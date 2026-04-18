@@ -1423,7 +1423,7 @@ function renderPerformance(){
     {key:'avgDay',label:'Avg/Day',align:'right',fmt:fmtRs,clrFn:clr},
   ];
   const monthRows=(tb.monthlyPnl||[]).map(m=>({...m,avgDay:m.days?Math.round(m.pnl/m.days):0}));
-  const monthTbl=makeSortableTable('perf-month',monthCols,monthRows,'month',1);
+  const monthTbl=makeSortableTable('perf-month',monthCols,monthRows,'month',-1);
 
   // ── Stocks table — last 30 days ──
   // Edge = (Win% × Avg%) × min(1, lots/5) — confidence-penalised combined metric
