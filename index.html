@@ -1303,6 +1303,7 @@ function computePerfStats(trips){
   const avgWinPct=+meanArr(winPcts).toFixed(2);
   const avgLossPct=+meanArr(lossPcts).toFixed(2);
   const riskReward=avgLossPct?+Math.abs(avgWinPct/avgLossPct).toFixed(2):0;
+  const kellyPct=avgLossPct?+(winRate/100 - (1-winRate/100)/Math.abs(avgWinPct/avgLossPct)).toFixed(3)*100:0;
   const grossWins=wins.reduce((s,r)=>s+r.netPnl,0);
   const grossLosses=Math.abs(losses.reduce((s,r)=>s+r.netPnl,0));
   const profitFactor=grossLosses>0?+(grossWins/grossLosses).toFixed(2):null;
@@ -1368,7 +1369,7 @@ function computePerfStats(trips){
   const bestHourObj=eligHours.length?eligHours.reduce((b,h)=>h.avgPct>b.avgPct?h:b,eligHours[0]):null;
   return {
     roundTrips:trips.length, winners:wins.length, losers:losses.length,
-    winRate, avgWinPct, avgLossPct, riskReward,
+    winRate, avgWinPct, avgLossPct, riskReward, kellyPct,
     profitFactor, expectancy, totalNetPnlRs,
     largestWinRs, largestLossRs, maxDrawdown, maxLossStreak:maxStreak, maxWinStreak,
     pctProfitableDays, profitableDays, totalTradingDays,
@@ -1401,19 +1402,23 @@ function renderPerformance(){
   const periodLabel=recentTrips.length?`Last 30 trading days (${d30from} → ${d30to})`:'All time';
 
   // ── KPI cards — based on last 30 trading days ──
+  const _kelly=p.kellyPct;
   const kpis=[
+    // ── Positives first ──
     {label:'Net P&L',value:fmtRs(p.totalNetPnlRs),color:clr(p.totalNetPnlRs),sub:`${p.roundTrips} lots · ${p.totalTradingDays} days`},
     {label:'Expectancy',value:fmtRs(p.expectancy),color:clr(p.expectancy),sub:'Net ₹ per FIFO lot'},
     {label:'Profit Factor',value:p.profitFactor!=null?p.profitFactor:'—',color:p.profitFactor>=1.5?'var(--green)':p.profitFactor>=1?'var(--amber)':'var(--red)',sub:'Gross wins ÷ gross losses'},
     {label:'Win Rate',value:p.winRate+'%',color:p.winRate>=55?'var(--green)':p.winRate>=45?'var(--amber)':'var(--red)',sub:`${p.winners}W · ${p.losers}L lots`},
     {label:'Profitable Days',value:p.pctProfitableDays+'%',color:p.pctProfitableDays>=60?'var(--green)':p.pctProfitableDays>=50?'var(--amber)':'var(--red)',sub:`${p.profitableDays} of ${p.totalTradingDays} days`},
     {label:'Avg Daily P&L',value:fmtRs(p.avgDailyPnl),color:clr(p.avgDailyPnl),sub:'On days traded, net of charges'},
-    {label:'Max Drawdown',value:p.maxDrawdown>0?'-₹'+p.maxDrawdown.toLocaleString('en-IN'):'—',color:'var(--red)',sub:'Peak-to-trough in period'},
     {label:'Largest Win',value:'+₹'+p.largestWinRs.toLocaleString('en-IN'),color:'var(--green)',sub:'Single lot, net'},
-    {label:'Largest Loss',value:'-₹'+Math.abs(p.largestLossRs).toLocaleString('en-IN'),color:'var(--red)',sub:'Single lot, net'},
     {label:'Max Win Streak',value:p.maxWinStreak+' days',color:p.maxWinStreak>=5?'var(--green)':p.maxWinStreak>=3?'var(--amber)':'var(--t1)',sub:'Consecutive profitable days'},
-    {label:'Max Loss Streak',value:p.maxLossStreak+' days',color:p.maxLossStreak>=5?'var(--red)':p.maxLossStreak>=3?'var(--amber)':'var(--green)',sub:'Consecutive losing days'},
+    {label:'Kelly %',value:(_kelly>0?'+':'')+_kelly.toFixed(1)+'%',color:_kelly>=20?'var(--green)':_kelly>=5?'var(--amber)':'var(--red)',sub:'Optimal position size fraction'},
     {label:'Avg Hold',value:p.avgHoldDays+'d',color:'var(--t1)',sub:'Avg position duration'},
+    // ── Negatives after ──
+    {label:'Largest Loss',value:'-₹'+Math.abs(p.largestLossRs).toLocaleString('en-IN'),color:'var(--red)',sub:'Single lot, net'},
+    {label:'Max Drawdown',value:p.maxDrawdown>0?'-₹'+p.maxDrawdown.toLocaleString('en-IN'):'—',color:'var(--red)',sub:'Peak-to-trough in period'},
+    {label:'Max Loss Streak',value:p.maxLossStreak+' days',color:p.maxLossStreak>=5?'var(--red)':p.maxLossStreak>=3?'var(--amber)':'var(--green)',sub:'Consecutive losing days'},
   ];
   const kpiHtml=`<div style="display:grid;grid-template-columns:repeat(4,1fr);gap:12px">`+kpis.map(k=>`
     <div style="background:var(--bg-card);border:1px solid var(--border);border-radius:12px;padding:16px 18px">
