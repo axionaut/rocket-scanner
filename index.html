@@ -3532,6 +3532,20 @@ function loadFilterState(){
 
   // Step 7: PREV_SNAP already loaded by IIFE above (previous-day data only)
 
+  // Step 7b: If no local data, try fetching Rocket_Brain.json from repo as fallback
+  if(!TRADEBOOK_STATS && !ALL.length){
+    fetch('Rocket_Brain.json').then(r=>r.ok?r.json():null).then(brain=>{
+      if(!brain) return;
+      const V4_MAP={rs_snapshot:'rs_snapshot',rs_snapshot_prev:'rs_snapshot_prev'};
+      Object.entries(brain).forEach(([k,v])=>{
+        if(k.startsWith('_')) return;
+        try{localStorage.setItem(V4_MAP[k]||k, typeof v==='string'?v:JSON.stringify(v));}catch(e){}
+      });
+      showToast('Loading brain from repo…',1500);
+      setTimeout(()=>location.reload(),1500);
+    }).catch(()=>{});
+  }
+
   // Step 8: Always show header + dash; toggle no-data banner
   try{
     document.getElementById('hdrR').style.display='flex';
