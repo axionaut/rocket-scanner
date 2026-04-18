@@ -1327,10 +1327,18 @@ function computePerfStats(trips){
   Object.keys(bookedByDate).sort().forEach(d=>{cum+=bookedByDate[d].total;if(cum>peak)peak=cum;if(peak-cum>maxDD)maxDD=peak-cum;});
   const maxDrawdown=+Math.round(maxDD);
   // Max loss streak
-  let streak=0,maxStreak=0;
-  trips.forEach(r=>{if(r.netPnl<=0){streak++;if(streak>maxStreak)maxStreak=streak;}else streak=0;});
+  // Streaks by trading day (not lots)
+  const dailyPnlByDate={};
+  trips.forEach(r=>{dailyPnlByDate[r.sellDate]=(dailyPnlByDate[r.sellDate]||0)+r.netPnl;});
+  const dailySeq=Object.keys(dailyPnlByDate).sort().map(d=>dailyPnlByDate[d]);
+  let lossStreak=0,maxLossStreak2=0,winStreak=0,maxWinStreak=0;
+  dailySeq.forEach(v=>{
+    if(v<=0){lossStreak++;if(lossStreak>maxLossStreak2)maxLossStreak2=lossStreak;winStreak=0;}
+    else{winStreak++;if(winStreak>maxWinStreak)maxWinStreak=winStreak;lossStreak=0;}
+  });
+  const maxStreak=maxLossStreak2;
   // Avg hold days
-  const avgHoldDays=+meanArr(trips.map(r=>r.holdDays)).toFixed(1);
+  const avgHoldDays=Math.round(meanArr(trips.map(r=>r.holdDays)));
   // Avg capital (position-level)
   const posMap={};
   trips.forEach(r=>{const k=r.sym+'|'+r.buyDate;posMap[k]=(posMap[k]||0)+r.capital;});
@@ -1362,7 +1370,7 @@ function computePerfStats(trips){
     roundTrips:trips.length, winners:wins.length, losers:losses.length,
     winRate, avgWinPct, avgLossPct, riskReward,
     profitFactor, expectancy, totalNetPnlRs,
-    largestWinRs, largestLossRs, maxDrawdown, maxLossStreak:maxStreak,
+    largestWinRs, largestLossRs, maxDrawdown, maxLossStreak:maxStreak, maxWinStreak,
     pctProfitableDays, profitableDays, totalTradingDays,
     avgDailyPnl, avgHoldDays, avgCapital,
     symBreakdown, hourBreakdown,
@@ -1394,25 +1402,25 @@ function renderPerformance(){
 
   // ── KPI cards — based on last 30 trading days ──
   const kpis=[
-    {label:'Net P&L',value:fmtRs(p.totalNetPnlRs),color:clr(p.totalNetPnlRs),sub:`${p.roundTrips} lots · ${p.totalTradingDays} days`},
+    {label:'Net P&L',value:fmtRs(p.totalNetPnlRs),color:clr(p.totalNetPnlRs),sub:`${p.roundTrips} lots · ${p.totalTradingDays} days · avg hold ${p.avgHoldDays}d`},
     {label:'Expectancy',value:fmtRs(p.expectancy),color:clr(p.expectancy),sub:'Net ₹ per FIFO lot'},
     {label:'Profit Factor',value:p.profitFactor!=null?p.profitFactor:'—',color:p.profitFactor>=1.5?'var(--green)':p.profitFactor>=1?'var(--amber)':'var(--red)',sub:'Gross wins ÷ gross losses'},
     {label:'Win Rate',value:p.winRate+'%',color:p.winRate>=55?'var(--green)':p.winRate>=45?'var(--amber)':'var(--red)',sub:`${p.winners}W · ${p.losers}L lots`},
     {label:'Avg R:R',value:p.riskReward+'×',color:p.expectancy>0?'var(--green)':p.expectancy>-100?'var(--amber)':'var(--red)',sub:`+${p.avgWinPct}% win · ${p.avgLossPct}% loss`},
     {label:'Profitable Days',value:p.pctProfitableDays+'%',color:p.pctProfitableDays>=60?'var(--green)':p.pctProfitableDays>=50?'var(--amber)':'var(--red)',sub:`${p.profitableDays} of ${p.totalTradingDays} days`},
     {label:'Avg Daily P&L',value:fmtRs(p.avgDailyPnl),color:clr(p.avgDailyPnl),sub:'On days traded, net of charges'},
-    {label:'Max Drawdown',value:'-₹'+p.maxDrawdown.toLocaleString('en-IN'),color:'var(--red)',sub:'Peak-to-trough in period'},
+    {label:'Max Drawdown',value:p.maxDrawdown>0?'-₹'+p.maxDrawdown.toLocaleString('en-IN'):'—',color:'var(--red)',sub:'Peak-to-trough in period'},
     {label:'Largest Win',value:'+₹'+p.largestWinRs.toLocaleString('en-IN'),color:'var(--green)',sub:'Single lot, net'},
     {label:'Largest Loss',value:'-₹'+Math.abs(p.largestLossRs).toLocaleString('en-IN'),color:'var(--red)',sub:'Single lot, net'},
-    {label:'Max Loss Streak',value:p.maxLossStreak+' lots',color:p.maxLossStreak>=5?'var(--red)':p.maxLossStreak>=3?'var(--amber)':'var(--green)',sub:'Consecutive losing lots'},
-    {label:'Avg Hold',value:p.avgHoldDays+'d',color:'var(--t1)',sub:'Avg position duration'},
+    {label:'Max Win Streak',value:p.maxWinStreak+' days',color:p.maxWinStreak>=5?'var(--green)':p.maxWinStreak>=3?'var(--amber)':'var(--t1)',sub:'Consecutive profitable days'},
+    {label:'Max Loss Streak',value:p.maxLossStreak+' days',color:p.maxLossStreak>=5?'var(--red)':p.maxLossStreak>=3?'var(--amber)':'var(--green)',sub:'Consecutive losing days'},
   ];
-  const kpiHtml=kpis.map(k=>`
-    <div style="background:var(--bg-card);border:1px solid var(--border);border-radius:12px;padding:16px 18px;min-width:140px;flex:1">
+  const kpiHtml=`<div style="display:grid;grid-template-columns:repeat(4,1fr);gap:12px">`+kpis.map(k=>`
+    <div style="background:var(--bg-card);border:1px solid var(--border);border-radius:12px;padding:16px 18px">
       <div style="font-size:10px;color:var(--t3);text-transform:uppercase;letter-spacing:.08em;margin-bottom:6px">${k.label}</div>
       <div style="font-size:20px;font-weight:800;color:${k.color};font-family:'DM Mono',monospace">${k.value}</div>
       <div style="font-size:10px;color:var(--t3);margin-top:4px">${k.sub}</div>
-    </div>`).join('');
+    </div>`).join('')+'</div>';
 
   // ── Monthly table — always full history ──
   const monthCols=[
@@ -1526,7 +1534,7 @@ function renderPerformance(){
     <div style="padding:20px;max-width:1400px;margin:0 auto">
       ${todayHtml}
       <div style="font-size:11px;color:var(--t3);margin-bottom:8px">${periodLabel} · ${p.roundTrips} lots · "Lots" = FIFO-matched buy/sell pairs, one position may span multiple lots. Monthly table shows full history.</div>
-      <div style="display:flex;flex-wrap:wrap;gap:12px">${kpiHtml}</div>
+      ${kpiHtml}
       ${monthRows.length?`<div style="background:var(--bg-card);border:1px solid var(--border);border-radius:12px;padding:18px;margin-top:20px">
         <div style="font-size:12px;font-weight:700;color:var(--t1);margin-bottom:14px;text-transform:uppercase;letter-spacing:.08em">Monthly Breakdown</div>
         ${monthTbl.getHtml()}</div>`:''}
