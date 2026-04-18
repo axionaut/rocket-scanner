@@ -2685,35 +2685,9 @@ function parseTradebook(text){
 
   if(!roundTrips.length) return null;
 
-  // Classify wins/losses by net P&L (post-charge), use net % for all averages
-  const netPnlPcts=roundTrips.map((r,i)=>r.capital>0?netByTripEarly[i]/r.capital*100:0);
-  const winPcts=[], lossPcts=[];
-  netByTripEarly.forEach((n,i)=>{ if(n>0) winPcts.push(netPnlPcts[i]); else lossPcts.push(netPnlPcts[i]); });
-  winPcts.sort((a,b)=>a-b); lossPcts.sort((a,b)=>a-b);
-  const wins={length:winPcts.length}, losses={length:lossPcts.length};
   const percentile=(arr,p)=>arr.length?arr[Math.min(Math.floor(arr.length*p),arr.length-1)]:0;
   const median=(arr)=>percentile(arr,0.5);
   const meanArr=(arr)=>arr.length?arr.reduce((s,v)=>s+v,0)/arr.length:0;
-
-  const avgWinPct=meanArr(winPcts);
-  const avgLossPct=meanArr(lossPcts);
-  const medianWinPct=median(winPcts);
-  const medianLossPct=median(lossPcts);
-  const p75Win=percentile(winPcts,0.75);
-  const p25Loss=percentile(lossPcts,0.25);
-  const winRate=roundTrips.length>0?(wins.length/roundTrips.length*100):0;
-  const avgHoldDays=meanArr(roundTrips.map(r=>r.holdDays));
-  // Aggregate lots by sym+buyDate to get true position-level capital
-  const posMap={};
-  roundTrips.forEach(r=>{
-    const k=r.sym+'|'+r.buyDate;
-    posMap[k]=(posMap[k]||0)+r.capital;
-  });
-  const avgCapital=meanArr(Object.values(posMap));
-
-  const adaptiveSL=+Math.abs(medianLossPct).toFixed(2);
-  const adaptiveTGT=+Math.abs(p75Win).toFixed(2);
-  const minExitPct=+Math.max(1,medianWinPct).toFixed(2);
 
   // ── Net ₹ P&L per trip (both legs, full charges) — single source of truth ──
   // DP (₹15.34) is charged once per ISIN per sell day, not per fill.
@@ -2728,6 +2702,28 @@ function parseTradebook(text){
     const sc=calcZerodhaCharges(r.sellPrice,r.qty,true,intra,intra||dpAlreadyPaid);
     return (r.sellPrice-r.buyPrice)*r.qty-bc-sc;
   });
+
+  // Classify wins/losses by net P&L (post-charge)
+  const netPnlPcts=roundTrips.map((r,i)=>r.capital>0?netByTripEarly[i]/r.capital*100:0);
+  const winPcts=[], lossPcts=[];
+  netByTripEarly.forEach((n,i)=>{ if(n>0) winPcts.push(netPnlPcts[i]); else lossPcts.push(netPnlPcts[i]); });
+  winPcts.sort((a,b)=>a-b); lossPcts.sort((a,b)=>a-b);
+  const wins={length:winPcts.length}, losses={length:lossPcts.length};
+  const avgWinPct=meanArr(winPcts);
+  const avgLossPct=meanArr(lossPcts);
+  const medianWinPct=median(winPcts);
+  const medianLossPct=median(lossPcts);
+  const p75Win=percentile(winPcts,0.75);
+  const p25Loss=percentile(lossPcts,0.25);
+  const winRate=roundTrips.length>0?(wins.length/roundTrips.length*100):0;
+  const avgHoldDays=meanArr(roundTrips.map(r=>r.holdDays));
+  const posMap={};
+  roundTrips.forEach(r=>{ const k=r.sym+'|'+r.buyDate; posMap[k]=(posMap[k]||0)+r.capital; });
+  const avgCapital=meanArr(Object.values(posMap));
+  const adaptiveSL=+Math.abs(medianLossPct).toFixed(2);
+  const adaptiveTGT=+Math.abs(p75Win).toFixed(2);
+  const minExitPct=+Math.max(1,medianWinPct).toFixed(2);
+
   const bookedByDate={};
   roundTrips.forEach((r,i)=>{
     if(!bookedByDate[r.sellDate]) bookedByDate[r.sellDate]={total:0,count:0};
