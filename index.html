@@ -2910,7 +2910,7 @@ function parseTradebook(text){
 function calcZerodhaCharges(price, qty, isSell, isIntraday=false, skipDp=false){
   const posVal=price*Math.abs(qty);
   const brokerage=isIntraday?Math.min(0.0003*posVal,20):0; // 0.03% or ₹20, whichever lower; ₹0 delivery
-  const stt=isIntraday?(isSell?0.00025*posVal:0):(0.001*posVal); // intraday: 0.025% sell only; delivery: 0.1% both
+  const stt=isIntraday?(isSell?0.00025*posVal:0):(isSell?0.001*posVal:0); // intraday: 0.025% sell only; delivery: 0.1% sell only
   const txn=0.0000375*posVal;                                     // Exchange txn: NSE 0.00375%
   const sebi=0.000001*posVal;                                     // SEBI: ₹10/crore
   const gst=0.18*(brokerage+sebi+txn);                           // GST: 18% on (brokerage + SEBI + txn)
