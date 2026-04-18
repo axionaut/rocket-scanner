@@ -1402,11 +1402,10 @@ function renderPerformance(){
 
   // ── KPI cards — based on last 30 trading days ──
   const kpis=[
-    {label:'Net P&L',value:fmtRs(p.totalNetPnlRs),color:clr(p.totalNetPnlRs),sub:`${p.roundTrips} lots · ${p.totalTradingDays} days · avg hold ${p.avgHoldDays}d`},
+    {label:'Net P&L',value:fmtRs(p.totalNetPnlRs),color:clr(p.totalNetPnlRs),sub:`${p.roundTrips} lots · ${p.totalTradingDays} days`},
     {label:'Expectancy',value:fmtRs(p.expectancy),color:clr(p.expectancy),sub:'Net ₹ per FIFO lot'},
     {label:'Profit Factor',value:p.profitFactor!=null?p.profitFactor:'—',color:p.profitFactor>=1.5?'var(--green)':p.profitFactor>=1?'var(--amber)':'var(--red)',sub:'Gross wins ÷ gross losses'},
     {label:'Win Rate',value:p.winRate+'%',color:p.winRate>=55?'var(--green)':p.winRate>=45?'var(--amber)':'var(--red)',sub:`${p.winners}W · ${p.losers}L lots`},
-    {label:'Avg R:R',value:p.riskReward+'×',color:p.expectancy>0?'var(--green)':p.expectancy>-100?'var(--amber)':'var(--red)',sub:`+${p.avgWinPct}% win · ${p.avgLossPct}% loss`},
     {label:'Profitable Days',value:p.pctProfitableDays+'%',color:p.pctProfitableDays>=60?'var(--green)':p.pctProfitableDays>=50?'var(--amber)':'var(--red)',sub:`${p.profitableDays} of ${p.totalTradingDays} days`},
     {label:'Avg Daily P&L',value:fmtRs(p.avgDailyPnl),color:clr(p.avgDailyPnl),sub:'On days traded, net of charges'},
     {label:'Max Drawdown',value:p.maxDrawdown>0?'-₹'+p.maxDrawdown.toLocaleString('en-IN'):'—',color:'var(--red)',sub:'Peak-to-trough in period'},
@@ -1414,6 +1413,7 @@ function renderPerformance(){
     {label:'Largest Loss',value:'-₹'+Math.abs(p.largestLossRs).toLocaleString('en-IN'),color:'var(--red)',sub:'Single lot, net'},
     {label:'Max Win Streak',value:p.maxWinStreak+' days',color:p.maxWinStreak>=5?'var(--green)':p.maxWinStreak>=3?'var(--amber)':'var(--t1)',sub:'Consecutive profitable days'},
     {label:'Max Loss Streak',value:p.maxLossStreak+' days',color:p.maxLossStreak>=5?'var(--red)':p.maxLossStreak>=3?'var(--amber)':'var(--green)',sub:'Consecutive losing days'},
+    {label:'Avg Hold',value:p.avgHoldDays+'d',color:'var(--t1)',sub:'Avg position duration'},
   ];
   const kpiHtml=`<div style="display:grid;grid-template-columns:repeat(4,1fr);gap:12px">`+kpis.map(k=>`
     <div style="background:var(--bg-card);border:1px solid var(--border);border-radius:12px;padding:16px 18px">
