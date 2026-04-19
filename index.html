@@ -1448,8 +1448,6 @@ function renderPerformance(){
   // ── Regime calendar: date → regime ──
   const regCal=JSON.parse(localStorage.getItem(REGIME_CAL_STORE)||'{}');
   const currentRegime=ENGINE_DATA?.regime||null;
-  // Default filter to current regime if we have one, else 'all'
-  if(PERF_REGIME_FILTER==='all' && currentRegime) PERF_REGIME_FILTER=currentRegime;
 
   // ── Tag all trips with regime from calendar (by buyDate) ──
   const allTripsRaw=tb.tripsData||[];
@@ -1616,7 +1614,9 @@ function renderPerformance(){
     const cntLabel=r==='all'?` (${cnt}${unknownCnt?', '+unknownCnt+' untagged':''})`:` (${cnt})`;
     const col=r==='bull'?'var(--green)':r==='bear'?'var(--red)':r==='neutral'?'var(--orange)':'var(--t2)';
     const bg=active?(r==='bull'?'rgba(34,197,94,.15)':r==='bear'?'rgba(239,68,68,.15)':r==='neutral'?'rgba(251,146,60,.15)':'rgba(148,163,184,.15)'):'transparent';
-    return `<button onclick="PERF_REGIME_FILTER='${r}';renderPerformance()" style="padding:5px 14px;border-radius:20px;border:1px solid ${active?col:'var(--border)'};background:${bg};color:${active?col:'var(--t3)'};font-size:12px;font-weight:${active?700:500};cursor:pointer;white-space:nowrap">${label}<span style="font-size:10px;opacity:.7">${cntLabel}</span></button>`;
+    const isCurrent=r!=='all'&&r===currentRegime;
+    const dot=isCurrent?`<span style="display:inline-block;width:5px;height:5px;border-radius:50%;background:${col};margin-left:4px;vertical-align:middle" title="Current session regime"></span>`:'';
+    return `<button onclick="PERF_REGIME_FILTER='${r}';renderPerformance()" style="padding:5px 14px;border-radius:20px;border:1px solid ${active?col:'var(--border)'};background:${bg};color:${active?col:'var(--t3)'};font-size:12px;font-weight:${active?700:500};cursor:pointer;white-space:nowrap">${label}${dot}<span style="font-size:10px;opacity:.7">${cntLabel}</span></button>`;
   }).join('');
   const regimePillsHtml=`<div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:16px">
     <span style="font-size:11px;color:var(--t3);font-weight:600;text-transform:uppercase;letter-spacing:.06em">Regime</span>
