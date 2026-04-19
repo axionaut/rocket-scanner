@@ -2024,7 +2024,8 @@ function getBuyPrice(s){
   const ltp=s.price>0?s.price:0;
   const vwap=s.vwap;
   const atrMargin=(s.atr!=null&&ltp>0)?(ltp*s.atr*0.25/100):0;
-  return vwap>0?parseFloat(tick(vwap+atrMargin).toFixed(2)):parseFloat(tick(ltp).toFixed(2));
+  const raw=vwap>0?tick(vwap+atrMargin):tick(ltp);
+  return parseFloat(Math.min(raw,tick(ltp)).toFixed(2));
 }
 // ── Effective learnt TGT% (gross sell-price delta from buy) ──
 // Source of truth = TRADEBOOK_STATS.adaptiveTGT (75th percentile win from FIFO matching).
