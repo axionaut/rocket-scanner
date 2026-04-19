@@ -275,7 +275,7 @@ table.main tbody td{padding:9px 11px;font-family:'DM Mono',monospace;font-size:1
   <button class="btn" onclick="resetBrain(this)" title="Wipe all accumulated correlations and start fresh" style="font-size:11px;border-color:rgba(239,68,68,.3);color:var(--red)">🗑 Reset</button>
   <div id="mobileMenuBtn" style="position:relative;align-items:center">
     <button class="btn" onclick="document.getElementById('mobileMenuPanel').style.display=document.getElementById('mobileMenuPanel').style.display==='none'?'flex':'none'" style="font-size:14px;padding:7px 11px">☰</button>
-    <div id="mobileMenuPanel" style="display:none;position:absolute;top:calc(100% + 8px);right:0;background:var(--bg-raised);border:1px solid var(--border-hi);border-radius:10px;padding:10px;z-index:1000;box-shadow:0 8px 32px rgba(0,0,0,.4);flex-direction:column;gap:8px;min-width:160px">
+    <div id="mobileMenuPanel" style="display:none;position:fixed;top:60px;left:0;right:0;background:var(--bg-raised);border-bottom:1px solid var(--border-hi);padding:12px 16px;z-index:1000;box-shadow:0 8px 32px rgba(0,0,0,.4);flex-direction:row;flex-wrap:wrap;gap:8px">
       <button class="btn" onclick="exportBrain();document.getElementById('mobileMenuPanel').style.display='none'" style="font-size:12px;width:100%">💾 Export Brain</button>
       <button class="btn" onclick="document.getElementById('brainIn').click();document.getElementById('mobileMenuPanel').style.display='none'" style="font-size:12px;width:100%">🧠 Import Brain</button>
       <button class="btn" onclick="resetBrain(this);document.getElementById('mobileMenuPanel').style.display='none'" style="font-size:12px;width:100%;border-color:rgba(239,68,68,.3);color:var(--red)">🗑 Reset Brain</button>
@@ -1557,8 +1557,8 @@ function renderPerformance(){
       const latestCols=[
         {key:'sym',label:'Symbol',align:'left',fmt:v=>v,clrFn:()=>'var(--t1)',bold:true},
         {key:'lots',label:'Trades',align:'right',fmt:v=>v,clrFn:()=>'var(--t2)'},
-        {key:'buyPrice',label:'Avg Buy',align:'right',fmt:v=>'₹'+v.toLocaleString('en-IN'),clrFn:()=>'var(--t2)'},
-        {key:'sellPrice',label:'Avg Sell',align:'right',fmt:v=>'₹'+v.toLocaleString('en-IN'),clrFn:()=>'var(--t2)'},
+        {key:'buyPrice',label:'Buy ₹',align:'right',fmt:v=>v.toLocaleString('en-IN'),clrFn:()=>'var(--t2)'},
+        {key:'sellPrice',label:'Sell ₹',align:'right',fmt:v=>v.toLocaleString('en-IN'),clrFn:()=>'var(--t2)'},
         {key:'netPnl',label:'Net P&L',align:'right',bold:true,fmt:fmtRs,clrFn:clr},
       ];
       const latestTbl=makeSortableTable('perf-latest',latestCols,latestRows,'_sort',-1);
