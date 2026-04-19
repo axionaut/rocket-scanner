@@ -355,6 +355,8 @@ table.main tbody td{padding:9px 11px;font-family:'DM Mono',monospace;font-size:1
    <div class="fg"><span class="fg-lbl">Stocks</span><input type="number" id="fTopN" value="" placeholder="auto" min="1" max="20" step="1" style="padding:8px 10px;background:var(--bg-card);border:1px solid var(--border);border-radius:8px;color:var(--t1);font-family:'DM Mono',monospace;font-size:12px;outline:none;transition:border .2s" onfocus="this.style.borderColor='var(--blue)'" onblur="this.style.borderColor='var(--border)'" oninput="if(parseInt(this.value)>20)this.value=20;applyFilters()" title="Number of top-scored stocks to allocate. Empty = auto (min of rocket count and 20). Hard cap = 20 (Zerodha basket limit)."></div>
    <div class="fg"><span class="fg-lbl" style="color:var(--purple)">Avg-down %</span><input type="number" id="fReDrop" value="1" placeholder="1" min="0" step="0.5" style="padding:8px 10px;background:var(--bg-card);border:1px solid var(--border);border-radius:8px;color:var(--t1);font-family:'DM Mono',monospace;font-size:12px;outline:none;transition:border .2s" onfocus="this.style.borderColor='var(--purple)'" onblur="this.style.borderColor='var(--border)'" oninput="applyFilters()" title="Stocks in open Positions are hidden unless price has fallen at least this % below your avg buy (long). Shorts and zero-qty positions are always suppressed. Default 1%."></div>
    <div class="fg"><span class="fg-lbl" style="color:var(--fire)">Rocket Thr %</span><input type="number" id="fRocketPct" value="10" placeholder="10" min="3" max="30" step="0.5" style="padding:8px 10px;background:var(--bg-card);border:1px solid rgba(249,115,22,.4);border-radius:8px;color:var(--fire);font-family:'DM Mono',monospace;font-size:12px;outline:none;transition:border .2s" onfocus="this.style.borderColor='var(--fire)'" onblur="this.style.borderColor='rgba(249,115,22,.4)'" oninput="saveFilterState()" title="Min 1D% gain yesterday to count as a rocket for learning signal."></div>
+   <div class="fg"><span class="fg-lbl" style="color:var(--red)">SL ATR ×</span><input type="number" id="fSlAtrMult" value="1.25" placeholder="1.25" min="0" max="5" step="0.05" style="padding:8px 10px;background:var(--bg-card);border:1px solid rgba(239,68,68,.4);border-radius:8px;color:var(--red);font-family:'DM Mono',monospace;font-size:12px;outline:none;transition:border .2s" onfocus="this.style.borderColor='var(--red)'" onblur="this.style.borderColor='rgba(239,68,68,.4)'" oninput="saveFilterState()" title="SL = max(adaptiveSL, this × ATR% 1W)"></div>
+   <div class="fg"><span class="fg-lbl" style="color:var(--green)">TGT ATR ×</span><input type="number" id="fTgtAtrMult" value="0.5" placeholder="0.5" min="0" max="5" step="0.05" style="padding:8px 10px;background:var(--bg-card);border:1px solid rgba(34,197,94,.4);border-radius:8px;color:var(--green);font-family:'DM Mono',monospace;font-size:12px;outline:none;transition:border .2s" onfocus="this.style.borderColor='var(--green)'" onblur="this.style.borderColor='rgba(34,197,94,.4)'" oninput="saveFilterState()" title="TGT = max(adaptiveTGT, this × ATR% 1W)"></div>
    <button class="btn" id="basketBtn" onclick="exportBasket()" disabled style="background:rgba(251,191,36,.12);border-color:rgba(251,191,36,.3);color:var(--amber);font-weight:700" title="Export selected stocks as Zerodha basket order">🧺 Export Buy Basket</button>
    <button class="btn" id="sellBasketBtn" onclick="exportSellBasket()" disabled style="background:rgba(239,68,68,.12);border-color:rgba(239,68,68,.3);color:var(--red);font-weight:700" title="Export selected stocks as Zerodha sell basket order">🧺 Export Sell Basket</button>
   </div>
@@ -3047,6 +3049,8 @@ function exportBasket(){
   // Universal SL/TGT from tradebook (already cost-adjusted)
   const adaptiveSL=TRADEBOOK_STATS?TRADEBOOK_STATS.adaptiveSL:3.5;
   const adaptiveTGT=TRADEBOOK_STATS?TRADEBOOK_STATS.adaptiveTGT:3.7;
+  const slAtrMult=parseFloat(document.getElementById('fSlAtrMult')?.value)||1.25;
+  const tgtAtrMult=parseFloat(document.getElementById('fTgtAtrMult')?.value)||0.5;
   // Build atr1w lookup from ALL so stale selList stocks can still get ATR
   const atr1wIndex={};
   ALL.forEach(s=>{if(s.atr1w>0) atr1wIndex[s.symbol]=s.atr1w;});
@@ -3062,8 +3066,8 @@ function exportBasket(){
     const sym=s.symbol;
     const name=s.name||sym;
     const atr1w=(s.atr1w>0?s.atr1w:null)??atr1wIndex[sym]??null;
-    const sl=atr1w!=null?Math.max(adaptiveSL,1.25*atr1w):adaptiveSL;
-    const tgt=atr1w!=null?Math.max(adaptiveTGT,0.5*atr1w):adaptiveTGT;
+    const sl=atr1w!=null?Math.max(adaptiveSL,slAtrMult*atr1w):adaptiveSL;
+    const tgt=atr1w!=null?Math.max(adaptiveTGT,tgtAtrMult*atr1w):adaptiveTGT;
     orders.push({
       id:Date.now()+i,
       instrument:{
@@ -3107,6 +3111,8 @@ function exportSellBasket(){
   const tick=v=>Math.round(v/0.05)*0.05;
   const adaptiveSL=TRADEBOOK_STATS?TRADEBOOK_STATS.adaptiveSL:3.5;
   const adaptiveTGT=TRADEBOOK_STATS?TRADEBOOK_STATS.adaptiveTGT:3.7;
+  const slAtrMult=parseFloat(document.getElementById('fSlAtrMult')?.value)||1.25;
+  const tgtAtrMult=parseFloat(document.getElementById('fTgtAtrMult')?.value)||0.5;
   // Build ATR1W lookup from ALL (scored stocks carry atr1w from today's CSV)
   const atr1wMap={};
   ALL.forEach(s=>{if(s.atr1w>0) atr1wMap[s.symbol]=s.atr1w;});
@@ -3126,8 +3132,8 @@ function exportSellBasket(){
 
     // ATR-adjusted SL/TGT: use weekly ATR if available, else fall back to adaptive values
     const atr1w=atr1wMap[sym]??null;
-    const slPct=atr1w!=null?Math.max(adaptiveSL,1.25*atr1w):adaptiveSL;
-    const tgtPct=atr1w!=null?Math.max(adaptiveTGT,0.5*atr1w):adaptiveTGT;
+    const slPct=atr1w!=null?Math.max(adaptiveSL,slAtrMult*atr1w):adaptiveSL;
+    const tgtPct=atr1w!=null?Math.max(adaptiveTGT,tgtAtrMult*atr1w):adaptiveTGT;
     orders.push({
       id:orderId++,
       instrument:{
@@ -3455,6 +3461,8 @@ function saveFilterState(){
     topN:document.getElementById('fTopN')?.value||'',
     rocketPct:document.getElementById('fRocketPct')?.value||'10',
     reDrop:document.getElementById('fReDrop')?.value||'1',
+    slAtrMult:document.getElementById('fSlAtrMult')?.value||'1.25',
+    tgtAtrMult:document.getElementById('fTgtAtrMult')?.value||'0.5',
     fmaxalloc:document.getElementById('fMaxAlloc')?.value||'',
     fMinScore:document.getElementById('fMinScore')?.value||'70',
     sortCol:SCOL,
@@ -3479,6 +3487,8 @@ function loadFilterState(){
     if(state.topN){const el=document.getElementById('fTopN');if(el)el.value=state.topN;}
     if(state.rocketPct){const el=document.getElementById('fRocketPct');if(el)el.value=state.rocketPct;}
     if(state.reDrop!=null){const el=document.getElementById('fReDrop');if(el)el.value=state.reDrop;}
+    if(state.slAtrMult!=null){const el=document.getElementById('fSlAtrMult');if(el)el.value=state.slAtrMult;}
+    if(state.tgtAtrMult!=null){const el=document.getElementById('fTgtAtrMult');if(el)el.value=state.tgtAtrMult;}
     if(state.fmaxalloc){const el=document.getElementById('fMaxAlloc');if(el)el.value=state.fmaxalloc;}
     if(state.fMinScore){const el=document.getElementById('fMinScore');if(el)el.value=state.fMinScore;}
     if(state.sortCol)SCOL=state.sortCol;
