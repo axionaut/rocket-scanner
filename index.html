@@ -751,6 +751,7 @@ function runEngine(raw, sessionTag){
     price:        findKey(/^price$/),
     price_change: findKey(/price_change.*1_day|1_day.*price_change|^change.*1_day$/),
     atr_pct:      findKey(/average_true_range_.*14.*1_day|atr_.*14.*1_day/),
+    atr_pct_1w:   findKey(/average_true_range_.*14.*1_week|atr_.*14.*1_week/),
     perf_1w:      findKey(/performance.*1_week|perf.*1_week|1_week.*perf/),
     volume:       findKey(/^volume_1_day$|^volume$/),
     shareholders: findKey(/number_of_shareholders/),
@@ -1092,6 +1093,7 @@ function runEngine(raw, sessionTag){
       priceChange:(K.price_change?d[K.price_change]:null),
       volume:vol,
       atr:(K.atr_pct?d[K.atr_pct]:null),
+      atr1w:(K.atr_pct_1w?d[K.atr_pct_1w]:null),
       high1d:(K.high_1d?d[K.high_1d]:null),
       low1d:(K.low_1d?d[K.low_1d]:null),
       vwap:(K.vwap?d[K.vwap]:null),
@@ -3012,6 +3014,10 @@ function exportBasket(){
     const buyPrice=getBuyPrice(s);
     const sym=s.symbol;
     const name=s.name||sym;
+    // ATR-adjusted SL/TGT: use weekly ATR if available, else fall back to adaptive values
+    const atr1w=s.atr1w>0?s.atr1w:null;
+    const sl=atr1w!=null?Math.max(adaptiveSL,1.25*atr1w):adaptiveSL;
+    const tgt=atr1w!=null?Math.max(adaptiveTGT,0.75*atr1w):adaptiveTGT;
     orders.push({
       id:Date.now()+i,
       instrument:{
@@ -3030,7 +3036,7 @@ function exportBasket(){
         quantity:qty,price:parseFloat(tick(buyPrice).toFixed(2)),
         triggerPrice:0,disclosedQuantity:0,lastPrice:0,
         variety:'regular',
-        gtt:{target:adaptiveTGT},
+        gtt:{target:parseFloat(tgt.toFixed(2)),sl:parseFloat(sl.toFixed(2))},
         tags:[]
       }
     });
@@ -3055,24 +3061,30 @@ function exportSellBasket(){
   const tick=v=>Math.round(v/0.05)*0.05;
   const adaptiveSL=TRADEBOOK_STATS?TRADEBOOK_STATS.adaptiveSL:3.5;
   const adaptiveTGT=TRADEBOOK_STATS?TRADEBOOK_STATS.adaptiveTGT:3.7;
+  // Build ATR1W lookup from ALL (scored stocks carry atr1w from today's CSV)
+  const atr1wMap={};
+  ALL.forEach(s=>{if(s.atr1w>0) atr1wMap[s.symbol]=s.atr1w;});
   const orders=[];
-  
+
   let orderId=Date.now();
   allSymbols.forEach(sym=>{
     // Get qty from HOLDINGS (master source for current holdings)
     const holdingRow=HOLDINGS?.find(h=>h.symbol===sym);
     const qty=holdingRow?.qty||0;
     if(qty<=0) return;
-    
+
     // Get average price: Positions first, then HOLD_COST_MAP, then LTP from holdings
     const sellData=getSellAvgPrice(sym);
     const avgBuy=sellData?.avg ?? holdingRow?.avgCost ?? holdingRow?.ltp ?? null;
     if(avgBuy==null) return; // no price reference at all — skip
-    
-    // Apply SL and TGT% to avgBuy
-    const tgtPrice=avgBuy*(1+adaptiveTGT/100);
-    const slPrice=avgBuy*(1-adaptiveSL/100);
-    
+
+    // ATR-adjusted SL/TGT: use weekly ATR if available, else fall back to adaptive values
+    const atr1w=atr1wMap[sym]??null;
+    const slPct=atr1w!=null?Math.max(adaptiveSL,1.25*atr1w):adaptiveSL;
+    const tgtPct=atr1w!=null?Math.max(adaptiveTGT,0.75*atr1w):adaptiveTGT;
+    const tgtPrice=avgBuy*(1+tgtPct/100);
+    const slPrice=avgBuy*(1-slPct/100);
+
     orders.push({
       id:orderId++,
       instrument:{
@@ -3091,7 +3103,7 @@ function exportSellBasket(){
         quantity:qty,price:parseFloat(tick(tgtPrice).toFixed(2)),
         triggerPrice:0,disclosedQuantity:0,lastPrice:0,
         variety:'regular',
-        gtt:{target:parseFloat(tick(tgtPrice).toFixed(2))},
+        gtt:{target:parseFloat(tick(tgtPrice).toFixed(2)),sl:parseFloat(tick(slPrice).toFixed(2))},
         tags:[]
       }
     });
