@@ -352,7 +352,6 @@ table.main tbody td{padding:9px 11px;font-family:'DM Mono',monospace;font-size:1
    <div class="fg"><span class="fg-lbl" style="color:var(--amber)">Capital ₹</span><input type="number" id="fCapital" placeholder="e.g. 100000" min="0" step="1000" style="padding:8px 10px;background:var(--bg-card);border:1px solid var(--border);border-radius:8px;color:var(--t1);font-family:'DM Mono',monospace;font-size:12px;outline:none;transition:border .2s" onfocus="this.style.borderColor='var(--amber)'" onblur="this.style.borderColor='var(--border)'" oninput="applyFilters()"></div>
    <div class="fg"><span class="fg-lbl" style="color:var(--amber)">Max Alloc ₹</span><input type="number" id="fMaxAlloc" placeholder="no cap" min="0" step="1000" style="padding:8px 10px;background:var(--bg-card);border:1px solid var(--border);border-radius:8px;color:var(--t1);font-family:'DM Mono',monospace;font-size:12px;outline:none;transition:border .2s" onfocus="this.style.borderColor='var(--amber)'" onblur="this.style.borderColor='var(--border)'" oninput="applyFilters()" title="Max ₹ to allocate to any single stock. Leave blank for no cap."></div>
 
-   <div class="fg"><span class="fg-lbl">Stocks</span><input type="number" id="fTopN" value="" placeholder="auto" min="1" max="20" step="1" style="padding:8px 10px;background:var(--bg-card);border:1px solid var(--border);border-radius:8px;color:var(--t1);font-family:'DM Mono',monospace;font-size:12px;outline:none;transition:border .2s" onfocus="this.style.borderColor='var(--blue)'" onblur="this.style.borderColor='var(--border)'" oninput="if(parseInt(this.value)>20)this.value=20;applyFilters()" title="Number of top-scored stocks to allocate. Empty = auto (min of rocket count and 20). Hard cap = 20 (Zerodha basket limit)."></div>
    <div class="fg"><span class="fg-lbl" style="color:var(--purple)">Avg-down %</span><input type="number" id="fReDrop" value="1" placeholder="1" min="0" step="0.5" style="padding:8px 10px;background:var(--bg-card);border:1px solid var(--border);border-radius:8px;color:var(--t1);font-family:'DM Mono',monospace;font-size:12px;outline:none;transition:border .2s" onfocus="this.style.borderColor='var(--purple)'" onblur="this.style.borderColor='var(--border)'" oninput="applyFilters()" title="Stocks in open Positions are hidden unless price has fallen at least this % below your avg buy (long). Shorts and zero-qty positions are always suppressed. Default 1%."></div>
    <div class="fg"><span class="fg-lbl" style="color:var(--fire)">Rocket Thr %</span><input type="number" id="fRocketPct" value="10" placeholder="10" min="3" max="30" step="0.5" style="padding:8px 10px;background:var(--bg-card);border:1px solid rgba(249,115,22,.4);border-radius:8px;color:var(--fire);font-family:'DM Mono',monospace;font-size:12px;outline:none;transition:border .2s" onfocus="this.style.borderColor='var(--fire)'" onblur="this.style.borderColor='rgba(249,115,22,.4)'" oninput="saveFilterState()" title="Min 1D% gain yesterday to count as a rocket for learning signal."></div>
    <div class="fg"><span class="fg-lbl" style="color:var(--red)">SL ATR ×</span><input type="number" id="fSlAtrMult" value="1.25" placeholder="1.25" min="0" max="5" step="0.05" style="padding:8px 10px;background:var(--bg-card);border:1px solid rgba(239,68,68,.4);border-radius:8px;color:var(--red);font-family:'DM Mono',monospace;font-size:12px;outline:none;transition:border .2s" onfocus="this.style.borderColor='var(--red)'" onblur="this.style.borderColor='rgba(239,68,68,.4)'" oninput="saveFilterState()" title="SL = max(adaptiveSL, this × ATR% 1W)"></div>
@@ -2369,12 +2368,8 @@ function applyFilters(){
   }
   applySort();
 
-  // Hard cap at 20 (Zerodha basket limit). Empty field = auto = min(FILT.length, 20).
-  const topNEl=document.getElementById('fTopN');
-  let topN=parseInt(topNEl?.value)||0;
-  if(topN<=0) topN=Math.min(FILT.length,20);
-  if(topN>20) topN=20;
-  if(topN>0) FILT=FILT.slice(0,topN);
+  // Always auto: cap at 20 (Zerodha basket limit)
+  FILT=FILT.slice(0,20);
 
   // SELECTED is auto-derived from FILT every filter pass. Checkboxes are a
   // post-filter convenience for tweaking the export — not persisted state.
@@ -2436,7 +2431,7 @@ function renderStatusBar(){
 }
 
 function clearFilters(){
-  ['fFscore','fSh','fMin1D','fMax1D','fCapital','fTopN','fMaxAlloc'].forEach(id=>{const el=document.getElementById(id);if(el)el.value='';});
+  ['fFscore','fSh','fMin1D','fMax1D','fCapital','fMaxAlloc'].forEach(id=>{const el=document.getElementById(id);if(el)el.value='';});
   const reDropEl=document.getElementById('fReDrop');if(reDropEl)reDropEl.value='1';
   const fVolEl=document.getElementById('fVol');if(fVolEl)fVolEl.value='';
   const fVolMEl=document.getElementById('fVolMult');if(fVolMEl)fVolMEl.value='';
@@ -3458,7 +3453,6 @@ function saveFilterState(){
     fMin1D:document.getElementById('fMin1D')?.value||'',
     fMax1D:document.getElementById('fMax1D').value,
     capital:document.getElementById('fCapital').value,
-    topN:document.getElementById('fTopN')?.value||'',
     rocketPct:document.getElementById('fRocketPct')?.value||'10',
     reDrop:document.getElementById('fReDrop')?.value||'1',
     slAtrMult:document.getElementById('fSlAtrMult')?.value||'1.25',
@@ -3484,7 +3478,6 @@ function loadFilterState(){
     if(state.fMin1D){const el=document.getElementById('fMin1D');if(el)el.value=state.fMin1D;}
     if(state.fMax1D){const el=document.getElementById('fMax1D');if(el)el.value=state.fMax1D;}
     if(state.capital)document.getElementById('fCapital').value=state.capital;
-    if(state.topN){const el=document.getElementById('fTopN');if(el)el.value=state.topN;}
     if(state.rocketPct){const el=document.getElementById('fRocketPct');if(el)el.value=state.rocketPct;}
     if(state.reDrop!=null){const el=document.getElementById('fReDrop');if(el)el.value=state.reDrop;}
     if(state.slAtrMult!=null){const el=document.getElementById('fSlAtrMult');if(el)el.value=state.slAtrMult;}
