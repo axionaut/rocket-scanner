@@ -97,7 +97,6 @@ body::before{content:'';position:fixed;inset:0;background:radial-gradient(ellips
 .ct th{text-align:left;padding:7px 10px;border-bottom:1px solid var(--border-hi);color:var(--t3);font-size:10px;text-transform:uppercase;letter-spacing:.7px;position:sticky;top:0;background:var(--bg-raised);cursor:pointer;user-select:none;transition:color .15s;white-space:nowrap}
 .ct th:hover{color:var(--t1)}
 .ct td{padding:6px 10px;border-bottom:1px solid var(--border);white-space:nowrap}
-.ct th:first-child,.ct td:first-child{position:sticky;left:0;background:var(--bg-raised);z-index:2}
 .ct .bar-cell{width:160px}
 .cb{height:8px;border-radius:4px;display:inline-block;vertical-align:middle}
 .hm-wrap{overflow-x:auto;margin:16px 0}
@@ -129,14 +128,6 @@ select option{background:var(--bg-card)}
 .fixed-hscroll-inner{height:1px;pointer-events:none}
 table.main{width:100%;border-collapse:separate;border-spacing:0;font-size:12.5px}
 table.main thead th{position:sticky;top:0;background:var(--bg-raised);border-bottom:2px solid var(--border-hi);padding:10px 11px;text-align:left;font-weight:600;font-size:10px;text-transform:uppercase;letter-spacing:.7px;color:var(--t3);cursor:pointer;user-select:none;white-space:nowrap;transition:color .15s;z-index:10}
-table.main thead th:nth-child(1){left:0;z-index:11;width:36px}
-table.main thead th:nth-child(2){left:36px;z-index:11;width:36px}
-table.main thead th:nth-child(3){left:72px;z-index:11;width:56px}
-table.main thead th:nth-child(4){left:128px;z-index:11;border-right:1px solid var(--border-hi)}
-table.main tbody td:nth-child(1){position:sticky;left:0;background:var(--bg-raised);z-index:1;width:36px}
-table.main tbody td:nth-child(2){position:sticky;left:36px;background:var(--bg-raised);z-index:1;width:36px}
-table.main tbody td:nth-child(3){position:sticky;left:72px;background:var(--bg-raised);z-index:1;width:56px}
-table.main tbody td:nth-child(4){position:sticky;left:128px;background:var(--bg-raised);z-index:1;border-right:1px solid var(--border)}
 table.main thead th:hover{color:var(--t1)}
 table.main thead th.sorted{color:var(--blue)}
 table.main thead th .sa{margin-left:3px;font-size:9px}
@@ -1313,8 +1304,8 @@ function renderStats(){
 // cols: [{key, label, align, fmt, clrFn}]  rows: array of objects
 // sortState stored on the table element itself
 function makeSortableTable(id, cols, rows, defaultSortKey, defaultDir=-1){
-  const thStyle=(align,i)=>`padding:6px 10px;text-align:${align};cursor:pointer;user-select:none;white-space:nowrap${i===0?';position:sticky;left:0;background:var(--bg-raised);z-index:2':''}`;
-  const tdStyle=(align,i,extra='')=>`padding:7px 10px;text-align:${align};white-space:nowrap${i===0?';position:sticky;left:0;background:var(--bg-card);z-index:1':''}${extra?';'+extra:''}`;
+  const thStyle=(align)=>`padding:6px 10px;text-align:${align};cursor:pointer;user-select:none;white-space:nowrap`;
+  const tdStyle=(align,extra='')=>`padding:7px 10px;text-align:${align};white-space:nowrap${extra?';'+extra:''}`;
   let sortKey=defaultSortKey, sortDir=defaultDir;
   function render(){
     const sorted=[...rows].sort((a,b)=>{
@@ -1323,14 +1314,14 @@ function makeSortableTable(id, cols, rows, defaultSortKey, defaultDir=-1){
       return sortDir*((av||0)-(bv||0));
     });
     const thead=`<thead><tr style="color:var(--t3);border-bottom:1px solid var(--border)">${
-      cols.map((c,i)=>`<th data-key="${c.key}" style="${thStyle(c.align||'right',i)}">${c.label}${sortKey===c.key?(sortDir>0?' ▲':' ▼'):''}</th>`).join('')
+      cols.map(c=>`<th data-key="${c.key}" style="${thStyle(c.align||'right')}">${c.label}${sortKey===c.key?(sortDir>0?' ▲':' ▼'):''}</th>`).join('')
     }</tr></thead>`;
     const tbody=`<tbody>${sorted.map(row=>`<tr style="border-bottom:1px solid var(--border);color:var(--t1)">${
       cols.map((c,i)=>{
         const v=row[c.key];
         const display=c.fmt?c.fmt(v,row):v;
         const color=c.clrFn?c.clrFn(v,row):'var(--t1)';
-        return `<td style="${tdStyle(c.align||'right',i,'color:'+color+(c.bold?';font-weight:700':''))}">${display}</td>`;
+        return `<td style="${tdStyle(c.align||'right','color:'+color+(c.bold?';font-weight:700':''))}">${display}</td>`;
       }).join('')
     }</tr>`).join('')}</tbody>`;
     const tbl=document.getElementById(id);
