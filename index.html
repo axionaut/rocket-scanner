@@ -3063,7 +3063,7 @@ function exportBasket(){
     const name=s.name||sym;
     const atr1w=(s.atr1w>0?s.atr1w:null)??atr1wIndex[sym]??null;
     const sl=atr1w!=null?Math.max(adaptiveSL,1.25*atr1w):adaptiveSL;
-    const tgt=atr1w!=null?Math.max(adaptiveTGT,0.75*atr1w):adaptiveTGT;
+    const tgt=atr1w!=null?Math.max(adaptiveTGT,0.5*atr1w):adaptiveTGT;
     orders.push({
       id:Date.now()+i,
       instrument:{
@@ -3127,7 +3127,7 @@ function exportSellBasket(){
     // ATR-adjusted SL/TGT: use weekly ATR if available, else fall back to adaptive values
     const atr1w=atr1wMap[sym]??null;
     const slPct=atr1w!=null?Math.max(adaptiveSL,1.25*atr1w):adaptiveSL;
-    const tgtPct=atr1w!=null?Math.max(adaptiveTGT,0.75*atr1w):adaptiveTGT;
+    const tgtPct=atr1w!=null?Math.max(adaptiveTGT,0.5*atr1w):adaptiveTGT;
     orders.push({
       id:orderId++,
       instrument:{
