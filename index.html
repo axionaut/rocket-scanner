@@ -341,6 +341,7 @@ table.main tbody td{padding:9px 11px;font-family:'DM Mono',monospace;font-size:1
    <input type="number" id="fPriceMax" placeholder="Max" min="0" style="padding:8px 10px;background:var(--bg-card);border:1px solid var(--border);border-radius:8px;color:var(--t1);font-family:'DM Mono',monospace;font-size:12px;outline:none;transition:border .2s" onfocus="this.style.borderColor='var(--blue)'" onblur="this.style.borderColor='var(--border)'" oninput="applyFilters()">
    </div></div>
    <div class="fg"><span class="fg-lbl">Min F-Score</span><input type="number" id="fFscore" placeholder="e.g. 5" min="1" max="9" step="1" style="padding:8px 10px;background:var(--bg-card);border:1px solid var(--border);border-radius:8px;color:var(--t1);font-family:'DM Mono',monospace;font-size:12px;outline:none;transition:border .2s" onfocus="this.style.borderColor='var(--blue)'" onblur="this.style.borderColor='var(--border)'" oninput="applyFilters()"></div>
+   <div class="fg"><span class="fg-lbl">Max 1D Chg %</span><input type="number" id="fMax1D" placeholder="Max" step="0.5" style="padding:8px 10px;background:var(--bg-card);border:1px solid var(--border);border-radius:8px;color:var(--t1);font-family:'DM Mono',monospace;font-size:12px;outline:none;transition:border .2s" onfocus="this.style.borderColor='var(--blue)'" onblur="this.style.borderColor='var(--border)'" oninput="applyFilters()"></div>
    <div class="fg"><span class="fg-lbl">Min Vol <span id="volAutoLabel" style="font-size:9px;color:var(--cyan)">(auto)</span></span><input type="number" id="fVol" placeholder="auto" min="0" step="1000" style="padding:8px 10px;background:var(--bg-card);border:1px solid var(--border);border-radius:8px;color:var(--t1);font-family:'DM Mono',monospace;font-size:12px;outline:none;transition:border .2s" onfocus="this.style.borderColor='var(--blue)'" onblur="this.style.borderColor='var(--border)'" oninput="onVolChange()"></div>
    <div class="fg"><span class="fg-lbl" style="font-size:8px">Vol ×</span><input type="number" id="fVolMult" value="" placeholder="240" min="10" max="100000" step="10" style="padding:8px 6px;background:var(--bg-card);border:1px solid var(--border);border-radius:8px;color:var(--t1);font-family:'DM Mono',monospace;font-size:11px;outline:none" oninput="VOL_AUTO=true;setAutoVolume();applyFilters()" title="Volume multiplier: minutes since open × this. At 4 PM (420 min) × 240 = 100,000 target volume."></div>
    <div class="fg"><span class="fg-lbl">Min Shareholders</span><input type="number" id="fSh" placeholder="e.g. 10000" min="0" step="1000" style="padding:8px 10px;background:var(--bg-card);border:1px solid var(--border);border-radius:8px;color:var(--t1);font-family:'DM Mono',monospace;font-size:12px;outline:none;transition:border .2s" onfocus="this.style.borderColor='var(--blue)'" onblur="this.style.borderColor='var(--border)'" oninput="applyFilters()"></div>
@@ -2293,6 +2294,8 @@ function applyFilters(){
   const fscore=parseFloat(document.getElementById('fFscore').value)||0;
   const fvol=parseFloat(document.getElementById('fVol').value)||0;
   const fsh=parseFloat(document.getElementById('fSh').value)||0;
+  const _fMax1Dv=document.getElementById('fMax1D').value;
+  const fMax1D=_fMax1Dv!==''?parseFloat(_fMax1Dv):Infinity;
   const _fPriceMinV=document.getElementById('fPriceMin')?.value;
   const _fPriceMaxV=document.getElementById('fPriceMax')?.value;
   const fPriceMin=_fPriceMinV!==''&&_fPriceMinV!=null?parseFloat(_fPriceMinV):0;
@@ -2305,6 +2308,7 @@ function applyFilters(){
     if(fvol>0&&(x.volume||0)<fvol) return false;
     if(fscore>0){if(x.piotroski===null||x.piotroski<fscore)return false;}
     if(fsh>0){if(x.shareholders===null||x.shareholders<fsh)return false;}
+    if(fMax1D<Infinity){if(x.priceChange!==null&&x.priceChange>fMax1D)return false;}
     return true;
   });
 
@@ -2374,7 +2378,10 @@ function renderStatusBar(){
   const fscore=parseFloat(document.getElementById('fFscore').value)||0;
   const fvol2=parseFloat(document.getElementById('fVol').value)||0;
   const fsh=parseFloat(document.getElementById('fSh').value)||0;
+  const _fMax1Dv2=document.getElementById('fMax1D')?.value||'';
+  const fMax1D=_fMax1Dv2!==''?parseFloat(_fMax1Dv2):Infinity;
   if(fscore>0)tags.push('F≥'+fscore);
+  if(fMax1D<Infinity)tags.push('1D≤'+fMax1D+'%');
   if(fvol2>0){const n=fvol2;tags.push('Vol≥'+(n>=1e6?(n/1e6).toFixed(1)+'M':n>=1e3?(n/1e3).toFixed(0)+'K':n));}
   if(fsh>0){const n=fsh;tags.push('Holders≥'+(n>=1e5?(n/1e5)+'L':n>=1e3?(n/1e3)+'K':n));}
   const capital=parseFloat(document.getElementById('fCapital').value)||0;
@@ -2414,7 +2421,7 @@ function renderStatusBar(){
 }
 
 function clearFilters(){
-  ['fFscore','fSh','fCapital','fMaxAlloc'].forEach(id=>{const el=document.getElementById(id);if(el)el.value='';});
+  ['fFscore','fSh','fMax1D','fCapital','fMaxAlloc'].forEach(id=>{const el=document.getElementById(id);if(el)el.value='';});
   const reDropEl=document.getElementById('fReDrop');if(reDropEl)reDropEl.value='1';
   const fVolEl=document.getElementById('fVol');if(fVolEl)fVolEl.value='';
   const fVolMEl=document.getElementById('fVolMult');if(fVolMEl)fVolMEl.value='';
@@ -3434,6 +3441,7 @@ function saveFilterState(){
     fPriceMin:document.getElementById('fPriceMin')?.value||'',
     fPriceMax:document.getElementById('fPriceMax')?.value||'',
     capital:document.getElementById('fCapital').value,
+    fMax1D:document.getElementById('fMax1D')?.value||'',
     rocketPct:document.getElementById('fRocketPct')?.value||'10',
     reDrop:document.getElementById('fReDrop')?.value||'1',
     slAtrMult:document.getElementById('fSlAtrMult')?.value||'1.25',
@@ -3458,6 +3466,7 @@ function loadFilterState(){
     if(state.fPriceMax){const el=document.getElementById('fPriceMax');if(el)el.value=state.fPriceMax;}
     if(state.capital)document.getElementById('fCapital').value=state.capital;
     if(state.rocketPct){const el=document.getElementById('fRocketPct');if(el)el.value=state.rocketPct;}
+    if(state.fMax1D){const el=document.getElementById('fMax1D');if(el)el.value=state.fMax1D;}
     if(state.reDrop!=null){const el=document.getElementById('fReDrop');if(el)el.value=state.reDrop;}
     if(state.slAtrMult!=null){const el=document.getElementById('fSlAtrMult');if(el)el.value=state.slAtrMult;}
     if(state.tgtAtrMult!=null){const el=document.getElementById('fTgtAtrMult');if(el)el.value=state.tgtAtrMult;}
