@@ -1334,7 +1334,7 @@ function makeSortableTable(id, cols, rows, defaultSortKey, defaultDir=-1){
       };
     });
   }
-  return {render,getHtml:()=>`<table id="${id}" style="width:100%;border-collapse:collapse;font-size:12px;font-family:'DM Mono',monospace"></table>`};
+  return {render,getHtml:()=>`<table id="${id}" style="width:auto;min-width:100%;border-collapse:collapse;font-size:12px;font-family:'DM Mono',monospace"></table>`};
 }
 
 // Recompute KPI stats from an array of {netPnl, pnlPct, sellDate, buyTime, sym, holdDays, capital, qty, buyDate} trips
