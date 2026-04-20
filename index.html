@@ -3168,7 +3168,6 @@ function exportSellBasket(){
         quantity:qty,price:parseFloat(tick(avgBuy*(1+tgtPct/100)).toFixed(2)),
         triggerPrice:0,disclosedQuantity:0,lastPrice:0,
         variety:'regular',
-        gtt:{target:parseFloat(tgtPct.toFixed(2)),stoploss:parseFloat((-slPct).toFixed(2))},
         tags:[]
       }
     });
