@@ -3187,8 +3187,8 @@ function showGttPopup(){
       <td style="text-align:right">${fmtp(avgBuy)}</td>
       <td style="text-align:right;color:var(--t2)">${ltp>0?fmtp(ltp):'—'}</td>
       <td style="text-align:right;color:${pnlColor}">${pnlPct!=null?(pnlPct>=0?'+':'')+pnlPct.toFixed(1)+'%':'—'}</td>
-      <td style="text-align:right;color:var(--green);font-weight:700">${fmtp(tgtPrice)}<br><span style="font-size:10px;color:var(--t3)">(+${tgtPct.toFixed(1)}%)</span></td>
       <td style="text-align:right;color:var(--red);font-weight:700">${fmtp(slPrice)}<br><span style="font-size:10px;color:var(--t3)">(-${slPct.toFixed(1)}%)</span></td>
+      <td style="text-align:right;color:var(--green);font-weight:700">${fmtp(tgtPrice)}<br><span style="font-size:10px;color:var(--t3)">(+${tgtPct.toFixed(1)}%)</span></td>
     </tr>`;
   });
 
@@ -3208,8 +3208,8 @@ function showGttPopup(){
           <th style="text-align:right;padding:6px 8px">Avg Cost</th>
           <th style="text-align:right;padding:6px 8px">LTP</th>
           <th style="text-align:right;padding:6px 8px">P&amp;L%</th>
-          <th style="text-align:right;padding:6px 8px;color:var(--green)">Target ₹</th>
           <th style="text-align:right;padding:6px 8px;color:var(--red)">SL ₹</th>
+          <th style="text-align:right;padding:6px 8px;color:var(--green)">Target ₹</th>
         </tr></thead>
         <tbody style="color:var(--t2)">${tbodyHtml}</tbody>
       </table>
