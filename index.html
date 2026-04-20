@@ -754,7 +754,7 @@ function runEngine(raw, sessionTag){
   });
 
   // Map column header → safe JS key (lowercase, alphanumeric + underscore)
-  function safeKey(h){ return h.toLowerCase().replace(/[^a-z0-9]+/g,'_').replace(/^_|_$/g,''); }
+  function safeKey(h){ return h.toLowerCase().replace(/%/g,'pct').replace(/[^a-z0-9]+/g,'_').replace(/^_|_$/g,''); }
   const COL_MAP = {}; // safeKey → original header
   numericCols.forEach(h => { COL_MAP[safeKey(h)] = h; });
 
@@ -764,8 +764,8 @@ function runEngine(raw, sessionTag){
   const K = {
     price:        findKey(/^price$/),
     price_change: findKey(/price_change.*1_day|1_day.*price_change|^change.*1_day$/),
-    atr_pct:      findKey(/average_true_range_.*14.*1_day|atr_.*14.*1_day/),
-    atr_pct_1w:   findKey(/average_true_range_.*14.*1_?w(eek)?|atr_.*14.*1_?w(eek)?/),
+    atr_pct:      findKey(/average_true_range_pct_.*14.*1_day|atr_pct_.*14.*1_day/),
+    atr_pct_1w:   findKey(/average_true_range_pct_.*14.*1_?w(eek)?|atr_pct_.*14.*1_?w(eek)?/),
     perf_1w:      findKey(/performance.*1_week|perf.*1_week|1_week.*perf/),
     volume:       findKey(/^volume_1_day$|^volume$/),
     shareholders: findKey(/number_of_shareholders/),
