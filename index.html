@@ -2220,14 +2220,7 @@ function renderTable(){
     const isSelected=SELECTED.has(s.symbol);
     const am=allocMap[s.symbol];
 
-    // Compute ATR-adjusted SL/TGT for display
-    const _slAtrMult=parseFloat(document.getElementById('fSlAtrMult')?.value)||1.25;
-    const _tgtAtrMult=parseFloat(document.getElementById('fTgtAtrMult')?.value)||0.5;
-    const _adaptiveSL=TRADEBOOK_STATS?TRADEBOOK_STATS.adaptiveSL:3.5;
-    const _adaptiveTGT=TRADEBOOK_STATS?TRADEBOOK_STATS.adaptiveTGT:3.7;
-    const _atr1w=s.atr1w>0?s.atr1w:null;
-    const _sl=_atr1w!=null?Math.max(_adaptiveSL,_slAtrMult*_atr1w):_adaptiveSL;
-    const _tgt=_atr1w!=null?Math.max(_adaptiveTGT,_tgtAtrMult*_atr1w):_adaptiveTGT;
+    const {sl:_sl,tgt:_tgt}=calcAtrSLTGT(s);
 
     // Fixed cells
     let cells=`
@@ -2290,12 +2283,8 @@ function applySort(){
       va=a._features?a._features[fk]:null;
       vb=b._features?b._features[fk]:null;
     } else if(col==='_sl'||col==='_tgt'){
-      const slM=parseFloat(document.getElementById('fSlAtrMult')?.value)||1.25;
-      const tgM=parseFloat(document.getElementById('fTgtAtrMult')?.value)||0.5;
-      const aSL=TRADEBOOK_STATS?TRADEBOOK_STATS.adaptiveSL:3.5;
-      const aTGT=TRADEBOOK_STATS?TRADEBOOK_STATS.adaptiveTGT:3.7;
-      const getV=(s)=>{const aw=s.atr1w>0?s.atr1w:null;return col==='_sl'?(aw!=null?Math.max(aSL,slM*aw):aSL):(aw!=null?Math.max(aTGT,tgM*aw):aTGT);};
-      va=getV(a);vb=getV(b);
+      va=col==='_sl'?calcAtrSLTGT(a).sl:calcAtrSLTGT(a).tgt;
+      vb=col==='_sl'?calcAtrSLTGT(b).sl:calcAtrSLTGT(b).tgt;
     } else {
       va=a[col];vb=b[col];
     }
@@ -3072,18 +3061,26 @@ function getSellAvgPrice(symbol){
   return null;
 }
 
+// ── Shared ATR-adjusted SL/TGT calculator ──
+// Returns {sl, tgt} percentages for a given stock, using filter bar multipliers.
+function calcAtrSLTGT(s){
+  const slAtrMult=parseFloat(document.getElementById('fSlAtrMult')?.value)||1.25;
+  const tgtAtrMult=parseFloat(document.getElementById('fTgtAtrMult')?.value)||0.5;
+  const adaptiveSL=TRADEBOOK_STATS?TRADEBOOK_STATS.adaptiveSL:3.5;
+  const adaptiveTGT=TRADEBOOK_STATS?TRADEBOOK_STATS.adaptiveTGT:3.7;
+  const atr1w=s.atr1w>0?s.atr1w:null;
+  return {
+    sl:  atr1w!=null ? Math.max(adaptiveSL,  slAtrMult*atr1w)  : adaptiveSL,
+    tgt: atr1w!=null ? Math.max(adaptiveTGT, tgtAtrMult*atr1w) : adaptiveTGT,
+  };
+}
+
 function exportBasket(){
   const capital=parseFloat(document.getElementById('fCapital').value)||0;
   const selList=FILT.filter(s=>SELECTED.has(s.symbol));
   if(!selList.length){showToast('Select at least one stock first.',3000,true);return;}
   const basketAlloc = computeAlloc(capital, selList);
   const tick=v=>Math.round(v/0.05)*0.05;
-
-  // Universal SL/TGT from tradebook (already cost-adjusted)
-  const adaptiveSL=TRADEBOOK_STATS?TRADEBOOK_STATS.adaptiveSL:3.5;
-  const adaptiveTGT=TRADEBOOK_STATS?TRADEBOOK_STATS.adaptiveTGT:3.7;
-  const slAtrMult=parseFloat(document.getElementById('fSlAtrMult')?.value)||1.25;
-  const tgtAtrMult=parseFloat(document.getElementById('fTgtAtrMult')?.value)||0.5;
   // Build atr1w lookup from ALL so stale selList stocks can still get ATR
   const atr1wIndex={};
   ALL.forEach(s=>{if(s.atr1w>0) atr1wIndex[s.symbol]=s.atr1w;});
@@ -3098,9 +3095,9 @@ function exportBasket(){
     const ltp=s.price>0?s.price:0;
     const sym=s.symbol;
     const name=s.name||sym;
-    const atr1w=(s.atr1w>0?s.atr1w:null)??atr1wIndex[sym]??null;
-    const sl=atr1w!=null?Math.max(adaptiveSL,slAtrMult*atr1w):adaptiveSL;
-    const tgt=atr1w!=null?Math.max(adaptiveTGT,tgtAtrMult*atr1w):adaptiveTGT;
+    // Use shared helper; fall back atr1w from ALL index if selList stock is stale
+    const sWithAtr={...s, atr1w: (s.atr1w>0?s.atr1w:null)??atr1wIndex[sym]??0};
+    const {sl,tgt}=calcAtrSLTGT(sWithAtr);
     orders.push({
       id:Date.now()+i,
       instrument:{
@@ -3142,10 +3139,6 @@ function exportSellBasket(){
   }
   
   const tick=v=>Math.round(v/0.05)*0.05;
-  const adaptiveSL=TRADEBOOK_STATS?TRADEBOOK_STATS.adaptiveSL:3.5;
-  const adaptiveTGT=TRADEBOOK_STATS?TRADEBOOK_STATS.adaptiveTGT:3.7;
-  const slAtrMult=parseFloat(document.getElementById('fSlAtrMult')?.value)||1.25;
-  const tgtAtrMult=parseFloat(document.getElementById('fTgtAtrMult')?.value)||0.5;
   // Build ATR1W lookup from ALL (scored stocks carry atr1w from today's CSV)
   const atr1wMap={};
   ALL.forEach(s=>{if(s.atr1w>0) atr1wMap[s.symbol]=s.atr1w;});
@@ -3163,10 +3156,7 @@ function exportSellBasket(){
     const avgBuy=sellData?.avg ?? holdingRow?.avgCost ?? holdingRow?.ltp ?? null;
     if(avgBuy==null) return; // no price reference at all — skip
 
-    // ATR-adjusted SL/TGT: use weekly ATR if available, else fall back to adaptive values
-    const atr1w=atr1wMap[sym]??null;
-    const slPct=atr1w!=null?Math.max(adaptiveSL,slAtrMult*atr1w):adaptiveSL;
-    const tgtPct=atr1w!=null?Math.max(adaptiveTGT,tgtAtrMult*atr1w):adaptiveTGT;
+    const {sl:slPct,tgt:tgtPct}=calcAtrSLTGT({atr1w:atr1wMap[sym]??0});
     const tgtPrice=parseFloat(tick(avgBuy*(1+tgtPct/100)).toFixed(2));
     orders.push({
       id:orderId++,
