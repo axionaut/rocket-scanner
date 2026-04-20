@@ -3167,9 +3167,8 @@ function exportSellBasket(){
         transactionType:'SELL',product:'CNC',orderType:'LIMIT',
         validity:'DAY',validityTTL:1,
         quantity:qty,price:tgtPrice,
-        triggerPrice:tgtPrice,disclosedQuantity:0,lastPrice:0,
-        variety:'gtt',
-        gtt:{target:parseFloat(tgtPct.toFixed(2)),stoploss:parseFloat((-slPct).toFixed(2))},
+        triggerPrice:0,disclosedQuantity:0,lastPrice:0,
+        variety:'regular',
         tags:[]
       }
     });
