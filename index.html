@@ -1563,15 +1563,14 @@ function renderPerformance(){
         const netPnl=+((avgSell-avgBuy)*matchedQty-bc-sc).toFixed(0);
         latestRows.push({sym,lots:sells.length,buyPrice:+avgBuy.toFixed(2),sellPrice:+avgSell.toFixed(2),winRate:netPnl>0?100:0,netPnl,_sort:netPnl});
       });
-      // Supplement with tradebook lastDayRows for any delivery sells missing from Orders.csv
-      // (e.g. stocks sold but not bought today, where Holdings cost is unavailable)
-      if(tb&&tb.lastDayRows&&tb.lastDayRows.length){
+      latestDate=(ORDERS_TODAY[0].time||'').substring(0,10)||getSessionDate();
+      // Supplement with tradebook lastDayRows only if they are from the same date
+      if(tb&&tb.lastDayRows&&tb.lastDayRows.length&&tb.lastDate===latestDate){
         const ordersSyms=new Set(latestRows.map(r=>r.sym));
         tb.lastDayRows.forEach(r=>{
           if(!ordersSyms.has(r.sym)) latestRows.push({...r,_sort:r.netPnl});
         });
       }
-      latestDate=(ORDERS_TODAY[0].time||'').substring(0,10)||getSessionDate();
       latestTotal=latestRows.reduce((s,r)=>s+r.netPnl,0);
       latestSource='Orders.csv';
     } else if(tb.lastDate&&(tb.lastDayRows||[]).length){
