@@ -2678,14 +2678,16 @@ function parsePositions(text){
   const find=(pats)=>hdrs.find(h=>pats.some(p=>p.test(h.trim())))||null;
   const symCol=find([/^instrument$/i,/^symbol$/i,/^tradingsymbol$/i]);
   const qtyCol=find([/^qty\.?$/i,/^quantity$/i,/^net.*qty$/i,/^buy.*qty$/i]);
-  const avgCol=find([/^avg\.?\s*price$/i,/^average.*price$/i,/^buy.*avg$/i,/^avg.*buy/i]);
+  const avgCol=find([/^avg\.?$/i,/^avg\.?\s*price$/i,/^average.*price$/i,/^buy.*avg$/i,/^avg.*buy/i]);
+  const ltpCol=find([/^ltp$/i,/^last.*price$/i,/^close$/i]);
   if(!symCol||!qtyCol){console.warn('Positions CSV: missing columns');return [];}
   return rows.map(r=>{
     const sym=normSym(r[symCol]);
     const qty=num(r[qtyCol]);
     const avg=avgCol?num(r[avgCol]):null;
+    const ltp=ltpCol?num(r[ltpCol]):null;
     if(!sym||!qty||qty<=0) return null;
-    return{symbol:sym,qty,avgCost:avg};
+    return{symbol:sym,qty,avgCost:avg,ltp};
   }).filter(Boolean);
 }
 
@@ -3136,29 +3138,49 @@ function showGttPopup(){
   // Collect rows: settled holdings + open long positions (T+1 unsettled)
   const rowMap={};
   (HOLDINGS||[]).forEach(h=>{
-    if(h.qty>0) rowMap[h.symbol]={symbol:h.symbol,qty:h.qty,avgCost:h.avgCost??h.ltp??0,src:'H'};
+    if(h.qty>0) rowMap[h.symbol]={symbol:h.symbol,qty:h.qty,avgCost:h.avgCost??0,posLtp:null,src:'H'};
   });
   (POSITIONS||[]).forEach(p=>{
-    if(p.qty>0 && !rowMap[p.symbol])
-      rowMap[p.symbol]={symbol:p.symbol,qty:p.qty,avgCost:p.avgCost??p.ltp??0,src:'P'};
+    if(p.qty>0){
+      if(rowMap[p.symbol]){
+        // enrich existing holding row with positions avg/ltp if missing
+        if(!rowMap[p.symbol].avgCost && p.avgCost) rowMap[p.symbol].avgCost=p.avgCost;
+        rowMap[p.symbol].posLtp=p.ltp??null;
+      } else {
+        rowMap[p.symbol]={symbol:p.symbol,qty:p.qty,avgCost:p.avgCost??0,posLtp:p.ltp??null,src:'P'};
+      }
+    }
   });
 
   const rows=Object.values(rowMap);
   if(!rows.length){showToast('No holdings or open positions.',3000,true);return;}
 
-  rows.sort((a,b)=>a.symbol.localeCompare(b.symbol));
+  const fmtp=v=>v!=null&&v>0?v.toFixed(2):'—';
 
-  const fmtp=v=>v>0?v.toFixed(2):'—';
+  // Pre-compute pnlPct for sorting
+  const enriched=rows.map(r=>{
+    const sellData=getSellAvgPrice(r.symbol);
+    const avgBuy=sellData?.avg ?? r.avgCost ?? 0;
+    // LTP priority: ALL scanner > positions CSV > holdings LTP
+    const allStock=ALL.find(s=>s.symbol===r.symbol);
+    const ltp=allStock?.ltp ?? r.posLtp ?? null;
+    const {sl:slPct,tgt:tgtPct}=calcAtrSLTGT({atr1w:atr1wMap[r.symbol]??0});
+    const tgtPrice=avgBuy>0?parseFloat(tick(avgBuy*(1+tgtPct/100)).toFixed(2)):null;
+    const slPrice=avgBuy>0?parseFloat(tick(avgBuy*(1-slPct/100)).toFixed(2)):null;
+    const pnlPct=(ltp!=null&&ltp>0&&avgBuy>0)?((ltp-avgBuy)/avgBuy*100):null;
+    return{...r,avgBuy,ltp,slPct,tgtPct,tgtPrice,slPrice,pnlPct};
+  });
+  // Sort by P&L% descending (nulls last)
+  enriched.sort((a,b)=>{
+    if(a.pnlPct==null&&b.pnlPct==null) return a.symbol.localeCompare(b.symbol);
+    if(a.pnlPct==null) return 1;
+    if(b.pnlPct==null) return -1;
+    return b.pnlPct-a.pnlPct;
+  });
 
   let tbodyHtml='';
-  rows.forEach(r=>{
-    const sellData=getSellAvgPrice(r.symbol);
-    const avgBuy=sellData?.avg ?? r.avgCost;
-    const ltp=ALL.find(s=>s.symbol===r.symbol)?.ltp??0;
-    const {sl:slPct,tgt:tgtPct}=calcAtrSLTGT({atr1w:atr1wMap[r.symbol]??0});
-    const tgtPrice=parseFloat(tick(avgBuy*(1+tgtPct/100)).toFixed(2));
-    const slPrice=parseFloat(tick(avgBuy*(1-slPct/100)).toFixed(2));
-    const pnlPct=ltp>0?((ltp-avgBuy)/avgBuy*100):null;
+  enriched.forEach(r=>{
+    const {avgBuy,ltp,slPct,tgtPct,tgtPrice,slPrice,pnlPct}=r;
     const pnlColor=pnlPct==null?'var(--t2)':pnlPct>=0?'var(--green)':'var(--red)';
     tbodyHtml+=`<tr>
       <td style="font-weight:700;color:var(--t1)">${r.symbol}</td>
