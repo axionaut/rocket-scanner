@@ -2854,6 +2854,8 @@ function parseTradebook(text){
     }
   });
 
+  LAST_BUY_DATE_MAP=lastBuyDateBySymbol;
+  try{localStorage.setItem(OPEN_BUY_DATE_STORE,JSON.stringify(LAST_BUY_DATE_MAP));}catch(e){}
   if(!roundTrips.length) return null;
 
   const percentile=(arr,p)=>arr.length?arr[Math.min(Math.floor(arr.length*p),arr.length-1)]:0;
