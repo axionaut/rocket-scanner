@@ -2652,6 +2652,7 @@ function resetBrain(btn){
   btn._stage=0;
   btn.innerHTML='🗑 Reset Brain';btn.style.background='';btn.style.borderColor='rgba(239,68,68,.3)';btn.style.color='var(--red)';
   showToast('<strong>Brain wiped.</strong> All correlations, snapshots, and session data cleared. Upload fresh data to start learning again.');
+  sessionStorage.setItem('_brainReset','1');
   setTimeout(()=>location.reload(),2000);
 }
 
@@ -3846,7 +3847,10 @@ function loadFilterState(){
   // Step 7: PREV_SNAP already loaded by IIFE above (previous-day data only)
 
   // Step 7b: If no local data, try fetching Rocket_Brain.json from repo as fallback
-  if(!TRADEBOOK_STATS&&!ALL.length){
+  // Skip if user just did a manual reset (sessionStorage flag)
+  const _justReset=sessionStorage.getItem('_brainReset');
+  if(_justReset) sessionStorage.removeItem('_brainReset');
+  if(!_justReset&&!TRADEBOOK_STATS&&!ALL.length){
     fetch('Rocket_Brain.json?v='+Date.now()).then(r=>r.ok?r.json():null).then(brain=>{
       if(!brain) return;
       Object.entries(brain).forEach(([k,v])=>{
