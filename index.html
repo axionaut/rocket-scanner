@@ -1975,7 +1975,7 @@ function getCols(){
   }
   const dynamic=[];
   for(const f of allFeats){
-    if(dynamic.length>=9) break;
+    if(dynamic.length>=8) break;
     if(fixedFeatKeys.has(f)) continue;
     // Skip only if ALL stocks have null for this feature
     const hasData=pool.some(s=>s._features&&s._features[f]!=null);
@@ -1983,13 +1983,13 @@ function getCols(){
     dynamic.push({key:'_feat_'+f,featKey:f,label:labels[f]||f,s:1,isDynamic:true});
   }
   // If we didn't get 9 from top10, fill from remaining features
-  if(dynamic.length<9&&ENGINE_DATA?.features){
+  if(dynamic.length<8&&ENGINE_DATA?.features){
     const weights=ENGINE_DATA.weights||{};
     const remaining=[...ENGINE_DATA.features]
       .filter(f=>!allFeats.includes(f)&&!fixedFeatKeys.has(f))
       .sort((a,b)=>(weights[b]||0)-(weights[a]||0));
     for(const f of remaining){
-      if(dynamic.length>=9) break;
+      if(dynamic.length>=8) break;
       const hasData=pool.some(s=>s._features&&s._features[f]!=null);
       if(!hasData) continue;
       dynamic.push({key:'_feat_'+f,featKey:f,label:labels[f]||f,s:1,isDynamic:true});
