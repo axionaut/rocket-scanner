@@ -393,7 +393,7 @@ const HOLD_STORE='rs_holdings';
 const TRADEBOOK_STORE='rs_tradebook';
 const ORDERS_STORE='rs_orders';
 const POSITIONS_STORE='rs_positions';
-const MISSED_OPP_STORE='rs_missed_opp'; // {date → [{sym, missed%}]}
+const MISSED_OPP_STORE='rs_missed_opp_v2'; // {date → [{sym, missed%}]} — v2: orders-based only
 const OPEN_BUY_DATE_STORE='rs_open_buy_dates'; // {sym → latest buy date}
 let TRADEBOOK_STATS=null; // {avgWinPct, avgLossPct, medianWinPct, medianLossPct, winRate, avgHoldDays, p25Loss, p75Win, adaptiveSL, adaptiveTGT, minExitPct, roundTrips}
 let LAST_BUY_DATE_MAP={}; // {symbol → latest buy date string} — populated on tradebook parse
@@ -1311,7 +1311,7 @@ function renderStats(){
   if(fp>0)pills.push(`<span class="info-pill pill-gray">❄ ${fp} freshness-penalised (near 52W high)</span>`);
   if(!NSE_LOADED)pills.push(`<span class="info-pill pill-gray">ℹ Drop NSE ZIP alongside TV CSV for delivery % &amp; 52W data</span>`);
   try{
-    const moRaw=localStorage.getItem('rs_missed_opp');
+    const moRaw=localStorage.getItem(MISSED_OPP_STORE);
     if(moRaw){
       const moStore=JSON.parse(moRaw);
       const moDates=Object.keys(moStore).length;
