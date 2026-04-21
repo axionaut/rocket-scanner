@@ -1261,7 +1261,15 @@ function renderStats(){
 
   document.getElementById('statsBar').innerHTML=`
     <div class="st"><div class="st-l">Universe</div><div class="st-v">${t.toLocaleString()}</div><div class="st-d">of ${totalParsed.toLocaleString()} · <span style="color:var(--green)">${bull} ▲</span> · <span style="color:var(--red)">${t-bull} ▼</span></div></div>
-    <div class="st"><div class="st-l">Filtered <span style="color:var(--t3);font-weight:400">≥${_minScore}</span></div><div class="st-v" style="color:var(--fire)">${sc}</div><div class="st-d">${top?`<span style="color:var(--amber);font-weight:700">#1 ${top.symbol}</span> · ${top.rocketScore.toFixed(2)} score`:'no picks'}${ENGINE_DATA?.goodFromYesterday?` · <span style="color:var(--green)">+${ENGINE_DATA.goodFromYesterday} held</span>`:''}${ENGINE_DATA?.badFromYesterday?` · <span style="color:var(--red)">${ENGINE_DATA.badFromYesterday} collapsed</span>`:''}</div></div>
+    ${(()=>{
+      const tb=TRADEBOOK_STATS;
+      if(!tb||!tb.firstDate||!tb.lastDate||!tb.avgCapital) return `<div class="st"><div class="st-l">Growth p.a.</div><div class="st-v" style="color:var(--t3)">—</div><div class="st-d">load tradebook</div></div>`;
+      const calDays=(new Date(tb.lastDate)-new Date(tb.firstDate))/86400000||1;
+      const annualised=(tb.totalNetPnlRs/tb.avgCapital)*(365/calDays)*100;
+      const months=Math.round(calDays/30.4);
+      const col=annualised>=0?'var(--green)':'var(--red)';
+      return `<div class="st"><div class="st-l">Growth p.a.</div><div class="st-v" style="color:${col}">${annualised>=0?'+':''}${annualised.toFixed(1)}%</div><div class="st-d">${tb.totalNetPnlRs>=0?'+':'−'}₹${Math.abs(tb.totalNetPnlRs).toLocaleString('en-IN')} net · ${tb.roundTrips} trades · ${months}mo</div></div>`;
+    })()}
     <div class="st"><div class="st-l">Score Spread</div><div class="st-v">${scoreSpread}</div><div class="st-d">${scoreMax} top · ${scoreMin} low</div></div>
     <div class="st"><div class="st-l">Top Sector</div><div class="st-v" style="font-size:15px;color:var(--green)">${topSec}</div><div class="st-d">${topSecPct.toFixed(0)}% advancing</div></div>
     ${TRADEBOOK_STATS?`<div class="st"><div class="st-l">Trading Stats</div><div class="st-v" style="font-size:13px;color:var(--amber)">SL ${TRADEBOOK_STATS.adaptiveSL}% · TGT ${TRADEBOOK_STATS.adaptiveTGT}%</div><div class="st-d">Hold ${TRADEBOOK_STATS.avgHoldDays}d · Size ₹${TRADEBOOK_STATS.avgCapital.toLocaleString('en-IN')} · Daily ${(TRADEBOOK_STATS.avgDailyPnl>=0?'+':'')}₹${Math.abs(TRADEBOOK_STATS.avgDailyPnl).toLocaleString('en-IN')}</div></div>`:''}
@@ -3019,6 +3027,7 @@ function parseTradebook(text){
     largestWinRs, largestLossRs,
     maxDrawdown, maxLossStreak,
     pctProfitableDays, profitableDays, totalTradingDays:dailyPnlArr.length,
+    firstDate:dailyPnlArr.length?dailyPnlArr[0][0]:null,
     monthlyPnl, dailyPnlArr, symBreakdown, hourBreakdown,
     lastDate, lastDayRows, lastDayTotal,
     tripsData:roundTrips.map((r,i)=>({...r,netPnl:netByTripEarly[i],netPnlPct:r.capital>0?+(netByTripEarly[i]/r.capital*100).toFixed(3):0}))
