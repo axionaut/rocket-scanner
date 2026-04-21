@@ -3622,11 +3622,10 @@ function loadFilterState(){
       // Orders are always today-only — check date on first entry
       if(Array.isArray(parsed)&&parsed.length){
         const firstDate=(parsed[0].time||'').substring(0,10);
-        // Accept orders from any day within the last 7 calendar days — no hardcoded holiday logic
-        const ageMs=Date.now()-new Date(firstDate).getTime();
-        const ageDays=ageMs/86400000;
-        if(ageDays<=7) ORDERS_TODAY=parsed;
-        else console.log('INIT: cleared stale orders from',firstDate,'(older than 7 days)');
+        // Accept orders only from today's session date
+        const sessionDate=getSessionDate();
+        if(firstDate===sessionDate) ORDERS_TODAY=parsed;
+        else console.log('INIT: cleared stale orders from',firstDate,'(session is',sessionDate,')');
       }
     }
   }catch(e){ console.error('INIT step2g orders restore failed:',e); }
