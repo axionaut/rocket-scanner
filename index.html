@@ -2827,7 +2827,11 @@ function parseTradebook(text){
       }
     }
     // Remaining unmatched buys = current open holdings
-    if(buyQueue.length>0) openBuyDateMap[sym]=buyQueue[0].date; // earliest unmatched buy
+    if(buyQueue.length>0){
+      const totalQty=buyQueue.reduce((s,b)=>s+b.qty,0);
+      const weightedMs=buyQueue.reduce((s,b)=>s+(new Date(b.date).getTime()*b.qty),0);
+      openBuyDateMap[sym]=new Date(weightedMs/totalQty).toISOString().slice(0,10);
+    }
   });
 
   if(!roundTrips.length) return null;
