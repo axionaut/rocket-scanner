@@ -2908,7 +2908,7 @@ function parseTradebook(text){
   Object.entries(NSE_BHAV).forEach(([sym,b])=>{if(dayHighMap[sym]==null&&b.high!=null)dayHighMap[sym]=b.high;});
 
   // If we have day-high data and recent sell date not yet stored, compute and persist
-  if(recentSellDate&&Object.keys(dayHighMap).length&&!missedOppStore[recentSellDate]){
+  if(recentSellDate&&Object.keys(dayHighMap).length){
     const seenSyms=new Set();
     const dayEntries=[];
     roundTrips.forEach(r=>{
