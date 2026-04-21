@@ -283,7 +283,7 @@ table.main tbody td{padding:9px 11px;font-family:'DM Mono',monospace;font-size:1
   <div style="position:relative;display:flex;align-items:center">
     <button class="btn btn-fire" id="loadFilesBtn" onclick="showUploadScreen()">Load Files</button>
     <button class="btn" onclick="toggleRequiredFilesPopover()" title="Required input files" style="font-size:14px;padding:8px 12px;margin-left:4px">ℹ️</button>
-    <div id="requiredFilesPopover" style="display:none;position:absolute;top:100%;right:0;margin-top:8px;background:var(--bg-raised);border:1px solid var(--border-hi);border-radius:10px;padding:14px 16px;z-index:1000;box-shadow:0 8px 32px rgba(0,0,0,.35);min-width:280px;max-width:380px">
+    <div id="requiredFilesPopover" style="display:none;position:fixed;top:60px;right:8px;margin-top:0;background:var(--bg-raised);border:1px solid var(--border-hi);border-radius:10px;padding:14px 16px;z-index:1000;box-shadow:0 8px 32px rgba(0,0,0,.35);min-width:280px;max-width:min(380px,calc(100vw - 16px))">
       <div style="font-size:12px;color:var(--t1);margin-bottom:10px;font-weight:600">📁 Required files:</div>
       <div id="requiredFilesPopoverContent" style="font-size:11px;line-height:1.6;color:var(--t2)"></div>
     </div>
@@ -2487,7 +2487,7 @@ function exportBrain(){
     CORR_STORE, CORR_BULL_STORE, CORR_BEAR_STORE, CORR_NEUT_STORE,
     SNAP_KEY, SNAP_PREV_KEY, ALL_STORE, METH_STORE, REGIME_CAL_STORE, SCANNER_STORE, VER_STORE, HOLD_STORE, TRADEBOOK_STORE, ORDERS_STORE, POSITIONS_STORE
   ];
-  const brain={_exported:new Date().toISOString(), _version:'rscanner_brain_v1'};
+  const brain={_exportedAt:new Date().toISOString(), _exported:new Date().toISOString(), _version:'rscanner_brain_v1'};
   let totalSize=0;
   for(const key of BRAIN_KEYS){
     try{
@@ -3666,17 +3666,30 @@ function loadFilterState(){
 
   // Step 7: PREV_SNAP already loaded by IIFE above (previous-day data only)
 
-  // Step 7b: If no local data, try fetching Rocket_Brain.json from repo as fallback
-  if(!TRADEBOOK_STATS && !ALL.length){
-    fetch('Rocket_Brain.json').then(r=>r.ok?r.json():null).then(brain=>{
+  // Step 7b: Fetch Rocket_Brain.json from repo.
+  // Cold start: load everything. Warm start: overwrite only perf keys if repo
+  // brain has a newer _exportedAt timestamp than what's already loaded locally.
+  {
+    const PERF_KEYS=['rs_tradebook','rs_orders','rs_holdings','rs_positions'];
+    const isCold=!TRADEBOOK_STATS&&!ALL.length;
+    const localTs=localStorage.getItem('rs_brain_ts')||'';
+    fetch('Rocket_Brain.json?v='+Date.now()).then(r=>r.ok?r.json():null).then(brain=>{
       if(!brain) return;
-      const V4_MAP={rs_snapshot:'rs_snapshot',rs_snapshot_prev:'rs_snapshot_prev'};
+      const repoTs=brain._exportedAt||brain._ts||'';
+      // Only sync if cold start OR repo brain is newer than what we loaded last time
+      if(!isCold&&repoTs&&repoTs<=localTs) return;
+      let changed=false;
       Object.entries(brain).forEach(([k,v])=>{
         if(k.startsWith('_')) return;
-        try{localStorage.setItem(V4_MAP[k]||k, typeof v==='string'?v:JSON.stringify(v));}catch(e){}
+        if(isCold||PERF_KEYS.includes(k)){
+          try{localStorage.setItem(k, typeof v==='string'?v:JSON.stringify(v));changed=true;}catch(e){}
+        }
       });
-      showToast('Loading brain from repo…',1500);
-      setTimeout(()=>location.reload(),1500);
+      if(changed){
+        if(repoTs) localStorage.setItem('rs_brain_ts',repoTs);
+        showToast('Synced latest session from repo…',1500);
+        setTimeout(()=>location.reload(),1500);
+      }
     }).catch(()=>{});
   }
 
