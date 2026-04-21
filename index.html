@@ -725,6 +725,17 @@ function pctRank(arr){
   return res;
 }
 
+// Compute tick size from available prices using GCD of paise values
+function calcTick(...prices){
+  const vals=prices.filter(v=>v!=null&&v>0).map(v=>Math.round(v*100));
+  if(!vals.length) return 0.05;
+  const gcd=(a,b)=>b===0?a:gcd(b,a%b);
+  const g=vals.reduce((a,b)=>gcd(a,b));
+  const tick=g/100;
+  // Clamp to sensible range: min 0.01, max 1.0
+  return Math.min(Math.max(tick,0.01),1.0);
+}
+
 // ── Engine ──
 function runEngine(raw, sessionTag){
   if(!raw.length) return;
@@ -776,6 +787,8 @@ function runEngine(raw, sessionTag){
     piotroski:    findKey(/piotroski/),
     high_1d:      findKey(/^high_1_day$/),
     low_1d:       findKey(/^low_1_day$/),
+    open_1d:      findKey(/^open_1_day$/),
+    close_1d:     findKey(/^close_1_day$|^previous_close$/),
     vwap:         findKey(/volume_weighted_average_price.*1_day/),
   };
 
@@ -1112,7 +1125,9 @@ function runEngine(raw, sessionTag){
       atr1w:(K.atr_pct_1w?d[K.atr_pct_1w]:null),
       high1d:(K.high_1d?d[K.high_1d]:null),
       low1d:(K.low_1d?d[K.low_1d]:null),
+      open1d:(K.open_1d?d[K.open_1d]:null),
       vwap:(K.vwap?d[K.vwap]:null),
+      tick:calcTick(K.price?d[K.price]:null,K.high_1d?d[K.high_1d]:null,K.low_1d?d[K.low_1d]:null,K.open_1d?d[K.open_1d]:null,K.close_1d?d[K.close_1d]:null),
       piotroski:(K.piotroski?d[K.piotroski]:null),
       shareholders:(K.shareholders?d[K.shareholders]:null),
       perf1w:(K.perf_1w?d[K.perf_1w]:null),
@@ -1673,6 +1688,9 @@ function renderPerformance(){
 }
 
 function renderMethodology(){
+  // Sync header height CSS var so sticky bookmark nav sits flush below header
+  const hdrEl=document.querySelector('.hdr');
+  if(hdrEl) document.documentElement.style.setProperty('--hdr-h',hdrEl.offsetHeight+'px');
   const E=ENGINE_DATA;
   if(!E||!E.features||!E.features.length||!E.mrmr||!E.weights||!E.targetCorr)return;
   // Guard all potentially missing fields
@@ -1854,7 +1872,7 @@ function renderMethodology(){
   const _archiveCount=removedFeats.length;
 
   mc.innerHTML=`
-    <nav style="position:sticky;top:60px;z-index:50;background:var(--bg);padding:8px 0 10px;margin-bottom:8px;display:flex;gap:6px;flex-wrap:wrap;border-bottom:1px solid var(--border);box-shadow:0 2px 8px rgba(0,0,0,0.3);overflow-x:auto;-webkit-overflow-scrolling:touch">
+    <nav style="position:sticky;top:var(--hdr-h,72px);z-index:50;background:var(--bg);padding:8px 0 10px;margin-bottom:8px;display:flex;gap:6px;flex-wrap:wrap;border-bottom:1px solid var(--border);box-shadow:0 2px 8px rgba(0,0,0,0.3);overflow-x:auto;-webkit-overflow-scrolling:touch">
       <a href="#meth-regime" onclick="event.preventDefault();scrollToSection('meth-regime')" style="padding:4px 12px;border-radius:6px;background:var(--bg-card);border:1px solid var(--border);color:var(--t2);font-size:11px;font-weight:600;text-decoration:none;cursor:pointer">🐂 Regime</a>
       <a href="#meth-engine" onclick="event.preventDefault();scrollToSection('meth-engine')" style="padding:4px 12px;border-radius:6px;background:var(--bg-card);border:1px solid var(--border);color:var(--t2);font-size:11px;font-weight:600;text-decoration:none;cursor:pointer">⚙ Engine</a>
       <a href="#meth-rockets" onclick="event.preventDefault();scrollToSection('meth-rockets')" style="padding:4px 12px;border-radius:6px;background:var(--bg-card);border:1px solid var(--border);color:var(--fire);font-size:11px;font-weight:600;text-decoration:none;cursor:pointer">🚀 Rockets (${_rocketCount})</a>
@@ -2051,7 +2069,7 @@ function toggleStock(sym,checked){
 
 // ── Score-weighted allocation across selected stocks ──
 function getBuyPrice(s){
-  const tick=v=>Math.round(v/0.05)*0.05;
+  const t=s.tick||0.05;const tick=v=>Math.round(v/t)*t;
   const ltp=s.price>0?s.price:0;
   const vwap=s.vwap;
   const atrMargin=(s.atr!=null&&ltp>0)?(ltp*s.atr*0.25/100):0;
@@ -3180,7 +3198,7 @@ function exportBasket(){
   const selList=FILT.filter(s=>SELECTED.has(s.symbol));
   if(!selList.length){showToast('Select at least one stock first.',3000,true);return;}
   const basketAlloc = computeAlloc(capital, selList);
-  const tick=v=>Math.round(v/0.05)*0.05;
+  const tickFor=s=>{ const t=s.tick||0.05; return v=>Math.round(v/t)*t; };
   const {sl,tgt}=calcAtrSLTGT();
   const orders=[];
   let rejectedCount=0;
@@ -3223,7 +3241,7 @@ function exportBasket(){
 }
 
 function showGttPopup(){
-  const tick=v=>Math.round(v/0.05)*0.05;
+  const tickFor=sym=>{ const s=ALL.find(x=>x.symbol===sym); const t=s?.tick||0.05; return v=>Math.round(v/t)*t; };
   const {sl:_sl,tgt:_tgt}=calcAtrSLTGT();
   // Collect rows: settled holdings + open long positions (T+1 unsettled)
   const rowMap={};
@@ -3268,6 +3286,7 @@ function showGttPopup(){
     const allStock=ALL.find(s=>s.symbol===r.symbol);
     const ltp=allStock?.ltp ?? r.posLtp ?? r.holdLtp ?? null;
     const slPct=_sl, tgtPct=_tgt;
+    const tick=tickFor(r.symbol);
     const tgtPrice=avgBuy>0?parseFloat(tick(avgBuy*(1+tgtPct/100)).toFixed(2)):null;
     const slPrice=avgBuy>0?parseFloat(tick(avgBuy*(1-slPct/100)).toFixed(2)):null;
     const pnlPct=(ltp!=null&&ltp>0&&avgBuy>0)?((ltp-avgBuy)/avgBuy*100):null;
