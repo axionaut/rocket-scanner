@@ -3304,6 +3304,9 @@ function showGttPopup(){
   let tbodyHtml='';
   enriched.forEach(r=>{
     const {avgBuy,ltp,slPct,tgtPct,tgtPrice,slPrice,pnlPct,daysHeld}=r;
+    const allStock=ALL.find(s=>s.symbol===r.symbol);
+    const score=allStock?.rocketScore??null;
+    const scoreColor=score==null?'var(--t3)':score>=70?'var(--green)':score>=50?'var(--amber)':'var(--t2)';
     const pnlColor=pnlPct==null?'var(--t2)':pnlPct>=0?'var(--green)':'var(--red)';
     const daysColor=daysHeld==null?'var(--t3)':daysHeld>10?'var(--red)':daysHeld>5?'var(--amber)':'var(--t2)';
     tbodyHtml+=`<tr>
@@ -3312,6 +3315,7 @@ function showGttPopup(){
       <td>${fmtp(avgBuy)}</td>
       <td style="color:var(--t2)">${ltp!=null&&ltp>0?fmtp(ltp):'—'}</td>
       <td style="color:${pnlColor}">${pnlPct!=null?(pnlPct>=0?'+':'')+pnlPct.toFixed(2)+'%':'—'}</td>
+      <td style="color:${scoreColor};font-weight:600">${score!=null?Math.round(score):'—'}</td>
       <td style="color:${daysColor};font-weight:600">${daysHeld!=null?daysHeld+'d':'—'}</td>
       <td style="color:var(--red);font-weight:700">${slPrice!=null?fmtp(slPrice):'—'}<br><span style="font-size:10px;color:var(--t3)">(-${slPct.toFixed(2)}%)</span></td>
       <td style="color:var(--green);font-weight:700">${tgtPrice!=null?fmtp(tgtPrice):'—'}<br><span style="font-size:10px;color:var(--t3)">(+${tgtPct.toFixed(2)}%)</span></td>
@@ -3334,6 +3338,7 @@ function showGttPopup(){
           <th>Avg Cost</th>
           <th>LTP</th>
           <th>P&amp;L%</th>
+          <th>Score</th>
           <th>Days</th>
           <th style="color:var(--red)">SL ₹</th>
           <th style="color:var(--green)">Target ₹</th>
