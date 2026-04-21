@@ -2909,13 +2909,14 @@ function parseTradebook(text){
 
   // If we have day-high data and recent sell date not yet stored, compute and persist
   if(recentSellDate&&Object.keys(dayHighMap).length&&!missedOppStore[recentSellDate]){
+    const seenSyms=new Set();
     const dayEntries=[];
     roundTrips.forEach(r=>{
-      if(r.sellDate!==recentSellDate) return;
+      if(r.sellDate!==recentSellDate||seenSyms.has(r.sym)) return;
       const dayHigh=dayHighMap[r.sym]??null;
       if(dayHigh==null||dayHigh<=r.sellPrice) return;
       const missed=(dayHigh-r.sellPrice)/r.sellPrice*100;
-      if(missed>0&&missed<30) dayEntries.push({sym:r.sym,missed:+missed.toFixed(2)});
+      if(missed>0&&missed<30){seenSyms.add(r.sym);dayEntries.push({sym:r.sym,missed:+missed.toFixed(2)});}
     });
     if(dayEntries.length){
       missedOppStore[recentSellDate]=dayEntries;
