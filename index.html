@@ -2895,43 +2895,18 @@ function parseTradebook(text){
   const avgCapital=meanArr(Object.values(posMap));
   const adaptiveSL=+Math.abs(medianLossPct).toFixed(2);
 
-  // Missed opportunity: accumulated across all sell dates.
-  // Each time bhav is loaded, compute missed gains for the most recent sell date
-  // and merge into persistent store keyed by date. Aggregates grow over time.
-  const recentSellDate=roundTrips.length?roundTrips.reduce((best,r)=>r.sellDate>best?r.sellDate:best,''):null;
-  // Load accumulated store
+  // Aggregate missed opp store for adaptiveTGT nudge
   let missedOppStore={};
   try{const raw=localStorage.getItem(MISSED_OPP_STORE);if(raw)missedOppStore=JSON.parse(raw);}catch(e){}
-  // Build day-high lookup: ALL array (TV CSV) is primary, NSE_BHAV as fallback
-  const dayHighMap={};
-  (ALL||[]).forEach(s=>{if(s.symbol&&s.high1d!=null)dayHighMap[s.symbol]=s.high1d;});
-  Object.entries(NSE_BHAV).forEach(([sym,b])=>{if(dayHighMap[sym]==null&&b.high!=null)dayHighMap[sym]=b.high;});
-
-  // If we have day-high data and recent sell date not yet stored, compute and persist
-  if(recentSellDate&&Object.keys(dayHighMap).length){
-    const seenSyms=new Set();
-    const dayEntries=[];
-    roundTrips.forEach(r=>{
-      if(r.sellDate!==recentSellDate||seenSyms.has(r.sym)) return;
-      const dayHigh=dayHighMap[r.sym]??null;
-      if(dayHigh==null||dayHigh<=r.sellPrice) return;
-      const missed=(dayHigh-r.sellPrice)/r.sellPrice*100;
-      if(missed>0&&missed<30){seenSyms.add(r.sym);dayEntries.push({sym:r.sym,missed:+missed.toFixed(2)});}
-    });
-    if(dayEntries.length){
-      missedOppStore[recentSellDate]=dayEntries;
-      try{localStorage.setItem(MISSED_OPP_STORE,JSON.stringify(missedOppStore));}catch(e){}
-    }
-  }
-  // Aggregate across all accumulated dates
   const allMissed=Object.values(missedOppStore).flat();
   const missedGains=allMissed;
   const missedGainVals=allMissed.map(m=>m.missed);
   const avgMissedGain=missedGainVals.length?missedGainVals.reduce((s,v)=>s+v,0)/missedGainVals.length:0;
-  const missedAdj=+Math.min(avgMissedGain*0.25,2).toFixed(2); // cap nudge at 2%
+  const missedAdj=+Math.min(avgMissedGain*0.25,2).toFixed(2);
   const missedOppCount=allMissed.length;
   const missedSyms=[...new Set(allMissed.map(m=>m.sym))];
   const missedOppDates=Object.keys(missedOppStore).length;
+  const recentSellDate=null; // computed externally by computeMissedOpp()
 
   const adaptiveTGT=+(Math.abs(medianWinPct)+missedAdj).toFixed(2);
   const minExitPct=+Math.max(1,medianWinPct).toFixed(2);
@@ -3148,6 +3123,48 @@ function getSellAvgPrice(symbol){
     if(holdingQty>0) return {qty:holdingQty, avg:holdingAvg, source:'holdings'};
   }
   return null;
+}
+
+// ── Missed opportunity: today's SELL orders vs today's ALL highs ──
+// Called after ALL and ORDERS_TODAY are both loaded. Stores result keyed by today's date.
+function computeMissedOpp(){
+  if(!ORDERS_TODAY||!ORDERS_TODAY.length||!ALL||!ALL.length) return;
+  const today=getSessionDate();
+  const dayHighMap={};
+  ALL.forEach(s=>{if(s.symbol&&s.high1d!=null)dayHighMap[s.symbol]=s.high1d;});
+  const sells=ORDERS_TODAY.filter(o=>o.type==='SELL');
+  if(!sells.length) return;
+  // Consolidate sells by symbol (qty-weighted avg price)
+  const sellMap={};
+  sells.forEach(o=>{
+    if(!sellMap[o.symbol]) sellMap[o.symbol]={totalVal:0,totalQty:0};
+    sellMap[o.symbol].totalVal+=o.price*o.qty;
+    sellMap[o.symbol].totalQty+=o.qty;
+  });
+  const dayEntries=[];
+  Object.entries(sellMap).forEach(([sym,s])=>{
+    const sellPrice=s.totalVal/s.totalQty;
+    const dayHigh=dayHighMap[sym]??null;
+    if(dayHigh==null||dayHigh<=sellPrice) return;
+    const missed=(dayHigh-sellPrice)/sellPrice*100;
+    if(missed>0&&missed<30) dayEntries.push({sym,missed:+missed.toFixed(2)});
+  });
+  let missedOppStore={};
+  try{const raw=localStorage.getItem(MISSED_OPP_STORE);if(raw)missedOppStore=JSON.parse(raw);}catch(e){}
+  if(dayEntries.length) missedOppStore[today]=dayEntries;
+  else delete missedOppStore[today];
+  try{localStorage.setItem(MISSED_OPP_STORE,JSON.stringify(missedOppStore));}catch(e){}
+  // Refresh tradebook stats so adaptiveTGT picks up new missedAdj
+  if(TRADEBOOK_STATS){
+    const allMissed=Object.values(missedOppStore).flat();
+    const avg=allMissed.length?allMissed.reduce((s,m)=>s+m.missed,0)/allMissed.length:0;
+    TRADEBOOK_STATS.missedAdj=+Math.min(avg*0.25,2).toFixed(2);
+    TRADEBOOK_STATS.adaptiveTGT=+(Math.abs(TRADEBOOK_STATS.medianWinPct)+TRADEBOOK_STATS.missedAdj).toFixed(2);
+    TRADEBOOK_STATS.missedOppCount=allMissed.length;
+    TRADEBOOK_STATS.avgMissedGain=+avg.toFixed(2);
+    TRADEBOOK_STATS.missedOppDates=Object.keys(missedOppStore).length;
+    try{localStorage.setItem(TRADEBOOK_STORE,JSON.stringify(TRADEBOOK_STATS));}catch(e){}
+  }
 }
 
 // ── Shared SL/TGT calculator — adaptive from tradebook, fixed defaults ──
@@ -3493,6 +3510,7 @@ async function processFiles(files){
     // Auto-select all stocks by default on fresh upload
     SELECTED=new Set(ALL.map(s=>s.symbol));
     renderStats();renderMethodology();loadFilterState();setAutoVolume();
+    computeMissedOpp(); // recompute with fresh ALL highs; ORDERS_TODAY may already be in memory
     // Process holdings BEFORE applyFilters so avg-down suppression has fresh data
     if(holdFile){
       setMsg('Processing holdings...');
@@ -3529,6 +3547,7 @@ async function processFiles(files){
       const ordersText=await ordersFile.text();
       ORDERS_TODAY=parseOrders(ordersText);
       if(ORDERS_TODAY) try{localStorage.setItem(ORDERS_STORE,JSON.stringify(ORDERS_TODAY));}catch(e){}
+      computeMissedOpp();
       if(ORDERS_TODAY) renderStats();
     }
     if(posFile){
