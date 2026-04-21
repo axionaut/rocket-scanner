@@ -440,7 +440,7 @@ let POSITIONS=[]; // open positions from Positions.csv (T+1 unsettled buys)
 // Regime-conditional accumulators
 let ACC_CORR_BULL=null, ACC_CORR_BEAR=null, ACC_CORR_NEUT=null;
 let CURRENT_REGIME='neutral'; // bull | bear | neutral
-const REGIME_THRESHOLDS={bull:0.55, bear:0.35}; // breadth % thresholds
+const REGIME_THRESHOLDS={bull:0.67, bear:0.33}; // breadth % thresholds — equal thirds
 
 // ── Version system (auto-increments on code change) ──
 const BUILT=(()=>{const d=new Date(document.lastModified);if(isNaN(d))return'';const dd=d=>String(d).padStart(2,'0');return d.getFullYear()+'-'+dd(d.getMonth()+1)+'-'+dd(d.getDate())+' '+dd(d.getHours())+':'+dd(d.getMinutes())+' IST';})();
