@@ -394,7 +394,7 @@ const TRADEBOOK_STORE='rs_tradebook';
 const ORDERS_STORE='rs_orders';
 const POSITIONS_STORE='rs_positions';
 const MISSED_OPP_STORE='rs_missed_opp'; // {date → [{sym, missed%}]}
-const OPEN_BUY_DATE_STORE='rs_open_buy_dates'; // {sym → weighted avg buy date}
+const OPEN_BUY_DATE_STORE='rs_open_buy_dates'; // {sym → latest buy date}
 let TRADEBOOK_STATS=null; // {avgWinPct, avgLossPct, medianWinPct, medianLossPct, winRate, avgHoldDays, p25Loss, p75Win, adaptiveSL, adaptiveTGT, minExitPct, roundTrips}
 
 // ── One-time key migration: move old versioned keys → clean names ──
@@ -2813,9 +2813,17 @@ function parseTradebook(text){
     bySymbol[o.sym].push({type:o.type,qty:o.totalQty,price:avgPrice,date:o.date,time:o.time});
   });
 
+  // Latest BUY date per symbol (simple scan, no FIFO needed)
+  const lastBuyDateBySymbol={};
+  Object.entries(bySymbol).forEach(([sym,trades])=>{
+    trades.filter(t=>t.type==='buy').forEach(t=>{
+      if(!lastBuyDateBySymbol[sym]||t.date>lastBuyDateBySymbol[sym]) lastBuyDateBySymbol[sym]=t.date;
+    });
+  });
+
   // FIFO matching per symbol — only closed round trips
   const roundTrips=[];
-  const openBuyDateMap={}; // sym → earliest unmatched buy date (current holdings)
+  const openBuyDateMap={}; // sym → weighted avg unmatched buy date (current holdings)
   Object.entries(bySymbol).forEach(([sym,trades])=>{
     trades.sort((a,b)=>a.time.localeCompare(b.time));
     const buyQueue=[];
@@ -2891,13 +2899,17 @@ function parseTradebook(text){
   // Load accumulated store
   let missedOppStore={};
   try{const raw=localStorage.getItem(MISSED_OPP_STORE);if(raw)missedOppStore=JSON.parse(raw);}catch(e){}
-  // If bhav is loaded and recent sell date not yet stored, compute and persist
-  if(recentSellDate&&Object.keys(NSE_BHAV).length&&!missedOppStore[recentSellDate]){
+  // Build day-high lookup: ALL array (TV CSV) is primary, NSE_BHAV as fallback
+  const dayHighMap={};
+  (ALL||[]).forEach(s=>{if(s.symbol&&s.high1d!=null)dayHighMap[s.symbol]=s.high1d;});
+  Object.entries(NSE_BHAV).forEach(([sym,b])=>{if(dayHighMap[sym]==null&&b.high!=null)dayHighMap[sym]=b.high;});
+
+  // If we have day-high data and recent sell date not yet stored, compute and persist
+  if(recentSellDate&&Object.keys(dayHighMap).length&&!missedOppStore[recentSellDate]){
     const dayEntries=[];
     roundTrips.forEach(r=>{
       if(r.sellDate!==recentSellDate) return;
-      const bhav=NSE_BHAV[r.sym];
-      const dayHigh=bhav?.high??bhav?.close??null;
+      const dayHigh=dayHighMap[r.sym]??null;
       if(dayHigh==null||dayHigh<=r.sellPrice) return;
       const missed=(dayHigh-r.sellPrice)/r.sellPrice*100;
       if(missed>0&&missed<30) dayEntries.push({sym:r.sym,missed:+missed.toFixed(2)});
@@ -3079,7 +3091,7 @@ function parseTradebook(text){
     medianWinPct:+medianWinPct.toFixed(2), medianLossPct:+medianLossPct.toFixed(2),
     p75Win:+p75Win.toFixed(2), p25Loss:+p25Loss.toFixed(2),
     avgHoldDays:+avgHoldDays.toFixed(2), avgCapital:+Math.round(avgCapital),
-    adaptiveSL, adaptiveTGT, minExitPct, missedOppCount, avgMissedGain:+avgMissedGain.toFixed(2), missedAdj, missedSyms, recentSellDate, openBuyDateMap, missedOppDates,
+    adaptiveSL, adaptiveTGT, minExitPct, missedOppCount, avgMissedGain:+avgMissedGain.toFixed(2), missedAdj, missedSyms, recentSellDate, openBuyDateMap, missedOppDates, lastBuyDateBySymbol,
     riskReward:+Math.abs(avgWinPct/avgLossPct).toFixed(2),
     lastBooked,
     bestHour, bestHourAvgPct:bestHour!==null?+bestHourAvgPct.toFixed(2):null,
@@ -3214,18 +3226,12 @@ function showGttPopup(){
   // Build buy date per symbol: for each holding with qty>0, find the earliest
   // buy in the tradebook's bySymbol raw legs that isn't fully consumed by sells.
   // Fall back to today's orders for same-day buys not yet in tradebook.
-  const heldSyms=new Set((HOLDINGS||[]).filter(h=>h.qty>0).map(h=>h.symbol));
-  (POSITIONS||[]).forEach(p=>{if(p.qty>0)heldSyms.add(p.symbol);});
-  const lastBuyDateMap={};
-  // Use openBuyDateMap from tradebook (FIFO remainder) as primary source
-  heldSyms.forEach(sym=>{
-    if(TRADEBOOK_STATS?.openBuyDateMap?.[sym]) lastBuyDateMap[sym]=TRADEBOOK_STATS.openBuyDateMap[sym];
-  });
-  // Today's orders fill in same-day buys not yet in tradebook
+  // Latest BUY date per symbol from tradebook; today's orders as fallback
+  const lastBuyDateMap=Object.assign({},TRADEBOOK_STATS?.lastBuyDateBySymbol||{});
   (ORDERS_TODAY||[]).forEach(o=>{
-    if(o.type==='BUY'&&heldSyms.has(o.symbol)){
+    if(o.type==='BUY'){
       const d=(o.time||'').substring(0,10);
-      if(d&&!lastBuyDateMap[o.symbol]) lastBuyDateMap[o.symbol]=d;
+      if(d&&(!lastBuyDateMap[o.symbol]||d>lastBuyDateMap[o.symbol])) lastBuyDateMap[o.symbol]=d;
     }
   });
   const today=new Date(getSessionDate());
@@ -3505,7 +3511,7 @@ async function processFiles(files){
       TRADEBOOK_STATS=parseTradebook(tbText);
       if(TRADEBOOK_STATS){
         try{localStorage.setItem(TRADEBOOK_STORE,JSON.stringify(TRADEBOOK_STATS));}catch(e){}
-        if(TRADEBOOK_STATS.openBuyDateMap) try{localStorage.setItem(OPEN_BUY_DATE_STORE,JSON.stringify(TRADEBOOK_STATS.openBuyDateMap));}catch(e){}
+        if(TRADEBOOK_STATS.lastBuyDateBySymbol) try{localStorage.setItem(OPEN_BUY_DATE_STORE,JSON.stringify(TRADEBOOK_STATS.lastBuyDateBySymbol));}catch(e){}
       }
       if(TRADEBOOK_STATS){renderStats();renderPerformance();}
     }
@@ -3708,9 +3714,9 @@ function loadFilterState(){
     const tbRaw=localStorage.getItem(TRADEBOOK_STORE);
     if(tbRaw) TRADEBOOK_STATS=JSON.parse(tbRaw);
     // Backfill openBuyDateMap if missing from old stored object
-    if(TRADEBOOK_STATS&&!TRADEBOOK_STATS.openBuyDateMap){
+    if(TRADEBOOK_STATS&&!TRADEBOOK_STATS.lastBuyDateBySymbol){
       const obdRaw=localStorage.getItem(OPEN_BUY_DATE_STORE);
-      if(obdRaw) TRADEBOOK_STATS.openBuyDateMap=JSON.parse(obdRaw);
+      if(obdRaw) TRADEBOOK_STATS.lastBuyDateBySymbol=JSON.parse(obdRaw);
     }
   }catch(e){ console.error('INIT step2f tradebook failed:',e); }
 
