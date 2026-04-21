@@ -396,6 +396,7 @@ const POSITIONS_STORE='rs_positions';
 const MISSED_OPP_STORE='rs_missed_opp'; // {date → [{sym, missed%}]}
 const OPEN_BUY_DATE_STORE='rs_open_buy_dates'; // {sym → latest buy date}
 let TRADEBOOK_STATS=null; // {avgWinPct, avgLossPct, medianWinPct, medianLossPct, winRate, avgHoldDays, p25Loss, p75Win, adaptiveSL, adaptiveTGT, minExitPct, roundTrips}
+let LAST_BUY_DATE_MAP={}; // {symbol → latest buy date string} — populated on tradebook parse
 
 // ── One-time key migration: move old versioned keys → clean names ──
 // Deletes old key FIRST to free space, then writes new. Safe to run repeatedly.
@@ -3227,7 +3228,7 @@ function showGttPopup(){
   // buy in the tradebook's bySymbol raw legs that isn't fully consumed by sells.
   // Fall back to today's orders for same-day buys not yet in tradebook.
   // Latest BUY date per symbol from tradebook; today's orders as fallback
-  const lastBuyDateMap=Object.assign({},TRADEBOOK_STATS?.lastBuyDateBySymbol||{});
+  const lastBuyDateMap=Object.assign({},LAST_BUY_DATE_MAP||{});
   (ORDERS_TODAY||[]).forEach(o=>{
     if(o.type==='BUY'){
       const d=(o.time||'').substring(0,10);
@@ -3511,7 +3512,10 @@ async function processFiles(files){
       TRADEBOOK_STATS=parseTradebook(tbText);
       if(TRADEBOOK_STATS){
         try{localStorage.setItem(TRADEBOOK_STORE,JSON.stringify(TRADEBOOK_STATS));}catch(e){}
-        if(TRADEBOOK_STATS.lastBuyDateBySymbol) try{localStorage.setItem(OPEN_BUY_DATE_STORE,JSON.stringify(TRADEBOOK_STATS.lastBuyDateBySymbol));}catch(e){}
+        if(TRADEBOOK_STATS.lastBuyDateBySymbol){
+          LAST_BUY_DATE_MAP=TRADEBOOK_STATS.lastBuyDateBySymbol;
+          try{localStorage.setItem(OPEN_BUY_DATE_STORE,JSON.stringify(LAST_BUY_DATE_MAP));}catch(e){}
+        }
       }
       if(TRADEBOOK_STATS){renderStats();renderPerformance();}
     }
@@ -3714,10 +3718,8 @@ function loadFilterState(){
     const tbRaw=localStorage.getItem(TRADEBOOK_STORE);
     if(tbRaw) TRADEBOOK_STATS=JSON.parse(tbRaw);
     // Backfill openBuyDateMap if missing from old stored object
-    if(TRADEBOOK_STATS&&!TRADEBOOK_STATS.lastBuyDateBySymbol){
-      const obdRaw=localStorage.getItem(OPEN_BUY_DATE_STORE);
-      if(obdRaw) TRADEBOOK_STATS.lastBuyDateBySymbol=JSON.parse(obdRaw);
-    }
+    try{const obdRaw=localStorage.getItem(OPEN_BUY_DATE_STORE);if(obdRaw)LAST_BUY_DATE_MAP=JSON.parse(obdRaw);}catch(e){}
+    if(TRADEBOOK_STATS&&!TRADEBOOK_STATS.lastBuyDateBySymbol) TRADEBOOK_STATS.lastBuyDateBySymbol=LAST_BUY_DATE_MAP;
   }catch(e){ console.error('INIT step2f tradebook failed:',e); }
 
   // Step 2g: Restore today's orders (only if from today)
