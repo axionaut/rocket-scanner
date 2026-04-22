@@ -398,6 +398,7 @@ const ORDERS_STORE='rs_orders';
 const POSITIONS_STORE='rs_positions';
 const MISSED_OPP_STORE='rs_missed_opp_v2'; // {date → [{sym, missed%}]} — v2: orders-based only
 const OPEN_BUY_DATE_STORE='rs_open_buy_dates'; // {sym → latest buy date}
+const REC_COUNT_STORE='rs_rec_count'; // {date → {sym → count}} — how many times seen today
 let TRADEBOOK_STATS=null; // {avgWinPct, avgLossPct, medianWinPct, medianLossPct, winRate, avgHoldDays, p25Loss, p75Win, adaptiveSL, adaptiveTGT, minExitPct, roundTrips}
 let LAST_BUY_DATE_MAP={}; // {symbol → latest buy date string} — populated on tradebook parse
 
@@ -2110,7 +2111,7 @@ function updateQualityPanel(){
 function getCols(){
   const fixed=[
     {key:'chk',label:'',s:0},
-    {key:'rocketScore',label:'Score',s:1},{key:'symbol',label:'Symbol',s:1},
+    {key:'rocketScore',label:'Score',s:1},{key:'recCount',label:'Seen',s:1},{key:'symbol',label:'Symbol',s:1},
     {key:'price',label:'Price ₹',s:1},{key:'priceChange',label:'Chg%',s:1},{key:'delivPct',label:'Deliv%',s:1},
     {key:'alloc',label:'Alloc ₹',s:0},{key:'volume',label:'Volume',s:1},
     {key:'_sl',label:'SL%',s:1},{key:'_tgt',label:'TGT%',s:1},
@@ -2377,6 +2378,7 @@ function renderTable(){
     let cells=`
       <td style="text-align:center"><input type="checkbox" ${isSelected?'checked':''} style="width:14px;height:14px;accent-color:var(--amber);cursor:pointer" onchange="toggleStock('${s.symbol}',this.checked)"></td>
       <td><span class="sc-m" style="color:${col}">${isNaN(s.rocketScore)?'?':s.rocketScore.toFixed(2)}</span></td>
+      <td style="text-align:center">${(s.recCount||0)>0?`<span style="font-size:11px;font-weight:700;color:${s.recCount>=3?'var(--green)':s.recCount>=2?'var(--amber)':'var(--t3)'};font-family:'DM Mono',monospace">${s.recCount}×</span>`:'<span style="color:var(--t3);font-size:10px">—</span>'}</td>
       <td style="font-family:'Plus Jakarta Sans',sans-serif"><div style="font-weight:700;font-size:13px">${s.symbol}</div><div style="font-size:9px;color:var(--t3);max-width:140px;overflow:hidden;text-overflow:ellipsis">${s.name}</div></td>
       <td>₹${fmt(s.price)}</td>
       <td>${fPerf(s.priceChange)}</td>
@@ -3637,6 +3639,14 @@ async function processFiles(files){
     const sessionTag=getSessionDate()+':'+Date.now();
     ALL=runEngine(raw, sessionTag);
     ALL.sort((a,b)=>b.rocketScore-a.rocketScore);
+    // Track how many times each stock has been recommended today
+    {
+      const _rcToday=getSessionDate();
+      let _rc={};
+      try{const _raw=localStorage.getItem(REC_COUNT_STORE);if(_raw){const _p=JSON.parse(_raw);_rc=_p[_rcToday]||{};}}catch(e){}
+      ALL.forEach(s=>{_rc[s.symbol]=(_rc[s.symbol]||0)+1;s.recCount=_rc[s.symbol];});
+      try{const _save={};_save[_rcToday]=_rc;localStorage.setItem(REC_COUNT_STORE,JSON.stringify(_save));}catch(e){}
+    }
     // Save scan results only — engineData is too large (N² interCorr matrix)
     try{
       // Trim data for storage — exclude _features (large, display-only, not needed on restore)
@@ -3871,6 +3881,8 @@ function loadFilterState(){
           ...s,
         }));
         ALL.forEach(s=>{if(s.rocketScore!=null)SCORE_MAP[s.symbol]=s.rocketScore;});
+        // Restore today's recommendation counts
+        try{const _rcRaw=localStorage.getItem(REC_COUNT_STORE);if(_rcRaw){const _rcp=JSON.parse(_rcRaw);const _rct=_rcp[getSessionDate()]||{};ALL.forEach(s=>{s.recCount=_rct[s.symbol]||0;});}}catch(e){}
         FILT=[...ALL];
         // Auto-select all stocks on restore
         SELECTED=new Set(ALL.map(s=>s.symbol));
