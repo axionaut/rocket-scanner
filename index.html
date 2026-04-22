@@ -1741,11 +1741,13 @@ function renderPerformance(){
   }
 
   // ── Regime filter pills HTML ──
+  const _rs=ENGINE_DATA?.regimeSessions||_savedMeth?.regimeSessions||{bull:0,bear:0,neutral:0};
+  const _totalObs=(_rs.bull||0)+(_rs.bear||0)+(_rs.neutral||0);
   const regimePills=['all','bull','bear','neutral'].map(r=>{
     const active=PERF_REGIME_FILTER===r;
     const label=r==='all'?'All':r==='bull'?'🐂 Bull':r==='bear'?'🐻 Bear':'➡ Neutral';
-    const cnt=r==='all'?allTrips.length:allTrips.filter(t=>t.regime===r).length;
-    const cntLabel=` (${cnt})`;
+    const cnt=r==='all'?_totalObs:(_rs[r]||0);
+    const cntLabel=` (${cnt} obs)`;
     const col=r==='bull'?'var(--green)':r==='bear'?'var(--red)':r==='neutral'?'var(--orange)':'var(--t2)';
     const bg=active?(r==='bull'?'rgba(34,197,94,.15)':r==='bear'?'rgba(239,68,68,.15)':r==='neutral'?'rgba(251,146,60,.15)':'rgba(148,163,184,.15)'):'transparent';
     const isCurrent=r!=='all'&&r===CURRENT_REGIME;
