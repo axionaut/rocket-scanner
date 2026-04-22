@@ -1287,12 +1287,23 @@ function renderStats(){
     <div class="st"><div class="st-l">Universe</div><div class="st-v">${t.toLocaleString()}</div><div class="st-d">of ${totalParsed.toLocaleString()} · <span style="color:var(--green)">${bull} ▲</span> · <span style="color:var(--red)">${t-bull} ▼</span></div></div>
     ${(()=>{
       const tb=TRADEBOOK_STATS;
-      if(!tb||!tb.firstDate||!tb.lastDate||!tb.avgCapital) return `<div class="st"><div class="st-l">Growth p.a.</div><div class="st-v" style="color:var(--t3)">—</div><div class="st-d">load tradebook</div></div>`;
-      const calDays=(new Date(tb.lastDate)-new Date(tb.firstDate))/86400000||1;
-      const annualised=(tb.totalNetPnlRs/tb.avgCapital)*(365/calDays)*100;
-      const months=Math.round(calDays/30.4);
-      const col=annualised>=0?'var(--green)':'var(--red)';
-      return `<div class="st"><div class="st-l">Growth p.a.</div><div class="st-v" style="color:${col}">${annualised>=0?'+':''}${annualised.toFixed(1)}%</div><div class="st-d">${tb.totalNetPnlRs>=0?'+':'−'}₹${Math.abs(tb.totalNetPnlRs).toLocaleString('en-IN')} net · ${tb.roundTrips} trades · ${months}mo</div></div>`;
+      if(!tb||!tb.tripsData||!tb.tripsData.length) return `<div class="st"><div class="st-l">Edge</div><div class="st-v" style="color:var(--t3)">—</div><div class="st-d">load tradebook</div></div>`;
+      const trips=tb.tripsData;
+      // Edge score: winRate × avgWinPct, confidence-penalized by min(1, trades/5)
+      const wins=trips.filter(t=>t.netPnl>0);
+      const wr=trips.length?wins.length/trips.length:0;
+      const avgWin=wins.length?wins.reduce((s,t)=>s+t.netPnlPct,0)/wins.length:0;
+      const edge=(wr*100*avgWin)*Math.min(1,trips.length/5);
+      // Current form: last 10 trades
+      const last10=trips.slice(-10);
+      const formW=last10.filter(t=>t.netPnl>0).length;
+      const formL=last10.length-formW;
+      // Projected monthly: expectancy × avg trades per month
+      const calDays=tb.firstDate&&tb.lastDate?(new Date(tb.lastDate)-new Date(tb.firstDate))/86400000||1:30;
+      const tradesPerMonth=trips.length/(calDays/30.4);
+      const projMonthly=tb.expectancy*tradesPerMonth;
+      const col=edge>0?'var(--green)':'var(--red)';
+      return `<div class="st"><div class="st-l">Edge</div><div class="st-v" style="color:${col}">${edge>=0?'+':''}${edge.toFixed(1)}</div><div class="st-d">Form ${formW}W ${formL}L · proj ₹${projMonthly>=0?'+':''}${Math.round(projMonthly).toLocaleString('en-IN')}/mo</div></div>`;
     })()}
     <div class="st"><div class="st-l">Score Spread</div><div class="st-v">${scoreSpread}</div><div class="st-d">${scoreMax} top · ${scoreMin} low</div></div>
     <div class="st"><div class="st-l">Top Sector</div><div class="st-v" style="font-size:15px;color:var(--green)">${topSec}</div><div class="st-d">${topSecPct.toFixed(0)}% advancing</div></div>
