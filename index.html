@@ -1542,10 +1542,25 @@ function renderPerformance(){
   const currentRegime=ENGINE_DATA?.regime||null;
 
   // ── Tag all trips with regime from calendar ──
-  // Also check sellDate+1: old entries may have been stored under next session date (after-4pm rollover bug)
+  // Direct hit, or sellDate+1 (backward compat: old entries stored under next session date after 4pm upload).
+  // Fallback: nearest calendar date — regime changes slowly, nearest known entry is a reasonable proxy.
   const _nd=d=>{const dt=new Date(d+'T12:00:00Z');dt.setUTCDate(dt.getUTCDate()+1);return dt.toISOString().slice(0,10);};
+  const calDates=Object.keys(regCal).sort();
+  function nearestRegime(date){
+    if(regCal[date]) return regCal[date];
+    const next=_nd(date); if(regCal[next]) return regCal[next];
+    if(!calDates.length) return '?';
+    // Binary search for closest calendar date
+    let lo=0,hi=calDates.length-1,best=0;
+    while(lo<=hi){const mid=(lo+hi)>>1;if(calDates[mid]<=date){best=mid;lo=mid+1;}else hi=mid-1;}
+    // Compare best (≤date) and best+1 (>date), pick closer
+    const a=calDates[best],b=calDates[best+1];
+    const da=Math.abs(new Date(date)-new Date(a));
+    const db=b?Math.abs(new Date(date)-new Date(b)):Infinity;
+    return regCal[da<=db?a:b];
+  }
   const allTripsRaw=tb.tripsData||[];
-  const allTrips=allTripsRaw.map(r=>({...r, regime: regCal[r.sellDate]||regCal[_nd(r.sellDate)]||'?'}));
+  const allTrips=allTripsRaw.map(r=>({...r,regime:nearestRegime(r.sellDate)}));
 
   // ── Regime filter ──
   const filteredByRegime=PERF_REGIME_FILTER==='all'?allTrips:allTrips.filter(r=>r.regime===PERF_REGIME_FILTER);
@@ -1720,8 +1735,7 @@ function renderPerformance(){
     const active=PERF_REGIME_FILTER===r;
     const label=r==='all'?'All':r==='bull'?'🐂 Bull':r==='bear'?'🐻 Bear':'➡ Neutral';
     const cnt=r==='all'?allTrips.length:allTrips.filter(t=>t.regime===r).length;
-    const unknownCnt=r==='all'?allTrips.filter(t=>t.regime==='?').length:0;
-    const cntLabel=r==='all'?` (${cnt}${unknownCnt?', '+unknownCnt+' untagged':''})`:` (${cnt})`;
+    const cntLabel=` (${cnt})`;
     const col=r==='bull'?'var(--green)':r==='bear'?'var(--red)':r==='neutral'?'var(--orange)':'var(--t2)';
     const bg=active?(r==='bull'?'rgba(34,197,94,.15)':r==='bear'?'rgba(239,68,68,.15)':r==='neutral'?'rgba(251,146,60,.15)':'rgba(148,163,184,.15)'):'transparent';
     const isCurrent=r!=='all'&&r===currentRegime;
