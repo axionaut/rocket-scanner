@@ -1187,9 +1187,11 @@ function runEngine(raw, sessionTag){
       regime:ENGINE_DATA.regime,marketBreadth:ENGINE_DATA.marketBreadth,regimeSessions:ENGINE_DATA.regimeSessions,useRegimeCorr:ENGINE_DATA.useRegimeCorr,sectorCol:ENGINE_DATA.sectorCol,industryCol:ENGINE_DATA.industryCol,
       yesterdayRockets:yesterdayRockets,goodFromYesterday:goodFromYesterday,badFromYesterday:badFromYesterday,qualityTargetN:qualityN,holdFactor:holdFactor,totalParsed:totalParsed};
     localStorage.setItem(METH_STORE,JSON.stringify(methSave));
-    // Update regime calendar: date → regime
+    // Update regime calendar: date → regime (use actual calendar date, not session date which rolls +1 after 4pm)
     const regCal=JSON.parse(localStorage.getItem(REGIME_CAL_STORE)||'{}');
-    regCal[getSessionDate()]=regime;
+    const {dateMs:_rdMs}=istNow();const _rdD=new Date(_rdMs);
+    const _rdStr=`${_rdD.getUTCFullYear()}-${String(_rdD.getUTCMonth()+1).padStart(2,'0')}-${String(_rdD.getUTCDate()).padStart(2,'0')}`;
+    regCal[_rdStr]=regime;
     localStorage.setItem(REGIME_CAL_STORE,JSON.stringify(regCal));
   }catch(e){console.warn('Could not save methodology data',e);}
   return results;
@@ -1515,9 +1517,11 @@ function renderPerformance(){
   const regCal=JSON.parse(localStorage.getItem(REGIME_CAL_STORE)||'{}');
   const currentRegime=ENGINE_DATA?.regime||null;
 
-  // ── Tag all trips with regime from calendar (by buyDate) ──
+  // ── Tag all trips with regime from calendar ──
+  // Also check sellDate+1: old entries may have been stored under next session date (after-4pm rollover bug)
+  const _nd=d=>{const dt=new Date(d+'T12:00:00Z');dt.setUTCDate(dt.getUTCDate()+1);return dt.toISOString().slice(0,10);};
   const allTripsRaw=tb.tripsData||[];
-  const allTrips=allTripsRaw.map(r=>({...r, regime: regCal[r.sellDate]||regCal[r.buyDate]||'?'}));
+  const allTrips=allTripsRaw.map(r=>({...r, regime: regCal[r.sellDate]||regCal[_nd(r.sellDate)]||'?'}));
 
   // ── Regime filter ──
   const filteredByRegime=PERF_REGIME_FILTER==='all'?allTrips:allTrips.filter(r=>r.regime===PERF_REGIME_FILTER);
