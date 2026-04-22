@@ -1547,11 +1547,12 @@ function renderPerformance(){
   // Direct hit, or sellDate+1 (backward compat: old entries stored under next session date after 4pm upload).
   // Nearest calendar date fallback — regime changes slowly.
   // Ultimate fallback: last known regime from METH_STORE (covers empty-calendar case, e.g. after brain reset).
-  const _nd=d=>{const dt=new Date(d+'T12:00:00Z');dt.setUTCDate(dt.getUTCDate()+1);return dt.toISOString().slice(0,10);};
+  const _nd=d=>{if(!d||typeof d!=='string')return'';const dt=new Date(d+'T12:00:00Z');if(isNaN(dt.getTime()))return'';dt.setUTCDate(dt.getUTCDate()+1);return dt.toISOString().slice(0,10);};
   const calDates=Object.keys(regCal).sort();
-  function nearestRegime(date){
+  const nearestRegime=date=>{
+    if(!date)return fallbackRegime||'?';
     if(regCal[date]) return regCal[date];
-    const next=_nd(date); if(regCal[next]) return regCal[next];
+    const next=_nd(date); if(next&&regCal[next]) return regCal[next];
     if(!calDates.length) return fallbackRegime||'?';
     let lo=0,hi=calDates.length-1,best=0;
     while(lo<=hi){const mid=(lo+hi)>>1;if(calDates[mid]<=date){best=mid;lo=mid+1;}else hi=mid-1;}
@@ -1559,7 +1560,7 @@ function renderPerformance(){
     const da=Math.abs(new Date(date)-new Date(a));
     const db=b?Math.abs(new Date(date)-new Date(b)):Infinity;
     return regCal[da<=db?a:b]||fallbackRegime||'?';
-  }
+  };
   const allTripsRaw=tb.tripsData||[];
   const allTrips=allTripsRaw.map(r=>({...r,regime:nearestRegime(r.sellDate)}));
 
@@ -1604,6 +1605,14 @@ function renderPerformance(){
       <div class="kpi-val" style="color:${k.color}">${k.value}</div>
       <div class="kpi-sub">${k.sub}</div>
     </div>`).join('')+'</div>';
+
+  // ── Regime returns — full history, all trips ──
+  const regBreakdown=['bull','bear','neutral'].map(reg=>{
+    const rTrips=allTrips.filter(t=>t.regime===reg);
+    if(!rTrips.length) return null;
+    const rp=computePerfStats(rTrips);
+    return {reg,count:rTrips.length,winRate:rp.winRate,avgPct:+(rTrips.reduce((s,t)=>s+(t.netPnlPct||0),0)/rTrips.length).toFixed(2),netPnl:rp.totalNetPnlRs,expectancy:rp.expectancy};
+  }).filter(Boolean);
 
   // ── Monthly table — always full history ──
   const monthCols=[
@@ -1739,7 +1748,7 @@ function renderPerformance(){
     const cntLabel=` (${cnt})`;
     const col=r==='bull'?'var(--green)':r==='bear'?'var(--red)':r==='neutral'?'var(--orange)':'var(--t2)';
     const bg=active?(r==='bull'?'rgba(34,197,94,.15)':r==='bear'?'rgba(239,68,68,.15)':r==='neutral'?'rgba(251,146,60,.15)':'rgba(148,163,184,.15)'):'transparent';
-    const isCurrent=r!=='all'&&r===currentRegime;
+    const isCurrent=r!=='all'&&r===CURRENT_REGIME;
     const dot=isCurrent?`<span style="display:inline-block;width:5px;height:5px;border-radius:50%;background:${col};margin-left:4px;vertical-align:middle" title="Current session regime"></span>`:'';
     return `<button onclick="PERF_REGIME_FILTER='${r}';renderPerformance()" style="padding:5px 14px;border-radius:20px;border:1px solid ${active?col:'var(--border)'};background:${bg};color:${active?col:'var(--t3)'};font-size:12px;font-weight:${active?700:500};cursor:pointer;white-space:nowrap">${label}${dot}<span style="font-size:10px;opacity:.7">${cntLabel}</span></button>`;
   }).join('');
@@ -1769,6 +1778,7 @@ function renderPerformance(){
       ${regimePillsHtml}
       <div style="font-size:10px;color:var(--t3);margin-bottom:12px">${periodLabel} · ${p.roundTrips} lots</div>
       ${kpiHtml}
+      ${regBreakdown.length?perfCard('Regime Returns',`<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:1px;background:var(--border)">${regBreakdown.map(rb=>{const col=rb.reg==='bull'?'var(--green)':rb.reg==='bear'?'var(--red)':'var(--orange)';const icon=rb.reg==='bull'?'🐂':rb.reg==='bear'?'🐻':'➡';return`<div style="background:var(--bg-card);padding:14px 16px"><div style="font-size:11px;font-weight:700;color:${col};text-transform:uppercase;letter-spacing:.06em;margin-bottom:8px">${icon} ${rb.reg.charAt(0).toUpperCase()+rb.reg.slice(1)} <span style="font-weight:400;color:var(--t3)">(${rb.count} lots)</span></div><div style="display:flex;flex-direction:column;gap:4px"><div style="display:flex;justify-content:space-between;font-size:12px"><span style="color:var(--t3)">Win Rate</span><span style="color:${rb.winRate>=55?'var(--green)':rb.winRate>=45?'var(--amber)':'var(--red)'};font-weight:700">${rb.winRate}%</span></div><div style="display:flex;justify-content:space-between;font-size:12px"><span style="color:var(--t3)">Avg P&L%</span><span style="color:${rb.avgPct>=0?'var(--green)':'var(--red)'};font-weight:700">${rb.avgPct>=0?'+':''}${rb.avgPct}%</span></div><div style="display:flex;justify-content:space-between;font-size:12px"><span style="color:var(--t3)">Expectancy</span><span style="color:${rb.expectancy>=0?'var(--green)':'var(--red)'};font-weight:700">${rb.expectancy>=0?'+':'-'}₹${Math.abs(rb.expectancy).toLocaleString('en-IN')}</span></div><div style="display:flex;justify-content:space-between;font-size:12px"><span style="color:var(--t3)">Net P&L</span><span style="color:${rb.netPnl>=0?'var(--green)':'var(--red)'};font-weight:700">${rb.netPnl>=0?'+':'-'}₹${Math.abs(rb.netPnl).toLocaleString('en-IN')}</span></div></div></div>`}).join('')}</div>`):''}
       ${monthRows.length?perfCard('Monthly Breakdown',monthTbl.getHtml()):''}
       ${p.symBreakdown.length?perfCard('Stocks',symTbl.getHtml(),'360px'):''}
       ${p.hourBreakdown.length?perfCard('Buy Hour',hourTbl.getHtml(),'280px'):''}
