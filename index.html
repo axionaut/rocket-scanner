@@ -1,4 +1,4 @@
-﻿<!DOCTYPE html>
+<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="UTF-8">
@@ -1768,36 +1768,23 @@ function renderPerformance(){
     ${regimePills}
   </div>`;
 
-  const perfCard=(title,content,maxH,id)=>`
-    <div id="${id||''}" style="background:var(--bg-card);border:1px solid var(--border);border-radius:10px;margin-top:12px;overflow:hidden">
+  const perfCard=(title,content,maxH)=>`
+    <div style="background:var(--bg-card);border:1px solid var(--border);border-radius:10px;margin-top:12px;overflow:hidden">
       <div style="padding:10px 16px;font-size:10px;font-weight:700;color:var(--t2);text-transform:uppercase;letter-spacing:.1em;border-bottom:1px solid var(--border)">${title}</div>
       <div style="overflow:auto${maxH?';max-height:'+maxH:''}">${content}</div>
     </div>`;
 
-  const navLink=(id,label)=>`<a href="#${id}" onclick="event.preventDefault();scrollToSection('${id}')" style="padding:4px 12px;border-radius:6px;background:var(--bg-card);border:1px solid var(--border);color:var(--t2);font-size:11px;font-weight:600;text-decoration:none;cursor:pointer;white-space:nowrap">${label}</a>`;
-  const perfNav=`<nav style="position:sticky;top:var(--hdr-h,72px);z-index:50;background:var(--bg);padding:8px 0 10px;margin-bottom:8px;display:flex;gap:6px;flex-wrap:wrap;border-bottom:1px solid var(--border);box-shadow:0 2px 8px rgba(0,0,0,0.3);overflow-x:auto;-webkit-overflow-scrolling:touch">
-    ${navLink('perf-kpi','📊 KPIs')}
-    ${regBreakdown.length?navLink('perf-regime-ret','🐂 Regime Returns'):''}
-    ${monthRows.length?navLink('perf-monthly','📅 Monthly'):''}
-    ${p.symBreakdown.length?navLink('perf-stocks','📈 Stocks'):''}
-    ${p.hourBreakdown.length?navLink('perf-buyhour','🕘 Buy Hour'):''}
-    ${p.sellHourBreakdown?.length?navLink('perf-sellhour','🕔 Sell Hour'):''}
-  </nav>`;
-
   el.innerHTML=`
     <div style="padding:12px 16px">
       ${todayHtml}
-      ${perfNav}
       ${regimePillsHtml}
-      <div id="perf-kpi">
-        <div style="font-size:10px;color:var(--t3);margin-bottom:12px">${periodLabel} · ${p.roundTrips} lots</div>
-        ${kpiHtml}
-      </div>
-      ${regBreakdown.length?perfCard('Regime Returns',`<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:1px;background:var(--border)">${regBreakdown.map(rb=>{const col=rb.reg==='bull'?'var(--green)':rb.reg==='bear'?'var(--red)':'var(--orange)';const icon=rb.reg==='bull'?'🐂':rb.reg==='bear'?'🐻':'➡';return`<div style="background:var(--bg-card);padding:14px 16px"><div style="font-size:11px;font-weight:700;color:${col};text-transform:uppercase;letter-spacing:.06em;margin-bottom:8px">${icon} ${rb.reg.charAt(0).toUpperCase()+rb.reg.slice(1)} <span style="font-weight:400;color:var(--t3)">(${rb.count} lots)</span></div><div style="display:flex;flex-direction:column;gap:4px"><div style="display:flex;justify-content:space-between;font-size:12px"><span style="color:var(--t3)">Win Rate</span><span style="color:${rb.winRate>=55?'var(--green)':rb.winRate>=45?'var(--amber)':'var(--red)'};font-weight:700">${rb.winRate}%</span></div><div style="display:flex;justify-content:space-between;font-size:12px"><span style="color:var(--t3)">Avg P&L%</span><span style="color:${rb.avgPct>=0?'var(--green)':'var(--red)'};font-weight:700">${rb.avgPct>=0?'+':''}${rb.avgPct}%</span></div><div style="display:flex;justify-content:space-between;font-size:12px"><span style="color:var(--t3)">Expectancy</span><span style="color:${rb.expectancy>=0?'var(--green)':'var(--red)'};font-weight:700">${rb.expectancy>=0?'+':'-'}₹${Math.abs(rb.expectancy).toLocaleString('en-IN')}</span></div><div style="display:flex;justify-content:space-between;font-size:12px"><span style="color:var(--t3)">Net P&L</span><span style="color:${rb.netPnl>=0?'var(--green)':'var(--red)'};font-weight:700">${rb.netPnl>=0?'+':'-'}₹${Math.abs(rb.netPnl).toLocaleString('en-IN')}</span></div></div></div>`}).join('')}</div>`,'','perf-regime-ret'):''}
-      ${monthRows.length?perfCard('Monthly Breakdown',monthTbl.getHtml(),'','perf-monthly'):''}
-      ${p.symBreakdown.length?perfCard('Stocks',symTbl.getHtml(),'360px','perf-stocks'):''}
-      ${p.hourBreakdown.length?perfCard('Buy Hour',hourTbl.getHtml(),'280px','perf-buyhour'):''}
-      ${p.sellHourBreakdown?.length?perfCard('Sell Hour',sellHourTbl.getHtml(),'280px','perf-sellhour'):''}
+      <div style="font-size:10px;color:var(--t3);margin-bottom:12px">${periodLabel} · ${p.roundTrips} lots</div>
+      ${kpiHtml}
+      ${regBreakdown.length?perfCard('Regime Returns',`<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:1px;background:var(--border)">${regBreakdown.map(rb=>{const col=rb.reg==='bull'?'var(--green)':rb.reg==='bear'?'var(--red)':'var(--orange)';const icon=rb.reg==='bull'?'🐂':rb.reg==='bear'?'🐻':'➡';return`<div style="background:var(--bg-card);padding:14px 16px"><div style="font-size:11px;font-weight:700;color:${col};text-transform:uppercase;letter-spacing:.06em;margin-bottom:8px">${icon} ${rb.reg.charAt(0).toUpperCase()+rb.reg.slice(1)} <span style="font-weight:400;color:var(--t3)">(${rb.count} lots)</span></div><div style="display:flex;flex-direction:column;gap:4px"><div style="display:flex;justify-content:space-between;font-size:12px"><span style="color:var(--t3)">Win Rate</span><span style="color:${rb.winRate>=55?'var(--green)':rb.winRate>=45?'var(--amber)':'var(--red)'};font-weight:700">${rb.winRate}%</span></div><div style="display:flex;justify-content:space-between;font-size:12px"><span style="color:var(--t3)">Avg P&L%</span><span style="color:${rb.avgPct>=0?'var(--green)':'var(--red)'};font-weight:700">${rb.avgPct>=0?'+':''}${rb.avgPct}%</span></div><div style="display:flex;justify-content:space-between;font-size:12px"><span style="color:var(--t3)">Expectancy</span><span style="color:${rb.expectancy>=0?'var(--green)':'var(--red)'};font-weight:700">${rb.expectancy>=0?'+':'-'}₹${Math.abs(rb.expectancy).toLocaleString('en-IN')}</span></div><div style="display:flex;justify-content:space-between;font-size:12px"><span style="color:var(--t3)">Net P&L</span><span style="color:${rb.netPnl>=0?'var(--green)':'var(--red)'};font-weight:700">${rb.netPnl>=0?'+':'-'}₹${Math.abs(rb.netPnl).toLocaleString('en-IN')}</span></div></div></div>`}).join('')}</div>`):''}
+      ${monthRows.length?perfCard('Monthly Breakdown',monthTbl.getHtml()):''}
+      ${p.symBreakdown.length?perfCard('Stocks',symTbl.getHtml(),'360px'):''}
+      ${p.hourBreakdown.length?perfCard('Buy Hour',hourTbl.getHtml(),'280px'):''}
+      ${p.sellHourBreakdown?.length?perfCard('Sell Hour',sellHourTbl.getHtml(),'280px'):''}
     </div>`;
 
   setTimeout(()=>{monthTbl.render();symTbl.render();hourTbl.render();sellHourTbl.render();},0);
@@ -3526,7 +3513,6 @@ function downloadBasket(orders, filename){
 function switchTab(n){
   document.querySelectorAll('#mainTabs .tab').forEach((t,i)=>t.classList.toggle('act',i===n));
   document.querySelectorAll('.tp').forEach((t,i)=>t.classList.toggle('act',i===n));
-  if(n===1) renderMethodology();
   if(n===2) renderPerformance();
   updateTabCounts();
 }
@@ -3827,7 +3813,6 @@ function saveFilterState(){
     sortCol:SCOL,
     sortDir:SDIR,
     perfPeriod:PERF_PERIOD_FILTER,
-    perfRegime:PERF_REGIME_FILTER,
   };
   localStorage.setItem(SCANNER_STORE, JSON.stringify(state));
 }
@@ -3852,7 +3837,6 @@ function loadFilterState(){
     if(state.sortCol)SCOL=state.sortCol;
     if(state.sortDir)SDIR=state.sortDir;
     if(state.perfPeriod)PERF_PERIOD_FILTER=state.perfPeriod;
-    if(state.perfRegime)PERF_REGIME_FILTER=state.perfRegime;
   }catch(e){console.warn('Could not load filter state',e);}
 }
 
@@ -3961,13 +3945,17 @@ function loadFilterState(){
     if(ALL.length) renderStats();
   }catch(e){ console.error('INIT step3 renderStats failed:',e); }
 
-  // Step 3b: renderPerformance deferred to after loadFilterState (step 5) so filters apply correctly
+  // Step 3b: Render performance tab (tradebook-only, no ALL needed)
+  try{ renderPerformance(); }catch(e){ console.error('INIT step3b renderPerformance failed:',e); }
 
-  // Step 5: Load filter state then render tabs that depend on it
+  // Step 4: Render methodology
+  try{
+    if(ALL.length && ENGINE_DATA && ENGINE_DATA.features) renderMethodology();
+  }catch(e){ console.error('INIT step4 renderMethodology failed:',e); }
+
+  // Step 5: Load filter state
   try{
     loadFilterState();
-    renderPerformance();
-    if(ALL.length && ENGINE_DATA && ENGINE_DATA.features) renderMethodology();
   }catch(e){ console.error('INIT step5 loadFilterState failed:',e); }
 
   // Step 5b: Set auto volume if not manually overridden
