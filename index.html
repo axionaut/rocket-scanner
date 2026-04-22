@@ -374,6 +374,7 @@ table.main tbody td{padding:9px 11px;font-family:'DM Mono',monospace;font-size:1
 <script>
 let ALL=[],FILT=[],PG=1,PGSZ=9999,SCOL='rocketScore',SDIR=-1;
 let PERF_REGIME_FILTER='all'; // 'all' | 'bull' | 'bear' | 'neutral'
+let PERF_PERIOD_FILTER='all'; // 'all' | '1m' | '3m' | '6m' | '1y'
 let ENGINE_DATA={};
 let REMOVED={uc:0,surv:0,liq:0,fscore:0,atr:0,deliv:0};
 let SUPPRESSED_HELD=0; // count of stocks hidden because already held in POSITIONS
@@ -1498,14 +1499,19 @@ function renderPerformance(){
   // ── Regime filter ──
   const filteredByRegime=PERF_REGIME_FILTER==='all'?allTrips:allTrips.filter(r=>r.regime===PERF_REGIME_FILTER);
 
-  // ── Last 30 trading days slice (within regime filter) ──
-  const allSellDates=[...new Set(filteredByRegime.map(r=>r.sellDate))].sort();
-  const last30Dates=new Set(allSellDates.slice(-30));
-  const recentTrips=filteredByRegime.filter(r=>last30Dates.has(r.sellDate));
-  const p=recentTrips.length?computePerfStats(recentTrips):computePerfStats(filteredByRegime);
-  const d30from=[...last30Dates][0], d30to=[...last30Dates].at(-1);
+  // ── Period filter ──
+  const _now=new Date(getSessionDate());
+  const _cutoff=PERF_PERIOD_FILTER==='all'?null
+    :PERF_PERIOD_FILTER==='1m'?new Date(_now.getFullYear(),_now.getMonth()-1,_now.getDate()).toISOString().slice(0,10)
+    :PERF_PERIOD_FILTER==='3m'?new Date(_now.getFullYear(),_now.getMonth()-3,_now.getDate()).toISOString().slice(0,10)
+    :PERF_PERIOD_FILTER==='6m'?new Date(_now.getFullYear(),_now.getMonth()-6,_now.getDate()).toISOString().slice(0,10)
+    :new Date(_now.getFullYear()-1,_now.getMonth(),_now.getDate()).toISOString().slice(0,10);
+  const recentTrips=_cutoff?filteredByRegime.filter(r=>r.sellDate>=_cutoff):filteredByRegime;
+  const p=computePerfStats(recentTrips.length?recentTrips:filteredByRegime);
+  const allSellDates=[...new Set(recentTrips.map(r=>r.sellDate))].sort();
+  const dfrom=allSellDates[0], dto=allSellDates.at(-1);
   const regimeLabel=PERF_REGIME_FILTER==='all'?'All regimes':PERF_REGIME_FILTER==='bull'?'🐂 Bull':PERF_REGIME_FILTER==='bear'?'🐻 Bear':'➡ Neutral';
-  const periodLabel=recentTrips.length?`Last 30 trading days (${d30from} → ${d30to}) · ${regimeLabel}`:`All time · ${regimeLabel}`;
+  const periodLabel=(dfrom&&dto)?`${dfrom} → ${dto} · ${regimeLabel}`:`All time · ${regimeLabel}`;
 
   // ── KPI cards — based on last 30 trading days ──
   const _kelly=p.kellyPct;
@@ -1659,7 +1665,16 @@ function renderPerformance(){
     const dot=isCurrent?`<span style="display:inline-block;width:5px;height:5px;border-radius:50%;background:${col};margin-left:4px;vertical-align:middle" title="Current session regime"></span>`:'';
     return `<button onclick="PERF_REGIME_FILTER='${r}';renderPerformance()" style="padding:5px 14px;border-radius:20px;border:1px solid ${active?col:'var(--border)'};background:${bg};color:${active?col:'var(--t3)'};font-size:12px;font-weight:${active?700:500};cursor:pointer;white-space:nowrap">${label}${dot}<span style="font-size:10px;opacity:.7">${cntLabel}</span></button>`;
   }).join('');
-  const regimePillsHtml=`<div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:16px">
+  const periodPills=['all','1m','3m','6m','1y'].map(p=>{
+    const active=PERF_PERIOD_FILTER===p;
+    const label=p==='all'?'All':p==='1m'?'1M':p==='3m'?'3M':p==='6m'?'6M':'1Y';
+    return `<button onclick="PERF_PERIOD_FILTER='${p}';renderPerformance()" style="padding:5px 14px;border-radius:20px;border:1px solid ${active?'var(--amber)':'var(--border)'};background:${active?'rgba(251,191,36,.15)':'transparent'};color:${active?'var(--amber)':'var(--t3)'};font-size:12px;font-weight:${active?700:500};cursor:pointer">${label}</button>`;
+  }).join('');
+  const regimePillsHtml=`<div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:8px">
+    <span style="font-size:11px;color:var(--t3);font-weight:600;text-transform:uppercase;letter-spacing:.06em">Period</span>
+    ${periodPills}
+  </div>
+  <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:16px">
     <span style="font-size:11px;color:var(--t3);font-weight:600;text-transform:uppercase;letter-spacing:.06em">Regime</span>
     ${regimePills}
   </div>`;
@@ -3691,6 +3706,7 @@ function saveFilterState(){
     fMinScore:document.getElementById('fMinScore')?.value||'70',
     sortCol:SCOL,
     sortDir:SDIR,
+    perfPeriod:PERF_PERIOD_FILTER,
   };
   localStorage.setItem(SCANNER_STORE, JSON.stringify(state));
 }
@@ -3713,6 +3729,7 @@ function loadFilterState(){
     if(state.fMinScore){const el=document.getElementById('fMinScore');if(el)el.value=state.fMinScore;}
     if(state.sortCol)SCOL=state.sortCol;
     if(state.sortDir)SDIR=state.sortDir;
+    if(state.perfPeriod)PERF_PERIOD_FILTER=state.perfPeriod;
   }catch(e){console.warn('Could not load filter state',e);}
 }
 
