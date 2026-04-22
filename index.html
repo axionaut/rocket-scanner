@@ -1539,25 +1539,26 @@ function renderPerformance(){
 
   // ── Regime calendar: date → regime ──
   const regCal=JSON.parse(localStorage.getItem(REGIME_CAL_STORE)||'{}');
-  const currentRegime=ENGINE_DATA?.regime||null;
+  // Fallback regime: ENGINE_DATA (current session) → METH_STORE (last persisted) → null
+  const _savedMeth=JSON.parse(localStorage.getItem(METH_STORE)||'{}');
+  const fallbackRegime=ENGINE_DATA?.regime||_savedMeth.regime||null;
 
   // ── Tag all trips with regime from calendar ──
   // Direct hit, or sellDate+1 (backward compat: old entries stored under next session date after 4pm upload).
-  // Fallback: nearest calendar date — regime changes slowly, nearest known entry is a reasonable proxy.
+  // Nearest calendar date fallback — regime changes slowly.
+  // Ultimate fallback: last known regime from METH_STORE (covers empty-calendar case, e.g. after brain reset).
   const _nd=d=>{const dt=new Date(d+'T12:00:00Z');dt.setUTCDate(dt.getUTCDate()+1);return dt.toISOString().slice(0,10);};
   const calDates=Object.keys(regCal).sort();
   function nearestRegime(date){
     if(regCal[date]) return regCal[date];
     const next=_nd(date); if(regCal[next]) return regCal[next];
-    if(!calDates.length) return '?';
-    // Binary search for closest calendar date
+    if(!calDates.length) return fallbackRegime||'?';
     let lo=0,hi=calDates.length-1,best=0;
     while(lo<=hi){const mid=(lo+hi)>>1;if(calDates[mid]<=date){best=mid;lo=mid+1;}else hi=mid-1;}
-    // Compare best (≤date) and best+1 (>date), pick closer
     const a=calDates[best],b=calDates[best+1];
     const da=Math.abs(new Date(date)-new Date(a));
     const db=b?Math.abs(new Date(date)-new Date(b)):Infinity;
-    return regCal[da<=db?a:b];
+    return regCal[da<=db?a:b]||fallbackRegime||'?';
   }
   const allTripsRaw=tb.tripsData||[];
   const allTrips=allTripsRaw.map(r=>({...r,regime:nearestRegime(r.sellDate)}));
@@ -2427,7 +2428,8 @@ function applySort(){
       va=a[col];vb=b[col];
     }
     if(va===null||va===undefined)return 1;if(vb===null||vb===undefined)return-1;
-    if(typeof va==='string')return va.localeCompare(vb)*SDIR;return(va-vb)*SDIR;
+    if(typeof va==='string')return va.localeCompare(vb)*SDIR;
+    const diff=(va-vb)*SDIR;return diff!==0?diff:a.symbol.localeCompare(b.symbol);
   });
 }
 function toggleFilters(){
@@ -3912,10 +3914,11 @@ function loadFilterState(){
       // Orders are always today-only — check date on first entry
       if(Array.isArray(parsed)&&parsed.length){
         const firstDate=(parsed[0].time||'').substring(0,10);
-        // Accept orders only from today's session date
-        const sessionDate=getSessionDate();
-        if(firstDate===sessionDate) ORDERS_TODAY=parsed;
-        else console.log('INIT: cleared stale orders from',firstDate,'(session is',sessionDate,')');
+        // Accept orders from today's actual calendar date (not session date, which rolls to tomorrow after 4pm)
+        const {dateMs:_odMs}=istNow();const _odD=new Date(_odMs);
+        const actualToday=`${_odD.getUTCFullYear()}-${String(_odD.getUTCMonth()+1).padStart(2,'0')}-${String(_odD.getUTCDate()).padStart(2,'0')}`;
+        if(firstDate===actualToday) ORDERS_TODAY=parsed;
+        else console.log('INIT: cleared stale orders from',firstDate,'(today is',actualToday,')');
       }
     }
   }catch(e){ console.error('INIT step2g orders restore failed:',e); }
