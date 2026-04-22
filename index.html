@@ -3360,7 +3360,13 @@ function showGttPopup(){
     const allStock=ALL.find(s=>s.symbol===r.symbol);
     const score=allStock?.rocketScore??null;
     const scoreColor=score==null?'var(--t3)':score>=70?'var(--green)':score>=50?'var(--amber)':'var(--t2)';
-    const edgeSignal=score==null?{label:'—',color:'var(--t3)'}:score>=70?{label:'↑ Top Up',color:'var(--green)'}:score>=50?{label:'→ Hold',color:'var(--amber)'}:{label:'↓ Exit',color:'var(--red)'};
+    const edgeSignal=(()=>{
+      if(pnlPct==null||slPct==null||tgtPct==null)return{label:'—',color:'var(--t3)'};
+      if(pnlPct<=-slPct)return{label:'↓ Exit',color:'var(--red)'};
+      if(pnlPct>=tgtPct)return{label:'🎯 Book',color:'var(--green)'};
+      if(score!=null)return score>=70?{label:'↑ Top Up',color:'var(--green)'}:score>=50?{label:'→ Hold',color:'var(--amber)'}:{label:'↓ Exit',color:'var(--red)'};
+      return{label:'→ Hold',color:pnlPct>=0?'var(--amber)':'var(--t2)'};
+    })();
     const pnlColor=pnlPct==null?'var(--t2)':pnlPct>=0?'var(--green)':'var(--red)';
     const daysColor=daysHeld==null?'var(--t3)':daysHeld>10?'var(--red)':daysHeld>5?'var(--amber)':'var(--t2)';
     tbodyHtml+=`<tr>
