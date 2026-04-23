@@ -1539,7 +1539,7 @@ function renderStats(){
 
   const pills=[];
   pills.push(`<span class="info-pill pill-red">⛔ ${REMOVED.uc} upper circuit removed</span>`);
-  if(REMOVED.surv>0)pills.push(`<span class="info-pill pill-orange">⚠ ${REMOVED.surv} surveillance (🔴 critical + 🟠 high risk) removed</span>`);
+  if(REMOVED.surv>0){const _sre=Object.entries(REMOVED.survRules||{}).sort((a,b)=>b[1]-a[1]).slice(0,5);const _srm=Object.fromEntries(getSurvRules().map(r=>[r.key,r.label]));const _srtip=_sre.map(([k,v])=>`${_srm[k]||k}: ${v}`).join(' · ');pills.push(`<span class="info-pill pill-orange" title="${escHtml(_srtip)}">⚠ ${REMOVED.surv} surveillance removed</span>`);}
   if(REMOVED.liq>0)pills.push(`<span class="info-pill pill-blue">🚫 ${REMOVED.liq} low liquidity removed</span>`);
   if(REMOVED.fscore>0)pills.push(`<span class="info-pill pill-gray">🚫 ${REMOVED.fscore} zero/null F-Score removed</span>`);
   if(REMOVED.deliv>0)pills.push(`<span class="info-pill pill-cyan">🚫 ${REMOVED.deliv} low/no delivery removed</span>`);
@@ -1842,27 +1842,35 @@ function renderPerformance(){
 
   // ── Hour table — last 30 days ──
   // Edge = (Win% × Avg%) × min(1, lots/5)
-  const hourRows=(p.hourBreakdown||[]).map(r=>({...r,edge:+((r.winRate*r.avgPct)*Math.min(1,r.trades/5)).toFixed(2)}));
-  const hourCols=[
-    {key:'hour',label:'Buy Time',align:'left',fmt:v=>{const hh=Math.floor(v/60),mm=v%60,h12=hh===0?12:hh>12?hh-12:hh,mer=hh<12?'AM':'PM';return h12+':'+(mm===0?'00':String(mm).padStart(2,'0'))+' '+mer;},clrFn:()=>'var(--t1)'},
-    {key:'trades',label:'Lots',align:'right',fmt:v=>v,clrFn:()=>'var(--t2)'},
-    {key:'winRate',label:'Win%',align:'right',fmt:v=>v+'%',clrFn:v=>v>=60?'var(--green)':v>=40?'var(--amber)':'var(--red)'},
-    {key:'avgPct',label:'Avg%',align:'right',fmt:fmtPct,clrFn:clr},
-    {key:'edge',label:'Edge',align:'right',bold:true,fmt:v=>v.toFixed(2),clrFn:v=>v>100?'var(--green)':v>0?'var(--amber)':'var(--red)'},
-  ];
-  const hourTbl=makeSortableTable('perf-hour',hourCols,hourRows,'edge',-1);
-
-  // ── Sell hour table ──
+  // ── Combined Trading Windows table (buy + sell merged by 30-min slot) ──
   const timeFmt=v=>{const hh=Math.floor(v/60),mm=v%60,h12=hh===0?12:hh>12?hh-12:hh,mer=hh<12?'AM':'PM';return h12+':'+(mm===0?'00':String(mm).padStart(2,'0'))+' '+mer;};
-  const sellHourRows=(p.sellHourBreakdown||[]).map(r=>({...r,edge:+((r.winRate*r.avgPct)*Math.min(1,r.trades/5)).toFixed(2)}));
-  const sellHourCols=[
-    {key:'hour',label:'Sell Time',align:'left',fmt:timeFmt,clrFn:()=>'var(--t1)'},
-    {key:'trades',label:'Lots',align:'right',fmt:v=>v,clrFn:()=>'var(--t2)'},
-    {key:'winRate',label:'Win%',align:'right',fmt:v=>v+'%',clrFn:v=>v>=60?'var(--green)':v>=40?'var(--amber)':'var(--red)'},
-    {key:'avgPct',label:'Avg%',align:'right',fmt:fmtPct,clrFn:clr},
-    {key:'edge',label:'Edge',align:'right',bold:true,fmt:v=>v.toFixed(2),clrFn:v=>v>100?'var(--green)':v>0?'var(--amber)':'var(--red)'},
+  const _buyMap=Object.fromEntries((p.hourBreakdown||[]).map(r=>[r.hour,{...r,edge:+((r.winRate*r.avgPct)*Math.min(1,r.trades/5)).toFixed(2)}]));
+  const _sellMap=Object.fromEntries((p.sellHourBreakdown||[]).map(r=>[r.hour,{...r,edge:+((r.winRate*r.avgPct)*Math.min(1,r.trades/5)).toFixed(2)}]));
+  const _allHours=[...new Set([...Object.keys(_buyMap),...Object.keys(_sellMap)].map(Number))].sort((a,b)=>a-b);
+  const tradeWindowRows=_allHours.map(h=>{
+    const b=_buyMap[h], s=_sellMap[h];
+    const bEdge=b?b.edge:null, sEdge=s?s.edge:null;
+    let action='&mdash;', actionC='var(--t3)';
+    if(bEdge!=null&&sEdge!=null&&bEdge>2&&sEdge>2){action='Enter + Exit';actionC='var(--cyan)';}
+    else if(bEdge!=null&&bEdge>2&&(sEdge==null||sEdge<=0)){action='Enter';actionC='var(--green)';}
+    else if(sEdge!=null&&sEdge>2&&(bEdge==null||bEdge<=0)){action='Exit';actionC='var(--amber)';}
+    return {hour:h,bTrades:b?b.trades:null,bWin:b?b.winRate:null,bEdge,sTrades:s?s.trades:null,sWin:s?s.winRate:null,sEdge,action,actionC};
+  });
+  const NA='<span style="color:var(--t3)">&mdash;</span>';
+  const winClr=v=>v>=60?'var(--green)':v>=40?'var(--amber)':'var(--red)';
+  const edgeClr=v=>v>2?'var(--green)':v>0?'var(--amber)':'var(--red)';
+  const tradeWindowCols=[
+    {key:'hour',label:'Time',align:'left',fmt:timeFmt,clrFn:()=>'var(--t1)'},
+    {key:'bTrades',label:'Buy Lots',align:'right',fmt:v=>v??NA,clrFn:()=>'var(--t2)'},
+    {key:'bWin',label:'Buy Win%',align:'right',fmt:v=>v!=null?v+'%':NA,clrFn:v=>v!=null?winClr(v):'var(--t3)'},
+    {key:'bEdge',label:'Buy Edge',align:'right',bold:true,fmt:v=>v!=null?v.toFixed(2):NA,clrFn:v=>v!=null?edgeClr(v):'var(--t3)'},
+    {key:'sTrades',label:'Sell Lots',align:'right',fmt:v=>v??NA,clrFn:()=>'var(--t2)'},
+    {key:'sWin',label:'Sell Win%',align:'right',fmt:v=>v!=null?v+'%':NA,clrFn:v=>v!=null?winClr(v):'var(--t3)'},
+    {key:'sEdge',label:'Sell Edge',align:'right',bold:true,fmt:v=>v!=null?v.toFixed(2):NA,clrFn:v=>v!=null?edgeClr(v):'var(--t3)'},
+    {key:'action',label:'Signal',align:'left',fmt:(v,row)=>`<span style="color:${row.actionC};font-weight:700">${v}</span>`,clrFn:()=>''},
   ];
-  const sellHourTbl=makeSortableTable('tbl-sell-hour',sellHourCols,sellHourRows,'edge',-1);
+  const tradeWindowTbl=makeSortableTable('tbl-trade-windows',tradeWindowCols,tradeWindowRows,'hour',1);
+  const hasTradeWindows=tradeWindowRows.length>0;
 
   // ── Latest session — Orders.csv if available (today), else last tradebook date ──
   let todayHtml='';
@@ -1975,8 +1983,7 @@ function renderPerformance(){
     ${_navLink('perf-regime-ret','🐂 Regime Returns',regBreakdown.length>0)}
     ${_navLink('perf-monthly','📅 Monthly',monthRows.length>0)}
     ${_navLink('perf-stocks','📈 Stocks',p.symBreakdown.length>0)}
-    ${_navLink('perf-buy-hour','🕐 Buy Hour',p.hourBreakdown.length>0)}
-    ${_navLink('perf-sell-hour','🕑 Sell Hour',(p.sellHourBreakdown?.length||0)>0)}
+    ${_navLink('perf-trade-windows','🕐 Trading Windows',hasTradeWindows)}
   </nav>`;
 
   el.innerHTML=`
@@ -1990,11 +1997,10 @@ function renderPerformance(){
 
       ${monthRows.length?perfCard('Monthly Breakdown',monthTbl.getHtml(),'','perf-monthly'):''}
       ${p.symBreakdown.length?perfCard('Stocks',symTbl.getHtml(),'360px','perf-stocks'):''}
-      ${p.hourBreakdown.length?perfCard('Buy Hour',hourTbl.getHtml(),'280px','perf-buy-hour'):''}
-      ${p.sellHourBreakdown?.length?perfCard('Sell Hour',sellHourTbl.getHtml(),'280px','perf-sell-hour'):''}
+      ${hasTradeWindows?perfCard('Trading Windows <span style="font-size:10px;color:var(--t3);font-weight:400">Buy Edge &gt; 2 = Enter · Sell Edge &gt; 2 = Exit · hover Edge columns to sort</span>',tradeWindowTbl.getHtml(),'320px','perf-trade-windows'):''}
     </div>`;
 
-  setTimeout(()=>{monthTbl.render();symTbl.render();hourTbl.render();sellHourTbl.render();},0);
+  setTimeout(()=>{monthTbl.render();symTbl.render();tradeWindowTbl.render();},0);
 }
 
 function addSurvRule(){
@@ -2011,7 +2017,7 @@ function addSurvRule(){
   }
   if(input) input.value='';
   renderMethodology();
-  showToast(`<strong>Added hard filter</strong> â€” ${escHtml(column)}. It will be applied whenever that REG1 column is flagged.`,3500);
+  showToast(`<strong>Added hard filter</strong> &mdash; ${escHtml(column)}. It will be applied whenever that REG1 column is flagged.`,3500);
 }
 function removeSurvRule(key){
   SURV_CUSTOM_RULES=(SURV_CUSTOM_RULES||[]).filter(rule=>survRuleKey(rule.column||rule.label)!==key);
@@ -2039,11 +2045,11 @@ function buildHardFilterMethodologyHTML(E){
           : `<div style="font-size:10px;color:var(--amber);margin-top:2px">Needs fresh NSE data to activate</div>`)
       : '';
     const flaggedCell=row.kind==='surv'
-      ? (row.active?`<span style="color:${(row.flagged||0)>0?'var(--orange)':'var(--t3)'}">${(row.flagged||0).toLocaleString()}</span>`:'â€”')
-      : 'â€”';
+      ? (row.active?`<span style=”color:${(row.flagged||0)>0?'var(--orange)':'var(--t3)'}”>${(row.flagged||0).toLocaleString()}</span>`:'&mdash;')
+      : '&mdash;';
     const removedCell=row.active&&row.removed!=null
-      ? `<span style="color:${row.removed>0?'var(--red)':'var(--t3)'}">${row.removed.toLocaleString()}</span>`
-      : 'â€”';
+      ? `<span style=”color:${row.removed>0?'var(--red)':'var(--t3)'}”>${row.removed.toLocaleString()}</span>`
+      : '&mdash;';
     const removeBtn=row.manual
       ? `<button onclick="removeSurvRule('${row.ruleKey}')" style="padding:4px 8px;border-radius:6px;border:1px solid rgba(239,68,68,.3);background:rgba(239,68,68,.08);color:var(--red);font-size:10px;font-weight:700;cursor:pointer">Remove</button>`
       : `<span style="color:var(--t3);font-size:10px">${row.kind==='surv'?'Built-in':'Core'}</span>`;
@@ -2057,8 +2063,8 @@ function buildHardFilterMethodologyHTML(E){
   }).join('');
   const survSize=E.survSize??0;
   const survMeta=survSize>0
-    ? `<div style="font-size:11px;color:var(--t3);margin-top:8px">Loaded <strong style="color:var(--t1)">${survSize}</strong> surveillance-flagged symbols from the latest REG1 file. Surveillance rows show exact-column hits; removed counts are primary-rule removals, so they donâ€™t double-count.</div>`
-    : `<div style="margin-top:8px;padding:8px 10px;background:rgba(239,68,68,.08);border:1px solid rgba(239,68,68,.25);border-radius:8px;font-size:11px;color:var(--red)">NSE REG1 data is not active in the latest saved session, so surveillance rows are shown for configuration but wonâ€™t remove stocks until a matching REG1 file is loaded.</div>`;
+    ? `<div style="font-size:11px;color:var(--t3);margin-top:8px">Loaded <strong style="color:var(--t1)">${survSize}</strong> surveillance-flagged symbols from the latest REG1 file. Surveillance rows show exact-column hits; removed counts are primary-rule removals, so they don't double-count.</div>`
+    : `<div style="margin-top:8px;padding:8px 10px;background:rgba(239,68,68,.08);border:1px solid rgba(239,68,68,.25);border-radius:8px;font-size:11px;color:var(--red)">NSE REG1 data is not active in the latest saved session, so surveillance rows are shown for configuration but won't remove stocks until a matching REG1 file is loaded.</div>`;
   return `
     <h3 id="meth-filters" style="margin-top:28px">Hard Filters <span style="font-size:12px;color:var(--t3);font-weight:400">(${totalRemoved} removals in latest saved run)</span></h3>
     <p style="color:var(--t3);font-size:12px;margin-bottom:10px">Each surveillance row is now an exact REG1 feature instead of a bundled category. Manual rows are persisted in your brain and will always be treated as hard filters whenever that exact REG1 column is flagged.</p>
@@ -3664,8 +3670,9 @@ function exportBasket(){
 
   if(!orders.length){showToast('Capital too low to buy even 1 share of any selected stock.',4000,true);return;}
   downloadBasket(orders,'Basket_Buy');
-  const rejNote=rejectedCount>0?` · ${rejectedCount} skipped (below net floor)`:'';
-  showToast(`<strong>Exported ${orders.length} BUY orders</strong> as Basket_Buy JSON${rejNote}`);
+  const rejNote=rejectedCount>0?` · ${rejectedCount} skipped`:'';
+  showToast(`<strong>Exported ${orders.length} BUY orders</strong>${rejNote} &mdash; SL ${sl.toFixed(1)}% &middot; TGT ${tgt.toFixed(1)}% &mdash; Import in Zerodha &rarr; Basket Orders`,4000);
+  setTimeout(()=>showToast('After import: use <strong>📋 GTT Values</strong> to set Stop Loss &amp; Target as OCO orders in Zerodha Holdings',5000),3500);
 }
 
 function showGttPopup(){
@@ -3811,7 +3818,8 @@ function exportGttBasket(){
   }).filter(Boolean);
   if(!orders.length){showToast('No valid orders (check Capital setting).',3000,true);return;}
   downloadBasket(orders,'Basket_Buy');
-  showToast(`<strong>Exported ${Math.min(orders.length,20)} BUY orders</strong> as Basket_Buy JSON`);
+  showToast(`<strong>Exported ${Math.min(orders.length,20)} BUY orders</strong> &mdash; SL ${sl.toFixed(1)}% &middot; TGT ${tgt.toFixed(1)}% &mdash; Import in Zerodha &rarr; Basket Orders`,4000);
+  setTimeout(()=>showToast('After import: use <strong>📋 GTT Values</strong> to set Stop Loss &amp; Target as OCO orders in Zerodha Holdings',5000),3500);
 }
 
 // ── Basket export helper: Zerodha limits 20 orders per basket ──
