@@ -378,7 +378,7 @@ let SCORE_MAP={}; // {symbol → rocketScore} for ALL parsed stocks including fi
 let PERF_REGIME_FILTER='all'; // 'all' | 'bull' | 'bear' | 'neutral'
 let PERF_PERIOD_FILTER='all'; // 'all' | '1m' | '3m' | '6m' | '1y'
 let ENGINE_DATA={};
-let REMOVED={uc:0,surv:0,liq:0,fscore:0,atr:0,deliv:0};
+let REMOVED={uc:0,surv:0,survRules:{},liq:0,fscore:0,atr:0,deliv:0};
 let SUPPRESSED_HELD=0; // count of stocks hidden because already held in POSITIONS
 let SELECTED=new Set(); // symbols selected for basket — recomputed from FILT each applyFilters
 let NSE_LOADED=false;
@@ -396,6 +396,7 @@ const HOLD_STORE='rs_holdings';
 const TRADEBOOK_STORE='rs_tradebook';
 const ORDERS_STORE='rs_orders';
 const POSITIONS_STORE='rs_positions';
+const SURV_RULE_STORE='rs_surv_rules'; // persistent manual REG1 surveillance columns
 const MISSED_OPP_STORE='rs_missed_opp_v2'; // {date → [{sym, missed%}]} — v2: orders-based only
 const OPEN_BUY_DATE_STORE='rs_open_buy_dates'; // {sym → latest buy date}
 const REC_COUNT_STORE='rs_rec_count'; // {date → {sym → count}} — how many times seen today
@@ -438,6 +439,9 @@ let LAST_BUY_DATE_MAP={}; // {symbol → latest buy date string} — populated o
   }catch(e){console.warn('Key migration:',e);}
 })();
 let NSE_BHAV={},NSE_52W={},NSE_SURV={},NSE_BULK={},NSE_BLOCK={};
+let SURV_CUSTOM_RULES=[]; // [{key,column,label,manual:true}] persistent manual REG1 columns
+let SURV_HEADERS=[]; // exact REG1 headers loaded this session
+let SURV_RULE_HITS={}; // {ruleKey -> flagged symbol count} before hard filters
 let HOLDINGS=[]; // active holdings from Holdings.csv (qty>0)
 let HOLDINGS_ALL=[]; // all holdings rows from Holdings.csv, including qty=0 closed holdings
 let POSITIONS=[]; // open positions from Positions.csv (T+1 unsettled buys)
@@ -633,6 +637,164 @@ function parseCSV(text){
 }
 function num(v){if(v===null||v===undefined||v==='')return null;const x=parseFloat(String(v).replace(/,/g,''));return isNaN(x)?null:x;}
 function normSym(s){return String(s||'').trim().replace(/^[A-Z]+:/,'').toUpperCase();}
+function escHtml(s){return String(s??'').replace(/[&<>"]/g,ch=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[ch]));}
+function survRuleKey(label){return String(label||'').trim().toLowerCase().replace(/[^a-z0-9]+/g,'_').replace(/^_|_$/g,'');}
+function isSurvFlag(v){
+  const s=String(v||'').trim().toLowerCase();
+  return s!==''&&s!=='100'&&s!=='n'&&s!=='no';
+}
+const SURV_DEFAULT_RULES=[
+  {column:'Default',label:'Default'},
+  {column:'Insolvency_Resolution_Process(IRP)',label:'Insolvency Resolution Process (IRP)'},
+  {column:'ICA',label:'ICA'},
+  {column:'Under BZ/SZ Series',label:'Under BZ/SZ Series'},
+  {column:'Company has failed to pay Annual listing fee',label:'Listing fee unpaid'},
+  {column:'Derivative contracts in the scrip to be moved out of F and O',label:'F&O removal'},
+  {column:'The Overall encumbered share in the scrip is more than 50 Percent.',label:'Encumbered share > 50%'},
+  {column:'ESM',label:'ESM'},
+  {column:'GSM',label:'GSM'},
+  {column:'Long_Term_Additional_Surveillance_Measure (Long Term ASM)',label:'Long Term ASM'},
+  {column:'Short_Term_Additional_Surveillance_Measure (Short Term ASM)',label:'Short Term ASM'},
+  {column:'Unsolicited_SMS',label:'Unsolicited SMS'},
+  {column:'Social Media Platforms',label:'Social Media Platforms'},
+  {column:'Pledge',label:'Pledge'},
+  {column:'Loss making',label:'Loss making'},
+  {column:'EPS in the scrip is zero (4 trailing quarters)',label:'EPS = 0 (4 trailing quarters)'},
+  {column:'Scrip PE is greater than 50 (4 trailing quarters)',label:'PE > 50 (4 trailing quarters)'},
+  {column:'Less than 100 unique PAN traded in previous 30 days',label:'PAN < 100 (30d)'},
+  {column:'Mandatory Market making period in SME scrip is over',label:'SME market making over'},
+  {column:'SME scrip is not regularly traded',label:'SME not regularly traded'},
+];
+function getSurvRules(){
+  const merged=[...SURV_DEFAULT_RULES,...(SURV_CUSTOM_RULES||[])];
+  const seen=new Set();
+  return merged.map(rule=>{
+    const column=String(rule.column||rule.label||'').trim();
+    const label=String(rule.label||column).trim();
+    const key=survRuleKey(column);
+    return {key,column,label,manual:!!rule.manual};
+  }).filter(rule=>{
+    if(!rule.column||seen.has(rule.key)) return false;
+    seen.add(rule.key);
+    return true;
+  });
+}
+function saveSurvRules(){
+  try{localStorage.setItem(SURV_RULE_STORE,JSON.stringify(SURV_CUSTOM_RULES||[]));}catch(e){console.warn('Could not save surveillance rules',e);}
+}
+function loadSurvRules(){
+  try{
+    const raw=localStorage.getItem(SURV_RULE_STORE);
+    SURV_CUSTOM_RULES=raw?JSON.parse(raw):[];
+    if(!Array.isArray(SURV_CUSTOM_RULES)) SURV_CUSTOM_RULES=[];
+    SURV_CUSTOM_RULES=SURV_CUSTOM_RULES.map(rule=>{
+      const column=String(rule.column||rule.label||'').trim();
+      return column?{key:survRuleKey(column),column,label:String(rule.label||column).trim(),manual:true}:null;
+    }).filter(Boolean);
+  }catch(e){
+    SURV_CUSTOM_RULES=[];
+  }
+}
+function getDynamicFeatureStoreKeys(features, weights){
+  if(!features||!features.length) return [];
+  const fixedFeatKeys=new Set(['delivery_pct','price','volume','volume_1_day']);
+  const pcPat=/price_change.*1_day|1_day.*price_change|^change.*1_day$/;
+  features.forEach(f=>{if(pcPat.test(f)) fixedFeatKeys.add(f);});
+  return [...features]
+    .filter(f=>!fixedFeatKeys.has(f))
+    .sort((a,b)=>(weights[b]||0)-(weights[a]||0))
+    .slice(0,24);
+}
+function syncSurvRuleRows(savedRows){
+  const byKey={};
+  (savedRows||[]).forEach(row=>{if(row&&row.key) byKey[row.key]=row;});
+  const activeHeaders=new Set((SURV_HEADERS||[]).map(h=>String(h).trim().toLowerCase()));
+  return getSurvRules().map(rule=>{
+    const prev=byKey[rule.key]||{};
+    const active=prev.active!=null?prev.active:activeHeaders.has(rule.column.toLowerCase());
+    return {
+      key:rule.key,
+      label:rule.label,
+      column:rule.column,
+      manual:rule.manual,
+      active:active,
+      flagged:prev.flagged||0,
+      removed:prev.removed||0,
+    };
+  });
+}
+function sanitizeSavedMethodology(meth){
+  if(!meth||!meth.removed) return meth;
+  const rows=Array.isArray(meth.survRuleRows)?meth.survRuleRows:[];
+  const survSize=Number(meth.survSize||0);
+  const activeRows=rows.filter(r=>r&&r.active);
+  const impossible = survSize>0 && activeRows.length>=5 && activeRows.every(r=>Number(r.flagged||0)===survSize);
+  if(!impossible) return meth;
+  const cleaned={...meth, removed:{...(meth.removed||{})}};
+  cleaned.removed.surv=0;
+  cleaned.removed.survRules={};
+  cleaned.survRuleRows=rows.map(r=>({...r,flagged:0,removed:0}));
+  cleaned._survSanitized=true;
+  return cleaned;
+}
+function getHardFilterRowsFromEngine(E){
+  if(!E) return [];
+  const rm=E.removed||{};
+  const survRows=syncSurvRuleRows(E.survRuleRows||[]);
+  return [
+    {key:'upper_circuit',label:'Upper Circuit',criteria:'Price change >= 19.5%',removed:rm.uc||0,active:true,kind:'core'},
+    ...survRows.map(row=>({
+      key:'surv_'+row.key,
+      label:row.label+(row.manual?' (Manual)':''),
+      criteria:row.column,
+      removed:row.active?(row.removed||0):null,
+      flagged:row.active?(row.flagged||0):0,
+      active:!!row.active,
+      manual:!!row.manual,
+      kind:'surv',
+      ruleKey:row.key,
+    })),
+    {key:'low_liquidity',label:'Low Liquidity',criteria:'Shareholders < 500 OR Volume < 5,000',removed:rm.liq||0,active:true,kind:'core'},
+    {key:'zero_fscore',label:'Zero F-Score',criteria:'Piotroski F-Score = 0 or null',removed:rm.fscore||0,active:true,kind:'core'},
+    {key:'low_delivery',label:'Low Delivery',criteria:'Delivery % < 30% or null',removed:rm.deliv||0,active:true,kind:'core'},
+    {key:'fading_peak_retention',label:'Fading (Peak Retention)',criteria:'Peak retention < 50% when day range > 1%',removed:rm.fade||0,active:true,kind:'core'},
+  ];
+}
+function persistMethodologySnapshot(){
+  if(!ENGINE_DATA||!ENGINE_DATA.features||!ENGINE_DATA.features.length) return;
+  try{
+    const methSave={
+      targetCorr:ENGINE_DATA.targetCorr||{},
+      targetCorrToday:ENGINE_DATA.targetCorrToday||{},
+      mrmr:ENGINE_DATA.mrmr||{},
+      weights:ENGINE_DATA.weights||{},
+      features:ENGINE_DATA.features||[],
+      labels:ENGINE_DATA.labels||{},
+      top10Feats:ENGINE_DATA.top10Feats||[],
+      rocketCount:ENGINE_DATA.rocketCount,
+      rocketThreshold:ENGINE_DATA.rocketThreshold,
+      accSessions:ENGINE_DATA.accSessions,
+      laggedNote:ENGINE_DATA.laggedNote||'',
+      regime:ENGINE_DATA.regime,
+      marketBreadth:ENGINE_DATA.marketBreadth,
+      regimeSessions:ENGINE_DATA.regimeSessions||{},
+      useRegimeCorr:ENGINE_DATA.useRegimeCorr,
+      sectorCol:ENGINE_DATA.sectorCol,
+      industryCol:ENGINE_DATA.industryCol,
+      yesterdayRockets:ENGINE_DATA.yesterdayRockets||[],
+      goodFromYesterday:ENGINE_DATA.goodFromYesterday||0,
+      badFromYesterday:ENGINE_DATA.badFromYesterday||0,
+      qualityTargetN:ENGINE_DATA.qualityTargetN||0,
+      totalParsed:ENGINE_DATA.totalParsed||0,
+      removed:{...(ENGINE_DATA.removed||{})},
+      survSize:ENGINE_DATA.survSize||0,
+      survRuleRows:syncSurvRuleRows(ENGINE_DATA.survRuleRows||[]),
+    };
+    localStorage.setItem(METH_STORE,JSON.stringify(methSave));
+  }catch(e){
+    console.warn('Could not save methodology data',e);
+  }
+}
 
 // ── NSE Parsers ──
 function parseBhavdata(text){
@@ -658,6 +820,31 @@ function parse52W(text){
   });
 }
 function parseSurv(text){
+  {
+    const rows=parseCSV(text);
+    NSE_SURV={};
+    SURV_HEADERS=[];
+    SURV_RULE_HITS={};
+    if(!rows.length) return;
+    const hdrs=Object.keys(rows[0]);
+    SURV_HEADERS=hdrs.slice();
+    const hdrMap={};
+    hdrs.forEach(h=>{hdrMap[String(h).trim().toLowerCase()]=h;});
+    const activeRules=getSurvRules().map(rule=>({...rule,header:hdrMap[rule.column.toLowerCase()]||null}));
+    activeRules.forEach(rule=>{SURV_RULE_HITS[rule.key]=0;});
+    rows.forEach(r=>{
+      const sym=normSym(r['Symbol']);if(!sym)return;
+      const hits=[];
+      activeRules.forEach(rule=>{
+        if(!rule.header) return;
+        if(isSurvFlag(r[rule.header])) hits.push(rule.key);
+      });
+      if(!hits.length) return;
+      NSE_SURV[sym]=hits;
+      hits.forEach(key=>{SURV_RULE_HITS[key]=(SURV_RULE_HITS[key]||0)+1;});
+    });
+    return;
+  }
   // NSE REG1_IND*.csv — exact column names from file
   // CRITICAL: any flag present (value not blank/N/No) → instant removal
   const CRITICAL_COLS=[
@@ -882,13 +1069,18 @@ function runEngine(raw, sessionTag){
   }
 
   // ── Hard Filters ──
-  REMOVED={uc:0,surv:0,liq:0,fscore:0,deliv:0,fade:0};
+  REMOVED={uc:0,surv:0,survRules:{},liq:0,fscore:0,deliv:0,fade:0};
   const filtered=parsed.filter(d=>{
     // Upper circuit — stock can't be bought, invalid for scanning
     const pc=K.price_change?d[K.price_change]:null;
     if(pc!==null&&pc>=19.5){REMOVED.uc++;return false;}
     // Surveillance — regulatory exclusion
-    if(NSE_SURV[d.symbol]){REMOVED.surv++;return false;}
+    if(NSE_SURV[d.symbol]&&NSE_SURV[d.symbol].length){
+      REMOVED.surv++;
+      const primaryRule=NSE_SURV[d.symbol][0];
+      if(primaryRule) REMOVED.survRules[primaryRule]=(REMOVED.survRules[primaryRule]||0)+1;
+      return false;
+    }
     // Hard liquidity floor — below these thresholds stock is untradeable
     const sh=K.shareholders?d[K.shareholders]:null;
     const vol=K.volume?d[K.volume]:null;
@@ -1192,9 +1384,19 @@ function runEngine(raw, sessionTag){
     qualityTargetN: qualityN,
     totalParsed: totalParsed,
     removed: {...REMOVED},
-    survSize: Object.keys(NSE_SURV).length
+    survSize: Object.keys(NSE_SURV).length,
+    survRuleRows: getSurvRules().map(rule=>({
+      key:rule.key,
+      label:rule.label,
+      column:rule.column,
+      manual:!!rule.manual,
+      active:SURV_HEADERS.map(h=>String(h).trim().toLowerCase()).includes(rule.column.toLowerCase()),
+      flagged:SURV_RULE_HITS[rule.key]||0,
+      removed:REMOVED.survRules?.[rule.key]||0,
+    }))
   };
   COLS=getCols(); // refresh dynamic columns
+  const holdFactor=null;
   // Persist lightweight methodology data (everything except N² interCorr matrix)
   try{
     const methSave={targetCorr,targetCorrToday,mrmr,weights,features:FEATS,labels:LABELS,top10Feats,rocketCount:ENGINE_DATA.rocketCount,rocketThreshold:ENGINE_DATA.rocketThreshold,accSessions:ENGINE_DATA.accSessions,laggedNote:ENGINE_DATA.laggedNote,
@@ -1208,6 +1410,7 @@ function runEngine(raw, sessionTag){
     regCal[_rdStr]=regime;
     localStorage.setItem(REGIME_CAL_STORE,JSON.stringify(regCal));
   }catch(e){console.warn('Could not save methodology data',e);}
+  persistMethodologySnapshot();
   return results;
 }
 
@@ -1794,6 +1997,88 @@ function renderPerformance(){
   setTimeout(()=>{monthTbl.render();symTbl.render();hourTbl.render();sellHourTbl.render();},0);
 }
 
+function addSurvRule(){
+  const input=document.getElementById('survRuleInput');
+  const column=String(input?.value||'').trim();
+  if(!column){showToast('Enter the exact REG1 column name to add.',3000,true);return;}
+  const key=survRuleKey(column);
+  if(getSurvRules().some(rule=>rule.key===key)){showToast('That hard filter is already configured.',3000,true);if(input)input.value='';return;}
+  SURV_CUSTOM_RULES.push({key,column,label:column,manual:true});
+  saveSurvRules();
+  if(ENGINE_DATA){
+    ENGINE_DATA.survRuleRows=syncSurvRuleRows(ENGINE_DATA.survRuleRows||[]);
+    persistMethodologySnapshot();
+  }
+  if(input) input.value='';
+  renderMethodology();
+  showToast(`<strong>Added hard filter</strong> â€” ${escHtml(column)}. It will be applied whenever that REG1 column is flagged.`,3500);
+}
+function removeSurvRule(key){
+  SURV_CUSTOM_RULES=(SURV_CUSTOM_RULES||[]).filter(rule=>survRuleKey(rule.column||rule.label)!==key);
+  saveSurvRules();
+  if(ENGINE_DATA){
+    ENGINE_DATA.survRuleRows=syncSurvRuleRows(ENGINE_DATA.survRuleRows||[]);
+    persistMethodologySnapshot();
+  }
+  renderMethodology();
+  showToast('Manual hard filter removed.',2500);
+}
+function buildHardFilterMethodologyHTML(E){
+  const rows=getHardFilterRowsFromEngine(E);
+  const totalRemoved=rows.reduce((sum,row)=>sum+(row.active&&row.removed!=null?row.removed:0),0);
+  const rowHtml=rows.map(row=>{
+    const inactiveNote=!row.active
+      ? (row.kind==='surv'
+          ? `<div style="font-size:10px;color:var(--red);margin-top:2px">Inactive until this exact REG1 column is present</div>`
+          : `<div style="font-size:10px;color:var(--amber);margin-top:2px">Needs fresh NSE data to activate</div>`)
+      : '';
+    const flaggedCell=row.kind==='surv'
+      ? (row.active?`<span style="color:${(row.flagged||0)>0?'var(--orange)':'var(--t3)'}">${(row.flagged||0).toLocaleString()}</span>`:'â€”')
+      : 'â€”';
+    const removedCell=row.active&&row.removed!=null
+      ? `<span style="color:${row.removed>0?'var(--red)':'var(--t3)'}">${row.removed.toLocaleString()}</span>`
+      : 'â€”';
+    const removeBtn=row.manual
+      ? `<button onclick="removeSurvRule('${row.ruleKey}')" style="padding:4px 8px;border-radius:6px;border:1px solid rgba(239,68,68,.3);background:rgba(239,68,68,.08);color:var(--red);font-size:10px;font-weight:700;cursor:pointer">Remove</button>`
+      : `<span style="color:var(--t3);font-size:10px">${row.kind==='surv'?'Built-in':'Core'}</span>`;
+    return `<tr style="border-bottom:1px solid var(--border)">
+      <td style="padding:8px 10px;color:${row.active?'var(--t1)':'var(--t3)'};font-weight:600;vertical-align:top">${escHtml(row.label)}${inactiveNote}</td>
+      <td style="padding:8px 10px;color:var(--t2);font-size:11px;vertical-align:top">${escHtml(row.criteria)}</td>
+      <td style="padding:8px 10px;text-align:right;font-family:'DM Mono',monospace;font-weight:700">${flaggedCell}</td>
+      <td style="padding:8px 10px;text-align:right;font-family:'DM Mono',monospace;font-weight:700">${removedCell}</td>
+      <td style="padding:8px 10px;text-align:right">${removeBtn}</td>
+    </tr>`;
+  }).join('');
+  const survSize=E.survSize??0;
+  const survMeta=survSize>0
+    ? `<div style="font-size:11px;color:var(--t3);margin-top:8px">Loaded <strong style="color:var(--t1)">${survSize}</strong> surveillance-flagged symbols from the latest REG1 file. Surveillance rows show exact-column hits; removed counts are primary-rule removals, so they donâ€™t double-count.</div>`
+    : `<div style="margin-top:8px;padding:8px 10px;background:rgba(239,68,68,.08);border:1px solid rgba(239,68,68,.25);border-radius:8px;font-size:11px;color:var(--red)">NSE REG1 data is not active in the latest saved session, so surveillance rows are shown for configuration but wonâ€™t remove stocks until a matching REG1 file is loaded.</div>`;
+  return `
+    <h3 id="meth-filters" style="margin-top:28px">Hard Filters <span style="font-size:12px;color:var(--t3);font-weight:400">(${totalRemoved} removals in latest saved run)</span></h3>
+    <p style="color:var(--t3);font-size:12px;margin-bottom:10px">Each surveillance row is now an exact REG1 feature instead of a bundled category. Manual rows are persisted in your brain and will always be treated as hard filters whenever that exact REG1 column is flagged.</p>
+    <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:10px">
+      <input id="survRuleInput" type="text" placeholder="Exact REG1 column name (e.g. GSM)" onkeydown="if(event.key==='Enter'){event.preventDefault();addSurvRule();}" style="flex:1;min-width:280px;padding:10px 12px;background:var(--bg-card);border:1px solid var(--border);border-radius:8px;color:var(--t1);font-size:12px;outline:none">
+      <button class="btn" onclick="addSurvRule()" style="font-weight:700">+ Add Hard Filter</button>
+    </div>
+    <div style="font-size:11px;color:var(--t3);margin-bottom:10px">Use the exact header text from <code style="color:var(--t1)">REG1_IND*.csv</code>. Custom rows become active immediately for future uploads and stay persisted across refreshes and brain exports.</div>
+    <div style="background:var(--bg-card);border:1px solid var(--border);border-radius:10px;overflow:hidden">
+      <div style="overflow-x:auto">
+        <table style="width:100%;border-collapse:collapse;font-size:12px">
+          <thead><tr style="color:var(--t3);font-size:10px;text-transform:uppercase;letter-spacing:.06em;border-bottom:1px solid var(--border)">
+            <th style="padding:6px 10px;text-align:left">Filter</th>
+            <th style="padding:6px 10px;text-align:left">Exact Column / Criteria</th>
+            <th style="padding:6px 10px;text-align:right">Flagged</th>
+            <th style="padding:6px 10px;text-align:right">Removed</th>
+            <th style="padding:6px 10px;text-align:right">Manage</th>
+          </tr></thead>
+          <tbody>${rowHtml}</tbody>
+        </table>
+      </div>
+    </div>
+    ${survMeta}
+  `;
+}
+
 function renderMethodology(){
   // Sync header height CSS var so sticky bookmark nav sits flush below header
   const hdrEl=document.querySelector('.hdr');
@@ -1977,6 +2262,7 @@ function renderMethodology(){
   const _redundantCount=allPairs.length;
   const _pruningCount=pruningRows.length;
   const _archiveCount=removedFeats.length;
+  const hardFiltersHTML=buildHardFilterMethodologyHTML(E);
 
   mc.innerHTML=`
     <nav style="position:sticky;top:var(--hdr-h,72px);z-index:50;background:var(--bg);padding:8px 0 10px;margin-bottom:8px;display:flex;gap:6px;flex-wrap:wrap;border-bottom:1px solid var(--border);box-shadow:0 2px 8px rgba(0,0,0,0.3);overflow-x:auto;-webkit-overflow-scrolling:touch">
@@ -2010,7 +2296,7 @@ function renderMethodology(){
         <td style="padding:7px 10px;text-align:right;font-family:'DM Mono',monospace;font-weight:700;color:${r.removed>0?'var(--red)':'var(--t3)'}">${r.active?(r.removed>0?r.removed:'0'):'—'}</td>
       </tr>`).join('');
       const survDetail=survSz>0?`<div style="font-size:11px;color:var(--t3);margin-top:6px">NSE surveillance list: <strong style="color:var(--t1)">${survSz}</strong> flagged symbols loaded</div>`:'';
-      return `<div id="meth-filters" style="margin-top:16px;background:var(--bg-card);border:1px solid var(--border);border-radius:10px;overflow:hidden">
+      return `<div id="meth-filters-old" style="display:none;margin-top:16px;background:var(--bg-card);border:1px solid var(--border);border-radius:10px;overflow:hidden">
         <div style="padding:10px 16px;font-size:10px;font-weight:700;color:var(--t2);text-transform:uppercase;letter-spacing:.1em;border-bottom:1px solid var(--border)">🛡 Hard Filters — Pre-Scoring Removals</div>
         <div style="overflow-x:auto">
           <table style="width:100%;border-collapse:collapse;font-size:12px">
@@ -2031,7 +2317,7 @@ function renderMethodology(){
       <div class="m-card"><h4>🎯 Quality-Adjusted Target</h4><p>Stocks that moved <strong>≥${E.rocketThreshold||10}% up</strong>, plus yesterday's rockets that <strong>held today</strong> (didn't collapse beyond hold threshold). Yesterday's rockets that collapsed get reclassified as 0 — the engine <em>unlearns</em> features that predicted fragile spikes. Over sessions, this trains the engine to recommend <strong>durable</strong> moves, not one-day spikes. See the <a href="#meth-rockets" style="color:var(--fire)">Yesterday's Rockets</a> panel below.</p></div>
       <div class="m-card"><h4>${E.regime==='bull'?'🐂':E.regime==='bear'?'🐻':'➡'} Regime-Conditional Learning</h4><p>Market classified as <strong style="color:${regimeColor}">${(E.regime||'neutral').toUpperCase()}</strong> (${E.marketBreadth!=null?(E.marketBreadth*100).toFixed(0):'?'}% breadth). Bull ≥55%, Bear &lt;35%. Each regime maintains <strong>separate correlation accumulators</strong> — bull sessions learn breakout patterns, bear sessions learn resilience patterns. ${E.useRegimeCorr?'Using <strong>regime-specific</strong> correlations.':'Using <strong>combined</strong> correlations (need ≥2 sessions in this regime).'}</p></div>
       <div class="m-card"><h4>📊 Sector & Industry Breadth</h4><p>${E.sectorCol?'<span style="color:var(--green)">✓</span> Sector breadth, sector relative strength':'<span style="color:var(--red)">✗</span> No Sector column detected'}${E.industryCol?', <span style="color:var(--green)">✓</span> industry breadth':''} — computed from today\'s data and fed into mRMR. Stocks in strong sectors score higher in bull markets; stocks outperforming weak sectors score higher in bear markets.</p></div>
-      <div class="m-card"><h4>🚫 Hard Filters</h4><p>Removed before scoring: upper circuit (≥19.5%), 🔴 Critical surveillance (Default/IRP/ICA/BZ-SZ/ESM/encumbered/F&amp;O removal/listing fee), 🟠 High Risk (GSM/ASM/EPS=0/PAN&lt;100/Loss-making/PE&gt;50/SMS/Social/Pledge/SME), low liquidity (shareholders &lt;500 or volume &lt;5K), zero/null Piotroski F-Score, delivery &lt;30%, and <strong>peak retention &lt;50%</strong> (fading; only when day range &gt;1%). Currently filtered: ${Object.values(REMOVED).reduce((s,v)=>s+v,0)} stocks.</p></div>
+      <div class="m-card"><h4>🚫 Hard Filters</h4><p>Removed before scoring: upper circuit (≥19.5%), exact REG1 surveillance flags, low liquidity (shareholders &lt;500 or volume &lt;5K), zero/null Piotroski F-Score, delivery &lt;30%, and <strong>peak retention &lt;50%</strong> (fading; only when day range &gt;1%). Currently filtered: ${Object.values(REMOVED).filter(v=>typeof v==='number').reduce((s,v)=>s+v,0)} stocks.</p></div>
     </div>
 
     <p style="color:var(--t3);font-style:italic;margin-top:4px">⚠ Quantitative screening only. Not financial advice. Past momentum ≠ future returns.</p>
@@ -2088,7 +2374,8 @@ function renderMethodology(){
     <div class="corr-wrap">${weakHTML}</div>
     <h3 id="meth-archive" style="margin-top:28px">Removed Features Archive <span style="font-size:12px;color:var(--t3);font-weight:400">(${_archiveCount})</span></h3>
     <p style="color:var(--t3);font-size:12px;margin-bottom:8px">Features that have accumulated correlation history but are absent from your current CSV upload — automatically detected. Sorted by |r| against the rocket target, highest first. Re-add the column to ALL NSE CSV to reinstate.</p>
-    <div class="corr-wrap">${archiveHTML}</div>`;
+    <div class="corr-wrap">${archiveHTML}</div>
+    ${hardFiltersHTML}`;
   // Populate example text after DOM is set
   setTimeout(updateQualityPanel,0);
 }
@@ -2687,7 +2974,7 @@ function hideUploadScreen(){
 function exportBrain(){
   const BRAIN_KEYS=[
     CORR_STORE, CORR_BULL_STORE, CORR_BEAR_STORE, CORR_NEUT_STORE,
-    SNAP_KEY, SNAP_PREV_KEY, ALL_STORE, METH_STORE, REGIME_CAL_STORE, SCANNER_STORE, VER_STORE, HOLD_STORE, TRADEBOOK_STORE, ORDERS_STORE, POSITIONS_STORE, MISSED_OPP_STORE, OPEN_BUY_DATE_STORE
+    SNAP_KEY, SNAP_PREV_KEY, ALL_STORE, METH_STORE, REGIME_CAL_STORE, SCANNER_STORE, VER_STORE, HOLD_STORE, TRADEBOOK_STORE, ORDERS_STORE, POSITIONS_STORE, SURV_RULE_STORE, MISSED_OPP_STORE, OPEN_BUY_DATE_STORE
   ];
   const brain={_exportedAt:new Date().toISOString(), _exported:new Date().toISOString(), _version:'rscanner_brain_v1'};
   let totalSize=0;
@@ -2727,7 +3014,7 @@ function importBrain(event){
       }
       const BRAIN_KEYS=[
         CORR_STORE, CORR_BULL_STORE, CORR_BEAR_STORE, CORR_NEUT_STORE,
-        SNAP_KEY, SNAP_PREV_KEY, ALL_STORE, METH_STORE, REGIME_CAL_STORE, SCANNER_STORE, VER_STORE, HOLD_STORE, TRADEBOOK_STORE, ORDERS_STORE, POSITIONS_STORE
+        SNAP_KEY, SNAP_PREV_KEY, ALL_STORE, METH_STORE, REGIME_CAL_STORE, SCANNER_STORE, VER_STORE, HOLD_STORE, TRADEBOOK_STORE, ORDERS_STORE, POSITIONS_STORE, SURV_RULE_STORE
       ];
       // Also map v4 keys → v5 keys for backward-compatible brain imports
       const V4_MAP={
@@ -2793,7 +3080,7 @@ function resetBrain(btn){
   const BRAIN_KEYS=[
     CORR_STORE, CORR_BULL_STORE, CORR_BEAR_STORE, CORR_NEUT_STORE,
     SNAP_KEY, SNAP_PREV_KEY, ALL_STORE, METH_STORE, REGIME_CAL_STORE, SCANNER_STORE,
-    HOLD_STORE, TRADEBOOK_STORE, ORDERS_STORE, POSITIONS_STORE
+    HOLD_STORE, TRADEBOOK_STORE, ORDERS_STORE, POSITIONS_STORE, SURV_RULE_STORE
   ];
   BRAIN_KEYS.forEach(k=>{try{localStorage.removeItem(k);}catch(e){}});
   ACC_CORR=null; ACC_CORR_BULL=null; ACC_CORR_BEAR=null; ACC_CORR_NEUT=null;
@@ -3667,8 +3954,20 @@ async function processFiles(files){
     // Save scan results only — engineData is too large (N² interCorr matrix)
     try{
       // Trim data for storage — exclude _features (large, display-only, not needed on restore)
-      const trimmed=ALL.map(s=>{const {_features,...rest}=s;return{...rest,name:rest.name?rest.name.substring(0,20):rest.symbol};});
+      const featureKeys=getDynamicFeatureStoreKeys(ENGINE_DATA.features||[],ENGINE_DATA.weights||{});
+      const trimmed=ALL.map(s=>{
+        const {_features,...rest}=s;
+        return{
+          ...rest,
+          name:rest.name?rest.name.substring(0,20):rest.symbol,
+          fv:featureKeys.map(f=>{
+            const v=_features&&_features[f]!=null?_features[f]:null;
+            return(v===null||v===undefined)?null:+parseFloat(v).toFixed(3);
+          }),
+        };
+      });
       const toSave={data:trimmed,fileTag:tvFile.name+' · '+raw.length+' stocks',ts:Date.now()};
+      toSave.featureKeys=featureKeys;
       localStorage.setItem(ALL_STORE,JSON.stringify(toSave));
     }catch(e){console.warn('Could not save scan data',e);}
     // Save compressed snapshot — store feature values as arrays (not objects)
@@ -3868,6 +4167,7 @@ function loadFilterState(){
 }
 
 (function initScanner(){
+  try{ loadSurvRules(); }catch(e){ console.warn('INIT surveillance rules failed:',e); }
   // Step 1: Load correlations (combined + per-regime)
   try{
     const c=localStorage.getItem(CORR_STORE);
@@ -3893,10 +4193,16 @@ function loadFilterState(){
       const saved=JSON.parse(raw);
       if(saved && saved.data && saved.data.length){
         // Ensure all required fields exist on restored stocks
-        ALL=saved.data.map(s=>({
-          flags: [],
-          ...s,
-        }));
+        const storedFeatureKeys=Array.isArray(saved.featureKeys)?saved.featureKeys:[];
+        ALL=saved.data.map(s=>{
+          const row={flags: [],...s};
+          if(Array.isArray(s.fv)&&storedFeatureKeys.length){
+            row._features={};
+            storedFeatureKeys.forEach((f,i)=>{row._features[f]=s.fv[i]??null;});
+          }
+          delete row.fv;
+          return row;
+        });
         ALL.forEach(s=>{if(s.rocketScore!=null)SCORE_MAP[s.symbol]=s.rocketScore;});
         // Restore today's recommendation counts
         try{const _rcRaw=localStorage.getItem(REC_COUNT_STORE);if(_rcRaw){const _rcp=JSON.parse(_rcRaw);const _rct=_rcp[getSessionDate()]||{};ALL.forEach(s=>{s.recCount=_rct[s.symbol]||0;});}}catch(e){}
@@ -3916,10 +4222,12 @@ function loadFilterState(){
   try{
     const mRaw=localStorage.getItem(METH_STORE);
     if(mRaw){
-      const meth=JSON.parse(mRaw);
+      const meth=sanitizeSavedMethodology(JSON.parse(mRaw));
       if(meth && meth.features && meth.features.length){
         // Restore without interCorr (will be empty for redundant pairs display)
         ENGINE_DATA={...meth, interCorr:{}};
+        ENGINE_DATA.survRuleRows=syncSurvRuleRows(meth.survRuleRows||[]);
+        if(meth._survSanitized) try{localStorage.setItem(METH_STORE,JSON.stringify(ENGINE_DATA));}catch(e){}
         COLS=getCols(); // refresh dynamic columns
         console.log('INIT: restored methodology data,',meth.features.length,'features');
       }
