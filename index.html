@@ -639,13 +639,14 @@ function parseBhavdata(text){
   parseCSV(text).forEach(r=>{
     const sym=normSym(r['SYMBOL']);
     if(!sym||(r['SERIES']||'').trim()!=='EQ')return;
-    NSE_BHAV[sym]={delivPct:num(r['DELIV_PER']),nseVol:num(r['TTL_TRD_QNTY']),close:num(r['CLOSE']||r['CLOSE_PRICE']||r['ClosePrice']),high:num(r['HIGH']||r['HIGH_PRICE']||r['HighPrice'])};
+    NSE_BHAV[sym]={delivPct:num(r['DELIV_PER']),nseVol:num(r['TTL_TRD_QNTY']),close:num(r['CLOSE_PRICE']),high:num(r['HIGH_PRICE'])};
   });
 }
 function parse52W(text){
+  // File has 2 disclaimer/date lines before the actual header on line 3
   const lines=parseCSVRaw(text);
   let hi=-1;
-  for(let i=0;i<lines.length;i++){if(lines[i].includes('SYMBOL')&&lines[i].includes('52_Week')){hi=i;break;}}
+  for(let i=0;i<lines.length;i++){if(lines[i].includes('"SYMBOL"')){hi=i;break;}}
   if(hi<0)return;
   parseCSV(lines.slice(hi).join('\n')).forEach(r=>{
     const sym=normSym(r['SYMBOL']);
@@ -657,40 +658,41 @@ function parse52W(text){
   });
 }
 function parseSurv(text){
-  // Weighted risk classification from NSE surveillance indicators.
-  // 🔴 CRITICAL: any flag = instant removal
-  // 🟠 HIGH RISK: any flag = removal
-  // Column matching is case-insensitive substring to handle NSE format variations.
-  const CRITICAL_PATTERNS=[
-    /^default$/i,/insolvency.resolution/i,/^ica$/i,/bz.*sz|sz.*bz/i,
-    /annual.listing.fee/i,/f.*o.*removal|moved.out.*f.*o/i,
-    /overall.encumber|encumbr/i,/^esm$/i,
-    /high.*promoter.*encumbr|high.*non.promoter.*encumbr/i
+  // NSE REG1_IND*.csv — exact column names from file
+  // CRITICAL: any flag present (value not blank/N/No) → instant removal
+  const CRITICAL_COLS=[
+    'Default','Insolvency_Resolution_Process(IRP)','ICA','Under BZ/SZ Series',
+    'Company has failed to pay Annual listing fee',
+    'Derivative contracts in the scrip to be moved out of F and O',
+    'The Overall encumbered share in the scrip is more than 50 Percent.','ESM'
   ];
-  const HIGH_RISK_PATTERNS=[
-    /^gsm$/i,/long.term.*asm|long.term.*surveillance/i,
-    /short.term.*asm|short.term.*surveillance/i,
-    /unsolicited.sms/i,/social.media/i,/^pledge$/i,/promoter.*pledge/i,
-    /loss.making/i,/eps.*zero|zero.*eps/i,/pe.*greater.*50|pe.*50/i,
-    /unique.pan|less.*100.*pan/i,/sme.*not.*regular/i,/market.making.*sme/i
+  // HIGH RISK: any flag present → removal
+  const HIGH_RISK_COLS=[
+    'GSM',
+    'Long_Term_Additional_Surveillance_Measure (Long Term ASM)',
+    'Short_Term_Additional_Surveillance_Measure (Short Term ASM)',
+    'Unsolicited_SMS','Social Media Platforms','Pledge',
+    'Loss making',
+    'EPS in the scrip is zero (4 trailing quarters)',
+    'Scrip PE is greater than 50 (4 trailing quarters)',
+    'Less than 100 unique PAN traded in previous 30 days',
+    'Mandatory Market making period in SME scrip is over',
+    'SME scrip is not regularly traded'
   ];
   const rows=parseCSV(text);
   if(!rows.length) return;
-  // Find symbol column case-insensitively
   const hdrs=Object.keys(rows[0]);
-  const symCol=hdrs.find(h=>/^symbol$/i.test(h.trim()))||hdrs[0];
-  // Pre-map headers to pattern categories (do once, not per row)
-  const criticalCols=hdrs.filter(h=>CRITICAL_PATTERNS.some(p=>p.test(h.trim())));
-  const highRiskCols=hdrs.filter(h=>HIGH_RISK_PATTERNS.some(p=>p.test(h.trim())));
+  const criticalCols=CRITICAL_COLS.filter(c=>hdrs.includes(c));
+  const highRiskCols=HIGH_RISK_COLS.filter(c=>hdrs.includes(c));
   rows.forEach(r=>{
-    const sym=normSym(r[symCol]);if(!sym)return;
+    const sym=normSym(r['Symbol']);if(!sym)return;
     for(const key of criticalCols){
       const v=(r[key]||'').trim();
-      if(v==='0'||v.toLowerCase()==='y'||v.toLowerCase()==='yes'){NSE_SURV[sym]=true;return;}
+      if(v!==''&&v.toLowerCase()!=='n'&&v.toLowerCase()!=='no'){NSE_SURV[sym]=true;return;}
     }
     for(const key of highRiskCols){
       const v=(r[key]||'').trim();
-      if(v!==''&&v!=='100'&&v.toLowerCase()!=='n'&&v.toLowerCase()!=='no'){NSE_SURV[sym]=true;return;}
+      if(v!==''&&v.toLowerCase()!=='n'&&v.toLowerCase()!=='no'){NSE_SURV[sym]=true;return;}
     }
   });
 }
@@ -750,19 +752,15 @@ function runEngine(raw, sessionTag){
   const _minsSinceLast=(Date.now()-_lastObsTs)/60000;
   const isNewSession = _minsSinceLast>=5 && isMarketHours();
 
-  // ── Auto-detect columns from CSV headers ──
+  // ── Column names from TradingView ALL NSE.csv (fixed, known headers) ──
   const allHeaders = Object.keys(raw[0]);
-
-  // Find symbol/name and text columns by content pattern (not by name)
-  // maRawCol: detects the MA rating text column so it's excluded from numeric features
-  const symCol   = allHeaders.find(h => raw.slice(0,5).every(r => /^[A-Z0-9&.-]{1,20}$/.test((r[h]||'').trim()))) || allHeaders[0];
-  const nameCol  = allHeaders.find(h => h !== symCol && raw.slice(0,5).some(r => (r[h]||'').trim().length > 10 && isNaN(parseFloat(r[h])))) || '';
-  const maRawCol = allHeaders.find(h => /strong buy|strong sell|buy|sell|neutral/i.test(raw.slice(0,10).map(r=>r[h]||'').join('|'))) || '';
+  const symCol  = 'Symbol';
+  const nameCol = 'Description';
 
   // Numeric detection: sample first 50 rows (skip blanks), column is numeric
   // if at least 30% of non-blank values parse as a real finite number
   const numericCols = allHeaders.filter(h => {
-    if(h === symCol || h === nameCol || h === maRawCol) return false;
+    if(h === symCol || h === nameCol) return false;
     const nonBlank = raw.slice(0, 50).map(r => (r[h]||'').trim()).filter(v => v !== '');
     if(nonBlank.length < 3) return false;
     const numericCount = nonBlank.filter(v => {
@@ -777,23 +775,22 @@ function runEngine(raw, sessionTag){
   const COL_MAP = {}; // safeKey → original header
   numericCols.forEach(h => { COL_MAP[safeKey(h)] = h; });
 
-  // ── Known special mappings for derived features ──
-  // These tell us which safeKey holds which meaning for computed features
-  const findKey = pattern => Object.keys(COL_MAP).find(k => pattern.test(k)) || null;
+  // ── Exact safeKey lookups for known TV CSV columns ──
+  const ck = k => k in COL_MAP ? k : null;
   const K = {
-    price:        findKey(/^price$/),
-    price_change: findKey(/price_change.*1_day|1_day.*price_change|^change.*1_day$/),
-    atr_pct:      findKey(/average_true_range_pct_.*14.*1_day|atr_pct_.*14.*1_day/),
-    atr_pct_1w:   findKey(/average_true_range_pct_.*14.*1_?w(eek)?|atr_pct_.*14.*1_?w(eek)?/),
-    perf_1w:      findKey(/performance.*1_week|perf.*1_week|1_week.*perf/),
-    volume:       findKey(/^volume_1_day$|^volume$/),
-    shareholders: findKey(/number_of_shareholders/),
-    piotroski:    findKey(/piotroski/),
-    high_1d:      findKey(/^high_1_day$/),
-    low_1d:       findKey(/^low_1_day$/),
-    open_1d:      findKey(/^open_1_day$/),
-    close_1d:     findKey(/^close_1_day$|^previous_close$/),
-    vwap:         findKey(/volume_weighted_average_price.*1_day/),
+    price:        ck('price'),
+    price_change: ck('price_change_pct_1_day'),
+    atr_pct:      ck('average_true_range_pct_14_1_day'),
+    atr_pct_1w:   ck('average_true_range_pct_14_1_week'),
+    perf_1w:      ck('market_capitalization_performance_pct_1_week'),
+    volume:       ck('volume_1_day'),
+    shareholders: ck('number_of_shareholders_annual'),
+    piotroski:    ck('piotroski_f_score_annual'),
+    high_1d:      ck('high_1_day'),
+    low_1d:       ck('low_1_day'),
+    open_1d:      ck('open_1_day'),
+    close_1d:     null,
+    vwap:         ck('volume_weighted_average_price_1_day'),
   };
 
   const parsed = raw.map(r => {
@@ -805,24 +802,9 @@ function runEngine(raw, sessionTag){
     return d;
   });
 
-  // ── Auto-detect Sector / Industry columns ──
-  // Look for text columns with repeated categorical values (not unique per row like name/symbol)
-  const SECTOR_PATTERNS = /^sector$/i;
-  const INDUSTRY_PATTERNS = /^industry$/i;
-  let sectorCol = allHeaders.find(h => SECTOR_PATTERNS.test(h.trim())) || null;
-  let industryCol = allHeaders.find(h => INDUSTRY_PATTERNS.test(h.trim())) || null;
-  // Fallback: detect any text column with 5-50 unique values (categorical grouping)
-  if(!sectorCol || !industryCol){
-    const candidates = allHeaders.filter(h => h!==symCol && h!==nameCol && h!==maRawCol && !numericCols.includes(h));
-    for(const h of candidates){
-      const vals = raw.slice(0,200).map(r=>(r[h]||'').trim()).filter(v=>v);
-      const uniq = new Set(vals);
-      if(vals.length>=50 && uniq.size>=5 && uniq.size<=50){
-        if(!sectorCol) sectorCol=h;
-        else if(!industryCol) industryCol=h;
-      }
-    }
-  }
+  // ── Sector column — fixed header in TV CSV ──
+  const sectorCol = allHeaders.includes('Sector') ? 'Sector' : null;
+  const industryCol = null; // TV CSV has no Industry column
   // Attach sector/industry text to parsed rows
   if(sectorCol) parsed.forEach((d,i) => { d._sector = (raw[i][sectorCol]||'').trim(); });
   if(industryCol) parsed.forEach((d,i) => { d._industry = (raw[i][industryCol]||'').trim(); });
@@ -1208,14 +1190,16 @@ function runEngine(raw, sessionTag){
     goodFromYesterday: goodFromYesterday,
     badFromYesterday: badFromYesterday,
     qualityTargetN: qualityN,
-    totalParsed: totalParsed
+    totalParsed: totalParsed,
+    removed: {...REMOVED},
+    survSize: Object.keys(NSE_SURV).length
   };
   COLS=getCols(); // refresh dynamic columns
   // Persist lightweight methodology data (everything except N² interCorr matrix)
   try{
     const methSave={targetCorr,targetCorrToday,mrmr,weights,features:FEATS,labels:LABELS,top10Feats,rocketCount:ENGINE_DATA.rocketCount,rocketThreshold:ENGINE_DATA.rocketThreshold,accSessions:ENGINE_DATA.accSessions,laggedNote:ENGINE_DATA.laggedNote,
       regime:ENGINE_DATA.regime,marketBreadth:ENGINE_DATA.marketBreadth,regimeSessions:ENGINE_DATA.regimeSessions,useRegimeCorr:ENGINE_DATA.useRegimeCorr,sectorCol:ENGINE_DATA.sectorCol,industryCol:ENGINE_DATA.industryCol,
-      yesterdayRockets:yesterdayRockets,goodFromYesterday:goodFromYesterday,badFromYesterday:badFromYesterday,qualityTargetN:qualityN,holdFactor:holdFactor,totalParsed:totalParsed};
+      yesterdayRockets:yesterdayRockets,goodFromYesterday:goodFromYesterday,badFromYesterday:badFromYesterday,qualityTargetN:qualityN,holdFactor:holdFactor,totalParsed:totalParsed,removed:{...REMOVED},survSize:Object.keys(NSE_SURV).length};
     localStorage.setItem(METH_STORE,JSON.stringify(methSave));
     // Update regime calendar: date → regime (use actual calendar date, not session date which rolls +1 after 4pm)
     const regCal=JSON.parse(localStorage.getItem(REGIME_CAL_STORE)||'{}');
@@ -1675,7 +1659,7 @@ function renderPerformance(){
     {key:'avgPct',label:'Avg%',align:'right',fmt:fmtPct,clrFn:clr},
     {key:'edge',label:'Edge',align:'right',bold:true,fmt:v=>v.toFixed(2),clrFn:v=>v>100?'var(--green)':v>0?'var(--amber)':'var(--red)'},
   ];
-  const sellHourTbl=makeSortableTable('perf-sell-hour',sellHourCols,sellHourRows,'edge',-1);
+  const sellHourTbl=makeSortableTable('tbl-sell-hour',sellHourCols,sellHourRows,'edge',-1);
 
   // ── Latest session — Orders.csv if available (today), else last tradebook date ──
   let todayHtml='';
@@ -1997,6 +1981,7 @@ function renderMethodology(){
   mc.innerHTML=`
     <nav style="position:sticky;top:var(--hdr-h,72px);z-index:50;background:var(--bg);padding:8px 0 10px;margin-bottom:8px;display:flex;gap:6px;flex-wrap:wrap;border-bottom:1px solid var(--border);box-shadow:0 2px 8px rgba(0,0,0,0.3);overflow-x:auto;-webkit-overflow-scrolling:touch">
       <a href="#meth-regime" onclick="event.preventDefault();scrollToSection('meth-regime')" style="padding:4px 12px;border-radius:6px;background:var(--bg-card);border:1px solid var(--border);color:var(--t2);font-size:11px;font-weight:600;text-decoration:none;cursor:pointer">🐂 Regime</a>
+      <a href="#meth-filters" onclick="event.preventDefault();scrollToSection('meth-filters')" style="padding:4px 12px;border-radius:6px;background:var(--bg-card);border:1px solid var(--border);color:var(--t2);font-size:11px;font-weight:600;text-decoration:none;cursor:pointer">🛡 Hard Filters</a>
       <a href="#meth-engine" onclick="event.preventDefault();scrollToSection('meth-engine')" style="padding:4px 12px;border-radius:6px;background:var(--bg-card);border:1px solid var(--border);color:var(--t2);font-size:11px;font-weight:600;text-decoration:none;cursor:pointer">⚙ Engine</a>
       <a href="#meth-rockets" onclick="event.preventDefault();scrollToSection('meth-rockets')" style="padding:4px 12px;border-radius:6px;background:var(--bg-card);border:1px solid var(--border);color:var(--fire);font-size:11px;font-weight:600;text-decoration:none;cursor:pointer">🚀 Rockets (${_rocketCount})</a>
       <a href="#meth-weights" onclick="event.preventDefault();scrollToSection('meth-weights')" style="padding:4px 12px;border-radius:6px;background:var(--bg-card);border:1px solid var(--border);color:var(--t2);font-size:11px;font-weight:600;text-decoration:none;cursor:pointer">📊 Weights (${_featureCount})</a>
@@ -2004,6 +1989,43 @@ function renderMethodology(){
       <a href="#meth-archive" onclick="event.preventDefault();scrollToSection('meth-archive')" style="padding:4px 12px;border-radius:6px;background:var(--bg-card);border:1px solid var(--border);color:${_archiveCount>0?'#818cf8':'var(--t2)'};font-size:11px;font-weight:600;text-decoration:none;cursor:pointer">🗃 Archive (${_archiveCount})</a>
     </nav>
     <div id="meth-regime">${regimeCardHTML}</div>
+
+    ${(()=>{
+      const rm=E.removed||{};
+      const survSz=E.survSize??-1;
+      const nseLoaded=survSz>0;
+      const survWarn=survSz===0?`<div style="margin-top:6px;padding:6px 10px;background:rgba(239,68,68,.1);border:1px solid rgba(239,68,68,.3);border-radius:6px;font-size:11px;color:var(--red)">⚠ NSE ZIP not uploaded this session — surveillance filter is <strong>inactive</strong>. Upload Reports-Daily-Multiple.zip alongside TV CSV.</div>`:'';
+      const rows=[
+        {name:'Upper Circuit',criteria:'Price change ≥ 19.5%',removed:rm.uc||0,active:true,warn:''},
+        {name:'Surveillance — Critical 🔴',criteria:'Default/ICA/ESM/BZ-SZ/encumbrance/F&O removal/listing fee',removed:rm.surv||0,active:nseLoaded,warn:nseLoaded?'':`<span style="color:var(--red);font-size:10px"> ⚠ inactive (no NSE ZIP)</span>`},
+        {name:'Surveillance — High Risk 🟠',criteria:'GSM/ASM/pledge/loss-making/EPS=0/PE>50/PAN<100/SMS manipulation/SME irregularity',removed:rm.surv||0,active:nseLoaded,warn:nseLoaded?'':`<span style="color:var(--red);font-size:10px"> ⚠ inactive (no NSE ZIP)</span>`},
+        {name:'Low Liquidity',criteria:'Shareholders < 500 OR Volume < 5,000',removed:rm.liq||0,active:true,warn:''},
+        {name:'Zero F-Score',criteria:'Piotroski F-Score = 0 or null',removed:rm.fscore||0,active:true,warn:''},
+        {name:'Low Delivery',criteria:'Delivery % < 30% or null',removed:rm.deliv||0,active:nseLoaded,warn:nseLoaded?'':`<span style="color:var(--amber);font-size:10px"> ⚠ no NSE data</span>`},
+        {name:'Fading (Peak Retention)',criteria:'Peak retention < 50% when day range > 1%',removed:rm.fade||0,active:true,warn:''},
+      ];
+      const tRows=rows.map(r=>`<tr style="border-bottom:1px solid var(--border)">
+        <td style="padding:7px 10px;color:${r.active?'var(--t1)':'var(--t3)'};font-weight:600;white-space:nowrap">${r.name}${r.warn}</td>
+        <td style="padding:7px 10px;color:var(--t2);font-size:11px">${r.criteria}</td>
+        <td style="padding:7px 10px;text-align:right;font-family:'DM Mono',monospace;font-weight:700;color:${r.removed>0?'var(--red)':'var(--t3)'}">${r.active?(r.removed>0?r.removed:'0'):'—'}</td>
+      </tr>`).join('');
+      const survDetail=survSz>0?`<div style="font-size:11px;color:var(--t3);margin-top:6px">NSE surveillance list: <strong style="color:var(--t1)">${survSz}</strong> flagged symbols loaded</div>`:'';
+      return `<div id="meth-filters" style="margin-top:16px;background:var(--bg-card);border:1px solid var(--border);border-radius:10px;overflow:hidden">
+        <div style="padding:10px 16px;font-size:10px;font-weight:700;color:var(--t2);text-transform:uppercase;letter-spacing:.1em;border-bottom:1px solid var(--border)">🛡 Hard Filters — Pre-Scoring Removals</div>
+        <div style="overflow-x:auto">
+          <table style="width:100%;border-collapse:collapse;font-size:12px">
+            <thead><tr style="color:var(--t3);font-size:10px;text-transform:uppercase;letter-spacing:.06em;border-bottom:1px solid var(--border)">
+              <th style="padding:6px 10px;text-align:left">Filter</th>
+              <th style="padding:6px 10px;text-align:left">Criteria</th>
+              <th style="padding:6px 10px;text-align:right">Removed</th>
+            </tr></thead>
+            <tbody>${tRows}</tbody>
+          </table>
+        </div>
+        ${survWarn}${survDetail}
+      </div>`;
+    })()}
+
     <h3 id="meth-engine" style="margin-top:18px">Scoring Engine — Regime-Adaptive mRMR + NSE Data Intelligence</h3>
     <div class="m-grid">
       <div class="m-card"><h4>🎯 Quality-Adjusted Target</h4><p>Stocks that moved <strong>≥${E.rocketThreshold||10}% up</strong>, plus yesterday's rockets that <strong>held today</strong> (didn't collapse beyond hold threshold). Yesterday's rockets that collapsed get reclassified as 0 — the engine <em>unlearns</em> features that predicted fragile spikes. Over sessions, this trains the engine to recommend <strong>durable</strong> moves, not one-day spikes. See the <a href="#meth-rockets" style="color:var(--fire)">Yesterday's Rockets</a> panel below.</p></div>
@@ -2791,22 +2813,16 @@ function resetBrain(btn){
 // ── Holdings & Trailing SL ──
 let HOLD_COST_MAP={}; // {symbol: avgCost} — ALL rows including qty=0 for position cross-ref
 function parseHoldings(text){
+  // Zerodha Holdings.csv — exact column names
   const rows=parseCSV(text);
   if(!rows.length) return [];
-  const hdrs=Object.keys(rows[0]);
-  const find=(patterns)=>hdrs.find(h=>patterns.some(p=>p.test(h.trim())))||null;
-  const symCol=find([/^instrument$/i,/^symbol$/i,/^stock$/i,/^tradingsymbol$/i]);
-  const qtyCol=find([/^qty/i,/^quantity/i]);
-  const avgCol=find([/^avg/i,/^average.*cost/i,/^buy.*price/i]);
-  const ltpCol=find([/^ltp$/i,/^last.*price/i,/^price$/i,/^cur.*price/i]);
-  if(!symCol||!qtyCol){console.warn('Holdings CSV: could not detect Symbol/Qty columns');return [];}
   // Build cost map from ALL rows (including sold/zero qty)
   HOLD_COST_MAP={};
   const all=rows.map(r=>{
-    const sym=normSym(r[symCol]);
-    const qty=num(r[qtyCol]);
-    const avg=avgCol?num(r[avgCol]):null;
-    const ltp=ltpCol?num(r[ltpCol]):null;
+    const sym=normSym(r['Instrument']);
+    const qty=num(r['Qty.']);
+    const avg=num(r['Avg. cost']);
+    const ltp=num(r['LTP']);
     if(!sym) return null;
     if(avg!=null) HOLD_COST_MAP[sym]=avg;
     return{symbol:sym,qty:qty||0,avgCost:avg,ltp};
@@ -2821,28 +2837,20 @@ function parseHoldings(text){
 // Parses Zerodha order history CSV for same-day round trips (intraday P&L not in tradebook).
 let ORDERS_TODAY=null; // [{symbol, type, qty, price, time}] — COMPLETE orders only
 function parseOrders(text){
+  // Zerodha Orders.csv — exact column names
   const rows=parseCSV(text);
   if(!rows.length) return null;
-  const hdrs=Object.keys(rows[0]);
-  const find=(pats)=>hdrs.find(h=>pats.some(p=>p.test(h.trim())))||null;
-  const timeCol=find([/^time$/i,/^order.*time$/i,/^date.*time$/i]);
-  const typeCol=find([/^type$/i,/^trade.*type$/i,/^buy.*sell$/i]);
-  const symCol=find([/^instrument$/i,/^symbol$/i,/^tradingsymbol$/i]);
-  const qtyCol=find([/^qty\.?$/i,/^quantity$/i]);
-  const priceCol=find([/^avg\.?\s*price$/i,/^average.*price$/i,/^price$/i]);
-  const statusCol=find([/^status$/i]);
-  if(!symCol||!typeCol||!qtyCol||!priceCol){console.warn('Orders CSV: missing columns');return null;}
   const orders=[];
   rows.forEach(r=>{
-    const status=(r[statusCol]||'').trim().toUpperCase();
+    const status=(r['Status']||'').trim().toUpperCase();
     if(status&&status!=='COMPLETE') return; // skip CANCELLED etc
-    const sym=normSym(r[symCol]);
-    const type=(r[typeCol]||'').trim().toUpperCase();
-    const rawQty=(r[qtyCol]||'').trim();
+    const sym=normSym(r['Instrument']);
+    const type=(r['Type']||'').trim().toUpperCase();
+    const rawQty=(r['Qty.']||'').trim();
     // qty may be "753/753" format — take executed (first number)
     const qty=num(rawQty.split('/')[0]);
-    const price=num(r[priceCol]);
-    const time=(r[timeCol]||'').trim();
+    const price=num(r['Avg. price']);
+    const time=(r['Time']||'').trim();
     if(!sym||!qty||!price||!type) return;
     orders.push({symbol:sym,type,qty:Math.abs(qty),price,time});
   });
@@ -2852,20 +2860,14 @@ function parseOrders(text){
 // ── Positions Parser ──
 // Parses Zerodha Positions.csv for open T+1/intraday positions (not yet in Holdings).
 function parsePositions(text){
+  // Zerodha Positions.csv — exact column names
   const rows=parseCSV(text);
   if(!rows.length) return [];
-  const hdrs=Object.keys(rows[0]);
-  const find=(pats)=>hdrs.find(h=>pats.some(p=>p.test(h.trim())))||null;
-  const symCol=find([/^instrument$/i,/^symbol$/i,/^tradingsymbol$/i]);
-  const qtyCol=find([/^qty\.?$/i,/^quantity$/i,/^net.*qty$/i,/^buy.*qty$/i]);
-  const avgCol=find([/^avg\.?$/i,/^avg\.?\s*price$/i,/^average.*price$/i,/^buy.*avg$/i,/^avg.*buy/i]);
-  const ltpCol=find([/^ltp$/i,/^last.*price$/i,/^close$/i]);
-  if(!symCol||!qtyCol){console.warn('Positions CSV: missing columns');return [];}
   return rows.map(r=>{
-    const sym=normSym(r[symCol]);
-    const qty=num(r[qtyCol]);
-    const avg=avgCol?num(r[avgCol]):null;
-    const ltp=ltpCol?num(r[ltpCol]):null;
+    const sym=normSym(r['Instrument']);
+    const qty=num(r['Qty.']);
+    const avg=num(r['Avg.']);
+    const ltp=num(r['LTP']);
     if(!sym||!qty||qty<=0) return null;
     return{symbol:sym,qty,avgCost:avg,ltp};
   }).filter(Boolean);
@@ -2925,17 +2927,12 @@ function computeIntradayPnl(orders){
 // computes adaptive SL/TGT from actual trading history.
 // Open positions (unmatched buys) are excluded from all stats.
 function parseTradebook(text){
+  // Zerodha TRADEBOOK.csv — exact column names
   const rows=parseCSV(text);
   if(!rows.length) return null;
-  const hdrs=Object.keys(rows[0]);
-  const find=(pats)=>hdrs.find(h=>pats.some(p=>p.test(h.trim())))||null;
-  const symCol=find([/^symbol$/i,/^tradingsymbol$/i]);
-  const dateCol=find([/^trade_date$/i,/^date$/i]);
-  const typeCol=find([/^trade_type$/i,/^type$/i,/^buy.*sell/i]);
-  const qtyCol=find([/^quantity$/i,/^qty$/i]);
-  const priceCol=find([/^price$/i,/^trade_price$/i]);
-  const timeCol=find([/^order_execution_time$/i,/^time$/i]);
-  if(!symCol||!typeCol||!qtyCol||!priceCol){console.warn('Tradebook CSV: missing columns');return null;}
+  const symCol='symbol', dateCol='trade_date', typeCol='trade_type',
+        qtyCol='quantity', priceCol='price', timeCol='order_execution_time';
+  if(!rows[0][symCol]&&!rows[0][typeCol]){console.warn('Tradebook CSV: missing columns');return null;}
 
   // Group fills by sym+date+type → one order per (sym, date, direction)
   // Multiple fills for the same order get qty-weighted avg price
@@ -3534,6 +3531,7 @@ function downloadBasket(orders, filename){
 function switchTab(n){
   document.querySelectorAll('#mainTabs .tab').forEach((t,i)=>t.classList.toggle('act',i===n));
   document.querySelectorAll('.tp').forEach((t,i)=>t.classList.toggle('act',i===n));
+  if(n===1) renderMethodology();
   if(n===2) renderPerformance();
   updateTabCounts();
 }
@@ -3979,9 +3977,9 @@ function loadFilterState(){
   // Step 3b: Render performance tab (tradebook-only, no ALL needed)
   try{ renderPerformance(); }catch(e){ console.error('INIT step3b renderPerformance failed:',e); }
 
-  // Step 4: Render methodology
+  // Step 4: Render methodology (only needs ENGINE_DATA from METH_STORE, not ALL)
   try{
-    if(ALL.length && ENGINE_DATA && ENGINE_DATA.features) renderMethodology();
+    if(ENGINE_DATA && ENGINE_DATA.features && ENGINE_DATA.features.length) renderMethodology();
   }catch(e){ console.error('INIT step4 renderMethodology failed:',e); }
 
   // Step 5: Load filter state
