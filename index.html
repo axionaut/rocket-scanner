@@ -1,4 +1,4 @@
-<!DOCTYPE html>
+﻿<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="UTF-8">
@@ -270,6 +270,7 @@ table.main tbody td{padding:9px 11px;font-family:'DM Mono',monospace;font-size:1
    <div class="file-slot" id="slot-nse">🏛 Reports-Daily-Multiple.zip</div>
    <div class="file-slot" id="slot-hold">🛡 Holdings.csv</div>
    <div class="file-slot" id="slot-pos">📊 Positions.csv</div>
+   <div class="file-slot" id="slot-ord">🧾 Orders.csv</div>
    <div class="file-slot" id="slot-tb">📒 Tradebook.csv</div>
   </div>
  </div>
@@ -1495,37 +1496,78 @@ function getHoldingAvgCost(symbol){
 }
 
 function computeBookedToday(){
-  if(!POSITIONS||!POSITIONS.length) return null;
-  const sellsBySymbol={};
-  POSITIONS.forEach(p=>{
-    if(!p.isSell) return;
-    const absQty=Math.abs(p.qty);
-    const sellPrice=p.avg||0;
-    if(!p.symbol||!sellPrice||!absQty) return;
-    if(!sellsBySymbol[p.symbol]) sellsBySymbol[p.symbol]={symbol:p.symbol,qty:0,sellValue:0};
-    sellsBySymbol[p.symbol].qty+=absQty;
-    sellsBySymbol[p.symbol].sellValue+=sellPrice*absQty;
+  if(!ORDERS_TODAY||!ORDERS_TODAY.length) return null;
+  const bySym={};
+  ORDERS_TODAY.forEach(o=>{
+    if(!o.symbol||!o.type||!o.qty||!o.price) return;
+    if(!bySym[o.symbol]) bySym[o.symbol]={buys:[],sells:[]};
+    if(o.type==='BUY') bySym[o.symbol].buys.push({...o});
+    else if(o.type==='SELL') bySym[o.symbol].sells.push({...o});
   });
-  const sellLegs=Object.values(sellsBySymbol).map(s=>({
-    symbol:s.symbol,
-    qty:s.qty,
-    sellPrice:s.qty?s.sellValue/s.qty:0
-  }));
-  if(!sellLegs.length) return null;
+  const symbols=Object.keys(bySym);
+  if(!symbols.length) return null;
 
-  let total=0, count=0, missingCost=0;
-  sellLegs.forEach(sell=>{
-    const holdCost=getHoldingAvgCost(sell.symbol);
-    if(holdCost==null){missingCost++;return;}
-    const sellCharges=calcZerodhaCharges(sell.sellPrice,sell.qty,true);
-    total+=(sell.sellPrice-holdCost)*sell.qty-sellCharges;
-    count++;
+  let total=0, count=0, missingCost=0, sellCount=0;
+  symbols.forEach(sym=>{
+    const entry=bySym[sym];
+    const sells=entry.sells.sort((a,b)=>a.time.localeCompare(b.time));
+    if(!sells.length) return;
+    sellCount++;
+
+    const buys=entry.buys.sort((a,b)=>a.time.localeCompare(b.time));
+    let matchedQty=0;
+    let matchedBuyValue=0;
+    let matchedSellValue=0;
+
+    while(buys.length && sells.length){
+      const buy=buys[0];
+      const sell=sells[0];
+      const m=Math.min(buy.qty,sell.qty);
+      matchedQty += m;
+      matchedBuyValue += m * buy.price;
+      matchedSellValue += m * sell.price;
+      buy.qty -= m;
+      sell.qty -= m;
+      if(buy.qty===0) buys.shift();
+      if(sell.qty===0) sells.shift();
+    }
+
+    const deliveryQty=sells.reduce((sum,o)=>sum+o.qty,0);
+    const deliveryValue=sells.reduce((sum,o)=>sum+o.price*o.qty,0);
+    let symbolNet=0;
+    let symbolCount=0;
+
+    if(matchedQty>0){
+      const matchedBuyAvg=matchedBuyValue/matchedQty;
+      const matchedSellAvg=matchedSellValue/matchedQty;
+      const sellCharge=calcZerodhaCharges(matchedSellAvg,matchedQty,true);
+      const buyCharge=calcZerodhaCharges(matchedBuyAvg,matchedQty,false);
+      symbolNet += (matchedSellAvg-matchedBuyAvg)*matchedQty - sellCharge - buyCharge;
+      symbolCount=1;
+    }
+
+    if(deliveryQty>0){
+      const holdCost=getHoldingAvgCost(sym);
+      if(holdCost==null){
+        missingCost++;
+      } else {
+        const deliverySellAvg=deliveryValue/deliveryQty;
+        const sellCharge=calcZerodhaCharges(deliverySellAvg,deliveryQty,true);
+        symbolNet += (deliverySellAvg-holdCost)*deliveryQty - sellCharge;
+        symbolCount=1;
+      }
+    }
+
+    if(symbolCount>0){
+      total += symbolNet;
+      count++;
+    }
   });
 
   return {
     total,
     count,
-    sellCount:sellLegs.length,
+    sellCount,
     missingCost,
     date:getSessionDate()
   };
@@ -3114,6 +3156,34 @@ function parsePositions(text){
   }).filter(Boolean);
 }
 
+function parseOrders(text){
+  const rows=parseCSV(text);
+  if(!rows.length) return [];
+  const hdrs=Object.keys(rows[0]);
+  const find=(patterns)=>hdrs.find(h=>patterns.some(p=>p.test(h.trim())))||null;
+  const timeCol=find([/^time$/i,/^timestamp$/i,/^date$/i]);
+  const typeCol=find([/^type$/i]);
+  const symCol=find([/^instrument$/i,/^symbol$/i,/^tradingsymbol$/i,/^stock$/i]);
+  const qtyCol=find([/^qty/i,/^quantity/i]);
+  const priceCol=find([/^avg.*price$/i,/^price$/i,/^avg.*trade/i]);
+  const statusCol=find([/^status$/i]);
+  if(!symCol||!typeCol||!qtyCol||!priceCol||!statusCol){console.warn('Orders CSV: missing required columns');return [];}
+  return rows.map(r=>{
+    const status=String(r[statusCol]||'').trim().toUpperCase();
+    if(status!=='COMPLETE') return null;
+    const sym=normSym(r[symCol]);
+    const type=String(r[typeCol]||'').trim().toUpperCase();
+    if(!sym||!(type==='BUY'||type==='SELL')) return null;
+    let qtyRaw=String(r[qtyCol]||'').trim();
+    if(qtyRaw.includes('/')) qtyRaw=qtyRaw.split('/')[0];
+    const qty=num(qtyRaw);
+    const price=num(r[priceCol]);
+    if(qty===null||qty===0||price===null) return null;
+    const time=String(r[timeCol]||'').trim()||getSessionDate();
+    return {symbol:sym,type,qty,price,time};
+  }).filter(Boolean);
+}
+
 // ── Tradebook Parser & Adaptive Stats ──
 // Parses Zerodha tradebook CSV, reconstructs FIFO round-trip trades,
 // computes adaptive SL/TGT from actual trading history.
@@ -3526,13 +3596,14 @@ function setMsg(m){document.getElementById('ldMsg').textContent=m;}
 
 async function processFiles(files){
   NSE_BHAV={};NSE_52W={};NSE_SURV={};NSE_BULK={};NSE_BLOCK={};NSE_LOADED=false;SELECTED=new Set();
-  let tvFile=null,nseZip=null,holdFile=null,posFile=null,tbFile=null;
+  let tvFile=null,nseZip=null,holdFile=null,posFile=null,ordFile=null,tbFile=null;
   for(const f of files){
     if(f.name.toLowerCase().endsWith('.zip')||f.name.toLowerCase().includes('.zip')){nseZip=nseZip||f;continue;}
     if(!f.name.toLowerCase().endsWith('.csv'))continue;
     const fname_l=f.name.toLowerCase();
     if(fname_l.includes('position')){posFile=f;continue;}
     if(fname_l.includes('holding')){holdFile=f;continue;}
+    if(fname_l.includes('order')){ordFile=f;continue;}
     if(fname_l.includes('tradebook')){tbFile=f;continue;}
     if(fname_l.includes('all nse')){tvFile=f;continue;}
     if(!tvFile) tvFile=f; // fallback
@@ -3678,8 +3749,17 @@ async function processFiles(files){
       POSITIONS=parsePositions(posText);
       try{FS.set(POS_STORE,{positions:POSITIONS,hash:posHash,sessionDate:today});}catch(e){}
     }
+    // Process orders if uploaded
+    if(ordFile){
+      setMsg('Processing orders...');
+      const ordSlot=document.getElementById('slot-ord');
+      if(ordSlot){ordSlot.textContent='🧾 '+ordFile.name;ordSlot.classList.add('ok');}
+      const ordText=await ordFile.text();
+      ORDERS_TODAY=parseOrders(ordText);
+      try{FS.set(ORDERS_STORE,ORDERS_TODAY);}catch(e){}
+    }
     // Re-render stats bar so the Booked Today card reflects fresh holdings/positions
-    if(holdFile||posFile) renderStats();
+    if(holdFile||posFile||ordFile) renderStats();
     // Process tradebook if uploaded
     if(tbFile){
       setMsg('Analyzing tradebook...');
