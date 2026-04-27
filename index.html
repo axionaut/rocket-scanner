@@ -299,7 +299,7 @@ table.main tbody td{padding:9px 11px;font-family:'DM Mono',monospace;font-size:1
  <div class="tp act" id="tab0">
   <button class="ctrls-toggle" id="ctrlsToggle" onclick="toggleFilters()">⚙ Filters <span id="ctrlsArrow">▼</span></button>
   <div class="ctrls" id="ctrlsPanel">
-   <div class="fg"><span class="fg-lbl" style="color:var(--orange)">Min Score</span><input type="number" id="fMinScore" value="70" placeholder="70" min="0" max="100" step="1" style="width:72px;padding:8px 10px;background:var(--bg-card);border:1px solid var(--border);border-radius:8px;color:var(--t1);font-family:'DM Mono',monospace;font-size:12px;outline:none;transition:border .2s" onfocus="this.style.borderColor='var(--orange)'" onblur="this.style.borderColor='var(--border)'" oninput="applyFilters()"></div>
+   <div class="fg"><span class="fg-lbl" style="color:var(--orange)">Min Score</span><input type="number" id="fMinScore" value="70" placeholder="70" min="70" max="100" step="1" style="width:72px;padding:8px 10px;background:var(--bg-card);border:1px solid var(--border);border-radius:8px;color:var(--t1);font-family:'DM Mono',monospace;font-size:12px;outline:none;transition:border .2s" onfocus="this.style.borderColor='var(--orange)'" onblur="this.style.borderColor='var(--border)'" oninput="applyFilters()"></div>
    <div class="fg"><span class="fg-lbl">Price ₹</span><div style="display:flex;gap:5px;align-items:center">
    <input type="number" id="fPriceMin" placeholder="Min" min="0" style="width:72px;padding:8px 10px;background:var(--bg-card);border:1px solid var(--border);border-radius:8px;color:var(--t1);font-family:'DM Mono',monospace;font-size:12px;outline:none;transition:border .2s" onfocus="this.style.borderColor='var(--blue)'" onblur="this.style.borderColor='var(--border)'" oninput="applyFilters()">
    <span style="color:var(--t3);font-size:11px">–</span>
@@ -3378,29 +3378,21 @@ function showGttPopup(){
 
   if(!rows.length){showToast('No holdings or open positions found.',3000,true);return;}
 
-  // Sort by P&L% descending (nulls last, then alphabetical)
-  rows.sort((a,b)=>{
-    if(a.pnlPct===null&&b.pnlPct===null) return a.sym.localeCompare(b.sym);
-    if(a.pnlPct===null) return 1;
-    if(b.pnlPct===null) return -1;
-    return b.pnlPct-a.pnlPct;
-  });
+  // Define sortable columns for GTT table
+  const gttCols=[
+    {key:'sym',label:'Symbol',align:'left',fmt:v=>v,clrFn:()=>'var(--t1)',bold:true},
+    {key:'qty',label:'Qty',align:'right',fmt:v=>v,clrFn:()=>'var(--t1)'},
+    {key:'avg',label:'Avg Cost',align:'right',fmt:v=>fmtRs(v),clrFn:()=>'var(--t1)'},
+    {key:'ltp',label:'LTP',align:'right',fmt:v=>fmtRs(v),clrFn:()=>'var(--t1)'},
+    {key:'pnlPct',label:'P&L%',align:'right',fmt:v=>fmtPct(v),clrFn:clr,bold:true},
+    {key:'daysHeld',label:'Days Held',align:'right',fmt:v=>v!=null?v+'d':'—',clrFn:()=>'var(--t2)'},
+    {key:'tgtPrice',label:'Target ₹',align:'right',fmt:v=>fmtRs(v)+(v!=null?`<span style="font-size:10px;color:var(--t3);margin-left:4px">+${adaptiveTGT}%</span>`:''),clrFn:()=>'var(--green)'},
+    {key:'slPrice',label:'SL ₹',align:'right',fmt:v=>fmtRs(v)+(v!=null?`<span style="font-size:10px;color:var(--t3);margin-left:4px">-${adaptiveSL}%</span>`:''),clrFn:()=>'var(--red)'},
+  ];
 
-  const fmtRs=v=>v==null?'—':'₹'+tick(v).toLocaleString('en-IN',{minimumFractionDigits:2,maximumFractionDigits:2});
-  const fmtPct=v=>v==null?'—':(v>=0?'+':'')+v.toFixed(2)+'%';
-  const clr=v=>v==null?'var(--t3)':v>=0?'var(--green)':'var(--red)';
-
-  const tbody=rows.map(r=>`
-    <tr style="border-bottom:1px solid var(--border)">
-      <td style="padding:8px 10px;font-weight:700;font-size:12px">${r.sym}</td>
-      <td style="padding:8px 10px;text-align:right;font-family:'DM Mono',monospace;font-size:12px">${r.qty}</td>
-      <td style="padding:8px 10px;text-align:right;font-family:'DM Mono',monospace;font-size:12px">${fmtRs(r.avg)}</td>
-      <td style="padding:8px 10px;text-align:right;font-family:'DM Mono',monospace;font-size:12px">${fmtRs(r.ltp)}</td>
-      <td style="padding:8px 10px;text-align:right;font-family:'DM Mono',monospace;font-size:12px;color:${clr(r.pnlPct)};font-weight:700">${fmtPct(r.pnlPct)}</td>
-      <td style="padding:8px 10px;text-align:right;font-size:12px;color:var(--t2)">${r.daysHeld!=null?r.daysHeld+'d':'—'}</td>
-      <td style="padding:8px 10px;text-align:right;font-family:'DM Mono',monospace;font-size:12px;color:var(--green)">${fmtRs(r.tgtPrice)}<span style="font-size:10px;color:var(--t3);margin-left:4px">+${adaptiveTGT}%</span></td>
-      <td style="padding:8px 10px;text-align:right;font-family:'DM Mono',monospace;font-size:12px;color:var(--red)">${fmtRs(r.slPrice)}<span style="font-size:10px;color:var(--t3);margin-left:4px">-${adaptiveSL}%</span></td>
-    </tr>`).join('');
+  const gttTable=makeSortableTable('gtt-table',gttCols,rows,'pnlPct',-1);
+  const tableHtml=gttTable.getHtml();
+  gttTable.render();
 
   const existing=document.getElementById('gttModal');
   if(existing) existing.remove();
@@ -3418,21 +3410,7 @@ function showGttPopup(){
         <button onclick="document.getElementById('gttModal').remove()" style="background:none;border:1px solid var(--border);color:var(--t3);border-radius:6px;padding:5px 12px;cursor:pointer;font-size:13px">✕</button>
       </div>
       <div style="overflow-x:auto">
-        <table style="width:100%;border-collapse:collapse">
-          <thead>
-            <tr style="border-bottom:1px solid var(--border-hi)">
-              <th style="padding:8px 10px;text-align:left;font-size:11px;color:var(--t3);font-weight:600">Symbol</th>
-              <th style="padding:8px 10px;text-align:right;font-size:11px;color:var(--t3);font-weight:600">Qty</th>
-              <th style="padding:8px 10px;text-align:right;font-size:11px;color:var(--t3);font-weight:600">Avg Cost</th>
-              <th style="padding:8px 10px;text-align:right;font-size:11px;color:var(--t3);font-weight:600">LTP</th>
-              <th style="padding:8px 10px;text-align:right;font-size:11px;color:var(--t3);font-weight:600">P&amp;L%</th>
-              <th style="padding:8px 10px;text-align:right;font-size:11px;color:var(--t3);font-weight:600">Days Held</th>
-              <th style="padding:8px 10px;text-align:right;font-size:11px;color:var(--green);font-weight:600">Target ₹</th>
-              <th style="padding:8px 10px;text-align:right;font-size:11px;color:var(--red);font-weight:600">SL ₹</th>
-            </tr>
-          </thead>
-          <tbody>${tbody}</tbody>
-        </table>
+        ${tableHtml}
       </div>
     </div>`;
   modal.addEventListener('click',e=>{if(e.target===modal) modal.remove();});
