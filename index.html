@@ -2692,7 +2692,11 @@ function renderBasketBtn(){
   }
   if(gttBtn){
     const gttSpan=document.getElementById('gttCount');
-    const n=(HOLDINGS?.length||0)+(POSITIONS?.length||0);
+    // Deduplicate by symbol (a stock can be in both HOLDINGS and POSITIONS)
+    const symSet=new Set();
+    if(POSITIONS?.length) POSITIONS.forEach(p=>{if(p.qty>0) symSet.add(p.symbol);});
+    if(HOLDINGS?.length) HOLDINGS.forEach(h=>{if(h.qty>0) symSet.add(h.symbol);});
+    const n=symSet.size;
     if(gttSpan)gttSpan.textContent=n>0?`(${n})`:'';
     gttBtn.disabled=n===0;
   }
@@ -3941,6 +3945,8 @@ initApp();
 function saveFilterState(){
   const state={
     minScore:document.getElementById('fMinScore')?.value||'70',
+    priceMin:document.getElementById('fPriceMin')?.value||'',
+    priceMax:document.getElementById('fPriceMax')?.value||'',
     fscore:document.getElementById('fFscore')?.value||'',
     fvol:VOL_AUTO?'':document.getElementById('fVol')?.value||'',
     volMult:document.getElementById('fVolMult')?.value||'240',
@@ -3961,6 +3967,8 @@ function loadFilterState(){
   try{
     const state=JSON.parse(localStorage.getItem(SCANNER_STORE)||'{}');
     if(state.minScore){const el=document.getElementById('fMinScore');if(el)el.value=state.minScore;}
+    if(state.priceMin){const el=document.getElementById('fPriceMin');if(el)el.value=state.priceMin;}
+    if(state.priceMax){const el=document.getElementById('fPriceMax');if(el)el.value=state.priceMax;}
     if(state.fscore){const el=document.getElementById('fFscore');if(el)el.value=state.fscore;}
     if(state.fsh){const el=document.getElementById('fSh');if(el)el.value=state.fsh;}
     if(state.fMin1D){const el=document.getElementById('fMin1D');if(el)el.value=state.fMin1D;}
@@ -3979,6 +3987,7 @@ function loadFilterState(){
     if(state.sortCol)SCOL=state.sortCol;
     if(state.sortDir)SDIR=state.sortDir;
   }catch(e){console.warn('Could not load filter state',e);}
+  
 }
 
 
