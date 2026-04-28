@@ -1934,7 +1934,7 @@ function renderPerformance(){
         {key:'lots',label:'Trades',align:'right',fmt:v=>v,clrFn:()=>'var(--t2)'},
         {key:'buyPrice',label:'Buy ₹',align:'right',fmt:v=>v.toLocaleString('en-IN'),clrFn:()=>'var(--t2)'},
         {key:'sellPrice',label:'Sell ₹',align:'right',fmt:v=>v.toLocaleString('en-IN'),clrFn:()=>'var(--t2)'},
-        {key:'charges',label:'Charges ₹',align:'right',fmt:v=>v!=null?fmtRs(v):'—',clrFn:()=>'var(--red)'},
+        {key:'charges',label:'Charges ₹',align:'right',fmt:v=>v!=null?'−₹'+Math.abs(v).toLocaleString('en-IN'):'—',clrFn:()=>'var(--red)'},
         {key:'netPnl',label:'Net P&L',align:'right',bold:true,fmt:fmtRs,clrFn:clr},
       ];
       const latestTbl=makeSortableTable('perf-latest',latestCols,latestRows,'_sort',-1);
@@ -2506,13 +2506,12 @@ function renderBasketBtn(){
   }
   if(gttBtn){
     const gttSpan=document.getElementById('gttCount');
-    // Deduplicate by symbol (a stock can be in both HOLDINGS and POSITIONS)
     const symSet=new Set();
     if(POSITIONS?.length) POSITIONS.forEach(p=>{if(p.qty>0) symSet.add(p.symbol);});
     if(HOLDINGS?.length) HOLDINGS.forEach(h=>{if(h.qty>0) symSet.add(h.symbol);});
     const n=symSet.size;
     if(gttSpan)gttSpan.textContent=n>0?`(${n})`:'';
-    gttBtn.disabled=n===0;
+    gttBtn.disabled=false; // always enabled — showGttPopup shows toast if no data
   }
 }
 function renderBasketSummary(){
@@ -3109,11 +3108,16 @@ function parseTradebook(text){
     lastBooked
   };
 
-  // Add netPnl (with charges) per trip and store full array for renderPerformance
+  // Add netPnl (with charges) per trip and store full array for renderPerformance.
+  // DP (₹15.34) is charged once per ISIN per sell day — track which combos already charged.
+  const dpCharged=new Set();
   const tripsData=roundTrips.map(r=>{
     const intra=r.holdDays===0;
-    const bc=calcZerodhaCharges(r.buyPrice,r.qty,false,intra);
-    const sc=calcZerodhaCharges(r.sellPrice,r.qty,true,intra);
+    const dpKey=r.sym+'|'+r.sellDate;
+    const skipDp=intra||dpCharged.has(dpKey);
+    if(!intra) dpCharged.add(dpKey);
+    const bc=calcZerodhaCharges(r.buyPrice,r.qty,false,intra,false);
+    const sc=calcZerodhaCharges(r.sellPrice,r.qty,true,intra,skipDp);
     const charges=+(bc+sc).toFixed(0);
     const netPnl=+((r.sellPrice-r.buyPrice)*r.qty-charges).toFixed(0);
     const netPnlPct=r.capital>0?+(netPnl/r.capital*100).toFixed(2):r.pnlPct;
@@ -3154,7 +3158,8 @@ function parseTradebook(text){
 }
 
 // Zerodha charge calculator for one leg. isIntraday=true → MIS rates, false → CNC/delivery rates.
-function calcZerodhaCharges(price, qty, isSell, isIntraday){
+// skipDp=true suppresses the ₹15.34 DP charge (use for 2nd+ trips of same ISIN on same sell day).
+function calcZerodhaCharges(price, qty, isSell, isIntraday, skipDp){
   const posVal=price*Math.abs(qty);
   const brokerage=isIntraday?Math.min(0.0003*posVal,20):0;  // MIS: min(0.03%,₹20); CNC: ₹0
   const stt=isSell?(isIntraday?0.00025:0.001)*posVal:0;     // STT sell-only: MIS 0.025%, CNC 0.1%
@@ -3162,7 +3167,7 @@ function calcZerodhaCharges(price, qty, isSell, isIntraday){
   const sebi=0.000001*posVal;                                // SEBI: ₹10/crore both sides
   const gst=0.18*(brokerage+sebi+txn);                      // GST: 18% on (brokerage+txn+SEBI)
   const stamp=isSell?0:(isIntraday?0.00003:0.00015)*posVal; // Stamp buy-only: MIS 0.003%, CNC 0.015%
-  const dp=(isSell&&!isIntraday)?15.34:0;                   // DP: ₹15.34 sell-only, CNC only
+  const dp=(isSell&&!isIntraday&&!skipDp)?15.34:0;          // DP: ₹15.34 sell-only, CNC, once per ISIN/day
   return brokerage+stt+txn+sebi+gst+stamp+dp;
 }
 
@@ -3220,7 +3225,7 @@ function showGttPopup(){
   if(POSITIONS?.length) POSITIONS.forEach(p=>{if(p.qty>0) addSym(p.symbol,p.qty,p.avg||p.avgCost,p.ltp);});
   if(HOLDINGS?.length) HOLDINGS.forEach(h=>{if(h.qty>0) addSym(h.symbol,h.qty,h.avgCost,h.ltp);});
 
-  if(!rows.length){showToast('No holdings or open positions found.',3000,true);return;}
+  if(!rows.length){showToast('No holdings found. Upload Holdings.csv or Positions.csv first.',4000,true);return;}
 
   // Define sortable columns for GTT table
   const gttCols=[
