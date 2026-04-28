@@ -561,6 +561,8 @@ let SURV_HEADERS=[]; // exact REG1 headers loaded this session
 let SURV_RULE_HITS={}; // {ruleKey -> flagged symbol count} before hard filters
 let SURV_ALL_HITS={}; // {sym -> {colName: true}} — ALL columns flagged, not just active rules
 let SURV_CORR_ACC={}; // {colKey -> {col, sessions, winRate, avgPnl, lastCount}} accumulated correlation
+let SURV_CORR_LAST_TAG=null; // dedup: prevent multiple accumulations per upload session
+let _methTbls={hf:null,sc:null}; // sortable table instances for methodology hard-filters + surv-corr
 let HOLDINGS=[]; // active holdings from Holdings.csv (qty>0)
 let HOLDINGS_ALL=[]; // all holdings rows from Holdings.csv, including qty=0 closed holdings
 let POSITIONS=[]; // parsed positions from Positions.csv
@@ -2066,6 +2068,11 @@ function renderPerformance(){
   setTimeout(()=>{monthTbl.render();symTbl.render();tradeWindowTbl.render();},0);
 }
 
+function _refreshHFSection(){
+  const wrap=document.getElementById('meth-hf-wrap');
+  if(wrap){wrap.innerHTML=buildHardFilterMethodologyHTML(ENGINE_DATA);setTimeout(()=>{_methTbls.hf?.render();_methTbls.sc?.render();},0);}
+  else renderMethodology();
+}
 function addSurvRule(colArg){
   let column=colArg?String(colArg).trim():'';
   if(!column){
@@ -2078,21 +2085,15 @@ function addSurvRule(colArg){
   if(getSurvRules().some(rule=>rule.key===key)){showToast('That hard filter is already configured.',3000,true);return;}
   SURV_CUSTOM_RULES.push({key,column,label:column,manual:true});
   saveSurvRules();
-  if(ENGINE_DATA){
-    ENGINE_DATA.survRuleRows=syncSurvRuleRows(ENGINE_DATA.survRuleRows||[]);
-    persistMethodologySnapshot();
-  }
-  renderMethodology();
+  if(ENGINE_DATA){ENGINE_DATA.survRuleRows=syncSurvRuleRows(ENGINE_DATA.survRuleRows||[]);persistMethodologySnapshot();}
+  _refreshHFSection();
   showToast(`<strong>Added hard filter</strong> &mdash; ${escHtml(column)}. It will be applied whenever that REG1 column is flagged.`,3500);
 }
 function removeSurvRule(key){
   SURV_CUSTOM_RULES=(SURV_CUSTOM_RULES||[]).filter(rule=>survRuleKey(rule.column||rule.label)!==key);
   saveSurvRules();
-  if(ENGINE_DATA){
-    ENGINE_DATA.survRuleRows=syncSurvRuleRows(ENGINE_DATA.survRuleRows||[]);
-    persistMethodologySnapshot();
-  }
-  renderMethodology();
+  if(ENGINE_DATA){ENGINE_DATA.survRuleRows=syncSurvRuleRows(ENGINE_DATA.survRuleRows||[]);persistMethodologySnapshot();}
+  _refreshHFSection();
   showToast('Manual hard filter removed.',2500);
 }
 function buildHardFilterMethodologyHTML(E){
@@ -2101,53 +2102,36 @@ function buildHardFilterMethodologyHTML(E){
   const addedRuleKeys=new Set((SURV_CUSTOM_RULES||[]).map(r=>survRuleKey(r.column||r.label)));
   const availableCols=(SURV_HEADERS||[]).filter(h=>!addedRuleKeys.has(survRuleKey(h)));
   const datalistHtml=availableCols.map(col=>`<option value="${escHtml(col)}"></option>`).join('');
-  const rowHtml=rows.map(row=>{
-    const inactiveNote=!row.active
-      ? (row.kind==='surv'
-          ? `<div style="font-size:10px;color:var(--red);margin-top:2px">Inactive until this exact REG1 column is present</div>`
-          : `<div style="font-size:10px;color:var(--amber);margin-top:2px">Needs fresh NSE data to activate</div>`)
-      : '';
-    const flaggedCell=row.kind==='surv'
-      ? (row.active?`<span style="color:${(row.flagged||0)>0?'var(--orange)':'var(--t3)'}">${(row.flagged||0).toLocaleString()}</span>`:'&mdash;')
-      : '&mdash;';
-    const removedCell=row.active&&row.removed!=null
-      ? `<span style="color:${row.removed>0?'var(--red)':'var(--t3)'}">${row.removed.toLocaleString()}</span>`
-      : '&mdash;';
-    const removeBtn=row.manual
-      ? `<button onclick="removeSurvRule('${row.ruleKey}')" style="padding:4px 8px;border-radius:6px;border:1px solid rgba(239,68,68,.3);background:rgba(239,68,68,.08);color:var(--red);font-size:10px;font-weight:700;cursor:pointer">Remove</button>`
-      : `<span style="color:var(--t3);font-size:10px">${row.kind==='surv'?'Built-in':'Core'}</span>`;
-    return `<tr style="border-bottom:1px solid var(--border)">
-      <td style="padding:8px 10px;color:${row.active?'var(--t1)':'var(--t3)'};font-size:11px;vertical-align:top">${escHtml(row.criteria)}${inactiveNote}</td>
-      <td style="padding:8px 10px;text-align:right;font-family:'DM Mono',monospace;font-weight:700">${flaggedCell}</td>
-      <td style="padding:8px 10px;text-align:right;font-family:'DM Mono',monospace;font-weight:700">${removedCell}</td>
-      <td style="padding:8px 10px;text-align:right">${removeBtn}</td>
-    </tr>`;
-  }).join('');
-  const survSize=E.survSize??0;
+  const hfRows=rows.map(row=>({
+    criteria:row.criteria,
+    flaggedSort:row.kind==='surv'&&row.active?(row.flagged||0):-1,
+    removedSort:row.active&&row.removed!=null?(row.removed||0):-1,
+    active:row.active, kind:row.kind, manual:!!row.manual, ruleKey:row.ruleKey||'',
+    inactiveNote:!row.active?(row.kind==='surv'?'Inactive — REG1 column not found in last upload':'Needs fresh NSE data'):'',
+    manageSort:row.manual?1:0,
+  }));
+  const hfCols=[
+    {key:'criteria',label:'Filter / Column',align:'left',fmt:(v,r)=>`<span style="font-size:11px;color:${r.active?'var(--t1)':'var(--t3)'}">${escHtml(v)}${r.inactiveNote?`<div style="font-size:10px;color:${r.kind==='surv'?'var(--red)':'var(--amber)'};margin-top:2px">${r.inactiveNote}</div>`:''}</span>`},
+    {key:'flaggedSort',label:'Flagged',align:'right',fmt:(v,r)=>v>=0?`<span style="color:${v>0?'var(--orange)':'var(--t3)'};font-weight:700;font-family:'DM Mono',monospace">${v.toLocaleString()}</span>`:'&mdash;'},
+    {key:'removedSort',label:'Removed',align:'right',fmt:(v,r)=>v>=0?`<span style="color:${v>0?'var(--red)':'var(--t3)'};font-weight:700;font-family:'DM Mono',monospace">${v.toLocaleString()}</span>`:'&mdash;'},
+    {key:'manageSort',label:'Manage',align:'right',fmt:(v,r)=>r.manual?`<button onclick="removeSurvRule('${r.ruleKey}')" style="padding:4px 8px;border-radius:6px;border:1px solid rgba(239,68,68,.3);background:rgba(239,68,68,.08);color:var(--red);font-size:10px;font-weight:700;cursor:pointer">Remove</button>`:`<span style="color:var(--t3);font-size:10px">${r.kind==='surv'?'Built-in':'Core'}</span>`},
+  ];
+  _methTbls.hf=makeSortableTable('tbl-hf',hfCols,hfRows,'removedSort',-1);
+  const survSize=E?.survSize??0;
   const survMeta=survSize>0
-    ? `<div style="font-size:11px;color:var(--t3);margin-top:8px">Loaded <strong style="color:var(--t1)">${survSize}</strong> surveillance-flagged symbols from the latest REG1 file. Surveillance rows show exact-column hits; removed counts are primary-rule removals, so they don't double-count.</div>`
-    : `<div style="margin-top:8px;padding:8px 10px;background:rgba(239,68,68,.08);border:1px solid rgba(239,68,68,.25);border-radius:8px;font-size:11px;color:var(--red)">NSE REG1 data is not active in the latest saved session, so surveillance rows are shown for configuration but won't remove stocks until a matching REG1 file is loaded.</div>`;
+    ? `<div style="font-size:11px;color:var(--t3);margin-top:8px">Loaded <strong style="color:var(--t1)">${survSize}</strong> surveillance-flagged symbols from the latest REG1 file. Removed counts are primary-rule removals and don't double-count.</div>`
+    : `<div style="margin-top:8px;padding:8px 10px;background:rgba(239,68,68,.08);border:1px solid rgba(239,68,68,.25);border-radius:8px;font-size:11px;color:var(--red)">NSE REG1 data not active — surveillance rows shown for configuration only, won't filter until a REG1 file is loaded.</div>`;
   return `
     <h3 id="meth-filters" style="margin-top:28px">Hard Filters <span style="font-size:12px;color:var(--t3);font-weight:400">(${totalRemoved} removals in latest saved run)</span></h3>
-    <p style="color:var(--t3);font-size:12px;margin-bottom:10px">Each surveillance row is now an exact REG1 feature instead of a bundled category. Manual rows are persisted in your brain and will always be treated as hard filters whenever that exact REG1 column is flagged.</p>
+    <p style="color:var(--t3);font-size:12px;margin-bottom:10px">Each surveillance row is an exact REG1 column. Manual rows are persisted in your brain and apply whenever that column is flagged.</p>
     <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:10px">
       <input id="survRuleInput" type="text" placeholder="Exact REG1 column name (e.g. GSM)" list="survRuleDatalist" onkeydown="if(event.key==='Enter'){event.preventDefault();addSurvRule();}" style="flex:1;min-width:280px;padding:10px 12px;background:var(--bg-card);border:1px solid var(--border);border-radius:8px;color:var(--t1);font-size:12px;outline:none">
       <datalist id="survRuleDatalist">${datalistHtml}</datalist>
       <button class="btn" onclick="addSurvRule()" style="font-weight:700">+ Add Hard Filter</button>
     </div>
-    <div style="font-size:11px;color:var(--t3);margin-bottom:10px">Use the exact header text from <code style="color:var(--t1)">REG1_IND*.csv</code>. Custom rows become active immediately for future uploads and stay persisted across refreshes and brain exports.</div>
+    <div style="font-size:11px;color:var(--t3);margin-bottom:10px">Use the exact header text from <code style="color:var(--t1)">REG1_IND*.csv</code>. Custom rows are persisted across refreshes and brain exports.</div>
     <div style="background:var(--bg-card);border:1px solid var(--border);border-radius:10px;overflow:hidden">
-      <div style="overflow-x:auto">
-        <table style="width:100%;border-collapse:collapse;font-size:12px">
-          <thead><tr style="color:var(--t3);font-size:10px;text-transform:uppercase;letter-spacing:.06em;border-bottom:1px solid var(--border)">
-            <th style="padding:6px 10px;text-align:left">Filter / Column</th>
-            <th style="padding:6px 10px;text-align:right">Flagged</th>
-            <th style="padding:6px 10px;text-align:right">Removed</th>
-            <th style="padding:6px 10px;text-align:right">Manage</th>
-          </tr></thead>
-          <tbody>${rowHtml}</tbody>
-        </table>
-      </div>
+      <div style="overflow-x:auto">${_methTbls.hf.getHtml()}</div>
     </div>
     ${survMeta}
     ${buildSurvCorrHTML()}
@@ -2160,6 +2144,10 @@ function buildHardFilterMethodologyHTML(E){
 // Requires: HOLDINGS + SURV_ALL_HITS both loaded.
 function updateSurvCorrelation(){
   if(!HOLDINGS?.length||!Object.keys(SURV_ALL_HITS).length) return;
+  // Deduplicate: only accumulate once per unique (surv symbols + holdings count) combo per session
+  const _tag=Object.keys(SURV_ALL_HITS).sort().slice(0,15).join('|')+'|'+HOLDINGS.length;
+  if(_tag===SURV_CORR_LAST_TAG) return;
+  SURV_CORR_LAST_TAG=_tag;
   // Build held symbol → current P&L% map
   const holdPnl={};
   HOLDINGS.forEach(h=>{
@@ -2198,70 +2186,47 @@ function updateSurvCorrelation(){
 }
 
 function buildSurvCorrHTML(){
-  const hasHoldings=HOLDINGS?.length>0;
-  const hasSurv=SURV_HEADERS?.length>0;
-  if(!hasHoldings||!hasSurv){
+  const allAcc=Object.values(SURV_CORR_ACC).filter(r=>r.sessions>0);
+  // Show placeholder only when nothing accumulated yet
+  if(!allAcc.length){
     const needs=[];
-    if(!hasHoldings) needs.push('<strong>Holdings.csv</strong>');
-    if(!hasSurv) needs.push('<strong>NSE ZIP</strong> (surveillance)');
+    if(!HOLDINGS?.length) needs.push('<strong>Holdings.csv</strong>');
+    if(!Object.keys(SURV_ALL_HITS).length) needs.push('<strong>NSE ZIP</strong> (surveillance)');
     return `<div style="padding:12px 14px;background:rgba(148,163,184,.06);border:1px solid var(--border);border-radius:8px;font-size:12px;color:var(--t3);margin-top:12px">
-      Load ${needs.join(' + ')} to compute surveillance P&amp;L correlation. The accumulator builds over time — each session adds one observation per flagged column.
+      ${needs.length?`Load ${needs.join(' + ')} to start accumulating surveillance P&amp;L correlation.`:'No correlation data yet — accumulator will update next time Holdings.csv + NSE ZIP are both loaded.'}
     </div>`;
   }
-  const accRows=Object.values(SURV_CORR_ACC).filter(r=>r.sessions>0);
-  if(!accRows.length){
-    return `<div style="padding:12px 14px;background:rgba(148,163,184,.06);border:1px solid var(--border);border-radius:8px;font-size:12px;color:var(--t3);margin-top:12px">
-      No correlation data yet — accumulator will update next time Holdings.csv + NSE ZIP are loaded together. None of your current holdings appear in any surveillance column.
-    </div>`;
-  }
+  // Show staleness note if we can't accumulate this session
+  const canAccumulate=HOLDINGS?.length>0&&Object.keys(SURV_ALL_HITS).length>0;
+  const staleNote=canAccumulate?'':
+    `<div style="margin-bottom:8px;padding:6px 10px;background:rgba(251,191,36,.06);border:1px solid rgba(251,191,36,.2);border-radius:6px;font-size:11px;color:var(--amber)">Showing historical data. Load Holdings.csv + REG1 file this session to update the accumulator.</div>`;
   const activeColKeys=new Set(getSurvRules().map(r=>r.key));
-  const sorted=[...accRows].filter(r=>!activeColKeys.has(r.key)).sort((a,b)=>a.winRate-b.winRate); // worst first; active rules excluded
-  const maxSess=Math.max(...sorted.map(r=>r.sessions));
-  const rowHtml=sorted.map(r=>{
-    const isActive=activeColKeys.has(r.key);
+  const visRows=allAcc.filter(r=>!activeColKeys.has(r.key));
+  const maxSess=visRows.length?Math.max(...visRows.map(r=>r.sessions)):1;
+  const scRows=visRows.map(r=>{
     const conf=r.sessions<2?'low':r.sessions<5?'med':'high';
-    const confClr=conf==='high'?'var(--green)':conf==='med'?'var(--amber)':'var(--t3)';
-    const verdict=r.sessions<2?'❓'
-      :r.winRate<35&&r.avgPnl<-0.5?'🚫 Filter'
-      :r.winRate>65&&r.avgPnl>0.5?'✅ Likely safe'
-      :'📊 Neutral';
-    const vClr=verdict.startsWith('🚫')?'var(--red)':verdict.startsWith('✅')?'var(--green)':'var(--amber)';
-    const pnlClr=r.avgPnl<0?'var(--red)':r.avgPnl>0?'var(--green)':'var(--t3)';
-    const winClr=r.winRate<40?'var(--red)':r.winRate>60?'var(--green)':'var(--amber)';
-    const addBtn=verdict.startsWith('🚫')
-      ?`<button onclick="addSurvRule(${JSON.stringify(r.col)})" style="padding:4px 8px;border-radius:6px;border:1px solid rgba(239,68,68,.3);background:rgba(239,68,68,.08);color:var(--red);font-size:10px;font-weight:700;cursor:pointer">+ Filter</button>`
-      :'';
-    const sessBar=`<span style="display:inline-block;width:${Math.round(r.sessions/maxSess*40)}px;height:4px;background:${confClr};border-radius:2px;vertical-align:middle;margin-right:4px"></span>`;
-    return `<tr style="border-bottom:1px solid var(--border)">
-      <td style="padding:7px 10px;color:var(--t1);font-size:11px;max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${escHtml(r.col)}">${escHtml(r.col)}</td>
-      <td style="padding:7px 10px;text-align:right;font-family:'DM Mono',monospace;font-size:11px;color:${confClr}">${sessBar}${r.sessions}</td>
-      <td style="padding:7px 10px;text-align:right;font-family:'DM Mono',monospace;font-size:11px;color:var(--t3)">${r.lastCount}</td>
-      <td style="padding:7px 10px;text-align:right;font-family:'DM Mono',monospace;font-weight:700;font-size:11px;color:${winClr}">${r.winRate.toFixed(1)}%</td>
-      <td style="padding:7px 10px;text-align:right;font-family:'DM Mono',monospace;font-weight:700;font-size:11px;color:${pnlClr}">${r.avgPnl>=0?'+':''}${r.avgPnl.toFixed(2)}%</td>
-      <td style="padding:7px 10px;font-size:11px;font-weight:700;color:${vClr}">${verdict}</td>
-      <td style="padding:7px 10px;text-align:right">${addBtn}</td>
-    </tr>`;
-  }).join('');
+    const verdict=r.sessions<2?'❓':r.winRate<35&&r.avgPnl<-0.5?'🚫 Filter':r.winRate>65&&r.avgPnl>0.5?'✅ Safe':'📊 Neutral';
+    return {col:r.col,sessions:r.sessions,lastCount:r.lastCount,winRate:r.winRate,avgPnl:r.avgPnl,
+      verdict,_conf:conf,_maxSess:maxSess,_canFilter:verdict.startsWith('🚫')?1:0};
+  });
+  const scCols=[
+    {key:'col',label:'Surveillance Column',align:'left',fmt:(v)=>`<span style="font-size:11px" title="${escHtml(v)}">${escHtml(v)}</span>`},
+    {key:'sessions',label:'Sessions',align:'right',fmt:(v,r)=>{const w=Math.round(v/r._maxSess*40);const c=r._conf==='high'?'var(--green)':r._conf==='med'?'var(--amber)':'var(--t3)';return`<span style="display:inline-flex;align-items:center;gap:4px"><span style="display:inline-block;width:${w}px;height:4px;background:${c};border-radius:2px"></span><span style="color:${c};font-family:'DM Mono',monospace">${v}</span></span>`;}},
+    {key:'lastCount',label:'Last Flagged',align:'right',fmt:(v)=>`<span style="color:var(--t3);font-family:'DM Mono',monospace">${v}</span>`},
+    {key:'winRate',label:'Win Rate',align:'right',fmt:(v)=>`<span style="color:${v<40?'var(--red)':v>60?'var(--green)':'var(--amber)'};font-weight:700;font-family:'DM Mono',monospace">${v.toFixed(1)}%</span>`},
+    {key:'avgPnl',label:'Avg P&L%',align:'right',fmt:(v)=>`<span style="color:${v<0?'var(--red)':v>0?'var(--green)':'var(--t3)'};font-weight:700;font-family:'DM Mono',monospace">${v>=0?'+':''}${v.toFixed(2)}%</span>`},
+    {key:'verdict',label:'Signal',align:'left',fmt:(v)=>`<span style="color:${v.startsWith('🚫')?'var(--red)':v.startsWith('✅')?'var(--green)':'var(--amber)'};font-weight:700">${v}</span>`},
+    {key:'_canFilter',label:'Action',align:'right',fmt:(v,r)=>v?`<button onclick="addSurvRule(${JSON.stringify(r.col)})" style="padding:4px 8px;border-radius:6px;border:1px solid rgba(239,68,68,.3);background:rgba(239,68,68,.08);color:var(--red);font-size:10px;font-weight:700;cursor:pointer">+ Filter</button>`:''},
+  ];
+  _methTbls.sc=makeSortableTable('tbl-sc',scCols,scRows,'winRate',1); // lowest win rate first
   return `
-    <h4 id="meth-surv-corr" style="margin:16px 0 6px;font-size:13px;color:var(--t2)">📊 Surveillance P&L Correlation <span style="font-size:10px;font-weight:400;color:var(--t3)">(accumulated from held-stock data · ${maxSess} max sessions)</span>
-      <button onclick="if(confirm('Reset surveillance correlation accumulator?')){SURV_CORR_ACC={};FS.set(SURV_CORR_STORE,{});renderMethodology();}" style="margin-left:12px;padding:3px 8px;border-radius:6px;border:1px solid var(--border);background:none;color:var(--t3);font-size:10px;cursor:pointer">Reset</button>
+    <h4 id="meth-surv-corr" style="margin:16px 0 6px;font-size:13px;color:var(--t2)">📊 Surveillance P&L Correlation <span style="font-size:10px;font-weight:400;color:var(--t3)">(accumulated · ${maxSess} max sessions)</span>
+      <button onclick="if(confirm('Reset surveillance correlation accumulator?')){SURV_CORR_ACC={};SURV_CORR_LAST_TAG=null;FS.set(SURV_CORR_STORE,{});_refreshHFSection();}" style="margin-left:12px;padding:3px 8px;border-radius:6px;border:1px solid var(--border);background:none;color:var(--t3);font-size:10px;cursor:pointer">Reset</button>
     </h4>
-    <p style="font-size:11px;color:var(--t3);margin-bottom:8px">For each surveillance column, tracks the P&amp;L of currently-held stocks flagged under it. Accumulates per session. Low confidence (&lt;2 sessions) — observe before acting.</p>
+    <p style="font-size:11px;color:var(--t3);margin-bottom:8px">Tracks P&amp;L of held stocks per surveillance column. Accumulates per session. &lt;2 sessions = low confidence.</p>
+    ${staleNote}
     <div style="background:var(--bg-card);border:1px solid var(--border);border-radius:10px;overflow:hidden">
-      <div style="overflow-x:auto">
-        <table style="width:100%;border-collapse:collapse;font-size:12px">
-          <thead><tr style="color:var(--t3);font-size:10px;text-transform:uppercase;letter-spacing:.06em;border-bottom:1px solid var(--border)">
-            <th style="padding:6px 10px;text-align:left">Surveillance Column</th>
-            <th style="padding:6px 10px;text-align:right">Sessions</th>
-            <th style="padding:6px 10px;text-align:right">Last Flagged</th>
-            <th style="padding:6px 10px;text-align:right">Win Rate</th>
-            <th style="padding:6px 10px;text-align:right">Avg P&L%</th>
-            <th style="padding:6px 10px;text-align:left">Signal</th>
-            <th style="padding:6px 10px;text-align:right">Action</th>
-          </tr></thead>
-          <tbody>${rowHtml}</tbody>
-        </table>
-      </div>
+      <div style="overflow-x:auto">${_methTbls.sc.getHtml()}</div>
     </div>`;
 }
 
@@ -2451,7 +2416,7 @@ function renderMethodology(){
       <a href="#meth-redundant" onclick="event.preventDefault();scrollToSection('meth-redundant')" style="padding:4px 12px;border-radius:6px;background:var(--bg-card);border:1px solid var(--border);color:var(--t2);font-size:11px;font-weight:600;text-decoration:none;cursor:pointer">🔁 Redundant (${_redundantCount})</a>
       <a href="#meth-weak" onclick="event.preventDefault();scrollToSection('meth-weak')" style="padding:4px 12px;border-radius:6px;background:var(--bg-card);border:1px solid var(--border);color:var(--t2);font-size:11px;font-weight:600;text-decoration:none;cursor:pointer">✂ Pruning (${_weakCount})</a>
     </nav>
-    ${hardFiltersHTML}
+    <div id="meth-hf-wrap">${hardFiltersHTML}</div>
     <div id="meth-regime">${regimeCardHTML}</div>
     <h3 id="meth-engine" style="margin-top:18px">Scoring Engine — Regime-Adaptive mRMR + NSE Data Intelligence</h3>
     <div class="m-grid">
@@ -2471,6 +2436,7 @@ function renderMethodology(){
     <h3 id="meth-weak" style="margin-top:28px">Weakest Contributors — CSV Pruning Advisory <span style="font-size:12px;color:var(--t3);font-weight:400">(${_weakCount})</span></h3>
     <p style="color:var(--t3);font-size:12px;margin-bottom:8px">Features from the bottom 20% by mRMR score that are weak across <strong>all</strong> regimes with sufficient data. These are safe to remove from your ALL NSE CSV. Features that are strong in any regime are excluded from this list.</p>
     <div class="corr-wrap">${weakHTML}</div>`;
+  setTimeout(()=>{_methTbls.hf?.render();_methTbls.sc?.render();},0);
 }
 
 // Fixed columns + dynamic top 10 mRMR features (skip empty ones)
