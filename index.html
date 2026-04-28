@@ -2066,19 +2066,22 @@ function renderPerformance(){
   setTimeout(()=>{monthTbl.render();symTbl.render();tradeWindowTbl.render();},0);
 }
 
-function addSurvRule(){
-  const input=document.getElementById('survRuleInput');
-  const column=String(input?.value||'').trim();
-  if(!column){showToast('Enter the exact REG1 column name to add.',3000,true);return;}
+function addSurvRule(colArg){
+  let column=colArg?String(colArg).trim():'';
+  if(!column){
+    const input=document.getElementById('survRuleInput');
+    column=String(input?.value||'').trim();
+    if(!column){showToast('Enter the exact REG1 column name to add.',3000,true);return;}
+    if(input) input.value='';
+  }
   const key=survRuleKey(column);
-  if(getSurvRules().some(rule=>rule.key===key)){showToast('That hard filter is already configured.',3000,true);if(input)input.value='';return;}
+  if(getSurvRules().some(rule=>rule.key===key)){showToast('That hard filter is already configured.',3000,true);return;}
   SURV_CUSTOM_RULES.push({key,column,label:column,manual:true});
   saveSurvRules();
   if(ENGINE_DATA){
     ENGINE_DATA.survRuleRows=syncSurvRuleRows(ENGINE_DATA.survRuleRows||[]);
     persistMethodologySnapshot();
   }
-  if(input) input.value='';
   renderMethodology();
   showToast(`<strong>Added hard filter</strong> &mdash; ${escHtml(column)}. It will be applied whenever that REG1 column is flagged.`,3500);
 }
@@ -3872,6 +3875,10 @@ async function initApp(){
 
     // Step 2f2: Restore surveillance P&L correlation accumulator
     try{const sc=brain[SURV_CORR_STORE];if(sc&&typeof sc==='object') SURV_CORR_ACC=sc;}catch(e){}
+    // Purge any non-flag columns (ScripCode, Symbol, Nse Exclusive, Status, Series, Filler*) from old bad data
+    {const _pNF=new Set(['scripcode','symbol','nse exclusive','status','series']);
+    Object.keys(SURV_CORR_ACC).forEach(k=>{const c=SURV_CORR_ACC[k]?.col||'';const hl=c.trim().toLowerCase();if(_pNF.has(hl)||/^filler/i.test(c.trim())){delete SURV_CORR_ACC[k];}});
+    FS.set(SURV_CORR_STORE,SURV_CORR_ACC);}
 
     // Step 2g: Restore surveillance custom rules
     try{
