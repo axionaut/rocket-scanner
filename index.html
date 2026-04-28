@@ -340,6 +340,8 @@ let PERF_REGIME_FILTER='all'; // 'all' | 'bull' | 'bear' | 'neutral'
 let PERF_PERIOD_FILTER='all'; // 'all' | '1m' | '3m' | '6m' | '1y'
 let PERF_TRADE_WINDOWS=[]; // cached trade window rows from renderPerformance — used by current-window pill
 let LATEST_BOOKED_TOTAL=null; // cached booked today total from renderPerformance — used by renderStats card
+let LATEST_BOOKED_DATE=''; // date string of latest session (set alongside LATEST_BOOKED_TOTAL)
+let LATEST_BOOKED_SOURCE=''; // 'Orders.csv' | 'Tradebook' (set alongside LATEST_BOOKED_TOTAL)
 let ENGINE_DATA={};
 let REMOVED={uc:0,surv:0,survRules:{},liq:0,fscore:0,deliv:0,fade:0};
 let SUPPRESSED_HELD=0; // count of stocks hidden because already held in POSITIONS
@@ -1522,10 +1524,13 @@ function renderStats(){
   // Use cached booked total from renderPerformance (runs first)
   let bookedCard='';
   if(LATEST_BOOKED_TOTAL!=null){
-    const bookedLabel='Booked Today';
-    const dateText=getSessionDate();
+    const sessionToday=getSessionDate();
+    const isToday=LATEST_BOOKED_DATE===sessionToday;
+    const bookedLabel=isToday?'Booked Today':'Latest Session';
+    const srcLabel=LATEST_BOOKED_SOURCE||'Tradebook';
+    const dateLabel=LATEST_BOOKED_DATE||sessionToday;
     bookedCard=`
-      <div class="st"><div class="st-l">${bookedLabel}</div><div class="st-v" style="color:${LATEST_BOOKED_TOTAL>=0?'var(--green)':'var(--red)'}">${LATEST_BOOKED_TOTAL>=0?'+':'−'}₹${Math.round(Math.abs(LATEST_BOOKED_TOTAL)).toLocaleString('en-IN')}</div><div class="st-d">from Orders.csv · net of charges · ${dateText}</div></div>`;
+      <div class="st"><div class="st-l">${bookedLabel}</div><div class="st-v" style="color:${LATEST_BOOKED_TOTAL>=0?'var(--green)':'var(--red)'}">${LATEST_BOOKED_TOTAL>=0?'+':'−'}₹${Math.round(Math.abs(LATEST_BOOKED_TOTAL)).toLocaleString('en-IN')}</div><div class="st-d">${dateLabel} · ${srcLabel} · net of charges</div></div>`;
   } else {
     const bookedFallback=TRADEBOOK_STATS?.lastBooked||null;
     if(bookedFallback){
@@ -1807,10 +1812,10 @@ function renderPerformance(){
 
   const regBreakdown=['bull','bear','neutral'].map(reg=>{
     const rTrips=allTrips.filter(t=>t.regime===reg);
-    if(!rTrips.length) return null;
+    if(!rTrips.length) return {reg,count:0,winRate:null,avgPct:null,netPnl:null,expectancy:null};
     const rp=computePerfStats(rTrips);
     return {reg,count:rTrips.length,winRate:rp.winRate,avgPct:+(rTrips.reduce((s,t)=>s+(t.netPnlPct||0),0)/rTrips.length).toFixed(2),netPnl:rp.totalNetPnlRs,expectancy:rp.expectancy};
-  }).filter(Boolean);
+  });
 
   const monthCols=[
     {key:'month',label:'Month',align:'left',fmt:v=>v,clrFn:()=>'var(--t1)'},
@@ -1921,7 +1926,9 @@ function renderPerformance(){
       latestSource='Tradebook';
     }
     if(latestRows.length){
-      LATEST_BOOKED_TOTAL=latestTotal; // cache for renderStats card
+      LATEST_BOOKED_TOTAL=latestTotal;
+      LATEST_BOOKED_DATE=latestDate;
+      LATEST_BOOKED_SOURCE=latestSource;
       const latestCols=[
         {key:'sym',label:'Symbol',align:'left',fmt:v=>v,clrFn:()=>'var(--t1)',bold:true},
         {key:'lots',label:'Trades',align:'right',fmt:v=>v,clrFn:()=>'var(--t2)'},
@@ -1978,7 +1985,7 @@ function renderPerformance(){
   const _navLink=(id,label,show)=>show?`<a href="#${id}" onclick="event.preventDefault();scrollToSection('${id}')" style="padding:4px 12px;border-radius:6px;background:var(--bg-card);border:1px solid var(--border);color:var(--t2);font-size:11px;font-weight:600;text-decoration:none;cursor:pointer;white-space:nowrap">${label}</a>`:'';
   const perfNav=`<nav style="position:sticky;top:var(--hdr-h,72px);z-index:50;background:var(--bg);padding:8px 0 10px;margin-bottom:8px;display:flex;gap:6px;flex-wrap:wrap;border-bottom:1px solid var(--border);box-shadow:0 2px 8px rgba(0,0,0,0.3);overflow-x:auto;-webkit-overflow-scrolling:touch">
     ${_navLink('perf-kpi','📊 KPIs',true)}
-    ${_navLink('perf-regime-ret','🐂 Regime Returns',regBreakdown.length>0)}
+    ${_navLink('perf-regime-ret','🐂 Regime Returns',true)}
     ${_navLink('perf-monthly','📅 Monthly',monthRows.length>0)}
     ${_navLink('perf-stocks','📈 Stocks',p.symBreakdown.length>0)}
     ${_navLink('perf-trade-windows','🕐 Trading Windows',hasTradeWindows)}
@@ -1991,7 +1998,7 @@ function renderPerformance(){
       ${regimePillsHtml}
       <div style="font-size:10px;color:var(--t3);margin-bottom:12px">${periodLabel} · ${p.roundTrips} lots</div>
       <div id="perf-kpi">${kpiHtml}</div>
-      ${regBreakdown.length?perfCard('Regime Returns',`<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:1px;background:var(--border)">${regBreakdown.map(rb=>{const col=rb.reg==='bull'?'var(--green)':rb.reg==='bear'?'var(--red)':'var(--orange)';const icon=rb.reg==='bull'?'🐂':rb.reg==='bear'?'🐻':'➡';return`<div style="background:var(--bg-card);padding:14px 16px"><div style="font-size:11px;font-weight:700;color:${col};text-transform:uppercase;letter-spacing:.06em;margin-bottom:8px">${icon} ${rb.reg.charAt(0).toUpperCase()+rb.reg.slice(1)} <span style="font-weight:400;color:var(--t3)">(${rb.count} lots)</span></div><div style="display:flex;flex-direction:column;gap:4px"><div style="display:flex;justify-content:space-between;font-size:12px"><span style="color:var(--t3)">Win Rate</span><span style="color:${rb.winRate>=55?'var(--green)':rb.winRate>=45?'var(--amber)':'var(--red)'};font-weight:700">${rb.winRate}%</span></div><div style="display:flex;justify-content:space-between;font-size:12px"><span style="color:var(--t3)">Avg P&L%</span><span style="color:${rb.avgPct>=0?'var(--green)':'var(--red)'};font-weight:700">${rb.avgPct>=0?'+':''}${rb.avgPct}%</span></div><div style="display:flex;justify-content:space-between;font-size:12px"><span style="color:var(--t3)">Expectancy</span><span style="color:${rb.expectancy>=0?'var(--green)':'var(--red)'};font-weight:700">${rb.expectancy>=0?'+':'-'}₹${Math.abs(rb.expectancy).toLocaleString('en-IN')}</span></div><div style="display:flex;justify-content:space-between;font-size:12px"><span style="color:var(--t3)">Net P&L</span><span style="color:${rb.netPnl>=0?'var(--green)':'var(--red)'};font-weight:700">${rb.netPnl>=0?'+':'-'}₹${Math.abs(rb.netPnl).toLocaleString('en-IN')}</span></div></div></div>`}).join('')}</div>`,'','perf-regime-ret'):''}
+      ${perfCard('Regime Returns',`<div style="display:grid;grid-template-columns:repeat(3,1fr);gap:1px;background:var(--border)">${regBreakdown.map(rb=>{const col=rb.reg==='bull'?'var(--green)':rb.reg==='bear'?'var(--red)':'var(--orange)';const icon=rb.reg==='bull'?'🐂':rb.reg==='bear'?'🐻':'➡';const noData=rb.count===0;return`<div style="background:var(--bg-card);padding:14px 16px"><div style="font-size:11px;font-weight:700;color:${col};text-transform:uppercase;letter-spacing:.06em;margin-bottom:8px">${icon} ${rb.reg.charAt(0).toUpperCase()+rb.reg.slice(1)} <span style="font-weight:400;color:var(--t3)">(${rb.count} lots)</span></div>${noData?`<div style="color:var(--t3);font-size:11px;padding:4px 0">No trades tagged to this regime yet.<br>Upload TV CSV during bear/neutral sessions to build history.</div>`:`<div style="display:flex;flex-direction:column;gap:4px"><div style="display:flex;justify-content:space-between;font-size:12px"><span style="color:var(--t3)">Win Rate</span><span style="color:${rb.winRate>=55?'var(--green)':rb.winRate>=45?'var(--amber)':'var(--red)'};font-weight:700">${rb.winRate}%</span></div><div style="display:flex;justify-content:space-between;font-size:12px"><span style="color:var(--t3)">Avg P&L%</span><span style="color:${rb.avgPct>=0?'var(--green)':'var(--red)'};font-weight:700">${rb.avgPct>=0?'+':''}${rb.avgPct}%</span></div><div style="display:flex;justify-content:space-between;font-size:12px"><span style="color:var(--t3)">Expectancy</span><span style="color:${rb.expectancy>=0?'var(--green)':'var(--red)'};font-weight:700">${rb.expectancy>=0?'+':'-'}₹${Math.abs(rb.expectancy).toLocaleString('en-IN')}</span></div><div style="display:flex;justify-content:space-between;font-size:12px"><span style="color:var(--t3)">Net P&L</span><span style="color:${rb.netPnl>=0?'var(--green)':'var(--red)'};font-weight:700">${rb.netPnl>=0?'+':'-'}₹${Math.abs(rb.netPnl).toLocaleString('en-IN')}</span></div></div>`}</div>`}).join('')}</div>`,'','perf-regime-ret')}
       ${monthRows.length?perfCard('Monthly Breakdown',monthTbl.getHtml(),'','perf-monthly'):''}
       ${p.symBreakdown.length?perfCard('Stocks',symTbl.getHtml(),'360px','perf-stocks'):''}
       ${hasTradeWindows?perfCard('Trading Windows <span style="font-size:10px;color:var(--t3);font-weight:400">Buy Edge &gt; 2 = Enter · Sell Edge &gt; 2 = Exit · hover Edge columns to sort</span>',tradeWindowTbl.getHtml(),'320px','perf-trade-windows'):''}
@@ -3229,7 +3236,6 @@ function showGttPopup(){
 
   const gttTable=makeSortableTable('gtt-table',gttCols,rows,'pnlPct',-1);
   const tableHtml=gttTable.getHtml();
-  gttTable.render();
 
   const existing=document.getElementById('gttModal');
   if(existing) existing.remove();
@@ -3252,6 +3258,7 @@ function showGttPopup(){
     </div>`;
   modal.addEventListener('click',e=>{if(e.target===modal) modal.remove();});
   document.body.appendChild(modal);
+  gttTable.render(); // must run after modal is in DOM so getElementById finds the table
 }
 
 function exportBasket(){
