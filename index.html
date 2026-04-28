@@ -1194,13 +1194,9 @@ function runEngine(raw, sessionTag){
   try{
     const st=JSON.parse(localStorage.getItem(SCANNER_STORE)||'{}');
     if(st.rocketPct!=null&&isFinite(parseFloat(st.rocketPct))) rocketPct=parseFloat(st.rocketPct);
-    if(st.holdFactor!=null&&isFinite(parseFloat(st.holdFactor))) holdFactor=parseFloat(st.holdFactor);
   }catch(e){}
-  // Also check live inputs (if methodology tab is rendered)
   const _rEl=document.getElementById('fRocketPct');
-  const _hEl=document.getElementById('fHoldFactor');
   if(_rEl&&_rEl.value!=='') rocketPct=parseFloat(_rEl.value)||10;
-  if(_hEl&&_hEl.value!=='') holdFactor=parseFloat(_hEl.value)||0.3;
 
   // ── Today's rockets: stocks that moved ≥X% up ──
   const ROCKET_THRESHOLD=rocketPct;
@@ -2254,7 +2250,6 @@ function renderMethodology(){
   }
 
   // Section counts for display
-  const _rocketCount=(E.yesterdayRockets||[]).length;
   const _featureCount=sorted.length;
   const _redundantCount=allPairs.length;
   const _weakCount=weakFeats.length;
@@ -2265,7 +2260,6 @@ function renderMethodology(){
       <a href="#meth-filters" onclick="event.preventDefault();scrollToSection('meth-filters')" style="padding:4px 12px;border-radius:6px;background:var(--bg-card);border:1px solid var(--border);color:var(--t2);font-size:11px;font-weight:600;text-decoration:none;cursor:pointer">🛡 Hard Filters</a>
       <a href="#meth-regime" onclick="event.preventDefault();scrollToSection('meth-regime')" style="padding:4px 12px;border-radius:6px;background:var(--bg-card);border:1px solid var(--border);color:var(--t2);font-size:11px;font-weight:600;text-decoration:none;cursor:pointer">🐂 Regime</a>
       <a href="#meth-engine" onclick="event.preventDefault();scrollToSection('meth-engine')" style="padding:4px 12px;border-radius:6px;background:var(--bg-card);border:1px solid var(--border);color:var(--t2);font-size:11px;font-weight:600;text-decoration:none;cursor:pointer">⚙ Engine</a>
-      <a href="#meth-rockets" onclick="event.preventDefault();scrollToSection('meth-rockets')" style="padding:4px 12px;border-radius:6px;background:var(--bg-card);border:1px solid var(--border);color:var(--fire);font-size:11px;font-weight:600;text-decoration:none;cursor:pointer">🚀 Rockets (${_rocketCount})</a>
       <a href="#meth-weights" onclick="event.preventDefault();scrollToSection('meth-weights')" style="padding:4px 12px;border-radius:6px;background:var(--bg-card);border:1px solid var(--border);color:var(--t2);font-size:11px;font-weight:600;text-decoration:none;cursor:pointer">📊 Weights (${_featureCount})</a>
       <a href="#meth-redundant" onclick="event.preventDefault();scrollToSection('meth-redundant')" style="padding:4px 12px;border-radius:6px;background:var(--bg-card);border:1px solid var(--border);color:var(--t2);font-size:11px;font-weight:600;text-decoration:none;cursor:pointer">🔁 Redundant (${_redundantCount})</a>
       <a href="#meth-weak" onclick="event.preventDefault();scrollToSection('meth-weak')" style="padding:4px 12px;border-radius:6px;background:var(--bg-card);border:1px solid var(--border);color:var(--t2);font-size:11px;font-weight:600;text-decoration:none;cursor:pointer">✂ Pruning (${_weakCount})</a>
@@ -2274,58 +2268,13 @@ function renderMethodology(){
     <div id="meth-regime">${regimeCardHTML}</div>
     <h3 id="meth-engine" style="margin-top:18px">Scoring Engine — Regime-Adaptive mRMR + NSE Data Intelligence</h3>
     <div class="m-grid">
-      <div class="m-card"><h4>🎯 Quality-Adjusted Target</h4><p>Stocks that moved <strong>≥${E.rocketThreshold||10}% up</strong>, plus yesterday's rockets that <strong>held today</strong> (didn't collapse beyond hold threshold). Yesterday's rockets that collapsed get reclassified as 0 — the engine <em>unlearns</em> features that predicted fragile spikes. Over sessions, this trains the engine to recommend <strong>durable</strong> moves, not one-day spikes. See the <a href="#meth-rockets" style="color:var(--fire)">Yesterday's Rockets</a> panel below.</p></div>
+      <div class="m-card"><h4>🎯 Quality-Adjusted Target</h4><p>Stocks that moved <strong>≥${E.rocketThreshold||10}% up</strong>, plus yesterday's rockets that <strong>held today</strong> (didn't collapse beyond hold threshold). Yesterday's rockets that collapsed get reclassified as 0 — the engine <em>unlearns</em> features that predicted fragile spikes. Over sessions, this trains the engine to recommend <strong>durable</strong> moves, not one-day spikes.</p></div>
       <div class="m-card"><h4>${E.regime==='bull'?'🐂':E.regime==='bear'?'🐻':'➡'} Regime-Conditional Learning</h4><p>Market classified as <strong style="color:${regimeColor}">${(E.regime||'neutral').toUpperCase()}</strong> (${E.marketBreadth!=null?(E.marketBreadth*100).toFixed(0):'?'}% breadth). Bull ≥55%, Bear &lt;35%. Each regime maintains <strong>separate correlation accumulators</strong> — bull sessions learn breakout patterns, bear sessions learn resilience patterns. ${E.useRegimeCorr?'Using <strong>regime-specific</strong> correlations.':'Using <strong>combined</strong> correlations (need ≥2 sessions in this regime).'}</p></div>
       <div class="m-card"><h4>📊 Sector & Industry Breadth</h4><p>${E.sectorCol?'<span style="color:var(--green)">✓</span> Sector breadth, sector relative strength':'<span style="color:var(--red)">✗</span> No Sector column detected'}${E.industryCol?', <span style="color:var(--green)">✓</span> industry breadth':''} — computed from today\'s data and fed into mRMR. Stocks in strong sectors score higher in bull markets; stocks outperforming weak sectors score higher in bear markets.</p></div>
       <div class="m-card"><h4>🚫 Hard Filters</h4><p>Removed before scoring: upper circuit (≥19.5%), surveillance-listed stocks (exact NSE REG1 column matching — see Hard Filters table below), low liquidity (shareholders &lt;500 or volume &lt;5K), zero/null Piotroski F-Score, delivery &lt;30%, and <strong>peak retention &lt;50%</strong> (fading; only when day range &gt;1%). Currently filtered: ${(REMOVED.uc||0)+(REMOVED.surv||0)+(REMOVED.liq||0)+(REMOVED.fscore||0)+(REMOVED.deliv||0)+(REMOVED.fade||0)} stocks.</p></div>
     </div>
 
     <p style="color:var(--t3);font-style:italic;margin-top:4px">⚠ Quantitative screening only. Not financial advice. Past momentum ≠ future returns.</p>
-
-    <h3 id="meth-rockets" style="margin-top:28px">🚀 Yesterday's Rockets Today — Quality Filter <span style="font-size:12px;color:var(--t3);font-weight:400">(${_rocketCount})</span></h3>
-    <div style="display:flex;gap:16px;align-items:flex-end;flex-wrap:wrap;margin:12px 0">
-      <div class="fg"><span class="fg-lbl" style="color:var(--fire)">Rocket Threshold %</span><input type="number" id="fRocketPctMeth" value="${E.rocketThreshold||10}" min="3" max="30" step="0.5" style="width:80px;padding:8px 10px;background:var(--bg-card);border:1px solid var(--border);border-radius:8px;color:var(--t1);font-family:'DM Mono',monospace;font-size:12px;outline:none" title="Min 1D change % to count as a rocket (X). Default 10%." onchange="const fb=document.getElementById('fRocketPct');if(fb)fb.value=this.value;saveFilterState();updateQualityPanel()"></div>
-      <div class="fg"><span class="fg-lbl" style="color:var(--fire)">Hold Factor</span><input type="number" id="fHoldFactor" value="${E.holdFactor!=null?E.holdFactor:0.3}" min="0" max="1" step="0.05" style="width:80px;padding:8px 10px;background:var(--bg-card);border:1px solid var(--border);border-radius:8px;color:var(--t1);font-family:'DM Mono',monospace;font-size:12px;outline:none" title="Collapse = today's change < -(yesterday's change × this). Default 0.3 = can dip up to 30% of yesterday's gain." onchange="saveFilterState();updateQualityPanel()"></div>
-      <p id="qualityExampleText" style="font-size:11px;color:var(--t3);max-width:400px;margin:0"></p>
-    </div>
-    <div id="qualityPanelBody">${(()=>{
-      const yr=E.yesterdayRockets||[];
-      if(!yr.length) return '<p style="color:var(--t3);font-style:italic">No rockets found in yesterday\'s snapshot — data panel populates after 2+ sessions with PREV_SNAP loaded.</p>';
-      // Build score/rank lookup from current ALL
-      const scoreMap={};
-      ALL.forEach((s,i)=>{scoreMap[s.symbol]={score:s.rocketScore,rank:i+1,tier:s.tier};});
-      const held=yr.filter(r=>r.held), collapsed=yr.filter(r=>!r.held);
-      // Sort by action priority: BUY first, then WATCH, SKIP, AVOID
-      const prioritized=yr.map(r=>{
-        const s=scoreMap[r.symbol];
-        let pri=4;
-        if(!r.inToday) pri=4; // AVOID
-        else if(s&&s.score>=64&&r.todayChg!=null&&r.todayChg>=-2) pri=1; // BUY
-        else if(s&&s.score>=50&&r.todayChg!=null&&r.todayChg>=0) pri=2; // WATCH
-        else pri=3; // SKIP
-        return {...r,_pri:pri,_score:s?s.score:0};
-      }).sort((a,b)=>a._pri!==b._pri?a._pri-b._pri:b._score-a._score);
-      let tbl='<table class="ct"><thead><tr><th>Symbol</th><th>Yesterday</th><th>Today Chg%</th><th>Today Score</th><th>Rank</th><th>Action</th></tr></thead><tbody>';
-      for(const r of prioritized){
-        const todayStr=r.todayChg!=null?((r.todayChg>=0?'+':'')+r.todayChg.toFixed(2)+'%'):'—';
-        const todayC=r.todayChg!=null?(r.todayChg>=0?'var(--green)':'var(--red)'):'var(--t3)';
-        const s=scoreMap[r.symbol];
-        const scoreStr=s?s.score.toFixed(1):'—';
-        const scoreC=s?(s.score>=78?'var(--fire)':s.score>=64?'var(--green)':'var(--t3)'):'var(--t3)';
-        const rankStr=s?'#'+s.rank:'—';
-        // Actionable verdict
-        let action,actionC;
-        if(!r.inToday){action='AVOID — filtered out';actionC='var(--red)';}
-        else if(s&&s.score>=64&&r.todayChg!=null&&r.todayChg>=-2){action='BUY — momentum confirmed';actionC='var(--green)';}
-        else if(s&&s.score>=50&&r.todayChg!=null&&r.todayChg>=0){action='WATCH — moderate score';actionC='var(--cyan)';}
-        else if(r.todayChg!=null&&r.todayChg<-3){action='SKIP — fading fast';actionC='var(--red)';}
-        else {action='SKIP — weak follow-through';actionC='var(--orange)';}
-        tbl+='<tr><td style="font-weight:700">'+r.symbol+'</td><td style="color:var(--fire);font-weight:600">+'+r.yesterdayChg.toFixed(2)+'%</td><td style="color:'+todayC+';font-weight:600">'+todayStr+'</td><td style="color:'+scoreC+';font-weight:600">'+scoreStr+'</td><td style="color:var(--t3)">'+rankStr+'</td><td style="color:'+actionC+';font-weight:700;font-size:11px">'+action+'</td></tr>';
-      }
-      tbl+='</tbody></table>';
-      tbl+='<p style="font-size:10px;color:var(--t3);margin-top:6px">Engine learning: <strong style="color:var(--green)">'+held.length+' held</strong> (label=1, reinforced) · <strong style="color:var(--red)">'+collapsed.length+' collapsed</strong> (label=0, unlearned) · Quality target: '+(E.qualityTargetN||0)+' positives this session</p>';
-      return tbl;
-    })()}</div>
 
     <h3 id="meth-weights" style="margin-top:28px">Feature Weights <span style="font-size:12px;color:var(--t3);font-weight:400">(${_featureCount})</span></h3>
     <div class="corr-wrap">${wtHTML}</div>
@@ -2335,70 +2284,6 @@ function renderMethodology(){
     <h3 id="meth-weak" style="margin-top:28px">Weakest Contributors — CSV Pruning Advisory <span style="font-size:12px;color:var(--t3);font-weight:400">(${_weakCount})</span></h3>
     <p style="color:var(--t3);font-size:12px;margin-bottom:8px">Features from the bottom 20% by mRMR score that are weak across <strong>all</strong> regimes with sufficient data. These are safe to remove from your ALL NSE CSV. Features that are strong in any regime are excluded from this list.</p>
     <div class="corr-wrap">${weakHTML}</div>`;
-  // Populate example text after DOM is set
-  setTimeout(updateQualityPanel,0);
-}
-
-// Live-update yesterday's rockets table when thresholds change
-function updateQualityPanel(){
-  const rocketPct=parseFloat(document.getElementById('fRocketPct')?.value)||ENGINE_DATA?.rocketThreshold||10;
-  const holdFactor=parseFloat(document.getElementById('fHoldFactor')?.value)||ENGINE_DATA?.holdFactor||0.3;
-  // Always update example text
-  const exampleEl=document.getElementById('qualityExampleText');
-  if(exampleEl) exampleEl.innerHTML='A rocket that went +'+rocketPct+'% yesterday can dip to <strong>'+(-(rocketPct*holdFactor)).toFixed(1)+'%</strong> today and still count as "held." Below that → collapsed → label = 0.';
-  const E=ENGINE_DATA;
-  if(!E||!E.yesterdayRockets) return;
-  // Re-evaluate held/collapsed with new thresholds
-  const yr=E.yesterdayRockets;
-  let held=0,collapsed=0;
-  yr.forEach(r=>{
-    // Re-check if this stock qualifies as a rocket under new threshold
-    r._show=r.yesterdayChg>=rocketPct;
-    if(!r._show) return;
-    const collapseThreshold=-(r.yesterdayChg*holdFactor);
-    r._newHeld=r.todayChg!=null&&r.todayChg>collapseThreshold;
-    r._newCollapse=+collapseThreshold.toFixed(2);
-    if(r._newHeld) held++; else collapsed++;
-  });
-  const visible=yr.filter(r=>r._show);
-  // Find the panel container — it's inside methContent
-  const panel=document.getElementById('qualityPanelBody');
-  if(!panel) return;
-  if(!visible.length){
-    panel.innerHTML='<p style="color:var(--t3);font-style:italic">No rockets ≥'+rocketPct+'% in yesterday\'s snapshot.</p>';
-    return;
-  }
-  const scoreMap={};
-  ALL.forEach((s,i)=>{scoreMap[s.symbol]={score:s.rocketScore,rank:i+1,tier:s.tier};});
-  // Sort by action priority
-  const prioritized=visible.map(r=>{
-    const s=scoreMap[r.symbol];
-    let pri=4;
-    if(!r.inToday) pri=4;
-    else if(s&&s.score>=64&&r.todayChg!=null&&r.todayChg>=-2) pri=1;
-    else if(s&&s.score>=50&&r.todayChg!=null&&r.todayChg>=0) pri=2;
-    else pri=3;
-    return {...r,_pri:pri,_score:s?s.score:0};
-  }).sort((a,b)=>a._pri!==b._pri?a._pri-b._pri:b._score-a._score);
-  let tbl='<table class="ct"><thead><tr><th>Symbol</th><th>Yesterday</th><th>Today Chg%</th><th>Today Score</th><th>Rank</th><th>Action</th></tr></thead><tbody>';
-  for(const r of prioritized){
-    const todayStr=r.todayChg!=null?((r.todayChg>=0?'+':'')+r.todayChg.toFixed(2)+'%'):'—';
-    const todayC=r.todayChg!=null?(r.todayChg>=0?'var(--green)':'var(--red)'):'var(--t3)';
-    const s=scoreMap[r.symbol];
-    const scoreStr=s?s.score.toFixed(1):'—';
-    const scoreC=s?(s.score>=78?'var(--fire)':s.score>=64?'var(--green)':'var(--t3)'):'var(--t3)';
-    const rankStr=s?'#'+s.rank:'—';
-    let action,actionC;
-    if(!r.inToday){action='AVOID — filtered out';actionC='var(--red)';}
-    else if(s&&s.score>=64&&r.todayChg!=null&&r.todayChg>=-2){action='BUY — momentum confirmed';actionC='var(--green)';}
-    else if(s&&s.score>=50&&r.todayChg!=null&&r.todayChg>=0){action='WATCH — moderate score';actionC='var(--cyan)';}
-    else if(r.todayChg!=null&&r.todayChg<-3){action='SKIP — fading fast';actionC='var(--red)';}
-    else {action='SKIP — weak follow-through';actionC='var(--orange)';}
-    tbl+='<tr><td style="font-weight:700">'+r.symbol+'</td><td style="color:var(--fire);font-weight:600">+'+r.yesterdayChg.toFixed(2)+'%</td><td style="color:'+todayC+';font-weight:600">'+todayStr+'</td><td style="color:'+scoreC+';font-weight:600">'+scoreStr+'</td><td style="color:var(--t3)">'+rankStr+'</td><td style="color:'+actionC+';font-weight:700;font-size:11px">'+action+'</td></tr>';
-  }
-  tbl+='</tbody></table>';
-  tbl+='<p style="font-size:10px;color:var(--t3);margin-top:6px">Engine learning: <strong style="color:var(--green)">'+held+' held</strong> (reinforced) · <strong style="color:var(--red)">'+collapsed+' collapsed</strong> (unlearned) · Thresholds apply on next upload.</p>';
-  panel.innerHTML=tbl;
 }
 
 // Fixed columns + dynamic top 10 mRMR features (skip empty ones)
