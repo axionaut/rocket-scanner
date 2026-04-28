@@ -3157,13 +3157,14 @@ function parseTradebook(text){
   return stats;
 }
 
-// Zerodha charge calculator for one leg. isIntraday=true → MIS rates, false → CNC/delivery rates.
+// Zerodha charge calculator for one leg. Rates from Zerodha Equity Trading Charges.csv.
+// isIntraday=true → MIS rates, false → CNC/delivery rates.
 // skipDp=true suppresses the ₹15.34 DP charge (use for 2nd+ trips of same ISIN on same sell day).
 function calcZerodhaCharges(price, qty, isSell, isIntraday, skipDp){
   const posVal=price*Math.abs(qty);
-  const brokerage=isIntraday?Math.min(0.0003*posVal,20):0;  // MIS: min(0.03%,₹20); CNC: ₹0
-  const stt=isSell?(isIntraday?0.00025:0.001)*posVal:0;     // STT sell-only: MIS 0.025%, CNC 0.1%
-  const txn=0.0000375*posVal;                                // Exchange txn: 0.00375% both sides
+  const brokerage=isIntraday?Math.min(0.0003*posVal,20):0;  // CNC: ₹0; MIS: min(0.03%,₹20)/order
+  const stt=isIntraday?(isSell?0.00025*posVal:0):0.001*posVal; // CNC: 0.1% both sides; MIS: 0.025% sell only
+  const txn=0.0000307*posVal;                                // NSE txn: 0.00307% both sides
   const sebi=0.000001*posVal;                                // SEBI: ₹10/crore both sides
   const gst=0.18*(brokerage+sebi+txn);                      // GST: 18% on (brokerage+txn+SEBI)
   const stamp=isSell?0:(isIntraday?0.00003:0.00015)*posVal; // Stamp buy-only: MIS 0.003%, CNC 0.015%
