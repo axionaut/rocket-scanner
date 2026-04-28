@@ -364,6 +364,7 @@ const ORDERS_STORE='rs_orders';
 const POS_STORE='rs_positions';
 const TRADEBOOK_STORE='rs_tradebook';
 const SURV_RULE_STORE='rs_surv_rules';
+const SURV_CORR_STORE='rs_surv_corr';
 const MISSED_OPP_STORE='rs_missed_opp_v2';
 const OPEN_BUY_DATE_STORE='rs_open_buy_dates';
 const REC_COUNT_STORE='rs_rec_count';
@@ -558,6 +559,8 @@ let NSE_BHAV={},NSE_52W={},NSE_SURV={},NSE_BULK={},NSE_BLOCK={};
 let SURV_CUSTOM_RULES=[]; // [{key,column,label,manual:true}] persistent manual REG1 columns
 let SURV_HEADERS=[]; // exact REG1 headers loaded this session
 let SURV_RULE_HITS={}; // {ruleKey -> flagged symbol count} before hard filters
+let SURV_ALL_HITS={}; // {sym -> {colName: true}} — ALL columns flagged, not just active rules
+let SURV_CORR_ACC={}; // {colKey -> {col, sessions, winRate, avgPnl, lastCount}} accumulated correlation
 let HOLDINGS=[]; // active holdings from Holdings.csv (qty>0)
 let HOLDINGS_ALL=[]; // all holdings rows from Holdings.csv, including qty=0 closed holdings
 let POSITIONS=[]; // parsed positions from Positions.csv
@@ -922,6 +925,7 @@ function parseSurv(text){
   NSE_SURV={};
   SURV_HEADERS=[];
   SURV_RULE_HITS={};
+  SURV_ALL_HITS={};
   if(!rows.length) return;
   const hdrs=Object.keys(rows[0]);
   SURV_HEADERS=hdrs.slice();
@@ -929,6 +933,8 @@ function parseSurv(text){
   hdrs.forEach(h=>{hdrMap[String(h).trim().toLowerCase()]=h;});
   const activeRules=getSurvRules().map(rule=>({...rule,header:hdrMap[rule.column.toLowerCase()]||null}));
   activeRules.forEach(rule=>{SURV_RULE_HITS[rule.key]=0;});
+  // dataHdrs: exclude Symbol/ISIN-style identity columns from P&L correlation
+  const dataHdrs=hdrs.filter(h=>!/^(symbol|isin|series|company|name|date)/i.test(h.trim()));
   rows.forEach(r=>{
     const sym=normSym(r['Symbol']);if(!sym)return;
     const hits=[];
@@ -936,9 +942,11 @@ function parseSurv(text){
       if(!rule.header) return;
       if(isSurvFlag(r[rule.header])) hits.push(rule.key);
     });
-    if(!hits.length) return;
-    NSE_SURV[sym]=hits;
-    hits.forEach(key=>{SURV_RULE_HITS[key]=(SURV_RULE_HITS[key]||0)+1;});
+    if(hits.length){NSE_SURV[sym]=hits; hits.forEach(key=>{SURV_RULE_HITS[key]=(SURV_RULE_HITS[key]||0)+1;});}
+    // Populate SURV_ALL_HITS for ALL flagged columns (for P&L correlation)
+    const allHit={};
+    dataHdrs.forEach(h=>{if(isSurvFlag(r[h]))allHit[h]=true;});
+    if(Object.keys(allHit).length) SURV_ALL_HITS[sym]=allHit;
   });
 }
 function parseDeal(text,map){
@@ -1606,6 +1614,8 @@ function renderStats(){
     const _sl=TRADEBOOK_STATS.adaptiveSL.toFixed(1),_tgt=TRADEBOOK_STATS.adaptiveTGT.toFixed(1);
     pills.push(`<span class="info-pill" style="background:rgba(148,163,184,.08);border:1px solid rgba(148,163,184,.2);color:var(--t2)" title="Derived from tradebook: SL = median net loss%, TGT = 75th percentile net win%">📐 SL ${_sl}% · TGT ${_tgt}%</span>`);
   }
+  // Update surveillance P&L correlation accumulator if both data sources are ready
+  if(HOLDINGS?.length&&Object.keys(SURV_ALL_HITS).length) try{updateSurvCorrelation();}catch(e){}
   const infoBarEl=document.getElementById('infoBar');
   infoBarEl.innerHTML=pills.join('');
   void infoBarEl.offsetHeight;
@@ -2138,7 +2148,118 @@ function buildHardFilterMethodologyHTML(E){
       </div>
     </div>
     ${survMeta}
+    ${buildSurvCorrHTML()}
   `;
+}
+
+// ── Surveillance P&L Correlation ──
+// For each surveillance column, checks which currently-held stocks are flagged and
+// computes their current P&L%. Accumulated over sessions like the mRMR correlators.
+// Requires: HOLDINGS + SURV_ALL_HITS both loaded.
+function updateSurvCorrelation(){
+  if(!HOLDINGS?.length||!Object.keys(SURV_ALL_HITS).length) return;
+  // Build held symbol → current P&L% map
+  const holdPnl={};
+  HOLDINGS.forEach(h=>{
+    if(!h?.symbol||!(h.qty>0)) return;
+    const ltp=ALL.find(s=>s.symbol===h.symbol)?.price
+              ||(POSITIONS?.find(p=>p.symbol===h.symbol)?.ltp)
+              ||h.ltp||null;
+    const avg=HOLD_COST_MAP[h.symbol]??h.avgCost??null;
+    if(ltp&&avg&&avg>0) holdPnl[h.symbol]=(ltp-avg)/avg*100;
+  });
+  if(!Object.keys(holdPnl).length) return;
+
+  let updated=false;
+  SURV_HEADERS.forEach(col=>{
+    if(!col||/^(symbol|isin|series|company|name|date)/i.test(col.trim())) return;
+    const key=survRuleKey(col); if(!key) return;
+    // Find held symbols flagged under this column
+    const flagged=Object.entries(SURV_ALL_HITS)
+      .filter(([sym,cols])=>cols[col]&&holdPnl[sym]!==undefined)
+      .map(([sym])=>({sym,pnl:holdPnl[sym]}));
+    if(!flagged.length) return; // none of my holdings are in this bucket this session
+    const wins=flagged.filter(f=>f.pnl>0).length;
+    const curWinRate=wins/flagged.length*100;
+    const curAvgPnl=flagged.reduce((s,f)=>s+f.pnl,0)/flagged.length;
+    // Running mean accumulation
+    if(!SURV_CORR_ACC[key]) SURV_CORR_ACC[key]={col,key,sessions:0,winRate:0,avgPnl:0,lastCount:0};
+    const acc=SURV_CORR_ACC[key];
+    const n=acc.sessions+1;
+    acc.winRate=(acc.winRate*(n-1)+curWinRate)/n;
+    acc.avgPnl=(acc.avgPnl*(n-1)+curAvgPnl)/n;
+    acc.sessions=n; acc.col=col; acc.lastCount=flagged.length;
+    updated=true;
+  });
+  if(updated) FS.set(SURV_CORR_STORE,SURV_CORR_ACC);
+}
+
+function buildSurvCorrHTML(){
+  const hasHoldings=HOLDINGS?.length>0;
+  const hasSurv=SURV_HEADERS?.length>0;
+  if(!hasHoldings||!hasSurv){
+    const needs=[];
+    if(!hasHoldings) needs.push('<strong>Holdings.csv</strong>');
+    if(!hasSurv) needs.push('<strong>NSE ZIP</strong> (surveillance)');
+    return `<div style="padding:12px 14px;background:rgba(148,163,184,.06);border:1px solid var(--border);border-radius:8px;font-size:12px;color:var(--t3);margin-top:12px">
+      Load ${needs.join(' + ')} to compute surveillance P&amp;L correlation. The accumulator builds over time — each session adds one observation per flagged column.
+    </div>`;
+  }
+  const accRows=Object.values(SURV_CORR_ACC).filter(r=>r.sessions>0);
+  if(!accRows.length){
+    return `<div style="padding:12px 14px;background:rgba(148,163,184,.06);border:1px solid var(--border);border-radius:8px;font-size:12px;color:var(--t3);margin-top:12px">
+      No correlation data yet — accumulator will update next time Holdings.csv + NSE ZIP are loaded together. None of your current holdings appear in any surveillance column.
+    </div>`;
+  }
+  const activeColKeys=new Set(getSurvRules().map(r=>r.key));
+  const sorted=[...accRows].sort((a,b)=>a.winRate-b.winRate); // worst first
+  const maxSess=Math.max(...sorted.map(r=>r.sessions));
+  const rowHtml=sorted.map(r=>{
+    const isActive=activeColKeys.has(r.key);
+    const conf=r.sessions<2?'low':r.sessions<5?'med':'high';
+    const confClr=conf==='high'?'var(--green)':conf==='med'?'var(--amber)':'var(--t3)';
+    const verdict=r.sessions<2?'❓'
+      :r.winRate<35&&r.avgPnl<-0.5?'🚫 Filter'
+      :r.winRate>65&&r.avgPnl>0.5?'✅ Likely safe'
+      :'📊 Neutral';
+    const vClr=verdict.startsWith('🚫')?'var(--red)':verdict.startsWith('✅')?'var(--green)':'var(--amber)';
+    const pnlClr=r.avgPnl<0?'var(--red)':r.avgPnl>0?'var(--green)':'var(--t3)';
+    const winClr=r.winRate<40?'var(--red)':r.winRate>60?'var(--green)':'var(--amber)';
+    const addBtn=!isActive&&verdict.startsWith('🚫')
+      ?`<button onclick="addSurvRule(${JSON.stringify(r.col)})" style="padding:4px 8px;border-radius:6px;border:1px solid rgba(239,68,68,.3);background:rgba(239,68,68,.08);color:var(--red);font-size:10px;font-weight:700;cursor:pointer">+ Filter</button>`
+      :isActive?`<span style="color:var(--t3);font-size:10px">Active</span>`:'';
+    const sessBar=`<span style="display:inline-block;width:${Math.round(r.sessions/maxSess*40)}px;height:4px;background:${confClr};border-radius:2px;vertical-align:middle;margin-right:4px"></span>`;
+    return `<tr style="border-bottom:1px solid var(--border)">
+      <td style="padding:7px 10px;color:var(--t1);font-size:11px;max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${escHtml(r.col)}">${escHtml(r.col)}</td>
+      <td style="padding:7px 10px;text-align:right;font-family:'DM Mono',monospace;font-size:11px;color:${confClr}">${sessBar}${r.sessions}</td>
+      <td style="padding:7px 10px;text-align:right;font-family:'DM Mono',monospace;font-size:11px;color:var(--t3)">${r.lastCount}</td>
+      <td style="padding:7px 10px;text-align:right;font-family:'DM Mono',monospace;font-weight:700;font-size:11px;color:${winClr}">${r.winRate.toFixed(1)}%</td>
+      <td style="padding:7px 10px;text-align:right;font-family:'DM Mono',monospace;font-weight:700;font-size:11px;color:${pnlClr}">${r.avgPnl>=0?'+':''}${r.avgPnl.toFixed(2)}%</td>
+      <td style="padding:7px 10px;font-size:11px;font-weight:700;color:${vClr}">${verdict}</td>
+      <td style="padding:7px 10px;text-align:right">${addBtn}</td>
+    </tr>`;
+  }).join('');
+  return `
+    <h4 id="meth-surv-corr" style="margin:16px 0 6px;font-size:13px;color:var(--t2)">📊 Surveillance P&L Correlation <span style="font-size:10px;font-weight:400;color:var(--t3)">(accumulated from held-stock data · ${maxSess} max sessions)</span>
+      <button onclick="if(confirm('Reset surveillance correlation accumulator?')){SURV_CORR_ACC={};FS.set(SURV_CORR_STORE,{});renderMethodology();}" style="margin-left:12px;padding:3px 8px;border-radius:6px;border:1px solid var(--border);background:none;color:var(--t3);font-size:10px;cursor:pointer">Reset</button>
+    </h4>
+    <p style="font-size:11px;color:var(--t3);margin-bottom:8px">For each surveillance column, tracks the P&amp;L of currently-held stocks flagged under it. Accumulates per session. Low confidence (&lt;2 sessions) — observe before acting.</p>
+    <div style="background:var(--bg-card);border:1px solid var(--border);border-radius:10px;overflow:hidden">
+      <div style="overflow-x:auto">
+        <table style="width:100%;border-collapse:collapse;font-size:12px">
+          <thead><tr style="color:var(--t3);font-size:10px;text-transform:uppercase;letter-spacing:.06em;border-bottom:1px solid var(--border)">
+            <th style="padding:6px 10px;text-align:left">Surveillance Column</th>
+            <th style="padding:6px 10px;text-align:right">Sessions</th>
+            <th style="padding:6px 10px;text-align:right">Last Flagged</th>
+            <th style="padding:6px 10px;text-align:right">Win Rate</th>
+            <th style="padding:6px 10px;text-align:right">Avg P&L%</th>
+            <th style="padding:6px 10px;text-align:left">Signal</th>
+            <th style="padding:6px 10px;text-align:right">Action</th>
+          </tr></thead>
+          <tbody>${rowHtml}</tbody>
+        </table>
+      </div>
+    </div>`;
 }
 
 function renderMethodology(){
@@ -2320,6 +2441,7 @@ function renderMethodology(){
   mc.innerHTML=`
     <nav style="position:sticky;top:var(--hdr-h,72px);z-index:50;background:var(--bg);padding:8px 0 10px;margin-bottom:8px;display:flex;gap:6px;flex-wrap:wrap;border-bottom:1px solid var(--border);box-shadow:0 2px 8px rgba(0,0,0,0.3);overflow-x:auto;-webkit-overflow-scrolling:touch">
       <a href="#meth-filters" onclick="event.preventDefault();scrollToSection('meth-filters')" style="padding:4px 12px;border-radius:6px;background:var(--bg-card);border:1px solid var(--border);color:var(--t2);font-size:11px;font-weight:600;text-decoration:none;cursor:pointer">🛡 Hard Filters</a>
+      <a href="#meth-surv-corr" onclick="event.preventDefault();scrollToSection('meth-surv-corr')" style="padding:4px 12px;border-radius:6px;background:var(--bg-card);border:1px solid var(--border);color:var(--t2);font-size:11px;font-weight:600;text-decoration:none;cursor:pointer">📊 Surv P&L</a>
       <a href="#meth-regime" onclick="event.preventDefault();scrollToSection('meth-regime')" style="padding:4px 12px;border-radius:6px;background:var(--bg-card);border:1px solid var(--border);color:var(--t2);font-size:11px;font-weight:600;text-decoration:none;cursor:pointer">🐂 Regime</a>
       <a href="#meth-engine" onclick="event.preventDefault();scrollToSection('meth-engine')" style="padding:4px 12px;border-radius:6px;background:var(--bg-card);border:1px solid var(--border);color:var(--t2);font-size:11px;font-weight:600;text-decoration:none;cursor:pointer">⚙ Engine</a>
       <a href="#meth-weights" onclick="event.preventDefault();scrollToSection('meth-weights')" style="padding:4px 12px;border-radius:6px;background:var(--bg-card);border:1px solid var(--border);color:var(--t2);font-size:11px;font-weight:600;text-decoration:none;cursor:pointer">📊 Weights (${_featureCount})</a>
@@ -3745,6 +3867,9 @@ async function initApp(){
 
     // Step 2f: Restore tradebook stats
     try{const tb=brain[TRADEBOOK_STORE];if(tb){TRADEBOOK_STATS=tb;if(tb.lastBuyDateMap) LAST_BUY_DATE_MAP=tb.lastBuyDateMap;}}catch(e){}
+
+    // Step 2f2: Restore surveillance P&L correlation accumulator
+    try{const sc=brain[SURV_CORR_STORE];if(sc&&typeof sc==='object') SURV_CORR_ACC=sc;}catch(e){}
 
     // Step 2g: Restore surveillance custom rules
     try{
