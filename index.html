@@ -1901,8 +1901,9 @@ function renderPerformance(){
         }
         const bc=calcZerodhaCharges(avgBuy,matchedQty,false,isIntraday);
         const sc=calcZerodhaCharges(avgSell,matchedQty,true,isIntraday);
-        const netPnl=+((avgSell-avgBuy)*matchedQty-bc-sc).toFixed(0);
-        latestRows.push({sym,lots:sells.length,buyPrice:+avgBuy.toFixed(2),sellPrice:+avgSell.toFixed(2),winRate:netPnl>0?100:0,netPnl,_sort:netPnl});
+        const charges=+(bc+sc).toFixed(0);
+        const netPnl=+((avgSell-avgBuy)*matchedQty-charges).toFixed(0);
+        latestRows.push({sym,lots:sells.length,buyPrice:+avgBuy.toFixed(2),sellPrice:+avgSell.toFixed(2),charges,winRate:netPnl>0?100:0,netPnl,_sort:netPnl});
       });
       latestDate=(ORDERS_TODAY[0].time||'').substring(0,10)||getSessionDate();
       if(tb&&tb.lastDayRows&&tb.lastDayRows.length&&tb.lastDate===latestDate){
@@ -1926,6 +1927,7 @@ function renderPerformance(){
         {key:'lots',label:'Trades',align:'right',fmt:v=>v,clrFn:()=>'var(--t2)'},
         {key:'buyPrice',label:'Buy ₹',align:'right',fmt:v=>v.toLocaleString('en-IN'),clrFn:()=>'var(--t2)'},
         {key:'sellPrice',label:'Sell ₹',align:'right',fmt:v=>v.toLocaleString('en-IN'),clrFn:()=>'var(--t2)'},
+        {key:'charges',label:'Charges ₹',align:'right',fmt:v=>v!=null?fmtRs(v):'—',clrFn:()=>'var(--red)'},
         {key:'netPnl',label:'Net P&L',align:'right',bold:true,fmt:fmtRs,clrFn:clr},
       ];
       const latestTbl=makeSortableTable('perf-latest',latestCols,latestRows,'_sort',-1);
@@ -3102,11 +3104,13 @@ function parseTradebook(text){
 
   // Add netPnl (with charges) per trip and store full array for renderPerformance
   const tripsData=roundTrips.map(r=>{
-    const bc=calcZerodhaCharges(r.buyPrice,r.qty,false);
-    const sc=calcZerodhaCharges(r.sellPrice,r.qty,true);
-    const netPnl=+((r.sellPrice-r.buyPrice)*r.qty-bc-sc).toFixed(0);
+    const intra=r.holdDays===0;
+    const bc=calcZerodhaCharges(r.buyPrice,r.qty,false,intra);
+    const sc=calcZerodhaCharges(r.sellPrice,r.qty,true,intra);
+    const charges=+(bc+sc).toFixed(0);
+    const netPnl=+((r.sellPrice-r.buyPrice)*r.qty-charges).toFixed(0);
     const netPnlPct=r.capital>0?+(netPnl/r.capital*100).toFixed(2):r.pnlPct;
-    return{...r,netPnl,netPnlPct};
+    return{...r,charges,netPnl,netPnlPct};
   });
   stats.tripsData=tripsData;
 
@@ -3114,14 +3118,15 @@ function parseTradebook(text){
   const lastDate=dates.length?dates[0]:null;
   const lastDayBySym={};
   tripsData.filter(r=>r.sellDate===lastDate).forEach(r=>{
-    if(!lastDayBySym[r.sym]) lastDayBySym[r.sym]={sym:r.sym,lots:0,buyVal:0,sellVal:0,qty:0,netPnl:0};
+    if(!lastDayBySym[r.sym]) lastDayBySym[r.sym]={sym:r.sym,lots:0,buyVal:0,sellVal:0,qty:0,netPnl:0,charges:0};
     const e=lastDayBySym[r.sym];
-    e.lots++;e.buyVal+=r.buyPrice*r.qty;e.sellVal+=r.sellPrice*r.qty;e.qty+=r.qty;e.netPnl+=r.netPnl;
+    e.lots++;e.buyVal+=r.buyPrice*r.qty;e.sellVal+=r.sellPrice*r.qty;e.qty+=r.qty;e.netPnl+=r.netPnl;e.charges+=r.charges;
   });
   const lastDayRows=Object.values(lastDayBySym).map(e=>({
     sym:e.sym,lots:e.lots,
     buyPrice:e.qty>0?+(e.buyVal/e.qty).toFixed(2):0,
     sellPrice:e.qty>0?+(e.sellVal/e.qty).toFixed(2):0,
+    charges:+e.charges.toFixed(0),
     netPnl:+e.netPnl.toFixed(0)
   }));
   stats.lastDate=lastDate;
@@ -3141,18 +3146,17 @@ function parseTradebook(text){
   return stats;
 }
 
-// Zerodha CNC charge calculator for one leg
-// Rates: Zerodha equity delivery (max across NSE/BSE)
-function calcZerodhaCharges(price, qty, isSell){
+// Zerodha charge calculator for one leg. isIntraday=true → MIS rates, false → CNC/delivery rates.
+function calcZerodhaCharges(price, qty, isSell, isIntraday){
   const posVal=price*Math.abs(qty);
-  const brokerage=0;                          // ₹0 equity delivery
-  const stt=0.001*posVal;                     // STT: 0.1% on buy & sell
-  const txn=0.0000375*posVal;                 // Exchange txn: max(NSE 0.00307%, BSE 0.00375%)
-  const sebi=0.000001*posVal;                 // SEBI: ₹10/crore
-  const gst=0.18*(brokerage+sebi+txn);        // GST: 18% on (brokerage + SEBI + txn)
-  const stamp=isSell?0:(0.00015*posVal);      // Stamp: 0.015% buy side only
-  const dp=isSell?15.34:0;                    // DP: ₹15.34 sell only
-  return stt+txn+sebi+gst+stamp+dp;
+  const brokerage=isIntraday?Math.min(0.0003*posVal,20):0;  // MIS: min(0.03%,₹20); CNC: ₹0
+  const stt=isSell?(isIntraday?0.00025:0.001)*posVal:0;     // STT sell-only: MIS 0.025%, CNC 0.1%
+  const txn=0.0000375*posVal;                                // Exchange txn: 0.00375% both sides
+  const sebi=0.000001*posVal;                                // SEBI: ₹10/crore both sides
+  const gst=0.18*(brokerage+sebi+txn);                      // GST: 18% on (brokerage+txn+SEBI)
+  const stamp=isSell?0:(isIntraday?0.00003:0.00015)*posVal; // Stamp buy-only: MIS 0.003%, CNC 0.015%
+  const dp=(isSell&&!isIntraday)?15.34:0;                   // DP: ₹15.34 sell-only, CNC only
+  return brokerage+stt+txn+sebi+gst+stamp+dp;
 }
 
 function getPosition(symbol){
