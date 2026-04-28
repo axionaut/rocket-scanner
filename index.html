@@ -2284,7 +2284,7 @@ function renderMethodology(){
 
     <h3 id="meth-rockets" style="margin-top:28px">🚀 Yesterday's Rockets Today — Quality Filter <span style="font-size:12px;color:var(--t3);font-weight:400">(${_rocketCount})</span></h3>
     <div style="display:flex;gap:16px;align-items:flex-end;flex-wrap:wrap;margin:12px 0">
-      <div class="fg"><span class="fg-lbl" style="color:var(--fire)">Rocket Threshold %</span><input type="number" id="fRocketPct" value="${E.rocketThreshold||10}" min="3" max="30" step="0.5" style="width:80px;padding:8px 10px;background:var(--bg-card);border:1px solid var(--border);border-radius:8px;color:var(--t1);font-family:'DM Mono',monospace;font-size:12px;outline:none" title="Min 1D change % to count as a rocket (X). Default 10%." onchange="saveFilterState();updateQualityPanel()"></div>
+      <div class="fg"><span class="fg-lbl" style="color:var(--fire)">Rocket Threshold %</span><input type="number" id="fRocketPctMeth" value="${E.rocketThreshold||10}" min="3" max="30" step="0.5" style="width:80px;padding:8px 10px;background:var(--bg-card);border:1px solid var(--border);border-radius:8px;color:var(--t1);font-family:'DM Mono',monospace;font-size:12px;outline:none" title="Min 1D change % to count as a rocket (X). Default 10%." onchange="const fb=document.getElementById('fRocketPct');if(fb)fb.value=this.value;saveFilterState();updateQualityPanel()"></div>
       <div class="fg"><span class="fg-lbl" style="color:var(--fire)">Hold Factor</span><input type="number" id="fHoldFactor" value="${E.holdFactor!=null?E.holdFactor:0.3}" min="0" max="1" step="0.05" style="width:80px;padding:8px 10px;background:var(--bg-card);border:1px solid var(--border);border-radius:8px;color:var(--t1);font-family:'DM Mono',monospace;font-size:12px;outline:none" title="Collapse = today's change < -(yesterday's change × this). Default 0.3 = can dip up to 30% of yesterday's gain." onchange="saveFilterState();updateQualityPanel()"></div>
       <p id="qualityExampleText" style="font-size:11px;color:var(--t3);max-width:400px;margin:0"></p>
     </div>
@@ -3383,70 +3383,6 @@ function exportBasket(){
   showToast(`<strong>Exported ${orders.length} BUY orders</strong> as Zerodha_Basket_Buy JSON${rejNote}`);
 }
 
-function exportSellBasket(){
-  // Collect all unique symbols from HOLDINGS and POSITIONS
-  const allSymbols=new Set();
-  if(HOLDINGS&&HOLDINGS.length) HOLDINGS.forEach(h=>{if(h.symbol&&h.qty>0) allSymbols.add(h.symbol);});
-  if(POSITIONS&&POSITIONS.length) POSITIONS.forEach(p=>{if(p.symbol&&p.qty>0) allSymbols.add(p.symbol);});
-  
-  if(!allSymbols.size){
-    showToast('No holdings or open positions to sell.',3000,true);
-    return;
-  }
-  
-  const tick=v=>Math.round(v/0.05)*0.05;
-  const adaptiveSL=TRADEBOOK_STATS?TRADEBOOK_STATS.adaptiveSL:3.5;
-  const adaptiveTGT=TRADEBOOK_STATS?TRADEBOOK_STATS.adaptiveTGT:3.7;
-  const orders=[];
-  
-  let orderId=Date.now();
-  allSymbols.forEach(sym=>{
-    // Get qty from HOLDINGS (master source for current holdings)
-    const holdingRow=HOLDINGS?.find(h=>h.symbol===sym);
-    const qty=holdingRow?.qty||0;
-    if(qty<=0) return;
-    
-    // Get average price: Positions first, then HOLD_COST_MAP
-    const sellData=getSellAvgPrice(sym);
-    const avgBuy=sellData?.avg;
-    if(avgBuy==null) return;
-    
-    // Apply SL and TGT% to avgBuy
-    const tgtPrice=avgBuy*(1+adaptiveTGT/100);
-    const slPrice=avgBuy*(1-adaptiveSL/100);
-    
-    orders.push({
-      id:orderId++,
-      instrument:{
-        tradingsymbol:sym,scripCode:'',type:'EQ',symbol:sym,
-        segment:'NSE',exchange:'NSE',tickSize:0.01,lotSize:1,
-        company:sym,tradable:true,precision:2,
-        fullName:sym,niceName:sym,niceNameHTML:sym,stockWidget:true,
-        exchangeToken:0,instrumentToken:0,isin:'',
-        related:[],underlying:null,auctionNumber:null,
-        isEquity:true,isWeekly:false
-      },
-      weight:0,
-      params:{
-        transactionType:'SELL',product:'CNC',orderType:'LIMIT',
-        validity:'DAY',validityTTL:1,
-        quantity:qty,price:parseFloat(tick(tgtPrice).toFixed(2)),
-        triggerPrice:0,disclosedQuantity:0,lastPrice:0,
-        variety:'regular',
-        gtt:{target:parseFloat(tick(tgtPrice).toFixed(2))},
-        tags:[]
-      }
-    });
-  });
-
-  if(!orders.length){
-    showToast('No holdings or open positions to sell.',3000,true);
-    return;
-  }
-  downloadBasket(orders,'Zerodha_Basket_Sell');
-  showToast(`<strong>Exported ${orders.length} SELL orders</strong> for all holdings as Zerodha_Basket_Sell JSON`);
-}
-
 // ── Basket export helper: Zerodha limits 20 orders per basket ──
 function downloadBasket(orders, filename){
   const capped=orders.slice(0,20);
@@ -3655,8 +3591,9 @@ async function processFiles(files){
       ORDERS_TODAY=parseOrders(ordText);
       try{FS.set(ORDERS_STORE,ORDERS_TODAY);}catch(e){}
     }
-    // Re-render stats bar so the Booked Today card reflects fresh holdings/positions
-    if(holdFile||posFile||ordFile) renderStats();
+    // Re-render stats bar so the Booked Today card reflects fresh holdings/positions/orders
+    // renderPerformance must run first to update LATEST_BOOKED_TOTAL
+    if(holdFile||posFile||ordFile){renderPerformance();renderStats();}
     // Process tradebook if uploaded
     if(tbFile){
       setMsg('Analyzing tradebook...');
@@ -3665,7 +3602,7 @@ async function processFiles(files){
       const tbText=await tbFile.text();
       TRADEBOOK_STATS=parseTradebook(tbText);
       if(TRADEBOOK_STATS) try{FS.set(TRADEBOOK_STORE,TRADEBOOK_STATS);}catch(e){}
-      if(TRADEBOOK_STATS) renderStats();
+      if(TRADEBOOK_STATS){renderPerformance();renderStats();}
     }
     showBrainPrompt();
     } // end isFullScannerCSV else
