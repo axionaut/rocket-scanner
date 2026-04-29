@@ -1990,25 +1990,30 @@ function renderPerformance(){
     const dpCharged=new Set();
     Object.entries(bySymO).forEach(([sym,{buys,sells}])=>{
       if(!sells.length) return;
-      const isIntraday=buys.length>0;
       const totalSellQty=sells.reduce((s,o)=>s+o.qty,0);
       const avgSell=sells.reduce((s,o)=>s+o.price*o.qty,0)/totalSellQty;
+      // Delivery: Holdings has a known avg cost for this symbol (sold an existing position)
+      // Intraday: no Holdings cost but same-day buys exist (bought and sold same day)
+      const holdingAvg=getHoldingAvgCost(sym)??null;
+      const isDelivery=holdingAvg!==null;
+      const isIntraday=!isDelivery&&buys.length>0;
       let avgBuy, matchedQty;
-      if(isIntraday){
+      if(isDelivery){
+        avgBuy=holdingAvg;
+        matchedQty=totalSellQty;
+      } else if(isIntraday){
         const totalBuyQty=buys.reduce((s,o)=>s+o.qty,0);
         avgBuy=buys.reduce((s,o)=>s+o.price*o.qty,0)/totalBuyQty;
         matchedQty=Math.min(totalBuyQty,totalSellQty);
       } else {
-        // Delivery: Positions avg → Holdings avg cost → Tradebook FIFO avg (fully-exited positions)
-        const posAvg=POSITIONS?.find(p=>p.symbol===sym&&p.qty>0)?.avg??null;
-        avgBuy=posAvg??getHoldingAvgCost(sym)??_tbBuyMap[sym]??null;
-        if(avgBuy==null) return; // no cost basis — skip
-        matchedQty=totalSellQty;
+        return; // no cost basis — skip
       }
-      const skipDp=isIntraday||dpCharged.has(sym);
-      if(!isIntraday) dpCharged.add(sym);
-      const bcS=calcZerodhaChargesSplit(avgBuy,matchedQty,false,isIntraday,false);
-      const scS=calcZerodhaChargesSplit(avgSell,matchedQty,true,isIntraday,skipDp);
+      // Charge rates: MIS only if any order for this symbol is explicitly MIS product
+      const isMIS=buys.some(o=>o.product==='MIS')||sells.some(o=>o.product==='MIS');
+      const skipDp=isMIS||dpCharged.has(sym);
+      if(!isMIS) dpCharged.add(sym);
+      const bcS=calcZerodhaChargesSplit(avgBuy,matchedQty,false,isMIS,false);
+      const scS=calcZerodhaChargesSplit(avgSell,matchedQty,true,isMIS,skipDp);
       const _brok=+(bcS.brokerage+scS.brokerage).toFixed(2);
       const _stt=+(bcS.stt+scS.stt).toFixed(2);
       const _txn=+(bcS.txn+scS.txn).toFixed(2);
@@ -3266,6 +3271,7 @@ function parseOrders(text){
   const qtyCol=find([/^qty/i,/^quantity/i]);
   const priceCol=find([/^avg.*price$/i,/^price$/i,/^avg.*trade/i]);
   const statusCol=find([/^status$/i]);
+  const productCol=find([/^product$/i]);
   if(!symCol||!typeCol||!qtyCol||!priceCol||!statusCol){console.warn('Orders CSV: missing required columns');return [];}
   return rows.map(r=>{
     const status=String(r[statusCol]||'').trim().toUpperCase();
@@ -3279,7 +3285,8 @@ function parseOrders(text){
     const price=num(r[priceCol]);
     if(qty===null||qty===0||price===null) return null;
     const time=String(r[timeCol]||'').trim()||getSessionDate();
-    return {symbol:sym,type,qty,price,time};
+    const product=productCol?String(r[productCol]||'').trim().toUpperCase():'CNC';
+    return {symbol:sym,type,qty,price,time,product};
   }).filter(Boolean);
 }
 
