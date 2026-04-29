@@ -1941,8 +1941,12 @@ function renderPerformance(){
   // Never falls back to tradebook — tradebook FIFO prices ≠ Holdings avg cost.
   let todayHtml='';
   if(ORDERS_TODAY&&ORDERS_TODAY.length){
+    // Filter to only the most recent date's orders (Orders.csv may contain multiple days)
+    const _allDates=ORDERS_TODAY.map(o=>(o.time||'').substring(0,10)).filter(Boolean).sort();
+    const _latestDay=_allDates[_allDates.length-1]||'';
+    const sessionOrders=_latestDay?ORDERS_TODAY.filter(o=>(o.time||'').startsWith(_latestDay)):ORDERS_TODAY;
     const bySymO={};
-    ORDERS_TODAY.forEach(o=>{
+    sessionOrders.forEach(o=>{
       if(!bySymO[o.symbol]) bySymO[o.symbol]={buys:[],sells:[]};
       if(o.type==='BUY') bySymO[o.symbol].buys.push(o);
       else if(o.type==='SELL') bySymO[o.symbol].sells.push(o);
@@ -1981,7 +1985,7 @@ function renderPerformance(){
       const netPnl=+((avgSell-avgBuy)*matchedQty-charges).toFixed(0);
       latestRows.push({sym,lots:sells.length,buyPrice:+avgBuy.toFixed(2),sellPrice:+avgSell.toFixed(2),_brok,_stt,_txn,_sebi,_gst,_stamp,_dp,charges,winRate:netPnl>0?100:0,netPnl,_sort:netPnl});
     });
-    const latestDate=(ORDERS_TODAY[0].time||'').substring(0,10)||getSessionDate();
+    const latestDate=_latestDay||getSessionDate();
     const latestTotal=latestRows.reduce((s,r)=>s+r.netPnl,0);
     LATEST_BOOKED_TOTAL=latestTotal;
     LATEST_BOOKED_DATE=latestDate;
@@ -2038,9 +2042,48 @@ function renderPerformance(){
         _lt.appendChild(tfoot);
       }
     },0);
+  } else if(TRADEBOOK_STATS?.lastDayRows?.length){
+    // Fallback: use last trading day from tradebook (charges already computed)
+    const tbRows=TRADEBOOK_STATS.lastDayRows.map(r=>({...r,_sort:r.netPnl}));
+    const tbDate=TRADEBOOK_STATS.lastDate||'';
+    const tbTotal=+(tbRows.reduce((s,r)=>s+r.netPnl,0)).toFixed(0);
+    LATEST_BOOKED_TOTAL=tbTotal; LATEST_BOOKED_DATE=tbDate; LATEST_BOOKED_SOURCE='Tradebook';
+    const tbCols=[
+      {key:'sym',label:'Symbol',align:'left',fmt:v=>`<span style="font-weight:700;font-size:12px">${escHtml(v)}</span>`},
+      {key:'lots',label:'Lots',align:'right',fmt:v=>`<span style="color:var(--t2)">${v}</span>`},
+      {key:'buyPrice',label:'Buy ₹',align:'right',fmt:v=>`<span style="font-family:'DM Mono',monospace">${v.toLocaleString('en-IN',{maximumFractionDigits:2})}</span>`},
+      {key:'sellPrice',label:'Sell ₹',align:'right',fmt:v=>`<span style="font-family:'DM Mono',monospace">${v.toLocaleString('en-IN',{maximumFractionDigits:2})}</span>`},
+      {key:'charges',label:'Charges ₹',align:'right',bold:true,fmt:v=>v>0?'−₹'+v.toLocaleString('en-IN'):'—',clrFn:()=>'var(--red)'},
+      {key:'netPnl',label:'Net P&L',align:'right',bold:true,fmt:fmtRs,clrFn:clr},
+    ];
+    const tbTbl=makeSortableTable('perf-latest',tbCols,tbRows,'_sort',-1);
+    todayHtml=`<div style="background:var(--bg-card);border:1px solid var(--border);border-radius:10px;margin-bottom:12px;overflow:hidden">
+      <div style="padding:10px 16px;display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:6px;border-bottom:1px solid var(--border)">
+        <span style="font-size:10px;font-weight:700;color:var(--t2);text-transform:uppercase;letter-spacing:.1em">Latest Session — ${tbDate} <span style="font-weight:400;color:var(--t3)">(Tradebook · charges included)</span></span>
+        <span style="font-size:15px;font-weight:800;color:${clr(tbTotal)};font-family:'DM Mono',monospace">${fmtRs(tbTotal)} <span style="font-size:10px;color:var(--t3);font-weight:400">net of charges</span></span>
+      </div>
+      <div style="overflow-x:auto">${tbTbl.getHtml()}</div>
+    </div>`;
+    setTimeout(()=>{
+      tbTbl.render();
+      const _lt=document.getElementById('perf-latest');
+      if(_lt&&tbRows.length>1){
+        const tfoot=document.createElement('tfoot');
+        const totCh=tbRows.reduce((s,r)=>s+(r.charges||0),0);
+        tfoot.innerHTML=`<tr style="border-top:2px solid var(--border-hi);background:rgba(148,163,184,.05)">
+          <td style="padding:7px 10px;font-weight:700;color:var(--t2)">Total (${tbRows.length})</td>
+          <td style="padding:7px 10px;text-align:right;color:var(--t3)">—</td>
+          <td style="padding:7px 10px;text-align:right;color:var(--t3)">—</td>
+          <td style="padding:7px 10px;text-align:right;color:var(--t3)">—</td>
+          <td style="padding:7px 10px;text-align:right;font-weight:700;color:var(--red)">${totCh>0?'−₹'+Math.round(totCh).toLocaleString('en-IN'):'—'}</td>
+          <td style="padding:7px 10px;text-align:right;font-weight:700;color:${tbTotal>=0?'var(--green)':'var(--red)'}">₹${Math.round(Math.abs(tbTotal)).toLocaleString('en-IN')}</td>
+        </tr>`;
+        _lt.appendChild(tfoot);
+      }
+    },0);
   } else {
     todayHtml=`<div style="background:var(--bg-card);border:1px solid var(--border);border-radius:10px;margin-bottom:12px;padding:14px 16px;color:var(--t3);font-size:12px">
-      <span style="font-weight:600;color:var(--t2)">Latest Session</span> — Upload <strong>Orders.csv</strong> to see today's P&L. Delivery buy prices come from <strong>Holdings.csv</strong>.
+      <span style="font-weight:600;color:var(--t2)">Latest Session</span> — Upload <strong>Tradebook.csv</strong> or <strong>Orders.csv</strong> to see session P&amp;L.
     </div>`;
   }
 
@@ -3891,10 +3934,7 @@ async function initApp(){
     try{
       const oRaw=brain[ORDERS_STORE];
       if(Array.isArray(oRaw)&&oRaw.length){
-        const firstDate=(oRaw[0].time||'').substring(0,10);
-        const {dateMs:_odMs}=istNow();const _odD=new Date(_odMs);
-        const actualToday=`${_odD.getUTCFullYear()}-${String(_odD.getUTCMonth()+1).padStart(2,'0')}-${String(_odD.getUTCDate()).padStart(2,'0')}`;
-        if(firstDate===actualToday) ORDERS_TODAY=oRaw;
+        ORDERS_TODAY=oRaw; // renderPerformance filters to the most recent date internally
       }
     }catch(e){}
 
