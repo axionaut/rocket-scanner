@@ -230,7 +230,7 @@ table.main tbody td{padding:9px 11px;font-family:'DM Mono',monospace;font-size:1
 <div class="hdr">
  <div class="brand">
   <div class="brand-ico">🚀</div>
-  <div><h1>Rocket <em>Scanner</em> <span id="verLabel"></span></h1><div class="brand-tag">Regime-Adaptive mRMR + Sector Intelligence</div><div class="brand-tag" id="lastScanTag" style="display:none;color:var(--t3);font-size:10px"></div></div>
+  <div><h1>Rocket <em>Scanner</em> <span id="verLabel"></span></h1><div class="brand-tag">Regime-Adaptive mRMR + Sector Intelligence<span id="lastScanTag" style="display:none"> · <span id="lastScanVal"></span></span></div></div>
  </div>
  <div class="hdr-r" id="hdrR">
   <span id="fileTag"></span>
@@ -2551,7 +2551,7 @@ function renderMethodology(){
 // Fixed columns + dynamic top 10 mRMR features (skip empty ones)
 function getCols(){
   const fixed=[
-    {key:'chk',label:'',s:0},{key:'rank',label:'#',s:0},
+    {key:'chk',label:'',s:0},
     {key:'rocketScore',label:'Score',s:1},{key:'symbol',label:'Symbol',s:1},
     {key:'price',label:'Price ₹',s:1},{key:'priceChange',label:'Chg%',s:1},{key:'delivPct',label:'Deliv%',s:1},
     {key:'alloc',label:'Alloc ₹',s:0},{key:'volume',label:'Volume',s:1},
@@ -2822,16 +2822,15 @@ function renderTable(){
   const start=(PG-1)*PGSZ,pg=FILT.slice(start,start+PGSZ);
 
   document.getElementById('tBody').innerHTML=pg.map((s,i)=>{
-    const rk=start+i+1,col=scC(s.rocketScore);
+    const rk=start+i+1;
     const isSelected=SELECTED.has(s.symbol);
     const am=allocMap[s.symbol];
 
     // Fixed cells
     let cells=`
       <td style="text-align:center"><input type="checkbox" ${isSelected?'checked':''} style="width:14px;height:14px;accent-color:var(--amber);cursor:pointer" onchange="toggleStock('${s.symbol}',this.checked)"></td>
-      <td class="rk" style="color:var(--t3)">${rk}</td>
-      <td><span class="sc-m" style="color:${col}">${isNaN(s.rocketScore)?'?':s.rocketScore.toFixed(1)}</span></td>
-      <td style="font-family:'Plus Jakarta Sans',sans-serif"><div style="font-weight:700;font-size:13px">${s.symbol}${(()=>{const sv=s.seen||0;if(!sv) return '';const sc=sv>=3?'var(--green)':sv>=2?'var(--amber)':'var(--t3)';return`<span style="font-size:9px;color:${sc};font-weight:700;margin-left:4px;font-family:'DM Mono',monospace;vertical-align:super" title="Seen ${sv}× today">${sv}×</span>`;})()}${s._isTopUp?`<span style="font-size:8px;background:rgba(251,146,60,.15);color:var(--fire);border-radius:4px;padding:1px 5px;margin-left:5px;font-weight:700;vertical-align:middle">↑ TOP-UP</span>`:''}</div><div style="font-size:9px;color:var(--t3);max-width:140px;overflow:hidden;text-overflow:ellipsis">${s.name}${s._isTopUp&&s._heldAvg?` · avg ₹${s._heldAvg.toLocaleString('en-IN',{maximumFractionDigits:2})}`:''}</div></td>
+      <td><span class="sc-m">${isNaN(s.rocketScore)?'?':s.rocketScore.toFixed(1)}</span></td>
+      <td style="font-family:'Plus Jakarta Sans',sans-serif"><div style="font-weight:700;font-size:13px">${s.symbol}${(()=>{const sv=s.seen||0;if(!sv) return '';return`<sub style="font-size:11px;color:var(--amber);font-weight:700;margin-left:3px;font-family:'DM Mono',monospace" title="Seen ${sv}× today">${sv}×</sub>`;})()}${s._isTopUp?`<span style="font-size:8px;background:rgba(251,146,60,.15);color:var(--fire);border-radius:4px;padding:1px 5px;margin-left:5px;font-weight:700;vertical-align:middle">↑ TOP-UP</span>`:''}</div><div style="font-size:9px;color:var(--t3);max-width:140px;overflow:hidden;text-overflow:ellipsis">${s.name}${s._isTopUp&&s._heldAvg?` · avg ₹${s._heldAvg.toLocaleString('en-IN',{maximumFractionDigits:2})}`:''}</div></td>
       <td>₹${fmt(s.price)}</td>
       <td>${fPerf(s.priceChange)}</td>
       <td>${fDel(s.delivPct)}</td>
@@ -3811,7 +3810,7 @@ async function processFiles(files){
     document.getElementById('fileTag').textContent=tvFile.name+' · '+raw.length+' stocks';
     const _nowIst=new Date(Date.now()+5.5*3600000);
     const _ts=_nowIst.toISOString().replace('T',' ').slice(0,16)+' IST';
-    const _stEl=document.getElementById('lastScanTag');if(_stEl){_stEl.textContent='Last scan: '+_ts;_stEl.style.display='block';}
+    const _stEl=document.getElementById('lastScanTag');const _svEl=document.getElementById('lastScanVal');if(_stEl&&_svEl){_svEl.textContent='Last scan: '+_ts;_stEl.style.display='inline';}
     // Auto-select all stocks by default on fresh upload
     SELECTED=new Set(ALL.map(s=>s.symbol));
     computeMissedOpp();
@@ -3927,7 +3926,7 @@ async function initApp(){
         FILT=[...ALL];
         SELECTED=new Set(ALL.map(s=>s.symbol));
         if(saved.fileTag){const ft=document.getElementById('fileTag');if(ft)ft.textContent=saved.fileTag;}
-        if(saved.ts){const _ist=new Date(saved.ts+5.5*3600000);const _ts=_ist.toISOString().replace('T',' ').slice(0,16)+' IST';const _stEl=document.getElementById('lastScanTag');if(_stEl){_stEl.textContent='Last scan: '+_ts;_stEl.style.display='block';}}
+        if(saved.ts){const _ist=new Date(saved.ts+5.5*3600000);const _ts=_ist.toISOString().replace('T',' ').slice(0,16)+' IST';const _stEl=document.getElementById('lastScanTag');const _svEl=document.getElementById('lastScanVal');if(_stEl&&_svEl){_svEl.textContent='Last scan: '+_ts;_stEl.style.display='inline';}}
         console.log('INIT: restored',ALL.length,'stocks from file');
         // Restore Seen counts for today
         try{const _rcS=brain[REC_COUNT_STORE];if(_rcS&&typeof _rcS==='object'){
