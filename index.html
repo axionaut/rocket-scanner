@@ -96,12 +96,12 @@ body::before{content:'';position:fixed;inset:0;background:radial-gradient(ellips
 .hm th{font-size:9px;color:var(--t3);position:sticky;top:0;background:var(--bg-raised);writing-mode:vertical-rl;height:80px}
 .hm .rh{writing-mode:horizontal-tb;text-align:right;padding-right:8px;font-weight:600;color:var(--t2);min-width:100px}
 .hm-cell{border-radius:3px;font-family:'DM Mono',monospace;font-weight:500}
-.ctrls{display:flex;gap:8px;align-items:flex-end;flex-wrap:wrap;margin:16px 0}
+.ctrls{display:flex;gap:8px;align-items:flex-end;flex-wrap:nowrap;overflow-x:auto;margin:16px 0;padding-bottom:4px}
 .ctrls-toggle{display:none;width:100%;padding:9px 14px;background:var(--bg-card);border:1px solid var(--border);border-radius:8px;color:var(--t2);font-size:12px;font-weight:600;cursor:pointer;margin:10px 0 0;text-align:left;transition:all .2s}
 .ctrls-toggle:hover{border-color:var(--blue);color:var(--t1)}
 @media(max-width:768px){.ctrls-toggle{display:block}.ctrls.collapsed{display:none}}
 .fg{display:flex;flex-direction:column;gap:3px}
-.fg-lbl{font-size:9px;font-weight:600;color:var(--t3);padding-left:2px}
+.fg-lbl{font-size:10px;font-weight:600;color:var(--t2);padding-left:2px}
 .srch{flex:1;min-width:220px;position:relative}
 .srch input{width:100%;padding:10px 14px 10px 38px;background:var(--bg-card);border:1px solid var(--border);border-radius:8px;color:var(--t1);font-family:'Plus Jakarta Sans',sans-serif;font-size:13px;outline:none;transition:border .2s}
 .srch input:focus{border-color:var(--blue)}
@@ -171,7 +171,7 @@ table.main tbody td{padding:9px 11px;font-family:'DM Mono',monospace;font-size:1
   .stats{grid-template-columns:repeat(2,1fr);gap:8px}
   .st-v{font-size:18px}
   .ctrls{gap:6px}
-  .fg{min-width:calc(50% - 6px);flex:1 1 calc(50% - 6px)}
+  .fg{flex:0 0 auto}
   .ctrls .btn{width:100%;justify-content:center}
   #basketBtn,#gttValuesBtn{flex:1 1 calc(50% - 6px)}
   .status-bar{font-size:10px}
@@ -1648,7 +1648,6 @@ function renderStats(){
   const blkCt=ALL.filter(s=>s.flags.includes('BLK')).length;
   if(bulkCt>0)filterPills.push(`<span class="info-pill pill-lime">📦 ${bulkCt} bulk deals</span>`);
   if(blkCt>0)filterPills.push(`<span class="info-pill pill-purple">🧱 ${blkCt} block deals</span>`);
-  if(!NSE_LOADED)filterPills.push(`<span class="info-pill pill-gray">ℹ Drop NSE ZIP for delivery % &amp; 52W data</span>`);
 
   // Row 2: analysis / insight pills
   const infoPills=[];
@@ -3947,6 +3946,11 @@ async function initApp(){
       if(meth&&meth.features&&meth.features.length){
         ENGINE_DATA={...meth,interCorr:{}};
         COLS=getCols();
+        // Restore REMOVED counts so filter pills show correctly on page load
+        if(meth.removed&&typeof meth.removed==='object'){
+          REMOVED={uc:0,surv:0,survRules:{},liq:0,fscore:0,deliv:0,fade:0,...meth.removed};
+          if(typeof REMOVED.survRules!=='object'||Array.isArray(REMOVED.survRules)) REMOVED.survRules={};
+        }
         console.log('INIT: restored methodology data,',meth.features.length,'features');
       }
     }catch(e){console.error('INIT step2b meth restore failed:',e);}
