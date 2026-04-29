@@ -1951,6 +1951,9 @@ function renderPerformance(){
       if(o.type==='BUY') bySymO[o.symbol].buys.push(o);
       else if(o.type==='SELL') bySymO[o.symbol].sells.push(o);
     });
+    // Build tradebook buy price map as fallback for delivery sells no longer in Holdings
+    const _tbBuyMap={};
+    (TRADEBOOK_STATS?.lastDayRows||[]).forEach(r=>{if(r.sym) _tbBuyMap[r.sym]=r.buyPrice;});
     const latestRows=[];
     const dpCharged=new Set();
     Object.entries(bySymO).forEach(([sym,{buys,sells}])=>{
@@ -1964,10 +1967,10 @@ function renderPerformance(){
         avgBuy=buys.reduce((s,o)=>s+o.price*o.qty,0)/totalBuyQty;
         matchedQty=Math.min(totalBuyQty,totalSellQty);
       } else {
-        // Delivery: buy price from Holdings.csv avg cost (or Positions avg)
+        // Delivery: Positions avg → Holdings avg cost → Tradebook FIFO avg (fully-exited positions)
         const posAvg=POSITIONS?.find(p=>p.symbol===sym&&p.qty>0)?.avg??null;
-        avgBuy=posAvg??getHoldingAvgCost(sym);
-        if(avgBuy==null) return; // no holdings data for this symbol — skip
+        avgBuy=posAvg??getHoldingAvgCost(sym)??_tbBuyMap[sym]??null;
+        if(avgBuy==null) return; // no cost basis — skip
         matchedQty=totalSellQty;
       }
       const skipDp=isIntraday||dpCharged.has(sym);
@@ -2125,8 +2128,8 @@ function renderPerformance(){
     ${_navLink('perf-kpi','📊 KPIs',true)}
     ${_navLink('perf-regime-ret','🐂 Regime Returns',true)}
     ${_navLink('perf-monthly','📅 Monthly',monthRows.length>0)}
-    ${_navLink('perf-stocks','📈 Stocks',p.symBreakdown.length>0)}
     ${_navLink('perf-trade-windows','🕐 Trading Windows',hasTradeWindows)}
+    ${_navLink('perf-stocks','📈 Stocks',p.symBreakdown.length>0)}
   </nav>`;
 
   el.innerHTML=`
@@ -2138,8 +2141,8 @@ function renderPerformance(){
       <div id="perf-kpi">${kpiHtml}</div>
       ${perfCard('Regime Returns',`<div style="display:grid;grid-template-columns:repeat(3,1fr);gap:1px;background:var(--border)">${regBreakdown.map(rb=>{const col=rb.reg==='bull'?'var(--green)':rb.reg==='bear'?'var(--red)':'var(--orange)';const icon=rb.reg==='bull'?'🐂':rb.reg==='bear'?'🐻':'➡';const noData=rb.count===0;return`<div style="background:var(--bg-card);padding:14px 16px"><div style="font-size:11px;font-weight:700;color:${col};text-transform:uppercase;letter-spacing:.06em;margin-bottom:8px">${icon} ${rb.reg.charAt(0).toUpperCase()+rb.reg.slice(1)} <span style="font-weight:400;color:var(--t3)">(${rb.count} lots)</span></div>${noData?`<div style="color:var(--t3);font-size:11px;padding:4px 0">No trades tagged to this regime yet.<br>Upload TV CSV during bear/neutral sessions to build history.</div>`:`<div style="display:flex;flex-direction:column;gap:4px"><div style="display:flex;justify-content:space-between;font-size:12px"><span style="color:var(--t3)">Win Rate</span><span style="color:${rb.winRate>=55?'var(--green)':rb.winRate>=45?'var(--amber)':'var(--red)'};font-weight:700">${rb.winRate}%</span></div><div style="display:flex;justify-content:space-between;font-size:12px"><span style="color:var(--t3)">Avg P&L%</span><span style="color:${rb.avgPct>=0?'var(--green)':'var(--red)'};font-weight:700">${rb.avgPct>=0?'+':''}${rb.avgPct}%</span></div><div style="display:flex;justify-content:space-between;font-size:12px"><span style="color:var(--t3)">Expectancy</span><span style="color:${rb.expectancy>=0?'var(--green)':'var(--red)'};font-weight:700">${rb.expectancy>=0?'+':'-'}₹${Math.abs(rb.expectancy).toLocaleString('en-IN')}</span></div><div style="display:flex;justify-content:space-between;font-size:12px"><span style="color:var(--t3)">Net P&L</span><span style="color:${rb.netPnl>=0?'var(--green)':'var(--red)'};font-weight:700">${rb.netPnl>=0?'+':'-'}₹${Math.abs(rb.netPnl).toLocaleString('en-IN')}</span></div></div>`}</div>`}).join('')}</div>`,'','perf-regime-ret')}
       ${monthRows.length?perfCard('Monthly Breakdown',monthTbl.getHtml(),'','perf-monthly'):''}
+      ${hasTradeWindows?perfCard('Trading Windows <span style="font-size:10px;color:var(--t3);font-weight:400">Buy Edge &gt; 2 = Enter · Sell Edge &gt; 2 = Exit · hover Edge columns to sort</span>',tradeWindowTbl.getHtml(),'','perf-trade-windows'):''}
       ${p.symBreakdown.length?perfCard('Stocks',symTbl.getHtml(),'360px','perf-stocks'):''}
-      ${hasTradeWindows?perfCard('Trading Windows <span style="font-size:10px;color:var(--t3);font-weight:400">Buy Edge &gt; 2 = Enter · Sell Edge &gt; 2 = Exit · hover Edge columns to sort</span>',tradeWindowTbl.getHtml(),'320px','perf-trade-windows'):''}
     </div>`;
 
   setTimeout(()=>{monthTbl.render();symTbl.render();tradeWindowTbl.render();},0);
@@ -2519,7 +2522,7 @@ function renderMethodology(){
 function getCols(){
   const fixed=[
     {key:'chk',label:'',s:0},{key:'rank',label:'#',s:0},
-    {key:'rocketScore',label:'Score',s:1},{key:'symbol',label:'Symbol',s:1},
+    {key:'rocketScore',label:'Score',s:1},{key:'seen',label:'Seen',s:1},{key:'symbol',label:'Symbol',s:1},
     {key:'price',label:'Price ₹',s:1},{key:'priceChange',label:'Chg%',s:1},{key:'delivPct',label:'Deliv%',s:1},
     {key:'alloc',label:'Alloc ₹',s:0},{key:'volume',label:'Volume',s:1},
   ];
@@ -2798,6 +2801,7 @@ function renderTable(){
       <td style="text-align:center"><input type="checkbox" ${isSelected?'checked':''} style="width:14px;height:14px;accent-color:var(--amber);cursor:pointer" onchange="toggleStock('${s.symbol}',this.checked)"></td>
       <td class="rk" style="color:var(--t3)">${rk}</td>
       <td><span class="sc-m" style="color:${col}">${isNaN(s.rocketScore)?'?':s.rocketScore.toFixed(1)}</span></td>
+      ${(()=>{const sv=s.seen||0;const sc=sv>=3?'var(--green)':sv>=2?'var(--amber)':'var(--t3)';return`<td style="text-align:center;font-weight:${sv>=2?700:400};color:${sc};font-size:11px;font-family:'DM Mono',monospace" title="Times ranked today">${sv||'—'}</td>`;})()}
       <td style="font-family:'Plus Jakarta Sans',sans-serif"><div style="font-weight:700;font-size:13px">${s.symbol}${s._isTopUp?`<span style="font-size:8px;background:rgba(251,146,60,.15);color:var(--fire);border-radius:4px;padding:1px 5px;margin-left:5px;font-weight:700;vertical-align:middle">↑ TOP-UP</span>`:''}</div><div style="font-size:9px;color:var(--t3);max-width:140px;overflow:hidden;text-overflow:ellipsis">${s.name}${s._isTopUp&&s._heldAvg?` · avg ₹${s._heldAvg.toLocaleString('en-IN',{maximumFractionDigits:2})}`:''}</div></td>
       <td>₹${fmt(s.price)}</td>
       <td>${fPerf(s.priceChange)}</td>
@@ -3711,6 +3715,11 @@ async function processFiles(files){
     const sessionTag=tvFile.name+'·'+raw.length+'·'+dataHash;
     ALL=runEngine(raw, sessionTag);
     ALL.sort((a,b)=>b.rocketScore-a.rocketScore);
+    // Track how many times each stock appeared in today's ranked results (Seen column)
+    {const _rcToday=getSessionDate();const _rc=FS.get(REC_COUNT_STORE)||{};
+    if(!_rc[_rcToday]) _rc[_rcToday]={};
+    ALL.forEach(s=>{_rc[_rcToday][s.symbol]=(_rc[_rcToday][s.symbol]||0)+1;s.seen=_rc[_rcToday][s.symbol];});
+    FS.set(REC_COUNT_STORE,_rc);}
     // Save scan results only — engineData is too large (N² interCorr matrix)
     try{
       // Trim data for storage — exclude heavy display-only fields
@@ -3867,6 +3876,11 @@ async function initApp(){
         if(saved.fileTag){const ft=document.getElementById('fileTag');if(ft)ft.textContent=saved.fileTag;}
         if(saved.ts){const _ist=new Date(saved.ts+5.5*3600000);const _ts=_ist.toISOString().replace('T',' ').slice(0,16)+' IST';const _stEl=document.getElementById('lastScanTag');if(_stEl){_stEl.textContent='Last scan: '+_ts;_stEl.style.display='block';}}
         console.log('INIT: restored',ALL.length,'stocks from file');
+        // Restore Seen counts for today
+        try{const _rcS=brain[REC_COUNT_STORE];if(_rcS&&typeof _rcS==='object'){
+          const _rcD=_rcS[getSessionDate()]||{};
+          ALL.forEach(s=>{s.seen=_rcD[s.symbol]||0;});
+        }}catch(e){}
       }
     }catch(e){console.error('INIT step2 data failed:',e);}
 
