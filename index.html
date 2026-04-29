@@ -2958,7 +2958,6 @@ function toggleFilters(){
 }
 function applyFilters(){
   const minScore=parseFloat(document.getElementById('fMinScore')?.value)||0;
-  const fscore=4; // hardcoded: F-Score ≥ 4
   const fvol=parseFloat(document.getElementById('fVol')?.value)||0;
   const fsh=parseFloat(document.getElementById('fSh')?.value)||0;
   const _fMin1Dv=document.getElementById('fMin1D')?.value||'';
@@ -2971,7 +2970,6 @@ function applyFilters(){
   FILT=ALL.filter(x=>{
     if(minScore>0&&x.rocketScore<minScore) return false;
     if(fvol>0){if((x.volume||0)<fvol)return false;}
-    if(fscore>0){if(x.piotroski===null||x.piotroski<fscore)return false;}
     if(fsh>0){if(x.shareholders===null||x.shareholders<fsh)return false;}
     if(fMin1D>-Infinity){if(x.priceChange===null||x.priceChange<fMin1D)return false;}
     if(fMax1D<Infinity){if(x.priceChange!==null&&x.priceChange>fMax1D)return false;}
