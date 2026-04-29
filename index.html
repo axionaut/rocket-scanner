@@ -3644,6 +3644,7 @@ function switchTab(n){
   document.querySelectorAll('#mainTabs .tab').forEach((t,i)=>t.classList.toggle('act',i===n));
   document.querySelectorAll('.tp').forEach((t,i)=>t.classList.toggle('act',i===n));
   updateTabCounts();
+  if(n===1) renderMethodology();
   if(n===2) renderPerformance();
 }
 function updateTabCounts(){
