@@ -1607,8 +1607,8 @@ function computeLatestOrderBooked(){
     const totalSellQty=sells.reduce((s,o)=>s+o.qty,0);
     const avgSell=sells.reduce((s,o)=>s+o.price*o.qty,0)/totalSellQty;
     const holdingAvg=getHoldingAvgCost(sym);
-    const isDelivery=holdingAvg!=null;
-    const isSameDay=!isDelivery&&buys.length>0;
+    const isSameDay=buys.length>0;
+    const isDelivery=!isSameDay&&holdingAvg!=null;
     let avgBuy, matchedQty;
     if(isDelivery){
       avgBuy=holdingAvg;
@@ -1621,11 +1621,10 @@ function computeLatestOrderBooked(){
     } else {
       return;
     }
-    const isMIS=buys.some(o=>o.product==='MIS')||sells.some(o=>o.product==='MIS');
-    const skipDp=isMIS||dpCharged.has(sym);
-    if(!isMIS) dpCharged.add(sym);
-    const bcS=calcZerodhaChargesSplit(avgBuy,matchedQty,false,isMIS,false);
-    const scS=calcZerodhaChargesSplit(avgSell,matchedQty,true,isMIS,skipDp);
+    const skipDp=isSameDay||dpCharged.has(sym);
+    if(!isSameDay) dpCharged.add(sym);
+    const bcS=calcZerodhaChargesSplit(avgBuy,matchedQty,false,isSameDay,false);
+    const scS=calcZerodhaChargesSplit(avgSell,matchedQty,true,isSameDay,skipDp);
     const _brok=+(bcS.brokerage+scS.brokerage).toFixed(2);
     const _stt=+(bcS.stt+scS.stt).toFixed(2);
     const _txn=+(bcS.txn+scS.txn).toFixed(2);
