@@ -1535,6 +1535,35 @@ function getHoldingAvgCost(symbol){
   return hrow?.avgCost??null;
 }
 
+function computeMissedOpp(){
+  if(!ORDERS_TODAY?.length||!ALL.length) return;
+  // Use only the latest date's sell orders (Orders.csv can span multiple days)
+  const _allDates=ORDERS_TODAY.map(o=>(o.time||'').substring(0,10)).filter(Boolean).sort();
+  const _latestDay=_allDates[_allDates.length-1]||'';
+  const sessionOrders=_latestDay?ORDERS_TODAY.filter(o=>(o.time||'').startsWith(_latestDay)):ORDERS_TODAY;
+  const sells=sessionOrders.filter(o=>o.type==='SELL');
+  if(!sells.length) return;
+  // Day high from current ALL scan (TV CSV must be loaded)
+  const highMap={};
+  ALL.forEach(s=>{if(s.high1d!=null) highMap[s.symbol]=s.high1d;});
+  if(!Object.keys(highMap).length) return;
+  const dayDate=_latestDay||getSessionDate();
+  const dayMissed=[];
+  const seenSyms=new Set();
+  sells.forEach(o=>{
+    if(seenSyms.has(o.symbol)) return;
+    seenSyms.add(o.symbol);
+    const h=highMap[o.symbol];
+    if(h==null||o.price<=0) return;
+    const missed=(h-o.price)/o.price*100;
+    if(missed>0.1) dayMissed.push({sym:o.symbol,missed:+missed.toFixed(2)});
+  });
+  if(!dayMissed.length) return;
+  const acc=FS.get(MISSED_OPP_STORE)||{};
+  acc[dayDate]=dayMissed;
+  FS.set(MISSED_OPP_STORE,acc);
+}
+
 function renderStats(){
   const t=ALL.length,sc=ALL.filter(s=>s.tier==='S').length,ac=ALL.filter(s=>s.tier==='A').length;
   const bull=ALL.filter(s=>(s.priceChange||0)>0).length;
@@ -3763,6 +3792,7 @@ async function processFiles(files){
     const _stEl=document.getElementById('lastScanTag');if(_stEl){_stEl.textContent='Last scan: '+_ts;_stEl.style.display='block';}
     // Auto-select all stocks by default on fresh upload
     SELECTED=new Set(ALL.map(s=>s.symbol));
+    computeMissedOpp();
     renderPerformance();renderStats();renderMethodology();loadFilterState();setAutoVolume();applyFilters();updateTabCounts();
     // Process holdings if uploaded
     if(holdFile){
@@ -3792,6 +3822,7 @@ async function processFiles(files){
       const ordText=await ordFile.text();
       ORDERS_TODAY=parseOrders(ordText);
       try{FS.set(ORDERS_STORE,ORDERS_TODAY);}catch(e){}
+      computeMissedOpp();
     }
     // Re-render stats bar so the Booked Today card reflects fresh holdings/positions/orders
     // renderPerformance must run first to update LATEST_BOOKED_TOTAL
