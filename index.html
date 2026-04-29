@@ -346,6 +346,7 @@ let REMOVED={uc:0,surv:0,survRules:{},liq:0,fscore:0,deliv:0,fade:0};
 let SUPPRESSED_HELD=0; // count of stocks hidden because already held in POSITIONS
 let SELECTED=new Set(); // symbols selected for basket — recomputed from FILT each applyFilters
 let PREV_SNAP={}; // symbol→{featureKey:value,...} full feature vector from last upload
+let PREV_SNAP_META={}; // metadata for PREV_SNAP, including the regime that produced the snapshot
 const SNAP_KEY='rs_snapshot';
 const SNAP_PREV_KEY='rs_snapshot_prev';
 const SCANNER_STORE='rs_filters';
@@ -936,6 +937,7 @@ function persistMethodologySnapshot(){
       accSessions:ENGINE_DATA.accSessions,
       laggedNote:ENGINE_DATA.laggedNote||'',
       regime:ENGINE_DATA.regime,
+      learningRegime:ENGINE_DATA.learningRegime,
       marketBreadth:ENGINE_DATA.marketBreadth,
       regimeSessions:ENGINE_DATA.regimeSessions||{},
       useRegimeCorr:ENGINE_DATA.useRegimeCorr,
@@ -1360,35 +1362,55 @@ function runEngine(raw, sessionTag){
   // ── Regime-conditional simple average blend ──
   // Each regime (bull/bear/neutral) has its own accumulator
   // All sessions within a regime contribute equally (running mean)
-  // Fallback to combined (legacy) accumulator if regime has <2 sessions
+  // Lagged labels train the regime that produced the input snapshot, not the
+  // destination regime where the result is observed.
 
   // Select the regime-specific accumulator
+  const snapRegime = PREV_SNAP_META && /^(bull|bear|neutral)$/.test(PREV_SNAP_META.regime) ? PREV_SNAP_META.regime : null;
+  const learningRegime = useLagged && snapRegime ? snapRegime : regime;
   const regimeAccMap = {bull: ACC_CORR_BULL, bear: ACC_CORR_BEAR, neutral: ACC_CORR_NEUT};
   const regimeStoreMap = {bull: CORR_BULL_STORE, bear: CORR_BEAR_STORE, neutral: CORR_NEUT_STORE};
-  let REGIME_ACC = regimeAccMap[regime] || null;
+  let REGIME_ACC = regimeAccMap[learningRegime] || null;
   const regimeSessions = REGIME_ACC ? (REGIME_ACC.sessions||0) : 0;
   const useRegimeCorr = regimeSessions >= 2; // need ≥2 sessions in this regime to trust it
   const newN = regimeSessions + (isNewSession ? 1 : 0); // session count after this update
 
-  const targetCorr={};
+  const learningCorr={};
   for(const f of FEATS){
     const today=isNaN(targetCorrToday[f])?null:targetCorrToday[f];
     // Pure regime-specific history only — no cross-regime fallback
     const hist = (useRegimeCorr && REGIME_ACC && REGIME_ACC.corr) ? REGIME_ACC.corr[f] : null;
-    if(today===null)     targetCorr[f]=hist!=null?hist:0;
-    else if(hist===null) targetCorr[f]=today;
-    else if(!isNewSession) targetCorr[f]=hist; // same session re-upload, don't blend
-    else                 targetCorr[f]=hist+(today-hist)/newN; // running mean
+    if(today===null)     learningCorr[f]=hist!=null?hist:0;
+    else if(hist===null) learningCorr[f]=today;
+    else if(!isNewSession) learningCorr[f]=hist; // same session re-upload, don't blend
+    else                 learningCorr[f]=hist+(today-hist)/newN; // running mean
   }
 
   // Save to regime-specific accumulator
   const newRegimeAcc={corr:{},sessions:regimeSessions+(isNewSession?1:0),
-                      lastUpdated:new Date().toISOString(),laggedNote:laggedNote,regime:regime};
-  for(const f of FEATS) newRegimeAcc.corr[f]=targetCorr[f];
-  if(regime==='bull')      ACC_CORR_BULL=newRegimeAcc;
-  else if(regime==='bear') ACC_CORR_BEAR=newRegimeAcc;
+                      lastUpdated:new Date().toISOString(),laggedNote:laggedNote,regime:learningRegime,
+                      observedRegime:regime};
+  for(const f of FEATS) newRegimeAcc.corr[f]=learningCorr[f];
+  if(learningRegime==='bull')      ACC_CORR_BULL=newRegimeAcc;
+  else if(learningRegime==='bear') ACC_CORR_BEAR=newRegimeAcc;
   else                     ACC_CORR_NEUT=newRegimeAcc;
-  FS.set(regimeStoreMap[regime],newRegimeAcc);
+  FS.set(regimeStoreMap[learningRegime],newRegimeAcc);
+
+  const scoreAccMap = {bull: ACC_CORR_BULL, bear: ACC_CORR_BEAR, neutral: ACC_CORR_NEUT};
+  const SCORE_ACC = scoreAccMap[regime] || null;
+  const scoreSessions = SCORE_ACC ? (SCORE_ACC.sessions||0) : 0;
+  const scoreUseRegimeCorr = scoreSessions >= 2;
+  const hasScoreCorr = !!(SCORE_ACC && SCORE_ACC.corr && Object.keys(SCORE_ACC.corr).length);
+  const targetCorr={};
+  for(const f of FEATS){
+    if(hasScoreCorr && SCORE_ACC.corr[f]!=null){
+      targetCorr[f]=SCORE_ACC.corr[f];
+    } else if(learningRegime===regime && learningCorr[f]!=null){
+      targetCorr[f]=learningCorr[f];
+    } else {
+      targetCorr[f]=0;
+    }
+  }
 
   // Keep price_change reference for stats display
   const withPC=filtered.map((d,i)=>({i,pc:K.price_change?d[K.price_change]:null})).filter(x=>x.pc!==null);
@@ -1502,14 +1524,15 @@ function runEngine(raw, sessionTag){
     SCORE_MAP[d.symbol]=mw>0?Math.round(rs/mw*1000)/10:0;
   });
 
-  ENGINE_DATA={targetCorr,targetCorrToday,interCorr,mrmr,weights,features:FEATS,labels:LABELS,top10Feats,rocketCount:topN,rocketThreshold:ROCKET_THRESHOLD,accSessions:ACC_CORR?.sessions||1,laggedNote:ACC_CORR?.laggedNote||'',
+  ENGINE_DATA={targetCorr,targetCorrToday,interCorr,mrmr,weights,features:FEATS,labels:LABELS,top10Feats,rocketCount:topN,rocketThreshold:ROCKET_THRESHOLD,accSessions:ACC_CORR?.sessions||1,laggedNote:laggedNote||'',
     regime:regime, marketBreadth:marketBreadth,
+    learningRegime:learningRegime,
     regimeSessions:{
       bull:  ACC_CORR_BULL ?(ACC_CORR_BULL.sessions||0) :0,
       bear:  ACC_CORR_BEAR ?(ACC_CORR_BEAR.sessions||0) :0,
       neutral:ACC_CORR_NEUT?(ACC_CORR_NEUT.sessions||0):0
     },
-    useRegimeCorr: useRegimeCorr,
+    useRegimeCorr: scoreUseRegimeCorr,
     sectorCol: sectorCol?true:false, industryCol: industryCol?true:false,
     yesterdayRockets: yesterdayRockets,
     goodFromYesterday: goodFromYesterday,
@@ -1532,7 +1555,7 @@ function runEngine(raw, sessionTag){
   // Persist lightweight methodology data (everything except N² interCorr matrix)
   try{
     const methSave={targetCorr,targetCorrToday,mrmr,weights,features:FEATS,labels:LABELS,top10Feats,rocketCount:ENGINE_DATA.rocketCount,rocketThreshold:ENGINE_DATA.rocketThreshold,accSessions:ENGINE_DATA.accSessions,laggedNote:ENGINE_DATA.laggedNote,
-      regime:ENGINE_DATA.regime,marketBreadth:ENGINE_DATA.marketBreadth,regimeSessions:ENGINE_DATA.regimeSessions,useRegimeCorr:ENGINE_DATA.useRegimeCorr,sectorCol:ENGINE_DATA.sectorCol,industryCol:ENGINE_DATA.industryCol,
+      regime:ENGINE_DATA.regime,learningRegime:ENGINE_DATA.learningRegime,marketBreadth:ENGINE_DATA.marketBreadth,regimeSessions:ENGINE_DATA.regimeSessions,useRegimeCorr:ENGINE_DATA.useRegimeCorr,sectorCol:ENGINE_DATA.sectorCol,industryCol:ENGINE_DATA.industryCol,
       yesterdayRockets:yesterdayRockets,goodFromYesterday:goodFromYesterday,badFromYesterday:badFromYesterday,qualityTargetN:qualityN,totalParsed:totalParsed,removed:{...REMOVED},survSize:Object.keys(NSE_SURV).length};
     FS.set(METH_STORE,methSave);
     // Update regime calendar: date → regime
@@ -2391,7 +2414,7 @@ function renderMethodology(){
   const regimeColor = E.regime==='bull'?'var(--green)':E.regime==='bear'?'var(--red)':'var(--orange)';
   const rs = E.regimeSessions||{bull:0,bear:0,neutral:0};
   const regimeTotal = (rs.bull||0)+(rs.bear||0)+(rs.neutral||0);
-  const corrSource = E.useRegimeCorr?'Regime-specific correlations active':'Combined fallback (need ≥2 sessions in regime)';
+  const corrSource = E.useRegimeCorr?'Regime-specific correlations active':'Regime history warming up (need ≥2 sessions)';
   const sessLabel = `${regimeTotal} sessions · ${E.laggedNote||'lagged learning starts next upload'}`;
 
   const regimeCardHTML=`<div class="regime-bar">
@@ -2565,7 +2588,7 @@ function renderMethodology(){
     <h3 id="meth-engine" style="margin-top:18px">Scoring Engine — Regime-Adaptive mRMR + NSE Data Intelligence</h3>
     <div class="m-grid">
       <div class="m-card"><h4>🎯 Quality-Adjusted Target</h4><p>Stocks that moved <strong>≥${E.rocketThreshold||10}% up</strong>, plus yesterday's rockets that <strong>held today</strong> (didn't collapse beyond hold threshold). Yesterday's rockets that collapsed get reclassified as 0 — the engine <em>unlearns</em> features that predicted fragile spikes. Over sessions, this trains the engine to recommend <strong>durable</strong> moves, not one-day spikes.</p></div>
-      <div class="m-card"><h4>${E.regime==='bull'?'🐂':E.regime==='bear'?'🐻':'➡'} Regime-Conditional Learning</h4><p>Market classified as <strong style="color:${regimeColor}">${(E.regime||'neutral').toUpperCase()}</strong> (${E.marketBreadth!=null?(E.marketBreadth*100).toFixed(0):'?'}% breadth). Bull ≥55%, Bear &lt;35%. Each regime maintains <strong>separate correlation accumulators</strong> — bull sessions learn breakout patterns, bear sessions learn resilience patterns. ${E.useRegimeCorr?'Using <strong>regime-specific</strong> correlations.':'Using <strong>combined</strong> correlations (need ≥2 sessions in this regime).'}</p></div>
+      <div class="m-card"><h4>${E.regime==='bull'?'🐂':E.regime==='bear'?'🐻':'➡'} Regime-Conditional Learning</h4><p>Market classified as <strong style="color:${regimeColor}">${(E.regime||'neutral').toUpperCase()}</strong> (${E.marketBreadth!=null?(E.marketBreadth*100).toFixed(0):'?'}% breadth). Bull ≥55%, Bear &lt;35%. Each regime maintains <strong>separate correlation accumulators</strong> — bull sessions learn breakout patterns, bear sessions learn resilience patterns. ${E.learningRegime&&E.learningRegime!==E.regime?'Latest lagged outcome trained the <strong>'+E.learningRegime.toUpperCase()+'</strong> bucket because that was the prior scan regime. ':''}${E.useRegimeCorr?'Using <strong>regime-specific</strong> correlations.':'Regime history still warming up (need ≥2 sessions in this regime).'}</p></div>
       <div class="m-card"><h4>📊 Sector & Industry Breadth</h4><p>${E.sectorCol?'<span style="color:var(--green)">✓</span> Sector breadth, sector relative strength':'<span style="color:var(--red)">✗</span> No Sector column detected'}${E.industryCol?', <span style="color:var(--green)">✓</span> industry breadth':''} — computed from today\'s data and fed into mRMR. Stocks in strong sectors score higher in bull markets; stocks outperforming weak sectors score higher in bear markets.</p></div>
       <div class="m-card"><h4>🚫 Hard Filters</h4><p>Removed before scoring: upper circuit (≥19.5%), surveillance-listed stocks (exact NSE REG1 column matching — see Hard Filters table below), low liquidity (shareholders &lt;500 or volume &lt;5K), zero/null Piotroski F-Score, delivery &lt;30%, and <strong>peak retention &lt;50%</strong> (fading; only when day range &gt;1%). Currently filtered: ${(REMOVED.uc||0)+(REMOVED.surv||0)+(REMOVED.liq||0)+(REMOVED.fscore||0)+(REMOVED.deliv||0)+(REMOVED.fade||0)} stocks.</p></div>
     </div>
@@ -3194,7 +3217,7 @@ function resetEngine(btn){
     SNAP_KEY,SNAP_PREV_KEY,METH_STORE,REGIME_CAL_STORE,SURV_CORR_STORE,REC_COUNT_STORE];
   engineKeys.forEach(k=>FS.set(k,null));
   ACC_CORR=null;ACC_CORR_BULL=null;ACC_CORR_BEAR=null;ACC_CORR_NEUT=null;
-  ALL=[];FILT=[];ENGINE_DATA={};PREV_SNAP={};SURV_CORR_ACC={};
+  ALL=[];FILT=[];ENGINE_DATA={};PREV_SNAP={};PREV_SNAP_META={};SURV_CORR_ACC={};
   btn._stage=0;
   btn.innerHTML='🧹 Reset Engine';btn.style.background='';
   showToast(`<strong>Engine reset.</strong> Wiped ${s} sessions (🐂${rs.bull} 🐻${rs.bear} ➡${rs.neutral}). Tradebook, holdings, and rules preserved. Upload fresh TV CSV to restart learning.`,6000);
@@ -3225,7 +3248,7 @@ function resetBrain(btn){
   ACC_CORR=null; ACC_CORR_BULL=null; ACC_CORR_BEAR=null; ACC_CORR_NEUT=null;
   ALL=[]; FILT=[]; ENGINE_DATA={};
   HOLDINGS=[]; POSITIONS=[];
-  PREV_SNAP={};
+  PREV_SNAP={};PREV_SNAP_META={};
   HOLD_COST_MAP={};
   btn._stage=0;
   btn.innerHTML='🗑 Reset Brain';btn.style.background='';btn.style.borderColor='rgba(239,68,68,.3)';btn.style.color='var(--red)';
@@ -3823,7 +3846,7 @@ async function processFiles(files){
         if(existingSnap&&existingSnap.stocks&&(!existingSnap.savedDate||existingSnap.savedDate!==today)){
           updates[SNAP_PREV_KEY]=existingSnap;
         }
-        updates[SNAP_KEY]={cols,stocks,savedDate:today};
+        updates[SNAP_KEY]={cols,stocks,savedDate:today,regime:ENGINE_DATA?.regime||null,marketBreadth:ENGINE_DATA?.marketBreadth??null};
         FS.setMultiple(updates);
       }catch(e){
         console.warn('Snapshot save failed',e);
@@ -3927,9 +3950,10 @@ async function initApp(){
         } else {
           PREV_SNAP=source.stocks||source;
         }
+        PREV_SNAP_META={savedDate:source.savedDate||null,regime:source.regime||null,marketBreadth:source.marketBreadth??null};
         console.log('INIT: loaded prev-day snapshot'+(source.savedDate?' from '+source.savedDate:' (legacy)')+',',Object.keys(PREV_SNAP).length,'stocks');
       }
-    }catch(e){PREV_SNAP={};}
+    }catch(e){PREV_SNAP={};PREV_SNAP_META={};}
 
     // Step 1: Load correlations
     try{if(brain[CORR_STORE]) ACC_CORR=brain[CORR_STORE];}catch(e){}
