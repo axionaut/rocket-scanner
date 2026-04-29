@@ -473,6 +473,29 @@ const FS = (() => {
     }
   }
 
+  async function readUploadText(fileName){
+    if(!dirHandle||!fileName) return null;
+    async function fromDir(dh,path){
+      try{
+        const fh=await dh.getFileHandle(fileName);
+        const file=await fh.getFile();
+        return {text:await file.text(),lastModified:file.lastModified,path};
+      }catch(e){
+        if(e.name!=='NotFoundError') console.warn('FS.readUploadText failed for '+path,e);
+        return null;
+      }
+    }
+    const rootHit=await fromDir(dirHandle,fileName);
+    if(rootHit) return rootHit;
+    try{
+      const uploads=await dirHandle.getDirectoryHandle('Scanner Uploads');
+      return await fromDir(uploads,'Scanner Uploads/'+fileName);
+    }catch(e){
+      if(e.name!=='NotFoundError') console.warn('FS.readUploadText Scanner Uploads failed',e);
+      return null;
+    }
+  }
+
   async function write(data){
     if(!dirHandle) return false;
     try{
@@ -514,7 +537,7 @@ const FS = (() => {
   function folderName(){ return dirHandle?.name||null; }
   function hasFolder(){ return !!dirHandle; }
 
-  return {init,pickFolder,reconnect,needsReconnect,read,write,set,setMultiple,get,load,getBrain,reset,folderName,hasFolder};
+  return {init,pickFolder,reconnect,needsReconnect,read,readUploadText,write,set,setMultiple,get,load,getBrain,reset,folderName,hasFolder};
 })();
 
 function updateFolderUI(){
@@ -2050,7 +2073,7 @@ function renderPerformance(){
     const headerNote=latestRows.length?'':`<div style="padding:12px 16px;color:var(--t3);font-size:12px">No sell orders found in Orders.csv — only sell orders generate P&L rows.</div>`;
     todayHtml=`<div style="background:var(--bg-card);border:1px solid var(--border);border-radius:10px;margin-bottom:12px;overflow:hidden">
       <div style="padding:10px 16px;display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:6px;border-bottom:1px solid var(--border)">
-        <span style="font-size:10px;font-weight:700;color:var(--t2);text-transform:uppercase;letter-spacing:.1em">Latest Session — ${latestDate} <span style="font-weight:400;color:var(--t3)">(Orders.csv · delivery buy from Holdings)</span></span>
+        <span style="font-size:10px;font-weight:700;color:var(--t2);text-transform:uppercase;letter-spacing:.1em">Latest Session — ${latestDate} <span style="font-weight:400;color:var(--t3)">(Orders.csv · holdings/same-day buys)</span></span>
         <span style="font-size:15px;font-weight:800;color:${clr(latestTotal)};font-family:'DM Mono',monospace">${latestRows.length?fmtRs(latestTotal):''} <span style="font-size:10px;color:var(--t3);font-weight:400">${latestRows.length?'net of charges':''}</span></span>
       </div>
       ${latestRows.length?`<div style="overflow-x:auto">${latestTbl.getHtml()}</div>`:headerNote}
@@ -3290,6 +3313,39 @@ function parseOrders(text){
   }).filter(Boolean);
 }
 
+async function hydrateSessionCSVsFromWorkspace(){
+  if(!FS.hasFolder()||!FS.readUploadText) return;
+  const files=await Promise.all([
+    FS.readUploadText('Holdings.csv'),
+    FS.readUploadText('Positions.csv'),
+    FS.readUploadText('Orders.csv'),
+    FS.readUploadText('TRADEBOOK.csv')
+  ]);
+  const [holdFile,posFile,ordFile,tbFile]=files;
+  const updates={};
+  if(holdFile?.text){
+    HOLDINGS=parseHoldings(holdFile.text);
+    updates[HOLD_STORE]={holdings:HOLDINGS,costMap:HOLD_COST_MAP,sourcePath:holdFile.path,lastModified:holdFile.lastModified};
+  }
+  if(posFile?.text){
+    const today=getSessionDate();
+    POSITIONS=parsePositions(posFile.text);
+    updates[POS_STORE]={positions:POSITIONS,sessionDate:today,sourcePath:posFile.path,lastModified:posFile.lastModified};
+  }
+  if(ordFile?.text){
+    ORDERS_TODAY=parseOrders(ordFile.text);
+    updates[ORDERS_STORE]={orders:ORDERS_TODAY,sourcePath:ordFile.path,lastModified:ordFile.lastModified};
+  }
+  if(tbFile?.text){
+    const tb=parseTradebook(tbFile.text);
+    if(tb){
+      TRADEBOOK_STATS=tb;
+      updates[TRADEBOOK_STORE]={...tb,sourcePath:tbFile.path,lastModified:tbFile.lastModified};
+    }
+  }
+  if(Object.keys(updates).length) FS.setMultiple(updates);
+}
+
 // ── Tradebook Parser & Adaptive Stats ──
 // Parses Zerodha tradebook CSV, reconstructs FIFO round-trip trades,
 // computes adaptive SL/TGT from actual trading history.
@@ -3860,7 +3916,7 @@ async function processFiles(files){
     if(ordSlot){ordSlot.textContent='🧾 '+ordFile.name;ordSlot.classList.add('ok');}
     const ordText=await ordFile.text();
     ORDERS_TODAY=parseOrders(ordText);
-    try{FS.set(ORDERS_STORE,ORDERS_TODAY);}catch(e){}
+    try{FS.set(ORDERS_STORE,{orders:ORDERS_TODAY,sourcePath:ordFile.name,lastModified:ordFile.lastModified});}catch(e){}
   }
   if(tbFile){
     setMsg('Analyzing tradebook...');
@@ -4013,8 +4069,9 @@ async function initApp(){
     // Step 2h: Restore orders (today only)
     try{
       const oRaw=brain[ORDERS_STORE];
-      if(Array.isArray(oRaw)&&oRaw.length){
-        ORDERS_TODAY=oRaw; // renderPerformance filters to the most recent date internally
+      const restoredOrders=Array.isArray(oRaw)?oRaw:(Array.isArray(oRaw?.orders)?oRaw.orders:null);
+      if(restoredOrders&&restoredOrders.length){
+        ORDERS_TODAY=restoredOrders; // renderPerformance filters to the most recent date internally
       }
     }catch(e){}
 
@@ -4030,6 +4087,10 @@ async function initApp(){
       console.log('INIT: no brain file found — starting fresh. Pick a folder to enable auto-save.');
     }
   }
+
+  // Prefer current workspace CSVs over the saved brain snapshot. This keeps
+  // Latest Session/Booked Today from showing stale rs_orders after Orders.csv changes.
+  try{await hydrateSessionCSVsFromWorkspace();}catch(e){console.warn('INIT: workspace CSV refresh failed',e);}
 
   // Step 3b: Render performance tab first (populates PERF_TRADE_WINDOWS for current-window pill)
   try{ renderPerformance(); }catch(e){ console.error('INIT step3b renderPerformance failed:',e); }
