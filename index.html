@@ -101,7 +101,7 @@ body::before{content:'';position:fixed;inset:0;background:radial-gradient(ellips
 .ctrls-toggle:hover{border-color:var(--blue);color:var(--t1)}
 @media(max-width:768px){.ctrls-toggle{display:block}.ctrls.collapsed{display:none}}
 .fg{display:flex;flex-direction:column;gap:3px}
-.fg-lbl{font-size:9px;font-weight:700;letter-spacing:1px;text-transform:uppercase;color:var(--t3);padding-left:2px}
+.fg-lbl{font-size:9px;font-weight:600;color:var(--t3);padding-left:2px}
 .srch{flex:1;min-width:220px;position:relative}
 .srch input{width:100%;padding:10px 14px 10px 38px;background:var(--bg-card);border:1px solid var(--border);border-radius:8px;color:var(--t1);font-family:'Plus Jakarta Sans',sans-serif;font-size:13px;outline:none;transition:border .2s}
 .srch input:focus{border-color:var(--blue)}
@@ -306,7 +306,7 @@ table.main tbody td{padding:9px 11px;font-family:'DM Mono',monospace;font-size:1
    <span style="color:var(--t3);font-size:11px">–</span>
    <input type="number" id="fPriceMax" placeholder="Max" min="0" style="width:72px;padding:8px 10px;background:var(--bg-card);border:1px solid var(--border);border-radius:8px;color:var(--t1);font-family:'DM Mono',monospace;font-size:12px;outline:none;transition:border .2s" onfocus="this.style.borderColor='var(--blue)'" onblur="this.style.borderColor='var(--border)'" oninput="applyFilters()">
    </div></div>
-   <div class="fg"><span class="fg-lbl">F-Score</span><input type="number" id="fFscore" placeholder="e.g. 5" min="1" max="9" step="1" style="width:72px;padding:8px 10px;background:var(--bg-card);border:1px solid var(--border);border-radius:8px;color:var(--t1);font-family:'DM Mono',monospace;font-size:12px;outline:none;transition:border .2s" onfocus="this.style.borderColor='var(--blue)'" onblur="this.style.borderColor='var(--border)'" oninput="applyFilters()"></div>
+
    <div class="fg"><span class="fg-lbl">Min 1D %</span><input type="number" id="fMin1D" placeholder="e.g. 2" step="0.5" style="width:72px;padding:8px 10px;background:var(--bg-card);border:1px solid var(--border);border-radius:8px;color:var(--t1);font-family:'DM Mono',monospace;font-size:12px;outline:none;transition:border .2s" onfocus="this.style.borderColor='var(--blue)'" onblur="this.style.borderColor='var(--border)'" oninput="applyFilters()"></div>
    <div class="fg"><span class="fg-lbl">Max 1D %</span><input type="number" id="fMax1D" placeholder="e.g. 19" step="0.5" style="width:72px;padding:8px 10px;background:var(--bg-card);border:1px solid var(--border);border-radius:8px;color:var(--t1);font-family:'DM Mono',monospace;font-size:12px;outline:none;transition:border .2s" onfocus="this.style.borderColor='var(--blue)'" onblur="this.style.borderColor='var(--border)'" oninput="applyFilters()"></div>
    <div class="fg"><span class="fg-lbl">Min Vol <span id="volAutoLabel" style="font-size:9px;color:var(--cyan)"></span></span><input type="number" id="fVol" placeholder="auto" min="0" style="width:110px;padding:8px 10px;background:var(--bg-card);border:1px solid var(--border);border-radius:8px;color:var(--t1);font-family:'DM Mono',monospace;font-size:12px;outline:none;transition:border .2s" onfocus="this.style.borderColor='var(--cyan)'" onblur="this.style.borderColor='var(--border)'" oninput="onVolChange()"></div>
@@ -2902,7 +2902,7 @@ function toggleFilters(){
 }
 function applyFilters(){
   const minScore=parseFloat(document.getElementById('fMinScore')?.value)||0;
-  const fscore=parseFloat(document.getElementById('fFscore')?.value)||0;
+  const fscore=4; // hardcoded: F-Score ≥ 4
   const fvol=parseFloat(document.getElementById('fVol')?.value)||0;
   const fsh=parseFloat(document.getElementById('fSh')?.value)||0;
   const _fMin1Dv=document.getElementById('fMin1D')?.value||'';
@@ -2977,7 +2977,7 @@ function renderStatusBar(){
   const total=ALL.length,shown=FILT.length;
   const tags=[];
   const minScore2=parseFloat(document.getElementById('fMinScore')?.value)||0;
-  const fscore=parseFloat(document.getElementById('fFscore')?.value)||0;
+  const fscore=4;
   const fvol2=parseFloat(document.getElementById('fVol')?.value)||0;
   const fsh=parseFloat(document.getElementById('fSh')?.value)||0;
   const _fMin1Dv2=document.getElementById('fMin1D')?.value||'';
@@ -3027,7 +3027,7 @@ function renderStatusBar(){
 }
 
 function clearFilters(){
-  ['fMinScore','fFscore','fSh','fMin1D','fMax1D','fCapital','fMaxAlloc','fPriceMin','fPriceMax'].forEach(id=>{const el=document.getElementById(id);if(el)el.value='';});
+  ['fMinScore','fSh','fMin1D','fMax1D','fCapital','fMaxAlloc','fPriceMin','fPriceMax'].forEach(id=>{const el=document.getElementById(id);if(el)el.value='';});
   const reDropEl=document.getElementById('fReDrop');if(reDropEl)reDropEl.value='1';
   const topupEl=document.getElementById('fTopupAlloc');if(topupEl)topupEl.value='50';
   const minScoreEl=document.getElementById('fMinScore');if(minScoreEl)minScoreEl.value='70';
@@ -4049,7 +4049,6 @@ function saveFilterState(){
     minScore:document.getElementById('fMinScore')?.value||'70',
     priceMin:document.getElementById('fPriceMin')?.value||'',
     priceMax:document.getElementById('fPriceMax')?.value||'',
-    fscore:document.getElementById('fFscore')?.value||'',
     fvol:VOL_AUTO?'':document.getElementById('fVol')?.value||'',
     volMult:document.getElementById('fVolMult')?.value||'240',
     fsh:document.getElementById('fSh')?.value||'',
@@ -4072,7 +4071,6 @@ function loadFilterState(){
     if(state.minScore){const el=document.getElementById('fMinScore');if(el)el.value=state.minScore;}
     if(state.priceMin){const el=document.getElementById('fPriceMin');if(el)el.value=state.priceMin;}
     if(state.priceMax){const el=document.getElementById('fPriceMax');if(el)el.value=state.priceMax;}
-    if(state.fscore){const el=document.getElementById('fFscore');if(el)el.value=state.fscore;}
     if(state.fsh){const el=document.getElementById('fSh');if(el)el.value=state.fsh;}
     if(state.fMin1D){const el=document.getElementById('fMin1D');if(el)el.value=state.fMin1D;}
     if(state.fMax1D){const el=document.getElementById('fMax1D');if(el)el.value=state.fMax1D;}
