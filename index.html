@@ -1345,10 +1345,8 @@ function runEngine(raw, sessionTag){
   const targetCorr={};
   for(const f of FEATS){
     const today=isNaN(targetCorrToday[f])?null:targetCorrToday[f];
-    // Pick historical correlation: regime-specific if available, else combined legacy
-    const regimeHist = (useRegimeCorr && REGIME_ACC && REGIME_ACC.corr) ? REGIME_ACC.corr[f] : null;
-    const combinedHist = (ACC_CORR && ACC_CORR.corr) ? ACC_CORR.corr[f] : null;
-    const hist = regimeHist != null ? regimeHist : combinedHist;
+    // Pure regime-specific history only — no cross-regime fallback
+    const hist = (useRegimeCorr && REGIME_ACC && REGIME_ACC.corr) ? REGIME_ACC.corr[f] : null;
     if(today===null)     targetCorr[f]=hist!=null?hist:0;
     else if(hist===null) targetCorr[f]=today;
     else if(!isNewSession) targetCorr[f]=hist; // same session re-upload, don't blend
@@ -1363,13 +1361,6 @@ function runEngine(raw, sessionTag){
   else if(regime==='bear') ACC_CORR_BEAR=newRegimeAcc;
   else                     ACC_CORR_NEUT=newRegimeAcc;
   FS.set(regimeStoreMap[regime],newRegimeAcc);
-
-  // Also update combined accumulator (legacy — used as fallback for regimes with <2 sessions)
-  const newAcc={corr:{},sessions:(ACC_CORR?ACC_CORR.sessions||0:0)+(isNewSession?1:0),
-                lastUpdated:new Date().toISOString(),laggedNote:laggedNote,lastTag:sessionTag||null};
-  for(const f of FEATS) newAcc.corr[f]=targetCorr[f];
-  ACC_CORR=newAcc;
-  FS.set(CORR_STORE,ACC_CORR);
 
   // Keep price_change reference for stats display
   const withPC=filtered.map((d,i)=>({i,pc:K.price_change?d[K.price_change]:null})).filter(x=>x.pc!==null);
