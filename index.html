@@ -230,7 +230,7 @@ table.main tbody td{padding:9px 11px;font-family:'DM Mono',monospace;font-size:1
 <div class="hdr">
  <div class="brand">
   <div class="brand-ico">🚀</div>
-  <div><h1>Rocket <em>Scanner</em> <span id="verLabel"></span></h1><div class="brand-tag">Regime-Adaptive mRMR + Sector Intelligence<span id="lastScanTag" style="display:none"> · <span id="lastScanVal"></span></span></div></div>
+  <div><h1>Rocket <em>Scanner</em> <span id="verLabel"></span></h1><div class="brand-tag">Regime-Adaptive mRMR + Sector Intelligence</div><div id="lastScanTag" style="display:none;font-size:11px;color:var(--t2);margin-top:1px;font-weight:500"><span id="lastScanVal"></span></div></div>
  </div>
  <div class="hdr-r" id="hdrR">
 
@@ -1633,23 +1633,25 @@ function renderStats(){
         : ''
     } sessions</div></div>${bookedCard}`;
 
-  const pills=[];
-  pills.push(`<span class="info-pill pill-red">⛔ ${REMOVED.uc} upper circuit removed</span>`);
-  if(REMOVED.surv>0){const _sre=Object.entries(REMOVED.survRules||{}).sort((a,b)=>b[1]-a[1]).slice(0,5);const _srm=Object.fromEntries(getSurvRules().map(r=>[r.key,r.label]));const _srtip=_sre.map(([k,v])=>`${_srm[k]||k}: ${v}`).join(' · ');pills.push(`<span class="info-pill pill-orange" title="${escHtml(_srtip)}">⚠ ${REMOVED.surv} surveillance removed</span>`);}
-  if(REMOVED.liq>0)pills.push(`<span class="info-pill pill-blue">🚫 ${REMOVED.liq} low liquidity removed</span>`);
-  if(REMOVED.fscore>0)pills.push(`<span class="info-pill pill-gray">🚫 ${REMOVED.fscore} zero/null F-Score removed</span>`);
-  if(REMOVED.deliv>0)pills.push(`<span class="info-pill pill-cyan">🚫 ${REMOVED.deliv} low/no delivery removed</span>`);
-  if(REMOVED.fade>0)pills.push(`<span class="info-pill pill-teal">🚫 ${REMOVED.fade} fading (peak retention &lt;50%) removed</span>`);
+  // Row 1: hard-filter removal pills
+  const filterPills=[];
+  filterPills.push(`<span class="info-pill pill-red">⛔ ${REMOVED.uc} upper circuit removed</span>`);
+  if(REMOVED.surv>0){const _sre=Object.entries(REMOVED.survRules||{}).sort((a,b)=>b[1]-a[1]).slice(0,5);const _srm=Object.fromEntries(getSurvRules().map(r=>[r.key,r.label]));const _srtip=_sre.map(([k,v])=>`${_srm[k]||k}: ${v}`).join(' · ');filterPills.push(`<span class="info-pill pill-orange" title="${escHtml(_srtip)}">⚠ ${REMOVED.surv} surveillance removed</span>`);}
+  if(REMOVED.liq>0)filterPills.push(`<span class="info-pill pill-blue">🚫 ${REMOVED.liq} low liquidity removed</span>`);
+  if(REMOVED.fscore>0)filterPills.push(`<span class="info-pill pill-gray">🚫 ${REMOVED.fscore} F-Score removed</span>`);
+  if(REMOVED.deliv>0)filterPills.push(`<span class="info-pill pill-cyan">🚫 ${REMOVED.deliv} low delivery removed</span>`);
+  if(REMOVED.fade>0)filterPills.push(`<span class="info-pill pill-teal">🚫 ${REMOVED.fade} fading removed</span>`);
   const topUpCt=FILT.filter(s=>s._isTopUp).length;
-  if(topUpCt>0) pills.push(`<span class="info-pill pill-fire" title="These stocks are already in your portfolio. Shown as top-up candidates — review before adding more.">↑ ${topUpCt} top-up candidate${topUpCt>1?'s':''} in table</span>`);
-  if(SUPPRESSED_HELD>0) pills.push(`<span class="info-pill pill-rose" title="Short positions and zero-qty holdings are always hidden.">📌 ${SUPPRESSED_HELD} held (suppressed)</span>`);
+  if(topUpCt>0)filterPills.push(`<span class="info-pill pill-fire" title="Already in portfolio — shown as top-up candidates.">↑ ${topUpCt} top-up</span>`);
+  if(SUPPRESSED_HELD>0)filterPills.push(`<span class="info-pill pill-rose" title="Short positions and zero-qty holdings are always hidden.">📌 ${SUPPRESSED_HELD} held</span>`);
   const bulkCt=ALL.filter(s=>s.flags.includes('BULK')).length;
   const blkCt=ALL.filter(s=>s.flags.includes('BLK')).length;
-  if(bulkCt>0)pills.push(`<span class="info-pill pill-lime">📦 ${bulkCt} bulk buy deals today</span>`);
-  if(blkCt>0)pills.push(`<span class="info-pill pill-purple">🧱 ${blkCt} block buy deals today</span>`);
-  const fp=0; // freshness penalty removed
-  if(fp>0)pills.push(`<span class="info-pill pill-gray">❄ ${fp} freshness-penalised (near 52W high)</span>`);
-  if(!NSE_LOADED)pills.push(`<span class="info-pill pill-gray">ℹ Drop NSE ZIP alongside TV CSV for delivery % &amp; 52W data</span>`);
+  if(bulkCt>0)filterPills.push(`<span class="info-pill pill-lime">📦 ${bulkCt} bulk deals</span>`);
+  if(blkCt>0)filterPills.push(`<span class="info-pill pill-purple">🧱 ${blkCt} block deals</span>`);
+  if(!NSE_LOADED)filterPills.push(`<span class="info-pill pill-gray">ℹ Drop NSE ZIP for delivery % &amp; 52W data</span>`);
+
+  // Row 2: analysis / insight pills
+  const infoPills=[];
   if(PERF_TRADE_WINDOWS.length){
     const {mins}=istNow();
     const curBucket=Math.floor(mins/30)*30;
@@ -1661,7 +1663,7 @@ function renderStats(){
       const sellPart=cw.sWin!=null?`Sell ${cw.sWin}% win`:'';
       const sigPart=cw.action!=='&mdash;'?` · <strong>${cw.action}</strong>`:'';
       const parts=[buyPart,sellPart].filter(Boolean).join(' · ');
-      if(parts) pills.push(`<span class="info-pill" style="background:rgba(99,102,241,.12);border-color:rgba(99,102,241,.3);color:var(--t2)" title="Historical win rates for the current 30-min slot from your tradebook">🕐 ${slotLabel}: ${parts}${sigPart}</span>`);
+      if(parts)infoPills.push(`<span class="info-pill" style="background:rgba(99,102,241,.12);border-color:rgba(99,102,241,.3);color:var(--t2)" title="Historical win rates for the current 30-min slot from your tradebook">🕐 ${slotLabel}: ${parts}${sigPart}</span>`);
     }
   }
   try{
@@ -1673,18 +1675,21 @@ function renderStats(){
       if(moCount>0){
         const moAvg=moAll.reduce((s,m)=>s+m.missed,0)/moCount;
         const moAdj=+Math.min(moAvg*0.25,2).toFixed(2);
-        pills.push(`<span class="info-pill pill-amber" title="Across ${moDates} sell date(s): stocks where day high exceeded sell price. TGT nudged by 25% of avg missed gain (max 2%).">🎯 ${moCount} missed opportunit${moCount===1?'y':'ies'} across ${moDates} day${moDates===1?'':'s'} · avg +${moAvg.toFixed(2)}% left on table · TGT nudged +${moAdj.toFixed(2)}%</span>`);
+        infoPills.push(`<span class="info-pill pill-amber" title="Across ${moDates} sell date(s): stocks where day high exceeded sell price. TGT nudged by 25% of avg missed gain (max 2%).">🎯 ${moCount} missed opportunit${moCount===1?'y':'ies'} across ${moDates} days · avg +${moAvg.toFixed(2)}% left · TGT nudged +${moAdj.toFixed(2)}%</span>`);
       }
     }
   }catch(e){}
   if(TRADEBOOK_STATS?.adaptiveSL){
     const _sl=TRADEBOOK_STATS.adaptiveSL.toFixed(1),_tgt=TRADEBOOK_STATS.adaptiveTGT.toFixed(1);
-    pills.push(`<span class="info-pill" style="background:rgba(148,163,184,.08);border:1px solid rgba(148,163,184,.2);color:var(--t2)" title="Derived from tradebook: SL = median net loss%, TGT = 75th percentile net win%">📐 SL ${_sl}% · TGT ${_tgt}%</span>`);
+    infoPills.push(`<span class="info-pill" style="background:rgba(148,163,184,.08);border:1px solid rgba(148,163,184,.2);color:var(--t2)" title="Derived from tradebook: SL = median net loss%, TGT = 75th percentile net win%">📐 SL ${_sl}% · TGT ${_tgt}%</span>`);
   }
+
   // Update surveillance P&L correlation accumulator if both data sources are ready
   if(HOLDINGS?.length&&Object.keys(SURV_ALL_HITS).length) try{updateSurvCorrelation();}catch(e){}
   const infoBarEl=document.getElementById('infoBar');
-  infoBarEl.innerHTML=pills.join('');
+  infoBarEl.innerHTML=
+    `<div style="display:flex;gap:6px;flex-wrap:wrap">${filterPills.join('')}</div>`+
+    (infoPills.length?`<div style="display:flex;gap:6px;flex-wrap:wrap;margin-top:5px">${infoPills.join('')}</div>`:'');
   void infoBarEl.offsetHeight;
 }
 
@@ -3810,7 +3815,7 @@ async function processFiles(files){
     document.getElementById('fileTag').textContent=tvFile.name+' · '+raw.length+' stocks';
     const _nowIst=new Date(Date.now()+5.5*3600000);
     const _ts=_nowIst.toISOString().replace('T',' ').slice(0,16)+' IST';
-    const _stEl=document.getElementById('lastScanTag');const _svEl=document.getElementById('lastScanVal');if(_stEl&&_svEl){_svEl.textContent='Last scan: '+_ts;_stEl.style.display='inline';}
+    const _stEl=document.getElementById('lastScanTag');const _svEl=document.getElementById('lastScanVal');if(_stEl&&_svEl){_svEl.textContent='Last scan: '+_ts;_stEl.style.display='block';}
     // Auto-select all stocks by default on fresh upload
     SELECTED=new Set(ALL.map(s=>s.symbol));
     computeMissedOpp();
@@ -3926,7 +3931,7 @@ async function initApp(){
         FILT=[...ALL];
         SELECTED=new Set(ALL.map(s=>s.symbol));
         if(saved.fileTag){const ft=document.getElementById('fileTag');if(ft)ft.textContent=saved.fileTag;}
-        if(saved.ts){const _ist=new Date(saved.ts+5.5*3600000);const _ts=_ist.toISOString().replace('T',' ').slice(0,16)+' IST';const _stEl=document.getElementById('lastScanTag');const _svEl=document.getElementById('lastScanVal');if(_stEl&&_svEl){_svEl.textContent='Last scan: '+_ts;_stEl.style.display='inline';}}
+        if(saved.ts){const _ist=new Date(saved.ts+5.5*3600000);const _ts=_ist.toISOString().replace('T',' ').slice(0,16)+' IST';const _stEl=document.getElementById('lastScanTag');const _svEl=document.getElementById('lastScanVal');if(_stEl&&_svEl){_svEl.textContent='Last scan: '+_ts;_stEl.style.display='block';}}
         console.log('INIT: restored',ALL.length,'stocks from file');
         // Restore Seen counts for today
         try{const _rcS=brain[REC_COUNT_STORE];if(_rcS&&typeof _rcS==='object'){
