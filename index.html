@@ -1250,9 +1250,13 @@ function runEngine(raw, sessionTag){
   // ── Today's rockets: stocks that moved ≥X% up ──
   const ROCKET_THRESHOLD=rocketPct;
   const topSetToday=new Set();
+  const labelMap=new Map(); // filtered index → soft rocket label: (change%-threshold)/threshold
   filtered.forEach((d,i)=>{
     const pc=K.price_change?d[K.price_change]:null;
-    if(pc!=null&&pc>=ROCKET_THRESHOLD) topSetToday.add(i);
+    if(pc!=null&&pc>=ROCKET_THRESHOLD){
+      topSetToday.add(i);
+      labelMap.set(i,(pc-ROCKET_THRESHOLD)/ROCKET_THRESHOLD);
+    }
   });
 
   // ── Quality-adjusted target: check yesterday's rockets ──
@@ -1282,7 +1286,10 @@ function runEngine(raw, sessionTag){
         held:held,
         inToday:idx!=null
       });
-      if(held&&idx!=null) goodRocketsToday.add(idx);
+      if(held&&idx!=null){
+        goodRocketsToday.add(idx);
+        if(!labelMap.has(idx)) labelMap.set(idx,(yesterdayChg-ROCKET_THRESHOLD)/ROCKET_THRESHOLD);
+      }
     });
   }
   // Sort: biggest yesterday movers first
@@ -1310,7 +1317,7 @@ function runEngine(raw, sessionTag){
     for(const f of FEATS) targetCorrToday[f]=null;
   } else if(useLagged){
     const overlapIndices=overlap.map(d=>filtered.indexOf(d));
-    const laggedTarget=overlapIndices.map(i=>qualitySet.has(i)?1:0);
+    const laggedTarget=overlapIndices.map(i=>labelMap.get(i)||0);
     laggedNote='Lagged ('+overlap.length+' matched · '+topN+' new rockets · +'+goodFromYesterday+' verified · −'+badFromYesterday+' collapsed · '+qualityN+' quality target)';
     for(const f of FEATS){
       const prevVals=overlap.map(d=>{
@@ -1320,7 +1327,7 @@ function runEngine(raw, sessionTag){
       targetCorrToday[f]=pearson(laggedTarget,prevVals);
     }
   } else {
-    const target=filtered.map((_,i)=>qualitySet.has(i)?1:0);
+    const target=filtered.map((_,i)=>labelMap.get(i)||0);
     laggedNote=overlap.length>0
       ?'Same-day fallback (only '+overlap.length+' matched, need 100+)'
       :'Session 1 — lagged learning starts next upload';
