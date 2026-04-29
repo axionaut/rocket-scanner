@@ -3818,8 +3818,7 @@ async function processFiles(files){
     const _stEl=document.getElementById('lastScanTag');const _svEl=document.getElementById('lastScanVal');if(_stEl&&_svEl){_svEl.textContent='Last scan: '+_ts;_stEl.style.display='block';}
     // Auto-select all stocks by default on fresh upload
     SELECTED=new Set(ALL.map(s=>s.symbol));
-    computeMissedOpp();
-    renderPerformance();renderStats();renderMethodology();loadFilterState();setAutoVolume();applyFilters();updateTabCounts();
+    renderMethodology();loadFilterState();setAutoVolume();applyFilters();updateTabCounts();
     showBrainPrompt();
     } // end isFullScannerCSV else
   } else if(!holdFile&&!posFile&&!ordFile&&!tbFile){
@@ -3829,7 +3828,7 @@ async function processFiles(files){
   }
 
   // Holdings / Positions / Orders / Tradebook — processed regardless of TV CSV
-  // These can be uploaded alone mid-session without re-running the engine
+  // All files are loaded before rendering so Latest Session always has fresh data
   if(holdFile){
     setMsg('Processing holdings...');
     document.getElementById('slot-hold').textContent='🛡 '+holdFile.name;
@@ -3855,10 +3854,6 @@ async function processFiles(files){
     const ordText=await ordFile.text();
     ORDERS_TODAY=parseOrders(ordText);
     try{FS.set(ORDERS_STORE,ORDERS_TODAY);}catch(e){}
-    computeMissedOpp();
-  }
-  if(holdFile||posFile||ordFile){
-    if(ALL.length){renderPerformance();renderStats();}
   }
   if(tbFile){
     setMsg('Analyzing tradebook...');
@@ -3867,8 +3862,10 @@ async function processFiles(files){
     const tbText=await tbFile.text();
     TRADEBOOK_STATS=parseTradebook(tbText);
     if(TRADEBOOK_STATS) try{FS.set(TRADEBOOK_STORE,TRADEBOOK_STATS);}catch(e){}
-    if(TRADEBOOK_STATS&&ALL.length){renderPerformance();renderStats();}
   }
+  // Single final render after all files are processed — ensures Latest Session uses fresh orders
+  computeMissedOpp();
+  if(ALL.length){renderPerformance();renderStats();}
   setMsg('');
 }
 
