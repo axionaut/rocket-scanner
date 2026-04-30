@@ -939,7 +939,7 @@ function getHardFilterRowsFromEngine(E){
       rockets:row.active?(rk.surv||[]).filter(r=>r.sym&&NSE_SURV[r.sym]&&NSE_SURV[r.sym][0]===row.column):[],
       active:!!row.active,
       manual:!!row.manual,
-      missing:SURV_MISSING_RULES.has(row.key), // column not found in last REG1 file — blocking all stocks
+      missing:false,
       kind:'surv',
       ruleKey:row.key,
     })),
@@ -1041,11 +1041,8 @@ function parseSurv(text){
     if(matchedHdr){
       r.column=matchedHdr; r.label=matchedHdr;
       fileRuleKeys.add(r.key);
-    } else {
-      // Column not found in current REG1 file — mark as missing; engine will block ALL stocks as precaution
-      SURV_MISSING_RULES.add(r.key);
-      activeRules.push({...r,header:null}); // header:null so the per-stock flag loop skips it (engine blocks globally)
     }
+    // If not found at all — skip silently; shown as inactive in HF table via syncSurvRuleRows active:false
   });
   activeRules.forEach(rule=>{SURV_RULE_HITS[rule.key]=0;});
   rows.forEach(r=>{
@@ -1288,14 +1285,6 @@ function runEngine(raw, sessionTag){
       REMOVED.surv++;
       const primaryRule=NSE_SURV[d.symbol][0];
       if(primaryRule) REMOVED.survRules[primaryRule]=(REMOVED.survRules[primaryRule]||0)+1;
-      if(pc!=null&&pc>=rocketPct) REMOVED.rockets.surv.push({sym,pc});
-      return false;
-    }
-    // Missing-column precaution: custom surveillance rule exists but its column was not found in the REG1 file.
-    // Block ALL stocks under that rule rather than silently passing them — safe default.
-    if(SURV_MISSING_RULES.size>0){
-      REMOVED.surv++;
-      SURV_MISSING_RULES.forEach(key=>{REMOVED.survRules[key]=(REMOVED.survRules[key]||0)+1;});
       if(pc!=null&&pc>=rocketPct) REMOVED.rockets.surv.push({sym,pc});
       return false;
     }
@@ -2364,7 +2353,7 @@ function removeSurvRule(key){
 }
 function buildHardFilterMethodologyHTML(E){
   const rows=getHardFilterRowsFromEngine(E);
-  const totalRemoved=rows.reduce((sum,row)=>sum+((row.active||row.missing)&&row.removed!=null?row.removed:0),0);
+  const totalRemoved=rows.reduce((sum,row)=>sum+(row.active&&row.removed!=null?row.removed:0),0);
   // Datalist: only real surveillance columns (SURV_FILE_RULES, already filtered of identity/filler cols),
   // excluding those already configured in the HF table
   const addedRuleKeys=new Set(getSurvRules().map(r=>r.key));
