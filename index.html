@@ -612,6 +612,7 @@ async function pickDataFolder(){
 let NSE_BHAV={},NSE_52W={},NSE_SURV={},NSE_BULK={},NSE_BLOCK={};
 let SURV_CUSTOM_RULES=[]; // [{key,column,label,manual:true}] persistent manual REG1 columns
 let SURV_FILE_RULES=[]; // [{key,column,label,manual:false}] — populated from actual REG1 file in parseSurv; replaces SURV_DEFAULT_RULES
+let SURV_MISSING_RULES=new Set(); // keys of custom rules whose column was not found in the last REG1 file — all stocks blocked as precaution
 let SURV_HEADERS=[]; // exact REG1 headers loaded this session
 let SURV_RULE_HITS={}; // {ruleKey -> flagged symbol count} before hard filters
 let SURV_ALL_HITS={}; // {sym -> {colName: true}} — ALL columns flagged, not just active rules
@@ -937,6 +938,7 @@ function getHardFilterRowsFromEngine(E){
       rockets:row.active?(rk.surv||[]).filter(r=>r.sym&&NSE_SURV[r.sym]&&NSE_SURV[r.sym][0]===row.column):[],
       active:!!row.active,
       manual:!!row.manual,
+      missing:SURV_MISSING_RULES.has(row.key), // column not found in last REG1 file — blocking all stocks
       kind:'surv',
       ruleKey:row.key,
     })),
@@ -1010,6 +1012,7 @@ function parseSurv(text){
   NSE_SURV={};
   SURV_HEADERS=[];
   SURV_RULE_HITS={};
+  SURV_MISSING_RULES=new Set();
   SURV_ALL_HITS={};
   if(!rows.length) return;
   const hdrs=Object.keys(rows[0]);
@@ -1032,13 +1035,15 @@ function parseSurv(text){
   // If a custom rule's column was renamed in the REG1 file, try to match it by key against current file columns
   SURV_CUSTOM_RULES.filter(r=>r.manual).forEach(r=>{
     if(fileRuleKeys.has(r.key)) return; // already covered by file rule with same key
-    // Fuzzy: if the normalized key matches a file header, update the stored column name to the current header
+    // If the normalized key matches a file header (column renamed with case/spacing only), update silently
     const matchedHdr=dataHdrs.find(h=>survRuleKey(h)===r.key);
     if(matchedHdr){
-      r.column=matchedHdr; r.label=matchedHdr; // silently update to current column name
-      fileRuleKeys.add(r.key); // treat as matched — don't add as separate orphan rule
+      r.column=matchedHdr; r.label=matchedHdr;
+      fileRuleKeys.add(r.key);
     } else {
-      activeRules.push({...r,header:hdrMap[r.column.toLowerCase()]||null});
+      // Column not found in current REG1 file — mark as missing; engine will block ALL stocks as precaution
+      SURV_MISSING_RULES.add(r.key);
+      activeRules.push({...r,header:null}); // header:null so the per-stock flag loop skips it (engine blocks globally)
     }
   });
   activeRules.forEach(rule=>{SURV_RULE_HITS[rule.key]=0;});
@@ -1282,6 +1287,14 @@ function runEngine(raw, sessionTag){
       REMOVED.surv++;
       const primaryRule=NSE_SURV[d.symbol][0];
       if(primaryRule) REMOVED.survRules[primaryRule]=(REMOVED.survRules[primaryRule]||0)+1;
+      if(pc!=null&&pc>=rocketPct) REMOVED.rockets.surv.push({sym,pc});
+      return false;
+    }
+    // Missing-column precaution: custom surveillance rule exists but its column was not found in the REG1 file.
+    // Block ALL stocks under that rule rather than silently passing them — safe default.
+    if(SURV_MISSING_RULES.size>0){
+      REMOVED.surv++;
+      SURV_MISSING_RULES.forEach(key=>{REMOVED.survRules[key]=(REMOVED.survRules[key]||0)+1;});
       if(pc!=null&&pc>=rocketPct) REMOVED.rockets.surv.push({sym,pc});
       return false;
     }
@@ -2350,7 +2363,7 @@ function removeSurvRule(key){
 }
 function buildHardFilterMethodologyHTML(E){
   const rows=getHardFilterRowsFromEngine(E);
-  const totalRemoved=rows.reduce((sum,row)=>sum+(row.active&&row.removed!=null?row.removed:0),0);
+  const totalRemoved=rows.reduce((sum,row)=>sum+((row.active||row.missing)&&row.removed!=null?row.removed:0),0);
   // Exclude columns already active (either from file rules or custom rules) from the add-rule datalist
   const addedRuleKeys=new Set(getSurvRules().map(r=>r.key));
   const availableCols=(SURV_HEADERS||[]).filter(h=>!addedRuleKeys.has(survRuleKey(h)));
@@ -2361,12 +2374,14 @@ function buildHardFilterMethodologyHTML(E){
     removedSort:row.active&&row.removed!=null?(row.removed||0):-1,
     rocketsFiltered:row.rockets||[],
     rocketsSort:(row.rockets||[]).length,
-    active:row.active, kind:row.kind, manual:!!row.manual, ruleKey:row.ruleKey||'',
-    inactiveNote:!row.active?(row.kind==='surv'?'Inactive — REG1 column not found in last upload':'Needs fresh NSE data'):'',
+    active:row.active, kind:row.kind, manual:!!row.manual, missing:!!row.missing, ruleKey:row.ruleKey||'',
+    inactiveNote:row.missing
+      ?'⚠ Column not found in REG1 file — ALL stocks blocked as precaution. Remove and re-add with correct column name.'
+      :(!row.active?(row.kind==='surv'?'Inactive — REG1 column not found in last upload':'Needs fresh NSE data'):''),
     manageSort:row.manual?1:0,
   }));
   const hfCols=[
-    {key:'criteria',label:'Filter / Column',align:'left',fmt:(v,r)=>`<span style="font-size:11px;color:${r.active?'var(--t1)':'var(--t3)'}">${escHtml(v)}${r.inactiveNote?`<div style="font-size:10px;color:${r.kind==='surv'?'var(--red)':'var(--amber)'};margin-top:2px">${r.inactiveNote}</div>`:''}</span>`},
+    {key:'criteria',label:'Filter / Column',align:'left',fmt:(v,r)=>`<span style="font-size:11px;color:${r.missing?'var(--amber)':r.active?'var(--t1)':'var(--t3)'}">${escHtml(v)}${r.inactiveNote?`<div style="font-size:10px;color:${r.missing?'var(--amber)':r.kind==='surv'?'var(--red)':'var(--amber)'};margin-top:2px">${r.inactiveNote}</div>`:''}</span>`},
     {key:'flaggedSort',label:'Flagged',align:'right',fmt:(v,r)=>v>=0?`<span style="color:${v>0?'var(--orange)':'var(--t3)'};font-weight:700;font-family:'DM Mono',monospace">${v.toLocaleString()}</span>`:'&mdash;'},
     {key:'removedSort',label:'Removed',align:'right',fmt:(v,r)=>v>=0?`<span style="color:${v>0?'var(--red)':'var(--t3)'};font-weight:700;font-family:'DM Mono',monospace">${v.toLocaleString()}</span>`:'&mdash;'},
     {key:'rocketsSort',label:'🚀 Rockets Filtered',align:'left',fmt:(v,r)=>{
