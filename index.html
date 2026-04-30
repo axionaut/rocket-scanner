@@ -1647,17 +1647,17 @@ function getHoldingAvgCost(symbol){
   return hrow?.avgCost??null;
 }
 
+// Module-level helper: normalise Zerodha order timestamp to YYYY-MM-DD
+// Handles DD-MM-YYYY HH:MM:SS (Zerodha format) and YYYY-MM-DD variants.
+function normOrderDate(timeStr){
+  const s=(timeStr||'').trim();
+  const m=s.match(/^(\d{2})-(\d{2})-(\d{4})/);
+  if(m) return `${m[3]}-${m[2]}-${m[1]}`;
+  return s.substring(0,10);
+}
+
 function getLatestOrderSession(){
   if(!ORDERS_TODAY?.length) return null;
-  // Normalise date portion to YYYY-MM-DD for correct lexicographic sort.
-  // Zerodha Orders.csv uses DD-MM-YYYY HH:MM:SS; other formats already YYYY-MM-DD.
-  function normOrderDate(timeStr){
-    const s=(timeStr||'').trim();
-    // DD-MM-YYYY HH:MM:SS  →  YYYY-MM-DD
-    const m=s.match(/^(\d{2})-(\d{2})-(\d{4})/);
-    if(m) return `${m[3]}-${m[2]}-${m[1]}`;
-    return s.substring(0,10); // already YYYY-MM-DD or unknown
-  }
   const dates=ORDERS_TODAY.map(o=>normOrderDate(o.time)).filter(Boolean).sort();
   const date=dates[dates.length-1]||getSessionDate();
   const orders=ORDERS_TODAY.filter(o=>normOrderDate(o.time)===date);
@@ -1735,13 +1735,17 @@ function computeLatestOrderBooked(){
 }
 
 function getLatestBookedSummary(){
+  // Priority 1: Orders.csv computed P&L (has actual sell rows)
   const orderBooked=computeLatestOrderBooked();
   if(orderBooked) return orderBooked;
-  if(TRADEBOOK_STATS?.lastDayRows?.length){
+  // Priority 2: Tradebook last-day rows — but only show if tradebook was uploaded
+  // this session (TRADEBOOK_STATS exists with a valid lastDate). Never show stale
+  // brain-cached tradebook as "today's P&L" — it could be from any prior day.
+  if(TRADEBOOK_STATS?._loadedThisSession&&TRADEBOOK_STATS?.lastDayRows?.length){
     const rows=TRADEBOOK_STATS.lastDayRows.map(r=>({...r,_sort:r.netPnl}));
     return {source:'Tradebook',date:TRADEBOOK_STATS.lastDate||'',total:+rows.reduce((s,r)=>s+r.netPnl,0).toFixed(0),rows};
   }
-  return TRADEBOOK_STATS?.lastBooked?{source:'Tradebook',date:TRADEBOOK_STATS.lastBooked.date||'',total:TRADEBOOK_STATS.lastBooked.total,rows:[],count:TRADEBOOK_STATS.lastBooked.count}:null;
+  return null;
 }
 
 function computeMissedOpp(){
@@ -2510,18 +2514,16 @@ function buildSurvCorrHTML(){
   });
   const scCols=[
     {key:'col',label:'Surveillance Column',align:'left',fmt:(v)=>`<span style="font-size:11px" title="${escHtml(v)}">${escHtml(v)}</span>`},
-    {key:'sessions',label:'Sessions',align:'right',fmt:(v,r)=>{const w=Math.round(v/r._maxSess*40);const c=r._conf==='high'?'var(--green)':r._conf==='med'?'var(--amber)':'var(--t3)';return`<span style="display:inline-flex;align-items:center;gap:4px"><span style="display:inline-block;width:${w}px;height:4px;background:${c};border-radius:2px"></span><span style="color:${c};font-family:'DM Mono',monospace">${v}</span></span>`;}},
-    {key:'lastCount',label:'Last Flagged',align:'right',fmt:(v)=>`<span style="color:var(--t3);font-family:'DM Mono',monospace">${v}</span>`},
-    {key:'winRate',label:'Holdings Win %',align:'right',fmt:(v)=>`<span style="color:${v<40?'var(--red)':v>60?'var(--green)':'var(--amber)'};font-weight:700;font-family:'DM Mono',monospace" title="% of your holdings flagged by this column that are currently profitable (LTP > avg cost)">${v.toFixed(1)}%</span>`},
-    {key:'avgPnl',label:'Avg P&L%',align:'right',fmt:(v)=>`<span style="color:${v<0?'var(--red)':v>0?'var(--green)':'var(--t3)'};font-weight:700;font-family:'DM Mono',monospace">${v>=0?'+':''}${v.toFixed(2)}%</span>`},
+    {key:'lastCount',label:'Holdings Flagged',align:'right',fmt:(v)=>`<span style="color:var(--t3);font-family:'DM Mono',monospace">${v}</span>`},
+    {key:'avgPnl',label:'Avg Unrealised P&L%',align:'right',fmt:(v)=>`<span style="color:${v<0?'var(--red)':v>0?'var(--green)':'var(--t3)'};font-weight:700;font-family:'DM Mono',monospace" title="Average unrealised P&L% of your holdings currently flagged by this column">${v>=0?'+':''}${v.toFixed(2)}%</span>`},
     {key:'verdict',label:'Signal',align:'left',fmt:(v)=>`<span style="color:${v.startsWith('🚫')?'var(--red)':v.startsWith('✅')?'var(--green)':'var(--amber)'};font-weight:700">${v}</span>`},
   ];
-  _methTbls.sc=makeSortableTable('tbl-sc',scCols,scRows,'winRate',1); // lowest win rate first
+  _methTbls.sc=makeSortableTable('tbl-sc',scCols,scRows,'avgPnl',1); // worst avg P&L first
   return `
-    <h4 id="meth-surv-corr" style="margin:16px 0 6px;font-size:13px;color:var(--t2)">📊 Surveillance P&L Correlation <span style="font-size:10px;font-weight:400;color:var(--t3)">(accumulated · ${maxSess} max sessions)</span>
+    <h4 id="meth-surv-corr" style="margin:16px 0 6px;font-size:13px;color:var(--t2)">📊 Surveillance P&L Correlation
       <button onclick="if(confirm('Reset surveillance correlation accumulator?')){SURV_CORR_ACC={};SURV_CORR_LAST_TAG=null;FS.set(SURV_CORR_STORE,{});_refreshHFSection();}" style="margin-left:12px;padding:3px 8px;border-radius:6px;border:1px solid var(--border);background:none;color:var(--t3);font-size:10px;cursor:pointer">Reset</button>
     </h4>
-    <p style="font-size:11px;color:var(--t3);margin-bottom:8px">For each surveillance column, shows what % of your <em>currently held stocks</em> flagged by that column are profitable (Holdings Win %) and their average unrealised P&L%. Accumulates as a running mean across sessions. Use it to assess portfolio risk: a column with low win % and negative avg P&L means your flagged holdings are underwater — consider tightening SLs. &lt;2 sessions = ❓ low confidence.</p>
+    <p style="font-size:11px;color:var(--t3);margin-bottom:8px">For each surveillance column, shows how your <em>currently held stocks</em> flagged by that column are performing (average unrealised P&L%). A column with deep negative avg P&L means your flagged holdings are underwater — consider tightening SLs or exiting. Signal = 🚫 Filter when avg P&L &lt; −0.5%.</p>
     ${staleNote}
     <div style="background:var(--bg-card);border:1px solid var(--border);border-radius:10px;overflow:hidden">
       <div style="overflow-x:auto">${_methTbls.sc.getHtml()}</div>
@@ -3140,12 +3142,23 @@ function applyFilters(){
         if(otype==='BUY'){ordBuys[sym]=(ordBuys[sym]||0)+o.qty;}
         else if(otype==='SELL'){ordSells[sym]=(ordSells[sym]||0)+o.qty;}
       });
+      // Build avg buy price per symbol from today's orders for the avg-down check
+      const ordAvgBuy={};
+      ORDERS_TODAY.forEach(o=>{
+        if(normOrderDate(o.time)!==todayDate) return;
+        const otype=(o.type||'').toUpperCase();
+        if(otype==='BUY'){
+          if(!ordAvgBuy[o.symbol]) ordAvgBuy[o.symbol]={tot:0,qty:0};
+          ordAvgBuy[o.symbol].tot+=o.price*o.qty;
+          ordAvgBuy[o.symbol].qty+=o.qty;
+        }
+      });
       Object.entries(ordBuys).forEach(([sym,bQty])=>{
         const netQty=bQty-(ordSells[sym]||0);
         if(netQty>0&&!heldPos[sym]){
-          // Net long from today's orders — treat as held with 0 avg (suppressed unless dropped enough)
-          // avg=0 will trigger the "no avg data" suppress path, which is correct: we don't know entry price
-          heldPos[sym]={qty:netQty,avg:0};
+          const avgObj=ordAvgBuy[sym];
+          const avg=avgObj&&avgObj.qty>0?+(avgObj.tot/avgObj.qty).toFixed(2):0;
+          heldPos[sym]={qty:netQty,avg};
         }
       });
       // Also suppress stocks that were bought AND fully sold today (round-trip) — they're done for the day.
@@ -3540,7 +3553,7 @@ async function hydrateSessionCSVsFromWorkspace(){
   if(tbFile?.text){
     const tb=parseTradebook(tbFile.text);
     if(tb){
-      TRADEBOOK_STATS=tb;
+      TRADEBOOK_STATS={...tb,_loadedThisSession:true};
       updates[TRADEBOOK_STORE]={...tb,sourcePath:tbFile.path,lastModified:tbFile.lastModified};
     }
   }
@@ -4085,7 +4098,7 @@ async function processFiles(files){
     document.getElementById('slot-tb').classList.add('ok');
     const tbText=await tbFile.text();
     TRADEBOOK_STATS=parseTradebook(tbText);
-    if(TRADEBOOK_STATS) try{FS.set(TRADEBOOK_STORE,TRADEBOOK_STATS);}catch(e){}
+    if(TRADEBOOK_STATS){TRADEBOOK_STATS._loadedThisSession=true;try{FS.set(TRADEBOOK_STORE,TRADEBOOK_STATS);}catch(e){}}
   }
   // Final render after all files are processed — ensures Latest Session uses fresh orders.
   // applyFilters() re-runs held-stock suppression with fresh holdings data only when
