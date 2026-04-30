@@ -1779,14 +1779,16 @@ function computeMissedOpp(){
   if(!Object.keys(highMap).length) return;
   const dayDate=session?.date||getSessionDate();
   const dayMissed=[];
-  const seenSyms=new Set();
+  // Group by symbol, take best (highest) sell price — most conservative missed% estimate
+  const bestSell={};
   sells.forEach(o=>{
-    if(seenSyms.has(o.symbol)) return;
-    seenSyms.add(o.symbol);
-    const h=highMap[o.symbol];
-    if(h==null||o.price<=0) return;
-    const missed=(h-o.price)/o.price*100;
-    if(missed>0.1) dayMissed.push({sym:o.symbol,missed:+missed.toFixed(2)});
+    if(o.price>0) bestSell[o.symbol]=Math.max(bestSell[o.symbol]||0,o.price);
+  });
+  Object.entries(bestSell).forEach(([sym,sellPx])=>{
+    const h=highMap[sym];
+    if(h==null) return;
+    const missed=(h-sellPx)/sellPx*100;
+    if(missed>0.1) dayMissed.push({sym,missed:+missed.toFixed(2)});
   });
   if(!dayMissed.length) return;
   const acc=FS.get(MISSED_OPP_STORE)||{};
