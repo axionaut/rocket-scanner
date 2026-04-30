@@ -1840,8 +1840,10 @@ function renderStats(){
       <div class="st"><div class="st-l">${bookedLabel}</div><div class="st-v" style="color:${booked.total>=0?'var(--green)':'var(--red)'}">${booked.total>=0?'+':'−'}₹${Math.round(Math.abs(booked.total)).toLocaleString('en-IN')}</div><div class="st-d">${dateLabel} · ${srcLabel} · net of charges</div></div>`;
   }
 
-  // Stale-data banner: shown when scan is brain-restored AND from a previous day
-  const _scanIsToday=_scanSavedDate===getSessionDate();
+  // Stale-data banner: shown when scan is brain-restored AND from a previous calendar day.
+  // Uses actual IST calendar date — getSessionDate() rolls over post-16:00 and would falsely show the banner after market close.
+  const _istToday=(()=>{const {dateMs}=istNow();const d=new Date(dateMs);return `${d.getUTCFullYear()}-${String(d.getUTCMonth()+1).padStart(2,'0')}-${String(d.getUTCDate()).padStart(2,'0')}`;})();
+  const _scanIsToday=_scanSavedDate===_istToday;
   const staleBanner=(_tvLoadedThisSession||_scanIsToday)?'':
     `<div style="grid-column:1/-1;padding:7px 14px;background:rgba(251,191,36,.07);border:1px solid rgba(251,191,36,.25);border-radius:8px;font-size:11px;color:var(--amber);display:flex;align-items:center;gap:8px">
       <span>📦</span><span>Showing last saved scan — upload <strong>ALL NSE.csv</strong> to get live scores and buy signals.</span>
