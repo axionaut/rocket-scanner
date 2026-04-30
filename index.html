@@ -1015,11 +1015,20 @@ function parseSurv(text){
   hdrs.forEach(h=>{hdrMap[String(h).trim().toLowerCase()]=h;});
   // Find symbol column — REG1 files use various casings/names
   const symCol=findHeader(hdrs,[/^symbol$/i,/^nse.?symbol$/i,/^trading.?symbol$/i,/^scrip.?symbol$/i])||null;
-  const activeRules=getSurvRules().map(rule=>({...rule,header:hdrMap[rule.column.toLowerCase()]||null}));
-  activeRules.forEach(rule=>{SURV_RULE_HITS[rule.key]=0;});
-  // dataHdrs: exclude REG1 identity/metadata columns (not surveillance flags)
+  // dataHdrs: every column from the actual REG1 file that is a surveillance flag
+  // Excludes identity/metadata columns and filler columns — no hardcoded rule list needed
   const _survNonFlag=new Set(['scripcode','symbol','nse exclusive','status','series']);
   const dataHdrs=hdrs.filter(h=>{const hl=h.trim().toLowerCase();return !_survNonFlag.has(hl)&&!/^filler/i.test(h.trim());});
+  // Build active rules from actual file columns — always up to date regardless of column name changes
+  // Merge with any user-added custom rules (which may target specific columns for the HF table display)
+  const fileRuleKeys=new Set();
+  const activeRules=dataHdrs.map(h=>({key:survRuleKey(h),column:h,label:h,header:h,manual:false}))
+    .filter(r=>{if(fileRuleKeys.has(r.key))return false;fileRuleKeys.add(r.key);return true;});
+  // Add custom user rules (for Methodology HF table management) — dedup against file rules
+  getSurvRules().filter(r=>r.manual&&!fileRuleKeys.has(r.key)).forEach(r=>{
+    activeRules.push({...r,header:hdrMap[r.column.toLowerCase()]||null});
+  });
+  activeRules.forEach(rule=>{SURV_RULE_HITS[rule.key]=0;});
   rows.forEach(r=>{
     const sym=normSym(symCol?r[symCol]:r['Symbol']);if(!sym)return;
     const hits=[];
