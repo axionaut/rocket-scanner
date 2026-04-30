@@ -993,13 +993,15 @@ function parseSurv(text){
   SURV_HEADERS=hdrs.slice();
   const hdrMap={};
   hdrs.forEach(h=>{hdrMap[String(h).trim().toLowerCase()]=h;});
+  // Find symbol column — REG1 files use various casings/names
+  const symCol=findHeader(hdrs,[/^symbol$/i,/^nse.?symbol$/i,/^trading.?symbol$/i,/^scrip.?symbol$/i])||null;
   const activeRules=getSurvRules().map(rule=>({...rule,header:hdrMap[rule.column.toLowerCase()]||null}));
   activeRules.forEach(rule=>{SURV_RULE_HITS[rule.key]=0;});
   // dataHdrs: exclude REG1 identity/metadata columns (not surveillance flags)
   const _survNonFlag=new Set(['scripcode','symbol','nse exclusive','status','series']);
   const dataHdrs=hdrs.filter(h=>{const hl=h.trim().toLowerCase();return !_survNonFlag.has(hl)&&!/^filler/i.test(h.trim());});
   rows.forEach(r=>{
-    const sym=normSym(r['Symbol']);if(!sym)return;
+    const sym=normSym(symCol?r[symCol]:r['Symbol']);if(!sym)return;
     const hits=[];
     activeRules.forEach(rule=>{
       if(!rule.header) return;
