@@ -1894,7 +1894,8 @@ function renderStats(){
       const moCount=moAll.length;
       if(moCount>0){
         const moAvg=moAll.reduce((s,m)=>s+m.missed,0)/moCount;
-        infoPills.push(`<span class="info-pill pill-amber" title="Across ${moDates} sell date(s): stocks where day high exceeded your sell price — gain left on table.">🎯 ${moCount} missed opportunit${moCount===1?'y':'ies'} across ${moDates} days · avg +${moAvg.toFixed(2)}% left on table</span>`);
+        const moNudge=+Math.min(moAvg*0.25,2).toFixed(2);
+        infoPills.push(`<span class="info-pill pill-amber" title="Across ${moDates} sell date(s): stocks where day high exceeded your sell price. Nudge = 25% of avg missed gain (max 2%) — added to effective TGT in allocation and basket export.">🎯 ${moCount} missed opportunit${moCount===1?'y':'ies'} · avg +${moAvg.toFixed(2)}% left · TGT nudged +${moNudge.toFixed(2)}%</span>`);
       }
     }
   }catch(e){}
@@ -2883,12 +2884,24 @@ function getBuyPrice(s){
 // ── Effective learnt TGT% (gross sell-price delta from buy) ──
 // Source of truth = TRADEBOOK_STATS.adaptiveTGT (75th percentile win from FIFO matching).
 // Fallback when no tradebook = median of per-stock tgtPct in current FILT (ATR-derived).
+function getMissedOppNudge(){
+  try{
+    const store=FS.get(MISSED_OPP_STORE);
+    if(!store) return 0;
+    const all=Object.values(store).flat();
+    if(!all.length) return 0;
+    const avg=all.reduce((s,m)=>s+m.missed,0)/all.length;
+    return +Math.min(avg*0.25,2).toFixed(2);
+  }catch(e){return 0;}
+}
+
 function getEffectiveTgtPct(){
-  if(TRADEBOOK_STATS && TRADEBOOK_STATS.adaptiveTGT > 0) return TRADEBOOK_STATS.adaptiveTGT;
+  const nudge=getMissedOppNudge();
+  if(TRADEBOOK_STATS && TRADEBOOK_STATS.adaptiveTGT > 0) return TRADEBOOK_STATS.adaptiveTGT + nudge;
   const vals = (typeof FILT !== 'undefined' ? FILT : []).map(s => s.tgtPct).filter(v => v != null && isFinite(v) && v > 0);
   if(!vals.length) return null;
   vals.sort((a,b)=>a-b);
-  return vals[Math.floor(vals.length/2)];
+  return vals[Math.floor(vals.length/2)] + nudge;
 }
 
 function computeAlloc(capital, selList){
