@@ -364,7 +364,6 @@ const ORDERS_STORE='rs_orders';
 const POS_STORE='rs_positions';
 const TRADEBOOK_STORE='rs_tradebook';
 const SURV_RULE_STORE='rs_surv_rules';
-const SURV_DISABLED_STORE='rs_surv_disabled';
 const CORE_FILTER_STORE='rs_core_filters';
 const SURV_CORR_STORE='rs_surv_corr';
 const MISSED_OPP_STORE='rs_missed_opp_v2';
@@ -637,8 +636,7 @@ async function pickDataFolder(){
   }catch(e){console.warn('Key migration:',e);}
 })();
 let NSE_BHAV={},NSE_52W={},NSE_SURV={},NSE_BULK={},NSE_BLOCK={};
-let SURV_CUSTOM_RULES=[]; // [{key,column,label,manual:true}] persistent manual REG1 columns
-let SURV_DISABLED_DEFAULTS=new Set(); // keys of SURV_DEFAULT_RULES the user has removed; stored in rs_surv_disabled
+let SURV_CUSTOM_RULES=[]; // [{key,column,label}] all surveillance rules — user-managed, persisted in brain
 let SURV_FILE_RULES=[]; // [{key,column,label,manual:false}] — populated from actual REG1 file in parseSurv; replaces SURV_DEFAULT_RULES
 let SURV_MISSING_RULES=new Set(); // keys of custom rules whose column was not found in the last REG1 file — all stocks blocked as precaution
 let SURV_HEADERS=[]; // exact REG1 headers loaded this session
@@ -854,7 +852,8 @@ function isSurvFlag(v){
   const s=String(v||'').trim();
   return s!==''&&s!=='100';
 }
-const SURV_DEFAULT_RULES=[
+// Seed rules — used only when brain has no saved rules yet (first-time setup)
+const SURV_SEED_RULES=[
   {column:'Default',label:'Default'},
   {column:'Insolvency_Resolution_Process(IRP)',label:'Insolvency Resolution Process (IRP)'},
   {column:'ICA',label:'ICA'},
@@ -877,13 +876,12 @@ const SURV_DEFAULT_RULES=[
   {column:'SME scrip is not regularly traded',label:'SME not regularly traded'},
 ];
 function getSurvRules(){
-  const merged=[...SURV_DEFAULT_RULES.filter(r=>!SURV_DISABLED_DEFAULTS.has(survRuleKey(r.column||r.label||''))),...(SURV_CUSTOM_RULES||[])];
   const seen=new Set();
-  return merged.map(rule=>{
+  return SURV_CUSTOM_RULES.map(rule=>{
     const column=String(rule.column||rule.label||'').trim();
     const label=String(rule.label||column).trim();
     const key=survRuleKey(column);
-    return {key,column,label,manual:!!rule.manual};
+    return {key,column,label};
   }).filter(rule=>{
     if(!rule.column||seen.has(rule.key)) return false;
     seen.add(rule.key);
@@ -891,25 +889,23 @@ function getSurvRules(){
   });
 }
 function saveSurvRules(){
-  try{FS.set(SURV_RULE_STORE,SURV_CUSTOM_RULES||[]);}catch(e){console.warn('Could not save surveillance rules',e);}
-  try{FS.set(SURV_DISABLED_STORE,[...SURV_DISABLED_DEFAULTS]);}catch(e){}
+  try{FS.set(SURV_RULE_STORE,SURV_CUSTOM_RULES);}catch(e){console.warn('Could not save surveillance rules',e);}
 }
 function loadSurvRules(){
   try{
     const raw=FS.get(SURV_RULE_STORE);
-    SURV_CUSTOM_RULES=raw?raw:[];
-    if(!Array.isArray(SURV_CUSTOM_RULES)) SURV_CUSTOM_RULES=[];
-    SURV_CUSTOM_RULES=SURV_CUSTOM_RULES.map(rule=>{
-      const column=String(rule.column||rule.label||'').trim();
-      return column?{key:survRuleKey(column),column,label:String(rule.label||column).trim(),manual:true}:null;
-    }).filter(Boolean);
+    if(raw&&Array.isArray(raw)&&raw.length>0){
+      SURV_CUSTOM_RULES=raw.map(rule=>{
+        const column=String(rule.column||rule.label||'').trim();
+        return column?{key:survRuleKey(column),column,label:String(rule.label||column).trim()}:null;
+      }).filter(Boolean);
+    } else {
+      // First-time: seed with default rules
+      SURV_CUSTOM_RULES=SURV_SEED_RULES.map(r=>({key:survRuleKey(r.column),column:r.column,label:r.label}));
+    }
   }catch(e){
-    SURV_CUSTOM_RULES=[];
+    SURV_CUSTOM_RULES=SURV_SEED_RULES.map(r=>({key:survRuleKey(r.column),column:r.column,label:r.label}));
   }
-  try{
-    const dis=FS.get(SURV_DISABLED_STORE);
-    SURV_DISABLED_DEFAULTS=new Set(Array.isArray(dis)?dis:[]);
-  }catch(e){SURV_DISABLED_DEFAULTS=new Set();}
 }
 function saveCoreFilters(){
   try{localStorage.setItem(CORE_FILTER_STORE,JSON.stringify(CORE_FILTERS));}catch(e){}
@@ -932,15 +928,7 @@ function syncSurvRuleRows(savedRows){
   return getSurvRules().map(rule=>{
     const prev=byKey[rule.key]||{};
     const active=prev.active!=null?prev.active:activeHeaders.has(rule.column.toLowerCase());
-    return {
-      key:rule.key,
-      label:rule.label,
-      column:rule.column,
-      manual:rule.manual,
-      active:active,
-      flagged:prev.flagged||0,
-      removed:prev.removed||0,
-    };
+    return {key:rule.key,label:rule.label,column:rule.column,active,flagged:prev.flagged||0,removed:prev.removed||0};
   });
 }
 function sanitizeSavedMethodology(meth){
@@ -966,13 +954,12 @@ function getHardFilterRowsFromEngine(E){
     {key:'upper_circuit',label:'Upper Circuit',criteria:'Price change >= 19.5%',removed:rm.uc||0,rockets:[],active:true,kind:'core'},
     ...survRows.map(row=>({
       key:'surv_'+row.key,
-      label:row.label+(row.manual?' (Manual)':''),
+      label:row.label,
       criteria:row.column,
       removed:row.active?(row.removed||0):null,
       flagged:row.active?(row.flagged||0):0,
       rockets:row.active?(rk.surv||[]).filter(r=>r.sym&&NSE_SURV[r.sym]&&NSE_SURV[r.sym][0]===row.column):[],
       active:!!row.active,
-      manual:!!row.manual,
       missing:false,
       kind:'surv',
       ruleKey:row.key,
@@ -1065,18 +1052,12 @@ function parseSurv(text){
   const activeRules=dataHdrs.map(h=>({key:survRuleKey(h),column:h,label:h,header:h,manual:false}))
     .filter(r=>{if(fileRuleKeys.has(r.key))return false;fileRuleKeys.add(r.key);return true;});
   // Publish file-derived rules to SURV_FILE_RULES so getSurvRules() and all consumers use actual file columns
-  SURV_FILE_RULES=activeRules.map(r=>({key:r.key,column:r.column,label:r.label,manual:false}));
-  // Add custom user rules — dedup against file rules by exact key
-  // If a custom rule's column was renamed in the REG1 file, try to match it by key against current file columns
-  SURV_CUSTOM_RULES.filter(r=>r.manual).forEach(r=>{
-    if(fileRuleKeys.has(r.key)) return; // already covered by file rule with same key
-    // If the normalized key matches a file header (column renamed with case/spacing only), update silently
+  SURV_FILE_RULES=activeRules.map(r=>({key:r.key,column:r.column,label:r.label}));
+  // Update column names for any user rules that were renamed in the REG1 file (case/spacing only)
+  SURV_CUSTOM_RULES.forEach(r=>{
+    if(fileRuleKeys.has(r.key)) return;
     const matchedHdr=dataHdrs.find(h=>survRuleKey(h)===r.key);
-    if(matchedHdr){
-      r.column=matchedHdr; r.label=matchedHdr;
-      fileRuleKeys.add(r.key);
-    }
-    // If not found at all — skip silently; shown as inactive in HF table via syncSurvRuleRows active:false
+    if(matchedHdr){r.column=matchedHdr;r.label=matchedHdr;fileRuleKeys.add(r.key);}
   });
   activeRules.forEach(rule=>{SURV_RULE_HITS[rule.key]=0;});
   rows.forEach(r=>{
@@ -1651,10 +1632,7 @@ function runEngine(raw, sessionTag){
     removed: {...REMOVED},
     survSize: Object.keys(NSE_SURV).length,
     survRuleRows: getSurvRules().map(rule=>({
-      key:rule.key,
-      label:rule.label,
-      column:rule.column,
-      manual:!!rule.manual,
+      key:rule.key,label:rule.label,column:rule.column,
       active:SURV_HEADERS.map(h=>String(h).trim().toLowerCase()).includes(rule.column.toLowerCase()),
       flagged:SURV_RULE_HITS[rule.key]||0,
       removed:REMOVED.survRules?.[rule.key]||0,
@@ -2430,19 +2408,14 @@ function addSurvRule(colArg){
   }
   const key=survRuleKey(column);
   if(getSurvRules().some(rule=>rule.key===key)){showToast('That hard filter is already configured.',3000,true);return;}
-  SURV_CUSTOM_RULES.push({key,column,label:column,manual:true});
+  SURV_CUSTOM_RULES.push({key,column,label:column});
   saveSurvRules();
   if(ENGINE_DATA){ENGINE_DATA.survRuleRows=syncSurvRuleRows(ENGINE_DATA.survRuleRows||[]);persistMethodologySnapshot();}
   _refreshHFSection();
   showToast(`<strong>Added hard filter</strong> &mdash; ${escHtml(column)}. It will be applied whenever that REG1 column is flagged.`,3500);
 }
 function removeSurvRule(key){
-  const isDefault=SURV_DEFAULT_RULES.some(r=>survRuleKey(r.column||r.label||'')===key);
-  if(isDefault){
-    SURV_DISABLED_DEFAULTS.add(key);
-  } else {
-    SURV_CUSTOM_RULES=(SURV_CUSTOM_RULES||[]).filter(rule=>survRuleKey(rule.column||rule.label)!==key);
-  }
+  SURV_CUSTOM_RULES=SURV_CUSTOM_RULES.filter(rule=>rule.key!==key&&survRuleKey(rule.column||rule.label)!==key);
   saveSurvRules();
   if(ENGINE_DATA){ENGINE_DATA.survRuleRows=syncSurvRuleRows(ENGINE_DATA.survRuleRows||[]);persistMethodologySnapshot();}
   _refreshHFSection();
@@ -2518,7 +2491,7 @@ function buildHardFilterMethodologyHTML(E){
     removedSort:row.active&&row.removed!=null?(row.removed||0):-1,
     rocketsFiltered:row.rockets||[],
     rocketsSort:(row.rockets||[]).length,
-    active:row.active, kind:row.kind, manual:!!row.manual, missing:!!row.missing, ruleKey:row.ruleKey||'',
+    active:row.active, kind:row.kind, missing:!!row.missing, ruleKey:row.ruleKey||'',
     inactiveNote:row.missing
       ?'⚠ Column not found in REG1 file — ALL stocks blocked as precaution. Remove and re-add with correct column name.'
       :(!row.active?'Inactive — REG1 column not found in last upload':''),
@@ -4446,14 +4419,14 @@ async function initApp(){
     // Step 2g: Restore surveillance custom rules
     try{
       const sRaw=brain[SURV_RULE_STORE];
-      if(sRaw&&Array.isArray(sRaw)){
+      if(sRaw&&Array.isArray(sRaw)&&sRaw.length>0){
         SURV_CUSTOM_RULES=sRaw.map(rule=>{
           const column=String(rule.column||rule.label||'').trim();
-          return column?{key:survRuleKey(column),column,label:String(rule.label||column).trim(),manual:true}:null;
+          return column?{key:survRuleKey(column),column,label:String(rule.label||column).trim()}:null;
         }).filter(Boolean);
+      } else if(!sRaw||sRaw.length===0){
+        SURV_CUSTOM_RULES=SURV_SEED_RULES.map(r=>({key:survRuleKey(r.column),column:r.column,label:r.label}));
       }
-      const disRaw=brain[SURV_DISABLED_STORE];
-      if(Array.isArray(disRaw)) SURV_DISABLED_DEFAULTS=new Set(disRaw);
     }catch(e){SURV_CUSTOM_RULES=[];}
 
     // Step 2g2: Load core filter settings from localStorage
