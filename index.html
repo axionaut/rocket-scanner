@@ -3936,7 +3936,7 @@ async function processFiles(files){
   }
   // Single final render after all files are processed — ensures Latest Session uses fresh orders
   computeMissedOpp();
-  if(ALL.length){renderPerformance();renderStats();}
+  if(ALL.length){renderPerformance();renderStats();applyFilters();}
   setMsg('');
 }
 
