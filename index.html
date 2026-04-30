@@ -364,6 +364,8 @@ const ORDERS_STORE='rs_orders';
 const POS_STORE='rs_positions';
 const TRADEBOOK_STORE='rs_tradebook';
 const SURV_RULE_STORE='rs_surv_rules';
+const SURV_DISABLED_STORE='rs_surv_disabled';
+const CORE_FILTER_STORE='rs_core_filters';
 const SURV_CORR_STORE='rs_surv_corr';
 const MISSED_OPP_STORE='rs_missed_opp_v2';
 const REC_COUNT_STORE='rs_rec_count';
@@ -636,6 +638,7 @@ async function pickDataFolder(){
 })();
 let NSE_BHAV={},NSE_52W={},NSE_SURV={},NSE_BULK={},NSE_BLOCK={};
 let SURV_CUSTOM_RULES=[]; // [{key,column,label,manual:true}] persistent manual REG1 columns
+let SURV_DISABLED_DEFAULTS=new Set(); // keys of SURV_DEFAULT_RULES the user has removed; stored in rs_surv_disabled
 let SURV_FILE_RULES=[]; // [{key,column,label,manual:false}] — populated from actual REG1 file in parseSurv; replaces SURV_DEFAULT_RULES
 let SURV_MISSING_RULES=new Set(); // keys of custom rules whose column was not found in the last REG1 file — all stocks blocked as precaution
 let SURV_HEADERS=[]; // exact REG1 headers loaded this session
@@ -770,6 +773,14 @@ function calcAutoVolume(){
 }
 let VOL_AUTO=true;
 let FILTER_BUY_ZONE=false; // when true, only stocks with price ≤ VWAP+0.5×ATR are shown
+// Core hard-filter thresholds — user-configurable, stored in rs_core_filters localStorage
+let CORE_FILTERS={
+  uc:{enabled:true,threshold:19.5},          // upper circuit %
+  liq:{enabled:true,minSh:10000,minVol:5000}, // liquidity floor
+  fscore:{enabled:true,maxScore:3},           // Piotroski ≤ this value filtered out
+  deliv:{enabled:true,minDeliv:30},           // delivery % minimum
+  fade:{enabled:true,minRetention:50,minRange:1}, // peak retention % below this when range > minRange%
+};
 let _initInProgress=true; // suppresses applyFilters inside setAutoVolume during startup
 function setAutoVolume(){
   if(!VOL_AUTO) return;
@@ -866,7 +877,7 @@ const SURV_DEFAULT_RULES=[
   {column:'SME scrip is not regularly traded',label:'SME not regularly traded'},
 ];
 function getSurvRules(){
-  const merged=[...SURV_DEFAULT_RULES,...(SURV_CUSTOM_RULES||[])];
+  const merged=[...SURV_DEFAULT_RULES.filter(r=>!SURV_DISABLED_DEFAULTS.has(survRuleKey(r.column||r.label||''))),...(SURV_CUSTOM_RULES||[])];
   const seen=new Set();
   return merged.map(rule=>{
     const column=String(rule.column||rule.label||'').trim();
@@ -881,6 +892,7 @@ function getSurvRules(){
 }
 function saveSurvRules(){
   try{FS.set(SURV_RULE_STORE,SURV_CUSTOM_RULES||[]);}catch(e){console.warn('Could not save surveillance rules',e);}
+  try{FS.set(SURV_DISABLED_STORE,[...SURV_DISABLED_DEFAULTS]);}catch(e){}
 }
 function loadSurvRules(){
   try{
@@ -894,6 +906,24 @@ function loadSurvRules(){
   }catch(e){
     SURV_CUSTOM_RULES=[];
   }
+  try{
+    const dis=FS.get(SURV_DISABLED_STORE);
+    SURV_DISABLED_DEFAULTS=new Set(Array.isArray(dis)?dis:[]);
+  }catch(e){SURV_DISABLED_DEFAULTS=new Set();}
+}
+function saveCoreFilters(){
+  try{localStorage.setItem(CORE_FILTER_STORE,JSON.stringify(CORE_FILTERS));}catch(e){}
+}
+function loadCoreFilters(){
+  try{
+    const raw=JSON.parse(localStorage.getItem(CORE_FILTER_STORE)||'null');
+    if(raw&&typeof raw==='object'){
+      // Merge saved values into defaults (preserves any new keys we add later)
+      ['uc','liq','fscore','deliv','fade'].forEach(k=>{
+        if(raw[k]&&typeof raw[k]==='object') Object.assign(CORE_FILTERS[k],raw[k]);
+      });
+    }
+  }catch(e){}
 }
 function syncSurvRuleRows(savedRows){
   const byKey={};
@@ -947,7 +977,7 @@ function getHardFilterRowsFromEngine(E){
       kind:'surv',
       ruleKey:row.key,
     })),
-    {key:'low_liquidity',label:'Low Liquidity',criteria:'Shareholders < 500 OR Volume < 5,000',removed:rm.liq||0,rockets:rk.liq||[],active:true,kind:'core'},
+    {key:'low_liquidity',label:'Low Liquidity',criteria:`Shareholders < ${CORE_FILTERS.liq.minSh.toLocaleString()} OR Volume < ${CORE_FILTERS.liq.minVol.toLocaleString()}`,removed:rm.liq||0,rockets:rk.liq||[],active:true,kind:'core'},
     {key:'zero_fscore',label:'Low F-Score',criteria:'Piotroski F-Score ≤ 3',removed:rm.fscore||0,rockets:rk.fscore||[],active:true,kind:'core'},
     {key:'low_delivery',label:'Low Delivery',criteria:'Delivery % < 30% or null',removed:rm.deliv||0,rockets:rk.deliv||[],active:true,kind:'core'},
     {key:'fading_peak_retention',label:'Fading (Peak Retention)',criteria:'Peak retention < 50% when day range > 1%',removed:rm.fade||0,rockets:rk.fade||[],active:true,kind:'core'},
@@ -1283,7 +1313,7 @@ function runEngine(raw, sessionTag){
     const pc=K.price_change?d[K.price_change]:null;
     const sym=d.symbol;
     // Upper circuit — stock can't be bought, invalid for scanning
-    if(pc!==null&&pc>=19.5){REMOVED.uc++;return false;} // UC stocks are excluded before rocket tracking
+    if(CORE_FILTERS.uc.enabled&&pc!==null&&pc>=CORE_FILTERS.uc.threshold){REMOVED.uc++;return false;}
     // Surveillance — regulatory exclusion
     if(NSE_SURV[d.symbol]&&NSE_SURV[d.symbol].length){
       REMOVED.surv++;
@@ -1292,36 +1322,43 @@ function runEngine(raw, sessionTag){
       if(pc!=null&&pc>=rocketPct) REMOVED.rockets.surv.push({sym,pc});
       return false;
     }
-    // Hard liquidity floor — below these thresholds stock is untradeable
-    const sh=K.shareholders?d[K.shareholders]:null;
-    const vol=K.volume?d[K.volume]:null;
-    if((sh!==null&&sh<10000)||(vol!==null&&vol<5000)){
-      REMOVED.liq++;
-      if(pc!=null&&pc>=rocketPct) REMOVED.rockets.liq.push({sym,pc});
-      return false;
-    }
-    // Piotroski — must be > 3 (higher = better fundamentals)
-    const pio=K.piotroski?d[K.piotroski]:null;
-    if(pio===null||pio<=3){
-      REMOVED.fscore++;
-      if(pc!=null&&pc>=rocketPct) REMOVED.rockets.fscore.push({sym,pc});
-      return false;
-    }
-    // Delivery — null or <30% means speculative, no rockets have ever come from below 30%
-    const del=d.delivery_pct;
-    if(del===null||del<30){
-      REMOVED.deliv++;
-      if(pc!=null&&pc>=rocketPct) REMOVED.rockets.deliv.push({sym,pc});
-      return false;
-    }
-    // Peak retention — stock has given back >50% of its day's range (fading)
-    // Only apply when day range is meaningful (>1% of price)
-    const hi1d=K.high_1d?d[K.high_1d]:null, lo1d=K.low_1d?d[K.low_1d]:null;
-    if(hi1d!=null&&lo1d!=null&&lo1d>0&&(hi1d-lo1d)/lo1d>0.01){
-      if(d.peak_retention!=null&&d.peak_retention<50){
-        REMOVED.fade++;
-        if(pc!=null&&pc>=rocketPct) REMOVED.rockets.fade.push({sym,pc});
+    // Hard liquidity floor
+    if(CORE_FILTERS.liq.enabled){
+      const sh=K.shareholders?d[K.shareholders]:null;
+      const vol=K.volume?d[K.volume]:null;
+      if((sh!==null&&sh<CORE_FILTERS.liq.minSh)||(vol!==null&&vol<CORE_FILTERS.liq.minVol)){
+        REMOVED.liq++;
+        if(pc!=null&&pc>=rocketPct) REMOVED.rockets.liq.push({sym,pc});
         return false;
+      }
+    }
+    // Piotroski
+    if(CORE_FILTERS.fscore.enabled){
+      const pio=K.piotroski?d[K.piotroski]:null;
+      if(pio===null||pio<=CORE_FILTERS.fscore.maxScore){
+        REMOVED.fscore++;
+        if(pc!=null&&pc>=rocketPct) REMOVED.rockets.fscore.push({sym,pc});
+        return false;
+      }
+    }
+    // Delivery %
+    if(CORE_FILTERS.deliv.enabled){
+      const del=d.delivery_pct;
+      if(del===null||del<CORE_FILTERS.deliv.minDeliv){
+        REMOVED.deliv++;
+        if(pc!=null&&pc>=rocketPct) REMOVED.rockets.deliv.push({sym,pc});
+        return false;
+      }
+    }
+    // Peak retention — fading stocks
+    if(CORE_FILTERS.fade.enabled){
+      const hi1d=K.high_1d?d[K.high_1d]:null, lo1d=K.low_1d?d[K.low_1d]:null;
+      if(hi1d!=null&&lo1d!=null&&lo1d>0&&(hi1d-lo1d)/lo1d>(CORE_FILTERS.fade.minRange/100)){
+        if(d.peak_retention!=null&&d.peak_retention<CORE_FILTERS.fade.minRetention){
+          REMOVED.fade++;
+          if(pc!=null&&pc>=rocketPct) REMOVED.rockets.fade.push({sym,pc});
+          return false;
+        }
       }
     }
     return true;
@@ -2354,6 +2391,30 @@ function renderPerformance(){
   setTimeout(()=>{monthTbl.render();symTbl.render();tradeWindowTbl.render();},0);
 }
 
+function _saveCoreFilterField(id, val){
+  // Map field id → CORE_FILTERS key
+  const map={
+    'cf_uc':['uc','enabled'],
+    'cf_uc_thr':['uc','threshold'],
+    'cf_liq':['liq','enabled'],
+    'cf_liq_sh':['liq','minSh'],
+    'cf_liq_vol':['liq','minVol'],
+    'cf_fscore':['fscore','enabled'],
+    'cf_fs_max':['fscore','maxScore'],
+    'cf_deliv':['deliv','enabled'],
+    'cf_del_min':['deliv','minDeliv'],
+    'cf_fade':['fade','enabled'],
+    'cf_fade_ret':['fade','minRetention'],
+    'cf_fade_rng':['fade','minRange'],
+  };
+  const path=map[id];
+  if(!path) return;
+  const [group,field]=path;
+  if(field==='enabled') CORE_FILTERS[group][field]=!!val;
+  else CORE_FILTERS[group][field]=+parseFloat(val)||0;
+  saveCoreFilters();
+  showToast('Core filter updated — takes effect on next TV CSV upload.',2500);
+}
 function _refreshHFSection(){
   const wrap=document.getElementById('meth-hf-wrap');
   if(wrap){wrap.innerHTML=buildHardFilterMethodologyHTML(ENGINE_DATA);setTimeout(()=>{_methTbls.hf?.render();_methTbls.sc?.render();},0);}
@@ -2376,24 +2437,90 @@ function addSurvRule(colArg){
   showToast(`<strong>Added hard filter</strong> &mdash; ${escHtml(column)}. It will be applied whenever that REG1 column is flagged.`,3500);
 }
 function removeSurvRule(key){
-  SURV_CUSTOM_RULES=(SURV_CUSTOM_RULES||[]).filter(rule=>survRuleKey(rule.column||rule.label)!==key);
+  const isDefault=SURV_DEFAULT_RULES.some(r=>survRuleKey(r.column||r.label||'')===key);
+  if(isDefault){
+    SURV_DISABLED_DEFAULTS.add(key);
+  } else {
+    SURV_CUSTOM_RULES=(SURV_CUSTOM_RULES||[]).filter(rule=>survRuleKey(rule.column||rule.label)!==key);
+  }
   saveSurvRules();
   if(ENGINE_DATA){ENGINE_DATA.survRuleRows=syncSurvRuleRows(ENGINE_DATA.survRuleRows||[]);persistMethodologySnapshot();}
   _refreshHFSection();
-  showToast('Manual hard filter removed.',2500);
+  showToast('Surveillance rule removed.',2500);
+}
+function restoreSurvDefaultRule(key){
+  SURV_DISABLED_DEFAULTS.delete(key);
+  saveSurvRules();
+  if(ENGINE_DATA){ENGINE_DATA.survRuleRows=syncSurvRuleRows(ENGINE_DATA.survRuleRows||[]);persistMethodologySnapshot();}
+  _refreshHFSection();
+  showToast('Surveillance rule restored.',2500);
 }
 function buildHardFilterMethodologyHTML(E){
   const rows=getHardFilterRowsFromEngine(E);
-  const totalRemoved=rows.reduce((sum,row)=>sum+(row.active&&row.removed!=null?row.removed:0),0);
-  // Datalist: only real surveillance columns (SURV_FILE_RULES, already filtered of identity/filler cols),
-  // excluding those already configured in the HF table
+  const coreRows=rows.filter(r=>r.kind==='core');
+  const survRows=rows.filter(r=>r.kind==='surv');
+  const coreRemoved=coreRows.reduce((s,r)=>s+(r.removed||0),0);
+  const survRemoved=survRows.reduce((s,r)=>s+(r.active&&r.removed!=null?r.removed:0),0);
+  const totalRemoved=coreRemoved+survRemoved;
+
+  // ── Core Filters UI ──
+  const iEl=(id,val,w='70px')=>`<input type="number" id="${id}" value="${val}" style="width:${w};padding:5px 8px;background:var(--bg);border:1px solid var(--border);border-radius:6px;color:var(--t1);font-family:'DM Mono',monospace;font-size:12px;outline:none" onchange="_saveCoreFilterField('${id}',this.value)" onfocus="this.style.borderColor='var(--blue)'" onblur="this.style.borderColor='var(--border)'">`;
+  const tog=(key,label,extra='')=>`<label style="display:flex;align-items:center;gap:6px;cursor:pointer;user-select:none"><input type="checkbox" id="cf_${key}" ${CORE_FILTERS[key].enabled?'checked':''} onchange="_saveCoreFilterField('cf_${key}',this.checked)" style="accent-color:var(--blue);width:14px;height:14px"><span style="font-size:12px;font-weight:600;color:${CORE_FILTERS[key].enabled?'var(--t1)':'var(--t3)'}">${label}</span>${extra}</label>`;
+  const rmBadge=(r)=>{const v=r.removed||0;return v>0?`<span style="font-family:'DM Mono',monospace;font-size:11px;color:var(--red);margin-left:6px">−${v.toLocaleString()}</span>`:''};
+  const rktBadge=(r)=>{const list=r.rockets||[];return list.length?`<span style="font-size:10px;color:var(--orange);margin-left:4px" title="Rockets filtered: ${list.map(x=>x.sym+' +'+x.pc.toFixed(1)+'%').join(', ')}">🚀${list.length}</span>`:''};
+  const coreRow=coreRows.reduce((m,r)=>{m[r.key]=r;return m;},{});
+
+  const coreHTML=`
+    <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(270px,1fr));gap:10px;margin-bottom:16px">
+      <div style="background:var(--bg-card);border:1px solid var(--border);border-radius:10px;padding:12px 14px">
+        ${tog('uc','Upper Circuit',rmBadge(coreRow.upper_circuit||{})+rktBadge(coreRow.upper_circuit||{}))}
+        <div style="margin-top:8px;display:flex;align-items:center;gap:8px;padding-left:20px">
+          <span style="font-size:11px;color:var(--t3)">Price chg ≥</span>
+          ${iEl('cf_uc_thr',CORE_FILTERS.uc.threshold,'60px')}
+          <span style="font-size:11px;color:var(--t3)">%</span>
+        </div>
+      </div>
+      <div style="background:var(--bg-card);border:1px solid var(--border);border-radius:10px;padding:12px 14px">
+        ${tog('liq','Liquidity Floor',rmBadge(coreRow.low_liquidity||{})+rktBadge(coreRow.low_liquidity||{}))}
+        <div style="margin-top:8px;display:flex;flex-direction:column;gap:6px;padding-left:20px">
+          <div style="display:flex;align-items:center;gap:8px"><span style="font-size:11px;color:var(--t3);width:80px">Min Shareholders</span>${iEl('cf_liq_sh',CORE_FILTERS.liq.minSh,'80px')}</div>
+          <div style="display:flex;align-items:center;gap:8px"><span style="font-size:11px;color:var(--t3);width:80px">Min Volume</span>${iEl('cf_liq_vol',CORE_FILTERS.liq.minVol,'80px')}</div>
+        </div>
+      </div>
+      <div style="background:var(--bg-card);border:1px solid var(--border);border-radius:10px;padding:12px 14px">
+        ${tog('fscore','F-Score',rmBadge(coreRow.zero_fscore||{})+rktBadge(coreRow.zero_fscore||{}))}
+        <div style="margin-top:8px;display:flex;align-items:center;gap:8px;padding-left:20px">
+          <span style="font-size:11px;color:var(--t3)">Piotroski ≤</span>
+          ${iEl('cf_fs_max',CORE_FILTERS.fscore.maxScore,'60px')}
+          <span style="font-size:11px;color:var(--t3)">filtered out</span>
+        </div>
+      </div>
+      <div style="background:var(--bg-card);border:1px solid var(--border);border-radius:10px;padding:12px 14px">
+        ${tog('deliv','Delivery %',rmBadge(coreRow.low_delivery||{})+rktBadge(coreRow.low_delivery||{}))}
+        <div style="margin-top:8px;display:flex;align-items:center;gap:8px;padding-left:20px">
+          <span style="font-size:11px;color:var(--t3)">Min</span>
+          ${iEl('cf_del_min',CORE_FILTERS.deliv.minDeliv,'60px')}
+          <span style="font-size:11px;color:var(--t3)">%</span>
+        </div>
+      </div>
+      <div style="background:var(--bg-card);border:1px solid var(--border);border-radius:10px;padding:12px 14px">
+        ${tog('fade','Fade Filter',rmBadge(coreRow.fading_peak_retention||{})+rktBadge(coreRow.fading_peak_retention||{}))}
+        <div style="margin-top:8px;display:flex;flex-direction:column;gap:6px;padding-left:20px">
+          <div style="display:flex;align-items:center;gap:8px"><span style="font-size:11px;color:var(--t3);width:100px">Peak Retention &lt;</span>${iEl('cf_fade_ret',CORE_FILTERS.fade.minRetention,'60px')}<span style="font-size:11px;color:var(--t3)">%</span></div>
+          <div style="display:flex;align-items:center;gap:8px"><span style="font-size:11px;color:var(--t3);width:100px">When day range &gt;</span>${iEl('cf_fade_rng',CORE_FILTERS.fade.minRange,'60px')}<span style="font-size:11px;color:var(--t3)">%</span></div>
+        </div>
+      </div>
+    </div>`;
+
+  // ── Surveillance Table — only surv rows, all with Remove buttons ──
   const addedRuleKeys=new Set(getSurvRules().map(r=>r.key));
   const availableCols=(SURV_FILE_RULES.length>0?SURV_FILE_RULES:SURV_HEADERS.filter(h=>{
     const hl=h.trim().toLowerCase();
     return !['scripcode','symbol','nse exclusive','status','series'].includes(hl)&&!/^filler/i.test(h.trim());
   })).map(r=>r.column||r).filter(h=>!addedRuleKeys.has(survRuleKey(h)));
   const datalistHtml=availableCols.map(col=>`<option value="${escHtml(col)}"></option>`).join('');
-  const hfRows=rows.map(row=>({
+
+  const hfRows=survRows.map(row=>({
     criteria:row.criteria,
     removedSort:row.active&&row.removed!=null?(row.removed||0):-1,
     rocketsFiltered:row.rockets||[],
@@ -2401,15 +2528,14 @@ function buildHardFilterMethodologyHTML(E){
     active:row.active, kind:row.kind, manual:!!row.manual, missing:!!row.missing, ruleKey:row.ruleKey||'',
     inactiveNote:row.missing
       ?'⚠ Column not found in REG1 file — ALL stocks blocked as precaution. Remove and re-add with correct column name.'
-      :(!row.active?(row.kind==='surv'?'Inactive — REG1 column not found in last upload':'Needs fresh NSE data'):''),
-    manageSort:row.manual?1:0,
+      :(!row.active?'Inactive — REG1 column not found in last upload':''),
   }));
   const hfCols=[
-    {key:'criteria',label:'Filter / Column',align:'left',
-      fmt:(v,r)=>`<span style="font-size:11px;color:${r.missing?'var(--amber)':r.active?'var(--t1)':'var(--t3)'}">${escHtml(v)}${r.inactiveNote?`<div style="font-size:10px;color:${r.missing?'var(--amber)':r.kind==='surv'?'var(--red)':'var(--amber)'};margin-top:2px">${r.inactiveNote}</div>`:''}</span>`,
+    {key:'criteria',label:'REG1 Column',align:'left',
+      fmt:(v,r)=>`<span style="font-size:11px;color:${r.missing?'var(--amber)':r.active?'var(--t1)':'var(--t3)'}">${escHtml(v)}${r.inactiveNote?`<div style="font-size:10px;color:${r.missing?'var(--amber)':'var(--red)'};margin-top:2px">${r.inactiveNote}</div>`:''}</span>`,
       totFmt:()=>`<span style="font-size:11px;color:var(--t2);font-weight:700">Total</span>`},
     {key:'removedSort',label:'Removed',align:'right',
-      fmt:(v,r)=>v>=0?`<span style="color:${v>0?'var(--red)':'var(--t3)'};font-weight:700;font-family:'DM Mono',monospace">${v.toLocaleString()}</span>`:'&mdash;',
+      fmt:(v)=>v>=0?`<span style="color:${v>0?'var(--red)':'var(--t3)'};font-weight:700;font-family:'DM Mono',monospace">${v.toLocaleString()}</span>`:'&mdash;',
       totFmt:(v)=>`<span style="color:var(--red);font-weight:700;font-family:'DM Mono',monospace">${v.toLocaleString()}</span>`},
     {key:'rocketsSort',label:'🚀 Rockets Filtered',align:'left',
       fmt:(v,r)=>{
@@ -2419,39 +2545,51 @@ function buildHardFilterMethodologyHTML(E){
         return `<span style="display:inline-flex;flex-wrap:wrap;gap:1px;align-items:center">${chips}</span>`;
       },
       totFmt:(v)=>`<span style="color:var(--t2);font-family:'DM Mono',monospace">${v} total</span>`},
-    {key:'manageSort',label:'Manage',align:'right',
-      fmt:(v,r)=>r.manual?`<button onclick="removeSurvRule('${r.ruleKey}')" style="padding:4px 8px;border-radius:6px;border:1px solid rgba(239,68,68,.3);background:rgba(239,68,68,.08);color:var(--red);font-size:10px;font-weight:700;cursor:pointer">Remove</button>`:`<span style="color:var(--t3);font-size:10px">${r.kind==='surv'?'Built-in':'Core'}</span>`,
+    {key:'ruleKey',label:'',align:'right',
+      fmt:(v,r)=>`<button onclick="removeSurvRule('${v}')" style="padding:4px 8px;border-radius:6px;border:1px solid rgba(239,68,68,.3);background:rgba(239,68,68,.08);color:var(--red);font-size:10px;font-weight:700;cursor:pointer">Remove</button>`,
       totFmt:()=>''},
   ];
   const hfTotalsRemoved=hfRows.reduce((s,r)=>s+(r.removedSort>=0?r.removedSort:0),0);
   const hfTotalsRockets=hfRows.reduce((s,r)=>s+r.rocketsSort,0);
   _methTbls.hf=makeSortableTable('tbl-hf',hfCols,hfRows,'removedSort',-1,null,{
-    criteria:null,
-    removedSort:hfTotalsRemoved,
-    rocketsSort:hfTotalsRockets,
-    manageSort:null,
+    criteria:null,removedSort:hfTotalsRemoved,rocketsSort:hfTotalsRockets,ruleKey:null,
   });
+
+  // Disabled defaults restore section
+  const disabledDefaults=SURV_DEFAULT_RULES.filter(r=>SURV_DISABLED_DEFAULTS.has(survRuleKey(r.column||r.label||'')));
+  const disabledHTML=disabledDefaults.length?`
+    <div style="margin-top:10px;padding:10px 14px;background:rgba(148,163,184,.06);border:1px solid var(--border);border-radius:8px">
+      <div style="font-size:11px;color:var(--t3);margin-bottom:6px">Removed built-in rules — click to restore:</div>
+      <div style="display:flex;flex-wrap:wrap;gap:6px">${disabledDefaults.map(r=>`<button onclick="restoreSurvDefaultRule('${survRuleKey(r.column||r.label||'')}')" style="padding:4px 10px;border-radius:6px;border:1px solid rgba(99,102,241,.3);background:rgba(99,102,241,.08);color:var(--blue);font-size:11px;cursor:pointer">+ ${escHtml(r.label||r.column)}</button>`).join('')}</div>
+    </div>`:'';
+
   const survSize=E?.survSize??0;
-  const survActiveThisSession=SURV_HEADERS.length>0; // REG1 file actually loaded this session
+  const survActiveThisSession=SURV_HEADERS.length>0;
   const survMeta=survActiveThisSession
     ? `<div style="font-size:11px;color:var(--t3);margin-top:8px">REG1 file active this session. Removed counts are primary-rule removals and don't double-count.</div>`
     : (survSize>0
       ? `<div style="font-size:11px;color:var(--amber);margin-top:8px">Showing last saved run (${survSize} flagged). Load NSE ZIP this session to refresh.</div>`
       : `<div style="margin-top:8px;padding:8px 10px;background:rgba(239,68,68,.08);border:1px solid rgba(239,68,68,.25);border-radius:8px;font-size:11px;color:var(--red)">NSE REG1 data not active — surveillance rows shown for configuration only, won't filter until a REG1 file is loaded.</div>`);
+
   return `
     <h3 id="meth-filters" style="margin-top:28px">Hard Filters <span style="font-size:12px;color:var(--t3);font-weight:400">(${totalRemoved} removals in latest saved run)</span></h3>
-    <p style="color:var(--t3);font-size:12px;margin-bottom:10px">Each surveillance row is an exact REG1 column. Manual rows are persisted in your brain and apply whenever that column is flagged.</p>
-    <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:10px">
-      <input id="survRuleInput" type="text" placeholder="${SURV_HEADERS.length?'Type to search REG1 columns…':'Load NSE ZIP to enable suggestions'}" list="survRuleDatalist" onkeydown="if(event.key==='Enter'){event.preventDefault();addSurvRule();}" style="flex:1;min-width:280px;padding:10px 12px;background:var(--bg-card);border:1px solid var(--border);border-radius:8px;color:var(--t1);font-size:12px;outline:none">
+
+    <h4 style="margin:14px 0 8px;font-size:12px;color:var(--t2);font-weight:700;text-transform:uppercase;letter-spacing:.5px">Core Filters</h4>
+    <p style="color:var(--t3);font-size:11px;margin-bottom:10px">Toggle on/off and adjust thresholds. Changes apply on the next TV CSV upload.</p>
+    ${coreHTML}
+
+    <h4 style="margin:20px 0 8px;font-size:12px;color:var(--t2);font-weight:700;text-transform:uppercase;letter-spacing:.5px">Surveillance Filters (NSE REG1)</h4>
+    <p style="color:var(--t3);font-size:11px;margin-bottom:10px">Each row is an exact REG1 column. Any stock flagged under that column is removed from scanning.</p>
+    <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:8px">
+      <input id="survRuleInput" type="text" placeholder="${SURV_HEADERS.length?'Type to search REG1 columns…':'Load NSE ZIP to enable suggestions'}" list="survRuleDatalist" onkeydown="if(event.key==='Enter'){event.preventDefault();addSurvRule();}" style="flex:1;min-width:260px;padding:9px 12px;background:var(--bg-card);border:1px solid var(--border);border-radius:8px;color:var(--t1);font-size:12px;outline:none">
       <datalist id="survRuleDatalist">${datalistHtml}</datalist>
-      <button class="btn" onclick="addSurvRule()" style="font-weight:700">+ Add Hard Filter</button>
+      <button class="btn" onclick="addSurvRule()" style="font-weight:700">+ Add Rule</button>
     </div>
-    <div style="font-size:11px;color:var(--t3);margin-bottom:10px">Use the exact header text from <code style="color:var(--t1)">REG1_IND*.csv</code>. Custom rows are persisted across refreshes and brain exports.</div>
     <div style="background:var(--bg-card);border:1px solid var(--border);border-radius:10px;overflow:hidden">
       <div style="overflow-x:auto">${_methTbls.hf.getHtml()}</div>
     </div>
     ${survMeta}
-    ${buildSurvHeldFlaggedHTML()}
+    ${disabledHTML}
     ${buildSurvCorrHTML()}
   `;
 }
@@ -2503,83 +2641,6 @@ function updateSurvCorrelation(){
   if(updated) FS.set(SURV_CORR_STORE,SURV_CORR_ACC);
 }
 
-function buildSurvHeldFlaggedHTML(){
-  // Build full set of held symbols: HOLDINGS (qty>0) + today's net buys from ORDERS_TODAY
-  const heldSyms=new Set();
-  if(HOLDINGS?.length) HOLDINGS.forEach(h=>{if(h?.symbol&&h.qty>0) heldSyms.add(h.symbol);});
-  if(ORDERS_TODAY?.length){
-    const todayDate=getSessionDate();
-    const ordBuys={},ordSells={};
-    ORDERS_TODAY.forEach(o=>{
-      if(normOrderDate(o.time)!==todayDate||!o.symbol) return;
-      const t=(o.type||'').toUpperCase();
-      if(t==='BUY') ordBuys[o.symbol]=(ordBuys[o.symbol]||0)+o.qty;
-      else if(t==='SELL') ordSells[o.symbol]=(ordSells[o.symbol]||0)+o.qty;
-    });
-    Object.entries(ordBuys).forEach(([sym,bQty])=>{if(bQty-(ordSells[sym]||0)>0) heldSyms.add(sym);});
-  }
-  if(!heldSyms.size) return '';
-
-  // Build per-symbol P&L info for held flagged stocks
-  const symInfo={};
-  heldSyms.forEach(sym=>{
-    if(!NSE_SURV[sym]?.length) return;
-    const ltp=ALL.find(s=>s.symbol===sym)?.price||(POSITIONS?.find(p=>p.symbol===sym)?.ltp)||(HOLDINGS?.find(h=>h.symbol===sym)?.ltp)||null;
-    const avg=HOLD_COST_MAP[sym]??HOLDINGS?.find(h=>h.symbol===sym)?.avgCost??null;
-    symInfo[sym]=(ltp&&avg&&avg>0)?+(((ltp-avg)/avg)*100).toFixed(2):null;
-  });
-
-  if(!Object.keys(symInfo).length) return '';
-
-  // Invert: flag → [{sym, pnlPct}]
-  const flagMap={};
-  Object.entries(symInfo).forEach(([sym,pnlPct])=>{
-    NSE_SURV[sym].forEach(ruleKey=>{
-      if(!flagMap[ruleKey]) flagMap[ruleKey]=[];
-      flagMap[ruleKey].push({sym,pnlPct});
-    });
-  });
-
-  // Sort flags by stock count desc
-  const flagEntries=Object.entries(flagMap).sort((a,b)=>b[1].length-a[1].length);
-  const survRules=getSurvRules();
-  const totalFlagged=Object.keys(symInfo).length;
-
-  const rows=flagEntries.map(([ruleKey,stocks])=>{
-    const rule=survRules.find(r=>r.key===ruleKey);
-    const label=rule?rule.label:ruleKey;
-    // Sort stocks worst P&L first within flag
-    stocks.sort((a,b)=>(a.pnlPct??Infinity)-(b.pnlPct??Infinity));
-    const symPills=stocks.map(({sym,pnlPct})=>{
-      const pnlColor=pnlPct==null?'var(--t3)':pnlPct>=0?'var(--green)':'var(--red)';
-      const pnlStr=pnlPct!=null?(pnlPct>=0?'+':'')+pnlPct.toFixed(1)+'%':'—';
-      return `<span style="display:inline-flex;align-items:center;gap:4px;background:rgba(239,68,68,.1);border:1px solid rgba(239,68,68,.2);border-radius:4px;padding:2px 7px;margin:2px 3px 2px 0;white-space:nowrap"><span style="font-weight:700;color:var(--amber);font-family:'DM Mono',monospace">${escHtml(sym)}</span><span style="color:${pnlColor};font-family:'DM Mono',monospace;font-size:11px">${pnlStr}</span></span>`;
-    }).join('');
-    return `
-      <tr style="border-bottom:1px solid rgba(239,68,68,.12)">
-        <td style="padding:8px 12px;font-size:11px;color:var(--red);max-width:260px;word-break:break-word">${escHtml(label)}</td>
-        <td style="padding:8px 12px;text-align:center;font-family:'DM Mono',monospace;font-weight:700;color:var(--red)">${stocks.length}</td>
-        <td style="padding:8px 12px">${symPills}</td>
-      </tr>`;
-  }).join('');
-
-  return `
-    <div style="background:rgba(239,68,68,.06);border:1px solid rgba(239,68,68,.25);border-radius:10px;overflow:hidden;margin-bottom:14px">
-      <div style="padding:10px 14px;border-bottom:1px solid rgba(239,68,68,.2);display:flex;align-items:center;gap:8px">
-        <span style="font-size:13px;font-weight:700;color:var(--red)">⚠ Surveillance — Held Positions</span>
-        <span style="font-size:11px;color:var(--t3)">${totalFlagged} of your held/bought stocks are on the NSE surveillance list</span>
-      </div>
-      <div style="overflow-x:auto"><table style="width:100%;border-collapse:collapse;font-size:12px">
-        <thead><tr style="color:var(--t3);font-size:10px;text-transform:uppercase;letter-spacing:.7px">
-          <th style="padding:7px 12px;text-align:left;font-weight:600">Surveillance Flag</th>
-          <th style="padding:7px 12px;text-align:center;font-weight:600">Stocks</th>
-          <th style="padding:7px 12px;text-align:left;font-weight:600">Held Positions (P&L%)</th>
-        </tr></thead>
-        <tbody>${rows}</tbody>
-      </table></div>
-    </div>`;
-}
-
 function buildSurvCorrHTML(){
   const allAcc=Object.values(SURV_CORR_ACC).filter(r=>r.sessions>0);
   // Show placeholder only when nothing accumulated yet
@@ -2597,20 +2658,58 @@ function buildSurvCorrHTML(){
   const canAccumulate=HOLDINGS?.length>0&&Object.keys(SURV_ALL_HITS).length>0;
   const staleNote=canAccumulate?'':
     `<div style="margin-bottom:8px;padding:6px 10px;background:rgba(251,191,36,.06);border:1px solid rgba(251,191,36,.2);border-radius:6px;font-size:11px;color:var(--amber)">Showing historical data. Load Holdings.csv + REG1 file this session to update the accumulator.</div>`;
+  // Build held-position pills per surveillance column (col name → pills HTML)
+  const heldPillMap={};
+  {
+    const heldSyms=new Set();
+    if(HOLDINGS?.length) HOLDINGS.forEach(h=>{if(h?.symbol&&h.qty>0) heldSyms.add(h.symbol);});
+    if(ORDERS_TODAY?.length){
+      const todayDate=getSessionDate();
+      const ordBuys={},ordSells={};
+      ORDERS_TODAY.forEach(o=>{
+        if(normOrderDate(o.time)!==todayDate||!o.symbol) return;
+        const t=(o.type||'').toUpperCase();
+        if(t==='BUY') ordBuys[o.symbol]=(ordBuys[o.symbol]||0)+o.qty;
+        else if(t==='SELL') ordSells[o.symbol]=(ordSells[o.symbol]||0)+o.qty;
+      });
+      Object.entries(ordBuys).forEach(([sym,bQty])=>{if(bQty-(ordSells[sym]||0)>0) heldSyms.add(sym);});
+    }
+    heldSyms.forEach(sym=>{
+      const hitCols=SURV_ALL_HITS[sym];
+      if(!hitCols) return;
+      const ltp=ALL.find(s=>s.symbol===sym)?.price||(POSITIONS?.find(p=>p.symbol===sym)?.ltp)||(HOLDINGS?.find(h=>h.symbol===sym)?.ltp)||null;
+      const avg=HOLD_COST_MAP[sym]??HOLDINGS?.find(h=>h.symbol===sym)?.avgCost??null;
+      const pnlPct=(ltp&&avg&&avg>0)?+(((ltp-avg)/avg)*100).toFixed(2):null;
+      Object.keys(hitCols).forEach(col=>{
+        if(!heldPillMap[col]) heldPillMap[col]=[];
+        heldPillMap[col].push({sym,pnlPct});
+      });
+    });
+    // Sort each flag's stocks worst P&L first
+    Object.values(heldPillMap).forEach(arr=>arr.sort((a,b)=>(a.pnlPct??Infinity)-(b.pnlPct??Infinity)));
+  }
+
   const activeColKeys=new Set(getSurvRules().map(r=>r.key));
   const visRows=allAcc.filter(r=>!activeColKeys.has(r.key));
   const maxSess=visRows.length?Math.max(...visRows.map(r=>r.sessions)):1;
   const scRows=visRows.map(r=>{
     const conf=r.sessions<2?'low':r.sessions<5?'med':'high';
     const verdict=r.sessions<2?'❓':r.winRate<35&&r.avgPnl<-0.5?'🚫 Filter':r.winRate>65&&r.avgPnl>0.5?'✅ Safe':'📊 Neutral';
+    const stocks=heldPillMap[r.col]||[];
+    const heldPills=stocks.map(({sym,pnlPct})=>{
+      const pnlColor=pnlPct==null?'var(--t3)':pnlPct>=0?'var(--green)':'var(--red)';
+      const pnlStr=pnlPct!=null?(pnlPct>=0?'+':'')+pnlPct.toFixed(1)+'%':'—';
+      return `<span style="display:inline-flex;align-items:center;gap:4px;background:rgba(239,68,68,.1);border:1px solid rgba(239,68,68,.2);border-radius:4px;padding:2px 6px;margin:2px 3px 2px 0;white-space:nowrap;font-family:'DM Mono',monospace"><span style="font-weight:700;color:var(--amber);font-size:11px">${escHtml(sym)}</span><span style="color:${pnlColor};font-size:10px">${pnlStr}</span></span>`;
+    }).join('');
     return {col:r.col,sessions:r.sessions,lastCount:r.lastCount,winRate:r.winRate,avgPnl:r.avgPnl,
-      verdict,_conf:conf,_maxSess:maxSess};
+      verdict,_conf:conf,_maxSess:maxSess,heldPills,_heldCount:stocks.length};
   });
   const scCols=[
     {key:'col',label:'Surveillance Column',align:'left',fmt:(v)=>`<span style="font-size:11px" title="${escHtml(v)}">${escHtml(v)}</span>`},
     {key:'lastCount',label:'Holdings Flagged',align:'right',fmt:(v)=>`<span style="color:var(--t3);font-family:'DM Mono',monospace">${v}</span>`},
     {key:'avgPnl',label:'Avg Unrealised P&L%',align:'right',fmt:(v)=>`<span style="color:${v<0?'var(--red)':v>0?'var(--green)':'var(--t3)'};font-weight:700;font-family:'DM Mono',monospace" title="Average unrealised P&L% of your holdings currently flagged by this column">${v>=0?'+':''}${v.toFixed(2)}%</span>`},
     {key:'verdict',label:'Signal',align:'left',fmt:(v)=>`<span style="color:${v.startsWith('🚫')?'var(--red)':v.startsWith('✅')?'var(--green)':'var(--amber)'};font-weight:700">${v}</span>`},
+    {key:'heldPills',label:'Held Positions',align:'left',fmt:(v,row)=>v||`<span style="color:var(--t3);font-size:11px">—</span>`},
   ];
   _methTbls.sc=makeSortableTable('tbl-sc',scCols,scRows,'avgPnl',1); // worst avg P&L first
   return `
@@ -4252,6 +4351,8 @@ let ACC_CORR=null; // accumulated targetCorr across sessions
 
 // ── Async app init: load brain file → hydrate all state → render ──
 async function initApp(){
+  // Load core filter settings from localStorage before any engine run
+  loadCoreFilters();
   // Step 0: Connect to folder and load brain file
   const brain=await FS.init();
   if(brain){
@@ -4367,7 +4468,12 @@ async function initApp(){
           return column?{key:survRuleKey(column),column,label:String(rule.label||column).trim(),manual:true}:null;
         }).filter(Boolean);
       }
+      const disRaw=brain[SURV_DISABLED_STORE];
+      if(Array.isArray(disRaw)) SURV_DISABLED_DEFAULTS=new Set(disRaw);
     }catch(e){SURV_CUSTOM_RULES=[];}
+
+    // Step 2g2: Load core filter settings from localStorage
+    loadCoreFilters();
 
     // Step 2h: Restore orders (today only)
     try{
