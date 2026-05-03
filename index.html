@@ -1815,7 +1815,7 @@ function computeMissedOpp(){
     const h=highMap[sym];
     if(h==null) return;
     const missed=(h-sellPx)/sellPx*100;
-    if(missed>0.1) dayMissed.push({sym,missed:+missed.toFixed(2)});
+    if(missed>1) dayMissed.push({sym,missed:+missed.toFixed(2)});
   });
   if(!dayMissed.length) return;
   const acc=FS.get(MISSED_OPP_STORE)||{};
@@ -1940,8 +1940,8 @@ function renderStats(){
       const moCount=moAll.length;
       if(moCount>0){
         const moAvg=moAll.reduce((s,m)=>s+m.missed,0)/moCount;
-        const moNudge=+Math.min(moAvg*0.25,2).toFixed(2);
-        infoPills.push(`<span class="info-pill pill-amber" title="Across ${moDates} sell date(s): stocks where day high exceeded your sell price. Nudge = 25% of avg missed gain (max 2%) — added to effective TGT in allocation and basket export.">🎯 ${moCount} missed opportunit${moCount===1?'y':'ies'} · avg +${moAvg.toFixed(2)}% left · TGT nudged +${moNudge.toFixed(2)}%</span>`);
+        const moNudge=+(moAvg*0.25).toFixed(2);
+        infoPills.push(`<span class="info-pill pill-amber" title="Across ${moDates} sell date(s): stocks where day high exceeded your sell price. Nudge = 25% of avg missed gain — added to effective TGT in allocation and basket export.">🎯 ${moCount} missed opportunit${moCount===1?'y':'ies'} · avg +${moAvg.toFixed(2)}% left · TGT nudged +${moNudge.toFixed(2)}%</span>`);
       }
     }
   }catch(e){}
@@ -3132,7 +3132,7 @@ function getMissedOppNudge(){
     const all=Object.values(store).flat();
     if(!all.length) return 0;
     const avg=all.reduce((s,m)=>s+m.missed,0)/all.length;
-    return +Math.min(avg*0.25,2).toFixed(2);
+    return +(avg*0.25).toFixed(2);
   }catch(e){return 0;}
 }
 
