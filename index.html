@@ -1879,8 +1879,8 @@ function renderStats(){
   // SL/TGT card — from tradebook adaptive values
   const slTgtCard=(()=>{
     if(!TRADEBOOK_STATS?.adaptiveSL) return '';
-    const _sl=TRADEBOOK_STATS.adaptiveSL.toFixed(1),_tgt=TRADEBOOK_STATS.adaptiveTGT.toFixed(1);
-    const rr=(TRADEBOOK_STATS.adaptiveTGT/TRADEBOOK_STATS.adaptiveSL).toFixed(2);
+    const _sl=TRADEBOOK_STATS.adaptiveSL.toFixed(1),_tgt=(getEffectiveTgtPct()||TRADEBOOK_STATS.adaptiveTGT).toFixed(1);
+    const rr=((getEffectiveTgtPct()||TRADEBOOK_STATS.adaptiveTGT)/TRADEBOOK_STATS.adaptiveSL).toFixed(2);
     return `<div class="st"><div class="st-l">SL / TGT</div><div class="st-v" style="font-size:17px"><span style="color:var(--red)">−${_sl}%</span><span style="color:var(--t3);font-size:13px"> / </span><span style="color:var(--green)">+${_tgt}%</span></div><div class="st-d">R:R ${rr} · tradebook-derived</div></div>`;
   })();
 
@@ -4098,7 +4098,7 @@ function _showGttPopupInner(){
   const fmtRs=v=>v!=null?'₹'+Number(v).toLocaleString('en-IN',{maximumFractionDigits:2}):'—';
   const fmtPct=v=>v!=null?(v>=0?'+':'')+Number(v).toFixed(2)+'%':'—';
   const adaptiveSL=TRADEBOOK_STATS?TRADEBOOK_STATS.adaptiveSL:3.5;
-  const adaptiveTGT=TRADEBOOK_STATS?TRADEBOOK_STATS.adaptiveTGT:3.7;
+  const adaptiveTGT=getEffectiveTgtPct()||(TRADEBOOK_STATS?TRADEBOOK_STATS.adaptiveTGT:3.7);
 
   // Merge HOLDINGS + POSITIONS into one list (deduplicated by symbol)
   const symSet=new Set();
@@ -4174,7 +4174,7 @@ function exportBasket(){
 
   // Universal SL/TGT from tradebook (already cost-adjusted)
   const adaptiveSL=TRADEBOOK_STATS?TRADEBOOK_STATS.adaptiveSL:3.5;
-  const adaptiveTGT=TRADEBOOK_STATS?TRADEBOOK_STATS.adaptiveTGT:3.7;
+  const adaptiveTGT=getEffectiveTgtPct()||(TRADEBOOK_STATS?TRADEBOOK_STATS.adaptiveTGT:3.7);
 
   const orders=[];
   let rejectedCount=0;
