@@ -338,7 +338,7 @@ table.main tbody td{padding:9px 11px;font-family:'DM Mono',monospace;font-size:1
 
 
 <script>
-const BUILD_TS='2026-05-04 13:01 IST'; // replaced at commit time with IST datetime
+const BUILD_TS='2026-05-04 13:06 IST'; // replaced at commit time with IST datetime
 let ALL=[],FILT=[],PG=1,PGSZ=9999,SCOL='rocketScore',SDIR=-1;
 let _tvLoadedThisSession=false; // true once a TV CSV has been processed this session
 let _scanSavedDate=null; // date string (YYYY-MM-DD) of the brain-restored scan, set on init
@@ -4447,6 +4447,7 @@ async function processFiles(files){
   // applyFilters() re-runs held-stock suppression with fresh holdings data only when
   // holdings/positions were updated (avoids double render lag when TV CSV was also uploaded).
   computeMissedOpp();
+  await FS.write(FS.getBrain()); // flush all pending brain writes before reload
   location.reload();
 }
 
@@ -4791,6 +4792,7 @@ initNSELinks();
 </script>
 </body>
 </html>
+
 
 
 
