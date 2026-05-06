@@ -311,7 +311,7 @@ table.main tbody td{padding:9px 11px;font-family:'DM Mono',monospace;font-size:1
    <!-- Max 1D is auto-derived from Rocket % minus the 1D Buffer below; legacy hidden field kept so saved state can still round-trip -->
    <input type="number" id="fMax1D" style="display:none">
    <div class="fg"><span class="fg-lbl">Min Vol <span id="volAutoLabel" style="font-size:9px;color:var(--cyan)"></span></span><input type="number" id="fVol" placeholder="auto" min="0" style="width:110px;padding:8px 10px;background:var(--bg-card);border:1px solid var(--border);border-radius:8px;color:var(--t1);font-family:'DM Mono',monospace;font-size:12px;outline:none;transition:border .2s" onfocus="this.style.borderColor='var(--cyan)'" onblur="this.style.borderColor='var(--border)'" oninput="onVolChange()"></div>
-   <div class="fg"><span class="fg-lbl" style="font-size:8px">Vol ×</span><input type="number" id="fVolMult" value="5000" placeholder="5000" min="10" max="9999" step="10" style="width:65px;padding:8px 6px;background:var(--bg-card);border:1px solid var(--border);border-radius:8px;color:var(--t1);font-family:'DM Mono',monospace;font-size:11px;outline:none" oninput="VOL_AUTO=true;setAutoVolume();applyFilters()" title="Volume multiplier: minutes since open × this. Default 5000 (matches liquidity floor)."></div>
+   <div class="fg"><span class="fg-lbl" style="font-size:8px">Vol ×</span><input type="number" id="fVolMult" placeholder="auto" min="10" max="99999" step="10" style="width:65px;padding:8px 6px;background:var(--bg-card);border:1px solid var(--border);border-radius:8px;color:var(--t1);font-family:'DM Mono',monospace;font-size:11px;outline:none" oninput="VOL_AUTO=true;setAutoVolume();applyFilters()" title="Volume multiplier: minutes since open × this. Tracks Min Volume from hard filters."></div>
    <div class="fg"><span class="fg-lbl" style="color:var(--amber)">Capital ₹</span><input type="number" id="fCapital" placeholder="e.g. 100000" min="0" step="1000" style="width:110px;padding:8px 10px;background:var(--bg-card);border:1px solid var(--border);border-radius:8px;color:var(--t1);font-family:'DM Mono',monospace;font-size:12px;outline:none;transition:border .2s" onfocus="this.style.borderColor='var(--amber)'" onblur="this.style.borderColor='var(--border)'" oninput="applyFilters()"></div>
    <div class="fg"><span class="fg-lbl" style="color:var(--amber)">Max Alloc ₹</span><input type="number" id="fMaxAlloc" placeholder="e.g. 20000" min="0" step="1000" style="width:110px;padding:8px 10px;background:var(--bg-card);border:1px solid var(--border);border-radius:8px;color:var(--t1);font-family:'DM Mono',monospace;font-size:12px;outline:none;transition:border .2s" onfocus="this.style.borderColor='var(--amber)'" onblur="this.style.borderColor='var(--border)'" oninput="applyFilters()" title="Per-stock cap for allocation. Empty = no cap."></div>
    <div class="fg"><span class="fg-lbl" style="color:var(--purple)">Avg-dn %</span><input type="number" id="fReDrop" value="1" placeholder="1" min="0" step="0.5" style="width:72px;padding:8px 10px;background:var(--bg-card);border:1px solid var(--border);border-radius:8px;color:var(--t1);font-family:'DM Mono',monospace;font-size:12px;outline:none;transition:border .2s" onfocus="this.style.borderColor='var(--purple)'" onblur="this.style.borderColor='var(--border)'" oninput="applyFilters()" title="Stock must have fallen at least this % below your avg buy to appear as a top-up candidate. Shorts and zero-qty always suppressed."></div>
@@ -338,7 +338,7 @@ table.main tbody td{padding:9px 11px;font-family:'DM Mono',monospace;font-size:1
 
 
 <script>
-const BUILD_TS='2026-05-06 15:04 IST'; // replaced at commit time with IST datetime
+const BUILD_TS='2026-05-06 15:12 IST'; // replaced at commit time with IST datetime
 let ALL=[],FILT=[],PG=1,PGSZ=9999,SCOL='rocketScore',SDIR=-1;
 let _tvLoadedThisSession=false; // true once a TV CSV has been processed this session
 let _scanSavedDate=null; // date string (YYYY-MM-DD) of the brain-restored scan, set on init
@@ -769,7 +769,7 @@ function getSessionDate(){
 
 // ── Auto Volume: minutes since day-start × configurable multiplier ──
 function calcAutoVolume(){
-  const mult=parseFloat(document.getElementById('fVolMult')?.value)||5000;
+  const mult=parseFloat(document.getElementById('fVolMult')?.value)||CORE_FILTERS.liq.minVol;
   const {mins}=istNow();
   const minsFromOpen=mins-DAY_START_MIN;
   if(minsFromOpen<=0) return mult;
@@ -4656,7 +4656,7 @@ function saveFilterState(){
     priceMin:document.getElementById('fPriceMin')?.value||'',
     priceMax:document.getElementById('fPriceMax')?.value||'',
     fvol:VOL_AUTO?'':document.getElementById('fVol')?.value||'',
-    volMult:document.getElementById('fVolMult')?.value||'5000',
+    volMult:document.getElementById('fVolMult')?.value||String(CORE_FILTERS.liq.minVol),
     fMin1D:document.getElementById('fMin1D')?.value||'',
     fMax1D:document.getElementById('fMax1D')?.value||'',
     capital:document.getElementById('fCapital')?.value||'',
@@ -4796,6 +4796,7 @@ initNSELinks();
 </script>
 </body>
 </html>
+
 
 
 
