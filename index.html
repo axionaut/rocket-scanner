@@ -338,7 +338,7 @@ table.main tbody td{padding:9px 11px;font-family:'DM Mono',monospace;font-size:1
 
 
 <script>
-const BUILD_TS='2026-05-06 08:28 IST'; // replaced at commit time with IST datetime
+const BUILD_TS='2026-05-06 08:33 IST'; // replaced at commit time with IST datetime
 let ALL=[],FILT=[],PG=1,PGSZ=9999,SCOL='rocketScore',SDIR=-1;
 let _tvLoadedThisSession=false; // true once a TV CSV has been processed this session
 let _scanSavedDate=null; // date string (YYYY-MM-DD) of the brain-restored scan, set on init
@@ -1823,25 +1823,23 @@ function computeMissedOpp(){
   const session=getLatestOrderSession();
   const sells=(session?.orders||[]).filter(o=>o.type==='SELL');
   if(!sells.length) return;
-  // Day high from current ALL scan (TV CSV must be loaded)
   const highMap={};
   ALL.forEach(s=>{if(s.high1d!=null) highMap[s.symbol]=s.high1d;});
   if(!Object.keys(highMap).length) return;
   const dayDate=session?.date||getSessionDate();
-  const dayMissed=[];
-  // Group by symbol, take best (highest) sell price — most conservative missed% estimate
   const bestSell={};
-  sells.forEach(o=>{
-    if(o.price>0) bestSell[o.symbol]=Math.max(bestSell[o.symbol]||0,o.price);
-  });
+  sells.forEach(o=>{if(o.price>0) bestSell[o.symbol]=Math.max(bestSell[o.symbol]||0,o.price);});
+  const missedVals=[];
   Object.entries(bestSell).forEach(([sym,sellPx])=>{
     const h=highMap[sym];
     if(h==null) return;
-    const missed=Math.max(0,(h-sellPx)/sellPx*100); // 0 if sold at or above high
-    dayMissed.push({sym,missed:+missed.toFixed(2)});
+    missedVals.push(Math.max(0,(h-sellPx)/sellPx*100));
   });
-  if(!dayMissed.length) return;
-  FS.set(MISSED_OPP_STORE,{[dayDate]:dayMissed});
+  if(!missedVals.length) return;
+  const avgMissed=+(missedVals.reduce((s,v)=>s+v,0)/missedVals.length).toFixed(2);
+  const acc=FS.get(MISSED_OPP_STORE)||{};
+  acc[dayDate]=avgMissed;
+  FS.set(MISSED_OPP_STORE,acc);
 }
 
 function renderStats(){
@@ -1948,12 +1946,11 @@ function renderStats(){
     const moStore=FS.get(MISSED_OPP_STORE);
     if(moStore){
       const moDates=Object.keys(moStore).length;
-      const moAll=Object.values(moStore).flat();
-      const moCount=moAll.length;
-      if(moCount>0){
-        const moAvg=moAll.reduce((s,m)=>s+m.missed,0)/moCount;
+      const moVals=Object.values(moStore).filter(v=>typeof v==='number'&&isFinite(v));
+      if(moVals.length>0){
+        const moAvg=moVals.reduce((s,v)=>s+v,0)/moVals.length;
         const moNudge=+(moAvg*0.25).toFixed(2);
-        infoPills.push(`<span class="info-pill pill-amber" title="Across ${moDates} sell date(s): all sold symbols, including perfect exits (0% missed). Nudge = 25% of avg missed gain — added to effective TGT in allocation and basket export.">🎯 ${moCount} missed opportunit${moCount===1?'y':'ies'} · avg +${moAvg.toFixed(2)}% left · TGT nudged +${moNudge.toFixed(2)}%</span>`);
+        infoPills.push(`<span class="info-pill pill-amber" title="Across ${moDates} sell date(s): avg missed gain per day (all sold symbols, including perfect exits). Nudge = 25% of avg — added to effective TGT in allocation and basket export.">🎯 ${moDates} sell date${moDates===1?'':'s'} · avg +${moAvg.toFixed(2)}% left · TGT nudged +${moNudge.toFixed(2)}%</span>`);
       }
     }
   }catch(e){}
@@ -3143,9 +3140,9 @@ function getMissedOppNudge(){
   try{
     const store=FS.get(MISSED_OPP_STORE);
     if(!store) return 0;
-    const all=Object.values(store).flat();
-    if(!all.length) return 0;
-    const avg=all.reduce((s,m)=>s+m.missed,0)/all.length;
+    const vals=Object.values(store).filter(v=>typeof v==='number'&&isFinite(v));
+    if(!vals.length) return 0;
+    const avg=vals.reduce((s,v)=>s+v,0)/vals.length;
     return +(avg*0.25).toFixed(2);
   }catch(e){return 0;}
 }
@@ -4798,6 +4795,7 @@ initNSELinks();
 </script>
 </body>
 </html>
+
 
 
 
