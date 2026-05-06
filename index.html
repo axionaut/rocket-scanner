@@ -338,7 +338,7 @@ table.main tbody td{padding:9px 11px;font-family:'DM Mono',monospace;font-size:1
 
 
 <script>
-const BUILD_TS='2026-05-06 07:56 IST'; // replaced at commit time with IST datetime
+const BUILD_TS='2026-05-06 08:02 IST'; // replaced at commit time with IST datetime
 let ALL=[],FILT=[],PG=1,PGSZ=9999,SCOL='rocketScore',SDIR=-1;
 let _tvLoadedThisSession=false; // true once a TV CSV has been processed this session
 let _scanSavedDate=null; // date string (YYYY-MM-DD) of the brain-restored scan, set on init
@@ -1698,10 +1698,9 @@ function getHoldingAvgCost(symbol){
   // 3. Positions.csv (T+1 unsettled — one day lag acceptable)
   const prow=POSITIONS?.find(p=>p.symbol===symbol&&p.avg!=null);
   if(prow?.avg!=null) return prow.avg;
-  // 4. Tradebook FIFO open legs (one day late but covers older positions)
-  const tbAvg=TRADEBOOK_STATS?.openAvgCostMap?.[symbol];
-  if(tbAvg!=null) return tbAvg;
   return null;
+  // Note: openAvgCostMap intentionally excluded here — it's for open position display
+  // only, not for sell P&L calculation (tradebook is one day late so sells appear open)
 }
 
 // Module-level helper: normalise Zerodha order timestamp to YYYY-MM-DD
@@ -1794,13 +1793,22 @@ function computeLatestOrderBooked(){
 }
 
 function getLatestBookedSummary(){
-  // Priority 1: Orders.csv computed P&L (has actual sell rows)
   const orderBooked=computeLatestOrderBooked();
+  const tbLoaded=TRADEBOOK_STATS?._loadedThisSession&&TRADEBOOK_STATS?.lastDayRows?.length;
+
+  // If both available, pick whichever has the more recent date
+  if(orderBooked&&tbLoaded){
+    const ordDate=orderBooked.date||'';
+    const tbDate=TRADEBOOK_STATS.lastDate||'';
+    if(tbDate>ordDate){
+      // Tradebook has a newer session (e.g. GTT triggered day after Orders.csv)
+      const rows=TRADEBOOK_STATS.lastDayRows.map(r=>({...r,_sort:r.netPnl}));
+      return {source:'Tradebook',date:tbDate,total:+rows.reduce((s,r)=>s+r.netPnl,0).toFixed(0),rows};
+    }
+    return orderBooked;
+  }
   if(orderBooked) return orderBooked;
-  // Priority 2: Tradebook last-day rows — but only show if tradebook was uploaded
-  // this session (TRADEBOOK_STATS exists with a valid lastDate). Never show stale
-  // brain-cached tradebook as "today's P&L" — it could be from any prior day.
-  if(TRADEBOOK_STATS?._loadedThisSession&&TRADEBOOK_STATS?.lastDayRows?.length){
+  if(tbLoaded){
     const rows=TRADEBOOK_STATS.lastDayRows.map(r=>({...r,_sort:r.netPnl}));
     return {source:'Tradebook',date:TRADEBOOK_STATS.lastDate||'',total:+rows.reduce((s,r)=>s+r.netPnl,0).toFixed(0),rows};
   }
@@ -4787,6 +4795,7 @@ initNSELinks();
 </script>
 </body>
 </html>
+
 
 
 
