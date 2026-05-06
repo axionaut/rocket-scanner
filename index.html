@@ -338,7 +338,7 @@ table.main tbody td{padding:9px 11px;font-family:'DM Mono',monospace;font-size:1
 
 
 <script>
-const BUILD_TS='2026-05-06 08:09 IST'; // replaced at commit time with IST datetime
+const BUILD_TS='2026-05-06 08:10 IST'; // replaced at commit time with IST datetime
 let ALL=[],FILT=[],PG=1,PGSZ=9999,SCOL='rocketScore',SDIR=-1;
 let _tvLoadedThisSession=false; // true once a TV CSV has been processed this session
 let _scanSavedDate=null; // date string (YYYY-MM-DD) of the brain-restored scan, set on init
@@ -346,6 +346,7 @@ let SCORE_MAP={}; // {symbol → rocketScore} for ALL parsed stocks including fi
 let PERF_REGIME_FILTER='all'; // 'all' | 'bull' | 'bear' | 'neutral'
 let PERF_PERIOD_FILTER='all'; // 'all' | '1m' | '3m' | '6m' | '1y'
 let PERF_TRADE_WINDOWS=[]; // cached trade window rows from renderPerformance — used by current-window pill
+let PERF_LATEST_SUMMARY=null; // cached latest session summary from renderPerformance — used by renderStats card
 let ENGINE_DATA={};
 let REMOVED={uc:0,surv:0,survRules:{},liq:0,fscore:0,deliv:0,fade:0};
 let SUPPRESSED_HELD=0; // count of stocks hidden because already held in POSITIONS
@@ -1876,7 +1877,7 @@ function renderStats(){
   });
 
   let bookedCard='';
-  const booked=getLatestBookedSummary();
+  const booked=PERF_LATEST_SUMMARY;
   if(booked){
     const sessionToday=getSessionDate();
     const isToday=booked.date===sessionToday;
@@ -2253,6 +2254,7 @@ function renderPerformance(){
   // Latest Session — pick whichever source (Orders.csv or Tradebook) has the newer date.
   let todayHtml='';
   const _latestSummary=getLatestBookedSummary();
+  PERF_LATEST_SUMMARY=_latestSummary; // cache for renderStats card — single source of truth
   const orderBooked=_latestSummary?.source==='Orders.csv'?_latestSummary:null;
   if(orderBooked){
     const latestRows=orderBooked.rows;
@@ -4795,6 +4797,7 @@ initNSELinks();
 </script>
 </body>
 </html>
+
 
 
 
