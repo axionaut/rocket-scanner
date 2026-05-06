@@ -338,7 +338,7 @@ table.main tbody td{padding:9px 11px;font-family:'DM Mono',monospace;font-size:1
 
 
 <script>
-const BUILD_TS='2026-05-06 08:02 IST'; // replaced at commit time with IST datetime
+const BUILD_TS='2026-05-06 08:09 IST'; // replaced at commit time with IST datetime
 let ALL=[],FILT=[],PG=1,PGSZ=9999,SCOL='rocketScore',SDIR=-1;
 let _tvLoadedThisSession=false; // true once a TV CSV has been processed this session
 let _scanSavedDate=null; // date string (YYYY-MM-DD) of the brain-restored scan, set on init
@@ -2250,9 +2250,10 @@ function renderPerformance(){
   const tradeWindowTbl=makeSortableTable('tbl-trade-windows',tradeWindowCols,tradeWindowRows,'hour',1,row=>row.hour===_twBucket?'background:rgba(99,102,241,.12);outline:1px solid rgba(99,102,241,.3);outline-offset:-1px':'');
   const hasTradeWindows=tradeWindowRows.length>0;
 
-  // Latest Session — Orders.csv wins when present; tradebook is fallback only.
+  // Latest Session — pick whichever source (Orders.csv or Tradebook) has the newer date.
   let todayHtml='';
-  const orderBooked=computeLatestOrderBooked();
+  const _latestSummary=getLatestBookedSummary();
+  const orderBooked=_latestSummary?.source==='Orders.csv'?_latestSummary:null;
   if(orderBooked){
     const latestRows=orderBooked.rows;
     const latestDate=orderBooked.date||getSessionDate();
@@ -2309,10 +2310,9 @@ function renderPerformance(){
         _lt.appendChild(tfoot);
       }
     },0);
-  } else if(TRADEBOOK_STATS?.lastDayRows?.length){
-    // Fallback: use last trading day from tradebook (charges already computed)
-    const tbRows=TRADEBOOK_STATS.lastDayRows.map(r=>({...r,_sort:r.netPnl}));
-    const tbDate=TRADEBOOK_STATS.lastDate||'';
+  } else if(_latestSummary?.source==='Tradebook'){
+    const tbRows=_latestSummary.rows.map(r=>({...r,_sort:r.netPnl}));
+    const tbDate=_latestSummary.date||'';
     const tbTotal=+(tbRows.reduce((s,r)=>s+r.netPnl,0)).toFixed(0);
     const tbCols=[
       {key:'sym',label:'Symbol',align:'left',fmt:v=>`<span style="font-weight:700;font-size:12px">${escHtml(v)}</span>`},
@@ -4795,6 +4795,7 @@ initNSELinks();
 </script>
 </body>
 </html>
+
 
 
 
