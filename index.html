@@ -338,7 +338,7 @@ table.main tbody td{padding:9px 11px;font-family:'DM Mono',monospace;font-size:1
 
 
 <script>
-const BUILD_TS='2026-05-06 08:17 IST'; // replaced at commit time with IST datetime
+const BUILD_TS='2026-05-06 08:20 IST'; // replaced at commit time with IST datetime
 let ALL=[],FILT=[],PG=1,PGSZ=9999,SCOL='rocketScore',SDIR=-1;
 let _tvLoadedThisSession=false; // true once a TV CSV has been processed this session
 let _scanSavedDate=null; // date string (YYYY-MM-DD) of the brain-restored scan, set on init
@@ -952,6 +952,8 @@ function loadCoreFilters(){
       });
     }
   }catch(e){}
+  // Sync Vol × multiplier to match the liquidity floor min volume
+  const el=document.getElementById('fVolMult');if(el)el.value=CORE_FILTERS.liq.minVol;
 }
 function syncSurvRuleRows(savedRows){
   const byKey={};
@@ -2567,6 +2569,7 @@ function _saveCoreFilterField(id, val){
   if(field==='enabled') CORE_FILTERS[group][field]=!!val;
   else CORE_FILTERS[group][field]=+parseFloat(val)||0;
   saveCoreFilters();
+  if(id==='cf_liq_vol'){const el=document.getElementById('fVolMult');if(el)el.value=CORE_FILTERS.liq.minVol;VOL_AUTO=true;setAutoVolume();}
   showToast('Core filter updated — takes effect on next TV CSV upload.',2500);
 }
 function _refreshHFSection(){
@@ -4797,6 +4800,7 @@ initNSELinks();
 </script>
 </body>
 </html>
+
 
 
 
