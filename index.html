@@ -316,8 +316,7 @@ table.main tbody td{padding:9px 11px;font-family:'DM Mono',monospace;font-size:1
    <div class="fg"><span class="fg-lbl" style="color:var(--amber)">Max Alloc ₹</span><input type="number" id="fMaxAlloc" placeholder="e.g. 20000" min="0" step="1000" style="width:110px;padding:8px 10px;background:var(--bg-card);border:1px solid var(--border);border-radius:8px;color:var(--t1);font-family:'DM Mono',monospace;font-size:12px;outline:none;transition:border .2s" onfocus="this.style.borderColor='var(--amber)'" onblur="this.style.borderColor='var(--border)'" oninput="applyFilters()" title="Per-stock cap for allocation. Empty = no cap."></div>
    <div class="fg"><span class="fg-lbl" style="color:var(--purple)">Avg-dn %</span><input type="number" id="fReDrop" value="1" placeholder="1" min="0" step="0.5" style="width:72px;padding:8px 10px;background:var(--bg-card);border:1px solid var(--border);border-radius:8px;color:var(--t1);font-family:'DM Mono',monospace;font-size:12px;outline:none;transition:border .2s" onfocus="this.style.borderColor='var(--purple)'" onblur="this.style.borderColor='var(--border)'" oninput="applyFilters()" title="Stock must have fallen at least this % below your avg buy to appear as a top-up candidate. Shorts and zero-qty always suppressed."></div>
    <div class="fg"><span class="fg-lbl" style="color:var(--fire)">Top-up %</span><input type="number" id="fTopupAlloc" value="50" placeholder="50" min="10" max="100" step="10" style="width:72px;padding:8px 10px;background:var(--bg-card);border:1px solid var(--border);border-radius:8px;color:var(--t1);font-family:'DM Mono',monospace;font-size:12px;outline:none;transition:border .2s" onfocus="this.style.borderColor='var(--fire)'" onblur="this.style.borderColor='var(--border)'" oninput="applyFilters()" title="Allocation % for top-up candidates vs a fresh buy. 50 means top-up gets half the normal score-weighted allocation. Default 50%."></div>
-   <div class="fg"><span class="fg-lbl" style="color:var(--orange)">Top % <span id="rocketCeilLbl" style="font-size:9px;color:var(--cyan);font-weight:400"></span></span><input type="number" id="fRocketTopPct" value="10" placeholder="10" min="0.5" max="50" step="0.5" style="width:72px;padding:8px 10px;background:var(--bg-card);border:1px solid var(--border);border-radius:8px;color:var(--t1);font-family:'DM Mono',monospace;font-size:12px;outline:none;transition:border .2s" onfocus="this.style.borderColor='var(--orange)'" onblur="this.style.borderColor='var(--border)'" oninput="onRocketPctChange()" title="Top X% of post-filter stocks by 1D gain qualify as Rockets for engine learning. Max 1D ceiling auto-derives from resolved threshold − Buffer."></div>
-   <div class="fg"><span class="fg-lbl" style="font-size:8px">1D Buf %</span><input type="number" id="fRocketBuffer" value="1" placeholder="1" min="0" max="5" step="0.5" style="width:60px;padding:8px 6px;background:var(--bg-card);border:1px solid var(--border);border-radius:8px;color:var(--t1);font-family:'DM Mono',monospace;font-size:11px;outline:none" oninput="onRocketPctChange()" title="Buffer below resolved Rocket threshold. Max 1D ceiling = resolved threshold − this. Default 1%."></div>
+   <div class="fg"><span class="fg-lbl" style="color:var(--orange)">Top % <span id="rocketCeilLbl" style="font-size:9px;color:var(--cyan);font-weight:400"></span></span><input type="number" id="fRocketTopPct" value="10" placeholder="10" min="0.5" max="50" step="0.5" style="width:72px;padding:8px 10px;background:var(--bg-card);border:1px solid var(--border);border-radius:8px;color:var(--t1);font-family:'DM Mono',monospace;font-size:12px;outline:none;transition:border .2s" onfocus="this.style.borderColor='var(--orange)'" onblur="this.style.borderColor='var(--border)'" oninput="onRocketPctChange()" title="Top X% of post-filter stocks by 1D gain qualify as Rockets. Max 1D ceiling = resolved threshold − adaptiveTGT (stocks within one TGT of rocket territory are excluded)."></div>
    <button class="btn" id="fBuyZoneBtn" onclick="toggleBuyZoneFilter()" title="Show only stocks where price ≤ VWAP+0.5×ATR (prime entry zone)" style="font-weight:700;white-space:nowrap">● Buy Zone</button>
    <button class="btn" id="basketBtn" onclick="exportBasket()" disabled style="background:rgba(251,191,36,.12);border-color:rgba(251,191,36,.3);color:var(--amber);font-weight:700" title="Export selected stocks as Zerodha basket order">🧺 Buy Basket <span id="basketCount"></span></button>
    <button class="btn" id="gttValuesBtn" onclick="showGttPopup()" style="background:rgba(59,130,246,.12);border-color:rgba(59,130,246,.3);color:var(--blue);font-weight:700" title="GTT values for all holdings and positions">📋 GTT Values <span id="gttCount"></span></button>
@@ -338,7 +337,7 @@ table.main tbody td{padding:9px 11px;font-family:'DM Mono',monospace;font-size:1
 
 
 <script>
-const BUILD_TS='2026-05-07 10:25 IST'; // replaced at commit time with IST datetime
+const BUILD_TS='2026-05-07 10:43 IST'; // replaced at commit time with IST datetime
 let ALL=[],FILT=[],PG=1,PGSZ=9999,SCOL='rocketScore',SDIR=-1;
 let _tvLoadedThisSession=false; // true once a TV CSV has been processed this session
 let _scanSavedDate=null; // date string (YYYY-MM-DD) of the brain-restored scan, set on init
@@ -815,15 +814,13 @@ function onVolChange(){
   applyFilters();
 }
 
-// ── Resolved rocket threshold drives Max 1D ceiling = resolvedThreshold − 1D Buffer.
-// Called by engine after resolving the dynamic percentile threshold, and by buffer input change.
-// resolvedThreshold: the actual % cutoff the engine computed this run (optional — uses ENGINE_DATA if omitted).
+// ── Rocket ceiling = resolvedThreshold − adaptiveTGT.
+// Hides stocks already within one TGT% of rocket territory — remaining upside not worth the risk.
+// Falls back to 1% buffer if no tradebook loaded. Recomputes from ALL if no threshold passed.
 function onRocketPctChange(resolvedThreshold){
-  const bufEl=document.getElementById('fRocketBuffer');
   const maxEl=document.getElementById('fMax1D');
   const lbl=document.getElementById('rocketCeilLbl');
   if(!maxEl) return;
-  // If no resolved threshold passed, recompute from ALL using current Top % input
   let rkt=resolvedThreshold!=null?resolvedThreshold:null;
   if(rkt==null&&ALL?.length){
     const _topPct=parseFloat(document.getElementById('fRocketTopPct')?.value)||10;
@@ -832,10 +829,9 @@ function onRocketPctChange(resolvedThreshold){
     rkt=_pcVals.length>0?+(_pcVals[_idx]||0).toFixed(2):null;
   }
   if(rkt==null) rkt=ENGINE_DATA?.rocketThreshold||null;
-  const buf=parseFloat(bufEl?.value);
+  const tgt=getEffectiveTgtPct()||(TRADEBOOK_STATS?.adaptiveTGT)||1;
   if(rkt!=null&&isFinite(rkt)&&rkt>0){
-    const bufVal=isFinite(buf)&&buf>=0?buf:1;
-    const ceil=Math.max(0, +(rkt-bufVal).toFixed(2));
+    const ceil=Math.max(0,+(rkt-tgt).toFixed(2));
     maxEl.value=ceil;
     if(lbl) lbl.textContent='≤'+ceil+'%';
   } else {
@@ -3619,7 +3615,6 @@ function clearFilters(){
   const topupEl=document.getElementById('fTopupAlloc');if(topupEl)topupEl.value='50';
   const minScoreEl=document.getElementById('fMinScore');if(minScoreEl)minScoreEl.value='70';
   const rktEl=document.getElementById('fRocketTopPct');if(rktEl)rktEl.value='10';
-  const bufEl=document.getElementById('fRocketBuffer');if(bufEl)bufEl.value='1';
   onRocketPctChange();
   VOL_AUTO=true;setAutoVolume();
   FILTER_BUY_ZONE=false;const _bzBtn=document.getElementById('fBuyZoneBtn');if(_bzBtn){_bzBtn.style.background='';_bzBtn.style.borderColor='';_bzBtn.style.color='';}
@@ -4671,7 +4666,6 @@ function saveFilterState(){
     capital:document.getElementById('fCapital')?.value||'',
     maxAlloc:document.getElementById('fMaxAlloc')?.value||'',
     rocketTopPct:document.getElementById('fRocketTopPct')?.value||'10',
-    rocketBuffer:document.getElementById('fRocketBuffer')?.value||'1',
     reDrop:document.getElementById('fReDrop')?.value||'1',
     topupAlloc:document.getElementById('fTopupAlloc')?.value||'50',
     sortCol:SCOL,
@@ -4692,7 +4686,6 @@ function loadFilterState(){
     if(state.capital){const el=document.getElementById('fCapital');if(el)el.value=state.capital;}
     if(state.maxAlloc){const el=document.getElementById('fMaxAlloc');if(el)el.value=state.maxAlloc;}
     if(state.rocketTopPct){const el=document.getElementById('fRocketTopPct');if(el)el.value=state.rocketTopPct;}
-    if(state.rocketBuffer!=null){const el=document.getElementById('fRocketBuffer');if(el)el.value=state.rocketBuffer;}
     onRocketPctChange(); // restore Max 1D ceiling from last known resolved threshold
     if(state.reDrop!=null){const el=document.getElementById('fReDrop');if(el)el.value=state.reDrop;}
     if(state.topupAlloc!=null){const el=document.getElementById('fTopupAlloc');if(el)el.value=state.topupAlloc;}
@@ -4803,6 +4796,7 @@ initNSELinks();
 </script>
 </body>
 </html>
+
 
 
 
