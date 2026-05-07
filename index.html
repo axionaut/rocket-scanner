@@ -335,7 +335,7 @@ table.main tbody td{padding:9px 11px;font-family:'DM Mono',monospace;font-size:1
 
 
 <script>
-const BUILD_TS='2026-05-07 15:00 IST'; // replaced at commit time with IST datetime
+const BUILD_TS='2026-05-07 15:08 IST'; // replaced at commit time with IST datetime
 let ALL=[],FILT=[],PG=1,PGSZ=9999,SCOL='rocketScore',SDIR=-1;
 let _tvLoadedThisSession=false; // true once a TV CSV has been processed this session
 let _scanSavedDate=null; // date string (YYYY-MM-DD) of the brain-restored scan, set on init
@@ -4111,7 +4111,8 @@ function _showGttPopupInner(){
     // Days held: today's Orders.csv BUY date → tradebook last buy date
     const _gttLatestDate=ORDERS_TODAY?.length?getLatestOrderSession()?.date:null;
     const todayBuy=(_gttLatestDate&&ORDERS_TODAY?._loadedThisSession)?ORDERS_TODAY.find(o=>o.symbol===sym&&o.type==='buy'&&normOrderDate(o.time)===_gttLatestDate):null;
-    const buyDateStr=todayBuy?_gttLatestDate:LAST_BUY_DATE_MAP[sym]||null;
+    const _gttInPositions=POSITIONS?.find(p=>p.symbol===sym&&p.qty>0&&!p.isSell);
+    const buyDateStr=todayBuy?_gttLatestDate:_gttInPositions?getSessionDate():LAST_BUY_DATE_MAP[sym]||null;
     const daysHeld=buyDateStr?Math.round((Date.now()-new Date(buyDateStr).getTime())/86400000):null;
     const tgtPrice=avg?tickPrice(avg*(1+adaptiveTGT/100)):null;
     const slPrice=avg?tickPrice(avg*(1-adaptiveSL/100)):null;
@@ -4765,6 +4766,7 @@ initNSELinks();
 </script>
 </body>
 </html>
+
 
 
 
