@@ -335,7 +335,7 @@ table.main tbody td{padding:9px 11px;font-family:'DM Mono',monospace;font-size:1
 
 
 <script>
-const BUILD_TS='2026-05-07 12:29 IST'; // replaced at commit time with IST datetime
+const BUILD_TS='2026-05-07 15:00 IST'; // replaced at commit time with IST datetime
 let ALL=[],FILT=[],PG=1,PGSZ=9999,SCOL='rocketScore',SDIR=-1;
 let _tvLoadedThisSession=false; // true once a TV CSV has been processed this session
 let _scanSavedDate=null; // date string (YYYY-MM-DD) of the brain-restored scan, set on init
@@ -3433,10 +3433,12 @@ function applyFilters(){
   const fPriceMin=parseFloat(document.getElementById('fPriceMin')?.value)||0;
   const fPriceMax=parseFloat(document.getElementById('fPriceMax')?.value)||0;
 
+  const _ceiling=ENGINE_DATA?.rocketThreshold||null;
   FILT=ALL.filter(x=>{
     if(minScore>0&&x.rocketScore<minScore) return false;
     if(fvol>0){if((x.volume||0)<fvol)return false;}
     if(fMin1D>-Infinity){if(x.priceChange===null||x.priceChange<fMin1D)return false;}
+    if(_ceiling!=null&&x.priceChange!=null&&x.priceChange>=_ceiling) return false;
     if(fPriceMin>0&&(x.price||0)<fPriceMin)return false;
     if(FILTER_BUY_ZONE&&!isBuyZone(x)) return false;
     if(fPriceMax>0&&(x.price||0)>fPriceMax)return false;
@@ -3540,6 +3542,8 @@ function renderStatusBar(){
   if(minScore2>0)tags.push('Score≥'+minScore2);
   if(fscore>0)tags.push('F≥'+fscore);
   if(fMin1D>-Infinity)tags.push('1D≥'+fMin1D+'%');
+  const _sbCeiling=ENGINE_DATA?.rocketThreshold||null;
+  if(_sbCeiling!=null)tags.push('1D<'+_sbCeiling+'%');
   if(fvol2>0){const n=fvol2;tags.push('Vol≥'+(n>=1e6?(n/1e6).toFixed(1)+'M':n>=1e3?(n/1e3).toFixed(0)+'K':n));}
   const capital=parseFloat(document.getElementById('fCapital').value)||0;
   const isFiltered=tags.length>0||shown<total;
@@ -4761,6 +4765,7 @@ initNSELinks();
 </script>
 </body>
 </html>
+
 
 
 
