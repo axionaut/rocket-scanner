@@ -315,7 +315,6 @@ table.main tbody td{padding:9px 11px;font-family:'DM Mono',monospace;font-size:1
    <div class="fg"><span class="fg-lbl" style="color:var(--purple)">Avg-dn %</span><input type="number" id="fReDrop" value="1" placeholder="1" min="0" step="0.5" style="width:72px;padding:8px 10px;background:var(--bg-card);border:1px solid var(--border);border-radius:8px;color:var(--t1);font-family:'DM Mono',monospace;font-size:12px;outline:none;transition:border .2s" onfocus="this.style.borderColor='var(--purple)'" onblur="this.style.borderColor='var(--border)'" oninput="applyFilters()" title="Stock must have fallen at least this % below your avg buy to appear as a top-up candidate. Shorts and zero-qty always suppressed."></div>
    <div class="fg"><span class="fg-lbl" style="color:var(--fire)">Top-up %</span><input type="number" id="fTopupAlloc" value="50" placeholder="50" min="10" max="100" step="10" style="width:72px;padding:8px 10px;background:var(--bg-card);border:1px solid var(--border);border-radius:8px;color:var(--t1);font-family:'DM Mono',monospace;font-size:12px;outline:none;transition:border .2s" onfocus="this.style.borderColor='var(--fire)'" onblur="this.style.borderColor='var(--border)'" oninput="applyFilters()" title="Allocation % for top-up candidates vs a fresh buy. 50 means top-up gets half the normal score-weighted allocation. Default 50%."></div>
    <div class="fg"><span class="fg-lbl" style="color:var(--orange)">Top %</span><input type="number" id="fRocketTopPct" value="10" placeholder="10" min="0.5" max="50" step="0.5" style="width:72px;padding:8px 10px;background:var(--bg-card);border:1px solid var(--border);border-radius:8px;color:var(--t1);font-family:'DM Mono',monospace;font-size:12px;outline:none;transition:border .2s" onfocus="this.style.borderColor='var(--orange)'" onblur="this.style.borderColor='var(--border)'" oninput="saveFilterState();applyFilters()" title="Top X% of post-filter stocks by 1D gain qualify as Rockets for engine learning. Default 10%."></div>
-   <button class="btn" id="fBuyZoneBtn" onclick="toggleBuyZoneFilter()" title="Show only stocks where price ≤ VWAP+0.5×ATR (prime entry zone)" style="font-weight:700;white-space:nowrap">● Buy Zone</button>
    <button class="btn" id="basketBtn" onclick="exportBasket()" disabled style="background:rgba(251,191,36,.12);border-color:rgba(251,191,36,.3);color:var(--amber);font-weight:700" title="Export selected stocks as Zerodha basket order">🧺 Buy Basket <span id="basketCount"></span></button>
    <button class="btn" id="gttValuesBtn" onclick="showGttPopup()" style="background:rgba(59,130,246,.12);border-color:rgba(59,130,246,.3);color:var(--blue);font-weight:700" title="GTT values for all holdings and positions">📋 GTT Values <span id="gttCount"></span></button>
   </div>
@@ -335,7 +334,7 @@ table.main tbody td{padding:9px 11px;font-family:'DM Mono',monospace;font-size:1
 
 
 <script>
-const BUILD_TS='2026-05-07 15:08 IST'; // replaced at commit time with IST datetime
+const BUILD_TS='2026-05-07 15:12 IST'; // replaced at commit time with IST datetime
 let ALL=[],FILT=[],PG=1,PGSZ=9999,SCOL='rocketScore',SDIR=-1;
 let _tvLoadedThisSession=false; // true once a TV CSV has been processed this session
 let _scanSavedDate=null; // date string (YYYY-MM-DD) of the brain-restored scan, set on init
@@ -774,7 +773,7 @@ function calcAutoVolume(){
   return Math.round(minsFromOpen*mult);
 }
 let VOL_AUTO=true;
-let FILTER_BUY_ZONE=false; // when true, only stocks with price ≤ VWAP+0.5×ATR are shown
+const FILTER_BUY_ZONE=true; // always on — only stocks with price ≤ VWAP+0.5×ATR shown
 // Core hard-filter thresholds — user-configurable, stored in rs_core_filters localStorage
 let CORE_FILTERS={
   uc:{enabled:true,threshold:19.5},          // upper circuit %
@@ -3414,17 +3413,6 @@ function isBuyZone(s){
   const atrAbs=a>0?p*a/100:0;
   return p<=v+0.5*atrAbs;
 }
-function toggleBuyZoneFilter(){
-  FILTER_BUY_ZONE=!FILTER_BUY_ZONE;
-  const btn=document.getElementById('fBuyZoneBtn');
-  if(btn){
-    btn.style.background=FILTER_BUY_ZONE?'rgba(34,197,94,.18)':'';
-    btn.style.borderColor=FILTER_BUY_ZONE?'rgba(34,197,94,.5)':'';
-    btn.style.color=FILTER_BUY_ZONE?'var(--green)':'';
-  }
-  saveFilterState();
-  applyFilters();
-}
 function applyFilters(){
   const minScore=parseFloat(document.getElementById('fMinScore')?.value)||0;
   const fvol=parseFloat(document.getElementById('fVol')?.value)||0;
@@ -3588,7 +3576,6 @@ function clearFilters(){
   const minScoreEl=document.getElementById('fMinScore');if(minScoreEl)minScoreEl.value='70';
   const rktEl=document.getElementById('fRocketTopPct');if(rktEl)rktEl.value='10';
   VOL_AUTO=true;setAutoVolume();
-  FILTER_BUY_ZONE=false;const _bzBtn=document.getElementById('fBuyZoneBtn');if(_bzBtn){_bzBtn.style.background='';_bzBtn.style.borderColor='';_bzBtn.style.color='';}
   applyFilters();
   localStorage.removeItem(SCANNER_STORE);
 }
@@ -4642,7 +4629,6 @@ function saveFilterState(){
     topupAlloc:document.getElementById('fTopupAlloc')?.value||'50',
     sortCol:SCOL,
     sortDir:SDIR,
-    buyZone:FILTER_BUY_ZONE,
   };
   localStorage.setItem(SCANNER_STORE, JSON.stringify(state));
 }
@@ -4668,11 +4654,6 @@ function loadFilterState(){
     }
     if(state.sortCol)SCOL=state.sortCol;
     if(state.sortDir)SDIR=state.sortDir;
-    if(state.buyZone!=null){
-      FILTER_BUY_ZONE=!!state.buyZone;
-      const btn=document.getElementById('fBuyZoneBtn');
-      if(btn&&FILTER_BUY_ZONE){btn.style.background='rgba(34,197,94,.18)';btn.style.borderColor='rgba(34,197,94,.5)';btn.style.color='var(--green)';}
-    }
   }catch(e){console.warn('Could not load filter state',e);}
   
 }
@@ -4766,6 +4747,7 @@ initNSELinks();
 </script>
 </body>
 </html>
+
 
 
 
