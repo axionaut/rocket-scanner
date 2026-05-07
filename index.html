@@ -12,7 +12,7 @@
 *{margin:0;padding:0;box-sizing:border-box}
 body{font-family:'Plus Jakarta Sans',sans-serif;background:var(--bg);color:var(--t1);min-height:100vh}
 body::before{content:'';position:fixed;inset:0;background:radial-gradient(ellipse 70% 50% at 20% 0%,rgba(249,115,22,.04) 0%,transparent 60%),radial-gradient(ellipse 50% 40% at 80% 5%,rgba(59,130,246,.03) 0%,transparent 50%);pointer-events:none;z-index:0}
-.app{position:relative;z-index:1;max-width:1820px;margin:0 auto;padding:0 28px}
+.app{position:relative;z-index:1;padding:0 28px}
 .hdr{padding:24px 0 18px;border-bottom:1px solid var(--border);display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:14px;position:sticky;top:0;z-index:100;background:rgba(7,9,14,.94);backdrop-filter:blur(18px)}
 .brand{display:flex;align-items:center;gap:12px}
 .brand-ico{width:40px;height:40px;background:linear-gradient(135deg,var(--fire),var(--fire2));border-radius:10px;display:flex;align-items:center;justify-content:center;font-size:20px;box-shadow:0 0 20px rgba(249,115,22,.25);animation:pg 3s ease-in-out infinite}
@@ -334,7 +334,7 @@ table.main tbody td{padding:9px 11px;font-family:'DM Mono',monospace;font-size:1
 
 
 <script>
-const BUILD_TS='2026-05-07 15:12 IST'; // replaced at commit time with IST datetime
+const BUILD_TS='2026-05-07 16:46 IST'; // replaced at commit time with IST datetime
 let ALL=[],FILT=[],PG=1,PGSZ=9999,SCOL='rocketScore',SDIR=-1;
 let _tvLoadedThisSession=false; // true once a TV CSV has been processed this session
 let _scanSavedDate=null; // date string (YYYY-MM-DD) of the brain-restored scan, set on init
@@ -4747,6 +4747,7 @@ initNSELinks();
 </script>
 </body>
 </html>
+
 
 
 
