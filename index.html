@@ -348,7 +348,7 @@ table.main tbody td{padding:9px 11px;font-family:'DM Mono',monospace;font-size:1
 
 
 <script>
-const BUILD_TS='2026-05-18 11:46 IST'; // replaced at commit time with IST datetime
+const BUILD_TS='2026-05-18 12:16 IST'; // replaced at commit time with IST datetime
 const MODE_STORE='rs_market_mode';
 const USD_INR_STORE='rs_usd_inr';
 const HARD_FILTER_SCHEMA='null_blanks_pass_v1';
@@ -1973,7 +1973,7 @@ function renderStats(){
     const _tgt=(getEffectiveTgtPct()||TRADEBOOK_STATS.adaptiveTGT).toFixed(2);
     const rr=(parseFloat(_sl)>0?(parseFloat(_tgt)/parseFloat(_sl)):0).toFixed(2);
     const nudge=getMissedOppNudge();
-    const nudgeStr=nudge>0?` · <span style="color:var(--amber);font-size:10px" title="You leave an avg of ${(nudge/0.25).toFixed(2)}% on the table after sells — informative only, not applied to TGT">missed opp +${nudge.toFixed(2)}%</span>`:'';
+    const nudgeStr=nudge>0?` · <span style="color:var(--amber);font-size:10px" title="You leave an avg of ${(nudge/0.25).toFixed(2)}% on the table after sells. 25% of that is now added to TGT.">missed opp +${nudge.toFixed(2)}%</span>`:'';
     const _cp=TRADEBOOK_STATS.avgChargePct!=null?Math.abs(TRADEBOOK_STATS.avgChargePct):null;
     const costStr=(_cp!=null&&_cp>0)?` · <span style="color:var(--t2)" title="Avg total Zerodha charges as % of round-trip turnover (buy+sell value), across all tradebook trips">cost ~${_cp.toFixed(2)}%</span>`:'';
     return `<div class="st"><div class="st-l">SL / TGT</div><div class="st-v" style="font-size:17px"><span style="color:var(--red)">−${_sl}%</span><span style="color:var(--t3);font-size:13px"> / </span><span style="color:var(--green)">+${_tgt}%</span></div><div class="st-d">R:R ${rr}${costStr} · tradebook-derived${nudgeStr}</div></div>`;
@@ -2043,7 +2043,7 @@ function renderStats(){
         const moTotal=moEntries.reduce((s,e)=>s+e.count,0);
         const moAvg=moEntries.reduce((s,e)=>s+e.avg*e.count,0)/moTotal;
         const moNudge=+(moAvg*0.25).toFixed(2);
-        infoPills.push(`<span class="info-pill pill-amber" title="Across ${moDates} sell date(s), ${moTotal} stocks: stock-weighted avg missed gain (all sold symbols, including perfect exits). Informative only — not applied to TGT.">🎯 ${moDates} sell date${moDates===1?'':'s'} · avg +${moAvg.toFixed(2)}% left · nudge +${moNudge.toFixed(2)}% (info)</span>`);
+        infoPills.push(`<span class="info-pill pill-amber" title="Across ${moDates} sell date(s), ${moTotal} stocks: stock-weighted avg missed gain (all sold symbols, including perfect exits). 25% of this is added to effective TGT.">🎯 ${moDates} sell date${moDates===1?'':'s'} · avg +${moAvg.toFixed(2)}% left · TGT +${moNudge.toFixed(2)}%</span>`);
       }
     }
   }catch(e){}
@@ -3159,7 +3159,7 @@ function isBuyZone(s){
   return s.price<=maxEntry+0.01;
 }
 // ── Effective learnt TGT% (gross sell-price delta from buy) ──
-// Source of truth = TRADEBOOK_STATS.adaptiveTGT (75th percentile win from FIFO matching).
+// Tradebook TGT is the base; missed opportunity nudge is added when available.
 // Fallback when no tradebook = median of per-stock tgtPct in current FILT (ATR-derived).
 function getMissedOppNudge(){
   try{
@@ -3175,11 +3175,12 @@ function getMissedOppNudge(){
 
 function getEffectiveTgtPct(){
   const round05=v=>+(Math.round(v/0.05)*0.05).toFixed(2);
-  if(TRADEBOOK_STATS && TRADEBOOK_STATS.adaptiveTGT > 0) return round05(TRADEBOOK_STATS.adaptiveTGT);
+  const nudge=getMissedOppNudge();
+  if(TRADEBOOK_STATS && TRADEBOOK_STATS.adaptiveTGT > 0) return round05(TRADEBOOK_STATS.adaptiveTGT+nudge);
   const vals = (typeof FILT !== 'undefined' ? FILT : []).map(s => s.tgtPct).filter(v => v != null && isFinite(v) && v > 0);
   if(!vals.length) return null;
   vals.sort((a,b)=>a-b);
-  return round05(vals[Math.floor(vals.length/2)]);
+  return round05(vals[Math.floor(vals.length/2)]+nudge);
 }
 
 function computeAlloc(capital, selList){
@@ -3187,9 +3188,10 @@ function computeAlloc(capital, selList){
   const maxAllocEl=document.getElementById('fMaxAlloc');
   const maxAllocV=maxAllocEl?parseFloat(maxAllocEl.value)||0:0;
   const cap = maxAllocV>0?maxAllocV:capital; // per-stock cap if set
-  // Helper: compute expected net and charges for a given buy price + qty + adaptive TGT
+  // Helper: compute expected net and charges for a given buy price + qty + effective TGT
   function evalNet(s, buyP, qty){
-    const tgtPct=(s.tgtPct!=null&&isFinite(s.tgtPct))?s.tgtPct:null;
+    const effTgt=getEffectiveTgtPct();
+    const tgtPct=(effTgt!=null&&isFinite(effTgt))?effTgt:((s.tgtPct!=null&&isFinite(s.tgtPct))?s.tgtPct:null);
     if(tgtPct===null||tgtPct<=0) return {ok:true, skip:true}; // can't eval → pass through
     const sellP=buyP*(1+tgtPct/100);
     const buyChg=calcZerodhaCharges(buyP, qty, false);
@@ -3601,7 +3603,7 @@ function renderStatusBar(){
           totalNet+=a.expectedNet;
         }
       }
-      const tgtSrc=TRADEBOOK_STATS&&TRADEBOOK_STATS.adaptiveTGT?'tradebook':'ATR fallback';
+      const tgtSrc=TRADEBOOK_STATS&&TRADEBOOK_STATS.adaptiveTGT?'tradebook + missed opp':'ATR fallback + missed opp';
       const tip=`Sum of (qty × buy × ${tgtPct.toFixed(2)}% − Zerodha round-trip charges) across selected stocks. Source: ${tgtSrc}.`;
       const color=totalNet>=0?'var(--green)':'var(--red)';
       html+=` <span style="color:${color};font-size:11px;font-family:'DM Mono',monospace;font-weight:700;margin-left:8px" title="${tip}">· 🎯 ₹${Math.round(totalNet).toLocaleString('en-IN')} net @ ${tgtPct.toFixed(1)}%</span>`;
@@ -4828,8 +4830,6 @@ initNSELinks();
 </script>
 </body>
 </html>
-
-
 
 
 
