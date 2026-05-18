@@ -242,6 +242,10 @@ table.main tbody td{padding:9px 11px;font-family:'DM Mono',monospace;font-size:1
    <button class="mode-btn" id="modeStockBtn" onclick="switchMarketMode('stock')">Stocks</button>
    <button class="mode-btn" id="modeCryptoBtn" onclick="switchMarketMode('crypto')">Crypto</button>
   </div>
+  <div class="fg" id="fxBox" style="display:none;margin:0" title="Crypto CSV is USD-denominated. Values are converted to INR using this rate.">
+   <span class="fg-lbl" style="font-size:8px;color:var(--cyan)">USD→INR</span>
+   <input type="number" id="usdInrRate" min="1" step="0.01" style="width:74px;padding:6px 7px;background:var(--bg-card);border:1px solid var(--border);border-radius:8px;color:var(--t1);font-family:'DM Mono',monospace;font-size:11px;outline:none" oninput="onUsdInrChange()">
+  </div>
   <div class="tabs" id="mainTabs" style="margin:0;border:0;gap:4px">
    <div class="tab act" onclick="switchTab(0)">📋 Rankings <span id="tabCount0" style="font-size:10px;opacity:.7"></span></div>
    <div class="tab" onclick="switchTab(1)">🔬 Methodology <span id="tabCount1" style="font-size:10px;opacity:.7"></span></div>
@@ -252,7 +256,7 @@ table.main tbody td{padding:9px 11px;font-family:'DM Mono',monospace;font-size:1
   <button class="btn" onclick="document.getElementById('brainIn').click()" title="Import Brain — restore from a previously exported file" style="font-size:11px">🧠 Import</button>
   <input type="file" id="brainIn" accept=".json" style="display:none" onchange="importBrain(event)">
   <button class="btn" onclick="resetEngine(this)" title="Reset Engine — wipe correlations and learning data only. Keeps tradebook, holdings, orders, custom rules." style="font-size:11px;border-color:rgba(251,191,36,.3);color:var(--amber)">🧹 Engine</button>
-  <button class="btn" onclick="resetBrain(this)" title="Reset — wipe all accumulated correlations and start fresh" style="font-size:11px;border-color:rgba(239,68,68,.3);color:var(--red)">🗑 Reset</button>
+  <button class="btn" onclick="resetBrain(this)" title="Reset — wipe only the selected mode's accumulated data and start fresh" style="font-size:11px;border-color:rgba(239,68,68,.3);color:var(--red)">🗑 Reset</button>
   <div style="position:relative;display:flex;align-items:center">
     <button class="btn btn-fire" id="loadFilesBtn" onclick="showUploadScreen()">Load Files</button>
     <button class="btn" onclick="toggleRequiredFilesPopover()" title="Required input files" style="font-size:14px;padding:8px 12px;margin-left:4px">ℹ️</button>
@@ -321,7 +325,7 @@ table.main tbody td{padding:9px 11px;font-family:'DM Mono',monospace;font-size:1
    <div class="fg"><span class="fg-lbl" style="color:var(--orange)">Rocket %</span><input type="number" id="fRocketPct" value="10" placeholder="10" min="5" max="20" step="0.5" style="width:72px;padding:8px 10px;background:var(--bg-card);border:1px solid var(--border);border-radius:8px;color:var(--t1);font-family:'DM Mono',monospace;font-size:12px;outline:none;transition:border .2s" onfocus="this.style.borderColor='var(--orange)'" onblur="this.style.borderColor='var(--border)'" oninput="onRocketPctChangeUI()" title="Threshold for what counts as a rocket. Used by the engine for labeling rockets and by the runway calculation in mRMR learning. Default 10%. Learning impact on next CSV upload."></div>
    <div class="fg stock-only"><span class="fg-lbl">Min Vol <span id="volAutoLabel" style="font-size:9px;color:var(--cyan)"></span></span><input type="number" id="fVol" placeholder="auto" min="0" style="width:110px;padding:8px 10px;background:var(--bg-card);border:1px solid var(--border);border-radius:8px;color:var(--t1);font-family:'DM Mono',monospace;font-size:12px;outline:none;transition:border .2s" onfocus="this.style.borderColor='var(--cyan)'" onblur="this.style.borderColor='var(--border)'" oninput="onVolChange()"></div>
    <div class="fg stock-only"><span class="fg-lbl" style="font-size:8px">Vol ×</span><input type="number" id="fVolMult" placeholder="auto" min="10" max="99999" step="10" style="width:65px;padding:8px 6px;background:var(--bg-card);border:1px solid var(--border);border-radius:8px;color:var(--t1);font-family:'DM Mono',monospace;font-size:11px;outline:none" oninput="VOL_AUTO=true;setAutoVolume();applyFilters()" title="Volume multiplier: minutes since open × this = Min Vol floor"></div>
-   <div class="fg"><span class="fg-lbl" style="font-size:8px">Min TV <span class="currency-lbl">₹</span></span><input type="number" id="fMinTurnover" placeholder="e.g. 1000000" value="1000000" min="0" step="500000" style="width:90px;padding:8px 6px;background:var(--bg-card);border:1px solid var(--border);border-radius:8px;color:var(--t1);font-family:'DM Mono',monospace;font-size:11px;outline:none" oninput="applyFilters()" title="Min turnover / 24h USD volume floor. Blank = no filter."></div>
+   <div class="fg"><span class="fg-lbl" style="font-size:8px">Min TV <span class="currency-lbl">₹</span></span><input type="number" id="fMinTurnover" placeholder="e.g. 1000000" value="1000000" min="0" step="500000" style="width:90px;padding:8px 6px;background:var(--bg-card);border:1px solid var(--border);border-radius:8px;color:var(--t1);font-family:'DM Mono',monospace;font-size:11px;outline:none" oninput="applyFilters()" title="Min turnover / 24h INR volume floor. Blank = no filter."></div>
    <div class="fg stock-only"><span class="fg-lbl" style="color:var(--amber)">Capital ₹</span><input type="number" id="fCapital" placeholder="e.g. 100000" min="0" step="1000" style="width:110px;padding:8px 10px;background:var(--bg-card);border:1px solid var(--border);border-radius:8px;color:var(--t1);font-family:'DM Mono',monospace;font-size:12px;outline:none;transition:border .2s" onfocus="this.style.borderColor='var(--amber)'" onblur="this.style.borderColor='var(--border)'" oninput="applyFilters()"></div>
    <div class="fg stock-only"><span class="fg-lbl" style="color:var(--amber)">Max Alloc ₹</span><input type="number" id="fMaxAlloc" placeholder="e.g. 20000" min="0" step="1000" style="width:110px;padding:8px 10px;background:var(--bg-card);border:1px solid var(--border);border-radius:8px;color:var(--t1);font-family:'DM Mono',monospace;font-size:12px;outline:none;transition:border .2s" onfocus="this.style.borderColor='var(--amber)'" onblur="this.style.borderColor='var(--border)'" oninput="applyFilters()" title="Per-stock cap for allocation. Empty = no cap."></div>
    <div class="fg stock-only"><span class="fg-lbl" style="color:var(--purple)">Avg-dn %</span><input type="number" id="fReDrop" value="1" placeholder="1" min="0" step="0.5" style="width:72px;padding:8px 10px;background:var(--bg-card);border:1px solid var(--border);border-radius:8px;color:var(--t1);font-family:'DM Mono',monospace;font-size:12px;outline:none;transition:border .2s" onfocus="this.style.borderColor='var(--purple)'" onblur="this.style.borderColor='var(--border)'" oninput="applyFilters()" title="Stock must have fallen at least this % below your avg buy to appear as a top-up candidate. Shorts and zero-qty always suppressed."></div>
@@ -344,9 +348,11 @@ table.main tbody td{padding:9px 11px;font-family:'DM Mono',monospace;font-size:1
 
 
 <script>
-const BUILD_TS='2026-05-16 11:38 IST'; // replaced at commit time with IST datetime
+const BUILD_TS='2026-05-18 09:03 IST'; // replaced at commit time with IST datetime
 const MODE_STORE='rs_market_mode';
+const USD_INR_STORE='rs_usd_inr';
 let MARKET_MODE=localStorage.getItem(MODE_STORE)==='crypto'?'crypto':'stock';
+let USD_INR_RATE=parseFloat(localStorage.getItem(USD_INR_STORE))||83;
 function isCryptoMode(){return MARKET_MODE==='crypto';}
 function modeKey(base,mode=MARKET_MODE){return mode==='crypto'?base+'_crypto':base;}
 function modeLabel(){return isCryptoMode()?'Crypto':'Stocks';}
@@ -362,7 +368,7 @@ function updateModeUI(){
   const brand=document.querySelector('.brand-tag');
   if(brand) brand.textContent=isCryptoMode()?'Crypto mRMR + 24h Momentum Intelligence':'Regime-Adaptive mRMR + Sector Intelligence';
   document.querySelectorAll('.stock-only').forEach(el=>{el.style.display=isCryptoMode()?'none':'';});
-  document.querySelectorAll('.currency-lbl').forEach(el=>{el.textContent=isCryptoMode()?'$':'₹';});
+  document.querySelectorAll('.currency-lbl').forEach(el=>{el.textContent='₹';});
   const slot=document.getElementById('slot-tv');
   if(slot) slot.textContent=isCryptoMode()?'🪙 ALL CRYPTO.csv':'📈 ALL NSE.csv';
   const cslot=document.getElementById('slot-crypto');
@@ -370,14 +376,44 @@ function updateModeUI(){
   const nseBox=document.getElementById('nseLinkBox');
   if(nseBox) nseBox.style.display=isCryptoMode()?'none':'';
   const perfTab=document.querySelector('#mainTabs .tab:nth-child(3)');
-  if(perfTab) perfTab.style.display=isCryptoMode()?'none':'';
+  if(perfTab) perfTab.style.display='';
   const basket=document.getElementById('basketBtn');
   if(basket) basket.style.display=isCryptoMode()?'none':'';
   const minTurn=document.getElementById('fMinTurnover');
   if(minTurn){
-    minTurn.placeholder=isCryptoMode()?'e.g. 100000':'e.g. 1000000';
-    minTurn.title=isCryptoMode()?'Minimum 24h USD volume. Blank = no filter.':'Min turnover (Price × Volume) in ₹. Blank = no filter.';
+    minTurn.placeholder=isCryptoMode()?'e.g. 8000000':'e.g. 1000000';
+    minTurn.title=isCryptoMode()?'Minimum 24h volume in INR after USD→INR conversion. Blank = no filter.':'Min turnover (Price × Volume) in ₹. Blank = no filter.';
   }
+  const fxBox=document.getElementById('fxBox');
+  if(fxBox) fxBox.style.display=isCryptoMode()?'flex':'none';
+  const fx=document.getElementById('usdInrRate');
+  if(fx&&!fx.value) fx.value=USD_INR_RATE.toFixed(2);
+}
+function onUsdInrChange(){
+  const el=document.getElementById('usdInrRate');
+  const v=parseFloat(el?.value);
+  if(isFinite(v)&&v>0){
+    USD_INR_RATE=v;
+    localStorage.setItem(USD_INR_STORE,String(v));
+  }
+}
+async function refreshUsdInrRate(){
+  try{
+    const cached=JSON.parse(localStorage.getItem(USD_INR_STORE+'_meta')||'{}');
+    const today=new Date().toISOString().slice(0,10);
+    if(cached.date===today&&isFinite(cached.rate)) return;
+    const res=await fetch('https://api.frankfurter.dev/v1/latest?base=USD&symbols=INR',{cache:'no-store'});
+    if(!res.ok) throw new Error('HTTP '+res.status);
+    const data=await res.json();
+    const rate=parseFloat(data?.rates?.INR);
+    if(isFinite(rate)&&rate>0){
+      USD_INR_RATE=rate;
+      localStorage.setItem(USD_INR_STORE,String(rate));
+      localStorage.setItem(USD_INR_STORE+'_meta',JSON.stringify({date:today,rate}));
+      const el=document.getElementById('usdInrRate');
+      if(el) el.value=rate.toFixed(2);
+    }
+  }catch(e){console.warn('USD/INR auto refresh failed',e);}
 }
 let ALL=[],FILT=[],PG=1,PGSZ=9999,SCOL='rocketScore',SDIR=-1;
 let _tvLoadedThisSession=false; // true once a TV CSV has been processed this session
@@ -905,6 +941,11 @@ function escHtml(s){return String(s??'').replace(/[&<>"]/g,ch=>({'&':'&amp;','<'
 function findHeader(hdrs,patterns){return hdrs.find(h=>patterns.some(p=>p.test(h.trim())))||null;}
 function meanArr(arr){return arr.length?arr.reduce((s,v)=>s+v,0)/arr.length:0;}
 function tickPrice(v){return Math.round(v/0.05)*0.05;}
+function isCryptoMoneyHeader(h){
+  const s=String(h||'').toLowerCase();
+  if(/%|ratio|rank|rate|sentiment|dominance|score|velocity|addresses|contributors|posts|engagements|transactions$|supply/.test(s)) return false;
+  return /price|open 1 day|high 1 day|low 1 day|average true range|average daily range|market cap|value locked|volume in usd|liquidations in usd|open interest in usd|transaction in usd|large transactions volume in usd|pivot points|bollinger|donchian|keltner|moving average|parabolic sar|awesome oscillator|momentum|macd|bull bear power/.test(s);
+}
 function survRuleKey(label){return String(label||'').trim().toLowerCase().replace(/[^a-z0-9]+/g,'_').replace(/^_|_$/g,'');}
 function isSurvFlag(v){
   const s=String(v||'').trim();
@@ -995,7 +1036,7 @@ function getHardFilterRowsFromEngine(E){
   const rk=rm.rockets||{};
   if(isCryptoMode()){
     return [
-      {key:'low_liquidity',label:'Low 24h Volume',criteria:'Volume in USD 24 hours < Min TV',removed:rm.liq||0,rockets:rk.liq||[],active:true,kind:'core'},
+      {key:'low_liquidity',label:'Low 24h Volume',criteria:'Volume in INR 24 hours < Min TV',removed:rm.liq||0,rockets:rk.liq||[],active:true,kind:'core'},
       {key:'no_atr',label:'No ATR Data',criteria:'ATR % null or <= 0',removed:rm.atr||0,rockets:rk.atr||[],active:true,kind:'core'},
       {key:'fade',label:'Fading',criteria:'Peak retention < 50% when day range > 1%',removed:rm.fade||0,rockets:rk.fade||[],active:true,kind:'core'},
     ];
@@ -1253,7 +1294,11 @@ function runEngine(raw, sessionTag){
   const parsed = raw.map(r => {
     const d = {};
     // Parse all numeric columns
-    for(const [key, col] of Object.entries(COL_MAP)) d[key] = num(r[col]);
+    for(const [key, col] of Object.entries(COL_MAP)){
+      let v=num(r[col]);
+      if(cryptoMode&&v!=null&&isCryptoMoneyHeader(col)) v*=USD_INR_RATE;
+      d[key] = v;
+    }
     d.symbol = normSym(r[symCol]);
     d.name   = (r[nameCol]||'').trim();
     return d;
@@ -1309,7 +1354,7 @@ function runEngine(raw, sessionTag){
   const FEATS = [...new Set([...Object.keys(COL_MAP), ...NSE_DERIVED])];
 
   const LABELS = {};
-  for(const key of Object.keys(COL_MAP)) LABELS[key] = COL_MAP[key];
+  for(const key of Object.keys(COL_MAP)) LABELS[key] = cryptoMode&&isCryptoMoneyHeader(COL_MAP[key]) ? COL_MAP[key].replace(/USD/g,'INR') : COL_MAP[key];
   LABELS.delivery_pct      = 'Delivery %';
   LABELS.range_pos         = '52W Range Position %';
   LABELS.pct_from_52w_high = '% From 52W High';
@@ -2143,6 +2188,21 @@ function renderPerformance(){
   if(!el) return;
   const hdrEl=document.querySelector('.hdr');
   if(hdrEl) document.documentElement.style.setProperty('--hdr-h',hdrEl.offsetHeight+'px');
+  if(isCryptoMode()){
+    const top=(ALL||[]).slice(0,10);
+    const rows=top.map((s,i)=>`<tr><td style="padding:8px 10px;color:var(--t3)">${i+1}</td><td style="padding:8px 10px;font-weight:800">${s.symbol}</td><td style="padding:8px 10px;color:var(--t2)">${escHtml(s.name||'')}</td><td style="padding:8px 10px;text-align:right;color:${s.priceChange>=0?'var(--green)':'var(--red)'}">${s.priceChange!=null?(s.priceChange>0?'+':'')+s.priceChange.toFixed(2)+'%':'—'}</td><td style="padding:8px 10px;text-align:right;font-weight:800">${isFinite(s.rocketScore)?s.rocketScore.toFixed(1):'—'}</td></tr>`).join('');
+    el.innerHTML=`<h3>Crypto Mode</h3>
+      <div class="kpi-grid">
+        <div class="kpi-card"><div class="kpi-lbl">Universe</div><div class="kpi-val">${(ALL||[]).length.toLocaleString()}</div><div class="kpi-sub">crypto assets · INR converted</div></div>
+        <div class="kpi-card"><div class="kpi-lbl">Rocket Threshold</div><div class="kpi-val">${(ENGINE_DATA.rocketThreshold||10).toFixed(1)}%</div><div class="kpi-sub">${ENGINE_DATA.rocketCount||0} assets over threshold</div></div>
+        <div class="kpi-card"><div class="kpi-lbl">Learning</div><div class="kpi-val">${ENGINE_DATA.accSessions||0}</div><div class="kpi-sub">${ENGINE_DATA.laggedNote||'No crypto scan loaded'}</div></div>
+        <div class="kpi-card"><div class="kpi-lbl">USD → INR</div><div class="kpi-val">${USD_INR_RATE.toFixed(2)}</div><div class="kpi-sub">used for crypto monetary fields</div></div>
+      </div>
+      <h3 style="margin-top:22px">Top Crypto Candidates</h3>
+      <div class="corr-wrap"><table class="ct"><thead><tr><th>#</th><th>Asset</th><th>Name</th><th style="text-align:right">24h</th><th style="text-align:right">Score</th></tr></thead><tbody>${rows||'<tr><td colspan="5" style="padding:18px;color:var(--t3);text-align:center">Load ALL CRYPTO.csv to populate crypto performance context.</td></tr>'}</tbody></table></div>`;
+    PERF_TRADE_WINDOWS=[];PERF_LATEST_SUMMARY=null;
+    return;
+  }
   const tb=TRADEBOOK_STATS;
   if(!tb){
     el.innerHTML=`<div style="text-align:center;padding:80px 40px;color:var(--t2)"><div style="font-size:36px;margin-bottom:16px">📒</div><div style="font-size:16px;font-weight:700;color:var(--t1);margin-bottom:8px">No Tradebook Loaded</div><div>Upload TRADEBOOK.csv to see performance analytics.</div></div>`;
@@ -2989,7 +3049,7 @@ function _renderMethodologyInner(){
       <div class="m-card"><h4>📡 How the Engine Learns</h4><p>After each session, the engine correlates <strong>yesterday's feature values</strong> against <strong>today's actual rockets</strong>. Features that consistently appeared in rockets get higher weight; features that didn't get lower weight. Tomorrow's recommendations are stocks that look like yesterday's rockets — but haven't moved yet. The target label is quality-adjusted: yesterday's rockets that <em>held</em> today reinforce the signal; those that collapsed are treated as 0, so the engine learns to find durable moves, not fragile spikes.</p></div>
       <div class="m-card"><h4>🎯 Max 1D Filter</h4><p>Set <em>Max 1D %</em> in the filter bar to hide stocks that have already moved too much today (default 8.5%). Stocks above this threshold are skipped — they have less runway to reach target before becoming rockets themselves. Adjust based on how much room you want from entry to the rocket threshold.</p></div>
       <div class="m-card"><h4>🚫 Hard Filters</h4><p>${isCryptoMode()
-        ? `Removed from <strong>both learning and display</strong>: missing price/change data, low 24h USD volume (below Min TV), no ATR data, and <strong>peak retention &lt;50%</strong> (fading; only when day range &gt;1%). Currently filtered: ${(REMOVED.liq||0)+(REMOVED.atr||0)+(REMOVED.fade||0)} assets.`
+        ? `Removed from <strong>both learning and display</strong>: missing price/change data, low 24h INR volume (below Min TV), no ATR data, and <strong>peak retention &lt;50%</strong> (fading; only when day range &gt;1%). Currently filtered: ${(REMOVED.liq||0)+(REMOVED.atr||0)+(REMOVED.fade||0)} assets.`
         : `Removed from <strong>both learning and display</strong>: upper circuit (≥19.5%), non-EQ series (BE/BZ/SZ/SM/ST), surveillance-flagged stocks (user's rules), low liquidity (volume &lt;${(parseFloat(document.getElementById('fVolMult')?.value)||LIQ_MIN_VOL_DEFAULT).toLocaleString()}${parseFloat(document.getElementById('fMinTurnover')?.value)>0?' or turnover &lt;₹'+(parseFloat(document.getElementById('fMinTurnover')?.value)/1e5).toFixed(1)+'L':''}, shareholders &lt;500), zero/null Piotroski F-Score, no ATR data, <strong>delivery &lt;30%</strong>, and <strong>peak retention &lt;50%</strong> (fading; only when day range &gt;1%). Currently filtered: ${(REMOVED.uc||0)+(REMOVED.surv||0)+(REMOVED.nonEq||0)+(REMOVED.liq||0)+(REMOVED.fscore||0)+(REMOVED.atr||0)+(REMOVED.deliv||0)+(REMOVED.fade||0)} stocks.`}</p></div>
       <div class="m-card"><h4>${E.regime==='bull'?'🐂':E.regime==='bear'?'🐻':'➡'} Regime-Conditional Learning</h4><p>Today's market: <strong style="color:${regimeColor}">${(E.regime||'neutral').toUpperCase()}</strong> (${E.marketBreadth!=null?(E.marketBreadth*100).toFixed(0):'?'}% breadth). Each regime maintains its own running-mean correlation accumulator — bull sessions learn breakout patterns, bear sessions learn resilience. ${E.useRegimeCorr?'Using <strong>regime-specific</strong> correlations.':'Using <strong>combined</strong> fallback (need ≥2 sessions in current regime).'} Bull ${(E.regimeSessions?.bull)||0} · Bear ${(E.regimeSessions?.bear)||0} · Neutral ${(E.regimeSessions?.neutral)||0}.</p></div>
       <div class="m-card"><h4>📊 Sector & Industry Breadth</h4><p>${E.sectorCol?'<span style="color:var(--green)">✓</span> Sector breadth, sector relative strength':'<span style="color:var(--red)">✗</span> No Sector column detected'}${E.industryCol?', <span style="color:var(--green)">✓</span> industry breadth':''} — computed from today\'s full universe and fed into mRMR as features. Stocks outperforming their sector score higher regardless of market direction.</p></div>
@@ -3010,8 +3070,8 @@ function getCols(){
   const fixed=[
     {key:'chk',label:'',s:0},
     {key:'rocketScore',label:'Score',s:1},{key:'symbol',label:'Symbol',s:1},
-    {key:'price',label:isCryptoMode()?'Price $':'Price ₹',s:1},{key:'priceChange',label:'Chg%',s:1},{key:'maxEntry',label:'Max Entry',s:0},{key:'delivPct',label:'Deliv%',s:1},
-    {key:'alloc',label:isCryptoMode()?'Alloc $':'Alloc ₹',s:0},{key:'volume',label:isCryptoMode()?'Vol USD':'Volume',s:1},
+    {key:'price',label:'Price ₹',s:1},{key:'priceChange',label:'Chg%',s:1},{key:'maxEntry',label:'Max Entry',s:0},{key:'delivPct',label:'Deliv%',s:1},
+    {key:'alloc',label:'Alloc ₹',s:0},{key:'volume',label:isCryptoMode()?'Vol ₹':'Volume',s:1},
   ];
   // Dynamic columns from mRMR features — skip any that are all null across displayed stocks
   const allFeats=ENGINE_DATA?.top10Feats||[];
@@ -3304,9 +3364,9 @@ function renderTable(){
       <td style="text-align:center"><input type="checkbox" ${isSelected?'checked':''} style="width:14px;height:14px;accent-color:var(--amber);cursor:pointer" onchange="toggleStock('${s.symbol}',this.checked)"></td>
       <td><span class="sc-m">${isNaN(s.rocketScore)?'?':s.rocketScore.toFixed(1)}</span></td>
       <td style="font-family:'Plus Jakarta Sans',sans-serif"><div style="font-weight:700;font-size:13px;color:var(--t1)">${s.symbol}${(()=>{const sv=s.seen||0;if(!sv) return '';return`<sub style="font-size:11px;color:var(--amber);font-weight:700;margin-left:3px;font-family:'DM Mono',monospace" title="Seen ${sv}× today">${sv}×</sub>`;})()}${s._isTopUp?`<span style="font-size:8px;background:rgba(251,146,60,.15);color:var(--fire);border-radius:4px;padding:1px 5px;margin-left:5px;font-weight:700;vertical-align:middle">↑ TOP-UP</span>`:''}${(()=>{if(!s.isSurv) return '';const labels=(s.survRules||[]).map(k=>{const r=SURV_CUSTOM_RULES.find(x=>x.key===k);return r?r.label:k;}).join(' · ');return `<span style="font-size:8px;background:rgba(239,68,68,.15);color:var(--red);border-radius:4px;padding:1px 5px;margin-left:5px;font-weight:700;vertical-align:middle" title="NSE Surveillance: ${escHtml(labels)}">⚠ SURV</span>`;})()}</div><div style="font-size:9px;color:var(--t3);max-width:160px;overflow:hidden;text-overflow:ellipsis">${s.name}${s._isTopUp&&s._heldAvg?` · avg ₹${s._heldAvg.toLocaleString('en-IN',{maximumFractionDigits:2})}`:''}</div></td>
-      <td>${isCryptoMode()?'$':'₹'}${fmt(s.price)}</td>
+      <td>₹${fmt(s.price)}</td>
       <td>${fPerf(s.priceChange)}</td>
-      <td>${(()=>{const hi=getMaxEntry(s);if(hi===null)return'<span style="color:var(--t3)">—</span>';const tgt=getEffectiveTgtPct()||3.7;const ceiling=ENGINE_DATA?.rocketThreshold||10;const inZone=isBuyZone(s);const cur=isCryptoMode()?'$':'₹';return`<span style="font-family:'DM Mono',monospace;font-size:12px;font-weight:700;color:${inZone?'var(--green)':'var(--red)'}" title="Max entry: buying ≤${cur}${hi.toFixed(2)} still leaves full TGT% (${tgt.toFixed(2)}%) before the ${ceiling}% ceiling">${cur}${hi.toFixed(2)}</span>`;})()}</td>
+      <td>${(()=>{const hi=getMaxEntry(s);if(hi===null)return'<span style="color:var(--t3)">—</span>';const tgt=getEffectiveTgtPct()||3.7;const ceiling=ENGINE_DATA?.rocketThreshold||10;const inZone=isBuyZone(s);return`<span style="font-family:'DM Mono',monospace;font-size:12px;font-weight:700;color:${inZone?'var(--green)':'var(--red)'}" title="Max entry: buying ≤₹${hi.toFixed(2)} still leaves full TGT% (${tgt.toFixed(2)}%) before the ${ceiling}% ceiling">₹${hi.toFixed(2)}</span>`;})()}</td>
       <td>${fDel(s.delivPct)}</td>
       <td class="alloc-cell" data-sym="${s.symbol}">${(()=>{
         if(!am) return '<span style="color:var(--t3);font-size:11px">—</span>';
@@ -3682,7 +3742,7 @@ function resetEngine(btn){
   ALL=[];FILT=[];ENGINE_DATA={};PREV_SNAP={};PREV_SNAP_META={};SURV_CORR_ACC={};
   btn._stage=0;
   btn.innerHTML='🧹 Reset Engine';btn.style.background='';
-  showToast(`<strong>Engine reset.</strong> Wiped ${s} sessions. Tradebook, holdings, and rules preserved. Upload fresh TV CSV to restart learning.`,6000);
+  showToast(`<strong>${modeLabel()} engine reset.</strong> Wiped ${s} sessions for the selected mode. Tradebook, holdings, and rules preserved. Upload fresh TV CSV to restart learning.`,6000);
   setTimeout(()=>location.reload(),2500);
 }
 
@@ -3704,8 +3764,11 @@ function resetBrain(btn){
     setTimeout(()=>{if(btn._stage===2){btn._stage=0;btn.innerHTML='🗑 Reset Brain';btn.style.background='';btn.style.borderColor='rgba(239,68,68,.3)';btn.style.color='var(--red)';}},6000);
     return;
   }
-  // Stage 3: confirmed — wipe everything
-  FS.reset();
+  // Stage 3: confirmed — wipe selected mode only
+  const stockKeys=[SNAP_KEY,SNAP_PREV_KEY,REC_COUNT_STORE,ALL_STORE,CORR_STORE,CORR_BULL_STORE,CORR_BEAR_STORE,CORR_NEUT_STORE,METH_STORE,REGIME_CAL_STORE,AVG_DAY_CHG_STORE,HOLD_STORE,ORDERS_STORE,POS_STORE,TRADEBOOK_STORE,MISSED_OPP_STORE,SURV_CORR_STORE,SURV_RULE_STORE,NSE_HOLIDAYS_STORE];
+  const cryptoKeys=[SNAP_KEY,SNAP_PREV_KEY,REC_COUNT_STORE,ALL_STORE,CORR_STORE,CORR_BULL_STORE,CORR_BEAR_STORE,CORR_NEUT_STORE,METH_STORE,REGIME_CAL_STORE,AVG_DAY_CHG_STORE].map(k=>modeKey(k,'crypto'));
+  (isCryptoMode()?cryptoKeys:stockKeys).forEach(k=>FS.set(k,null));
+  localStorage.removeItem(modeKey(SCANNER_STORE));
   ACC_CORR=null; ACC_CORR_BULL=null; ACC_CORR_BEAR=null; ACC_CORR_NEUT=null;
   ALL=[]; FILT=[]; ENGINE_DATA={};
   HOLDINGS=[]; POSITIONS=[];
@@ -3713,7 +3776,7 @@ function resetBrain(btn){
   HOLD_COST_MAP={};
   btn._stage=0;
   btn.innerHTML='🗑 Reset Brain';btn.style.background='';btn.style.borderColor='rgba(239,68,68,.3)';btn.style.color='var(--red)';
-  showToast('<strong>Brain wiped.</strong> All correlations, snapshots, and session data cleared. Upload fresh data to start learning again.');
+  showToast(`<strong>${modeLabel()} data wiped.</strong> Cleared only the selected mode. Upload fresh data to start learning again.`);
   setTimeout(()=>location.reload(),2000);
 }
 
@@ -4151,6 +4214,105 @@ function nseDate(){
 // ── File Processing ──
 function setMsg(m){document.getElementById('ldMsg').textContent=m;}
 
+function captureScannerRuntime(){
+  return {mode:MARKET_MODE,ALL,FILT,ENGINE_DATA,PREV_SNAP,PREV_SNAP_META,ACC_CORR,ACC_CORR_BULL,ACC_CORR_BEAR,ACC_CORR_NEUT,CURRENT_REGIME,REMOVED,SCORE_MAP,COLS};
+}
+function restoreScannerRuntime(s){
+  MARKET_MODE=s.mode;ALL=s.ALL;FILT=s.FILT;ENGINE_DATA=s.ENGINE_DATA;PREV_SNAP=s.PREV_SNAP;PREV_SNAP_META=s.PREV_SNAP_META;
+  ACC_CORR=s.ACC_CORR;ACC_CORR_BULL=s.ACC_CORR_BULL;ACC_CORR_BEAR=s.ACC_CORR_BEAR;ACC_CORR_NEUT=s.ACC_CORR_NEUT;
+  CURRENT_REGIME=s.CURRENT_REGIME;REMOVED=s.REMOVED;SCORE_MAP=s.SCORE_MAP;COLS=s.COLS;
+}
+function loadPrevSnapForMode(mode){
+  const todayISO=getSessionDate();
+  const normDate=(s)=>{
+    if(!s) return null;
+    if(/^\d{4}-\d{2}-\d{2}$/.test(s)) return s;
+    const d=new Date(s);
+    if(isNaN(d.getTime())) return null;
+    return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;
+  };
+  const snap=FS.get(modeKey(SNAP_KEY,mode)), prev=FS.get(modeKey(SNAP_PREV_KEY,mode));
+  let source=null;
+  const snapDate=normDate(snap?.savedDate);
+  if(snap&&snap.stocks&&snapDate&&snapDate!==todayISO) source=snap;
+  if(!source&&prev&&prev.stocks) source=prev;
+  if(source){
+    const sd=normDate(source.savedDate);
+    const gap=sd?tradingDaysBetween(sd,todayISO):null;
+    if(gap!=null&&gap>1) source=null;
+  }
+  const out={snap:{},meta:{}};
+  if(!source) return out;
+  if(source.cols){
+    Object.entries(source.stocks).forEach(([sym,vals])=>{
+      const obj={};source.cols.forEach((f,i)=>obj[f]=vals[i]);
+      out.snap[sym]=obj;
+    });
+  } else out.snap=source.stocks||source;
+  out.meta={savedDate:source.savedDate||null,regime:source.regime||null,marketBreadth:source.marketBreadth??null};
+  return out;
+}
+function applySavedFiltersForMode(mode){
+  const ids=['fMinScore','fPriceMin','fPriceMax','fMin1D','fMax1D','fVol','fVolMult','fMinTurnover','fCapital','fMaxAlloc','fReDrop','fTopupAlloc','fRocketPct'];
+  const prev={};
+  ids.forEach(id=>{const el=document.getElementById(id);if(el)prev[id]=el.value;});
+  try{
+    const st=JSON.parse(localStorage.getItem(modeKey(SCANNER_STORE,mode))||'{}');
+    const map={minScore:'fMinScore',priceMin:'fPriceMin',priceMax:'fPriceMax',fMin1D:'fMin1D',fMax1D:'fMax1D',fvol:'fVol',volMult:'fVolMult',minTurnover:'fMinTurnover',capital:'fCapital',maxAlloc:'fMaxAlloc',reDrop:'fReDrop',topupAlloc:'fTopupAlloc',rocketPct:'fRocketPct'};
+    Object.entries(map).forEach(([k,id])=>{const el=document.getElementById(id);if(el&&st[k]!=null)el.value=st[k];});
+    if(mode==='crypto'&&st.minTurnover==null){const el=document.getElementById('fMinTurnover');if(el)el.value='8000000';}
+  }catch(e){}
+  return ()=>ids.forEach(id=>{const el=document.getElementById(id);if(el&&prev[id]!=null)el.value=prev[id];});
+}
+async function processScannerUpload(scannerFile, mode){
+  if(!scannerFile) return false;
+  const original=captureScannerRuntime();
+  const restoreFilters=applySavedFiltersForMode(mode);
+  MARKET_MODE=mode;
+  const prev=loadPrevSnapForMode(mode);
+  PREV_SNAP=prev.snap;PREV_SNAP_META=prev.meta;
+  ACC_CORR=FS.get(modeKey(CORR_STORE,mode));
+  ACC_CORR_BULL=FS.get(modeKey(CORR_BULL_STORE,mode));
+  ACC_CORR_BEAR=FS.get(modeKey(CORR_BEAR_STORE,mode));
+  ACC_CORR_NEUT=FS.get(modeKey(CORR_NEUT_STORE,mode));
+  try{
+    setMsg('Parsing '+(mode==='crypto'?'crypto':'stock')+' TradingView data...');
+    const slot=document.getElementById(mode==='crypto'?'slot-crypto':'slot-tv')||document.getElementById('slot-tv');
+    if(slot){slot.textContent=(mode==='crypto'?'🪙 ':'📈 ')+scannerFile.name;slot.classList.add('ok');}
+    const text=await scannerFile.text();
+    const raw=parseCSV(text);
+    const fname=scannerFile.name.toLowerCase();
+    const ok=mode==='crypto'?fname.includes('all crypto'):fname.includes('all nse');
+    if(!ok){console.warn('Non-scanner CSV ignored:',scannerFile.name);return false;}
+    setMsg('Running '+(mode==='crypto'?'crypto':'stock')+' mRMR engine across '+raw.length+' '+(mode==='crypto'?'assets':'stocks')+'...');
+    await new Promise(r=>setTimeout(r,60));
+    window._lastRawTV=raw;
+    const dataHash=(function(){let h=0;for(let i=0;i<Math.min(raw.length,200);i++){const pc=parseFloat(raw[i][Object.keys(raw[i]).find(k=>/price/i.test(k)&&/change/i.test(k))])||0;h=((h<<5)-h)+Math.round(pc*1000);h|=0;}return h;})();
+    const sessionTag=scannerFile.name+'·'+raw.length+'·'+dataHash;
+    ALL=runEngine(raw,sessionTag)||[];
+    ALL.sort((a,b)=>b.rocketScore-a.rocketScore);
+    const rcToday=getSessionDate(), rc=FS.get(modeKey(REC_COUNT_STORE,mode))||{};
+    if(!rc[rcToday])rc[rcToday]={};
+    ALL.forEach(s=>{rc[rcToday][s.symbol]=(rc[rcToday][s.symbol]||0)+1;s.seen=rc[rcToday][s.symbol];});
+    FS.set(modeKey(REC_COUNT_STORE,mode),rc);
+    try{FS.set(modeKey(ALL_STORE,mode),{data:ALL.map(s=>({...s,name:s.name?s.name.substring(0,20):s.symbol})),fileTag:scannerFile.name+' · '+raw.length+' '+(mode==='crypto'?'assets':'stocks'),ts:Date.now()});}catch(e){console.warn('Could not save scan data',e);}
+    if(window._lastEngineFeats&&window._lastParsedFiltered){
+      const cols=window._lastEngineFeats, stocks={};
+      window._lastParsedFiltered.forEach(d=>{stocks[d.symbol]=cols.map(f=>{const v=d[f];return(v===null||v===undefined)?null:+parseFloat(v).toFixed(2);});});
+      const today=getSessionDate(), existingSnap=FS.get(modeKey(SNAP_KEY,mode)), updates={};
+      const existingDate=existingSnap?.savedDate, isLegacyFormat=existingDate&&/^[A-Z][a-z]{2} /.test(existingDate);
+      if(existingSnap&&existingSnap.stocks&&(isLegacyFormat||!existingDate||existingDate!==today))updates[modeKey(SNAP_PREV_KEY,mode)]=existingSnap;
+      updates[modeKey(SNAP_KEY,mode)]={cols,stocks,savedDate:today,regime:ENGINE_DATA?.regime||null,marketBreadth:ENGINE_DATA?.marketBreadth??null,mode};
+      FS.setMultiple(updates);
+    }
+    FILT=[...ALL];_tvLoadedThisSession=true;
+    return true;
+  }finally{
+    restoreFilters();
+    if(mode!==original.mode) restoreScannerRuntime(original);
+  }
+}
+
 async function processFiles(files){
   NSE_BHAV={};NSE_52W={};NSE_SURV={};NSE_BULK={};NSE_BLOCK={};
   let tvFile=null,cryptoFile=null,nseZip=null,holdFile=null,posFile=null,ordFile=null,tbFile=null;
@@ -4165,17 +4327,17 @@ async function processFiles(files){
     if(fname_l.includes('tradebook')){tbFile=f;continue;}
     if(fname_l.includes('all nse')){tvFile=f;continue;}
     if(fname_l.includes('nse holidays')||fname_l.includes('nse_holidays')){const ht=await f.text();parseNSEHolidays(ht);continue;}
-    if(!tvFile&&!isCryptoMode()) tvFile=f; // fallback
-    if(!cryptoFile&&isCryptoMode()) cryptoFile=f; // fallback
+    if(!tvFile&&!cryptoFile){
+      if(isCryptoMode()) cryptoFile=f;
+      else tvFile=f;
+    }
   }
-  if(isCryptoMode()) tvFile=cryptoFile;
-  if(isCryptoMode()&&!tvFile){showToast('No files recognised. Drop ALL CRYPTO.csv.',4000,true);return;}
-  if(!tvFile&&!nseZip){showToast(isCryptoMode()?'No files recognised. Drop ALL CRYPTO.csv.':'No files recognised. Drop ALL NSE.csv and/or the NSE ZIP.',4000,true);return;}
+  if(!tvFile&&!cryptoFile&&!nseZip){showToast(isCryptoMode()?'No files recognised. Drop ALL CRYPTO.csv.':'No files recognised. Drop ALL NSE.csv and/or the NSE ZIP.',4000,true);return;}
 
   document.getElementById('uplSec').style.display='none';
   document.getElementById('ldSt').classList.add('on');
 
-  if(nseZip&&!isCryptoMode()){
+  if(nseZip){
     setMsg('Unzipping NSE data...');
     document.getElementById('slot-nse').textContent='🏛 '+nseZip.name;
     document.getElementById('slot-nse').classList.add('ok');
@@ -4202,10 +4364,10 @@ async function processFiles(files){
             // Try NSE detection first
             if(detectNSE(fn,text)) continue;
             // Fall through to scanner CSV routing
-            if(fn.includes('all crypto')&&!tvFile&&isCryptoMode()){
-              tvFile={name:fn,text:async()=>text};continue;
+            if(fn.includes('all crypto')&&!cryptoFile){
+              cryptoFile={name:fn,text:async()=>text};continue;
             }
-            if(fn.includes('all nse')&&!tvFile&&!isCryptoMode()){
+            if(fn.includes('all nse')&&!tvFile){
               // Synthesise a File-like object for the TV CSV path
               tvFile={name:fn,text:async()=>text};continue;
             }
@@ -4220,72 +4382,14 @@ async function processFiles(files){
     }catch(e){console.error('ZIP error:',e);}
   }
 
-  if(tvFile){
-    setMsg('Parsing TradingView data...');
-    document.getElementById('slot-tv').textContent=(isCryptoMode()?'🪙 ':'📈 ')+tvFile.name;
-    document.getElementById('slot-tv').classList.add('ok');
-    const tvText=await tvFile.text();
-    const raw=parseCSV(tvText);
+  const scannerJobs=[];
+  if(tvFile)scannerJobs.push({mode:'stock',file:tvFile});
+  if(cryptoFile)scannerJobs.push({mode:'crypto',file:cryptoFile});
+  scannerJobs.sort((a,b)=>(a.mode===MARKET_MODE?1:0)-(b.mode===MARKET_MODE?1:0)); // active mode last
+  for(const job of scannerJobs) await processScannerUpload(job.file,job.mode);
+  const stockScannerProcessed=scannerJobs.some(j=>j.mode==='stock');
 
-    // Route by filename (exact names user always uses)
-    const fname = tvFile.name.toLowerCase();
-    const isFullScannerCSV = isCryptoMode()?fname.includes('all crypto'):fname.includes('all nse');
-    if(!isFullScannerCSV){
-      console.warn('Non-scanner CSV ignored:', tvFile.name);
-    } else {
-    setMsg('Running mRMR engine across '+(raw.length)+' '+(isCryptoMode()?'crypto assets':'stocks')+'...');
-    await new Promise(r=>setTimeout(r,60));
-    window._lastRawTV=raw;
-    // Session tag: based on actual data content, not date
-    // If data is identical (holiday re-upload), tag matches → no double-counting
-    const dataHash=(function(){let h=0;for(let i=0;i<Math.min(raw.length,200);i++){const pc=parseFloat(raw[i][Object.keys(raw[i]).find(k=>/price/i.test(k)&&/change/i.test(k))])||0;h=((h<<5)-h)+Math.round(pc*1000);h|=0;}return h;})();
-    const sessionTag=tvFile.name+'·'+raw.length+'·'+dataHash;
-    ALL=runEngine(raw, sessionTag);
-    ALL.sort((a,b)=>b.rocketScore-a.rocketScore);
-    // Track how many times each stock appeared in today's ranked results (Seen column)
-    {const _rcToday=getSessionDate();const _rc=FS.get(modeKey(REC_COUNT_STORE))||{};
-    if(!_rc[_rcToday]) _rc[_rcToday]={};
-    ALL.forEach(s=>{_rc[_rcToday][s.symbol]=(_rc[_rcToday][s.symbol]||0)+1;s.seen=_rc[_rcToday][s.symbol];});
-    FS.set(modeKey(REC_COUNT_STORE),_rc);}
-    // Save scan results only — engineData is too large (N² interCorr matrix)
-    try{
-      // Trim data for storage — exclude heavy display-only fields
-      const trimmed=ALL.map(s=>({...s,name:s.name?s.name.substring(0,20):s.symbol}));
-      const toSave={data:trimmed,fileTag:tvFile.name+' · '+raw.length+' stocks',ts:Date.now()};
-      FS.set(modeKey(ALL_STORE),toSave);
-    }catch(e){console.warn('Could not save scan data',e);}
-    // Save compressed snapshot — store feature values as arrays (not objects)
-    // Format: {cols:[feat1,feat2,...], stocks:{SYM:[v1,v2,...]}, savedDate:'...'}
-    // This saves TODAY's data for TOMORROW's lagged correlations.
-    // PREV_SNAP in memory is NOT updated — it stays as yesterday's data for all of today's uploads.
-    if(window._lastEngineFeats && window._lastParsedFiltered){
-      const cols=window._lastEngineFeats;
-      const stocks={};
-      window._lastParsedFiltered.forEach(d=>{
-        stocks[d.symbol]=cols.map(f=>{const v=d[f];return(v===null||v===undefined)?null:+parseFloat(v).toFixed(2);});
-      });
-      const today=getSessionDate(); // YYYY-MM-DD — same format as load-side comparison
-      try{
-        // Before overwriting, check if existing snapshot is from a PREVIOUS day
-        // If so, archive it as rs_snapshot_prev (yesterday's data for tomorrow's page refresh)
-        const existingSnap=FS.get(modeKey(SNAP_KEY));
-        const updates={};
-        // Migrate old "Thu May 14 2026" format if present — treat as not-today regardless
-        const existingDate=existingSnap?.savedDate;
-        const isLegacyFormat=existingDate && /^[A-Z][a-z]{2} /.test(existingDate);
-        if(existingSnap&&existingSnap.stocks&&(isLegacyFormat||!existingDate||existingDate!==today)){
-          updates[modeKey(SNAP_PREV_KEY)]=existingSnap;
-        }
-        updates[modeKey(SNAP_KEY)]={cols,stocks,savedDate:today,regime:ENGINE_DATA?.regime||null,marketBreadth:ENGINE_DATA?.marketBreadth??null,mode:MARKET_MODE};
-        FS.setMultiple(updates);
-      }catch(e){
-        console.warn('Snapshot save failed',e);
-      }
-    }
-    FILT=[...ALL];
-    _tvLoadedThisSession=true;
-    } // end isFullScannerCSV else
-  } else if(!holdFile&&!posFile&&!ordFile&&!tbFile){
+  if(!scannerJobs.length&&!holdFile&&!posFile&&!ordFile&&!tbFile){
     document.getElementById('ldSt').classList.remove('on');
     document.getElementById('uplSec').style.display='flex';
     if(!nseZip) showToast(isCryptoMode()?'TradingView CSV not found. Drop ALL CRYPTO.csv.':'TradingView CSV not found. Drop ALL NSE.csv alongside the NSE ZIP.',4000,true);
@@ -4331,7 +4435,15 @@ async function processFiles(files){
   // Final render after all files are processed — ensures Latest Session uses fresh orders.
   // applyFilters() re-runs held-stock suppression with fresh holdings data only when
   // holdings/positions were updated (avoids double render lag when TV CSV was also uploaded).
-  if(!isCryptoMode()) computeMissedOpp();
+  if(stockScannerProcessed){
+    const rt=captureScannerRuntime();
+    try{
+      MARKET_MODE='stock';
+      const saved=FS.get(ALL_STORE);
+      if(saved?.data?.length) ALL=saved.data;
+      computeMissedOpp();
+    }finally{restoreScannerRuntime(rt);}
+  } else if(!isCryptoMode()) computeMissedOpp();
   try{await FS.write(FS.getBrain());}catch(e){console.warn('Brain flush failed',e);}
   await new Promise(r=>setTimeout(r,300)); // let file system settle
   location.reload();
@@ -4354,6 +4466,7 @@ let ACC_CORR=null; // accumulated targetCorr across sessions
 // ── Async app init: load brain file → hydrate all state → render ──
 async function initApp(){
   updateModeUI();
+  refreshUsdInrRate();
   // Step 0: Connect to folder and load brain file
   const brain=await FS.init();
   if(brain){
@@ -4528,7 +4641,7 @@ async function initApp(){
 
   // Step 3b: Render after hydration — workspace CSVs (orders, tradebook, holdings) are now fresh in memory.
   // renderPerformance must run before renderStats (populates PERF_TRADE_WINDOWS for current-window pill).
-  if(!isCryptoMode()) try{ renderPerformance(); }catch(e){ console.error('INIT step3b renderPerformance failed:',e); }
+  try{ renderPerformance(); }catch(e){ console.error('INIT step3b renderPerformance failed:',e); }
 
   // Step 3: Render stats (after renderPerformance so PERF_TRADE_WINDOWS is ready)
   try{if(ALL.length) renderStats();}catch(e){console.error('INIT step3 renderStats failed:',e);}
@@ -4579,7 +4692,7 @@ function saveFilterState(){
 function loadFilterState(){
   try{
     const state=JSON.parse(localStorage.getItem(modeKey(SCANNER_STORE))||'{}');
-    if(isCryptoMode()&&state.minTurnover==null){const el=document.getElementById('fMinTurnover');if(el)el.value='100000';}
+    if(isCryptoMode()&&state.minTurnover==null){const el=document.getElementById('fMinTurnover');if(el)el.value='8000000';}
     if(state.minScore){const el=document.getElementById('fMinScore');if(el)el.value=state.minScore;}
     if(state.priceMin){const el=document.getElementById('fPriceMin');if(el)el.value=state.priceMin;}
     if(state.priceMax){const el=document.getElementById('fPriceMax');if(el)el.value=state.priceMax;}
@@ -4701,9 +4814,6 @@ initNSELinks();
 </script>
 </body>
 </html>
-
-
-
 
 
 
