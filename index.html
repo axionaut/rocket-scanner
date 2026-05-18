@@ -348,7 +348,7 @@ table.main tbody td{padding:9px 11px;font-family:'DM Mono',monospace;font-size:1
 
 
 <script>
-const BUILD_TS='2026-05-18 12:16 IST'; // replaced at commit time with IST datetime
+const BUILD_TS='2026-05-18 12:26 IST'; // replaced at commit time with IST datetime
 const MODE_STORE='rs_market_mode';
 const USD_INR_STORE='rs_usd_inr';
 const HARD_FILTER_SCHEMA='null_blanks_pass_v1';
@@ -4026,7 +4026,7 @@ function parseTradebook(text){
   const avgCapital=meanArr(roundTrips.map(r=>r.capital));
 
   const adaptiveSL=+(Math.round(Math.abs(medianLossPct)/0.05)*0.05).toFixed(2);
-  const adaptiveTGT=+(Math.round(Math.abs(p75Win)/0.05)*0.05).toFixed(2);
+  const adaptiveTGT=+(Math.round(Math.abs(medianWinPct)/0.05)*0.05).toFixed(2);
   const minExitPct=+Math.max(1,medianWinPct).toFixed(2);
 
   const stats={
@@ -4830,8 +4830,6 @@ initNSELinks();
 </script>
 </body>
 </html>
-
-
 
 
 
