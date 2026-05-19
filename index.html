@@ -348,7 +348,7 @@ table.main tbody td{padding:9px 11px;font-family:'DM Mono',monospace;font-size:1
 
 
 <script>
-const BUILD_TS='2026-05-19 10:32 IST'; // replaced at commit time with IST datetime
+const BUILD_TS='2026-05-19 12:02 IST'; // replaced at commit time with IST datetime
 const MODE_STORE='rs_market_mode';
 const USD_INR_STORE='rs_usd_inr';
 const HARD_FILTER_SCHEMA='null_blanks_pass_v1';
@@ -2702,12 +2702,37 @@ function _refreshHFSection(){
   if(wrap){wrap.innerHTML=buildHardFilterMethodologyHTML(ENGINE_DATA);setTimeout(()=>{_methTbls.hf?.render();_methTbls.sc?.render();},0);}
   else renderMethodology();
 }
+function rebuildActiveSurveillanceHits(){
+  NSE_SURV={};SURV_RULE_HITS={};
+  const fileRuleByKey=Object.fromEntries((SURV_FILE_RULES||[]).map(r=>[r.key,r]));
+  const colKeyToRuleKey={};
+  SURV_CUSTOM_RULES.forEach(rule=>{
+    const matched=fileRuleByKey[rule.key]||null;
+    if(matched){rule.column=matched.column;rule.label=matched.label;}
+    SURV_RULE_HITS[rule.key]=0;
+    colKeyToRuleKey[rule.key]=rule.key;
+  });
+  Object.entries(SURV_ALL_HITS||{}).forEach(([sym,hits])=>{
+    const active=[];
+    Object.keys(hits||{}).forEach(col=>{
+      const ruleKey=colKeyToRuleKey[survRuleKey(col)];
+      if(ruleKey&&!active.includes(ruleKey)) active.push(ruleKey);
+    });
+    if(active.length){
+      NSE_SURV[sym]=active;
+      active.forEach(k=>{SURV_RULE_HITS[k]=(SURV_RULE_HITS[k]||0)+1;});
+    }
+  });
+}
 function scannerSessionTag(fileName, raw){
   const dataHash=(function(){let h=0;for(let i=0;i<Math.min(raw.length,200);i++){const pc=parseFloat(raw[i][Object.keys(raw[i]).find(k=>/price/i.test(k)&&/change/i.test(k))])||0;h=((h<<5)-h)+Math.round(pc*1000);h|=0;}return h;})();
   return fileName+'·'+raw.length+'·'+dataHash;
 }
 async function refreshRankingsAfterSurvRuleChange(){
   if(isCryptoMode()) return;
+  if(!Object.keys(SURV_ALL_HITS||{}).length&&FS.hasFolder()){
+    try{await hydrateSessionCSVsFromWorkspace();rebuildActiveSurveillanceHits();}catch(e){console.warn('Could not hydrate surveillance data for live refresh',e);}
+  }
   let raw=Array.isArray(window._lastRawTV)?window._lastRawTV:null;
   let fileName='ALL NSE.csv';
   const looksStockRaw=rows=>rows?.length&&Object.prototype.hasOwnProperty.call(rows[0],'Symbol');
@@ -2740,7 +2765,7 @@ async function refreshRankingsAfterSurvRuleChange(){
     showToast('Rule saved, but Rankings refresh failed. Re-upload ALL NSE.csv.',4000,true);
   }
 }
-function addSurvRule(colArg){
+async function addSurvRule(colArg){
   let column=colArg?String(colArg).trim():'';
   if(!column){
     const input=document.getElementById('survRuleInput');
@@ -2752,17 +2777,19 @@ function addSurvRule(colArg){
   if(getSurvRules().some(rule=>rule.key===key)){showToast('That hard filter is already configured.',3000,true);return;}
   SURV_CUSTOM_RULES.push({key,column,label:column});
   saveSurvRules();
+  rebuildActiveSurveillanceHits();
   if(ENGINE_DATA){ENGINE_DATA.survRuleRows=syncSurvRuleRows(ENGINE_DATA.survRuleRows||[]);persistMethodologySnapshot();}
   _refreshHFSection();
-  refreshRankingsAfterSurvRuleChange();
+  await refreshRankingsAfterSurvRuleChange();
   showToast(`<strong>Added hard filter</strong> &mdash; ${escHtml(column)}. It will be applied whenever that REG1 column is flagged.`,3500);
 }
-function removeSurvRule(key){
+async function removeSurvRule(key){
   SURV_CUSTOM_RULES=SURV_CUSTOM_RULES.filter(rule=>rule.key!==key&&survRuleKey(rule.column||rule.label)!==key);
   saveSurvRules();
+  rebuildActiveSurveillanceHits();
   if(ENGINE_DATA){ENGINE_DATA.survRuleRows=syncSurvRuleRows(ENGINE_DATA.survRuleRows||[]);persistMethodologySnapshot();}
   _refreshHFSection();
-  refreshRankingsAfterSurvRuleChange();
+  await refreshRankingsAfterSurvRuleChange();
   showToast('Surveillance rule removed.',2500);
 }
 function buildHardFilterMethodologyHTML(E){
@@ -4880,7 +4907,6 @@ initNSELinks();
 </script>
 </body>
 </html>
-
 
 
 
