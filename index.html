@@ -348,7 +348,7 @@ table.main tbody td{padding:9px 11px;font-family:'DM Mono',monospace;font-size:1
 
 
 <script>
-const BUILD_TS='2026-05-18 12:26 IST'; // replaced at commit time with IST datetime
+const BUILD_TS='2026-05-19 09:41 IST'; // replaced at commit time with IST datetime
 const MODE_STORE='rs_market_mode';
 const USD_INR_STORE='rs_usd_inr';
 const HARD_FILTER_SCHEMA='null_blanks_pass_v1';
@@ -4227,12 +4227,18 @@ function nseDate(){
 function setMsg(m){document.getElementById('ldMsg').textContent=m;}
 
 function captureScannerRuntime(){
-  return {mode:MARKET_MODE,ALL,FILT,ENGINE_DATA,PREV_SNAP,PREV_SNAP_META,ACC_CORR,ACC_CORR_BULL,ACC_CORR_BEAR,ACC_CORR_NEUT,CURRENT_REGIME,REMOVED,SCORE_MAP,COLS};
+  return {
+    mode:MARKET_MODE,ALL,FILT,ENGINE_DATA,PREV_SNAP,PREV_SNAP_META,
+    ACC_CORR,ACC_CORR_BULL,ACC_CORR_BEAR,ACC_CORR_NEUT,CURRENT_REGIME,
+    REMOVED,SCORE_MAP,COLS,_tvLoadedThisSession,
+    lastRawTV:window._lastRawTV,lastEngineFeats:window._lastEngineFeats,lastParsedFiltered:window._lastParsedFiltered
+  };
 }
 function restoreScannerRuntime(s){
   MARKET_MODE=s.mode;ALL=s.ALL;FILT=s.FILT;ENGINE_DATA=s.ENGINE_DATA;PREV_SNAP=s.PREV_SNAP;PREV_SNAP_META=s.PREV_SNAP_META;
   ACC_CORR=s.ACC_CORR;ACC_CORR_BULL=s.ACC_CORR_BULL;ACC_CORR_BEAR=s.ACC_CORR_BEAR;ACC_CORR_NEUT=s.ACC_CORR_NEUT;
-  CURRENT_REGIME=s.CURRENT_REGIME;REMOVED=s.REMOVED;SCORE_MAP=s.SCORE_MAP;COLS=s.COLS;
+  CURRENT_REGIME=s.CURRENT_REGIME;REMOVED=s.REMOVED;SCORE_MAP=s.SCORE_MAP;COLS=s.COLS;_tvLoadedThisSession=s._tvLoadedThisSession;
+  window._lastRawTV=s.lastRawTV;window._lastEngineFeats=s.lastEngineFeats;window._lastParsedFiltered=s.lastParsedFiltered;
 }
 function loadPrevSnapForMode(mode){
   const todayISO=getSessionDate();
@@ -4321,11 +4327,12 @@ async function processScannerUpload(scannerFile, mode){
     return true;
   }finally{
     restoreFilters();
-    if(mode!==original.mode) restoreScannerRuntime(original);
+    restoreScannerRuntime(original);
   }
 }
 
 async function processFiles(files){
+  const activeMode=MARKET_MODE;
   NSE_BHAV={};NSE_52W={};NSE_SURV={};NSE_BULK={};NSE_BLOCK={};
   let tvFile=null,cryptoFile=null,nseZip=null,holdFile=null,posFile=null,ordFile=null,tbFile=null;
   for(const f of files){
@@ -4397,8 +4404,9 @@ async function processFiles(files){
   const scannerJobs=[];
   if(tvFile)scannerJobs.push({mode:'stock',file:tvFile});
   if(cryptoFile)scannerJobs.push({mode:'crypto',file:cryptoFile});
-  scannerJobs.sort((a,b)=>(a.mode===MARKET_MODE?1:0)-(b.mode===MARKET_MODE?1:0)); // active mode last
+  scannerJobs.sort((a,b)=>(a.mode===activeMode?1:0)-(b.mode===activeMode?1:0)); // active mode last
   for(const job of scannerJobs) await processScannerUpload(job.file,job.mode);
+  MARKET_MODE=activeMode;
   const stockScannerProcessed=scannerJobs.some(j=>j.mode==='stock');
 
   if(!scannerJobs.length&&!holdFile&&!posFile&&!ordFile&&!tbFile){
@@ -4830,8 +4838,6 @@ initNSELinks();
 </script>
 </body>
 </html>
-
-
 
 
 
