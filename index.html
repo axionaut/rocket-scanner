@@ -348,7 +348,7 @@ table.main tbody td{padding:9px 11px;font-family:'DM Mono',monospace;font-size:1
 
 
 <script>
-const BUILD_TS='2026-05-19 09:41 IST'; // replaced at commit time with IST datetime
+const BUILD_TS='2026-05-19 10:32 IST'; // replaced at commit time with IST datetime
 const MODE_STORE='rs_market_mode';
 const USD_INR_STORE='rs_usd_inr';
 const HARD_FILTER_SCHEMA='null_blanks_pass_v1';
@@ -2702,6 +2702,44 @@ function _refreshHFSection(){
   if(wrap){wrap.innerHTML=buildHardFilterMethodologyHTML(ENGINE_DATA);setTimeout(()=>{_methTbls.hf?.render();_methTbls.sc?.render();},0);}
   else renderMethodology();
 }
+function scannerSessionTag(fileName, raw){
+  const dataHash=(function(){let h=0;for(let i=0;i<Math.min(raw.length,200);i++){const pc=parseFloat(raw[i][Object.keys(raw[i]).find(k=>/price/i.test(k)&&/change/i.test(k))])||0;h=((h<<5)-h)+Math.round(pc*1000);h|=0;}return h;})();
+  return fileName+'·'+raw.length+'·'+dataHash;
+}
+async function refreshRankingsAfterSurvRuleChange(){
+  if(isCryptoMode()) return;
+  let raw=Array.isArray(window._lastRawTV)?window._lastRawTV:null;
+  let fileName='ALL NSE.csv';
+  const looksStockRaw=rows=>rows?.length&&Object.prototype.hasOwnProperty.call(rows[0],'Symbol');
+  if(!looksStockRaw(raw)&&FS.hasFolder()&&FS.readUploadText){
+    try{
+      const f=await FS.readUploadText('ALL NSE.csv');
+      if(f?.text){raw=parseCSV(f.text);fileName=f.path||fileName;window._lastRawTV=raw;}
+    }catch(e){console.warn('Could not reload ALL NSE.csv for surveillance refresh',e);}
+  }
+  if(!looksStockRaw(raw)){
+    applyFilters();
+    showToast('Rule saved. Re-upload ALL NSE.csv to fully refresh Rankings.',3500,true);
+    return;
+  }
+  try{
+    const tag=window._lastScannerSessionTag||ACC_CORR?.lastTag||scannerSessionTag(fileName,raw);
+    if(!ACC_CORR||ACC_CORR.lastTag!==tag) ACC_CORR={...(ACC_CORR||{corr:{},sessions:0}),lastTag:tag};
+    ALL=runEngine(raw,tag)||[];
+    ALL.sort((a,b)=>b.rocketScore-a.rocketScore);
+    const rc=FS.get(modeKey(REC_COUNT_STORE))||{}, rcD=rc[getSessionDate()]||{};
+    ALL.forEach(s=>{s.seen=rcD[s.symbol]||0;});
+    FS.set(modeKey(ALL_STORE),{data:ALL.map(s=>({...s,name:s.name?s.name.substring(0,20):s.symbol})),fileTag:fileName+' · '+raw.length+' stocks',ts:Date.now()});
+    window._lastScannerSessionTag=tag;
+    FILT=[...ALL];
+    applyFilters();
+    renderMethodology();
+    try{await FS.write(FS.getBrain());}catch(e){console.warn('Brain flush failed after surveillance refresh',e);}
+  }catch(e){
+    console.error('Surveillance ranking refresh failed',e);
+    showToast('Rule saved, but Rankings refresh failed. Re-upload ALL NSE.csv.',4000,true);
+  }
+}
 function addSurvRule(colArg){
   let column=colArg?String(colArg).trim():'';
   if(!column){
@@ -2716,6 +2754,7 @@ function addSurvRule(colArg){
   saveSurvRules();
   if(ENGINE_DATA){ENGINE_DATA.survRuleRows=syncSurvRuleRows(ENGINE_DATA.survRuleRows||[]);persistMethodologySnapshot();}
   _refreshHFSection();
+  refreshRankingsAfterSurvRuleChange();
   showToast(`<strong>Added hard filter</strong> &mdash; ${escHtml(column)}. It will be applied whenever that REG1 column is flagged.`,3500);
 }
 function removeSurvRule(key){
@@ -2723,6 +2762,7 @@ function removeSurvRule(key){
   saveSurvRules();
   if(ENGINE_DATA){ENGINE_DATA.survRuleRows=syncSurvRuleRows(ENGINE_DATA.survRuleRows||[]);persistMethodologySnapshot();}
   _refreshHFSection();
+  refreshRankingsAfterSurvRuleChange();
   showToast('Surveillance rule removed.',2500);
 }
 function buildHardFilterMethodologyHTML(E){
@@ -4231,14 +4271,16 @@ function captureScannerRuntime(){
     mode:MARKET_MODE,ALL,FILT,ENGINE_DATA,PREV_SNAP,PREV_SNAP_META,
     ACC_CORR,ACC_CORR_BULL,ACC_CORR_BEAR,ACC_CORR_NEUT,CURRENT_REGIME,
     REMOVED,SCORE_MAP,COLS,_tvLoadedThisSession,
-    lastRawTV:window._lastRawTV,lastEngineFeats:window._lastEngineFeats,lastParsedFiltered:window._lastParsedFiltered
+    lastRawTV:window._lastRawTV,lastScannerSessionTag:window._lastScannerSessionTag,
+    lastEngineFeats:window._lastEngineFeats,lastParsedFiltered:window._lastParsedFiltered
   };
 }
 function restoreScannerRuntime(s){
   MARKET_MODE=s.mode;ALL=s.ALL;FILT=s.FILT;ENGINE_DATA=s.ENGINE_DATA;PREV_SNAP=s.PREV_SNAP;PREV_SNAP_META=s.PREV_SNAP_META;
   ACC_CORR=s.ACC_CORR;ACC_CORR_BULL=s.ACC_CORR_BULL;ACC_CORR_BEAR=s.ACC_CORR_BEAR;ACC_CORR_NEUT=s.ACC_CORR_NEUT;
   CURRENT_REGIME=s.CURRENT_REGIME;REMOVED=s.REMOVED;SCORE_MAP=s.SCORE_MAP;COLS=s.COLS;_tvLoadedThisSession=s._tvLoadedThisSession;
-  window._lastRawTV=s.lastRawTV;window._lastEngineFeats=s.lastEngineFeats;window._lastParsedFiltered=s.lastParsedFiltered;
+  window._lastRawTV=s.lastRawTV;window._lastScannerSessionTag=s.lastScannerSessionTag;
+  window._lastEngineFeats=s.lastEngineFeats;window._lastParsedFiltered=s.lastParsedFiltered;
 }
 function loadPrevSnapForMode(mode){
   const todayISO=getSessionDate();
@@ -4305,8 +4347,8 @@ async function processScannerUpload(scannerFile, mode){
     setMsg('Running '+(mode==='crypto'?'crypto':'stock')+' mRMR engine across '+raw.length+' '+(mode==='crypto'?'assets':'stocks')+'...');
     await new Promise(r=>setTimeout(r,60));
     window._lastRawTV=raw;
-    const dataHash=(function(){let h=0;for(let i=0;i<Math.min(raw.length,200);i++){const pc=parseFloat(raw[i][Object.keys(raw[i]).find(k=>/price/i.test(k)&&/change/i.test(k))])||0;h=((h<<5)-h)+Math.round(pc*1000);h|=0;}return h;})();
-    const sessionTag=scannerFile.name+'·'+raw.length+'·'+dataHash;
+    const sessionTag=scannerSessionTag(scannerFile.name,raw);
+    window._lastScannerSessionTag=sessionTag;
     ALL=runEngine(raw,sessionTag)||[];
     ALL.sort((a,b)=>b.rocketScore-a.rocketScore);
     const rcToday=getSessionDate(), rc=FS.get(modeKey(REC_COUNT_STORE,mode))||{};
@@ -4838,8 +4880,6 @@ initNSELinks();
 </script>
 </body>
 </html>
-
-
 
 
 
