@@ -349,7 +349,7 @@ table.main tbody td{padding:9px 11px;font-family:'DM Mono',monospace;font-size:1
 
 
 <script>
-const BUILD_TS='2026-05-20 15:12 IST'; // replaced at commit time with IST datetime
+const BUILD_TS='2026-05-20 15:55 IST'; // replaced at commit time with IST datetime
 const MODE_STORE='rs_market_mode';
 const USD_INR_STORE='rs_usd_inr';
 const HARD_FILTER_SCHEMA='null_blanks_pass_v1';
@@ -1984,17 +1984,50 @@ function computeMissedOpp(){
   FS.set(MISSED_OPP_STORE,acc);
 }
 
+function displayFilterReason(s){
+  if(!s) return 'filtered out';
+  const minScore=parseFloat(document.getElementById('fMinScore')?.value)||0;
+  const fvol=isCryptoMode()?0:(parseFloat(document.getElementById('fVol')?.value)||0);
+  const _fMin1Dv=document.getElementById('fMin1D')?.value||'';
+  const fMin1D=_fMin1Dv!==''?parseFloat(_fMin1Dv):-Infinity;
+  const _fMax1Dv=document.getElementById('fMax1D')?.value||'';
+  const fMax1D=_fMax1Dv!==''?parseFloat(_fMax1Dv):Infinity;
+  const fPriceMin=parseFloat(document.getElementById('fPriceMin')?.value)||0;
+  const fPriceMax=parseFloat(document.getElementById('fPriceMax')?.value)||0;
+  if(minScore>0&&s.rocketScore<minScore) return `Score ${s.rocketScore?.toFixed?.(1)||s.rocketScore} < ${minScore}`;
+  if(fvol>0&&s.volume!=null&&s.volume<fvol) return `Volume ${Math.round(s.volume).toLocaleString('en-IN')} < ${Math.round(fvol).toLocaleString('en-IN')}`;
+  if(fMin1D>-Infinity&&s.priceChange!=null&&s.priceChange<fMin1D) return `1D ${s.priceChange.toFixed(2)}% < ${fMin1D}%`;
+  if(fMax1D<Infinity&&s.priceChange!=null&&s.priceChange>fMax1D) return `1D ${s.priceChange.toFixed(2)}% > ${fMax1D}%`;
+  if(fPriceMin>0&&s.price!=null&&s.price<fPriceMin) return `Price ₹${s.price.toFixed(2)} < ₹${fPriceMin}`;
+  if(fPriceMax>0&&s.price!=null&&s.price>fPriceMax) return `Price ₹${s.price.toFixed(2)} > ₹${fPriceMax}`;
+  if(!isBuyZone(s)) return 'No runway to TGT before rocket ceiling';
+  if((ENGINE_DATA.yesterdayRockets||[]).some(r=>r.symbol===s.symbol)) return 'Yesterday rocket hidden';
+  if(!FILT.some(x=>x.symbol===s.symbol)){
+    if(SUPPRESSED_HELD>0) return 'Held/recently bought suppression';
+    return 'Outside current top-20 display cap';
+  }
+  return 'visible';
+}
+
 function renderStats(){
   const t=ALL.length,sc=ALL.filter(s=>s.tier==='S').length,ac=ALL.filter(s=>s.tier==='A').length;
   const bull=ALL.filter(s=>(s.priceChange||0)>0).length;
   const totalParsed=ENGINE_DATA?.totalParsed||t;
   const top=ALL[0];
 
-  // Score spread: shows if engine is differentiating
-  const scores=ALL.map(s=>s.rocketScore).filter(v=>isFinite(v));
-  const scoreMax=scores.length?Math.max(...scores).toFixed(1):'—';
-  const scoreMin=scores.length?Math.min(...scores).toFixed(1):'—';
-  const scoreSpread=scores.length?(Math.max(...scores)-Math.min(...scores)).toFixed(1):'—';
+  // Score spread: visible table first, with the engine top called out when display filters hide it.
+  const rawRanked=ALL.filter(s=>isFinite(s.rocketScore)).sort((a,b)=>b.rocketScore-a.rocketScore);
+  const engineTop=rawRanked[0]||null;
+  const visibleScores=FILT.map(s=>s.rocketScore).filter(v=>isFinite(v));
+  const visibleMax=visibleScores.length?Math.max(...visibleScores):null;
+  const visibleMin=visibleScores.length?Math.min(...visibleScores):null;
+  const scoreSpread=visibleScores.length?(visibleMax-visibleMin).toFixed(1):'—';
+  const hiddenEngineTop=engineTop&&!FILT.some(s=>s.symbol===engineTop.symbol);
+  const engineTopText=engineTop?`${engineTop.symbol} ${engineTop.rocketScore.toFixed(1)}`:'—';
+  const hiddenReason=hiddenEngineTop?displayFilterReason(engineTop):'';
+  const scoreDetail=visibleScores.length
+    ? `${visibleMax.toFixed(1)} visible top · ${visibleMin.toFixed(1)} low${hiddenEngineTop?` · engine top ${escHtml(engineTopText)} hidden: ${escHtml(hiddenReason)}`:''}`
+    : `${engineTop?`No visible matches · engine top ${escHtml(engineTopText)} hidden: ${escHtml(hiddenReason)}`:'No scores loaded'}`;
 
   const _rsCeiling=ENGINE_DATA?.rocketThreshold||10;
   const rocketCount=ALL.filter(s=>s.priceChange!=null&&s.priceChange>=_rsCeiling).length;
@@ -2045,7 +2078,7 @@ function renderStats(){
       return `<div class="st"><div class="st-l">Universe</div><div class="st-v">${t.toLocaleString()}</div><div class="st-d">of ${totalParsed.toLocaleString()} · <span style="color:var(--green)">${bull} ▲</span> · <span style="color:var(--red)">${t-bull} ▼</span>${_todayStr}${_histStr}</div></div>`;
     })()}
     ${slTgtCard}
-    <div class="st"><div class="st-l">Score Spread</div><div class="st-v">${scoreSpread}</div><div class="st-d">${scoreMax} top · ${scoreMin} low</div></div>
+    <div class="st"><div class="st-l">Score Spread</div><div class="st-v">${scoreSpread}</div><div class="st-d">${scoreDetail}</div></div>
     <div class="st"><div class="st-l">${isCryptoMode()?'Top Category':'Top Sector'}</div><div class="st-v" style="font-size:15px;color:var(--green)">${topSec}</div><div class="st-d">${topSecPct.toFixed(0)}% advancing</div></div>
     <div class="st"><div class="st-l">Rockets Today</div><div class="st-v" style="color:${rocketCount>0?'var(--fire)':'var(--t3)'}">${rocketCount}</div><div class="st-d">≥${_rsCeiling}%</div></div>
     <div class="st"><div class="st-l">Regime</div><div class="st-v">${
