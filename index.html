@@ -649,6 +649,74 @@ const FS = (() => {
   return {init,pickFolder,reconnect,needsReconnect,read,readUploadText,readUploadFile,write,set,setMultiple,get,load,getBrain,reset,folderName,hasFolder};
 })();
 
+const WORKSPACE_WATCH_FILES=[
+  'ALL NSE.csv',
+  'ALL CRYPTO.csv',
+  'Reports-Daily-Multiple.zip',
+  'Holdings.csv',
+  'Positions.csv',
+  'Orders.csv',
+  'TRADEBOOK.csv',
+  'NSE Holidays.csv'
+];
+let workspaceWatchTimer=null;
+let workspaceWatchSnapshot=null;
+let workspaceWatchBusy=false;
+
+async function getWorkspaceInputFiles(){
+  if(!FS.hasFolder()) return [];
+  const entries=await Promise.all(WORKSPACE_WATCH_FILES.map(async name=>{
+    try{return await FS.readUploadFile(name);}catch(e){return null;}
+  }));
+  return entries.filter(Boolean).map(entry=>entry.file);
+}
+
+function workspaceFileSignature(file){
+  return [file.name,file.size||0,file.lastModified||0].join('|');
+}
+
+function workspaceSnapshot(files){
+  return files.map(workspaceFileSignature).sort().join('||');
+}
+
+async function pollWorkspaceUploads(){
+  if(workspaceWatchBusy||!FS.hasFolder()) return;
+  workspaceWatchBusy=true;
+  try{
+    const files=await getWorkspaceInputFiles();
+    const next=workspaceSnapshot(files);
+    if(workspaceWatchSnapshot===null){
+      workspaceWatchSnapshot=next;
+      return;
+    }
+    if(next&&next!==workspaceWatchSnapshot){
+      workspaceWatchSnapshot=next;
+      if(workspaceWatchTimer) clearInterval(workspaceWatchTimer);
+      showToast('<strong>Folder update detected.</strong> Processing latest files...');
+      const hasScannerInput=files.some(f=>{
+        const n=f.name.toLowerCase();
+        return n.includes('all nse')||n.includes('all crypto')||n.endsWith('.zip')||n.includes('.zip');
+      });
+      if(hasScannerInput) await processFiles(files);
+      else{
+        await hydrateSessionCSVsFromWorkspace();
+        try{await FS.write(FS.getBrain());}catch(e){console.warn('Brain flush failed',e);}
+        location.reload();
+      }
+    }
+  }catch(e){
+    console.warn('Workspace watcher failed',e);
+  }finally{
+    workspaceWatchBusy=false;
+  }
+}
+
+function startWorkspaceWatcher(){
+  if(workspaceWatchTimer||!FS.hasFolder()) return;
+  pollWorkspaceUploads();
+  workspaceWatchTimer=setInterval(pollWorkspaceUploads,7000);
+}
+
 function updateFolderUI(){
   const btn=document.getElementById('folderBtn');
   if(!btn) return;
@@ -684,7 +752,10 @@ async function pickDataFolder(){
     return;
   }
   const ok=await FS.pickFolder();
-  if(ok) showToast('<strong>Folder set:</strong> '+FS.folderName()+' — brain data will auto-save here.');
+  if(ok){
+    showToast('<strong>Folder set:</strong> '+FS.folderName()+' — brain data will auto-save here.');
+    startWorkspaceWatcher();
+  }
 }
 
 // ── One-time key migration: move old versioned keys → clean names ──
@@ -4731,6 +4802,7 @@ async function initApp(){
   // Prefer current workspace CSVs over the saved brain snapshot. This keeps
   // Latest Session/Booked Today from showing stale rs_orders after Orders.csv changes.
   if(!isCryptoMode()) try{await hydrateSessionCSVsFromWorkspace();}catch(e){console.warn('INIT: workspace CSV refresh failed',e);}
+  startWorkspaceWatcher();
 
   // Step 3b: Render after hydration — workspace CSVs (orders, tradebook, holdings) are now fresh in memory.
   // renderPerformance must run before renderStats (populates PERF_TRADE_WINDOWS for current-window pill).
