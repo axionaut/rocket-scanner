@@ -327,6 +327,7 @@ table.main tbody td{padding:9px 11px;font-family:'DM Mono',monospace;font-size:1
    <div class="fg stock-only"><span class="fg-lbl">Min Vol <span id="volAutoLabel" style="font-size:9px;color:var(--cyan)"></span></span><input type="number" id="fVol" placeholder="auto" min="0" style="width:110px;padding:8px 10px;background:var(--bg-card);border:1px solid var(--border);border-radius:8px;color:var(--t1);font-family:'DM Mono',monospace;font-size:12px;outline:none;transition:border .2s" onfocus="this.style.borderColor='var(--cyan)'" onblur="this.style.borderColor='var(--border)'" oninput="onVolChange()"></div>
    <div class="fg stock-only"><span class="fg-lbl" style="font-size:8px">Vol ×</span><input type="number" id="fVolMult" placeholder="auto" min="10" max="99999" step="10" style="width:65px;padding:8px 6px;background:var(--bg-card);border:1px solid var(--border);border-radius:8px;color:var(--t1);font-family:'DM Mono',monospace;font-size:11px;outline:none" oninput="VOL_AUTO=true;setAutoVolume();applyFilters()" title="Volume multiplier: minutes since open × this = Min Vol floor"></div>
    <div class="fg"><span class="fg-lbl" style="font-size:8px">Min TV <span class="currency-lbl">₹</span></span><input type="number" id="fMinTurnover" placeholder="e.g. 1000000" value="1000000" min="0" step="500000" style="width:90px;padding:8px 6px;background:var(--bg-card);border:1px solid var(--border);border-radius:8px;color:var(--t1);font-family:'DM Mono',monospace;font-size:11px;outline:none" oninput="applyFilters()" title="Min turnover / 24h INR volume floor. Blank = no filter."></div>
+   <div class="fg stock-only"><span class="fg-lbl" style="font-size:8px">Min MCap <span class="currency-lbl">₹</span></span><input type="number" id="fMinMarketCap" placeholder="e.g. 5000000000" min="0" step="100000000" style="width:112px;padding:8px 6px;background:var(--bg-card);border:1px solid var(--border);border-radius:8px;color:var(--t1);font-family:'DM Mono',monospace;font-size:11px;outline:none" oninput="applyFilters()" title="Min market capitalization in ₹. Blank = no filter. Stocks with blank/null market cap pass through."></div>
    <div class="fg stock-only"><span class="fg-lbl" style="color:var(--amber)">Capital ₹</span><input type="number" id="fCapital" placeholder="e.g. 100000" min="0" step="1000" style="width:110px;padding:8px 10px;background:var(--bg-card);border:1px solid var(--border);border-radius:8px;color:var(--t1);font-family:'DM Mono',monospace;font-size:12px;outline:none;transition:border .2s" onfocus="this.style.borderColor='var(--amber)'" onblur="this.style.borderColor='var(--border)'" oninput="applyFilters()"></div>
    <div class="fg stock-only"><span class="fg-lbl" style="color:var(--amber)">Max Alloc ₹</span><input type="number" id="fMaxAlloc" placeholder="e.g. 20000" min="0" step="1000" style="width:110px;padding:8px 10px;background:var(--bg-card);border:1px solid var(--border);border-radius:8px;color:var(--t1);font-family:'DM Mono',monospace;font-size:12px;outline:none;transition:border .2s" onfocus="this.style.borderColor='var(--amber)'" onblur="this.style.borderColor='var(--border)'" oninput="applyFilters()" title="Per-stock cap for allocation. Empty = no cap."></div>
    <div class="fg stock-only"><span class="fg-lbl" style="color:var(--purple)">Avg-dn %</span><input type="number" id="fReDrop" value="1" placeholder="1" min="0" step="0.5" style="width:72px;padding:8px 10px;background:var(--bg-card);border:1px solid var(--border);border-radius:8px;color:var(--t1);font-family:'DM Mono',monospace;font-size:12px;outline:none;transition:border .2s" onfocus="this.style.borderColor='var(--purple)'" onblur="this.style.borderColor='var(--border)'" oninput="applyFilters()" title="Stock must have fallen at least this % below your avg buy to appear as a top-up candidate. Shorts and zero-qty always suppressed."></div>
@@ -349,7 +350,7 @@ table.main tbody td{padding:9px 11px;font-family:'DM Mono',monospace;font-size:1
 
 
 <script>
-const BUILD_TS='2026-05-20 16:25 IST'; // replaced at commit time with IST datetime
+const BUILD_TS='2026-05-20 16:36 IST'; // replaced at commit time with IST datetime
 const MODE_STORE='rs_market_mode';
 const USD_INR_STORE='rs_usd_inr';
 const HARD_FILTER_SCHEMA='null_blanks_pass_v1';
@@ -1352,6 +1353,7 @@ function runEngine(raw, sessionTag){
     perf_1w:      findKey(/performance.*1_week|perf.*1_week|1_week.*perf/),
     volume:       findKey(cryptoMode?/volume_in_usd_24_hours|^volume_24_hours$|^volume$/:/^volume_1_day$|^volume$/),
     turnover:     findKey(cryptoMode?/volume_in_usd_24_hours|market_capitalization/:/price_volume_turnover_1_day/),
+    market_cap:   findKey(/market_capitalization|market_cap/),
     shareholders: findKey(/number_of_shareholders/),
     piotroski:    findKey(/piotroski/),
     high_1d:      findKey(/^high_1_day$/),
@@ -1730,6 +1732,7 @@ function runEngine(raw, sessionTag){
       price:(K.price?d[K.price]:null),
       priceChange:(K.price_change?d[K.price_change]:null),
       volume:vol,
+      marketCap:(!cryptoMode&&K.market_cap?d[K.market_cap]:null),
       atr:(K.atr_pct?d[K.atr_pct]:null),
       high1d:(K.high_1d?d[K.high_1d]:null),
       low1d:(K.low_1d?d[K.low_1d]:null),
@@ -3293,6 +3296,7 @@ function isBuyZone(s){
 function getFilterBarReason(s){
   const minScore=parseFloat(document.getElementById('fMinScore')?.value)||0;
   const fvol=isCryptoMode()?0:(parseFloat(document.getElementById('fVol')?.value)||0);
+  const fMinMarketCap=isCryptoMode()?0:(parseFloat(document.getElementById('fMinMarketCap')?.value)||0);
   const _fMin1Dv=document.getElementById('fMin1D')?.value||'';
   const fMin1D=_fMin1Dv!==''?parseFloat(_fMin1Dv):-Infinity;
   const _fMax1Dv=document.getElementById('fMax1D')?.value||'';
@@ -3301,6 +3305,7 @@ function getFilterBarReason(s){
   const fPriceMax=parseFloat(document.getElementById('fPriceMax')?.value)||0;
   if(minScore>0&&s.rocketScore<minScore) return `Score ${s.rocketScore?.toFixed?.(1)||s.rocketScore} < ${minScore}`;
   if(fvol>0&&s.volume!=null&&s.volume<fvol) return `Volume ${Math.round(s.volume).toLocaleString('en-IN')} < ${Math.round(fvol).toLocaleString('en-IN')}`;
+  if(fMinMarketCap>0&&s.marketCap!=null&&s.marketCap<fMinMarketCap) return `MCap ₹${fV(s.marketCap)} < ₹${fV(fMinMarketCap)}`;
   if(fMin1D>-Infinity&&s.priceChange!=null&&s.priceChange<fMin1D) return `1D ${s.priceChange.toFixed(2)}% < ${fMin1D}%`;
   if(fMax1D<Infinity&&s.priceChange!=null&&s.priceChange>fMax1D) return `1D ${s.priceChange.toFixed(2)}% > ${fMax1D}%`;
   if(fPriceMin>0&&s.price!=null&&s.price<fPriceMin) return `Price ₹${s.price.toFixed(2)} < ₹${fPriceMin}`;
@@ -3758,6 +3763,7 @@ function renderStatusBar(){
   const minScore2=parseFloat(document.getElementById('fMinScore')?.value)||0;
   const fscore=isCryptoMode()?0:4;
   const fvol2=isCryptoMode()?0:(parseFloat(document.getElementById('fVol')?.value)||0);
+  const fMinMarketCap2=isCryptoMode()?0:(parseFloat(document.getElementById('fMinMarketCap')?.value)||0);
   const _fMin1Dv2=document.getElementById('fMin1D')?.value||'';
   const fMin1D=_fMin1Dv2!==''?parseFloat(_fMin1Dv2):-Infinity;
   if(minScore2>0)tags.push('Score≥'+minScore2);
@@ -3766,6 +3772,7 @@ function renderStatusBar(){
   const _sbTgt=getEffectiveTgtPct()||3.7;
   tags.push('runway≥'+_sbTgt+'%');
   if(fvol2>0){const n=fvol2;tags.push('Vol≥'+(n>=1e6?(n/1e6).toFixed(1)+'M':n>=1e3?(n/1e3).toFixed(0)+'K':n));}
+  if(fMinMarketCap2>0)tags.push('MCap≥₹'+fV(fMinMarketCap2));
   const capital=parseFloat(document.getElementById('fCapital').value)||0;
   const isFiltered=tags.length>0||shown<total;
   const countColor=shown<total?'var(--fire)':'var(--green)';
@@ -3807,7 +3814,7 @@ function renderStatusBar(){
 }
 
 function clearFilters(){
-  ['fMinScore','fMin1D','fCapital','fMaxAlloc','fPriceMin','fPriceMax','fMinTurnover'].forEach(id=>{const el=document.getElementById(id);if(el)el.value='';});
+  ['fMinScore','fMin1D','fCapital','fMaxAlloc','fPriceMin','fPriceMax','fMinTurnover','fMinMarketCap'].forEach(id=>{const el=document.getElementById(id);if(el)el.value='';});
   const max1Del=document.getElementById('fMax1D');if(max1Del)max1Del.value='8.5';
   const reDropEl=document.getElementById('fReDrop');if(reDropEl)reDropEl.value='1';
   const topupEl=document.getElementById('fTopupAlloc');if(topupEl)topupEl.value='50';
@@ -4462,12 +4469,12 @@ function loadPrevSnapForMode(mode){
   return out;
 }
 function applySavedFiltersForMode(mode){
-  const ids=['fMinScore','fPriceMin','fPriceMax','fMin1D','fMax1D','fVol','fVolMult','fMinTurnover','fCapital','fMaxAlloc','fReDrop','fTopupAlloc','fRocketPct'];
+  const ids=['fMinScore','fPriceMin','fPriceMax','fMin1D','fMax1D','fVol','fVolMult','fMinTurnover','fMinMarketCap','fCapital','fMaxAlloc','fReDrop','fTopupAlloc','fRocketPct'];
   const prev={};
   ids.forEach(id=>{const el=document.getElementById(id);if(el)prev[id]=el.value;});
   try{
     const st=JSON.parse(localStorage.getItem(modeKey(SCANNER_STORE,mode))||'{}');
-    const map={minScore:'fMinScore',priceMin:'fPriceMin',priceMax:'fPriceMax',fMin1D:'fMin1D',fMax1D:'fMax1D',fvol:'fVol',volMult:'fVolMult',minTurnover:'fMinTurnover',capital:'fCapital',maxAlloc:'fMaxAlloc',reDrop:'fReDrop',topupAlloc:'fTopupAlloc',rocketPct:'fRocketPct'};
+    const map={minScore:'fMinScore',priceMin:'fPriceMin',priceMax:'fPriceMax',fMin1D:'fMin1D',fMax1D:'fMax1D',fvol:'fVol',volMult:'fVolMult',minTurnover:'fMinTurnover',minMarketCap:'fMinMarketCap',capital:'fCapital',maxAlloc:'fMaxAlloc',reDrop:'fReDrop',topupAlloc:'fTopupAlloc',rocketPct:'fRocketPct'};
     Object.entries(map).forEach(([k,id])=>{const el=document.getElementById(id);if(el&&st[k]!=null)el.value=st[k];});
     if(mode==='crypto'&&st.minTurnover==null){const el=document.getElementById('fMinTurnover');if(el)el.value='8000000';}
   }catch(e){}
@@ -4891,6 +4898,7 @@ function saveFilterState(){
     fvol:VOL_AUTO?'':document.getElementById('fVol')?.value||'',
     volMult:document.getElementById('fVolMult')?.value||String(LIQ_MIN_VOL_DEFAULT),
     minTurnover:document.getElementById('fMinTurnover')?.value||'1000000',
+    minMarketCap:document.getElementById('fMinMarketCap')?.value||'',
     fMin1D:document.getElementById('fMin1D')?.value||'',
     fMax1D:document.getElementById('fMax1D')?.value||'',
     capital:document.getElementById('fCapital')?.value||'',
@@ -4920,6 +4928,7 @@ function loadFilterState(){
     if(state.rocketPct!=null){const el=document.getElementById('fRocketPct');if(el)el.value=state.rocketPct;}
     if(state.volMult){const el=document.getElementById('fVolMult');if(el)el.value=state.volMult;}
     if(state.minTurnover){const el=document.getElementById('fMinTurnover');if(el)el.value=state.minTurnover;}
+    if(state.minMarketCap){const el=document.getElementById('fMinMarketCap');if(el)el.value=state.minMarketCap;}
     if(state.fvol){
       const el=document.getElementById('fVol');if(el)el.value=state.fvol;
       VOL_AUTO=false;
@@ -5029,6 +5038,7 @@ initNSELinks();
 </script>
 </body>
 </html>
+
 
 
 
