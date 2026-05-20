@@ -349,7 +349,7 @@ table.main tbody td{padding:9px 11px;font-family:'DM Mono',monospace;font-size:1
 
 
 <script>
-const BUILD_TS='2026-05-20 15:55 IST'; // replaced at commit time with IST datetime
+const BUILD_TS='2026-05-20 16:10 IST'; // replaced at commit time with IST datetime
 const MODE_STORE='rs_market_mode';
 const USD_INR_STORE='rs_usd_inr';
 const HARD_FILTER_SCHEMA='null_blanks_pass_v1';
@@ -430,6 +430,8 @@ let REMOVED={uc:0,surv:0,liq:0,fscore:0,atr:0,deliv:0,fade:0};
 let SUPPRESSED_HELD=0; // count of stocks hidden because already held in POSITIONS
 let SUPPRESSED_YDAY_ROCKET=0; // count of stocks hidden because they were rockets yesterday
 let SELECTED=new Set(); // symbols selected for basket — recomputed from FILT each applyFilters
+let SHOW_FILTERED_CANDIDATES=false;
+let KEEP_FILTER_OVERRIDES=new Set();
 let PREV_SNAP={}; // symbol→{featureKey:value,...} full feature vector from last upload
 let PREV_SNAP_META={}; // metadata for PREV_SNAP, including the regime that produced the snapshot
 // Regime-conditional accumulators — restored from the legacy profitable engine.
@@ -1984,50 +1986,17 @@ function computeMissedOpp(){
   FS.set(MISSED_OPP_STORE,acc);
 }
 
-function displayFilterReason(s){
-  if(!s) return 'filtered out';
-  const minScore=parseFloat(document.getElementById('fMinScore')?.value)||0;
-  const fvol=isCryptoMode()?0:(parseFloat(document.getElementById('fVol')?.value)||0);
-  const _fMin1Dv=document.getElementById('fMin1D')?.value||'';
-  const fMin1D=_fMin1Dv!==''?parseFloat(_fMin1Dv):-Infinity;
-  const _fMax1Dv=document.getElementById('fMax1D')?.value||'';
-  const fMax1D=_fMax1Dv!==''?parseFloat(_fMax1Dv):Infinity;
-  const fPriceMin=parseFloat(document.getElementById('fPriceMin')?.value)||0;
-  const fPriceMax=parseFloat(document.getElementById('fPriceMax')?.value)||0;
-  if(minScore>0&&s.rocketScore<minScore) return `Score ${s.rocketScore?.toFixed?.(1)||s.rocketScore} < ${minScore}`;
-  if(fvol>0&&s.volume!=null&&s.volume<fvol) return `Volume ${Math.round(s.volume).toLocaleString('en-IN')} < ${Math.round(fvol).toLocaleString('en-IN')}`;
-  if(fMin1D>-Infinity&&s.priceChange!=null&&s.priceChange<fMin1D) return `1D ${s.priceChange.toFixed(2)}% < ${fMin1D}%`;
-  if(fMax1D<Infinity&&s.priceChange!=null&&s.priceChange>fMax1D) return `1D ${s.priceChange.toFixed(2)}% > ${fMax1D}%`;
-  if(fPriceMin>0&&s.price!=null&&s.price<fPriceMin) return `Price ₹${s.price.toFixed(2)} < ₹${fPriceMin}`;
-  if(fPriceMax>0&&s.price!=null&&s.price>fPriceMax) return `Price ₹${s.price.toFixed(2)} > ₹${fPriceMax}`;
-  if(!isBuyZone(s)) return 'No runway to TGT before rocket ceiling';
-  if((ENGINE_DATA.yesterdayRockets||[]).some(r=>r.symbol===s.symbol)) return 'Yesterday rocket hidden';
-  if(!FILT.some(x=>x.symbol===s.symbol)){
-    if(SUPPRESSED_HELD>0) return 'Held/recently bought suppression';
-    return 'Outside current top-20 display cap';
-  }
-  return 'visible';
-}
-
 function renderStats(){
   const t=ALL.length,sc=ALL.filter(s=>s.tier==='S').length,ac=ALL.filter(s=>s.tier==='A').length;
   const bull=ALL.filter(s=>(s.priceChange||0)>0).length;
   const totalParsed=ENGINE_DATA?.totalParsed||t;
   const top=ALL[0];
 
-  // Score spread: visible table first, with the engine top called out when display filters hide it.
-  const rawRanked=ALL.filter(s=>isFinite(s.rocketScore)).sort((a,b)=>b.rocketScore-a.rocketScore);
-  const engineTop=rawRanked[0]||null;
-  const visibleScores=FILT.map(s=>s.rocketScore).filter(v=>isFinite(v));
-  const visibleMax=visibleScores.length?Math.max(...visibleScores):null;
-  const visibleMin=visibleScores.length?Math.min(...visibleScores):null;
-  const scoreSpread=visibleScores.length?(visibleMax-visibleMin).toFixed(1):'—';
-  const hiddenEngineTop=engineTop&&!FILT.some(s=>s.symbol===engineTop.symbol);
-  const engineTopText=engineTop?`${engineTop.symbol} ${engineTop.rocketScore.toFixed(1)}`:'—';
-  const hiddenReason=hiddenEngineTop?displayFilterReason(engineTop):'';
-  const scoreDetail=visibleScores.length
-    ? `${visibleMax.toFixed(1)} visible top · ${visibleMin.toFixed(1)} low${hiddenEngineTop?` · engine top ${escHtml(engineTopText)} hidden: ${escHtml(hiddenReason)}`:''}`
-    : `${engineTop?`No visible matches · engine top ${escHtml(engineTopText)} hidden: ${escHtml(hiddenReason)}`:'No scores loaded'}`;
+  // Score spread: shows if engine is differentiating
+  const scores=ALL.map(s=>s.rocketScore).filter(v=>isFinite(v));
+  const scoreMax=scores.length?Math.max(...scores).toFixed(1):'—';
+  const scoreMin=scores.length?Math.min(...scores).toFixed(1):'—';
+  const scoreSpread=scores.length?(Math.max(...scores)-Math.min(...scores)).toFixed(1):'—';
 
   const _rsCeiling=ENGINE_DATA?.rocketThreshold||10;
   const rocketCount=ALL.filter(s=>s.priceChange!=null&&s.priceChange>=_rsCeiling).length;
@@ -2078,7 +2047,7 @@ function renderStats(){
       return `<div class="st"><div class="st-l">Universe</div><div class="st-v">${t.toLocaleString()}</div><div class="st-d">of ${totalParsed.toLocaleString()} · <span style="color:var(--green)">${bull} ▲</span> · <span style="color:var(--red)">${t-bull} ▼</span>${_todayStr}${_histStr}</div></div>`;
     })()}
     ${slTgtCard}
-    <div class="st"><div class="st-l">Score Spread</div><div class="st-v">${scoreSpread}</div><div class="st-d">${scoreDetail}</div></div>
+    <div class="st"><div class="st-l">Score Spread</div><div class="st-v">${scoreSpread}</div><div class="st-d">${scoreMax} top · ${scoreMin} low</div></div>
     <div class="st"><div class="st-l">${isCryptoMode()?'Top Category':'Top Sector'}</div><div class="st-v" style="font-size:15px;color:var(--green)">${topSec}</div><div class="st-d">${topSecPct.toFixed(0)}% advancing</div></div>
     <div class="st"><div class="st-l">Rockets Today</div><div class="st-v" style="color:${rocketCount>0?'var(--fire)':'var(--t3)'}">${rocketCount}</div><div class="st-d">≥${_rsCeiling}%</div></div>
     <div class="st"><div class="st-l">Regime</div><div class="st-v">${
@@ -3315,6 +3284,87 @@ function isBuyZone(s){
   if(maxEntry===null) return false;
   return s.price<=maxEntry+0.01;
 }
+function getFilterBarReason(s){
+  const minScore=parseFloat(document.getElementById('fMinScore')?.value)||0;
+  const fvol=isCryptoMode()?0:(parseFloat(document.getElementById('fVol')?.value)||0);
+  const _fMin1Dv=document.getElementById('fMin1D')?.value||'';
+  const fMin1D=_fMin1Dv!==''?parseFloat(_fMin1Dv):-Infinity;
+  const _fMax1Dv=document.getElementById('fMax1D')?.value||'';
+  const fMax1D=_fMax1Dv!==''?parseFloat(_fMax1Dv):Infinity;
+  const fPriceMin=parseFloat(document.getElementById('fPriceMin')?.value)||0;
+  const fPriceMax=parseFloat(document.getElementById('fPriceMax')?.value)||0;
+  if(minScore>0&&s.rocketScore<minScore) return `Score ${s.rocketScore?.toFixed?.(1)||s.rocketScore} < ${minScore}`;
+  if(fvol>0&&s.volume!=null&&s.volume<fvol) return `Volume ${Math.round(s.volume).toLocaleString('en-IN')} < ${Math.round(fvol).toLocaleString('en-IN')}`;
+  if(fMin1D>-Infinity&&s.priceChange!=null&&s.priceChange<fMin1D) return `1D ${s.priceChange.toFixed(2)}% < ${fMin1D}%`;
+  if(fMax1D<Infinity&&s.priceChange!=null&&s.priceChange>fMax1D) return `1D ${s.priceChange.toFixed(2)}% > ${fMax1D}%`;
+  if(fPriceMin>0&&s.price!=null&&s.price<fPriceMin) return `Price ₹${s.price.toFixed(2)} < ₹${fPriceMin}`;
+  if(fPriceMax>0&&s.price!=null&&s.price>fPriceMax) return `Price ₹${s.price.toFixed(2)} > ₹${fPriceMax}`;
+  if(!isBuyZone(s)) return 'No runway to TGT before rocket ceiling';
+  return '';
+}
+function getHeldPositionMap(){
+  const heldPos={};
+  if(HOLDINGS?.length) HOLDINGS.forEach(h=>{
+    if(h&&h.symbol&&h.qty>0){const avg=HOLD_COST_MAP[h.symbol]??h.avgCost??0;heldPos[h.symbol]={qty:h.qty,avg};}
+  });
+  if(POSITIONS?.length) POSITIONS.forEach(p=>{
+    if(p&&p.symbol) heldPos[p.symbol]={qty:p.qty||0,avg:p.avg!=null?p.avg:0};
+  });
+  if(ORDERS_TODAY?.length){
+    const todayDate=getSessionDate();
+    const ordBuys={},ordSells={},ordAvgBuy={};
+    ORDERS_TODAY.forEach(o=>{
+      if(normOrderDate(o.time)!==todayDate) return;
+      const sym=o.symbol; if(!sym) return;
+      const otype=(o.type||'').toUpperCase();
+      if(otype==='BUY'){
+        ordBuys[sym]=(ordBuys[sym]||0)+o.qty;
+        if(!ordAvgBuy[sym]) ordAvgBuy[sym]={tot:0,qty:0};
+        ordAvgBuy[sym].tot+=o.price*o.qty;
+        ordAvgBuy[sym].qty+=o.qty;
+      } else if(otype==='SELL') ordSells[sym]=(ordSells[sym]||0)+o.qty;
+    });
+    Object.entries(ordBuys).forEach(([sym,bQty])=>{
+      const netQty=bQty-(ordSells[sym]||0);
+      if(netQty>0&&!heldPos[sym]){
+        const avgObj=ordAvgBuy[sym];
+        const avg=avgObj&&avgObj.qty>0?+(avgObj.tot/avgObj.qty).toFixed(2):0;
+        heldPos[sym]={qty:netQty,avg};
+      }
+    });
+    Object.entries(ordSells).forEach(([sym,sQty])=>{
+      const bQty=ordBuys[sym]||0;
+      if(sQty>=bQty&&bQty>0&&!heldPos[sym]) heldPos[sym]={qty:-1,avg:0};
+    });
+  }
+  return heldPos;
+}
+function applyHeldDisplayState(s,heldPos,dropPct){
+  const pos=heldPos[s.symbol];
+  if(!pos) return '';
+  const {qty,avg}=pos;
+  const cur=s.price;
+  if(qty<=0) return 'Held/closed or short today';
+  if(!avg||cur==null||cur<=0) return 'Held, avg cost unavailable';
+  const dropFromAvg=((avg-cur)/avg)*100;
+  if(dropFromAvg>=dropPct){
+    s._isTopUp=true; s._heldAvg=avg; s._heldQty=qty; s._topUpDrop=+dropFromAvg.toFixed(2);
+    return '';
+  }
+  return `Held: only ${dropFromAvg.toFixed(2)}% below avg, needs ${dropPct}%`;
+}
+function toggleFilteredCandidates(){
+  SHOW_FILTERED_CANDIDATES=!SHOW_FILTERED_CANDIDATES;
+  applyFilters();
+}
+function keepFilteredCandidate(sym){
+  KEEP_FILTER_OVERRIDES.add(sym);
+  applyFilters();
+}
+function removeFilterOverride(sym){
+  KEEP_FILTER_OVERRIDES.delete(sym);
+  applyFilters();
+}
 // ── Effective learnt TGT% (gross sell-price delta from buy) ──
 // Tradebook TGT is the base; missed opportunity nudge is added when available.
 // Fallback when no tradebook = median of per-stock tgtPct in current FILT (ATR-derived).
@@ -3529,10 +3579,21 @@ function renderTable(){
 
 
     // Fixed cells
+    const filterBadge=s._forceKept
+      ? `<span style="font-size:8px;background:rgba(34,197,94,.14);color:var(--green);border-radius:4px;padding:1px 5px;margin-left:5px;font-weight:700;vertical-align:middle" title="Kept this session despite filter: ${escHtml(s._filterReason||'override')}">KEPT</span>`
+      : s._filterPreview
+        ? `<span style="font-size:8px;background:rgba(251,191,36,.14);color:var(--amber);border-radius:4px;padding:1px 5px;margin-left:5px;font-weight:700;vertical-align:middle" title="${escHtml(s._filterReason||'filtered')}">FILTERED</span>`
+        : '';
+    const filterAction=s._filterPreview
+      ? `<button onclick="keepFilteredCandidate('${s.symbol}')" title="Keep this stock in Rankings for this page session only" style="margin-left:6px;padding:2px 6px;border-radius:5px;border:1px solid rgba(34,197,94,.35);background:rgba(34,197,94,.1);color:var(--green);font-size:9px;font-weight:800;cursor:pointer">Keep</button>`
+      : s._forceKept
+        ? `<button onclick="removeFilterOverride('${s.symbol}')" title="Remove this filter override" style="margin-left:6px;padding:2px 6px;border-radius:5px;border:1px solid rgba(239,68,68,.35);background:rgba(239,68,68,.08);color:var(--red);font-size:9px;font-weight:800;cursor:pointer">Unkeep</button>`
+        : '';
+
     let cells=`
-      <td style="text-align:center"><input type="checkbox" ${isSelected?'checked':''} style="width:14px;height:14px;accent-color:var(--amber);cursor:pointer" onchange="toggleStock('${s.symbol}',this.checked)"></td>
+      <td style="text-align:center"><input type="checkbox" ${isSelected?'checked':''} ${s._filterPreview?'disabled':''} style="width:14px;height:14px;accent-color:var(--amber);cursor:${s._filterPreview?'not-allowed':'pointer'}" onchange="toggleStock('${s.symbol}',this.checked)"></td>
       <td><span class="sc-m">${isNaN(s.rocketScore)?'?':s.rocketScore.toFixed(1)}</span></td>
-      <td style="font-family:'Plus Jakarta Sans',sans-serif"><div style="font-weight:700;font-size:13px;color:var(--t1)">${s.symbol}${(()=>{const sv=s.seen||0;if(!sv) return '';return`<sub style="font-size:11px;color:var(--amber);font-weight:700;margin-left:3px;font-family:'DM Mono',monospace" title="Seen ${sv}× today">${sv}×</sub>`;})()}${s._isTopUp?`<span style="font-size:8px;background:rgba(251,146,60,.15);color:var(--fire);border-radius:4px;padding:1px 5px;margin-left:5px;font-weight:700;vertical-align:middle">↑ TOP-UP</span>`:''}${(()=>{if(!s.isSurv) return '';const labels=(s.survRules||[]).map(k=>{const r=SURV_CUSTOM_RULES.find(x=>x.key===k);return r?r.label:k;}).join(' · ');return `<span style="font-size:8px;background:rgba(239,68,68,.15);color:var(--red);border-radius:4px;padding:1px 5px;margin-left:5px;font-weight:700;vertical-align:middle" title="NSE Surveillance: ${escHtml(labels)}">⚠ SURV</span>`;})()}</div><div style="font-size:9px;color:var(--t3);max-width:160px;overflow:hidden;text-overflow:ellipsis">${s.name}${s._isTopUp&&s._heldAvg?` · avg ₹${s._heldAvg.toLocaleString('en-IN',{maximumFractionDigits:2})}`:''}</div></td>
+      <td style="font-family:'Plus Jakarta Sans',sans-serif"><div style="font-weight:700;font-size:13px;color:var(--t1)">${s.symbol}${(()=>{const sv=s.seen||0;if(!sv) return '';return`<sub style="font-size:11px;color:var(--amber);font-weight:700;margin-left:3px;font-family:'DM Mono',monospace" title="Seen ${sv}× today">${sv}×</sub>`;})()}${filterBadge}${filterAction}${s._isTopUp?`<span style="font-size:8px;background:rgba(251,146,60,.15);color:var(--fire);border-radius:4px;padding:1px 5px;margin-left:5px;font-weight:700;vertical-align:middle">↑ TOP-UP</span>`:''}${(()=>{if(!s.isSurv) return '';const labels=(s.survRules||[]).map(k=>{const r=SURV_CUSTOM_RULES.find(x=>x.key===k);return r?r.label:k;}).join(' · ');return `<span style="font-size:8px;background:rgba(239,68,68,.15);color:var(--red);border-radius:4px;padding:1px 5px;margin-left:5px;font-weight:700;vertical-align:middle" title="NSE Surveillance: ${escHtml(labels)}">⚠ SURV</span>`;})()}</div><div style="font-size:9px;color:${s._filterPreview?'var(--amber)':'var(--t3)'};max-width:220px;overflow:hidden;text-overflow:ellipsis">${s._filterPreview||s._forceKept?escHtml(s._filterReason||'filtered'):(s.name+(s._isTopUp&&s._heldAvg?` · avg ₹${s._heldAvg.toLocaleString('en-IN',{maximumFractionDigits:2})}`:''))}</div></td>
       <td>₹${fmt(s.price)}</td>
       <td>${fPerf(s.priceChange)}</td>
       <td>${(()=>{const hi=getMaxEntry(s);if(hi===null)return'<span style="color:var(--t3)">—</span>';const tgt=getEffectiveTgtPct()||3.7;const ceiling=ENGINE_DATA?.rocketThreshold||10;const inZone=isBuyZone(s);return`<span style="font-family:'DM Mono',monospace;font-size:12px;font-weight:700;color:${inZone?'var(--green)':'var(--red)'}" title="Max entry: buying ≤₹${hi.toFixed(2)} still leaves full TGT% (${tgt.toFixed(2)}%) before the ${ceiling}% ceiling">₹${hi.toFixed(2)}</span>`;})()}</td>
@@ -3553,8 +3614,8 @@ function renderTable(){
         cells+=`<td style="color:${c};font-weight:600;font-size:11px">${v>=1000?fV(v):v.toFixed(v>=100?0:v>=10?1:2)}</td>`;
       } else cells+=`<td style="font-size:10px;color:var(--t2)">${v}</td>`;
     }
-    let _trStyle=s._isTopUp?'background:rgba(251,146,60,.05);outline:1px solid rgba(251,146,60,.18);outline-offset:-1px':'';
-    if(isSelected) _trStyle='background:rgba(251,191,36,.04);outline:1px solid rgba(251,191,36,.12);outline-offset:-1px';
+    let _trStyle=s._filterPreview?'background:rgba(251,191,36,.035);outline:1px dashed rgba(251,191,36,.22);outline-offset:-1px':(s._forceKept?'background:rgba(34,197,94,.035);outline:1px solid rgba(34,197,94,.18);outline-offset:-1px':(s._isTopUp?'background:rgba(251,146,60,.05);outline:1px solid rgba(251,146,60,.18);outline-offset:-1px':''));
+    if(isSelected&&!s._forceKept&&!s._filterPreview) _trStyle='background:rgba(251,191,36,.04);outline:1px solid rgba(251,191,36,.12);outline-offset:-1px';
     return`<tr style="${_trStyle}">${cells}</tr>`;
   }).join('');
   renderPgn();
@@ -3604,25 +3665,15 @@ function toggleFilters(){
   if(a) a.textContent=collapsed?'▶':'▼';
 }
 function applyFilters(){
-  const minScore=parseFloat(document.getElementById('fMinScore')?.value)||0;
-  const fvol=isCryptoMode()?0:(parseFloat(document.getElementById('fVol')?.value)||0);
-  const _fMin1Dv=document.getElementById('fMin1D')?.value||'';
-  const fMin1D=_fMin1Dv!==''?parseFloat(_fMin1Dv):-Infinity;
-  const _fMax1Dv=document.getElementById('fMax1D')?.value||'';
-  const fMax1D=_fMax1Dv!==''?parseFloat(_fMax1Dv):Infinity;
-  const fPriceMin=parseFloat(document.getElementById('fPriceMin')?.value)||0;
-  const fPriceMax=parseFloat(document.getElementById('fPriceMax')?.value)||0;
-
-  FILT=ALL.filter(x=>{
-    if(minScore>0&&x.rocketScore<minScore) return false;
-    if(fvol>0&&x.volume!=null){if(x.volume<fvol)return false;}
-    if(fMin1D>-Infinity&&x.priceChange!=null){if(x.priceChange<fMin1D)return false;}
-    if(fMax1D<Infinity&&x.priceChange!=null){if(x.priceChange>fMax1D)return false;}
-    if(fPriceMin>0&&x.price!=null&&x.price<fPriceMin)return false;
-    if(fPriceMax>0&&x.price!=null&&x.price>fPriceMax)return false;
-    if(!isBuyZone(x)) return false;
-    return true;
+  ALL.forEach(x=>{delete x._filterReason;delete x._filterPreview;delete x._forceKept;delete x._isTopUp;delete x._heldAvg;delete x._heldQty;delete x._topUpDrop;});
+  const hiddenReasons={};
+  const visible=[];
+  ALL.forEach(x=>{
+    const reason=getFilterBarReason(x);
+    if(reason) hiddenReasons[x.symbol]=reason;
+    else visible.push(x);
   });
+  FILT=visible;
 
   // ── Already-held suppression ──
   // If a stock is in current POSITIONS (long, qty>0), hide it from recommendations
@@ -3630,70 +3681,17 @@ function applyFilters(){
   // Rationale: averaging down at a meaningfully lower price improves blended cost;
   // re-buying at or above entry just doubles risk without improving the position.
   SUPPRESSED_HELD=0;
-  FILT.forEach(x=>{x._isTopUp=false;x._heldAvg=null;x._heldQty=null;});
   {
     const reDrop=parseFloat(document.getElementById('fReDrop')?.value);
     const dropPct=isFinite(reDrop)&&reDrop>=0?reDrop:1;
-    // Build heldPos from HOLDINGS (settled) + POSITIONS (T+1 unsettled — overwrites)
-    const heldPos={};
-    if(HOLDINGS?.length) HOLDINGS.forEach(h=>{
-      if(h&&h.symbol&&h.qty>0){const avg=HOLD_COST_MAP[h.symbol]??h.avgCost??0;heldPos[h.symbol]={qty:h.qty,avg};}
-    });
-    if(POSITIONS?.length) POSITIONS.forEach(p=>{
-      if(p&&p.symbol) heldPos[p.symbol]={qty:p.qty||0,avg:p.avg!=null?p.avg:0};
-    });
-    // Suppress stocks with a net intraday buy today (bought more than sold today via Orders.csv).
-    // These haven't settled yet so they won't appear in HOLDINGS or POSITIONS.
-    if(ORDERS_TODAY?.length){
-      const todayDate=getSessionDate();
-      const ordBuys={},ordSells={};
-      ORDERS_TODAY.forEach(o=>{
-        if(normOrderDate(o.time)!==todayDate) return;
-        const sym=o.symbol; if(!sym) return;
-        const otype=(o.type||'').toUpperCase();
-        if(otype==='BUY'){ordBuys[sym]=(ordBuys[sym]||0)+o.qty;}
-        else if(otype==='SELL'){ordSells[sym]=(ordSells[sym]||0)+o.qty;}
-      });
-      // Build avg buy price per symbol from today's orders for the avg-down check
-      const ordAvgBuy={};
-      ORDERS_TODAY.forEach(o=>{
-        if(normOrderDate(o.time)!==todayDate) return;
-        const otype=(o.type||'').toUpperCase();
-        if(otype==='BUY'){
-          if(!ordAvgBuy[o.symbol]) ordAvgBuy[o.symbol]={tot:0,qty:0};
-          ordAvgBuy[o.symbol].tot+=o.price*o.qty;
-          ordAvgBuy[o.symbol].qty+=o.qty;
-        }
-      });
-      Object.entries(ordBuys).forEach(([sym,bQty])=>{
-        const netQty=bQty-(ordSells[sym]||0);
-        if(netQty>0&&!heldPos[sym]){
-          const avgObj=ordAvgBuy[sym];
-          const avg=avgObj&&avgObj.qty>0?+(avgObj.tot/avgObj.qty).toFixed(2):0;
-          heldPos[sym]={qty:netQty,avg};
-        }
-      });
-      // Also suppress stocks that were bought AND fully sold today (round-trip) — they're done for the day.
-      Object.entries(ordSells).forEach(([sym,sQty])=>{
-        const bQty=ordBuys[sym]||0;
-        if(sQty>=bQty&&bQty>0&&!heldPos[sym]) heldPos[sym]={qty:-1,avg:0}; // qty<=0 path suppresses
-      });
-    }
+    const heldPos=getHeldPositionMap();
     if(Object.keys(heldPos).length){
       FILT=FILT.filter(x=>{
-        const pos=heldPos[x.symbol];
-        if(!pos) return true;
-        const {qty,avg}=pos;
-        const cur=x.price;
-        if(qty<=0){SUPPRESSED_HELD++;return false;} // short or zero-qty: always suppress
-        if(!avg||cur==null||cur<=0){SUPPRESSED_HELD++;return false;} // no avg data
-        const dropFromAvg=((avg-cur)/avg)*100;
-        if(dropFromAvg>=dropPct){
-          // Eligible avg-down: show as top-up candidate with reduced allocation
-          x._isTopUp=true; x._heldAvg=avg; x._heldQty=qty; x._topUpDrop=+dropFromAvg.toFixed(2);
-          return true;
-        }
-        SUPPRESSED_HELD++; return false; // not dropped enough: suppress
+        const reason=applyHeldDisplayState(x,heldPos,dropPct);
+        if(!reason) return true;
+        hiddenReasons[x.symbol]=reason;
+        SUPPRESSED_HELD++;
+        return false;
       });
     }
   }
@@ -3704,7 +3702,7 @@ function applyFilters(){
     const ydaySyms=new Set((ENGINE_DATA.yesterdayRockets||[]).map(r=>r.symbol));
     if(ydaySyms.size>0){
       FILT=FILT.filter(x=>{
-        if(ydaySyms.has(x.symbol)){SUPPRESSED_YDAY_ROCKET++;return false;}
+        if(ydaySyms.has(x.symbol)){hiddenReasons[x.symbol]='Yesterday rocket hidden';SUPPRESSED_YDAY_ROCKET++;return false;}
         return true;
       });
     }
@@ -3713,11 +3711,35 @@ function applyFilters(){
   applySort();
 
   // Hard cap at 20 (Zerodha basket limit).
-  if(FILT.length>20) FILT=FILT.slice(0,20);
+  if(FILT.length>20){
+    const capped=FILT.slice(0,20);
+    FILT.slice(20).forEach(x=>{hiddenReasons[x.symbol]='Outside current top-20 display cap';});
+    FILT=capped;
+  }
+
+  const currentSyms=new Set(FILT.map(s=>s.symbol));
+  const overrideRows=[];
+  KEEP_FILTER_OVERRIDES.forEach(sym=>{
+    const s=ALL.find(x=>x.symbol===sym);
+    if(!s||currentSyms.has(sym)) return;
+    s._forceKept=true;
+    s._filterReason=hiddenReasons[sym]||getFilterBarReason(s)||'Display filter override';
+    overrideRows.push(s);
+    currentSyms.add(sym);
+  });
+  const previewRows=[];
+  if(SHOW_FILTERED_CANDIDATES){
+    ALL.filter(s=>!currentSyms.has(s.symbol)&&hiddenReasons[s.symbol])
+      .sort((a,b)=>(b.rocketScore||0)-(a.rocketScore||0))
+      .slice(0,20)
+      .forEach(s=>{s._filterPreview=true;s._filterReason=hiddenReasons[s.symbol];previewRows.push(s);});
+  }
+  FILT=[...overrideRows,...FILT,...previewRows];
+  applySort();
 
   // SELECTED is auto-derived from FILT every filter pass. Checkboxes are a
   // post-filter convenience for tweaking the export — not persisted state.
-  SELECTED=new Set(FILT.map(s=>s.symbol));
+  SELECTED=new Set(FILT.filter(s=>!s._filterPreview).map(s=>s.symbol));
 
   PG=1;renderHead();renderTable();renderStatusBar();saveFilterState();updateTabCounts();
   if(ALL.length) try{renderStats();}catch(e){}
@@ -3769,6 +3791,10 @@ function renderStatusBar(){
     html+=` <span style="color:var(--t3);font-size:11px;margin-left:8px">· select stocks to allocate ₹${capital.toLocaleString('en-IN')}</span>`;
   }
   if(tags.length){html+=`<span class="sb-sep">|</span>`;html+=tags.map(t=>`<span class="sb-tag">${t}</span>`).join('');}
+  const previewCt=FILT.filter(s=>s._filterPreview).length;
+  const keptCt=FILT.filter(s=>s._forceKept).length;
+  html+=`<button class="sb-clear" onclick="toggleFilteredCandidates()" title="Review high-score engine candidates hidden by display filters" style="border-color:${SHOW_FILTERED_CANDIDATES?'rgba(251,191,36,.45)':'var(--border)'};color:${SHOW_FILTERED_CANDIDATES?'var(--amber)':'var(--t2)'}">${SHOW_FILTERED_CANDIDATES?'Hide':'Show'} filtered${previewCt?` (${previewCt})`:''}</button>`;
+  if(keptCt) html+=`<span class="sb-tag" title="Session-only. Clears on refresh, upload, or page reload.">${keptCt} kept this session</span>`;
   if(isFiltered)html+=`<button class="sb-clear" onclick="clearFilters()">✕ Clear filters</button>`;
   const el=document.getElementById('statusBar');
   if(el)el.innerHTML=html;
@@ -4997,6 +5023,8 @@ initNSELinks();
 </script>
 </body>
 </html>
+
+
 
 
 
