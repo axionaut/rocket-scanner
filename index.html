@@ -252,6 +252,7 @@ table.main tbody td{padding:9px 11px;font-family:'DM Mono',monospace;font-size:1
    <div class="tab" onclick="switchTab(2)">📈 Performance</div>
   </div>
   <button class="btn" id="folderBtn" onclick="pickDataFolder()" title="Pick a folder to auto-save brain data" style="font-size:11px">📁 Folder</button>
+  <button class="btn" id="refreshDataBtn" onclick="refreshWorkspaceData(this)" title="Read the selected folder / Scanner Uploads and process the latest files" style="font-size:11px">↻ Refresh data</button>
   <button class="btn" onclick="exportBrain()" title="Export Brain — download a copy of the brain file" style="font-size:11px">💾 Export</button>
   <button class="btn" onclick="document.getElementById('brainIn').click()" title="Import Brain — restore from a previously exported file" style="font-size:11px">🧠 Import</button>
   <input type="file" id="brainIn" accept=".json" style="display:none" onchange="importBrain(event)">
@@ -348,7 +349,7 @@ table.main tbody td{padding:9px 11px;font-family:'DM Mono',monospace;font-size:1
 
 
 <script>
-const BUILD_TS='2026-05-20 15:06 IST'; // replaced at commit time with IST datetime
+const BUILD_TS='2026-05-20 15:12 IST'; // replaced at commit time with IST datetime
 const MODE_STORE='rs_market_mode';
 const USD_INR_STORE='rs_usd_inr';
 const HARD_FILTER_SCHEMA='null_blanks_pass_v1';
@@ -649,7 +650,7 @@ const FS = (() => {
   return {init,pickFolder,reconnect,needsReconnect,read,readUploadText,readUploadFile,write,set,setMultiple,get,load,getBrain,reset,folderName,hasFolder};
 })();
 
-const WORKSPACE_WATCH_FILES=[
+const WORKSPACE_INPUT_FILES=[
   'ALL NSE.csv',
   'ALL CRYPTO.csv',
   'Reports-Daily-Multiple.zip',
@@ -659,62 +660,50 @@ const WORKSPACE_WATCH_FILES=[
   'TRADEBOOK.csv',
   'NSE Holidays.csv'
 ];
-let workspaceWatchTimer=null;
-let workspaceWatchSnapshot=null;
-let workspaceWatchBusy=false;
+let workspaceRefreshBusy=false;
 
 async function getWorkspaceInputFiles(){
   if(!FS.hasFolder()) return [];
-  const entries=await Promise.all(WORKSPACE_WATCH_FILES.map(async name=>{
+  const entries=await Promise.all(WORKSPACE_INPUT_FILES.map(async name=>{
     try{return await FS.readUploadFile(name);}catch(e){return null;}
   }));
   return entries.filter(Boolean).map(entry=>entry.file);
 }
 
-function workspaceFileSignature(file){
-  return [file.name,file.size||0,file.lastModified||0].join('|');
-}
-
-function workspaceSnapshot(files){
-  return files.map(workspaceFileSignature).sort().join('||');
-}
-
-async function pollWorkspaceUploads(){
-  if(workspaceWatchBusy||!FS.hasFolder()) return;
-  workspaceWatchBusy=true;
+async function refreshWorkspaceData(btn){
+  if(workspaceRefreshBusy) return;
+  workspaceRefreshBusy=true;
+  const oldText=btn?.textContent;
+  if(btn){btn.disabled=true;btn.textContent='Refreshing...';}
   try{
+    if(!FS.hasFolder()){
+      const ok=await FS.pickFolder();
+      if(!ok){showToast('Pick a folder first, then refresh data.',3000,true);return;}
+      updateFolderUI();
+    }
     const files=await getWorkspaceInputFiles();
-    const next=workspaceSnapshot(files);
-    if(workspaceWatchSnapshot===null){
-      workspaceWatchSnapshot=next;
+    if(!files.length){
+      showToast('No known input files found in the selected folder or Scanner Uploads.',4000,true);
       return;
     }
-    if(next&&next!==workspaceWatchSnapshot){
-      workspaceWatchSnapshot=next;
-      if(workspaceWatchTimer) clearInterval(workspaceWatchTimer);
-      showToast('<strong>Folder update detected.</strong> Processing latest files...');
-      const hasScannerInput=files.some(f=>{
-        const n=f.name.toLowerCase();
-        return n.includes('all nse')||n.includes('all crypto')||n.endsWith('.zip')||n.includes('.zip');
-      });
-      if(hasScannerInput) await processFiles(files);
-      else{
-        await hydrateSessionCSVsFromWorkspace();
-        try{await FS.write(FS.getBrain());}catch(e){console.warn('Brain flush failed',e);}
-        location.reload();
-      }
+    showToast('<strong>Refreshing data.</strong> Processing latest folder files...');
+    const hasScannerInput=files.some(f=>{
+      const n=f.name.toLowerCase();
+      return n.includes('all nse')||n.includes('all crypto')||n.endsWith('.zip')||n.includes('.zip');
+    });
+    if(hasScannerInput) await processFiles(files);
+    else{
+      await hydrateSessionCSVsFromWorkspace();
+      try{await FS.write(FS.getBrain());}catch(e){console.warn('Brain flush failed',e);}
+      location.reload();
     }
   }catch(e){
-    console.warn('Workspace watcher failed',e);
+    console.warn('Refresh data failed',e);
+    showToast('Refresh data failed: '+(e?.message||e),5000,true);
   }finally{
-    workspaceWatchBusy=false;
+    workspaceRefreshBusy=false;
+    if(btn){btn.disabled=false;btn.textContent=oldText||'↻ Refresh data';}
   }
-}
-
-function startWorkspaceWatcher(){
-  if(workspaceWatchTimer||!FS.hasFolder()) return;
-  pollWorkspaceUploads();
-  workspaceWatchTimer=setInterval(pollWorkspaceUploads,7000);
 }
 
 function updateFolderUI(){
@@ -752,10 +741,7 @@ async function pickDataFolder(){
     return;
   }
   const ok=await FS.pickFolder();
-  if(ok){
-    showToast('<strong>Folder set:</strong> '+FS.folderName()+' — brain data will auto-save here.');
-    startWorkspaceWatcher();
-  }
+  if(ok) showToast('<strong>Folder set:</strong> '+FS.folderName()+' — brain data will auto-save here.');
 }
 
 // ── One-time key migration: move old versioned keys → clean names ──
@@ -4802,7 +4788,6 @@ async function initApp(){
   // Prefer current workspace CSVs over the saved brain snapshot. This keeps
   // Latest Session/Booked Today from showing stale rs_orders after Orders.csv changes.
   if(!isCryptoMode()) try{await hydrateSessionCSVsFromWorkspace();}catch(e){console.warn('INIT: workspace CSV refresh failed',e);}
-  startWorkspaceWatcher();
 
   // Step 3b: Render after hydration — workspace CSVs (orders, tradebook, holdings) are now fresh in memory.
   // renderPerformance must run before renderStats (populates PERF_TRADE_WINDOWS for current-window pill).
