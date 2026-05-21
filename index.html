@@ -350,7 +350,7 @@ table.main tbody td{padding:9px 11px;font-family:'DM Mono',monospace;font-size:1
 
 
 <script>
-const BUILD_TS='2026-05-20 16:36 IST'; // replaced at commit time with IST datetime
+const BUILD_TS='2026-05-21 08:38 IST'; // replaced at commit time with IST datetime
 const MODE_STORE='rs_market_mode';
 const USD_INR_STORE='rs_usd_inr';
 const HARD_FILTER_SCHEMA='null_blanks_pass_v1';
@@ -478,6 +478,7 @@ const FS = (() => {
   let dirHandle = null;
   let _saveTimer = null;
   let _brain = {};
+  let _brainLoaded = false;
 
   function _idb(){
     return new Promise((res,rej)=>{
@@ -545,6 +546,7 @@ const FS = (() => {
       dirHandle=h; _pendingHandle=null;
       await _saveHandle(h);
       updateFolderUI();
+      await loadFromDisk();
       return true;
     }catch(e){
       if(e.name!=='AbortError') console.warn('FS.pickFolder failed',e);
@@ -641,17 +643,28 @@ const FS = (() => {
   }
 
   function get(key){ return _brain[key]??null; }
-  function load(brain){ _brain=brain||{}; }
+  function load(brain){ _brain=brain||{}; _brainLoaded=true; }
+  async function loadFromDisk(){
+    if(!dirHandle) return null;
+    const brain=await read();
+    load(brain||{});
+    return brain;
+  }
+  async function ensureLoaded(){
+    if(!_brainLoaded&&dirHandle) await loadFromDisk();
+    return _brain;
+  }
   function getBrain(){ return _brain; }
   function reset(){
     _brain={};
+    _brainLoaded=true;
     if(_saveTimer) clearTimeout(_saveTimer);
     deleteFile();
   }
   function folderName(){ return dirHandle?.name||null; }
   function hasFolder(){ return !!dirHandle; }
 
-  return {init,pickFolder,reconnect,needsReconnect,read,readUploadText,readUploadFile,write,set,setMultiple,get,load,getBrain,reset,folderName,hasFolder};
+  return {init,pickFolder,reconnect,needsReconnect,read,readUploadText,readUploadFile,write,set,setMultiple,get,load,loadFromDisk,ensureLoaded,getBrain,reset,folderName,hasFolder};
 })();
 
 const WORKSPACE_INPUT_FILES=[
@@ -685,6 +698,7 @@ async function refreshWorkspaceData(btn){
       if(!ok){showToast('Pick a folder first, then refresh data.',3000,true);return;}
       updateFolderUI();
     }
+    await FS.ensureLoaded();
     const files=await getWorkspaceInputFiles();
     if(!files.length){
       showToast('No known input files found in the selected folder or Scanner Uploads.',4000,true);
@@ -4504,13 +4518,19 @@ async function processScannerUpload(scannerFile, mode){
     await new Promise(r=>setTimeout(r,60));
     window._lastRawTV=raw;
     const sessionTag=scannerSessionTag(scannerFile.name,raw);
+    const priorCorr=FS.get(modeKey(CORR_STORE,mode));
+    const isDuplicateSession=!!(priorCorr&&priorCorr.lastTag===sessionTag);
     window._lastScannerSessionTag=sessionTag;
     ALL=runEngine(raw,sessionTag)||[];
     ALL.sort((a,b)=>b.rocketScore-a.rocketScore);
     const rcToday=getSessionDate(), rc=FS.get(modeKey(REC_COUNT_STORE,mode))||{};
     if(!rc[rcToday])rc[rcToday]={};
-    ALL.forEach(s=>{rc[rcToday][s.symbol]=(rc[rcToday][s.symbol]||0)+1;s.seen=rc[rcToday][s.symbol];});
-    FS.set(modeKey(REC_COUNT_STORE,mode),rc);
+    const countSeen=!isDuplicateSession&&isMarketHours();
+    ALL.forEach(s=>{
+      if(countSeen) rc[rcToday][s.symbol]=(rc[rcToday][s.symbol]||0)+1;
+      s.seen=rc[rcToday][s.symbol]||0;
+    });
+    if(countSeen) FS.set(modeKey(REC_COUNT_STORE,mode),rc);
     try{FS.set(modeKey(ALL_STORE,mode),{data:ALL.map(s=>({...s,name:s.name?s.name.substring(0,20):s.symbol})),fileTag:scannerFile.name+' · '+raw.length+' '+(mode==='crypto'?'assets':'stocks'),ts:Date.now()});}catch(e){console.warn('Could not save scan data',e);}
     if(window._lastEngineFeats&&window._lastParsedFiltered){
       const cols=window._lastEngineFeats, stocks={};
@@ -5038,6 +5058,7 @@ initNSELinks();
 </script>
 </body>
 </html>
+
 
 
 
