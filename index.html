@@ -350,7 +350,7 @@ table.main tbody td{padding:9px 11px;font-family:'DM Mono',monospace;font-size:1
 
 
 <script>
-const BUILD_TS='2026-05-21 08:38 IST'; // replaced at commit time with IST datetime
+const BUILD_TS='2026-05-21 14:29 IST'; // replaced at commit time with IST datetime
 const MODE_STORE='rs_market_mode';
 const USD_INR_STORE='rs_usd_inr';
 const HARD_FILTER_SCHEMA='null_blanks_pass_v1';
@@ -1158,6 +1158,12 @@ function persistMethodologySnapshot(){
       regime:ENGINE_DATA.regime,
       marketBreadth:ENGINE_DATA.marketBreadth,
       useAccCorr:ENGINE_DATA.useAccCorr,
+      useRegimeCorr:ENGINE_DATA.useRegimeCorr,
+      regimeSessions:ENGINE_DATA.regimeSessions||{
+        bull:ACC_CORR_BULL?.sessions||0,
+        bear:ACC_CORR_BEAR?.sessions||0,
+        neutral:ACC_CORR_NEUT?.sessions||0
+      },
       sectorCol:ENGINE_DATA.sectorCol,
       industryCol:ENGINE_DATA.industryCol,
       yesterdayRockets:ENGINE_DATA.yesterdayRockets||[],
@@ -1167,6 +1173,7 @@ function persistMethodologySnapshot(){
       removed:{...(ENGINE_DATA.removed||{})},
       survSize:ENGINE_DATA.survSize||0,
       survRuleRows:syncSurvRuleRows(ENGINE_DATA.survRuleRows||[]),
+      avgDayChg:ENGINE_DATA.avgDayChg
     };
     FS.set(modeKey(METH_STORE),methSave);
   }catch(e){
@@ -3097,7 +3104,12 @@ function _renderMethodologyInner(){
   const COMPUTED_FEATS=new Set(['sector_breadth','sector_rel_strength','industry_breadth','peak_retention']);
   const regimeIcon = E.regime==='bull'?'🐂':E.regime==='bear'?'🐻':'➡';
   const regimeColor = E.regime==='bull'?'var(--green)':E.regime==='bear'?'var(--red)':'var(--orange)';
-  const rs = E.regimeSessions||{bull:0,bear:0,neutral:0};
+  const rs = {
+    bull:ACC_CORR_BULL?.sessions ?? E.regimeSessions?.bull ?? 0,
+    bear:ACC_CORR_BEAR?.sessions ?? E.regimeSessions?.bear ?? 0,
+    neutral:ACC_CORR_NEUT?.sessions ?? E.regimeSessions?.neutral ?? 0
+  };
+  E.regimeSessions=rs;
   const corrSource = E.useRegimeCorr?'Regime-specific correlations active':(E.useAccCorr?'Combined fallback (regime <2 sessions)':'Warming up (need ≥2 sessions)');
   const regimeTotal = (rs.bull||0)+(rs.bear||0)+(rs.neutral||0);
   const sessLabel = `${regimeTotal} sessions · ${E.laggedNote||'lagged learning starts next upload'}`;
@@ -3109,9 +3121,9 @@ function _renderMethodologyInner(){
       <div>Breadth: ${E.marketBreadth!=null?(E.marketBreadth*100).toFixed(0)+'%':'?'} · ${sessLabel}${E.rocketCount!=null?' · 🚀 '+E.rocketCount+' rockets (≥'+(E.rocketThreshold||10)+'%)':''}</div>
     </div>
     <div class="regime-sessions">
-      <span>🐂 ${(E.regimeSessions?.bull)||0}</span>
-      <span>🐻 ${(E.regimeSessions?.bear)||0}</span>
-      <span>➡ ${(E.regimeSessions?.neutral)||0}</span>
+      <span>🐂 ${rs.bull||0}</span>
+      <span>🐻 ${rs.bear||0}</span>
+      <span>➡ ${rs.neutral||0}</span>
     </div>
   </div>`;
   const mc=document.getElementById('methContent');
@@ -5058,6 +5070,7 @@ initNSELinks();
 </script>
 </body>
 </html>
+
 
 
 
