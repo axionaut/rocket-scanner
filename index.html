@@ -350,7 +350,7 @@ table.main tbody td{padding:9px 11px;font-family:'DM Mono',monospace;font-size:1
 
 
 <script>
-const BUILD_TS='2026-05-21 15:35 IST'; // replaced at commit time with IST datetime
+const BUILD_TS='2026-05-22 12:15 IST'; // replaced at commit time with IST datetime
 const MODE_STORE='rs_market_mode';
 const USD_INR_STORE='rs_usd_inr';
 const HARD_FILTER_SCHEMA='null_blanks_pass_v1';
@@ -454,6 +454,7 @@ const REGIME_CAL_STORE='rs_regime_cal';
 const HOLD_STORE='rs_holdings';
 const ORDERS_STORE='rs_orders';
 const POS_STORE='rs_positions';
+const POS_TSL_STORE='rs_position_tsl';
 const TRADEBOOK_STORE='rs_tradebook';
 const SURV_RULE_STORE='rs_surv_rules';
 const SURV_CORR_STORE='rs_surv_corr';
@@ -2614,6 +2615,9 @@ function renderPerformance(){
     // ── Build live open-position rows ──
     const _seen=new Set();
     const _rows=[];
+    const _tslStore=FS.get(POS_TSL_STORE)||{};
+    const _tslNext={};
+    let _tslChanged=false;
     const _addPos=(sym,qty,avg,ltpHint)=>{
       if(!sym||qty<=0||_seen.has(sym)) return;
       _seen.add(sym);
@@ -2635,13 +2639,25 @@ function renderPerformance(){
       const slPrice=avgCost?tickPrice(avgCost*(1-adaptiveSL/100)):null;
       // Distance to SL: positive = above SL (safe), negative = breached SL
       const distSL=(ltp!=null&&slPrice!=null&&slPrice>0)?+((ltp-slPrice)/slPrice*100).toFixed(2):null;
+      const tslInfo=calcPositionTSL({sym,qty,avgCost,ltp,scannerRow,adaptiveSL,adaptiveTGT,prev:_tslStore[sym]});
+      if(tslInfo){
+        _tslNext[sym]=tslInfo;
+        if(JSON.stringify(_tslStore[sym]||{})!==JSON.stringify(tslInfo)) _tslChanged=true;
+      }
       const signal=null; // computed below after all rows collected — needs cross-row normalisation
-      _rows.push({sym,qty,avg:avgCost,ltp,pnlPct,pnlRs,daysHeld,capDeployed,tgtPrice,slPrice,distSL,signal,
+      _rows.push({sym,qty,avg:avgCost,ltp,pnlPct,pnlRs,daysHeld,capDeployed,tgtPrice,slPrice,distSL,
+        tslPrice:tslInfo?.tsl??null,tslGapPct:tslInfo?.gapPct??null,tslPeakPct:tslInfo?.peakProfitPct??null,
+        tslLockPct:tslInfo?.lockPct??null,tslBasis:tslInfo?.basis||'',signal,
         _sortDays:daysHeld==null?-1:daysHeld});
     };
     if(POSITIONS?.length) POSITIONS.forEach(p=>{if(p.qty>0) _addPos(p.symbol,p.qty,p.avg||p.avgCost,p.ltp);});
     if(HOLDINGS?.length) HOLDINGS.forEach(h=>{if(h.qty>0) _addPos(h.symbol,h.qty,h.avgCost,h.ltp);});
-    if(!_rows.length) return; // nothing to show
+    if(!_rows.length){
+      if(Object.keys(_tslStore).length) FS.set(POS_TSL_STORE,{});
+      return; // nothing to show
+    }
+    if(Object.keys(_tslStore).some(sym=>!_tslNext[sym])) _tslChanged=true;
+    if(_tslChanged) FS.set(POS_TSL_STORE,_tslNext);
 
     // ── Signal: composite exit urgency score ──
     // Components: P&L% (40%), P&L ₹ (30%), Days Held (20%), Distance to SL (10%)
@@ -2691,6 +2707,7 @@ function renderPerformance(){
       {key:'_sortDays',label:'Days Held',align:'right',fmt:(v,r)=>_daysFmt(r.daysHeld),clrFn:()=>'var(--t1)'},
       {key:'tgtPrice',label:'Target ₹',align:'right',fmt:(v,r)=>v!=null?'₹'+v.toLocaleString('en-IN',{maximumFractionDigits:2})+`<span style="font-size:10px;color:var(--t3);margin-left:4px">+${adaptiveTGT}%</span>`:'—',clrFn:()=>'var(--green)'},
       {key:'slPrice',label:'SL ₹',align:'right',fmt:(v,r)=>v!=null?'₹'+v.toLocaleString('en-IN',{maximumFractionDigits:2})+`<span style="font-size:10px;color:var(--t3);margin-left:4px">-${adaptiveSL}%</span>`:'—',clrFn:()=>'var(--red)'},
+      {key:'tslPrice',label:'TSL ₹',align:'right',bold:true,fmt:(v,r)=>v!=null?'₹'+v.toLocaleString('en-IN',{maximumFractionDigits:2})+`<div style="font-size:10px;color:var(--t3);margin-top:1px">${r.tslLockPct>=0?'+':''}${r.tslLockPct}% lock · ${r.tslGapPct}% gap</div>`:'—',clrFn:(v,r)=>v==null?'var(--t3)':r.tslLockPct>0?'var(--green)':r.tslLockPct===0?'var(--amber)':'var(--red)'},
       {key:'signal',label:'Signal',align:'right',bold:true,fmt:v=>v!=null?(v>=0?'+':'')+v.toFixed(2):'—',clrFn:v=>v==null?'var(--t3)':v>0?'var(--green)':v<0?'var(--red)':'var(--t2)'},
     ];
     // Sort: signal ascending (worst first), then days desc
@@ -3428,6 +3445,43 @@ function getEffectiveTgtPct(){
   return round05(vals[Math.floor(vals.length/2)]+nudge);
 }
 
+function calcPositionTSL({sym, qty, avgCost, ltp, scannerRow, adaptiveSL, adaptiveTGT, prev}){
+  if(!sym||!(qty>0)||!(avgCost>0)||!(ltp>0)||!(adaptiveSL>0)) return null;
+  const dayHigh=scannerRow?.high1d;
+  const peak=+Math.max(ltp, (dayHigh!=null&&isFinite(dayHigh))?dayHigh:0).toFixed(2);
+  const peakProfitPct=+(((peak-avgCost)/avgCost)*100).toFixed(2);
+  const protective=tickPrice(avgCost*(1-adaptiveSL/100));
+  const target=(adaptiveTGT&&isFinite(adaptiveTGT)&&adaptiveTGT>0)?adaptiveTGT:3.7;
+  const ceiling=Math.max(target, Math.min(target*3, 15));
+  const progress=Math.max(0,Math.min(1,peakProfitPct/ceiling));
+  const atrPct=(scannerRow?.atr!=null&&isFinite(scannerRow.atr)&&scannerRow.atr>0)?scannerRow.atr:null;
+  const curveGap=adaptiveSL*(1-0.65*progress);
+  const atrMult=1.2-(0.5*progress);
+  const volFloor=atrPct!=null?atrPct*atrMult:0;
+  const rawGap=peakProfitPct>0?Math.min(adaptiveSL,Math.max(curveGap,volFloor)):adaptiveSL;
+  const rawTsl=tickPrice(Math.max(protective, peak*(1-rawGap/100)));
+  const avgChanged=prev?.avg!=null&&Math.abs(prev.avg-avgCost)/avgCost>0.01;
+  const qtyIncreased=prev?.qty!=null&&qty>prev.qty;
+  const prevTsl=(prev?.tsl!=null&&isFinite(prev.tsl))?prev.tsl:null;
+  const tsl=(!prevTsl||avgChanged||qtyIncreased)?rawTsl:Math.max(prevTsl,rawTsl);
+  const lockPct=+(((tsl-avgCost)/avgCost)*100).toFixed(2);
+  const basis=peakProfitPct<=0?'Protective':(atrPct!=null&&volFloor>=curveGap?'ATR floor':'Target curve');
+  return {
+    tsl:+tsl.toFixed(2),
+    rawTsl:+rawTsl.toFixed(2),
+    gapPct:+rawGap.toFixed(2),
+    peak,
+    peakProfitPct,
+    lockPct,
+    basis,
+    atrPct:atrPct!=null?+atrPct.toFixed(2):null,
+    avg:+avgCost.toFixed(2),
+    qty,
+    reset:!!(avgChanged||qtyIncreased),
+    updated:getSessionDate()
+  };
+}
+
 function computeAlloc(capital, selList){
   if(!capital||!selList.length) return {};
   const maxAllocEl=document.getElementById('fMaxAlloc');
@@ -4004,7 +4058,7 @@ function resetBrain(btn){
     return;
   }
   // Stage 3: confirmed — wipe selected mode only
-  const stockKeys=[SNAP_KEY,SNAP_PREV_KEY,REC_COUNT_STORE,ALL_STORE,CORR_STORE,CORR_BULL_STORE,CORR_BEAR_STORE,CORR_NEUT_STORE,METH_STORE,REGIME_CAL_STORE,AVG_DAY_CHG_STORE,HOLD_STORE,ORDERS_STORE,POS_STORE,TRADEBOOK_STORE,MISSED_OPP_STORE,SURV_CORR_STORE,SURV_RULE_STORE,NSE_HOLIDAYS_STORE];
+  const stockKeys=[SNAP_KEY,SNAP_PREV_KEY,REC_COUNT_STORE,ALL_STORE,CORR_STORE,CORR_BULL_STORE,CORR_BEAR_STORE,CORR_NEUT_STORE,METH_STORE,REGIME_CAL_STORE,AVG_DAY_CHG_STORE,HOLD_STORE,ORDERS_STORE,POS_STORE,POS_TSL_STORE,TRADEBOOK_STORE,MISSED_OPP_STORE,SURV_CORR_STORE,SURV_RULE_STORE,NSE_HOLIDAYS_STORE];
   const cryptoKeys=[SNAP_KEY,SNAP_PREV_KEY,REC_COUNT_STORE,ALL_STORE,CORR_STORE,CORR_BULL_STORE,CORR_BEAR_STORE,CORR_NEUT_STORE,METH_STORE,REGIME_CAL_STORE,AVG_DAY_CHG_STORE].map(k=>modeKey(k,'crypto'));
   (isCryptoMode()?cryptoKeys:stockKeys).forEach(k=>FS.set(k,null));
   localStorage.removeItem(modeKey(SCANNER_STORE));
@@ -5083,6 +5137,7 @@ initNSELinks();
 </script>
 </body>
 </html>
+
 
 
 
