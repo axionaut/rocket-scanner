@@ -350,7 +350,7 @@ table.main tbody td{padding:9px 11px;font-family:'DM Mono',monospace;font-size:1
 
 
 <script>
-const BUILD_TS='2026-05-22 12:15 IST'; // replaced at commit time with IST datetime
+const BUILD_TS='2026-05-22 12:25 IST'; // replaced at commit time with IST datetime
 const MODE_STORE='rs_market_mode';
 const USD_INR_STORE='rs_usd_inr';
 const HARD_FILTER_SCHEMA='null_blanks_pass_v1';
@@ -2647,7 +2647,7 @@ function renderPerformance(){
       const signal=null; // computed below after all rows collected — needs cross-row normalisation
       _rows.push({sym,qty,avg:avgCost,ltp,pnlPct,pnlRs,daysHeld,capDeployed,tgtPrice,slPrice,distSL,
         tslPrice:tslInfo?.tsl??null,tslGapPct:tslInfo?.gapPct??null,tslPeakPct:tslInfo?.peakProfitPct??null,
-        tslLockPct:tslInfo?.lockPct??null,tslBasis:tslInfo?.basis||'',signal,
+        tslLockPct:tslInfo?.lockPct??null,tslPoints:tslInfo?.trailPoints??null,tslBasis:tslInfo?.basis||'',signal,
         _sortDays:daysHeld==null?-1:daysHeld});
     };
     if(POSITIONS?.length) POSITIONS.forEach(p=>{if(p.qty>0) _addPos(p.symbol,p.qty,p.avg||p.avgCost,p.ltp);});
@@ -2707,7 +2707,7 @@ function renderPerformance(){
       {key:'_sortDays',label:'Days Held',align:'right',fmt:(v,r)=>_daysFmt(r.daysHeld),clrFn:()=>'var(--t1)'},
       {key:'tgtPrice',label:'Target ₹',align:'right',fmt:(v,r)=>v!=null?'₹'+v.toLocaleString('en-IN',{maximumFractionDigits:2})+`<span style="font-size:10px;color:var(--t3);margin-left:4px">+${adaptiveTGT}%</span>`:'—',clrFn:()=>'var(--green)'},
       {key:'slPrice',label:'SL ₹',align:'right',fmt:(v,r)=>v!=null?'₹'+v.toLocaleString('en-IN',{maximumFractionDigits:2})+`<span style="font-size:10px;color:var(--t3);margin-left:4px">-${adaptiveSL}%</span>`:'—',clrFn:()=>'var(--red)'},
-      {key:'tslPrice',label:'TSL ₹',align:'right',bold:true,fmt:(v,r)=>v!=null?'₹'+v.toLocaleString('en-IN',{maximumFractionDigits:2})+`<div style="font-size:10px;color:var(--t3);margin-top:1px">${r.tslLockPct>=0?'+':''}${r.tslLockPct}% lock · ${r.tslGapPct}% gap</div>`:'—',clrFn:(v,r)=>v==null?'var(--t3)':r.tslLockPct>0?'var(--green)':r.tslLockPct===0?'var(--amber)':'var(--red)'},
+      {key:'tslPrice',label:'TSL ₹',align:'right',bold:true,fmt:(v,r)=>v!=null?'₹'+v.toLocaleString('en-IN',{maximumFractionDigits:2})+`<div style="font-size:10px;color:var(--t3);margin-top:1px">trail ₹${(r.tslPoints??0).toLocaleString('en-IN',{maximumFractionDigits:2})} · ${r.tslBasis}</div>`:'—',clrFn:(v,r)=>v==null?'var(--t3)':r.tslLockPct>0?'var(--green)':r.tslLockPct===0?'var(--amber)':'var(--red)'},
       {key:'signal',label:'Signal',align:'right',bold:true,fmt:v=>v!=null?(v>=0?'+':'')+v.toFixed(2):'—',clrFn:v=>v==null?'var(--t3)':v>0?'var(--green)':v<0?'var(--red)':'var(--t2)'},
     ];
     // Sort: signal ascending (worst first), then days desc
@@ -3465,10 +3465,14 @@ function calcPositionTSL({sym, qty, avgCost, ltp, scannerRow, adaptiveSL, adapti
   const prevTsl=(prev?.tsl!=null&&isFinite(prev.tsl))?prev.tsl:null;
   const tsl=(!prevTsl||avgChanged||qtyIncreased)?rawTsl:Math.max(prevTsl,rawTsl);
   const lockPct=+(((tsl-avgCost)/avgCost)*100).toFixed(2);
+  const trailPoints=+Math.max(0,peak-tsl).toFixed(2);
+  const rawTrailPoints=+Math.max(0,peak-rawTsl).toFixed(2);
   const basis=peakProfitPct<=0?'Protective':(atrPct!=null&&volFloor>=curveGap?'ATR floor':'Target curve');
   return {
     tsl:+tsl.toFixed(2),
     rawTsl:+rawTsl.toFixed(2),
+    trailPoints,
+    rawTrailPoints,
     gapPct:+rawGap.toFixed(2),
     peak,
     peakProfitPct,
@@ -5137,6 +5141,7 @@ initNSELinks();
 </script>
 </body>
 </html>
+
 
 
 
