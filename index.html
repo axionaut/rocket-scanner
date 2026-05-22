@@ -350,7 +350,7 @@ table.main tbody td{padding:9px 11px;font-family:'DM Mono',monospace;font-size:1
 
 
 <script>
-const BUILD_TS='2026-05-22 12:53 IST'; // replaced at commit time with IST datetime
+const BUILD_TS='2026-05-22 13:00 IST'; // replaced at commit time with IST datetime
 const MODE_STORE='rs_market_mode';
 const USD_INR_STORE='rs_usd_inr';
 const HARD_FILTER_SCHEMA='null_blanks_pass_v1';
@@ -2383,12 +2383,12 @@ function renderPerformance(){
 
   const monthCols=[
     {key:'month',label:'Month',align:'left',fmt:v=>v,clrFn:()=>'var(--t1)'},
-    {key:'pnl',label:'Net P&L',align:'right',bold:true,fmt:fmtRs,clrFn:clr},
+    {key:'pnl',label:'Net P&L',align:'right',bold:true,fmt:fmtPerfRs,clrFn:clr},
     {key:'trades',label:'Lots',align:'right',fmt:v=>v,clrFn:()=>'var(--t2)'},
     {key:'days',label:'Trading Days',align:'right',fmt:v=>v,clrFn:()=>'var(--t2)'},
-    {key:'avgDay',label:'Avg/Trading Day',align:'right',fmt:fmtRs,clrFn:clr},
+    {key:'avgDay',label:'Avg/Trading Day',align:'right',fmt:fmtPerfRs,clrFn:clr},
     {key:'calDays',label:'Cal Days',align:'right',fmt:v=>v,clrFn:()=>'var(--t2)'},
-    {key:'avgCalDay',label:'Avg/Cal Day',align:'right',fmt:fmtRs,clrFn:clr},
+    {key:'avgCalDay',label:'Avg/Cal Day',align:'right',fmt:fmtPerfRs,clrFn:clr},
   ];
   const monthMap={};
   filteredByRegime.forEach(r=>{
@@ -2424,7 +2424,7 @@ function renderPerformance(){
   const symRows=(p.symBreakdown||[]).map(r=>({...r,edge:+((r.winRate*r.avgPct)*Math.min(1,r.trades/5)).toFixed(2)}));
   const symCols=[
     {key:'sym',label:'Symbol',align:'left',fmt:v=>v,clrFn:()=>'var(--t1)',bold:true},
-    {key:'netPnl',label:'Net P&L',align:'right',bold:true,fmt:fmtRs,clrFn:clr},
+    {key:'netPnl',label:'Net P&L',align:'right',bold:true,fmt:fmtPerfRs,clrFn:clr},
     {key:'trades',label:'Lots',align:'right',fmt:v=>v,clrFn:()=>'var(--t2)'},
     {key:'winRate',label:'Win%',align:'right',fmt:v=>v+'%',clrFn:v=>v>=60?'var(--green)':v>=40?'var(--amber)':'var(--red)'},
     {key:'avgPct',label:'Avg%',align:'right',fmt:fmtPct,clrFn:clr},
@@ -5145,6 +5145,7 @@ initNSELinks();
 </script>
 </body>
 </html>
+
 
 
 
