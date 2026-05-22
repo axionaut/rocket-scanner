@@ -350,7 +350,7 @@ table.main tbody td{padding:9px 11px;font-family:'DM Mono',monospace;font-size:1
 
 
 <script>
-const BUILD_TS='2026-05-22 14:24 IST'; // replaced at commit time with IST datetime
+const BUILD_TS='2026-05-22 14:57 IST'; // replaced at commit time with IST datetime
 const MODE_STORE='rs_market_mode';
 const USD_INR_STORE='rs_usd_inr';
 const HARD_FILTER_SCHEMA='null_blanks_pass_v1';
@@ -1025,6 +1025,11 @@ function escHtml(s){return String(s??'').replace(/[&<>"]/g,ch=>({'&':'&amp;','<'
 function findHeader(hdrs,patterns){return hdrs.find(h=>patterns.some(p=>p.test(h.trim())))||null;}
 function meanArr(arr){return arr.length?arr.reduce((s,v)=>s+v,0)/arr.length:0;}
 function tickPrice(v){return Math.round(v/0.05)*0.05;}
+function tickBelowPrice(v){return Math.max(0,(Math.ceil((v*100)/5)*5-5)/100);}
+function actionableSellTrigger(stop, ltp){
+  if(!(stop>0)||!(ltp>0)) return stop;
+  return +Math.min(tickPrice(stop),tickBelowPrice(ltp)).toFixed(2);
+}
 function isCryptoMoneyHeader(h){
   const s=String(h||'').toLowerCase();
   if(/%|ratio|rank|rate|sentiment|dominance|score|velocity|addresses|contributors|posts|engagements|transactions$|supply/.test(s)) return false;
@@ -2645,8 +2650,10 @@ function renderPerformance(){
         if(JSON.stringify(_tslStore[sym]||{})!==JSON.stringify(tslInfo)) _tslChanged=true;
       }
       const signal=null; // computed below after all rows collected — needs cross-row normalisation
+      const rawTslPrice=tslInfo?.tsl??null;
+      const tslPrice=actionableSellTrigger(rawTslPrice,ltp);
       _rows.push({sym,qty,avg:avgCost,ltp,pnlPct,pnlRs,daysHeld,capDeployed,tgtPrice,slPrice,distSL,
-        tslPrice:tslInfo?.tsl??null,tslGapPct:tslInfo?.gapPct??null,tslPeakPct:tslInfo?.peakProfitPct??null,
+        tslPrice,tslRawPrice:rawTslPrice,tslGapPct:tslInfo?.gapPct??null,tslPeakPct:tslInfo?.peakProfitPct??null,
         tslLockPct:tslInfo?.lockPct??null,tslPoints:tslInfo?.trailStepPoints??tslInfo?.trailPoints??null,
         tslDistance:tslInfo?.distancePoints??null,tslBasis:tslInfo?.basis||'',signal,
         _sortDays:daysHeld==null?-1:daysHeld});
