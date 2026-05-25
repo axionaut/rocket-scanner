@@ -1,4 +1,4 @@
-﻿<!DOCTYPE html>
+<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="UTF-8">
@@ -256,8 +256,8 @@ table.main tbody td{padding:9px 11px;font-family:'DM Mono',monospace;font-size:1
   <button class="btn" onclick="exportBrain()" title="Export Brain — download a copy of the brain file" style="font-size:11px">💾 Export</button>
   <button class="btn" onclick="document.getElementById('brainIn').click()" title="Import Brain — restore from a previously exported file" style="font-size:11px">🧠 Import</button>
   <input type="file" id="brainIn" accept=".json" style="display:none" onchange="importBrain(event)">
-  <button class="btn" onclick="resetEngine(this)" title="Reset Engine — wipe correlations and learning data only. Keeps tradebook, holdings, orders, custom rules." style="font-size:11px;border-color:rgba(251,191,36,.3);color:var(--amber)">🧹 Engine</button>
-  <button class="btn" onclick="resetBrain(this)" title="Reset — wipe only the selected mode's accumulated data and start fresh" style="font-size:11px;border-color:rgba(239,68,68,.3);color:var(--red)">🗑 Reset</button>
+  <button class="btn" onclick="resetEngine(this)" title="Reset Engine — restart scoring/learning only. Keeps tradebook, holdings, rules, and dated regime history." style="font-size:11px;border-color:rgba(251,191,36,.3);color:var(--amber)">🧹 Engine</button>
+  <button class="btn" onclick="resetBrain(this)" title="Reset — wipe all selected-mode data, including tradebook and dated regime history, and start fresh." style="font-size:11px;border-color:rgba(239,68,68,.3);color:var(--red)">🗑 Reset</button>
   <div style="position:relative;display:flex;align-items:center">
     <button class="btn btn-fire" id="loadFilesBtn" onclick="showUploadScreen()">Load Files</button>
     <button class="btn" onclick="toggleRequiredFilesPopover()" title="Required input files" style="font-size:14px;padding:8px 12px;margin-left:4px">ℹ️</button>
@@ -350,7 +350,7 @@ table.main tbody td{padding:9px 11px;font-family:'DM Mono',monospace;font-size:1
 
 
 <script>
-const BUILD_TS='2026-05-25 09:32 IST'; // replaced at commit time with IST datetime
+const BUILD_TS='2026-05-25 10:29 IST'; // replaced at commit time with IST datetime
 const MODE_STORE='rs_market_mode';
 const USD_INR_STORE='rs_usd_inr';
 const HARD_FILTER_SCHEMA='null_blanks_pass_v1';
@@ -423,7 +423,7 @@ let ALL=[],FILT=[],PG=1,PGSZ=9999,SCOL='rocketScore',SDIR=-1;
 let _tvLoadedThisSession=false; // true once a TV CSV has been processed this session
 let _scanSavedDate=null; // date string (YYYY-MM-DD) of the brain-restored scan, set on init
 let SCORE_MAP={}; // {symbol → rocketScore} for ALL parsed stocks including filtered-out ones
-let PERF_REGIME_FILTER='all'; // 'all' | 'bull' | 'bear' | 'neutral'
+let PERF_REGIME_FILTER='all'; // 'all' | 'bull' | 'bear' | 'neutral' | 'untagged'
 let PERF_PERIOD_FILTER='all'; // 'all' | '1m' | '3m' | '6m' | '1y'
 let PERF_TRADE_WINDOWS=[]; // cached trade window rows from renderPerformance — used by current-window pill
 let PERF_LATEST_SUMMARY=null; // cached latest session summary from renderPerformance — used by renderStats card
@@ -2335,30 +2335,17 @@ function renderPerformance(){
   const fmtPct=(v)=>(v>=0?'+':'')+v.toFixed(2)+'%';
 
   const regCal=FS.get(modeKey(REGIME_CAL_STORE))||{};
-  const _savedMeth=FS.get(modeKey(METH_STORE))||{};
-  const fallbackRegime=ENGINE_DATA?.regime||_savedMeth.regime||null;
-
-  const _nd=d=>{if(!d||typeof d!=='string')return'';const dt=new Date(d+'T12:00:00Z');if(isNaN(dt.getTime()))return'';dt.setUTCDate(dt.getUTCDate()+1);return dt.toISOString().slice(0,10);};
-  const calDates=Object.keys(regCal).sort();
-  const nearestRegime=date=>{
-    if(!date)return fallbackRegime||'?';
-    if(regCal[date]) return regCal[date];
-    const next=_nd(date); if(next&&regCal[next]) return regCal[next];
-    if(!calDates.length) return fallbackRegime||'?';
-    let lo=0,hi=calDates.length-1,best=0;
-    while(lo<=hi){const mid=(lo+hi)>>1;if(calDates[mid]<=date){best=mid;lo=mid+1;}else hi=mid-1;}
-    const a=calDates[best],b=calDates[best+1];
-    const da=Math.abs(new Date(date)-new Date(a));
-    const db=b?Math.abs(new Date(date)-new Date(b)):Infinity;
-    return regCal[da<=db?a:b]||fallbackRegime||'?';
-  };
+  // Attribute performance only when that sell-date has an observed market regime.
+  // Inferring from today's/nearest scan can relabel the entire historical tradebook.
+  const observedRegime=date=>date&&regCal[date]?regCal[date]:'untagged';
   const allTripsRaw=tb.tripsData||[];
   if(!allTripsRaw.length&&tb.roundTrips>0){
     // Old brain data — tripsData field didn't exist before this version
     el.innerHTML=`<div style="text-align:center;padding:80px 40px;color:var(--t2)"><div style="font-size:36px;margin-bottom:16px">🔄</div><div style="font-size:16px;font-weight:700;color:var(--t1);margin-bottom:8px">Re-upload TRADEBOOK.csv</div><div>Brain has ${tb.roundTrips} trades stored in the old format. Re-upload TRADEBOOK.csv once to rebuild with full trip data.</div></div>`;
     return;
   }
-  const allTrips=allTripsRaw.map(r=>({...r,regime:nearestRegime(r.sellDate)}));
+  const allTrips=allTripsRaw.map(r=>({...r,regime:observedRegime(r.sellDate)}));
+  const untaggedLots=allTrips.filter(r=>r.regime==='untagged').length;
 
   const filteredByRegime=PERF_REGIME_FILTER==='all'?allTrips:allTrips.filter(r=>r.regime===PERF_REGIME_FILTER);
 
@@ -2375,7 +2362,7 @@ function renderPerformance(){
   const calDayCount=(dfrom&&dto)?Math.round((new Date(dto)-new Date(dfrom))/86400000)+1:null;
   const avgCalDayPnl=(calDayCount&&calDayCount>0)?Math.round(p.totalNetPnlRs/calDayCount):null;
   const spanTradingDays=(dfrom&&dto)?(dfrom===dto?1:(tradingDaysBetween(dfrom,dto)||0)+1):null;
-  const regimeLabel=PERF_REGIME_FILTER==='all'?'All regimes':PERF_REGIME_FILTER==='bull'?'🐂 Bull':PERF_REGIME_FILTER==='bear'?'🐻 Bear':'➡ Neutral';
+  const regimeLabel=PERF_REGIME_FILTER==='all'?'All regimes':PERF_REGIME_FILTER==='bull'?'🐂 Bull':PERF_REGIME_FILTER==='bear'?'🐻 Bear':PERF_REGIME_FILTER==='neutral'?'➡ Neutral':'? Untagged';
   const periodLabel=(dfrom&&dto)?`${dfrom} → ${dto} · ${regimeLabel}`:`All time · ${regimeLabel}`;
 
   const kpis=[
@@ -2402,7 +2389,7 @@ function renderPerformance(){
       <div class="kpi-sub">${k.sub}</div>
     </div>`).join('')+'</div>';
 
-  const regBreakdown=['bull','bear','neutral'].map(reg=>{
+  const regBreakdown=['bull','bear','neutral','untagged'].map(reg=>{
     const rTrips=allTrips.filter(t=>t.regime===reg);
     if(!rTrips.length) return {reg,count:0,winRate:null,avgPct:null,netPnl:null,expectancy:null};
     const rp=computePerfStats(rTrips);
@@ -2774,12 +2761,12 @@ function renderPerformance(){
     </div>`;
   })();
 
-  const regimePills=['all','bull','bear','neutral'].map(r=>{
+  const regimePills=['all','bull','bear','neutral','untagged'].map(r=>{
     const active=PERF_REGIME_FILTER===r;
-    const label=r==='all'?'All':r==='bull'?'🐂 Bull':r==='bear'?'🐻 Bear':'➡ Neutral';
+    const label=r==='all'?'All':r==='bull'?'🐂 Bull':r==='bear'?'🐻 Bear':r==='neutral'?'➡ Neutral':'? Untagged';
     const col=r==='bull'?'var(--green)':r==='bear'?'var(--red)':r==='neutral'?'var(--orange)':'var(--t2)';
     const bg=active?(r==='bull'?'rgba(34,197,94,.15)':r==='bear'?'rgba(239,68,68,.15)':r==='neutral'?'rgba(251,146,60,.15)':'rgba(148,163,184,.15)'):'transparent';
-    const isCurrent=r!=='all'&&r===CURRENT_REGIME;
+    const isCurrent=(r==='bull'||r==='bear'||r==='neutral')&&r===CURRENT_REGIME;
     const dot=isCurrent?`<span style="display:inline-block;width:5px;height:5px;border-radius:50%;background:${col};margin-left:4px;vertical-align:middle" title="Current session regime"></span>`:'';
     return `<button onclick="PERF_REGIME_FILTER='${r}';renderPerformance()" style="padding:5px 14px;border-radius:20px;border:1px solid ${active?col:'var(--border)'};background:${bg};color:${active?col:'var(--t3)'};font-size:12px;font-weight:${active?700:500};cursor:pointer;white-space:nowrap">${label}${dot}</button>`;
   }).join('');
@@ -2819,9 +2806,9 @@ function renderPerformance(){
       ${timeStopHtml}
       ${perfNav}
       ${regimePillsHtml}
-      <div style="font-size:10px;color:var(--t3);margin-bottom:12px">${periodLabel} · ${p.roundTrips} lots</div>
+      <div style="font-size:10px;color:var(--t3);margin-bottom:12px">${periodLabel} · ${p.roundTrips} lots${untaggedLots?` · ${untaggedLots} untagged (no observed sell-date regime)`:''}</div>
       <div id="perf-kpi">${kpiHtml}</div>
-      ${perfCard('Regime Returns',`<div style="display:grid;grid-template-columns:repeat(3,1fr);gap:1px;background:var(--border)">${regBreakdown.map(rb=>{const col=rb.reg==='bull'?'var(--green)':rb.reg==='bear'?'var(--red)':'var(--orange)';const icon=rb.reg==='bull'?'🐂':rb.reg==='bear'?'🐻':'➡';const noData=rb.count===0;return`<div style="background:var(--bg-card);padding:14px 16px"><div style="font-size:11px;font-weight:700;color:${col};text-transform:uppercase;letter-spacing:.06em;margin-bottom:8px">${icon} ${rb.reg.charAt(0).toUpperCase()+rb.reg.slice(1)} <span style="font-weight:400;color:var(--t3)">(${rb.count} lots)</span></div>${noData?`<div style="color:var(--t3);font-size:11px;padding:4px 0">No trades tagged to this regime yet.<br>Upload TV CSV during bear/neutral sessions to build history.</div>`:`<div style="display:flex;flex-direction:column;gap:4px"><div style="display:flex;justify-content:space-between;font-size:12px"><span style="color:var(--t3)">Win Rate</span><span style="color:${rb.winRate>=55?'var(--green)':rb.winRate>=45?'var(--amber)':'var(--red)'};font-weight:700">${rb.winRate}%</span></div><div style="display:flex;justify-content:space-between;font-size:12px"><span style="color:var(--t3)">Avg P&L%</span><span style="color:${rb.avgPct>=0?'var(--green)':'var(--red)'};font-weight:700">${rb.avgPct>=0?'+':''}${rb.avgPct}%</span></div><div style="display:flex;justify-content:space-between;font-size:12px"><span style="color:var(--t3)">Expectancy</span><span style="color:${rb.expectancy>=0?'var(--green)':'var(--red)'};font-weight:700">${fmtSignedINR(rb.expectancy)}</span></div><div style="display:flex;justify-content:space-between;font-size:12px"><span style="color:var(--t3)">Net P&L</span><span style="color:${rb.netPnl>=0?'var(--green)':'var(--red)'};font-weight:700">${fmtSignedINR(rb.netPnl)}</span></div></div>`}</div>`}).join('')}</div>`,'','perf-regime-ret')}
+      ${perfCard('Regime Returns',`<div style="display:grid;grid-template-columns:repeat(4,1fr);gap:1px;background:var(--border)">${regBreakdown.map(rb=>{const col=rb.reg==='bull'?'var(--green)':rb.reg==='bear'?'var(--red)':rb.reg==='neutral'?'var(--orange)':'var(--t2)';const icon=rb.reg==='bull'?'🐂':rb.reg==='bear'?'🐻':rb.reg==='neutral'?'➡':'?';const noData=rb.count===0;return`<div style="background:var(--bg-card);padding:14px 16px"><div style="font-size:11px;font-weight:700;color:${col};text-transform:uppercase;letter-spacing:.06em;margin-bottom:8px">${icon} ${rb.reg.charAt(0).toUpperCase()+rb.reg.slice(1)} <span style="font-weight:400;color:var(--t3)">(${rb.count} lots)</span></div>${noData?`<div style="color:var(--t3);font-size:11px;padding:4px 0">${rb.reg==='untagged'?'Every lot has an observed sell-date regime.':'No trades observed in this regime yet.'}</div>`:`<div style="display:flex;flex-direction:column;gap:4px"><div style="display:flex;justify-content:space-between;font-size:12px"><span style="color:var(--t3)">Win Rate</span><span style="color:${rb.winRate>=55?'var(--green)':rb.winRate>=45?'var(--amber)':'var(--red)'};font-weight:700">${rb.winRate}%</span></div><div style="display:flex;justify-content:space-between;font-size:12px"><span style="color:var(--t3)">Avg P&L%</span><span style="color:${rb.avgPct>=0?'var(--green)':'var(--red)'};font-weight:700">${rb.avgPct>=0?'+':''}${rb.avgPct}%</span></div><div style="display:flex;justify-content:space-between;font-size:12px"><span style="color:var(--t3)">Expectancy</span><span style="color:${rb.expectancy>=0?'var(--green)':'var(--red)'};font-weight:700">${fmtSignedINR(rb.expectancy)}</span></div><div style="display:flex;justify-content:space-between;font-size:12px"><span style="color:var(--t3)">Net P&L</span><span style="color:${rb.netPnl>=0?'var(--green)':'var(--red)'};font-weight:700">${fmtSignedINR(rb.netPnl)}</span></div></div>`}</div>`}).join('')}</div>`,'','perf-regime-ret')}
       ${monthRows.length?perfCard('Monthly Breakdown',monthTbl.getHtml(),'','perf-monthly'):''}
       ${hasTradeWindows?perfCard('Trading Windows <span style="font-size:10px;color:var(--t3);font-weight:400">Buy Edge &gt; 2 = Enter · Sell Edge &gt; 2 = Exit · hover Edge columns to sort</span>',tradeWindowTbl.getHtml(),'','perf-trade-windows'):''}
       ${p.symBreakdown.length?perfCard('Stocks',symTbl.getHtml(),'360px','perf-stocks'):''}
@@ -4089,14 +4076,14 @@ function resetEngine(btn){
     return;
   }
   const s=ACC_CORR?.sessions||0;
-  // Wipe engine learning keys — keep tradebook, holdings, orders, positions, missed opp, surv rules
-  const engineKeys=[CORR_STORE,CORR_BULL_STORE,CORR_BEAR_STORE,CORR_NEUT_STORE,SNAP_KEY,SNAP_PREV_KEY,METH_STORE,REGIME_CAL_STORE,SURV_CORR_STORE,REC_COUNT_STORE,ALL_STORE].map(k=>modeKey(k));
+  // Wipe engine learning keys; keep dated regime observations used by tradebook analytics.
+  const engineKeys=[CORR_STORE,CORR_BULL_STORE,CORR_BEAR_STORE,CORR_NEUT_STORE,SNAP_KEY,SNAP_PREV_KEY,METH_STORE,SURV_CORR_STORE,REC_COUNT_STORE,ALL_STORE].map(k=>modeKey(k));
   engineKeys.forEach(k=>FS.set(k,null));
   ACC_CORR=null; ACC_CORR_BULL=null; ACC_CORR_BEAR=null; ACC_CORR_NEUT=null;
   ALL=[];FILT=[];ENGINE_DATA={};PREV_SNAP={};PREV_SNAP_META={};SURV_CORR_ACC={};
   btn._stage=0;
   btn.innerHTML='🧹 Reset Engine';btn.style.background='';
-  showToast(`<strong>${modeLabel()} engine reset.</strong> Wiped ${s} sessions for the selected mode. Tradebook, holdings, and rules preserved. Upload fresh TV CSV to restart learning.`,6000);
+  showToast(`<strong>${modeLabel()} engine reset.</strong> Wiped ${s} learning sessions for the selected mode. Tradebook, dated regime history, holdings, and rules preserved. Upload fresh TV CSV to restart learning.`,6000);
   setTimeout(()=>location.reload(),2500);
 }
 
