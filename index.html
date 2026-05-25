@@ -256,8 +256,7 @@ table.main tbody td{padding:9px 11px;font-family:'DM Mono',monospace;font-size:1
   <button class="btn" onclick="exportBrain()" title="Export Brain — download a copy of the brain file" style="font-size:11px">💾 Export</button>
   <button class="btn" onclick="document.getElementById('brainIn').click()" title="Import Brain — restore from a previously exported file" style="font-size:11px">🧠 Import</button>
   <input type="file" id="brainIn" accept=".json" style="display:none" onchange="importBrain(event)">
-  <button class="btn" onclick="resetEngine(this)" title="Reset Engine — restart scoring/learning only. Keeps tradebook, holdings, rules, and dated regime history." style="font-size:11px;border-color:rgba(251,191,36,.3);color:var(--amber)">🧹 Engine</button>
-  <button class="btn" onclick="resetBrain(this)" title="Reset — wipe all selected-mode data, including tradebook and dated regime history, and start fresh." style="font-size:11px;border-color:rgba(239,68,68,.3);color:var(--red)">🗑 Reset</button>
+  <button class="btn" onclick="resetBrain(this)" title="Reset Brain — wipe all accumulated Stocks and Crypto brain data and saved filters. Input files stay in your folder." style="font-size:11px;border-color:rgba(239,68,68,.3);color:var(--red)">🗑 Reset Brain</button>
   <div style="position:relative;display:flex;align-items:center">
     <button class="btn btn-fire" id="loadFilesBtn" onclick="showUploadScreen()">Load Files</button>
     <button class="btn" onclick="toggleRequiredFilesPopover()" title="Required input files" style="font-size:14px;padding:8px 12px;margin-left:4px">ℹ️</button>
@@ -350,7 +349,7 @@ table.main tbody td{padding:9px 11px;font-family:'DM Mono',monospace;font-size:1
 
 
 <script>
-const BUILD_TS='2026-05-25 10:29 IST'; // replaced at commit time with IST datetime
+const BUILD_TS='2026-05-25 10:34 IST'; // replaced at commit time with IST datetime
 const MODE_STORE='rs_market_mode';
 const USD_INR_STORE='rs_usd_inr';
 const HARD_FILTER_SCHEMA='null_blanks_pass_v1';
@@ -4067,57 +4066,38 @@ function showBrainPrompt(){
   setTimeout(()=>{const t=document.getElementById('brainToast');if(t)t.remove();},15000);
 }
 
-function resetEngine(btn){
-  if(!btn._stage){
-    btn._stage=1;
-    btn.innerHTML='⚠ Wipe correlations?';
-    btn.style.background='rgba(251,191,36,.12)';
-    setTimeout(()=>{if(btn._stage===1){btn._stage=0;btn.innerHTML='🧹 Reset Engine';btn.style.background='';}},4000);
-    return;
-  }
-  const s=ACC_CORR?.sessions||0;
-  // Wipe engine learning keys; keep dated regime observations used by tradebook analytics.
-  const engineKeys=[CORR_STORE,CORR_BULL_STORE,CORR_BEAR_STORE,CORR_NEUT_STORE,SNAP_KEY,SNAP_PREV_KEY,METH_STORE,SURV_CORR_STORE,REC_COUNT_STORE,ALL_STORE].map(k=>modeKey(k));
-  engineKeys.forEach(k=>FS.set(k,null));
-  ACC_CORR=null; ACC_CORR_BULL=null; ACC_CORR_BEAR=null; ACC_CORR_NEUT=null;
-  ALL=[];FILT=[];ENGINE_DATA={};PREV_SNAP={};PREV_SNAP_META={};SURV_CORR_ACC={};
-  btn._stage=0;
-  btn.innerHTML='🧹 Reset Engine';btn.style.background='';
-  showToast(`<strong>${modeLabel()} engine reset.</strong> Wiped ${s} learning sessions for the selected mode. Tradebook, dated regime history, holdings, and rules preserved. Upload fresh TV CSV to restart learning.`,6000);
-  setTimeout(()=>location.reload(),2500);
-}
-
 function resetBrain(btn){
   // Stage 1: first click → ask for confirmation
   if(!btn._stage){
     btn._stage=1;
-    btn.innerHTML='⚠ Are you sure?';
+    btn.innerHTML='⚠ Wipe all brain data?';
     btn.style.background='rgba(239,68,68,.15)';
     setTimeout(()=>{if(btn._stage===1){btn._stage=0;btn.innerHTML='🗑 Reset Brain';btn.style.background='';btn.style.borderColor='rgba(239,68,68,.3)';}},4000);
     return;
   }
-  // Stage 2: second click → final warning with session count
+  // Stage 2: second click → final warning with all-mode session count
   if(btn._stage===1){
-    const s=ACC_CORR?.sessions||0;
+    const brain=FS.getBrain()||{};
+    const s=(brain[CORR_STORE]?.sessions||0)+(brain[modeKey(CORR_STORE,'crypto')]?.sessions||0);
     btn._stage=2;
-    btn.innerHTML=`🗑 CONFIRM: wipe ${s} sessions?`;
+    btn.innerHTML=`🗑 CONFIRM: wipe ${s} sessions + data?`;
     btn.style.background='rgba(239,68,68,.25)';btn.style.borderColor='var(--red)';btn.style.color='#fff';
     setTimeout(()=>{if(btn._stage===2){btn._stage=0;btn.innerHTML='🗑 Reset Brain';btn.style.background='';btn.style.borderColor='rgba(239,68,68,.3)';btn.style.color='var(--red)';}},6000);
     return;
   }
-  // Stage 3: confirmed — wipe selected mode only
-  const stockKeys=[SNAP_KEY,SNAP_PREV_KEY,REC_COUNT_STORE,ALL_STORE,CORR_STORE,CORR_BULL_STORE,CORR_BEAR_STORE,CORR_NEUT_STORE,METH_STORE,REGIME_CAL_STORE,AVG_DAY_CHG_STORE,HOLD_STORE,ORDERS_STORE,POS_STORE,POS_TSL_STORE,TRADEBOOK_STORE,MISSED_OPP_STORE,SURV_CORR_STORE,SURV_RULE_STORE,NSE_HOLIDAYS_STORE];
-  const cryptoKeys=[SNAP_KEY,SNAP_PREV_KEY,REC_COUNT_STORE,ALL_STORE,CORR_STORE,CORR_BULL_STORE,CORR_BEAR_STORE,CORR_NEUT_STORE,METH_STORE,REGIME_CAL_STORE,AVG_DAY_CHG_STORE].map(k=>modeKey(k,'crypto'));
-  (isCryptoMode()?cryptoKeys:stockKeys).forEach(k=>FS.set(k,null));
-  localStorage.removeItem(modeKey(SCANNER_STORE));
+  // Stage 3: confirmed — wipe the full persisted brain, regardless of active mode.
+  FS.reset();
+  localStorage.removeItem(SCANNER_STORE);
+  localStorage.removeItem(modeKey(SCANNER_STORE,'crypto'));
+  localStorage.removeItem(SHARED_FILTER_STORE);
   ACC_CORR=null; ACC_CORR_BULL=null; ACC_CORR_BEAR=null; ACC_CORR_NEUT=null;
   ALL=[]; FILT=[]; ENGINE_DATA={};
-  HOLDINGS=[]; POSITIONS=[];
+  HOLDINGS=[]; POSITIONS=[]; ORDERS_TODAY=null; TRADEBOOK_STATS=null; LAST_BUY_DATE_MAP={};
   PREV_SNAP={};PREV_SNAP_META={};
-  HOLD_COST_MAP={};
+  HOLD_COST_MAP={}; SURV_CORR_ACC={};
   btn._stage=0;
   btn.innerHTML='🗑 Reset Brain';btn.style.background='';btn.style.borderColor='rgba(239,68,68,.3)';btn.style.color='var(--red)';
-  showToast(`<strong>${modeLabel()} data wiped.</strong> Cleared only the selected mode. Upload fresh data to start learning again.`);
+  showToast('<strong>Brain reset.</strong> Cleared accumulated Stocks and Crypto data plus saved filters. Source files remain in your folder and can be processed fresh.',6000);
   setTimeout(()=>location.reload(),2000);
 }
 
