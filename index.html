@@ -349,7 +349,7 @@ table.main tbody td{padding:9px 11px;font-family:'DM Mono',monospace;font-size:1
 
 
 <script>
-const BUILD_TS='2026-05-25 10:34 IST'; // replaced at commit time with IST datetime
+const BUILD_TS='2026-05-25 10:44 IST'; // replaced at commit time with IST datetime
 const MODE_STORE='rs_market_mode';
 const USD_INR_STORE='rs_usd_inr';
 const HARD_FILTER_SCHEMA='null_blanks_pass_v1';
@@ -4944,19 +4944,6 @@ async function initApp(){
     {const _pNF=new Set(['scripcode','symbol','nse exclusive','status','series']);
     Object.keys(SURV_CORR_ACC).forEach(k=>{const c=SURV_CORR_ACC[k]?.col||'';const hl=c.trim().toLowerCase();if(_pNF.has(hl)||/^filler/i.test(c.trim())) delete SURV_CORR_ACC[k];});}
 
-    // Step 2g: Restore surveillance custom rules
-    try{
-      const sRaw=brain[SURV_RULE_STORE];
-      if(sRaw&&Array.isArray(sRaw)&&sRaw.length>0){
-        SURV_CUSTOM_RULES=sRaw.map(rule=>{
-          const column=String(rule.column||rule.label||'').trim();
-          return column?{key:survRuleKey(column),column,label:String(rule.label||column).trim()}:null;
-        }).filter(Boolean);
-      } else if(!sRaw||sRaw.length===0){
-        SURV_CUSTOM_RULES=SURV_SEED_RULES.map(r=>({key:survRuleKey(r.column),column:r.column,label:r.label}));
-      }
-    }catch(e){SURV_CUSTOM_RULES=[];}
-
     // Step 2h: Restore orders (today only)
     try{
       const oRaw=brain[ORDERS_STORE];
@@ -4978,6 +4965,10 @@ async function initApp(){
       console.log('INIT: no brain file found — starting fresh. Pick a folder to enable auto-save.');
     }
   }
+
+  // Restore configured surveillance rules, or seed the defaults for a fresh/reset brain,
+  // before REG1 ZIP hydration so hard filtering is active on the first new scan.
+  try{loadSurvRules();}catch(e){SURV_CUSTOM_RULES=SURV_SEED_RULES.map(r=>({key:survRuleKey(r.column),column:r.column,label:r.label}));}
 
   // Prefer current workspace CSVs over the saved brain snapshot. This keeps
   // Latest Session/Booked Today from showing stale rs_orders after Orders.csv changes.
