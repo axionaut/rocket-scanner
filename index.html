@@ -256,7 +256,7 @@ table.main tbody td{padding:9px 11px;font-family:'DM Mono',monospace;font-size:1
   <button class="btn" onclick="exportBrain()" title="Export Brain — download a copy of the brain file" style="font-size:11px">💾 Export</button>
   <button class="btn" onclick="document.getElementById('brainIn').click()" title="Import Brain — restore from a previously exported file" style="font-size:11px">🧠 Import</button>
   <input type="file" id="brainIn" accept=".json" style="display:none" onchange="importBrain(event)">
-  <button class="btn" onclick="resetBrain(this)" title="Reset Brain — wipe all accumulated Stocks and Crypto brain data and saved filters. Input files stay in your folder." style="font-size:11px;border-color:rgba(239,68,68,.3);color:var(--red)">🗑 Reset Brain</button>
+  <button class="btn" onclick="resetBrain(this)" title="Reset Brain - clear accumulated learning and saved filters while retaining one valid prior-session comparison snapshot. Input files stay in your folder." style="font-size:11px;border-color:rgba(239,68,68,.3);color:var(--red)">🗑 Reset Brain</button>
   <div style="position:relative;display:flex;align-items:center">
     <button class="btn btn-fire" id="loadFilesBtn" onclick="showUploadScreen()">Load Files</button>
     <button class="btn" onclick="toggleRequiredFilesPopover()" title="Required input files" style="font-size:14px;padding:8px 12px;margin-left:4px">ℹ️</button>
@@ -349,7 +349,7 @@ table.main tbody td{padding:9px 11px;font-family:'DM Mono',monospace;font-size:1
 
 
 <script>
-const BUILD_TS='2026-05-25 10:44 IST'; // replaced at commit time with IST datetime
+const BUILD_TS='2026-05-25 10:58 IST'; // replaced at commit time with IST datetime
 const MODE_STORE='rs_market_mode';
 const USD_INR_STORE='rs_usd_inr';
 const HARD_FILTER_SCHEMA='null_blanks_pass_v1';
@@ -657,11 +657,12 @@ const FS = (() => {
     return _brain;
   }
   function getBrain(){ return _brain; }
-  function reset(){
-    _brain={};
+  function reset(preserved={}){
+    _brain=preserved||{};
     _brainLoaded=true;
     if(_saveTimer) clearTimeout(_saveTimer);
-    deleteFile();
+    if(Object.keys(_brain).length) write(_brain);
+    else deleteFile();
   }
   function folderName(){ return dirHandle?.name||null; }
   function hasFolder(){ return !!dirHandle; }
@@ -4070,7 +4071,7 @@ function resetBrain(btn){
   // Stage 1: first click → ask for confirmation
   if(!btn._stage){
     btn._stage=1;
-    btn.innerHTML='⚠ Wipe all brain data?';
+    btn.innerHTML='⚠ Clear learned brain data?';
     btn.style.background='rgba(239,68,68,.15)';
     setTimeout(()=>{if(btn._stage===1){btn._stage=0;btn.innerHTML='🗑 Reset Brain';btn.style.background='';btn.style.borderColor='rgba(239,68,68,.3)';}},4000);
     return;
@@ -4080,13 +4081,20 @@ function resetBrain(btn){
     const brain=FS.getBrain()||{};
     const s=(brain[CORR_STORE]?.sessions||0)+(brain[modeKey(CORR_STORE,'crypto')]?.sessions||0);
     btn._stage=2;
-    btn.innerHTML=`🗑 CONFIRM: wipe ${s} sessions + data?`;
+    btn.innerHTML=`🗑 CONFIRM: clear ${s} learned sessions?`;
     btn.style.background='rgba(239,68,68,.25)';btn.style.borderColor='var(--red)';btn.style.color='#fff';
     setTimeout(()=>{if(btn._stage===2){btn._stage=0;btn.innerHTML='🗑 Reset Brain';btn.style.background='';btn.style.borderColor='rgba(239,68,68,.3)';btn.style.color='var(--red)';}},6000);
     return;
   }
-  // Stage 3: confirmed — wipe the full persisted brain, regardless of active mode.
-  FS.reset();
+  // Stage 3: keep only a valid prior-session comparison baseline; wipe learned/runtime state.
+  const preserved={};
+  const stockBaseline=getPriorSessionSnapshotRecordForMode('stock');
+  const cryptoBaseline=getPriorSessionSnapshotRecordForMode('crypto');
+  const holidays=FS.get(NSE_HOLIDAYS_STORE);
+  if(stockBaseline) preserved[SNAP_KEY]=stockBaseline;
+  if(cryptoBaseline) preserved[modeKey(SNAP_KEY,'crypto')]=cryptoBaseline;
+  if(Array.isArray(holidays)&&holidays.length) preserved[NSE_HOLIDAYS_STORE]=holidays;
+  FS.reset(preserved);
   localStorage.removeItem(SCANNER_STORE);
   localStorage.removeItem(modeKey(SCANNER_STORE,'crypto'));
   localStorage.removeItem(SHARED_FILTER_STORE);
@@ -4097,7 +4105,9 @@ function resetBrain(btn){
   HOLD_COST_MAP={}; SURV_CORR_ACC={};
   btn._stage=0;
   btn.innerHTML='🗑 Reset Brain';btn.style.background='';btn.style.borderColor='rgba(239,68,68,.3)';btn.style.color='var(--red)';
-  showToast('<strong>Brain reset.</strong> Cleared accumulated Stocks and Crypto data plus saved filters. Source files remain in your folder and can be processed fresh.',6000);
+  const kept=[stockBaseline&&('Stocks '+stockBaseline.savedDate),cryptoBaseline&&('Crypto '+cryptoBaseline.savedDate)].filter(Boolean);
+  const baselineMsg=kept.length?' Kept prior-session baseline: '+kept.join(', ')+'.':' No valid prior-session baseline was available.';
+  showToast('<strong>Brain reset.</strong> Cleared accumulated learning and saved filters.'+baselineMsg+' Source files remain in your folder.',7000);
   setTimeout(()=>location.reload(),2000);
 }
 
@@ -4551,25 +4561,23 @@ function restoreScannerRuntime(s){
   window._lastRawTV=s.lastRawTV;window._lastScannerSessionTag=s.lastScannerSessionTag;
   window._lastEngineFeats=s.lastEngineFeats;window._lastParsedFiltered=s.lastParsedFiltered;
 }
-function loadPrevSnapForMode(mode){
+function normSnapshotDate(s){
+  if(!s) return null;
+  if(/^\d{4}-\d{2}-\d{2}$/.test(s)) return s;
+  const d=new Date(s);
+  if(isNaN(d.getTime())) return null;
+  return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;
+}
+function getPriorSessionSnapshotRecordForMode(mode){
   const todayISO=getSessionDate();
-  const normDate=(s)=>{
-    if(!s) return null;
-    if(/^\d{4}-\d{2}-\d{2}$/.test(s)) return s;
-    const d=new Date(s);
-    if(isNaN(d.getTime())) return null;
-    return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;
-  };
   const snap=FS.get(modeKey(SNAP_KEY,mode)), prev=FS.get(modeKey(SNAP_PREV_KEY,mode));
-  let source=null;
-  const snapDate=normDate(snap?.savedDate);
-  if(snap&&snap.stocks&&snapDate&&snapDate!==todayISO) source=snap;
-  if(!source&&prev&&prev.stocks) source=prev;
-  if(source){
-    const sd=normDate(source.savedDate);
-    const gap=sd?tradingDaysBetween(sd,todayISO):null;
-    if(gap!=null&&gap>1) source=null;
-  }
+  const candidates=[snap,prev]
+    .filter(s=>s&&s.stocks&&normSnapshotDate(s.savedDate)&&normSnapshotDate(s.savedDate)<todayISO)
+    .sort((a,b)=>normSnapshotDate(b.savedDate).localeCompare(normSnapshotDate(a.savedDate)));
+  return candidates.find(s=>tradingDaysBetween(normSnapshotDate(s.savedDate),todayISO)===1)||null;
+}
+function loadPrevSnapForMode(mode){
+  const source=getPriorSessionSnapshotRecordForMode(mode);
   const out={snap:{},meta:{}};
   if(!source) return out;
   if(source.cols){
@@ -4816,32 +4824,7 @@ async function initApp(){
 
     // Load PREV_SNAP from brain — discard if more than 1 trading day old (stale lagged data)
     try{
-      const todayISO=getSessionDate();
-      // Normalize legacy "Thu May 14 2026" format to "YYYY-MM-DD" so comparisons work
-      const normDate=(s)=>{
-        if(!s) return null;
-        if(/^\d{4}-\d{2}-\d{2}$/.test(s)) return s;
-        const d=new Date(s);
-        if(isNaN(d.getTime())) return null;
-        const y=d.getFullYear(),m=String(d.getMonth()+1).padStart(2,'0'),dd=String(d.getDate()).padStart(2,'0');
-        return `${y}-${m}-${dd}`;
-      };
-      const snap=brain[modeKey(SNAP_KEY)], prev=brain[modeKey(SNAP_PREV_KEY)];
-      const snapDate=normDate(snap?.savedDate);
-      const prevDate=normDate(prev?.savedDate);
-      let source=null;
-      // Only use snap as PREV_SNAP if it's from a strictly earlier date than today
-      if(snap&&snap.stocks&&snapDate&&snapDate!==todayISO) source=snap;
-      if(!source&&prev&&prev.stocks) source=prev;
-      if(source){
-        // Staleness check: how many trading days between snapshot and today?
-        const sd=normDate(source.savedDate);
-        const gap=sd?tradingDaysBetween(sd,todayISO):null;
-        if(gap!=null&&gap>1){
-          console.log('INIT: discarding stale snapshot from',source.savedDate,'('+gap+' trading days ago)');
-          source=null;
-        }
-      }
+      const source=getPriorSessionSnapshotRecordForMode(MARKET_MODE);
       if(source){
         if(source.cols){
           Object.entries(source.stocks).forEach(([sym,vals])=>{
