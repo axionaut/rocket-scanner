@@ -350,7 +350,7 @@ table.main tbody td{padding:9px 11px;font-family:'DM Mono',monospace;font-size:1
 
 
 <script>
-const BUILD_TS='2026-05-22 14:57 IST'; // replaced at commit time with IST datetime
+const BUILD_TS='2026-05-25 09:32 IST'; // replaced at commit time with IST datetime
 const MODE_STORE='rs_market_mode';
 const USD_INR_STORE='rs_usd_inr';
 const HARD_FILTER_SCHEMA='null_blanks_pass_v1';
@@ -449,6 +449,7 @@ const CORR_STORE='rs_corr';
 const CORR_BULL_STORE='rs_corr_bull';
 const CORR_BEAR_STORE='rs_corr_bear';
 const CORR_NEUT_STORE='rs_corr_neutral';
+const CORR_SCHEMA='independent_valid_target_v2';
 const METH_STORE='rs_meth';
 const REGIME_CAL_STORE='rs_regime_cal';
 const HOLD_STORE='rs_holdings';
@@ -1658,31 +1659,53 @@ function runEngine(raw, sessionTag){
   }
 
   // ── Regime-conditional simple-average (running mean) blend ──
-  // Each regime (bull/bear/neutral) has its own accumulator. All sessions within a regime
-  // contribute equally. Combined ACC_CORR is the fallback for regimes with <2 sessions.
+  // Regime and combined models are accumulated independently. Older brains wrote the active
+  // regime vector into ACC_CORR; reconstruct the initial combined baseline from regime means.
   const regimeAccMap={bull:ACC_CORR_BULL,bear:ACC_CORR_BEAR,neutral:ACC_CORR_NEUT};
   const regimeStoreMap={bull:modeKey(CORR_BULL_STORE),bear:modeKey(CORR_BEAR_STORE),neutral:modeKey(CORR_NEUT_STORE)};
   const REGIME_ACC=regimeAccMap[regime]||null;
   const regimeSessions=REGIME_ACC?(REGIME_ACC.sessions||0):0;
-  const useRegimeCorr=regimeSessions>=2;
-  const newN=regimeSessions+(isNewSession?1:0);
+  const hasTargetObservation=qualityN>0;
+  const includeToday=isNewSession&&hasTargetObservation;
+  const learnedN=REGIME_ACC?(REGIME_ACC.learnSessions??REGIME_ACC.sessions??0):0;
+  const useRegimeCorr=learnedN>=2;
+  const newLearnedN=learnedN+(includeToday?1:0);
+  const combinedIsIndependent=ACC_CORR?.corrSchema===CORR_SCHEMA;
+  const legacyRegimeAccs=[ACC_CORR_BULL,ACC_CORR_BEAR,ACC_CORR_NEUT].filter(a=>a&&a.corr&&(a.learnSessions??a.sessions??0)>0);
+  const legacyCombinedLearnedN=legacyRegimeAccs.reduce((s,a)=>s+(a.learnSessions??a.sessions??0),0);
+  const combinedLearnedN=combinedIsIndependent?(ACC_CORR.learnSessions??ACC_CORR.sessions??0):legacyCombinedLearnedN;
+  const newCombinedLearnedN=combinedLearnedN+(includeToday?1:0);
+  const blend=(prior,today,n,add)=>{
+    if(today===null||!add) return prior;
+    if(prior===null||prior===undefined||n<=0) return today;
+    return prior+(today-prior)/(n+1);
+  };
 
+  const regimeCorr={};
+  const combinedCorr={};
   const targetCorr={};
   for(const f of FEATS){
     const today=isNaN(targetCorrToday[f])?null:targetCorrToday[f];
-    const regimeHist=(useRegimeCorr && REGIME_ACC && REGIME_ACC.corr)?REGIME_ACC.corr[f]:null;
-    const combinedHist=(ACC_CORR && ACC_CORR.corr)?ACC_CORR.corr[f]:null;
-    const hist=regimeHist!=null?regimeHist:combinedHist;
-    if(today===null)        targetCorr[f]=hist!=null?hist:0;
-    else if(hist===null)    targetCorr[f]=today;
-    else if(!isNewSession)  targetCorr[f]=hist; // same-session re-upload — don't blend
-    else                    targetCorr[f]=hist+(today-hist)/newN; // running mean
+    const regimeHist=REGIME_ACC?.corr?.[f]??null;
+    let combinedHist=ACC_CORR?.corr?.[f]??null;
+    if(!combinedIsIndependent&&legacyRegimeAccs.length){
+      let sum=0,n=0;
+      legacyRegimeAccs.forEach(a=>{
+        const v=a.corr[f], w=a.learnSessions??a.sessions??0;
+        if(v!==null&&v!==undefined&&isFinite(v)&&w>0){sum+=v*w;n+=w;}
+      });
+      combinedHist=n>0?sum/n:null;
+    }
+    regimeCorr[f]=blend(regimeHist,today,learnedN,includeToday);
+    combinedCorr[f]=blend(combinedHist,today,combinedLearnedN,includeToday);
+    const selected=useRegimeCorr?regimeCorr[f]:combinedCorr[f];
+    targetCorr[f]=selected!=null?selected:(today!=null?today:0);
   }
 
   // Save regime-specific accumulator
-  const newRegimeAcc={corr:{},sessions:regimeSessions+(isNewSession?1:0),
+  const newRegimeAcc={corr:regimeCorr,sessions:regimeSessions+(isNewSession?1:0),
+    learnSessions:newLearnedN,corrSchema:CORR_SCHEMA,
     lastUpdated:new Date().toISOString(),laggedNote,regime};
-  for(const f of FEATS) newRegimeAcc.corr[f]=targetCorr[f];
   if(regime==='bull')      ACC_CORR_BULL=newRegimeAcc;
   else if(regime==='bear') ACC_CORR_BEAR=newRegimeAcc;
   else                     ACC_CORR_NEUT=newRegimeAcc;
@@ -1698,11 +1721,11 @@ function runEngine(raw, sessionTag){
     }
   }
 
-  // Save combined accumulator (legacy fallback for regimes with <2 sessions)
-  const newAcc={corr:{},sessions:(ACC_CORR?ACC_CORR.sessions||0:0)+(isNewSession?1:0),
+  // Save the independent combined accumulator used only as the early-regime fallback.
+  const newAcc={corr:combinedCorr,sessions:(ACC_CORR?ACC_CORR.sessions||0:0)+(isNewSession?1:0),
+    learnSessions:newCombinedLearnedN,corrSchema:CORR_SCHEMA,
     lastUpdated:new Date().toISOString(),laggedNote,
     lastTag:sessionTag||null,lastDate:getSessionDate(),regime};
-  for(const f of FEATS) newAcc.corr[f]=targetCorr[f];
   ACC_CORR=newAcc;
   FS.set(modeKey(CORR_STORE), ACC_CORR);
 
@@ -3136,7 +3159,7 @@ function _renderMethodologyInner(){
     neutral:ACC_CORR_NEUT?.sessions ?? E.regimeSessions?.neutral ?? 0
   };
   E.regimeSessions=rs;
-  const corrSource = E.useRegimeCorr?'Regime-specific correlations active':(E.useAccCorr?'Combined fallback (regime <2 sessions)':'Warming up (need ≥2 sessions)');
+  const corrSource = E.useRegimeCorr?'Regime-specific correlations active':(E.useAccCorr?'Combined fallback (regime <2 target sessions)':'Warming up (need ≥2 target sessions)');
   const regimeTotal = (rs.bull||0)+(rs.bear||0)+(rs.neutral||0);
   const sessLabel = `${regimeTotal} sessions · ${E.laggedNote||'lagged learning starts next upload'}`;
 
@@ -3241,7 +3264,7 @@ function _renderMethodologyInner(){
       <div class="m-card"><h4>🚫 Hard Filters</h4><p>${isCryptoMode()
         ? `Removed from <strong>both learning and display</strong>: zero price, low 24h INR volume when present (below Min TV), ATR &lt;=0 when present, and <strong>peak retention &lt;50%</strong> (fading; only when day range &gt;1%). Blank/null values pass through as unknown. Currently filtered: ${(REMOVED.liq||0)+(REMOVED.atr||0)+(REMOVED.fade||0)} assets.`
         : `Removed from <strong>both learning and display</strong>: zero price, upper circuit (≥19.5%), non-EQ series (BE/BZ/SZ/SM/ST), surveillance-flagged stocks (user's rules), low liquidity when present (volume &lt;${(parseFloat(document.getElementById('fVolMult')?.value)||LIQ_MIN_VOL_DEFAULT).toLocaleString()}${parseFloat(document.getElementById('fMinTurnover')?.value)>0?' or turnover &lt;'+fmtINR(parseFloat(document.getElementById('fMinTurnover')?.value)):''}, shareholders &lt;500), zero Piotroski F-Score, ATR &lt;=0 when present, <strong>delivery &lt;30%</strong> when present, and <strong>peak retention &lt;50%</strong> (fading; only when day range &gt;1%). Blank/null values pass through as unknown. Currently filtered: ${(REMOVED.uc||0)+(REMOVED.surv||0)+(REMOVED.nonEq||0)+(REMOVED.liq||0)+(REMOVED.fscore||0)+(REMOVED.atr||0)+(REMOVED.deliv||0)+(REMOVED.fade||0)} stocks.`}</p></div>
-      <div class="m-card"><h4>${E.regime==='bull'?'🐂':E.regime==='bear'?'🐻':'➡'} Regime-Conditional Learning</h4><p>Today's market: <strong style="color:${regimeColor}">${(E.regime||'neutral').toUpperCase()}</strong> (${E.marketBreadth!=null?(E.marketBreadth*100).toFixed(0):'?'}% breadth). Each regime maintains its own running-mean correlation accumulator — bull sessions learn breakout patterns, bear sessions learn resilience. ${E.useRegimeCorr?'Using <strong>regime-specific</strong> correlations.':'Using <strong>combined</strong> fallback (need ≥2 sessions in current regime).'} Bull ${(E.regimeSessions?.bull)||0} · Bear ${(E.regimeSessions?.bear)||0} · Neutral ${(E.regimeSessions?.neutral)||0}.</p></div>
+      <div class="m-card"><h4>${E.regime==='bull'?'🐂':E.regime==='bear'?'🐻':'➡'} Regime-Conditional Learning</h4><p>Today's market: <strong style="color:${regimeColor}">${(E.regime||'neutral').toUpperCase()}</strong> (${E.marketBreadth!=null?(E.marketBreadth*100).toFixed(0):'?'}% breadth). Each regime maintains its own running-mean correlation accumulator — bull sessions learn breakout patterns, bear sessions learn resilience. ${E.useRegimeCorr?'Using <strong>regime-specific</strong> correlations.':'Using <strong>combined</strong> fallback (need ≥2 sessions with a rocket target in current regime).'} Bull ${(E.regimeSessions?.bull)||0} · Bear ${(E.regimeSessions?.bear)||0} · Neutral ${(E.regimeSessions?.neutral)||0}.</p></div>
       <div class="m-card"><h4>📊 Sector & Industry Breadth</h4><p>${E.sectorCol?'<span style="color:var(--green)">✓</span> Sector breadth, sector relative strength':'<span style="color:var(--red)">✗</span> No Sector column detected'}${E.industryCol?', <span style="color:var(--green)">✓</span> industry breadth':''} — computed from today\'s full universe and fed into mRMR as features. Stocks outperforming their sector score higher regardless of market direction.</p></div>
     </div>
 
