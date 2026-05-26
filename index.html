@@ -349,7 +349,7 @@ table.main tbody td{padding:9px 11px;font-family:'DM Mono',monospace;font-size:1
 
 
 <script>
-const BUILD_TS='2026-05-26 10:47 IST'; // replaced at commit time with IST datetime
+const BUILD_TS='2026-05-26 14:50 IST'; // replaced at commit time with IST datetime
 const MODE_STORE='rs_market_mode';
 const USD_INR_STORE='rs_usd_inr';
 const HARD_FILTER_SCHEMA='null_blanks_pass_v1';
@@ -464,7 +464,7 @@ const AVG_MOVE_ALL_STORE='rs_avg_move_all_v1';
 const AVG_MOVE_UNIVERSE_STORE='rs_avg_move_universe_v1';
 const REC_COUNT_STORE='rs_rec_count';
 const NSE_HOLIDAYS_STORE='rs_nse_holidays';
-let TRADEBOOK_STATS=null; // {avgWinPct, avgLossPct, medianWinPct, medianLossPct, winRate, avgHoldDays, p25Loss, p75Win, adaptiveSL, adaptiveTGT, minExitPct, roundTrips}
+let TRADEBOOK_STATS=null; // Includes net profit-velocity exitPolicy applied to adaptiveSL/adaptiveTGT/holdLimitDays.
 let LAST_BUY_DATE_MAP={}; // {symbol → latest buy date string} — populated on tradebook parse
 let ORDERS_TODAY=null; // [{symbol, type, qty, price, time}] — COMPLETE orders only
 
@@ -1027,6 +1027,50 @@ function normSym(s){return String(s||'').trim().replace(/^[A-Z]+:/,'').toUpperCa
 function escHtml(s){return String(s??'').replace(/[&<>"]/g,ch=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[ch]));}
 function findHeader(hdrs,patterns){return hdrs.find(h=>patterns.some(p=>p.test(h.trim())))||null;}
 function meanArr(arr){return arr.length?arr.reduce((s,v)=>s+v,0)/arr.length:0;}
+function roundPct05(v){return +(Math.round(v/0.05)*0.05).toFixed(2);}
+function weightedPercentile(rows,valueFn,weightFn,pct){
+  const vals=rows.map(r=>({v:valueFn(r),w:Math.max(0,weightFn(r))}))
+    .filter(x=>isFinite(x.v)&&isFinite(x.w)&&x.w>0).sort((a,b)=>a.v-b.v);
+  if(!vals.length) return null;
+  const total=vals.reduce((s,x)=>s+x.w,0), target=total*Math.max(0,Math.min(1,pct));
+  let seen=0;
+  for(const x of vals){seen+=x.w;if(seen>=target) return x.v;}
+  return vals[vals.length-1].v;
+}
+// Observational policy: chooses fast, profitable realised exit cohorts; it does not claim
+// an alternate TGT/SL would have filled without position-level historical price paths.
+function deriveProfitVelocityPolicy(trips,fallbackSL,fallbackTGT){
+  const valid=(trips||[]).filter(r=>isFinite(r.netPnlPct)&&isFinite(r.holdDays));
+  const baseline={slPct:fallbackSL,tgtPct:fallbackTGT,holdDays:Math.max(1,Math.round(meanArr(valid.map(r=>r.holdDays))||5)),
+    velocityPctPerDay:null,sample:valid.length,objective:'observed net % / holding day'};
+  if(valid.length<30) return baseline;
+  const minObs=Math.max(20,Math.ceil(valid.length*0.08));
+  const candidates=[1,2,3,5,7,10,15,20,30].map(days=>{
+    const rows=valid.filter(r=>r.holdDays<=days);
+    if(rows.length<minObs) return null;
+    const avgPct=meanArr(rows.map(r=>r.netPnlPct));
+    const avgDays=Math.max(1,meanArr(rows.map(r=>r.holdDays)));
+    const downside=meanArr(rows.map(r=>Math.max(0,-r.netPnlPct)));
+    const reliability=Math.sqrt(rows.length/(rows.length+40));
+    const velocity=avgPct/avgDays;
+    return {days,rows,velocity,score:((avgPct-(0.15*downside))/avgDays)*reliability};
+  }).filter(Boolean);
+  const best=candidates.length?candidates.reduce((a,b)=>b.score>a.score?b:a):null;
+  if(!best||best.score<=0) return baseline;
+  const wins=best.rows.filter(r=>r.netPnlPct>0);
+  const losses=valid.filter(r=>r.netPnlPct<=0);
+  const speedWeight=r=>1/Math.max(1,r.holdDays);
+  const learnedTgt=weightedPercentile(wins,r=>r.netPnlPct,speedWeight,0.5);
+  const learnedSL=weightedPercentile(losses,r=>Math.abs(r.netPnlPct),speedWeight,0.35);
+  const tgtBlend=Math.min(0.75,wins.length/(wins.length+40));
+  const slBlend=Math.min(0.75,losses.length/(losses.length+40));
+  const tgt=learnedTgt==null?fallbackTGT:roundPct05(Math.max(1,fallbackTGT+(learnedTgt-fallbackTGT)*tgtBlend));
+  const tightenedSL=learnedSL==null?fallbackSL:Math.min(fallbackSL,learnedSL);
+  const sl=roundPct05(Math.max(1,fallbackSL+(tightenedSL-fallbackSL)*slBlend));
+  return {slPct:sl,tgtPct:tgt,holdDays:best.days,velocityPctPerDay:+best.velocity.toFixed(3),
+    sample:best.rows.length,total:valid.length,baselineSL:fallbackSL,baselineTGT:fallbackTGT,
+    objective:'observed net % / holding day'};
+}
 function tickPrice(v){return Math.round(v/0.05)*0.05;}
 function tickBelowPrice(v){return Math.max(0,(Math.ceil((v*100)/5)*5-5)/100);}
 function actionableSellTrigger(stop, ltp){
@@ -2092,11 +2136,13 @@ function renderStats(){
     const _sl=TRADEBOOK_STATS.adaptiveSL.toFixed(2);
     const _tgt=(getEffectiveTgtPct()||TRADEBOOK_STATS.adaptiveTGT).toFixed(2);
     const rr=(parseFloat(_sl)>0?(parseFloat(_tgt)/parseFloat(_sl)):0).toFixed(2);
+    const policy=TRADEBOOK_STATS.exitPolicy;
+    const holdStr=policy?.holdDays?` · review &gt;${policy.holdDays}d`:'';
     const nudge=getMissedOppNudge();
     const nudgeStr=nudge>0?` · <span style="color:var(--amber);font-size:10px" title="You leave an avg of ${(nudge/0.25).toFixed(2)}% on the table after sells. 25% of that is now added to TGT.">missed opp +${nudge.toFixed(2)}%</span>`:'';
     const _cp=TRADEBOOK_STATS.avgChargePct!=null?Math.abs(TRADEBOOK_STATS.avgChargePct):null;
     const costStr=(_cp!=null&&_cp>0)?` · <span style="color:var(--t2)" title="Avg total Zerodha charges as % of round-trip turnover (buy+sell value), across all tradebook trips">cost ~${_cp.toFixed(2)}%</span>`:'';
-    return `<div class="st"><div class="st-l">SL / TGT</div><div class="st-v" style="font-size:17px"><span style="color:var(--red)">−${_sl}%</span><span style="color:var(--t3);font-size:13px"> / </span><span style="color:var(--green)">+${_tgt}%</span></div><div class="st-d">R:R ${rr}${costStr} · tradebook-derived${nudgeStr}</div></div>`;
+    return `<div class="st"><div class="st-l">SL / TGT</div><div class="st-v" style="font-size:17px"><span style="color:var(--red)">−${_sl}%</span><span style="color:var(--t3);font-size:13px"> / </span><span style="color:var(--green)">+${_tgt}%</span></div><div class="st-d">R:R ${rr}${costStr} · velocity policy${holdStr}${nudgeStr}</div></div>`;
   })();
 
   document.getElementById('statsBar').innerHTML=`
@@ -2342,6 +2388,14 @@ function renderPerformance(){
     el.innerHTML=`<div style="text-align:center;padding:80px 40px;color:var(--t2)"><div style="font-size:36px;margin-bottom:16px">📒</div><div style="font-size:16px;font-weight:700;color:var(--t1);margin-bottom:8px">No Tradebook Loaded</div><div>Upload TRADEBOOK.csv to see performance analytics.</div></div>`;
     return;
   }
+  // Upgrade saved tradebooks that already contain trip data but predate the velocity policy.
+  if(!tb.exitPolicy&&tb.tripsData?.length){
+    tb.exitPolicy=deriveProfitVelocityPolicy(tb.tripsData,tb.adaptiveSL||3.5,tb.adaptiveTGT||3.7);
+    tb.adaptiveSL=tb.exitPolicy.slPct;
+    tb.adaptiveTGT=tb.exitPolicy.tgtPct;
+    tb.holdLimitDays=tb.exitPolicy.holdDays;
+    try{FS.set(TRADEBOOK_STORE,tb);}catch(e){}
+  }
   const clr=(v)=>v===0?'var(--t2)':v>0?'var(--green)':'var(--red)';
   const fmtPerfRs=(v)=>fmtSignedINR(v);
   const fmtPct=(v)=>(v>=0?'+':'')+v.toFixed(2)+'%';
@@ -2376,6 +2430,7 @@ function renderPerformance(){
   const spanTradingDays=(dfrom&&dto)?(dfrom===dto?1:(tradingDaysBetween(dfrom,dto)||0)+1):null;
   const regimeLabel=PERF_REGIME_FILTER==='all'?'All regimes':PERF_REGIME_FILTER==='bull'?'🐂 Bull':PERF_REGIME_FILTER==='bear'?'🐻 Bear':PERF_REGIME_FILTER==='neutral'?'➡ Neutral':'? Untagged';
   const periodLabel=(dfrom&&dto)?`${dfrom} → ${dto} · ${regimeLabel}`:`All time · ${regimeLabel}`;
+  const exitPolicy=tb.exitPolicy||null;
 
   const kpis=[
     {label:'Net P&L',value:fmtPerfRs(p.totalNetPnlRs),color:clr(p.totalNetPnlRs),sub:`${p.roundTrips} lots · ${spanTradingDays||p.totalTradingDays} trading days`},
@@ -2388,6 +2443,7 @@ function renderPerformance(){
     {label:'Largest Win',value:fmtSignedINR(p.largestWinRs),color:'var(--green)',sub:'Single lot, net'},
     {label:'Max Win Streak',value:p.maxWinStreak+' days',color:p.maxWinStreak>=5?'var(--green)':p.maxWinStreak>=3?'var(--amber)':'var(--t1)',sub:'Consecutive profitable days'},
     {label:'Avg Hold',value:p.avgHoldDays+'d',color:'var(--t1)',sub:'Avg position duration'},
+    {label:'Learned Hold Cap',value:exitPolicy?exitPolicy.holdDays+'d':'—',color:exitPolicy?'var(--amber)':'var(--t3)',sub:exitPolicy&&exitPolicy.velocityPctPerDay!=null?`Observed +${exitPolicy.velocityPctPerDay.toFixed(3)}%/day · ${exitPolicy.sample} lots`:'Re-upload tradebook to learn'},
     {label:'Largest Loss',value:fmtSignedINR(p.largestLossRs),color:'var(--red)',sub:'Single lot, net'},
     {label:'Max Drawdown',value:p.maxDrawdown>0?fmtSignedINR(-p.maxDrawdown):'—',color:'var(--red)',sub:'Peak-to-trough in period'},
     {label:'Max Loss Streak',value:p.maxLossStreak+' days',color:p.maxLossStreak>=5?'var(--red)':p.maxLossStreak>=3?'var(--amber)':'var(--green)',sub:'Consecutive losing days'},
@@ -2601,7 +2657,7 @@ function renderPerformance(){
 
   const _totalObs=ENGINE_DATA?.accSessions||_savedMeth?.accSessions||0;
 
-  // ── Time-Stop Alert: open positions held past the high-win-rate window ──
+  // ── Time-Stop Alert: open positions held past the learned profit-velocity horizon ──
   // Built from HOLDINGS + POSITIONS (qty>0). Days held is sourced from today's
   // Orders.csv BUY first, then LAST_BUY_DATE_MAP from the tradebook.
   // Action thresholds are derived from this user's own tradebook below.
@@ -2610,33 +2666,12 @@ function renderPerformance(){
     if(!allTrips.length) return;
     const adaptiveSL=TRADEBOOK_STATS?.adaptiveSL||3.5;
     const adaptiveTGT=getEffectiveTgtPct()||(TRADEBOOK_STATS?.adaptiveTGT||3.7);
-    // ── Empirical thresholds from this user's tradebook ──
-    // Find the hold-day cutoff where the win rate crosses below 60%.
-    // Buckets: 0-1, 2-3, 4-5, 6-10, 11-20, 21+
-    const _bucketize=hd=>hd<=1?'0-1':hd<=3?'2-3':hd<=5?'4-5':hd<=10?'6-10':hd<=20?'11-20':'21+';
-    const _bucketCutoff={'0-1':1,'2-3':3,'4-5':5,'6-10':10,'11-20':20,'21+':9999};
-    const _stats={};
-    allTrips.forEach(t=>{
-      const b=_bucketize(t.holdDays);
-      if(!_stats[b]) _stats[b]={wins:0,total:0,pnl:0};
-      _stats[b].total++;
-      if(t.netPnlPct>0) _stats[b].wins++;
-      _stats[b].pnl+=t.netPnl||0;
-    });
-    // Find the last bucket where win rate stays ≥60% AND total trades ≥5 (avoid spurious cutoffs)
-    let cutoffDays=5; // sane fallback
-    const _orderedB=['0-1','2-3','4-5','6-10','11-20','21+'];
-    for(const b of _orderedB){
-      const s=_stats[b];
-      if(!s||s.total<5) continue;
-      if((s.wins/s.total)>=0.6) cutoffDays=_bucketCutoff[b];
-      else break; // first bucket below 60% — stop
-    }
-    // Extract a quick tail summary for context line
-    const _longBuckets=_orderedB.filter(b=>_bucketCutoff[b]>cutoffDays);
-    const _longWins=_longBuckets.reduce((s,b)=>s+(_stats[b]?.wins||0),0);
-    const _longTotal=_longBuckets.reduce((s,b)=>s+(_stats[b]?.total||0),0);
-    const _longPnl=_longBuckets.reduce((s,b)=>s+(_stats[b]?.pnl||0),0);
+    // Apply the net profit-per-day horizon learned from closed tradebook outcomes.
+    const cutoffDays=TRADEBOOK_STATS?.exitPolicy?.holdDays||TRADEBOOK_STATS?.holdLimitDays||5;
+    const _longRows=allTrips.filter(t=>t.holdDays>cutoffDays);
+    const _longWins=_longRows.filter(t=>t.netPnlPct>0).length;
+    const _longTotal=_longRows.length;
+    const _longPnl=_longRows.reduce((s,t)=>s+(t.netPnl||0),0);
     const _longWR=_longTotal?Math.round(_longWins/_longTotal*100):0;
 
     // ── Build live open-position rows ──
@@ -2757,7 +2792,7 @@ function renderPerformance(){
     ].filter(Boolean).join(' ');
 
     const _evidence=_longTotal>0
-      ?`<div style="font-size:11px;color:var(--t3);margin-top:6px;line-height:1.5"><strong style="color:var(--t2)">Signal</strong> = avg(P&amp;L%, P&amp;L ₹, −Days Held, Dist-to-SL), all cross-normalised to [−1,+1]. Equal weights — lower = more urgent to exit. Positions held &gt;${cutoffDays}d show a <strong style="color:${_longWR<50?'var(--red)':'var(--amber)'}">${_longWR}% win rate</strong> across ${_longTotal} tradebook trips (net ${fmtSignedINR(_longPnl)}).</div>`
+      ?`<div style="font-size:11px;color:var(--t3);margin-top:6px;line-height:1.5"><strong style="color:var(--t2)">Signal</strong> = avg(P&amp;L%, P&amp;L ₹, −Days Held, Dist-to-SL), all cross-normalised to [−1,+1]. Equal weights — lower = more urgent to exit. The profit-velocity policy reviews positions after <strong style="color:var(--amber)">${cutoffDays}d</strong>; historically, trips beyond it had a <strong style="color:${_longWR<50?'var(--red)':'var(--amber)'}">${_longWR}% win rate</strong> across ${_longTotal} lots (net ${fmtSignedINR(_longPnl)}).</div>`
       :'';
 
     timeStopHtml=`<div id="perf-timestop-card" style="background:var(--bg-card);border:1px solid ${_negCount>0?'rgba(239,68,68,.4)':'var(--border)'};border-radius:10px;margin-bottom:12px;overflow:hidden">
@@ -3466,13 +3501,12 @@ function getMissedOppNudge(){
 }
 
 function getEffectiveTgtPct(){
-  const round05=v=>+(Math.round(v/0.05)*0.05).toFixed(2);
   const nudge=getMissedOppNudge();
-  if(TRADEBOOK_STATS && TRADEBOOK_STATS.adaptiveTGT > 0) return round05(TRADEBOOK_STATS.adaptiveTGT+nudge);
+  if(TRADEBOOK_STATS && TRADEBOOK_STATS.adaptiveTGT > 0) return roundPct05(TRADEBOOK_STATS.adaptiveTGT+nudge);
   const vals = (typeof FILT !== 'undefined' ? FILT : []).map(s => s.tgtPct).filter(v => v != null && isFinite(v) && v > 0);
   if(!vals.length) return null;
   vals.sort((a,b)=>a-b);
-  return round05(vals[Math.floor(vals.length/2)]+nudge);
+  return roundPct05(vals[Math.floor(vals.length/2)]+nudge);
 }
 
 function getZerodhaMinTrailPoints(price){
@@ -4356,8 +4390,8 @@ function parseTradebook(text){
   const avgHoldDays=meanArr(roundTrips.map(r=>r.holdDays));
   const avgCapital=meanArr(roundTrips.map(r=>r.capital));
 
-  const adaptiveSL=+(Math.round(Math.abs(medianLossPct)/0.05)*0.05).toFixed(2);
-  const adaptiveTGT=+(Math.round(Math.abs(medianWinPct)/0.05)*0.05).toFixed(2);
+  const baselineSL=roundPct05(Math.abs(medianLossPct));
+  const baselineTGT=roundPct05(Math.abs(medianWinPct));
   const minExitPct=+Math.max(1,medianWinPct).toFixed(2);
 
   const stats={
@@ -4367,7 +4401,7 @@ function parseTradebook(text){
     medianWinPct:+medianWinPct.toFixed(2), medianLossPct:+medianLossPct.toFixed(2),
     p75Win:+p75Win.toFixed(2), p25Loss:+p25Loss.toFixed(2),
     avgHoldDays:+avgHoldDays.toFixed(1), avgCapital:+Math.round(avgCapital),
-    adaptiveSL, adaptiveTGT, minExitPct,
+    adaptiveSL:baselineSL, adaptiveTGT:baselineTGT, minExitPct,
     riskReward:+Math.abs(avgWinPct/avgLossPct).toFixed(2),
     openAvgCostMap, // {symbol: avgCost} from unmatched FIFO buy legs
   };
@@ -4388,6 +4422,10 @@ function parseTradebook(text){
     return{...r,charges,netPnl,netPnlPct};
   });
   stats.tripsData=tripsData;
+  stats.exitPolicy=deriveProfitVelocityPolicy(tripsData,baselineSL,baselineTGT);
+  stats.adaptiveSL=stats.exitPolicy.slPct;
+  stats.adaptiveTGT=stats.exitPolicy.tgtPct;
+  stats.holdLimitDays=stats.exitPolicy.holdDays;
 
   // Avg charge as % of turnover (buy+sell value) across all valid round trips
   const _ctTrips=tripsData.filter(r=>r.buyPrice>0&&r.sellPrice>0&&r.qty>0&&r.charges>=0);
@@ -4437,7 +4475,7 @@ function parseTradebook(text){
   LAST_BUY_DATE_MAP=lastBuyDateMap;
 
 
-  console.log('TRADEBOOK:',stats.roundTrips,'round trips,',stats.winners,'winners ('+stats.winRate+'%), adaptive SL:'+stats.adaptiveSL+'% TGT:'+stats.adaptiveTGT+'%');
+  console.log('TRADEBOOK:',stats.roundTrips,'round trips,',stats.winners,'winners ('+stats.winRate+'%), velocity policy SL:'+stats.adaptiveSL+'% TGT:'+stats.adaptiveTGT+'% hold:'+stats.holdLimitDays+'d');
   return stats;
 }
 
