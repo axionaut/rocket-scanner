@@ -349,7 +349,7 @@ table.main tbody td{padding:9px 11px;font-family:'DM Mono',monospace;font-size:1
 
 
 <script>
-const BUILD_TS='2026-05-25 10:58 IST'; // replaced at commit time with IST datetime
+const BUILD_TS='2026-05-26 10:47 IST'; // replaced at commit time with IST datetime
 const MODE_STORE='rs_market_mode';
 const USD_INR_STORE='rs_usd_inr';
 const HARD_FILTER_SCHEMA='null_blanks_pass_v1';
@@ -459,7 +459,9 @@ const TRADEBOOK_STORE='rs_tradebook';
 const SURV_RULE_STORE='rs_surv_rules';
 const SURV_CORR_STORE='rs_surv_corr';
 const MISSED_OPP_STORE='rs_missed_opp_v2';
-const AVG_DAY_CHG_STORE='rs_avg_day_chg';
+// Kept separate from the former day-high accumulator: these measure absolute daily change.
+const AVG_MOVE_ALL_STORE='rs_avg_move_all_v1';
+const AVG_MOVE_UNIVERSE_STORE='rs_avg_move_universe_v1';
 const REC_COUNT_STORE='rs_rec_count';
 const NSE_HOLIDAYS_STORE='rs_nse_holidays';
 let TRADEBOOK_STATS=null; // {avgWinPct, avgLossPct, medianWinPct, medianLossPct, winRate, avgHoldDays, p25Loss, p75Win, adaptiveSL, adaptiveTGT, minExitPct, roundTrips}
@@ -1181,7 +1183,8 @@ function persistMethodologySnapshot(){
       removed:{...(ENGINE_DATA.removed||{})},
       survSize:ENGINE_DATA.survSize||0,
       survRuleRows:syncSurvRuleRows(ENGINE_DATA.survRuleRows||[]),
-      avgDayChg:ENGINE_DATA.avgDayChg
+      avgMoveAll:ENGINE_DATA.avgMoveAll,
+      avgMoveUniverse:ENGINE_DATA.avgMoveUniverse
     };
     FS.set(modeKey(METH_STORE),methSave);
   }catch(e){
@@ -1470,14 +1473,13 @@ function runEngine(raw, sessionTag){
                : 'neutral';
   CURRENT_REGIME = regime;
   const totalParsed = parsed.length;
-  // Avg day-high % from previous close (how far each stock ran at its intraday best)
-  const _dayHighVals = (K.high_1d && K.price_change) ? parsed.map(d=>{
-    const pc=d[K.price_change]; const hi=d[K.high_1d]; const pr=d[K.price];
-    if(pc==null||hi==null||pr==null||!isFinite(pc)||!isFinite(hi)||!isFinite(pr)||pr<=0) return null;
-    const prevClose=pr/(1+pc/100);
-    return prevClose>0?(hi/prevClose-1)*100:null;
-  }).filter(v=>v!=null&&isFinite(v)) : [];
-  const todayAvgDayChg=_dayHighVals.length ? _dayHighVals.reduce((s,v)=>s+v,0)/_dayHighVals.length : null;
+  // Daily movement is absolute % change, so advances and declines do not cancel out.
+  const avgAbsDailyMove=(rows)=>{
+    if(!K.price_change) return null;
+    const vals=rows.map(d=>d[K.price_change]).filter(v=>v!=null&&isFinite(v)).map(v=>Math.abs(v));
+    return vals.length ? vals.reduce((sum,v)=>sum+v,0)/vals.length : null;
+  };
+  const todayAvgMoveAll=avgAbsDailyMove(parsed);
 
   // ── Compute Sector / Industry breadth features (full universe) ──
   if(sectorCol && K.price_change){
@@ -1580,6 +1582,7 @@ function runEngine(raw, sessionTag){
     }
     return true;
   });
+  const todayAvgMoveUniverse=avgAbsDailyMove(filtered);
 
   // Expose for snapshot saving after engine run
   window._lastEngineFeats = FEATS;
@@ -1711,15 +1714,17 @@ function runEngine(raw, sessionTag){
   else                     ACC_CORR_NEUT=newRegimeAcc;
   FS.set(regimeStoreMap[regime], newRegimeAcc);
 
-  // Update avg day-high running mean — once per calendar day only, regardless of upload count
-  if(todayAvgDayChg != null && isMarketHours()){
-    const _adc=FS.get(modeKey(AVG_DAY_CHG_STORE))||{mean:0,sessions:0,lastDate:''};
-    const _today=getSessionDate();
-    if(_adc.lastDate !== _today){
-      const _adcN=_adc.sessions+1;
-      FS.set(modeKey(AVG_DAY_CHG_STORE),{mean:+(_adc.mean+(todayAvgDayChg-_adc.mean)/_adcN).toFixed(4),sessions:_adcN,lastDate:_today});
-    }
-  }
+  // Maintain separate all-input and filtered-universe histories once per trading day.
+  const updateAvgMove=(storeKey,value)=>{
+    if(value == null || !isMarketHours()) return;
+    const acc=FS.get(modeKey(storeKey))||{mean:0,sessions:0,lastDate:''};
+    const today=getSessionDate();
+    if(acc.lastDate === today) return;
+    const n=acc.sessions+1;
+    FS.set(modeKey(storeKey),{mean:+(acc.mean+(value-acc.mean)/n).toFixed(4),sessions:n,lastDate:today});
+  };
+  updateAvgMove(AVG_MOVE_ALL_STORE,todayAvgMoveAll);
+  updateAvgMove(AVG_MOVE_UNIVERSE_STORE,todayAvgMoveUniverse);
 
   // Save the independent combined accumulator used only as the early-regime fallback.
   const newAcc={corr:combinedCorr,sessions:(ACC_CORR?ACC_CORR.sessions||0:0)+(isNewSession?1:0),
@@ -1847,7 +1852,7 @@ function runEngine(raw, sessionTag){
   });
 
   ENGINE_DATA={targetCorr,targetCorrToday,interCorr,mrmr,weights,features:FEATS,labels:LABELS,top10Feats,rocketCount:topN,rocketThreshold:ROCKET_THRESHOLD,accSessions:ACC_CORR?.sessions||1,laggedNote:laggedNote||'',
-    regime:regime, marketBreadth:marketBreadth, avgDayChg:todayAvgDayChg,
+    regime:regime, marketBreadth:marketBreadth, avgMoveAll:todayAvgMoveAll, avgMoveUniverse:todayAvgMoveUniverse,
     useAccCorr: useRegimeCorr || (ACC_CORR?(ACC_CORR.sessions||0)>=2:false),
     useRegimeCorr,
     regimeSessions:{
@@ -1874,7 +1879,8 @@ function runEngine(raw, sessionTag){
   try{
     const methSave={targetCorr,targetCorrToday,interCorr,mrmr,weights,features:FEATS,labels:LABELS,top10Feats,rocketCount:ENGINE_DATA.rocketCount,rocketThreshold:ENGINE_DATA.rocketThreshold,accSessions:ENGINE_DATA.accSessions,laggedNote:ENGINE_DATA.laggedNote,
       regime:ENGINE_DATA.regime,marketBreadth:ENGINE_DATA.marketBreadth,useAccCorr:ENGINE_DATA.useAccCorr,useRegimeCorr:ENGINE_DATA.useRegimeCorr,regimeSessions:ENGINE_DATA.regimeSessions,sectorCol:ENGINE_DATA.sectorCol,industryCol:ENGINE_DATA.industryCol,
-      yesterdayRockets:yesterdayRockets,qualityTargetN:qualityN,totalParsed:totalParsed,hardFilterSchema:HARD_FILTER_SCHEMA,removed:{...REMOVED},survSize:Object.keys(NSE_SURV).length,avgDayChg:todayAvgDayChg};
+      yesterdayRockets:yesterdayRockets,qualityTargetN:qualityN,totalParsed:totalParsed,hardFilterSchema:HARD_FILTER_SCHEMA,removed:{...REMOVED},survSize:Object.keys(NSE_SURV).length,
+      avgMoveAll:todayAvgMoveAll,avgMoveUniverse:todayAvgMoveUniverse};
     FS.set(modeKey(METH_STORE),methSave);
     // Update regime calendar: date → regime
     const regCal=FS.get(modeKey(REGIME_CAL_STORE))||{};
@@ -2095,10 +2101,16 @@ function renderStats(){
 
   document.getElementById('statsBar').innerHTML=`
     ${(()=>{
-      const _adc=FS.get(modeKey(AVG_DAY_CHG_STORE));
-      const _todayChg=ENGINE_DATA.avgDayChg;
-      const _histStr=_adc&&_adc.sessions>=2?` · hist high <span style="color:${_adc.mean>=0?'var(--green)':'var(--red)'}" title="Avg universe day-high % from prev close — running mean, one observation per trading day (${_adc.sessions} days)">${_adc.mean>=0?'+':''}${_adc.mean.toFixed(2)}%</span> <span style="color:var(--t3);font-size:10px">(${_adc.sessions}d)</span>`:'';
-      const _todayStr=_todayChg!=null?` · today high <span style="color:${_todayChg>=0?'var(--green)':'var(--red)'}" title="Avg day-high % from prev close across all stocks today">${_todayChg>=0?'+':''}${_todayChg.toFixed(2)}%</span>`:'';
+      const _allHist=FS.get(modeKey(AVG_MOVE_ALL_STORE));
+      const _univHist=FS.get(modeKey(AVG_MOVE_UNIVERSE_STORE));
+      const _allToday=ENGINE_DATA.avgMoveAll;
+      const _univToday=ENGINE_DATA.avgMoveUniverse;
+      const _todayStr=_univToday!=null&&_allToday!=null
+        ?` · avg |move| <span style="color:var(--green)" title="Average absolute daily % change today among the ${t.toLocaleString()} filtered universe stocks. Declines count as positive movement.">U ${_univToday.toFixed(2)}%</span> / <span style="color:var(--t2)" title="Average absolute daily % change today across all ${totalParsed.toLocaleString()} input stocks.">All ${_allToday.toFixed(2)}%</span>`
+        :'';
+      const _histStr=_univHist&&_allHist&&_univHist.sessions>=2&&_allHist.sessions>=2
+        ?` · hist <span style="color:var(--green)" title="Running daily mean of filtered-universe average absolute movement (${_univHist.sessions} days).">U ${_univHist.mean.toFixed(2)}%</span> / <span style="color:var(--t2)" title="Running daily mean of all-input average absolute movement (${_allHist.sessions} days).">All ${_allHist.mean.toFixed(2)}%</span> <span style="color:var(--t3);font-size:10px">(${Math.min(_univHist.sessions,_allHist.sessions)}d)</span>`
+        :'';
       return `<div class="st"><div class="st-l">Universe</div><div class="st-v">${t.toLocaleString()}</div><div class="st-d">of ${totalParsed.toLocaleString()} · <span style="color:var(--green)">${bull} ▲</span> · <span style="color:var(--red)">${t-bull} ▼</span>${_todayStr}${_histStr}</div></div>`;
     })()}
     ${slTgtCard}
