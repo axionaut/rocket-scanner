@@ -349,7 +349,7 @@ table.main tbody td{padding:9px 11px;font-family:'DM Mono',monospace;font-size:1
 
 
 <script>
-const BUILD_TS='2026-05-26 14:50 IST'; // replaced at commit time with IST datetime
+const BUILD_TS='2026-05-26 15:11 IST'; // replaced at commit time with IST datetime
 const MODE_STORE='rs_market_mode';
 const USD_INR_STORE='rs_usd_inr';
 const HARD_FILTER_SCHEMA='null_blanks_pass_v1';
@@ -459,6 +459,10 @@ const TRADEBOOK_STORE='rs_tradebook';
 const SURV_RULE_STORE='rs_surv_rules';
 const SURV_CORR_STORE='rs_surv_corr';
 const MISSED_OPP_STORE='rs_missed_opp_v2';
+const RECOMMEND_OUTCOME_STORE='rs_recommend_outcomes_v1';
+const RECOMMEND_HORIZON_DAYS=5;
+const POST_SALE_ROCKET_STORE='rs_post_sale_rockets_v1';
+const POST_SALE_ROCKET_HORIZON_DAYS=5;
 // Kept separate from the former day-high accumulator: these measure absolute daily change.
 const AVG_MOVE_ALL_STORE='rs_avg_move_all_v1';
 const AVG_MOVE_UNIVERSE_STORE='rs_avg_move_universe_v1';
@@ -1039,7 +1043,7 @@ function weightedPercentile(rows,valueFn,weightFn,pct){
 }
 // Observational policy: chooses fast, profitable realised exit cohorts; it does not claim
 // an alternate TGT/SL would have filled without position-level historical price paths.
-function deriveProfitVelocityPolicy(trips,fallbackSL,fallbackTGT){
+function deriveProfitVelocityPolicy(trips,fallbackSL,fallbackTGT,escapeFeedback){
   const valid=(trips||[]).filter(r=>isFinite(r.netPnlPct)&&isFinite(r.holdDays));
   const baseline={slPct:fallbackSL,tgtPct:fallbackTGT,holdDays:Math.max(1,Math.round(meanArr(valid.map(r=>r.holdDays))||5)),
     velocityPctPerDay:null,sample:valid.length,objective:'observed net % / holding day'};
@@ -1064,11 +1068,25 @@ function deriveProfitVelocityPolicy(trips,fallbackSL,fallbackTGT){
   const learnedSL=weightedPercentile(losses,r=>Math.abs(r.netPnlPct),speedWeight,0.35);
   const tgtBlend=Math.min(0.75,wins.length/(wins.length+40));
   const slBlend=Math.min(0.75,losses.length/(losses.length+40));
-  const tgt=learnedTgt==null?fallbackTGT:roundPct05(Math.max(1,fallbackTGT+(learnedTgt-fallbackTGT)*tgtBlend));
+  let tgt=learnedTgt==null?fallbackTGT:roundPct05(Math.max(1,fallbackTGT+(learnedTgt-fallbackTGT)*tgtBlend));
   const tightenedSL=learnedSL==null?fallbackSL:Math.min(fallbackSL,learnedSL);
   const sl=roundPct05(Math.max(1,fallbackSL+(tightenedSL-fallbackSL)*slBlend));
-  return {slPct:sl,tgtPct:tgt,holdDays:best.days,velocityPctPerDay:+best.velocity.toFixed(3),
+  const events=Object.values(escapeFeedback?.events||{});
+  const assessedSales=Object.keys(escapeFeedback?.assessed||{}).length;
+  const escapeRate=assessedSales?+(events.length/assessedSales*100).toFixed(1):null;
+  let holdDays=best.days, escapeGuardDays=null, escapeTgtNudgePct=0;
+  if(events.length>=2&&assessedSales>=10){
+    const confidence=Math.min(0.6,events.length/10)*Math.min(1,assessedSales/30);
+    const lag=weightedPercentile(events,e=>e.daysAfterSale,()=>1,0.75);
+    escapeGuardDays=lag==null?null:Math.min(POST_SALE_ROCKET_HORIZON_DAYS,Math.max(1,Math.ceil(lag)));
+    if(escapeGuardDays!=null) holdDays=Math.max(holdDays,escapeGuardDays);
+    const typicalGain=weightedPercentile(events.filter(e=>e.postSellGainPct>0),e=>e.postSellGainPct,()=>1,0.5);
+    escapeTgtNudgePct=typicalGain==null?0:roundPct05(Math.min(1,typicalGain*0.10*confidence));
+    tgt=roundPct05(tgt+escapeTgtNudgePct);
+  }
+  return {slPct:sl,tgtPct:tgt,holdDays,coreHoldDays:best.days,velocityPctPerDay:+best.velocity.toFixed(3),
     sample:best.rows.length,total:valid.length,baselineSL:fallbackSL,baselineTGT:fallbackTGT,
+    escapeCount:events.length,assessedSales,escapeRate,escapeGuardDays,escapeTgtNudgePct,
     objective:'observed net % / holding day'};
 }
 function tickPrice(v){return Math.round(v/0.05)*0.05;}
@@ -1352,6 +1370,104 @@ function tradingDaysBetween(d1,d2){
   }
   return count;
 }
+function recordRecommendationOutcomeScan(scan){
+  if(!scan?.date||!scan.rows?.length) return;
+  const store=FS.get(RECOMMEND_OUTCOME_STORE)||{horizonDays:RECOMMEND_HORIZON_DAYS,issues:{}};
+  const rowMap=Object.fromEntries(scan.rows.map(r=>[r.symbol,r]));
+  Object.values(store.issues||{}).forEach(issue=>{
+    const gap=tradingDaysBetween(issue.date,scan.date);
+    if(gap==null||gap<=0) return;
+    if(gap>RECOMMEND_HORIZON_DAYS){
+      (issue.picks||[]).forEach(p=>{p.complete=true;});
+      return;
+    }
+    (issue.picks||[]).forEach(p=>{
+      const row=rowMap[p.symbol];
+      if(!row||!(p.entryPrice>0)) return;
+      if(p.evaluatedThrough===scan.date) return;
+      const highProfit=row.high1d>0?((row.high1d-p.entryPrice)/p.entryPrice)*100:null;
+      const closeProfit=row.price>0?((row.price-p.entryPrice)/p.entryPrice)*100:null;
+      p.observations=(p.observations||0)+1;
+      p.evaluatedThrough=scan.date;
+      if(highProfit!=null&&(p.bestHighProfitPct==null||highProfit>p.bestHighProfitPct)){
+        p.bestHighProfitPct=+highProfit.toFixed(2);p.bestDays=gap;
+      }
+      if(closeProfit!=null&&(p.bestCloseProfitPct==null||closeProfit>p.bestCloseProfitPct)){
+        p.bestCloseProfitPct=+closeProfit.toFixed(2);
+      }
+      if(!p.rocketDate&&row.priceChange!=null&&row.priceChange>=issue.threshold){
+        p.rocketDate=scan.date;p.rocketDays=gap;
+      }
+      if(gap===RECOMMEND_HORIZON_DAYS) p.complete=true;
+    });
+  });
+  if(!store.issues[scan.date]&&scan.recommendations?.length){
+    store.issues[scan.date]={
+      date:scan.date,threshold:scan.threshold,
+      picks:scan.recommendations.map(p=>({...p,observations:0,evaluatedThrough:null,rocketDate:null,rocketDays:null,
+        bestHighProfitPct:null,bestCloseProfitPct:null,bestDays:null,complete:false}))
+    };
+  }
+  const cutoff=new Date(scan.date+'T12:00:00Z');
+  cutoff.setUTCDate(cutoff.getUTCDate()-180);
+  Object.keys(store.issues).forEach(date=>{if(date<cutoff.toISOString().slice(0,10)) delete store.issues[date];});
+  FS.set(RECOMMEND_OUTCOME_STORE,store);
+}
+function getRecommendationOutcomeSummary(){
+  const issues=Object.values((FS.get(RECOMMEND_OUTCOME_STORE)||{}).issues||{});
+  const picks=issues.flatMap(i=>(i.picks||[]).filter(p=>p.complete&&p.observations>0));
+  const rockets=picks.filter(p=>p.rocketDate);
+  const upsides=picks.map(p=>p.bestHighProfitPct).filter(v=>v!=null);
+  return {
+    evaluated:picks.length,rockets:rockets.length,
+    conversionPct:picks.length?+(rockets.length/picks.length*100).toFixed(1):null,
+    avgRocketDays:rockets.length?+(meanArr(rockets.map(p=>p.rocketDays)).toFixed(1)):null,
+    avgBestHighPct:upsides.length?+meanArr(upsides).toFixed(2):null,
+    issueDays:issues.length
+  };
+}
+function getRecommendationFeedbackCorrelations(features){
+  const issues=Object.values((FS.get(RECOMMEND_OUTCOME_STORE)||{}).issues||{});
+  const picks=issues.flatMap(i=>(i.picks||[]).filter(p=>p.complete&&p.observations>0&&p.features));
+  if(picks.length<30) return null;
+  const target=picks.map(p=>p.rocketDate?1:0);
+  const rockets=target.reduce((s,v)=>s+v,0);
+  if(!rockets||rockets===picks.length) return null;
+  const corr={};
+  features.forEach(f=>{corr[f]=pearson(target,picks.map(p=>p.features[f]??null));});
+  return {samples:picks.length,rockets,corr};
+}
+function recordPostSaleRocketScan(scan){
+  if(!scan?.date||!scan.rows?.length||!TRADEBOOK_STATS?.tripsData?.length) return;
+  const store=FS.get(POST_SALE_ROCKET_STORE)||{horizonDays:POST_SALE_ROCKET_HORIZON_DAYS,assessed:{},events:{}};
+  const rowMap=Object.fromEntries(scan.rows.map(r=>[r.symbol,r]));
+  TRADEBOOK_STATS.tripsData.forEach((trip,idx)=>{
+    if(!trip.sellDate||!(trip.sellPrice>0)) return;
+    const gap=tradingDaysBetween(trip.sellDate,scan.date);
+    if(gap==null||gap<=0||gap>POST_SALE_ROCKET_HORIZON_DAYS) return;
+    const key=[trip.sellDate,trip.sym,trip.sellPrice,trip.qty,idx].join('|');
+    store.assessed[key]=true;
+    const row=rowMap[trip.sym];
+    if(!row||row.priceChange==null||row.priceChange<scan.threshold||store.events[key]) return;
+    const peak=row.high1d>0?row.high1d:row.price;
+    store.events[key]={
+      symbol:trip.sym,sellDate:trip.sellDate,rocketDate:scan.date,daysAfterSale:gap,
+      sellPrice:+trip.sellPrice.toFixed(2),postSellGainPct:peak>0?+(((peak-trip.sellPrice)/trip.sellPrice)*100).toFixed(2):null
+    };
+  });
+  FS.set(POST_SALE_ROCKET_STORE,store);
+}
+function refreshExitPolicyFromFeedback(stats){
+  if(!stats?.tripsData?.length) return stats;
+  const existing=stats.exitPolicy||{};
+  const baselineSL=existing.baselineSL??roundPct05(Math.abs(stats.medianLossPct||stats.adaptiveSL||3.5));
+  const baselineTGT=existing.baselineTGT??roundPct05(Math.abs(stats.medianWinPct||stats.adaptiveTGT||3.7));
+  stats.exitPolicy=deriveProfitVelocityPolicy(stats.tripsData,baselineSL,baselineTGT,FS.get(POST_SALE_ROCKET_STORE));
+  stats.adaptiveSL=stats.exitPolicy.slPct;
+  stats.adaptiveTGT=stats.exitPolicy.tgtPct;
+  stats.holdLimitDays=stats.exitPolicy.holdDays;
+  return stats;
+}
 function detectNSE(filename,content){
   const fn=filename.toLowerCase();
   if(fn.includes('bhavdata')||fn.includes('sec_bhav')){parseBhavdata(content);return'bhav';}
@@ -1517,6 +1633,14 @@ function runEngine(raw, sessionTag){
                : 'neutral';
   CURRENT_REGIME = regime;
   const totalParsed = parsed.length;
+  if(!cryptoMode){
+    window._lastObservedDailyMoves=parsed.map(d=>({
+      symbol:d.symbol,
+      price:K.price?d[K.price]:null,
+      priceChange:K.price_change?d[K.price_change]:null,
+      high1d:K.high_1d?d[K.high_1d]:null
+    })).filter(d=>d.symbol);
+  }
   // Daily movement is absolute % change, so advances and declines do not cancel out.
   const avgAbsDailyMove=(rows)=>{
     if(!K.price_change) return null;
@@ -1778,6 +1902,22 @@ function runEngine(raw, sessionTag){
   ACC_CORR=newAcc;
   FS.set(modeKey(CORR_STORE), ACC_CORR);
 
+  // Completed engine shortlists provide a second, slower target: did a recommendation
+  // turn into a rocket within the next five trading days? Blend is deliberately capped.
+  let recommendationFeedback=null;
+  if(!cryptoMode){
+    recordRecommendationOutcomeScan({date:getSessionDate(),threshold:ROCKET_THRESHOLD,rows:window._lastObservedDailyMoves||[],recommendations:[]});
+    recommendationFeedback=getRecommendationFeedbackCorrelations(FEATS);
+    if(recommendationFeedback){
+      const alpha=Math.min(0.35,(recommendationFeedback.samples/(recommendationFeedback.samples+200))*0.5);
+      recommendationFeedback.alpha=alpha;
+      for(const f of FEATS){
+        const observed=recommendationFeedback.corr[f];
+        if(observed!=null&&isFinite(observed)) targetCorr[f]=(targetCorr[f]*(1-alpha))+(observed*alpha);
+      }
+    }
+  }
+
   // Keep price_change reference for stats display
   const withPC=filtered.map((d,i)=>({i,pc:K.price_change?d[K.price_change]:null})).filter(x=>x.pc!==null);
   withPC.sort((a,b)=>b.pc-a.pc);
@@ -1897,6 +2037,7 @@ function runEngine(raw, sessionTag){
 
   ENGINE_DATA={targetCorr,targetCorrToday,interCorr,mrmr,weights,features:FEATS,labels:LABELS,top10Feats,rocketCount:topN,rocketThreshold:ROCKET_THRESHOLD,accSessions:ACC_CORR?.sessions||1,laggedNote:laggedNote||'',
     regime:regime, marketBreadth:marketBreadth, avgMoveAll:todayAvgMoveAll, avgMoveUniverse:todayAvgMoveUniverse,
+    recommendationFeedback,
     useAccCorr: useRegimeCorr || (ACC_CORR?(ACC_CORR.sessions||0)>=2:false),
     useRegimeCorr,
     regimeSessions:{
@@ -1924,7 +2065,7 @@ function runEngine(raw, sessionTag){
     const methSave={targetCorr,targetCorrToday,interCorr,mrmr,weights,features:FEATS,labels:LABELS,top10Feats,rocketCount:ENGINE_DATA.rocketCount,rocketThreshold:ENGINE_DATA.rocketThreshold,accSessions:ENGINE_DATA.accSessions,laggedNote:ENGINE_DATA.laggedNote,
       regime:ENGINE_DATA.regime,marketBreadth:ENGINE_DATA.marketBreadth,useAccCorr:ENGINE_DATA.useAccCorr,useRegimeCorr:ENGINE_DATA.useRegimeCorr,regimeSessions:ENGINE_DATA.regimeSessions,sectorCol:ENGINE_DATA.sectorCol,industryCol:ENGINE_DATA.industryCol,
       yesterdayRockets:yesterdayRockets,qualityTargetN:qualityN,totalParsed:totalParsed,hardFilterSchema:HARD_FILTER_SCHEMA,removed:{...REMOVED},survSize:Object.keys(NSE_SURV).length,
-      avgMoveAll:todayAvgMoveAll,avgMoveUniverse:todayAvgMoveUniverse};
+      avgMoveAll:todayAvgMoveAll,avgMoveUniverse:todayAvgMoveUniverse,recommendationFeedback};
     FS.set(modeKey(METH_STORE),methSave);
     // Update regime calendar: date → regime
     const regCal=FS.get(modeKey(REGIME_CAL_STORE))||{};
@@ -2138,11 +2279,12 @@ function renderStats(){
     const rr=(parseFloat(_sl)>0?(parseFloat(_tgt)/parseFloat(_sl)):0).toFixed(2);
     const policy=TRADEBOOK_STATS.exitPolicy;
     const holdStr=policy?.holdDays?` · review &gt;${policy.holdDays}d`:'';
+    const escapeStr=policy?.escapeCount?` · <span style="color:var(--amber)" title="${policy.escapeCount} sold lots became rockets within ${POST_SALE_ROCKET_HORIZON_DAYS} trading days after exit.">${policy.escapeCount} post-sale rockets</span>`:'';
     const nudge=getMissedOppNudge();
     const nudgeStr=nudge>0?` · <span style="color:var(--amber);font-size:10px" title="You leave an avg of ${(nudge/0.25).toFixed(2)}% on the table after sells. 25% of that is now added to TGT.">missed opp +${nudge.toFixed(2)}%</span>`:'';
     const _cp=TRADEBOOK_STATS.avgChargePct!=null?Math.abs(TRADEBOOK_STATS.avgChargePct):null;
     const costStr=(_cp!=null&&_cp>0)?` · <span style="color:var(--t2)" title="Avg total Zerodha charges as % of round-trip turnover (buy+sell value), across all tradebook trips">cost ~${_cp.toFixed(2)}%</span>`:'';
-    return `<div class="st"><div class="st-l">SL / TGT</div><div class="st-v" style="font-size:17px"><span style="color:var(--red)">−${_sl}%</span><span style="color:var(--t3);font-size:13px"> / </span><span style="color:var(--green)">+${_tgt}%</span></div><div class="st-d">R:R ${rr}${costStr} · velocity policy${holdStr}${nudgeStr}</div></div>`;
+    return `<div class="st"><div class="st-l">SL / TGT</div><div class="st-v" style="font-size:17px"><span style="color:var(--red)">−${_sl}%</span><span style="color:var(--t3);font-size:13px"> / </span><span style="color:var(--green)">+${_tgt}%</span></div><div class="st-d">R:R ${rr}${costStr} · velocity policy${holdStr}${escapeStr}${nudgeStr}</div></div>`;
   })();
 
   document.getElementById('statsBar').innerHTML=`
@@ -2388,12 +2530,9 @@ function renderPerformance(){
     el.innerHTML=`<div style="text-align:center;padding:80px 40px;color:var(--t2)"><div style="font-size:36px;margin-bottom:16px">📒</div><div style="font-size:16px;font-weight:700;color:var(--t1);margin-bottom:8px">No Tradebook Loaded</div><div>Upload TRADEBOOK.csv to see performance analytics.</div></div>`;
     return;
   }
-  // Upgrade saved tradebooks that already contain trip data but predate the velocity policy.
-  if(!tb.exitPolicy&&tb.tripsData?.length){
-    tb.exitPolicy=deriveProfitVelocityPolicy(tb.tripsData,tb.adaptiveSL||3.5,tb.adaptiveTGT||3.7);
-    tb.adaptiveSL=tb.exitPolicy.slPct;
-    tb.adaptiveTGT=tb.exitPolicy.tgtPct;
-    tb.holdLimitDays=tb.exitPolicy.holdDays;
+  // Re-apply policy so newly observed near-term post-sale rockets can inform the next exit.
+  if(tb.tripsData?.length){
+    refreshExitPolicyFromFeedback(tb);
     try{FS.set(TRADEBOOK_STORE,tb);}catch(e){}
   }
   const clr=(v)=>v===0?'var(--t2)':v>0?'var(--green)':'var(--red)';
@@ -2431,6 +2570,7 @@ function renderPerformance(){
   const regimeLabel=PERF_REGIME_FILTER==='all'?'All regimes':PERF_REGIME_FILTER==='bull'?'🐂 Bull':PERF_REGIME_FILTER==='bear'?'🐻 Bear':PERF_REGIME_FILTER==='neutral'?'➡ Neutral':'? Untagged';
   const periodLabel=(dfrom&&dto)?`${dfrom} → ${dto} · ${regimeLabel}`:`All time · ${regimeLabel}`;
   const exitPolicy=tb.exitPolicy||null;
+  const recSummary=getRecommendationOutcomeSummary();
 
   const kpis=[
     {label:'Net P&L',value:fmtPerfRs(p.totalNetPnlRs),color:clr(p.totalNetPnlRs),sub:`${p.roundTrips} lots · ${spanTradingDays||p.totalTradingDays} trading days`},
@@ -2443,13 +2583,20 @@ function renderPerformance(){
     {label:'Largest Win',value:fmtSignedINR(p.largestWinRs),color:'var(--green)',sub:'Single lot, net'},
     {label:'Max Win Streak',value:p.maxWinStreak+' days',color:p.maxWinStreak>=5?'var(--green)':p.maxWinStreak>=3?'var(--amber)':'var(--t1)',sub:'Consecutive profitable days'},
     {label:'Avg Hold',value:p.avgHoldDays+'d',color:'var(--t1)',sub:'Avg position duration'},
-    {label:'Learned Hold Cap',value:exitPolicy?exitPolicy.holdDays+'d':'—',color:exitPolicy?'var(--amber)':'var(--t3)',sub:exitPolicy&&exitPolicy.velocityPctPerDay!=null?`Observed +${exitPolicy.velocityPctPerDay.toFixed(3)}%/day · ${exitPolicy.sample} lots`:'Re-upload tradebook to learn'},
+    {label:'Learned Hold Cap',value:exitPolicy?exitPolicy.holdDays+'d':'—',color:exitPolicy?'var(--amber)':'var(--t3)',sub:exitPolicy&&exitPolicy.velocityPctPerDay!=null?`Observed +${exitPolicy.velocityPctPerDay.toFixed(3)}%/day · ${exitPolicy.escapeCount||0} near-term escapes`:'Re-upload tradebook to learn'},
     {label:'Largest Loss',value:fmtSignedINR(p.largestLossRs),color:'var(--red)',sub:'Single lot, net'},
     {label:'Max Drawdown',value:p.maxDrawdown>0?fmtSignedINR(-p.maxDrawdown):'—',color:'var(--red)',sub:'Peak-to-trough in period'},
     {label:'Max Loss Streak',value:p.maxLossStreak+' days',color:p.maxLossStreak>=5?'var(--red)':p.maxLossStreak>=3?'var(--amber)':'var(--green)',sub:'Consecutive losing days'},
     {label:'Best Day',value:p.maxProfitDay?fmtSignedINR(p.maxProfitDay.pnl):'—',color:p.maxProfitDay&&p.maxProfitDay.pnl>0?'var(--green)':'var(--t3)',sub:p.maxProfitDay?p.maxProfitDay.date+' · '+p.maxProfitDay.count+' lots':'No data'},
     {label:'Worst Day',value:p.maxLossDay?fmtSignedINR(p.maxLossDay.pnl):'—',color:p.maxLossDay&&p.maxLossDay.pnl<0?'var(--red)':'var(--t3)',sub:p.maxLossDay?p.maxLossDay.date+' · '+p.maxLossDay.count+' lots':'No data'},
   ];
+  if(recSummary.evaluated){
+    const bestUpside=recSummary.avgBestHighPct;
+    kpis.splice(11,0,
+      {label:'Rec -> Rockets',value:recSummary.conversionPct+'%',color:recSummary.conversionPct>=20?'var(--green)':recSummary.conversionPct>=10?'var(--amber)':'var(--red)',sub:`${recSummary.rockets}/${recSummary.evaluated} shortlist picks within ${RECOMMEND_HORIZON_DAYS}d`},
+      {label:'Rec Best Upside',value:bestUpside!=null?(bestUpside>=0?'+':'')+bestUpside.toFixed(2)+'%':'—',color:bestUpside!=null?(bestUpside>=0?'var(--green)':'var(--red)'):'var(--t3)',sub:recSummary.avgRocketDays!=null?`Rockets arrived in avg ${recSummary.avgRocketDays}d`:'No rocket conversions yet'}
+    );
+  }
   const kpiHtml=`<div class="kpi-grid">`+kpis.map(k=>`
     <div class="kpi-card">
       <div class="kpi-lbl">${k.label}</div>
@@ -2841,11 +2988,20 @@ function renderPerformance(){
   const perfNav=`<nav style="position:sticky;top:var(--hdr-h,72px);z-index:50;background:var(--bg);padding:8px 0 10px;margin-bottom:8px;display:flex;gap:6px;flex-wrap:wrap;border-bottom:1px solid var(--border);box-shadow:0 2px 8px rgba(0,0,0,0.3);overflow-x:auto;-webkit-overflow-scrolling:touch">
     ${_navLink('perf-timestop-card','📊 Positions',!!timeStopHtml)}
     ${_navLink('perf-kpi','📊 KPIs',true)}
+    ${_navLink('perf-outcomes','Outcome Feedback',true)}
     ${_navLink('perf-regime-ret','🐂 Regime Returns',true)}
     ${_navLink('perf-monthly','📅 Monthly',monthRows.length>0)}
     ${_navLink('perf-trade-windows','🕐 Trading Windows',hasTradeWindows)}
     ${_navLink('perf-stocks','📈 Stocks',p.symBreakdown.length>0)}
   </nav>`;
+  const outcomeText=recSummary.evaluated
+    ? `${recSummary.evaluated} completed engine-shortlist picks assessed across ${recSummary.issueDays} scan days. ${recSummary.rockets} became rockets within ${RECOMMEND_HORIZON_DAYS} trading days (${recSummary.conversionPct}%), with average attainable high move of ${recSummary.avgBestHighPct!=null?(recSummary.avgBestHighPct>=0?'+':'')+recSummary.avgBestHighPct.toFixed(2)+'%':'not available'}.`
+    : `Outcome tracking has started. A shortlist is assessed after ${RECOMMEND_HORIZON_DAYS} later trading-day scans are observed.`;
+  const escapeText=exitPolicy?.escapeCount
+    ? `${exitPolicy.escapeCount} sold lots became rockets within ${POST_SALE_ROCKET_HORIZON_DAYS} trading days of exit out of ${exitPolicy.assessedSales||0} assessed recent sales. Learned hold cap is ${exitPolicy.holdDays}d${exitPolicy.escapeTgtNudgePct?` and post-sale evidence adds +${exitPolicy.escapeTgtNudgePct.toFixed(2)}% to TGT`:''}.`
+    : `No confirmed post-sale rockets within ${POST_SALE_ROCKET_HORIZON_DAYS} trading days have been observed yet.`;
+  const outcomeHtml=perfCard('Recommendation Outcome Feedback',
+    `<div style="padding:14px 16px;color:var(--t2);font-size:12px;line-height:1.7"><div>${outcomeText}</div><div style="margin-top:8px">${escapeText}</div><div style="margin-top:8px;color:var(--t3)">Completed shortlist outcomes blend into mRMR feature relevance with a capped weight; post-sale escapes can extend review/TGT but do not widen SL.</div></div>`,'','perf-outcomes');
 
   el.innerHTML=`
     <div style="padding:12px 16px">
@@ -2855,6 +3011,7 @@ function renderPerformance(){
       ${regimePillsHtml}
       <div style="font-size:10px;color:var(--t3);margin-bottom:12px">${periodLabel} · ${p.roundTrips} lots${untaggedLots?` · ${untaggedLots} untagged (no observed sell-date regime)`:''}</div>
       <div id="perf-kpi">${kpiHtml}</div>
+      ${outcomeHtml}
       ${perfCard('Regime Returns',`<div style="display:grid;grid-template-columns:repeat(4,1fr);gap:1px;background:var(--border)">${regBreakdown.map(rb=>{const col=rb.reg==='bull'?'var(--green)':rb.reg==='bear'?'var(--red)':rb.reg==='neutral'?'var(--orange)':'var(--t2)';const icon=rb.reg==='bull'?'🐂':rb.reg==='bear'?'🐻':rb.reg==='neutral'?'➡':'?';const noData=rb.count===0;return`<div style="background:var(--bg-card);padding:14px 16px"><div style="font-size:11px;font-weight:700;color:${col};text-transform:uppercase;letter-spacing:.06em;margin-bottom:8px">${icon} ${rb.reg.charAt(0).toUpperCase()+rb.reg.slice(1)} <span style="font-weight:400;color:var(--t3)">(${rb.count} lots)</span></div>${noData?`<div style="color:var(--t3);font-size:11px;padding:4px 0">${rb.reg==='untagged'?'Every lot has an observed sell-date regime.':'No trades observed in this regime yet.'}</div>`:`<div style="display:flex;flex-direction:column;gap:4px"><div style="display:flex;justify-content:space-between;font-size:12px"><span style="color:var(--t3)">Win Rate</span><span style="color:${rb.winRate>=55?'var(--green)':rb.winRate>=45?'var(--amber)':'var(--red)'};font-weight:700">${rb.winRate}%</span></div><div style="display:flex;justify-content:space-between;font-size:12px"><span style="color:var(--t3)">Avg P&L%</span><span style="color:${rb.avgPct>=0?'var(--green)':'var(--red)'};font-weight:700">${rb.avgPct>=0?'+':''}${rb.avgPct}%</span></div><div style="display:flex;justify-content:space-between;font-size:12px"><span style="color:var(--t3)">Expectancy</span><span style="color:${rb.expectancy>=0?'var(--green)':'var(--red)'};font-weight:700">${fmtSignedINR(rb.expectancy)}</span></div><div style="display:flex;justify-content:space-between;font-size:12px"><span style="color:var(--t3)">Net P&L</span><span style="color:${rb.netPnl>=0?'var(--green)':'var(--red)'};font-weight:700">${fmtSignedINR(rb.netPnl)}</span></div></div>`}</div>`}).join('')}</div>`,'','perf-regime-ret')}
       ${monthRows.length?perfCard('Monthly Breakdown',monthTbl.getHtml(),'','perf-monthly'):''}
       ${hasTradeWindows?perfCard('Trading Windows <span style="font-size:10px;color:var(--t3);font-weight:400">Buy Edge &gt; 2 = Enter · Sell Edge &gt; 2 = Exit · hover Edge columns to sort</span>',tradeWindowTbl.getHtml(),'','perf-trade-windows'):''}
@@ -4422,10 +4579,7 @@ function parseTradebook(text){
     return{...r,charges,netPnl,netPnlPct};
   });
   stats.tripsData=tripsData;
-  stats.exitPolicy=deriveProfitVelocityPolicy(tripsData,baselineSL,baselineTGT);
-  stats.adaptiveSL=stats.exitPolicy.slPct;
-  stats.adaptiveTGT=stats.exitPolicy.tgtPct;
-  stats.holdLimitDays=stats.exitPolicy.holdDays;
+  refreshExitPolicyFromFeedback(stats);
 
   // Avg charge as % of turnover (buy+sell value) across all valid round trips
   const _ctTrips=tripsData.filter(r=>r.buyPrice>0&&r.sellPrice>0&&r.qty>0&&r.charges>=0);
@@ -4701,6 +4855,19 @@ async function processScannerUpload(scannerFile, mode){
       updates[modeKey(SNAP_KEY,mode)]={cols,stocks,savedDate:today,regime:ENGINE_DATA?.regime||null,marketBreadth:ENGINE_DATA?.marketBreadth??null,mode};
       FS.setMultiple(updates);
     }
+    if(mode==='stock'){
+      const threshold=ENGINE_DATA?.rocketThreshold||10;
+      const recommendations=ALL
+        .filter(s=>s.price>0&&(s.priceChange==null||s.priceChange<threshold))
+        .slice(0,20)
+        .map((s,i)=>({symbol:s.symbol,entryPrice:s.price,score:s.rocketScore,rank:i+1,features:s._features||{}}));
+      window._lastStockOutcomeScan={
+        date:getSessionDate(),threshold,
+        rows:window._lastObservedDailyMoves||[],
+        recommendations
+      };
+      recordRecommendationOutcomeScan(window._lastStockOutcomeScan);
+    }
     FILT=[...ALL];_tvLoadedThisSession=true;
     return true;
   }finally{
@@ -4840,6 +5007,11 @@ async function processFiles(files){
       const saved=FS.get(ALL_STORE);
       if(saved?.data?.length) ALL=saved.data;
       computeMissedOpp();
+      recordPostSaleRocketScan(window._lastStockOutcomeScan);
+      if(TRADEBOOK_STATS?.tripsData?.length){
+        refreshExitPolicyFromFeedback(TRADEBOOK_STATS);
+        FS.set(TRADEBOOK_STORE,TRADEBOOK_STATS);
+      }
     }finally{restoreScannerRuntime(rt);}
   } else if(!isCryptoMode()) computeMissedOpp();
   try{await FS.write(FS.getBrain());}catch(e){console.warn('Brain flush failed',e);}
