@@ -317,16 +317,16 @@ table.main tbody td{padding:9px 11px;font-family:'DM Mono',monospace;font-size:1
    <div class="fg"><span class="fg-lbl">Price <span class="currency-lbl">₹</span></span><div style="display:flex;gap:5px;align-items:center">
    <input type="number" id="fPriceMin" placeholder="Min" min="0" style="width:72px;padding:8px 10px;background:var(--bg-card);border:1px solid var(--border);border-radius:8px;color:var(--t1);font-family:'DM Mono',monospace;font-size:12px;outline:none;transition:border .2s" onfocus="this.style.borderColor='var(--blue)'" onblur="this.style.borderColor='var(--border)'" oninput="applyFilters()">
    <span style="color:var(--t3);font-size:11px">–</span>
-   <input type="number" id="fPriceMax" placeholder="Max" min="0" style="width:72px;padding:8px 10px;background:var(--bg-card);border:1px solid var(--border);border-radius:8px;color:var(--t1);font-family:'DM Mono',monospace;font-size:12px;outline:none;transition:border .2s" onfocus="this.style.borderColor='var(--blue)'" onblur="this.style.borderColor='var(--border)'" oninput="applyFilters()">
+   <input type="number" id="fPriceMax" value="1200" placeholder="Max" min="0" style="width:72px;padding:8px 10px;background:var(--bg-card);border:1px solid var(--border);border-radius:8px;color:var(--t1);font-family:'DM Mono',monospace;font-size:12px;outline:none;transition:border .2s" onfocus="this.style.borderColor='var(--blue)'" onblur="this.style.borderColor='var(--border)'" oninput="applyFilters()">
    </div></div>
 
    <div class="fg"><span class="fg-lbl">Min 1D %</span><input type="number" id="fMin1D" placeholder="e.g. 2" step="0.5" style="width:72px;padding:8px 10px;background:var(--bg-card);border:1px solid var(--border);border-radius:8px;color:var(--t1);font-family:'DM Mono',monospace;font-size:12px;outline:none;transition:border .2s" onfocus="this.style.borderColor='var(--blue)'" onblur="this.style.borderColor='var(--border)'" oninput="applyFilters()"></div>
-   <div class="fg"><span class="fg-lbl">Max 1D %</span><input type="number" id="fMax1D" value="8.5" placeholder="e.g. 8.5" step="0.5" style="width:72px;padding:8px 10px;background:var(--bg-card);border:1px solid var(--border);border-radius:8px;color:var(--t1);font-family:'DM Mono',monospace;font-size:12px;outline:none;transition:border .2s" onfocus="this.style.borderColor='var(--blue)'" onblur="this.style.borderColor='var(--border)'" oninput="saveFilterState();applyFilters()" title="Hide stocks that have already moved too much today. This is your explicit chase-control filter."></div>
+   <div class="fg"><span class="fg-lbl">Max 1D %</span><input type="number" id="fMax1D" value="5" placeholder="e.g. 5" step="0.5" style="width:72px;padding:8px 10px;background:var(--bg-card);border:1px solid var(--border);border-radius:8px;color:var(--t1);font-family:'DM Mono',monospace;font-size:12px;outline:none;transition:border .2s" onfocus="this.style.borderColor='var(--blue)'" onblur="this.style.borderColor='var(--border)'" oninput="saveFilterState();applyFilters()" title="Hide stocks that have already moved too much today. Default 5% keeps candidates below the 10% rocket label."></div>
    <div class="fg"><span class="fg-lbl" style="color:var(--orange)">Rocket %</span><input type="number" id="fRocketPct" value="10" placeholder="10" min="5" max="20" step="0.5" style="width:72px;padding:8px 10px;background:var(--bg-card);border:1px solid var(--border);border-radius:8px;color:var(--t1);font-family:'DM Mono',monospace;font-size:12px;outline:none;transition:border .2s" onfocus="this.style.borderColor='var(--orange)'" onblur="this.style.borderColor='var(--border)'" oninput="onRocketPctChangeUI()" title="Threshold for what counts as a rocket. Used for rocket labels/counts and learning targets. Default 10%. Learning impact on next CSV upload."></div>
    <div class="fg stock-only"><span class="fg-lbl">Min Vol <span id="volAutoLabel" style="font-size:9px;color:var(--cyan)"></span></span><input type="number" id="fVol" placeholder="auto" min="0" style="width:110px;padding:8px 10px;background:var(--bg-card);border:1px solid var(--border);border-radius:8px;color:var(--t1);font-family:'DM Mono',monospace;font-size:12px;outline:none;transition:border .2s" onfocus="this.style.borderColor='var(--cyan)'" onblur="this.style.borderColor='var(--border)'" oninput="onVolChange()"></div>
-   <div class="fg stock-only"><span class="fg-lbl" style="font-size:8px">Vol ×</span><input type="number" id="fVolMult" placeholder="auto" min="10" max="99999" step="10" style="width:65px;padding:8px 6px;background:var(--bg-card);border:1px solid var(--border);border-radius:8px;color:var(--t1);font-family:'DM Mono',monospace;font-size:11px;outline:none" oninput="VOL_AUTO=true;setAutoVolume();applyFilters()" title="Volume multiplier: minutes since open × this = Min Vol floor"></div>
-   <div class="fg"><span class="fg-lbl" style="font-size:8px">Min TV <span class="currency-lbl">₹</span></span><input type="number" id="fMinTurnover" placeholder="e.g. 1000000" value="1000000" min="0" step="500000" style="width:90px;padding:8px 6px;background:var(--bg-card);border:1px solid var(--border);border-radius:8px;color:var(--t1);font-family:'DM Mono',monospace;font-size:11px;outline:none" oninput="applyFilters()" title="Min turnover / 24h INR volume floor. Blank = no filter."></div>
-   <div class="fg stock-only"><span class="fg-lbl" style="font-size:8px">Min MCap <span class="currency-lbl">₹</span></span><input type="number" id="fMinMarketCap" placeholder="e.g. 5000000000" min="0" step="100000000" style="width:112px;padding:8px 6px;background:var(--bg-card);border:1px solid var(--border);border-radius:8px;color:var(--t1);font-family:'DM Mono',monospace;font-size:11px;outline:none" oninput="applyFilters()" title="Min market capitalization in ₹. Blank = no filter. Stocks with blank/null market cap pass through."></div>
+   <div class="fg stock-only"><span class="fg-lbl" style="font-size:8px">Vol ×</span><input type="number" id="fVolMult" value="500" placeholder="auto" min="10" max="99999" step="10" style="width:65px;padding:8px 6px;background:var(--bg-card);border:1px solid var(--border);border-radius:8px;color:var(--t1);font-family:'DM Mono',monospace;font-size:11px;outline:none" oninput="VOL_AUTO=true;setAutoVolume();applyFilters()" title="Volume multiplier: minutes since open × this = Min Vol floor"></div>
+   <div class="fg"><span class="fg-lbl" style="font-size:8px">Min TV <span class="currency-lbl">₹</span></span><input type="number" id="fMinTurnover" placeholder="e.g. 10000000" value="10000000" min="0" step="500000" style="width:90px;padding:8px 6px;background:var(--bg-card);border:1px solid var(--border);border-radius:8px;color:var(--t1);font-family:'DM Mono',monospace;font-size:11px;outline:none" oninput="applyFilters()" title="Min turnover / 24h INR volume floor. Blank = no filter."></div>
+   <div class="fg stock-only"><span class="fg-lbl" style="font-size:8px">Min MCap <span class="currency-lbl">₹</span></span><input type="number" id="fMinMarketCap" value="500000000" placeholder="e.g. 500000000" min="0" step="100000000" style="width:112px;padding:8px 6px;background:var(--bg-card);border:1px solid var(--border);border-radius:8px;color:var(--t1);font-family:'DM Mono',monospace;font-size:11px;outline:none" oninput="applyFilters()" title="Min market capitalization in ₹. Default is ₹50 Cr; blank = no filter. Stocks with blank/null market cap pass through."></div>
    <div class="fg"><span class="fg-lbl" style="color:var(--amber)">Capital ₹</span><input type="number" id="fCapital" placeholder="e.g. 100000" min="0" step="1000" style="width:110px;padding:8px 10px;background:var(--bg-card);border:1px solid var(--border);border-radius:8px;color:var(--t1);font-family:'DM Mono',monospace;font-size:12px;outline:none;transition:border .2s" onfocus="this.style.borderColor='var(--amber)'" onblur="this.style.borderColor='var(--border)'" oninput="applyFilters()" title="Shared capital pool for both Stocks and Crypto allocation."></div>
    <div class="fg"><span class="fg-lbl" style="color:var(--amber)">Max Alloc ₹</span><input type="number" id="fMaxAlloc" placeholder="e.g. 20000" min="0" step="1000" style="width:110px;padding:8px 10px;background:var(--bg-card);border:1px solid var(--border);border-radius:8px;color:var(--t1);font-family:'DM Mono',monospace;font-size:12px;outline:none;transition:border .2s" onfocus="this.style.borderColor='var(--amber)'" onblur="this.style.borderColor='var(--border)'" oninput="applyFilters()" title="Shared per-instrument allocation cap for Stocks and Crypto. Empty = no cap."></div>
    <div class="fg stock-only"><span class="fg-lbl" style="color:var(--purple)">Avg-dn %</span><input type="number" id="fReDrop" value="1" placeholder="1" min="0" step="0.5" style="width:72px;padding:8px 10px;background:var(--bg-card);border:1px solid var(--border);border-radius:8px;color:var(--t1);font-family:'DM Mono',monospace;font-size:12px;outline:none;transition:border .2s" onfocus="this.style.borderColor='var(--purple)'" onblur="this.style.borderColor='var(--border)'" oninput="applyFilters()" title="Stock must have fallen at least this % below your avg buy to appear as a top-up candidate. Shorts and zero-qty always suppressed."></div>
@@ -349,7 +349,7 @@ table.main tbody td{padding:9px 11px;font-family:'DM Mono',monospace;font-size:1
 
 
 <script>
-const BUILD_TS='2026-05-26 15:11 IST'; // replaced at commit time with IST datetime
+const BUILD_TS='2026-05-26 15:39 IST'; // replaced at commit time with IST datetime
 const MODE_STORE='rs_market_mode';
 const USD_INR_STORE='rs_usd_inr';
 const HARD_FILTER_SCHEMA='null_blanks_pass_v1';
@@ -933,7 +933,7 @@ function getSessionDate(){
 }
 
 // ── Auto Volume: minutes since day-start × configurable multiplier ──
-const LIQ_MIN_VOL_DEFAULT=5000;
+const LIQ_MIN_VOL_DEFAULT=500;
 function calcAutoVolume(){
   const mult=parseFloat(document.getElementById('fVolMult')?.value)||LIQ_MIN_VOL_DEFAULT;
   const {mins}=istNow();
@@ -4150,8 +4150,11 @@ function renderStatusBar(){
 }
 
 function clearFilters(){
-  ['fMinScore','fMin1D','fCapital','fMaxAlloc','fPriceMin','fPriceMax','fMinTurnover','fMinMarketCap'].forEach(id=>{const el=document.getElementById(id);if(el)el.value='';});
-  const max1Del=document.getElementById('fMax1D');if(max1Del)max1Del.value='8.5';
+  ['fMinScore','fMin1D','fCapital','fMaxAlloc','fPriceMin'].forEach(id=>{const el=document.getElementById(id);if(el)el.value='';});
+  const maxPriceEl=document.getElementById('fPriceMax');if(maxPriceEl)maxPriceEl.value='1200';
+  const max1Del=document.getElementById('fMax1D');if(max1Del)max1Del.value='5';
+  const minTurnEl=document.getElementById('fMinTurnover');if(minTurnEl)minTurnEl.value='10000000';
+  const minMCapEl=document.getElementById('fMinMarketCap');if(minMCapEl)minMCapEl.value='500000000';
   const reDropEl=document.getElementById('fReDrop');if(reDropEl)reDropEl.value='1';
   const topupEl=document.getElementById('fTopupAlloc');if(topupEl)topupEl.value='50';
   const rocketEl=document.getElementById('fRocketPct');if(rocketEl)rocketEl.value='10';
@@ -5215,8 +5218,8 @@ function saveFilterState(){
     priceMax:document.getElementById('fPriceMax')?.value||'',
     fvol:VOL_AUTO?'':document.getElementById('fVol')?.value||'',
     volMult:document.getElementById('fVolMult')?.value||String(LIQ_MIN_VOL_DEFAULT),
-    minTurnover:document.getElementById('fMinTurnover')?.value||'1000000',
-    minMarketCap:document.getElementById('fMinMarketCap')?.value||'',
+    minTurnover:document.getElementById('fMinTurnover')?.value??'',
+    minMarketCap:document.getElementById('fMinMarketCap')?.value??'',
     fMin1D:document.getElementById('fMin1D')?.value||'',
     fMax1D:document.getElementById('fMax1D')?.value||'',
     reDrop:document.getElementById('fReDrop')?.value||'1',
@@ -5239,7 +5242,7 @@ function loadFilterState(){
     if(isCryptoMode()&&state.minTurnover==null){const el=document.getElementById('fMinTurnover');if(el)el.value='8000000';}
     if(state.minScore){const el=document.getElementById('fMinScore');if(el)el.value=state.minScore;}
     if(state.priceMin){const el=document.getElementById('fPriceMin');if(el)el.value=state.priceMin;}
-    if(state.priceMax){const el=document.getElementById('fPriceMax');if(el)el.value=state.priceMax;}
+    if(state.priceMax!=null){const el=document.getElementById('fPriceMax');if(el)el.value=state.priceMax;}
     if(state.fMin1D){const el=document.getElementById('fMin1D');if(el)el.value=state.fMin1D;}
     if(state.fMax1D!=null){const el=document.getElementById('fMax1D');if(el)el.value=state.fMax1D;}
     const sharedCapital=shared.capital!=null?shared.capital:state.capital;
@@ -5250,8 +5253,8 @@ function loadFilterState(){
     if(state.topupAlloc!=null){const el=document.getElementById('fTopupAlloc');if(el)el.value=state.topupAlloc;}
     if(state.rocketPct!=null){const el=document.getElementById('fRocketPct');if(el)el.value=state.rocketPct;}
     if(state.volMult){const el=document.getElementById('fVolMult');if(el)el.value=state.volMult;}
-    if(state.minTurnover){const el=document.getElementById('fMinTurnover');if(el)el.value=state.minTurnover;}
-    if(state.minMarketCap){const el=document.getElementById('fMinMarketCap');if(el)el.value=state.minMarketCap;}
+    if(state.minTurnover!=null){const el=document.getElementById('fMinTurnover');if(el)el.value=state.minTurnover;}
+    if(state.minMarketCap!=null){const el=document.getElementById('fMinMarketCap');if(el)el.value=state.minMarketCap;}
     if(state.fvol){
       const el=document.getElementById('fVol');if(el)el.value=state.fvol;
       VOL_AUTO=false;
