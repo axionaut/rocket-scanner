@@ -170,7 +170,7 @@ table.main tbody td{padding:9px 11px;font-family:'DM Mono',monospace;font-size:1
 @media(max-width:480px){
   .stats{grid-template-columns:repeat(2,1fr)}
   .fg{min-width:calc(50% - 6px)}
-  .hdr-r .btn:not(#loadFilesBtn){display:none}
+  .hdr-r .btn:not(#loadFilesBtn):not(#folderBtn){display:none}
   #mobileMenuBtn{display:flex}
 }
 @media(max-width:768px){.hdr{padding:16px 0}.app{padding:0 12px}}
@@ -292,7 +292,7 @@ table.main tbody td{padding:9px 11px;font-family:'DM Mono',monospace;font-size:1
 
 
 <script>
-const BUILD_TS='2026-05-27 21:28 IST'; // replaced at commit time with IST datetime
+const BUILD_TS='2026-05-27 21:45 IST'; // replaced at commit time with IST datetime
 const GOOGLE_DRIVE_CLIENT_ID='1015012642264-oi2nelv3v90k3d39r994a6nelgjs2a56.apps.googleusercontent.com'; // Public OAuth Web Client ID.
 const HARD_FILTER_SCHEMA='null_blanks_pass_v1';
 const STOCK_RUNWAY_CEILING_PCT=19.5; // UC-style ceiling for Max Entry; Rocket % only labels rockets.
