@@ -349,7 +349,7 @@ table.main tbody td{padding:9px 11px;font-family:'DM Mono',monospace;font-size:1
 
 
 <script>
-const BUILD_TS='2026-05-27 09:47 IST'; // replaced at commit time with IST datetime
+const BUILD_TS='2026-05-27 09:57 IST'; // replaced at commit time with IST datetime
 const MODE_STORE='rs_market_mode';
 const USD_INR_STORE='rs_usd_inr';
 const HARD_FILTER_SCHEMA='null_blanks_pass_v1';
@@ -469,7 +469,7 @@ const AVG_MOVE_UNIVERSE_STORE='rs_avg_move_universe_v1';
 const REC_COUNT_STORE='rs_rec_count';
 const NSE_HOLIDAYS_STORE='rs_nse_holidays';
 let TRADEBOOK_STATS=null; // Includes net profit-velocity exitPolicy applied to adaptiveSL/adaptiveTGT/holdLimitDays.
-let LAST_BUY_DATE_MAP={}; // {symbol → latest buy date string} — populated on tradebook parse
+let LAST_BUY_DATE_MAP={}; // Legacy latest-buy map retained for stored-brain compatibility.
 let ORDERS_TODAY=null; // [{symbol, type, qty, price, time}] — COMPLETE orders only
 
 // ══════════════════════════════════════════════════
@@ -2805,8 +2805,8 @@ function renderPerformance(){
   const _totalObs=ENGINE_DATA?.accSessions||_savedMeth?.accSessions||0;
 
   // ── Time-Stop Alert: open positions held past the learned profit-velocity horizon ──
-  // Built from HOLDINGS + POSITIONS (qty>0). Days held is sourced from today's
-  // Orders.csv BUY first, then LAST_BUY_DATE_MAP from the tradebook.
+  // Built from HOLDINGS + POSITIONS (qty>0). Days held is quantity-weighted from
+  // unmatched FIFO tradebook buy lots, so small top-ups do not reset old holdings.
   // Action thresholds are derived from this user's own tradebook below.
   let timeStopHtml='', timeStopTblObj=null;
   (function(){
@@ -2838,11 +2838,7 @@ function renderPerformance(){
       const avgCost=avg||HOLD_COST_MAP[sym]||null;
       const pnlPct=(avgCost&&ltp)?+((ltp-avgCost)/avgCost*100).toFixed(2):null;
       const pnlRs=(avgCost&&ltp&&qty)?+((ltp-avgCost)*qty).toFixed(0):null;
-      const _latestOrderDate=ORDERS_TODAY?.length?getLatestOrderSession()?.date:null;
-      const todayBuy=(_latestOrderDate&&ORDERS_TODAY?._loadedThisSession)?ORDERS_TODAY.find(o=>o.symbol===sym&&o.type==='buy'&&normOrderDate(o.time)===_latestOrderDate):null;
-      const inPositions=POSITIONS?.find(p=>p.symbol===sym&&p.qty>0&&!p.isSell);
-      const buyDateStr=todayBuy?_latestOrderDate:inPositions?getSessionDate():LAST_BUY_DATE_MAP[sym]||null;
-      const daysHeld=buyDateStr?Math.max(0,Math.round((Date.now()-new Date(buyDateStr).getTime())/86400000)):null;
+      const daysHeld=getOpenPositionDaysHeld(sym,qty);
       const capDeployed=(avgCost&&qty)?+(avgCost*qty).toFixed(0):null;
       const tgtPrice=avgCost?tickPrice(avgCost*(1+adaptiveTGT/100)):null;
       const slPrice=avgCost?tickPrice(avgCost*(1-adaptiveSL/100)):null;
@@ -2906,7 +2902,7 @@ function renderPerformance(){
     const _daysFmt=v=>{
       if(v==null) return '<span style="color:var(--t3)">—</span>';
       const c=v>cutoffDays?'var(--red)':v>=cutoffDays?'var(--amber)':'var(--t1)';
-      return `<span style="color:${c};font-weight:${v>cutoffDays?700:500}">${v}d</span>`;
+      return `<span title="Quantity-weighted age of remaining FIFO buy lots" style="color:${c};font-weight:${v>cutoffDays?700:500}">${v}d</span>`;
     };
     const cols=[
       {key:'sym',label:'Symbol',align:'left',fmt:v=>v,clrFn:()=>'var(--t1)',bold:true},
@@ -2939,7 +2935,7 @@ function renderPerformance(){
     ].filter(Boolean).join(' ');
 
     const _evidence=_longTotal>0
-      ?`<div style="font-size:11px;color:var(--t3);margin-top:6px;line-height:1.5"><strong style="color:var(--t2)">Signal</strong> = avg(P&amp;L%, P&amp;L ₹, −Days Held, Dist-to-SL), all cross-normalised to [−1,+1]. Equal weights — lower = more urgent to exit. The profit-velocity policy reviews positions after <strong style="color:var(--amber)">${cutoffDays}d</strong>; historically, trips beyond it had a <strong style="color:${_longWR<50?'var(--red)':'var(--amber)'}">${_longWR}% win rate</strong> across ${_longTotal} lots (net ${fmtSignedINR(_longPnl)}).</div>`
+      ?`<div style="font-size:11px;color:var(--t3);margin-top:6px;line-height:1.5"><strong style="color:var(--t2)">Signal</strong> = avg(P&amp;L%, P&amp;L ₹, −Days Held, Dist-to-SL), all cross-normalised to [−1,+1]. Days Held is quantity-weighted across the remaining FIFO buy lots. Equal weights — lower = more urgent to exit. The profit-velocity policy reviews positions after <strong style="color:var(--amber)">${cutoffDays}d</strong>; historically, trips beyond it had a <strong style="color:${_longWR<50?'var(--red)':'var(--amber)'}">${_longWR}% win rate</strong> across ${_longTotal} lots (net ${fmtSignedINR(_longPnl)}).</div>`
       :'';
 
     timeStopHtml=`<div id="perf-timestop-card" style="background:var(--bg-card);border:1px solid ${_negCount>0?'rgba(239,68,68,.4)':'var(--border)'};border-radius:10px;margin-bottom:12px;overflow:hidden">
@@ -3615,6 +3611,40 @@ function getEffectiveTgtPct(){
   if(!vals.length) return null;
   vals.sort((a,b)=>a-b);
   return roundPct05(vals[Math.floor(vals.length/2)]+nudge);
+}
+
+function calendarDaysHeld(dateStr){
+  if(!dateStr) return null;
+  const start=new Date(String(dateStr).slice(0,10)+'T00:00:00Z');
+  const end=new Date(getSessionDate()+'T00:00:00Z');
+  if(!isFinite(start.getTime())||!isFinite(end.getTime())) return null;
+  return Math.max(0,Math.round((end-start)/86400000));
+}
+
+function getOpenPositionDaysHeld(sym,liveQty){
+  const qty=Math.max(0,Number(liveQty)||0);
+  const lots=(TRADEBOOK_STATS?.openPositionLotsMap?.[sym]||[])
+    .filter(l=>Number(l.qty)>0&&l.date)
+    .map(l=>({qty:Number(l.qty),date:l.date}))
+    .sort((a,b)=>String(a.date).localeCompare(String(b.date)));
+  if(!lots.length||qty<=0) return null;
+
+  const recordedQty=lots.reduce((s,l)=>s+l.qty,0);
+  let soldAfterTradebook=Math.max(0,recordedQty-qty);
+  let agedQty=0, weightedDays=0;
+  lots.forEach(lot=>{
+    const removed=Math.min(soldAfterTradebook,lot.qty);
+    soldAfterTradebook-=removed;
+    const remaining=lot.qty-removed;
+    const days=calendarDaysHeld(lot.date);
+    if(remaining>0&&days!=null){
+      agedQty+=remaining;
+      weightedDays+=remaining*days;
+    }
+  });
+  // Quantity above the stored open lots is a newer live top-up and contributes age zero.
+  const denominator=agedQty+Math.max(0,qty-agedQty);
+  return denominator>0?Math.round(weightedDays/denominator):null;
 }
 
 function getZerodhaMinTrailPoints(price){
@@ -4474,6 +4504,7 @@ function parseTradebook(text){
   // FIFO matching per symbol — only closed round trips
   const roundTrips=[];
   const openAvgCostMap={}; // {symbol: avgCost} — unmatched buy legs (open positions)
+  const openPositionLotsMap={}; // {symbol:[{qty,date}]} — remaining FIFO lots for age calculations
   Object.entries(bySymbol).forEach(([sym,trades])=>{
     trades.sort((a,b)=>a.time.localeCompare(b.time));
     const buyQueue=[];
@@ -4498,7 +4529,12 @@ function parseTradebook(text){
     // Remaining unmatched buys = open position; compute qty-weighted avg cost
     if(buyQueue.length){
       const totalQty=buyQueue.reduce((s,b)=>s+b.qty,0);
-      if(totalQty>0) openAvgCostMap[sym]=+(buyQueue.reduce((s,b)=>s+b.price*b.qty,0)/totalQty).toFixed(2);
+      if(totalQty>0){
+        openAvgCostMap[sym]=+(buyQueue.reduce((s,b)=>s+b.price*b.qty,0)/totalQty).toFixed(2);
+        openPositionLotsMap[sym]=buyQueue
+          .filter(b=>b.qty>0&&b.date)
+          .map(b=>({qty:b.qty,date:b.date}));
+      }
     }
   });
 
@@ -4535,6 +4571,7 @@ function parseTradebook(text){
     adaptiveSL:baselineSL, adaptiveTGT:baselineTGT, minExitPct,
     riskReward:+Math.abs(avgWinPct/avgLossPct).toFixed(2),
     openAvgCostMap, // {symbol: avgCost} from unmatched FIFO buy legs
+    openPositionLotsMap, // {symbol:[{qty,date}]} for quantity-weighted open-position age
   };
 
   // Add netPnl (with charges) per trip and store full array for renderPerformance.
