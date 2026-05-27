@@ -349,7 +349,7 @@ table.main tbody td{padding:9px 11px;font-family:'DM Mono',monospace;font-size:1
 
 
 <script>
-const BUILD_TS='2026-05-27 10:02 IST'; // replaced at commit time with IST datetime
+const BUILD_TS='2026-05-27 10:07 IST'; // replaced at commit time with IST datetime
 const MODE_STORE='rs_market_mode';
 const USD_INR_STORE='rs_usd_inr';
 const HARD_FILTER_SCHEMA='null_blanks_pass_v1';
@@ -459,8 +459,6 @@ const TRADEBOOK_STORE='rs_tradebook';
 const SURV_RULE_STORE='rs_surv_rules';
 const SURV_CORR_STORE='rs_surv_corr';
 const MISSED_OPP_STORE='rs_missed_opp_v2';
-const MISSED_OPP_MIN_SELLS=10;
-const MISSED_OPP_MIN_DATES=3;
 const RECOMMEND_OUTCOME_STORE='rs_recommend_outcomes_v1';
 const RECOMMEND_HORIZON_DAYS=5;
 const POST_SALE_ROCKET_STORE='rs_post_sale_rockets_v1';
@@ -2282,13 +2280,8 @@ function renderStats(){
     const policy=TRADEBOOK_STATS.exitPolicy;
     const holdStr=policy?.holdDays?` · review &gt;${policy.holdDays}d`:'';
     const escapeStr=policy?.escapeCount?` · <span style="color:var(--amber)" title="${policy.escapeCount} sold lots became rockets within ${POST_SALE_ROCKET_HORIZON_DAYS} trading days after exit.">${policy.escapeCount} post-sale rockets</span>`:'';
-    const missed=getMissedOppSummary();
-    const nudge=missed?.nudge||0;
-    const nudgeStr=nudge>0
-      ?` · <span style="color:var(--amber);font-size:10px" title="Observed same-day missed upside averages ${missed.avg.toFixed(2)}% across ${missed.totalCount} sells on ${missed.dates} dates. The target nudge is confidence-scaled until evidence matures.">missed opp +${nudge.toFixed(2)}%</span>`
-      :missed&&!missed.eligible
-        ?` · <span style="color:var(--t3);font-size:10px" title="Same-day missed upside is being measured, but it will not adjust TGT until at least ${MISSED_OPP_MIN_SELLS} sells across ${MISSED_OPP_MIN_DATES} sell dates are observed.">missed opp learning ${missed.totalCount}/${MISSED_OPP_MIN_SELLS}</span>`
-        :'';
+    const nudge=getMissedOppNudge();
+    const nudgeStr=nudge>0?` · <span style="color:var(--amber);font-size:10px" title="You leave an avg of ${(nudge/0.25).toFixed(2)}% on the table after sells. 25% of that is now added to TGT.">missed opp +${nudge.toFixed(2)}%</span>`:'';
     const _cp=TRADEBOOK_STATS.avgChargePct!=null?Math.abs(TRADEBOOK_STATS.avgChargePct):null;
     const costStr=(_cp!=null&&_cp>0)?` · <span style="color:var(--t2)" title="Avg total Zerodha charges as % of round-trip turnover (buy+sell value), across all tradebook trips">cost ~${_cp.toFixed(2)}%</span>`:'';
     return `<div class="st"><div class="st-l">SL / TGT</div><div class="st-v" style="font-size:17px"><span style="color:var(--red)">−${_sl}%</span><span style="color:var(--t3);font-size:13px"> / </span><span style="color:var(--green)">+${_tgt}%</span></div><div class="st-d">R:R ${rr}${costStr} · velocity policy${holdStr}${escapeStr}${nudgeStr}</div></div>`;
@@ -2363,12 +2356,8 @@ function renderStats(){
       if(moEntries.length>0){
         const moTotal=moEntries.reduce((s,e)=>s+e.count,0);
         const moAvg=moEntries.reduce((s,e)=>s+e.avg*e.count,0)/moTotal;
-        const moSummary=getMissedOppSummary();
-        const adjustment=moSummary?.nudge>0?` · TGT +${moSummary.nudge.toFixed(2)}%`:` · learning ${moTotal}/${MISSED_OPP_MIN_SELLS} sells`;
-        const tip=moSummary?.eligible
-          ?`Across ${moDates} sell date(s), ${moTotal} stocks: stock-weighted avg missed gain. The TGT adjustment is confidence-scaled until more exits are observed.`
-          :`Across ${moDates} sell date(s), ${moTotal} stocks: measuring same-day missed gain only. TGT will not be adjusted until at least ${MISSED_OPP_MIN_SELLS} sells across ${MISSED_OPP_MIN_DATES} sell dates are observed.`;
-        infoPills.push(`<span class="info-pill pill-amber" title="${tip}">🎯 ${moDates} sell date${moDates===1?'':'s'} · avg +${moAvg.toFixed(2)}% left${adjustment}</span>`);
+        const moNudge=+(moAvg*0.25).toFixed(2);
+        infoPills.push(`<span class="info-pill pill-amber" title="Across ${moDates} sell date(s), ${moTotal} stocks: stock-weighted avg missed gain (all sold symbols, including perfect exits). 25% of this is added to effective TGT.">🎯 ${moDates} sell date${moDates===1?'':'s'} · avg +${moAvg.toFixed(2)}% left · TGT +${moNudge.toFixed(2)}%</span>`);
       }
     }
   }catch(e){}
@@ -3601,26 +3590,18 @@ function removeFilterOverride(sym){
   applyFilters();
 }
 // ── Effective learnt TGT% (gross sell-price delta from buy) ──
-// Tradebook TGT is the base; missed opportunity nudge is added only after enough evidence.
+// Tradebook TGT is the base; missed opportunity nudge is added when available.
 // Fallback when no tradebook = median of per-stock tgtPct in current FILT (ATR-derived).
-function getMissedOppSummary(){
+function getMissedOppNudge(){
   try{
     const store=FS.get(MISSED_OPP_STORE);
-    if(!store) return null;
+    if(!store) return 0;
     const entries=Object.values(store).filter(e=>e&&typeof e==='object'&&isFinite(e.avg)&&e.count>0);
-    if(!entries.length) return null;
-    const dates=entries.length;
+    if(!entries.length) return 0;
     const totalCount=entries.reduce((s,e)=>s+e.count,0);
     const weightedSum=entries.reduce((s,e)=>s+e.avg*e.count,0);
-    const avg=weightedSum/totalCount;
-    const eligible=totalCount>=MISSED_OPP_MIN_SELLS&&dates>=MISSED_OPP_MIN_DATES;
-    const confidence=eligible?Math.min(1,totalCount/30)*Math.min(1,dates/5):0;
-    const nudge=eligible?+(avg*0.25*confidence).toFixed(2):0;
-    return {dates,totalCount,avg,nudge,eligible,confidence};
-  }catch(e){return null;}
-}
-function getMissedOppNudge(){
-  return getMissedOppSummary()?.nudge||0;
+    return +((weightedSum/totalCount)*0.25).toFixed(2);
+  }catch(e){return 0;}
 }
 
 function getEffectiveTgtPct(){
