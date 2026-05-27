@@ -349,7 +349,7 @@ table.main tbody td{padding:9px 11px;font-family:'DM Mono',monospace;font-size:1
 
 
 <script>
-const BUILD_TS='2026-05-27 10:07 IST'; // replaced at commit time with IST datetime
+const BUILD_TS='2026-05-27 11:36 IST'; // replaced at commit time with IST datetime
 const MODE_STORE='rs_market_mode';
 const USD_INR_STORE='rs_usd_inr';
 const HARD_FILTER_SCHEMA='null_blanks_pass_v1';
@@ -1772,10 +1772,12 @@ function runEngine(raw, sessionTag){
   });
 
 
-  // ── Yesterday's rockets — tracked only to suppress them from display ──
+  // ── Yesterday's rockets — continuation-aware learning and display tracking ──
   const prevSnap=PREV_SNAP||{};
   const pcKey=K.price_change;
   const yesterdayRockets=[];
+  const goodRocketsToday=new Set();
+  const continuationHoldFactor=0.3;
   const filteredSymMap={}; filtered.forEach((d,i)=>{filteredSymMap[d.symbol]=i;});
 
   if(pcKey){
@@ -1785,16 +1787,19 @@ function runEngine(raw, sessionTag){
       const idx=filteredSymMap[sym];
       const todayData=idx!=null?filtered[idx]:null;
       const todayChg=todayData&&pcKey?todayData[pcKey]:null;
-      yesterdayRockets.push({symbol:sym,yesterdayChg:+yesterdayChg.toFixed(2),todayChg:todayChg!=null?+todayChg.toFixed(2):null});
+      const collapseThreshold=-(yesterdayChg*continuationHoldFactor);
+      const held=todayChg!=null&&todayChg>collapseThreshold;
+      yesterdayRockets.push({symbol:sym,yesterdayChg:+yesterdayChg.toFixed(2),todayChg:todayChg!=null?+todayChg.toFixed(2):null,held});
+      if(held&&idx!=null) goodRocketsToday.add(idx);
     });
   }
   yesterdayRockets.sort((a,b)=>b.yesterdayChg-a.yesterdayChg);
 
-  // Binary 0/1 target — fresh rockets only. Yesterday's held rockets excluded from
-  // learning: their features already "fired" yesterday; including them contaminates
-  // the lagged correlation with a continuation signal we don't want to predict.
-  const qualitySet=new Set([...topSetToday]);
+  // Positive target includes fresh rockets and yesterday's rockets that held their move.
+  // Display suppression remains independent, so continuation shapes rankings without forcing re-entry.
+  const qualitySet=new Set([...topSetToday,...goodRocketsToday]);
   const topN=topSetToday.size;
+  const continuationN=goodRocketsToday.size;
   const qualityN=qualitySet.size;
 
   // ── Lagged correlation: yesterday's features → quality target (binary 0/1) ──
@@ -1805,12 +1810,12 @@ function runEngine(raw, sessionTag){
   let laggedNote='';
 
   if(qualityN===0){
-    laggedNote='No rockets today (0 stocks ≥'+ROCKET_THRESHOLD+'%) — using historical only';
+    laggedNote='No rockets or held continuations today — using historical only';
     for(const f of FEATS) targetCorrToday[f]=null;
   } else if(useLagged){
     const overlapIndices=overlap.map(d=>filtered.indexOf(d));
     const laggedTarget=overlapIndices.map(i=>qualitySet.has(i)?1:0);
-    laggedNote='Lagged ('+overlap.length+' matched · '+topN+' rockets · '+qualityN+' quality target)';
+    laggedNote='Lagged ('+overlap.length+' matched · '+topN+' fresh rockets · +'+continuationN+' held continuations · '+qualityN+' quality target)';
     for(const f of FEATS){
       const prevVals=overlap.map(d=>{
         const v=prevSnap[d.symbol][f];
@@ -2047,6 +2052,7 @@ function runEngine(raw, sessionTag){
     },
     sectorCol: sectorCol?true:false, industryCol: industryCol?true:false,
     yesterdayRockets: yesterdayRockets,
+    continuationN,
     qualityTargetN: qualityN,
     totalParsed: totalParsed,
     hardFilterSchema:HARD_FILTER_SCHEMA,
@@ -2064,7 +2070,7 @@ function runEngine(raw, sessionTag){
   try{
     const methSave={targetCorr,targetCorrToday,interCorr,mrmr,weights,features:FEATS,labels:LABELS,top10Feats,rocketCount:ENGINE_DATA.rocketCount,rocketThreshold:ENGINE_DATA.rocketThreshold,accSessions:ENGINE_DATA.accSessions,laggedNote:ENGINE_DATA.laggedNote,
       regime:ENGINE_DATA.regime,marketBreadth:ENGINE_DATA.marketBreadth,useAccCorr:ENGINE_DATA.useAccCorr,useRegimeCorr:ENGINE_DATA.useRegimeCorr,regimeSessions:ENGINE_DATA.regimeSessions,sectorCol:ENGINE_DATA.sectorCol,industryCol:ENGINE_DATA.industryCol,
-      yesterdayRockets:yesterdayRockets,qualityTargetN:qualityN,totalParsed:totalParsed,hardFilterSchema:HARD_FILTER_SCHEMA,removed:{...REMOVED},survSize:Object.keys(NSE_SURV).length,
+      yesterdayRockets:yesterdayRockets,continuationN,qualityTargetN:qualityN,totalParsed:totalParsed,hardFilterSchema:HARD_FILTER_SCHEMA,removed:{...REMOVED},survSize:Object.keys(NSE_SURV).length,
       avgMoveAll:todayAvgMoveAll,avgMoveUniverse:todayAvgMoveUniverse,recommendationFeedback};
     FS.set(modeKey(METH_STORE),methSave);
     // Update regime calendar: date → regime
@@ -3401,7 +3407,7 @@ function _renderMethodologyInner(){
     <div class="m-grid">
       <div class="m-card"><h4>🚀 What is a Rocket?</h4><p>Every trading day, regardless of what the broader market is doing, a small subset of NSE stocks moves <strong>≥${E.rocketThreshold||10}% intraday</strong>. These are Rockets. They don't happen randomly — stocks that become rockets tend to share measurable characteristics <em>the day before</em> they move. The engine's job is to find those stocks before the move, not explain them after.</p></div>
       <div class="m-card"><h4>📡 How the Engine Learns</h4><p>After each session, the engine correlates <strong>yesterday's feature values</strong> against <strong>today's actual rockets</strong>. Features that consistently appeared in rockets get higher weight; features that didn't get lower weight. Tomorrow's recommendations are stocks that look like yesterday's rockets — but haven't moved yet. The target label is quality-adjusted: yesterday's rockets that <em>held</em> today reinforce the signal; those that collapsed are treated as 0, so the engine learns to find durable moves, not fragile spikes.</p></div>
-      <div class="m-card"><h4>🎯 Max 1D Filter</h4><p>Set <em>Max 1D %</em> in the filter bar to hide stocks that have already moved too much today (default 5%). This is your explicit chase-control filter. <em>Rocket %</em> is only the rocket labeling threshold; Max Entry runway uses the ${STOCK_RUNWAY_CEILING_PCT}% UC-style ceiling.</p></div>
+      <div class="m-card"><h4>🎯 Max 1D Filter</h4><p>Set <em>Max 1D %</em> in the filter bar to hide stocks that have already moved too much today (default 5%). This is your explicit chase-control filter. <em>Max Entry</em> is shown as a runway reference only and no longer rejects candidates.</p></div>
       <div class="m-card"><h4>🚫 Hard Filters</h4><p>${isCryptoMode()
         ? `Removed from <strong>both learning and display</strong>: zero price, low 24h INR volume when present (below Min TV), ATR &lt;=0 when present, and <strong>peak retention &lt;50%</strong> (fading; only when day range &gt;1%). Blank/null values pass through as unknown. Currently filtered: ${(REMOVED.liq||0)+(REMOVED.atr||0)+(REMOVED.fade||0)} assets.`
         : `Removed from <strong>both learning and display</strong>: zero price, upper circuit (≥19.5%), non-EQ series (BE/BZ/SZ/SM/ST), surveillance-flagged stocks (user's rules), low liquidity when present (volume &lt;${(parseFloat(document.getElementById('fVolMult')?.value)||LIQ_MIN_VOL_DEFAULT).toLocaleString()}${parseFloat(document.getElementById('fMinTurnover')?.value)>0?' or turnover &lt;'+fmtINR(parseFloat(document.getElementById('fMinTurnover')?.value)):''}, shareholders &lt;500), zero Piotroski F-Score, ATR &lt;=0 when present, <strong>delivery &lt;30%</strong> when present, and <strong>peak retention &lt;50%</strong> (fading; only when day range &gt;1%). Blank/null values pass through as unknown. Currently filtered: ${(REMOVED.uc||0)+(REMOVED.surv||0)+(REMOVED.nonEq||0)+(REMOVED.liq||0)+(REMOVED.fscore||0)+(REMOVED.atr||0)+(REMOVED.deliv||0)+(REMOVED.fade||0)} stocks.`}</p></div>
@@ -3523,7 +3529,6 @@ function getFilterBarReason(s){
   if(fMax1D<Infinity&&s.priceChange!=null&&s.priceChange>fMax1D) return `1D ${s.priceChange.toFixed(2)}% > ${fMax1D}%`;
   if(fPriceMin>0&&s.price!=null&&s.price<fPriceMin) return `Price ${fmtINR(s.price)} < ${fmtINR(fPriceMin)}`;
   if(fPriceMax>0&&s.price!=null&&s.price>fPriceMax) return `Price ${fmtINR(s.price)} > ${fmtINR(fPriceMax)}`;
-  if(!isBuyZone(s)) return `No runway to TGT before ${STOCK_RUNWAY_CEILING_PCT}% UC ceiling`;
   return '';
 }
 function getHeldPositionMap(){
@@ -4084,8 +4089,6 @@ function renderStatusBar(){
   if(minScore2>0)tags.push('Score≥'+minScore2);
   if(fscore>0)tags.push('F≥'+fscore);
   if(fMin1D>-Infinity)tags.push('1D≥'+fMin1D+'%');
-  const _sbTgt=getEffectiveTgtPct()||3.7;
-  tags.push('runway≥'+_sbTgt+'%');
   if(fvol2>0){const n=fvol2;tags.push('Vol≥'+(n>=1e6?(n/1e6).toFixed(1)+'M':n>=1e3?(n/1e3).toFixed(0)+'K':n));}
   if(fMinMarketCap2>0)tags.push('MCap≥₹'+fV(fMinMarketCap2));
   const capital=parseFloat(document.getElementById('fCapital').value)||0;
