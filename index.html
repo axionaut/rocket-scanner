@@ -349,7 +349,7 @@ table.main tbody td{padding:9px 11px;font-family:'DM Mono',monospace;font-size:1
 
 
 <script>
-const BUILD_TS='2026-05-27 09:19 IST'; // replaced at commit time with IST datetime
+const BUILD_TS='2026-05-27 09:47 IST'; // replaced at commit time with IST datetime
 const MODE_STORE='rs_market_mode';
 const USD_INR_STORE='rs_usd_inr';
 const HARD_FILTER_SCHEMA='null_blanks_pass_v1';
@@ -3387,53 +3387,8 @@ function _renderMethodologyInner(){
   }
   wtHTML+='</tbody></table>';
 
-  // ── Redundancy Analysis: deduplicated drop candidates (|r| ≥ 0.7) ──
-  const hasInterCorr = E.interCorr && Object.keys(E.interCorr).length > 0;
-  let pairsHTML='';
-  const allPairs=[];
-  if(hasInterCorr){
-    for(let a=0;a<sorted.length;a++){
-      for(let b=a+1;b<sorted.length;b++){
-        const f1=sorted[a],f2=sorted[b];
-        const r=(E.interCorr&&E.interCorr[f1+'|'+f2])||0;
-        if(Math.abs(r)>=0.7) allPairs.push({f1,f2,r});
-      }
-    }
-    allPairs.sort((a,b)=>Math.abs(b.r)-Math.abs(a.r));
-  }
-  if(!hasInterCorr){
-    pairsHTML='<p style="color:var(--t3);font-style:italic">Inter-feature correlations not available — upload ALL NSE.csv once to compute and persist.</p>';
-  } else if(allPairs.length===0){
-    pairsHTML='<p style="color:var(--t3);font-style:italic">No feature pairs with |r| ≥ 0.7 found — low redundancy across all features.</p>';
-  } else {
-    const dropMap={};
-    for(const {f1,f2,r} of allPairs){
-      const s1=E.mrmr[f1]?.score||0, s2=E.mrmr[f2]?.score||0;
-      const keep=s1>=s2?f1:f2, drop=s1>=s2?f2:f1;
-      if(!dropMap[drop]) dropMap[drop]={redundantWith:keep,r:r,keepScore:E.mrmr[keep]?.score||0,dropScore:E.mrmr[drop]?.score||0};
-    }
-    const dropList=Object.entries(dropMap).sort((a,b)=>Math.abs(b[1].r)-Math.abs(a[1].r));
-    pairsHTML=`<table class="ct"><thead><tr>
-      <th>Drop Candidate</th><th>mRMR</th>
-      <th>Redundant With</th><th>mRMR</th><th>|r|</th>
-    </tr></thead><tbody>`;
-    for(const [feat,info] of dropList){
-      const rC=Math.abs(info.r)>=0.9?'var(--red)':Math.abs(info.r)>=0.8?'var(--orange)':'var(--amber)';
-      pairsHTML+=`<tr>
-        <td style="color:var(--red);font-size:11px;font-weight:600">${E.labels[feat]||feat}</td>
-        <td style="color:var(--t3);font-size:10px">${info.dropScore.toFixed(4)}</td>
-        <td style="color:var(--green);font-size:11px;font-weight:600">${E.labels[info.redundantWith]||info.redundantWith}</td>
-        <td style="color:var(--t3);font-size:10px">${info.keepScore.toFixed(4)}</td>
-        <td style="color:${rC};font-weight:700">${Math.abs(info.r).toFixed(3)}</td>
-      </tr>`;
-    }
-    pairsHTML+='</tbody></table>';
-    pairsHTML+=`<p style="color:var(--t3);font-size:11px;margin-top:8px">${dropList.length} drop candidates from ${allPairs.length} redundant pairs. Each feature listed once — attributed to its strongest overlapping partner.</p>`;
-  }
-
   // Section counts for display
   const _featureCount=sorted.length;
-  const _redundantCount=allPairs.length;
 
   const hardFiltersHTML=buildHardFilterMethodologyHTML(E);
   mc.innerHTML=`
@@ -3443,7 +3398,6 @@ function _renderMethodologyInner(){
       <a href="#meth-regime" onclick="event.preventDefault();scrollToSection('meth-regime')" style="padding:4px 12px;border-radius:6px;background:var(--bg-card);border:1px solid var(--border);color:var(--t2);font-size:11px;font-weight:600;text-decoration:none;cursor:pointer">🐂 Regime</a>
       <a href="#meth-engine" onclick="event.preventDefault();scrollToSection('meth-engine')" style="padding:4px 12px;border-radius:6px;background:var(--bg-card);border:1px solid var(--border);color:var(--t2);font-size:11px;font-weight:600;text-decoration:none;cursor:pointer">⚙ Engine</a>
       <a href="#meth-weights" onclick="event.preventDefault();scrollToSection('meth-weights')" style="padding:4px 12px;border-radius:6px;background:var(--bg-card);border:1px solid var(--border);color:var(--t2);font-size:11px;font-weight:600;text-decoration:none;cursor:pointer">📊 Weights (${_featureCount})</a>
-      <a href="#meth-redundant" onclick="event.preventDefault();scrollToSection('meth-redundant')" style="padding:4px 12px;border-radius:6px;background:var(--bg-card);border:1px solid var(--border);color:var(--t2);font-size:11px;font-weight:600;text-decoration:none;cursor:pointer">🔁 Redundant (${_redundantCount})</a>
     </nav>
     <div id="meth-hf-wrap">${hardFiltersHTML}</div>
     <div id="meth-regime">${regimeCardHTML}</div>
@@ -3451,7 +3405,7 @@ function _renderMethodologyInner(){
     <div class="m-grid">
       <div class="m-card"><h4>🚀 What is a Rocket?</h4><p>Every trading day, regardless of what the broader market is doing, a small subset of NSE stocks moves <strong>≥${E.rocketThreshold||10}% intraday</strong>. These are Rockets. They don't happen randomly — stocks that become rockets tend to share measurable characteristics <em>the day before</em> they move. The engine's job is to find those stocks before the move, not explain them after.</p></div>
       <div class="m-card"><h4>📡 How the Engine Learns</h4><p>After each session, the engine correlates <strong>yesterday's feature values</strong> against <strong>today's actual rockets</strong>. Features that consistently appeared in rockets get higher weight; features that didn't get lower weight. Tomorrow's recommendations are stocks that look like yesterday's rockets — but haven't moved yet. The target label is quality-adjusted: yesterday's rockets that <em>held</em> today reinforce the signal; those that collapsed are treated as 0, so the engine learns to find durable moves, not fragile spikes.</p></div>
-      <div class="m-card"><h4>🎯 Max 1D Filter</h4><p>Set <em>Max 1D %</em> in the filter bar to hide stocks that have already moved too much today (default 8.5%). This is your explicit chase-control filter. <em>Rocket %</em> is only the rocket labeling threshold; Max Entry runway uses the ${STOCK_RUNWAY_CEILING_PCT}% UC-style ceiling.</p></div>
+      <div class="m-card"><h4>🎯 Max 1D Filter</h4><p>Set <em>Max 1D %</em> in the filter bar to hide stocks that have already moved too much today (default 5%). This is your explicit chase-control filter. <em>Rocket %</em> is only the rocket labeling threshold; Max Entry runway uses the ${STOCK_RUNWAY_CEILING_PCT}% UC-style ceiling.</p></div>
       <div class="m-card"><h4>🚫 Hard Filters</h4><p>${isCryptoMode()
         ? `Removed from <strong>both learning and display</strong>: zero price, low 24h INR volume when present (below Min TV), ATR &lt;=0 when present, and <strong>peak retention &lt;50%</strong> (fading; only when day range &gt;1%). Blank/null values pass through as unknown. Currently filtered: ${(REMOVED.liq||0)+(REMOVED.atr||0)+(REMOVED.fade||0)} assets.`
         : `Removed from <strong>both learning and display</strong>: zero price, upper circuit (≥19.5%), non-EQ series (BE/BZ/SZ/SM/ST), surveillance-flagged stocks (user's rules), low liquidity when present (volume &lt;${(parseFloat(document.getElementById('fVolMult')?.value)||LIQ_MIN_VOL_DEFAULT).toLocaleString()}${parseFloat(document.getElementById('fMinTurnover')?.value)>0?' or turnover &lt;'+fmtINR(parseFloat(document.getElementById('fMinTurnover')?.value)):''}, shareholders &lt;500), zero Piotroski F-Score, ATR &lt;=0 when present, <strong>delivery &lt;30%</strong> when present, and <strong>peak retention &lt;50%</strong> (fading; only when day range &gt;1%). Blank/null values pass through as unknown. Currently filtered: ${(REMOVED.uc||0)+(REMOVED.surv||0)+(REMOVED.nonEq||0)+(REMOVED.liq||0)+(REMOVED.fscore||0)+(REMOVED.atr||0)+(REMOVED.deliv||0)+(REMOVED.fade||0)} stocks.`}</p></div>
@@ -3462,10 +3416,7 @@ function _renderMethodologyInner(){
     <p style="color:var(--t3);font-style:italic;margin-top:4px">⚠ Quantitative screening only. Not financial advice. Past momentum ≠ future returns.</p>
 
     <h3 id="meth-weights" style="margin-top:28px">Feature Weights <span style="font-size:12px;color:var(--t3);font-weight:400">(${_featureCount})</span></h3>
-    <div class="corr-wrap">${wtHTML}</div>
-    <h3 id="meth-redundant" style="margin-top:28px">Redundant Features — Drop Candidates <span style="font-size:12px;color:var(--t3);font-weight:400">(${_redundantCount} pairs)</span></h3>
-    <p style="color:var(--t3);font-size:12px;margin-bottom:8px">Feature pairs with |r| ≥ 0.7 — the weaker mRMR partner is the drop candidate. Each feature listed once, attributed to its strongest correlated partner. Safe to remove from your ALL NSE CSV.</p>
-    <div class="corr-wrap">${pairsHTML}</div>`;
+    <div class="corr-wrap">${wtHTML}</div>`;
   setTimeout(()=>{_methTbls.hf?.render();_methTbls.sc?.render();},0);
 }
 
