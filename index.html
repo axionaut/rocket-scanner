@@ -6,6 +6,7 @@
 <title>NSE Rocket Scanner v5</title>
 <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🚀</text></svg>">
 <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
+<script src="https://accounts.google.com/gsi/client" async defer></script>
 <link href="https://fonts.googleapis.com/css2?family=DM+Mono:wght@400;500&family=Plus+Jakarta+Sans:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
 <style>
 :root{--bg:#07090e;--bg-card:#0c1018;--bg-hover:#111824;--bg-raised:#151c28;--border:#1a2233;--border-hi:#243044;--t1:#e8edf5;--t2:#8994a8;--t3:#4a5568;--green:#22c55e;--green-dim:#0d3320;--red:#ef4444;--red-dim:#3b1111;--orange:#f59e0b;--blue:#3b82f6;--purple:#a78bfa;--cyan:#06b6d4;--amber:#fbbf24;--fire:#f97316;--fire2:#ef4444}
@@ -238,12 +239,11 @@ table.main tbody td{padding:9px 11px;font-family:'DM Mono',monospace;font-size:1
    <div class="tab" onclick="switchTab(1)">🔬 Methodology <span id="tabCount1" style="font-size:10px;opacity:.7"></span></div>
    <div class="tab" onclick="switchTab(2)">📈 Performance</div>
   </div>
-  <button class="btn" id="folderBtn" onclick="pickDataFolder()" title="Pick a folder to auto-save brain data" style="font-size:11px">📁 Folder</button>
-  <button class="btn" id="refreshDataBtn" onclick="refreshWorkspaceData(this)" title="Read the selected folder / Scanner Uploads and process the latest files" style="font-size:11px">↻ Refresh data</button>
+  <button class="btn" id="folderBtn" onclick="connectCloudStorage()" title="Connect private Google Drive application storage" style="font-size:11px">☁ Connect Drive</button>
   <button class="btn" onclick="exportBrain()" title="Export Brain — download a copy of the brain file" style="font-size:11px">💾 Export</button>
   <button class="btn" onclick="document.getElementById('brainIn').click()" title="Import Brain — restore from a previously exported file" style="font-size:11px">🧠 Import</button>
   <input type="file" id="brainIn" accept=".json" style="display:none" onchange="importBrain(event)">
-  <button class="btn" onclick="resetBrain(this)" title="Reset Brain - clear accumulated learning and saved filters while retaining one valid prior-session comparison snapshot. Input files stay in your folder." style="font-size:11px;border-color:rgba(239,68,68,.3);color:var(--red)">🗑 Reset Brain</button>
+  <button class="btn" onclick="resetBrain(this)" title="Reset Brain - clear accumulated learning and saved filters while retaining one valid prior-session comparison snapshot. Uploaded input files remain in Drive." style="font-size:11px;border-color:rgba(239,68,68,.3);color:var(--red)">🗑 Reset Brain</button>
   <div style="position:relative;display:flex;align-items:center">
     <button class="btn btn-fire" id="loadFilesBtn" onclick="showUploadScreen()">Load Files</button>
     <button class="btn" onclick="toggleRequiredFilesPopover()" title="Required input files" style="font-size:14px;padding:8px 12px;margin-left:4px">ℹ️</button>
@@ -260,7 +260,7 @@ table.main tbody td{padding:9px 11px;font-family:'DM Mono',monospace;font-size:1
  <div class="upl" id="dz">
   <div class="upl-ico">📊</div>
   <h2>Drop files here to get started</h2>
-  <p>Drop all files at once — or select a folder.</p>
+  <p>Select files, or a desktop folder, to upload and process in Google Drive.</p>
   <div style="display:flex;gap:10px;margin-bottom:6px">
     <button onclick="document.getElementById('fIn').click()" style="background:var(--bg-card);border:1px solid var(--border);color:var(--t2);border-radius:8px;padding:8px 18px;cursor:pointer;font-size:12px;font-weight:600">📄 Select Files</button>
     <button onclick="document.getElementById('fInDir').click()" style="background:var(--bg-card);border:1px solid var(--border);color:var(--t2);border-radius:8px;padding:8px 18px;cursor:pointer;font-size:12px;font-weight:600">📁 Select Folder</button>
@@ -272,6 +272,7 @@ table.main tbody td{padding:9px 11px;font-family:'DM Mono',monospace;font-size:1
    <div class="file-slot" id="slot-pos">📊 Positions.csv</div>
    <div class="file-slot" id="slot-ord">🧾 Orders.csv</div>
    <div class="file-slot" id="slot-tb">📒 Tradebook.csv</div>
+   <div class="file-slot" id="slot-hol">📅 NSE Holidays.csv</div>
   </div>
  </div>
  <div class="nse-links-box" id="nseLinkBox">
@@ -294,7 +295,7 @@ table.main tbody td{padding:9px 11px;font-family:'DM Mono',monospace;font-size:1
  <div class="nse-links-box" id="requiredFilesBox" style="display:none;margin-bottom:14px;">
   <div class="nse-links-title">📁 Required input files</div>
   <div class="nse-links-grid" id="requiredFilesGrid"></div>
-  <div class="nse-links-hint">Upload the folder containing these files for the best data coverage.</div>
+  <div class="nse-links-hint">Upload these files together for the best data coverage.</div>
  </div>
  <div class="tp act" id="tab0">
   <button class="ctrls-toggle" id="ctrlsToggle" onclick="toggleFilters()">⚙ Filters <span id="ctrlsArrow">▼</span></button>
@@ -335,7 +336,8 @@ table.main tbody td{padding:9px 11px;font-family:'DM Mono',monospace;font-size:1
 
 
 <script>
-const BUILD_TS='2026-05-27 14:45 IST'; // replaced at commit time with IST datetime
+const BUILD_TS='2026-05-27 21:12 IST'; // replaced at commit time with IST datetime
+const GOOGLE_DRIVE_CLIENT_ID='1015012642264-oi2nelv3v90k3d39r994a6nelgjs2a56.apps.googleusercontent.com'; // Public OAuth Web Client ID.
 const HARD_FILTER_SCHEMA='null_blanks_pass_v1';
 const STOCK_RUNWAY_CEILING_PCT=19.5; // UC-style ceiling for Max Entry; Rocket % only labels rockets.
 let MARKET_MODE='stock';
@@ -411,167 +413,191 @@ let ORDERS_TODAY=null; // [{symbol, type, qty, price, time}] — COMPLETE orders
 let TRADEBOOK_BUY_FILLS=[]; // Consolidated BUY fills available for executed-entry feedback matching.
 
 // ══════════════════════════════════════════════════
-// FILE SYSTEM STORAGE (File System Access API)
-// Brain data auto-saved to rocket_brain.json in a
-// user-chosen folder. Handle persisted in IndexedDB.
-// SCANNER_STORE (filters) stays in localStorage.
+// CLOUD STORAGE (Google Drive appDataFolder)
+// Brain and canonical input files are kept in the
+// user's private per-app Drive storage. The engine
+// continues to persist through the same FS contract.
 // ══════════════════════════════════════════════════
 const FS = (() => {
   const BRAIN_FILE = 'rocket_brain.json';
-  const IDB_DB = 'rs_fs_v1';
-  const IDB_STORE = 'handles';
-  const IDB_KEY = 'dir';
-  let dirHandle = null;
+  const CLIENT_ID_STORE = 'rs_google_client_id';
+  const PROVIDER_STORE = 'rs_cloud_provider';
+  const SESSION_STORE = 'rs_drive_access_v1';
+  const SCOPE = 'https://www.googleapis.com/auth/drive.appdata';
+  const DRIVE_API = 'https://www.googleapis.com/drive/v3/files';
+  const DRIVE_UPLOAD = 'https://www.googleapis.com/upload/drive/v3/files';
   let _saveTimer = null;
   let _brain = {};
   let _brainLoaded = false;
+  let _accessToken = null;
+  let _expiresAt = 0;
+  let _tokenClient = null;
 
-  function _idb(){
-    return new Promise((res,rej)=>{
-      const req=indexedDB.open(IDB_DB,1);
-      req.onupgradeneeded=e=>e.target.result.createObjectStore(IDB_STORE);
-      req.onsuccess=e=>res(e.target.result);
-      req.onerror=()=>rej(req.error);
-    });
+  function clientId(){ return (GOOGLE_DRIVE_CLIENT_ID||localStorage.getItem(CLIENT_ID_STORE)||'').trim(); }
+  function setClientId(id){
+    const cleaned=String(id||'').trim();
+    if(cleaned) localStorage.setItem(CLIENT_ID_STORE,cleaned);
+    else localStorage.removeItem(CLIENT_ID_STORE);
+    _tokenClient=null;
   }
-  async function _saveHandle(h){
+  function isConfigured(){ return !!clientId(); }
+  function isConnected(){ return !!_accessToken&&Date.now()<_expiresAt-30000; }
+  function clearSession(){
+    _accessToken=null;_expiresAt=0;
+    try{sessionStorage.removeItem(SESSION_STORE);}catch(e){}
+    updateFolderUI();
+  }
+  function restoreSession(){
     try{
-      const db=await _idb();
-      await new Promise((res,rej)=>{
-        const tx=db.transaction(IDB_STORE,'readwrite');
-        tx.objectStore(IDB_STORE).put(h,IDB_KEY);
-        tx.oncomplete=res; tx.onerror=rej;
-      });
-    }catch(e){console.warn('FS._saveHandle failed',e);}
+      const state=JSON.parse(sessionStorage.getItem(SESSION_STORE)||'null');
+      if(state?.token&&state?.expiresAt>Date.now()+30000){
+        _accessToken=state.token;_expiresAt=state.expiresAt;
+      }
+    }catch(e){}
   }
-  async function _loadHandle(){
-    try{
-      const db=await _idb();
-      return new Promise(res=>{
-        const tx=db.transaction(IDB_STORE,'readonly');
-        const req=tx.objectStore(IDB_STORE).get(IDB_KEY);
-        req.onsuccess=()=>res(req.result||null);
-        req.onerror=()=>res(null);
-      });
-    }catch(e){return null;}
+  async function waitForGIS(){
+    for(let i=0;i<80;i++){
+      if(window.google?.accounts?.oauth2) return true;
+      await new Promise(r=>setTimeout(r,50));
+    }
+    return false;
   }
-
-  let _pendingHandle=null; // stored handle that needs user-gesture to grant permission
 
   async function init(){
-    const h=await _loadHandle();
-    if(!h) return null;
-    try{
-      const perm=await h.queryPermission({mode:'readwrite'});
-      if(perm==='granted'){dirHandle=h;updateFolderUI();return await read();}
-      // Permission needs user gesture — store handle for reconnect(), don't call requestPermission here
-      _pendingHandle=h;
-      return null;
-    }catch(e){return null;}
+    restoreSession();
+    updateFolderUI();
+    if(!isConnected()) return null;
+    try{return await read();}catch(e){console.warn('Drive startup read failed',e);return null;}
   }
 
-  // Call with a user gesture (e.g. button click) to re-grant permission for the stored handle
-  async function reconnect(){
-    const h=_pendingHandle||await _loadHandle();
-    if(!h) return null;
-    try{
-      const perm=await h.requestPermission({mode:'readwrite'});
-      if(perm!=='granted') return null;
-      dirHandle=h; _pendingHandle=null;
-      await _saveHandle(h);
-      updateFolderUI();
-      return await read();
-    }catch(e){return null;}
+  async function connect(){
+    if(!isConfigured()) return {ok:false,reason:'missing_client_id'};
+    if(!(await waitForGIS())) return {ok:false,reason:'google_library'};
+    return new Promise(resolve=>{
+      _tokenClient=google.accounts.oauth2.initTokenClient({
+        client_id:clientId(),
+        scope:SCOPE,
+        callback:async response=>{
+          if(response?.error||!response?.access_token){
+            resolve({ok:false,reason:response?.error||'authorization_failed'});return;
+          }
+          _accessToken=response.access_token;
+          _expiresAt=Date.now()+((parseInt(response.expires_in,10)||3600)*1000);
+          localStorage.setItem(PROVIDER_STORE,'drive');
+          try{sessionStorage.setItem(SESSION_STORE,JSON.stringify({token:_accessToken,expiresAt:_expiresAt}));}catch(e){}
+          updateFolderUI();
+          let brain=null;
+          try{brain=await read();}catch(e){console.warn('Drive brain read failed after connect',e);}
+          resolve({ok:true,brain});
+        },
+        error_callback:()=>resolve({ok:false,reason:'popup_failed'})
+      });
+      _tokenClient.requestAccessToken({prompt:''});
+    });
   }
 
-  function needsReconnect(){ return !!_pendingHandle; }
+  function needsReconnect(){
+    return localStorage.getItem(PROVIDER_STORE)==='drive'&&!isConnected();
+  }
 
-  async function pickFolder(){
-    try{
-      const h=await window.showDirectoryPicker({mode:'readwrite'});
-      dirHandle=h; _pendingHandle=null;
-      await _saveHandle(h);
-      updateFolderUI();
-      await loadFromDisk();
-      return true;
-    }catch(e){
-      if(e.name!=='AbortError') console.warn('FS.pickFolder failed',e);
-      return false;
+  async function request(url,options={}){
+    if(!isConnected()) throw new Error('Google Drive is not connected. Click Connect Drive again.');
+    const headers=new Headers(options.headers||{});
+    headers.set('Authorization','Bearer '+_accessToken);
+    const response=await fetch(url,{...options,headers});
+    if(response.status===401){
+      clearSession();
+      throw new Error('Google Drive authorization expired. Click Connect Drive again.');
     }
+    if(!response.ok) throw new Error('Google Drive request failed ('+response.status+').');
+    return response;
   }
-
+  function queryName(name){ return String(name).replace(/\\/g,'\\\\').replace(/'/g,"\\'"); }
+  async function findFile(name){
+    const q=`name='${queryName(name)}' and trashed=false`;
+    const url=DRIVE_API+'?spaces=appDataFolder&pageSize=1&fields=files(id,name,modifiedTime,mimeType)&q='+encodeURIComponent(q);
+    const data=await (await request(url)).json();
+    return data.files?.[0]||null;
+  }
+  async function readBlob(name){
+    const meta=await findFile(name);
+    if(!meta) return null;
+    const response=await request(DRIVE_API+'/'+encodeURIComponent(meta.id)+'?alt=media');
+    return {blob:await response.blob(),meta};
+  }
   async function read(){
-    if(!dirHandle) return null;
-    try{
-      const fh=await dirHandle.getFileHandle(BRAIN_FILE);
-      const file=await fh.getFile();
-      return JSON.parse(await file.text());
-    }catch(e){
-      if(e.name!=='NotFoundError') console.warn('FS.read failed',e);
-      return null;
-    }
+    const hit=await readBlob(BRAIN_FILE);
+    if(!hit) return null;
+    try{return JSON.parse(await hit.blob.text());}
+    catch(e){console.warn('FS.read invalid cloud brain',e);return null;}
   }
 
   async function readUploadText(fileName){
-    if(!dirHandle||!fileName) return null;
-    async function fromDir(dh,path){
-      try{
-        const fh=await dh.getFileHandle(fileName);
-        const file=await fh.getFile();
-        return {text:await file.text(),lastModified:file.lastModified,path};
-      }catch(e){
-        if(e.name!=='NotFoundError') console.warn('FS.readUploadText failed for '+path,e);
-        return null;
-      }
-    }
-    const rootHit=await fromDir(dirHandle,fileName);
-    if(rootHit) return rootHit;
-    try{
-      const uploads=await dirHandle.getDirectoryHandle('Scanner Uploads');
-      return await fromDir(uploads,'Scanner Uploads/'+fileName);
-    }catch(e){
-      if(e.name!=='NotFoundError') console.warn('FS.readUploadText Scanner Uploads failed',e);
-      return null;
-    }
+    if(!isConnected()||!fileName) return null;
+    const hit=await readBlob(fileName);
+    if(!hit) return null;
+    return {text:await hit.blob.text(),lastModified:Date.parse(hit.meta.modifiedTime)||0,path:'Google Drive/'+fileName};
   }
 
   async function readUploadFile(fileName){
-    if(!dirHandle||!fileName) return null;
-    async function fromDir(dh,path){
-      try{
-        const fh=await dh.getFileHandle(fileName);
-        const file=await fh.getFile();
-        return {file,lastModified:file.lastModified,path};
-      }catch(e){
-        if(e.name!=='NotFoundError') console.warn('FS.readUploadFile failed for '+path,e);
-        return null;
-      }
+    if(!isConnected()||!fileName) return null;
+    const hit=await readBlob(fileName);
+    if(!hit) return null;
+    const lastModified=Date.parse(hit.meta.modifiedTime)||Date.now();
+    const file=new File([hit.blob],fileName,{type:hit.blob.type||'application/octet-stream',lastModified});
+    return {file,lastModified,path:'Google Drive/'+fileName};
+  }
+
+  async function uploadFile(name,content,mimeType='application/octet-stream'){
+    const existing=await findFile(name);
+    const endpoint=DRIVE_UPLOAD+(existing?'/'+encodeURIComponent(existing.id):'')+'?uploadType=resumable&fields=id,name,modifiedTime';
+    const metadata=existing?{name}:{name,parents:['appDataFolder']};
+    const begin=await request(endpoint,{
+      method:existing?'PATCH':'POST',
+      headers:{'Content-Type':'application/json; charset=UTF-8','X-Upload-Content-Type':mimeType},
+      body:JSON.stringify(metadata)
+    });
+    const location=begin.headers.get('Location');
+    if(!location) throw new Error('Google Drive did not provide an upload location.');
+    const blob=content instanceof Blob?content:new Blob([content],{type:mimeType});
+    await request(location,{method:'PUT',headers:{'Content-Type':mimeType},body:blob});
+    return true;
+  }
+
+  function canonicalInputName(name){
+    const n=String(name||'').toLowerCase();
+    if(n.includes('all nse')&&n.endsWith('.csv')) return 'ALL NSE.csv';
+    if(n.endsWith('.zip')) return 'Reports-Daily-Multiple.zip';
+    if(n.includes('holding')&&n.endsWith('.csv')) return 'Holdings.csv';
+    if(n.includes('position')&&n.endsWith('.csv')) return 'Positions.csv';
+    if(n.includes('order')&&n.endsWith('.csv')) return 'Orders.csv';
+    if(n.includes('tradebook')&&n.endsWith('.csv')) return 'TRADEBOOK.csv';
+    if((n.includes('nse holidays')||n.includes('nse_holidays'))&&n.endsWith('.csv')) return 'NSE Holidays.csv';
+    return null;
+  }
+  async function saveUploadedInputs(files){
+    let count=0;
+    for(const file of files||[]){
+      const name=canonicalInputName(file.name);
+      if(!name) continue;
+      await uploadFile(name,file,file.type||(/\.zip$/i.test(name)?'application/zip':'text/csv'));
+      count++;
     }
-    const rootHit=await fromDir(dirHandle,fileName);
-    if(rootHit) return rootHit;
-    try{
-      const uploads=await dirHandle.getDirectoryHandle('Scanner Uploads');
-      return await fromDir(uploads,'Scanner Uploads/'+fileName);
-    }catch(e){
-      if(e.name!=='NotFoundError') console.warn('FS.readUploadFile Scanner Uploads failed',e);
-      return null;
-    }
+    return count;
   }
 
   async function write(data){
-    if(!dirHandle) return false;
-    try{
-      const fh=await dirHandle.getFileHandle(BRAIN_FILE,{create:true});
-      const w=await fh.createWritable();
-      await w.write(JSON.stringify(data));
-      await w.close();
-      return true;
-    }catch(e){console.warn('FS.write failed',e);return false;}
+    if(!isConnected()) return false;
+    try{return await uploadFile(BRAIN_FILE,JSON.stringify(data),'application/json');}
+    catch(e){console.warn('FS.write failed',e);return false;}
   }
 
   async function deleteFile(){
-    if(!dirHandle) return;
-    try{await dirHandle.removeEntry(BRAIN_FILE);}catch(e){}
+    if(!isConnected()) return;
+    try{
+      const file=await findFile(BRAIN_FILE);
+      if(file) await request(DRIVE_API+'/'+encodeURIComponent(file.id),{method:'DELETE'});
+    }catch(e){console.warn('FS.deleteFile failed',e);}
   }
 
   // Set one key and schedule a debounced write
@@ -591,13 +617,13 @@ const FS = (() => {
   function get(key){ return _brain[key]??null; }
   function load(brain){ _brain=brain||{}; _brainLoaded=true; }
   async function loadFromDisk(){
-    if(!dirHandle) return null;
+    if(!isConnected()) return null;
     const brain=await read();
     load(brain||{});
     return brain;
   }
   async function ensureLoaded(){
-    if(!_brainLoaded&&dirHandle) await loadFromDisk();
+    if(!_brainLoaded&&isConnected()) await loadFromDisk();
     return _brain;
   }
   function getBrain(){ return _brain; }
@@ -608,104 +634,51 @@ const FS = (() => {
     if(Object.keys(_brain).length) write(_brain);
     else deleteFile();
   }
-  function folderName(){ return dirHandle?.name||null; }
-  function hasFolder(){ return !!dirHandle; }
+  function folderName(){ return isConnected()?'Google Drive':null; }
+  function hasFolder(){ return isConnected(); }
 
-  return {init,pickFolder,reconnect,needsReconnect,read,readUploadText,readUploadFile,write,set,setMultiple,get,load,loadFromDisk,ensureLoaded,getBrain,reset,folderName,hasFolder};
+  return {init,connect,needsReconnect,isConfigured,setClientId,isConnected,read,readUploadText,readUploadFile,saveUploadedInputs,write,set,setMultiple,get,load,loadFromDisk,ensureLoaded,getBrain,reset,folderName,hasFolder};
 })();
-
-const WORKSPACE_INPUT_FILES=[
-  'ALL NSE.csv',
-  'Reports-Daily-Multiple.zip',
-  'Holdings.csv',
-  'Positions.csv',
-  'Orders.csv',
-  'TRADEBOOK.csv',
-  'NSE Holidays.csv'
-];
-let workspaceRefreshBusy=false;
-
-async function getWorkspaceInputFiles(){
-  if(!FS.hasFolder()) return [];
-  const entries=await Promise.all(WORKSPACE_INPUT_FILES.map(async name=>{
-    try{return await FS.readUploadFile(name);}catch(e){return null;}
-  }));
-  return entries.filter(Boolean).map(entry=>entry.file);
-}
-
-async function refreshWorkspaceData(btn){
-  if(workspaceRefreshBusy) return;
-  workspaceRefreshBusy=true;
-  const oldText=btn?.textContent;
-  if(btn){btn.disabled=true;btn.textContent='Refreshing...';}
-  try{
-    if(!FS.hasFolder()){
-      const ok=await FS.pickFolder();
-      if(!ok){showToast('Pick a folder first, then refresh data.',3000,true);return;}
-      updateFolderUI();
-    }
-    await FS.ensureLoaded();
-    const files=await getWorkspaceInputFiles();
-    if(!files.length){
-      showToast('No known input files found in the selected folder or Scanner Uploads.',4000,true);
-      return;
-    }
-    showToast('<strong>Refreshing data.</strong> Processing latest folder files...');
-    const hasScannerInput=files.some(f=>{
-      const n=f.name.toLowerCase();
-      return n.includes('all nse')||n.endsWith('.zip')||n.includes('.zip');
-    });
-    if(hasScannerInput) await processFiles(files);
-    else{
-      await hydrateSessionCSVsFromWorkspace();
-      try{await FS.write(FS.getBrain());}catch(e){console.warn('Brain flush failed',e);}
-      location.reload();
-    }
-  }catch(e){
-    console.warn('Refresh data failed',e);
-    showToast('Refresh data failed: '+(e?.message||e),5000,true);
-  }finally{
-    workspaceRefreshBusy=false;
-    if(btn){btn.disabled=false;btn.textContent=oldText||'↻ Refresh data';}
-  }
-}
 
 function updateFolderUI(){
   const btn=document.getElementById('folderBtn');
   if(!btn) return;
   if(FS.hasFolder()){
-    btn.textContent='📁 '+FS.folderName();
-    btn.title='Brain folder: '+FS.folderName()+'. Click to change.';
+    btn.textContent='☁ Drive Connected';
+    btn.title='Private Google Drive app storage connected for this browser session.';
     btn.style.borderColor='rgba(34,197,94,.4)';
     btn.style.color='var(--green)';
   } else if(FS.needsReconnect()){
-    btn.textContent='📁 Reconnect Brain';
-    btn.title='Brain folder exists but needs permission. Click to reconnect.';
+    btn.textContent='☁ Reconnect Drive';
+    btn.title='Google Drive access has expired or is needed on this browser. Click to reconnect.';
     btn.style.borderColor='rgba(251,191,36,.5)';
     btn.style.color='var(--amber)';
   } else {
-    btn.textContent='📁 Folder';
-    btn.title='Pick a folder to auto-save brain data (correlations, snapshots, scan data)';
+    btn.textContent='☁ Connect Drive';
+    btn.title='Connect private Google Drive app storage for inputs and brain data.';
     btn.style.borderColor='';
     btn.style.color='';
   }
 }
 
-async function pickDataFolder(){
-  if(FS.needsReconnect()){
-    const brain=await FS.reconnect();
-    if(brain){
-      // Permission granted — reload so initApp restores all state cleanly
-      window.location.reload();
-    } else {
-      showToast('Reconnect failed — try picking the folder manually.',3000,true);
-      const ok=await FS.pickFolder();
-      if(ok) showToast('<strong>Folder set:</strong> '+FS.folderName());
+async function connectCloudStorage(){
+  if(!FS.isConfigured()){
+    const id=window.prompt('Paste your Google OAuth Web Client ID. This is a public app identifier, not a password or secret.');
+    if(!id) return;
+    if(!/\.apps\.googleusercontent\.com$/.test(id.trim())){
+      showToast('That does not look like a Google OAuth Web Client ID.',5000,true);
+      return;
     }
+    FS.setClientId(id);
+  }
+  const result=await FS.connect();
+  if(!result.ok){
+    const reason=result.reason==='google_library'?'Google authorization library could not load.':result.reason==='popup_failed'?'Google authorization popup was closed or blocked.':'Google Drive connection failed: '+result.reason;
+    showToast(reason,5000,true);
     return;
   }
-  const ok=await FS.pickFolder();
-  if(ok) showToast('<strong>Folder set:</strong> '+FS.folderName()+' — brain data will auto-save here.');
+  showToast('<strong>Google Drive connected.</strong> Loading your latest cloud brain...');
+  setTimeout(()=>location.reload(),400);
 }
 
 // ── One-time key migration: move old versioned keys → clean names ──
@@ -4250,7 +4223,8 @@ function toggleRequiredFilesPopover(){
 function showUploadScreen(){
   document.getElementById('fIn').value='';
   document.getElementById('fInDir').value='';
-  document.getElementById('fInDir').click();
+  document.getElementById('uplSec').style.display='flex';
+  document.getElementById('fIn').click();
 }
 function hideUploadScreen(){
   document.getElementById('uplSec').style.display='none';
@@ -4293,17 +4267,23 @@ function importBrain(event){
   reader.onload=async function(e){
     try{
       const brain=JSON.parse(e.target.result);
-      if(!brain._version||!brain._version.startsWith('rscanner_brain')){
+      const isExport=!!(brain._version&&brain._version.startsWith('rscanner_brain'));
+      const isRawBrain=!!(brain&&typeof brain==='object'&&(brain[CORR_STORE]||brain[ALL_STORE]||brain[TRADEBOOK_STORE]||brain[SNAP_KEY]));
+      if(!isExport&&!isRawBrain){
         showToast('Invalid brain file — not a Rocket Scanner export.', 5000, true);return;
       }
       if(!FS.hasFolder()){
-        showToast('Pick a folder first (📁 Folder button) before importing.', 5000, true);return;
+        showToast('Connect Google Drive first before importing a brain backup.', 5000, true);return;
       }
-      // Strip metadata keys, write brain data to file
-      const {_exported,_version,_summary,_sizeKB,...data}=brain;
+      // Export wrappers contain metadata; auto-saved rocket_brain.json is already raw brain data.
+      let data=brain;
+      if(isExport){
+        const {_exported,_version,_summary,_sizeKB,...wrappedData}=brain;
+        data=wrappedData;
+      }
       const ok=await FS.write(data);
       if(!ok){showToast('Failed to write brain file.', 5000, true);return;}
-      const s=brain._summary||{};
+      const s=brain._summary||{sessions:data[CORR_STORE]?.sessions||0};
       showToast(`<strong>Brain imported</strong> — ${s.sessions||0} sessions · Reloading...`, 3000);
       setTimeout(()=>location.reload(),1500);
     }catch(err){
@@ -4368,7 +4348,7 @@ function resetBrain(btn){
   btn.innerHTML='🗑 Reset Brain';btn.style.background='';btn.style.borderColor='rgba(239,68,68,.3)';btn.style.color='var(--red)';
   const kept=[stockBaseline&&('Stocks '+stockBaseline.savedDate)].filter(Boolean);
   const baselineMsg=kept.length?' Kept prior-session baseline: '+kept.join(', ')+'.':' No valid prior-session baseline was available.';
-  showToast('<strong>Brain reset.</strong> Cleared accumulated learning and saved filters.'+baselineMsg+' Source files remain in your folder.',7000);
+  showToast('<strong>Brain reset.</strong> Cleared accumulated learning and saved filters.'+baselineMsg+' Uploaded input files remain in Google Drive.',7000);
   setTimeout(()=>location.reload(),2000);
 }
 
@@ -4970,8 +4950,29 @@ async function processScannerUpload(scannerFile, mode){
 }
 
 async function processFiles(files){
+  if(!FS.hasFolder()){
+    showToast('Connect Google Drive before uploading files so inputs and brain stay in sync.',5000,true);
+    return;
+  }
+  document.getElementById('uplSec').style.display='none';
+  document.getElementById('ldSt').classList.add('on');
+  setMsg('Saving selected inputs to Google Drive...');
+  try{
+    const uploaded=await FS.saveUploadedInputs(files);
+    if(!uploaded){
+      document.getElementById('ldSt').classList.remove('on');
+      document.getElementById('uplSec').style.display='flex';
+      showToast('No recognised scanner input files were selected.',4000,true);
+      return;
+    }
+  }catch(e){
+    document.getElementById('ldSt').classList.remove('on');
+    document.getElementById('uplSec').style.display='flex';
+    showToast('Could not save files to Google Drive: '+(e.message||e),6000,true);
+    return;
+  }
   NSE_BHAV={};NSE_52W={};NSE_SURV={};NSE_BULK={};NSE_BLOCK={};
-  let tvFile=null,nseZip=null,holdFile=null,posFile=null,ordFile=null,tbFile=null;
+  let tvFile=null,nseZip=null,holdFile=null,posFile=null,ordFile=null,tbFile=null,holidayFile=false;
   for(const f of files){
     if(f.name.toLowerCase().endsWith('.zip')||f.name.toLowerCase().includes('.zip')){nseZip=nseZip||f;continue;}
     if(!f.name.toLowerCase().endsWith('.csv'))continue;
@@ -4981,12 +4982,18 @@ async function processFiles(files){
     if(fname_l.includes('order')){ordFile=f;continue;}
     if(fname_l.includes('tradebook')){tbFile=f;continue;}
     if(fname_l.includes('all nse')){tvFile=f;continue;}
-    if(fname_l.includes('nse holidays')||fname_l.includes('nse_holidays')){const ht=await f.text();parseNSEHolidays(ht);continue;}
+    if(fname_l.includes('nse holidays')||fname_l.includes('nse_holidays')){
+      const ht=await f.text();parseNSEHolidays(ht);holidayFile=true;
+      const holSlot=document.getElementById('slot-hol');
+      if(holSlot){holSlot.textContent='📅 '+f.name;holSlot.classList.add('ok');}
+      continue;
+    }
   }
-  if(!tvFile&&!nseZip){showToast('No files recognised. Drop ALL NSE.csv and/or the NSE ZIP.',4000,true);return;}
-
-  document.getElementById('uplSec').style.display='none';
-  document.getElementById('ldSt').classList.add('on');
+  if(!tvFile&&!nseZip&&!holdFile&&!posFile&&!ordFile&&!tbFile&&!holidayFile){
+    document.getElementById('ldSt').classList.remove('on');
+    showToast('No files recognised. Upload the NSE scanner and/or Zerodha input files.',4000,true);
+    return;
+  }
 
   if(nseZip){
     setMsg('Unzipping NSE data...');
@@ -5034,7 +5041,7 @@ async function processFiles(files){
   for(const job of scannerJobs) await processScannerUpload(job.file,job.mode);
   const stockScannerProcessed=scannerJobs.some(j=>j.mode==='stock');
 
-  if(!scannerJobs.length&&!holdFile&&!posFile&&!ordFile&&!tbFile){
+  if(!scannerJobs.length&&!holdFile&&!posFile&&!ordFile&&!tbFile&&!holidayFile){
     document.getElementById('ldSt').classList.remove('on');
     document.getElementById('uplSec').style.display='flex';
     if(!nseZip) showToast('TradingView CSV not found. Drop ALL NSE.csv alongside the NSE ZIP.',4000,true);
@@ -5100,8 +5107,20 @@ async function processFiles(files){
       }
     }finally{restoreScannerRuntime(rt);}
   } else computeMissedOpp();
-  try{await FS.write(FS.getBrain());}catch(e){console.warn('Brain flush failed',e);}
-  await new Promise(r=>setTimeout(r,300)); // let file system settle
+  try{
+    const brainSaved=await FS.write(FS.getBrain());
+    if(!brainSaved){
+      document.getElementById('ldSt').classList.remove('on');
+      showToast('Inputs were uploaded, but the updated brain was not saved. Reconnect Google Drive and upload again.',7000,true);
+      return;
+    }
+  }catch(e){
+    console.warn('Brain flush failed',e);
+    document.getElementById('ldSt').classList.remove('on');
+    showToast('Inputs were uploaded, but saving the updated brain failed: '+(e.message||e),7000,true);
+    return;
+  }
+  await new Promise(r=>setTimeout(r,300)); // let the Drive write settle before reload
   location.reload();
 }
 
@@ -5122,7 +5141,7 @@ let ACC_CORR=null; // accumulated targetCorr across sessions
 // ── Async app init: load brain file → hydrate all state → render ──
 async function initApp(){
   updateModeUI();
-  // Step 0: Connect to folder and load brain file
+  // Step 0: Restore an active Drive token for this browser session and load cloud brain data.
   const brain=await FS.init();
   if(brain){
     FS.load(brain);
@@ -5245,14 +5264,13 @@ async function initApp(){
 
   } else {
     if(FS.needsReconnect()){
-      console.log('INIT: brain folder found but needs permission — showing reconnect prompt.');
-      // Show a prominent banner so the user knows to click the button
+      console.log('INIT: Google Drive needs authorization — showing reconnect prompt.');
       setTimeout(()=>{
         const bar=document.getElementById('infoBar');
-        if(bar) bar.innerHTML=`<span class="info-pill pill-amber" style="cursor:pointer;font-weight:700" onclick="pickDataFolder()" title="Click to reconnect brain folder and restore all session data">⚠ Brain needs permission — click to reconnect (or click 📁 Reconnect Brain above)</span>`;
+        if(bar) bar.innerHTML=`<span class="info-pill pill-amber" style="cursor:pointer;font-weight:700" onclick="connectCloudStorage()" title="Click to authorize Google Drive and load the latest cloud brain">⚠ Google Drive needs authorization — click to connect</span>`;
       },200);
     } else {
-      console.log('INIT: no brain file found — starting fresh. Pick a folder to enable auto-save.');
+      console.log('INIT: no connected Google Drive brain found — connect Drive to load or save cloud state.');
     }
   }
 
@@ -5260,11 +5278,11 @@ async function initApp(){
   // before REG1 ZIP hydration so hard filtering is active on the first new scan.
   try{loadSurvRules();}catch(e){SURV_CUSTOM_RULES=SURV_SEED_RULES.map(r=>({key:survRuleKey(r.column),column:r.column,label:r.label}));}
 
-  // Prefer current workspace CSVs over the saved brain snapshot. This keeps
+  // Prefer current cloud inputs over the saved brain snapshot. This keeps
   // Latest Session/Booked Today from showing stale rs_orders after Orders.csv changes.
-  try{await hydrateSessionCSVsFromWorkspace();}catch(e){console.warn('INIT: workspace CSV refresh failed',e);}
+  try{await hydrateSessionCSVsFromWorkspace();}catch(e){console.warn('INIT: cloud input hydration failed',e);}
 
-  // Step 3b: Render after hydration — workspace CSVs (orders, tradebook, holdings) are now fresh in memory.
+  // Step 3b: Render after hydration — cloud orders, tradebook and holdings are now fresh in memory.
   // renderPerformance must run before renderStats (populates PERF_TRADE_WINDOWS for current-window pill).
   try{ renderPerformance(); }catch(e){ console.error('INIT step3b renderPerformance failed:',e); }
 
@@ -5416,7 +5434,9 @@ function initNSELinks(){
     '🏛 Reports-Daily-Multiple.zip',
     '🛡 Holdings.csv',
     '📊 Positions.csv',
+    '🧾 Orders.csv',
     '📒 TRADEBOOK.csv',
+    '📅 NSE Holidays.csv',
   ];
   const allFiles=tvFiles.concat(nseFiles);
   var grid=document.getElementById('nseLinkGrid');
