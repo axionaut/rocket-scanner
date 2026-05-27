@@ -349,7 +349,7 @@ table.main tbody td{padding:9px 11px;font-family:'DM Mono',monospace;font-size:1
 
 
 <script>
-const BUILD_TS='2026-05-27 12:52 IST'; // replaced at commit time with IST datetime
+const BUILD_TS='2026-05-27 14:23 IST'; // replaced at commit time with IST datetime
 const MODE_STORE='rs_market_mode';
 const USD_INR_STORE='rs_usd_inr';
 const HARD_FILTER_SCHEMA='null_blanks_pass_v1';
@@ -461,6 +461,8 @@ const SURV_CORR_STORE='rs_surv_corr';
 const MISSED_OPP_STORE='rs_missed_opp_v2';
 const RECOMMEND_OUTCOME_STORE='rs_recommend_outcomes_v1';
 const RECOMMEND_HORIZON_DAYS=5;
+const ENTRY_OUTCOME_STORE='rs_entry_outcomes_v2';
+const ENTRY_OUTCOME_HORIZON_DAYS=5;
 const POST_SALE_ROCKET_STORE='rs_post_sale_rockets_v1';
 const POST_SALE_ROCKET_HORIZON_DAYS=5;
 // Kept separate from the former day-high accumulator: these measure absolute daily change.
@@ -471,6 +473,7 @@ const NSE_HOLIDAYS_STORE='rs_nse_holidays';
 let TRADEBOOK_STATS=null; // Includes net profit-velocity exitPolicy applied to adaptiveSL/adaptiveTGT/holdLimitDays.
 let LAST_BUY_DATE_MAP={}; // Legacy latest-buy map retained for stored-brain compatibility.
 let ORDERS_TODAY=null; // [{symbol, type, qty, price, time}] — COMPLETE orders only
+let TRADEBOOK_BUY_FILLS=[]; // Consolidated BUY fills available for executed-entry feedback matching.
 
 // ══════════════════════════════════════════════════
 // FILE SYSTEM STORAGE (File System Access API)
@@ -1246,7 +1249,9 @@ function persistMethodologySnapshot(){
       survSize:ENGINE_DATA.survSize||0,
       survRuleRows:syncSurvRuleRows(ENGINE_DATA.survRuleRows||[]),
       avgMoveAll:ENGINE_DATA.avgMoveAll,
-      avgMoveUniverse:ENGINE_DATA.avgMoveUniverse
+      avgMoveUniverse:ENGINE_DATA.avgMoveUniverse,
+      recommendationFeedback:ENGINE_DATA.recommendationFeedback||null,
+      executedEntryFeedback:ENGINE_DATA.executedEntryFeedback||null
     };
     FS.set(modeKey(METH_STORE),methSave);
   }catch(e){
@@ -1401,7 +1406,8 @@ function recordRecommendationOutcomeScan(scan){
       if(gap===RECOMMEND_HORIZON_DAYS) p.complete=true;
     });
   });
-  if(!store.issues[scan.date]&&scan.recommendations?.length){
+  const currentIssue=store.issues[scan.date];
+  if(scan.recommendations?.length&&(!currentIssue||(currentIssue.picks||[]).every(p=>(p.observations||0)===0))){
     store.issues[scan.date]={
       date:scan.date,threshold:scan.threshold,
       picks:scan.recommendations.map(p=>({...p,observations:0,evaluatedThrough:null,rocketDate:null,rocketDays:null,
@@ -1436,6 +1442,139 @@ function getRecommendationFeedbackCorrelations(features){
   const corr={};
   features.forEach(f=>{corr[f]=pearson(target,picks.map(p=>p.features[f]??null));});
   return {samples:picks.length,rockets,corr};
+}
+function getDisplayedEntryCandidates(rows){
+  if(!Array.isArray(rows)||!rows.length) return [];
+  const heldPos=getHeldPositionMap();
+  const reDrop=parseFloat(document.getElementById('fReDrop')?.value);
+  const dropPct=isFinite(reDrop)&&reDrop>=0?reDrop:1;
+  const yesterday=new Set((ENGINE_DATA?.yesterdayRockets||[]).map(r=>r.symbol));
+  return rows.map(s=>({...s,_features:s._features||{}}))
+    .filter(s=>!getFilterBarReason(s))
+    .filter(s=>!applyHeldDisplayState(s,heldPos,dropPct))
+    .filter(s=>!yesterday.has(s.symbol))
+    .sort((a,b)=>(b.rocketScore||0)-(a.rocketScore||0))
+    .slice(0,20);
+}
+function recordDisplayedEntryCohort(scan){
+  if(!scan?.date||!scan.candidates?.length) return;
+  const store=FS.get(ENTRY_OUTCOME_STORE)||{horizonDays:ENTRY_OUTCOME_HORIZON_DAYS,cohorts:{},entries:{}};
+  const cohort=store.cohorts[scan.date]||{date:scan.date,candidates:{}};
+  scan.candidates.forEach((s,i)=>{
+    if(cohort.candidates[s.symbol]) return;
+    cohort.candidates[s.symbol]={
+      symbol:s.symbol,referencePrice:s.price,score:s.rocketScore,rank:i+1,
+      kind:s._isTopUp?'topup':'fresh',heldAvg:s._heldAvg??null,heldQty:s._heldQty??null,
+      features:s._features||{}
+    };
+  });
+  store.cohorts[scan.date]=cohort;
+  const cutoff=new Date(scan.date+'T12:00:00Z');
+  cutoff.setUTCDate(cutoff.getUTCDate()-180);
+  Object.keys(store.cohorts).forEach(date=>{if(date<cutoff.toISOString().slice(0,10)) delete store.cohorts[date];});
+  FS.set(ENTRY_OUTCOME_STORE,store);
+}
+function syncExecutedRecommendedEntries(){
+  const store=FS.get(ENTRY_OUTCOME_STORE);
+  if(!store?.cohorts) return;
+  if(!store.entries) store.entries={};
+  const fills={};
+  const add=(date,symbol,qty,price,sourcePriority)=>{
+    const candidate=store.cohorts?.[date]?.candidates?.[symbol];
+    if(!candidate||!(qty>0)||!(price>0)) return;
+    const key=date+'|'+symbol;
+    const existing=fills[key];
+    if(existing&&existing.sourcePriority>sourcePriority) return;
+    if(!existing||existing.sourcePriority<sourcePriority){
+      fills[key]={date,symbol,qty:0,value:0,sourcePriority};
+    }
+    fills[key].qty+=qty;
+    fills[key].value+=qty*price;
+  };
+  (TRADEBOOK_BUY_FILLS||[]).forEach(t=>add(t.date,t.symbol,t.qty,t.price,2));
+  // Orders.csv is the current-session execution truth and replaces any partial same-day tradebook slice.
+  (ORDERS_TODAY||[]).filter(o=>o.type==='BUY').forEach(o=>add(normOrderDate(o.time),o.symbol,o.qty,o.price,3));
+  let changed=false;
+  Object.values(fills).forEach(fill=>{
+    const candidate=store.cohorts[fill.date].candidates[fill.symbol];
+    const id=fill.date+'|'+fill.symbol;
+    const avgBuy=fill.value/fill.qty;
+    const existing=store.entries[id];
+    if(existing&&existing.qty===fill.qty&&Math.abs(existing.buyPrice-avgBuy)<0.001) return;
+    store.entries[id]={
+      ...(existing||{}),id,symbol:fill.symbol,issueDate:fill.date,
+      kind:candidate.kind||'fresh',qty:fill.qty,buyPrice:+avgBuy.toFixed(4),
+      capital:+fill.value.toFixed(2),referencePrice:candidate.referencePrice,
+      score:candidate.score,rank:candidate.rank,features:candidate.features||{},
+      observations:existing?.observations||0,evaluatedThrough:existing?.evaluatedThrough||null,
+      bestNetHighPct:existing?.bestNetHighPct??null,bestNetClosePct:existing?.bestNetClosePct??null,
+      bestHighDays:existing?.bestHighDays??null,bestVelocityPctPerDay:existing?.bestVelocityPctPerDay??null,
+      bestVelocityDays:existing?.bestVelocityDays??null,
+      complete:existing?.complete||false
+    };
+    changed=true;
+  });
+  if(changed) FS.set(ENTRY_OUTCOME_STORE,store);
+}
+function estimatedEntryNetPct(entry,exitPrice){
+  if(!(entry?.buyPrice>0)||!(entry?.qty>0)||!(exitPrice>0)) return null;
+  const capital=entry.buyPrice*entry.qty;
+  const charges=calcZerodhaCharges(entry.buyPrice,entry.qty,false,false,false)+calcZerodhaCharges(exitPrice,entry.qty,true,false,false);
+  return capital>0?(((exitPrice-entry.buyPrice)*entry.qty-charges)/capital)*100:null;
+}
+function assessExecutedEntryOutcomeScan(scan){
+  if(!scan?.date||!scan.rows?.length) return;
+  syncExecutedRecommendedEntries();
+  const store=FS.get(ENTRY_OUTCOME_STORE);
+  if(!store?.entries) return;
+  const rowMap=Object.fromEntries(scan.rows.map(r=>[r.symbol,r]));
+  let changed=false;
+  Object.values(store.entries).forEach(entry=>{
+    const gap=tradingDaysBetween(entry.issueDate,scan.date);
+    if(gap==null||gap<=0||entry.complete) return;
+    if(gap>ENTRY_OUTCOME_HORIZON_DAYS){entry.complete=true;changed=true;return;}
+    const row=rowMap[entry.symbol];
+    if(!row||entry.evaluatedThrough===scan.date) return;
+    const highNet=estimatedEntryNetPct(entry,row.high1d>0?row.high1d:row.price);
+    const closeNet=estimatedEntryNetPct(entry,row.price);
+    entry.observations=(entry.observations||0)+1;
+    entry.evaluatedThrough=scan.date;
+    if(highNet!=null&&(entry.bestNetHighPct==null||highNet>entry.bestNetHighPct)){
+      entry.bestNetHighPct=+highNet.toFixed(2);
+      entry.bestHighDays=gap;
+    }
+    const velocity=highNet!=null?highNet/gap:null;
+    if(velocity!=null&&(entry.bestVelocityPctPerDay==null||velocity>entry.bestVelocityPctPerDay)){
+      entry.bestVelocityPctPerDay=+velocity.toFixed(3);
+      entry.bestVelocityDays=gap;
+    }
+    if(closeNet!=null&&(entry.bestNetClosePct==null||closeNet>entry.bestNetClosePct)) entry.bestNetClosePct=+closeNet.toFixed(2);
+    if(gap===ENTRY_OUTCOME_HORIZON_DAYS) entry.complete=true;
+    changed=true;
+  });
+  if(changed) FS.set(ENTRY_OUTCOME_STORE,store);
+}
+function getExecutedEntryOutcomeSummary(){
+  const entries=Object.values((FS.get(ENTRY_OUTCOME_STORE)||{}).entries||{});
+  const completed=entries.filter(e=>e.complete&&e.observations>0&&isFinite(e.bestVelocityPctPerDay));
+  const topups=completed.filter(e=>e.kind==='topup');
+  const positive=completed.filter(e=>e.bestVelocityPctPerDay>0);
+  return {
+    tracked:entries.length,completed:completed.length,topups:topups.length,positive:positive.length,
+    avgVelocity:completed.length?+meanArr(completed.map(e=>e.bestVelocityPctPerDay)).toFixed(3):null,
+    avgBestNet:completed.length?+meanArr(completed.map(e=>e.bestNetHighPct)).toFixed(2):null
+  };
+}
+function getExecutedEntryFeedbackCorrelations(features){
+  const entries=Object.values((FS.get(ENTRY_OUTCOME_STORE)||{}).entries||{})
+    .filter(e=>e.complete&&e.observations>0&&e.features&&isFinite(e.bestVelocityPctPerDay));
+  if(entries.length<8) return null;
+  const target=entries.map(e=>e.bestVelocityPctPerDay);
+  if(Math.max(...target)===Math.min(...target)) return null;
+  const corr={};
+  features.forEach(f=>{corr[f]=pearson(target,entries.map(e=>e.features[f]??null));});
+  return {samples:entries.length,profitable:entries.filter(e=>e.bestVelocityPctPerDay>0).length,corr,
+    avgVelocity:+meanArr(target).toFixed(3)};
 }
 function recordPostSaleRocketScan(scan){
   if(!scan?.date||!scan.rows?.length||!TRADEBOOK_STATS?.tripsData?.length) return;
@@ -1907,17 +2046,28 @@ function runEngine(raw, sessionTag){
   ACC_CORR=newAcc;
   FS.set(modeKey(CORR_STORE), ACC_CORR);
 
-  // Completed engine shortlists provide a second, slower target: did a recommendation
-  // turn into a rocket within the next five trading days? Blend is deliberately capped.
-  let recommendationFeedback=null;
+  // Slower feedback targets: eligible shortlist conversion and actual executed-entry
+  // net profit velocity. Both are capped so daily rocket learning remains primary.
+  let recommendationFeedback=null, executedEntryFeedback=null;
   if(!cryptoMode){
-    recordRecommendationOutcomeScan({date:getSessionDate(),threshold:ROCKET_THRESHOLD,rows:window._lastObservedDailyMoves||[],recommendations:[]});
+    const outcomeScan={date:getSessionDate(),threshold:ROCKET_THRESHOLD,rows:window._lastObservedDailyMoves||[],recommendations:[]};
+    recordRecommendationOutcomeScan(outcomeScan);
+    assessExecutedEntryOutcomeScan(outcomeScan);
     recommendationFeedback=getRecommendationFeedbackCorrelations(FEATS);
     if(recommendationFeedback){
       const alpha=Math.min(0.35,(recommendationFeedback.samples/(recommendationFeedback.samples+200))*0.5);
       recommendationFeedback.alpha=alpha;
       for(const f of FEATS){
         const observed=recommendationFeedback.corr[f];
+        if(observed!=null&&isFinite(observed)) targetCorr[f]=(targetCorr[f]*(1-alpha))+(observed*alpha);
+      }
+    }
+    executedEntryFeedback=getExecutedEntryFeedbackCorrelations(FEATS);
+    if(executedEntryFeedback){
+      const alpha=Math.min(0.45,(executedEntryFeedback.samples/(executedEntryFeedback.samples+30))*0.45);
+      executedEntryFeedback.alpha=alpha;
+      for(const f of FEATS){
+        const observed=executedEntryFeedback.corr[f];
         if(observed!=null&&isFinite(observed)) targetCorr[f]=(targetCorr[f]*(1-alpha))+(observed*alpha);
       }
     }
@@ -2042,7 +2192,7 @@ function runEngine(raw, sessionTag){
 
   ENGINE_DATA={targetCorr,targetCorrToday,interCorr,mrmr,weights,features:FEATS,labels:LABELS,top10Feats,rocketCount:topN,rocketThreshold:ROCKET_THRESHOLD,accSessions:ACC_CORR?.sessions||1,laggedNote:laggedNote||'',
     regime:regime, marketBreadth:marketBreadth, avgMoveAll:todayAvgMoveAll, avgMoveUniverse:todayAvgMoveUniverse,
-    recommendationFeedback,
+    recommendationFeedback,executedEntryFeedback,
     useAccCorr: useRegimeCorr || (ACC_CORR?(ACC_CORR.sessions||0)>=2:false),
     useRegimeCorr,
     regimeSessions:{
@@ -2071,7 +2221,7 @@ function runEngine(raw, sessionTag){
     const methSave={targetCorr,targetCorrToday,interCorr,mrmr,weights,features:FEATS,labels:LABELS,top10Feats,rocketCount:ENGINE_DATA.rocketCount,rocketThreshold:ENGINE_DATA.rocketThreshold,accSessions:ENGINE_DATA.accSessions,laggedNote:ENGINE_DATA.laggedNote,
       regime:ENGINE_DATA.regime,marketBreadth:ENGINE_DATA.marketBreadth,useAccCorr:ENGINE_DATA.useAccCorr,useRegimeCorr:ENGINE_DATA.useRegimeCorr,regimeSessions:ENGINE_DATA.regimeSessions,sectorCol:ENGINE_DATA.sectorCol,industryCol:ENGINE_DATA.industryCol,
       yesterdayRockets:yesterdayRockets,continuationN,qualityTargetN:qualityN,totalParsed:totalParsed,hardFilterSchema:HARD_FILTER_SCHEMA,removed:{...REMOVED},survSize:Object.keys(NSE_SURV).length,
-      avgMoveAll:todayAvgMoveAll,avgMoveUniverse:todayAvgMoveUniverse,recommendationFeedback};
+      avgMoveAll:todayAvgMoveAll,avgMoveUniverse:todayAvgMoveUniverse,recommendationFeedback,executedEntryFeedback};
     FS.set(modeKey(METH_STORE),methSave);
     // Update regime calendar: date → regime
     const regCal=FS.get(modeKey(REGIME_CAL_STORE))||{};
@@ -2579,6 +2729,7 @@ function renderPerformance(){
   const periodLabel=(dfrom&&dto)?`${dfrom} → ${dto} · ${regimeLabel}`:`All time · ${regimeLabel}`;
   const exitPolicy=tb.exitPolicy||null;
   const recSummary=getRecommendationOutcomeSummary();
+  const entrySummary=getExecutedEntryOutcomeSummary();
 
   const kpis=[
     {label:'Net P&L',value:fmtPerfRs(p.totalNetPnlRs),color:clr(p.totalNetPnlRs),sub:`${p.roundTrips} lots · ${spanTradingDays||p.totalTradingDays} trading days`},
@@ -2603,6 +2754,12 @@ function renderPerformance(){
     kpis.splice(11,0,
       {label:'Rec -> Rockets',value:recSummary.conversionPct+'%',color:recSummary.conversionPct>=20?'var(--green)':recSummary.conversionPct>=10?'var(--amber)':'var(--red)',sub:`${recSummary.rockets}/${recSummary.evaluated} shortlist picks within ${RECOMMEND_HORIZON_DAYS}d`},
       {label:'Rec Best Upside',value:bestUpside!=null?(bestUpside>=0?'+':'')+bestUpside.toFixed(2)+'%':'—',color:bestUpside!=null?(bestUpside>=0?'var(--green)':'var(--red)'):'var(--t3)',sub:recSummary.avgRocketDays!=null?`Rockets arrived in avg ${recSummary.avgRocketDays}d`:'No rocket conversions yet'}
+    );
+  }
+  if(entrySummary.completed){
+    kpis.splice(11,0,
+      {label:'Entry Velocity',value:(entrySummary.avgVelocity>=0?'+':'')+entrySummary.avgVelocity.toFixed(3)+'%/d',color:entrySummary.avgVelocity>=0?'var(--green)':'var(--red)',sub:`${entrySummary.positive}/${entrySummary.completed} executed recommendations profitable by best net velocity`},
+      {label:'Entry Best Net',value:(entrySummary.avgBestNet>=0?'+':'')+entrySummary.avgBestNet.toFixed(2)+'%',color:entrySummary.avgBestNet>=0?'var(--green)':'var(--red)',sub:`${entrySummary.topups} completed top-ups included`}
     );
   }
   const kpiHtml=`<div class="kpi-grid">`+kpis.map(k=>`
@@ -3012,6 +3169,11 @@ function renderPerformance(){
     ${_navLink('perf-trade-windows','🕐 Trading Windows',hasTradeWindows)}
     ${_navLink('perf-stocks','📈 Stocks',p.symBreakdown.length>0)}
   </nav>`;
+  const entryOutcomeText=entrySummary.completed
+    ? `${entrySummary.completed} actual recommended buys assessed for ${ENTRY_OUTCOME_HORIZON_DAYS} trading days (${entrySummary.topups} top-ups). Their average best net opportunity is ${entrySummary.avgBestNet>=0?'+':''}${entrySummary.avgBestNet.toFixed(2)}%; their best observed profit velocity averages ${entrySummary.avgVelocity>=0?'+':''}${entrySummary.avgVelocity.toFixed(3)}%/day. Completed profit-velocity outcomes now feed selection ranking with capped confidence.`
+    : entrySummary.tracked
+      ? `${entrySummary.tracked} actual recommended buys are being tracked; selection feedback activates as completed ${ENTRY_OUTCOME_HORIZON_DAYS}-trading-day outcomes accumulate. Fresh buys and top-ups are assessed separately in the stored evidence.`
+      : `Executed-entry feedback is ready. Future completed BUY executions that came from displayed recommendations will be assessed for net profit velocity across the next ${ENTRY_OUTCOME_HORIZON_DAYS} trading days.`;
   const outcomeText=recSummary.evaluated
     ? `${recSummary.evaluated} completed engine-shortlist picks assessed across ${recSummary.issueDays} scan days. ${recSummary.rockets} became rockets within ${RECOMMEND_HORIZON_DAYS} trading days (${recSummary.conversionPct}%), with average attainable high move of ${recSummary.avgBestHighPct!=null?(recSummary.avgBestHighPct>=0?'+':'')+recSummary.avgBestHighPct.toFixed(2)+'%':'not available'}.`
     : `Outcome tracking has started. A shortlist is assessed after ${RECOMMEND_HORIZON_DAYS} later trading-day scans are observed.`;
@@ -3019,7 +3181,7 @@ function renderPerformance(){
     ? `${exitPolicy.escapeCount} sold lots became rockets within ${POST_SALE_ROCKET_HORIZON_DAYS} trading days of exit out of ${exitPolicy.assessedSales||0} assessed recent sales. Learned hold cap is ${exitPolicy.holdDays}d${exitPolicy.escapeTgtNudgePct?` and post-sale evidence adds +${exitPolicy.escapeTgtNudgePct.toFixed(2)}% to TGT`:''}.`
     : `No confirmed post-sale rockets within ${POST_SALE_ROCKET_HORIZON_DAYS} trading days have been observed yet.`;
   const outcomeHtml=perfCard('Recommendation Outcome Feedback',
-    `<div style="padding:14px 16px;color:var(--t2);font-size:12px;line-height:1.7"><div>${outcomeText}</div><div style="margin-top:8px">${escapeText}</div><div style="margin-top:8px;color:var(--t3)">Completed shortlist outcomes blend into mRMR feature relevance with a capped weight; post-sale escapes can extend review/TGT but do not widen SL.</div></div>`,'','perf-outcomes');
+    `<div style="padding:14px 16px;color:var(--t2);font-size:12px;line-height:1.7"><div><strong style="color:var(--t1)">Actual entries:</strong> ${entryOutcomeText}</div><div style="margin-top:8px"><strong style="color:var(--t1)">Eligible shortlist:</strong> ${outcomeText}</div><div style="margin-top:8px"><strong style="color:var(--t1)">Post-sale exits:</strong> ${escapeText}</div><div style="margin-top:8px;color:var(--t3)">Actual-entry profit velocity and eligible-shortlist conversion affect entry feature relevance with capped weights; post-sale escapes can extend review/TGT but do not widen SL.</div></div>`,'','perf-outcomes');
 
   el.innerHTML=`
     <div style="padding:12px 16px">
@@ -4473,6 +4635,7 @@ async function hydrateSessionCSVsFromWorkspace(){
       if(selected.persist) updates[TRADEBOOK_STORE]=selected.persist;
     }
   }
+  syncExecutedRecommendedEntries();
   if(Object.keys(updates).length) FS.setMultiple(updates);
   // Recompute missed opportunities with fresh Orders + ALL (if available) and persist to brain
   try{computeMissedOpp();}catch(e){}
@@ -4519,6 +4682,9 @@ function parseTradebook(text){
     });
     bySymbol[sym]=order.map(g=>({...g,price:g.qty?g.totalVal/g.qty:0}));
   });
+  TRADEBOOK_BUY_FILLS=Object.entries(bySymbol).flatMap(([symbol,trades])=>
+    trades.filter(t=>t.type==='buy').map(t=>({symbol,date:t.date,qty:t.qty,price:t.price}))
+  );
 
   // FIFO matching per symbol — only closed round trips
   const roundTrips=[];
@@ -4890,9 +5056,9 @@ async function processScannerUpload(scannerFile, mode){
     }
     if(mode==='stock'){
       const threshold=ENGINE_DATA?.rocketThreshold||10;
-      const recommendations=ALL
-        .filter(s=>s.price>0&&(s.priceChange==null||s.priceChange<threshold))
-        .slice(0,20)
+      const eligibleCandidates=getDisplayedEntryCandidates(ALL)
+        .filter(s=>s.price>0&&(s.priceChange==null||s.priceChange<threshold));
+      const recommendations=eligibleCandidates
         .map((s,i)=>({symbol:s.symbol,entryPrice:s.price,score:s.rocketScore,rank:i+1,features:s._features||{}}));
       window._lastStockOutcomeScan={
         date:getSessionDate(),threshold,
@@ -4900,6 +5066,8 @@ async function processScannerUpload(scannerFile, mode){
         recommendations
       };
       recordRecommendationOutcomeScan(window._lastStockOutcomeScan);
+      recordDisplayedEntryCohort({date:getSessionDate(),candidates:eligibleCandidates});
+      syncExecutedRecommendedEntries();
     }
     FILT=[...ALL];_tvLoadedThisSession=true;
     return true;
@@ -5034,6 +5202,7 @@ async function processFiles(files){
       if(selected.persist) try{FS.set(TRADEBOOK_STORE,selected.persist);}catch(e){}
     }
   }
+  syncExecutedRecommendedEntries();
   // Final render after all files are processed — ensures Latest Session uses fresh orders.
   // applyFilters() re-runs held-stock suppression with fresh holdings data only when
   // holdings/positions were updated (avoids double render lag when TV CSV was also uploaded).
@@ -5044,6 +5213,7 @@ async function processFiles(files){
       const saved=FS.get(ALL_STORE);
       if(saved?.data?.length) ALL=saved.data;
       computeMissedOpp();
+      assessExecutedEntryOutcomeScan(window._lastStockOutcomeScan);
       recordPostSaleRocketScan(window._lastStockOutcomeScan);
       if(TRADEBOOK_STATS?.tripsData?.length){
         refreshExitPolicyFromFeedback(TRADEBOOK_STATS);
