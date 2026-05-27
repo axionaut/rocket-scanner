@@ -292,7 +292,8 @@ table.main tbody td{padding:9px 11px;font-family:'DM Mono',monospace;font-size:1
 
 
 <script>
-const BUILD_TS='2026-05-27 21:45 IST'; // replaced at commit time with IST datetime
+const BUILD_TS='2026-05-27 21:50 IST'; // replaced at commit time with IST datetime
+const APP_VERSION=361; // Shared deployed version; increment once per released code change.
 const GOOGLE_DRIVE_CLIENT_ID='1015012642264-oi2nelv3v90k3d39r994a6nelgjs2a56.apps.googleusercontent.com'; // Public OAuth Web Client ID.
 const HARD_FILTER_SCHEMA='null_blanks_pass_v1';
 const STOCK_RUNWAY_CEILING_PCT=19.5; // UC-style ceiling for Max Entry; Rocket % only labels rockets.
@@ -686,22 +687,11 @@ let POSITIONS=[]; // parsed positions from Positions.csv
 let CURRENT_REGIME='neutral'; // bull | bear | neutral
 const REGIME_THRESHOLDS={bull:0.55, bear:0.35}; // breadth % thresholds
 
-// ── Version system (auto-increments on code change) ──
-const VER_STORE='rscanner_ver';
-const CODE_HASH=(function(){let h=0;const s=document.querySelector('script:not([src])')?.textContent||'';for(let i=0;i<s.length;i++){h=((h<<5)-h)+s.charCodeAt(i);h|=0;}return h;})();
+// ── Shared deployed version: identical on every browser/device ──
 (function initVersion(){
-  try{
-    const stored=JSON.parse(localStorage.getItem(VER_STORE)||'{}');
-    let ver=stored.ver||5;
-    if(stored.hash && stored.hash!==CODE_HASH) ver++; // code changed → bump
-    localStorage.setItem(VER_STORE,JSON.stringify({ver,hash:CODE_HASH}));
-    const lbl=document.getElementById('verLabel');
-    if(lbl) lbl.textContent='v'+ver;
-    document.title='NSE Rocket Scanner v'+ver;
-  }catch(e){
-    const lbl=document.getElementById('verLabel');
-    if(lbl) lbl.textContent='v5';
-  }
+  const lbl=document.getElementById('verLabel');
+  if(lbl) lbl.textContent='v'+APP_VERSION;
+  document.title='NSE Rocket Scanner v'+APP_VERSION;
   // Show build/push timestamp
   const _bsEl=document.getElementById('lastScanVal');
   if(_bsEl) _bsEl.textContent=BUILD_TS?'Last updated: '+BUILD_TS:'';
