@@ -349,7 +349,7 @@ table.main tbody td{padding:9px 11px;font-family:'DM Mono',monospace;font-size:1
 
 
 <script>
-const BUILD_TS='2026-05-26 15:39 IST'; // replaced at commit time with IST datetime
+const BUILD_TS='2026-05-27 09:19 IST'; // replaced at commit time with IST datetime
 const MODE_STORE='rs_market_mode';
 const USD_INR_STORE='rs_usd_inr';
 const HARD_FILTER_SCHEMA='null_blanks_pass_v1';
@@ -4396,6 +4396,25 @@ function parseOrders(text){
   }).filter(Boolean);
 }
 
+function keepFullerTradebookHistory(candidate,sourcePath,lastModified){
+  if(!candidate) return {stats:null,persist:null,ignored:false};
+  const prior=FS.get(TRADEBOOK_STORE);
+  const priorN=prior?.tripsData?.length||prior?.roundTrips||0;
+  const nextN=candidate?.tripsData?.length||candidate?.roundTrips||0;
+  if(prior&&priorN>nextN&&nextN>0){
+    const priorFirst=(prior.tripsData||[]).map(r=>r.buyDate||r.sellDate).filter(Boolean).sort()[0]||'';
+    const nextFirst=(candidate.tripsData||[]).map(r=>r.buyDate||r.sellDate).filter(Boolean).sort()[0]||'';
+    const isPartialExport=nextN<Math.max(10,Math.floor(priorN*0.8)) || (priorFirst&&nextFirst&&nextFirst>priorFirst);
+    if(isPartialExport){
+      console.warn('Ignored partial tradebook export:',sourcePath||'TRADEBOOK.csv',nextN,'lots; retained',priorN,'historical lots.');
+      try{showToast(`Ignored partial TRADEBOOK.csv (${nextN} lots); kept full history (${priorN} lots).`,5000,true);}catch(e){}
+      return {stats:prior,persist:null,ignored:true};
+    }
+  }
+  const stats={...candidate,_loadedThisSession:true};
+  return {stats,persist:{...candidate,sourcePath,lastModified},ignored:false};
+}
+
 async function hydrateSessionCSVsFromWorkspace(){
   if(!FS.hasFolder()||!FS.readUploadText) return;
   const [csvFiles,zipEntry]=await Promise.all([
@@ -4449,8 +4468,9 @@ async function hydrateSessionCSVsFromWorkspace(){
   if(tbFile?.text){
     const tb=parseTradebook(tbFile.text);
     if(tb){
-      TRADEBOOK_STATS={...tb,_loadedThisSession:true};
-      updates[TRADEBOOK_STORE]={...tb,sourcePath:tbFile.path,lastModified:tbFile.lastModified};
+      const selected=keepFullerTradebookHistory(tb,tbFile.path,tbFile.lastModified);
+      TRADEBOOK_STATS=selected.stats;
+      if(selected.persist) updates[TRADEBOOK_STORE]=selected.persist;
     }
   }
   if(Object.keys(updates).length) FS.setMultiple(updates);
@@ -4997,8 +5017,12 @@ async function processFiles(files){
     document.getElementById('slot-tb').textContent='📒 '+tbFile.name;
     document.getElementById('slot-tb').classList.add('ok');
     const tbText=await tbFile.text();
-    TRADEBOOK_STATS=parseTradebook(tbText);
-    if(TRADEBOOK_STATS){TRADEBOOK_STATS._loadedThisSession=true;try{FS.set(TRADEBOOK_STORE,TRADEBOOK_STATS);}catch(e){}}
+    const parsedTradebook=parseTradebook(tbText);
+    if(parsedTradebook){
+      const selected=keepFullerTradebookHistory(parsedTradebook,tbFile.name,tbFile.lastModified);
+      TRADEBOOK_STATS=selected.stats;
+      if(selected.persist) try{FS.set(TRADEBOOK_STORE,selected.persist);}catch(e){}
+    }
   }
   // Final render after all files are processed — ensures Latest Session uses fresh orders.
   // applyFilters() re-runs held-stock suppression with fresh holdings data only when
