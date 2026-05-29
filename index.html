@@ -291,12 +291,13 @@ table.main tbody td{padding:9px 11px;font-family:'DM Mono',monospace;font-size:1
 
 
 <script>
-const BUILD_TS='2026-05-29 13:51 IST'; // replaced at commit time with IST datetime
-const APP_VERSION=368; // Shared deployed version; increment once per released code change.
+const BUILD_TS='2026-05-29 14:05 IST'; // replaced at commit time with IST datetime
+const APP_VERSION=369; // Shared deployed version; increment once per released code change.
 const GOOGLE_DRIVE_CLIENT_ID='1015012642264-oi2nelv3v90k3d39r994a6nelgjs2a56.apps.googleusercontent.com'; // Public OAuth Web Client ID.
 const HARD_FILTER_SCHEMA='price_band_uc_buffer_v1';
 const STOCK_RUNWAY_CEILING_PCT=19.5; // UC-style ceiling for Max Entry; Rocket % only labels rockets.
 const PRICE_BAND_BLOCK_BUFFER_PCT=0.15; // Treat rounded 4.9/9.9/19.9 rows as effectively band-locked.
+const SYSTEM_TRADE_START_DATE='2026-04-01'; // Adaptive stats use trades closed from this date onward.
 let MARKET_MODE='stock';
 function modeKey(base){return base;}
 function modeLabel(){return 'Stocks';}
@@ -1487,7 +1488,8 @@ function refreshExitPolicyFromFeedback(stats){
   const existing=stats.exitPolicy||{};
   const baselineSL=existing.baselineSL??roundPct05(Math.abs(stats.medianLossPct||stats.adaptiveSL||3.5));
   const baselineTGT=existing.baselineTGT??roundPct05(Math.abs(stats.medianWinPct||stats.adaptiveTGT||3.7));
-  stats.exitPolicy=deriveProfitVelocityPolicy(stats.tripsData,baselineSL,baselineTGT,FS.get(POST_SALE_ROCKET_STORE));
+  const adaptiveTrips=getAdaptiveTradeTrips(stats.tripsData);
+  stats.exitPolicy=deriveProfitVelocityPolicy(adaptiveTrips.length?adaptiveTrips:stats.tripsData,baselineSL,baselineTGT,FS.get(POST_SALE_ROCKET_STORE));
   stats.adaptiveSL=stats.exitPolicy.slPct;
   stats.adaptiveTGT=stats.exitPolicy.tgtPct;
   stats.holdLimitDays=stats.exitPolicy.holdDays;
@@ -2550,6 +2552,11 @@ function computePerfStats(trips){
   };
 }
 
+function getAdaptiveTradeTrips(trips){
+  const rows=(trips||[]).filter(r=>r&&r.sellDate>=SYSTEM_TRADE_START_DATE);
+  return rows.length?rows:(trips||[]);
+}
+
 function renderPerformance(){
   const el=document.getElementById('perfContent');
   if(!el) return;
@@ -2580,9 +2587,11 @@ function renderPerformance(){
     return;
   }
   const allTrips=allTripsRaw.map(r=>({...r,regime:observedRegime(r.sellDate)}));
+  const adaptiveAllTrips=getAdaptiveTradeTrips(allTrips);
+  const preSystemLots=Math.max(0,allTrips.length-adaptiveAllTrips.length);
   const untaggedLots=allTrips.filter(r=>r.regime==='untagged').length;
 
-  const filteredByRegime=PERF_REGIME_FILTER==='all'?allTrips:allTrips.filter(r=>r.regime===PERF_REGIME_FILTER);
+  const filteredByRegime=PERF_REGIME_FILTER==='all'?adaptiveAllTrips:adaptiveAllTrips.filter(r=>r.regime===PERF_REGIME_FILTER);
 
   const _now=new Date(getSessionDate());
   const _cutoff=PERF_PERIOD_FILTER==='all'?null
@@ -2598,7 +2607,7 @@ function renderPerformance(){
   const avgCalDayPnl=(calDayCount&&calDayCount>0)?Math.round(p.totalNetPnlRs/calDayCount):null;
   const spanTradingDays=(dfrom&&dto)?(dfrom===dto?1:(tradingDaysBetween(dfrom,dto)||0)+1):null;
   const regimeLabel=PERF_REGIME_FILTER==='all'?'All regimes':PERF_REGIME_FILTER==='bull'?'🐂 Bull':PERF_REGIME_FILTER==='bear'?'🐻 Bear':PERF_REGIME_FILTER==='neutral'?'➡ Neutral':'? Untagged';
-  const periodLabel=(dfrom&&dto)?`${dfrom} → ${dto} · ${regimeLabel}`:`All time · ${regimeLabel}`;
+  const periodLabel=(dfrom&&dto)?`${dfrom} -> ${dto} · ${regimeLabel}`:`System period · ${regimeLabel}`;
   const exitPolicy=tb.exitPolicy||null;
   const recSummary=getRecommendationOutcomeSummary();
   const entrySummary=getExecutedEntryOutcomeSummary();
@@ -2609,7 +2618,7 @@ function renderPerformance(){
     : `Avg actual ${fmtINR(p.avgCapital||0)} · ${recPos.source}`;
 
   const kpis=[
-    {label:'Net P&L',value:fmtPerfRs(p.totalNetPnlRs),color:clr(p.totalNetPnlRs),sub:`${p.roundTrips} lots · ${spanTradingDays||p.totalTradingDays} trading days`},
+    {label:'Net P&L',value:fmtPerfRs(p.totalNetPnlRs),color:clr(p.totalNetPnlRs),sub:`${p.roundTrips} lots · ${spanTradingDays||p.totalTradingDays} trading days${preSystemLots?` · ${preSystemLots} pre-system ignored`:''}`},
     {label:'Expectancy',value:fmtPerfRs(p.expectancy),color:clr(p.expectancy),sub:'Net ₹ per FIFO lot'},
     {label:'Profit Factor',value:p.profitFactor!=null?p.profitFactor:'—',color:p.profitFactor>=1.5?'var(--green)':p.profitFactor>=1?'var(--amber)':'var(--red)',sub:'Gross wins ÷ gross losses'},
     {label:'Win Rate',value:p.winRate+'%',color:p.winRate>=55?'var(--green)':p.winRate>=45?'var(--amber)':'var(--red)',sub:`${p.winners}W · ${p.losers}L lots`},
@@ -3869,7 +3878,7 @@ function computeAlloc(capital, selList){
   return allocMap;
 }
 function getRecommendedPositionSize(perfStats){
-  const trips=(TRADEBOOK_STATS?.tripsData||[]).filter(r=>r&&r.capital>0&&isFinite(r.netPnl)&&isFinite(r.netPnlPct));
+  const trips=getAdaptiveTradeTrips(TRADEBOOK_STATS?.tripsData||[]).filter(r=>r&&r.capital>0&&isFinite(r.netPnl)&&isFinite(r.netPnlPct));
   const avgActual=perfStats?.avgCapital||TRADEBOOK_STATS?.avgCapital||0;
   if(trips.length<20||!(avgActual>0)) return {value:avgActual?Math.round(avgActual):null,source:'Need more closed trades for learned sizing'};
 
