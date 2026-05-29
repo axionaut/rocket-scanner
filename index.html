@@ -291,8 +291,8 @@ table.main tbody td{padding:9px 11px;font-family:'DM Mono',monospace;font-size:1
 
 
 <script>
-const BUILD_TS='2026-05-29 11:03 IST'; // replaced at commit time with IST datetime
-const APP_VERSION=364; // Shared deployed version; increment once per released code change.
+const BUILD_TS='2026-05-29 11:10 IST'; // replaced at commit time with IST datetime
+const APP_VERSION=365; // Shared deployed version; increment once per released code change.
 const GOOGLE_DRIVE_CLIENT_ID='1015012642264-oi2nelv3v90k3d39r994a6nelgjs2a56.apps.googleusercontent.com'; // Public OAuth Web Client ID.
 const HARD_FILTER_SCHEMA='null_blanks_pass_v1';
 const STOCK_RUNWAY_CEILING_PCT=19.5; // UC-style ceiling for Max Entry; Rocket % only labels rockets.
@@ -874,7 +874,7 @@ function num(v){
   const x=parseFloat(s);
   return Number.isFinite(x)?x:null;
 }
-function normSym(s){return String(s||'').trim().replace(/^[A-Z]+:/,'').toUpperCase();}
+function normSym(s){return String(s||'').trim().replace(/^[A-Z]+:/,'').replace(/_/g,'-').toUpperCase();}
 function escHtml(s){return String(s??'').replace(/[&<>"]/g,ch=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[ch]));}
 function findHeader(hdrs,patterns){return hdrs.find(h=>patterns.some(p=>p.test(h.trim())))||null;}
 function meanArr(arr){return arr.length?arr.reduce((s,v)=>s+v,0)/arr.length:0;}
@@ -5105,10 +5105,15 @@ async function initApp(){
         if(source.cols){
           Object.entries(source.stocks).forEach(([sym,vals])=>{
             const obj={};source.cols.forEach((f,i)=>obj[f]=vals[i]);
-            PREV_SNAP[sym]=obj;
+            const ns=normSym(sym);
+            if(ns) PREV_SNAP[ns]=obj;
           });
         } else {
-          PREV_SNAP=source.stocks||source;
+          PREV_SNAP={};
+          Object.entries(source.stocks||source).forEach(([sym,feats])=>{
+            const ns=normSym(sym);
+            if(ns&&feats&&typeof feats==='object') PREV_SNAP[ns]=feats;
+          });
         }
         PREV_SNAP_META={savedDate:source.savedDate||null,regime:source.regime||null,marketBreadth:source.marketBreadth??null};
         console.log('INIT: loaded prev-day snapshot from',source.savedDate,',',Object.keys(PREV_SNAP).length,'stocks');
@@ -5125,7 +5130,7 @@ async function initApp(){
     try{
       const saved=brain[modeKey(ALL_STORE)];
       if(saved&&saved.data&&saved.data.length){
-        ALL=saved.data.map(s=>({flags:[],  ...s}));
+        ALL=saved.data.map(s=>({flags:[],...s,symbol:normSym(s.symbol)})).filter(s=>s.symbol);
         FILT=[...ALL];
         SELECTED=new Set(ALL.map(s=>s.symbol));
         if(saved.fileTag){const ft=document.getElementById('fileTag');if(ft)ft.textContent=saved.fileTag;}
