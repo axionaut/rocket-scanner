@@ -291,11 +291,12 @@ table.main tbody td{padding:9px 11px;font-family:'DM Mono',monospace;font-size:1
 
 
 <script>
-const BUILD_TS='2026-05-29 11:34 IST'; // replaced at commit time with IST datetime
-const APP_VERSION=366; // Shared deployed version; increment once per released code change.
+const BUILD_TS='2026-05-29 11:51 IST'; // replaced at commit time with IST datetime
+const APP_VERSION=367; // Shared deployed version; increment once per released code change.
 const GOOGLE_DRIVE_CLIENT_ID='1015012642264-oi2nelv3v90k3d39r994a6nelgjs2a56.apps.googleusercontent.com'; // Public OAuth Web Client ID.
-const HARD_FILTER_SCHEMA='price_band_uc_v1';
+const HARD_FILTER_SCHEMA='price_band_uc_buffer_v1';
 const STOCK_RUNWAY_CEILING_PCT=19.5; // UC-style ceiling for Max Entry; Rocket % only labels rockets.
+const PRICE_BAND_BLOCK_BUFFER_PCT=0.15; // Treat rounded 4.9/9.9/19.9 rows as effectively band-locked.
 let MARKET_MODE='stock';
 function modeKey(base){return base;}
 function modeLabel(){return 'Stocks';}
@@ -1124,6 +1125,34 @@ function parsePriceBand(text){
     if(band!==null&&band>0)NSE_PRICE_BAND[sym]={bandPct:band,remarks:String(r['Remarks']||r['REMARKS']||'').trim()};
   });
 }
+function enrichRowsWithNSEData(rows){
+  (rows||[]).forEach(s=>{
+    const sym=normSym(s.symbol);
+    if(sym&&sym!==s.symbol) s.symbol=sym;
+    const pb=NSE_PRICE_BAND[s.symbol];
+    if(pb?.bandPct!=null){
+      s.price_band_pct=pb.bandPct;
+      s.pct_to_upper_band=(s.priceChange!=null&&isFinite(s.priceChange))?pb.bandPct-s.priceChange:null;
+      if(s._features){
+        s._features.price_band_pct=s.price_band_pct;
+        s._features.pct_to_upper_band=s.pct_to_upper_band;
+      }
+    }
+  });
+  return rows;
+}
+function getNSEPriceBandPct(symbol){
+  const pb=NSE_PRICE_BAND[normSym(symbol)];
+  const band=pb?.bandPct;
+  return band!=null&&isFinite(band)&&band>0?band:null;
+}
+function getPriceBandBlockReason(s){
+  const band=s?.price_band_pct??getNSEPriceBandPct(s?.symbol);
+  if(!(band!=null&&isFinite(band)&&band>0)) return '';
+  const pc=s?.priceChange;
+  if(pc!=null&&isFinite(pc)&&pc>=band-PRICE_BAND_BLOCK_BUFFER_PCT) return `Near ${band}% NSE price band`;
+  return '';
+}
 function parse52W(text){
   const lines=parseCSVRaw(text);
   let hi=-1;
@@ -1711,7 +1740,7 @@ function runEngine(raw, sessionTag){
     // Upper circuit — stock-only market structure filter
     const priceBand=d.price_band_pct;
     const ucCeiling=(priceBand!=null&&isFinite(priceBand)&&priceBand>0)?priceBand:STOCK_RUNWAY_CEILING_PCT;
-    const ucBuffer=(priceBand!=null&&isFinite(priceBand)&&priceBand>0)?0.05:0;
+    const ucBuffer=(priceBand!=null&&isFinite(priceBand)&&priceBand>0)?PRICE_BAND_BLOCK_BUFFER_PCT:0;
     if(pc!==null&&pc>=ucCeiling-ucBuffer){_track('uc');return false;}
     // Non-EQ series (BE/BZ/SZ/SM/ST) — stock-only T2T settlement filter
     if(NSE_NON_EQ.has(d.symbol)){_track('nonEq');return false;}
@@ -3543,6 +3572,8 @@ function getFilterBarReason(s){
   const fMax1D=_fMax1Dv!==''?parseFloat(_fMax1Dv):Infinity;
   const fPriceMin=parseFloat(document.getElementById('fPriceMin')?.value)||0;
   const fPriceMax=parseFloat(document.getElementById('fPriceMax')?.value)||0;
+  const bandReason=getPriceBandBlockReason(s);
+  if(bandReason) return bandReason;
   if(minScore>0&&s.rocketScore<minScore) return `Score ${s.rocketScore?.toFixed?.(1)||s.rocketScore} < ${minScore}`;
   if(fvol>0&&s.volume!=null&&s.volume<fvol) return `Volume ${Math.round(s.volume).toLocaleString('en-IN')} < ${Math.round(fvol).toLocaleString('en-IN')}`;
   if(fMinMarketCap>0&&s.marketCap!=null&&s.marketCap<fMinMarketCap) return `MCap ₹${fV(s.marketCap)} < ₹${fV(fMinMarketCap)}`;
@@ -4737,6 +4768,7 @@ function exportBasket(){
   const orders=[];
   let rejectedCount=0;
   selList.forEach((s,i)=>{
+    if(getPriceBandBlockReason(s)){rejectedCount++;return;}
     const am = basketAlloc[s.symbol];
     if(am?.rejected){rejectedCount++;return;} // skip cost-floor rejections
     const qty = capital > 0 ? (am?.qty || 0) : 1;
@@ -4908,6 +4940,7 @@ async function processScannerUpload(scannerFile, mode){
     const isDuplicateSession=!!(priorCorr&&priorCorr.lastTag===sessionTag);
     window._lastScannerSessionTag=sessionTag;
     ALL=runEngine(raw,sessionTag)||[];
+    enrichRowsWithNSEData(ALL);
     ALL.sort((a,b)=>b.rocketScore-a.rocketScore);
     const rcToday=getSessionDate(), rc=FS.get(modeKey(REC_COUNT_STORE,mode))||{};
     if(!rc[rcToday])rc[rcToday]={};
@@ -5122,6 +5155,7 @@ let ACC_CORR=null; // accumulated targetCorr across sessions
 // ── Async app init: load brain file → hydrate all state → render ──
 async function initApp(){
   updateModeUI();
+  setLoading(true,'Loading latest cloud data...');
   // Step 0: Restore an active Drive token for this browser session and load cloud brain data.
   const brain=await FS.init();
   if(!brain&&!FS.hasFolder()){
@@ -5131,6 +5165,7 @@ async function initApp(){
     _initInProgress=false;
     showDriveAuthRequiredState();
     updateFolderUI();
+    setLoading(false);
     return;
   }
   if(brain){
@@ -5276,6 +5311,7 @@ async function initApp(){
   // Prefer current cloud inputs over the saved brain snapshot. This keeps
   // Latest Session/Booked Today from showing stale rs_orders after Orders.csv changes.
   try{await hydrateSessionCSVsFromWorkspace();}catch(e){console.warn('INIT: cloud input hydration failed',e);}
+  try{enrichRowsWithNSEData(ALL);}catch(e){console.warn('INIT: NSE row enrichment failed',e);}
 
   // Step 3b: Render after hydration — cloud orders, tradebook and holdings are now fresh in memory.
   // renderPerformance must run before renderStats (populates PERF_TRADE_WINDOWS for current-window pill).
@@ -5303,6 +5339,7 @@ async function initApp(){
   // Step 7: Apply filters and render table — runs once, cleanly, with all filters restored
   _initInProgress=false;
   try{applyFilters();}catch(e){console.error('INIT step7 applyFilters failed:',e);}
+  setLoading(false);
 }
 initApp();
 
