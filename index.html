@@ -291,8 +291,8 @@ table.main tbody td{padding:9px 11px;font-family:'DM Mono',monospace;font-size:1
 
 
 <script>
-const BUILD_TS='2026-05-29 10:24 IST'; // replaced at commit time with IST datetime
-const APP_VERSION=362; // Shared deployed version; increment once per released code change.
+const BUILD_TS='2026-05-29 10:37 IST'; // replaced at commit time with IST datetime
+const APP_VERSION=363; // Shared deployed version; increment once per released code change.
 const GOOGLE_DRIVE_CLIENT_ID='1015012642264-oi2nelv3v90k3d39r994a6nelgjs2a56.apps.googleusercontent.com'; // Public OAuth Web Client ID.
 const HARD_FILTER_SCHEMA='null_blanks_pass_v1';
 const STOCK_RUNWAY_CEILING_PCT=19.5; // UC-style ceiling for Max Entry; Rocket % only labels rockets.
@@ -4165,11 +4165,13 @@ function openUploadFolderPicker(){
 
 async function handleCloudLoadAction(){
   if(!FS.hasFolder()){
-    showToast('Connecting Google Drive...');
+    setLoading(true,'Connecting Google Drive...');
     const connected=await connectCloudStorage({reloadAfterConnect:false});
-    if(!connected) return;
+    if(!connected){setLoading(false);return;}
   }
+  setLoading(true,'Choose the Scanner Uploads folder...');
   openUploadFolderPicker();
+  setTimeout(()=>setLoading(false),1200);
 }
 
 // ── Brain Export / Import ──
@@ -4762,6 +4764,11 @@ function nseDate(){
 
 // ── File Processing ──
 function setMsg(m){document.getElementById('ldMsg').textContent=m;}
+function setLoading(on,msg){
+  const el=document.getElementById('ldSt');
+  if(msg) setMsg(msg);
+  if(el) el.classList.toggle('on',!!on);
+}
 
 function captureScannerRuntime(){
   return {
@@ -4894,17 +4901,16 @@ async function processFiles(files){
     showToast('Connect Google Drive before uploading files so inputs and brain stay in sync.',5000,true);
     return;
   }
-  document.getElementById('ldSt').classList.add('on');
-  setMsg('Saving selected inputs to Google Drive...');
+  setLoading(true,'Saving selected inputs to Google Drive...');
   try{
     const uploaded=await FS.saveUploadedInputs(files);
     if(!uploaded){
-      document.getElementById('ldSt').classList.remove('on');
+      setLoading(false);
       showToast('No recognised scanner input files were selected.',4000,true);
       return;
     }
   }catch(e){
-    document.getElementById('ldSt').classList.remove('on');
+    setLoading(false);
     showToast('Could not save files to Google Drive: '+(e.message||e),6000,true);
     return;
   }
@@ -4925,7 +4931,7 @@ async function processFiles(files){
     }
   }
   if(!tvFile&&!nseZip&&!holdFile&&!posFile&&!ordFile&&!tbFile&&!holidayFile){
-    document.getElementById('ldSt').classList.remove('on');
+    setLoading(false);
     showToast('No files recognised. Upload the NSE scanner and/or Zerodha input files.',4000,true);
     return;
   }
@@ -4975,7 +4981,7 @@ async function processFiles(files){
   const stockScannerProcessed=scannerJobs.some(j=>j.mode==='stock');
 
   if(!scannerJobs.length&&!holdFile&&!posFile&&!ordFile&&!tbFile&&!holidayFile){
-    document.getElementById('ldSt').classList.remove('on');
+    setLoading(false);
     if(!nseZip) showToast('TradingView CSV not found in the selected Scanner Uploads folder.',4000,true);
   }
 
@@ -5032,18 +5038,20 @@ async function processFiles(files){
     }finally{restoreScannerRuntime(rt);}
   } else computeMissedOpp();
   try{
+    setMsg('Saving updated brain to Google Drive...');
     const brainSaved=await FS.write(FS.getBrain());
     if(!brainSaved){
-      document.getElementById('ldSt').classList.remove('on');
+      setLoading(false);
       showToast('Inputs were uploaded, but the updated brain was not saved. Reconnect Google Drive and upload again.',7000,true);
       return;
     }
   }catch(e){
     console.warn('Brain flush failed',e);
-    document.getElementById('ldSt').classList.remove('on');
+    setLoading(false);
     showToast('Inputs were uploaded, but saving the updated brain failed: '+(e.message||e),7000,true);
     return;
   }
+  setMsg('Reloading latest saved state...');
   await new Promise(r=>setTimeout(r,300)); // let the Drive write settle before reload
   location.reload();
 }
