@@ -291,8 +291,8 @@ table.main tbody td{padding:9px 11px;font-family:'DM Mono',monospace;font-size:1
 
 
 <script>
-const BUILD_TS='2026-05-29 14:05 IST'; // replaced at commit time with IST datetime
-const APP_VERSION=369; // Shared deployed version; increment once per released code change.
+const BUILD_TS='2026-05-29 15:36 IST'; // replaced at commit time with IST datetime
+const APP_VERSION=370; // Shared deployed version; increment once per released code change.
 const GOOGLE_DRIVE_CLIENT_ID='1015012642264-oi2nelv3v90k3d39r994a6nelgjs2a56.apps.googleusercontent.com'; // Public OAuth Web Client ID.
 const HARD_FILTER_SCHEMA='price_band_uc_buffer_v1';
 const STOCK_RUNWAY_CEILING_PCT=19.5; // UC-style ceiling for Max Entry; Rocket % only labels rockets.
@@ -2553,7 +2553,9 @@ function computePerfStats(trips){
 }
 
 function getAdaptiveTradeTrips(trips){
-  const rows=(trips||[]).filter(r=>r&&r.sellDate>=SYSTEM_TRADE_START_DATE);
+  const dates=(trips||[]).map(r=>r?.sellDate).filter(Boolean).sort();
+  const effectiveStart=dates.length?dates[0]>SYSTEM_TRADE_START_DATE?dates[0]:SYSTEM_TRADE_START_DATE:SYSTEM_TRADE_START_DATE;
+  const rows=(trips||[]).filter(r=>r&&r.sellDate>=effectiveStart);
   return rows.length?rows:(trips||[]);
 }
 
@@ -2613,9 +2615,9 @@ function renderPerformance(){
   const entrySummary=getExecutedEntryOutcomeSummary();
   const recPos=getRecommendedPositionSize(p);
   const posRatio=(p.avgCapital>0&&recPos.value)?recPos.value/p.avgCapital:null;
-  const posSub=recPos.value
-    ? `Avg actual ${fmtINR(p.avgCapital||0)} · rec ${recPos.source}${posRatio?` · ${(posRatio*100).toFixed(0)}% of avg`:''}`
-    : `Avg actual ${fmtINR(p.avgCapital||0)} · ${recPos.source}`;
+  const recPosSub=recPos.value
+    ? `${recPos.source}${posRatio?` · ${(posRatio*100).toFixed(0)}% of avg`:''}`
+    : recPos.source;
 
   const kpis=[
     {label:'Net P&L',value:fmtPerfRs(p.totalNetPnlRs),color:clr(p.totalNetPnlRs),sub:`${p.roundTrips} lots · ${spanTradingDays||p.totalTradingDays} trading days${preSystemLots?` · ${preSystemLots} pre-system ignored`:''}`},
@@ -2628,7 +2630,8 @@ function renderPerformance(){
     {label:'Largest Win',value:fmtSignedINR(p.largestWinRs),color:'var(--green)',sub:'Single lot, net'},
     {label:'Max Win Streak',value:p.maxWinStreak+' days',color:p.maxWinStreak>=5?'var(--green)':p.maxWinStreak>=3?'var(--amber)':'var(--t1)',sub:'Consecutive profitable days'},
     {label:'Avg Hold',value:p.avgHoldDays+'d',color:'var(--t1)',sub:'Avg position duration'},
-    {label:'Position Size',value:`${fmtINR(p.avgCapital||0)} / ${recPos.value?fmtINR(recPos.value):'—'}`,color:recPos.value?'var(--amber)':'var(--t3)',sub:posSub},
+    {label:'Avg Position',value:fmtINR(p.avgCapital||0),color:'var(--t1)',sub:'Observed avg capital per position'},
+    {label:'Recommended Position',value:recPos.value?fmtINR(recPos.value):'—',color:recPos.value?'var(--amber)':'var(--t3)',sub:recPosSub},
     {label:'Learned Hold Cap',value:exitPolicy?exitPolicy.holdDays+'d':'—',color:exitPolicy?'var(--amber)':'var(--t3)',sub:exitPolicy&&exitPolicy.velocityPctPerDay!=null?`Observed +${exitPolicy.velocityPctPerDay.toFixed(3)}%/day · ${exitPolicy.escapeCount||0} near-term escapes`:'Re-upload tradebook to learn'},
     {label:'Largest Loss',value:fmtSignedINR(p.largestLossRs),color:'var(--red)',sub:'Single lot, net'},
     {label:'Max Drawdown',value:p.maxDrawdown>0?fmtSignedINR(-p.maxDrawdown):'—',color:'var(--red)',sub:'Peak-to-trough in period'},
