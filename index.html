@@ -226,7 +226,7 @@ table.main tbody td{padding:9px 11px;font-family:'DM Mono',monospace;font-size:1
   <input type="file" id="brainIn" accept=".json" style="display:none" onchange="importBrain(event)">
   <button class="btn" onclick="resetBrain(this)" title="Reset Brain - clear accumulated learning and saved filters while retaining one valid prior-session comparison snapshot. Uploaded input files remain in Drive." style="font-size:11px;border-color:rgba(239,68,68,.3);color:var(--red)">🗑 Reset Brain</button>
   <div style="position:relative;display:flex;align-items:center">
-    <button class="btn btn-fire" id="loadFilesBtn" onclick="handleCloudLoadAction()">☁ Connect Drive</button>
+    <button class="btn btn-fire" id="loadFilesBtn" onclick="handleCloudLoadAction()">Load Files</button>
     <button class="btn" onclick="toggleRequiredFilesPopover()" title="Required input files" style="font-size:14px;padding:8px 12px;margin-left:4px">ℹ️</button>
     <div id="requiredFilesPopover" style="display:none;position:absolute;top:100%;right:0;margin-top:8px;background:var(--bg-raised);border:1px solid var(--border-hi);border-radius:10px;padding:14px 16px;z-index:1000;box-shadow:0 8px 32px rgba(0,0,0,.35);min-width:280px;max-width:380px">
       <div style="font-size:12px;color:var(--t1);margin-bottom:10px;font-weight:600">📁 Required files:</div>
@@ -291,7 +291,7 @@ table.main tbody td{padding:9px 11px;font-family:'DM Mono',monospace;font-size:1
 
 
 <script>
-const BUILD_TS='2026-05-29 10:18 IST'; // replaced at commit time with IST datetime
+const BUILD_TS='2026-05-29 10:24 IST'; // replaced at commit time with IST datetime
 const APP_VERSION=362; // Shared deployed version; increment once per released code change.
 const GOOGLE_DRIVE_CLIENT_ID='1015012642264-oi2nelv3v90k3d39r994a6nelgjs2a56.apps.googleusercontent.com'; // Public OAuth Web Client ID.
 const HARD_FILTER_SCHEMA='null_blanks_pass_v1';
@@ -597,22 +597,10 @@ const FS = (() => {
 function updateFolderUI(){
   const btn=document.getElementById('loadFilesBtn');
   if(!btn) return;
-  if(FS.hasFolder()){
-    btn.textContent='Load Files';
-    btn.title='Select the Scanner Uploads folder, upload recognised inputs to Google Drive, and process them.';
-    btn.style.borderColor='';
-    btn.style.color='';
-  } else if(FS.needsReconnect()){
-    btn.textContent='☁ Reconnect Drive';
-    btn.title='Google Drive access has expired or is needed on this browser. Click to reconnect and load the latest cloud state.';
-    btn.style.borderColor='rgba(251,191,36,.5)';
-    btn.style.color='var(--amber)';
-  } else {
-    btn.textContent='☁ Connect Drive';
-    btn.title='Connect private Google Drive app storage for inputs and brain data.';
-    btn.style.borderColor='';
-    btn.style.color='';
-  }
+  btn.textContent='Load Files';
+  btn.title='Connect Google Drive if needed, then select the Scanner Uploads folder.';
+  btn.style.borderColor='';
+  btn.style.color='';
 }
 
 async function connectCloudStorage(opts={}){
@@ -4177,12 +4165,9 @@ function openUploadFolderPicker(){
 
 async function handleCloudLoadAction(){
   if(!FS.hasFolder()){
-    const btnText=(document.getElementById('loadFilesBtn')?.textContent||'').toLowerCase();
-    const wasLoadIntent=btnText.includes('load files');
-    showToast(wasLoadIntent?'Google Drive needs authorization first. Reconnecting...':'Connecting Google Drive...');
-    const connected=await connectCloudStorage({reloadAfterConnect:!wasLoadIntent});
+    showToast('Connecting Google Drive...');
+    const connected=await connectCloudStorage({reloadAfterConnect:false});
     if(!connected) return;
-    if(!wasLoadIntent) return;
   }
   openUploadFolderPicker();
 }
