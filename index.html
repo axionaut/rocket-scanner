@@ -291,12 +291,13 @@ table.main tbody td{padding:9px 11px;font-family:'DM Mono',monospace;font-size:1
 
 
 <script>
-const BUILD_TS='2026-06-01 14:17 IST'; // replaced at commit time with IST datetime
-const APP_VERSION=378; // Shared deployed version; increment once per released code change.
+const BUILD_TS='2026-06-01 14:36 IST'; // replaced at commit time with IST datetime
+const APP_VERSION=379; // Shared deployed version; increment once per released code change.
 const GOOGLE_DRIVE_CLIENT_ID='1015012642264-oi2nelv3v90k3d39r994a6nelgjs2a56.apps.googleusercontent.com'; // Public OAuth Web Client ID.
 const HARD_FILTER_SCHEMA='price_band_uc_buffer_v1';
 const STOCK_RUNWAY_CEILING_PCT=19.5; // UC-style ceiling for Max Entry; Rocket % only labels rockets.
 const PRICE_BAND_BLOCK_BUFFER_PCT=0.15; // Treat rounded 4.9/9.9/19.9 rows as effectively band-locked.
+const PRICE_COMPARE_EPS=0.0001; // Do not let a full tick/paisa breach pass a buy ceiling.
 const SYSTEM_TRADE_START_DATE='2026-04-01'; // Adaptive stats use trades closed from this date onward.
 let MARKET_MODE='stock';
 function modeKey(base){return base;}
@@ -600,15 +601,15 @@ function updateFolderUI(){
   const btn=document.getElementById('loadFilesBtn');
   if(!btn) return;
   btn.textContent='Load Files';
-  btn.title='Connect Google Drive if needed, then select the Scanner Uploads folder.';
+  btn.title='Reconnect Google Drive if needed; once connected, select the Scanner Uploads folder.';
   btn.style.borderColor='';
   btn.style.color='';
 }
 
 function showDriveAuthRequiredState(){
   const msg=FS.needsReconnect()
-    ? 'Google Drive needs authorization. Press Load Files to reconnect, then select Scanner Uploads.'
-    : 'Press Load Files to connect Google Drive, then select Scanner Uploads.';
+    ? 'Google Drive needs authorization. Press Load Files to reconnect and load latest saved data.'
+    : 'Press Load Files to connect Google Drive and load latest saved data.';
   try{
     const bar=document.getElementById('infoBar');
     if(bar) bar.innerHTML=`<span class="info-pill pill-amber" title="${escHtml(msg)}">⚠ ${escHtml(msg)}</span>`;
@@ -616,7 +617,7 @@ function showDriveAuthRequiredState(){
     document.getElementById('dash').style.display='block';
     document.getElementById('noDataBanner').style.display='flex';
     const nd=document.querySelector('#noDataBanner div:nth-child(2)');
-    if(nd) nd.innerHTML=`Cloud data is private. Press <strong style="color:var(--fire)">Load Files</strong> to connect Drive, then select Scanner Uploads.`;
+    if(nd) nd.innerHTML=`Cloud data is private. Press <strong style="color:var(--fire)">Load Files</strong> to reconnect Drive and restore the latest saved dashboard.`;
   }catch(e){}
 }
 
@@ -3647,7 +3648,7 @@ function isBuyZone(s){
   const maxEntry=getMaxEntry(s);
   if(maxEntry===null) return false;
   const refPrice=Math.max(s.price||0,getBuyPrice(s)||0);
-  return refPrice<=maxEntry+0.01;
+  return refPrice<=maxEntry+PRICE_COMPARE_EPS;
 }
 function getFilterBarReason(s){
   const minScore=parseFloat(document.getElementById('fMinScore')?.value)||0;
@@ -3663,7 +3664,7 @@ function getFilterBarReason(s){
   if(bandReason) return bandReason;
   const maxEntry=getMaxEntry(s);
   const refPrice=Math.max(s.price||0,getBuyPrice(s)||0);
-  if(maxEntry!==null&&refPrice>maxEntry+0.01) return `Buy price ${fmtINR(refPrice)} > Max Entry ${fmtINR(maxEntry)}`;
+  if(maxEntry!==null&&refPrice>maxEntry+PRICE_COMPARE_EPS) return `Buy price ${fmtINR(refPrice)} > Max Entry ${fmtINR(maxEntry)}`;
   if(minScore>0&&s.rocketScore<minScore) return `Score ${s.rocketScore?.toFixed?.(1)||s.rocketScore} < ${minScore}`;
   if(fvol>0&&s.volume!=null&&s.volume<fvol) return `Volume ${Math.round(s.volume).toLocaleString('en-IN')} < ${Math.round(fvol).toLocaleString('en-IN')}`;
   if(fMinMarketCap>0&&s.marketCap!=null&&s.marketCap<fMinMarketCap) return `MCap ₹${fV(s.marketCap)} < ₹${fV(fMinMarketCap)}`;
@@ -4369,9 +4370,10 @@ function openUploadFolderPicker(){
 
 async function handleCloudLoadAction(){
   if(!FS.hasFolder()){
-    setLoading(true,'Connecting Google Drive...');
-    const connected=await connectCloudStorage({reloadAfterConnect:false});
+    setLoading(true,'Connecting Google Drive and loading latest saved data...');
+    const connected=await connectCloudStorage({reloadAfterConnect:true});
     if(!connected){setLoading(false);return;}
+    return;
   }
   setLoading(true,'Choose the Scanner Uploads folder...');
   openUploadFolderPicker();
@@ -4894,7 +4896,7 @@ function exportBasket(){
     if(qty===0) return;
     const buyPrice=getBuyPrice(s);
     const maxEntry=getMaxEntry(s);
-    if(maxEntry!==null&&buyPrice>maxEntry+0.01){rejectedCount++;return;}
+    if(maxEntry!==null&&buyPrice>maxEntry+PRICE_COMPARE_EPS){rejectedCount++;return;}
     const sym=s.symbol;
     const name=s.name||sym;
     orders.push({
