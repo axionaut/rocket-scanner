@@ -291,8 +291,8 @@ table.main tbody td{padding:9px 11px;font-family:'DM Mono',monospace;font-size:1
 
 
 <script>
-const BUILD_TS='2026-06-01 11:02 IST'; // replaced at commit time with IST datetime
-const APP_VERSION=373; // Shared deployed version; increment once per released code change.
+const BUILD_TS='2026-06-01 11:10 IST'; // replaced at commit time with IST datetime
+const APP_VERSION=374; // Shared deployed version; increment once per released code change.
 const GOOGLE_DRIVE_CLIENT_ID='1015012642264-oi2nelv3v90k3d39r994a6nelgjs2a56.apps.googleusercontent.com'; // Public OAuth Web Client ID.
 const HARD_FILTER_SCHEMA='price_band_uc_buffer_v1';
 const STOCK_RUNWAY_CEILING_PCT=19.5; // UC-style ceiling for Max Entry; Rocket % only labels rockets.
@@ -1565,6 +1565,10 @@ function runEngine(raw, sessionTag){
   // ── Known special mappings for derived features ──
   // These tell us which safeKey holds which meaning for computed features
   const findKey = pattern => Object.keys(COL_MAP).find(k => pattern.test(k)) || null;
+  const findKeys = pattern => Object.keys(COL_MAP).filter(k => pattern.test(k));
+  const findKeyPref = (preferred, fallback) =>
+    Object.keys(COL_MAP).find(k => preferred.some(p => p.test(k))) || findKey(fallback);
+  const INTRADAY_TF = /(1_minute|3_minutes|5_minutes|15_minutes|30_minutes|45_minutes|1_hour|2_hours|4_hours)/;
   const K = {
     price:        findKey(/^price$/),
     price_change: findKey(/price_change.*1_day|1_day.*price_change|^change.*1_day$/),
@@ -1581,9 +1585,17 @@ function runEngine(raw, sessionTag){
     change_open:  findKey(/change_from_open.*1_day|1_day.*change_from_open/),
     rvol_time:    findKey(/^relative_volume_at_time$|relative_volume.*time/),
     rvol_day:     findKey(/^relative_volume_1_day$|relative_volume.*1_day/),
-    dmi_pos:      findKey(/directional_movement_index.*positive/),
-    dmi_neg:      findKey(/directional_movement_index.*negative/),
+    dmi_pos:      findKeyPref([new RegExp('directional_movement_index.*'+INTRADAY_TF.source+'.*positive'),new RegExp('directional_movement_index.*positive.*'+INTRADAY_TF.source)],/directional_movement_index.*positive/),
+    dmi_neg:      findKeyPref([new RegExp('directional_movement_index.*'+INTRADAY_TF.source+'.*negative'),new RegExp('directional_movement_index.*negative.*'+INTRADAY_TF.source)],/directional_movement_index.*negative/),
+    adx:          findKeyPref([new RegExp('average_directional_index.*'+INTRADAY_TF.source),new RegExp(INTRADAY_TF.source+'.*average_directional_index')],/average_directional_index/),
+    mfi:          findKeyPref([new RegExp('money_flow_index.*'+INTRADAY_TF.source),new RegExp(INTRADAY_TF.source+'.*money_flow_index')],/money_flow_index/),
+    rsi:          findKeyPref([new RegExp('relative_strength_index.*'+INTRADAY_TF.source),new RegExp(INTRADAY_TF.source+'.*relative_strength_index')],/relative_strength_index/),
   };
+  K.dmi_pos_keys = findKeys(new RegExp('directional_movement_index.*'+INTRADAY_TF.source+'.*positive')).concat(findKeys(new RegExp('directional_movement_index.*positive.*'+INTRADAY_TF.source)));
+  K.dmi_neg_keys = findKeys(new RegExp('directional_movement_index.*'+INTRADAY_TF.source+'.*negative')).concat(findKeys(new RegExp('directional_movement_index.*negative.*'+INTRADAY_TF.source)));
+  K.adx_keys = findKeys(new RegExp('average_directional_index.*'+INTRADAY_TF.source)).concat(findKeys(new RegExp(INTRADAY_TF.source+'.*average_directional_index')));
+  K.mfi_keys = findKeys(new RegExp('money_flow_index.*'+INTRADAY_TF.source)).concat(findKeys(new RegExp(INTRADAY_TF.source+'.*money_flow_index')));
+  K.rsi_keys = findKeys(new RegExp('relative_strength_index.*'+INTRADAY_TF.source)).concat(findKeys(new RegExp(INTRADAY_TF.source+'.*relative_strength_index')));
 
   const parsed = raw.map(r => {
     const d = {};
@@ -1644,6 +1656,7 @@ function runEngine(raw, sessionTag){
     // into accumulation/distribution fuel before mRMR can reward it.
     const adjustRvol=(key)=>{
       if(!key||d[key]==null||!isFinite(d[key])) return;
+      const rawRvol=Math.max(0,d[key]);
       let vote=0, wt=0;
       const add=(v,w=1)=>{ if(v==null||!isFinite(v)) return; vote+=Math.max(-1,Math.min(1,v))*w; wt+=w; };
       const pc=K.price_change?d[K.price_change]:null;
@@ -1651,12 +1664,39 @@ function runEngine(raw, sessionTag){
       add(pc!=null?pc/3:null,1.1);
       add(co!=null?co/2:null,1.2);
       add(d.peak_retention!=null?(d.peak_retention-50)/35:null,1.4);
-      const dp=K.dmi_pos?d[K.dmi_pos]:null, dn=K.dmi_neg?d[K.dmi_neg]:null;
-      if(dp!=null&&dn!=null&&(dp+dn)>0) add((dp-dn)/(dp+dn),1.0);
+      if(rawRvol>=1.5){
+        if(pc!=null&&co!=null&&pc<1&&co<0.5) add(-0.85,1.5); // high effort, weak result
+        if(d.peak_retention!=null&&d.peak_retention<65) add((d.peak_retention-65)/30,1.2);
+        if(d.pct_to_upper_band!=null&&d.pct_to_upper_band<3) add((d.pct_to_upper_band-3)/3,0.9);
+      }
+      const tfTags=['5_minutes','15_minutes','30_minutes','1_hour','4_hours','1_day'];
+      let usedDmi=false;
+      tfTags.forEach(tf=>{
+        const pk=(K.dmi_pos_keys||[]).find(k=>k.includes(tf))||(tf==='1_day'?K.dmi_pos:null);
+        const nk=(K.dmi_neg_keys||[]).find(k=>k.includes(tf))||(tf==='1_day'?K.dmi_neg:null);
+        const ak=(K.adx_keys||[]).find(k=>k.includes(tf))||(tf==='1_day'?K.adx:null);
+        const dp=pk?d[pk]:null, dn=nk?d[nk]:null, adx=ak?d[ak]:null;
+        if(dp!=null&&dn!=null&&(dp+dn)>0){
+          usedDmi=true;
+          const trendBoost=adx!=null?0.6+Math.max(0,Math.min(0.8,(adx-15)/25)):1.0;
+          add(((dp-dn)/(dp+dn))*trendBoost,tf==='5_minutes'||tf==='15_minutes'?0.75:0.5);
+        }
+      });
+      if(!usedDmi){
+        const dp=K.dmi_pos?d[K.dmi_pos]:null, dn=K.dmi_neg?d[K.dmi_neg]:null, adx=K.adx?d[K.adx]:null;
+        const trendBoost=adx!=null?0.6+Math.max(0,Math.min(0.8,(adx-15)/25)):1.0;
+        if(dp!=null&&dn!=null&&(dp+dn)>0) add(((dp-dn)/(dp+dn))*trendBoost,1.15);
+      }
       const vwap=K.vwap?d[K.vwap]:null;
       if(price!=null&&vwap!=null&&vwap>0) add((price-vwap)/vwap*20,0.9);
-      const dir=wt>0?vote/wt:0;
-      d[key]=Math.max(0,d[key])*dir;
+      const mfiKeys=(K.mfi_keys&&K.mfi_keys.length)?K.mfi_keys:[K.mfi].filter(Boolean);
+      mfiKeys.forEach(k=>{const mfi=d[k];if(mfi!=null) add((mfi-50)/25,mfiKeys.length>1?0.28:0.7);});
+      const rsiKeys=(K.rsi_keys&&K.rsi_keys.length)?K.rsi_keys:[K.rsi].filter(Boolean);
+      rsiKeys.forEach(k=>{const rsi=d[k];if(rsi!=null) add((rsi-50)/20,rsiKeys.length>1?0.18:0.45);});
+      const rawDir=wt>0?vote/wt:0;
+      const deadZone=0.2;
+      const dir=rawDir>deadZone?(rawDir-deadZone)/(1-deadZone):rawDir< -deadZone?(rawDir+deadZone)/(1-deadZone):0;
+      d[key]=rawRvol*dir;
     };
     adjustRvol(K.rvol_time);
     adjustRvol(K.rvol_day);
