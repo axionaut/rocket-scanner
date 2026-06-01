@@ -291,8 +291,8 @@ table.main tbody td{padding:9px 11px;font-family:'DM Mono',monospace;font-size:1
 
 
 <script>
-const BUILD_TS='2026-06-01 10:55 IST'; // replaced at commit time with IST datetime
-const APP_VERSION=372; // Shared deployed version; increment once per released code change.
+const BUILD_TS='2026-06-01 11:02 IST'; // replaced at commit time with IST datetime
+const APP_VERSION=373; // Shared deployed version; increment once per released code change.
 const GOOGLE_DRIVE_CLIENT_ID='1015012642264-oi2nelv3v90k3d39r994a6nelgjs2a56.apps.googleusercontent.com'; // Public OAuth Web Client ID.
 const HARD_FILTER_SCHEMA='price_band_uc_buffer_v1';
 const STOCK_RUNWAY_CEILING_PCT=19.5; // UC-style ceiling for Max Entry; Rocket % only labels rockets.
@@ -1673,6 +1673,8 @@ function runEngine(raw, sessionTag){
   LABELS.range_pos         = '52W Range Position %';
   LABELS.pct_from_52w_high = '% From 52W High';
   LABELS.peak_retention    = 'Peak Retention %';
+  LABELS.price_band_pct    = 'NSE Price Band %';
+  LABELS.pct_to_upper_band = '% To Upper Band';
 
   // ── Market Regime Detection (full universe, before filters) ──
   const allAdvancing = parsed.filter(d => {
@@ -3432,13 +3434,14 @@ function _renderMethodologyInner(){
   if(!E.targetCorrToday) E.targetCorrToday={};
   const sorted=[...E.features].sort((a,b)=>E.mrmr[b].score-E.mrmr[a].score);
   const maxW=sorted.reduce((m,f)=>Math.max(m,E.weights[f]||0),0)||1;
-  const NSE_FEATS=new Set(['delivery_pct','range_pos','pct_from_52w_high']);
-  const COMPUTED_FEATS=new Set(['sector_breadth','sector_rel_strength','industry_breadth','peak_retention']);
-  if(E.features){
-    E.features.forEach(f=>{
-      if(/^relative_volume_at_time$|^relative_volume_1_day$|relative_volume.*time|relative_volume.*1_day/.test(f)) COMPUTED_FEATS.add(f);
-    });
-  }
+  const NSE_FEATS=new Set(['delivery_pct','price_band_pct']);
+  const CALC_FEATS=new Set(['range_pos','pct_from_52w_high','pct_to_upper_band','peak_retention','sector_breadth','sector_rel_strength','industry_breadth']);
+  const getFeatureSource=f=>{
+    if(NSE_FEATS.has(f)) return 'NSE';
+    if(CALC_FEATS.has(f)) return 'Calc';
+    if(/^relative_volume_at_time$|^relative_volume_1_day$|relative_volume.*time|relative_volume.*1_day/.test(f)) return 'Calc';
+    return 'TV';
+  };
   const regimeIcon = E.regime==='bull'?'🐂':E.regime==='bear'?'🐻':'➡';
   const regimeColor = E.regime==='bull'?'var(--green)':E.regime==='bear'?'var(--red)':'var(--orange)';
   const rs = {
@@ -3473,7 +3476,8 @@ function _renderMethodologyInner(){
     const tc=E.targetCorr[f],m=E.mrmr[f],w=E.weights[f];
     const dir=tc>=0?'<span style="color:var(--green)">↑</span>':'<span style="color:var(--red)">↓</span>';
     const bw=Math.round((w||0)/maxW*100),bc=(tc||0)>=0?'var(--green)':'var(--red)';
-    const src=NSE_FEATS.has(f)?'<span style="color:var(--cyan);font-size:9px;font-weight:700">NSE</span>':COMPUTED_FEATS.has(f)?'<span style="color:var(--purple);font-size:9px;font-weight:700">Calc</span>':'<span style="color:var(--t3);font-size:9px">TV</span>';
+    const srcType=getFeatureSource(f);
+    const src=srcType==='NSE'?'<span style="color:var(--cyan);font-size:9px;font-weight:700">NSE</span>':srcType==='Calc'?'<span style="color:var(--purple);font-size:9px;font-weight:700">Calc</span>':'<span style="color:var(--t3);font-size:9px">TV</span>';
     const todayR=E.targetCorrToday?.[f];
     const todayCell=todayR!=null&&!isNaN(todayR)?`<span style="color:${todayR>=0?'var(--green)':'var(--red)'};font-size:10px">${(todayR??0).toFixed(3)}</span>`:'—';
     const _n=v=>isFinite(v)?v:0;
