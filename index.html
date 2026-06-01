@@ -291,8 +291,8 @@ table.main tbody td{padding:9px 11px;font-family:'DM Mono',monospace;font-size:1
 
 
 <script>
-const BUILD_TS='2026-06-01 14:59 IST'; // replaced at commit time with IST datetime
-const APP_VERSION=380; // Shared deployed version; increment once per released code change.
+const BUILD_TS='2026-06-01 15:08 IST'; // replaced at commit time with IST datetime
+const APP_VERSION=381; // Shared deployed version; increment once per released code change.
 const GOOGLE_DRIVE_CLIENT_ID='1015012642264-oi2nelv3v90k3d39r994a6nelgjs2a56.apps.googleusercontent.com'; // Public OAuth Web Client ID.
 const HARD_FILTER_SCHEMA='price_band_uc_buffer_v1';
 const STOCK_RUNWAY_CEILING_PCT=19.5; // UC-style ceiling for Max Entry; Rocket % only labels rockets.
@@ -390,6 +390,7 @@ const FS = (() => {
   let _accessToken = null;
   let _expiresAt = 0;
   let _tokenClient = null;
+  let _fileCache = null;
 
   function clientId(){ return (GOOGLE_DRIVE_CLIENT_ID||localStorage.getItem(CLIENT_ID_STORE)||'').trim(); }
   function setClientId(id){
@@ -471,11 +472,32 @@ const FS = (() => {
     return response;
   }
   function queryName(name){ return String(name).replace(/\\/g,'\\\\').replace(/'/g,"\\'"); }
+  async function listAppDataFiles(force=false){
+    if(_fileCache&&!force) return _fileCache;
+    const files=[];
+    let pageToken='';
+    do{
+      const url=DRIVE_API+'?spaces=appDataFolder&pageSize=100&fields=nextPageToken,files(id,name,modifiedTime,mimeType,size)&q='+encodeURIComponent('trashed=false')+(pageToken?'&pageToken='+encodeURIComponent(pageToken):'');
+      const data=await (await request(url)).json();
+      (data.files||[]).forEach(f=>files.push(f));
+      pageToken=data.nextPageToken||'';
+    }while(pageToken);
+    _fileCache=new Map();
+    files.forEach(f=>{
+      const existing=_fileCache.get(f.name);
+      if(!existing||String(f.modifiedTime||'')>String(existing.modifiedTime||'')) _fileCache.set(f.name,f);
+    });
+    return _fileCache;
+  }
   async function findFile(name){
+    const cache=await listAppDataFiles();
+    if(cache.has(name)) return cache.get(name);
     const q=`name='${queryName(name)}' and trashed=false`;
     const url=DRIVE_API+'?spaces=appDataFolder&pageSize=1&fields=files(id,name,modifiedTime,mimeType)&q='+encodeURIComponent(q);
     const data=await (await request(url)).json();
-    return data.files?.[0]||null;
+    const file=data.files?.[0]||null;
+    if(file) cache.set(name,file);
+    return file;
   }
   async function readBlob(name){
     const meta=await findFile(name);
@@ -518,7 +540,11 @@ const FS = (() => {
     const location=begin.headers.get('Location');
     if(!location) throw new Error('Google Drive did not provide an upload location.');
     const blob=content instanceof Blob?content:new Blob([content],{type:mimeType});
-    await request(location,{method:'PUT',headers:{'Content-Type':mimeType},body:blob});
+    const done=await request(location,{method:'PUT',headers:{'Content-Type':mimeType},body:blob});
+    try{
+      const meta=await done.json();
+      if(meta?.name&&_fileCache) _fileCache.set(meta.name,meta);
+    }catch(e){}
     return true;
   }
 
@@ -534,18 +560,26 @@ const FS = (() => {
     return null;
   }
   async function saveUploadedInputs(files){
-    let count=0;
+    const byName=new Map();
+    await listAppDataFiles().catch(()=>null);
     for(const file of files||[]){
       const name=canonicalInputName(file.name);
       if(!name) continue;
-      await uploadFile(name,file,file.type||(/\.zip$/i.test(name)?'application/zip':'text/csv'));
-      count++;
+      const prior=byName.get(name);
+      if(!prior||((file.lastModified||0)>(prior.lastModified||0))) byName.set(name,file);
     }
-    return count;
+    const jobs=[];
+    byName.forEach((file,name)=>{
+      jobs.push(uploadFile(name,file,file.type||(/\.zip$/i.test(name)?'application/zip':'text/csv')).then(()=>1));
+    });
+    if(!jobs.length) return 0;
+    const counts=await Promise.all(jobs);
+    return counts.reduce((s,v)=>s+v,0);
   }
 
   async function write(data){
     if(!isConnected()) return false;
+    if(_saveTimer){clearTimeout(_saveTimer);_saveTimer=null;}
     try{return await uploadFile(BRAIN_FILE,JSON.stringify(data),'application/json');}
     catch(e){console.warn('FS.write failed',e);return false;}
   }
