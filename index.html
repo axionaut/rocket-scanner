@@ -291,8 +291,8 @@ table.main tbody td{padding:9px 11px;font-family:'DM Mono',monospace;font-size:1
 
 
 <script>
-const BUILD_TS='2026-06-02 09:29 IST'; // replaced at commit time with IST datetime
-const APP_VERSION=382; // Shared deployed version; increment once per released code change.
+const BUILD_TS='2026-06-02 09:45 IST'; // replaced at commit time with IST datetime
+const APP_VERSION=383; // Shared deployed version; increment once per released code change.
 const GOOGLE_DRIVE_CLIENT_ID='1015012642264-oi2nelv3v90k3d39r994a6nelgjs2a56.apps.googleusercontent.com'; // Public OAuth Web Client ID.
 const HARD_FILTER_SCHEMA='price_band_uc_buffer_v1';
 const STOCK_RUNWAY_CEILING_PCT=19.5; // UC-style ceiling for Max Entry; Rocket % only labels rockets.
@@ -386,6 +386,10 @@ const FS = (() => {
   const SCOPE = 'https://www.googleapis.com/auth/drive.appdata';
   const DRIVE_API = 'https://www.googleapis.com/drive/v3/files';
   const DRIVE_UPLOAD = 'https://www.googleapis.com/upload/drive/v3/files';
+  const LOCAL_DB = 'rocket_scanner_local_brain_v1';
+  const LOCAL_STORE = 'brain';
+  const LOCAL_KEY = 'rocket_brain';
+  const LOCAL_HANDLE_KEY = 'rocket_brain_dir_handle';
   let _saveTimer = null;
   let _brain = {};
   let _brainLoaded = false;
@@ -393,6 +397,7 @@ const FS = (() => {
   let _expiresAt = 0;
   let _tokenClient = null;
   let _fileCache = null;
+  let _localDirHandle = null;
 
   function clientId(){ return (GOOGLE_DRIVE_CLIENT_ID||localStorage.getItem(CLIENT_ID_STORE)||'').trim(); }
   function setClientId(id){
@@ -426,9 +431,13 @@ const FS = (() => {
 
   async function init(){
     restoreSession();
+    await restoreLocalDirectoryHandle();
     updateFolderUI();
-    if(!isConnected()) return null;
-    try{return await read();}catch(e){console.warn('Drive startup read failed',e);return null;}
+    if(!isConnected()) return await readLocalBrain();
+    try{
+      const brain=await read();
+      return brain||await readLocalBrain();
+    }catch(e){console.warn('Drive startup read failed',e);return await readLocalBrain();}
   }
 
   async function connect(){
@@ -510,7 +519,11 @@ const FS = (() => {
   async function read(){
     const hit=await readBlob(BRAIN_FILE);
     if(!hit) return null;
-    try{return JSON.parse(await hit.blob.text());}
+    try{
+      const brain=JSON.parse(await hit.blob.text());
+      writeLocalBrain(brain).catch(e=>console.warn('Local brain mirror failed after Drive read',e));
+      return brain;
+    }
     catch(e){console.warn('FS.read invalid cloud brain',e);return null;}
   }
 
@@ -580,10 +593,148 @@ const FS = (() => {
   }
 
   async function write(data){
-    if(!isConnected()) return false;
     if(_saveTimer){clearTimeout(_saveTimer);_saveTimer=null;}
+    const localOk=await writeLocalBrain(data);
+    if(!isConnected()) return localOk;
     try{return await uploadFile(BRAIN_FILE,JSON.stringify(data),'application/json');}
     catch(e){console.warn('FS.write failed',e);return false;}
+  }
+
+  function openLocalDb(){
+    return new Promise((resolve,reject)=>{
+      if(!window.indexedDB){resolve(null);return;}
+      const req=indexedDB.open(LOCAL_DB,1);
+      req.onupgradeneeded=()=>{req.result.createObjectStore(LOCAL_STORE,{keyPath:'key'});};
+      req.onsuccess=()=>resolve(req.result);
+      req.onerror=()=>reject(req.error);
+    });
+  }
+
+  async function writeIndexedBrain(data){
+    if(!data||typeof data!=='object') return false;
+    const db=await openLocalDb();
+    if(!db) return false;
+    return new Promise(resolve=>{
+      const tx=db.transaction(LOCAL_STORE,'readwrite');
+      tx.objectStore(LOCAL_STORE).put({key:LOCAL_KEY,data,ts:Date.now()});
+      tx.oncomplete=()=>{db.close();resolve(true);};
+      tx.onerror=()=>{console.warn('IndexedDB brain mirror failed',tx.error);db.close();resolve(false);};
+    });
+  }
+
+  async function putLocalStore(key, value){
+    const db=await openLocalDb();
+    if(!db) return false;
+    return new Promise(resolve=>{
+      const tx=db.transaction(LOCAL_STORE,'readwrite');
+      tx.objectStore(LOCAL_STORE).put({key,value,ts:Date.now()});
+      tx.oncomplete=()=>{db.close();resolve(true);};
+      tx.onerror=()=>{console.warn('Local store write failed',tx.error);db.close();resolve(false);};
+    });
+  }
+
+  async function getLocalStore(key){
+    const db=await openLocalDb();
+    if(!db) return null;
+    return new Promise(resolve=>{
+      const tx=db.transaction(LOCAL_STORE,'readonly');
+      const req=tx.objectStore(LOCAL_STORE).get(key);
+      req.onsuccess=()=>resolve(req.result?.value??null);
+      req.onerror=()=>{console.warn('Local store read failed',req.error);resolve(null);};
+      tx.oncomplete=()=>db.close();
+      tx.onerror=()=>db.close();
+    });
+  }
+
+  async function readIndexedBrain(){
+    const db=await openLocalDb();
+    if(!db) return null;
+    return new Promise(resolve=>{
+      const tx=db.transaction(LOCAL_STORE,'readonly');
+      const req=tx.objectStore(LOCAL_STORE).get(LOCAL_KEY);
+      req.onsuccess=()=>resolve(req.result?.data||null);
+      req.onerror=()=>{console.warn('IndexedDB brain read failed',req.error);resolve(null);};
+      tx.oncomplete=()=>db.close();
+      tx.onerror=()=>db.close();
+    });
+  }
+
+  async function deleteIndexedBrain(){
+    const db=await openLocalDb();
+    if(!db) return false;
+    return new Promise(resolve=>{
+      const tx=db.transaction(LOCAL_STORE,'readwrite');
+      tx.objectStore(LOCAL_STORE).delete(LOCAL_KEY);
+      tx.oncomplete=()=>{db.close();resolve(true);};
+      tx.onerror=()=>{console.warn('IndexedDB brain delete failed',tx.error);db.close();resolve(false);};
+    });
+  }
+
+  async function writeLocalBrain(data){
+    const fileOk=await writeLocalBrainFile(data);
+    const indexedOk=await writeIndexedBrain(data).catch(e=>{console.warn('IndexedDB brain mirror failed',e);return false;});
+    return fileOk||indexedOk;
+  }
+
+  async function readLocalBrain(){
+    const brain=await readIndexedBrain().catch(e=>{console.warn('Local brain read failed',e);return null;});
+    if(brain&&typeof brain==='object') return brain;
+    return null;
+  }
+
+  async function setLocalDirectoryHandle(handle){
+    _localDirHandle=handle||null;
+    if(!_localDirHandle) return false;
+    try{
+      const ok=await requestLocalPermission(_localDirHandle);
+      if(!ok){_localDirHandle=null;return false;}
+      await putLocalStore(LOCAL_HANDLE_KEY,_localDirHandle).catch(e=>console.warn('Could not persist local folder handle',e));
+      if(_brainLoaded||Object.keys(_brain||{}).length) await writeLocalBrain(_brain);
+      updateFolderUI();
+      return true;
+    }catch(e){console.warn('Local folder permission failed',e);_localDirHandle=null;return false;}
+  }
+
+  async function restoreLocalDirectoryHandle(){
+    try{
+      const handle=await getLocalStore(LOCAL_HANDLE_KEY);
+      if(!handle) return false;
+      _localDirHandle=handle;
+      const granted=!_localDirHandle.queryPermission||await _localDirHandle.queryPermission({mode:'readwrite'})==='granted';
+      if(granted){
+        updateFolderUI();
+        return true;
+      }
+      _localDirHandle=null;
+      return false;
+    }catch(e){console.warn('Local folder restore failed',e);_localDirHandle=null;return false;}
+  }
+
+  async function requestLocalPermission(handle){
+    if(!handle?.queryPermission||!handle?.requestPermission) return true;
+    const opts={mode:'readwrite'};
+    if(await handle.queryPermission(opts)==='granted') return true;
+    return await handle.requestPermission(opts)==='granted';
+  }
+
+  async function writeLocalBrainFile(data){
+    if(!_localDirHandle||!data||typeof data!=='object') return false;
+    try{
+      if(!(await requestLocalPermission(_localDirHandle))) return false;
+      const fileHandle=await _localDirHandle.getFileHandle(BRAIN_FILE,{create:true});
+      const writable=await fileHandle.createWritable();
+      await writable.write(JSON.stringify(data));
+      await writable.close();
+      return true;
+    }catch(e){console.warn('Local rocket_brain.json write failed',e);return false;}
+  }
+
+  async function deleteLocalBrainFile(){
+    if(!_localDirHandle) return;
+    try{
+      if(!(await requestLocalPermission(_localDirHandle))) return;
+      await _localDirHandle.removeEntry(BRAIN_FILE).catch(()=>null);
+    }catch(e){console.warn('Local rocket_brain.json delete failed',e);}
   }
 
   async function deleteFile(){
@@ -609,7 +760,7 @@ const FS = (() => {
   }
 
   function get(key){ return _brain[key]??null; }
-  function load(brain){ _brain=brain||{}; _brainLoaded=true; }
+  function load(brain){ _brain=brain||{}; _brainLoaded=true; writeLocalBrain(_brain).catch(e=>console.warn('Local brain mirror failed after load',e)); }
   async function loadFromDisk(){
     if(!isConnected()) return null;
     const brain=await read();
@@ -626,12 +777,13 @@ const FS = (() => {
     _brainLoaded=true;
     if(_saveTimer) clearTimeout(_saveTimer);
     if(Object.keys(_brain).length) write(_brain);
-    else deleteFile();
+    else { deleteLocalBrainFile(); deleteIndexedBrain(); deleteFile(); }
   }
-  function folderName(){ return isConnected()?'Google Drive':null; }
+  function folderName(){ return isConnected()?'Google Drive':(_localDirHandle?'Local folder':null); }
   function hasFolder(){ return isConnected(); }
+  function hasLocalBrainFolder(){ return !!_localDirHandle; }
 
-  return {init,connect,needsReconnect,isConfigured,setClientId,isConnected,read,readUploadText,readUploadFile,saveUploadedInputs,write,set,setMultiple,get,load,loadFromDisk,ensureLoaded,getBrain,reset,folderName,hasFolder};
+  return {init,connect,needsReconnect,isConfigured,setClientId,isConnected,read,readUploadText,readUploadFile,saveUploadedInputs,write,set,setMultiple,get,load,loadFromDisk,ensureLoaded,getBrain,reset,folderName,hasFolder,setLocalDirectoryHandle,hasLocalBrainFolder};
 })();
 
 function updateFolderUI(){
@@ -4476,22 +4628,55 @@ function toggleRequiredFilesPopover(){
   }
 }
 
-function openUploadFolderPicker(){
+async function filesFromDirectoryHandle(dirHandle){
+  const files=[];
+  async function walk(handle){
+    for await(const entry of handle.values()){
+      if(entry.kind==='file'){
+        files.push(await entry.getFile());
+      }else if(entry.kind==='directory'){
+        await walk(entry);
+      }
+    }
+  }
+  await walk(dirHandle);
+  return files;
+}
+
+async function openUploadFolderPicker(){
+  if(window.showDirectoryPicker){
+    try{
+      const picked=await window.showDirectoryPicker({id:'rocket-scanner-uploads',mode:'readwrite'});
+      let uploadHandle=picked;
+      let localBrainHandle=picked;
+      try{
+        uploadHandle=await picked.getDirectoryHandle('Scanner Uploads');
+        localBrainHandle=picked;
+      }catch(e){}
+      await FS.setLocalDirectoryHandle(localBrainHandle);
+      const files=await filesFromDirectoryHandle(uploadHandle);
+      if(!files.length){
+        showToast('No files found in the selected folder.',4000,true);
+        return false;
+      }
+      await processFiles(files);
+      return true;
+    }catch(e){
+      if(e?.name!=='AbortError') console.warn('Directory picker failed',e);
+      return false;
+    }
+  }
   const input=document.getElementById('fInDir');
   input.value='';
   input.click();
+  return true;
 }
 
 async function handleCloudLoadAction(){
-  if(!FS.hasFolder()){
-    setLoading(true,'Connecting Google Drive and loading latest saved data...');
-    const connected=await connectCloudStorage({reloadAfterConnect:true});
-    if(!connected){setLoading(false);return;}
-    return;
-  }
-  setLoading(true,'Choose the Scanner Uploads folder...');
-  openUploadFolderPicker();
-  setTimeout(()=>setLoading(false),1200);
+  setLoading(true,'Choose Rocket Scanner folder or Scanner Uploads...');
+  const opened=await openUploadFolderPicker();
+  if(!opened) setLoading(false);
+  else if(!window.showDirectoryPicker) setTimeout(()=>setLoading(false),1200);
 }
 
 // ── Brain Export / Import ──
@@ -5363,11 +5548,11 @@ async function processFiles(files){
     }finally{restoreScannerRuntime(rt);}
   } else computeMissedOpp();
   try{
-    setMsg('Saving updated brain to Google Drive...');
+    setMsg('Saving updated brain locally and to Google Drive...');
     const brainSaved=await FS.write(FS.getBrain());
     if(!brainSaved){
       setLoading(false);
-      showToast('Inputs were uploaded, but the updated brain was not saved. Reconnect Google Drive and upload again.',7000,true);
+      showToast('Inputs were uploaded, but the updated brain was not saved to Google Drive. Reconnect Google Drive and upload again.',7000,true);
       return;
     }
   }catch(e){
