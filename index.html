@@ -291,8 +291,8 @@ table.main tbody td{padding:9px 11px;font-family:'DM Mono',monospace;font-size:1
 
 
 <script>
-const BUILD_TS='2026-06-02 09:45 IST'; // replaced at commit time with IST datetime
-const APP_VERSION=383; // Shared deployed version; increment once per released code change.
+const BUILD_TS='2026-06-02 10:01 IST'; // replaced at commit time with IST datetime
+const APP_VERSION=384; // Shared deployed version; increment once per released code change.
 const GOOGLE_DRIVE_CLIENT_ID='1015012642264-oi2nelv3v90k3d39r994a6nelgjs2a56.apps.googleusercontent.com'; // Public OAuth Web Client ID.
 const HARD_FILTER_SCHEMA='price_band_uc_buffer_v1';
 const STOCK_RUNWAY_CEILING_PCT=19.5; // UC-style ceiling for Max Entry; Rocket % only labels rockets.
@@ -5182,8 +5182,8 @@ function exportBasket(){
   const basketAlloc = computeAlloc(capital, selList);
 
   // Universal SL/TGT from tradebook (already cost-adjusted)
-  const adaptiveSL=TRADEBOOK_STATS?TRADEBOOK_STATS.adaptiveSL:3.5;
-  const adaptiveTGT=getEffectiveTgtPct()||(TRADEBOOK_STATS?TRADEBOOK_STATS.adaptiveTGT:3.7);
+  const adaptiveSL=roundPct05(TRADEBOOK_STATS?TRADEBOOK_STATS.adaptiveSL:3.5);
+  const adaptiveTGT=roundPct05(getEffectiveTgtPct()||(TRADEBOOK_STATS?TRADEBOOK_STATS.adaptiveTGT:3.7));
 
   const orders=[];
   let rejectedCount=0;
@@ -5216,7 +5216,7 @@ function exportBasket(){
         quantity:qty,price:parseFloat(tickPrice(buyPrice).toFixed(2)),
         triggerPrice:0,disclosedQuantity:0,lastPrice:0,
         variety:'regular',
-        gtt:{target:adaptiveTGT},
+        gtt:{stoploss:-adaptiveSL,target:adaptiveTGT},
         tags:[]
       }
     });
