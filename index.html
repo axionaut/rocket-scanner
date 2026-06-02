@@ -291,8 +291,8 @@ table.main tbody td{padding:9px 11px;font-family:'DM Mono',monospace;font-size:1
 
 
 <script>
-const BUILD_TS='2026-06-01 15:08 IST'; // replaced at commit time with IST datetime
-const APP_VERSION=381; // Shared deployed version; increment once per released code change.
+const BUILD_TS='2026-06-02 09:29 IST'; // replaced at commit time with IST datetime
+const APP_VERSION=382; // Shared deployed version; increment once per released code change.
 const GOOGLE_DRIVE_CLIENT_ID='1015012642264-oi2nelv3v90k3d39r994a6nelgjs2a56.apps.googleusercontent.com'; // Public OAuth Web Client ID.
 const HARD_FILTER_SCHEMA='price_band_uc_buffer_v1';
 const STOCK_RUNWAY_CEILING_PCT=19.5; // UC-style ceiling for Max Entry; Rocket % only labels rockets.
@@ -355,6 +355,8 @@ const SURV_CORR_STORE='rs_surv_corr';
 const MISSED_OPP_STORE='rs_missed_opp_v2';
 const RECOMMEND_OUTCOME_STORE='rs_recommend_outcomes_v1';
 const RECOMMEND_HORIZON_DAYS=5;
+const RECOMMEND_CONVERSION_DAYS=2;
+const RECOMMEND_MIN_PROGRESS_FRACTION=0.25;
 const RECOMMEND_FEEDBACK_MIN_SAMPLES=20;
 const ENTRY_OUTCOME_STORE='rs_entry_outcomes_v2';
 const ENTRY_OUTCOME_HORIZON_DAYS=5;
@@ -1305,16 +1307,37 @@ function calcRecommendationOutcomeScore(p,threshold){
   const bestClose=p.bestCloseProfitPct;
   const finalClose=p.finalCloseProfitPct!=null?p.finalCloseProfitPct:bestClose;
   const worstLow=p.worstLowProfitPct;
-  if(p.rocketDate) return 1;
+  const earlyHigh=p.conversionHighProfitPct;
+  const earlyClose=p.conversionCloseProfitPct;
+  const earlyWorst=p.conversionWorstLowProfitPct;
+  if(p.rocketDate){
+    const days=p.rocketDays??RECOMMEND_HORIZON_DAYS;
+    return days<=RECOMMEND_CONVERSION_DAYS?1:0.75;
+  }
   let score=0;
-  if(bestHigh!=null&&isFinite(bestHigh)) score=Math.max(score,clampNum((bestHigh/tgt)*0.85,-1,0.85));
-  if(bestClose!=null&&isFinite(bestClose)) score=Math.max(score,clampNum((bestClose/tgt)*0.65,-1,0.65));
+  if(earlyHigh!=null&&isFinite(earlyHigh)) score=Math.max(score,clampNum((earlyHigh/tgt)*0.8,-1,0.55));
+  if(earlyClose!=null&&isFinite(earlyClose)) score=Math.max(score,clampNum((earlyClose/tgt)*0.65,-1,0.45));
+  if(bestHigh!=null&&isFinite(bestHigh)) score=Math.max(score,clampNum((bestHigh/tgt)*0.55,-1,0.55));
+  if(bestClose!=null&&isFinite(bestClose)) score=Math.max(score,clampNum((bestClose/tgt)*0.45,-1,0.45));
+  if(p.conversionAssessed&&!p.rocketDate){
+    const minProgress=tgt*RECOMMEND_MIN_PROGRESS_FRACTION;
+    const noBreak=(earlyHigh==null||earlyHigh<minProgress);
+    const weakClose=earlyClose!=null&&earlyClose<0;
+    if(noBreak||weakClose){
+      const noConvPenalty=noBreak? -0.25 : score;
+      const failPenalty=weakClose?clampNum(earlyClose/(tgt*0.45),-0.75,-0.08):score;
+      score=Math.min(score,noConvPenalty,failPenalty);
+    }
+  }
   if(finalClose!=null&&isFinite(finalClose)){
     const finalScore=clampNum(finalClose/tgt,-1,1);
-    score=(score*0.65)+(finalScore*0.35);
+    score=(score*0.7)+(finalScore*0.3);
     if(finalClose<0&&(bestHigh==null||bestHigh<tgt*0.35)){
       score=Math.min(score,clampNum(finalClose/(tgt*0.5),-1,-0.05));
     }
+  }
+  if(earlyWorst!=null&&isFinite(earlyWorst)&&earlyWorst<0&&(earlyHigh==null||earlyHigh<tgt*0.35)){
+    score=Math.min(score,clampNum((earlyWorst/(tgt*0.55))*0.9,-1,-0.08));
   }
   if(worstLow!=null&&isFinite(worstLow)&&worstLow<0&&(bestHigh==null||bestHigh<tgt*0.5)){
     score=Math.min(score,clampNum((worstLow/(tgt*0.6))*0.8,-1,-0.05));
@@ -1351,6 +1374,18 @@ function recordRecommendationOutcomeScan(scan){
       if(lowProfit!=null&&(p.worstLowProfitPct==null||lowProfit<p.worstLowProfitPct)){
         p.worstLowProfitPct=+lowProfit.toFixed(2);
       }
+      if(gap<=RECOMMEND_CONVERSION_DAYS){
+        p.conversionAssessed=gap===RECOMMEND_CONVERSION_DAYS;
+        if(highProfit!=null&&(p.conversionHighProfitPct==null||highProfit>p.conversionHighProfitPct)){
+          p.conversionHighProfitPct=+highProfit.toFixed(2);
+        }
+        if(closeProfit!=null) p.conversionCloseProfitPct=+closeProfit.toFixed(2);
+        if(lowProfit!=null&&(p.conversionWorstLowProfitPct==null||lowProfit<p.conversionWorstLowProfitPct)){
+          p.conversionWorstLowProfitPct=+lowProfit.toFixed(2);
+        }
+      } else if(!p.conversionAssessed&&(p.conversionHighProfitPct!=null||p.conversionCloseProfitPct!=null||p.conversionWorstLowProfitPct!=null)){
+        p.conversionAssessed=true;
+      }
       if(!p.rocketDate&&row.priceChange!=null&&row.priceChange>=issue.threshold){
         p.rocketDate=scan.date;p.rocketDays=gap;
       }
@@ -1364,6 +1399,7 @@ function recordRecommendationOutcomeScan(scan){
       date:scan.date,threshold:scan.threshold,
       picks:scan.recommendations.map(p=>({...p,observations:0,evaluatedThrough:null,rocketDate:null,rocketDays:null,
         bestHighProfitPct:null,bestCloseProfitPct:null,finalCloseProfitPct:null,worstLowProfitPct:null,
+        conversionHighProfitPct:null,conversionCloseProfitPct:null,conversionWorstLowProfitPct:null,conversionAssessed:false,
         bestDays:null,outcomeScore:null,complete:false}))
     };
   }
@@ -1376,11 +1412,15 @@ function getRecommendationOutcomeSummary(){
   const issues=Object.values((FS.get(RECOMMEND_OUTCOME_STORE)||{}).issues||{});
   const picks=issues.flatMap(i=>(i.picks||[]).filter(p=>p.complete&&p.observations>0));
   const rockets=picks.filter(p=>p.rocketDate);
+  const fastRockets=rockets.filter(p=>(p.rocketDays??RECOMMEND_HORIZON_DAYS)<=RECOMMEND_CONVERSION_DAYS);
+  const delayedRockets=rockets.length-fastRockets.length;
   const upsides=picks.map(p=>p.bestHighProfitPct).filter(v=>v!=null);
   const scored=picks.map(p=>p.outcomeScore).filter(v=>v!=null&&isFinite(v));
   const failures=picks.filter(p=>(p.outcomeScore!=null?p.outcomeScore:(p.rocketDate?1:0))<0);
+  const earlyFailures=picks.filter(p=>p.conversionAssessed&&!p.rocketDate&&(p.outcomeScore??0)<0);
   return {
     evaluated:picks.length,rockets:rockets.length,
+    fastRockets:fastRockets.length,delayedRockets,earlyFailures:earlyFailures.length,
     failures:failures.length,
     conversionPct:picks.length?+(rockets.length/picks.length*100).toFixed(1):null,
     avgRocketDays:rockets.length?+(meanArr(rockets.map(p=>p.rocketDays)).toFixed(1)):null,
@@ -3207,8 +3247,8 @@ function renderPerformance(){
       ? `${entrySummary.tracked} actual recommended buys are being tracked; selection feedback activates as completed ${ENTRY_OUTCOME_HORIZON_DAYS}-trading-day outcomes accumulate. Fresh buys and top-ups are assessed separately in the stored evidence.`
       : `Executed-entry feedback is ready. Future completed BUY executions that came from displayed recommendations will be assessed for net profit velocity across the next ${ENTRY_OUTCOME_HORIZON_DAYS} trading days.`;
   const outcomeText=recSummary.evaluated
-    ? `${recSummary.evaluated} completed engine-shortlist picks assessed across ${recSummary.issueDays} scan days. ${recSummary.rockets} became rockets within ${RECOMMEND_HORIZON_DAYS} trading days (${recSummary.conversionPct}%) and ${recSummary.failures||0} moved opposite enough to count as negative telemetry. Average outcome score is ${recSummary.avgOutcomeScore!=null?(recSummary.avgOutcomeScore>=0?'+':'')+recSummary.avgOutcomeScore.toFixed(3):'not available'}; average attainable high move is ${recSummary.avgBestHighPct!=null?(recSummary.avgBestHighPct>=0?'+':'')+recSummary.avgBestHighPct.toFixed(2)+'%':'not available'}.`
-    : `Outcome tracking has started. A shortlist is assessed after ${RECOMMEND_HORIZON_DAYS} later trading-day scans are observed.`;
+    ? `${recSummary.evaluated} completed engine-shortlist picks assessed across ${recSummary.issueDays} scan days. ${recSummary.rockets} became rockets within ${RECOMMEND_HORIZON_DAYS} trading days (${recSummary.conversionPct}%): ${recSummary.fastRockets||0} inside the ${RECOMMEND_CONVERSION_DAYS}d conversion window and ${recSummary.delayedRockets||0} delayed. ${recSummary.earlyFailures||0} failed the early window and ${recSummary.failures||0} moved opposite enough to count as negative telemetry. Average outcome score is ${recSummary.avgOutcomeScore!=null?(recSummary.avgOutcomeScore>=0?'+':'')+recSummary.avgOutcomeScore.toFixed(3):'not available'}; average attainable high move is ${recSummary.avgBestHighPct!=null?(recSummary.avgBestHighPct>=0?'+':'')+recSummary.avgBestHighPct.toFixed(2)+'%':'not available'}.`
+    : `Outcome tracking has started. A shortlist gets a ${RECOMMEND_CONVERSION_DAYS}-trading-day conversion check and a final ${RECOMMEND_HORIZON_DAYS}-trading-day assessment.`;
   const escapeText=exitPolicy?.escapeCount
     ? `${exitPolicy.escapeCount} sold lots became rockets within ${POST_SALE_ROCKET_HORIZON_DAYS} trading days of exit out of ${exitPolicy.assessedSales||0} assessed recent sales. Learned hold cap is ${exitPolicy.holdDays}d${exitPolicy.escapeTgtNudgePct?` and post-sale evidence adds +${exitPolicy.escapeTgtNudgePct.toFixed(2)}% to TGT`:''}.`
     : `No confirmed post-sale rockets within ${POST_SALE_ROCKET_HORIZON_DAYS} trading days have been observed yet.`;
