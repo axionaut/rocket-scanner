@@ -291,13 +291,14 @@ table.main tbody td{padding:9px 11px;font-family:'DM Mono',monospace;font-size:1
 
 
 <script>
-const BUILD_TS='2026-06-02 10:01 IST'; // replaced at commit time with IST datetime
-const APP_VERSION=384; // Shared deployed version; increment once per released code change.
+const BUILD_TS='2026-06-03 09:30 IST'; // replaced at commit time with IST datetime
+const APP_VERSION=385; // Shared deployed version; increment once per released code change.
 const GOOGLE_DRIVE_CLIENT_ID='1015012642264-oi2nelv3v90k3d39r994a6nelgjs2a56.apps.googleusercontent.com'; // Public OAuth Web Client ID.
-const HARD_FILTER_SCHEMA='price_band_uc_buffer_v1';
+const HARD_FILTER_SCHEMA='supply_pressure_v1';
 const STOCK_RUNWAY_CEILING_PCT=19.5; // UC-style ceiling for Max Entry; Rocket % only labels rockets.
 const PRICE_BAND_BLOCK_BUFFER_PCT=0.15; // Treat rounded 4.9/9.9/19.9 rows as effectively band-locked.
 const PRICE_COMPARE_EPS=0.0001; // Do not let a full tick/paisa breach pass a buy ceiling.
+const SELL_PRESSURE_EDGE_MIN=0.08; // DMI- must beat DMI+ by this normalized edge to count as supply pressure.
 const SYSTEM_TRADE_START_DATE='2026-04-01'; // Adaptive stats use trades closed from this date onward.
 let MARKET_MODE='stock';
 function modeKey(base){return base;}
@@ -321,7 +322,7 @@ let PERF_PERIOD_FILTER='all'; // 'all' | '1m' | '3m' | '6m' | '1y'
 let PERF_TRADE_WINDOWS=[]; // cached trade window rows from renderPerformance — used by current-window pill
 let PERF_LATEST_SUMMARY=null; // cached latest session summary from renderPerformance — used by renderStats card
 let ENGINE_DATA={};
-let REMOVED={uc:0,surv:0,liq:0,fscore:0,atr:0,deliv:0,fade:0};
+let REMOVED={uc:0,surv:0,liq:0,fscore:0,atr:0,deliv:0,fade:0,supply:0};
 let SUPPRESSED_HELD=0; // count of stocks hidden because already held in POSITIONS
 let SUPPRESSED_YDAY_ROCKET=0; // count of stocks hidden because they were rockets yesterday
 let SELECTED=new Set(); // symbols selected for basket — recomputed from FILT each applyFilters
@@ -1251,6 +1252,7 @@ function getHardFilterRowsFromEngine(E){
       kind:'surv',
       ruleKey:row.key,
     })),
+    {key:'supply_pressure',label:'Sell-Side Pressure',criteria:'Current DMI-/sell-side pressure stronger than buy-side, confirmed by weak VWAP/open/flow/retention',removed:rm.supply||0,rockets:rk.supply||[],active:true,kind:'core'},
     {key:'low_liquidity',label:'Low Liquidity',criteria:`Volume < Min Vol OR Shareholders < Min Sh (filter bar)`,removed:rm.liq||0,rockets:rk.liq||[],active:true,kind:'core'},
   ];
 }
@@ -1851,6 +1853,8 @@ function runEngine(raw, sessionTag){
     change_open:  findKey(/change_from_open.*1_day|1_day.*change_from_open/),
     rvol_time:    findKey(/^relative_volume_at_time$|relative_volume.*time/),
     rvol_day:     findKey(/^relative_volume_1_day$|relative_volume.*1_day/),
+    buy_qty:      findKey(/(^|_)buy(_|ing_)?(qty|quantity|volume|orders?)$|(^|_)bid(_|_qty|_quantity|_volume)/),
+    sell_qty:     findKey(/(^|_)sell(_|ing_)?(qty|quantity|volume|orders?)$|(^|_)ask(_|_qty|_quantity|_volume)|offer(_|_qty|_quantity|_volume)/),
     dmi_pos:      findKeyPref([new RegExp('directional_movement_index.*'+INTRADAY_TF.source+'.*positive'),new RegExp('directional_movement_index.*positive.*'+INTRADAY_TF.source)],/directional_movement_index.*positive/),
     dmi_neg:      findKeyPref([new RegExp('directional_movement_index.*'+INTRADAY_TF.source+'.*negative'),new RegExp('directional_movement_index.*negative.*'+INTRADAY_TF.source)],/directional_movement_index.*negative/),
     adx:          findKeyPref([new RegExp('average_directional_index.*'+INTRADAY_TF.source),new RegExp(INTRADAY_TF.source+'.*average_directional_index')],/average_directional_index/),
@@ -1862,6 +1866,68 @@ function runEngine(raw, sessionTag){
   K.adx_keys = findKeys(new RegExp('average_directional_index.*'+INTRADAY_TF.source)).concat(findKeys(new RegExp(INTRADAY_TF.source+'.*average_directional_index')));
   K.mfi_keys = findKeys(new RegExp('money_flow_index.*'+INTRADAY_TF.source)).concat(findKeys(new RegExp(INTRADAY_TF.source+'.*money_flow_index')));
   K.rsi_keys = findKeys(new RegExp('relative_strength_index.*'+INTRADAY_TF.source)).concat(findKeys(new RegExp(INTRADAY_TF.source+'.*relative_strength_index')));
+
+  function getSellPressureReason(d){
+    const directBuy=K.buy_qty?d[K.buy_qty]:null;
+    const directSell=K.sell_qty?d[K.sell_qty]:null;
+    if(directBuy!=null&&directSell!=null&&directBuy>0&&directSell>directBuy*1.05){
+      return `Sell side ${directSell.toFixed(0)} > buy side ${directBuy.toFixed(0)}`;
+    }
+
+    const dmiPairs=[];
+    const seenPairs=new Set();
+    const addPair=(posKey,negKey,weight,label)=>{
+      if(!posKey||!negKey) return;
+      const id=posKey+'|'+negKey;
+      if(seenPairs.has(id)) return;
+      seenPairs.add(id);
+      dmiPairs.push({posKey,negKey,weight,label});
+    };
+    [
+      ['5_minutes',1.35,'5m'],
+      ['15_minutes',1.15,'15m'],
+      ['30_minutes',1.0,'30m'],
+      ['45_minutes',0.85,'45m'],
+      ['1_hour',0.75,'1h']
+    ].forEach(([tf,weight,label])=>{
+      const pos=(K.dmi_pos_keys||[]).find(k=>k.includes(tf));
+      const neg=(K.dmi_neg_keys||[]).find(k=>k.includes(tf));
+      addPair(pos,neg,weight,label);
+    });
+    addPair(K.dmi_pos,K.dmi_neg,0.45,'1d');
+
+    let sellWeight=0,buyWeight=0,totalWeight=0,edgeSum=0,best=null;
+    dmiPairs.forEach(p=>{
+      const dp=d[p.posKey], dn=d[p.negKey];
+      if(dp==null||dn==null||!isFinite(dp)||!isFinite(dn)||(dp+dn)<=0) return;
+      const edge=(dn-dp)/(dn+dp);
+      totalWeight+=p.weight;
+      edgeSum+=edge*p.weight;
+      if(edge>=SELL_PRESSURE_EDGE_MIN) sellWeight+=p.weight;
+      else if(edge<=-SELL_PRESSURE_EDGE_MIN) buyWeight+=p.weight;
+      if(!best||edge>best.edge) best={...p,edge,dp,dn};
+    });
+    if(!totalWeight||sellWeight<Math.max(1.8,buyWeight+0.45)) return '';
+
+    const price=K.price?d[K.price]:null;
+    const vwap=K.vwap?d[K.vwap]:null;
+    const pc=K.price_change?d[K.price_change]:null;
+    const co=K.change_open?d[K.change_open]:null;
+    let confirms=0;
+    if(price!=null&&vwap!=null&&vwap>0&&price<vwap*0.9985) confirms++;
+    if(co!=null&&co<0) confirms++;
+    if(pc!=null&&pc<0) confirms++;
+    if(d.peak_retention!=null&&d.peak_retention<58) confirms++;
+    const mfiKeys=(K.mfi_keys&&K.mfi_keys.length)?K.mfi_keys:[K.mfi].filter(Boolean);
+    if(mfiKeys.some(k=>d[k]!=null&&d[k]<45)) confirms++;
+    const rsiKeys=(K.rsi_keys&&K.rsi_keys.length)?K.rsi_keys:[K.rsi].filter(Boolean);
+    if(rsiKeys.some(k=>d[k]!=null&&d[k]<45)) confirms++;
+
+    const netEdge=edgeSum/totalWeight;
+    if(confirms<1||netEdge<SELL_PRESSURE_EDGE_MIN) return '';
+    const pct=(best?.edge!=null?(best.edge*100).toFixed(1):'');
+    return `Sell-side pressure${best?` (${best.label} DMI- > DMI+ by ${pct}%)`:''}`;
+  }
 
   const parsed = raw.map(r => {
     const d = {};
@@ -2063,8 +2129,8 @@ function runEngine(raw, sessionTag){
   // profitable for 30 days. Non-EQ series exclusion is kept on top (user choice).
   const _liqMinVol=parseFloat(document.getElementById('fVolMult')?.value)||LIQ_MIN_VOL_DEFAULT;
   const _liqMinTurnover=parseFloat(document.getElementById('fMinTurnover')?.value)||0;
-  REMOVED={uc:0,surv:0,nonEq:0,liq:0,fscore:0,atr:0,deliv:0,fade:0,survRules:{},
-    rockets:{uc:[],surv:[],nonEq:[],liq:[],fscore:[],atr:[],deliv:[],fade:[]}};
+  REMOVED={uc:0,surv:0,nonEq:0,liq:0,fscore:0,atr:0,deliv:0,fade:0,supply:0,survRules:{},
+    rockets:{uc:[],surv:[],nonEq:[],liq:[],fscore:[],atr:[],deliv:[],fade:[],supply:[]}};
   const filtered=parsed.filter(d=>{
     const pc=K.price_change?d[K.price_change]:null;
     const sym=d.symbol;
@@ -2087,6 +2153,11 @@ function runEngine(raw, sessionTag){
       if(rules.length){const primary=rules[0];REMOVED.survRules[primary]=(REMOVED.survRules[primary]||0)+1;}
       return false;
     }
+    // Sell-side pressure — avoid names where current supply is stronger than demand.
+    // Uses direct buy/sell quantity columns when available, otherwise intraday DMI-/DMI+
+    // with weak VWAP/open/flow/retention confirmation. Blank signals pass as unknown.
+    const sellPressureReason=getSellPressureReason(d);
+    if(sellPressureReason){d._sellPressureReason=sellPressureReason;_track('supply');return false;}
     // Liquidity floor — volume, turnover, or shareholders below threshold
     const sh=K.shareholders?d[K.shareholders]:null;
     const vol=K.volume?d[K.volume]:null;
@@ -2704,6 +2775,7 @@ function renderStats(){
   if(REMOVED.atr>0)filterPills.push(`<span class="info-pill pill-amber">🚫 ${REMOVED.atr} zero/invalid ATR removed</span>`);
   if(REMOVED.deliv>0){const _dR=REMOVED.rockets?.deliv||[];const _dTip=_dR.length?'Low-delivery rockets hidden: '+_dR.map(x=>x.sym+' +'+x.pc.toFixed(1)+'%').join(', '):'Delivery <30% when present — excluded from learning and display';filterPills.push(`<span class="info-pill pill-cyan" title="${escHtml(_dTip)}">🚫 ${REMOVED.deliv} low delivery removed</span>`);}
   if(REMOVED.fade>0){const _fR=REMOVED.rockets?.fade||[];const _fTip=_fR.length?'Faded rockets hidden: '+_fR.map(x=>x.sym+' +'+x.pc.toFixed(1)+'%').join(', '):'Peak retention <50% — given back half the day\'s range';filterPills.push(`<span class="info-pill pill-gray" title="${escHtml(_fTip)}">🚫 ${REMOVED.fade} fading (peak ret &lt;50%) removed</span>`);}
+  if(REMOVED.supply>0){const _spR=REMOVED.rockets?.supply||[];const _spTip=_spR.length?'Sell-pressure rockets hidden: '+_spR.map(x=>x.sym+' +'+x.pc.toFixed(1)+'%').join(', '):'Current sell-side pressure stronger than buy-side; excluded from learning and display';filterPills.push(`<span class="info-pill pill-red" title="${escHtml(_spTip)}">Sell pressure ${REMOVED.supply} removed</span>`);}
   const topUpCt=FILT.filter(s=>s._isTopUp).length;
   if(topUpCt>0)filterPills.push(`<span class="info-pill pill-fire" title="Already in portfolio — shown as top-up candidates.">↑ ${topUpCt} top-up</span>`);
   if(SUPPRESSED_HELD>0)filterPills.push(`<span class="info-pill pill-rose" title="Short positions and zero-qty holdings are always hidden.">📌 ${SUPPRESSED_HELD} held</span>`);
@@ -3575,7 +3647,7 @@ function buildHardFilterMethodologyHTML(E){
       ? `<div style="font-size:11px;color:var(--amber);margin-top:8px">Showing last saved run (${survSize} flagged). Load NSE ZIP this session to refresh.</div>`
       : `<div style="margin-top:8px;padding:8px 10px;background:rgba(239,68,68,.08);border:1px solid rgba(239,68,68,.25);border-radius:8px;font-size:11px;color:var(--red)">NSE REG1 data not active — surveillance rows shown for configuration only, won't filter until a REG1 file is loaded.</div>`);
 
-  const totalRemoved=(REMOVED.uc||0)+(REMOVED.surv||0)+(REMOVED.nonEq||0)+(REMOVED.liq||0)+(REMOVED.fscore||0)+(REMOVED.atr||0)+(REMOVED.deliv||0)+(REMOVED.fade||0);
+  const totalRemoved=(REMOVED.uc||0)+(REMOVED.surv||0)+(REMOVED.nonEq||0)+(REMOVED.liq||0)+(REMOVED.fscore||0)+(REMOVED.atr||0)+(REMOVED.deliv||0)+(REMOVED.fade||0)+(REMOVED.supply||0);
   return `
     <h3 id="meth-filters" style="margin-top:28px">Hard Filters <span style="font-size:12px;color:var(--t3);font-weight:400">(${totalRemoved} removals in latest saved run)</span></h3>
 
@@ -5656,7 +5728,7 @@ async function initApp(){
         // are intentionally not restored under the current hard-filter schema.
         if(meth.removed&&typeof meth.removed==='object'){
           const restored=meth.hardFilterSchema===HARD_FILTER_SCHEMA?meth.removed:{};
-          REMOVED={uc:0,surv:0,nonEq:0,survRules:{},liq:0,fscore:0,atr:0,deliv:0,fade:0,rockets:{uc:[],surv:[],nonEq:[],liq:[],fscore:[],atr:[],deliv:[],fade:[]},...restored};
+          REMOVED={uc:0,surv:0,nonEq:0,survRules:{},liq:0,fscore:0,atr:0,deliv:0,fade:0,supply:0,rockets:{uc:[],surv:[],nonEq:[],liq:[],fscore:[],atr:[],deliv:[],fade:[],supply:[]},...restored};
           if(typeof REMOVED.survRules!=='object'||Array.isArray(REMOVED.survRules)) REMOVED.survRules={};
           ENGINE_DATA.removed=REMOVED;
         }
