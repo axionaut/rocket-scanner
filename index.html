@@ -291,8 +291,8 @@ table.main tbody td{padding:9px 11px;font-family:'DM Mono',monospace;font-size:1
 
 
 <script>
-const BUILD_TS='2026-06-03 09:30 IST'; // replaced at commit time with IST datetime
-const APP_VERSION=385; // Shared deployed version; increment once per released code change.
+const BUILD_TS='2026-06-03 10:19 IST'; // replaced at commit time with IST datetime
+const APP_VERSION=386; // Shared deployed version; increment once per released code change.
 const GOOGLE_DRIVE_CLIENT_ID='1015012642264-oi2nelv3v90k3d39r994a6nelgjs2a56.apps.googleusercontent.com'; // Public OAuth Web Client ID.
 const HARD_FILTER_SCHEMA='supply_pressure_v1';
 const STOCK_RUNWAY_CEILING_PCT=19.5; // UC-style ceiling for Max Entry; Rocket % only labels rockets.
@@ -343,7 +343,7 @@ const CORR_STORE='rs_corr';
 const CORR_BULL_STORE='rs_corr_bull';
 const CORR_BEAR_STORE='rs_corr_bear';
 const CORR_NEUT_STORE='rs_corr_neutral';
-const CORR_SCHEMA='independent_valid_target_v2';
+const CORR_SCHEMA='fresh_lagged_primary_v1';
 const METH_STORE='rs_meth';
 const REGIME_CAL_STORE='rs_regime_cal';
 const HOLD_STORE='rs_holdings';
@@ -2293,8 +2293,10 @@ function runEngine(raw, sessionTag){
   const regimeCorr={};
   const combinedCorr={};
   const targetCorr={};
+  let freshSignalCount=0;
   for(const f of FEATS){
     const today=isNaN(targetCorrToday[f])?null:targetCorrToday[f];
+    if(today!=null&&isFinite(today)&&Math.abs(today)>0.0001) freshSignalCount++;
     const regimeHist=REGIME_ACC?.corr?.[f]??null;
     let combinedHist=ACC_CORR?.corr?.[f]??null;
     if(!combinedIsIndependent&&legacyRegimeAccs.length){
@@ -2307,8 +2309,13 @@ function runEngine(raw, sessionTag){
     }
     regimeCorr[f]=blend(regimeHist,today,learnedN,includeToday);
     combinedCorr[f]=blend(combinedHist,today,combinedLearnedN,includeToday);
-    const selected=useRegimeCorr?regimeCorr[f]:combinedCorr[f];
-    targetCorr[f]=selected!=null?selected:(today!=null?today:0);
+  }
+  const useFreshCorr=freshSignalCount>0;
+  const scoringSource=useFreshCorr?'fresh_lagged':(useRegimeCorr?'regime_fallback':'combined_fallback');
+  for(const f of FEATS){
+    const today=isNaN(targetCorrToday[f])?null:targetCorrToday[f];
+    const hist=useRegimeCorr?regimeCorr[f]:combinedCorr[f];
+    targetCorr[f]=useFreshCorr?(today!=null?today:0):(hist!=null?hist:0);
   }
 
   // Save regime-specific accumulator
@@ -2340,31 +2347,17 @@ function runEngine(raw, sessionTag){
   ACC_CORR=newAcc;
   FS.set(modeKey(CORR_STORE), ACC_CORR);
 
-  // Slower feedback targets: eligible shortlist conversion and actual executed-entry
-  // net profit velocity. Both are capped so daily rocket learning remains primary.
+  // Slower feedback targets are recorded for review, but no longer blended into mRMR.
+  // Fresh previous-day -> today rocket correlation is the scoring signal when available.
   let recommendationFeedback=null, executedEntryFeedback=null;
   {
     const outcomeScan={date:getSessionDate(),threshold:ROCKET_THRESHOLD,rows:window._lastObservedDailyMoves||[],recommendations:[]};
     recordRecommendationOutcomeScan(outcomeScan);
     assessExecutedEntryOutcomeScan(outcomeScan);
     recommendationFeedback=getRecommendationFeedbackCorrelations(FEATS);
-    if(recommendationFeedback){
-      const alpha=Math.min(0.50,(recommendationFeedback.samples/(recommendationFeedback.samples+120))*0.55);
-      recommendationFeedback.alpha=alpha;
-      for(const f of FEATS){
-        const observed=recommendationFeedback.corr[f];
-        if(observed!=null&&isFinite(observed)) targetCorr[f]=(targetCorr[f]*(1-alpha))+(observed*alpha);
-      }
-    }
+    if(recommendationFeedback) recommendationFeedback.alpha=0;
     executedEntryFeedback=getExecutedEntryFeedbackCorrelations(FEATS);
-    if(executedEntryFeedback){
-      const alpha=Math.min(0.45,(executedEntryFeedback.samples/(executedEntryFeedback.samples+30))*0.45);
-      executedEntryFeedback.alpha=alpha;
-      for(const f of FEATS){
-        const observed=executedEntryFeedback.corr[f];
-        if(observed!=null&&isFinite(observed)) targetCorr[f]=(targetCorr[f]*(1-alpha))+(observed*alpha);
-      }
-    }
+    if(executedEntryFeedback) executedEntryFeedback.alpha=0;
   }
 
   // Keep price_change reference for stats display
@@ -2487,8 +2480,9 @@ function runEngine(raw, sessionTag){
   ENGINE_DATA={targetCorr,targetCorrToday,interCorr,mrmr,weights,features:FEATS,labels:LABELS,top10Feats,rocketCount:topN,rocketThreshold:ROCKET_THRESHOLD,accSessions:ACC_CORR?.sessions||1,laggedNote:laggedNote||'',
     regime:regime, marketBreadth:marketBreadth, avgMoveAll:todayAvgMoveAll, avgMoveUniverse:todayAvgMoveUniverse,
     recommendationFeedback,executedEntryFeedback,
-    useAccCorr: useRegimeCorr || (ACC_CORR?(ACC_CORR.sessions||0)>=2:false),
-    useRegimeCorr,
+    useFreshCorr, freshSignalCount, scoringSource,
+    useAccCorr: !useFreshCorr && (useRegimeCorr || (ACC_CORR?(ACC_CORR.sessions||0)>=2:false)),
+    useRegimeCorr: !useFreshCorr && useRegimeCorr,
     regimeSessions:{
       bull:  ACC_CORR_BULL ?(ACC_CORR_BULL.sessions ||0):0,
       bear:  ACC_CORR_BEAR ?(ACC_CORR_BEAR.sessions ||0):0,
@@ -2513,7 +2507,7 @@ function runEngine(raw, sessionTag){
   // Persist methodology data including interCorr matrix
   try{
     const methSave={targetCorr,targetCorrToday,interCorr,mrmr,weights,features:FEATS,labels:LABELS,top10Feats,rocketCount:ENGINE_DATA.rocketCount,rocketThreshold:ENGINE_DATA.rocketThreshold,accSessions:ENGINE_DATA.accSessions,laggedNote:ENGINE_DATA.laggedNote,
-      regime:ENGINE_DATA.regime,marketBreadth:ENGINE_DATA.marketBreadth,useAccCorr:ENGINE_DATA.useAccCorr,useRegimeCorr:ENGINE_DATA.useRegimeCorr,regimeSessions:ENGINE_DATA.regimeSessions,sectorCol:ENGINE_DATA.sectorCol,industryCol:ENGINE_DATA.industryCol,
+      regime:ENGINE_DATA.regime,marketBreadth:ENGINE_DATA.marketBreadth,useFreshCorr:ENGINE_DATA.useFreshCorr,freshSignalCount:ENGINE_DATA.freshSignalCount,scoringSource:ENGINE_DATA.scoringSource,useAccCorr:ENGINE_DATA.useAccCorr,useRegimeCorr:ENGINE_DATA.useRegimeCorr,regimeSessions:ENGINE_DATA.regimeSessions,sectorCol:ENGINE_DATA.sectorCol,industryCol:ENGINE_DATA.industryCol,
       yesterdayRockets:yesterdayRockets,continuationN,qualityTargetN:qualityN,totalParsed:totalParsed,hardFilterSchema:HARD_FILTER_SCHEMA,removed:{...REMOVED},survSize:Object.keys(NSE_SURV).length,
       avgMoveAll:todayAvgMoveAll,avgMoveUniverse:todayAvgMoveUniverse,recommendationFeedback,executedEntryFeedback};
     FS.set(modeKey(METH_STORE),methSave);
@@ -3830,13 +3824,16 @@ function _renderMethodologyInner(){
   };
   E.regimeSessions=rs;
   const corrSource = E.useRegimeCorr?'Regime-specific correlations active':(E.useAccCorr?'Combined fallback (regime <2 target sessions)':'Warming up (need ≥2 target sessions)');
+  const scoreCorrSource = E.useFreshCorr
+    ? `Fresh previous-day signal active (${E.freshSignalCount||0} features)`
+    : (E.useRegimeCorr?'Historical regime fallback active':(E.useAccCorr?'Historical combined fallback active':'Warming up (need a usable fresh target)'));
   const regimeTotal = (rs.bull||0)+(rs.bear||0)+(rs.neutral||0);
   const sessLabel = `${regimeTotal} sessions · ${E.laggedNote||'lagged learning starts next upload'}`;
 
   const regimeCardHTML=`<div class="regime-bar">
     <div class="regime-badge" style="color:${regimeColor}">${regimeIcon} ${(E.regime||'neutral').toUpperCase()}</div>
     <div class="regime-meta">
-      <div style="color:var(--t1);font-weight:600">${corrSource}</div>
+      <div style="color:var(--t1);font-weight:600">${scoreCorrSource}</div>
       <div>Breadth: ${E.marketBreadth!=null?(E.marketBreadth*100).toFixed(0)+'%':'?'} · ${sessLabel}${E.rocketCount!=null?' · 🚀 '+E.rocketCount+' rockets (≥'+(E.rocketThreshold||10)+'%)':''}</div>
     </div>
     <div class="regime-sessions">
@@ -3850,7 +3847,7 @@ function _renderMethodologyInner(){
 
   mc.innerHTML=''; // clear before rebuild
 
-  let wtHTML=`<table class="ct"><thead><tr><th>Feature</th><th>Src</th><th>Target r (acc)</th><th>Today r</th><th>Direction</th><th>Redundancy</th><th>mRMR Score</th><th class="bar-cell">Weight</th><th>Wt%</th></tr></thead><tbody>`;
+  let wtHTML=`<table class="ct"><thead><tr><th>Feature</th><th>Src</th><th>Target r (score)</th><th>Today r</th><th>Direction</th><th>Redundancy</th><th>mRMR Score</th><th class="bar-cell">Weight</th><th>Wt%</th></tr></thead><tbody>`;
   for(const f of sorted){
     const tc=E.targetCorr[f],m=E.mrmr[f],w=E.weights[f];
     const dir=tc>=0?'<span style="color:var(--green)">↑</span>':'<span style="color:var(--red)">↓</span>';
