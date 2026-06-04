@@ -292,8 +292,8 @@ table.main tbody td{padding:9px 11px;font-family:'DM Mono',monospace;font-size:1
 
 
 <script>
-const BUILD_TS='2026-06-04 09:18 IST'; // replaced at commit time with IST datetime
-const APP_VERSION=388; // Shared deployed version; increment once per released code change.
+const BUILD_TS='2026-06-04 09:27 IST'; // replaced at commit time with IST datetime
+const APP_VERSION=389; // Shared deployed version; increment once per released code change.
 const GOOGLE_DRIVE_CLIENT_ID='1015012642264-oi2nelv3v90k3d39r994a6nelgjs2a56.apps.googleusercontent.com'; // Public OAuth Web Client ID.
 const HARD_FILTER_SCHEMA='supply_pressure_v1';
 const STOCK_RUNWAY_CEILING_PCT=19.5; // UC-style ceiling for Max Entry; Rocket % only labels rockets.
@@ -4767,10 +4767,8 @@ async function handleCloudLoadAction(){
     showToast('Connect Google Drive first, then press Load Files.',4000,true);
     return;
   }
-  setLoading(true,'Choose Rocket Scanner folder or Scanner Uploads...');
   const opened=await openUploadFolderPicker();
   if(!opened) setLoading(false);
-  else if(!window.showDirectoryPicker) setTimeout(()=>setLoading(false),1200);
 }
 
 // ── Brain Export / Import ──
