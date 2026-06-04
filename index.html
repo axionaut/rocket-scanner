@@ -292,8 +292,8 @@ table.main tbody td{padding:9px 11px;font-family:'DM Mono',monospace;font-size:1
 
 
 <script>
-const BUILD_TS='2026-06-04 09:50 IST'; // replaced at commit time with IST datetime
-const APP_VERSION=391; // Shared deployed version; increment once per released code change.
+const BUILD_TS='2026-06-04 10:03 IST'; // replaced at commit time with IST datetime
+const APP_VERSION=392; // Shared deployed version; increment once per released code change.
 const GOOGLE_DRIVE_CLIENT_ID='1015012642264-oi2nelv3v90k3d39r994a6nelgjs2a56.apps.googleusercontent.com'; // Public OAuth Web Client ID.
 const HARD_FILTER_SCHEMA='raw_rvol_directional_pressure_v1';
 const STOCK_RUNWAY_CEILING_PCT=19.5; // UC-style ceiling for Max Entry; Rocket % only labels rockets.
@@ -413,6 +413,7 @@ const FS = (() => {
   function isConnected(){ return !!_accessToken&&Date.now()<_expiresAt-30000; }
   function clearSession(){
     _accessToken=null;_expiresAt=0;
+    _fileCache=null;
     try{sessionStorage.removeItem(SESSION_STORE);}catch(e){}
     updateFolderUI();
   }
@@ -459,6 +460,8 @@ const FS = (() => {
           localStorage.setItem(PROVIDER_STORE,'drive');
           try{sessionStorage.setItem(SESSION_STORE,JSON.stringify({token:_accessToken,expiresAt:_expiresAt}));}catch(e){}
           updateFolderUI();
+          _fileCache=null;
+          try{await listAppDataFiles(true);}catch(e){console.warn('Drive file index refresh failed after connect',e);}
           let brain=null;
           try{brain=await read();}catch(e){console.warn('Drive brain read failed after connect',e);}
           resolve({ok:true,brain});
@@ -770,6 +773,11 @@ const FS = (() => {
     load(brain||{});
     return brain;
   }
+  async function refreshCloudIndex(){
+    if(!isConnected()) return null;
+    _fileCache=null;
+    return await listAppDataFiles(true);
+  }
   async function ensureLoaded(){
     if(!_brainLoaded&&isConnected()) await loadFromDisk();
     return _brain;
@@ -786,7 +794,7 @@ const FS = (() => {
   function hasFolder(){ return isConnected(); }
   function hasLocalBrainFolder(){ return !!_localDirHandle; }
 
-  return {init,connect,needsReconnect,isConfigured,setClientId,isConnected,read,readUploadText,readUploadFile,saveUploadedInputs,write,set,setMultiple,get,load,loadFromDisk,ensureLoaded,getBrain,reset,folderName,hasFolder,setLocalDirectoryHandle,hasLocalBrainFolder};
+  return {init,connect,needsReconnect,isConfigured,setClientId,isConnected,read,readUploadText,readUploadFile,saveUploadedInputs,write,set,setMultiple,get,load,loadFromDisk,ensureLoaded,refreshCloudIndex,getBrain,reset,folderName,hasFolder,setLocalDirectoryHandle,hasLocalBrainFolder};
 })();
 
 function updateFolderUI(){
@@ -843,17 +851,33 @@ async function connectCloudStorage(opts={}){
     }
     FS.setClientId(id);
   }
+  setLoading(true,FS.needsReconnect()?'Reconnecting Google Drive...':'Connecting Google Drive...');
   const result=await FS.connect();
   if(!result.ok){
+    setLoading(false);
     const reason=result.reason==='google_library'?'Google authorization library could not load.':result.reason==='popup_failed'?'Google authorization popup was closed or blocked.':'Google Drive connection failed: '+result.reason;
     showToast(reason,5000,true);
     return false;
   }
+  setMsg('Loading latest cloud brain...');
   if(result.brain) FS.load(result.brain);
+  else {
+    try{await FS.loadFromDisk();}catch(e){console.warn('Drive brain reload failed after connect',e);}
+  }
+  setMsg('Loading latest Drive inputs...');
+  try{
+    await FS.refreshCloudIndex?.();
+    const hydratedCount=await hydrateSessionCSVsFromWorkspace();
+    try{enrichRowsWithNSEData(ALL);}catch(e){console.warn('Drive reconnect NSE enrichment failed',e);}
+    if(hydratedCount||Object.keys(FS.getBrain()||{}).length) await FS.write(FS.getBrain());
+  }catch(e){console.warn('Drive input hydration failed after connect',e);}
   updateFolderUI();
   if(reloadAfterConnect){
-    showToast('<strong>Google Drive connected.</strong> Loading your latest cloud brain...');
+    showToast('<strong>Google Drive connected.</strong> Loading your latest cloud data...');
+    setMsg('Preparing refreshed dashboard...');
     setTimeout(()=>location.reload(),400);
+  }else{
+    setLoading(false);
   }
   return true;
 }
@@ -4970,7 +4994,7 @@ function keepFullerTradebookHistory(candidate,sourcePath,lastModified){
 }
 
 async function hydrateSessionCSVsFromWorkspace(){
-  if(!FS.hasFolder()||!FS.readUploadText) return;
+  if(!FS.hasFolder()||!FS.readUploadText) return 0;
   const [csvFiles,zipEntry]=await Promise.all([
     Promise.all([
       FS.readUploadText('Holdings.csv'),
@@ -5028,9 +5052,11 @@ async function hydrateSessionCSVsFromWorkspace(){
     }
   }
   syncExecutedRecommendedEntries();
-  if(Object.keys(updates).length) FS.setMultiple(updates);
+  const updateCount=Object.keys(updates).length;
+  if(updateCount) FS.setMultiple(updates);
   // Recompute missed opportunities with fresh Orders + ALL (if available) and persist to brain
   try{computeMissedOpp();}catch(e){}
+  return updateCount;
 }
 
 // ── Tradebook Parser & Adaptive Stats ──
