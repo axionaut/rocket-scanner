@@ -292,8 +292,8 @@ table.main tbody td{padding:9px 11px;font-family:'DM Mono',monospace;font-size:1
 
 
 <script>
-const BUILD_TS='2026-06-04 09:27 IST'; // replaced at commit time with IST datetime
-const APP_VERSION=389; // Shared deployed version; increment once per released code change.
+const BUILD_TS='2026-06-04 09:40 IST'; // replaced at commit time with IST datetime
+const APP_VERSION=390; // Shared deployed version; increment once per released code change.
 const GOOGLE_DRIVE_CLIENT_ID='1015012642264-oi2nelv3v90k3d39r994a6nelgjs2a56.apps.googleusercontent.com'; // Public OAuth Web Client ID.
 const HARD_FILTER_SCHEMA='supply_pressure_v1';
 const STOCK_RUNWAY_CEILING_PCT=19.5; // UC-style ceiling for Max Entry; Rocket % only labels rockets.
@@ -3034,6 +3034,7 @@ function renderPerformance(){
   const recSummary=getRecommendationOutcomeSummary();
   const entrySummary=getExecutedEntryOutcomeSummary();
   const recPos=getRecommendedPositionSize(p);
+  applyLearnedMaxAllocDefault(recPos);
   const posRatio=(p.avgCapital>0&&recPos.value)?recPos.value/p.avgCapital:null;
   const recPosSub=recPos.value
     ? `${recPos.source}${posRatio?` · ${(posRatio*100).toFixed(0)}% of avg`:''}`
@@ -4343,6 +4344,21 @@ function getRecommendedPositionSize(perfStats){
   rec=Math.max(avgActual*0.4,Math.min(avgActual*2.0,rec));
   return {value:Math.round(rec),source:`Learned risk ${fmtINR(Math.round(learnedRiskRs))} @ SL ${adaptiveSL}%`,riskRs:Math.round(learnedRiskRs),kellyPct:kelly*100,riskMult};
 }
+function applyLearnedMaxAllocDefault(recPos=null){
+  const el=document.getElementById('fMaxAlloc');
+  if(!el||String(el.value||'').trim()) return false;
+  let rec=recPos;
+  if(!rec){
+    const trips=getAdaptiveTradeTrips(TRADEBOOK_STATS?.tripsData||[]);
+    if(trips.length) rec=getRecommendedPositionSize(computePerfStats(trips));
+  }
+  const value=rec?.value;
+  if(!(value>0)) return false;
+  el.value=String(Math.round(value));
+  el.dataset.autoDefault='1';
+  el.title=rec?.source?`Default from Performance Position Size: ${rec.source}`:'Default from Performance Position Size';
+  return true;
+}
 function getBasketPositionSize(){
   const capital=parseFloat(document.getElementById('fCapital')?.value)||0;
   const maxAlloc=parseFloat(document.getElementById('fMaxAlloc')?.value)||0;
@@ -4687,6 +4703,7 @@ function clearFilters(){
   const topupEl=document.getElementById('fTopupAlloc');if(topupEl)topupEl.value='50';
   const rocketEl=document.getElementById('fRocketPct');if(rocketEl)rocketEl.value='10';
   const minScoreEl=document.getElementById('fMinScore');if(minScoreEl)minScoreEl.value='70';
+  applyLearnedMaxAllocDefault();
   VOL_AUTO=true;setAutoVolume();
   applyFilters();
   localStorage.removeItem(SCANNER_STORE);
@@ -5660,6 +5677,7 @@ async function processFiles(files){
 }
 
 document.getElementById('fInDir').addEventListener('change',e=>{if(e.target.files.length)processFiles(Array.from(e.target.files));});
+document.getElementById('fMaxAlloc')?.addEventListener('input',e=>{delete e.target.dataset.autoDefault;});
 
 
 // ══════════════════════════════════════════════════
@@ -5877,9 +5895,10 @@ function saveFilterState(){
     sortDir:SDIR,
   };
   localStorage.setItem(modeKey(SCANNER_STORE), JSON.stringify(state));
+  const maxAllocEl=document.getElementById('fMaxAlloc');
   localStorage.setItem(SHARED_FILTER_STORE, JSON.stringify({
     capital:document.getElementById('fCapital')?.value||'',
-    maxAlloc:document.getElementById('fMaxAlloc')?.value||''
+    maxAlloc:maxAllocEl?.dataset.autoDefault==='1'?'':(maxAllocEl?.value||'')
   }));
 }
 
@@ -5908,6 +5927,7 @@ function loadFilterState(){
     } else {
       VOL_AUTO=true; setAutoVolume();
     }
+    applyLearnedMaxAllocDefault();
     if(state.sortCol)SCOL=state.sortCol;
     if(state.sortDir)SDIR=state.sortDir;
   }catch(e){console.warn('Could not load filter state',e);}
