@@ -92,6 +92,7 @@ body::before{content:'';position:fixed;inset:0;background:radial-gradient(ellips
 .srch::before{content:'⌕';position:absolute;left:12px;top:50%;transform:translateY(-50%);color:var(--t3);font-size:16px}
 select,.btn{padding:10px 14px;background:var(--bg-card);border:1px solid var(--border);border-radius:8px;color:var(--t1);font-family:'Plus Jakarta Sans',sans-serif;font-size:12px;cursor:pointer;outline:none;font-weight:500;transition:all .2s}
 select:hover,.btn:hover{border-color:var(--blue);background:var(--bg-hover)}
+.btn:disabled,.btn:disabled:hover{opacity:.45;cursor:not-allowed;transform:none;box-shadow:none;background:var(--bg-card);border-color:var(--border);color:var(--t3)}
 select option{background:var(--bg-card)}
 .btn-fire{background:linear-gradient(135deg,var(--fire),var(--fire2));border:none;font-weight:700;color:#fff;box-shadow:0 2px 12px rgba(249,115,22,.25)}
 .btn-fire:hover{box-shadow:0 4px 20px rgba(249,115,22,.4);transform:translateY(-1px)}
@@ -292,8 +293,8 @@ table.main tbody td{padding:9px 11px;font-family:'DM Mono',monospace;font-size:1
 
 
 <script>
-const BUILD_TS='2026-06-04 10:03 IST'; // replaced at commit time with IST datetime
-const APP_VERSION=392; // Shared deployed version; increment once per released code change.
+const BUILD_TS='2026-06-04 13:02 IST'; // replaced at commit time with IST datetime
+const APP_VERSION=393; // Shared deployed version; increment once per released code change.
 const GOOGLE_DRIVE_CLIENT_ID='1015012642264-oi2nelv3v90k3d39r994a6nelgjs2a56.apps.googleusercontent.com'; // Public OAuth Web Client ID.
 const HARD_FILTER_SCHEMA='raw_rvol_directional_pressure_v1';
 const STOCK_RUNWAY_CEILING_PCT=19.5; // UC-style ceiling for Max Entry; Rocket % only labels rockets.
@@ -778,6 +779,16 @@ const FS = (() => {
     _fileCache=null;
     return await listAppDataFiles(true);
   }
+  async function verifyConnection(){
+    if(!isConnected()) return false;
+    try{
+      await listAppDataFiles(true);
+      return true;
+    }catch(e){
+      console.warn('Drive connection check failed',e);
+      return false;
+    }
+  }
   async function ensureLoaded(){
     if(!_brainLoaded&&isConnected()) await loadFromDisk();
     return _brain;
@@ -794,16 +805,20 @@ const FS = (() => {
   function hasFolder(){ return isConnected(); }
   function hasLocalBrainFolder(){ return !!_localDirHandle; }
 
-  return {init,connect,needsReconnect,isConfigured,setClientId,isConnected,read,readUploadText,readUploadFile,saveUploadedInputs,write,set,setMultiple,get,load,loadFromDisk,ensureLoaded,refreshCloudIndex,getBrain,reset,folderName,hasFolder,setLocalDirectoryHandle,hasLocalBrainFolder};
+  return {init,connect,needsReconnect,isConfigured,setClientId,isConnected,read,readUploadText,readUploadFile,saveUploadedInputs,write,set,setMultiple,get,load,loadFromDisk,ensureLoaded,refreshCloudIndex,verifyConnection,getBrain,reset,folderName,hasFolder,setLocalDirectoryHandle,hasLocalBrainFolder};
 })();
 
 function updateFolderUI(){
   const loadBtn=document.getElementById('loadFilesBtn');
   if(loadBtn){
+    const driveConnected=FS.isConnected();
+    loadBtn.disabled=!driveConnected;
     loadBtn.textContent='Load Files';
-    loadBtn.title='Select the Rocket Scanner folder or Scanner Uploads folder. Connect Drive separately first.';
-    loadBtn.style.borderColor='';
-    loadBtn.style.color='';
+    loadBtn.title=driveConnected
+      ? 'Select the Rocket Scanner folder or Scanner Uploads folder.'
+      : 'Reconnect Google Drive before loading files.';
+    loadBtn.style.borderColor=driveConnected?'':'';
+    loadBtn.style.color=driveConnected?'':'';
   }
   const driveBtn=document.getElementById('driveBtn');
   if(!driveBtn) return;
@@ -824,6 +839,7 @@ function updateFolderUI(){
     driveBtn.style.color='';
   }
 }
+setInterval(()=>{try{updateFolderUI();}catch(e){}},30000);
 
 function showDriveAuthRequiredState(){
   const msg=FS.needsReconnect()
@@ -838,6 +854,21 @@ function showDriveAuthRequiredState(){
     const nd=document.querySelector('#noDataBanner div:nth-child(2)');
     if(nd) nd.innerHTML=`Cloud data is private. Press <strong style="color:var(--fire)">Drive</strong> to reconnect and restore the latest saved dashboard.`;
   }catch(e){}
+}
+
+async function ensureDriveReadyForLoad(){
+  updateFolderUI();
+  if(!FS.hasFolder()){
+    showDriveAuthRequiredState();
+    showToast('Connect Google Drive first, then press Load Files.',4000,true);
+    return false;
+  }
+  const ok=await FS.verifyConnection();
+  updateFolderUI();
+  if(ok) return true;
+  showDriveAuthRequiredState();
+  showToast('Google Drive is disconnected. Press Drive to reconnect before loading files.',5000,true);
+  return false;
 }
 
 async function connectCloudStorage(opts={}){
@@ -4764,11 +4795,7 @@ async function openUploadFolderPicker(){
 }
 
 async function handleCloudLoadAction(){
-  if(!FS.hasFolder()){
-    showDriveAuthRequiredState();
-    showToast('Connect Google Drive first, then press Load Files.',4000,true);
-    return;
-  }
+  if(!(await ensureDriveReadyForLoad())) return;
   const opened=await openUploadFolderPicker();
   if(!opened) setLoading(false);
 }
@@ -5502,10 +5529,8 @@ async function processScannerUpload(scannerFile, mode){
 }
 
 async function processFiles(files){
-  if(!FS.hasFolder()){
+  if(!(await ensureDriveReadyForLoad())){
     setLoading(false);
-    showDriveAuthRequiredState();
-    showToast('Connect Google Drive first, then press Load Files.',5000,true);
     return;
   }
   setLoading(true,'Saving selected inputs to Google Drive...');
