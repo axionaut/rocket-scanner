@@ -293,8 +293,8 @@ table.main tbody td{padding:9px 11px;font-family:'DM Mono',monospace;font-size:1
 
 
 <script>
-const BUILD_TS='2026-06-05 10:45 IST'; // replaced at commit time with IST datetime
-const APP_VERSION=394; // Shared deployed version; increment once per released code change.
+const BUILD_TS='2026-06-05 13:52 IST'; // replaced at commit time with IST datetime
+const APP_VERSION=395; // Shared deployed version; increment once per released code change.
 const GOOGLE_DRIVE_CLIENT_ID='1015012642264-oi2nelv3v90k3d39r994a6nelgjs2a56.apps.googleusercontent.com'; // Public OAuth Web Client ID.
 const HARD_FILTER_SCHEMA='raw_rvol_directional_pressure_v1';
 const STOCK_RUNWAY_CEILING_PCT=19.5; // UC-style ceiling for Max Entry; Rocket % only labels rockets.
@@ -5320,22 +5320,18 @@ function exportBasket(){
   // Universal SL/TGT from tradebook (already cost-adjusted)
   const adaptiveSL=roundPct05(TRADEBOOK_STATS?TRADEBOOK_STATS.adaptiveSL:3.5);
   const adaptiveTGT=roundPct05(getEffectiveTgtPct()||(TRADEBOOK_STATS?TRADEBOOK_STATS.adaptiveTGT:3.7));
+  const runnerTGT=roundPct05(adaptiveTGT*2);
 
   const orders=[];
   let rejectedCount=0;
-  selList.forEach((s,i)=>{
-    if(getPriceBandBlockReason(s)){rejectedCount++;return;}
-    const am = basketAlloc[s.symbol];
-    if(am?.rejected){rejectedCount++;return;} // skip cost-floor rejections
-    const qty = capital > 0 ? (am?.qty || 0) : 1;
-    if(qty===0) return;
-    const buyPrice=getBuyPrice(s);
-    const maxEntry=getMaxEntry(s);
-    if(maxEntry!==null&&buyPrice>maxEntry+PRICE_COMPARE_EPS){rejectedCount++;return;}
+  let splitCount=0;
+  let orderSeq=0;
+  const pushBuyOrder=(s,qty,buyPrice,targetPct,label)=>{
+    if(qty<=0) return;
     const sym=s.symbol;
     const name=s.name||sym;
     orders.push({
-      id:Date.now()+i,
+      id:Date.now()+orderSeq++,
       instrument:{
         tradingsymbol:sym,scripCode:'',type:'EQ',symbol:sym,
         segment:'NSE',exchange:'NSE',tickSize:0.01,lotSize:1,
@@ -5352,16 +5348,36 @@ function exportBasket(){
         quantity:qty,price:parseFloat(tickPrice(buyPrice).toFixed(2)),
         triggerPrice:0,disclosedQuantity:0,lastPrice:0,
         variety:'regular',
-        gtt:{stoploss:-adaptiveSL,target:adaptiveTGT},
-        tags:[]
+        gtt:{stoploss:-adaptiveSL,target:targetPct},
+        tags:label?[label]:[]
       }
     });
+  };
+  selList.forEach(s=>{
+    if(getPriceBandBlockReason(s)){rejectedCount++;return;}
+    const am = basketAlloc[s.symbol];
+    if(am?.rejected){rejectedCount++;return;} // skip cost-floor rejections
+    const qty = capital > 0 ? (am?.qty || 0) : 1;
+    if(qty===0) return;
+    const buyPrice=getBuyPrice(s);
+    const maxEntry=getMaxEntry(s);
+    if(maxEntry!==null&&buyPrice>maxEntry+PRICE_COMPARE_EPS){rejectedCount++;return;}
+    if(qty>=2){
+      const baseQty=Math.ceil(qty/2);
+      const runnerQty=qty-baseQty;
+      pushBuyOrder(s,baseQty,buyPrice,adaptiveTGT,'TGT1');
+      pushBuyOrder(s,runnerQty,buyPrice,runnerTGT,'TGT2');
+      splitCount++;
+    } else {
+      pushBuyOrder(s,qty,buyPrice,adaptiveTGT,'TGT1');
+    }
   });
 
   if(!orders.length){showToast('Capital too low to buy even 1 share of any selected stock.',4000,true);return;}
   downloadBasket(orders,'Zerodha_Basket_Buy');
   const rejNote=rejectedCount>0?` · ${rejectedCount} skipped (below net floor)`:'';
-  showToast(`<strong>Exported ${orders.length} BUY orders</strong> as Zerodha_Basket_Buy JSON${rejNote}`);
+  const splitNote=splitCount>0?` Â· split ${splitCount} stocks @ ${adaptiveTGT.toFixed(2)}% / ${runnerTGT.toFixed(2)}%`:'';
+  showToast(`<strong>Exported ${orders.length} BUY orders</strong> as Zerodha_Basket_Buy JSON${splitNote}${rejNote}`);
 }
 
 // ── Basket export helper: Zerodha limits 20 orders per basket ──
