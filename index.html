@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>NSE Rocket Scanner v5</title>
+<title>NSE Rocket Scanner</title>
 <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🚀</text></svg>">
 <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
 <script src="https://accounts.google.com/gsi/client" async defer></script>
@@ -293,8 +293,8 @@ table.main tbody td{padding:9px 11px;font-family:'DM Mono',monospace;font-size:1
 
 
 <script>
-const BUILD_TS='2026-06-04 13:02 IST'; // replaced at commit time with IST datetime
-const APP_VERSION=393; // Shared deployed version; increment once per released code change.
+const BUILD_TS='2026-06-05 10:45 IST'; // replaced at commit time with IST datetime
+const APP_VERSION=394; // Shared deployed version; increment once per released code change.
 const GOOGLE_DRIVE_CLIENT_ID='1015012642264-oi2nelv3v90k3d39r994a6nelgjs2a56.apps.googleusercontent.com'; // Public OAuth Web Client ID.
 const HARD_FILTER_SCHEMA='raw_rvol_directional_pressure_v1';
 const STOCK_RUNWAY_CEILING_PCT=19.5; // UC-style ceiling for Max Entry; Rocket % only labels rockets.
@@ -369,6 +369,7 @@ const POST_SALE_ROCKET_HORIZON_DAYS=5;
 // Kept separate from the former day-high accumulator: these measure absolute daily change.
 const AVG_MOVE_ALL_STORE='rs_avg_move_all_v1';
 const AVG_MOVE_UNIVERSE_STORE='rs_avg_move_universe_v1';
+const INTRADAY_LEDGER_STORE='rs_intraday_ledger_v1';
 const REC_COUNT_STORE='rs_rec_count';
 const NSE_HOLIDAYS_STORE='rs_nse_holidays';
 let TRADEBOOK_STATS=null; // Includes net profit-velocity exitPolicy applied to adaptiveSL/adaptiveTGT/holdLimitDays.
@@ -2420,6 +2421,7 @@ function runEngine(raw, sessionTag){
 
   const pctls={};
   for(const f of FEATS)pctls[f]=pctRank(filtered.map(d=>d[f]));
+  const intradayTrajectory=buildIntradayTrajectoryModel(filtered,FEATS,weights,targetCorr,pctls);
 
   const results=filtered.map((d,idx)=>{
     let rawScore=0,maxW=0;
@@ -2429,9 +2431,12 @@ function runEngine(raw, sessionTag){
       maxW+=w;
       rawScore+=w*(targetCorr[f]>=0?p:(1-p));
     }
-    // Pure mRMR score — no qualitative multipliers
+    // Base mRMR score refined by same-day feature trajectory when prior uploads exist.
     const rawFinal = maxW>0 ? rawScore/maxW : 0.5;
-    const score = Math.round(rawFinal*100*10)/10;
+    const travel=intradayTrajectory.bySymbol[d.symbol]||null;
+    const travelAlpha=travel?0.18*clampNum(travel.coverage,0,1):0;
+    const refinedRaw=travelAlpha>0?(rawFinal*(1-travelAlpha)+travel.signal*travelAlpha):rawFinal;
+    const score = Math.round(refinedRaw*100*10)/10;
 
     const vol=(K.volume?d[K.volume]:null);
     const flags=[];
@@ -2463,6 +2468,7 @@ function runEngine(raw, sessionTag){
       rangePos:d.range_pos,
       pctFrom52wHigh:d.pct_from_52w_high,
       rocketScore:score, tier, flags,
+      intradayTrajectory:travel,
       isSurv:_isSurv, survRules:_survRules,
       // Calculated SL/Target per stock — adaptive from tradebook if available
       slPct: (()=>{
@@ -2517,6 +2523,12 @@ function runEngine(raw, sessionTag){
   ENGINE_DATA={targetCorr,targetCorrToday,interCorr,mrmr,weights,features:FEATS,labels:LABELS,top10Feats,rocketCount:topN,rocketThreshold:ROCKET_THRESHOLD,accSessions:ACC_CORR?.sessions||1,laggedNote:laggedNote||'',
     regime:regime, marketBreadth:marketBreadth, avgMoveAll:todayAvgMoveAll, avgMoveUniverse:todayAvgMoveUniverse,
     recommendationFeedback,executedEntryFeedback,
+    intradayTrajectory:{
+      active:intradayTrajectory.active,
+      sampleCount:intradayTrajectory.sampleCount,
+      stocks:Object.keys(intradayTrajectory.bySymbol||{}).length,
+      alphaMax:0.18
+    },
     useFreshCorr, freshSignalCount, scoringSource,
     useAccCorr: !useFreshCorr && (useRegimeCorr || (ACC_CORR?(ACC_CORR.sessions||0)>=2:false)),
     useRegimeCorr: !useFreshCorr && useRegimeCorr,
@@ -2546,7 +2558,8 @@ function runEngine(raw, sessionTag){
     const methSave={targetCorr,targetCorrToday,interCorr,mrmr,weights,features:FEATS,labels:LABELS,top10Feats,rocketCount:ENGINE_DATA.rocketCount,rocketThreshold:ENGINE_DATA.rocketThreshold,accSessions:ENGINE_DATA.accSessions,laggedNote:ENGINE_DATA.laggedNote,
       regime:ENGINE_DATA.regime,marketBreadth:ENGINE_DATA.marketBreadth,useFreshCorr:ENGINE_DATA.useFreshCorr,freshSignalCount:ENGINE_DATA.freshSignalCount,scoringSource:ENGINE_DATA.scoringSource,useAccCorr:ENGINE_DATA.useAccCorr,useRegimeCorr:ENGINE_DATA.useRegimeCorr,regimeSessions:ENGINE_DATA.regimeSessions,sectorCol:ENGINE_DATA.sectorCol,industryCol:ENGINE_DATA.industryCol,
       yesterdayRockets:yesterdayRockets,continuationN,qualityTargetN:qualityN,totalParsed:totalParsed,hardFilterSchema:HARD_FILTER_SCHEMA,removed:{...REMOVED},survSize:Object.keys(NSE_SURV).length,
-      avgMoveAll:todayAvgMoveAll,avgMoveUniverse:todayAvgMoveUniverse,recommendationFeedback,executedEntryFeedback};
+      avgMoveAll:todayAvgMoveAll,avgMoveUniverse:todayAvgMoveUniverse,recommendationFeedback,executedEntryFeedback,
+      intradayTrajectory:ENGINE_DATA.intradayTrajectory};
     FS.set(modeKey(METH_STORE),methSave);
     // Update regime calendar: date → regime
     const regCal=FS.get(modeKey(REGIME_CAL_STORE))||{};
@@ -5445,6 +5458,72 @@ function loadPrevSnapForMode(mode){
   out.meta={savedDate:source.savedDate||null,regime:source.regime||null,marketBreadth:source.marketBreadth??null};
   return out;
 }
+function compactFeatureValue(v){
+  if(v===null||v===undefined||isNaN(v)) return null;
+  return +parseFloat(v).toFixed(3);
+}
+function buildScannerStockMatrix(rows, cols){
+  const stocks={};
+  rows.forEach(d=>{
+    const sym=normSym(d.symbol);
+    if(!sym) return;
+    stocks[sym]=cols.map(f=>compactFeatureValue(d[f]));
+  });
+  return stocks;
+}
+function getIntradayLedgerForMode(mode){
+  const ledger=FS.get(modeKey(INTRADAY_LEDGER_STORE,mode));
+  const today=getSessionDate();
+  if(!ledger||ledger.date!==today||!Array.isArray(ledger.samples)) return {date:today,mode,cols:[],samples:[]};
+  return ledger;
+}
+function saveIntradayLedgerForMode(mode, cols, stocks, tag){
+  if(!cols?.length||!stocks||!Object.keys(stocks).length) return;
+  const today=getSessionDate();
+  const ledger=getIntradayLedgerForMode(mode);
+  const sample={ts:Date.now(),tag:tag||null,stocks};
+  if(ledger.samples.length&&tag&&ledger.samples[ledger.samples.length-1].tag===tag) return;
+  ledger.date=today;ledger.mode=mode;ledger.cols=cols;ledger.samples=[...ledger.samples,sample].slice(-12);
+  FS.set(modeKey(INTRADAY_LEDGER_STORE,mode),ledger);
+}
+function rankInSorted(arr,v){
+  if(v==null||isNaN(v)||!arr?.length) return null;
+  let lo=0,hi=arr.length;
+  while(lo<hi){const mid=(lo+hi)>>1;if(arr[mid]<=v)lo=mid+1;else hi=mid;}
+  return arr.length>1?Math.min(1,Math.max(0,(lo-0.5)/(arr.length-1))):0.5;
+}
+function buildIntradayTrajectoryModel(filtered, feats, weights, targetCorr, pctls){
+  const ledger=getIntradayLedgerForMode(MARKET_MODE);
+  if(!ledger.samples.length||!ledger.cols?.length) return {bySymbol:{},sampleCount:0,active:false};
+  const sortedVals={};
+  feats.forEach(f=>{sortedVals[f]=filtered.map(d=>d[f]).filter(v=>v!=null&&!isNaN(v)).sort((a,b)=>a-b);});
+  const colIndex={};ledger.cols.forEach((f,i)=>{colIndex[f]=i;});
+  const first=ledger.samples[0], prev=ledger.samples[ledger.samples.length-1];
+  const bySymbol={};
+  filtered.forEach((d,idx)=>{
+    const sym=d.symbol, prevVals=prev.stocks?.[sym], firstVals=first.stocks?.[sym];
+    if(!prevVals&&!firstVals) return;
+    let prevDelta=0, dayDelta=0, prevW=0, dayW=0;
+    feats.forEach(f=>{
+      const ci=colIndex[f];
+      const w=weights[f]||0, p=pctls[f]?.[idx];
+      if(ci==null||!w||p==null) return;
+      const bullishNow=targetCorr[f]>=0?p:(1-p);
+      const pv=prevVals?rankInSorted(sortedVals[f],prevVals[ci]):null;
+      if(pv!=null){prevDelta+=w*(bullishNow-(targetCorr[f]>=0?pv:(1-pv)));prevW+=w;}
+      const fv=firstVals?rankInSorted(sortedVals[f],firstVals[ci]):null;
+      if(fv!=null){dayDelta+=w*(bullishNow-(targetCorr[f]>=0?fv:(1-fv)));dayW+=w;}
+    });
+    if(prevW<=0&&dayW<=0) return;
+    const prevNorm=prevW>0?prevDelta/prevW:0;
+    const dayNorm=dayW>0?dayDelta/dayW:prevNorm;
+    const delta=(prevW>0&&dayW>0)?(prevNorm*0.65+dayNorm*0.35):(prevW>0?prevNorm:dayNorm);
+    const coverage=Math.min(1,Math.max(prevW,dayW));
+    const signal=clampNum(0.5+(delta*1.35),0,1);
+    bySymbol[sym]={signal,delta,coverage,prevDelta:prevNorm,dayDelta:dayNorm};
+  });
+  return {bySymbol,sampleCount:ledger.samples.length,active:true};
+}
 function applySavedFiltersForMode(mode){
   const ids=['fMinScore','fPriceMin','fPriceMax','fMin1D','fMax1D','fVol','fVolMult','fMinTurnover','fMinMarketCap','fCapital','fMaxAlloc','fReDrop','fTopupAlloc','fRocketPct'];
   const prev={};
@@ -5498,12 +5577,13 @@ async function processScannerUpload(scannerFile, mode){
     try{FS.set(modeKey(ALL_STORE,mode),{data:ALL.map(s=>({...s,name:s.name?s.name.substring(0,20):s.symbol})),fileTag:scannerFile.name+' · '+raw.length+' stocks',ts:Date.now()});}catch(e){console.warn('Could not save scan data',e);}
     if(window._lastEngineFeats&&window._lastParsedFiltered){
       const cols=window._lastEngineFeats, stocks={};
-      window._lastParsedFiltered.forEach(d=>{stocks[d.symbol]=cols.map(f=>{const v=d[f];return(v===null||v===undefined)?null:+parseFloat(v).toFixed(2);});});
+      Object.assign(stocks,buildScannerStockMatrix(window._lastParsedFiltered,cols));
       const today=getSessionDate(), existingSnap=FS.get(modeKey(SNAP_KEY,mode)), updates={};
       const existingDate=existingSnap?.savedDate, isLegacyFormat=existingDate&&/^[A-Z][a-z]{2} /.test(existingDate);
       if(existingSnap&&existingSnap.stocks&&(isLegacyFormat||!existingDate||existingDate!==today))updates[modeKey(SNAP_PREV_KEY,mode)]=existingSnap;
       updates[modeKey(SNAP_KEY,mode)]={cols,stocks,savedDate:today,regime:ENGINE_DATA?.regime||null,marketBreadth:ENGINE_DATA?.marketBreadth??null,mode};
       FS.setMultiple(updates);
+      saveIntradayLedgerForMode(mode,cols,stocks,sessionTag);
     }
     if(mode==='stock'){
       const threshold=ENGINE_DATA?.rocketThreshold||10;
