@@ -293,8 +293,8 @@ table.main tbody td{padding:9px 11px;font-family:'DM Mono',monospace;font-size:1
 
 
 <script>
-const BUILD_TS='2026-06-05 13:52 IST'; // replaced at commit time with IST datetime
-const APP_VERSION=395; // Shared deployed version; increment once per released code change.
+const BUILD_TS='2026-06-09 15:35 IST'; // replaced at commit time with IST datetime
+const APP_VERSION=396; // Shared deployed version; increment once per released code change.
 const GOOGLE_DRIVE_CLIENT_ID='1015012642264-oi2nelv3v90k3d39r994a6nelgjs2a56.apps.googleusercontent.com'; // Public OAuth Web Client ID.
 const HARD_FILTER_SCHEMA='raw_rvol_directional_pressure_v1';
 const STOCK_RUNWAY_CEILING_PCT=19.5; // UC-style ceiling for Max Entry; Rocket % only labels rockets.
@@ -3441,8 +3441,8 @@ function renderPerformance(){
       {key:'_sortDays',label:'Days Held',align:'right',fmt:(v,r)=>_daysFmt(r.daysHeld),clrFn:()=>'var(--t1)'},
       {key:'tgtPrice',label:'Target ₹',align:'right',fmt:(v,r)=>v!=null?fmtINR(v)+`<span style="font-size:10px;color:var(--t3);margin-left:4px">+${adaptiveTGT}%</span>`:'—',clrFn:()=>'var(--green)'},
       {key:'slPrice',label:'SL ₹',align:'right',fmt:(v,r)=>v!=null?fmtINR(v)+`<span style="font-size:10px;color:var(--t3);margin-left:4px">-${adaptiveSL}%</span>`:'—',clrFn:()=>'var(--red)'},
-      {key:'tsl1Price',label:'TSL 1 ₹',align:'right',bold:true,fmt:(v,r)=>v!=null?fmtINR(v)+`<div style="font-size:10px;color:var(--t3);margin-top:1px">trail ${Number(r.tsl1Points??0).toLocaleString('en-IN',INR_2)} pts · ${Number(r.tsl1GapPct??0).toFixed(2)}%</div>`:'—',clrFn:(v,r)=>v==null?'var(--t3)':r.tsl1LockPct>0?'var(--green)':r.tsl1LockPct===0?'var(--amber)':'var(--red)'},
-      {key:'tsl2Price',label:'TSL 2 ₹',align:'right',bold:true,fmt:(v,r)=>v!=null?fmtINR(v)+`<div style="font-size:10px;color:var(--t3);margin-top:1px">trail ${Number(r.tsl2Points??0).toLocaleString('en-IN',INR_2)} pts · ${Number(r.tsl2GapPct??0).toFixed(2)}%</div>`:'—',clrFn:(v,r)=>v==null?'var(--t3)':r.tsl2LockPct>0?'var(--green)':r.tsl2LockPct===0?'var(--amber)':'var(--red)'},
+      {key:'tsl1Price',label:'TSL 1 Trigger ₹',align:'right',bold:true,fmt:(v,r)=>v!=null?fmtINR(v)+`<div style="font-size:10px;color:var(--t3);margin-top:1px">gap ${Number(r.tsl1Distance??0).toLocaleString('en-IN',INR_2)} · step ${Number(r.tsl1Points??0).toLocaleString('en-IN',INR_2)}</div><div style="font-size:10px;color:var(--t3);margin-top:1px">${Number(r.tsl1GapPct??0).toFixed(2)}% gap</div>`:'—',clrFn:(v,r)=>v==null?'var(--t3)':r.tsl1LockPct>0?'var(--green)':r.tsl1LockPct===0?'var(--amber)':'var(--red)'},
+      {key:'tsl2Price',label:'TSL 2 Trigger ₹',align:'right',bold:true,fmt:(v,r)=>v!=null?fmtINR(v)+`<div style="font-size:10px;color:var(--t3);margin-top:1px">gap ${Number(r.tsl2Distance??0).toLocaleString('en-IN',INR_2)} · step ${Number(r.tsl2Points??0).toLocaleString('en-IN',INR_2)}</div><div style="font-size:10px;color:var(--t3);margin-top:1px">${Number(r.tsl2GapPct??0).toFixed(2)}% gap</div>`:'—',clrFn:(v,r)=>v==null?'var(--t3)':r.tsl2LockPct>0?'var(--green)':r.tsl2LockPct===0?'var(--amber)':'var(--red)'},
       {key:'signal',label:'Signal',align:'right',bold:true,fmt:v=>v!=null?(v>=0?'+':'')+v.toFixed(2):'—',clrFn:v=>v==null?'var(--t3)':v>0?'var(--green)':v<0?'var(--red)':'var(--t2)'},
     ];
     // Sort: signal ascending (worst first), then days desc
@@ -4214,26 +4214,29 @@ function calcPositionTSL({sym, qty, avgCost, ltp, scannerRow, adaptiveSL, adapti
   const qtyIncreased=prev?.qty!=null&&qty>prev.qty;
   const reset=!!(avgChanged||qtyIncreased);
 
-  // Proper Zerodha TSL for the split-GTT system:
-  // trail gap % = max(half of that leg's target %, Daily ATR%)
-  // trail points = buy/avg price × trail gap %
+  // Proper Zerodha GTT TSL for the split-GTT system:
+  // Zerodha's "Trailing points" field is the ratchet step, not the stop distance.
+  // So the table shows the actual stop-loss trigger price separately from the step.
+  // TSL trigger = LTP - gap points. Gap % = max(half of that leg's target %, Daily ATR%).
   const calcLeg=(targetPct, prevKey)=>{
     const floorPct=targetPct/2;
     const gapPct=Math.max(floorPct, atrPct||0);
-    const trailPoints=tickPrice(Math.max(minStep, avgCost*gapPct/100));
-    const rawTsl=tickPrice(Math.max(protective, peak-trailPoints));
-    const prevTsl=(prev?.[prevKey]!=null&&isFinite(prev[prevKey]))?prev[prevKey]:null;
-    const tsl=(!prevTsl||reset)?rawTsl:Math.max(prevTsl,rawTsl);
+    const gapPoints=tickPrice(Math.max(minStep, ltp*gapPct/100));
+    const rawTsl=tickPrice(Math.max(0, ltp-gapPoints));
+    const stepPoints=+minStep.toFixed(2);
+    const tsl=rawTsl;
     return {
       targetPct:+targetPct.toFixed(2),
       floorPct:+floorPct.toFixed(2),
       gapPct:+gapPct.toFixed(2),
-      trailPoints:+trailPoints.toFixed(2),
+      trailPoints:stepPoints,
+      trailStepPoints:stepPoints,
+      gapPoints:+gapPoints.toFixed(2),
       rawTsl:+rawTsl.toFixed(2),
       tsl:+tsl.toFixed(2),
       lockPct:+(((tsl-avgCost)/avgCost)*100).toFixed(2),
-      distancePoints:+Math.max(0,peak-tsl).toFixed(2),
-      rawDistancePoints:+Math.max(0,peak-rawTsl).toFixed(2),
+      distancePoints:+Math.max(0,ltp-tsl).toFixed(2),
+      rawDistancePoints:+Math.max(0,ltp-rawTsl).toFixed(2),
       basis:atrPct!=null&&atrPct>=floorPct?'ATR floor':'Half-target floor'
     };
   };
