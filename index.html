@@ -3370,12 +3370,18 @@ function renderPerformance(){
         if(JSON.stringify(_tslStore[sym]||{})!==JSON.stringify(tslInfo)) _tslChanged=true;
       }
       const signal=null; // computed below after all rows collected — needs cross-row normalisation
-      const rawTslPrice=tslInfo?.tsl??null;
-      const tslPrice=actionableSellTrigger(rawTslPrice,ltp);
+      const rawTsl1Price=tslInfo?.tsl1??null;
+      const rawTsl2Price=tslInfo?.tsl2??tslInfo?.tsl??null;
+      const tsl1Price=actionableSellTrigger(rawTsl1Price,ltp);
+      const tsl2Price=actionableSellTrigger(rawTsl2Price,ltp);
       _rows.push({sym,qty,avg:avgCost,ltp,pnlPct,pnlRs,daysHeld,capDeployed,tgtPrice,slPrice,distSL,
-        tslPrice,tslRawPrice:rawTslPrice,tslGapPct:tslInfo?.gapPct??null,tslPeakPct:tslInfo?.peakProfitPct??null,
-        tslLockPct:tslInfo?.lockPct??null,tslPoints:tslInfo?.trailStepPoints??tslInfo?.trailPoints??null,
-        tslDistance:tslInfo?.distancePoints??null,tslBasis:tslInfo?.basis||'',signal,
+        tslPrice:tsl2Price,tslRawPrice:rawTsl2Price,tslGapPct:tslInfo?.gapPct2??tslInfo?.gapPct??null,tslPeakPct:tslInfo?.peakProfitPct??null,
+        tslLockPct:tslInfo?.lockPct2??tslInfo?.lockPct??null,tslPoints:tslInfo?.trailPoints2??tslInfo?.trailStepPoints??tslInfo?.trailPoints??null,
+        tslDistance:tslInfo?.distancePoints2??tslInfo?.distancePoints??null,tslBasis:tslInfo?.basis2||tslInfo?.basis||'',
+        tsl1Price,tsl1RawPrice:rawTsl1Price,tsl1GapPct:tslInfo?.gapPct1??null,tsl1LockPct:tslInfo?.lockPct1??null,
+        tsl1Points:tslInfo?.trailPoints1??null,tsl1Distance:tslInfo?.distancePoints1??null,tsl1Basis:tslInfo?.basis1||'',tsl1TargetPct:tslInfo?.targetPct1??adaptiveTGT,
+        tsl2Price,tsl2RawPrice:rawTsl2Price,tsl2GapPct:tslInfo?.gapPct2??null,tsl2LockPct:tslInfo?.lockPct2??null,
+        tsl2Points:tslInfo?.trailPoints2??null,tsl2Distance:tslInfo?.distancePoints2??null,tsl2Basis:tslInfo?.basis2||'',tsl2TargetPct:tslInfo?.targetPct2??(adaptiveTGT*2),signal,
         _sortDays:daysHeld==null?-1:daysHeld});
     };
     if(POSITIONS?.length) POSITIONS.forEach(p=>{if(p.qty>0) _addPos(p.symbol,p.qty,p.avg||p.avgCost,p.ltp);});
@@ -3435,7 +3441,8 @@ function renderPerformance(){
       {key:'_sortDays',label:'Days Held',align:'right',fmt:(v,r)=>_daysFmt(r.daysHeld),clrFn:()=>'var(--t1)'},
       {key:'tgtPrice',label:'Target ₹',align:'right',fmt:(v,r)=>v!=null?fmtINR(v)+`<span style="font-size:10px;color:var(--t3);margin-left:4px">+${adaptiveTGT}%</span>`:'—',clrFn:()=>'var(--green)'},
       {key:'slPrice',label:'SL ₹',align:'right',fmt:(v,r)=>v!=null?fmtINR(v)+`<span style="font-size:10px;color:var(--t3);margin-left:4px">-${adaptiveSL}%</span>`:'—',clrFn:()=>'var(--red)'},
-      {key:'tslPrice',label:'TSL ₹',align:'right',bold:true,fmt:(v,r)=>v!=null?fmtINR(v)+`<div style="font-size:10px;color:var(--t3);margin-top:1px">step ${Number(r.tslPoints??0).toLocaleString('en-IN',INR_2)} pts</div>`:'—',clrFn:(v,r)=>v==null?'var(--t3)':r.tslLockPct>0?'var(--green)':r.tslLockPct===0?'var(--amber)':'var(--red)'},
+      {key:'tsl1Price',label:'TSL 1 ₹',align:'right',bold:true,fmt:(v,r)=>v!=null?fmtINR(v)+`<div style="font-size:10px;color:var(--t3);margin-top:1px">trail ${Number(r.tsl1Points??0).toLocaleString('en-IN',INR_2)} pts · ${Number(r.tsl1GapPct??0).toFixed(2)}%</div>`:'—',clrFn:(v,r)=>v==null?'var(--t3)':r.tsl1LockPct>0?'var(--green)':r.tsl1LockPct===0?'var(--amber)':'var(--red)'},
+      {key:'tsl2Price',label:'TSL 2 ₹',align:'right',bold:true,fmt:(v,r)=>v!=null?fmtINR(v)+`<div style="font-size:10px;color:var(--t3);margin-top:1px">trail ${Number(r.tsl2Points??0).toLocaleString('en-IN',INR_2)} pts · ${Number(r.tsl2GapPct??0).toFixed(2)}%</div>`:'—',clrFn:(v,r)=>v==null?'var(--t3)':r.tsl2LockPct>0?'var(--green)':r.tsl2LockPct===0?'var(--amber)':'var(--red)'},
       {key:'signal',label:'Signal',align:'right',bold:true,fmt:v=>v!=null?(v>=0?'+':'')+v.toFixed(2):'—',clrFn:v=>v==null?'var(--t3)':v>0?'var(--green)':v<0?'var(--red)':'var(--t2)'},
     ];
     // Sort: signal ascending (worst first), then days desc
@@ -4199,46 +4206,74 @@ function calcPositionTSL({sym, qty, avgCost, ltp, scannerRow, adaptiveSL, adapti
   const peak=+Math.max(ltp, (dayHigh!=null&&isFinite(dayHigh))?dayHigh:0).toFixed(2);
   const peakProfitPct=+(((peak-avgCost)/avgCost)*100).toFixed(2);
   const protective=tickPrice(avgCost*(1-adaptiveSL/100));
-  const target=(adaptiveTGT&&isFinite(adaptiveTGT)&&adaptiveTGT>0)?adaptiveTGT:3.7;
-  const ceiling=Math.max(target, Math.min(target*3, 15));
-  const progress=Math.max(0,Math.min(1,peakProfitPct/ceiling));
+  const target1=(adaptiveTGT&&isFinite(adaptiveTGT)&&adaptiveTGT>0)?adaptiveTGT:4.2;
+  const target2=target1*2;
   const atrPct=(scannerRow?.atr!=null&&isFinite(scannerRow.atr)&&scannerRow.atr>0)?scannerRow.atr:null;
-  const curveGap=adaptiveSL*(1-0.65*progress);
-  const atrMult=1.2-(0.5*progress);
-  const volFloor=atrPct!=null?atrPct*atrMult:0;
-  const rawGap=peakProfitPct>0?Math.min(adaptiveSL,Math.max(curveGap,volFloor)):adaptiveSL;
-  const rawTsl=tickPrice(Math.max(protective, peak*(1-rawGap/100)));
+  const minStep=getZerodhaMinTrailPoints(avgCost);
   const avgChanged=prev?.avg!=null&&Math.abs(prev.avg-avgCost)/avgCost>0.01;
   const qtyIncreased=prev?.qty!=null&&qty>prev.qty;
-  const prevTsl=(prev?.tsl!=null&&isFinite(prev.tsl))?prev.tsl:null;
-  const tsl=(!prevTsl||avgChanged||qtyIncreased)?rawTsl:Math.max(prevTsl,rawTsl);
-  const lockPct=+(((tsl-avgCost)/avgCost)*100).toFixed(2);
-  const distancePoints=+Math.max(0,peak-tsl).toFixed(2);
-  const rawDistancePoints=+Math.max(0,peak-rawTsl).toFixed(2);
-  // Zerodha "Trailing" is the favorable-move step size, not the current stop distance.
-  const minStep=getZerodhaMinTrailPoints(ltp);
-  const atrPoints=atrPct!=null?ltp*atrPct/100:0;
-  const stepCandidate=atrPoints>0?atrPoints*0.10:minStep;
-  const maxUsefulStep=distancePoints>0?Math.max(minStep,distancePoints*0.25):minStep;
-  const trailStep=tickPrice(Math.min(Math.max(minStep,stepCandidate),maxUsefulStep));
-  const basis=peakProfitPct<=0?'Protective':(atrPct!=null&&volFloor>=curveGap?'ATR floor':'Target curve');
+  const reset=!!(avgChanged||qtyIncreased);
+
+  // Proper Zerodha TSL for the split-GTT system:
+  // trail gap % = max(half of that leg's target %, Daily ATR%)
+  // trail points = buy/avg price × trail gap %
+  const calcLeg=(targetPct, prevKey)=>{
+    const floorPct=targetPct/2;
+    const gapPct=Math.max(floorPct, atrPct||0);
+    const trailPoints=tickPrice(Math.max(minStep, avgCost*gapPct/100));
+    const rawTsl=tickPrice(Math.max(protective, peak-trailPoints));
+    const prevTsl=(prev?.[prevKey]!=null&&isFinite(prev[prevKey]))?prev[prevKey]:null;
+    const tsl=(!prevTsl||reset)?rawTsl:Math.max(prevTsl,rawTsl);
+    return {
+      targetPct:+targetPct.toFixed(2),
+      floorPct:+floorPct.toFixed(2),
+      gapPct:+gapPct.toFixed(2),
+      trailPoints:+trailPoints.toFixed(2),
+      rawTsl:+rawTsl.toFixed(2),
+      tsl:+tsl.toFixed(2),
+      lockPct:+(((tsl-avgCost)/avgCost)*100).toFixed(2),
+      distancePoints:+Math.max(0,peak-tsl).toFixed(2),
+      rawDistancePoints:+Math.max(0,peak-rawTsl).toFixed(2),
+      basis:atrPct!=null&&atrPct>=floorPct?'ATR floor':'Half-target floor'
+    };
+  };
+
+  const leg1=calcLeg(target1,'tsl1');
+  const leg2=calcLeg(target2,'tsl2');
   return {
-    tsl:+tsl.toFixed(2),
-    rawTsl:+rawTsl.toFixed(2),
-    trailPoints:+trailStep.toFixed(2),
-    trailStepPoints:+trailStep.toFixed(2),
+    // Legacy aliases point to the runner leg, because that is the one usually managed manually.
+    tsl:leg2.tsl,
+    rawTsl:leg2.rawTsl,
+    trailPoints:leg2.trailPoints,
+    trailStepPoints:leg2.trailPoints,
     minTrailPoints:minStep,
-    distancePoints,
-    rawDistancePoints,
-    gapPct:+rawGap.toFixed(2),
+    distancePoints:leg2.distancePoints,
+    rawDistancePoints:leg2.rawDistancePoints,
+    gapPct:leg2.gapPct,
+    lockPct:leg2.lockPct,
+    basis:leg2.basis,
+    tsl1:leg1.tsl,
+    rawTsl1:leg1.rawTsl,
+    trailPoints1:leg1.trailPoints,
+    gapPct1:leg1.gapPct,
+    lockPct1:leg1.lockPct,
+    distancePoints1:leg1.distancePoints,
+    targetPct1:leg1.targetPct,
+    basis1:leg1.basis,
+    tsl2:leg2.tsl,
+    rawTsl2:leg2.rawTsl,
+    trailPoints2:leg2.trailPoints,
+    gapPct2:leg2.gapPct,
+    lockPct2:leg2.lockPct,
+    distancePoints2:leg2.distancePoints,
+    targetPct2:leg2.targetPct,
+    basis2:leg2.basis,
     peak,
     peakProfitPct,
-    lockPct,
-    basis,
     atrPct:atrPct!=null?+atrPct.toFixed(2):null,
     avg:+avgCost.toFixed(2),
     qty,
-    reset:!!(avgChanged||qtyIncreased),
+    reset,
     updated:getSessionDate()
   };
 }
