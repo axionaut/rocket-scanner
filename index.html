@@ -372,6 +372,31 @@ const AVG_MOVE_UNIVERSE_STORE='rs_avg_move_universe_v1';
 const INTRADAY_LEDGER_STORE='rs_intraday_ledger_v1';
 const REC_COUNT_STORE='rs_rec_count';
 const NSE_HOLIDAYS_STORE='rs_nse_holidays';
+// Keep rocket_brain.json for learned state only. Input-file derivatives are rebuilt
+// from Google Drive canonical files; crypto-era keys are purged completely.
+const SOURCE_DERIVED_BRAIN_KEYS=new Set([
+  ALL_STORE,
+  HOLD_STORE,
+  POS_STORE,
+  ORDERS_STORE,
+  TRADEBOOK_STORE,
+  NSE_HOLIDAYS_STORE,
+]);
+function shouldDropBrainKey(key){
+  const k=String(key||'').toLowerCase();
+  if(!k) return false;
+  if(k.includes('crypto')) return true;
+  return SOURCE_DERIVED_BRAIN_KEYS.has(key);
+}
+function pruneBrainForStorage(brain){
+  const src=(brain&&typeof brain==='object')?brain:{};
+  const out={};
+  Object.entries(src).forEach(([key,value])=>{
+    if(shouldDropBrainKey(key)) return;
+    out[key]=value;
+  });
+  return out;
+}
 let TRADEBOOK_STATS=null; // Includes net profit-velocity exitPolicy applied to adaptiveSL/adaptiveTGT/holdLimitDays.
 let LAST_BUY_DATE_MAP={}; // Legacy latest-buy map retained for stored-brain compatibility.
 let ORDERS_TODAY=null; // [{symbol, type, qty, price, time}] — COMPLETE orders only
@@ -602,9 +627,11 @@ const FS = (() => {
 
   async function write(data){
     if(_saveTimer){clearTimeout(_saveTimer);_saveTimer=null;}
-    const localOk=await writeLocalBrain(data);
+    const cleaned=pruneBrainForStorage(data);
+    if(data===_brain) _brain=cleaned;
+    const localOk=await writeLocalBrain(cleaned);
     if(!isConnected()) return localOk;
-    try{return await uploadFile(BRAIN_FILE,JSON.stringify(data),'application/json');}
+    try{return await uploadFile(BRAIN_FILE,JSON.stringify(cleaned),'application/json');}
     catch(e){console.warn('FS.write failed',e);return false;}
   }
 
@@ -755,6 +782,7 @@ const FS = (() => {
 
   // Set one key and schedule a debounced write
   function set(key,value){
+    if(shouldDropBrainKey(key)){delete _brain[key];return;}
     _brain[key]=value;
     if(_saveTimer) clearTimeout(_saveTimer);
     _saveTimer=setTimeout(()=>write(_brain),400);
@@ -762,13 +790,28 @@ const FS = (() => {
 
   // Set multiple keys in one write cycle (avoids two debounced writes)
   function setMultiple(updates){
-    Object.assign(_brain,updates);
-    if(_saveTimer) clearTimeout(_saveTimer);
-    _saveTimer=setTimeout(()=>write(_brain),400);
+    const kept={}; let dropped=false;
+    Object.entries(updates||{}).forEach(([key,value])=>{
+      if(shouldDropBrainKey(key)){delete _brain[key];dropped=true;return;}
+      kept[key]=value;
+    });
+    if(Object.keys(kept).length) Object.assign(_brain,kept);
+    if(Object.keys(kept).length||dropped){
+      if(_saveTimer) clearTimeout(_saveTimer);
+      _saveTimer=setTimeout(()=>write(_brain),400);
+    }
   }
 
   function get(key){ return _brain[key]??null; }
-  function load(brain){ _brain=brain||{}; _brainLoaded=true; writeLocalBrain(_brain).catch(e=>console.warn('Local brain mirror failed after load',e)); }
+  function load(brain){
+    const raw=(brain&&typeof brain==='object')?brain:{};
+    const hadDropped=Object.keys(raw).some(shouldDropBrainKey);
+    _brain=pruneBrainForStorage(raw);
+    _brainLoaded=true;
+    writeLocalBrain(_brain).catch(e=>console.warn('Local brain mirror failed after load',e));
+    // Seamless one-time migration: old/full brains still load, then the next cloud copy is pruned automatically.
+    if(hadDropped&&isConnected()) write(_brain).catch(e=>console.warn('Cloud brain migration save failed',e));
+  }
   async function loadFromDisk(){
     if(!isConnected()) return null;
     const brain=await read();
@@ -796,7 +839,7 @@ const FS = (() => {
   }
   function getBrain(){ return _brain; }
   function reset(preserved={}){
-    _brain=preserved||{};
+    _brain=pruneBrainForStorage(preserved||{});
     _brainLoaded=true;
     if(_saveTimer) clearTimeout(_saveTimer);
     if(Object.keys(_brain).length) write(_brain);
@@ -4855,7 +4898,7 @@ async function handleCloudLoadAction(){
 // Saves all accumulated knowledge (correlations, snapshot, methodology, filters, version)
 // to a single JSON file that can be imported on any browser/device.
 function exportBrain(){
-  const brain=FS.getBrain();
+  const brain=pruneBrainForStorage(FS.getBrain());
   const out={
     _exported:new Date().toISOString(),
     _version:'rscanner_brain_v1',
@@ -4902,6 +4945,7 @@ function importBrain(event){
         const {_exported,_version,_summary,_sizeKB,...wrappedData}=brain;
         data=wrappedData;
       }
+      data=pruneBrainForStorage(data);
       const ok=await FS.write(data);
       if(!ok){showToast('Failed to write brain file.', 5000, true);return;}
       const s=brain._summary||{sessions:data[CORR_STORE]?.sessions||0};
@@ -4954,9 +4998,7 @@ function resetBrain(btn){
   // Stage 3: keep only a valid prior-session comparison baseline; wipe learned/runtime state.
   const preserved={};
   const stockBaseline=getPriorSessionSnapshotRecordForMode('stock');
-  const holidays=FS.get(NSE_HOLIDAYS_STORE);
   if(stockBaseline) preserved[SNAP_KEY]=stockBaseline;
-  if(Array.isArray(holidays)&&holidays.length) preserved[NSE_HOLIDAYS_STORE]=holidays;
   FS.reset(preserved);
   localStorage.removeItem(SCANNER_STORE);
   localStorage.removeItem(SHARED_FILTER_STORE);
@@ -5073,7 +5115,7 @@ function keepFullerTradebookHistory(candidate,sourcePath,lastModified){
 
 async function hydrateSessionCSVsFromWorkspace(){
   if(!FS.hasFolder()||!FS.readUploadText) return 0;
-  const [csvFiles,zipEntry]=await Promise.all([
+  const [csvFiles,zipEntry,scannerEntry]=await Promise.all([
     Promise.all([
       FS.readUploadText('Holdings.csv'),
       FS.readUploadText('Positions.csv'),
@@ -5082,6 +5124,7 @@ async function hydrateSessionCSVsFromWorkspace(){
       FS.readUploadText('NSE Holidays.csv'),
     ]),
     FS.readUploadFile('Reports-Daily-Multiple.zip'),
+    FS.readUploadFile('ALL NSE.csv'),
   ]);
   const [holdFile,posFile,ordFile,tbFile,holFile]=csvFiles;
   if(holFile?.text) parseNSEHolidays(holFile.text);
@@ -5105,6 +5148,11 @@ async function hydrateSessionCSVsFromWorkspace(){
       }
       await _hydrateZipEntries(outerZip);
     }catch(e){console.warn('hydrateSessionCSVsFromWorkspace: ZIP parse failed',e);}
+  }
+  let scannerHydrated=false;
+  if(scannerEntry?.file){
+    try{scannerHydrated=await processScannerUpload(scannerEntry.file,'stock');}
+    catch(e){console.warn('hydrateSessionCSVsFromWorkspace: ALL NSE parse failed',e);}
   }
   const updates={};
   if(holdFile?.text){
@@ -5596,6 +5644,7 @@ async function processScannerUpload(scannerFile, mode){
   if(!scannerFile) return false;
   const original=captureScannerRuntime();
   const restoreFilters=applySavedFiltersForMode(mode);
+  let completed=false;
   MARKET_MODE=mode;
   const prev=loadPrevSnapForMode(mode);
   PREV_SNAP=prev.snap;PREV_SNAP_META=prev.meta;
@@ -5655,10 +5704,11 @@ async function processScannerUpload(scannerFile, mode){
       syncExecutedRecommendedEntries();
     }
     FILT=[...ALL];_tvLoadedThisSession=true;
+    completed=true;
     return true;
   }finally{
     restoreFilters();
-    restoreScannerRuntime(original);
+    if(!completed) restoreScannerRuntime(original);
   }
 }
 
@@ -5792,8 +5842,6 @@ async function processFiles(files){
     const rt=captureScannerRuntime();
     try{
       MARKET_MODE='stock';
-      const saved=FS.get(ALL_STORE);
-      if(saved?.data?.length) ALL=saved.data;
       computeMissedOpp();
       assessExecutedEntryOutcomeScan(window._lastStockOutcomeScan);
       recordPostSaleRocketScan(window._lastStockOutcomeScan);
