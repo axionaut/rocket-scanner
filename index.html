@@ -316,7 +316,7 @@ function updateModeUI(){
     minTurn.title='Min turnover (Price × Volume) in ₹. Blank = no filter.';
   }
 }
-let ALL=[],FILT=[],PG=1,PGSZ=9999,SCOL='rocketScore',SDIR=-1;
+let ALL=[],FILT=[],PG=1,PGSZ=100,SCOL='rocketScore',SDIR=-1;
 let _tvLoadedThisSession=false; // true once a TV CSV has been processed this session
 let _scanSavedDate=null; // date string (YYYY-MM-DD) of the brain-restored scan, set on init
 let SCORE_MAP={}; // {symbol → rocketScore} for ALL parsed stocks including filtered-out ones
@@ -324,6 +324,7 @@ let PERF_REGIME_FILTER='all'; // 'all' | 'bull' | 'bear' | 'neutral' | 'untagged
 let PERF_PERIOD_FILTER='all'; // 'all' | '1m' | '3m' | '6m' | '1y'
 let PERF_TRADE_WINDOWS=[]; // cached trade window rows from renderPerformance — used by current-window pill
 let PERF_LATEST_SUMMARY=null; // cached latest session summary from renderPerformance — used by renderStats card
+let PERF_RENDERED=false; // Performance tab is heavy; render only on demand
 let ENGINE_DATA={};
 let REMOVED={uc:0,surv:0,liq:0,fscore:0,atr:0,deliv:0,fade:0,supply:0};
 let SUPPRESSED_HELD=0; // count of stocks hidden because already held in POSITIONS
@@ -780,25 +781,33 @@ const FS = (() => {
     }catch(e){console.warn('FS.deleteFile failed',e);}
   }
 
-  // Set one key and schedule a debounced write
-  function set(key,value){
-    if(shouldDropBrainKey(key)){delete _brain[key];return;}
-    _brain[key]=value;
-    if(_saveTimer) clearTimeout(_saveTimer);
-    _saveTimer=setTimeout(()=>write(_brain),400);
+  function brainValueChanged(key,value){
+    const old=_brain[key];
+    if(old===value) return false;
+    try{return JSON.stringify(old)!==JSON.stringify(value);}catch(e){return true;}
   }
 
-  // Set multiple keys in one write cycle (avoids two debounced writes)
+  // Set one key and schedule a debounced background write. Trading render never waits for this.
+  function set(key,value){
+    if(shouldDropBrainKey(key)){delete _brain[key];return;}
+    if(!brainValueChanged(key,value)) return;
+    _brain[key]=value;
+    if(_saveTimer) clearTimeout(_saveTimer);
+    _saveTimer=setTimeout(()=>write(_brain),1600);
+  }
+
+  // Set multiple keys in one write cycle (avoids repeated full-brain writes)
   function setMultiple(updates){
-    const kept={}; let dropped=false;
+    let changed=false, dropped=false;
     Object.entries(updates||{}).forEach(([key,value])=>{
-      if(shouldDropBrainKey(key)){delete _brain[key];dropped=true;return;}
-      kept[key]=value;
+      if(shouldDropBrainKey(key)){if(_brain[key]!==undefined){delete _brain[key];dropped=true;}return;}
+      if(!brainValueChanged(key,value)) return;
+      _brain[key]=value;
+      changed=true;
     });
-    if(Object.keys(kept).length) Object.assign(_brain,kept);
-    if(Object.keys(kept).length||dropped){
+    if(changed||dropped){
       if(_saveTimer) clearTimeout(_saveTimer);
-      _saveTimer=setTimeout(()=>write(_brain),400);
+      _saveTimer=setTimeout(()=>write(_brain),1600);
     }
   }
 
@@ -900,6 +909,36 @@ function showDriveAuthRequiredState(){
   }catch(e){}
 }
 
+function idleTask(fn,timeout=1200){
+  const run=()=>{try{fn();}catch(e){console.warn('Background task failed',e);}};
+  if('requestIdleCallback' in window) requestIdleCallback(run,{timeout});
+  else setTimeout(run,60);
+}
+function saveInputsInBackground(files){
+  if(!files?.length||!FS.hasFolder()) return;
+  idleTask(()=>{
+    FS.saveUploadedInputs(files)
+      .then(n=>{if(n) showToast(`Saved ${n} input file${n!==1?'s':''} to Drive in background.`,2500);})
+      .catch(e=>showToast('Background Drive input save failed: '+(e.message||e),5000,true));
+  },1800);
+}
+function saveBrainInBackground(label='Brain saved'){
+  idleTask(()=>{
+    FS.write(FS.getBrain())
+      .then(ok=>{if(!ok) showToast('Background brain save failed. Reconnect Drive and load again.',5000,true);})
+      .catch(e=>showToast('Background brain save failed: '+(e.message||e),5000,true));
+  },1800);
+}
+function renderTradingDashboardNow(){
+  try{
+    document.getElementById('hdrR').style.display='flex';
+    document.getElementById('dash').style.display='block';
+    document.getElementById('noDataBanner').style.display=ALL.length?'none':'flex';
+  }catch(e){}
+  try{if(ALL.length&&ENGINE_DATA&&ENGINE_DATA.features) renderMethodology();}catch(e){console.warn('Methodology render failed',e);}
+  try{if(ALL.length) applyFilters();}catch(e){console.warn('Fast ranking render failed',e);}
+}
+
 async function ensureDriveReadyForLoad(){
   updateFolderUI();
   if(!FS.hasFolder()){
@@ -916,7 +955,7 @@ async function ensureDriveReadyForLoad(){
 }
 
 async function connectCloudStorage(opts={}){
-  const reloadAfterConnect=opts.reloadAfterConnect!==false;
+  const reloadAfterConnect=false;
   if(!FS.isConfigured()){
     const id=window.prompt('Paste your Google OAuth Web Client ID. This is a public app identifier, not a password or secret.');
     if(!id) return false;
@@ -944,16 +983,12 @@ async function connectCloudStorage(opts={}){
     await FS.refreshCloudIndex?.();
     const hydratedCount=await hydrateSessionCSVsFromWorkspace();
     try{enrichRowsWithNSEData(ALL);}catch(e){console.warn('Drive reconnect NSE enrichment failed',e);}
-    if(hydratedCount||Object.keys(FS.getBrain()||{}).length) await FS.write(FS.getBrain());
+    if(hydratedCount||Object.keys(FS.getBrain()||{}).length) saveBrainInBackground('Cloud brain saved');
   }catch(e){console.warn('Drive input hydration failed after connect',e);}
   updateFolderUI();
-  if(reloadAfterConnect){
-    showToast('<strong>Google Drive connected.</strong> Loading your latest cloud data...');
-    setMsg('Preparing refreshed dashboard...');
-    setTimeout(()=>location.reload(),400);
-  }else{
-    setLoading(false);
-  }
+  renderTradingDashboardNow();
+  setLoading(false);
+  showToast('<strong>Google Drive connected.</strong> Latest data loaded without page reload.',3500);
   return true;
 }
 
@@ -3053,6 +3088,7 @@ function getAdaptiveTradeTrips(trips){
 }
 
 function renderPerformance(){
+  PERF_RENDERED=true;
   const el=document.getElementById('perfContent');
   if(!el) return;
   const hdrEl=document.querySelector('.hdr');
@@ -3648,7 +3684,7 @@ async function refreshRankingsAfterSurvRuleChange(){
     ALL.sort((a,b)=>b.rocketScore-a.rocketScore);
     const rc=FS.get(modeKey(REC_COUNT_STORE))||{}, rcD=rc[getSessionDate()]||{};
     ALL.forEach(s=>{s.seen=rcD[s.symbol]||0;});
-    FS.set(modeKey(ALL_STORE),{data:ALL.map(s=>({...s,name:s.name?s.name.substring(0,20):s.symbol})),fileTag:fileName+' · '+raw.length+' stocks',ts:Date.now()});
+    const ft=document.getElementById('fileTag');if(ft)ft.textContent=fileName+' · '+raw.length+' stocks';
     window._lastScannerSessionTag=tag;
     FILT=[...ALL];
     applyFilters();
@@ -5179,7 +5215,7 @@ async function hydrateSessionCSVsFromWorkspace(){
   }
   syncExecutedRecommendedEntries();
   const updateCount=Object.keys(updates).length;
-  if(updateCount) FS.setMultiple(updates);
+  // Source-derived CSV state remains in memory for this session; brain stores learning only.
   // Recompute missed opportunities with fresh Orders + ALL (if available) and persist to brain
   try{computeMissedOpp();}catch(e){}
   return updateCount;
@@ -5677,7 +5713,7 @@ async function processScannerUpload(scannerFile, mode){
       s.seen=rc[rcToday][s.symbol]||0;
     });
     if(countSeen) FS.set(modeKey(REC_COUNT_STORE,mode),rc);
-    try{FS.set(modeKey(ALL_STORE,mode),{data:ALL.map(s=>({...s,name:s.name?s.name.substring(0,20):s.symbol})),fileTag:scannerFile.name+' · '+raw.length+' stocks',ts:Date.now()});}catch(e){console.warn('Could not save scan data',e);}
+    try{const ft=document.getElementById('fileTag');if(ft)ft.textContent=scannerFile.name+' · '+raw.length+' stocks';}catch(e){}
     if(window._lastEngineFeats&&window._lastParsedFiltered){
       const cols=window._lastEngineFeats, stocks={};
       Object.assign(stocks,buildScannerStockMatrix(window._lastParsedFiltered,cols));
@@ -5717,19 +5753,10 @@ async function processFiles(files){
     setLoading(false);
     return;
   }
-  setLoading(true,'Saving selected inputs to Google Drive...');
-  try{
-    const uploaded=await FS.saveUploadedInputs(files);
-    if(!uploaded){
-      setLoading(false);
-      showToast('No recognised scanner input files were selected.',4000,true);
-      return;
-    }
-  }catch(e){
-    setLoading(false);
-    showToast('Could not save files to Google Drive: '+(e.message||e),6000,true);
-    return;
-  }
+  setLoading(true,'Processing selected files...');
+  // Upload canonical input files to Drive in the background. Rankings are built from
+  // the selected local files immediately, because the market does not wait for Drive.
+  saveInputsInBackground(files);
   NSE_BHAV={};NSE_52W={};NSE_SURV={};NSE_BULK={};NSE_BLOCK={};NSE_PRICE_BAND={};
   let tvFile=null,nseZip=null,holdFile=null,posFile=null,ordFile=null,tbFile=null,holidayFile=false;
   for(const f of files){
@@ -5851,23 +5878,11 @@ async function processFiles(files){
       }
     }finally{restoreScannerRuntime(rt);}
   } else computeMissedOpp();
-  try{
-    setMsg('Saving updated brain locally and to Google Drive...');
-    const brainSaved=await FS.write(FS.getBrain());
-    if(!brainSaved){
-      setLoading(false);
-      showToast('Inputs were uploaded, but the updated brain was not saved to Google Drive. Reconnect Google Drive and upload again.',7000,true);
-      return;
-    }
-  }catch(e){
-    console.warn('Brain flush failed',e);
-    setLoading(false);
-    showToast('Inputs were uploaded, but saving the updated brain failed: '+(e.message||e),7000,true);
-    return;
-  }
-  setMsg('Reloading latest saved state...');
-  await new Promise(r=>setTimeout(r,300)); // let the Drive write settle before reload
-  location.reload();
+  setMsg('Rendering rankings...');
+  renderTradingDashboardNow();
+  setLoading(false);
+  showToast('<strong>Rankings ready.</strong> Drive and brain saves continue in the background.',3500);
+  saveBrainInBackground('Brain saved after file processing');
 }
 
 document.getElementById('fInDir').addEventListener('change',e=>{if(e.target.files.length)processFiles(Array.from(e.target.files));});
@@ -6041,11 +6056,10 @@ async function initApp(){
   try{await hydrateSessionCSVsFromWorkspace();}catch(e){console.warn('INIT: cloud input hydration failed',e);}
   try{enrichRowsWithNSEData(ALL);}catch(e){console.warn('INIT: NSE row enrichment failed',e);}
 
-  // Step 3b: Render after hydration — cloud orders, tradebook and holdings are now fresh in memory.
-  // renderPerformance must run before renderStats (populates PERF_TRADE_WINDOWS for current-window pill).
-  try{ renderPerformance(); }catch(e){ console.error('INIT step3b renderPerformance failed:',e); }
+  // Step 3b: Keep Performance tab lazy. Rankings render first; performance analytics run on click.
+  try{const pe=document.getElementById('perfContent');if(pe&&!PERF_RENDERED)pe.innerHTML=`<div style="text-align:center;padding:60px 40px;color:var(--t2)"><div style="font-size:34px;margin-bottom:14px">📈</div><div style="font-size:15px;font-weight:700;color:var(--t1);margin-bottom:8px">Performance loads on demand</div><div>Click the Performance tab when you need analytics. Rankings stay fast for trading.</div></div>`;}catch(e){}
 
-  // Step 3: Render stats (after renderPerformance so PERF_TRADE_WINDOWS is ready)
+  // Step 3: Render stats without blocking on Performance analytics.
   try{if(ALL.length) renderStats();}catch(e){console.error('INIT step3 renderStats failed:',e);}
 
   // Step 4: Render methodology
