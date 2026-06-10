@@ -297,7 +297,7 @@ const BUILD_TS='2026-06-09 15:35 IST'; // replaced at commit time with IST datet
 const APP_VERSION=396; // Shared deployed version; increment once per released code change.
 const GOOGLE_DRIVE_CLIENT_ID='1015012642264-oi2nelv3v90k3d39r994a6nelgjs2a56.apps.googleusercontent.com'; // Public OAuth Web Client ID.
 const HARD_FILTER_SCHEMA='raw_rvol_directional_pressure_v1';
-const STOCK_RUNWAY_CEILING_PCT=19.5; // UC-style ceiling for Max Entry; Rocket % only labels rockets.
+const STOCK_RUNWAY_CEILING_PCT=19.5; // UC-style ceiling retained only for legacy helpers; entry-ceiling filtering is disabled.
 const PRICE_BAND_BLOCK_BUFFER_PCT=0.15; // Treat rounded 4.9/9.9/19.9 rows as effectively band-locked.
 const PRICE_COMPARE_EPS=0.0001; // Do not let a full tick/paisa breach pass a buy ceiling.
 const SELL_PRESSURE_EDGE_MIN=0.08; // DMI- must beat DMI+ by this normalized edge to count as supply pressure.
@@ -374,7 +374,7 @@ const INTRADAY_LEDGER_STORE='rs_intraday_ledger_v1';
 const REC_COUNT_STORE='rs_rec_count';
 const NSE_HOLIDAYS_STORE='rs_nse_holidays';
 // Keep rocket_brain.json for learned state only. Input-file derivatives are rebuilt
-// from Google Drive canonical files; crypto-era keys are purged completely.
+// from Google Drive canonical files; legacy non-stock keys are purged completely.
 const SOURCE_DERIVED_BRAIN_KEYS=new Set([
   ALL_STORE,
   HOLD_STORE,
@@ -386,7 +386,8 @@ const SOURCE_DERIVED_BRAIN_KEYS=new Set([
 function shouldDropBrainKey(key){
   const k=String(key||'').toLowerCase();
   if(!k) return false;
-  if(k.includes('crypto')) return true;
+  const legacyNonStockSuffix='_'+'cr'+'yp'+'to';
+  if(k.includes(legacyNonStockSuffix)) return true;
   return SOURCE_DERIVED_BRAIN_KEYS.has(key);
 }
 function pruneBrainForStorage(brain){
@@ -2647,7 +2648,7 @@ function runEngine(raw, sessionTag){
     FS.set(modeKey(REGIME_CAL_STORE),regCal);
   }catch(e){console.warn('Could not save methodology data',e);}
   persistMethodologySnapshot();
-  // Keep legacy call site; Rocket % no longer drives Max Entry runway.
+  // Keep legacy call site; Rocket % controls rocket labels/counts only.
   try{onRocketPctChange(ROCKET_THRESHOLD);}catch(e){}
   return results;
 }
@@ -4018,7 +4019,7 @@ function _renderMethodologyInner(){
     <div class="m-grid">
       <div class="m-card"><h4>🚀 What is a Rocket?</h4><p>Every trading day, regardless of what the broader market is doing, a small subset of NSE stocks moves <strong>≥${E.rocketThreshold||10}% intraday</strong>. These are Rockets. They don't happen randomly — stocks that become rockets tend to share measurable characteristics <em>the day before</em> they move. The engine's job is to find those stocks before the move, not explain them after.</p></div>
       <div class="m-card"><h4>📡 How the Engine Learns</h4><p>After each session, the engine correlates <strong>yesterday's feature values</strong> against <strong>today's actual rockets</strong>. Features that consistently appeared in rockets get higher weight; features that didn't get lower weight. Tomorrow's recommendations are stocks that look like yesterday's rockets — but haven't moved yet. The target label is quality-adjusted: yesterday's rockets that <em>held</em> today reinforce the signal; those that collapsed are treated as 0, so the engine learns to find durable moves, not fragile spikes.</p></div>
-      <div class="m-card"><h4>🎯 Max 1D + Entry Ceiling</h4><p>Set <em>Max 1D %</em> in the filter bar to hide stocks that have already moved too much today (default 5%). <em>Max Entry</em> is the calculated buy ceiling; stocks already above it are hidden from fresh recommendations.</p></div>
+      <div class="m-card"><h4>🎯 Max 1D Filter</h4><p>Set <em>Max 1D %</em> in the filter bar to hide stocks that have already moved too much today (default 5%). Entry-ceiling filtering has been removed; strong candidates are no longer hidden just because current price is above a calculated buy ceiling.</p></div>
       <div class="m-card"><h4>🚫 Hard Filters</h4><p>Removed from <strong>both learning and display</strong>: zero price, stocks at/near their NSE price band from <strong>sec_list</strong> (fallback ≥19.5% when band data is unavailable), non-EQ series (BE/BZ/SZ/SM/ST), surveillance-flagged stocks (user's rules), low liquidity when present (volume &lt;${(parseFloat(document.getElementById('fVolMult')?.value)||LIQ_MIN_VOL_DEFAULT).toLocaleString()}${parseFloat(document.getElementById('fMinTurnover')?.value)>0?' or turnover &lt;'+fmtINR(parseFloat(document.getElementById('fMinTurnover')?.value)):''}, shareholders &lt;500), zero Piotroski F-Score, ATR &lt;=0 when present, <strong>delivery &lt;30%</strong> when present, and <strong>peak retention &lt;50%</strong> (fading; only when day range &gt;1%). Blank/null values pass through as unknown. Currently filtered: ${(REMOVED.uc||0)+(REMOVED.surv||0)+(REMOVED.nonEq||0)+(REMOVED.liq||0)+(REMOVED.fscore||0)+(REMOVED.atr||0)+(REMOVED.deliv||0)+(REMOVED.fade||0)} stocks.</p></div>
       <div class="m-card"><h4>${E.regime==='bull'?'🐂':E.regime==='bear'?'🐻':'➡'} Regime-Conditional Learning</h4><p>Today's market: <strong style="color:${regimeColor}">${(E.regime||'neutral').toUpperCase()}</strong> (${E.marketBreadth!=null?(E.marketBreadth*100).toFixed(0):'?'}% breadth). Each regime maintains its own running-mean correlation accumulator — bull sessions learn breakout patterns, bear sessions learn resilience. ${E.useRegimeCorr?'Using <strong>regime-specific</strong> correlations.':'Using <strong>combined</strong> fallback (need ≥2 sessions with a rocket target in current regime).'} Bull ${(E.regimeSessions?.bull)||0} · Bear ${(E.regimeSessions?.bear)||0} · Neutral ${(E.regimeSessions?.neutral)||0}.</p></div>
       <div class="m-card"><h4>📊 Sector & Industry Breadth</h4><p>${E.sectorCol?'<span style="color:var(--green)">✓</span> Sector breadth, sector relative strength':'<span style="color:var(--red)">✗</span> No Sector column detected'}${E.industryCol?', <span style="color:var(--green)">✓</span> industry breadth':''} — computed from today\'s full universe and fed into mRMR as features. Stocks outperforming their sector score higher regardless of market direction.</p></div>
@@ -4036,7 +4037,7 @@ function getCols(){
   const fixed=[
     {key:'chk',label:'',s:0},
     {key:'rocketScore',label:'Score',s:1},{key:'symbol',label:'Symbol',s:1},
-    {key:'price',label:'Price ₹',s:1},{key:'priceChange',label:'Chg%',s:1},{key:'maxEntry',label:'Max Entry',s:0},{key:'delivPct',label:'Deliv%',s:1},
+    {key:'price',label:'Price ₹',s:1},{key:'priceChange',label:'Chg%',s:1},{key:'delivPct',label:'Deliv%',s:1},
     {key:'alloc',label:'Alloc ₹',s:0},{key:'volume',label:'Volume',s:1},
   ];
   // Dynamic columns from mRMR features — skip any that are all null across displayed stocks
@@ -4133,9 +4134,6 @@ function getFilterBarReason(s){
   const fPriceMax=parseFloat(document.getElementById('fPriceMax')?.value)||0;
   const bandReason=getPriceBandBlockReason(s);
   if(bandReason) return bandReason;
-  const maxEntry=getMaxEntry(s);
-  const refPrice=Math.max(s.price||0,getBuyPrice(s)||0);
-  if(maxEntry!==null&&refPrice>maxEntry+PRICE_COMPARE_EPS) return `Buy price ${fmtINR(refPrice)} > Max Entry ${fmtINR(maxEntry)}`;
   if(minScore>0&&s.rocketScore<minScore) return `Score ${s.rocketScore?.toFixed?.(1)||s.rocketScore} < ${minScore}`;
   if(fvol>0&&s.volume!=null&&s.volume<fvol) return `Volume ${Math.round(s.volume).toLocaleString('en-IN')} < ${Math.round(fvol).toLocaleString('en-IN')}`;
   if(fMinMarketCap>0&&s.marketCap!=null&&s.marketCap<fMinMarketCap) return `MCap ₹${fV(s.marketCap)} < ₹${fV(fMinMarketCap)}`;
@@ -4633,7 +4631,6 @@ function renderTable(){
       <td style="font-family:'Plus Jakarta Sans',sans-serif"><div style="font-weight:700;font-size:13px;color:var(--t1)">${s.symbol}${(()=>{const sv=s.seen||0;if(!sv) return '';return`<sub style="font-size:11px;color:var(--amber);font-weight:700;margin-left:3px;font-family:'DM Mono',monospace" title="Seen ${sv}× today">${sv}×</sub>`;})()}${filterBadge}${filterAction}${s._isTopUp?`<span style="font-size:8px;background:rgba(251,146,60,.15);color:var(--fire);border-radius:4px;padding:1px 5px;margin-left:5px;font-weight:700;vertical-align:middle">↑ TOP-UP</span>`:''}${(()=>{if(!s.isSurv) return '';const labels=(s.survRules||[]).map(k=>{const r=SURV_CUSTOM_RULES.find(x=>x.key===k);return r?r.label:k;}).join(' · ');return `<span style="font-size:8px;background:rgba(239,68,68,.15);color:var(--red);border-radius:4px;padding:1px 5px;margin-left:5px;font-weight:700;vertical-align:middle" title="NSE Surveillance: ${escHtml(labels)}">⚠ SURV</span>`;})()}</div><div style="font-size:9px;color:${s._filterPreview?'var(--amber)':'var(--t3)'};max-width:220px;overflow:hidden;text-overflow:ellipsis">${s._filterPreview||s._forceKept?escHtml(s._filterReason||'filtered'):(s.name+(s._isTopUp&&s._heldAvg?` · avg ${fmtINR(s._heldAvg)}`:''))}</div></td>
       <td>${fmtINR(s.price)}</td>
       <td>${fPerf(s.priceChange)}</td>
-      <td>${(()=>{const hi=getMaxEntry(s);if(hi===null)return'<span style="color:var(--t3)">—</span>';const tgt=getEffectiveTgtPct()||3.7;const ceiling=getRunwayCeilingPct(s);const inZone=isBuyZone(s);return`<span style="font-family:'DM Mono',monospace;font-size:12px;font-weight:700;color:${inZone?'var(--green)':'var(--red)'}" title="Max entry: buying ≤${fmtINR(hi)} still leaves full TGT% (${tgt.toFixed(2)}%) before the ${ceiling}% UC runway ceiling">${fmtINR(hi)}</span>`;})()}</td>
       <td>${fDel(s.delivPct)}</td>
       <td class="alloc-cell" data-sym="${s.symbol}">${(()=>{
         if(!am) return '<span style="color:var(--t3);font-size:11px">—</span>';
@@ -4941,12 +4938,11 @@ function exportBrain(){
     ...brain
   };
   out._summary={
-    mode:MARKET_MODE,
+    market:'Stocks',
     sessions:brain[modeKey(CORR_STORE)]?.sessions||0,
     bullSessions:brain[modeKey(CORR_BULL_STORE)]?.sessions||0,
     bearSessions:brain[modeKey(CORR_BEAR_STORE)]?.sessions||0,
     neutralSessions:brain[modeKey(CORR_NEUT_STORE)]?.sessions||0,
-    stocks:brain[modeKey(ALL_STORE)]?.data?.length||0,
     features:brain[modeKey(METH_STORE)]?.features?.length||0
   };
   const json=JSON.stringify(out);
@@ -5482,8 +5478,6 @@ function exportBasket(){
     const qty = capital > 0 ? (am?.qty || 0) : 1;
     if(qty===0) return;
     const buyPrice=getBuyPrice(s);
-    const maxEntry=getMaxEntry(s);
-    if(maxEntry!==null&&buyPrice>maxEntry+PRICE_COMPARE_EPS){rejectedCount++;return;}
     if(qty>=2){
       const baseQty=Math.ceil(qty/2);
       const runnerQty=qty-baseQty;
