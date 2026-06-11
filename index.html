@@ -293,8 +293,8 @@ table.main tbody td{padding:9px 11px;font-family:'DM Mono',monospace;font-size:1
 
 
 <script>
-const BUILD_TS='2026-06-09 15:35 IST'; // replaced at commit time with IST datetime
-const APP_VERSION=396; // Shared deployed version; increment once per released code change.
+const BUILD_TS='2026-06-11 10:15 IST'; // replaced at commit time with IST datetime
+const APP_VERSION=397; // Shared deployed version; increment once per released code change.
 const GOOGLE_DRIVE_CLIENT_ID='1015012642264-oi2nelv3v90k3d39r994a6nelgjs2a56.apps.googleusercontent.com'; // Public OAuth Web Client ID.
 const HARD_FILTER_SCHEMA='raw_rvol_directional_pressure_v1';
 const STOCK_RUNWAY_CEILING_PCT=19.5; // UC-style ceiling retained only for legacy helpers; entry-ceiling filtering is disabled.
@@ -355,6 +355,7 @@ const ORDERS_STORE='rs_orders';
 const POS_STORE='rs_positions';
 const POS_TSL_STORE='rs_position_tsl';
 const TRADEBOOK_STORE='rs_tradebook';
+const TRADEBOOK_META_STORE='rs_tradebook_meta_v1';
 const SURV_RULE_STORE='rs_surv_rules';
 const SURV_CORR_STORE='rs_surv_corr';
 const MISSED_OPP_STORE='rs_missed_opp_v2';
@@ -381,7 +382,6 @@ const SOURCE_DERIVED_BRAIN_KEYS=new Set([
   POS_STORE,
   ORDERS_STORE,
   TRADEBOOK_STORE,
-  NSE_HOLIDAYS_STORE,
 ]);
 function shouldDropBrainKey(key){
   const k=String(key||'').toLowerCase();
@@ -2374,13 +2374,27 @@ function runEngine(raw, sessionTag){
       targetCorrToday[f]=pearson(laggedTarget,prevVals);
     }
   } else {
-    // Same-day fallback (v2 behavior — restored)
-    const target=filtered.map((_,i)=>qualitySet.has(i)?1:0);
-    laggedNote=overlap.length>0
-      ?'Same-day fallback (only '+overlap.length+' matched, need 100+)'
-      :'Session 1 — lagged learning starts next upload';
-    for(const f of FEATS){
-      targetCorrToday[f]=pearson(target,filtered.map(d=>d[f]));
+    const priorLearnedSessions=Math.max(
+      ACC_CORR?.learnSessions??ACC_CORR?.sessions??0,
+      ACC_CORR_BULL?.learnSessions??ACC_CORR_BULL?.sessions??0,
+      ACC_CORR_BEAR?.learnSessions??ACC_CORR_BEAR?.sessions??0,
+      ACC_CORR_NEUT?.learnSessions??ACC_CORR_NEUT?.sessions??0,
+      0
+    );
+    if(priorLearnedSessions>=2){
+      laggedNote=overlap.length>0
+        ?'Low lagged overlap ('+overlap.length+' matched, need 100) — using historical correlations'
+        :'No prior overlap — using historical correlations';
+      for(const f of FEATS) targetCorrToday[f]=null;
+    } else {
+      // Cold-start only: same-day fallback is useful before the brain has history.
+      const target=filtered.map((_,i)=>qualitySet.has(i)?1:0);
+      laggedNote=overlap.length>0
+        ?'Cold-start same-day fallback (only '+overlap.length+' matched, need 100+)'
+        :'Session 1 — lagged learning starts next upload';
+      for(const f of FEATS){
+        targetCorrToday[f]=pearson(target,filtered.map(d=>d[f]));
+      }
     }
   }
 
@@ -5129,20 +5143,32 @@ function parseOrders(text){
 function keepFullerTradebookHistory(candidate,sourcePath,lastModified){
   if(!candidate) return {stats:null,persist:null,ignored:false};
   const prior=FS.get(TRADEBOOK_STORE);
+  const priorMeta=FS.get(TRADEBOOK_META_STORE);
   const priorN=prior?.tripsData?.length||prior?.roundTrips||0;
+  const priorMetaN=priorMeta?.tripsDataLength||priorMeta?.roundTrips||0;
   const nextN=candidate?.tripsData?.length||candidate?.roundTrips||0;
-  if(prior&&priorN>nextN&&nextN>0){
-    const priorFirst=(prior.tripsData||[]).map(r=>r.buyDate||r.sellDate).filter(Boolean).sort()[0]||'';
+  if((priorN>nextN||priorMetaN>nextN)&&nextN>0){
+    const priorFirst=(prior.tripsData||[]).map(r=>r.buyDate||r.sellDate).filter(Boolean).sort()[0]||priorMeta?.firstDate||'';
     const nextFirst=(candidate.tripsData||[]).map(r=>r.buyDate||r.sellDate).filter(Boolean).sort()[0]||'';
-    const isPartialExport=nextN<Math.max(10,Math.floor(priorN*0.8)) || (priorFirst&&nextFirst&&nextFirst>priorFirst);
+    const baselineN=Math.max(priorN,priorMetaN);
+    const isPartialExport=nextN<Math.max(10,Math.floor(baselineN*0.8)) || (priorFirst&&nextFirst&&nextFirst>priorFirst);
     if(isPartialExport){
-      console.warn('Ignored partial tradebook export:',sourcePath||'TRADEBOOK.csv',nextN,'lots; retained',priorN,'historical lots.');
-      try{showToast(`Ignored partial TRADEBOOK.csv (${nextN} lots); kept full history (${priorN} lots).`,5000,true);}catch(e){}
-      return {stats:prior,persist:null,ignored:true};
+      console.warn('Ignored partial tradebook export:',sourcePath||'TRADEBOOK.csv',nextN,'lots; prior metadata has',baselineN,'historical lots.');
+      try{showToast(`Ignored partial TRADEBOOK.csv (${nextN} lots); prior full history had ${baselineN} lots.`,5000,true);}catch(e){}
+      return {stats:prior||null,persist:null,meta:null,ignored:true};
     }
   }
   const stats={...candidate,_loadedThisSession:true};
-  return {stats,persist:{...candidate,sourcePath,lastModified},ignored:false};
+  const dates=(candidate.tripsData||[]).map(r=>r.buyDate||r.sellDate).filter(Boolean).sort();
+  const meta={
+    tripsDataLength:candidate.tripsData?.length||0,
+    roundTrips:candidate.roundTrips||0,
+    firstDate:dates[0]||'',
+    lastDate:dates[dates.length-1]||'',
+    sourcePath,
+    lastModified
+  };
+  return {stats,persist:{...candidate,sourcePath,lastModified},meta,ignored:false};
 }
 
 async function hydrateSessionCSVsFromWorkspace(){
@@ -5207,6 +5233,7 @@ async function hydrateSessionCSVsFromWorkspace(){
       const selected=keepFullerTradebookHistory(tb,tbFile.path,tbFile.lastModified);
       TRADEBOOK_STATS=selected.stats;
       if(selected.persist) updates[TRADEBOOK_STORE]=selected.persist;
+      if(selected.meta) FS.set(TRADEBOOK_META_STORE,selected.meta);
     }
   }
   syncExecutedRecommendedEntries();
@@ -5853,6 +5880,7 @@ async function processFiles(files){
       const selected=keepFullerTradebookHistory(parsedTradebook,tbFile.name,tbFile.lastModified);
       TRADEBOOK_STATS=selected.stats;
       if(selected.persist) try{FS.set(TRADEBOOK_STORE,selected.persist);}catch(e){}
+      if(selected.meta) try{FS.set(TRADEBOOK_META_STORE,selected.meta);}catch(e){}
     }
   }
   syncExecutedRecommendedEntries();
@@ -6228,14 +6256,6 @@ initNSELinks();
 </script>
 </body>
 </html>
-
-
-
-
-
-
-
-
 
 
 
