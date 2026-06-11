@@ -2285,8 +2285,9 @@ function runEngine(raw, sessionTag){
   });
   parsed.forEach(d=>{d.rocketScore=SCORE_MAP[d.symbol]??null;});
   const labCols=buildRocketLabCols(FEATS);
+  const labSeedSession=buildRocketLabSeedSessionFromPrevSnap({date:PREV_SNAP_META?.savedDate,threshold:ROCKET_THRESHOLD,cols:labCols,labels:LABELS,prevSnap:PREV_SNAP});
   const labSession=buildRocketLabSession({date:getSessionDate(),threshold:ROCKET_THRESHOLD,cols:labCols,rows:parsed,labels:LABELS,marketBreadth,totalParsed});
-  const rocketLab=updateRocketLab(labSession);
+  const rocketLab=promoteRocketLabFromFirstEvaluation(updateRocketLab(labSession,labSeedSession));
 
   ENGINE_DATA={targetCorr,targetCorrToday,interCorr,mrmr,weights,features:FEATS,labels:LABELS,top10Feats,rocketCount:topN,rocketThreshold:ROCKET_THRESHOLD,accSessions:ACC_CORR?.sessions||1,laggedNote:laggedNote||'',
     marketBreadth:marketBreadth, avgMoveAll:todayAvgMoveAll, avgMoveUniverse:todayAvgMoveUniverse,
@@ -5406,13 +5407,55 @@ function evaluateRocketLabSessions(store){
   });
   const ranked=Object.values(metrics).sort((a,b)=>(b.recall20-a.recall20)||(b.recall50-a.recall50)||(b.precision20-a.precision20));
   const current=metrics.current;
-  const best=ranked.find(m=>m.model!=='current'&&m.days>=3&&(m.recall20>current.recall20||m.recall50>current.recall50))||null;
+  const best=ranked.find(m=>m.model!=='current'&&m.days>=1&&(m.recall20>current.recall20||m.recall50>current.recall50))||null;
   return {models:metrics,ranked,bestModel:best?.model||null,days:Math.max(...Object.values(metrics).map(m=>m.days),0),updated:getSessionDate()};
 }
-function updateRocketLab(session){
+function buildRocketLabSeedSessionFromPrevSnap({date,threshold,cols,labels,prevSnap}){
+  if(!date||!cols?.length||!prevSnap||typeof prevSnap!=='object') return null;
+  const rows=Object.entries(prevSnap).map(([symbol,vals])=>{
+    const src=vals&&typeof vals==='object'?vals:{};
+    const features={};
+    cols.forEach(c=>{
+      const v=src[c];
+      features[c]=(v==null||isNaN(Number(v)))?null:Number(v);
+    });
+    const priceChangeEntry=Object.entries(src).find(([k])=>/price/i.test(k)&&/change/i.test(k));
+    const pc=priceChangeEntry?Number(priceChangeEntry[1]):null;
+    return {
+      symbol:normSym(symbol),
+      eligible:true,
+      rocket:pc!=null&&isFinite(pc)&&pc>=threshold,
+      score:null,
+      features
+    };
+  }).filter(r=>r.symbol);
+  if(!rows.length) return null;
+  return {date,threshold,cols,labels:cols.reduce((o,c)=>{o[c]=labels?.[c]||c;return o;},{}),marketBreadth:null,totalParsed:rows.length,seededFromPrevSnap:true,rows};
+}
+
+function promoteRocketLabFromFirstEvaluation(lab){
+  const evals=Array.isArray(lab?.evaluations)?lab.evaluations:[];
+  const modelId=e=>e.model||e.key||e.name||'';
+  const current=evals.find(e=>modelId(e)==='current'||/current/i.test(String(e.label||e.name||'')));
+  if(!current) return lab;
+  const winner=evals
+    .filter(e=>modelId(e)!=='current'&&(e.days||0)>=1&&(e.rockets||0)>0&&(Number(e.recall20||0)>Number(current.recall20||0)||Number(e.recall50||0)>Number(current.recall50||0)))
+    .sort((a,b)=>(Number(b.recall20||0)-Number(a.recall20||0))||(Number(b.recall50||0)-Number(a.recall50||0))||(Number(b.precision20||0)-Number(a.precision20||0)))[0];
+  if(!winner) return lab;
+  lab.activeModel=modelId(winner);
+  lab.activeModelLabel=winner.label||winner.name||modelId(winner);
+  lab.activeOverlayReason='first_walk_forward_win';
+  try{FS.set(modeKey(ROCKET_LAB_STORE),lab);}catch(e){}
+  return lab;
+}
+
+function updateRocketLab(session,seedSession){
   if(!session?.rows?.length) return null;
   const store=getRocketLabStore();
   const sessions=store.sessions.filter(s=>s.date!==session.date);
+  if(seedSession&&!sessions.some(s=>s.date===seedSession.date)&&seedSession.date!==session.date){
+    sessions.push(seedSession);
+  }
   sessions.push(session);
   sessions.sort((a,b)=>String(a.date).localeCompare(String(b.date)));
   const trimmed=sessions.slice(-15);
@@ -5426,7 +5469,7 @@ function getRocketLabAdjustmentModel(){
   const ev=lab?.evaluations, model=lab?.activeModel;
   if(!ev||!model||!ev.models?.[model]) return null;
   const m=ev.models[model], cur=ev.models.current||{};
-  if((m.days||0)<3) return null;
+  if((m.days||0)<1) return null;
   if((m.recall20||0)<=(cur.recall20||0)&&(m.recall50||0)<=(cur.recall50||0)) return null;
   return model;
 }
@@ -6040,4 +6083,32 @@ function initNSELinks(){
   }
 }
 initNSELinks();
+
+(function installMethodologyCopyPatch(){
+  function patchMethodologyCopy(){
+    const el=document.getElementById('methContent');
+    if(!el) return;
+    const scoring=[...el.querySelectorAll('h3')].find(h=>/Scoring Engine/i.test(h.textContent||''));
+    if(scoring&&!document.getElementById('mrmrLearningModeNote')){
+      scoring.insertAdjacentHTML('afterend',`<p id="mrmrLearningModeNote"><strong>Current learning mode:</strong> one regime-agnostic mRMR accumulator. The engine learns from yesterday's saved feature snapshot versus today's actual rockets; market breadth is context only and does not create separate bull/neutral/bear histories.</p>`);
+    }
+    const rocket=[...el.querySelectorAll('h3')].find(h=>/Rocket Lab/i.test(h.textContent||''));
+    if(rocket&&!document.getElementById('rocketLabSeedNote')){
+      rocket.insertAdjacentHTML('afterend','<p id="rocketLabSeedNote"><strong>Starts immediately:</strong> Rocket Lab seeds its first walk-forward check from the available yesterday/today pair, then promotes a lab model after 1 evaluated day if it beats current mRMR recall.</p>');
+    }
+    el.querySelectorAll('p').forEach(p=>{
+      p.innerHTML=p.innerHTML
+        .replace(/after at least 3 evaluated days/gi,'after 1 evaluated walk-forward day');
+    });
+  }
+  const base=typeof renderMethodology==='function'?renderMethodology:null;
+  if(base){
+    renderMethodology=function(){
+      const out=base.apply(this,arguments);
+      patchMethodologyCopy();
+      return out;
+    };
+  }
+  setTimeout(patchMethodologyCopy,0);
+})();
 
