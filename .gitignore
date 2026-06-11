@@ -2,4 +2,6 @@
 *
 !.gitignore
 !index.html
+!app.js
+!styles.css
 !rocket_brain.json
