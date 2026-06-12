@@ -1,5 +1,5 @@
-const BUILD_TS='2026-06-11 11:20 IST'; // replaced at commit time with IST datetime
-const APP_VERSION=399; // Shared deployed version; increment once per released code change.
+const BUILD_TS='2026-06-12 10:52 IST'; // replaced at commit time with IST datetime
+const APP_VERSION=400; // Shared deployed version; increment once per released code change.
 const GOOGLE_DRIVE_CLIENT_ID='1015012642264-oi2nelv3v90k3d39r994a6nelgjs2a56.apps.googleusercontent.com'; // Public OAuth Web Client ID.
 const HARD_FILTER_SCHEMA='raw_rvol_directional_pressure_v1';
 const STOCK_RUNWAY_CEILING_PCT=19.5; // UC-style ceiling retained only for legacy helpers; entry-ceiling filtering is disabled.
@@ -2287,7 +2287,8 @@ function runEngine(raw, sessionTag){
   const labCols=buildRocketLabCols(FEATS);
   const labSeedSession=buildRocketLabSeedSessionFromPrevSnap({date:PREV_SNAP_META?.savedDate,threshold:ROCKET_THRESHOLD,cols:labCols,labels:LABELS,prevSnap:PREV_SNAP});
   const labSession=buildRocketLabSession({date:getSessionDate(),threshold:ROCKET_THRESHOLD,cols:labCols,rows:parsed,labels:LABELS,marketBreadth,totalParsed});
-  const rocketLab=promoteRocketLabFromFirstEvaluation(updateRocketLab(labSession,labSeedSession));
+  const rocketLab=updateRocketLab(labSession,labSeedSession);
+  const rocketLabActiveModel=rocketLab?.activeModel||activeLabModel||null;
 
   ENGINE_DATA={targetCorr,targetCorrToday,interCorr,mrmr,weights,features:FEATS,labels:LABELS,top10Feats,rocketCount:topN,rocketThreshold:ROCKET_THRESHOLD,accSessions:ACC_CORR?.sessions||1,laggedNote:laggedNote||'',
     marketBreadth:marketBreadth, avgMoveAll:todayAvgMoveAll, avgMoveUniverse:todayAvgMoveUniverse,
@@ -2299,7 +2300,7 @@ function runEngine(raw, sessionTag){
       alphaMax:0.18
     },
     rocketLab:rocketLab?.evaluations||null,
-    rocketLabActiveModel:activeLabModel||null,
+    rocketLabActiveModel,
     useFreshCorr, freshSignalCount, scoringSource,
     useAccCorr: !useFreshCorr && (ACC_CORR?(ACC_CORR.sessions||0)>=2:false),
     sectorCol: sectorCol?true:false, industryCol: industryCol?true:false,
@@ -3607,7 +3608,7 @@ function _renderMethodologyInner(){
   const labRows=(lab?.ranked||[]).slice(0,6);
   const labNames={current:'Current mRMR',rvol_early:'RVOL early',quiet_accum:'Quiet accumulation',sector_breakout:'Sector breakout',durable_momo:'Durable momentum'};
   const labHTML=`<h3 id="meth-rocket-lab" style="margin-top:18px">Rocket Lab — Walk-Forward Gate</h3>
-    <div class="m-card" style="margin-bottom:14px"><h4>Model Promotion</h4><p>Rocket Lab replays stored compact daily snapshots. Each model ranks day D using only day-D data, then checks whether day D+1 rockets appeared in top 20/top 50. A lab model only blends into live Score after at least 3 evaluated days and only if it beats current mRMR recall.</p>
+    <div class="m-card" style="margin-bottom:14px"><h4>Model Promotion</h4><p>Rocket Lab replays stored daily snapshots using all clean numeric feature columns. Each model ranks day D using only day-D data, then checks whether day D+1 rockets appeared in top 20/top 50. A lab model only blends into live Score after 1 evaluated walk-forward day and only if it beats current mRMR recall.</p>
     <p style="margin-top:8px;color:${E.rocketLabActiveModel?'var(--green)':'var(--t3)'}">Active overlay: <strong>${E.rocketLabActiveModel?labNames[E.rocketLabActiveModel]||E.rocketLabActiveModel:'none yet'}</strong>${lab?.days!=null?` · ${lab.days} evaluated day${lab.days===1?'':'s'}`:''}</p></div>
     <div class="corr-wrap"><table class="ct"><thead><tr><th>Model</th><th>Days</th><th>Rockets</th><th>Hit@20</th><th>Recall@20</th><th>Recall@50</th><th>Precision@20</th></tr></thead><tbody>
       ${labRows.length?labRows.map(r=>`<tr><td style="font-weight:700;color:${r.model===E.rocketLabActiveModel?'var(--green)':'var(--t1)'}">${labNames[r.model]||r.model}</td><td>${r.days||0}</td><td>${r.rockets||0}</td><td>${r.hit20||0}</td><td>${r.recall20||0}%</td><td>${r.recall50||0}%</td><td>${r.precision20||0}%</td></tr>`).join(''):`<tr><td colspan="7" style="color:var(--t3)">Need at least two stored daily snapshots to evaluate. First sessions only collect evidence.</td></tr>`}
@@ -3665,6 +3666,7 @@ function _renderMethodologyInner(){
     <div id="meth-breadth">${breadthCardHTML}</div>
     ${labHTML}
     <h3 id="meth-engine" style="margin-top:18px">Scoring Engine — Continuous Learning mRMR</h3>
+    <p id="mrmrLearningModeNote"><strong>Current learning mode:</strong> simple logic, rich inputs. The engine learns from all clean numeric indicators in yesterday's saved feature snapshot versus today's actual rockets, using one regime-agnostic mRMR accumulator. Market breadth is context only and does not create separate bull/neutral/bear histories.</p>
     <div class="m-grid">
       <div class="m-card"><h4>🚀 What is a Rocket?</h4><p>Every trading day, regardless of what the broader market is doing, a small subset of NSE stocks moves <strong>≥${E.rocketThreshold||10}% intraday</strong>. These are Rockets. They don't happen randomly — stocks that become rockets tend to share measurable characteristics <em>the day before</em> they move. The engine's job is to find those stocks before the move, not explain them after.</p></div>
       <div class="m-card"><h4>📡 How the Engine Learns</h4><p>After each session, the engine correlates <strong>yesterday's feature values</strong> against <strong>today's actual rockets</strong>. Features that consistently appeared in rockets get higher weight; features that didn't get lower weight. Tomorrow's recommendations are stocks that look like yesterday's rockets — but haven't moved yet. The target label is quality-adjusted: yesterday's rockets that <em>held</em> today reinforce the signal; those that collapsed are treated as 0, so the engine learns to find durable moves, not fragile spikes.</p></div>
@@ -5272,32 +5274,7 @@ function featureKeyByPatterns(cols,patterns){
   return (cols||[]).find(f=>patterns.some(p=>p.test(f)))||null;
 }
 function buildRocketLabCols(feats){
-  const wanted=[
-    [/^price$/],
-    [/price_change.*1_day|1_day.*price_change|^change.*1_day$/],
-    [/change_from_open.*1_day|1_day.*change_from_open/],
-    [/relative_volume.*time/],
-    [/relative_volume.*1_day/],
-    [/^volume_1_day$|^volume$/],
-    [/price_volume_turnover_1_day/],
-    [/average_true_range.*1_day|atr.*1_day/],
-    [/directional_movement_index.*5_minutes.*positive/],
-    [/directional_movement_index.*5_minutes.*negative/],
-    [/directional_movement_index.*15_minutes.*positive/],
-    [/directional_movement_index.*15_minutes.*negative/],
-    [/money_flow_index.*5_minutes/],
-    [/money_flow_index.*15_minutes/],
-    [/relative_strength_index.*5_minutes/],
-    [/relative_strength_index.*15_minutes/],
-    [/commodity_channel_index.*5_minutes/],
-    [/rate_of_change.*5_minutes/],
-  ];
-  const cols=[];
-  wanted.forEach(pats=>{const k=featureKeyByPatterns(feats,pats);if(k&&!cols.includes(k)) cols.push(k);});
-  ['delivery_pct','peak_retention','range_pos','pct_from_52w_high','sector_breadth','sector_rel_strength','industry_breadth','price_band_pct','pct_to_upper_band'].forEach(k=>{
-    if(feats.includes(k)&&!cols.includes(k)) cols.push(k);
-  });
-  return cols.slice(0,20);
+  return [...new Set(feats||[])].filter(Boolean);
 }
 function buildRocketLabSession({date,threshold,cols,rows,labels,marketBreadth,totalParsed}){
   const data=[];
@@ -5414,39 +5391,16 @@ function buildRocketLabSeedSessionFromPrevSnap({date,threshold,cols,labels,prevS
   if(!date||!cols?.length||!prevSnap||typeof prevSnap!=='object') return null;
   const rows=Object.entries(prevSnap).map(([symbol,vals])=>{
     const src=vals&&typeof vals==='object'?vals:{};
-    const features={};
-    cols.forEach(c=>{
-      const v=src[c];
-      features[c]=(v==null||isNaN(Number(v)))?null:Number(v);
-    });
+    const sym=normSym(symbol);
+    if(!sym) return null;
     const priceChangeEntry=Object.entries(src).find(([k])=>/price/i.test(k)&&/change/i.test(k));
     const pc=priceChangeEntry?Number(priceChangeEntry[1]):null;
-    return {
-      symbol:normSym(symbol),
-      eligible:true,
-      rocket:pc!=null&&isFinite(pc)&&pc>=threshold,
-      score:null,
-      features
-    };
-  }).filter(r=>r.symbol);
+    const savedScore=Number(src.rocketScore??src.score??src.baseRocketScore);
+    const baseScore=isFinite(savedScore)?savedScore:(pc!=null&&isFinite(pc)?Math.max(0,Math.min(100,pc*10)):null);
+    return [sym,baseScore,1,...cols.map(c=>compactFeatureValue(src[c]))];
+  }).filter(Boolean);
   if(!rows.length) return null;
   return {date,threshold,cols,labels:cols.reduce((o,c)=>{o[c]=labels?.[c]||c;return o;},{}),marketBreadth:null,totalParsed:rows.length,seededFromPrevSnap:true,rows};
-}
-
-function promoteRocketLabFromFirstEvaluation(lab){
-  const evals=Array.isArray(lab?.evaluations)?lab.evaluations:[];
-  const modelId=e=>e.model||e.key||e.name||'';
-  const current=evals.find(e=>modelId(e)==='current'||/current/i.test(String(e.label||e.name||'')));
-  if(!current) return lab;
-  const winner=evals
-    .filter(e=>modelId(e)!=='current'&&(e.days||0)>=1&&(e.rockets||0)>0&&(Number(e.recall20||0)>Number(current.recall20||0)||Number(e.recall50||0)>Number(current.recall50||0)))
-    .sort((a,b)=>(Number(b.recall20||0)-Number(a.recall20||0))||(Number(b.recall50||0)-Number(a.recall50||0))||(Number(b.precision20||0)-Number(a.precision20||0)))[0];
-  if(!winner) return lab;
-  lab.activeModel=modelId(winner);
-  lab.activeModelLabel=winner.label||winner.name||modelId(winner);
-  lab.activeOverlayReason='first_walk_forward_win';
-  try{FS.set(modeKey(ROCKET_LAB_STORE),lab);}catch(e){}
-  return lab;
 }
 
 function updateRocketLab(session,seedSession){
@@ -6083,36 +6037,4 @@ function initNSELinks(){
   }
 }
 initNSELinks();
-
-function buildRocketLabCols(features){
-  return [...new Set(features||[])].filter(Boolean);
-}
-
-(function installMethodologyCopyPatch(){
-  function patchMethodologyCopy(){
-    const el=document.getElementById('methContent');
-    if(!el) return;
-    const scoring=[...el.querySelectorAll('h3')].find(h=>/Scoring Engine/i.test(h.textContent||''));
-    if(scoring&&!document.getElementById('mrmrLearningModeNote')){
-      scoring.insertAdjacentHTML('afterend',`<p id="mrmrLearningModeNote"><strong>Current learning mode:</strong> simple logic, rich inputs. The engine learns from all clean numeric indicators in yesterday's saved feature snapshot versus today's actual rockets, using one regime-agnostic mRMR accumulator. Market breadth is context only and does not create separate bull/neutral/bear histories.</p>`);
-    }
-    const rocket=[...el.querySelectorAll('h3')].find(h=>/Rocket Lab/i.test(h.textContent||''));
-    if(rocket&&!document.getElementById('rocketLabSeedNote')){
-      rocket.insertAdjacentHTML('afterend','<p id="rocketLabSeedNote"><strong>Starts immediately:</strong> Rocket Lab seeds its first walk-forward check from the available yesterday/today pair using the full numeric feature state, then promotes a lab model after 1 evaluated day if it beats current mRMR recall.</p>');
-    }
-    el.querySelectorAll('p').forEach(p=>{
-      p.innerHTML=p.innerHTML
-        .replace(/after at least 3 evaluated days/gi,'after 1 evaluated walk-forward day');
-    });
-  }
-  const base=typeof renderMethodology==='function'?renderMethodology:null;
-  if(base){
-    renderMethodology=function(){
-      const out=base.apply(this,arguments);
-      patchMethodologyCopy();
-      return out;
-    };
-  }
-  setTimeout(patchMethodologyCopy,0);
-})();
 
