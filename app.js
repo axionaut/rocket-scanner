@@ -1,12 +1,11 @@
-const BUILD_TS='2026-06-12 11:25 IST'; // replaced at commit time with IST datetime
-const APP_VERSION=401; // Shared deployed version; increment once per released code change.
+const BUILD_TS='2026-06-12 15:01 IST'; // replaced at commit time with IST datetime
+const APP_VERSION=402; // Shared deployed version; increment once per released code change.
 const GOOGLE_DRIVE_CLIENT_ID='1015012642264-oi2nelv3v90k3d39r994a6nelgjs2a56.apps.googleusercontent.com'; // Public OAuth Web Client ID.
-const HARD_FILTER_SCHEMA='raw_rvol_directional_pressure_v1';
+const HARD_FILTER_SCHEMA='structural_tradeability_v2';
+const ROCKET_TARGET_FRACTION=0.005; // Daily top 0.5% of the full parsed NSE universe.
 const STOCK_RUNWAY_CEILING_PCT=19.5; // UC-style ceiling retained only for legacy helpers; entry-ceiling filtering is disabled.
 const PRICE_BAND_BLOCK_BUFFER_PCT=0.15; // Treat rounded 4.9/9.9/19.9 rows as effectively band-locked.
 const PRICE_COMPARE_EPS=0.0001; // Do not let a full tick/paisa breach pass a buy ceiling.
-const SELL_PRESSURE_EDGE_MIN=0.08; // DMI- must beat DMI+ by this normalized edge to count as supply pressure.
-const RVOL_PRESSURE_MIN=1.5; // Above this, raw RVOL must have upward direction or it is treated as distribution.
 const SYSTEM_TRADE_START_DATE='2026-04-01'; // Adaptive stats use trades closed from this date onward.
 let MARKET_MODE='stock';
 function modeKey(base){return base;}
@@ -30,7 +29,7 @@ let PERF_TRADE_WINDOWS=[]; // cached trade window rows from renderPerformance �
 let PERF_LATEST_SUMMARY=null; // cached latest session summary from renderPerformance — used by renderStats card
 let PERF_RENDERED=false; // Performance tab is heavy; render only on demand
 let ENGINE_DATA={};
-let REMOVED={uc:0,surv:0,liq:0,fscore:0,atr:0,deliv:0,fade:0,supply:0};
+let REMOVED={uc:0,surv:0,liq:0,fscore:0,atr:0};
 let SUPPRESSED_HELD=0; // count of stocks hidden because already held in POSITIONS
 let SUPPRESSED_YDAY_ROCKET=0; // count of stocks hidden because they were rockets yesterday
 let SELECTED=new Set(); // symbols selected for basket — recomputed from FILT each applyFilters
@@ -44,7 +43,8 @@ const SCANNER_STORE='rs_filters';
 const SHARED_FILTER_STORE='rs_filters_shared';
 const ALL_STORE='rs_data';
 const CORR_STORE='rs_corr';
-const CORR_SCHEMA='fresh_lagged_primary_v1';
+const CORR_SCHEMA='relative_top_half_percent_full_universe_v1';
+const FEATURE_ACCOUNTABILITY_STORE='rs_feature_accountability_v1';
 const METH_STORE='rs_meth';
 const HOLD_STORE='rs_holdings';
 const ORDERS_STORE='rs_orders';
@@ -884,21 +884,6 @@ function onVolChange(){
   applyFilters();
 }
 
-// Rocket % is only the rocket-label threshold. Runway uses STOCK_RUNWAY_CEILING_PCT.
-// Retained as no-op for call sites in engine post-run, loadFilterState, clearFilters.
-function onRocketPctChange(resolvedThreshold){}
-
-// User-facing: rocket threshold changed via filter bar input.
-// Updates rocket labels/counts immediately. Learning impact only takes effect on next CSV upload.
-function onRocketPctChangeUI(){
-  const el=document.getElementById('fRocketPct');
-  const raw=parseFloat(el?.value);
-  const v=(isFinite(raw)&&raw>=5&&raw<=20)?raw:10;
-  if(ENGINE_DATA) ENGINE_DATA.rocketThreshold=v;
-  try{saveFilterState();}catch(e){}
-  applyFilters();
-}
-
 // ── CSV Parser ──
 function parseCSVRaw(text){
   const lines=[];let cur='',inQ=false;
@@ -1109,7 +1094,6 @@ function getHardFilterRowsFromEngine(E){
       kind:'surv',
       ruleKey:row.key,
     })),
-    {key:'supply_pressure',label:'Sell-Side Pressure',criteria:'Current DMI-/sell-side pressure stronger than buy-side, confirmed by weak VWAP/open/flow/retention',removed:rm.supply||0,rockets:rk.supply||[],active:true,kind:'core'},
     {key:'low_liquidity',label:'Low Liquidity',criteria:`Volume < Min Vol OR Shareholders < Min Sh (filter bar)`,removed:rm.liq||0,rockets:rk.liq||[],active:true,kind:'core'},
   ];
 }
@@ -1126,6 +1110,7 @@ function persistMethodologySnapshot(){
       top10Feats:ENGINE_DATA.top10Feats||[],
       rocketCount:ENGINE_DATA.rocketCount,
       rocketThreshold:ENGINE_DATA.rocketThreshold,
+      rocketTargetFraction:ENGINE_DATA.rocketTargetFraction||ROCKET_TARGET_FRACTION,
       accSessions:ENGINE_DATA.accSessions,
       laggedNote:ENGINE_DATA.laggedNote||'',
       marketBreadth:ENGINE_DATA.marketBreadth,
@@ -1133,7 +1118,6 @@ function persistMethodologySnapshot(){
       sectorCol:ENGINE_DATA.sectorCol,
       industryCol:ENGINE_DATA.industryCol,
       yesterdayRockets:ENGINE_DATA.yesterdayRockets||[],
-      qualityTargetN:ENGINE_DATA.qualityTargetN||0,
       totalParsed:ENGINE_DATA.totalParsed||0,
       hardFilterSchema:ENGINE_DATA.hardFilterSchema||HARD_FILTER_SCHEMA,
       removed:{...(ENGINE_DATA.removed||{})},
@@ -1142,7 +1126,8 @@ function persistMethodologySnapshot(){
       avgMoveAll:ENGINE_DATA.avgMoveAll,
       avgMoveUniverse:ENGINE_DATA.avgMoveUniverse,
       recommendationFeedback:ENGINE_DATA.recommendationFeedback||null,
-      executedEntryFeedback:ENGINE_DATA.executedEntryFeedback||null
+      executedEntryFeedback:ENGINE_DATA.executedEntryFeedback||null,
+      featureAccountability:ENGINE_DATA.featureAccountability||null
     };
     FS.set(modeKey(METH_STORE),methSave);
   }catch(e){
@@ -1683,10 +1668,6 @@ function runEngine(raw, sessionTag){
   // ── Known special mappings for derived features ──
   // These tell us which safeKey holds which meaning for computed features
   const findKey = pattern => Object.keys(COL_MAP).find(k => pattern.test(k)) || null;
-  const findKeys = pattern => Object.keys(COL_MAP).filter(k => pattern.test(k));
-  const findKeyPref = (preferred, fallback) =>
-    Object.keys(COL_MAP).find(k => preferred.some(p => p.test(k))) || findKey(fallback);
-  const INTRADAY_TF = /(1_minute|3_minutes|5_minutes|15_minutes|30_minutes|45_minutes|1_hour|2_hours|4_hours)/;
   const K = {
     price:        findKey(/^price$/),
     price_change: findKey(/price_change.*1_day|1_day.*price_change|^change.*1_day$/),
@@ -1700,94 +1681,7 @@ function runEngine(raw, sessionTag){
     high_1d:      findKey(/^high_1_day$/),
     low_1d:       findKey(/^low_1_day$/),
     vwap:         findKey(/volume_weighted_average_price.*1_day/),
-    change_open:  findKey(/change_from_open.*1_day|1_day.*change_from_open/),
-    rvol_time:    findKey(/^relative_volume_at_time$|relative_volume.*time/),
-    rvol_day:     findKey(/^relative_volume_1_day$|relative_volume.*1_day/),
-    buy_qty:      findKey(/(^|_)buy(_|ing_)?(qty|quantity|volume|orders?)$|(^|_)bid(_|_qty|_quantity|_volume)/),
-    sell_qty:     findKey(/(^|_)sell(_|ing_)?(qty|quantity|volume|orders?)$|(^|_)ask(_|_qty|_quantity|_volume)|offer(_|_qty|_quantity|_volume)/),
-    dmi_pos:      findKeyPref([new RegExp('directional_movement_index.*'+INTRADAY_TF.source+'.*positive'),new RegExp('directional_movement_index.*positive.*'+INTRADAY_TF.source)],/directional_movement_index.*positive/),
-    dmi_neg:      findKeyPref([new RegExp('directional_movement_index.*'+INTRADAY_TF.source+'.*negative'),new RegExp('directional_movement_index.*negative.*'+INTRADAY_TF.source)],/directional_movement_index.*negative/),
-    adx:          findKeyPref([new RegExp('average_directional_index.*'+INTRADAY_TF.source),new RegExp(INTRADAY_TF.source+'.*average_directional_index')],/average_directional_index/),
-    mfi:          findKeyPref([new RegExp('money_flow_index.*'+INTRADAY_TF.source),new RegExp(INTRADAY_TF.source+'.*money_flow_index')],/money_flow_index/),
-    rsi:          findKeyPref([new RegExp('relative_strength_index.*'+INTRADAY_TF.source),new RegExp(INTRADAY_TF.source+'.*relative_strength_index')],/relative_strength_index/),
   };
-  K.dmi_pos_keys = findKeys(new RegExp('directional_movement_index.*'+INTRADAY_TF.source+'.*positive')).concat(findKeys(new RegExp('directional_movement_index.*positive.*'+INTRADAY_TF.source)));
-  K.dmi_neg_keys = findKeys(new RegExp('directional_movement_index.*'+INTRADAY_TF.source+'.*negative')).concat(findKeys(new RegExp('directional_movement_index.*negative.*'+INTRADAY_TF.source)));
-  K.adx_keys = findKeys(new RegExp('average_directional_index.*'+INTRADAY_TF.source)).concat(findKeys(new RegExp(INTRADAY_TF.source+'.*average_directional_index')));
-  K.mfi_keys = findKeys(new RegExp('money_flow_index.*'+INTRADAY_TF.source)).concat(findKeys(new RegExp(INTRADAY_TF.source+'.*money_flow_index')));
-  K.rsi_keys = findKeys(new RegExp('relative_strength_index.*'+INTRADAY_TF.source)).concat(findKeys(new RegExp(INTRADAY_TF.source+'.*relative_strength_index')));
-
-  function getSellPressureReason(d){
-    const directBuy=K.buy_qty?d[K.buy_qty]:null;
-    const directSell=K.sell_qty?d[K.sell_qty]:null;
-    if(directBuy!=null&&directSell!=null&&directBuy>0&&directSell>directBuy*1.05){
-      return `Sell side ${directSell.toFixed(0)} > buy side ${directBuy.toFixed(0)}`;
-    }
-
-    const dmiPairs=[];
-    const seenPairs=new Set();
-    const addPair=(posKey,negKey,weight,label)=>{
-      if(!posKey||!negKey) return;
-      const id=posKey+'|'+negKey;
-      if(seenPairs.has(id)) return;
-      seenPairs.add(id);
-      dmiPairs.push({posKey,negKey,weight,label});
-    };
-    [
-      ['5_minutes',1.35,'5m'],
-      ['15_minutes',1.15,'15m'],
-      ['30_minutes',1.0,'30m'],
-      ['45_minutes',0.85,'45m'],
-      ['1_hour',0.75,'1h']
-    ].forEach(([tf,weight,label])=>{
-      const pos=(K.dmi_pos_keys||[]).find(k=>k.includes(tf));
-      const neg=(K.dmi_neg_keys||[]).find(k=>k.includes(tf));
-      addPair(pos,neg,weight,label);
-    });
-    addPair(K.dmi_pos,K.dmi_neg,0.45,'1d');
-
-    let sellWeight=0,buyWeight=0,totalWeight=0,edgeSum=0,best=null;
-    dmiPairs.forEach(p=>{
-      const dp=d[p.posKey], dn=d[p.negKey];
-      if(dp==null||dn==null||!isFinite(dp)||!isFinite(dn)||(dp+dn)<=0) return;
-      const edge=(dn-dp)/(dn+dp);
-      totalWeight+=p.weight;
-      edgeSum+=edge*p.weight;
-      if(edge>=SELL_PRESSURE_EDGE_MIN) sellWeight+=p.weight;
-      else if(edge<=-SELL_PRESSURE_EDGE_MIN) buyWeight+=p.weight;
-      if(!best||edge>best.edge) best={...p,edge,dp,dn};
-    });
-    const netEdge=totalWeight?edgeSum/totalWeight:0;
-    const rawRvols=[K.rvol_time?d[K.rvol_time]:null,K.rvol_day?d[K.rvol_day]:null]
-      .filter(v=>v!=null&&isFinite(v)&&v>0);
-    const maxRvol=rawRvols.length?Math.max(...rawRvols):null;
-    const buyDominant=totalWeight>0&&buyWeight>=Math.max(1.25,sellWeight+0.45)&&netEdge<=-SELL_PRESSURE_EDGE_MIN;
-    if(maxRvol!=null&&maxRvol>=RVOL_PRESSURE_MIN&&totalWeight>0&&!buyDominant){
-      const label=best?.label||'intraday';
-      const pct=(best?.edge!=null?(best.edge*100).toFixed(1):'0.0');
-      return `High RVOL ${maxRvol.toFixed(2)} without upward direction (${label} DMI edge ${pct}%)`;
-    }
-    if(!totalWeight||sellWeight<Math.max(1.8,buyWeight+0.45)) return '';
-
-    const price=K.price?d[K.price]:null;
-    const vwap=K.vwap?d[K.vwap]:null;
-    const pc=K.price_change?d[K.price_change]:null;
-    const co=K.change_open?d[K.change_open]:null;
-    let confirms=0;
-    if(price!=null&&vwap!=null&&vwap>0&&price<vwap*0.9985) confirms++;
-    if(co!=null&&co<0) confirms++;
-    if(pc!=null&&pc<0) confirms++;
-    if(d.peak_retention!=null&&d.peak_retention<58) confirms++;
-    const mfiKeys=(K.mfi_keys&&K.mfi_keys.length)?K.mfi_keys:[K.mfi].filter(Boolean);
-    if(mfiKeys.some(k=>d[k]!=null&&d[k]<45)) confirms++;
-    const rsiKeys=(K.rsi_keys&&K.rsi_keys.length)?K.rsi_keys:[K.rsi].filter(Boolean);
-    if(rsiKeys.some(k=>d[k]!=null&&d[k]<45)) confirms++;
-
-    if(confirms<1||netEdge<SELL_PRESSURE_EDGE_MIN) return '';
-    const pct=(best?.edge!=null?(best.edge*100).toFixed(1):'');
-    return `Sell-side pressure${best?` (${best.label} DMI- > DMI+ by ${pct}%)`:''}`;
-  }
-
   const parsed = raw.map(r => {
     const d = {};
     // Parse all numeric columns
@@ -1923,21 +1817,18 @@ function runEngine(raw, sessionTag){
     LABELS.industry_breadth='Industry Breadth %';
   }
 
-  // ── Configurable thresholds (read early so hard filters can use rocketPct) ──
-  let rocketPct=10;
-  const _rPctEl=document.getElementById('fRocketPct');
-  const _rPctRaw=parseFloat(_rPctEl?.value);
-  const ROCKET_THRESHOLD=(isFinite(_rPctRaw)&&_rPctRaw>=5&&_rPctRaw<=20)?_rPctRaw:10;
-  rocketPct=ROCKET_THRESHOLD;
+  const learningUniverse=parsed.filter(d=>d.symbol&&(!K.price||d[K.price]!==0));
 
-  // ── Hard Filters (legacy profitable engine — single pass, learning = display) ──
-  // Surveillance flagging uses user's SURV_CUSTOM_RULES (via NSE_SURV[sym]) but is applied
-  // as a hard exclusion from both learning and display — matching the engine that was
-  // profitable for 30 days. Non-EQ series exclusion is kept on top (user choice).
+  // ── Relative rocket target: strongest 0.5% of the full valid parsed NSE universe ──
+  const rocketSelection=selectRelativeRockets(learningUniverse,d=>K.price_change?d[K.price_change]:null);
+  const ROCKET_THRESHOLD=rocketSelection.cutoff;
+
+  // ── Recommendation filters ──
+  // These rows remain in learningUniverse and snapshots; only live eligibility is filtered.
   const _liqMinVol=parseFloat(document.getElementById('fVolMult')?.value)||LIQ_MIN_VOL_DEFAULT;
   const _liqMinTurnover=parseFloat(document.getElementById('fMinTurnover')?.value)||0;
-  REMOVED={uc:0,surv:0,nonEq:0,liq:0,fscore:0,atr:0,deliv:0,fade:0,supply:0,survRules:{},
-    rockets:{uc:[],surv:[],nonEq:[],liq:[],fscore:[],atr:[],deliv:[],fade:[],supply:[]}};
+  REMOVED={uc:0,surv:0,nonEq:0,liq:0,fscore:0,atr:0,survRules:{},
+    rockets:{uc:[],surv:[],nonEq:[],liq:[],fscore:[],atr:[]}};
   const filtered=parsed.filter(d=>{
     const pc=K.price_change?d[K.price_change]:null;
     const sym=d.symbol;
@@ -1945,7 +1836,7 @@ function runEngine(raw, sessionTag){
       d._hardFiltered=true;
       d._filterBucket=bucket;
       REMOVED[bucket]++;
-      if(pc!=null&&pc>=rocketPct) REMOVED.rockets[bucket].push({sym,pc});
+      if(rocketSelection.symbols.has(sym)) REMOVED.rockets[bucket].push({sym,pc});
     };
     if(!d.symbol||(K.price&&d[K.price]===0)){_track('liq');return false;}
     // Upper circuit — stock-only market structure filter
@@ -1962,11 +1853,6 @@ function runEngine(raw, sessionTag){
       if(rules.length){const primary=rules[0];REMOVED.survRules[primary]=(REMOVED.survRules[primary]||0)+1;}
       return false;
     }
-    // Sell-side pressure — avoid names where current supply is stronger than demand.
-    // Uses direct buy/sell quantity columns when available, otherwise intraday DMI-/DMI+
-    // with weak VWAP/open/flow/retention confirmation. Blank signals pass as unknown.
-    const sellPressureReason=getSellPressureReason(d);
-    if(sellPressureReason){d._sellPressureReason=sellPressureReason;_track('supply');return false;}
     // Liquidity floor — volume, turnover, or shareholders below threshold
     const sh=K.shareholders?d[K.shareholders]:null;
     const vol=K.volume?d[K.volume]:null;
@@ -1981,15 +1867,6 @@ function runEngine(raw, sessionTag){
     // ATR — zero/negative values are invalid; blanks pass through as unknown
     const atr=K.atr_pct?d[K.atr_pct]:null;
     if(atr!==null&&atr<=0){_track('atr');return false;}
-    // Delivery — stock-only NSE filter; blanks pass through as unknown
-    const del=d.delivery_pct;
-    if(del!==null&&del<30){_track('deliv');return false;}
-    // Peak retention — stock has given back >50% of today's day range (fading). Only applied
-    // when day range is meaningful (>1% of price) to avoid noise on tight ranges.
-    const hi1d=K.high_1d?d[K.high_1d]:null, lo1d=K.low_1d?d[K.low_1d]:null;
-    if(hi1d!=null&&lo1d!=null&&lo1d>0&&(hi1d-lo1d)/lo1d>0.01){
-      if(d.peak_retention!=null&&d.peak_retention<50){_track('fade');return false;}
-    }
     d._hardFiltered=false;
     d._filterBucket='';
     return true;
@@ -1999,6 +1876,7 @@ function runEngine(raw, sessionTag){
   // Expose for snapshot saving after engine run
   window._lastEngineFeats = FEATS;
   window._lastParsedFiltered = filtered;
+  window._lastParsedForSnapshot = learningUniverse;
 
   // Deduplicate FEATS (in case of re-runs in same session)
   const FEATS_UNIQUE=[...new Set(FEATS)];
@@ -2006,60 +1884,55 @@ function runEngine(raw, sessionTag){
 
   // Session dedup: don't re-increment if same data uploaded again.
   // Market hours guard: only accumulate correlations during 9:00–16:00 IST.
+  if(ACC_CORR?.corrSchema!==CORR_SCHEMA) ACC_CORR=null;
   const isNewSession = (!sessionTag || !ACC_CORR || ACC_CORR.lastTag !== sessionTag) && isMarketHours();
 
   // ── Today's rockets ──
   const topSetToday=new Set();
-  filtered.forEach((d,i)=>{
-    const pc=K.price_change?d[K.price_change]:null;
-    if(pc!=null&&pc>=ROCKET_THRESHOLD) topSetToday.add(i);
+  learningUniverse.forEach((d,i)=>{
+    if(rocketSelection.symbols.has(d.symbol)) topSetToday.add(i);
   });
 
 
-  // ── Yesterday's rockets — continuation-aware learning and display tracking ──
+  // ── Yesterday's relative leaders — display suppression only ──
   const prevSnap=PREV_SNAP||{};
   const pcKey=K.price_change;
   const yesterdayRockets=[];
-  const goodRocketsToday=new Set();
-  const continuationHoldFactor=0.3;
-  const filteredSymMap={}; filtered.forEach((d,i)=>{filteredSymMap[d.symbol]=i;});
+  const learningSymMap={}; learningUniverse.forEach((d,i)=>{learningSymMap[d.symbol]=i;});
 
   if(pcKey){
-    Object.entries(prevSnap).forEach(([sym,feats])=>{
+    const prevRows=Object.entries(prevSnap).map(([symbol,features])=>({symbol,features}));
+    const prevRocketSelection=selectRelativeRockets(prevRows,row=>row.features?.[pcKey]);
+    prevRocketSelection.rows.forEach(({symbol:sym,features:feats})=>{
       const yesterdayChg=feats[pcKey];
-      if(yesterdayChg==null||yesterdayChg<ROCKET_THRESHOLD) return;
-      const idx=filteredSymMap[sym];
-      const todayData=idx!=null?filtered[idx]:null;
+      const idx=learningSymMap[sym];
+      const todayData=idx!=null?learningUniverse[idx]:null;
       const todayChg=todayData&&pcKey?todayData[pcKey]:null;
-      const collapseThreshold=-(yesterdayChg*continuationHoldFactor);
-      const held=todayChg!=null&&todayChg>collapseThreshold;
-      yesterdayRockets.push({symbol:sym,yesterdayChg:+yesterdayChg.toFixed(2),todayChg:todayChg!=null?+todayChg.toFixed(2):null,held});
-      if(held&&idx!=null) goodRocketsToday.add(idx);
+      yesterdayRockets.push({symbol:sym,yesterdayChg:+yesterdayChg.toFixed(2),todayChg:todayChg!=null?+todayChg.toFixed(2):null});
     });
   }
   yesterdayRockets.sort((a,b)=>b.yesterdayChg-a.yesterdayChg);
 
-  // Positive target includes fresh rockets and yesterday's rockets that held their move.
-  // Display suppression remains independent, so continuation shapes rankings without forcing re-entry.
-  const qualitySet=new Set([...topSetToday,...goodRocketsToday]);
+  // The learning target is only today's fresh relative rockets. Yesterday's rockets are
+  // tracked for display suppression but do not dilute the next-rocket objective.
+  const qualitySet=new Set(topSetToday);
   const topN=topSetToday.size;
-  const continuationN=goodRocketsToday.size;
   const qualityN=qualitySet.size;
 
   // ── Lagged correlation: yesterday's features → quality target (binary 0/1) ──
-  const overlap=filtered.filter(d=>prevSnap[d.symbol]&&Object.keys(prevSnap[d.symbol]).length>0);
+  const overlap=learningUniverse.filter(d=>prevSnap[d.symbol]&&Object.keys(prevSnap[d.symbol]).length>0);
   const useLagged=overlap.length>=100;
 
   const targetCorrToday={};
   let laggedNote='';
 
   if(qualityN===0){
-    laggedNote='No rockets or held continuations today — using historical only';
+    laggedNote='No relative leaders today — using historical only';
     for(const f of FEATS) targetCorrToday[f]=null;
   } else if(useLagged){
-    const overlapIndices=overlap.map(d=>filtered.indexOf(d));
+    const overlapIndices=overlap.map(d=>learningUniverse.indexOf(d));
     const laggedTarget=overlapIndices.map(i=>qualitySet.has(i)?1:0);
-    laggedNote='Lagged ('+overlap.length+' matched · '+topN+' fresh rockets · +'+continuationN+' held continuations · '+qualityN+' quality target)';
+    laggedNote='Lagged ('+overlap.length+' matched · top '+(ROCKET_TARGET_FRACTION*100).toFixed(1)+'% · '+topN+' fresh leaders · cutoff '+(ROCKET_THRESHOLD!=null?ROCKET_THRESHOLD.toFixed(2)+'%':'n/a')+')';
     for(const f of FEATS){
       const prevVals=overlap.map(d=>{
         const v=prevSnap[d.symbol][f];
@@ -2076,12 +1949,12 @@ function runEngine(raw, sessionTag){
       for(const f of FEATS) targetCorrToday[f]=null;
     } else {
       // Cold-start only: same-day fallback is useful before the brain has history.
-      const target=filtered.map((_,i)=>qualitySet.has(i)?1:0);
+      const target=learningUniverse.map((_,i)=>qualitySet.has(i)?1:0);
       laggedNote=overlap.length>0
         ?'Cold-start same-day fallback (only '+overlap.length+' matched, need 100+)'
         :'Session 1 — lagged learning starts next upload';
       for(const f of FEATS){
-        targetCorrToday[f]=pearson(target,filtered.map(d=>d[f]));
+        targetCorrToday[f]=pearson(target,learningUniverse.map(d=>d[f]));
       }
     }
   }
@@ -2151,22 +2024,44 @@ function runEngine(raw, sessionTag){
   const withPC=filtered.map((d,i)=>({i,pc:K.price_change?d[K.price_change]:null})).filter(x=>x.pc!==null);
   withPC.sort((a,b)=>b.pc-a.pc);
 
+  // Audit the feature directions that were active yesterday against today's actual fresh rockets.
+  // This is feature-level accountability inside mRMR, not a parallel prediction model.
+  const actualRocketSymbols=new Set([...topSetToday].map(i=>learningUniverse[i]?.symbol).filter(Boolean));
+  const featureAccountability=evaluateFeatureAccountability({
+    features:FEATS,
+    overlap,
+    actualRocketSymbols,
+    sourceDate:PREV_SNAP_META?.savedDate,
+    evaluationDate:getSessionDate(),
+  });
+
   const interCorr={};
+  const redundancySampleMax=600;
+  const redundancyRows=learningUniverse.length<=redundancySampleMax
+    ? learningUniverse
+    : Array.from({length:redundancySampleMax},(_,i)=>learningUniverse[Math.floor(i*(learningUniverse.length-1)/(redundancySampleMax-1))]);
   for(let a=0;a<FEATS.length;a++)for(let b=a+1;b<FEATS.length;b++){
     const f1=FEATS[a],f2=FEATS[b];
-    const r=pearson(filtered.map(d=>d[f1]),filtered.map(d=>d[f2]));
+    const r=pearson(redundancyRows.map(d=>d[f1]),redundancyRows.map(d=>d[f2]));
     interCorr[f1+'|'+f2]=r;interCorr[f2+'|'+f1]=r;
   }
 
   const mrmr={};
   for(const f of FEATS){
     const rel=Math.abs(targetCorr[f])||0;
-    const red=mean(FEATS.filter(g=>g!==f).map(g=>Math.abs(interCorr[f+'|'+g]||0)))||0;
-    mrmr[f]={rel,red,score:rel/(1+red)};
+    const strongestPeers=FEATS.filter(g=>g!==f)
+      .map(g=>Math.abs(interCorr[f+'|'+g]||0))
+      .sort((a,b)=>b-a)
+      .slice(0,10);
+    const red=mean(strongestPeers)||0;
+    const baseScore=rel/(1+red);
+    const reliability=featureAccountability.reliability[f]||1;
+    mrmr[f]={rel,red,baseScore,reliability,score:baseScore*reliability,accountability:featureAccountability.stats[f]||null};
   }
   const totalMRMR=FEATS.reduce((s,f)=>s+mrmr[f].score,0)||1; // guard /0
   const weights={};
   for(const f of FEATS)weights[f]=mrmr[f].score/totalMRMR;
+  saveFeatureAccountabilityPlan(getSessionDate(),FEATS,targetCorr,weights);
 
   const pctls={};
   for(const f of FEATS)pctls[f]=pctRank(filtered.map(d=>d[f]));
@@ -2268,9 +2163,10 @@ function runEngine(raw, sessionTag){
     SCORE_MAP[d.symbol]=mw>0?Math.round(rs/mw*1000)/10:0;
   });
   parsed.forEach(d=>{d.rocketScore=SCORE_MAP[d.symbol]??null;});
-  ENGINE_DATA={targetCorr,targetCorrToday,interCorr,mrmr,weights,features:FEATS,labels:LABELS,top10Feats,rocketCount:topN,rocketThreshold:ROCKET_THRESHOLD,accSessions:ACC_CORR?.sessions||1,laggedNote:laggedNote||'',
+  ENGINE_DATA={targetCorr,targetCorrToday,mrmr,weights,features:FEATS,labels:LABELS,top10Feats,rocketCount:topN,rocketThreshold:ROCKET_THRESHOLD,rocketTargetFraction:ROCKET_TARGET_FRACTION,accSessions:ACC_CORR?.sessions||1,laggedNote:laggedNote||'',
     marketBreadth:marketBreadth, avgMoveAll:todayAvgMoveAll, avgMoveUniverse:todayAvgMoveUniverse,
     recommendationFeedback,executedEntryFeedback,
+    featureAccountability:{lastEvaluatedDate:featureAccountability.lastEvaluatedDate,stats:featureAccountability.stats},
     intradayTrajectory:{
       active:intradayTrajectory.active,
       sampleCount:intradayTrajectory.sampleCount,
@@ -2281,8 +2177,6 @@ function runEngine(raw, sessionTag){
     useAccCorr: !useFreshCorr && (ACC_CORR?(ACC_CORR.sessions||0)>=2:false),
     sectorCol: sectorCol?true:false, industryCol: industryCol?true:false,
     yesterdayRockets: yesterdayRockets,
-    continuationN,
-    qualityTargetN: qualityN,
     totalParsed: totalParsed,
     hardFilterSchema:HARD_FILTER_SCHEMA,
     removed: {...REMOVED},
@@ -2295,18 +2189,17 @@ function runEngine(raw, sessionTag){
     }))
   };
   COLS=getCols(); // refresh dynamic columns
-  // Persist methodology data including interCorr matrix
+  // Persist compact methodology summaries; the O(n²) pair matrix is recomputed per run.
   try{
-    const methSave={targetCorr,targetCorrToday,interCorr,mrmr,weights,features:FEATS,labels:LABELS,top10Feats,rocketCount:ENGINE_DATA.rocketCount,rocketThreshold:ENGINE_DATA.rocketThreshold,accSessions:ENGINE_DATA.accSessions,laggedNote:ENGINE_DATA.laggedNote,
+    const methSave={targetCorr,targetCorrToday,mrmr,weights,features:FEATS,labels:LABELS,top10Feats,rocketCount:ENGINE_DATA.rocketCount,rocketThreshold:ENGINE_DATA.rocketThreshold,rocketTargetFraction:ROCKET_TARGET_FRACTION,accSessions:ENGINE_DATA.accSessions,laggedNote:ENGINE_DATA.laggedNote,
       marketBreadth:ENGINE_DATA.marketBreadth,useFreshCorr:ENGINE_DATA.useFreshCorr,freshSignalCount:ENGINE_DATA.freshSignalCount,scoringSource:ENGINE_DATA.scoringSource,useAccCorr:ENGINE_DATA.useAccCorr,sectorCol:ENGINE_DATA.sectorCol,industryCol:ENGINE_DATA.industryCol,
-      yesterdayRockets:yesterdayRockets,continuationN,qualityTargetN:qualityN,totalParsed:totalParsed,hardFilterSchema:HARD_FILTER_SCHEMA,removed:{...REMOVED},survSize:Object.keys(NSE_SURV).length,
+      yesterdayRockets:yesterdayRockets,totalParsed:totalParsed,hardFilterSchema:HARD_FILTER_SCHEMA,removed:{...REMOVED},survSize:Object.keys(NSE_SURV).length,
       avgMoveAll:todayAvgMoveAll,avgMoveUniverse:todayAvgMoveUniverse,recommendationFeedback,executedEntryFeedback,
+      featureAccountability:ENGINE_DATA.featureAccountability,
       intradayTrajectory:ENGINE_DATA.intradayTrajectory};
     FS.set(modeKey(METH_STORE),methSave);
   }catch(e){console.warn('Could not save methodology data',e);}
   persistMethodologySnapshot();
-  // Keep legacy call site; Rocket % controls rocket labels/counts only.
-  try{onRocketPctChange(ROCKET_THRESHOLD);}catch(e){}
   return results;
 }
 
@@ -2476,8 +2369,7 @@ function renderStats(){
   const scoreMin=scores.length?Math.min(...scores).toFixed(1):'—';
   const scoreSpread=scores.length?(Math.max(...scores)-Math.min(...scores)).toFixed(1):'—';
 
-  const _rsCeiling=ENGINE_DATA?.rocketThreshold||10;
-  const rocketCount=ALL.filter(s=>s.priceChange!=null&&s.priceChange>=_rsCeiling).length;
+  const rocketCount=ENGINE_DATA?.rocketCount||0;
 
   // Compute top sector by breadth
   const secBreadths={};
@@ -2536,20 +2428,17 @@ function renderStats(){
     ${slTgtCard}
     <div class="st"><div class="st-l">Score Spread</div><div class="st-v">${scoreSpread}</div><div class="st-d">${scoreMax} top · ${scoreMin} low</div></div>
     <div class="st"><div class="st-l">Top Sector</div><div class="st-v" style="font-size:15px;color:var(--green)">${topSec}</div><div class="st-d">${topSecPct.toFixed(0)}% advancing</div></div>
-    <div class="st"><div class="st-l">Rockets Today</div><div class="st-v" style="color:${rocketCount>0?'var(--fire)':'var(--t3)'}">${rocketCount}</div><div class="st-d">≥${_rsCeiling}%</div></div>
+    <div class="st"><div class="st-l">Relative Leaders</div><div class="st-v" style="color:${rocketCount>0?'var(--fire)':'var(--t3)'}">${rocketCount}</div><div class="st-d">top ${((ENGINE_DATA.rocketTargetFraction||ROCKET_TARGET_FRACTION)*100).toFixed(1)}% · cutoff ${ENGINE_DATA.rocketThreshold!=null?ENGINE_DATA.rocketThreshold.toFixed(2)+'%':'n/a'}</div></div>
     <div class="st"><div class="st-l">Breadth</div><div class="st-v" style="color:var(--cyan)">${ENGINE_DATA.marketBreadth!=null?(ENGINE_DATA.marketBreadth*100).toFixed(0):(bull/t*100).toFixed(0)}%</div><div class="st-d">market context only · ${ENGINE_DATA.accSessions||0} learned sessions</div></div>${bookedCard}`;
 
   // Row 1: hard-filter removal pills
   const filterPills=[];
   const _ucRkt=REMOVED.rockets?.uc||[];if(_ucRkt.length)filterPills.push(`<span class="info-pill pill-red" title="UC rockets (learned from, not shown): ${_ucRkt.map(x=>x.sym+' +'+x.pc.toFixed(1)+'%').join(', ')}">⛔ ${_ucRkt.length} UC rockets</span>`);
-  if(REMOVED.nonEq>0)filterPills.push(`<span class="info-pill pill-orange" title="Non-EQ series (BE/BZ/SZ/SM/ST) — T2T settlement, excluded from learning and display.">⚠ ${REMOVED.nonEq} non-EQ removed</span>`);
-  if(REMOVED.surv>0){const _sre=Object.entries(REMOVED.survRules||{}).sort((a,b)=>b[1]-a[1]).slice(0,5);const _srm=Object.fromEntries(getSurvRules().map(r=>[r.key,r.label]));const _srtip=_sre.map(([k,v])=>`${_srm[k]||k}: ${v}`).join(' · ');filterPills.push(`<span class="info-pill pill-red" title="Surveillance-flagged — excluded from both learning and display. Top rules: ${escHtml(_srtip)}">⚠ ${REMOVED.surv} surveillance removed</span>`);}
+  if(REMOVED.nonEq>0)filterPills.push(`<span class="info-pill pill-orange" title="Non-EQ series (BE/BZ/SZ/SM/ST) — T2T settlement, excluded from recommendations and retained in learning.">⚠ ${REMOVED.nonEq} non-EQ removed</span>`);
+  if(REMOVED.surv>0){const _sre=Object.entries(REMOVED.survRules||{}).sort((a,b)=>b[1]-a[1]).slice(0,5);const _srm=Object.fromEntries(getSurvRules().map(r=>[r.key,r.label]));const _srtip=_sre.map(([k,v])=>`${_srm[k]||k}: ${v}`).join(' · ');filterPills.push(`<span class="info-pill pill-red" title="Surveillance-flagged — excluded from recommendations and retained in learning. Top rules: ${escHtml(_srtip)}">⚠ ${REMOVED.surv} surveillance removed</span>`);}
   if(REMOVED.liq>0)filterPills.push(`<span class="info-pill pill-blue">🚫 ${REMOVED.liq} low liquidity removed</span>`);
   if(REMOVED.fscore>0)filterPills.push(`<span class="info-pill pill-gray">🚫 ${REMOVED.fscore} zero F-Score removed</span>`);
   if(REMOVED.atr>0)filterPills.push(`<span class="info-pill pill-amber">🚫 ${REMOVED.atr} zero/invalid ATR removed</span>`);
-  if(REMOVED.deliv>0){const _dR=REMOVED.rockets?.deliv||[];const _dTip=_dR.length?'Low-delivery rockets hidden: '+_dR.map(x=>x.sym+' +'+x.pc.toFixed(1)+'%').join(', '):'Delivery <30% when present — excluded from learning and display';filterPills.push(`<span class="info-pill pill-cyan" title="${escHtml(_dTip)}">🚫 ${REMOVED.deliv} low delivery removed</span>`);}
-  if(REMOVED.fade>0){const _fR=REMOVED.rockets?.fade||[];const _fTip=_fR.length?'Faded rockets hidden: '+_fR.map(x=>x.sym+' +'+x.pc.toFixed(1)+'%').join(', '):'Peak retention <50% — given back half the day\'s range';filterPills.push(`<span class="info-pill pill-gray" title="${escHtml(_fTip)}">🚫 ${REMOVED.fade} fading (peak ret &lt;50%) removed</span>`);}
-  if(REMOVED.supply>0){const _spR=REMOVED.rockets?.supply||[];const _spTip=_spR.length?'Sell-pressure rockets hidden: '+_spR.map(x=>x.sym+' +'+x.pc.toFixed(1)+'%').join(', '):'Current sell-side pressure stronger than buy-side; excluded from learning and display';filterPills.push(`<span class="info-pill pill-red" title="${escHtml(_spTip)}">Sell pressure ${REMOVED.supply} removed</span>`);}
   const topUpCt=FILT.filter(s=>s._isTopUp).length;
   if(topUpCt>0)filterPills.push(`<span class="info-pill pill-fire" title="Already in portfolio — shown as top-up candidates.">↑ ${topUpCt} top-up</span>`);
   if(SUPPRESSED_HELD>0)filterPills.push(`<span class="info-pill pill-rose" title="Short positions and zero-qty holdings are always hidden.">📌 ${SUPPRESSED_HELD} held</span>`);
@@ -3400,7 +3289,7 @@ function buildHardFilterMethodologyHTML(E){
       ? `<div style="font-size:11px;color:var(--amber);margin-top:8px">Showing last saved run (${survSize} flagged). Load NSE ZIP this session to refresh.</div>`
       : `<div style="margin-top:8px;padding:8px 10px;background:rgba(239,68,68,.08);border:1px solid rgba(239,68,68,.25);border-radius:8px;font-size:11px;color:var(--red)">NSE REG1 data not active — surveillance rows shown for configuration only, won't filter until a REG1 file is loaded.</div>`);
 
-  const totalRemoved=(REMOVED.uc||0)+(REMOVED.surv||0)+(REMOVED.nonEq||0)+(REMOVED.liq||0)+(REMOVED.fscore||0)+(REMOVED.atr||0)+(REMOVED.deliv||0)+(REMOVED.fade||0)+(REMOVED.supply||0);
+  const totalRemoved=(REMOVED.uc||0)+(REMOVED.surv||0)+(REMOVED.nonEq||0)+(REMOVED.liq||0)+(REMOVED.fscore||0)+(REMOVED.atr||0);
   return `
     <h3 id="meth-filters" style="margin-top:28px">Hard Filters <span style="font-size:12px;color:var(--t3);font-weight:400">(${totalRemoved} removals in latest saved run)</span></h3>
 
@@ -3559,7 +3448,6 @@ function _renderMethodologyInner(){
   const E=ENGINE_DATA;
   if(!E||!E.features||!E.features.length||!E.mrmr||!E.weights||!E.targetCorr)return;
   // Guard all potentially missing fields
-  if(!E.interCorr) E.interCorr={};
   if(!E.labels) E.labels={};
   if(!E.accSessions) E.accSessions=1;
   if(!E.laggedNote) E.laggedNote='';
@@ -3585,7 +3473,7 @@ function _renderMethodologyInner(){
     <div class="breadth-badge" style="color:var(--cyan)">${breadthPct}% Breadth</div>
     <div class="breadth-meta">
       <div style="color:var(--t1);font-weight:600">${scoreCorrSource}</div>
-      <div>Breadth: ${E.marketBreadth!=null?(E.marketBreadth*100).toFixed(0)+'%':'?'} · ${sessLabel}${E.rocketCount!=null?' · 🚀 '+E.rocketCount+' rockets (≥'+(E.rocketThreshold||10)+'%)':''}</div>
+      <div>Breadth: ${E.marketBreadth!=null?(E.marketBreadth*100).toFixed(0)+'%':'?'} · ${sessLabel}${E.rocketCount!=null?' · 🚀 '+E.rocketCount+' leaders (top '+((E.rocketTargetFraction||ROCKET_TARGET_FRACTION)*100).toFixed(1)+'%, cutoff '+(E.rocketThreshold!=null?E.rocketThreshold.toFixed(2)+'%':'n/a')+')':''}</div>
     </div>
     <div class="breadth-sessions">
       <span>🐂 ${rs.bull||0}</span>
@@ -3598,7 +3486,7 @@ function _renderMethodologyInner(){
 
   mc.innerHTML=''; // clear before rebuild
 
-  let wtHTML=`<table class="ct"><thead><tr><th>Feature</th><th>Src</th><th>Target r (score)</th><th>Today r</th><th>Direction</th><th>Redundancy</th><th>mRMR Score</th><th class="bar-cell">Weight</th><th>Wt%</th></tr></thead><tbody>`;
+  let wtHTML=`<table class="ct"><thead><tr><th>Feature</th><th>Src</th><th>Target r</th><th>Today r</th><th>Direction</th><th>Redundancy</th><th>Track Record</th><th>Reliability</th><th>mRMR Score</th><th class="bar-cell">Weight</th><th>Wt%</th></tr></thead><tbody>`;
   for(const f of sorted){
     const tc=E.targetCorr[f],m=E.mrmr[f],w=E.weights[f];
     const dir=tc>=0?'<span style="color:var(--green)">↑</span>':'<span style="color:var(--red)">↓</span>';
@@ -3607,10 +3495,14 @@ function _renderMethodologyInner(){
     const src=srcType==='NSE'?'<span style="color:var(--cyan);font-size:9px;font-weight:700">NSE</span>':srcType==='Calc'?'<span style="color:var(--purple);font-size:9px;font-weight:700">Calc</span>':'<span style="color:var(--t3);font-size:9px">TV</span>';
     const todayR=E.targetCorrToday?.[f];
     const todayCell=todayR!=null&&!isNaN(todayR)?`<span style="color:${todayR>=0?'var(--green)':'var(--red)'};font-size:10px">${(todayR??0).toFixed(3)}</span>`:'—';
+    const acc=m?.accountability;
+    const trackCell=acc?`${acc.wins||0}W / ${acc.losses||0}L <span style="color:var(--t3)">(${acc.evaluations||0})</span>`:'Warming up';
+    const reliability=m?.reliability||1;
+    const reliabilityCell=`<span style="color:${reliability>1.02?'var(--green)':reliability<0.98?'var(--red)':'var(--t3)'};font-weight:700">${reliability.toFixed(2)}×</span>`;
     const _n=v=>isFinite(v)?v:0;
     const tcS=tc!=null&&isFinite(tc)?tc.toFixed(3):'—'; const redS=m&&m.red!=null&&isFinite(m.red)?m.red.toFixed(3):'—'; const scS=m&&m.score!=null&&isFinite(m.score)?m.score.toFixed(4):'—'; const wS=w!=null&&isFinite(w)?(w*100).toFixed(1):'—';
     wtHTML+=`<tr>
-      <td style="font-family:'Plus Jakarta Sans',sans-serif;font-weight:600;color:var(--t1)">${E.labels[f]||f}</td><td>${src}</td><td style="color:${(tc||0)>=0?'var(--green)':'var(--red)'};font-weight:600">${tcS}</td><td>${todayCell}</td><td>${dir}</td><td>${redS}</td><td style="font-weight:700">${scS}</td><td class="bar-cell"><span class="cb" style="width:${bw}%;background:${bc};opacity:.5"></span></td><td style="font-weight:800">${wS}%</td>
+      <td style="font-family:'Plus Jakarta Sans',sans-serif;font-weight:600;color:var(--t1)">${E.labels[f]||f}</td><td>${src}</td><td style="color:${(tc||0)>=0?'var(--green)':'var(--red)'};font-weight:600">${tcS}</td><td>${todayCell}</td><td>${dir}</td><td>${redS}</td><td>${trackCell}</td><td>${reliabilityCell}</td><td style="font-weight:700">${scS}</td><td class="bar-cell"><span class="cb" style="width:${bw}%;background:${bc};opacity:.5"></span></td><td style="font-weight:800">${wS}%</td>
     </tr>`;
   }
   wtHTML+='</tbody></table>';
@@ -3632,10 +3524,11 @@ function _renderMethodologyInner(){
     <h3 id="meth-engine" style="margin-top:18px">Scoring Engine — Continuous Learning mRMR</h3>
     <p id="mrmrLearningModeNote"><strong>Current learning mode:</strong> simple logic, rich inputs. The engine learns from all clean numeric indicators in yesterday's saved feature snapshot versus today's actual rockets, using one regime-agnostic mRMR accumulator. Market breadth is context only and does not create separate bull/neutral/bear histories.</p>
     <div class="m-grid">
-      <div class="m-card"><h4>🚀 What is a Rocket?</h4><p>Every trading day, regardless of what the broader market is doing, a small subset of NSE stocks moves <strong>≥${E.rocketThreshold||10}% intraday</strong>. These are Rockets. They don't happen randomly — stocks that become rockets tend to share measurable characteristics <em>the day before</em> they move. The engine's job is to find those stocks before the move, not explain them after.</p></div>
-      <div class="m-card"><h4>📡 How the Engine Learns</h4><p>After each session, the engine correlates <strong>yesterday's feature values</strong> against <strong>today's actual rockets</strong>. Features that consistently appeared in rockets get higher weight; features that didn't get lower weight. Tomorrow's recommendations are stocks that look like yesterday's rockets — but haven't moved yet. The target label is quality-adjusted: yesterday's rockets that <em>held</em> today reinforce the signal; those that collapsed are treated as 0, so the engine learns to find durable moves, not fragile spikes.</p></div>
+      <div class="m-card"><h4>🚀 What is a Rocket?</h4><p>For learning, Rockets are the <strong>top ${((E.rocketTargetFraction||ROCKET_TARGET_FRACTION)*100).toFixed(1)}%</strong> of the full NSE universe by daily price change. This yields roughly 15 relative leaders from ~3,000 stocks every session, even in weak markets. Today's cutoff is <strong>${E.rocketThreshold!=null?E.rocketThreshold.toFixed(2)+'%':'not available'}</strong>. The engine's job is to find these leaders before the move.</p></div>
+      <div class="m-card"><h4>📡 How the Engine Learns</h4><p>After each session, the engine correlates <strong>yesterday's feature values</strong> against <strong>today's actual top-0.5% leaders</strong> across the full valid NSE universe. Tomorrow's recommendations are eligible stocks whose current feature states best match those learned directions. Previous rockets and continuations are not positive labels for a new move.</p></div>
+      <div class="m-card"><h4>Feature Accountability</h4><p>Each weighted feature records the direction it used today. On the next session, the engine checks whether that feature's favoured top 20% contained more <strong>actual fresh rockets</strong> than the full matched universe. Consistent wins gradually reward its mRMR relevance; misses penalise it. Confidence builds over eight evaluated sessions, preventing one-hit wonders from dominating.</p></div>
       <div class="m-card"><h4>🎯 Max 1D Filter</h4><p>Set <em>Max 1D %</em> in the filter bar to hide stocks that have already moved too much today (default 5%). Entry-ceiling filtering has been removed; strong candidates are no longer hidden just because current price is above a calculated buy ceiling.</p></div>
-      <div class="m-card"><h4>🚫 Hard Filters</h4><p>Removed from <strong>both learning and display</strong>: zero price, stocks at/near their NSE price band from <strong>sec_list</strong> (fallback ≥19.5% when band data is unavailable), non-EQ series (BE/BZ/SZ/SM/ST), surveillance-flagged stocks (user's rules), low liquidity when present (volume &lt;${(parseFloat(document.getElementById('fVolMult')?.value)||LIQ_MIN_VOL_DEFAULT).toLocaleString()}${parseFloat(document.getElementById('fMinTurnover')?.value)>0?' or turnover &lt;'+fmtINR(parseFloat(document.getElementById('fMinTurnover')?.value)):''}, shareholders &lt;500), zero Piotroski F-Score, ATR &lt;=0 when present, <strong>delivery &lt;30%</strong> when present, and <strong>peak retention &lt;50%</strong> (fading; only when day range &gt;1%). Blank/null values pass through as unknown. Currently filtered: ${(REMOVED.uc||0)+(REMOVED.surv||0)+(REMOVED.nonEq||0)+(REMOVED.liq||0)+(REMOVED.fscore||0)+(REMOVED.atr||0)+(REMOVED.deliv||0)+(REMOVED.fade||0)} stocks.</p></div>
+      <div class="m-card"><h4>🚫 Recommendation Filters</h4><p>The learning universe keeps every valid parsed NSE symbol. Recommendation eligibility separately excludes zero-price rows, stocks at/near their NSE price band, non-EQ series, surveillance-flagged stocks, insufficient liquidity, zero Piotroski F-Score, and invalid ATR. Delivery, peak retention, RVOL, DMI, MFI, RSI, and sell pressure are <strong>features, not hard filters</strong>. Currently filtered from recommendations: ${(REMOVED.uc||0)+(REMOVED.surv||0)+(REMOVED.nonEq||0)+(REMOVED.liq||0)+(REMOVED.fscore||0)+(REMOVED.atr||0)} stocks.</p></div>
       <div class="m-card"><h4>Regime-Agnostic Learning</h4><p>Market breadth is shown as context only. The scanner uses one running-mean rocket-correlation accumulator across all market conditions, so bull, neutral, and bear days do not create separate scoring histories.</p></div>
       <div class="m-card"><h4>📊 Sector & Industry Breadth</h4><p>${E.sectorCol?'<span style="color:var(--green)">✓</span> Sector breadth, sector relative strength':'<span style="color:var(--red)">✗</span> No Sector column detected'}${E.industryCol?', <span style="color:var(--green)">✓</span> industry breadth':''} — computed from today\'s full universe and fed into mRMR as features. Stocks outperforming their sector score higher regardless of market direction.</p></div>
     </div>
@@ -4459,7 +4352,6 @@ function clearFilters(){
   const minMCapEl=document.getElementById('fMinMarketCap');if(minMCapEl)minMCapEl.value='500000000';
   const reDropEl=document.getElementById('fReDrop');if(reDropEl)reDropEl.value='1';
   const topupEl=document.getElementById('fTopupAlloc');if(topupEl)topupEl.value='50';
-  const rocketEl=document.getElementById('fRocketPct');if(rocketEl)rocketEl.value='10';
   const minScoreEl=document.getElementById('fMinScore');if(minScoreEl)minScoreEl.value='70';
   applyLearnedMaxAllocDefault();
   VOL_AUTO=true;setAutoVolume();
@@ -5177,7 +5069,7 @@ function captureScannerRuntime(){
     ACC_CORR,
     REMOVED,SCORE_MAP,COLS,_tvLoadedThisSession,
     lastRawTV:window._lastRawTV,lastScannerSessionTag:window._lastScannerSessionTag,
-    lastEngineFeats:window._lastEngineFeats,lastParsedFiltered:window._lastParsedFiltered
+    lastEngineFeats:window._lastEngineFeats,lastParsedFiltered:window._lastParsedFiltered,lastParsedForSnapshot:window._lastParsedForSnapshot
   };
 }
 function restoreScannerRuntime(s){
@@ -5185,7 +5077,7 @@ function restoreScannerRuntime(s){
   ACC_CORR=s.ACC_CORR;
   REMOVED=s.REMOVED;SCORE_MAP=s.SCORE_MAP;COLS=s.COLS;_tvLoadedThisSession=s._tvLoadedThisSession;
   window._lastRawTV=s.lastRawTV;window._lastScannerSessionTag=s.lastScannerSessionTag;
-  window._lastEngineFeats=s.lastEngineFeats;window._lastParsedFiltered=s.lastParsedFiltered;
+  window._lastEngineFeats=s.lastEngineFeats;window._lastParsedFiltered=s.lastParsedFiltered;window._lastParsedForSnapshot=s.lastParsedForSnapshot;
 }
 function normSnapshotDate(s){
   if(!s) return null;
@@ -5219,6 +5111,20 @@ function compactFeatureValue(v){
   if(v===null||v===undefined||isNaN(v)) return null;
   return +parseFloat(v).toFixed(3);
 }
+function selectRelativeRockets(rows,getValue,fraction=ROCKET_TARGET_FRACTION){
+  const ranked=(rows||[]).map(row=>({row,value:Number(getValue(row))}))
+    .filter(x=>isFinite(x.value))
+    .sort((a,b)=>b.value-a.value);
+  const count=ranked.length?Math.max(1,Math.ceil(ranked.length*fraction)):0;
+  const selected=ranked.slice(0,count);
+  return {
+    rows:selected.map(x=>x.row),
+    symbols:new Set(selected.map(x=>normSym(x.row.symbol)).filter(Boolean)),
+    cutoff:selected.length?selected[selected.length-1].value:null,
+    count,
+    universe:ranked.length,
+  };
+}
 function buildScannerStockMatrix(rows, cols){
   const stocks={};
   rows.forEach(d=>{
@@ -5227,6 +5133,92 @@ function buildScannerStockMatrix(rows, cols){
     stocks[sym]=cols.map(f=>compactFeatureValue(d[f]));
   });
   return stocks;
+}
+function getFeatureAccountabilityStore(){
+  const raw=FS.get(modeKey(FEATURE_ACCOUNTABILITY_STORE))||{};
+  return {
+    version:1,
+    pending:raw.pending&&typeof raw.pending==='object'?raw.pending:null,
+    stats:raw.stats&&typeof raw.stats==='object'?raw.stats:{},
+    lastEvaluatedDate:raw.lastEvaluatedDate||null,
+    lastUpdated:raw.lastUpdated||null,
+  };
+}
+function featureReliabilityMultiplier(stat){
+  const n=stat?.evaluations||0;
+  if(!n) return 1;
+  const confidence=Math.min(1,n/8);
+  const winRate=(stat.wins||0)/n;
+  const skill=clampNum(stat.meanSkill||0,-1,1);
+  const consistency=(winRate*2)-1;
+  return clampNum(1+(confidence*0.6*((skill*0.65)+(consistency*0.35))),0.4,1.6);
+}
+function evaluateFeatureAccountability({features,overlap,actualRocketSymbols,sourceDate,evaluationDate}){
+  const store=getFeatureAccountabilityStore();
+  const pending=store.pending;
+  const source=normDate(sourceDate);
+  const canEvaluate=pending&&source&&normDate(pending.date)===source&&
+    store.lastEvaluatedDate!==evaluationDate&&overlap?.length>=100&&actualRocketSymbols?.size>0;
+  if(canEvaluate){
+    const stats={...store.stats};
+    Object.entries(pending.features||{}).forEach(([f,plan])=>{
+      if(!features.includes(f)||!plan||!plan.d) return;
+      const rows=overlap.map(d=>{
+        const raw=PREV_SNAP?.[d.symbol]?.[f];
+        if(raw===null||raw===undefined||raw==='') return null;
+        const value=Number(raw);
+        return isFinite(value)?{symbol:d.symbol,value}:null;
+      }).filter(Boolean);
+      if(rows.length<50) return;
+      rows.sort((a,b)=>plan.d>0?b.value-a.value:a.value-b.value);
+      const cohortSize=Math.max(10,Math.ceil(rows.length*0.2));
+      const predicted=rows.slice(0,cohortSize);
+      const hits=predicted.filter(r=>actualRocketSymbols.has(r.symbol)).length;
+      const actual=rows.filter(r=>actualRocketSymbols.has(r.symbol)).length;
+      const baseline=actual/rows.length;
+      const precision=hits/cohortSize;
+      const lift=precision-baseline;
+      const skill=clampNum(lift/Math.max(baseline,1/rows.length),-1,3);
+      const prior=stats[f]||{evaluations:0,wins:0,losses:0,meanLift:0,meanSkill:0,hits:0,predicted:0,actual:0};
+      const n=(prior.evaluations||0)+1;
+      const won=hits>0&&precision>baseline;
+      stats[f]={
+        evaluations:n,
+        wins:(prior.wins||0)+(won?1:0),
+        losses:(prior.losses||0)+(won?0:1),
+        meanLift:(prior.meanLift||0)+(lift-(prior.meanLift||0))/n,
+        meanSkill:(prior.meanSkill||0)+(skill-(prior.meanSkill||0))/n,
+        hits:(prior.hits||0)+hits,
+        predicted:(prior.predicted||0)+cohortSize,
+        actual:(prior.actual||0)+actual,
+        lastHits:hits,
+        lastPredicted:cohortSize,
+        lastBaseline:+baseline.toFixed(6),
+        lastPrecision:+precision.toFixed(6),
+        lastEvaluatedDate:evaluationDate,
+      };
+    });
+    store.stats=stats;
+    store.lastEvaluatedDate=evaluationDate;
+    store.lastUpdated=new Date().toISOString();
+    FS.set(modeKey(FEATURE_ACCOUNTABILITY_STORE),store);
+  }
+  const reliability={};
+  features.forEach(f=>{reliability[f]=featureReliabilityMultiplier(store.stats[f]);});
+  return {stats:store.stats,reliability,lastEvaluatedDate:store.lastEvaluatedDate};
+}
+function saveFeatureAccountabilityPlan(date,features,targetCorr,weights){
+  if(!date||!isMarketHours()) return;
+  const store=getFeatureAccountabilityStore();
+  const planned={};
+  features.forEach(f=>{
+    const corr=Number(targetCorr[f]), weight=Number(weights[f]);
+    if(!isFinite(corr)||Math.abs(corr)<0.0001||!isFinite(weight)||weight<=0) return;
+    planned[f]={d:corr>=0?1:-1,w:+weight.toFixed(6)};
+  });
+  store.pending={date,features:planned};
+  store.lastUpdated=new Date().toISOString();
+  FS.set(modeKey(FEATURE_ACCOUNTABILITY_STORE),store);
 }
 function getIntradayLedgerForMode(mode){
   const ledger=FS.get(modeKey(INTRADAY_LEDGER_STORE,mode));
@@ -5282,13 +5274,13 @@ function buildIntradayTrajectoryModel(filtered, feats, weights, targetCorr, pctl
   return {bySymbol,sampleCount:ledger.samples.length,active:true};
 }
 function applySavedFiltersForMode(mode){
-  const ids=['fMinScore','fPriceMin','fPriceMax','fMin1D','fMax1D','fVol','fVolMult','fMinTurnover','fMinMarketCap','fCapital','fMaxAlloc','fReDrop','fTopupAlloc','fRocketPct'];
+  const ids=['fMinScore','fPriceMin','fPriceMax','fMin1D','fMax1D','fVol','fVolMult','fMinTurnover','fMinMarketCap','fCapital','fMaxAlloc','fReDrop','fTopupAlloc'];
   const prev={};
   ids.forEach(id=>{const el=document.getElementById(id);if(el)prev[id]=el.value;});
   try{
     const st=JSON.parse(localStorage.getItem(modeKey(SCANNER_STORE,mode))||'{}');
     const shared=JSON.parse(localStorage.getItem(SHARED_FILTER_STORE)||'{}');
-    const map={minScore:'fMinScore',priceMin:'fPriceMin',priceMax:'fPriceMax',fMin1D:'fMin1D',fMax1D:'fMax1D',fvol:'fVol',volMult:'fVolMult',minTurnover:'fMinTurnover',minMarketCap:'fMinMarketCap',reDrop:'fReDrop',topupAlloc:'fTopupAlloc',rocketPct:'fRocketPct'};
+    const map={minScore:'fMinScore',priceMin:'fPriceMin',priceMax:'fPriceMax',fMin1D:'fMin1D',fMax1D:'fMax1D',fvol:'fVol',volMult:'fVolMult',minTurnover:'fMinTurnover',minMarketCap:'fMinMarketCap',reDrop:'fReDrop',topupAlloc:'fTopupAlloc'};
     Object.entries(map).forEach(([k,id])=>{const el=document.getElementById(id);if(el&&st[k]!=null)el.value=st[k];});
     const capEl=document.getElementById('fCapital');if(capEl&&shared.capital!=null)capEl.value=shared.capital;
     const maxEl=document.getElementById('fMaxAlloc');if(maxEl&&shared.maxAlloc!=null)maxEl.value=shared.maxAlloc;
@@ -5330,15 +5322,16 @@ async function processScannerUpload(scannerFile, mode){
     });
     if(countSeen) FS.set(modeKey(REC_COUNT_STORE,mode),rc);
     try{const ft=document.getElementById('fileTag');if(ft)ft.textContent=scannerFile.name+' · '+raw.length+' stocks';}catch(e){}
-    if(window._lastEngineFeats&&window._lastParsedFiltered){
-      const cols=window._lastEngineFeats, stocks={};
-      Object.assign(stocks,buildScannerStockMatrix(window._lastParsedFiltered,cols));
+    if(window._lastEngineFeats&&window._lastParsedForSnapshot){
+      const cols=window._lastEngineFeats;
+      const stocks=buildScannerStockMatrix(window._lastParsedForSnapshot,cols);
       const today=getSessionDate(), existingSnap=FS.get(modeKey(SNAP_KEY,mode)), updates={};
       const existingDate=existingSnap?.savedDate, isLegacyFormat=existingDate&&/^[A-Z][a-z]{2} /.test(existingDate);
       if(existingSnap&&existingSnap.stocks&&(isLegacyFormat||!existingDate||existingDate!==today))updates[modeKey(SNAP_PREV_KEY,mode)]=existingSnap;
       updates[modeKey(SNAP_KEY,mode)]={cols,stocks,savedDate:today,marketBreadth:ENGINE_DATA?.marketBreadth??null,mode};
       FS.setMultiple(updates);
-      saveIntradayLedgerForMode(mode,cols,stocks,sessionTag);
+      const intradayStocks=buildScannerStockMatrix(window._lastParsedFiltered||[],cols);
+      saveIntradayLedgerForMode(mode,cols,intradayStocks,sessionTag);
     }
     if(mode==='stock'){
       const threshold=ENGINE_DATA?.rocketThreshold||10;
@@ -5583,14 +5576,14 @@ async function initApp(){
     try{
       const meth=brain[modeKey(METH_STORE)];
       if(meth&&meth.features&&meth.features.length){
-        ENGINE_DATA={...meth,interCorr:meth.interCorr||{}};
+        ENGINE_DATA={...meth};
         COLS=getCols();
         // Restore REMOVED counts so filter pills show correctly on page load.
         // Older brain snapshots counted null/blank values as removals; those counts
         // are intentionally not restored under the current hard-filter schema.
         if(meth.removed&&typeof meth.removed==='object'){
           const restored=meth.hardFilterSchema===HARD_FILTER_SCHEMA?meth.removed:{};
-          REMOVED={uc:0,surv:0,nonEq:0,survRules:{},liq:0,fscore:0,atr:0,deliv:0,fade:0,supply:0,rockets:{uc:[],surv:[],nonEq:[],liq:[],fscore:[],atr:[],deliv:[],fade:[],supply:[]},...restored};
+          REMOVED={uc:0,surv:0,nonEq:0,survRules:{},liq:0,fscore:0,atr:0,rockets:{uc:[],surv:[],nonEq:[],liq:[],fscore:[],atr:[]},...restored};
           if(typeof REMOVED.survRules!=='object'||Array.isArray(REMOVED.survRules)) REMOVED.survRules={};
           ENGINE_DATA.removed=REMOVED;
         }
@@ -5712,7 +5705,6 @@ function saveFilterState(){
     fMax1D:document.getElementById('fMax1D')?.value||'',
     reDrop:document.getElementById('fReDrop')?.value||'1',
     topupAlloc:document.getElementById('fTopupAlloc')?.value||'50',
-    rocketPct:document.getElementById('fRocketPct')?.value||'10',
     sortCol:SCOL,
     sortDir:SDIR,
   };
@@ -5739,7 +5731,6 @@ function loadFilterState(){
     if(sharedMaxAlloc){const el=document.getElementById('fMaxAlloc');if(el)el.value=sharedMaxAlloc;}
     if(state.reDrop!=null){const el=document.getElementById('fReDrop');if(el)el.value=state.reDrop;}
     if(state.topupAlloc!=null){const el=document.getElementById('fTopupAlloc');if(el)el.value=state.topupAlloc;}
-    if(state.rocketPct!=null){const el=document.getElementById('fRocketPct');if(el)el.value=state.rocketPct;}
     if(state.volMult){const el=document.getElementById('fVolMult');if(el)el.value=state.volMult;}
     if(state.minTurnover!=null){const el=document.getElementById('fMinTurnover');if(el)el.value=state.minTurnover;}
     if(state.minMarketCap!=null){const el=document.getElementById('fMinMarketCap');if(el)el.value=state.minMarketCap;}
