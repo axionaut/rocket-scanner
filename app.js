@@ -1,5 +1,5 @@
-const BUILD_TS='2026-06-12 15:01 IST'; // replaced at commit time with IST datetime
-const APP_VERSION=402; // Shared deployed version; increment once per released code change.
+const BUILD_TS='2026-06-12 15:31 IST'; // replaced at commit time with IST datetime
+const APP_VERSION=403; // Shared deployed version; increment once per released code change.
 const GOOGLE_DRIVE_CLIENT_ID='1015012642264-oi2nelv3v90k3d39r994a6nelgjs2a56.apps.googleusercontent.com'; // Public OAuth Web Client ID.
 const HARD_FILTER_SCHEMA='structural_tradeability_v2';
 const ROCKET_TARGET_FRACTION=0.005; // Daily top 0.5% of the full parsed NSE universe.
@@ -67,13 +67,11 @@ const POST_SALE_ROCKET_HORIZON_DAYS=5;
 // Kept separate from the former day-high accumulator: these measure absolute daily change.
 const AVG_MOVE_ALL_STORE='rs_avg_move_all_v1';
 const AVG_MOVE_UNIVERSE_STORE='rs_avg_move_universe_v1';
-const INTRADAY_LEDGER_STORE='rs_intraday_ledger_v1';
 const REC_COUNT_STORE='rs_rec_count';
 const NSE_HOLIDAYS_STORE='rs_nse_holidays';
 // Keep rocket_brain.json for learned state only. Input-file derivatives are rebuilt
 // from Google Drive canonical files; legacy non-stock keys are purged completely.
 const SOURCE_DERIVED_BRAIN_KEYS=new Set([
-  ALL_STORE,
   HOLD_STORE,
   POS_STORE,
   ORDERS_STORE,
@@ -85,6 +83,7 @@ const DEPRECATED_BRAIN_KEYS=new Set([
   'rs_corr_neutral',
   'rs_regime_cal',
   'rs_rocket_lab_v1',
+  'rs_intraday_ledger_v1',
 ]);
 function shouldDropBrainKey(key){
   const k=String(key||'').toLowerCase();
@@ -2065,8 +2064,6 @@ function runEngine(raw, sessionTag){
 
   const pctls={};
   for(const f of FEATS)pctls[f]=pctRank(filtered.map(d=>d[f]));
-  const intradayTrajectory=buildIntradayTrajectoryModel(filtered,FEATS,weights,targetCorr,pctls);
-
   const results=filtered.map((d,idx)=>{
     let rawScore=0,maxW=0;
     for(const f of FEATS){
@@ -2075,12 +2072,8 @@ function runEngine(raw, sessionTag){
       maxW+=w;
       rawScore+=w*(targetCorr[f]>=0?p:(1-p));
     }
-    // Base mRMR score refined by same-day feature trajectory when prior uploads exist.
     const rawFinal = maxW>0 ? rawScore/maxW : 0.5;
-    const travel=intradayTrajectory.bySymbol[d.symbol]||null;
-    const travelAlpha=travel?0.18*clampNum(travel.coverage,0,1):0;
-    const refinedRaw=travelAlpha>0?(rawFinal*(1-travelAlpha)+travel.signal*travelAlpha):rawFinal;
-    const score = Math.round(refinedRaw*100*10)/10;
+    const score = Math.round(rawFinal*100*10)/10;
 
     const vol=(K.volume?d[K.volume]:null);
     const flags=[];
@@ -2112,7 +2105,6 @@ function runEngine(raw, sessionTag){
       rangePos:d.range_pos,
       pctFrom52wHigh:d.pct_from_52w_high,
       rocketScore:score, tier, flags,
-      intradayTrajectory:travel,
       isSurv:_isSurv, survRules:_survRules,
       // Calculated SL/Target per stock — adaptive from tradebook if available
       slPct: (()=>{
@@ -2167,12 +2159,6 @@ function runEngine(raw, sessionTag){
     marketBreadth:marketBreadth, avgMoveAll:todayAvgMoveAll, avgMoveUniverse:todayAvgMoveUniverse,
     recommendationFeedback,executedEntryFeedback,
     featureAccountability:{lastEvaluatedDate:featureAccountability.lastEvaluatedDate,stats:featureAccountability.stats},
-    intradayTrajectory:{
-      active:intradayTrajectory.active,
-      sampleCount:intradayTrajectory.sampleCount,
-      stocks:Object.keys(intradayTrajectory.bySymbol||{}).length,
-      alphaMax:0.18
-    },
     useFreshCorr, freshSignalCount, scoringSource,
     useAccCorr: !useFreshCorr && (ACC_CORR?(ACC_CORR.sessions||0)>=2:false),
     sectorCol: sectorCol?true:false, industryCol: industryCol?true:false,
@@ -2195,8 +2181,7 @@ function runEngine(raw, sessionTag){
       marketBreadth:ENGINE_DATA.marketBreadth,useFreshCorr:ENGINE_DATA.useFreshCorr,freshSignalCount:ENGINE_DATA.freshSignalCount,scoringSource:ENGINE_DATA.scoringSource,useAccCorr:ENGINE_DATA.useAccCorr,sectorCol:ENGINE_DATA.sectorCol,industryCol:ENGINE_DATA.industryCol,
       yesterdayRockets:yesterdayRockets,totalParsed:totalParsed,hardFilterSchema:HARD_FILTER_SCHEMA,removed:{...REMOVED},survSize:Object.keys(NSE_SURV).length,
       avgMoveAll:todayAvgMoveAll,avgMoveUniverse:todayAvgMoveUniverse,recommendationFeedback,executedEntryFeedback,
-      featureAccountability:ENGINE_DATA.featureAccountability,
-      intradayTrajectory:ENGINE_DATA.intradayTrajectory};
+      featureAccountability:ENGINE_DATA.featureAccountability};
     FS.set(modeKey(METH_STORE),methSave);
   }catch(e){console.warn('Could not save methodology data',e);}
   persistMethodologySnapshot();
@@ -4430,6 +4415,18 @@ async function openUploadFolderPicker(){
 
 async function handleCloudLoadAction(){
   if(!(await ensureDriveReadyForLoad())) return;
+  setLoading(true,'Loading current Drive inputs...');
+  try{
+    await FS.refreshCloudIndex?.();
+    await hydrateSessionCSVsFromWorkspace();
+    if(ALL.length){
+      renderTradingDashboardNow();
+      setLoading(false);
+      showToast('<strong>Rankings loaded from Drive.</strong>',2500);
+      return;
+    }
+  }catch(e){console.warn('Drive input load failed; opening local folder picker',e);}
+  setMsg('Select the Rocket Scanner folder...');
   const opened=await openUploadFolderPicker();
   if(!opened) setLoading(false);
 }
@@ -5111,6 +5108,18 @@ function compactFeatureValue(v){
   if(v===null||v===undefined||isNaN(v)) return null;
   return +parseFloat(v).toFixed(3);
 }
+function compactRankingRows(rows){
+  const featureKeys=ENGINE_DATA?.top10Feats||[];
+  return (rows||[]).map(s=>({
+    symbol:s.symbol,name:s.name,sector:s.sector,industry:s.industry,sectorBreadth:s.sectorBreadth,
+    price:s.price,priceChange:s.priceChange,volume:s.volume,marketCap:s.marketCap,atr:s.atr,
+    high1d:s.high1d,low1d:s.low1d,vwap:s.vwap,piotroski:s.piotroski,shareholders:s.shareholders,
+    perf1w:s.perf1w,delivPct:s.delivPct,rangePos:s.rangePos,pctFrom52wHigh:s.pctFrom52wHigh,
+    rocketScore:s.rocketScore,tier:s.tier,flags:s.flags||[],isSurv:!!s.isSurv,survRules:s.survRules||null,
+    slPct:s.slPct,tgtPct:s.tgtPct,seen:s.seen||0,
+    _features:Object.fromEntries(featureKeys.filter(f=>s._features?.[f]!=null).map(f=>[f,s._features[f]]))
+  }));
+}
 function selectRelativeRockets(rows,getValue,fraction=ROCKET_TARGET_FRACTION){
   const ranked=(rows||[]).map(row=>({row,value:Number(getValue(row))}))
     .filter(x=>isFinite(x.value))
@@ -5220,59 +5229,6 @@ function saveFeatureAccountabilityPlan(date,features,targetCorr,weights){
   store.lastUpdated=new Date().toISOString();
   FS.set(modeKey(FEATURE_ACCOUNTABILITY_STORE),store);
 }
-function getIntradayLedgerForMode(mode){
-  const ledger=FS.get(modeKey(INTRADAY_LEDGER_STORE,mode));
-  const today=getSessionDate();
-  if(!ledger||ledger.date!==today||!Array.isArray(ledger.samples)) return {date:today,mode,cols:[],samples:[]};
-  return ledger;
-}
-function saveIntradayLedgerForMode(mode, cols, stocks, tag){
-  if(!cols?.length||!stocks||!Object.keys(stocks).length) return;
-  const today=getSessionDate();
-  const ledger=getIntradayLedgerForMode(mode);
-  const sample={ts:Date.now(),tag:tag||null,stocks};
-  if(ledger.samples.length&&tag&&ledger.samples[ledger.samples.length-1].tag===tag) return;
-  ledger.date=today;ledger.mode=mode;ledger.cols=cols;ledger.samples=[...ledger.samples,sample].slice(-12);
-  FS.set(modeKey(INTRADAY_LEDGER_STORE,mode),ledger);
-}
-function rankInSorted(arr,v){
-  if(v==null||isNaN(v)||!arr?.length) return null;
-  let lo=0,hi=arr.length;
-  while(lo<hi){const mid=(lo+hi)>>1;if(arr[mid]<=v)lo=mid+1;else hi=mid;}
-  return arr.length>1?Math.min(1,Math.max(0,(lo-0.5)/(arr.length-1))):0.5;
-}
-function buildIntradayTrajectoryModel(filtered, feats, weights, targetCorr, pctls){
-  const ledger=getIntradayLedgerForMode(MARKET_MODE);
-  if(!ledger.samples.length||!ledger.cols?.length) return {bySymbol:{},sampleCount:0,active:false};
-  const sortedVals={};
-  feats.forEach(f=>{sortedVals[f]=filtered.map(d=>d[f]).filter(v=>v!=null&&!isNaN(v)).sort((a,b)=>a-b);});
-  const colIndex={};ledger.cols.forEach((f,i)=>{colIndex[f]=i;});
-  const first=ledger.samples[0], prev=ledger.samples[ledger.samples.length-1];
-  const bySymbol={};
-  filtered.forEach((d,idx)=>{
-    const sym=d.symbol, prevVals=prev.stocks?.[sym], firstVals=first.stocks?.[sym];
-    if(!prevVals&&!firstVals) return;
-    let prevDelta=0, dayDelta=0, prevW=0, dayW=0;
-    feats.forEach(f=>{
-      const ci=colIndex[f];
-      const w=weights[f]||0, p=pctls[f]?.[idx];
-      if(ci==null||!w||p==null) return;
-      const bullishNow=targetCorr[f]>=0?p:(1-p);
-      const pv=prevVals?rankInSorted(sortedVals[f],prevVals[ci]):null;
-      if(pv!=null){prevDelta+=w*(bullishNow-(targetCorr[f]>=0?pv:(1-pv)));prevW+=w;}
-      const fv=firstVals?rankInSorted(sortedVals[f],firstVals[ci]):null;
-      if(fv!=null){dayDelta+=w*(bullishNow-(targetCorr[f]>=0?fv:(1-fv)));dayW+=w;}
-    });
-    if(prevW<=0&&dayW<=0) return;
-    const prevNorm=prevW>0?prevDelta/prevW:0;
-    const dayNorm=dayW>0?dayDelta/dayW:prevNorm;
-    const delta=(prevW>0&&dayW>0)?(prevNorm*0.65+dayNorm*0.35):(prevW>0?prevNorm:dayNorm);
-    const coverage=Math.min(1,Math.max(prevW,dayW));
-    const signal=clampNum(0.5+(delta*1.35),0,1);
-    bySymbol[sym]={signal,delta,coverage,prevDelta:prevNorm,dayDelta:dayNorm};
-  });
-  return {bySymbol,sampleCount:ledger.samples.length,active:true};
-}
 function applySavedFiltersForMode(mode){
   const ids=['fMinScore','fPriceMin','fPriceMax','fMin1D','fMax1D','fVol','fVolMult','fMinTurnover','fMinMarketCap','fCapital','fMaxAlloc','fReDrop','fTopupAlloc'];
   const prev={};
@@ -5321,7 +5277,9 @@ async function processScannerUpload(scannerFile, mode){
       s.seen=rc[rcToday][s.symbol]||0;
     });
     if(countSeen) FS.set(modeKey(REC_COUNT_STORE,mode),rc);
-    try{const ft=document.getElementById('fileTag');if(ft)ft.textContent=scannerFile.name+' · '+raw.length+' stocks';}catch(e){}
+    const fileTag=scannerFile.name+' · '+raw.length+' stocks';
+    try{const ft=document.getElementById('fileTag');if(ft)ft.textContent=fileTag;}catch(e){}
+    FS.set(modeKey(ALL_STORE,mode),{data:compactRankingRows(ALL),fileTag,ts:new Date().toISOString()});
     if(window._lastEngineFeats&&window._lastParsedForSnapshot){
       const cols=window._lastEngineFeats;
       const stocks=buildScannerStockMatrix(window._lastParsedForSnapshot,cols);
@@ -5330,8 +5288,6 @@ async function processScannerUpload(scannerFile, mode){
       if(existingSnap&&existingSnap.stocks&&(isLegacyFormat||!existingDate||existingDate!==today))updates[modeKey(SNAP_PREV_KEY,mode)]=existingSnap;
       updates[modeKey(SNAP_KEY,mode)]={cols,stocks,savedDate:today,marketBreadth:ENGINE_DATA?.marketBreadth??null,mode};
       FS.setMultiple(updates);
-      const intradayStocks=buildScannerStockMatrix(window._lastParsedFiltered||[],cols);
-      saveIntradayLedgerForMode(mode,cols,intradayStocks,sessionTag);
     }
     if(mode==='stock'){
       const threshold=ENGINE_DATA?.rocketThreshold||10;
