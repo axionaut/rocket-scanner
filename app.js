@@ -6084,17 +6084,21 @@ function initNSELinks(){
 }
 initNSELinks();
 
+function buildRocketLabCols(features){
+  return [...new Set(features||[])].filter(Boolean);
+}
+
 (function installMethodologyCopyPatch(){
   function patchMethodologyCopy(){
     const el=document.getElementById('methContent');
     if(!el) return;
     const scoring=[...el.querySelectorAll('h3')].find(h=>/Scoring Engine/i.test(h.textContent||''));
     if(scoring&&!document.getElementById('mrmrLearningModeNote')){
-      scoring.insertAdjacentHTML('afterend',`<p id="mrmrLearningModeNote"><strong>Current learning mode:</strong> one regime-agnostic mRMR accumulator. The engine learns from yesterday's saved feature snapshot versus today's actual rockets; market breadth is context only and does not create separate bull/neutral/bear histories.</p>`);
+      scoring.insertAdjacentHTML('afterend',`<p id="mrmrLearningModeNote"><strong>Current learning mode:</strong> simple logic, rich inputs. The engine learns from all clean numeric indicators in yesterday's saved feature snapshot versus today's actual rockets, using one regime-agnostic mRMR accumulator. Market breadth is context only and does not create separate bull/neutral/bear histories.</p>`);
     }
     const rocket=[...el.querySelectorAll('h3')].find(h=>/Rocket Lab/i.test(h.textContent||''));
     if(rocket&&!document.getElementById('rocketLabSeedNote')){
-      rocket.insertAdjacentHTML('afterend','<p id="rocketLabSeedNote"><strong>Starts immediately:</strong> Rocket Lab seeds its first walk-forward check from the available yesterday/today pair, then promotes a lab model after 1 evaluated day if it beats current mRMR recall.</p>');
+      rocket.insertAdjacentHTML('afterend','<p id="rocketLabSeedNote"><strong>Starts immediately:</strong> Rocket Lab seeds its first walk-forward check from the available yesterday/today pair using the full numeric feature state, then promotes a lab model after 1 evaluated day if it beats current mRMR recall.</p>');
     }
     el.querySelectorAll('p').forEach(p=>{
       p.innerHTML=p.innerHTML
