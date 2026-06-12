@@ -1,5 +1,5 @@
-const BUILD_TS='2026-06-12 15.27 IST'; // replaced at commit time with IST datetime
-const APP_VERSION=404; // Shared deployed version; increment once per released code change.
+const BUILD_TS='2026-06-12 16.05 IST'; // replaced at commit time with IST datetime
+const APP_VERSION=405; // Shared deployed version; increment once per released code change.
 const GOOGLE_DRIVE_CLIENT_ID='1015012642264-oi2nelv3v90k3d39r994a6nelgjs2a56.apps.googleusercontent.com'; // Public OAuth Web Client ID.
 const HARD_FILTER_SCHEMA='structural_tradeability_v2';
 const ROCKET_TARGET_FRACTION=0.005; // Daily top 0.5% of the full parsed NSE universe.
@@ -3125,7 +3125,8 @@ function renderPerformance(){
   const perfNav=`<nav style="position:sticky;top:var(--hdr-h,72px);z-index:50;background:var(--bg);padding:8px 0 10px;margin-bottom:8px;display:flex;gap:6px;flex-wrap:wrap;border-bottom:1px solid var(--border);box-shadow:0 2px 8px rgba(0,0,0,0.3);overflow-x:auto;-webkit-overflow-scrolling:touch">
     ${_navLink('perf-timestop-card','📊 Positions',!!timeStopHtml)}
     ${_navLink('perf-kpi','📊 KPIs',true)}
-    ${_navLink('perf-outcomes','Outcome Feedback',true)}
+    ${_navLink('perf-outcomes','Outcome Feedback',true)}
+
     ${_navLink('perf-monthly','📅 Monthly',monthRows.length>0)}
     ${_navLink('perf-trade-windows','🕐 Trading Windows',hasTradeWindows)}
     ${_navLink('perf-stocks','📈 Stocks',p.symBreakdown.length>0)}
@@ -4451,18 +4452,14 @@ async function openUploadFolderPicker(){
 }
 
 async function handleCloudLoadAction(){
-  if(!(await ensureDriveReadyForLoad())) return;
-  setLoading(true,'Loading current Drive inputs...');
-  try{
-    await FS.refreshCloudIndex?.();
-    await hydrateSessionCSVsFromWorkspace();
-    if(ALL.length){
-      renderTradingDashboardNow();
-      setLoading(false);
-      showToast('<strong>Rankings loaded from Drive.</strong>',2500);
-      return;
-    }
-  }catch(e){console.warn('Drive input load failed; opening local folder picker',e);}
+  // Keep the folder/file picker inside the original user click. Browser pickers need
+  // transient user activation; awaiting Drive reads first makes the picker silently fail.
+  updateFolderUI();
+  if(!FS.isConnected()){
+    showDriveAuthRequiredState();
+    showToast('Connect Google Drive first, then press Load Files.',4000,true);
+    return;
+  }
   setMsg('Select the Rocket Scanner folder...');
   const opened=await openUploadFolderPicker();
   if(!opened) setLoading(false);
