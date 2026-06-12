@@ -1,5 +1,5 @@
-const BUILD_TS='2026-06-12 16.05 IST'; // replaced at commit time with IST datetime
-const APP_VERSION=405; // Shared deployed version; increment once per released code change.
+const BUILD_TS='2026-06-12 16.36 IST'; // replaced at commit time with IST datetime
+const APP_VERSION=406; // Shared deployed version; increment once per released code change.
 const GOOGLE_DRIVE_CLIENT_ID='1015012642264-oi2nelv3v90k3d39r994a6nelgjs2a56.apps.googleusercontent.com'; // Public OAuth Web Client ID.
 const HARD_FILTER_SCHEMA='structural_tradeability_v2';
 const ROCKET_TARGET_FRACTION=0.005; // Daily top 0.5% of the full parsed NSE universe.
@@ -10,6 +10,32 @@ const SYSTEM_TRADE_START_DATE='2026-04-01'; // Adaptive stats use trades closed 
 let MARKET_MODE='stock';
 function modeKey(base){return base;}
 function modeLabel(){return 'Stocks';}
+
+function normaliseInputFilename(name){
+  return String(name||'')
+    .toLowerCase()
+    .replace(/^[^a-z0-9]+/,'')
+    .replace(/\s*\(\d+\)(?=\.[^.]+$)/,'')
+    .replace(/[^a-z0-9]+/g,' ')
+    .trim();
+}
+function isAllNseFilename(name){
+  const n=normaliseInputFilename(name);
+  return /(^| )all nse( |$)/.test(n)&&/\.csv$/i.test(String(name||''));
+}
+function isNseSupportFilename(name){
+  const raw=String(name||'').toLowerCase();
+  const n=normaliseInputFilename(name);
+  return /\.csv$/i.test(raw)&&(
+    n.includes('sec bhavdata')||n.includes('bhavdata')||
+    n.includes('sec list')||n.includes('price band')||n.includes('priceband')||
+    n.includes('52 wk')||n.includes('high low')||
+    n.startsWith('reg1')||n.includes('reg1 ind')||
+    n.includes('bulk')||n.includes('block')||
+    n.includes('nse holidays')||n.includes('nse holidays')
+  );
+}
+
 function updateModeUI(){
   const brand=document.querySelector('.brand-tag');
   if(brand) brand.textContent='Continuous Learning mRMR';
@@ -242,6 +268,20 @@ const FS = (() => {
   async function findFile(name){
     const cache=await listAppDataFiles();
     if(cache.has(name)) return cache.get(name);
+    // Canonical reads should also find files saved with minor name variations
+    // such as ALL_NSE.csv, ALL-NSE.csv or browser '(1)' suffixes.
+    const targetCanonical=canonicalInputName(name);
+    if(targetCanonical===name){
+      let best=null;
+      for(const meta of cache.values()){
+        if(canonicalInputName(meta.name)!==name) continue;
+        if(!best||String(meta.modifiedTime||'')>String(best.modifiedTime||'')) best=meta;
+      }
+      if(best){
+        cache.set(name,best);
+        return best;
+      }
+    }
     const q=`name='${queryName(name)}' and trashed=false`;
     const url=DRIVE_API+'?spaces=appDataFolder&pageSize=1&fields=files(id,name,modifiedTime,mimeType)&q='+encodeURIComponent(q);
     const data=await (await request(url)).json();
@@ -303,14 +343,15 @@ const FS = (() => {
   }
 
   function canonicalInputName(name){
-    const n=String(name||'').toLowerCase();
-    if(n.includes('all nse')&&n.endsWith('.csv')) return 'ALL NSE.csv';
-    if(n.endsWith('.zip')) return 'Reports-Daily-Multiple.zip';
-    if(n.includes('holding')&&n.endsWith('.csv')) return 'Holdings.csv';
-    if(n.includes('position')&&n.endsWith('.csv')) return 'Positions.csv';
-    if(n.includes('order')&&n.endsWith('.csv')) return 'Orders.csv';
-    if(n.includes('tradebook')&&n.endsWith('.csv')) return 'TRADEBOOK.csv';
-    if((n.includes('nse holidays')||n.includes('nse_holidays'))&&n.endsWith('.csv')) return 'NSE Holidays.csv';
+    const raw=String(name||'');
+    const n=normaliseInputFilename(raw);
+    if(isAllNseFilename(raw)) return 'ALL NSE.csv';
+    if(/\.zip$/i.test(raw)) return 'Reports-Daily-Multiple.zip';
+    if(/\.csv$/i.test(raw)&&n.includes('holding')) return 'Holdings.csv';
+    if(/\.csv$/i.test(raw)&&n.includes('position')) return 'Positions.csv';
+    if(/\.csv$/i.test(raw)&&n.includes('order')) return 'Orders.csv';
+    if(/\.csv$/i.test(raw)&&n.includes('tradebook')) return 'TRADEBOOK.csv';
+    if(/\.csv$/i.test(raw)&&n.includes('nse holidays')) return 'NSE Holidays.csv';
     return null;
   }
   async function saveUploadedInputs(files){
@@ -1600,14 +1641,15 @@ function refreshExitPolicyFromFeedback(stats){
   return stats;
 }
 function detectNSE(filename,content){
-  const fn=filename.toLowerCase();
-  if(fn.includes('bhavdata')||fn.includes('sec_bhav')){parseBhavdata(content);return'bhav';}
-  if(fn.includes('sec_list')||fn.includes('price_band')||fn.includes('priceband')){parsePriceBand(content);return'price_band';}
-  if(fn.includes('52_wk')||fn.includes('high_low')){parse52W(content);return'52w';}
-  if(fn.startsWith('reg1')||fn.includes('reg1_ind')){parseSurv(content);return'surv';}
+  const raw=String(filename||'').toLowerCase();
+  const fn=normaliseInputFilename(filename);
+  if(fn.includes('bhavdata')||raw.includes('sec_bhav')){parseBhavdata(content);return'bhav';}
+  if(fn.includes('sec list')||fn.includes('price band')||fn.includes('priceband')||raw.includes('sec_list')||raw.includes('price_band')){parsePriceBand(content);return'price_band';}
+  if(fn.includes('52 wk')||fn.includes('high low')||raw.includes('52_wk')||raw.includes('high_low')){parse52W(content);return'52w';}
+  if(fn.startsWith('reg1')||fn.includes('reg1 ind')||raw.includes('reg1_ind')){parseSurv(content);return'surv';}
   if(fn.includes('bulk')){parseDeal(content,NSE_BULK);return'bulk';}
   if(fn.includes('block')){parseDeal(content,NSE_BLOCK);return'block';}
-  if(fn.includes('nse holidays')||fn.includes('nse_holidays')){parseNSEHolidays(content);return'holidays';}
+  if(fn.includes('nse holidays')){parseNSEHolidays(content);return'holidays';}
   return null;
 }
 
@@ -5363,7 +5405,7 @@ async function processScannerUpload(scannerFile, mode){
     const text=await scannerFile.text();
     const raw=parseCSV(text);
     const fname=scannerFile.name.toLowerCase();
-    const ok=fname.includes('all nse');
+    const ok=isAllNseFilename(scannerFile.name);
     if(!ok){console.warn('Non-scanner CSV ignored:',scannerFile.name);return false;}
     setMsg('Running stock mRMR engine across '+raw.length+' stocks...');
     await new Promise(r=>setTimeout(r,60));
@@ -5438,16 +5480,19 @@ async function processFiles(files){
   NSE_BHAV={};NSE_52W={};NSE_SURV={};NSE_BULK={};NSE_BLOCK={};NSE_PRICE_BAND={};
   let tvFile=null,nseZip=null,holdFile=null,posFile=null,ordFile=null,tbFile=null,holidayFile=false;
   for(const f of files){
-    if(f.name.toLowerCase().endsWith('.zip')||f.name.toLowerCase().includes('.zip')){nseZip=nseZip||f;continue;}
-    if(!f.name.toLowerCase().endsWith('.csv'))continue;
     const fname_l=f.name.toLowerCase();
+    if(fname_l.endsWith('.zip')||fname_l.includes('.zip')){nseZip=nseZip||f;continue;}
+    if(!fname_l.endsWith('.csv'))continue;
+    if(isAllNseFilename(f.name)){tvFile=f;continue;}
     if(fname_l.includes('position')){posFile=f;continue;}
     if(fname_l.includes('holding')){holdFile=f;continue;}
     if(fname_l.includes('order')){ordFile=f;continue;}
     if(fname_l.includes('tradebook')){tbFile=f;continue;}
-    if(fname_l.includes('all nse')){tvFile=f;continue;}
-    if(fname_l.includes('nse holidays')||fname_l.includes('nse_holidays')){
-      const ht=await f.text();parseNSEHolidays(ht);holidayFile=true;
+    if(isNseSupportFilename(f.name)){
+      try{
+        const text=await f.text();
+        if(detectNSE(f.name,text)==='holidays') holidayFile=true;
+      }catch(e){console.warn('Could not parse NSE support CSV:',f.name,e);}
       continue;
     }
   }
@@ -5482,7 +5527,7 @@ async function processFiles(files){
             // Try NSE detection first
             if(detectNSE(fn,text)) continue;
             // Fall through to scanner CSV routing
-            if(fn.includes('all nse')&&!tvFile){
+            if(isAllNseFilename(fn)&&!tvFile){
               // Synthesise a File-like object for the TV CSV path
               tvFile={name:fn,text:async()=>text};continue;
             }
