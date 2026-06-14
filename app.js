@@ -1,5 +1,5 @@
-const BUILD_TS='2026-06-14 20:07 IST'; // replaced at commit time with IST datetime
-const APP_VERSION=410; // Shared deployed version; increment once per released code change.
+const BUILD_TS='2026-06-14 20:39 IST'; // replaced at commit time with IST datetime
+const APP_VERSION=411; // Shared deployed version; increment once per released code change.
 const GOOGLE_DRIVE_CLIENT_ID='1015012642264-oi2nelv3v90k3d39r994a6nelgjs2a56.apps.googleusercontent.com'; // Public OAuth Web Client ID.
 const HARD_FILTER_SCHEMA='structural_tradeability_v2';
 const ROCKET_TARGET_FRACTION=0.005; // Daily top 0.5% of the full parsed NSE universe.
@@ -106,7 +106,7 @@ const TRADEBOOK_STORE='rs_tradebook';
 const TRADEBOOK_META_STORE='rs_tradebook_meta_v1';
 const SURV_RULE_STORE='rs_surv_rules';
 const SURV_CORR_STORE='rs_surv_corr';
-const MISSED_OPP_STORE='rs_missed_opp_v2';
+const SAME_DAY_EXIT_OPPORTUNITY_STORE='rs_same_day_exit_opportunity_v3';
 const RECOMMEND_OUTCOME_STORE='rs_recommend_outcomes_v1';
 const RECOMMEND_HORIZON_DAYS=5;
 const RECOMMEND_CONVERSION_DAYS=2;
@@ -114,11 +114,6 @@ const RECOMMEND_MIN_PROGRESS_FRACTION=0.25;
 const RECOMMEND_FEEDBACK_MIN_SAMPLES=20;
 const ENTRY_OUTCOME_STORE='rs_entry_outcomes_v2';
 const ENTRY_OUTCOME_HORIZON_DAYS=5;
-const POST_SALE_ROCKET_STORE='rs_post_sale_rockets_v1';
-const POST_SALE_ROCKET_HORIZON_DAYS=5;
-// Kept separate from the former day-high accumulator: these measure absolute daily change.
-const AVG_MOVE_ALL_STORE='rs_avg_move_all_v1';
-const AVG_MOVE_UNIVERSE_STORE='rs_avg_move_universe_v1';
 const REC_COUNT_STORE='rs_rec_count';
 const NSE_HOLIDAYS_STORE='rs_nse_holidays';
 // Keep rocket_brain.json for learned state only. Input-file derivatives are rebuilt
@@ -136,6 +131,11 @@ const DEPRECATED_BRAIN_KEYS=new Set([
   'rs_regime_cal',
   'rs_rocket_lab_v1',
   'rs_intraday_ledger_v1',
+  'rs_missed_opp_v2',
+  'rs_post_sale_rockets_v1',
+  'rs_avg_day_chg',
+  'rs_avg_move_all_v1',
+  'rs_avg_move_universe_v1',
 ]);
 function shouldDropBrainKey(key){
   const k=String(key||'').toLowerCase();
@@ -1005,7 +1005,7 @@ function weightedPercentile(rows,valueFn,weightFn,pct){
 }
 // Observational policy: chooses fast, profitable realised exit cohorts; it does not claim
 // an alternate TGT/SL would have filled without position-level historical price paths.
-function deriveProfitVelocityPolicy(trips,fallbackSL,fallbackTGT,escapeFeedback){
+function deriveProfitVelocityPolicy(trips,fallbackSL,fallbackTGT){
   const valid=(trips||[]).filter(r=>isFinite(r.netPnlPct)&&isFinite(r.holdDays));
   const baseline={slPct:fallbackSL,tgtPct:fallbackTGT,holdDays:Math.max(1,Math.round(meanArr(valid.map(r=>r.holdDays))||5)),
     velocityPctPerDay:null,sample:valid.length,objective:'observed net % / holding day'};
@@ -1033,22 +1033,8 @@ function deriveProfitVelocityPolicy(trips,fallbackSL,fallbackTGT,escapeFeedback)
   let tgt=learnedTgt==null?fallbackTGT:roundPct05(Math.max(1,fallbackTGT+(learnedTgt-fallbackTGT)*tgtBlend));
   const tightenedSL=learnedSL==null?fallbackSL:Math.min(fallbackSL,learnedSL);
   const sl=roundPct05(Math.max(1,fallbackSL+(tightenedSL-fallbackSL)*slBlend));
-  const events=Object.values(escapeFeedback?.events||{});
-  const assessedSales=Object.keys(escapeFeedback?.assessed||{}).length;
-  const escapeRate=assessedSales?+(events.length/assessedSales*100).toFixed(1):null;
-  let holdDays=best.days, escapeGuardDays=null, escapeTgtNudgePct=0;
-  if(events.length>=2&&assessedSales>=10){
-    const confidence=Math.min(0.6,events.length/10)*Math.min(1,assessedSales/30);
-    const lag=weightedPercentile(events,e=>e.daysAfterSale,()=>1,0.75);
-    escapeGuardDays=lag==null?null:Math.min(POST_SALE_ROCKET_HORIZON_DAYS,Math.max(1,Math.ceil(lag)));
-    if(escapeGuardDays!=null) holdDays=Math.max(holdDays,escapeGuardDays);
-    const typicalGain=weightedPercentile(events.filter(e=>e.postSellGainPct>0),e=>e.postSellGainPct,()=>1,0.5);
-    escapeTgtNudgePct=typicalGain==null?0:roundPct05(Math.min(1,typicalGain*0.10*confidence));
-    tgt=roundPct05(tgt+escapeTgtNudgePct);
-  }
-  return {slPct:sl,tgtPct:tgt,holdDays,coreHoldDays:best.days,velocityPctPerDay:+best.velocity.toFixed(3),
+  return {slPct:sl,tgtPct:tgt,holdDays:best.days,coreHoldDays:best.days,velocityPctPerDay:+best.velocity.toFixed(3),
     sample:best.rows.length,total:valid.length,baselineSL:fallbackSL,baselineTGT:fallbackTGT,
-    escapeCount:events.length,assessedSales,escapeRate,escapeGuardDays,escapeTgtNudgePct,
     objective:'observed net % / holding day'};
 }
 function tickPrice(v){return Math.round(v/0.05)*0.05;}
@@ -1189,8 +1175,6 @@ function persistMethodologySnapshot(){
       removed:{...(ENGINE_DATA.removed||{})},
       survSize:ENGINE_DATA.survSize||0,
       survRuleRows:syncSurvRuleRows(ENGINE_DATA.survRuleRows||[]),
-      avgMoveAll:ENGINE_DATA.avgMoveAll,
-      avgMoveUniverse:ENGINE_DATA.avgMoveUniverse,
       recommendationFeedback:ENGINE_DATA.recommendationFeedback||null,
       executedEntryFeedback:ENGINE_DATA.executedEntryFeedback||null,
       featureAccountability:ENGINE_DATA.featureAccountability||null
@@ -1632,25 +1616,84 @@ function getExecutedEntryFeedbackCorrelations(features){
   return {samples:entries.length,profitable:entries.filter(e=>e.bestVelocityPctPerDay>0).length,corr,
     avgVelocity:+meanArr(target).toFixed(3)};
 }
-function recordPostSaleRocketScan(scan){
-  if(!scan?.date||!scan.rows?.length||!TRADEBOOK_STATS?.tripsData?.length) return;
-  const store=FS.get(POST_SALE_ROCKET_STORE)||{horizonDays:POST_SALE_ROCKET_HORIZON_DAYS,assessed:{},events:{}};
-  const rowMap=Object.fromEntries(scan.rows.map(r=>[r.symbol,r]));
-  TRADEBOOK_STATS.tripsData.forEach((trip,idx)=>{
-    if(!trip.sellDate||!(trip.sellPrice>0)) return;
-    const gap=tradingDaysBetween(trip.sellDate,scan.date);
-    if(gap==null||gap<=0||gap>POST_SALE_ROCKET_HORIZON_DAYS) return;
-    const key=[trip.sellDate,trip.sym,trip.sellPrice,trip.qty,idx].join('|');
-    store.assessed[key]=true;
-    const row=rowMap[trip.sym];
-    if(!row||(row.rocketMove??row.priceChange)==null||(row.rocketMove??row.priceChange)<scan.threshold||store.events[key]) return;
-    const peak=row.high1d>0?row.high1d:row.price;
-    store.events[key]={
-      symbol:trip.sym,sellDate:trip.sellDate,rocketDate:scan.date,daysAfterSale:gap,
-      sellPrice:+trip.sellPrice.toFixed(2),postSellGainPct:peak>0?+(((peak-trip.sellPrice)/trip.sellPrice)*100).toFixed(2):null
+function getClosedSaleCohorts(trips){
+  const cohorts={};
+  (trips||[]).forEach(trip=>{
+    if(!trip?.sym||!trip.sellDate||!(trip.qty>0)||!(trip.buyPrice>0)||!(trip.sellPrice>0)) return;
+    const key=trip.sellDate+'|'+trip.sym;
+    if(!cohorts[key]) cohorts[key]={key,symbol:trip.sym,sellDate:trip.sellDate,qty:0,buyValue:0,sellValue:0,netPnl:0};
+    const cohort=cohorts[key];
+    cohort.qty+=trip.qty;
+    cohort.buyValue+=trip.buyPrice*trip.qty;
+    cohort.sellValue+=trip.sellPrice*trip.qty;
+    cohort.netPnl+=isFinite(trip.netPnl)?trip.netPnl:(trip.sellPrice-trip.buyPrice)*trip.qty;
+  });
+  return Object.values(cohorts).map(cohort=>({
+    ...cohort,
+    avgBuy:cohort.qty>0?cohort.buyValue/cohort.qty:0,
+    avgSell:cohort.qty>0?cohort.sellValue/cohort.qty:0,
+    realisedPnlPct:cohort.buyValue>0?(cohort.netPnl/cohort.buyValue)*100:null,
+  }));
+}
+function recordSameDayExitOpportunity(scan){
+  if(!scan?.date||!scan.rows?.length) return;
+  const sourceDate=scan.sourceDate||scan.date;
+  const tradebookCohorts=Object.fromEntries(getClosedSaleCohorts(TRADEBOOK_STATS?.tripsData||[]).map(cohort=>[cohort.key,cohort]));
+  const orderSession=getLatestOrderSession();
+  const orderCohorts={};
+  if(orderSession?.date===sourceDate){
+    orderSession.orders.filter(order=>order.type==='SELL'&&order.qty>0&&order.price>0).forEach(order=>{
+      const key=sourceDate+'|'+order.symbol;
+      if(!orderCohorts[key]) orderCohorts[key]={key,symbol:order.symbol,sellDate:sourceDate,qty:0,sellValue:0};
+      orderCohorts[key].qty+=order.qty;
+      orderCohorts[key].sellValue+=order.price*order.qty;
+    });
+  }
+  const candidates={...orderCohorts};
+  Object.values(tradebookCohorts).filter(cohort=>cohort.sellDate===sourceDate).forEach(cohort=>{candidates[cohort.key]=cohort;});
+  if(!Object.keys(candidates).length) return;
+  const rowMap=Object.fromEntries(scan.rows.map(row=>[row.symbol,row]));
+  const store=FS.get(SAME_DAY_EXIT_OPPORTUNITY_STORE)||{version:3,entries:{}};
+  if(!store.entries||typeof store.entries!=='object') store.entries={};
+  Object.values(candidates).forEach(candidate=>{
+    const row=rowMap[candidate.symbol];
+    const high=row?(row.high1d>0?row.high1d:row.price):null;
+    const avgSell=candidate.qty>0?candidate.sellValue/candidate.qty:0;
+    if(!(high>0)||!(avgSell>0)) return;
+    const matched=tradebookCohorts[candidate.key];
+    const prior=store.entries[candidate.key]||{};
+    const dayHigh=Math.max(prior.dayHigh||0,high);
+    store.entries[candidate.key]={
+      symbol:candidate.symbol,sellDate:sourceDate,qty:candidate.qty,
+      avgBuy:matched?.avgBuy>0?+matched.avgBuy.toFixed(2):(prior.avgBuy??null),
+      avgSell:+avgSell.toFixed(2),sellValue:+candidate.sellValue.toFixed(2),
+      realisedPnlPct:matched?.realisedPnlPct==null?(prior.realisedPnlPct??null):+matched.realisedPnlPct.toFixed(2),
+      dayHigh:+dayHigh.toFixed(2),
+      missedGainPct:+Math.max(0,((dayHigh-avgSell)/avgSell)*100).toFixed(2),
+      source:matched?'tradebook':'orders',lastUpdated:new Date().toISOString(),
     };
   });
-  FS.set(POST_SALE_ROCKET_STORE,store);
+  store.lastUpdated=new Date().toISOString();
+  FS.set(SAME_DAY_EXIT_OPPORTUNITY_STORE,store);
+}
+function reconcileSameDayExitOpportunities(){
+  if(!TRADEBOOK_STATS?.tripsData?.length) return;
+  const store=FS.get(SAME_DAY_EXIT_OPPORTUNITY_STORE);
+  if(!store?.entries) return;
+  const cohorts=Object.fromEntries(getClosedSaleCohorts(TRADEBOOK_STATS.tripsData).map(cohort=>[cohort.key,cohort]));
+  let changed=false;
+  Object.entries(store.entries).forEach(([key,entry])=>{
+    const cohort=cohorts[key];
+    if(!cohort||!(entry.dayHigh>0)) return;
+    const avgSell=cohort.avgSell;
+    store.entries[key]={...entry,
+      qty:cohort.qty,avgBuy:+cohort.avgBuy.toFixed(2),avgSell:+avgSell.toFixed(2),
+      sellValue:+cohort.sellValue.toFixed(2),realisedPnlPct:cohort.realisedPnlPct==null?null:+cohort.realisedPnlPct.toFixed(2),
+      missedGainPct:+Math.max(0,((entry.dayHigh-avgSell)/avgSell)*100).toFixed(2),source:'tradebook',
+    };
+    changed=true;
+  });
+  if(changed){store.lastUpdated=new Date().toISOString();FS.set(SAME_DAY_EXIT_OPPORTUNITY_STORE,store);}
 }
 function refreshExitPolicyFromFeedback(stats){
   if(!stats?.tripsData?.length) return stats;
@@ -1658,7 +1701,7 @@ function refreshExitPolicyFromFeedback(stats){
   const baselineSL=existing.baselineSL??roundPct05(Math.abs(stats.medianLossPct||stats.adaptiveSL||3.5));
   const baselineTGT=existing.baselineTGT??roundPct05(Math.abs(stats.medianWinPct||stats.adaptiveTGT||3.7));
   const adaptiveTrips=getAdaptiveTradeTrips(stats.tripsData);
-  stats.exitPolicy=deriveProfitVelocityPolicy(adaptiveTrips.length?adaptiveTrips:stats.tripsData,baselineSL,baselineTGT,FS.get(POST_SALE_ROCKET_STORE));
+  stats.exitPolicy=deriveProfitVelocityPolicy(adaptiveTrips.length?adaptiveTrips:stats.tripsData,baselineSL,baselineTGT);
   stats.adaptiveSL=stats.exitPolicy.slPct;
   stats.adaptiveTGT=stats.exitPolicy.tgtPct;
   stats.holdLimitDays=stats.exitPolicy.holdDays;
@@ -1835,14 +1878,6 @@ function runEngine(raw, sessionTag){
       low1d:K.low_1d?d[K.low_1d]:null,
       rocketMove:getIntradayRocketMove(d,K.price,K.price_change,K.high_1d)
     })).filter(d=>d.symbol);
-  // Daily movement is absolute % change, so advances and declines do not cancel out.
-  const avgAbsDailyMove=(rows)=>{
-    if(!K.price_change) return null;
-    const vals=rows.map(d=>d[K.price_change]).filter(v=>v!=null&&isFinite(v)).map(v=>Math.abs(v));
-    return vals.length ? vals.reduce((sum,v)=>sum+v,0)/vals.length : null;
-  };
-  const todayAvgMoveAll=avgAbsDailyMove(parsed);
-
   // ── Compute Sector / Industry breadth features (full universe) ──
   if(sectorCol && K.price_change){
     const secMap={};
@@ -1950,8 +1985,6 @@ function runEngine(raw, sessionTag){
     d._filterBucket='';
     return true;
   });
-  const todayAvgMoveUniverse=avgAbsDailyMove(filtered);
-
   // Expose for snapshot saving after engine run
   window._lastEngineFeats = FEATS;
   window._lastParsedFiltered = filtered;
@@ -2083,18 +2116,6 @@ function runEngine(raw, sessionTag){
     const hist=combinedCorr[f];
     targetCorr[f]=useFreshCorr?(today!=null?today:0):(hist!=null?hist:0);
   }
-
-  // Maintain separate all-input and filtered-universe histories once per trading day.
-  const updateAvgMove=(storeKey,value)=>{
-    if(value == null || !isMarketHours()) return;
-    const acc=FS.get(modeKey(storeKey))||{mean:0,sessions:0,lastDate:''};
-    const today=getSessionDate();
-    if(acc.lastDate === today) return;
-    const n=acc.sessions+1;
-    FS.set(modeKey(storeKey),{mean:+(acc.mean+(value-acc.mean)/n).toFixed(4),sessions:n,lastDate:today});
-  };
-  updateAvgMove(AVG_MOVE_ALL_STORE,todayAvgMoveAll);
-  updateAvgMove(AVG_MOVE_UNIVERSE_STORE,todayAvgMoveUniverse);
 
   // Save the single combined accumulator used by all market conditions.
   const newAcc={corr:combinedCorr,counts:combinedCounts,sessions:(ACC_CORR?ACC_CORR.sessions||0:0)+(addingToday?1:0),
@@ -2259,7 +2280,7 @@ function runEngine(raw, sessionTag){
   });
   parsed.forEach(d=>{d.rocketScore=SCORE_MAP[d.symbol]??null;});
   ENGINE_DATA={targetCorr,targetCorrToday,mrmr,weights,features:FEATS,labels:LABELS,top10Feats,rocketCount:topN,rocketThreshold:ROCKET_THRESHOLD,rocketTargetFraction:ROCKET_TARGET_FRACTION,rocketObservationRelevance,accSessions:ACC_CORR?.sessions||1,laggedNote:laggedNote||'',
-    marketBreadth:marketBreadth, avgMoveAll:todayAvgMoveAll, avgMoveUniverse:todayAvgMoveUniverse,
+    marketBreadth:marketBreadth,
     recommendationFeedback,executedEntryFeedback,
     featureAccountability:{lastEvaluatedDate:featureAccountability.lastEvaluatedDate,stats:featureAccountability.stats},
     useFreshCorr, freshSignalCount, scoringSource,
@@ -2283,7 +2304,7 @@ function runEngine(raw, sessionTag){
     const methSave={targetCorr,targetCorrToday,mrmr,weights,features:FEATS,labels:LABELS,top10Feats,rocketCount:ENGINE_DATA.rocketCount,rocketThreshold:ENGINE_DATA.rocketThreshold,rocketTargetFraction:ROCKET_TARGET_FRACTION,rocketObservationRelevance,accSessions:ENGINE_DATA.accSessions,laggedNote:ENGINE_DATA.laggedNote,
       marketBreadth:ENGINE_DATA.marketBreadth,useFreshCorr:ENGINE_DATA.useFreshCorr,freshSignalCount:ENGINE_DATA.freshSignalCount,scoringSource:ENGINE_DATA.scoringSource,useAccCorr:ENGINE_DATA.useAccCorr,sectorCol:ENGINE_DATA.sectorCol,industryCol:ENGINE_DATA.industryCol,
       yesterdayRockets:yesterdayRockets,totalParsed:totalParsed,hardFilterSchema:HARD_FILTER_SCHEMA,removed:{...REMOVED},survSize:Object.keys(NSE_SURV).length,
-      avgMoveAll:todayAvgMoveAll,avgMoveUniverse:todayAvgMoveUniverse,recommendationFeedback,executedEntryFeedback,
+      recommendationFeedback,executedEntryFeedback,
       featureAccountability:ENGINE_DATA.featureAccountability};
     FS.set(modeKey(METH_STORE),methSave);
   }catch(e){console.warn('Could not save methodology data',e);}
@@ -2421,28 +2442,22 @@ function getLatestBookedSummary(){
   return null;
 }
 
-function computeMissedOpp(){
-  if(!ORDERS_TODAY?.length||!ALL.length) return;
-  const session=getLatestOrderSession();
-  const sells=(session?.orders||[]).filter(o=>o.type==='SELL');
-  if(!sells.length) return;
-  const highMap={};
-  ALL.forEach(s=>{if(s.high1d!=null) highMap[s.symbol]=s.high1d;});
-  if(!Object.keys(highMap).length) return;
-  const dayDate=session?.date||getSessionDate();
-  const bestSell={};
-  sells.forEach(o=>{if(o.price>0) bestSell[o.symbol]=Math.max(bestSell[o.symbol]||0,o.price);});
-  const missedVals=[];
-  Object.entries(bestSell).forEach(([sym,sellPx])=>{
-    const h=highMap[sym];
-    if(h==null) return;
-    missedVals.push(Math.max(0,(h-sellPx)/sellPx*100));
-  });
-  if(!missedVals.length) return;
-  const avgMissed=+(missedVals.reduce((s,v)=>s+v,0)/missedVals.length).toFixed(2);
-  const acc=FS.get(MISSED_OPP_STORE)||{};
-  acc[dayDate]={avg:avgMissed,count:missedVals.length};
-  FS.set(MISSED_OPP_STORE,acc);
+function getSameDayExitOpportunitySummary(){
+  const entries=Object.values(FS.get(SAME_DAY_EXIT_OPPORTUNITY_STORE)?.entries||{})
+    .filter(entry=>entry&&entry.avgSell>0&&entry.sellValue>0&&isFinite(entry.missedGainPct));
+  const sellValue=entries.reduce((sum,entry)=>sum+entry.sellValue,0);
+  const avgMissed=sellValue>0?entries.reduce((sum,entry)=>sum+(entry.missedGainPct*entry.sellValue),0)/sellValue:0;
+  const realisedEntries=entries.filter(entry=>entry.avgBuy>0&&entry.qty>0&&isFinite(entry.realisedPnlPct));
+  const buyValue=realisedEntries.reduce((sum,entry)=>sum+(entry.avgBuy*entry.qty),0);
+  const avgRealised=buyValue>0?realisedEntries.reduce((sum,entry)=>sum+(entry.realisedPnlPct*entry.avgBuy*entry.qty),0)/buyValue:null;
+  return {
+    exits:entries.length,
+    upsideExits:entries.filter(entry=>entry.missedGainPct>0).length,
+    avgRealised:avgRealised==null?null:+avgRealised.toFixed(2),
+    avgMissed:+avgMissed.toFixed(2),
+    missedValue:+entries.reduce((sum,entry)=>sum+(entry.missedGainPct/100)*entry.sellValue,0).toFixed(0),
+    nudge:+(avgMissed*0.25).toFixed(2),
+  };
 }
 
 function renderStats(){
@@ -2491,28 +2506,17 @@ function renderStats(){
     const rr=(parseFloat(_sl)>0?(parseFloat(_tgt)/parseFloat(_sl)):0).toFixed(2);
     const policy=TRADEBOOK_STATS.exitPolicy;
     const holdStr=policy?.holdDays?` · review &gt;${policy.holdDays}d`:'';
-    const escapeStr=policy?.escapeCount?` · <span style="color:var(--amber)" title="${policy.escapeCount} sold lots became rockets within ${POST_SALE_ROCKET_HORIZON_DAYS} trading days after exit.">${policy.escapeCount} post-sale rockets</span>`:'';
+    const opportunity=getSameDayExitOpportunitySummary();
+    const opportunityStr=opportunity.exits?` · <span style="color:var(--amber)" title="${opportunity.exits} symbol/date exit${opportunity.exits===1?'':'s'} compared with the same day's ALL NSE high; ${opportunity.upsideExits} day high${opportunity.upsideExits===1?'':'s'} exceeded your quantity-weighted average sell price.">${opportunity.upsideExits}/${opportunity.exits} exit${opportunity.exits===1?'':'s'} left upside</span>`:'';
     const nudge=getMissedOppNudge();
-    const nudgeStr=nudge>0?` · <span style="color:var(--amber);font-size:10px" title="You leave an avg of ${(nudge/0.25).toFixed(2)}% on the table after sells. 25% of that is now added to TGT.">missed opp +${nudge.toFixed(2)}%</span>`:'';
+    const nudgeStr=nudge>0?` · <span style="color:var(--amber);font-size:10px" title="Same-day missed upside averages ${opportunity.avgMissed.toFixed(2)}%. 25% of that is added to TGT.">missed opp +${nudge.toFixed(2)}%</span>`:'';
     const _cp=TRADEBOOK_STATS.avgChargePct!=null?Math.abs(TRADEBOOK_STATS.avgChargePct):null;
     const costStr=(_cp!=null&&_cp>0)?` · <span style="color:var(--t2)" title="Avg total Zerodha charges as % of round-trip turnover (buy+sell value), across all tradebook trips">cost ~${_cp.toFixed(2)}%</span>`:'';
-    return `<div class="st"><div class="st-l">SL / TGT</div><div class="st-v" style="font-size:17px"><span style="color:var(--red)">−${_sl}%</span><span style="color:var(--t3);font-size:13px"> / </span><span style="color:var(--green)">+${_tgt}%</span></div><div class="st-d">R:R ${rr}${costStr} · velocity policy${holdStr}${escapeStr}${nudgeStr}</div></div>`;
+    return `<div class="st"><div class="st-l">SL / TGT</div><div class="st-v" style="font-size:17px"><span style="color:var(--red)">−${_sl}%</span><span style="color:var(--t3);font-size:13px"> / </span><span style="color:var(--green)">+${_tgt}%</span></div><div class="st-d">R:R ${rr}${costStr} · velocity policy${holdStr}${opportunityStr}${nudgeStr}</div></div>`;
   })();
 
   document.getElementById('statsBar').innerHTML=`
-    ${(()=>{
-      const _allHist=FS.get(modeKey(AVG_MOVE_ALL_STORE));
-      const _univHist=FS.get(modeKey(AVG_MOVE_UNIVERSE_STORE));
-      const _allToday=ENGINE_DATA.avgMoveAll;
-      const _univToday=ENGINE_DATA.avgMoveUniverse;
-      const _todayStr=_univToday!=null&&_allToday!=null
-        ?` · avg |move| <span style="color:var(--green)" title="Average absolute daily % change today among the ${t.toLocaleString()} filtered universe stocks. Declines count as positive movement.">U ${_univToday.toFixed(2)}%</span> / <span style="color:var(--t2)" title="Average absolute daily % change today across all ${totalParsed.toLocaleString()} input stocks.">All ${_allToday.toFixed(2)}%</span>`
-        :'';
-      const _histStr=_univHist&&_allHist&&_univHist.sessions>=2&&_allHist.sessions>=2
-        ?` · hist <span style="color:var(--green)" title="Running daily mean of filtered-universe average absolute movement (${_univHist.sessions} days).">U ${_univHist.mean.toFixed(2)}%</span> / <span style="color:var(--t2)" title="Running daily mean of all-input average absolute movement (${_allHist.sessions} days).">All ${_allHist.mean.toFixed(2)}%</span> <span style="color:var(--t3);font-size:10px">(${Math.min(_univHist.sessions,_allHist.sessions)}d)</span>`
-        :'';
-      return `<div class="st"><div class="st-l">Universe</div><div class="st-v">${t.toLocaleString()}</div><div class="st-d">of ${totalParsed.toLocaleString()} · <span style="color:var(--green)">${bull} ▲</span> · <span style="color:var(--red)">${t-bull} ▼</span>${_todayStr}${_histStr}</div></div>`;
-    })()}
+    <div class="st"><div class="st-l">Eligible Universe</div><div class="st-v">${t.toLocaleString()}</div><div class="st-d">of ${totalParsed.toLocaleString()} parsed · <span style="color:var(--green)">${bull} up</span> · <span style="color:var(--red)">${t-bull} down/flat</span></div></div>
     ${slTgtCard}
     <div class="st"><div class="st-l">Score Spread</div><div class="st-v">${scoreSpread}</div><div class="st-d">${scoreMax} top · ${scoreMin} low</div></div>
     <div class="st"><div class="st-l">Top Sector</div><div class="st-v" style="font-size:15px;color:var(--green)">${topSec}</div><div class="st-d">${topSecPct.toFixed(0)}% advancing</div></div>
@@ -2553,16 +2557,10 @@ function renderStats(){
     }
   }
   try{
-    const moStore=FS.get(MISSED_OPP_STORE);
-    if(moStore){
-      const moDates=Object.keys(moStore).length;
-      const moEntries=Object.values(moStore).filter(e=>e&&typeof e==='object'&&isFinite(e.avg)&&e.count>0);
-      if(moEntries.length>0){
-        const moTotal=moEntries.reduce((s,e)=>s+e.count,0);
-        const moAvg=moEntries.reduce((s,e)=>s+e.avg*e.count,0)/moTotal;
-        const moNudge=+(moAvg*0.25).toFixed(2);
-        infoPills.push(`<span class="info-pill pill-amber" title="Across ${moDates} sell date(s), ${moTotal} stocks: stock-weighted avg missed gain (all sold symbols, including perfect exits). 25% of this is added to effective TGT.">🎯 ${moDates} sell date${moDates===1?'':'s'} · avg +${moAvg.toFixed(2)}% left · TGT +${moNudge.toFixed(2)}%</span>`);
-      }
+    const opportunity=getSameDayExitOpportunitySummary();
+    if(opportunity.exits){
+      const realisedText=opportunity.avgRealised==null?'':` · realised ${opportunity.avgRealised>=0?'+':''}${opportunity.avgRealised.toFixed(2)}%`;
+      infoPills.push(`<span class="info-pill pill-amber" title="One exit means one symbol on one sell date. Sell fills are quantity-weighted; ALL NSE supplies that day's high. The average is weighted by sold value and includes 0% when the high did not exceed your average sell price.">🎯 ${opportunity.exits} exit${opportunity.exits===1?'':'s'}${realisedText} · ${opportunity.upsideExits} left upside · missed +${opportunity.avgMissed.toFixed(2)}% (${fmtINR(opportunity.missedValue)}) · TGT +${opportunity.nudge.toFixed(2)}%</span>`);
     }
   }catch(e){}
 
@@ -2727,7 +2725,7 @@ function renderPerformance(){
     el.innerHTML=`<div style="text-align:center;padding:80px 40px;color:var(--t2)"><div style="font-size:36px;margin-bottom:16px">📒</div><div style="font-size:16px;font-weight:700;color:var(--t1);margin-bottom:8px">No Tradebook Loaded</div><div>Upload TRADEBOOK.csv to see performance analytics.</div></div>`;
     return;
   }
-  // Re-apply policy so newly observed near-term post-sale rockets can inform the next exit.
+  // Re-apply the realised profit-velocity policy after tradebook refresh.
   if(tb.tripsData?.length){
     refreshExitPolicyFromFeedback(tb);
     try{FS.set(TRADEBOOK_STORE,tb);}catch(e){}
@@ -2783,7 +2781,7 @@ function renderPerformance(){
     {label:'Avg Hold',value:p.avgHoldDays+'d',color:'var(--t1)',sub:'Avg position duration'},
     {label:'Avg Position',value:fmtINR(p.avgCapital||0),color:'var(--t1)',sub:'Observed avg capital per position'},
     {label:'Recommended Position',value:recPos.value?fmtINR(recPos.value):'—',color:recPos.value?'var(--amber)':'var(--t3)',sub:recPosSub},
-    {label:'Learned Hold Cap',value:exitPolicy?exitPolicy.holdDays+'d':'—',color:exitPolicy?'var(--amber)':'var(--t3)',sub:exitPolicy&&exitPolicy.velocityPctPerDay!=null?`Observed +${exitPolicy.velocityPctPerDay.toFixed(3)}%/day · ${exitPolicy.escapeCount||0} near-term escapes`:'Re-upload tradebook to learn'},
+    {label:'Learned Hold Cap',value:exitPolicy?exitPolicy.holdDays+'d':'—',color:exitPolicy?'var(--amber)':'var(--t3)',sub:exitPolicy&&exitPolicy.velocityPctPerDay!=null?`Observed +${exitPolicy.velocityPctPerDay.toFixed(3)}%/day`:'Re-upload tradebook to learn'},
     {label:'Largest Loss',value:fmtSignedINR(p.largestLossRs),color:'var(--red)',sub:'Single lot, net'},
     {label:'Max Drawdown',value:p.maxDrawdown>0?fmtSignedINR(-p.maxDrawdown):'—',color:'var(--red)',sub:'Peak-to-trough in period'},
     {label:'Max Loss Streak',value:p.maxLossStreak+' days',color:p.maxLossStreak>=5?'var(--red)':p.maxLossStreak>=3?'var(--amber)':'var(--green)',sub:'Consecutive losing days'},
@@ -3205,11 +3203,12 @@ function renderPerformance(){
   const outcomeText=recSummary.evaluated
     ? `${recSummary.evaluated} completed engine-shortlist picks assessed across ${recSummary.issueDays} scan days. ${recSummary.rockets} became rockets within ${RECOMMEND_HORIZON_DAYS} trading days (${recSummary.conversionPct}%): ${recSummary.fastRockets||0} inside the ${RECOMMEND_CONVERSION_DAYS}d conversion window and ${recSummary.delayedRockets||0} delayed. ${recSummary.earlyFailures||0} failed the early window and ${recSummary.failures||0} moved opposite enough to count as negative telemetry. Average outcome score is ${recSummary.avgOutcomeScore!=null?(recSummary.avgOutcomeScore>=0?'+':'')+recSummary.avgOutcomeScore.toFixed(3):'not available'}; average attainable high move is ${recSummary.avgBestHighPct!=null?(recSummary.avgBestHighPct>=0?'+':'')+recSummary.avgBestHighPct.toFixed(2)+'%':'not available'}.`
     : `Outcome tracking has started. A shortlist gets a ${RECOMMEND_CONVERSION_DAYS}-trading-day conversion check and a final ${RECOMMEND_HORIZON_DAYS}-trading-day assessment.`;
-  const escapeText=exitPolicy?.escapeCount
-    ? `${exitPolicy.escapeCount} sold lots became rockets within ${POST_SALE_ROCKET_HORIZON_DAYS} trading days of exit out of ${exitPolicy.assessedSales||0} assessed recent sales. Learned hold cap is ${exitPolicy.holdDays}d${exitPolicy.escapeTgtNudgePct?` and post-sale evidence adds +${exitPolicy.escapeTgtNudgePct.toFixed(2)}% to TGT`:''}.`
-    : `No confirmed post-sale rockets within ${POST_SALE_ROCKET_HORIZON_DAYS} trading days have been observed yet.`;
+  const exitOpportunity=getSameDayExitOpportunitySummary();
+  const escapeText=exitOpportunity.exits
+    ? `${exitOpportunity.exits} symbol/date exits have same-day ALL NSE highs recorded. ${exitOpportunity.upsideExits} highs exceeded the quantity-weighted average sell price; sold-value-weighted missed upside averages ${exitOpportunity.avgMissed.toFixed(2)}% (${fmtINR(exitOpportunity.missedValue)}).`
+    : `No same-day exit opportunities have been recorded yet. Load Orders, Tradebook, and ALL NSE for the sell day.`;
   const outcomeHtml=perfCard('Recommendation Outcome Feedback',
-    `<div style="padding:14px 16px;color:var(--t2);font-size:12px;line-height:1.7"><div><strong style="color:var(--t1)">Actual entries:</strong> ${entryOutcomeText}</div><div style="margin-top:8px"><strong style="color:var(--t1)">Eligible shortlist:</strong> ${outcomeText}</div><div style="margin-top:8px"><strong style="color:var(--t1)">Post-sale exits:</strong> ${escapeText}</div><div style="margin-top:8px;color:var(--t3)">Actual-entry profit velocity and shortlist telemetry affect global feature relevance with capped weights; failed recommendations can now push feature correlations down instead of merely counting as non-rockets. Post-sale escapes can extend review/TGT but do not widen SL.</div></div>`,'','perf-outcomes');
+    `<div style="padding:14px 16px;color:var(--t2);font-size:12px;line-height:1.7"><div><strong style="color:var(--t1)">Actual entries:</strong> ${entryOutcomeText}</div><div style="margin-top:8px"><strong style="color:var(--t1)">Eligible shortlist:</strong> ${outcomeText}</div><div style="margin-top:8px"><strong style="color:var(--t1)">Same-day exit opportunity:</strong> ${escapeText}</div><div style="margin-top:8px;color:var(--t3)">Actual-entry profit velocity and shortlist telemetry affect global feature relevance with capped weights. Same-day missed upside adjusts TGT only; it does not alter feature learning or widen SL.</div></div>`,'','perf-outcomes');
 
   el.innerHTML=`
     <div style="padding:12px 16px">
@@ -3258,6 +3257,12 @@ function rebuildActiveSurveillanceHits(){
 function scannerSessionTag(fileName, raw){
   const dataHash=(function(){let h=0;for(let i=0;i<Math.min(raw.length,200);i++){const pc=parseFloat(raw[i][Object.keys(raw[i]).find(k=>/price/i.test(k)&&/change/i.test(k))])||0;h=((h<<5)-h)+Math.round(pc*1000);h|=0;}return h;})();
   return fileName+'·'+raw.length+'·'+dataHash;
+}
+function inputFileSessionDate(file){
+  const ts=Number(file?.lastModified);
+  if(!(ts>0)) return getSessionDate();
+  const ist=new Date(ts+5.5*3600000);
+  return `${ist.getUTCFullYear()}-${String(ist.getUTCMonth()+1).padStart(2,'0')}-${String(ist.getUTCDate()).padStart(2,'0')}`;
 }
 async function refreshRankingsAfterSurvRuleChange(){
   if(!Object.keys(SURV_ALL_HITS||{}).length&&FS.hasFolder()){
@@ -3807,15 +3812,8 @@ function removeFilterOverride(sym){
 // Tradebook TGT is the base; missed opportunity nudge is added when available.
 // Fallback when no tradebook = median of per-stock tgtPct in current FILT (ATR-derived).
 function getMissedOppNudge(){
-  try{
-    const store=FS.get(MISSED_OPP_STORE);
-    if(!store) return 0;
-    const entries=Object.values(store).filter(e=>e&&typeof e==='object'&&isFinite(e.avg)&&e.count>0);
-    if(!entries.length) return 0;
-    const totalCount=entries.reduce((s,e)=>s+e.count,0);
-    const weightedSum=entries.reduce((s,e)=>s+e.avg*e.count,0);
-    return +((weightedSum/totalCount)*0.25).toFixed(2);
-  }catch(e){return 0;}
+  try{return getSameDayExitOpportunitySummary().nudge||0;}
+  catch(e){return 0;}
 }
 
 function getEffectiveTgtPct(){
@@ -4825,6 +4823,7 @@ async function hydrateSessionCSVsFromWorkspace(){
     if(tb){
       const selected=keepFullerTradebookHistory(tb,tbFile.path,tbFile.lastModified);
       TRADEBOOK_STATS=selected.stats;
+      reconcileSameDayExitOpportunities();
       if(selected.persist) updates[TRADEBOOK_STORE]=selected.persist;
       if(selected.meta) FS.set(TRADEBOOK_META_STORE,selected.meta);
     }
@@ -4832,8 +4831,8 @@ async function hydrateSessionCSVsFromWorkspace(){
   syncExecutedRecommendedEntries();
   const updateCount=Object.keys(updates).length;
   // Source-derived CSV state remains in memory for this session; brain stores learning only.
-  // Recompute missed opportunities with fresh Orders + ALL (if available) and persist to brain
-  try{computeMissedOpp();}catch(e){}
+  // Join same-day exits with the day's ALL NSE high after all source files are hydrated.
+  try{recordSameDayExitOpportunity(window._lastStockOutcomeScan);}catch(e){}
   return updateCount;
 }
 
@@ -5480,7 +5479,7 @@ async function processScannerUpload(scannerFile, mode){
       const recommendations=eligibleCandidates
         .map((s,i)=>({symbol:s.symbol,entryPrice:s.price,score:s.rocketScore,rank:i+1,features:s._features||{}}));
       window._lastStockOutcomeScan={
-        date:getSessionDate(),threshold,
+        date:getSessionDate(),sourceDate:inputFileSessionDate(scannerFile),threshold,
         rows:window._lastObservedDailyMoves||[],
         recommendations
       };
@@ -5601,6 +5600,7 @@ async function processFiles(files){
     if(parsedTradebook){
       const selected=keepFullerTradebookHistory(parsedTradebook,tbFile.name,tbFile.lastModified);
       TRADEBOOK_STATS=selected.stats;
+      reconcileSameDayExitOpportunities();
       if(selected.persist) try{FS.set(TRADEBOOK_STORE,selected.persist);}catch(e){}
       if(selected.meta) try{FS.set(TRADEBOOK_META_STORE,selected.meta);}catch(e){}
     }
@@ -5613,15 +5613,14 @@ async function processFiles(files){
     const rt=captureScannerRuntime();
     try{
       MARKET_MODE='stock';
-      computeMissedOpp();
       assessExecutedEntryOutcomeScan(window._lastStockOutcomeScan);
-      recordPostSaleRocketScan(window._lastStockOutcomeScan);
+      recordSameDayExitOpportunity(window._lastStockOutcomeScan);
       if(TRADEBOOK_STATS?.tripsData?.length){
         refreshExitPolicyFromFeedback(TRADEBOOK_STATS);
         FS.set(TRADEBOOK_STORE,TRADEBOOK_STATS);
       }
     }finally{restoreScannerRuntime(rt);}
-  } else computeMissedOpp();
+  }
   setMsg('Rendering rankings...');
   renderTradingDashboardNow();
   setLoading(false);
