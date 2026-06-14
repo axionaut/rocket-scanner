@@ -1,5 +1,5 @@
-const BUILD_TS='2026-06-12 17.44 IST'; // replaced at commit time with IST datetime
-const APP_VERSION=409; // Shared deployed version; increment once per released code change.
+const BUILD_TS='2026-06-14 20:07 IST'; // replaced at commit time with IST datetime
+const APP_VERSION=410; // Shared deployed version; increment once per released code change.
 const GOOGLE_DRIVE_CLIENT_ID='1015012642264-oi2nelv3v90k3d39r994a6nelgjs2a56.apps.googleusercontent.com'; // Public OAuth Web Client ID.
 const HARD_FILTER_SCHEMA='structural_tradeability_v2';
 const ROCKET_TARGET_FRACTION=0.005; // Daily top 0.5% of the full parsed NSE universe.
@@ -17,11 +17,30 @@ function inputBaseName(name){
 function inputNameLower(name){
   return inputBaseName(name).toLowerCase();
 }
+function normaliseInputFilename(name){
+  return inputNameLower(name)
+    .replace(/^\ufeff/,'')
+    .replace(/\s*\(\d+\)(?=\.[^.]+$)/,'')
+    .replace(/[^a-z0-9]+/g,' ')
+    .trim();
+}
 function isExactCsvName(name, expected){
-  return inputNameLower(name)===String(expected||'').toLowerCase();
+  return normaliseInputFilename(name)===normaliseInputFilename(expected)&&/\.csv$/i.test(inputBaseName(name));
 }
 function isScannerCsvName(name){
   return isExactCsvName(name,'ALL NSE.csv');
+}
+function isAllNseFilename(name){
+  return isScannerCsvName(name);
+}
+function looksLikeAllNseRows(rows){
+  if(!Array.isArray(rows)||rows.length<100) return false;
+  const headers=Object.keys(rows[0]||{}).map(normaliseInputFilename);
+  return headers.length>=50&&
+    headers.includes('symbol')&&
+    headers.includes('price')&&
+    headers.some(h=>h.includes('price change')&&h.includes('1 day'))&&
+    headers.some(h=>h.includes('volume')&&h.includes('1 day'));
 }
 function isReportsZipName(name){
   return inputNameLower(name)==='reports-daily-multiple.zip';
@@ -349,13 +368,12 @@ const FS = (() => {
   }
 
   function canonicalInputName(name){
-    const n=inputNameLower(name);
-    if(n==='all nse.csv') return 'ALL NSE.csv';
-    if(n==='holdings.csv') return 'Holdings.csv';
-    if(n==='positions.csv') return 'Positions.csv';
-    if(n==='orders.csv') return 'Orders.csv';
-    if(n==='tradebook.csv') return 'TRADEBOOK.csv';
-    if(n==='nse holidays.csv') return 'NSE Holidays.csv';
+    if(isScannerCsvName(name)) return 'ALL NSE.csv';
+    if(isExactCsvName(name,'Holdings.csv')) return 'Holdings.csv';
+    if(isExactCsvName(name,'Positions.csv')) return 'Positions.csv';
+    if(isExactCsvName(name,'Orders.csv')) return 'Orders.csv';
+    if(isExactCsvName(name,'TRADEBOOK.csv')) return 'TRADEBOOK.csv';
+    if(isExactCsvName(name,'NSE Holidays.csv')) return 'NSE Holidays.csv';
     if(isReportsZipName(name)) return 'Reports-Daily-Multiple.zip';
     return null;
   }
@@ -4489,7 +4507,10 @@ async function openUploadFolderPicker(){
       await processFiles(files);
       return true;
     }catch(e){
-      if(e?.name!=='AbortError') console.warn('Directory picker failed',e);
+      if(e?.name!=='AbortError'){
+        console.error('Directory load failed',e);
+        showToast('Could not load the selected folder: '+(e?.message||e),6000,true);
+      }
       return false;
     }
   }
@@ -4779,7 +4800,10 @@ async function hydrateSessionCSVsFromWorkspace(){
   let scannerHydrated=false;
   if(scannerEntry?.file){
     try{scannerHydrated=await processScannerUpload(scannerEntry.file,'stock');}
-    catch(e){console.warn('hydrateSessionCSVsFromWorkspace: ALL NSE parse failed',e);}
+    catch(e){
+      console.error('hydrateSessionCSVsFromWorkspace: ALL NSE parse failed',e);
+      showToast('Stored ALL NSE.csv could not be loaded: '+(e?.message||e),6000,true);
+    }
   }
   const updates={};
   if(holdFile?.text){
@@ -5313,7 +5337,7 @@ function featureReliabilityMultiplier(stat){
 }
 function evaluateFeatureAccountability({features,overlap,actualRocketSymbols,sourceDate,evaluationDate,acceptObservation=true}){
   const store=getFeatureAccountabilityStore();
-  const source=normDate(sourceDate);
+  const source=normSnapshotDate(sourceDate);
   const plan=source?store.plans[source]:null;
   const canEvaluate=acceptObservation&&plan&&overlap?.length>=100&&actualRocketSymbols?.size>0;
   if(canEvaluate){
@@ -5488,7 +5512,7 @@ async function processFiles(files){
     const name=inputNameLower(f.name);
     if(isReportsZipName(f.name)){nseZip=nseZip||f;continue;}
     if(!isCsvLikeFile(f))continue;
-    if(name==='all nse.csv'){tvFile=f;continue;}
+    if(isScannerCsvName(f.name)){tvFile=f;continue;}
     if(name==='positions.csv'){posFile=f;continue;}
     if(name==='holdings.csv'){holdFile=f;continue;}
     if(name==='orders.csv'){ordFile=f;continue;}
@@ -5605,7 +5629,14 @@ async function processFiles(files){
   saveBrainInBackground('Brain saved after file processing');
 }
 
-document.getElementById('fInDir').addEventListener('change',e=>{if(e.target.files.length)processFiles(Array.from(e.target.files));});
+document.getElementById('fInDir').addEventListener('change',e=>{
+  if(!e.target.files.length) return;
+  processFiles(Array.from(e.target.files)).catch(error=>{
+    console.error('File input load failed',error);
+    setLoading(false);
+    showToast('Could not load the selected files: '+(error?.message||error),6000,true);
+  });
+});
 document.getElementById('fMaxAlloc')?.addEventListener('input',e=>{delete e.target.dataset.autoDefault;});
 
 
