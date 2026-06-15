@@ -1,5 +1,5 @@
-const BUILD_TS='2026-06-15 14:05 IST'; // replaced at commit time with IST datetime
-const APP_VERSION=415; // Shared deployed version; increment once per released code change.
+const BUILD_TS='2026-06-15 14:17 IST'; // replaced at commit time with IST datetime
+const APP_VERSION=416; // Shared deployed version; increment once per released code change.
 const GOOGLE_DRIVE_CLIENT_ID='1015012642264-oi2nelv3v90k3d39r994a6nelgjs2a56.apps.googleusercontent.com'; // Public OAuth Web Client ID.
 const HARD_FILTER_SCHEMA='structural_tradeability_v2';
 const ROCKET_TARGET_FRACTION=0.005; // Top 0.5% between consecutive valid snapshots.
@@ -82,7 +82,8 @@ let SCORE_MAP={}; // {symbol → rocketScore} for ALL parsed stocks including fi
 let PERF_PERIOD_FILTER='all'; // 'all' | '1m' | '3m' | '6m' | '1y'
 let PERF_TRADE_WINDOWS=[]; // cached trade window rows from renderPerformance — used by current-window pill
 let PERF_LATEST_SUMMARY=null; // cached latest session summary from renderPerformance — used by renderStats card
-let PERF_RENDERED=false; // Performance tab is heavy; render only on demand
+let PERF_RENDERED=false; // true after background or foreground performance calculation
+let PERF_RENDER_QUEUED=false;
 let ENGINE_DATA={};
 let REMOVED={uc:0,surv:0,liq:0,fscore:0,atr:0};
 let SUPPRESSED_HELD=0; // count of stocks hidden because already held in POSITIONS
@@ -709,6 +710,7 @@ function renderTradingDashboardNow(){
   }catch(e){}
   try{if(ALL.length&&ENGINE_DATA&&ENGINE_DATA.features) renderMethodology();}catch(e){console.warn('Methodology render failed',e);}
   try{if(ALL.length) applyFilters();}catch(e){console.warn('Fast ranking render failed',e);}
+  schedulePerformanceRender();
 }
 
 async function ensureDriveReadyForLoad(){
@@ -3196,6 +3198,18 @@ function renderPerformance(){
   setTimeout(()=>{monthTbl.render();symTbl.render();tradeWindowTbl.render();if(timeStopTblObj)timeStopTblObj.render();},0);
 }
 
+function schedulePerformanceRender(){
+  if(PERF_RENDER_QUEUED) return;
+  PERF_RENDER_QUEUED=true;
+  const el=document.getElementById('perfContent');
+  if(el&&!PERF_RENDERED) el.innerHTML=`<div style="text-align:center;padding:60px 40px;color:var(--t2)"><div style="font-size:34px;margin-bottom:14px">📈</div><div style="font-size:15px;font-weight:700;color:var(--t1);margin-bottom:8px">Calculating performance</div><div>Rankings are ready while trade analytics finish in the background.</div></div>`;
+  idleTask(()=>{
+    PERF_RENDER_QUEUED=false;
+    renderPerformance();
+    try{if(ALL.length) renderStats();}catch(e){console.warn('Stats refresh after performance failed',e);}
+  },900);
+}
+
 function _refreshHFSection(){
   const wrap=document.getElementById('meth-hf-wrap');
   if(wrap){wrap.innerHTML=buildHardFilterMethodologyHTML(ENGINE_DATA);setTimeout(()=>{_methTbls.hf?.render();_methTbls.sc?.render();},0);}
@@ -3223,11 +3237,9 @@ function rebuildActiveSurveillanceHits(){
     }
   });
 }
-function scannerSessionTag(fileName, raw){
-  const headers=Object.keys(raw[0]||{});
-  const symbolCol=headers.find(k=>/^symbol$/i.test(k.trim()))||headers[0];
-  const priceCol=headers.find(k=>/^price(?:\s*₹)?$/i.test(k.trim()))||headers.find(k=>/^price\b/i.test(k)&&!/change/i.test(k));
-  const dataHash=(function(){let h=0;for(let i=0;i<raw.length;i++){const symbol=String(raw[i][symbolCol]||'');const price=parseFloat(String(raw[i][priceCol]||'').replace(/,/g,''))||0;for(let j=0;j<symbol.length;j++){h=((h<<5)-h)+symbol.charCodeAt(j);h|=0;}h=((h<<5)-h)+Math.round(price*1000);h|=0;}return h;})();
+function scannerSessionTag(fileName, raw, sourceText=''){
+  const source=sourceText||JSON.stringify(raw);
+  const dataHash=(function(){let h=2166136261;for(let i=0;i<source.length;i++){h^=source.charCodeAt(i);h=Math.imul(h,16777619);}return h>>>0;})();
   return fileName+'·'+raw.length+'·'+dataHash;
 }
 function inputFileSessionDate(file){
@@ -5395,7 +5407,7 @@ async function processScannerUpload(scannerFile, mode){
     setMsg('Running stock mRMR engine across '+raw.length+' stocks...');
     await new Promise(r=>setTimeout(r,60));
     window._lastRawTV=raw;
-    const sessionTag=scannerSessionTag(scannerFile.name,raw);
+    const sessionTag=scannerSessionTag(scannerFile.name,raw,text);
     const uploadSession=inputFileSessionDate(scannerFile);
     const isDuplicateSession=!!(SNAPSHOT_RUNTIME?.lastTag===sessionTag&&SNAPSHOT_RUNTIME?.latest?.sessionDate===uploadSession);
     window._lastScannerSessionTag=sessionTag;
@@ -5726,8 +5738,8 @@ async function initApp(){
   try{await hydrateSessionCSVsFromWorkspace();}catch(e){console.warn('INIT: cloud input hydration failed',e);}
   try{enrichRowsWithNSEData(ALL);}catch(e){console.warn('INIT: NSE row enrichment failed',e);}
 
-  // Step 3b: Keep Performance tab lazy. Rankings render first; performance analytics run on click.
-  try{const pe=document.getElementById('perfContent');if(pe&&!PERF_RENDERED)pe.innerHTML=`<div style="text-align:center;padding:60px 40px;color:var(--t2)"><div style="font-size:34px;margin-bottom:14px">📈</div><div style="font-size:15px;font-weight:700;color:var(--t1);margin-bottom:8px">Performance loads on demand</div><div>Click the Performance tab when you need analytics. Rankings stay fast for trading.</div></div>`;}catch(e){}
+  // Rankings render first; performance analytics are scheduled below as an idle task.
+  try{const pe=document.getElementById('perfContent');if(pe&&!PERF_RENDERED)pe.innerHTML=`<div style="text-align:center;padding:60px 40px;color:var(--t2)"><div style="font-size:34px;margin-bottom:14px">📈</div><div style="font-size:15px;font-weight:700;color:var(--t1);margin-bottom:8px">Calculating performance</div><div>Rankings load first; trade analytics continue automatically.</div></div>`;}catch(e){}
 
   // Step 3: Render stats without blocking on Performance analytics.
   try{if(ALL.length) renderStats();}catch(e){console.error('INIT step3 renderStats failed:',e);}
@@ -5752,6 +5764,7 @@ async function initApp(){
   _initInProgress=false;
   try{applyFilters();}catch(e){console.error('INIT step7 applyFilters failed:',e);}
   setLoading(false);
+  schedulePerformanceRender();
 }
 initApp();
 
