@@ -1,11 +1,12 @@
-const BUILD_TS='2026-06-14 20:39 IST'; // replaced at commit time with IST datetime
-const APP_VERSION=411; // Shared deployed version; increment once per released code change.
+const BUILD_TS='2026-06-15 09:24 IST'; // replaced at commit time with IST datetime
+const APP_VERSION=412; // Shared deployed version; increment once per released code change.
 const GOOGLE_DRIVE_CLIENT_ID='1015012642264-oi2nelv3v90k3d39r994a6nelgjs2a56.apps.googleusercontent.com'; // Public OAuth Web Client ID.
 const HARD_FILTER_SCHEMA='structural_tradeability_v2';
 const ROCKET_TARGET_FRACTION=0.005; // Daily top 0.5% of the full parsed NSE universe.
 const STOCK_RUNWAY_CEILING_PCT=19.5; // UC-style ceiling retained only for legacy helpers; entry-ceiling filtering is disabled.
 const PRICE_BAND_BLOCK_BUFFER_PCT=0.15; // Treat rounded 4.9/9.9/19.9 rows as effectively band-locked.
 const PRICE_COMPARE_EPS=0.0001; // Do not let a full tick/paisa breach pass a buy ceiling.
+const BASKET_CASH_RESERVE_RS=1; // Leave a rupee for broker-side tax/rounding differences.
 const SYSTEM_TRADE_START_DATE='2026-04-01'; // Adaptive stats use trades closed from this date onward.
 let MARKET_MODE='stock';
 function modeKey(base){return base;}
@@ -3958,6 +3959,14 @@ function computeAlloc(capital, selList){
   const maxAllocEl=document.getElementById('fMaxAlloc');
   const maxAllocV=maxAllocEl?parseFloat(maxAllocEl.value)||0:0;
   const cap = maxAllocV>0?maxAllocV:capital; // per-stock cap if set
+  const spendableCapital=Math.max(0,capital-BASKET_CASH_RESERVE_RS);
+  const buyDebit=(buyP,qty)=>qty>0?(buyP*qty)+calcZerodhaCharges(buyP,qty,false,false,false):0;
+  const affordableQty=(budget,buyP,maxNotional=Infinity)=>{
+    if(!(budget>0)||!(buyP>0)) return 0;
+    let qty=Math.min(Math.floor(budget/buyP),Math.floor(maxNotional/buyP));
+    while(qty>0&&buyDebit(buyP,qty)>budget+0.001) qty--;
+    return qty;
+  };
   // Helper: compute expected net and charges for a given buy price + qty + effective TGT
   function evalNet(s, buyP, qty){
     const effTgt=getEffectiveTgtPct();
@@ -3985,15 +3994,15 @@ function computeAlloc(capital, selList){
     const buyP=getBuyPrice(s);
     if(!buyP||buyP<=0) return;
     const weight = _effScore(s) / totalScore;
-    const allotted = Math.min(capital * weight, cap);
-    const qty = Math.floor(allotted / buyP);
+    const allotted = Math.min(spendableCapital * weight, cap);
+    const qty = affordableQty(allotted,buyP,cap);
     if(qty <= 0) return;
     const ev=evalNet(s, buyP, qty);
     if(ev.skip){
-      allocMap[s.symbol]={ alloc: qty * buyP, qty, buyPrice: buyP, _ref:s };
+      allocMap[s.symbol]={ alloc: qty * buyP, debit:buyDebit(buyP,qty), buyCharges:calcZerodhaCharges(buyP,qty,false,false,false), qty, buyPrice: buyP, _ref:s };
       return;
     }
-    allocMap[s.symbol] = { alloc: qty * buyP, qty, buyPrice: buyP, _ref:s, expectedNet:ev.expectedNet, charges:ev.charges, tgtPct:ev.tgtPct };
+    allocMap[s.symbol] = { alloc: qty * buyP, debit:buyDebit(buyP,qty), buyCharges:calcZerodhaCharges(buyP,qty,false,false,false), qty, buyPrice: buyP, _ref:s, expectedNet:ev.expectedNet, charges:ev.charges, tgtPct:ev.tgtPct };
   });
 
   // ── Pass 2: Residual redistribution ──
@@ -4002,8 +4011,8 @@ function computeAlloc(capital, selList){
   // first, subject to the Max ₹/Stock cap. Previously unallocated stocks are
   // reconsidered when residual capital is available.
   let deployed=0;
-  for(const sym in allocMap) deployed += allocMap[sym].alloc;
-  let residual = capital - deployed;
+  for(const sym in allocMap) deployed += allocMap[sym].debit;
+  let residual = spendableCapital - deployed;
 
   // Keep topping up until we can't add another share to any stock
   let progress = true;
@@ -4014,14 +4023,14 @@ function computeAlloc(capital, selList){
       // If stock not yet allocated, try adding 1 share for first time
       if(!am){
         const buyP=getBuyPrice(s);
-        if(!buyP||buyP<=0||buyP>residual) continue;
+        if(!buyP||buyP<=0||buyDebit(buyP,1)>residual) continue;
         const qty=1;
         const ev=evalNet(s, buyP, qty);
         if(ev.skip){
-          allocMap[s.symbol]={ alloc: qty * buyP, qty, buyPrice: buyP, _ref:s };
+          allocMap[s.symbol]={ alloc: qty * buyP, debit:buyDebit(buyP,qty), buyCharges:calcZerodhaCharges(buyP,qty,false,false,false), qty, buyPrice: buyP, _ref:s };
           am=allocMap[s.symbol];
         } else {
-          allocMap[s.symbol]={ alloc: qty * buyP, qty, buyPrice: buyP, _ref:s, expectedNet:ev.expectedNet, charges:ev.charges, tgtPct:ev.tgtPct };
+          allocMap[s.symbol]={ alloc: qty * buyP, debit:buyDebit(buyP,qty), buyCharges:calcZerodhaCharges(buyP,qty,false,false,false), qty, buyPrice: buyP, _ref:s, expectedNet:ev.expectedNet, charges:ev.charges, tgtPct:ev.tgtPct };
           am=allocMap[s.symbol];
         }
       }
@@ -4029,15 +4038,19 @@ function computeAlloc(capital, selList){
       const buyP = am.buyPrice;
       if(!buyP || buyP <= 0) continue;
       // Can we add one more share?
-      if(buyP > residual) continue;
+      const nextDebit=buyDebit(buyP,am.qty+1);
+      const incrementalDebit=nextDebit-am.debit;
+      if(incrementalDebit > residual+0.001) continue;
       // Would adding a share exceed the per-stock cap?
       const newAlloc = am.alloc + buyP;
       if(newAlloc > cap + 0.5) continue; // +0.5 = float tolerance
       // Add the share
       am.qty += 1;
       am.alloc = newAlloc;
-      residual -= buyP;
-      deployed += buyP;
+      am.debit=nextDebit;
+      am.buyCharges=calcZerodhaCharges(buyP,am.qty,false,false,false);
+      residual -= incrementalDebit;
+      deployed += incrementalDebit;
       progress = true;
       // Re-evaluate expected net and charges for this stock with new qty
       const ev = evalNet(s, buyP, am.qty);
@@ -4046,7 +4059,6 @@ function computeAlloc(capital, selList){
         am.charges = ev.charges;
         am.tgtPct = ev.tgtPct;
       }
-      if(residual < buyP) break; // early exit — can't afford even the cheapest add
     }
   }
 
@@ -4399,9 +4411,9 @@ function renderStatusBar(){
   if(capital>0&&selCount>0){
     const selList2=FILT.filter(s=>SELECTED.has(s.symbol));
     const am2=computeAlloc(capital,selList2);
-    const actualDeployed=Object.values(am2).reduce((s,a)=>s+a.alloc,0);
+    const actualDeployed=Object.values(am2).reduce((s,a)=>s+(a.debit??a.alloc),0);
     const stockCount=Object.keys(am2).length;
-    html+=` <span style="color:var(--amber);font-size:11px;font-family:'DM Mono',monospace;font-weight:700;margin-left:8px">· ${stockCount} ${allocatedLabel} · ${fmtINR(actualDeployed)} of ${fmtINR(capital)} deployed</span>`;
+    html+=` <span style="color:var(--amber);font-size:11px;font-family:'DM Mono',monospace;font-weight:700;margin-left:8px" title="All-in estimated buy debit: limit-price notional plus CNC buy-side charges.">· ${stockCount} ${allocatedLabel} · ${fmtINR(actualDeployed)} of ${fmtINR(capital)} all-in</span>`;
     // Expected net at learnt TGT% — feedback, not input
     const tgtPct=getEffectiveTgtPct();
     if(tgtPct>0){
@@ -5096,10 +5108,11 @@ function exportBasket(){
     if(am?.rejected){rejectedCount++;return;} // skip cost-floor rejections
     const qty = capital > 0 ? (am?.qty || 0) : 1;
     if(qty===0) return;
-    const buyPrice=getBuyPrice(s);
+    const buyPrice=am?.buyPrice||getBuyPrice(s);
     if(qty>=2){
       const baseQty=Math.ceil(qty/2);
       const runnerQty=qty-baseQty;
+      if(baseQty+runnerQty!==qty||baseQty<=0||runnerQty<=0) throw new Error(`Invalid basket split for ${s.symbol}: ${qty} -> ${baseQty}+${runnerQty}`);
       pushBuyOrder(s,baseQty,buyPrice,adaptiveTGT,'TGT1');
       pushBuyOrder(s,runnerQty,buyPrice,runnerTGT,'TGT2');
       splitCount++;
@@ -5109,6 +5122,17 @@ function exportBasket(){
   });
 
   if(!orders.length){showToast('Capital too low to buy even 1 share of any selected stock.',4000,true);return;}
+  if(capital>0){
+    const exportedDebit=orders.reduce((sum,order)=>{
+      const qty=order.params.quantity,price=order.params.price;
+      return sum+(qty*price)+calcZerodhaCharges(price,qty,false,false,false);
+    },0);
+    if(exportedDebit>capital+0.001){
+      console.error('Basket exceeds capital',{capital,exportedDebit,orders});
+      showToast(`Basket needs ${fmtINR(exportedDebit)} including estimated buy charges, above capital ${fmtINR(capital)}. Nothing exported.`,6000,true);
+      return;
+    }
+  }
   downloadBasket(orders,'Zerodha_Basket_Buy');
   const rejNote=rejectedCount>0?` · ${rejectedCount} skipped (below net floor)`:'';
   const splitNote=splitCount>0?` Â· split ${splitCount} stocks @ ${adaptiveTGT.toFixed(2)}% / ${runnerTGT.toFixed(2)}%`:'';
