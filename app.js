@@ -1,8 +1,11 @@
-const BUILD_TS='2026-06-15 10:17 IST'; // replaced at commit time with IST datetime
-const APP_VERSION=414; // Shared deployed version; increment once per released code change.
+const BUILD_TS='2026-06-15 14:05 IST'; // replaced at commit time with IST datetime
+const APP_VERSION=415; // Shared deployed version; increment once per released code change.
 const GOOGLE_DRIVE_CLIENT_ID='1015012642264-oi2nelv3v90k3d39r994a6nelgjs2a56.apps.googleusercontent.com'; // Public OAuth Web Client ID.
 const HARD_FILTER_SCHEMA='structural_tradeability_v2';
-const ROCKET_TARGET_FRACTION=0.005; // Daily top 0.5% of the full parsed NSE universe.
+const ROCKET_TARGET_FRACTION=0.005; // Top 0.5% between consecutive valid snapshots.
+const SNAPSHOT_MIN_GAP_MINUTES=1;
+const NSE_OPEN_MINUTES=9*60+15;
+const NSE_CLOSE_MINUTES=15*60+30;
 const STOCK_RUNWAY_CEILING_PCT=19.5; // UC-style ceiling retained only for legacy helpers; entry-ceiling filtering is disabled.
 const PRICE_BAND_BLOCK_BUFFER_PCT=0.15; // Treat rounded 4.9/9.9/19.9 rows as effectively band-locked.
 const PRICE_COMPARE_EPS=0.0001; // Do not let a full tick/paisa breach pass a buy ceiling.
@@ -64,7 +67,7 @@ function isLooseNseSupportCsvName(name){
 
 function updateModeUI(){
   const brand=document.querySelector('.brand-tag');
-  if(brand) brand.textContent='Continuous Learning mRMR';
+  if(brand) brand.textContent='Continuous Snapshot mRMR';
   document.querySelectorAll('.currency-lbl').forEach(el=>{el.textContent='₹';});
   const minTurn=document.getElementById('fMinTurnover');
   if(minTurn){
@@ -83,21 +86,17 @@ let PERF_RENDERED=false; // Performance tab is heavy; render only on demand
 let ENGINE_DATA={};
 let REMOVED={uc:0,surv:0,liq:0,fscore:0,atr:0};
 let SUPPRESSED_HELD=0; // count of stocks hidden because already held in POSITIONS
-let SUPPRESSED_YDAY_ROCKET=0; // count of stocks hidden because they were rockets yesterday
+let SUPPRESSED_RECENT_ROCKET=0; // count hidden because they led the latest completed snapshot pair
 let SELECTED=new Set(); // symbols selected for basket — recomputed from FILT each applyFilters
 let SHOW_FILTERED_CANDIDATES=false;
 let KEEP_FILTER_OVERRIDES=new Set();
-let PREV_SNAP={}; // symbol→{featureKey:value,...} full feature vector from last upload
-let PREV_SNAP_META={}; // metadata for PREV_SNAP, including source date and market breadth
-const SNAP_KEY='rs_snapshot';
-const SNAP_PREV_KEY='rs_snapshot_prev';
 const SCANNER_STORE='rs_filters';
 const SHARED_FILTER_STORE='rs_filters_shared';
 const ALL_STORE='rs_data';
 const CORR_STORE='rs_corr';
-const CORR_SCHEMA='relative_top_half_percent_full_universe_daily_replace_v2';
-const FEATURE_ACCOUNTABILITY_STORE='rs_feature_accountability_v1';
-const FEATURE_ACCOUNTABILITY_SCHEMA='intraday_high_daily_replace_v2';
+const CORR_SCHEMA='continuous_snapshot_top_half_percent_v1';
+const SNAPSHOT_STATE_STORE='rs_snapshot_mrmr_v1';
+const SNAPSHOT_STATE_SCHEMA='continuous_snapshot_pair_v1';
 const METH_STORE='rs_meth';
 const HOLD_STORE='rs_holdings';
 const ORDERS_STORE='rs_orders';
@@ -131,6 +130,10 @@ const DEPRECATED_BRAIN_KEYS=new Set([
   'rs_regime_cal',
   'rs_rocket_lab_v1',
   'rs_intraday_ledger_v1',
+  'rs_intraday_mrmr_v1',
+  'rs_snapshot',
+  'rs_snapshot_prev',
+  'rs_feature_accountability_v1',
   'rs_missed_opp_v2',
   'rs_post_sale_rockets_v1',
   'rs_avg_day_chg',
@@ -765,7 +768,6 @@ async function connectCloudStorage(opts={}){
 // Deletes old key FIRST to free space, then writes new. Safe to run repeatedly.
 (function migrateKeys(){
   const OLD_TO_NEW={
-    'rscanner_v4_snapshot':SNAP_KEY,'rscanner_v5_snapshot':SNAP_KEY,
     'rscanner_v4_filters':SCANNER_STORE,'rscanner_v5_filters':SCANNER_STORE,
     'rscanner_v4_data':ALL_STORE,'rscanner_v5_data':ALL_STORE,
     'rscanner_v4_corr':CORR_STORE,'rscanner_v5_corr':CORR_STORE,
@@ -1169,7 +1171,7 @@ function persistMethodologySnapshot(){
       useAccCorr:ENGINE_DATA.useAccCorr,
       sectorCol:ENGINE_DATA.sectorCol,
       industryCol:ENGINE_DATA.industryCol,
-      yesterdayRockets:ENGINE_DATA.yesterdayRockets||[],
+      recentRockets:ENGINE_DATA.recentRockets||[],
       totalParsed:ENGINE_DATA.totalParsed||0,
       hardFilterSchema:ENGINE_DATA.hardFilterSchema||HARD_FILTER_SCHEMA,
       removed:{...(ENGINE_DATA.removed||{})},
@@ -1177,7 +1179,8 @@ function persistMethodologySnapshot(){
       survRuleRows:syncSurvRuleRows(ENGINE_DATA.survRuleRows||[]),
       recommendationFeedback:ENGINE_DATA.recommendationFeedback||null,
       executedEntryFeedback:ENGINE_DATA.executedEntryFeedback||null,
-      featureAccountability:ENGINE_DATA.featureAccountability||null
+      snapshotElapsedMinutes:ENGINE_DATA.snapshotElapsedMinutes??null,
+      snapshotPairs:ENGINE_DATA.snapshotPairs||0
     };
     FS.set(modeKey(METH_STORE),methSave);
   }catch(e){
@@ -1519,31 +1522,16 @@ function getRecommendationOutcomeSummary(){
     issueDays:issues.length,horizonDays:currentHorizon
   };
 }
-function getRecommendationFeedbackCorrelations(features){
-  const issues=Object.values((FS.get(RECOMMEND_OUTCOME_STORE)||{}).issues||{});
-  const assessed=issues.flatMap(issue=>(issue.picks||[])
-    .filter(p=>p.complete&&p.observations>0&&p.features)
-    .map(p=>({p,threshold:issue.threshold})));
-  if(assessed.length<OUTCOME_FEEDBACK_MIN_SAMPLES) return null;
-  const target=assessed.map(({p,threshold})=>calcRecommendationOutcomeScore(p,threshold));
-  const rockets=assessed.filter(({p})=>p.rocketDate).length;
-  const failures=target.filter(v=>v<0).length;
-  if(Math.max(...target)===Math.min(...target)) return null;
-  const corr={};
-  features.forEach(f=>{corr[f]=pearson(target,assessed.map(({p})=>p.features[f]??null));});
-  return {samples:assessed.length,rockets,failures,avgOutcomeScore:+meanArr(target).toFixed(3),
-    alpha:getFeedbackAlpha(assessed.length,0.35,40),corr};
-}
 function getDisplayedEntryCandidates(rows){
   if(!Array.isArray(rows)||!rows.length) return [];
   const heldPos=getHeldPositionMap();
   const reDrop=parseFloat(document.getElementById('fReDrop')?.value);
   const dropPct=isFinite(reDrop)&&reDrop>=0?reDrop:1;
-  const yesterday=new Set((ENGINE_DATA?.yesterdayRockets||[]).map(r=>r.symbol));
+  const recentRockets=new Set((ENGINE_DATA?.recentRockets||[]).map(r=>r.symbol));
   return rows.map(s=>({...s,_features:s._features||{}}))
     .filter(s=>!getFilterBarReason(s))
     .filter(s=>!applyHeldDisplayState(s,heldPos,dropPct))
-    .filter(s=>!yesterday.has(s.symbol))
+    .filter(s=>!recentRockets.has(s.symbol))
     .sort((a,b)=>(b.rocketScore||0)-(a.rocketScore||0))
     .slice(0,20);
 }
@@ -1661,18 +1649,6 @@ function getExecutedEntryOutcomeSummary(){
     avgBestNet:completed.length?+meanArr(completed.map(e=>e.bestNetHighPct)).toFixed(2):null,
     horizonDays:getAdaptiveOutcomeHorizonDays()
   };
-}
-function getExecutedEntryFeedbackCorrelations(features){
-  const entries=Object.values((FS.get(ENTRY_OUTCOME_STORE)||{}).entries||{})
-    .filter(e=>e.complete&&e.observations>0&&e.features&&isFinite(e.bestVelocityPctPerDay));
-  if(entries.length<OUTCOME_FEEDBACK_MIN_SAMPLES) return null;
-  const target=entries.map(e=>e.bestVelocityPctPerDay);
-  if(Math.max(...target)===Math.min(...target)) return null;
-  const corr={};
-  features.forEach(f=>{corr[f]=pearson(target,entries.map(e=>e.features[f]??null));});
-  return {samples:entries.length,profitable:entries.filter(e=>e.bestVelocityPctPerDay>0).length,
-    alpha:getFeedbackAlpha(entries.length,0.20,25),corr,
-    avgVelocity:+meanArr(target).toFixed(3)};
 }
 function getClosedSaleCohorts(trips){
   const cohorts={};
@@ -1797,14 +1773,102 @@ function pctRank(arr){
   return res;
 }
 
+function emptySnapshotRuntime(){
+  return {schema:SNAPSHOT_STATE_SCHEMA,latest:null,completed:0,lastRockets:[],lastOutcome:null,lastTag:null};
+}
+function accumulateSnapshotCorrelation(correlation){
+  const prior=ACC_CORR?.corrSchema===CORR_SCHEMA?ACC_CORR:{corr:{},counts:{},sessions:0,learnSessions:0,corrSchema:CORR_SCHEMA};
+  const corr={...prior.corr},counts={...prior.counts};
+  Object.entries(correlation||{}).forEach(([feature,value])=>{
+    if(value==null||!isFinite(value)) return;
+    const n=counts[feature]||0;
+    corr[feature]=n?corr[feature]+(value-corr[feature])/(n+1):value;
+    counts[feature]=n+1;
+  });
+  const sessions=(prior.learnSessions??prior.sessions??0)+1;
+  ACC_CORR={...prior,corr,counts,sessions,learnSessions:sessions,corrSchema:CORR_SCHEMA,lastUpdated:new Date().toISOString()};
+}
+async function advanceSnapshotLearning({rows,features,priceKey,sessionTag,advance=true,snapshotTimestamp=Date.now()}){
+  if(!SNAPSHOT_RUNTIME||SNAPSHOT_RUNTIME.schema!==SNAPSHOT_STATE_SCHEMA) SNAPSHOT_RUNTIME=emptySnapshotRuntime();
+  if(ACC_CORR?.corrSchema!==CORR_SCHEMA) ACC_CORR={corr:{},counts:{},sessions:0,learnSessions:0,corrSchema:CORR_SCHEMA};
+  const runtime=SNAPSHOT_RUNTIME;
+  const targetCorrToday=Object.fromEntries(features.map(f=>[f,null]));
+  let completedNow=0;
+  let note='Waiting for the first valid snapshot pair';
+  const stamp=snapshotStamp(snapshotTimestamp);
+  const duplicate=!!sessionTag&&runtime.lastTag===sessionTag&&runtime.latest?.sessionDate===stamp.sessionDate;
+  const cleanRows=rows.filter(row=>row.symbol&&priceKey&&row[priceKey]>0);
+  const symbols=cleanRows.map(row=>row.symbol);
+  const prices=Float32Array.from(cleanRows,row=>row[priceKey]);
+
+  if(!advance){
+    note='Rankings refreshed without advancing the snapshot sequence';
+  }else if(duplicate){
+    note='Duplicate snapshot ignored; predictions and learning were not advanced';
+  }else if(!stamp.inSession){
+    note='Outside NSE hours; rankings refreshed without creating a learning interval';
+  }else{
+    const previous=runtime.latest;
+    const stale=previous&&stamp.timestamp<=previous.timestamp;
+    const validTransition=!stale&&isValidSnapshotTransition(previous,stamp);
+    if(previous&&validTransition){
+      const previousIndex=new Map((previous.symbols||[]).map((symbol,index)=>[symbol,index]));
+      const currentIndex=new Map(symbols.map((symbol,index)=>[symbol,index]));
+      const ranked=previous.symbols.map((symbol,index)=>{
+        const ci=currentIndex.get(symbol),priorPrice=previous.prices[index],currentPrice=ci==null?null:prices[ci];
+        return {symbol,value:priorPrice>0&&currentPrice>0?((currentPrice/priorPrice)-1)*100:null};
+      }).filter(item=>item.value!=null&&isFinite(item.value)).sort((a,b)=>b.value-a.value);
+      const rocketCount=ranked.length?Math.max(1,Math.ceil(ranked.length*ROCKET_TARGET_FRACTION)):0;
+      const rockets=ranked.slice(0,rocketCount),rocketSet=new Set(rockets.map(item=>item.symbol));
+      const correlation={};
+      for(const feature of features){
+        const xs=[],target=[];
+        previous.symbols.forEach(symbol=>{
+          if(!previousIndex.has(symbol)||!currentIndex.has(symbol)) return;
+          const value=previous.featureRows?.[symbol]?.[feature];
+          if(value==null||!isFinite(value)) return;
+          xs.push(value);target.push(rocketSet.has(symbol)?1:0);
+        });
+        correlation[feature]=pearson(target,xs);
+      }
+      accumulateSnapshotCorrelation(correlation);
+      Object.assign(targetCorrToday,correlation);
+      runtime.completed=(runtime.completed||0)+1;
+      runtime.lastRockets=rockets.map(item=>({symbol:item.symbol,move:+item.value.toFixed(2)}));
+      const elapsedMinutes=Math.round((stamp.timestamp-previous.timestamp)/60000);
+      runtime.lastOutcome={sourceTimestamp:previous.timestamp,completedAt:stamp.timestamp,elapsedMinutes,
+        rocketCount,cutoff:rockets.length?rockets[rockets.length-1].value:null,matched:ranked.length};
+      completedNow=1;
+      note=`Learned from ${ranked.length} stocks over the latest ${elapsedMinutes}-minute snapshot pair`;
+    }else if(stale){
+      note='Older or same-time snapshot ignored; the current baseline was preserved';
+    }else if(previous){
+      note=previous.sessionDate!==stamp.sessionDate
+        ?'New NSE session baseline; overnight gap excluded from snapshot learning'
+        :'Snapshot arrived too soon; baseline refreshed without counting a learning pair';
+    }
+
+    if(!stale){
+      const featureRows=Object.fromEntries(cleanRows.map(row=>[row.symbol,Object.fromEntries(features.map(f=>[f,row[f]??null]))]));
+      runtime.latest={...stamp,symbols:[...symbols],prices,featureRows,featureCols:[...features],features:null};
+      runtime.lastTag=sessionTag||null;
+      window._snapshotRuntimeDirty=true;
+    }
+  }
+
+  const historical=ACC_CORR?.corr||{};
+  const targetCorr={};
+  features.forEach(feature=>{targetCorr[feature]=historical[feature]??0;});
+  if(ACC_CORR){ACC_CORR.lastDate=stamp.sessionDate;ACC_CORR.laggedNote=note;FS.set(modeKey(CORR_STORE),ACC_CORR);}
+  return {targetCorr,targetCorrToday,completedNow,note,runtime,
+    rocketCount:runtime.lastOutcome?.rocketCount||0,rocketThreshold:runtime.lastOutcome?.cutoff??null,
+    recentRockets:runtime.lastRockets||[],freshSignalCount:Object.values(targetCorrToday).filter(v=>v!=null&&isFinite(v)&&Math.abs(v)>0.0001).length};
+}
+
 // ── Engine ──
-function runEngine(raw, sessionTag){
+async function runEngine(raw, sessionTag, options={}){
   if(!raw.length) return;
-  // isNewDay: first upload of each trading day increments session count and EMA-blends.
-  // Same-day re-uploads recompute correlations but don't increment session count.
-  // No market-hours guard — lagged learning uses yesterday's snapshot regardless of upload time.
-  const _today=getSessionDate();
-  const _isMarket=true;
+  const advanceSnapshot=options.advanceSnapshot!==false;
 
   // ── Auto-detect columns from CSV headers ──
   const allHeaders = Object.keys(raw[0]);
@@ -1979,21 +2043,14 @@ function runEngine(raw, sessionTag){
   }
 
   const learningUniverse=parsed.filter(d=>d.symbol&&(!K.price||d[K.price]!==0));
-  const priorPeakSnap=window._currentDayPeakSnap||{};
-  const peakLearningUniverse=learningUniverse.map(d=>{
-    const prior=priorPeakSnap[d.symbol];
-    if(!prior) return d;
-    const currentMove=getIntradayRocketMove(d,K.price,K.price_change,K.high_1d);
-    const priorMove=getIntradayRocketMove(prior,K.price,K.price_change,K.high_1d);
-    return priorMove!=null&&(currentMove==null||priorMove>currentMove)
-      ? {...d,...prior,symbol:d.symbol,name:d.name,_sector:d._sector,_industry:d._industry}
-      : d;
-  });
-
-  // ── Relative rocket target: strongest 0.5% of the full valid parsed NSE universe ──
-  const rocketSelection=selectRelativeRockets(peakLearningUniverse,d=>getIntradayRocketMove(d,K.price,K.price_change,K.high_1d));
-  const ROCKET_THRESHOLD=rocketSelection.cutoff;
-  const rocketObservationRelevance=rocketSelection.relevance??-Infinity;
+  const FEATS_UNIQUE=[...new Set(FEATS)];
+  FEATS.length=0;FEATS.push(...FEATS_UNIQUE);
+  const snapshotLearning=await advanceSnapshotLearning({rows:learningUniverse,features:FEATS,priceKey:K.price,
+    sessionTag,advance:advanceSnapshot,snapshotTimestamp:options.snapshotTimestamp||Date.now()});
+  const recentRocketSet=new Set(snapshotLearning.recentRockets.map(row=>row.symbol));
+  const rocketSelection={symbols:recentRocketSet};
+  const ROCKET_THRESHOLD=snapshotLearning.rocketThreshold;
+  const rocketObservationRelevance=ROCKET_THRESHOLD??-Infinity;
 
   // ── Recommendation filters ──
   // These rows remain in learningUniverse and snapshots; only live eligibility is filtered.
@@ -2043,193 +2100,27 @@ function runEngine(raw, sessionTag){
     d._filterBucket='';
     return true;
   });
-  // Expose for snapshot saving after engine run
+  // Expose current full-universe values for outcome and diagnostics only.
   window._lastEngineFeats = FEATS;
   window._lastParsedFiltered = filtered;
-  window._lastParsedForSnapshot = peakLearningUniverse;
+  window._lastParsedForSnapshot = learningUniverse;
 
-  // Deduplicate FEATS (in case of re-runs in same session)
-  const FEATS_UNIQUE=[...new Set(FEATS)];
-  FEATS.length=0; FEATS.push(...FEATS_UNIQUE);
-
-  // Uploads refresh rankings immediately, but accumulated learning is one replaceable
-  // observation per trading date. A later upload replaces the earlier contribution.
-  if(ACC_CORR?.corrSchema!==CORR_SCHEMA) ACC_CORR=null;
-  const learningDate=getSessionDate();
-  const changedUpload=!sessionTag||!ACC_CORR||ACC_CORR.lastTag!==sessionTag;
-  const canUpdateLearning=changedUpload&&isMarketHours();
-
-  // ── Today's rockets ──
-  const topSetToday=new Set();
-  peakLearningUniverse.forEach((d,i)=>{
-    if(rocketSelection.symbols.has(d.symbol)) topSetToday.add(i);
-  });
-
-
-  // ── Yesterday's relative leaders — display suppression only ──
-  const prevSnap=PREV_SNAP||{};
-  const pcKey=K.price_change;
-  const yesterdayRockets=[];
-  const learningSymMap={}; peakLearningUniverse.forEach((d,i)=>{learningSymMap[d.symbol]=i;});
-
-  if(pcKey){
-    const prevRows=Object.entries(prevSnap).map(([symbol,features])=>({symbol,features}));
-    const prevRocketSelection=selectRelativeRockets(prevRows,row=>getIntradayRocketMove(row.features,K.price,pcKey,K.high_1d));
-    prevRocketSelection.rows.forEach(({symbol:sym,features:feats})=>{
-      const yesterdayChg=feats[pcKey];
-      const idx=learningSymMap[sym];
-      const todayData=idx!=null?peakLearningUniverse[idx]:null;
-      const todayChg=todayData&&pcKey?todayData[pcKey]:null;
-      yesterdayRockets.push({symbol:sym,yesterdayChg:+yesterdayChg.toFixed(2),todayChg:todayChg!=null?+todayChg.toFixed(2):null});
-    });
-  }
-  yesterdayRockets.sort((a,b)=>b.yesterdayChg-a.yesterdayChg);
-
-  // The learning target is only today's fresh relative rockets. Yesterday's rockets are
-  // tracked for display suppression but do not dilute the next-rocket objective.
-  const qualitySet=new Set(topSetToday);
-  const topN=topSetToday.size;
-  const qualityN=qualitySet.size;
-
-  // ── Lagged correlation: yesterday's features → quality target (binary 0/1) ──
-  const overlap=peakLearningUniverse.filter(d=>prevSnap[d.symbol]&&Object.keys(prevSnap[d.symbol]).length>0);
-  const useLagged=overlap.length>=100;
-
-  const targetCorrToday={};
-  let laggedNote='';
-
-  if(qualityN===0){
-    laggedNote='No relative leaders today — using historical only';
-    for(const f of FEATS) targetCorrToday[f]=null;
-  } else if(useLagged){
-    const overlapIndices=overlap.map(d=>peakLearningUniverse.indexOf(d));
-    const laggedTarget=overlapIndices.map(i=>qualitySet.has(i)?1:0);
-    laggedNote='Lagged ('+overlap.length+' matched · top '+(ROCKET_TARGET_FRACTION*100).toFixed(1)+'% · '+topN+' fresh leaders · cutoff '+(ROCKET_THRESHOLD!=null?ROCKET_THRESHOLD.toFixed(2)+'%':'n/a')+')';
-    for(const f of FEATS){
-      const prevVals=overlap.map(d=>{
-        const v=prevSnap[d.symbol][f];
-        return(v===null||v===undefined||isNaN(Number(v)))?null:Number(v);
-      });
-      targetCorrToday[f]=pearson(laggedTarget,prevVals);
-    }
-  } else {
-    const priorLearnedSessions=ACC_CORR?.learnSessions??ACC_CORR?.sessions??0;
-    if(priorLearnedSessions>=2){
-      laggedNote=overlap.length>0
-        ?'Low lagged overlap ('+overlap.length+' matched, need 100) — using historical correlations'
-        :'No prior overlap — using historical correlations';
-      for(const f of FEATS) targetCorrToday[f]=null;
-    } else {
-      // Cold-start only: same-day fallback is useful before the brain has history.
-      const target=peakLearningUniverse.map((_,i)=>qualitySet.has(i)?1:0);
-      laggedNote=overlap.length>0
-        ?'Cold-start same-day fallback (only '+overlap.length+' matched, need 100+)'
-        :'Session 1 — lagged learning starts next upload';
-      for(const f of FEATS){
-        targetCorrToday[f]=pearson(target,peakLearningUniverse.map(d=>d[f]));
-      }
-    }
-  }
-
-  // ── Regime-agnostic daily running mean ──
-  const hasTargetObservation=qualityN>0;
-  const priorDailyRelevance=ACC_CORR?.lastContributionDate===learningDate?(ACC_CORR.lastContributionRelevance??-Infinity):-Infinity;
-  const strongerDailyObservation=rocketObservationRelevance>=priorDailyRelevance;
-  const includeToday=canUpdateLearning&&hasTargetObservation&&strongerDailyObservation;
-  const priorLearnedN=ACC_CORR?(ACC_CORR.learnSessions??ACC_CORR.sessions??0):0;
-  const replacingToday=includeToday&&ACC_CORR?.lastContributionDate===learningDate&&ACC_CORR?.lastContribution;
-  const addingToday=includeToday&&!replacingToday;
-  const newCombinedLearnedN=priorLearnedN+(addingToday?1:0);
-
-  const combinedCorr={};
-  const combinedCounts={};
-  const dailyContribution={};
-  const targetCorr={};
-  let freshSignalCount=0;
-  for(const f of FEATS){
-    const today=isNaN(targetCorrToday[f])?null:targetCorrToday[f];
-    if(today!=null&&isFinite(today)&&Math.abs(today)>0.0001) freshSignalCount++;
-    const prior=ACC_CORR?.corr?.[f]??null;
-    let count=ACC_CORR?.counts?.[f]??(prior!=null?priorLearnedN:0);
-    const old=replacingToday?(ACC_CORR.lastContribution?.[f]??null):null;
-    let next=prior;
-    if(includeToday){
-      if(replacingToday){
-        if(old!=null&&today!=null&&count>0) next=prior+(today-old)/count;
-        else if(old==null&&today!=null){next=count>0?prior+(today-prior)/(count+1):today;count++;}
-        else if(old!=null&&today==null){next=count>1?((prior*count)-old)/(count-1):null;count=Math.max(0,count-1);}
-      }else if(today!=null){
-        next=count>0?prior+(today-prior)/(count+1):today;
-        count++;
-      }
-    }
-    combinedCorr[f]=next;
-    combinedCounts[f]=count;
-    dailyContribution[f]=today;
-  }
-  const useFreshCorr=freshSignalCount>0&&(strongerDailyObservation||ACC_CORR?.lastContributionDate!==learningDate);
-  const scoringSource=useFreshCorr?'fresh_lagged':'combined_history';
-  for(const f of FEATS){
-    const today=isNaN(targetCorrToday[f])?null:targetCorrToday[f];
-    const hist=combinedCorr[f];
-    targetCorr[f]=useFreshCorr?(today!=null?today:0):(hist!=null?hist:0);
-  }
-
-  // Save the single combined accumulator used by all market conditions.
-  const newAcc={corr:combinedCorr,counts:combinedCounts,sessions:(ACC_CORR?ACC_CORR.sessions||0:0)+(addingToday?1:0),
-    learnSessions:newCombinedLearnedN,corrSchema:CORR_SCHEMA,
-    lastUpdated:new Date().toISOString(),laggedNote,
-    lastTag:sessionTag||null,lastDate:learningDate,marketBreadth,
-    lastContributionDate:includeToday?learningDate:(ACC_CORR?.lastContributionDate||null),
-    lastContribution:includeToday?dailyContribution:(ACC_CORR?.lastContribution||null),
-    lastContributionRelevance:includeToday?rocketObservationRelevance:(ACC_CORR?.lastContributionRelevance??null)};
-  ACC_CORR=newAcc;
-  FS.set(modeKey(CORR_STORE), ACC_CORR);
-
-  // Multi-session recommendation and executed-entry outcomes refine the core lagged
-  // rocket signal. Their influence grows gradually with sample size and remains capped.
-  let recommendationFeedback=null, executedEntryFeedback=null;
-  {
-    const outcomeScan={date:getSessionDate(),threshold:ROCKET_THRESHOLD,rows:window._lastObservedDailyMoves||[],recommendations:[]};
-    recordRecommendationOutcomeScan(outcomeScan);
-    assessExecutedEntryOutcomeScan(outcomeScan);
-    recommendationFeedback=getRecommendationFeedbackCorrelations(FEATS);
-    executedEntryFeedback=getExecutedEntryFeedbackCorrelations(FEATS);
-    let recAlpha=recommendationFeedback?.alpha||0;
-    let entryAlpha=executedEntryFeedback?.alpha||0;
-    const totalAlpha=recAlpha+entryAlpha;
-    if(totalAlpha>0.45){
-      const scale=0.45/totalAlpha;
-      recAlpha*=scale;entryAlpha*=scale;
-    }
-    if(recommendationFeedback) recommendationFeedback.alpha=+recAlpha.toFixed(3);
-    if(executedEntryFeedback) executedEntryFeedback.alpha=+entryAlpha.toFixed(3);
-    for(const f of FEATS){
-      const base=targetCorr[f]||0;
-      const recCorr=recommendationFeedback?.corr?.[f];
-      const entryCorr=executedEntryFeedback?.corr?.[f];
-      const activeRec=Number.isFinite(recCorr)?recAlpha:0;
-      const activeEntry=Number.isFinite(entryCorr)?entryAlpha:0;
-      const baseAlpha=Math.max(0,1-activeRec-activeEntry);
-      targetCorr[f]=(base*baseAlpha)+(Number.isFinite(recCorr)?recCorr*activeRec:0)+(Number.isFinite(entryCorr)?entryCorr*activeEntry:0);
-    }
-  }
+  const targetCorr=snapshotLearning.targetCorr;
+  const targetCorrToday=snapshotLearning.targetCorrToday;
+  const freshSignalCount=snapshotLearning.freshSignalCount;
+  const useFreshCorr=snapshotLearning.completedNow>0;
+  const scoringSource=useFreshCorr?'accumulated_with_latest_pair':'accumulated_snapshot_history';
+  const laggedNote=snapshotLearning.note;
+  const topN=snapshotLearning.rocketCount;
+  const recentRockets=snapshotLearning.recentRockets.map(row=>({symbol:row.symbol,move:row.move}));
+  const recOutcomeSummary=getRecommendationOutcomeSummary();
+  const entryOutcomeSummary=getExecutedEntryOutcomeSummary();
+  const recommendationFeedback={samples:recOutcomeSummary.evaluated,rockets:recOutcomeSummary.rockets,failures:recOutcomeSummary.failures};
+  const executedEntryFeedback={samples:entryOutcomeSummary.completed,profitable:entryOutcomeSummary.positive};
 
   // Keep price_change reference for stats display
   const withPC=filtered.map((d,i)=>({i,pc:K.price_change?d[K.price_change]:null})).filter(x=>x.pc!==null);
   withPC.sort((a,b)=>b.pc-a.pc);
-
-  // Audit the feature directions that were active yesterday against today's actual fresh rockets.
-  // This is feature-level accountability inside mRMR, not a parallel prediction model.
-  const actualRocketSymbols=new Set([...topSetToday].map(i=>peakLearningUniverse[i]?.symbol).filter(Boolean));
-  const featureAccountability=evaluateFeatureAccountability({
-    features:FEATS,
-    overlap,
-    actualRocketSymbols,
-    sourceDate:PREV_SNAP_META?.savedDate,
-    evaluationDate:getSessionDate(),
-    acceptObservation:includeToday,
-  });
 
   const interCorr={};
   const redundancySampleMax=600;
@@ -2251,13 +2142,11 @@ function runEngine(raw, sessionTag){
       .slice(0,10);
     const red=mean(strongestPeers)||0;
     const baseScore=rel/(1+red);
-    const reliability=featureAccountability.reliability[f]||1;
-    mrmr[f]={rel,red,baseScore,reliability,score:baseScore*reliability,accountability:featureAccountability.stats[f]||null};
+    mrmr[f]={rel,red,baseScore,reliability:1,score:baseScore,accountability:null};
   }
   const totalMRMR=FEATS.reduce((s,f)=>s+mrmr[f].score,0)||1; // guard /0
   const weights={};
   for(const f of FEATS)weights[f]=mrmr[f].score/totalMRMR;
-  if(includeToday) saveFeatureAccountabilityPlan(getSessionDate(),FEATS,targetCorr,weights);
 
   const pctls={};
   for(const f of FEATS)pctls[f]=pctRank(filtered.map(d=>d[f]));
@@ -2353,14 +2242,15 @@ function runEngine(raw, sessionTag){
     SCORE_MAP[d.symbol]=mw>0?Math.round(rs/mw*1000)/10:0;
   });
   parsed.forEach(d=>{d.rocketScore=SCORE_MAP[d.symbol]??null;});
-  ENGINE_DATA={targetCorr,targetCorrToday,mrmr,weights,features:FEATS,labels:LABELS,top10Feats,rocketCount:topN,rocketThreshold:ROCKET_THRESHOLD,rocketTargetFraction:ROCKET_TARGET_FRACTION,rocketObservationRelevance,accSessions:ACC_CORR?.sessions||1,laggedNote:laggedNote||'',
+  ENGINE_DATA={targetCorr,targetCorrToday,mrmr,weights,features:FEATS,labels:LABELS,top10Feats,rocketCount:topN,rocketThreshold:ROCKET_THRESHOLD,rocketTargetFraction:ROCKET_TARGET_FRACTION,rocketObservationRelevance,accSessions:ACC_CORR?.sessions||0,laggedNote:laggedNote||'',
     marketBreadth:marketBreadth,
     recommendationFeedback,executedEntryFeedback,
-    featureAccountability:{lastEvaluatedDate:featureAccountability.lastEvaluatedDate,stats:featureAccountability.stats},
     useFreshCorr, freshSignalCount, scoringSource,
-    useAccCorr: !useFreshCorr && (ACC_CORR?(ACC_CORR.sessions||0)>=2:false),
+    useAccCorr: (ACC_CORR?.sessions||0)>0,
+    snapshotElapsedMinutes:SNAPSHOT_RUNTIME?.lastOutcome?.elapsedMinutes??null,
+    snapshotPairs:SNAPSHOT_RUNTIME?.completed||0,
     sectorCol: sectorCol?true:false, industryCol: industryCol?true:false,
-    yesterdayRockets: yesterdayRockets,
+    recentRockets,
     totalParsed: totalParsed,
     hardFilterSchema:HARD_FILTER_SCHEMA,
     removed: {...REMOVED},
@@ -2377,9 +2267,8 @@ function runEngine(raw, sessionTag){
   try{
     const methSave={targetCorr,targetCorrToday,mrmr,weights,features:FEATS,labels:LABELS,top10Feats,rocketCount:ENGINE_DATA.rocketCount,rocketThreshold:ENGINE_DATA.rocketThreshold,rocketTargetFraction:ROCKET_TARGET_FRACTION,rocketObservationRelevance,accSessions:ENGINE_DATA.accSessions,laggedNote:ENGINE_DATA.laggedNote,
       marketBreadth:ENGINE_DATA.marketBreadth,useFreshCorr:ENGINE_DATA.useFreshCorr,freshSignalCount:ENGINE_DATA.freshSignalCount,scoringSource:ENGINE_DATA.scoringSource,useAccCorr:ENGINE_DATA.useAccCorr,sectorCol:ENGINE_DATA.sectorCol,industryCol:ENGINE_DATA.industryCol,
-      yesterdayRockets:yesterdayRockets,totalParsed:totalParsed,hardFilterSchema:HARD_FILTER_SCHEMA,removed:{...REMOVED},survSize:Object.keys(NSE_SURV).length,
-      recommendationFeedback,executedEntryFeedback,
-      featureAccountability:ENGINE_DATA.featureAccountability};
+      recentRockets,totalParsed:totalParsed,hardFilterSchema:HARD_FILTER_SCHEMA,removed:{...REMOVED},survSize:Object.keys(NSE_SURV).length,
+      recommendationFeedback,executedEntryFeedback,snapshotElapsedMinutes:ENGINE_DATA.snapshotElapsedMinutes,snapshotPairs:ENGINE_DATA.snapshotPairs};
     FS.set(modeKey(METH_STORE),methSave);
   }catch(e){console.warn('Could not save methodology data',e);}
   persistMethodologySnapshot();
@@ -2599,7 +2488,7 @@ function renderStats(){
     <div class="st"><div class="st-l">Score Spread</div><div class="st-v">${scoreSpread}</div><div class="st-d">${scoreMax} top · ${scoreMin} low</div></div>
     <div class="st"><div class="st-l">Top Sector</div><div class="st-v" style="font-size:15px;color:var(--green)">${topSec}</div><div class="st-d">${topSecPct.toFixed(0)}% advancing</div></div>
     <div class="st"><div class="st-l">Relative Leaders</div><div class="st-v" style="color:${rocketCount>0?'var(--fire)':'var(--t3)'}">${rocketCount}</div><div class="st-d">top ${((ENGINE_DATA.rocketTargetFraction||ROCKET_TARGET_FRACTION)*100).toFixed(1)}% · cutoff ${ENGINE_DATA.rocketThreshold!=null?ENGINE_DATA.rocketThreshold.toFixed(2)+'%':'n/a'}</div></div>
-    <div class="st"><div class="st-l">Breadth</div><div class="st-v" style="color:var(--cyan)">${ENGINE_DATA.marketBreadth!=null?(ENGINE_DATA.marketBreadth*100).toFixed(0):(bull/t*100).toFixed(0)}%</div><div class="st-d">market context only · ${ENGINE_DATA.accSessions||0} learned sessions</div></div>${bookedCard}`;
+    <div class="st"><div class="st-l">Breadth</div><div class="st-v" style="color:var(--cyan)">${ENGINE_DATA.marketBreadth!=null?(ENGINE_DATA.marketBreadth*100).toFixed(0):(bull/t*100).toFixed(0)}%</div><div class="st-d">market context only · ${ENGINE_DATA.accSessions||0} learned snapshot pairs</div></div>${bookedCard}`;
 
   // Row 1: hard-filter removal pills
   const filterPills=[];
@@ -2612,7 +2501,7 @@ function renderStats(){
   const topUpCt=FILT.filter(s=>s._isTopUp).length;
   if(topUpCt>0)filterPills.push(`<span class="info-pill pill-fire" title="Already in portfolio — shown as top-up candidates.">↑ ${topUpCt} top-up</span>`);
   if(SUPPRESSED_HELD>0)filterPills.push(`<span class="info-pill pill-rose" title="Short positions and zero-qty holdings are always hidden.">📌 ${SUPPRESSED_HELD} held</span>`);
-  if(SUPPRESSED_YDAY_ROCKET>0){const _ydTip=(ENGINE_DATA.yesterdayRockets||[]).map(r=>`${r.symbol} +${r.yesterdayChg}% yday → ${r.todayChg!=null?r.todayChg+'% today':'not in today\'s scan'}`).join(', ');filterPills.push(`<span class="info-pill pill-orange" title="Already rocketed yesterday — move done, excluded from recommendations. ${escHtml(_ydTip)}">⏮ ${SUPPRESSED_YDAY_ROCKET} yday rockets hidden</span>`);}
+  if(SUPPRESSED_RECENT_ROCKET>0){const tip=(ENGINE_DATA.recentRockets||[]).map(r=>`${r.symbol} +${r.move}% in the latest snapshot interval`).join(', ');filterPills.push(`<span class="info-pill pill-orange" title="Latest interval rockets are hidden to avoid chasing a move that already happened. ${escHtml(tip)}">⏮ ${SUPPRESSED_RECENT_ROCKET} recent rockets hidden</span>`);}
   const bulkCt=ALL.filter(s=>s.flags.includes('BULK')).length;
   const blkCt=ALL.filter(s=>s.flags.includes('BLK')).length;
   if(bulkCt>0)filterPills.push(`<span class="info-pill pill-lime">📦 ${bulkCt} bulk deals</span>`);
@@ -3288,7 +3177,7 @@ function renderPerformance(){
     ? `${exitOpportunity.exits} symbol/date exits have same-day ALL NSE highs recorded. ${exitOpportunity.upsideExits} highs exceeded the quantity-weighted average sell price; sold-value-weighted missed upside averages ${exitOpportunity.avgMissed.toFixed(2)}% (${fmtINR(exitOpportunity.missedValue)}).`
     : `No same-day exit opportunities have been recorded yet. Load Orders, Tradebook, and ALL NSE for the sell day.`;
   const outcomeHtml=perfCard('Recommendation Outcome Feedback',
-    `<div style="padding:14px 16px;color:var(--t2);font-size:12px;line-height:1.7"><div><strong style="color:var(--t1)">Actual entries:</strong> ${entryOutcomeText}</div><div style="margin-top:8px"><strong style="color:var(--t1)">Eligible shortlist:</strong> ${outcomeText}</div><div style="margin-top:8px"><strong style="color:var(--t1)">Same-day exit opportunity:</strong> ${escapeText}</div><div style="margin-top:8px;color:var(--t3)">The loop is automatic: next-session rocket evidence remains the primary mRMR signal; multi-session shortlist and executed-entry outcomes refine feature weights; realised exits set the baseline SL/TGT; attainable highs adjust TGT1/TGT2; rocket timing sets the learning horizon; same-day missed upside adds the final TGT nudge.</div></div>`,'','perf-outcomes');
+    `<div style="padding:14px 16px;color:var(--t2);font-size:12px;line-height:1.7"><div><strong style="color:var(--t1)">Actual entries:</strong> ${entryOutcomeText}</div><div style="margin-top:8px"><strong style="color:var(--t1)">Eligible shortlist:</strong> ${outcomeText}</div><div style="margin-top:8px"><strong style="color:var(--t1)">Same-day exit opportunity:</strong> ${escapeText}</div><div style="margin-top:8px;color:var(--t3)">Snapshot-pair rocket outcomes train mRMR feature relevance. Tradebook, shortlist, executed-entry, and missed-opportunity evidence independently refine position sizing, review timing, and TGT1/TGT2 without changing the prediction target.</div></div>`,'','perf-outcomes');
 
   el.innerHTML=`
     <div style="padding:12px 16px">
@@ -3335,7 +3224,10 @@ function rebuildActiveSurveillanceHits(){
   });
 }
 function scannerSessionTag(fileName, raw){
-  const dataHash=(function(){let h=0;for(let i=0;i<Math.min(raw.length,200);i++){const pc=parseFloat(raw[i][Object.keys(raw[i]).find(k=>/price/i.test(k)&&/change/i.test(k))])||0;h=((h<<5)-h)+Math.round(pc*1000);h|=0;}return h;})();
+  const headers=Object.keys(raw[0]||{});
+  const symbolCol=headers.find(k=>/^symbol$/i.test(k.trim()))||headers[0];
+  const priceCol=headers.find(k=>/^price(?:\s*₹)?$/i.test(k.trim()))||headers.find(k=>/^price\b/i.test(k)&&!/change/i.test(k));
+  const dataHash=(function(){let h=0;for(let i=0;i<raw.length;i++){const symbol=String(raw[i][symbolCol]||'');const price=parseFloat(String(raw[i][priceCol]||'').replace(/,/g,''))||0;for(let j=0;j<symbol.length;j++){h=((h<<5)-h)+symbol.charCodeAt(j);h|=0;}h=((h<<5)-h)+Math.round(price*1000);h|=0;}return h;})();
   return fileName+'·'+raw.length+'·'+dataHash;
 }
 function inputFileSessionDate(file){
@@ -3365,7 +3257,7 @@ async function refreshRankingsAfterSurvRuleChange(){
   try{
     const tag=window._lastScannerSessionTag||ACC_CORR?.lastTag||scannerSessionTag(fileName,raw);
     if(!ACC_CORR||ACC_CORR.lastTag!==tag) ACC_CORR={...(ACC_CORR||{corr:{},sessions:0}),lastTag:tag};
-    ALL=runEngine(raw,tag)||[];
+    ALL=await runEngine(raw,tag,{advanceSnapshot:false})||[];
     ALL.sort((a,b)=>b.rocketScore-a.rocketScore);
     const rc=FS.get(modeKey(REC_COUNT_STORE))||{}, rcD=rc[getSessionDate()]||{};
     ALL.forEach(s=>{s.seen=rcD[s.symbol]||0;});
@@ -3623,7 +3515,7 @@ function _renderMethodologyInner(){
   if(!E||!E.features||!E.features.length||!E.mrmr||!E.weights||!E.targetCorr)return;
   // Guard all potentially missing fields
   if(!E.labels) E.labels={};
-  if(!E.accSessions) E.accSessions=1;
+  if(E.accSessions==null) E.accSessions=0;
   if(!E.laggedNote) E.laggedNote='';
   if(!E.targetCorrToday) E.targetCorrToday={};
   const sorted=[...E.features].sort((a,b)=>E.mrmr[b].score-E.mrmr[a].score);
@@ -3637,17 +3529,14 @@ function _renderMethodologyInner(){
   };
   const rs = {
   };
-  const corrSource = E.useAccCorr?'Historical correlations active':'Warming up (need ≥2 target sessions)';
   const scoreCorrSource = E.useFreshCorr
-    ? `Fresh previous-day signal active (${E.freshSignalCount||0} features)`
-    : (E.useAccCorr?'Historical combined fallback active':'Warming up (need a usable fresh target)');
-  const sessLabel = `${E.accSessions||0} sessions · ${E.laggedNote||'lagged learning starts next upload'}`;
+    ? `Latest snapshot pair learned (${E.freshSignalCount||0} active features)`
+    : (E.useAccCorr?'Accumulated snapshot learning active':'Warming up: upload the next snapshot');
+  const sessLabel = `${E.accSessions||0} learned pairs · ${E.laggedNote||'waiting for the next snapshot'}`;
   const breadthPct=E.marketBreadth!=null?(E.marketBreadth*100).toFixed(0):'?';
   const recFeedback=E.recommendationFeedback;
   const entryFeedback=E.executedEntryFeedback;
-  const feedbackText=(recFeedback?.alpha||entryFeedback?.alpha)
-    ? `Shortlist outcomes: ${recFeedback?.samples||0} samples at ${((recFeedback?.alpha||0)*100).toFixed(1)}% influence. Executed entries: ${entryFeedback?.samples||0} samples at ${((entryFeedback?.alpha||0)*100).toFixed(1)}% influence. Combined outcome influence is capped at 45%; the core next-session rocket signal keeps the majority weight.`
-    : `Outcome feedback is warming up. It starts contributing automatically after ${OUTCOME_FEEDBACK_MIN_SAMPLES} completed observations and then grows gradually with sample size.`;
+  const feedbackText=`Shortlist outcomes: ${recFeedback?.samples||0}; executed-entry outcomes: ${entryFeedback?.samples||0}. These longer-horizon trade outcomes refine targets and sizing, while snapshot-pair rocket outcomes alone train mRMR feature relevance.`;
   const breadthCardHTML=`<div class="breadth-bar">
     <div class="breadth-badge" style="color:var(--cyan)">${breadthPct}% Breadth</div>
     <div class="breadth-meta">
@@ -3665,7 +3554,7 @@ function _renderMethodologyInner(){
 
   mc.innerHTML=''; // clear before rebuild
 
-  let wtHTML=`<table class="ct"><thead><tr><th>Feature</th><th>Src</th><th>Target r</th><th>Today r</th><th>Direction</th><th>Redundancy</th><th>Track Record</th><th>Reliability</th><th>mRMR Score</th><th class="bar-cell">Weight</th><th>Wt%</th></tr></thead><tbody>`;
+  let wtHTML=`<table class="ct"><thead><tr><th>Feature</th><th>Src</th><th>Accumulated r</th><th>Latest Pair r</th><th>Direction</th><th>Redundancy</th><th>mRMR Score</th><th class="bar-cell">Weight</th><th>Wt%</th></tr></thead><tbody>`;
   for(const f of sorted){
     const tc=E.targetCorr[f],m=E.mrmr[f],w=E.weights[f];
     const dir=tc>=0?'<span style="color:var(--green)">↑</span>':'<span style="color:var(--red)">↓</span>';
@@ -3674,14 +3563,10 @@ function _renderMethodologyInner(){
     const src=srcType==='NSE'?'<span style="color:var(--cyan);font-size:9px;font-weight:700">NSE</span>':srcType==='Calc'?'<span style="color:var(--purple);font-size:9px;font-weight:700">Calc</span>':'<span style="color:var(--t3);font-size:9px">TV</span>';
     const todayR=E.targetCorrToday?.[f];
     const todayCell=todayR!=null&&!isNaN(todayR)?`<span style="color:${todayR>=0?'var(--green)':'var(--red)'};font-size:10px">${(todayR??0).toFixed(3)}</span>`:'—';
-    const acc=m?.accountability;
-    const trackCell=acc?`${acc.wins||0}W / ${acc.losses||0}L <span style="color:var(--t3)">(${acc.evaluations||0})</span>`:'Warming up';
-    const reliability=m?.reliability||1;
-    const reliabilityCell=`<span style="color:${reliability>1.02?'var(--green)':reliability<0.98?'var(--red)':'var(--t3)'};font-weight:700">${reliability.toFixed(2)}×</span>`;
     const _n=v=>isFinite(v)?v:0;
     const tcS=tc!=null&&isFinite(tc)?tc.toFixed(3):'—'; const redS=m&&m.red!=null&&isFinite(m.red)?m.red.toFixed(3):'—'; const scS=m&&m.score!=null&&isFinite(m.score)?m.score.toFixed(4):'—'; const wS=w!=null&&isFinite(w)?(w*100).toFixed(1):'—';
     wtHTML+=`<tr>
-      <td style="font-family:'Plus Jakarta Sans',sans-serif;font-weight:600;color:var(--t1)">${E.labels[f]||f}</td><td>${src}</td><td style="color:${(tc||0)>=0?'var(--green)':'var(--red)'};font-weight:600">${tcS}</td><td>${todayCell}</td><td>${dir}</td><td>${redS}</td><td>${trackCell}</td><td>${reliabilityCell}</td><td style="font-weight:700">${scS}</td><td class="bar-cell"><span class="cb" style="width:${bw}%;background:${bc};opacity:.5"></span></td><td style="font-weight:800">${wS}%</td>
+      <td style="font-family:'Plus Jakarta Sans',sans-serif;font-weight:600;color:var(--t1)">${E.labels[f]||f}</td><td>${src}</td><td style="color:${(tc||0)>=0?'var(--green)':'var(--red)'};font-weight:600">${tcS}</td><td>${todayCell}</td><td>${dir}</td><td>${redS}</td><td style="font-weight:700">${scS}</td><td class="bar-cell"><span class="cb" style="width:${bw}%;background:${bc};opacity:.5"></span></td><td style="font-weight:800">${wS}%</td>
     </tr>`;
   }
   wtHTML+='</tbody></table>';
@@ -3701,12 +3586,12 @@ function _renderMethodologyInner(){
     <div id="meth-hf-wrap">${hardFiltersHTML}</div>
     <div id="meth-breadth">${breadthCardHTML}</div>
     <h3 id="meth-engine" style="margin-top:18px">Scoring Engine — Continuous Learning mRMR</h3>
-    <p id="mrmrLearningModeNote"><strong>Current learning mode:</strong> simple logic, rich inputs. The primary signal is every clean numeric indicator in yesterday's saved feature snapshot versus today's actual rockets. Completed shortlist and executed-entry outcomes then refine those correlations with bounded, sample-size-weighted feedback. Market breadth is context only and does not create separate bull/neutral/bear histories.</p>
+    <p id="mrmrLearningModeNote"><strong>Current learning mode:</strong> continuous snapshot learning with rich inputs. Every clean numeric indicator in one upload is compared with the top movers observed at the next upload. The elapsed time is whatever actually passed between those uploads; the TradingView 1-day change column remains an unchanged input feature. Market breadth is context only.</p>
     <div class="m-grid">
-      <div class="m-card"><h4>🚀 What is a Rocket?</h4><p>For learning, Rockets are the <strong>top ${((E.rocketTargetFraction||ROCKET_TARGET_FRACTION)*100).toFixed(1)}%</strong> of the full NSE universe by maximum intraday percentage gain from the previous close. This yields roughly 15 relative leaders from ~3,000 stocks every session, even in weak markets. Today's cutoff is <strong>${E.rocketThreshold!=null?E.rocketThreshold.toFixed(2)+'%':'not available'}</strong>. Repeated uploads preserve each stock's feature vector from its own highest observed excursion; equal highs use the later state.</p></div>
-      <div class="m-card"><h4>📡 How the Engine Learns</h4><p>After each session, the engine correlates <strong>yesterday's feature values</strong> against <strong>today's actual top-0.5% leaders</strong> across the full valid NSE universe. Tomorrow's recommendations are eligible stocks whose current feature states best match those learned directions. Previous rockets and continuations are not positive labels for a new move.</p></div>
+      <div class="m-card"><h4>🚀 What is a Rocket?</h4><p>For each valid snapshot pair, Rockets are the <strong>top ${((E.rocketTargetFraction||ROCKET_TARGET_FRACTION)*100).toFixed(1)}%</strong> of the full NSE universe by price gain between the two uploads. The latest learned pair spanned <strong>${E.snapshotElapsedMinutes!=null?E.snapshotElapsedMinutes+' minutes':'no completed interval yet'}</strong> and its cutoff was <strong>${E.rocketThreshold!=null?E.rocketThreshold.toFixed(2)+'%':'not available'}</strong>.</p></div>
+      <div class="m-card"><h4>📡 How the Engine Learns</h4><p>The engine freezes all available feature values at snapshot A, identifies the actual top movers when snapshot B arrives, and correlates A's features with those outcomes. B then becomes the baseline for C. Every completed pair updates the same permanent regime-agnostic accumulator; only the superseded raw snapshot is discarded.</p></div>
       <div class="m-card"><h4>Outcome Self-Correction</h4><p>${feedbackText} Faster rocket conversions and profitable executed-entry peaks reward their feature patterns; failures and adverse outcomes penalise them.</p></div>
-      <div class="m-card"><h4>Feature Accountability</h4><p>Each weighted feature records the direction it used today. On the next session, the engine checks whether that feature's favoured top 20% contained more <strong>actual fresh rockets</strong> than the full matched universe. Consistent wins gradually reward its mRMR relevance; misses penalise it. Confidence builds over eight evaluated sessions, preventing one-hit wonders from dominating.</p></div>
+      <div class="m-card"><h4>Feature Self-Correction</h4><p>Each snapshot pair contributes a fresh correlation for every feature. Correct and repeatable relationships persist in the running mean; random one-off relationships dilute naturally as more pairs accumulate. mRMR then reduces the weight of features that duplicate stronger peers.</p></div>
       <div class="m-card"><h4>🎯 Max 1D Filter</h4><p>Set <em>Max 1D %</em> in the filter bar to hide stocks that have already moved too much today (default 5%). Entry-ceiling filtering has been removed; strong candidates are no longer hidden just because current price is above a calculated buy ceiling.</p></div>
       <div class="m-card"><h4>🚫 Recommendation Filters</h4><p>The learning universe keeps every valid parsed NSE symbol. Recommendation eligibility separately excludes zero-price rows, stocks at/near their NSE price band, non-EQ series, surveillance-flagged stocks, insufficient liquidity, zero Piotroski F-Score, and invalid ATR. Delivery, peak retention, RVOL, DMI, MFI, RSI, and sell pressure are <strong>features, not hard filters</strong>. Currently filtered from recommendations: ${(REMOVED.uc||0)+(REMOVED.surv||0)+(REMOVED.nonEq||0)+(REMOVED.liq||0)+(REMOVED.fscore||0)+(REMOVED.atr||0)} stocks.</p></div>
       <div class="m-card"><h4>Regime-Agnostic Learning</h4><p>Market breadth is shown as context only. The scanner uses one running-mean rocket-correlation accumulator across all market conditions, so bull, neutral, and bear days do not create separate scoring histories.</p></div>
@@ -4465,13 +4350,13 @@ function applyFilters(){
     }
   }
 
-  // Suppress yesterday's rockets — move already happened, system purpose is prediction not confirmation
-  SUPPRESSED_YDAY_ROCKET=0;
+  // Suppress latest-interval rockets: the move already happened, so recommending them would chase it.
+  SUPPRESSED_RECENT_ROCKET=0;
   {
-    const ydaySyms=new Set((ENGINE_DATA.yesterdayRockets||[]).map(r=>r.symbol));
-    if(ydaySyms.size>0){
+    const recentRocketSymbols=new Set((ENGINE_DATA.recentRockets||[]).map(r=>r.symbol));
+    if(recentRocketSymbols.size>0){
       FILT=FILT.filter(x=>{
-        if(ydaySyms.has(x.symbol)){hiddenReasons[x.symbol]='Yesterday rocket hidden';SUPPRESSED_YDAY_ROCKET++;return false;}
+        if(recentRocketSymbols.has(x.symbol)){hiddenReasons[x.symbol]='Latest interval rocket hidden';SUPPRESSED_RECENT_ROCKET++;return false;}
         return true;
       });
     }
@@ -4706,7 +4591,7 @@ function importBrain(event){
     try{
       const brain=JSON.parse(e.target.result);
       const isExport=!!(brain._version&&brain._version.startsWith('rscanner_brain'));
-      const isRawBrain=!!(brain&&typeof brain==='object'&&(brain[CORR_STORE]||brain[ALL_STORE]||brain[TRADEBOOK_STORE]||brain[SNAP_KEY]));
+      const isRawBrain=!!(brain&&typeof brain==='object'&&(brain[CORR_STORE]||brain[ALL_STORE]||brain[TRADEBOOK_STORE]||brain[SNAPSHOT_STATE_STORE]));
       if(!isExport&&!isRawBrain){
         showToast('Invalid brain file — not a Rocket Scanner export.', 5000, true);return;
       }
@@ -4764,28 +4649,22 @@ function resetBrain(btn){
     const brain=FS.getBrain()||{};
     const s=brain[CORR_STORE]?.sessions||0;
     btn._stage=2;
-    btn.innerHTML=`🗑 CONFIRM: clear ${s} learned sessions?`;
+    btn.innerHTML=`🗑 CONFIRM: clear ${s} learned snapshot pairs?`;
     btn.style.background='rgba(239,68,68,.25)';btn.style.borderColor='var(--red)';btn.style.color='#fff';
     setTimeout(()=>{if(btn._stage===2){btn._stage=0;btn.innerHTML='🗑 Reset Brain';btn.style.background='';btn.style.borderColor='rgba(239,68,68,.3)';btn.style.color='var(--red)';}},6000);
     return;
   }
-  // Stage 3: keep only a valid prior-session comparison baseline; wipe learned/runtime state.
-  const preserved={};
-  const stockBaseline=getPriorSessionSnapshotRecordForMode('stock');
-  if(stockBaseline) preserved[SNAP_KEY]=stockBaseline;
-  FS.reset(preserved);
+  // Stage 3: clear learned/runtime state. The next upload becomes a fresh baseline.
+  FS.reset({});
   localStorage.removeItem(SCANNER_STORE);
   localStorage.removeItem(SHARED_FILTER_STORE);
-  ACC_CORR=null;
+  ACC_CORR=null;SNAPSHOT_RUNTIME=null;
   ALL=[]; FILT=[]; ENGINE_DATA={};
   HOLDINGS=[]; POSITIONS=[]; ORDERS_TODAY=null; TRADEBOOK_STATS=null; LAST_BUY_DATE_MAP={};
-  PREV_SNAP={};PREV_SNAP_META={};
   HOLD_COST_MAP={}; SURV_CORR_ACC={};
   btn._stage=0;
   btn.innerHTML='🗑 Reset Brain';btn.style.background='';btn.style.borderColor='rgba(239,68,68,.3)';btn.style.color='var(--red)';
-  const kept=[stockBaseline&&('Stocks '+stockBaseline.savedDate)].filter(Boolean);
-  const baselineMsg=kept.length?' Kept prior-session baseline: '+kept.join(', ')+'.':' No valid prior-session baseline was available.';
-  showToast('<strong>Brain reset.</strong> Cleared accumulated learning and saved filters.'+baselineMsg+' Uploaded input files remain in Google Drive.',7000);
+  showToast('<strong>Brain reset.</strong> Cleared accumulated learning and saved filters. The next upload will establish a new snapshot baseline. Uploaded input files remain in Google Drive.',7000);
   setTimeout(()=>location.reload(),2000);
 }
 
@@ -5319,44 +5198,19 @@ function setLoading(on,msg){
 
 function captureScannerRuntime(){
   return {
-    mode:MARKET_MODE,ALL,FILT,ENGINE_DATA,PREV_SNAP,PREV_SNAP_META,
-    ACC_CORR,
+    mode:MARKET_MODE,ALL,FILT,ENGINE_DATA,ACC_CORR,SNAPSHOT_RUNTIME,
     REMOVED,SCORE_MAP,COLS,_tvLoadedThisSession,
     lastRawTV:window._lastRawTV,lastScannerSessionTag:window._lastScannerSessionTag,
     lastEngineFeats:window._lastEngineFeats,lastParsedFiltered:window._lastParsedFiltered,lastParsedForSnapshot:window._lastParsedForSnapshot,
-    currentDayPeakSnap:window._currentDayPeakSnap
+    snapshotRuntimeDirty:window._snapshotRuntimeDirty
   };
 }
 function restoreScannerRuntime(s){
-  MARKET_MODE=s.mode;ALL=s.ALL;FILT=s.FILT;ENGINE_DATA=s.ENGINE_DATA;PREV_SNAP=s.PREV_SNAP;PREV_SNAP_META=s.PREV_SNAP_META;
-  ACC_CORR=s.ACC_CORR;
+  MARKET_MODE=s.mode;ALL=s.ALL;FILT=s.FILT;ENGINE_DATA=s.ENGINE_DATA;ACC_CORR=s.ACC_CORR;SNAPSHOT_RUNTIME=s.SNAPSHOT_RUNTIME;
   REMOVED=s.REMOVED;SCORE_MAP=s.SCORE_MAP;COLS=s.COLS;_tvLoadedThisSession=s._tvLoadedThisSession;
   window._lastRawTV=s.lastRawTV;window._lastScannerSessionTag=s.lastScannerSessionTag;
   window._lastEngineFeats=s.lastEngineFeats;window._lastParsedFiltered=s.lastParsedFiltered;window._lastParsedForSnapshot=s.lastParsedForSnapshot;
-  window._currentDayPeakSnap=s.currentDayPeakSnap;
-}
-function normSnapshotDate(s){
-  if(!s) return null;
-  if(/^\d{4}-\d{2}-\d{2}$/.test(s)) return s;
-  const d=new Date(s);
-  if(isNaN(d.getTime())) return null;
-  return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;
-}
-function getPriorSessionSnapshotRecordForMode(mode){
-  const todayISO=getSessionDate();
-  const snap=FS.get(modeKey(SNAP_KEY,mode)), prev=FS.get(modeKey(SNAP_PREV_KEY,mode));
-  const candidates=[snap,prev]
-    .filter(s=>snapshotHasData(s)&&normSnapshotDate(s.savedDate)&&normSnapshotDate(s.savedDate)<todayISO)
-    .sort((a,b)=>normSnapshotDate(b.savedDate).localeCompare(normSnapshotDate(a.savedDate)));
-  return candidates.find(s=>tradingDaysBetween(normSnapshotDate(s.savedDate),todayISO)===1)||null;
-}
-async function loadPrevSnapForMode(mode){
-  const source=getPriorSessionSnapshotRecordForMode(mode);
-  const out={snap:{},meta:{}};
-  if(!source) return out;
-  out.snap=await decodeScannerSnapshot(source);
-  out.meta={savedDate:source.savedDate||null,marketBreadth:source.marketBreadth??null};
-  return out;
+  window._snapshotRuntimeDirty=s.snapshotRuntimeDirty;
 }
 function compactFeatureValue(v){
   if(v===null||v===undefined||isNaN(v)) return null;
@@ -5425,6 +5279,53 @@ async function gunzipBytes(bytes){
   const stream=new Blob([bytes]).stream().pipeThrough(new DecompressionStream('gzip'));
   return new Uint8Array(await new Response(stream).arrayBuffer());
 }
+function snapshotStamp(timestamp=Date.now()){
+  const shifted=new Date(timestamp+5.5*60*60*1000);
+  const minutes=shifted.getUTCHours()*60+shifted.getUTCMinutes();
+  return {
+    timestamp,
+    sessionDate:`${shifted.getUTCFullYear()}-${String(shifted.getUTCMonth()+1).padStart(2,'0')}-${String(shifted.getUTCDate()).padStart(2,'0')}`,
+    minutes,
+    inSession:minutes>=NSE_OPEN_MINUTES&&minutes<=NSE_CLOSE_MINUTES,
+  };
+}
+function isValidSnapshotTransition(previous,current){
+  if(!previous||!current||!previous.inSession||!current.inSession||previous.sessionDate!==current.sessionDate) return false;
+  const gap=(current.timestamp-previous.timestamp)/60000;
+  return gap>=SNAPSHOT_MIN_GAP_MINUTES;
+}
+async function packFloat32Values(values){
+  const array=values instanceof Float32Array?values:Float32Array.from(values||[],v=>isFinite(v)?v:NaN);
+  const raw=new Uint8Array(array.buffer,array.byteOffset,array.byteLength),compressed=await gzipBytes(raw);
+  return {format:compressed?'f32-gzip-v1':'f32-v1',length:array.length,data:bytesToBase64(compressed||raw)};
+}
+async function unpackFloat32Values(source){
+  if(!source?.data) return new Float32Array(0);
+  const packed=base64ToBytes(source.data),bytes=source.format==='f32-gzip-v1'?await gunzipBytes(packed):packed;
+  const view=new Float32Array(bytes.buffer,bytes.byteOffset,Math.floor(bytes.byteLength/4));
+  return new Float32Array(view);
+}
+async function decodeSnapshotState(source){
+  if(!source||source.schema!==SNAPSHOT_STATE_SCHEMA) return emptySnapshotRuntime();
+  const latest=source.latest?{
+    ...source.latest,
+    prices:await unpackFloat32Values(source.latest.prices),
+    featureRows:await decodeScannerSnapshot(source.latest.features),
+  }:null;
+  return {...source,latest};
+}
+async function encodeSnapshotState(runtime){
+  const latest=runtime.latest?{
+    timestamp:runtime.latest.timestamp,sessionDate:runtime.latest.sessionDate,minutes:runtime.latest.minutes,
+    inSession:runtime.latest.inSession,symbols:runtime.latest.symbols,
+    prices:await packFloat32Values(runtime.latest.prices),
+    features:runtime.latest.features||await packScannerSnapshot(
+      runtime.latest.symbols.map(symbol=>({symbol,...(runtime.latest.featureRows[symbol]||{})})),runtime.latest.featureCols||[]
+    ),
+  }:null;
+  return {schema:SNAPSHOT_STATE_SCHEMA,latest,completed:runtime.completed||0,lastRockets:runtime.lastRockets||[],
+    lastOutcome:runtime.lastOutcome||null,lastTag:runtime.lastTag||null};
+}
 async function packScannerSnapshot(rows,cols){
   const clean=(rows||[]).filter(d=>normSym(d.symbol));
   const values=new Float32Array(clean.length*cols.length);
@@ -5462,99 +5363,6 @@ async function decodeScannerSnapshot(source){
   Object.entries(source?.stocks||source||{}).forEach(([sym,features])=>{if(features&&typeof features==='object')out[normSym(sym)]=features;});
   return out;
 }
-function getFeatureAccountabilityStore(){
-  const raw=FS.get(modeKey(FEATURE_ACCOUNTABILITY_STORE))||{};
-  if(Object.keys(raw).length&&raw.schema!==FEATURE_ACCOUNTABILITY_SCHEMA) return {version:2,schema:FEATURE_ACCOUNTABILITY_SCHEMA,plans:{},stats:{},lastEvaluatedDate:null,lastContribution:null,lastUpdated:null};
-  const plans=raw.plans&&typeof raw.plans==='object'?{...raw.plans}:{};
-  if(raw.pending?.date&&raw.pending?.features&&!plans[raw.pending.date]) plans[raw.pending.date]=raw.pending.features;
-  return {
-    version:2,
-    schema:FEATURE_ACCOUNTABILITY_SCHEMA,
-    plans,
-    stats:raw.stats&&typeof raw.stats==='object'?raw.stats:{},
-    lastEvaluatedDate:raw.lastEvaluatedDate||null,
-    lastContribution:raw.lastContribution&&typeof raw.lastContribution==='object'?raw.lastContribution:null,
-    lastUpdated:raw.lastUpdated||null,
-  };
-}
-function featureReliabilityMultiplier(stat){
-  const n=stat?.evaluations||0;
-  if(!n) return 1;
-  const confidence=Math.min(1,n/8);
-  const winRate=(stat.wins||0)/n;
-  const skill=clampNum(stat.meanSkill||0,-1,1);
-  const consistency=(winRate*2)-1;
-  return clampNum(1+(confidence*0.6*((skill*0.65)+(consistency*0.35))),0.4,1.6);
-}
-function evaluateFeatureAccountability({features,overlap,actualRocketSymbols,sourceDate,evaluationDate,acceptObservation=true}){
-  const store=getFeatureAccountabilityStore();
-  const source=normSnapshotDate(sourceDate);
-  const plan=source?store.plans[source]:null;
-  const canEvaluate=acceptObservation&&plan&&overlap?.length>=100&&actualRocketSymbols?.size>0;
-  if(canEvaluate){
-    const stats={...store.stats};
-    const contributions={};
-    Object.entries(plan).forEach(([f,direction])=>{
-      if(!features.includes(f)||!direction||!direction.d) return;
-      const rows=overlap.map(d=>{
-        const raw=PREV_SNAP?.[d.symbol]?.[f];
-        if(raw===null||raw===undefined||raw==='') return null;
-        const value=Number(raw);
-        return isFinite(value)?{symbol:d.symbol,value}:null;
-      }).filter(Boolean);
-      if(rows.length<50) return;
-      rows.sort((a,b)=>direction.d>0?b.value-a.value:a.value-b.value);
-      const cohortSize=Math.max(10,Math.ceil(rows.length*0.2));
-      const predicted=rows.slice(0,cohortSize);
-      const hits=predicted.filter(r=>actualRocketSymbols.has(r.symbol)).length;
-      const actual=rows.filter(r=>actualRocketSymbols.has(r.symbol)).length;
-      const baseline=actual/rows.length;
-      const precision=hits/cohortSize;
-      const lift=precision-baseline;
-      const skill=clampNum(lift/Math.max(baseline,1/rows.length),-1,3);
-      const won=hits>0&&precision>baseline;
-      contributions[f]={won,lift,skill,hits,predicted:cohortSize,actual,baseline,precision};
-    });
-    const old=store.lastContribution?.date===evaluationDate?(store.lastContribution.features||{}):{};
-    new Set([...Object.keys(old),...Object.keys(contributions)]).forEach(f=>{
-      const prior=stats[f]||{evaluations:0,wins:0,losses:0,meanLift:0,meanSkill:0,hits:0,predicted:0,actual:0};
-      const previous=old[f];
-      let n=prior.evaluations||0,wins=prior.wins||0,losses=prior.losses||0;
-      let liftSum=(prior.meanLift||0)*n,skillSum=(prior.meanSkill||0)*n;
-      let hits=prior.hits||0,predicted=prior.predicted||0,actual=prior.actual||0;
-      if(previous){n=Math.max(0,n-1);wins-=previous.won?1:0;losses-=previous.won?0:1;liftSum-=previous.lift;skillSum-=previous.skill;hits-=previous.hits;predicted-=previous.predicted;actual-=previous.actual;}
-      const current=contributions[f];
-      if(current){n++;wins+=current.won?1:0;losses+=current.won?0:1;liftSum+=current.lift;skillSum+=current.skill;hits+=current.hits;predicted+=current.predicted;actual+=current.actual;}
-      if(!n){delete stats[f];return;}
-      stats[f]={evaluations:n,wins,losses,meanLift:liftSum/n,meanSkill:skillSum/n,hits,predicted,actual,
-        lastHits:current?.hits??prior.lastHits,lastPredicted:current?.predicted??prior.lastPredicted,
-        lastBaseline:current?+current.baseline.toFixed(6):prior.lastBaseline,
-        lastPrecision:current?+current.precision.toFixed(6):prior.lastPrecision,lastEvaluatedDate:evaluationDate};
-    });
-    store.stats=stats;
-    store.lastEvaluatedDate=evaluationDate;
-    store.lastContribution={date:evaluationDate,sourceDate:source,features:contributions};
-    store.lastUpdated=new Date().toISOString();
-    FS.set(modeKey(FEATURE_ACCOUNTABILITY_STORE),store);
-  }
-  const reliability={};
-  features.forEach(f=>{reliability[f]=featureReliabilityMultiplier(store.stats[f]);});
-  return {stats:store.stats,reliability,lastEvaluatedDate:store.lastEvaluatedDate};
-}
-function saveFeatureAccountabilityPlan(date,features,targetCorr,weights){
-  if(!date||!isMarketHours()) return;
-  const store=getFeatureAccountabilityStore();
-  const planned={};
-  features.forEach(f=>{
-    const corr=Number(targetCorr[f]), weight=Number(weights[f]);
-    if(!isFinite(corr)||Math.abs(corr)<0.0001||!isFinite(weight)||weight<=0) return;
-    planned[f]={d:corr>=0?1:-1,w:+weight.toFixed(6)};
-  });
-  store.plans[date]=planned;
-  Object.keys(store.plans).sort().slice(0,-3).forEach(d=>delete store.plans[d]);
-  store.lastUpdated=new Date().toISOString();
-  FS.set(modeKey(FEATURE_ACCOUNTABILITY_STORE),store);
-}
 function applySavedFiltersForMode(mode){
   const ids=['fMinScore','fPriceMin','fPriceMax','fMin1D','fMax1D','fVol','fVolMult','fMinTurnover','fMinMarketCap','fCapital','fMaxAlloc','fReDrop','fTopupAlloc'];
   const prev={};
@@ -5575,12 +5383,9 @@ async function processScannerUpload(scannerFile, mode){
   const restoreFilters=applySavedFiltersForMode(mode);
   let completed=false;
   MARKET_MODE=mode;
-  const prev=await loadPrevSnapForMode(mode);
-  PREV_SNAP=prev.snap;PREV_SNAP_META=prev.meta;
   ACC_CORR=FS.get(modeKey(CORR_STORE,mode));
-  const currentSnapshot=FS.get(modeKey(SNAP_KEY,mode));
-  window._currentDayPeakSnap=currentSnapshot&&normSnapshotDate(currentSnapshot.savedDate)===getSessionDate()
-    ? await decodeScannerSnapshot(currentSnapshot):{};
+  SNAPSHOT_RUNTIME=await decodeSnapshotState(FS.get(modeKey(SNAPSHOT_STATE_STORE,mode)));
+  window._snapshotRuntimeDirty=false;
   try{
     setMsg('Parsing stock TradingView data...');
     const text=await scannerFile.text();
@@ -5591,10 +5396,10 @@ async function processScannerUpload(scannerFile, mode){
     await new Promise(r=>setTimeout(r,60));
     window._lastRawTV=raw;
     const sessionTag=scannerSessionTag(scannerFile.name,raw);
-    const priorCorr=FS.get(modeKey(CORR_STORE,mode));
-    const isDuplicateSession=!!(priorCorr&&priorCorr.lastTag===sessionTag);
+    const uploadSession=inputFileSessionDate(scannerFile);
+    const isDuplicateSession=!!(SNAPSHOT_RUNTIME?.lastTag===sessionTag&&SNAPSHOT_RUNTIME?.latest?.sessionDate===uploadSession);
     window._lastScannerSessionTag=sessionTag;
-    ALL=runEngine(raw,sessionTag)||[];
+    ALL=await runEngine(raw,sessionTag,{advanceSnapshot:true,snapshotTimestamp:scannerFile.lastModified||Date.now()})||[];
     enrichRowsWithNSEData(ALL);
     ALL.sort((a,b)=>b.rocketScore-a.rocketScore);
     const rcToday=getSessionDate(), rc=FS.get(modeKey(REC_COUNT_STORE,mode))||{};
@@ -5608,26 +5413,12 @@ async function processScannerUpload(scannerFile, mode){
     const fileTag=scannerFile.name+' · '+raw.length+' stocks';
     try{const ft=document.getElementById('fileTag');if(ft)ft.textContent=fileTag;}catch(e){}
     FS.set(modeKey(ALL_STORE,mode),{data:compactRankingRows(ALL),fileTag,ts:new Date().toISOString()});
-    if(window._lastEngineFeats&&window._lastParsedForSnapshot){
-      const cols=window._lastEngineFeats;
-      const packed=await packScannerSnapshot(window._lastParsedForSnapshot,cols);
-      const today=getSessionDate(), existingSnap=FS.get(modeKey(SNAP_KEY,mode)), updates={};
-      const existingDate=existingSnap?.savedDate, isLegacyFormat=existingDate&&/^[A-Z][a-z]{2} /.test(existingDate);
-      if(snapshotHasData(existingSnap)&&(isLegacyFormat||!existingDate||existingDate!==today))updates[modeKey(SNAP_PREV_KEY,mode)]=existingSnap;
-      const existingRelevance=existingDate===today?(existingSnap?.relevance??-Infinity):-Infinity;
-      if(existingDate!==today||(ENGINE_DATA?.rocketObservationRelevance??-Infinity)>=existingRelevance){
-        updates[modeKey(SNAP_KEY,mode)]={...packed,savedDate:today,marketBreadth:ENGINE_DATA?.marketBreadth??null,
-          relevance:ENGINE_DATA?.rocketObservationRelevance??null,mode};
-      }
-      FS.setMultiple(updates);
+    if(window._snapshotRuntimeDirty&&SNAPSHOT_RUNTIME){
+      FS.set(modeKey(SNAPSHOT_STATE_STORE,mode),await encodeSnapshotState(SNAPSHOT_RUNTIME));
     }
     if(mode==='stock'){
       const threshold=ENGINE_DATA?.rocketThreshold||10;
-      const eligibleCandidates=getDisplayedEntryCandidates(ALL)
-        .filter(s=>{
-          const move=s.rocketMove??s.priceChange;
-          return s.price>0&&(move==null||move<threshold);
-        });
+      const eligibleCandidates=getDisplayedEntryCandidates(ALL).filter(s=>s.price>0);
       const recommendations=eligibleCandidates
         .map((s,i)=>({symbol:s.symbol,entryPrice:s.price,score:s.rocketScore,rank:i+1,features:s._features||{}}));
       window._lastStockOutcomeScan={
@@ -5795,7 +5586,8 @@ document.getElementById('fMaxAlloc')?.addEventListener('input',e=>{delete e.targ
 // SCANNER FILTER PERSISTENCE
 // ══════════════════════════════════════════════════
 
-let ACC_CORR=null; // accumulated targetCorr across sessions
+let ACC_CORR=null; // accumulated feature relevance across completed snapshot pairs
+let SNAPSHOT_RUNTIME=null; // decoded latest full-universe snapshot baseline
 
 // ── Async app init: load brain file → hydrate all state → render ──
 async function initApp(){
@@ -5818,18 +5610,9 @@ async function initApp(){
     // Load NSE holidays first (needed for staleness check below)
     try{const hols=brain[NSE_HOLIDAYS_STORE];if(Array.isArray(hols)&&hols.length) NSE_HOLIDAYS=new Set(hols);}catch(e){}
 
-    // Load PREV_SNAP from brain — discard if more than 1 trading day old (stale lagged data)
-    try{
-      const source=getPriorSessionSnapshotRecordForMode(MARKET_MODE);
-      if(source){
-        PREV_SNAP=await decodeScannerSnapshot(source);
-        PREV_SNAP_META={savedDate:source.savedDate||null,marketBreadth:source.marketBreadth??null};
-        console.log('INIT: loaded prev-day snapshot from',source.savedDate,',',Object.keys(PREV_SNAP).length,'stocks');
-      }
-    }catch(e){PREV_SNAP={};PREV_SNAP_META={};}
-
     // Step 1: Load correlations
     try{if(brain[modeKey(CORR_STORE)]) ACC_CORR=brain[modeKey(CORR_STORE)];}catch(e){}
+    try{SNAPSHOT_RUNTIME=await decodeSnapshotState(brain[modeKey(SNAPSHOT_STATE_STORE)]);}catch(e){SNAPSHOT_RUNTIME=emptySnapshotRuntime();}
 
     // Step 2: Load scan data
     try{
