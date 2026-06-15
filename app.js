@@ -1,5 +1,5 @@
-const BUILD_TS='2026-06-15 09:24 IST'; // replaced at commit time with IST datetime
-const APP_VERSION=412; // Shared deployed version; increment once per released code change.
+const BUILD_TS='2026-06-15 09:52 IST'; // replaced at commit time with IST datetime
+const APP_VERSION=413; // Shared deployed version; increment once per released code change.
 const GOOGLE_DRIVE_CLIENT_ID='1015012642264-oi2nelv3v90k3d39r994a6nelgjs2a56.apps.googleusercontent.com'; // Public OAuth Web Client ID.
 const HARD_FILTER_SCHEMA='structural_tradeability_v2';
 const ROCKET_TARGET_FRACTION=0.005; // Daily top 0.5% of the full parsed NSE universe.
@@ -1450,6 +1450,8 @@ function recordRecommendationOutcomeScan(scan){
 }
 function getRecommendationOutcomeSummary(){
   const issues=Object.values((FS.get(RECOMMEND_OUTCOME_STORE)||{}).issues||{});
+  const observedPicks=issues.flatMap(i=>(i.picks||[]).filter(p=>p.observations>0));
+  const observedRockets=observedPicks.filter(p=>p.rocketDate&&p.rocketDays!=null);
   const picks=issues.flatMap(i=>(i.picks||[]).filter(p=>p.complete&&p.observations>0));
   const rockets=picks.filter(p=>p.rocketDate);
   const fastRockets=rockets.filter(p=>(p.rocketDays??RECOMMEND_HORIZON_DAYS)<=RECOMMEND_CONVERSION_DAYS);
@@ -1463,7 +1465,8 @@ function getRecommendationOutcomeSummary(){
     fastRockets:fastRockets.length,delayedRockets,earlyFailures:earlyFailures.length,
     failures:failures.length,
     conversionPct:picks.length?+(rockets.length/picks.length*100).toFixed(1):null,
-    avgRocketDays:rockets.length?+(meanArr(rockets.map(p=>p.rocketDays)).toFixed(1)):null,
+    rocketArrivalCount:observedRockets.length,
+    avgRocketDays:observedRockets.length?+(meanArr(observedRockets.map(p=>p.rocketDays)).toFixed(1)):null,
     avgBestHighPct:upsides.length?+meanArr(upsides).toFixed(2):null,
     avgOutcomeScore:scored.length?+meanArr(scored).toFixed(3):null,
     issueDays:issues.length
@@ -2513,7 +2516,7 @@ function renderStats(){
     const nudgeStr=nudge>0?` · <span style="color:var(--amber);font-size:10px" title="Same-day missed upside averages ${opportunity.avgMissed.toFixed(2)}%. 25% of that is added to TGT.">missed opp +${nudge.toFixed(2)}%</span>`:'';
     const _cp=TRADEBOOK_STATS.avgChargePct!=null?Math.abs(TRADEBOOK_STATS.avgChargePct):null;
     const costStr=(_cp!=null&&_cp>0)?` · <span style="color:var(--t2)" title="Avg total Zerodha charges as % of round-trip turnover (buy+sell value), across all tradebook trips">cost ~${_cp.toFixed(2)}%</span>`:'';
-    return `<div class="st"><div class="st-l">SL / TGT</div><div class="st-v" style="font-size:17px"><span style="color:var(--red)">−${_sl}%</span><span style="color:var(--t3);font-size:13px"> / </span><span style="color:var(--green)">+${_tgt}%</span></div><div class="st-d">R:R ${rr}${costStr} · velocity policy${holdStr}${opportunityStr}${nudgeStr}</div></div>`;
+    return `<div class="st"><div class="st-l">SL / TGT</div><div class="st-v" style="font-size:17px"><span style="color:var(--red)">−${_sl}%</span><span style="color:var(--t3);font-size:13px"> / </span><span style="color:var(--green)">+${_tgt}%</span></div><div class="st-d">R:R ${rr}${costStr} · tradebook exit policy${holdStr}${opportunityStr}${nudgeStr}</div></div>`;
   })();
 
   document.getElementById('statsBar').innerHTML=`
@@ -2726,7 +2729,7 @@ function renderPerformance(){
     el.innerHTML=`<div style="text-align:center;padding:80px 40px;color:var(--t2)"><div style="font-size:36px;margin-bottom:16px">📒</div><div style="font-size:16px;font-weight:700;color:var(--t1);margin-bottom:8px">No Tradebook Loaded</div><div>Upload TRADEBOOK.csv to see performance analytics.</div></div>`;
     return;
   }
-  // Re-apply the realised profit-velocity policy after tradebook refresh.
+  // Re-apply the realised tradebook exit policy after tradebook refresh.
   if(tb.tripsData?.length){
     refreshExitPolicyFromFeedback(tb);
     try{FS.set(TRADEBOOK_STORE,tb);}catch(e){}
@@ -2782,7 +2785,7 @@ function renderPerformance(){
     {label:'Avg Hold',value:p.avgHoldDays+'d',color:'var(--t1)',sub:'Avg position duration'},
     {label:'Avg Position',value:fmtINR(p.avgCapital||0),color:'var(--t1)',sub:'Observed avg capital per position'},
     {label:'Recommended Position',value:recPos.value?fmtINR(recPos.value):'—',color:recPos.value?'var(--amber)':'var(--t3)',sub:recPosSub},
-    {label:'Learned Hold Cap',value:exitPolicy?exitPolicy.holdDays+'d':'—',color:exitPolicy?'var(--amber)':'var(--t3)',sub:exitPolicy&&exitPolicy.velocityPctPerDay!=null?`Observed +${exitPolicy.velocityPctPerDay.toFixed(3)}%/day`:'Re-upload tradebook to learn'},
+    {label:'Review After',value:exitPolicy?exitPolicy.holdDays+'d':'—',color:exitPolicy?'var(--amber)':'var(--t3)',sub:exitPolicy&&exitPolicy.velocityPctPerDay!=null?`Active exit policy · realised ${exitPolicy.velocityPctPerDay.toFixed(3)}%/day`:'Re-upload tradebook to learn'},
     {label:'Largest Loss',value:fmtSignedINR(p.largestLossRs),color:'var(--red)',sub:'Single lot, net'},
     {label:'Max Drawdown',value:p.maxDrawdown>0?fmtSignedINR(-p.maxDrawdown):'—',color:'var(--red)',sub:'Peak-to-trough in period'},
     {label:'Max Loss Streak',value:p.maxLossStreak+' days',color:p.maxLossStreak>=5?'var(--red)':p.maxLossStreak>=3?'var(--amber)':'var(--green)',sub:'Consecutive losing days'},
@@ -2792,14 +2795,15 @@ function renderPerformance(){
   if(recSummary.evaluated){
     const bestUpside=recSummary.avgBestHighPct;
     kpis.splice(11,0,
-      {label:'Rec -> Rockets',value:recSummary.conversionPct+'%',color:recSummary.conversionPct>=20?'var(--green)':recSummary.conversionPct>=10?'var(--amber)':'var(--red)',sub:`${recSummary.rockets}/${recSummary.evaluated} shortlist picks within ${RECOMMEND_HORIZON_DAYS}d`},
-      {label:'Rec Best Upside',value:bestUpside!=null?(bestUpside>=0?'+':'')+bestUpside.toFixed(2)+'%':'—',color:bestUpside!=null?(bestUpside>=0?'var(--green)':'var(--red)'):'var(--t3)',sub:recSummary.avgRocketDays!=null?`Rockets arrived in avg ${recSummary.avgRocketDays}d`:'No rocket conversions yet'}
+      {label:'5D Rocket Conversion',value:recSummary.conversionPct+'%',color:recSummary.conversionPct>=20?'var(--green)':recSummary.conversionPct>=10?'var(--amber)':'var(--red)',sub:`Tracking only · ${recSummary.rockets}/${recSummary.evaluated} shortlist picks`},
+      {label:'Shortlist 5D Peak',value:bestUpside!=null?(bestUpside>=0?'+':'')+bestUpside.toFixed(2)+'%':'—',color:bestUpside!=null?(bestUpside>=0?'var(--green)':'var(--red)'):'var(--t3)',sub:'Tracking only · average highest observed upside'},
+      {label:'Avg Time to Rocket',value:recSummary.avgRocketDays!=null?recSummary.avgRocketDays+'d':'—',color:recSummary.avgRocketDays!=null?'var(--amber)':'var(--t3)',sub:recSummary.rocketArrivalCount?`Tracking only · ${recSummary.rocketArrivalCount} converted recommendation${recSummary.rocketArrivalCount===1?'':'s'}`:'No observed conversions yet'}
     );
   }
   if(entrySummary.completed){
     kpis.splice(11,0,
-      {label:'Entry Velocity',value:(entrySummary.avgVelocity>=0?'+':'')+entrySummary.avgVelocity.toFixed(3)+'%/d',color:entrySummary.avgVelocity>=0?'var(--green)':'var(--red)',sub:`${entrySummary.positive}/${entrySummary.completed} executed recommendations profitable by best net velocity`},
-      {label:'Entry Best Net',value:(entrySummary.avgBestNet>=0?'+':'')+entrySummary.avgBestNet.toFixed(2)+'%',color:entrySummary.avgBestNet>=0?'var(--green)':'var(--red)',sub:`${entrySummary.topups} completed top-ups included`}
+      {label:'Entry 5D Peak / Day',value:(entrySummary.avgVelocity>=0?'+':'')+entrySummary.avgVelocity.toFixed(3)+'%/d',color:entrySummary.avgVelocity>=0?'var(--green)':'var(--red)',sub:`Tracking only · ${entrySummary.positive}/${entrySummary.completed} had a positive peak`},
+      {label:'Entry 5D Peak Net',value:(entrySummary.avgBestNet>=0?'+':'')+entrySummary.avgBestNet.toFixed(2)+'%',color:entrySummary.avgBestNet>=0?'var(--green)':'var(--red)',sub:`Tracking only · highest net opportunity; ${entrySummary.topups} top-ups`}
     );
   }
   const kpiHtml=`<div class="kpi-grid">`+kpis.map(k=>`
@@ -3154,7 +3158,7 @@ function renderPerformance(){
     ].filter(Boolean).join(' ');
 
     const _evidence=_longTotal>0
-      ?`<div style="font-size:11px;color:var(--t3);margin-top:6px;line-height:1.5"><strong style="color:var(--t2)">Signal</strong> = avg(P&amp;L%, P&amp;L ₹, −Days Held, Dist-to-SL), all cross-normalised to [−1,+1]. Days Held is quantity-weighted across the remaining FIFO buy lots. Equal weights — lower = more urgent to exit. The profit-velocity policy reviews positions after <strong style="color:var(--amber)">${cutoffDays}d</strong>; historically, trips beyond it had a <strong style="color:${_longWR<50?'var(--red)':'var(--amber)'}">${_longWR}% win rate</strong> across ${_longTotal} lots (net ${fmtSignedINR(_longPnl)}).</div>`
+      ?`<div style="font-size:11px;color:var(--t3);margin-top:6px;line-height:1.5"><strong style="color:var(--t2)">Signal</strong> = avg(P&amp;L%, P&amp;L ₹, −Days Held, Dist-to-SL), all cross-normalised to [−1,+1]. Days Held is quantity-weighted across the remaining FIFO buy lots. Equal weights — lower = more urgent to exit. The tradebook exit policy reviews positions after <strong style="color:var(--amber)">${cutoffDays}d</strong>; historically, trips beyond it had a <strong style="color:${_longWR<50?'var(--red)':'var(--amber)'}">${_longWR}% win rate</strong> across ${_longTotal} lots (net ${fmtSignedINR(_longPnl)}).</div>`
       :'';
 
     timeStopHtml=`<div id="perf-timestop-card" style="background:var(--bg-card);border:1px solid ${_negCount>0?'rgba(239,68,68,.4)':'var(--border)'};border-radius:10px;margin-bottom:12px;overflow:hidden">
@@ -3197,19 +3201,19 @@ function renderPerformance(){
     ${_navLink('perf-stocks','📈 Stocks',p.symBreakdown.length>0)}
   </nav>`;
   const entryOutcomeText=entrySummary.completed
-    ? `${entrySummary.completed} actual recommended buys assessed for ${ENTRY_OUTCOME_HORIZON_DAYS} trading days (${entrySummary.topups} top-ups). Their average best net opportunity is ${entrySummary.avgBestNet>=0?'+':''}${entrySummary.avgBestNet.toFixed(2)}%; their best observed profit velocity averages ${entrySummary.avgVelocity>=0?'+':''}${entrySummary.avgVelocity.toFixed(3)}%/day. Completed profit-velocity outcomes now feed selection ranking with capped confidence.`
+    ? `${entrySummary.completed} actual recommended buys assessed for ${ENTRY_OUTCOME_HORIZON_DAYS} trading days (${entrySummary.topups} top-ups). Their average best net opportunity is ${entrySummary.avgBestNet>=0?'+':''}${entrySummary.avgBestNet.toFixed(2)}%; their best observed peak velocity averages ${entrySummary.avgVelocity>=0?'+':''}${entrySummary.avgVelocity.toFixed(3)}%/day. This is tracking-only telemetry and does not change selection ranking.`
     : entrySummary.tracked
-      ? `${entrySummary.tracked} actual recommended buys are being tracked; selection feedback activates as completed ${ENTRY_OUTCOME_HORIZON_DAYS}-trading-day outcomes accumulate. Fresh buys and top-ups are assessed separately in the stored evidence.`
-      : `Executed-entry feedback is ready. Future completed BUY executions that came from displayed recommendations will be assessed for net profit velocity across the next ${ENTRY_OUTCOME_HORIZON_DAYS} trading days.`;
+      ? `${entrySummary.tracked} actual recommended buys are being tracked across ${ENTRY_OUTCOME_HORIZON_DAYS} trading days. Fresh buys and top-ups are assessed separately, but this telemetry does not change selection ranking.`
+      : `Executed-entry tracking is ready. Future completed BUY executions that came from displayed recommendations will be assessed across the next ${ENTRY_OUTCOME_HORIZON_DAYS} trading days; the results are diagnostic only.`;
   const outcomeText=recSummary.evaluated
-    ? `${recSummary.evaluated} completed engine-shortlist picks assessed across ${recSummary.issueDays} scan days. ${recSummary.rockets} became rockets within ${RECOMMEND_HORIZON_DAYS} trading days (${recSummary.conversionPct}%): ${recSummary.fastRockets||0} inside the ${RECOMMEND_CONVERSION_DAYS}d conversion window and ${recSummary.delayedRockets||0} delayed. ${recSummary.earlyFailures||0} failed the early window and ${recSummary.failures||0} moved opposite enough to count as negative telemetry. Average outcome score is ${recSummary.avgOutcomeScore!=null?(recSummary.avgOutcomeScore>=0?'+':'')+recSummary.avgOutcomeScore.toFixed(3):'not available'}; average attainable high move is ${recSummary.avgBestHighPct!=null?(recSummary.avgBestHighPct>=0?'+':'')+recSummary.avgBestHighPct.toFixed(2)+'%':'not available'}.`
+    ? `${recSummary.evaluated} completed engine-shortlist picks assessed across ${recSummary.issueDays} scan days. ${recSummary.rockets} became rockets within ${RECOMMEND_HORIZON_DAYS} trading days (${recSummary.conversionPct}%): ${recSummary.fastRockets||0} inside the ${RECOMMEND_CONVERSION_DAYS}d conversion window and ${recSummary.delayedRockets||0} delayed. Observed conversions took ${recSummary.avgRocketDays!=null?recSummary.avgRocketDays+' trading days on average':'an unavailable average time'}. ${recSummary.earlyFailures||0} failed the early window and ${recSummary.failures||0} moved opposite enough to count as negative telemetry. Average outcome score is ${recSummary.avgOutcomeScore!=null?(recSummary.avgOutcomeScore>=0?'+':'')+recSummary.avgOutcomeScore.toFixed(3):'not available'}; average attainable high move is ${recSummary.avgBestHighPct!=null?(recSummary.avgBestHighPct>=0?'+':'')+recSummary.avgBestHighPct.toFixed(2)+'%':'not available'}.`
     : `Outcome tracking has started. A shortlist gets a ${RECOMMEND_CONVERSION_DAYS}-trading-day conversion check and a final ${RECOMMEND_HORIZON_DAYS}-trading-day assessment.`;
   const exitOpportunity=getSameDayExitOpportunitySummary();
   const escapeText=exitOpportunity.exits
     ? `${exitOpportunity.exits} symbol/date exits have same-day ALL NSE highs recorded. ${exitOpportunity.upsideExits} highs exceeded the quantity-weighted average sell price; sold-value-weighted missed upside averages ${exitOpportunity.avgMissed.toFixed(2)}% (${fmtINR(exitOpportunity.missedValue)}).`
     : `No same-day exit opportunities have been recorded yet. Load Orders, Tradebook, and ALL NSE for the sell day.`;
   const outcomeHtml=perfCard('Recommendation Outcome Feedback',
-    `<div style="padding:14px 16px;color:var(--t2);font-size:12px;line-height:1.7"><div><strong style="color:var(--t1)">Actual entries:</strong> ${entryOutcomeText}</div><div style="margin-top:8px"><strong style="color:var(--t1)">Eligible shortlist:</strong> ${outcomeText}</div><div style="margin-top:8px"><strong style="color:var(--t1)">Same-day exit opportunity:</strong> ${escapeText}</div><div style="margin-top:8px;color:var(--t3)">Actual-entry profit velocity and shortlist telemetry affect global feature relevance with capped weights. Same-day missed upside adjusts TGT only; it does not alter feature learning or widen SL.</div></div>`,'','perf-outcomes');
+    `<div style="padding:14px 16px;color:var(--t2);font-size:12px;line-height:1.7"><div><strong style="color:var(--t1)">Actual entries:</strong> ${entryOutcomeText}</div><div style="margin-top:8px"><strong style="color:var(--t1)">Eligible shortlist:</strong> ${outcomeText}</div><div style="margin-top:8px"><strong style="color:var(--t1)">Same-day exit opportunity:</strong> ${escapeText}</div><div style="margin-top:8px;color:var(--t3)">Entry and shortlist outcomes are currently tracking-only (feedback weight 0), so they do not change mRMR feature weights or rankings. The tradebook exit policy actively sets SL, base TGT, and review timing. Same-day missed upside adjusts TGT only.</div></div>`,'','perf-outcomes');
 
   el.innerHTML=`
     <div style="padding:12px 16px">
@@ -5035,7 +5039,7 @@ function parseTradebook(text){
   LAST_BUY_DATE_MAP=lastBuyDateMap;
 
 
-  console.log('TRADEBOOK:',stats.roundTrips,'round trips,',stats.winners,'winners ('+stats.winRate+'%), velocity policy SL:'+stats.adaptiveSL+'% TGT:'+stats.adaptiveTGT+'% hold:'+stats.holdLimitDays+'d');
+  console.log('TRADEBOOK:',stats.roundTrips,'round trips,',stats.winners,'winners ('+stats.winRate+'%), exit policy SL:'+stats.adaptiveSL+'% TGT:'+stats.adaptiveTGT+'% review:'+stats.holdLimitDays+'d');
   return stats;
 }
 
