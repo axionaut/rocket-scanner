@@ -1,5 +1,5 @@
-const BUILD_TS='2026-06-16 10:18 IST'; // replaced at commit time with IST datetime
-const APP_VERSION=419; // Shared deployed version; increment once per released code change.
+const BUILD_TS='2026-06-16 20:34 IST'; // replaced at commit time with IST datetime
+const APP_VERSION=420; // Shared deployed version; increment once per released code change.
 const GOOGLE_DRIVE_CLIENT_ID='1015012642264-oi2nelv3v90k3d39r994a6nelgjs2a56.apps.googleusercontent.com'; // Public OAuth Web Client ID.
 const HARD_FILTER_SCHEMA='structural_tradeability_v2';
 const ROCKET_TARGET_FRACTION=0.005; // Top 0.5% between consecutive valid snapshots.
@@ -225,6 +225,15 @@ const FS = (() => {
     restoreSession();
     await restoreLocalDirectoryHandle();
     updateFolderUI();
+    if(!isConnected()&&localStorage.getItem(PROVIDER_STORE)==='drive'){
+      try{
+        const restored=await connect({silent:true});
+        if(restored?.ok){
+          updateFolderUI();
+          return restored.brain||await readLocalBrain();
+        }
+      }catch(e){console.warn('Silent Drive reconnect failed',e);}
+    }
     if(!isConnected()) return await readLocalBrain();
     try{
       const brain=await read();
@@ -232,7 +241,8 @@ const FS = (() => {
     }catch(e){console.warn('Drive startup read failed',e);return await readLocalBrain();}
   }
 
-  async function connect(){
+  async function connect(opts={}){
+    const silent=!!opts.silent;
     if(!isConfigured()) return {ok:false,reason:'missing_client_id'};
     if(!(await waitForGIS())) return {ok:false,reason:'google_library'};
     return new Promise(resolve=>{
@@ -256,7 +266,7 @@ const FS = (() => {
         },
         error_callback:()=>resolve({ok:false,reason:'popup_failed'})
       });
-      _tokenClient.requestAccessToken({prompt:''});
+      _tokenClient.requestAccessToken({prompt:silent?'':''});
     });
   }
 
