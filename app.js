@@ -1,5 +1,5 @@
-const BUILD_TS='2026-06-16 09:39 IST'; // replaced at commit time with IST datetime
-const APP_VERSION=418; // Shared deployed version; increment once per released code change.
+const BUILD_TS='2026-06-16 10:18 IST'; // replaced at commit time with IST datetime
+const APP_VERSION=419; // Shared deployed version; increment once per released code change.
 const GOOGLE_DRIVE_CLIENT_ID='1015012642264-oi2nelv3v90k3d39r994a6nelgjs2a56.apps.googleusercontent.com'; // Public OAuth Web Client ID.
 const HARD_FILTER_SCHEMA='structural_tradeability_v2';
 const ROCKET_TARGET_FRACTION=0.005; // Top 0.5% between consecutive valid snapshots.
@@ -3043,7 +3043,7 @@ function renderPerformance(){
         tsl1Price,tsl1RawPrice:rawTsl1Price,tsl1GapPct:tslInfo?.gapPct1??null,tsl1LockPct:tslInfo?.lockPct1??null,
         tsl1Points:tslInfo?.trailPoints1??null,tsl1Distance:tslInfo?.distancePoints1??null,tsl1Basis:tslInfo?.basis1||'',tsl1TargetPct:tslInfo?.targetPct1??adaptiveTGT,
         tsl2Price,tsl2RawPrice:rawTsl2Price,tsl2GapPct:tslInfo?.gapPct2??null,tsl2LockPct:tslInfo?.lockPct2??null,
-        tsl2Points:tslInfo?.trailPoints2??null,tsl2Distance:tslInfo?.distancePoints2??null,tsl2Basis:tslInfo?.basis2||'',tsl2TargetPct:tslInfo?.targetPct2??(getRunnerTgtPct()||adaptiveTGT*1.5),signal,
+        tsl2Points:tslInfo?.trailPoints2??null,tsl2Distance:tslInfo?.distancePoints2??null,tsl2Basis:tslInfo?.basis2||'',tsl2TargetPct:tslInfo?.targetPct2??(getRunnerTgtPct(scannerRow,avgCost,adaptiveTGT)||adaptiveTGT*1.5),signal,
         _sortDays:daysHeld==null?-1:daysHeld});
     };
     if(POSITIONS?.length) POSITIONS.forEach(p=>{if(p.qty>0) _addPos(p.symbol,p.qty,p.avg||p.avgCost,p.ltp);});
@@ -3854,12 +3854,33 @@ function getEffectiveTgtPct(){
   return roundPct05(vals[Math.floor(vals.length/2)]+nudge);
 }
 
-function getRunnerTgtPct(){
+function getRunnerTgtPct(row=null,buyPrice=null,baseTarget=null){
   const nudge=getMissedOppNudge();
   const policy=getOutcomeTargetPolicy();
-  if(policy?.runnerTgt>0) return roundPct05(policy.runnerTgt+nudge);
-  const base=getEffectiveTgtPct();
-  return base>0?roundPct05(base*1.5):null;
+  const base=(baseTarget&&isFinite(baseTarget)&&baseTarget>0)?Number(baseTarget):getEffectiveTgtPct();
+  let runner=policy?.runnerTgt>0?policy.runnerTgt+nudge:(base>0?base*1.5:null);
+  if(!(runner>0)) return null;
+  const atr=row?.atr!=null&&isFinite(row.atr)&&row.atr>0?Number(row.atr):null;
+  const entry=(buyPrice&&isFinite(buyPrice)&&buyPrice>0)?Number(buyPrice):((row?.price&&isFinite(row.price)&&row.price>0)?Number(row.price):null);
+  const dayHigh=(row?.high1d&&isFinite(row.high1d)&&row.high1d>0)?Number(row.high1d):null;
+  const dayHighPct=(entry>0&&dayHigh>entry)?((dayHigh-entry)/entry*100):null;
+  if(base>0){
+    const minRunner=base+0.25;
+    let floor=minRunner;
+    let ceiling=Math.max(floor,base*1.8);
+    if(atr>0){
+      floor=Math.max(floor,base+(atr*0.5));
+      ceiling=Math.min(ceiling,Math.max(floor,base+(atr*1.5)));
+    }
+    if(dayHighPct!=null){
+      const reachable=Math.max(floor,dayHighPct);
+      runner=Math.max(runner,Math.min(reachable,ceiling));
+      ceiling=Math.min(ceiling,reachable);
+    }
+    runner=clampNum(runner,floor,ceiling);
+  }
+  const rounded=roundPct05(runner);
+  return rounded>base?rounded:roundPct05(base+0.25);
 }
 
 function calendarDaysHeld(dateStr){
@@ -3916,7 +3937,7 @@ function calcPositionTSL({sym, qty, avgCost, ltp, scannerRow, adaptiveSL, adapti
   const peakProfitPct=+(((peak-avgCost)/avgCost)*100).toFixed(2);
   const protective=tickPrice(avgCost*(1-adaptiveSL/100));
   const target1=(adaptiveTGT&&isFinite(adaptiveTGT)&&adaptiveTGT>0)?adaptiveTGT:4.2;
-  const target2=getRunnerTgtPct()||target1*1.5;
+  const target2=getRunnerTgtPct(scannerRow,avgCost,target1)||target1*1.5;
   const atrPct=(scannerRow?.atr!=null&&isFinite(scannerRow.atr)&&scannerRow.atr>0)?scannerRow.atr:null;
   const minStep=getZerodhaMinTrailPoints(avgCost);
   const avgChanged=prev?.avg!=null&&Math.abs(prev.avg-avgCost)/avgCost>0.01;
@@ -5099,7 +5120,7 @@ function exportBasket(){
   // Universal SL/TGT from tradebook (already cost-adjusted)
   const adaptiveSL=roundPct05(TRADEBOOK_STATS?TRADEBOOK_STATS.adaptiveSL:3.5);
   const adaptiveTGT=roundPct05(getEffectiveTgtPct()||(TRADEBOOK_STATS?TRADEBOOK_STATS.adaptiveTGT:3.7));
-  const runnerTGT=roundPct05(getRunnerTgtPct()||adaptiveTGT*1.5);
+  let runnerTGT=roundPct05(getRunnerTgtPct(null,null,adaptiveTGT)||adaptiveTGT*1.5);
 
   const orders=[];
   let rejectedCount=0;
@@ -5143,6 +5164,7 @@ function exportBasket(){
       const baseQty=Math.ceil(qty/2);
       const runnerQty=qty-baseQty;
       if(baseQty+runnerQty!==qty||baseQty<=0||runnerQty<=0) throw new Error(`Invalid basket split for ${s.symbol}: ${qty} -> ${baseQty}+${runnerQty}`);
+      runnerTGT=roundPct05(getRunnerTgtPct(s,buyPrice,adaptiveTGT)||adaptiveTGT*1.5);
       pushBuyOrder(s,baseQty,buyPrice,adaptiveTGT,'TGT1');
       pushBuyOrder(s,runnerQty,buyPrice,runnerTGT,'TGT2');
       splitCount++;
