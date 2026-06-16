@@ -1,5 +1,5 @@
-const BUILD_TS='2026-06-15 14:17 IST'; // replaced at commit time with IST datetime
-const APP_VERSION=416; // Shared deployed version; increment once per released code change.
+const BUILD_TS='2026-06-16 09:25 IST'; // replaced at commit time with IST datetime
+const APP_VERSION=417; // Shared deployed version; increment once per released code change.
 const GOOGLE_DRIVE_CLIENT_ID='1015012642264-oi2nelv3v90k3d39r994a6nelgjs2a56.apps.googleusercontent.com'; // Public OAuth Web Client ID.
 const HARD_FILTER_SCHEMA='structural_tradeability_v2';
 const ROCKET_TARGET_FRACTION=0.005; // Top 0.5% between consecutive valid snapshots.
@@ -3388,56 +3388,69 @@ function buildHardFilterMethodologyHTML(E){
 
 // ── Surveillance P&L Correlation ──
 // For each surveillance column, checks which currently-held stocks are flagged and
-// computes their current P&L%. Accumulated over sessions like the mRMR correlators.
-// Requires: HOLDINGS + SURV_ALL_HITS both loaded.
+// computes their current P&L%. Historical accumulation is maintained internally,
+// but the visible table must never show stale rows as current holdings.
+function getCurrentSurvHoldingRows(){
+  if(!Object.keys(SURV_ALL_HITS||{}).length) return [];
+  const heldPos=getHeldPositionMap();
+  const rowsByCol={};
+  const nonFlag=new Set(['scripcode','symbol','nse exclusive','status','series']);
+  Object.entries(heldPos).forEach(([sym,pos])=>{
+    if(!sym||!(pos?.qty>0)) return;
+    const hitCols=SURV_ALL_HITS[sym];
+    if(!hitCols) return;
+    const ltp=ALL.find(s=>s.symbol===sym)?.price
+      ||POSITIONS?.find(p=>p.symbol===sym)?.ltp
+      ||HOLDINGS?.find(h=>h.symbol===sym)?.ltp
+      ||null;
+    const avg=pos.avg||HOLD_COST_MAP[sym]||HOLDINGS?.find(h=>h.symbol===sym)?.avgCost||null;
+    if(!(ltp>0)||!(avg>0)) return;
+    const pnlPct=+(((ltp-avg)/avg)*100).toFixed(2);
+    Object.keys(hitCols).forEach(col=>{
+      const label=String(col||'').trim();
+      const lower=label.toLowerCase();
+      if(!label||nonFlag.has(lower)||/^filler/i.test(label)) return;
+      const key=survRuleKey(label);
+      if(!key) return;
+      if(!rowsByCol[key]) rowsByCol[key]={key,col:label,stocks:[]};
+      rowsByCol[key].stocks.push({sym,pnlPct});
+    });
+  });
+  return Object.values(rowsByCol).map(row=>{
+    row.stocks.sort((a,b)=>a.pnlPct-b.pnlPct);
+    const avgPnl=row.stocks.reduce((sum,s)=>sum+s.pnlPct,0)/row.stocks.length;
+    const wins=row.stocks.filter(s=>s.pnlPct>0).length;
+    return {...row,sessions:10,lastCount:row.stocks.length,avgPnl,winRate:wins/row.stocks.length*100};
+  });
+}
+
 function updateSurvCorrelation(){
-  if(!HOLDINGS?.length||!Object.keys(SURV_ALL_HITS).length) return;
-  // Deduplicate: only accumulate once per unique (surv symbols + holdings count) combo per session
-  const _tag=Object.keys(SURV_ALL_HITS).sort().slice(0,15).join('|')+'|'+HOLDINGS.length;
+  const currentRows=getCurrentSurvHoldingRows();
+  if(!currentRows.length) return;
+  const _tag=currentRows.map(r=>r.key+':'+r.stocks.map(s=>s.sym+'@'+s.pnlPct).join(',')).sort().join('|');
   if(_tag===SURV_CORR_LAST_TAG) return;
   SURV_CORR_LAST_TAG=_tag;
   // Build held symbol → current P&L% map
-  const holdPnl={};
-  HOLDINGS.forEach(h=>{
-    if(!h?.symbol||!(h.qty>0)) return;
-    const ltp=ALL.find(s=>s.symbol===h.symbol)?.price
-              ||(POSITIONS?.find(p=>p.symbol===h.symbol)?.ltp)
-              ||h.ltp||null;
-    const avg=HOLD_COST_MAP[h.symbol]??h.avgCost??null;
-    if(ltp&&avg&&avg>0) holdPnl[h.symbol]=(ltp-avg)/avg*100;
-  });
-  if(!Object.keys(holdPnl).length) return;
-
   let updated=false;
-  const _scNonFlag=new Set(['scripcode','symbol','nse exclusive','status','series']);
-  SURV_HEADERS.forEach(col=>{
-    if(!col) return;const _schl=col.trim().toLowerCase();if(_scNonFlag.has(_schl)||/^filler/i.test(col.trim())) return;
-    const key=survRuleKey(col); if(!key) return;
-    // Find held symbols flagged under this column
-    const flagged=Object.entries(SURV_ALL_HITS)
-      .filter(([sym,cols])=>cols[col]&&holdPnl[sym]!==undefined)
-      .map(([sym])=>({sym,pnl:holdPnl[sym]}));
-    if(!flagged.length) return; // none of my holdings are in this bucket this session
-    const wins=flagged.filter(f=>f.pnl>0).length;
-    const curWinRate=wins/flagged.length*100;
-    const curAvgPnl=flagged.reduce((s,f)=>s+f.pnl,0)/flagged.length;
-    // Running mean accumulation
-    if(!SURV_CORR_ACC[key]) SURV_CORR_ACC[key]={col,key,sessions:0,winRate:0,avgPnl:0,lastCount:0};
-    const acc=SURV_CORR_ACC[key];
+  currentRows.forEach(row=>{
+    if(!SURV_CORR_ACC[row.key]) SURV_CORR_ACC[row.key]={col:row.col,key:row.key,sessions:0,winRate:0,avgPnl:0,lastCount:0};
+    const acc=SURV_CORR_ACC[row.key];
     const n=acc.sessions+1;
-    acc.winRate=(acc.winRate*(n-1)+curWinRate)/n;
-    acc.avgPnl=(acc.avgPnl*(n-1)+curAvgPnl)/n;
-    acc.sessions=n; acc.col=col; acc.lastCount=flagged.length;
+    acc.winRate=(acc.winRate*(n-1)+row.winRate)/n;
+    acc.avgPnl=(acc.avgPnl*(n-1)+row.avgPnl)/n;
+    acc.sessions=n; acc.col=row.col; acc.lastCount=row.lastCount;
     updated=true;
   });
   if(updated) FS.set(SURV_CORR_STORE,SURV_CORR_ACC);
 }
 
 function buildSurvCorrHTML(){
-  const allAcc=Object.values(SURV_CORR_ACC).filter(r=>r.sessions>0);
+  const activeColKeys=new Set(getSurvRules().map(r=>r.key));
+  const liveRows=getCurrentSurvHoldingRows().filter(r=>!activeColKeys.has(r.key));
+  const allAcc=liveRows;
   // Show placeholder only when nothing accumulated yet
   if(!allAcc.length){
-    const hasHoldings=HOLDINGS?.length>0;
+    const hasHoldings=Object.values(getHeldPositionMap()).some(p=>p?.qty>0);
     const hasSurv=Object.keys(SURV_ALL_HITS).length>0;
     let msg;
     if(!hasHoldings&&!hasSurv) msg='Load <strong>Holdings.csv</strong> + <strong>NSE ZIP</strong> to start accumulating surveillance P&amp;L correlation.';
@@ -3446,10 +3459,7 @@ function buildSurvCorrHTML(){
     else msg='None of your held stocks are currently flagged in surveillance — accumulator activates when a held position appears on the REG1 list.';
     return `<div style="padding:12px 14px;background:rgba(148,163,184,.06);border:1px solid var(--border);border-radius:8px;font-size:12px;color:var(--t3);margin-top:12px">${msg}</div>`;
   }
-  // Show staleness note if we can't accumulate this session
-  const canAccumulate=HOLDINGS?.length>0&&Object.keys(SURV_ALL_HITS).length>0;
-  const staleNote=canAccumulate?'':
-    `<div style="margin-bottom:8px;padding:6px 10px;background:rgba(251,191,36,.06);border:1px solid rgba(251,191,36,.2);border-radius:6px;font-size:11px;color:var(--amber)">Showing historical data. Load Holdings.csv + REG1 file this session to update the accumulator.</div>`;
+  const staleNote='';
   // Build held-position pills per surveillance column (col name → pills HTML)
   const heldPillMap={};
   const heldSyms=new Set();
@@ -3479,15 +3489,14 @@ function buildSurvCorrHTML(){
   // Sort each flag's stocks worst P&L first
   Object.values(heldPillMap).forEach(arr=>arr.sort((a,b)=>(a.pnlPct??Infinity)-(b.pnlPct??Infinity)));
 
-  const activeColKeys=new Set(getSurvRules().map(r=>r.key));
   const visRows=allAcc.filter(r=>!activeColKeys.has(r.key));
-  const maxSess=visRows.length?Math.max(...visRows.map(r=>r.sessions)):1;
+  const maxSess=1;
   const scRows=visRows.map(r=>{
-    const conf=r.sessions<2?'low':r.sessions<5?'med':'high';
+    const conf='live';
     const verdict=r.sessions<2?'❓':r.winRate<35&&r.avgPnl<-0.5?'🚫 Filter':r.winRate>65&&r.avgPnl>0.5?'✅ Safe':'📊 Neutral';
-    const stocks=heldPillMap[r.col]||[];
+    const stocks=r.stocks||[];
     const heldPills=stocks.map(({sym,pnlPct})=>{
-      const pnlColor=pnlPct==null?'var(--t3)':pnlPct>=0?'var(--green)':'var(--red)';
+      const pnlColor=pnlPct>=0?'var(--green)':'var(--red)';
       const pnlStr=pnlPct!=null?(pnlPct>=0?'+':'')+pnlPct.toFixed(1)+'%':'—';
       return `<span style="display:inline-flex;align-items:center;gap:4px;background:rgba(239,68,68,.1);border:1px solid rgba(239,68,68,.2);border-radius:4px;padding:2px 6px;margin:2px 3px 2px 0;white-space:nowrap;font-family:'DM Mono',monospace"><span style="font-weight:700;color:var(--amber);font-size:11px">${escHtml(sym)}</span><span style="color:${pnlColor};font-size:10px">${pnlStr}</span></span>`;
     }).join('');
