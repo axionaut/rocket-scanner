@@ -1,5 +1,5 @@
-const BUILD_TS='2026-06-16 09:25 IST'; // replaced at commit time with IST datetime
-const APP_VERSION=417; // Shared deployed version; increment once per released code change.
+const BUILD_TS='2026-06-16 09:39 IST'; // replaced at commit time with IST datetime
+const APP_VERSION=418; // Shared deployed version; increment once per released code change.
 const GOOGLE_DRIVE_CLIENT_ID='1015012642264-oi2nelv3v90k3d39r994a6nelgjs2a56.apps.googleusercontent.com'; // Public OAuth Web Client ID.
 const HARD_FILTER_SCHEMA='structural_tradeability_v2';
 const ROCKET_TARGET_FRACTION=0.005; // Top 0.5% between consecutive valid snapshots.
@@ -2468,7 +2468,7 @@ function renderStats(){
     if(!TRADEBOOK_STATS?.adaptiveSL) return '';
     const _sl=TRADEBOOK_STATS.adaptiveSL.toFixed(2);
     const _tgt=(getEffectiveTgtPct()||TRADEBOOK_STATS.adaptiveTGT).toFixed(2);
-    const _runner=(getRunnerTgtPct()||parseFloat(_tgt)*2).toFixed(2);
+    const _runner=(getRunnerTgtPct()||parseFloat(_tgt)*1.5).toFixed(2);
     const rr=(parseFloat(_sl)>0?(parseFloat(_tgt)/parseFloat(_sl)):0).toFixed(2);
     const policy=TRADEBOOK_STATS.exitPolicy;
     const targetPolicy=getOutcomeTargetPolicy();
@@ -3043,7 +3043,7 @@ function renderPerformance(){
         tsl1Price,tsl1RawPrice:rawTsl1Price,tsl1GapPct:tslInfo?.gapPct1??null,tsl1LockPct:tslInfo?.lockPct1??null,
         tsl1Points:tslInfo?.trailPoints1??null,tsl1Distance:tslInfo?.distancePoints1??null,tsl1Basis:tslInfo?.basis1||'',tsl1TargetPct:tslInfo?.targetPct1??adaptiveTGT,
         tsl2Price,tsl2RawPrice:rawTsl2Price,tsl2GapPct:tslInfo?.gapPct2??null,tsl2LockPct:tslInfo?.lockPct2??null,
-        tsl2Points:tslInfo?.trailPoints2??null,tsl2Distance:tslInfo?.distancePoints2??null,tsl2Basis:tslInfo?.basis2||'',tsl2TargetPct:tslInfo?.targetPct2??(getRunnerTgtPct()||adaptiveTGT*2),signal,
+        tsl2Points:tslInfo?.trailPoints2??null,tsl2Distance:tslInfo?.distancePoints2??null,tsl2Basis:tslInfo?.basis2||'',tsl2TargetPct:tslInfo?.targetPct2??(getRunnerTgtPct()||adaptiveTGT*1.5),signal,
         _sortDays:daysHeld==null?-1:daysHeld});
     };
     if(POSITIONS?.length) POSITIONS.forEach(p=>{if(p.qty>0) _addPos(p.symbol,p.qty,p.avg||p.avgCost,p.ltp);});
@@ -3820,7 +3820,7 @@ function getOutcomeTargetPolicy(){
   const evidenceCount=recPicks.length+entryRows.length;
   const positiveCount=recPositive.length+entryPositive.length;
   if(evidenceCount<OUTCOME_FEEDBACK_MIN_SAMPLES||!positiveCount){
-    return {baseTgt:realised,runnerTgt:roundPct05(realised*2),confidence:0,evidenceCount,positiveCount};
+    return {baseTgt:realised,runnerTgt:roundPct05(realised*1.5),confidence:0,evidenceCount,positiveCount};
   }
   const weightedEvidence=(entryValue,recValue)=>{
     const parts=[];
@@ -3835,9 +3835,11 @@ function getOutcomeTargetPolicy(){
   const confidence=Math.min(0.65,evidenceCount/(evidenceCount+30))*successRate;
   const baseOpportunity=Math.max(realised,reachable||realised);
   const baseTgt=roundPct05(realised+((baseOpportunity-realised)*confidence));
-  const mechanicalRunner=baseTgt*2;
-  const runnerOpportunity=Math.max(mechanicalRunner,upper||mechanicalRunner);
-  const runnerTgt=roundPct05(mechanicalRunner+((runnerOpportunity-mechanicalRunner)*confidence));
+  const runnerFallback=baseTgt*1.5;
+  const runnerFloor=baseTgt+Math.max(0.5,baseTgt*0.25);
+  const runnerCeiling=baseTgt*1.75;
+  const learnedRunner=upper||runnerFallback;
+  const runnerTgt=roundPct05(clampNum(learnedRunner,runnerFloor,runnerCeiling));
   return {baseTgt,runnerTgt,confidence:+confidence.toFixed(3),evidenceCount,positiveCount,
     reachable:reachable==null?null:+reachable.toFixed(2),upper:upper==null?null:+upper.toFixed(2)};
 }
@@ -3857,7 +3859,7 @@ function getRunnerTgtPct(){
   const policy=getOutcomeTargetPolicy();
   if(policy?.runnerTgt>0) return roundPct05(policy.runnerTgt+nudge);
   const base=getEffectiveTgtPct();
-  return base>0?roundPct05(base*2):null;
+  return base>0?roundPct05(base*1.5):null;
 }
 
 function calendarDaysHeld(dateStr){
@@ -3914,7 +3916,7 @@ function calcPositionTSL({sym, qty, avgCost, ltp, scannerRow, adaptiveSL, adapti
   const peakProfitPct=+(((peak-avgCost)/avgCost)*100).toFixed(2);
   const protective=tickPrice(avgCost*(1-adaptiveSL/100));
   const target1=(adaptiveTGT&&isFinite(adaptiveTGT)&&adaptiveTGT>0)?adaptiveTGT:4.2;
-  const target2=getRunnerTgtPct()||target1*2;
+  const target2=getRunnerTgtPct()||target1*1.5;
   const atrPct=(scannerRow?.atr!=null&&isFinite(scannerRow.atr)&&scannerRow.atr>0)?scannerRow.atr:null;
   const minStep=getZerodhaMinTrailPoints(avgCost);
   const avgChanged=prev?.avg!=null&&Math.abs(prev.avg-avgCost)/avgCost>0.01;
@@ -5097,7 +5099,7 @@ function exportBasket(){
   // Universal SL/TGT from tradebook (already cost-adjusted)
   const adaptiveSL=roundPct05(TRADEBOOK_STATS?TRADEBOOK_STATS.adaptiveSL:3.5);
   const adaptiveTGT=roundPct05(getEffectiveTgtPct()||(TRADEBOOK_STATS?TRADEBOOK_STATS.adaptiveTGT:3.7));
-  const runnerTGT=roundPct05(getRunnerTgtPct()||adaptiveTGT*2);
+  const runnerTGT=roundPct05(getRunnerTgtPct()||adaptiveTGT*1.5);
 
   const orders=[];
   let rejectedCount=0;
