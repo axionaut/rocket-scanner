@@ -1,11 +1,12 @@
-const BUILD_TS='2026-06-17 19:41 IST'; // replaced at commit time with IST datetime
-const APP_VERSION=422; // Shared deployed version; increment once per released code change.
+const BUILD_TS='2026-06-17 20:14 IST'; // replaced at commit time with IST datetime
+const APP_VERSION=423; // Shared deployed version; increment once per released code change.
 const GOOGLE_DRIVE_CLIENT_ID='1015012642264-oi2nelv3v90k3d39r994a6nelgjs2a56.apps.googleusercontent.com'; // Public OAuth Web Client ID.
 const HARD_FILTER_SCHEMA='structural_tradeability_v2';
 const ROCKET_TARGET_FRACTION=0.005; // Top 0.5% between consecutive valid snapshots.
 const SNAPSHOT_MIN_GAP_MINUTES=1;
-const SNAPSHOT_FORWARD_MAX_MINUTES=120;
-const SNAPSHOT_PENDING_MAX=24;
+const SNAPSHOT_GAP_MIN_RELIABILITY_SAMPLES=5;
+const SNAPSHOT_GAP_WEIGHT_MIN=0.25;
+const SNAPSHOT_GAP_WEIGHT_MAX=1.75;
 const NSE_OPEN_MINUTES=9*60+15;
 const NSE_CLOSE_MINUTES=15*60+30;
 const STOCK_RUNWAY_CEILING_PCT=19.5; // UC-style ceiling retained only for legacy helpers; entry-ceiling filtering is disabled.
@@ -1866,34 +1867,70 @@ function emptySnapshotRuntime(){
   return {schema:SNAPSHOT_STATE_SCHEMA,latest:null,completed:0,lastRockets:[],lastOutcome:null,lastTag:null};
 }
 let SNAPSHOT_PENDING_QUEUE=[];
-function accumulateSnapshotCorrelation(correlation){
+function accumulateSnapshotCorrelation(correlation, weight=1){
   const prior=ACC_CORR?.corrSchema===CORR_SCHEMA?ACC_CORR:{corr:{},counts:{},sessions:0,learnSessions:0,corrSchema:CORR_SCHEMA};
   const corr={...prior.corr},counts={...prior.counts};
+  const obsWeight=isFinite(weight)&&weight>0?weight:1;
   Object.entries(correlation||{}).forEach(([feature,value])=>{
     if(value==null||!isFinite(value)) return;
     const n=counts[feature]||0;
-    corr[feature]=n?corr[feature]+(value-corr[feature])/(n+1):value;
-    counts[feature]=n+1;
+    const total=n+obsWeight;
+    corr[feature]=n?((corr[feature]*n)+(value*obsWeight))/total:value;
+    counts[feature]=total;
   });
   const sessions=(prior.learnSessions??prior.sessions??0)+1;
-  ACC_CORR={...prior,corr,counts,sessions,learnSessions:sessions,corrSchema:CORR_SCHEMA,lastUpdated:new Date().toISOString()};
+  const weightedSessions=(prior.weightedSessions||0)+obsWeight;
+  ACC_CORR={...prior,corr,counts,sessions,learnSessions:sessions,weightedSessions,corrSchema:CORR_SCHEMA,lastUpdated:new Date().toISOString()};
 }
 function buildDecodedSnapshot({stamp,symbols,prices,featureRows,features,sessionTag}){
   return {...stamp,symbols:[...symbols],prices,featureRows,featureCols:[...features],features:null,sessionTag:sessionTag||null};
 }
 function seedPendingSnapshotQueue(runtime,stamp){
   if(!Array.isArray(SNAPSHOT_PENDING_QUEUE)) SNAPSHOT_PENDING_QUEUE=[];
-  SNAPSHOT_PENDING_QUEUE=SNAPSHOT_PENDING_QUEUE.filter(s=>s&&s.inSession&&s.sessionDate===stamp.sessionDate);
+  SNAPSHOT_PENDING_QUEUE=SNAPSHOT_PENDING_QUEUE.filter(s=>s&&(s.baselineEligible??s.inSession)&&s.sessionDate===stamp.sessionDate);
   const latest=runtime?.latest;
-  if(latest?.inSession&&latest.sessionDate===stamp.sessionDate&&!SNAPSHOT_PENDING_QUEUE.some(s=>s.timestamp===latest.timestamp)){
+  if((latest?.baselineEligible??latest?.inSession)&&latest.sessionDate===stamp.sessionDate&&!SNAPSHOT_PENDING_QUEUE.some(s=>s.timestamp===latest.timestamp)){
     SNAPSHOT_PENDING_QUEUE.push(latest);
   }
 }
 function trimPendingSnapshotQueue(currentStamp){
   SNAPSHOT_PENDING_QUEUE=(SNAPSHOT_PENDING_QUEUE||[])
-    .filter(s=>s&&s.inSession&&s.sessionDate===currentStamp.sessionDate&&s.timestamp<currentStamp.timestamp&&((currentStamp.timestamp-s.timestamp)/60000)<=SNAPSHOT_FORWARD_MAX_MINUTES)
-    .sort((a,b)=>a.timestamp-b.timestamp)
-    .slice(-SNAPSHOT_PENDING_MAX);
+    .filter(s=>s&&(s.baselineEligible??s.inSession)&&s.sessionDate===currentStamp.sessionDate&&s.timestamp<currentStamp.timestamp)
+    .sort((a,b)=>a.timestamp-b.timestamp);
+}
+function snapshotGapBucket(minutes){
+  const gap=Math.max(SNAPSHOT_MIN_GAP_MINUTES,Math.round(Number(minutes)||0));
+  const step=gap<=30?5:(gap<=120?15:30);
+  return `${Math.max(SNAPSHOT_MIN_GAP_MINUTES,Math.round(gap/step)*step)}m`;
+}
+function correlationQuality(correlation){
+  const vals=Object.values(correlation||{}).map(v=>Math.abs(Number(v))).filter(v=>isFinite(v)&&v>0).sort((a,b)=>b-a);
+  if(!vals.length) return 0;
+  return mean(vals.slice(0,Math.min(20,vals.length)));
+}
+function getGapReliabilityWeight(elapsedMinutes){
+  const stats=ACC_CORR?.gapStats||{};
+  const rec=stats[snapshotGapBucket(elapsedMinutes)];
+  const mature=Object.values(stats).filter(s=>s&&s.samples>=SNAPSHOT_GAP_MIN_RELIABILITY_SAMPLES&&isFinite(s.meanQuality));
+  if(!rec||rec.samples<SNAPSHOT_GAP_MIN_RELIABILITY_SAMPLES||mature.length<2) return 1;
+  const totalSamples=mature.reduce((sum,s)=>sum+s.samples,0)||1;
+  const globalQuality=mature.reduce((sum,s)=>sum+(s.meanQuality*s.samples),0)/totalSamples;
+  if(!isFinite(globalQuality)||globalQuality<=0) return 1;
+  return clampNum(rec.meanQuality/globalQuality,SNAPSHOT_GAP_WEIGHT_MIN,SNAPSHOT_GAP_WEIGHT_MAX);
+}
+function recordGapReliability(elapsedMinutes,quality,appliedWeight){
+  if(!ACC_CORR||!isFinite(quality)) return;
+  const bucket=snapshotGapBucket(elapsedMinutes);
+  const gapStats={...(ACC_CORR.gapStats||{})};
+  const prev=gapStats[bucket]||{bucket,samples:0,meanQuality:0,meanWeight:0,lastElapsedMinutes:null};
+  const samples=(prev.samples||0)+1;
+  gapStats[bucket]={
+    bucket,samples,
+    meanQuality:prev.samples?prev.meanQuality+(quality-prev.meanQuality)/samples:quality,
+    meanWeight:prev.samples?prev.meanWeight+(appliedWeight-prev.meanWeight)/samples:appliedWeight,
+    lastElapsedMinutes:elapsedMinutes,
+  };
+  ACC_CORR={...ACC_CORR,gapStats,lastUpdated:new Date().toISOString()};
 }
 function computeSnapshotPairCorrelation(previous,current,features){
   const currentIndex=new Map((current.symbols||[]).map((symbol,index)=>[symbol,index]));
@@ -1941,8 +1978,8 @@ async function advanceSnapshotLearning({rows,features,priceKey,sessionTag,advanc
     note='Rankings refreshed without advancing the snapshot sequence';
   }else if(duplicate){
     note='Duplicate snapshot ignored; predictions and learning were not advanced';
-  }else if(!stamp.inSession){
-    note='Outside NSE hours; rankings refreshed without creating a learning interval';
+  }else if(!stamp.baselineEligible){
+    note='Outside NSE snapshot hours; rankings refreshed without creating a learning baseline';
   }else{
     const previous=runtime.latest;
     const stale=previous&&stamp.timestamp<=previous.timestamp;
@@ -1950,12 +1987,15 @@ async function advanceSnapshotLearning({rows,features,priceKey,sessionTag,advanc
       seedPendingSnapshotQueue(runtime,stamp);
       trimPendingSnapshotQueue(stamp);
     }
-    const validPairs=!stale?SNAPSHOT_PENDING_QUEUE.filter(prev=>isValidSnapshotTransition(prev,stamp)): [];
+    const validPairs=!stale&&stamp.inSession?SNAPSHOT_PENDING_QUEUE.filter(prev=>isValidSnapshotTransition(prev,stamp)): [];
     if(validPairs.length){
       const pairSums={},pairCounts={};
       const pairs=validPairs.map(prev=>computeSnapshotPairCorrelation(prev,currentSnapshot,features));
       pairs.forEach(pair=>{
-        accumulateSnapshotCorrelation(pair.correlation);
+        pair.quality=correlationQuality(pair.correlation);
+        pair.weight=getGapReliabilityWeight(pair.elapsedMinutes);
+        accumulateSnapshotCorrelation(pair.correlation,pair.weight);
+        recordGapReliability(pair.elapsedMinutes,pair.quality,pair.weight);
         features.forEach(feature=>{
           const value=pair.correlation[feature];
           if(value==null||!isFinite(value)) return;
@@ -1969,12 +2009,16 @@ async function advanceSnapshotLearning({rows,features,priceKey,sessionTag,advanc
       const displayPair=pairs.reduce((best,pair)=>!best||pair.elapsedMinutes>best.elapsedMinutes?pair:best,null);
       runtime.lastRockets=displayPair.rockets.map(item=>({symbol:item.symbol,move:+item.value.toFixed(2)}));
       const elapsed=pairs.map(pair=>pair.elapsedMinutes),minElapsed=Math.min(...elapsed),maxElapsed=Math.max(...elapsed);
+      const weights=pairs.map(pair=>pair.weight).filter(v=>isFinite(v));
       runtime.lastOutcome={sourceTimestamp:displayPair.sourceTimestamp,completedAt:stamp.timestamp,elapsedMinutes:displayPair.elapsedMinutes,
-        minElapsedMinutes:minElapsed,maxElapsedMinutes:maxElapsed,forwardPairs:pairs.length,forwardWindowMinutes:SNAPSHOT_FORWARD_MAX_MINUTES,
+        minElapsedMinutes:minElapsed,maxElapsedMinutes:maxElapsed,forwardPairs:pairs.length,
+        minGapWeight:weights.length?Math.min(...weights):1,maxGapWeight:weights.length?Math.max(...weights):1,
         rocketCount:displayPair.rocketCount,cutoff:displayPair.cutoff,matched:displayPair.ranked.length};
-      note=`Learned from ${pairs.length} forward snapshot horizon${pairs.length===1?'':'s'} (${minElapsed}-${maxElapsed} min) across ${displayPair.ranked.length} stocks`;
+      note=`Learned from ${pairs.length} data-weighted snapshot horizon${pairs.length===1?'':'s'} (${minElapsed}-${maxElapsed} min) across ${displayPair.ranked.length} stocks`;
     }else if(stale){
       note='Older or same-time snapshot ignored; the current baseline was preserved';
+    }else if(!stamp.inSession){
+      note='Premarket baseline saved; live recommendations will start after the next market snapshot';
     }else if(previous){
       note=previous.sessionDate!==stamp.sessionDate
         ?'New NSE session baseline; overnight gap excluded from snapshot learning'
@@ -1986,7 +2030,7 @@ async function advanceSnapshotLearning({rows,features,priceKey,sessionTag,advanc
     if(!stale){
       runtime.latest=currentSnapshot;
       runtime.lastTag=sessionTag||null;
-      if(currentSnapshot.inSession){
+      if(currentSnapshot.baselineEligible){
         SNAPSHOT_PENDING_QUEUE.push(currentSnapshot);
         trimPendingSnapshotQueue({...stamp,timestamp:stamp.timestamp+1});
       }
@@ -3710,7 +3754,7 @@ function _renderMethodologyInner(){
     : (E.currentUploadLearned
       ? `First learning interval captured; recommendations are now active (${E.freshSignalCount||0} active features learned)`
       : 'First upload baseline saved; recommendations will start after the next upload');
-  const sessLabel = `${E.accSessions||0} learned pairs · ${E.laggedNote||'waiting for the next snapshot'}`;
+  const sessLabel = `${E.accSessions||0} learned horizons · ${E.laggedNote||'waiting for the next snapshot'}`;
   const breadthPct=E.marketBreadth!=null?(E.marketBreadth*100).toFixed(0):'?';
   const recFeedback=E.recommendationFeedback;
   const entryFeedback=E.executedEntryFeedback;
@@ -3765,12 +3809,12 @@ function _renderMethodologyInner(){
     <div id="meth-hf-wrap">${hardFiltersHTML}</div>
     <div id="meth-breadth">${breadthCardHTML}</div>
     <h3 id="meth-engine" style="margin-top:18px">Scoring Engine — Continuous Learning mRMR</h3>
-    <p id="mrmrLearningModeNote"><strong>Current learning mode:</strong> continuous snapshot learning with rich inputs. Every clean numeric indicator in one upload is compared with the top movers observed at the next upload. The elapsed time is whatever actually passed between those uploads; the TradingView 1-day change column remains an unchanged input feature. Market breadth is context only.</p>
+    <p id="mrmrLearningModeNote"><strong>Current learning mode:</strong> continuous snapshot learning with rich inputs. Every clean numeric indicator in an earlier upload is compared with top movers observed in later same-session uploads. Elapsed gaps are weighted by observed evidence quality; the TradingView 1-day change column remains an unchanged input feature. Market breadth is context only.</p>
     <div class="m-grid">
-      <div class="m-card"><h4>🚀 What is a Rocket?</h4><p>For each valid snapshot pair, Rockets are the <strong>top ${((E.rocketTargetFraction||ROCKET_TARGET_FRACTION)*100).toFixed(1)}%</strong> of the full NSE universe by price gain between the two uploads. The latest learned pair spanned <strong>${E.snapshotElapsedMinutes!=null?E.snapshotElapsedMinutes+' minutes':'no completed interval yet'}</strong> and its cutoff was <strong>${E.rocketThreshold!=null?E.rocketThreshold.toFixed(2)+'%':'not available'}</strong>.</p></div>
-      <div class="m-card"><h4>📡 How the Engine Learns</h4><p>The engine freezes all available feature values at snapshot A, identifies the actual top movers when snapshot B arrives, and correlates A's features with those outcomes. B then becomes the baseline for C. Every completed pair updates the same permanent regime-agnostic accumulator; only the superseded raw snapshot is discarded.</p></div>
+      <div class="m-card"><h4>🚀 What is a Rocket?</h4><p>For each valid snapshot horizon, Rockets are the <strong>top ${((E.rocketTargetFraction||ROCKET_TARGET_FRACTION)*100).toFixed(1)}%</strong> of the full NSE universe by price gain between the two uploads. The latest learned horizon spanned <strong>${E.snapshotElapsedMinutes!=null?E.snapshotElapsedMinutes+' minutes':'no completed interval yet'}</strong> and its cutoff was <strong>${E.rocketThreshold!=null?E.rocketThreshold.toFixed(2)+'%':'not available'}</strong>.</p></div>
+      <div class="m-card"><h4>📡 How the Engine Learns</h4><p>The engine freezes all available feature values at an earlier snapshot, identifies the actual top movers when a later same-session snapshot arrives, and correlates the earlier features with those outcomes. Each elapsed-gap bucket earns more or less influence from observed correlation quality; weak gaps fade, useful gaps matter more.</p></div>
       <div class="m-card"><h4>Outcome Self-Correction</h4><p>${feedbackText} Faster rocket conversions and profitable executed-entry peaks reward their feature patterns; failures and adverse outcomes penalise them.</p></div>
-      <div class="m-card"><h4>Feature Self-Correction</h4><p>Each snapshot pair contributes a fresh correlation for every feature. Correct and repeatable relationships persist in the running mean; random one-off relationships dilute naturally as more pairs accumulate. mRMR then reduces the weight of features that duplicate stronger peers.</p></div>
+      <div class="m-card"><h4>Feature Self-Correction</h4><p>Each snapshot horizon contributes a fresh correlation for every feature. Correct and repeatable relationships persist in the running mean; random one-off relationships dilute naturally as more evidence accumulates. mRMR then reduces the weight of features that duplicate stronger peers.</p></div>
       <div class="m-card"><h4>🎯 Max 1D Filter</h4><p>Set <em>Max 1D %</em> in the filter bar to hide stocks that have already moved too much today (default 5%). Entry-ceiling filtering has been removed; strong candidates are no longer hidden just because current price is above a calculated buy ceiling.</p></div>
       <div class="m-card"><h4>🚫 Recommendation Filters</h4><p>The learning universe keeps every valid parsed NSE symbol. Recommendation eligibility separately excludes zero-price rows, stocks at/near their NSE price band, non-EQ series, surveillance-flagged stocks, insufficient liquidity, zero Piotroski F-Score, and invalid ATR. Delivery, peak retention, RVOL, DMI, MFI, RSI, and sell pressure are <strong>features, not hard filters</strong>. Currently filtered from recommendations: ${(REMOVED.uc||0)+(REMOVED.surv||0)+(REMOVED.nonEq||0)+(REMOVED.liq||0)+(REMOVED.fscore||0)+(REMOVED.atr||0)} stocks.</p></div>
       <div class="m-card"><h4>Regime-Agnostic Learning</h4><p>Market breadth is shown as context only. The scanner uses one running-mean rocket-correlation accumulator across all market conditions, so bull, neutral, and bear days do not create separate scoring histories.</p></div>
@@ -5490,10 +5534,11 @@ function snapshotStamp(timestamp=Date.now()){
     sessionDate:`${shifted.getUTCFullYear()}-${String(shifted.getUTCMonth()+1).padStart(2,'0')}-${String(shifted.getUTCDate()).padStart(2,'0')}`,
     minutes,
     inSession:minutes>=NSE_OPEN_MINUTES&&minutes<=NSE_CLOSE_MINUTES,
+    baselineEligible:minutes>=DAY_START_MIN&&minutes<=NSE_CLOSE_MINUTES,
   };
 }
 function isValidSnapshotTransition(previous,current){
-  if(!previous||!current||!previous.inSession||!current.inSession||previous.sessionDate!==current.sessionDate) return false;
+  if(!previous||!current||!(previous.baselineEligible??previous.inSession)||!current.inSession||previous.sessionDate!==current.sessionDate) return false;
   const gap=(current.timestamp-previous.timestamp)/60000;
   return gap>=SNAPSHOT_MIN_GAP_MINUTES;
 }
@@ -5521,7 +5566,7 @@ async function decodeSnapshotState(source){
 async function encodeSnapshotState(runtime){
   const latest=runtime.latest?{
     timestamp:runtime.latest.timestamp,sessionDate:runtime.latest.sessionDate,minutes:runtime.latest.minutes,
-    inSession:runtime.latest.inSession,symbols:runtime.latest.symbols,
+    inSession:runtime.latest.inSession,baselineEligible:runtime.latest.baselineEligible??runtime.latest.inSession,symbols:runtime.latest.symbols,
     prices:await packFloat32Values(runtime.latest.prices),
     features:runtime.latest.features||await packScannerSnapshot(
       runtime.latest.symbols.map(symbol=>({symbol,...(runtime.latest.featureRows[symbol]||{})})),runtime.latest.featureCols||[]
