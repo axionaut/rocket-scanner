@@ -1,9 +1,11 @@
-const BUILD_TS='2026-06-17 09:36 IST'; // replaced at commit time with IST datetime
-const APP_VERSION=421; // Shared deployed version; increment once per released code change.
+const BUILD_TS='2026-06-17 19:41 IST'; // replaced at commit time with IST datetime
+const APP_VERSION=422; // Shared deployed version; increment once per released code change.
 const GOOGLE_DRIVE_CLIENT_ID='1015012642264-oi2nelv3v90k3d39r994a6nelgjs2a56.apps.googleusercontent.com'; // Public OAuth Web Client ID.
 const HARD_FILTER_SCHEMA='structural_tradeability_v2';
 const ROCKET_TARGET_FRACTION=0.005; // Top 0.5% between consecutive valid snapshots.
 const SNAPSHOT_MIN_GAP_MINUTES=1;
+const SNAPSHOT_FORWARD_MAX_MINUTES=120;
+const SNAPSHOT_PENDING_MAX=24;
 const NSE_OPEN_MINUTES=9*60+15;
 const NSE_CLOSE_MINUTES=15*60+30;
 const STOCK_RUNWAY_CEILING_PCT=19.5; // UC-style ceiling retained only for legacy helpers; entry-ceiling filtering is disabled.
@@ -1863,6 +1865,7 @@ function pctRank(arr){
 function emptySnapshotRuntime(){
   return {schema:SNAPSHOT_STATE_SCHEMA,latest:null,completed:0,lastRockets:[],lastOutcome:null,lastTag:null};
 }
+let SNAPSHOT_PENDING_QUEUE=[];
 function accumulateSnapshotCorrelation(correlation){
   const prior=ACC_CORR?.corrSchema===CORR_SCHEMA?ACC_CORR:{corr:{},counts:{},sessions:0,learnSessions:0,corrSchema:CORR_SCHEMA};
   const corr={...prior.corr},counts={...prior.counts};
@@ -1875,10 +1878,54 @@ function accumulateSnapshotCorrelation(correlation){
   const sessions=(prior.learnSessions??prior.sessions??0)+1;
   ACC_CORR={...prior,corr,counts,sessions,learnSessions:sessions,corrSchema:CORR_SCHEMA,lastUpdated:new Date().toISOString()};
 }
+function buildDecodedSnapshot({stamp,symbols,prices,featureRows,features,sessionTag}){
+  return {...stamp,symbols:[...symbols],prices,featureRows,featureCols:[...features],features:null,sessionTag:sessionTag||null};
+}
+function seedPendingSnapshotQueue(runtime,stamp){
+  if(!Array.isArray(SNAPSHOT_PENDING_QUEUE)) SNAPSHOT_PENDING_QUEUE=[];
+  SNAPSHOT_PENDING_QUEUE=SNAPSHOT_PENDING_QUEUE.filter(s=>s&&s.inSession&&s.sessionDate===stamp.sessionDate);
+  const latest=runtime?.latest;
+  if(latest?.inSession&&latest.sessionDate===stamp.sessionDate&&!SNAPSHOT_PENDING_QUEUE.some(s=>s.timestamp===latest.timestamp)){
+    SNAPSHOT_PENDING_QUEUE.push(latest);
+  }
+}
+function trimPendingSnapshotQueue(currentStamp){
+  SNAPSHOT_PENDING_QUEUE=(SNAPSHOT_PENDING_QUEUE||[])
+    .filter(s=>s&&s.inSession&&s.sessionDate===currentStamp.sessionDate&&s.timestamp<currentStamp.timestamp&&((currentStamp.timestamp-s.timestamp)/60000)<=SNAPSHOT_FORWARD_MAX_MINUTES)
+    .sort((a,b)=>a.timestamp-b.timestamp)
+    .slice(-SNAPSHOT_PENDING_MAX);
+}
+function computeSnapshotPairCorrelation(previous,current,features){
+  const currentIndex=new Map((current.symbols||[]).map((symbol,index)=>[symbol,index]));
+  const ranked=(previous.symbols||[]).map((symbol,index)=>{
+    const ci=currentIndex.get(symbol),priorPrice=previous.prices?.[index],currentPrice=ci==null?null:current.prices?.[ci];
+    return {symbol,value:priorPrice>0&&currentPrice>0?((currentPrice/priorPrice)-1)*100:null};
+  }).filter(item=>item.value!=null&&isFinite(item.value)).sort((a,b)=>b.value-a.value);
+  const rocketCount=ranked.length?Math.max(1,Math.ceil(ranked.length*ROCKET_TARGET_FRACTION)):0;
+  const rockets=ranked.slice(0,rocketCount),rocketSet=new Set(rockets.map(item=>item.symbol));
+  const correlation={};
+  for(const feature of features){
+    const xs=[],target=[];
+    (previous.symbols||[]).forEach(symbol=>{
+      if(!currentIndex.has(symbol)) return;
+      const value=previous.featureRows?.[symbol]?.[feature];
+      if(value==null||!isFinite(value)) return;
+      xs.push(value);target.push(rocketSet.has(symbol)?1:0);
+    });
+    correlation[feature]=pearson(target,xs);
+  }
+  return {
+    correlation,ranked,rockets,rocketCount,
+    elapsedMinutes:Math.round((current.timestamp-previous.timestamp)/60000),
+    cutoff:rockets.length?rockets[rockets.length-1].value:null,
+    sourceTimestamp:previous.timestamp,
+  };
+}
 async function advanceSnapshotLearning({rows,features,priceKey,sessionTag,advance=true,snapshotTimestamp=Date.now()}){
   if(!SNAPSHOT_RUNTIME||SNAPSHOT_RUNTIME.schema!==SNAPSHOT_STATE_SCHEMA) SNAPSHOT_RUNTIME=emptySnapshotRuntime();
   if(ACC_CORR?.corrSchema!==CORR_SCHEMA) ACC_CORR={corr:{},counts:{},sessions:0,learnSessions:0,corrSchema:CORR_SCHEMA};
   const runtime=SNAPSHOT_RUNTIME;
+  const hadPriorCorr=(ACC_CORR?.learnSessions??ACC_CORR?.sessions??0)>0;
   const targetCorrToday=Object.fromEntries(features.map(f=>[f,null]));
   let completedNow=0;
   let note='Waiting for the first valid snapshot pair';
@@ -1887,6 +1934,8 @@ async function advanceSnapshotLearning({rows,features,priceKey,sessionTag,advanc
   const cleanRows=rows.filter(row=>row.symbol&&priceKey&&row[priceKey]>0);
   const symbols=cleanRows.map(row=>row.symbol);
   const prices=Float32Array.from(cleanRows,row=>row[priceKey]);
+  const featureRows=Object.fromEntries(cleanRows.map(row=>[row.symbol,Object.fromEntries(features.map(f=>[f,row[f]??null]))]));
+  const currentSnapshot=buildDecodedSnapshot({stamp,symbols,prices,featureRows,features,sessionTag});
 
   if(!advance){
     note='Rankings refreshed without advancing the snapshot sequence';
@@ -1897,57 +1946,60 @@ async function advanceSnapshotLearning({rows,features,priceKey,sessionTag,advanc
   }else{
     const previous=runtime.latest;
     const stale=previous&&stamp.timestamp<=previous.timestamp;
-    const validTransition=!stale&&isValidSnapshotTransition(previous,stamp);
-    if(previous&&validTransition){
-      const previousIndex=new Map((previous.symbols||[]).map((symbol,index)=>[symbol,index]));
-      const currentIndex=new Map(symbols.map((symbol,index)=>[symbol,index]));
-      const ranked=previous.symbols.map((symbol,index)=>{
-        const ci=currentIndex.get(symbol),priorPrice=previous.prices[index],currentPrice=ci==null?null:prices[ci];
-        return {symbol,value:priorPrice>0&&currentPrice>0?((currentPrice/priorPrice)-1)*100:null};
-      }).filter(item=>item.value!=null&&isFinite(item.value)).sort((a,b)=>b.value-a.value);
-      const rocketCount=ranked.length?Math.max(1,Math.ceil(ranked.length*ROCKET_TARGET_FRACTION)):0;
-      const rockets=ranked.slice(0,rocketCount),rocketSet=new Set(rockets.map(item=>item.symbol));
-      const correlation={};
-      for(const feature of features){
-        const xs=[],target=[];
-        previous.symbols.forEach(symbol=>{
-          if(!previousIndex.has(symbol)||!currentIndex.has(symbol)) return;
-          const value=previous.featureRows?.[symbol]?.[feature];
+    if(!stale){
+      seedPendingSnapshotQueue(runtime,stamp);
+      trimPendingSnapshotQueue(stamp);
+    }
+    const validPairs=!stale?SNAPSHOT_PENDING_QUEUE.filter(prev=>isValidSnapshotTransition(prev,stamp)): [];
+    if(validPairs.length){
+      const pairSums={},pairCounts={};
+      const pairs=validPairs.map(prev=>computeSnapshotPairCorrelation(prev,currentSnapshot,features));
+      pairs.forEach(pair=>{
+        accumulateSnapshotCorrelation(pair.correlation);
+        features.forEach(feature=>{
+          const value=pair.correlation[feature];
           if(value==null||!isFinite(value)) return;
-          xs.push(value);target.push(rocketSet.has(symbol)?1:0);
+          pairSums[feature]=(pairSums[feature]||0)+value;
+          pairCounts[feature]=(pairCounts[feature]||0)+1;
         });
-        correlation[feature]=pearson(target,xs);
-      }
-      accumulateSnapshotCorrelation(correlation);
-      Object.assign(targetCorrToday,correlation);
-      runtime.completed=(runtime.completed||0)+1;
-      runtime.lastRockets=rockets.map(item=>({symbol:item.symbol,move:+item.value.toFixed(2)}));
-      const elapsedMinutes=Math.round((stamp.timestamp-previous.timestamp)/60000);
-      runtime.lastOutcome={sourceTimestamp:previous.timestamp,completedAt:stamp.timestamp,elapsedMinutes,
-        rocketCount,cutoff:rockets.length?rockets[rockets.length-1].value:null,matched:ranked.length};
-      completedNow=1;
-      note=`Learned from ${ranked.length} stocks over the latest ${elapsedMinutes}-minute snapshot pair`;
+      });
+      features.forEach(feature=>{if(pairCounts[feature]) targetCorrToday[feature]=pairSums[feature]/pairCounts[feature];});
+      completedNow=pairs.length;
+      runtime.completed=(runtime.completed||0)+completedNow;
+      const displayPair=pairs.reduce((best,pair)=>!best||pair.elapsedMinutes>best.elapsedMinutes?pair:best,null);
+      runtime.lastRockets=displayPair.rockets.map(item=>({symbol:item.symbol,move:+item.value.toFixed(2)}));
+      const elapsed=pairs.map(pair=>pair.elapsedMinutes),minElapsed=Math.min(...elapsed),maxElapsed=Math.max(...elapsed);
+      runtime.lastOutcome={sourceTimestamp:displayPair.sourceTimestamp,completedAt:stamp.timestamp,elapsedMinutes:displayPair.elapsedMinutes,
+        minElapsedMinutes:minElapsed,maxElapsedMinutes:maxElapsed,forwardPairs:pairs.length,forwardWindowMinutes:SNAPSHOT_FORWARD_MAX_MINUTES,
+        rocketCount:displayPair.rocketCount,cutoff:displayPair.cutoff,matched:displayPair.ranked.length};
+      note=`Learned from ${pairs.length} forward snapshot horizon${pairs.length===1?'':'s'} (${minElapsed}-${maxElapsed} min) across ${displayPair.ranked.length} stocks`;
     }else if(stale){
       note='Older or same-time snapshot ignored; the current baseline was preserved';
     }else if(previous){
       note=previous.sessionDate!==stamp.sessionDate
         ?'New NSE session baseline; overnight gap excluded from snapshot learning'
         :'Snapshot arrived too soon; baseline refreshed without counting a learning pair';
+    }else{
+      note='First upload baseline saved; recommendations will start after the next upload';
     }
 
     if(!stale){
-      const featureRows=Object.fromEntries(cleanRows.map(row=>[row.symbol,Object.fromEntries(features.map(f=>[f,row[f]??null]))]));
-      runtime.latest={...stamp,symbols:[...symbols],prices,featureRows,featureCols:[...features],features:null};
+      runtime.latest=currentSnapshot;
       runtime.lastTag=sessionTag||null;
+      if(currentSnapshot.inSession){
+        SNAPSHOT_PENDING_QUEUE.push(currentSnapshot);
+        trimPendingSnapshotQueue({...stamp,timestamp:stamp.timestamp+1});
+      }
       window._snapshotRuntimeDirty=true;
     }
   }
 
-  const historical=ACC_CORR?.corr||{};
   const targetCorr={};
+  const historical=ACC_CORR?.corr||{};
   features.forEach(feature=>{targetCorr[feature]=historical[feature]??0;});
   if(ACC_CORR){ACC_CORR.lastDate=stamp.sessionDate;ACC_CORR.laggedNote=note;FS.set(modeKey(CORR_STORE),ACC_CORR);}
   return {targetCorr,targetCorrToday,completedNow,note,runtime,
+    hadPriorCorr,
     rocketCount:runtime.lastOutcome?.rocketCount||0,rocketThreshold:runtime.lastOutcome?.cutoff??null,
     recentRockets:runtime.lastRockets||[],freshSignalCount:Object.values(targetCorrToday).filter(v=>v!=null&&isFinite(v)&&Math.abs(v)>0.0001).length};
 }
@@ -2195,8 +2247,10 @@ async function runEngine(raw, sessionTag, options={}){
   const targetCorr=snapshotLearning.targetCorr;
   const targetCorrToday=snapshotLearning.targetCorrToday;
   const freshSignalCount=snapshotLearning.freshSignalCount;
-  const useFreshCorr=snapshotLearning.completedNow>0;
-  const scoringSource=useFreshCorr?'accumulated_with_latest_pair':'accumulated_snapshot_history';
+  const currentUploadLearned=snapshotLearning.completedNow>0;
+  const hasRecommendationEvidence=snapshotLearning.hadPriorCorr||currentUploadLearned;
+  const useFreshCorr=false;
+  const scoringSource=currentUploadLearned?'latest_completed_snapshot_evidence':'accumulated_snapshot_history';
   const laggedNote=snapshotLearning.note;
   const topN=snapshotLearning.rocketCount;
   const recentRockets=snapshotLearning.recentRockets.map(row=>({symbol:row.symbol,move:row.move}));
@@ -2246,11 +2300,11 @@ async function runEngine(raw, sessionTag, options={}){
       maxW+=w;
       rawScore+=w*(targetCorr[f]>=0?p:(1-p));
     }
-    const rawFinal = maxW>0 ? rawScore/maxW : 0.5;
+    const rawFinal = hasRecommendationEvidence&&maxW>0 ? rawScore/maxW : 0;
     const mrmrScore = Math.round(rawFinal*100*10)/10;
     const currentFeatures=Object.fromEntries(FEATS.map(f=>[f,d[f]??null]));
-    const outcomeReliability=getOutcomeReliabilityAdjustment(currentFeatures,outcomeReliabilityModel,weights);
-    const score = Math.round(clampNum(mrmrScore+outcomeReliability.delta,0,100)*10)/10;
+    const outcomeReliability=hasRecommendationEvidence?getOutcomeReliabilityAdjustment(currentFeatures,outcomeReliabilityModel,weights):{delta:0,confidence:0,matched:0};
+    const score = hasRecommendationEvidence?Math.round(clampNum(mrmrScore+outcomeReliability.delta,0,100)*10)/10:0;
 
     const vol=(K.volume?d[K.volume]:null);
     const flags=[];
@@ -2261,7 +2315,8 @@ async function runEngine(raw, sessionTag, options={}){
     const _isSurv=Array.isArray(_survRules)&&_survRules.length>0;
 
     let tier;
-    if(score>=78)tier='S';else if(score>=64)tier='A';else if(score>=50)tier='B';else if(score>=38)tier='C';else tier='D';
+    if(!hasRecommendationEvidence)tier='WARMUP';
+    else if(score>=78)tier='S';else if(score>=64)tier='A';else if(score>=50)tier='B';else if(score>=38)tier='C';else tier='D';
 
     return{
       symbol:d.symbol, name:d.name,
@@ -2332,18 +2387,18 @@ async function runEngine(raw, sessionTag, options={}){
       const rank=arr.length>1?Math.min(1,Math.max(0,(lo-0.5)/(arr.length-1))):0.5;
       mw+=w; rs+=w*(targetCorr[f]>=0?rank:(1-rank));
     }
-    const mrmrScore=mw>0?Math.round(rs/mw*1000)/10:0;
+    const mrmrScore=hasRecommendationEvidence&&mw>0?Math.round(rs/mw*1000)/10:0;
     const currentFeatures=Object.fromEntries(FEATS.map(f=>[f,d[f]??null]));
-    const outcomeReliability=getOutcomeReliabilityAdjustment(currentFeatures,outcomeReliabilityModel,weights);
-    SCORE_MAP[d.symbol]=Math.round(clampNum(mrmrScore+outcomeReliability.delta,0,100)*10)/10;
+    const outcomeReliability=hasRecommendationEvidence?getOutcomeReliabilityAdjustment(currentFeatures,outcomeReliabilityModel,weights):{delta:0};
+    SCORE_MAP[d.symbol]=hasRecommendationEvidence?Math.round(clampNum(mrmrScore+outcomeReliability.delta,0,100)*10)/10:0;
   });
   parsed.forEach(d=>{d.rocketScore=SCORE_MAP[d.symbol]??null;});
   ENGINE_DATA={targetCorr,targetCorrToday,mrmr,weights,features:FEATS,labels:LABELS,top10Feats,rocketCount:topN,rocketThreshold:ROCKET_THRESHOLD,rocketTargetFraction:ROCKET_TARGET_FRACTION,rocketObservationRelevance,accSessions:ACC_CORR?.sessions||0,laggedNote:laggedNote||'',
     marketBreadth:marketBreadth,
     recommendationFeedback,executedEntryFeedback,
     outcomeScoreOverlay:{active:outcomeReliabilityModel.active,samples:outcomeReliabilityModel.samples.length,features:outcomeReliabilityModel.features.length,maxAdjustment:OUTCOME_SCORE_ADJ_MAX},
-    useFreshCorr, freshSignalCount, scoringSource,
-    useAccCorr: (ACC_CORR?.sessions||0)>0,
+    useFreshCorr, hasRecommendationEvidence, currentUploadLearned, freshSignalCount, scoringSource,
+    useAccCorr: snapshotLearning.hadPriorCorr,
     snapshotElapsedMinutes:SNAPSHOT_RUNTIME?.lastOutcome?.elapsedMinutes??null,
     snapshotPairs:SNAPSHOT_RUNTIME?.completed||0,
     sectorCol: sectorCol?true:false, industryCol: industryCol?true:false,
@@ -2363,7 +2418,7 @@ async function runEngine(raw, sessionTag, options={}){
   // Persist compact methodology summaries; the O(n²) pair matrix is recomputed per run.
   try{
     const methSave={targetCorr,targetCorrToday,mrmr,weights,features:FEATS,labels:LABELS,top10Feats,rocketCount:ENGINE_DATA.rocketCount,rocketThreshold:ENGINE_DATA.rocketThreshold,rocketTargetFraction:ROCKET_TARGET_FRACTION,rocketObservationRelevance,accSessions:ENGINE_DATA.accSessions,laggedNote:ENGINE_DATA.laggedNote,
-      marketBreadth:ENGINE_DATA.marketBreadth,useFreshCorr:ENGINE_DATA.useFreshCorr,freshSignalCount:ENGINE_DATA.freshSignalCount,scoringSource:ENGINE_DATA.scoringSource,useAccCorr:ENGINE_DATA.useAccCorr,sectorCol:ENGINE_DATA.sectorCol,industryCol:ENGINE_DATA.industryCol,
+      marketBreadth:ENGINE_DATA.marketBreadth,useFreshCorr:ENGINE_DATA.useFreshCorr,hasRecommendationEvidence:ENGINE_DATA.hasRecommendationEvidence,currentUploadLearned:ENGINE_DATA.currentUploadLearned,freshSignalCount:ENGINE_DATA.freshSignalCount,scoringSource:ENGINE_DATA.scoringSource,useAccCorr:ENGINE_DATA.useAccCorr,sectorCol:ENGINE_DATA.sectorCol,industryCol:ENGINE_DATA.industryCol,
       recentRockets,totalParsed:totalParsed,hardFilterSchema:HARD_FILTER_SCHEMA,removed:{...REMOVED},survSize:Object.keys(NSE_SURV).length,
       recommendationFeedback,executedEntryFeedback,outcomeScoreOverlay:ENGINE_DATA.outcomeScoreOverlay,
       snapshotElapsedMinutes:ENGINE_DATA.snapshotElapsedMinutes,snapshotPairs:ENGINE_DATA.snapshotPairs};
@@ -3648,9 +3703,13 @@ function _renderMethodologyInner(){
   };
   const rs = {
   };
-  const scoreCorrSource = E.useFreshCorr
-    ? `Latest snapshot pair learned (${E.freshSignalCount||0} active features)`
-    : (E.useAccCorr?'Accumulated snapshot learning active':'Warming up: upload the next snapshot');
+  const scoreCorrSource = E.useAccCorr
+    ? (E.currentUploadLearned
+      ? `Latest completed snapshot evidence is scoring current candidates (${E.freshSignalCount||0} active features learned)`
+      : 'Accumulated snapshot learning active')
+    : (E.currentUploadLearned
+      ? `First learning interval captured; recommendations are now active (${E.freshSignalCount||0} active features learned)`
+      : 'First upload baseline saved; recommendations will start after the next upload');
   const sessLabel = `${E.accSessions||0} learned pairs · ${E.laggedNote||'waiting for the next snapshot'}`;
   const breadthPct=E.marketBreadth!=null?(E.marketBreadth*100).toFixed(0):'?';
   const recFeedback=E.recommendationFeedback;
@@ -5455,6 +5514,7 @@ async function decodeSnapshotState(source){
     ...source.latest,
     prices:await unpackFloat32Values(source.latest.prices),
     featureRows:await decodeScannerSnapshot(source.latest.features),
+    featureCols:source.latest.features?.cols||source.latest.featureCols||[],
   }:null;
   return {...source,latest};
 }
