@@ -1,5 +1,5 @@
-const BUILD_TS='2026-06-17 20:41 IST'; // replaced at commit time with IST datetime
-const APP_VERSION=424; // Shared deployed version; increment once per released code change.
+const BUILD_TS='2026-06-18 08:44 IST'; // replaced at commit time with IST datetime
+const APP_VERSION=425; // Shared deployed version; increment once per released code change.
 const GOOGLE_DRIVE_CLIENT_ID='1015012642264-oi2nelv3v90k3d39r994a6nelgjs2a56.apps.googleusercontent.com'; // Public OAuth Web Client ID.
 const HARD_FILTER_SCHEMA='structural_tradeability_v2';
 const ROCKET_TARGET_FRACTION=0.005; // Top 0.5% between consecutive valid snapshots.
@@ -2631,7 +2631,13 @@ function computeLatestOrderBooked(){
 
 function getLatestBookedSummary(){
   const orderBooked=computeLatestOrderBooked();
+  const currentOrderSession=ORDERS_TODAY?._loadedThisSession?getLatestOrderSession():null;
+  const hasCurrentSellOrders=!!currentOrderSession?.orders?.some(o=>o.type==='SELL');
   const tbLoaded=TRADEBOOK_STATS?._loadedThisSession&&TRADEBOOK_STATS?.lastDayRows?.length;
+
+  // Current-session sell orders are fresher than a completed prior-day tradebook export.
+  // Even if some P&L fields are incomplete, do not replace today's sells with yesterday's session.
+  if(hasCurrentSellOrders) return orderBooked||{source:'Orders.csv',date:currentOrderSession.date,total:0,rows:[],hasOrders:true};
 
   // If both available, pick whichever has the more recent date
   if(orderBooked&&tbLoaded){
