@@ -58,7 +58,7 @@ body::before{content:'';position:fixed;inset:0;background:radial-gradient(ellips
 .m-card p{font-size:12px;margin-bottom:0}
 .corr-wrap{overflow-x:auto;margin:16px 0}
 .ct{border-collapse:collapse;font-size:11px;font-family:'DM Mono',monospace;width:100%}
-.ct th{text-align:left;padding:7px 10px;border-bottom:1px solid var(--border-hi);color:var(--t3);font-size:10px;text-transform:uppercase;letter-spacing:.7px;position:sticky;top:var(--table-stick-top,var(--hdr-h,72px));z-index:20;background:var(--bg-raised);cursor:pointer;user-select:none;transition:color .15s}
+.ct th{text-align:left;padding:7px 10px;border-bottom:1px solid var(--border-hi);color:var(--t3);font-size:10px;text-transform:uppercase;letter-spacing:.7px;position:sticky;top:0;z-index:20;background:var(--bg-raised);cursor:pointer;user-select:none;transition:color .15s}
 .ct th:hover{color:var(--t1)}
 .ct td{padding:6px 10px;border-bottom:1px solid var(--border)}
 .ct .bar-cell{width:160px}
@@ -91,10 +91,9 @@ select option{background:var(--bg-card)}
 .fixed-hscroll{position:fixed;bottom:0;overflow-x:scroll;overflow-y:hidden;height:17px;z-index:999;background:var(--bg-card);border-top:1px solid var(--border);display:none}
 .fixed-hscroll-inner{height:1px;pointer-events:none}
 table.main{width:100%;border-collapse:separate;border-spacing:0;font-size:12.5px}
-table.main thead th,.sticky-head thead th{position:sticky;top:var(--table-stick-top,var(--hdr-h,72px));background:var(--bg-raised);z-index:20}
-table.main thead th{border-bottom:2px solid var(--border-hi);padding:10px 11px;text-align:left;font-weight:600;font-size:10px;text-transform:uppercase;letter-spacing:.7px;color:var(--t3);cursor:pointer;user-select:none;white-space:nowrap;transition:color .15s}
-.sticky-head thead th{box-shadow:inset 0 -1px var(--border-hi)}
-#tab1,#tab2{--table-stick-top:calc(var(--hdr-h,72px) + 44px)}
+table.main thead th,.sticky-head thead th{position:sticky;background:var(--bg-raised);z-index:20}
+table.main thead th{top:var(--hdr-h,72px);border-bottom:2px solid var(--border-hi);padding:10px 11px;text-align:left;font-weight:600;font-size:10px;text-transform:uppercase;letter-spacing:.7px;color:var(--t3);cursor:pointer;user-select:none;white-space:nowrap;transition:color .15s}
+.sticky-head thead th{top:0;box-shadow:inset 0 -1px var(--border-hi)}
 table.main thead th:hover{color:var(--t1)}
 table.main thead th.sorted{color:var(--blue)}
 table.main thead th .sa{margin-left:3px;font-size:9px}

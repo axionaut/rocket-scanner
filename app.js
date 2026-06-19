@@ -1,5 +1,5 @@
-const BUILD_TS='2026-06-19 14:39 IST'; // replaced at commit time with IST datetime
-const APP_VERSION=428; // Shared deployed version; increment once per released code change.
+const BUILD_TS='2026-06-19 14:57 IST'; // replaced at commit time with IST datetime
+const APP_VERSION=429; // Shared deployed version; increment once per released code change.
 const GOOGLE_DRIVE_CLIENT_ID='1015012642264-oi2nelv3v90k3d39r994a6nelgjs2a56.apps.googleusercontent.com'; // Public OAuth Web Client ID.
 const HARD_FILTER_SCHEMA='structural_tradeability_v2';
 const SNAPSHOT_MIN_GAP_MINUTES=1;
