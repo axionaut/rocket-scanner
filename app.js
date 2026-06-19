@@ -1,5 +1,5 @@
-const BUILD_TS='2026-06-18 08:44 IST'; // replaced at commit time with IST datetime
-const APP_VERSION=425; // Shared deployed version; increment once per released code change.
+const BUILD_TS='2026-06-19 09:08 IST'; // replaced at commit time with IST datetime
+const APP_VERSION=426; // Shared deployed version; increment once per released code change.
 const GOOGLE_DRIVE_CLIENT_ID='1015012642264-oi2nelv3v90k3d39r994a6nelgjs2a56.apps.googleusercontent.com'; // Public OAuth Web Client ID.
 const HARD_FILTER_SCHEMA='structural_tradeability_v2';
 const ROCKET_TARGET_FRACTION=0.005; // Top 0.5% between consecutive valid snapshots.
@@ -1972,7 +1972,14 @@ function recordGapQuality(elapsedMinutes,quality,appliedWeight){
     meanWeight:prev.samples?prev.meanWeight+(appliedWeight-prev.meanWeight)/samples:appliedWeight,
     lastElapsedMinutes:elapsedMinutes,
   };
-  ACC_CORR={...ACC_CORR,gapStats,lastUpdated:new Date().toISOString()};
+  const elapsedCount=(ACC_CORR.elapsedCount||0)+1;
+  const elapsedTotalMinutes=(ACC_CORR.elapsedTotalMinutes||0)+elapsedMinutes;
+  ACC_CORR={...ACC_CORR,gapStats,elapsedCount,elapsedTotalMinutes,lastUpdated:new Date().toISOString()};
+}
+function getAverageLearningHorizon(){
+  const count=Number(ACC_CORR?.elapsedCount||0);
+  const total=Number(ACC_CORR?.elapsedTotalMinutes||0);
+  return count>0&&isFinite(total)?{minutes:total/count,count}:null;
 }
 function computeSnapshotPairCorrelation(previous,current,features){
   const currentIndex=new Map((current.symbols||[]).map((symbol,index)=>[symbol,index]));
@@ -2877,6 +2884,9 @@ function computePerfStats(trips){
   const avgHoldDays=Math.round(meanArr(trips.map(r=>r.holdDays)));
   const posMap={};
   trips.forEach(r=>{const k=r.sym+'|'+r.buyDate;posMap[k]=(posMap[k]||0)+r.capital;});
+  const entryDays=new Set(trips.map(r=>r.buyDate).filter(Boolean));
+  const positionCount=Object.keys(posMap).length;
+  const avgPositionsPerEntryDay=entryDays.size?positionCount/entryDays.size:0;
   const avgCapital=+Math.round(meanArr(Object.values(posMap)));
   const symMap={};
   trips.forEach(r=>{
@@ -2919,7 +2929,8 @@ function computePerfStats(trips){
     profitFactor, expectancy, totalNetPnlRs,
     largestWinRs, largestLossRs, maxDrawdown, maxLossStreak:maxStreak, maxWinStreak,
     pctProfitableDays, profitableDays, totalTradingDays,
-    avgDailyPnl, avgHoldDays, avgCapital,
+    avgDailyPnl, avgHoldDays, avgCapital,positionCount,entryDays:entryDays.size,
+    avgPositionsPerEntryDay:+avgPositionsPerEntryDay.toFixed(2),
     maxProfitDay, maxLossDay,
     symBreakdown, hourBreakdown, sellHourBreakdown,
     bestHour:bestHourObj?.hour??null, bestHourAvgPct:bestHourObj?+bestHourObj.avgPct.toFixed(2):null,
@@ -2989,6 +3000,7 @@ function renderPerformance(){
     ? `${recPos.source}${posRatio?` · ${(posRatio*100).toFixed(0)}% of avg`:''}`
     : recPos.source;
 
+  const learningHorizon=getAverageLearningHorizon();
   const kpis=[
     {label:'Net P&L',value:fmtPerfRs(p.totalNetPnlRs),color:clr(p.totalNetPnlRs),sub:`${p.roundTrips} lots · ${spanTradingDays||p.totalTradingDays} trading days${preSystemLots?` · ${preSystemLots} pre-system ignored`:''}`},
     {label:'Expectancy',value:fmtPerfRs(p.expectancy),color:clr(p.expectancy),sub:'Net ₹ per FIFO lot'},
@@ -3001,6 +3013,8 @@ function renderPerformance(){
     {label:'Max Win Streak',value:p.maxWinStreak+' days',color:p.maxWinStreak>=5?'var(--green)':p.maxWinStreak>=3?'var(--amber)':'var(--t1)',sub:'Consecutive profitable days'},
     {label:'Avg Hold',value:p.avgHoldDays+'d',color:'var(--t1)',sub:'Avg position duration'},
     {label:'Avg Position',value:fmtINR(p.avgCapital||0),color:'var(--t1)',sub:'Observed avg capital per position'},
+    {label:'Avg Positions/Entry Day',value:p.avgPositionsPerEntryDay.toFixed(2),color:'var(--t1)',sub:`${p.positionCount} positions across ${p.entryDays} entry days`},
+    {label:'Avg Learning Horizon',value:learningHorizon?learningHorizon.minutes.toFixed(1)+' min':'—',color:learningHorizon?'var(--cyan)':'var(--t3)',sub:learningHorizon?`${learningHorizon.count} learned snapshot horizons`:'Starts with the next learned horizon'},
     {label:'Recommended Position',value:recPos.value?fmtINR(recPos.value):'—',color:recPos.value?'var(--amber)':'var(--t3)',sub:recPosSub},
     {label:'Review After',value:effectiveReviewDays?effectiveReviewDays+'d':'—',color:effectiveReviewDays?'var(--amber)':'var(--t3)',sub:exitPolicy&&exitPolicy.velocityPctPerDay!=null?`Realised baseline ${exitPolicy.holdDays}d · rocket timing floor`:'Re-upload tradebook to learn'},
     {label:'Largest Loss',value:fmtSignedINR(p.largestLossRs),color:'var(--red)',sub:'Single lot, net'},
