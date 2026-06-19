@@ -1,5 +1,5 @@
-const BUILD_TS='2026-06-19 09:08 IST'; // replaced at commit time with IST datetime
-const APP_VERSION=426; // Shared deployed version; increment once per released code change.
+const BUILD_TS='2026-06-19 10:31 IST'; // replaced at commit time with IST datetime
+const APP_VERSION=427; // Shared deployed version; increment once per released code change.
 const GOOGLE_DRIVE_CLIENT_ID='1015012642264-oi2nelv3v90k3d39r994a6nelgjs2a56.apps.googleusercontent.com'; // Public OAuth Web Client ID.
 const HARD_FILTER_SCHEMA='structural_tradeability_v2';
 const ROCKET_TARGET_FRACTION=0.005; // Top 0.5% between consecutive valid snapshots.
@@ -1237,6 +1237,7 @@ function persistMethodologySnapshot(){
       recommendationFeedback:ENGINE_DATA.recommendationFeedback||null,
       executedEntryFeedback:ENGINE_DATA.executedEntryFeedback||null,
       snapshotElapsedMinutes:ENGINE_DATA.snapshotElapsedMinutes??null,
+      snapshotDisplayElapsedMinutes:ENGINE_DATA.snapshotDisplayElapsedMinutes??null,
       snapshotPairs:ENGINE_DATA.snapshotPairs||0
     };
     FS.set(modeKey(METH_STORE),methSave);
@@ -2014,6 +2015,8 @@ async function advanceSnapshotLearning({rows,features,priceKey,sessionTag,advanc
   const hadPriorCorr=(ACC_CORR?.learnSessions??ACC_CORR?.sessions??0)>0;
   const targetCorrToday=Object.fromEntries(features.map(f=>[f,null]));
   let completedNow=0;
+  let intervalMoves={};
+  let intervalElapsedMinutes=null;
   let note='Waiting for the first valid snapshot horizon';
   const stamp=snapshotStamp(snapshotTimestamp);
   const duplicate=!!sessionTag&&runtime.lastTag===sessionTag&&runtime.latest?.sessionDate===stamp.sessionDate;
@@ -2040,6 +2043,9 @@ async function advanceSnapshotLearning({rows,features,priceKey,sessionTag,advanc
     if(validPairs.length){
       const pairSums={},pairCounts={};
       const pairs=validPairs.map(prev=>computeSnapshotPairCorrelation(prev,currentSnapshot,features));
+      const immediatePair=pairs.reduce((best,pair)=>!best||pair.elapsedMinutes<best.elapsedMinutes?pair:best,null);
+      intervalElapsedMinutes=immediatePair?.elapsedMinutes??null;
+      intervalMoves=Object.fromEntries((immediatePair?.ranked||[]).map(item=>[item.symbol,+item.value.toFixed(2)]));
       pairs.forEach(pair=>{
         pair.quality=correlationQuality(pair.correlation);
         pair.weight=getGapEvidenceWeight(pair.elapsedMinutes);
@@ -2103,7 +2109,8 @@ async function advanceSnapshotLearning({rows,features,priceKey,sessionTag,advanc
   return {targetCorr,targetCorrToday,completedNow,note,runtime,
     hadPriorCorr,
     rocketCount:runtime.lastOutcome?.rocketUnionCount||runtime.lastOutcome?.rocketCount||0,rocketThreshold:runtime.lastOutcome?.cutoff??null,
-    recentRockets:runtime.lastRockets||[],freshSignalCount:Object.values(targetCorrToday).filter(v=>v!=null&&isFinite(v)&&Math.abs(v)>0.0001).length};
+    recentRockets:runtime.lastRockets||[],intervalMoves,intervalElapsedMinutes,
+    freshSignalCount:Object.values(targetCorrToday).filter(v=>v!=null&&isFinite(v)&&Math.abs(v)>0.0001).length};
 }
 
 // ── Engine ──
@@ -2426,6 +2433,7 @@ async function runEngine(raw, sessionTag, options={}){
       sectorBreadth:d.sector_breadth??null,
       price:(K.price?d[K.price]:null),
       priceChange:(K.price_change?d[K.price_change]:null),
+      snapshotChange:snapshotLearning.intervalMoves?.[d.symbol]??null,
       rocketMove:getIntradayRocketMove(d,K.price,K.price_change,K.high_1d),
       volume:vol,
       marketCap:(K.market_cap?d[K.market_cap]:null),
@@ -2502,6 +2510,7 @@ async function runEngine(raw, sessionTag, options={}){
     useFreshCorr, hasRecommendationEvidence, currentUploadLearned, freshSignalCount, scoringSource,
     useAccCorr: snapshotLearning.hadPriorCorr,
     snapshotElapsedMinutes:SNAPSHOT_RUNTIME?.lastOutcome?.elapsedMinutes??null,
+    snapshotDisplayElapsedMinutes:snapshotLearning.intervalElapsedMinutes??null,
     snapshotPairs:SNAPSHOT_RUNTIME?.completed||0,
     sectorCol: sectorCol?true:false, industryCol: industryCol?true:false,
     recentRockets,
@@ -2523,7 +2532,8 @@ async function runEngine(raw, sessionTag, options={}){
       marketBreadth:ENGINE_DATA.marketBreadth,useFreshCorr:ENGINE_DATA.useFreshCorr,hasRecommendationEvidence:ENGINE_DATA.hasRecommendationEvidence,currentUploadLearned:ENGINE_DATA.currentUploadLearned,freshSignalCount:ENGINE_DATA.freshSignalCount,scoringSource:ENGINE_DATA.scoringSource,useAccCorr:ENGINE_DATA.useAccCorr,sectorCol:ENGINE_DATA.sectorCol,industryCol:ENGINE_DATA.industryCol,
       recentRockets,totalParsed:totalParsed,hardFilterSchema:HARD_FILTER_SCHEMA,removed:{...REMOVED},survSize:Object.keys(NSE_SURV).length,
       recommendationFeedback,executedEntryFeedback,outcomeScoreOverlay:ENGINE_DATA.outcomeScoreOverlay,
-      snapshotElapsedMinutes:ENGINE_DATA.snapshotElapsedMinutes,snapshotPairs:ENGINE_DATA.snapshotPairs};
+      snapshotElapsedMinutes:ENGINE_DATA.snapshotElapsedMinutes,snapshotDisplayElapsedMinutes:ENGINE_DATA.snapshotDisplayElapsedMinutes,
+      snapshotPairs:ENGINE_DATA.snapshotPairs};
     FS.set(modeKey(METH_STORE),methSave);
   }catch(e){console.warn('Could not save methodology data',e);}
   persistMethodologySnapshot();
@@ -3901,10 +3911,13 @@ function _renderMethodologyInner(){
 
 // Fixed columns + dynamic top 10 mRMR features (skip empty ones)
 function getCols(){
+  const intervalMinutes=ENGINE_DATA?.snapshotDisplayElapsedMinutes;
+  const intervalLabel=intervalMinutes!=null?`Chg ${intervalMinutes}m%`:'Snap Chg%';
   const fixed=[
     {key:'chk',label:'',s:0},
     {key:'rocketScore',label:'Score',s:1},{key:'symbol',label:'Symbol',s:1},
-    {key:'price',label:'Price ₹',s:1},{key:'priceChange',label:'Chg%',s:1},{key:'delivPct',label:'Deliv%',s:1},
+    {key:'price',label:'Price ₹',s:1},{key:'snapshotChange',label:intervalLabel,s:1},
+    {key:'priceChange',label:'Chg 1D%',s:1},{key:'delivPct',label:'Deliv%',s:1},
     {key:'alloc',label:'Alloc ₹',s:0},{key:'volume',label:'Volume',s:1},
   ];
   // Dynamic columns from mRMR features — skip any that are all null across displayed stocks
@@ -4540,6 +4553,7 @@ function renderTable(){
       <td><span class="sc-m">${isNaN(s.rocketScore)?'?':s.rocketScore.toFixed(1)}</span></td>
       <td style="font-family:'Plus Jakarta Sans',sans-serif"><div style="font-weight:700;font-size:13px;color:var(--t1)">${s.symbol}${(()=>{const sv=s.seen||0;if(!sv) return '';return`<sub style="font-size:11px;color:var(--amber);font-weight:700;margin-left:3px;font-family:'DM Mono',monospace" title="Seen ${sv}× today">${sv}×</sub>`;})()}${filterBadge}${filterAction}${s._isTopUp?`<span style="font-size:8px;background:rgba(251,146,60,.15);color:var(--fire);border-radius:4px;padding:1px 5px;margin-left:5px;font-weight:700;vertical-align:middle">↑ TOP-UP</span>`:''}${(()=>{if(!s.isSurv) return '';const labels=(s.survRules||[]).map(k=>{const r=SURV_CUSTOM_RULES.find(x=>x.key===k);return r?r.label:k;}).join(' · ');return `<span style="font-size:8px;background:rgba(239,68,68,.15);color:var(--red);border-radius:4px;padding:1px 5px;margin-left:5px;font-weight:700;vertical-align:middle" title="NSE Surveillance: ${escHtml(labels)}">⚠ SURV</span>`;})()}</div><div style="font-size:9px;color:${s._filterPreview?'var(--amber)':'var(--t3)'};max-width:220px;overflow:hidden;text-overflow:ellipsis">${s._filterPreview||s._forceKept?escHtml(s._filterReason||'filtered'):(s.name+(s._isTopUp&&s._heldAvg?` · avg ${fmtINR(s._heldAvg)}`:''))}</div></td>
       <td>${fmtINR(s.price)}</td>
+      <td>${fPerf(s.snapshotChange)}</td>
       <td>${fPerf(s.priceChange)}</td>
       <td>${fDel(s.delivPct)}</td>
       <td class="alloc-cell" data-sym="${s.symbol}">${(()=>{
@@ -5507,7 +5521,8 @@ function compactRankingRows(rows){
   const featureKeys=ENGINE_DATA?.top10Feats||[];
   return (rows||[]).map(s=>({
     symbol:s.symbol,name:s.name,sector:s.sector,industry:s.industry,sectorBreadth:s.sectorBreadth,
-    price:s.price,priceChange:s.priceChange,rocketMove:s.rocketMove,volume:s.volume,marketCap:s.marketCap,atr:s.atr,
+    price:s.price,priceChange:s.priceChange,snapshotChange:s.snapshotChange,rocketMove:s.rocketMove,
+    volume:s.volume,marketCap:s.marketCap,atr:s.atr,
     high1d:s.high1d,low1d:s.low1d,vwap:s.vwap,piotroski:s.piotroski,shareholders:s.shareholders,
     perf1w:s.perf1w,delivPct:s.delivPct,rangePos:s.rangePos,pctFrom52wHigh:s.pctFrom52wHigh,
     rocketScore:s.rocketScore,tier:s.tier,flags:s.flags||[],isSurv:!!s.isSurv,survRules:s.survRules||null,
