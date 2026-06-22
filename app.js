@@ -1,5 +1,5 @@
-const BUILD_TS='2026-06-22 07:35 IST'; // replaced at commit time with IST datetime
-const APP_VERSION=430; // Shared deployed version; increment once per released code change.
+const BUILD_TS='2026-06-22 09:21 IST'; // replaced at commit time with IST datetime
+const APP_VERSION=431; // Shared deployed version; increment once per released code change.
 const GOOGLE_DRIVE_CLIENT_ID='1015012642264-oi2nelv3v90k3d39r994a6nelgjs2a56.apps.googleusercontent.com'; // Public OAuth Web Client ID.
 const HARD_FILTER_SCHEMA='structural_tradeability_v2';
 const SNAPSHOT_MIN_GAP_MINUTES=1;
@@ -3932,7 +3932,8 @@ function getBuyPrice(s){
   const ltp=s.price>0?s.price:0;
   const vwap=s.vwap;
   const atrMargin=(s.atr!=null&&ltp>0)?(ltp*s.atr*0.25/100):0;
-  return vwap>0?parseFloat(tickPrice(vwap+atrMargin).toFixed(2)):parseFloat(tickPrice(ltp).toFixed(2));
+  const candidate=vwap>0?Math.min(vwap+atrMargin,ltp):ltp;
+  return parseFloat(tickPrice(candidate).toFixed(2));
 }
 function getRunwayCeilingPct(s){
   return (s&&s.price_band_pct!=null&&isFinite(s.price_band_pct)&&s.price_band_pct>0)?s.price_band_pct:STOCK_RUNWAY_CEILING_PCT;
@@ -5346,12 +5347,28 @@ function calcZerodhaChargesSplit(price, qty, isSell, isIntraday, skipDp){
   return {brokerage,stt,txn,sebi,gst,stamp,dp};
 }
 
+function planBasketExport(capital, selected){
+  let exportList=(selected||[]).filter(s=>!getPriceBandBlockReason(s));
+  let basketAlloc=computeAlloc(capital,exportList);
+  const orderCount=()=>exportList.reduce((count,s)=>{
+    const qty=capital>0?(basketAlloc[s.symbol]?.qty||0):1;
+    return count+(qty>=2?2:(qty===1?1:0));
+  },0);
+  while(exportList.length&&orderCount()>20){
+    exportList=exportList.slice(0,-1);
+    basketAlloc=computeAlloc(capital,exportList);
+  }
+  return {exportList,basketAlloc,orderCount:orderCount()};
+}
+
 
 function exportBasket(){
   const capital=parseFloat(document.getElementById('fCapital').value)||0;
   const selList=FILT.filter(s=>SELECTED.has(s.symbol));
   if(!selList.length){showToast('Select at least one stock first.',3000,true);return;}
-  const basketAlloc = computeAlloc(capital, selList);
+  const bandRejected=selList.filter(s=>getPriceBandBlockReason(s)).length;
+  const {exportList,basketAlloc}=planBasketExport(capital,selList);
+  const limitOmitted=Math.max(0,selList.length-bandRejected-exportList.length);
 
   // Universal SL/TGT from tradebook (already cost-adjusted)
   const adaptiveSL=roundPct05(TRADEBOOK_STATS?TRADEBOOK_STATS.adaptiveSL:3.5);
@@ -5359,7 +5376,7 @@ function exportBasket(){
   let runnerTGT=roundPct05(getRunnerTgtPct(null,null,adaptiveTGT)||adaptiveTGT*1.5);
 
   const orders=[];
-  let rejectedCount=0;
+  let rejectedCount=bandRejected;
   let splitCount=0;
   let orderSeq=0;
   const pushBuyOrder=(s,qty,buyPrice,targetPct,label)=>{
@@ -5389,8 +5406,7 @@ function exportBasket(){
       }
     });
   };
-  selList.forEach(s=>{
-    if(getPriceBandBlockReason(s)){rejectedCount++;return;}
+  exportList.forEach(s=>{
     const am = basketAlloc[s.symbol];
     if(am?.rejected){rejectedCount++;return;} // skip cost-floor rejections
     const qty = capital > 0 ? (am?.qty || 0) : 1;
@@ -5410,6 +5426,7 @@ function exportBasket(){
   });
 
   if(!orders.length){showToast('Capital too low to buy even 1 share of any selected stock.',4000,true);return;}
+  if(orders.length>20) throw new Error(`Basket planning invariant failed: ${orders.length} orders`);
   if(capital>0){
     const exportedDebit=orders.reduce((sum,order)=>{
       const qty=order.params.quantity,price=order.params.price;
@@ -5422,16 +5439,16 @@ function exportBasket(){
     }
   }
   downloadBasket(orders,'Zerodha_Basket_Buy');
-  const rejNote=rejectedCount>0?` · ${rejectedCount} skipped (below net floor)`:'';
+  const rejNote=rejectedCount>0?` · ${rejectedCount} skipped (eligibility/allocation)`:'';
   const splitNote=splitCount>0?` Â· split ${splitCount} stocks @ ${adaptiveTGT.toFixed(2)}% / ${runnerTGT.toFixed(2)}%`:'';
-  showToast(`<strong>Exported ${orders.length} BUY orders</strong> as Zerodha_Basket_Buy JSON${splitNote}${rejNote}`);
+  const limitNote=limitOmitted>0?` · ${limitOmitted} lower-priority stock${limitOmitted===1?'':'s'} omitted to keep complete TGT1/TGT2 pairs within Zerodha's 20-order limit`:'';
+  showToast(`<strong>Exported ${orders.length} BUY orders</strong> as Zerodha_Basket_Buy JSON${splitNote}${rejNote}${limitNote}`);
 }
 
 // ── Basket export helper: Zerodha limits 20 orders per basket ──
 function downloadBasket(orders, filename){
-  const capped=orders.slice(0,20);
-  if(orders.length>20) showToast(`Capped to 20 orders (had ${orders.length}). Top 20 by priority exported.`,4000);
-  const blob=new Blob([JSON.stringify(capped,null,2)],{type:'application/json'});
+  if(orders.length>20) throw new Error(`Refusing to truncate basket with ${orders.length} orders`);
+  const blob=new Blob([JSON.stringify(orders,null,2)],{type:'application/json'});
   const a=document.createElement('a');
   a.href=URL.createObjectURL(blob);
   a.download=filename+'.json';
@@ -5934,56 +5951,16 @@ async function initApp(){
       }
     }catch(e){console.error('INIT step2b meth restore failed:',e);}
 
-    // Step 2c: Restore holdings
-    try{
-      const h=brain[HOLD_STORE];
-      if(h&&typeof h==='object'){
-        if(Array.isArray(h.holdings)) HOLDINGS=h.holdings;
-        if(h.costMap) HOLD_COST_MAP=h.costMap;
-        console.log('INIT: restored',HOLDINGS.length,'holdings');
-      }
-    }catch(e){console.error('INIT step2c holdings restore failed:',e);}
-
-    // Step 2d: Restore positions (today's session only)
-    try{
-      const p=brain[POS_STORE];
-      const today=getSessionDate(), legacyToday=new Date().toDateString();
-      if(p){
-        if(Array.isArray(p)){
-          POSITIONS=[];
-          console.log('INIT: cleared legacy positions (no session date)');
-        } else if(p.positions&&Array.isArray(p.positions)){
-          if(p.sessionDate===today||p.sessionDate===legacyToday){
-            POSITIONS=p.positions;
-            console.log('INIT: restored',POSITIONS.length,'positions for today');
-          } else {
-            POSITIONS=[];
-            console.log('INIT: cleared stale positions from',p.sessionDate,'(today is',today+')');
-          }
-        }
-      }
-    }catch(e){console.error('INIT step2d positions restore failed:',e);}
-
-    // Step 2f: Restore tradebook stats
-    try{const tb=brain[TRADEBOOK_STORE];if(tb){TRADEBOOK_STATS=tb;if(tb.lastBuyDateMap) LAST_BUY_DATE_MAP=tb.lastBuyDateMap;}}catch(e){}
-
-    // Step 2f1: Restore NSE holidays
+    // Step 2c: Restore compact learned/runtime state only. Holdings, positions,
+    // orders, and tradebook are source-derived and hydrate from canonical Drive inputs.
+    // Restore NSE holidays because this compact calendar is intentionally persisted.
     try{const hols=brain[NSE_HOLIDAYS_STORE];if(Array.isArray(hols)&&hols.length) NSE_HOLIDAYS=new Set(hols);}catch(e){}
 
-    // Step 2f2: Restore surveillance P&L correlation accumulator
+    // Step 2d: Restore surveillance P&L correlation accumulator
     try{const sc=brain[SURV_CORR_STORE];if(sc&&typeof sc==='object') SURV_CORR_ACC=sc;}catch(e){}
     // Purge stale identity-column entries (one-time cleanup, no write-back needed)
     {const _pNF=new Set(['scripcode','symbol','nse exclusive','status','series']);
     Object.keys(SURV_CORR_ACC).forEach(k=>{const c=SURV_CORR_ACC[k]?.col||'';const hl=c.trim().toLowerCase();if(_pNF.has(hl)||/^filler/i.test(c.trim())) delete SURV_CORR_ACC[k];});}
-
-    // Step 2h: Restore orders (today only)
-    try{
-      const oRaw=brain[ORDERS_STORE];
-      const restoredOrders=Array.isArray(oRaw)?oRaw:(Array.isArray(oRaw?.orders)?oRaw.orders:null);
-      if(restoredOrders&&restoredOrders.length){
-        ORDERS_TODAY=restoredOrders; // renderPerformance filters to the most recent date internally
-      }
-    }catch(e){}
 
   } else {
     if(FS.needsReconnect()){
