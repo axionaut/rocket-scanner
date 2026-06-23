@@ -1,5 +1,5 @@
-const BUILD_TS='2026-06-22 09:21 IST'; // replaced at commit time with IST datetime
-const APP_VERSION=431; // Shared deployed version; increment once per released code change.
+const BUILD_TS='2026-06-22 19:12 IST'; // replaced at commit time with IST datetime
+const APP_VERSION=432; // Shared deployed version; increment once per released code change.
 const GOOGLE_DRIVE_CLIENT_ID='1015012642264-oi2nelv3v90k3d39r994a6nelgjs2a56.apps.googleusercontent.com'; // Public OAuth Web Client ID.
 const HARD_FILTER_SCHEMA='structural_tradeability_v2';
 const SNAPSHOT_MIN_GAP_MINUTES=1;
@@ -94,7 +94,9 @@ const SCANNER_STORE='rs_filters';
 const SHARED_FILTER_STORE='rs_filters_shared';
 const ALL_STORE='rs_data';
 const CORR_STORE='rs_corr';
-const CORR_SCHEMA='continuous_snapshot_full_rank_spearman_v1';
+const CORR_SCHEMA='snapshot_top10_binary_level_mrmr_v1';
+const ROCKET_TOP_FRACTION=0.10;
+const SNAPSHOT_HISTORY_DECAY=0.95;
 const SNAPSHOT_STATE_STORE='rs_snapshot_mrmr_v1';
 const SNAPSHOT_STATE_SCHEMA='continuous_snapshot_pair_v1';
 const METH_STORE='rs_meth';
@@ -1901,37 +1903,35 @@ function spearman(xs,ys){
 function emptySnapshotRuntime(){
   return {schema:SNAPSHOT_STATE_SCHEMA,latest:null,completed:0,lastOutcome:null,lastTag:null};
 }
-let SNAPSHOT_PENDING_QUEUE=[];
-function accumulateSnapshotCorrelation(correlation, weight=1){
-  const prior=ACC_CORR?.corrSchema===CORR_SCHEMA?ACC_CORR:{corr:{},counts:{},sessions:0,learnSessions:0,corrSchema:CORR_SCHEMA};
-  const corr={...prior.corr},counts={...prior.counts};
+function correlationFromMoments(m){
+  const n=m?.n||0;
+  if(n<30) return 0;
+  const d=Math.sqrt((n*m.sx2-m.sx*m.sx)*(n*m.sy2-m.sy*m.sy));
+  return d===0?0:(n*m.sxy-m.sx*m.sy)/d;
+}
+function accumulateSnapshotCorrelation(correlation, weight=1, featureMoments={}){
+  const prior=ACC_CORR?.corrSchema===CORR_SCHEMA?ACC_CORR:{corr:{},counts:{},moments:{},sessions:0,learnSessions:0,corrSchema:CORR_SCHEMA};
+  const corr={...prior.corr},counts={...prior.counts},moments={...(prior.moments||{})};
   const obsWeight=isFinite(weight)&&weight>0?weight:1;
   Object.entries(correlation||{}).forEach(([feature,value])=>{
     if(value==null||!isFinite(value)) return;
-    const n=counts[feature]||0;
-    const total=n+obsWeight;
-    corr[feature]=n?((corr[feature]*n)+(value*obsWeight))/total:value;
-    counts[feature]=total;
+    const incoming=featureMoments[feature];
+    if(!incoming) return;
+    const old=moments[feature]||{n:0,sx:0,sy:0,sxy:0,sx2:0,sy2:0};
+    const next={};
+    for(const key of ['n','sx','sy','sxy','sx2','sy2']){
+      next[key]=(old[key]||0)*SNAPSHOT_HISTORY_DECAY+(incoming[key]||0)*obsWeight;
+    }
+    moments[feature]=next;
+    counts[feature]=next.n;
+    corr[feature]=correlationFromMoments(next);
   });
   const sessions=(prior.learnSessions??prior.sessions??0)+1;
   const weightedSessions=(prior.weightedSessions||0)+obsWeight;
-  ACC_CORR={...prior,corr,counts,sessions,learnSessions:sessions,weightedSessions,corrSchema:CORR_SCHEMA,lastUpdated:new Date().toISOString()};
+  ACC_CORR={...prior,corr,counts,moments,sessions,learnSessions:sessions,weightedSessions,corrSchema:CORR_SCHEMA,lastUpdated:new Date().toISOString()};
 }
 function buildDecodedSnapshot({stamp,symbols,prices,featureRows,features,sessionTag}){
   return {...stamp,symbols:[...symbols],prices,featureRows,featureCols:[...features],features:null,sessionTag:sessionTag||null};
-}
-function seedPendingSnapshotQueue(runtime,stamp){
-  if(!Array.isArray(SNAPSHOT_PENDING_QUEUE)) SNAPSHOT_PENDING_QUEUE=[];
-  SNAPSHOT_PENDING_QUEUE=SNAPSHOT_PENDING_QUEUE.filter(s=>s&&(s.baselineEligible??s.inSession)&&s.sessionDate===stamp.sessionDate);
-  const latest=runtime?.latest;
-  if((latest?.baselineEligible??latest?.inSession)&&latest.sessionDate===stamp.sessionDate&&!SNAPSHOT_PENDING_QUEUE.some(s=>s.timestamp===latest.timestamp)){
-    SNAPSHOT_PENDING_QUEUE.push(latest);
-  }
-}
-function trimPendingSnapshotQueue(currentStamp){
-  SNAPSHOT_PENDING_QUEUE=(SNAPSHOT_PENDING_QUEUE||[])
-    .filter(s=>s&&(s.baselineEligible??s.inSession)&&s.sessionDate===currentStamp.sessionDate&&s.timestamp<currentStamp.timestamp)
-    .sort((a,b)=>a.timestamp-b.timestamp);
 }
 function snapshotGapBucket(minutes){
   const gap=Math.max(SNAPSHOT_MIN_GAP_MINUTES,Math.round(Number(minutes)||0));
@@ -1980,22 +1980,28 @@ function computeSnapshotPairCorrelation(previous,current,features){
     const ci=currentIndex.get(symbol),priorPrice=previous.prices?.[index],currentPrice=ci==null?null:current.prices?.[ci];
     return {symbol,value:priorPrice>0&&currentPrice>0?((currentPrice/priorPrice)-1)*100:null};
   }).filter(item=>item.value!=null&&isFinite(item.value)).sort((a,b)=>b.value-a.value);
-  const outcomeRanks=pctRank(ranked.map(item=>item.value));
-  const outcomeRankBySymbol=Object.fromEntries(ranked.map((item,index)=>[item.symbol,outcomeRanks[index]]));
-  const correlation={};
+  const rocketCount=Math.max(1,Math.ceil(ranked.length*ROCKET_TOP_FRACTION));
+  const rocketSymbols=new Set(ranked.slice(0,rocketCount).map(item=>item.symbol));
+  const eligibleSymbols=new Set(ranked.map(item=>item.symbol));
+  const correlation={},featureMoments={};
   for(const feature of features){
     const xs=[],target=[];
     (previous.symbols||[]).forEach(symbol=>{
       if(!currentIndex.has(symbol)) return;
       const value=previous.featureRows?.[symbol]?.[feature];
-      const outcomeRank=outcomeRankBySymbol[symbol];
-      if(value==null||!isFinite(value)||outcomeRank==null||!isFinite(outcomeRank)) return;
-      xs.push(value);target.push(outcomeRank);
+      if(value==null||!isFinite(value)||!eligibleSymbols.has(symbol)) return;
+      xs.push(value);target.push(rocketSymbols.has(symbol)?1:0);
     });
-    correlation[feature]=spearman(xs,target);
+    correlation[feature]=pearson(xs,target);
+    const moments={n:xs.length,sx:0,sy:0,sxy:0,sx2:0,sy2:0};
+    for(let i=0;i<xs.length;i++){
+      const x=xs[i],y=target[i];
+      moments.sx+=x;moments.sy+=y;moments.sxy+=x*y;moments.sx2+=x*x;moments.sy2+=y*y;
+    }
+    featureMoments[feature]=moments;
   }
   return {
-    correlation,ranked,
+    correlation,featureMoments,ranked,rocketCount,rocketSymbols,
     elapsedMinutes:Math.round((current.timestamp-previous.timestamp)/60000),
     sourceTimestamp:previous.timestamp,
   };
@@ -2027,11 +2033,7 @@ async function advanceSnapshotLearning({rows,features,priceKey,sessionTag,advanc
   }else{
     const previous=runtime.latest;
     const stale=previous&&stamp.timestamp<=previous.timestamp;
-    if(!stale){
-      seedPendingSnapshotQueue(runtime,stamp);
-      trimPendingSnapshotQueue(stamp);
-    }
-    const validPairs=!stale&&stamp.inSession?SNAPSHOT_PENDING_QUEUE.filter(prev=>isValidSnapshotTransition(prev,stamp)): [];
+    const validPairs=!stale&&stamp.inSession&&isValidSnapshotTransition(previous,stamp)?[previous]:[];
     if(validPairs.length){
       const pairSums={},pairCounts={};
       const pairs=validPairs.map(prev=>computeSnapshotPairCorrelation(prev,currentSnapshot,features));
@@ -2041,7 +2043,7 @@ async function advanceSnapshotLearning({rows,features,priceKey,sessionTag,advanc
       pairs.forEach(pair=>{
         pair.quality=correlationQuality(pair.correlation);
         pair.weight=getGapEvidenceWeight(pair.elapsedMinutes);
-        accumulateSnapshotCorrelation(pair.correlation,pair.weight);
+        accumulateSnapshotCorrelation(pair.correlation,pair.weight,pair.featureMoments);
         recordGapQuality(pair.elapsedMinutes,pair.quality,pair.weight);
         features.forEach(feature=>{
           const value=pair.correlation[feature];
@@ -2059,8 +2061,8 @@ async function advanceSnapshotLearning({rows,features,priceKey,sessionTag,advanc
       runtime.lastOutcome={sourceTimestamp:displayPair.sourceTimestamp,completedAt:stamp.timestamp,elapsedMinutes:displayPair.elapsedMinutes,
         minElapsedMinutes:minElapsed,maxElapsedMinutes:maxElapsed,forwardPairs:pairs.length,
         minGapWeight:weights.length?Math.min(...weights):1,maxGapWeight:weights.length?Math.max(...weights):1,
-        matched:displayPair.ranked.length};
-      note=`Learned from ${pairs.length} data-weighted snapshot horizon${pairs.length===1?'':'s'} (${minElapsed}-${maxElapsed} min) across ${displayPair.ranked.length} stocks`;
+        matched:displayPair.ranked.length,rockets:displayPair.rocketCount};
+      note=`Learned what the top ${Math.round(ROCKET_TOP_FRACTION*100)}% (${displayPair.rocketCount}) interval rockets looked like ${displayPair.elapsedMinutes} min earlier across ${displayPair.ranked.length} stocks`;
     }else if(stale){
       note='Older or same-time snapshot ignored; the current baseline was preserved';
     }else if(!stamp.inSession){
@@ -2074,13 +2076,9 @@ async function advanceSnapshotLearning({rows,features,priceKey,sessionTag,advanc
     }
 
     if(!stale){
-      runtime.latest=currentSnapshot;
-      runtime.lastTag=sessionTag||null;
-      if(currentSnapshot.baselineEligible){
-        SNAPSHOT_PENDING_QUEUE.push(currentSnapshot);
-        trimPendingSnapshotQueue({...stamp,timestamp:stamp.timestamp+1});
-      }
-      window._snapshotRuntimeDirty=true;
+        runtime.latest=currentSnapshot;
+        runtime.lastTag=sessionTag||null;
+        window._snapshotRuntimeDirty=true;
     }
   }
 
@@ -2366,7 +2364,7 @@ async function runEngine(raw, sessionTag, options={}){
     const baseScore=rel/(1+red);
     mrmr[f]={rel,red,baseScore,reliability:1,score:baseScore,accountability:null};
   }
-  const totalMRMR=FEATS.reduce((s,f)=>s+mrmr[f].score,0)||1; // guard /0
+  const totalMRMR=FEATS.reduce((s,f)=>s+mrmr[f].score,0)||1;
   const weights={};
   for(const f of FEATS)weights[f]=mrmr[f].score/totalMRMR;
   const outcomeReliabilityModel=buildOutcomeReliabilityModel(FEATS,weights);
@@ -2377,15 +2375,15 @@ async function runEngine(raw, sessionTag, options={}){
     let rawScore=0,maxW=0;
     for(const f of FEATS){
       const w=weights[f],p=pctls[f][idx];
-      if(p===null) continue; // skip features with no data for this stock
+      if(p===null) continue;
       maxW+=w;
       rawScore+=w*(targetCorr[f]>=0?p:(1-p));
     }
-    const rawFinal = hasRecommendationEvidence&&maxW>0 ? rawScore/maxW : 0;
-    const mrmrScore = Math.round(rawFinal*100*10)/10;
+    const rawFinal=hasRecommendationEvidence&&maxW>0?rawScore/maxW:0;
+    const mrmrScore=Math.round(rawFinal*100*10)/10;
     const currentFeatures=Object.fromEntries(FEATS.map(f=>[f,d[f]??null]));
     const outcomeReliability=hasRecommendationEvidence?getOutcomeReliabilityAdjustment(currentFeatures,outcomeReliabilityModel,weights):{delta:0,confidence:0,matched:0};
-    const score = hasRecommendationEvidence?Math.round(clampNum(mrmrScore+outcomeReliability.delta,0,100)*10)/10:0;
+    const score=hasRecommendationEvidence?Math.round(clampNum(mrmrScore+outcomeReliability.delta,0,100)*10)/10:0;
 
     const vol=(K.volume?d[K.volume]:null);
     const flags=[];
@@ -2479,7 +2477,9 @@ async function runEngine(raw, sessionTag, options={}){
     marketBreadth:marketBreadth,
     recommendationFeedback,executedEntryFeedback,
     outcomeScoreOverlay:{active:outcomeReliabilityModel.active,samples:outcomeReliabilityModel.samples.length,features:outcomeReliabilityModel.features.length,maxAdjustment:OUTCOME_SCORE_ADJ_MAX},
-    useFreshCorr, hasRecommendationEvidence, currentUploadLearned, freshSignalCount, scoringSource,
+    scoringModel:'snapshot_top10_binary_level_mrmr',
+    useFreshCorr, hasRecommendationEvidence, currentUploadLearned, freshSignalCount,
+    scoringSource,
     useAccCorr: snapshotLearning.hadPriorCorr,
     snapshotElapsedMinutes:SNAPSHOT_RUNTIME?.lastOutcome?.elapsedMinutes??null,
     snapshotDisplayElapsedMinutes:snapshotLearning.intervalElapsedMinutes??null,
@@ -2499,12 +2499,13 @@ async function runEngine(raw, sessionTag, options={}){
   COLS=getCols(); // refresh dynamic columns
   // Persist compact methodology summaries; the O(n²) pair matrix is recomputed per run.
   try{
-    const methSave={targetCorr,targetCorrToday,mrmr,weights,features:FEATS,labels:LABELS,top10Feats,accSessions:ENGINE_DATA.accSessions,laggedNote:ENGINE_DATA.laggedNote,
+    const methSave={targetCorr:ENGINE_DATA.targetCorr,targetCorrToday,mrmr:ENGINE_DATA.mrmr,weights:ENGINE_DATA.weights,
+      features:ENGINE_DATA.features,labels:ENGINE_DATA.labels,top10Feats:ENGINE_DATA.top10Feats,accSessions:ENGINE_DATA.accSessions,laggedNote:ENGINE_DATA.laggedNote,
       marketBreadth:ENGINE_DATA.marketBreadth,useFreshCorr:ENGINE_DATA.useFreshCorr,hasRecommendationEvidence:ENGINE_DATA.hasRecommendationEvidence,currentUploadLearned:ENGINE_DATA.currentUploadLearned,freshSignalCount:ENGINE_DATA.freshSignalCount,scoringSource:ENGINE_DATA.scoringSource,useAccCorr:ENGINE_DATA.useAccCorr,sectorCol:ENGINE_DATA.sectorCol,industryCol:ENGINE_DATA.industryCol,
       totalParsed:totalParsed,hardFilterSchema:HARD_FILTER_SCHEMA,removed:{...REMOVED},survSize:Object.keys(NSE_SURV).length,
       recommendationFeedback,executedEntryFeedback,outcomeScoreOverlay:ENGINE_DATA.outcomeScoreOverlay,
       snapshotElapsedMinutes:ENGINE_DATA.snapshotElapsedMinutes,snapshotDisplayElapsedMinutes:ENGINE_DATA.snapshotDisplayElapsedMinutes,
-      snapshotPairs:ENGINE_DATA.snapshotPairs};
+      snapshotPairs:ENGINE_DATA.snapshotPairs,scoringModel:ENGINE_DATA.scoringModel};
     FS.set(modeKey(METH_STORE),methSave);
   }catch(e){console.warn('Could not save methodology data',e);}
   persistMethodologySnapshot();
@@ -3417,7 +3418,7 @@ function renderPerformance(){
     ? `${exitOpportunity.exits} symbol/date exits have same-day ALL NSE highs recorded. ${exitOpportunity.upsideExits} highs exceeded the quantity-weighted average sell price; sold-value-weighted missed upside averages ${exitOpportunity.avgMissed.toFixed(2)}% (${fmtINR(exitOpportunity.missedValue)}).`
     : `No same-day exit opportunities have been recorded yet. Load Orders, Tradebook, and ALL NSE for the sell day.`;
   const outcomeHtml=perfCard('Recommendation Outcome Feedback',
-    `<div style="padding:14px 16px;color:var(--t2);font-size:12px;line-height:1.7"><div><strong style="color:var(--t1)">Actual entries:</strong> ${entryOutcomeText}</div><div style="margin-top:8px"><strong style="color:var(--t1)">Eligible shortlist:</strong> ${outcomeText}</div><div style="margin-top:8px"><strong style="color:var(--t1)">Same-day exit opportunity:</strong> ${escapeText}</div><div style="margin-top:8px;color:var(--t3)">Whole-universe snapshot return ranks train raw mRMR feature relevance. Completed shortlist and executed-entry outcomes apply a bounded evidence adjustment to final scores, while tradebook and missed-opportunity evidence refine sizing, review timing, and TGT1/TGT2.</div></div>`,'','perf-outcomes');
+    `<div style="padding:14px 16px;color:var(--t2);font-size:12px;line-height:1.7"><div><strong style="color:var(--t1)">Actual entries:</strong> ${entryOutcomeText}</div><div style="margin-top:8px"><strong style="color:var(--t1)">Eligible shortlist:</strong> ${outcomeText}</div><div style="margin-top:8px"><strong style="color:var(--t1)">Same-day exit opportunity:</strong> ${escapeText}</div><div style="margin-top:8px;color:var(--t3)">Prior-snapshot feature levels versus next-interval top-10% rocket labels train raw mRMR relevance. Completed shortlist and executed-entry outcomes apply a bounded evidence adjustment to final scores, while tradebook and missed-opportunity evidence refine sizing, review timing, and TGT1/TGT2.</div></div>`,'','perf-outcomes');
 
   el.innerHTML=`
     <div style="padding:12px 16px">
@@ -3780,19 +3781,15 @@ function _renderMethodologyInner(){
   };
   const rs = {
   };
-  const scoreCorrSource = E.useAccCorr
-    ? (E.currentUploadLearned
-      ? `Latest completed snapshot evidence is scoring current candidates (${E.freshSignalCount||0} active features learned)`
-      : 'Accumulated snapshot learning active')
-    : (E.currentUploadLearned
-      ? `First learning interval captured; recommendations are now active (${E.freshSignalCount||0} active features learned)`
-      : 'First upload baseline saved; recommendations will start after the next upload');
+  const scoreCorrSource = E.hasRecommendationEvidence
+    ?'Prior-snapshot feature levels are scoring candidates for the next top-10% rocket set'
+    :'First upload baseline saved; recommendations start after the next valid snapshot';
   const sessLabel = `${E.accSessions||0} learned horizons · ${E.laggedNote||'waiting for the next snapshot'}`;
   const breadthPct=E.marketBreadth!=null?(E.marketBreadth*100).toFixed(0):'?';
   const recFeedback=E.recommendationFeedback;
   const entryFeedback=E.executedEntryFeedback;
   const overlay=E.outcomeScoreOverlay||{};
-  const feedbackText=`Shortlist outcomes: ${recFeedback?.samples||0}; executed-entry outcomes: ${entryFeedback?.samples||0}. Raw mRMR feature relevance is trained from the full cross-sectional return ranking of every matched stock; completed recommendation/entry outcomes ${overlay.active?'are active':'will activate after enough samples'} as a bounded evidence score overlay (${overlay.samples||0} samples, max ±${overlay.maxAdjustment||OUTCOME_SCORE_ADJ_MAX} pts) and also refine targets/sizing.`;
+  const feedbackText=`Shortlist outcomes: ${recFeedback?.samples||0}; executed-entry outcomes: ${entryFeedback?.samples||0}. Raw mRMR relevance learns which earlier feature levels distinguish the next interval's top 10% movers. Completed recommendation and entry outcomes remain a bounded evidence overlay and continue refining targets, sizing, and review timing.`;
   const breadthCardHTML=`<div class="breadth-bar">
     <div class="breadth-badge" style="color:var(--cyan)">${breadthPct}% Breadth</div>
     <div class="breadth-meta">
@@ -3810,7 +3807,7 @@ function _renderMethodologyInner(){
 
   mc.innerHTML=''; // clear before rebuild
 
-  let wtHTML=`<table class="ct"><thead><tr><th>Feature</th><th>Src</th><th>Accumulated Rank r</th><th>Latest Rank r</th><th>Direction</th><th>Rank Redundancy</th><th>mRMR Score</th><th class="bar-cell">Weight</th><th>Wt%</th></tr></thead><tbody>`;
+  let wtHTML=`<table class="ct"><thead><tr><th>Feature</th><th>Src</th><th>Accumulated Rocket r</th><th>Latest Rocket r</th><th>Direction</th><th>Rank Redundancy</th><th>mRMR Score</th><th class="bar-cell">Weight</th><th>Wt%</th></tr></thead><tbody>`;
   for(const f of sorted){
     const tc=E.targetCorr[f],m=E.mrmr[f],w=E.weights[f];
     const dir=tc>=0?'<span style="color:var(--green)">↑</span>':'<span style="color:var(--red)">↓</span>';
@@ -3826,7 +3823,6 @@ function _renderMethodologyInner(){
     </tr>`;
   }
   wtHTML+='</tbody></table>';
-
   // Section counts for display
   const _featureCount=sorted.length;
 
@@ -3842,15 +3838,15 @@ function _renderMethodologyInner(){
     <div id="meth-hf-wrap">${hardFiltersHTML}</div>
     <div id="meth-breadth">${breadthCardHTML}</div>
     <h3 id="meth-engine" style="margin-top:18px">Scoring Engine — Continuous Learning mRMR</h3>
-    <p id="mrmrLearningModeNote"><strong>Current learning mode:</strong> continuous whole-universe rank learning with rich inputs. Every clean numeric indicator in an earlier upload is rank-correlated with the complete forward-return ranking of all matched stocks in later same-session uploads. Elapsed gaps are weighted by observed evidence quality; the TradingView 1-day change column remains an unchanged input feature. Market breadth is context only.</p>
+    <p id="mrmrLearningModeNote"><strong>Current learning mode:</strong> rolling prior-snapshot level mRMR. At each new upload, the top 10% of stocks by actual snapshot-to-snapshot return are labelled rockets. The engine learns what those stocks looked like in the immediately preceding snapshot, accumulates that evidence with 5% recency decay, and scores the current feature levels for the next upload. Market breadth is context only.</p>
     <div class="m-grid">
-      <div class="m-card"><h4>Learning Target</h4><p>Every matched stock receives a forward-return percentile rank from worst to best between snapshots. The model learns that complete ordering, scores every eligible stock in the current snapshot, and the Rankings view shows the highest-scoring 20.</p></div>
-      <div class="m-card"><h4>📡 How the Engine Learns</h4><p>The engine ranks every matched stock from worst to best by its return between snapshots. It then uses Spearman rank correlation to measure whether each earlier feature consistently orders the full universe toward stronger or weaker future returns. Non-rockets therefore contribute their exact relative outcome instead of one shared zero label.</p></div>
+      <div class="m-card"><h4>Learning Target</h4><p>For each completed interval, the highest-returning 10% of matched stocks receive a rocket label of 1 and all other matched stocks receive 0. Feature values come strictly from the earlier snapshot.</p></div>
+      <div class="m-card"><h4>📡 How the Engine Learns</h4><p>N→N+1 learns which feature levels at N distinguished the rockets observed at N+1. N+1→N+2 adds another batch, and so on. Historical feature correlations accumulate rather than being replaced, with newer transitions receiving gradually more influence.</p></div>
       <div class="m-card"><h4>Outcome Self-Correction</h4><p>${feedbackText} Faster rocket conversions and profitable executed-entry peaks reward their feature patterns; failures and adverse outcomes penalise them.</p></div>
-      <div class="m-card"><h4>Feature Self-Correction</h4><p>Each snapshot horizon contributes a whole-universe rank correlation for every feature. Correct and repeatable ordering relationships persist in the running mean; random one-off relationships dilute naturally as more evidence accumulates. mRMR uses rank correlation again to reduce the weight of features that duplicate stronger peers.</p></div>
+      <div class="m-card"><h4>Feature Self-Correction</h4><p>Features that repeatedly separate future rockets from non-rockets strengthen; one-off relationships fade as more transitions arrive. mRMR separately measures current feature-to-feature rank correlation so highly redundant indicators cannot cast duplicate votes.</p></div>
       <div class="m-card"><h4>🎯 Max 1D Filter</h4><p>Set <em>Max 1D %</em> in the filter bar to hide stocks that have already moved too much today (default 5%). Entry-ceiling filtering has been removed; strong candidates are no longer hidden just because current price is above a calculated buy ceiling.</p></div>
       <div class="m-card"><h4>🚫 Recommendation Filters</h4><p>The learning universe keeps every valid parsed NSE symbol. Recommendation eligibility separately excludes zero-price rows, stocks at/near their NSE price band, non-EQ series, surveillance-flagged stocks, insufficient liquidity, zero Piotroski F-Score, and invalid ATR. Delivery, peak retention, RVOL, DMI, MFI, RSI, and sell pressure are <strong>features, not hard filters</strong>. Currently filtered from recommendations: ${(REMOVED.uc||0)+(REMOVED.surv||0)+(REMOVED.nonEq||0)+(REMOVED.liq||0)+(REMOVED.fscore||0)+(REMOVED.atr||0)} stocks.</p></div>
-      <div class="m-card"><h4>Regime-Agnostic Learning</h4><p>Market breadth is shown as context only. The scanner uses one running-mean whole-universe rank-correlation accumulator across all market conditions, so bull, neutral, and bear days do not create separate scoring histories.</p></div>
+      <div class="m-card"><h4>Regime-Agnostic Learning</h4><p>Market breadth is shown as context only. The scanner uses one recency-adjusted top-rocket correlation accumulator across all market conditions, so bull, neutral, and bear days do not create separate scoring histories.</p></div>
       <div class="m-card"><h4>📊 Sector & Industry Breadth</h4><p>${E.sectorCol?'<span style="color:var(--green)">✓</span> Sector breadth, sector relative strength':'<span style="color:var(--red)">✗</span> No Sector column detected'}${E.industryCol?', <span style="color:var(--green)">✓</span> industry breadth':''} — computed from today\'s full universe and fed into mRMR as features. Stocks outperforming their sector score higher regardless of market direction.</p></div>
     </div>
 
@@ -5666,8 +5662,13 @@ async function processScannerUpload(scannerFile, mode){
   let completed=false;
   MARKET_MODE=mode;
   ACC_CORR=FS.get(modeKey(CORR_STORE,mode));
+  const correlationCompatible=ACC_CORR?.corrSchema===CORR_SCHEMA;
   SNAPSHOT_RUNTIME=await decodeSnapshotState(FS.get(modeKey(SNAPSHOT_STATE_STORE,mode)));
   window._snapshotRuntimeDirty=false;
+  if(!correlationCompatible&&SNAPSHOT_RUNTIME){
+    SNAPSHOT_RUNTIME={...SNAPSHOT_RUNTIME,completed:0,lastOutcome:null};
+    window._snapshotRuntimeDirty=true;
+  }
   try{
     setMsg('Parsing stock TradingView data...');
     const text=await scannerFile.text();
@@ -5908,7 +5909,10 @@ async function initApp(){
         console.log('INIT: reset incompatible correlation target schema; retained compact timing totals.');
       }
     }catch(e){}
-    try{SNAPSHOT_RUNTIME=await decodeSnapshotState(brain[modeKey(SNAPSHOT_STATE_STORE)]);}catch(e){SNAPSHOT_RUNTIME=emptySnapshotRuntime();}
+    try{
+      SNAPSHOT_RUNTIME=await decodeSnapshotState(brain[modeKey(SNAPSHOT_STATE_STORE)]);
+      if(!correlationCompatible&&SNAPSHOT_RUNTIME) SNAPSHOT_RUNTIME={...SNAPSHOT_RUNTIME,completed:0,lastOutcome:null};
+    }catch(e){SNAPSHOT_RUNTIME=emptySnapshotRuntime();}
 
     // Step 2: Load scan data
     try{
