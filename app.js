@@ -1,5 +1,5 @@
-const BUILD_TS='2026-06-24 10:30 IST'; // replaced at commit time with IST datetime
-const APP_VERSION=435; // Intrinsic-delta baseline + prior-trading-day delta mRMR release.
+const BUILD_TS='2026-06-24 11:31 IST'; // replaced at commit time with IST datetime
+const APP_VERSION=436; // Snapshot-display fix + 3-leg cost-cover basket release.
 const GOOGLE_DRIVE_CLIENT_ID='1015012642264-oi2nelv3v90k3d39r994a6nelgjs2a56.apps.googleusercontent.com'; // Public OAuth Web Client ID.
 const HARD_FILTER_SCHEMA='structural_tradeability_v2';
 const SNAPSHOT_MIN_GAP_MINUTES=1;
@@ -2073,8 +2073,9 @@ async function advanceSnapshotLearning({rows,features,priceKey,sessionTag,target
   const currentSnapshot=buildDecodedSnapshot({stamp,symbols,prices,featureRows,features,sessionTag});
 
   let note='Waiting for first-upload intrinsic daily-delta baseline';
-  let primaryCorr=null,intradayCurrent=null,intervalMoves={},scoringFeatureRows={};
+  let primaryCorr=null,intradayCurrent=null,primaryIntervalMoves={},displayIntervalMoves={},scoringFeatureRows={};
   let primarySnapshot=null,primaryValid=false,intradayUpdated=false,baselineActive=false,baselineCreated=false;
+  let displayIntervalElapsedMinutes=null;
   const duplicate=!!sessionTag&&runtime.lastTag===sessionTag&&runtime.latest?.sessionDate===stamp.sessionDate;
 
   if(!advance){
@@ -2087,6 +2088,18 @@ async function advanceSnapshotLearning({rows,features,priceKey,sessionTag,target
   }else{
     const latest=runtime.latest;
     const stale=latest&&stamp.timestamp<=latest.timestamp;
+
+    // The Rankings "Snap Chg" column is a display-only comparison against the most recent
+    // earlier upload. It is deliberately independent of the scoring comparator: same-day
+    // snapshots may show a change here but must never create or rescue mRMR evidence.
+    const displaySnapshot=latest&&latest.timestamp<stamp.timestamp
+      ?latest
+      :(runtime.previousTradingDay&&runtime.previousTradingDay.timestamp<stamp.timestamp
+        ?runtime.previousTradingDay:null);
+    if(displaySnapshot){
+      displayIntervalMoves=snapshotPriceMoves(displaySnapshot,currentSnapshot);
+      displayIntervalElapsedMinutes=Math.max(1,Math.round((stamp.timestamp-displaySnapshot.timestamp)/60000));
+    }
 
     // The primary comparator is ONLY the immediately previous NSE trading day.
     if(runtime.previousTradingDay&&tradingDaysBetween(runtime.previousTradingDay.sessionDate,stamp.sessionDate)===1){
@@ -2102,7 +2115,7 @@ async function advanceSnapshotLearning({rows,features,priceKey,sessionTag,target
     if(primaryValid){
       primaryCorr=primaryPair.correlation;
       scoringFeatureRows=primaryPair.comparisonRows||{};
-      intervalMoves=snapshotPriceMoves(primarySnapshot,currentSnapshot);
+      primaryIntervalMoves=snapshotPriceMoves(primarySnapshot,currentSnapshot);
       features.forEach(f=>{targetCorrToday[f]=primaryCorr[f]??null;});
     }
 
@@ -2136,7 +2149,7 @@ async function advanceSnapshotLearning({rows,features,priceKey,sessionTag,target
         corrSchema:CORR_SCHEMA,lastUpdated:new Date().toISOString(),lastPrimaryDate:primarySnapshot.sessionDate,lastCurrentDate:stamp.sessionDate};
       runtime.completed=(runtime.completed||0)+1;
       runtime.lastOutcome={sourceTimestamp:primarySnapshot.timestamp,completedAt:stamp.timestamp,elapsedMinutes:primaryElapsed,
-        matched:Object.keys(intervalMoves).length,rockets:targetSet.size,primaryDate:primarySnapshot.sessionDate,currentDate:stamp.sessionDate,intradayUpdated};
+        matched:Object.keys(primaryIntervalMoves).length,rockets:targetSet.size,primaryDate:primarySnapshot.sessionDate,currentDate:stamp.sessionDate,intradayUpdated};
       note=`Primary: ${primarySnapshot.sessionDate} → ${stamp.sessionDate} current 1D top ${Math.round(ROCKET_TOP_FRACTION*100)}% target (${primaryPair.matched} matched)${intradayUpdated?' · same-day context refreshed':''}`;
     }else{
       // First-ever baseline exception. This is not a same-day fallback: it learns only from
@@ -2195,8 +2208,8 @@ async function advanceSnapshotLearning({rows,features,priceKey,sessionTag,target
   if(ACC_CORR){ACC_CORR.laggedNote=note;FS.set(modeKey(CORR_STORE),ACC_CORR);}
   return {targetCorr,targetCorrToday,completedNow:hasPrimaryComparison?1:0,note,runtime,
     hadPriorCorr:(ACC_CORR?.learnSessions||0)>0,hasPrimaryComparison,hasBaselineEvidence,hasScoringEvidence,baselineCreated,
-    primaryCorr,intradayCurrent,intervalMoves,scoringFeatureRows,deltaFeatureSchema:DELTA_FEATURE_SCHEMA,
-    intervalElapsedMinutes:primarySnapshot?Math.round((stamp.timestamp-primarySnapshot.timestamp)/60000):null,
+    primaryCorr,intradayCurrent,intervalMoves:displayIntervalMoves,scoringFeatureRows,deltaFeatureSchema:DELTA_FEATURE_SCHEMA,
+    intervalElapsedMinutes:displayIntervalElapsedMinutes,
     freshSignalCount:hasScoringEvidence?Object.values(targetCorrToday).filter(v=>v!=null&&isFinite(v)&&Math.abs(v)>0.0001).length:0};
 }
 
@@ -5428,12 +5441,27 @@ function calcZerodhaChargesSplit(price, qty, isSell, isIntraday, skipDp){
   return {brokerage,stt,txn,sebi,gst,stamp,dp};
 }
 
+// Cost-cover leg: its profit target is sized to recover the estimated CNC costs of the
+// entire allocated stock position, not merely the costs of that child order. Sell charges
+// are estimated at the evolving cost-cover price; 0.05% is retained as a tick-rounding cushion.
+function getCostCoverTargetPct(buyPrice, costQty, parentQty){
+  if(!(buyPrice>0)||!(costQty>0)||!(parentQty>0)) return 0.05;
+  const parentBuyCharges=calcZerodhaCharges(buyPrice,parentQty,false,false,false);
+  let pct=0;
+  for(let i=0;i<8;i++){
+    const coverSellPrice=buyPrice*(1+pct/100);
+    const estimatedParentSellCharges=calcZerodhaCharges(coverSellPrice,parentQty,true,false,false);
+    pct=((parentBuyCharges+estimatedParentSellCharges)/(buyPrice*costQty))*100;
+  }
+  return roundPct05(Math.max(0.05,pct+0.05));
+}
+
 function planBasketExport(capital, selected){
   let exportList=(selected||[]).filter(s=>!getPriceBandBlockReason(s));
   let basketAlloc=computeAlloc(capital,exportList);
   const orderCount=()=>exportList.reduce((count,s)=>{
     const qty=capital>0?(basketAlloc[s.symbol]?.qty||0):1;
-    return count+(qty>=2?2:(qty===1?1:0));
+    return count+(qty>=3?3:(qty===2?2:(qty===1?1:0)));
   },0);
   while(exportList.length&&orderCount()>20){
     exportList=exportList.slice(0,-1);
@@ -5451,14 +5479,14 @@ function exportBasket(){
   const {exportList,basketAlloc}=planBasketExport(capital,selList);
   const limitOmitted=Math.max(0,selList.length-bandRejected-exportList.length);
 
-  // Universal SL/TGT from tradebook (already cost-adjusted)
-  const adaptiveSL=roundPct05(TRADEBOOK_STATS?TRADEBOOK_STATS.adaptiveSL:3.5);
+  // Target levels remain adaptive. Basket entries intentionally carry no stop-loss GTT.
   const adaptiveTGT=roundPct05(getEffectiveTgtPct()||(TRADEBOOK_STATS?TRADEBOOK_STATS.adaptiveTGT:3.7));
   let runnerTGT=roundPct05(getRunnerTgtPct(null,null,adaptiveTGT)||adaptiveTGT*1.5);
 
   const orders=[];
   let rejectedCount=bandRejected;
   let splitCount=0;
+  let costCoverCount=0;
   let orderSeq=0;
   const pushBuyOrder=(s,qty,buyPrice,targetPct,label)=>{
     if(qty<=0) return;
@@ -5482,7 +5510,7 @@ function exportBasket(){
         quantity:qty,price:parseFloat(tickPrice(buyPrice).toFixed(2)),
         triggerPrice:0,disclosedQuantity:0,lastPrice:0,
         variety:'regular',
-        gtt:{stoploss:-adaptiveSL,target:targetPct},
+        gtt:{target:targetPct},
         tags:label?[label]:[]
       }
     });
@@ -5493,13 +5521,26 @@ function exportBasket(){
     const qty = capital > 0 ? (am?.qty || 0) : 1;
     if(qty===0) return;
     const buyPrice=am?.buyPrice||getBuyPrice(s);
-    if(qty>=2){
-      const baseQty=Math.ceil(qty/2);
-      const runnerQty=qty-baseQty;
-      if(baseQty+runnerQty!==qty||baseQty<=0||runnerQty<=0) throw new Error(`Invalid basket split for ${s.symbol}: ${qty} -> ${baseQty}+${runnerQty}`);
+    if(qty>=3){
+      // Roughly one-third is reserved for the cost-cover exit. Its target recovers estimated
+      // full-position CNC costs; the remaining parent quantity is split between TGT1 and TGT2.
+      const costQty=Math.max(1,Math.floor(qty/3));
+      const remainingQty=qty-costQty;
+      const baseQty=Math.ceil(remainingQty/2);
+      const runnerQty=remainingQty-baseQty;
+      if(costQty+baseQty+runnerQty!==qty||baseQty<=0||runnerQty<=0) throw new Error(`Invalid 3-leg basket split for ${s.symbol}: ${qty} -> ${costQty}+${baseQty}+${runnerQty}`);
+      const costTarget=getCostCoverTargetPct(buyPrice,costQty,qty);
       runnerTGT=roundPct05(getRunnerTgtPct(s,buyPrice,adaptiveTGT)||adaptiveTGT*1.5);
+      pushBuyOrder(s,costQty,buyPrice,costTarget,'COST');
       pushBuyOrder(s,baseQty,buyPrice,adaptiveTGT,'TGT1');
       pushBuyOrder(s,runnerQty,buyPrice,runnerTGT,'TGT2');
+      splitCount++;
+      costCoverCount++;
+    } else if(qty===2){
+      // Three positive child orders are impossible with two shares; retain the two target legs.
+      runnerTGT=roundPct05(getRunnerTgtPct(s,buyPrice,adaptiveTGT)||adaptiveTGT*1.5);
+      pushBuyOrder(s,1,buyPrice,adaptiveTGT,'TGT1');
+      pushBuyOrder(s,1,buyPrice,runnerTGT,'TGT2');
       splitCount++;
     } else {
       pushBuyOrder(s,qty,buyPrice,adaptiveTGT,'TGT1');
@@ -5521,8 +5562,8 @@ function exportBasket(){
   }
   downloadBasket(orders,'Zerodha_Basket_Buy');
   const rejNote=rejectedCount>0?` · ${rejectedCount} skipped (eligibility/allocation)`:'';
-  const splitNote=splitCount>0?` Â· split ${splitCount} stocks @ ${adaptiveTGT.toFixed(2)}% / ${runnerTGT.toFixed(2)}%`:'';
-  const limitNote=limitOmitted>0?` · ${limitOmitted} lower-priority stock${limitOmitted===1?'':'s'} omitted to keep complete TGT1/TGT2 pairs within Zerodha's 20-order limit`:'';
+  const splitNote=splitCount>0?` · split ${splitCount} stocks across TGT1 / TGT2${costCoverCount?` / COST (${costCoverCount} cost-cover legs)`:''}`:'';
+  const limitNote=limitOmitted>0?` · ${limitOmitted} lower-priority stock${limitOmitted===1?'':'s'} omitted to keep complete multi-leg plans within Zerodha's 20-order limit`:'';
   showToast(`<strong>Exported ${orders.length} BUY orders</strong> as Zerodha_Basket_Buy JSON${splitNote}${rejNote}${limitNote}`);
 }
 
