@@ -1,5 +1,5 @@
 const BUILD_TS='2026-06-24 09:30 IST'; // replaced at commit time with IST datetime
-const APP_VERSION=433; // Shared deployed version; increment once per released code change.
+const APP_VERSION=434; // Delta-only prior-trading-day mRMR release.
 const GOOGLE_DRIVE_CLIENT_ID='1015012642264-oi2nelv3v90k3d39r994a6nelgjs2a56.apps.googleusercontent.com'; // Public OAuth Web Client ID.
 const HARD_FILTER_SCHEMA='structural_tradeability_v2';
 const SNAPSHOT_MIN_GAP_MINUTES=1;
@@ -12,6 +12,13 @@ const STOCK_RUNWAY_CEILING_PCT=19.5; // UC-style ceiling retained only for legac
 const PRICE_BAND_BLOCK_BUFFER_PCT=0.15; // Treat rounded 4.9/9.9/19.9 rows as effectively band-locked.
 const BASKET_CASH_RESERVE_RS=1; // Leave a rupee for broker-side tax/rounding differences.
 const SYSTEM_TRADE_START_DATE='2026-04-01'; // Adaptive stats use trades closed from this date onward.
+// mRMR v434-delta: only daily/intraday-changeable fields enter the learning vector.
+// Every scoring feature is current-minus-comparison-snapshot; slow fundamentals are filter/display-only.
+const DELTA_FEATURE_SCHEMA='dynamic_delta_only_prior_trading_day_v1';
+const PRIMARY_PRIOR_DAY_WEIGHT=0.70;
+const SECONDARY_INTRADAY_WEIGHT=0.30;
+const CURRENT_EVIDENCE_WEIGHT=0.70;
+const HISTORICAL_MEMORY_WEIGHT=0.30;
 let MARKET_MODE='stock';
 function modeKey(base){return base;}
 
@@ -94,7 +101,7 @@ const SCANNER_STORE='rs_filters';
 const SHARED_FILTER_STORE='rs_filters_shared';
 const ALL_STORE='rs_data';
 const CORR_STORE='rs_corr';
-const CORR_SCHEMA='prior_trading_day_top10_1d_mrmr_v2';
+const CORR_SCHEMA='prior_trading_day_delta_top10_1d_mrmr_v3';
 const ROCKET_TOP_FRACTION=0.10;
 const SNAPSHOT_HISTORY_DECAY=0.95;
 const SNAPSHOT_STATE_STORE='rs_snapshot_mrmr_v1';
@@ -109,9 +116,9 @@ const TRADEBOOK_META_STORE='rs_tradebook_meta_v1';
 const SURV_RULE_STORE='rs_surv_rules';
 const SURV_CORR_STORE='rs_surv_corr';
 const SAME_DAY_EXIT_OPPORTUNITY_STORE='rs_same_day_exit_opportunity_v3';
-const RECOMMEND_OUTCOME_STORE='rs_recommend_outcomes_v1';
+const RECOMMEND_OUTCOME_STORE='rs_recommend_outcomes_delta_v1';
 const RECOMMEND_MIN_PROGRESS_FRACTION=0.25;
-const ENTRY_OUTCOME_STORE='rs_entry_outcomes_v2';
+const ENTRY_OUTCOME_STORE='rs_entry_outcomes_delta_v1';
 const OUTCOME_HORIZON_FALLBACK_DAYS=5;
 const OUTCOME_HORIZON_MAX_DAYS=20;
 const OUTCOME_FEEDBACK_MIN_SAMPLES=6;
@@ -1231,7 +1238,8 @@ function persistMethodologySnapshot(){
       executedEntryFeedback:ENGINE_DATA.executedEntryFeedback||null,
       snapshotElapsedMinutes:ENGINE_DATA.snapshotElapsedMinutes??null,
       snapshotDisplayElapsedMinutes:ENGINE_DATA.snapshotDisplayElapsedMinutes??null,
-      snapshotPairs:ENGINE_DATA.snapshotPairs||0
+      snapshotPairs:ENGINE_DATA.snapshotPairs||0,
+      deltaFeatureSchema:ENGINE_DATA.deltaFeatureSchema||DELTA_FEATURE_SCHEMA
     };
     FS.set(modeKey(METH_STORE),methSave);
   }catch(e){
@@ -1906,23 +1914,71 @@ function emptySnapshotRuntime(){
 function buildDecodedSnapshot({stamp,symbols,prices,featureRows,features,sessionTag}){
   return {...stamp,symbols:[...symbols],prices,featureRows,featureCols:[...features],features:null,sessionTag:sessionTag||null};
 }
-function snapshotCorrelationToCurrentTarget(previous,currentEligibleSymbols,currentTargetSymbols,features){
-  // Every current live-eligible symbol is a 0/1 observation; targetSymbols are today's top 10% by 1D change.
-  const eligible=currentEligibleSymbols instanceof Set?currentEligibleSymbols:new Set(currentEligibleSymbols||[]);
-  const correlation={},matchedSymbols=[];
-  for(const symbol of previous.symbols||[]){
-    if(eligible.has(symbol)) matchedSymbols.push(symbol);
+// Strict delta-only mRMR: slow/fundamental fields never enter the learning vector.
+// They remain available to hard filters, display, sizing and tradeability logic, but never receive
+// score credit as raw levels and are never differenced. Every feature that does enter mRMR must be
+// meaningfully capable of changing daily or intraday and is represented as current minus comparison.
+function isSlowOrStaticFeature(feature){
+  const f=String(feature||'').toLowerCase();
+  return /(^|_)(market_cap|market_capitalization|number_of_shareholders|shareholders|piotroski|f_score|altman|beneish|pe_ratio|price_earnings|price_to_book|pb_ratio|book_value|face_value|eps|roe|roa|roce|debt|equity|cash_flow|revenue|sales|profit|margin|promoter|institutional|public_holding|pledge|price_band_pct|enterprise_value|dividend|beta|float|shares_outstanding)(_|$)/.test(f);
+}
+function isDynamicScaleFeature(feature){
+  const f=String(feature||'').toLowerCase();
+  // Fields that are already expressed as a change/percentage/ratio must use point deltas,
+  // even when their name contains words such as price, volume or turnover.
+  if(/(^|_)(change|performance|return|pct|percent|percentage|ratio|rsi|stoch|cci|mfi|adx|dmi|atr)(_|$)/.test(f)) return false;
+  return /(^|_)(price|close|open|high|low|volume|turnover|vwap|moving_average|average_price|ema|sma|hma|wma|tema|dema|kama)(_|$)/.test(f);
+}
+function isDynamicMrmrFeature(feature){
+  return !isSlowOrStaticFeature(feature);
+}
+function deltaFeatureValue(feature,currentValue,previousValue){
+  // Scoring is delta-only. No previous value means no score input for this feature.
+  if(!isDynamicMrmrFeature(feature)) return null;
+  const current=Number(currentValue), previous=Number(previousValue);
+  if(!isFinite(current)||!isFinite(previous)) return null;
+  // Scale fields use percentage change to avoid raw-value scale distortion.
+  if(isDynamicScaleFeature(feature)){
+    if(previous===0) return null;
+    return ((current-previous)/Math.abs(previous))*100;
   }
+  // Already-percent, oscillator, performance and technical fields use point delta.
+  return current-previous;
+}
+function buildComparisonFeatureRows(previous,current,features){
+  const rows={};
+  const currentSymbols=current?.symbols||[];
+  currentSymbols.forEach(symbol=>{
+    const now=current.featureRows?.[symbol]||{};
+    const prior=previous?.featureRows?.[symbol]||null;
+    const vector={};
+    features.forEach(feature=>{
+      vector[feature]=deltaFeatureValue(feature,now[feature],prior?.[feature]);
+    });
+    rows[symbol]=vector;
+  });
+  return rows;
+}
+function snapshotCorrelationToCurrentTarget(previous,current,currentEligibleSymbols,currentTargetSymbols,features){
+  // Every current live-eligible symbol is a 0/1 observation. Every mRMR input is a strict dynamic delta:
+  // current snapshot minus comparison snapshot. Static/fundamental fields are absent from FEATS.
+  const eligible=currentEligibleSymbols instanceof Set?currentEligibleSymbols:new Set(currentEligibleSymbols||[]);
+  const comparisonRows=buildComparisonFeatureRows(previous,current,features);
+  const matchedSymbols=[];
+  for(const symbol of current.symbols||[]){
+    if(eligible.has(symbol)&&previous?.featureRows?.[symbol]) matchedSymbols.push(symbol);
+  }
+  const correlation={};
   for(const feature of features){
     const xs=[],ys=[];
     matchedSymbols.forEach(symbol=>{
-      const value=previous.featureRows?.[symbol]?.[feature];
+      const value=comparisonRows[symbol]?.[feature];
       if(value==null||!isFinite(value)) return;
       xs.push(value); ys.push(currentTargetSymbols.has(symbol)?1:0);
     });
     correlation[feature]=pearson(xs,ys);
   }
-  return {correlation,matched:matchedSymbols.length};
+  return {correlation,matched:matchedSymbols.length,comparisonRows};
 }
 function snapshotPriceMoves(previous,current){
   const currentIndex=new Map((current.symbols||[]).map((symbol,index)=>[symbol,index]));
@@ -1970,7 +2026,7 @@ async function advanceSnapshotLearning({rows,features,priceKey,sessionTag,target
   const featureRows=Object.fromEntries(cleanRows.map(row=>[row.symbol,Object.fromEntries(features.map(f=>[f,row[f]??null]))]));
   const currentSnapshot=buildDecodedSnapshot({stamp,symbols,prices,featureRows,features,sessionTag});
   let note='Waiting for a valid immediately previous trading-day snapshot';
-  let primaryCorr=null, intradayCurrent=null, intervalMoves={};
+  let primaryCorr=null, intradayCurrent=null, intervalMoves={}, scoringFeatureRows={};
   let primarySnapshot=null;
   let primaryValid=false;
   let intradayUpdated=false;
@@ -1992,11 +2048,12 @@ async function advanceSnapshotLearning({rows,features,priceKey,sessionTag,target
       primarySnapshot=latest;
     }
     const primaryPair=primarySnapshot&&stamp.inSession&&targetSet.size>0
-      ?snapshotCorrelationToCurrentTarget(primarySnapshot,eligibleSet,targetSet,features):null;
+      ?snapshotCorrelationToCurrentTarget(primarySnapshot,currentSnapshot,eligibleSet,targetSet,features):null;
     // Preserve the older lagged-learning quality floor: fewer than 100 matched live-eligible stocks stays WARMUP.
     primaryValid=!!primaryPair&&primaryPair.matched>=100;
     if(primaryValid){
       primaryCorr=primaryPair.correlation;
+      scoringFeatureRows=primaryPair.comparisonRows||{};
       intervalMoves=snapshotPriceMoves(primarySnapshot,currentSnapshot);
       features.forEach(f=>{targetCorrToday[f]=primaryCorr[f]??null;});
     }
@@ -2005,7 +2062,7 @@ async function advanceSnapshotLearning({rows,features,priceKey,sessionTag,target
     if(!stale&&latest&&latest.sessionDate===stamp.sessionDate&&stamp.inSession){
       const gap=(stamp.timestamp-latest.timestamp)/60000;
       if(gap>=SNAPSHOT_MIN_GAP_MINUTES&&targetSet.size>0){
-        const intradayPair=snapshotCorrelationToCurrentTarget(latest,eligibleSet,targetSet,features);
+        const intradayPair=snapshotCorrelationToCurrentTarget(latest,currentSnapshot,eligibleSet,targetSet,features);
         if(intradayPair.matched>=100){
           intradayCurrent=intradayPair.correlation;
           updateCorrelationEMA('intradayCorr',intradayCurrent,0.70);
@@ -2023,9 +2080,9 @@ async function advanceSnapshotLearning({rows,features,priceKey,sessionTag,target
         const primary=primaryCorr[f];
         const secondary=intradayHistory[f];
         // Direct previous-trading-day evidence is 70%; accumulated short-horizon same-day evidence is only 30%.
-        currentEvidence[f]=isFinite(secondary)?blendCorrelation(primary,secondary,0.70):primary;
+        currentEvidence[f]=isFinite(secondary)?blendCorrelation(primary,secondary,PRIMARY_PRIOR_DAY_WEIGHT):primary;
         // User-selected reverse EMA: current evidence 70%, historical memory 30%.
-        finalCorr[f]=blendCorrelation(currentEvidence[f],historical[f],0.70);
+        finalCorr[f]=blendCorrelation(currentEvidence[f],historical[f],CURRENT_EVIDENCE_WEIGHT);
       });
       const primaryElapsed=Math.round((stamp.timestamp-primarySnapshot.timestamp)/60000);
       ACC_CORR={...ACC_CORR,corr:finalCorr,sessions:(ACC_CORR.sessions||0)+1,learnSessions:(ACC_CORR.learnSessions||0)+1,
@@ -2063,13 +2120,18 @@ async function advanceSnapshotLearning({rows,features,priceKey,sessionTag,target
   }
 
   const hasPrimaryComparison=primaryValid;
+  if(!hasPrimaryComparison){
+    // Baseline/WARMUP: raw snapshot values are stored for tomorrow's delta comparison.
+    // No mRMR feature receives a raw-level fallback before a valid prior-day comparator exists.
+    scoringFeatureRows=buildComparisonFeatureRows(null,currentSnapshot,features);
+  }
   const targetCorr={};
   const historical=ACC_CORR?.corr||{};
   features.forEach(feature=>{targetCorr[feature]=hasPrimaryComparison?(historical[feature]??0):0;});
   if(ACC_CORR){ACC_CORR.laggedNote=note;FS.set(modeKey(CORR_STORE),ACC_CORR);}
   return {targetCorr,targetCorrToday,completedNow:hasPrimaryComparison?1:0,note,runtime,
     hadPriorCorr:(ACC_CORR?.learnSessions||0)>0,hasPrimaryComparison,primaryCorr,intradayCurrent,
-    intervalMoves,intervalElapsedMinutes:primarySnapshot?Math.round((stamp.timestamp-primarySnapshot.timestamp)/60000):null,
+    intervalMoves,scoringFeatureRows,deltaFeatureSchema:DELTA_FEATURE_SCHEMA,intervalElapsedMinutes:primarySnapshot?Math.round((stamp.timestamp-primarySnapshot.timestamp)/60000):null,
     freshSignalCount:hasPrimaryComparison?Object.values(targetCorrToday).filter(v=>v!=null&&isFinite(v)&&Math.abs(v)>0.0001).length:0};
 }
 
@@ -2179,10 +2241,11 @@ async function runEngine(raw, sessionTag, options={}){
     } else { d.peak_retention=null; }
   });
 
-  // FEATS: all auto-detected numeric columns + NSE-derived columns
-  // No manual additions — mRMR decides what matters
+  // FEATS: only daily/intraday-changeable numeric columns and derived fields.
+  // Slow/fundamental fields remain parsed for filters/display but are deliberately excluded from mRMR and never converted into score inputs.
   const NSE_DERIVED = ['delivery_pct','range_pos','pct_from_52w_high','peak_retention','price_band_pct','pct_to_upper_band'];
-  const FEATS = [...new Set([...Object.keys(COL_MAP), ...NSE_DERIVED])];
+  const ALL_CANDIDATE_FEATURES = [...new Set([...Object.keys(COL_MAP), ...NSE_DERIVED])];
+  const FEATS = ALL_CANDIDATE_FEATURES.filter(isDynamicMrmrFeature);
 
   const LABELS = {};
   for(const key of Object.keys(COL_MAP)) LABELS[key] = COL_MAP[key];
@@ -2334,11 +2397,15 @@ async function runEngine(raw, sessionTag, options={}){
   const withPC=filtered.map((d,i)=>({i,pc:K.price_change?d[K.price_change]:null})).filter(x=>x.pc!==null);
   withPC.sort((a,b)=>b.pc-a.pc);
 
+  // Every mRMR comparison uses dynamic deltas from the valid prior trading-day snapshot.
+  // Slow/fundamental fields are excluded from FEATS and remain filter/display-only.
+  const scoringFeatureRows=snapshotLearning.scoringFeatureRows||{};
+  const scoringRows=learningUniverse.map(d=>scoringFeatureRows[d.symbol]||{});
   // Older mRMR redundancy rule: average absolute Pearson correlation across all peer features.
   const interCorr={};
   for(let a=0;a<FEATS.length;a++)for(let b=a+1;b<FEATS.length;b++){
     const f1=FEATS[a],f2=FEATS[b];
-    const r=pearson(learningUniverse.map(d=>d[f1]),learningUniverse.map(d=>d[f2]));
+    const r=pearson(scoringRows.map(row=>row[f1]),scoringRows.map(row=>row[f2]));
     interCorr[f1+'|'+f2]=r;interCorr[f2+'|'+f1]=r;
   }
   const mrmr={};
@@ -2355,7 +2422,7 @@ async function runEngine(raw, sessionTag, options={}){
   const outcomeReliabilityModel=buildOutcomeReliabilityModel(FEATS,weights);
 
   const pctls={};
-  for(const f of FEATS)pctls[f]=pctRank(filtered.map(d=>d[f]));
+  for(const f of FEATS)pctls[f]=pctRank(filtered.map(d=>scoringFeatureRows[d.symbol]?.[f]??null));
   const results=filtered.map((d,idx)=>{
     let rawScore=0;
     for(const f of FEATS){
@@ -2365,7 +2432,7 @@ async function runEngine(raw, sessionTag, options={}){
       rawScore+=w*(targetCorr[f]>=0?percentile:(1-percentile));
     }
     const mrmrScore=hasRecommendationEvidence?Math.round(rawScore*1000)/10:0;
-    const currentFeatures=Object.fromEntries(FEATS.map(f=>[f,d[f]??null]));
+    const currentFeatures=Object.fromEntries(FEATS.map(f=>[f,scoringFeatureRows[d.symbol]?.[f]??null]));
     // Outcome learning remains visible as confidence evidence only. It never alters Rocket Score or rank.
     const outcomeReliability=hasRecommendationEvidence?getOutcomeReliabilityAdjustment(currentFeatures,outcomeReliabilityModel,weights):{delta:0,confidence:0,matched:0};
     const score=mrmrScore;
@@ -2427,20 +2494,20 @@ async function runEngine(raw, sessionTag, options={}){
     const d=filtered[idx];
     r._features={};
     for(const f of FEATS){
-      r._features[f]=d[f]!=null?d[f]:null;
+      r._features[f]=scoringFeatureRows[d.symbol]?.[f]??null;
     }
   });
   // ── Score ALL parsed stocks (including hard-filter exclusions) into SCORE_MAP ──
   SCORE_MAP={};
   results.forEach(r=>{SCORE_MAP[r.symbol]=r.rocketScore;});
   const _sf={};
-  for(const f of FEATS)_sf[f]=filtered.map(d=>d[f]).filter(v=>v!=null&&!isNaN(v)).sort((a,b)=>a-b);
+  for(const f of FEATS)_sf[f]=filtered.map(d=>scoringFeatureRows[d.symbol]?.[f]??null).filter(v=>v!=null&&!isNaN(v)).sort((a,b)=>a-b);
   const _filtSet=new Set(filtered.map(d=>d.symbol));
   parsed.forEach(d=>{
     if(_filtSet.has(d.symbol))return;
     let rs=0;
     for(const f of FEATS){
-      const w=weights[f],v=d[f];
+      const w=weights[f],v=scoringFeatureRows[d.symbol]?.[f]??null;
       const arr=_sf[f];
       let rank=0.35;
       if(v!=null&&!isNaN(v)&&arr.length){
@@ -2457,7 +2524,10 @@ async function runEngine(raw, sessionTag, options={}){
     marketBreadth:marketBreadth,
     recommendationFeedback,executedEntryFeedback,
     outcomeScoreOverlay:{active:outcomeReliabilityModel.active,samples:outcomeReliabilityModel.samples.length,features:outcomeReliabilityModel.features.length,maxAdjustment:0,mode:'confidence_badge_only'},
-    scoringModel:'prior_trading_day_current_1d_top10_mrmr',
+    scoringModel:'prior_trading_day_delta_current_1d_top10_mrmr',
+    deltaFeatureSchema:DELTA_FEATURE_SCHEMA,
+    deltaOnlyFeatureCount:FEATS.length,
+    excludedSlowFeatureCount:ALL_CANDIDATE_FEATURES.length-FEATS.length,
     useFreshCorr, hasRecommendationEvidence, currentUploadLearned, freshSignalCount,
     scoringSource,
     useAccCorr: snapshotLearning.hadPriorCorr,
@@ -2485,7 +2555,7 @@ async function runEngine(raw, sessionTag, options={}){
       totalParsed:totalParsed,hardFilterSchema:HARD_FILTER_SCHEMA,removed:{...REMOVED},survSize:Object.keys(NSE_SURV).length,
       recommendationFeedback,executedEntryFeedback,outcomeScoreOverlay:ENGINE_DATA.outcomeScoreOverlay,
       snapshotElapsedMinutes:ENGINE_DATA.snapshotElapsedMinutes,snapshotDisplayElapsedMinutes:ENGINE_DATA.snapshotDisplayElapsedMinutes,
-      snapshotPairs:ENGINE_DATA.snapshotPairs,scoringModel:ENGINE_DATA.scoringModel};
+      snapshotPairs:ENGINE_DATA.snapshotPairs,scoringModel:ENGINE_DATA.scoringModel,deltaFeatureSchema:ENGINE_DATA.deltaFeatureSchema};
     FS.set(modeKey(METH_STORE),methSave);
   }catch(e){console.warn('Could not save methodology data',e);}
   persistMethodologySnapshot();
@@ -3386,10 +3456,10 @@ function renderPerformance(){
     ${_navLink('perf-stocks','📈 Stocks',p.symBreakdown.length>0)}
   </nav>`;
   const entryOutcomeText=entrySummary.completed
-    ? `${entrySummary.completed} actual recommended buys assessed over their adaptive outcome windows (${entrySummary.topups} top-ups). Their average best net opportunity is ${entrySummary.avgBestNet>=0?'+':''}${entrySummary.avgBestNet.toFixed(2)}%; their best observed peak velocity averages ${entrySummary.avgVelocity>=0?'+':''}${entrySummary.avgVelocity.toFixed(3)}%/day. These outcomes adjust final scores through the bounded evidence overlay and refine the two-leg target policy with sample-size confidence.`
+    ? `${entrySummary.completed} actual recommended buys assessed over their adaptive outcome windows (${entrySummary.topups} top-ups). Their average best net opportunity is ${entrySummary.avgBestNet>=0?'+':''}${entrySummary.avgBestNet.toFixed(2)}%; their best observed peak velocity averages ${entrySummary.avgVelocity>=0?'+':''}${entrySummary.avgVelocity.toFixed(3)}%/day. These outcomes provide confidence context only and refine the two-leg target policy with sample-size confidence.`
     : entrySummary.tracked
-      ? `${entrySummary.tracked} actual recommended buys are being tracked across the current ${entrySummary.horizonDays}-trading-day adaptive window. Fresh buys and top-ups are assessed separately; completed outcomes adjust score evidence and targets.`
-      : `Executed-entry learning is ready. Future completed BUY executions that came from displayed recommendations will be assessed over the adaptive outcome window and fed into score evidence and targets.`;
+      ? `${entrySummary.tracked} actual recommended buys are being tracked across the current ${entrySummary.horizonDays}-trading-day adaptive window. Fresh buys and top-ups are assessed separately; completed outcomes update confidence context and targets.`
+      : `Executed-entry learning is ready. Future completed BUY executions that came from displayed recommendations will be assessed over the adaptive outcome window and fed into confidence context and targets.`;
   const outcomeText=recSummary.evaluated
     ? `${recSummary.evaluated} completed engine-shortlist picks assessed across ${recSummary.issueDays} scan days using the adaptive ${recSummary.horizonDays}-day window. ${recSummary.rockets} became rockets (${recSummary.conversionPct}%); observed conversions took ${recSummary.avgRocketDays!=null?recSummary.avgRocketDays+' trading days on average':'an unavailable average time'}. Faster conversions receive more reward, while failures and adverse moves penalise their feature patterns. Average outcome score is ${recSummary.avgOutcomeScore!=null?(recSummary.avgOutcomeScore>=0?'+':'')+recSummary.avgOutcomeScore.toFixed(3):'not available'}; average attainable high move is ${recSummary.avgBestHighPct!=null?(recSummary.avgBestHighPct>=0?'+':'')+recSummary.avgBestHighPct.toFixed(2)+'%':'not available'}.`
     : `Outcome learning has started. The assessment window is currently ${recSummary.horizonDays} trading days, derived from observed holding duration and rocket-arrival timing.`;
@@ -3398,7 +3468,7 @@ function renderPerformance(){
     ? `${exitOpportunity.exits} symbol/date exits have same-day ALL NSE highs recorded. ${exitOpportunity.upsideExits} highs exceeded the quantity-weighted average sell price; sold-value-weighted missed upside averages ${exitOpportunity.avgMissed.toFixed(2)}% (${fmtINR(exitOpportunity.missedValue)}).`
     : `No same-day exit opportunities have been recorded yet. Load Orders, Tradebook, and ALL NSE for the sell day.`;
   const outcomeHtml=perfCard('Recommendation Outcome Feedback',
-    `<div style="padding:14px 16px;color:var(--t2);font-size:12px;line-height:1.7"><div><strong style="color:var(--t1)">Actual entries:</strong> ${entryOutcomeText}</div><div style="margin-top:8px"><strong style="color:var(--t1)">Eligible shortlist:</strong> ${outcomeText}</div><div style="margin-top:8px"><strong style="color:var(--t1)">Same-day exit opportunity:</strong> ${escapeText}</div><div style="margin-top:8px;color:var(--t3)">Prior-snapshot feature levels versus next-interval top-10% rocket labels train raw mRMR relevance. Completed shortlist and executed-entry outcomes apply a bounded evidence adjustment to final scores, while tradebook and missed-opportunity evidence refine sizing, review timing, and TGT1/TGT2.</div></div>`,'','perf-outcomes');
+    `<div style="padding:14px 16px;color:var(--t2);font-size:12px;line-height:1.7"><div><strong style="color:var(--t1)">Actual entries:</strong> ${entryOutcomeText}</div><div style="margin-top:8px"><strong style="color:var(--t1)">Eligible shortlist:</strong> ${outcomeText}</div><div style="margin-top:8px"><strong style="color:var(--t1)">Same-day exit opportunity:</strong> ${escapeText}</div><div style="margin-top:8px;color:var(--t3)">Dynamic current-minus-prior-trading-day feature deltas versus the current 1D top-10% target train raw mRMR relevance. Completed shortlist and executed-entry outcomes are shown as confidence context only, while tradebook and missed-opportunity evidence refine sizing, review timing, and TGT1/TGT2.</div></div>`,'','perf-outcomes');
 
   el.innerHTML=`
     <div style="padding:12px 16px">
@@ -3762,14 +3832,14 @@ function _renderMethodologyInner(){
   const rs = {
   };
   const scoreCorrSource = E.hasRecommendationEvidence
-    ?'Prior-snapshot feature levels are scoring candidates for the next top-10% rocket set'
+    ?'Prior-day feature deltas are scoring candidates for the current top-10% 1D mover set'
     :'First upload baseline saved; recommendations start after the next valid snapshot';
   const sessLabel = `${E.accSessions||0} learned horizons · ${E.laggedNote||'waiting for the next snapshot'}`;
   const breadthPct=E.marketBreadth!=null?(E.marketBreadth*100).toFixed(0):'?';
   const recFeedback=E.recommendationFeedback;
   const entryFeedback=E.executedEntryFeedback;
   const overlay=E.outcomeScoreOverlay||{};
-  const feedbackText=`Shortlist outcomes: ${recFeedback?.samples||0}; executed-entry outcomes: ${entryFeedback?.samples||0}. Raw mRMR relevance learns which earlier feature levels distinguish the next interval's top 10% movers. Completed recommendation and entry outcomes remain a bounded evidence overlay and continue refining targets, sizing, and review timing.`;
+  const feedbackText=`Shortlist outcomes: ${recFeedback?.samples||0}; executed-entry outcomes: ${entryFeedback?.samples||0}. Raw mRMR relevance learns which prior-day-to-current dynamic deltas distinguish the current top 10% by 1D move. Completed recommendation and entry outcomes remain confidence context only and continue refining targets, sizing, and review timing.`;
   const breadthCardHTML=`<div class="breadth-bar">
     <div class="breadth-badge" style="color:var(--cyan)">${breadthPct}% Breadth</div>
     <div class="breadth-meta">
@@ -3818,10 +3888,10 @@ function _renderMethodologyInner(){
     <div id="meth-hf-wrap">${hardFiltersHTML}</div>
     <div id="meth-breadth">${breadthCardHTML}</div>
     <h3 id="meth-engine" style="margin-top:18px">Scoring Engine — Prior-Day Primary mRMR</h3>
-    <p id="mrmrLearningModeNote"><strong>Current learning mode:</strong> The current top 10% of live-eligible stocks by 1D change are the target. A valid snapshot from the immediately previous trading day provides the mandatory primary comparison. Same-day snapshots only provide secondary accumulated context and never create or rescue a score.</p>
+    <p id="mrmrLearningModeNote"><strong>Current learning mode:</strong> The current top 10% of live-eligible stocks by 1D change are the target. mRMR uses only dynamic deltas against a valid immediately previous trading-day snapshot. Same-day snapshots provide secondary accumulated delta context only and never create or rescue a score.</p>
     <div class="m-grid">
-      <div class="m-card"><h4>Learning Target</h4><p>The current top 10% by 1D change receive label 1. Features from the immediately previous trading-day snapshot are the mandatory primary predictor set; missing that direct prior-day snapshot keeps the scanner in WARMUP.</p></div>
-      <div class="m-card"><h4>📡 How the Engine Learns</h4><p>Each current upload compares today’s 1D top-10% target with the immediately previous trading day’s feature snapshot. That direct comparison has 70% of fresh evidence; accumulated same-day snapshots have 30%. Final correlation then uses 70% fresh evidence and 30% historical memory.</p></div>
+      <div class="m-card"><h4>Learning Target</h4><p>The current top 10% by 1D change receive label 1. Only daily/intraday-changeable features enter mRMR, each as a current-minus-immediately-prior-trading-day delta. Slow fundamentals remain filter/display-only; missing that direct prior-day snapshot keeps the scanner in WARMUP.</p></div>
+      <div class="m-card"><h4>📡 How the Engine Learns</h4><p>Each current upload compares today’s 1D top-10% target with dynamic deltas versus the immediately previous trading-day snapshot. That direct comparison has 70% of fresh evidence; accumulated same-day snapshots have 30%. Final correlation then uses 70% fresh evidence and 30% historical memory.</p></div>
       <div class="m-card"><h4>Outcome Self-Correction</h4><p>${feedbackText} Outcome evidence is displayed as confidence context only. It does not add or subtract points from Rocket Score.</p></div>
       <div class="m-card"><h4>Feature Self-Correction</h4><p>Features that repeatedly separate future rockets from non-rockets strengthen; one-off relationships fade as more transitions arrive. mRMR uses average absolute Pearson correlation across all feature peers so redundant indicators cannot cast duplicate votes.</p></div>
       <div class="m-card"><h4>🎯 Max 1D Filter</h4><p>Set <em>Max 1D %</em> in the filter bar to hide stocks that have already moved too much today (default 5%). Entry-ceiling filtering has been removed; strong candidates are no longer hidden just because current price is above a calculated buy ceiling.</p></div>
