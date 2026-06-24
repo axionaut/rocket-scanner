@@ -1,5 +1,5 @@
-const BUILD_TS='2026-06-24 13:15 IST'; // replaced at commit time with IST datetime
-const APP_VERSION=439; // Prior-state → later-outcome mRMR; no current-day feature leakage.
+const BUILD_TS='2026-06-24 14:28 IST'; // release build time (IST)
+const APP_VERSION=440; // Prior-state → later-outcome mRMR with one-time persisted-pair bootstrap.
 const GOOGLE_DRIVE_CLIENT_ID='1015012642264-oi2nelv3v90k3d39r994a6nelgjs2a56.apps.googleusercontent.com'; // Public OAuth Web Client ID.
 const HARD_FILTER_SCHEMA='structural_tradeability_v2';
 const SNAPSHOT_MIN_GAP_MINUTES=1;
@@ -12,9 +12,9 @@ const STOCK_RUNWAY_CEILING_PCT=19.5; // UC-style ceiling retained only for legac
 const PRICE_BAND_BLOCK_BUFFER_PCT=0.15; // Treat rounded 4.9/9.9/19.9 rows as effectively band-locked.
 const BASKET_CASH_RESERVE_RS=1; // Leave a rupee for broker-side tax/rounding differences.
 const SYSTEM_TRADE_START_DATE='2026-04-01'; // Adaptive stats use trades closed from this date onward.
-// mRMR v439: every retained analytical feature is a prior-state input.
-// Training is strictly earlier feature state → later rocket outcome; no current-day feature leakage.
-const DELTA_FEATURE_SCHEMA='all_retained_analytical_prior_state_features_v1';
+// mRMR v440: every retained analytical feature is an earlier-state input.
+// Training is strictly prior feature state → later rocket outcome; no current-day feature leakage.
+const DELTA_FEATURE_SCHEMA='all_retained_analytical_prior_state_features_v2';
 const PRIMARY_PRIOR_DAY_WEIGHT=0.70;
 const SECONDARY_INTRADAY_WEIGHT=0.30;
 const CURRENT_EVIDENCE_WEIGHT=0.70;
@@ -75,7 +75,7 @@ function isLooseNseSupportCsvName(name){
 
 function updateModeUI(){
   const brand=document.querySelector('.brand-tag');
-  if(brand) brand.textContent='Intrinsic Baseline + Prior-Day mRMR';
+  if(brand) brand.textContent='Prior-State → Later-Rocket mRMR';
   document.querySelectorAll('.currency-lbl').forEach(el=>{el.textContent='₹';});
   const minTurn=document.getElementById('fMinTurnover');
   if(minTurn){
@@ -102,11 +102,11 @@ const SCANNER_STORE='rs_filters';
 const SHARED_FILTER_STORE='rs_filters_shared';
 const ALL_STORE='rs_data';
 const CORR_STORE='rs_corr';
-const CORR_SCHEMA='prior_state_to_later_rocket_outcome_mrmr_v1';
+const CORR_SCHEMA='prior_state_to_later_rocket_outcome_mrmr_v2';
 const ROCKET_TOP_FRACTION=0.10;
 const SNAPSHOT_HISTORY_DECAY=0.95;
 const SNAPSHOT_STATE_STORE='rs_snapshot_mrmr_v1';
-const SNAPSHOT_STATE_SCHEMA='prior_state_later_outcome_primary_v1';
+const SNAPSHOT_STATE_SCHEMA='prior_state_later_outcome_primary_v2';
 const METH_STORE='rs_meth';
 const HOLD_STORE='rs_holdings';
 const ORDERS_STORE='rs_orders';
@@ -897,7 +897,7 @@ let POSITIONS=[]; // parsed positions from Positions.csv
   document.title='NSE Rocket Scanner v'+APP_VERSION;
   // Show build/push timestamp
   const _bsEl=document.getElementById('lastScanVal');
-  if(_bsEl) _bsEl.textContent=BUILD_TS?'Last updated: '+BUILD_TS:'';
+  if(_bsEl) _bsEl.textContent=BUILD_TS?'Build: '+BUILD_TS:'';
 })();
 
 // ── Go to top button ──
@@ -2055,28 +2055,15 @@ async function advanceSnapshotLearning({rows,features,priceKey,sessionTag,target
   const latest=runtime.latest;
   const duplicate=!!sessionTag&&runtime.lastTag===sessionTag&&latest?.sessionDate===stamp.sessionDate;
   const stale=!!latest&&stamp.timestamp<latest.timestamp;
-  const dailyHistory=ACC_CORR.dailyCorr||ACC_CORR.corr||{};
+  let dailyHistory=ACC_CORR.dailyCorr||ACC_CORR.corr||{};
   const intradayHistory=ACC_CORR.intradayCorr||{};
-
-  // A daily score model is frozen at the beginning of a new trading day.
-  // Today's completed outcome teaches tomorrow's model, never today's already-rendered ranks.
-  if(advance&&!stale&&!duplicate&&stamp.inSession&&ACC_CORR.activeDailyDate!==stamp.sessionDate){
-    ACC_CORR.activeDailyDate=stamp.sessionDate;
-    ACC_CORR.activeDailyCorr={...dailyHistory};
-  }
-  const activeDailyCorr=(ACC_CORR.activeDailyDate===stamp.sessionDate)
-    ?(ACC_CORR.activeDailyCorr||{})
-    :dailyHistory;
-  // Capture intraday history before this upload's later outcome is added.
-  const scoreIntradayCorr={...intradayHistory};
-  const dailyScoreReady=(ACC_CORR.dailySessions||0)>0&&hasUsableCorrelation(activeDailyCorr);
-  const intradayScoreReady=(ACC_CORR.intradaySessions||0)>=INTRADAY_MIN_LEARN_SESSIONS&&hasUsableCorrelation(scoreIntradayCorr);
 
   let note='';
   let primaryCorr=null;
   let intradayCurrent=null;
   let primarySnapshot=null;
   let primaryValid=false;
+  let bootstrapRecovered=false;
   let intradayUpdated=false;
   let displayIntervalMoves={};
   let displayIntervalElapsedMinutes=null;
@@ -2098,7 +2085,26 @@ async function advanceSnapshotLearning({rows,features,priceKey,sessionTag,target
     primarySnapshot=latest;
   }
 
-  if(advance&&stamp.baselineEligible&&!duplicate&&!stale){
+  // A normal daily score is frozen at the beginning of a trading day. On the first
+  // prior-state release only, recover one honest training pair already preserved in
+  // the brain (previous trading day -> currently stored scan). This replaces the
+  // discarded delta model; it does not reuse any old delta correlation.
+  if(advance&&!stale&&!duplicate&&stamp.inSession&&ACC_CORR.activeDailyDate!==stamp.sessionDate){
+    ACC_CORR.activeDailyDate=stamp.sessionDate;
+    ACC_CORR.activeDailyCorr={...dailyHistory};
+  }
+  let activeDailyCorr=(ACC_CORR.activeDailyDate===stamp.sessionDate)
+    ?(ACC_CORR.activeDailyCorr||{})
+    :dailyHistory;
+  const scoreIntradayCorr={...intradayHistory};
+  let dailyScoreReady=(ACC_CORR.dailySessions||0)>0&&hasUsableCorrelation(activeDailyCorr);
+  const intradayScoreReady=(ACC_CORR.intradaySessions||0)>=INTRADAY_MIN_LEARN_SESSIONS&&hasUsableCorrelation(scoreIntradayCorr);
+
+  const canAdvanceSnapshot=advance&&stamp.baselineEligible&&!duplicate&&!stale;
+  const canBootstrapPersistedPair=(ACC_CORR.dailySessions||0)===0&&!!primarySnapshot&&
+    !!latest&&latest.sessionDate===stamp.sessionDate&&stamp.inSession&&targetSet.size>0;
+
+  if(canAdvanceSnapshot||canBootstrapPersistedPair){
     const primaryPair=primarySnapshot&&stamp.inSession&&targetSet.size>0
       ?correlationFromPriorState(primarySnapshot,currentSnapshot,eligibleSet,targetSet,features)
       :null;
@@ -2133,11 +2139,23 @@ async function advanceSnapshotLearning({rows,features,priceKey,sessionTag,target
         currentDate:stamp.sessionDate,
         model:'prior_state_to_current_1d_top10'
       };
+
+      if(canBootstrapPersistedPair){
+        // The recovered pair predicts the next NSE session from current feature state.
+        // Showing it now prevents an artificial second warmup day after the schema fix.
+        bootstrapRecovered=true;
+        dailyHistory=nextDaily;
+        activeDailyCorr={...nextDaily};
+        ACC_CORR.activeDailyDate=stamp.sessionDate;
+        ACC_CORR.activeDailyCorr={...nextDaily};
+        dailyScoreReady=hasUsableCorrelation(activeDailyCorr);
+        window._snapshotRuntimeDirty=true;
+      }
     }
 
     // Same-day continuation: earlier state -> later actual interval rocket outcome.
     // It is a separate secondary model and never rescues a missing daily model.
-    if(latest&&latest.sessionDate===stamp.sessionDate&&stamp.inSession&&targetSet.size>0){
+    if(canAdvanceSnapshot&&latest&&latest.sessionDate===stamp.sessionDate&&stamp.inSession&&targetSet.size>0){
       const gap=(stamp.timestamp-latest.timestamp)/60000;
       if(gap>=SNAPSHOT_MIN_GAP_MINUTES){
         const intradayPair=sameDayContinuationCorrelation(latest,currentSnapshot,eligibleSet,features);
@@ -2150,12 +2168,14 @@ async function advanceSnapshotLearning({rows,features,priceKey,sessionTag,target
       }
     }
 
-    if(latest&&latest.sessionDate!==stamp.sessionDate){
-      runtime.previousTradingDay=tradingDaysBetween(latest.sessionDate,stamp.sessionDate)===1?latest:null;
+    if(canAdvanceSnapshot){
+      if(latest&&latest.sessionDate!==stamp.sessionDate){
+        runtime.previousTradingDay=tradingDaysBetween(latest.sessionDate,stamp.sessionDate)===1?latest:null;
+      }
+      runtime.latest=currentSnapshot;
+      runtime.lastTag=sessionTag||null;
+      window._snapshotRuntimeDirty=true;
     }
-    runtime.latest=currentSnapshot;
-    runtime.lastTag=sessionTag||null;
-    window._snapshotRuntimeDirty=true;
   }
 
   // Current live score uses current feature state, but only correlations learned before
@@ -2170,7 +2190,9 @@ async function advanceSnapshotLearning({rows,features,priceKey,sessionTag,target
       :daily;
   });
   const hasScoringEvidence=dailyScoreReady;
-  if(!hasScoringEvidence){
+  if(bootstrapRecovered){
+    note='Recovered one valid prior-day → current-rocket pair from saved snapshots. Scores now describe the next NSE session; current-day intraday continuation is still warming up.';
+  }else if(!hasScoringEvidence){
     if(primaryValid) note='WARMUP: first valid prior-state → current-rocket pair learned; scores activate next NSE trading day';
     else if(primarySnapshot&&targetSet.size>0) note='WARMUP: immediate prior-day snapshot matched fewer than 100 live-eligible stocks';
     else if(latest&&latest.sessionDate!==stamp.sessionDate&&tradingDaysBetween(latest.sessionDate,stamp.sessionDate)!==1) note='WARMUP: immediate previous NSE trading-day snapshot is missing';
@@ -2202,7 +2224,7 @@ async function advanceSnapshotLearning({rows,features,priceKey,sessionTag,target
     deltaFeatureSchema:DELTA_FEATURE_SCHEMA,
     intervalElapsedMinutes:displayIntervalElapsedMinutes,
     freshSignalCount:primaryValid?Object.values(targetCorrToday).filter(v=>v!=null&&isFinite(v)&&Math.abs(v)>0.0001).length:0,
-    scoringSource:dailyScoreReady?(intradayScoreReady?'daily_prior_state_plus_intraday_continuation':'daily_prior_state_only'):'warmup',
+    scoringSource:dailyScoreReady?(bootstrapRecovered?'daily_prior_state_bootstrap_next_session':(intradayScoreReady?'daily_prior_state_plus_intraday_continuation':'daily_prior_state_only')):'warmup',
     intradayScoreReady,
     dailyScoreReady
   };
@@ -2803,9 +2825,10 @@ function renderStats(){
 
   // Score spread: shows if engine is differentiating
   const scores=ALL.map(s=>s.rocketScore).filter(v=>isFinite(v));
-  const scoreMax=scores.length?Math.max(...scores).toFixed(1):'—';
-  const scoreMin=scores.length?Math.min(...scores).toFixed(1):'—';
-  const scoreSpread=scores.length?(Math.max(...scores)-Math.min(...scores)).toFixed(1):'—';
+  const scoreReady=!!ENGINE_DATA?.hasRecommendationEvidence;
+  const scoreMax=scoreReady&&scores.length?Math.max(...scores).toFixed(1):'—';
+  const scoreMin=scoreReady&&scores.length?Math.min(...scores).toFixed(1):'—';
+  const scoreSpread=scoreReady&&scores.length?(Math.max(...scores)-Math.min(...scores)).toFixed(1):'—';
 
   // Compute top sector by breadth
   const secBreadths={};
@@ -3548,7 +3571,7 @@ function renderPerformance(){
     ? `${exitOpportunity.exits} symbol/date exits have same-day ALL NSE highs recorded. ${exitOpportunity.upsideExits} highs exceeded the quantity-weighted average sell price; sold-value-weighted missed upside averages ${exitOpportunity.avgMissed.toFixed(2)}% (${fmtINR(exitOpportunity.missedValue)}).`
     : `No same-day exit opportunities have been recorded yet. Load Orders, Tradebook, and ALL NSE for the sell day.`;
   const outcomeHtml=perfCard('Recommendation Outcome Feedback',
-    `<div style="padding:14px 16px;color:var(--t2);font-size:12px;line-height:1.7"><div><strong style="color:var(--t1)">Actual entries:</strong> ${entryOutcomeText}</div><div style="margin-top:8px"><strong style="color:var(--t1)">Eligible shortlist:</strong> ${outcomeText}</div><div style="margin-top:8px"><strong style="color:var(--t1)">Same-day exit opportunity:</strong> ${escapeText}</div><div style="margin-top:8px;color:var(--t3)">Dynamic current-minus-prior-trading-day feature deltas versus the current 1D top-10% target train raw mRMR relevance. Completed shortlist and executed-entry outcomes are shown as confidence context only, while tradebook and missed-opportunity evidence refine sizing, review timing, and TGT1/TGT2.</div></div>`,'','perf-outcomes');
+    `<div style="padding:14px 16px;color:var(--t2);font-size:12px;line-height:1.7"><div><strong style="color:var(--t1)">Actual entries:</strong> ${entryOutcomeText}</div><div style="margin-top:8px"><strong style="color:var(--t1)">Eligible shortlist:</strong> ${outcomeText}</div><div style="margin-top:8px"><strong style="color:var(--t1)">Same-day exit opportunity:</strong> ${escapeText}</div><div style="margin-top:8px;color:var(--t3)">Earlier trading-day feature states versus the later current 1D top-10% outcome train raw mRMR relevance. Completed shortlist and executed-entry outcomes are shown as confidence context only, while tradebook and missed-opportunity evidence refine sizing, review timing, and TGT1/TGT2.</div></div>`,'','perf-outcomes');
 
   el.innerHTML=`
     <div style="padding:12px 16px">
@@ -3912,8 +3935,8 @@ function _renderMethodologyInner(){
   const rs = {
   };
   const scoreCorrSource = E.hasRecommendationEvidence
-    ?'Current feature states are scored using correlations learned from earlier-state → later-rocket pairs'
-    :'First upload baseline saved; recommendations start after the next valid snapshot';
+    ? 'Current feature states are scored using correlations learned from earlier-state → later-rocket pairs'
+    : 'Warmup: a valid earlier-state → later-rocket training pair is required before scores are available';
   const sessLabel = `${E.accSessions||0} learned horizons · ${E.laggedNote||'waiting for the next snapshot'}`;
   const breadthPct=E.marketBreadth!=null?(E.marketBreadth*100).toFixed(0):'?';
   const recFeedback=E.recommendationFeedback;
@@ -3967,10 +3990,10 @@ function _renderMethodologyInner(){
     </nav>
     <div id="meth-hf-wrap">${hardFiltersHTML}</div>
     <div id="meth-breadth">${breadthCardHTML}</div>
-    <h3 id="meth-engine" style="margin-top:18px">Scoring Engine — Prior-State → Later-Outcome mRMR</h3>
-    <p id="mrmrLearningModeNote"><strong>Current learning mode:</strong> The current top 10% of live-eligible stocks by 1D change are the target. A first-ever upload scores from ALL NSE’s intrinsic daily/intraday delta fields already present in the file. From the next valid session onward, every retained numeric/rating feature uses its immediately previous-trading-day delta. Same-day snapshots provide secondary accumulated context only and never create or rescue a skipped-day score.</p>
+    <h3 id="meth-engine" style="margin-top:18px">Scoring Engine — Prior-State → Later-Rocket mRMR</h3>
+    <p id="mrmrLearningModeNote"><strong>Current learning mode:</strong> The current top 10% by 1D change are the later outcome. Every retained analytical feature is read from the immediately previous trading-day snapshot, never from a current-minus-prior delta. Same-day uploads train a separate continuation model from earlier same-day state to later interval outcome. They contribute only after five valid intervals and never replace the daily model.</p>
     <div class="m-grid">
-      <div class="m-card"><h4>Learning Target</h4><p>The current top 10% by 1D change receive label 1. The first upload uses existing intrinsic daily/intraday deltas in ALL NSE to establish a scored baseline. Thereafter every retained numeric and converted-rating feature enters mRMR as a current-minus-immediately-prior-trading-day delta. A skipped normal trading day still keeps the scanner in WARMUP.</p></div>
+      <div class="m-card"><h4>Learning Target</h4><p>The current top 10% by 1D change receive label 1. For those same symbols, mRMR examines the feature levels in the immediately previous NSE trading-day snapshot. The first ever scan stores a baseline. A valid consecutive previous-day → current-day pair produces the first daily model; skipped normal trading days do not create a substitute pair.</p></div>
       <div class="m-card"><h4>📡 How the Engine Learns</h4><p>Each current upload trains yesterday’s feature state against today’s top-10% outcome. The daily model is frozen for the current trading day and only affects the next trading day. Same-day learning separately uses earlier-state → later-return pairs and joins the score at 30% after enough honest intervals.</p></div>
       <div class="m-card"><h4>Outcome Self-Correction</h4><p>${feedbackText} Outcome evidence is displayed as confidence context only. It does not add or subtract points from Rocket Score.</p></div>
       <div class="m-card"><h4>Feature Self-Correction</h4><p>Features that repeatedly separate future rockets from non-rockets strengthen; one-off relationships fade as more transitions arrive. mRMR uses average absolute Pearson correlation across all feature peers so redundant indicators cannot cast duplicate votes.</p></div>
@@ -4085,7 +4108,7 @@ function getFilterBarReason(s){
   const fPriceMax=parseFloat(document.getElementById('fPriceMax')?.value)||0;
   const bandReason=getPriceBandBlockReason(s);
   if(bandReason) return bandReason;
-  if(minScore>0&&s.rocketScore<minScore) return `Score ${s.rocketScore?.toFixed?.(1)||s.rocketScore} < ${minScore}`;
+  if(ENGINE_DATA?.hasRecommendationEvidence&&minScore>0&&s.rocketScore<minScore) return `Score ${s.rocketScore?.toFixed?.(1)||s.rocketScore} < ${minScore}`;
   if(fvol>0&&s.volume!=null&&s.volume<fvol) return `Volume ${Math.round(s.volume).toLocaleString('en-IN')} < ${Math.round(fvol).toLocaleString('en-IN')}`;
   if(fMinMarketCap>0&&s.marketCap!=null&&s.marketCap<fMinMarketCap) return `MCap ₹${fV(s.marketCap)} < ₹${fV(fMinMarketCap)}`;
   if(fMin1D>-Infinity&&s.priceChange!=null&&s.priceChange<fMin1D) return `1D ${s.priceChange.toFixed(2)}% < ${fMin1D}%`;
@@ -4544,8 +4567,12 @@ function renderBasketBtn(){
   const buyBtn=document.getElementById('basketBtn');
   if(buyBtn){
     const cntSpan=document.getElementById('basketCount');
+    const scoreReady=!!ENGINE_DATA?.hasRecommendationEvidence;
     if(cntSpan)cntSpan.textContent=buyCount>0?`(${buyCount})`:'';
-    buyBtn.disabled=buyCount===0;
+    buyBtn.disabled=buyCount===0||!scoreReady;
+    buyBtn.title=scoreReady
+      ? 'Export selected stocks as Zerodha basket order'
+      : 'Basket export is disabled until the prior-state model has a valid learned score.';
   }
 }
 function renderBasketSummary(){
@@ -4627,7 +4654,7 @@ function renderTable(){
 
     let cells=`
       <td style="text-align:center"><input type="checkbox" ${isSelected?'checked':''} ${s._filterPreview?'disabled':''} style="width:14px;height:14px;accent-color:var(--amber);cursor:${s._filterPreview?'not-allowed':'pointer'}" onchange="toggleStock('${s.symbol}',this.checked)"></td>
-      <td><span class="sc-m">${isNaN(s.rocketScore)?'?':s.rocketScore.toFixed(1)}</span></td>
+      <td><span class="sc-m">${ENGINE_DATA?.hasRecommendationEvidence?(isNaN(s.rocketScore)?'?':s.rocketScore.toFixed(1)):'—'}</span></td>
       <td style="font-family:'Plus Jakarta Sans',sans-serif"><div style="font-weight:700;font-size:13px;color:var(--t1)">${s.symbol}${(()=>{const sv=s.seen||0;if(!sv) return '';return`<sub style="font-size:11px;color:var(--amber);font-weight:700;margin-left:3px;font-family:'DM Mono',monospace" title="Seen ${sv}× today">${sv}×</sub>`;})()}${filterBadge}${filterAction}${s._isTopUp?`<span style="font-size:8px;background:rgba(251,146,60,.15);color:var(--fire);border-radius:4px;padding:1px 5px;margin-left:5px;font-weight:700;vertical-align:middle">↑ TOP-UP</span>`:''}${(()=>{const c=Number(s.outcomeReliability||0),n=Number(s.outcomeEvidence||0);if(!(c>0)||!(n>0)) return '';const pct=Math.round(c*100);return `<span style="font-size:8px;background:rgba(167,139,250,.14);color:var(--purple);border-radius:4px;padding:1px 5px;margin-left:5px;font-weight:700;vertical-align:middle" title="Outcome-pattern confidence only. It does not change Rocket Score or rank. ${n} historical matches.">◉ ${pct}% CONF</span>`;})()}${(()=>{if(!s.isSurv) return '';const labels=(s.survRules||[]).map(k=>{const r=SURV_CUSTOM_RULES.find(x=>x.key===k);return r?r.label:k;}).join(' · ');return `<span style="font-size:8px;background:rgba(239,68,68,.15);color:var(--red);border-radius:4px;padding:1px 5px;margin-left:5px;font-weight:700;vertical-align:middle" title="NSE Surveillance: ${escHtml(labels)}">⚠ SURV</span>`;})()}</div><div style="font-size:9px;color:${s._filterPreview?'var(--amber)':'var(--t3)'};max-width:220px;overflow:hidden;text-overflow:ellipsis">${s._filterPreview||s._forceKept?escHtml(s._filterReason||'filtered'):(s.name+(s._isTopUp&&s._heldAvg?` · avg ${fmtINR(s._heldAvg)}`:''))}</div></td>
       <td>${fmtINR(s.price)}</td>
       <td>${fPerf(s.snapshotChange)}</td>
@@ -4778,7 +4805,7 @@ function renderStatusBar(){
   const fMinMarketCap2=parseFloat(document.getElementById('fMinMarketCap')?.value)||0;
   const _fMin1Dv2=document.getElementById('fMin1D')?.value||'';
   const fMin1D=_fMin1Dv2!==''?parseFloat(_fMin1Dv2):-Infinity;
-  if(minScore2>0)tags.push('Score≥'+minScore2);
+  if(ENGINE_DATA?.hasRecommendationEvidence&&minScore2>0)tags.push('Score≥'+minScore2);
   if(fscore>0)tags.push('F≥'+fscore);
   if(fMin1D>-Infinity)tags.push('1D≥'+fMin1D+'%');
   if(fvol2>0){const n=fvol2;tags.push('Vol≥'+(n>=1e6?(n/1e6).toFixed(1)+'M':n>=1e3?(n/1e3).toFixed(0)+'K':n));}
@@ -5464,6 +5491,10 @@ function planBasketExport(capital, selected){
 
 
 function exportBasket(){
+  if(!ENGINE_DATA?.hasRecommendationEvidence){
+    showToast('Basket export is unavailable while the prior-state model is warming up.',4500,true);
+    return;
+  }
   const capital=parseFloat(document.getElementById('fCapital').value)||0;
   const selList=FILT.filter(s=>SELECTED.has(s.symbol));
   if(!selList.length){showToast('Select at least one stock first.',3000,true);return;}
@@ -5703,7 +5734,7 @@ async function unpackFloat32Values(source){
 async function decodeSnapshotState(source){
   // Snapshot rows remain valid across the v438→v439 learning-model migration:
   // only correlation semantics changed. Preserve the latest/prior raw feature states.
-  const accepted=new Set([SNAPSHOT_STATE_SCHEMA,'intrinsic_baseline_prior_trading_day_primary_v3']);
+  const accepted=new Set([SNAPSHOT_STATE_SCHEMA,'prior_state_later_outcome_primary_v1','intrinsic_baseline_prior_trading_day_primary_v3']);
   if(!source||!accepted.has(source.schema)) return emptySnapshotRuntime();
   const decodeOne=async packed=>packed?{
     ...packed,
