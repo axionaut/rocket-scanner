@@ -1,5 +1,5 @@
-const BUILD_TS='2026-06-24 11:31 IST'; // replaced at commit time with IST datetime
-const APP_VERSION=436; // Snapshot-display fix + 3-leg cost-cover basket release.
+const BUILD_TS='2026-06-24 11:15 IST'; // replaced at commit time with IST datetime
+const APP_VERSION=437; // Prior-day delta mRMR + 3-leg cost-cover basket release.
 const GOOGLE_DRIVE_CLIENT_ID='1015012642264-oi2nelv3v90k3d39r994a6nelgjs2a56.apps.googleusercontent.com'; // Public OAuth Web Client ID.
 const HARD_FILTER_SCHEMA='structural_tradeability_v2';
 const SNAPSHOT_MIN_GAP_MINUTES=1;
@@ -2089,9 +2089,8 @@ async function advanceSnapshotLearning({rows,features,priceKey,sessionTag,target
     const latest=runtime.latest;
     const stale=latest&&stamp.timestamp<=latest.timestamp;
 
-    // The Rankings "Snap Chg" column is a display-only comparison against the most recent
-    // earlier upload. It is deliberately independent of the scoring comparator: same-day
-    // snapshots may show a change here but must never create or rescue mRMR evidence.
+    // Display-only Snap Chg compares against the most recent earlier upload. It is deliberately
+    // independent of the scoring comparator: same-day changes may be displayed but never score.
     const displaySnapshot=latest&&latest.timestamp<stamp.timestamp
       ?latest
       :(runtime.previousTradingDay&&runtime.previousTradingDay.timestamp<stamp.timestamp
@@ -5441,17 +5440,15 @@ function calcZerodhaChargesSplit(price, qty, isSell, isIntraday, skipDp){
   return {brokerage,stt,txn,sebi,gst,stamp,dp};
 }
 
-// Cost-cover leg: its profit target is sized to recover the estimated CNC costs of the
-// entire allocated stock position, not merely the costs of that child order. Sell charges
-// are estimated at the evolving cost-cover price; 0.05% is retained as a tick-rounding cushion.
+// COST leg target: recover estimated full-position CNC buy + sell charges using this child leg.
 function getCostCoverTargetPct(buyPrice, costQty, parentQty){
   if(!(buyPrice>0)||!(costQty>0)||!(parentQty>0)) return 0.05;
   const parentBuyCharges=calcZerodhaCharges(buyPrice,parentQty,false,false,false);
   let pct=0;
   for(let i=0;i<8;i++){
-    const coverSellPrice=buyPrice*(1+pct/100);
-    const estimatedParentSellCharges=calcZerodhaCharges(coverSellPrice,parentQty,true,false,false);
-    pct=((parentBuyCharges+estimatedParentSellCharges)/(buyPrice*costQty))*100;
+    const sellPrice=buyPrice*(1+pct/100);
+    const parentSellCharges=calcZerodhaCharges(sellPrice,parentQty,true,false,false);
+    pct=((parentBuyCharges+parentSellCharges)/(buyPrice*costQty))*100;
   }
   return roundPct05(Math.max(0.05,pct+0.05));
 }
@@ -5479,7 +5476,7 @@ function exportBasket(){
   const {exportList,basketAlloc}=planBasketExport(capital,selList);
   const limitOmitted=Math.max(0,selList.length-bandRejected-exportList.length);
 
-  // Target levels remain adaptive. Basket entries intentionally carry no stop-loss GTT.
+  // Target-only entries: no stop-loss GTT is exported on any child order.
   const adaptiveTGT=roundPct05(getEffectiveTgtPct()||(TRADEBOOK_STATS?TRADEBOOK_STATS.adaptiveTGT:3.7));
   let runnerTGT=roundPct05(getRunnerTgtPct(null,null,adaptiveTGT)||adaptiveTGT*1.5);
 
@@ -5522,22 +5519,22 @@ function exportBasket(){
     if(qty===0) return;
     const buyPrice=am?.buyPrice||getBuyPrice(s);
     if(qty>=3){
-      // Roughly one-third is reserved for the cost-cover exit. Its target recovers estimated
-      // full-position CNC costs; the remaining parent quantity is split between TGT1 and TGT2.
+      // All three child BUY orders are mandatory whenever parent quantity permits it.
       const costQty=Math.max(1,Math.floor(qty/3));
       const remainingQty=qty-costQty;
       const baseQty=Math.ceil(remainingQty/2);
       const runnerQty=remainingQty-baseQty;
-      if(costQty+baseQty+runnerQty!==qty||baseQty<=0||runnerQty<=0) throw new Error(`Invalid 3-leg basket split for ${s.symbol}: ${qty} -> ${costQty}+${baseQty}+${runnerQty}`);
+      if(costQty+baseQty+runnerQty!==qty||costQty<=0||baseQty<=0||runnerQty<=0){
+        throw new Error(`Invalid 3-leg basket split for ${s.symbol}: ${qty} -> ${costQty}+${baseQty}+${runnerQty}`);
+      }
       const costTarget=getCostCoverTargetPct(buyPrice,costQty,qty);
       runnerTGT=roundPct05(getRunnerTgtPct(s,buyPrice,adaptiveTGT)||adaptiveTGT*1.5);
       pushBuyOrder(s,costQty,buyPrice,costTarget,'COST');
       pushBuyOrder(s,baseQty,buyPrice,adaptiveTGT,'TGT1');
       pushBuyOrder(s,runnerQty,buyPrice,runnerTGT,'TGT2');
-      splitCount++;
-      costCoverCount++;
+      splitCount++;costCoverCount++;
     } else if(qty===2){
-      // Three positive child orders are impossible with two shares; retain the two target legs.
+      // Three positive order quantities are impossible for a two-share allocation.
       runnerTGT=roundPct05(getRunnerTgtPct(s,buyPrice,adaptiveTGT)||adaptiveTGT*1.5);
       pushBuyOrder(s,1,buyPrice,adaptiveTGT,'TGT1');
       pushBuyOrder(s,1,buyPrice,runnerTGT,'TGT2');
