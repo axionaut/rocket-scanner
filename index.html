@@ -94,108 +94,15 @@
 
 
 
-<script src="app.js?v432"></script>
+<!-- app.js is loaded with a per-page cache key. This prevents GitHub Pages/browser
+     caches from serving an older scanner engine after an app.js-only deploy. Do not
+     replace this with a static app.js?vNNN URL. -->
+<script>
+(function loadLatestScannerApp() {
+  const cacheKey = Date.now().toString(36);
+  document.write('<script src="app.js?v=' + cacheKey + '"><\\/script>');
+})();
+</script>
 
 </body>
 </html>
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
