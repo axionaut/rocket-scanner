@@ -1,5 +1,5 @@
-const BUILD_TS='2026-06-24 12:10 IST'; // replaced at commit time with IST datetime
-const APP_VERSION=438; // Persisted snapshot restore + prior-day delta mRMR release.
+const BUILD_TS='2026-06-24 13:15 IST'; // replaced at commit time with IST datetime
+const APP_VERSION=439; // Prior-state → later-outcome mRMR; no current-day feature leakage.
 const GOOGLE_DRIVE_CLIENT_ID='1015012642264-oi2nelv3v90k3d39r994a6nelgjs2a56.apps.googleusercontent.com'; // Public OAuth Web Client ID.
 const HARD_FILTER_SCHEMA='structural_tradeability_v2';
 const SNAPSHOT_MIN_GAP_MINUTES=1;
@@ -12,13 +12,14 @@ const STOCK_RUNWAY_CEILING_PCT=19.5; // UC-style ceiling retained only for legac
 const PRICE_BAND_BLOCK_BUFFER_PCT=0.15; // Treat rounded 4.9/9.9/19.9 rows as effectively band-locked.
 const BASKET_CASH_RESERVE_RS=1; // Leave a rupee for broker-side tax/rounding differences.
 const SYSTEM_TRADE_START_DATE='2026-04-01'; // Adaptive stats use trades closed from this date onward.
-// mRMR v434-delta: only daily/intraday-changeable fields enter the learning vector.
-// Every scoring feature is current-minus-comparison-snapshot; slow fundamentals are filter/display-only.
-const DELTA_FEATURE_SCHEMA='all_retained_features_intrinsic_baseline_plus_prior_day_deltas_v2';
+// mRMR v439: every retained analytical feature is a prior-state input.
+// Training is strictly earlier feature state → later rocket outcome; no current-day feature leakage.
+const DELTA_FEATURE_SCHEMA='all_retained_analytical_prior_state_features_v1';
 const PRIMARY_PRIOR_DAY_WEIGHT=0.70;
 const SECONDARY_INTRADAY_WEIGHT=0.30;
 const CURRENT_EVIDENCE_WEIGHT=0.70;
 const HISTORICAL_MEMORY_WEIGHT=0.30;
+const INTRADAY_MIN_LEARN_SESSIONS=5; // Intraday continuation only joins scoring after five honest earlier→later observations.
 let MARKET_MODE='stock';
 function modeKey(base){return base;}
 
@@ -101,11 +102,11 @@ const SCANNER_STORE='rs_filters';
 const SHARED_FILTER_STORE='rs_filters_shared';
 const ALL_STORE='rs_data';
 const CORR_STORE='rs_corr';
-const CORR_SCHEMA='intrinsic_baseline_plus_prior_trading_day_delta_top10_1d_mrmr_v4';
+const CORR_SCHEMA='prior_state_to_later_rocket_outcome_mrmr_v1';
 const ROCKET_TOP_FRACTION=0.10;
 const SNAPSHOT_HISTORY_DECAY=0.95;
 const SNAPSHOT_STATE_STORE='rs_snapshot_mrmr_v1';
-const SNAPSHOT_STATE_SCHEMA='intrinsic_baseline_prior_trading_day_primary_v3';
+const SNAPSHOT_STATE_SCHEMA='prior_state_later_outcome_primary_v1';
 const METH_STORE='rs_meth';
 const HOLD_STORE='rs_holdings';
 const ORDERS_STORE='rs_orders';
@@ -1908,120 +1909,64 @@ function spearman(xs,ys){
   return pearson(pctRank(xs),pctRank(ys));
 }
 
+
 function emptySnapshotRuntime(){
-  return {schema:SNAPSHOT_STATE_SCHEMA,latest:null,previousTradingDay:null,completed:0,lastOutcome:null,lastTag:null};
+  return {
+    schema:SNAPSHOT_STATE_SCHEMA,
+    latest:null,
+    previousTradingDay:null,
+    completed:0,
+    lastOutcome:null,
+    lastTag:null
+  };
 }
 function buildDecodedSnapshot({stamp,symbols,prices,featureRows,features,sessionTag}){
   return {...stamp,symbols:[...symbols],prices,featureRows,featureCols:[...features],features:null,sessionTag:sessionTag||null};
 }
-// Every retained analytical field is eligible for mRMR.
-// On a valid prior-trading-day comparison it is expressed strictly as current-minus-prior.
-// The first-ever upload has no comparator, so it uses only fields that are already
-// intrinsically daily/intraday delta-like in ALL NSE (change, momentum, oscillator state,
-// relative volume, ratings centred on neutral, etc.). Raw price-level fields wait for a
-// real previous-trading-day snapshot; they are never scored as raw levels.
-function isDynamicMrmrFeature(feature){
-  return !!String(feature||'').trim();
-}
-function isDynamicScaleFeature(feature){
-  const f=String(feature||'').toLowerCase();
-  // These are already relative, bounded, oscillatory or point-valued. Their comparison
-  // delta is a direct point difference, never a percent-of-a-percent.
-  if(/(^|_)(change|performance|return|pct|percent|percentage|ratio|rsi|stoch|cci|mfi|adx|dmi|atr|aroon|oscillator|momentum|rate_of_change|roc|relative_volume|volatility|gap|rating|delivery|range_pos|pct_from|peak_retention|sector_breadth|sector_rel_strength|industry_breadth|bull_bear_power|chaikin|macd|ultimate)(_|$)/.test(f)) return false;
-  // Everything else numeric is a scale/level field: price, volume, turnover, pivots,
-  // bands, averages, cloud lines, market cap, shareholder counts and similar values.
-  // A real prior-day comparison converts it to a percentage delta.
-  return true;
-}
-function isIntrinsicBaselineFeature(feature){
-  const f=String(feature||'').toLowerCase();
-  // First-upload baseline: only fields that already encode current daily/intraday movement
-  // or a meaningful technical state are usable before a prior snapshot exists.
-  return /(^|_)(change|performance|return|gap|momentum|rate_of_change|roc|relative_volume|volatility|average_daily_range|atr|adx|dmi|rsi|stoch|cci|mfi|aroon|oscillator|macd|bull_bear_power|chaikin|ultimate|rating|delivery|range_pos|pct_from|peak_retention|pct_to_upper_band|sector_breadth|sector_rel_strength|industry_breadth)(_|$)/.test(f);
-}
-function intrinsicBaselineValue(feature,value){
-  const v=Number(value);
-  if(!isFinite(v)||!isIntrinsicBaselineFeature(feature)) return null;
-  const f=String(feature||'').toLowerCase();
-  // Text ratings are converted to 1..5 and centred on Neutral (=3).
-  if(/rating/.test(f)) return v-3;
-  // Bounded oscillators and range-position measures are expressed as deviation from neutral.
-  if(/(rsi|mfi|stoch|aroon|range_pos|peak_retention|delivery_pct|sector_breadth|industry_breadth)/.test(f)) return v-50;
-  // ADX/DMI are conventionally interpreted around 25 rather than 0.
-  if(/(^|_)(adx|dmi)(_|$)/.test(f)) return v-25;
-  // Change/return/performance, MACD, CCI, ROC, momentum and similar fields already have
-  // a meaningful zero point, so their supplied daily/intraday value is the baseline delta.
-  return v;
-}
-function deltaFeatureValue(feature,currentValue,previousValue){
-  const current=Number(currentValue), previous=Number(previousValue);
-  if(!isFinite(current)||!isFinite(previous)) return null;
-  if(isDynamicScaleFeature(feature)){
-    if(previous===0) return null;
-    return ((current-previous)/Math.abs(previous))*100;
-  }
-  return current-previous;
-}
-function buildComparisonFeatureRows(previous,current,features){
-  const rows={};
-  const currentSymbols=current?.symbols||[];
-  currentSymbols.forEach(symbol=>{
-    const now=current.featureRows?.[symbol]||{};
-    const prior=previous?.featureRows?.[symbol]||null;
-    const vector={};
-    features.forEach(feature=>{
-      vector[feature]=deltaFeatureValue(feature,now[feature],prior?.[feature]);
-    });
-    rows[symbol]=vector;
+
+/*
+  Core temporal contract
+
+  DAILY PRIMARY:
+    feature state from the immediately previous NSE trading-day snapshot
+      -> current upload's top 10% by current 1D change.
+
+  INTRADAY SECONDARY:
+    feature state from an earlier same-day snapshot
+      -> later same-day top 10% by actual snapshot-to-snapshot return.
+
+  The current upload's feature values never explain its own current rocket label.
+  No intrinsic first-upload model exists: the first upload stores a baseline only.
+*/
+function buildStateFeatureRows(snapshot,features){
+  const out={};
+  (snapshot?.symbols||[]).forEach(symbol=>{
+    const src=snapshot.featureRows?.[symbol]||{};
+    const row={};
+    features.forEach(feature=>{row[feature]=src[feature]??null;});
+    out[symbol]=row;
   });
-  return rows;
+  return out;
 }
-function buildIntrinsicBaselineFeatureRows(current,features){
-  const rows={};
-  (current?.symbols||[]).forEach(symbol=>{
-    const now=current.featureRows?.[symbol]||{};
-    const vector={};
-    features.forEach(feature=>{vector[feature]=intrinsicBaselineValue(feature,now[feature]);});
-    rows[symbol]=vector;
-  });
-  return rows;
-}
-function intrinsicBaselineCorrelation(current,currentEligibleSymbols,currentTargetSymbols,features){
-  const eligible=currentEligibleSymbols instanceof Set?currentEligibleSymbols:new Set(currentEligibleSymbols||[]);
-  const comparisonRows=buildIntrinsicBaselineFeatureRows(current,features);
-  const matchedSymbols=(current.symbols||[]).filter(symbol=>eligible.has(symbol));
+function correlationFromPriorState(sourceSnapshot,currentSnapshot,eligibleSymbols,targetSymbols,features){
+  const eligible=eligibleSymbols instanceof Set?eligibleSymbols:new Set(eligibleSymbols||[]);
+  const target=targetSymbols instanceof Set?targetSymbols:new Set(targetSymbols||[]);
+  const featureRows=buildStateFeatureRows(sourceSnapshot,features);
+  const matched=(currentSnapshot?.symbols||[]).filter(symbol=>
+    eligible.has(symbol)&&sourceSnapshot?.featureRows?.[symbol]&&currentSnapshot?.featureRows?.[symbol]
+  );
   const correlation={};
   for(const feature of features){
     const xs=[],ys=[];
-    matchedSymbols.forEach(symbol=>{
-      const value=comparisonRows[symbol]?.[feature];
+    matched.forEach(symbol=>{
+      const value=featureRows[symbol]?.[feature];
       if(value==null||!isFinite(value)) return;
-      xs.push(value);ys.push(currentTargetSymbols.has(symbol)?1:0);
+      xs.push(value);
+      ys.push(target.has(symbol)?1:0);
     });
     correlation[feature]=pearson(xs,ys);
   }
-  return {correlation,matched:matchedSymbols.length,comparisonRows};
-}
-function snapshotCorrelationToCurrentTarget(previous,current,currentEligibleSymbols,currentTargetSymbols,features){
-  // Every current live-eligible symbol is a 0/1 observation. Every mRMR input is a strict dynamic delta:
-  // current snapshot minus comparison snapshot. Static/fundamental fields are absent from FEATS.
-  const eligible=currentEligibleSymbols instanceof Set?currentEligibleSymbols:new Set(currentEligibleSymbols||[]);
-  const comparisonRows=buildComparisonFeatureRows(previous,current,features);
-  const matchedSymbols=[];
-  for(const symbol of current.symbols||[]){
-    if(eligible.has(symbol)&&previous?.featureRows?.[symbol]) matchedSymbols.push(symbol);
-  }
-  const correlation={};
-  for(const feature of features){
-    const xs=[],ys=[];
-    matchedSymbols.forEach(symbol=>{
-      const value=comparisonRows[symbol]?.[feature];
-      if(value==null||!isFinite(value)) return;
-      xs.push(value); ys.push(currentTargetSymbols.has(symbol)?1:0);
-    });
-    correlation[feature]=pearson(xs,ys);
-  }
-  return {correlation,matched:matchedSymbols.length,comparisonRows};
+  return {correlation,matched,featureRows};
 }
 function snapshotPriceMoves(previous,current){
   const currentIndex=new Map((current.symbols||[]).map((symbol,index)=>[symbol,index]));
@@ -2033,6 +1978,20 @@ function snapshotPriceMoves(previous,current){
   });
   return out;
 }
+function topRocketSymbolsFromMoves(moves,eligibleSymbols){
+  const eligible=eligibleSymbols instanceof Set?eligibleSymbols:new Set(eligibleSymbols||[]);
+  const ranked=Object.entries(moves||{})
+    .filter(([symbol,value])=>eligible.has(symbol)&&value!=null&&isFinite(value))
+    .sort((a,b)=>b[1]-a[1]);
+  const count=Math.max(1,Math.floor(ranked.length*ROCKET_TOP_FRACTION));
+  return new Set(ranked.slice(0,count).map(([symbol])=>symbol));
+}
+function sameDayContinuationCorrelation(previous,current,eligibleSymbols,features){
+  const moves=snapshotPriceMoves(previous,current);
+  const targets=topRocketSymbolsFromMoves(moves,eligibleSymbols);
+  const pair=correlationFromPriorState(previous,current,eligibleSymbols,targets,features);
+  return {...pair,moves,targets};
+}
 function blendCorrelation(currentValue,historicalValue,currentWeight=0.70){
   const c=isFinite(currentValue)?currentValue:null;
   const h=isFinite(historicalValue)?historicalValue:null;
@@ -2040,15 +1999,15 @@ function blendCorrelation(currentValue,historicalValue,currentWeight=0.70){
   if(h==null) return c;
   return currentWeight*c+(1-currentWeight)*h;
 }
-function updateCorrelationEMA(storeKey,incoming,weightCurrent=0.70){
-  const prior=ACC_CORR?.[storeKey]||{};
-  const next={...prior};
-  Object.entries(incoming||{}).forEach(([feature,value])=>{
-    if(value==null||!isFinite(value)) return;
-    next[feature]=blendCorrelation(value,prior[feature],weightCurrent);
+function blendCorrelationMap(incoming,history,features,currentWeight=0.70){
+  const out={};
+  (features||[]).forEach(feature=>{
+    out[feature]=blendCorrelation(incoming?.[feature],history?.[feature],currentWeight);
   });
-  ACC_CORR={...(ACC_CORR||{}),[storeKey]:next};
-  return next;
+  return out;
+}
+function hasUsableCorrelation(corr){
+  return !!corr&&Object.values(corr).some(v=>v!=null&&isFinite(v)&&Math.abs(v)>0.0001);
 }
 function getAverageLearningHorizon(){
   const count=Number(ACC_CORR?.elapsedCount||0);
@@ -2058,184 +2017,195 @@ function getAverageLearningHorizon(){
 async function advanceSnapshotLearning({rows,features,priceKey,sessionTag,targetSymbols,eligibleSymbols,advance=true,snapshotTimestamp=Date.now()}){
   if(!SNAPSHOT_RUNTIME||SNAPSHOT_RUNTIME.schema!==SNAPSHOT_STATE_SCHEMA) SNAPSHOT_RUNTIME=emptySnapshotRuntime();
   if(ACC_CORR?.corrSchema!==CORR_SCHEMA){
-    ACC_CORR={corr:{},intradayCorr:{},sessions:0,learnSessions:0,corrSchema:CORR_SCHEMA,
-      seedBaselineDate:null,seedBaselineCorr:{},baselineSessions:0};
+    ACC_CORR={
+      corrSchema:CORR_SCHEMA,
+      corr:{},
+      dailyCorr:{},
+      intradayCorr:{},
+      activeDailyCorr:{},
+      activeDailyDate:null,
+      sessions:0,
+      learnSessions:0,
+      dailySessions:0,
+      intradaySessions:0,
+      elapsedCount:0,
+      elapsedTotalMinutes:0
+    };
   }
+
   const runtime=SNAPSHOT_RUNTIME;
-  const stamp=snapshotStamp(snapshotTimestamp);
+  const rawStamp=snapshotStamp(snapshotTimestamp);
+  // Drive/browser restore reads the already-stored scan. Keep its original session identity;
+  // a Drive modification time must never turn a restore into a synthetic new trading day.
+  const stamp=!advance&&runtime.latest
+    ?{...rawStamp,timestamp:runtime.latest.timestamp,sessionDate:runtime.latest.sessionDate,
+      minutes:runtime.latest.minutes,inSession:runtime.latest.inSession,baselineEligible:runtime.latest.baselineEligible}
+    :rawStamp;
   const targetSet=targetSymbols instanceof Set?targetSymbols:new Set(targetSymbols||[]);
   const eligibleSet=eligibleSymbols instanceof Set?eligibleSymbols:new Set(eligibleSymbols||[]);
   const targetCorrToday=Object.fromEntries(features.map(f=>[f,null]));
   const cleanRows=rows.filter(row=>row.symbol&&priceKey&&row[priceKey]>0);
   const symbols=cleanRows.map(row=>row.symbol);
   const prices=Float32Array.from(cleanRows,row=>row[priceKey]);
-  const featureRows=Object.fromEntries(cleanRows.map(row=>[row.symbol,Object.fromEntries(features.map(f=>[f,row[f]??null]))]));
+  const featureRows=Object.fromEntries(cleanRows.map(row=>[
+    row.symbol,Object.fromEntries(features.map(f=>[f,row[f]??null]))
+  ]));
   const currentSnapshot=buildDecodedSnapshot({stamp,symbols,prices,featureRows,features,sessionTag});
 
-  let note='Waiting for first-upload intrinsic daily-delta baseline';
-  let primaryCorr=null,intradayCurrent=null,primaryIntervalMoves={},displayIntervalMoves={},scoringFeatureRows={};
-  let primarySnapshot=null,primaryValid=false,intradayUpdated=false,baselineActive=false,baselineCreated=false;
+  const latest=runtime.latest;
+  const duplicate=!!sessionTag&&runtime.lastTag===sessionTag&&latest?.sessionDate===stamp.sessionDate;
+  const stale=!!latest&&stamp.timestamp<latest.timestamp;
+  const dailyHistory=ACC_CORR.dailyCorr||ACC_CORR.corr||{};
+  const intradayHistory=ACC_CORR.intradayCorr||{};
+
+  // A daily score model is frozen at the beginning of a new trading day.
+  // Today's completed outcome teaches tomorrow's model, never today's already-rendered ranks.
+  if(advance&&!stale&&!duplicate&&stamp.inSession&&ACC_CORR.activeDailyDate!==stamp.sessionDate){
+    ACC_CORR.activeDailyDate=stamp.sessionDate;
+    ACC_CORR.activeDailyCorr={...dailyHistory};
+  }
+  const activeDailyCorr=(ACC_CORR.activeDailyDate===stamp.sessionDate)
+    ?(ACC_CORR.activeDailyCorr||{})
+    :dailyHistory;
+  // Capture intraday history before this upload's later outcome is added.
+  const scoreIntradayCorr={...intradayHistory};
+  const dailyScoreReady=(ACC_CORR.dailySessions||0)>0&&hasUsableCorrelation(activeDailyCorr);
+  const intradayScoreReady=(ACC_CORR.intradaySessions||0)>=INTRADAY_MIN_LEARN_SESSIONS&&hasUsableCorrelation(scoreIntradayCorr);
+
+  let note='';
+  let primaryCorr=null;
+  let intradayCurrent=null;
+  let primarySnapshot=null;
+  let primaryValid=false;
+  let intradayUpdated=false;
+  let displayIntervalMoves={};
   let displayIntervalElapsedMinutes=null;
-  const duplicate=!!sessionTag&&runtime.lastTag===sessionTag&&runtime.latest?.sessionDate===stamp.sessionDate;
+  let primaryIntervalMoves={};
 
-  if(!advance){
-    note='Rankings refreshed without advancing snapshot learning';
-  }else if(duplicate){
-    // A duplicate upload keeps the existing state and still renders the available score mode below.
-    note='Duplicate snapshot ignored; retained existing scoring state';
-  }else if(!stamp.baselineEligible){
-    note='Outside NSE snapshot hours; no learning snapshot saved';
-  }else{
-    const latest=runtime.latest;
-    const stale=latest&&stamp.timestamp<=latest.timestamp;
+  const displaySnapshot=latest&&latest.timestamp<stamp.timestamp
+    ?latest
+    :(runtime.previousTradingDay&&runtime.previousTradingDay.timestamp<stamp.timestamp
+      ?runtime.previousTradingDay:null);
+  if(displaySnapshot){
+    displayIntervalMoves=snapshotPriceMoves(displaySnapshot,currentSnapshot);
+    displayIntervalElapsedMinutes=Math.max(1,Math.round((stamp.timestamp-displaySnapshot.timestamp)/60000));
+  }
 
-    // Display-only Snap Chg compares against the most recent earlier upload. It is deliberately
-    // independent of the scoring comparator: same-day changes may be displayed but never score.
-    const displaySnapshot=latest&&latest.timestamp<stamp.timestamp
-      ?latest
-      :(runtime.previousTradingDay&&runtime.previousTradingDay.timestamp<stamp.timestamp
-        ?runtime.previousTradingDay:null);
-    if(displaySnapshot){
-      displayIntervalMoves=snapshotPriceMoves(displaySnapshot,currentSnapshot);
-      displayIntervalElapsedMinutes=Math.max(1,Math.round((stamp.timestamp-displaySnapshot.timestamp)/60000));
-    }
+  // Strict daily comparator: immediately previous NSE trading-day snapshot only.
+  if(runtime.previousTradingDay&&tradingDaysBetween(runtime.previousTradingDay.sessionDate,stamp.sessionDate)===1){
+    primarySnapshot=runtime.previousTradingDay;
+  }else if(latest&&tradingDaysBetween(latest.sessionDate,stamp.sessionDate)===1){
+    primarySnapshot=latest;
+  }
 
-    // The primary comparator is ONLY the immediately previous NSE trading day.
-    if(runtime.previousTradingDay&&tradingDaysBetween(runtime.previousTradingDay.sessionDate,stamp.sessionDate)===1){
-      primarySnapshot=runtime.previousTradingDay;
-    }else if(latest&&tradingDaysBetween(latest.sessionDate,stamp.sessionDate)===1){
-      primarySnapshot=latest;
-    }
-
+  if(advance&&stamp.baselineEligible&&!duplicate&&!stale){
     const primaryPair=primarySnapshot&&stamp.inSession&&targetSet.size>0
-      ?snapshotCorrelationToCurrentTarget(primarySnapshot,currentSnapshot,eligibleSet,targetSet,features):null;
+      ?correlationFromPriorState(primarySnapshot,currentSnapshot,eligibleSet,targetSet,features)
+      :null;
     primaryValid=!!primaryPair&&primaryPair.matched>=100;
 
     if(primaryValid){
       primaryCorr=primaryPair.correlation;
-      scoringFeatureRows=primaryPair.comparisonRows||{};
-      primaryIntervalMoves=snapshotPriceMoves(primarySnapshot,currentSnapshot);
       features.forEach(f=>{targetCorrToday[f]=primaryCorr[f]??null;});
+      primaryIntervalMoves=snapshotPriceMoves(primarySnapshot,currentSnapshot);
+      const nextDaily=blendCorrelationMap(primaryCorr,dailyHistory,features,CURRENT_EVIDENCE_WEIGHT);
+      ACC_CORR={
+        ...ACC_CORR,
+        corr:nextDaily,
+        dailyCorr:nextDaily,
+        dailySessions:(ACC_CORR.dailySessions||0)+1,
+        sessions:(ACC_CORR.sessions||0)+1,
+        learnSessions:(ACC_CORR.learnSessions||0)+1,
+        elapsedCount:(ACC_CORR.elapsedCount||0)+1,
+        elapsedTotalMinutes:(ACC_CORR.elapsedTotalMinutes||0)+Math.max(1,Math.round((stamp.timestamp-primarySnapshot.timestamp)/60000)),
+        lastUpdated:new Date().toISOString(),
+        lastPrimaryDate:primarySnapshot.sessionDate,
+        lastCurrentDate:stamp.sessionDate
+      };
+      runtime.completed=(runtime.completed||0)+1;
+      runtime.lastOutcome={
+        sourceTimestamp:primarySnapshot.timestamp,
+        completedAt:stamp.timestamp,
+        elapsedMinutes:Math.max(1,Math.round((stamp.timestamp-primarySnapshot.timestamp)/60000)),
+        matched:primaryPair.matched,
+        rockets:targetSet.size,
+        primaryDate:primarySnapshot.sessionDate,
+        currentDate:stamp.sessionDate,
+        model:'prior_state_to_current_1d_top10'
+      };
     }
 
-    // Same-day snapshot comparisons build secondary context only. They never create,
-    // replace or rescue a prior-day score.
-    if(!stale&&latest&&latest.sessionDate===stamp.sessionDate&&stamp.inSession&&targetSet.size>0){
+    // Same-day continuation: earlier state -> later actual interval rocket outcome.
+    // It is a separate secondary model and never rescues a missing daily model.
+    if(latest&&latest.sessionDate===stamp.sessionDate&&stamp.inSession&&targetSet.size>0){
       const gap=(stamp.timestamp-latest.timestamp)/60000;
       if(gap>=SNAPSHOT_MIN_GAP_MINUTES){
-        const intradayPair=snapshotCorrelationToCurrentTarget(latest,currentSnapshot,eligibleSet,targetSet,features);
+        const intradayPair=sameDayContinuationCorrelation(latest,currentSnapshot,eligibleSet,features);
         if(intradayPair.matched>=100){
           intradayCurrent=intradayPair.correlation;
-          updateCorrelationEMA('intradayCorr',intradayCurrent,0.70);
+          ACC_CORR.intradayCorr=blendCorrelationMap(intradayCurrent,intradayHistory,features,CURRENT_EVIDENCE_WEIGHT);
+          ACC_CORR.intradaySessions=(ACC_CORR.intradaySessions||0)+1;
           intradayUpdated=true;
         }
       }
     }
 
-    if(primaryValid){
-      const intradayHistory=ACC_CORR.intradayCorr||{};
-      const historical=ACC_CORR.corr||{};
-      const currentEvidence={},finalCorr={};
-      features.forEach(f=>{
-        const primary=primaryCorr[f];
-        const secondary=intradayHistory[f];
-        currentEvidence[f]=isFinite(secondary)?blendCorrelation(primary,secondary,PRIMARY_PRIOR_DAY_WEIGHT):primary;
-        finalCorr[f]=blendCorrelation(currentEvidence[f],historical[f],CURRENT_EVIDENCE_WEIGHT);
-      });
-      const primaryElapsed=Math.round((stamp.timestamp-primarySnapshot.timestamp)/60000);
-      ACC_CORR={...ACC_CORR,corr:finalCorr,sessions:(ACC_CORR.sessions||0)+1,learnSessions:(ACC_CORR.learnSessions||0)+1,
-        elapsedCount:(ACC_CORR.elapsedCount||0)+1,elapsedTotalMinutes:(ACC_CORR.elapsedTotalMinutes||0)+primaryElapsed,
-        corrSchema:CORR_SCHEMA,lastUpdated:new Date().toISOString(),lastPrimaryDate:primarySnapshot.sessionDate,lastCurrentDate:stamp.sessionDate};
-      runtime.completed=(runtime.completed||0)+1;
-      runtime.lastOutcome={sourceTimestamp:primarySnapshot.timestamp,completedAt:stamp.timestamp,elapsedMinutes:primaryElapsed,
-        matched:Object.keys(primaryIntervalMoves).length,rockets:targetSet.size,primaryDate:primarySnapshot.sessionDate,currentDate:stamp.sessionDate,intradayUpdated};
-      note=`Primary: ${primarySnapshot.sessionDate} → ${stamp.sessionDate} current 1D top ${Math.round(ROCKET_TOP_FRACTION*100)}% target (${primaryPair.matched} matched)${intradayUpdated?' · same-day context refreshed':''}`;
-    }else{
-      // First-ever baseline exception. This is not a same-day fallback: it learns only from
-      // intrinsic daily/intraday delta fields already present in ALL NSE, such as price-change,
-      // volume-change, momentum, oscillators and centred technical ratings.
-      const canCreateBaseline=!latest&&!ACC_CORR.seedBaselineDate&&stamp.inSession&&targetSet.size>0;
-      const canUseSeedToday=ACC_CORR.seedBaselineDate===stamp.sessionDate&&(!latest||latest.sessionDate===stamp.sessionDate);
-      if(canCreateBaseline){
-        const seed=intrinsicBaselineCorrelation(currentSnapshot,eligibleSet,targetSet,features);
-        const seedCorr=seed.correlation||{};
-        ACC_CORR={...ACC_CORR,corr:seedCorr,seedBaselineCorr:seedCorr,seedBaselineDate:stamp.sessionDate,
-          baselineSessions:(ACC_CORR.baselineSessions||0)+1,sessions:(ACC_CORR.sessions||0)+1,
-          corrSchema:CORR_SCHEMA,lastUpdated:new Date().toISOString(),lastCurrentDate:stamp.sessionDate};
-        scoringFeatureRows=seed.comparisonRows||{};
-        features.forEach(f=>{targetCorrToday[f]=seedCorr[f]??null;});
-        baselineActive=true;baselineCreated=true;
-        note=`Baseline: first-upload intrinsic daily/intraday deltas against current 1D top ${Math.round(ROCKET_TOP_FRACTION*100)}% target (${seed.matched} live-eligible stocks)`;
-      }else if(canUseSeedToday){
-        scoringFeatureRows=buildIntrinsicBaselineFeatureRows(currentSnapshot,features);
-        baselineActive=true;
-        note='Baseline: first-upload intrinsic daily/intraday delta model retained; same-day snapshots remain secondary context only';
-      }else if(primaryPair&&primaryPair.matched<100){
-        note=`WARMUP: immediate prior-day snapshot matched only ${primaryPair.matched} live-eligible stocks; 100 required`;
-      }else if(stale){
-        note='Older or same-time snapshot ignored; baseline preserved';
-      }else{
-        const latestDate=latest?.sessionDate||null;
-        if(latestDate&&latestDate!==stamp.sessionDate&&tradingDaysBetween(latestDate,stamp.sessionDate)!==1){
-          note='WARMUP: immediate previous trading-day snapshot is missing; baseline cannot bridge a skipped trading day';
-        }else if(latestDate===stamp.sessionDate){
-          note='WARMUP: same-day snapshot stored as secondary context only; immediate prior-day comparison is required';
-        }else{
-          note='WARMUP: immediate previous trading-day comparison is required';
-        }
-      }
+    if(latest&&latest.sessionDate!==stamp.sessionDate){
+      runtime.previousTradingDay=tradingDaysBetween(latest.sessionDate,stamp.sessionDate)===1?latest:null;
     }
-
-    if(!stale){
-      if(latest&&latest.sessionDate!==stamp.sessionDate){
-        runtime.previousTradingDay=tradingDaysBetween(latest.sessionDate,stamp.sessionDate)===1?latest:null;
-      }
-      runtime.latest=currentSnapshot;
-      runtime.lastTag=sessionTag||null;
-      window._snapshotRuntimeDirty=true;
-    }
+    runtime.latest=currentSnapshot;
+    runtime.lastTag=sessionTag||null;
+    window._snapshotRuntimeDirty=true;
   }
 
-  // Reload / Drive hydration must never create a new baseline or erase an existing one.
-  // It reuses the persisted immediate-prior-day comparator and learned vector for the
-  // already-saved latest snapshot. This path is also used for an exact duplicate upload.
-  let restoredPrimaryEvidence=false;
-  let restoredBaselineEvidence=false;
-  const learned=ACC_CORR?.corr||{};
-  const hasLearnedVector=Object.keys(learned).length>0;
-
-  if(!primaryValid&&!baselineActive&&hasLearnedVector){
-    const retainedPrior=runtime.previousTradingDay;
-    const retainedMatched=retainedPrior
-      ?(currentSnapshot.symbols||[]).filter(symbol=>eligibleSet.has(symbol)&&retainedPrior.featureRows?.[symbol]).length
-      :0;
-
-    if(retainedPrior&&tradingDaysBetween(retainedPrior.sessionDate,stamp.sessionDate)===1&&retainedMatched>=100){
-      scoringFeatureRows=buildComparisonFeatureRows(retainedPrior,currentSnapshot,features);
-      restoredPrimaryEvidence=true;
-      if(!advance) note=`Restored prior-day scoring state: ${retainedPrior.sessionDate} → ${stamp.sessionDate} (${retainedMatched} matched)`;
-      else if(duplicate) note=`Duplicate snapshot ignored; restored prior-day scoring state (${retainedMatched} matched)`;
-    }else if(ACC_CORR.seedBaselineDate===stamp.sessionDate){
-      scoringFeatureRows=buildIntrinsicBaselineFeatureRows(currentSnapshot,features);
-      restoredBaselineEvidence=true;
-      if(!advance) note='Restored first-upload intrinsic baseline scoring state';
-      else if(duplicate) note='Duplicate snapshot ignored; restored intrinsic baseline scoring state';
-    }
-  }
-
-  const hasPrimaryComparison=primaryValid||restoredPrimaryEvidence;
-  const hasBaselineEvidence=baselineActive||restoredBaselineEvidence;
-  const hasScoringEvidence=hasPrimaryComparison||hasBaselineEvidence;
-  if(!hasScoringEvidence) scoringFeatureRows=buildComparisonFeatureRows(null,currentSnapshot,features);
-
+  // Current live score uses current feature state, but only correlations learned before
+  // the current outcome. The daily predictor is mandatory; intraday is optional at 30%.
+  const scoringFeatureRows=buildStateFeatureRows(currentSnapshot,features);
   const targetCorr={};
-  features.forEach(feature=>{targetCorr[feature]=hasScoringEvidence?(learned[feature]??0):0;});
-  if(ACC_CORR){ACC_CORR.laggedNote=note;FS.set(modeKey(CORR_STORE),ACC_CORR);}
-  return {targetCorr,targetCorrToday,completedNow:hasPrimaryComparison?1:0,note,runtime,
-    hadPriorCorr:(ACC_CORR?.learnSessions||0)>0,hasPrimaryComparison,hasBaselineEvidence,hasScoringEvidence,baselineCreated,
-    primaryCorr,intradayCurrent,intervalMoves:displayIntervalMoves,scoringFeatureRows,deltaFeatureSchema:DELTA_FEATURE_SCHEMA,
+  features.forEach(feature=>{
+    const daily=activeDailyCorr[feature]??0;
+    const intra=scoreIntradayCorr[feature];
+    targetCorr[feature]=(dailyScoreReady&&intradayScoreReady&&isFinite(intra))
+      ?PRIMARY_PRIOR_DAY_WEIGHT*daily+SECONDARY_INTRADAY_WEIGHT*intra
+      :daily;
+  });
+  const hasScoringEvidence=dailyScoreReady;
+  if(!hasScoringEvidence){
+    if(primaryValid) note='WARMUP: first valid prior-state → current-rocket pair learned; scores activate next NSE trading day';
+    else if(primarySnapshot&&targetSet.size>0) note='WARMUP: immediate prior-day snapshot matched fewer than 100 live-eligible stocks';
+    else if(latest&&latest.sessionDate!==stamp.sessionDate&&tradingDaysBetween(latest.sessionDate,stamp.sessionDate)!==1) note='WARMUP: immediate previous NSE trading-day snapshot is missing';
+    else if(latest?.sessionDate===stamp.sessionDate) note='WARMUP: same-day uploads train continuation only; they cannot create the daily predictor';
+    else note='WARMUP: first baseline saved; a valid next trading-day outcome is required';
+  }else{
+    const dailyPart=`daily prior-state model (${ACC_CORR.dailySessions||0} learned transition${(ACC_CORR.dailySessions||0)===1?'':'s'})`;
+    const intraPart=intradayScoreReady?` + 30% intraday continuation (${ACC_CORR.intradaySessions||0} intervals)`:'';
+    note=`Scoring from ${dailyPart}${intraPart}; current upload outcome is training the next daily model${primaryValid?' · prior-day pair recorded':''}`;
+  }
+
+  ACC_CORR.laggedNote=note;
+  FS.set(modeKey(CORR_STORE),ACC_CORR);
+  return {
+    targetCorr,
+    targetCorrToday,
+    completedNow:primaryValid?1:0,
+    note,
+    runtime,
+    hadPriorCorr:(ACC_CORR?.dailySessions||0)>0,
+    hasPrimaryComparison:primaryValid,
+    hasBaselineEvidence:false,
+    hasScoringEvidence,
+    baselineCreated:false,
+    primaryCorr,
+    intradayCurrent,
+    intervalMoves:displayIntervalMoves,
+    scoringFeatureRows,
+    deltaFeatureSchema:DELTA_FEATURE_SCHEMA,
     intervalElapsedMinutes:displayIntervalElapsedMinutes,
-    freshSignalCount:hasScoringEvidence?Object.values(targetCorrToday).filter(v=>v!=null&&isFinite(v)&&Math.abs(v)>0.0001).length:0};
+    freshSignalCount:primaryValid?Object.values(targetCorrToday).filter(v=>v!=null&&isFinite(v)&&Math.abs(v)>0.0001).length:0,
+    scoringSource:dailyScoreReady?(intradayScoreReady?'daily_prior_state_plus_intraday_continuation':'daily_prior_state_only'):'warmup',
+    intradayScoreReady,
+    dailyScoreReady
+  };
 }
 
 // ── Engine ──
@@ -2497,7 +2467,7 @@ async function runEngine(raw, sessionTag, options={}){
   // Strict gate: same-day evidence and historical memory never create a tradable score without today's direct prior-trading-day comparison.
   const hasRecommendationEvidence=!!snapshotLearning.hasScoringEvidence;
   const useFreshCorr=true;
-  const scoringSource=snapshotLearning.hasPrimaryComparison?'immediate_prior_trading_day_primary':(snapshotLearning.hasBaselineEvidence?'first_upload_intrinsic_daily_delta_baseline':'warmup_missing_immediate_prior_trading_day');
+  const scoringSource=snapshotLearning.scoringSource||'warmup';
   const laggedNote=snapshotLearning.note;
   const recOutcomeSummary=getRecommendationOutcomeSummary();
   const entryOutcomeSummary=getExecutedEntryOutcomeSummary();
@@ -2508,8 +2478,7 @@ async function runEngine(raw, sessionTag, options={}){
   const withPC=filtered.map((d,i)=>({i,pc:K.price_change?d[K.price_change]:null})).filter(x=>x.pc!==null);
   withPC.sort((a,b)=>b.pc-a.pc);
 
-  // Every post-baseline mRMR comparison uses retained-feature deltas from the valid prior trading-day snapshot.
-  // The first-ever upload uses only intrinsic daily/intraday deltas already supplied by ALL NSE.
+  // mRMR scores current feature states using correlations learned only from earlier feature states and later outcomes.
   const scoringFeatureRows=snapshotLearning.scoringFeatureRows||{};
   const scoringRows=learningUniverse.map(d=>scoringFeatureRows[d.symbol]||{});
   // Older mRMR redundancy rule: average absolute Pearson correlation across all peer features.
@@ -2635,7 +2604,7 @@ async function runEngine(raw, sessionTag, options={}){
     marketBreadth:marketBreadth,
     recommendationFeedback,executedEntryFeedback,
     outcomeScoreOverlay:{active:outcomeReliabilityModel.active,samples:outcomeReliabilityModel.samples.length,features:outcomeReliabilityModel.features.length,maxAdjustment:0,mode:'confidence_badge_only'},
-    scoringModel:'prior_trading_day_delta_current_1d_top10_mrmr',
+    scoringModel:'prior_state_to_later_rocket_outcome_mrmr',
     deltaFeatureSchema:DELTA_FEATURE_SCHEMA,
     deltaOnlyFeatureCount:FEATS.length,
     excludedSlowFeatureCount:0,
@@ -3943,14 +3912,14 @@ function _renderMethodologyInner(){
   const rs = {
   };
   const scoreCorrSource = E.hasRecommendationEvidence
-    ?'Prior-day feature deltas are scoring candidates for the current top-10% 1D mover set'
+    ?'Current feature states are scored using correlations learned from earlier-state → later-rocket pairs'
     :'First upload baseline saved; recommendations start after the next valid snapshot';
   const sessLabel = `${E.accSessions||0} learned horizons · ${E.laggedNote||'waiting for the next snapshot'}`;
   const breadthPct=E.marketBreadth!=null?(E.marketBreadth*100).toFixed(0):'?';
   const recFeedback=E.recommendationFeedback;
   const entryFeedback=E.executedEntryFeedback;
   const overlay=E.outcomeScoreOverlay||{};
-  const feedbackText=`Shortlist outcomes: ${recFeedback?.samples||0}; executed-entry outcomes: ${entryFeedback?.samples||0}. Raw mRMR relevance learns which prior-day-to-current dynamic deltas distinguish the current top 10% by 1D move. Completed recommendation and entry outcomes remain confidence context only and continue refining targets, sizing, and review timing.`;
+  const feedbackText=`Shortlist outcomes: ${recFeedback?.samples||0}; executed-entry outcomes: ${entryFeedback?.samples||0}. Raw mRMR relevance learns which earlier feature states precede later rocket outcomes. Completed recommendation and entry outcomes remain confidence context only and continue refining targets, sizing, and review timing.`;
   const breadthCardHTML=`<div class="breadth-bar">
     <div class="breadth-badge" style="color:var(--cyan)">${breadthPct}% Breadth</div>
     <div class="breadth-meta">
@@ -3998,11 +3967,11 @@ function _renderMethodologyInner(){
     </nav>
     <div id="meth-hf-wrap">${hardFiltersHTML}</div>
     <div id="meth-breadth">${breadthCardHTML}</div>
-    <h3 id="meth-engine" style="margin-top:18px">Scoring Engine — Prior-Day Primary mRMR</h3>
+    <h3 id="meth-engine" style="margin-top:18px">Scoring Engine — Prior-State → Later-Outcome mRMR</h3>
     <p id="mrmrLearningModeNote"><strong>Current learning mode:</strong> The current top 10% of live-eligible stocks by 1D change are the target. A first-ever upload scores from ALL NSE’s intrinsic daily/intraday delta fields already present in the file. From the next valid session onward, every retained numeric/rating feature uses its immediately previous-trading-day delta. Same-day snapshots provide secondary accumulated context only and never create or rescue a skipped-day score.</p>
     <div class="m-grid">
       <div class="m-card"><h4>Learning Target</h4><p>The current top 10% by 1D change receive label 1. The first upload uses existing intrinsic daily/intraday deltas in ALL NSE to establish a scored baseline. Thereafter every retained numeric and converted-rating feature enters mRMR as a current-minus-immediately-prior-trading-day delta. A skipped normal trading day still keeps the scanner in WARMUP.</p></div>
-      <div class="m-card"><h4>📡 How the Engine Learns</h4><p>Each current upload compares today’s 1D top-10% target with dynamic deltas versus the immediately previous trading-day snapshot. That direct comparison has 70% of fresh evidence; accumulated same-day snapshots have 30%. Final correlation then uses 70% fresh evidence and 30% historical memory.</p></div>
+      <div class="m-card"><h4>📡 How the Engine Learns</h4><p>Each current upload trains yesterday’s feature state against today’s top-10% outcome. The daily model is frozen for the current trading day and only affects the next trading day. Same-day learning separately uses earlier-state → later-return pairs and joins the score at 30% after enough honest intervals.</p></div>
       <div class="m-card"><h4>Outcome Self-Correction</h4><p>${feedbackText} Outcome evidence is displayed as confidence context only. It does not add or subtract points from Rocket Score.</p></div>
       <div class="m-card"><h4>Feature Self-Correction</h4><p>Features that repeatedly separate future rockets from non-rockets strengthen; one-off relationships fade as more transitions arrive. mRMR uses average absolute Pearson correlation across all feature peers so redundant indicators cannot cast duplicate votes.</p></div>
       <div class="m-card"><h4>🎯 Max 1D Filter</h4><p>Set <em>Max 1D %</em> in the filter bar to hide stocks that have already moved too much today (default 5%). Entry-ceiling filtering has been removed; strong candidates are no longer hidden just because current price is above a calculated buy ceiling.</p></div>
@@ -5732,14 +5701,18 @@ async function unpackFloat32Values(source){
   return new Float32Array(view);
 }
 async function decodeSnapshotState(source){
-  if(!source||source.schema!==SNAPSHOT_STATE_SCHEMA) return emptySnapshotRuntime();
+  // Snapshot rows remain valid across the v438→v439 learning-model migration:
+  // only correlation semantics changed. Preserve the latest/prior raw feature states.
+  const accepted=new Set([SNAPSHOT_STATE_SCHEMA,'intrinsic_baseline_prior_trading_day_primary_v3']);
+  if(!source||!accepted.has(source.schema)) return emptySnapshotRuntime();
   const decodeOne=async packed=>packed?{
     ...packed,
     prices:await unpackFloat32Values(packed.prices),
     featureRows:await decodeScannerSnapshot(packed.features),
     featureCols:packed.features?.cols||packed.featureCols||[],
   }:null;
-  return {...source,latest:await decodeOne(source.latest),previousTradingDay:await decodeOne(source.previousTradingDay)};
+  return {...emptySnapshotRuntime(),...source,schema:SNAPSHOT_STATE_SCHEMA,
+    latest:await decodeOne(source.latest),previousTradingDay:await decodeOne(source.previousTradingDay)};
 }
 async function encodeSnapshotState(runtime){
   const encodeOne=async snapshot=>snapshot?{
@@ -6055,9 +6028,9 @@ async function initApp(){
         ACC_CORR=savedCorr;
       }else{
         ACC_CORR={
-          corr:{},counts:{},sessions:0,learnSessions:0,weightedSessions:0,corrSchema:CORR_SCHEMA,
-          elapsedCount:savedCorr?.elapsedCount||0,
-          elapsedTotalMinutes:savedCorr?.elapsedTotalMinutes||0,
+          corr:{},dailyCorr:{},intradayCorr:{},activeDailyCorr:{},activeDailyDate:null,
+          sessions:0,learnSessions:0,dailySessions:0,intradaySessions:0,corrSchema:CORR_SCHEMA,
+          elapsedCount:0,elapsedTotalMinutes:0,
         };
         console.log('INIT: reset incompatible correlation target schema; retained compact timing totals.');
       }
