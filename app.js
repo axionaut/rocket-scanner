@@ -1,5 +1,5 @@
-const BUILD_TS='2026-06-24 11:15 IST'; // replaced at commit time with IST datetime
-const APP_VERSION=437; // Prior-day delta mRMR + 3-leg cost-cover basket release.
+const BUILD_TS='2026-06-24 12:10 IST'; // replaced at commit time with IST datetime
+const APP_VERSION=438; // Persisted snapshot restore + prior-day delta mRMR release.
 const GOOGLE_DRIVE_CLIENT_ID='1015012642264-oi2nelv3v90k3d39r994a6nelgjs2a56.apps.googleusercontent.com'; // Public OAuth Web Client ID.
 const HARD_FILTER_SCHEMA='structural_tradeability_v2';
 const SNAPSHOT_MIN_GAP_MINUTES=1;
@@ -2196,13 +2196,39 @@ async function advanceSnapshotLearning({rows,features,priceKey,sessionTag,target
     }
   }
 
-  const hasPrimaryComparison=primaryValid;
-  const hasBaselineEvidence=baselineActive;
+  // Reload / Drive hydration must never create a new baseline or erase an existing one.
+  // It reuses the persisted immediate-prior-day comparator and learned vector for the
+  // already-saved latest snapshot. This path is also used for an exact duplicate upload.
+  let restoredPrimaryEvidence=false;
+  let restoredBaselineEvidence=false;
+  const learned=ACC_CORR?.corr||{};
+  const hasLearnedVector=Object.keys(learned).length>0;
+
+  if(!primaryValid&&!baselineActive&&hasLearnedVector){
+    const retainedPrior=runtime.previousTradingDay;
+    const retainedMatched=retainedPrior
+      ?(currentSnapshot.symbols||[]).filter(symbol=>eligibleSet.has(symbol)&&retainedPrior.featureRows?.[symbol]).length
+      :0;
+
+    if(retainedPrior&&tradingDaysBetween(retainedPrior.sessionDate,stamp.sessionDate)===1&&retainedMatched>=100){
+      scoringFeatureRows=buildComparisonFeatureRows(retainedPrior,currentSnapshot,features);
+      restoredPrimaryEvidence=true;
+      if(!advance) note=`Restored prior-day scoring state: ${retainedPrior.sessionDate} → ${stamp.sessionDate} (${retainedMatched} matched)`;
+      else if(duplicate) note=`Duplicate snapshot ignored; restored prior-day scoring state (${retainedMatched} matched)`;
+    }else if(ACC_CORR.seedBaselineDate===stamp.sessionDate){
+      scoringFeatureRows=buildIntrinsicBaselineFeatureRows(currentSnapshot,features);
+      restoredBaselineEvidence=true;
+      if(!advance) note='Restored first-upload intrinsic baseline scoring state';
+      else if(duplicate) note='Duplicate snapshot ignored; restored intrinsic baseline scoring state';
+    }
+  }
+
+  const hasPrimaryComparison=primaryValid||restoredPrimaryEvidence;
+  const hasBaselineEvidence=baselineActive||restoredBaselineEvidence;
   const hasScoringEvidence=hasPrimaryComparison||hasBaselineEvidence;
   if(!hasScoringEvidence) scoringFeatureRows=buildComparisonFeatureRows(null,currentSnapshot,features);
 
   const targetCorr={};
-  const learned=ACC_CORR?.corr||{};
   features.forEach(feature=>{targetCorr[feature]=hasScoringEvidence?(learned[feature]??0):0;});
   if(ACC_CORR){ACC_CORR.laggedNote=note;FS.set(modeKey(CORR_STORE),ACC_CORR);}
   return {targetCorr,targetCorrToday,completedNow:hasPrimaryComparison?1:0,note,runtime,
@@ -5190,7 +5216,7 @@ async function hydrateSessionCSVsFromWorkspace(){
   }
   let scannerHydrated=false;
   if(scannerEntry?.file){
-    try{scannerHydrated=await processScannerUpload(scannerEntry.file,'stock');}
+    try{scannerHydrated=await processScannerUpload(scannerEntry.file,'stock',{restoreOnly:true});}
     catch(e){
       console.error('hydrateSessionCSVsFromWorkspace: ALL NSE parse failed',e);
       showToast('Stored ALL NSE.csv could not be loaded: '+(e?.message||e),6000,true);
@@ -5778,7 +5804,7 @@ function applySavedFiltersForMode(mode){
   }catch(e){}
   return ()=>ids.forEach(id=>{const el=document.getElementById(id);if(el&&prev[id]!=null)el.value=prev[id];});
 }
-async function processScannerUpload(scannerFile, mode){
+async function processScannerUpload(scannerFile, mode, options={}){
   if(!scannerFile) return false;
   const original=captureScannerRuntime();
   const restoreFilters=applySavedFiltersForMode(mode);
@@ -5805,12 +5831,16 @@ async function processScannerUpload(scannerFile, mode){
     const uploadSession=inputFileSessionDate(scannerFile);
     const isDuplicateSession=!!(SNAPSHOT_RUNTIME?.lastTag===sessionTag&&SNAPSHOT_RUNTIME?.latest?.sessionDate===uploadSession);
     window._lastScannerSessionTag=sessionTag;
-    ALL=await runEngine(raw,sessionTag,{advanceSnapshot:true,snapshotTimestamp:scannerFile.lastModified||Date.now()})||[];
+    const restoreOnly=options.restoreOnly===true;
+    ALL=await runEngine(raw,sessionTag,{
+      advanceSnapshot:!restoreOnly,
+      snapshotTimestamp:scannerFile.lastModified||Date.now()
+    })||[];
     enrichRowsWithNSEData(ALL);
     ALL.sort((a,b)=>b.rocketScore-a.rocketScore);
     const rcToday=getSessionDate(), rc=FS.get(modeKey(REC_COUNT_STORE,mode))||{};
     if(!rc[rcToday])rc[rcToday]={};
-    const countSeen=!isDuplicateSession&&isMarketHours();
+    const countSeen=!restoreOnly&&!isDuplicateSession&&isMarketHours();
     ALL.forEach(s=>{
       if(countSeen) rc[rcToday][s.symbol]=(rc[rcToday][s.symbol]||0)+1;
       s.seen=rc[rcToday][s.symbol]||0;
