@@ -91,10 +91,14 @@
 </div><!-- /dash -->
 <button class="go-top" id="goTop" onclick="window.scrollTo({top:0,behavior:'smooth'})" title="Go to top">▲</button>
 </div><!-- /app -->
-<!-- app.js is loaded normally. Ctrl+R revalidates it; no manual ?vNNN edits. -->
 
-<!-- app.js is loaded normally. Ctrl+R revalidates it; no manual ?vNNN edits. -->
-<script src="app.js"></script>
+<!-- Parser-time cache-proof loader. Keep this exact pattern; it loads the newest deployed app.js on every page load. -->
+<script>
+(function () {
+  var cacheKey = Date.now().toString(36);
+  document.write('<script src="app.js?cb=' + cacheKey + '"><\/script>');
+})();
+</script>
 
 </body>
 </html>
