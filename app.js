@@ -1,5 +1,5 @@
-const BUILD_TS='2026-06-22 19:12 IST'; // replaced at commit time with IST datetime
-const APP_VERSION=432; // Shared deployed version; increment once per released code change.
+const BUILD_TS='2026-06-24 09:30 IST'; // replaced at commit time with IST datetime
+const APP_VERSION=433; // Shared deployed version; increment once per released code change.
 const GOOGLE_DRIVE_CLIENT_ID='1015012642264-oi2nelv3v90k3d39r994a6nelgjs2a56.apps.googleusercontent.com'; // Public OAuth Web Client ID.
 const HARD_FILTER_SCHEMA='structural_tradeability_v2';
 const SNAPSHOT_MIN_GAP_MINUTES=1;
@@ -67,7 +67,7 @@ function isLooseNseSupportCsvName(name){
 
 function updateModeUI(){
   const brand=document.querySelector('.brand-tag');
-  if(brand) brand.textContent='Continuous Snapshot mRMR';
+  if(brand) brand.textContent='Prior-Day Primary mRMR';
   document.querySelectorAll('.currency-lbl').forEach(el=>{el.textContent='₹';});
   const minTurn=document.getElementById('fMinTurnover');
   if(minTurn){
@@ -94,11 +94,11 @@ const SCANNER_STORE='rs_filters';
 const SHARED_FILTER_STORE='rs_filters_shared';
 const ALL_STORE='rs_data';
 const CORR_STORE='rs_corr';
-const CORR_SCHEMA='snapshot_top10_binary_level_mrmr_v1';
+const CORR_SCHEMA='prior_trading_day_top10_1d_mrmr_v2';
 const ROCKET_TOP_FRACTION=0.10;
 const SNAPSHOT_HISTORY_DECAY=0.95;
 const SNAPSHOT_STATE_STORE='rs_snapshot_mrmr_v1';
-const SNAPSHOT_STATE_SCHEMA='continuous_snapshot_pair_v1';
+const SNAPSHOT_STATE_SCHEMA='prior_trading_day_primary_v2';
 const METH_STORE='rs_meth';
 const HOLD_STORE='rs_holdings';
 const ORDERS_STORE='rs_orders';
@@ -1901,195 +1901,176 @@ function spearman(xs,ys){
 }
 
 function emptySnapshotRuntime(){
-  return {schema:SNAPSHOT_STATE_SCHEMA,latest:null,completed:0,lastOutcome:null,lastTag:null};
-}
-function correlationFromMoments(m){
-  const n=m?.n||0;
-  if(n<30) return 0;
-  const d=Math.sqrt((n*m.sx2-m.sx*m.sx)*(n*m.sy2-m.sy*m.sy));
-  return d===0?0:(n*m.sxy-m.sx*m.sy)/d;
-}
-function accumulateSnapshotCorrelation(correlation, weight=1, featureMoments={}){
-  const prior=ACC_CORR?.corrSchema===CORR_SCHEMA?ACC_CORR:{corr:{},counts:{},moments:{},sessions:0,learnSessions:0,corrSchema:CORR_SCHEMA};
-  const corr={...prior.corr},counts={...prior.counts},moments={...(prior.moments||{})};
-  const obsWeight=isFinite(weight)&&weight>0?weight:1;
-  Object.entries(correlation||{}).forEach(([feature,value])=>{
-    if(value==null||!isFinite(value)) return;
-    const incoming=featureMoments[feature];
-    if(!incoming) return;
-    const old=moments[feature]||{n:0,sx:0,sy:0,sxy:0,sx2:0,sy2:0};
-    const next={};
-    for(const key of ['n','sx','sy','sxy','sx2','sy2']){
-      next[key]=(old[key]||0)*SNAPSHOT_HISTORY_DECAY+(incoming[key]||0)*obsWeight;
-    }
-    moments[feature]=next;
-    counts[feature]=next.n;
-    corr[feature]=correlationFromMoments(next);
-  });
-  const sessions=(prior.learnSessions??prior.sessions??0)+1;
-  const weightedSessions=(prior.weightedSessions||0)+obsWeight;
-  ACC_CORR={...prior,corr,counts,moments,sessions,learnSessions:sessions,weightedSessions,corrSchema:CORR_SCHEMA,lastUpdated:new Date().toISOString()};
+  return {schema:SNAPSHOT_STATE_SCHEMA,latest:null,previousTradingDay:null,completed:0,lastOutcome:null,lastTag:null};
 }
 function buildDecodedSnapshot({stamp,symbols,prices,featureRows,features,sessionTag}){
   return {...stamp,symbols:[...symbols],prices,featureRows,featureCols:[...features],features:null,sessionTag:sessionTag||null};
 }
-function snapshotGapBucket(minutes){
-  const gap=Math.max(SNAPSHOT_MIN_GAP_MINUTES,Math.round(Number(minutes)||0));
-  const step=gap<=30?5:(gap<=120?15:30);
-  return `${Math.max(SNAPSHOT_MIN_GAP_MINUTES,Math.round(gap/step)*step)}m`;
+function snapshotCorrelationToCurrentTarget(previous,currentEligibleSymbols,currentTargetSymbols,features){
+  // Every current live-eligible symbol is a 0/1 observation; targetSymbols are today's top 10% by 1D change.
+  const eligible=currentEligibleSymbols instanceof Set?currentEligibleSymbols:new Set(currentEligibleSymbols||[]);
+  const correlation={},matchedSymbols=[];
+  for(const symbol of previous.symbols||[]){
+    if(eligible.has(symbol)) matchedSymbols.push(symbol);
+  }
+  for(const feature of features){
+    const xs=[],ys=[];
+    matchedSymbols.forEach(symbol=>{
+      const value=previous.featureRows?.[symbol]?.[feature];
+      if(value==null||!isFinite(value)) return;
+      xs.push(value); ys.push(currentTargetSymbols.has(symbol)?1:0);
+    });
+    correlation[feature]=pearson(xs,ys);
+  }
+  return {correlation,matched:matchedSymbols.length};
 }
-function correlationQuality(correlation){
-  const vals=Object.values(correlation||{}).map(v=>Math.abs(Number(v))).filter(v=>isFinite(v)&&v>0).sort((a,b)=>b-a);
-  if(!vals.length) return 0;
-  return mean(vals.slice(0,Math.min(20,vals.length)));
+function snapshotPriceMoves(previous,current){
+  const currentIndex=new Map((current.symbols||[]).map((symbol,index)=>[symbol,index]));
+  const out={};
+  (previous.symbols||[]).forEach((symbol,index)=>{
+    const ci=currentIndex.get(symbol);
+    const prior=previous.prices?.[index], now=ci==null?null:current.prices?.[ci];
+    if(prior>0&&now>0) out[symbol]=+(((now/prior)-1)*100).toFixed(2);
+  });
+  return out;
 }
-function getGapEvidenceWeight(elapsedMinutes){
-  const stats=ACC_CORR?.gapStats||{};
-  const rec=stats[snapshotGapBucket(elapsedMinutes)];
-  const mature=Object.values(stats).filter(s=>s&&s.samples>=SNAPSHOT_GAP_MIN_QUALITY_SAMPLES&&isFinite(s.meanQuality));
-  if(!rec||rec.samples<SNAPSHOT_GAP_MIN_QUALITY_SAMPLES||mature.length<2) return 1;
-  const totalSamples=mature.reduce((sum,s)=>sum+s.samples,0)||1;
-  const globalQuality=mature.reduce((sum,s)=>sum+(s.meanQuality*s.samples),0)/totalSamples;
-  if(!isFinite(globalQuality)||globalQuality<=0) return 1;
-  return clampNum(rec.meanQuality/globalQuality,SNAPSHOT_GAP_WEIGHT_MIN,SNAPSHOT_GAP_WEIGHT_MAX);
+function blendCorrelation(currentValue,historicalValue,currentWeight=0.70){
+  const c=isFinite(currentValue)?currentValue:null;
+  const h=isFinite(historicalValue)?historicalValue:null;
+  if(c==null) return h??0;
+  if(h==null) return c;
+  return currentWeight*c+(1-currentWeight)*h;
 }
-function recordGapQuality(elapsedMinutes,quality,appliedWeight){
-  if(!ACC_CORR||!isFinite(quality)) return;
-  const bucket=snapshotGapBucket(elapsedMinutes);
-  const gapStats={...(ACC_CORR.gapStats||{})};
-  const prev=gapStats[bucket]||{bucket,samples:0,meanQuality:0,meanWeight:0,lastElapsedMinutes:null};
-  const samples=(prev.samples||0)+1;
-  gapStats[bucket]={
-    bucket,samples,
-    meanQuality:prev.samples?prev.meanQuality+(quality-prev.meanQuality)/samples:quality,
-    meanWeight:prev.samples?prev.meanWeight+(appliedWeight-prev.meanWeight)/samples:appliedWeight,
-    lastElapsedMinutes:elapsedMinutes,
-  };
-  const elapsedCount=(ACC_CORR.elapsedCount||0)+1;
-  const elapsedTotalMinutes=(ACC_CORR.elapsedTotalMinutes||0)+elapsedMinutes;
-  ACC_CORR={...ACC_CORR,gapStats,elapsedCount,elapsedTotalMinutes,lastUpdated:new Date().toISOString()};
+function updateCorrelationEMA(storeKey,incoming,weightCurrent=0.70){
+  const prior=ACC_CORR?.[storeKey]||{};
+  const next={...prior};
+  Object.entries(incoming||{}).forEach(([feature,value])=>{
+    if(value==null||!isFinite(value)) return;
+    next[feature]=blendCorrelation(value,prior[feature],weightCurrent);
+  });
+  ACC_CORR={...(ACC_CORR||{}),[storeKey]:next};
+  return next;
 }
 function getAverageLearningHorizon(){
   const count=Number(ACC_CORR?.elapsedCount||0);
   const total=Number(ACC_CORR?.elapsedTotalMinutes||0);
   return count>0&&isFinite(total)?{minutes:total/count,count}:null;
 }
-function computeSnapshotPairCorrelation(previous,current,features){
-  const currentIndex=new Map((current.symbols||[]).map((symbol,index)=>[symbol,index]));
-  const ranked=(previous.symbols||[]).map((symbol,index)=>{
-    const ci=currentIndex.get(symbol),priorPrice=previous.prices?.[index],currentPrice=ci==null?null:current.prices?.[ci];
-    return {symbol,value:priorPrice>0&&currentPrice>0?((currentPrice/priorPrice)-1)*100:null};
-  }).filter(item=>item.value!=null&&isFinite(item.value)).sort((a,b)=>b.value-a.value);
-  const rocketCount=Math.max(1,Math.ceil(ranked.length*ROCKET_TOP_FRACTION));
-  const rocketSymbols=new Set(ranked.slice(0,rocketCount).map(item=>item.symbol));
-  const eligibleSymbols=new Set(ranked.map(item=>item.symbol));
-  const correlation={},featureMoments={};
-  for(const feature of features){
-    const xs=[],target=[];
-    (previous.symbols||[]).forEach(symbol=>{
-      if(!currentIndex.has(symbol)) return;
-      const value=previous.featureRows?.[symbol]?.[feature];
-      if(value==null||!isFinite(value)||!eligibleSymbols.has(symbol)) return;
-      xs.push(value);target.push(rocketSymbols.has(symbol)?1:0);
-    });
-    correlation[feature]=pearson(xs,target);
-    const moments={n:xs.length,sx:0,sy:0,sxy:0,sx2:0,sy2:0};
-    for(let i=0;i<xs.length;i++){
-      const x=xs[i],y=target[i];
-      moments.sx+=x;moments.sy+=y;moments.sxy+=x*y;moments.sx2+=x*x;moments.sy2+=y*y;
-    }
-    featureMoments[feature]=moments;
-  }
-  return {
-    correlation,featureMoments,ranked,rocketCount,rocketSymbols,
-    elapsedMinutes:Math.round((current.timestamp-previous.timestamp)/60000),
-    sourceTimestamp:previous.timestamp,
-  };
-}
-async function advanceSnapshotLearning({rows,features,priceKey,sessionTag,advance=true,snapshotTimestamp=Date.now()}){
+async function advanceSnapshotLearning({rows,features,priceKey,sessionTag,targetSymbols,eligibleSymbols,advance=true,snapshotTimestamp=Date.now()}){
   if(!SNAPSHOT_RUNTIME||SNAPSHOT_RUNTIME.schema!==SNAPSHOT_STATE_SCHEMA) SNAPSHOT_RUNTIME=emptySnapshotRuntime();
-  if(ACC_CORR?.corrSchema!==CORR_SCHEMA) ACC_CORR={corr:{},counts:{},sessions:0,learnSessions:0,corrSchema:CORR_SCHEMA};
+  if(ACC_CORR?.corrSchema!==CORR_SCHEMA) ACC_CORR={corr:{},intradayCorr:{},sessions:0,learnSessions:0,corrSchema:CORR_SCHEMA};
   const runtime=SNAPSHOT_RUNTIME;
-  const hadPriorCorr=(ACC_CORR?.learnSessions??ACC_CORR?.sessions??0)>0;
-  const targetCorrToday=Object.fromEntries(features.map(f=>[f,null]));
-  let completedNow=0;
-  let intervalMoves={};
-  let intervalElapsedMinutes=null;
-  let note='Waiting for the first valid snapshot horizon';
   const stamp=snapshotStamp(snapshotTimestamp);
-  const duplicate=!!sessionTag&&runtime.lastTag===sessionTag&&runtime.latest?.sessionDate===stamp.sessionDate;
+  const targetSet=targetSymbols instanceof Set?targetSymbols:new Set(targetSymbols||[]);
+  const eligibleSet=eligibleSymbols instanceof Set?eligibleSymbols:new Set(eligibleSymbols||[]);
+  const targetCorrToday=Object.fromEntries(features.map(f=>[f,null]));
   const cleanRows=rows.filter(row=>row.symbol&&priceKey&&row[priceKey]>0);
   const symbols=cleanRows.map(row=>row.symbol);
   const prices=Float32Array.from(cleanRows,row=>row[priceKey]);
   const featureRows=Object.fromEntries(cleanRows.map(row=>[row.symbol,Object.fromEntries(features.map(f=>[f,row[f]??null]))]));
   const currentSnapshot=buildDecodedSnapshot({stamp,symbols,prices,featureRows,features,sessionTag});
+  let note='Waiting for a valid immediately previous trading-day snapshot';
+  let primaryCorr=null, intradayCurrent=null, intervalMoves={};
+  let primarySnapshot=null;
+  let primaryValid=false;
+  let intradayUpdated=false;
+  const duplicate=!!sessionTag&&runtime.lastTag===sessionTag&&runtime.latest?.sessionDate===stamp.sessionDate;
 
   if(!advance){
-    note='Rankings refreshed without advancing the snapshot sequence';
+    note='Rankings refreshed without advancing snapshot learning';
   }else if(duplicate){
-    note='Duplicate snapshot ignored; predictions and learning were not advanced';
+    note='Duplicate snapshot ignored; learning was not advanced';
   }else if(!stamp.baselineEligible){
-    note='Outside NSE snapshot hours; rankings refreshed without creating a learning baseline';
+    note='Outside NSE snapshot hours; no learning snapshot saved';
   }else{
-    const previous=runtime.latest;
-    const stale=previous&&stamp.timestamp<=previous.timestamp;
-    const validPairs=!stale&&stamp.inSession&&isValidSnapshotTransition(previous,stamp)?[previous]:[];
-    if(validPairs.length){
-      const pairSums={},pairCounts={};
-      const pairs=validPairs.map(prev=>computeSnapshotPairCorrelation(prev,currentSnapshot,features));
-      const immediatePair=pairs.reduce((best,pair)=>!best||pair.elapsedMinutes<best.elapsedMinutes?pair:best,null);
-      intervalElapsedMinutes=immediatePair?.elapsedMinutes??null;
-      intervalMoves=Object.fromEntries((immediatePair?.ranked||[]).map(item=>[item.symbol,+item.value.toFixed(2)]));
-      pairs.forEach(pair=>{
-        pair.quality=correlationQuality(pair.correlation);
-        pair.weight=getGapEvidenceWeight(pair.elapsedMinutes);
-        accumulateSnapshotCorrelation(pair.correlation,pair.weight,pair.featureMoments);
-        recordGapQuality(pair.elapsedMinutes,pair.quality,pair.weight);
-        features.forEach(feature=>{
-          const value=pair.correlation[feature];
-          if(value==null||!isFinite(value)) return;
-          pairSums[feature]=(pairSums[feature]||0)+value;
-          pairCounts[feature]=(pairCounts[feature]||0)+1;
-        });
+    const latest=runtime.latest;
+    const stale=latest&&stamp.timestamp<=latest.timestamp;
+    // The primary comparator is ONLY the immediately previous NSE trading day. Same-day data may refine it later, never replace it.
+    if(runtime.previousTradingDay&&tradingDaysBetween(runtime.previousTradingDay.sessionDate,stamp.sessionDate)===1){
+      primarySnapshot=runtime.previousTradingDay;
+    }else if(latest&&tradingDaysBetween(latest.sessionDate,stamp.sessionDate)===1){
+      primarySnapshot=latest;
+    }
+    const primaryPair=primarySnapshot&&stamp.inSession&&targetSet.size>0
+      ?snapshotCorrelationToCurrentTarget(primarySnapshot,eligibleSet,targetSet,features):null;
+    // Preserve the older lagged-learning quality floor: fewer than 100 matched live-eligible stocks stays WARMUP.
+    primaryValid=!!primaryPair&&primaryPair.matched>=100;
+    if(primaryValid){
+      primaryCorr=primaryPair.correlation;
+      intervalMoves=snapshotPriceMoves(primarySnapshot,currentSnapshot);
+      features.forEach(f=>{targetCorrToday[f]=primaryCorr[f]??null;});
+    }
+
+    // Same-day comparisons are secondary accumulated context only. They never create a score and never rescue a missing primary comparator.
+    if(!stale&&latest&&latest.sessionDate===stamp.sessionDate&&stamp.inSession){
+      const gap=(stamp.timestamp-latest.timestamp)/60000;
+      if(gap>=SNAPSHOT_MIN_GAP_MINUTES&&targetSet.size>0){
+        const intradayPair=snapshotCorrelationToCurrentTarget(latest,eligibleSet,targetSet,features);
+        if(intradayPair.matched>=100){
+          intradayCurrent=intradayPair.correlation;
+          updateCorrelationEMA('intradayCorr',intradayCurrent,0.70);
+          intradayUpdated=true;
+        }
+      }
+    }
+
+    if(primaryValid){
+      const intradayHistory=ACC_CORR.intradayCorr||{};
+      const historical=ACC_CORR.corr||{};
+      const currentEvidence={};
+      const finalCorr={};
+      features.forEach(f=>{
+        const primary=primaryCorr[f];
+        const secondary=intradayHistory[f];
+        // Direct previous-trading-day evidence is 70%; accumulated short-horizon same-day evidence is only 30%.
+        currentEvidence[f]=isFinite(secondary)?blendCorrelation(primary,secondary,0.70):primary;
+        // User-selected reverse EMA: current evidence 70%, historical memory 30%.
+        finalCorr[f]=blendCorrelation(currentEvidence[f],historical[f],0.70);
       });
-      features.forEach(feature=>{if(pairCounts[feature]) targetCorrToday[feature]=pairSums[feature]/pairCounts[feature];});
-      completedNow=pairs.length;
-      runtime.completed=(runtime.completed||0)+completedNow;
-      const displayPair=pairs.reduce((best,pair)=>!best||pair.elapsedMinutes>best.elapsedMinutes?pair:best,null);
-      const elapsed=pairs.map(pair=>pair.elapsedMinutes),minElapsed=Math.min(...elapsed),maxElapsed=Math.max(...elapsed);
-      const weights=pairs.map(pair=>pair.weight).filter(v=>isFinite(v));
-      runtime.lastOutcome={sourceTimestamp:displayPair.sourceTimestamp,completedAt:stamp.timestamp,elapsedMinutes:displayPair.elapsedMinutes,
-        minElapsedMinutes:minElapsed,maxElapsedMinutes:maxElapsed,forwardPairs:pairs.length,
-        minGapWeight:weights.length?Math.min(...weights):1,maxGapWeight:weights.length?Math.max(...weights):1,
-        matched:displayPair.ranked.length,rockets:displayPair.rocketCount};
-      note=`Learned what the top ${Math.round(ROCKET_TOP_FRACTION*100)}% (${displayPair.rocketCount}) interval rockets looked like ${displayPair.elapsedMinutes} min earlier across ${displayPair.ranked.length} stocks`;
+      const primaryElapsed=Math.round((stamp.timestamp-primarySnapshot.timestamp)/60000);
+      ACC_CORR={...ACC_CORR,corr:finalCorr,sessions:(ACC_CORR.sessions||0)+1,learnSessions:(ACC_CORR.learnSessions||0)+1,
+        elapsedCount:(ACC_CORR.elapsedCount||0)+1,elapsedTotalMinutes:(ACC_CORR.elapsedTotalMinutes||0)+primaryElapsed,
+        corrSchema:CORR_SCHEMA,lastUpdated:new Date().toISOString(),lastPrimaryDate:primarySnapshot.sessionDate,lastCurrentDate:stamp.sessionDate};
+      runtime.completed=(runtime.completed||0)+1;
+      runtime.lastOutcome={sourceTimestamp:primarySnapshot.timestamp,completedAt:stamp.timestamp,elapsedMinutes:primaryElapsed,
+        matched:Object.keys(intervalMoves).length,rockets:targetSet.size,primaryDate:primarySnapshot.sessionDate,currentDate:stamp.sessionDate,
+        intradayUpdated};
+      note=`Primary: ${primarySnapshot.sessionDate} → ${stamp.sessionDate} current 1D top ${Math.round(ROCKET_TOP_FRACTION*100)}% target (${primaryPair.matched} matched)${intradayUpdated?' · same-day context refreshed':''}`;
+    }else if(primaryPair&&primaryPair.matched<100){
+      note=`WARMUP: immediate prior-day snapshot matched only ${primaryPair.matched} live-eligible stocks; 100 required`;
     }else if(stale){
-      note='Older or same-time snapshot ignored; the current baseline was preserved';
-    }else if(!stamp.inSession){
-      note='Premarket baseline saved; live recommendations will start after the next market snapshot';
-    }else if(previous){
-      note=previous.sessionDate!==stamp.sessionDate
-        ?'New NSE session baseline; overnight gap excluded from snapshot learning'
-        :'Snapshot arrived too soon; baseline refreshed without counting a learning pair';
+      note='Older or same-time snapshot ignored; baseline preserved';
     }else{
-      note='First upload baseline saved; recommendations will start after the next upload';
+      const latestDate=latest?.sessionDate||null;
+      if(latestDate&&latestDate!==stamp.sessionDate&&tradingDaysBetween(latestDate,stamp.sessionDate)!==1){
+        note='WARMUP: immediate previous trading-day snapshot is missing; same-day data cannot score';
+      }else if(latestDate===stamp.sessionDate){
+        note='WARMUP: same-day snapshot stored as secondary context only; immediate prior-day comparison is required';
+      }else{
+        note='WARMUP: first baseline saved; immediate previous trading-day comparison is required';
+      }
     }
 
     if(!stale){
-        runtime.latest=currentSnapshot;
-        runtime.lastTag=sessionTag||null;
-        window._snapshotRuntimeDirty=true;
+      // When the trading date advances, preserve only a direct prior-day latest snapshot. A skipped normal trading day clears the primary comparator.
+      if(latest&&latest.sessionDate!==stamp.sessionDate){
+        runtime.previousTradingDay=tradingDaysBetween(latest.sessionDate,stamp.sessionDate)===1?latest:null;
+      }
+      runtime.latest=currentSnapshot;
+      runtime.lastTag=sessionTag||null;
+      window._snapshotRuntimeDirty=true;
     }
   }
 
+  const hasPrimaryComparison=primaryValid;
   const targetCorr={};
   const historical=ACC_CORR?.corr||{};
-  features.forEach(feature=>{targetCorr[feature]=historical[feature]??0;});
-  if(ACC_CORR){ACC_CORR.lastDate=stamp.sessionDate;ACC_CORR.laggedNote=note;FS.set(modeKey(CORR_STORE),ACC_CORR);}
-  return {targetCorr,targetCorrToday,completedNow,note,runtime,
-    hadPriorCorr,
-    intervalMoves,intervalElapsedMinutes,
-    freshSignalCount:Object.values(targetCorrToday).filter(v=>v!=null&&isFinite(v)&&Math.abs(v)>0.0001).length};
+  features.forEach(feature=>{targetCorr[feature]=hasPrimaryComparison?(historical[feature]??0):0;});
+  if(ACC_CORR){ACC_CORR.laggedNote=note;FS.set(modeKey(CORR_STORE),ACC_CORR);}
+  return {targetCorr,targetCorrToday,completedNow:hasPrimaryComparison?1:0,note,runtime,
+    hadPriorCorr:(ACC_CORR?.learnSessions||0)>0,hasPrimaryComparison,primaryCorr,intradayCurrent,
+    intervalMoves,intervalElapsedMinutes:primarySnapshot?Math.round((stamp.timestamp-primarySnapshot.timestamp)/60000):null,
+    freshSignalCount:hasPrimaryComparison?Object.values(targetCorrToday).filter(v=>v!=null&&isFinite(v)&&Math.abs(v)>0.0001).length:0};
 }
 
 // ── Engine ──
@@ -2272,8 +2253,7 @@ async function runEngine(raw, sessionTag, options={}){
   const learningUniverse=parsed.filter(d=>d.symbol&&(!K.price||d[K.price]!==0));
   const FEATS_UNIQUE=[...new Set(FEATS)];
   FEATS.length=0;FEATS.push(...FEATS_UNIQUE);
-  const snapshotLearning=await advanceSnapshotLearning({rows:learningUniverse,features:FEATS,priceKey:K.price,
-    sessionTag,advance:advanceSnapshot,snapshotTimestamp:options.snapshotTimestamp||Date.now()});
+  let snapshotLearning=null; // populated after current tradeability filters create today’s top-10% label
 
   // ── Recommendation filters ──
   // These rows remain in learningUniverse and snapshots; only live eligibility is filtered.
@@ -2320,6 +2300,17 @@ async function runEngine(raw, sessionTag, options={}){
     d._filterBucket='';
     return true;
   });
+  // Current-day target: the top 10% of live-eligible stocks by 1D price change.
+  // This is deliberately calculated only after current tradeability exclusions.
+  const targetRanked=filtered
+    .map((d,i)=>({i,value:K.price_change?d[K.price_change]:null}))
+    .filter(x=>x.value!=null&&isFinite(x.value))
+    .sort((a,b)=>b.value-a.value);
+  const targetCount=Math.max(1,Math.floor(targetRanked.length*ROCKET_TOP_FRACTION));
+  const currentTop10Symbols=new Set(targetRanked.slice(0,targetCount).map(x=>filtered[x.i].symbol));
+  snapshotLearning=await advanceSnapshotLearning({rows:learningUniverse,features:FEATS,priceKey:K.price,
+    sessionTag,targetSymbols:currentTop10Symbols,eligibleSymbols:new Set(filtered.map(d=>d.symbol)),advance:advanceSnapshot,snapshotTimestamp:options.snapshotTimestamp||Date.now()});
+
   // Expose current full-universe values for outcome and diagnostics only.
   window._lastEngineFeats = FEATS;
   window._lastParsedFiltered = filtered;
@@ -2329,9 +2320,10 @@ async function runEngine(raw, sessionTag, options={}){
   const targetCorrToday=snapshotLearning.targetCorrToday;
   const freshSignalCount=snapshotLearning.freshSignalCount;
   const currentUploadLearned=snapshotLearning.completedNow>0;
-  const hasRecommendationEvidence=snapshotLearning.hadPriorCorr||currentUploadLearned;
-  const useFreshCorr=false;
-  const scoringSource=currentUploadLearned?'latest_completed_snapshot_evidence':'accumulated_snapshot_history';
+  // Strict gate: same-day evidence and historical memory never create a tradable score without today's direct prior-trading-day comparison.
+  const hasRecommendationEvidence=!!snapshotLearning.hasPrimaryComparison;
+  const useFreshCorr=true;
+  const scoringSource=hasRecommendationEvidence?'immediate_prior_trading_day_primary':'warmup_missing_immediate_prior_trading_day';
   const laggedNote=snapshotLearning.note;
   const recOutcomeSummary=getRecommendationOutcomeSummary();
   const entryOutcomeSummary=getExecutedEntryOutcomeSummary();
@@ -2342,27 +2334,20 @@ async function runEngine(raw, sessionTag, options={}){
   const withPC=filtered.map((d,i)=>({i,pc:K.price_change?d[K.price_change]:null})).filter(x=>x.pc!==null);
   withPC.sort((a,b)=>b.pc-a.pc);
 
+  // Older mRMR redundancy rule: average absolute Pearson correlation across all peer features.
   const interCorr={};
-  const redundancySampleMax=600;
-  const redundancyRows=learningUniverse.length<=redundancySampleMax
-    ? learningUniverse
-    : Array.from({length:redundancySampleMax},(_,i)=>learningUniverse[Math.floor(i*(learningUniverse.length-1)/(redundancySampleMax-1))]);
   for(let a=0;a<FEATS.length;a++)for(let b=a+1;b<FEATS.length;b++){
     const f1=FEATS[a],f2=FEATS[b];
-    const r=spearman(redundancyRows.map(d=>d[f1]),redundancyRows.map(d=>d[f2]));
+    const r=pearson(learningUniverse.map(d=>d[f1]),learningUniverse.map(d=>d[f2]));
     interCorr[f1+'|'+f2]=r;interCorr[f2+'|'+f1]=r;
   }
-
   const mrmr={};
   for(const f of FEATS){
     const rel=Math.abs(targetCorr[f])||0;
-    const strongestPeers=FEATS.filter(g=>g!==f)
-      .map(g=>Math.abs(interCorr[f+'|'+g]||0))
-      .sort((a,b)=>b-a)
-      .slice(0,10);
-    const red=mean(strongestPeers)||0;
-    const baseScore=rel/(1+red);
-    mrmr[f]={rel,red,baseScore,reliability:1,score:baseScore,accountability:null};
+    const peers=FEATS.filter(g=>g!==f).map(g=>Math.abs(interCorr[f+'|'+g]||0));
+    const red=mean(peers)||0;
+    const score=rel/(1+red);
+    mrmr[f]={rel,red,baseScore:score,reliability:1,score,accountability:null};
   }
   const totalMRMR=FEATS.reduce((s,f)=>s+mrmr[f].score,0)||1;
   const weights={};
@@ -2372,18 +2357,18 @@ async function runEngine(raw, sessionTag, options={}){
   const pctls={};
   for(const f of FEATS)pctls[f]=pctRank(filtered.map(d=>d[f]));
   const results=filtered.map((d,idx)=>{
-    let rawScore=0,maxW=0;
+    let rawScore=0;
     for(const f of FEATS){
       const w=weights[f],p=pctls[f][idx];
-      if(p===null) continue;
-      maxW+=w;
-      rawScore+=w*(targetCorr[f]>=0?p:(1-p));
+      // Older rule: missing feature value contributes the 35th percentile instead of disappearing from the denominator.
+      const percentile=p===null?0.35:p;
+      rawScore+=w*(targetCorr[f]>=0?percentile:(1-percentile));
     }
-    const rawFinal=hasRecommendationEvidence&&maxW>0?rawScore/maxW:0;
-    const mrmrScore=Math.round(rawFinal*100*10)/10;
+    const mrmrScore=hasRecommendationEvidence?Math.round(rawScore*1000)/10:0;
     const currentFeatures=Object.fromEntries(FEATS.map(f=>[f,d[f]??null]));
+    // Outcome learning remains visible as confidence evidence only. It never alters Rocket Score or rank.
     const outcomeReliability=hasRecommendationEvidence?getOutcomeReliabilityAdjustment(currentFeatures,outcomeReliabilityModel,weights):{delta:0,confidence:0,matched:0};
-    const score=hasRecommendationEvidence?Math.round(clampNum(mrmrScore+outcomeReliability.delta,0,100)*10)/10:0;
+    const score=mrmrScore;
 
     const vol=(K.volume?d[K.volume]:null);
     const flags=[];
@@ -2392,10 +2377,6 @@ async function runEngine(raw, sessionTag, options={}){
     // Surveillance rules flagging this stock — used to show a warning badge in the table
     const _survRules=NSE_SURV[d.symbol]||null;
     const _isSurv=Array.isArray(_survRules)&&_survRules.length>0;
-
-    let tier;
-    if(!hasRecommendationEvidence)tier='WARMUP';
-    else if(score>=78)tier='S';else if(score>=64)tier='A';else if(score>=50)tier='B';else if(score>=38)tier='C';else tier='D';
 
     return{
       symbol:d.symbol, name:d.name,
@@ -2419,7 +2400,7 @@ async function runEngine(raw, sessionTag, options={}){
       pctFrom52wHigh:d.pct_from_52w_high,
       rocketScore:score, mrmrScore, outcomeAdj:outcomeReliability.delta,
       outcomeReliability:outcomeReliability.confidence, outcomeEvidence:outcomeReliability.matched,
-      tier, flags,
+      flags,
       isSurv:_isSurv, survRules:_survRules,
       // Calculated SL/Target per stock — adaptive from tradebook if available
       slPct: (()=>{
@@ -2457,27 +2438,26 @@ async function runEngine(raw, sessionTag, options={}){
   const _filtSet=new Set(filtered.map(d=>d.symbol));
   parsed.forEach(d=>{
     if(_filtSet.has(d.symbol))return;
-    let rs=0,mw=0;
+    let rs=0;
     for(const f of FEATS){
       const w=weights[f],v=d[f];
-      if(v==null||isNaN(v))continue;
-      const arr=_sf[f];if(!arr.length)continue;
-      let lo=0,hi=arr.length;
-      while(lo<hi){const mid=(lo+hi)>>1;if(arr[mid]<=v)lo=mid+1;else hi=mid;}
-      const rank=arr.length>1?Math.min(1,Math.max(0,(lo-0.5)/(arr.length-1))):0.5;
-      mw+=w; rs+=w*(targetCorr[f]>=0?rank:(1-rank));
+      const arr=_sf[f];
+      let rank=0.35;
+      if(v!=null&&!isNaN(v)&&arr.length){
+        let lo=0,hi=arr.length;
+        while(lo<hi){const mid=(lo+hi)>>1;if(arr[mid]<=v)lo=mid+1;else hi=mid;}
+        rank=arr.length>1?Math.min(1,Math.max(0,(lo-0.5)/(arr.length-1))):0.5;
+      }
+      rs+=w*(targetCorr[f]>=0?rank:(1-rank));
     }
-    const mrmrScore=hasRecommendationEvidence&&mw>0?Math.round(rs/mw*1000)/10:0;
-    const currentFeatures=Object.fromEntries(FEATS.map(f=>[f,d[f]??null]));
-    const outcomeReliability=hasRecommendationEvidence?getOutcomeReliabilityAdjustment(currentFeatures,outcomeReliabilityModel,weights):{delta:0};
-    SCORE_MAP[d.symbol]=hasRecommendationEvidence?Math.round(clampNum(mrmrScore+outcomeReliability.delta,0,100)*10)/10:0;
+    SCORE_MAP[d.symbol]=hasRecommendationEvidence?Math.round(rs*1000)/10:0;
   });
   parsed.forEach(d=>{d.rocketScore=SCORE_MAP[d.symbol]??null;});
   ENGINE_DATA={targetCorr,targetCorrToday,mrmr,weights,features:FEATS,labels:LABELS,top10Feats,accSessions:ACC_CORR?.sessions||0,laggedNote:laggedNote||'',
     marketBreadth:marketBreadth,
     recommendationFeedback,executedEntryFeedback,
-    outcomeScoreOverlay:{active:outcomeReliabilityModel.active,samples:outcomeReliabilityModel.samples.length,features:outcomeReliabilityModel.features.length,maxAdjustment:OUTCOME_SCORE_ADJ_MAX},
-    scoringModel:'snapshot_top10_binary_level_mrmr',
+    outcomeScoreOverlay:{active:outcomeReliabilityModel.active,samples:outcomeReliabilityModel.samples.length,features:outcomeReliabilityModel.features.length,maxAdjustment:0,mode:'confidence_badge_only'},
+    scoringModel:'prior_trading_day_current_1d_top10_mrmr',
     useFreshCorr, hasRecommendationEvidence, currentUploadLearned, freshSignalCount,
     scoringSource,
     useAccCorr: snapshotLearning.hadPriorCorr,
@@ -2666,7 +2646,7 @@ function getSameDayExitOpportunitySummary(){
 }
 
 function renderStats(){
-  const t=ALL.length,sc=ALL.filter(s=>s.tier==='S').length,ac=ALL.filter(s=>s.tier==='A').length;
+  const t=ALL.length;
   const bull=ALL.filter(s=>(s.priceChange||0)>0).length;
   const totalParsed=ENGINE_DATA?.totalParsed||t;
   const top=ALL[0];
@@ -3837,13 +3817,13 @@ function _renderMethodologyInner(){
     </nav>
     <div id="meth-hf-wrap">${hardFiltersHTML}</div>
     <div id="meth-breadth">${breadthCardHTML}</div>
-    <h3 id="meth-engine" style="margin-top:18px">Scoring Engine — Continuous Learning mRMR</h3>
-    <p id="mrmrLearningModeNote"><strong>Current learning mode:</strong> rolling prior-snapshot level mRMR. At each new upload, the top 10% of stocks by actual snapshot-to-snapshot return are labelled rockets. The engine learns what those stocks looked like in the immediately preceding snapshot, accumulates that evidence with 5% recency decay, and scores the current feature levels for the next upload. Market breadth is context only.</p>
+    <h3 id="meth-engine" style="margin-top:18px">Scoring Engine — Prior-Day Primary mRMR</h3>
+    <p id="mrmrLearningModeNote"><strong>Current learning mode:</strong> The current top 10% of live-eligible stocks by 1D change are the target. A valid snapshot from the immediately previous trading day provides the mandatory primary comparison. Same-day snapshots only provide secondary accumulated context and never create or rescue a score.</p>
     <div class="m-grid">
-      <div class="m-card"><h4>Learning Target</h4><p>For each completed interval, the highest-returning 10% of matched stocks receive a rocket label of 1 and all other matched stocks receive 0. Feature values come strictly from the earlier snapshot.</p></div>
-      <div class="m-card"><h4>📡 How the Engine Learns</h4><p>N→N+1 learns which feature levels at N distinguished the rockets observed at N+1. N+1→N+2 adds another batch, and so on. Historical feature correlations accumulate rather than being replaced, with newer transitions receiving gradually more influence.</p></div>
-      <div class="m-card"><h4>Outcome Self-Correction</h4><p>${feedbackText} Faster rocket conversions and profitable executed-entry peaks reward their feature patterns; failures and adverse outcomes penalise them.</p></div>
-      <div class="m-card"><h4>Feature Self-Correction</h4><p>Features that repeatedly separate future rockets from non-rockets strengthen; one-off relationships fade as more transitions arrive. mRMR separately measures current feature-to-feature rank correlation so highly redundant indicators cannot cast duplicate votes.</p></div>
+      <div class="m-card"><h4>Learning Target</h4><p>The current top 10% by 1D change receive label 1. Features from the immediately previous trading-day snapshot are the mandatory primary predictor set; missing that direct prior-day snapshot keeps the scanner in WARMUP.</p></div>
+      <div class="m-card"><h4>📡 How the Engine Learns</h4><p>Each current upload compares today’s 1D top-10% target with the immediately previous trading day’s feature snapshot. That direct comparison has 70% of fresh evidence; accumulated same-day snapshots have 30%. Final correlation then uses 70% fresh evidence and 30% historical memory.</p></div>
+      <div class="m-card"><h4>Outcome Self-Correction</h4><p>${feedbackText} Outcome evidence is displayed as confidence context only. It does not add or subtract points from Rocket Score.</p></div>
+      <div class="m-card"><h4>Feature Self-Correction</h4><p>Features that repeatedly separate future rockets from non-rockets strengthen; one-off relationships fade as more transitions arrive. mRMR uses average absolute Pearson correlation across all feature peers so redundant indicators cannot cast duplicate votes.</p></div>
       <div class="m-card"><h4>🎯 Max 1D Filter</h4><p>Set <em>Max 1D %</em> in the filter bar to hide stocks that have already moved too much today (default 5%). Entry-ceiling filtering has been removed; strong candidates are no longer hidden just because current price is above a calculated buy ceiling.</p></div>
       <div class="m-card"><h4>🚫 Recommendation Filters</h4><p>The learning universe keeps every valid parsed NSE symbol. Recommendation eligibility separately excludes zero-price rows, stocks at/near their NSE price band, non-EQ series, surveillance-flagged stocks, insufficient liquidity, zero Piotroski F-Score, and invalid ATR. Delivery, peak retention, RVOL, DMI, MFI, RSI, and sell pressure are <strong>features, not hard filters</strong>. Currently filtered from recommendations: ${(REMOVED.uc||0)+(REMOVED.surv||0)+(REMOVED.nonEq||0)+(REMOVED.liq||0)+(REMOVED.fscore||0)+(REMOVED.atr||0)} stocks.</p></div>
       <div class="m-card"><h4>Regime-Agnostic Learning</h4><p>Market breadth is shown as context only. The scanner uses one recency-adjusted top-rocket correlation accumulator across all market conditions, so bull, neutral, and bear days do not create separate scoring histories.</p></div>
@@ -4278,7 +4258,7 @@ function computeAlloc(capital, selList){
   if(!capital||!selList.length) return {};
   const maxAllocEl=document.getElementById('fMaxAlloc');
   const maxAllocV=maxAllocEl?parseFloat(maxAllocEl.value)||0:0;
-  const cap = maxAllocV>0?maxAllocV:capital; // per-stock cap if set
+  const cap=maxAllocV>0?maxAllocV:capital;
   const spendableCapital=Math.max(0,capital-BASKET_CASH_RESERVE_RS);
   const buyDebit=(buyP,qty)=>qty>0?(buyP*qty)+calcZerodhaCharges(buyP,qty,false,false,false):0;
   const affordableQty=(budget,buyP,maxNotional=Infinity)=>{
@@ -4287,103 +4267,65 @@ function computeAlloc(capital, selList){
     while(qty>0&&buyDebit(buyP,qty)>budget+0.001) qty--;
     return qty;
   };
-  // Helper: compute expected net and charges for a given buy price + qty + effective TGT
-  function evalNet(s, buyP, qty){
+  function evalNet(s,buyP,qty){
     const effTgt=getEffectiveTgtPct();
     const tgtPct=(effTgt!=null&&isFinite(effTgt))?effTgt:((s.tgtPct!=null&&isFinite(s.tgtPct))?s.tgtPct:null);
-    if(tgtPct===null||tgtPct<=0) return {ok:true, skip:true}; // can't eval → pass through
+    if(tgtPct===null||tgtPct<=0) return {ok:true,skip:true};
     const sellP=buyP*(1+tgtPct/100);
-    const buyChg=calcZerodhaCharges(buyP, qty, false);
-    const sellChg=calcZerodhaCharges(sellP, qty, true);
+    const buyChg=calcZerodhaCharges(buyP,qty,false);
+    const sellChg=calcZerodhaCharges(sellP,qty,true);
     const charges=buyChg+sellChg;
-    const expectedGain=qty*buyP*(tgtPct/100);
-    const expectedNet=expectedGain-charges;
-    return {ok:true, expectedNet, charges, tgtPct};
+    return {ok:true,expectedNet:qty*buyP*(tgtPct/100)-charges,charges,tgtPct};
   }
 
-  // ── Pass 1: Score-weighted initial allocation ──
-  const _topupPctEl=document.getElementById('fTopupAlloc');
-  const _topupMult=Math.min(1,Math.max(0.1,((_topupPctEl?parseFloat(_topupPctEl.value)||50:50)/100)));
-  const _effScore=s=>s._isTopUp?(s.rocketScore||0)*_topupMult:(s.rocketScore||0);
-  const totalScore = selList.reduce((s,x)=>s+_effScore(x),0)||1;
-  const allocMap = {};
-  // Sort a working copy by effective score descending
-  const sortedSel=[...selList].sort((a,b)=>_effScore(b)-_effScore(a));
+  const topupPctEl=document.getElementById('fTopupAlloc');
+  const topupMult=Math.min(1,Math.max(0.1,((topupPctEl?parseFloat(topupPctEl.value)||50:50)/100)));
+  const rawScore=s=>Math.max(0,Number(s.rocketScore)||0);
+  const totalRawScore=selList.reduce((sum,s)=>sum+rawScore(s),0)||1;
+  const sortedSel=[...selList].sort((a,b)=>rawScore(b)-rawScore(a));
+  const allocMap={},limits={};
 
-  sortedSel.forEach(s => {
+  // Top-up percentage is a hard TOTAL allocation cap, not a per-leg setting.
+  // Both TGT1/TGT2 orders subsequently share this one quantity allocation.
+  for(const s of sortedSel){
     const buyP=getBuyPrice(s);
-    if(!buyP||buyP<=0) return;
-    const weight = _effScore(s) / totalScore;
-    const allotted = Math.min(spendableCapital * weight, cap);
-    const qty = affordableQty(allotted,buyP,cap);
-    if(qty <= 0) return;
-    const ev=evalNet(s, buyP, qty);
-    if(ev.skip){
-      allocMap[s.symbol]={ alloc: qty * buyP, debit:buyDebit(buyP,qty), buyCharges:calcZerodhaCharges(buyP,qty,false,false,false), qty, buyPrice: buyP, _ref:s };
-      return;
-    }
-    allocMap[s.symbol] = { alloc: qty * buyP, debit:buyDebit(buyP,qty), buyCharges:calcZerodhaCharges(buyP,qty,false,false,false), qty, buyPrice: buyP, _ref:s, expectedNet:ev.expectedNet, charges:ev.charges, tgtPct:ev.tgtPct };
-  });
+    if(!(buyP>0)) continue;
+    const normalBudget=Math.min(spendableCapital*(rawScore(s)/totalRawScore),cap);
+    const rowLimit=s._isTopUp?normalBudget*topupMult:normalBudget;
+    limits[s.symbol]=rowLimit;
+    const qty=affordableQty(rowLimit,buyP,rowLimit);
+    if(qty<=0) continue;
+    const ev=evalNet(s,buyP,qty);
+    allocMap[s.symbol]={alloc:qty*buyP,debit:buyDebit(buyP,qty),buyCharges:calcZerodhaCharges(buyP,qty,false,false,false),qty,buyPrice:buyP,
+      limit:rowLimit,expectedNet:ev.expectedNet,charges:ev.charges,tgtPct:ev.tgtPct};
+  }
 
-  // ── Pass 2: Residual redistribution ──
-  // Any capital left over due to floor() truncation or partial score weights
-  // is redistributed in score order: highest-conviction stocks get topped up
-  // first, subject to the Max ₹/Stock cap. Previously unallocated stocks are
-  // reconsidered when residual capital is available.
-  let deployed=0;
-  for(const sym in allocMap) deployed += allocMap[sym].debit;
-  let residual = spendableCapital - deployed;
-
-  // Keep topping up until we can't add another share to any stock
-  let progress = true;
-  while(residual > 0 && progress){
-    progress = false;
+  let deployed=Object.values(allocMap).reduce((sum,am)=>sum+am.debit,0);
+  let residual=spendableCapital-deployed;
+  let progress=true;
+  while(residual>0&&progress){
+    progress=false;
     for(const s of sortedSel){
-      let am = allocMap[s.symbol];
-      // If stock not yet allocated, try adding 1 share for first time
+      const rowLimit=limits[s.symbol]||0;
+      let am=allocMap[s.symbol];
       if(!am){
         const buyP=getBuyPrice(s);
-        if(!buyP||buyP<=0||buyDebit(buyP,1)>residual) continue;
-        const qty=1;
-        const ev=evalNet(s, buyP, qty);
-        if(ev.skip){
-          allocMap[s.symbol]={ alloc: qty * buyP, debit:buyDebit(buyP,qty), buyCharges:calcZerodhaCharges(buyP,qty,false,false,false), qty, buyPrice: buyP, _ref:s };
-          am=allocMap[s.symbol];
-        } else {
-          allocMap[s.symbol]={ alloc: qty * buyP, debit:buyDebit(buyP,qty), buyCharges:calcZerodhaCharges(buyP,qty,false,false,false), qty, buyPrice: buyP, _ref:s, expectedNet:ev.expectedNet, charges:ev.charges, tgtPct:ev.tgtPct };
-          am=allocMap[s.symbol];
-        }
+        if(!(buyP>0)||rowLimit<buyP||buyDebit(buyP,1)>residual+0.001) continue;
+        const qty=1,ev=evalNet(s,buyP,qty);
+        allocMap[s.symbol]={alloc:qty*buyP,debit:buyDebit(buyP,qty),buyCharges:calcZerodhaCharges(buyP,qty,false,false,false),qty,buyPrice:buyP,
+          limit:rowLimit,expectedNet:ev.expectedNet,charges:ev.charges,tgtPct:ev.tgtPct};
+        am=allocMap[s.symbol];
       }
-      if(!am) continue;
-      const buyP = am.buyPrice;
-      if(!buyP || buyP <= 0) continue;
-      // Can we add one more share?
-      const nextDebit=buyDebit(buyP,am.qty+1);
-      const incrementalDebit=nextDebit-am.debit;
-      if(incrementalDebit > residual+0.001) continue;
-      // Would adding a share exceed the per-stock cap?
-      const newAlloc = am.alloc + buyP;
-      if(newAlloc > cap + 0.5) continue; // +0.5 = float tolerance
-      // Add the share
-      am.qty += 1;
-      am.alloc = newAlloc;
-      am.debit=nextDebit;
-      am.buyCharges=calcZerodhaCharges(buyP,am.qty,false,false,false);
-      residual -= incrementalDebit;
-      deployed += incrementalDebit;
-      progress = true;
-      // Re-evaluate expected net and charges for this stock with new qty
-      const ev = evalNet(s, buyP, am.qty);
-      if(!ev.skip){
-        am.expectedNet = ev.expectedNet;
-        am.charges = ev.charges;
-        am.tgtPct = ev.tgtPct;
-      }
+      const buyP=am.buyPrice;
+      const nextDebit=buyDebit(buyP,am.qty+1),incremental=nextDebit-am.debit;
+      if(incremental>residual+0.001||am.alloc+buyP>am.limit+0.5) continue;
+      am.qty++; am.alloc+=buyP; am.debit=nextDebit; am.buyCharges=calcZerodhaCharges(buyP,am.qty,false,false,false);
+      const ev=evalNet(s,buyP,am.qty);
+      if(!ev.skip){am.expectedNet=ev.expectedNet;am.charges=ev.charges;am.tgtPct=ev.tgtPct;}
+      residual-=incremental; deployed+=incremental; progress=true;
     }
   }
-
-  // Clean up internal _ref before returning
-  for(const sym in allocMap) delete allocMap[sym]._ref;
+  Object.values(allocMap).forEach(am=>delete am.limit);
   return allocMap;
 }
 function getRecommendedPositionSize(perfStats){
@@ -4536,7 +4478,7 @@ function renderTable(){
     let cells=`
       <td style="text-align:center"><input type="checkbox" ${isSelected?'checked':''} ${s._filterPreview?'disabled':''} style="width:14px;height:14px;accent-color:var(--amber);cursor:${s._filterPreview?'not-allowed':'pointer'}" onchange="toggleStock('${s.symbol}',this.checked)"></td>
       <td><span class="sc-m">${isNaN(s.rocketScore)?'?':s.rocketScore.toFixed(1)}</span></td>
-      <td style="font-family:'Plus Jakarta Sans',sans-serif"><div style="font-weight:700;font-size:13px;color:var(--t1)">${s.symbol}${(()=>{const sv=s.seen||0;if(!sv) return '';return`<sub style="font-size:11px;color:var(--amber);font-weight:700;margin-left:3px;font-family:'DM Mono',monospace" title="Seen ${sv}× today">${sv}×</sub>`;})()}${filterBadge}${filterAction}${s._isTopUp?`<span style="font-size:8px;background:rgba(251,146,60,.15);color:var(--fire);border-radius:4px;padding:1px 5px;margin-left:5px;font-weight:700;vertical-align:middle">↑ TOP-UP</span>`:''}${(()=>{if(!s.isSurv) return '';const labels=(s.survRules||[]).map(k=>{const r=SURV_CUSTOM_RULES.find(x=>x.key===k);return r?r.label:k;}).join(' · ');return `<span style="font-size:8px;background:rgba(239,68,68,.15);color:var(--red);border-radius:4px;padding:1px 5px;margin-left:5px;font-weight:700;vertical-align:middle" title="NSE Surveillance: ${escHtml(labels)}">⚠ SURV</span>`;})()}</div><div style="font-size:9px;color:${s._filterPreview?'var(--amber)':'var(--t3)'};max-width:220px;overflow:hidden;text-overflow:ellipsis">${s._filterPreview||s._forceKept?escHtml(s._filterReason||'filtered'):(s.name+(s._isTopUp&&s._heldAvg?` · avg ${fmtINR(s._heldAvg)}`:''))}</div></td>
+      <td style="font-family:'Plus Jakarta Sans',sans-serif"><div style="font-weight:700;font-size:13px;color:var(--t1)">${s.symbol}${(()=>{const sv=s.seen||0;if(!sv) return '';return`<sub style="font-size:11px;color:var(--amber);font-weight:700;margin-left:3px;font-family:'DM Mono',monospace" title="Seen ${sv}× today">${sv}×</sub>`;})()}${filterBadge}${filterAction}${s._isTopUp?`<span style="font-size:8px;background:rgba(251,146,60,.15);color:var(--fire);border-radius:4px;padding:1px 5px;margin-left:5px;font-weight:700;vertical-align:middle">↑ TOP-UP</span>`:''}${(()=>{const c=Number(s.outcomeReliability||0),n=Number(s.outcomeEvidence||0);if(!(c>0)||!(n>0)) return '';const pct=Math.round(c*100);return `<span style="font-size:8px;background:rgba(167,139,250,.14);color:var(--purple);border-radius:4px;padding:1px 5px;margin-left:5px;font-weight:700;vertical-align:middle" title="Outcome-pattern confidence only. It does not change Rocket Score or rank. ${n} historical matches.">◉ ${pct}% CONF</span>`;})()}${(()=>{if(!s.isSurv) return '';const labels=(s.survRules||[]).map(k=>{const r=SURV_CUSTOM_RULES.find(x=>x.key===k);return r?r.label:k;}).join(' · ');return `<span style="font-size:8px;background:rgba(239,68,68,.15);color:var(--red);border-radius:4px;padding:1px 5px;margin-left:5px;font-weight:700;vertical-align:middle" title="NSE Surveillance: ${escHtml(labels)}">⚠ SURV</span>`;})()}</div><div style="font-size:9px;color:${s._filterPreview?'var(--amber)':'var(--t3)'};max-width:220px;overflow:hidden;text-overflow:ellipsis">${s._filterPreview||s._forceKept?escHtml(s._filterReason||'filtered'):(s.name+(s._isTopUp&&s._heldAvg?` · avg ${fmtINR(s._heldAvg)}`:''))}</div></td>
       <td>${fmtINR(s.price)}</td>
       <td>${fPerf(s.snapshotChange)}</td>
       <td>${fPerf(s.priceChange)}</td>
@@ -5514,7 +5456,7 @@ function compactRankingRows(rows){
     volume:s.volume,marketCap:s.marketCap,atr:s.atr,
     high1d:s.high1d,low1d:s.low1d,vwap:s.vwap,piotroski:s.piotroski,shareholders:s.shareholders,
     perf1w:s.perf1w,delivPct:s.delivPct,rangePos:s.rangePos,pctFrom52wHigh:s.pctFrom52wHigh,
-    rocketScore:s.rocketScore,tier:s.tier,flags:s.flags||[],isSurv:!!s.isSurv,survRules:s.survRules||null,
+    rocketScore:s.rocketScore,flags:s.flags||[],isSurv:!!s.isSurv,survRules:s.survRules||null,
     slPct:s.slPct,tgtPct:s.tgtPct,seen:s.seen||0,
     _features:Object.fromEntries(featureKeys.filter(f=>s._features?.[f]!=null).map(f=>[f,s._features[f]]))
   }));
@@ -5567,9 +5509,9 @@ function snapshotStamp(timestamp=Date.now()){
   };
 }
 function isValidSnapshotTransition(previous,current){
-  if(!previous||!current||!(previous.baselineEligible??previous.inSession)||!current.inSession||previous.sessionDate!==current.sessionDate) return false;
-  const gap=(current.timestamp-previous.timestamp)/60000;
-  return gap>=SNAPSHOT_MIN_GAP_MINUTES;
+  // Retained for diagnostics: valid primary transitions are consecutive NSE trading days only.
+  return !!previous&&!!current&&!!(previous.baselineEligible??previous.inSession)&&!!current.inSession&&
+    tradingDaysBetween(previous.sessionDate,current.sessionDate)===1&&current.timestamp>previous.timestamp;
 }
 async function packFloat32Values(values){
   const array=values instanceof Float32Array?values:Float32Array.from(values||[],v=>isFinite(v)?v:NaN);
@@ -5584,25 +5526,25 @@ async function unpackFloat32Values(source){
 }
 async function decodeSnapshotState(source){
   if(!source||source.schema!==SNAPSHOT_STATE_SCHEMA) return emptySnapshotRuntime();
-  const latest=source.latest?{
-    ...source.latest,
-    prices:await unpackFloat32Values(source.latest.prices),
-    featureRows:await decodeScannerSnapshot(source.latest.features),
-    featureCols:source.latest.features?.cols||source.latest.featureCols||[],
+  const decodeOne=async packed=>packed?{
+    ...packed,
+    prices:await unpackFloat32Values(packed.prices),
+    featureRows:await decodeScannerSnapshot(packed.features),
+    featureCols:packed.features?.cols||packed.featureCols||[],
   }:null;
-  return {...source,latest};
+  return {...source,latest:await decodeOne(source.latest),previousTradingDay:await decodeOne(source.previousTradingDay)};
 }
 async function encodeSnapshotState(runtime){
-  const latest=runtime.latest?{
-    timestamp:runtime.latest.timestamp,sessionDate:runtime.latest.sessionDate,minutes:runtime.latest.minutes,
-    inSession:runtime.latest.inSession,baselineEligible:runtime.latest.baselineEligible??runtime.latest.inSession,symbols:runtime.latest.symbols,
-    prices:await packFloat32Values(runtime.latest.prices),
-    features:runtime.latest.features||await packScannerSnapshot(
-      runtime.latest.symbols.map(symbol=>({symbol,...(runtime.latest.featureRows[symbol]||{})})),runtime.latest.featureCols||[]
+  const encodeOne=async snapshot=>snapshot?{
+    timestamp:snapshot.timestamp,sessionDate:snapshot.sessionDate,minutes:snapshot.minutes,
+    inSession:snapshot.inSession,baselineEligible:snapshot.baselineEligible??snapshot.inSession,symbols:snapshot.symbols,
+    prices:await packFloat32Values(snapshot.prices),
+    features:snapshot.features||await packScannerSnapshot(
+      snapshot.symbols.map(symbol=>({symbol,...(snapshot.featureRows[symbol]||{})})),snapshot.featureCols||[]
     ),
   }:null;
-  return {schema:SNAPSHOT_STATE_SCHEMA,latest,completed:runtime.completed||0,
-    lastOutcome:runtime.lastOutcome||null,lastTag:runtime.lastTag||null};
+  return {schema:SNAPSHOT_STATE_SCHEMA,latest:await encodeOne(runtime.latest),previousTradingDay:await encodeOne(runtime.previousTradingDay),
+    completed:runtime.completed||0,lastOutcome:runtime.lastOutcome||null,lastTag:runtime.lastTag||null};
 }
 async function packScannerSnapshot(rows,cols){
   const clean=(rows||[]).filter(d=>normSym(d.symbol));
