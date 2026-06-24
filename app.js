@@ -1,5 +1,5 @@
-const BUILD_TS='2026-06-24 09:30 IST'; // replaced at commit time with IST datetime
-const APP_VERSION=434; // Delta-only prior-trading-day mRMR release.
+const BUILD_TS='2026-06-24 10:30 IST'; // replaced at commit time with IST datetime
+const APP_VERSION=435; // Intrinsic-delta baseline + prior-trading-day delta mRMR release.
 const GOOGLE_DRIVE_CLIENT_ID='1015012642264-oi2nelv3v90k3d39r994a6nelgjs2a56.apps.googleusercontent.com'; // Public OAuth Web Client ID.
 const HARD_FILTER_SCHEMA='structural_tradeability_v2';
 const SNAPSHOT_MIN_GAP_MINUTES=1;
@@ -14,7 +14,7 @@ const BASKET_CASH_RESERVE_RS=1; // Leave a rupee for broker-side tax/rounding di
 const SYSTEM_TRADE_START_DATE='2026-04-01'; // Adaptive stats use trades closed from this date onward.
 // mRMR v434-delta: only daily/intraday-changeable fields enter the learning vector.
 // Every scoring feature is current-minus-comparison-snapshot; slow fundamentals are filter/display-only.
-const DELTA_FEATURE_SCHEMA='dynamic_delta_only_prior_trading_day_v1';
+const DELTA_FEATURE_SCHEMA='all_retained_features_intrinsic_baseline_plus_prior_day_deltas_v2';
 const PRIMARY_PRIOR_DAY_WEIGHT=0.70;
 const SECONDARY_INTRADAY_WEIGHT=0.30;
 const CURRENT_EVIDENCE_WEIGHT=0.70;
@@ -74,7 +74,7 @@ function isLooseNseSupportCsvName(name){
 
 function updateModeUI(){
   const brand=document.querySelector('.brand-tag');
-  if(brand) brand.textContent='Prior-Day Primary mRMR';
+  if(brand) brand.textContent='Intrinsic Baseline + Prior-Day mRMR';
   document.querySelectorAll('.currency-lbl').forEach(el=>{el.textContent='₹';});
   const minTurn=document.getElementById('fMinTurnover');
   if(minTurn){
@@ -101,11 +101,11 @@ const SCANNER_STORE='rs_filters';
 const SHARED_FILTER_STORE='rs_filters_shared';
 const ALL_STORE='rs_data';
 const CORR_STORE='rs_corr';
-const CORR_SCHEMA='prior_trading_day_delta_top10_1d_mrmr_v3';
+const CORR_SCHEMA='intrinsic_baseline_plus_prior_trading_day_delta_top10_1d_mrmr_v4';
 const ROCKET_TOP_FRACTION=0.10;
 const SNAPSHOT_HISTORY_DECAY=0.95;
 const SNAPSHOT_STATE_STORE='rs_snapshot_mrmr_v1';
-const SNAPSHOT_STATE_SCHEMA='prior_trading_day_primary_v2';
+const SNAPSHOT_STATE_SCHEMA='intrinsic_baseline_prior_trading_day_primary_v3';
 const METH_STORE='rs_meth';
 const HOLD_STORE='rs_holdings';
 const ORDERS_STORE='rs_orders';
@@ -1914,35 +1914,52 @@ function emptySnapshotRuntime(){
 function buildDecodedSnapshot({stamp,symbols,prices,featureRows,features,sessionTag}){
   return {...stamp,symbols:[...symbols],prices,featureRows,featureCols:[...features],features:null,sessionTag:sessionTag||null};
 }
-// Strict delta-only mRMR: slow/fundamental fields never enter the learning vector.
-// They remain available to hard filters, display, sizing and tradeability logic, but never receive
-// score credit as raw levels and are never differenced. Every feature that does enter mRMR must be
-// meaningfully capable of changing daily or intraday and is represented as current minus comparison.
-function isSlowOrStaticFeature(feature){
-  const f=String(feature||'').toLowerCase();
-  return /(^|_)(market_cap|market_capitalization|number_of_shareholders|shareholders|piotroski|f_score|altman|beneish|pe_ratio|price_earnings|price_to_book|pb_ratio|book_value|face_value|eps|roe|roa|roce|debt|equity|cash_flow|revenue|sales|profit|margin|promoter|institutional|public_holding|pledge|price_band_pct|enterprise_value|dividend|beta|float|shares_outstanding)(_|$)/.test(f);
+// Every retained analytical field is eligible for mRMR.
+// On a valid prior-trading-day comparison it is expressed strictly as current-minus-prior.
+// The first-ever upload has no comparator, so it uses only fields that are already
+// intrinsically daily/intraday delta-like in ALL NSE (change, momentum, oscillator state,
+// relative volume, ratings centred on neutral, etc.). Raw price-level fields wait for a
+// real previous-trading-day snapshot; they are never scored as raw levels.
+function isDynamicMrmrFeature(feature){
+  return !!String(feature||'').trim();
 }
 function isDynamicScaleFeature(feature){
   const f=String(feature||'').toLowerCase();
-  // Fields that are already expressed as a change/percentage/ratio must use point deltas,
-  // even when their name contains words such as price, volume or turnover.
-  if(/(^|_)(change|performance|return|pct|percent|percentage|ratio|rsi|stoch|cci|mfi|adx|dmi|atr)(_|$)/.test(f)) return false;
-  return /(^|_)(price|close|open|high|low|volume|turnover|vwap|moving_average|average_price|ema|sma|hma|wma|tema|dema|kama)(_|$)/.test(f);
+  // These are already relative, bounded, oscillatory or point-valued. Their comparison
+  // delta is a direct point difference, never a percent-of-a-percent.
+  if(/(^|_)(change|performance|return|pct|percent|percentage|ratio|rsi|stoch|cci|mfi|adx|dmi|atr|aroon|oscillator|momentum|rate_of_change|roc|relative_volume|volatility|gap|rating|delivery|range_pos|pct_from|peak_retention|sector_breadth|sector_rel_strength|industry_breadth|bull_bear_power|chaikin|macd|ultimate)(_|$)/.test(f)) return false;
+  // Everything else numeric is a scale/level field: price, volume, turnover, pivots,
+  // bands, averages, cloud lines, market cap, shareholder counts and similar values.
+  // A real prior-day comparison converts it to a percentage delta.
+  return true;
 }
-function isDynamicMrmrFeature(feature){
-  return !isSlowOrStaticFeature(feature);
+function isIntrinsicBaselineFeature(feature){
+  const f=String(feature||'').toLowerCase();
+  // First-upload baseline: only fields that already encode current daily/intraday movement
+  // or a meaningful technical state are usable before a prior snapshot exists.
+  return /(^|_)(change|performance|return|gap|momentum|rate_of_change|roc|relative_volume|volatility|average_daily_range|atr|adx|dmi|rsi|stoch|cci|mfi|aroon|oscillator|macd|bull_bear_power|chaikin|ultimate|rating|delivery|range_pos|pct_from|peak_retention|pct_to_upper_band|sector_breadth|sector_rel_strength|industry_breadth)(_|$)/.test(f);
+}
+function intrinsicBaselineValue(feature,value){
+  const v=Number(value);
+  if(!isFinite(v)||!isIntrinsicBaselineFeature(feature)) return null;
+  const f=String(feature||'').toLowerCase();
+  // Text ratings are converted to 1..5 and centred on Neutral (=3).
+  if(/rating/.test(f)) return v-3;
+  // Bounded oscillators and range-position measures are expressed as deviation from neutral.
+  if(/(rsi|mfi|stoch|aroon|range_pos|peak_retention|delivery_pct|sector_breadth|industry_breadth)/.test(f)) return v-50;
+  // ADX/DMI are conventionally interpreted around 25 rather than 0.
+  if(/(^|_)(adx|dmi)(_|$)/.test(f)) return v-25;
+  // Change/return/performance, MACD, CCI, ROC, momentum and similar fields already have
+  // a meaningful zero point, so their supplied daily/intraday value is the baseline delta.
+  return v;
 }
 function deltaFeatureValue(feature,currentValue,previousValue){
-  // Scoring is delta-only. No previous value means no score input for this feature.
-  if(!isDynamicMrmrFeature(feature)) return null;
   const current=Number(currentValue), previous=Number(previousValue);
   if(!isFinite(current)||!isFinite(previous)) return null;
-  // Scale fields use percentage change to avoid raw-value scale distortion.
   if(isDynamicScaleFeature(feature)){
     if(previous===0) return null;
     return ((current-previous)/Math.abs(previous))*100;
   }
-  // Already-percent, oscillator, performance and technical fields use point delta.
   return current-previous;
 }
 function buildComparisonFeatureRows(previous,current,features){
@@ -1958,6 +1975,32 @@ function buildComparisonFeatureRows(previous,current,features){
     rows[symbol]=vector;
   });
   return rows;
+}
+function buildIntrinsicBaselineFeatureRows(current,features){
+  const rows={};
+  (current?.symbols||[]).forEach(symbol=>{
+    const now=current.featureRows?.[symbol]||{};
+    const vector={};
+    features.forEach(feature=>{vector[feature]=intrinsicBaselineValue(feature,now[feature]);});
+    rows[symbol]=vector;
+  });
+  return rows;
+}
+function intrinsicBaselineCorrelation(current,currentEligibleSymbols,currentTargetSymbols,features){
+  const eligible=currentEligibleSymbols instanceof Set?currentEligibleSymbols:new Set(currentEligibleSymbols||[]);
+  const comparisonRows=buildIntrinsicBaselineFeatureRows(current,features);
+  const matchedSymbols=(current.symbols||[]).filter(symbol=>eligible.has(symbol));
+  const correlation={};
+  for(const feature of features){
+    const xs=[],ys=[];
+    matchedSymbols.forEach(symbol=>{
+      const value=comparisonRows[symbol]?.[feature];
+      if(value==null||!isFinite(value)) return;
+      xs.push(value);ys.push(currentTargetSymbols.has(symbol)?1:0);
+    });
+    correlation[feature]=pearson(xs,ys);
+  }
+  return {correlation,matched:matchedSymbols.length,comparisonRows};
 }
 function snapshotCorrelationToCurrentTarget(previous,current,currentEligibleSymbols,currentTargetSymbols,features){
   // Every current live-eligible symbol is a 0/1 observation. Every mRMR input is a strict dynamic delta:
@@ -2014,7 +2057,10 @@ function getAverageLearningHorizon(){
 }
 async function advanceSnapshotLearning({rows,features,priceKey,sessionTag,targetSymbols,eligibleSymbols,advance=true,snapshotTimestamp=Date.now()}){
   if(!SNAPSHOT_RUNTIME||SNAPSHOT_RUNTIME.schema!==SNAPSHOT_STATE_SCHEMA) SNAPSHOT_RUNTIME=emptySnapshotRuntime();
-  if(ACC_CORR?.corrSchema!==CORR_SCHEMA) ACC_CORR={corr:{},intradayCorr:{},sessions:0,learnSessions:0,corrSchema:CORR_SCHEMA};
+  if(ACC_CORR?.corrSchema!==CORR_SCHEMA){
+    ACC_CORR={corr:{},intradayCorr:{},sessions:0,learnSessions:0,corrSchema:CORR_SCHEMA,
+      seedBaselineDate:null,seedBaselineCorr:{},baselineSessions:0};
+  }
   const runtime=SNAPSHOT_RUNTIME;
   const stamp=snapshotStamp(snapshotTimestamp);
   const targetSet=targetSymbols instanceof Set?targetSymbols:new Set(targetSymbols||[]);
@@ -2025,32 +2071,34 @@ async function advanceSnapshotLearning({rows,features,priceKey,sessionTag,target
   const prices=Float32Array.from(cleanRows,row=>row[priceKey]);
   const featureRows=Object.fromEntries(cleanRows.map(row=>[row.symbol,Object.fromEntries(features.map(f=>[f,row[f]??null]))]));
   const currentSnapshot=buildDecodedSnapshot({stamp,symbols,prices,featureRows,features,sessionTag});
-  let note='Waiting for a valid immediately previous trading-day snapshot';
-  let primaryCorr=null, intradayCurrent=null, intervalMoves={}, scoringFeatureRows={};
-  let primarySnapshot=null;
-  let primaryValid=false;
-  let intradayUpdated=false;
+
+  let note='Waiting for first-upload intrinsic daily-delta baseline';
+  let primaryCorr=null,intradayCurrent=null,intervalMoves={},scoringFeatureRows={};
+  let primarySnapshot=null,primaryValid=false,intradayUpdated=false,baselineActive=false,baselineCreated=false;
   const duplicate=!!sessionTag&&runtime.lastTag===sessionTag&&runtime.latest?.sessionDate===stamp.sessionDate;
 
   if(!advance){
     note='Rankings refreshed without advancing snapshot learning';
   }else if(duplicate){
-    note='Duplicate snapshot ignored; learning was not advanced';
+    // A duplicate upload keeps the existing state and still renders the available score mode below.
+    note='Duplicate snapshot ignored; retained existing scoring state';
   }else if(!stamp.baselineEligible){
     note='Outside NSE snapshot hours; no learning snapshot saved';
   }else{
     const latest=runtime.latest;
     const stale=latest&&stamp.timestamp<=latest.timestamp;
-    // The primary comparator is ONLY the immediately previous NSE trading day. Same-day data may refine it later, never replace it.
+
+    // The primary comparator is ONLY the immediately previous NSE trading day.
     if(runtime.previousTradingDay&&tradingDaysBetween(runtime.previousTradingDay.sessionDate,stamp.sessionDate)===1){
       primarySnapshot=runtime.previousTradingDay;
     }else if(latest&&tradingDaysBetween(latest.sessionDate,stamp.sessionDate)===1){
       primarySnapshot=latest;
     }
+
     const primaryPair=primarySnapshot&&stamp.inSession&&targetSet.size>0
       ?snapshotCorrelationToCurrentTarget(primarySnapshot,currentSnapshot,eligibleSet,targetSet,features):null;
-    // Preserve the older lagged-learning quality floor: fewer than 100 matched live-eligible stocks stays WARMUP.
     primaryValid=!!primaryPair&&primaryPair.matched>=100;
+
     if(primaryValid){
       primaryCorr=primaryPair.correlation;
       scoringFeatureRows=primaryPair.comparisonRows||{};
@@ -2058,10 +2106,11 @@ async function advanceSnapshotLearning({rows,features,priceKey,sessionTag,target
       features.forEach(f=>{targetCorrToday[f]=primaryCorr[f]??null;});
     }
 
-    // Same-day comparisons are secondary accumulated context only. They never create a score and never rescue a missing primary comparator.
-    if(!stale&&latest&&latest.sessionDate===stamp.sessionDate&&stamp.inSession){
+    // Same-day snapshot comparisons build secondary context only. They never create,
+    // replace or rescue a prior-day score.
+    if(!stale&&latest&&latest.sessionDate===stamp.sessionDate&&stamp.inSession&&targetSet.size>0){
       const gap=(stamp.timestamp-latest.timestamp)/60000;
-      if(gap>=SNAPSHOT_MIN_GAP_MINUTES&&targetSet.size>0){
+      if(gap>=SNAPSHOT_MIN_GAP_MINUTES){
         const intradayPair=snapshotCorrelationToCurrentTarget(latest,currentSnapshot,eligibleSet,targetSet,features);
         if(intradayPair.matched>=100){
           intradayCurrent=intradayPair.correlation;
@@ -2074,14 +2123,11 @@ async function advanceSnapshotLearning({rows,features,priceKey,sessionTag,target
     if(primaryValid){
       const intradayHistory=ACC_CORR.intradayCorr||{};
       const historical=ACC_CORR.corr||{};
-      const currentEvidence={};
-      const finalCorr={};
+      const currentEvidence={},finalCorr={};
       features.forEach(f=>{
         const primary=primaryCorr[f];
         const secondary=intradayHistory[f];
-        // Direct previous-trading-day evidence is 70%; accumulated short-horizon same-day evidence is only 30%.
         currentEvidence[f]=isFinite(secondary)?blendCorrelation(primary,secondary,PRIMARY_PRIOR_DAY_WEIGHT):primary;
-        // User-selected reverse EMA: current evidence 70%, historical memory 30%.
         finalCorr[f]=blendCorrelation(currentEvidence[f],historical[f],CURRENT_EVIDENCE_WEIGHT);
       });
       const primaryElapsed=Math.round((stamp.timestamp-primarySnapshot.timestamp)/60000);
@@ -2090,26 +2136,45 @@ async function advanceSnapshotLearning({rows,features,priceKey,sessionTag,target
         corrSchema:CORR_SCHEMA,lastUpdated:new Date().toISOString(),lastPrimaryDate:primarySnapshot.sessionDate,lastCurrentDate:stamp.sessionDate};
       runtime.completed=(runtime.completed||0)+1;
       runtime.lastOutcome={sourceTimestamp:primarySnapshot.timestamp,completedAt:stamp.timestamp,elapsedMinutes:primaryElapsed,
-        matched:Object.keys(intervalMoves).length,rockets:targetSet.size,primaryDate:primarySnapshot.sessionDate,currentDate:stamp.sessionDate,
-        intradayUpdated};
+        matched:Object.keys(intervalMoves).length,rockets:targetSet.size,primaryDate:primarySnapshot.sessionDate,currentDate:stamp.sessionDate,intradayUpdated};
       note=`Primary: ${primarySnapshot.sessionDate} → ${stamp.sessionDate} current 1D top ${Math.round(ROCKET_TOP_FRACTION*100)}% target (${primaryPair.matched} matched)${intradayUpdated?' · same-day context refreshed':''}`;
-    }else if(primaryPair&&primaryPair.matched<100){
-      note=`WARMUP: immediate prior-day snapshot matched only ${primaryPair.matched} live-eligible stocks; 100 required`;
-    }else if(stale){
-      note='Older or same-time snapshot ignored; baseline preserved';
     }else{
-      const latestDate=latest?.sessionDate||null;
-      if(latestDate&&latestDate!==stamp.sessionDate&&tradingDaysBetween(latestDate,stamp.sessionDate)!==1){
-        note='WARMUP: immediate previous trading-day snapshot is missing; same-day data cannot score';
-      }else if(latestDate===stamp.sessionDate){
-        note='WARMUP: same-day snapshot stored as secondary context only; immediate prior-day comparison is required';
+      // First-ever baseline exception. This is not a same-day fallback: it learns only from
+      // intrinsic daily/intraday delta fields already present in ALL NSE, such as price-change,
+      // volume-change, momentum, oscillators and centred technical ratings.
+      const canCreateBaseline=!latest&&!ACC_CORR.seedBaselineDate&&stamp.inSession&&targetSet.size>0;
+      const canUseSeedToday=ACC_CORR.seedBaselineDate===stamp.sessionDate&&(!latest||latest.sessionDate===stamp.sessionDate);
+      if(canCreateBaseline){
+        const seed=intrinsicBaselineCorrelation(currentSnapshot,eligibleSet,targetSet,features);
+        const seedCorr=seed.correlation||{};
+        ACC_CORR={...ACC_CORR,corr:seedCorr,seedBaselineCorr:seedCorr,seedBaselineDate:stamp.sessionDate,
+          baselineSessions:(ACC_CORR.baselineSessions||0)+1,sessions:(ACC_CORR.sessions||0)+1,
+          corrSchema:CORR_SCHEMA,lastUpdated:new Date().toISOString(),lastCurrentDate:stamp.sessionDate};
+        scoringFeatureRows=seed.comparisonRows||{};
+        features.forEach(f=>{targetCorrToday[f]=seedCorr[f]??null;});
+        baselineActive=true;baselineCreated=true;
+        note=`Baseline: first-upload intrinsic daily/intraday deltas against current 1D top ${Math.round(ROCKET_TOP_FRACTION*100)}% target (${seed.matched} live-eligible stocks)`;
+      }else if(canUseSeedToday){
+        scoringFeatureRows=buildIntrinsicBaselineFeatureRows(currentSnapshot,features);
+        baselineActive=true;
+        note='Baseline: first-upload intrinsic daily/intraday delta model retained; same-day snapshots remain secondary context only';
+      }else if(primaryPair&&primaryPair.matched<100){
+        note=`WARMUP: immediate prior-day snapshot matched only ${primaryPair.matched} live-eligible stocks; 100 required`;
+      }else if(stale){
+        note='Older or same-time snapshot ignored; baseline preserved';
       }else{
-        note='WARMUP: first baseline saved; immediate previous trading-day comparison is required';
+        const latestDate=latest?.sessionDate||null;
+        if(latestDate&&latestDate!==stamp.sessionDate&&tradingDaysBetween(latestDate,stamp.sessionDate)!==1){
+          note='WARMUP: immediate previous trading-day snapshot is missing; baseline cannot bridge a skipped trading day';
+        }else if(latestDate===stamp.sessionDate){
+          note='WARMUP: same-day snapshot stored as secondary context only; immediate prior-day comparison is required';
+        }else{
+          note='WARMUP: immediate previous trading-day comparison is required';
+        }
       }
     }
 
     if(!stale){
-      // When the trading date advances, preserve only a direct prior-day latest snapshot. A skipped normal trading day clears the primary comparator.
       if(latest&&latest.sessionDate!==stamp.sessionDate){
         runtime.previousTradingDay=tradingDaysBetween(latest.sessionDate,stamp.sessionDate)===1?latest:null;
       }
@@ -2120,19 +2185,19 @@ async function advanceSnapshotLearning({rows,features,priceKey,sessionTag,target
   }
 
   const hasPrimaryComparison=primaryValid;
-  if(!hasPrimaryComparison){
-    // Baseline/WARMUP: raw snapshot values are stored for tomorrow's delta comparison.
-    // No mRMR feature receives a raw-level fallback before a valid prior-day comparator exists.
-    scoringFeatureRows=buildComparisonFeatureRows(null,currentSnapshot,features);
-  }
+  const hasBaselineEvidence=baselineActive;
+  const hasScoringEvidence=hasPrimaryComparison||hasBaselineEvidence;
+  if(!hasScoringEvidence) scoringFeatureRows=buildComparisonFeatureRows(null,currentSnapshot,features);
+
   const targetCorr={};
-  const historical=ACC_CORR?.corr||{};
-  features.forEach(feature=>{targetCorr[feature]=hasPrimaryComparison?(historical[feature]??0):0;});
+  const learned=ACC_CORR?.corr||{};
+  features.forEach(feature=>{targetCorr[feature]=hasScoringEvidence?(learned[feature]??0):0;});
   if(ACC_CORR){ACC_CORR.laggedNote=note;FS.set(modeKey(CORR_STORE),ACC_CORR);}
   return {targetCorr,targetCorrToday,completedNow:hasPrimaryComparison?1:0,note,runtime,
-    hadPriorCorr:(ACC_CORR?.learnSessions||0)>0,hasPrimaryComparison,primaryCorr,intradayCurrent,
-    intervalMoves,scoringFeatureRows,deltaFeatureSchema:DELTA_FEATURE_SCHEMA,intervalElapsedMinutes:primarySnapshot?Math.round((stamp.timestamp-primarySnapshot.timestamp)/60000):null,
-    freshSignalCount:hasPrimaryComparison?Object.values(targetCorrToday).filter(v=>v!=null&&isFinite(v)&&Math.abs(v)>0.0001).length:0};
+    hadPriorCorr:(ACC_CORR?.learnSessions||0)>0,hasPrimaryComparison,hasBaselineEvidence,hasScoringEvidence,baselineCreated,
+    primaryCorr,intradayCurrent,intervalMoves,scoringFeatureRows,deltaFeatureSchema:DELTA_FEATURE_SCHEMA,
+    intervalElapsedMinutes:primarySnapshot?Math.round((stamp.timestamp-primarySnapshot.timestamp)/60000):null,
+    freshSignalCount:hasScoringEvidence?Object.values(targetCorrToday).filter(v=>v!=null&&isFinite(v)&&Math.abs(v)>0.0001).length:0};
 }
 
 // ── Engine ──
@@ -2143,16 +2208,22 @@ async function runEngine(raw, sessionTag, options={}){
   // ── Auto-detect columns from CSV headers ──
   const allHeaders = Object.keys(raw[0]);
 
-  // Find symbol/name and text columns by content pattern (not by name)
-  // maRawCol: detects the MA rating text column so it's excluded from numeric features
+  // Find symbol/name. Every retained rating column is converted to an ordered numeric feature.
   const symCol   = allHeaders.find(h => raw.slice(0,5).every(r => /^[A-Z0-9&.-]{1,20}$/.test((r[h]||'').trim()))) || allHeaders[0];
   const nameCol  = allHeaders.find(h => h !== symCol && raw.slice(0,5).some(r => (r[h]||'').trim().length > 10 && isNaN(parseFloat(r[h])))) || '';
-  const maRawCol = allHeaders.find(h => /strong buy|strong sell|buy|sell|neutral/i.test(raw.slice(0,10).map(r=>r[h]||'').join('|'))) || '';
+  const RATING_MAP={'strong sell':1,'sell':2,'neutral':3,'buy':4,'strong buy':5};
+  const ratingValue=v=>RATING_MAP[String(v||'').trim().toLowerCase()]??null;
+  const ratingCols=allHeaders.filter(h=>{
+    if(!/rating/i.test(h)) return false;
+    const sample=raw.slice(0,50).map(r=>ratingValue(r[h])).filter(v=>v!=null);
+    return sample.length>0;
+  });
+  const ratingColSet=new Set(ratingCols);
 
   // Numeric detection: sample first 50 rows (skip blanks), column is numeric
   // if at least 30% of non-blank values parse as a real finite number
   const numericCols = allHeaders.filter(h => {
-    if(h === symCol || h === nameCol || h === maRawCol) return false;
+    if(h === symCol || h === nameCol || ratingColSet.has(h)) return false;
     const nonBlank = raw.slice(0, 50).map(r => (r[h]||'').trim()).filter(v => v !== '');
     if(nonBlank.length < 3) return false;
     const numericCount = nonBlank.filter(v => {
@@ -2166,6 +2237,8 @@ async function runEngine(raw, sessionTag, options={}){
   function safeKey(h){ return h.toLowerCase().replace(/[^a-z0-9]+/g,'_').replace(/^_|_$/g,''); }
   const COL_MAP = {}; // safeKey → original header
   numericCols.forEach(h => { COL_MAP[safeKey(h)] = h; });
+  // Convert every retained textual rating into a 1..5 ordered numeric mRMR feature.
+  ratingCols.forEach(h => { COL_MAP[safeKey(h)] = h; });
 
   // ── Known special mappings for derived features ──
   // These tell us which safeKey holds which meaning for computed features
@@ -2186,9 +2259,9 @@ async function runEngine(raw, sessionTag, options={}){
   };
   const parsed = raw.map(r => {
     const d = {};
-    // Parse all numeric columns
+    // Parse numeric columns, then convert textual ratings to 1..5.
     for(const [key, col] of Object.entries(COL_MAP)){
-      d[key] = num(r[col]);
+      d[key] = ratingColSet.has(col)?ratingValue(r[col]):num(r[col]);
     }
     d.symbol = normSym(r[symCol]);
     d.name   = (r[nameCol]||'').trim();
@@ -2203,7 +2276,7 @@ async function runEngine(raw, sessionTag, options={}){
   let industryCol = allHeaders.find(h => INDUSTRY_PATTERNS.test(h.trim())) || null;
   // Fallback: detect any text column with 5-50 unique values (categorical grouping)
   if(!sectorCol || !industryCol){
-    const candidates = allHeaders.filter(h => h!==symCol && h!==nameCol && h!==maRawCol && !numericCols.includes(h));
+    const candidates = allHeaders.filter(h => h!==symCol && h!==nameCol && !ratingColSet.has(h) && !numericCols.includes(h));
     for(const h of candidates){
       const vals = raw.slice(0,200).map(r=>(r[h]||'').trim()).filter(v=>v);
       const uniq = new Set(vals);
@@ -2241,11 +2314,11 @@ async function runEngine(raw, sessionTag, options={}){
     } else { d.peak_retention=null; }
   });
 
-  // FEATS: only daily/intraday-changeable numeric columns and derived fields.
-  // Slow/fundamental fields remain parsed for filters/display but are deliberately excluded from mRMR and never converted into score inputs.
+  // FEATS: every retained numeric or converted-rating analytical field in ALL NSE,
+  // plus NSE-derived fields. Redundancy is handled by mRMR, not by pre-pruning.
   const NSE_DERIVED = ['delivery_pct','range_pos','pct_from_52w_high','peak_retention','price_band_pct','pct_to_upper_band'];
   const ALL_CANDIDATE_FEATURES = [...new Set([...Object.keys(COL_MAP), ...NSE_DERIVED])];
-  const FEATS = ALL_CANDIDATE_FEATURES.filter(isDynamicMrmrFeature);
+  const FEATS = [...ALL_CANDIDATE_FEATURES];
 
   const LABELS = {};
   for(const key of Object.keys(COL_MAP)) LABELS[key] = COL_MAP[key];
@@ -2384,9 +2457,9 @@ async function runEngine(raw, sessionTag, options={}){
   const freshSignalCount=snapshotLearning.freshSignalCount;
   const currentUploadLearned=snapshotLearning.completedNow>0;
   // Strict gate: same-day evidence and historical memory never create a tradable score without today's direct prior-trading-day comparison.
-  const hasRecommendationEvidence=!!snapshotLearning.hasPrimaryComparison;
+  const hasRecommendationEvidence=!!snapshotLearning.hasScoringEvidence;
   const useFreshCorr=true;
-  const scoringSource=hasRecommendationEvidence?'immediate_prior_trading_day_primary':'warmup_missing_immediate_prior_trading_day';
+  const scoringSource=snapshotLearning.hasPrimaryComparison?'immediate_prior_trading_day_primary':(snapshotLearning.hasBaselineEvidence?'first_upload_intrinsic_daily_delta_baseline':'warmup_missing_immediate_prior_trading_day');
   const laggedNote=snapshotLearning.note;
   const recOutcomeSummary=getRecommendationOutcomeSummary();
   const entryOutcomeSummary=getExecutedEntryOutcomeSummary();
@@ -2397,8 +2470,8 @@ async function runEngine(raw, sessionTag, options={}){
   const withPC=filtered.map((d,i)=>({i,pc:K.price_change?d[K.price_change]:null})).filter(x=>x.pc!==null);
   withPC.sort((a,b)=>b.pc-a.pc);
 
-  // Every mRMR comparison uses dynamic deltas from the valid prior trading-day snapshot.
-  // Slow/fundamental fields are excluded from FEATS and remain filter/display-only.
+  // Every post-baseline mRMR comparison uses retained-feature deltas from the valid prior trading-day snapshot.
+  // The first-ever upload uses only intrinsic daily/intraday deltas already supplied by ALL NSE.
   const scoringFeatureRows=snapshotLearning.scoringFeatureRows||{};
   const scoringRows=learningUniverse.map(d=>scoringFeatureRows[d.symbol]||{});
   // Older mRMR redundancy rule: average absolute Pearson correlation across all peer features.
@@ -2527,7 +2600,7 @@ async function runEngine(raw, sessionTag, options={}){
     scoringModel:'prior_trading_day_delta_current_1d_top10_mrmr',
     deltaFeatureSchema:DELTA_FEATURE_SCHEMA,
     deltaOnlyFeatureCount:FEATS.length,
-    excludedSlowFeatureCount:ALL_CANDIDATE_FEATURES.length-FEATS.length,
+    excludedSlowFeatureCount:0,
     useFreshCorr, hasRecommendationEvidence, currentUploadLearned, freshSignalCount,
     scoringSource,
     useAccCorr: snapshotLearning.hadPriorCorr,
@@ -3888,14 +3961,14 @@ function _renderMethodologyInner(){
     <div id="meth-hf-wrap">${hardFiltersHTML}</div>
     <div id="meth-breadth">${breadthCardHTML}</div>
     <h3 id="meth-engine" style="margin-top:18px">Scoring Engine — Prior-Day Primary mRMR</h3>
-    <p id="mrmrLearningModeNote"><strong>Current learning mode:</strong> The current top 10% of live-eligible stocks by 1D change are the target. mRMR uses only dynamic deltas against a valid immediately previous trading-day snapshot. Same-day snapshots provide secondary accumulated delta context only and never create or rescue a score.</p>
+    <p id="mrmrLearningModeNote"><strong>Current learning mode:</strong> The current top 10% of live-eligible stocks by 1D change are the target. A first-ever upload scores from ALL NSE’s intrinsic daily/intraday delta fields already present in the file. From the next valid session onward, every retained numeric/rating feature uses its immediately previous-trading-day delta. Same-day snapshots provide secondary accumulated context only and never create or rescue a skipped-day score.</p>
     <div class="m-grid">
-      <div class="m-card"><h4>Learning Target</h4><p>The current top 10% by 1D change receive label 1. Only daily/intraday-changeable features enter mRMR, each as a current-minus-immediately-prior-trading-day delta. Slow fundamentals remain filter/display-only; missing that direct prior-day snapshot keeps the scanner in WARMUP.</p></div>
+      <div class="m-card"><h4>Learning Target</h4><p>The current top 10% by 1D change receive label 1. The first upload uses existing intrinsic daily/intraday deltas in ALL NSE to establish a scored baseline. Thereafter every retained numeric and converted-rating feature enters mRMR as a current-minus-immediately-prior-trading-day delta. A skipped normal trading day still keeps the scanner in WARMUP.</p></div>
       <div class="m-card"><h4>📡 How the Engine Learns</h4><p>Each current upload compares today’s 1D top-10% target with dynamic deltas versus the immediately previous trading-day snapshot. That direct comparison has 70% of fresh evidence; accumulated same-day snapshots have 30%. Final correlation then uses 70% fresh evidence and 30% historical memory.</p></div>
       <div class="m-card"><h4>Outcome Self-Correction</h4><p>${feedbackText} Outcome evidence is displayed as confidence context only. It does not add or subtract points from Rocket Score.</p></div>
       <div class="m-card"><h4>Feature Self-Correction</h4><p>Features that repeatedly separate future rockets from non-rockets strengthen; one-off relationships fade as more transitions arrive. mRMR uses average absolute Pearson correlation across all feature peers so redundant indicators cannot cast duplicate votes.</p></div>
       <div class="m-card"><h4>🎯 Max 1D Filter</h4><p>Set <em>Max 1D %</em> in the filter bar to hide stocks that have already moved too much today (default 5%). Entry-ceiling filtering has been removed; strong candidates are no longer hidden just because current price is above a calculated buy ceiling.</p></div>
-      <div class="m-card"><h4>🚫 Recommendation Filters</h4><p>The learning universe keeps every valid parsed NSE symbol. Recommendation eligibility separately excludes zero-price rows, stocks at/near their NSE price band, non-EQ series, surveillance-flagged stocks, insufficient liquidity, zero Piotroski F-Score, and invalid ATR. Delivery, peak retention, RVOL, DMI, MFI, RSI, and sell pressure are <strong>features, not hard filters</strong>. Currently filtered from recommendations: ${(REMOVED.uc||0)+(REMOVED.surv||0)+(REMOVED.nonEq||0)+(REMOVED.liq||0)+(REMOVED.fscore||0)+(REMOVED.atr||0)} stocks.</p></div>
+      <div class="m-card"><h4>🚫 Recommendation Filters</h4><p>The learning universe keeps every valid parsed NSE symbol. Recommendation eligibility separately excludes zero-price rows, stocks at/near their NSE price band, non-EQ series, surveillance-flagged stocks, insufficient liquidity, and invalid ATR. Delivery, peak retention, RVOL, DMI, MFI, RSI, and sell pressure are <strong>features, not hard filters</strong>. Currently filtered from recommendations: ${(REMOVED.uc||0)+(REMOVED.surv||0)+(REMOVED.nonEq||0)+(REMOVED.liq||0)+(REMOVED.fscore||0)+(REMOVED.atr||0)} stocks.</p></div>
       <div class="m-card"><h4>Regime-Agnostic Learning</h4><p>Market breadth is shown as context only. The scanner uses one recency-adjusted top-rocket correlation accumulator across all market conditions, so bull, neutral, and bear days do not create separate scoring histories.</p></div>
       <div class="m-card"><h4>📊 Sector & Industry Breadth</h4><p>${E.sectorCol?'<span style="color:var(--green)">✓</span> Sector breadth, sector relative strength':'<span style="color:var(--red)">✗</span> No Sector column detected'}${E.industryCol?', <span style="color:var(--green)">✓</span> industry breadth':''} — computed from today\'s full universe and fed into mRMR as features. Stocks outperforming their sector score higher regardless of market direction.</p></div>
     </div>
