@@ -91,39 +91,10 @@
 </div><!-- /dash -->
 <button class="go-top" id="goTop" onclick="window.scrollTo({top:0,behavior:'smooth'})" title="Go to top">▲</button>
 </div><!-- /app -->
+<!-- app.js is loaded normally. Ctrl+R revalidates it; no manual ?vNNN edits. -->
 
-<!-- Always fetch the latest deployed app.js. No manual ?vNNN cache-buster edits. -->
-<script>
-(async function loadRocketScannerApp() {
-  try {
-    const response = await fetch('app.js', { cache: 'no-store' });
-    if (!response.ok) throw new Error('HTTP ' + response.status);
-
-    const source = await response.text();
-    const blobUrl = URL.createObjectURL(new Blob([source], { type: 'text/javascript' }));
-    const appScript = document.createElement('script');
-    appScript.src = blobUrl;
-    appScript.onload = function () { URL.revokeObjectURL(blobUrl); };
-    appScript.onerror = function () {
-      URL.revokeObjectURL(blobUrl);
-      throw new Error('app.js could not execute');
-    };
-    document.body.appendChild(appScript);
-  } catch (error) {
-    console.error('Rocket Scanner app load failed:', error);
-    document.body.insertAdjacentHTML(
-      'beforeend',
-      '<div style="margin:24px;padding:16px;border:1px solid #ef4444;border-radius:10px;color:#fecaca;font:14px sans-serif;background:#2b1010">' +
-      '<strong>Rocket Scanner failed to load.</strong><br>' +
-      'Open DevTools Console and check the app.js error: ' + String(error.message || error) +
-      '</div>'
-    );
-  }
-})();
-</script>
+<!-- app.js is loaded normally. Ctrl+R revalidates it; no manual ?vNNN edits. -->
+<script src="app.js"></script>
 
 </body>
 </html>
-
-
-
