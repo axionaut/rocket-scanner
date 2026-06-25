@@ -1,5 +1,5 @@
-const BUILD_TS='2026-06-25 11:52 IST'; // release build time (IST)
-const APP_VERSION=448; // Five-trading-session rolling rocket-trajectory mRMR; CNC market-order basket entry with two target legs.
+const BUILD_TS='2026-06-25 13:27 IST'; // release build time (IST)
+const APP_VERSION=449; // Five-trading-session rolling rocket-trajectory mRMR; CNC market-order basket entry with two target legs.
 const GOOGLE_DRIVE_CLIENT_ID='1015012642264-oi2nelv3v90k3d39r994a6nelgjs2a56.apps.googleusercontent.com'; // Public OAuth Web Client ID.
 const HARD_FILTER_SCHEMA='structural_tradeability_v2';
 const STOCK_RUNWAY_CEILING_PCT=19.5; // UC-style ceiling retained only for legacy helpers; entry-ceiling filtering is disabled.
@@ -892,8 +892,8 @@ let POSITIONS=[]; // parsed positions from Positions.csv
   if(lbl) lbl.textContent='v'+APP_VERSION;
   document.title='NSE Rocket Scanner v'+APP_VERSION;
   // Show build/push timestamp
-  const _bsEl=document.getElementById('lastScanVal');
-  if(_bsEl) _bsEl.textContent=BUILD_TS?'Build: '+BUILD_TS:'';
+  const _bsEl=document.getElementById('appUpdateVal');
+  if(_bsEl) _bsEl.textContent=BUILD_TS?'Last updated: '+BUILD_TS:'';
 })();
 
 // ── Go to top button ──
