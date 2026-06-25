@@ -1,5 +1,5 @@
-const BUILD_TS='2026-06-24 15:42 IST'; // release build time (IST)
-const APP_VERSION=441; // Five-trading-session rolling rocket-trajectory mRMR.
+const BUILD_TS='2026-06-25 07:54 IST'; // release build time (IST)
+const APP_VERSION=442; // Five-trading-session rolling rocket-trajectory mRMR; direction-neutral missing-value fallback.
 const GOOGLE_DRIVE_CLIENT_ID='1015012642264-oi2nelv3v90k3d39r994a6nelgjs2a56.apps.googleusercontent.com'; // Public OAuth Web Client ID.
 const HARD_FILTER_SCHEMA='structural_tradeability_v2';
 const NSE_OPEN_MINUTES=9*60+15;
@@ -8,7 +8,7 @@ const STOCK_RUNWAY_CEILING_PCT=19.5; // UC-style ceiling retained only for legac
 const PRICE_BAND_BLOCK_BUFFER_PCT=0.15; // Treat rounded 4.9/9.9/19.9 rows as effectively band-locked.
 const BASKET_CASH_RESERVE_RS=1; // Leave a rupee for broker-side tax/rounding differences.
 const SYSTEM_TRADE_START_DATE='2026-04-01'; // Adaptive stats use trades closed from this date onward.
-// mRMR v441: four prior trading-day states explain the current day's rocket set.
+// mRMR v442: four prior trading-day states explain the current day's rocket set.
 // A five-session frame is D-4, D-3, D-2, D-1 and D. Current feature values never explain Y(D).
 const DELTA_FEATURE_SCHEMA='five_session_rolling_daily_rocket_trajectory_v1';
 const DAILY_TRAJECTORY_TOTAL_DAYS=5;
@@ -2530,9 +2530,12 @@ async function runEngine(raw, sessionTag, options={}){
     let rawScore=0;
     for(const f of FEATS){
       const w=weights[f],p=pctls[f][idx];
-      // Older rule: missing feature value contributes the 35th percentile instead of disappearing from the denominator.
-      const percentile=p===null?0.35:p;
-      rawScore+=w*(targetCorr[f]>=0?percentile:(1-percentile));
+      // Missing values remain direction-neutral at the conservative 35th-percentile fallback.
+      // Only observed values are inverted for a negative learned correlation.
+      const directedPercentile=(p==null||!Number.isFinite(p))
+        ?0.35
+        :(targetCorr[f]>=0?p:(1-p));
+      rawScore+=w*directedPercentile;
     }
     const mrmrScore=hasRecommendationEvidence?Math.round(rawScore*1000)/10:0;
     const currentFeatures=Object.fromEntries(FEATS.map(f=>[f,scoringFeatureRows[d.symbol]?.[f]??null]));
@@ -2612,13 +2615,18 @@ async function runEngine(raw, sessionTag, options={}){
     for(const f of FEATS){
       const w=weights[f],v=scoringFeatureRows[d.symbol]?.[f]??null;
       const arr=_sf[f];
-      let rank=0.35;
+      let rank=null;
       if(v!=null&&!isNaN(v)&&arr.length){
         let lo=0,hi=arr.length;
         while(lo<hi){const mid=(lo+hi)>>1;if(arr[mid]<=v)lo=mid+1;else hi=mid;}
         rank=arr.length>1?Math.min(1,Math.max(0,(lo-0.5)/(arr.length-1))):0.5;
       }
-      rs+=w*(targetCorr[f]>=0?rank:(1-rank));
+      // Keep hard-filtered rows consistent with the main score path: missing is 0.35,
+      // while negative correlations invert observed ranks only.
+      const directedRank=(rank==null||!Number.isFinite(rank))
+        ?0.35
+        :(targetCorr[f]>=0?rank:(1-rank));
+      rs+=w*directedRank;
     }
     SCORE_MAP[d.symbol]=hasRecommendationEvidence?Math.round(rs*1000)/10:0;
   });
