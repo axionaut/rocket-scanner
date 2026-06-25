@@ -1,10 +1,11 @@
 const BUILD_TS='2026-06-25 11:06 IST'; // release build time (IST)
-const APP_VERSION=446; // Five-trading-session rolling rocket-trajectory mRMR; warm-up basket export enabled.
+const APP_VERSION=447; // Five-trading-session rolling rocket-trajectory mRMR; CNC market-order basket entry.
 const GOOGLE_DRIVE_CLIENT_ID='1015012642264-oi2nelv3v90k3d39r994a6nelgjs2a56.apps.googleusercontent.com'; // Public OAuth Web Client ID.
 const HARD_FILTER_SCHEMA='structural_tradeability_v2';
 const STOCK_RUNWAY_CEILING_PCT=19.5; // UC-style ceiling retained only for legacy helpers; entry-ceiling filtering is disabled.
 const PRICE_BAND_BLOCK_BUFFER_PCT=0.15; // Treat rounded 4.9/9.9/19.9 rows as effectively band-locked.
 const BASKET_CASH_RESERVE_RS=1; // Leave a rupee for broker-side tax/rounding differences.
+const BASKET_MARKET_BUDGET_BUFFER_PCT=0.25; // Sizing cushion only; exported buys remain MARKET orders.
 const SYSTEM_TRADE_START_DATE='2026-04-01'; // Adaptive stats use trades closed from this date onward.
 // mRMR v443: four prior trading-day states explain the current day's rocket set.
 // A five-session frame is D-4, D-3, D-2, D-1 and D. Current feature values never explain Y(D).
@@ -4165,12 +4166,13 @@ function toggleStock(sym,checked){
 }
 
 // ── Score-weighted allocation across selected stocks ──
+// Execution is MARKET. This price is only a conservative sizing/target reference so
+// a small upward move between export and fill does not over-allocate the basket.
 function getBuyPrice(s){
   const ltp=s.price>0?s.price:0;
-  const vwap=s.vwap;
-  const atrMargin=(s.atr!=null&&ltp>0)?(ltp*s.atr*0.25/100):0;
-  const candidate=vwap>0?Math.min(vwap+atrMargin,ltp):ltp;
-  return parseFloat(tickPrice(candidate).toFixed(2));
+  if(!(ltp>0)) return 0;
+  const budgetReference=ltp*(1+BASKET_MARKET_BUDGET_BUFFER_PCT/100);
+  return parseFloat(tickPrice(budgetReference).toFixed(2));
 }
 function getRunwayCeilingPct(s){
   return (s&&s.price_band_pct!=null&&isFinite(s.price_band_pct)&&s.price_band_pct>0)?s.price_band_pct:STOCK_RUNWAY_CEILING_PCT;
@@ -5622,10 +5624,10 @@ function exportBasket(){
       },
       weight:0,
       params:{
-        transactionType:'BUY',product:'CNC',orderType:'LIMIT',
+        transactionType:'BUY',product:'CNC',orderType:'MARKET',
         validity:'DAY',validityTTL:1,
-        quantity:qty,price:parseFloat(tickPrice(buyPrice).toFixed(2)),
-        triggerPrice:0,disclosedQuantity:0,lastPrice:0,
+        quantity:qty,price:0,
+        triggerPrice:0,disclosedQuantity:0,lastPrice:Number(s.price)||0,
         variety:'regular',
         gtt:{target:targetPct},
         tags:label?[label]:[]
@@ -5667,9 +5669,13 @@ function exportBasket(){
   if(!orders.length){showToast('Capital too low to buy even 1 share of any selected stock.',4000,true);return;}
   if(orders.length>20) throw new Error(`Basket planning invariant failed: ${orders.length} orders`);
   if(capital>0){
-    const exportedDebit=orders.reduce((sum,order)=>{
-      const qty=order.params.quantity,price=order.params.price;
-      return sum+(qty*price)+calcZerodhaCharges(price,qty,false,false,false);
+    // MARKET orders export with price: 0. Validate affordability against the
+    // same buffered LTP references used by computeAlloc(), never against JSON price.
+    const exportedDebit=exportList.reduce((sum,s)=>{
+      const am=basketAlloc[s.symbol];
+      const qty=am?.qty||0;
+      const budgetPrice=am?.buyPrice||getBuyPrice(s);
+      return sum+(am?.debit??((qty*budgetPrice)+calcZerodhaCharges(budgetPrice,qty,false,false,false)));
     },0);
     if(exportedDebit>capital+0.001){
       console.error('Basket exceeds capital',{capital,exportedDebit,orders});
@@ -5682,7 +5688,7 @@ function exportBasket(){
   const splitNote=splitCount>0?` · split ${splitCount} stocks across TGT1 / TGT2${costCoverCount?` / COST (${costCoverCount} cost-cover legs)`:''}`:'';
   const limitNote=limitOmitted>0?` · ${limitOmitted} lower-priority stock${limitOmitted===1?'':'s'} omitted to keep complete multi-leg plans within Zerodha's 20-order limit`:'';
   const warmupNote=isWarmup?` · neutral warm-up ${WARMUP_NEUTRAL_SCORE.toFixed(1)} score, equal allocation`:'';
-  showToast(`<strong>Exported ${orders.length} BUY orders</strong> as Zerodha_Basket_Buy JSON${warmupNote}${splitNote}${rejNote}${limitNote}`);
+  showToast(`<strong>Exported ${orders.length} CNC MARKET BUY orders</strong> as Zerodha_Basket_Buy JSON${warmupNote}${splitNote}${rejNote}${limitNote}`);
 }
 
 // ── Basket export helper: Zerodha limits 20 orders per basket ──
