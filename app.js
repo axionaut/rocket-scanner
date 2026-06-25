@@ -1,5 +1,5 @@
-const BUILD_TS='2026-06-25 09:34 IST'; // release build time (IST)
-const APP_VERSION=443; // One-clock five-session rolling rocket-trajectory mRMR with sequential diverse-feature selection.
+const BUILD_TS='2026-06-25 09:54 IST'; // release build time (IST)
+const APP_VERSION=443; // Receipt-time session clock + sequential diverse-feature mRMR.
 const GOOGLE_DRIVE_CLIENT_ID='1015012642264-oi2nelv3v90k3d39r994a6nelgjs2a56.apps.googleusercontent.com'; // Public OAuth Web Client ID.
 const HARD_FILTER_SCHEMA='structural_tradeability_v2';
 const STOCK_RUNWAY_CEILING_PCT=19.5; // UC-style ceiling retained only for legacy helpers; entry-ceiling filtering is disabled.
@@ -12,7 +12,8 @@ const DELTA_FEATURE_SCHEMA='five_session_rolling_daily_rocket_trajectory_one_clo
 const DAILY_TRAJECTORY_TOTAL_DAYS=5;
 const DAILY_TRAJECTORY_PRIOR_DAYS=DAILY_TRAJECTORY_TOTAL_DAYS-1;
 const DAILY_TRAJECTORY_WEIGHT_STEPS=[4,3,2,1]; // D-1 through D-4, normalized over usable pairs.
-const MRMR_MAX_SELECTED_FEATURES=32; // Classic sequential mRMR: one diverse compact score set, never duplicate voting by a correlated cluster.
+const MRMR_MAX_SELECTED_FEATURES=24;
+const MRMR_MIN_SELECTION_GAIN=0.0001;
 let MARKET_MODE='stock';
 function modeKey(base){return base;}
 
@@ -949,69 +950,44 @@ function showToast(msg, duration=4000, isError=false){
   if(duration>0) setTimeout(()=>{const el=document.getElementById('appToast');if(el)el.remove();},duration);
 }
 
-// ── One IST clock: 09:00 rollover, 16:00 live-market close ──
-// The app receipt time is the only timestamp used to assign a scanner upload to
-// an mRMR trading day. File metadata, Drive metadata and BUILD_TS are never inputs.
+// ── One operational trading clock: IST 09:00 rollover, 16:00 live close ──
+// The app receipt time owns every session decision. A new model day begins only at
+// 09:00 on a valid NSE trading date. Post-market, overnight, weekends and holidays
+// remain attached to the last valid model day until that next 09:00 boundary.
 const DAY_START_MIN = 9*60;   // 9:00 AM IST = 540
 const DAY_END_MIN   = 16*60;  // 4:00 PM IST = 960
 const DAY_LENGTH_MIN= DAY_END_MIN - DAY_START_MIN; // 420
 
 function istClock(timestamp=Date.now()){
-  const ts=Number(timestamp);
-  const safeTs=isFinite(ts)&&ts>0?ts:Date.now();
-  const shifted=new Date(safeTs+5.5*60*60*1000);
+  const ts=Number(timestamp)||Date.now();
+  const shifted=new Date(ts+5.5*60*60*1000);
   const h=shifted.getUTCHours(),m=shifted.getUTCMinutes();
   return {
-    timestamp:safeTs,
-    h,m,mins:h*60+m,
-    year:shifted.getUTCFullYear(),
-    month:shifted.getUTCMonth()+1,
-    day:shifted.getUTCDate(),
-    dateMs:safeTs+5.5*60*60*1000
+    timestamp:ts,
+    year:shifted.getUTCFullYear(),month:shifted.getUTCMonth()+1,day:shifted.getUTCDate(),
+    h,m,mins:h*60+m,dateMs:ts+5.5*60*60*1000
   };
 }
-function istDateKey(year,month,day){
-  return `${year}-${String(month).padStart(2,'0')}-${String(day).padStart(2,'0')}`;
-}
+function isoDateFromUtcDate(date){ return date.toISOString().slice(0,10); }
 function isNseTradingDate(dateText){
-  if(!dateText) return false;
-  const date=new Date(String(dateText).slice(0,10)+'T12:00:00Z');
+  const date=new Date(String(dateText||'')+'T12:00:00Z');
   if(Number.isNaN(date.getTime())) return false;
-  const dow=date.getUTCDay();
-  return dow!==0&&dow!==6&&!NSE_HOLIDAYS.has(date.toISOString().slice(0,10));
+  const day=date.getUTCDay();
+  return day!==0&&day!==6&&!NSE_HOLIDAYS.has(isoDateFromUtcDate(date));
 }
-function previousValidNseTradingDate(dateText){
-  const date=new Date(String(dateText).slice(0,10)+'T12:00:00Z');
-  if(Number.isNaN(date.getTime())) return null;
-  do{
-    date.setUTCDate(date.getUTCDate()-1);
-    const key=date.toISOString().slice(0,10);
-    if(isNseTradingDate(key)) return key;
-  }while(true);
-}
-// One session key for the whole app:
-// • before 09:00 → latest valid prior trading day
-// • 09:00 onward, including post-market/overnight → current valid trading day
-// • weekends and NSE holidays → latest valid prior trading day
 function getModelTradingDate(timestamp=Date.now()){
   const clock=istClock(timestamp);
   const anchor=new Date(Date.UTC(clock.year,clock.month-1,clock.day,12,0,0));
   if(clock.mins<DAY_START_MIN) anchor.setUTCDate(anchor.getUTCDate()-1);
-  let key=anchor.toISOString().slice(0,10);
-  while(!isNseTradingDate(key)){
-    anchor.setUTCDate(anchor.getUTCDate()-1);
-    key=anchor.toISOString().slice(0,10);
-  }
-  return key;
+  while(!isNseTradingDate(isoDateFromUtcDate(anchor))) anchor.setUTCDate(anchor.getUTCDate()-1);
+  return isoDateFromUtcDate(anchor);
 }
 function istNow(){ return istClock(Date.now()); }
-function isMarketHours(timestamp=Date.now()){
-  const {mins}=istClock(timestamp);
+function isMarketHours(){
+  const {mins}=istNow();
   return mins>=DAY_START_MIN&&mins<DAY_END_MIN;
 }
-function getSessionDate(){
-  return getModelTradingDate(Date.now());
-}
+function getSessionDate(){ return getModelTradingDate(Date.now()); }
 
 // ── Auto Volume: minutes since day-start × configurable multiplier ──
 const LIQ_MIN_VOL_DEFAULT=500;
@@ -2079,8 +2055,7 @@ function mergeDailyRecord(day,currentSnapshot,rocketMetricKey,targetSymbols,elig
   day.timestamp=Math.max(Number(day.timestamp)||0,Number(currentSnapshot.timestamp)||0);
   day.minutes=currentSnapshot.minutes;
   day.inSession=currentSnapshot.inSession;
-  day.telemetryEligible=currentSnapshot.telemetryEligible??true;
-  day.baselineEligible=currentSnapshot.baselineEligible??true;
+  day.baselineEligible=currentSnapshot.baselineEligible;
   day.latestSessionTag=sessionTag||currentSnapshot.sessionTag||day.latestSessionTag||null;
   day.sampleCount=(Number(day.sampleCount)||0)+1;
   return day;
@@ -2135,44 +2110,47 @@ function combineTrajectoryPairs({sources,currentDay,features}){
   return {valid,correlation,targetCorrToday,redundancyGroups,nearest};
 }
 function selectSequentialMrmrFeatures(features,targetCorr,interCorr,maxSelected=MRMR_MAX_SELECTED_FEATURES){
-  const rel=Object.fromEntries((features||[]).map(feature=>[
-    feature,Math.abs(Number(targetCorr?.[feature])||0)
-  ]));
-  const remaining=(features||[]).filter(feature=>rel[feature]>0.0001);
+  const list=[...(features||[])];
+  const mrmr={};
+  const relevance={};
+  list.forEach(feature=>{
+    const rel=Math.abs(Number(targetCorr?.[feature])||0);
+    relevance[feature]=rel;
+    mrmr[feature]={rel,red:0,baseScore:0,reliability:1,score:0,selected:false,accountability:null};
+  });
+  const remaining=list.filter(feature=>relevance[feature]>MRMR_MIN_SELECTION_GAIN);
   const selected=[];
-  const selectionGain={};
-  const similarityToSelected=feature=>selected.length
-    ?Math.max(...selected.map(peer=>Math.abs(interCorr[feature+'|'+peer]||0)))
-    :0;
-
   while(remaining.length&&selected.length<maxSelected){
     let best=null;
     for(const feature of remaining){
-      const redundancy=similarityToSelected(feature);
-      // Sequential mRMR with a maximum-similarity guard: the first strong
-      // representative of a correlated family stands on its relevance, while a
-      // close substitute must add signal beyond its nearest selected neighbour.
-      const gain=selected.length?rel[feature]-redundancy:rel[feature];
-      if(!best||gain>best.gain+1e-12||
-        (Math.abs(gain-best.gain)<=1e-12&&rel[feature]>best.rel+1e-12)){
-        best={feature,rel:rel[feature],redundancy,gain};
-      }
+      const red=selected.length
+        ?Math.max(...selected.map(peer=>Math.abs(Number(interCorr?.[feature+'|'+peer])||0)))
+        :0;
+      // The first representative keeps its full rocket relevance. Every later
+      // candidate must add more unique relevance than it duplicates from the
+      // already selected set.
+      const gain=selected.length?relevance[feature]-red:relevance[feature];
+      if(!best||gain>best.gain+1e-12||(
+        Math.abs(gain-best.gain)<=1e-12&&relevance[feature]>best.rel+1e-12
+      )) best={feature,rel:relevance[feature],red,gain};
     }
-    // A candidate that adds no unique signal is a duplicate vote, not another feature.
-    if(!best||best.gain<=0.0001) break;
+    if(!best||(selected.length>0&&best.gain<=MRMR_MIN_SELECTION_GAIN)) break;
     selected.push(best.feature);
-    selectionGain[best.feature]=best.gain;
+    mrmr[best.feature]={...mrmr[best.feature],red:best.red,baseScore:best.gain,score:best.gain,selected:true};
     remaining.splice(remaining.indexOf(best.feature),1);
   }
-
-  const finalRedundancy={};
-  for(const feature of features||[]){
-    const peers=selected.filter(peer=>peer!==feature);
-    finalRedundancy[feature]=peers.length
-      ?Math.max(...peers.map(peer=>Math.abs(interCorr[feature+'|'+peer]||0)))
+  list.forEach(feature=>{
+    if(mrmr[feature].selected) return;
+    const red=selected.length
+      ?Math.max(...selected.map(peer=>Math.abs(Number(interCorr?.[feature+'|'+peer])||0)))
       :0;
-  }
-  return {selected,rel,selectionGain,finalRedundancy};
+    mrmr[feature]={...mrmr[feature],red,baseScore:Math.max(0,relevance[feature]-red),score:0};
+  });
+  const total=selected.reduce((sum,feature)=>sum+(mrmr[feature].score||0),0)||1;
+  const weights=Object.fromEntries(list.map(feature=>[
+    feature,mrmr[feature].selected?(mrmr[feature].score||0)/total:0
+  ]));
+  return {mrmr,selectedFeatures:selected,weights};
 }
 async function advanceSnapshotLearning({rows,features,priceKey,rocketMetricKey,sessionTag,targetSymbols,eligibleSymbols,advance=true,snapshotTimestamp=Date.now()}){
   if(!SNAPSHOT_RUNTIME||SNAPSHOT_RUNTIME.schema!==SNAPSHOT_STATE_SCHEMA) SNAPSHOT_RUNTIME=emptySnapshotRuntime();
@@ -2187,9 +2165,7 @@ async function advanceSnapshotLearning({rows,features,priceKey,rocketMetricKey,s
   // the file's Drive-modification timestamp as a synthetic fresh trading session.
   const stamp=!advance&&latestStored
     ?{...rawStamp,timestamp:latestStored.timestamp,sessionDate:latestStored.sessionDate,
-      minutes:latestStored.minutes,inSession:latestStored.inSession,
-      telemetryEligible:latestStored.telemetryEligible??true,
-      baselineEligible:latestStored.baselineEligible??true}
+      minutes:latestStored.minutes,inSession:latestStored.inSession,baselineEligible:latestStored.baselineEligible}
     :rawStamp;
   const liveRocketSet=targetSymbols instanceof Set?targetSymbols:new Set(targetSymbols||[]);
   const liveEligibleSet=eligibleSymbols instanceof Set?eligibleSymbols:new Set(eligibleSymbols||[]);
@@ -2263,7 +2239,7 @@ async function advanceSnapshotLearning({rows,features,priceKey,rocketMetricKey,s
 
   let note='';
   if(!hasScoringEvidence){
-    if(!currentForLearning) note='WARMUP: save an accepted daily telemetry record first.';
+    if(!currentForLearning) note='WARMUP: save a daily telemetry record first.';
     else if(!sources.length) note='WARMUP: Day 1 telemetry saved. Scores begin after the next NSE trading-day rocket outcome.';
     else note='WARMUP: the available prior-day telemetry matched fewer than 100 live-eligible stocks.';
   }else{
@@ -2570,55 +2546,35 @@ async function runEngine(raw, sessionTag, options={}){
   const withPC=filtered.map((d,i)=>({i,pc:K.price_change?d[K.price_change]:null})).filter(x=>x.pc!==null);
   withPC.sort((a,b)=>b.pc-a.pc);
 
-  // mRMR learns from earlier states only. Pair similarity is absolute within each
-  // lag before recency aggregation, so inverse duplicates cannot cancel to zero.
+  // mRMR scores current feature states using correlations learned only from earlier feature states and later outcomes.
   const scoringFeatureRows=snapshotLearning.scoringFeatureRows||{};
+  const scoringRows=learningUniverse.map(d=>scoringFeatureRows[d.symbol]||{});
+  // Relevance and redundancy use the identical rolling D-1…D-4 prior-state window.
+  // Current live rows are only score inputs and never alter the mRMR feature relationships.
   const redundancyGroups=snapshotLearning.redundancyGroups||[];
   const interCorr={};
   for(let a=0;a<FEATS.length;a++)for(let b=a+1;b<FEATS.length;b++){
     const f1=FEATS[a],f2=FEATS[b];
-    const similarity=redundancyGroups.length
+    // Similarity is absolute inside each lag before recency averaging. Positive
+    // and inverse twins are both redundant and must not cancel one another out.
+    const r=redundancyGroups.length
       ?redundancyGroups.reduce((sum,group)=>sum+(group.weight||0)*Math.abs(
         pearson((group.rows||[]).map(row=>row[f1]),(group.rows||[]).map(row=>row[f2]))
       ),0)
       :0;
-    interCorr[f1+'|'+f2]=similarity;
-    interCorr[f2+'|'+f1]=similarity;
+    interCorr[f1+'|'+f2]=r;interCorr[f2+'|'+f1]=r;
   }
-
-  // Sequential mRMR chooses a compact diverse set. A strong indicator is never
-  // weakened merely because several close substitutes exist: it can become the
-  // group's representative. A substitute joins only when it adds unique signal.
-  const mrmrSelection=selectSequentialMrmrFeatures(FEATS,targetCorr,interCorr);
-  const selectedFeatures=mrmrSelection.selected;
-  const selectedSet=new Set(selectedFeatures);
-  const mrmr={};
-  for(const f of FEATS){
-    const rel=mrmrSelection.rel[f]||0;
-    const red=mrmrSelection.finalRedundancy[f]||0;
-    const selectionGain=mrmrSelection.selectionGain[f]||0;
-    mrmr[f]={
-      rel,
-      red,
-      baseScore:rel,
-      selectionGain,
-      selected:selectedSet.has(f),
-      reliability:1,
-      score:selectionGain,
-      accountability:null
-    };
-  }
-  const totalMRMR=selectedFeatures.reduce((sum,f)=>sum+(mrmr[f].score||0),0)||1;
-  const weights=Object.fromEntries(FEATS.map(f=>[
-    f,selectedSet.has(f)?(mrmr[f].score||0)/totalMRMR:0
-  ]));
-  const outcomeReliabilityModel=buildOutcomeReliabilityModel(selectedFeatures,weights);
+  // Sequential mRMR selects a diverse feature set. The strongest representative
+  // of a correlated family keeps its full relevance; close substitutes enter only
+  // when their rocket relevance exceeds their maximum similarity to the set.
+  const {mrmr,selectedFeatures,weights}=selectSequentialMrmrFeatures(FEATS,targetCorr,interCorr);
+  const outcomeReliabilityModel=buildOutcomeReliabilityModel(FEATS,weights);
 
   const pctls={};
-  for(const f of selectedFeatures)pctls[f]=pctRank(filtered.map(d=>scoringFeatureRows[d.symbol]?.[f]??null));
+  for(const f of FEATS)pctls[f]=pctRank(filtered.map(d=>scoringFeatureRows[d.symbol]?.[f]??null));
   const results=filtered.map((d,idx)=>{
     let rawScore=0;
-    for(const f of selectedFeatures){
+    for(const f of FEATS){
       const w=weights[f],p=pctls[f][idx];
       // Missing values remain direction-neutral at the conservative 35th-percentile fallback.
       // Only observed values are inverted for a negative learned correlation.
@@ -2683,7 +2639,7 @@ async function runEngine(raw, sessionTag, options={}){
     };
   });
 
-  // Compute top 10 mRMR features (sorted by weight descending)
+  // Dynamic columns show only selected mRMR representatives, never zero-weight duplicates.
   const top10Feats=[...selectedFeatures].sort((a,b)=>(weights[b]||0)-(weights[a]||0)).slice(0,10);
   // Attach ALL feature values to each result for dynamic column display
   results.forEach((r,idx)=>{
@@ -2697,12 +2653,12 @@ async function runEngine(raw, sessionTag, options={}){
   SCORE_MAP={};
   results.forEach(r=>{SCORE_MAP[r.symbol]=r.rocketScore;});
   const _sf={};
-  for(const f of selectedFeatures)_sf[f]=filtered.map(d=>scoringFeatureRows[d.symbol]?.[f]??null).filter(v=>v!=null&&!isNaN(v)).sort((a,b)=>a-b);
+  for(const f of FEATS)_sf[f]=filtered.map(d=>scoringFeatureRows[d.symbol]?.[f]??null).filter(v=>v!=null&&!isNaN(v)).sort((a,b)=>a-b);
   const _filtSet=new Set(filtered.map(d=>d.symbol));
   parsed.forEach(d=>{
     if(_filtSet.has(d.symbol))return;
     let rs=0;
-    for(const f of selectedFeatures){
+    for(const f of FEATS){
       const w=weights[f],v=scoringFeatureRows[d.symbol]?.[f]??null;
       const arr=_sf[f];
       let rank=null;
@@ -2751,7 +2707,7 @@ async function runEngine(raw, sessionTag, options={}){
   // Persist compact methodology summaries; the O(n²) pair matrix is recomputed per run.
   try{
     const methSave={targetCorr:ENGINE_DATA.targetCorr,targetCorrToday,mrmr:ENGINE_DATA.mrmr,weights:ENGINE_DATA.weights,
-      features:ENGINE_DATA.features,selectedFeatures:ENGINE_DATA.selectedFeatures,labels:ENGINE_DATA.labels,top10Feats:ENGINE_DATA.top10Feats,accSessions:ENGINE_DATA.accSessions,laggedNote:ENGINE_DATA.laggedNote,
+      features:ENGINE_DATA.features,labels:ENGINE_DATA.labels,top10Feats:ENGINE_DATA.top10Feats,accSessions:ENGINE_DATA.accSessions,laggedNote:ENGINE_DATA.laggedNote,
       marketBreadth:ENGINE_DATA.marketBreadth,useFreshCorr:ENGINE_DATA.useFreshCorr,hasRecommendationEvidence:ENGINE_DATA.hasRecommendationEvidence,currentUploadLearned:ENGINE_DATA.currentUploadLearned,freshSignalCount:ENGINE_DATA.freshSignalCount,scoringSource:ENGINE_DATA.scoringSource,useAccCorr:ENGINE_DATA.useAccCorr,sectorCol:ENGINE_DATA.sectorCol,industryCol:ENGINE_DATA.industryCol,
       totalParsed:totalParsed,hardFilterSchema:HARD_FILTER_SCHEMA,removed:{...REMOVED},survSize:Object.keys(NSE_SURV).length,
       recommendationFeedback,executedEntryFeedback,outcomeScoreOverlay:ENGINE_DATA.outcomeScoreOverlay,
@@ -3733,7 +3689,6 @@ function scannerSessionTag(fileName, raw, sourceText=''){
   const dataHash=(function(){let h=2166136261;for(let i=0;i<source.length;i++){h^=source.charCodeAt(i);h=Math.imul(h,16777619);}return h>>>0;})();
   return fileName+'·'+raw.length+'·'+dataHash;
 }
-// Support-file metadata only. Scanner mRMR never calls this; it uses receipt time.
 function inputFileSessionDate(file){
   const ts=Number(file?.lastModified);
   if(!(ts>0)) return getSessionDate();
@@ -4060,12 +4015,10 @@ function _renderMethodologyInner(){
 
   mc.innerHTML=''; // clear before rebuild
 
-  let wtHTML=`<table class="ct"><thead><tr><th>Feature</th><th>Src</th><th>Rolling Rocket r</th><th>D-1 Rocket r</th><th>Direction</th><th>Selected</th><th>Rank Redundancy</th><th>mRMR Gain</th><th class="bar-cell">Weight</th><th>Wt%</th></tr></thead><tbody>`;
+  let wtHTML=`<table class="ct"><thead><tr><th>Feature</th><th>Src</th><th>Rolling Rocket r</th><th>D-1 Rocket r</th><th>Direction</th><th>Max Similarity</th><th>mRMR Score</th><th class="bar-cell">Weight</th><th>Wt%</th></tr></thead><tbody>`;
   for(const f of sorted){
     const tc=E.targetCorr[f],m=E.mrmr[f],w=E.weights[f];
-    const dir=tc==null||!isFinite(tc)||Math.abs(tc)<0.0001
-      ?'<span style="color:var(--t3)">—</span>'
-      :(tc>0?'<span style="color:var(--green)">↑</span>':'<span style="color:var(--red)">↓</span>');
+    const dir=tc>=0?'<span style="color:var(--green)">↑</span>':'<span style="color:var(--red)">↓</span>';
     const bw=Math.round((w||0)/maxW*100),bc=(tc||0)>=0?'var(--green)':'var(--red)';
     const srcType=getFeatureSource(f);
     const src=srcType==='NSE'?'<span style="color:var(--cyan);font-size:9px;font-weight:700">NSE</span>':srcType==='Calc'?'<span style="color:var(--purple);font-size:9px;font-weight:700">Calc</span>':'<span style="color:var(--t3);font-size:9px">TV</span>';
@@ -4073,12 +4026,8 @@ function _renderMethodologyInner(){
     const todayCell=todayR!=null&&!isNaN(todayR)?`<span style="color:${todayR>=0?'var(--green)':'var(--red)'};font-size:10px">${(todayR??0).toFixed(3)}</span>`:'—';
     const _n=v=>isFinite(v)?v:0;
     const tcS=tc!=null&&isFinite(tc)?tc.toFixed(3):'—'; const redS=m&&m.red!=null&&isFinite(m.red)?m.red.toFixed(3):'—'; const scS=m&&m.score!=null&&isFinite(m.score)?m.score.toFixed(4):'—'; const wS=w!=null&&isFinite(w)?(w*100).toFixed(1):'—';
-    const selected=m?.selected===true||(w||0)>0;
-    const selectionCell=selected
-      ?'<span style="color:var(--green);font-weight:800">✓</span>'
-      :'<span style="color:var(--t3)">—</span>';
     wtHTML+=`<tr>
-      <td style="font-family:'Plus Jakarta Sans',sans-serif;font-weight:600;color:var(--t1)">${E.labels[f]||f}</td><td>${src}</td><td style="color:${tc==null||!isFinite(tc)||Math.abs(tc)<0.0001?'var(--t3)':tc>0?'var(--green)':'var(--red)'};font-weight:600">${tcS}</td><td>${todayCell}</td><td>${dir}</td><td>${selectionCell}</td><td>${redS}</td><td style="font-weight:700">${scS}</td><td class="bar-cell"><span class="cb" style="width:${bw}%;background:${bc};opacity:.5"></span></td><td style="font-weight:800">${wS}%</td>
+      <td style="font-family:'Plus Jakarta Sans',sans-serif;font-weight:600;color:var(--t1)">${E.labels[f]||f}</td><td>${src}</td><td style="color:${(tc||0)>=0?'var(--green)':'var(--red)'};font-weight:600">${tcS}</td><td>${todayCell}</td><td>${dir}</td><td>${redS}</td><td style="font-weight:700">${scS}</td><td class="bar-cell"><span class="cb" style="width:${bw}%;background:${bc};opacity:.5"></span></td><td style="font-weight:800">${wS}%</td>
     </tr>`;
   }
   wtHTML+='</tbody></table>';
@@ -4097,12 +4046,12 @@ function _renderMethodologyInner(){
     <div id="meth-hf-wrap">${hardFiltersHTML}</div>
     <div id="meth-breadth">${breadthCardHTML}</div>
     <h3 id="meth-engine" style="margin-top:18px">Scoring Engine — Five-Session Rocket-Trajectory mRMR</h3>
-    <p id="mrmrLearningModeNote"><strong>Current learning mode:</strong> A trading day stores one compact telemetry record, not its last upload. Every stock keeps the feature state from its highest observed 1D-change point, and the day retains every stock that entered the live top-10% rocket set. For current day D, mRMR compares those rockets with states at D-1, D-2, D-3 and D-4. Same-day uploads revise D only; they never create intraday training pairs.</p>
+    <p id="mrmrLearningModeNote"><strong>Current learning mode:</strong> App receipt time controls the single model clock. A new trading day begins at 9:00 AM IST; post-market and pre-open uploads continue to revise the latest valid day until the next valid 9:00 AM. Every stock keeps its highest observed 1D-change state, and current Day-D rockets are compared with D-1, D-2, D-3 and D-4. Same-day uploads never create intraday training pairs.</p>
     <div class="m-grid">
       <div class="m-card"><h4>Learning Target</h4><p>Any stock that enters the live top 10% by 1D change during day D receives label 1 for that day. Its target flag remains set even if a later upload shows it outside the top 10%. The day’s source state for every stock is overwritten only when that stock reaches a higher observed 1D change.</p></div>
       <div class="m-card"><h4>📡 How the Engine Learns</h4><p>Current Day-D rockets are compared directly with the same stocks’ states at D-1, D-2, D-3 and D-4, never as chained day-to-day transitions. The newest usable state receives weight 4, then 3, 2 and 1, normalized across available pairs. Scores begin on Day 2 and use the current live state to rank stocks for later rocket potential.</p></div>
       <div class="m-card"><h4>Outcome Self-Correction</h4><p>${feedbackText} Outcome evidence is displayed as confidence context only. It does not add or subtract points from Rocket Score.</p></div>
-      <div class="m-card"><h4>Feature Self-Correction</h4><p>Features that repeatedly separate future rockets from non-rockets strengthen; one-off relationships fade as more transitions arrive. mRMR uses average absolute Pearson correlation across all feature peers so redundant indicators cannot cast duplicate votes.</p></div>
+      <div class="m-card"><h4>Feature Selection</h4><p>mRMR first keeps the feature with the strongest rocket relevance. Later features must add more relevance than their maximum similarity to an already selected feature. A correlated indicator family therefore contributes its strongest representative rather than several copies of the same signal.</p></div>
       <div class="m-card"><h4>🎯 Max 1D Filter</h4><p>Set <em>Max 1D %</em> in the filter bar to hide stocks that have already moved too much today (default 5%). Entry-ceiling filtering has been removed; strong candidates are no longer hidden just because current price is above a calculated buy ceiling.</p></div>
       <div class="m-card"><h4>🚫 Recommendation Filters</h4><p>The learning universe keeps every valid parsed NSE symbol. Recommendation eligibility separately excludes zero-price rows, stocks at/near their NSE price band, non-EQ series, surveillance-flagged stocks, insufficient liquidity, and invalid ATR. Delivery, peak retention, RVOL, DMI, MFI, RSI, and sell pressure are <strong>features, not hard filters</strong>. Currently filtered from recommendations: ${(REMOVED.uc||0)+(REMOVED.surv||0)+(REMOVED.nonEq||0)+(REMOVED.liq||0)+(REMOVED.fscore||0)+(REMOVED.atr||0)} stocks.</p></div>
       <div class="m-card"><h4>Regime-Agnostic Learning</h4><p>Market breadth is shown as context only. The scanner uses one recency-adjusted top-rocket correlation accumulator across all market conditions, so bull, neutral, and bear days do not create separate scoring histories.</p></div>
@@ -4111,7 +4060,7 @@ function _renderMethodologyInner(){
 
     <p style="color:var(--t3);font-style:italic;margin-top:4px">⚠ Quantitative screening only. Not financial advice. Past momentum ≠ future returns.</p>
 
-    <h3 id="meth-weights" style="margin-top:28px">Feature Weights <span style="font-size:12px;color:var(--t3);font-weight:400">(${_featureCount} candidates · ${(E.selectedFeatures||[]).length} selected)</span></h3>
+    <h3 id="meth-weights" style="margin-top:28px">Feature Weights <span style="font-size:12px;color:var(--t3);font-weight:400">(${_featureCount})</span></h3>
     <div class="corr-wrap">${wtHTML}</div>`;
   setTimeout(()=>{_methTbls.hf?.render();_methTbls.sc?.render();},0);
 }
@@ -5815,18 +5764,16 @@ function snapshotStamp(receivedAt=Date.now()){
     timestamp:clock.timestamp,
     sessionDate:getModelTradingDate(clock.timestamp),
     minutes:clock.mins,
-    // Live market status ends at 16:00, but telemetry ownership does not roll
-    // until the next valid trading day opens at 09:00.
+    // 16:00 ends live-market behaviour only. Model-day ownership rolls at the next
+    // valid 09:00 boundary, so post-market and pre-open receipts still revise D.
     inSession:clock.mins>=DAY_START_MIN&&clock.mins<DAY_END_MIN,
-    telemetryEligible:true,
     baselineEligible:true,
+    telemetryEligible:true,
   };
 }
 function isValidSnapshotTransition(previous,current){
   // Retained for diagnostics: valid primary transitions are consecutive NSE trading days only.
-  return !!previous&&!!current&&
-    !!(previous.telemetryEligible??previous.baselineEligible??previous.inSession)&&
-    !!(current.telemetryEligible??current.baselineEligible??current.inSession)&&
+  return !!previous&&!!current&&!!(previous.baselineEligible??previous.inSession)&&!!current.inSession&&
     tradingDaysBetween(previous.sessionDate,current.sessionDate)===1&&current.timestamp>previous.timestamp;
 }
 async function packFloat32Values(values){
@@ -5841,8 +5788,9 @@ async function unpackFloat32Values(source){
   return new Float32Array(view);
 }
 async function decodeSnapshotState(source){
-  // Older telemetry used file metadata and a narrower session gate. The v443
-  // receipt-time one-clock records are deliberately rebuilt from a clean warmup.
+  // v443 changes both the session ownership clock and mRMR feature-selection rule.
+  // Older packed telemetry is deliberately discarded rather than mixed with state
+  // created under a different trading-day contract.
   if(!source||source.schema!==SNAPSHOT_STATE_SCHEMA) return emptySnapshotRuntime();
   const decodeOne=async packed=>packed?{
     ...packed,
@@ -5863,8 +5811,7 @@ async function decodeSnapshotState(source){
 async function encodeSnapshotState(runtime){
   const encodeOne=async snapshot=>snapshot?{
     timestamp:snapshot.timestamp,sessionDate:snapshot.sessionDate,minutes:snapshot.minutes,
-    inSession:snapshot.inSession,telemetryEligible:snapshot.telemetryEligible??true,
-    baselineEligible:snapshot.baselineEligible??true,symbols:snapshot.symbols,
+    inSession:snapshot.inSession,baselineEligible:snapshot.baselineEligible??snapshot.inSession,symbols:snapshot.symbols,
     prices:await packFloat32Values(snapshot.prices),
     features:snapshot.features||await packScannerSnapshot(
       snapshot.symbols.map(symbol=>({symbol,...(snapshot.featureRows[symbol]||{})})),snapshot.featureCols||[]
@@ -5933,7 +5880,8 @@ function applySavedFiltersForMode(mode){
 }
 async function processScannerUpload(scannerFile, mode, options={}){
   if(!scannerFile) return false;
-  // Capture once at receipt. Scanner-file metadata is never a trading timestamp.
+  // This is the only scanner timestamp used by mRMR. File metadata, Drive metadata
+  // and BUILD_TS are deployment/storage facts, never trading-session facts.
   const receivedAt=Date.now();
   const original=captureScannerRuntime();
   const restoreFilters=applySavedFiltersForMode(mode);
@@ -5958,6 +5906,8 @@ async function processScannerUpload(scannerFile, mode, options={}){
     window._lastRawTV=raw;
     const sessionTag=scannerSessionTag(scannerFile.name,raw,text);
     const uploadSession=getModelTradingDate(receivedAt);
+    const receiptClock=istClock(receivedAt);
+    const receivedDuringMarket=receiptClock.mins>=DAY_START_MIN&&receiptClock.mins<DAY_END_MIN;
     const isDuplicateSession=!!(SNAPSHOT_RUNTIME?.lastTag===sessionTag&&getLatestDailyRecord(SNAPSHOT_RUNTIME)?.sessionDate===uploadSession);
     window._lastScannerSessionTag=sessionTag;
     const restoreOnly=options.restoreOnly===true;
@@ -5967,9 +5917,9 @@ async function processScannerUpload(scannerFile, mode, options={}){
     })||[];
     enrichRowsWithNSEData(ALL);
     ALL.sort((a,b)=>b.rocketScore-a.rocketScore);
-    const rcToday=getSessionDate(), rc=FS.get(modeKey(REC_COUNT_STORE,mode))||{};
+    const rcToday=uploadSession, rc=FS.get(modeKey(REC_COUNT_STORE,mode))||{};
     if(!rc[rcToday])rc[rcToday]={};
-    const countSeen=!restoreOnly&&!isDuplicateSession&&isMarketHours();
+    const countSeen=!restoreOnly&&!isDuplicateSession&&receivedDuringMarket;
     ALL.forEach(s=>{
       if(countSeen) rc[rcToday][s.symbol]=(rc[rcToday][s.symbol]||0)+1;
       s.seen=rc[rcToday][s.symbol]||0;
@@ -5988,12 +5938,12 @@ async function processScannerUpload(scannerFile, mode, options={}){
       const recommendations=eligibleCandidates
         .map((s,i)=>({symbol:s.symbol,entryPrice:s.price,score:s.rocketScore,rank:i+1,features:compactOutcomeFeatures(s._features,outcomeFeatureOrder)}));
       window._lastStockOutcomeScan={
-        date:getSessionDate(),sourceDate:uploadSession,threshold,
+        date:uploadSession,sourceDate:uploadSession,threshold,
         rows:window._lastObservedDailyMoves||[],
         recommendations
       };
       recordRecommendationOutcomeScan(window._lastStockOutcomeScan);
-      recordDisplayedEntryCohort({date:getSessionDate(),candidates:eligibleCandidates});
+      recordDisplayedEntryCohort({date:uploadSession,candidates:eligibleCandidates});
       syncExecutedRecommendedEntries();
     }
     FILT=[...ALL];_tvLoadedThisSession=true;
