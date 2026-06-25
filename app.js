@@ -1,5 +1,5 @@
-const BUILD_TS='2026-06-25 10:55 IST'; // release build time (IST)
-const APP_VERSION=445; // Receipt-time session clock + sequential mRMR + surveillance P&L in ₹ and %.
+const BUILD_TS='2026-06-25 11:06 IST'; // release build time (IST)
+const APP_VERSION=446; // Five-trading-session rolling rocket-trajectory mRMR; warm-up basket export enabled.
 const GOOGLE_DRIVE_CLIENT_ID='1015012642264-oi2nelv3v90k3d39r994a6nelgjs2a56.apps.googleusercontent.com'; // Public OAuth Web Client ID.
 const HARD_FILTER_SCHEMA='structural_tradeability_v2';
 const STOCK_RUNWAY_CEILING_PCT=19.5; // UC-style ceiling retained only for legacy helpers; entry-ceiling filtering is disabled.
@@ -4025,7 +4025,7 @@ function _renderMethodologyInner(){
   };
   const scoreCorrSource = E.hasRecommendationEvidence
     ? 'Current feature states are scored using correlations learned from earlier-state → later-rocket pairs'
-    : 'Warmup: a valid earlier-state → later-rocket training pair is required before scores are available';
+    : `Warm-up: neutral ${WARMUP_NEUTRAL_SCORE.toFixed(1)} scores and equal allocation remain usable until the first learned pair`;
   const sessLabel = `${E.accSessions||0} usable daily state pair${(E.accSessions||0)===1?'':'s'} · ${E.laggedNote||'waiting for Day 2'}`;
   const breadthPct=E.marketBreadth!=null?(E.marketBreadth*100).toFixed(0):'?';
   const recFeedback=E.recommendationFeedback;
@@ -4655,12 +4655,14 @@ function renderBasketBtn(){
   const buyBtn=document.getElementById('basketBtn');
   if(buyBtn){
     const cntSpan=document.getElementById('basketCount');
-    const scoreReady=!!ENGINE_DATA?.hasRecommendationEvidence;
+    const isWarmup=!ENGINE_DATA?.hasRecommendationEvidence;
     if(cntSpan)cntSpan.textContent=buyCount>0?`(${buyCount})`:'';
-    buyBtn.disabled=buyCount===0||!scoreReady;
-    buyBtn.title=scoreReady
-      ? 'Export selected stocks as Zerodha basket order'
-      : 'Basket export is disabled until the prior-state model has a valid learned score.';
+    buyBtn.disabled=buyCount===0;
+    buyBtn.title=buyCount===0
+      ? 'Select at least one stock to export a Zerodha basket order.'
+      : isWarmup
+        ? `Export selected stocks as a Zerodha basket using neutral warm-up score ${WARMUP_NEUTRAL_SCORE.toFixed(1)} and equal allocation.`
+        : 'Export selected stocks as Zerodha basket order';
   }
 }
 function renderBasketSummary(){
@@ -5584,10 +5586,9 @@ function planBasketExport(capital, selected){
 
 
 function exportBasket(){
-  if(!ENGINE_DATA?.hasRecommendationEvidence){
-    showToast('Basket export is unavailable while the prior-state model is warming up.',4500,true);
-    return;
-  }
+  // Warm-up exports are allowed. Neutral score 50 produces equal allocation until
+  // an honest learned mRMR score becomes available.
+  const isWarmup=!ENGINE_DATA?.hasRecommendationEvidence;
   const capital=parseFloat(document.getElementById('fCapital').value)||0;
   const selList=FILT.filter(s=>SELECTED.has(s.symbol));
   if(!selList.length){showToast('Select at least one stock first.',3000,true);return;}
@@ -5680,7 +5681,8 @@ function exportBasket(){
   const rejNote=rejectedCount>0?` · ${rejectedCount} skipped (eligibility/allocation)`:'';
   const splitNote=splitCount>0?` · split ${splitCount} stocks across TGT1 / TGT2${costCoverCount?` / COST (${costCoverCount} cost-cover legs)`:''}`:'';
   const limitNote=limitOmitted>0?` · ${limitOmitted} lower-priority stock${limitOmitted===1?'':'s'} omitted to keep complete multi-leg plans within Zerodha's 20-order limit`:'';
-  showToast(`<strong>Exported ${orders.length} BUY orders</strong> as Zerodha_Basket_Buy JSON${splitNote}${rejNote}${limitNote}`);
+  const warmupNote=isWarmup?` · neutral warm-up ${WARMUP_NEUTRAL_SCORE.toFixed(1)} score, equal allocation`:'';
+  showToast(`<strong>Exported ${orders.length} BUY orders</strong> as Zerodha_Basket_Buy JSON${warmupNote}${splitNote}${rejNote}${limitNote}`);
 }
 
 // ── Basket export helper: Zerodha limits 20 orders per basket ──
