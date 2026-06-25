@@ -1,5 +1,5 @@
-const BUILD_TS='2026-06-25 09:54 IST'; // release build time (IST)
-const APP_VERSION=443; // Receipt-time session clock + sequential diverse-feature mRMR.
+const BUILD_TS='2026-06-25 10:55 IST'; // release build time (IST)
+const APP_VERSION=445; // Receipt-time session clock + sequential mRMR + surveillance P&L in ₹ and %.
 const GOOGLE_DRIVE_CLIENT_ID='1015012642264-oi2nelv3v90k3d39r994a6nelgjs2a56.apps.googleusercontent.com'; // Public OAuth Web Client ID.
 const HARD_FILTER_SCHEMA='structural_tradeability_v2';
 const STOCK_RUNWAY_CEILING_PCT=19.5; // UC-style ceiling retained only for legacy helpers; entry-ceiling filtering is disabled.
@@ -12,6 +12,7 @@ const DELTA_FEATURE_SCHEMA='five_session_rolling_daily_rocket_trajectory_one_clo
 const DAILY_TRAJECTORY_TOTAL_DAYS=5;
 const DAILY_TRAJECTORY_PRIOR_DAYS=DAILY_TRAJECTORY_TOTAL_DAYS-1;
 const DAILY_TRAJECTORY_WEIGHT_STEPS=[4,3,2,1]; // D-1 through D-4, normalized over usable pairs.
+const WARMUP_NEUTRAL_SCORE=50; // Equal-weight display/allocation score until honest mRMR evidence exists.
 const MRMR_MAX_SELECTED_FEATURES=24;
 const MRMR_MIN_SELECTION_GAIN=0.0001;
 let MARKET_MODE='stock';
@@ -2583,11 +2584,13 @@ async function runEngine(raw, sessionTag, options={}){
         :(targetCorr[f]>=0?p:(1-p));
       rawScore+=w*directedPercentile;
     }
-    const mrmrScore=hasRecommendationEvidence?Math.round(rawScore*1000)/10:0;
+    const learnedMrmrScore=hasRecommendationEvidence?Math.round(rawScore*1000)/10:null;
     const currentFeatures=Object.fromEntries(FEATS.map(f=>[f,scoringFeatureRows[d.symbol]?.[f]??null]));
     // Outcome learning remains visible as confidence evidence only. It never alters Rocket Score or rank.
     const outcomeReliability=hasRecommendationEvidence?getOutcomeReliabilityAdjustment(currentFeatures,outcomeReliabilityModel,weights):{delta:0,confidence:0,matched:0};
-    const score=mrmrScore;
+    // Warm-up has no predictive evidence yet. A neutral 50 keeps every selected
+    // stock equally weighted for allocation without pretending it is a learned score.
+    const score=hasRecommendationEvidence?learnedMrmrScore:WARMUP_NEUTRAL_SCORE;
 
     const vol=(K.volume?d[K.volume]:null);
     const flags=[];
@@ -2617,7 +2620,7 @@ async function runEngine(raw, sessionTag, options={}){
       delivPct:d.delivery_pct,
       rangePos:d.range_pos,
       pctFrom52wHigh:d.pct_from_52w_high,
-      rocketScore:score, mrmrScore, outcomeAdj:outcomeReliability.delta,
+      rocketScore:score, mrmrScore:learnedMrmrScore, outcomeAdj:outcomeReliability.delta,
       outcomeReliability:outcomeReliability.confidence, outcomeEvidence:outcomeReliability.matched,
       flags,
       isSurv:_isSurv, survRules:_survRules,
@@ -2674,7 +2677,7 @@ async function runEngine(raw, sessionTag, options={}){
         :(targetCorr[f]>=0?rank:(1-rank));
       rs+=w*directedRank;
     }
-    SCORE_MAP[d.symbol]=hasRecommendationEvidence?Math.round(rs*1000)/10:0;
+    SCORE_MAP[d.symbol]=hasRecommendationEvidence?Math.round(rs*1000)/10:WARMUP_NEUTRAL_SCORE;
   });
   parsed.forEach(d=>{d.rocketScore=SCORE_MAP[d.symbol]??null;});
   ENGINE_DATA={targetCorr,targetCorrToday,mrmr,weights,features:FEATS,selectedFeatures,labels:LABELS,top10Feats,accSessions:ACC_CORR?.sessions||0,laggedNote:laggedNote||'',
@@ -2881,9 +2884,12 @@ function renderStats(){
   // Score spread: shows if engine is differentiating
   const scores=ALL.map(s=>s.rocketScore).filter(v=>isFinite(v));
   const scoreReady=!!ENGINE_DATA?.hasRecommendationEvidence;
-  const scoreMax=scoreReady&&scores.length?Math.max(...scores).toFixed(1):'—';
-  const scoreMin=scoreReady&&scores.length?Math.min(...scores).toFixed(1):'—';
-  const scoreSpread=scoreReady&&scores.length?(Math.max(...scores)-Math.min(...scores)).toFixed(1):'—';
+  const scoreMax=scores.length?Math.max(...scores).toFixed(1):'—';
+  const scoreMin=scores.length?Math.min(...scores).toFixed(1):'—';
+  const scoreSpread=scores.length?(Math.max(...scores)-Math.min(...scores)).toFixed(1):'—';
+  const scoreSpreadDetail=scoreReady
+    ? `${scoreMax} top · ${scoreMin} low`
+    : `warm-up · neutral ${WARMUP_NEUTRAL_SCORE.toFixed(1)} · equal allocation`;
 
   // Compute top sector by breadth
   const secBreadths={};
@@ -2933,7 +2939,7 @@ function renderStats(){
   document.getElementById('statsBar').innerHTML=`
     <div class="st"><div class="st-l">Eligible Universe</div><div class="st-v">${t.toLocaleString()}</div><div class="st-d">of ${totalParsed.toLocaleString()} parsed · <span style="color:var(--green)">${bull} up</span> · <span style="color:var(--red)">${t-bull} down/flat</span></div></div>
     ${slTgtCard}
-    <div class="st"><div class="st-l">Score Spread</div><div class="st-v">${scoreSpread}</div><div class="st-d">${scoreMax} top · ${scoreMin} low</div></div>
+    <div class="st"><div class="st-l">Score Spread</div><div class="st-v">${scoreSpread}</div><div class="st-d">${scoreSpreadDetail}</div></div>
     <div class="st"><div class="st-l">Top Sector</div><div class="st-v" style="font-size:15px;color:var(--green)">${topSec}</div><div class="st-d">${topSecPct.toFixed(0)}% advancing</div></div>
     <div class="st"><div class="st-l">Breadth</div><div class="st-v" style="color:var(--cyan)">${ENGINE_DATA.marketBreadth!=null?(ENGINE_DATA.marketBreadth*100).toFixed(0):(bull/t*100).toFixed(0)}%</div><div class="st-d">market context only · ${ENGINE_DATA.accSessions||0} learned horizons</div></div>${bookedCard}`;
 
@@ -3774,14 +3780,24 @@ function buildHardFilterMethodologyHTML(E){
   })).map(r=>r.column||r).filter(h=>!addedRuleKeys.has(survRuleKey(h)));
   const datalistHtml=availableCols.map(col=>`<option value="${escHtml(col)}"></option>`).join('');
 
-  const hfRows=survRows.map(row=>({
-    criteria:row.criteria,
-    removedSort:row.active&&row.removed!=null?(row.removed||0):-1,
-    active:row.active, kind:row.kind, missing:!!row.missing, ruleKey:row.ruleKey||'',
-    inactiveNote:row.missing
-      ?'⚠ Column not found in REG1 file — ALL stocks blocked as precaution. Remove and re-add with correct column name.'
-      :(!row.active?'Inactive — REG1 column not found in last upload':''),
-  }));
+  // Live holdings P&L is deliberately shared with the correlation table below:
+  // it is current unrealised P&L for stocks currently flagged under this exact REG1 column.
+  // Rule rows can overlap, so P&L is meaningful per rule but must never be totalled across rules.
+  const heldPnlByRule=Object.fromEntries(getCurrentSurvHoldingRows().map(row=>[row.key,row]));
+  const hfRows=survRows.map(row=>{
+    const held=heldPnlByRule[row.ruleKey||'']||null;
+    return {
+      criteria:row.criteria,
+      removedSort:row.active&&row.removed!=null?(row.removed||0):-1,
+      heldPnlRs:held?.pnlRs??null,
+      heldPnlPct:held?.pnlPct??null,
+      heldCount:held?.lastCount??0,
+      active:row.active, kind:row.kind, missing:!!row.missing, ruleKey:row.ruleKey||'',
+      inactiveNote:row.missing
+        ?'⚠ Column not found in REG1 file — ALL stocks blocked as precaution. Remove and re-add with correct column name.'
+        :(!row.active?'Inactive — REG1 column not found in last upload':''),
+    };
+  });
   const hfCols=[
     {key:'criteria',label:'REG1 Column',align:'left',
       fmt:(v,r)=>`<span style="font-size:11px;color:${r.missing?'var(--amber)':r.active?'var(--t1)':'var(--t3)'}">${escHtml(v)}${r.inactiveNote?`<div style="font-size:10px;color:${r.missing?'var(--amber)':'var(--red)'};margin-top:2px">${r.inactiveNote}</div>`:''}</span>`,
@@ -3789,6 +3805,12 @@ function buildHardFilterMethodologyHTML(E){
     {key:'removedSort',label:'Removed',align:'right',
       fmt:(v)=>v>=0?`<span style="color:${v>0?'var(--red)':'var(--t3)'};font-weight:700;font-family:'DM Mono',monospace">${v.toLocaleString()}</span>`:'&mdash;',
       totFmt:(v)=>`<span style="color:var(--red);font-weight:700;font-family:'DM Mono',monospace">${v.toLocaleString()}</span>`},
+    {key:'heldPnlRs',label:'Held P&L ₹',align:'right',
+      fmt:(v,r)=>v==null?'&mdash;':`<span style="color:${v<0?'var(--red)':v>0?'var(--green)':'var(--t3)'};font-weight:700;font-family:'DM Mono',monospace" title="Current unrealised P&L across ${r.heldCount||0} held stock${(r.heldCount||0)===1?'':'s'} currently flagged by this REG1 column">${fmtSignedINR(v)}</span>`,
+      totFmt:()=>`<span title="Rule-level P&L overlaps when a holding has multiple REG1 flags, so there is no P&L total.">&mdash;</span>`},
+    {key:'heldPnlPct',label:'Held P&L %',align:'right',
+      fmt:(v,r)=>v==null?'&mdash;':`<span style="color:${v<0?'var(--red)':v>0?'var(--green)':'var(--t3)'};font-weight:700;font-family:'DM Mono',monospace" title="Current unrealised P&L as a capital-weighted percentage across ${r.heldCount||0} held stock${(r.heldCount||0)===1?'':'s'} currently flagged by this REG1 column">${v>=0?'+':''}${v.toFixed(2)}%</span>`,
+      totFmt:()=>`<span title="Rule-level P&L overlaps when a holding has multiple REG1 flags, so there is no P&L total.">&mdash;</span>`},
     {key:'ruleKey',label:'',align:'right',
       fmt:(v,r)=>`<button onclick="removeSurvRule('${v}')" style="padding:4px 8px;border-radius:6px;border:1px solid rgba(239,68,68,.3);background:rgba(239,68,68,.08);color:var(--red);font-size:10px;font-weight:700;cursor:pointer">Remove</button>`,
       totFmt:()=>''},
@@ -3820,6 +3842,7 @@ function buildHardFilterMethodologyHTML(E){
     <div style="background:var(--bg-card);border:1px solid var(--border);border-radius:10px;overflow:hidden">
       <div style="overflow-x:auto">${_methTbls.hf.getHtml()}</div>
     </div>
+    <div style="font-size:10px;color:var(--t3);margin-top:7px">Held P&L is live, unrealised P&L for your currently held stocks flagged by that exact REG1 column. A stock with multiple flags appears in each relevant row, so rule-level P&L is not totalled.</div>
     ${survMeta}
     ${buildSurvCorrHTML()}
   `;
@@ -3838,13 +3861,16 @@ function getCurrentSurvHoldingRows(){
     if(!sym||!(pos?.qty>0)) return;
     const hitCols=SURV_ALL_HITS[sym];
     if(!hitCols) return;
+    const qty=Number(pos.qty)||0;
     const ltp=ALL.find(s=>s.symbol===sym)?.price
       ||POSITIONS?.find(p=>p.symbol===sym)?.ltp
       ||HOLDINGS?.find(h=>h.symbol===sym)?.ltp
       ||null;
     const avg=pos.avg||HOLD_COST_MAP[sym]||HOLDINGS?.find(h=>h.symbol===sym)?.avgCost||null;
-    if(!(ltp>0)||!(avg>0)) return;
-    const pnlPct=+(((ltp-avg)/avg)*100).toFixed(2);
+    if(!(qty>0)||!(ltp>0)||!(avg>0)) return;
+    const capital=avg*qty;
+    const pnlRs=(ltp-avg)*qty;
+    const pnlPct=+((pnlRs/capital)*100).toFixed(2);
     Object.keys(hitCols).forEach(col=>{
       const label=String(col||'').trim();
       const lower=label.toLowerCase();
@@ -3852,14 +3878,19 @@ function getCurrentSurvHoldingRows(){
       const key=survRuleKey(label);
       if(!key) return;
       if(!rowsByCol[key]) rowsByCol[key]={key,col:label,stocks:[]};
-      rowsByCol[key].stocks.push({sym,pnlPct});
+      rowsByCol[key].stocks.push({sym,qty,capital,pnlRs,pnlPct});
     });
   });
   return Object.values(rowsByCol).map(row=>{
     row.stocks.sort((a,b)=>a.pnlPct-b.pnlPct);
+    const capital=row.stocks.reduce((sum,s)=>sum+s.capital,0);
+    const pnlRs=row.stocks.reduce((sum,s)=>sum+s.pnlRs,0);
+    const pnlPct=capital>0?+((pnlRs/capital)*100).toFixed(2):null;
+    // Retain avgPnl for the existing internal accumulator, while the live table
+    // deliberately shows the more useful capital-weighted percentage below.
     const avgPnl=row.stocks.reduce((sum,s)=>sum+s.pnlPct,0)/row.stocks.length;
     const wins=row.stocks.filter(s=>s.pnlPct>0).length;
-    return {...row,sessions:10,lastCount:row.stocks.length,avgPnl,winRate:wins/row.stocks.length*100};
+    return {...row,sessions:10,lastCount:row.stocks.length,capital,pnlRs,pnlPct,avgPnl,winRate:wins/row.stocks.length*100};
   });
 }
 
@@ -3872,11 +3903,13 @@ function updateSurvCorrelation(){
   // Build held symbol → current P&L% map
   let updated=false;
   currentRows.forEach(row=>{
-    if(!SURV_CORR_ACC[row.key]) SURV_CORR_ACC[row.key]={col:row.col,key:row.key,sessions:0,winRate:0,avgPnl:0,lastCount:0};
+    if(!SURV_CORR_ACC[row.key]) SURV_CORR_ACC[row.key]={col:row.col,key:row.key,sessions:0,winRate:0,avgPnl:0,pnlPct:0,pnlRs:0,lastCount:0};
     const acc=SURV_CORR_ACC[row.key];
     const n=acc.sessions+1;
     acc.winRate=(acc.winRate*(n-1)+row.winRate)/n;
     acc.avgPnl=(acc.avgPnl*(n-1)+row.avgPnl)/n;
+    acc.pnlPct=(Number(acc.pnlPct||0)*(n-1)+Number(row.pnlPct||0))/n;
+    acc.pnlRs=(Number(acc.pnlRs||0)*(n-1)+Number(row.pnlRs||0))/n;
     acc.sessions=n; acc.col=row.col; acc.lastCount=row.lastCount;
     updated=true;
   });
@@ -3932,30 +3965,31 @@ function buildSurvCorrHTML(){
   const maxSess=1;
   const scRows=visRows.map(r=>{
     const conf='live';
-    const verdict=r.sessions<2?'❓':r.winRate<35&&r.avgPnl<-0.5?'🚫 Filter':r.winRate>65&&r.avgPnl>0.5?'✅ Safe':'📊 Neutral';
+    const verdict=r.sessions<2?'❓':r.winRate<35&&r.pnlPct<-0.5?'🚫 Filter':r.winRate>65&&r.pnlPct>0.5?'✅ Safe':'📊 Neutral';
     const stocks=r.stocks||[];
     const heldPills=stocks.map(({sym,pnlPct})=>{
       const pnlColor=pnlPct>=0?'var(--green)':'var(--red)';
       const pnlStr=pnlPct!=null?(pnlPct>=0?'+':'')+pnlPct.toFixed(1)+'%':'—';
       return `<span style="display:inline-flex;align-items:center;gap:4px;background:rgba(239,68,68,.1);border:1px solid rgba(239,68,68,.2);border-radius:4px;padding:2px 6px;margin:2px 3px 2px 0;white-space:nowrap;font-family:'DM Mono',monospace"><span style="font-weight:700;color:var(--amber);font-size:11px">${escHtml(sym)}</span><span style="color:${pnlColor};font-size:10px">${pnlStr}</span></span>`;
     }).join('');
-    return {col:r.col,sessions:r.sessions,lastCount:r.lastCount,winRate:r.winRate,avgPnl:r.avgPnl,
+    return {col:r.col,sessions:r.sessions,lastCount:r.lastCount,winRate:r.winRate,avgPnl:r.avgPnl,pnlRs:r.pnlRs,pnlPct:r.pnlPct,
       verdict,_conf:conf,_maxSess:maxSess,heldPills,_heldCount:stocks.length,_addBtn:0};
   });
   const scCols=[
     {key:'col',label:'Surveillance Column',align:'left',fmt:(v)=>`<span style="font-size:11px" title="${escHtml(v)}">${escHtml(v)}</span>`},
     {key:'lastCount',label:'Holdings Flagged',align:'right',fmt:(v)=>`<span style="color:var(--t3);font-family:'DM Mono',monospace">${v}</span>`},
-    {key:'avgPnl',label:'Avg Unrealised P&L%',align:'right',fmt:(v)=>`<span style="color:${v<0?'var(--red)':v>0?'var(--green)':'var(--t3)'};font-weight:700;font-family:'DM Mono',monospace" title="Average unrealised P&L% of your holdings currently flagged by this column">${v>=0?'+':''}${v.toFixed(2)}%</span>`},
+    {key:'pnlRs',label:'Unrealised P&L ₹',align:'right',fmt:(v)=>`<span style="color:${v<0?'var(--red)':v>0?'var(--green)':'var(--t3)'};font-weight:700;font-family:'DM Mono',monospace" title="Total current unrealised P&L in rupees across holdings currently flagged by this column">${fmtSignedINR(v)}</span>`},
+    {key:'pnlPct',label:'Unrealised P&L %',align:'right',fmt:(v)=>`<span style="color:${v<0?'var(--red)':v>0?'var(--green)':'var(--t3)'};font-weight:700;font-family:'DM Mono',monospace" title="Capital-weighted current unrealised P&L percentage across holdings currently flagged by this column">${v>=0?'+':''}${v.toFixed(2)}%</span>`},
     {key:'verdict',label:'Signal',align:'left',fmt:(v)=>`<span style="color:${v.startsWith('🚫')?'var(--red)':v.startsWith('✅')?'var(--green)':'var(--amber)'};font-weight:700">${v}</span>`},
     {key:'heldPills',label:'Held Positions',align:'left',fmt:(v,row)=>v||`<span style="color:var(--t3);font-size:11px">—</span>`},
     {key:'_addBtn',label:'',align:'right',fmt:(v,row)=>`<button onclick="addSurvRule(${escHtml(JSON.stringify(row.col))})" style="padding:4px 8px;border-radius:6px;border:1px solid rgba(34,197,94,.3);background:rgba(34,197,94,.08);color:var(--green);font-size:10px;font-weight:700;cursor:pointer">Add</button>`},
   ];
-  _methTbls.sc=makeSortableTable('tbl-sc',scCols,scRows,'avgPnl',1); // worst avg P&L first
+  _methTbls.sc=makeSortableTable('tbl-sc',scCols,scRows,'pnlPct',1); // worst weighted P&L% first
   return `
     <h4 id="meth-surv-corr" style="margin:16px 0 6px;font-size:13px;color:var(--t2)">📊 Surveillance P&L Correlation
       <button onclick="if(confirm('Reset surveillance correlation accumulator?')){SURV_CORR_ACC={};SURV_CORR_LAST_TAG=null;FS.set(SURV_CORR_STORE,{});_refreshHFSection();}" style="margin-left:12px;padding:3px 8px;border-radius:6px;border:1px solid var(--border);background:none;color:var(--t3);font-size:10px;cursor:pointer">Reset</button>
     </h4>
-    <p style="font-size:11px;color:var(--t3);margin-bottom:8px">For each surveillance column, shows how your <em>currently held stocks</em> flagged by that column are performing (average unrealised P&L%). A column with deep negative avg P&L means your flagged holdings are underwater — consider tightening SLs or exiting. Signal = 🚫 Filter when avg P&L &lt; −0.5%.</p>
+    <p style="font-size:11px;color:var(--t3);margin-bottom:8px">For each surveillance column, shows the total current unrealised P&L in ₹ and the capital-weighted unrealised P&L% of your <em>currently held stocks</em> flagged by that column. A deep negative P&L% means those flagged holdings are underwater. Signal = 🚫 Filter when weighted P&L% &lt; −0.5%. A stock with several flags appears in each relevant rule row, so rows are not totalled.</p>
     ${staleNote}
     <div style="background:var(--bg-card);border:1px solid var(--border);border-radius:10px;overflow:hidden">
       <div style="overflow-x:auto">${_methTbls.sc.getHtml()}</div>
@@ -4706,9 +4740,14 @@ function renderTable(){
         ? `<button onclick="removeFilterOverride('${s.symbol}')" title="Remove this filter override" style="margin-left:6px;padding:2px 6px;border-radius:5px;border:1px solid rgba(239,68,68,.35);background:rgba(239,68,68,.08);color:var(--red);font-size:9px;font-weight:800;cursor:pointer">Unkeep</button>`
         : '';
 
+    const isWarmupScore=!ENGINE_DATA?.hasRecommendationEvidence;
+    const scoreText=isFinite(s.rocketScore)?s.rocketScore.toFixed(1):'—';
+    const scoreTitle=isWarmupScore
+      ? `Neutral warm-up score (${WARMUP_NEUTRAL_SCORE}). Allocation is equal across selected stocks until the first learned mRMR score is available.`
+      : 'Learned Rocket Score from the rolling five-session mRMR model.';
     let cells=`
       <td style="text-align:center"><input type="checkbox" ${isSelected?'checked':''} ${s._filterPreview?'disabled':''} style="width:14px;height:14px;accent-color:var(--amber);cursor:${s._filterPreview?'not-allowed':'pointer'}" onchange="toggleStock('${s.symbol}',this.checked)"></td>
-      <td><span class="sc-m">${ENGINE_DATA?.hasRecommendationEvidence?(isNaN(s.rocketScore)?'?':s.rocketScore.toFixed(1)):'—'}</span></td>
+      <td><span class="sc-m" title="${scoreTitle}">${scoreText}</span></td>
       <td style="font-family:'Plus Jakarta Sans',sans-serif"><div style="font-weight:700;font-size:13px;color:var(--t1)">${s.symbol}${(()=>{const sv=s.seen||0;if(!sv) return '';return`<sub style="font-size:11px;color:var(--amber);font-weight:700;margin-left:3px;font-family:'DM Mono',monospace" title="Seen ${sv}× today">${sv}×</sub>`;})()}${filterBadge}${filterAction}${s._isTopUp?`<span style="font-size:8px;background:rgba(251,146,60,.15);color:var(--fire);border-radius:4px;padding:1px 5px;margin-left:5px;font-weight:700;vertical-align:middle">↑ TOP-UP</span>`:''}${(()=>{const c=Number(s.outcomeReliability||0),n=Number(s.outcomeEvidence||0);if(!(c>0)||!(n>0)) return '';const pct=Math.round(c*100);return `<span style="font-size:8px;background:rgba(167,139,250,.14);color:var(--purple);border-radius:4px;padding:1px 5px;margin-left:5px;font-weight:700;vertical-align:middle" title="Outcome-pattern confidence only. It does not change Rocket Score or rank. ${n} historical matches.">◉ ${pct}% CONF</span>`;})()}${(()=>{if(!s.isSurv) return '';const labels=(s.survRules||[]).map(k=>{const r=SURV_CUSTOM_RULES.find(x=>x.key===k);return r?r.label:k;}).join(' · ');return `<span style="font-size:8px;background:rgba(239,68,68,.15);color:var(--red);border-radius:4px;padding:1px 5px;margin-left:5px;font-weight:700;vertical-align:middle" title="NSE Surveillance: ${escHtml(labels)}">⚠ SURV</span>`;})()}</div><div style="font-size:9px;color:${s._filterPreview?'var(--amber)':'var(--t3)'};max-width:220px;overflow:hidden;text-overflow:ellipsis">${s._filterPreview||s._forceKept?escHtml(s._filterReason||'filtered'):(s.name+(s._isTopUp&&s._heldAvg?` · avg ${fmtINR(s._heldAvg)}`:''))}</div></td>
       <td>${fmtINR(s.price)}</td>
       <td>${fPerf(s.snapshotChange)}</td>
@@ -6148,7 +6187,14 @@ async function initApp(){
     try{
       const saved=brain[modeKey(ALL_STORE)];
       if(saved&&saved.data&&saved.data.length){
-        ALL=saved.data.map(s=>({flags:[],...s,symbol:normSym(s.symbol),rocketScore:correlationCompatible?(s.rocketScore||0):0})).filter(s=>s.symbol);
+        const restoredHasEvidence=!!brain[modeKey(METH_STORE)]?.hasRecommendationEvidence;
+        ALL=saved.data.map(s=>({
+          flags:[],...s,symbol:normSym(s.symbol),
+          rocketScore:restoredHasEvidence&&correlationCompatible&&isFinite(s.rocketScore)
+            ?s.rocketScore
+            :WARMUP_NEUTRAL_SCORE
+        })).filter(s=>s.symbol);
+        SCORE_MAP=Object.fromEntries(ALL.map(s=>[s.symbol,s.rocketScore]));
         FILT=[...ALL];
         SELECTED=new Set(ALL.map(s=>s.symbol));
         if(saved.fileTag){const ft=document.getElementById('fileTag');if(ft)ft.textContent=saved.fileTag;}
