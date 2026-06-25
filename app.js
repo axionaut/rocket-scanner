@@ -1,5 +1,5 @@
-const BUILD_TS='2026-06-25 11:06 IST'; // release build time (IST)
-const APP_VERSION=447; // Five-trading-session rolling rocket-trajectory mRMR; CNC market-order basket entry.
+const BUILD_TS='2026-06-25 11:52 IST'; // release build time (IST)
+const APP_VERSION=448; // Five-trading-session rolling rocket-trajectory mRMR; CNC market-order basket entry with two target legs.
 const GOOGLE_DRIVE_CLIENT_ID='1015012642264-oi2nelv3v90k3d39r994a6nelgjs2a56.apps.googleusercontent.com'; // Public OAuth Web Client ID.
 const HARD_FILTER_SCHEMA='structural_tradeability_v2';
 const STOCK_RUNWAY_CEILING_PCT=19.5; // UC-style ceiling retained only for legacy helpers; entry-ceiling filtering is disabled.
@@ -5559,25 +5559,12 @@ function calcZerodhaChargesSplit(price, qty, isSell, isIntraday, skipDp){
   return {brokerage,stt,txn,sebi,gst,stamp,dp};
 }
 
-// COST leg target: recover estimated full-position CNC buy + sell charges using this child leg.
-function getCostCoverTargetPct(buyPrice, costQty, parentQty){
-  if(!(buyPrice>0)||!(costQty>0)||!(parentQty>0)) return 0.05;
-  const parentBuyCharges=calcZerodhaCharges(buyPrice,parentQty,false,false,false);
-  let pct=0;
-  for(let i=0;i<8;i++){
-    const sellPrice=buyPrice*(1+pct/100);
-    const parentSellCharges=calcZerodhaCharges(sellPrice,parentQty,true,false,false);
-    pct=((parentBuyCharges+parentSellCharges)/(buyPrice*costQty))*100;
-  }
-  return roundPct05(Math.max(0.05,pct+0.05));
-}
-
 function planBasketExport(capital, selected){
   let exportList=(selected||[]).filter(s=>!getPriceBandBlockReason(s));
   let basketAlloc=computeAlloc(capital,exportList);
   const orderCount=()=>exportList.reduce((count,s)=>{
     const qty=capital>0?(basketAlloc[s.symbol]?.qty||0):1;
-    return count+(qty>=3?3:(qty===2?2:(qty===1?1:0)));
+    return count+(qty>=2?2:(qty===1?1:0));
   },0);
   while(exportList.length&&orderCount()>20){
     exportList=exportList.slice(0,-1);
@@ -5605,7 +5592,6 @@ function exportBasket(){
   const orders=[];
   let rejectedCount=bandRejected;
   let splitCount=0;
-  let costCoverCount=0;
   let orderSeq=0;
   const pushBuyOrder=(s,qty,buyPrice,targetPct,label)=>{
     if(qty<=0) return;
@@ -5640,26 +5626,17 @@ function exportBasket(){
     const qty = capital > 0 ? (am?.qty || 0) : 1;
     if(qty===0) return;
     const buyPrice=am?.buyPrice||getBuyPrice(s);
-    if(qty>=3){
-      // All three child BUY orders are mandatory whenever parent quantity permits it.
-      const costQty=Math.max(1,Math.floor(qty/3));
-      const remainingQty=qty-costQty;
-      const baseQty=Math.ceil(remainingQty/2);
-      const runnerQty=remainingQty-baseQty;
-      if(costQty+baseQty+runnerQty!==qty||costQty<=0||baseQty<=0||runnerQty<=0){
-        throw new Error(`Invalid 3-leg basket split for ${s.symbol}: ${qty} -> ${costQty}+${baseQty}+${runnerQty}`);
+    if(qty>=2){
+      // Partial-profit architecture: half at the normal target, half left for the runner.
+      // Odd quantities put the extra share on TGT1, and all child quantities must sum to the parent.
+      const baseQty=Math.ceil(qty/2);
+      const runnerQty=qty-baseQty;
+      if(baseQty+runnerQty!==qty||baseQty<=0||runnerQty<=0){
+        throw new Error(`Invalid 2-leg basket split for ${s.symbol}: ${qty} -> ${baseQty}+${runnerQty}`);
       }
-      const costTarget=getCostCoverTargetPct(buyPrice,costQty,qty);
       runnerTGT=roundPct05(getRunnerTgtPct(s,buyPrice,adaptiveTGT)||adaptiveTGT*1.5);
-      pushBuyOrder(s,costQty,buyPrice,costTarget,'COST');
       pushBuyOrder(s,baseQty,buyPrice,adaptiveTGT,'TGT1');
       pushBuyOrder(s,runnerQty,buyPrice,runnerTGT,'TGT2');
-      splitCount++;costCoverCount++;
-    } else if(qty===2){
-      // Three positive order quantities are impossible for a two-share allocation.
-      runnerTGT=roundPct05(getRunnerTgtPct(s,buyPrice,adaptiveTGT)||adaptiveTGT*1.5);
-      pushBuyOrder(s,1,buyPrice,adaptiveTGT,'TGT1');
-      pushBuyOrder(s,1,buyPrice,runnerTGT,'TGT2');
       splitCount++;
     } else {
       pushBuyOrder(s,qty,buyPrice,adaptiveTGT,'TGT1');
@@ -5685,7 +5662,7 @@ function exportBasket(){
   }
   downloadBasket(orders,'Zerodha_Basket_Buy');
   const rejNote=rejectedCount>0?` · ${rejectedCount} skipped (eligibility/allocation)`:'';
-  const splitNote=splitCount>0?` · split ${splitCount} stocks across TGT1 / TGT2${costCoverCount?` / COST (${costCoverCount} cost-cover legs)`:''}`:'';
+  const splitNote=splitCount>0?` · split ${splitCount} stocks 50/50 across TGT1 / TGT2`:'';
   const limitNote=limitOmitted>0?` · ${limitOmitted} lower-priority stock${limitOmitted===1?'':'s'} omitted to keep complete multi-leg plans within Zerodha's 20-order limit`:'';
   const warmupNote=isWarmup?` · neutral warm-up ${WARMUP_NEUTRAL_SCORE.toFixed(1)} score, equal allocation`:'';
   showToast(`<strong>Exported ${orders.length} CNC MARKET BUY orders</strong> as Zerodha_Basket_Buy JSON${warmupNote}${splitNote}${rejNote}${limitNote}`);
