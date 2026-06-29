@@ -1,5 +1,5 @@
-const BUILD_TS='2026-06-29 15:35 IST'; // release build time (IST)
-const APP_VERSION=450; // Five-trading-session rolling rocket-trajectory mRMR; CNC market-order basket entry with one target per stock.
+const BUILD_TS='2026-06-29 16:10 IST'; // release build time (IST)
+const APP_VERSION=451; // Harvest target plan: hard outcome moves, costs, current-capital sizing, and one basket GTT per stock.
 const GOOGLE_DRIVE_CLIENT_ID='1015012642264-oi2nelv3v90k3d39r994a6nelgjs2a56.apps.googleusercontent.com'; // Public OAuth Web Client ID.
 const HARD_FILTER_SCHEMA='structural_tradeability_v2';
 const STOCK_RUNWAY_CEILING_PCT=19.5; // UC-style ceiling retained only for legacy helpers; entry-ceiling filtering is disabled.
@@ -7,6 +7,10 @@ const PRICE_BAND_BLOCK_BUFFER_PCT=0.15; // Treat rounded 4.9/9.9/19.9 rows as ef
 const BASKET_CASH_RESERVE_RS=1; // Leave a rupee for broker-side tax/rounding differences.
 const BASKET_MARKET_BUDGET_BUFFER_PCT=0.25; // Sizing cushion only; exported buys remain MARKET orders.
 const SYSTEM_TRADE_START_DATE='2026-04-01'; // Adaptive stats use trades closed from this date onward.
+const HARVEST_DAILY_NET_GOAL_RS=15000; // North-star daily pure-profit goal, never a forced capital assumption.
+const HARVEST_DESIRED_NET_PCT=0.60; // Minimum useful net profit after charges for capital rotation.
+const HARVEST_TRIGGER_CONFIDENCE=0.60; // Prefer a target that prior picks commonly reached.
+const HARVEST_MIN_SAMPLES=8;
 // mRMR v443: four prior trading-day states explain the current day's rocket set.
 // A five-session frame is D-4, D-3, D-2, D-1 and D. Current feature values never explain Y(D).
 const DELTA_FEATURE_SCHEMA='five_session_rolling_daily_rocket_trajectory_one_clock_sequential_mrmr_v2';
@@ -2919,21 +2923,19 @@ function renderStats(){
 
   const slTgtCard=(()=>{
     if(!TRADEBOOK_STATS?.adaptiveSL) return '';
+    const harvestPlan=computeHarvestPlan();
     const _sl=TRADEBOOK_STATS.adaptiveSL.toFixed(2);
-    const _tgt=(getEffectiveTgtPct()||TRADEBOOK_STATS.adaptiveTGT).toFixed(2);
+    const _tgt=(harvestPlan.targetPct||TRADEBOOK_STATS.adaptiveTGT).toFixed(2);
     const rr=(parseFloat(_sl)>0?(parseFloat(_tgt)/parseFloat(_sl)):0).toFixed(2);
-    const policy=TRADEBOOK_STATS.exitPolicy;
-    const targetPolicy=getOutcomeTargetPolicy();
     const reviewDays=getEffectiveReviewDays();
     const holdStr=reviewDays?` · review &gt;${reviewDays}d`:'';
-    const learnedStr=targetPolicy?.confidence>0?` · ${targetPolicy.evidenceCount} outcome-adjusted`:'';
+    const learnedStr=harvestPlan.sampleCount?` · ${harvestPlan.sampleCount} move samples`:'';
     const opportunity=getSameDayExitOpportunitySummary();
     const opportunityStr=opportunity.exits?` · <span style="color:var(--amber)" title="${opportunity.exits} symbol/date exit${opportunity.exits===1?'':'s'} compared with the same day's ALL NSE high; ${opportunity.upsideExits} day high${opportunity.upsideExits===1?'':'s'} exceeded your quantity-weighted average sell price.">${opportunity.upsideExits}/${opportunity.exits} exit${opportunity.exits===1?'':'s'} left upside</span>`:'';
-    const nudge=getMissedOppNudge();
-    const nudgeStr=nudge>0?` · <span style="color:var(--amber);font-size:10px" title="Same-day missed upside averages ${opportunity.avgMissed.toFixed(2)}%. 25% of that is added to TGT.">missed opp +${nudge.toFixed(2)}%</span>`:'';
-    const _cp=TRADEBOOK_STATS.avgChargePct!=null?Math.abs(TRADEBOOK_STATS.avgChargePct):null;
-    const costStr=(_cp!=null&&_cp>0)?` · <span style="color:var(--t2)" title="Avg total Zerodha charges as % of round-trip turnover (buy+sell value), across all tradebook trips">cost ~${_cp.toFixed(2)}%</span>`:'';
-    return `<div class="st"><div class="st-l">SL / TGT</div><div class="st-v" style="font-size:15px"><span style="color:var(--red)">−${_sl}%</span><span style="color:var(--t3);font-size:12px"> / </span><span style="color:var(--green)">+${_tgt}%</span></div><div class="st-d">R:R ${rr}${costStr} · self-correcting exit policy${learnedStr}${holdStr}${opportunityStr}${nudgeStr}</div></div>`;
+    const costStr=` · <span style="color:var(--t2)" title="Estimated round-trip charges as % of buy capital">cost ~${harvestPlan.costPct.toFixed(2)}%</span>`;
+    const netStr=` · net ~${harvestPlan.expectedNetPct.toFixed(2)}%`;
+    const confStr=harvestPlan.confidence!=null?` · hit ${(harvestPlan.confidence*100).toFixed(0)}% hist`:'';
+    return `<div class="st"><div class="st-l">SL / Harvest GTT</div><div class="st-v" style="font-size:15px"><span style="color:var(--red)">−${_sl}%</span><span style="color:var(--t3);font-size:12px"> / </span><span style="color:var(--green)">+${_tgt}%</span></div><div class="st-d">R:R ${rr}${costStr}${netStr}${confStr} · ${harvestPlan.source}${learnedStr}${holdStr}${opportunityStr}</div></div>`;
   })();
 
   document.getElementById('statsBar').innerHTML=`
@@ -3625,7 +3627,7 @@ function renderPerformance(){
     ? `${exitOpportunity.exits} symbol/date exits have same-day ALL NSE highs recorded. ${exitOpportunity.upsideExits} highs exceeded the quantity-weighted average sell price; sold-value-weighted missed upside averages ${exitOpportunity.avgMissed.toFixed(2)}% (${fmtINR(exitOpportunity.missedValue)}).`
     : `No same-day exit opportunities have been recorded yet. Load Orders, Tradebook, and ALL NSE for the sell day.`;
   const outcomeHtml=perfCard('Recommendation Outcome Feedback',
-    `<div style="padding:14px 16px;color:var(--t2);font-size:12px;line-height:1.7"><div><strong style="color:var(--t1)">Actual entries:</strong> ${entryOutcomeText}</div><div style="margin-top:8px"><strong style="color:var(--t1)">Eligible shortlist:</strong> ${outcomeText}</div><div style="margin-top:8px"><strong style="color:var(--t1)">Same-day exit opportunity:</strong> ${escapeText}</div><div style="margin-top:8px;color:var(--t3)">Earlier trading-day feature states versus the later current 1D top-10% outcome train raw mRMR relevance. Completed shortlist and executed-entry outcomes are shown as confidence context only, while tradebook and missed-opportunity evidence refine sizing, review timing, and the single target.</div></div>`,'','perf-outcomes');
+    `<div style="padding:14px 16px;color:var(--t2);font-size:12px;line-height:1.7"><div><strong style="color:var(--t1)">Actual entries:</strong> ${entryOutcomeText}</div><div style="margin-top:8px"><strong style="color:var(--t1)">Eligible shortlist:</strong> ${outcomeText}</div><div style="margin-top:8px"><strong style="color:var(--t1)">Same-day exit opportunity:</strong> ${escapeText}</div><div style="margin-top:8px;color:var(--t3)">Earlier trading-day feature states versus the later current 1D top-10% outcome train raw mRMR relevance. Completed shortlist and executed-entry outcomes are shown as confidence context only, while tradebook costs plus hard high-move outcomes refine sizing, review timing, and the single Harvest target.</div></div>`,'','perf-outcomes');
 
   el.innerHTML=`
     <div style="padding:12px 16px">
@@ -4298,52 +4300,73 @@ function removeFilterOverride(sym){
   KEEP_FILTER_OVERRIDES.delete(sym);
   applyFilters();
 }
-// ── Effective learnt TGT% (gross sell-price delta from buy) ──
-// Tradebook TGT is the base; missed opportunity nudge is added when available.
-// Fallback when no tradebook = median of per-stock tgtPct in current FILT (ATR-derived).
-function getMissedOppNudge(){
-  try{return getSameDayExitOpportunitySummary().nudge||0;}
-  catch(e){return 0;}
+// Fixed Harvest GTT% (gross sell-price delta from buy): hard high-move outcomes
+// choose a reachable net target, then costs are added so the GTT covers charges.
+function estimateRoundTripCostPct(grossTargetPct=1){
+  const avgTurnoverPct=TRADEBOOK_STATS?.avgChargePct;
+  if(avgTurnoverPct!=null&&isFinite(avgTurnoverPct)&&avgTurnoverPct>0){
+    return +Math.max(0,avgTurnoverPct*(2+(Math.max(0,grossTargetPct)/100))).toFixed(3);
+  }
+  return 0.35;
 }
-
-function getOutcomeTargetPolicy(){
-  const realised=TRADEBOOK_STATS?.adaptiveTGT;
-  if(!(realised>0)) return null;
+function getHarvestOutcomeSamples(){
   const recPicks=Object.values((FS.get(RECOMMEND_OUTCOME_STORE)||{}).issues||{})
     .flatMap(issue=>(issue.picks||[]).filter(p=>p.complete&&p.observations>0));
   const entryRows=Object.values((FS.get(ENTRY_OUTCOME_STORE)||{}).entries||{})
     .filter(e=>e.complete&&e.observations>0);
-  const recPositive=recPicks.map(p=>p.bestHighProfitPct).filter(v=>v!=null&&isFinite(v)&&v>0);
-  const entryPositive=entryRows.map(e=>e.bestNetHighPct).filter(v=>v!=null&&isFinite(v)&&v>0);
-  const evidenceCount=recPicks.length+entryRows.length;
-  const positiveCount=recPositive.length+entryPositive.length;
-  if(evidenceCount<OUTCOME_FEEDBACK_MIN_SAMPLES||!positiveCount){
-    return {baseTgt:realised,confidence:0,evidenceCount,positiveCount};
-  }
-  const weightedEvidence=(entryValue,recValue)=>{
-    const parts=[];
-    if(entryValue!=null&&entryPositive.length) parts.push({v:entryValue,w:entryPositive.length});
-    if(recValue!=null&&recPositive.length) parts.push({v:recValue,w:recPositive.length});
-    const weight=parts.reduce((sum,p)=>sum+p.w,0);
-    return weight?parts.reduce((sum,p)=>sum+p.v*p.w,0)/weight:null;
-  };
-  const reachable=weightedEvidence(percentileValue(entryPositive,0.35),percentileValue(recPositive,0.35));
-  const successRate=positiveCount/evidenceCount;
-  const confidence=Math.min(0.65,evidenceCount/(evidenceCount+30))*successRate;
-  const baseOpportunity=Math.max(realised,reachable||realised);
-  const baseTgt=roundPct05(realised+((baseOpportunity-realised)*confidence));
-  return {baseTgt,confidence:+confidence.toFixed(3),evidenceCount,positiveCount,
-    reachable:reachable==null?null:+reachable.toFixed(2)};
+  const samples=[];
+  entryRows.forEach(e=>{
+    const net=Number(e.bestNetHighPct);
+    if(isFinite(net)) samples.push({net,kind:'entry'});
+  });
+  recPicks.forEach(p=>{
+    const gross=Number(p.bestHighProfitPct);
+    if(!isFinite(gross)) return;
+    const net=gross-estimateRoundTripCostPct(gross);
+    samples.push({net:+net.toFixed(3),kind:'recommendation'});
+  });
+  return samples;
 }
-
+function computeHarvestPlan(){
+  const samples=getHarvestOutcomeSamples();
+  const netSamples=samples.map(s=>s.net).filter(v=>isFinite(v)).sort((a,b)=>a-b);
+  const desiredNet=HARVEST_DESIRED_NET_PCT;
+  const confidenceTarget=HARVEST_TRIGGER_CONFIDENCE;
+  const reachablePct=1-confidenceTarget;
+  let source='cost floor';
+  let learnedNet=null;
+  if(netSamples.length>=HARVEST_MIN_SAMPLES){
+    learnedNet=percentileValue(netSamples,reachablePct);
+    source=`${Math.round(confidenceTarget*100)}% ${getAdaptiveOutcomeHorizonDays()}d reachable`;
+  }
+  const netTarget=Math.max(desiredNet,learnedNet!=null&&isFinite(learnedNet)?learnedNet:0);
+  let grossTarget=netTarget+estimateRoundTripCostPct(netTarget+0.35);
+  const costPct=estimateRoundTripCostPct(grossTarget);
+  grossTarget=roundPct05(netTarget+costPct);
+  const finalCostPct=estimateRoundTripCostPct(grossTarget);
+  const expectedNetPct=+(grossTarget-finalCostPct).toFixed(3);
+  const achievedConfidence=netSamples.length
+    ? +(netSamples.filter(v=>v>=expectedNetPct).length/netSamples.length).toFixed(3)
+    : null;
+  const capitalNeeded=expectedNetPct>0?Math.ceil(HARVEST_DAILY_NET_GOAL_RS/(expectedNetPct/100)):null;
+  const belowFloor=learnedNet!=null&&learnedNet<desiredNet;
+  return {
+    targetPct:grossTarget,
+    expectedNetPct,
+    costPct:+finalCostPct.toFixed(3),
+    desiredNetPct:desiredNet,
+    confidence:achievedConfidence,
+    confidenceTarget,
+    sampleCount:netSamples.length,
+    learnedNetPct:learnedNet==null?null:+learnedNet.toFixed(3),
+    capitalNeeded,
+    dailyGoal:HARVEST_DAILY_NET_GOAL_RS,
+    source:netSamples.length>=HARVEST_MIN_SAMPLES?source:'cost floor (warming up)',
+    warning:belowFloor?'Recent reachable moves are below the desired net floor.':null
+  };
+}
 function getEffectiveTgtPct(){
-  const nudge=getMissedOppNudge();
-  const policy=getOutcomeTargetPolicy();
-  if(policy?.baseTgt>0) return roundPct05(policy.baseTgt+nudge);
-  const vals = (typeof FILT !== 'undefined' ? FILT : []).map(s => s.tgtPct).filter(v => v != null && isFinite(v) && v > 0);
-  if(!vals.length) return null;
-  vals.sort((a,b)=>a-b);
-  return roundPct05(vals[Math.floor(vals.length/2)]+nudge);
+  return computeHarvestPlan().targetPct;
 }
 
 function calendarDaysHeld(dateStr){
@@ -4858,8 +4881,9 @@ function renderStatusBar(){
     const actualDeployed=Object.values(am2).reduce((s,a)=>s+(a.debit??a.alloc),0);
     const stockCount=Object.keys(am2).length;
     html+=` <span style="color:var(--amber);font-size:11px;font-family:'DM Mono',monospace;font-weight:700;margin-left:8px" title="All-in estimated buy debit: limit-price notional plus CNC buy-side charges.">· ${stockCount} ${allocatedLabel} · ${fmtINR(actualDeployed)} of ${fmtINR(capital)} all-in</span>`;
-    // Expected net at learnt TGT% — feedback, not input
-    const tgtPct=getEffectiveTgtPct();
+    // Expected net at fixed Harvest GTT% — feedback, not input.
+    const harvestPlan=computeHarvestPlan();
+    const tgtPct=harvestPlan.targetPct;
     if(tgtPct>0){
       let totalNet=0;
       for(const sym in am2){
@@ -4869,10 +4893,15 @@ function renderStatusBar(){
           totalNet+=a.expectedNet;
         }
       }
-      const tgtSrc=TRADEBOOK_STATS&&TRADEBOOK_STATS.adaptiveTGT?'tradebook + outcome learning':'ATR fallback + missed opp';
-      const tip=`Sum of (qty × buy × ${tgtPct.toFixed(2)}% − estimated round-trip costs) across selected ${instrumentLabel}. Source: ${tgtSrc}.`;
+      const goalCoverage=harvestPlan.dailyGoal>0?Math.max(0,totalNet)/harvestPlan.dailyGoal:0;
+      const needed=harvestPlan.capitalNeeded?` Capital needed for ${fmtINR(harvestPlan.dailyGoal)} at this learned edge: ${fmtINR(harvestPlan.capitalNeeded)}.`:'';
+      const warn=harvestPlan.warning?` Warning: ${harvestPlan.warning}`:'';
+      const tip=`Fixed Harvest GTT ${tgtPct.toFixed(2)}%, expected net ${harvestPlan.expectedNetPct.toFixed(2)}% after ~${harvestPlan.costPct.toFixed(2)}% costs. Source: ${harvestPlan.source}.${needed}${warn}`;
       const color=totalNet>=0?'var(--green)':'var(--red)';
-      html+=` <span style="color:${color};font-size:11px;font-family:'DM Mono',monospace;font-weight:700;margin-left:8px" title="${tip}">· 🎯 ${fmtINR(totalNet)} net @ ${tgtPct.toFixed(1)}%</span>`;
+      html+=` <span style="color:${color};font-size:11px;font-family:'DM Mono',monospace;font-weight:700;margin-left:8px" title="${tip}">· 🎯 ${fmtINR(totalNet)} net @ harvest ${tgtPct.toFixed(1)}% · ${(goalCoverage*100).toFixed(0)}% of ${fmtINR(harvestPlan.dailyGoal)}</span>`;
+      if(harvestPlan.warning){
+        html+=` <span style="color:var(--amber);font-size:11px;font-family:'DM Mono',monospace;font-weight:700;margin-left:8px" title="${harvestPlan.warning}">· target floor active</span>`;
+      }
     }
   } else if(capital>0){
     html+=` <span style="color:var(--t3);font-size:11px;margin-left:8px">· select ${instrumentLabel} to allocate ${fmtINR(capital)}</span>`;
@@ -5524,7 +5553,8 @@ function exportBasket(){
   const limitOmitted=Math.max(0,selList.length-bandRejected-exportList.length);
 
   // Target-only entries: no stop-loss GTT is exported.
-  const adaptiveTGT=roundPct05(getEffectiveTgtPct()||(TRADEBOOK_STATS?TRADEBOOK_STATS.adaptiveTGT:3.7));
+  const harvestPlan=computeHarvestPlan();
+  const adaptiveTGT=roundPct05(harvestPlan.targetPct||(TRADEBOOK_STATS?TRADEBOOK_STATS.adaptiveTGT:3.7));
 
   const orders=[];
   let rejectedCount=bandRejected;
@@ -5584,9 +5614,11 @@ function exportBasket(){
   downloadBasket(orders,'Zerodha_Basket_Buy');
   const rejNote=rejectedCount>0?` · ${rejectedCount} skipped (eligibility/allocation)`:'';
   const targetNote=` · one target per stock`;
+  const planNote=` · Harvest ${adaptiveTGT.toFixed(2)}% (net ~${harvestPlan.expectedNetPct.toFixed(2)}% after costs)`;
+  const floorNote=harvestPlan.warning?` · target floor active`:``;
   const limitNote=limitOmitted>0?` · ${limitOmitted} lower-priority stock${limitOmitted===1?'':'s'} omitted to keep the basket within Zerodha's 20-order limit`:'';
   const warmupNote=isWarmup?` · neutral warm-up ${WARMUP_NEUTRAL_SCORE.toFixed(1)} score, equal allocation`:'';
-  showToast(`<strong>Exported ${orders.length} CNC MARKET BUY orders</strong> as Zerodha_Basket_Buy JSON${targetNote}${warmupNote}${rejNote}${limitNote}`);
+  showToast(`<strong>Exported ${orders.length} CNC MARKET BUY orders</strong> as Zerodha_Basket_Buy JSON${targetNote}${planNote}${floorNote}${warmupNote}${rejNote}${limitNote}`);
 }
 
 // ── Basket export helper: Zerodha limits 20 orders per basket ──
