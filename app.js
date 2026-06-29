@@ -1,5 +1,5 @@
-const BUILD_TS='2026-06-25 13:27 IST'; // release build time (IST)
-const APP_VERSION=449; // Five-trading-session rolling rocket-trajectory mRMR; CNC market-order basket entry with two target legs.
+const BUILD_TS='2026-06-29 15:35 IST'; // release build time (IST)
+const APP_VERSION=450; // Five-trading-session rolling rocket-trajectory mRMR; CNC market-order basket entry with one target per stock.
 const GOOGLE_DRIVE_CLIENT_ID='1015012642264-oi2nelv3v90k3d39r994a6nelgjs2a56.apps.googleusercontent.com'; // Public OAuth Web Client ID.
 const HARD_FILTER_SCHEMA='structural_tradeability_v2';
 const STOCK_RUNWAY_CEILING_PCT=19.5; // UC-style ceiling retained only for legacy helpers; entry-ceiling filtering is disabled.
@@ -71,7 +71,7 @@ function isLooseNseSupportCsvName(name){
 
 function updateModeUI(){
   const brand=document.querySelector('.brand-tag');
-  if(brand) brand.textContent='Five-Session Rocket-Trajectory mRMR';
+  if(brand) brand.textContent='Prior-State Rocket mRMR';
   document.querySelectorAll('.currency-lbl').forEach(el=>{el.textContent='₹';});
   const minTurn=document.getElementById('fMinTurnover');
   if(minTurn){
@@ -2921,7 +2921,6 @@ function renderStats(){
     if(!TRADEBOOK_STATS?.adaptiveSL) return '';
     const _sl=TRADEBOOK_STATS.adaptiveSL.toFixed(2);
     const _tgt=(getEffectiveTgtPct()||TRADEBOOK_STATS.adaptiveTGT).toFixed(2);
-    const _runner=(getRunnerTgtPct()||parseFloat(_tgt)*1.5).toFixed(2);
     const rr=(parseFloat(_sl)>0?(parseFloat(_tgt)/parseFloat(_sl)):0).toFixed(2);
     const policy=TRADEBOOK_STATS.exitPolicy;
     const targetPolicy=getOutcomeTargetPolicy();
@@ -2934,7 +2933,7 @@ function renderStats(){
     const nudgeStr=nudge>0?` · <span style="color:var(--amber);font-size:10px" title="Same-day missed upside averages ${opportunity.avgMissed.toFixed(2)}%. 25% of that is added to TGT.">missed opp +${nudge.toFixed(2)}%</span>`:'';
     const _cp=TRADEBOOK_STATS.avgChargePct!=null?Math.abs(TRADEBOOK_STATS.avgChargePct):null;
     const costStr=(_cp!=null&&_cp>0)?` · <span style="color:var(--t2)" title="Avg total Zerodha charges as % of round-trip turnover (buy+sell value), across all tradebook trips">cost ~${_cp.toFixed(2)}%</span>`:'';
-    return `<div class="st"><div class="st-l">SL / TGT1 / TGT2</div><div class="st-v" style="font-size:15px"><span style="color:var(--red)">−${_sl}%</span><span style="color:var(--t3);font-size:12px"> / </span><span style="color:var(--green)">+${_tgt}%</span><span style="color:var(--t3);font-size:12px"> / </span><span style="color:var(--green)">+${_runner}%</span></div><div class="st-d">R:R ${rr}${costStr} · self-correcting exit policy${learnedStr}${holdStr}${opportunityStr}${nudgeStr}</div></div>`;
+    return `<div class="st"><div class="st-l">SL / TGT</div><div class="st-v" style="font-size:15px"><span style="color:var(--red)">−${_sl}%</span><span style="color:var(--t3);font-size:12px"> / </span><span style="color:var(--green)">+${_tgt}%</span></div><div class="st-d">R:R ${rr}${costStr} · self-correcting exit policy${learnedStr}${holdStr}${opportunityStr}${nudgeStr}</div></div>`;
   })();
 
   document.getElementById('statsBar').innerHTML=`
@@ -3485,18 +3484,12 @@ function renderPerformance(){
         if(JSON.stringify(_tslStore[sym]||{})!==JSON.stringify(tslInfo)) _tslChanged=true;
       }
       const signal=null; // computed below after all rows collected — needs cross-row normalisation
-      const rawTsl1Price=tslInfo?.tsl1??null;
-      const rawTsl2Price=tslInfo?.tsl2??tslInfo?.tsl??null;
-      const tsl1Price=actionableSellTrigger(rawTsl1Price,ltp);
-      const tsl2Price=actionableSellTrigger(rawTsl2Price,ltp);
+      const rawTslPrice=tslInfo?.tsl??null;
+      const tslPrice=actionableSellTrigger(rawTslPrice,ltp);
       _rows.push({sym,qty,avg:avgCost,ltp,pnlPct,pnlRs,daysHeld,capDeployed,tgtPrice,slPrice,distSL,
-        tslPrice:tsl2Price,tslRawPrice:rawTsl2Price,tslGapPct:tslInfo?.gapPct2??tslInfo?.gapPct??null,tslPeakPct:tslInfo?.peakProfitPct??null,
-        tslLockPct:tslInfo?.lockPct2??tslInfo?.lockPct??null,tslPoints:tslInfo?.trailPoints2??tslInfo?.trailStepPoints??tslInfo?.trailPoints??null,
-        tslDistance:tslInfo?.distancePoints2??tslInfo?.distancePoints??null,tslBasis:tslInfo?.basis2||tslInfo?.basis||'',
-        tsl1Price,tsl1RawPrice:rawTsl1Price,tsl1GapPct:tslInfo?.gapPct1??null,tsl1LockPct:tslInfo?.lockPct1??null,
-        tsl1Points:tslInfo?.trailPoints1??null,tsl1Distance:tslInfo?.distancePoints1??null,tsl1Basis:tslInfo?.basis1||'',tsl1TargetPct:tslInfo?.targetPct1??adaptiveTGT,
-        tsl2Price,tsl2RawPrice:rawTsl2Price,tsl2GapPct:tslInfo?.gapPct2??null,tsl2LockPct:tslInfo?.lockPct2??null,
-        tsl2Points:tslInfo?.trailPoints2??null,tsl2Distance:tslInfo?.distancePoints2??null,tsl2Basis:tslInfo?.basis2||'',tsl2TargetPct:tslInfo?.targetPct2??(getRunnerTgtPct(scannerRow,avgCost,adaptiveTGT)||adaptiveTGT*1.5),signal,
+        tslPrice,tslRawPrice:rawTslPrice,tslGapPct:tslInfo?.gapPct??null,tslPeakPct:tslInfo?.peakProfitPct??null,
+        tslLockPct:tslInfo?.lockPct??null,tslPoints:tslInfo?.trailStepPoints??tslInfo?.trailPoints??null,
+        tslDistance:tslInfo?.distancePoints??null,tslBasis:tslInfo?.basis||'',tslTargetPct:tslInfo?.targetPct??adaptiveTGT,signal,
         _sortDays:daysHeld==null?-1:daysHeld});
     };
     Object.values(getCombinedOpenPositionMap()).forEach(pos=>{
@@ -3557,8 +3550,7 @@ function renderPerformance(){
       {key:'_sortDays',label:'Days Held',align:'right',fmt:(v,r)=>_daysFmt(r.daysHeld),clrFn:()=>'var(--t1)'},
       {key:'tgtPrice',label:'Target ₹',align:'right',fmt:(v,r)=>v!=null?fmtINR(v)+`<span style="font-size:10px;color:var(--t3);margin-left:4px">+${adaptiveTGT}%</span>`:'—',clrFn:()=>'var(--green)'},
       {key:'slPrice',label:'SL ₹',align:'right',fmt:(v,r)=>v!=null?fmtINR(v)+`<span style="font-size:10px;color:var(--t3);margin-left:4px">-${adaptiveSL}%</span>`:'—',clrFn:()=>'var(--red)'},
-      {key:'tsl1Price',label:'TSL 1 Trigger ₹',align:'right',bold:true,fmt:(v,r)=>v!=null?fmtINR(v)+`<div style="font-size:10px;color:var(--t3);margin-top:1px">gap ${Number(r.tsl1Distance??0).toLocaleString('en-IN',INR_2)} · step ${Number(r.tsl1Points??0).toLocaleString('en-IN',INR_2)}</div><div style="font-size:10px;color:var(--t3);margin-top:1px">${Number(r.tsl1GapPct??0).toFixed(2)}% gap</div>`:'—',clrFn:(v,r)=>v==null?'var(--t3)':r.tsl1LockPct>0?'var(--green)':r.tsl1LockPct===0?'var(--amber)':'var(--red)'},
-      {key:'tsl2Price',label:'TSL 2 Trigger ₹',align:'right',bold:true,fmt:(v,r)=>v!=null?fmtINR(v)+`<div style="font-size:10px;color:var(--t3);margin-top:1px">gap ${Number(r.tsl2Distance??0).toLocaleString('en-IN',INR_2)} · step ${Number(r.tsl2Points??0).toLocaleString('en-IN',INR_2)}</div><div style="font-size:10px;color:var(--t3);margin-top:1px">${Number(r.tsl2GapPct??0).toFixed(2)}% gap</div>`:'—',clrFn:(v,r)=>v==null?'var(--t3)':r.tsl2LockPct>0?'var(--green)':r.tsl2LockPct===0?'var(--amber)':'var(--red)'},
+      {key:'tslPrice',label:'TSL Trigger ₹',align:'right',bold:true,fmt:(v,r)=>v!=null?fmtINR(v)+`<div style="font-size:10px;color:var(--t3);margin-top:1px">gap ${Number(r.tslDistance??0).toLocaleString('en-IN',INR_2)} · step ${Number(r.tslPoints??0).toLocaleString('en-IN',INR_2)}</div><div style="font-size:10px;color:var(--t3);margin-top:1px">${Number(r.tslGapPct??0).toFixed(2)}% gap</div>`:'—',clrFn:(v,r)=>v==null?'var(--t3)':r.tslLockPct>0?'var(--green)':r.tslLockPct===0?'var(--amber)':'var(--red)'},
       {key:'signal',label:'Signal',align:'right',bold:true,fmt:v=>v!=null?(v>=0?'+':'')+v.toFixed(2):'—',clrFn:v=>v==null?'var(--t3)':v>0?'var(--green)':v<0?'var(--red)':'var(--t2)'},
     ];
     // Sort: signal ascending (worst first), then days desc
@@ -3621,7 +3613,7 @@ function renderPerformance(){
     ${_navLink('perf-stocks','📈 Stocks',p.symBreakdown.length>0)}
   </nav>`;
   const entryOutcomeText=entrySummary.completed
-    ? `${entrySummary.completed} actual recommended buys assessed over their adaptive outcome windows (${entrySummary.topups} top-ups). Their average best net opportunity is ${entrySummary.avgBestNet>=0?'+':''}${entrySummary.avgBestNet.toFixed(2)}%; their best observed peak velocity averages ${entrySummary.avgVelocity>=0?'+':''}${entrySummary.avgVelocity.toFixed(3)}%/day. These outcomes provide confidence context only and refine the two-leg target policy with sample-size confidence.`
+    ? `${entrySummary.completed} actual recommended buys assessed over their adaptive outcome windows (${entrySummary.topups} top-ups). Their average best net opportunity is ${entrySummary.avgBestNet>=0?'+':''}${entrySummary.avgBestNet.toFixed(2)}%; their best observed peak velocity averages ${entrySummary.avgVelocity>=0?'+':''}${entrySummary.avgVelocity.toFixed(3)}%/day. These outcomes provide confidence context only and refine the single target policy with sample-size confidence.`
     : entrySummary.tracked
       ? `${entrySummary.tracked} actual recommended buys are being tracked across the current ${entrySummary.horizonDays}-trading-day adaptive window. Fresh buys and top-ups are assessed separately; completed outcomes update confidence context and targets.`
       : `Executed-entry learning is ready. Future completed BUY executions that came from displayed recommendations will be assessed over the adaptive outcome window and fed into confidence context and targets.`;
@@ -3633,7 +3625,7 @@ function renderPerformance(){
     ? `${exitOpportunity.exits} symbol/date exits have same-day ALL NSE highs recorded. ${exitOpportunity.upsideExits} highs exceeded the quantity-weighted average sell price; sold-value-weighted missed upside averages ${exitOpportunity.avgMissed.toFixed(2)}% (${fmtINR(exitOpportunity.missedValue)}).`
     : `No same-day exit opportunities have been recorded yet. Load Orders, Tradebook, and ALL NSE for the sell day.`;
   const outcomeHtml=perfCard('Recommendation Outcome Feedback',
-    `<div style="padding:14px 16px;color:var(--t2);font-size:12px;line-height:1.7"><div><strong style="color:var(--t1)">Actual entries:</strong> ${entryOutcomeText}</div><div style="margin-top:8px"><strong style="color:var(--t1)">Eligible shortlist:</strong> ${outcomeText}</div><div style="margin-top:8px"><strong style="color:var(--t1)">Same-day exit opportunity:</strong> ${escapeText}</div><div style="margin-top:8px;color:var(--t3)">Earlier trading-day feature states versus the later current 1D top-10% outcome train raw mRMR relevance. Completed shortlist and executed-entry outcomes are shown as confidence context only, while tradebook and missed-opportunity evidence refine sizing, review timing, and TGT1/TGT2.</div></div>`,'','perf-outcomes');
+    `<div style="padding:14px 16px;color:var(--t2);font-size:12px;line-height:1.7"><div><strong style="color:var(--t1)">Actual entries:</strong> ${entryOutcomeText}</div><div style="margin-top:8px"><strong style="color:var(--t1)">Eligible shortlist:</strong> ${outcomeText}</div><div style="margin-top:8px"><strong style="color:var(--t1)">Same-day exit opportunity:</strong> ${escapeText}</div><div style="margin-top:8px;color:var(--t3)">Earlier trading-day feature states versus the later current 1D top-10% outcome train raw mRMR relevance. Completed shortlist and executed-entry outcomes are shown as confidence context only, while tradebook and missed-opportunity evidence refine sizing, review timing, and the single target.</div></div>`,'','perf-outcomes');
 
   el.innerHTML=`
     <div style="padding:12px 16px">
@@ -4326,7 +4318,7 @@ function getOutcomeTargetPolicy(){
   const evidenceCount=recPicks.length+entryRows.length;
   const positiveCount=recPositive.length+entryPositive.length;
   if(evidenceCount<OUTCOME_FEEDBACK_MIN_SAMPLES||!positiveCount){
-    return {baseTgt:realised,runnerTgt:roundPct05(realised*1.5),confidence:0,evidenceCount,positiveCount};
+    return {baseTgt:realised,confidence:0,evidenceCount,positiveCount};
   }
   const weightedEvidence=(entryValue,recValue)=>{
     const parts=[];
@@ -4336,18 +4328,12 @@ function getOutcomeTargetPolicy(){
     return weight?parts.reduce((sum,p)=>sum+p.v*p.w,0)/weight:null;
   };
   const reachable=weightedEvidence(percentileValue(entryPositive,0.35),percentileValue(recPositive,0.35));
-  const upper=weightedEvidence(percentileValue(entryPositive,0.75),percentileValue(recPositive,0.75));
   const successRate=positiveCount/evidenceCount;
   const confidence=Math.min(0.65,evidenceCount/(evidenceCount+30))*successRate;
   const baseOpportunity=Math.max(realised,reachable||realised);
   const baseTgt=roundPct05(realised+((baseOpportunity-realised)*confidence));
-  const runnerFallback=baseTgt*1.5;
-  const runnerFloor=baseTgt+Math.max(0.5,baseTgt*0.25);
-  const runnerCeiling=baseTgt*1.75;
-  const learnedRunner=upper||runnerFallback;
-  const runnerTgt=roundPct05(clampNum(learnedRunner,runnerFloor,runnerCeiling));
-  return {baseTgt,runnerTgt,confidence:+confidence.toFixed(3),evidenceCount,positiveCount,
-    reachable:reachable==null?null:+reachable.toFixed(2),upper:upper==null?null:+upper.toFixed(2)};
+  return {baseTgt,confidence:+confidence.toFixed(3),evidenceCount,positiveCount,
+    reachable:reachable==null?null:+reachable.toFixed(2)};
 }
 
 function getEffectiveTgtPct(){
@@ -4358,35 +4344,6 @@ function getEffectiveTgtPct(){
   if(!vals.length) return null;
   vals.sort((a,b)=>a-b);
   return roundPct05(vals[Math.floor(vals.length/2)]+nudge);
-}
-
-function getRunnerTgtPct(row=null,buyPrice=null,baseTarget=null){
-  const nudge=getMissedOppNudge();
-  const policy=getOutcomeTargetPolicy();
-  const base=(baseTarget&&isFinite(baseTarget)&&baseTarget>0)?Number(baseTarget):getEffectiveTgtPct();
-  let runner=policy?.runnerTgt>0?policy.runnerTgt+nudge:(base>0?base*1.5:null);
-  if(!(runner>0)) return null;
-  const atr=row?.atr!=null&&isFinite(row.atr)&&row.atr>0?Number(row.atr):null;
-  const entry=(buyPrice&&isFinite(buyPrice)&&buyPrice>0)?Number(buyPrice):((row?.price&&isFinite(row.price)&&row.price>0)?Number(row.price):null);
-  const dayHigh=(row?.high1d&&isFinite(row.high1d)&&row.high1d>0)?Number(row.high1d):null;
-  const dayHighPct=(entry>0&&dayHigh>entry)?((dayHigh-entry)/entry*100):null;
-  if(base>0){
-    const minRunner=base+0.25;
-    let floor=minRunner;
-    let ceiling=Math.max(floor,base*1.8);
-    if(atr>0){
-      floor=Math.max(floor,base+(atr*0.5));
-      ceiling=Math.min(ceiling,Math.max(floor,base+(atr*1.5)));
-    }
-    if(dayHighPct!=null){
-      const reachable=Math.max(floor,dayHighPct);
-      runner=Math.max(runner,Math.min(reachable,ceiling));
-      ceiling=Math.min(ceiling,reachable);
-    }
-    runner=clampNum(runner,floor,ceiling);
-  }
-  const rounded=roundPct05(runner);
-  return rounded>base?rounded:roundPct05(base+0.25);
 }
 
 function calendarDaysHeld(dateStr){
@@ -4442,19 +4399,18 @@ function calcPositionTSL({sym, qty, avgCost, ltp, scannerRow, adaptiveSL, adapti
   const peak=+Math.max(ltp, (dayHigh!=null&&isFinite(dayHigh))?dayHigh:0).toFixed(2);
   const peakProfitPct=+(((peak-avgCost)/avgCost)*100).toFixed(2);
   const protective=tickPrice(avgCost*(1-adaptiveSL/100));
-  const target1=(adaptiveTGT&&isFinite(adaptiveTGT)&&adaptiveTGT>0)?adaptiveTGT:4.2;
-  const target2=getRunnerTgtPct(scannerRow,avgCost,target1)||target1*1.5;
+  const targetPct=(adaptiveTGT&&isFinite(adaptiveTGT)&&adaptiveTGT>0)?adaptiveTGT:4.2;
   const atrPct=(scannerRow?.atr!=null&&isFinite(scannerRow.atr)&&scannerRow.atr>0)?scannerRow.atr:null;
   const minStep=getZerodhaMinTrailPoints(avgCost);
   const avgChanged=prev?.avg!=null&&Math.abs(prev.avg-avgCost)/avgCost>0.01;
   const qtyIncreased=prev?.qty!=null&&qty>prev.qty;
   const reset=!!(avgChanged||qtyIncreased);
 
-  // Proper Zerodha GTT TSL for the split-GTT system:
+  // Proper Zerodha GTT TSL reference:
   // Zerodha's "Trailing points" field is the ratchet step, not the stop distance.
   // So the table shows the actual stop-loss trigger price separately from the step.
-  // TSL trigger = LTP - gap points. Gap % = max(half of that leg's target %, Daily ATR%).
-  const calcLeg=(targetPct, prevKey)=>{
+  // TSL trigger = LTP - gap points. Gap % = max(half target %, Daily ATR%).
+  const calcLeg=(targetPct)=>{
     const floorPct=targetPct/2;
     const gapPct=Math.max(floorPct, atrPct||0);
     const gapPoints=tickPrice(Math.max(minStep, ltp*gapPct/100));
@@ -4477,36 +4433,19 @@ function calcPositionTSL({sym, qty, avgCost, ltp, scannerRow, adaptiveSL, adapti
     };
   };
 
-  const leg1=calcLeg(target1,'tsl1');
-  const leg2=calcLeg(target2,'tsl2');
+  const leg=calcLeg(targetPct);
   return {
-    // Legacy aliases point to the runner leg, because that is the one usually managed manually.
-    tsl:leg2.tsl,
-    rawTsl:leg2.rawTsl,
-    trailPoints:leg2.trailPoints,
-    trailStepPoints:leg2.trailPoints,
+    tsl:leg.tsl,
+    rawTsl:leg.rawTsl,
+    trailPoints:leg.trailPoints,
+    trailStepPoints:leg.trailPoints,
     minTrailPoints:minStep,
-    distancePoints:leg2.distancePoints,
-    rawDistancePoints:leg2.rawDistancePoints,
-    gapPct:leg2.gapPct,
-    lockPct:leg2.lockPct,
-    basis:leg2.basis,
-    tsl1:leg1.tsl,
-    rawTsl1:leg1.rawTsl,
-    trailPoints1:leg1.trailPoints,
-    gapPct1:leg1.gapPct,
-    lockPct1:leg1.lockPct,
-    distancePoints1:leg1.distancePoints,
-    targetPct1:leg1.targetPct,
-    basis1:leg1.basis,
-    tsl2:leg2.tsl,
-    rawTsl2:leg2.rawTsl,
-    trailPoints2:leg2.trailPoints,
-    gapPct2:leg2.gapPct,
-    lockPct2:leg2.lockPct,
-    distancePoints2:leg2.distancePoints,
-    targetPct2:leg2.targetPct,
-    basis2:leg2.basis,
+    distancePoints:leg.distancePoints,
+    rawDistancePoints:leg.rawDistancePoints,
+    gapPct:leg.gapPct,
+    lockPct:leg.lockPct,
+    targetPct:leg.targetPct,
+    basis:leg.basis,
     peak,
     peakProfitPct,
     atrPct:atrPct!=null?+atrPct.toFixed(2):null,
@@ -4548,8 +4487,7 @@ function computeAlloc(capital, selList){
   const sortedSel=[...selList].sort((a,b)=>rawScore(b)-rawScore(a));
   const allocMap={},limits={};
 
-  // Top-up percentage is a hard TOTAL allocation cap, not a per-leg setting.
-  // Both TGT1/TGT2 orders subsequently share this one quantity allocation.
+  // Top-up percentage is a hard TOTAL allocation cap for the single stock order.
   for(const s of sortedSel){
     const buyP=getBuyPrice(s);
     if(!(buyP>0)) continue;
@@ -5564,7 +5502,7 @@ function planBasketExport(capital, selected){
   let basketAlloc=computeAlloc(capital,exportList);
   const orderCount=()=>exportList.reduce((count,s)=>{
     const qty=capital>0?(basketAlloc[s.symbol]?.qty||0):1;
-    return count+(qty>=2?2:(qty===1?1:0));
+    return count+(qty>0?1:0);
   },0);
   while(exportList.length&&orderCount()>20){
     exportList=exportList.slice(0,-1);
@@ -5585,15 +5523,13 @@ function exportBasket(){
   const {exportList,basketAlloc}=planBasketExport(capital,selList);
   const limitOmitted=Math.max(0,selList.length-bandRejected-exportList.length);
 
-  // Target-only entries: no stop-loss GTT is exported on any child order.
+  // Target-only entries: no stop-loss GTT is exported.
   const adaptiveTGT=roundPct05(getEffectiveTgtPct()||(TRADEBOOK_STATS?TRADEBOOK_STATS.adaptiveTGT:3.7));
-  let runnerTGT=roundPct05(getRunnerTgtPct(null,null,adaptiveTGT)||adaptiveTGT*1.5);
 
   const orders=[];
   let rejectedCount=bandRejected;
-  let splitCount=0;
   let orderSeq=0;
-  const pushBuyOrder=(s,qty,buyPrice,targetPct,label)=>{
+  const pushBuyOrder=(s,qty,targetPct)=>{
     if(qty<=0) return;
     const sym=s.symbol;
     const name=s.name||sym;
@@ -5616,7 +5552,7 @@ function exportBasket(){
         triggerPrice:0,disclosedQuantity:0,lastPrice:Number(s.price)||0,
         variety:'regular',
         gtt:{target:targetPct},
-        tags:label?[label]:[]
+        tags:['TGT']
       }
     });
   };
@@ -5625,22 +5561,7 @@ function exportBasket(){
     if(am?.rejected){rejectedCount++;return;} // skip cost-floor rejections
     const qty = capital > 0 ? (am?.qty || 0) : 1;
     if(qty===0) return;
-    const buyPrice=am?.buyPrice||getBuyPrice(s);
-    if(qty>=2){
-      // Partial-profit architecture: half at the normal target, half left for the runner.
-      // Odd quantities put the extra share on TGT1, and all child quantities must sum to the parent.
-      const baseQty=Math.ceil(qty/2);
-      const runnerQty=qty-baseQty;
-      if(baseQty+runnerQty!==qty||baseQty<=0||runnerQty<=0){
-        throw new Error(`Invalid 2-leg basket split for ${s.symbol}: ${qty} -> ${baseQty}+${runnerQty}`);
-      }
-      runnerTGT=roundPct05(getRunnerTgtPct(s,buyPrice,adaptiveTGT)||adaptiveTGT*1.5);
-      pushBuyOrder(s,baseQty,buyPrice,adaptiveTGT,'TGT1');
-      pushBuyOrder(s,runnerQty,buyPrice,runnerTGT,'TGT2');
-      splitCount++;
-    } else {
-      pushBuyOrder(s,qty,buyPrice,adaptiveTGT,'TGT1');
-    }
+    pushBuyOrder(s,qty,adaptiveTGT);
   });
 
   if(!orders.length){showToast('Capital too low to buy even 1 share of any selected stock.',4000,true);return;}
@@ -5662,10 +5583,10 @@ function exportBasket(){
   }
   downloadBasket(orders,'Zerodha_Basket_Buy');
   const rejNote=rejectedCount>0?` · ${rejectedCount} skipped (eligibility/allocation)`:'';
-  const splitNote=splitCount>0?` · split ${splitCount} stocks 50/50 across TGT1 / TGT2`:'';
-  const limitNote=limitOmitted>0?` · ${limitOmitted} lower-priority stock${limitOmitted===1?'':'s'} omitted to keep complete multi-leg plans within Zerodha's 20-order limit`:'';
+  const targetNote=` · one target per stock`;
+  const limitNote=limitOmitted>0?` · ${limitOmitted} lower-priority stock${limitOmitted===1?'':'s'} omitted to keep the basket within Zerodha's 20-order limit`:'';
   const warmupNote=isWarmup?` · neutral warm-up ${WARMUP_NEUTRAL_SCORE.toFixed(1)} score, equal allocation`:'';
-  showToast(`<strong>Exported ${orders.length} CNC MARKET BUY orders</strong> as Zerodha_Basket_Buy JSON${warmupNote}${splitNote}${rejNote}${limitNote}`);
+  showToast(`<strong>Exported ${orders.length} CNC MARKET BUY orders</strong> as Zerodha_Basket_Buy JSON${targetNote}${warmupNote}${rejNote}${limitNote}`);
 }
 
 // ── Basket export helper: Zerodha limits 20 orders per basket ──
