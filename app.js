@@ -1,8 +1,8 @@
-const BUILD_TS='2026-06-30 11:59 IST'; // release build time (IST)
-const APP_VERSION=454; // Trajectory-aware entry gate blocks already-rocketed and fading current candidates.
+const BUILD_TS='2026-06-30 13:51 IST'; // release build time (IST)
+const APP_VERSION=455; // Top-1% rocket target, low-sample diagnostics, and redundancy-aware mRMR.
 const GOOGLE_DRIVE_CLIENT_ID='1015012642264-oi2nelv3v90k3d39r994a6nelgjs2a56.apps.googleusercontent.com'; // Public OAuth Web Client ID.
 const HARD_FILTER_SCHEMA='structural_tradeability_v2';
-const STOCK_RUNWAY_CEILING_PCT=19.5; // UC-style ceiling retained only for legacy helpers; entry-ceiling filtering is disabled.
+const STOCK_RUNWAY_CEILING_PCT=19.5; // Active fallback live-eligibility ceiling and max-entry cap when NSE price-band data is unavailable.
 const PRICE_BAND_BLOCK_BUFFER_PCT=0.15; // Treat rounded 4.9/9.9/19.9 rows as effectively band-locked.
 const BASKET_CASH_RESERVE_RS=1; // Leave a rupee for broker-side tax/rounding differences.
 const BASKET_MARKET_BUDGET_BUFFER_PCT=0.25; // Sizing cushion only; exported buys remain MARKET orders.
@@ -15,7 +15,7 @@ const ENTRY_FADE_RETENTION_FLOOR=70; // Below this, a pullback through the targe
 const ENTRY_FADE_SEVERE_TARGET_MULT=2; // A pullback twice the harvest target is too much give-back to chase.
 // Rocket relevance: four prior trading-day states explain the current day's rocket set.
 // A five-session frame is D-4, D-3, D-2, D-1 and D. Current feature values never explain Y(D).
-const DELTA_FEATURE_SCHEMA='five_session_rolling_daily_rocket_trajectory_one_clock_pure_relevance_v4';
+const DELTA_FEATURE_SCHEMA='five_session_rolling_daily_rocket_trajectory_one_clock_pure_relevance_v5';
 const DAILY_TRAJECTORY_TOTAL_DAYS=5;
 const DAILY_TRAJECTORY_PRIOR_DAYS=DAILY_TRAJECTORY_TOTAL_DAYS-1;
 const DAILY_TRAJECTORY_WEIGHT_STEPS=[4,3,2,1]; // D-1 through D-4, normalized over usable pairs.
@@ -104,11 +104,11 @@ const SCANNER_STORE='rs_filters';
 const SHARED_FILTER_STORE='rs_filters_shared';
 const ALL_STORE='rs_data';
 const CORR_STORE='rs_corr';
-const CORR_SCHEMA='five_session_rolling_daily_rocket_trajectory_one_clock_pure_relevance_v4';
-const ROCKET_TOP_FRACTION=0.10;
+const CORR_SCHEMA='five_session_rolling_daily_rocket_trajectory_one_clock_pure_relevance_v5';
+const ROCKET_TOP_FRACTION=0.01;
 const SNAPSHOT_HISTORY_DECAY=0.95;
 const SNAPSHOT_STATE_STORE='rs_snapshot_mrmr_v1';
-const SNAPSHOT_STATE_SCHEMA='five_session_rolling_daily_rocket_trajectory_one_clock_v2';
+const SNAPSHOT_STATE_SCHEMA='five_session_rolling_daily_rocket_trajectory_one_clock_v3';
 const METH_STORE='rs_meth';
 const HOLD_STORE='rs_holdings';
 const ORDERS_STORE='rs_orders';
@@ -999,6 +999,7 @@ function getSessionDate(){ return getModelTradingDate(Date.now()); }
 
 // ── Auto Volume: minutes since day-start × configurable multiplier ──
 const LIQ_MIN_VOL_DEFAULT=500;
+const SHAREHOLDER_MIN_DEFAULT=500;
 function calcAutoVolume(){
   const mult=parseFloat(document.getElementById('fVolMult')?.value)||LIQ_MIN_VOL_DEFAULT;
   const {mins}=istNow();
@@ -1248,6 +1249,7 @@ function persistMethodologySnapshot(){
       snapshotElapsedMinutes:ENGINE_DATA.snapshotElapsedMinutes??null,
       snapshotDisplayElapsedMinutes:ENGINE_DATA.snapshotDisplayElapsedMinutes??null,
       snapshotPairs:ENGINE_DATA.snapshotPairs||0,
+      lowSampleFeatures:ENGINE_DATA.lowSampleFeatures||[],
       deltaFeatureSchema:ENGINE_DATA.deltaFeatureSchema||DELTA_FEATURE_SCHEMA
     };
     FS.set(modeKey(METH_STORE),methSave);
@@ -1916,6 +1918,13 @@ function pctRank(arr){
 function spearman(xs,ys){
   return pearson(pctRank(xs),pctRank(ys));
 }
+function matchedPairCount(xs,ys){
+  let count=0;
+  for(let i=0;i<xs.length;i++){
+    if(xs[i]!==null&&ys[i]!==null&&!isNaN(xs[i])&&!isNaN(ys[i])) count++;
+  }
+  return count;
+}
 
 
 function emptySnapshotRuntime(){
@@ -1936,7 +1945,7 @@ function buildDecodedSnapshot({stamp,symbols,prices,featureRows,features,session
 
   A stored day is not the final upload of that day. For every stock it retains the
   feature state from that stock's highest observed 1D-change point, while the day
-  also retains the union of stocks that entered the live top-10% rocket set.
+  also retains the union of stocks that entered the live top-1% rocket set.
 
   For current day D, rocket relevance compares that D rocket union with source states at:
     D-1 (weight 4), D-2 (3), D-3 (2), D-4 (1).
@@ -1962,6 +1971,8 @@ function correlationFromPriorState(sourceSnapshot,currentSnapshot,eligibleSymbol
     eligible.has(symbol)&&sourceSnapshot?.featureRows?.[symbol]&&currentSnapshot?.featureRows?.[symbol]
   );
   const correlation={};
+  const sampleCounts={};
+  const lowSampleFeatures=[];
   for(const feature of features){
     const xs=[],ys=[];
     matched.forEach(symbol=>{
@@ -1970,9 +1981,16 @@ function correlationFromPriorState(sourceSnapshot,currentSnapshot,eligibleSymbol
       xs.push(value);
       ys.push(target.has(symbol)?1:0);
     });
-    correlation[feature]=pearson(xs,ys);
+    const samples=matchedPairCount(xs,ys);
+    sampleCounts[feature]=samples;
+    if(samples<30){
+      lowSampleFeatures.push({feature,samples});
+      correlation[feature]=0;
+    }else{
+      correlation[feature]=spearman(xs,ys);
+    }
   }
-  return {correlation,matched,featureRows};
+  return {correlation,matched,featureRows,sampleCounts,lowSampleFeatures};
 }
 function snapshotPriceMoves(previous,current){
   const currentIndex=new Map((current?.symbols||[]).map((symbol,index)=>[symbol,index]));
@@ -2103,16 +2121,36 @@ function combineTrajectoryPairs({sources,currentDay,features}){
   valid.forEach((item,index)=>{item.rawWeight=DAILY_TRAJECTORY_WEIGHT_STEPS[weightOffset+index];});
   const totalWeight=valid.reduce((sum,item)=>sum+item.rawWeight,0)||0;
   valid.forEach(item=>{item.weight=totalWeight?item.rawWeight/totalWeight:0;});
-  const correlation=Object.fromEntries((features||[]).map(feature=>[
-    feature,valid.reduce((sum,item)=>sum+item.weight*(item.pair.correlation?.[feature]??0),0)
-  ]));
+  const lowSampleFeatures=[];
+  const correlation=Object.fromEntries((features||[]).map(feature=>{
+    const usable=valid.filter(item=>(item.pair.sampleCounts?.[feature]||0)>=30);
+    const featureWeight=usable.reduce((sum,item)=>sum+item.rawWeight,0)||0;
+    if(usable.length<valid.length){
+      valid.forEach(item=>{
+        const samples=item.pair.sampleCounts?.[feature]||0;
+        if(samples<30) lowSampleFeatures.push({feature,lag:item.lag,samples});
+      });
+    }
+    const value=featureWeight
+      ?usable.reduce((sum,item)=>sum+(item.rawWeight/featureWeight)*(item.pair.correlation?.[feature]??0),0)
+      :0;
+    return [feature,value];
+  }));
   const nearest=valid.find(item=>item.lag===1)||null;
   const targetCorrToday=Object.fromEntries((features||[]).map(feature=>[
     feature,nearest?(nearest.pair.correlation?.[feature]??0):null
   ]));
-  return {valid,correlation,targetCorrToday,nearest};
+  return {valid,correlation,targetCorrToday,nearest,lowSampleFeatures};
 }
-function selectRocketRelevanceFeatures(features,targetCorr,maxSelected=FEATURE_MAX_SELECTED){
+function computeFeatureRedundancy(featureA,featureB,featureRows){
+  const xs=[],ys=[];
+  (featureRows||[]).forEach(row=>{
+    xs.push(row?.[featureA]??null);
+    ys.push(row?.[featureB]??null);
+  });
+  return Math.abs(spearman(xs,ys)||0);
+}
+function selectRocketRelevanceFeatures(features,targetCorr,maxSelected=FEATURE_MAX_SELECTED,featureRows=[]){
   const list=[...(features||[])];
   const mrmr={};
   const relevance={};
@@ -2121,15 +2159,31 @@ function selectRocketRelevanceFeatures(features,targetCorr,maxSelected=FEATURE_M
     relevance[feature]=rel;
     mrmr[feature]={rel,red:0,baseScore:0,reliability:1,score:0,selected:false,accountability:null};
   });
-  const selected=list
+  const candidates=list
     .filter(feature=>relevance[feature]>FEATURE_MIN_RELEVANCE)
-    .sort((a,b)=>relevance[b]-relevance[a])
-    .slice(0,maxSelected);
-  selected.forEach(feature=>{
-    const rel=relevance[feature];
-    mrmr[feature]={...mrmr[feature],baseScore:rel,score:rel,selected:true,
-      accountability:{relevance:rel}};
-  });
+    .sort((a,b)=>relevance[b]-relevance[a]);
+  const selected=[];
+  const redundancyCache=new Map();
+  const redundancy=(a,b)=>{
+    const key=a<b?`${a}\u0000${b}`:`${b}\u0000${a}`;
+    if(!redundancyCache.has(key)) redundancyCache.set(key,computeFeatureRedundancy(a,b,featureRows));
+    return redundancyCache.get(key);
+  };
+  while(selected.length<maxSelected&&selected.length<candidates.length){
+    let best=null;
+    candidates.forEach(feature=>{
+      if(selected.includes(feature)) return;
+      const red=selected.length?mean(selected.map(existing=>redundancy(feature,existing))):0;
+      const score=relevance[feature]-red;
+      if(!best||score>best.score||(score===best.score&&relevance[feature]>relevance[best.feature])){
+        best={feature,red,score};
+      }
+    });
+    if(!best||best.score<=FEATURE_MIN_RELEVANCE) break;
+    selected.push(best.feature);
+    mrmr[best.feature]={...mrmr[best.feature],red:best.red,baseScore:relevance[best.feature],score:best.score,selected:true,
+      accountability:{relevance:relevance[best.feature],redundancy:best.red,criterion:'MID'}};
+  }
   list.forEach(feature=>{
     if(mrmr[feature].selected) return;
     mrmr[feature]={...mrmr[feature],baseScore:relevance[feature],score:0,
@@ -2255,6 +2309,7 @@ async function advanceSnapshotLearning({rows,features,priceKey,rocketMetricKey,s
     intervalMoves,
     scoringFeatureRows,
     currentRocketSymbols:[...(currentForLearning?.rocketSymbols||[])],
+    lowSampleFeatures:combined.lowSampleFeatures||[],
     lagPairs:ACC_CORR?.lagPairs||[],
     deltaFeatureSchema:DELTA_FEATURE_SCHEMA,
     intervalElapsedMinutes:null,
@@ -2464,7 +2519,7 @@ async function runEngine(raw, sessionTag, options={}){
   const learningUniverse=parsed.filter(d=>d.symbol&&(!K.price||d[K.price]!==0));
   const FEATS_UNIQUE=[...new Set(FEATS)];
   FEATS.length=0;FEATS.push(...FEATS_UNIQUE);
-  let snapshotLearning=null; // populated after current tradeability filters create today’s top-10% label
+  let snapshotLearning=null; // populated after current tradeability filters create today's top-1% label
 
   // ── Recommendation filters ──
   // These rows remain in learningUniverse and snapshots; only live eligibility is filtered.
@@ -2498,7 +2553,7 @@ async function runEngine(raw, sessionTag, options={}){
     const vol=K.volume?d[K.volume]:null;
     const tv=K.turnover?d[K.turnover]:null;
     const volFloor=_liqMinVol;
-    if((sh!==null&&sh<500)||(vol!==null&&vol<volFloor)||(tv!==null&&_liqMinTurnover>0&&tv<_liqMinTurnover)){
+    if((sh!==null&&sh<SHAREHOLDER_MIN_DEFAULT)||(vol!==null&&vol<volFloor)||(tv!==null&&_liqMinTurnover>0&&tv<_liqMinTurnover)){
       _track('liq');return false;
     }
     // Piotroski — stock-only fundamental data filter
@@ -2511,7 +2566,7 @@ async function runEngine(raw, sessionTag, options={}){
     d._filterBucket='';
     return true;
   });
-  // Current-day target: the top 10% of live-eligible stocks by 1D price change.
+  // Current-day target: the top 1% of live-eligible stocks by 1D price change.
   // This is deliberately calculated only after current tradeability exclusions.
   const targetRanked=filtered
     .map((d,i)=>({i,value:K.price_change?d[K.price_change]:null}))
@@ -2549,9 +2604,8 @@ async function runEngine(raw, sessionTag, options={}){
   // Rocket relevance scores current feature states using correlations learned only from earlier feature states and later outcomes.
   const scoringFeatureRows=snapshotLearning.scoringFeatureRows||{};
   const scoringRows=learningUniverse.map(d=>scoringFeatureRows[d.symbol]||{});
-  // Feature selection is pure rocket relevance. If two similar indicators both
-  // predict later rockets, both are allowed to carry weight.
-  const {mrmr,selectedFeatures,weights}=selectRocketRelevanceFeatures(FEATS,targetCorr);
+  // Feature selection uses greedy mRMR: rank-relevance minus same-day cross-sectional redundancy.
+  const {mrmr,selectedFeatures,weights}=selectRocketRelevanceFeatures(FEATS,targetCorr,FEATURE_MAX_SELECTED,filtered.map(d=>scoringFeatureRows[d.symbol]||{}));
   const outcomeReliabilityModel=buildOutcomeReliabilityModel(FEATS,weights);
 
   const pctls={};
@@ -2683,6 +2737,7 @@ async function runEngine(raw, sessionTag, options={}){
     snapshotElapsedMinutes:null,
     snapshotDisplayElapsedMinutes:snapshotLearning.intervalElapsedMinutes??null,
     snapshotPairs:snapshotLearning.snapshotPairs??0,
+    lowSampleFeatures:snapshotLearning.lowSampleFeatures||[],
     sectorCol: sectorCol?true:false, industryCol: industryCol?true:false,
     totalParsed: totalParsed,
     hardFilterSchema:HARD_FILTER_SCHEMA,
@@ -2704,7 +2759,7 @@ async function runEngine(raw, sessionTag, options={}){
       totalParsed:totalParsed,hardFilterSchema:HARD_FILTER_SCHEMA,removed:{...REMOVED},survSize:Object.keys(NSE_SURV).length,
       recommendationFeedback,executedEntryFeedback,outcomeScoreOverlay:ENGINE_DATA.outcomeScoreOverlay,
       snapshotElapsedMinutes:ENGINE_DATA.snapshotElapsedMinutes,snapshotDisplayElapsedMinutes:ENGINE_DATA.snapshotDisplayElapsedMinutes,
-      snapshotPairs:ENGINE_DATA.snapshotPairs,scoringModel:ENGINE_DATA.scoringModel,deltaFeatureSchema:ENGINE_DATA.deltaFeatureSchema};
+      snapshotPairs:ENGINE_DATA.snapshotPairs,lowSampleFeatures:ENGINE_DATA.lowSampleFeatures||[],scoringModel:ENGINE_DATA.scoringModel,deltaFeatureSchema:ENGINE_DATA.deltaFeatureSchema};
     FS.set(modeKey(METH_STORE),methSave);
   }catch(e){console.warn('Could not save methodology data',e);}
   persistMethodologySnapshot();
@@ -3611,7 +3666,7 @@ function renderPerformance(){
     ? `${exitOpportunity.exits} symbol/date exits have same-day ALL NSE highs recorded. ${exitOpportunity.upsideExits} highs exceeded the quantity-weighted average sell price; sold-value-weighted missed upside averages ${exitOpportunity.avgMissed.toFixed(2)}% (${fmtINR(exitOpportunity.missedValue)}).`
     : `No same-day exit opportunities have been recorded yet. Load Orders, Tradebook, and ALL NSE for the sell day.`;
   const outcomeHtml=perfCard('Recommendation Outcome Feedback',
-    `<div style="padding:14px 16px;color:var(--t2);font-size:12px;line-height:1.7"><div><strong style="color:var(--t1)">Actual entries:</strong> ${entryOutcomeText}</div><div style="margin-top:8px"><strong style="color:var(--t1)">Eligible shortlist:</strong> ${outcomeText}</div><div style="margin-top:8px"><strong style="color:var(--t1)">Same-day exit opportunity:</strong> ${escapeText}</div><div style="margin-top:8px;color:var(--t3)">Earlier trading-day feature states versus the later current 1D top-10% outcome train raw rocket relevance. Completed shortlist and executed-entry outcomes are shown as confidence context only, while tradebook costs plus hard high-move outcomes refine sizing, review timing, and the single Harvest target.</div></div>`,'','perf-outcomes');
+    `<div style="padding:14px 16px;color:var(--t2);font-size:12px;line-height:1.7"><div><strong style="color:var(--t1)">Actual entries:</strong> ${entryOutcomeText}</div><div style="margin-top:8px"><strong style="color:var(--t1)">Eligible shortlist:</strong> ${outcomeText}</div><div style="margin-top:8px"><strong style="color:var(--t1)">Same-day exit opportunity:</strong> ${escapeText}</div><div style="margin-top:8px;color:var(--t3)">Earlier trading-day feature states versus the later current 1D top-1% outcome train raw rocket relevance. Completed shortlist and executed-entry outcomes are shown as confidence context only, while tradebook costs plus hard high-move outcomes refine sizing, review timing, and the single Harvest target.</div></div>`,'','perf-outcomes');
 
   el.innerHTML=`
     <div style="padding:12px 16px">
@@ -4011,6 +4066,11 @@ function _renderMethodologyInner(){
   const entryFeedback=E.executedEntryFeedback;
   const overlay=E.outcomeScoreOverlay||{};
   const feedbackText=`Shortlist outcomes: ${recFeedback?.samples||0}; executed-entry outcomes: ${entryFeedback?.samples||0}. Raw rocket relevance learns which earlier feature states precede later rocket outcomes. Completed recommendation and entry outcomes remain confidence context only and continue refining targets, sizing, and review timing.`;
+  const lowSamples=Array.isArray(E.lowSampleFeatures)?E.lowSampleFeatures:[];
+  const lowSamplePreview=lowSamples.slice(0,12).map(item=>`${E.labels?.[item.feature]||item.feature} D-${item.lag} (${item.samples})`).join(', ');
+  const lowSampleText=lowSamples.length
+    ?`${lowSamples.length} feature/lag correlations were below the 30-sample floor and excluded from that feature's blended lag weight${lowSamplePreview?': '+lowSamplePreview+(lowSamples.length>12?' ...':''):'.'}`
+    :'No selected learning pair hit the 30-sample feature floor.';
   const breadthCardHTML=`<div class="breadth-bar">
     <div class="breadth-badge" style="color:var(--cyan)">${breadthPct}% Breadth</div>
     <div class="breadth-meta">
@@ -4028,7 +4088,7 @@ function _renderMethodologyInner(){
 
   mc.innerHTML=''; // clear before rebuild
 
-  let wtHTML=`<table class="ct"><thead><tr><th>Feature</th><th>Src</th><th>Rolling Rocket r</th><th>D-1 Rocket r</th><th>Direction</th><th>Relevance Score</th><th class="bar-cell">Weight</th><th>Wt%</th></tr></thead><tbody>`;
+  let wtHTML=`<table class="ct"><thead><tr><th>Feature</th><th>Src</th><th>Rolling Rocket r</th><th>D-1 Rocket r</th><th>Direction</th><th>mRMR Score</th><th class="bar-cell">Weight</th><th>Wt%</th></tr></thead><tbody>`;
   for(const f of sorted){
     const tc=E.targetCorr[f],m=E.mrmr[f],w=E.weights[f];
     const dir=tc>=0?'<span style="color:var(--green)">↑</span>':'<span style="color:var(--red)">↓</span>';
@@ -4061,10 +4121,11 @@ function _renderMethodologyInner(){
     <h3 id="meth-engine" style="margin-top:18px">Scoring Engine — Five-Session Rocket Relevance</h3>
     <p id="mrmrLearningModeNote"><strong>Current learning mode:</strong> App receipt time controls the single model clock. A new trading day begins at 9:00 AM IST; post-market and pre-open uploads continue to revise the latest valid day until the next valid 9:00 AM. Every stock keeps its highest observed 1D-change state, and current Day-D rockets are compared with D-1, D-2, D-3 and D-4. Same-day uploads never create intraday training pairs.</p>
     <div class="m-grid">
-      <div class="m-card"><h4>Learning Target</h4><p>Any stock that enters the live top 10% by 1D change during day D receives label 1 for that day. Its target flag remains set even if a later upload shows it outside the top 10%. The day’s source state for every stock is overwritten only when that stock reaches a higher observed 1D change.</p></div>
+      <div class="m-card"><h4>Learning Target</h4><p>Any stock that enters the live top 1% by 1D change during day D receives label 1 for that day. Its target flag remains set even if a later upload shows it outside the top 1%. The day’s source state for every stock is overwritten only when that stock reaches a higher observed 1D change.</p></div>
       <div class="m-card"><h4>📡 How the Engine Learns</h4><p>Current Day-D rockets are compared directly with the same stocks’ states at D-1, D-2, D-3 and D-4, never as chained day-to-day transitions. The newest usable state receives weight 4, then 3, 2 and 1, normalized across available pairs. Scores begin on Day 2 and use the current live state to rank stocks for later rocket potential.</p></div>
+      <div class="m-card"><h4>Low-Sample Diagnostics</h4><p>${lowSampleText}</p></div>
       <div class="m-card"><h4>Outcome Self-Correction</h4><p>${feedbackText} Outcome evidence is displayed as confidence context only. It does not add or subtract points from Rocket Score.</p></div>
-      <div class="m-card"><h4>Feature Selection</h4><p>Every retained indicator competes on its own rolling rocket correlation. The strongest predictive features receive weight directly; similar indicators are not suppressed if they also predict later rockets.</p></div>
+      <div class="m-card"><h4>Feature Selection</h4><p>Every retained indicator competes on rank-based rocket relevance minus same-day cross-sectional redundancy with already-selected features. Final weights are proportional to that mRMR score, so highly overlapping indicators no longer each receive full independent weight.</p></div>
       <div class="m-card"><h4>🎯 Max 1D Filter</h4><p>Set <em>Max 1D %</em> in the filter bar to hide stocks that have already moved too much today (default 5%). Entry-ceiling filtering has been removed; strong candidates are no longer hidden just because current price is above a calculated buy ceiling.</p></div>
       <div class="m-card"><h4>🚫 Recommendation Filters</h4><p>The learning universe keeps every valid parsed NSE symbol. Recommendation eligibility separately excludes zero-price rows, stocks at/near their NSE price band, non-EQ series, surveillance-flagged stocks, insufficient liquidity, invalid ATR, stocks already in the current day's rocket union, and live entries that have faded from the day high by the harvest-target zone. Delivery, peak retention, pullback from high, RVOL, DMI, MFI, RSI, and sell pressure remain learnable features. Currently structurally filtered from recommendations: ${(REMOVED.uc||0)+(REMOVED.surv||0)+(REMOVED.nonEq||0)+(REMOVED.liq||0)+(REMOVED.fscore||0)+(REMOVED.atr||0)} stocks.</p></div>
       <div class="m-card"><h4>Regime-Agnostic Learning</h4><p>Market breadth is shown as context only. The scanner uses one recency-adjusted top-rocket correlation accumulator across all market conditions, so bull, neutral, and bear days do not create separate scoring histories.</p></div>
