@@ -1,5 +1,5 @@
-const BUILD_TS='2026-06-29 16:10 IST'; // release build time (IST)
-const APP_VERSION=451; // Harvest target plan: hard outcome moves, costs, current-capital sizing, and one basket GTT per stock.
+const BUILD_TS='2026-06-30 09:39 IST'; // release build time (IST)
+const APP_VERSION=452; // Soft mRMR: redundancy discounts useful signals instead of vetoing the feature set.
 const GOOGLE_DRIVE_CLIENT_ID='1015012642264-oi2nelv3v90k3d39r994a6nelgjs2a56.apps.googleusercontent.com'; // Public OAuth Web Client ID.
 const HARD_FILTER_SCHEMA='structural_tradeability_v2';
 const STOCK_RUNWAY_CEILING_PCT=19.5; // UC-style ceiling retained only for legacy helpers; entry-ceiling filtering is disabled.
@@ -13,13 +13,14 @@ const HARVEST_TRIGGER_CONFIDENCE=0.60; // Prefer a target that prior picks commo
 const HARVEST_MIN_SAMPLES=8;
 // mRMR v443: four prior trading-day states explain the current day's rocket set.
 // A five-session frame is D-4, D-3, D-2, D-1 and D. Current feature values never explain Y(D).
-const DELTA_FEATURE_SCHEMA='five_session_rolling_daily_rocket_trajectory_one_clock_sequential_mrmr_v2';
+const DELTA_FEATURE_SCHEMA='five_session_rolling_daily_rocket_trajectory_one_clock_soft_mrmr_v3';
 const DAILY_TRAJECTORY_TOTAL_DAYS=5;
 const DAILY_TRAJECTORY_PRIOR_DAYS=DAILY_TRAJECTORY_TOTAL_DAYS-1;
 const DAILY_TRAJECTORY_WEIGHT_STEPS=[4,3,2,1]; // D-1 through D-4, normalized over usable pairs.
 const WARMUP_NEUTRAL_SCORE=50; // Equal-weight display/allocation score until honest mRMR evidence exists.
 const MRMR_MAX_SELECTED_FEATURES=24;
 const MRMR_MIN_SELECTION_GAIN=0.0001;
+const MRMR_MAX_REDUNDANCY_DISCOUNT=0.95; // Redundancy discounts relevance; it must never veto a useful signal outright.
 let MARKET_MODE='stock';
 function modeKey(base){return base;}
 
@@ -102,7 +103,7 @@ const SCANNER_STORE='rs_filters';
 const SHARED_FILTER_STORE='rs_filters_shared';
 const ALL_STORE='rs_data';
 const CORR_STORE='rs_corr';
-const CORR_SCHEMA='five_session_rolling_daily_rocket_trajectory_one_clock_sequential_mrmr_v2';
+const CORR_SCHEMA='five_session_rolling_daily_rocket_trajectory_one_clock_soft_mrmr_v3';
 const ROCKET_TOP_FRACTION=0.10;
 const SNAPSHOT_HISTORY_DECAY=0.95;
 const SNAPSHOT_STATE_STORE='rs_snapshot_mrmr_v1';
@@ -2129,28 +2130,37 @@ function selectSequentialMrmrFeatures(features,targetCorr,interCorr,maxSelected=
   while(remaining.length&&selected.length<maxSelected){
     let best=null;
     for(const feature of remaining){
-      const red=selected.length
-        ?Math.max(...selected.map(peer=>Math.abs(Number(interCorr?.[feature+'|'+peer])||0)))
-        :0;
-      // The first representative keeps its full rocket relevance. Every later
-      // candidate must add more unique relevance than it duplicates from the
-      // already selected set.
-      const gain=selected.length?relevance[feature]-red:relevance[feature];
-      if(!best||gain>best.gain+1e-12||(
-        Math.abs(gain-best.gain)<=1e-12&&relevance[feature]>best.rel+1e-12
-      )) best={feature,rel:relevance[feature],red,gain};
+      const sims=selected.map(peer=>Math.abs(Number(interCorr?.[feature+'|'+peer])||0));
+      const red=sims.length?Math.max(...sims):0;
+      const avgRed=sims.length?sims.reduce((sum,v)=>sum+v,0)/sims.length:0;
+      // Redundancy should reduce confidence in overlapping indicators, not
+      // discard every feature whose similarity happens to exceed its weak early
+      // rocket correlation. This keeps the model multi-factor while still
+      // favouring independent evidence.
+      const penalty=Math.min(MRMR_MAX_REDUNDANCY_DISCOUNT,Math.max(0,avgRed));
+      const score=relevance[feature]*(1-penalty);
+      if(!best||score>best.score+1e-12||(
+        Math.abs(score-best.score)<=1e-12&&relevance[feature]>best.rel+1e-12
+      )) best={feature,rel:relevance[feature],red,avgRed,score};
     }
-    if(!best||(selected.length>0&&best.gain<=MRMR_MIN_SELECTION_GAIN)) break;
+    if(!best||best.score<=MRMR_MIN_SELECTION_GAIN) break;
     selected.push(best.feature);
-    mrmr[best.feature]={...mrmr[best.feature],red:best.red,baseScore:best.gain,score:best.gain,selected:true};
+    mrmr[best.feature]={...mrmr[best.feature],red:best.red,avgRed:best.avgRed,
+      baseScore:best.score,score:best.score,selected:true,
+      accountability:{relevance:best.rel,maxSimilarity:best.red,avgSimilarity:best.avgRed,
+        redundancyDiscount:Math.min(MRMR_MAX_REDUNDANCY_DISCOUNT,Math.max(0,best.avgRed))}};
     remaining.splice(remaining.indexOf(best.feature),1);
   }
   list.forEach(feature=>{
     if(mrmr[feature].selected) return;
-    const red=selected.length
-      ?Math.max(...selected.map(peer=>Math.abs(Number(interCorr?.[feature+'|'+peer])||0)))
-      :0;
-    mrmr[feature]={...mrmr[feature],red,baseScore:Math.max(0,relevance[feature]-red),score:0};
+    const sims=selected.map(peer=>Math.abs(Number(interCorr?.[feature+'|'+peer])||0));
+    const red=sims.length?Math.max(...sims):0;
+    const avgRed=sims.length?sims.reduce((sum,v)=>sum+v,0)/sims.length:0;
+    const penalty=Math.min(MRMR_MAX_REDUNDANCY_DISCOUNT,Math.max(0,avgRed));
+    const baseScore=relevance[feature]*(1-penalty);
+    mrmr[feature]={...mrmr[feature],red,avgRed,baseScore,score:0,
+      accountability:{relevance:relevance[feature],maxSimilarity:red,avgSimilarity:avgRed,
+        redundancyDiscount:penalty}};
   });
   const total=selected.reduce((sum,feature)=>sum+(mrmr[feature].score||0),0)||1;
   const weights=Object.fromEntries(list.map(feature=>[
@@ -2570,9 +2580,9 @@ async function runEngine(raw, sessionTag, options={}){
       :0;
     interCorr[f1+'|'+f2]=r;interCorr[f2+'|'+f1]=r;
   }
-  // Sequential mRMR selects a diverse feature set. The strongest representative
-  // of a correlated family keeps its full relevance; close substitutes enter only
-  // when their rocket relevance exceeds their maximum similarity to the set.
+  // Soft mRMR keeps a multi-factor feature set. Redundancy discounts overlapping
+  // indicators, but it no longer vetoes every feature whose weak early relevance
+  // is below one strong similarity number.
   const {mrmr,selectedFeatures,weights}=selectSequentialMrmrFeatures(FEATS,targetCorr,interCorr);
   const outcomeReliabilityModel=buildOutcomeReliabilityModel(FEATS,weights);
 
@@ -2980,7 +2990,7 @@ function renderStats(){
     const opportunity=getSameDayExitOpportunitySummary();
     if(opportunity.exits){
       const realisedText=opportunity.avgRealised==null?'':` · realised ${opportunity.avgRealised>=0?'+':''}${opportunity.avgRealised.toFixed(2)}%`;
-      infoPills.push(`<span class="info-pill pill-amber" title="One exit means one symbol on one sell date. Sell fills are quantity-weighted; ALL NSE supplies that day's high. The average is weighted by sold value and includes 0% when the high did not exceed your average sell price.">🎯 ${opportunity.exits} exit${opportunity.exits===1?'':'s'}${realisedText} · ${opportunity.upsideExits} left upside · missed +${opportunity.avgMissed.toFixed(2)}% (${fmtINR(opportunity.missedValue)}) · TGT +${opportunity.nudge.toFixed(2)}%</span>`);
+      infoPills.push(`<span class="info-pill pill-amber" title="One exit means one symbol on one sell date. Sell fills are quantity-weighted; ALL NSE supplies that day's high. The average is weighted by sold value and includes 0% when the high did not exceed your average sell price. Diagnostic only; it does not change the Harvest GTT target.">🎯 ${opportunity.exits} exit${opportunity.exits===1?'':'s'}${realisedText} · ${opportunity.upsideExits} left upside · missed +${opportunity.avgMissed.toFixed(2)}% (${fmtINR(opportunity.missedValue)}) · diagnostic</span>`);
     }
   }catch(e){}
 
@@ -4080,7 +4090,7 @@ function _renderMethodologyInner(){
       <div class="m-card"><h4>Learning Target</h4><p>Any stock that enters the live top 10% by 1D change during day D receives label 1 for that day. Its target flag remains set even if a later upload shows it outside the top 10%. The day’s source state for every stock is overwritten only when that stock reaches a higher observed 1D change.</p></div>
       <div class="m-card"><h4>📡 How the Engine Learns</h4><p>Current Day-D rockets are compared directly with the same stocks’ states at D-1, D-2, D-3 and D-4, never as chained day-to-day transitions. The newest usable state receives weight 4, then 3, 2 and 1, normalized across available pairs. Scores begin on Day 2 and use the current live state to rank stocks for later rocket potential.</p></div>
       <div class="m-card"><h4>Outcome Self-Correction</h4><p>${feedbackText} Outcome evidence is displayed as confidence context only. It does not add or subtract points from Rocket Score.</p></div>
-      <div class="m-card"><h4>Feature Selection</h4><p>mRMR first keeps the feature with the strongest rocket relevance. Later features must add more relevance than their maximum similarity to an already selected feature. A correlated indicator family therefore contributes its strongest representative rather than several copies of the same signal.</p></div>
+      <div class="m-card"><h4>Feature Selection</h4><p>Soft mRMR starts with rocket relevance, then discounts features by their average similarity to already selected signals. Correlated indicators can still contribute when they carry useful evidence; redundancy reduces their weight instead of deleting them.</p></div>
       <div class="m-card"><h4>🎯 Max 1D Filter</h4><p>Set <em>Max 1D %</em> in the filter bar to hide stocks that have already moved too much today (default 5%). Entry-ceiling filtering has been removed; strong candidates are no longer hidden just because current price is above a calculated buy ceiling.</p></div>
       <div class="m-card"><h4>🚫 Recommendation Filters</h4><p>The learning universe keeps every valid parsed NSE symbol. Recommendation eligibility separately excludes zero-price rows, stocks at/near their NSE price band, non-EQ series, surveillance-flagged stocks, insufficient liquidity, and invalid ATR. Delivery, peak retention, RVOL, DMI, MFI, RSI, and sell pressure are <strong>features, not hard filters</strong>. Currently filtered from recommendations: ${(REMOVED.uc||0)+(REMOVED.surv||0)+(REMOVED.nonEq||0)+(REMOVED.liq||0)+(REMOVED.fscore||0)+(REMOVED.atr||0)} stocks.</p></div>
       <div class="m-card"><h4>Regime-Agnostic Learning</h4><p>Market breadth is shown as context only. The scanner uses one recency-adjusted top-rocket correlation accumulator across all market conditions, so bull, neutral, and bear days do not create separate scoring histories.</p></div>
