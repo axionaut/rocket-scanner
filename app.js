@@ -1,5 +1,5 @@
-const BUILD_TS='2026-06-30 09:58 IST'; // release build time (IST)
-const APP_VERSION=453; // Pure rocket relevance: features earn weight only from their own predictive correlation.
+const BUILD_TS='2026-06-30 11:59 IST'; // release build time (IST)
+const APP_VERSION=454; // Trajectory-aware entry gate blocks already-rocketed and fading current candidates.
 const GOOGLE_DRIVE_CLIENT_ID='1015012642264-oi2nelv3v90k3d39r994a6nelgjs2a56.apps.googleusercontent.com'; // Public OAuth Web Client ID.
 const HARD_FILTER_SCHEMA='structural_tradeability_v2';
 const STOCK_RUNWAY_CEILING_PCT=19.5; // UC-style ceiling retained only for legacy helpers; entry-ceiling filtering is disabled.
@@ -11,6 +11,8 @@ const HARVEST_DAILY_NET_GOAL_RS=15000; // North-star daily pure-profit goal, nev
 const HARVEST_DESIRED_NET_PCT=0.60; // Minimum useful net profit after charges for capital rotation.
 const HARVEST_TRIGGER_CONFIDENCE=0.60; // Prefer a target that prior picks commonly reached.
 const HARVEST_MIN_SAMPLES=8;
+const ENTRY_FADE_RETENTION_FLOOR=70; // Below this, a pullback through the target zone is treated as a fading entry.
+const ENTRY_FADE_SEVERE_TARGET_MULT=2; // A pullback twice the harvest target is too much give-back to chase.
 // Rocket relevance: four prior trading-day states explain the current day's rocket set.
 // A five-session frame is D-4, D-3, D-2, D-1 and D. Current feature values never explain Y(D).
 const DELTA_FEATURE_SCHEMA='five_session_rolling_daily_rocket_trajectory_one_clock_pure_relevance_v4';
@@ -2252,6 +2254,7 @@ async function advanceSnapshotLearning({rows,features,priceKey,rocketMetricKey,s
     primaryCorr:combined.nearest?.pair?.correlation||null,
     intervalMoves,
     scoringFeatureRows,
+    currentRocketSymbols:[...(currentForLearning?.rocketSymbols||[])],
     lagPairs:ACC_CORR?.lagPairs||[],
     deltaFeatureSchema:DELTA_FEATURE_SCHEMA,
     intervalElapsedMinutes:null,
@@ -2317,6 +2320,7 @@ async function runEngine(raw, sessionTag, options={}){
     piotroski:    findKey(/piotroski/),
     high_1d:      findKey(/^high_1_day$/),
     low_1d:       findKey(/^low_1_day$/),
+    open_1d:      findKey(/^open_1_day$/),
     vwap:         findKey(/volume_weighted_average_price.*1_day/),
   };
   const parsed = raw.map(r => {
@@ -2373,12 +2377,15 @@ async function runEngine(raw, sessionTag, options={}){
     const hi1d=K.high_1d?d[K.high_1d]:null, lo1d=K.low_1d?d[K.low_1d]:null;
     if(price!=null&&hi1d!=null&&lo1d!=null&&(hi1d-lo1d)>0){
       d.peak_retention=((price-lo1d)/(hi1d-lo1d))*100;
-    } else { d.peak_retention=null; }
+      d.pullback_from_high_pct=(hi1d>0)?((hi1d-price)/hi1d)*100:null;
+    } else { d.peak_retention=null; d.pullback_from_high_pct=null; }
+    const open1d=K.open_1d?d[K.open_1d]:null;
+    d.from_open_pct=(price!=null&&open1d>0)?((price-open1d)/open1d)*100:null;
   });
 
   // FEATS: every retained numeric or converted-rating analytical field in ALL NSE,
   // plus NSE-derived fields. Do not pre-prune similar indicators; each feature earns weight from its own rocket correlation.
-  const NSE_DERIVED = ['delivery_pct','range_pos','pct_from_52w_high','peak_retention','price_band_pct','pct_to_upper_band'];
+  const NSE_DERIVED = ['delivery_pct','range_pos','pct_from_52w_high','peak_retention','pullback_from_high_pct','from_open_pct','price_band_pct','pct_to_upper_band'];
   const ALL_CANDIDATE_FEATURES = [...new Set([...Object.keys(COL_MAP), ...NSE_DERIVED])];
   const FEATS = [...ALL_CANDIDATE_FEATURES];
 
@@ -2388,6 +2395,8 @@ async function runEngine(raw, sessionTag, options={}){
   LABELS.range_pos         = '52W Range Position %';
   LABELS.pct_from_52w_high = '% From 52W High';
   LABELS.peak_retention    = 'Peak Retention %';
+  LABELS.pullback_from_high_pct = 'Pullback From Day High %';
+  LABELS.from_open_pct     = '% From Day Open';
   LABELS.price_band_pct    = 'NSE Price Band %';
   LABELS.pct_to_upper_band = '% To Upper Band';
 
@@ -2404,6 +2413,10 @@ async function runEngine(raw, sessionTag, options={}){
       priceChange:K.price_change?d[K.price_change]:null,
       high1d:K.high_1d?d[K.high_1d]:null,
       low1d:K.low_1d?d[K.low_1d]:null,
+      open1d:K.open_1d?d[K.open_1d]:null,
+      peakRetention:d.peak_retention,
+      pullbackFromHighPct:d.pullback_from_high_pct,
+      fromOpenPct:d.from_open_pct,
       rocketMove:getIntradayRocketMove(d,K.price,K.price_change,K.high_1d)
     })).filter(d=>d.symbol);
   // ── Compute Sector / Industry breadth features (full universe) ──
@@ -2516,6 +2529,7 @@ async function runEngine(raw, sessionTag, options={}){
 
   const targetCorr=snapshotLearning.targetCorr;
   const targetCorrToday=snapshotLearning.targetCorrToday;
+  const todayRocketSet=new Set(snapshotLearning.currentRocketSymbols||[]);
   const freshSignalCount=snapshotLearning.freshSignalCount;
   const currentUploadLearned=snapshotLearning.completedNow>0;
   // A score exists as soon as one honest prior daily state can explain today's observed rocket set.
@@ -2576,12 +2590,18 @@ async function runEngine(raw, sessionTag, options={}){
       price:(K.price?d[K.price]:null),
       priceChange:(K.price_change?d[K.price_change]:null),
       snapshotChange:snapshotLearning.intervalMoves?.[d.symbol]??null,
+      rocketToday:todayRocketSet.has(d.symbol),
+      rocketNow:currentTop10Symbols.has(d.symbol),
       rocketMove:getIntradayRocketMove(d,K.price,K.price_change,K.high_1d),
       volume:vol,
       marketCap:(K.market_cap?d[K.market_cap]:null),
       atr:(K.atr_pct?d[K.atr_pct]:null),
       high1d:(K.high_1d?d[K.high_1d]:null),
       low1d:(K.low_1d?d[K.low_1d]:null),
+      open1d:(K.open_1d?d[K.open_1d]:null),
+      peakRetention:d.peak_retention,
+      pullbackFromHighPct:d.pullback_from_high_pct,
+      fromOpenPct:d.from_open_pct,
       vwap:(K.vwap?d[K.vwap]:null),
       piotroski:(K.piotroski?d[K.piotroski]:null),
       shareholders:(K.shareholders?d[K.shareholders]:null),
@@ -3974,7 +3994,7 @@ function _renderMethodologyInner(){
   const sorted=[...E.features].sort((a,b)=>E.mrmr[b].score-E.mrmr[a].score);
   const maxW=sorted.reduce((m,f)=>Math.max(m,E.weights[f]||0),0)||1;
   const NSE_FEATS=new Set(['delivery_pct','price_band_pct']);
-  const CALC_FEATS=new Set(['range_pos','pct_from_52w_high','pct_to_upper_band','peak_retention','sector_breadth','sector_rel_strength','industry_breadth']);
+  const CALC_FEATS=new Set(['range_pos','pct_from_52w_high','pct_to_upper_band','peak_retention','pullback_from_high_pct','from_open_pct','sector_breadth','sector_rel_strength','industry_breadth']);
   const getFeatureSource=f=>{
     if(NSE_FEATS.has(f)) return 'NSE';
     if(CALC_FEATS.has(f)) return 'Calc';
@@ -4046,7 +4066,7 @@ function _renderMethodologyInner(){
       <div class="m-card"><h4>Outcome Self-Correction</h4><p>${feedbackText} Outcome evidence is displayed as confidence context only. It does not add or subtract points from Rocket Score.</p></div>
       <div class="m-card"><h4>Feature Selection</h4><p>Every retained indicator competes on its own rolling rocket correlation. The strongest predictive features receive weight directly; similar indicators are not suppressed if they also predict later rockets.</p></div>
       <div class="m-card"><h4>🎯 Max 1D Filter</h4><p>Set <em>Max 1D %</em> in the filter bar to hide stocks that have already moved too much today (default 5%). Entry-ceiling filtering has been removed; strong candidates are no longer hidden just because current price is above a calculated buy ceiling.</p></div>
-      <div class="m-card"><h4>🚫 Recommendation Filters</h4><p>The learning universe keeps every valid parsed NSE symbol. Recommendation eligibility separately excludes zero-price rows, stocks at/near their NSE price band, non-EQ series, surveillance-flagged stocks, insufficient liquidity, and invalid ATR. Delivery, peak retention, RVOL, DMI, MFI, RSI, and sell pressure are <strong>features, not hard filters</strong>. Currently filtered from recommendations: ${(REMOVED.uc||0)+(REMOVED.surv||0)+(REMOVED.nonEq||0)+(REMOVED.liq||0)+(REMOVED.fscore||0)+(REMOVED.atr||0)} stocks.</p></div>
+      <div class="m-card"><h4>🚫 Recommendation Filters</h4><p>The learning universe keeps every valid parsed NSE symbol. Recommendation eligibility separately excludes zero-price rows, stocks at/near their NSE price band, non-EQ series, surveillance-flagged stocks, insufficient liquidity, invalid ATR, stocks already in the current day's rocket union, and live entries that have faded from the day high by the harvest-target zone. Delivery, peak retention, pullback from high, RVOL, DMI, MFI, RSI, and sell pressure remain learnable features. Currently structurally filtered from recommendations: ${(REMOVED.uc||0)+(REMOVED.surv||0)+(REMOVED.nonEq||0)+(REMOVED.liq||0)+(REMOVED.fscore||0)+(REMOVED.atr||0)} stocks.</p></div>
       <div class="m-card"><h4>Regime-Agnostic Learning</h4><p>Market breadth is shown as context only. The scanner uses one recency-adjusted top-rocket correlation accumulator across all market conditions, so bull, neutral, and bear days do not create separate scoring histories.</p></div>
       <div class="m-card"><h4>📊 Sector & Industry Breadth</h4><p>${E.sectorCol?'<span style="color:var(--green)">✓</span> Sector breadth, sector relative strength':'<span style="color:var(--red)">✗</span> No Sector column detected'}${E.industryCol?', <span style="color:var(--green)">✓</span> industry breadth':''} — computed from today\'s full universe and fed into rocket relevance as features. Stocks outperforming their sector score higher regardless of market direction.</p></div>
     </div>
@@ -4144,6 +4164,23 @@ function getMaxEntry(s){
   const openPrice=s.price/(1+pc/100);
   return tickPrice(openPrice*(1+ceiling/100)/(1+tgt/100));
 }
+function getEntryFadeReason(s){
+  if(!s) return '';
+  const pc=Number(s.priceChange);
+  if(!(pc>0)) return '';
+  const targetPct=Number(getEffectiveTgtPct())||1.2;
+  const pullback=Number(s.pullbackFromHighPct);
+  const retention=Number(s.peakRetention);
+  if(!Number.isFinite(pullback)||pullback<=0) return '';
+  const severeGiveback=targetPct*ENTRY_FADE_SEVERE_TARGET_MULT;
+  if(pullback>=severeGiveback){
+    return `Fading entry: ${pullback.toFixed(2)}% below day high (>${severeGiveback.toFixed(2)}% harvest give-back)`;
+  }
+  if(pullback>=targetPct&&Number.isFinite(retention)&&retention<ENTRY_FADE_RETENTION_FLOOR){
+    return `Fading entry: ${pullback.toFixed(2)}% below day high, retained ${retention.toFixed(0)}% of range`;
+  }
+  return '';
+}
 function getFilterBarReason(s){
   const minScore=parseFloat(document.getElementById('fMinScore')?.value)||0;
   const fvol=parseFloat(document.getElementById('fVol')?.value)||0;
@@ -4156,6 +4193,9 @@ function getFilterBarReason(s){
   const fPriceMax=parseFloat(document.getElementById('fPriceMax')?.value)||0;
   const bandReason=getPriceBandBlockReason(s);
   if(bandReason) return bandReason;
+  if(s.rocketToday) return s.rocketNow?'Already in today’s live rocket set':'Already rocketed earlier today';
+  const fadeReason=getEntryFadeReason(s);
+  if(fadeReason) return fadeReason;
   if(ENGINE_DATA?.hasRecommendationEvidence&&minScore>0&&s.rocketScore<minScore) return `Score ${s.rocketScore?.toFixed?.(1)||s.rocketScore} < ${minScore}`;
   if(fvol>0&&s.volume!=null&&s.volume<fvol) return `Volume ${Math.round(s.volume).toLocaleString('en-IN')} < ${Math.round(fvol).toLocaleString('en-IN')}`;
   if(fMinMarketCap>0&&s.marketCap!=null&&s.marketCap<fMinMarketCap) return `MCap ₹${fV(s.marketCap)} < ₹${fV(fMinMarketCap)}`;
