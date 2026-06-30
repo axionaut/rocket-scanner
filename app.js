@@ -1,5 +1,5 @@
-const BUILD_TS='2026-06-30 13:51 IST'; // release build time (IST)
-const APP_VERSION=455; // Top-1% rocket target, low-sample diagnostics, and redundancy-aware mRMR.
+const BUILD_TS='2026-06-30 14:44 IST'; // release build time (IST)
+const APP_VERSION=456; // Phase 0 telemetry archive and offline backtest harness.
 const GOOGLE_DRIVE_CLIENT_ID='1015012642264-oi2nelv3v90k3d39r994a6nelgjs2a56.apps.googleusercontent.com'; // Public OAuth Web Client ID.
 const HARD_FILTER_SCHEMA='structural_tradeability_v2';
 const STOCK_RUNWAY_CEILING_PCT=19.5; // Active fallback live-eligibility ceiling and max-entry cap when NSE price-band data is unavailable.
@@ -109,6 +109,8 @@ const ROCKET_TOP_FRACTION=0.01;
 const SNAPSHOT_HISTORY_DECAY=0.95;
 const SNAPSHOT_STATE_STORE='rs_snapshot_mrmr_v1';
 const SNAPSHOT_STATE_SCHEMA='five_session_rolling_daily_rocket_trajectory_one_clock_v3';
+const TELEMETRY_ARCHIVE_FILE='rocket_archive.json';
+const TELEMETRY_ARCHIVE_SCHEMA='daily_telemetry_archive_v1';
 const METH_STORE='rs_meth';
 const HOLD_STORE='rs_holdings';
 const ORDERS_STORE='rs_orders';
@@ -413,6 +415,17 @@ const FS = (() => {
     }
     catch(e){console.warn('FS.read invalid cloud brain',e);return null;}
   }
+  async function readJsonFile(name){
+    if(!isConnected()||!name) return null;
+    const hit=await readBlob(name);
+    if(!hit) return null;
+    try{return {data:JSON.parse(await hit.blob.text()),meta:hit.meta};}
+    catch(e){console.warn('FS.readJsonFile invalid JSON',name,e);return null;}
+  }
+  async function writeJsonFile(name,data){
+    if(!isConnected()||!name) return false;
+    return await uploadFile(name,JSON.stringify(data),'application/json');
+  }
 
   async function readUploadText(fileName){
     if(!isConnected()||!fileName) return null;
@@ -710,7 +723,7 @@ const FS = (() => {
   function hasFolder(){ return isConnected(); }
   function hasLocalBrainFolder(){ return !!_localDirHandle; }
 
-  return {init,connect,needsReconnect,isConfigured,setClientId,isConnected,read,readUploadText,readUploadFile,saveUploadedInputs,write,set,setMultiple,get,load,loadFromDisk,ensureLoaded,refreshCloudIndex,verifyConnection,getBrain,reset,folderName,hasFolder,setLocalDirectoryHandle,hasLocalBrainFolder};
+  return {init,connect,needsReconnect,isConfigured,setClientId,isConnected,read,readJsonFile,writeJsonFile,readUploadText,readUploadFile,saveUploadedInputs,write,set,setMultiple,get,load,loadFromDisk,ensureLoaded,refreshCloudIndex,verifyConnection,getBrain,reset,folderName,hasFolder,setLocalDirectoryHandle,hasLocalBrainFolder};
 })();
 
 function updateFolderUI(){
@@ -2241,6 +2254,7 @@ async function advanceSnapshotLearning({rows,features,priceKey,rocketMetricKey,s
     runtime.completed=runtime.days.length;
     runtime.lastTag=sessionTag||null;
     window._snapshotRuntimeDirty=true;
+    await appendTelemetryArchiveDay(currentDay).catch(e=>console.warn('Telemetry archive append failed',e));
   }
 
   const currentForLearning=currentDay&&currentDay.sessionDate===stamp.sessionDate?currentDay:null;
@@ -5780,6 +5794,20 @@ function getIntradayRocketMove(row,priceKey,changeKey,highKey){
 function snapshotHasData(snapshot){
   return !!(snapshot&&(/^(u16|f32|f32-gzip)-column-v1$/.test(snapshot.format)?snapshot.symbols?.length&&snapshot.data:snapshot.stocks));
 }
+function cloneTelemetryRecord(snapshot){
+  const symbols=[...(snapshot?.symbols||[])];
+  const featureRows={};
+  symbols.forEach(symbol=>{featureRows[symbol]={...(snapshot?.featureRows?.[symbol]||{})};});
+  return {
+    ...snapshot,
+    symbols,
+    prices:Float32Array.from(snapshot?.prices||[]),
+    featureRows,
+    featureCols:[...(snapshot?.featureCols||[])],
+    rocketSymbols:[...(snapshot?.rocketSymbols||[])],
+    eligibleSymbols:[...(snapshot?.eligibleSymbols||[])]
+  };
+}
 function bytesToBase64(bytes){
   let binary='';
   for(let i=0;i<bytes.length;i+=0x8000) binary+=String.fromCharCode(...bytes.subarray(i,i+0x8000));
@@ -5829,42 +5857,108 @@ async function unpackFloat32Values(source){
   const view=new Float32Array(bytes.buffer,bytes.byteOffset,Math.floor(bytes.byteLength/4));
   return new Float32Array(view);
 }
-async function decodeSnapshotState(source){
-  // v443 changes both the session ownership clock and feature-selection rule.
-  // Older packed telemetry is deliberately discarded rather than mixed with state
-  // created under a different trading-day contract.
-  if(!source||source.schema!==SNAPSHOT_STATE_SCHEMA) return emptySnapshotRuntime();
-  const decodeOne=async packed=>packed?{
+async function decodePackedDailyRecord(packed){
+  if(!packed) return null;
+  const prices=await unpackFloat32Values(packed.prices);
+  const featureRows=await decodeScannerSnapshot(packed.features);
+  return {
     ...packed,
-    prices:await unpackFloat32Values(packed.prices),
-    featureRows:await decodeScannerSnapshot(packed.features),
+    prices,
+    featureRows,
     featureCols:packed.features?.cols||packed.featureCols||[],
     rocketSymbols:Array.isArray(packed.rocketSymbols)?packed.rocketSymbols.map(normSym).filter(Boolean):[],
     eligibleSymbols:Array.isArray(packed.eligibleSymbols)?packed.eligibleSymbols.map(normSym).filter(Boolean):[],
     sampleCount:Number(packed.sampleCount)||1
-  }:null;
-  const decoded=[];
-  for(const packed of source.days||[]){
-    const day=await decodeOne(packed);
-    if(day?.sessionDate&&day.symbols?.length) decoded.push(day);
-  }
-  return {...emptySnapshotRuntime(),...source,schema:SNAPSHOT_STATE_SCHEMA,days:trimDailyRecords(decoded)};
+  };
 }
-async function encodeSnapshotState(runtime){
-  const encodeOne=async snapshot=>snapshot?{
+async function encodePackedDailyRecord(snapshot){
+  if(!snapshot) return null;
+  return {
     timestamp:snapshot.timestamp,sessionDate:snapshot.sessionDate,minutes:snapshot.minutes,
-    inSession:snapshot.inSession,baselineEligible:snapshot.baselineEligible??snapshot.inSession,symbols:snapshot.symbols,
+    inSession:snapshot.inSession,baselineEligible:snapshot.baselineEligible??snapshot.inSession,symbols:[...(snapshot.symbols||[])],
     prices:await packFloat32Values(snapshot.prices),
     features:snapshot.features||await packScannerSnapshot(
-      snapshot.symbols.map(symbol=>({symbol,...(snapshot.featureRows[symbol]||{})})),snapshot.featureCols||[]
+      (snapshot.symbols||[]).map(symbol=>({symbol,...(snapshot.featureRows?.[symbol]||{})})),snapshot.featureCols||[]
     ),
     rocketSymbols:[...(snapshot.rocketSymbols||[])],
     eligibleSymbols:[...(snapshot.eligibleSymbols||[])],
     sampleCount:Number(snapshot.sampleCount)||1,
     latestSessionTag:snapshot.latestSessionTag||null
-  }:null;
+  };
+}
+function emptyTelemetryArchive(){
+  return {schema:TELEMETRY_ARCHIVE_SCHEMA,days:[],createdAt:new Date().toISOString(),updatedAt:null};
+}
+async function decodeTelemetryArchive(source){
+  if(!source||source.schema!==TELEMETRY_ARCHIVE_SCHEMA) return emptyTelemetryArchive();
   const days=[];
-  for(const day of trimDailyRecords(runtime?.days||[])) days.push(await encodeOne(day));
+  for(const packed of source.days||[]){
+    const day=packed?.featureRows?cloneTelemetryRecord(packed):await decodePackedDailyRecord(packed);
+    if(day?.sessionDate&&day.symbols?.length) days.push(day);
+  }
+  days.sort((a,b)=>String(a.sessionDate).localeCompare(String(b.sessionDate))||((a.timestamp||0)-(b.timestamp||0)));
+  return {...emptyTelemetryArchive(),...source,schema:TELEMETRY_ARCHIVE_SCHEMA,days};
+}
+async function encodeTelemetryArchive(archive){
+  const days=[];
+  const ordered=[...(archive?.days||[])]
+    .filter(day=>day?.sessionDate&&day.symbols?.length)
+    .sort((a,b)=>String(a.sessionDate).localeCompare(String(b.sessionDate))||((a.timestamp||0)-(b.timestamp||0)));
+  for(const day of ordered) days.push(await encodePackedDailyRecord(day));
+  return {
+    schema:TELEMETRY_ARCHIVE_SCHEMA,
+    createdAt:archive?.createdAt||new Date().toISOString(),
+    updatedAt:new Date().toISOString(),
+    days
+  };
+}
+async function loadTelemetryArchive({force=false}={}){
+  if(TELEMETRY_ARCHIVE_CACHE&&!force) return TELEMETRY_ARCHIVE_CACHE;
+  const hit=await FS.readJsonFile?.(TELEMETRY_ARCHIVE_FILE);
+  TELEMETRY_ARCHIVE_CACHE=await decodeTelemetryArchive(hit?.data||null);
+  return TELEMETRY_ARCHIVE_CACHE;
+}
+function upsertTelemetryArchiveDay(archive, day){
+  const clean=cloneTelemetryRecord(day);
+  const days=[...(archive?.days||[])].filter(d=>d.sessionDate!==clean.sessionDate);
+  days.push(clean);
+  days.sort((a,b)=>String(a.sessionDate).localeCompare(String(b.sessionDate))||((a.timestamp||0)-(b.timestamp||0)));
+  return {...emptyTelemetryArchive(),...(archive||{}),days,updatedAt:new Date().toISOString()};
+}
+async function appendTelemetryArchiveDay(day){
+  if(!day?.sessionDate) return {saved:false,reason:'missing_day'};
+  const archive=upsertTelemetryArchiveDay(await loadTelemetryArchive(),day);
+  TELEMETRY_ARCHIVE_CACHE=archive;
+  const encoded=await encodeTelemetryArchive(archive);
+  const text=JSON.stringify(encoded);
+  const saved=await FS.writeJsonFile?.(TELEMETRY_ARCHIVE_FILE,encoded);
+  const latest=encoded.days.find(d=>d.sessionDate===day.sessionDate);
+  const latestBytes=latest?JSON.stringify(latest).length:0;
+  window._lastTelemetryArchiveWrite={
+    saved:!!saved,
+    file:TELEMETRY_ARCHIVE_FILE,
+    days:encoded.days.length,
+    bytes:text.length,
+    latestDayBytes:latestBytes,
+    projectedYearBytes:latestBytes*252
+  };
+  return window._lastTelemetryArchiveWrite;
+}
+async function decodeSnapshotState(source){
+  // v443 changes both the session ownership clock and feature-selection rule.
+  // Older packed telemetry is deliberately discarded rather than mixed with state
+  // created under a different trading-day contract.
+  if(!source||source.schema!==SNAPSHOT_STATE_SCHEMA) return emptySnapshotRuntime();
+  const decoded=[];
+  for(const packed of source.days||[]){
+    const day=await decodePackedDailyRecord(packed);
+    if(day?.sessionDate&&day.symbols?.length) decoded.push(day);
+  }
+  return {...emptySnapshotRuntime(),...source,schema:SNAPSHOT_STATE_SCHEMA,days:trimDailyRecords(decoded)};
+}
+async function encodeSnapshotState(runtime){
+  const days=[];
+  for(const day of trimDailyRecords(runtime?.days||[])) days.push(await encodePackedDailyRecord(day));
   return {schema:SNAPSHOT_STATE_SCHEMA,days,
     completed:Math.min(DAILY_TRAJECTORY_TOTAL_DAYS,Number(runtime?.completed)||days.length),
     lastOutcome:runtime?.lastOutcome||null,lastTag:runtime?.lastTag||null};
@@ -5996,6 +6090,174 @@ async function processScannerUpload(scannerFile, mode, options={}){
     if(!completed) restoreScannerRuntime(original);
   }
 }
+
+function archiveFeatureKey(features,pattern){
+  return (features||[]).find(f=>pattern.test(f))||null;
+}
+function archiveDayRows(day,targetCorr,weights,features,hasEvidence){
+  const eligible=new Set(day?.eligibleSymbols||[]);
+  const rocketSet=new Set(day?.rocketSymbols||[]);
+  const featureRows=buildStateFeatureRows(day,features);
+  const priceIndex=new Map((day?.symbols||[]).map((symbol,index)=>[symbol,index]));
+  const priceChangeKey=archiveFeatureKey(features,/price_change.*1_day|1_day.*price_change|^change.*1_day$/);
+  const volumeKey=archiveFeatureKey(features,/^volume_1_day$|^volume$/);
+  const marketCapKey=archiveFeatureKey(features,/market_capitalization|market_cap/);
+  const atrKey=archiveFeatureKey(features,/average_true_range_.*14.*1_day|atr_.*14.*1_day/);
+  const highKey=archiveFeatureKey(features,/^high_1_day$/);
+  const lowKey=archiveFeatureKey(features,/^low_1_day$/);
+  const openKey=archiveFeatureKey(features,/^open_1_day$/);
+  const vwapKey=archiveFeatureKey(features,/volume_weighted_average_price.*1_day/);
+  const pioKey=archiveFeatureKey(features,/piotroski/);
+  const perf1wKey=archiveFeatureKey(features,/performance.*1_week|perf.*1_week|1_week.*perf/);
+  const shareholdersKey=archiveFeatureKey(features,/number_of_shareholders/);
+  const symbols=(day?.symbols||[]).filter(symbol=>eligible.has(symbol));
+  const pctls={};
+  features.forEach(feature=>{pctls[feature]=pctRank(symbols.map(symbol=>featureRows[symbol]?.[feature]??null));});
+  return symbols.map((symbol,idx)=>{
+    const row=featureRows[symbol]||{};
+    let rawScore=0;
+    features.forEach(feature=>{
+      const w=weights?.[feature]||0,p=pctls[feature]?.[idx];
+      const directed=(p==null||!Number.isFinite(p))?0.35:((targetCorr?.[feature]||0)>=0?p:(1-p));
+      rawScore+=w*directed;
+    });
+    const price=day.prices?.[priceIndex.get(symbol)]??null;
+    return {
+      symbol,name:symbol,price,
+      priceChange:priceChangeKey?row[priceChangeKey]:null,
+      volume:volumeKey?row[volumeKey]:null,
+      marketCap:marketCapKey?row[marketCapKey]:null,
+      atr:atrKey?row[atrKey]:null,
+      high1d:highKey?row[highKey]:null,
+      low1d:lowKey?row[lowKey]:null,
+      open1d:openKey?row[openKey]:null,
+      vwap:vwapKey?row[vwapKey]:null,
+      piotroski:pioKey?row[pioKey]:null,
+      shareholders:shareholdersKey?row[shareholdersKey]:null,
+      perf1w:perf1wKey?row[perf1wKey]:null,
+      delivPct:row.delivery_pct??null,
+      rangePos:row.range_pos??null,
+      pctFrom52wHigh:row.pct_from_52w_high??null,
+      peakRetention:row.peak_retention??null,
+      pullbackFromHighPct:row.pullback_from_high_pct??null,
+      fromOpenPct:row.from_open_pct??null,
+      rocketToday:rocketSet.has(symbol),
+      rocketNow:rocketSet.has(symbol),
+      rocketScore:hasEvidence?Math.round(rawScore*1000)/10:WARMUP_NEUTRAL_SCORE,
+      _features:row
+    };
+  }).sort((a,b)=>(b.rocketScore||0)-(a.rocketScore||0));
+}
+function archiveForwardReturn(symbol,fromDay,toDay){
+  const fromIndex=new Map((fromDay?.symbols||[]).map((s,i)=>[s,i]));
+  const toIndex=new Map((toDay?.symbols||[]).map((s,i)=>[s,i]));
+  const a=fromDay?.prices?.[fromIndex.get(symbol)],b=toDay?.prices?.[toIndex.get(symbol)];
+  return a>0&&b>0?((b/a)-1)*100:null;
+}
+function seededRandom(seedText){
+  let seed=0;
+  String(seedText||'').split('').forEach(ch=>{seed=((seed*31)+ch.charCodeAt(0))>>>0;});
+  return ()=>{seed=(1664525*seed+1013904223)>>>0;return seed/4294967296;};
+}
+function pickRandomSymbols(symbols,count,seedText){
+  const rand=seededRandom(seedText),pool=[...(symbols||[])],out=[];
+  while(pool.length&&out.length<count){
+    const idx=Math.floor(rand()*pool.length);
+    out.push(pool.splice(idx,1)[0]);
+  }
+  return out;
+}
+function scoreArchivePickSet(symbols,day,nextDay){
+  const nextRockets=new Set(nextDay?.rocketSymbols||[]);
+  const returns=(symbols||[]).map(symbol=>archiveForwardReturn(symbol,day,nextDay)).filter(v=>v!=null&&isFinite(v));
+  const hits=(symbols||[]).filter(symbol=>nextRockets.has(symbol)).length;
+  return {
+    count:(symbols||[]).length,
+    hitRate:(symbols||[]).length?hits/(symbols||[]).length:null,
+    avgForwardReturn:returns.length?mean(returns):null
+  };
+}
+function backtestMomentumSymbols(day,count){
+  const features=day?.featureCols||[];
+  const priceChangeKey=archiveFeatureKey(features,/price_change.*1_day|1_day.*price_change|^change.*1_day$/);
+  const eligible=new Set(day?.eligibleSymbols||[]);
+  return (day?.symbols||[])
+    .filter(symbol=>eligible.has(symbol))
+    .map(symbol=>({symbol,value:priceChangeKey?day.featureRows?.[symbol]?.[priceChangeKey]:null}))
+    .filter(x=>x.value!=null&&isFinite(x.value))
+    .sort((a,b)=>b.value-a.value)
+    .slice(0,count)
+    .map(x=>x.symbol);
+}
+async function runArchiveBacktest(options={}){
+  const archive=options.archive?await decodeTelemetryArchive(options.archive):await loadTelemetryArchive({force:!!options.forceLoad});
+  const days=[...(archive?.days||[])].sort((a,b)=>String(a.sessionDate).localeCompare(String(b.sessionDate)));
+  const config={
+    relevanceMetric:options.relevanceMetric||'spearman',
+    scoringMethod:options.scoringMethod||'linear_percentile',
+    capital:Number(options.capital)||parseFloat(document.getElementById('fCapital')?.value)||0
+  };
+  const results=[];
+  for(let i=1;i<days.length-1;i++){
+    const basketDay=days[i],nextDay=days[i+1],trainingCurrent=days[i-1];
+    const trainingRuntime={schema:SNAPSHOT_STATE_SCHEMA,days:days.slice(0,i)};
+    const sources=getTrailingTrajectorySources(trainingRuntime,trainingCurrent.sessionDate);
+    if(String(trainingCurrent.sessionDate)>=String(basketDay.sessionDate)) throw new Error(`Backtest leakage: training day ${trainingCurrent.sessionDate} is not before basket day ${basketDay.sessionDate}`);
+    sources.forEach(item=>{
+      if(String(item.source.sessionDate)>=String(basketDay.sessionDate)) throw new Error(`Backtest leakage: source ${item.source.sessionDate} read for basket day ${basketDay.sessionDate}`);
+    });
+    const features=trainingCurrent.featureCols?.length?trainingCurrent.featureCols:(basketDay.featureCols||[]);
+    const combined=combineTrajectoryPairs({sources,currentDay:trainingCurrent,features});
+    const hasEvidence=combined.valid.length>0;
+    const targetCorr=hasEvidence?combined.correlation:Object.fromEntries(features.map(f=>[f,0]));
+    const rowsForRedundancy=(basketDay.eligibleSymbols||[]).map(symbol=>buildStateFeatureRows(basketDay,features)[symbol]||{});
+    const {weights,selectedFeatures}=selectRocketRelevanceFeatures(features,targetCorr,FEATURE_MAX_SELECTED,rowsForRedundancy);
+    const previousEngine=ENGINE_DATA;
+    try{
+      ENGINE_DATA={...(ENGINE_DATA||{}),hasRecommendationEvidence:hasEvidence};
+      const scoredRows=archiveDayRows(basketDay,targetCorr,weights,features,hasEvidence);
+      const candidates=getDisplayedEntryCandidates(scoredRows);
+      const planned=planBasketExport(config.capital,candidates);
+      const basketSymbols=planned.exportList.map(s=>s.symbol);
+      const eligibleSymbols=(basketDay.eligibleSymbols||[]).filter(Boolean);
+      const randomSymbols=pickRandomSymbols(eligibleSymbols,basketSymbols.length,basketDay.sessionDate);
+      const momentumSymbols=backtestMomentumSymbols(basketDay,basketSymbols.length);
+      results.push({
+        date:basketDay.sessionDate,
+        nextDate:nextDay.sessionDate,
+        trainingDate:trainingCurrent.sessionDate,
+        evidencePairs:combined.valid.length,
+        selectedFeatureCount:selectedFeatures.length,
+        basket:scoreArchivePickSet(basketSymbols,basketDay,nextDay),
+        random:scoreArchivePickSet(randomSymbols,basketDay,nextDay),
+        momentum:scoreArchivePickSet(momentumSymbols,basketDay,nextDay),
+        basketSymbols,
+        leakageChecked:true
+      });
+    }finally{
+      ENGINE_DATA=previousEngine;
+    }
+  }
+  const avg=numbers=>numbers.length?mean(numbers):null;
+  const collect=(key,field)=>results.map(r=>r[key]?.[field]).filter(v=>v!=null&&isFinite(v));
+  return {
+    ok:true,
+    schema:archive?.schema||null,
+    archiveDays:days.length,
+    config,
+    runs:results.length,
+    summary:{
+      basketAvgReturn:avg(collect('basket','avgForwardReturn')),
+      randomAvgReturn:avg(collect('random','avgForwardReturn')),
+      momentumAvgReturn:avg(collect('momentum','avgForwardReturn')),
+      basketHitRate:avg(collect('basket','hitRate')),
+      randomHitRate:avg(collect('random','hitRate')),
+      momentumHitRate:avg(collect('momentum','hitRate'))
+    },
+    results
+  };
+}
+window.runArchiveBacktest=runArchiveBacktest;
 
 async function processFiles(files){
   if(!(await ensureDriveReadyForLoad())){
@@ -6146,6 +6408,7 @@ document.getElementById('fMaxAlloc')?.addEventListener('input',e=>{delete e.targ
 
 let ACC_CORR=null; // derived rocket relevance for the current rolling daily trajectory window
 let SNAPSHOT_RUNTIME=null; // decoded five-day per-stock daily telemetry window
+let TELEMETRY_ARCHIVE_CACHE=null; // lazy-loaded indefinite daily telemetry archive
 
 // ── Async app init: load brain file → hydrate all state → render ──
 async function initApp(){
