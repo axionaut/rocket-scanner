@@ -1,5 +1,5 @@
-const BUILD_TS='2026-07-01 07:50 IST'; // release build time (IST)
-const APP_VERSION=458; // AUC rocket relevance with temporary Spearman comparison.
+const BUILD_TS='2026-07-01 10:26 IST'; // release build time (IST)
+const APP_VERSION=459; // Interaction rocket relevance features; forward-catch exclusion audit.
 const GOOGLE_DRIVE_CLIENT_ID='1015012642264-oi2nelv3v90k3d39r994a6nelgjs2a56.apps.googleusercontent.com'; // Public OAuth Web Client ID.
 const HARD_FILTER_SCHEMA='structural_tradeability_v2';
 const STOCK_RUNWAY_CEILING_PCT=19.5; // Active fallback live-eligibility ceiling and max-entry cap when NSE price-band data is unavailable.
