@@ -1239,8 +1239,8 @@ function persistMethodologySnapshot(){
   if(!ENGINE_DATA||!ENGINE_DATA.features||!ENGINE_DATA.features.length) return;
   try{
     const methSave={
-      targetCorr:ENGINE_DATA.targetCorr||{},
-      targetCorrToday:ENGINE_DATA.targetCorrToday||{},
+      targetRelevance:ENGINE_DATA.targetRelevance||{},
+      targetRelevanceToday:ENGINE_DATA.targetRelevanceToday||{},
       mrmr:ENGINE_DATA.mrmr||{},
       weights:ENGINE_DATA.weights||{},
       features:ENGINE_DATA.features||[],
@@ -1983,7 +1983,7 @@ function correlationFromPriorState(sourceSnapshot,currentSnapshot,eligibleSymbol
   const matched=(currentSnapshot?.symbols||[]).filter(symbol=>
     eligible.has(symbol)&&sourceSnapshot?.featureRows?.[symbol]&&currentSnapshot?.featureRows?.[symbol]
   );
-  const correlation={};
+  const targetRelevance={};
   const sampleCounts={};
   const lowSampleFeatures=[];
   for(const feature of features){
@@ -1998,12 +1998,12 @@ function correlationFromPriorState(sourceSnapshot,currentSnapshot,eligibleSymbol
     sampleCounts[feature]=samples;
     if(samples<30){
       lowSampleFeatures.push({feature,samples});
-      correlation[feature]=0;
+      targetRelevance[feature]=0;
     }else{
-      correlation[feature]=spearman(xs,ys);
+      targetRelevance[feature]=spearman(xs,ys);
     }
   }
-  return {correlation,matched,featureRows,sampleCounts,lowSampleFeatures};
+  return {targetRelevance,matched,featureRows,sampleCounts,lowSampleFeatures};
 }
 function snapshotPriceMoves(previous,current){
   const currentIndex=new Map((current?.symbols||[]).map((symbol,index)=>[symbol,index]));
@@ -2135,7 +2135,7 @@ function combineTrajectoryPairs({sources,currentDay,features}){
   const totalWeight=valid.reduce((sum,item)=>sum+item.rawWeight,0)||0;
   valid.forEach(item=>{item.weight=totalWeight?item.rawWeight/totalWeight:0;});
   const lowSampleFeatures=[];
-  const correlation=Object.fromEntries((features||[]).map(feature=>{
+  const targetRelevance=Object.fromEntries((features||[]).map(feature=>{
     const usable=valid.filter(item=>(item.pair.sampleCounts?.[feature]||0)>=30);
     const featureWeight=usable.reduce((sum,item)=>sum+item.rawWeight,0)||0;
     if(usable.length<valid.length){
@@ -2145,15 +2145,15 @@ function combineTrajectoryPairs({sources,currentDay,features}){
       });
     }
     const value=featureWeight
-      ?usable.reduce((sum,item)=>sum+(item.rawWeight/featureWeight)*(item.pair.correlation?.[feature]??0),0)
+      ?usable.reduce((sum,item)=>sum+(item.rawWeight/featureWeight)*(item.pair.targetRelevance?.[feature]??0),0)
       :0;
     return [feature,value];
   }));
   const nearest=valid.find(item=>item.lag===1)||null;
-  const targetCorrToday=Object.fromEntries((features||[]).map(feature=>[
-    feature,nearest?(nearest.pair.correlation?.[feature]??0):null
+  const targetRelevanceToday=Object.fromEntries((features||[]).map(feature=>[
+    feature,nearest?(nearest.pair.targetRelevance?.[feature]??0):null
   ]));
-  return {valid,correlation,targetCorrToday,nearest,lowSampleFeatures};
+  return {valid,targetRelevance,targetRelevanceToday,nearest,lowSampleFeatures};
 }
 function computeFeatureRedundancy(featureA,featureB,featureRows){
   const xs=[],ys=[];
@@ -2163,12 +2163,12 @@ function computeFeatureRedundancy(featureA,featureB,featureRows){
   });
   return Math.abs(spearman(xs,ys)||0);
 }
-function selectRocketRelevanceFeatures(features,targetCorr,maxSelected=FEATURE_MAX_SELECTED,featureRows=[]){
+function selectRocketRelevanceFeatures(features,targetRelevance,maxSelected=FEATURE_MAX_SELECTED,featureRows=[]){
   const list=[...(features||[])];
   const mrmr={};
   const relevance={};
   list.forEach(feature=>{
-    const rel=Math.abs(Number(targetCorr?.[feature])||0);
+    const rel=Math.abs(Number(targetRelevance?.[feature])||0);
     relevance[feature]=rel;
     mrmr[feature]={rel,red:0,baseScore:0,reliability:1,score:0,selected:false,accountability:null};
   });
@@ -2260,12 +2260,12 @@ async function advanceSnapshotLearning({rows,features,priceKey,rocketMetricKey,s
   const sources=currentForLearning?getTrailingTrajectorySources(runtime,currentForLearning.sessionDate):[];
   const combined=currentForLearning
     ?combineTrajectoryPairs({sources,currentDay:currentForLearning,features})
-    :{valid:[],correlation:{},targetCorrToday:Object.fromEntries(features.map(f=>[f,null])),nearest:null};
+    :{valid:[],targetRelevance:{},targetRelevanceToday:Object.fromEntries(features.map(f=>[f,null])),nearest:null};
   const hasScoringEvidence=combined.valid.length>0;
-  const targetCorr=hasScoringEvidence
-    ?combined.correlation
+  const targetRelevance=hasScoringEvidence
+    ?combined.targetRelevance
     :(ACC_CORR?.dailyCorr||ACC_CORR?.corr||Object.fromEntries(features.map(f=>[f,0])));
-  const targetCorrToday=combined.targetCorrToday;
+  const targetRelevanceToday=combined.targetRelevanceToday;
   const nearestSource=combined.nearest?.source||sources.find(item=>item.lag===1)?.source||null;
   const intervalMoves=nearestSource?snapshotPriceMoves(nearestSource,currentSnapshot):{};
 
@@ -2273,8 +2273,8 @@ async function advanceSnapshotLearning({rows,features,priceKey,rocketMetricKey,s
     ACC_CORR={
       ...ACC_CORR,
       corrSchema:CORR_SCHEMA,
-      corr:combined.correlation,
-      dailyCorr:combined.correlation,
+      corr:combined.targetRelevance,
+      dailyCorr:combined.targetRelevance,
       sessions:combined.valid.length,
       learnSessions:combined.valid.length,
       dailySessions:combined.valid.length,
@@ -2308,8 +2308,8 @@ async function advanceSnapshotLearning({rows,features,priceKey,rocketMetricKey,s
 
   const scoringFeatureRows=buildStateFeatureRows(currentSnapshot,features);
   return {
-    targetCorr,
-    targetCorrToday,
+    targetRelevance,
+    targetRelevanceToday,
     completedNow:combined.valid.length,
     note,
     runtime,
@@ -2318,7 +2318,7 @@ async function advanceSnapshotLearning({rows,features,priceKey,rocketMetricKey,s
     hasBaselineEvidence:false,
     hasScoringEvidence,
     baselineCreated:canAdvance&&!sameDayRecord,
-    primaryCorr:combined.nearest?.pair?.correlation||null,
+    primaryRelevance:combined.nearest?.pair?.targetRelevance||null,
     intervalMoves,
     scoringFeatureRows,
     currentRocketSymbols:[...(currentForLearning?.rocketSymbols||[])],
@@ -2326,7 +2326,7 @@ async function advanceSnapshotLearning({rows,features,priceKey,rocketMetricKey,s
     lagPairs:ACC_CORR?.lagPairs||[],
     deltaFeatureSchema:DELTA_FEATURE_SCHEMA,
     intervalElapsedMinutes:null,
-    freshSignalCount:hasScoringEvidence?Object.values(targetCorrToday).filter(v=>v!=null&&isFinite(v)&&Math.abs(v)>0.0001).length:0,
+    freshSignalCount:hasScoringEvidence?Object.values(targetRelevanceToday).filter(v=>v!=null&&isFinite(v)&&Math.abs(v)>0.0001).length:0,
     scoringSource:hasScoringEvidence?'five_session_rolling_daily_rocket_trajectory':'warmup',
     dailyScoreReady:hasScoringEvidence,
     snapshotPairs:combined.valid.length
@@ -2595,8 +2595,8 @@ async function runEngine(raw, sessionTag, options={}){
   window._lastParsedFiltered = filtered;
   window._lastParsedForSnapshot = learningUniverse;
 
-  const targetCorr=snapshotLearning.targetCorr;
-  const targetCorrToday=snapshotLearning.targetCorrToday;
+  const targetRelevance=snapshotLearning.targetRelevance;
+  const targetRelevanceToday=snapshotLearning.targetRelevanceToday;
   const todayRocketSet=new Set(snapshotLearning.currentRocketSymbols||[]);
   const freshSignalCount=snapshotLearning.freshSignalCount;
   const currentUploadLearned=snapshotLearning.completedNow>0;
@@ -2618,7 +2618,7 @@ async function runEngine(raw, sessionTag, options={}){
   const scoringFeatureRows=snapshotLearning.scoringFeatureRows||{};
   const scoringRows=learningUniverse.map(d=>scoringFeatureRows[d.symbol]||{});
   // Feature selection uses greedy mRMR: rank-relevance minus same-day cross-sectional redundancy.
-  const {mrmr,selectedFeatures,weights}=selectRocketRelevanceFeatures(FEATS,targetCorr,FEATURE_MAX_SELECTED,filtered.map(d=>scoringFeatureRows[d.symbol]||{}));
+  const {mrmr,selectedFeatures,weights}=selectRocketRelevanceFeatures(FEATS,targetRelevance,FEATURE_MAX_SELECTED,filtered.map(d=>scoringFeatureRows[d.symbol]||{}));
   const outcomeReliabilityModel=buildOutcomeReliabilityModel(FEATS,weights);
 
   const pctls={};
@@ -2631,7 +2631,7 @@ async function runEngine(raw, sessionTag, options={}){
       // Only observed values are inverted for a negative learned correlation.
       const directedPercentile=(p==null||!Number.isFinite(p))
         ?0.35
-        :(targetCorr[f]>=0?p:(1-p));
+        :(targetRelevance[f]>=0?p:(1-p));
       rawScore+=w*directedPercentile;
     }
     const learnedMrmrScore=hasRecommendationEvidence?Math.round(rawScore*1000)/10:null;
@@ -2730,13 +2730,13 @@ async function runEngine(raw, sessionTag, options={}){
       // while negative correlations invert observed ranks only.
       const directedRank=(rank==null||!Number.isFinite(rank))
         ?0.35
-        :(targetCorr[f]>=0?rank:(1-rank));
+        :(targetRelevance[f]>=0?rank:(1-rank));
       rs+=w*directedRank;
     }
     SCORE_MAP[d.symbol]=hasRecommendationEvidence?Math.round(rs*1000)/10:WARMUP_NEUTRAL_SCORE;
   });
   parsed.forEach(d=>{d.rocketScore=SCORE_MAP[d.symbol]??null;});
-  ENGINE_DATA={targetCorr,targetCorrToday,mrmr,weights,features:FEATS,selectedFeatures,labels:LABELS,top10Feats,accSessions:ACC_CORR?.sessions||0,laggedNote:laggedNote||'',
+  ENGINE_DATA={targetRelevance,targetRelevanceToday,mrmr,weights,features:FEATS,selectedFeatures,labels:LABELS,top10Feats,accSessions:ACC_CORR?.sessions||0,laggedNote:laggedNote||'',
     marketBreadth:marketBreadth,
     recommendationFeedback,executedEntryFeedback,
     outcomeScoreOverlay:{active:outcomeReliabilityModel.active,samples:outcomeReliabilityModel.samples.length,features:outcomeReliabilityModel.features.length,maxAdjustment:0,mode:'confidence_badge_only'},
@@ -2766,7 +2766,7 @@ async function runEngine(raw, sessionTag, options={}){
   COLS=getCols(); // refresh dynamic columns
   // Persist compact methodology summaries; the O(n²) pair matrix is recomputed per run.
   try{
-    const methSave={targetCorr:ENGINE_DATA.targetCorr,targetCorrToday,mrmr:ENGINE_DATA.mrmr,weights:ENGINE_DATA.weights,
+    const methSave={targetRelevance:ENGINE_DATA.targetRelevance,targetRelevanceToday,mrmr:ENGINE_DATA.mrmr,weights:ENGINE_DATA.weights,
       features:ENGINE_DATA.features,labels:ENGINE_DATA.labels,top10Feats:ENGINE_DATA.top10Feats,accSessions:ENGINE_DATA.accSessions,laggedNote:ENGINE_DATA.laggedNote,
       marketBreadth:ENGINE_DATA.marketBreadth,useFreshCorr:ENGINE_DATA.useFreshCorr,hasRecommendationEvidence:ENGINE_DATA.hasRecommendationEvidence,currentUploadLearned:ENGINE_DATA.currentUploadLearned,freshSignalCount:ENGINE_DATA.freshSignalCount,scoringSource:ENGINE_DATA.scoringSource,useAccCorr:ENGINE_DATA.useAccCorr,sectorCol:ENGINE_DATA.sectorCol,industryCol:ENGINE_DATA.industryCol,
       totalParsed:totalParsed,hardFilterSchema:HARD_FILTER_SCHEMA,removed:{...REMOVED},survSize:Object.keys(NSE_SURV).length,
@@ -4053,12 +4053,12 @@ function renderMethodology(){
 }
 function _renderMethodologyInner(){
   const E=ENGINE_DATA;
-  if(!E||!E.features||!E.features.length||!E.mrmr||!E.weights||!E.targetCorr)return;
+  if(!E||!E.features||!E.features.length||!E.mrmr||!E.weights||!E.targetRelevance)return;
   // Guard all potentially missing fields
   if(!E.labels) E.labels={};
   if(E.accSessions==null) E.accSessions=0;
   if(!E.laggedNote) E.laggedNote='';
-  if(!E.targetCorrToday) E.targetCorrToday={};
+  if(!E.targetRelevanceToday) E.targetRelevanceToday={};
   const sorted=[...E.features].sort((a,b)=>E.mrmr[b].score-E.mrmr[a].score);
   const maxW=sorted.reduce((m,f)=>Math.max(m,E.weights[f]||0),0)||1;
   const NSE_FEATS=new Set(['delivery_pct','price_band_pct']);
@@ -4101,14 +4101,14 @@ function _renderMethodologyInner(){
 
   mc.innerHTML=''; // clear before rebuild
 
-  let wtHTML=`<table class="ct"><thead><tr><th>Feature</th><th>Src</th><th>Rolling Rocket r</th><th>D-1 Rocket r</th><th>Direction</th><th>mRMR Score</th><th class="bar-cell">Weight</th><th>Wt%</th></tr></thead><tbody>`;
+  let wtHTML=`<table class="ct"><thead><tr><th>Feature</th><th>Src</th><th>Rolling Relevance</th><th>D-1 Relevance</th><th>Direction</th><th>mRMR Score</th><th class="bar-cell">Weight</th><th>Wt%</th></tr></thead><tbody>`;
   for(const f of sorted){
-    const tc=E.targetCorr[f],m=E.mrmr[f],w=E.weights[f];
+    const tc=E.targetRelevance[f],m=E.mrmr[f],w=E.weights[f];
     const dir=tc>=0?'<span style="color:var(--green)">↑</span>':'<span style="color:var(--red)">↓</span>';
     const bw=Math.round((w||0)/maxW*100),bc=(tc||0)>=0?'var(--green)':'var(--red)';
     const srcType=getFeatureSource(f);
     const src=srcType==='NSE'?'<span style="color:var(--cyan);font-size:9px;font-weight:700">NSE</span>':srcType==='Calc'?'<span style="color:var(--purple);font-size:9px;font-weight:700">Calc</span>':'<span style="color:var(--t3);font-size:9px">TV</span>';
-    const todayR=E.targetCorrToday?.[f];
+    const todayR=E.targetRelevanceToday?.[f];
     const todayCell=todayR!=null&&!isNaN(todayR)?`<span style="color:${todayR>=0?'var(--green)':'var(--red)'};font-size:10px">${(todayR??0).toFixed(3)}</span>`:'—';
     const _n=v=>isFinite(v)?v:0;
     const tcS=tc!=null&&isFinite(tc)?tc.toFixed(3):'—'; const scS=m&&m.score!=null&&isFinite(m.score)?m.score.toFixed(4):'—'; const wS=w!=null&&isFinite(w)?(w*100).toFixed(1):'—';
