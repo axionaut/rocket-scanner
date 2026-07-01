@@ -106,7 +106,6 @@ const ALL_STORE='rs_data';
 const CORR_STORE='rs_corr';
 const CORR_SCHEMA='five_session_rolling_daily_rocket_trajectory_one_clock_pure_relevance_v6';
 const ROCKET_TOP_FRACTION=0.01;
-const SNAPSHOT_HISTORY_DECAY=0.95;
 const SNAPSHOT_STATE_STORE='rs_snapshot_mrmr_v1';
 const SNAPSHOT_STATE_SCHEMA='five_session_rolling_daily_rocket_trajectory_one_clock_v3';
 const TELEMETRY_ARCHIVE_FILE='rocket_archive.json';
