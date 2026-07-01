@@ -4365,6 +4365,16 @@ function getMaxEntry(s){
   const openPrice=s.price/(1+pc/100);
   return tickPrice(openPrice*(1+ceiling/100)/(1+tgt/100));
 }
+/*
+  Exclusion audit, 2026-07-01:
+  - The already-rocketed branch below excludes only stocks in today's persisted top-1%
+    rocket union (`ROCKET_TOP_FRACTION = 0.01`). A partial mover below that cutoff is
+    not benched by `rocketToday`, unless it touched the same-day top-1% set earlier.
+  - The entry-fade branch can bench a not-yet-rocketed partial mover when it is positive
+    on the day but has already pulled back through the harvest zone from the day high:
+    pullback >= targetPct * 2, or pullback >= targetPct with peak retention below 70%.
+  This block documents current behavior only; it intentionally changes no thresholds.
+*/
 function getEntryFadeReason(s){
   if(!s) return '';
   const pc=Number(s.priceChange);
