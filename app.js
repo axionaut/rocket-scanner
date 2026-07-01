@@ -1,5 +1,5 @@
-const BUILD_TS='2026-07-01 14:35 IST'; // release build time (IST)
-const APP_VERSION=464; // Entry geometry gate with velocity-aware recommendation ranking.
+const BUILD_TS='2026-07-01 15:12 IST'; // release build time (IST)
+const APP_VERSION=465; // Geometry fallback preserves null upper-band data.
 const GOOGLE_DRIVE_CLIENT_ID='1015012642264-oi2nelv3v90k3d39r994a6nelgjs2a56.apps.googleusercontent.com'; // Public OAuth Web Client ID.
 const HARD_FILTER_SCHEMA='structural_tradeability_v2';
 const STOCK_RUNWAY_CEILING_PCT=19.5; // Intentional owner-approved forward-catch strategy filter: excludes stocks already near their circuit band (or caps max entry) since a stock that has already used up its daily range is a poor pre-rocket buy. Active fallback when NSE price-band data is unavailable.
@@ -4568,6 +4568,7 @@ function getEntryFadeReason(s){
 }
 function getGeometryHeadroomPct(s){
   const raw=s?.pctToUpperBand??s?._features?.pct_to_upper_band;
+  if(raw==null) return null;
   const v=Number(raw);
   if(!Number.isFinite(v)) return null;
   return Math.max(0,v);
