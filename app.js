@@ -1,5 +1,5 @@
-const BUILD_TS='2026-07-01 13:55 IST'; // release build time (IST)
-const APP_VERSION=462; // Regime exposure dial + top-ups pyramid into strength (no averaging down).
+const BUILD_TS='2026-07-01 13:05 IST'; // release build time (IST)
+const APP_VERSION=463; // Read-only folder loading; no local write-permission prompt.
 const GOOGLE_DRIVE_CLIENT_ID='1015012642264-oi2nelv3v90k3d39r994a6nelgjs2a56.apps.googleusercontent.com'; // Public OAuth Web Client ID.
 const HARD_FILTER_SCHEMA='structural_tradeability_v2';
 const STOCK_RUNWAY_CEILING_PCT=19.5; // Intentional owner-approved forward-catch strategy filter: excludes stocks already near their circuit band (or caps max entry) since a stock that has already used up its daily range is a poor pre-rocket buy. Active fallback when NSE price-band data is unavailable.
@@ -602,7 +602,6 @@ const FS = (() => {
       const ok=await requestLocalPermission(_localDirHandle);
       if(!ok){_localDirHandle=null;return false;}
       await putLocalStore(LOCAL_HANDLE_KEY,_localDirHandle).catch(e=>console.warn('Could not persist local folder handle',e));
-      if(_brainLoaded||Object.keys(_brain||{}).length) await writeLocalBrain(_brain);
       updateFolderUI();
       return true;
     }catch(e){console.warn('Local folder permission failed',e);_localDirHandle=null;return false;}
@@ -613,7 +612,7 @@ const FS = (() => {
       const handle=await getLocalStore(LOCAL_HANDLE_KEY);
       if(!handle) return false;
       _localDirHandle=handle;
-      const granted=!_localDirHandle.queryPermission||await _localDirHandle.queryPermission({mode:'readwrite'})==='granted';
+      const granted=!_localDirHandle.queryPermission||await _localDirHandle.queryPermission({mode:'read'})==='granted';
       if(granted){
         updateFolderUI();
         return true;
@@ -625,7 +624,7 @@ const FS = (() => {
 
   async function requestLocalPermission(handle){
     if(!handle?.queryPermission||!handle?.requestPermission) return true;
-    const opts={mode:'readwrite'};
+    const opts={mode:'read'};
     if(await handle.queryPermission(opts)==='granted') return true;
     return await handle.requestPermission(opts)==='granted';
   }
@@ -633,7 +632,7 @@ const FS = (() => {
   async function writeLocalBrainFile(data){
     if(!_localDirHandle||!data||typeof data!=='object') return false;
     try{
-      if(!(await requestLocalPermission(_localDirHandle))) return false;
+      if(_localDirHandle.queryPermission&&await _localDirHandle.queryPermission({mode:'readwrite'})!=='granted') return false;
       const fileHandle=await _localDirHandle.getFileHandle(BRAIN_FILE,{create:true});
       const writable=await fileHandle.createWritable();
       await writable.write(JSON.stringify(data));
@@ -645,7 +644,7 @@ const FS = (() => {
   async function deleteLocalBrainFile(){
     if(!_localDirHandle) return;
     try{
-      if(!(await requestLocalPermission(_localDirHandle))) return;
+      if(_localDirHandle.queryPermission&&await _localDirHandle.queryPermission({mode:'readwrite'})!=='granted') return;
       await _localDirHandle.removeEntry(BRAIN_FILE).catch(()=>null);
     }catch(e){console.warn('Local rocket_brain.json delete failed',e);}
   }
@@ -5347,7 +5346,7 @@ async function filesFromDirectoryHandle(dirHandle){
 async function openUploadFolderPicker(){
   if(window.showDirectoryPicker){
     try{
-      const picked=await window.showDirectoryPicker({id:'rocket-scanner-uploads',mode:'readwrite'});
+      const picked=await window.showDirectoryPicker({id:'rocket-scanner-uploads',mode:'read'});
       let uploadHandle=picked;
       let localBrainHandle=picked;
       try{
