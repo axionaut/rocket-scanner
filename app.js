@@ -1,5 +1,5 @@
-const BUILD_TS='2026-06-30 14:44 IST'; // release build time (IST)
-const APP_VERSION=456; // Phase 0 telemetry archive and offline backtest harness.
+const BUILD_TS='2026-07-01 07:26 IST'; // release build time (IST)
+const APP_VERSION=457; // Compact outcome trace archive and backtest harness.
 const GOOGLE_DRIVE_CLIENT_ID='1015012642264-oi2nelv3v90k3d39r994a6nelgjs2a56.apps.googleusercontent.com'; // Public OAuth Web Client ID.
 const HARD_FILTER_SCHEMA='structural_tradeability_v2';
 const STOCK_RUNWAY_CEILING_PCT=19.5; // Active fallback live-eligibility ceiling and max-entry cap when NSE price-band data is unavailable.
@@ -110,7 +110,7 @@ const SNAPSHOT_HISTORY_DECAY=0.95;
 const SNAPSHOT_STATE_STORE='rs_snapshot_mrmr_v1';
 const SNAPSHOT_STATE_SCHEMA='five_session_rolling_daily_rocket_trajectory_one_clock_v3';
 const TELEMETRY_ARCHIVE_FILE='rocket_archive.json';
-const TELEMETRY_ARCHIVE_SCHEMA='daily_telemetry_archive_v1';
+const TELEMETRY_ARCHIVE_SCHEMA='daily_outcome_trace_v2';
 const METH_STORE='rs_meth';
 const HOLD_STORE='rs_holdings';
 const ORDERS_STORE='rs_orders';
@@ -2254,7 +2254,6 @@ async function advanceSnapshotLearning({rows,features,priceKey,rocketMetricKey,s
     runtime.completed=runtime.days.length;
     runtime.lastTag=sessionTag||null;
     window._snapshotRuntimeDirty=true;
-    await appendTelemetryArchiveDay(currentDay).catch(e=>console.warn('Telemetry archive append failed',e));
   }
 
   const currentForLearning=currentDay&&currentDay.sessionDate===stamp.sessionDate?currentDay:null;
@@ -5886,61 +5885,68 @@ async function encodePackedDailyRecord(snapshot){
     latestSessionTag:snapshot.latestSessionTag||null
   };
 }
-function emptyTelemetryArchive(){
+function emptyOutcomeTraceArchive(){
   return {schema:TELEMETRY_ARCHIVE_SCHEMA,days:[],createdAt:new Date().toISOString(),updatedAt:null};
 }
-async function decodeTelemetryArchive(source){
-  if(!source||source.schema!==TELEMETRY_ARCHIVE_SCHEMA) return emptyTelemetryArchive();
-  const days=[];
-  for(const packed of source.days||[]){
-    const day=packed?.featureRows?cloneTelemetryRecord(packed):await decodePackedDailyRecord(packed);
-    if(day?.sessionDate&&day.symbols?.length) days.push(day);
-  }
-  days.sort((a,b)=>String(a.sessionDate).localeCompare(String(b.sessionDate))||((a.timestamp||0)-(b.timestamp||0)));
-  return {...emptyTelemetryArchive(),...source,schema:TELEMETRY_ARCHIVE_SCHEMA,days};
+function cleanSymbolList(list){
+  return [...new Set((list||[]).map(normSym).filter(Boolean))];
 }
-async function encodeTelemetryArchive(archive){
-  const days=[];
-  const ordered=[...(archive?.days||[])]
-    .filter(day=>day?.sessionDate&&day.symbols?.length)
-    .sort((a,b)=>String(a.sessionDate).localeCompare(String(b.sessionDate))||((a.timestamp||0)-(b.timestamp||0)));
-  for(const day of ordered) days.push(await encodePackedDailyRecord(day));
-  return {
-    schema:TELEMETRY_ARCHIVE_SCHEMA,
-    createdAt:archive?.createdAt||new Date().toISOString(),
-    updatedAt:new Date().toISOString(),
-    days
+function cleanPriceMap(prices){
+  const out={};
+  Object.entries(prices||{}).forEach(([symbol,value])=>{
+    const sym=normSym(symbol),price=Number(value);
+    if(sym&&price>0&&isFinite(price)) out[sym]=Number(price.toFixed(4));
+  });
+  return out;
+}
+function cleanOutcomeTraceDay(day){
+  if(!day?.sessionDate) return null;
+  const entry={
+    sessionDate:String(day.sessionDate),
+    basketSymbols:cleanSymbolList(day.basketSymbols),
+    eligibleSymbols:cleanSymbolList(day.eligibleSymbols),
+    rocketSymbols:cleanSymbolList(day.rocketSymbols),
+    prices:cleanPriceMap(day.prices)
   };
+  return entry.eligibleSymbols.length&&Object.keys(entry.prices).length?entry:null;
 }
-async function loadTelemetryArchive({force=false}={}){
+async function decodeOutcomeTraceArchive(source){
+  if(!source||source.schema!==TELEMETRY_ARCHIVE_SCHEMA) return emptyOutcomeTraceArchive();
+  const days=(source.days||[]).map(cleanOutcomeTraceDay).filter(Boolean)
+    .sort((a,b)=>String(a.sessionDate).localeCompare(String(b.sessionDate)));
+  return {...emptyOutcomeTraceArchive(),...source,schema:TELEMETRY_ARCHIVE_SCHEMA,days};
+}
+async function loadOutcomeTraceArchive({force=false}={}){
   if(TELEMETRY_ARCHIVE_CACHE&&!force) return TELEMETRY_ARCHIVE_CACHE;
   const hit=await FS.readJsonFile?.(TELEMETRY_ARCHIVE_FILE);
-  TELEMETRY_ARCHIVE_CACHE=await decodeTelemetryArchive(hit?.data||null);
+  TELEMETRY_ARCHIVE_CACHE=await decodeOutcomeTraceArchive(hit?.data||null);
   return TELEMETRY_ARCHIVE_CACHE;
 }
-function upsertTelemetryArchiveDay(archive, day){
-  const clean=cloneTelemetryRecord(day);
+function upsertOutcomeTraceDay(archive, day){
+  const clean=cleanOutcomeTraceDay(day);
+  if(!clean) return {...emptyOutcomeTraceArchive(),...(archive||{})};
   const days=[...(archive?.days||[])].filter(d=>d.sessionDate!==clean.sessionDate);
   days.push(clean);
-  days.sort((a,b)=>String(a.sessionDate).localeCompare(String(b.sessionDate))||((a.timestamp||0)-(b.timestamp||0)));
-  return {...emptyTelemetryArchive(),...(archive||{}),days,updatedAt:new Date().toISOString()};
+  days.sort((a,b)=>String(a.sessionDate).localeCompare(String(b.sessionDate)));
+  return {...emptyOutcomeTraceArchive(),...(archive||{}),schema:TELEMETRY_ARCHIVE_SCHEMA,days,updatedAt:new Date().toISOString()};
 }
-async function appendTelemetryArchiveDay(day){
-  if(!day?.sessionDate) return {saved:false,reason:'missing_day'};
-  const archive=upsertTelemetryArchiveDay(await loadTelemetryArchive(),day);
+async function appendOutcomeTraceDay(day){
+  const archive=upsertOutcomeTraceDay(await loadOutcomeTraceArchive(),day);
   TELEMETRY_ARCHIVE_CACHE=archive;
-  const encoded=await encodeTelemetryArchive(archive);
+  const encoded={schema:TELEMETRY_ARCHIVE_SCHEMA,createdAt:archive.createdAt||new Date().toISOString(),updatedAt:new Date().toISOString(),days:archive.days};
   const text=JSON.stringify(encoded);
   const saved=await FS.writeJsonFile?.(TELEMETRY_ARCHIVE_FILE,encoded);
-  const latest=encoded.days.find(d=>d.sessionDate===day.sessionDate);
+  const latest=encoded.days.find(d=>d.sessionDate===day?.sessionDate);
   const latestBytes=latest?JSON.stringify(latest).length:0;
   window._lastTelemetryArchiveWrite={
     saved:!!saved,
     file:TELEMETRY_ARCHIVE_FILE,
+    schema:TELEMETRY_ARCHIVE_SCHEMA,
     days:encoded.days.length,
     bytes:text.length,
     latestDayBytes:latestBytes,
-    projectedYearBytes:latestBytes*252
+    projectedYearBytes:latestBytes*252,
+    latestEntry:latest||null
   };
   return window._lastTelemetryArchiveWrite;
 }
@@ -6070,6 +6076,27 @@ async function processScannerUpload(scannerFile, mode, options={}){
     if(mode==='stock'){
       const threshold=getEffectiveTgtPct()||TRADEBOOK_STATS?.adaptiveTGT||4;
       const eligibleCandidates=getDisplayedEntryCandidates(ALL).filter(s=>s.price>0);
+      if(!restoreOnly&&!isDuplicateSession){
+        const capital=parseFloat(document.getElementById('fCapital')?.value)||0;
+        const planned=planBasketExport(capital,eligibleCandidates);
+        const dayRecord=(SNAPSHOT_RUNTIME?.days||[]).find(day=>day.sessionDate===uploadSession)||null;
+        const liveEligibleSymbols=dayRecord?.eligibleSymbols?.length
+          ?dayRecord.eligibleSymbols
+          :(window._lastParsedFiltered||[]).map(s=>s.symbol);
+        const liveRocketSymbols=dayRecord?.rocketSymbols?.length
+          ?dayRecord.rocketSymbols
+          :ALL.filter(s=>s.rocketToday).map(s=>s.symbol);
+        const prices=Object.fromEntries(ALL
+          .map(s=>[s.symbol,Number(s.price)])
+          .filter(([symbol,price])=>normSym(symbol)&&price>0&&isFinite(price)));
+        await appendOutcomeTraceDay({
+          sessionDate:uploadSession,
+          basketSymbols:planned.exportList.map(s=>s.symbol),
+          eligibleSymbols:liveEligibleSymbols,
+          rocketSymbols:liveRocketSymbols,
+          prices
+        }).catch(e=>console.warn('Outcome trace archive append failed',e));
+      }
       const outcomeFeatureOrder=getOutcomeFeatureOrderFromEngine();
       const recommendations=eligibleCandidates
         .map((s,i)=>({symbol:s.symbol,entryPrice:s.price,score:s.rocketScore,rank:i+1,features:compactOutcomeFeatures(s._features,outcomeFeatureOrder)}));
@@ -6091,67 +6118,9 @@ async function processScannerUpload(scannerFile, mode, options={}){
   }
 }
 
-function archiveFeatureKey(features,pattern){
-  return (features||[]).find(f=>pattern.test(f))||null;
-}
-function archiveDayRows(day,targetCorr,weights,features,hasEvidence){
-  const eligible=new Set(day?.eligibleSymbols||[]);
-  const rocketSet=new Set(day?.rocketSymbols||[]);
-  const featureRows=buildStateFeatureRows(day,features);
-  const priceIndex=new Map((day?.symbols||[]).map((symbol,index)=>[symbol,index]));
-  const priceChangeKey=archiveFeatureKey(features,/price_change.*1_day|1_day.*price_change|^change.*1_day$/);
-  const volumeKey=archiveFeatureKey(features,/^volume_1_day$|^volume$/);
-  const marketCapKey=archiveFeatureKey(features,/market_capitalization|market_cap/);
-  const atrKey=archiveFeatureKey(features,/average_true_range_.*14.*1_day|atr_.*14.*1_day/);
-  const highKey=archiveFeatureKey(features,/^high_1_day$/);
-  const lowKey=archiveFeatureKey(features,/^low_1_day$/);
-  const openKey=archiveFeatureKey(features,/^open_1_day$/);
-  const vwapKey=archiveFeatureKey(features,/volume_weighted_average_price.*1_day/);
-  const pioKey=archiveFeatureKey(features,/piotroski/);
-  const perf1wKey=archiveFeatureKey(features,/performance.*1_week|perf.*1_week|1_week.*perf/);
-  const shareholdersKey=archiveFeatureKey(features,/number_of_shareholders/);
-  const symbols=(day?.symbols||[]).filter(symbol=>eligible.has(symbol));
-  const pctls={};
-  features.forEach(feature=>{pctls[feature]=pctRank(symbols.map(symbol=>featureRows[symbol]?.[feature]??null));});
-  return symbols.map((symbol,idx)=>{
-    const row=featureRows[symbol]||{};
-    let rawScore=0;
-    features.forEach(feature=>{
-      const w=weights?.[feature]||0,p=pctls[feature]?.[idx];
-      const directed=(p==null||!Number.isFinite(p))?0.35:((targetCorr?.[feature]||0)>=0?p:(1-p));
-      rawScore+=w*directed;
-    });
-    const price=day.prices?.[priceIndex.get(symbol)]??null;
-    return {
-      symbol,name:symbol,price,
-      priceChange:priceChangeKey?row[priceChangeKey]:null,
-      volume:volumeKey?row[volumeKey]:null,
-      marketCap:marketCapKey?row[marketCapKey]:null,
-      atr:atrKey?row[atrKey]:null,
-      high1d:highKey?row[highKey]:null,
-      low1d:lowKey?row[lowKey]:null,
-      open1d:openKey?row[openKey]:null,
-      vwap:vwapKey?row[vwapKey]:null,
-      piotroski:pioKey?row[pioKey]:null,
-      shareholders:shareholdersKey?row[shareholdersKey]:null,
-      perf1w:perf1wKey?row[perf1wKey]:null,
-      delivPct:row.delivery_pct??null,
-      rangePos:row.range_pos??null,
-      pctFrom52wHigh:row.pct_from_52w_high??null,
-      peakRetention:row.peak_retention??null,
-      pullbackFromHighPct:row.pullback_from_high_pct??null,
-      fromOpenPct:row.from_open_pct??null,
-      rocketToday:rocketSet.has(symbol),
-      rocketNow:rocketSet.has(symbol),
-      rocketScore:hasEvidence?Math.round(rawScore*1000)/10:WARMUP_NEUTRAL_SCORE,
-      _features:row
-    };
-  }).sort((a,b)=>(b.rocketScore||0)-(a.rocketScore||0));
-}
 function archiveForwardReturn(symbol,fromDay,toDay){
-  const fromIndex=new Map((fromDay?.symbols||[]).map((s,i)=>[s,i]));
-  const toIndex=new Map((toDay?.symbols||[]).map((s,i)=>[s,i]));
-  const a=fromDay?.prices?.[fromIndex.get(symbol)],b=toDay?.prices?.[toIndex.get(symbol)];
+  const sym=normSym(symbol);
+  const a=Number(fromDay?.prices?.[sym]),b=Number(toDay?.prices?.[sym]);
   return a>0&&b>0?((b/a)-1)*100:null;
 }
 function seededRandom(seedText){
@@ -6177,66 +6146,40 @@ function scoreArchivePickSet(symbols,day,nextDay){
     avgForwardReturn:returns.length?mean(returns):null
   };
 }
-function backtestMomentumSymbols(day,count){
-  const features=day?.featureCols||[];
-  const priceChangeKey=archiveFeatureKey(features,/price_change.*1_day|1_day.*price_change|^change.*1_day$/);
-  const eligible=new Set(day?.eligibleSymbols||[]);
-  return (day?.symbols||[])
-    .filter(symbol=>eligible.has(symbol))
-    .map(symbol=>({symbol,value:priceChangeKey?day.featureRows?.[symbol]?.[priceChangeKey]:null}))
+function traceMomentumSymbols(previousDay,day,count){
+  return cleanSymbolList(day?.eligibleSymbols)
+    .map(symbol=>({symbol,value:archiveForwardReturn(symbol,previousDay,day)}))
     .filter(x=>x.value!=null&&isFinite(x.value))
     .sort((a,b)=>b.value-a.value)
     .slice(0,count)
     .map(x=>x.symbol);
 }
 async function runArchiveBacktest(options={}){
-  const archive=options.archive?await decodeTelemetryArchive(options.archive):await loadTelemetryArchive({force:!!options.forceLoad});
+  const archive=options.archive?await decodeOutcomeTraceArchive(options.archive):await loadOutcomeTraceArchive({force:!!options.forceLoad});
   const days=[...(archive?.days||[])].sort((a,b)=>String(a.sessionDate).localeCompare(String(b.sessionDate)));
   const config={
-    relevanceMetric:options.relevanceMetric||'spearman',
-    scoringMethod:options.scoringMethod||'linear_percentile',
-    capital:Number(options.capital)||parseFloat(document.getElementById('fCapital')?.value)||0
+    relevanceMetric:options.relevanceMetric||'recorded_trace',
+    scoringMethod:options.scoringMethod||'recorded_basket'
   };
   const results=[];
   for(let i=1;i<days.length-1;i++){
-    const basketDay=days[i],nextDay=days[i+1],trainingCurrent=days[i-1];
-    const trainingRuntime={schema:SNAPSHOT_STATE_SCHEMA,days:days.slice(0,i)};
-    const sources=getTrailingTrajectorySources(trainingRuntime,trainingCurrent.sessionDate);
-    if(String(trainingCurrent.sessionDate)>=String(basketDay.sessionDate)) throw new Error(`Backtest leakage: training day ${trainingCurrent.sessionDate} is not before basket day ${basketDay.sessionDate}`);
-    sources.forEach(item=>{
-      if(String(item.source.sessionDate)>=String(basketDay.sessionDate)) throw new Error(`Backtest leakage: source ${item.source.sessionDate} read for basket day ${basketDay.sessionDate}`);
+    const previousDay=days[i-1],basketDay=days[i],nextDay=days[i+1];
+    if(String(previousDay.sessionDate)>=String(basketDay.sessionDate)) throw new Error(`Backtest leakage: momentum source ${previousDay.sessionDate} is not before basket day ${basketDay.sessionDate}`);
+    if(String(nextDay.sessionDate)<=String(basketDay.sessionDate)) throw new Error(`Backtest order error: outcome day ${nextDay.sessionDate} is not after basket day ${basketDay.sessionDate}`);
+    const basketSymbols=cleanSymbolList(basketDay.basketSymbols);
+    const eligibleSymbols=cleanSymbolList(basketDay.eligibleSymbols);
+    const randomSymbols=pickRandomSymbols(eligibleSymbols,basketSymbols.length,basketDay.sessionDate);
+    const momentumSymbols=traceMomentumSymbols(previousDay,basketDay,basketSymbols.length);
+    results.push({
+      date:basketDay.sessionDate,
+      nextDate:nextDay.sessionDate,
+      momentumSourceDate:previousDay.sessionDate,
+      basket:scoreArchivePickSet(basketSymbols,basketDay,nextDay),
+      random:scoreArchivePickSet(randomSymbols,basketDay,nextDay),
+      momentum:scoreArchivePickSet(momentumSymbols,basketDay,nextDay),
+      basketSymbols,
+      leakageChecked:true
     });
-    const features=trainingCurrent.featureCols?.length?trainingCurrent.featureCols:(basketDay.featureCols||[]);
-    const combined=combineTrajectoryPairs({sources,currentDay:trainingCurrent,features});
-    const hasEvidence=combined.valid.length>0;
-    const targetCorr=hasEvidence?combined.correlation:Object.fromEntries(features.map(f=>[f,0]));
-    const rowsForRedundancy=(basketDay.eligibleSymbols||[]).map(symbol=>buildStateFeatureRows(basketDay,features)[symbol]||{});
-    const {weights,selectedFeatures}=selectRocketRelevanceFeatures(features,targetCorr,FEATURE_MAX_SELECTED,rowsForRedundancy);
-    const previousEngine=ENGINE_DATA;
-    try{
-      ENGINE_DATA={...(ENGINE_DATA||{}),hasRecommendationEvidence:hasEvidence};
-      const scoredRows=archiveDayRows(basketDay,targetCorr,weights,features,hasEvidence);
-      const candidates=getDisplayedEntryCandidates(scoredRows);
-      const planned=planBasketExport(config.capital,candidates);
-      const basketSymbols=planned.exportList.map(s=>s.symbol);
-      const eligibleSymbols=(basketDay.eligibleSymbols||[]).filter(Boolean);
-      const randomSymbols=pickRandomSymbols(eligibleSymbols,basketSymbols.length,basketDay.sessionDate);
-      const momentumSymbols=backtestMomentumSymbols(basketDay,basketSymbols.length);
-      results.push({
-        date:basketDay.sessionDate,
-        nextDate:nextDay.sessionDate,
-        trainingDate:trainingCurrent.sessionDate,
-        evidencePairs:combined.valid.length,
-        selectedFeatureCount:selectedFeatures.length,
-        basket:scoreArchivePickSet(basketSymbols,basketDay,nextDay),
-        random:scoreArchivePickSet(randomSymbols,basketDay,nextDay),
-        momentum:scoreArchivePickSet(momentumSymbols,basketDay,nextDay),
-        basketSymbols,
-        leakageChecked:true
-      });
-    }finally{
-      ENGINE_DATA=previousEngine;
-    }
   }
   const avg=numbers=>numbers.length?mean(numbers):null;
   const collect=(key,field)=>results.map(r=>r[key]?.[field]).filter(v=>v!=null&&isFinite(v));
