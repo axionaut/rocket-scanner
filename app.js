@@ -1,5 +1,5 @@
-const BUILD_TS='2026-07-01 13:05 IST'; // release build time (IST)
-const APP_VERSION=463; // Read-only folder loading; no local write-permission prompt.
+const BUILD_TS='2026-07-01 14:35 IST'; // release build time (IST)
+const APP_VERSION=464; // Entry geometry gate with velocity-aware recommendation ranking.
 const GOOGLE_DRIVE_CLIENT_ID='1015012642264-oi2nelv3v90k3d39r994a6nelgjs2a56.apps.googleusercontent.com'; // Public OAuth Web Client ID.
 const HARD_FILTER_SCHEMA='structural_tradeability_v2';
 const STOCK_RUNWAY_CEILING_PCT=19.5; // Intentional owner-approved forward-catch strategy filter: excludes stocks already near their circuit band (or caps max entry) since a stock that has already used up its daily range is a poor pre-rocket buy. Active fallback when NSE price-band data is unavailable.
@@ -13,6 +13,9 @@ const HARVEST_TRIGGER_CONFIDENCE=0.60; // Prefer a target that prior picks commo
 const HARVEST_MIN_SAMPLES=8;
 const ENTRY_FADE_RETENTION_FLOOR=70; // Below this, a pullback through the target zone is treated as a fading entry.
 const ENTRY_FADE_SEVERE_TARGET_MULT=2; // A pullback twice the harvest target is too much give-back to chase.
+const SL_HARD_CAP_PCT=3.0; // Maximum stop distance used for display, sizing, export references and entry geometry.
+const GEOMETRY_MIN_RR=2.0; // Require at least 2x headroom-to-risk before recommending a fresh entry.
+const VELOCITY_WEIGHT=0.3; // Modest ranking tilt toward catchable room to upper circuit among geometry survivors.
 // Rocket relevance: four prior trading-day states explain the current day's rocket set.
 // A five-session frame is D-4, D-3, D-2, D-1 and D. Current feature values never explain Y(D).
 const DELTA_FEATURE_SCHEMA='five_session_rolling_daily_rocket_trajectory_one_clock_pure_relevance_v6';
@@ -112,6 +115,7 @@ let PERF_RENDER_QUEUED=false;
 let ENGINE_DATA={};
 let REMOVED={uc:0,surv:0,liq:0,fscore:0,atr:0};
 let SUPPRESSED_HELD=0; // count of stocks hidden because already held in POSITIONS
+let GEOMETRY_GATE_SUMMARY={input:0,gatedOut:0,unverifiedFallback:0,finalRecommended:0,slCapClamped:0,velocityTilted:0};
 let SELECTED=new Set(); // symbols selected for basket — recomputed from FILT each applyFilters
 let SHOW_FILTERED_CANDIDATES=false;
 let KEEP_FILTER_OVERRIDES=new Set();
@@ -1108,6 +1112,15 @@ function escHtml(s){return String(s??'').replace(/[&<>"]/g,ch=>({'&':'&amp;','<'
 function findHeader(hdrs,patterns){return hdrs.find(h=>patterns.some(p=>p.test(h.trim())))||null;}
 function meanArr(arr){return arr.length?arr.reduce((s,v)=>s+v,0)/arr.length:0;}
 function roundPct05(v){return +(Math.round(v/0.05)*0.05).toFixed(2);}
+function capSLDistancePct(v){
+  const n=Number(v);
+  if(!Number.isFinite(n)||n<=0) return null;
+  return Math.min(n,SL_HARD_CAP_PCT);
+}
+function getCappedSLPct(rawDistance){
+  const capped=capSLDistancePct(rawDistance);
+  return capped==null?null:-capped;
+}
 function weightedPercentile(rows,valueFn,weightFn,pct){
   const vals=rows.map(r=>({v:valueFn(r),w:Math.max(0,weightFn(r))}))
     .filter(x=>isFinite(x.v)&&isFinite(x.w)&&x.w>0).sort((a,b)=>a.v-b.v);
@@ -1906,7 +1919,7 @@ function refreshExitPolicyFromFeedback(stats){
   const baselineTGT=existing.baselineTGT??roundPct05(Math.abs(stats.medianWinPct||stats.adaptiveTGT||3.7));
   const adaptiveTrips=getAdaptiveTradeTrips(stats.tripsData);
   stats.exitPolicy=deriveProfitVelocityPolicy(adaptiveTrips.length?adaptiveTrips:stats.tripsData,baselineSL,baselineTGT);
-  stats.adaptiveSL=stats.exitPolicy.slPct;
+  stats.adaptiveSL=capSLDistancePct(stats.exitPolicy.slPct);
   stats.adaptiveTGT=stats.exitPolicy.tgtPct;
   stats.holdLimitDays=stats.exitPolicy.holdDays;
   return stats;
@@ -2901,16 +2914,30 @@ async function runEngine(raw, sessionTag, options={}){
       delivPct:d.delivery_pct,
       rangePos:d.range_pos,
       pctFrom52wHigh:d.pct_from_52w_high,
+      pctToUpperBand:d.pct_to_upper_band,
       rocketScore:score, mrmrScore:learnedMrmrScore, outcomeAdj:outcomeReliability.delta,
       outcomeReliability:outcomeReliability.confidence, outcomeEvidence:outcomeReliability.matched,
       flags,
       isSurv:_isSurv, survRules:_survRules,
       // Calculated SL/Target per stock — adaptive from tradebook if available
       slPct: (()=>{
-        if(TRADEBOOK_STATS&&TRADEBOOK_STATS.adaptiveSL) return -TRADEBOOK_STATS.adaptiveSL;
+        if(TRADEBOOK_STATS&&TRADEBOOK_STATS.adaptiveSL){
+          d._slRawDistance=TRADEBOOK_STATS.adaptiveSL;
+          d._slCapped=TRADEBOOK_STATS.adaptiveSL>SL_HARD_CAP_PCT;
+          return getCappedSLPct(TRADEBOOK_STATS.adaptiveSL);
+        }
         const atr=K.atr_pct?d[K.atr_pct]:null;
-        return atr>0 ? -(atr*1.5) : null;
+        if(atr>0){
+          d._slRawDistance=atr*1.5;
+          d._slCapped=d._slRawDistance>SL_HARD_CAP_PCT;
+          return getCappedSLPct(d._slRawDistance);
+        }
+        d._slRawDistance=null;
+        d._slCapped=false;
+        return null;
       })(),
+      slRawPct:d._slRawDistance,
+      slCapped:!!d._slCapped,
       tgtPct: (()=>{
         if(TRADEBOOK_STATS&&TRADEBOOK_STATS.adaptiveTGT) return TRADEBOOK_STATS.adaptiveTGT;
         const atr=K.atr_pct?d[K.atr_pct]:null;
@@ -3256,6 +3283,8 @@ function renderStats(){
   if(REMOVED.liq>0)filterPills.push(`<span class="info-pill pill-blue">🚫 ${REMOVED.liq} low liquidity removed</span>`);
   if(REMOVED.fscore>0)filterPills.push(`<span class="info-pill pill-gray">🚫 ${REMOVED.fscore} zero F-Score removed</span>`);
   if(REMOVED.atr>0)filterPills.push(`<span class="info-pill pill-amber">🚫 ${REMOVED.atr} zero/invalid ATR removed</span>`);
+  if(GEOMETRY_GATE_SUMMARY.gatedOut>0)filterPills.push(`<span class="info-pill pill-amber" title="Entry geometry gate: upper-circuit room must be at least ${GEOMETRY_MIN_RR}x capped SL risk. Missing upper-band data falls back to relevance-only instead of filtering.">Geometry gate: ${GEOMETRY_GATE_SUMMARY.gatedOut} excluded for insufficient headroom</span>`);
+  if(GEOMETRY_GATE_SUMMARY.unverifiedFallback>0)filterPills.push(`<span class="info-pill pill-gray" title="NSE upper-band room missing today; these stocks remain eligible and rank on relevance only.">${GEOMETRY_GATE_SUMMARY.unverifiedFallback} room unverified</span>`);
   const topUpCt=FILT.filter(s=>s._isTopUp).length;
   if(topUpCt>0)filterPills.push(`<span class="info-pill pill-fire" title="Already in portfolio — shown as top-up candidates.">↑ ${topUpCt} top-up</span>`);
   if(SUPPRESSED_HELD>0)filterPills.push(`<span class="info-pill pill-rose" title="Short positions and zero-qty holdings are always hidden.">📌 ${SUPPRESSED_HELD} held</span>`);
@@ -3753,7 +3782,7 @@ function renderPerformance(){
   let timeStopHtml='', timeStopTblObj=null;
   (function(){
     if(!allTrips.length) return;
-    const adaptiveSL=TRADEBOOK_STATS?.adaptiveSL||3.5;
+    const adaptiveSL=capSLDistancePct(TRADEBOOK_STATS?.adaptiveSL)||3.5;
     const adaptiveTGT=getEffectiveTgtPct()||(TRADEBOOK_STATS?.adaptiveTGT||3.7);
     // Apply the net profit-per-day horizon learned from closed tradebook outcomes.
     const cutoffDays=getEffectiveReviewDays()||5;
@@ -4396,6 +4425,7 @@ function _renderMethodologyInner(){
       <div class="m-card"><h4>Low-Sample Diagnostics</h4><p>${lowSampleText}</p></div>
       <div class="m-card"><h4>Outcome Self-Correction</h4><p>${feedbackText} Outcome evidence is displayed as confidence context only. It does not add or subtract points from Rocket Score.</p></div>
       <div class="m-card"><h4>Feature Weighting</h4><p>Every indicator receives a cross-day stability factor from its D-1...D-4 relevance track record. Final weight starts as absolute AUC relevance times stability, then mRMR redundancy reduces overlapping stable signals. All features are considered with no fixed cap; unstable or random features self-cancel toward zero weight, so the feature list decides its own effective size.</p></div>
+      <div class="m-card"><h4>Entry Geometry Gate</h4><p>After live relevance and entry-fade checks, a fresh recommendation must still have favorable reward:risk geometry: room to upper circuit (pct_to_upper_band) must be at least ${GEOMETRY_MIN_RR}x the active stop distance. Stop distance is capped at ${SL_HARD_CAP_PCT.toFixed(1)}% everywhere the scanner uses SL, so large historical/ATR stops cannot justify loose entries. If upper-band room is missing for a stock, it is kept as geometry-unverified and ranks on relevance alone rather than being silently removed.</p></div>
       ${(()=>{
         const acc=computeWindowPredictionAccuracy(SNAPSHOT_RUNTIME);
         const pct=x=>x&&x.hitRate!=null?(x.hitRate*100).toFixed(1)+'%':'—';
@@ -4430,7 +4460,7 @@ function getCols(){
     {key:'chk',label:'',s:0},
     {key:'rocketScore',label:'Score',s:1},{key:'symbol',label:'Symbol',s:1},
     {key:'price',label:'Price ₹',s:1},{key:'snapshotChange',label:intervalLabel,s:1},
-    {key:'priceChange',label:'Chg 1D%',s:1},{key:'delivPct',label:'Deliv%',s:1},
+    {key:'priceChange',label:'Chg 1D%',s:1},{key:'velocityPotential',label:'Room%',s:1},{key:'delivPct',label:'Deliv%',s:1},
     {key:'alloc',label:'Alloc ₹',s:0},{key:'volume',label:'Volume',s:1},
   ];
   // Dynamic columns from rocket-relevance features — skip any that are all null across displayed stocks
@@ -4438,7 +4468,7 @@ function getCols(){
   const labels=ENGINE_DATA?.labels||{};
   const pool=FILT.length?FILT:ALL;
   // Features already shown as fixed columns — skip from dynamic to avoid duplicates
-  const fixedFeatKeys=new Set(['delivery_pct','price','volume','volume_1_day']);
+  const fixedFeatKeys=new Set(['delivery_pct','pct_to_upper_band','price','volume','volume_1_day']);
   if(ENGINE_DATA?.features){
     const pcPat=/price_change.*1_day|1_day.*price_change|^change.*1_day$/;
     ENGINE_DATA.features.forEach(f=>{if(pcPat.test(f))fixedFeatKeys.add(f);});
@@ -4536,6 +4566,52 @@ function getEntryFadeReason(s){
   }
   return '';
 }
+function getGeometryHeadroomPct(s){
+  const raw=s?.pctToUpperBand??s?._features?.pct_to_upper_band;
+  const v=Number(raw);
+  if(!Number.isFinite(v)) return null;
+  return Math.max(0,v);
+}
+function evaluateEntryGeometry(s){
+  const headroom=getGeometryHeadroomPct(s);
+  const risk=capSLDistancePct(Math.abs(Number(s?.slPct)));
+  const out={passes:true,unverified:false,headroom,risk,required:null,reason:''};
+  if(headroom==null){
+    out.unverified=true;
+    return out;
+  }
+  if(!(risk>0)) return out;
+  out.required=GEOMETRY_MIN_RR*risk;
+  if(headroom+1e-9<out.required){
+    out.passes=false;
+    out.reason=`Insufficient headroom: ${headroom.toFixed(2)}% room vs ${risk.toFixed(2)}% risk (need ${GEOMETRY_MIN_RR}x)`;
+  }
+  return out;
+}
+function applyEntryGeometryState(s){
+  const g=evaluateEntryGeometry(s);
+  s._geometryChecked=true;
+  s._geometryUnverified=!!g.unverified;
+  s._geometryBlocked=!g.passes;
+  s.velocityPotential=g.headroom;
+  s.geometryRiskPct=g.risk;
+  s.geometryRequiredPct=g.required;
+  s.geometryRR=(g.headroom!=null&&g.risk>0)?g.headroom/g.risk:null;
+  return g;
+}
+function applyVelocityPotentialRanking(rows){
+  const verified=rows.filter(s=>!s._geometryUnverified&&s.velocityPotential!=null&&Number.isFinite(Number(s.velocityPotential)));
+  const sorted=[...verified].sort((a,b)=>(Number(a.velocityPotential)||0)-(Number(b.velocityPotential)||0));
+  const denom=Math.max(1,sorted.length-1);
+  const pctBySymbol=new Map();
+  sorted.forEach((s,i)=>pctBySymbol.set(s.symbol,sorted.length===1?1:i/denom));
+  rows.forEach(s=>{
+    const base=Number(s.rocketScore)||0;
+    const pct=s._geometryUnverified?0:(pctBySymbol.get(s.symbol)??0);
+    s.normalizedVelocityPotential=pct;
+    s.rankScore=base*(1+VELOCITY_WEIGHT*pct);
+  });
+}
 function getFilterBarReason(s){
   const minScore=parseFloat(document.getElementById('fMinScore')?.value)||0;
   const fvol=parseFloat(document.getElementById('fVol')?.value)||0;
@@ -4551,6 +4627,8 @@ function getFilterBarReason(s){
   if(s.rocketToday) return s.rocketNow?'Already in today’s live rocket set':'Already rocketed earlier today';
   const fadeReason=getEntryFadeReason(s);
   if(fadeReason) return fadeReason;
+  const geometry=applyEntryGeometryState(s);
+  if(!geometry.passes) return geometry.reason;
   if(ENGINE_DATA?.hasRecommendationEvidence&&minScore>0&&s.rocketScore<minScore) return `Score ${s.rocketScore?.toFixed?.(1)||s.rocketScore} < ${minScore}`;
   if(fvol>0&&s.volume!=null&&s.volume<fvol) return `Volume ${Math.round(s.volume).toLocaleString('en-IN')} < ${Math.round(fvol).toLocaleString('en-IN')}`;
   if(fMinMarketCap>0&&s.marketCap!=null&&s.marketCap<fMinMarketCap) return `MCap ₹${fV(s.marketCap)} < ₹${fV(fMinMarketCap)}`;
@@ -4937,7 +5015,7 @@ function getRecommendedPositionSize(perfStats){
   const payoff=avgLossPct<0?avgWinPct/Math.abs(avgLossPct):0;
   const kelly=payoff>0?winRate-(1-winRate)/payoff:0;
   const profitFactor=perfStats?.profitFactor??null;
-  const adaptiveSL=TRADEBOOK_STATS?.adaptiveSL||Math.abs(perfStats?.avgLossPct||0)||3;
+  const adaptiveSL=capSLDistancePct(TRADEBOOK_STATS?.adaptiveSL||Math.abs(perfStats?.avgLossPct||0)||3)||3;
   const medianLossRs=median(losses.map(r=>Math.abs(r.netPnl)));
   const baseRiskRs=medianLossRs&&medianLossRs>0?medianLossRs:avgActual*(adaptiveSL/100);
   const expectancy=perfStats?.expectancy||0;
@@ -5082,6 +5160,11 @@ function renderTable(){
     const scoreTitle=isWarmupScore
       ? `Neutral warm-up score (${WARMUP_NEUTRAL_SCORE}). Allocation is equal across selected stocks until the first learned rocket-relevance score is available.`
       : 'Learned Rocket Score from the rolling five-session rocket-relevance model.';
+    const roomCell=s._geometryUnverified
+      ? `<span style="font-size:9px;background:rgba(148,163,184,.14);color:var(--t2);border-radius:4px;padding:2px 5px;font-weight:700" title="Upper-band room unavailable; relevance-only ranking fallback.">room unverified</span>`
+      : s.velocityPotential!=null&&isFinite(Number(s.velocityPotential))
+        ? `<span style="color:${Number(s.velocityPotential)>=((s.geometryRequiredPct||0))?'var(--green)':'var(--amber)'};font-weight:700">${Number(s.velocityPotential).toFixed(2)}%</span>`
+        : '<span style="color:var(--t3);font-size:11px">â€”</span>';
     let cells=`
       <td style="text-align:center"><input type="checkbox" ${isSelected?'checked':''} ${s._filterPreview?'disabled':''} style="width:14px;height:14px;accent-color:var(--amber);cursor:${s._filterPreview?'not-allowed':'pointer'}" onchange="toggleStock('${s.symbol}',this.checked)"></td>
       <td><span class="sc-m" title="${scoreTitle}">${scoreText}</span></td>
@@ -5089,6 +5172,7 @@ function renderTable(){
       <td>${fmtINR(s.price)}</td>
       <td>${fPerf(s.snapshotChange)}</td>
       <td>${fPerf(s.priceChange)}</td>
+      <td>${roomCell}</td>
       <td>${fDel(s.delivPct)}</td>
       <td class="alloc-cell" data-sym="${s.symbol}">${(()=>{
         if(!am) return '<span style="color:var(--t3);font-size:11px">—</span>';
@@ -5142,6 +5226,9 @@ function applySort(){
       const fk=col.substring(6);
       va=a._features?a._features[fk]:null;
       vb=b._features?b._features[fk]:null;
+    } else if(col==='rocketScore'&&SDIR<0){
+      va=a.rankScore??a.rocketScore;
+      vb=b.rankScore??b.rocketScore;
     } else {
       va=a[col];vb=b[col];
     }
@@ -5157,7 +5244,7 @@ function toggleFilters(){
   if(a) a.textContent=collapsed?'▶':'▼';
 }
 function applyFilters(){
-  ALL.forEach(x=>{delete x._filterReason;delete x._filterPreview;delete x._forceKept;delete x._isTopUp;delete x._heldAvg;delete x._heldQty;delete x._topUpGain;delete x._isHeldRisk;delete x._heldDrop;});
+  ALL.forEach(x=>{delete x._filterReason;delete x._filterPreview;delete x._forceKept;delete x._isTopUp;delete x._heldAvg;delete x._heldQty;delete x._topUpGain;delete x._isHeldRisk;delete x._heldDrop;delete x._geometryChecked;delete x._geometryUnverified;delete x._geometryBlocked;delete x.velocityPotential;delete x.normalizedVelocityPotential;delete x.rankScore;delete x.geometryRiskPct;delete x.geometryRequiredPct;delete x.geometryRR;});
   const hiddenReasons={};
   const visible=[];
   ALL.forEach(x=>{
@@ -5166,6 +5253,15 @@ function applyFilters(){
     else visible.push(x);
   });
   FILT=visible;
+  applyVelocityPotentialRanking(FILT);
+  GEOMETRY_GATE_SUMMARY={
+    input:ALL.filter(s=>s._geometryChecked).length,
+    gatedOut:ALL.filter(s=>s._geometryBlocked).length,
+    unverifiedFallback:FILT.filter(s=>s._geometryUnverified).length,
+    finalRecommended:0,
+    slCapClamped:ALL.filter(s=>s.slCapped).length,
+    velocityTilted:FILT.filter(s=>!s._geometryUnverified&&s.normalizedVelocityPotential>0).length
+  };
 
   // ── Already-held suppression ──
   // If a stock is in current POSITIONS (long, qty>0), hide it from recommendations
@@ -5187,6 +5283,9 @@ function applyFilters(){
       });
     }
   }
+  applyVelocityPotentialRanking(FILT);
+  GEOMETRY_GATE_SUMMARY.unverifiedFallback=FILT.filter(s=>s._geometryUnverified).length;
+  GEOMETRY_GATE_SUMMARY.velocityTilted=FILT.filter(s=>!s._geometryUnverified&&s.normalizedVelocityPotential>0).length;
 
   applySort();
 
@@ -5196,6 +5295,8 @@ function applyFilters(){
     FILT.slice(20).forEach(x=>{hiddenReasons[x.symbol]='Outside current top-20 display cap';});
     FILT=capped;
   }
+  GEOMETRY_GATE_SUMMARY.finalRecommended=FILT.length;
+  window._lastGeometryGateSummary={...GEOMETRY_GATE_SUMMARY};
 
   const currentSyms=new Set(FILT.map(s=>s.symbol));
   const overrideRows=[];
