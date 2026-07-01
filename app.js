@@ -107,7 +107,7 @@ const CORR_STORE='rs_corr';
 const CORR_SCHEMA='five_session_rolling_daily_rocket_trajectory_one_clock_pure_relevance_v6';
 const ROCKET_TOP_FRACTION=0.01;
 const SNAPSHOT_STATE_STORE='rs_snapshot_mrmr_v1';
-const SNAPSHOT_STATE_SCHEMA='five_session_rolling_daily_rocket_trajectory_one_clock_v3';
+const SNAPSHOT_STATE_SCHEMA='five_session_rolling_daily_rocket_trajectory_one_clock_v4';
 const METH_STORE='rs_meth';
 const HOLD_STORE='rs_holdings';
 const ORDERS_STORE='rs_orders';
@@ -1243,6 +1243,7 @@ function persistMethodologySnapshot(){
       features:ENGINE_DATA.features||[],
       labels:ENGINE_DATA.labels||{},
       top10Feats:ENGINE_DATA.top10Feats||[],
+      interactionFeatures:ENGINE_DATA.interactionFeatures||{static:[],breadth:[],selected:[]},
       accSessions:ENGINE_DATA.accSessions,
       laggedNote:ENGINE_DATA.laggedNote||'',
       marketBreadth:ENGINE_DATA.marketBreadth,
@@ -1925,6 +1926,60 @@ function pctRank(arr){
   while(i<n){let j=i;while(j<n&&it[j].v===it[i].v)j++;const r=n>1?((i+j-1)/2)/(n-1):0.5;for(let k=i;k<j;k++)res[it[k].i]=r;i=j;}
   return res;
 }
+function applyRankProductInteractions(rows,defs){
+  (defs||[]).forEach(def=>{
+    const left=def.left,right=def.right,key=def.key;
+    if(!left||!right||!key){
+      (rows||[]).forEach(row=>{if(key) row[key]=null;});
+      return;
+    }
+    const leftRanks=pctRank((rows||[]).map(row=>row?.[left]??null));
+    const rightRanks=pctRank((rows||[]).map(row=>row?.[right]??null));
+    (rows||[]).forEach((row,index)=>{
+      const a=leftRanks[index],b=rightRanks[index];
+      row[key]=(a!=null&&b!=null&&isFinite(a)&&isFinite(b))?Number((a*b).toFixed(6)):null;
+    });
+  });
+}
+function buildBreadthInteractionDefs(selectedFeatures,weights,labels,features=[],featureRows=[]){
+  const rankedSelected=[...(selectedFeatures||[])]
+    .filter(feature=>feature&&!String(feature).startsWith('market_breadth_x_'))
+    .sort((a,b)=>(weights?.[b]||0)-(weights?.[a]||0))
+    .slice(0,3);
+  const partners=rankedSelected.length?rankedSelected:[...(features||[])]
+    .filter(feature=>feature&&!String(feature).startsWith('market_breadth_x_'))
+    .map(feature=>({
+      feature,
+      coverage:(featureRows||[]).reduce((sum,row)=>{
+        const value=row?.[feature];
+        return sum+(value!=null&&isFinite(value)?1:0);
+      },0)
+    }))
+    .sort((a,b)=>b.coverage-a.coverage)
+    .slice(0,3)
+    .map(item=>item.feature);
+  return partners
+    .map(feature=>({
+      key:`market_breadth_x_${feature}_rank`,
+      left:feature,
+      label:`Breadth x ${labels?.[feature]||feature} Rank`,
+      partnerWeight:weights?.[feature]||0
+    }));
+}
+function applyMarketBreadthInteractions(rows,defs,marketBreadth){
+  const breadth=marketBreadth!=null&&isFinite(marketBreadth)?Math.max(0,Math.min(1,marketBreadth)):null;
+  (defs||[]).forEach(def=>{
+    if(!def.left||!def.key||breadth==null){
+      (rows||[]).forEach(row=>{if(def.key) row[def.key]=null;});
+      return;
+    }
+    const ranks=pctRank((rows||[]).map(row=>row?.[def.left]??null));
+    (rows||[]).forEach((row,index)=>{
+      const rank=ranks[index];
+      row[def.key]=(rank!=null&&isFinite(rank))?Number((breadth*rank).toFixed(6)):null;
+    });
+  });
+}
 function spearman(xs,ys){
   return pearson(pctRank(xs),pctRank(ys));
 }
@@ -1948,6 +2003,14 @@ function emptySnapshotRuntime(){
 }
 function buildDecodedSnapshot({stamp,symbols,prices,featureRows,features,sessionTag}){
   return {...stamp,symbols:[...symbols],prices,featureRows,featureCols:[...features],features:null,sessionTag:sessionTag||null};
+}
+function cloneSnapshotRuntime(runtime){
+  return {
+    ...emptySnapshotRuntime(),
+    ...(runtime||{}),
+    days:(runtime?.days||[]).map(day=>cloneDailyRecord(day,day.rocketSymbols||[],day.eligibleSymbols||[])),
+    lastOutcome:runtime?.lastOutcome?{...runtime.lastOutcome}:null
+  };
 }
 
 /*
@@ -2227,13 +2290,15 @@ function selectRocketRelevanceFeatures(features,targetRelevance,maxSelected=FEAT
   ]));
   return {mrmr,selectedFeatures:selected,weights};
 }
-async function advanceSnapshotLearning({rows,features,priceKey,rocketMetricKey,sessionTag,targetSymbols,eligibleSymbols,advance=true,snapshotTimestamp=Date.now()}){
-  if(!SNAPSHOT_RUNTIME||SNAPSHOT_RUNTIME.schema!==SNAPSHOT_STATE_SCHEMA) SNAPSHOT_RUNTIME=emptySnapshotRuntime();
-  if(ACC_CORR?.corrSchema!==CORR_SCHEMA){
-    ACC_CORR={corrSchema:CORR_SCHEMA,corr:{},dailyCorr:{},sessions:0,learnSessions:0,dailySessions:0,lagPairs:[]};
+async function advanceSnapshotLearning({rows,features,priceKey,rocketMetricKey,sessionTag,targetSymbols,eligibleSymbols,advance=true,snapshotTimestamp=Date.now(),previewOnly=false}){
+  let runtime=previewOnly?cloneSnapshotRuntime(SNAPSHOT_RUNTIME):SNAPSHOT_RUNTIME;
+  if(!runtime||runtime.schema!==SNAPSHOT_STATE_SCHEMA) runtime=emptySnapshotRuntime();
+  if(!previewOnly) SNAPSHOT_RUNTIME=runtime;
+  let accCorr=ACC_CORR;
+  if(accCorr?.corrSchema!==CORR_SCHEMA){
+    accCorr={corrSchema:CORR_SCHEMA,corr:{},dailyCorr:{},sessions:0,learnSessions:0,dailySessions:0,lagPairs:[]};
+    if(!previewOnly) ACC_CORR=accCorr;
   }
-
-  const runtime=SNAPSHOT_RUNTIME;
   const rawStamp=snapshotStamp(snapshotTimestamp);
   const latestStored=getLatestDailyRecord(runtime);
   // Restore-only Drive hydration must retain the saved day identity instead of using
@@ -2272,7 +2337,7 @@ async function advanceSnapshotLearning({rows,features,priceKey,rocketMetricKey,s
     }
     runtime.completed=runtime.days.length;
     runtime.lastTag=sessionTag||null;
-    window._snapshotRuntimeDirty=true;
+    if(!previewOnly) window._snapshotRuntimeDirty=true;
   }
 
   const currentForLearning=currentDay&&currentDay.sessionDate===stamp.sessionDate?currentDay:null;
@@ -2283,14 +2348,14 @@ async function advanceSnapshotLearning({rows,features,priceKey,rocketMetricKey,s
   const hasScoringEvidence=combined.valid.length>0;
   const targetRelevance=hasScoringEvidence
     ?combined.targetRelevance
-    :(ACC_CORR?.dailyCorr||ACC_CORR?.corr||Object.fromEntries(features.map(f=>[f,0])));
+    :(accCorr?.dailyCorr||accCorr?.corr||Object.fromEntries(features.map(f=>[f,0])));
   const targetRelevanceToday=combined.targetRelevanceToday;
   const nearestSource=combined.nearest?.source||sources.find(item=>item.lag===1)?.source||null;
   const intervalMoves=nearestSource?snapshotPriceMoves(nearestSource,currentSnapshot):{};
 
   if(canAdvance){
-    ACC_CORR={
-      ...ACC_CORR,
+    accCorr={
+      ...accCorr,
       corrSchema:CORR_SCHEMA,
       corr:combined.targetRelevance,
       dailyCorr:combined.targetRelevance,
@@ -2306,10 +2371,10 @@ async function advanceSnapshotLearning({rows,features,priceKey,rocketMetricKey,s
     runtime.lastOutcome={
       currentDate:currentForLearning?.sessionDate||null,
       rockets:(currentForLearning?.rocketSymbols||[]).length,
-      pairs:ACC_CORR.lagPairs,
+      pairs:accCorr.lagPairs,
       model:'five_session_rolling_daily_rocket_trajectory'
     };
-    window._snapshotRuntimeDirty=true;
+    if(!previewOnly) window._snapshotRuntimeDirty=true;
   }
 
   let note='';
@@ -2318,12 +2383,15 @@ async function advanceSnapshotLearning({rows,features,priceKey,rocketMetricKey,s
     else if(!sources.length) note='WARMUP: Day 1 telemetry saved. Scores begin after the next NSE trading-day rocket outcome.';
     else note='WARMUP: the available prior-day telemetry matched fewer than 100 live-eligible stocks.';
   }else{
-    const weights=ACC_CORR?.lagPairs||combined.valid.map(item=>({lag:item.lag,weight:item.weight}));
+    const weights=accCorr?.lagPairs||combined.valid.map(item=>({lag:item.lag,weight:item.weight}));
     const weightText=weights.map(item=>`D-${item.lag} ${(item.weight*100).toFixed(0)}%`).join(', ');
     note=`Scoring from ${combined.valid.length} prior daily state snapshot${combined.valid.length===1?'':'s'} against today’s ${currentForLearning.rocketSymbols.length} observed rockets (${weightText}). Same-day uploads only refresh today’s telemetry.`;
   }
-  ACC_CORR.laggedNote=note;
-  FS.set(modeKey(CORR_STORE),ACC_CORR);
+  accCorr.laggedNote=note;
+  if(!previewOnly){
+    ACC_CORR=accCorr;
+    FS.set(modeKey(CORR_STORE),ACC_CORR);
+  }
 
   const scoringFeatureRows=buildStateFeatureRows(currentSnapshot,features);
   return {
@@ -2332,7 +2400,7 @@ async function advanceSnapshotLearning({rows,features,priceKey,rocketMetricKey,s
     completedNow:combined.valid.length,
     note,
     runtime,
-    hadPriorCorr:(ACC_CORR?.dailySessions||0)>0,
+    hadPriorCorr:(accCorr?.dailySessions||0)>0,
     hasPrimaryComparison:combined.valid.length>0,
     hasBaselineEvidence:false,
     hasScoringEvidence,
@@ -2342,7 +2410,7 @@ async function advanceSnapshotLearning({rows,features,priceKey,rocketMetricKey,s
     scoringFeatureRows,
     currentRocketSymbols:[...(currentForLearning?.rocketSymbols||[])],
     lowSampleFeatures:combined.lowSampleFeatures||[],
-    lagPairs:ACC_CORR?.lagPairs||[],
+    lagPairs:accCorr?.lagPairs||[],
     deltaFeatureSchema:DELTA_FEATURE_SCHEMA,
     intervalElapsedMinutes:null,
     freshSignalCount:hasScoringEvidence?Object.values(targetRelevanceToday).filter(v=>v!=null&&isFinite(v)&&Math.abs(v)>0.0001).length:0,
@@ -2547,6 +2615,17 @@ async function runEngine(raw, sessionTag, options={}){
     FEATS.push('industry_breadth');
     LABELS.industry_breadth='Industry Breadth %';
   }
+  const staticInteractionDefs=[
+    {key:'volume_rank_x_atr_pct_rank',left:K.volume,right:K.atr_pct,label:'Volume Rank x ATR % Rank'},
+    {key:'delivery_pct_rank_x_pct_to_upper_band_rank',left:'delivery_pct',right:'pct_to_upper_band',label:'Delivery % Rank x Upper Band Gap Rank'},
+    {key:'range_pos_rank_x_sector_breadth_rank',left:'range_pos',right:'sector_breadth',label:'52W Range Rank x Sector Breadth Rank'},
+    {key:'piotroski_rank_x_perf_1w_rank',left:K.piotroski,right:K.perf_1w,label:'Piotroski Rank x 1W Performance Rank'}
+  ];
+  applyRankProductInteractions(parsed,staticInteractionDefs);
+  staticInteractionDefs.forEach(def=>{
+    FEATS.push(def.key);
+    LABELS[def.key]=def.label;
+  });
 
   const learningUniverse=parsed.filter(d=>d.symbol&&(!K.price||d[K.price]!==0));
   const FEATS_UNIQUE=[...new Set(FEATS)];
@@ -2606,6 +2685,23 @@ async function runEngine(raw, sessionTag, options={}){
     .sort((a,b)=>b.value-a.value);
   const targetCount=Math.max(1,Math.floor(targetRanked.length*ROCKET_TOP_FRACTION));
   const currentTop10Symbols=new Set(targetRanked.slice(0,targetCount).map(x=>filtered[x.i].symbol));
+  const previewLearning=await advanceSnapshotLearning({rows:learningUniverse,features:FEATS,priceKey:K.price,rocketMetricKey:K.price_change,
+    sessionTag,targetSymbols:currentTop10Symbols,eligibleSymbols:new Set(filtered.map(d=>d.symbol)),advance:advanceSnapshot,snapshotTimestamp:options.snapshotTimestamp||Date.now(),previewOnly:true});
+  const previewSelection=selectRocketRelevanceFeatures(FEATS,previewLearning.targetRelevance,FEATURE_MAX_SELECTED,filtered.map(d=>previewLearning.scoringFeatureRows[d.symbol]||{}));
+  const breadthInteractionDefs=buildBreadthInteractionDefs(
+    previewSelection.selectedFeatures,
+    previewSelection.weights,
+    LABELS,
+    FEATS,
+    filtered.map(d=>previewLearning.scoringFeatureRows[d.symbol]||{})
+  );
+  applyMarketBreadthInteractions(parsed,breadthInteractionDefs,marketBreadth);
+  breadthInteractionDefs.forEach(def=>{
+    FEATS.push(def.key);
+    LABELS[def.key]=def.label;
+  });
+  const FEATS_WITH_INTERACTIONS=[...new Set(FEATS)];
+  FEATS.length=0;FEATS.push(...FEATS_WITH_INTERACTIONS);
   snapshotLearning=await advanceSnapshotLearning({rows:learningUniverse,features:FEATS,priceKey:K.price,rocketMetricKey:K.price_change,
     sessionTag,targetSymbols:currentTop10Symbols,eligibleSymbols:new Set(filtered.map(d=>d.symbol)),advance:advanceSnapshot,snapshotTimestamp:options.snapshotTimestamp||Date.now()});
 
@@ -2755,8 +2851,17 @@ async function runEngine(raw, sessionTag, options={}){
     SCORE_MAP[d.symbol]=hasRecommendationEvidence?Math.round(rs*1000)/10:WARMUP_NEUTRAL_SCORE;
   });
   parsed.forEach(d=>{d.rocketScore=SCORE_MAP[d.symbol]??null;});
+  const interactionFeatureKeys=new Set([...staticInteractionDefs.map(def=>def.key),...breadthInteractionDefs.map(def=>def.key)]);
+  const selectedInteractions=selectedFeatures
+    .filter(feature=>interactionFeatureKeys.has(feature))
+    .map(feature=>({feature,label:LABELS[feature]||feature,weight:weights[feature]||0}));
   ENGINE_DATA={targetRelevance,targetRelevanceToday,mrmr,weights,features:FEATS,selectedFeatures,labels:LABELS,top10Feats,accSessions:ACC_CORR?.sessions||0,laggedNote:laggedNote||'',
     marketBreadth:marketBreadth,
+    interactionFeatures:{
+      static:staticInteractionDefs.map(def=>({feature:def.key,label:def.label,left:def.left||null,right:def.right||null})),
+      breadth:breadthInteractionDefs.map(def=>({feature:def.key,label:def.label,left:def.left,partnerWeight:def.partnerWeight||0})),
+      selected:selectedInteractions
+    },
     recommendationFeedback,executedEntryFeedback,
     outcomeScoreOverlay:{active:outcomeReliabilityModel.active,samples:outcomeReliabilityModel.samples.length,features:outcomeReliabilityModel.features.length,maxAdjustment:0,mode:'confidence_badge_only'},
     scoringModel:'five_session_rolling_daily_rocket_trajectory_mrmr',
@@ -2791,7 +2896,8 @@ async function runEngine(raw, sessionTag, options={}){
       totalParsed:totalParsed,hardFilterSchema:HARD_FILTER_SCHEMA,removed:{...REMOVED},survSize:Object.keys(NSE_SURV).length,
       recommendationFeedback,executedEntryFeedback,outcomeScoreOverlay:ENGINE_DATA.outcomeScoreOverlay,
       snapshotElapsedMinutes:ENGINE_DATA.snapshotElapsedMinutes,snapshotDisplayElapsedMinutes:ENGINE_DATA.snapshotDisplayElapsedMinutes,
-      snapshotPairs:ENGINE_DATA.snapshotPairs,lowSampleFeatures:ENGINE_DATA.lowSampleFeatures||[],scoringModel:ENGINE_DATA.scoringModel,deltaFeatureSchema:ENGINE_DATA.deltaFeatureSchema};
+      snapshotPairs:ENGINE_DATA.snapshotPairs,lowSampleFeatures:ENGINE_DATA.lowSampleFeatures||[],scoringModel:ENGINE_DATA.scoringModel,deltaFeatureSchema:ENGINE_DATA.deltaFeatureSchema,
+      interactionFeatures:ENGINE_DATA.interactionFeatures};
     FS.set(modeKey(METH_STORE),methSave);
   }catch(e){console.warn('Could not save methodology data',e);}
   persistMethodologySnapshot();
@@ -4084,6 +4190,7 @@ function _renderMethodologyInner(){
   const CALC_FEATS=new Set(['range_pos','pct_from_52w_high','pct_to_upper_band','peak_retention','pullback_from_high_pct','from_open_pct','sector_breadth','sector_rel_strength','industry_breadth']);
   const getFeatureSource=f=>{
     if(NSE_FEATS.has(f)) return 'NSE';
+    if(String(f).includes('_rank_x_')||String(f).startsWith('market_breadth_x_')) return 'Calc';
     if(CALC_FEATS.has(f)) return 'Calc';
     return 'TV';
   };
