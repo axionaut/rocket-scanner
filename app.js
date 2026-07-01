@@ -1,5 +1,5 @@
-const BUILD_TS='2026-07-01 12:45 IST'; // release build time (IST)
-const APP_VERSION=460; // Uncapped stability-weighted relevance; 5-day rolling prediction-accuracy tracker.
+const BUILD_TS='2026-07-01 13:55 IST'; // release build time (IST)
+const APP_VERSION=462; // Regime exposure dial + top-ups pyramid into strength (no averaging down).
 const GOOGLE_DRIVE_CLIENT_ID='1015012642264-oi2nelv3v90k3d39r994a6nelgjs2a56.apps.googleusercontent.com'; // Public OAuth Web Client ID.
 const HARD_FILTER_SCHEMA='structural_tradeability_v2';
 const STOCK_RUNWAY_CEILING_PCT=19.5; // Intentional owner-approved forward-catch strategy filter: excludes stocks already near their circuit band (or caps max entry) since a stock that has already used up its daily range is a poor pre-rocket buy. Active fallback when NSE price-band data is unavailable.
@@ -20,8 +20,25 @@ const DAILY_TRAJECTORY_TOTAL_DAYS=5;
 const DAILY_TRAJECTORY_PRIOR_DAYS=DAILY_TRAJECTORY_TOTAL_DAYS-1;
 const DAILY_TRAJECTORY_WEIGHT_STEPS=[4,3,2,1]; // D-1 through D-4, normalized over usable pairs.
 const WARMUP_NEUTRAL_SCORE=50; // Equal-weight display/allocation score until honest rocket-relevance evidence exists.
+// Regime exposure dial: scales the final rocket score by today's market breadth (fraction
+// of stocks advancing) at APPLICATION time only — it never touches learned relevance. Rocket
+// setups fire in receptive markets and fail as falling knives in broad selloffs, so exposure
+// tapers as breadth weakens and fully sits out at extreme weakness. Thresholds are tunable.
+const REGIME_BREADTH_FULL=0.50;   // At/above this breadth, full exposure (factor 1.0).
+const REGIME_BREADTH_FLOOR=0.25;  // At/below this breadth, sit out entirely (factor 0.0).
+const REGIME_MIN_FACTOR=0.0;      // Exposure floor at extreme weakness (0 = full sit-out).
 let MARKET_MODE='stock';
 function modeKey(base){return base;}
+// Continuous exposure multiplier from market breadth. 1.0 in healthy/strong markets,
+// tapers linearly through the weak zone, 0.0 at/below the floor. Neutral-and-above is
+// unpenalized because a genuine pre-rocket setup should still be trusted in a normal tape.
+function regimeExposureFactor(breadth){
+  if(breadth==null||!isFinite(breadth)) return 1.0; // unknown breadth: do not penalize
+  if(breadth>=REGIME_BREADTH_FULL) return 1.0;
+  if(breadth<=REGIME_BREADTH_FLOOR) return REGIME_MIN_FACTOR;
+  const t=(breadth-REGIME_BREADTH_FLOOR)/(REGIME_BREADTH_FULL-REGIME_BREADTH_FLOOR);
+  return REGIME_MIN_FACTOR+t*(1-REGIME_MIN_FACTOR);
+}
 
 function inputBaseName(name){
   return String(name||'').split(/[\\/]/).pop().trim();
@@ -2846,7 +2863,10 @@ async function runEngine(raw, sessionTag, options={}){
     const outcomeReliability=hasRecommendationEvidence?getOutcomeReliabilityAdjustment(currentFeatures,outcomeReliabilityModel,weights):{delta:0,confidence:0,matched:0};
     // Warm-up has no predictive evidence yet. A neutral 50 keeps every selected
     // stock equally weighted for allocation without pretending it is a learned score.
-    const score=hasRecommendationEvidence?learnedMrmrScore:WARMUP_NEUTRAL_SCORE;
+    // Regime exposure dial: in learned mode, scale the score by today's market breadth so
+    // recommendations dampen (and fully suspend at extreme weakness) on hostile days.
+    const regimeFactor=hasRecommendationEvidence?regimeExposureFactor(marketBreadth):1;
+    const score=hasRecommendationEvidence?Math.round(learnedMrmrScore*regimeFactor*10)/10:WARMUP_NEUTRAL_SCORE;
 
     const vol=(K.volume?d[K.volume]:null);
     const flags=[];
@@ -2939,7 +2959,7 @@ async function runEngine(raw, sessionTag, options={}){
         :(targetRelevance[f]>=0?rank:(1-rank));
       rs+=w*directedRank;
     }
-    SCORE_MAP[d.symbol]=hasRecommendationEvidence?Math.round(rs*1000)/10:WARMUP_NEUTRAL_SCORE;
+    SCORE_MAP[d.symbol]=hasRecommendationEvidence?Math.round(rs*regimeExposureFactor(marketBreadth)*1000)/10:WARMUP_NEUTRAL_SCORE;
   });
   parsed.forEach(d=>{d.rocketScore=SCORE_MAP[d.symbol]??null;});
   const interactionFeatureKeys=new Set([...staticInteractionDefs.map(def=>def.key),...breadthInteractionDefs.map(def=>def.key)]);
@@ -2961,6 +2981,7 @@ async function runEngine(raw, sessionTag, options={}){
   };
   ENGINE_DATA={targetRelevance,targetRelevanceToday,mrmr,weights,features:FEATS,selectedFeatures,labels:LABELS,top10Feats,accSessions:ACC_CORR?.sessions||0,laggedNote:laggedNote||'',
     marketBreadth:marketBreadth,
+    regimeExposureFactor:hasRecommendationEvidence?regimeExposureFactor(marketBreadth):1,
     featureStability,
     targetRelevanceByLag:snapshotLearning.targetRelevanceByLag||{},
     stabilitySummary,
@@ -3227,7 +3248,7 @@ function renderStats(){
     ${slTgtCard}
     <div class="st"><div class="st-l">Score Spread</div><div class="st-v">${scoreSpread}</div><div class="st-d">${scoreSpreadDetail}</div></div>
     <div class="st"><div class="st-l">Top Sector</div><div class="st-v" style="font-size:15px;color:var(--green)">${topSec}</div><div class="st-d">${topSecPct.toFixed(0)}% advancing</div></div>
-    <div class="st"><div class="st-l">Breadth</div><div class="st-v" style="color:var(--cyan)">${ENGINE_DATA.marketBreadth!=null?(ENGINE_DATA.marketBreadth*100).toFixed(0):(bull/t*100).toFixed(0)}%</div><div class="st-d">market context only · ${ENGINE_DATA.accSessions||0} learned horizons</div></div>${bookedCard}`;
+    <div class="st"><div class="st-l">Breadth</div><div class="st-v" style="color:var(--cyan)">${ENGINE_DATA.marketBreadth!=null?(ENGINE_DATA.marketBreadth*100).toFixed(0):(bull/t*100).toFixed(0)}%</div><div class="st-d">${ENGINE_DATA.regimeExposureFactor!=null&&ENGINE_DATA.regimeExposureFactor<1?`exposure ${(ENGINE_DATA.regimeExposureFactor*100).toFixed(0)}% · scores dampened`:'exposure 100% · full'} · ${ENGINE_DATA.accSessions||0} learned horizons</div></div>${bookedCard}`;
 
   // Row 1: hard-filter removal pills
   const filterPills=[];
@@ -4621,11 +4642,24 @@ function applyHeldDisplayState(s,heldPos,dropPct){
   if(qty<=0) return 'Held/closed or short today';
   if(!avg||cur==null||cur<=0) return 'Held, avg cost unavailable';
   const dropFromAvg=((avg-cur)/avg)*100;
-  if(dropFromAvg>=dropPct){
-    s._isTopUp=true; s._heldAvg=avg; s._heldQty=qty; s._topUpDrop=+dropFromAvg.toFixed(2);
-    return '';
+  // Top-ups add to STRENGTH, not weakness. A held stock qualifies as a top-up candidate
+  // only when it is at/above average cost (working, consolidating) — never when it is red.
+  // Averaging down into a falling position is the documented biggest source of realized
+  // loss and is deliberately disallowed. Red held positions are surfaced as risk-review
+  // flags (consider exit), not buy candidates. Regime sit-out suppresses top-ups entirely.
+  const regimeFactor=ENGINE_DATA?.regimeExposureFactor;
+  const regimeSitOut=(regimeFactor!=null&&regimeFactor<=0);
+  if(dropFromAvg>0){
+    // Below average cost — a losing position. Never a top-up. Flag for exit review.
+    s._isHeldRisk=true; s._heldAvg=avg; s._heldQty=qty; s._heldDrop=+dropFromAvg.toFixed(2);
+    return `Held & down ${dropFromAvg.toFixed(2)}% — review exit, not a top-up`;
   }
-  return `Held: only ${dropFromAvg.toFixed(2)}% below avg, needs ${dropPct}%`;
+  if(regimeSitOut){
+    return 'Held — top-ups suspended on weak-breadth day';
+  }
+  // At/above average cost in a receptive regime: valid pyramid-into-strength top-up.
+  s._isTopUp=true; s._heldAvg=avg; s._heldQty=qty; s._topUpGain=+(-dropFromAvg).toFixed(2);
+  return '';
 }
 function toggleFilteredCandidates(){
   SHOW_FILTERED_CANDIDATES=!SHOW_FILTERED_CANDIDATES;
@@ -5124,7 +5158,7 @@ function toggleFilters(){
   if(a) a.textContent=collapsed?'▶':'▼';
 }
 function applyFilters(){
-  ALL.forEach(x=>{delete x._filterReason;delete x._filterPreview;delete x._forceKept;delete x._isTopUp;delete x._heldAvg;delete x._heldQty;delete x._topUpDrop;});
+  ALL.forEach(x=>{delete x._filterReason;delete x._filterPreview;delete x._forceKept;delete x._isTopUp;delete x._heldAvg;delete x._heldQty;delete x._topUpGain;delete x._isHeldRisk;delete x._heldDrop;});
   const hiddenReasons={};
   const visible=[];
   ALL.forEach(x=>{
