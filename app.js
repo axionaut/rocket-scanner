@@ -108,8 +108,6 @@ const CORR_SCHEMA='five_session_rolling_daily_rocket_trajectory_one_clock_pure_r
 const ROCKET_TOP_FRACTION=0.01;
 const SNAPSHOT_STATE_STORE='rs_snapshot_mrmr_v1';
 const SNAPSHOT_STATE_SCHEMA='five_session_rolling_daily_rocket_trajectory_one_clock_v3';
-const TELEMETRY_ARCHIVE_FILE='rocket_archive.json';
-const TELEMETRY_ARCHIVE_SCHEMA='daily_outcome_trace_v2';
 const METH_STORE='rs_meth';
 const HOLD_STORE='rs_holdings';
 const ORDERS_STORE='rs_orders';
@@ -5941,71 +5939,6 @@ async function encodePackedDailyRecord(snapshot){
     latestSessionTag:snapshot.latestSessionTag||null
   };
 }
-function emptyOutcomeTraceArchive(){
-  return {schema:TELEMETRY_ARCHIVE_SCHEMA,days:[],createdAt:new Date().toISOString(),updatedAt:null};
-}
-function cleanSymbolList(list){
-  return [...new Set((list||[]).map(normSym).filter(Boolean))];
-}
-function cleanPriceMap(prices){
-  const out={};
-  Object.entries(prices||{}).forEach(([symbol,value])=>{
-    const sym=normSym(symbol),price=Number(value);
-    if(sym&&price>0&&isFinite(price)) out[sym]=Number(price.toFixed(4));
-  });
-  return out;
-}
-function cleanOutcomeTraceDay(day){
-  if(!day?.sessionDate) return null;
-  const entry={
-    sessionDate:String(day.sessionDate),
-    basketSymbols:cleanSymbolList(day.basketSymbols),
-    eligibleSymbols:cleanSymbolList(day.eligibleSymbols),
-    rocketSymbols:cleanSymbolList(day.rocketSymbols),
-    prices:cleanPriceMap(day.prices)
-  };
-  return entry.eligibleSymbols.length&&Object.keys(entry.prices).length?entry:null;
-}
-async function decodeOutcomeTraceArchive(source){
-  if(!source||source.schema!==TELEMETRY_ARCHIVE_SCHEMA) return emptyOutcomeTraceArchive();
-  const days=(source.days||[]).map(cleanOutcomeTraceDay).filter(Boolean)
-    .sort((a,b)=>String(a.sessionDate).localeCompare(String(b.sessionDate)));
-  return {...emptyOutcomeTraceArchive(),...source,schema:TELEMETRY_ARCHIVE_SCHEMA,days};
-}
-async function loadOutcomeTraceArchive({force=false}={}){
-  if(TELEMETRY_ARCHIVE_CACHE&&!force) return TELEMETRY_ARCHIVE_CACHE;
-  const hit=await FS.readJsonFile?.(TELEMETRY_ARCHIVE_FILE);
-  TELEMETRY_ARCHIVE_CACHE=await decodeOutcomeTraceArchive(hit?.data||null);
-  return TELEMETRY_ARCHIVE_CACHE;
-}
-function upsertOutcomeTraceDay(archive, day){
-  const clean=cleanOutcomeTraceDay(day);
-  if(!clean) return {...emptyOutcomeTraceArchive(),...(archive||{})};
-  const days=[...(archive?.days||[])].filter(d=>d.sessionDate!==clean.sessionDate);
-  days.push(clean);
-  days.sort((a,b)=>String(a.sessionDate).localeCompare(String(b.sessionDate)));
-  return {...emptyOutcomeTraceArchive(),...(archive||{}),schema:TELEMETRY_ARCHIVE_SCHEMA,days,updatedAt:new Date().toISOString()};
-}
-async function appendOutcomeTraceDay(day){
-  const archive=upsertOutcomeTraceDay(await loadOutcomeTraceArchive(),day);
-  TELEMETRY_ARCHIVE_CACHE=archive;
-  const encoded={schema:TELEMETRY_ARCHIVE_SCHEMA,createdAt:archive.createdAt||new Date().toISOString(),updatedAt:new Date().toISOString(),days:archive.days};
-  const text=JSON.stringify(encoded);
-  const saved=await FS.writeJsonFile?.(TELEMETRY_ARCHIVE_FILE,encoded);
-  const latest=encoded.days.find(d=>d.sessionDate===day?.sessionDate);
-  const latestBytes=latest?JSON.stringify(latest).length:0;
-  window._lastTelemetryArchiveWrite={
-    saved:!!saved,
-    file:TELEMETRY_ARCHIVE_FILE,
-    schema:TELEMETRY_ARCHIVE_SCHEMA,
-    days:encoded.days.length,
-    bytes:text.length,
-    latestDayBytes:latestBytes,
-    projectedYearBytes:latestBytes*252,
-    latestEntry:latest||null
-  };
-  return window._lastTelemetryArchiveWrite;
-}
 async function decodeSnapshotState(source){
   // v443 changes both the session ownership clock and feature-selection rule.
   // Older packed telemetry is deliberately discarded rather than mixed with state
@@ -6132,27 +6065,6 @@ async function processScannerUpload(scannerFile, mode, options={}){
     if(mode==='stock'){
       const threshold=getEffectiveTgtPct()||TRADEBOOK_STATS?.adaptiveTGT||4;
       const eligibleCandidates=getDisplayedEntryCandidates(ALL).filter(s=>s.price>0);
-      if(!restoreOnly&&!isDuplicateSession){
-        const capital=parseFloat(document.getElementById('fCapital')?.value)||0;
-        const planned=planBasketExport(capital,eligibleCandidates);
-        const dayRecord=(SNAPSHOT_RUNTIME?.days||[]).find(day=>day.sessionDate===uploadSession)||null;
-        const liveEligibleSymbols=dayRecord?.eligibleSymbols?.length
-          ?dayRecord.eligibleSymbols
-          :(window._lastParsedFiltered||[]).map(s=>s.symbol);
-        const liveRocketSymbols=dayRecord?.rocketSymbols?.length
-          ?dayRecord.rocketSymbols
-          :ALL.filter(s=>s.rocketToday).map(s=>s.symbol);
-        const prices=Object.fromEntries(ALL
-          .map(s=>[s.symbol,Number(s.price)])
-          .filter(([symbol,price])=>normSym(symbol)&&price>0&&isFinite(price)));
-        await appendOutcomeTraceDay({
-          sessionDate:uploadSession,
-          basketSymbols:planned.exportList.map(s=>s.symbol),
-          eligibleSymbols:liveEligibleSymbols,
-          rocketSymbols:liveRocketSymbols,
-          prices
-        }).catch(e=>console.warn('Outcome trace archive append failed',e));
-      }
       const outcomeFeatureOrder=getOutcomeFeatureOrderFromEngine();
       const recommendations=eligibleCandidates
         .map((s,i)=>({symbol:s.symbol,entryPrice:s.price,score:s.rocketScore,rank:i+1,features:compactOutcomeFeatures(s._features,outcomeFeatureOrder)}));
@@ -6173,90 +6085,6 @@ async function processScannerUpload(scannerFile, mode, options={}){
     if(!completed) restoreScannerRuntime(original);
   }
 }
-
-function archiveForwardReturn(symbol,fromDay,toDay){
-  const sym=normSym(symbol);
-  const a=Number(fromDay?.prices?.[sym]),b=Number(toDay?.prices?.[sym]);
-  return a>0&&b>0?((b/a)-1)*100:null;
-}
-function seededRandom(seedText){
-  let seed=0;
-  String(seedText||'').split('').forEach(ch=>{seed=((seed*31)+ch.charCodeAt(0))>>>0;});
-  return ()=>{seed=(1664525*seed+1013904223)>>>0;return seed/4294967296;};
-}
-function pickRandomSymbols(symbols,count,seedText){
-  const rand=seededRandom(seedText),pool=[...(symbols||[])],out=[];
-  while(pool.length&&out.length<count){
-    const idx=Math.floor(rand()*pool.length);
-    out.push(pool.splice(idx,1)[0]);
-  }
-  return out;
-}
-function scoreArchivePickSet(symbols,day,nextDay){
-  const nextRockets=new Set(nextDay?.rocketSymbols||[]);
-  const returns=(symbols||[]).map(symbol=>archiveForwardReturn(symbol,day,nextDay)).filter(v=>v!=null&&isFinite(v));
-  const hits=(symbols||[]).filter(symbol=>nextRockets.has(symbol)).length;
-  return {
-    count:(symbols||[]).length,
-    hitRate:(symbols||[]).length?hits/(symbols||[]).length:null,
-    avgForwardReturn:returns.length?mean(returns):null
-  };
-}
-function traceMomentumSymbols(previousDay,day,count){
-  return cleanSymbolList(day?.eligibleSymbols)
-    .map(symbol=>({symbol,value:archiveForwardReturn(symbol,previousDay,day)}))
-    .filter(x=>x.value!=null&&isFinite(x.value))
-    .sort((a,b)=>b.value-a.value)
-    .slice(0,count)
-    .map(x=>x.symbol);
-}
-async function runArchiveBacktest(options={}){
-  const archive=options.archive?await decodeOutcomeTraceArchive(options.archive):await loadOutcomeTraceArchive({force:!!options.forceLoad});
-  const days=[...(archive?.days||[])].sort((a,b)=>String(a.sessionDate).localeCompare(String(b.sessionDate)));
-  const config={
-    relevanceMetric:options.relevanceMetric||'recorded_trace',
-    scoringMethod:options.scoringMethod||'recorded_basket'
-  };
-  const results=[];
-  for(let i=1;i<days.length-1;i++){
-    const previousDay=days[i-1],basketDay=days[i],nextDay=days[i+1];
-    if(String(previousDay.sessionDate)>=String(basketDay.sessionDate)) throw new Error(`Backtest leakage: momentum source ${previousDay.sessionDate} is not before basket day ${basketDay.sessionDate}`);
-    if(String(nextDay.sessionDate)<=String(basketDay.sessionDate)) throw new Error(`Backtest order error: outcome day ${nextDay.sessionDate} is not after basket day ${basketDay.sessionDate}`);
-    const basketSymbols=cleanSymbolList(basketDay.basketSymbols);
-    const eligibleSymbols=cleanSymbolList(basketDay.eligibleSymbols);
-    const randomSymbols=pickRandomSymbols(eligibleSymbols,basketSymbols.length,basketDay.sessionDate);
-    const momentumSymbols=traceMomentumSymbols(previousDay,basketDay,basketSymbols.length);
-    results.push({
-      date:basketDay.sessionDate,
-      nextDate:nextDay.sessionDate,
-      momentumSourceDate:previousDay.sessionDate,
-      basket:scoreArchivePickSet(basketSymbols,basketDay,nextDay),
-      random:scoreArchivePickSet(randomSymbols,basketDay,nextDay),
-      momentum:scoreArchivePickSet(momentumSymbols,basketDay,nextDay),
-      basketSymbols,
-      leakageChecked:true
-    });
-  }
-  const avg=numbers=>numbers.length?mean(numbers):null;
-  const collect=(key,field)=>results.map(r=>r[key]?.[field]).filter(v=>v!=null&&isFinite(v));
-  return {
-    ok:true,
-    schema:archive?.schema||null,
-    archiveDays:days.length,
-    config,
-    runs:results.length,
-    summary:{
-      basketAvgReturn:avg(collect('basket','avgForwardReturn')),
-      randomAvgReturn:avg(collect('random','avgForwardReturn')),
-      momentumAvgReturn:avg(collect('momentum','avgForwardReturn')),
-      basketHitRate:avg(collect('basket','hitRate')),
-      randomHitRate:avg(collect('random','hitRate')),
-      momentumHitRate:avg(collect('momentum','hitRate'))
-    },
-    results
-  };
-}
-window.runArchiveBacktest=runArchiveBacktest;
 
 async function processFiles(files){
   if(!(await ensureDriveReadyForLoad())){
@@ -6407,7 +6235,6 @@ document.getElementById('fMaxAlloc')?.addEventListener('input',e=>{delete e.targ
 
 let ACC_CORR=null; // derived rocket relevance for the current rolling daily trajectory window
 let SNAPSHOT_RUNTIME=null; // decoded five-day per-stock daily telemetry window
-let TELEMETRY_ARCHIVE_CACHE=null; // lazy-loaded indefinite daily telemetry archive
 
 // ── Async app init: load brain file → hydrate all state → render ──
 async function initApp(){
