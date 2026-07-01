@@ -1,8 +1,8 @@
-const BUILD_TS='2026-07-01 10:26 IST'; // release build time (IST)
-const APP_VERSION=459; // Interaction rocket relevance features; forward-catch exclusion audit.
+const BUILD_TS='2026-07-01 12:45 IST'; // release build time (IST)
+const APP_VERSION=460; // Uncapped stability-weighted relevance; 5-day rolling prediction-accuracy tracker.
 const GOOGLE_DRIVE_CLIENT_ID='1015012642264-oi2nelv3v90k3d39r994a6nelgjs2a56.apps.googleusercontent.com'; // Public OAuth Web Client ID.
 const HARD_FILTER_SCHEMA='structural_tradeability_v2';
-const STOCK_RUNWAY_CEILING_PCT=19.5; // Active fallback live-eligibility ceiling and max-entry cap when NSE price-band data is unavailable.
+const STOCK_RUNWAY_CEILING_PCT=19.5; // Intentional owner-approved forward-catch strategy filter: excludes stocks already near their circuit band (or caps max entry) since a stock that has already used up its daily range is a poor pre-rocket buy. Active fallback when NSE price-band data is unavailable.
 const PRICE_BAND_BLOCK_BUFFER_PCT=0.15; // Treat rounded 4.9/9.9/19.9 rows as effectively band-locked.
 const BASKET_CASH_RESERVE_RS=1; // Leave a rupee for broker-side tax/rounding differences.
 const BASKET_MARKET_BUDGET_BUFFER_PCT=0.25; // Sizing cushion only; exported buys remain MARKET orders.
@@ -20,8 +20,6 @@ const DAILY_TRAJECTORY_TOTAL_DAYS=5;
 const DAILY_TRAJECTORY_PRIOR_DAYS=DAILY_TRAJECTORY_TOTAL_DAYS-1;
 const DAILY_TRAJECTORY_WEIGHT_STEPS=[4,3,2,1]; // D-1 through D-4, normalized over usable pairs.
 const WARMUP_NEUTRAL_SCORE=50; // Equal-weight display/allocation score until honest rocket-relevance evidence exists.
-const FEATURE_MAX_SELECTED=24;
-const FEATURE_MIN_RELEVANCE=0.0001;
 let MARKET_MODE='stock';
 function modeKey(base){return base;}
 
@@ -1238,6 +1236,8 @@ function persistMethodologySnapshot(){
     const methSave={
       targetRelevance:ENGINE_DATA.targetRelevance||{},
       targetRelevanceToday:ENGINE_DATA.targetRelevanceToday||{},
+      featureStability:ENGINE_DATA.featureStability||{},
+      targetRelevanceByLag:ENGINE_DATA.targetRelevanceByLag||{},
       mrmr:ENGINE_DATA.mrmr||{},
       weights:ENGINE_DATA.weights||{},
       features:ENGINE_DATA.features||[],
@@ -2184,6 +2184,78 @@ function trimDailyRecords(days){
     .sort((a,b)=>String(a.sessionDate).localeCompare(String(b.sessionDate))||((a.timestamp||0)-(b.timestamp||0)))
     .slice(-DAILY_TRAJECTORY_TOTAL_DAYS);
 }
+// Records the engine's flagged buy candidates onto the stored day, so later uploads can
+// score them against subsequently-observed rockets — entirely within the 5-day window.
+function recordDayPredictions(runtime,sessionDate,predictedSymbols){
+  const day=(runtime?.days||[]).find(d=>d.sessionDate===sessionDate);
+  if(!day) return false;
+  day.predictedSymbols=[...new Set((predictedSymbols||[]).map(normSym).filter(Boolean))];
+  return true;
+}
+// Rolling self-accuracy over the retained 5-day window: for each past day's flagged
+// predictions, did the symbol appear in ANY later retained day's top-1% rocket set?
+// Baselines (random from that day's eligible universe, momentum top-N by prior-day price
+// move) are scored over the identical evaluable days for a like-for-like reference.
+function computeWindowPredictionAccuracy(runtime){
+  const days=[...(runtime?.days||[])].sort((a,b)=>String(a.sessionDate).localeCompare(String(b.sessionDate)));
+  const laterRocketUnion=(fromIndex)=>{
+    const union=new Set();
+    for(let j=fromIndex+1;j<days.length;j++) (days[j].rocketSymbols||[]).forEach(sym=>union.add(sym));
+    return union;
+  };
+  const priceOf=(day,symbol)=>{
+    const idx=(day?.symbols||[]).indexOf(symbol);
+    return idx>=0?Number(day.prices?.[idx]):null;
+  };
+  const momentumPick=(prevDay,day,count)=>{
+    if(!prevDay) return [];
+    return (day?.eligibleSymbols||[])
+      .map(sym=>{const a=priceOf(prevDay,sym),b=priceOf(day,sym);return {sym,move:(a>0&&b>0)?(b/a-1):null};})
+      .filter(x=>x.move!=null&&isFinite(x.move))
+      .sort((a,b)=>b.move-a.move)
+      .slice(0,count)
+      .map(x=>x.sym);
+  };
+  const randPick=(day,count,seedText)=>{
+    let seed=0;String(seedText||'').split('').forEach(ch=>{seed=((seed*31)+ch.charCodeAt(0))>>>0;});
+    const rand=()=>{seed=(1664525*seed+1013904223)>>>0;return seed/4294967296;};
+    const pool=[...(day?.eligibleSymbols||[])],out=[];
+    while(pool.length&&out.length<count) out.push(pool.splice(Math.floor(rand()*pool.length),1)[0]);
+    return out;
+  };
+  const scoreSet=(symbols,laterRockets)=>{
+    const list=(symbols||[]).filter(Boolean);
+    if(!list.length) return null;
+    const hits=list.filter(sym=>laterRockets.has(sym)).length;
+    return {flagged:list.length,hits,hitRate:hits/list.length};
+  };
+  let modelEval=0,modelHits=0,modelFlagged=0;
+  let randEval=0,randHits=0,randFlagged=0;
+  let momEval=0,momHits=0,momFlagged=0;
+  let evaluableDays=0;
+  days.forEach((day,i)=>{
+    const preds=day.predictedSymbols||[];
+    const hasFuture=i<days.length-1;
+    if(!preds.length||!hasFuture) return;
+    const laterRockets=laterRocketUnion(i);
+    const model=scoreSet(preds,laterRockets);
+    if(!model) return;
+    evaluableDays++;
+    modelEval++;modelHits+=model.hits;modelFlagged+=model.flagged;
+    const rnd=scoreSet(randPick(day,preds.length,day.sessionDate),laterRockets);
+    if(rnd){randEval++;randHits+=rnd.hits;randFlagged+=rnd.flagged;}
+    const mom=scoreSet(momentumPick(days[i-1]||null,day,preds.length),laterRockets);
+    if(mom){momEval++;momHits+=mom.hits;momFlagged+=mom.flagged;}
+  });
+  return {
+    evaluableDays,
+    windowDays:days.length,
+    model:modelFlagged?{flagged:modelFlagged,hits:modelHits,hitRate:modelHits/modelFlagged}:null,
+    random:randFlagged?{flagged:randFlagged,hits:randHits,hitRate:randHits/randFlagged}:null,
+    momentum:momFlagged?{flagged:momFlagged,hits:momHits,hitRate:momHits/momFlagged}:null,
+    warmingUp:evaluableDays===0
+  };
+}
 function getTrailingTrajectorySources(runtime,currentDate){
   const byDate=new Map((runtime?.days||[]).map(day=>[day.sessionDate,day]));
   const sources=[];
@@ -2215,6 +2287,8 @@ function combineTrajectoryPairs({sources,currentDay,features}){
   const totalWeight=valid.reduce((sum,item)=>sum+item.rawWeight,0)||0;
   valid.forEach(item=>{item.weight=totalWeight?item.rawWeight/totalWeight:0;});
   const lowSampleFeatures=[];
+  const targetRelevanceByLag={};
+  const featureStability={};
   const targetRelevance=Object.fromEntries((features||[]).map(feature=>{
     const usable=valid.filter(item=>(item.pair.sampleCounts?.[feature]||0)>=30&&(item.pair.positiveCounts?.[feature]||0)>=10);
     const featureWeight=usable.reduce((sum,item)=>sum+item.rawWeight,0)||0;
@@ -2229,13 +2303,26 @@ function combineTrajectoryPairs({sources,currentDay,features}){
     const value=featureWeight
       ?usable.reduce((sum,item)=>sum+(item.rawWeight/featureWeight)*(item.pair.targetRelevance?.[feature]??0),0)
       :0;
+    const lagValues=usable.map(item=>Number(item.pair.targetRelevance?.[feature])).filter(v=>isFinite(v));
+    targetRelevanceByLag[feature]=usable.map(item=>({
+      lag:item.lag,
+      relevance:isFinite(Number(item.pair.targetRelevance?.[feature]))?Number(item.pair.targetRelevance?.[feature]):0
+    }));
+    if(lagValues.length){
+      const meanSigned=mean(lagValues);
+      const meanMagnitude=mean(lagValues.map(v=>Math.abs(v)));
+      const dispersion=Math.sqrt(mean(lagValues.map(v=>(v-meanSigned)*(v-meanSigned))));
+      featureStability[feature]=meanMagnitude>0?Math.max(0,Math.min(1,1-(dispersion/meanMagnitude))):0;
+    }else{
+      featureStability[feature]=0;
+    }
     return [feature,value];
   }));
   const nearest=valid.find(item=>item.lag===1)||null;
   const targetRelevanceToday=Object.fromEntries((features||[]).map(feature=>[
     feature,nearest?(nearest.pair.targetRelevance?.[feature]??0):null
   ]));
-  return {valid,targetRelevance,targetRelevanceToday,nearest,lowSampleFeatures};
+  return {valid,targetRelevance,targetRelevanceToday,targetRelevanceByLag,featureStability,nearest,lowSampleFeatures};
 }
 function computeFeatureRedundancy(featureA,featureB,featureRows){
   const xs=[],ys=[];
@@ -2245,18 +2332,20 @@ function computeFeatureRedundancy(featureA,featureB,featureRows){
   });
   return Math.abs(spearman(xs,ys)||0);
 }
-function selectRocketRelevanceFeatures(features,targetRelevance,maxSelected=FEATURE_MAX_SELECTED,featureRows=[]){
+function selectRocketRelevanceFeatures(features,targetRelevance,featureStability={},featureRows=[]){
   const list=[...(features||[])];
   const mrmr={};
   const relevance={};
   list.forEach(feature=>{
     const rel=Math.abs(Number(targetRelevance?.[feature])||0);
+    const stability=Math.max(0,Math.min(1,Number(featureStability?.[feature])||0));
+    const stableRelevance=rel*stability;
     relevance[feature]=rel;
-    mrmr[feature]={rel,red:0,baseScore:0,reliability:1,score:0,selected:false,accountability:null};
+    mrmr[feature]={rel,stability,stableRelevance,red:0,baseScore:stableRelevance,reliability:stability,score:0,selected:false,accountability:null};
   });
   const candidates=list
-    .filter(feature=>relevance[feature]>FEATURE_MIN_RELEVANCE)
-    .sort((a,b)=>relevance[b]-relevance[a]);
+    .filter(feature=>(mrmr[feature]?.stableRelevance||0)>0)
+    .sort((a,b)=>(mrmr[b].stableRelevance||0)-(mrmr[a].stableRelevance||0));
   const selected=[];
   const redundancyCache=new Map();
   const redundancy=(a,b)=>{
@@ -2264,25 +2353,25 @@ function selectRocketRelevanceFeatures(features,targetRelevance,maxSelected=FEAT
     if(!redundancyCache.has(key)) redundancyCache.set(key,computeFeatureRedundancy(a,b,featureRows));
     return redundancyCache.get(key);
   };
-  while(selected.length<maxSelected&&selected.length<candidates.length){
+  while(selected.length<candidates.length){
     let best=null;
     candidates.forEach(feature=>{
       if(selected.includes(feature)) return;
       const red=selected.length?mean(selected.map(existing=>redundancy(feature,existing))):0;
-      const score=relevance[feature]-red;
-      if(!best||score>best.score||(score===best.score&&relevance[feature]>relevance[best.feature])){
+      const score=(mrmr[feature].stableRelevance||0)*Math.max(0,1-red);
+      if(!best||score>best.score||(score===best.score&&mrmr[feature].stableRelevance>mrmr[best.feature].stableRelevance)){
         best={feature,red,score};
       }
     });
-    if(!best||best.score<=FEATURE_MIN_RELEVANCE) break;
+    if(!best||best.score<=0) break;
     selected.push(best.feature);
-    mrmr[best.feature]={...mrmr[best.feature],red:best.red,baseScore:relevance[best.feature],score:best.score,selected:true,
-      accountability:{relevance:relevance[best.feature],redundancy:best.red,criterion:'MID'}};
+    mrmr[best.feature]={...mrmr[best.feature],red:best.red,score:best.score,selected:true,
+      accountability:{relevance:relevance[best.feature],stability:mrmr[best.feature].stability,stableRelevance:mrmr[best.feature].stableRelevance,redundancy:best.red,criterion:'stability-weighted MID'}};
   }
   list.forEach(feature=>{
     if(mrmr[feature].selected) return;
-    mrmr[feature]={...mrmr[feature],baseScore:relevance[feature],score:0,
-      accountability:{relevance:relevance[feature]}};
+    mrmr[feature]={...mrmr[feature],score:0,
+      accountability:{relevance:relevance[feature],stability:mrmr[feature].stability,stableRelevance:mrmr[feature].stableRelevance}};
   });
   const total=selected.reduce((sum,feature)=>sum+(mrmr[feature].score||0),0)||1;
   const weights=Object.fromEntries(list.map(feature=>[
@@ -2344,7 +2433,7 @@ async function advanceSnapshotLearning({rows,features,priceKey,rocketMetricKey,s
   const sources=currentForLearning?getTrailingTrajectorySources(runtime,currentForLearning.sessionDate):[];
   const combined=currentForLearning
     ?combineTrajectoryPairs({sources,currentDay:currentForLearning,features})
-    :{valid:[],targetRelevance:{},targetRelevanceToday:Object.fromEntries(features.map(f=>[f,null])),nearest:null};
+    :{valid:[],targetRelevance:{},targetRelevanceToday:Object.fromEntries(features.map(f=>[f,null])),targetRelevanceByLag:{},featureStability:Object.fromEntries(features.map(f=>[f,0])),nearest:null};
   const hasScoringEvidence=combined.valid.length>0;
   const targetRelevance=hasScoringEvidence
     ?combined.targetRelevance
@@ -2397,6 +2486,8 @@ async function advanceSnapshotLearning({rows,features,priceKey,rocketMetricKey,s
   return {
     targetRelevance,
     targetRelevanceToday,
+    targetRelevanceByLag:combined.targetRelevanceByLag||{},
+    featureStability:combined.featureStability||Object.fromEntries(features.map(f=>[f,0])),
     completedNow:combined.valid.length,
     note,
     runtime,
@@ -2687,7 +2778,7 @@ async function runEngine(raw, sessionTag, options={}){
   const currentTop10Symbols=new Set(targetRanked.slice(0,targetCount).map(x=>filtered[x.i].symbol));
   const previewLearning=await advanceSnapshotLearning({rows:learningUniverse,features:FEATS,priceKey:K.price,rocketMetricKey:K.price_change,
     sessionTag,targetSymbols:currentTop10Symbols,eligibleSymbols:new Set(filtered.map(d=>d.symbol)),advance:advanceSnapshot,snapshotTimestamp:options.snapshotTimestamp||Date.now(),previewOnly:true});
-  const previewSelection=selectRocketRelevanceFeatures(FEATS,previewLearning.targetRelevance,FEATURE_MAX_SELECTED,filtered.map(d=>previewLearning.scoringFeatureRows[d.symbol]||{}));
+  const previewSelection=selectRocketRelevanceFeatures(FEATS,previewLearning.targetRelevance,previewLearning.featureStability,filtered.map(d=>previewLearning.scoringFeatureRows[d.symbol]||{}));
   const breadthInteractionDefs=buildBreadthInteractionDefs(
     previewSelection.selectedFeatures,
     previewSelection.weights,
@@ -2733,7 +2824,7 @@ async function runEngine(raw, sessionTag, options={}){
   const scoringFeatureRows=snapshotLearning.scoringFeatureRows||{};
   const scoringRows=learningUniverse.map(d=>scoringFeatureRows[d.symbol]||{});
   // Feature selection uses greedy mRMR: rank-relevance minus same-day cross-sectional redundancy.
-  const {mrmr,selectedFeatures,weights}=selectRocketRelevanceFeatures(FEATS,targetRelevance,FEATURE_MAX_SELECTED,filtered.map(d=>scoringFeatureRows[d.symbol]||{}));
+  const {mrmr,selectedFeatures,weights}=selectRocketRelevanceFeatures(FEATS,targetRelevance,snapshotLearning.featureStability,filtered.map(d=>scoringFeatureRows[d.symbol]||{}));
   const outcomeReliabilityModel=buildOutcomeReliabilityModel(FEATS,weights);
 
   const pctls={};
@@ -2855,8 +2946,24 @@ async function runEngine(raw, sessionTag, options={}){
   const selectedInteractions=selectedFeatures
     .filter(feature=>interactionFeatureKeys.has(feature))
     .map(feature=>({feature,label:LABELS[feature]||feature,weight:weights[feature]||0}));
+  const featureStability=snapshotLearning.featureStability||{};
+  const stabilityValues=FEATS.map(f=>Number(featureStability[f])||0).filter(v=>isFinite(v)).sort((a,b)=>a-b);
+  const stabilityAt=pct=>stabilityValues.length?stabilityValues[Math.min(stabilityValues.length-1,Math.max(0,Math.floor((stabilityValues.length-1)*pct)))]:0;
+  const stabilitySummary={
+    min:stabilityAt(0),
+    p25:stabilityAt(0.25),
+    median:stabilityAt(0.5),
+    p75:stabilityAt(0.75),
+    max:stabilityAt(1),
+    nearZero:stabilityValues.filter(v=>v<=0.05).length,
+    nearOne:stabilityValues.filter(v=>v>=0.95).length,
+    total:stabilityValues.length
+  };
   ENGINE_DATA={targetRelevance,targetRelevanceToday,mrmr,weights,features:FEATS,selectedFeatures,labels:LABELS,top10Feats,accSessions:ACC_CORR?.sessions||0,laggedNote:laggedNote||'',
     marketBreadth:marketBreadth,
+    featureStability,
+    targetRelevanceByLag:snapshotLearning.targetRelevanceByLag||{},
+    stabilitySummary,
     interactionFeatures:{
       static:staticInteractionDefs.map(def=>({feature:def.key,label:def.label,left:def.left||null,right:def.right||null})),
       breadth:breadthInteractionDefs.map(def=>({feature:def.key,label:def.label,left:def.left,partnerWeight:def.partnerWeight||0})),
@@ -2890,7 +2997,7 @@ async function runEngine(raw, sessionTag, options={}){
   COLS=getCols(); // refresh dynamic columns
   // Persist compact methodology summaries; the O(n²) pair matrix is recomputed per run.
   try{
-    const methSave={targetRelevance:ENGINE_DATA.targetRelevance,targetRelevanceToday,mrmr:ENGINE_DATA.mrmr,weights:ENGINE_DATA.weights,
+    const methSave={targetRelevance:ENGINE_DATA.targetRelevance,targetRelevanceToday,featureStability:ENGINE_DATA.featureStability,targetRelevanceByLag:ENGINE_DATA.targetRelevanceByLag,stabilitySummary:ENGINE_DATA.stabilitySummary,mrmr:ENGINE_DATA.mrmr,weights:ENGINE_DATA.weights,
       features:ENGINE_DATA.features,labels:ENGINE_DATA.labels,top10Feats:ENGINE_DATA.top10Feats,accSessions:ENGINE_DATA.accSessions,laggedNote:ENGINE_DATA.laggedNote,
       marketBreadth:ENGINE_DATA.marketBreadth,useFreshCorr:ENGINE_DATA.useFreshCorr,hasRecommendationEvidence:ENGINE_DATA.hasRecommendationEvidence,currentUploadLearned:ENGINE_DATA.currentUploadLearned,freshSignalCount:ENGINE_DATA.freshSignalCount,scoringSource:ENGINE_DATA.scoringSource,useAccCorr:ENGINE_DATA.useAccCorr,sectorCol:ENGINE_DATA.sectorCol,industryCol:ENGINE_DATA.industryCol,
       totalParsed:totalParsed,hardFilterSchema:HARD_FILTER_SCHEMA,removed:{...REMOVED},survSize:Object.keys(NSE_SURV).length,
@@ -4184,6 +4291,7 @@ function _renderMethodologyInner(){
   if(E.accSessions==null) E.accSessions=0;
   if(!E.laggedNote) E.laggedNote='';
   if(!E.targetRelevanceToday) E.targetRelevanceToday={};
+  if(!E.featureStability) E.featureStability={};
   const sorted=[...E.features].sort((a,b)=>E.mrmr[b].score-E.mrmr[a].score);
   const maxW=sorted.reduce((m,f)=>Math.max(m,E.weights[f]||0),0)||1;
   const NSE_FEATS=new Set(['delivery_pct','price_band_pct']);
@@ -4204,7 +4312,8 @@ function _renderMethodologyInner(){
   const recFeedback=E.recommendationFeedback;
   const entryFeedback=E.executedEntryFeedback;
   const overlay=E.outcomeScoreOverlay||{};
-  const feedbackText=`Shortlist outcomes: ${recFeedback?.samples||0}; executed-entry outcomes: ${entryFeedback?.samples||0}. Raw rocket relevance learns which earlier feature states precede later rocket outcomes. Completed recommendation and entry outcomes remain confidence context only and continue refining targets, sizing, and review timing.`;
+  const stabilitySummary=E.stabilitySummary||{};
+  const feedbackText=`Shortlist outcomes: ${recFeedback?.samples||0}; executed-entry outcomes: ${entryFeedback?.samples||0}. Raw rocket relevance learns which earlier feature states precede later rocket outcomes. Feature weight is relevance scaled by cross-day stability, then redundancy-adjusted. Completed recommendation and entry outcomes remain confidence context only and continue refining targets, sizing, and review timing.`;
   const lowSamples=Array.isArray(E.lowSampleFeatures)?E.lowSampleFeatures:[];
   const lowReasonLabel=reason=>reason==='low_positive_count'?'positive count':'total samples';
   const lowSamplePreview=lowSamples.slice(0,12).map(item=>`${E.labels?.[item.feature]||item.feature} D-${item.lag} (${lowReasonLabel(item.reason)}: ${item.reason==='low_positive_count'?(item.positiveCount??0):(item.samples??0)})`).join(', ');
@@ -4228,9 +4337,10 @@ function _renderMethodologyInner(){
 
   mc.innerHTML=''; // clear before rebuild
 
-  let wtHTML=`<table class="ct"><thead><tr><th>Feature</th><th>Src</th><th>AUC Relevance</th><th>D-1 AUC</th><th>Direction</th><th>mRMR Score</th><th class="bar-cell">Weight</th><th>Wt%</th></tr></thead><tbody>`;
+  let wtHTML=`<table class="ct"><thead><tr><th>Feature</th><th>Src</th><th>AUC Relevance</th><th>Stability</th><th>D-1 AUC</th><th>Direction</th><th>mRMR Score</th><th class="bar-cell">Weight</th><th>Wt%</th></tr></thead><tbody>`;
   for(const f of sorted){
     const tc=E.targetRelevance[f],m=E.mrmr[f],w=E.weights[f];
+    const stability=E.featureStability?.[f];
     const dir=tc>=0?'<span style="color:var(--green)">↑</span>':'<span style="color:var(--red)">↓</span>';
     const bw=Math.round((w||0)/maxW*100),bc=(tc||0)>=0?'var(--green)':'var(--red)';
     const srcType=getFeatureSource(f);
@@ -4238,9 +4348,9 @@ function _renderMethodologyInner(){
     const todayR=E.targetRelevanceToday?.[f];
     const todayCell=todayR!=null&&!isNaN(todayR)?`<span style="color:${todayR>=0?'var(--green)':'var(--red)'};font-size:10px">${(todayR??0).toFixed(3)}</span>`:'—';
     const _n=v=>isFinite(v)?v:0;
-    const tcS=tc!=null&&isFinite(tc)?tc.toFixed(3):'—'; const scS=m&&m.score!=null&&isFinite(m.score)?m.score.toFixed(4):'—'; const wS=w!=null&&isFinite(w)?(w*100).toFixed(1):'—';
+    const tcS=tc!=null&&isFinite(tc)?tc.toFixed(3):'—'; const stS=stability!=null&&isFinite(stability)?stability.toFixed(2):'—'; const scS=m&&m.score!=null&&isFinite(m.score)?m.score.toFixed(4):'—'; const wS=w!=null&&isFinite(w)?(w*100).toFixed(1):'—';
     wtHTML+=`<tr>
-      <td style="font-family:'Plus Jakarta Sans',sans-serif;font-weight:600;color:var(--t1)">${E.labels[f]||f}</td><td>${src}</td><td style="color:${(tc||0)>=0?'var(--green)':'var(--red)'};font-weight:600">${tcS}</td><td>${todayCell}</td><td>${dir}</td><td style="font-weight:700">${scS}</td><td class="bar-cell"><span class="cb" style="width:${bw}%;background:${bc};opacity:.5"></span></td><td style="font-weight:800">${wS}%</td>
+      <td style="font-family:'Plus Jakarta Sans',sans-serif;font-weight:600;color:var(--t1)">${E.labels[f]||f}</td><td>${src}</td><td style="color:${(tc||0)>=0?'var(--green)':'var(--red)'};font-weight:600">${tcS}</td><td style="font-weight:700;color:${(stability||0)>=0.75?'var(--green)':(stability||0)<=0.2?'var(--red)':'var(--amber)'}">${stS}</td><td>${todayCell}</td><td>${dir}</td><td style="font-weight:700">${scS}</td><td class="bar-cell"><span class="cb" style="width:${bw}%;background:${bc};opacity:.5"></span></td><td style="font-weight:800">${wS}%</td>
     </tr>`;
   }
   wtHTML+='</tbody></table>';
@@ -4265,7 +4375,21 @@ function _renderMethodologyInner(){
       <div class="m-card"><h4>📡 How the Engine Learns</h4><p>Current Day-D rockets are compared directly with the same stocks’ states at D-1, D-2, D-3 and D-4, never as chained day-to-day transitions. The newest usable state receives weight 4, then 3, 2 and 1, normalized across available pairs. Scores begin on Day 2 and use the current live state to rank stocks for later rocket potential.</p></div>
       <div class="m-card"><h4>Low-Sample Diagnostics</h4><p>${lowSampleText}</p></div>
       <div class="m-card"><h4>Outcome Self-Correction</h4><p>${feedbackText} Outcome evidence is displayed as confidence context only. It does not add or subtract points from Rocket Score.</p></div>
-      <div class="m-card"><h4>Feature Selection</h4><p>Every retained indicator competes on rank-based rocket relevance minus same-day cross-sectional redundancy with already-selected features. Final weights are proportional to that mRMR score, so highly overlapping indicators no longer each receive full independent weight.</p></div>
+      <div class="m-card"><h4>Feature Weighting</h4><p>Every indicator receives a cross-day stability factor from its D-1...D-4 relevance track record. Final weight starts as absolute AUC relevance times stability, then mRMR redundancy reduces overlapping stable signals. All features are considered with no fixed cap; unstable or random features self-cancel toward zero weight, so the feature list decides its own effective size.</p></div>
+      ${(()=>{
+        const acc=computeWindowPredictionAccuracy(SNAPSHOT_RUNTIME);
+        const pct=x=>x&&x.hitRate!=null?(x.hitRate*100).toFixed(1)+'%':'—';
+        if(acc.warmingUp){
+          return `<div class="m-card"><h4>5-Day Prediction Accuracy</h4><p>Warming up — the engine records each day's flagged buy candidates and scores them against rockets observed on later days within the 5-day window. Accuracy appears once at least one flagged day has a following day to evaluate against. Window holds ${acc.windowDays} day${acc.windowDays===1?'':'s'} so far.</p></div>`;
+        }
+        return `<div class="m-card"><h4>5-Day Prediction Accuracy</h4><p>Over ${acc.evaluableDays} evaluable day${acc.evaluableDays===1?'':'s'} in the current window: flagged candidates that became rockets within the window vs. random and momentum baselines over the same days.</p>
+          <table class="ct"><thead><tr><th>Pick source</th><th>Flagged</th><th>Hits</th><th>Hit rate</th></tr></thead><tbody>
+          <tr><td>Engine (live)</td><td>${acc.model?.flagged??0}</td><td>${acc.model?.hits??0}</td><td>${pct(acc.model)}</td></tr>
+          <tr><td>Random baseline</td><td>${acc.random?.flagged??0}</td><td>${acc.random?.hits??0}</td><td>${pct(acc.random)}</td></tr>
+          <tr><td>Momentum baseline</td><td>${acc.momentum?.flagged??0}</td><td>${acc.momentum?.hits??0}</td><td>${pct(acc.momentum)}</td></tr>
+          </tbody></table></div>`;
+      })()}
+      <div class="m-card"><h4>Stability Spread</h4><p>Stability min ${((stabilitySummary.min||0)*100).toFixed(0)}%, median ${((stabilitySummary.median||0)*100).toFixed(0)}%, max ${((stabilitySummary.max||0)*100).toFixed(0)}%. Near-zero: ${stabilitySummary.nearZero||0}; near-one: ${stabilitySummary.nearOne||0}; tracked features: ${stabilitySummary.total||0}.</p></div>
       <div class="m-card"><h4>🎯 Max 1D Filter</h4><p>Set <em>Max 1D %</em> in the filter bar to hide stocks that have already moved too much today (default 5%). Entry-ceiling filtering has been removed; strong candidates are no longer hidden just because current price is above a calculated buy ceiling.</p></div>
       <div class="m-card"><h4>🚫 Recommendation Filters</h4><p>The learning universe keeps every valid parsed NSE symbol. Recommendation eligibility separately excludes zero-price rows, stocks at/near their NSE price band, non-EQ series, surveillance-flagged stocks, insufficient liquidity, invalid ATR, stocks already in the current day's rocket union, and live entries that have faded from the day high by the harvest-target zone. Delivery, peak retention, pullback from high, RVOL, DMI, MFI, RSI, and sell pressure remain learnable features. Currently structurally filtered from recommendations: ${(REMOVED.uc||0)+(REMOVED.surv||0)+(REMOVED.nonEq||0)+(REMOVED.liq||0)+(REMOVED.fscore||0)+(REMOVED.atr||0)} stocks.</p></div>
       <div class="m-card"><h4>Regime-Agnostic Learning</h4><p>Market breadth is shown as context only. The scanner uses one recency-adjusted top-rocket correlation accumulator across all market conditions, so bull, neutral, and bear days do not create separate scoring histories.</p></div>
@@ -6004,6 +6128,7 @@ async function decodePackedDailyRecord(packed){
     featureCols:packed.features?.cols||packed.featureCols||[],
     rocketSymbols:Array.isArray(packed.rocketSymbols)?packed.rocketSymbols.map(normSym).filter(Boolean):[],
     eligibleSymbols:Array.isArray(packed.eligibleSymbols)?packed.eligibleSymbols.map(normSym).filter(Boolean):[],
+    predictedSymbols:Array.isArray(packed.predictedSymbols)?packed.predictedSymbols.map(normSym).filter(Boolean):[],
     sampleCount:Number(packed.sampleCount)||1
   };
 }
@@ -6018,6 +6143,7 @@ async function encodePackedDailyRecord(snapshot){
     ),
     rocketSymbols:[...(snapshot.rocketSymbols||[])],
     eligibleSymbols:[...(snapshot.eligibleSymbols||[])],
+    predictedSymbols:[...(snapshot.predictedSymbols||[])],
     sampleCount:Number(snapshot.sampleCount)||1,
     latestSessionTag:snapshot.latestSessionTag||null
   };
@@ -6158,6 +6284,12 @@ async function processScannerUpload(scannerFile, mode, options={}){
       };
       recordRecommendationOutcomeScan(window._lastStockOutcomeScan);
       recordDisplayedEntryCohort({date:uploadSession,candidates:eligibleCandidates});
+      // 5-day rolling self-accuracy: attach today's flagged buy candidates to the stored
+      // day so later in-window uploads can score them against observed rockets. Reuses the
+      // 5-day snapshot store — nothing persists beyond the window.
+      if(SNAPSHOT_RUNTIME&&recordDayPredictions(SNAPSHOT_RUNTIME,uploadSession,eligibleCandidates.map(s=>s.symbol))){
+        FS.set(modeKey(SNAPSHOT_STATE_STORE,mode),await encodeSnapshotState(SNAPSHOT_RUNTIME));
+      }
       syncExecutedRecommendedEntries();
     }
     FILT=[...ALL];_tvLoadedThisSession=true;
