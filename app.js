@@ -1238,8 +1238,6 @@ function persistMethodologySnapshot(){
     const methSave={
       targetRelevance:ENGINE_DATA.targetRelevance||{},
       targetRelevanceToday:ENGINE_DATA.targetRelevanceToday||{},
-      targetRelevanceSpearman:ENGINE_DATA.targetRelevanceSpearman||{},
-      targetRelevanceTodaySpearman:ENGINE_DATA.targetRelevanceTodaySpearman||{},
       mrmr:ENGINE_DATA.mrmr||{},
       weights:ENGINE_DATA.weights||{},
       features:ENGINE_DATA.features||[],
@@ -1983,7 +1981,6 @@ function correlationFromPriorState(sourceSnapshot,currentSnapshot,eligibleSymbol
     eligible.has(symbol)&&sourceSnapshot?.featureRows?.[symbol]&&currentSnapshot?.featureRows?.[symbol]
   );
   const targetRelevance={};
-  const targetRelevanceSpearman={};
   const sampleCounts={};
   const positiveCounts={};
   const lowSampleFeatures=[];
@@ -2000,7 +1997,6 @@ function correlationFromPriorState(sourceSnapshot,currentSnapshot,eligibleSymbol
     const negatives=samples-positives;
     sampleCounts[feature]=samples;
     positiveCounts[feature]=positives;
-    targetRelevanceSpearman[feature]=samples>=30?spearman(xs,ys):0;
     if(samples<30){
       lowSampleFeatures.push({feature,samples,positiveCount:positives,reason:'low_total_sample'});
       targetRelevance[feature]=0;
@@ -2024,7 +2020,7 @@ function correlationFromPriorState(sourceSnapshot,currentSnapshot,eligibleSymbol
       targetRelevance[feature]=isFinite(auc)?(auc-0.5)*2:0;
     }
   }
-  return {targetRelevance,targetRelevanceSpearman,matched,featureRows,sampleCounts,positiveCounts,lowSampleFeatures};
+  return {targetRelevance,matched,featureRows,sampleCounts,positiveCounts,lowSampleFeatures};
 }
 function snapshotPriceMoves(previous,current){
   const currentIndex=new Map((current?.symbols||[]).map((symbol,index)=>[symbol,index]));
@@ -2172,23 +2168,11 @@ function combineTrajectoryPairs({sources,currentDay,features}){
       :0;
     return [feature,value];
   }));
-  // TEMPORARY: AUC vs Spearman comparison — remove after review.
-  const targetRelevanceSpearman=Object.fromEntries((features||[]).map(feature=>{
-    const usable=valid.filter(item=>(item.pair.sampleCounts?.[feature]||0)>=30);
-    const featureWeight=usable.reduce((sum,item)=>sum+item.rawWeight,0)||0;
-    const value=featureWeight
-      ?usable.reduce((sum,item)=>sum+(item.rawWeight/featureWeight)*(item.pair.targetRelevanceSpearman?.[feature]??0),0)
-      :0;
-    return [feature,value];
-  }));
   const nearest=valid.find(item=>item.lag===1)||null;
   const targetRelevanceToday=Object.fromEntries((features||[]).map(feature=>[
     feature,nearest?(nearest.pair.targetRelevance?.[feature]??0):null
   ]));
-  const targetRelevanceTodaySpearman=Object.fromEntries((features||[]).map(feature=>[
-    feature,nearest?(nearest.pair.targetRelevanceSpearman?.[feature]??0):null
-  ]));
-  return {valid,targetRelevance,targetRelevanceToday,targetRelevanceSpearman,targetRelevanceTodaySpearman,nearest,lowSampleFeatures};
+  return {valid,targetRelevance,targetRelevanceToday,nearest,lowSampleFeatures};
 }
 function computeFeatureRedundancy(featureA,featureB,featureRows){
   const xs=[],ys=[];
@@ -2246,7 +2230,7 @@ function selectRocketRelevanceFeatures(features,targetRelevance,maxSelected=FEAT
 async function advanceSnapshotLearning({rows,features,priceKey,rocketMetricKey,sessionTag,targetSymbols,eligibleSymbols,advance=true,snapshotTimestamp=Date.now()}){
   if(!SNAPSHOT_RUNTIME||SNAPSHOT_RUNTIME.schema!==SNAPSHOT_STATE_SCHEMA) SNAPSHOT_RUNTIME=emptySnapshotRuntime();
   if(ACC_CORR?.corrSchema!==CORR_SCHEMA){
-    ACC_CORR={corrSchema:CORR_SCHEMA,corr:{},dailyCorr:{},targetRelevanceSpearman:{},targetRelevanceTodaySpearman:{},sessions:0,learnSessions:0,dailySessions:0,lagPairs:[]};
+    ACC_CORR={corrSchema:CORR_SCHEMA,corr:{},dailyCorr:{},sessions:0,learnSessions:0,dailySessions:0,lagPairs:[]};
   }
 
   const runtime=SNAPSHOT_RUNTIME;
@@ -2295,17 +2279,12 @@ async function advanceSnapshotLearning({rows,features,priceKey,rocketMetricKey,s
   const sources=currentForLearning?getTrailingTrajectorySources(runtime,currentForLearning.sessionDate):[];
   const combined=currentForLearning
     ?combineTrajectoryPairs({sources,currentDay:currentForLearning,features})
-    :{valid:[],targetRelevance:{},targetRelevanceToday:Object.fromEntries(features.map(f=>[f,null])),targetRelevanceSpearman:{},targetRelevanceTodaySpearman:Object.fromEntries(features.map(f=>[f,null])),nearest:null};
+    :{valid:[],targetRelevance:{},targetRelevanceToday:Object.fromEntries(features.map(f=>[f,null])),nearest:null};
   const hasScoringEvidence=combined.valid.length>0;
   const targetRelevance=hasScoringEvidence
     ?combined.targetRelevance
     :(ACC_CORR?.dailyCorr||ACC_CORR?.corr||Object.fromEntries(features.map(f=>[f,0])));
   const targetRelevanceToday=combined.targetRelevanceToday;
-  // TEMPORARY: AUC vs Spearman comparison — remove after review.
-  const targetRelevanceSpearman=hasScoringEvidence
-    ?combined.targetRelevanceSpearman
-    :(ACC_CORR?.targetRelevanceSpearman||Object.fromEntries(features.map(f=>[f,0])));
-  const targetRelevanceTodaySpearman=combined.targetRelevanceTodaySpearman;
   const nearestSource=combined.nearest?.source||sources.find(item=>item.lag===1)?.source||null;
   const intervalMoves=nearestSource?snapshotPriceMoves(nearestSource,currentSnapshot):{};
 
@@ -2315,8 +2294,6 @@ async function advanceSnapshotLearning({rows,features,priceKey,rocketMetricKey,s
       corrSchema:CORR_SCHEMA,
       corr:combined.targetRelevance,
       dailyCorr:combined.targetRelevance,
-      targetRelevanceSpearman:combined.targetRelevanceSpearman,
-      targetRelevanceTodaySpearman:combined.targetRelevanceTodaySpearman,
       sessions:combined.valid.length,
       learnSessions:combined.valid.length,
       dailySessions:combined.valid.length,
@@ -2352,8 +2329,6 @@ async function advanceSnapshotLearning({rows,features,priceKey,rocketMetricKey,s
   return {
     targetRelevance,
     targetRelevanceToday,
-    targetRelevanceSpearman,
-    targetRelevanceTodaySpearman,
     completedNow:combined.valid.length,
     note,
     runtime,
@@ -2641,9 +2616,6 @@ async function runEngine(raw, sessionTag, options={}){
 
   const targetRelevance=snapshotLearning.targetRelevance;
   const targetRelevanceToday=snapshotLearning.targetRelevanceToday;
-  // TEMPORARY: AUC vs Spearman comparison — remove after review.
-  const targetRelevanceSpearman=snapshotLearning.targetRelevanceSpearman||{};
-  const targetRelevanceTodaySpearman=snapshotLearning.targetRelevanceTodaySpearman||{};
   const todayRocketSet=new Set(snapshotLearning.currentRocketSymbols||[]);
   const freshSignalCount=snapshotLearning.freshSignalCount;
   const currentUploadLearned=snapshotLearning.completedNow>0;
@@ -2783,7 +2755,7 @@ async function runEngine(raw, sessionTag, options={}){
     SCORE_MAP[d.symbol]=hasRecommendationEvidence?Math.round(rs*1000)/10:WARMUP_NEUTRAL_SCORE;
   });
   parsed.forEach(d=>{d.rocketScore=SCORE_MAP[d.symbol]??null;});
-  ENGINE_DATA={targetRelevance,targetRelevanceToday,targetRelevanceSpearman,targetRelevanceTodaySpearman,mrmr,weights,features:FEATS,selectedFeatures,labels:LABELS,top10Feats,accSessions:ACC_CORR?.sessions||0,laggedNote:laggedNote||'',
+  ENGINE_DATA={targetRelevance,targetRelevanceToday,mrmr,weights,features:FEATS,selectedFeatures,labels:LABELS,top10Feats,accSessions:ACC_CORR?.sessions||0,laggedNote:laggedNote||'',
     marketBreadth:marketBreadth,
     recommendationFeedback,executedEntryFeedback,
     outcomeScoreOverlay:{active:outcomeReliabilityModel.active,samples:outcomeReliabilityModel.samples.length,features:outcomeReliabilityModel.features.length,maxAdjustment:0,mode:'confidence_badge_only'},
@@ -2813,7 +2785,7 @@ async function runEngine(raw, sessionTag, options={}){
   COLS=getCols(); // refresh dynamic columns
   // Persist compact methodology summaries; the O(n²) pair matrix is recomputed per run.
   try{
-    const methSave={targetRelevance:ENGINE_DATA.targetRelevance,targetRelevanceToday,targetRelevanceSpearman:ENGINE_DATA.targetRelevanceSpearman,targetRelevanceTodaySpearman:ENGINE_DATA.targetRelevanceTodaySpearman,mrmr:ENGINE_DATA.mrmr,weights:ENGINE_DATA.weights,
+    const methSave={targetRelevance:ENGINE_DATA.targetRelevance,targetRelevanceToday,mrmr:ENGINE_DATA.mrmr,weights:ENGINE_DATA.weights,
       features:ENGINE_DATA.features,labels:ENGINE_DATA.labels,top10Feats:ENGINE_DATA.top10Feats,accSessions:ENGINE_DATA.accSessions,laggedNote:ENGINE_DATA.laggedNote,
       marketBreadth:ENGINE_DATA.marketBreadth,useFreshCorr:ENGINE_DATA.useFreshCorr,hasRecommendationEvidence:ENGINE_DATA.hasRecommendationEvidence,currentUploadLearned:ENGINE_DATA.currentUploadLearned,freshSignalCount:ENGINE_DATA.freshSignalCount,scoringSource:ENGINE_DATA.scoringSource,useAccCorr:ENGINE_DATA.useAccCorr,sectorCol:ENGINE_DATA.sectorCol,industryCol:ENGINE_DATA.industryCol,
       totalParsed:totalParsed,hardFilterSchema:HARD_FILTER_SCHEMA,removed:{...REMOVED},survSize:Object.keys(NSE_SURV).length,
@@ -4106,8 +4078,6 @@ function _renderMethodologyInner(){
   if(E.accSessions==null) E.accSessions=0;
   if(!E.laggedNote) E.laggedNote='';
   if(!E.targetRelevanceToday) E.targetRelevanceToday={};
-  if(!E.targetRelevanceSpearman) E.targetRelevanceSpearman={};
-  if(!E.targetRelevanceTodaySpearman) E.targetRelevanceTodaySpearman={};
   const sorted=[...E.features].sort((a,b)=>E.mrmr[b].score-E.mrmr[a].score);
   const maxW=sorted.reduce((m,f)=>Math.max(m,E.weights[f]||0),0)||1;
   const NSE_FEATS=new Set(['delivery_pct','price_band_pct']);
@@ -4151,23 +4121,19 @@ function _renderMethodologyInner(){
 
   mc.innerHTML=''; // clear before rebuild
 
-  let wtHTML=`<table class="ct"><thead><tr><th>Feature</th><th>Src</th><th>AUC Relevance (Live)</th><th>Spearman Relevance</th><th>D-1 AUC</th><th>D-1 Spearman</th><th>Direction</th><th>mRMR Score</th><th class="bar-cell">Weight</th><th>Wt%</th></tr></thead><tbody>`;
+  let wtHTML=`<table class="ct"><thead><tr><th>Feature</th><th>Src</th><th>AUC Relevance</th><th>D-1 AUC</th><th>Direction</th><th>mRMR Score</th><th class="bar-cell">Weight</th><th>Wt%</th></tr></thead><tbody>`;
   for(const f of sorted){
     const tc=E.targetRelevance[f],m=E.mrmr[f],w=E.weights[f];
-    const sp=E.targetRelevanceSpearman?.[f];
     const dir=tc>=0?'<span style="color:var(--green)">↑</span>':'<span style="color:var(--red)">↓</span>';
     const bw=Math.round((w||0)/maxW*100),bc=(tc||0)>=0?'var(--green)':'var(--red)';
     const srcType=getFeatureSource(f);
     const src=srcType==='NSE'?'<span style="color:var(--cyan);font-size:9px;font-weight:700">NSE</span>':srcType==='Calc'?'<span style="color:var(--purple);font-size:9px;font-weight:700">Calc</span>':'<span style="color:var(--t3);font-size:9px">TV</span>';
     const todayR=E.targetRelevanceToday?.[f];
-    const todaySp=E.targetRelevanceTodaySpearman?.[f];
     const todayCell=todayR!=null&&!isNaN(todayR)?`<span style="color:${todayR>=0?'var(--green)':'var(--red)'};font-size:10px">${(todayR??0).toFixed(3)}</span>`:'—';
-    const spearmanCell=sp!=null&&isFinite(sp)?`<span style="color:${sp>=0?'var(--green)':'var(--red)'};font-size:10px">${sp.toFixed(3)}</span>`:'—';
-    const todaySpearmanCell=todaySp!=null&&isFinite(todaySp)?`<span style="color:${todaySp>=0?'var(--green)':'var(--red)'};font-size:10px">${todaySp.toFixed(3)}</span>`:'—';
     const _n=v=>isFinite(v)?v:0;
     const tcS=tc!=null&&isFinite(tc)?tc.toFixed(3):'—'; const scS=m&&m.score!=null&&isFinite(m.score)?m.score.toFixed(4):'—'; const wS=w!=null&&isFinite(w)?(w*100).toFixed(1):'—';
     wtHTML+=`<tr>
-      <td style="font-family:'Plus Jakarta Sans',sans-serif;font-weight:600;color:var(--t1)">${E.labels[f]||f}</td><td>${src}</td><td style="color:${(tc||0)>=0?'var(--green)':'var(--red)'};font-weight:600">${tcS}</td><td>${spearmanCell}</td><td>${todayCell}</td><td>${todaySpearmanCell}</td><td>${dir}</td><td style="font-weight:700">${scS}</td><td class="bar-cell"><span class="cb" style="width:${bw}%;background:${bc};opacity:.5"></span></td><td style="font-weight:800">${wS}%</td>
+      <td style="font-family:'Plus Jakarta Sans',sans-serif;font-weight:600;color:var(--t1)">${E.labels[f]||f}</td><td>${src}</td><td style="color:${(tc||0)>=0?'var(--green)':'var(--red)'};font-weight:600">${tcS}</td><td>${todayCell}</td><td>${dir}</td><td style="font-weight:700">${scS}</td><td class="bar-cell"><span class="cb" style="width:${bw}%;background:${bc};opacity:.5"></span></td><td style="font-weight:800">${wS}%</td>
     </tr>`;
   }
   wtHTML+='</tbody></table>';
@@ -6265,7 +6231,7 @@ async function initApp(){
         ACC_CORR=savedCorr;
       }else{
         ACC_CORR={
-          corr:{},dailyCorr:{},targetRelevanceSpearman:{},targetRelevanceTodaySpearman:{},sessions:0,learnSessions:0,dailySessions:0,lagPairs:[],corrSchema:CORR_SCHEMA
+          corr:{},dailyCorr:{},sessions:0,learnSessions:0,dailySessions:0,lagPairs:[],corrSchema:CORR_SCHEMA
         };
         console.log('INIT: reset incompatible correlation and snapshot state for the rolling daily-telemetry model.');
       }
