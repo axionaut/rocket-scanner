@@ -1,5 +1,5 @@
-const BUILD_TS='2026-07-02 10:28 IST'; // release build time (IST)
-const APP_VERSION=468; // Load Files reuses the remembered read-only folder handle when permitted.
+const BUILD_TS='2026-07-02 10:47 IST'; // release build time (IST)
+const APP_VERSION=469; // Load Files reports the source folder and recognized inputs.
 const GOOGLE_DRIVE_CLIENT_ID='1015012642264-oi2nelv3v90k3d39r994a6nelgjs2a56.apps.googleusercontent.com'; // Public OAuth Web Client ID.
 const HARD_FILTER_SCHEMA='structural_tradeability_v2';
 const STOCK_RUNWAY_CEILING_PCT=19.5; // Intentional owner-approved forward-catch strategy filter: excludes stocks already near their circuit band (or caps max entry) since a stock that has already used up its daily range is a poor pre-rocket buy. Active fallback when NSE price-band data is unavailable.
@@ -5484,7 +5484,7 @@ async function openUploadFolderPicker(){
         try{uploadHandle=await stored.getDirectoryHandle('Scanner Uploads');}catch(e){}
         const files=await filesFromDirectoryHandle(uploadHandle);
         if(files.length){
-          await processFiles(files);
+          await processFiles(files,uploadHandle.name);
           return true;
         }
       }catch(e){
@@ -5505,7 +5505,7 @@ async function openUploadFolderPicker(){
         showToast('No files found in the selected folder.',4000,true);
         return false;
       }
-      await processFiles(files);
+      await processFiles(files,uploadHandle.name);
       return true;
     }catch(e){
       if(e?.name!=='AbortError'){
@@ -6480,7 +6480,7 @@ async function processScannerUpload(scannerFile, mode, options={}){
   }
 }
 
-async function processFiles(files){
+async function processFiles(files,sourceLabel){
   if(!(await ensureDriveReadyForLoad())){
     setLoading(false);
     return;
@@ -6490,7 +6490,7 @@ async function processFiles(files){
   // the selected local files immediately, because the market does not wait for Drive.
   saveInputsInBackground(files);
   NSE_BHAV={};NSE_52W={};NSE_SURV={};NSE_BULK={};NSE_BLOCK={};NSE_PRICE_BAND={};
-  let tvFile=null,nseZip=null,holdFile=null,posFile=null,ordFile=null,tbFile=null,holidayFile=false;
+  let tvFile=null,nseZip=null,holdFile=null,posFile=null,ordFile=null,tbFile=null,holidayFile=false,holidayFileName='';
   for(const f of files){
     const name=inputNameLower(f.name);
     if(isReportsZipName(f.name)){nseZip=nseZip||f;continue;}
@@ -6503,7 +6503,7 @@ async function processFiles(files){
     if(name==='nse holidays.csv'){
       try{
         const text=await f.text();
-        if(detectNSE(f.name,text)==='holidays') holidayFile=true;
+        if(detectNSE(f.name,text)==='holidays'){holidayFile=true;holidayFileName=f.name;}
       }catch(e){console.warn('Could not parse NSE Holidays.csv:',f.name,e);}
       continue;
     }
@@ -6567,8 +6567,9 @@ async function processFiles(files){
     const posText=await posFile.text();
     const posHash=(function(t){let h=0;for(let i=0;i<t.length;i++){h=((h<<5)-h)+t.charCodeAt(i);h|=0;}return h;})(posText);
     const today=getSessionDate();
-    POSITIONS=isCurrentSessionFile(posFile)?parsePositions(posText):[];
-    try{FS.set(POS_STORE,{positions:POSITIONS,hash:posHash,sessionDate:today,sourceDate:inputFileSessionDate(posFile),stale:!isCurrentSessionFile(posFile)});}catch(e){}
+    const positionsCurrent=isCurrentSessionFile(posFile);
+    POSITIONS=positionsCurrent?parsePositions(posText):[];
+    try{FS.set(POS_STORE,{positions:POSITIONS,hash:posHash,sessionDate:today,sourceDate:inputFileSessionDate(posFile),stale:!positionsCurrent});}catch(e){}
   }
   if(ordFile){
     setMsg('Processing orders...');
@@ -6608,13 +6609,27 @@ async function processFiles(files){
   setMsg('Rendering rankings...');
   renderTradingDashboardNow();
   setLoading(false);
-  showToast('<strong>Rankings ready.</strong> Drive and brain saves continue in the background.',3500);
+  const loadedItems=[];
+  if(tvFile) loadedItems.push(tvFile.name);
+  if(nseZip) loadedItems.push(nseZip.name);
+  if(holdFile) loadedItems.push(holdFile.name);
+  if(posFile) loadedItems.push(posFile.name+(isCurrentSessionFile(posFile)?'':' (stale - ignored)'));
+  if(ordFile) loadedItems.push(ordFile.name);
+  if(tbFile) loadedItems.push(tbFile.name);
+  if(holidayFile) loadedItems.push(holidayFileName||'NSE Holidays.csv');
+  if(loadedItems.length){
+    const skipped=Math.max(0,files.length-loadedItems.length);
+    const from=sourceLabel?` from "${escHtml(sourceLabel)}"`:'';
+    showToast(`<strong>Loaded${from}:</strong> ${loadedItems.map(escHtml).join(' Â· ')} &mdash; ${loadedItems.length} recognised Â· ${skipped} skipped`,6000);
+  }
   saveBrainInBackground('Brain saved after file processing');
 }
 
 document.getElementById('fInDir').addEventListener('change',e=>{
   if(!e.target.files.length) return;
-  processFiles(Array.from(e.target.files)).catch(error=>{
+  const files=Array.from(e.target.files);
+  const sourceLabel=files[0]?.webkitRelativePath?.split(/[\\/]/)[0]||undefined;
+  processFiles(files,sourceLabel).catch(error=>{
     console.error('File input load failed',error);
     setLoading(false);
     showToast('Could not load the selected files: '+(error?.message||error),6000,true);
