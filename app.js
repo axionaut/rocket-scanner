@@ -1,5 +1,5 @@
-const BUILD_TS='2026-07-02 14:00 IST'; // release build time (IST)
-const APP_VERSION=472; // Empty Min Score uses default floor; remove fake F pill.
+const BUILD_TS='2026-07-02 14:47 IST'; // release build time (IST)
+const APP_VERSION=473; // Request folder write access with read fallback.
 const GOOGLE_DRIVE_CLIENT_ID='1015012642264-oi2nelv3v90k3d39r994a6nelgjs2a56.apps.googleusercontent.com'; // Public OAuth Web Client ID.
 const HARD_FILTER_SCHEMA='structural_tradeability_v2';
 const STOCK_RUNWAY_CEILING_PCT=19.5; // Intentional owner-approved forward-catch strategy filter: excludes stocks already near their circuit band (or caps max entry) since a stock that has already used up its daily range is a poor pre-rocket buy. Active fallback when NSE price-band data is unavailable.
@@ -630,9 +630,12 @@ const FS = (() => {
 
   async function requestLocalPermission(handle){
     if(!handle?.queryPermission||!handle?.requestPermission) return true;
-    const opts={mode:'read'};
-    if(await handle.queryPermission(opts)==='granted') return true;
-    return await handle.requestPermission(opts)==='granted';
+    const writeOpts={mode:'readwrite'};
+    if(await handle.queryPermission(writeOpts)==='granted') return 'readwrite';
+    if(await handle.requestPermission(writeOpts)==='granted') return 'readwrite';
+    const readOpts={mode:'read'};
+    if(await handle.queryPermission(readOpts)==='granted') return 'read';
+    return await handle.requestPermission(readOpts)==='granted'?'read':false;
   }
 
   async function getStoredUploadDirHandle(){
@@ -5518,7 +5521,7 @@ async function openUploadFolderPicker(){
       }
     }
     try{
-      const picked=await window.showDirectoryPicker({id:'rocket-scanner-uploads',mode:'read'});
+      const picked=await window.showDirectoryPicker({id:'rocket-scanner-uploads',mode:'readwrite'});
       let uploadHandle=picked;
       let localBrainHandle=picked;
       try{
