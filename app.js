@@ -1,5 +1,5 @@
-const BUILD_TS='2026-07-02 11:41 IST'; // release build time (IST)
-const APP_VERSION=470; // Loader checklist, manifest popover, and visible-rank sorting.
+const BUILD_TS='2026-07-02 11:53 IST'; // release build time (IST)
+const APP_VERSION=471; // Preserve chosen sort after rank-based top-20 cap.
 const GOOGLE_DRIVE_CLIENT_ID='1015012642264-oi2nelv3v90k3d39r994a6nelgjs2a56.apps.googleusercontent.com'; // Public OAuth Web Client ID.
 const HARD_FILTER_SCHEMA='structural_tradeability_v2';
 const STOCK_RUNWAY_CEILING_PCT=19.5; // Intentional owner-approved forward-catch strategy filter: excludes stocks already near their circuit band (or caps max entry) since a stock that has already used up its daily range is a poor pre-rocket buy. Active fallback when NSE price-band data is unavailable.
@@ -5336,15 +5336,14 @@ function applyFilters(){
   GEOMETRY_GATE_SUMMARY.velocityTilted=FILT.filter(s=>!s._geometryUnverified&&s.normalizedVelocityPotential>0).length;
   assignDisplayRanks(FILT);
 
-  applySort();
-
   // Hard cap at 20 (Zerodha basket limit).
   if(FILT.length>20){
-    FILT.sort((a,b)=>(a._rank??Infinity)-(b._rank??Infinity));
-    const capped=FILT.slice(0,20);
-    FILT.slice(20).forEach(x=>{hiddenReasons[x.symbol]='Outside current top-20 display cap';});
+    const rankSorted=[...FILT].sort((a,b)=>(a._rank??Infinity)-(b._rank??Infinity));
+    const capped=rankSorted.slice(0,20);
+    rankSorted.slice(20).forEach(x=>{hiddenReasons[x.symbol]='Outside current top-20 display cap';});
     FILT=capped;
   }
+  applySort();
   GEOMETRY_GATE_SUMMARY.finalRecommended=FILT.length;
   window._lastGeometryGateSummary={...GEOMETRY_GATE_SUMMARY};
 
