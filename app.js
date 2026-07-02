@@ -1,5 +1,5 @@
-const BUILD_TS='2026-07-02 14:47 IST'; // release build time (IST)
-const APP_VERSION=473; // Request folder write access with read fallback.
+const BUILD_TS='2026-07-02 16:11 IST'; // release build time (IST)
+const APP_VERSION=474; // Merge hydration checklist updates without downgrades.
 const GOOGLE_DRIVE_CLIENT_ID='1015012642264-oi2nelv3v90k3d39r994a6nelgjs2a56.apps.googleusercontent.com'; // Public OAuth Web Client ID.
 const HARD_FILTER_SCHEMA='structural_tradeability_v2';
 const STOCK_RUNWAY_CEILING_PCT=19.5; // Intentional owner-approved forward-catch strategy filter: excludes stocks already near their circuit band (or caps max entry) since a stock that has already used up its daily range is a poor pre-rocket buy. Active fallback when NSE price-band data is unavailable.
@@ -5804,7 +5804,7 @@ async function hydrateSessionCSVsFromWorkspace(){
     tbFile&&{name:'TRADEBOOK.csv'},holFile&&{name:'NSE Holidays.csv'},zipEntry?.file&&{name:'Reports-Daily-Multiple.zip'},
     scannerEntry?.file&&{name:'ALL NSE.csv'}
   ].filter(Boolean);
-  setFileLoadStatus('Drive',driveFiles,'not in Drive');
+  mergeFileLoadStatus('Drive',driveFiles,'not in Drive');
   if(holFile?.text){parseNSEHolidays(holFile.text);updateFileLoadStatus('NSE Holidays.csv','loaded');}
   // Parse NSE ZIP to populate NSE_BHAV, NSE_52W, NSE_SURV etc. for this session
   if(zipEntry?.file&&typeof JSZip!=='undefined'){
@@ -6253,14 +6253,42 @@ function getExpectedInputFiles(){
   return {canonical,nse,all:[...canonical,...nse]};
 }
 function fileStatusClock(){const c=istClock();return String(c.h).padStart(2,'0')+':'+String(c.m).padStart(2,'0')+' IST';}
+function getReadableStatusNames(files=[]){
+  return (files||[]).map(f=>f?.name||f?.path||f).filter(Boolean);
+}
+function isExpectedStatusPresent(item,names){
+  const hasZip=names.some(name=>isReportsZipName(name));
+  return item.parent?hasZip:names.some(name=>item.match?.(name));
+}
 function setFileLoadStatus(source,files=[],missingNote='not in folder'){
   const expected=getExpectedInputFiles();
-  const names=(files||[]).map(f=>f?.name||f?.path||f).filter(Boolean);
-  const hasZip=names.some(name=>isReportsZipName(name));
+  const names=getReadableStatusNames(files);
   FILE_LOAD_STATUS={source:source||null,when:fileStatusClock(),files:expected.all.map(item=>{
-    const present=item.parent?hasZip:names.some(name=>item.match?.(name));
+    const present=isExpectedStatusPresent(item,names);
     return {key:item.key,label:item.label,parent:item.parent||null,state:present?'pending':'missing',note:present?'':missingNote};
   })};
+  renderFileLoadStatus();
+}
+function mergeFileLoadStatus(source,files=[],missingNote='not in Drive'){
+  const names=getReadableStatusNames(files);
+  if(!FILE_LOAD_STATUS.files?.length){
+    setFileLoadStatus(source,files,missingNote);
+    return;
+  }
+  if(!names.length){
+    renderFileLoadStatus();
+    return;
+  }
+  const expected=getExpectedInputFiles();
+  const byKey=new Map(FILE_LOAD_STATUS.files.map(item=>[item.key,item]));
+  expected.all.forEach(item=>{
+    if(!isExpectedStatusPresent(item,names)) return;
+    const existing=byKey.get(item.key);
+    if(existing){existing.state='pending';existing.note='';}
+    else FILE_LOAD_STATUS.files.push({key:item.key,label:item.label,parent:item.parent||null,state:'pending',note:''});
+  });
+  FILE_LOAD_STATUS.source=source||FILE_LOAD_STATUS.source;
+  FILE_LOAD_STATUS.when=fileStatusClock();
   renderFileLoadStatus();
 }
 function updateFileLoadStatus(key,state,note=''){
