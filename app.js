@@ -1,5 +1,5 @@
-const BUILD_TS='2026-07-02 11:53 IST'; // release build time (IST)
-const APP_VERSION=471; // Preserve chosen sort after rank-based top-20 cap.
+const BUILD_TS='2026-07-02 14:00 IST'; // release build time (IST)
+const APP_VERSION=472; // Empty Min Score uses default floor; remove fake F pill.
 const GOOGLE_DRIVE_CLIENT_ID='1015012642264-oi2nelv3v90k3d39r994a6nelgjs2a56.apps.googleusercontent.com'; // Public OAuth Web Client ID.
 const HARD_FILTER_SCHEMA='structural_tradeability_v2';
 const STOCK_RUNWAY_CEILING_PCT=19.5; // Intentional owner-approved forward-catch strategy filter: excludes stocks already near their circuit band (or caps max entry) since a stock that has already used up its daily range is a poor pre-rocket buy. Active fallback when NSE price-band data is unavailable.
@@ -13,6 +13,7 @@ const HARVEST_TRIGGER_CONFIDENCE=0.60; // Prefer a target that prior picks commo
 const HARVEST_MIN_SAMPLES=8;
 const ENTRY_FADE_RETENTION_FLOOR=70; // Below this, a pullback through the target zone is treated as a fading entry.
 const ENTRY_FADE_SEVERE_TARGET_MULT=2; // A pullback twice the harvest target is too much give-back to chase.
+const MIN_SCORE_DEFAULT=70; // Empty Min Score field still means the visible default floor.
 const SL_HARD_CAP_PCT=3.0; // Maximum stop distance used for display, sizing, export references and entry geometry.
 const GEOMETRY_MIN_RR=2.0; // Require at least 2x headroom-to-risk before recommending a fresh entry.
 const VELOCITY_WEIGHT=0.3; // Modest ranking tilt toward catchable room to upper circuit among geometry survivors.
@@ -4662,8 +4663,14 @@ function applyVelocityPotentialRanking(rows){
     s.rankScore=base*(1+VELOCITY_WEIGHT*pct);
   });
 }
+function getMinScoreFloor(){
+  const raw=String(document.getElementById('fMinScore')?.value??'').trim();
+  if(raw==='') return MIN_SCORE_DEFAULT;
+  const parsed=parseFloat(raw);
+  return Number.isFinite(parsed)?parsed:MIN_SCORE_DEFAULT;
+}
 function getFilterBarReason(s){
-  const minScore=parseFloat(document.getElementById('fMinScore')?.value)||0;
+  const minScore=getMinScoreFloor();
   const fvol=parseFloat(document.getElementById('fVol')?.value)||0;
   const fMinMarketCap=parseFloat(document.getElementById('fMinMarketCap')?.value)||0;
   const _fMin1Dv=document.getElementById('fMin1D')?.value||'';
@@ -5379,14 +5386,12 @@ function applyFilters(){
 function renderStatusBar(){
   const total=ALL.length,shown=FILT.length;
   const tags=[];
-  const minScore2=parseFloat(document.getElementById('fMinScore')?.value)||0;
-  const fscore=4;
+  const minScore2=getMinScoreFloor();
   const fvol2=parseFloat(document.getElementById('fVol')?.value)||0;
   const fMinMarketCap2=parseFloat(document.getElementById('fMinMarketCap')?.value)||0;
   const _fMin1Dv2=document.getElementById('fMin1D')?.value||'';
   const fMin1D=_fMin1Dv2!==''?parseFloat(_fMin1Dv2):-Infinity;
   if(ENGINE_DATA?.hasRecommendationEvidence&&minScore2>0)tags.push('Score≥'+minScore2);
-  if(fscore>0)tags.push('F≥'+fscore);
   if(fMin1D>-Infinity)tags.push('1D≥'+fMin1D+'%');
   if(fvol2>0){const n=fvol2;tags.push('Vol≥'+(n>=1e6?(n/1e6).toFixed(1)+'M':n>=1e3?(n/1e3).toFixed(0)+'K':n));}
   if(fMinMarketCap2>0)tags.push('MCap≥₹'+fV(fMinMarketCap2));
