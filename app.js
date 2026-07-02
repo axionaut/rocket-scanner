@@ -1,5 +1,5 @@
-const BUILD_TS='2026-07-02 09:44 IST'; // release build time (IST)
-const APP_VERSION=467; // Gated low-positive evidence stays neutral until features survive sample gates.
+const BUILD_TS='2026-07-02 10:28 IST'; // release build time (IST)
+const APP_VERSION=468; // Load Files reuses the remembered read-only folder handle when permitted.
 const GOOGLE_DRIVE_CLIENT_ID='1015012642264-oi2nelv3v90k3d39r994a6nelgjs2a56.apps.googleusercontent.com'; // Public OAuth Web Client ID.
 const HARD_FILTER_SCHEMA='structural_tradeability_v2';
 const STOCK_RUNWAY_CEILING_PCT=19.5; // Intentional owner-approved forward-catch strategy filter: excludes stocks already near their circuit band (or caps max entry) since a stock that has already used up its daily range is a poor pre-rocket buy. Active fallback when NSE price-band data is unavailable.
@@ -633,6 +633,21 @@ const FS = (() => {
     return await handle.requestPermission(opts)==='granted';
   }
 
+  async function getStoredUploadDirHandle(){
+    try{
+      const handle=await getLocalStore(LOCAL_HANDLE_KEY);
+      if(!handle) return null;
+      const ok=await requestLocalPermission(handle);
+      if(!ok) return null;
+      _localDirHandle=handle;
+      updateFolderUI();
+      return handle;
+    }catch(e){
+      console.warn('Stored upload folder unavailable',e);
+      return null;
+    }
+  }
+
   async function writeLocalBrainFile(data){
     if(!_localDirHandle||!data||typeof data!=='object') return false;
     try{
@@ -738,7 +753,7 @@ const FS = (() => {
   function hasFolder(){ return isConnected(); }
   function hasLocalBrainFolder(){ return !!_localDirHandle; }
 
-  return {init,connect,needsReconnect,isConfigured,setClientId,isConnected,read,readJsonFile,writeJsonFile,readUploadText,readUploadFile,saveUploadedInputs,write,set,setMultiple,get,load,loadFromDisk,ensureLoaded,refreshCloudIndex,verifyConnection,getBrain,reset,folderName,hasFolder,setLocalDirectoryHandle,hasLocalBrainFolder};
+  return {init,connect,needsReconnect,isConfigured,setClientId,isConnected,read,readJsonFile,writeJsonFile,readUploadText,readUploadFile,saveUploadedInputs,write,set,setMultiple,get,load,loadFromDisk,ensureLoaded,refreshCloudIndex,verifyConnection,getBrain,reset,folderName,hasFolder,setLocalDirectoryHandle,getStoredUploadDirHandle,hasLocalBrainFolder};
 })();
 
 function updateFolderUI(){
@@ -5462,6 +5477,20 @@ async function filesFromDirectoryHandle(dirHandle){
 
 async function openUploadFolderPicker(){
   if(window.showDirectoryPicker){
+    const stored=await FS.getStoredUploadDirHandle();
+    if(stored){
+      try{
+        let uploadHandle=stored;
+        try{uploadHandle=await stored.getDirectoryHandle('Scanner Uploads');}catch(e){}
+        const files=await filesFromDirectoryHandle(uploadHandle);
+        if(files.length){
+          await processFiles(files);
+          return true;
+        }
+      }catch(e){
+        console.warn('Stored upload folder could not be reused',e);
+      }
+    }
     try{
       const picked=await window.showDirectoryPicker({id:'rocket-scanner-uploads',mode:'read'});
       let uploadHandle=picked;
