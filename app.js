@@ -1,5 +1,5 @@
-const BUILD_TS='2026-07-02 09:12 IST'; // release build time (IST)
-const APP_VERSION=466; // Latest Session uses same-date tradebook realized rows for delivery sell cost basis.
+const BUILD_TS='2026-07-02 09:44 IST'; // release build time (IST)
+const APP_VERSION=467; // Gated low-positive evidence stays neutral until features survive sample gates.
 const GOOGLE_DRIVE_CLIENT_ID='1015012642264-oi2nelv3v90k3d39r994a6nelgjs2a56.apps.googleusercontent.com'; // Public OAuth Web Client ID.
 const HARD_FILTER_SCHEMA='structural_tradeability_v2';
 const STOCK_RUNWAY_CEILING_PCT=19.5; // Intentional owner-approved forward-catch strategy filter: excludes stocks already near their circuit band (or caps max entry) since a stock that has already used up its daily range is a poor pre-rocket buy. Active fallback when NSE price-band data is unavailable.
@@ -2854,6 +2854,11 @@ async function runEngine(raw, sessionTag, options={}){
   const scoringRows=learningUniverse.map(d=>scoringFeatureRows[d.symbol]||{});
   // Feature selection uses greedy mRMR: rank-relevance minus same-day cross-sectional redundancy.
   const {mrmr,selectedFeatures,weights}=selectRocketRelevanceFeatures(FEATS,targetRelevance,snapshotLearning.featureStability,filtered.map(d=>scoringFeatureRows[d.symbol]||{}));
+  const selectedWeightTotal=selectedFeatures.reduce((sum,feature)=>sum+(weights[feature]||0),0);
+  const scoringUsable=hasRecommendationEvidence&&selectedFeatures.length>0&&selectedWeightTotal>0;
+  const scoreGatedReason=hasRecommendationEvidence&&!scoringUsable
+    ? `learning gated: only ${todayRocketSet.size} rocket-positives today (need 10) - neutral scores`
+    : '';
   const outcomeReliabilityModel=buildOutcomeReliabilityModel(FEATS,weights);
 
   const pctls={};
@@ -2869,16 +2874,16 @@ async function runEngine(raw, sessionTag, options={}){
         :(targetRelevance[f]>=0?p:(1-p));
       rawScore+=w*directedPercentile;
     }
-    const learnedMrmrScore=hasRecommendationEvidence?Math.round(rawScore*1000)/10:null;
+    const learnedMrmrScore=scoringUsable?Math.round(rawScore*1000)/10:null;
     const currentFeatures=Object.fromEntries(FEATS.map(f=>[f,scoringFeatureRows[d.symbol]?.[f]??null]));
     // Outcome learning remains visible as confidence evidence only. It never alters Rocket Score or rank.
-    const outcomeReliability=hasRecommendationEvidence?getOutcomeReliabilityAdjustment(currentFeatures,outcomeReliabilityModel,weights):{delta:0,confidence:0,matched:0};
+    const outcomeReliability=scoringUsable?getOutcomeReliabilityAdjustment(currentFeatures,outcomeReliabilityModel,weights):{delta:0,confidence:0,matched:0};
     // Warm-up has no predictive evidence yet. A neutral 50 keeps every selected
     // stock equally weighted for allocation without pretending it is a learned score.
     // Regime exposure dial: in learned mode, scale the score by today's market breadth so
     // recommendations dampen (and fully suspend at extreme weakness) on hostile days.
-    const regimeFactor=hasRecommendationEvidence?regimeExposureFactor(marketBreadth):1;
-    const score=hasRecommendationEvidence?Math.round(learnedMrmrScore*regimeFactor*10)/10:WARMUP_NEUTRAL_SCORE;
+    const regimeFactor=scoringUsable?regimeExposureFactor(marketBreadth):1;
+    const score=scoringUsable?Math.round(learnedMrmrScore*regimeFactor*10)/10:WARMUP_NEUTRAL_SCORE;
 
     const vol=(K.volume?d[K.volume]:null);
     const flags=[];
@@ -2985,7 +2990,7 @@ async function runEngine(raw, sessionTag, options={}){
         :(targetRelevance[f]>=0?rank:(1-rank));
       rs+=w*directedRank;
     }
-    SCORE_MAP[d.symbol]=hasRecommendationEvidence?Math.round(rs*regimeExposureFactor(marketBreadth)*1000)/10:WARMUP_NEUTRAL_SCORE;
+    SCORE_MAP[d.symbol]=scoringUsable?Math.round(rs*regimeExposureFactor(marketBreadth)*1000)/10:WARMUP_NEUTRAL_SCORE;
   });
   parsed.forEach(d=>{d.rocketScore=SCORE_MAP[d.symbol]??null;});
   const interactionFeatureKeys=new Set([...staticInteractionDefs.map(def=>def.key),...breadthInteractionDefs.map(def=>def.key)]);
@@ -3007,7 +3012,7 @@ async function runEngine(raw, sessionTag, options={}){
   };
   ENGINE_DATA={targetRelevance,targetRelevanceToday,mrmr,weights,features:FEATS,selectedFeatures,labels:LABELS,top10Feats,accSessions:ACC_CORR?.sessions||0,laggedNote:laggedNote||'',
     marketBreadth:marketBreadth,
-    regimeExposureFactor:hasRecommendationEvidence?regimeExposureFactor(marketBreadth):1,
+    regimeExposureFactor:scoringUsable?regimeExposureFactor(marketBreadth):1,
     featureStability,
     targetRelevanceByLag:snapshotLearning.targetRelevanceByLag||{},
     stabilitySummary,
@@ -3022,7 +3027,7 @@ async function runEngine(raw, sessionTag, options={}){
     deltaFeatureSchema:DELTA_FEATURE_SCHEMA,
     deltaOnlyFeatureCount:FEATS.length,
     excludedSlowFeatureCount:0,
-    useFreshCorr, hasRecommendationEvidence, currentUploadLearned, freshSignalCount,
+    useFreshCorr, hasRecommendationEvidence:scoringUsable, scoreGatedReason, currentUploadLearned, freshSignalCount,
     scoringSource,
     useAccCorr: snapshotLearning.hadPriorCorr,
     snapshotElapsedMinutes:null,
@@ -3235,6 +3240,8 @@ function renderStats(){
     ? `${scoreMax} top · ${scoreMin} low`
     : `warm-up · neutral ${WARMUP_NEUTRAL_SCORE.toFixed(1)} · equal allocation`;
 
+  const effectiveScoreSpreadDetail=ENGINE_DATA?.scoreGatedReason||scoreSpreadDetail;
+
   // Compute top sector by breadth
   const secBreadths={};
   ALL.forEach(s=>{
@@ -3280,7 +3287,7 @@ function renderStats(){
   document.getElementById('statsBar').innerHTML=`
     <div class="st"><div class="st-l">Eligible Universe</div><div class="st-v">${t.toLocaleString()}</div><div class="st-d">of ${totalParsed.toLocaleString()} parsed · <span style="color:var(--green)">${bull} up</span> · <span style="color:var(--red)">${t-bull} down/flat</span></div></div>
     ${slTgtCard}
-    <div class="st"><div class="st-l">Score Spread</div><div class="st-v">${scoreSpread}</div><div class="st-d">${scoreSpreadDetail}</div></div>
+    <div class="st"><div class="st-l">Score Spread</div><div class="st-v">${scoreSpread}</div><div class="st-d">${effectiveScoreSpreadDetail}</div></div>
     <div class="st"><div class="st-l">Top Sector</div><div class="st-v" style="font-size:15px;color:var(--green)">${topSec}</div><div class="st-d">${topSecPct.toFixed(0)}% advancing</div></div>
     <div class="st"><div class="st-l">Breadth</div><div class="st-v" style="color:var(--cyan)">${ENGINE_DATA.marketBreadth!=null?(ENGINE_DATA.marketBreadth*100).toFixed(0):(bull/t*100).toFixed(0)}%</div><div class="st-d">${ENGINE_DATA.regimeExposureFactor!=null&&ENGINE_DATA.regimeExposureFactor<1?`exposure ${(ENGINE_DATA.regimeExposureFactor*100).toFixed(0)}% · scores dampened`:'exposure 100% · full'} · ${ENGINE_DATA.accSessions||0} learned horizons</div></div>${bookedCard}`;
 
