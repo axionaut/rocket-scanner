@@ -1,5 +1,5 @@
-const BUILD_TS='2026-07-02 10:47 IST'; // release build time (IST)
-const APP_VERSION=469; // Load Files reports the source folder and recognized inputs.
+const BUILD_TS='2026-07-02 11:41 IST'; // release build time (IST)
+const APP_VERSION=470; // Loader checklist, manifest popover, and visible-rank sorting.
 const GOOGLE_DRIVE_CLIENT_ID='1015012642264-oi2nelv3v90k3d39r994a6nelgjs2a56.apps.googleusercontent.com'; // Public OAuth Web Client ID.
 const HARD_FILTER_SCHEMA='structural_tradeability_v2';
 const STOCK_RUNWAY_CEILING_PCT=19.5; // Intentional owner-approved forward-catch strategy filter: excludes stocks already near their circuit band (or caps max entry) since a stock that has already used up its daily range is a poor pre-rocket buy. Active fallback when NSE price-band data is unavailable.
@@ -103,7 +103,7 @@ function updateModeUI(){
     minTurn.title='Min turnover (Price × Volume) in ₹. Blank = no filter.';
   }
 }
-let ALL=[],FILT=[],PG=1,PGSZ=100,SCOL='rocketScore',SDIR=-1;
+let ALL=[],FILT=[],PG=1,PGSZ=100,SCOL='_rank',SDIR=1;
 let _tvLoadedThisSession=false; // true once a TV CSV has been processed this session
 let _scanSavedDate=null; // date string (YYYY-MM-DD) of the brain-restored scan, set on init
 let SCORE_MAP={}; // {symbol → rocketScore} for ALL parsed stocks including filtered-out ones
@@ -119,6 +119,7 @@ let GEOMETRY_GATE_SUMMARY={input:0,gatedOut:0,unverifiedFallback:0,finalRecommen
 let SELECTED=new Set(); // symbols selected for basket — recomputed from FILT each applyFilters
 let SHOW_FILTERED_CANDIDATES=false;
 let KEEP_FILTER_OVERRIDES=new Set();
+let FILE_LOAD_STATUS={source:null,when:null,files:[]};
 const SCANNER_STORE='rs_filters';
 const SHARED_FILTER_STORE='rs_filters_shared';
 const ALL_STORE='rs_data';
@@ -4488,6 +4489,7 @@ function getCols(){
   const intervalLabel='Vs D-1 %';
   const fixed=[
     {key:'chk',label:'',s:0},
+    {key:'_rank',label:'#',s:1},
     {key:'rocketScore',label:'Score',s:1},{key:'symbol',label:'Symbol',s:1},
     {key:'price',label:'Price ₹',s:1},{key:'snapshotChange',label:intervalLabel,s:1},
     {key:'priceChange',label:'Chg 1D%',s:1},{key:'velocityPotential',label:'Room%',s:1},{key:'delivPct',label:'Deliv%',s:1},
@@ -4546,6 +4548,23 @@ function toggleStock(sym,checked){
   if(checked)SELECTED.add(sym);else SELECTED.delete(sym);
   updateSelectAll();
   recomputeAlloc();
+}
+function assignDisplayRanks(rows){
+  [...rows].sort((a,b)=>{
+    const ar=a.rankScore??a.rocketScore??-Infinity;
+    const br=b.rankScore??b.rocketScore??-Infinity;
+    if(br!==ar) return br-ar;
+    const rs=(b.rocketScore??-Infinity)-(a.rocketScore??-Infinity);
+    if(rs) return rs;
+    return String(a.symbol||'').localeCompare(String(b.symbol||''));
+  }).forEach((s,i)=>{s._rank=i+1;});
+}
+function rankTitle(s){
+  const score=isFinite(s.rocketScore)?Number(s.rocketScore).toFixed(1):'—';
+  if(s._geometryUnverified) return `#${s._rank} — score ${score} · room unverified, no tilt`;
+  const pct=Number(s.normalizedVelocityPotential)||0;
+  const factor=1+VELOCITY_WEIGHT*pct;
+  return `#${s._rank} — score ${score} × ${factor.toFixed(2)} room tilt`;
 }
 
 // ── Score-weighted allocation across selected stocks ──
@@ -5198,6 +5217,7 @@ function renderTable(){
         : '<span style="color:var(--t3);font-size:11px">â€”</span>';
     let cells=`
       <td style="text-align:center"><input type="checkbox" ${isSelected?'checked':''} ${s._filterPreview?'disabled':''} style="width:14px;height:14px;accent-color:var(--amber);cursor:${s._filterPreview?'not-allowed':'pointer'}" onchange="toggleStock('${s.symbol}',this.checked)"></td>
+      <td title="${escHtml(rankTitle(s))}" style="font-family:'DM Mono',monospace;font-weight:800;color:var(--t1);text-align:right">${s._rank??'—'}</td>
       <td><span class="sc-m" title="${scoreTitle}">${scoreText}</span></td>
       <td style="font-family:'Plus Jakarta Sans',sans-serif"><div style="font-weight:700;font-size:13px;color:var(--t1)">${s.symbol}${(()=>{const sv=s.seen||0;if(!sv) return '';return`<sub style="font-size:11px;color:var(--amber);font-weight:700;margin-left:3px;font-family:'DM Mono',monospace" title="Seen ${sv}× today">${sv}×</sub>`;})()}${filterBadge}${filterAction}${s._isTopUp?`<span style="font-size:8px;background:rgba(251,146,60,.15);color:var(--fire);border-radius:4px;padding:1px 5px;margin-left:5px;font-weight:700;vertical-align:middle">↑ TOP-UP</span>`:''}${(()=>{const c=Number(s.outcomeReliability||0),n=Number(s.outcomeEvidence||0);if(!(c>0)||!(n>0)) return '';const pct=Math.round(c*100);return `<span style="font-size:8px;background:rgba(167,139,250,.14);color:var(--purple);border-radius:4px;padding:1px 5px;margin-left:5px;font-weight:700;vertical-align:middle" title="Outcome-pattern confidence only. It does not change Rocket Score or rank. ${n} historical matches.">◉ ${pct}% CONF</span>`;})()}${(()=>{if(!s.isSurv) return '';const labels=(s.survRules||[]).map(k=>{const r=SURV_CUSTOM_RULES.find(x=>x.key===k);return r?r.label:k;}).join(' · ');return `<span style="font-size:8px;background:rgba(239,68,68,.15);color:var(--red);border-radius:4px;padding:1px 5px;margin-left:5px;font-weight:700;vertical-align:middle" title="NSE Surveillance: ${escHtml(labels)}">⚠ SURV</span>`;})()}</div><div style="font-size:9px;color:${s._filterPreview?'var(--amber)':'var(--t3)'};max-width:220px;overflow:hidden;text-overflow:ellipsis">${s._filterPreview||s._forceKept?escHtml(s._filterReason||'filtered'):(s.name+(s._isTopUp&&s._heldAvg?` · avg ${fmtINR(s._heldAvg)}`:''))}</div></td>
       <td>${fmtINR(s.price)}</td>
@@ -5257,9 +5277,6 @@ function applySort(){
       const fk=col.substring(6);
       va=a._features?a._features[fk]:null;
       vb=b._features?b._features[fk]:null;
-    } else if(col==='rocketScore'&&SDIR<0){
-      va=a.rankScore??a.rocketScore;
-      vb=b.rankScore??b.rocketScore;
     } else {
       va=a[col];vb=b[col];
     }
@@ -5275,7 +5292,7 @@ function toggleFilters(){
   if(a) a.textContent=collapsed?'▶':'▼';
 }
 function applyFilters(){
-  ALL.forEach(x=>{delete x._filterReason;delete x._filterPreview;delete x._forceKept;delete x._isTopUp;delete x._heldAvg;delete x._heldQty;delete x._topUpGain;delete x._isHeldRisk;delete x._heldDrop;delete x._geometryChecked;delete x._geometryUnverified;delete x._geometryBlocked;delete x.velocityPotential;delete x.normalizedVelocityPotential;delete x.rankScore;delete x.geometryRiskPct;delete x.geometryRequiredPct;delete x.geometryRR;});
+  ALL.forEach(x=>{delete x._filterReason;delete x._filterPreview;delete x._forceKept;delete x._isTopUp;delete x._heldAvg;delete x._heldQty;delete x._topUpGain;delete x._isHeldRisk;delete x._heldDrop;delete x._geometryChecked;delete x._geometryUnverified;delete x._geometryBlocked;delete x.velocityPotential;delete x.normalizedVelocityPotential;delete x.rankScore;delete x._rank;delete x.geometryRiskPct;delete x.geometryRequiredPct;delete x.geometryRR;});
   const hiddenReasons={};
   const visible=[];
   ALL.forEach(x=>{
@@ -5317,11 +5334,13 @@ function applyFilters(){
   applyVelocityPotentialRanking(FILT);
   GEOMETRY_GATE_SUMMARY.unverifiedFallback=FILT.filter(s=>s._geometryUnverified).length;
   GEOMETRY_GATE_SUMMARY.velocityTilted=FILT.filter(s=>!s._geometryUnverified&&s.normalizedVelocityPotential>0).length;
+  assignDisplayRanks(FILT);
 
   applySort();
 
   // Hard cap at 20 (Zerodha basket limit).
   if(FILT.length>20){
+    FILT.sort((a,b)=>(a._rank??Infinity)-(b._rank??Infinity));
     const capped=FILT.slice(0,20);
     FILT.slice(20).forEach(x=>{hiddenReasons[x.symbol]='Outside current top-20 display cap';});
     FILT=capped;
@@ -5443,7 +5462,10 @@ function toggleRequiredFilesPopover(){
   if(isHidden){
     pop.style.display='block';
     const content=document.getElementById('requiredFilesPopoverContent');
-    if(!content.innerHTML){
+    if(FILE_LOAD_STATUS.files?.length){
+      const src=FILE_LOAD_STATUS.source==='Drive'?'☁ Drive · restored':'📁 "'+escHtml(FILE_LOAD_STATUS.source||'Scanner Uploads')+'" ·';
+      content.innerHTML=`<div style="font-size:12px;color:var(--t1);margin-bottom:8px;font-weight:700">${src} ${escHtml(FILE_LOAD_STATUS.when||'')}</div>${renderFileStatusList()}`;
+    }else if(!content.innerHTML){
       const grid=document.getElementById('requiredFilesGrid');
       if(grid) content.innerHTML=grid.innerHTML;
     }
@@ -5770,7 +5792,13 @@ async function hydrateSessionCSVsFromWorkspace(){
     FS.readUploadFile('ALL NSE.csv'),
   ]);
   const [holdFile,posFile,ordFile,tbFile,holFile]=csvFiles;
-  if(holFile?.text) parseNSEHolidays(holFile.text);
+  const driveFiles=[
+    holdFile&&{name:'Holdings.csv'},posFile&&{name:'Positions.csv'},ordFile&&{name:'Orders.csv'},
+    tbFile&&{name:'TRADEBOOK.csv'},holFile&&{name:'NSE Holidays.csv'},zipEntry?.file&&{name:'Reports-Daily-Multiple.zip'},
+    scannerEntry?.file&&{name:'ALL NSE.csv'}
+  ].filter(Boolean);
+  setFileLoadStatus('Drive',driveFiles,'not in Drive');
+  if(holFile?.text){parseNSEHolidays(holFile.text);updateFileLoadStatus('NSE Holidays.csv','loaded');}
   // Parse NSE ZIP to populate NSE_BHAV, NSE_52W, NSE_SURV etc. for this session
   if(zipEntry?.file&&typeof JSZip!=='undefined'){
     try{
@@ -5785,11 +5813,13 @@ async function hydrateSessionCSVsFromWorkspace(){
           }
           if(fn.endsWith('.csv')){
             const text=await entry.async('string');
-            detectNSE(fn,text);
+            const type=detectNSE(fn,text);
+            if(type) updateFileLoadStatusByNseType(type,'loaded');
           }
         }
       }
       await _hydrateZipEntries(outerZip);
+      updateFileLoadStatus('Reports-Daily-Multiple.zip','loaded');
     }catch(e){console.warn('hydrateSessionCSVsFromWorkspace: ZIP parse failed',e);}
   }
   let scannerHydrated=false;
@@ -5799,21 +5829,26 @@ async function hydrateSessionCSVsFromWorkspace(){
       console.error('hydrateSessionCSVsFromWorkspace: ALL NSE parse failed',e);
       showToast('Stored ALL NSE.csv could not be loaded: '+(e?.message||e),6000,true);
     }
+    if(scannerHydrated) updateFileLoadStatus('ALL NSE.csv','loaded');
   }
   const updates={};
   if(holdFile?.text){
     HOLDINGS=parseHoldings(holdFile.text);
     updates[HOLD_STORE]={holdings:HOLDINGS,costMap:HOLD_COST_MAP,sourcePath:holdFile.path,lastModified:holdFile.lastModified};
+    updateFileLoadStatus('Holdings.csv','loaded');
   }
   if(posFile?.text){
     const today=getSessionDate();
-    POSITIONS=isCurrentSessionFile(posFile)?parsePositions(posFile.text):[];
-    updates[POS_STORE]={positions:POSITIONS,sessionDate:today,sourcePath:posFile.path,lastModified:posFile.lastModified,sourceDate:inputFileSessionDate(posFile),stale:!isCurrentSessionFile(posFile)};
+    const positionsCurrent=isCurrentSessionFile(posFile);
+    POSITIONS=positionsCurrent?parsePositions(posFile.text):[];
+    updates[POS_STORE]={positions:POSITIONS,sessionDate:today,sourcePath:posFile.path,lastModified:posFile.lastModified,sourceDate:inputFileSessionDate(posFile),stale:!positionsCurrent};
+    updateFileLoadStatus('Positions.csv',positionsCurrent?'loaded':'stale',positionsCurrent?'':'stale - ignored');
   }
   if(ordFile?.text){
     ORDERS_TODAY=parseOrders(ordFile.text);
     if(ORDERS_TODAY) ORDERS_TODAY._loadedThisSession=true;
     updates[ORDERS_STORE]={orders:ORDERS_TODAY,sourcePath:ordFile.path,lastModified:ordFile.lastModified};
+    updateFileLoadStatus('Orders.csv','loaded');
   }
   if(tbFile?.text){
     const tb=parseTradebook(tbFile.text);
@@ -5824,6 +5859,7 @@ async function hydrateSessionCSVsFromWorkspace(){
       if(selected.persist) updates[TRADEBOOK_STORE]=selected.persist;
       if(selected.meta) FS.set(TRADEBOOK_META_STORE,selected.meta);
     }
+    updateFileLoadStatus('TRADEBOOK.csv','loaded');
   }
   syncExecutedRecommendedEntries();
   const updateCount=Object.keys(updates).length;
@@ -6187,6 +6223,58 @@ function setLoading(on,msg){
   if(msg) setMsg(msg);
   if(el) el.classList.toggle('on',!!on);
 }
+function getExpectedInputFiles(){
+  const nd=nseDate();
+  const zipKey='Reports-Daily-Multiple.zip';
+  const canonical=[
+    {key:'ALL NSE.csv',label:'📈 ALL NSE.csv',match:name=>isScannerCsvName(name)},
+    {key:zipKey,label:'🏛 Reports-Daily-Multiple.zip',match:name=>isReportsZipName(name)},
+    {key:'Holdings.csv',label:'🛡 Holdings.csv',match:name=>isExactCsvName(name,'Holdings.csv')},
+    {key:'Positions.csv',label:'📊 Positions.csv',match:name=>isExactCsvName(name,'Positions.csv')},
+    {key:'Orders.csv',label:'🧾 Orders.csv',match:name=>isExactCsvName(name,'Orders.csv')},
+    {key:'TRADEBOOK.csv',label:'📒 TRADEBOOK.csv',match:name=>isExactCsvName(name,'TRADEBOOK.csv')},
+    {key:'NSE Holidays.csv',label:'📅 NSE Holidays.csv',match:name=>isExactCsvName(name,'NSE Holidays.csv')},
+  ];
+  const nse=[
+    {key:'block.csv',label:'block.csv',parent:zipKey,nseType:'block'},
+    {key:'bulk.csv',label:'bulk.csv',parent:zipKey,nseType:'bulk'},
+    {key:'CM_52_wk_High_low_'+nd.ddmmyyyy+'.csv',label:'CM_52_wk_High_low_'+nd.ddmmyyyy+'.csv',parent:zipKey,nseType:'52w'},
+    {key:'REG1_IND'+nd.ddmmyy+'.csv',label:'REG1_IND'+nd.ddmmyy+'.csv',parent:zipKey,nseType:'surv'},
+    {key:'sec_bhavdata_full_'+nd.ddmmyyyy+'.csv',label:'sec_bhavdata_full_'+nd.ddmmyyyy+'.csv',parent:zipKey,nseType:'bhav'},
+    {key:'sec_list_'+nd.ddmmyyyy+'.csv',label:'sec_list_'+nd.ddmmyyyy+'.csv',parent:zipKey,nseType:'price_band'},
+  ];
+  return {canonical,nse,all:[...canonical,...nse]};
+}
+function fileStatusClock(){const c=istClock();return String(c.h).padStart(2,'0')+':'+String(c.m).padStart(2,'0')+' IST';}
+function setFileLoadStatus(source,files=[],missingNote='not in folder'){
+  const expected=getExpectedInputFiles();
+  const names=(files||[]).map(f=>f?.name||f?.path||f).filter(Boolean);
+  const hasZip=names.some(name=>isReportsZipName(name));
+  FILE_LOAD_STATUS={source:source||null,when:fileStatusClock(),files:expected.all.map(item=>{
+    const present=item.parent?hasZip:names.some(name=>item.match?.(name));
+    return {key:item.key,label:item.label,parent:item.parent||null,state:present?'pending':'missing',note:present?'':missingNote};
+  })};
+  renderFileLoadStatus();
+}
+function updateFileLoadStatus(key,state,note=''){
+  const item=FILE_LOAD_STATUS.files?.find(f=>f.key===key);
+  if(!item) return;
+  item.state=state;item.note=note;renderFileLoadStatus();
+}
+function updateFileLoadStatusByNseType(type,state='loaded',note=''){
+  const item=getExpectedInputFiles().nse.find(f=>f.nseType===type);
+  if(item) updateFileLoadStatus(item.key,state,note);
+}
+function renderFileStatusList(){
+  if(!FILE_LOAD_STATUS.files?.length) return '';
+  const icon={pending:'…',loaded:'✓',stale:'⚠',missing:'—'};
+  const color={pending:'var(--t2)',loaded:'var(--green)',stale:'var(--amber)',missing:'var(--t3)'};
+  return `<div style="display:grid;grid-template-columns:1fr;gap:2px">${FILE_LOAD_STATUS.files.map(f=>`<div style="display:flex;gap:7px;align-items:flex-start;color:${color[f.state]||'var(--t2)'};${f.parent?'padding-left:18px;font-size:10.5px':''}"><span style="width:12px;text-align:center;font-weight:800">${icon[f.state]||'…'}</span><span style="flex:1;color:var(--t2)">${escHtml(f.label)}${f.note?` <span style="color:${color[f.state]||'var(--t3)'}">(${escHtml(f.note)})</span>`:''}</span></div>`).join('')}</div>`;
+}
+function renderFileLoadStatus(){
+  const el=document.getElementById('fileLoadChecklist');
+  if(el) el.innerHTML=renderFileStatusList();
+}
 
 function captureScannerRuntime(){
   return {
@@ -6486,6 +6574,7 @@ async function processFiles(files,sourceLabel){
     return;
   }
   setLoading(true,'Processing selected files...');
+  setFileLoadStatus(sourceLabel||'Scanner Uploads',files,'not in folder');
   // Upload canonical input files to Drive in the background. Rankings are built from
   // the selected local files immediately, because the market does not wait for Drive.
   saveInputsInBackground(files);
@@ -6503,7 +6592,7 @@ async function processFiles(files,sourceLabel){
     if(name==='nse holidays.csv'){
       try{
         const text=await f.text();
-        if(detectNSE(f.name,text)==='holidays'){holidayFile=true;holidayFileName=f.name;}
+        if(detectNSE(f.name,text)==='holidays'){holidayFile=true;holidayFileName=f.name;updateFileLoadStatus('NSE Holidays.csv','loaded');}
       }catch(e){console.warn('Could not parse NSE Holidays.csv:',f.name,e);}
       continue;
     }
@@ -6536,17 +6625,22 @@ async function processFiles(files,sourceLabel){
           if(fn.endsWith('.csv')){
             setMsg('Parsing '+fn+'...');
             const text=await entry.async('string');
-            detectNSE(fn,text);
+            const type=detectNSE(fn,text);
+            if(type) updateFileLoadStatusByNseType(type,'loaded');
           }
         }
       }
       await processZipEntries(outerZip);
+      updateFileLoadStatus('Reports-Daily-Multiple.zip','loaded');
     }catch(e){console.error('ZIP error:',e);}
   }
 
   const scannerJobs=[];
   if(tvFile)scannerJobs.push({mode:'stock',file:tvFile});
-  for(const job of scannerJobs) await processScannerUpload(job.file,job.mode);
+  for(const job of scannerJobs){
+    const ok=await processScannerUpload(job.file,job.mode);
+    if(ok&&job.mode==='stock') updateFileLoadStatus('ALL NSE.csv','loaded');
+  }
   const stockScannerProcessed=scannerJobs.some(j=>j.mode==='stock');
 
   if(!scannerJobs.length&&!holdFile&&!posFile&&!ordFile&&!tbFile&&!holidayFile){
@@ -6561,6 +6655,7 @@ async function processFiles(files,sourceLabel){
     const holdText=await holdFile.text();
     HOLDINGS=parseHoldings(holdText);
     try{FS.set(HOLD_STORE,{holdings:HOLDINGS,costMap:HOLD_COST_MAP});}catch(e){}
+    updateFileLoadStatus('Holdings.csv','loaded');
   }
   if(posFile){
     setMsg('Processing positions...');
@@ -6570,6 +6665,7 @@ async function processFiles(files,sourceLabel){
     const positionsCurrent=isCurrentSessionFile(posFile);
     POSITIONS=positionsCurrent?parsePositions(posText):[];
     try{FS.set(POS_STORE,{positions:POSITIONS,hash:posHash,sessionDate:today,sourceDate:inputFileSessionDate(posFile),stale:!positionsCurrent});}catch(e){}
+    updateFileLoadStatus('Positions.csv',positionsCurrent?'loaded':'stale',positionsCurrent?'':'stale - ignored');
   }
   if(ordFile){
     setMsg('Processing orders...');
@@ -6577,6 +6673,7 @@ async function processFiles(files,sourceLabel){
     ORDERS_TODAY=parseOrders(ordText);
     if(ORDERS_TODAY) ORDERS_TODAY._loadedThisSession=true;
     try{FS.set(ORDERS_STORE,{orders:ORDERS_TODAY,sourcePath:ordFile.name,lastModified:ordFile.lastModified});}catch(e){}
+    updateFileLoadStatus('Orders.csv','loaded');
   }
   if(tbFile){
     setMsg('Analyzing tradebook...');
@@ -6589,6 +6686,7 @@ async function processFiles(files,sourceLabel){
       if(selected.persist) try{FS.set(TRADEBOOK_STORE,selected.persist);}catch(e){}
       if(selected.meta) try{FS.set(TRADEBOOK_META_STORE,selected.meta);}catch(e){}
     }
+    updateFileLoadStatus('TRADEBOOK.csv','loaded');
   }
   syncExecutedRecommendedEntries();
   // Final render after all files are processed — ensures Latest Session uses fresh orders.
@@ -6609,19 +6707,6 @@ async function processFiles(files,sourceLabel){
   setMsg('Rendering rankings...');
   renderTradingDashboardNow();
   setLoading(false);
-  const loadedItems=[];
-  if(tvFile) loadedItems.push(tvFile.name);
-  if(nseZip) loadedItems.push(nseZip.name);
-  if(holdFile) loadedItems.push(holdFile.name);
-  if(posFile) loadedItems.push(posFile.name+(isCurrentSessionFile(posFile)?'':' (stale - ignored)'));
-  if(ordFile) loadedItems.push(ordFile.name);
-  if(tbFile) loadedItems.push(tbFile.name);
-  if(holidayFile) loadedItems.push(holidayFileName||'NSE Holidays.csv');
-  if(loadedItems.length){
-    const skipped=Math.max(0,files.length-loadedItems.length);
-    const from=sourceLabel?` from "${escHtml(sourceLabel)}"`:'';
-    showToast(`<strong>Loaded${from}:</strong> ${loadedItems.map(escHtml).join(' Â· ')} &mdash; ${loadedItems.length} recognised Â· ${skipped} skipped`,6000);
-  }
   saveBrainInBackground('Brain saved after file processing');
 }
 
@@ -6843,8 +6928,11 @@ function loadFilterState(){
       VOL_AUTO=true; setAutoVolume();
     }
     applyLearnedMaxAllocDefault();
-    if(state.sortCol)SCOL=state.sortCol;
-    if(state.sortDir)SDIR=state.sortDir;
+    if(state.sortCol==='rocketScore'&&Number(state.sortDir)<0){SCOL='_rank';SDIR=1;}
+    else {
+      if(state.sortCol)SCOL=state.sortCol;
+      if(state.sortDir)SDIR=state.sortDir;
+    }
   }catch(e){console.warn('Could not load filter state',e);}
 
 }
@@ -6899,24 +6987,9 @@ function initNSELinks(){
   const nd=nseDate();
   const el=document.getElementById('nseDateLabel');
   if(el) el.textContent='(prev trading day: '+nd.label+')';
-  const nseFiles=[
-    'block.csv',
-    'bulk.csv',
-    'CM_52_wk_High_low_'+nd.ddmmyyyy+'.csv',
-    'REG1_IND'+nd.ddmmyy+'.csv',
-    'sec_bhavdata_full_'+nd.ddmmyyyy+'.csv',
-    'sec_list_'+nd.ddmmyyyy+'.csv',
-  ];
-  const tvFiles=[
-    '📈 ALL NSE.csv',
-    '🏛 Reports-Daily-Multiple.zip',
-    '🛡 Holdings.csv',
-    '📊 Positions.csv',
-    '🧾 Orders.csv',
-    '📒 TRADEBOOK.csv',
-    '📅 NSE Holidays.csv',
-  ];
-  const allFiles=tvFiles.concat(nseFiles);
+  const expected=getExpectedInputFiles();
+  const nseFiles=expected.nse.map(f=>f.label);
+  const allFiles=expected.all.map(f=>f.label);
   var grid=document.getElementById('nseLinkGrid');
   if(grid){
     grid.innerHTML=nseFiles.map(function(f){
