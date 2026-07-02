@@ -1,5 +1,5 @@
-const BUILD_TS='2026-07-01 15:12 IST'; // release build time (IST)
-const APP_VERSION=465; // Geometry fallback preserves null upper-band data.
+const BUILD_TS='2026-07-02 09:12 IST'; // release build time (IST)
+const APP_VERSION=466; // Latest Session uses same-date tradebook realized rows for delivery sell cost basis.
 const GOOGLE_DRIVE_CLIENT_ID='1015012642264-oi2nelv3v90k3d39r994a6nelgjs2a56.apps.googleusercontent.com'; // Public OAuth Web Client ID.
 const HARD_FILTER_SCHEMA='structural_tradeability_v2';
 const STOCK_RUNWAY_CEILING_PCT=19.5; // Intentional owner-approved forward-catch strategy filter: excludes stocks already near their circuit band (or caps max entry) since a stock that has already used up its daily range is a poor pre-rocket buy. Active fallback when NSE price-band data is unavailable.
@@ -3066,8 +3066,8 @@ function getHoldingAvgCost(symbol){
   // 2. Holdings.csv all rows (includes qty=0 closed positions)
   const hrow=HOLDINGS_ALL?.find(h=>h.symbol===symbol&&h.avgCost!=null);
   if(hrow?.avgCost!=null) return hrow.avgCost;
-  // 3. Positions.csv (T+1 unsettled — one day lag acceptable)
-  const prow=POSITIONS?.find(p=>p.symbol===symbol&&p.avg!=null);
+  // 3. Positions.csv T+1 unsettled buy rows; sell avg is sell price, not cost basis.
+  const prow=POSITIONS?.find(p=>p.symbol===symbol&&p.avg!=null&&!p.isSell);
   if(prow?.avg!=null) return prow.avg;
   return null;
   // Note: openAvgCostMap intentionally excluded here — it's for open position display
@@ -3121,7 +3121,15 @@ function computeLatestOrderBooked(){
       if(holdingAvg!=null){
         avgBuy=holdingAvg;
       } else {
-        // Holdings.csv not loaded or stock not found — show row with unknown P&L
+        // If tradebook has the same sell date, use its exact FIFO-realized row.
+        const tradebookRow=TRADEBOOK_STATS?._loadedThisSession
+          && TRADEBOOK_STATS.lastDate===session.date
+          && TRADEBOOK_STATS.lastDayRows?.find(r=>r.sym===sym);
+        if(tradebookRow){
+          rows.push({...tradebookRow,_sort:tradebookRow.netPnl});
+          return;
+        }
+        // Holdings.csv not loaded or stock not found — show row with unknown P&L.
         avgBuy=null;
         noAvgCost=true;
       }
