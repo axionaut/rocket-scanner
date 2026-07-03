@@ -1,5 +1,5 @@
-const BUILD_TS='2026-07-03 10:32 IST'; // release build time (IST)
-const APP_VERSION=476; // Top rank count filter.
+const BUILD_TS='2026-07-03 11:49 IST'; // release build time (IST)
+const APP_VERSION=477; // Peak-ratcheted position TSL display.
 const GOOGLE_DRIVE_CLIENT_ID='1015012642264-oi2nelv3v90k3d39r994a6nelgjs2a56.apps.googleusercontent.com'; // Public OAuth Web Client ID.
 const HARD_FILTER_SCHEMA='structural_tradeability_v2';
 const STOCK_RUNWAY_CEILING_PCT=19.5; // Intentional owner-approved forward-catch strategy filter: excludes stocks already near their circuit band (or caps max entry) since a stock that has already used up its daily range is a poor pre-rocket buy. Active fallback when NSE price-band data is unavailable.
@@ -9,6 +9,11 @@ const BASKET_MARKET_BUDGET_BUFFER_PCT=0.25; // Sizing cushion only; exported buy
 const SYSTEM_TRADE_START_DATE='2026-04-01'; // Adaptive stats use trades closed from this date onward.
 const HARVEST_DAILY_NET_GOAL_RS=15000; // North-star daily pure-profit goal, never a forced capital assumption.
 const HARVEST_DESIRED_NET_PCT=0.60; // Minimum useful net profit after charges for capital rotation.
+const TSL_GAP_PERCENTILE=0.75;
+const TSL_GAP_RETENTION_FLOOR=70;
+const TSL_GAP_MIN_SAMPLES=8;
+const TSL_GAP_MIN_PCT=1.5;
+const TSL_GAP_MAX_PCT=6.0;
 const HARVEST_TRIGGER_CONFIDENCE=0.60; // Prefer a target that prior picks commonly reached.
 const HARVEST_MIN_SAMPLES=8;
 const ENTRY_FADE_RETENTION_FLOOR=70; // Below this, a pullback through the target zone is treated as a fading entry.
@@ -3031,6 +3036,7 @@ async function runEngine(raw, sessionTag, options={}){
     nearOne:stabilityValues.filter(v=>v>=0.95).length,
     total:stabilityValues.length
   };
+  const positionTslGapModel=persistPositionTslGapModel(results,getModelTradingDate(options.snapshotTimestamp||Date.now()));
   ENGINE_DATA={targetRelevance,targetRelevanceToday,mrmr,weights,features:FEATS,selectedFeatures,labels:LABELS,top10Feats,accSessions:ACC_CORR?.sessions||0,laggedNote:laggedNote||'',
     marketBreadth:marketBreadth,
     regimeExposureFactor:scoringUsable?regimeExposureFactor(marketBreadth):1,
@@ -3058,6 +3064,7 @@ async function runEngine(raw, sessionTag, options={}){
     sectorCol: sectorCol?true:false, industryCol: industryCol?true:false,
     totalParsed: totalParsed,
     hardFilterSchema:HARD_FILTER_SCHEMA,
+    positionTslGapModel,
     removed: {...REMOVED},
     survSize: Object.keys(NSE_SURV).length,
     survRuleRows: getSurvRules().map(rule=>({
@@ -3830,8 +3837,8 @@ function renderPerformance(){
 
     // ── Build live open-position rows ──
     const _rows=[];
-    const _tslStore=FS.get(POS_TSL_STORE)||{};
-    const _tslNext={};
+    const _tslStore=getPositionTslStore();
+    const _tslNext=_tslStore.gapModel?{gapModel:_tslStore.gapModel}:{};
     let _tslChanged=false;
     const _addPos=(sym,qty,avg,ltpHint)=>{
       if(!sym||qty<=0) return;
@@ -3856,21 +3863,22 @@ function renderPerformance(){
       }
       const signal=null; // computed below after all rows collected — needs cross-row normalisation
       const rawTslPrice=tslInfo?.tsl??null;
-      const tslPrice=actionableSellTrigger(rawTslPrice,ltp);
+      const tslPrice=rawTslPrice;
       _rows.push({sym,qty,avg:avgCost,ltp,pnlPct,pnlRs,daysHeld,capDeployed,tgtPrice,slPrice,distSL,
         tslPrice,tslRawPrice:rawTslPrice,tslGapPct:tslInfo?.gapPct??null,tslPeakPct:tslInfo?.peakProfitPct??null,
         tslLockPct:tslInfo?.lockPct??null,tslPoints:tslInfo?.trailStepPoints??tslInfo?.trailPoints??null,
-        tslDistance:tslInfo?.distancePoints??null,tslBasis:tslInfo?.basis||'',tslTargetPct:tslInfo?.targetPct??adaptiveTGT,signal,
+        tslDistance:tslInfo?.distancePoints??null,tslBasis:tslInfo?.basis||'',tslMode:tslInfo?.mode||'protect',
+        tslTargetPct:tslInfo?.targetPct??adaptiveTGT,signal,
         _sortDays:daysHeld==null?-1:daysHeld});
     };
     Object.values(getCombinedOpenPositionMap()).forEach(pos=>{
       if(pos.qty>0) _addPos(pos.symbol,pos.qty,pos.avg,pos.ltp);
     });
     if(!_rows.length){
-      if(Object.keys(_tslStore).length) FS.set(POS_TSL_STORE,{});
+      if(Object.keys(_tslStore).some(isPositionTslSymbolKey)) FS.set(POS_TSL_STORE,_tslStore.gapModel?{gapModel:_tslStore.gapModel}:{});
       return; // nothing to show
     }
-    if(Object.keys(_tslStore).some(sym=>!_tslNext[sym])) _tslChanged=true;
+    if(Object.keys(_tslStore).some(sym=>isPositionTslSymbolKey(sym)&&!_tslNext[sym])) _tslChanged=true;
     if(_tslChanged) FS.set(POS_TSL_STORE,_tslNext);
 
     // ── Signal: composite exit urgency score ──
@@ -3921,7 +3929,7 @@ function renderPerformance(){
       {key:'_sortDays',label:'Days Held',align:'right',fmt:(v,r)=>_daysFmt(r.daysHeld),clrFn:()=>'var(--t1)'},
       {key:'tgtPrice',label:'Target ₹',align:'right',fmt:(v,r)=>v!=null?fmtINR(v)+`<span style="font-size:10px;color:var(--t3);margin-left:4px">+${adaptiveTGT}%</span>`:'—',clrFn:()=>'var(--green)'},
       {key:'slPrice',label:'SL ₹',align:'right',fmt:(v,r)=>v!=null?fmtINR(v)+`<span style="font-size:10px;color:var(--t3);margin-left:4px">-${adaptiveSL}%</span>`:'—',clrFn:()=>'var(--red)'},
-      {key:'tslPrice',label:'TSL Trigger ₹',align:'right',bold:true,fmt:(v,r)=>v!=null?fmtINR(v)+`<div style="font-size:10px;color:var(--t3);margin-top:1px">gap ${Number(r.tslDistance??0).toLocaleString('en-IN',INR_2)} · step ${Number(r.tslPoints??0).toLocaleString('en-IN',INR_2)}</div><div style="font-size:10px;color:var(--t3);margin-top:1px">${Number(r.tslGapPct??0).toFixed(2)}% gap</div>`:'—',clrFn:(v,r)=>v==null?'var(--t3)':r.tslLockPct>0?'var(--green)':r.tslLockPct===0?'var(--amber)':'var(--red)'},
+      {key:'tslPrice',label:'TSL Trigger ₹',align:'right',bold:true,fmt:(v,r)=>v!=null?fmtINR(v)+`<div style="font-size:10px;color:${r.tslLockPct>0?'var(--green)':r.tslLockPct===0?'var(--amber)':'var(--red)'};margin-top:1px">locked ${r.tslLockPct>=0?'+':''}${Number(r.tslLockPct??0).toFixed(2)}%</div><div style="font-size:10px;color:var(--t3);margin-top:1px">gap ${Number(r.tslGapPct??0).toFixed(2)}% · ${r.tslBasis||'ATR fallback'}</div>`:'<span title="Below harvest target — fixed SL applies">—</span>',clrFn:(v,r)=>v==null?'var(--t3)':r.tslLockPct>0?'var(--green)':r.tslLockPct===0?'var(--amber)':'var(--red)'},
       {key:'signal',label:'Signal',align:'right',bold:true,fmt:v=>v!=null?(v>=0?'+':'')+v.toFixed(2):'—',clrFn:v=>v==null?'var(--t3)':v>0?'var(--green)':v<0?'var(--red)':'var(--t2)'},
     ];
     // Sort: signal ascending (worst first), then days desc
@@ -4940,66 +4948,106 @@ function getZerodhaMinTrailPoints(price){
   return 50;
 }
 
-function calcPositionTSL({sym, qty, avgCost, ltp, scannerRow, adaptiveSL, adaptiveTGT, prev}){
-  if(!sym||!(qty>0)||!(avgCost>0)||!(ltp>0)||!(adaptiveSL>0)) return null;
-  const dayHigh=scannerRow?.high1d;
-  const peak=+Math.max(ltp, (dayHigh!=null&&isFinite(dayHigh))?dayHigh:0).toFixed(2);
-  const peakProfitPct=+(((peak-avgCost)/avgCost)*100).toFixed(2);
-  const protective=tickPrice(avgCost*(1-adaptiveSL/100));
+function getPositionTslStore(){
+  const store=FS.get(POS_TSL_STORE)||{};
+  return store&&typeof store==='object'?store:{};
+}
+function isPositionTslSymbolKey(key){
+  return key&&key!=='gapModel';
+}
+function clampTslGapPct(value){
+  const n=Number(value);
+  if(!Number.isFinite(n)) return null;
+  return +clampNum(n,TSL_GAP_MIN_PCT,TSL_GAP_MAX_PCT).toFixed(2);
+}
+function buildPositionTslGapModel(rows, sessionDate){
+  const survivors=(rows||[])
+    .filter(s=>s?.rocketToday&&s._hardFiltered!==true)
+    .map(s=>({
+      pullback:Number(s.pullbackFromHighPct),
+      retention:Number(s.peakRetention)
+    }))
+    .filter(s=>Number.isFinite(s.pullback)&&Number.isFinite(s.retention)&&s.retention>=TSL_GAP_RETENTION_FLOOR);
+  if(survivors.length<TSL_GAP_MIN_SAMPLES) return null;
+  const raw=percentileValue(survivors.map(s=>s.pullback),TSL_GAP_PERCENTILE);
+  const gapPct=clampTslGapPct(raw);
+  if(gapPct==null) return null;
+  return {gapPct,samples:survivors.length,date:sessionDate||getSessionDate(),updatedAt:new Date().toISOString()};
+}
+function persistPositionTslGapModel(rows, sessionDate){
+  const model=buildPositionTslGapModel(rows,sessionDate);
+  if(!model) return null;
+  const store=getPositionTslStore();
+  const next={...store,gapModel:model};
+  if(JSON.stringify(store.gapModel||{})!==JSON.stringify(model)) FS.set(POS_TSL_STORE,next);
+  return model;
+}
+function resolvePositionTslGap({scannerRow, adaptiveTGT, gapModel, sessionDate}){
+  const model=(gapModel&&typeof gapModel==='object')?gapModel:null;
+  const modelSamples=Number(model?.samples)||0;
+  const modelGap=clampTslGapPct(model?.gapPct);
+  const today=sessionDate||getSessionDate();
+  if(model&&model.date===today&&modelSamples>=TSL_GAP_MIN_SAMPLES&&modelGap!=null){
+    return {gapPct:modelGap,basis:`learned from ${modelSamples} rockets`,source:'learned',samples:modelSamples,date:model.date};
+  }
+  const age=model?.date?tradingDaysBetween(model.date,today):null;
+  if(model&&modelGap!=null&&modelSamples>=TSL_GAP_MIN_SAMPLES&&age!=null&&age<=5){
+    return {gapPct:modelGap,basis:`recent (${String(model.date).slice(5)})`,source:'recent',samples:modelSamples,date:model.date};
+  }
   const targetPct=(adaptiveTGT&&isFinite(adaptiveTGT)&&adaptiveTGT>0)?adaptiveTGT:4.2;
   const atrPct=(scannerRow?.atr!=null&&isFinite(scannerRow.atr)&&scannerRow.atr>0)?scannerRow.atr:null;
-  const minStep=getZerodhaMinTrailPoints(avgCost);
-  const avgChanged=prev?.avg!=null&&Math.abs(prev.avg-avgCost)/avgCost>0.01;
-  const qtyIncreased=prev?.qty!=null&&qty>prev.qty;
+  const fallback=clampTslGapPct(Math.max(targetPct/2,atrPct||0));
+  return {gapPct:fallback??TSL_GAP_MIN_PCT,basis:'ATR fallback',source:'atr',samples:0,date:null};
+}
+
+function calcPositionTSL({sym, qty, avgCost, ltp, scannerRow, adaptiveSL, adaptiveTGT, prev}){
+  if(!sym||!(qty>0)||!(avgCost>0)||!(ltp>0)||!(adaptiveSL>0)) return null;
+  const store=getPositionTslStore();
+  const gapModel=store.gapModel||null;
+  const prevPosition=(prev&&typeof prev==='object')?prev:{};
+  const targetPct=(adaptiveTGT&&isFinite(adaptiveTGT)&&adaptiveTGT>0)?adaptiveTGT:4.2;
+  const dayHigh=(scannerRow?.high1d!=null&&isFinite(scannerRow.high1d))?Number(scannerRow.high1d):null;
+  const avgChanged=prevPosition?.avg!=null&&Math.abs(prevPosition.avg-avgCost)/avgCost>0.01;
+  const qtyIncreased=prevPosition?.qty!=null&&qty>prevPosition.qty;
   const reset=!!(avgChanged||qtyIncreased);
-
-  // Proper Zerodha GTT TSL reference:
-  // Zerodha's "Trailing points" field is the ratchet step, not the stop distance.
-  // So the table shows the actual stop-loss trigger price separately from the step.
-  // TSL trigger = LTP - gap points. Gap % = max(half target %, Daily ATR%).
-  const calcLeg=(targetPct)=>{
-    const floorPct=targetPct/2;
-    const gapPct=Math.max(floorPct, atrPct||0);
-    const gapPoints=tickPrice(Math.max(minStep, ltp*gapPct/100));
-    const rawTsl=tickPrice(Math.max(0, ltp-gapPoints));
-    const stepPoints=+minStep.toFixed(2);
-    const tsl=rawTsl;
-    return {
-      targetPct:+targetPct.toFixed(2),
-      floorPct:+floorPct.toFixed(2),
-      gapPct:+gapPct.toFixed(2),
-      trailPoints:stepPoints,
-      trailStepPoints:stepPoints,
-      gapPoints:+gapPoints.toFixed(2),
-      rawTsl:+rawTsl.toFixed(2),
-      tsl:+tsl.toFixed(2),
-      lockPct:+(((tsl-avgCost)/avgCost)*100).toFixed(2),
-      distancePoints:+Math.max(0,ltp-tsl).toFixed(2),
-      rawDistancePoints:+Math.max(0,ltp-rawTsl).toFixed(2),
-      basis:atrPct!=null&&atrPct>=floorPct?'ATR floor':'Half-target floor'
-    };
-  };
-
-  const leg=calcLeg(targetPct);
+  const storedPeak=(!reset&&prevPosition?.peak!=null&&isFinite(prevPosition.peak))?Number(prevPosition.peak):0;
+  const peak=+Math.max(storedPeak,ltp,dayHigh||0).toFixed(2);
+  const peakProfitPct=+(((peak-avgCost)/avgCost)*100).toFixed(2);
+  const rocketToday=!!scannerRow?.rocketToday;
+  const storedMode=!reset&&prevPosition?.mode==='trail'?'trail':null;
+  const mode=(storedMode==='trail'||peakProfitPct>=targetPct||rocketToday)?'trail':'protect';
+  const gap=resolvePositionTslGap({scannerRow,adaptiveTGT:targetPct,gapModel,sessionDate:getSessionDate()});
+  const gapPct=gap.gapPct;
+  const minStep=getZerodhaMinTrailPoints(avgCost);
+  const candidate=+tickPrice(Math.max(0,peak*(1-gapPct/100))).toFixed(2);
+  const storedTsl=(!reset&&prevPosition?.tsl!=null&&isFinite(prevPosition.tsl))?Number(prevPosition.tsl):null;
+  const activeTsl=mode==='trail'?+Math.max(storedTsl||0,candidate).toFixed(2):null;
+  const lockPct=activeTsl!=null?+(((activeTsl-avgCost)/avgCost)*100).toFixed(2):null;
+  const distancePoints=activeTsl!=null?+Math.max(0,ltp-activeTsl).toFixed(2):null;
   return {
-    tsl:leg.tsl,
-    rawTsl:leg.rawTsl,
-    trailPoints:leg.trailPoints,
-    trailStepPoints:leg.trailPoints,
+    tsl:activeTsl,
+    rawTsl:activeTsl,
+    candidateTsl:candidate,
+    trailPoints:+minStep.toFixed(2),
+    trailStepPoints:+minStep.toFixed(2),
     minTrailPoints:minStep,
-    distancePoints:leg.distancePoints,
-    rawDistancePoints:leg.rawDistancePoints,
-    gapPct:leg.gapPct,
-    lockPct:leg.lockPct,
-    targetPct:leg.targetPct,
-    basis:leg.basis,
+    distancePoints,
+    rawDistancePoints:distancePoints,
+    gapPct,
+    lockPct,
+    targetPct:+targetPct.toFixed(2),
+    basis:gap.basis,
+    gapSource:gap.source,
+    gapSamples:gap.samples,
+    gapDate:gap.date,
     peak,
     peakProfitPct,
-    atrPct:atrPct!=null?+atrPct.toFixed(2):null,
+    mode,
+    atrPct:(scannerRow?.atr!=null&&isFinite(scannerRow.atr))?+Number(scannerRow.atr).toFixed(2):null,
     avg:+avgCost.toFixed(2),
     qty,
     reset,
-    updated:getSessionDate()
+    updatedAt:new Date().toISOString()
   };
 }
 
