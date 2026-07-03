@@ -1,5 +1,5 @@
-const BUILD_TS='2026-07-03 09:49 IST'; // release build time (IST)
-const APP_VERSION=475; // Union tracker predictions across same-day uploads.
+const BUILD_TS='2026-07-03 10:32 IST'; // release build time (IST)
+const APP_VERSION=476; // Top rank count filter.
 const GOOGLE_DRIVE_CLIENT_ID='1015012642264-oi2nelv3v90k3d39r994a6nelgjs2a56.apps.googleusercontent.com'; // Public OAuth Web Client ID.
 const HARD_FILTER_SCHEMA='structural_tradeability_v2';
 const STOCK_RUNWAY_CEILING_PCT=19.5; // Intentional owner-approved forward-catch strategy filter: excludes stocks already near their circuit band (or caps max entry) since a stock that has already used up its daily range is a poor pre-rocket buy. Active fallback when NSE price-band data is unavailable.
@@ -4673,6 +4673,19 @@ function getMinScoreFloor(){
   const parsed=parseFloat(raw);
   return Number.isFinite(parsed)?parsed:MIN_SCORE_DEFAULT;
 }
+function getTopRankCap(){
+  const raw=String(document.getElementById('fTopRank')?.value??'').trim();
+  const parsed=parseInt(raw,10)||20;
+  return Math.max(1,Math.min(20,parsed));
+}
+function getTopRankFilterPill(){
+  const raw=String(document.getElementById('fTopRank')?.value??'').trim();
+  if(raw==='') return null;
+  const parsed=parseInt(raw,10);
+  if(!Number.isFinite(parsed)) return null;
+  const cap=Math.max(1,Math.min(20,parsed));
+  return cap<20?`Top ≤${cap}`:null;
+}
 function getFilterBarReason(s){
   const minScore=getMinScoreFloor();
   const fvol=parseFloat(document.getElementById('fVol')?.value)||0;
@@ -5347,11 +5360,12 @@ function applyFilters(){
   GEOMETRY_GATE_SUMMARY.velocityTilted=FILT.filter(s=>!s._geometryUnverified&&s.normalizedVelocityPotential>0).length;
   assignDisplayRanks(FILT);
 
-  // Hard cap at 20 (Zerodha basket limit).
-  if(FILT.length>20){
+  // Hard cap at 20 (Zerodha basket limit), optionally tightened by Top #.
+  const displayCap=getTopRankCap();
+  if(FILT.length>displayCap){
     const rankSorted=[...FILT].sort((a,b)=>(a._rank??Infinity)-(b._rank??Infinity));
-    const capped=rankSorted.slice(0,20);
-    rankSorted.slice(20).forEach(x=>{hiddenReasons[x.symbol]='Outside current top-20 display cap';});
+    const capped=rankSorted.slice(0,displayCap);
+    rankSorted.slice(displayCap).forEach(x=>{hiddenReasons[x.symbol]=`Outside current top-${displayCap} display cap`;});
     FILT=capped;
   }
   applySort();
@@ -5395,6 +5409,8 @@ function renderStatusBar(){
   const fMinMarketCap2=parseFloat(document.getElementById('fMinMarketCap')?.value)||0;
   const _fMin1Dv2=document.getElementById('fMin1D')?.value||'';
   const fMin1D=_fMin1Dv2!==''?parseFloat(_fMin1Dv2):-Infinity;
+  const topRankPill=getTopRankFilterPill();
+  if(topRankPill)tags.push(topRankPill);
   if(ENGINE_DATA?.hasRecommendationEvidence&&minScore2>0)tags.push('Score≥'+minScore2);
   if(fMin1D>-Infinity)tags.push('1D≥'+fMin1D+'%');
   if(fvol2>0){const n=fvol2;tags.push('Vol≥'+(n>=1e6?(n/1e6).toFixed(1)+'M':n>=1e3?(n/1e3).toFixed(0)+'K':n));}
@@ -5448,7 +5464,7 @@ function renderStatusBar(){
 }
 
 function clearFilters(){
-  ['fMinScore','fMin1D','fCapital','fMaxAlloc','fPriceMin'].forEach(id=>{const el=document.getElementById(id);if(el)el.value='';});
+  ['fMinScore','fTopRank','fMin1D','fCapital','fMaxAlloc','fPriceMin'].forEach(id=>{const el=document.getElementById(id);if(el)el.value='';});
   const maxPriceEl=document.getElementById('fPriceMax');if(maxPriceEl)maxPriceEl.value='1200';
   const max1Del=document.getElementById('fMax1D');if(max1Del)max1Del.value='5';
   const minTurnEl=document.getElementById('fMinTurnover');if(minTurnEl)minTurnEl.value='10000000';
@@ -6508,13 +6524,13 @@ async function decodeScannerSnapshot(source){
   return out;
 }
 function applySavedFiltersForMode(mode){
-  const ids=['fMinScore','fPriceMin','fPriceMax','fMin1D','fMax1D','fVol','fVolMult','fMinTurnover','fMinMarketCap','fCapital','fMaxAlloc','fReDrop','fTopupAlloc'];
+  const ids=['fMinScore','fTopRank','fPriceMin','fPriceMax','fMin1D','fMax1D','fVol','fVolMult','fMinTurnover','fMinMarketCap','fCapital','fMaxAlloc','fReDrop','fTopupAlloc'];
   const prev={};
   ids.forEach(id=>{const el=document.getElementById(id);if(el)prev[id]=el.value;});
   try{
     const st=JSON.parse(localStorage.getItem(modeKey(SCANNER_STORE,mode))||'{}');
     const shared=JSON.parse(localStorage.getItem(SHARED_FILTER_STORE)||'{}');
-    const map={minScore:'fMinScore',priceMin:'fPriceMin',priceMax:'fPriceMax',fMin1D:'fMin1D',fMax1D:'fMax1D',fvol:'fVol',volMult:'fVolMult',minTurnover:'fMinTurnover',minMarketCap:'fMinMarketCap',reDrop:'fReDrop',topupAlloc:'fTopupAlloc'};
+    const map={minScore:'fMinScore',topRank:'fTopRank',priceMin:'fPriceMin',priceMax:'fPriceMax',fMin1D:'fMin1D',fMax1D:'fMax1D',fvol:'fVol',volMult:'fVolMult',minTurnover:'fMinTurnover',minMarketCap:'fMinMarketCap',reDrop:'fReDrop',topupAlloc:'fTopupAlloc'};
     Object.entries(map).forEach(([k,id])=>{const el=document.getElementById(id);if(el&&st[k]!=null)el.value=st[k];});
     const capEl=document.getElementById('fCapital');if(capEl&&shared.capital!=null)capEl.value=shared.capital;
     const maxEl=document.getElementById('fMaxAlloc');if(maxEl&&shared.maxAlloc!=null)maxEl.value=shared.maxAlloc;
@@ -6918,6 +6934,7 @@ initApp();
 function saveFilterState(){
   const state={
     minScore:document.getElementById('fMinScore')?.value||'70',
+    topRank:document.getElementById('fTopRank')?.value||'',
     priceMin:document.getElementById('fPriceMin')?.value||'',
     priceMax:document.getElementById('fPriceMax')?.value||'',
     fvol:VOL_AUTO?'':document.getElementById('fVol')?.value||'',
@@ -6944,6 +6961,7 @@ function loadFilterState(){
     const state=JSON.parse(localStorage.getItem(modeKey(SCANNER_STORE))||'{}');
     const shared=JSON.parse(localStorage.getItem(SHARED_FILTER_STORE)||'{}');
     if(state.minScore){const el=document.getElementById('fMinScore');if(el)el.value=state.minScore;}
+    if(state.topRank!=null){const el=document.getElementById('fTopRank');if(el)el.value=state.topRank;}
     if(state.priceMin){const el=document.getElementById('fPriceMin');if(el)el.value=state.priceMin;}
     if(state.priceMax!=null){const el=document.getElementById('fPriceMax');if(el)el.value=state.priceMax;}
     if(state.fMin1D){const el=document.getElementById('fMin1D');if(el)el.value=state.fMin1D;}
