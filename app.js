@@ -1,5 +1,5 @@
-const BUILD_TS='2026-07-02 16:11 IST'; // release build time (IST)
-const APP_VERSION=474; // Merge hydration checklist updates without downgrades.
+const BUILD_TS='2026-07-03 09:49 IST'; // release build time (IST)
+const APP_VERSION=475; // Union tracker predictions across same-day uploads.
 const GOOGLE_DRIVE_CLIENT_ID='1015012642264-oi2nelv3v90k3d39r994a6nelgjs2a56.apps.googleusercontent.com'; // Public OAuth Web Client ID.
 const HARD_FILTER_SCHEMA='structural_tradeability_v2';
 const STOCK_RUNWAY_CEILING_PCT=19.5; // Intentional owner-approved forward-catch strategy filter: excludes stocks already near their circuit band (or caps max entry) since a stock that has already used up its daily range is a poor pre-rocket buy. Active fallback when NSE price-band data is unavailable.
@@ -2238,7 +2238,8 @@ function trimDailyRecords(days){
 function recordDayPredictions(runtime,sessionDate,predictedSymbols){
   const day=(runtime?.days||[]).find(d=>d.sessionDate===sessionDate);
   if(!day) return false;
-  day.predictedSymbols=[...new Set((predictedSymbols||[]).map(normSym).filter(Boolean))];
+  day.predictedSymbols=[...new Set([...(day.predictedSymbols||[]),
+    ...(predictedSymbols||[]).map(normSym).filter(Boolean)])];
   return true;
 }
 // Rolling self-accuracy over the retained 5-day window: for each past day's flagged
