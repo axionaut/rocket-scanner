@@ -1,5 +1,5 @@
-const BUILD_TS='2026-07-03 11:49 IST'; // release build time (IST)
-const APP_VERSION=477; // Peak-ratcheted position TSL display.
+const BUILD_TS='2026-07-07 07:11 IST'; // release build time (IST)
+const APP_VERSION=478; // Completed-day scoring fallback for gated mornings.
 const GOOGLE_DRIVE_CLIENT_ID='1015012642264-oi2nelv3v90k3d39r994a6nelgjs2a56.apps.googleusercontent.com'; // Public OAuth Web Client ID.
 const HARD_FILTER_SCHEMA='structural_tradeability_v2';
 const STOCK_RUNWAY_CEILING_PCT=19.5; // Intentional owner-approved forward-catch strategy filter: excludes stocks already near their circuit band (or caps max entry) since a stock that has already used up its daily range is a poor pre-rocket buy. Active fallback when NSE price-band data is unavailable.
@@ -2434,6 +2434,34 @@ function selectRocketRelevanceFeatures(features,targetRelevance,featureStability
   ]));
   return {mrmr,selectedFeatures:selected,weights};
 }
+function compactNumericMap(map){
+  const out={};
+  Object.entries(map||{}).forEach(([key,value])=>{
+    const n=Number(value);
+    if(Number.isFinite(n)) out[key]=+n.toFixed(6);
+  });
+  return out;
+}
+function getCompletedDayFallbackSelection({features,map,today,featureRows}){
+  if(!map||!map.date||!map.targetRelevance||!map.featureStability||!today) return null;
+  if(String(map.date)>=String(today)) return null;
+  const age=tradingDaysBetween(map.date,today);
+  if(age==null||age<=0||age>5) return null;
+  const selection=selectRocketRelevanceFeatures(features,map.targetRelevance,map.featureStability,featureRows);
+  const weightTotal=selection.selectedFeatures.reduce((sum,feature)=>sum+(selection.weights[feature]||0),0);
+  if(selection.selectedFeatures.length<1||weightTotal<=0) return null;
+  return {...selection,weightTotal,age};
+}
+function persistLastUsableCompletedMap({date,targetRelevance,featureStability}){
+  if(!date||!ACC_CORR||ACC_CORR.corrSchema!==CORR_SCHEMA) return;
+  const map={
+    date,
+    targetRelevance:compactNumericMap(targetRelevance),
+    featureStability:compactNumericMap(featureStability)
+  };
+  ACC_CORR={...ACC_CORR,lastUsableMap:map};
+  FS.set(modeKey(CORR_STORE),ACC_CORR);
+}
 async function advanceSnapshotLearning({rows,features,priceKey,rocketMetricKey,sessionTag,targetSymbols,eligibleSymbols,advance=true,snapshotTimestamp=Date.now(),previewOnly=false}){
   let runtime=previewOnly?cloneSnapshotRuntime(SNAPSHOT_RUNTIME):SNAPSHOT_RUNTIME;
   if(!runtime||runtime.schema!==SNAPSHOT_STATE_SCHEMA) runtime=emptySnapshotRuntime();
@@ -2856,7 +2884,8 @@ async function runEngine(raw, sessionTag, options={}){
   window._lastParsedFiltered = filtered;
   window._lastParsedForSnapshot = learningUniverse;
 
-  const targetRelevance=snapshotLearning.targetRelevance;
+  const todaySessionDate=getModelTradingDate(options.snapshotTimestamp||Date.now());
+  const liveTargetRelevance=snapshotLearning.targetRelevance;
   const targetRelevanceToday=snapshotLearning.targetRelevanceToday;
   const todayRocketSet=new Set(snapshotLearning.currentRocketSymbols||[]);
   const freshSignalCount=snapshotLearning.freshSignalCount;
@@ -2864,7 +2893,7 @@ async function runEngine(raw, sessionTag, options={}){
   // A score exists as soon as one honest prior daily state can explain today's observed rocket set.
   const hasRecommendationEvidence=!!snapshotLearning.hasScoringEvidence;
   const useFreshCorr=true;
-  const scoringSource=snapshotLearning.scoringSource||'warmup';
+  let scoringSource=snapshotLearning.scoringSource||'warmup';
   const laggedNote=snapshotLearning.note;
   const recOutcomeSummary=getRecommendationOutcomeSummary();
   const entryOutcomeSummary=getExecutedEntryOutcomeSummary();
@@ -2879,10 +2908,37 @@ async function runEngine(raw, sessionTag, options={}){
   const scoringFeatureRows=snapshotLearning.scoringFeatureRows||{};
   const scoringRows=learningUniverse.map(d=>scoringFeatureRows[d.symbol]||{});
   // Feature selection uses greedy mRMR: rank-relevance minus same-day cross-sectional redundancy.
-  const {mrmr,selectedFeatures,weights}=selectRocketRelevanceFeatures(FEATS,targetRelevance,snapshotLearning.featureStability,filtered.map(d=>scoringFeatureRows[d.symbol]||{}));
-  const selectedWeightTotal=selectedFeatures.reduce((sum,feature)=>sum+(weights[feature]||0),0);
+  const featureRowsForSelection=filtered.map(d=>scoringFeatureRows[d.symbol]||{});
+  let activeTargetRelevance=liveTargetRelevance;
+  let activeFeatureStability=snapshotLearning.featureStability||{};
+  let {mrmr,selectedFeatures,weights}=selectRocketRelevanceFeatures(FEATS,activeTargetRelevance,activeFeatureStability,featureRowsForSelection);
+  let selectedWeightTotal=selectedFeatures.reduce((sum,feature)=>sum+(weights[feature]||0),0);
   const scoringUsable=hasRecommendationEvidence&&selectedFeatures.length>0&&selectedWeightTotal>0;
-  const scoreGatedReason=hasRecommendationEvidence&&!scoringUsable
+  let fallbackActive=false;
+  if(scoringUsable){
+    persistLastUsableCompletedMap({date:todaySessionDate,targetRelevance:liveTargetRelevance,featureStability:snapshotLearning.featureStability||{}});
+  }else{
+    const fallback=getCompletedDayFallbackSelection({
+      features:FEATS,
+      map:ACC_CORR?.lastUsableMap,
+      today:todaySessionDate,
+      featureRows:featureRowsForSelection
+    });
+    if(fallback){
+      fallbackActive=true;
+      activeTargetRelevance=ACC_CORR.lastUsableMap.targetRelevance;
+      activeFeatureStability=ACC_CORR.lastUsableMap.featureStability;
+      mrmr=fallback.mrmr;
+      selectedFeatures=fallback.selectedFeatures;
+      weights=fallback.weights;
+      selectedWeightTotal=fallback.weightTotal;
+      scoringSource='completed_day_fallback';
+    }
+  }
+  const scoringActive=scoringUsable||fallbackActive;
+  const scoreGatedReason=fallbackActive
+    ? `scores from last completed day (${ACC_CORR.lastUsableMap.date}) - live map activates at 10 rocket-positives today (currently ${todayRocketSet.size})`
+    : hasRecommendationEvidence&&!scoringUsable
     ? `learning gated: only ${todayRocketSet.size} rocket-positives today (need 10) - neutral scores`
     : '';
   const outcomeReliabilityModel=buildOutcomeReliabilityModel(FEATS,weights);
@@ -2897,19 +2953,19 @@ async function runEngine(raw, sessionTag, options={}){
       // Only observed values are inverted for a negative learned correlation.
       const directedPercentile=(p==null||!Number.isFinite(p))
         ?0.35
-        :(targetRelevance[f]>=0?p:(1-p));
+        :(activeTargetRelevance[f]>=0?p:(1-p));
       rawScore+=w*directedPercentile;
     }
-    const learnedMrmrScore=scoringUsable?Math.round(rawScore*1000)/10:null;
+    const learnedMrmrScore=scoringActive?Math.round(rawScore*1000)/10:null;
     const currentFeatures=Object.fromEntries(FEATS.map(f=>[f,scoringFeatureRows[d.symbol]?.[f]??null]));
     // Outcome learning remains visible as confidence evidence only. It never alters Rocket Score or rank.
-    const outcomeReliability=scoringUsable?getOutcomeReliabilityAdjustment(currentFeatures,outcomeReliabilityModel,weights):{delta:0,confidence:0,matched:0};
+    const outcomeReliability=scoringActive?getOutcomeReliabilityAdjustment(currentFeatures,outcomeReliabilityModel,weights):{delta:0,confidence:0,matched:0};
     // Warm-up has no predictive evidence yet. A neutral 50 keeps every selected
     // stock equally weighted for allocation without pretending it is a learned score.
     // Regime exposure dial: in learned mode, scale the score by today's market breadth so
     // recommendations dampen (and fully suspend at extreme weakness) on hostile days.
-    const regimeFactor=scoringUsable?regimeExposureFactor(marketBreadth):1;
-    const score=scoringUsable?Math.round(learnedMrmrScore*regimeFactor*10)/10:WARMUP_NEUTRAL_SCORE;
+    const regimeFactor=scoringActive?regimeExposureFactor(marketBreadth):1;
+    const score=scoringActive?Math.round(learnedMrmrScore*regimeFactor*10)/10:WARMUP_NEUTRAL_SCORE;
 
     const vol=(K.volume?d[K.volume]:null);
     const flags=[];
@@ -3013,17 +3069,17 @@ async function runEngine(raw, sessionTag, options={}){
       // while negative correlations invert observed ranks only.
       const directedRank=(rank==null||!Number.isFinite(rank))
         ?0.35
-        :(targetRelevance[f]>=0?rank:(1-rank));
+        :(activeTargetRelevance[f]>=0?rank:(1-rank));
       rs+=w*directedRank;
     }
-    SCORE_MAP[d.symbol]=scoringUsable?Math.round(rs*regimeExposureFactor(marketBreadth)*1000)/10:WARMUP_NEUTRAL_SCORE;
+    SCORE_MAP[d.symbol]=scoringActive?Math.round(rs*regimeExposureFactor(marketBreadth)*1000)/10:WARMUP_NEUTRAL_SCORE;
   });
   parsed.forEach(d=>{d.rocketScore=SCORE_MAP[d.symbol]??null;});
   const interactionFeatureKeys=new Set([...staticInteractionDefs.map(def=>def.key),...breadthInteractionDefs.map(def=>def.key)]);
   const selectedInteractions=selectedFeatures
     .filter(feature=>interactionFeatureKeys.has(feature))
     .map(feature=>({feature,label:LABELS[feature]||feature,weight:weights[feature]||0}));
-  const featureStability=snapshotLearning.featureStability||{};
+  const featureStability=activeFeatureStability;
   const stabilityValues=FEATS.map(f=>Number(featureStability[f])||0).filter(v=>isFinite(v)).sort((a,b)=>a-b);
   const stabilityAt=pct=>stabilityValues.length?stabilityValues[Math.min(stabilityValues.length-1,Math.max(0,Math.floor((stabilityValues.length-1)*pct)))]:0;
   const stabilitySummary={
@@ -3037,9 +3093,9 @@ async function runEngine(raw, sessionTag, options={}){
     total:stabilityValues.length
   };
   const positionTslGapModel=persistPositionTslGapModel(results,getModelTradingDate(options.snapshotTimestamp||Date.now()));
-  ENGINE_DATA={targetRelevance,targetRelevanceToday,mrmr,weights,features:FEATS,selectedFeatures,labels:LABELS,top10Feats,accSessions:ACC_CORR?.sessions||0,laggedNote:laggedNote||'',
+  ENGINE_DATA={targetRelevance:activeTargetRelevance,targetRelevanceToday,mrmr,weights,features:FEATS,selectedFeatures,labels:LABELS,top10Feats,accSessions:ACC_CORR?.sessions||0,laggedNote:laggedNote||'',
     marketBreadth:marketBreadth,
-    regimeExposureFactor:scoringUsable?regimeExposureFactor(marketBreadth):1,
+    regimeExposureFactor:scoringActive?regimeExposureFactor(marketBreadth):1,
     featureStability,
     targetRelevanceByLag:snapshotLearning.targetRelevanceByLag||{},
     stabilitySummary,
@@ -3054,7 +3110,7 @@ async function runEngine(raw, sessionTag, options={}){
     deltaFeatureSchema:DELTA_FEATURE_SCHEMA,
     deltaOnlyFeatureCount:FEATS.length,
     excludedSlowFeatureCount:0,
-    useFreshCorr, hasRecommendationEvidence:scoringUsable, scoreGatedReason, currentUploadLearned, freshSignalCount,
+    useFreshCorr, hasRecommendationEvidence:scoringActive, scoreGatedReason, currentUploadLearned, freshSignalCount,
     scoringSource,
     useAccCorr: snapshotLearning.hadPriorCorr,
     snapshotElapsedMinutes:null,
