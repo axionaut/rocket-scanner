@@ -1,5 +1,5 @@
-const BUILD_TS='2026-07-07 12:25 IST'; // release build time (IST)
-const APP_VERSION=479; // Defaults, SL GTT export, partial-fill orders.
+const BUILD_TS='2026-07-07 14:11 IST'; // release build time (IST)
+const APP_VERSION=480; // Turnover-led liquidity, raw scores, self-managing filters.
 const GOOGLE_DRIVE_CLIENT_ID='1015012642264-oi2nelv3v90k3d39r994a6nelgjs2a56.apps.googleusercontent.com'; // Public OAuth Web Client ID.
 const HARD_FILTER_SCHEMA='structural_tradeability_v2';
 const STOCK_RUNWAY_CEILING_PCT=19.5; // Intentional owner-approved forward-catch strategy filter: excludes stocks already near their circuit band (or caps max entry) since a stock that has already used up its daily range is a poor pre-rocket buy. Active fallback when NSE price-band data is unavailable.
@@ -29,26 +29,8 @@ const DAILY_TRAJECTORY_TOTAL_DAYS=5;
 const DAILY_TRAJECTORY_PRIOR_DAYS=DAILY_TRAJECTORY_TOTAL_DAYS-1;
 const DAILY_TRAJECTORY_WEIGHT_STEPS=[4,3,2,1]; // D-1 through D-4, normalized over usable pairs.
 const WARMUP_NEUTRAL_SCORE=50; // Equal-weight display/allocation score until honest rocket-relevance evidence exists.
-// Regime exposure dial: scales the final rocket score by today's market breadth (fraction
-// of stocks advancing) at APPLICATION time only — it never touches learned relevance. Rocket
-// setups fire in receptive markets and fail as falling knives in broad selloffs, so exposure
-// tapers as breadth weakens and fully sits out at extreme weakness. Thresholds are tunable.
-const REGIME_BREADTH_FULL=0.50;   // At/above this breadth, full exposure (factor 1.0).
-const REGIME_BREADTH_FLOOR=0.25;  // At/below this breadth, sit out entirely (factor 0.0).
-const REGIME_MIN_FACTOR=0.0;      // Exposure floor at extreme weakness (0 = full sit-out).
 let MARKET_MODE='stock';
 function modeKey(base){return base;}
-// Continuous exposure multiplier from market breadth. 1.0 in healthy/strong markets,
-// tapers linearly through the weak zone, 0.0 at/below the floor. Neutral-and-above is
-// unpenalized because a genuine pre-rocket setup should still be trusted in a normal tape.
-function regimeExposureFactor(breadth){
-  if(breadth==null||!isFinite(breadth)) return 1.0; // unknown breadth: do not penalize
-  if(breadth>=REGIME_BREADTH_FULL) return 1.0;
-  if(breadth<=REGIME_BREADTH_FLOOR) return REGIME_MIN_FACTOR;
-  const t=(breadth-REGIME_BREADTH_FLOOR)/(REGIME_BREADTH_FULL-REGIME_BREADTH_FLOOR);
-  return REGIME_MIN_FACTOR+t*(1-REGIME_MIN_FACTOR);
-}
-
 function inputBaseName(name){
   return String(name||'').split(/[\\/]/).pop().trim();
 }
@@ -103,11 +85,6 @@ function updateModeUI(){
   const brand=document.querySelector('.brand-tag');
   if(brand) brand.textContent='Prior-State Rocket Relevance';
   document.querySelectorAll('.currency-lbl').forEach(el=>{el.textContent='₹';});
-  const minTurn=document.getElementById('fMinTurnover');
-  if(minTurn){
-    minTurn.placeholder='e.g. 10000000';
-    minTurn.title='Min turnover (Price × Volume) in ₹. Blank = no filter.';
-  }
 }
 let ALL=[],FILT=[],PG=1,PGSZ=100,SCOL='_rank',SDIR=1;
 let _tvLoadedThisSession=false; // true once a TV CSV has been processed this session
@@ -1050,47 +1027,16 @@ function isMarketHours(){
 }
 function getSessionDate(){ return getModelTradingDate(Date.now()); }
 
-// ── Auto Volume: minutes since day-start × configurable multiplier ──
-const LIQ_MIN_VOL_DEFAULT=5000;
-const SHAREHOLDER_MIN_DEFAULT=500;
-function calcAutoVolume(){
-  const mult=parseFloat(document.getElementById('fVolMult')?.value)||LIQ_MIN_VOL_DEFAULT;
-  const {mins}=istNow();
-  const minsFromOpen=mins-DAY_START_MIN;
-  if(minsFromOpen<=0) return mult;
-  if(minsFromOpen>=DAY_LENGTH_MIN) return Math.round(DAY_LENGTH_MIN*mult);
-  return Math.round(minsFromOpen*mult);
+// Stable liquidity and self-managing display filters
+const LIQ_MIN_AVG_VOL=10000;
+const LIQ_MIN_AVG_TURNOVER=10000000;
+const MIN_PRICE_FLOOR=5;
+const MIN_MCAP_FLOOR=500000000;
+function passesAverageLiquidity(avgVol10D,avgTurnover){
+  if(avgVol10D==null||!isFinite(avgVol10D)) return true;
+  if(avgVol10D<LIQ_MIN_AVG_VOL) return false;
+  return avgTurnover==null||!isFinite(avgTurnover)||avgTurnover>=LIQ_MIN_AVG_TURNOVER;
 }
-let VOL_AUTO=true;
-let _initInProgress=true; // suppresses applyFilters inside setAutoVolume during startup
-function setAutoVolume(){
-  if(!VOL_AUTO) return;
-  const v=calcAutoVolume();
-  const el=document.getElementById('fVol');
-  if(el&&el.value!=String(v)){
-    el.value=v;
-    if(ALL.length&&!_initInProgress) applyFilters();
-  }
-  if(el) el.style.color='var(--cyan)';
-  const lbl=document.getElementById('volAutoLabel');
-  if(lbl){lbl.textContent='(auto)';lbl.style.display='';}
-}
-setInterval(function(){if(VOL_AUTO&&ALL.length)setAutoVolume();},60000);
-function onVolChange(){
-  const el=document.getElementById('fVol');
-  if(!el) return;
-  if(el.value===''){
-    VOL_AUTO=true;
-    setAutoVolume();
-  } else {
-    VOL_AUTO=false;
-    el.style.color='var(--t1)';
-    const lbl=document.getElementById('volAutoLabel');
-    if(lbl){lbl.textContent='';lbl.style.display='none';}
-  }
-  applyFilters();
-}
-
 // ── CSV Parser ──
 function parseCSVRaw(text){
   const lines=[];let cur='',inQ=false;
@@ -1660,11 +1606,9 @@ function getRecommendationOutcomeSummary(){
 function getDisplayedEntryCandidates(rows){
   if(!Array.isArray(rows)||!rows.length) return [];
   const heldPos=getHeldPositionMap();
-  const reDrop=parseFloat(document.getElementById('fReDrop')?.value);
-  const dropPct=isFinite(reDrop)&&reDrop>=0?reDrop:1;
   return rows.map(s=>({...s,_features:s._features||{}}))
     .filter(s=>!getFilterBarReason(s))
-    .filter(s=>!applyHeldDisplayState(s,heldPos,dropPct))
+    .filter(s=>!applyHeldDisplayState(s,heldPos))
     .sort((a,b)=>(b.rocketScore||0)-(a.rocketScore||0))
     .slice(0,20);
 }
@@ -2644,6 +2588,8 @@ async function runEngine(raw, sessionTag, options={}){
     perf_1w:      findKey(/performance.*1_week|perf.*1_week|1_week.*perf/),
     volume:       findKey(/^volume_1_day$|^volume$/),
     turnover:     findKey(/price_volume_turnover_1_day/),
+    avg_volume_10d: findKey(/average_volume.*10_days|volume.*10_days.*average/),
+    avg_turnover_10d: findKey(/price_average_volume.*10_days|price.*average_volume.*10_days|average_volume.*10_days.*price/),
     market_cap:   findKey(/market_capitalization|market_cap/),
     shareholders: findKey(/number_of_shareholders/),
     piotroski:    findKey(/piotroski/),
@@ -2808,8 +2754,6 @@ async function runEngine(raw, sessionTag, options={}){
 
   // ── Recommendation filters ──
   // These rows remain in learningUniverse and snapshots; only live eligibility is filtered.
-  const _liqMinVol=parseFloat(document.getElementById('fVolMult')?.value)||LIQ_MIN_VOL_DEFAULT;
-  const _liqMinTurnover=parseFloat(document.getElementById('fMinTurnover')?.value)||0;
   REMOVED={uc:0,surv:0,nonEq:0,liq:0,fscore:0,atr:0,survRules:{}};
   const filtered=parsed.filter(d=>{
     const pc=K.price_change?d[K.price_change]:null;
@@ -2833,12 +2777,12 @@ async function runEngine(raw, sessionTag, options={}){
       if(rules.length){const primary=rules[0];REMOVED.survRules[primary]=(REMOVED.survRules[primary]||0)+1;}
       return false;
     }
-    // Liquidity floor — volume, turnover, or shareholders below threshold
-    const sh=K.shareholders?d[K.shareholders]:null;
-    const vol=K.volume?d[K.volume]:null;
-    const tv=K.turnover?d[K.turnover]:null;
-    const volFloor=_liqMinVol;
-    if((sh!==null&&sh<SHAREHOLDER_MIN_DEFAULT)||(vol!==null&&vol<volFloor)||(tv!==null&&_liqMinTurnover>0&&tv<_liqMinTurnover)){
+    // Stable average liquidity floor
+    const avgVol10D=K.avg_volume_10d?d[K.avg_volume_10d]:null;
+    const avgTurnover=K.avg_turnover_10d
+      ?d[K.avg_turnover_10d]
+      :(avgVol10D!=null&&K.price?d[K.price]*avgVol10D:null);
+    if(!passesAverageLiquidity(avgVol10D,avgTurnover)){
       _track('liq');return false;
     }
     // Piotroski — stock-only fundamental data filter
@@ -2962,10 +2906,7 @@ async function runEngine(raw, sessionTag, options={}){
     const outcomeReliability=scoringActive?getOutcomeReliabilityAdjustment(currentFeatures,outcomeReliabilityModel,weights):{delta:0,confidence:0,matched:0};
     // Warm-up has no predictive evidence yet. A neutral 50 keeps every selected
     // stock equally weighted for allocation without pretending it is a learned score.
-    // Regime exposure dial: in learned mode, scale the score by today's market breadth so
-    // recommendations dampen (and fully suspend at extreme weakness) on hostile days.
-    const regimeFactor=scoringActive?regimeExposureFactor(marketBreadth):1;
-    const score=scoringActive?Math.round(learnedMrmrScore*regimeFactor*10)/10:WARMUP_NEUTRAL_SCORE;
+    const score=scoringActive?learnedMrmrScore:WARMUP_NEUTRAL_SCORE;
 
     const vol=(K.volume?d[K.volume]:null);
     const flags=[];
@@ -3072,7 +3013,7 @@ async function runEngine(raw, sessionTag, options={}){
         :(activeTargetRelevance[f]>=0?rank:(1-rank));
       rs+=w*directedRank;
     }
-    SCORE_MAP[d.symbol]=scoringActive?Math.round(rs*regimeExposureFactor(marketBreadth)*1000)/10:WARMUP_NEUTRAL_SCORE;
+    SCORE_MAP[d.symbol]=scoringActive?Math.round(rs*1000)/10:WARMUP_NEUTRAL_SCORE;
   });
   parsed.forEach(d=>{d.rocketScore=SCORE_MAP[d.symbol]??null;});
   const interactionFeatureKeys=new Set([...staticInteractionDefs.map(def=>def.key),...breadthInteractionDefs.map(def=>def.key)]);
@@ -3095,7 +3036,7 @@ async function runEngine(raw, sessionTag, options={}){
   const positionTslGapModel=persistPositionTslGapModel(results,getModelTradingDate(options.snapshotTimestamp||Date.now()));
   ENGINE_DATA={targetRelevance:activeTargetRelevance,targetRelevanceToday,mrmr,weights,features:FEATS,selectedFeatures,labels:LABELS,top10Feats,accSessions:ACC_CORR?.sessions||0,laggedNote:laggedNote||'',
     marketBreadth:marketBreadth,
-    regimeExposureFactor:scoringActive?regimeExposureFactor(marketBreadth):1,
+    regimeExposureFactor:1,
     featureStability,
     targetRelevanceByLag:snapshotLearning.targetRelevanceByLag||{},
     stabilitySummary,
@@ -3373,7 +3314,7 @@ function renderStats(){
     ${slTgtCard}
     <div class="st"><div class="st-l">Score Spread</div><div class="st-v">${scoreSpread}</div><div class="st-d">${effectiveScoreSpreadDetail}</div></div>
     <div class="st"><div class="st-l">Top Sector</div><div class="st-v" style="font-size:15px;color:var(--green)">${topSec}</div><div class="st-d">${topSecPct.toFixed(0)}% advancing</div></div>
-    <div class="st"><div class="st-l">Breadth</div><div class="st-v" style="color:var(--cyan)">${ENGINE_DATA.marketBreadth!=null?(ENGINE_DATA.marketBreadth*100).toFixed(0):(bull/t*100).toFixed(0)}%</div><div class="st-d">${ENGINE_DATA.regimeExposureFactor!=null&&ENGINE_DATA.regimeExposureFactor<1?`exposure ${(ENGINE_DATA.regimeExposureFactor*100).toFixed(0)}% · scores dampened`:'exposure 100% · full'} · ${ENGINE_DATA.accSessions||0} learned horizons</div></div>${bookedCard}`;
+    <div class="st"><div class="st-l">Breadth</div><div class="st-v" style="color:var(--cyan)">${ENGINE_DATA.marketBreadth!=null?(ENGINE_DATA.marketBreadth*100).toFixed(0):(bull/t*100).toFixed(0)}%</div><div class="st-d">${bull.toLocaleString()} advancing · ${(t-bull).toLocaleString()} down/flat · ${ENGINE_DATA.accSessions||0} learned horizons</div></div>${bookedCard}`;
 
   // Row 1: hard-filter removal pills
   const filterPills=[];
@@ -4750,16 +4691,14 @@ function getTopRankFilterPill(){
   const cap=Math.max(1,Math.min(20,parsed));
   return cap<20?`Top ≤${cap}`:null;
 }
+function getPerStockBudgetCap(){
+  const maxAlloc=parseFloat(document.getElementById('fMaxAlloc')?.value)||0;
+  const capital=parseFloat(document.getElementById('fCapital')?.value)||0;
+  const caps=[maxAlloc,capital].filter(v=>v>0&&isFinite(v));
+  return caps.length?Math.min(...caps):null;
+}
 function getFilterBarReason(s){
   const minScore=getMinScoreFloor();
-  const fvol=parseFloat(document.getElementById('fVol')?.value)||0;
-  const fMinMarketCap=parseFloat(document.getElementById('fMinMarketCap')?.value)||0;
-  const _fMin1Dv=document.getElementById('fMin1D')?.value||'';
-  const fMin1D=_fMin1Dv!==''?parseFloat(_fMin1Dv):-Infinity;
-  const _fMax1Dv=document.getElementById('fMax1D')?.value||'';
-  const fMax1D=_fMax1Dv!==''?parseFloat(_fMax1Dv):Infinity;
-  const fPriceMin=parseFloat(document.getElementById('fPriceMin')?.value)||0;
-  const fPriceMax=parseFloat(document.getElementById('fPriceMax')?.value)||0;
   const bandReason=getPriceBandBlockReason(s);
   if(bandReason) return bandReason;
   if(s.rocketToday) return s.rocketNow?'Already in today’s live rocket set':'Already rocketed earlier today';
@@ -4768,15 +4707,12 @@ function getFilterBarReason(s){
   const geometry=applyEntryGeometryState(s);
   if(!geometry.passes) return geometry.reason;
   if(ENGINE_DATA?.hasRecommendationEvidence&&minScore>0&&s.rocketScore<minScore) return `Score ${s.rocketScore?.toFixed?.(1)||s.rocketScore} < ${minScore}`;
-  if(fvol>0&&s.volume!=null&&s.volume<fvol) return `Volume ${Math.round(s.volume).toLocaleString('en-IN')} < ${Math.round(fvol).toLocaleString('en-IN')}`;
-  if(fMinMarketCap>0&&s.marketCap!=null&&s.marketCap<fMinMarketCap) return `MCap ₹${fV(s.marketCap)} < ₹${fV(fMinMarketCap)}`;
-  if(fMin1D>-Infinity&&s.priceChange!=null&&s.priceChange<fMin1D) return `1D ${s.priceChange.toFixed(2)}% < ${fMin1D}%`;
-  if(fMax1D<Infinity&&s.priceChange!=null&&s.priceChange>fMax1D) return `1D ${s.priceChange.toFixed(2)}% > ${fMax1D}%`;
-  if(fPriceMin>0&&s.price!=null&&s.price<fPriceMin) return `Price ${fmtINR(s.price)} < ${fmtINR(fPriceMin)}`;
-  if(fPriceMax>0&&s.price!=null&&s.price>fPriceMax) return `Price ${fmtINR(s.price)} > ${fmtINR(fPriceMax)}`;
+  if(s.price!=null&&s.price<MIN_PRICE_FLOOR) return `Price ${fmtINR(s.price)} < ${fmtINR(MIN_PRICE_FLOOR)}`;
+  if(s.marketCap!=null&&s.marketCap<MIN_MCAP_FLOOR) return `MCap ₹${fV(s.marketCap)} < ₹${fV(MIN_MCAP_FLOOR)}`;
+  const budgetCap=getPerStockBudgetCap();
+  if(budgetCap!=null&&getBuyPrice(s)>budgetCap) return '1 share exceeds per-stock budget';
   return '';
-}
-function getHeldPositionMap(){
+}function getHeldPositionMap(){
   const heldPos={};
   Object.values(getCombinedOpenPositionMap()).forEach(pos=>{
     heldPos[pos.symbol]={qty:pos.qty,avg:pos.avg};
@@ -4849,7 +4785,7 @@ function getCombinedOpenPositionMap(){
   Object.values(combined).forEach(pos=>{pos.avg=pos.avg>0?+pos.avg.toFixed(4):0;});
   return combined;
 }
-function applyHeldDisplayState(s,heldPos,dropPct){
+function applyHeldDisplayState(s,heldPos){
   const pos=heldPos[s.symbol];
   if(!pos) return '';
   const {qty,avg}=pos;
@@ -5439,19 +5375,13 @@ function applyFilters(){
     velocityTilted:FILT.filter(s=>!s._geometryUnverified&&s.normalizedVelocityPotential>0).length
   };
 
-  // ── Already-held suppression ──
-  // If a stock is in current POSITIONS (long, qty>0), hide it from recommendations
-  // UNLESS its current price has dropped at least Re-entry Drop % below avg buy price.
-  // Rationale: averaging down at a meaningfully lower price improves blended cost;
-  // re-buying at or above entry just doubles risk without improving the position.
+  // Already-held suppression keeps red positions out of buys and allows only top-ups into strength.
   SUPPRESSED_HELD=0;
   {
-    const reDrop=parseFloat(document.getElementById('fReDrop')?.value);
-    const dropPct=isFinite(reDrop)&&reDrop>=0?reDrop:1;
     const heldPos=getHeldPositionMap();
     if(Object.keys(heldPos).length){
       FILT=FILT.filter(x=>{
-        const reason=applyHeldDisplayState(x,heldPos,dropPct);
+        const reason=applyHeldDisplayState(x,heldPos);
         if(!reason) return true;
         hiddenReasons[x.symbol]=reason;
         SUPPRESSED_HELD++;
@@ -5509,16 +5439,9 @@ function renderStatusBar(){
   const total=ALL.length,shown=FILT.length;
   const tags=[];
   const minScore2=getMinScoreFloor();
-  const fvol2=parseFloat(document.getElementById('fVol')?.value)||0;
-  const fMinMarketCap2=parseFloat(document.getElementById('fMinMarketCap')?.value)||0;
-  const _fMin1Dv2=document.getElementById('fMin1D')?.value||'';
-  const fMin1D=_fMin1Dv2!==''?parseFloat(_fMin1Dv2):-Infinity;
   const topRankPill=getTopRankFilterPill();
   if(topRankPill)tags.push(topRankPill);
   if(ENGINE_DATA?.hasRecommendationEvidence&&minScore2>0)tags.push('Score≥'+minScore2);
-  if(fMin1D>-Infinity)tags.push('1D≥'+fMin1D+'%');
-  if(fvol2>0){const n=fvol2;tags.push('Vol≥'+(n>=1e6?(n/1e6).toFixed(1)+'M':n>=1e3?(n/1e3).toFixed(0)+'K':n));}
-  if(fMinMarketCap2>0)tags.push('MCap≥₹'+fV(fMinMarketCap2));
   const capital=parseFloat(document.getElementById('fCapital').value)||0;
   const isFiltered=tags.length>0||shown<total;
   const countColor=shown<total?'var(--fire)':'var(--green)';
@@ -5568,21 +5491,13 @@ function renderStatusBar(){
 }
 
 function clearFilters(){
-  ['fMinScore','fTopRank','fMin1D','fCapital','fMaxAlloc','fPriceMin'].forEach(id=>{const el=document.getElementById(id);if(el)el.value='';});
-  const maxPriceEl=document.getElementById('fPriceMax');if(maxPriceEl)maxPriceEl.value='1200';
-  const max1Del=document.getElementById('fMax1D');if(max1Del)max1Del.value='5';
-  const minTurnEl=document.getElementById('fMinTurnover');if(minTurnEl)minTurnEl.value='10000000';
-  const minMCapEl=document.getElementById('fMinMarketCap');if(minMCapEl)minMCapEl.value='500000000';
-  const reDropEl=document.getElementById('fReDrop');if(reDropEl)reDropEl.value='1';
+  ['fMinScore','fTopRank','fCapital','fMaxAlloc'].forEach(id=>{const el=document.getElementById(id);if(el)el.value='';});
   const topupEl=document.getElementById('fTopupAlloc');if(topupEl)topupEl.value='50';
   const minScoreEl=document.getElementById('fMinScore');if(minScoreEl)minScoreEl.value='';
   applyLearnedMaxAllocDefault();
-  VOL_AUTO=true;setAutoVolume();
   applyFilters();
   localStorage.removeItem(SCANNER_STORE);
 }
-
-
 function toggleRequiredFilesPopover(){
   const pop=document.getElementById('requiredFilesPopover');
   if(!pop) return;
@@ -6629,20 +6544,19 @@ async function decodeScannerSnapshot(source){
   return out;
 }
 function applySavedFiltersForMode(mode){
-  const ids=['fMinScore','fTopRank','fPriceMin','fPriceMax','fMin1D','fMax1D','fVol','fVolMult','fMinTurnover','fMinMarketCap','fCapital','fMaxAlloc','fReDrop','fTopupAlloc'];
+  const ids=['fMinScore','fTopRank','fCapital','fMaxAlloc','fTopupAlloc'];
   const prev={};
   ids.forEach(id=>{const el=document.getElementById(id);if(el)prev[id]=el.value;});
   try{
     const st=JSON.parse(localStorage.getItem(modeKey(SCANNER_STORE,mode))||'{}');
     const shared=JSON.parse(localStorage.getItem(SHARED_FILTER_STORE)||'{}');
-    const map={minScore:'fMinScore',topRank:'fTopRank',priceMin:'fPriceMin',priceMax:'fPriceMax',fMin1D:'fMin1D',fMax1D:'fMax1D',fvol:'fVol',volMult:'fVolMult',minTurnover:'fMinTurnover',minMarketCap:'fMinMarketCap',reDrop:'fReDrop',topupAlloc:'fTopupAlloc'};
+    const map={minScore:'fMinScore',topRank:'fTopRank',topupAlloc:'fTopupAlloc'};
     Object.entries(map).forEach(([k,id])=>{const el=document.getElementById(id);if(el&&st[k]!=null)el.value=st[k];});
     const capEl=document.getElementById('fCapital');if(capEl&&shared.capital!=null)capEl.value=shared.capital;
     const maxEl=document.getElementById('fMaxAlloc');if(maxEl&&shared.maxAlloc!=null)maxEl.value=shared.maxAlloc;
   }catch(e){}
   return ()=>ids.forEach(id=>{const el=document.getElementById(id);if(el&&prev[id]!=null)el.value=prev[id];});
-}
-async function processScannerUpload(scannerFile, mode, options={}){
+}async function processScannerUpload(scannerFile, mode, options={}){
   if(!scannerFile) return false;
   // This is the only scanner timestamp used by rocket relevance. File metadata, Drive metadata
   // and BUILD_TS are deployment/storage facts, never trading-session facts.
@@ -6896,8 +6810,6 @@ async function initApp(){
   if(!brain&&!FS.hasFolder()){
     console.log('INIT: Google Drive is not authorized; skipping cloud hydration until user reconnects.');
     try{loadFilterState();}catch(e){}
-    try{setAutoVolume();}catch(e){}
-    _initInProgress=false;
     showDriveAuthRequiredState();
     updateFolderUI();
     setLoading(false);
@@ -7018,9 +6930,6 @@ async function initApp(){
   // Step 5: Load filter state (still from localStorage)
   try{loadFilterState();}catch(e){console.error('INIT step5 loadFilterState failed:',e);}
 
-  // Step 5b: Set auto volume (must be after loadFilterState so fVolMult is restored first)
-  try{setAutoVolume();}catch(e){}
-
   // Step 6: Show header + dash before applyFilters so renderTable works into a visible element
   try{
     document.getElementById('hdrR').style.display='flex';
@@ -7029,7 +6938,6 @@ async function initApp(){
   }catch(e){console.error('INIT step6 visibility failed:',e);}
 
   // Step 7: Apply filters and render table — runs once, cleanly, with all filters restored
-  _initInProgress=false;
   try{applyFilters();}catch(e){console.error('INIT step7 applyFilters failed:',e);}
   setLoading(false);
   schedulePerformanceRender();
@@ -7040,15 +6948,6 @@ function saveFilterState(){
   const state={
     minScore:document.getElementById('fMinScore')?.value||String(MIN_SCORE_DEFAULT),
     topRank:document.getElementById('fTopRank')?.value||'',
-    priceMin:document.getElementById('fPriceMin')?.value||'',
-    priceMax:document.getElementById('fPriceMax')?.value||'',
-    fvol:VOL_AUTO?'':document.getElementById('fVol')?.value||'',
-    volMult:document.getElementById('fVolMult')?.value||String(LIQ_MIN_VOL_DEFAULT),
-    minTurnover:document.getElementById('fMinTurnover')?.value??'',
-    minMarketCap:document.getElementById('fMinMarketCap')?.value??'',
-    fMin1D:document.getElementById('fMin1D')?.value||'',
-    fMax1D:document.getElementById('fMax1D')?.value||'',
-    reDrop:document.getElementById('fReDrop')?.value||'1',
     topupAlloc:document.getElementById('fTopupAlloc')?.value||'50',
     sortCol:SCOL,
     sortDir:SDIR,
@@ -7067,25 +6966,11 @@ function loadFilterState(){
     const shared=JSON.parse(localStorage.getItem(SHARED_FILTER_STORE)||'{}');
     if(state.minScore){const el=document.getElementById('fMinScore');if(el)el.value=state.minScore;}
     if(state.topRank!=null){const el=document.getElementById('fTopRank');if(el)el.value=state.topRank;}
-    if(state.priceMin){const el=document.getElementById('fPriceMin');if(el)el.value=state.priceMin;}
-    if(state.priceMax!=null){const el=document.getElementById('fPriceMax');if(el)el.value=state.priceMax;}
-    if(state.fMin1D){const el=document.getElementById('fMin1D');if(el)el.value=state.fMin1D;}
-    if(state.fMax1D!=null){const el=document.getElementById('fMax1D');if(el)el.value=state.fMax1D;}
     const sharedCapital=shared.capital!=null?shared.capital:state.capital;
     const sharedMaxAlloc=shared.maxAlloc!=null?shared.maxAlloc:state.maxAlloc;
     if(sharedCapital){const el=document.getElementById('fCapital');if(el)el.value=sharedCapital;}
     if(sharedMaxAlloc){const el=document.getElementById('fMaxAlloc');if(el)el.value=sharedMaxAlloc;}
-    if(state.reDrop!=null){const el=document.getElementById('fReDrop');if(el)el.value=state.reDrop;}
     if(state.topupAlloc!=null){const el=document.getElementById('fTopupAlloc');if(el)el.value=state.topupAlloc;}
-    if(state.volMult){const el=document.getElementById('fVolMult');if(el)el.value=state.volMult;}
-    if(state.minTurnover!=null){const el=document.getElementById('fMinTurnover');if(el)el.value=state.minTurnover;}
-    if(state.minMarketCap!=null){const el=document.getElementById('fMinMarketCap');if(el)el.value=state.minMarketCap;}
-    if(state.fvol){
-      const el=document.getElementById('fVol');if(el)el.value=state.fvol;
-      VOL_AUTO=false;
-    } else {
-      VOL_AUTO=true; setAutoVolume();
-    }
     applyLearnedMaxAllocDefault();
     if(state.sortCol==='rocketScore'&&Number(state.sortDir)<0){SCOL='_rank';SDIR=1;}
     else {
@@ -7095,8 +6980,6 @@ function loadFilterState(){
   }catch(e){console.warn('Could not load filter state',e);}
 
 }
-
-
 // ── Fixed horizontal scrollbar always at viewport bottom ──
 function initFixedScroll(){
   const tblW   = document.getElementById('tblW');
