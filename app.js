@@ -1,5 +1,5 @@
-const BUILD_TS='2026-07-07 14:11 IST'; // release build time (IST)
-const APP_VERSION=480; // Turnover-led liquidity, raw scores, self-managing filters.
+const BUILD_TS='2026-07-07 15:09 IST'; // release build time (IST)
+const APP_VERSION=481; // Volatility-scaled stops, rupee-risk sizing, adverse excursion.
 const GOOGLE_DRIVE_CLIENT_ID='1015012642264-oi2nelv3v90k3d39r994a6nelgjs2a56.apps.googleusercontent.com'; // Public OAuth Web Client ID.
 const HARD_FILTER_SCHEMA='structural_tradeability_v2';
 const STOCK_RUNWAY_CEILING_PCT=19.5; // Intentional owner-approved forward-catch strategy filter: excludes stocks already near their circuit band (or caps max entry) since a stock that has already used up its daily range is a poor pre-rocket buy. Active fallback when NSE price-band data is unavailable.
@@ -19,7 +19,9 @@ const HARVEST_MIN_SAMPLES=8;
 const ENTRY_FADE_RETENTION_FLOOR=70; // Below this, a pullback through the target zone is treated as a fading entry.
 const ENTRY_FADE_SEVERE_TARGET_MULT=2; // A pullback twice the harvest target is too much give-back to chase.
 const MIN_SCORE_DEFAULT=77; // Empty Min Score field still means the visible default floor.
-const SL_HARD_CAP_PCT=3.0; // Maximum stop distance used for display, sizing, export references and entry geometry.
+const SL_ATR_MULT=1.5;
+const SL_MIN_PCT=3.0;
+const SL_MAX_PCT=8.0;
 const GEOMETRY_MIN_RR=2.0; // Require at least 2x headroom-to-risk before recommending a fresh entry.
 const VELOCITY_WEIGHT=0.3; // Modest ranking tilt toward catchable room to upper circuit among geometry survivors.
 // Rocket relevance: four prior trading-day states explain the current day's rocket set.
@@ -1085,12 +1087,20 @@ function meanArr(arr){return arr.length?arr.reduce((s,v)=>s+v,0)/arr.length:0;}
 function roundPct05(v){return +(Math.round(v/0.05)*0.05).toFixed(2);}
 function capSLDistancePct(v){
   const n=Number(v);
-  if(!Number.isFinite(n)||n<=0) return null;
-  return Math.min(n,SL_HARD_CAP_PCT);
+  if(!Number.isFinite(n)||n<=0) return SL_MIN_PCT;
+  return Math.max(SL_MIN_PCT,Math.min(n,SL_MAX_PCT));
 }
 function getCappedSLPct(rawDistance){
-  const capped=capSLDistancePct(rawDistance);
-  return capped==null?null:-capped;
+  return -capSLDistancePct(rawDistance);
+}
+function getActiveStopDistancePct(atrPct){
+  const atr=Number(atrPct);
+  return capSLDistancePct(atr>0?atr*SL_ATR_MULT:SL_MIN_PCT);
+}
+function getRowStopDistancePct(s){
+  const explicit=Math.abs(Number(s?.slPct));
+  if(explicit>0&&Number.isFinite(explicit)) return capSLDistancePct(explicit);
+  return getActiveStopDistancePct(s?.atr);
 }
 function weightedPercentile(rows,valueFn,weightFn,pct){
   const vals=rows.map(r=>({v:valueFn(r),w:Math.max(0,weightFn(r))}))
@@ -1671,6 +1681,7 @@ function syncExecutedRecommendedEntries(){
       horizonDays:existing?.horizonDays||store.cohorts[fill.date]?.horizonDays||getAdaptiveOutcomeHorizonDays(),
       observations:existing?.observations||0,evaluatedThrough:existing?.evaluatedThrough||null,
       bestNetHighPct:existing?.bestNetHighPct??null,bestNetClosePct:existing?.bestNetClosePct??null,
+      maxAdversePct:existing?.maxAdversePct??null,
       bestHighDays:existing?.bestHighDays??null,bestVelocityPctPerDay:existing?.bestVelocityPctPerDay??null,
       bestVelocityDays:existing?.bestVelocityDays??null,
       complete:existing?.complete||false
@@ -1696,10 +1707,19 @@ function assessExecutedEntryOutcomeScan(scan){
     const horizon=Math.max(1,entry.horizonDays||store.horizonDays||getAdaptiveOutcomeHorizonDays());
     entry.horizonDays=horizon;
     const gap=tradingDaysBetween(entry.issueDate,scan.date);
-    if(gap==null||gap<=0) return;
+    if(gap==null) return;
     if(gap>horizon){entry.complete=true;changed=true;return;}
     const row=rowMap[entry.symbol];
-    if(!row||entry.evaluatedThrough===scan.date) return;
+    if(!row) return;
+    const entryRef=Number(entry.referencePrice||entry.buyPrice);
+    if(entryRef>0&&row.low1d>0&&gap>=0){
+      const adverse=Math.max(0,((entryRef-row.low1d)/entryRef)*100);
+      if(entry.maxAdversePct==null||adverse>entry.maxAdversePct){
+        entry.maxAdversePct=+adverse.toFixed(2);
+        changed=true;
+      }
+    }
+    if(gap<=0||entry.evaluatedThrough===scan.date) return;
     const highNet=estimatedEntryNetPct(entry,row.high1d>0?row.high1d:row.price);
     const closeNet=estimatedEntryNetPct(entry,row.price);
     entry.observations=(entry.observations||0)+1;
@@ -2949,20 +2969,12 @@ async function runEngine(raw, sessionTag, options={}){
       isSurv:_isSurv, survRules:_survRules,
       // Calculated SL/Target per stock — adaptive from tradebook if available
       slPct: (()=>{
-        if(TRADEBOOK_STATS&&TRADEBOOK_STATS.adaptiveSL){
-          d._slRawDistance=TRADEBOOK_STATS.adaptiveSL;
-          d._slCapped=TRADEBOOK_STATS.adaptiveSL>SL_HARD_CAP_PCT;
-          return getCappedSLPct(TRADEBOOK_STATS.adaptiveSL);
-        }
         const atr=K.atr_pct?d[K.atr_pct]:null;
-        if(atr>0){
-          d._slRawDistance=atr*1.5;
-          d._slCapped=d._slRawDistance>SL_HARD_CAP_PCT;
-          return getCappedSLPct(d._slRawDistance);
-        }
-        d._slRawDistance=null;
-        d._slCapped=false;
-        return null;
+        const raw=atr>0?atr*SL_ATR_MULT:null;
+        const active=getActiveStopDistancePct(atr);
+        d._slRawDistance=raw;
+        d._slCapped=raw!=null&&Math.abs(raw-active)>1e-9;
+        return -active;
       })(),
       slRawPct:d._slRawDistance,
       slCapped:!!d._slCapped,
@@ -3822,7 +3834,6 @@ function renderPerformance(){
   let timeStopHtml='', timeStopTblObj=null;
   (function(){
     if(!allTrips.length) return;
-    const adaptiveSL=capSLDistancePct(TRADEBOOK_STATS?.adaptiveSL)||3.5;
     const adaptiveTGT=getEffectiveTgtPct()||(TRADEBOOK_STATS?.adaptiveTGT||3.7);
     // Apply the net profit-per-day horizon learned from closed tradebook outcomes.
     const cutoffDays=getEffectiveReviewDays()||5;
@@ -3849,11 +3860,12 @@ function renderPerformance(){
       const pnlRs=(avgCost&&ltp&&qty)?+((ltp-avgCost)*qty).toFixed(0):null;
       const daysHeld=getOpenPositionDaysHeld(sym,qty);
       const capDeployed=(avgCost&&qty)?+(avgCost*qty).toFixed(0):null;
+      const activeSL=getRowStopDistancePct(scannerRow);
       const tgtPrice=avgCost?tickPrice(avgCost*(1+adaptiveTGT/100)):null;
-      const slPrice=avgCost?tickPrice(avgCost*(1-adaptiveSL/100)):null;
+      const slPrice=avgCost?tickPrice(avgCost*(1-activeSL/100)):null;
       // Distance to SL: positive = above SL (safe), negative = breached SL
       const distSL=(ltp!=null&&slPrice!=null&&slPrice>0)?+((ltp-slPrice)/slPrice*100).toFixed(2):null;
-      const tslInfo=calcPositionTSL({sym,qty,avgCost,ltp,scannerRow,adaptiveSL,adaptiveTGT,prev:_tslStore[sym]});
+      const tslInfo=calcPositionTSL({sym,qty,avgCost,ltp,scannerRow,adaptiveSL:activeSL,adaptiveTGT,prev:_tslStore[sym]});
       if(tslInfo){
         _tslNext[sym]=tslInfo;
         if(JSON.stringify(_tslStore[sym]||{})!==JSON.stringify(tslInfo)) _tslChanged=true;
@@ -3925,7 +3937,7 @@ function renderPerformance(){
       {key:'capDeployed',label:'Capital ₹',align:'right',fmt:fmtINR,clrFn:()=>'var(--t2)'},
       {key:'_sortDays',label:'Days Held',align:'right',fmt:(v,r)=>_daysFmt(r.daysHeld),clrFn:()=>'var(--t1)'},
       {key:'tgtPrice',label:'Target ₹',align:'right',fmt:(v,r)=>v!=null?fmtINR(v)+`<span style="font-size:10px;color:var(--t3);margin-left:4px">+${adaptiveTGT}%</span>`:'—',clrFn:()=>'var(--green)'},
-      {key:'slPrice',label:'SL ₹',align:'right',fmt:(v,r)=>v!=null?fmtINR(v)+`<span style="font-size:10px;color:var(--t3);margin-left:4px">-${adaptiveSL}%</span>`:'—',clrFn:()=>'var(--red)'},
+      {key:'slPrice',label:'SL ₹',align:'right',fmt:(v,r)=>v!=null?fmtINR(v)+`<span style="font-size:10px;color:var(--t3);margin-left:4px">-${getRowStopDistancePct(ALL.find(s=>s.symbol===r.sym)).toFixed(2)}%</span>`:'—',clrFn:()=>'var(--red)'},
       {key:'tslPrice',label:'TSL Trigger ₹',align:'right',bold:true,fmt:(v,r)=>v!=null?fmtINR(v)+`<div style="font-size:10px;color:${r.tslLockPct>0?'var(--green)':r.tslLockPct===0?'var(--amber)':'var(--red)'};margin-top:1px">locked ${r.tslLockPct>=0?'+':''}${Number(r.tslLockPct??0).toFixed(2)}%</div><div style="font-size:10px;color:var(--t3);margin-top:1px">gap ${Number(r.tslGapPct??0).toFixed(2)}% · ${r.tslBasis||'ATR fallback'}</div>`:'<span title="Below harvest target — fixed SL applies">—</span>',clrFn:(v,r)=>v==null?'var(--t3)':r.tslLockPct>0?'var(--green)':r.tslLockPct===0?'var(--amber)':'var(--red)'},
       {key:'signal',label:'Signal',align:'right',bold:true,fmt:v=>v!=null?(v>=0?'+':'')+v.toFixed(2):'—',clrFn:v=>v==null?'var(--t3)':v>0?'var(--green)':v<0?'var(--red)':'var(--t2)'},
     ];
@@ -4466,7 +4478,7 @@ function _renderMethodologyInner(){
       <div class="m-card"><h4>Low-Sample Diagnostics</h4><p>${lowSampleText}</p></div>
       <div class="m-card"><h4>Outcome Self-Correction</h4><p>${feedbackText} Outcome evidence is displayed as confidence context only. It does not add or subtract points from Rocket Score.</p></div>
       <div class="m-card"><h4>Feature Weighting</h4><p>Every indicator receives a cross-day stability factor from its D-1...D-4 relevance track record. Final weight starts as absolute AUC relevance times stability, then mRMR redundancy reduces overlapping stable signals. All features are considered with no fixed cap; unstable or random features self-cancel toward zero weight, so the feature list decides its own effective size.</p></div>
-      <div class="m-card"><h4>Entry Geometry Gate</h4><p>After live relevance and entry-fade checks, a fresh recommendation must still have favorable reward:risk geometry: room to upper circuit (pct_to_upper_band) must be at least ${GEOMETRY_MIN_RR}x the active stop distance. Stop distance is capped at ${SL_HARD_CAP_PCT.toFixed(1)}% everywhere the scanner uses SL, so large historical/ATR stops cannot justify loose entries. If upper-band room is missing for a stock, it is kept as geometry-unverified and ranks on relevance alone rather than being silently removed.</p></div>
+      <div class="m-card"><h4>Entry Geometry Gate</h4><p>After live relevance and entry-fade checks, a fresh recommendation must still have favorable reward:risk geometry: room to upper circuit (pct_to_upper_band) must be at least ${GEOMETRY_MIN_RR}x the active stop distance. Stop distance is volatility-scaled from daily ATR and clamped to ${SL_MIN_PCT.toFixed(1)}%-${SL_MAX_PCT.toFixed(1)}%, so high-ATR stocks need honest runway. If upper-band room is missing for a stock, it is kept as geometry-unverified and ranks on relevance alone rather than being silently removed.</p></div>
       ${(()=>{
         const acc=computeWindowPredictionAccuracy(SNAPSHOT_RUNTIME);
         const pct=x=>x&&x.hitRate!=null?(x.hitRate*100).toFixed(1)+'%':'—';
@@ -4634,7 +4646,7 @@ function getGeometryHeadroomPct(s){
 }
 function evaluateEntryGeometry(s){
   const headroom=getGeometryHeadroomPct(s);
-  const risk=capSLDistancePct(Math.abs(Number(s?.slPct)));
+  const risk=getRowStopDistancePct(s);
   const out={passes:true,unverified:false,headroom,risk,required:null,reason:''};
   if(headroom==null){
     out.unverified=true;
@@ -5012,8 +5024,9 @@ function calcPositionTSL({sym, qty, avgCost, ltp, scannerRow, adaptiveSL, adapti
   const gapPct=gap.gapPct;
   const minStep=getZerodhaMinTrailPoints(avgCost);
   const candidate=+tickPrice(Math.max(0,peak*(1-gapPct/100))).toFixed(2);
+  const fixedStop=+tickPrice(Math.max(0,avgCost*(1-adaptiveSL/100))).toFixed(2);
   const storedTsl=(!reset&&prevPosition?.tsl!=null&&isFinite(prevPosition.tsl))?Number(prevPosition.tsl):null;
-  const activeTsl=mode==='trail'?+Math.max(storedTsl||0,candidate).toFixed(2):null;
+  const activeTsl=mode==='trail'?+Math.max(storedTsl||0,candidate).toFixed(2):fixedStop;
   const lockPct=activeTsl!=null?+(((activeTsl-avgCost)/avgCost)*100).toFixed(2):null;
   const distancePoints=activeTsl!=null?+Math.max(0,ltp-activeTsl).toFixed(2):null;
   return {
@@ -5072,7 +5085,8 @@ function computeAlloc(capital, selList){
   const rawScore=s=>Math.max(0,Number(s.rocketScore)||0);
   const totalRawScore=selList.reduce((sum,s)=>sum+rawScore(s),0)||1;
   const sortedSel=[...selList].sort((a,b)=>rawScore(b)-rawScore(a));
-  const allocMap={},limits={};
+  const riskBudgetRs=getRiskBudgetRs(capital);
+  const allocMap={},limits={},riskQtyLimits={};
 
   // Top-up percentage is a hard TOTAL allocation cap for the single stock order.
   for(const s of sortedSel){
@@ -5081,11 +5095,13 @@ function computeAlloc(capital, selList){
     const normalBudget=Math.min(spendableCapital*(rawScore(s)/totalRawScore),cap);
     const rowLimit=s._isTopUp?normalBudget*topupMult:normalBudget;
     limits[s.symbol]=rowLimit;
-    const qty=affordableQty(rowLimit,buyP,rowLimit);
+    const riskQty=getRiskCappedQty(riskBudgetRs,getRowStopDistancePct(s),buyP);
+    riskQtyLimits[s.symbol]=riskQty;
+    const qty=Math.min(affordableQty(rowLimit,buyP,rowLimit),riskQty);
     if(qty<=0) continue;
     const ev=evalNet(s,buyP,qty);
     allocMap[s.symbol]={alloc:qty*buyP,debit:buyDebit(buyP,qty),buyCharges:calcZerodhaCharges(buyP,qty,false,false,false),qty,buyPrice:buyP,
-      limit:rowLimit,expectedNet:ev.expectedNet,charges:ev.charges,tgtPct:ev.tgtPct};
+      limit:rowLimit,riskBudgetRs,riskQtyLimit:riskQty,stopDistancePct:getRowStopDistancePct(s),expectedNet:ev.expectedNet,charges:ev.charges,tgtPct:ev.tgtPct};
   }
 
   let deployed=Object.values(allocMap).reduce((sum,am)=>sum+am.debit,0);
@@ -5098,15 +5114,16 @@ function computeAlloc(capital, selList){
       let am=allocMap[s.symbol];
       if(!am){
         const buyP=getBuyPrice(s);
-        if(!(buyP>0)||rowLimit<buyP||buyDebit(buyP,1)>residual+0.001) continue;
+        const riskQty=riskQtyLimits[s.symbol]??getRiskCappedQty(riskBudgetRs,getRowStopDistancePct(s),buyP);
+        if(!(buyP>0)||riskQty<1||rowLimit<buyP||buyDebit(buyP,1)>residual+0.001) continue;
         const qty=1,ev=evalNet(s,buyP,qty);
         allocMap[s.symbol]={alloc:qty*buyP,debit:buyDebit(buyP,qty),buyCharges:calcZerodhaCharges(buyP,qty,false,false,false),qty,buyPrice:buyP,
-          limit:rowLimit,expectedNet:ev.expectedNet,charges:ev.charges,tgtPct:ev.tgtPct};
+          limit:rowLimit,riskBudgetRs,riskQtyLimit:riskQty,stopDistancePct:getRowStopDistancePct(s),expectedNet:ev.expectedNet,charges:ev.charges,tgtPct:ev.tgtPct};
         am=allocMap[s.symbol];
       }
       const buyP=am.buyPrice;
       const nextDebit=buyDebit(buyP,am.qty+1),incremental=nextDebit-am.debit;
-      if(incremental>residual+0.001||am.alloc+buyP>am.limit+0.5) continue;
+      if(am.qty+1>(am.riskQtyLimit??Infinity)||incremental>residual+0.001||am.alloc+buyP>am.limit+0.5) continue;
       am.qty++; am.alloc+=buyP; am.debit=nextDebit; am.buyCharges=calcZerodhaCharges(buyP,am.qty,false,false,false);
       const ev=evalNet(s,buyP,am.qty);
       if(!ev.skip){am.expectedNet=ev.expectedNet;am.charges=ev.charges;am.tgtPct=ev.tgtPct;}
@@ -5115,6 +5132,22 @@ function computeAlloc(capital, selList){
   }
   Object.values(allocMap).forEach(am=>delete am.limit);
   return allocMap;
+}
+function medianNumber(arr){
+  const vals=(arr||[]).filter(v=>Number.isFinite(Number(v))).map(Number).sort((a,b)=>a-b);
+  return vals.length?vals[Math.floor(vals.length/2)]:null;
+}
+function getRiskBudgetRs(capital=0){
+  const trips=getAdaptiveTradeTrips(TRADEBOOK_STATS?.tripsData||[])
+    .filter(r=>r&&Number.isFinite(Number(r.netPnl))&&Number(r.netPnl)<=0);
+  const medianLoss=medianNumber(trips.map(r=>Math.abs(Number(r.netPnl))));
+  if(medianLoss>0) return medianLoss;
+  return capital>0?capital*0.01:null;
+}
+function getRiskCappedQty(riskBudgetRs,stopDistancePct,buyPrice){
+  const risk=Number(riskBudgetRs), stop=Number(stopDistancePct), price=Number(buyPrice);
+  if(!(risk>0)||!(stop>0)||!(price>0)) return Infinity;
+  return Math.max(0,Math.floor(risk/((stop/100)*price)));
 }
 function getRecommendedPositionSize(perfStats){
   const trips=getAdaptiveTradeTrips(TRADEBOOK_STATS?.tripsData||[]).filter(r=>r&&r.capital>0&&isFinite(r.netPnl)&&isFinite(r.netPnlPct));
@@ -5454,7 +5487,11 @@ function renderStatusBar(){
     const am2=computeAlloc(capital,selList2);
     const actualDeployed=Object.values(am2).reduce((s,a)=>s+(a.debit??a.alloc),0);
     const stockCount=Object.keys(am2).length;
+    const riskBudgetRs=getRiskBudgetRs(capital);
     html+=` <span style="color:var(--amber);font-size:11px;font-family:'DM Mono',monospace;font-weight:700;margin-left:8px" title="All-in estimated buy debit: limit-price notional plus CNC buy-side charges.">· ${stockCount} ${allocatedLabel} · ${fmtINR(actualDeployed)} of ${fmtINR(capital)} all-in</span>`;
+    if(riskBudgetRs>0){
+      html+=` <span style="color:var(--t2);font-size:11px;font-family:'DM Mono',monospace;font-weight:700;margin-left:8px" title="Per-stock worst-case loss cap from median realised loss; falls back to 1% of capital when no loss history exists.">risk ${fmtINR(riskBudgetRs)}/stock</span>`;
+    }
     // Expected net at fixed Harvest GTT% — feedback, not input.
     const harvestPlan=computeHarvestPlan();
     const tgtPct=harvestPlan.targetPct;
@@ -6159,8 +6196,8 @@ function exportBasket(){
     if(qty<=0) return;
     const sym=s.symbol;
     const name=s.name||sym;
-    const slDistance=capSLDistancePct(Math.abs(Number(s.slPct)));
-    const stoplossPct=slDistance==null?null:-roundPct05(slDistance);
+    const slDistance=getRowStopDistancePct(s);
+    const stoplossPct=-roundPct05(slDistance);
     orders.push({
       id:Date.now()+orderSeq++,
       instrument:{
@@ -6179,8 +6216,8 @@ function exportBasket(){
         quantity:qty,price:0,
         triggerPrice:0,disclosedQuantity:0,lastPrice:Number(s.price)||0,
         variety:'regular',
-        gtt:stoplossPct==null?{target:targetPct}:{target:targetPct,stoploss:stoplossPct},
-        tags:stoplossPct==null?['TGT']:['TGT','SL']
+        gtt:{target:targetPct,stoploss:stoplossPct},
+        tags:['TGT','SL']
       }
     });
   };
