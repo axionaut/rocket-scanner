@@ -1,5 +1,5 @@
-const BUILD_TS='2026-07-07 17:36 IST'; // release build time (IST)
-const APP_VERSION=483; // Free-capital goal caps Harvest TGT; pick-source championship; trigger-only reps.
+const BUILD_TS='2026-07-07 18:09 IST'; // release build time (IST)
+const APP_VERSION=484; // Goal header config; compass-only goal; pick championship shadow bar.
 const GOOGLE_DRIVE_CLIENT_ID='1015012642264-oi2nelv3v90k3d39r994a6nelgjs2a56.apps.googleusercontent.com'; // Public OAuth Web Client ID.
 const HARD_FILTER_SCHEMA='structural_tradeability_v2';
 const STOCK_RUNWAY_CEILING_PCT=19.5; // Intentional owner-approved forward-catch strategy filter: excludes stocks already near their circuit band (or caps max entry) since a stock that has already used up its daily range is a poor pre-rocket buy. Active fallback when NSE price-band data is unavailable.
@@ -2211,78 +2211,14 @@ function recordDayPredictions(runtime,sessionDate,predictedSymbols){
     ...(predictedSymbols||[]).map(normSym).filter(Boolean)])];
   return true;
 }
-// Rolling self-accuracy over the retained 5-day window: for each past day's flagged
-// predictions, did the symbol appear in ANY later retained day's top-1% rocket set?
-// Baselines (random from that day's eligible universe, momentum top-N by prior-day price
-// move) are scored over the identical evaluable days for a like-for-like reference.
-function computeWindowPredictionAccuracy(runtime){
-  const days=[...(runtime?.days||[])].sort((a,b)=>String(a.sessionDate).localeCompare(String(b.sessionDate)));
-  const laterRocketUnion=(fromIndex)=>{
-    const union=new Set();
-    for(let j=fromIndex+1;j<days.length;j++) (days[j].rocketSymbols||[]).forEach(sym=>union.add(sym));
-    return union;
-  };
-  const priceOf=(day,symbol)=>{
-    const idx=(day?.symbols||[]).indexOf(symbol);
-    return idx>=0?Number(day.prices?.[idx]):null;
-  };
-  const momentumPick=(prevDay,day,count)=>{
-    if(!prevDay) return [];
-    return (day?.eligibleSymbols||[])
-      .map(sym=>{const a=priceOf(prevDay,sym),b=priceOf(day,sym);return {sym,move:(a>0&&b>0)?(b/a-1):null};})
-      .filter(x=>x.move!=null&&isFinite(x.move))
-      .sort((a,b)=>b.move-a.move)
-      .slice(0,count)
-      .map(x=>x.sym);
-  };
-  const randPick=(day,count,seedText)=>{
-    let seed=0;String(seedText||'').split('').forEach(ch=>{seed=((seed*31)+ch.charCodeAt(0))>>>0;});
-    const rand=()=>{seed=(1664525*seed+1013904223)>>>0;return seed/4294967296;};
-    const pool=[...(day?.eligibleSymbols||[])],out=[];
-    while(pool.length&&out.length<count) out.push(pool.splice(Math.floor(rand()*pool.length),1)[0]);
-    return out;
-  };
-  const scoreSet=(symbols,laterRockets)=>{
-    const list=(symbols||[]).filter(Boolean);
-    if(!list.length) return null;
-    const hits=list.filter(sym=>laterRockets.has(sym)).length;
-    return {flagged:list.length,hits,hitRate:hits/list.length};
-  };
-  let modelEval=0,modelHits=0,modelFlagged=0;
-  let randEval=0,randHits=0,randFlagged=0;
-  let momEval=0,momHits=0,momFlagged=0;
-  let evaluableDays=0;
-  days.forEach((day,i)=>{
-    const preds=day.predictedSymbols||[];
-    const hasFuture=i<days.length-1;
-    if(!preds.length||!hasFuture) return;
-    const laterRockets=laterRocketUnion(i);
-    const model=scoreSet(preds,laterRockets);
-    if(!model) return;
-    evaluableDays++;
-    modelEval++;modelHits+=model.hits;modelFlagged+=model.flagged;
-    const rnd=scoreSet(randPick(day,preds.length,day.sessionDate),laterRockets);
-    if(rnd){randEval++;randHits+=rnd.hits;randFlagged+=rnd.flagged;}
-    const mom=scoreSet(momentumPick(days[i-1]||null,day,preds.length),laterRockets);
-    if(mom){momEval++;momHits+=mom.hits;momFlagged+=mom.flagged;}
-  });
-  return {
-    evaluableDays,
-    windowDays:days.length,
-    model:modelFlagged?{flagged:modelFlagged,hits:modelHits,hitRate:modelHits/modelFlagged}:null,
-    random:randFlagged?{flagged:randFlagged,hits:randHits,hitRate:randHits/randFlagged}:null,
-    momentum:momFlagged?{flagged:momFlagged,hits:momHits,hitRate:momHits/momFlagged}:null,
-    warmingUp:evaluableDays===0
-  };
-}
-// ── Pick-source championship (v483): grade strategies on hit rate AND cost-adjusted
-// profit per flag inside the 5-day window; the champion runs the live pick list.
-// Random is a control only and can never be champion. Sticky switching prevents
-// day-to-day flip-flop on noise.
+// Pick-source championship: grade strategies on hit rate AND cost-adjusted profit per flag.
+// Random is a control only and can never be champion. v484 keeps this in shadow mode
+// until a challenger beats an incumbent with a full-window, >=2pp lead.
 const PICK_CHAMPION_STORE='rs_pick_champion_v1';
-const PICK_STICKINESS_PP=1.0;   // challenger must lead incumbent by ≥1pp net/flag
-const PICK_MIN_EVAL_DAYS=2;     // and have at least this many evaluable days
-const PICK_STRATEGY_LABELS={engine:'Engine',momentum:'Momentum',persistence:'Persistence',early_mover:'Early Mover 3–6%',random:'Random'};
+const PICK_CHAMPION_BAR='v484';
+const PICK_STICKINESS_PP=2.0;
+const PICK_MIN_EVAL_DAYS=5;
+const PICK_STRATEGY_LABELS={engine:'Engine',momentum:'Momentum',persistence:'Persistence',early_mover:'Early Mover 3-6%',random:'Random'};
 function _dayPriceChangeKey(day){
   const cols=day?.featureCols?.length?day.featureCols:Object.keys(day?.featureRows?.[day?.symbols?.[0]]||{});
   return cols.find(c=>/price_change/.test(c)&&/1_day/.test(c)&&!/open|from/.test(c))||cols.find(c=>/price_change/.test(c))||null;
@@ -2345,18 +2281,25 @@ function computeStrategyLadder(runtime){
   });
 }
 function resolvePickChampion(ladder){
-  const stored=FS.get(PICK_CHAMPION_STORE)||{name:'engine',since:null,metric:null};
+  const fallback={name:'engine',since:null,metric:null,bar:PICK_CHAMPION_BAR};
+  const raw=FS.get(PICK_CHAMPION_STORE);
+  let stored=(raw&&raw.bar===PICK_CHAMPION_BAR)?raw:fallback;
+  if(!raw||raw.bar!==PICK_CHAMPION_BAR){
+    FS.set(PICK_CHAMPION_STORE,stored);
+    return stored;
+  }
   const eligible=(ladder||[]).filter(s=>s.name!=='random'&&s.evalDays>=PICK_MIN_EVAL_DAYS&&s.avgNetPct!=null);
   if(!eligible.length) return stored;
   const best=eligible.reduce((a,b)=>(b.avgNetPct>a.avgNetPct?b:a));
   const incumbent=eligible.find(s=>s.name===stored.name)||null;
-  if(best.name!==stored.name&&(!incumbent||best.avgNetPct-incumbent.avgNetPct>=PICK_STICKINESS_PP)){
-    const next={name:best.name,since:getSessionDate(),metric:best.avgNetPct};
+  if(!incumbent) return stored;
+  if(best.name!==stored.name&&best.avgNetPct-incumbent.avgNetPct>=PICK_STICKINESS_PP){
+    const next={name:best.name,since:getSessionDate(),metric:best.avgNetPct,bar:PICK_CHAMPION_BAR};
     FS.set(PICK_CHAMPION_STORE,next);
     return next;
   }
   if(incumbent&&incumbent.metric!==stored.metric){
-    const upd={...stored,metric:incumbent.avgNetPct};
+    const upd={...stored,metric:incumbent.avgNetPct,bar:PICK_CHAMPION_BAR};
     FS.set(PICK_CHAMPION_STORE,upd);
     return upd;
   }
@@ -3403,6 +3346,7 @@ function onGoalChange(){
     withdrawMonthly:w>=0?w:cur.withdrawMonthly
   });
   renderStats();
+  renderGoalPopover();
 }
 function goalTradingDaysUntil(dateStr){
   const end=new Date(dateStr+'T12:00:00Z');
@@ -3441,8 +3385,8 @@ function getGoalFreeCapitalParts(){
 }
 function getGoalPortfolioBasis(){return getGoalFreeCapitalParts().total;}
 let _goalRateCache=null;
-// Required NET %/trading day toward the goal, on FREE capital. Caps the Harvest TGT
-// (min with the learned target) — never raises it.
+// Required NET %/trading day toward the goal, on FREE capital. Informational only:
+// this compass display never alters harvest targets, scoring, or allocation.
 function getGoalRequiredNetPct(){
   const g=getGoalConfig();
   const basis=getGoalPortfolioBasis();
@@ -3470,6 +3414,7 @@ function goalFmtRs(v){
   const n=Number(v)||0;
   if(Math.abs(n)>=1e7) return (n/1e7).toFixed(2)+'Cr';
   if(Math.abs(n)>=1e5) return (n/1e5).toFixed(1)+'L';
+  if(Math.abs(n)>=1e3) return (n/1e3).toFixed(1)+'K';
   return Math.round(n).toLocaleString('en-IN');
 }
 // Celebration/punishment reps (v482): profit ₹ = steps to walk; |loss| ÷ 100 = pushups.
@@ -3479,6 +3424,22 @@ function goalRepsHTML(v){
   if(n<0) return `<div style="font-size:9px;color:var(--red)">💪 ${Math.max(1,Math.ceil(Math.abs(n)/100))} pushups</div>`;
   return '';
 }
+function buildGoalPopoverContent(){
+  const g=getGoalConfig();
+  const _in='background:transparent;border:1px solid var(--border-hi);border-radius:5px;color:var(--t1);font-size:10.5px;padding:2px 6px;font-family:inherit';
+  const _lbl='font-size:8.5px;color:var(--t3);text-transform:uppercase;letter-spacing:.4px;display:block;margin-bottom:1px';
+  return `<div style="font-size:12px;color:var(--t1);margin-bottom:10px;font-weight:700">Goal</div>
+  <div style="display:flex;gap:8px;align-items:flex-end;flex-wrap:wrap">
+    <span><span style="${_lbl}">Target ₹</span><input id="goalTarget" type="number" value="${g.target}" style="width:92px;${_in}" onchange="onGoalChange()"></span>
+    <span><span style="${_lbl}">By</span><input id="goalDate" type="date" value="${g.date}" style="width:118px;${_in}" onchange="onGoalChange()"></span>
+    <span><span style="${_lbl}">Withdraw ₹/mo</span><input id="goalWd" type="number" value="${g.withdrawMonthly}" style="width:76px;${_in}" onchange="onGoalChange()"></span>
+  </div>
+  <div style="font-size:11px;line-height:1.5;color:var(--t2);margin-top:10px">Required NET %/trading day on free capital (Capital ₹ + today's sells). Informational — does not change targets.</div>`;
+}
+function renderGoalPopover(){
+  const content=document.getElementById('goalPopoverContent');
+  if(content) content.innerHTML=buildGoalPopoverContent();
+}
 function buildGoalCard(){
   const g=getGoalConfig();
   const parts=getGoalFreeCapitalParts();
@@ -3486,38 +3447,39 @@ function buildGoalCard(){
   const days=goalTradingDaysUntil(g.date);
   const req=solveGoalDailyRate(basis,g.target,days,g.withdrawMonthly);
   const ach=getGoalAchievedDailyRate(basis);
-  const _in='background:transparent;border:1px solid var(--border-hi);border-radius:5px;color:var(--t1);font-size:10.5px;padding:2px 6px;font-family:inherit';
-  const _lbl='font-size:8.5px;color:var(--t3);text-transform:uppercase;letter-spacing:.4px;display:block;margin-bottom:1px';
-  const inputs=`<div style="display:flex;gap:8px;align-items:flex-end;margin-top:6px;flex-wrap:wrap">
-    <span><span style="${_lbl}">Target ₹</span><input id="goalTarget" type="number" value="${g.target}" style="width:92px;${_in}" onchange="onGoalChange()"></span>
-    <span><span style="${_lbl}">By</span><input id="goalDate" type="date" value="${g.date}" style="width:118px;${_in}" onchange="onGoalChange()"></span>
-    <span><span style="${_lbl}">Withdraw ₹/mo</span><input id="goalWd" type="number" value="${g.withdrawMonthly}" style="width:76px;${_in}" onchange="onGoalChange()"></span>
-  </div>`;
   if(!(basis>0)){
-    return `<div class="st"><div class="st-l">Goal · ₹${goalFmtRs(g.target)}</div><div class="st-v" style="color:var(--t3)">—</div><div class="st-d">set Capital ₹ to activate · ${days} td left</div>${inputs}</div>`;
+    return `<div class="st"><div class="st-l">Goal · ₹${goalFmtRs(g.target)} · ${days} td left</div><div class="st-v" style="color:var(--t3)">—</div><div class="st-d">free ₹0 (cap ${goalFmtRs(parts.cap)} + sells ${goalFmtRs(parts.sells)}) · need —/day · achieved —/day (30d)</div></div>`;
   }
   const reqStr=req==null?'>50':'+'+(req*100).toFixed(2);
   const needRs=req!=null?basis*req:null;
   const onTrack=req!=null&&ach!=null&&ach>=req;
   const col=req==null?'var(--red)':(onTrack?'var(--green)':'var(--amber)');
-  const badge=ach!=null?(onTrack?'<span style="color:var(--green);font-size:11px">✅ on track</span>':'<span style="color:var(--amber);font-size:11px">⚠ behind</span>'):'<span style="color:var(--t3);font-size:11px">no 30d trades</span>';
-  const freeStr=parts.sells>0?`free ₹${goalFmtRs(basis)} (cap ${goalFmtRs(parts.cap)} + sells ${goalFmtRs(parts.sells)})`:`free ₹${goalFmtRs(basis)}`;
-  const title='Required NET compounding per NSE trading day (after charges) on FREE capital (Capital ₹ + today’s sell proceeds) to reach the target by the date, net of planned withdrawals. Caps the Harvest TGT when lower than the learned target; never raises it.';
-  return `<div class="st" title="${title}"><div class="st-l">Goal · ₹${goalFmtRs(g.target)} <span style="color:var(--t3)">· ${days} td left</span></div><div class="st-v" style="color:${col}">${reqStr}%/day ${badge}</div><div class="st-d">${freeStr}${needRs!=null?` · need ₹${goalFmtRs(needRs)}/day`:''}${ach!=null?` · achieved ${(ach*100).toFixed(2)}%/day (30d)`:''}${g.withdrawMonthly>0?` · wd ₹${goalFmtRs(g.withdrawMonthly)}/mo`:''} · caps Harvest TGT</div>${inputs}</div>`;
+  const badge=ach!=null?(onTrack?'<span style="color:var(--green);font-size:11px">✓ on track</span>':'<span style="color:var(--amber);font-size:11px">behind</span>'):'<span style="color:var(--t3);font-size:11px">no 30d trades</span>';
+  const freeStr=`free ₹${goalFmtRs(basis)} (cap ${goalFmtRs(parts.cap)} + sells ${goalFmtRs(parts.sells)})`;
+  const title='Required NET compounding per NSE trading day on FREE capital (Capital ₹ + today\'s sell proceeds). Informational only; does not change targets.';
+  return `<div class="st" title="${title}"><div class="st-l">Goal · ₹${goalFmtRs(g.target)} · ${days} td left</div><div class="st-v" style="color:${col}">${reqStr}%/day ${badge}</div><div class="st-d">${freeStr} · need ${needRs!=null?'₹'+goalFmtRs(needRs)+'/day':'—/day'} · achieved ${ach!=null?(ach*100).toFixed(2)+'%/day':'—/day'} (30d)</div></div>`;
 }
 // Pick-source championship card (v483): shows which strategy currently runs the pick
 // list and the full ladder (hit rate + cost-adjusted net per flag).
 function buildPickSourceCard(){
   const ps=getPickState();
-  const rows=(ps.ladder||[]).filter(s=>s.flagged>0).sort((a,b)=>(b.avgNetPct??-99)-(a.avgNetPct??-99))
-    .map(s=>{
-      const isCh=s.name===ps.name;
-      return `<span style="${isCh?'color:var(--t1);font-weight:700':'color:var(--t3)'}">${s.label} ${s.hitRate!=null?(s.hitRate*100).toFixed(0)+'%':'—'}·${s.avgNetPct!=null?(s.avgNetPct>=0?'+':'')+s.avgNetPct.toFixed(1)+'%/flag':'—'}</span>`;
-    }).join(' · ');
+  const ranked=(ps.ladder||[]).filter(s=>s.flagged>0).sort((a,b)=>(b.avgNetPct??-99)-(a.avgNetPct??-99));
+  const rows=ranked.map(s=>{
+    const isCh=s.name===ps.name;
+    const label=(s.label||PICK_STRATEGY_LABELS[s.name]||s.name)+(s.name==='random'?' (control)':'');
+    return `<span style="${isCh?'color:var(--t1);font-weight:700':'color:var(--t3)'}">${label} ${s.hitRate!=null?(s.hitRate*100).toFixed(0)+'%':'—'}·${s.avgNetPct!=null?(s.avgNetPct>=0?'+':'')+s.avgNetPct.toFixed(1)+'%/flag':'—'} · ${s.evalDays}d</span>`;
+  }).join(' · ');
+  const incumbent=ranked.find(s=>s.name===ps.name)||null;
+  const leader=ranked.find(s=>s.name!=='random'&&s.name!==ps.name&&s.avgNetPct!=null&&(!incumbent||s.avgNetPct>incumbent.avgNetPct));
+  let shadow='';
+  if(ps.name==='engine'&&leader&&incumbent){
+    const gap=leader.avgNetPct-incumbent.avgNetPct;
+    if(gap>0&&gap<PICK_STICKINESS_PP) shadow=`${leader.label} leads +${gap.toFixed(1)}pp — needs ≥${PICK_STICKINESS_PP.toFixed(0)}pp over ${PICK_MIN_EVAL_DAYS} days`;
+  }
   const col=ps.name==='engine'?'var(--cyan)':'var(--fire)';
   const note=ps.name==='engine'?'engine picks':'RUNNING THE SHOW';
-  const title='Champion = best cost-adjusted net %/flag over the 5-day window (min 2 evaluable days, random is control-only). Sticky: a challenger must lead the incumbent by ≥1pp to take over. The champion strategy orders the live pick list; Min Score floor applies only in Engine mode.';
-  return `<div class="st" title="${title}"><div class="st-l">Pick Source</div><div class="st-v" style="color:${col};font-size:16px">${ps.label||'Engine'} <span style="font-size:10px;color:var(--t3)">${note}${ps.since?' · since '+ps.since:''}</span></div><div class="st-d">${rows||'warming up — needs 2+ evaluable days'}</div></div>`;
+  const title=`Champion = best cost-adjusted net %/flag over the 5-day window (both sides need at least ${PICK_MIN_EVAL_DAYS} evaluable days; random is control-only). Sticky: a challenger must lead the incumbent by ≥${PICK_STICKINESS_PP.toFixed(0)}pp to take over. The champion strategy orders the live pick list; Min Score floor applies only in Engine mode.`;
+  return `<div class="st" title="${title}"><div class="st-l">Pick Source</div><div class="st-v" style="color:${col};font-size:16px">${ps.label||'Engine'} <span style="font-size:10px;color:var(--t3)">${note}${ps.since?' · since '+ps.since:''}</span></div><div class="st-d">${shadow||rows||`warming up — needs ${PICK_MIN_EVAL_DAYS}+ evaluable days`}</div></div>`;
 }
 function renderStats(){
   const t=ALL.length;
@@ -3586,7 +3548,8 @@ function renderStats(){
     const costStr=` · <span style="color:var(--t2)" title="Estimated round-trip charges as % of buy capital">cost ~${harvestPlan.costPct.toFixed(2)}%</span>`;
     const netStr=` · net ~${harvestPlan.expectedNetPct.toFixed(2)}%`;
     const confStr=harvestPlan.confidence!=null?` · hit ${(harvestPlan.confidence*100).toFixed(0)}% hist`:'';
-    return `<div class="st"><div class="st-l">SL / Harvest GTT</div><div class="st-v" style="font-size:15px"><span style="color:var(--red)">−${_sl}%</span><span style="color:var(--t3);font-size:12px"> / </span><span style="color:var(--green)">+${_tgt}%</span></div><div class="st-d">R:R ${rr}${costStr}${netStr}${confStr} · ${harvestPlan.source}${learnedStr}${holdStr}${opportunityStr}</div></div>`;
+    const goalStr=harvestPlan.goalNetPct!=null&&isFinite(harvestPlan.goalNetPct)?` · goal needs ${harvestPlan.goalNetPct.toFixed(2)}%/day`:'';
+    return `<div class="st"><div class="st-l">SL / Harvest GTT</div><div class="st-v" style="font-size:15px"><span style="color:var(--red)">−${_sl}%</span><span style="color:var(--t3);font-size:12px"> / </span><span style="color:var(--green)">+${_tgt}%</span></div><div class="st-d">R:R ${rr}${costStr}${netStr}${confStr} · ${harvestPlan.source}${learnedStr}${holdStr}${opportunityStr}${goalStr}</div></div>`;
   })();
 
   document.getElementById('statsBar').innerHTML=`
@@ -4748,16 +4711,15 @@ function _renderMethodologyInner(){
       <div class="m-card"><h4>Feature Weighting</h4><p>Every indicator receives a cross-day stability factor from its D-1...D-4 relevance track record. Final weight starts as absolute AUC relevance times stability, then mRMR redundancy reduces overlapping stable signals. All features are considered with no fixed cap; unstable or random features self-cancel toward zero weight, so the feature list decides its own effective size.</p></div>
       <div class="m-card"><h4>Entry Geometry Gate</h4><p>After live relevance and entry-fade checks, a fresh recommendation must still have favorable reward:risk geometry: room to upper circuit (pct_to_upper_band) must be at least ${GEOMETRY_MIN_RR}x the active stop distance. Stop distance is volatility-scaled from daily ATR and clamped to ${SL_MIN_PCT.toFixed(1)}%-${SL_MAX_PCT.toFixed(1)}%, so high-ATR stocks need honest runway. If upper-band room is missing for a stock, it is kept as geometry-unverified and ranks on relevance alone rather than being silently removed.</p></div>
       ${(()=>{
-        const acc=computeWindowPredictionAccuracy(SNAPSHOT_RUNTIME);
-        const pct=x=>x&&x.hitRate!=null?(x.hitRate*100).toFixed(1)+'%':'—';
-        if(acc.warmingUp){
-          return `<div class="m-card"><h4>5-Day Prediction Accuracy</h4><p>Warming up — the engine records each day's flagged buy candidates and scores them against rockets observed on later days within the 5-day window. Accuracy appears once at least one flagged day has a following day to evaluate against. Window holds ${acc.windowDays} day${acc.windowDays===1?'':'s'} so far.</p></div>`;
-        }
-        return `<div class="m-card"><h4>5-Day Prediction Accuracy</h4><p>Over ${acc.evaluableDays} evaluable day${acc.evaluableDays===1?'':'s'} in the current window: flagged candidates that became rockets within the window vs. random and momentum baselines over the same days.</p>
-          <table class="ct"><thead><tr><th>Pick source</th><th>Flagged</th><th>Hits</th><th>Hit rate</th></tr></thead><tbody>
-          <tr><td>Engine (live)</td><td>${acc.model?.flagged??0}</td><td>${acc.model?.hits??0}</td><td>${pct(acc.model)}</td></tr>
-          <tr><td>Random baseline</td><td>${acc.random?.flagged??0}</td><td>${acc.random?.hits??0}</td><td>${pct(acc.random)}</td></tr>
-          <tr><td>Momentum baseline</td><td>${acc.momentum?.flagged??0}</td><td>${acc.momentum?.hits??0}</td><td>${pct(acc.momentum)}</td></tr>
+        const ps=getPickState();
+        const order=['engine','momentum','persistence','early_mover','random'];
+        const ladder=ps.ladder||[];
+        const fmtPct=v=>v!=null&&isFinite(v)?(v*100).toFixed(1)+'%':'—';
+        const fmtNet=v=>v!=null&&isFinite(v)?(v>=0?'+':'')+v.toFixed(2)+'%':'—';
+        const rows=order.map(name=>ladder.find(r=>r.name===name)||{name,label:PICK_STRATEGY_LABELS[name]||name,evalDays:0,flagged:0,hits:0,hitRate:null,avgNetPct:null});
+        return `<div class="m-card"><h4>Pick Championship Ladder</h4><p>Graded on later-in-window rockets and cost-adjusted best forward move. Champion switching requires ≥${PICK_STICKINESS_PP.toFixed(0)}pp net/flag lead across ≥${PICK_MIN_EVAL_DAYS} evaluable days; Random is a control and never champion.</p>
+          <table class="ct"><thead><tr><th>Pick Source</th><th>Evaluable Days</th><th>Flagged</th><th>Hits</th><th>Hit Rate</th><th>Net %/flag</th></tr></thead><tbody>
+          ${rows.map(r=>{const isCh=r.name===ps.name;const label=(r.label||PICK_STRATEGY_LABELS[r.name]||r.name)+(r.name==='random'?' (control)':'')+(isCh?' ▶ champion':'');return `<tr style="${isCh?'font-weight:800;color:var(--t1)':''}"><td>${label}</td><td>${r.evalDays||0}</td><td>${r.flagged||0}</td><td>${r.hits||0}</td><td>${fmtPct(r.hitRate)}</td><td>${fmtNet(r.avgNetPct)}</td></tr>`;}).join('')}
           </tbody></table></div>`;
       })()}
       <div class="m-card"><h4>Stability Spread</h4><p>Stability min ${((stabilitySummary.min||0)*100).toFixed(0)}%, median ${((stabilitySummary.median||0)*100).toFixed(0)}%, max ${((stabilitySummary.max||0)*100).toFixed(0)}%. Near-zero: ${stabilitySummary.nearZero||0}; near-one: ${stabilitySummary.nearOne||0}; tracked features: ${stabilitySummary.total||0}.</p></div>
@@ -5144,15 +5106,7 @@ function computeHarvestPlan(){
     source=`${Math.round(confidenceTarget*100)}% ${getAdaptiveOutcomeHorizonDays()}d reachable`;
   }
   let netTarget=Math.max(desiredNet,learnedNet!=null&&isFinite(learnedNet)?learnedNet:0);
-  // v483: the goal-required rate (on free capital) CAPS the target — min(), never a raise.
-  // The learned/reachable calculation above stays fully intact as the upper bound.
   const goalNet=(typeof getGoalRequiredNetPct==='function')?getGoalRequiredNetPct():null;
-  let goalCapped=false;
-  if(goalNet!=null&&isFinite(goalNet)&&goalNet>0&&goalNet<netTarget){
-    netTarget=Math.max(desiredNet,goalNet);
-    goalCapped=true;
-    source=`goal-capped (needs ${goalNet.toFixed(2)}%/day)`;
-  }
   let grossTarget=netTarget+estimateRoundTripCostPct(netTarget+0.35);
   const costPct=estimateRoundTripCostPct(grossTarget);
   grossTarget=roundPct05(netTarget+costPct);
@@ -5174,9 +5128,8 @@ function computeHarvestPlan(){
     learnedNetPct:learnedNet==null?null:+learnedNet.toFixed(3),
     capitalNeeded,
     dailyGoal:HARVEST_DAILY_NET_GOAL_RS,
-    source:goalCapped?source:(netSamples.length>=HARVEST_MIN_SAMPLES?source:'cost floor (warming up)'),
+    source:netSamples.length>=HARVEST_MIN_SAMPLES?source:'cost floor (warming up)',
     goalNetPct:goalNet,
-    goalCapped,
     warning:belowFloor?'Recent reachable moves are below the desired net floor.':null
   };
 }
@@ -5827,11 +5780,34 @@ function clearFilters(){
   applyFilters();
   localStorage.removeItem(SCANNER_STORE);
 }
+function toggleGoalPopover(){
+  const pop=document.getElementById('goalPopover');
+  if(!pop) return;
+  const isHidden=pop.style.display==='none';
+  if(isHidden){
+    renderGoalPopover();
+    pop.style.display='block';
+    const req=document.getElementById('requiredFilesPopover');
+    if(req) req.style.display='none';
+    if(!window._goalPopoverClickListener){
+      window._goalPopoverClickListener=true;
+      document.addEventListener('click',(e)=>{
+        if(!e.target.closest('#goalPopover')&&!e.target.closest('button[onclick*="toggleGoalPopover"]')){
+          document.getElementById('goalPopover').style.display='none';
+        }
+      });
+    }
+  } else {
+    pop.style.display='none';
+  }
+}
 function toggleRequiredFilesPopover(){
   const pop=document.getElementById('requiredFilesPopover');
   if(!pop) return;
   const isHidden=pop.style.display==='none';
   if(isHidden){
+    const goal=document.getElementById('goalPopover');
+    if(goal) goal.style.display='none';
     pop.style.display='block';
     const content=document.getElementById('requiredFilesPopoverContent');
     if(FILE_LOAD_STATUS.files?.length){
