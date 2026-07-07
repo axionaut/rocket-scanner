@@ -1,5 +1,5 @@
-const BUILD_TS='2026-07-07 15:25 IST'; // release build time (IST)
-const APP_VERSION=482; // Goal compounding card + celebration/punishment reps.
+const BUILD_TS='2026-07-07 17:36 IST'; // release build time (IST)
+const APP_VERSION=483; // Free-capital goal caps Harvest TGT; pick-source championship; trigger-only reps.
 const GOOGLE_DRIVE_CLIENT_ID='1015012642264-oi2nelv3v90k3d39r994a6nelgjs2a56.apps.googleusercontent.com'; // Public OAuth Web Client ID.
 const HARD_FILTER_SCHEMA='structural_tradeability_v2';
 const STOCK_RUNWAY_CEILING_PCT=19.5; // Intentional owner-approved forward-catch strategy filter: excludes stocks already near their circuit band (or caps max entry) since a stock that has already used up its daily range is a poor pre-rocket buy. Active fallback when NSE price-band data is unavailable.
@@ -2275,6 +2275,123 @@ function computeWindowPredictionAccuracy(runtime){
     warmingUp:evaluableDays===0
   };
 }
+// ── Pick-source championship (v483): grade strategies on hit rate AND cost-adjusted
+// profit per flag inside the 5-day window; the champion runs the live pick list.
+// Random is a control only and can never be champion. Sticky switching prevents
+// day-to-day flip-flop on noise.
+const PICK_CHAMPION_STORE='rs_pick_champion_v1';
+const PICK_STICKINESS_PP=1.0;   // challenger must lead incumbent by ≥1pp net/flag
+const PICK_MIN_EVAL_DAYS=2;     // and have at least this many evaluable days
+const PICK_STRATEGY_LABELS={engine:'Engine',momentum:'Momentum',persistence:'Persistence',early_mover:'Early Mover 3–6%',random:'Random'};
+function _dayPriceChangeKey(day){
+  const cols=day?.featureCols?.length?day.featureCols:Object.keys(day?.featureRows?.[day?.symbols?.[0]]||{});
+  return cols.find(c=>/price_change/.test(c)&&/1_day/.test(c)&&!/open|from/.test(c))||cols.find(c=>/price_change/.test(c))||null;
+}
+function computeStrategyLadder(runtime){
+  const days=[...(runtime?.days||[])].sort((a,b)=>String(a.sessionDate).localeCompare(String(b.sessionDate)));
+  const priceOf=(day,symbol)=>{const idx=(day?.symbols||[]).indexOf(symbol);return idx>=0?Number(day.prices?.[idx]):null;};
+  const agg={};
+  const add=(name,picks,laterRockets,fwdOf)=>{
+    const list=(picks||[]).filter(Boolean);
+    if(!list.length) return;
+    const a=agg[name]=agg[name]||{name,label:PICK_STRATEGY_LABELS[name]||name,evalDays:0,flagged:0,hits:0,fwdSum:0,fwdN:0};
+    a.evalDays++;a.flagged+=list.length;
+    list.forEach(sym=>{
+      if(laterRockets.has(sym)) a.hits++;
+      const f=fwdOf(sym);
+      if(f!=null&&isFinite(f)){a.fwdSum+=f;a.fwdN++;}
+    });
+  };
+  days.forEach((day,i)=>{
+    if(i>=days.length-1) return;
+    const later=new Set();
+    for(let j=i+1;j<days.length;j++) (days[j].rocketSymbols||[]).forEach(s=>later.add(s));
+    const fwdOf=sym=>{
+      const base=priceOf(day,sym);
+      if(!(base>0)) return null;
+      let best=null;
+      for(let j=i+1;j<days.length;j++){const p=priceOf(days[j],sym);if(p>0){const m=(p/base-1)*100;if(best==null||m>best)best=m;}}
+      return best;
+    };
+    const pool=day.eligibleSymbols||[];
+    const preds=day.predictedSymbols||[];
+    const n=Math.min(20,Math.max(5,preds.length||10));
+    const key=_dayPriceChangeKey(day);
+    const prev=days[i-1]||null;
+    const prevKey=prev?_dayPriceChangeKey(prev):null;
+    const prevMove=sym=>prev&&prevKey?Number(prev.featureRows?.[sym]?.[prevKey]):null;
+    if(preds.length) add('engine',preds,later,fwdOf);
+    if(prev){
+      const mom=pool.map(s=>({s,m:prevMove(s)})).filter(x=>x.m!=null&&isFinite(x.m)).sort((a,b)=>b.m-a.m).slice(0,n).map(x=>x.s);
+      add('momentum',mom,later,fwdOf);
+      const prevRockets=new Set(prev.rocketSymbols||[]);
+      const per=pool.filter(s=>prevRockets.has(s)).slice(0,n);
+      add('persistence',per,later,fwdOf);
+    }
+    if(key){
+      const early=pool.map(s=>({s,c:Number(day.featureRows?.[s]?.[key])})).filter(x=>isFinite(x.c)&&x.c>=3&&x.c<6).sort((a,b)=>b.c-a.c).slice(0,n).map(x=>x.s);
+      add('early_mover',early,later,fwdOf);
+    }
+    let seed=0;String(day.sessionDate||'').split('').forEach(ch=>{seed=((seed*31)+ch.charCodeAt(0))>>>0;});
+    const rand=()=>{seed=(1664525*seed+1013904223)>>>0;return seed/4294967296;};
+    const rp=[...pool],rout=[];
+    while(rp.length&&rout.length<n) rout.push(rp.splice(Math.floor(rand()*rp.length),1)[0]);
+    add('random',rout,later,fwdOf);
+  });
+  return Object.values(agg).map(a=>{
+    const grossAvg=a.fwdN?a.fwdSum/a.fwdN:null;
+    const cost=grossAvg!=null?estimateRoundTripCostPct(Math.max(0.5,grossAvg)):null;
+    return {...a,hitRate:a.flagged?a.hits/a.flagged:null,avgNetPct:grossAvg!=null?+(grossAvg-cost).toFixed(2):null};
+  });
+}
+function resolvePickChampion(ladder){
+  const stored=FS.get(PICK_CHAMPION_STORE)||{name:'engine',since:null,metric:null};
+  const eligible=(ladder||[]).filter(s=>s.name!=='random'&&s.evalDays>=PICK_MIN_EVAL_DAYS&&s.avgNetPct!=null);
+  if(!eligible.length) return stored;
+  const best=eligible.reduce((a,b)=>(b.avgNetPct>a.avgNetPct?b:a));
+  const incumbent=eligible.find(s=>s.name===stored.name)||null;
+  if(best.name!==stored.name&&(!incumbent||best.avgNetPct-incumbent.avgNetPct>=PICK_STICKINESS_PP)){
+    const next={name:best.name,since:getSessionDate(),metric:best.avgNetPct};
+    FS.set(PICK_CHAMPION_STORE,next);
+    return next;
+  }
+  if(incumbent&&incumbent.metric!==stored.metric){
+    const upd={...stored,metric:incumbent.avgNetPct};
+    FS.set(PICK_CHAMPION_STORE,upd);
+    return upd;
+  }
+  return stored;
+}
+let _pickStateCache=null;
+function getPickState(){
+  const tag=String(window._lastScannerSessionTag||'')+'|'+((SNAPSHOT_RUNTIME?.days||[]).length);
+  if(_pickStateCache?.tag===tag) return _pickStateCache.v;
+  let ladder=[];
+  try{ladder=computeStrategyLadder(SNAPSHOT_RUNTIME);}catch(e){console.warn('strategy ladder failed',e);}
+  let champ={name:'engine',since:null,metric:null};
+  try{champ=resolvePickChampion(ladder);}catch(e){console.warn('champion resolve failed',e);}
+  const v={...champ,label:PICK_STRATEGY_LABELS[champ.name]||champ.name,ladder};
+  _pickStateCache={tag,v};
+  return v;
+}
+function getYesterdayStateMaps(){
+  const days=[...(SNAPSHOT_RUNTIME?.days||[])].sort((a,b)=>String(a.sessionDate).localeCompare(String(b.sessionDate)));
+  const today=getSessionDate();
+  let prev=null;
+  days.forEach(d=>{if(String(d.sessionDate)<today)prev=d;});
+  if(!prev) return {peak:new Map(),rockets:new Set()};
+  const key=_dayPriceChangeKey(prev);
+  const peak=new Map();
+  if(key)(prev.symbols||[]).forEach(sym=>{const v=Number(prev.featureRows?.[sym]?.[key]);if(isFinite(v))peak.set(sym,v);});
+  return {peak,rockets:new Set(prev.rocketSymbols||[])};
+}
+// Live ordering metric for the champion's picks; -Infinity = not picked by this strategy.
+function getChampionRowMetric(champ,s,yd){
+  if(champ==='momentum'){const m=yd.peak.get(s.symbol);return m!=null&&isFinite(m)?m:-Infinity;}
+  if(champ==='persistence') return yd.rockets.has(s.symbol)?(1000+(yd.peak.get(s.symbol)||0)):-Infinity;
+  if(champ==='early_mover'){const c=Number(s.priceChange);return (isFinite(c)&&c>=3&&c<6)?c:-Infinity;}
+  return Number(s.rankScore??s.rocketScore)||0;
+}
 function getTrailingTrajectorySources(runtime,currentDate){
   const byDate=new Map((runtime?.days||[]).map(day=>[day.sessionDate,day]));
   const sources=[];
@@ -3265,6 +3382,7 @@ function getSameDayExitOpportunitySummary(){
 // Compass, not throttle: informs pace/capital planning only; never alters harvest targets,
 // scoring, or allocation. Config persists in brain (GOAL_STORE) for cross-device sync.
 const GOAL_STORE='rs_goal_v1';
+let _repsState=null; // {date,lastTotal,lastDelta} — session-only reps trigger state (v483)
 function getGoalConfig(){
   const g=FS.get(GOAL_STORE)||{};
   const def=new Date();def.setFullYear(def.getFullYear()+1);
@@ -3309,11 +3427,32 @@ function solveGoalDailyRate(start,target,days,wdMonthly){
   for(let i=0;i<60;i++){const mid=(lo+hi)/2;if(endCap(mid)>=target)hi=mid;else lo=mid;}
   return hi;
 }
-function getGoalPortfolioBasis(){
+// Free capital = manually maintained deployable cash + today's sell proceeds (v483).
+function getGoalFreeCapitalParts(){
   const cap=parseFloat(document.getElementById('fCapital')?.value)||0;
-  let held=0;
-  (HOLDINGS||[]).forEach(h=>{const q=Number(h.qty)||0,l=Number(h.ltp)||0;if(q>0&&l>0)held+=q*l;});
-  return cap+held;
+  let sells=0;
+  if(ORDERS_TODAY?._loadedThisSession){
+    const today=getSessionDate();
+    (ORDERS_TODAY||[]).forEach(o=>{
+      if(o.type==='SELL'&&normOrderDate(o.time)===today) sells+=(Number(o.qty)||0)*(Number(o.price)||0);
+    });
+  }
+  return {cap,sells,total:Math.max(0,cap+sells)};
+}
+function getGoalPortfolioBasis(){return getGoalFreeCapitalParts().total;}
+let _goalRateCache=null;
+// Required NET %/trading day toward the goal, on FREE capital. Caps the Harvest TGT
+// (min with the learned target) — never raises it.
+function getGoalRequiredNetPct(){
+  const g=getGoalConfig();
+  const basis=getGoalPortfolioBasis();
+  const key=[g.target,g.date,g.withdrawMonthly,Math.round(basis)].join('|');
+  if(_goalRateCache?.key===key) return _goalRateCache.v;
+  const days=goalTradingDaysUntil(g.date);
+  const r=solveGoalDailyRate(basis,g.target,days,g.withdrawMonthly);
+  const v=(r!=null&&r>0)?+(r*100).toFixed(3):null;
+  _goalRateCache={key,v};
+  return v;
 }
 function getGoalAchievedDailyRate(basis){
   const trips=TRADEBOOK_STATS?.tripsData;
@@ -3342,21 +3481,43 @@ function goalRepsHTML(v){
 }
 function buildGoalCard(){
   const g=getGoalConfig();
-  const basis=getGoalPortfolioBasis();
+  const parts=getGoalFreeCapitalParts();
+  const basis=parts.total;
   const days=goalTradingDaysUntil(g.date);
   const req=solveGoalDailyRate(basis,g.target,days,g.withdrawMonthly);
   const ach=getGoalAchievedDailyRate(basis);
-  const _in='background:transparent;border:1px solid var(--border-hi);border-radius:4px;color:var(--t1);font-size:10px;padding:1px 4px';
-  const inputs=`<div class="st-d" style="margin-top:3px">🎯<input id="goalTarget" type="number" value="${g.target}" style="width:88px;${_in}" onchange="onGoalChange()" title="Target corpus ₹"> <input id="goalDate" type="date" value="${g.date}" style="${_in}" onchange="onGoalChange()" title="Target date"> wd<input id="goalWd" type="number" value="${g.withdrawMonthly}" style="width:56px;${_in}" onchange="onGoalChange()" title="Planned withdrawal ₹/month (debited every ~21 trading days)">/mo</div>`;
+  const _in='background:transparent;border:1px solid var(--border-hi);border-radius:5px;color:var(--t1);font-size:10.5px;padding:2px 6px;font-family:inherit';
+  const _lbl='font-size:8.5px;color:var(--t3);text-transform:uppercase;letter-spacing:.4px;display:block;margin-bottom:1px';
+  const inputs=`<div style="display:flex;gap:8px;align-items:flex-end;margin-top:6px;flex-wrap:wrap">
+    <span><span style="${_lbl}">Target ₹</span><input id="goalTarget" type="number" value="${g.target}" style="width:92px;${_in}" onchange="onGoalChange()"></span>
+    <span><span style="${_lbl}">By</span><input id="goalDate" type="date" value="${g.date}" style="width:118px;${_in}" onchange="onGoalChange()"></span>
+    <span><span style="${_lbl}">Withdraw ₹/mo</span><input id="goalWd" type="number" value="${g.withdrawMonthly}" style="width:76px;${_in}" onchange="onGoalChange()"></span>
+  </div>`;
   if(!(basis>0)){
-    return `<div class="st"><div class="st-l">Goal ₹${goalFmtRs(g.target)}</div><div class="st-v" style="color:var(--t3)">—</div><div class="st-d">set Capital ₹ to activate · ${days} trading days left</div>${inputs}</div>`;
+    return `<div class="st"><div class="st-l">Goal · ₹${goalFmtRs(g.target)}</div><div class="st-v" style="color:var(--t3)">—</div><div class="st-d">set Capital ₹ to activate · ${days} td left</div>${inputs}</div>`;
   }
   const reqStr=req==null?'>50':'+'+(req*100).toFixed(2);
   const needRs=req!=null?basis*req:null;
-  const achStr=ach!=null?`achieved ${(ach*100).toFixed(2)}%/day (30d) ${req!=null&&ach>=req?'✅ on track':'⚠ behind'}`:'no closed trades in 30d';
-  const col=req==null?'var(--red)':(ach!=null&&ach>=req?'var(--green)':'var(--amber)');
-  const title='Required NET compounding per NSE trading day (after charges) to grow the portfolio basis (Capital ₹ + current holdings value) to the target by the date, net of planned withdrawals. Compass only — never changes harvest targets or allocation.';
-  return `<div class="st" title="${title}"><div class="st-l">Goal ₹${goalFmtRs(g.target)}</div><div class="st-v" style="color:${col}">${reqStr}%/day</div><div class="st-d">basis ₹${goalFmtRs(basis)} · ${days} td left${needRs!=null?` · need ₹${goalFmtRs(needRs)}/day`:''} · ${achStr}${g.withdrawMonthly>0?` · wd ₹${goalFmtRs(g.withdrawMonthly)}/mo`:''}</div>${inputs}</div>`;
+  const onTrack=req!=null&&ach!=null&&ach>=req;
+  const col=req==null?'var(--red)':(onTrack?'var(--green)':'var(--amber)');
+  const badge=ach!=null?(onTrack?'<span style="color:var(--green);font-size:11px">✅ on track</span>':'<span style="color:var(--amber);font-size:11px">⚠ behind</span>'):'<span style="color:var(--t3);font-size:11px">no 30d trades</span>';
+  const freeStr=parts.sells>0?`free ₹${goalFmtRs(basis)} (cap ${goalFmtRs(parts.cap)} + sells ${goalFmtRs(parts.sells)})`:`free ₹${goalFmtRs(basis)}`;
+  const title='Required NET compounding per NSE trading day (after charges) on FREE capital (Capital ₹ + today’s sell proceeds) to reach the target by the date, net of planned withdrawals. Caps the Harvest TGT when lower than the learned target; never raises it.';
+  return `<div class="st" title="${title}"><div class="st-l">Goal · ₹${goalFmtRs(g.target)} <span style="color:var(--t3)">· ${days} td left</span></div><div class="st-v" style="color:${col}">${reqStr}%/day ${badge}</div><div class="st-d">${freeStr}${needRs!=null?` · need ₹${goalFmtRs(needRs)}/day`:''}${ach!=null?` · achieved ${(ach*100).toFixed(2)}%/day (30d)`:''}${g.withdrawMonthly>0?` · wd ₹${goalFmtRs(g.withdrawMonthly)}/mo`:''} · caps Harvest TGT</div>${inputs}</div>`;
+}
+// Pick-source championship card (v483): shows which strategy currently runs the pick
+// list and the full ladder (hit rate + cost-adjusted net per flag).
+function buildPickSourceCard(){
+  const ps=getPickState();
+  const rows=(ps.ladder||[]).filter(s=>s.flagged>0).sort((a,b)=>(b.avgNetPct??-99)-(a.avgNetPct??-99))
+    .map(s=>{
+      const isCh=s.name===ps.name;
+      return `<span style="${isCh?'color:var(--t1);font-weight:700':'color:var(--t3)'}">${s.label} ${s.hitRate!=null?(s.hitRate*100).toFixed(0)+'%':'—'}·${s.avgNetPct!=null?(s.avgNetPct>=0?'+':'')+s.avgNetPct.toFixed(1)+'%/flag':'—'}</span>`;
+    }).join(' · ');
+  const col=ps.name==='engine'?'var(--cyan)':'var(--fire)';
+  const note=ps.name==='engine'?'engine picks':'RUNNING THE SHOW';
+  const title='Champion = best cost-adjusted net %/flag over the 5-day window (min 2 evaluable days, random is control-only). Sticky: a challenger must lead the incumbent by ≥1pp to take over. The champion strategy orders the live pick list; Min Score floor applies only in Engine mode.';
+  return `<div class="st" title="${title}"><div class="st-l">Pick Source</div><div class="st-v" style="color:${col};font-size:16px">${ps.label||'Engine'} <span style="font-size:10px;color:var(--t3)">${note}${ps.since?' · since '+ps.since:''}</span></div><div class="st-d">${rows||'warming up — needs 2+ evaluable days'}</div></div>`;
 }
 function renderStats(){
   const t=ALL.length;
@@ -3397,7 +3558,16 @@ function renderStats(){
     const bookedLabel=isToday?'Booked Today':'Latest Session';
     const srcLabel=booked.source||'Tradebook';
     const dateLabel=booked.date||sessionToday;
-    const repsTotal=booked.total>0?` · 🎉 ${Math.round(booked.total).toLocaleString('en-IN')} steps`:booked.total<0?` · 💪 ${Math.max(1,Math.ceil(Math.abs(booked.total)/100))} pushups`:'';
+    // Reps only on a NEW trigger this session (v483): first observation of a date is
+    // the baseline (no reps on plain page load); a later change shows the DELTA's reps.
+    if(!_repsState||_repsState.date!==booked.date){
+      _repsState={date:booked.date,lastTotal:booked.total,lastDelta:null};
+    } else if(booked.total!==_repsState.lastTotal){
+      _repsState.lastDelta=booked.total-_repsState.lastTotal;
+      _repsState.lastTotal=booked.total;
+    }
+    const d=_repsState.lastDelta;
+    const repsTotal=d==null?'':(d>0?` · 🎉 ${Math.round(d).toLocaleString('en-IN')} steps`:d<0?` · 💪 ${Math.max(1,Math.ceil(Math.abs(d)/100))} pushups`:'');
     bookedCard=`
       <div class="st"><div class="st-l">${bookedLabel}</div><div class="st-v" style="color:${booked.total>=0?'var(--green)':'var(--red)'}">${fmtSignedINR(booked.total)}</div><div class="st-d">${dateLabel} · ${srcLabel} · net of charges${repsTotal}</div></div>`;
   }
@@ -3424,7 +3594,7 @@ function renderStats(){
     ${slTgtCard}
     <div class="st"><div class="st-l">Score Spread</div><div class="st-v">${scoreSpread}</div><div class="st-d">${effectiveScoreSpreadDetail}</div></div>
     <div class="st"><div class="st-l">Top Sector</div><div class="st-v" style="font-size:15px;color:var(--green)">${topSec}</div><div class="st-d">${topSecPct.toFixed(0)}% advancing</div></div>
-    <div class="st"><div class="st-l">Breadth</div><div class="st-v" style="color:var(--cyan)">${ENGINE_DATA.marketBreadth!=null?(ENGINE_DATA.marketBreadth*100).toFixed(0):(bull/t*100).toFixed(0)}%</div><div class="st-d">${bull.toLocaleString()} advancing · ${(t-bull).toLocaleString()} down/flat · ${ENGINE_DATA.accSessions||0} learned horizons</div></div>${bookedCard}${buildGoalCard()}`;
+    <div class="st"><div class="st-l">Breadth</div><div class="st-v" style="color:var(--cyan)">${ENGINE_DATA.marketBreadth!=null?(ENGINE_DATA.marketBreadth*100).toFixed(0):(bull/t*100).toFixed(0)}%</div><div class="st-d">${bull.toLocaleString()} advancing · ${(t-bull).toLocaleString()} down/flat · ${ENGINE_DATA.accSessions||0} learned horizons</div></div>${bookedCard}${buildGoalCard()}${buildPickSourceCard()}`;
 
   // Row 1: hard-filter removal pills
   const filterPills=[];
@@ -3834,7 +4004,7 @@ function renderPerformance(){
       {key:'_stamp',label:'Stamp',align:'right',fmt:_chFmt,clrFn:_chClr},
       {key:'_dp',label:'DP',align:'right',fmt:_chFmt,clrFn:_chClr},
       {key:'charges',label:'Total Charges',align:'right',bold:true,fmt:fmtNegINR,clrFn:()=>'var(--red)'},
-      {key:'netPnl',label:'Net P&L',align:'right',bold:true,fmt:(v,r)=>v!=null?fmtPerfRs(v)+goalRepsHTML(v):`<span style="color:var(--amber);font-size:10px">unknown</span>`,clrFn:(v)=>v!=null?clr(v):'var(--amber)'},
+      {key:'netPnl',label:'Net P&L',align:'right',bold:true,fmt:(v,r)=>v!=null?fmtPerfRs(v):`<span style="color:var(--amber);font-size:10px">unknown</span>`,clrFn:(v)=>v!=null?clr(v):'var(--amber)'},
       {key:'netPnlPct',label:'P&L %',align:'right',bold:true,fmt:v=>v!=null?fmtPct(v):`<span style="color:var(--amber);font-size:10px">unknown</span>`,clrFn:v=>v!=null?clr(v):'var(--amber)'},
     ];
     const latestTbl=makeSortableTable('perf-latest',latestCols,latestRows,'_sort',-1);
@@ -4816,7 +4986,7 @@ function getFilterBarReason(s){
   if(fadeReason) return fadeReason;
   const geometry=applyEntryGeometryState(s);
   if(!geometry.passes) return geometry.reason;
-  if(ENGINE_DATA?.hasRecommendationEvidence&&minScore>0&&s.rocketScore<minScore) return `Score ${s.rocketScore?.toFixed?.(1)||s.rocketScore} < ${minScore}`;
+  if(ENGINE_DATA?.hasRecommendationEvidence&&minScore>0&&s.rocketScore<minScore&&getPickState().name==='engine') return `Score ${s.rocketScore?.toFixed?.(1)||s.rocketScore} < ${minScore}`;
   if(s.price!=null&&s.price<MIN_PRICE_FLOOR) return `Price ${fmtINR(s.price)} < ${fmtINR(MIN_PRICE_FLOOR)}`;
   if(s.marketCap!=null&&s.marketCap<MIN_MCAP_FLOOR) return `MCap ₹${fV(s.marketCap)} < ₹${fV(MIN_MCAP_FLOOR)}`;
   const budgetCap=getPerStockBudgetCap();
@@ -4973,7 +5143,16 @@ function computeHarvestPlan(){
     learnedNet=percentileValue(netSamples,reachablePct);
     source=`${Math.round(confidenceTarget*100)}% ${getAdaptiveOutcomeHorizonDays()}d reachable`;
   }
-  const netTarget=Math.max(desiredNet,learnedNet!=null&&isFinite(learnedNet)?learnedNet:0);
+  let netTarget=Math.max(desiredNet,learnedNet!=null&&isFinite(learnedNet)?learnedNet:0);
+  // v483: the goal-required rate (on free capital) CAPS the target — min(), never a raise.
+  // The learned/reachable calculation above stays fully intact as the upper bound.
+  const goalNet=(typeof getGoalRequiredNetPct==='function')?getGoalRequiredNetPct():null;
+  let goalCapped=false;
+  if(goalNet!=null&&isFinite(goalNet)&&goalNet>0&&goalNet<netTarget){
+    netTarget=Math.max(desiredNet,goalNet);
+    goalCapped=true;
+    source=`goal-capped (needs ${goalNet.toFixed(2)}%/day)`;
+  }
   let grossTarget=netTarget+estimateRoundTripCostPct(netTarget+0.35);
   const costPct=estimateRoundTripCostPct(grossTarget);
   grossTarget=roundPct05(netTarget+costPct);
@@ -4995,7 +5174,9 @@ function computeHarvestPlan(){
     learnedNetPct:learnedNet==null?null:+learnedNet.toFixed(3),
     capitalNeeded,
     dailyGoal:HARVEST_DAILY_NET_GOAL_RS,
-    source:netSamples.length>=HARVEST_MIN_SAMPLES?source:'cost floor (warming up)',
+    source:goalCapped?source:(netSamples.length>=HARVEST_MIN_SAMPLES?source:'cost floor (warming up)'),
+    goalNetPct:goalNet,
+    goalCapped,
     warning:belowFloor?'Recent reachable moves are below the desired net floor.':null
   };
 }
@@ -5524,6 +5705,17 @@ function applyFilters(){
   GEOMETRY_GATE_SUMMARY.unverifiedFallback=FILT.filter(s=>s._geometryUnverified).length;
   GEOMETRY_GATE_SUMMARY.velocityTilted=FILT.filter(s=>!s._geometryUnverified&&s.normalizedVelocityPotential>0).length;
   assignDisplayRanks(FILT);
+  // v483: when a non-engine strategy is champion, it runs the show — its picks form
+  // the list, ordered by its own metric. All structural/entry gates above still apply.
+  const _pick=getPickState();
+  if(_pick.name!=='engine'){
+    const yd=getYesterdayStateMaps();
+    FILT.forEach(s=>{s._champMetric=getChampionRowMetric(_pick.name,s,yd);});
+    const dropped=FILT.filter(s=>s._champMetric===-Infinity);
+    dropped.forEach(s=>{hiddenReasons[s.symbol]=`Not picked by ${_pick.label}`;});
+    FILT=FILT.filter(s=>s._champMetric!==-Infinity);
+    FILT.sort((a,b)=>b._champMetric-a._champMetric).forEach((s,i)=>{s._rank=i+1;});
+  }
 
   // Hard cap at 20 (Zerodha basket limit), optionally tightened by Top #.
   const displayCap=getTopRankCap();
@@ -5572,7 +5764,9 @@ function renderStatusBar(){
   const minScore2=getMinScoreFloor();
   const topRankPill=getTopRankFilterPill();
   if(topRankPill)tags.push(topRankPill);
-  if(ENGINE_DATA?.hasRecommendationEvidence&&minScore2>0)tags.push('Score≥'+minScore2);
+  const _pickTag=getPickState();
+  if(_pickTag.name!=='engine')tags.push('Picks: '+_pickTag.label);
+  if(ENGINE_DATA?.hasRecommendationEvidence&&minScore2>0&&_pickTag.name==='engine')tags.push('Score≥'+minScore2);
   const capital=parseFloat(document.getElementById('fCapital').value)||0;
   const isFiltered=tags.length>0||shown<total;
   const countColor=shown<total?'var(--fire)':'var(--green)';
