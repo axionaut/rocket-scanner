@@ -1,5 +1,5 @@
-const BUILD_TS='2026-07-07 15:09 IST'; // release build time (IST)
-const APP_VERSION=481; // Volatility-scaled stops, rupee-risk sizing, adverse excursion.
+const BUILD_TS='2026-07-07 15:25 IST'; // release build time (IST)
+const APP_VERSION=482; // Goal compounding card + celebration/punishment reps.
 const GOOGLE_DRIVE_CLIENT_ID='1015012642264-oi2nelv3v90k3d39r994a6nelgjs2a56.apps.googleusercontent.com'; // Public OAuth Web Client ID.
 const HARD_FILTER_SCHEMA='structural_tradeability_v2';
 const STOCK_RUNWAY_CEILING_PCT=19.5; // Intentional owner-approved forward-catch strategy filter: excludes stocks already near their circuit band (or caps max entry) since a stock that has already used up its daily range is a poor pre-rocket buy. Active fallback when NSE price-band data is unavailable.
@@ -3261,6 +3261,103 @@ function getSameDayExitOpportunitySummary(){
   };
 }
 
+// ── Goal engine (v482): required NET daily compounding rate toward the owner's corpus target ──
+// Compass, not throttle: informs pace/capital planning only; never alters harvest targets,
+// scoring, or allocation. Config persists in brain (GOAL_STORE) for cross-device sync.
+const GOAL_STORE='rs_goal_v1';
+function getGoalConfig(){
+  const g=FS.get(GOAL_STORE)||{};
+  const def=new Date();def.setFullYear(def.getFullYear()+1);
+  return {
+    target:(Number(g.target)>0)?Number(g.target):10000000,
+    date:(typeof g.date==='string'&&/^\d{4}-\d{2}-\d{2}$/.test(g.date))?g.date:def.toISOString().slice(0,10),
+    withdrawMonthly:Math.max(0,Number(g.withdrawMonthly)||0)
+  };
+}
+function onGoalChange(){
+  const t=parseFloat(document.getElementById('goalTarget')?.value);
+  const d=document.getElementById('goalDate')?.value||'';
+  const w=parseFloat(document.getElementById('goalWd')?.value);
+  const cur=getGoalConfig();
+  FS.set(GOAL_STORE,{
+    target:t>0?t:cur.target,
+    date:/^\d{4}-\d{2}-\d{2}$/.test(d)?d:cur.date,
+    withdrawMonthly:w>=0?w:cur.withdrawMonthly
+  });
+  renderStats();
+}
+function goalTradingDaysUntil(dateStr){
+  const end=new Date(dateStr+'T12:00:00Z');
+  if(!isFinite(end.getTime())) return 0;
+  const cur=new Date(getSessionDate()+'T12:00:00Z');
+  let n=0;
+  while(cur<end&&n<2600){
+    cur.setUTCDate(cur.getUTCDate()+1);
+    const dow=cur.getUTCDay();
+    if(dow!==0&&dow!==6&&!NSE_HOLIDAYS.has(cur.toISOString().slice(0,10))) n++;
+  }
+  return n;
+}
+// Withdrawals are debited every 21st trading day (~monthly). Binary search the net
+// per-trading-day compounding rate that lands the portfolio on the target by the date.
+function solveGoalDailyRate(start,target,days,wdMonthly){
+  if(!(start>0)||!(days>0)||!(target>0)) return null;
+  const endCap=r=>{let c=start;for(let d=1;d<=days;d++){c*=1+r;if(wdMonthly>0&&d%21===0)c-=wdMonthly;}return c;};
+  if(endCap(0)>=target) return 0;
+  if(endCap(0.5)<target) return null;
+  let lo=0,hi=0.5;
+  for(let i=0;i<60;i++){const mid=(lo+hi)/2;if(endCap(mid)>=target)hi=mid;else lo=mid;}
+  return hi;
+}
+function getGoalPortfolioBasis(){
+  const cap=parseFloat(document.getElementById('fCapital')?.value)||0;
+  let held=0;
+  (HOLDINGS||[]).forEach(h=>{const q=Number(h.qty)||0,l=Number(h.ltp)||0;if(q>0&&l>0)held+=q*l;});
+  return cap+held;
+}
+function getGoalAchievedDailyRate(basis){
+  const trips=TRADEBOOK_STATS?.tripsData;
+  if(!Array.isArray(trips)||!trips.length||!(basis>0)) return null;
+  const cutoff=new Date(getSessionDate()+'T12:00:00Z');cutoff.setUTCDate(cutoff.getUTCDate()-30);
+  const cutStr=cutoff.toISOString().slice(0,10);
+  let net=0;const days=new Set();
+  trips.forEach(r=>{if(r.sellDate&&String(r.sellDate)>=cutStr){net+=Number(r.netPnl)||0;days.add(r.sellDate);}});
+  if(!days.size) return null;
+  const span=tradingDaysBetween(cutStr,getSessionDate());
+  const tradingDays=Math.max(days.size,Number(span)||0);
+  return tradingDays>0?(net/tradingDays)/basis:null;
+}
+function goalFmtRs(v){
+  const n=Number(v)||0;
+  if(Math.abs(n)>=1e7) return (n/1e7).toFixed(2)+'Cr';
+  if(Math.abs(n)>=1e5) return (n/1e5).toFixed(1)+'L';
+  return Math.round(n).toLocaleString('en-IN');
+}
+// Celebration/punishment reps (v482): profit ₹ = steps to walk; |loss| ÷ 100 = pushups.
+function goalRepsHTML(v){
+  const n=Number(v)||0;
+  if(n>0) return `<div style="font-size:9px;color:var(--green)">🎉 ${Math.round(n).toLocaleString('en-IN')} steps</div>`;
+  if(n<0) return `<div style="font-size:9px;color:var(--red)">💪 ${Math.max(1,Math.ceil(Math.abs(n)/100))} pushups</div>`;
+  return '';
+}
+function buildGoalCard(){
+  const g=getGoalConfig();
+  const basis=getGoalPortfolioBasis();
+  const days=goalTradingDaysUntil(g.date);
+  const req=solveGoalDailyRate(basis,g.target,days,g.withdrawMonthly);
+  const ach=getGoalAchievedDailyRate(basis);
+  const _in='background:transparent;border:1px solid var(--border-hi);border-radius:4px;color:var(--t1);font-size:10px;padding:1px 4px';
+  const inputs=`<div class="st-d" style="margin-top:3px">🎯<input id="goalTarget" type="number" value="${g.target}" style="width:88px;${_in}" onchange="onGoalChange()" title="Target corpus ₹"> <input id="goalDate" type="date" value="${g.date}" style="${_in}" onchange="onGoalChange()" title="Target date"> wd<input id="goalWd" type="number" value="${g.withdrawMonthly}" style="width:56px;${_in}" onchange="onGoalChange()" title="Planned withdrawal ₹/month (debited every ~21 trading days)">/mo</div>`;
+  if(!(basis>0)){
+    return `<div class="st"><div class="st-l">Goal ₹${goalFmtRs(g.target)}</div><div class="st-v" style="color:var(--t3)">—</div><div class="st-d">set Capital ₹ to activate · ${days} trading days left</div>${inputs}</div>`;
+  }
+  const reqStr=req==null?'>50':'+'+(req*100).toFixed(2);
+  const needRs=req!=null?basis*req:null;
+  const achStr=ach!=null?`achieved ${(ach*100).toFixed(2)}%/day (30d) ${req!=null&&ach>=req?'✅ on track':'⚠ behind'}`:'no closed trades in 30d';
+  const col=req==null?'var(--red)':(ach!=null&&ach>=req?'var(--green)':'var(--amber)');
+  const title='Required NET compounding per NSE trading day (after charges) to grow the portfolio basis (Capital ₹ + current holdings value) to the target by the date, net of planned withdrawals. Compass only — never changes harvest targets or allocation.';
+  return `<div class="st" title="${title}"><div class="st-l">Goal ₹${goalFmtRs(g.target)}</div><div class="st-v" style="color:${col}">${reqStr}%/day</div><div class="st-d">basis ₹${goalFmtRs(basis)} · ${days} td left${needRs!=null?` · need ₹${goalFmtRs(needRs)}/day`:''} · ${achStr}${g.withdrawMonthly>0?` · wd ₹${goalFmtRs(g.withdrawMonthly)}/mo`:''}</div>${inputs}</div>`;
+}
 function renderStats(){
   const t=ALL.length;
   const bull=ALL.filter(s=>(s.priceChange||0)>0).length;
@@ -3300,8 +3397,9 @@ function renderStats(){
     const bookedLabel=isToday?'Booked Today':'Latest Session';
     const srcLabel=booked.source||'Tradebook';
     const dateLabel=booked.date||sessionToday;
+    const repsTotal=booked.total>0?` · 🎉 ${Math.round(booked.total).toLocaleString('en-IN')} steps`:booked.total<0?` · 💪 ${Math.max(1,Math.ceil(Math.abs(booked.total)/100))} pushups`:'';
     bookedCard=`
-      <div class="st"><div class="st-l">${bookedLabel}</div><div class="st-v" style="color:${booked.total>=0?'var(--green)':'var(--red)'}">${fmtSignedINR(booked.total)}</div><div class="st-d">${dateLabel} · ${srcLabel} · net of charges</div></div>`;
+      <div class="st"><div class="st-l">${bookedLabel}</div><div class="st-v" style="color:${booked.total>=0?'var(--green)':'var(--red)'}">${fmtSignedINR(booked.total)}</div><div class="st-d">${dateLabel} · ${srcLabel} · net of charges${repsTotal}</div></div>`;
   }
 
   const slTgtCard=(()=>{
@@ -3326,7 +3424,7 @@ function renderStats(){
     ${slTgtCard}
     <div class="st"><div class="st-l">Score Spread</div><div class="st-v">${scoreSpread}</div><div class="st-d">${effectiveScoreSpreadDetail}</div></div>
     <div class="st"><div class="st-l">Top Sector</div><div class="st-v" style="font-size:15px;color:var(--green)">${topSec}</div><div class="st-d">${topSecPct.toFixed(0)}% advancing</div></div>
-    <div class="st"><div class="st-l">Breadth</div><div class="st-v" style="color:var(--cyan)">${ENGINE_DATA.marketBreadth!=null?(ENGINE_DATA.marketBreadth*100).toFixed(0):(bull/t*100).toFixed(0)}%</div><div class="st-d">${bull.toLocaleString()} advancing · ${(t-bull).toLocaleString()} down/flat · ${ENGINE_DATA.accSessions||0} learned horizons</div></div>${bookedCard}`;
+    <div class="st"><div class="st-l">Breadth</div><div class="st-v" style="color:var(--cyan)">${ENGINE_DATA.marketBreadth!=null?(ENGINE_DATA.marketBreadth*100).toFixed(0):(bull/t*100).toFixed(0)}%</div><div class="st-d">${bull.toLocaleString()} advancing · ${(t-bull).toLocaleString()} down/flat · ${ENGINE_DATA.accSessions||0} learned horizons</div></div>${bookedCard}${buildGoalCard()}`;
 
   // Row 1: hard-filter removal pills
   const filterPills=[];
@@ -3736,7 +3834,7 @@ function renderPerformance(){
       {key:'_stamp',label:'Stamp',align:'right',fmt:_chFmt,clrFn:_chClr},
       {key:'_dp',label:'DP',align:'right',fmt:_chFmt,clrFn:_chClr},
       {key:'charges',label:'Total Charges',align:'right',bold:true,fmt:fmtNegINR,clrFn:()=>'var(--red)'},
-      {key:'netPnl',label:'Net P&L',align:'right',bold:true,fmt:(v,r)=>v!=null?fmtPerfRs(v):`<span style="color:var(--amber);font-size:10px">unknown</span>`,clrFn:(v)=>v!=null?clr(v):'var(--amber)'},
+      {key:'netPnl',label:'Net P&L',align:'right',bold:true,fmt:(v,r)=>v!=null?fmtPerfRs(v)+goalRepsHTML(v):`<span style="color:var(--amber);font-size:10px">unknown</span>`,clrFn:(v)=>v!=null?clr(v):'var(--amber)'},
       {key:'netPnlPct',label:'P&L %',align:'right',bold:true,fmt:v=>v!=null?fmtPct(v):`<span style="color:var(--amber);font-size:10px">unknown</span>`,clrFn:v=>v!=null?clr(v):'var(--amber)'},
     ];
     const latestTbl=makeSortableTable('perf-latest',latestCols,latestRows,'_sort',-1);
