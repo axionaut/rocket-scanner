@@ -1,5 +1,5 @@
-const BUILD_TS='2026-07-07 07:11 IST'; // release build time (IST)
-const APP_VERSION=478; // Completed-day scoring fallback for gated mornings.
+const BUILD_TS='2026-07-07 12:25 IST'; // release build time (IST)
+const APP_VERSION=479; // Defaults, SL GTT export, partial-fill orders.
 const GOOGLE_DRIVE_CLIENT_ID='1015012642264-oi2nelv3v90k3d39r994a6nelgjs2a56.apps.googleusercontent.com'; // Public OAuth Web Client ID.
 const HARD_FILTER_SCHEMA='structural_tradeability_v2';
 const STOCK_RUNWAY_CEILING_PCT=19.5; // Intentional owner-approved forward-catch strategy filter: excludes stocks already near their circuit band (or caps max entry) since a stock that has already used up its daily range is a poor pre-rocket buy. Active fallback when NSE price-band data is unavailable.
@@ -18,7 +18,7 @@ const HARVEST_TRIGGER_CONFIDENCE=0.60; // Prefer a target that prior picks commo
 const HARVEST_MIN_SAMPLES=8;
 const ENTRY_FADE_RETENTION_FLOOR=70; // Below this, a pullback through the target zone is treated as a fading entry.
 const ENTRY_FADE_SEVERE_TARGET_MULT=2; // A pullback twice the harvest target is too much give-back to chase.
-const MIN_SCORE_DEFAULT=70; // Empty Min Score field still means the visible default floor.
+const MIN_SCORE_DEFAULT=77; // Empty Min Score field still means the visible default floor.
 const SL_HARD_CAP_PCT=3.0; // Maximum stop distance used for display, sizing, export references and entry geometry.
 const GEOMETRY_MIN_RR=2.0; // Require at least 2x headroom-to-risk before recommending a fresh entry.
 const VELOCITY_WEIGHT=0.3; // Modest ranking tilt toward catchable room to upper circuit among geometry survivors.
@@ -254,7 +254,7 @@ function pruneBrainForStorage(brain){
 }
 let TRADEBOOK_STATS=null; // Includes the realised exit-policy baseline, later refined by outcome learning.
 let LAST_BUY_DATE_MAP={}; // Legacy latest-buy map retained for stored-brain compatibility.
-let ORDERS_TODAY=null; // [{symbol, type, qty, price, time}] — COMPLETE orders only
+let ORDERS_TODAY=null; // [{symbol, type, qty, price, time}] — filled order rows, including partial-cancel fills
 let TRADEBOOK_BUY_FILLS=[]; // Consolidated BUY fills available for executed-entry feedback matching.
 
 // ══════════════════════════════════════════════════
@@ -1051,7 +1051,7 @@ function isMarketHours(){
 function getSessionDate(){ return getModelTradingDate(Date.now()); }
 
 // ── Auto Volume: minutes since day-start × configurable multiplier ──
-const LIQ_MIN_VOL_DEFAULT=500;
+const LIQ_MIN_VOL_DEFAULT=5000;
 const SHAREHOLDER_MIN_DEFAULT=500;
 function calcAutoVolume(){
   const mult=parseFloat(document.getElementById('fVolMult')?.value)||LIQ_MIN_VOL_DEFAULT;
@@ -5575,7 +5575,7 @@ function clearFilters(){
   const minMCapEl=document.getElementById('fMinMarketCap');if(minMCapEl)minMCapEl.value='500000000';
   const reDropEl=document.getElementById('fReDrop');if(reDropEl)reDropEl.value='1';
   const topupEl=document.getElementById('fTopupAlloc');if(topupEl)topupEl.value='50';
-  const minScoreEl=document.getElementById('fMinScore');if(minScoreEl)minScoreEl.value='70';
+  const minScoreEl=document.getElementById('fMinScore');if(minScoreEl)minScoreEl.value='';
   applyLearnedMaxAllocDefault();
   VOL_AUTO=true;setAutoVolume();
   applyFilters();
@@ -5860,7 +5860,7 @@ function parseOrders(text){
   if(!symCol||!typeCol||!qtyCol||!priceCol||!statusCol){console.warn('Orders CSV: missing required columns');return [];}
   return rows.map(r=>{
     const status=String(r[statusCol]||'').trim().toUpperCase();
-    if(status!=='COMPLETE') return null;
+    if(status==='REJECTED') return null;
     const sym=normSym(r[symCol]);
     const type=String(r[typeCol]||'').trim().toUpperCase();
     if(!sym||!(type==='BUY'||type==='SELL')) return null;
@@ -6234,7 +6234,6 @@ function exportBasket(){
   const {exportList,basketAlloc}=planBasketExport(capital,selList);
   const limitOmitted=Math.max(0,selList.length-bandRejected-exportList.length);
 
-  // Target-only entries: no stop-loss GTT is exported.
   const harvestPlan=computeHarvestPlan();
   const adaptiveTGT=roundPct05(harvestPlan.targetPct||(TRADEBOOK_STATS?TRADEBOOK_STATS.adaptiveTGT:3.7));
 
@@ -6245,6 +6244,8 @@ function exportBasket(){
     if(qty<=0) return;
     const sym=s.symbol;
     const name=s.name||sym;
+    const slDistance=capSLDistancePct(Math.abs(Number(s.slPct)));
+    const stoplossPct=slDistance==null?null:-roundPct05(slDistance);
     orders.push({
       id:Date.now()+orderSeq++,
       instrument:{
@@ -6263,8 +6264,8 @@ function exportBasket(){
         quantity:qty,price:0,
         triggerPrice:0,disclosedQuantity:0,lastPrice:Number(s.price)||0,
         variety:'regular',
-        gtt:{target:targetPct},
-        tags:['TGT']
+        gtt:stoplossPct==null?{target:targetPct}:{target:targetPct,stoploss:stoplossPct},
+        tags:stoplossPct==null?['TGT']:['TGT','SL']
       }
     });
   };
@@ -6295,7 +6296,7 @@ function exportBasket(){
   }
   downloadBasket(orders,'Zerodha_Basket_Buy');
   const rejNote=rejectedCount>0?` · ${rejectedCount} skipped (eligibility/allocation)`:'';
-  const targetNote=` · one target per stock`;
+  const targetNote=` · target + SL GTT per stock`;
   const planNote=` · Harvest ${adaptiveTGT.toFixed(2)}% (net ~${harvestPlan.expectedNetPct.toFixed(2)}% after costs)`;
   const floorNote=harvestPlan.warning?` · target floor active`:``;
   const limitNote=limitOmitted>0?` · ${limitOmitted} lower-priority stock${limitOmitted===1?'':'s'} omitted to keep the basket within Zerodha's 20-order limit`:'';
@@ -7037,7 +7038,7 @@ initApp();
 
 function saveFilterState(){
   const state={
-    minScore:document.getElementById('fMinScore')?.value||'70',
+    minScore:document.getElementById('fMinScore')?.value||String(MIN_SCORE_DEFAULT),
     topRank:document.getElementById('fTopRank')?.value||'',
     priceMin:document.getElementById('fPriceMin')?.value||'',
     priceMax:document.getElementById('fPriceMax')?.value||'',
