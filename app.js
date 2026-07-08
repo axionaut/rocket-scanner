@@ -1,5 +1,5 @@
-const BUILD_TS='2026-07-07 18:09 IST'; // release build time (IST)
-const APP_VERSION=484; // Goal header config; compass-only goal; pick championship shadow bar.
+const BUILD_TS='2026-07-08 14:41 IST'; // release build time (IST)
+const APP_VERSION=485; // TA/FA composite pick-source ladder baselines.
 const GOOGLE_DRIVE_CLIENT_ID='1015012642264-oi2nelv3v90k3d39r994a6nelgjs2a56.apps.googleusercontent.com'; // Public OAuth Web Client ID.
 const HARD_FILTER_SCHEMA='structural_tradeability_v2';
 const STOCK_RUNWAY_CEILING_PCT=19.5; // Intentional owner-approved forward-catch strategy filter: excludes stocks already near their circuit band (or caps max entry) since a stock that has already used up its daily range is a poor pre-rocket buy. Active fallback when NSE price-band data is unavailable.
@@ -2218,10 +2218,79 @@ const PICK_CHAMPION_STORE='rs_pick_champion_v1';
 const PICK_CHAMPION_BAR='v484';
 const PICK_STICKINESS_PP=2.0;
 const PICK_MIN_EVAL_DAYS=5;
-const PICK_STRATEGY_LABELS={engine:'Engine',momentum:'Momentum',persistence:'Persistence',early_mover:'Early Mover 3-6%',random:'Random'};
+const PICK_STRATEGY_LABELS={engine:'Engine',momentum:'Momentum',persistence:'Persistence',early_mover:'Early Mover 3-6%',ta_composite:'TA Composite',fa_composite:'FA Composite',random:'Random'};
+const PICK_COMPOSITES={
+  ta_composite:[
+    {pattern:/average_directional|adx/,dir:1},
+    {pattern:/relative_volume|volume.*change|rvol/,dir:1},
+    {pattern:/stochastic_rsi|relative_strength_index|\brsi\b/,dir:1},
+    {pattern:/perf.*1_week|price_change.*1_week|change_from_open|from_open/,dir:1}
+  ],
+  fa_composite:[
+    {pattern:/piotroski/,dir:1},
+    {pattern:/price_to_earnings|price_earnings|\bpe_ratio\b/,dir:-1,positiveOnly:true},
+    {pattern:/return_on_equity|\broe\b/,dir:1},
+    {pattern:/eps.*growth|earnings.*growth|revenue.*growth/,dir:1},
+    {pattern:/debt_to_equity|debt.*equity/,dir:-1}
+  ]
+};
 function _dayPriceChangeKey(day){
   const cols=day?.featureCols?.length?day.featureCols:Object.keys(day?.featureRows?.[day?.symbols?.[0]]||{});
   return cols.find(c=>/price_change/.test(c)&&/1_day/.test(c)&&!/open|from/.test(c))||cols.find(c=>/price_change/.test(c))||null;
+}
+function getDayFeatureCols(day){
+  if(day?.featureCols?.length) return day.featureCols;
+  const cols=new Set();
+  Object.values(day?.featureRows||{}).forEach(row=>Object.keys(row||{}).forEach(k=>cols.add(k)));
+  return [...cols];
+}
+function detectCompositeComponents(cols,components){
+  return (components||[]).map(c=>{
+    const key=(cols||[]).find(col=>c.pattern.test(String(col).toLowerCase()));
+    return key?{...c,key}:null;
+  }).filter(Boolean);
+}
+function compositeValue(row,component){
+  const v=Number(row?.[component.key]);
+  if(!isFinite(v)) return null;
+  if(component.positiveOnly&&v<=0) return null;
+  return v;
+}
+function pickCompositeSymbols(day,pool,n,components){
+  const detected=detectCompositeComponents(getDayFeatureCols(day),components);
+  if(detected.length<2) return [];
+  const scores=new Map();
+  detected.forEach(component=>{
+    const vals=(pool||[])
+      .map(sym=>({sym,v:compositeValue(day?.featureRows?.[sym],component)}))
+      .filter(x=>x.v!=null&&isFinite(x.v));
+    if(!vals.length) return;
+    vals.sort((a,b)=>(a.v*component.dir)-(b.v*component.dir));
+    const denom=Math.max(1,vals.length-1);
+    vals.forEach((x,idx)=>{
+      const rank=vals.length===1?1:idx/denom;
+      const rec=scores.get(x.sym)||{sum:0,n:0};
+      rec.sum+=rank;rec.n++;
+      scores.set(x.sym,rec);
+    });
+  });
+  return [...scores.entries()]
+    .filter(([,r])=>r.n>=2)
+    .map(([sym,r])=>({sym,score:r.sum/r.n}))
+    .sort((a,b)=>b.score-a.score||String(a.sym).localeCompare(String(b.sym)))
+    .slice(0,n)
+    .map(x=>x.sym);
+}
+function liveCompositeMetric(features,components){
+  const detected=detectCompositeComponents(Object.keys(features||{}),components);
+  const vals=detected.map(component=>{
+    const v=compositeValue(features,component);
+    if(v==null) return null;
+    const directional=v*component.dir;
+    return 0.5+(Math.atan(directional)/Math.PI);
+  }).filter(v=>v!=null&&isFinite(v));
+  if(vals.length<2) return -Infinity;
+  return vals.reduce((sum,v)=>sum+v,0)/vals.length;
 }
 function computeStrategyLadder(runtime){
   const days=[...(runtime?.days||[])].sort((a,b)=>String(a.sessionDate).localeCompare(String(b.sessionDate)));
@@ -2268,6 +2337,9 @@ function computeStrategyLadder(runtime){
       const early=pool.map(s=>({s,c:Number(day.featureRows?.[s]?.[key])})).filter(x=>isFinite(x.c)&&x.c>=3&&x.c<6).sort((a,b)=>b.c-a.c).slice(0,n).map(x=>x.s);
       add('early_mover',early,later,fwdOf);
     }
+    Object.entries(PICK_COMPOSITES).forEach(([name,components])=>{
+      add(name,pickCompositeSymbols(day,pool,n,components),later,fwdOf);
+    });
     let seed=0;String(day.sessionDate||'').split('').forEach(ch=>{seed=((seed*31)+ch.charCodeAt(0))>>>0;});
     const rand=()=>{seed=(1664525*seed+1013904223)>>>0;return seed/4294967296;};
     const rp=[...pool],rout=[];
@@ -2333,6 +2405,8 @@ function getChampionRowMetric(champ,s,yd){
   if(champ==='momentum'){const m=yd.peak.get(s.symbol);return m!=null&&isFinite(m)?m:-Infinity;}
   if(champ==='persistence') return yd.rockets.has(s.symbol)?(1000+(yd.peak.get(s.symbol)||0)):-Infinity;
   if(champ==='early_mover'){const c=Number(s.priceChange);return (isFinite(c)&&c>=3&&c<6)?c:-Infinity;}
+  if(champ==='ta_composite') return liveCompositeMetric(s._features||{},PICK_COMPOSITES.ta_composite);
+  if(champ==='fa_composite') return liveCompositeMetric(s._features||{},PICK_COMPOSITES.fa_composite);
   return Number(s.rankScore??s.rocketScore)||0;
 }
 function getTrailingTrajectorySources(runtime,currentDate){
@@ -4712,7 +4786,7 @@ function _renderMethodologyInner(){
       <div class="m-card"><h4>Entry Geometry Gate</h4><p>After live relevance and entry-fade checks, a fresh recommendation must still have favorable reward:risk geometry: room to upper circuit (pct_to_upper_band) must be at least ${GEOMETRY_MIN_RR}x the active stop distance. Stop distance is volatility-scaled from daily ATR and clamped to ${SL_MIN_PCT.toFixed(1)}%-${SL_MAX_PCT.toFixed(1)}%, so high-ATR stocks need honest runway. If upper-band room is missing for a stock, it is kept as geometry-unverified and ranks on relevance alone rather than being silently removed.</p></div>
       ${(()=>{
         const ps=getPickState();
-        const order=['engine','momentum','persistence','early_mover','random'];
+        const order=Object.keys(PICK_STRATEGY_LABELS);
         const ladder=ps.ladder||[];
         const fmtPct=v=>v!=null&&isFinite(v)?(v*100).toFixed(1)+'%':'—';
         const fmtNet=v=>v!=null&&isFinite(v)?(v>=0?'+':'')+v.toFixed(2)+'%':'—';
