@@ -1,5 +1,5 @@
 const BUILD_TS='2026-07-08 14:41 IST'; // release build time (IST)
-const APP_VERSION=485; // TA/FA composite pick-source ladder baselines.
+const APP_VERSION=486; // Rating ladder baselines and promoted championship ladder.
 const GOOGLE_DRIVE_CLIENT_ID='1015012642264-oi2nelv3v90k3d39r994a6nelgjs2a56.apps.googleusercontent.com'; // Public OAuth Web Client ID.
 const HARD_FILTER_SCHEMA='structural_tradeability_v2';
 const STOCK_RUNWAY_CEILING_PCT=19.5; // Intentional owner-approved forward-catch strategy filter: excludes stocks already near their circuit band (or caps max entry) since a stock that has already used up its daily range is a poor pre-rocket buy. Active fallback when NSE price-band data is unavailable.
@@ -2218,7 +2218,34 @@ const PICK_CHAMPION_STORE='rs_pick_champion_v1';
 const PICK_CHAMPION_BAR='v484';
 const PICK_STICKINESS_PP=2.0;
 const PICK_MIN_EVAL_DAYS=5;
-const PICK_STRATEGY_LABELS={engine:'Engine',momentum:'Momentum',persistence:'Persistence',early_mover:'Early Mover 3-6%',ta_composite:'TA Composite',fa_composite:'FA Composite',random:'Random'};
+const RATING_BUY=4;
+const RATING_STRONG_BUY=5;
+const PICK_STRATEGY_LABELS={
+  engine:'Engine',momentum:'Momentum',persistence:'Persistence',early_mover:'Early Mover 3-6%',
+  ta_composite:'TA Composite',fa_composite:'FA Composite',
+  rating_ma_buy:'MA = Buy',rating_osc_buy:'Osc = Buy',rating_tech_buy:'Tech = Buy',
+  rating_ma_osc_buy:'MA+Osc = Buy',rating_ma_tech_buy:'MA+Tech = Buy',rating_osc_tech_buy:'Osc+Tech = Buy',rating_all3_buy:'All-3 = Buy',
+  rating_ma_sbuy:'MA = Strong Buy',rating_osc_sbuy:'Osc = Strong Buy',rating_tech_sbuy:'Tech = Strong Buy',
+  rating_ma_osc_sbuy:'MA+Osc = Strong Buy',rating_ma_tech_sbuy:'MA+Tech = Strong Buy',rating_osc_tech_sbuy:'Osc+Tech = Strong Buy',rating_all3_sbuy:'All-3 = Strong Buy',
+  random:'Random'
+};
+const RATING_STRATEGIES=[
+  {key:'rating_ma_buy',target:RATING_BUY,parts:['ma']},
+  {key:'rating_osc_buy',target:RATING_BUY,parts:['osc']},
+  {key:'rating_tech_buy',target:RATING_BUY,parts:['tech']},
+  {key:'rating_ma_osc_buy',target:RATING_BUY,parts:['ma','osc']},
+  {key:'rating_ma_tech_buy',target:RATING_BUY,parts:['ma','tech']},
+  {key:'rating_osc_tech_buy',target:RATING_BUY,parts:['osc','tech']},
+  {key:'rating_all3_buy',target:RATING_BUY,parts:['ma','osc','tech']},
+  {key:'rating_ma_sbuy',target:RATING_STRONG_BUY,parts:['ma']},
+  {key:'rating_osc_sbuy',target:RATING_STRONG_BUY,parts:['osc']},
+  {key:'rating_tech_sbuy',target:RATING_STRONG_BUY,parts:['tech']},
+  {key:'rating_ma_osc_sbuy',target:RATING_STRONG_BUY,parts:['ma','osc']},
+  {key:'rating_ma_tech_sbuy',target:RATING_STRONG_BUY,parts:['ma','tech']},
+  {key:'rating_osc_tech_sbuy',target:RATING_STRONG_BUY,parts:['osc','tech']},
+  {key:'rating_all3_sbuy',target:RATING_STRONG_BUY,parts:['ma','osc','tech']}
+];
+const PICK_STRATEGY_META=Object.fromEntries(RATING_STRATEGIES.map(s=>[s.key,{championEligible:false}]));
 const PICK_COMPOSITES={
   ta_composite:[
     {pattern:/average_directional|adx/,dir:1},
@@ -2234,6 +2261,11 @@ const PICK_COMPOSITES={
     {pattern:/debt_to_equity|debt.*equity/,dir:-1}
   ]
 };
+function isChampionEligible(name){return name!=='random'&&PICK_STRATEGY_META[name]?.championEligible!==false;}
+function seededRand(seedText){
+  let seed=0;String(seedText||'').split('').forEach(ch=>{seed=((seed*31)+ch.charCodeAt(0))>>>0;});
+  return ()=>{seed=(1664525*seed+1013904223)>>>0;return seed/4294967296;};
+}
 function _dayPriceChangeKey(day){
   const cols=day?.featureCols?.length?day.featureCols:Object.keys(day?.featureRows?.[day?.symbols?.[0]]||{});
   return cols.find(c=>/price_change/.test(c)&&/1_day/.test(c)&&!/open|from/.test(c))||cols.find(c=>/price_change/.test(c))||null;
@@ -2292,6 +2324,42 @@ function liveCompositeMetric(features,components){
   if(vals.length<2) return -Infinity;
   return vals.reduce((sum,v)=>sum+v,0)/vals.length;
 }
+function detectRatingColumns(day){
+  const cols=getDayFeatureCols(day).map(c=>String(c));
+  const find=re=>cols.find(c=>re.test(c.toLowerCase()))||null;
+  return {
+    ma:find(/moving_averages_rating_1_day|moving.*average.*rating/),
+    osc:find(/oscillators_rating_1_day|oscillator.*rating/),
+    tech:find(/technical_rating_1_day|technical.*rating/)
+  };
+}
+// Rating strategies are rating-filtered momentum rules: same-day 1D-change sorting
+// is deliberate, so the existing Momentum row is the control for the rating's marginal contribution.
+function pickRatingSymbols(day,pool,n,strategy){
+  const ratingCols=detectRatingColumns(day);
+  const needed=strategy.parts||[];
+  if(needed.some(part=>!ratingCols[part])) return [];
+  const priceKey=_dayPriceChangeKey(day);
+  const rand=seededRand(String(day?.sessionDate||'')+'|'+strategy.key);
+  const tie=Object.fromEntries((pool||[]).map(sym=>[sym,rand()]));
+  return (pool||[])
+    .filter(sym=>needed.every(part=>{
+      const v=Number(day?.featureRows?.[sym]?.[ratingCols[part]]);
+      return isFinite(v)&&Math.round(v)===strategy.target;
+    }))
+    .map(sym=>{
+      const ch=priceKey?Number(day?.featureRows?.[sym]?.[priceKey]):null;
+      return {sym,ch:isFinite(ch)?ch:null,tie:tie[sym]??0};
+    })
+    .sort((a,b)=>{
+      if(a.ch!=null&&b.ch!=null&&b.ch!==a.ch) return b.ch-a.ch;
+      if(a.ch!=null&&b.ch==null) return -1;
+      if(a.ch==null&&b.ch!=null) return 1;
+      return a.tie-b.tie;
+    })
+    .slice(0,n)
+    .map(x=>x.sym);
+}
 function computeStrategyLadder(runtime){
   const days=[...(runtime?.days||[])].sort((a,b)=>String(a.sessionDate).localeCompare(String(b.sessionDate)));
   const priceOf=(day,symbol)=>{const idx=(day?.symbols||[]).indexOf(symbol);return idx>=0?Number(day.prices?.[idx]):null;};
@@ -2299,7 +2367,7 @@ function computeStrategyLadder(runtime){
   const add=(name,picks,laterRockets,fwdOf)=>{
     const list=(picks||[]).filter(Boolean);
     if(!list.length) return;
-    const a=agg[name]=agg[name]||{name,label:PICK_STRATEGY_LABELS[name]||name,evalDays:0,flagged:0,hits:0,fwdSum:0,fwdN:0};
+    const a=agg[name]=agg[name]||{name,label:PICK_STRATEGY_LABELS[name]||name,championEligible:isChampionEligible(name),evalDays:0,flagged:0,hits:0,fwdSum:0,fwdN:0};
     a.evalDays++;a.flagged+=list.length;
     list.forEach(sym=>{
       if(laterRockets.has(sym)) a.hits++;
@@ -2340,8 +2408,10 @@ function computeStrategyLadder(runtime){
     Object.entries(PICK_COMPOSITES).forEach(([name,components])=>{
       add(name,pickCompositeSymbols(day,pool,n,components),later,fwdOf);
     });
-    let seed=0;String(day.sessionDate||'').split('').forEach(ch=>{seed=((seed*31)+ch.charCodeAt(0))>>>0;});
-    const rand=()=>{seed=(1664525*seed+1013904223)>>>0;return seed/4294967296;};
+    RATING_STRATEGIES.forEach(strategy=>{
+      add(strategy.key,pickRatingSymbols(day,pool,n,strategy),later,fwdOf);
+    });
+    const rand=seededRand(day.sessionDate||'');
     const rp=[...pool],rout=[];
     while(rp.length&&rout.length<n) rout.push(rp.splice(Math.floor(rand()*rp.length),1)[0]);
     add('random',rout,later,fwdOf);
@@ -2360,12 +2430,12 @@ function resolvePickChampion(ladder){
     FS.set(PICK_CHAMPION_STORE,stored);
     return stored;
   }
-  const eligible=(ladder||[]).filter(s=>s.name!=='random'&&s.evalDays>=PICK_MIN_EVAL_DAYS&&s.avgNetPct!=null);
+  const eligible=(ladder||[]).filter(s=>isChampionEligible(s.name)&&s.evalDays>=PICK_MIN_EVAL_DAYS&&s.avgNetPct!=null);
   if(!eligible.length) return stored;
   const best=eligible.reduce((a,b)=>(b.avgNetPct>a.avgNetPct?b:a));
   const incumbent=eligible.find(s=>s.name===stored.name)||null;
   if(!incumbent) return stored;
-  if(best.name!==stored.name&&best.avgNetPct-incumbent.avgNetPct>=PICK_STICKINESS_PP){
+  if(best.name!==stored.name&&best.avgNetPct>0&&best.avgNetPct-incumbent.avgNetPct>=PICK_STICKINESS_PP){
     const next={name:best.name,since:getSessionDate(),metric:best.avgNetPct,bar:PICK_CHAMPION_BAR};
     FS.set(PICK_CHAMPION_STORE,next);
     return next;
@@ -3533,16 +3603,44 @@ function buildGoalCard(){
   const title='Required NET compounding per NSE trading day on FREE capital (Capital ₹ + today\'s sell proceeds). Informational only; does not change targets.';
   return `<div class="st" title="${title}"><div class="st-l">Goal · ₹${goalFmtRs(g.target)} · ${days} td left</div><div class="st-v" style="color:${col}">${reqStr}%/day ${badge}</div><div class="st-d">${freeStr} · need ${needRs!=null?'₹'+goalFmtRs(needRs)+'/day':'—/day'} · achieved ${ach!=null?(ach*100).toFixed(2)+'%/day':'—/day'} (30d)</div></div>`;
 }
-// Pick-source championship card (v483): shows which strategy currently runs the pick
-// list and the full ladder (hit rate + cost-adjusted net per flag).
+function pickLadderDisplayRows(ladder){
+  return (ladder||[])
+    .filter(r=>(r.flagged||0)>0)
+    .sort((a,b)=>(b.avgNetPct??-Infinity)-(a.avgNetPct??-Infinity)||String(a.label||a.name).localeCompare(String(b.label||b.name)));
+}
+function buildPickLadderHTML(){
+  const ps=getPickState();
+  const rows=pickLadderDisplayRows(ps.ladder);
+  const pct=v=>v!=null&&isFinite(v)?(v*100).toFixed(1)+'%':'—';
+  const net=v=>v!=null&&isFinite(v)?(v>=0?'+':'')+v.toFixed(2)+'%':'—';
+  const body=rows.map(r=>{
+    const isCh=r.name===ps.name;
+    const label=(r.label||PICK_STRATEGY_LABELS[r.name]||r.name)+(r.name==='random'?' (control)':'')+(!isChampionEligible(r.name)&&r.name!=='random'?' <span style="color:var(--t3);font-weight:600">(shadow)</span>':'')+(isCh?' ▶ champion':'');
+    return `<tr style="${isCh?'font-weight:800;color:var(--t1)':''}"><td>${label}</td><td>${r.evalDays||0}</td><td>${r.flagged||0}</td><td>${r.hits||0}</td><td>${pct(r.hitRate)}</td><td>${net(r.avgNetPct)}</td></tr>`;
+  }).join('');
+  return `<div style="overflow-x:auto"><table class="ct" style="min-width:620px;font-size:11px"><thead><tr><th>Pick Source</th><th>Eval Days</th><th>Flagged</th><th>Hits</th><th>Hit Rate</th><th>Net %/flag</th></tr></thead><tbody>${body||'<tr><td colspan="6" style="color:var(--t3)">Warming up — no evaluable pick-source rows yet.</td></tr>'}</tbody></table></div>`;
+}
+let PICK_LADDER_COLLAPSED=false;
+function togglePickLadderPanel(){
+  PICK_LADDER_COLLAPSED=!PICK_LADDER_COLLAPSED;
+  renderPickLadderPanel();
+}
+function renderPickLadderPanel(){
+  const el=document.getElementById('pickLadderPanel');
+  if(!el) return;
+  const ps=getPickState();
+  const header=`🏆 Pick Championship Ladder — Champion: ${escHtml(ps.label||'Engine')}`;
+  el.innerHTML=`<div style="margin:10px 0 14px;border:1px solid var(--border);border-radius:8px;background:var(--bg-card);overflow:hidden">
+    <button onclick="togglePickLadderPanel()" style="width:100%;display:flex;justify-content:space-between;align-items:center;gap:10px;background:transparent;border:0;color:var(--t1);padding:10px 12px;font-weight:800;font-family:inherit;cursor:pointer;text-align:left">
+      <span>${header}</span><span style="color:var(--t3);font-size:12px">${PICK_LADDER_COLLAPSED?'Show':'Hide'}</span>
+    </button>
+    <div style="${PICK_LADDER_COLLAPSED?'display:none;':''}padding:0 10px 10px">${buildPickLadderHTML()}</div>
+  </div>`;
+}
+// Pick-source championship card: champion status only; the full ladder lives above Rankings.
 function buildPickSourceCard(){
   const ps=getPickState();
-  const ranked=(ps.ladder||[]).filter(s=>s.flagged>0).sort((a,b)=>(b.avgNetPct??-99)-(a.avgNetPct??-99));
-  const rows=ranked.map(s=>{
-    const isCh=s.name===ps.name;
-    const label=(s.label||PICK_STRATEGY_LABELS[s.name]||s.name)+(s.name==='random'?' (control)':'');
-    return `<span style="${isCh?'color:var(--t1);font-weight:700':'color:var(--t3)'}">${label} ${s.hitRate!=null?(s.hitRate*100).toFixed(0)+'%':'—'}·${s.avgNetPct!=null?(s.avgNetPct>=0?'+':'')+s.avgNetPct.toFixed(1)+'%/flag':'—'} · ${s.evalDays}d</span>`;
-  }).join(' · ');
+  const ranked=pickLadderDisplayRows(ps.ladder);
   const incumbent=ranked.find(s=>s.name===ps.name)||null;
   const leader=ranked.find(s=>s.name!=='random'&&s.name!==ps.name&&s.avgNetPct!=null&&(!incumbent||s.avgNetPct>incumbent.avgNetPct));
   let shadow='';
@@ -3553,7 +3651,7 @@ function buildPickSourceCard(){
   const col=ps.name==='engine'?'var(--cyan)':'var(--fire)';
   const note=ps.name==='engine'?'engine picks':'RUNNING THE SHOW';
   const title=`Champion = best cost-adjusted net %/flag over the 5-day window (both sides need at least ${PICK_MIN_EVAL_DAYS} evaluable days; random is control-only). Sticky: a challenger must lead the incumbent by ≥${PICK_STICKINESS_PP.toFixed(0)}pp to take over. The champion strategy orders the live pick list; Min Score floor applies only in Engine mode.`;
-  return `<div class="st" title="${title}"><div class="st-l">Pick Source</div><div class="st-v" style="color:${col};font-size:16px">${ps.label||'Engine'} <span style="font-size:10px;color:var(--t3)">${note}${ps.since?' · since '+ps.since:''}</span></div><div class="st-d">${shadow||rows||`warming up — needs ${PICK_MIN_EVAL_DAYS}+ evaluable days`}</div></div>`;
+  return `<div class="st" title="${title}"><div class="st-l">Pick Source</div><div class="st-v" style="color:${col};font-size:16px">${ps.label||'Engine'} <span style="font-size:10px;color:var(--t3)">${note}${ps.since?' · since '+ps.since:''}</span></div><div class="st-d">${shadow||`full ladder below · needs ${PICK_STICKINESS_PP.toFixed(0)}pp over ${PICK_MIN_EVAL_DAYS} days to switch`}</div></div>`;
 }
 function renderStats(){
   const t=ALL.length;
@@ -3632,6 +3730,7 @@ function renderStats(){
     <div class="st"><div class="st-l">Score Spread</div><div class="st-v">${scoreSpread}</div><div class="st-d">${effectiveScoreSpreadDetail}</div></div>
     <div class="st"><div class="st-l">Top Sector</div><div class="st-v" style="font-size:15px;color:var(--green)">${topSec}</div><div class="st-d">${topSecPct.toFixed(0)}% advancing</div></div>
     <div class="st"><div class="st-l">Breadth</div><div class="st-v" style="color:var(--cyan)">${ENGINE_DATA.marketBreadth!=null?(ENGINE_DATA.marketBreadth*100).toFixed(0):(bull/t*100).toFixed(0)}%</div><div class="st-d">${bull.toLocaleString()} advancing · ${(t-bull).toLocaleString()} down/flat · ${ENGINE_DATA.accSessions||0} learned horizons</div></div>${bookedCard}${buildGoalCard()}${buildPickSourceCard()}`;
+  renderPickLadderPanel();
 
   // Row 1: hard-filter removal pills
   const filterPills=[];
@@ -4784,18 +4883,6 @@ function _renderMethodologyInner(){
       <div class="m-card"><h4>Outcome Self-Correction</h4><p>${feedbackText} Outcome evidence is displayed as confidence context only. It does not add or subtract points from Rocket Score.</p></div>
       <div class="m-card"><h4>Feature Weighting</h4><p>Every indicator receives a cross-day stability factor from its D-1...D-4 relevance track record. Final weight starts as absolute AUC relevance times stability, then mRMR redundancy reduces overlapping stable signals. All features are considered with no fixed cap; unstable or random features self-cancel toward zero weight, so the feature list decides its own effective size.</p></div>
       <div class="m-card"><h4>Entry Geometry Gate</h4><p>After live relevance and entry-fade checks, a fresh recommendation must still have favorable reward:risk geometry: room to upper circuit (pct_to_upper_band) must be at least ${GEOMETRY_MIN_RR}x the active stop distance. Stop distance is volatility-scaled from daily ATR and clamped to ${SL_MIN_PCT.toFixed(1)}%-${SL_MAX_PCT.toFixed(1)}%, so high-ATR stocks need honest runway. If upper-band room is missing for a stock, it is kept as geometry-unverified and ranks on relevance alone rather than being silently removed.</p></div>
-      ${(()=>{
-        const ps=getPickState();
-        const order=Object.keys(PICK_STRATEGY_LABELS);
-        const ladder=ps.ladder||[];
-        const fmtPct=v=>v!=null&&isFinite(v)?(v*100).toFixed(1)+'%':'—';
-        const fmtNet=v=>v!=null&&isFinite(v)?(v>=0?'+':'')+v.toFixed(2)+'%':'—';
-        const rows=order.map(name=>ladder.find(r=>r.name===name)||{name,label:PICK_STRATEGY_LABELS[name]||name,evalDays:0,flagged:0,hits:0,hitRate:null,avgNetPct:null});
-        return `<div class="m-card"><h4>Pick Championship Ladder</h4><p>Graded on later-in-window rockets and cost-adjusted best forward move. Champion switching requires ≥${PICK_STICKINESS_PP.toFixed(0)}pp net/flag lead across ≥${PICK_MIN_EVAL_DAYS} evaluable days; Random is a control and never champion.</p>
-          <table class="ct"><thead><tr><th>Pick Source</th><th>Evaluable Days</th><th>Flagged</th><th>Hits</th><th>Hit Rate</th><th>Net %/flag</th></tr></thead><tbody>
-          ${rows.map(r=>{const isCh=r.name===ps.name;const label=(r.label||PICK_STRATEGY_LABELS[r.name]||r.name)+(r.name==='random'?' (control)':'')+(isCh?' ▶ champion':'');return `<tr style="${isCh?'font-weight:800;color:var(--t1)':''}"><td>${label}</td><td>${r.evalDays||0}</td><td>${r.flagged||0}</td><td>${r.hits||0}</td><td>${fmtPct(r.hitRate)}</td><td>${fmtNet(r.avgNetPct)}</td></tr>`;}).join('')}
-          </tbody></table></div>`;
-      })()}
       <div class="m-card"><h4>Stability Spread</h4><p>Stability min ${((stabilitySummary.min||0)*100).toFixed(0)}%, median ${((stabilitySummary.median||0)*100).toFixed(0)}%, max ${((stabilitySummary.max||0)*100).toFixed(0)}%. Near-zero: ${stabilitySummary.nearZero||0}; near-one: ${stabilitySummary.nearOne||0}; tracked features: ${stabilitySummary.total||0}.</p></div>
       <div class="m-card"><h4>🎯 Max 1D Filter</h4><p>Set <em>Max 1D %</em> in the filter bar to hide stocks that have already moved too much today (default 5%). Entry-ceiling filtering has been removed; strong candidates are no longer hidden just because current price is above a calculated buy ceiling.</p></div>
       <div class="m-card"><h4>🚫 Recommendation Filters</h4><p>The learning universe keeps every valid parsed NSE symbol. Recommendation eligibility separately excludes zero-price rows, stocks at/near their NSE price band, non-EQ series, surveillance-flagged stocks, insufficient liquidity, invalid ATR, stocks already in the current day's rocket union, and live entries that have faded from the day high by the harvest-target zone. Delivery, peak retention, pullback from high, RVOL, DMI, MFI, RSI, and sell pressure remain learnable features. Currently structurally filtered from recommendations: ${(REMOVED.uc||0)+(REMOVED.surv||0)+(REMOVED.nonEq||0)+(REMOVED.liq||0)+(REMOVED.fscore||0)+(REMOVED.atr||0)} stocks.</p></div>
@@ -6611,7 +6698,10 @@ function downloadBasket(orders, filename){
 function switchTab(n){
   document.querySelectorAll('#mainTabs .tab').forEach((t,i)=>t.classList.toggle('act',i===n));
   document.querySelectorAll('.tp').forEach((t,i)=>t.classList.toggle('act',i===n));
+  const ladderPanel=document.getElementById('pickLadderPanel');
+  if(ladderPanel) ladderPanel.style.display=n===0?'':'none';
   updateTabCounts();
+  if(n===0) renderPickLadderPanel();
   if(n===1) renderMethodology();
   if(n===2) renderPerformance();
 }
