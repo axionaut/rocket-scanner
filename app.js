@@ -1,5 +1,5 @@
-const BUILD_TS='2026-07-10 08:52 IST'; // release build time (IST)
-const APP_VERSION=487; // Ladder placement, latest-session P&L detail, and local-first hydration.
+const BUILD_TS='2026-07-10 19:20 IST'; // release build time (IST)
+const APP_VERSION=488; // Open pick championship: all non-random strategies can win.
 const GOOGLE_DRIVE_CLIENT_ID='1015012642264-oi2nelv3v90k3d39r994a6nelgjs2a56.apps.googleusercontent.com'; // Public OAuth Web Client ID.
 const HARD_FILTER_SCHEMA='structural_tradeability_v2';
 const STOCK_RUNWAY_CEILING_PCT=19.5; // Intentional owner-approved forward-catch strategy filter: excludes stocks already near their circuit band (or caps max entry) since a stock that has already used up its daily range is a poor pre-rocket buy. Active fallback when NSE price-band data is unavailable.
@@ -2231,11 +2231,9 @@ function recordDayPredictions(runtime,sessionDate,predictedSymbols){
   return true;
 }
 // Pick-source championship: grade strategies on hit rate AND cost-adjusted profit per flag.
-// Random is a control only and can never be champion. v484 keeps this in shadow mode
-// until a challenger beats an incumbent with a full-window, >=2pp lead.
+// Random is a control only; every other strategy can run the live pick list.
 const PICK_CHAMPION_STORE='rs_pick_champion_v1';
-const PICK_CHAMPION_BAR='v484';
-const PICK_STICKINESS_PP=2.0;
+const PICK_CHAMPION_BAR='v488';
 const PICK_MIN_EVAL_DAYS=5;
 const RATING_BUY=4;
 const RATING_STRONG_BUY=5;
@@ -2264,7 +2262,7 @@ const RATING_STRATEGIES=[
   {key:'rating_osc_tech_sbuy',target:RATING_STRONG_BUY,parts:['osc','tech']},
   {key:'rating_all3_sbuy',target:RATING_STRONG_BUY,parts:['ma','osc','tech']}
 ];
-const PICK_STRATEGY_META=Object.fromEntries(RATING_STRATEGIES.map(s=>[s.key,{championEligible:false}]));
+const RATING_STRATEGY_BY_KEY=Object.fromEntries(RATING_STRATEGIES.map(s=>[s.key,s]));
 const PICK_COMPOSITES={
   ta_composite:[
     {pattern:/average_directional|adx/,dir:1},
@@ -2280,7 +2278,7 @@ const PICK_COMPOSITES={
     {pattern:/debt_to_equity|debt.*equity/,dir:-1}
   ]
 };
-function isChampionEligible(name){return name!=='random'&&PICK_STRATEGY_META[name]?.championEligible!==false;}
+function isChampionEligible(name){return name!=='random';}
 function seededRand(seedText){
   let seed=0;String(seedText||'').split('').forEach(ch=>{seed=((seed*31)+ch.charCodeAt(0))>>>0;});
   return ()=>{seed=(1664525*seed+1013904223)>>>0;return seed/4294967296;};
@@ -2343,6 +2341,11 @@ function liveCompositeMetric(features,components){
   if(vals.length<2) return -Infinity;
   return vals.reduce((sum,v)=>sum+v,0)/vals.length;
 }
+const RATING_FEATURE_KEYS={
+  ma:'moving_averages_rating_1_day',
+  osc:'oscillators_rating_1_day',
+  tech:'technical_rating_1_day'
+};
 function detectRatingColumns(day){
   const cols=getDayFeatureCols(day).map(c=>String(c));
   const find=re=>cols.find(c=>re.test(c.toLowerCase()))||null;
@@ -2378,6 +2381,21 @@ function pickRatingSymbols(day,pool,n,strategy){
     })
     .slice(0,n)
     .map(x=>x.sym);
+}
+function liveRatingMetric(s,strategy){
+  const features=s?._features||{};
+  const needed=strategy?.parts||[];
+  if(!needed.length) return -Infinity;
+  const ok=needed.every(part=>{
+    const v=Number(features[RATING_FEATURE_KEYS[part]]);
+    return isFinite(v)&&Math.round(v)===strategy.target;
+  });
+  if(!ok) return -Infinity;
+  const direct=Number(s.priceChange);
+  if(isFinite(direct)) return direct;
+  const key=Object.keys(features).find(c=>/price_change/.test(c)&&/1_day/.test(c)&&!/open|from/.test(c))||Object.keys(features).find(c=>/price_change/.test(c));
+  const change=Number(features[key]);
+  return isFinite(change)?change:-Infinity;
 }
 function computeStrategyLadder(runtime){
   const days=[...(runtime?.days||[])].sort((a,b)=>String(a.sessionDate).localeCompare(String(b.sessionDate)));
@@ -2444,25 +2462,17 @@ function computeStrategyLadder(runtime){
 function resolvePickChampion(ladder){
   const fallback={name:'engine',since:null,metric:null,bar:PICK_CHAMPION_BAR};
   const raw=FS.get(PICK_CHAMPION_STORE);
-  let stored=(raw&&raw.bar===PICK_CHAMPION_BAR)?raw:fallback;
-  if(!raw||raw.bar!==PICK_CHAMPION_BAR){
-    FS.set(PICK_CHAMPION_STORE,stored);
-    return stored;
+  const stored=(raw&&raw.bar===PICK_CHAMPION_BAR)?raw:fallback;
+  const eligible=(ladder||[]).filter(s=>isChampionEligible(s.name)&&s.evalDays>=PICK_MIN_EVAL_DAYS&&s.avgNetPct>0);
+  if(!eligible.length){
+    if(raw?.name!==fallback.name||raw?.bar!==PICK_CHAMPION_BAR) FS.set(PICK_CHAMPION_STORE,fallback);
+    return fallback;
   }
-  const eligible=(ladder||[]).filter(s=>isChampionEligible(s.name)&&s.evalDays>=PICK_MIN_EVAL_DAYS&&s.avgNetPct!=null);
-  if(!eligible.length) return stored;
   const best=eligible.reduce((a,b)=>(b.avgNetPct>a.avgNetPct?b:a));
-  const incumbent=eligible.find(s=>s.name===stored.name)||null;
-  if(!incumbent) return stored;
-  if(best.name!==stored.name&&best.avgNetPct>0&&best.avgNetPct-incumbent.avgNetPct>=PICK_STICKINESS_PP){
-    const next={name:best.name,since:getSessionDate(),metric:best.avgNetPct,bar:PICK_CHAMPION_BAR};
+  if(best.name!==stored.name||stored.metric!==best.avgNetPct||stored.bar!==PICK_CHAMPION_BAR){
+    const next={name:best.name,since:best.name===stored.name?stored.since:getSessionDate(),metric:best.avgNetPct,bar:PICK_CHAMPION_BAR};
     FS.set(PICK_CHAMPION_STORE,next);
     return next;
-  }
-  if(incumbent&&incumbent.metric!==stored.metric){
-    const upd={...stored,metric:incumbent.avgNetPct,bar:PICK_CHAMPION_BAR};
-    FS.set(PICK_CHAMPION_STORE,upd);
-    return upd;
   }
   return stored;
 }
@@ -2496,6 +2506,7 @@ function getChampionRowMetric(champ,s,yd){
   if(champ==='early_mover'){const c=Number(s.priceChange);return (isFinite(c)&&c>=3&&c<6)?c:-Infinity;}
   if(champ==='ta_composite') return liveCompositeMetric(s._features||{},PICK_COMPOSITES.ta_composite);
   if(champ==='fa_composite') return liveCompositeMetric(s._features||{},PICK_COMPOSITES.fa_composite);
+  if(RATING_STRATEGY_BY_KEY[champ]) return liveRatingMetric(s,RATING_STRATEGY_BY_KEY[champ]);
   return Number(s.rankScore??s.rocketScore)||0;
 }
 function getTrailingTrajectorySources(runtime,currentDate){
@@ -3677,7 +3688,7 @@ function buildPickLadderHTML(){
   const net=v=>v!=null&&isFinite(v)?(v>=0?'+':'')+v.toFixed(2)+'%':'—';
   const body=rows.map(r=>{
     const isCh=r.name===ps.name;
-    const label=(r.label||PICK_STRATEGY_LABELS[r.name]||r.name)+(r.name==='random'?' (control)':'')+(!isChampionEligible(r.name)&&r.name!=='random'?' <span style="color:var(--t3);font-weight:600">(shadow)</span>':'')+(isCh?' ▶ champion':'');
+    const label=(r.label||PICK_STRATEGY_LABELS[r.name]||r.name)+(r.name==='random'?' (control)':'')+(isCh?' ▶ champion':'');
     return `<tr style="${isCh?'font-weight:800;color:var(--t1)':''}"><td>${label}</td><td>${r.evalDays||0}</td><td>${r.flagged||0}</td><td>${r.hits||0}</td><td>${pct(r.hitRate)}</td><td>${net(r.avgNetPct)}</td></tr>`;
   }).join('');
   return `<div style="overflow-x:auto"><table class="ct" style="min-width:620px;font-size:11px"><thead><tr><th>Pick Source</th><th>Eval Days</th><th>Flagged</th><th>Hits</th><th>Hit Rate</th><th>Net %/flag</th></tr></thead><tbody>${body||'<tr><td colspan="6" style="color:var(--t3)">Warming up — no evaluable pick-source rows yet.</td></tr>'}</tbody></table></div>`;
@@ -3702,18 +3713,10 @@ function renderPickLadderPanel(){
 // Pick-source championship card: champion status only; the full ladder lives above Rankings.
 function buildPickSourceCard(){
   const ps=getPickState();
-  const ranked=pickLadderDisplayRows(ps.ladder);
-  const incumbent=ranked.find(s=>s.name===ps.name)||null;
-  const leader=ranked.find(s=>s.name!=='random'&&s.name!==ps.name&&s.avgNetPct!=null&&(!incumbent||s.avgNetPct>incumbent.avgNetPct));
-  let shadow='';
-  if(ps.name==='engine'&&leader&&incumbent){
-    const gap=leader.avgNetPct-incumbent.avgNetPct;
-    if(gap>0&&gap<PICK_STICKINESS_PP) shadow=`${leader.label} leads +${gap.toFixed(1)}pp — needs ≥${PICK_STICKINESS_PP.toFixed(0)}pp over ${PICK_MIN_EVAL_DAYS} days`;
-  }
   const col=ps.name==='engine'?'var(--cyan)':'var(--fire)';
   const note=ps.name==='engine'?'engine picks':'RUNNING THE SHOW';
-  const title=`Champion = best cost-adjusted net %/flag over the 5-day window (both sides need at least ${PICK_MIN_EVAL_DAYS} evaluable days; random is control-only). Sticky: a challenger must lead the incumbent by ≥${PICK_STICKINESS_PP.toFixed(0)}pp to take over. The champion strategy orders the live pick list; Min Score floor applies only in Engine mode.`;
-  return `<div class="st" title="${title}"><div class="st-l">Pick Source</div><div class="st-v" style="color:${col};font-size:16px">${ps.label||'Engine'} <span style="font-size:10px;color:var(--t3)">${note}${ps.since?' · since '+ps.since:''}</span></div><div class="st-d">${shadow||`full ladder below · needs ${PICK_STICKINESS_PP.toFixed(0)}pp over ${PICK_MIN_EVAL_DAYS} days to switch`}</div></div>`;
+  const title=`Champion = best cost-adjusted net %/flag over at least ${PICK_MIN_EVAL_DAYS} evaluable days; random is control-only. The champion strategy orders the live pick list; Min Score floor applies only in Engine mode.`;
+  return `<div class="st" title="${title}"><div class="st-l">Pick Source</div><div class="st-v" style="color:${col};font-size:16px">${ps.label||'Engine'} <span style="font-size:10px;color:var(--t3)">${note}${ps.since?' · since '+ps.since:''}</span></div><div class="st-d">best net %/flag over ≥${PICK_MIN_EVAL_DAYS} evaluable days runs the show</div></div>`;
 }
 function renderStats(){
   const t=ALL.length;
