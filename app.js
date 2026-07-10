@@ -1,5 +1,5 @@
-const BUILD_TS='2026-07-08 14:41 IST'; // release build time (IST)
-const APP_VERSION=486; // Rating ladder baselines and promoted championship ladder.
+const BUILD_TS='2026-07-10 08:52 IST'; // release build time (IST)
+const APP_VERSION=487; // Ladder placement, latest-session P&L detail, and local-first hydration.
 const GOOGLE_DRIVE_CLIENT_ID='1015012642264-oi2nelv3v90k3d39r994a6nelgjs2a56.apps.googleusercontent.com'; // Public OAuth Web Client ID.
 const HARD_FILTER_SCHEMA='structural_tradeability_v2';
 const STOCK_RUNWAY_CEILING_PCT=19.5; // Intentional owner-approved forward-catch strategy filter: excludes stocks already near their circuit band (or caps max entry) since a stock that has already used up its daily range is a poor pre-rocket buy. Active fallback when NSE price-band data is unavailable.
@@ -741,8 +741,9 @@ const FS = (() => {
   function folderName(){ return isConnected()?'Google Drive':(_localDirHandle?'Local folder':null); }
   function hasFolder(){ return isConnected(); }
   function hasLocalBrainFolder(){ return !!_localDirHandle; }
+  function getActiveLocalDirectoryHandle(){ return _localDirHandle; }
 
-  return {init,connect,needsReconnect,isConfigured,setClientId,isConnected,read,readJsonFile,writeJsonFile,readUploadText,readUploadFile,saveUploadedInputs,write,set,setMultiple,get,load,loadFromDisk,ensureLoaded,refreshCloudIndex,verifyConnection,getBrain,reset,folderName,hasFolder,setLocalDirectoryHandle,getStoredUploadDirHandle,hasLocalBrainFolder};
+  return {init,connect,needsReconnect,isConfigured,setClientId,isConnected,read,readJsonFile,writeJsonFile,readUploadText,readUploadFile,saveUploadedInputs,write,set,setMultiple,get,load,loadFromDisk,ensureLoaded,refreshCloudIndex,verifyConnection,getBrain,reset,folderName,hasFolder,setLocalDirectoryHandle,getStoredUploadDirHandle,hasLocalBrainFolder,getActiveLocalDirectoryHandle};
 })();
 
 function updateFolderUI(){
@@ -777,6 +778,24 @@ function updateFolderUI(){
   }
 }
 setInterval(()=>{try{updateFolderUI();}catch(e){}},30000);
+
+let _driveSilentReconnect=null;
+async function maintainDriveSession(){
+  if(_driveSilentReconnect||!FS.needsReconnect()) return false;
+  _driveSilentReconnect=FS.connect({silent:true})
+    .then(result=>{
+      if(result?.ok){
+        if(result.brain) FS.load(result.brain);
+        updateFolderUI();
+        return true;
+      }
+      return false;
+    })
+    .catch(e=>{console.warn('Silent Drive session refresh failed',e);return false;})
+    .finally(()=>{_driveSilentReconnect=null;});
+  return await _driveSilentReconnect;
+}
+setInterval(()=>{maintainDriveSession().catch(()=>null);},60000);
 
 function showDriveAuthRequiredState(){
   const msg=FS.needsReconnect()
@@ -866,7 +885,7 @@ async function connectCloudStorage(opts={}){
   setMsg('Loading latest Drive inputs...');
   try{
     await FS.refreshCloudIndex?.();
-    const hydratedCount=await hydrateSessionCSVsFromWorkspace();
+    const hydratedCount=await hydrateSessionCSVsFromPreferredInputs('Drive reconnect');
     try{enrichRowsWithNSEData(ALL);}catch(e){console.warn('Drive reconnect NSE enrichment failed',e);}
     if(hydratedCount||Object.keys(FS.getBrain()||{}).length) saveBrainInBackground('Cloud brain saved');
   }catch(e){console.warn('Drive input hydration failed after connect',e);}
@@ -3340,6 +3359,49 @@ function sumChargeParts(parts){
   return Object.values(parts).reduce((sum,v)=>sum+(v||0),0);
 }
 
+function currentPriceForSymbol(symbol){
+  const sym=normSym(symbol);
+  const row=ALL.find(s=>s.symbol===sym);
+  const price=Number(row?.price);
+  return price>0?price:null;
+}
+
+function enrichExitPnlRow(row){
+  const qty=Number(row?.qty)||0;
+  const buy=Number(row?.buyPrice);
+  const sell=Number(row?.sellPrice);
+  const current=currentPriceForSymbol(row?.sym);
+  const out={...row};
+  if(qty>0&&isFinite(buy)&&buy>0&&isFinite(sell)&&sell>0){
+    out.priceDiff=+(sell-buy).toFixed(2);
+    out.grossPnl=+((sell-buy)*qty).toFixed(0);
+  }else{
+    out.priceDiff=null;
+    out.grossPnl=null;
+  }
+  if(qty>0&&isFinite(sell)&&sell>0&&current!=null){
+    out.currentPrice=+current.toFixed(2);
+    out.reversePnl=+((sell-current)*qty).toFixed(0);
+    out.reverseStatus=out.reversePnl>0?'Cheaper re-entry':out.reversePnl<0?'Costlier re-entry':'Flat re-entry';
+  }else{
+    out.currentPrice=current!=null?+current.toFixed(2):null;
+    out.reversePnl=null;
+    out.reverseStatus='No live price';
+  }
+  return out;
+}
+
+function summarizeExitPnlRows(rows){
+  const known=(rows||[]).filter(r=>r&&r.capital>0&&r.netPnl!=null);
+  const capital=known.reduce((s,r)=>s+(r.capital||0),0);
+  const net=known.reduce((s,r)=>s+(r.netPnl||0),0);
+  const gross=known.reduce((s,r)=>s+(r.grossPnl||0),0);
+  const charges=known.reduce((s,r)=>s+(r.charges||0),0);
+  const reverse=(rows||[]).filter(r=>r.reversePnl!=null).reduce((s,r)=>s+r.reversePnl,0);
+  const reverseCount=(rows||[]).filter(r=>r.reversePnl!=null).length;
+  return {known,capital,net,gross,charges,reverse,reverseCount,pct:capital>0?+(net/capital*100).toFixed(2):null};
+}
+
 function computeLatestOrderBooked(){
   // Only compute from orders loaded this session — never from brain-restored stale orders.
   if(!ORDERS_TODAY?._loadedThisSession) return null;
@@ -3372,7 +3434,7 @@ function computeLatestOrderBooked(){
           && TRADEBOOK_STATS.lastDate===session.date
           && TRADEBOOK_STATS.lastDayRows?.find(r=>r.sym===sym);
         if(tradebookRow){
-          rows.push({...tradebookRow,_sort:tradebookRow.netPnl});
+          rows.push(enrichExitPnlRow({...tradebookRow,_sort:tradebookRow.netPnl}));
           return;
         }
         // Holdings.csv not loaded or stock not found — show row with unknown P&L.
@@ -3393,7 +3455,7 @@ function computeLatestOrderBooked(){
       const _brok=+scS.brokerage.toFixed(2),_stt=+scS.stt.toFixed(2),_txn=+scS.txn.toFixed(2);
       const _sebi=+scS.sebi.toFixed(2),_gst=+scS.gst.toFixed(2),_stamp=+scS.stamp.toFixed(2),_dp=+scS.dp.toFixed(2);
       const charges=+sumChargeParts({_brok,_stt,_txn,_sebi,_gst,_stamp,_dp}).toFixed(0);
-      rows.push({sym,lots:sells.length,qty:matchedQty,capital:null,buyPrice:null,sellPrice:+avgSell.toFixed(2),_brok,_stt,_txn,_sebi,_gst,_stamp,_dp,charges,winRate:null,netPnl:null,netPnlPct:null,_sort:-Infinity,_noAvgCost:true});
+      rows.push(enrichExitPnlRow({sym,lots:sells.length,qty:matchedQty,capital:null,buyPrice:null,sellPrice:+avgSell.toFixed(2),_brok,_stt,_txn,_sebi,_gst,_stamp,_dp,charges,winRate:null,netPnl:null,netPnlPct:null,_sort:-Infinity,_noAvgCost:true}));
       return;
     }
     const bcS=calcZerodhaChargesSplit(avgBuy,matchedQty,false,isSameDay,false);
@@ -3409,7 +3471,7 @@ function computeLatestOrderBooked(){
     const netPnl=+((avgSell-avgBuy)*matchedQty-charges).toFixed(0);
     const capital=avgBuy*matchedQty;
     const netPnlPct=capital>0?+(netPnl/capital*100).toFixed(2):null;
-    rows.push({sym,lots:sells.length,qty:matchedQty,capital,buyPrice:+avgBuy.toFixed(2),sellPrice:+avgSell.toFixed(2),_brok,_stt,_txn,_sebi,_gst,_stamp,_dp,charges,winRate:netPnl>0?100:0,netPnl,netPnlPct,_sort:netPnl});
+    rows.push(enrichExitPnlRow({sym,lots:sells.length,qty:matchedQty,capital,buyPrice:+avgBuy.toFixed(2),sellPrice:+avgSell.toFixed(2),_brok,_stt,_txn,_sebi,_gst,_stamp,_dp,charges,winRate:netPnl>0?100:0,netPnl,netPnlPct,_sort:netPnl}));
   });
   const total=rows.reduce((s,r)=>s+(r.netPnl||0),0);
   // Only return Orders.csv result if there are actual sell rows — if today only has buys,
@@ -3434,14 +3496,14 @@ function getLatestBookedSummary(){
     const tbDate=TRADEBOOK_STATS.lastDate||'';
     if(tbDate>ordDate){
       // Tradebook has a newer session (e.g. GTT triggered day after Orders.csv)
-      const rows=TRADEBOOK_STATS.lastDayRows.map(r=>({...r,_sort:r.netPnl}));
+      const rows=TRADEBOOK_STATS.lastDayRows.map(r=>enrichExitPnlRow({...r,_sort:r.netPnl}));
       return {source:'Tradebook',date:tbDate,total:+rows.reduce((s,r)=>s+r.netPnl,0).toFixed(0),rows};
     }
     return orderBooked;
   }
   if(orderBooked) return orderBooked;
   if(tbLoaded){
-    const rows=TRADEBOOK_STATS.lastDayRows.map(r=>({...r,_sort:r.netPnl}));
+    const rows=TRADEBOOK_STATS.lastDayRows.map(r=>enrichExitPnlRow({...r,_sort:r.netPnl}));
     return {source:'Tradebook',date:TRADEBOOK_STATS.lastDate||'',total:+rows.reduce((s,r)=>s+r.netPnl,0).toFixed(0),rows};
   }
   return null;
@@ -3702,8 +3764,12 @@ function renderStats(){
     }
     const d=_repsState.lastDelta;
     const repsTotal=d==null?'':(d>0?` · 🎉 ${Math.round(d).toLocaleString('en-IN')} steps`:d<0?` · 💪 ${Math.max(1,Math.ceil(Math.abs(d)/100))} pushups`:'');
+    const pnlSummary=summarizeExitPnlRows(booked.rows||[]);
+    const grossStr=pnlSummary.known.length?`gross ${fmtSignedINR(pnlSummary.gross)}`:'gross —';
+    const costStr=pnlSummary.known.length?`cost ${fmtNegINR(pnlSummary.charges)}`:'cost —';
+    const reverseStr=pnlSummary.reverseCount?`reverse ${fmtSignedINR(pnlSummary.reverse)}`:'reverse —';
     bookedCard=`
-      <div class="st"><div class="st-l">${bookedLabel}</div><div class="st-v" style="color:${booked.total>=0?'var(--green)':'var(--red)'}">${fmtSignedINR(booked.total)}</div><div class="st-d">${dateLabel} · ${srcLabel} · net of charges${repsTotal}</div></div>`;
+      <div class="st"><div class="st-l">${bookedLabel}</div><div class="st-v" style="color:${booked.total>=0?'var(--green)':'var(--red)'}">${fmtSignedINR(booked.total)}</div><div class="st-d">${dateLabel} · ${srcLabel} · ${grossStr} · ${costStr} · ${reverseStr}${repsTotal}</div></div>`;
   }
 
   const slTgtCard=(()=>{
@@ -4122,16 +4188,17 @@ function renderPerformance(){
     const latestRows=orderBooked.rows;
     const latestDate=orderBooked.date||getSessionDate();
     const latestTotal=orderBooked.total;
-    const latestKnownRows=latestRows.filter(r=>r.capital>0&&r.netPnl!=null);
-    const latestCapital=latestKnownRows.reduce((s,r)=>s+r.capital,0);
-    const latestKnownNet=latestKnownRows.reduce((s,r)=>s+r.netPnl,0);
-    const latestTotalPct=latestCapital>0?+(latestKnownNet/latestCapital*100).toFixed(2):null;
+    const latestSummary=summarizeExitPnlRows(latestRows);
+    const latestTotalPct=latestSummary.pct;
     const _chFmt=v=>fmtNegINR(v);const _chClr=()=>'var(--red)';
     const latestCols=[
       {key:'sym',label:'Symbol',align:'left',fmt:v=>v,clrFn:()=>'var(--t1)',bold:true},
       {key:'lots',label:'Trades',align:'right',fmt:v=>v,clrFn:()=>'var(--t2)'},
       {key:'buyPrice',label:'Buy ₹',align:'right',fmt:(v,r)=>v!=null?Number(v).toLocaleString('en-IN',INR_2):`<span style="color:var(--amber);font-size:10px" title="Load Holdings.csv to see avg cost">avg cost?</span>`,clrFn:()=>'var(--t2)'},
       {key:'sellPrice',label:'Sell ₹',align:'right',fmt:v=>Number(v).toLocaleString('en-IN',INR_2),clrFn:()=>'var(--t2)'},
+      {key:'priceDiff',label:'Diff ₹',align:'right',fmt:v=>v!=null?fmtSignedINR(v).replace('₹','₹/sh '):'—',clrFn:v=>v!=null?clr(v):'var(--t3)'},
+      {key:'currentPrice',label:'Now ₹',align:'right',fmt:v=>v!=null?Number(v).toLocaleString('en-IN',INR_2):'—',clrFn:()=>'var(--t2)'},
+      {key:'reversePnl',label:'Reverse ₹',align:'right',bold:true,fmt:(v,r)=>v!=null?`<span title="${escHtml(r.reverseStatus||'')}">${fmtPerfRs(v)}</span>`:'—',clrFn:v=>v!=null?clr(v):'var(--t3)'},
       {key:'_brok',label:'Brokerage',align:'right',fmt:_chFmt,clrFn:_chClr},
       {key:'_stt',label:'STT/CTT',align:'right',fmt:_chFmt,clrFn:_chClr},
       {key:'_txn',label:'Txn',align:'right',fmt:_chFmt,clrFn:_chClr},
@@ -4140,6 +4207,7 @@ function renderPerformance(){
       {key:'_stamp',label:'Stamp',align:'right',fmt:_chFmt,clrFn:_chClr},
       {key:'_dp',label:'DP',align:'right',fmt:_chFmt,clrFn:_chClr},
       {key:'charges',label:'Total Charges',align:'right',bold:true,fmt:fmtNegINR,clrFn:()=>'var(--red)'},
+      {key:'grossPnl',label:'Gross P&L',align:'right',bold:true,fmt:v=>v!=null?fmtPerfRs(v):'—',clrFn:v=>v!=null?clr(v):'var(--t3)'},
       {key:'netPnl',label:'Net P&L',align:'right',bold:true,fmt:(v,r)=>v!=null?fmtPerfRs(v):`<span style="color:var(--amber);font-size:10px">unknown</span>`,clrFn:(v)=>v!=null?clr(v):'var(--amber)'},
       {key:'netPnlPct',label:'P&L %',align:'right',bold:true,fmt:v=>v!=null?fmtPct(v):`<span style="color:var(--amber);font-size:10px">unknown</span>`,clrFn:v=>v!=null?clr(v):'var(--amber)'},
     ];
@@ -4166,6 +4234,9 @@ function renderPerformance(){
           ${td('—','color:var(--t3)')}
           ${td('—','color:var(--t3)')}
           ${td('—','color:var(--t3)')}
+          ${td('—','color:var(--t3)')}
+          ${td('—','color:var(--t3)')}
+          ${td(latestSummary.reverseCount?fmtPerfRs(latestSummary.reverse):'—','color:'+(latestSummary.reverse>=0?'var(--green)':'var(--red)'))}
           ${td(fmtNegINR(_sum('_brok')),'color:var(--red)')}
           ${td(fmtNegINR(_sum('_stt')),'color:var(--red)')}
           ${td(fmtNegINR(_sum('_txn')),'color:var(--red)')}
@@ -4174,6 +4245,7 @@ function renderPerformance(){
           ${td(fmtNegINR(_sum('_stamp')),'color:var(--red)')}
           ${td(fmtNegINR(_sum('_dp')),'color:var(--red)')}
           ${td(fmtNegINR(_sum('charges')),'color:var(--red)')}
+          ${td(latestSummary.known.length?_p(latestSummary.gross):'—','color:'+(latestSummary.gross>=0?'var(--green)':'var(--red)'))}
           ${td(_p(latestTotal),'color:'+(latestTotal>=0?'var(--green)':'var(--red)'))}
           ${td(latestTotalPct==null?'--':fmtPct(latestTotalPct),'color:'+(latestTotalPct==null?'var(--t3)':latestTotalPct>=0?'var(--green)':'var(--red)'))}
         </tr>`;
@@ -4184,18 +4256,22 @@ function renderPerformance(){
     const tbRows=_latestSummary.rows.map(r=>{
       const capital=r.capital??((r.buyPrice||0)*(r.qty||0));
       const netPnlPct=r.netPnlPct??(capital>0?+(r.netPnl/capital*100).toFixed(2):null);
-      return {...r,capital,netPnlPct,_sort:r.netPnl};
+      return enrichExitPnlRow({...r,capital,netPnlPct,_sort:r.netPnl});
     });
     const tbDate=_latestSummary.date||'';
     const tbTotal=+(tbRows.reduce((s,r)=>s+r.netPnl,0)).toFixed(0);
-    const tbCapital=tbRows.reduce((s,r)=>s+(r.capital||0),0);
-    const tbTotalPct=tbCapital>0?+(tbTotal/tbCapital*100).toFixed(2):null;
+    const tbSummary=summarizeExitPnlRows(tbRows);
+    const tbTotalPct=tbSummary.pct;
     const tbCols=[
       {key:'sym',label:'Symbol',align:'left',fmt:v=>`<span style="font-weight:700;font-size:12px">${escHtml(v)}</span>`},
       {key:'lots',label:'Lots',align:'right',fmt:v=>`<span style="color:var(--t2)">${v}</span>`},
       {key:'buyPrice',label:'Buy ₹',align:'right',fmt:v=>`<span style="font-family:'DM Mono',monospace">${Number(v).toLocaleString('en-IN',INR_2)}</span>`},
       {key:'sellPrice',label:'Sell ₹',align:'right',fmt:v=>`<span style="font-family:'DM Mono',monospace">${Number(v).toLocaleString('en-IN',INR_2)}</span>`},
+      {key:'priceDiff',label:'Diff ₹',align:'right',fmt:v=>v!=null?fmtSignedINR(v).replace('₹','₹/sh '):'—',clrFn:v=>v!=null?clr(v):'var(--t3)'},
+      {key:'currentPrice',label:'Now ₹',align:'right',fmt:v=>v!=null?Number(v).toLocaleString('en-IN',INR_2):'—',clrFn:()=>'var(--t2)'},
+      {key:'reversePnl',label:'Reverse ₹',align:'right',bold:true,fmt:(v,r)=>v!=null?`<span title="${escHtml(r.reverseStatus||'')}">${fmtPerfRs(v)}</span>`:'—',clrFn:v=>v!=null?clr(v):'var(--t3)'},
       {key:'charges',label:'Charges ₹',align:'right',bold:true,fmt:fmtNegINR,clrFn:()=>'var(--red)'},
+      {key:'grossPnl',label:'Gross P&L',align:'right',bold:true,fmt:v=>v!=null?fmtPerfRs(v):'—',clrFn:v=>v!=null?clr(v):'var(--t3)'},
       {key:'netPnl',label:'Net P&L',align:'right',bold:true,fmt:fmtPerfRs,clrFn:clr},
       {key:'netPnlPct',label:'P&L %',align:'right',bold:true,fmt:v=>v!=null?fmtPct(v):'--',clrFn:v=>v!=null?clr(v):'var(--t3)'},
     ];
@@ -4218,7 +4294,11 @@ function renderPerformance(){
           <td style="padding:7px 10px;text-align:right;color:var(--t3)">—</td>
           <td style="padding:7px 10px;text-align:right;color:var(--t3)">—</td>
           <td style="padding:7px 10px;text-align:right;color:var(--t3)">—</td>
+          <td style="padding:7px 10px;text-align:right;color:var(--t3)">—</td>
+          <td style="padding:7px 10px;text-align:right;color:var(--t3)">—</td>
+          <td style="padding:7px 10px;text-align:right;font-weight:700;color:${tbSummary.reverse>=0?'var(--green)':'var(--red)'}">${tbSummary.reverseCount?fmtSignedINR(tbSummary.reverse):'—'}</td>
           <td style="padding:7px 10px;text-align:right;font-weight:700;color:var(--red)">${fmtNegINR(totCh)}</td>
+          <td style="padding:7px 10px;text-align:right;font-weight:700;color:${tbSummary.gross>=0?'var(--green)':'var(--red)'}">${tbSummary.known.length?fmtSignedINR(tbSummary.gross):'—'}</td>
           <td style="padding:7px 10px;text-align:right;font-weight:700;color:${tbTotal>=0?'var(--green)':'var(--red)'}">${fmtSignedINR(tbTotal)}</td>
           <td style="padding:7px 10px;text-align:right;font-weight:700;color:${tbTotalPct==null?'var(--t3)':tbTotalPct>=0?'var(--green)':'var(--red)'}">${tbTotalPct==null?'--':fmtPct(tbTotalPct)}</td>
         </tr>`;
@@ -6006,6 +6086,31 @@ async function filesFromDirectoryHandle(dirHandle){
   return files;
 }
 
+async function getLocalUploadFolderFiles(){
+  const root=FS.getActiveLocalDirectoryHandle?.();
+  if(!root) return null;
+  try{
+    if(root.queryPermission&&await root.queryPermission({mode:'read'})!=='granted') return null;
+    let uploadHandle=root;
+    try{uploadHandle=await root.getDirectoryHandle('Scanner Uploads');}catch(e){}
+    const files=await filesFromDirectoryHandle(uploadHandle);
+    return files.length?{files,sourceLabel:uploadHandle.name||root.name||'Scanner Uploads'}:null;
+  }catch(e){
+    console.warn('Stored local upload folder could not be read',e);
+    return null;
+  }
+}
+
+async function hydrateSessionCSVsFromPreferredInputs(reason='startup'){
+  const local=await getLocalUploadFolderFiles();
+  if(local?.files?.length){
+    console.log(`${reason}: hydrating from local upload folder`,local.sourceLabel,local.files.length);
+    return await processFiles(local.files,local.sourceLabel)?local.files.length:0;
+  }
+  console.log(`${reason}: local upload folder unavailable; falling back to Drive inputs`);
+  return await hydrateSessionCSVsFromWorkspace();
+}
+
 async function openUploadFolderPicker(){
   if(window.showDirectoryPicker){
     const stored=await FS.getStoredUploadDirHandle();
@@ -7111,7 +7216,7 @@ function applySavedFiltersForMode(mode){
 async function processFiles(files,sourceLabel){
   if(!(await ensureDriveReadyForLoad())){
     setLoading(false);
-    return;
+    return false;
   }
   setLoading(true,'Processing selected files...');
   setFileLoadStatus(sourceLabel||'Scanner Uploads',files,'not in folder');
@@ -7140,7 +7245,7 @@ async function processFiles(files,sourceLabel){
   if(!tvFile&&!nseZip&&!holdFile&&!posFile&&!ordFile&&!tbFile&&!holidayFile){
     setLoading(false);
     showToast('No files recognised. Upload the NSE scanner and/or Zerodha input files.',4000,true);
-    return;
+    return false;
   }
 
   if(nseZip){
@@ -7183,9 +7288,10 @@ async function processFiles(files,sourceLabel){
   }
   const stockScannerProcessed=scannerJobs.some(j=>j.mode==='stock');
 
-  if(!scannerJobs.length&&!holdFile&&!posFile&&!ordFile&&!tbFile&&!holidayFile){
+  if(!scannerJobs.length&&!nseZip&&!holdFile&&!posFile&&!ordFile&&!tbFile&&!holidayFile){
     setLoading(false);
-    if(!nseZip) showToast('TradingView CSV not found in the selected Scanner Uploads folder.',4000,true);
+    showToast('TradingView CSV not found in the selected Scanner Uploads folder.',4000,true);
+    return false;
   }
 
   // Holdings / Positions / Orders / Tradebook — processed regardless of TV CSV
@@ -7248,6 +7354,7 @@ async function processFiles(files,sourceLabel){
   renderTradingDashboardNow();
   setLoading(false);
   saveBrainInBackground('Brain saved after file processing');
+  return true;
 }
 
 document.getElementById('fInDir').addEventListener('change',e=>{
@@ -7382,9 +7489,8 @@ async function initApp(){
   // before REG1 ZIP hydration so hard filtering is active on the first new scan.
   try{loadSurvRules();}catch(e){SURV_CUSTOM_RULES=SURV_SEED_RULES.map(r=>({key:survRuleKey(r.column),column:r.column,label:r.label}));}
 
-  // Prefer current cloud inputs over the saved brain snapshot. This keeps
-  // Latest Session/Booked Today from showing stale rs_orders after Orders.csv changes.
-  try{await hydrateSessionCSVsFromWorkspace();}catch(e){console.warn('INIT: cloud input hydration failed',e);}
+  // Prefer the same local upload folder used by Load Files; Drive copies are fallback.
+  try{await hydrateSessionCSVsFromPreferredInputs('INIT');}catch(e){console.warn('INIT: input hydration failed',e);}
   try{enrichRowsWithNSEData(ALL);}catch(e){console.warn('INIT: NSE row enrichment failed',e);}
 
   // Rankings render first; performance analytics are scheduled below as an idle task.
