@@ -1,5 +1,5 @@
-const BUILD_TS='2026-07-11 09:10 IST'; // release build time (IST)
-const APP_VERSION=489; // Fix mojibake em-dash in Latest Session placeholder.
+const BUILD_TS='2026-07-11 09:26 IST'; // release build time (IST)
+const APP_VERSION=490; // Portfolio-constant risk budget for concentrated allocations.
 const GOOGLE_DRIVE_CLIENT_ID='1015012642264-oi2nelv3v90k3d39r994a6nelgjs2a56.apps.googleusercontent.com'; // Public OAuth Web Client ID.
 const HARD_FILTER_SCHEMA='structural_tradeability_v2';
 const STOCK_RUNWAY_CEILING_PCT=19.5; // Intentional owner-approved forward-catch strategy filter: excludes stocks already near their circuit band (or caps max entry) since a stock that has already used up its daily range is a poor pre-rocket buy. Active fallback when NSE price-band data is unavailable.
@@ -5561,7 +5561,8 @@ function computeAlloc(capital, selList){
   const rawScore=s=>Math.max(0,Number(s.rocketScore)||0);
   const totalRawScore=selList.reduce((sum,s)=>sum+rawScore(s),0)||1;
   const sortedSel=[...selList].sort((a,b)=>rawScore(b)-rawScore(a));
-  const riskBudgetRs=getRiskBudgetRs(capital);
+  const riskPlan=getAllocationRiskBudget(capital,sortedSel.length);
+  const riskBudgetRs=riskPlan.perStockRiskBudget;
   const allocMap={},limits={},riskQtyLimits={};
 
   // Top-up percentage is a hard TOTAL allocation cap for the single stock order.
@@ -5577,7 +5578,7 @@ function computeAlloc(capital, selList){
     if(qty<=0) continue;
     const ev=evalNet(s,buyP,qty);
     allocMap[s.symbol]={alloc:qty*buyP,debit:buyDebit(buyP,qty),buyCharges:calcZerodhaCharges(buyP,qty,false,false,false),qty,buyPrice:buyP,
-      limit:rowLimit,riskBudgetRs,riskQtyLimit:riskQty,stopDistancePct:getRowStopDistancePct(s),expectedNet:ev.expectedNet,charges:ev.charges,tgtPct:ev.tgtPct};
+      limit:rowLimit,riskBudgetRs,totalRiskBudget:riskPlan.totalRiskBudget,avgPositionsPerDay:riskPlan.avgPositionsPerDay,riskQtyLimit:riskQty,stopDistancePct:getRowStopDistancePct(s),expectedNet:ev.expectedNet,charges:ev.charges,tgtPct:ev.tgtPct};
   }
 
   let deployed=Object.values(allocMap).reduce((sum,am)=>sum+am.debit,0);
@@ -5594,7 +5595,7 @@ function computeAlloc(capital, selList){
         if(!(buyP>0)||riskQty<1||rowLimit<buyP||buyDebit(buyP,1)>residual+0.001) continue;
         const qty=1,ev=evalNet(s,buyP,qty);
         allocMap[s.symbol]={alloc:qty*buyP,debit:buyDebit(buyP,qty),buyCharges:calcZerodhaCharges(buyP,qty,false,false,false),qty,buyPrice:buyP,
-          limit:rowLimit,riskBudgetRs,riskQtyLimit:riskQty,stopDistancePct:getRowStopDistancePct(s),expectedNet:ev.expectedNet,charges:ev.charges,tgtPct:ev.tgtPct};
+          limit:rowLimit,riskBudgetRs,totalRiskBudget:riskPlan.totalRiskBudget,avgPositionsPerDay:riskPlan.avgPositionsPerDay,riskQtyLimit:riskQty,stopDistancePct:getRowStopDistancePct(s),expectedNet:ev.expectedNet,charges:ev.charges,tgtPct:ev.tgtPct};
         am=allocMap[s.symbol];
       }
       const buyP=am.buyPrice;
@@ -5619,6 +5620,41 @@ function getRiskBudgetRs(capital=0){
   const medianLoss=medianNumber(trips.map(r=>Math.abs(Number(r.netPnl))));
   if(medianLoss>0) return medianLoss;
   return capital>0?capital*0.01:null;
+}
+function getSystemEraTripsForRisk(trips){
+  return (trips||[]).filter(r=>r&&r.sellDate>=SYSTEM_TRADE_START_DATE);
+}
+function normalizeRiskAvgPositions(value){
+  const n=Number(value);
+  if(!Number.isFinite(n)||n<=0) return 1;
+  return +clampNum(n,1,10).toFixed(2);
+}
+function getSystemEraAvgPositionsInfo(trips=TRADEBOOK_STATS?.tripsData||[]){
+  const rows=getSystemEraTripsForRisk(trips);
+  const entryDays=new Set(rows.map(r=>r?.buyDate).filter(Boolean));
+  if(entryDays.size<3) return {value:1,available:false,entryDays:entryDays.size};
+  const stats=computePerfStats(rows);
+  const avg=Number(stats?.avgPositionsPerEntryDay);
+  return {value:normalizeRiskAvgPositions(avg),available:true,entryDays:entryDays.size};
+}
+function getSystemEraAvgPositionsPerEntryDay(trips=TRADEBOOK_STATS?.tripsData||[]){
+  return getSystemEraAvgPositionsInfo(trips).value;
+}
+function getAllocationRiskBudget(capital=0,selectedCount=1){
+  const base=getRiskBudgetRs(capital);
+  if(!(base>0)) return {perTradeRiskBase:base,avgPositionsPerDay:1,totalRiskBudget:null,perStockRiskBudget:null,selectedCount:Math.max(1,selectedCount||0)};
+  const avgInfo=getSystemEraAvgPositionsInfo();
+  const count=Math.max(1,selectedCount||0);
+  const avgPositionsPerDay=avgInfo.value;
+  const totalRiskBudget=avgInfo.available?base*avgPositionsPerDay:base;
+  return {
+    perTradeRiskBase:base,
+    avgPositionsPerDay,
+    avgPositionsAvailable:avgInfo.available,
+    totalRiskBudget,
+    perStockRiskBudget:avgInfo.available?totalRiskBudget/count:base,
+    selectedCount:count
+  };
 }
 function getRiskCappedQty(riskBudgetRs,stopDistancePct,buyPrice){
   const risk=Number(riskBudgetRs), stop=Number(stopDistancePct), price=Number(buyPrice);
@@ -5976,10 +6012,11 @@ function renderStatusBar(){
     const am2=computeAlloc(capital,selList2);
     const actualDeployed=Object.values(am2).reduce((s,a)=>s+(a.debit??a.alloc),0);
     const stockCount=Object.keys(am2).length;
-    const riskBudgetRs=getRiskBudgetRs(capital);
+    const riskPlan=getAllocationRiskBudget(capital,selList2.length);
+    const riskBudgetRs=riskPlan.perStockRiskBudget;
     html+=` <span style="color:var(--amber);font-size:11px;font-family:'DM Mono',monospace;font-weight:700;margin-left:8px" title="All-in estimated buy debit: limit-price notional plus CNC buy-side charges.">· ${stockCount} ${allocatedLabel} · ${fmtINR(actualDeployed)} of ${fmtINR(capital)} all-in</span>`;
     if(riskBudgetRs>0){
-      html+=` <span style="color:var(--t2);font-size:11px;font-family:'DM Mono',monospace;font-weight:700;margin-left:8px" title="Per-stock worst-case loss cap from median realised loss; falls back to 1% of capital when no loss history exists.">risk ${fmtINR(riskBudgetRs)}/stock</span>`;
+      html+=` <span style="color:var(--t2);font-size:11px;font-family:'DM Mono',monospace;font-weight:700;margin-left:8px" title="Portfolio-constant worst-case loss cap: learned per-trade risk times system-era average positions, divided across currently selected stocks.">risk ${fmtINR(riskBudgetRs)}/stock · ${fmtINR(riskPlan.totalRiskBudget)} total</span>`;
     }
     // Expected net at fixed Harvest GTT% — feedback, not input.
     const harvestPlan=computeHarvestPlan();
