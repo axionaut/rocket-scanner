@@ -1,5 +1,5 @@
-const BUILD_TS='2026-07-10 19:20 IST'; // release build time (IST)
-const APP_VERSION=488; // Open pick championship: all non-random strategies can win.
+const BUILD_TS='2026-07-11 09:10 IST'; // release build time (IST)
+const APP_VERSION=489; // Fix mojibake em-dash in Latest Session placeholder.
 const GOOGLE_DRIVE_CLIENT_ID='1015012642264-oi2nelv3v90k3d39r994a6nelgjs2a56.apps.googleusercontent.com'; // Public OAuth Web Client ID.
 const HARD_FILTER_SCHEMA='structural_tradeability_v2';
 const STOCK_RUNWAY_CEILING_PCT=19.5; // Intentional owner-approved forward-catch strategy filter: excludes stocks already near their circuit band (or caps max entry) since a stock that has already used up its daily range is a poor pre-rocket buy. Active fallback when NSE price-band data is unavailable.
@@ -5787,7 +5787,7 @@ function renderTable(){
       ? `<span style="font-size:9px;background:rgba(148,163,184,.14);color:var(--t2);border-radius:4px;padding:2px 5px;font-weight:700" title="Upper-band room unavailable; relevance-only ranking fallback.">room unverified</span>`
       : s.velocityPotential!=null&&isFinite(Number(s.velocityPotential))
         ? `<span style="color:${Number(s.velocityPotential)>=((s.geometryRequiredPct||0))?'var(--green)':'var(--amber)'};font-weight:700">${Number(s.velocityPotential).toFixed(2)}%</span>`
-        : '<span style="color:var(--t3);font-size:11px">â€”</span>';
+        : '<span style="color:var(--t3);font-size:11px">—</span>';
     let cells=`
       <td style="text-align:center"><input type="checkbox" ${isSelected?'checked':''} ${s._filterPreview?'disabled':''} style="width:14px;height:14px;accent-color:var(--amber);cursor:${s._filterPreview?'not-allowed':'pointer'}" onchange="toggleStock('${s.symbol}',this.checked)"></td>
       <td title="${escHtml(rankTitle(s))}" style="font-family:'DM Mono',monospace;font-weight:800;color:var(--t1);text-align:right">${s._rank??'—'}</td>
