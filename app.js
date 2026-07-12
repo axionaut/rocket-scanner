@@ -1,5 +1,5 @@
-const BUILD_TS='2026-07-12 08:33 IST'; // release build time (IST)
-const APP_VERSION=491; // Momentum-continuation ladder strategies.
+const BUILD_TS='2026-07-12 20:03 IST'; // release build time (IST)
+const APP_VERSION=492; // Championship threshold matches the achievable 5-day-window ceiling.
 const GOOGLE_DRIVE_CLIENT_ID='1015012642264-oi2nelv3v90k3d39r994a6nelgjs2a56.apps.googleusercontent.com'; // Public OAuth Web Client ID.
 const HARD_FILTER_SCHEMA='structural_tradeability_v2';
 const STOCK_RUNWAY_CEILING_PCT=19.5; // Intentional owner-approved forward-catch strategy filter: excludes stocks already near their circuit band (or caps max entry) since a stock that has already used up its daily range is a poor pre-rocket buy. Active fallback when NSE price-band data is unavailable.
@@ -2234,7 +2234,7 @@ function recordDayPredictions(runtime,sessionDate,predictedSymbols){
 // Random is a control only; every other strategy can run the live pick list.
 const PICK_CHAMPION_STORE='rs_pick_champion_v1';
 const PICK_CHAMPION_BAR='v488';
-const PICK_MIN_EVAL_DAYS=5;
+const PICK_MIN_EVAL_DAYS=4;
 const RATING_BUY=4;
 const RATING_STRONG_BUY=5;
 const MOMC_MIN_PREV_MOVE_PCT=5;
