@@ -1,5 +1,5 @@
-const BUILD_TS='2026-07-11 09:26 IST'; // release build time (IST)
-const APP_VERSION=490; // Portfolio-constant risk budget for concentrated allocations.
+const BUILD_TS='2026-07-12 08:33 IST'; // release build time (IST)
+const APP_VERSION=491; // Momentum-continuation ladder strategies.
 const GOOGLE_DRIVE_CLIENT_ID='1015012642264-oi2nelv3v90k3d39r994a6nelgjs2a56.apps.googleusercontent.com'; // Public OAuth Web Client ID.
 const HARD_FILTER_SCHEMA='structural_tradeability_v2';
 const STOCK_RUNWAY_CEILING_PCT=19.5; // Intentional owner-approved forward-catch strategy filter: excludes stocks already near their circuit band (or caps max entry) since a stock that has already used up its daily range is a poor pre-rocket buy. Active fallback when NSE price-band data is unavailable.
@@ -2237,9 +2237,12 @@ const PICK_CHAMPION_BAR='v488';
 const PICK_MIN_EVAL_DAYS=5;
 const RATING_BUY=4;
 const RATING_STRONG_BUY=5;
+const MOMC_MIN_PREV_MOVE_PCT=5;
+const MOMC_MIN_GAP_PCT=0.5;
 const PICK_STRATEGY_LABELS={
   engine:'Engine',momentum:'Momentum',persistence:'Persistence',early_mover:'Early Mover 3-6%',
   ta_composite:'TA Composite',fa_composite:'FA Composite',
+  mom_cont_buy:'Mom-Cont ≥5% (Buy)',mom_cont_sbuy:'Mom-Cont ≥5% (SBuy)',
   rating_ma_buy:'MA = Buy',rating_osc_buy:'Osc = Buy',rating_tech_buy:'Tech = Buy',
   rating_ma_osc_buy:'MA+Osc = Buy',rating_ma_tech_buy:'MA+Tech = Buy',rating_osc_tech_buy:'Osc+Tech = Buy',rating_all3_buy:'All-3 = Buy',
   rating_ma_sbuy:'MA = Strong Buy',rating_osc_sbuy:'Osc = Strong Buy',rating_tech_sbuy:'Tech = Strong Buy',
@@ -2263,6 +2266,11 @@ const RATING_STRATEGIES=[
   {key:'rating_all3_sbuy',target:RATING_STRONG_BUY,parts:['ma','osc','tech']}
 ];
 const RATING_STRATEGY_BY_KEY=Object.fromEntries(RATING_STRATEGIES.map(s=>[s.key,s]));
+const MOM_CONT_STRATEGIES=[
+  {key:'mom_cont_buy',target:RATING_BUY},
+  {key:'mom_cont_sbuy',target:RATING_STRONG_BUY}
+];
+const MOM_CONT_STRATEGY_BY_KEY=Object.fromEntries(MOM_CONT_STRATEGIES.map(s=>[s.key,s]));
 const PICK_COMPOSITES={
   ta_composite:[
     {pattern:/average_directional|adx/,dir:1},
@@ -2346,6 +2354,28 @@ const RATING_FEATURE_KEYS={
   osc:'oscillators_rating_1_day',
   tech:'technical_rating_1_day'
 };
+const MOM_CONT_FEATURE_KEYS={
+  prevMove:'price_change_1_day',
+  prevMa:'moving_averages_rating_1_day',
+  prevTech:'technical_rating_1_day',
+  gap:'gap_1_day',
+  roc:'rate_of_change_9_1_day'
+};
+function dayHasFeatureColumn(day,key){
+  return getDayFeatureCols(day).includes(key);
+}
+function finiteFeature(row,key){
+  const v=Number(row?.[key]);
+  return isFinite(v)?v:null;
+}
+function hasMomentumContinuationColumns(day,prevDay){
+  return !!day&&!!prevDay&&
+    dayHasFeatureColumn(prevDay,MOM_CONT_FEATURE_KEYS.prevMove)&&
+    dayHasFeatureColumn(prevDay,MOM_CONT_FEATURE_KEYS.prevMa)&&
+    dayHasFeatureColumn(prevDay,MOM_CONT_FEATURE_KEYS.prevTech)&&
+    dayHasFeatureColumn(day,MOM_CONT_FEATURE_KEYS.gap)&&
+    dayHasFeatureColumn(day,MOM_CONT_FEATURE_KEYS.roc);
+}
 function detectRatingColumns(day){
   const cols=getDayFeatureCols(day).map(c=>String(c));
   const find=re=>cols.find(c=>re.test(c.toLowerCase()))||null;
@@ -2397,6 +2427,37 @@ function liveRatingMetric(s,strategy){
   const change=Number(features[key]);
   return isFinite(change)?change:-Infinity;
 }
+function momentumContinuationMetricFromRows(prevRow,todayRow,strategy){
+  const move=finiteFeature(prevRow,MOM_CONT_FEATURE_KEYS.prevMove);
+  const ma=finiteFeature(prevRow,MOM_CONT_FEATURE_KEYS.prevMa);
+  const tech=finiteFeature(prevRow,MOM_CONT_FEATURE_KEYS.prevTech);
+  const gap=finiteFeature(todayRow,MOM_CONT_FEATURE_KEYS.gap);
+  const roc=finiteFeature(todayRow,MOM_CONT_FEATURE_KEYS.roc);
+  if([move,ma,tech,gap,roc].some(v=>v==null)) return -Infinity;
+  if(move<MOMC_MIN_PREV_MOVE_PCT) return -Infinity;
+  if(Math.round(ma)!==strategy.target||Math.round(tech)!==strategy.target) return -Infinity;
+  if(gap<=MOMC_MIN_GAP_PCT||roc<=0) return -Infinity;
+  return move;
+}
+function pickMomentumContinuationSymbols(day,prevDay,pool,n,strategy){
+  if(!hasMomentumContinuationColumns(day,prevDay)) return null;
+  const prevRows=prevDay?.featureRows||{};
+  const todayRows=day?.featureRows||{};
+  const rand=seededRand(String(day?.sessionDate||'')+'|'+strategy.key);
+  const tie=Object.fromEntries((pool||[]).map(sym=>[sym,rand()]));
+  return (pool||[])
+    .filter(sym=>prevRows[sym]&&todayRows[sym])
+    .map(sym=>({sym,metric:momentumContinuationMetricFromRows(prevRows[sym],todayRows[sym],strategy),tie:tie[sym]??0}))
+    .filter(x=>isFinite(x.metric))
+    .sort((a,b)=>b.metric-a.metric||a.tie-b.tie)
+    .slice(0,n)
+    .map(x=>x.sym);
+}
+function liveMomentumContinuationMetric(s,yd,strategy){
+  const prevRow=yd?.features?.get(s?.symbol);
+  if(!prevRow) return -Infinity;
+  return momentumContinuationMetricFromRows(prevRow,s?._features||{},strategy);
+}
 function computeStrategyLadder(runtime){
   const days=[...(runtime?.days||[])].sort((a,b)=>String(a.sessionDate).localeCompare(String(b.sessionDate)));
   const priceOf=(day,symbol)=>{const idx=(day?.symbols||[]).indexOf(symbol);return idx>=0?Number(day.prices?.[idx]):null;};
@@ -2445,6 +2506,12 @@ function computeStrategyLadder(runtime){
     Object.entries(PICK_COMPOSITES).forEach(([name,components])=>{
       add(name,pickCompositeSymbols(day,pool,n,components),later,fwdOf);
     });
+    if(prev){
+      MOM_CONT_STRATEGIES.forEach(strategy=>{
+        const picks=pickMomentumContinuationSymbols(day,prev,pool,n,strategy);
+        if(picks) add(strategy.key,picks,later,fwdOf);
+      });
+    }
     RATING_STRATEGIES.forEach(strategy=>{
       add(strategy.key,pickRatingSymbols(day,pool,n,strategy),later,fwdOf);
     });
@@ -2493,11 +2560,13 @@ function getYesterdayStateMaps(){
   const today=getSessionDate();
   let prev=null;
   days.forEach(d=>{if(String(d.sessionDate)<today)prev=d;});
-  if(!prev) return {peak:new Map(),rockets:new Set()};
+  if(!prev) return {peak:new Map(),rockets:new Set(),features:new Map()};
   const key=_dayPriceChangeKey(prev);
   const peak=new Map();
   if(key)(prev.symbols||[]).forEach(sym=>{const v=Number(prev.featureRows?.[sym]?.[key]);if(isFinite(v))peak.set(sym,v);});
-  return {peak,rockets:new Set(prev.rocketSymbols||[])};
+  const features=new Map();
+  Object.entries(prev.featureRows||{}).forEach(([sym,row])=>features.set(sym,row));
+  return {peak,rockets:new Set(prev.rocketSymbols||[]),features};
 }
 // Live ordering metric for the champion's picks; -Infinity = not picked by this strategy.
 function getChampionRowMetric(champ,s,yd){
@@ -2506,6 +2575,7 @@ function getChampionRowMetric(champ,s,yd){
   if(champ==='early_mover'){const c=Number(s.priceChange);return (isFinite(c)&&c>=3&&c<6)?c:-Infinity;}
   if(champ==='ta_composite') return liveCompositeMetric(s._features||{},PICK_COMPOSITES.ta_composite);
   if(champ==='fa_composite') return liveCompositeMetric(s._features||{},PICK_COMPOSITES.fa_composite);
+  if(MOM_CONT_STRATEGY_BY_KEY[champ]) return liveMomentumContinuationMetric(s,yd,MOM_CONT_STRATEGY_BY_KEY[champ]);
   if(RATING_STRATEGY_BY_KEY[champ]) return liveRatingMetric(s,RATING_STRATEGY_BY_KEY[champ]);
   return Number(s.rankScore??s.rocketScore)||0;
 }
