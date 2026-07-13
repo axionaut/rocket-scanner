@@ -1,5 +1,5 @@
-const BUILD_TS='2026-07-12 20:03 IST'; // release build time (IST)
-const APP_VERSION=492; // Championship threshold matches the achievable 5-day-window ceiling.
+const BUILD_TS='2026-07-13 14:37 IST'; // release build time (IST)
+const APP_VERSION=493; // Allocation uses only capital, score weighting, and Max Alloc bounds.
 const GOOGLE_DRIVE_CLIENT_ID='1015012642264-oi2nelv3v90k3d39r994a6nelgjs2a56.apps.googleusercontent.com'; // Public OAuth Web Client ID.
 const HARD_FILTER_SCHEMA='structural_tradeability_v2';
 const STOCK_RUNWAY_CEILING_PCT=19.5; // Intentional owner-approved forward-catch strategy filter: excludes stocks already near their circuit band (or caps max entry) since a stock that has already used up its daily range is a poor pre-rocket buy. Active fallback when NSE price-band data is unavailable.
@@ -5631,9 +5631,7 @@ function computeAlloc(capital, selList){
   const rawScore=s=>Math.max(0,Number(s.rocketScore)||0);
   const totalRawScore=selList.reduce((sum,s)=>sum+rawScore(s),0)||1;
   const sortedSel=[...selList].sort((a,b)=>rawScore(b)-rawScore(a));
-  const riskPlan=getAllocationRiskBudget(capital,sortedSel.length);
-  const riskBudgetRs=riskPlan.perStockRiskBudget;
-  const allocMap={},limits={},riskQtyLimits={};
+  const allocMap={},limits={};
 
   // Top-up percentage is a hard TOTAL allocation cap for the single stock order.
   for(const s of sortedSel){
@@ -5642,13 +5640,11 @@ function computeAlloc(capital, selList){
     const normalBudget=Math.min(spendableCapital*(rawScore(s)/totalRawScore),cap);
     const rowLimit=s._isTopUp?normalBudget*topupMult:normalBudget;
     limits[s.symbol]=rowLimit;
-    const riskQty=getRiskCappedQty(riskBudgetRs,getRowStopDistancePct(s),buyP);
-    riskQtyLimits[s.symbol]=riskQty;
-    const qty=Math.min(affordableQty(rowLimit,buyP,rowLimit),riskQty);
+    const qty=affordableQty(rowLimit,buyP,rowLimit);
     if(qty<=0) continue;
     const ev=evalNet(s,buyP,qty);
     allocMap[s.symbol]={alloc:qty*buyP,debit:buyDebit(buyP,qty),buyCharges:calcZerodhaCharges(buyP,qty,false,false,false),qty,buyPrice:buyP,
-      limit:rowLimit,riskBudgetRs,totalRiskBudget:riskPlan.totalRiskBudget,avgPositionsPerDay:riskPlan.avgPositionsPerDay,riskQtyLimit:riskQty,stopDistancePct:getRowStopDistancePct(s),expectedNet:ev.expectedNet,charges:ev.charges,tgtPct:ev.tgtPct};
+      limit:rowLimit,stopDistancePct:getRowStopDistancePct(s),expectedNet:ev.expectedNet,charges:ev.charges,tgtPct:ev.tgtPct};
   }
 
   let deployed=Object.values(allocMap).reduce((sum,am)=>sum+am.debit,0);
@@ -5661,16 +5657,15 @@ function computeAlloc(capital, selList){
       let am=allocMap[s.symbol];
       if(!am){
         const buyP=getBuyPrice(s);
-        const riskQty=riskQtyLimits[s.symbol]??getRiskCappedQty(riskBudgetRs,getRowStopDistancePct(s),buyP);
-        if(!(buyP>0)||riskQty<1||rowLimit<buyP||buyDebit(buyP,1)>residual+0.001) continue;
+        if(!(buyP>0)||rowLimit<buyP||buyDebit(buyP,1)>residual+0.001) continue;
         const qty=1,ev=evalNet(s,buyP,qty);
         allocMap[s.symbol]={alloc:qty*buyP,debit:buyDebit(buyP,qty),buyCharges:calcZerodhaCharges(buyP,qty,false,false,false),qty,buyPrice:buyP,
-          limit:rowLimit,riskBudgetRs,totalRiskBudget:riskPlan.totalRiskBudget,avgPositionsPerDay:riskPlan.avgPositionsPerDay,riskQtyLimit:riskQty,stopDistancePct:getRowStopDistancePct(s),expectedNet:ev.expectedNet,charges:ev.charges,tgtPct:ev.tgtPct};
+          limit:rowLimit,stopDistancePct:getRowStopDistancePct(s),expectedNet:ev.expectedNet,charges:ev.charges,tgtPct:ev.tgtPct};
         am=allocMap[s.symbol];
       }
       const buyP=am.buyPrice;
       const nextDebit=buyDebit(buyP,am.qty+1),incremental=nextDebit-am.debit;
-      if(am.qty+1>(am.riskQtyLimit??Infinity)||incremental>residual+0.001||am.alloc+buyP>am.limit+0.5) continue;
+      if(incremental>residual+0.001||am.alloc+buyP>am.limit+0.5) continue;
       am.qty++; am.alloc+=buyP; am.debit=nextDebit; am.buyCharges=calcZerodhaCharges(buyP,am.qty,false,false,false);
       const ev=evalNet(s,buyP,am.qty);
       if(!ev.skip){am.expectedNet=ev.expectedNet;am.charges=ev.charges;am.tgtPct=ev.tgtPct;}
@@ -5679,57 +5674,6 @@ function computeAlloc(capital, selList){
   }
   Object.values(allocMap).forEach(am=>delete am.limit);
   return allocMap;
-}
-function medianNumber(arr){
-  const vals=(arr||[]).filter(v=>Number.isFinite(Number(v))).map(Number).sort((a,b)=>a-b);
-  return vals.length?vals[Math.floor(vals.length/2)]:null;
-}
-function getRiskBudgetRs(capital=0){
-  const trips=getAdaptiveTradeTrips(TRADEBOOK_STATS?.tripsData||[])
-    .filter(r=>r&&Number.isFinite(Number(r.netPnl))&&Number(r.netPnl)<=0);
-  const medianLoss=medianNumber(trips.map(r=>Math.abs(Number(r.netPnl))));
-  if(medianLoss>0) return medianLoss;
-  return capital>0?capital*0.01:null;
-}
-function getSystemEraTripsForRisk(trips){
-  return (trips||[]).filter(r=>r&&r.sellDate>=SYSTEM_TRADE_START_DATE);
-}
-function normalizeRiskAvgPositions(value){
-  const n=Number(value);
-  if(!Number.isFinite(n)||n<=0) return 1;
-  return +clampNum(n,1,10).toFixed(2);
-}
-function getSystemEraAvgPositionsInfo(trips=TRADEBOOK_STATS?.tripsData||[]){
-  const rows=getSystemEraTripsForRisk(trips);
-  const entryDays=new Set(rows.map(r=>r?.buyDate).filter(Boolean));
-  if(entryDays.size<3) return {value:1,available:false,entryDays:entryDays.size};
-  const stats=computePerfStats(rows);
-  const avg=Number(stats?.avgPositionsPerEntryDay);
-  return {value:normalizeRiskAvgPositions(avg),available:true,entryDays:entryDays.size};
-}
-function getSystemEraAvgPositionsPerEntryDay(trips=TRADEBOOK_STATS?.tripsData||[]){
-  return getSystemEraAvgPositionsInfo(trips).value;
-}
-function getAllocationRiskBudget(capital=0,selectedCount=1){
-  const base=getRiskBudgetRs(capital);
-  if(!(base>0)) return {perTradeRiskBase:base,avgPositionsPerDay:1,totalRiskBudget:null,perStockRiskBudget:null,selectedCount:Math.max(1,selectedCount||0)};
-  const avgInfo=getSystemEraAvgPositionsInfo();
-  const count=Math.max(1,selectedCount||0);
-  const avgPositionsPerDay=avgInfo.value;
-  const totalRiskBudget=avgInfo.available?base*avgPositionsPerDay:base;
-  return {
-    perTradeRiskBase:base,
-    avgPositionsPerDay,
-    avgPositionsAvailable:avgInfo.available,
-    totalRiskBudget,
-    perStockRiskBudget:avgInfo.available?totalRiskBudget/count:base,
-    selectedCount:count
-  };
-}
-function getRiskCappedQty(riskBudgetRs,stopDistancePct,buyPrice){
-  const risk=Number(riskBudgetRs), stop=Number(stopDistancePct), price=Number(buyPrice);
-  if(!(risk>0)||!(stop>0)||!(price>0)) return Infinity;
-  return Math.max(0,Math.floor(risk/((stop/100)*price)));
 }
 function getRecommendedPositionSize(perfStats){
   const trips=getAdaptiveTradeTrips(TRADEBOOK_STATS?.tripsData||[]).filter(r=>r&&r.capital>0&&isFinite(r.netPnl)&&isFinite(r.netPnlPct));
@@ -6082,12 +6026,7 @@ function renderStatusBar(){
     const am2=computeAlloc(capital,selList2);
     const actualDeployed=Object.values(am2).reduce((s,a)=>s+(a.debit??a.alloc),0);
     const stockCount=Object.keys(am2).length;
-    const riskPlan=getAllocationRiskBudget(capital,selList2.length);
-    const riskBudgetRs=riskPlan.perStockRiskBudget;
     html+=` <span style="color:var(--amber);font-size:11px;font-family:'DM Mono',monospace;font-weight:700;margin-left:8px" title="All-in estimated buy debit: limit-price notional plus CNC buy-side charges.">· ${stockCount} ${allocatedLabel} · ${fmtINR(actualDeployed)} of ${fmtINR(capital)} all-in</span>`;
-    if(riskBudgetRs>0){
-      html+=` <span style="color:var(--t2);font-size:11px;font-family:'DM Mono',monospace;font-weight:700;margin-left:8px" title="Portfolio-constant worst-case loss cap: learned per-trade risk times system-era average positions, divided across currently selected stocks.">risk ${fmtINR(riskBudgetRs)}/stock · ${fmtINR(riskPlan.totalRiskBudget)} total</span>`;
-    }
     // Expected net at fixed Harvest GTT% — feedback, not input.
     const harvestPlan=computeHarvestPlan();
     const tgtPct=harvestPlan.targetPct;
