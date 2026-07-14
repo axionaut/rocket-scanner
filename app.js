@@ -1,5 +1,5 @@
-const BUILD_TS='2026-07-13 14:37 IST'; // release build time (IST)
-const APP_VERSION=493; // Allocation uses only capital, score weighting, and Max Alloc bounds.
+const BUILD_TS='2026-07-14 09:20 IST'; // release build time (IST)
+const APP_VERSION=494; // Normalize NSE series suffixes for complete Latest Session cost basis.
 const GOOGLE_DRIVE_CLIENT_ID='1015012642264-oi2nelv3v90k3d39r994a6nelgjs2a56.apps.googleusercontent.com'; // Public OAuth Web Client ID.
 const HARD_FILTER_SCHEMA='structural_tradeability_v2';
 const STOCK_RUNWAY_CEILING_PCT=19.5; // Intentional owner-approved forward-catch strategy filter: excludes stocks already near their circuit band (or caps max entry) since a stock that has already used up its daily range is a poor pre-rocket buy. Active fallback when NSE price-band data is unavailable.
@@ -1099,7 +1099,7 @@ function num(v){
   const x=parseFloat(s);
   return Number.isFinite(x)?x:null;
 }
-function normSym(s){return String(s||'').trim().replace(/^[A-Z]+:/,'').replace(/_/g,'-').toUpperCase();}
+function normSym(s){return String(s||'').trim().replace(/^[A-Z]+:/,'').replace(/_/g,'-').toUpperCase().replace(/-(EQ|BE|BZ|SM|ST|SZ)$/,'');}
 function escHtml(s){return String(s??'').replace(/[&<>"]/g,ch=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[ch]));}
 function findHeader(hdrs,patterns){return hdrs.find(h=>patterns.some(p=>p.test(h.trim())))||null;}
 function meanArr(arr){return arr.length?arr.reduce((s,v)=>s+v,0)/arr.length:0;}
@@ -3406,6 +3406,7 @@ async function runEngine(raw, sessionTag, options={}){
 
 // ── Rendering ──
 function getHoldingAvgCost(symbol){
+  symbol=normSym(symbol);
   if(!symbol) return null;
   // 1. Holdings.csv cost map (most accurate — Zerodha settled avg)
   if(HOLD_COST_MAP[symbol]!=null) return HOLD_COST_MAP[symbol];
@@ -3415,9 +3416,10 @@ function getHoldingAvgCost(symbol){
   // 3. Positions.csv T+1 unsettled buy rows; sell avg is sell price, not cost basis.
   const prow=POSITIONS?.find(p=>p.symbol===symbol&&p.avg!=null&&!p.isSell);
   if(prow?.avg!=null) return prow.avg;
+  // A stale tradebook still holds the unmatched buy lots that today's Orders.csv sell closed.
+  const openAvg=TRADEBOOK_STATS?.openAvgCostMap?.[symbol];
+  if(openAvg!=null) return openAvg;
   return null;
-  // Note: openAvgCostMap intentionally excluded here — it's for open position display
-  // only, not for sell P&L calculation (tradebook is one day late so sells appear open)
 }
 
 // Module-level helper: normalise Zerodha order timestamp to YYYY-MM-DD
@@ -3555,10 +3557,11 @@ function computeLatestOrderBooked(){
     rows.push(enrichExitPnlRow({sym,lots:sells.length,qty:matchedQty,capital,buyPrice:+avgBuy.toFixed(2),sellPrice:+avgSell.toFixed(2),_brok,_stt,_txn,_sebi,_gst,_stamp,_dp,charges,winRate:netPnl>0?100:0,netPnl,netPnlPct,_sort:netPnl}));
   });
   const total=rows.reduce((s,r)=>s+(r.netPnl||0),0);
+  const unknownRows=rows.filter(r=>r.netPnl==null).length;
   // Only return Orders.csv result if there are actual sell rows — if today only has buys,
   // fall through to tradebook so yesterday's session P&L shows instead of ₹0.
   if(!rows.length) return null;
-  return {source:'Orders.csv',date:session.date,total,rows,hasOrders:session.orders.length>0};
+  return {source:'Orders.csv',date:session.date,total,rows,unknownRows,hasOrders:session.orders.length>0};
 }
 
 function getLatestBookedSummary(){
@@ -3569,7 +3572,7 @@ function getLatestBookedSummary(){
 
   // Current-session sell orders are fresher than a completed prior-day tradebook export.
   // Even if some P&L fields are incomplete, do not replace today's sells with yesterday's session.
-  if(hasCurrentSellOrders) return orderBooked||{source:'Orders.csv',date:currentOrderSession.date,total:0,rows:[],hasOrders:true};
+  if(hasCurrentSellOrders) return orderBooked||{source:'Orders.csv',date:currentOrderSession.date,total:0,rows:[],unknownRows:0,hasOrders:true};
 
   // If both available, pick whichever has the more recent date
   if(orderBooked&&tbLoaded){
@@ -3578,14 +3581,14 @@ function getLatestBookedSummary(){
     if(tbDate>ordDate){
       // Tradebook has a newer session (e.g. GTT triggered day after Orders.csv)
       const rows=TRADEBOOK_STATS.lastDayRows.map(r=>enrichExitPnlRow({...r,_sort:r.netPnl}));
-      return {source:'Tradebook',date:tbDate,total:+rows.reduce((s,r)=>s+r.netPnl,0).toFixed(0),rows};
+      return {source:'Tradebook',date:tbDate,total:+rows.reduce((s,r)=>s+r.netPnl,0).toFixed(0),rows,unknownRows:0};
     }
     return orderBooked;
   }
   if(orderBooked) return orderBooked;
   if(tbLoaded){
     const rows=TRADEBOOK_STATS.lastDayRows.map(r=>enrichExitPnlRow({...r,_sort:r.netPnl}));
-    return {source:'Tradebook',date:TRADEBOOK_STATS.lastDate||'',total:+rows.reduce((s,r)=>s+r.netPnl,0).toFixed(0),rows};
+    return {source:'Tradebook',date:TRADEBOOK_STATS.lastDate||'',total:+rows.reduce((s,r)=>s+r.netPnl,0).toFixed(0),rows,unknownRows:0};
   }
   return null;
 }
@@ -3841,8 +3844,9 @@ function renderStats(){
     const grossStr=pnlSummary.known.length?`gross ${fmtSignedINR(pnlSummary.gross)}`:'gross —';
     const costStr=pnlSummary.known.length?`cost ${fmtNegINR(pnlSummary.charges)}`:'cost —';
     const reverseStr=pnlSummary.reverseCount?`reverse ${fmtSignedINR(pnlSummary.reverse)}`:'reverse —';
+    const unknownWarning=booked.unknownRows>0?` · <span style="color:var(--amber)">&#9888; excludes ${booked.unknownRows} row${booked.unknownRows===1?'':'s'} with unknown cost</span>`:'';
     bookedCard=`
-      <div class="st"><div class="st-l">${bookedLabel}</div><div class="st-v" style="color:${booked.total>=0?'var(--green)':'var(--red)'}">${fmtSignedINR(booked.total)}</div><div class="st-d">${dateLabel} · ${srcLabel} · ${grossStr} · ${costStr} · ${reverseStr}${repsTotal}</div></div>`;
+      <div class="st"><div class="st-l">${bookedLabel}</div><div class="st-v" style="color:${booked.total>=0?'var(--green)':'var(--red)'}">${fmtSignedINR(booked.total)}</div><div class="st-d">${dateLabel} · ${srcLabel} · ${grossStr} · ${costStr} · ${reverseStr}${unknownWarning}${repsTotal}</div></div>`;
   }
 
   const slTgtCard=(()=>{
@@ -4263,6 +4267,8 @@ function renderPerformance(){
     const latestTotal=orderBooked.total;
     const latestSummary=summarizeExitPnlRows(latestRows);
     const latestTotalPct=latestSummary.pct;
+    const latestUnknownRows=orderBooked.unknownRows||0;
+    const latestUnknownWarning=latestUnknownRows>0?` <span style="font-size:10px;color:var(--amber);font-weight:700">&#9888; excludes ${latestUnknownRows} row${latestUnknownRows===1?'':'s'} with unknown cost</span>`:'';
     const _chFmt=v=>fmtNegINR(v);const _chClr=()=>'var(--red)';
     const latestCols=[
       {key:'sym',label:'Symbol',align:'left',fmt:v=>v,clrFn:()=>'var(--t1)',bold:true},
@@ -4289,21 +4295,21 @@ function renderPerformance(){
     todayHtml=`<div style="background:var(--bg-card);border:1px solid var(--border);border-radius:10px;margin-bottom:12px;overflow:hidden">
       <div style="padding:10px 16px;display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:6px;border-bottom:1px solid var(--border)">
         <span style="font-size:10px;font-weight:700;color:var(--t2);text-transform:uppercase;letter-spacing:.1em">Latest Session — ${latestDate} <span style="font-weight:400;color:var(--t3)">(Orders.csv · holdings/same-day buys)</span></span>
-        <span style="font-size:15px;font-weight:800;color:${clr(latestTotal)};font-family:'DM Mono',monospace">${latestRows.length?fmtPerfRs(latestTotal):''} <span style="font-size:10px;color:var(--t3);font-weight:400">${latestRows.length?'net of charges':''}</span></span>
+        <span style="font-size:15px;font-weight:800;color:${clr(latestTotal)};font-family:'DM Mono',monospace">${latestRows.length?fmtPerfRs(latestTotal):''} <span style="font-size:10px;color:var(--t3);font-weight:400">${latestRows.length?'net of charges':''}</span>${latestUnknownWarning}</span>
       </div>
       ${latestRows.length?`<div style="overflow-x:auto">${latestTbl.getHtml()}</div>`:headerNote}
     </div>`;
     setTimeout(()=>{
       latestTbl.render();
       const _lt=document.getElementById('perf-latest');
-      if(_lt&&latestRows.length>1){
+      if(_lt&&(latestRows.length>1||latestUnknownRows>0)){
         const _sum=(k)=>latestRows.reduce((s,r)=>s+(r[k]||0),0);
         const _c=v=>v>0?'var(--red)':'var(--t2)';
         const _p=v=>fmtPerfRs(v);
         const td=(v,extra='')=>`<td style="padding:7px 10px;text-align:right;white-space:nowrap;font-weight:700;${extra}">${v}</td>`;
         const tfoot=document.createElement('tfoot');
         tfoot.innerHTML=`<tr style="border-top:2px solid var(--border-hi);background:rgba(148,163,184,.05)">
-          <td style="padding:7px 10px;font-weight:700;color:var(--t2);white-space:nowrap">Total (${latestRows.length})</td>
+          <td style="padding:7px 10px;font-weight:700;color:var(--t2);white-space:nowrap">Total (${latestRows.length})${latestUnknownRows?` <span style="color:var(--amber)">&#9888; excludes ${latestUnknownRows} unknown</span>`:''}</td>
           ${td('—','color:var(--t3)')}
           ${td('—','color:var(--t3)')}
           ${td('—','color:var(--t3)')}
