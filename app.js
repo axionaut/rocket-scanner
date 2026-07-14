@@ -1,5 +1,5 @@
-const BUILD_TS='2026-07-14 09:20 IST'; // release build time (IST)
-const APP_VERSION=494; // Normalize NSE series suffixes for complete Latest Session cost basis.
+const BUILD_TS='2026-07-14 12:42 IST'; // release build time (IST)
+const APP_VERSION=495; // Simulated strategy exits, actual-trader control, quant ladder, and roster controls.
 const GOOGLE_DRIVE_CLIENT_ID='1015012642264-oi2nelv3v90k3d39r994a6nelgjs2a56.apps.googleusercontent.com'; // Public OAuth Web Client ID.
 const HARD_FILTER_SCHEMA='structural_tradeability_v2';
 const STOCK_RUNWAY_CEILING_PCT=19.5; // Intentional owner-approved forward-catch strategy filter: excludes stocks already near their circuit band (or caps max entry) since a stock that has already used up its daily range is a poor pre-rocket buy. Active fallback when NSE price-band data is unavailable.
@@ -2233,6 +2233,7 @@ function recordDayPredictions(runtime,sessionDate,predictedSymbols){
 // Pick-source championship: grade strategies on hit rate AND cost-adjusted profit per flag.
 // Random is a control only; every other strategy can run the live pick list.
 const PICK_CHAMPION_STORE='rs_pick_champion_v1';
+const PICK_DISABLED_STORE='rs_pick_disabled_v1';
 const PICK_CHAMPION_BAR='v488';
 const PICK_MIN_EVAL_DAYS=4;
 const RATING_BUY=4;
@@ -2247,8 +2248,11 @@ const PICK_STRATEGY_LABELS={
   rating_ma_osc_buy:'MA+Osc = Buy',rating_ma_tech_buy:'MA+Tech = Buy',rating_osc_tech_buy:'Osc+Tech = Buy',rating_all3_buy:'All-3 = Buy',
   rating_ma_sbuy:'MA = Strong Buy',rating_osc_sbuy:'Osc = Strong Buy',rating_tech_sbuy:'Tech = Strong Buy',
   rating_ma_osc_sbuy:'MA+Osc = Strong Buy',rating_ma_tech_sbuy:'MA+Tech = Strong Buy',rating_osc_tech_sbuy:'Osc+Tech = Strong Buy',rating_all3_sbuy:'All-3 = Strong Buy',
-  random:'Random'
+  high52w_mom:'52W-High Momentum',volume_shock:'Volume Shock',range_squeeze:'Range Squeeze',
+  delivery_surge:'Delivery Surge',oversold_snap:'Oversold Snap',random:'Random',actual_you:'Actual (You)'
 };
+const PICK_PERMANENT_STRATEGIES=new Set(['engine','random','actual_you']);
+const QS_RVOL_MIN=2.0,QS_QUIET_CHG_MIN=0,QS_QUIET_CHG_MAX=3,QS_DELIV_MIN=60,QS_RSI_OVERSOLD=30,QS_SQUEEZE_RATIO=0.5;
 const RATING_STRATEGIES=[
   {key:'rating_ma_buy',target:RATING_BUY,parts:['ma']},
   {key:'rating_osc_buy',target:RATING_BUY,parts:['osc']},
@@ -2286,7 +2290,32 @@ const PICK_COMPOSITES={
     {pattern:/debt_to_equity|debt.*equity/,dir:-1}
   ]
 };
-function isChampionEligible(name){return name!=='random';}
+function getPickDisabledStrategies(){
+  const saved=FS.get(PICK_DISABLED_STORE);
+  return new Set((Array.isArray(saved)?saved:[])
+    .map(key=>String(key||''))
+    .filter(key=>PICK_STRATEGY_LABELS[key]&&!PICK_PERMANENT_STRATEGIES.has(key)));
+}
+function isPickStrategyDisabled(name){return getPickDisabledStrategies().has(name);}
+function isChampionEligible(name){return name!=='random'&&name!=='actual_you'&&!isPickStrategyDisabled(name);}
+function getPickRosterStrategies(){
+  return Object.keys(PICK_STRATEGY_LABELS).filter(key=>!PICK_PERMANENT_STRATEGIES.has(key));
+}
+function savePickDisabledStrategies(disabled){
+  const next=[...disabled].filter(key=>getPickRosterStrategies().includes(key)).sort();
+  FS.set(PICK_DISABLED_STORE,next);
+  _pickStateCache=null;
+  applyFilters();
+}
+function disablePickStrategy(name){
+  if(PICK_PERMANENT_STRATEGIES.has(name)) return;
+  const disabled=getPickDisabledStrategies();disabled.add(name);
+  savePickDisabledStrategies(disabled);
+}
+function enablePickStrategy(name){
+  const disabled=getPickDisabledStrategies();disabled.delete(name);
+  savePickDisabledStrategies(disabled); // Re-enabled strategies use the full stored window again.
+}
 function seededRand(seedText){
   let seed=0;String(seedText||'').split('').forEach(ch=>{seed=((seed*31)+ch.charCodeAt(0))>>>0;});
   return ()=>{seed=(1664525*seed+1013904223)>>>0;return seed/4294967296;};
@@ -2367,6 +2396,85 @@ function dayHasFeatureColumn(day,key){
 function finiteFeature(row,key){
   const v=Number(row?.[key]);
   return isFinite(v)?v:null;
+}
+function findFeatureColumn(cols,patterns){
+  return (cols||[]).find(col=>patterns.some(pattern=>pattern.test(String(col).toLowerCase())))||null;
+}
+function detectQuantColumns(day){
+  const cols=getDayFeatureCols(day);
+  return {
+    high52:findFeatureColumn(cols,[/pct.*52.*high/,/52.*high.*pct/]),
+    rvol:findFeatureColumn(cols,[/relative.*volume/,/\brvol\b/]),
+    delivery:findFeatureColumn(cols,[/delivery.*pct/,/delivery.*percent/]),
+    rsi:findFeatureColumn(cols,[/relative.*strength.*index/,/\brsi(?:_|$)/]),
+    high:findFeatureColumn(cols,[/^high_1_day$/,/^high$/]),
+    low:findFeatureColumn(cols,[/^low_1_day$/,/^low$/]),
+    adr:findFeatureColumn(cols,[/average.*daily.*range/,/\badr\b/]),
+    atr:findFeatureColumn(cols,[/average.*true.*range.*(?:pct|percent)/,/\batr.*(?:pct|percent)/])
+  };
+}
+function getDayChange(row,day){
+  const key=_dayPriceChangeKey(day);
+  return key?finiteFeature(row,key):null;
+}
+function pickQuantSymbols(key,day,prevDay,pool,n){
+  const cols=detectQuantColumns(day);
+  const prevCols=prevDay?detectQuantColumns(prevDay):null;
+  const rand=seededRand(String(day?.sessionDate||'')+'|'+key);
+  const tie=Object.fromEntries((pool||[]).map(sym=>[sym,rand()]));
+  const ranked=[];
+  for(const sym of pool||[]){
+    const row=day?.featureRows?.[sym]||{};
+    const change=getDayChange(row,day);
+    let metric=null;
+    if(key==='high52w_mom'){
+      const value=finiteFeature(row,cols.high52); if(!cols.high52||value==null) continue;
+      metric=value;
+    }else if(key==='volume_shock'){
+      const value=finiteFeature(row,cols.rvol); if(!cols.rvol||value==null||change==null||value<QS_RVOL_MIN||change<QS_QUIET_CHG_MIN||change>QS_QUIET_CHG_MAX) continue;
+      metric=value;
+    }else if(key==='range_squeeze'){
+      if(!prevDay||!prevCols?.high||!prevCols.low||!prevCols.adr||change==null||change<=0) continue;
+      const prevRow=prevDay.featureRows?.[sym]||{};
+      const high=finiteFeature(prevRow,prevCols.high),low=finiteFeature(prevRow,prevCols.low),adr=finiteFeature(prevRow,prevCols.adr);
+      const priceIndex=(prevDay.symbols||[]).indexOf(sym),price=priceIndex>=0?Number(prevDay.prices?.[priceIndex]):null;
+      if([high,low,adr,price].some(v=>v==null||!isFinite(v))||!(price>0)||((high-low)/price*100)>QS_SQUEEZE_RATIO*adr) continue;
+      metric=(high-low)/price*100;
+    }else if(key==='delivery_surge'){
+      const value=finiteFeature(row,cols.delivery); if(!cols.delivery||value==null||change==null||value<QS_DELIV_MIN||change<QS_QUIET_CHG_MIN||change>QS_QUIET_CHG_MAX) continue;
+      metric=value;
+    }else if(key==='oversold_snap'){
+      const value=finiteFeature(row,cols.rsi); if(!cols.rsi||value==null||change==null||value>=QS_RSI_OVERSOLD||change<=0) continue;
+      metric=value;
+    }
+    if(metric!=null) ranked.push({sym,metric,tie:tie[sym]??0});
+  }
+  const asc=key==='range_squeeze'||key==='oversold_snap';
+  return ranked.sort((a,b)=>(asc?a.metric-b.metric:b.metric-a.metric)||a.tie-b.tie).slice(0,n).map(x=>x.sym);
+}
+function getQuantLiveMetric(key,s,yd){
+  const row=s?._features||{},change=Number(s?.priceChange);
+  const todayCols=detectQuantColumns({featureRows:{[s?.symbol||'']:row}});
+  if(key==='high52w_mom') return finiteFeature(row,todayCols.high52)??-Infinity;
+  if(key==='volume_shock'){
+    const v=finiteFeature(row,todayCols.rvol);return v!=null&&v>=QS_RVOL_MIN&&isFinite(change)&&change>=QS_QUIET_CHG_MIN&&change<=QS_QUIET_CHG_MAX?v:-Infinity;
+  }
+  if(key==='delivery_surge'){
+    const v=finiteFeature(row,todayCols.delivery);return v!=null&&v>=QS_DELIV_MIN&&isFinite(change)&&change>=QS_QUIET_CHG_MIN&&change<=QS_QUIET_CHG_MAX?v:-Infinity;
+  }
+  if(key==='oversold_snap'){
+    const v=finiteFeature(row,todayCols.rsi);return v!=null&&v<QS_RSI_OVERSOLD&&isFinite(change)&&change>0?-v:-Infinity;
+  }
+  if(key==='range_squeeze'){
+    const prevRow=yd?.features?.get(s?.symbol);if(!prevRow||!isFinite(change)||change<=0)return -Infinity;
+    const prevCols=detectQuantColumns({featureRows:{[s?.symbol||'']:prevRow}});
+    const high=finiteFeature(prevRow,prevCols.high),low=finiteFeature(prevRow,prevCols.low),adr=finiteFeature(prevRow,prevCols.adr);
+    const price=Number(yd?.prices?.get(s?.symbol));
+    if([high,low,adr,price].some(v=>v==null||!isFinite(v))||!(price>0)) return -Infinity;
+    const tightness=(high-low)/price*100;
+    return tightness<=QS_SQUEEZE_RATIO*adr?-tightness:-Infinity;
+  }
+  return -Infinity;
 }
 function hasMomentumContinuationColumns(day,prevDay){
   return !!day&&!!prevDay&&
@@ -2458,32 +2566,72 @@ function liveMomentumContinuationMetric(s,yd,strategy){
   if(!prevRow) return -Infinity;
   return momentumContinuationMetricFromRows(prevRow,s?._features||{},strategy);
 }
+function simulateStoredExitPct(days,startIndex,symbol){
+  const entryDay=days[startIndex];
+  const entryIndex=(entryDay?.symbols||[]).indexOf(symbol);
+  const entry=entryIndex>=0?Number(entryDay.prices?.[entryIndex]):null;
+  if(!(entry>0)) return null;
+  const targetPct=Number(getEffectiveTgtPct());
+  if(!(targetPct>0)) return null;
+  const atr=finiteFeature(entryDay.featureRows?.[symbol],detectQuantColumns(entryDay).atr);
+  const stopPct=getActiveStopDistancePct(atr);
+  const target=entry*(1+targetPct/100),stop=entry*(1-stopPct/100);
+  const priceOf=(day)=>{const idx=(day?.symbols||[]).indexOf(symbol);return idx>=0?Number(day.prices?.[idx]):null;};
+  for(let j=startIndex+1;j<days.length;j++){
+    const next=days[j],row=next.featureRows?.[symbol]||{},cols=detectQuantColumns(next);
+    const storedHigh=finiteFeature(row,cols.high),storedLow=finiteFeature(row,cols.low);
+    const fallback=priceOf(next);
+    // A daily bar that reaches both levels has no intraday order; count it as the stop.
+    const high=storedHigh!=null&&storedLow!=null?storedHigh:fallback;
+    const low=storedHigh!=null&&storedLow!=null?storedLow:fallback;
+    if(!(isFinite(high)&&isFinite(low))) continue;
+    if(low<=stop&&high>=target) return -stopPct;
+    if(low<=stop) return -stopPct;
+    if(high>=target) return targetPct;
+  }
+  const last=priceOf(days[days.length-1]);
+  return last>0?((last/entry)-1)*100:null;
+}
+function addActualYouRow(ladder,days){
+  if(!days.length) return ladder;
+  const min=String(days[0].sessionDate||''),max=String(days[days.length-1].sessionDate||'');
+  const trips=getAdaptiveTradeTrips(TRADEBOOK_STATS?.tripsData).filter(trip=>{
+    const sell=String(trip?.sellDate||'');return sell>=min&&sell<=max;
+  }).map(trip=>{
+    const capital=Number(trip?.capital),net=Number(trip?.netPnl);
+    return capital>0&&isFinite(net)?{...trip,pct:net/capital*100}:null;
+  }).filter(Boolean);
+  if(!trips.length) return ladder;
+  const avg=meanArr(trips.map(trip=>trip.pct));
+  ladder.push({name:'actual_you',label:PICK_STRATEGY_LABELS.actual_you,championEligible:false,
+    evalDays:new Set(trips.map(trip=>trip.sellDate)).size,flagged:trips.length,
+    hits:trips.filter(trip=>trip.netPnl>0).length,hitRate:trips.filter(trip=>trip.netPnl>0).length/trips.length,
+    avgNetPct:+avg.toFixed(2)});
+  return ladder;
+}
 function computeStrategyLadder(runtime){
   const days=[...(runtime?.days||[])].sort((a,b)=>String(a.sessionDate).localeCompare(String(b.sessionDate)));
-  const priceOf=(day,symbol)=>{const idx=(day?.symbols||[]).indexOf(symbol);return idx>=0?Number(day.prices?.[idx]):null;};
   const agg={};
-  const add=(name,picks,laterRockets,fwdOf)=>{
+  const add=(name,picks,laterRockets,exitOf)=>{
+    if(isPickStrategyDisabled(name)) return;
     const list=(picks||[]).filter(Boolean);
     if(!list.length) return;
-    const a=agg[name]=agg[name]||{name,label:PICK_STRATEGY_LABELS[name]||name,championEligible:isChampionEligible(name),evalDays:0,flagged:0,hits:0,fwdSum:0,fwdN:0};
+    const a=agg[name]=agg[name]||{name,label:PICK_STRATEGY_LABELS[name]||name,championEligible:isChampionEligible(name),evalDays:0,flagged:0,hits:0,netSum:0,netN:0};
     a.evalDays++;a.flagged+=list.length;
     list.forEach(sym=>{
       if(laterRockets.has(sym)) a.hits++;
-      const f=fwdOf(sym);
-      if(f!=null&&isFinite(f)){a.fwdSum+=f;a.fwdN++;}
+      const gross=exitOf(sym);
+      if(gross!=null&&isFinite(gross)){
+        a.netSum+=gross-estimateRoundTripCostPct(Math.max(0.5,Math.abs(gross)));
+        a.netN++;
+      }
     });
   };
   days.forEach((day,i)=>{
     if(i>=days.length-1) return;
     const later=new Set();
     for(let j=i+1;j<days.length;j++) (days[j].rocketSymbols||[]).forEach(s=>later.add(s));
-    const fwdOf=sym=>{
-      const base=priceOf(day,sym);
-      if(!(base>0)) return null;
-      let best=null;
-      for(let j=i+1;j<days.length;j++){const p=priceOf(days[j],sym);if(p>0){const m=(p/base-1)*100;if(best==null||m>best)best=m;}}
-      return best;
-    };
+    const exitOf=sym=>simulateStoredExitPct(days,i,sym);
     const pool=day.eligibleSymbols||[];
     const preds=day.predictedSymbols||[];
     const n=Math.min(20,Math.max(5,preds.length||10));
@@ -2491,40 +2639,28 @@ function computeStrategyLadder(runtime){
     const prev=days[i-1]||null;
     const prevKey=prev?_dayPriceChangeKey(prev):null;
     const prevMove=sym=>prev&&prevKey?Number(prev.featureRows?.[sym]?.[prevKey]):null;
-    if(preds.length) add('engine',preds,later,fwdOf);
+    if(preds.length) add('engine',preds,later,exitOf);
     if(prev){
       const mom=pool.map(s=>({s,m:prevMove(s)})).filter(x=>x.m!=null&&isFinite(x.m)).sort((a,b)=>b.m-a.m).slice(0,n).map(x=>x.s);
-      add('momentum',mom,later,fwdOf);
+      add('momentum',mom,later,exitOf);
       const prevRockets=new Set(prev.rocketSymbols||[]);
-      const per=pool.filter(s=>prevRockets.has(s)).slice(0,n);
-      add('persistence',per,later,fwdOf);
+      add('persistence',pool.filter(s=>prevRockets.has(s)).slice(0,n),later,exitOf);
     }
     if(key){
-      const early=pool.map(s=>({s,c:Number(day.featureRows?.[s]?.[key])})).filter(x=>isFinite(x.c)&&x.c>=3&&x.c<6).sort((a,b)=>b.c-a.c).slice(0,n).map(x=>x.s);
-      add('early_mover',early,later,fwdOf);
+      add('early_mover',pool.map(s=>({s,c:Number(day.featureRows?.[s]?.[key])})).filter(x=>isFinite(x.c)&&x.c>=3&&x.c<6).sort((a,b)=>b.c-a.c).slice(0,n).map(x=>x.s),later,exitOf);
     }
-    Object.entries(PICK_COMPOSITES).forEach(([name,components])=>{
-      add(name,pickCompositeSymbols(day,pool,n,components),later,fwdOf);
+    Object.entries(PICK_COMPOSITES).forEach(([name,components])=>add(name,pickCompositeSymbols(day,pool,n,components),later,exitOf));
+    if(prev) MOM_CONT_STRATEGIES.forEach(strategy=>{
+      const picks=pickMomentumContinuationSymbols(day,prev,pool,n,strategy);if(picks) add(strategy.key,picks,later,exitOf);
     });
-    if(prev){
-      MOM_CONT_STRATEGIES.forEach(strategy=>{
-        const picks=pickMomentumContinuationSymbols(day,prev,pool,n,strategy);
-        if(picks) add(strategy.key,picks,later,fwdOf);
-      });
-    }
-    RATING_STRATEGIES.forEach(strategy=>{
-      add(strategy.key,pickRatingSymbols(day,pool,n,strategy),later,fwdOf);
-    });
-    const rand=seededRand(day.sessionDate||'');
-    const rp=[...pool],rout=[];
+    RATING_STRATEGIES.forEach(strategy=>add(strategy.key,pickRatingSymbols(day,pool,n,strategy),later,exitOf));
+    ['high52w_mom','volume_shock','range_squeeze','delivery_surge','oversold_snap'].forEach(name=>add(name,pickQuantSymbols(name,day,prev,pool,n),later,exitOf));
+    const rand=seededRand(day.sessionDate||''),rp=[...pool],rout=[];
     while(rp.length&&rout.length<n) rout.push(rp.splice(Math.floor(rand()*rp.length),1)[0]);
-    add('random',rout,later,fwdOf);
+    add('random',rout,later,exitOf);
   });
-  return Object.values(agg).map(a=>{
-    const grossAvg=a.fwdN?a.fwdSum/a.fwdN:null;
-    const cost=grossAvg!=null?estimateRoundTripCostPct(Math.max(0.5,grossAvg)):null;
-    return {...a,hitRate:a.flagged?a.hits/a.flagged:null,avgNetPct:grossAvg!=null?+(grossAvg-cost).toFixed(2):null};
-  });
+  const ladder=Object.values(agg).map(a=>({...a,hitRate:a.flagged?a.hits/a.flagged:null,avgNetPct:a.netN?+(a.netSum/a.netN).toFixed(2):null}));
+  return addActualYouRow(ladder,days);
 }
 function resolvePickChampion(ladder){
   const fallback={name:'engine',since:null,metric:null,bar:PICK_CHAMPION_BAR};
@@ -2545,7 +2681,7 @@ function resolvePickChampion(ladder){
 }
 let _pickStateCache=null;
 function getPickState(){
-  const tag=String(window._lastScannerSessionTag||'')+'|'+((SNAPSHOT_RUNTIME?.days||[]).length);
+  const tag=String(window._lastScannerSessionTag||'')+'|'+((SNAPSHOT_RUNTIME?.days||[]).length)+'|'+[...getPickDisabledStrategies()].sort().join(',');
   if(_pickStateCache?.tag===tag) return _pickStateCache.v;
   let ladder=[];
   try{ladder=computeStrategyLadder(SNAPSHOT_RUNTIME);}catch(e){console.warn('strategy ladder failed',e);}
@@ -2560,13 +2696,15 @@ function getYesterdayStateMaps(){
   const today=getSessionDate();
   let prev=null;
   days.forEach(d=>{if(String(d.sessionDate)<today)prev=d;});
-  if(!prev) return {peak:new Map(),rockets:new Set(),features:new Map()};
+  if(!prev) return {peak:new Map(),rockets:new Set(),features:new Map(),prices:new Map()};
   const key=_dayPriceChangeKey(prev);
   const peak=new Map();
   if(key)(prev.symbols||[]).forEach(sym=>{const v=Number(prev.featureRows?.[sym]?.[key]);if(isFinite(v))peak.set(sym,v);});
   const features=new Map();
   Object.entries(prev.featureRows||{}).forEach(([sym,row])=>features.set(sym,row));
-  return {peak,rockets:new Set(prev.rocketSymbols||[]),features};
+  const prices=new Map();
+  (prev.symbols||[]).forEach((sym,i)=>{const price=Number(prev.prices?.[i]);if(isFinite(price)&&price>0)prices.set(sym,price);});
+  return {peak,rockets:new Set(prev.rocketSymbols||[]),features,prices};
 }
 // Live ordering metric for the champion's picks; -Infinity = not picked by this strategy.
 function getChampionRowMetric(champ,s,yd){
@@ -2577,6 +2715,7 @@ function getChampionRowMetric(champ,s,yd){
   if(champ==='fa_composite') return liveCompositeMetric(s._features||{},PICK_COMPOSITES.fa_composite);
   if(MOM_CONT_STRATEGY_BY_KEY[champ]) return liveMomentumContinuationMetric(s,yd,MOM_CONT_STRATEGY_BY_KEY[champ]);
   if(RATING_STRATEGY_BY_KEY[champ]) return liveRatingMetric(s,RATING_STRATEGY_BY_KEY[champ]);
+  if(['high52w_mom','volume_shock','range_squeeze','delivery_surge','oversold_snap'].includes(champ)) return getQuantLiveMetric(champ,s,yd);
   return Number(s.rankScore??s.rocketScore)||0;
 }
 function getTrailingTrajectorySources(runtime,currentDate){
@@ -3762,9 +3901,15 @@ function buildPickLadderHTML(){
   const body=rows.map(r=>{
     const isCh=r.name===ps.name;
     const label=(r.label||PICK_STRATEGY_LABELS[r.name]||r.name)+(r.name==='random'?' (control)':'')+(isCh?' ▶ champion':'');
-    return `<tr style="${isCh?'font-weight:800;color:var(--t1)':''}"><td>${label}</td><td>${r.evalDays||0}</td><td>${r.flagged||0}</td><td>${r.hits||0}</td><td>${pct(r.hitRate)}</td><td>${net(r.avgNetPct)}</td></tr>`;
+    const remove=PICK_PERMANENT_STRATEGIES.has(r.name)?'':`<button onclick="disablePickStrategy('${r.name}')" title="Remove ${escHtml(r.label)} from the ladder" aria-label="Remove ${escHtml(r.label)}" style="border:0;background:transparent;color:var(--red);font:inherit;font-size:16px;cursor:pointer;padding:0 4px">x</button>`;
+    return `<tr style="${isCh?'font-weight:800;color:var(--t1)':''}"><td>${label}</td><td>${r.evalDays||0}</td><td>${r.flagged||0}</td><td>${r.hits||0}</td><td>${pct(r.hitRate)}</td><td>${net(r.avgNetPct)}</td><td style="text-align:center">${remove}</td></tr>`;
   }).join('');
   return `<div style="overflow-x:auto"><table class="ct" style="min-width:620px;font-size:11px"><thead><tr><th>Pick Source</th><th>Eval Days</th><th>Flagged</th><th>Hits</th><th>Hit Rate</th><th>Net %/flag</th></tr></thead><tbody>${body||'<tr><td colspan="6" style="color:var(--t3)">Warming up — no evaluable pick-source rows yet.</td></tr>'}</tbody></table></div>`;
+}
+function buildPickRosterControls(){
+  const disabled=[...getPickDisabledStrategies()].sort();
+  if(!disabled.length) return '';
+  return `<div style="display:flex;align-items:center;gap:6px;margin:0 0 8px;font-size:11px"><select id="pickRosterAdd" style="max-width:230px;font:inherit"><option value="">Disabled strategy...</option>${disabled.map(key=>`<option value="${key}">${escHtml(PICK_STRATEGY_LABELS[key])}</option>`).join('')}</select><button onclick="enablePickStrategy(document.getElementById('pickRosterAdd').value)" style="font:inherit;cursor:pointer">Add</button></div>`;
 }
 let PICK_LADDER_COLLAPSED=false;
 function togglePickLadderPanel(){
@@ -3775,12 +3920,15 @@ function renderPickLadderPanel(){
   const el=document.getElementById('pickLadderPanel');
   if(!el) return;
   const ps=getPickState();
+  const disabled=getPickDisabledStrategies().size;
+  const active=getPickRosterStrategies().length-disabled+2;
+  const roster=`${active} active${disabled?' · '+disabled+' disabled':''}`;
   const header=`🏆 Pick Championship Ladder — Champion: ${escHtml(ps.label||'Engine')}`;
   el.innerHTML=`<div style="margin:10px 0 14px;border:1px solid var(--border);border-radius:8px;background:var(--bg-card);overflow:hidden">
     <button onclick="togglePickLadderPanel()" style="width:100%;display:flex;justify-content:space-between;align-items:center;gap:10px;background:transparent;border:0;color:var(--t1);padding:10px 12px;font-weight:800;font-family:inherit;cursor:pointer;text-align:left">
-      <span>${header}</span><span style="color:var(--t3);font-size:12px">${PICK_LADDER_COLLAPSED?'Show':'Hide'}</span>
+      <span>${header} <span style="color:var(--t3);font-size:11px">${roster}</span></span><span style="color:var(--t3);font-size:12px">${PICK_LADDER_COLLAPSED?'Show':'Hide'}</span>
     </button>
-    <div style="${PICK_LADDER_COLLAPSED?'display:none;':''}padding:0 10px 10px">${buildPickLadderHTML()}</div>
+    <div style="${PICK_LADDER_COLLAPSED?'display:none;':''}padding:0 10px 10px">${buildPickRosterControls()}<div style="color:var(--t3);font-size:11px;margin:0 0 8px">Simulated target/stop exits; stop-first ambiguous days; costs adjusted.</div>${buildPickLadderHTML()}</div>
   </div>`;
 }
 // Pick-source championship card: champion status only; the full ladder lives above Rankings.
@@ -3788,8 +3936,8 @@ function buildPickSourceCard(){
   const ps=getPickState();
   const col=ps.name==='engine'?'var(--cyan)':'var(--fire)';
   const note=ps.name==='engine'?'engine picks':'RUNNING THE SHOW';
-  const title=`Champion = best cost-adjusted net %/flag over at least ${PICK_MIN_EVAL_DAYS} evaluable days; random is control-only. The champion strategy orders the live pick list; Min Score floor applies only in Engine mode.`;
-  return `<div class="st" title="${title}"><div class="st-l">Pick Source</div><div class="st-v" style="color:${col};font-size:16px">${ps.label||'Engine'} <span style="font-size:10px;color:var(--t3)">${note}${ps.since?' · since '+ps.since:''}</span></div><div class="st-d">best net %/flag over ≥${PICK_MIN_EVAL_DAYS} evaluable days runs the show</div></div>`;
+  const title=`Champion = best cost-adjusted net %/flag over at least ${PICK_MIN_EVAL_DAYS} evaluable days; random and Actual (You) are not eligible. The champion strategy orders the live pick list; Min Score floor applies only in Engine mode.`;
+  return `<div class="st" title="${title}"><div class="st-l">Pick Source</div><div class="st-v" style="color:${col};font-size:16px">${ps.label||'Engine'} <span style="font-size:10px;color:var(--t3)">${note}${ps.since?' · since '+ps.since:''}</span></div><div class="st-d">simulated target/stop exits, stop-first ambiguity, costs adjusted</div></div>`;
 }
 function renderStats(){
   const t=ALL.length;
@@ -6891,6 +7039,10 @@ function nseDate(){
 
 // ── File Processing ──
 function setMsg(m){document.getElementById('ldMsg').textContent=m;}
+function setLoadMsg(m){
+  const source=String(FILE_LOAD_STATUS?.source||'').trim();
+  setMsg(source?`${m} · ${source}`:m);
+}
 function setLoading(on,msg){
   const el=document.getElementById('ldSt');
   if(msg) setMsg(msg);
@@ -7203,12 +7355,12 @@ function applySavedFiltersForMode(mode){
     window._snapshotRuntimeDirty=true;
   }
   try{
-    setMsg('Parsing stock TradingView data...');
+    setLoadMsg('Parsing stock TradingView data...');
     const text=await scannerFile.text();
     const raw=parseCSV(text);
     const ok=isAllNseFilename(scannerFile.name)||looksLikeAllNseRows(raw);
     if(!ok){console.warn('Non-scanner CSV ignored:',scannerFile.name,'rows:',raw.length);return false;}
-    setMsg('Running stock rocket-relevance engine across '+raw.length+' stocks...');
+    setLoadMsg('Running stock rocket-relevance engine across '+raw.length+' stocks...');
     await new Promise(r=>setTimeout(r,60));
     window._lastRawTV=raw;
     const sessionTag=scannerSessionTag(scannerFile.name,raw,text);
@@ -7273,8 +7425,8 @@ async function processFiles(files,sourceLabel){
     setLoading(false);
     return false;
   }
-  setLoading(true,'Processing selected files...');
   setFileLoadStatus(sourceLabel||'Scanner Uploads',files,'not in folder');
+  setLoading(true,String(FILE_LOAD_STATUS.source?`Processing selected files... · ${FILE_LOAD_STATUS.source}`:'Processing selected files...'));
   // Upload canonical input files to Drive in the background. Rankings are built from
   // the selected local files immediately, because the market does not wait for Drive.
   saveInputsInBackground(files);
@@ -7304,7 +7456,7 @@ async function processFiles(files,sourceLabel){
   }
 
   if(nseZip){
-    setMsg('Unzipping NSE data...');
+    setLoadMsg('Unzipping NSE data...');
     try{
       const outerZip=await JSZip.loadAsync(nseZip);
       // Helper: process all entries in a JSZip object (recurses into nested zips)
@@ -7323,7 +7475,7 @@ async function processFiles(files,sourceLabel){
           }
           // CSV inside the NSE reports ZIP — names inside this ZIP contain dates.
           if(fn.endsWith('.csv')){
-            setMsg('Parsing '+fn+'...');
+            setLoadMsg('Parsing '+fn+'...');
             const text=await entry.async('string');
             const type=detectNSE(fn,text);
             if(type) updateFileLoadStatusByNseType(type,'loaded');
@@ -7352,14 +7504,14 @@ async function processFiles(files,sourceLabel){
   // Holdings / Positions / Orders / Tradebook — processed regardless of TV CSV
   // All files are loaded before rendering so Latest Session always has fresh data
   if(holdFile){
-    setMsg('Processing holdings...');
+    setLoadMsg('Processing holdings...');
     const holdText=await holdFile.text();
     HOLDINGS=parseHoldings(holdText);
     try{FS.set(HOLD_STORE,{holdings:HOLDINGS,costMap:HOLD_COST_MAP});}catch(e){}
     updateFileLoadStatus('Holdings.csv','loaded');
   }
   if(posFile){
-    setMsg('Processing positions...');
+    setLoadMsg('Processing positions...');
     const posText=await posFile.text();
     const posHash=(function(t){let h=0;for(let i=0;i<t.length;i++){h=((h<<5)-h)+t.charCodeAt(i);h|=0;}return h;})(posText);
     const today=getSessionDate();
@@ -7369,7 +7521,7 @@ async function processFiles(files,sourceLabel){
     updateFileLoadStatus('Positions.csv',positionsCurrent?'loaded':'stale',positionsCurrent?'':'stale - ignored');
   }
   if(ordFile){
-    setMsg('Processing orders...');
+    setLoadMsg('Processing orders...');
     const ordText=await ordFile.text();
     ORDERS_TODAY=parseOrders(ordText);
     if(ORDERS_TODAY) ORDERS_TODAY._loadedThisSession=true;
@@ -7377,7 +7529,7 @@ async function processFiles(files,sourceLabel){
     updateFileLoadStatus('Orders.csv','loaded');
   }
   if(tbFile){
-    setMsg('Analyzing tradebook...');
+    setLoadMsg('Analyzing tradebook...');
     const tbText=await tbFile.text();
     const parsedTradebook=parseTradebook(tbText);
     if(parsedTradebook){
@@ -7405,7 +7557,7 @@ async function processFiles(files,sourceLabel){
       }
     }finally{restoreScannerRuntime(rt);}
   }
-  setMsg('Rendering rankings...');
+  setLoadMsg('Rendering rankings...');
   renderTradingDashboardNow();
   setLoading(false);
   saveBrainInBackground('Brain saved after file processing');
