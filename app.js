@@ -1,5 +1,5 @@
-const BUILD_TS='2026-07-14 12:42 IST'; // release build time (IST)
-const APP_VERSION=495; // Simulated strategy exits, actual-trader control, quant ladder, and roster controls.
+const BUILD_TS='2026-07-14 18:52 IST'; // release build time (IST)
+const APP_VERSION=496; // Peak championship metric with simulated exits retained as context.
 const GOOGLE_DRIVE_CLIENT_ID='1015012642264-oi2nelv3v90k3d39r994a6nelgjs2a56.apps.googleusercontent.com'; // Public OAuth Web Client ID.
 const HARD_FILTER_SCHEMA='structural_tradeability_v2';
 const STOCK_RUNWAY_CEILING_PCT=19.5; // Intentional owner-approved forward-catch strategy filter: excludes stocks already near their circuit band (or caps max entry) since a stock that has already used up its daily range is a poor pre-rocket buy. Active fallback when NSE price-band data is unavailable.
@@ -2606,24 +2606,30 @@ function addActualYouRow(ladder,days){
   ladder.push({name:'actual_you',label:PICK_STRATEGY_LABELS.actual_you,championEligible:false,
     evalDays:new Set(trips.map(trip=>trip.sellDate)).size,flagged:trips.length,
     hits:trips.filter(trip=>trip.netPnl>0).length,hitRate:trips.filter(trip=>trip.netPnl>0).length/trips.length,
-    avgNetPct:+avg.toFixed(2)});
+    peakNetPct:null,exitNetPct:+avg.toFixed(2)});
   return ladder;
 }
 function computeStrategyLadder(runtime){
   const days=[...(runtime?.days||[])].sort((a,b)=>String(a.sessionDate).localeCompare(String(b.sessionDate)));
+  const priceOf=(day,symbol)=>{const idx=(day?.symbols||[]).indexOf(symbol);return idx>=0?Number(day.prices?.[idx]):null;};
   const agg={};
-  const add=(name,picks,laterRockets,exitOf)=>{
+  const add=(name,picks,laterRockets,peakOf,exitOf)=>{
     if(isPickStrategyDisabled(name)) return;
     const list=(picks||[]).filter(Boolean);
     if(!list.length) return;
-    const a=agg[name]=agg[name]||{name,label:PICK_STRATEGY_LABELS[name]||name,championEligible:isChampionEligible(name),evalDays:0,flagged:0,hits:0,netSum:0,netN:0};
+    const a=agg[name]=agg[name]||{name,label:PICK_STRATEGY_LABELS[name]||name,championEligible:isChampionEligible(name),evalDays:0,flagged:0,hits:0,peakSum:0,peakN:0,exitSum:0,exitN:0};
     a.evalDays++;a.flagged+=list.length;
     list.forEach(sym=>{
       if(laterRockets.has(sym)) a.hits++;
-      const gross=exitOf(sym);
-      if(gross!=null&&isFinite(gross)){
-        a.netSum+=gross-estimateRoundTripCostPct(Math.max(0.5,Math.abs(gross)));
-        a.netN++;
+      const peak=peakOf(sym);
+      if(peak!=null&&isFinite(peak)){
+        a.peakSum+=peak;
+        a.peakN++;
+      }
+      const exit=exitOf(sym);
+      if(exit!=null&&isFinite(exit)){
+        a.exitSum+=exit-estimateRoundTripCostPct(Math.max(0.5,Math.abs(exit)));
+        a.exitN++;
       }
     });
   };
@@ -2631,6 +2637,16 @@ function computeStrategyLadder(runtime){
     if(i>=days.length-1) return;
     const later=new Set();
     for(let j=i+1;j<days.length;j++) (days[j].rocketSymbols||[]).forEach(s=>later.add(s));
+    const peakOf=sym=>{
+      const base=priceOf(day,sym);
+      if(!(base>0)) return null;
+      let best=null;
+      for(let j=i+1;j<days.length;j++){
+        const price=priceOf(days[j],sym);
+        if(price>0){const move=(price/base-1)*100;if(best==null||move>best) best=move;}
+      }
+      return best;
+    };
     const exitOf=sym=>simulateStoredExitPct(days,i,sym);
     const pool=day.eligibleSymbols||[];
     const preds=day.predictedSymbols||[];
@@ -2639,41 +2655,46 @@ function computeStrategyLadder(runtime){
     const prev=days[i-1]||null;
     const prevKey=prev?_dayPriceChangeKey(prev):null;
     const prevMove=sym=>prev&&prevKey?Number(prev.featureRows?.[sym]?.[prevKey]):null;
-    if(preds.length) add('engine',preds,later,exitOf);
+    if(preds.length) add('engine',preds,later,peakOf,exitOf);
     if(prev){
       const mom=pool.map(s=>({s,m:prevMove(s)})).filter(x=>x.m!=null&&isFinite(x.m)).sort((a,b)=>b.m-a.m).slice(0,n).map(x=>x.s);
-      add('momentum',mom,later,exitOf);
+      add('momentum',mom,later,peakOf,exitOf);
       const prevRockets=new Set(prev.rocketSymbols||[]);
-      add('persistence',pool.filter(s=>prevRockets.has(s)).slice(0,n),later,exitOf);
+      add('persistence',pool.filter(s=>prevRockets.has(s)).slice(0,n),later,peakOf,exitOf);
     }
     if(key){
-      add('early_mover',pool.map(s=>({s,c:Number(day.featureRows?.[s]?.[key])})).filter(x=>isFinite(x.c)&&x.c>=3&&x.c<6).sort((a,b)=>b.c-a.c).slice(0,n).map(x=>x.s),later,exitOf);
+      add('early_mover',pool.map(s=>({s,c:Number(day.featureRows?.[s]?.[key])})).filter(x=>isFinite(x.c)&&x.c>=3&&x.c<6).sort((a,b)=>b.c-a.c).slice(0,n).map(x=>x.s),later,peakOf,exitOf);
     }
-    Object.entries(PICK_COMPOSITES).forEach(([name,components])=>add(name,pickCompositeSymbols(day,pool,n,components),later,exitOf));
+    Object.entries(PICK_COMPOSITES).forEach(([name,components])=>add(name,pickCompositeSymbols(day,pool,n,components),later,peakOf,exitOf));
     if(prev) MOM_CONT_STRATEGIES.forEach(strategy=>{
-      const picks=pickMomentumContinuationSymbols(day,prev,pool,n,strategy);if(picks) add(strategy.key,picks,later,exitOf);
+      const picks=pickMomentumContinuationSymbols(day,prev,pool,n,strategy);if(picks) add(strategy.key,picks,later,peakOf,exitOf);
     });
-    RATING_STRATEGIES.forEach(strategy=>add(strategy.key,pickRatingSymbols(day,pool,n,strategy),later,exitOf));
-    ['high52w_mom','volume_shock','range_squeeze','delivery_surge','oversold_snap'].forEach(name=>add(name,pickQuantSymbols(name,day,prev,pool,n),later,exitOf));
+    RATING_STRATEGIES.forEach(strategy=>add(strategy.key,pickRatingSymbols(day,pool,n,strategy),later,peakOf,exitOf));
+    ['high52w_mom','volume_shock','range_squeeze','delivery_surge','oversold_snap'].forEach(name=>add(name,pickQuantSymbols(name,day,prev,pool,n),later,peakOf,exitOf));
     const rand=seededRand(day.sessionDate||''),rp=[...pool],rout=[];
     while(rp.length&&rout.length<n) rout.push(rp.splice(Math.floor(rand()*rp.length),1)[0]);
-    add('random',rout,later,exitOf);
+    add('random',rout,later,peakOf,exitOf);
   });
-  const ladder=Object.values(agg).map(a=>({...a,hitRate:a.flagged?a.hits/a.flagged:null,avgNetPct:a.netN?+(a.netSum/a.netN).toFixed(2):null}));
+  const ladder=Object.values(agg).map(a=>{
+    const grossPeakAvg=a.peakN?a.peakSum/a.peakN:null;
+    const peakNetPct=grossPeakAvg!=null?+(grossPeakAvg-estimateRoundTripCostPct(Math.max(0.5,grossPeakAvg))).toFixed(2):null;
+    return {...a,hitRate:a.flagged?a.hits/a.flagged:null,peakNetPct,
+      exitNetPct:a.exitN?+(a.exitSum/a.exitN).toFixed(2):null};
+  });
   return addActualYouRow(ladder,days);
 }
 function resolvePickChampion(ladder){
   const fallback={name:'engine',since:null,metric:null,bar:PICK_CHAMPION_BAR};
   const raw=FS.get(PICK_CHAMPION_STORE);
   const stored=(raw&&raw.bar===PICK_CHAMPION_BAR)?raw:fallback;
-  const eligible=(ladder||[]).filter(s=>isChampionEligible(s.name)&&s.evalDays>=PICK_MIN_EVAL_DAYS&&s.avgNetPct>0);
+  const eligible=(ladder||[]).filter(s=>isChampionEligible(s.name)&&s.evalDays>=PICK_MIN_EVAL_DAYS&&s.peakNetPct>0);
   if(!eligible.length){
     if(raw?.name!==fallback.name||raw?.bar!==PICK_CHAMPION_BAR) FS.set(PICK_CHAMPION_STORE,fallback);
     return fallback;
   }
-  const best=eligible.reduce((a,b)=>(b.avgNetPct>a.avgNetPct?b:a));
-  if(best.name!==stored.name||stored.metric!==best.avgNetPct||stored.bar!==PICK_CHAMPION_BAR){
-    const next={name:best.name,since:best.name===stored.name?stored.since:getSessionDate(),metric:best.avgNetPct,bar:PICK_CHAMPION_BAR};
+  const best=eligible.reduce((a,b)=>(b.peakNetPct>a.peakNetPct?b:a));
+  if(best.name!==stored.name||stored.metric!==best.peakNetPct||stored.bar!==PICK_CHAMPION_BAR){
+    const next={name:best.name,since:best.name===stored.name?stored.since:getSessionDate(),metric:best.peakNetPct,bar:PICK_CHAMPION_BAR};
     FS.set(PICK_CHAMPION_STORE,next);
     return next;
   }
@@ -3891,7 +3912,7 @@ function buildGoalCard(){
 function pickLadderDisplayRows(ladder){
   return (ladder||[])
     .filter(r=>(r.flagged||0)>0)
-    .sort((a,b)=>(b.avgNetPct??-Infinity)-(a.avgNetPct??-Infinity)||String(a.label||a.name).localeCompare(String(b.label||b.name)));
+    .sort((a,b)=>(b.peakNetPct??-Infinity)-(a.peakNetPct??-Infinity)||String(a.label||a.name).localeCompare(String(b.label||b.name)));
 }
 function buildPickLadderHTML(){
   const ps=getPickState();
@@ -3902,9 +3923,9 @@ function buildPickLadderHTML(){
     const isCh=r.name===ps.name;
     const label=(r.label||PICK_STRATEGY_LABELS[r.name]||r.name)+(r.name==='random'?' (control)':'')+(isCh?' ▶ champion':'');
     const remove=PICK_PERMANENT_STRATEGIES.has(r.name)?'':`<button onclick="disablePickStrategy('${r.name}')" title="Remove ${escHtml(r.label)} from the ladder" aria-label="Remove ${escHtml(r.label)}" style="border:0;background:transparent;color:var(--red);font:inherit;font-size:16px;cursor:pointer;padding:0 4px">x</button>`;
-    return `<tr style="${isCh?'font-weight:800;color:var(--t1)':''}"><td>${label}</td><td>${r.evalDays||0}</td><td>${r.flagged||0}</td><td>${r.hits||0}</td><td>${pct(r.hitRate)}</td><td>${net(r.avgNetPct)}</td><td style="text-align:center">${remove}</td></tr>`;
+    return `<tr style="${isCh?'font-weight:800;color:var(--t1)':''}"><td>${label}</td><td>${r.evalDays||0}</td><td>${r.flagged||0}</td><td>${r.hits||0}</td><td>${pct(r.hitRate)}</td><td title="Prediction quality - best forward move within the window, cost-adjusted (decides the champion)">${net(r.peakNetPct)}</td><td title="What the current target/stop exit policy captures of it">${net(r.exitNetPct)}</td><td style="text-align:center">${remove}</td></tr>`;
   }).join('');
-  return `<div style="overflow-x:auto"><table class="ct" style="min-width:620px;font-size:11px"><thead><tr><th>Pick Source</th><th>Eval Days</th><th>Flagged</th><th>Hits</th><th>Hit Rate</th><th>Net %/flag</th></tr></thead><tbody>${body||'<tr><td colspan="6" style="color:var(--t3)">Warming up — no evaluable pick-source rows yet.</td></tr>'}</tbody></table></div>`;
+  return `<div style="overflow-x:auto"><table class="ct" style="min-width:760px;font-size:11px"><thead><tr><th>Pick Source</th><th>Eval Days</th><th>Flagged</th><th>Hits</th><th>Hit Rate</th><th title="Prediction quality - best forward move within the window, cost-adjusted (decides the champion)">Peak %/flag</th><th title="What the current target/stop exit policy captures of it">Exit %/flag</th><th></th></tr></thead><tbody>${body||'<tr><td colspan="8" style="color:var(--t3)">Warming up — no evaluable pick-source rows yet.</td></tr>'}</tbody></table></div>`;
 }
 function buildPickRosterControls(){
   const disabled=[...getPickDisabledStrategies()].sort();
@@ -3928,16 +3949,19 @@ function renderPickLadderPanel(){
     <button onclick="togglePickLadderPanel()" style="width:100%;display:flex;justify-content:space-between;align-items:center;gap:10px;background:transparent;border:0;color:var(--t1);padding:10px 12px;font-weight:800;font-family:inherit;cursor:pointer;text-align:left">
       <span>${header} <span style="color:var(--t3);font-size:11px">${roster}</span></span><span style="color:var(--t3);font-size:12px">${PICK_LADDER_COLLAPSED?'Show':'Hide'}</span>
     </button>
-    <div style="${PICK_LADDER_COLLAPSED?'display:none;':''}padding:0 10px 10px">${buildPickRosterControls()}<div style="color:var(--t3);font-size:11px;margin:0 0 8px">Simulated target/stop exits; stop-first ambiguous days; costs adjusted.</div>${buildPickLadderHTML()}</div>
+    <div style="${PICK_LADDER_COLLAPSED?'display:none;':''}padding:0 10px 10px">${buildPickRosterControls()}<div style="color:var(--t3);font-size:11px;margin:0 0 8px">Peak measures prediction quality; Exit shows what the current target/stop policy captures of it.</div>${buildPickLadderHTML()}</div>
   </div>`;
 }
 // Pick-source championship card: champion status only; the full ladder lives above Rankings.
 function buildPickSourceCard(){
   const ps=getPickState();
+  const champion=ps.ladder.find(row=>row.name===ps.name);
   const col=ps.name==='engine'?'var(--cyan)':'var(--fire)';
   const note=ps.name==='engine'?'engine picks':'RUNNING THE SHOW';
-  const title=`Champion = best cost-adjusted net %/flag over at least ${PICK_MIN_EVAL_DAYS} evaluable days; random and Actual (You) are not eligible. The champion strategy orders the live pick list; Min Score floor applies only in Engine mode.`;
-  return `<div class="st" title="${title}"><div class="st-l">Pick Source</div><div class="st-v" style="color:${col};font-size:16px">${ps.label||'Engine'} <span style="font-size:10px;color:var(--t3)">${note}${ps.since?' · since '+ps.since:''}</span></div><div class="st-d">simulated target/stop exits, stop-first ambiguity, costs adjusted</div></div>`;
+  const peak=champion?.peakNetPct,exit=champion?.exitNetPct;
+  const fmt=v=>v!=null&&isFinite(v)?(v>=0?'+':'')+v.toFixed(2)+'%':'—';
+  const title=`Champion = best Peak %/flag over at least ${PICK_MIN_EVAL_DAYS} evaluable days; random and Actual (You) are not eligible. The champion strategy orders the live pick list; Min Score floor applies only in Engine mode.`;
+  return `<div class="st" title="${title}"><div class="st-l">Pick Source</div><div class="st-v" style="color:${col};font-size:16px">${ps.label||'Engine'} <span style="font-size:10px;color:var(--t3)">${note}${ps.since?' · since '+ps.since:''}</span></div><div class="st-d">Peak ${fmt(peak)}/flag · exits capture ${fmt(exit)}</div></div>`;
 }
 function renderStats(){
   const t=ALL.length;
