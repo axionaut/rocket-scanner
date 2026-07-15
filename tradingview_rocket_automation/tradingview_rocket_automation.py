@@ -584,44 +584,105 @@ def unused_local_port() -> int:
         return int(sock.getsockname()[1])
 
 
-def existing_profile_session() -> tuple[int, bool] | None:
-    """Return the CDP port and headed/headless state of automation Chrome, if any."""
-    command = (
-        "Get-CimInstance Win32_Process -Filter \"Name = 'chrome.exe'\" "
-        "| Where-Object { $_.CommandLine -like '*--user-data-dir=*browser_profile*' } "
-        "| Select-Object -ExpandProperty CommandLine"
-    )
+# Console child processes (powershell/taskkill/tasklist) must never open a window:
+# the scheduler itself runs console-less (wscript //B), so Windows would otherwise
+# allocate a brand-new console for each call — the "blue flashes" the owner saw.
+WIN_NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0) if os.name == "nt" else 0
+
+# We record the Chrome we launch instead of trusting process-listing later.
+# PowerShell CIM CommandLine queries return nothing in some session contexts
+# (elevated/non-interactive), which previously made stop_profile_and_wait() return
+# while headless Chrome was still alive — the fresh headed login Chrome then hit
+# Chrome's profile singleton, forwarded to the hidden instance and exited: the
+# "blank window that disappears" with no usable login window.
+CHROME_STATE_FILE = PROFILE_DIR / "automation_chrome.json"
+
+
+def _read_chrome_state() -> dict | None:
+    try:
+        state = json.loads(CHROME_STATE_FILE.read_text(encoding="utf-8"))
+        return state if isinstance(state, dict) and state.get("pid") and state.get("port") else None
+    except (OSError, ValueError):
+        return None
+
+
+def _write_chrome_state(pid: int, port: int, headless: bool) -> None:
+    with contextlib.suppress(OSError):
+        PROFILE_DIR.mkdir(parents=True, exist_ok=True)
+        CHROME_STATE_FILE.write_text(
+            json.dumps({"pid": pid, "port": port, "headless": headless}), encoding="utf-8"
+        )
+
+
+def _clear_chrome_state() -> None:
+    with contextlib.suppress(OSError):
+        CHROME_STATE_FILE.unlink()
+
+
+def _pid_alive(pid: int) -> bool:
     try:
         result = subprocess.run(
-            ["powershell.exe", "-NoProfile", "-Command", command],
-            capture_output=True,
-            text=True,
-            timeout=5,
-            check=False,
+            ["tasklist", "/FI", f"PID eq {int(pid)}", "/NH", "/FO", "CSV"],
+            capture_output=True, text=True, timeout=5, check=False, creationflags=WIN_NO_WINDOW,
         )
-    except (OSError, subprocess.SubprocessError):
-        return None
-    match = re.search(r"--remote-debugging-port[= ](\d+)", result.stdout)
-    if not match:
-        return None
-    return int(match.group(1)), "--headless" in result.stdout
+        return str(int(pid)) in result.stdout
+    except (OSError, subprocess.SubprocessError, ValueError):
+        return False
 
 
-def stop_existing_profile() -> None:
+def _cdp_port_alive(port: int) -> bool:
+    try:
+        with socket.create_connection(("127.0.0.1", int(port)), timeout=1.0):
+            return True
+    except (OSError, ValueError):
+        return False
+
+
+def existing_profile_session() -> tuple[int, bool] | None:
+    """Return (CDP port, headless?) of the automation Chrome we launched, if alive."""
+    state = _read_chrome_state()
+    if state and _cdp_port_alive(state["port"]) and _pid_alive(state["pid"]):
+        return int(state["port"]), bool(state.get("headless"))
+    return None
+
+
+def _powershell_orphan_sweep() -> None:
+    """Fallback only: kill any chrome.exe still bound to our profile directory."""
     command = (
         "Get-CimInstance Win32_Process -Filter \"Name = 'chrome.exe'\" "
         "| Where-Object { $_.CommandLine -like '*--user-data-dir=*browser_profile*' } "
         "| ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }"
     )
     with contextlib.suppress(OSError, subprocess.SubprocessError):
-        subprocess.run(["powershell.exe", "-NoProfile", "-Command", command], capture_output=True, timeout=10, check=False)
+        subprocess.run(
+            ["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", command],
+            capture_output=True, timeout=10, check=False, creationflags=WIN_NO_WINDOW,
+        )
+
+
+def stop_existing_profile() -> None:
+    state = _read_chrome_state()
+    if state:
+        with contextlib.suppress(OSError, subprocess.SubprocessError):
+            subprocess.run(
+                ["taskkill", "/PID", str(int(state["pid"])), "/T", "/F"],
+                capture_output=True, timeout=10, check=False, creationflags=WIN_NO_WINDOW,
+            )
+    _powershell_orphan_sweep()
 
 
 async def stop_profile_and_wait() -> None:
     stop_existing_profile()
+    state = _read_chrome_state()
     deadline = time.monotonic() + 15
     while time.monotonic() < deadline:
-        if not existing_profile_session():
+        pid_gone = not state or not _pid_alive(state["pid"])
+        port_gone = not state or not _cdp_port_alive(state["port"])
+        if pid_gone and port_gone and not existing_profile_session():
+            _clear_chrome_state()
+            # Give Chrome a moment to release the profile lock after process exit,
+            # so a fresh headed launch cannot collide with the singleton.
+            await asyncio.sleep(1.0)
             return
         await asyncio.sleep(0.25)
     raise RuntimeError("The previous automation Chrome process did not close")
@@ -667,23 +728,34 @@ async def launch_context(playwright: Any, config: Config) -> BrowserSession:
     ]
     if config.headless:
         chrome_args.append("--headless=new")
+    else:
+        chrome_args.append("--start-maximized")
     process = subprocess.Popen(chrome_args, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    _write_chrome_state(process.pid, port, config.headless)
     deadline = time.monotonic() + 30
     try:
         while time.monotonic() < deadline:
+            if process.poll() is not None:
+                # Immediate exit = almost always the profile-singleton forward
+                # (another Chrome still owns browser_profile). Surface it clearly.
+                _clear_chrome_state()
+                raise RuntimeError(
+                    "Chrome exited immediately - the automation profile is still in use "
+                    "by another Chrome process (singleton forward). Stop it and retry."
+                )
             try:
                 session = await connect_cdp(playwright, port)
                 if session:
                     session.process = process
                     return session
             except Exception:
-                if process.poll() is not None:
-                    raise RuntimeError("Chrome exited before its local automation connection became available") from None
-                await asyncio.sleep(0.25)
+                pass
+            await asyncio.sleep(0.25)
         raise RuntimeError("Timed out connecting to the dedicated Chrome process")
     except Exception:
         if process.poll() is None:
             process.terminate()
+        _clear_chrome_state()
         raise
 
 
@@ -700,6 +772,8 @@ async def repair_tradingview_login(playwright: Any, config: Config, stop_event: 
     try:
         set_automation_status("login_in_progress", 10, "Sign in to TradingView in the opened Chrome window")
         await login_page.goto("https://www.tradingview.com/accounts/signin/", wait_until="domcontentloaded", timeout=config.tradingview_page_timeout_seconds * 1000)
+        with contextlib.suppress(Exception):
+            await login_page.bring_to_front()
         deadline = time.monotonic() + 900
         while time.monotonic() < deadline and not stop_event.is_set() and not STOP_FILE.exists():
             try:
