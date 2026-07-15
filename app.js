@@ -1,5 +1,5 @@
-const BUILD_TS='2026-07-15 10:34 IST'; // release build time (IST)
-const APP_VERSION=501; // Visible-page automation refresh and champion-based allocation.
+const BUILD_TS='2026-07-15 10:38 IST'; // release build time (IST)
+const APP_VERSION=502; // Suppress every already-held stock from new buy recommendations.
 const GOOGLE_DRIVE_CLIENT_ID='1015012642264-oi2nelv3v90k3d39r994a6nelgjs2a56.apps.googleusercontent.com'; // Public OAuth Web Client ID.
 const HARD_FILTER_SCHEMA='structural_tradeability_v2';
 const STOCK_RUNWAY_CEILING_PCT=19.5; // Intentional owner-approved forward-catch strategy filter: excludes stocks already near their circuit band (or caps max entry) since a stock that has already used up its daily range is a poor pre-rocket buy. Active fallback when NSE price-band data is unavailable.
@@ -5620,25 +5620,13 @@ function applyHeldDisplayState(s,heldPos){
   const cur=s.price;
   if(qty<=0) return 'Held/closed or short today';
   if(!avg||cur==null||cur<=0) return 'Held, avg cost unavailable';
-  const dropFromAvg=((avg-cur)/avg)*100;
-  // Top-ups add to STRENGTH, not weakness. A held stock qualifies as a top-up candidate
-  // only when it is at/above average cost (working, consolidating) — never when it is red.
-  // Averaging down into a falling position is the documented biggest source of realized
-  // loss and is deliberately disallowed. Red held positions are surfaced as risk-review
-  // flags (consider exit), not buy candidates. Regime sit-out suppresses top-ups entirely.
-  const regimeFactor=ENGINE_DATA?.regimeExposureFactor;
-  const regimeSitOut=(regimeFactor!=null&&regimeFactor<=0);
-  if(dropFromAvg>0){
-    // Below average cost — a losing position. Never a top-up. Flag for exit review.
-    s._isHeldRisk=true; s._heldAvg=avg; s._heldQty=qty; s._heldDrop=+dropFromAvg.toFixed(2);
-    return `Held & down ${dropFromAvg.toFixed(2)}% — review exit, not a top-up`;
+  const pnlPct=((cur-avg)/avg)*100;
+  s._heldAvg=avg;s._heldQty=qty;
+  if(pnlPct<0){
+    s._isHeldRisk=true;s._heldDrop=+(-pnlPct).toFixed(2);
+    return `Held & down ${Math.abs(pnlPct).toFixed(2)}% - review exit, do not average down`;
   }
-  if(regimeSitOut){
-    return 'Held — top-ups suspended on weak-breadth day';
-  }
-  // At/above average cost in a receptive regime: valid pyramid-into-strength top-up.
-  s._isTopUp=true; s._heldAvg=avg; s._heldQty=qty; s._topUpGain=+(-dropFromAvg).toFixed(2);
-  return '';
+  return `Held & up ${pnlPct.toFixed(2)}% - already owned, do not top up at a higher price`;
 }
 function toggleFilteredCandidates(){
   SHOW_FILTERED_CANDIDATES=!SHOW_FILTERED_CANDIDATES;
@@ -6211,7 +6199,7 @@ function applyFilters(){
     velocityTilted:FILT.filter(s=>!s._geometryUnverified&&s.normalizedVelocityPotential>0).length
   };
 
-  // Already-held suppression keeps red positions out of buys and allows only top-ups into strength.
+  // Every held long position is excluded from new buys: no averaging down and no higher-price top-ups.
   SUPPRESSED_HELD=0;
   {
     const heldPos=getHeldPositionMap();
