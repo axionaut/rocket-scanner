@@ -617,13 +617,24 @@ def stop_existing_profile() -> None:
         subprocess.run(["powershell.exe", "-NoProfile", "-Command", command], capture_output=True, timeout=10, check=False)
 
 
+async def stop_profile_and_wait() -> None:
+    stop_existing_profile()
+    deadline = time.monotonic() + 15
+    while time.monotonic() < deadline:
+        if not existing_profile_session():
+            return
+        await asyncio.sleep(0.25)
+    raise RuntimeError("The previous automation Chrome process did not close")
+
+
 async def connect_cdp(playwright: Any, port: int) -> BrowserSession | None:
     try:
         browser = await playwright.chromium.connect_over_cdp(f"http://127.0.0.1:{port}")
         contexts = browser.contexts
         if contexts:
+            probe = await contexts[0].new_page()
+            await probe.close()
             return BrowserSession(browser, contexts[0], None)
-        await browser.close()
     except Exception:
         return None
     return None
@@ -632,15 +643,18 @@ async def connect_cdp(playwright: Any, port: int) -> BrowserSession | None:
 async def launch_context(playwright: Any, config: Config) -> BrowserSession:
     PROFILE_DIR.mkdir(parents=True, exist_ok=True)
     existing = existing_profile_session()
-    if existing and config.headless and not existing[1]:
-        LOGGER.info("Closing the old headed automation profile before starting hidden Chrome")
-        stop_existing_profile()
+    if existing and existing[1] != config.headless:
+        target_mode = "hidden" if config.headless else "visible"
+        LOGGER.info("Closing the old automation Chrome before starting %s mode", target_mode)
+        await stop_profile_and_wait()
         existing = None
     if existing:
         existing_session = await connect_cdp(playwright, existing[0])
         if existing_session:
             LOGGER.info("Reusing the already-running automation Chrome session on port %s", existing[0])
             return existing_session
+        LOGGER.info("Discarding an unresponsive automation Chrome session on port %s", existing[0])
+        await stop_profile_and_wait()
     port = unused_local_port()
     chrome_args = [
         str(chrome_executable()),
@@ -677,7 +691,7 @@ async def repair_tradingview_login(playwright: Any, config: Config, stop_event: 
     """Open headed Chrome and wait until the private screener works again."""
     with contextlib.suppress(FileNotFoundError):
         LOGIN_FILE.unlink()
-    stop_existing_profile()
+    await stop_profile_and_wait()
     session = await launch_context(playwright, replace(config, headless=False))
     context = session.context
     pages = [page for page in context.pages if not page.is_closed()]
@@ -711,7 +725,7 @@ async def repair_tradingview_login(playwright: Any, config: Config, stop_event: 
         with contextlib.suppress(Exception):
             await probe.close()
         await session.close()
-        stop_existing_profile()
+        await stop_profile_and_wait()
 
 
 async def setup_mode(config: Config) -> None:
