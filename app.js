@@ -1,5 +1,5 @@
-const BUILD_TS='2026-07-15 08:29 IST'; // release build time (IST)
-const APP_VERSION=497; // Local one-click TradingView automation launcher.
+const BUILD_TS='2026-07-15 08:53 IST'; // release build time (IST)
+const APP_VERSION=498; // Background TradingView automation with live progress.
 const GOOGLE_DRIVE_CLIENT_ID='1015012642264-oi2nelv3v90k3d39r994a6nelgjs2a56.apps.googleusercontent.com'; // Public OAuth Web Client ID.
 const HARD_FILTER_SCHEMA='structural_tradeability_v2';
 const STOCK_RUNWAY_CEILING_PCT=19.5; // Intentional owner-approved forward-catch strategy filter: excludes stocks already near their circuit band (or caps max entry) since a stock that has already used up its daily range is a poor pre-rocket buy. Active fallback when NSE price-band data is unavailable.
@@ -2298,14 +2298,46 @@ function getPickDisabledStrategies(){
 }
 
 // Local Windows launcher registered by the standalone TradingView automation utility.
+let automationProgressTimer=null;
 function runMarketAutomation(){
-  showToast('Starting the market automation cycle...',3500);
+  const panel=document.getElementById('automationProgress');
+  const bar=document.getElementById('automationProgressBar');
+  const text=document.getElementById('automationProgressText');
+  const button=document.getElementById('automationBtn');
+  if(automationProgressTimer) return;
+  if(panel) panel.style.display='flex';
+  if(bar) bar.style.width='3%';
+  if(text) text.textContent='Starting...';
+  if(button){button.disabled=true;button.textContent='Running...';}
   const link=document.createElement('a');
   link.href='rocket-scanner://run-once';
   link.style.display='none';
   document.body.appendChild(link);
   link.click();
   link.remove();
+  const started=Date.now();
+  automationProgressTimer=setInterval(async()=>{
+    try{
+      const response=await fetch('http://127.0.0.1:8765/status?ts='+Date.now(),{cache:'no-store'});
+      if(!response.ok) throw new Error('status '+response.status);
+      const status=await response.json();
+      if(bar) bar.style.width=(Math.max(3,Math.min(100,Number(status.progress)||0)))+'%';
+      if(text) text.textContent=status.message||'Running...';
+      if(status.state==='complete'||status.state==='error'){
+        clearInterval(automationProgressTimer);automationProgressTimer=null;
+        if(button){button.disabled=false;button.textContent='Run Automation';}
+        showToast(status.state==='complete'?'Automation completed.':'Automation failed: '+(status.error||status.message),status.state==='complete'?3500:7000,status.state==='error');
+        setTimeout(()=>{if(panel) panel.style.display='none';},5000);
+      }
+    }catch(e){
+      if(Date.now()-started>20000){
+        clearInterval(automationProgressTimer);automationProgressTimer=null;
+        if(button){button.disabled=false;button.textContent='Run Automation';}
+        if(text) text.textContent='Launcher not responding';
+        showToast('Automation launcher did not start. Run the registration file once.',5000,true);
+      }
+    }
+  },1000);
 }
 function isPickStrategyDisabled(name){return getPickDisabledStrategies().has(name);}
 function isChampionEligible(name){return name!=='random'&&name!=='actual_you'&&!isPickStrategyDisabled(name);}
