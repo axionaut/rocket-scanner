@@ -1,5 +1,5 @@
-const BUILD_TS='2026-07-14 18:52 IST'; // release build time (IST)
-const APP_VERSION=496; // Peak championship metric with simulated exits retained as context.
+const BUILD_TS='2026-07-15 08:29 IST'; // release build time (IST)
+const APP_VERSION=497; // Local one-click TradingView automation launcher.
 const GOOGLE_DRIVE_CLIENT_ID='1015012642264-oi2nelv3v90k3d39r994a6nelgjs2a56.apps.googleusercontent.com'; // Public OAuth Web Client ID.
 const HARD_FILTER_SCHEMA='structural_tradeability_v2';
 const STOCK_RUNWAY_CEILING_PCT=19.5; // Intentional owner-approved forward-catch strategy filter: excludes stocks already near their circuit band (or caps max entry) since a stock that has already used up its daily range is a poor pre-rocket buy. Active fallback when NSE price-band data is unavailable.
@@ -2295,6 +2295,17 @@ function getPickDisabledStrategies(){
   return new Set((Array.isArray(saved)?saved:[])
     .map(key=>String(key||''))
     .filter(key=>PICK_STRATEGY_LABELS[key]&&!PICK_PERMANENT_STRATEGIES.has(key)));
+}
+
+// Local Windows launcher registered by the standalone TradingView automation utility.
+function runMarketAutomation(){
+  showToast('Starting the market automation cycle...',3500);
+  const link=document.createElement('a');
+  link.href='rocket-scanner://run-once';
+  link.style.display='none';
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
 }
 function isPickStrategyDisabled(name){return getPickDisabledStrategies().has(name);}
 function isChampionEligible(name){return name!=='random'&&name!=='actual_you'&&!isPickStrategyDisabled(name);}
