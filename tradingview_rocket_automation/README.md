@@ -88,6 +88,13 @@ staggered day schedule and displays live progress in the header. Use **Pause**,
 protocol uses `rocket_scanner_launcher.vbs` and `pythonw.exe`, so starting or
 controlling automation does not open a Command Prompt window.
 
+If the private TradingView screener session expires, Rocket Scanner shows a
+**TradingView Login** button beside the automation status. Press it to open the
+dedicated Chrome profile, sign in normally, and leave the `ALL NSE` screener
+open. The helper confirms that the screener is available, closes the visible
+repair window, and resumes hidden automation automatically. No batch file or
+terminal command is required.
+
 The previous `ALL NSE.csv` is left untouched if the browser download fails. A
 successful download is first saved as `ALL NSE.new.csv`, then atomically
 replaces `ALL NSE.csv`. No other file in `Scanner Uploads` is modified, and stale

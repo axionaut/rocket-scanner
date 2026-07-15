@@ -44,6 +44,7 @@ CONFIG_PATH = PROJECT_DIR / "automation_config.json"
 PROFILE_DIR = PROJECT_DIR / "browser_profile"
 PAUSE_FILE = PROJECT_DIR / "automation_pause.txt"
 STOP_FILE = PROJECT_DIR / "automation_stop.txt"
+LOGIN_FILE = PROJECT_DIR / "automation_login.txt"
 LOCK_FILE = PROJECT_DIR / "automation.lock"
 LOG_DIR = PROJECT_DIR / "logs"
 SCREENSHOT_DIR = PROJECT_DIR / "failure_screenshots"
@@ -170,6 +171,10 @@ class CycleFailure(RuntimeError):
 
 class AutomationStopRequested(RuntimeError):
     """Raised when the owner requests a clean stop during an active cycle."""
+
+
+class TradingViewLoginRequired(RuntimeError):
+    """Raised when hidden automation needs a visible TradingView sign-in."""
 
 
 def parse_clock(value: Any, field: str) -> clock_time:
@@ -364,7 +369,12 @@ async def ensure_tradingview_ready(page: Page, config: Config) -> None:
         body = await page_body(page)
         if body.strip():
             break
+    title = (await page.title()).lower()
+    if "page not found" in title or "this isn't the page you're looking for" in body:
+        raise TradingViewLoginRequired("TradingView login expired or the private screener is unavailable")
     if any(marker in body for marker in MANUAL_AUTH_MARKERS):
+        if config.headless:
+            raise TradingViewLoginRequired("TradingView requires a visible sign-in")
         await wait_for_manual_browser_action(page, "TradingView login, CAPTCHA, consent, or session renewal", ("screener",))
     if not body.strip():
         raise CycleFailure("TradingView page", "Screener page returned no visible body content")
@@ -492,6 +502,8 @@ async def retry_stage(name: str, operation: Callable[[], Awaitable[None]], confi
             await operation()
             return
         except Exception as exc:
+            if isinstance(exc, TradingViewLoginRequired):
+                raise
             if isinstance(exc, AutomationStopRequested):
                 raise
             LOGGER.exception("Cycle %s failed at %s (attempt %s/%s): %s", cycle_id, name, attempt, attempts, exc)
@@ -515,6 +527,8 @@ async def run_cycle(context: BrowserContext, config: Config, cycle_id: str) -> b
         LOGGER.info("Cycle %s download succeeded; visible Rocket Scanner refresh requested", cycle_id)
         return True
     except Exception as exc:
+        if isinstance(exc, TradingViewLoginRequired):
+            raise
         if isinstance(exc, AutomationStopRequested):
             set_automation_status("stopped", 0, "Automation stopped")
             LOGGER.info("Cycle %s stopped by user", cycle_id)
@@ -659,6 +673,47 @@ async def launch_context(playwright: Any, config: Config) -> BrowserSession:
         raise
 
 
+async def repair_tradingview_login(playwright: Any, config: Config, stop_event: asyncio.Event) -> bool:
+    """Open headed Chrome and wait until the private screener works again."""
+    with contextlib.suppress(FileNotFoundError):
+        LOGIN_FILE.unlink()
+    stop_existing_profile()
+    session = await launch_context(playwright, replace(config, headless=False))
+    context = session.context
+    pages = [page for page in context.pages if not page.is_closed()]
+    login_page = pages[0] if pages else await context.new_page()
+    probe = await context.new_page()
+    try:
+        set_automation_status("login_in_progress", 10, "Sign in to TradingView in the opened Chrome window")
+        await login_page.goto("https://www.tradingview.com/accounts/signin/", wait_until="domcontentloaded", timeout=config.tradingview_page_timeout_seconds * 1000)
+        deadline = time.monotonic() + 900
+        while time.monotonic() < deadline and not stop_event.is_set() and not STOP_FILE.exists():
+            try:
+                await probe.goto(config.tradingview_url, wait_until="domcontentloaded", timeout=config.tradingview_page_timeout_seconds * 1000)
+                await probe.wait_for_timeout(1500)
+                title = (await probe.title()).lower()
+                body = await page_body(probe)
+                if "page not found" not in title and "this isn't the page you're looking for" not in body:
+                    for candidate in TV_MENU_CANDIDATES:
+                        locator = await candidate_locator(probe, candidate)
+                        if await locator.count() and await locator.first.is_visible():
+                            LOGGER.info("TradingView login repaired; private screener is available")
+                            set_automation_status("login_complete", 100, "TradingView connected; restarting hidden automation")
+                            await asyncio.sleep(2)
+                            return True
+            except Exception:
+                pass
+            await asyncio.sleep(3)
+        if STOP_FILE.exists() or stop_event.is_set():
+            return False
+        raise CycleFailure("TradingView login", "Timed out waiting for TradingView sign-in")
+    finally:
+        with contextlib.suppress(Exception):
+            await probe.close()
+        await session.close()
+        stop_existing_profile()
+
+
 async def setup_mode(config: Config) -> None:
     require_playwright()
     LOGGER.info("Setup mode: the headed browser will remain open for manual setup.")
@@ -711,8 +766,9 @@ def in_operating_window(current: datetime, config: Config) -> bool:
 
 async def recurring_mode(config: Config) -> None:
     require_playwright()
-    with contextlib.suppress(FileNotFoundError):
-        STOP_FILE.unlink()
+    for control_file in (STOP_FILE, LOGIN_FILE):
+        with contextlib.suppress(FileNotFoundError):
+            control_file.unlink()
     await start_status_server()
     set_automation_status("idle", 0, "Waiting for the next scheduled cycle")
     stop_event = asyncio.Event()
@@ -768,7 +824,24 @@ async def recurring_mode(config: Config) -> None:
                         final_ran_date = current.date().isoformat()
                     else:
                         cycle_id = current.strftime("%Y%m%d_%H%M%S")
-                        await run_cycle(context, config, cycle_id)
+                        try:
+                            await run_cycle(context, config, cycle_id)
+                        except TradingViewLoginRequired as exc:
+                            LOGGER.warning("TradingView login required: %s", exc)
+                            set_automation_status("login_required", 0, "TradingView login required")
+                            while not LOGIN_FILE.exists() and not STOP_FILE.exists() and not stop_event.is_set():
+                                await asyncio.sleep(1)
+                            if STOP_FILE.exists() or stop_event.is_set():
+                                continue
+                            await session.close()
+                            repaired = await repair_tradingview_login(playwright, config, stop_event)
+                            if not repaired:
+                                continue
+                            session = await launch_context(playwright, config)
+                            context = session.context
+                            next_random = now_in(config.tz)
+                            set_automation_status("idle", 0, "TradingView connected; resuming automation")
+                            continue
                         last_cycle_finished = now_in(config.tz)
                         if due_final:
                             final_ran_date = current.date().isoformat()

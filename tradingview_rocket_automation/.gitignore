@@ -6,5 +6,6 @@ failure_pages/
 automation.lock
 automation_pause.txt
 automation_stop.txt
+automation_login.txt
 __pycache__/
 *.pyc

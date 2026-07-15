@@ -1,5 +1,5 @@
-const BUILD_TS='2026-07-15 10:38 IST'; // release build time (IST)
-const APP_VERSION=502; // Suppress every already-held stock from new buy recommendations.
+const BUILD_TS='2026-07-15 12:08 IST'; // release build time (IST)
+const APP_VERSION=503; // In-app TradingView session repair for market automation.
 const GOOGLE_DRIVE_CLIENT_ID='1015012642264-oi2nelv3v90k3d39r994a6nelgjs2a56.apps.googleusercontent.com'; // Public OAuth Web Client ID.
 const HARD_FILTER_SCHEMA='structural_tradeability_v2';
 const STOCK_RUNWAY_CEILING_PCT=19.5; // Intentional owner-approved forward-catch strategy filter: excludes stocks already near their circuit band (or caps max entry) since a stock that has already used up its daily range is a poor pre-rocket buy. Active fallback when NSE price-band data is unavailable.
@@ -2314,6 +2314,7 @@ function runMarketAutomation(){
   const button=document.getElementById('automationBtn');
   const pauseButton=document.getElementById('automationPauseBtn');
   const stopButton=document.getElementById('automationStopBtn');
+  const loginButton=document.getElementById('automationLoginBtn');
   if(automationProgressTimer) return;
   automationPaused=false;
   if(panel) panel.style.display='flex';
@@ -2331,6 +2332,10 @@ function runMarketAutomation(){
       const status=await response.json();
       if(bar) bar.style.width=(Math.max(3,Math.min(100,Number(status.progress)||0)))+'%';
       if(text) text.textContent=status.message||'Running...';
+      if(loginButton){
+        loginButton.style.display=status.state==='login_required'?'inline-block':'none';
+        loginButton.disabled=false;
+      }
       if(status.download_id&&status.download_id!==lastAutomationDownloadId&&!automationVisibleRefreshBusy){
         automationVisibleRefreshBusy=true;
         try{
@@ -2360,6 +2365,7 @@ function runMarketAutomation(){
         if(button){button.disabled=false;button.textContent='Start Automation';}
         if(pauseButton) pauseButton.style.display='none';
         if(stopButton) stopButton.style.display='none';
+        if(loginButton) loginButton.style.display='none';
         showToast(status.state==='stopped'?'Automation stopped.':'Automation failed: '+(status.error||status.message),status.state==='stopped'?3500:7000,status.state==='error');
         setTimeout(()=>{if(panel) panel.style.display='none';},5000);
       }
@@ -2369,8 +2375,9 @@ function runMarketAutomation(){
         if(button){button.disabled=false;button.textContent='Start Automation';}
         if(pauseButton) pauseButton.style.display='none';
         if(stopButton) stopButton.style.display='none';
+        if(loginButton) loginButton.style.display='none';
         if(text) text.textContent='Launcher not responding';
-        showToast('Automation launcher did not start. Run the registration file once.',5000,true);
+        showToast('The local automation helper did not respond.',5000,true);
       }
     }
   },1000);
@@ -2389,6 +2396,13 @@ function stopMarketAutomation(){
   automationProtocol('stop');
   const text=document.getElementById('automationProgressText');
   if(text) text.textContent='Stopping automation...';
+}
+function repairTradingViewLogin(){
+  const loginButton=document.getElementById('automationLoginBtn');
+  const text=document.getElementById('automationProgressText');
+  if(loginButton) loginButton.disabled=true;
+  if(text) text.textContent='Opening TradingView login...';
+  automationProtocol('login');
 }
 function isPickStrategyDisabled(name){return getPickDisabledStrategies().has(name);}
 function isChampionEligible(name){return name!=='random'&&name!=='actual_you'&&!isPickStrategyDisabled(name);}

@@ -19,6 +19,8 @@ ElseIf InStr(action, "rocket-scanner://resume") > 0 Then
     DeleteIfPresent fso.BuildPath(root, "automation_pause.txt")
 ElseIf InStr(action, "rocket-scanner://stop") > 0 Then
     WriteControlFile fso.BuildPath(root, "automation_stop.txt"), "stop"
+ElseIf InStr(action, "rocket-scanner://login") > 0 Then
+    WriteControlFile fso.BuildPath(root, "automation_login.txt"), "login"
 End If
 
 Function Quote(value)
