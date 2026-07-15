@@ -1,5 +1,5 @@
-const BUILD_TS='2026-07-15 13:37 IST'; // release build time (IST)
-const APP_VERSION=504; // Restore manual TradingView CSV loading.
+const BUILD_TS='2026-07-15 15:31 IST'; // release build time (IST)
+const APP_VERSION=505; // Restore manual TradingView CSV loading.
 const GOOGLE_DRIVE_CLIENT_ID='1015012642264-oi2nelv3v90k3d39r994a6nelgjs2a56.apps.googleusercontent.com'; // Public OAuth Web Client ID.
 const HARD_FILTER_SCHEMA='structural_tradeability_v2';
 const STOCK_RUNWAY_CEILING_PCT=19.5; // Intentional owner-approved forward-catch strategy filter: excludes stocks already near their circuit band (or caps max entry) since a stock that has already used up its daily range is a poor pre-rocket buy. Active fallback when NSE price-band data is unavailable.
@@ -1244,7 +1244,15 @@ function getHardFilterRowsFromEngine(E){
   if(!E) return [];
   const rm=E.removed||{};
   const survRows=syncSurvRuleRows(E.survRuleRows||[]);
+  const audit=E.hardFilterAudit||window._lastHardFilterAudit||{};
   return [
+    {key:'upper_circuit',label:'Upper Circuit',criteria:'Price change at/near NSE upper band',removed:rm.uc||0,active:true,kind:'core'},
+    {key:'non_eq',label:'Non-EQ Series',criteria:'BE / BZ / SZ / SM / ST',removed:rm.nonEq||0,active:true,kind:'core'},
+    {key:'low_liquidity',label:'Low Liquidity',criteria:`Volume < Min Vol OR Shareholders < Min Sh (filter bar)`,removed:rm.liq||0,active:true,kind:'core'},
+    {key:'zero_f_score',label:'Zero F-Score',criteria:'Piotroski = 0',removed:rm.fscore||0,active:true,kind:'core'},
+    {key:'invalid_atr',label:'Invalid ATR',criteria:'ATR <= 0 or missing when mandatory',removed:rm.atr||0,active:true,kind:'core'},
+    {key:'prior_move',label:'Prior Move',criteria:'Already in today’s rocket union / already rocketed earlier',removed:audit.priorMove||0,active:true,kind:'core'},
+    {key:'entry_gate',label:'Entry Gate',criteria:'Fade / geometry / held / min-score / budget',removed:(audit.entryGate||0)+(GEOMETRY_GATE_SUMMARY.gatedOut||0),active:true,kind:'core'},
     ...survRows.map(row=>({
       key:'surv_'+row.key,
       label:row.label,
@@ -1256,7 +1264,6 @@ function getHardFilterRowsFromEngine(E){
       kind:'surv',
       ruleKey:row.key,
     })),
-    {key:'low_liquidity',label:'Low Liquidity',criteria:`Volume < Min Vol OR Shareholders < Min Sh (filter bar)`,removed:rm.liq||0,active:true,kind:'core'},
   ];
 }
 function persistMethodologySnapshot(){
@@ -1286,6 +1293,8 @@ function persistMethodologySnapshot(){
       survRuleRows:syncSurvRuleRows(ENGINE_DATA.survRuleRows||[]),
       recommendationFeedback:ENGINE_DATA.recommendationFeedback||null,
       executedEntryFeedback:ENGINE_DATA.executedEntryFeedback||null,
+      hardFilterAudit:ENGINE_DATA.hardFilterAudit||null,
+      pickDiagnostics:getPickState()?.diagnostics||null,
       snapshotElapsedMinutes:ENGINE_DATA.snapshotElapsedMinutes??null,
       snapshotDisplayElapsedMinutes:ENGINE_DATA.snapshotDisplayElapsedMinutes??null,
       snapshotPairs:ENGINE_DATA.snapshotPairs||0,
@@ -1632,11 +1641,11 @@ function getRecommendationOutcomeSummary(){
     issueDays:issues.length,horizonDays:currentHorizon
   };
 }
-function getDisplayedEntryCandidates(rows){
+function getDisplayedEntryCandidates(rows,opts={}){
   if(!Array.isArray(rows)||!rows.length) return [];
   const heldPos=getHeldPositionMap();
   return rows.map(s=>({...s,_features:s._features||{}}))
-    .filter(s=>!getFilterBarReason(s))
+    .filter(s=>!getFilterBarReason(s,opts))
     .filter(s=>!applyHeldDisplayState(s,heldPos))
     .sort((a,b)=>(b.rocketScore||0)-(a.rocketScore||0))
     .slice(0,20);
@@ -2169,6 +2178,12 @@ function cloneDailyRecord(snapshot,targetSymbols,eligibleSymbols){
     featureCols:[...(snapshot?.featureCols||[])],
     rocketSymbols:[...(targetSymbols||[])],
     eligibleSymbols:[...(eligibleSymbols||[])],
+    pickUploads:Array.isArray(snapshot?.pickUploads)?snapshot.pickUploads.map(upload=>({
+      ts:Number(upload.ts)||0,
+      tag:upload.tag||null,
+      basis:upload.basis||null,
+      strategies:Object.fromEntries(Object.entries(upload.strategies||{}).map(([name,items])=>[name,[...(items||[])].map(sym=>normSym(sym)).filter(Boolean)]))
+    })) : [],
     sampleCount:1,
     latestSessionTag:snapshot?.sessionTag||null
   };
@@ -2208,6 +2223,22 @@ function mergeDailyRecord(day,currentSnapshot,rocketMetricKey,targetSymbols,elig
   const eligible=new Set(day.eligibleSymbols||[]);
   (eligibleSymbols||[]).forEach(symbol=>eligible.add(symbol));
   day.eligibleSymbols=[...eligible];
+  if(Array.isArray(currentSnapshot?.pickUploads)&&currentSnapshot.pickUploads.length){
+    const existing=new Set((day.pickUploads||[]).map(upload=>`${upload.ts||0}|${upload.tag||''}`));
+    const merged=[...(day.pickUploads||[])];
+    currentSnapshot.pickUploads.forEach(upload=>{
+      const key=`${upload.ts||0}|${upload.tag||''}`;
+      if(existing.has(key)) return;
+      existing.add(key);
+      merged.push({
+        ts:Number(upload.ts)||0,
+        tag:upload.tag||null,
+        basis:upload.basis||null,
+        strategies:Object.fromEntries(Object.entries(upload.strategies||{}).map(([name,items])=>[name,[...(items||[])].map(sym=>normSym(sym)).filter(Boolean)]))
+      });
+    });
+    day.pickUploads=merged;
+  }
   day.timestamp=Math.max(Number(day.timestamp)||0,Number(currentSnapshot.timestamp)||0);
   day.minutes=currentSnapshot.minutes;
   day.inSession=currentSnapshot.inSession;
@@ -2228,13 +2259,159 @@ function recordDayPredictions(runtime,sessionDate,predictedSymbols){
   if(!day) return false;
   day.predictedSymbols=[...new Set([...(day.predictedSymbols||[]),
     ...(predictedSymbols||[]).map(normSym).filter(Boolean)])];
+  _pickStateCache=null;
   return true;
+}
+function compactCohortSymbols(rows,limit=20){
+  return (rows||[])
+    .map((row,i)=>({symbol:normSym(row?.symbol),rank:i+1,score:Number(row?.rocketScore)}))
+    .filter(row=>row.symbol)
+    .slice(0,limit);
+}
+function unionCompactCohortSymbols(chunks,limit=20){
+  const seen=new Set();
+  const out=[];
+  for(const chunk of chunks||[]){
+    for(const item of chunk||[]){
+      const sym=normSym(item?.symbol||item?.s||item);
+      if(!sym||seen.has(sym)) continue;
+      seen.add(sym);
+      out.push({symbol:sym,rank:out.length+1,score:isFinite(Number(item?.score))?Number(item.score):null});
+      if(out.length>=limit) return out;
+    }
+  }
+  return out;
+}
+function getDayStrategyCohorts(day,prevDay,rows){
+  const pool=(day?.eligibleSymbols||[]).filter(Boolean);
+  const poolRows=pool.map(sym=>rows.find(r=>r.symbol===sym)).filter(Boolean);
+  const n=20;
+  const cohorts={engine:compactCohortSymbols(getDisplayedEntryCandidates(rows,{ignoreMinScore:true}),n)};
+  if(prevDay){
+    const prevRows=prevDay.featureRows||{};
+    const prevPriceKey=_dayPriceChangeKey(prevDay);
+    const prevRockets=new Set(prevDay.rocketSymbols||[]);
+    const momentum=pool.map(sym=>({sym,m:Number(prevRows?.[sym]?.[prevPriceKey])})).filter(x=>x.m!=null&&isFinite(x.m)).sort((a,b)=>b.m-a.m).slice(0,n).map((x,i)=>({symbol:x.sym,rank:i+1,score:x.m}));
+    const persistence=pool.filter(sym=>prevRockets.has(sym)).slice(0,n).map((sym,i)=>({symbol:sym,rank:i+1,score:null}));
+    cohorts.momentum=momentum;
+    cohorts.persistence=persistence;
+  }
+  const dayPriceKey=_dayPriceChangeKey(day);
+  if(dayPriceKey){
+    cohorts.early_mover=pool.map(sym=>({sym,v:Number(day?.featureRows?.[sym]?.[dayPriceKey])}))
+      .filter(x=>isFinite(x.v)&&x.v>=3&&x.v<6).sort((a,b)=>b.v-a.v).slice(0,n)
+      .map((x,i)=>({symbol:x.sym,rank:i+1,score:x.v}));
+  }
+  cohorts.target_1m5m=compactCohortSymbols(pickTarget1m5mSymbols(day,pool,n).map(sym=>({symbol:sym,rocketScore:null})),n);
+  Object.entries(PICK_COMPOSITES).forEach(([name,components])=>{
+    cohorts[name]=compactCohortSymbols(pickCompositeSymbols(day,pool,n,components).map(sym=>({symbol:sym,rocketScore:null})),n);
+  });
+  if(prevDay) MOM_CONT_STRATEGIES.forEach(strategy=>{
+    const picks=pickMomentumContinuationSymbols(day,prevDay,pool,n,strategy)||[];
+    cohorts[strategy.key]=compactCohortSymbols(picks.map(sym=>({symbol:sym,rocketScore:null})),n);
+  });
+  RATING_STRATEGIES.forEach(strategy=>{
+    const picks=pickRatingSymbols(day,pool,n,strategy)||[];
+    cohorts[strategy.key]=compactCohortSymbols(picks.map(sym=>({symbol:sym,rocketScore:null})),n);
+  });
+  ['high52w_mom','volume_shock','range_squeeze','delivery_surge','oversold_snap'].forEach(name=>{
+    const picks=pickQuantSymbols(name,day,prevDay,pool,n)||[];
+    cohorts[name]=compactCohortSymbols(picks.map(sym=>({symbol:sym,rocketScore:null})),n);
+  });
+  const rand=seededRand(day?.sessionDate||''),rp=[...pool],rout=[];
+  while(rp.length&&rout.length<n) rout.push(rp.splice(Math.floor(rand()*rp.length),1)[0]);
+  cohorts.random=compactCohortSymbols(rout.map(sym=>({symbol:sym,rocketScore:null})),n);
+  return cohorts;
+}
+function buildAuthoritativePickUploadRecord({runtime,rows,sessionDate,sessionTag,timestamp}){
+  const days=[...(runtime?.days||[])].sort((a,b)=>String(a.sessionDate).localeCompare(String(b.sessionDate)));
+  const current=days.find(d=>d.sessionDate===sessionDate)||getLatestDailyRecord(runtime)||null;
+  const prev=days.filter(d=>String(d.sessionDate)<String(sessionDate)).slice(-1)[0]||null;
+  if(!current) return null;
+  const strategies=getDayStrategyCohorts(current,prev,rows||[]);
+  const engineRowCount=compactCohortSymbols(getDisplayedEntryCandidates(rows||[],{ignoreMinScore:true}),20).length;
+  return {
+    ts:Number(timestamp)||Date.now(),
+    tag:sessionTag||null,
+    sessionDate,
+    basis:{
+      eligibleCount:(current.eligibleSymbols||[]).length,
+      engineCount:engineRowCount,
+      poolCap:20,
+      hardFiltered:Math.max(0,(REMOVED.uc||0)+(REMOVED.surv||0)+(REMOVED.nonEq||0)+(REMOVED.liq||0)+(REMOVED.fscore||0)+(REMOVED.atr||0)),
+      entryBlocked:GEOMETRY_GATE_SUMMARY.gatedOut||0
+    },
+    strategies:Object.fromEntries(Object.entries(strategies).map(([name,items])=>[name,items.map(item=>item.symbol)]))
+  };
+}
+function recordAuthoritativePickUpload(runtime,sessionDate,uploadRecord){
+  if(!runtime?.days?.length||!uploadRecord?.strategies) return false;
+  const day=(runtime.days||[]).find(d=>d.sessionDate===sessionDate);
+  if(!day) return false;
+  if(!Array.isArray(day.pickUploads)) day.pickUploads=[];
+  const key=`${uploadRecord.ts||0}|${uploadRecord.tag||''}`;
+  if(day.pickUploads.some(u=>`${u.ts||0}|${u.tag||''}`===key)) return false;
+  day.pickUploads.push({
+    ts:Number(uploadRecord.ts)||Date.now(),
+    tag:uploadRecord.tag||null,
+    basis:uploadRecord.basis||null,
+    strategies:Object.fromEntries(Object.entries(uploadRecord.strategies||{}).map(([name,items])=>[name,[...(items||[])].map(sym=>normSym(sym)).filter(Boolean)]))
+  });
+  _pickStateCache=null;
+  return true;
+}
+function collectDayStrategySymbols(day){
+  const out={};
+  (day?.pickUploads||[]).forEach(upload=>{
+    Object.entries(upload.strategies||{}).forEach(([name,items])=>{
+      if(!out[name]) out[name]=new Set();
+      (items||[]).forEach(sym=>{if(sym) out[name].add(normSym(sym));});
+    });
+  });
+  return out;
+}
+function getStrategySelectionForDay(day,name,legacyPool,prevDay,laterRockets){
+  const union=collectDayStrategySymbols(day);
+  const auth=union[name];
+  if(auth&&auth.size){
+    return [...auth].slice(0,20);
+  }
+  if(name==='engine') return [...(day?.predictedSymbols||[])].slice(0,20);
+  const pool=legacyPool||[];
+  const n=20;
+  if(name==='target_1m5m') return pickTarget1m5mSymbols(day,pool,n);
+  if(name==='momentum'){
+    const prevKey=prevDay?_dayPriceChangeKey(prevDay):null;
+    return prevKey
+      ? pool.map(sym=>({sym,m:Number(prevDay?.featureRows?.[sym]?.[prevKey])})).filter(x=>x.m!=null&&isFinite(x.m)).sort((a,b)=>b.m-a.m).slice(0,n).map(x=>x.sym)
+      : [];
+  }
+  if(name==='persistence'){
+    const prevRockets=new Set(prevDay?.rocketSymbols||[]);
+    return pool.filter(sym=>prevRockets.has(sym)).slice(0,n);
+  }
+  if(name==='early_mover'){
+    const key=_dayPriceChangeKey(day);
+    return key
+      ? pool.map(sym=>({sym,c:Number(day?.featureRows?.[sym]?.[key])})).filter(x=>isFinite(x.c)&&x.c>=3&&x.c<6).sort((a,b)=>b.c-a.c).slice(0,n).map(x=>x.sym)
+      : [];
+  }
+  if(PICK_COMPOSITES[name]) return pickCompositeSymbols(day,pool,n,PICK_COMPOSITES[name]);
+  if(MOM_CONT_STRATEGY_BY_KEY[name]) return pickMomentumContinuationSymbols(day,prevDay,pool,n,MOM_CONT_STRATEGY_BY_KEY[name])||[];
+  if(RATING_STRATEGY_BY_KEY[name]) return pickRatingSymbols(day,pool,n,RATING_STRATEGY_BY_KEY[name])||[];
+  if(['high52w_mom','volume_shock','range_squeeze','delivery_surge','oversold_snap'].includes(name)) return pickQuantSymbols(name,day,prevDay,pool,n)||[];
+  if(name==='random'){
+    const rand=seededRand(day?.sessionDate||''),rp=[...pool],rout=[];
+    while(rp.length&&rout.length<n) rout.push(rp.splice(Math.floor(rand()*rp.length),1)[0]);
+    return rout;
+  }
+  return [];
 }
 // Pick-source championship: grade strategies on hit rate AND cost-adjusted profit per flag.
 // Random is a control only; every other strategy can run the live pick list.
 const PICK_CHAMPION_STORE='rs_pick_champion_v1';
 const PICK_DISABLED_STORE='rs_pick_disabled_v1';
-const PICK_CHAMPION_BAR='v488';
+const PICK_CHAMPION_BAR='v490';
 const PICK_MIN_EVAL_DAYS=4;
 const RATING_BUY=4;
 const RATING_STRONG_BUY=5;
@@ -2244,6 +2421,7 @@ const PICK_STRATEGY_LABELS={
   engine:'Engine',momentum:'Momentum',persistence:'Persistence',early_mover:'Early Mover 3-6%',
   ta_composite:'TA Composite',fa_composite:'FA Composite',
   mom_cont_buy:'Mom-Cont ≥5% (Buy)',mom_cont_sbuy:'Mom-Cont ≥5% (SBuy)',
+  target_1m5m:'Target + 1m > 5m',
   rating_ma_buy:'MA = Buy',rating_osc_buy:'Osc = Buy',rating_tech_buy:'Tech = Buy',
   rating_ma_osc_buy:'MA+Osc = Buy',rating_ma_tech_buy:'MA+Tech = Buy',rating_osc_tech_buy:'Osc+Tech = Buy',rating_all3_buy:'All-3 = Buy',
   rating_ma_sbuy:'MA = Strong Buy',rating_osc_sbuy:'Osc = Strong Buy',rating_tech_sbuy:'Tech = Strong Buy',
@@ -2275,6 +2453,42 @@ const MOM_CONT_STRATEGIES=[
   {key:'mom_cont_sbuy',target:RATING_STRONG_BUY}
 ];
 const MOM_CONT_STRATEGY_BY_KEY=Object.fromEntries(MOM_CONT_STRATEGIES.map(s=>[s.key,s]));
+function detectShortChangeColumns(day){
+  const cols=getDayFeatureCols(day);
+  return {
+    oneMinute:findFeatureColumn(cols,[/price_change.*1.*minute/,/change.*1.*minute/]),
+    fiveMinute:findFeatureColumn(cols,[/price_change.*5.*minute/,/change.*5.*minute/])
+  };
+}
+function pickTarget1m5mSymbols(day,pool,n){
+  const cols=detectShortChangeColumns(day);
+  const dayKey=_dayPriceChangeKey(day);
+  const target=Number(getEffectiveTgtPct());
+  if(!(target>0)||!dayKey||!cols.oneMinute||!cols.fiveMinute) return [];
+  const rand=seededRand(String(day?.sessionDate||'')+'|target_1m5m');
+  const ranked=[];
+  for(const sym of pool||[]){
+    const row=day?.featureRows?.[sym]||{};
+    const dayCh=Number(row?.[dayKey]);
+    const one=Number(row?.[cols.oneMinute]);
+    const five=Number(row?.[cols.fiveMinute]);
+    if(!isFinite(dayCh)||!isFinite(one)||!isFinite(five)) continue;
+    if(dayCh<target||!(five>0)||!(one>five)) continue;
+    ranked.push({sym,one,five,dayCh,tie:rand()});
+  }
+  return ranked.sort((a,b)=>b.one-a.one||b.five-a.five||b.dayCh-a.dayCh||a.tie-b.tie).slice(0,n).map(x=>x.sym);
+}
+function liveTarget1m5mMetric(s){
+  const row=s?._features||{};
+  const dayCh=Number(s?.priceChange);
+  const cols=detectShortChangeColumns({featureRows:{[s?.symbol||'']:row}});
+  const one=Number(row?.[cols.oneMinute]);
+  const five=Number(row?.[cols.fiveMinute]);
+  const target=Number(getEffectiveTgtPct());
+  if(!(target>0)||!isFinite(dayCh)||!isFinite(one)||!isFinite(five)) return -Infinity;
+  if(dayCh<target||!(five>0)||!(one>five)) return -Infinity;
+  return one;
+}
 const PICK_COMPOSITES={
   ta_composite:[
     {pattern:/average_directional|adx/,dir:1},
@@ -2634,6 +2848,7 @@ function computeStrategyLadder(runtime){
       }
     });
   };
+  const strategyNames=['engine','momentum','persistence','early_mover','target_1m5m',...Object.keys(PICK_COMPOSITES),...MOM_CONT_STRATEGIES.map(s=>s.key),...RATING_STRATEGIES.map(s=>s.key),'high52w_mom','volume_shock','range_squeeze','delivery_surge','oversold_snap','random'];
   days.forEach((day,i)=>{
     if(i>=days.length-1) return;
     const later=new Set();
@@ -2650,31 +2865,16 @@ function computeStrategyLadder(runtime){
     };
     const exitOf=sym=>simulateStoredExitPct(days,i,sym);
     const pool=day.eligibleSymbols||[];
-    const preds=day.predictedSymbols||[];
-    const n=Math.min(20,Math.max(5,preds.length||10));
     const key=_dayPriceChangeKey(day);
     const prev=days[i-1]||null;
-    const prevKey=prev?_dayPriceChangeKey(prev):null;
-    const prevMove=sym=>prev&&prevKey?Number(prev.featureRows?.[sym]?.[prevKey]):null;
-    if(preds.length) add('engine',preds,later,peakOf,exitOf);
-    if(prev){
-      const mom=pool.map(s=>({s,m:prevMove(s)})).filter(x=>x.m!=null&&isFinite(x.m)).sort((a,b)=>b.m-a.m).slice(0,n).map(x=>x.s);
-      add('momentum',mom,later,peakOf,exitOf);
-      const prevRockets=new Set(prev.rocketSymbols||[]);
-      add('persistence',pool.filter(s=>prevRockets.has(s)).slice(0,n),later,peakOf,exitOf);
-    }
-    if(key){
-      add('early_mover',pool.map(s=>({s,c:Number(day.featureRows?.[s]?.[key])})).filter(x=>isFinite(x.c)&&x.c>=3&&x.c<6).sort((a,b)=>b.c-a.c).slice(0,n).map(x=>x.s),later,peakOf,exitOf);
-    }
-    Object.entries(PICK_COMPOSITES).forEach(([name,components])=>add(name,pickCompositeSymbols(day,pool,n,components),later,peakOf,exitOf));
-    if(prev) MOM_CONT_STRATEGIES.forEach(strategy=>{
-      const picks=pickMomentumContinuationSymbols(day,prev,pool,n,strategy);if(picks) add(strategy.key,picks,later,peakOf,exitOf);
-    });
-    RATING_STRATEGIES.forEach(strategy=>add(strategy.key,pickRatingSymbols(day,pool,n,strategy),later,peakOf,exitOf));
-    ['high52w_mom','volume_shock','range_squeeze','delivery_surge','oversold_snap'].forEach(name=>add(name,pickQuantSymbols(name,day,prev,pool,n),later,peakOf,exitOf));
-    const rand=seededRand(day.sessionDate||''),rp=[...pool],rout=[];
-    while(rp.length&&rout.length<n) rout.push(rp.splice(Math.floor(rand()*rp.length),1)[0]);
-    add('random',rout,later,peakOf,exitOf);
+    const auth=collectDayStrategySymbols(day);
+    const pickFor=name=>{
+      const authList=auth[name]? [...auth[name]]:[];
+      if(authList.length) return authList;
+      if(name==='engine') return [...(day.predictedSymbols||[])].slice(0,20);
+      return getStrategySelectionForDay(day,name,pool,prev,later).slice(0,20);
+    };
+    strategyNames.forEach(name=>add(name,pickFor(name),later,peakOf,exitOf));
   });
   const ladder=Object.values(agg).map(a=>{
     const grossPeakAvg=a.peakN?a.peakSum/a.peakN:null;
@@ -2688,18 +2888,76 @@ function resolvePickChampion(ladder){
   const fallback={name:'engine',since:null,metric:null,bar:PICK_CHAMPION_BAR};
   const raw=FS.get(PICK_CHAMPION_STORE);
   const stored=(raw&&raw.bar===PICK_CHAMPION_BAR)?raw:fallback;
-  const eligible=(ladder||[]).filter(s=>isChampionEligible(s.name)&&s.evalDays>=PICK_MIN_EVAL_DAYS&&s.peakNetPct>0);
-  if(!eligible.length){
+  const eligible=(ladder||[]).filter(s=>isChampionEligible(s.name)&&s.evalDays>=PICK_MIN_EVAL_DAYS&&Number(s.exitNetPct)>0);
+  const challengers=eligible.filter(s=>s.name!=='engine');
+  if(!challengers.length){
     if(raw?.name!==fallback.name||raw?.bar!==PICK_CHAMPION_BAR) FS.set(PICK_CHAMPION_STORE,fallback);
     return fallback;
   }
-  const best=eligible.reduce((a,b)=>(b.peakNetPct>a.peakNetPct?b:a));
-  if(best.name!==stored.name||stored.metric!==best.peakNetPct||stored.bar!==PICK_CHAMPION_BAR){
-    const next={name:best.name,since:best.name===stored.name?stored.since:getSessionDate(),metric:best.peakNetPct,bar:PICK_CHAMPION_BAR};
+  const ranked=eligible.slice().sort((a,b)=>{
+    const ex=(Number(b.exitNetPct)||-Infinity)-(Number(a.exitNetPct)||-Infinity);
+    if(ex) return ex;
+    const pk=(Number(b.peakNetPct)||-Infinity)-(Number(a.peakNetPct)||-Infinity);
+    if(pk) return pk;
+    const hr=(Number(b.hitRate)||-Infinity)-(Number(a.hitRate)||-Infinity);
+    if(hr) return hr;
+    const ed=(Number(b.evalDays)||0)-(Number(a.evalDays)||0);
+    if(ed) return ed;
+    return String(a.label||a.name).localeCompare(String(b.label||b.name));
+  });
+  const best=ranked[0]||fallback;
+  if(best.name!==stored.name||stored.metric!==best.exitNetPct||stored.bar!==PICK_CHAMPION_BAR){
+    const next={name:best.name,since:best.name===stored.name?stored.since:getSessionDate(),metric:best.exitNetPct,bar:PICK_CHAMPION_BAR};
     FS.set(PICK_CHAMPION_STORE,next);
     return next;
   }
   return stored;
+}
+function buildPickDiagnostics(ladder,runtime){
+  const days=[...(runtime?.days||[])];
+  const authDays=days.filter(day=>Array.isArray(day.pickUploads)&&day.pickUploads.length);
+  const firstAuthoritativeDate=authDays.length?authDays[0].sessionDate||null:null;
+  const uploadCount=authDays.reduce((sum,day)=>sum+(day.pickUploads?.length||0),0);
+  const unionDayCount=authDays.length;
+  const strategyRows=(ladder||[]).filter(row=>row.name&&row.name!=='actual_you');
+  const dayStrategySets=authDays.map(day=>({day,sets:collectDayStrategySymbols(day)}));
+  const pairs=[];
+  for(let i=0;i<strategyRows.length;i++){
+    for(let j=i+1;j<strategyRows.length;j++){
+      const a=strategyRows[i].name,b=strategyRows[j].name;
+      const samples=[];
+      dayStrategySets.forEach(({sets})=>{
+        const sa=sets[a],sb=sets[b];
+        if(!sa?.size||!sb?.size) return;
+        const inter=[...sa].filter(sym=>sb.has(sym)).length;
+        const union=new Set([...sa,...sb]).size;
+        if(union>0) samples.push(inter/union);
+      });
+      if(samples.length){
+        const avg=samples.reduce((s,v)=>s+v,0)/samples.length;
+        if(avg>=0.6){
+          pairs.push({a,b,avg:+avg.toFixed(2),days:samples.length,identical:avg>=0.95});
+        }
+      }
+    }
+  }
+  pairs.sort((a,b)=>b.avg-a.avg||b.days-a.days||String(a.a).localeCompare(String(b.a)));
+  const engineRow=(ladder||[]).find(row=>row.name==='engine')||null;
+  const bestChallenger=[...(ladder||[])].filter(row=>row.name!=='engine'&&row.name!=='actual_you').sort((a,b)=>
+    (Number(b.exitNetPct)||-Infinity)-(Number(a.exitNetPct)||-Infinity)||
+    (Number(b.peakNetPct)||-Infinity)-(Number(a.peakNetPct)||-Infinity)
+  )[0]||null;
+  return {
+    authoritative:authDays.length>0,
+    firstAuthoritativeDate,
+    uploadCount,
+    unionDayCount,
+    legacyOnly:!authDays.length,
+    correlatedPairs:pairs.slice(0,3),
+    engineCohortSize:Number(engineRow?.flagged)||0,
+    challengerCohortSize:Number(bestChallenger?.flagged)||0,
+    bestChallenger:bestChallenger?{name:bestChallenger.name,label:bestChallenger.label,exitNetPct:bestChallenger.exitNetPct,peakNetPct:bestChallenger.peakNetPct}:null
+  };
 }
 let _pickStateCache=null;
 function getPickState(){
@@ -2709,7 +2967,8 @@ function getPickState(){
   try{ladder=computeStrategyLadder(SNAPSHOT_RUNTIME);}catch(e){console.warn('strategy ladder failed',e);}
   let champ={name:'engine',since:null,metric:null};
   try{champ=resolvePickChampion(ladder);}catch(e){console.warn('champion resolve failed',e);}
-  const v={...champ,label:PICK_STRATEGY_LABELS[champ.name]||champ.name,ladder};
+  const diagnostics=buildPickDiagnostics(ladder,SNAPSHOT_RUNTIME);
+  const v={...champ,label:PICK_STRATEGY_LABELS[champ.name]||champ.name,ladder,diagnostics};
   _pickStateCache={tag,v};
   return v;
 }
@@ -2733,6 +2992,7 @@ function getChampionRowMetric(champ,s,yd){
   if(champ==='momentum'){const m=yd.peak.get(s.symbol);return m!=null&&isFinite(m)?m:-Infinity;}
   if(champ==='persistence') return yd.rockets.has(s.symbol)?(1000+(yd.peak.get(s.symbol)||0)):-Infinity;
   if(champ==='early_mover'){const c=Number(s.priceChange);return (isFinite(c)&&c>=3&&c<6)?c:-Infinity;}
+  if(champ==='target_1m5m') return liveTarget1m5mMetric(s);
   if(champ==='ta_composite') return liveCompositeMetric(s._features||{},PICK_COMPOSITES.ta_composite);
   if(champ==='fa_composite') return liveCompositeMetric(s._features||{},PICK_COMPOSITES.fa_composite);
   if(MOM_CONT_STRATEGY_BY_KEY[champ]) return liveMomentumContinuationMetric(s,yd,MOM_CONT_STRATEGY_BY_KEY[champ]);
@@ -3556,6 +3816,7 @@ async function runEngine(raw, sessionTag, options={}){
       marketBreadth:ENGINE_DATA.marketBreadth,useFreshCorr:ENGINE_DATA.useFreshCorr,hasRecommendationEvidence:ENGINE_DATA.hasRecommendationEvidence,currentUploadLearned:ENGINE_DATA.currentUploadLearned,freshSignalCount:ENGINE_DATA.freshSignalCount,scoringSource:ENGINE_DATA.scoringSource,useAccCorr:ENGINE_DATA.useAccCorr,sectorCol:ENGINE_DATA.sectorCol,industryCol:ENGINE_DATA.industryCol,
       totalParsed:totalParsed,hardFilterSchema:HARD_FILTER_SCHEMA,removed:{...REMOVED},survSize:Object.keys(NSE_SURV).length,
       recommendationFeedback,executedEntryFeedback,outcomeScoreOverlay:ENGINE_DATA.outcomeScoreOverlay,
+      hardFilterAudit:ENGINE_DATA.hardFilterAudit||null,pickDiagnostics:getPickState()?.diagnostics||null,
       snapshotElapsedMinutes:ENGINE_DATA.snapshotElapsedMinutes,snapshotDisplayElapsedMinutes:ENGINE_DATA.snapshotDisplayElapsedMinutes,
       snapshotPairs:ENGINE_DATA.snapshotPairs,lowSampleFeatures:ENGINE_DATA.lowSampleFeatures||[],scoringModel:ENGINE_DATA.scoringModel,deltaFeatureSchema:ENGINE_DATA.deltaFeatureSchema,
       interactionFeatures:ENGINE_DATA.interactionFeatures};
@@ -3913,7 +4174,11 @@ function buildGoalCard(){
 function pickLadderDisplayRows(ladder){
   return (ladder||[])
     .filter(r=>(r.flagged||0)>0)
-    .sort((a,b)=>(b.peakNetPct??-Infinity)-(a.peakNetPct??-Infinity)||String(a.label||a.name).localeCompare(String(b.label||b.name)));
+    .sort((a,b)=>
+      (b.exitNetPct??-Infinity)-(a.exitNetPct??-Infinity)||
+      (b.peakNetPct??-Infinity)-(a.peakNetPct??-Infinity)||
+      String(a.label||a.name).localeCompare(String(b.label||b.name))
+    );
 }
 function buildPickLadderHTML(){
   const ps=getPickState();
@@ -3924,9 +4189,9 @@ function buildPickLadderHTML(){
     const isCh=r.name===ps.name;
     const label=(r.label||PICK_STRATEGY_LABELS[r.name]||r.name)+(r.name==='random'?' (control)':'')+(isCh?' ▶ champion':'');
     const remove=PICK_PERMANENT_STRATEGIES.has(r.name)?'':`<button onclick="disablePickStrategy('${r.name}')" title="Remove ${escHtml(r.label)} from the ladder" aria-label="Remove ${escHtml(r.label)}" style="border:0;background:transparent;color:var(--red);font:inherit;font-size:16px;cursor:pointer;padding:0 4px">x</button>`;
-    return `<tr style="${isCh?'font-weight:800;color:var(--t1)':''}"><td>${label}</td><td>${r.evalDays||0}</td><td>${r.flagged||0}</td><td>${r.hits||0}</td><td>${pct(r.hitRate)}</td><td title="Prediction quality - best forward move within the window, cost-adjusted (decides the champion)">${net(r.peakNetPct)}</td><td title="What the current target/stop exit policy captures of it">${net(r.exitNetPct)}</td><td style="text-align:center">${remove}</td></tr>`;
+    return `<tr style="${isCh?'font-weight:800;color:var(--t1)':''}"><td>${label}</td><td>${r.evalDays||0}</td><td>${r.flagged||0}</td><td>${r.hits||0}</td><td>${pct(r.hitRate)}</td><td title="Historical peak context only">${net(r.peakNetPct)}</td><td title="Executable outcome under the current exit policy">${net(r.exitNetPct)}</td><td style="text-align:center">${remove}</td></tr>`;
   }).join('');
-  return `<div style="overflow-x:auto"><table class="ct" style="min-width:760px;font-size:11px"><thead><tr><th>Pick Source</th><th>Eval Days</th><th>Flagged</th><th>Hits</th><th>Hit Rate</th><th title="Prediction quality - best forward move within the window, cost-adjusted (decides the champion)">Peak %/flag</th><th title="What the current target/stop exit policy captures of it">Exit %/flag</th><th></th></tr></thead><tbody>${body||'<tr><td colspan="8" style="color:var(--t3)">Warming up — no evaluable pick-source rows yet.</td></tr>'}</tbody></table></div>`;
+  return `<div style="overflow-x:auto"><table class="ct" style="min-width:760px;font-size:11px"><thead><tr><th>Pick Source</th><th>Eval Days</th><th>Flagged</th><th>Hits</th><th>Hit Rate</th><th title="Historical peak context only; champion selection uses Exit %/flag">Peak %/flag</th><th title="Executable outcome under the current exit policy; this decides the champion">Exit %/flag</th><th></th></tr></thead><tbody>${body||'<tr><td colspan="8" style="color:var(--t3)">Warming up — no evaluable pick-source rows yet.</td></tr>'}</tbody></table></div>`;
 }
 function buildPickRosterControls(){
   const disabled=[...getPickDisabledStrategies()].sort();
@@ -3950,7 +4215,7 @@ function renderPickLadderPanel(){
     <button onclick="togglePickLadderPanel()" style="width:100%;display:flex;justify-content:space-between;align-items:center;gap:10px;background:transparent;border:0;color:var(--t1);padding:10px 12px;font-weight:800;font-family:inherit;cursor:pointer;text-align:left">
       <span>${header} <span style="color:var(--t3);font-size:11px">${roster}</span></span><span style="color:var(--t3);font-size:12px">${PICK_LADDER_COLLAPSED?'Show':'Hide'}</span>
     </button>
-    <div style="${PICK_LADDER_COLLAPSED?'display:none;':''}padding:0 10px 10px">${buildPickRosterControls()}<div style="color:var(--t3);font-size:11px;margin:0 0 8px">Peak measures prediction quality; Exit shows what the current target/stop policy captures of it.</div>${buildPickLadderHTML()}</div>
+    <div style="${PICK_LADDER_COLLAPSED?'display:none;':''}padding:0 10px 10px">${buildPickRosterControls()}<div style="color:var(--t3);font-size:11px;margin:0 0 8px">Exit drives the champion; Peak remains historical context only.</div>${buildPickLadderHTML()}</div>
   </div>`;
 }
 // Pick-source championship card: champion status only; the full ladder lives above Rankings.
@@ -3961,8 +4226,19 @@ function buildPickSourceCard(){
   const note=ps.name==='engine'?'engine picks':'RUNNING THE SHOW';
   const peak=champion?.peakNetPct,exit=champion?.exitNetPct;
   const fmt=v=>v!=null&&isFinite(v)?(v>=0?'+':'')+v.toFixed(2)+'%':'—';
-  const title=`Champion = best Peak %/flag over at least ${PICK_MIN_EVAL_DAYS} evaluable days; random and Actual (You) are not eligible. The champion strategy orders the live pick list; Min Score floor applies only in Engine mode.`;
-  return `<div class="st" title="${title}"><div class="st-l">Pick Source</div><div class="st-v" style="color:${col};font-size:16px">${ps.label||'Engine'} <span style="font-size:10px;color:var(--t3)">${note}${ps.since?' · since '+ps.since:''}</span></div><div class="st-d">Peak ${fmt(peak)}/flag · exits capture ${fmt(exit)}</div></div>`;
+  const title=`Champion = best positive Exit %/flag over at least ${PICK_MIN_EVAL_DAYS} evaluable days. If no challenger is positive, Engine remains authoritative. Random and Actual (You) are not eligible.`;
+  return `<div class="st" title="${title}"><div class="st-l">Pick Source</div><div class="st-v" style="color:${col};font-size:16px">${ps.label||'Engine'} <span style="font-size:10px;color:var(--t3)">${note}${ps.since?' · since '+ps.since:''}</span></div><div class="st-d">Exit ${fmt(exit)}/flag · Peak ${fmt(peak)}/flag${ps.name==='engine'?' · no positive challenger yet':' · challenger is positive'}</div></div>`;
+}
+function buildPickDiagnosticsCard(){
+  const ps=getPickState();
+  const d=ps.diagnostics||{};
+  const mode=d.authoritative?'authoritative':'legacy reconstructed';
+  const first=d.firstAuthoritativeDate||'—';
+  const overlap=d.correlatedPairs?.[0];
+  const overlapTxt=overlap?`${PICK_STRATEGY_LABELS[overlap.a]||overlap.a} ↔ ${PICK_STRATEGY_LABELS[overlap.b]||overlap.b} ${Math.round((overlap.avg||0)*100)}% overlap${overlap.identical?' · identical-ish':''}`:'no material overlap yet';
+  const bestCh=d.bestChallenger;
+  const challengerTxt=bestCh?`${PICK_STRATEGY_LABELS[bestCh.name]||bestCh.name} ${Number(bestCh.exitNetPct||0)>=0?'+':''}${Number(bestCh.exitNetPct||0).toFixed(2)}% exit`: 'no positive challenger';
+  return `<div class="st" title="Authoritative upload cohorts are the live champion basis. Legacy reconstructed history remains visible but cannot elect the champion."><div class="st-l">Pick Cohorts</div><div class="st-v" style="font-size:15px;color:var(--t1)">${mode}</div><div class="st-d">${d.uploadCount||0} upload${(d.uploadCount||0)===1?'':'s'} · first ${first} · engine ${d.engineCohortSize||0} vs challenger ${d.challengerCohortSize||0} · ${challengerTxt} · ${overlapTxt}</div></div>`;
 }
 function renderStats(){
   const t=ALL.length;
@@ -4045,7 +4321,7 @@ function renderStats(){
     ${slTgtCard}
     <div class="st"><div class="st-l">Score Spread</div><div class="st-v">${scoreSpread}</div><div class="st-d">${effectiveScoreSpreadDetail}</div></div>
     <div class="st"><div class="st-l">Top Sector</div><div class="st-v" style="font-size:15px;color:var(--green)">${topSec}</div><div class="st-d">${topSecPct.toFixed(0)}% advancing</div></div>
-    <div class="st"><div class="st-l">Breadth</div><div class="st-v" style="color:var(--cyan)">${ENGINE_DATA.marketBreadth!=null?(ENGINE_DATA.marketBreadth*100).toFixed(0):(bull/t*100).toFixed(0)}%</div><div class="st-d">${bull.toLocaleString()} advancing · ${(t-bull).toLocaleString()} down/flat · ${ENGINE_DATA.accSessions||0} learned horizons</div></div>${bookedCard}${buildGoalCard()}${buildPickSourceCard()}`;
+    <div class="st"><div class="st-l">Breadth</div><div class="st-v" style="color:var(--cyan)">${ENGINE_DATA.marketBreadth!=null?(ENGINE_DATA.marketBreadth*100).toFixed(0):(bull/t*100).toFixed(0)}%</div><div class="st-d">${bull.toLocaleString()} advancing · ${(t-bull).toLocaleString()} down/flat · ${ENGINE_DATA.accSessions||0} learned horizons</div></div>${bookedCard}${buildGoalCard()}${buildPickSourceCard()}${buildPickDiagnosticsCard()}`;
   renderPickLadderPanel();
 
   // Row 1: hard-filter removal pills
@@ -4945,9 +5221,15 @@ function buildHardFilterMethodologyHTML(E){
       ? `<div style="font-size:11px;color:var(--amber);margin-top:8px">Showing last saved run (${survSize} flagged). Load NSE ZIP this session to refresh.</div>`
       : `<div style="margin-top:8px;padding:8px 10px;background:rgba(239,68,68,.08);border:1px solid rgba(239,68,68,.25);border-radius:8px;font-size:11px;color:var(--red)">NSE REG1 data not active — surveillance rows shown for configuration only, won't filter until a REG1 file is loaded.</div>`);
 
+  const audit=E?.hardFilterAudit||window._lastHardFilterAudit||null;
+  const auditMeta=audit?`
+    <div style="font-size:11px;color:var(--t3);margin-top:8px">Audit snapshot ${audit.generatedAt?String(audit.generatedAt).slice(0,19).replace('T',' '):''} · structural ${audit.structural||0} · data-validity ${audit.dataValidity||0} · prior-move ${audit.priorMove||0} · entry-gate ${audit.entryGate||0} · other ${audit.other||0}</div>
+    <div style="font-size:11px;color:var(--t3);margin-top:6px">Raw top-20 movers: ${audit.top20Missed?.filter(r=>r.structural).length||0} structurally ineligible · ${audit.top20Missed?.filter(r=>r.bucket==='priorMove').length||0} already rocketing · ${audit.top20Missed?.filter(r=>r.bucket==='geometry'||r.bucket==='entryFade'||r.bucket==='held'||r.bucket==='minScore'||r.bucket==='budget').length||0} blocked before move · ${audit.top20Missed?.filter(r=>!r.selected&&!(r.bucket==='structural'||r.bucket==='dataValidity'||r.bucket==='priorMove'||r.bucket==='geometry'||r.bucket==='entryFade'||r.bucket==='held'||r.bucket==='minScore'||r.bucket==='budget')).length||0} eligible but unselected · ${audit.top20Missed?.filter(r=>r.selected).length||0} selected before move</div>
+  `:'';
   const totalRemoved=(REMOVED.uc||0)+(REMOVED.surv||0)+(REMOVED.nonEq||0)+(REMOVED.liq||0)+(REMOVED.fscore||0)+(REMOVED.atr||0);
   return `
     <h3 id="meth-filters" style="margin-top:28px">Hard Filters <span style="font-size:12px;color:var(--t3);font-weight:400">(${totalRemoved} removals in latest saved run)</span></h3>
+    <div style="background:var(--bg-card);border:1px solid var(--border);border-radius:10px;padding:10px 12px;margin:10px 0 14px">${auditMeta||'<div style="font-size:11px;color:var(--t3)">Audit snapshot will appear after the next ranked upload.</div>'}</div>
 
     <h4 style="margin:20px 0 8px;font-size:12px;color:var(--t2);font-weight:700;text-transform:uppercase;letter-spacing:.5px">Surveillance Filters (NSE REG1)</h4>
     <p style="color:var(--t3);font-size:11px;margin-bottom:10px">Each row is an exact REG1 column. Any stock flagged under that column is removed from scanning.</p>
@@ -5432,7 +5714,7 @@ function getPerStockBudgetCap(){
   const caps=[maxAlloc,capital].filter(v=>v>0&&isFinite(v));
   return caps.length?Math.min(...caps):null;
 }
-function getFilterBarReason(s){
+function getFilterBarReason(s,opts={}){
   const minScore=getMinScoreFloor();
   const bandReason=getPriceBandBlockReason(s);
   if(bandReason) return bandReason;
@@ -5441,13 +5723,48 @@ function getFilterBarReason(s){
   if(fadeReason) return fadeReason;
   const geometry=applyEntryGeometryState(s);
   if(!geometry.passes) return geometry.reason;
-  if(ENGINE_DATA?.hasRecommendationEvidence&&minScore>0&&s.rocketScore<minScore&&getPickState().name==='engine') return `Score ${s.rocketScore?.toFixed?.(1)||s.rocketScore} < ${minScore}`;
+  if(!opts.ignoreMinScore&&ENGINE_DATA?.hasRecommendationEvidence&&minScore>0&&s.rocketScore<minScore&&getPickState().name==='engine') return `Score ${s.rocketScore?.toFixed?.(1)||s.rocketScore} < ${minScore}`;
   if(s.price!=null&&s.price<MIN_PRICE_FLOOR) return `Price ${fmtINR(s.price)} < ${fmtINR(MIN_PRICE_FLOOR)}`;
   if(s.marketCap!=null&&s.marketCap<MIN_MCAP_FLOOR) return `MCap ₹${fV(s.marketCap)} < ₹${fV(MIN_MCAP_FLOOR)}`;
   const budgetCap=getPerStockBudgetCap();
   if(budgetCap!=null&&getBuyPrice(s)>budgetCap) return '1 share exceeds per-stock budget';
   return '';
-}function getHeldPositionMap(){
+}
+function classifyFilterReasonBucket(reason,row){
+  if(row?._hardFiltered) return row._filterBucket||'hard';
+  const text=String(reason||'');
+  if(!text) return '';
+  if(text.startsWith('Already in today')) return 'priorMove';
+  if(text.startsWith('Already rocketed')) return 'priorMove';
+  if(text.startsWith('Fading entry')) return 'entryFade';
+  if(text.startsWith('Insufficient headroom')) return 'geometry';
+  if(text.startsWith('Held &')) return 'held';
+  if(text.startsWith('Score ')) return 'minScore';
+  if(text.startsWith('Price ')||text.startsWith('MCap ')) return 'structural';
+  if(text.startsWith('1 share exceeds')) return 'budget';
+  return 'other';
+}
+function buildHardFilterAuditSnapshot(rows,hiddenReasons){
+  const bucketCounts={structural:0,dataValidity:0,priorMove:0,entryGate:0,other:0};
+  const top20=[...(window._lastObservedDailyMoves||[])]
+    .filter(x=>x?.symbol)
+    .sort((a,b)=>(Number(b.priceChange)||-Infinity)-(Number(a.priceChange)||-Infinity))
+    .slice(0,20);
+  const liveSelections=new Set(getDisplayedEntryCandidates(rows||[]).map(s=>s.symbol));
+  const top20Missed=top20.map(item=>{
+    const row=(rows||[]).find(r=>r.symbol===item.symbol)||null;
+    const reason=hiddenReasons?.[item.symbol]||getFilterBarReason(row||{symbol:item.symbol,price:item.price,priceChange:item.priceChange,_features:{pct_to_upper_band:item.pctToUpperBand}});
+    const bucket=classifyFilterReasonBucket(reason,row);
+    if(bucket==='structural') bucketCounts.structural++;
+    else if(bucket==='dataValidity') bucketCounts.dataValidity++;
+    else if(bucket==='priorMove') bucketCounts.priorMove++;
+    else if(bucket==='geometry'||bucket==='entryFade'||bucket==='held'||bucket==='minScore'||bucket==='budget') bucketCounts.entryGate++;
+    else bucketCounts.other++;
+    return {symbol:item.symbol,bucket,reason,selected:liveSelections.has(item.symbol),price:item.price??null,priceChange:item.priceChange??null};
+  });
+  return {generatedAt:new Date().toISOString(),...bucketCounts,top20Missed};
+}
+function getHeldPositionMap(){
   const heldPos={};
   Object.values(getCombinedOpenPositionMap()).forEach(pos=>{
     heldPos[pos.symbol]={qty:pos.qty,avg:pos.avg};
@@ -6171,6 +6488,9 @@ function applyFilters(){
   // SELECTED is auto-derived from FILT every filter pass. Checkboxes are a
   // post-filter convenience for tweaking the export — not persisted state.
   SELECTED=new Set(FILT.filter(s=>!s._filterPreview).map(s=>s.symbol));
+
+  window._lastHardFilterAudit=buildHardFilterAuditSnapshot(ALL,hiddenReasons);
+  if(ENGINE_DATA) ENGINE_DATA.hardFilterAudit=window._lastHardFilterAudit;
 
   PG=1;renderHead();renderTable();renderStatusBar();saveFilterState();updateTabCounts();
   if(ALL.length) try{renderStats();}catch(e){}
@@ -7266,6 +7586,12 @@ async function decodePackedDailyRecord(packed){
     featureCols:packed.features?.cols||packed.featureCols||[],
     rocketSymbols:Array.isArray(packed.rocketSymbols)?packed.rocketSymbols.map(normSym).filter(Boolean):[],
     eligibleSymbols:Array.isArray(packed.eligibleSymbols)?packed.eligibleSymbols.map(normSym).filter(Boolean):[],
+    pickUploads:Array.isArray(packed.pickUploads)?packed.pickUploads.map(upload=>({
+      ts:Number(upload.ts)||0,
+      tag:upload.tag||null,
+      basis:upload.basis||null,
+      strategies:Object.fromEntries(Object.entries(upload.strategies||{}).map(([name,items])=>[name,[...(items||[])].map(sym=>normSym(sym)).filter(Boolean)]))
+    })) : [],
     predictedSymbols:Array.isArray(packed.predictedSymbols)?packed.predictedSymbols.map(normSym).filter(Boolean):[],
     sampleCount:Number(packed.sampleCount)||1
   };
@@ -7281,6 +7607,12 @@ async function encodePackedDailyRecord(snapshot){
     ),
     rocketSymbols:[...(snapshot.rocketSymbols||[])],
     eligibleSymbols:[...(snapshot.eligibleSymbols||[])],
+    pickUploads:Array.isArray(snapshot.pickUploads)?snapshot.pickUploads.map(upload=>({
+      ts:Number(upload.ts)||0,
+      tag:upload.tag||null,
+      basis:upload.basis||null,
+      strategies:Object.fromEntries(Object.entries(upload.strategies||{}).map(([name,items])=>[name,[...(items||[])].map(sym=>normSym(sym)).filter(Boolean)]))
+    })) : [],
     predictedSymbols:[...(snapshot.predictedSymbols||[])],
     sampleCount:Number(snapshot.sampleCount)||1,
     latestSessionTag:snapshot.latestSessionTag||null
@@ -7426,6 +7758,18 @@ function applySavedFiltersForMode(mode){
       // 5-day snapshot store — nothing persists beyond the window.
       if(SNAPSHOT_RUNTIME&&recordDayPredictions(SNAPSHOT_RUNTIME,uploadSession,eligibleCandidates.map(s=>s.symbol))){
         FS.set(modeKey(SNAPSHOT_STATE_STORE,mode),await encodeSnapshotState(SNAPSHOT_RUNTIME));
+      }
+      if(SNAPSHOT_RUNTIME){
+        const pickUpload=buildAuthoritativePickUploadRecord({
+          runtime:SNAPSHOT_RUNTIME,
+          rows:ALL,
+          sessionDate:uploadSession,
+          sessionTag,
+          timestamp:receivedAt
+        });
+        if(pickUpload&&recordAuthoritativePickUpload(SNAPSHOT_RUNTIME,uploadSession,pickUpload)){
+          FS.set(modeKey(SNAPSHOT_STATE_STORE,mode),await encodeSnapshotState(SNAPSHOT_RUNTIME));
+        }
       }
       syncExecutedRecommendedEntries();
     }
