@@ -32,7 +32,9 @@
   <div style="position:relative;display:flex;align-items:center">
     <button class="btn" id="driveBtn" onclick="connectCloudStorage()" title="Connect or reconnect Google Drive">Drive</button>
     <button class="btn btn-fire" id="loadFilesBtn" onclick="handleCloudLoadAction()">Load Files</button>
-    <button class="btn" id="automationBtn" onclick="runMarketAutomation()" title="Start one TradingView download and Rocket Scanner refresh">Run Automation</button>
+    <button class="btn" id="automationBtn" onclick="runMarketAutomation()" title="Start staggered market automation for the day">Start Automation</button>
+    <button class="btn" id="automationPauseBtn" onclick="toggleAutomationPause()" style="display:none" title="Pause or resume staggered market automation">Pause</button>
+    <button class="btn" id="automationStopBtn" onclick="stopMarketAutomation()" style="display:none;border-color:rgba(239,68,68,.35);color:var(--red)" title="Stop market automation">Stop</button>
     <div id="automationProgress" style="display:none;align-items:center;gap:6px;min-width:170px;margin-left:6px" aria-live="polite">
       <div style="width:92px;height:5px;background:var(--border);border-radius:3px;overflow:hidden"><div id="automationProgressBar" style="height:100%;width:0;background:var(--fire);transition:width .3s ease"></div></div>
       <span id="automationProgressText" style="font-size:10px;color:var(--t2);white-space:nowrap">Starting...</span>
