@@ -1,5 +1,5 @@
-const BUILD_TS='2026-07-15 09:11 IST'; // release build time (IST)
-const APP_VERSION=499; // All-day staggered automation with pause and stop controls.
+const BUILD_TS='2026-07-15 10:11 IST'; // release build time (IST)
+const APP_VERSION=500; // Preserve capital input during file loading and filter clearing.
 const GOOGLE_DRIVE_CLIENT_ID='1015012642264-oi2nelv3v90k3d39r994a6nelgjs2a56.apps.googleusercontent.com'; // Public OAuth Web Client ID.
 const HARD_FILTER_SCHEMA='structural_tradeability_v2';
 const STOCK_RUNWAY_CEILING_PCT=19.5; // Intentional owner-approved forward-catch strategy filter: excludes stocks already near their circuit band (or caps max entry) since a stock that has already used up its daily range is a poor pre-rocket buy. Active fallback when NSE price-band data is unavailable.
@@ -6309,7 +6309,7 @@ function renderStatusBar(){
 }
 
 function clearFilters(){
-  ['fMinScore','fTopRank','fCapital','fMaxAlloc'].forEach(id=>{const el=document.getElementById(id);if(el)el.value='';});
+  ['fMinScore','fTopRank','fMaxAlloc'].forEach(id=>{const el=document.getElementById(id);if(el)el.value='';});
   const topupEl=document.getElementById('fTopupAlloc');if(topupEl)topupEl.value='50';
   const minScoreEl=document.getElementById('fMinScore');if(minScoreEl)minScoreEl.value='';
   applyLearnedMaxAllocDefault();
