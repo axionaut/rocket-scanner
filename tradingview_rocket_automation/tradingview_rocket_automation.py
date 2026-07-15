@@ -282,12 +282,16 @@ class SingleInstance:
             pid = LOCK_FILE.read_text(encoding="ascii", errors="ignore").strip()
             try:
                 alive = bool(pid) and os.name == "nt" and os.kill(int(pid), 0) is None
-            except (ValueError, OSError, PermissionError):
+            except PermissionError:
+                alive = True
+            except (ValueError, OSError):
                 alive = False
             if alive:
                 raise RuntimeError(f"Another automation instance is already running (PID {pid}).")
-            with contextlib.suppress(OSError):
+            try:
                 LOCK_FILE.unlink()
+            except OSError as exc:
+                raise RuntimeError("Automation is already starting or its lock file is still in use.") from exc
             self.handle = os.open(str(LOCK_FILE), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
             os.write(self.handle, str(os.getpid()).encode("ascii"))
         return self
@@ -722,6 +726,7 @@ async def recurring_mode(config: Config) -> None:
         final_ran_date: Optional[str] = None
         last_cycle_finished: Optional[datetime] = None
         next_random: Optional[datetime] = None
+        was_paused = False
         try:
             while not stop_event.is_set():
                 if STOP_FILE.exists():
@@ -730,8 +735,14 @@ async def recurring_mode(config: Config) -> None:
                     break
                 if PAUSE_FILE.exists():
                     set_automation_status("paused", 0, "Automation paused")
+                    was_paused = True
                     await asyncio.sleep(5)
                     continue
+                if was_paused:
+                    message = f"Waiting for next cycle at {display_time(next_random)}" if next_random else "Waiting for the next scheduled cycle"
+                    set_automation_status("idle", 0, message)
+                    LOGGER.info("Automation resumed")
+                    was_paused = False
                 current = now_in(config.tz)
                 if current.weekday() >= 5:
                     await sleep_until(current.replace(hour=0, minute=0, second=0, microsecond=0) + timedelta(days=1), stop_event)

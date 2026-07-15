@@ -84,7 +84,9 @@ Normal recurring runs use headless Chrome and do not open a visible Chrome
 window or console. Rocket Scanner's **Start Automation** button starts the
 staggered day schedule and displays live progress in the header. Use **Pause**,
 **Resume**, or **Stop** beside it to control the schedule. The first time, run
-`register_automation_button.bat` once to enable that button.
+`register_automation_button.bat` once to enable that button. The registered
+protocol uses `rocket_scanner_launcher.vbs` and `pythonw.exe`, so starting or
+controlling automation does not open a Command Prompt window.
 
 The previous `ALL NSE.csv` is left untouched if the browser download fails. A
 successful download is first saved as `ALL NSE.new.csv`, then atomically
