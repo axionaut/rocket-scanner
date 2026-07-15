@@ -1,0 +1,10 @@
+.venv/
+browser_profile/
+logs/
+failure_screenshots/
+failure_pages/
+automation.lock
+automation_pause.txt
+automation_stop.txt
+__pycache__/
+*.pyc

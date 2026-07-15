@@ -1,0 +1,20 @@
+{
+  "tradingview_url": "https://www.tradingview.com/screener/PxKS5XBW/",
+  "rocket_scanner_url": "https://axionaut.github.io/rocket-scanner/",
+  "scanner_uploads_folder": "C:\\Users\\nitin\\Desktop\\Apps\\Trading\\Rocket Scanner\\Scanner Uploads",
+  "output_filename": "ALL NSE.csv",
+  "minimum_interval_minutes": 3,
+  "maximum_interval_minutes": 6,
+  "automation_start": "09:10",
+  "automation_end": "16:00",
+  "timezone": "Asia/Kolkata",
+  "run_final_cycle": true,
+  "final_cycle_time": "15:58",
+  "final_cycle_proximity_minutes": 2,
+  "headless": true,
+  "tradingview_page_timeout_seconds": 90,
+  "download_timeout_seconds": 120,
+  "rocket_processing_timeout_seconds": 300,
+  "retry_attempts": 2,
+  "retry_delay_seconds": 15
+}

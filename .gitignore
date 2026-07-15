@@ -1,8 +1,10 @@
-# Only index.html and Rocket_Brain.json are tracked
+# Track the web app and its local automation helper source.
 *
 !.gitignore
 !index.html
 !app.js
 !styles.css
 !rocket_brain.json
+!tradingview_rocket_automation/
+!tradingview_rocket_automation/**
 dev/
