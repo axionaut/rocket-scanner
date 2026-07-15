@@ -1,5 +1,5 @@
-const BUILD_TS='2026-07-15 10:11 IST'; // release build time (IST)
-const APP_VERSION=500; // Preserve capital input during file loading and filter clearing.
+const BUILD_TS='2026-07-15 10:34 IST'; // release build time (IST)
+const APP_VERSION=501; // Visible-page automation refresh and champion-based allocation.
 const GOOGLE_DRIVE_CLIENT_ID='1015012642264-oi2nelv3v90k3d39r994a6nelgjs2a56.apps.googleusercontent.com'; // Public OAuth Web Client ID.
 const HARD_FILTER_SCHEMA='structural_tradeability_v2';
 const STOCK_RUNWAY_CEILING_PCT=19.5; // Intentional owner-approved forward-catch strategy filter: excludes stocks already near their circuit band (or caps max entry) since a stock that has already used up its daily range is a poor pre-rocket buy. Active fallback when NSE price-band data is unavailable.
@@ -2300,6 +2300,8 @@ function getPickDisabledStrategies(){
 // Local Windows launcher registered by the standalone TradingView automation utility.
 let automationProgressTimer=null;
 let automationPaused=false;
+let automationVisibleRefreshBusy=false;
+let lastAutomationDownloadId=sessionStorage.getItem('rs_last_automation_download')||'';
 function automationProtocol(action){
   const link=document.createElement('a');
   link.href='rocket-scanner://'+action;
@@ -2329,6 +2331,30 @@ function runMarketAutomation(){
       const status=await response.json();
       if(bar) bar.style.width=(Math.max(3,Math.min(100,Number(status.progress)||0)))+'%';
       if(text) text.textContent=status.message||'Running...';
+      if(status.download_id&&status.download_id!==lastAutomationDownloadId&&!automationVisibleRefreshBusy){
+        automationVisibleRefreshBusy=true;
+        try{
+          if(bar) bar.style.width='82%';
+          if(text) text.textContent='Loading files into this page...';
+          const local=await getLocalUploadFolderFiles();
+          if(!local?.files?.length) throw new Error('Scanner Uploads folder permission is unavailable in this browser');
+          const capitalEl=document.getElementById('fCapital');
+          const capitalBefore=capitalEl?.value??'';
+          const loaded=await processFiles(local.files,local.sourceLabel);
+          if(capitalEl&&capitalEl.value!==capitalBefore){capitalEl.value=capitalBefore;applyFilters();}
+          if(!loaded) throw new Error('Rocket Scanner did not accept the downloaded files');
+          lastAutomationDownloadId=status.download_id;
+          sessionStorage.setItem('rs_last_automation_download',lastAutomationDownloadId);
+          if(bar) bar.style.width='100%';
+          if(text) text.textContent='Recommendations refreshed';
+          showToast('Automation refreshed recommendations in this page.',3500);
+        }catch(refreshError){
+          if(text) text.textContent='Visible refresh failed';
+          showToast('Automation downloaded the CSV, but this page could not load it: '+refreshError.message,7000,true);
+        }finally{
+          automationVisibleRefreshBusy=false;
+        }
+      }
       if(status.state==='error'||status.state==='stopped'){
         clearInterval(automationProgressTimer);automationProgressTimer=null;
         if(button){button.disabled=false;button.textContent='Start Automation';}
@@ -5874,7 +5900,12 @@ function computeAlloc(capital, selList){
 
   const topupPctEl=document.getElementById('fTopupAlloc');
   const topupMult=Math.min(1,Math.max(0.1,((topupPctEl?parseFloat(topupPctEl.value)||50:50)/100)));
-  const rawScore=s=>Math.max(0,Number(s.rocketScore)||0);
+  const activePick=getPickState();
+  const championOrder=[...selList].sort((a,b)=>(a._rank??Infinity)-(b._rank??Infinity));
+  const championWeights=new Map(championOrder.map((s,i)=>[s.symbol,Math.max(1,championOrder.length-i)]));
+  const rawScore=s=>activePick.name==='engine'
+    ?Math.max(0,Number(s.rocketScore)||0)
+    :(championWeights.get(s.symbol)||1);
   const totalRawScore=selList.reduce((sum,s)=>sum+rawScore(s),0)||1;
   const sortedSel=[...selList].sort((a,b)=>rawScore(b)-rawScore(a));
   const allocMap={},limits={};
