@@ -1,5 +1,5 @@
-const BUILD_TS='2026-07-15 17:23 IST'; // release build time (IST)
-const APP_VERSION=507; // Loaded Spring strategy and persistent dynamic outcome horizon.
+const BUILD_TS='2026-07-15 18:35 IST'; // release build time (IST)
+const APP_VERSION=508; // Fix Loaded Spring live-state false "unavailable": read persisted full-feature telemetry, not the compacted display cache.
 const GOOGLE_DRIVE_CLIENT_ID='1015012642264-oi2nelv3v90k3d39r994a6nelgjs2a56.apps.googleusercontent.com'; // Public OAuth Web Client ID.
 const HARD_FILTER_SCHEMA='structural_tradeability_v2';
 const STOCK_RUNWAY_CEILING_PCT=19.5; // Intentional owner-approved forward-catch strategy filter: excludes stocks already near their circuit band (or caps max entry) since a stock that has already used up its daily range is a poor pre-rocket buy. Active fallback when NSE price-band data is unavailable.
@@ -3457,16 +3457,17 @@ function getPickState(){
 }
 let _loadedSpringLiveCache=null;
 function getLoadedSpringLiveState(){
-  const tag=String(window._lastScannerSessionTag||'')+'|'+ALL.length;
+  const tag=String(window._lastScannerSessionTag||'')+'|'+(SNAPSHOT_RUNTIME?.days?.length||0);
   if(_loadedSpringLiveCache?.tag===tag) return _loadedSpringLiveCache.value;
   const days=[...(SNAPSHOT_RUNTIME?.days||[])].sort((a,b)=>String(a.sessionDate).localeCompare(String(b.sessionDate)));
-  const latest=days[days.length-1]||null;
-  const previous=latest?days.filter(day=>String(day.sessionDate)<String(latest.sessionDate)).slice(-1)[0]||null:null;
-  const current=latest?{...latest,
-    symbols:ALL.map(row=>row.symbol),prices:Float32Array.from(ALL,row=>Number(row.price)||NaN),
-    featureCols:[...new Set(ALL.flatMap(row=>Object.keys(row._features||{})))],
-    featureRows:Object.fromEntries(ALL.map(row=>[row.symbol,{...(row._features||{})}]))
-  }:null;
+  // The persisted daily telemetry record already holds the full column set straight
+  // from ALL NSE.csv (packScannerSnapshot stores every FEATS column, never a reduced
+  // subset) -- it is the single source of truth here. Do not reconstruct a second copy
+  // from the live `ALL` array: after a page restore ALL's `_features` only carries the
+  // top-10 dynamic-column subset (rs_data display cache), which falsely reports most
+  // technical columns as missing.
+  const current=days[days.length-1]||null;
+  const previous=current?days.filter(day=>String(day.sessionDate)<String(current.sessionDate)).slice(-1)[0]||null:null;
   const result=buildLoadedSpringSelection(current,previous,current?.eligibleSymbols||[]);
   const metrics=new Map((result.picks||[]).map(item=>[item.symbol,Number(item.score)]));
   const value={...result,metrics};
