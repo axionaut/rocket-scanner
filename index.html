@@ -32,14 +32,6 @@
   <div style="position:relative;display:flex;align-items:center">
     <button class="btn" id="driveBtn" onclick="connectCloudStorage()" title="Connect or reconnect Google Drive">Drive</button>
     <button class="btn btn-fire" id="loadFilesBtn" onclick="handleCloudLoadAction()">Load Files</button>
-    <button class="btn" id="automationBtn" onclick="runMarketAutomation()" title="Start staggered market automation for the day">Start Automation</button>
-    <button class="btn" id="automationPauseBtn" onclick="toggleAutomationPause()" style="display:none" title="Pause or resume staggered market automation">Pause</button>
-    <button class="btn" id="automationStopBtn" onclick="stopMarketAutomation()" style="display:none;border-color:rgba(239,68,68,.35);color:var(--red)" title="Stop market automation">Stop</button>
-    <button class="btn" id="automationLoginBtn" onclick="repairTradingViewLogin()" style="display:none;border-color:rgba(251,191,36,.4);color:var(--amber)" title="Reconnect the dedicated TradingView session">TradingView Login</button>
-    <div id="automationProgress" style="display:none;align-items:center;gap:6px;min-width:170px;margin-left:6px" aria-live="polite">
-      <div style="width:92px;height:5px;background:var(--border);border-radius:3px;overflow:hidden"><div id="automationProgressBar" style="height:100%;width:0;background:var(--fire);transition:width .3s ease"></div></div>
-      <span id="automationProgressText" style="font-size:10px;color:var(--t2);white-space:nowrap">Starting...</span>
-    </div>
     <button class="btn" onclick="toggleGoalPopover()" title="Goal settings" style="font-size:14px;padding:8px 12px;margin-left:4px">⚙ Goal</button>
     <div id="goalPopover" style="display:none;position:absolute;top:100%;right:0;margin-top:8px;background:var(--bg-raised);border:1px solid var(--border-hi);border-radius:10px;padding:14px 16px;z-index:1000;box-shadow:0 8px 32px rgba(0,0,0,.35);min-width:300px;max-width:420px">
       <div id="goalPopoverContent" style="font-size:11px;line-height:1.6;color:var(--t2)"></div>

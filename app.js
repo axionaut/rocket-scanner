@@ -1,5 +1,5 @@
-const BUILD_TS='2026-07-15 12:08 IST'; // release build time (IST)
-const APP_VERSION=503; // In-app TradingView session repair for market automation.
+const BUILD_TS='2026-07-15 13:37 IST'; // release build time (IST)
+const APP_VERSION=504; // Restore manual TradingView CSV loading.
 const GOOGLE_DRIVE_CLIENT_ID='1015012642264-oi2nelv3v90k3d39r994a6nelgjs2a56.apps.googleusercontent.com'; // Public OAuth Web Client ID.
 const HARD_FILTER_SCHEMA='structural_tradeability_v2';
 const STOCK_RUNWAY_CEILING_PCT=19.5; // Intentional owner-approved forward-catch strategy filter: excludes stocks already near their circuit band (or caps max entry) since a stock that has already used up its daily range is a poor pre-rocket buy. Active fallback when NSE price-band data is unavailable.
@@ -2297,113 +2297,6 @@ function getPickDisabledStrategies(){
     .filter(key=>PICK_STRATEGY_LABELS[key]&&!PICK_PERMANENT_STRATEGIES.has(key)));
 }
 
-// Local Windows launcher registered by the standalone TradingView automation utility.
-let automationProgressTimer=null;
-let automationPaused=false;
-let automationVisibleRefreshBusy=false;
-let lastAutomationDownloadId=sessionStorage.getItem('rs_last_automation_download')||'';
-function automationProtocol(action){
-  const link=document.createElement('a');
-  link.href='rocket-scanner://'+action;
-  link.style.display='none';document.body.appendChild(link);link.click();link.remove();
-}
-function runMarketAutomation(){
-  const panel=document.getElementById('automationProgress');
-  const bar=document.getElementById('automationProgressBar');
-  const text=document.getElementById('automationProgressText');
-  const button=document.getElementById('automationBtn');
-  const pauseButton=document.getElementById('automationPauseBtn');
-  const stopButton=document.getElementById('automationStopBtn');
-  const loginButton=document.getElementById('automationLoginBtn');
-  if(automationProgressTimer) return;
-  automationPaused=false;
-  if(panel) panel.style.display='flex';
-  if(bar) bar.style.width='3%';
-  if(text) text.textContent='Starting day automation...';
-  if(button){button.disabled=true;button.textContent='Running...';}
-  if(pauseButton) pauseButton.style.display='inline-block';
-  if(stopButton) stopButton.style.display='inline-block';
-  automationProtocol('run-day');
-  const started=Date.now();
-  automationProgressTimer=setInterval(async()=>{
-    try{
-      const response=await fetch('http://127.0.0.1:8765/status?ts='+Date.now(),{cache:'no-store'});
-      if(!response.ok) throw new Error('status '+response.status);
-      const status=await response.json();
-      if(bar) bar.style.width=(Math.max(3,Math.min(100,Number(status.progress)||0)))+'%';
-      if(text) text.textContent=status.message||'Running...';
-      if(loginButton){
-        loginButton.style.display=status.state==='login_required'?'inline-block':'none';
-        loginButton.disabled=false;
-      }
-      if(status.download_id&&status.download_id!==lastAutomationDownloadId&&!automationVisibleRefreshBusy){
-        automationVisibleRefreshBusy=true;
-        try{
-          if(bar) bar.style.width='82%';
-          if(text) text.textContent='Loading files into this page...';
-          const local=await getLocalUploadFolderFiles();
-          if(!local?.files?.length) throw new Error('Scanner Uploads folder permission is unavailable in this browser');
-          const capitalEl=document.getElementById('fCapital');
-          const capitalBefore=capitalEl?.value??'';
-          const loaded=await processFiles(local.files,local.sourceLabel);
-          if(capitalEl&&capitalEl.value!==capitalBefore){capitalEl.value=capitalBefore;applyFilters();}
-          if(!loaded) throw new Error('Rocket Scanner did not accept the downloaded files');
-          lastAutomationDownloadId=status.download_id;
-          sessionStorage.setItem('rs_last_automation_download',lastAutomationDownloadId);
-          if(bar) bar.style.width='100%';
-          if(text) text.textContent='Recommendations refreshed';
-          showToast('Automation refreshed recommendations in this page.',3500);
-        }catch(refreshError){
-          if(text) text.textContent='Visible refresh failed';
-          showToast('Automation downloaded the CSV, but this page could not load it: '+refreshError.message,7000,true);
-        }finally{
-          automationVisibleRefreshBusy=false;
-        }
-      }
-      if(status.state==='error'||status.state==='stopped'){
-        clearInterval(automationProgressTimer);automationProgressTimer=null;
-        if(button){button.disabled=false;button.textContent='Start Automation';}
-        if(pauseButton) pauseButton.style.display='none';
-        if(stopButton) stopButton.style.display='none';
-        if(loginButton) loginButton.style.display='none';
-        showToast(status.state==='stopped'?'Automation stopped.':'Automation failed: '+(status.error||status.message),status.state==='stopped'?3500:7000,status.state==='error');
-        setTimeout(()=>{if(panel) panel.style.display='none';},5000);
-      }
-    }catch(e){
-      if(Date.now()-started>20000){
-        clearInterval(automationProgressTimer);automationProgressTimer=null;
-        if(button){button.disabled=false;button.textContent='Start Automation';}
-        if(pauseButton) pauseButton.style.display='none';
-        if(stopButton) stopButton.style.display='none';
-        if(loginButton) loginButton.style.display='none';
-        if(text) text.textContent='Launcher not responding';
-        showToast('The local automation helper did not respond.',5000,true);
-      }
-    }
-  },1000);
-}
-function toggleAutomationPause(){
-  if(!automationProgressTimer) return;
-  const pauseButton=document.getElementById('automationPauseBtn');
-  const text=document.getElementById('automationProgressText');
-  automationPaused=!automationPaused;
-  automationProtocol(automationPaused?'pause':'resume');
-  if(pauseButton) pauseButton.textContent=automationPaused?'Resume':'Pause';
-  if(text) text.textContent=automationPaused?'Automation paused':'Resuming automation...';
-}
-function stopMarketAutomation(){
-  if(!automationProgressTimer) return;
-  automationProtocol('stop');
-  const text=document.getElementById('automationProgressText');
-  if(text) text.textContent='Stopping automation...';
-}
-function repairTradingViewLogin(){
-  const loginButton=document.getElementById('automationLoginBtn');
-  const text=document.getElementById('automationProgressText');
-  if(loginButton) loginButton.disabled=true;
-  if(text) text.textContent='Opening TradingView login...';
-  automationProtocol('login');
-}
 function isPickStrategyDisabled(name){return getPickDisabledStrategies().has(name);}
 function isChampionEligible(name){return name!=='random'&&name!=='actual_you'&&!isPickStrategyDisabled(name);}
 function getPickRosterStrategies(){
