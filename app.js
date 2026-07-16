@@ -1,5 +1,5 @@
-const BUILD_TS='2026-07-16 14:23 IST'; // release build time (IST)
-const APP_VERSION=510; // Episode-only scoreboard, same-day post-flag outcomes, daily pattern miner, and breadth-relative ordering.
+const BUILD_TS='2026-07-16 14:52 IST'; // release build time (IST)
+const APP_VERSION=511; // Provisional warm-up leader, restored ladder calculations, and TSL points.
 const GOOGLE_DRIVE_CLIENT_ID='1015012642264-oi2nelv3v90k3d39r994a6nelgjs2a56.apps.googleusercontent.com'; // Public OAuth Web Client ID.
 const HARD_FILTER_SCHEMA='structural_tradeability_v2';
 const STOCK_RUNWAY_CEILING_PCT=19.5; // Intentional owner-approved forward-catch strategy filter: excludes stocks already near their circuit band (or caps max entry) since a stock that has already used up its daily range is a poor pre-rocket buy. Active fallback when NSE price-band data is unavailable.
@@ -1233,7 +1233,8 @@ const SURV_SEED_RULES=[
 function getSurvRules(){
   const seen=new Set();
   return SURV_CUSTOM_RULES.map(rule=>{
-    const column=String(rule.column||rule.label||'').trim();    const label=(r.label||getPickStrategyLabel(r.name))+(r.name==='random'?' (control)':'')+(isCh?(ps.default?' [default]':' [champion]'):'');
+    const column=String(rule.column||rule.label||'').trim();
+    const label=String(rule.label||column).trim();
     const key=survRuleKey(column);
     return {key,column,label};
   }).filter(rule=>{
@@ -2878,7 +2879,7 @@ function getStrategySelectionForDay(day,name,legacyPool,prevDay,laterRockets,opt
 // Random is a control only; every other strategy can run the live pick list.
 const PICK_CHAMPION_STORE='rs_pick_champion_v1';
 const PICK_DISABLED_STORE='rs_pick_disabled_v1';
-const PICK_CHAMPION_BAR='v507';
+const PICK_CHAMPION_BAR='v511';
 const PICK_MIN_EVAL_DAYS=4;
 const RATING_BUY=4;
 const RATING_STRONG_BUY=5;
@@ -3333,7 +3334,8 @@ function computeEpisodeStrategyLadder(){
       const diveTs=Number(item.dive2?.ts);if(!(diveTs>0))return false;
       const firstMilestoneTs=Math.min(...Object.values(item.milestones||{}).map(value=>Number(value?.ts)).filter(value=>value>0));
       return !isFinite(firstMilestoneTs)||diveTs<firstMilestoneTs;
-    }).length;  const net=v=>v!=null&&isFinite(v)?(v>=0?'+':'')+v.toFixed(2)+'%':'-';
+    }).length;
+    const net=evaluated.map(item=>item.value-estimateRoundTripCostPct(Math.max(0.5,Math.abs(item.value))));
     return {name,label:getPickStrategyLabel(name),championEligible:isChampionEligible(name),evidenceStatus:'authoritative',episodeBased:true,horizon,
       observationDays:new Set(mature.map(item=>item.evaluatedThrough).filter(Boolean)).size,
       evalDays:new Set(evaluated.map(item=>item.episode.entryDate)).size,entryDays:new Set(all.map(item=>item.entryDate)).size,
@@ -3416,7 +3418,8 @@ function buildAutoStrategySelection(day,pool,strategy,limit=20){
   }
   let rankMap=maps.get(strategy.rankKey);
   if(!rankMap){const values=symbols.map(symbol=>({symbol,value:Number(day.featureRows[symbol]?.[strategy.rankKey])})).filter(item=>isFinite(item.value)),ranks=percentileMap(values,item=>item.value);rankMap=new Map(values.map(item=>[item.symbol,ranks.get(item)]));}
-  const picks=symbols.filter(symbol=>(strategy.conditions||[]).every(condition=>{  const pct=v=>v!=null&&isFinite(v)?(v*100).toFixed(1)+'%':'-';
+  const picks=symbols.filter(symbol=>(strategy.conditions||[]).every(condition=>{
+    const pct=maps.get(condition.feature)?.get(symbol);
     return pct!=null&&autoConditionPass(pct,condition.bucket);
   })).map(symbol=>{
     const score=(rankMap.get(symbol)||0)*100;
@@ -3579,14 +3582,36 @@ function computeInternalWindowStrategyEvidence(runtime){
   return base;
 }
 function computeStrategyLadder(){return computeEpisodeStrategyLadder();}
+function comparePickLadderRows(a,b){
+  return (b.sameDay10Rate??-Infinity)-(a.sameDay10Rate??-Infinity)||
+    (b.exitNetPct??-Infinity)-(a.exitNetPct??-Infinity)||
+    String(a.label||a.name).localeCompare(String(b.label||b.name));
+}
+function getWarmupPickLeader(ladder){
+  return (ladder||[]).filter(row=>
+    row.evidenceStatus==='authoritative'&&
+    isChampionEligible(row.name)&&
+    Number(row.flagged)>Number(row.pendingFlagged||0)&&
+    [row.sameDay10Rate,row.exitNetPct,row.hitRate].some(value=>value!=null&&isFinite(value))
+  ).sort(comparePickLadderRows)[0]||null;
+}
 function resolvePickChampion(ladder){
   const horizon=getOutcomeHorizonSummary();
   const fallback={name:LOADED_SPRING_KEY,since:null,metric:null,bar:PICK_CHAMPION_BAR,default:true};
   const raw=FS.get(PICK_CHAMPION_STORE);
   const stored=(raw&&raw.bar===PICK_CHAMPION_BAR)?raw:fallback;
   if(horizon.phase!=='dynamic'){
-    if(raw?.name!==fallback.name||raw?.bar!==PICK_CHAMPION_BAR||!raw?.default) FS.set(PICK_CHAMPION_STORE,fallback);
-    return fallback;
+    const leader=getWarmupPickLeader(ladder);
+    const next=leader?{
+      name:leader.name,
+      since:stored.name===leader.name&&stored.default?stored.since:getSessionDate(),
+      metric:leader.exitNetPct,
+      bar:PICK_CHAMPION_BAR,
+      default:true,
+      provisional:true
+    }:fallback;
+    if(raw?.name!==next.name||raw?.bar!==PICK_CHAMPION_BAR||raw?.metric!==next.metric||raw?.default!==true||!!raw?.provisional!==!!next.provisional) FS.set(PICK_CHAMPION_STORE,next);
+    return next;
   }
   const eligible=(ladder||[]).filter(s=>s.evidenceStatus==='authoritative'&&isChampionEligible(s.name)&&s.evalDays>=3&&s.flagged>=10&&Number(s.exitNetPct)>0);
   if(!eligible.length){
@@ -3605,7 +3630,7 @@ function resolvePickChampion(ladder){
     return String(a.label||a.name).localeCompare(String(b.label||b.name));
   });
   const best=ranked[0]||fallback;
-  if(best.name!==stored.name||stored.metric!==best.exitNetPct||stored.bar!==PICK_CHAMPION_BAR){
+  if(best.name!==stored.name||stored.metric!==best.exitNetPct||stored.bar!==PICK_CHAMPION_BAR||stored.default||stored.provisional){
     const next={name:best.name,since:best.name===stored.name?stored.since:getSessionDate(),metric:best.exitNetPct,bar:PICK_CHAMPION_BAR};
     FS.set(PICK_CHAMPION_STORE,next);
     return next;
@@ -4959,17 +4984,12 @@ function buildGoalCard(){
   return `<div class="st" title="${title}"><div class="st-l">Goal · ₹${goalFmtRs(g.target)} · ${days} td left</div><div class="st-v" style="color:${col}">${reqStr}%/day ${badge}</div><div class="st-d">${freeStr} · need ${needRs!=null?'₹'+goalFmtRs(needRs)+'/day':'—/day'} · achieved ${ach!=null?(ach*100).toFixed(2)+'%/day':'—/day'} (30d)</div></div>`;
 }
 function pickLadderDisplayRows(ladder){
-  return (ladder||[])
-    .sort((a,b)=>
-      (b.sameDay10Rate??-Infinity)-(a.sameDay10Rate??-Infinity)||
-      (b.exitNetPct??-Infinity)-(a.exitNetPct??-Infinity)||
-      String(a.label||a.name).localeCompare(String(b.label||b.name))
-    );
+  return (ladder||[]).sort(comparePickLadderRows);
 }
-function getPickEligibilityReason(row){
+function getPickEligibilityReason(row,pickState=null){
   if(row?.name==='random'||row?.name==='actual_you') return 'Control only';
   if(row?.evidenceStatus!=='authoritative') return 'Legacy cannot govern';
-  if(getOutcomeHorizonSummary().phase!=='dynamic') return row?.name===LOADED_SPRING_KEY?'Warm-up default':'Ledger warming up';
+  if(getOutcomeHorizonSummary().phase!=='dynamic') return row?.name===pickState?.name?'Warm-up leader':'Provisional ranking';
   if(row?.episodeBased&&(row?.flagged||0)<10) return `${row?.flagged||0}/10 episodes`;
   const minDays=row?.episodeBased?3:PICK_MIN_EVAL_DAYS;
   if((row?.evalDays||0)<minDays) return `${row?.evalDays||0}/${minDays} authoritative days`;
@@ -4987,7 +5007,7 @@ function buildPickLadderHTML(){
     const rule=getAutoStrategy(r.name)?.rule||'';
     const examples=(r.rocketExamples||[]).slice(0,8);
     const exampleHtml=examples.length?`<div style="margin-top:3px;font-size:10px;line-height:1.35;color:var(--t3)">Top rockets: ${examples.map(item=>escHtml(item)).join(' | ')}</div>`:'';
-    return `<tr title="${escHtml(rule)}" style="${isCh?'font-weight:800;color:var(--t1)':''}"><td>${label}${exampleHtml}</td><td>${r.entryDays||0}</td><td>${r.flagged||0}</td><td>${r.pendingFlagged||0}</td><td style="font-weight:800">${pct(r.sameDay10Rate)}</td><td>${pct(r.hitRate)}</td><td>${net(r.exitNetPct)}</td><td>${r.medianMinutesToMove!=null?Number(r.medianMinutesToMove).toFixed(1):'-'}</td><td>${getPickEligibilityReason(r)}</td><td style="text-align:center">${remove}</td></tr>`;
+    return `<tr title="${escHtml(rule)}" style="${isCh?'font-weight:800;color:var(--t1)':''}"><td>${label}${exampleHtml}</td><td>${r.entryDays||0}</td><td>${r.flagged||0}</td><td>${r.pendingFlagged||0}</td><td style="font-weight:800">${pct(r.sameDay10Rate)}</td><td>${pct(r.hitRate)}</td><td>${net(r.exitNetPct)}</td><td>${r.medianMinutesToMove!=null?Number(r.medianMinutesToMove).toFixed(1):'-'}</td><td>${getPickEligibilityReason(r,ps)}</td><td style="text-align:center">${remove}</td></tr>`;
   }).join('');
   return `<div style="overflow-x:auto"><table class="ct" style="min-width:980px;font-size:11px"><thead><tr><th>Pick Source</th><th>Entry Days</th><th>Flags</th><th>Pending</th><th title="Post-flag 10% milestones on the entry day">Same-day 10%</th><th title="10% milestones within the active outcome horizon">10% &lt;= horizon</th><th>Net %/flag</th><th title="Median minutes from flag to the first same-day 3% milestone">Med mins to move</th><th>Authority</th><th></th></tr></thead><tbody>${body||'<tr><td colspan="10" style="color:var(--t3)">No outcome episodes yet.</td></tr>'}</tbody></table></div>`;
 }
@@ -5021,11 +5041,11 @@ function buildPickSourceCard(){
   const ps=getPickState();
   const champion=ps.ladder.find(row=>row.name===ps.name);
   const col=ps.name==='engine'?'var(--cyan)':'var(--fire)';
-  const note=ps.fallbackReason?'TEMPORARY FALLBACK':(ps.default?'DEFAULT DURING WARM-UP':(ps.name==='engine'?'engine picks':'RUNNING THE SHOW'));
+  const note=ps.fallbackReason?'TEMPORARY FALLBACK':(ps.provisional?'PROVISIONAL WARM-UP LEADER':(ps.default?'DEFAULT DURING WARM-UP':(ps.name==='engine'?'engine picks':'RUNNING THE SHOW')));
   const exit=champion?.exitNetPct;
   const fmt=v=>v!=null&&isFinite(v)?(v>=0?'+':'')+v.toFixed(2)+'%':'—';
-  const title='Loaded Spring is the default during episode-ledger warm-up. After the dynamic horizon activates, a strategy needs at least 10 evaluable episodes across 3 entry dates and positive executable return to become champion.';
-  const detail=ps.fallbackReason?`Loaded Spring unavailable: ${escHtml(ps.fallbackReason)}`:`Same-day 10% ${champion?.sameDay10Rate!=null?(champion.sameDay10Rate*100).toFixed(1)+'%':'—'} · Net ${fmt(exit)}/flag`;
+  const title='During episode-ledger warm-up, the highest-ranked non-control strategy with authoritative evaluated evidence runs the recommendations. After the dynamic horizon activates, a strategy needs at least 10 evaluable episodes across 3 entry dates and positive executable return to become champion.';
+  const detail=ps.fallbackReason?`${escHtml(ps.label)} unavailable: ${escHtml(ps.fallbackReason)}`:`Same-day 10% ${champion?.sameDay10Rate!=null?(champion.sameDay10Rate*100).toFixed(1)+'%':'—'} · Net ${fmt(exit)}/flag`;
   return `<div class="st" title="${title}"><div class="st-l">Pick Source</div><div class="st-v" style="color:${col};font-size:16px">${ps.label||'Loaded Spring'} <span style="font-size:10px;color:var(--t3)">${note}${ps.since?' · since '+ps.since:''}</span></div><div class="st-d">${detail}</div></div>`;
 }
 function buildPickDiagnosticsCard(){
@@ -5747,7 +5767,8 @@ function renderPerformance(){
       {key:'capDeployed',label:'Capital ₹',align:'right',fmt:fmtINR,clrFn:()=>'var(--t2)'},
       {key:'_sortDays',label:'Days Held',align:'right',fmt:(v,r)=>_daysFmt(r.daysHeld),clrFn:()=>'var(--t1)'},
       {key:'tgtPrice',label:'Target ₹',align:'right',fmt:(v,r)=>v!=null?fmtINR(v)+`<span style="font-size:10px;color:var(--t3);margin-left:4px">+${adaptiveTGT}%</span>`:'—',clrFn:()=>'var(--green)'},
-      {key:'slPrice',label:'SL ₹',align:'right',fmt:(v,r)=>v!=null?fmtINR(v)+`<span style="font-size:10px;color:var(--t3);margin-left:4px">-${getRowStopDistancePct(ALL.find(s=>s.symbol===r.sym)).toFixed(2)}%</span>`:'—',clrFn:()=>'var(--red)'},      {key:'tslPoints',label:'TSL pts',align:'right',bold:true,fmt:v=>v!=null?Number(v).toFixed(2):'-',clrFn:v=>v==null?'var(--t3)':'var(--amber)'},
+      {key:'slPrice',label:'SL ₹',align:'right',fmt:(v,r)=>v!=null?fmtINR(v)+`<span style="font-size:10px;color:var(--t3);margin-left:4px">-${getRowStopDistancePct(ALL.find(s=>s.symbol===r.sym)).toFixed(2)}%</span>`:'—',clrFn:()=>'var(--red)'},
+      {key:'tslPoints',label:'TSL pts',align:'right',bold:true,fmt:v=>v!=null?Number(v).toFixed(2):'-',clrFn:v=>v==null?'var(--t3)':'var(--amber)'},
       {key:'signal',label:'Signal',align:'right',bold:true,fmt:v=>v!=null?(v>=0?'+':'')+v.toFixed(2):'—',clrFn:v=>v==null?'var(--t3)':v>0?'var(--green)':v<0?'var(--red)':'var(--t2)'},
     ];
     // Sort: signal ascending (worst first), then days desc
@@ -6322,7 +6343,7 @@ function _renderMethodologyInner(){
 
     <h3 id="meth-pick-horizon" style="margin-top:28px">Loaded Spring & Dynamic Pick Horizon</h3>
     <div class="m-grid">
-      <div class="m-card"><h4>Loaded Spring</h4><p>A standalone challenger that first requires tradeability and a coiled daily profile, then ranks candidates with 65% Rocket DNA and 35% fresh ignition against the previous accepted ALL NSE snapshot. At least four of seven ignition signals must improve. Five stocks are flagged and ranks 6-10 remain reserves. It is the default pick source until evidence can crown a champion; Engine is the explicit fallback when required inputs are unavailable.</p></div>
+      <div class="m-card"><h4>Loaded Spring</h4><p>A standalone challenger that first requires tradeability and a coiled daily profile, then ranks candidates with 65% Rocket DNA and 35% fresh ignition against the previous accepted ALL NSE snapshot. At least four of seven ignition signals must improve. Five stocks are flagged and ranks 6-10 remain reserves. During ledger warm-up, the current highest-ranked non-control strategy with authoritative evaluated evidence runs the recommendations; Loaded Spring remains the fallback before such evidence exists.</p></div>
       <div class="m-card"><h4>One Episode Scoreboard</h4><p>Every forward strategy flag and new tradebook BUY opens an independent episode at its actionable flag or fill price. Entry-day milestones use only later uploads and new post-flag highs or lows, with timestamps for first 3%, 5%, 10% and 2% adverse crossings. The ladder, Pick Source card and championship all read these non-legacy episodes; the newest entry date remains pending.</p></div>
       <div class="m-card"><h4>Daily Pattern Miner</h4><p>Once per model date, the bounded five-day telemetry window tests deterministic two- and three-condition percentile conjunctions. A rule is registered only when average support is at least eight picks per training day, hit rate is at least twice the base rocket rate, cost-adjusted peak evidence is positive, and its canonical signature is novel. New rules begin flagging on the next session and are judged only through forward episodes.</p></div>
       <div class="m-card"><h4>Capital-Velocity Horizon</h4><p>${horizonStatus} Candidate horizons are 3, 5, 10, 15, 20 and 30 trading sessions. A 10% hit before H counts as +10%; otherwise the observed return at H is used. Average return divided by H selects capital velocity. A switch must be at least 10% better and persist for three accepted trading days.</p></div>
