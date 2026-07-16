@@ -1,5 +1,5 @@
-const BUILD_TS='2026-07-16 11:56 IST'; // release build time (IST)
-const APP_VERSION=509; // Episode-only scoreboard, same-day post-flag outcomes, daily pattern miner, and breadth-relative ordering.
+const BUILD_TS='2026-07-16 14:23 IST'; // release build time (IST)
+const APP_VERSION=510; // Episode-only scoreboard, same-day post-flag outcomes, daily pattern miner, and breadth-relative ordering.
 const GOOGLE_DRIVE_CLIENT_ID='1015012642264-oi2nelv3v90k3d39r994a6nelgjs2a56.apps.googleusercontent.com'; // Public OAuth Web Client ID.
 const HARD_FILTER_SCHEMA='structural_tradeability_v2';
 const STOCK_RUNWAY_CEILING_PCT=19.5; // Intentional owner-approved forward-catch strategy filter: excludes stocks already near their circuit band (or caps max entry) since a stock that has already used up its daily range is a poor pre-rocket buy. Active fallback when NSE price-band data is unavailable.
@@ -1145,14 +1145,13 @@ function getTslMomentumTightenPct(row,peakProfitPct=0){
   if(peakProfitPct>0) tighten+=Math.min(0.75,peakProfitPct/20);
   return Math.max(0,Math.min(2.5,tighten));
 }
-function getRecommendedTslPrice(row,opts={}){
+function getRecommendedTslPoints(row,opts={}){
   const price=Number(opts.price??row?.price);
   if(!(price>0)) return null;
-  const baseGap=Number(opts.baseGapPct??getRowStopDistancePct(row));
-  if(!(baseGap>0)) return null;
   const tighten=getTslMomentumTightenPct(row,Number(opts.peakProfitPct)||0);
-  const gap=clampTslGapPct(Math.max(TSL_GAP_MIN_PCT,baseGap-tighten));
-  return gap!=null?+tickPrice(price*(1-gap/100)).toFixed(2):null;
+  const basePoints=getZerodhaMinTrailPoints(price);
+  if(!(basePoints>0)) return null;
+  return +Math.max(0.05,basePoints*(1-Math.min(0.35,tighten/10))).toFixed(2);
 }
 function weightedPercentile(rows,valueFn,weightFn,pct){
   const vals=rows.map(r=>({v:valueFn(r),w:Math.max(0,weightFn(r))}))
@@ -1234,8 +1233,7 @@ const SURV_SEED_RULES=[
 function getSurvRules(){
   const seen=new Set();
   return SURV_CUSTOM_RULES.map(rule=>{
-    const column=String(rule.column||rule.label||'').trim();
-    const label=String(rule.label||column).trim();
+    const column=String(rule.column||rule.label||'').trim();    const label=(r.label||getPickStrategyLabel(r.name))+(r.name==='random'?' (control)':'')+(isCh?(ps.default?' [default]':' [champion]'):'');
     const key=survRuleKey(column);
     return {key,column,label};
   }).filter(rule=>{
@@ -3335,8 +3333,7 @@ function computeEpisodeStrategyLadder(){
       const diveTs=Number(item.dive2?.ts);if(!(diveTs>0))return false;
       const firstMilestoneTs=Math.min(...Object.values(item.milestones||{}).map(value=>Number(value?.ts)).filter(value=>value>0));
       return !isFinite(firstMilestoneTs)||diveTs<firstMilestoneTs;
-    }).length;
-    const net=evaluated.map(item=>item.value-estimateRoundTripCostPct(Math.max(0.5,Math.abs(item.value))));
+    }).length;  const net=v=>v!=null&&isFinite(v)?(v>=0?'+':'')+v.toFixed(2)+'%':'-';
     return {name,label:getPickStrategyLabel(name),championEligible:isChampionEligible(name),evidenceStatus:'authoritative',episodeBased:true,horizon,
       observationDays:new Set(mature.map(item=>item.evaluatedThrough).filter(Boolean)).size,
       evalDays:new Set(evaluated.map(item=>item.episode.entryDate)).size,entryDays:new Set(all.map(item=>item.entryDate)).size,
@@ -3419,8 +3416,7 @@ function buildAutoStrategySelection(day,pool,strategy,limit=20){
   }
   let rankMap=maps.get(strategy.rankKey);
   if(!rankMap){const values=symbols.map(symbol=>({symbol,value:Number(day.featureRows[symbol]?.[strategy.rankKey])})).filter(item=>isFinite(item.value)),ranks=percentileMap(values,item=>item.value);rankMap=new Map(values.map(item=>[item.symbol,ranks.get(item)]));}
-  const picks=symbols.filter(symbol=>(strategy.conditions||[]).every(condition=>{
-    const pct=maps.get(condition.feature)?.get(symbol);
+  const picks=symbols.filter(symbol=>(strategy.conditions||[]).every(condition=>{  const pct=v=>v!=null&&isFinite(v)?(v*100).toFixed(1)+'%':'-';
     return pct!=null&&autoConditionPass(pct,condition.bucket);
   })).map(symbol=>{
     const score=(rankMap.get(symbol)||0)*100;
@@ -4432,7 +4428,7 @@ async function runEngine(raw, sessionTag, options={}){
     const _survRules=NSE_SURV[d.symbol]||null;
     const _isSurv=Array.isArray(_survRules)&&_survRules.length>0;
     const rocketMove=getIntradayRocketMove(d,K.price,K.price_change,K.high_1d);
-    const tslRefPrice=getRecommendedTslPrice({
+    const tslRefPoints=getRecommendedTslPoints({
       price:d.price,
       priceChange:d.priceChange,
       snapshotChange:snapshotLearning.intervalMoves?.[d.symbol]??null,
@@ -4494,7 +4490,7 @@ async function runEngine(raw, sessionTag, options={}){
         const rrFloor=slBase*1.5;
         return dailyMove!=null?Math.max(rrFloor,dailyMove):rrFloor;
       })(),
-      tslRefPrice,
+      tslRefPoints,
     };
   });
 
@@ -4982,16 +4978,16 @@ function getPickEligibilityReason(row){
 }
 function buildPickLadderHTML(){
   const ps=getPickState(),rows=pickLadderDisplayRows(ps.ladder);
-  const pct=v=>v!=null&&isFinite(v)?(v*100).toFixed(1)+'%':'â€”';
-  const net=v=>v!=null&&isFinite(v)?(v>=0?'+':'')+v.toFixed(2)+'%':'â€”';
+  const pct=v=>v!=null&&isFinite(v)?(v*100).toFixed(1)+'%':'-';
+  const net=v=>v!=null&&isFinite(v)?(v>=0?'+':'')+v.toFixed(2)+'%':'-';
   const body=rows.map(r=>{
     const isCh=r.name===ps.name;
-    const label=(r.label||getPickStrategyLabel(r.name))+(r.name==='random'?' (control)':'')+(isCh?(ps.default?' â–¶ default':' â–¶ champion'):'');
+    const label=(r.label||getPickStrategyLabel(r.name))+(r.name==='random'?' (control)':'')+(isCh?(ps.default?' [default]':' [champion]'):'');
     const remove=PICK_PERMANENT_STRATEGIES.has(r.name)?'':`<button onclick="disablePickStrategy('${r.name}')" title="Remove ${escHtml(r.label)} from the ladder" aria-label="Remove ${escHtml(r.label)}" style="border:0;background:transparent;color:var(--red);font:inherit;font-size:16px;cursor:pointer;padding:0 4px">x</button>`;
     const rule=getAutoStrategy(r.name)?.rule||'';
     const examples=(r.rocketExamples||[]).slice(0,8);
     const exampleHtml=examples.length?`<div style="margin-top:3px;font-size:10px;line-height:1.35;color:var(--t3)">Top rockets: ${examples.map(item=>escHtml(item)).join(' | ')}</div>`:'';
-    return `<tr title="${escHtml(rule)}" style="${isCh?'font-weight:800;color:var(--t1)':''}"><td>${label}${exampleHtml}</td><td>${r.entryDays||0}</td><td>${r.flagged||0}</td><td>${r.pendingFlagged||0}</td><td style="font-weight:800">${pct(r.sameDay10Rate)}</td><td>${pct(r.hitRate)}</td><td>${net(r.exitNetPct)}</td><td>${r.medianMinutesToMove!=null?Number(r.medianMinutesToMove).toFixed(1):'â€”'}</td><td>${getPickEligibilityReason(r)}</td><td style="text-align:center">${remove}</td></tr>`;
+    return `<tr title="${escHtml(rule)}" style="${isCh?'font-weight:800;color:var(--t1)':''}"><td>${label}${exampleHtml}</td><td>${r.entryDays||0}</td><td>${r.flagged||0}</td><td>${r.pendingFlagged||0}</td><td style="font-weight:800">${pct(r.sameDay10Rate)}</td><td>${pct(r.hitRate)}</td><td>${net(r.exitNetPct)}</td><td>${r.medianMinutesToMove!=null?Number(r.medianMinutesToMove).toFixed(1):'-'}</td><td>${getPickEligibilityReason(r)}</td><td style="text-align:center">${remove}</td></tr>`;
   }).join('');
   return `<div style="overflow-x:auto"><table class="ct" style="min-width:980px;font-size:11px"><thead><tr><th>Pick Source</th><th>Entry Days</th><th>Flags</th><th>Pending</th><th title="Post-flag 10% milestones on the entry day">Same-day 10%</th><th title="10% milestones within the active outcome horizon">10% &lt;= horizon</th><th>Net %/flag</th><th title="Median minutes from flag to the first same-day 3% milestone">Med mins to move</th><th>Authority</th><th></th></tr></thead><tbody>${body||'<tr><td colspan="10" style="color:var(--t3)">No outcome episodes yet.</td></tr>'}</tbody></table></div>`;
 }
@@ -5751,8 +5747,7 @@ function renderPerformance(){
       {key:'capDeployed',label:'Capital ₹',align:'right',fmt:fmtINR,clrFn:()=>'var(--t2)'},
       {key:'_sortDays',label:'Days Held',align:'right',fmt:(v,r)=>_daysFmt(r.daysHeld),clrFn:()=>'var(--t1)'},
       {key:'tgtPrice',label:'Target ₹',align:'right',fmt:(v,r)=>v!=null?fmtINR(v)+`<span style="font-size:10px;color:var(--t3);margin-left:4px">+${adaptiveTGT}%</span>`:'—',clrFn:()=>'var(--green)'},
-      {key:'slPrice',label:'SL ₹',align:'right',fmt:(v,r)=>v!=null?fmtINR(v)+`<span style="font-size:10px;color:var(--t3);margin-left:4px">-${getRowStopDistancePct(ALL.find(s=>s.symbol===r.sym)).toFixed(2)}%</span>`:'—',clrFn:()=>'var(--red)'},
-      {key:'tslPrice',label:'TSL ₹',align:'right',bold:true,fmt:v=>v!=null?fmtINR(v):'—',clrFn:v=>v==null?'var(--t3)':'var(--amber)'},
+      {key:'slPrice',label:'SL ₹',align:'right',fmt:(v,r)=>v!=null?fmtINR(v)+`<span style="font-size:10px;color:var(--t3);margin-left:4px">-${getRowStopDistancePct(ALL.find(s=>s.symbol===r.sym)).toFixed(2)}%</span>`:'—',clrFn:()=>'var(--red)'},      {key:'tslPoints',label:'TSL pts',align:'right',bold:true,fmt:v=>v!=null?Number(v).toFixed(2):'-',clrFn:v=>v==null?'var(--t3)':'var(--amber)'},
       {key:'signal',label:'Signal',align:'right',bold:true,fmt:v=>v!=null?(v>=0?'+':'')+v.toFixed(2):'—',clrFn:v=>v==null?'var(--t3)':v>0?'var(--green)':v<0?'var(--red)':'var(--t2)'},
     ];
     // Sort: signal ascending (worst first), then days desc
@@ -6350,7 +6345,7 @@ function getCols(){
     {key:'_rank',label:'#',s:1},
     {key:'rocketScore',label:'Score',s:1},{key:'symbol',label:'Symbol',s:1},
     {key:'price',label:'Price ₹',s:1},{key:'snapshotChange',label:intervalLabel,s:1},
-      {key:'priceChange',label:'Chg 1D%',s:1},{key:'tslRefPrice',label:'TSL ₹',s:1},{key:'velocityPotential',label:'Room%',s:1},{key:'delivPct',label:'Deliv%',s:1},
+      {key:'priceChange',label:'Chg 1D%',s:1},{key:'tslRefPoints',label:'TSL pts',s:1},{key:'velocityPotential',label:'Room%',s:1},{key:'delivPct',label:'Deliv%',s:1},
     {key:'alloc',label:'Alloc ₹',s:0},{key:'volume',label:'Volume',s:1},
   ];
   // Dynamic columns from rocket-relevance features — skip any that are all null across displayed stocks
@@ -7325,7 +7320,7 @@ function renderTable(){
       <td>${fmtINR(s.price)}</td>
       <td>${fPerf(s.snapshotChange)}</td>
       <td>${fPerf(s.priceChange)}</td>
-      <td style="font-family:'DM Mono',monospace;font-weight:700;color:var(--amber)">${s.tslRefPrice!=null?fmtINR(s.tslRefPrice):'—'}</td>
+      <td style="font-family:'DM Mono',monospace;font-weight:700;color:var(--amber)">${s.tslRefPoints!=null?Number(s.tslRefPoints).toFixed(2):'-'}</td>
       <td>${roomCell}</td>
       <td>${fDel(s.delivPct)}</td>
       <td class="alloc-cell" data-sym="${s.symbol}">${(()=>{
