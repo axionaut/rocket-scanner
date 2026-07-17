@@ -1,5 +1,5 @@
-const BUILD_TS='2026-07-17 09:34 IST'; // release build time (IST)
-const APP_VERSION=514; // Honest horizon hit counts and completed-cohort net returns in the pick ladder.
+const BUILD_TS='2026-07-17 10:19 IST'; // release build time (IST)
+const APP_VERSION=515; // Focused momentum-volume ladder, accumulating live evidence, and responsive filtering.
 const GOOGLE_DRIVE_CLIENT_ID='1015012642264-oi2nelv3v90k3d39r994a6nelgjs2a56.apps.googleusercontent.com'; // Public OAuth Web Client ID.
 const HARD_FILTER_SCHEMA='structural_tradeability_v2';
 const STOCK_RUNWAY_CEILING_PCT=19.5; // Intentional owner-approved forward-catch strategy filter: excludes stocks already near their circuit band (or caps max entry) since a stock that has already used up its daily range is a poor pre-rocket buy. Active fallback when NSE price-band data is unavailable.
@@ -97,6 +97,7 @@ let PERF_TRADE_WINDOWS=[]; // cached trade window rows from renderPerformance �
 let PERF_LATEST_SUMMARY=null; // cached latest session summary from renderPerformance — used by renderStats card
 let PERF_RENDERED=false; // true after background or foreground performance calculation
 let PERF_RENDER_QUEUED=false;
+let PERF_RENDER_WAITING_FOR_VISIBLE=false;
 let ENGINE_DATA={};
 let REMOVED={uc:0,surv:0,liq:0,fscore:0,atr:0};
 let SUPPRESSED_HELD=0; // count of stocks hidden because already held in POSITIONS
@@ -2765,45 +2766,8 @@ function getDayStrategyCohorts(day,prevDay,rows,history=[]){
   const n=20;
   const available=picks=>({available:true,picks:picks||[]});
   const cohorts={engine:available(compactCohortSymbols([...commonRows].sort((a,b)=>(b.rocketScore||0)-(a.rocketScore||0)),n))};
+  cohorts[MOMENTUM_VOLUME_KEY]=buildMomentumVolumeContinuation(day,pool,n);
   cohorts[LOADED_SPRING_KEY]=buildLoadedSpringSelection(day,prevDay,pool);
-  cohorts.breadth_relative=buildBreadthRelativeSelection(day,history,pool,n);
-  if(prevDay){
-    const prevRows=prevDay.featureRows||{};
-    const prevPriceKey=_dayPriceChangeKey(prevDay);
-    const prevRockets=new Set(prevDay.rocketSymbols||[]);
-    const momentum=pool.map(sym=>({sym,m:Number(prevRows?.[sym]?.[prevPriceKey])})).filter(x=>x.m!=null&&isFinite(x.m)).sort((a,b)=>b.m-a.m).slice(0,n).map((x,i)=>({symbol:x.sym,rank:i+1,score:x.m}));
-    const persistence=pool.filter(sym=>prevRockets.has(sym)).slice(0,n).map((sym,i)=>({symbol:sym,rank:i+1,score:null}));
-    cohorts.momentum=available(momentum);
-    cohorts.persistence=available(persistence);
-  }
-  const dayPriceKey=_dayPriceChangeKey(day);
-  if(dayPriceKey){
-    cohorts.early_mover=available(pool.map(sym=>({sym,v:Number(day?.featureRows?.[sym]?.[dayPriceKey])}))
-      .filter(x=>isFinite(x.v)&&x.v>=3&&x.v<6).sort((a,b)=>b.v-a.v).slice(0,n)
-      .map((x,i)=>({symbol:x.sym,rank:i+1,score:x.v})));
-  }
-  const shortCols=detectShortChangeColumns(day);
-  cohorts.target_1m5m=shortCols.oneMinute&&shortCols.fiveMinute
-    ?available(compactCohortSymbols(pickTarget1m5mSymbols(day,pool,n).map(sym=>{
-      const row=day?.featureRows?.[sym]||{};
-      return {symbol:sym,rocketScore:null,inputs:{d:finiteFeature(row,_dayPriceChangeKey(day)),m1:finiteFeature(row,shortCols.oneMinute),m5:finiteFeature(row,shortCols.fiveMinute),t:Number(getEffectiveTgtPct())||null}};
-    }),n))
-    :{available:false,unavailableReason:'1m/5m columns unavailable',picks:[]};
-  Object.entries(PICK_COMPOSITES).forEach(([name,components])=>{
-    cohorts[name]=available(compactCohortSymbols(pickCompositeSymbols(day,pool,n,components).map(sym=>({symbol:sym,rocketScore:null})),n));
-  });
-  if(prevDay) MOM_CONT_STRATEGIES.forEach(strategy=>{
-    const picks=pickMomentumContinuationSymbols(day,prevDay,pool,n,strategy)||[];
-    cohorts[strategy.key]=available(compactCohortSymbols(picks.map(sym=>({symbol:sym,rocketScore:null})),n));
-  });
-  RATING_STRATEGIES.forEach(strategy=>{
-    const picks=pickRatingSymbols(day,pool,n,strategy)||[];
-    cohorts[strategy.key]=available(compactCohortSymbols(picks.map(sym=>({symbol:sym,rocketScore:null})),n));
-  });
-  ['high52w_mom','volume_shock','range_squeeze','delivery_surge','oversold_snap'].forEach(name=>{
-    const picks=pickQuantSymbols(name,day,prevDay,pool,n)||[];
-    cohorts[name]=available(compactCohortSymbols(picks.map(sym=>({symbol:sym,rocketScore:null})),n));
-  });
   cohorts[DONCHIAN_VB_KEY]=buildDonchianBreakoutSelection(day,prevDay,pool,n);
   const rand=seededRand(day?.sessionDate||''),rp=[...pool],rout=[];
   while(rp.length&&rout.length<n) rout.push(rp.splice(Math.floor(rand()*rp.length),1)[0]);
@@ -2872,6 +2836,7 @@ function getStrategySelectionForDay(day,name,legacyPool,prevDay,laterRockets,opt
     if(auth&&auth.size)return [...auth].slice(0,20);
   }
   if(name==='engine') return [...(day?.predictedSymbols||[])].slice(0,20);
+  if(name===MOMENTUM_VOLUME_KEY) return []; // forward-only: no reconstructed cohorts
   if(name===LOADED_SPRING_KEY) return [];
   if(name===DONCHIAN_VB_KEY) return []; // forward-only: no reconstructed cohorts
   const pool=legacyPool||[];
@@ -2908,7 +2873,7 @@ function getStrategySelectionForDay(day,name,legacyPool,prevDay,laterRockets,opt
 // Random is a control only; every other strategy can run the live pick list.
 const PICK_CHAMPION_STORE='rs_pick_champion_v1';
 const PICK_DISABLED_STORE='rs_pick_disabled_v1';
-const PICK_CHAMPION_BAR='v511';
+const PICK_CHAMPION_BAR='v515';
 const PICK_MIN_EVAL_DAYS=4;
 const RATING_BUY=4;
 const RATING_STRONG_BUY=5;
@@ -2921,26 +2886,29 @@ const DVB_CHANNEL_BAND=0.995;      // 0.5% band around the Donchian 20-day upper
 const DVB_RVOL_MIN=1.5;            // Relative Volume at Time participation floor
 const DVB_ADX_MIN=20;              // daily ADX trend-strength floor
 const DVB_HIGH_RETENTION_MAX_PCT=1.0; // max % below the day High to still count as holding the breakout
+const MOMENTUM_VOLUME_KEY='momentum_volume_continuation';
 const PICK_STRATEGY_LABELS={
-  engine:'Engine',loaded_spring:'Loaded Spring',breadth_relative:'Breadth Relative Strength',momentum:'Momentum',persistence:'Persistence',early_mover:'Early Mover 3-6%',
-  ta_composite:'TA Composite',fa_composite:'FA Composite',
-  mom_cont_buy:'Mom-Cont ≥5% (Buy)',mom_cont_sbuy:'Mom-Cont ≥5% (SBuy)',
-  target_1m5m:'Target + 1m > 5m',
-  rating_ma_buy:'MA = Buy',rating_osc_buy:'Osc = Buy',rating_tech_buy:'Tech = Buy',
-  rating_ma_osc_buy:'MA+Osc = Buy',rating_ma_tech_buy:'MA+Tech = Buy',rating_osc_tech_buy:'Osc+Tech = Buy',rating_all3_buy:'All-3 = Buy',
-  rating_ma_sbuy:'MA = Strong Buy',rating_osc_sbuy:'Osc = Strong Buy',rating_tech_sbuy:'Tech = Strong Buy',
-  rating_ma_osc_sbuy:'MA+Osc = Strong Buy',rating_ma_tech_sbuy:'MA+Tech = Strong Buy',rating_osc_tech_sbuy:'Osc+Tech = Strong Buy',rating_all3_sbuy:'All-3 = Strong Buy',
-  high52w_mom:'52W-High Momentum',volume_shock:'Volume Shock',range_squeeze:'Range Squeeze',
-  delivery_surge:'Delivery Surge',oversold_snap:'Oversold Snap',
+  [MOMENTUM_VOLUME_KEY]:'Momentum + Volume Continuation',
+  engine:'Engine',loaded_spring:'Loaded Spring',
   [DONCHIAN_VB_KEY]:'Confirmed Donchian Breakout',
   random:'Random',actual_you:'Actual (You)'
 };
-const PICK_PERMANENT_STRATEGIES=new Set(['engine',LOADED_SPRING_KEY,'breadth_relative','random','actual_you']);
+const PICK_RETIRED_LABELS={
+  breadth_relative:'Breadth Relative Strength',momentum:'Momentum',persistence:'Persistence',early_mover:'Early Mover 3-6%',
+  ta_composite:'TA Composite',fa_composite:'FA Composite',mom_cont_buy:'Mom-Cont >=5% (Buy)',mom_cont_sbuy:'Mom-Cont >=5% (SBuy)',
+  target_1m5m:'Target + 1m > 5m',rating_ma_buy:'MA = Buy',rating_osc_buy:'Osc = Buy',rating_tech_buy:'Tech = Buy',
+  rating_ma_osc_buy:'MA+Osc = Buy',rating_ma_tech_buy:'MA+Tech = Buy',rating_osc_tech_buy:'Osc+Tech = Buy',rating_all3_buy:'All-3 = Buy',
+  rating_ma_sbuy:'MA = Strong Buy',rating_osc_sbuy:'Osc = Strong Buy',rating_tech_sbuy:'Tech = Strong Buy',
+  rating_ma_osc_sbuy:'MA+Osc = Strong Buy',rating_ma_tech_sbuy:'MA+Tech = Strong Buy',rating_osc_tech_sbuy:'Osc+Tech = Strong Buy',rating_all3_sbuy:'All-3 = Strong Buy',
+  high52w_mom:'52W-High Momentum',volume_shock:'Volume Shock',range_squeeze:'Range Squeeze',delivery_surge:'Delivery Surge',oversold_snap:'Oversold Snap'
+};
+const PICK_PERMANENT_STRATEGIES=new Set([MOMENTUM_VOLUME_KEY,'engine',LOADED_SPRING_KEY,DONCHIAN_VB_KEY,'random','actual_you']);
 // Rule-audit text shown in the ladder row tooltip for manually specified rule strategies.
 const PICK_STRATEGY_RULES={
+  [MOMENTUM_VOLUME_KEY]:'Qualify: 1-6.5% daily move, positive from open, above VWAP, within 1.25% of the day high, positive 1m and 5m movement, DMI+ > DMI-, daily ADX >= 18, and market-relative participation floors that tighten when breadth is weak. Rank: relative strength 30%, relative volume 20%, drive from open 15%, high retention 15%, DMI spread 10%, five-minute continuation 10%.',
   [DONCHIAN_VB_KEY]:'Qualify: prev Price < 99.5% of prev Donchian(20) Upper AND current Price >= 99.5% of current Donchian(20) Upper AND Price > VWAP AND Relative Volume at Time >= '+DVB_RVOL_MIN+' AND ADX(14,1D) >= '+DVB_ADX_MIN+' AND DMI+ > DMI- AND Change from Open > 0 AND Price within '+DVB_HIGH_RETENTION_MAX_PCT+'% of day High. Rank: 40% RVol-at-time pct + 25% ADX pct + 20% DMI spread pct + 15% high-retention pct.'
 };
-function getPickStrategyLabel(name){return PICK_STRATEGY_LABELS[name]||name;}
+function getPickStrategyLabel(name){return PICK_STRATEGY_LABELS[name]||PICK_RETIRED_LABELS[name]||name;}
 const QS_RVOL_MIN=2.0,QS_QUIET_CHG_MIN=0,QS_QUIET_CHG_MAX=3,QS_DELIV_MIN=60,QS_RSI_OVERSOLD=30,QS_SQUEEZE_RATIO=0.5;
 const RATING_STRATEGIES=[
   {key:'rating_ma_buy',target:RATING_BUY,parts:['ma']},
@@ -3344,15 +3312,24 @@ function computeEpisodeStrategyLadder(){
   const newestEntryDate=strategyEpisodes.map(item=>item.entryDate).filter(Boolean).sort().slice(-1)[0]||null;
   const names=new Set(Object.keys(PICK_STRATEGY_LABELS).filter(name=>name!=='actual_you'));
   // Legacy auto_* generator episodes are pruned on ledger read; skip any stragglers here.
-  strategyEpisodes.forEach(item=>{if(item.strategy&&!String(item.strategy).startsWith('auto_'))names.add(item.strategy);});
+  strategyEpisodes.forEach(item=>{if(PICK_STRATEGY_LABELS[item.strategy])names.add(item.strategy);});
   const buildRow=(name,all)=>{
     const outcomes=all.map(episode=>({episode,value:episodeReturnAtHorizon(episode,horizon,asOfDate)}));
     const pending=outcomes.filter(item=>item.value==null||!isFinite(item.value)).map(item=>item.episode);
     const mature=all.filter(item=>item.entryDate!==newestEntryDate);
     const evaluated=outcomes.filter(item=>item.value!=null&&isFinite(item.value));
-    const horizonHits=evaluated.filter(item=>Number(item.episode.milestones?.[10]?.sessions)<=horizon).length;
-    const observedHorizonHits=all.filter(item=>Number(item.milestones?.[10]?.sessions)<=horizon).length;
-    const sameDayHits=mature.filter(item=>Number(item.milestones?.[10]?.sessions)===0).length;
+    const horizonHits=evaluated.filter(item=>item.episode.milestones?.[10]?.sessions!=null&&Number(item.episode.milestones[10].sessions)<=horizon).length;
+    const observedHorizonHits=all.filter(item=>item.milestones?.[10]?.sessions!=null&&Number(item.milestones[10].sessions)<=horizon).length;
+    const observed=all.map(episode=>{
+      if(episode.milestones?.[10]?.sessions!=null&&Number(episode.milestones[10].sessions)<=horizon)return {episode,value:10};
+      const rawCurrent=episode.currentReturnPct;
+      const current=rawCurrent==null?NaN:Number(rawCurrent);
+      if(isFinite(current))return {episode,value:current};
+      const latest=[...(episode.observations||[])].sort((a,b)=>Number(b.s)-Number(a.s)||String(b.d).localeCompare(String(a.d)))[0];
+      const value=Number(latest?.c);
+      return isFinite(value)?{episode,value}:null;
+    }).filter(Boolean);
+    const sameDayHits=mature.filter(item=>item.milestones?.[10]?.sessions!=null&&Number(item.milestones[10].sessions)===0).length;
     const moveMinutes=mature.map(item=>{
       const milestone=item.milestones?.[3];
       return Number(milestone?.sessions)===0&&Number(milestone?.ts)>Number(item.entryTs)?(Number(milestone.ts)-Number(item.entryTs))/60000:null;
@@ -3363,11 +3340,13 @@ function computeEpisodeStrategyLadder(){
       return !isFinite(firstMilestoneTs)||diveTs<firstMilestoneTs;
     }).length;
     const net=evaluated.map(item=>item.value-estimateRoundTripCostPct(Math.max(0.5,Math.abs(item.value))));
+    const liveNet=observed.map(item=>item.value-estimateRoundTripCostPct(Math.max(0.5,Math.abs(item.value))));
     return {name,label:getPickStrategyLabel(name),championEligible:isChampionEligible(name),evidenceStatus:'authoritative',episodeBased:true,horizon,
       observationDays:new Set(mature.map(item=>item.evaluatedThrough).filter(Boolean)).size,
       evalDays:new Set(evaluated.map(item=>item.episode.entryDate)).size,entryDays:new Set(all.map(item=>item.entryDate)).size,
       flagged:all.length,pendingFlagged:pending.length,evaluatedFlagged:evaluated.length,hits:horizonHits,hitRate:evaluated.length?horizonHits/evaluated.length:null,
       observedHorizonHits,observedHorizonRate:all.length?observedHorizonHits/all.length:null,
+      observedFlagged:observed.length,liveNetPct:liveNet.length?+meanArr(liveNet).toFixed(2):null,
       sameDay10Rate:mature.length?sameDayHits/mature.length:null,doveBeforeMilestoneRate:mature.length?doveBefore/mature.length:null,
       medianMinutesToMove:moveMinutes.length?+medianOutcomeValue(moveMinutes).toFixed(1):null,
       exitNetPct:net.length?+meanArr(net).toFixed(2):null,firstDate:all.map(item=>item.entryDate).sort()[0]||null};
@@ -3421,7 +3400,7 @@ function buildBreadthRelativeSelection(day,history,pool,limit=20){
 function applyBreadthOrderingOverlay(cohorts,day){
   const state=getDayBreadthRelationState(day);if(!state.available)return cohorts;
   Object.entries(cohorts||{}).forEach(([name,cohort])=>{
-    if(name==='random'||name==='breadth_relative'||!cohort?.available||!cohort.picks?.length)return;
+    if(name==='random'||name==='breadth_relative'||name===MOMENTUM_VOLUME_KEY||!cohort?.available||!cohort.picks?.length)return;
     const nativePct=percentileMap(cohort.picks,item=>Number.isFinite(Number(item.score))?Number(item.score):-Number(item.rank||999));
     cohort.picks=cohort.picks.map(item=>{
       const native=Number.isFinite(Number(item.score))?Number(item.score):null;
@@ -3431,6 +3410,49 @@ function applyBreadthOrderingOverlay(cohorts,day){
     }).sort((a,b)=>b.score-a.score||a.symbol.localeCompare(b.symbol)).map((item,index)=>({...item,rank:index+1}));
   });
   return cohorts;
+}
+const MOMENTUM_VOLUME_FEATURES={
+  price:'price',vwap:'volume_weighted_average_price_1_day',high:'high_1_day',
+  fromOpen:'change_from_open_1_day',rvol:'relative_volume_at_time',adx:'average_directional_index_14_1_day',
+  dmiPlus:'directional_movement_index_14_1_day_positive',dmiMinus:'directional_movement_index_14_1_day_negative'
+};
+function buildMomentumVolumeContinuation(day,pool,limit=20){
+  if(!day)return {available:false,unavailableReason:'current daily snapshot unavailable',picks:[]};
+  const dayChangeKey=_dayPriceChangeKey(day),short=detectShortChangeColumns(day);
+  const required=[dayChangeKey,short.oneMinute,short.fiveMinute,...Object.values(MOMENTUM_VOLUME_FEATURES)];
+  const missing=required.filter(key=>!key||!dayHasFeatureColumn(day,key));
+  if(missing.length)return {available:false,unavailableReason:'required momentum columns unavailable',picks:[]};
+  const market=getDayBreadthRelationState(day);
+  if(!market.available)return {available:false,unavailableReason:'market breadth unavailable',picks:[]};
+  const weakBreadth=market.breadth<0.40;
+  const relativeFloor=weakBreadth?0.85:0.75;
+  const rvolFloor=weakBreadth?1.5:1.2;
+  const rows=[];
+  for(const symbol of pool||[]){
+    const row=day.featureRows?.[symbol];if(!row)continue;
+    const change=finiteFeature(row,dayChangeKey),m1=finiteFeature(row,short.oneMinute),m5=finiteFeature(row,short.fiveMinute);
+    const price=finiteFeature(row,MOMENTUM_VOLUME_FEATURES.price),vwap=finiteFeature(row,MOMENTUM_VOLUME_FEATURES.vwap);
+    const high=finiteFeature(row,MOMENTUM_VOLUME_FEATURES.high),fromOpen=finiteFeature(row,MOMENTUM_VOLUME_FEATURES.fromOpen);
+    const rvol=finiteFeature(row,MOMENTUM_VOLUME_FEATURES.rvol),adx=finiteFeature(row,MOMENTUM_VOLUME_FEATURES.adx);
+    const dmiPlus=finiteFeature(row,MOMENTUM_VOLUME_FEATURES.dmiPlus),dmiMinus=finiteFeature(row,MOMENTUM_VOLUME_FEATURES.dmiMinus);
+    const relative=market.relationPct.get(symbol),highGap=price>0&&high>0?(high-price)/high*100:null;
+    if([change,m1,m5,price,vwap,high,fromOpen,rvol,adx,dmiPlus,dmiMinus,relative,highGap].some(value=>value==null||!isFinite(value)))continue;
+    if(!(change>=1&&change<=6.5&&fromOpen>=0.5&&price>vwap&&highGap<=1.25&&m1>=0&&m5>0))continue;
+    if(!(rvol>=rvolFloor&&relative>=relativeFloor&&adx>=18&&dmiPlus>dmiMinus))continue;
+    rows.push({symbol,change,m1,m5,fromOpen,rvol,adx,dmiSpread:dmiPlus-dmiMinus,relative,highGap});
+  }
+  const rvolPct=percentileMap(rows,item=>item.rvol),openPct=percentileMap(rows,item=>item.fromOpen);
+  const retentionPct=percentileMap(rows,item=>-item.highGap),dmiPct=percentileMap(rows,item=>item.dmiSpread);
+  const m5Pct=percentileMap(rows,item=>item.m5);
+  const ranked=rows.map(item=>{
+    const score=100*((0.30*item.relative)+(0.20*(rvolPct.get(item)||0))+(0.15*(openPct.get(item)||0))+
+      (0.15*(retentionPct.get(item)||0))+(0.10*(dmiPct.get(item)||0))+(0.10*(m5Pct.get(item)||0)));
+    return {symbol:item.symbol,score,inputs:{nativeScore:+score.toFixed(2),marketBreadth:+market.breadth.toFixed(4),
+      relativeStrengthPct:+item.relative.toFixed(4),relativeFloor,rvolFloor,rvolAtTime:+item.rvol.toFixed(3),
+      change:+item.change.toFixed(3),changeFromOpen:+item.fromOpen.toFixed(3),m1:+item.m1.toFixed(3),m5:+item.m5.toFixed(3),
+      highGapPct:+item.highGap.toFixed(3),adx:+item.adx.toFixed(3),dmiSpread:+item.dmiSpread.toFixed(3)}};
+  }).sort((a,b)=>b.score-a.score||a.symbol.localeCompare(b.symbol)).slice(0,limit).map((item,index)=>({...item,rank:index+1}));
+  return {available:true,picks:ranked};
 }
 // Confirmed Donchian Volume Breakout: fresh 20-day upper-channel approach/break with
 // volume, trend, direction, session-drive and high-retention confirmations. One shared
@@ -3523,7 +3545,7 @@ function computeInternalWindowStrategyEvidence(runtime){
       }
     });
   };
-  const strategyNames=['engine',LOADED_SPRING_KEY,'momentum','persistence','early_mover','target_1m5m',...Object.keys(PICK_COMPOSITES),...MOM_CONT_STRATEGIES.map(s=>s.key),...RATING_STRATEGIES.map(s=>s.key),'high52w_mom','volume_shock','range_squeeze','delivery_surge','oversold_snap','random'];
+  const strategyNames=[MOMENTUM_VOLUME_KEY,'engine',LOADED_SPRING_KEY,DONCHIAN_VB_KEY,'random'];
   days.forEach((day,i)=>{
     const auth=collectDayStrategyEvidence(day);
     if(i>=days.length-1){
@@ -3583,36 +3605,27 @@ function computeInternalWindowStrategyEvidence(runtime){
 function computeStrategyLadder(){return computeEpisodeStrategyLadder();}
 function comparePickLadderRows(a,b){
   return (b.sameDay10Rate??-Infinity)-(a.sameDay10Rate??-Infinity)||
-    (b.exitNetPct??-Infinity)-(a.exitNetPct??-Infinity)||
+    (b.liveNetPct??b.exitNetPct??-Infinity)-(a.liveNetPct??a.exitNetPct??-Infinity)||
     String(a.label||a.name).localeCompare(String(b.label||b.name));
 }
 function getWarmupPickLeader(ladder){
   return (ladder||[]).filter(row=>
     row.evidenceStatus==='authoritative'&&
     isChampionEligible(row.name)&&
-    Number(row.flagged)>Number(row.pendingFlagged||0)&&
-    [row.sameDay10Rate,row.exitNetPct,row.hitRate].some(value=>value!=null&&isFinite(value))
+    Number(row.observedFlagged)>0&&
+    [row.sameDay10Rate,row.liveNetPct,row.exitNetPct,row.hitRate].some(value=>value!=null&&isFinite(value))
   ).sort(comparePickLadderRows)[0]||null;
 }
 function resolvePickChampion(ladder){
   const horizon=getOutcomeHorizonSummary();
-  const fallback={name:LOADED_SPRING_KEY,since:null,metric:null,bar:PICK_CHAMPION_BAR,default:true};
+  const fallback={name:MOMENTUM_VOLUME_KEY,since:null,metric:null,bar:PICK_CHAMPION_BAR,default:true};
   const raw=FS.get(PICK_CHAMPION_STORE);
   const stored=(raw&&raw.bar===PICK_CHAMPION_BAR)?raw:fallback;
   if(horizon.phase!=='dynamic'){
-    const leader=getWarmupPickLeader(ladder);
-    const next=leader?{
-      name:leader.name,
-      since:stored.name===leader.name&&stored.default?stored.since:getSessionDate(),
-      metric:leader.exitNetPct,
-      bar:PICK_CHAMPION_BAR,
-      default:true,
-      provisional:true
-    }:fallback;
-    if(raw?.name!==next.name||raw?.bar!==PICK_CHAMPION_BAR||raw?.metric!==next.metric||raw?.default!==true||!!raw?.provisional!==!!next.provisional) FS.set(PICK_CHAMPION_STORE,next);
-    return next;
+    if(raw?.name!==fallback.name||raw?.bar!==PICK_CHAMPION_BAR||raw?.default!==true)FS.set(PICK_CHAMPION_STORE,fallback);
+    return fallback;
   }
-  const eligible=(ladder||[]).filter(s=>s.evidenceStatus==='authoritative'&&isChampionEligible(s.name)&&s.evalDays>=3&&s.flagged>=10&&Number(s.exitNetPct)>0);
+  const eligible=(ladder||[]).filter(s=>s.evidenceStatus==='authoritative'&&isChampionEligible(s.name)&&s.evalDays>=PICK_MIN_EVAL_DAYS&&s.flagged>=10&&Number(s.exitNetPct)>0);
   if(!eligible.length){
     if(raw?.name!==fallback.name||raw?.bar!==PICK_CHAMPION_BAR) FS.set(PICK_CHAMPION_STORE,fallback);
     return fallback;
@@ -3666,8 +3679,8 @@ function buildPickDiagnostics(ladder,runtime){
   }
   pairs.sort((a,b)=>b.avg-a.avg||b.days-a.days||String(a.a).localeCompare(String(b.a)));
   const engineRow=(ladder||[]).find(row=>row.name==='engine')||null;
-  const bestChallenger=[...(ladder||[])].filter(row=>row.evidenceStatus==='authoritative'&&row.name!=='engine'&&row.name!=='actual_you'&&row.evalDays>0).sort((a,b)=>
-    (Number(b.exitNetPct)||-Infinity)-(Number(a.exitNetPct)||-Infinity)||
+  const bestChallenger=[...(ladder||[])].filter(row=>row.evidenceStatus==='authoritative'&&row.name!=='engine'&&row.name!=='actual_you'&&row.observedFlagged>0).sort((a,b)=>
+    (Number.isFinite(Number(b.liveNetPct??b.exitNetPct))?Number(b.liveNetPct??b.exitNetPct):-Infinity)-(Number.isFinite(Number(a.liveNetPct??a.exitNetPct))?Number(a.liveNetPct??a.exitNetPct):-Infinity)||
     (Number(b.peakNetPct)||-Infinity)-(Number(a.peakNetPct)||-Infinity)
   )[0]||null;
   return {
@@ -3679,7 +3692,7 @@ function buildPickDiagnostics(ladder,runtime){
     correlatedPairs:pairs.slice(0,3),
     engineCohortSize:Number(engineRow?.flagged)||0,
     challengerCohortSize:Number(bestChallenger?.flagged)||0,
-    bestChallenger:bestChallenger?{name:bestChallenger.name,label:bestChallenger.label,exitNetPct:bestChallenger.exitNetPct,peakNetPct:bestChallenger.peakNetPct}:null
+    bestChallenger:bestChallenger?{name:bestChallenger.name,label:bestChallenger.label,exitNetPct:bestChallenger.exitNetPct,liveNetPct:bestChallenger.liveNetPct,peakNetPct:bestChallenger.peakNetPct}:null
   };
 }
 let _pickStateCache=null;
@@ -3691,6 +3704,10 @@ function getPickState(){
   try{ladder=computeStrategyLadder(SNAPSHOT_RUNTIME);}catch(e){console.warn('strategy ladder failed',e);}
   let champ={name:'engine',since:null,metric:null};
   try{champ=resolvePickChampion(ladder);}catch(e){console.warn('champion resolve failed',e);}
+  if(champ.name===MOMENTUM_VOLUME_KEY){
+    const live=getMomentumVolumeLiveState();
+    if(!live.available) champ={name:'engine',since:null,metric:null,default:true,fallbackSourceLabel:getPickStrategyLabel(MOMENTUM_VOLUME_KEY),fallbackReason:live.unavailableReason||'Momentum + Volume Continuation unavailable'};
+  }
   if(champ.name===LOADED_SPRING_KEY){
     const live=getLoadedSpringLiveState();
     if(!live.available) champ={name:'engine',since:null,metric:null,default:true,fallbackSourceLabel:getPickStrategyLabel(LOADED_SPRING_KEY),fallbackReason:live.unavailableReason||'Loaded Spring unavailable'};
@@ -3732,6 +3749,12 @@ function getLoadedSpringLiveState(){
   const value={...result,metrics};
   _loadedSpringLiveCache={tag,value};
   return value;
+}
+function getMomentumVolumeLiveState(){
+  const days=[...(SNAPSHOT_RUNTIME?.days||[])].sort((a,b)=>String(a.sessionDate).localeCompare(String(b.sessionDate)));
+  const current=days[days.length-1]||null;
+  const result=buildMomentumVolumeContinuation(current,current?.eligibleSymbols||[],20);
+  return {...result,metrics:new Map((result.picks||[]).map(item=>[item.symbol,Number(item.score)]))};
 }
 function getBreadthRelativeLiveState(){
   const days=[...(SNAPSHOT_RUNTIME?.days||[])].sort((a,b)=>String(a.sessionDate).localeCompare(String(b.sessionDate)));
@@ -3799,6 +3822,7 @@ function getStrategyMetricRow(row){
 // Live ordering metric for the champion's picks; -Infinity = not picked by this strategy.
 function getChampionRowMetric(champ,s,yd){
   const live=getStrategyMetricRow(s);
+  if(champ===MOMENTUM_VOLUME_KEY) return getMomentumVolumeLiveState().metrics.get(live.symbol)??-Infinity;
   if(champ===LOADED_SPRING_KEY) return getLoadedSpringLiveState().metrics.get(live.symbol)??-Infinity;
   if(champ==='breadth_relative') return getBreadthRelativeLiveState().metrics.get(live.symbol)??-Infinity;
   if(champ===DONCHIAN_VB_KEY) return getDonchianBreakoutLiveState().metrics.get(live.symbol)??-Infinity;
@@ -5033,7 +5057,7 @@ function getPickEligibilityReason(row,pickState=null){
   if(row?.evidenceStatus!=='authoritative') return 'Legacy cannot govern';
   if(getOutcomeHorizonSummary().phase!=='dynamic') return row?.name===pickState?.name?'Warm-up leader':'Provisional ranking';
   if(row?.episodeBased&&(row?.flagged||0)<10) return `${row?.flagged||0}/10 episodes`;
-  const minDays=row?.episodeBased?3:PICK_MIN_EVAL_DAYS;
+  const minDays=PICK_MIN_EVAL_DAYS;
   if((row?.evalDays||0)<minDays) return `${row?.evalDays||0}/${minDays} authoritative days`;
   if(!(Number(row?.exitNetPct)>0)) return 'Exit must be positive';
   return 'Eligible';
@@ -5053,10 +5077,13 @@ function buildPickLadderHTML(){
     const observedHits=Number(r.observedHorizonHits)||0,flagged=Number(r.flagged)||0;
     const horizonResult=`${observedHits} / ${flagged}${flagged?` (${pct(r.observedHorizonRate)})`:''}`;
     const settledTitle=evaluated?`Fully evaluated comparison: ${hits} / ${evaluated} (${pct(r.hitRate)})`:'No flags have completed the full horizon yet';
-    const netResult=evaluated?`${net(r.exitNetPct)} <span style="color:var(--t3);font-size:9px">(${evaluated} eval)</span>`:'-';
+    const observed=Number(r.observedFlagged)||0;
+    const liveResult=observed?`${net(r.liveNetPct)} <span style="color:var(--t3);font-size:9px">(${observed} observed)</span>`:'-';
+    const finalResult=evaluated?`${net(r.exitNetPct)} <span style="color:var(--t3);font-size:9px">(${evaluated} evaluated)</span>`:'pending';
+    const netResult=`<div>${liveResult}</div><div style="color:var(--t3);font-size:9px">Final: ${finalResult}</div>`;
     return `<tr title="${escHtml(rule)}" style="${isCh?'font-weight:800;color:var(--t1)':''}"><td>${label}${exampleHtml}</td><td>${r.entryDays||0}</td><td>${r.flagged||0}</td><td>${r.pendingFlagged||0}</td><td style="font-weight:800">${pct(r.sameDay10Rate)}</td><td title="${settledTitle}">${horizonResult}</td><td>${netResult}</td><td>${r.medianMinutesToMove!=null?Number(r.medianMinutesToMove).toFixed(1):'-'}</td><td>${getPickEligibilityReason(r,ps)}</td><td style="text-align:center">${remove}</td></tr>`;
   }).join('');
-  return `<div style="overflow-x:auto"><table class="ct" style="min-width:980px;font-size:11px"><thead><tr><th>Pick Source</th><th>Entry Days</th><th>Flags</th><th title="Flags whose full evaluation horizon has not elapsed or whose horizon observation is unavailable">Pending</th><th title="Post-flag 10% milestones on the entry day">Same-day 10%</th><th title="Actual flags that have reached 10% within the horizon / all flags, with the observed rate in brackets">10% &lt;= horizon<br><span style="font-size:9px">hits / flags</span></th><th title="Average horizon return after estimated round-trip costs, across fully evaluated flags only">Net %/flag</th><th title="Median minutes from flag to the first same-day 3% milestone">Med mins to move</th><th>Authority</th><th></th></tr></thead><tbody>${body||'<tr><td colspan="10" style="color:var(--t3)">No outcome episodes yet.</td></tr>'}</tbody></table></div>`;
+  return `<div style="overflow-x:auto"><table class="ct" style="min-width:980px;font-size:11px"><thead><tr><th>Pick Source</th><th>Entry Days</th><th>Flags</th><th title="Flags whose full evaluation horizon has not elapsed or whose horizon observation is unavailable">Pending</th><th title="Post-flag 10% milestones on the entry day">Same-day 10%</th><th title="Actual flags that have reached 10% within the horizon / all flags, with the observed rate in brackets">10% &lt;= horizon<br><span style="font-size:9px">hits / flags</span></th><th title="Live is the latest cost-adjusted mark across all observed flags. Final uses only flags whose complete horizon has elapsed.">Net %/flag<br><span style="font-size:9px">live + final</span></th><th title="Median minutes from flag to the first same-day 3% milestone">Med mins to move</th><th>Authority</th><th></th></tr></thead><tbody>${body||'<tr><td colspan="10" style="color:var(--t3)">No outcome episodes yet.</td></tr>'}</tbody></table></div>`;
 }
 function buildPickRosterControls(){
   const disabled=[...getPickDisabledStrategies()].sort();
@@ -5073,14 +5100,14 @@ function renderPickLadderPanel(){
   if(!el) return;
   const ps=getPickState();
   const disabled=getPickDisabledStrategies().size;
-  const active=getPickRosterStrategies().length-disabled+2;
+  const active=Object.keys(PICK_STRATEGY_LABELS).filter(key=>key!=='actual_you'&&!isPickStrategyDisabled(key)).length;
   const roster=`${active} active${disabled?' · '+disabled+' disabled':''}`;
-  const header=`🏆 Pick Championship Ladder — ${ps.default?'Default':'Champion'}: ${escHtml(ps.label||'Loaded Spring')}`;
+  const header=`🏆 Pick Championship Ladder — ${ps.default?'Default':'Champion'}: ${escHtml(ps.label||'Momentum + Volume Continuation')}`;
   el.innerHTML=`<div style="margin:10px 0 14px;border:1px solid var(--border);border-radius:8px;background:var(--bg-card);overflow:hidden">
     <button onclick="togglePickLadderPanel()" style="width:100%;display:flex;justify-content:space-between;align-items:center;gap:10px;background:transparent;border:0;color:var(--t1);padding:10px 12px;font-weight:800;font-family:inherit;cursor:pointer;text-align:left">
       <span>${header} <span style="color:var(--t3);font-size:11px">${roster}</span></span><span style="color:var(--t3);font-size:12px">${PICK_LADDER_COLLAPSED?'Show':'Hide'}</span>
     </button>
-    <div style="${PICK_LADDER_COLLAPSED?'display:none;':''}padding:0 10px 10px">${buildPickRosterControls()}<div style="color:var(--t3);font-size:11px;margin:0 0 8px">Same-day rockets are shown first; cost-adjusted episode return drives the champion.</div>${buildPickLadderHTML()}</div>
+    <div style="${PICK_LADDER_COLLAPSED?'display:none;':''}padding:0 10px 10px">${buildPickRosterControls()}<div style="color:var(--t3);font-size:11px;margin:0 0 8px">Same-day rockets are shown first; Live Net continuously updates warm-up ranking, while completed-horizon Final Net governs mature championship authority.</div>${buildPickLadderHTML()}</div>
   </div>`;
 }
 // Pick-source championship card: champion status only; the full ladder lives above Rankings.
@@ -5089,11 +5116,12 @@ function buildPickSourceCard(){
   const champion=ps.ladder.find(row=>row.name===ps.name);
   const col=ps.name==='engine'?'var(--cyan)':'var(--fire)';
   const note=ps.fallbackReason?'TEMPORARY FALLBACK':(ps.provisional?'PROVISIONAL WARM-UP LEADER':(ps.default?'DEFAULT DURING WARM-UP':(ps.name==='engine'?'engine picks':'RUNNING THE SHOW')));
-  const exit=champion?.exitNetPct;
+  const finalNet=champion?.exitNetPct,liveNet=champion?.liveNetPct;
   const fmt=v=>v!=null&&isFinite(v)?(v>=0?'+':'')+v.toFixed(2)+'%':'—';
-  const title='During episode-ledger warm-up, the highest-ranked non-control strategy with authoritative evaluated evidence runs the recommendations. After the dynamic horizon activates, a strategy needs at least 10 evaluable episodes across 3 entry dates and positive executable return to become champion.';
-  const detail=ps.fallbackReason?`${escHtml(ps.fallbackSourceLabel||ps.label)} unavailable: ${escHtml(ps.fallbackReason)}`:`Same-day 10% ${champion?.sameDay10Rate!=null?(champion.sameDay10Rate*100).toFixed(1)+'%':'—'} · Net ${fmt(exit)}/flag`;
-  return `<div class="st" title="${title}"><div class="st-l">Pick Source</div><div class="st-v" style="color:${col};font-size:16px">${ps.label||'Loaded Spring'} <span style="font-size:10px;color:var(--t3)">${note}${ps.since?' · since '+ps.since:''}</span></div><div class="st-d">${detail}</div></div>`;
+  const title=`Momentum + Volume Continuation remains the default during episode-ledger warm-up. After the dynamic horizon activates, a strategy needs at least 10 evaluable episodes across ${PICK_MIN_EVAL_DAYS} entry dates and positive Final Net to become champion.`;
+  const netMode=ps.horizon?.phase==='dynamic'?'Final':'Live',displayNet=netMode==='Final'?finalNet:(liveNet??finalNet);
+  const detail=ps.fallbackReason?`${escHtml(ps.fallbackSourceLabel||ps.label)} unavailable: ${escHtml(ps.fallbackReason)}`:`Same-day 10% ${champion?.sameDay10Rate!=null?(champion.sameDay10Rate*100).toFixed(1)+'%':'—'} · ${netMode} net ${fmt(displayNet)}/flag`;
+  return `<div class="st" title="${title}"><div class="st-l">Pick Source</div><div class="st-v" style="color:${col};font-size:16px">${ps.label||'Momentum + Volume Continuation'} <span style="font-size:10px;color:var(--t3)">${note}${ps.since?' · since '+ps.since:''}</span></div><div class="st-d">${detail}</div></div>`;
 }
 function buildPickDiagnosticsCard(){
   const ps=getPickState();
@@ -5101,7 +5129,8 @@ function buildPickDiagnosticsCard(){
   const mode='episode ledger';
   const first=d.firstAuthoritativeDate||'—';
   const bestCh=d.bestChallenger;
-  const challengerTxt=bestCh?`${getPickStrategyLabel(bestCh.name)} ${Number(bestCh.exitNetPct||0)>=0?'+':''}${Number(bestCh.exitNetPct||0).toFixed(2)}% net`: 'no evaluated challenger yet';
+  const challengerNet=bestCh?(bestCh.liveNetPct??bestCh.exitNetPct):null;
+  const challengerTxt=bestCh&&challengerNet!=null?`${getPickStrategyLabel(bestCh.name)} ${Number(challengerNet)>=0?'+':''}${Number(challengerNet).toFixed(2)}% live net`: 'no observed challenger yet';
   const h=ps.horizon||{},horizonTxt=h.phase==='dynamic'?`${h.active}-session dynamic horizon`:`ledger warm-up ${h.episodeCount||0}/${OUTCOME_HORIZON_MIN_EPISODES} episodes · ${h.entryDateCount||0}/${OUTCOME_HORIZON_MIN_DATES} entry dates`;
   return `<div class="st" title="Every pick source is judged from forward outcome episodes opened at its flag-time price."><div class="st-l">Pick Outcomes</div><div class="st-v" style="font-size:15px;color:var(--t1)">${mode}</div><div class="st-d">${horizonTxt} · first ${first} · ${challengerTxt}</div></div>`;
 }
@@ -5910,16 +5939,30 @@ function renderPerformance(){
 }
 
 function schedulePerformanceRender(){
+  if(document.visibilityState==='hidden'){
+    PERF_RENDER_WAITING_FOR_VISIBLE=true;
+    return;
+  }
   if(PERF_RENDER_QUEUED) return;
   PERF_RENDER_QUEUED=true;
   const el=document.getElementById('perfContent');
   if(el&&!PERF_RENDERED) el.innerHTML=`<div style="text-align:center;padding:60px 40px;color:var(--t2)"><div style="font-size:34px;margin-bottom:14px">📈</div><div style="font-size:15px;font-weight:700;color:var(--t1);margin-bottom:8px">Calculating performance</div><div>Rankings are ready while trade analytics finish in the background.</div></div>`;
   idleTask(()=>{
     PERF_RENDER_QUEUED=false;
+    if(document.visibilityState==='hidden'){
+      PERF_RENDER_WAITING_FOR_VISIBLE=true;
+      return;
+    }
     renderPerformance();
     try{if(ALL.length) renderStats();}catch(e){console.warn('Stats refresh after performance failed',e);}
   },900);
 }
+
+document.addEventListener('visibilitychange',()=>{
+  if(document.visibilityState!=='visible'||!PERF_RENDER_WAITING_FOR_VISIBLE)return;
+  PERF_RENDER_WAITING_FOR_VISIBLE=false;
+  requestAnimationFrame(()=>requestAnimationFrame(schedulePerformanceRender));
+});
 
 function _refreshHFSection(){
   const wrap=document.getElementById('meth-hf-wrap');
@@ -6384,15 +6427,16 @@ function _renderMethodologyInner(){
       <div class="m-card"><h4>Stability Spread</h4><p>Stability min ${((stabilitySummary.min||0)*100).toFixed(0)}%, median ${((stabilitySummary.median||0)*100).toFixed(0)}%, max ${((stabilitySummary.max||0)*100).toFixed(0)}%. Near-zero: ${stabilitySummary.nearZero||0}; near-one: ${stabilitySummary.nearOne||0}; tracked features: ${stabilitySummary.total||0}.</p></div>
       <div class="m-card"><h4>🎯 Max 1D Filter</h4><p>Set <em>Max 1D %</em> in the filter bar to hide stocks that have already moved too much today (default 5%). Entry-ceiling filtering has been removed; strong candidates are no longer hidden just because current price is above a calculated buy ceiling.</p></div>
       <div class="m-card"><h4>🚫 Recommendation Filters</h4><p>The learning universe keeps every valid parsed NSE symbol. Recommendation eligibility separately excludes zero-price rows, stocks at/near their NSE price band, non-EQ series, surveillance-flagged stocks, insufficient liquidity, invalid ATR, stocks already in the current day's rocket union, and live entries that have faded from the day high by the harvest-target zone. Delivery, peak retention, pullback from high, RVOL, DMI, MFI, RSI, and sell pressure remain learnable features. Currently structurally filtered from recommendations: ${(REMOVED.uc||0)+(REMOVED.surv||0)+(REMOVED.nonEq||0)+(REMOVED.liq||0)+(REMOVED.fscore||0)+(REMOVED.atr||0)} stocks.</p></div>
-      <div class="m-card"><h4>Breadth-Relative Ordering</h4><p>Each stock's 1-day-change percentile minus advancing-stock breadth measures whether it is leading or lagging market participation. Engine learning receives that direct feature. Every non-control pick source keeps its own qualification rules, then orders qualified rows with 80% native rank and 20% breadth-relation rank. Breadth Relative Strength separately tracks current leadership, recent mean leadership and consistency; no market regime, exposure multiplier or sit-out rule is created.</p></div>
+      <div class="m-card"><h4>Breadth and Relative Strength</h4><p>Each stock's 1-day-change percentile is measured against advancing-stock breadth. Engine learning receives the direct feature and the remaining specialist strategies retain a 20% breadth-relative ordering component. Momentum + Volume Continuation goes further: market-relative strength is an admission rule, and both its relative-strength and relative-volume floors tighten below 40% breadth.</p></div>
       <div class="m-card"><h4>📊 Sector & Industry Breadth</h4><p>${E.sectorCol?'<span style="color:var(--green)">✓</span> Sector breadth, sector relative strength':'<span style="color:var(--red)">✗</span> No Sector column detected'}${E.industryCol?', <span style="color:var(--green)">✓</span> industry breadth':''} — computed from today\'s full universe and fed into rocket relevance as features. Stocks outperforming their sector score higher regardless of market direction.</p></div>
     </div>
 
-    <h3 id="meth-pick-horizon" style="margin-top:28px">Loaded Spring & Dynamic Pick Horizon</h3>
+    <h3 id="meth-pick-horizon" style="margin-top:28px">Focused Strategy Ladder & Dynamic Pick Horizon</h3>
     <div class="m-grid">
-      <div class="m-card"><h4>Loaded Spring</h4><p>A standalone challenger that first requires tradeability and a coiled daily profile, then ranks candidates with 65% Rocket DNA and 35% fresh ignition against the previous accepted ALL NSE snapshot. At least four of seven ignition signals must improve. Five stocks are flagged and ranks 6-10 remain reserves. During ledger warm-up, the current highest-ranked non-control strategy with authoritative evaluated evidence runs the recommendations; Loaded Spring remains the fallback before such evidence exists.</p></div>
+      <div class="m-card"><h4>Momentum + Volume Continuation</h4><p>The warm-up default seeks an early 1-6.5% move that is leading the market, above VWAP, close to the day high and still positive over both one and five minutes. Relative volume, ADX and DMI confirm participation and directional control. Weak breadth raises both the relative-strength and volume requirements. It ranks only qualified stocks; it does not rescue laggards with a scoring bonus.</p></div>
+      <div class="m-card"><h4>Loaded Spring</h4><p>A distinct pre-breakout challenger that first requires tradeability and a coiled daily profile, then ranks candidates with 65% Rocket DNA and 35% fresh ignition against the previous accepted ALL NSE snapshot. At least four of seven ignition signals must improve. Five stocks are flagged and ranks 6-10 remain reserves.</p></div>
       <div class="m-card"><h4>One Episode Scoreboard</h4><p>Every forward strategy flag and new tradebook BUY opens an independent episode at its actionable flag or fill price. Entry-day milestones use only later uploads and new post-flag highs or lows, with timestamps for first 3%, 5%, 10% and 2% adverse crossings. The ladder, Pick Source card and championship all read these non-legacy episodes; the newest entry date remains pending.</p></div>
-      <div class="m-card"><h4>Confirmed Donchian Breakout</h4><p>A manually specified challenger that flags a stock only when it freshly reaches its 20-day Donchian upper channel: yesterday's price was below 99.5% of yesterday's upper channel while the current price is at or within 0.5% of today's. Every confirmation must also hold — price above VWAP, Relative Volume at Time at least ${DVB_RVOL_MIN}, daily ADX at least ${DVB_ADX_MIN}, DMI+ above DMI-, positive change from open, and price within ${DVB_HIGH_RETENTION_MAX_PCT}% of the day High. Qualifiers rank by 40% relative volume, 25% ADX, 20% DMI spread and 15% high retention. Forward measurement began only after deployment; it has no reconstructed history. Automatic daily strategy generation was retired: future strategies are researched and owner-approved before implementation, and Random remains the permanent control.</p></div>
+      <div class="m-card"><h4>Confirmed Donchian Breakout</h4><p>A narrow fresh-channel-break challenger. Yesterday must be below the 20-day upper-channel band; today must reach it while staying above VWAP, holding near the high and passing relative-volume, ADX, DMI and from-open confirmations. The active ladder now contains only Momentum + Volume Continuation, Engine, Loaded Spring, Confirmed Donchian Breakout and Random control. Retired strategy episodes remain stored for audit but no longer issue picks or compete for champion.</p></div>
       <div class="m-card"><h4>Capital-Velocity Horizon</h4><p>${horizonStatus} Candidate horizons are 3, 5, 10, 15, 20 and 30 trading sessions. A 10% hit before H counts as +10%; otherwise the observed return at H is used. Average return divided by H selects capital velocity. A switch must be at least 10% better and persist for three accepted trading days.</p></div>
       <div class="m-card"><h4>Current Evaluation Evidence</h4><p><strong>${horizonValue}</strong> · ${horizonMode}<br>Evaluable episodes: ${episodeAnalytics.evaluableCount||0} of ${episodeAnalytics.episodeCount||0}<br>Observed hit rates: 3% ${outcomePct(episodeAnalytics.hit3)} · 5% ${outcomePct(episodeAnalytics.hit5)} · 10% ${outcomePct(episodeAnalytics.hit10)}<br>Median sessions to 10%: ${outcomeNum(episodeAnalytics.medianSessionsTo10,1)} · median drawdown before success: ${outcomeNum(episodeAnalytics.medianDrawdownBeforeSuccess)}% · expired: ${outcomePct(episodeAnalytics.expiredRate)}<br>Active since: ${outcomeHorizon.activeSince||'—'} · phase: ${outcomeHorizon.phase||'warmup'}</p></div>
     </div>
@@ -7557,6 +7601,12 @@ function applyFilters(){
 
   PG=1;renderHead();renderTable();renderStatusBar();saveFilterState();updateTabCounts();
   if(ALL.length) try{renderStats();}catch(e){}
+}
+
+let APPLY_FILTERS_TIMER=null;
+function scheduleApplyFilters(){
+  clearTimeout(APPLY_FILTERS_TIMER);
+  APPLY_FILTERS_TIMER=setTimeout(()=>{APPLY_FILTERS_TIMER=null;applyFilters();},120);
 }
 
 
