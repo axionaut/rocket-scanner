@@ -1,5 +1,5 @@
-const BUILD_TS='2026-07-16 14:52 IST'; // release build time (IST)
-const APP_VERSION=511; // Provisional warm-up leader, restored ladder calculations, and TSL points.
+const BUILD_TS='2026-07-17 08:04 IST'; // release build time (IST)
+const APP_VERSION=512; // Restored Rankings metrics and recoverable Google Drive authorization loading.
 const GOOGLE_DRIVE_CLIENT_ID='1015012642264-oi2nelv3v90k3d39r994a6nelgjs2a56.apps.googleusercontent.com'; // Public OAuth Web Client ID.
 const HARD_FILTER_SCHEMA='structural_tradeability_v2';
 const STOCK_RUNWAY_CEILING_PCT=19.5; // Intentional owner-approved forward-catch strategy filter: excludes stocks already near their circuit band (or caps max entry) since a stock that has already used up its daily range is a poor pre-rocket buy. Active fallback when NSE price-band data is unavailable.
@@ -271,6 +271,7 @@ const FS = (() => {
   let _accessToken = null;
   let _expiresAt = 0;
   let _tokenClient = null;
+  let _gisLoadPromise = null;
   let _fileCache = null;
   let _localDirHandle = null;
 
@@ -298,11 +299,26 @@ const FS = (() => {
     }catch(e){}
   }
   async function waitForGIS(){
-    for(let i=0;i<80;i++){
+    for(let i=0;i<60;i++){
       if(window.google?.accounts?.oauth2) return true;
       await new Promise(r=>setTimeout(r,50));
     }
-    return false;
+    if(_gisLoadPromise) return await _gisLoadPromise;
+    _gisLoadPromise=new Promise(resolve=>{
+      const prior=document.getElementById('googleGisScript')||document.querySelector('script[src^="https://accounts.google.com/gsi/client"]');
+      if(prior) prior.remove();
+      const script=document.createElement('script');
+      script.id='googleGisScript';script.src='https://accounts.google.com/gsi/client';script.async=true;
+      let settled=false;
+      const finish=ok=>{if(settled)return;settled=true;clearTimeout(timer);resolve(!!ok);};
+      script.addEventListener('load',()=>finish(!!window.google?.accounts?.oauth2),{once:true});
+      script.addEventListener('error',()=>finish(false),{once:true});
+      const timer=setTimeout(()=>finish(!!window.google?.accounts?.oauth2),12000);
+      document.head.appendChild(script);
+    });
+    const loaded=await _gisLoadPromise;
+    if(!loaded)_gisLoadPromise=null;
+    return loaded;
   }
 
   async function init(){
@@ -884,7 +900,7 @@ async function connectCloudStorage(opts={}){
   const result=await FS.connect();
   if(!result.ok){
     setLoading(false);
-    const reason=result.reason==='google_library'?'Google authorization library could not load.':result.reason==='popup_failed'?'Google authorization popup was closed or blocked.':'Google Drive connection failed: '+result.reason;
+    const reason=result.reason==='google_library'?'Google authorization library is blocked or unavailable after retry. Check the connection or browser privacy blocking, then reconnect Drive.':result.reason==='popup_failed'?'Google authorization popup was closed or blocked.':'Google Drive connection failed: '+result.reason;
     showToast(reason,5000,true);
     return false;
   }
@@ -3694,7 +3710,17 @@ function getPickState(){
   try{champ=resolvePickChampion(ladder);}catch(e){console.warn('champion resolve failed',e);}
   if(champ.name===LOADED_SPRING_KEY){
     const live=getLoadedSpringLiveState();
-    if(!live.available) champ={name:'engine',since:null,metric:null,default:true,fallbackReason:live.unavailableReason||'Loaded Spring unavailable'};
+    if(!live.available) champ={name:'engine',since:null,metric:null,default:true,fallbackSourceLabel:getPickStrategyLabel(LOADED_SPRING_KEY),fallbackReason:live.unavailableReason||'Loaded Spring unavailable'};
+  }
+  if(champ.name!=='engine'&&ALL.length){
+    const yd=getYesterdayStateMaps();
+    const hasLivePick=ALL.some(row=>getChampionRowMetric(champ.name,row,yd)!==-Infinity);
+    if(!hasLivePick){
+      const fallbackName=champ.name;
+      champ={name:'engine',since:null,metric:null,default:true,provisional:champ.provisional,
+        fallbackSourceLabel:getPickStrategyLabel(fallbackName),
+        fallbackReason:'No live picks are available from the restored or current scanner data.'};
+    }
   }
   const diagnostics=buildPickDiagnostics(ladder,SNAPSHOT_RUNTIME);
   const v={...champ,label:getPickStrategyLabel(champ.name),ladder,diagnostics,horizon};
@@ -3755,21 +3781,46 @@ function getYesterdayStateMaps(){
   (prev.symbols||[]).forEach((sym,i)=>{const price=Number(prev.prices?.[i]);if(isFinite(price)&&price>0)prices.set(sym,price);});
   return {peak,rockets:new Set(prev.rocketSymbols||[]),features,prices};
 }
+let _strategyMetricSnapshotCache=null;
+function getStrategyMetricSnapshotState(){
+  const days=[...(SNAPSHOT_RUNTIME?.days||[])].sort((a,b)=>String(a.sessionDate).localeCompare(String(b.sessionDate)));
+  const current=days[days.length-1]||null;
+  const tag=String(window._lastScannerSessionTag||'')+'|'+String(current?.sessionDate||'')+'|'+(current?.symbols?.length||0);
+  if(_strategyMetricSnapshotCache?.tag===tag)return _strategyMetricSnapshotCache.value;
+  const priceKey=current?_dayPriceChangeKey(current):null;
+  const prices=new Map((current?.symbols||[]).map((symbol,index)=>[symbol,Number(current.prices?.[index])]));
+  const value={rows:new Map(Object.entries(current?.featureRows||{})),prices,priceKey};
+  _strategyMetricSnapshotCache={tag,value};
+  return value;
+}
+function getStrategyMetricRow(row){
+  if(!row?.symbol)return row;
+  const snapshot=getStrategyMetricSnapshotState(),full=snapshot.rows.get(row.symbol);
+  if(!full)return row;
+  const snapshotChange=snapshot.priceKey?Number(full[snapshot.priceKey]):null;
+  const snapshotPrice=Number(snapshot.prices.get(row.symbol));
+  return {...row,
+    price:Number(row.price)>0?row.price:(snapshotPrice>0?snapshotPrice:row.price),
+    priceChange:Number.isFinite(Number(row.priceChange))?row.priceChange:(Number.isFinite(snapshotChange)?snapshotChange:row.priceChange),
+    _features:{...full,...(row._features||{})}
+  };
+}
 // Live ordering metric for the champion's picks; -Infinity = not picked by this strategy.
 function getChampionRowMetric(champ,s,yd){
-  if(champ===LOADED_SPRING_KEY) return getLoadedSpringLiveState().metrics.get(s.symbol)??-Infinity;
-  if(champ==='breadth_relative') return getBreadthRelativeLiveState().metrics.get(s.symbol)??-Infinity;
-  const auto=getAutoStrategy(champ);if(auto)return getAutoStrategyLiveState(auto).metrics.get(s.symbol)??-Infinity;
-  if(champ==='momentum'){const m=yd.peak.get(s.symbol);return m!=null&&isFinite(m)?m:-Infinity;}
-  if(champ==='persistence') return yd.rockets.has(s.symbol)?(1000+(yd.peak.get(s.symbol)||0)):-Infinity;
-  if(champ==='early_mover'){const c=Number(s.priceChange);return (isFinite(c)&&c>=3&&c<6)?c:-Infinity;}
-  if(champ==='target_1m5m') return liveTarget1m5mMetric(s);
-  if(champ==='ta_composite') return liveCompositeMetric(s._features||{},PICK_COMPOSITES.ta_composite);
-  if(champ==='fa_composite') return liveCompositeMetric(s._features||{},PICK_COMPOSITES.fa_composite);
-  if(MOM_CONT_STRATEGY_BY_KEY[champ]) return liveMomentumContinuationMetric(s,yd,MOM_CONT_STRATEGY_BY_KEY[champ]);
-  if(RATING_STRATEGY_BY_KEY[champ]) return liveRatingMetric(s,RATING_STRATEGY_BY_KEY[champ]);
-  if(['high52w_mom','volume_shock','range_squeeze','delivery_surge','oversold_snap'].includes(champ)) return getQuantLiveMetric(champ,s,yd);
-  return Number(s.rankScore??s.rocketScore)||0;
+  const live=getStrategyMetricRow(s);
+  if(champ===LOADED_SPRING_KEY) return getLoadedSpringLiveState().metrics.get(live.symbol)??-Infinity;
+  if(champ==='breadth_relative') return getBreadthRelativeLiveState().metrics.get(live.symbol)??-Infinity;
+  const auto=getAutoStrategy(champ);if(auto)return getAutoStrategyLiveState(auto).metrics.get(live.symbol)??-Infinity;
+  if(champ==='momentum'){const m=yd.peak.get(live.symbol);return m!=null&&isFinite(m)?m:-Infinity;}
+  if(champ==='persistence') return yd.rockets.has(live.symbol)?(1000+(yd.peak.get(live.symbol)||0)):-Infinity;
+  if(champ==='early_mover'){const c=Number(live.priceChange);return (isFinite(c)&&c>=3&&c<6)?c:-Infinity;}
+  if(champ==='target_1m5m') return liveTarget1m5mMetric(live);
+  if(champ==='ta_composite') return liveCompositeMetric(live._features||{},PICK_COMPOSITES.ta_composite);
+  if(champ==='fa_composite') return liveCompositeMetric(live._features||{},PICK_COMPOSITES.fa_composite);
+  if(MOM_CONT_STRATEGY_BY_KEY[champ]) return liveMomentumContinuationMetric(live,yd,MOM_CONT_STRATEGY_BY_KEY[champ]);
+  if(RATING_STRATEGY_BY_KEY[champ]) return liveRatingMetric(live,RATING_STRATEGY_BY_KEY[champ]);
+  if(['high52w_mom','volume_shock','range_squeeze','delivery_surge','oversold_snap'].includes(champ)) return getQuantLiveMetric(champ,live,yd);
+  return Number(live.rankScore??live.rocketScore)||0;
 }
 function getTrailingTrajectorySources(runtime,currentDate){
   const byDate=new Map((runtime?.days||[]).map(day=>[day.sessionDate,day]));
@@ -5045,7 +5096,7 @@ function buildPickSourceCard(){
   const exit=champion?.exitNetPct;
   const fmt=v=>v!=null&&isFinite(v)?(v>=0?'+':'')+v.toFixed(2)+'%':'—';
   const title='During episode-ledger warm-up, the highest-ranked non-control strategy with authoritative evaluated evidence runs the recommendations. After the dynamic horizon activates, a strategy needs at least 10 evaluable episodes across 3 entry dates and positive executable return to become champion.';
-  const detail=ps.fallbackReason?`${escHtml(ps.label)} unavailable: ${escHtml(ps.fallbackReason)}`:`Same-day 10% ${champion?.sameDay10Rate!=null?(champion.sameDay10Rate*100).toFixed(1)+'%':'—'} · Net ${fmt(exit)}/flag`;
+  const detail=ps.fallbackReason?`${escHtml(ps.fallbackSourceLabel||ps.label)} unavailable: ${escHtml(ps.fallbackReason)}`:`Same-day 10% ${champion?.sameDay10Rate!=null?(champion.sameDay10Rate*100).toFixed(1)+'%':'—'} · Net ${fmt(exit)}/flag`;
   return `<div class="st" title="${title}"><div class="st-l">Pick Source</div><div class="st-v" style="color:${col};font-size:16px">${ps.label||'Loaded Spring'} <span style="font-size:10px;color:var(--t3)">${note}${ps.since?' · since '+ps.since:''}</span></div><div class="st-d">${detail}</div></div>`;
 }
 function buildPickDiagnosticsCard(){
