@@ -16,7 +16,7 @@
 <div class="hdr">
  <div class="brand">
   <div class="brand-ico">🚀</div>
-  <div><h1>Rocket <em>Scanner</em> <span id="verLabel"></span></h1><div class="brand-tag">Prior-State Rocket Relevance</div><div id="appUpdateTag" style="font-size:11px;color:var(--t2);margin-top:1px;font-weight:500"><span id="appUpdateVal"></span></div></div>
+  <div><h1>Rocket <em>Scanner</em> <span id="verLabel"></span></h1><div class="brand-tag">Same-Day Composite Radar</div><div id="appUpdateTag" style="font-size:11px;color:var(--t2);margin-top:1px;font-weight:500"><span id="appUpdateVal"></span></div></div>
  </div>
  <div class="hdr-r" id="hdrR">
 
@@ -64,11 +64,12 @@
  <div class="tp act" id="tab0">
   <button class="ctrls-toggle" id="ctrlsToggle" onclick="toggleFilters()">⚙ Filters <span id="ctrlsArrow">▼</span></button>
   <div class="ctrls" id="ctrlsPanel">
-   <div class="fg"><span class="fg-lbl" style="color:var(--orange)">Min Score</span><input type="number" id="fMinScore" placeholder="Default" min="0" max="100" step="0.5" style="width:72px;padding:8px 10px;background:var(--bg-card);border:1px solid var(--border);border-radius:8px;color:var(--t1);font-family:'DM Mono',monospace;font-size:12px;outline:none;transition:border .2s" onfocus="this.style.borderColor='var(--orange)'" onblur="this.style.borderColor='var(--border)'" oninput="scheduleApplyFilters()"></div>
-   <div class="fg"><span class="fg-lbl" style="color:var(--amber)">Top #</span><input type="number" id="fTopRank" placeholder="20" min="1" max="20" step="1" style="width:62px;padding:8px 10px;background:var(--bg-card);border:1px solid var(--border);border-radius:8px;color:var(--t1);font-family:'DM Mono',monospace;font-size:12px;outline:none;transition:border .2s" onfocus="this.style.borderColor='var(--amber)'" onblur="this.style.borderColor='var(--border)'" oninput="scheduleApplyFilters()" title="Show only the top N ranked buy candidates. Empty = 20."></div>
+   <div class="fg" style="flex:1;min-width:180px"><span class="fg-lbl" style="color:var(--blue)">Search</span><input type="text" id="fSearch" placeholder="Symbol, company, sector" style="width:100%;padding:8px 10px;background:var(--bg-card);border:1px solid var(--border);border-radius:8px;color:var(--t1);font-size:12px;outline:none;transition:border .2s" onfocus="this.style.borderColor='var(--blue)'" onblur="this.style.borderColor='var(--border)'" oninput="scheduleApplyFilters()"></div>
+   <div class="fg"><span class="fg-lbl" style="color:var(--orange)">Risk</span><select id="fRisk" style="padding:8px 10px;background:var(--bg-card);border:1px solid var(--border);border-radius:8px;color:var(--t1);font-size:12px;outline:none" onchange="scheduleApplyFilters()"><option value="">All</option><option>Low</option><option>Medium</option><option>High</option></select></div>
+   <div class="fg"><span class="fg-lbl" style="color:var(--amber)">Rows</span><input type="number" id="fRows" placeholder="20" min="1" step="1" style="width:62px;padding:8px 10px;background:var(--bg-card);border:1px solid var(--border);border-radius:8px;color:var(--t1);font-family:'DM Mono',monospace;font-size:12px;outline:none;transition:border .2s" onfocus="this.style.borderColor='var(--amber)'" onblur="this.style.borderColor='var(--border)'" oninput="scheduleApplyFilters()" title="Number of ranked stocks to display. Empty = 20."></div>
+   <div class="fg"><span class="fg-lbl" style="color:var(--cyan)">Min Turnover</span><select id="fMinTurnover" style="padding:8px 10px;background:var(--bg-card);border:1px solid var(--border);border-radius:8px;color:var(--t1);font-size:12px;outline:none" onchange="scheduleApplyFilters()"><option value="0">Any</option><option value="1">₹5L</option><option value="2">₹25L</option><option value="3">₹1Cr</option><option value="4">₹5Cr</option><option value="5">₹10Cr</option><option value="6">₹100Cr</option><option value="7">₹1000Cr</option></select></div>
    <div class="fg"><span class="fg-lbl" style="color:var(--amber)">Capital ₹</span><input type="number" id="fCapital" placeholder="e.g. 100000" min="0" step="1000" style="width:110px;padding:8px 10px;background:var(--bg-card);border:1px solid var(--border);border-radius:8px;color:var(--t1);font-family:'DM Mono',monospace;font-size:12px;outline:none;transition:border .2s" onfocus="this.style.borderColor='var(--amber)'" onblur="this.style.borderColor='var(--border)'" oninput="scheduleApplyFilters()" title="Total capital pool for stock allocation."></div>
    <div class="fg"><span class="fg-lbl" style="color:var(--amber)">Max Alloc ₹</span><input type="number" id="fMaxAlloc" placeholder="e.g. 20000" min="0" step="1000" style="width:110px;padding:8px 10px;background:var(--bg-card);border:1px solid var(--border);border-radius:8px;color:var(--t1);font-family:'DM Mono',monospace;font-size:12px;outline:none;transition:border .2s" onfocus="this.style.borderColor='var(--amber)'" onblur="this.style.borderColor='var(--border)'" oninput="scheduleApplyFilters()" title="Per-stock allocation cap. Empty = no cap."></div>
-   <div class="fg"><span class="fg-lbl" style="color:var(--fire)">Top-up %</span><input type="number" id="fTopupAlloc" value="50" placeholder="50" min="10" max="100" step="10" style="width:72px;padding:8px 10px;background:var(--bg-card);border:1px solid var(--border);border-radius:8px;color:var(--t1);font-family:'DM Mono',monospace;font-size:12px;outline:none;transition:border .2s" onfocus="this.style.borderColor='var(--fire)'" onblur="this.style.borderColor='var(--border)'" oninput="scheduleApplyFilters()" title="Allocation % for top-up candidates vs a fresh buy. 50 means top-up gets half the normal score-weighted allocation. Default 50%."></div>
    <button class="btn" id="basketBtn" onclick="exportBasket()" disabled style="background:rgba(251,191,36,.12);border-color:rgba(251,191,36,.3);color:var(--amber);font-weight:700" title="Export selected stocks as Zerodha basket order">🧺 Buy Basket <span id="basketCount"></span></button>
   </div>
   <div class="status-bar" id="statusBar"></div>
@@ -76,7 +77,6 @@
   <div class="tbl-w" id="tblW"><table class="main"><thead id="tHead"></thead><tbody id="tBody"></tbody></table></div>
   </div>
   <div class="pgn" id="pgn"></div>
-  <div id="pickLadderPanel"></div>
   <div class="fixed-hscroll" id="fixedHScroll"><div class="fixed-hscroll-inner" id="fixedHScrollInner"></div></div>
  </div>
  <div class="tp" id="tab1"><div class="meth" id="methContent"></div></div>
@@ -84,6 +84,7 @@
 </div><!-- /dash -->
 <button class="go-top" id="goTop" onclick="window.scrollTo({top:0,behavior:'smooth'})" title="Go to top">▲</button>
 </div><!-- /app -->
+<dialog id="radarDetail"><div class="rr-modalhead"><h2 id="radarDetailTitle"></h2><button class="rr-close" onclick="closeRadarDetail()">Close</button></div><div class="rr-modalbody" id="radarDetailBody"></div></dialog>
 
 <!-- Cache-proof app loader. The visible version/timestamp comes from the loaded app.js. -->
 <script>

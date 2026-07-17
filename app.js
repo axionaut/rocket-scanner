@@ -1,8 +1,6 @@
-const BUILD_TS='2026-07-17 10:50 IST'; // release build time (IST)
-const APP_VERSION=516; // Additive volatility-contraction challenger with cumulative strategy-learning preservation.
+const BUILD_TS='2026-07-17 19:59 IST'; // release build time (IST)
+const APP_VERSION=517; // Radar composite core: stateless same-day transparent scorer replaces the learning engine.
 const GOOGLE_DRIVE_CLIENT_ID='1015012642264-oi2nelv3v90k3d39r994a6nelgjs2a56.apps.googleusercontent.com'; // Public OAuth Web Client ID.
-const HARD_FILTER_SCHEMA='structural_tradeability_v2';
-const STOCK_RUNWAY_CEILING_PCT=19.5; // Intentional owner-approved forward-catch strategy filter: excludes stocks already near their circuit band (or caps max entry) since a stock that has already used up its daily range is a poor pre-rocket buy. Active fallback when NSE price-band data is unavailable.
 const PRICE_BAND_BLOCK_BUFFER_PCT=0.15; // Treat rounded 4.9/9.9/19.9 rows as effectively band-locked.
 const BASKET_CASH_RESERVE_RS=1; // Leave a rupee for broker-side tax/rounding differences.
 const BASKET_MARKET_BUDGET_BUFFER_PCT=0.25; // Sizing cushion only; exported buys remain MARKET orders.
@@ -16,21 +14,9 @@ const TSL_GAP_MIN_PCT=1.5;
 const TSL_GAP_MAX_PCT=6.0;
 const HARVEST_TRIGGER_CONFIDENCE=0.60; // Prefer a target that prior picks commonly reached.
 const HARVEST_MIN_SAMPLES=8;
-const ENTRY_FADE_RETENTION_FLOOR=70; // Below this, a pullback through the target zone is treated as a fading entry.
-const ENTRY_FADE_SEVERE_TARGET_MULT=2; // A pullback twice the harvest target is too much give-back to chase.
-const MIN_SCORE_DEFAULT=77; // Empty Min Score field still means the visible default floor.
 const SL_ATR_MULT=1.5;
 const SL_MIN_PCT=3.0;
 const SL_MAX_PCT=8.0;
-const GEOMETRY_MIN_RR=2.0; // Require at least 2x headroom-to-risk before recommending a fresh entry.
-const VELOCITY_WEIGHT=0.3; // Modest ranking tilt toward catchable room to upper circuit among geometry survivors.
-// Rocket relevance: four prior trading-day states explain the current day's rocket set.
-// A five-session frame is D-4, D-3, D-2, D-1 and D. Current feature values never explain Y(D).
-const DELTA_FEATURE_SCHEMA='five_session_rolling_daily_rocket_trajectory_one_clock_pure_relevance_v6';
-const DAILY_TRAJECTORY_TOTAL_DAYS=5;
-const DAILY_TRAJECTORY_PRIOR_DAYS=DAILY_TRAJECTORY_TOTAL_DAYS-1;
-const DAILY_TRAJECTORY_WEIGHT_STEPS=[4,3,2,1]; // D-1 through D-4, normalized over usable pairs.
-const WARMUP_NEUTRAL_SCORE=50; // Equal-weight display/allocation score until honest rocket-relevance evidence exists.
 let MARKET_MODE='stock';
 function modeKey(base){return base;}
 function inputBaseName(name){
@@ -85,36 +71,27 @@ function isLooseNseSupportCsvName(name){
 
 function updateModeUI(){
   const brand=document.querySelector('.brand-tag');
-  if(brand) brand.textContent='Prior-State Rocket Relevance';
+  if(brand) brand.textContent='Same-Day Composite Radar';
   document.querySelectorAll('.currency-lbl').forEach(el=>{el.textContent='₹';});
 }
-let ALL=[],FILT=[],PG=1,PGSZ=100,SCOL='_rank',SDIR=1;
+let ALL=[],FILT=[],PG=1,PGSZ=100,SCOL='rank',SDIR=1;
 let _tvLoadedThisSession=false; // true once a TV CSV has been processed this session
-let _scanSavedDate=null; // date string (YYYY-MM-DD) of the brain-restored scan, set on init
-let SCORE_MAP={}; // {symbol → rocketScore} for ALL parsed stocks including filtered-out ones
 let PERF_PERIOD_FILTER='all'; // 'all' | '1m' | '3m' | '6m' | '1y'
 let PERF_TRADE_WINDOWS=[]; // cached trade window rows from renderPerformance — used by current-window pill
 let PERF_LATEST_SUMMARY=null; // cached latest session summary from renderPerformance — used by renderStats card
 let PERF_RENDERED=false; // true after background or foreground performance calculation
 let PERF_RENDER_QUEUED=false;
 let PERF_RENDER_WAITING_FOR_VISIBLE=false;
-let ENGINE_DATA={};
-let REMOVED={uc:0,surv:0,liq:0,fscore:0,atr:0};
+let ENGINE_DATA={}; // legacy engine metadata shell; the Radar composite keeps its own RADAR state
 let SUPPRESSED_HELD=0; // count of stocks hidden because already held in POSITIONS
-let GEOMETRY_GATE_SUMMARY={input:0,gatedOut:0,unverifiedFallback:0,finalRecommended:0,slCapClamped:0,velocityTilted:0};
 let SELECTED=new Set(); // symbols selected for basket — recomputed from FILT each applyFilters
-let SHOW_FILTERED_CANDIDATES=false;
-let KEEP_FILTER_OVERRIDES=new Set();
 let FILE_LOAD_STATUS={source:null,when:null,files:[]};
+// Radar composite scorer state (v517): one same-day transparent cross-sectional model.
+let RADAR={headers:[],matrix:[],features:[],ids:{},rockets:0,ms:0,sourceNote:'',scoredAt:null};
 const SCANNER_STORE='rs_filters';
 const SHARED_FILTER_STORE='rs_filters_shared';
 const ALL_STORE='rs_data';
-const CORR_STORE='rs_corr';
-const CORR_SCHEMA='five_session_rolling_daily_rocket_trajectory_one_clock_pure_relevance_v6';
-const ROCKET_TOP_FRACTION=0.01;
-const SNAPSHOT_STATE_STORE='rs_snapshot_mrmr_v1';
-const SNAPSHOT_STATE_SCHEMA='five_session_rolling_daily_rocket_trajectory_one_clock_v4';
-const METH_STORE='rs_meth';
+const ALL_STORE_SCHEMA='radar_composite_v1'; // same-day transparent composite scorer (v517)
 const HOLD_STORE='rs_holdings';
 const ORDERS_STORE='rs_orders';
 const POS_STORE='rs_positions';
@@ -127,22 +104,11 @@ const SAME_DAY_EXIT_OPPORTUNITY_STORE='rs_same_day_exit_opportunity_v3';
 const RECOMMEND_OUTCOME_STORE='rs_recommend_outcomes_delta_v1';
 const RECOMMEND_MIN_PROGRESS_FRACTION=0.25;
 const ENTRY_OUTCOME_STORE='rs_entry_outcomes_delta_v1';
-const OUTCOME_EPISODE_STORE='rs_outcome_episode_ledger_v1';
-const OUTCOME_EPISODE_SCHEMA=1;
-const OUTCOME_EPISODE_MAX_SESSIONS=30;
-const OUTCOME_MILESTONES=[3,5,10];
-const OUTCOME_HORIZON_CANDIDATES=[3,5,10,15,20,30];
-const OUTCOME_HORIZON_MIN_EPISODES=30;
-const OUTCOME_HORIZON_MIN_DATES=5;
-const OUTCOME_HORIZON_MIN_PER_CANDIDATE=10;
-const OUTCOME_HORIZON_SWITCH_MARGIN=0.10;
-const OUTCOME_HORIZON_STABILITY_DAYS=3;
 const OUTCOME_HORIZON_FALLBACK_DAYS=5;
 const OUTCOME_HORIZON_MAX_DAYS=20;
 const OUTCOME_FEEDBACK_MIN_SAMPLES=6;
 const OUTCOME_SCORE_ADJ_MAX=8;
 const OUTCOME_FEATURE_SIGNATURE_MAX=24;
-const REC_COUNT_STORE='rs_rec_count';
 const NSE_HOLIDAYS_STORE='rs_nse_holidays';
 // Keep rocket_brain.json for learned state only. Input-file derivatives are rebuilt
 // from Google Drive canonical files; legacy non-stock keys are purged completely.
@@ -169,6 +135,15 @@ const DEPRECATED_BRAIN_KEYS=new Set([
   'rs_avg_move_all_v1',
   'rs_avg_move_universe_v1',
   'rs_auto_strategies_v1',
+  // v517: the five-session learning engine, strategy ladder/championship and
+  // outcome-episode scoreboard were retired with the Radar composite core.
+  'rs_corr',
+  'rs_snapshot_mrmr_v1',
+  'rs_meth',
+  'rs_rec_count',
+  'rs_pick_champion_v1',
+  'rs_pick_disabled_v1',
+  'rs_outcome_episode_ledger_v1',
 ]);
 function shouldDropBrainKey(key){
   const k=String(key||'').toLowerCase();
@@ -205,8 +180,9 @@ function getOutcomeFeatureOrderFromEngine(){
   return getOutcomeFeatureOrderFromWeights(ENGINE_DATA?.weights,ENGINE_DATA?.features);
 }
 function getOutcomeFeatureOrderFromBrain(brain){
-  const meth=brain?.[modeKey(METH_STORE)]||brain?.[METH_STORE]||{};
-  return getOutcomeFeatureOrderFromWeights(meth.weights,meth.features);
+  // rs_meth (engine feature weights) is deprecated; stored outcome signatures keep
+  // their own key order via the compactOutcomeFeatures fallback.
+  return [];
 }
 function migrateOutcomeFeatureStore(store,featureOrder){
   if(!store||typeof store!=='object') return false;
@@ -243,37 +219,10 @@ function pruneBrainForStorage(brain){
   });
   return compactOutcomeStoresInBrain(out);
 }
-function mergeOutcomeEpisodeLedgers(first,second){
-  if(!first?.episodes) return second;
-  if(!second?.episodes) return first;
-  const merged={...first,...second,episodes:{...first.episodes}};
-  Object.entries(second.episodes).forEach(([id,incoming])=>{
-    const existing=merged.episodes[id];
-    if(!existing){merged.episodes[id]=incoming;return;}
-    const existingDate=String(existing.evaluatedThrough||''),incomingDate=String(incoming.evaluatedThrough||'');
-    const newer=incomingDate>=existingDate?incoming:existing,older=newer===incoming?existing:incoming;
-    const observations=new Map();
-    [...(older.observations||[]),...(newer.observations||[])].forEach(item=>observations.set(`${item.d}|${item.s}`,item));
-    merged.episodes[id]={...older,...newer,
-      milestones:{...(older.milestones||{}),...(newer.milestones||{})},
-      observations:[...observations.values()].sort((a,b)=>Number(a.s)-Number(b.s)||String(a.d).localeCompare(String(b.d)))
-    };
-  });
-  merged.deployedOn=[first.deployedOn,second.deployedOn].filter(Boolean).sort()[0]||second.deployedOn||first.deployedOn;
-  merged.revision=Math.max(Number(first.revision)||0,Number(second.revision)||0);
-  const firstHorizonDate=String(first.horizon?.lastDate||''),secondHorizonDate=String(second.horizon?.lastDate||'');
-  merged.horizon=secondHorizonDate>=firstHorizonDate?(second.horizon||first.horizon):(first.horizon||second.horizon);
-  return merged;
-}
 function mergeCumulativeBrain(first,second){
   const base=(first&&typeof first==='object')?first:{};
   const incoming=(second&&typeof second==='object')?second:{};
-  const merged={...base,...incoming};
-  const ledger=mergeOutcomeEpisodeLedgers(base[OUTCOME_EPISODE_STORE],incoming[OUTCOME_EPISODE_STORE]);
-  if(ledger) merged[OUTCOME_EPISODE_STORE]=ledger;
-  const expanded=!!incoming.__cumulativeLedgerExpanded||Object.keys(ledger?.episodes||{}).length>Object.keys(incoming[OUTCOME_EPISODE_STORE]?.episodes||{}).length;
-  if(expanded) Object.defineProperty(merged,'__cumulativeLedgerExpanded',{value:true,enumerable:false});
-  return merged;
+  return {...base,...incoming};
 }
 let TRADEBOOK_STATS=null; // Includes the realised exit-policy baseline, later refined by outcome learning.
 let LAST_BUY_DATE_MAP={}; // Legacy latest-buy map retained for stored-brain compatibility.
@@ -759,12 +708,11 @@ const FS = (() => {
     const raw=(brain&&typeof brain==='object')?brain:{};
     const hadDropped=Object.keys(raw).some(shouldDropBrainKey);
     const cumulative=mergeCumulativeBrain(_brain,raw);
-    const ledgerExpanded=!!cumulative.__cumulativeLedgerExpanded||Object.keys(cumulative[OUTCOME_EPISODE_STORE]?.episodes||{}).length>Object.keys(raw[OUTCOME_EPISODE_STORE]?.episodes||{}).length;
     _brain=pruneBrainForStorage(cumulative);
     _brainLoaded=true;
     writeLocalBrain(_brain).catch(e=>console.warn('Local brain mirror failed after load',e));
     // Seamless one-time migration: old/full brains still load, then the next cloud copy is pruned automatically.
-    if((hadDropped||ledgerExpanded)&&isConnected()) write(_brain).catch(e=>console.warn('Cloud brain migration save failed',e));
+    if(hadDropped&&isConnected()) write(_brain).catch(e=>console.warn('Cloud brain migration save failed',e));
   }
   async function loadFromDisk(){
     if(!isConnected()) return null;
@@ -899,7 +847,7 @@ function renderTradingDashboardNow(){
     document.getElementById('dash').style.display='block';
     document.getElementById('noDataBanner').style.display=ALL.length?'none':'flex';
   }catch(e){}
-  try{if(ALL.length&&ENGINE_DATA&&ENGINE_DATA.features) renderMethodology();}catch(e){console.warn('Methodology render failed',e);}
+  try{renderMethodology();}catch(e){console.warn('Methodology render failed',e);}
   try{if(ALL.length) applyFilters();}catch(e){console.warn('Fast ranking render failed',e);}
   schedulePerformanceRender();
 }
@@ -963,8 +911,8 @@ async function connectCloudStorage(opts={}){
   const OLD_TO_NEW={
     'rscanner_v4_filters':SCANNER_STORE,'rscanner_v5_filters':SCANNER_STORE,
     'rscanner_v4_data':ALL_STORE,'rscanner_v5_data':ALL_STORE,
-    'rscanner_v4_corr':CORR_STORE,'rscanner_v5_corr':CORR_STORE,
-    'rscanner_v4_meth':METH_STORE,'rscanner_v5_meth':METH_STORE
+    'rscanner_v4_corr':'rs_corr','rscanner_v5_corr':'rs_corr',
+    'rscanner_v4_meth':'rs_meth','rscanner_v5_meth':'rs_meth'
   };
   try{
     // First pass: clean up orphans and defunct keys to free space
@@ -989,6 +937,7 @@ async function connectCloudStorage(opts={}){
   }catch(e){console.warn('Key migration:',e);}
 })();
 let NSE_BHAV={},NSE_52W={},NSE_SURV={},NSE_BULK={},NSE_BLOCK={},NSE_PRICE_BAND={};
+let NSE_STATUS={}; // {symbol -> exchange status letter from REG1 (A = active)}
 let NSE_NON_EQ=new Set(); // symbols in non-EQ series (BE,BZ,SZ,SM,ST) — excluded from display, kept in learning
 let NSE_HOLIDAYS=new Set(); // Set of 'YYYY-MM-DD' strings for NSE trading holidays
 let SURV_CUSTOM_RULES=[]; // [{key,column,label}] all surveillance rules — user-managed, persisted in brain
@@ -1146,12 +1095,14 @@ function parseCSV(text){
   if(lines[0]&&/^sep=/i.test(lines[0].trim())) lines=lines.slice(1);
   if(!lines.length)return[];
   const hdrs=splitLine(lines[0].replace(/^\uFEFF/,'')).map(h=>h.trim().replace(/^\uFEFF/,''));
-  return lines.slice(1).map(l=>{
+  const rows=lines.slice(1).map(l=>{
     const v=splitLine(l);
     const o={};
     hdrs.forEach((h,i)=>o[h]=(v[i]!==undefined?v[i].trim():''));
     return o;
   }).filter(r=>Object.values(r).some(v=>v));
+  rows._headers=hdrs; // column order for the Radar composite scorer
+  return rows;
 }
 function num(v){
   if(v===null||v===undefined)return null;
@@ -1322,79 +1273,13 @@ function syncSurvRuleRows(savedRows){
     return {key:rule.key,label:rule.label,column:rule.column,active,flagged:prev.flagged||0,removed:prev.removed||0};
   });
 }
-function getHardFilterRowsFromEngine(E){
-  if(!E) return [];
-  const rm=E.removed||{};
-  const survRows=syncSurvRuleRows(E.survRuleRows||[]);
-  const audit=E.hardFilterAudit||window._lastHardFilterAudit||{};
-  return [
-    {key:'upper_circuit',label:'Upper Circuit',criteria:'Price change at/near NSE upper band',removed:rm.uc||0,active:true,kind:'core'},
-    {key:'non_eq',label:'Non-EQ Series',criteria:'BE / BZ / SZ / SM / ST',removed:rm.nonEq||0,active:true,kind:'core'},
-    {key:'low_liquidity',label:'Low Liquidity',criteria:`Volume < Min Vol OR Shareholders < Min Sh (filter bar)`,removed:rm.liq||0,active:true,kind:'core'},
-    {key:'zero_f_score',label:'Zero F-Score',criteria:'Piotroski = 0',removed:rm.fscore||0,active:true,kind:'core'},
-    {key:'invalid_atr',label:'Invalid ATR',criteria:'ATR <= 0 or missing when mandatory',removed:rm.atr||0,active:true,kind:'core'},
-    {key:'prior_move',label:'Prior Move',criteria:'Already in today’s rocket union / already rocketed earlier',removed:audit.priorMove||0,active:true,kind:'core'},
-    {key:'entry_gate',label:'Entry Gate',criteria:'Fade / geometry / held / min-score / budget',removed:(audit.entryGate||0)+(GEOMETRY_GATE_SUMMARY.gatedOut||0),active:true,kind:'core'},
-    ...survRows.map(row=>({
-      key:'surv_'+row.key,
-      label:row.label,
-      criteria:row.column,
-      removed:row.active?(row.removed||0):null,
-      flagged:row.active?(row.flagged||0):0,
-      active:!!row.active,
-      missing:false,
-      kind:'surv',
-      ruleKey:row.key,
-    })),
-  ];
-}
-function persistMethodologySnapshot(){
-  if(!ENGINE_DATA||!ENGINE_DATA.features||!ENGINE_DATA.features.length) return;
-  try{
-    const methSave={
-      targetRelevance:ENGINE_DATA.targetRelevance||{},
-      targetRelevanceToday:ENGINE_DATA.targetRelevanceToday||{},
-      featureStability:ENGINE_DATA.featureStability||{},
-      targetRelevanceByLag:ENGINE_DATA.targetRelevanceByLag||{},
-      mrmr:ENGINE_DATA.mrmr||{},
-      weights:ENGINE_DATA.weights||{},
-      features:ENGINE_DATA.features||[],
-      labels:ENGINE_DATA.labels||{},
-      top10Feats:ENGINE_DATA.top10Feats||[],
-      interactionFeatures:ENGINE_DATA.interactionFeatures||{static:[],breadth:[],selected:[]},
-      accSessions:ENGINE_DATA.accSessions,
-      laggedNote:ENGINE_DATA.laggedNote||'',
-      marketBreadth:ENGINE_DATA.marketBreadth,
-      useAccCorr:ENGINE_DATA.useAccCorr,
-      sectorCol:ENGINE_DATA.sectorCol,
-      industryCol:ENGINE_DATA.industryCol,
-      totalParsed:ENGINE_DATA.totalParsed||0,
-      hardFilterSchema:ENGINE_DATA.hardFilterSchema||HARD_FILTER_SCHEMA,
-      removed:{...(ENGINE_DATA.removed||{})},
-      survSize:ENGINE_DATA.survSize||0,
-      survRuleRows:syncSurvRuleRows(ENGINE_DATA.survRuleRows||[]),
-      recommendationFeedback:ENGINE_DATA.recommendationFeedback||null,
-      executedEntryFeedback:ENGINE_DATA.executedEntryFeedback||null,
-      hardFilterAudit:ENGINE_DATA.hardFilterAudit||null,
-      pickDiagnostics:getPickState()?.diagnostics||null,
-      snapshotElapsedMinutes:ENGINE_DATA.snapshotElapsedMinutes??null,
-      snapshotDisplayElapsedMinutes:ENGINE_DATA.snapshotDisplayElapsedMinutes??null,
-      snapshotPairs:ENGINE_DATA.snapshotPairs||0,
-      lowSampleFeatures:ENGINE_DATA.lowSampleFeatures||[],
-      deltaFeatureSchema:ENGINE_DATA.deltaFeatureSchema||DELTA_FEATURE_SCHEMA
-    };
-    FS.set(modeKey(METH_STORE),methSave);
-  }catch(e){
-    console.warn('Could not save methodology data',e);
-  }
-}
-
 // ── NSE Parsers ──
 function parseBhavdata(text){
   parseCSV(text).forEach(r=>{
     const sym=normSym(r['SYMBOL']);
     if(!sym||(r['SERIES']||'').trim()!=='EQ')return;
-    NSE_BHAV[sym]={delivPct:num(r['DELIV_PER']),nseVol:num(r['TTL_TRD_QNTY'])};
+    NSE_BHAV[sym]={delivPct:num(r['DELIV_PER']),nseVol:num(r['TTL_TRD_QNTY']),
+      officialClose:num(r['CLOSE_PRICE']),officialAvg:num(r['AVG_PRICE']),trades:num(r['NO_OF_TRADES'])};
   });
 }
 function parsePriceBand(text){
@@ -1452,6 +1337,7 @@ function parse52W(text){
 function parseSurv(text){
   const rows=parseCSV(text);
   NSE_SURV={};
+  NSE_STATUS={};
   NSE_NON_EQ=new Set();
   SURV_HEADERS=[];
   SURV_RULE_HITS={};
@@ -1487,10 +1373,12 @@ function parseSurv(text){
     return {key:r.key, column:r.column, label:r.label, header:matchedHdr||null};
   });
   activeRules.forEach(rule=>{SURV_RULE_HITS[rule.key]=0;});
+  const statusCol=findHeader(hdrs,[/^status$/i])||null;
   rows.forEach(r=>{
     const sym=normSym(symCol?r[symCol]:r['Symbol']);if(!sym)return;
     // Track non-EQ series — BE/BZ/SZ/SM/ST can't be bought normally
     if(seriesCol){const s=(r[seriesCol]||'').trim().toUpperCase();if(s&&s!=='EQ')NSE_NON_EQ.add(sym);}
+    if(statusCol){const st=(r[statusCol]||'').trim().toUpperCase();if(st)NSE_STATUS[sym]=st;}
     const hits=[];
     activeRules.forEach(rule=>{
       if(!rule.header) return;
@@ -1723,221 +1611,14 @@ function getRecommendationOutcomeSummary(){
     issueDays:issues.length,horizonDays:currentHorizon
   };
 }
-function getDisplayedEntryCandidates(rows,opts={}){
+function getDisplayedEntryCandidates(rows){
+  // Top-20 actionable Radar candidates: basket-eligible, valid price, not held.
   if(!Array.isArray(rows)||!rows.length) return [];
   const heldPos=getHeldPositionMap();
-  const candidates=rows.map(s=>({...s,_features:s._features||{}}))
-    .filter(s=>!getFilterBarReason(s,opts))
-    .filter(s=>!applyHeldDisplayState(s,heldPos));
-  const breadth=getRowBreadthRelationState(rows),nativePct=percentileMap(candidates,s=>Number(s.rankScore??s.rocketScore)||0);
-  candidates.forEach(s=>{
-    s._nativeStrategyMetric=Number(s.rankScore??s.rocketScore)||0;
-    s._breadthRelation=breadth.relation.get(s.symbol)??null;
-    s._engineBreadthOrderingScore=breadth.available?100*((0.8*(nativePct.get(s)||0))+(0.2*(breadth.relationPct.get(s.symbol)||0))):s._nativeStrategyMetric;
-  });
-  return candidates.sort((a,b)=>b._engineBreadthOrderingScore-a._engineBreadthOrderingScore||a.symbol.localeCompare(b.symbol))
+  return rows
+    .filter(s=>s.symbol&&Number(s.price)>0&&s.basketEligible!==false&&!heldPos[s.symbol])
+    .sort((a,b)=>(Number(b.score)||0)-(Number(a.score)||0)||a.symbol.localeCompare(b.symbol))
     .slice(0,20);
-}
-function getOutcomeEpisodeLedger(){
-  const raw=FS.get(OUTCOME_EPISODE_STORE);
-  if(raw?.schema===OUTCOME_EPISODE_SCHEMA&&raw.episodes) return raw;
-  return {schema:OUTCOME_EPISODE_SCHEMA,deployedOn:getSessionDate(),revision:0,episodes:{},horizon:{active:null,candidate:null,streak:0,lastDate:null,stats:[]}};
-}
-function outcomeEpisodeId(source,strategy,symbol,date,price){
-  return [source,strategy||'',normSym(symbol),date,source==='trade'?Number(price||0).toFixed(4):''].join('|');
-}
-function getEpisodeFingerprint(row,pick){
-  const features=row?._features||{};
-  const day={featureRows:{[row?.symbol||'']:features}},cols=detectLoadedSpringColumns(day);
-  const finite=key=>{const raw=features?.[cols[key]];if(raw==null||raw==='')return null;const value=Number(raw);return isFinite(value)?+value.toFixed(4):null;};
-  const rankFor=key=>{
-    const value=finite(key);if(value==null)return null;
-    const values=(ALL||[]).map(item=>item?._features?.[cols[key]]).filter(raw=>raw!=null&&raw!=='').map(Number).filter(Number.isFinite).sort((a,b)=>a-b);
-    if(!values.length)return null;
-    let below=0,equal=0;values.forEach(item=>{if(item<value)below++;else if(item===value)equal++;});
-    return +((below+(equal/2))/values.length).toFixed(4);
-  };
-  const price=Number(row?.price),ema50=finite('ema50'),dmiPlus=finite('dmiPlus'),dmiMinus=finite('dmiMinus');
-  const dmi15Plus=finite('dmi15Plus'),dmi15Minus=finite('dmi15Minus');
-  return {
-    price:Number(row?.price)>0?+Number(row.price).toFixed(4):null,change:Number.isFinite(Number(row?.priceChange))?+Number(row.priceChange).toFixed(4):null,
-    marketCapRank:rankFor('marketCap'),turnoverRank:rankFor('avgTurnover'),turnover:finite('turnover'),volume:finite('volume'),
-    adr:finite('adr'),ema50Distance:price>0&&ema50>0?+((price/ema50-1)*100).toFixed(4):null,
-    dmiBalance:dmiPlus!=null&&dmiMinus!=null?+(dmiPlus-dmiMinus).toFixed(4):null,
-    dmi15Balance:dmi15Plus!=null&&dmi15Minus!=null?+(dmi15Plus-dmi15Minus).toFixed(4):null,
-    rsi:finite('rsi'),mfi:finite('mfi'),roc:finite('roc'),rsi30:finite('rsi30'),relativeVolume:findFingerprintFeature(features,/relative_volume_1_day|relative_volume_at_time/),
-    pullback:finite('pullback'),sectorRelativeStrength:findFingerprintFeature(features,/sector_rel_strength/),marketBreadth:Number.isFinite(Number(pick?.inputs?.breadth??ENGINE_DATA?.marketBreadth))?+Number(pick?.inputs?.breadth??ENGINE_DATA.marketBreadth).toFixed(4):null,
-    breadthRelation:Number.isFinite(Number(pick?.inputs?.breadthRelation??features?.breadth_relation))?+Number(pick?.inputs?.breadthRelation??features.breadth_relation).toFixed(4):null,
-    loadedSpringScore:Number.isFinite(Number(pick?.score))&&pick?.inputs?.loadedSpringScore!=null?+Number(pick.score).toFixed(4):null,
-    strategyScore:Number.isFinite(Number(pick?.score))?+Number(pick.score).toFixed(4):null,nativeScore:Number.isFinite(Number(pick?.inputs?.nativeScore))?+Number(pick.inputs.nativeScore).toFixed(4):null,
-    finalOrderingScore:Number.isFinite(Number(pick?.inputs?.finalOrderingScore))?+Number(pick.inputs.finalOrderingScore).toFixed(4):null,inputs:pick?.inputs||null
-  };
-}
-function findFingerprintFeature(features,pattern){
-  const key=Object.keys(features||{}).find(name=>pattern.test(name));
-  const raw=key?features[key]:null;if(raw==null||raw==='')return null;
-  const value=Number(raw);return isFinite(value)?+value.toFixed(4):null;
-}
-function createOutcomeEpisode(ledger,{source,strategy,symbol,entryDate,entryPrice,legacy=false,fingerprint=null,entryTs=0,entryTimestamp=null,entryDayHighAtFlag=null,entryDayLowAtFlag=null}){
-  if(!symbol||!entryDate||!(entryPrice>0)) return false;
-  const id=outcomeEpisodeId(source,strategy,symbol,entryDate,entryPrice);
-  if(ledger.episodes[id]) return false;
-  const price=+Number(entryPrice).toFixed(4),trackingStartDate=legacy?ledger.deployedOn:entryDate;
-  ledger.episodes[id]={id,source,strategy:strategy||null,symbol:normSym(symbol),entryDate,entryPrice:price,
-    entryTimestamp:entryTimestamp||(Number(entryTs)>0?new Date(Number(entryTs)).toISOString():entryDate),entryTs:Number(entryTs)||0,
-    target3:+(price*1.03).toFixed(4),target5:+(price*1.05).toFixed(4),target10:+(price*1.10).toFixed(4),
-    legacy:!!legacy,trackingStartDate,historicalFirstHitStatus:legacy?'unknown':'forward-known',sessionsSincePurchase:0,sessionsSinceTracking:0,
-    entryDayHighAtFlag:Number(entryDayHighAtFlag)>0?+Number(entryDayHighAtFlag).toFixed(4):null,
-    entryDayLowAtFlag:Number(entryDayLowAtFlag)>0?+Number(entryDayLowAtFlag).toFixed(4):null,
-    fingerprint:fingerprint||null,milestones:{},dive2:null,observations:[],maxGainPct:null,maxDrawdownPct:null,currentReturnPct:null,expiryReturnPct:null,status:'active',evaluatedThrough:null};
-  return true;
-}
-function compactEpisodeObservations(observations){
-  const sorted=[...(observations||[])].sort((a,b)=>a.s-b.s||String(a.d).localeCompare(String(b.d)));
-  const keep=new Map();
-  OUTCOME_HORIZON_CANDIDATES.forEach(horizon=>{
-    const item=sorted.find(observation=>Number(observation.s)>=horizon);
-    if(item)keep.set(item.d,item);
-  });
-  const latest=sorted[sorted.length-1];if(latest)keep.set(latest.d,latest);
-  return [...keep.values()].sort((a,b)=>a.s-b.s||String(a.d).localeCompare(String(b.d)));
-}
-function updateOutcomeEpisodesFromScan(ledger,scan){
-  if(!scan?.date||!scan?.rows?.length) return false;
-  const rows=new Map(scan.rows.map(row=>[normSym(row.symbol),row]));
-  let changed=false;
-  Object.values(ledger.episodes||{}).forEach(episode=>{
-    if(episode.status==='hit'||episode.status==='expired') return;
-    const sessions=tradingDaysBetween(episode.entryDate,scan.date);
-    const trackingSessions=tradingDaysBetween(episode.trackingStartDate||episode.entryDate,scan.date);
-    const horizonSessions=episode.legacy?trackingSessions:sessions;
-    if(sessions==null||trackingSessions==null||horizonSessions<0) return;
-    const row=rows.get(episode.symbol);
-    if(!row||!(episode.entryPrice>0)) return;
-    const scanTs=Number(scan.ts)||0;
-    if(horizonSessions===0&&(!(scanTs>0)||!(scanTs>Number(episode.entryTs||0)))) return;
-    const close=Number(row.price),dayHigh=Number(row.high1d),dayLow=Number(row.low1d);
-    if(!(close>0)) return;
-    let high=dayHigh,low=dayLow;
-    if(horizonSessions===0){
-      const highAtFlag=Number(episode.entryDayHighAtFlag),lowAtFlag=Number(episode.entryDayLowAtFlag);
-      high=dayHigh>0&&highAtFlag>0&&dayHigh>highAtFlag?dayHigh:close;
-      low=dayLow>0&&lowAtFlag>0&&dayLow<lowAtFlag?dayLow:close;
-    }
-    const closeReturn=(close/episode.entryPrice-1)*100;
-    const highReturn=high>0?(high/episode.entryPrice-1)*100:closeReturn;
-    const lowReturn=low>0?(low/episode.entryPrice-1)*100:closeReturn;
-    episode.observations=(episode.observations||[]).filter(item=>item.d!==scan.date);
-    episode.observations.push({d:scan.date,s:horizonSessions,h:+highReturn.toFixed(3),l:+lowReturn.toFixed(3),c:+closeReturn.toFixed(3)});
-    episode.observations=compactEpisodeObservations(episode.observations);
-    episode.maxGainPct=episode.maxGainPct==null?+highReturn.toFixed(3):+Math.max(episode.maxGainPct,highReturn).toFixed(3);
-    episode.maxDrawdownPct=episode.maxDrawdownPct==null?+lowReturn.toFixed(3):+Math.min(episode.maxDrawdownPct,lowReturn).toFixed(3);
-    episode.currentReturnPct=+closeReturn.toFixed(3);episode.evaluatedThrough=scan.date;
-    episode.sessionsSincePurchase=sessions;
-    episode.sessionsSinceTracking=trackingSessions;
-    if(horizonSessions<=OUTCOME_EPISODE_MAX_SESSIONS)OUTCOME_MILESTONES.forEach(target=>{if(!episode.milestones[target]&&highReturn>=target)episode.milestones[target]={date:scan.date,ts:scanTs||null,sessions:episode.legacy?sessions:horizonSessions,trackingSessions};});
-    if(!episode.dive2&&lowReturn<=-2)episode.dive2={date:scan.date,ts:scanTs||null};
-    if(episode.milestones[10]) episode.status='hit';
-    if(horizonSessions>=OUTCOME_EPISODE_MAX_SESSIONS){episode.expiryReturnPct=+closeReturn.toFixed(3);if(episode.status!=='hit')episode.status='expired';}
-    changed=true;
-  });
-  return changed;
-}
-function episodeReturnAtHorizon(episode,horizon,asOfDate){
-  if(episode?.legacy) return null;
-  const age=asOfDate?tradingDaysBetween(episode.entryDate,asOfDate):null;
-  if(age==null||age<horizon) return null;
-  const hit=episode.milestones?.[10];
-  if(hit&&Number(hit.sessions)<=horizon) return 10;
-  const observation=(episode.observations||[]).filter(item=>Number(item.s)>=horizon).sort((a,b)=>a.s-b.s)[0];
-  return observation&&isFinite(Number(observation.c))?Number(observation.c):null;
-}
-function calculateOutcomeHorizon(ledger,sessionDate){
-  const episodes=Object.values(ledger.episodes||{}).filter(item=>item.source==='strategy'&&!item.legacy);
-  const entryDates=new Set(episodes.map(item=>item.entryDate));
-  const stats=OUTCOME_HORIZON_CANDIDATES.map(horizon=>{
-    const returns=episodes.map(episode=>episodeReturnAtHorizon(episode,horizon,sessionDate)).filter(value=>value!=null&&isFinite(value));
-    const avgReturn=returns.length?meanArr(returns):null;
-    return {horizon,count:returns.length,avgReturn:avgReturn==null?null:+avgReturn.toFixed(3),velocity:avgReturn==null?null:+(avgReturn/horizon).toFixed(4)};
-  });
-  const sufficient=stats.filter(item=>item.count>=OUTCOME_HORIZON_MIN_PER_CANDIDATE&&item.velocity!=null);
-  const ready=episodes.length>=OUTCOME_HORIZON_MIN_EPISODES&&entryDates.size>=OUTCOME_HORIZON_MIN_DATES&&sufficient.length>=2;
-  const state=ledger.horizon||{};state.stats=stats;state.ready=ready;state.episodeCount=episodes.length;state.entryDateCount=entryDates.size;
-  if(!ready){state.phase='warmup';state.candidate=null;state.streak=0;state.lastDate=sessionDate;ledger.horizon=state;return;}
-  const best=[...sufficient].sort((a,b)=>b.velocity-a.velocity||a.horizon-b.horizon)[0];
-  const active=stats.find(item=>item.horizon===state.active);
-  const improvementFloor=active?.velocity===0?Number.EPSILON:Math.abs(active?.velocity||0)*OUTCOME_HORIZON_SWITCH_MARGIN;
-  const qualifies=!active||active.velocity==null||best.horizon===state.active||best.velocity>=active.velocity+improvementFloor;
-  const candidate=qualifies?best.horizon:state.active;
-  if(state.lastDate!==sessionDate){state.streak=state.candidate===candidate?(state.streak||0)+1:1;state.candidate=candidate;state.lastDate=sessionDate;}
-  if(state.streak>=OUTCOME_HORIZON_STABILITY_DAYS&&candidate!=null&&candidate!==state.active){state.active=candidate;state.activeSince=sessionDate;}
-  state.phase=state.active==null?'stabilizing':'dynamic';ledger.horizon=state;
-}
-function recordOutcomeEpisodesForAcceptedScan(scan,pickUpload){
-  if(!scan?.date||!pickUpload?.strategies) return;
-  const ledger=getOutcomeEpisodeLedger();
-  let changed=updateOutcomeEpisodesFromScan(ledger,scan);
-  const rows=new Map((ALL||[]).map(row=>[row.symbol,row]));
-  Object.entries(pickUpload.strategies).forEach(([strategy,value])=>{
-    const cohort=normalizeStrategyCohort(value);
-    if(!cohort.available) return;
-    cohort.picks.forEach(pick=>{
-      const row=rows.get(pick.symbol),entryPrice=Number(row?.price);
-      // A strategy episode starts at the exact live price and intraday range visible when it is flagged.
-      if(createOutcomeEpisode(ledger,{source:'strategy',strategy,symbol:pick.symbol,entryDate:scan.date,entryPrice,entryTs:pickUpload.ts,entryTimestamp:new Date(pickUpload.ts).toISOString(),entryDayHighAtFlag:Number(row?.high1d),entryDayLowAtFlag:Number(row?.low1d),fingerprint:getEpisodeFingerprint(row,pick)})) changed=true;
-    });
-  });
-  const horizonBefore=JSON.stringify(ledger.horizon||{});
-  calculateOutcomeHorizon(ledger,scan.date);
-  if(JSON.stringify(ledger.horizon||{})!==horizonBefore) changed=true;
-  if(changed){ledger.revision=(ledger.revision||0)+1;FS.set(OUTCOME_EPISODE_STORE,ledger);_pickStateCache=null;}
-}
-function syncTradebookOutcomeEpisodes(){
-  if(!TRADEBOOK_BUY_FILLS?.length) return;
-  const ledger=getOutcomeEpisodeLedger();
-  const latestBySymbol=new Map();
-  TRADEBOOK_BUY_FILLS.forEach(fill=>{const prior=latestBySymbol.get(fill.symbol);if(!prior||String(fill.date)+'|'+String(fill.time||'')>String(prior.date)+'|'+String(prior.time||''))latestBySymbol.set(fill.symbol,fill);});
-  let changed=false;
-  TRADEBOOK_BUY_FILLS.forEach(fill=>{
-    const legacy=String(fill.date)<String(ledger.deployedOn);
-    if(legacy&&latestBySymbol.get(fill.symbol)!==fill) return;
-    if(createOutcomeEpisode(ledger,{source:'trade',strategy:null,symbol:fill.symbol,entryDate:fill.date,entryPrice:Number(fill.price),entryTs:0,entryTimestamp:fill.time||fill.date,legacy,fingerprint:{qty:Number(fill.qty)||null,time:fill.time||null}})) changed=true;
-  });
-  if(changed){ledger.revision=(ledger.revision||0)+1;FS.set(OUTCOME_EPISODE_STORE,ledger);_pickStateCache=null;}
-}
-function getOutcomeHorizonSummary(){
-  const ledger=getOutcomeEpisodeLedger();
-  return {...(ledger.horizon||{}),revision:ledger.revision||0,deployedOn:ledger.deployedOn};
-}
-function medianOutcomeValue(values){
-  const sorted=(values||[]).filter(value=>value!=null&&isFinite(value)).map(Number).sort((a,b)=>a-b);
-  if(!sorted.length)return null;
-  const middle=Math.floor(sorted.length/2);
-  return sorted.length%2?sorted[middle]:(sorted[middle-1]+sorted[middle])/2;
-}
-function getOutcomeEpisodeAnalytics(){
-  const ledger=getOutcomeEpisodeLedger();
-  const asOfDate=ledger.horizon?.lastDate||null;
-  const episodes=Object.values(ledger.episodes||{}).filter(item=>item.source==='strategy'&&!item.legacy);
-  const completed=episodes.filter(item=>item.status==='hit'||item.status==='expired');
-  const rate=target=>completed.length?completed.filter(item=>item.milestones?.[target]).length/completed.length:null;
-  const curves=OUTCOME_HORIZON_CANDIDATES.map(horizon=>{
-    const evaluable=episodes.filter(item=>episodeReturnAtHorizon(item,horizon,asOfDate)!=null);
-    const hits=evaluable.filter(item=>Number(item.milestones?.[10]?.sessions)<=horizon).length;
-    const unresolved=evaluable.filter(item=>!(Number(item.milestones?.[10]?.sessions)<=horizon)).map(item=>{
-      const observation=(item.observations||[]).filter(row=>Number(row.s)>=horizon).sort((a,b)=>a.s-b.s)[0];
-      return observation?.c;
-    });
-    const horizonStat=(ledger.horizon?.stats||[]).find(item=>item.horizon===horizon);
-    return {horizon,sample:evaluable.length,hits,hitRate:evaluable.length?hits/evaluable.length:null,
-      medianUnresolvedReturn:medianOutcomeValue(unresolved),capitalVelocity:horizonStat?.velocity??null};
-  });
-  const successful=episodes.filter(item=>item.milestones?.[10]);
-  return {episodeCount:episodes.length,evaluableCount:completed.length,
-    hit3:rate(3),hit5:rate(5),hit10:rate(10),curves,
-    medianSessionsTo10:medianOutcomeValue(successful.map(item=>item.milestones[10].sessions)),
-    medianDrawdownBeforeSuccess:medianOutcomeValue(successful.map(item=>item.maxDrawdownPct)),
-    expiredRate:completed.length?completed.filter(item=>item.status==='expired').length/completed.length:null};
 }
 function recordDisplayedEntryCohort(scan){
   if(!scan?.date||!scan.candidates?.length) return;
@@ -2082,63 +1763,6 @@ function calcExecutedEntryOutcomeScore(entry){
   if(velocity!=null&&isFinite(velocity)) score+=clampNum(velocity/tgt,-0.25,0.25);
   return +clampNum(score,-1,1).toFixed(3);
 }
-function getOutcomeFeedbackSamples(){
-  const samples=[];
-  Object.values((FS.get(RECOMMEND_OUTCOME_STORE)||{}).issues||{}).forEach(issue=>{
-    (issue.picks||[]).forEach(p=>{
-      if(!p.complete||!(p.observations>0)||!p.features) return;
-      const score=p.outcomeScore!=null?p.outcomeScore:calcRecommendationOutcomeScore(p,issue.threshold);
-      if(score!=null&&isFinite(score)) samples.push({features:p.features,score,weight:1,source:'recommendation'});
-    });
-  });
-  Object.values((FS.get(ENTRY_OUTCOME_STORE)||{}).entries||{}).forEach(entry=>{
-    if(!entry.complete||!(entry.observations>0)||!entry.features) return;
-    const score=calcExecutedEntryOutcomeScore(entry);
-    if(score!=null&&isFinite(score)) samples.push({features:entry.features,score,weight:1.25,source:'entry'});
-  });
-  return samples;
-}
-function featureSignatureAffinity(currentFeatures,sampleFeatures,features,weights){
-  let sum=0,total=0,matched=0;
-  for(const f of features){
-    const a=currentFeatures?.[f],b=sampleFeatures?.[f];
-    if(a==null||b==null||!isFinite(a)||!isFinite(b)) continue;
-    const denom=Math.max(1,Math.abs(a)+Math.abs(b));
-    const affinity=clampNum(1-(Math.abs(a-b)/denom),0,1);
-    const w=Math.max(0.0001,weights?.[f]||0);
-    sum+=affinity*w;total+=w;matched++;
-  }
-  return matched>=5&&total>0?{affinity:sum/total,matched}:null;
-}
-function buildOutcomeReliabilityModel(features,weights){
-  const samples=getOutcomeFeedbackSamples();
-  const rankedFeatures=getOutcomeFeatureOrderFromWeights(weights,features);
-  const active=samples.length>=OUTCOME_FEEDBACK_MIN_SAMPLES&&rankedFeatures.length>=5;
-  return {samples,features:rankedFeatures,active};
-}
-function getOutcomeReliabilityAdjustment(currentFeatures,model,weights){
-  if(!model?.active) return {delta:0,confidence:0,samples:model?.samples?.length||0,matched:0};
-  const matches=[];
-  model.samples.forEach(sample=>{
-    const match=featureSignatureAffinity(currentFeatures,sample.features,model.features,weights);
-    if(match&&match.affinity>=0.35) matches.push({...match,score:sample.score,weight:sample.weight||1});
-  });
-  matches.sort((a,b)=>b.affinity-a.affinity);
-  const top=matches.slice(0,12);
-  const denom=top.reduce((sum,m)=>sum+(m.affinity*m.weight),0);
-  if(!denom) return {delta:0,confidence:0,samples:model.samples.length,matched:0};
-  const evidence=top.reduce((sum,m)=>sum+(m.score*m.affinity*m.weight),0)/denom;
-  const avgAffinity=top.reduce((sum,m)=>sum+m.affinity,0)/top.length;
-  const sampleConfidence=Math.min(1,model.samples.length/(model.samples.length+30));
-  const confidence=clampNum(sampleConfidence*avgAffinity,0,0.65);
-  return {
-    delta:+clampNum(evidence*confidence*OUTCOME_SCORE_ADJ_MAX,-OUTCOME_SCORE_ADJ_MAX,OUTCOME_SCORE_ADJ_MAX).toFixed(2),
-    confidence:+confidence.toFixed(3),
-    samples:model.samples.length,
-    matched:top.length,
-    evidence:+evidence.toFixed(3)
-  };
-}
 function getClosedSaleCohorts(trips){
   const cohorts={};
   (trips||[]).forEach(trip=>{
@@ -2245,201 +1869,6 @@ function detectNSE(filename,content){
 
 // ── Stats ──
 function mean(a){return a.length?a.reduce((s,v)=>s+v,0)/a.length:0;}
-function pearson(xs,ys){
-  const p=[];
-  for(let i=0;i<xs.length;i++)if(xs[i]!==null&&ys[i]!==null&&!isNaN(xs[i])&&!isNaN(ys[i]))p.push([xs[i],ys[i]]);
-  if(p.length<30)return 0;
-  const n=p.length;let sx=0,sy=0,sxy=0,sx2=0,sy2=0;
-  for(const[x,y]of p){sx+=x;sy+=y;sxy+=x*y;sx2+=x*x;sy2+=y*y;}
-  const d=Math.sqrt((n*sx2-sx*sx)*(n*sy2-sy*sy));return d===0?0:(n*sxy-sx*sy)/d;
-}
-function pctRank(arr){
-  const it=arr.map((v,i)=>({v,i})).filter(x=>x.v!==null&&!isNaN(x.v));
-  it.sort((a,b)=>a.v-b.v);
-  const n=it.length,res=new Array(arr.length).fill(null);if(!n)return res;
-  let i=0;
-  while(i<n){let j=i;while(j<n&&it[j].v===it[i].v)j++;const r=n>1?((i+j-1)/2)/(n-1):0.5;for(let k=i;k<j;k++)res[it[k].i]=r;i=j;}
-  return res;
-}
-function applyRankProductInteractions(rows,defs){
-  (defs||[]).forEach(def=>{
-    const left=def.left,right=def.right,key=def.key;
-    if(!left||!right||!key){
-      (rows||[]).forEach(row=>{if(key) row[key]=null;});
-      return;
-    }
-    const leftRanks=pctRank((rows||[]).map(row=>row?.[left]??null));
-    const rightRanks=pctRank((rows||[]).map(row=>row?.[right]??null));
-    (rows||[]).forEach((row,index)=>{
-      const a=leftRanks[index],b=rightRanks[index];
-      row[key]=(a!=null&&b!=null&&isFinite(a)&&isFinite(b))?Number((a*b).toFixed(6)):null;
-    });
-  });
-}
-function buildBreadthInteractionDefs(selectedFeatures,weights,labels,features=[],featureRows=[]){
-  const rankedSelected=[...(selectedFeatures||[])]
-    .filter(feature=>feature&&!String(feature).startsWith('market_breadth_x_'))
-    .sort((a,b)=>(weights?.[b]||0)-(weights?.[a]||0))
-    .slice(0,3);
-  const partners=rankedSelected.length?rankedSelected:[...(features||[])]
-    .filter(feature=>feature&&!String(feature).startsWith('market_breadth_x_'))
-    .map(feature=>({
-      feature,
-      coverage:(featureRows||[]).reduce((sum,row)=>{
-        const value=row?.[feature];
-        return sum+(value!=null&&isFinite(value)?1:0);
-      },0)
-    }))
-    .sort((a,b)=>b.coverage-a.coverage)
-    .slice(0,3)
-    .map(item=>item.feature);
-  return partners
-    .map(feature=>({
-      key:`market_breadth_x_${feature}_rank`,
-      left:feature,
-      label:`Breadth x ${labels?.[feature]||feature} Rank`,
-      partnerWeight:weights?.[feature]||0
-    }));
-}
-function applyMarketBreadthInteractions(rows,defs,marketBreadth){
-  const breadth=marketBreadth!=null&&isFinite(marketBreadth)?Math.max(0,Math.min(1,marketBreadth)):null;
-  (defs||[]).forEach(def=>{
-    if(!def.left||!def.key||breadth==null){
-      (rows||[]).forEach(row=>{if(def.key) row[def.key]=null;});
-      return;
-    }
-    const ranks=pctRank((rows||[]).map(row=>row?.[def.left]??null));
-    (rows||[]).forEach((row,index)=>{
-      const rank=ranks[index];
-      row[def.key]=(rank!=null&&isFinite(rank))?Number((breadth*rank).toFixed(6)):null;
-    });
-  });
-}
-function spearman(xs,ys){
-  return pearson(pctRank(xs),pctRank(ys));
-}
-function matchedPairCount(xs,ys){
-  let count=0;
-  for(let i=0;i<xs.length;i++){
-    if(xs[i]!==null&&ys[i]!==null&&!isNaN(xs[i])&&!isNaN(ys[i])) count++;
-  }
-  return count;
-}
-
-
-function emptySnapshotRuntime(){
-  return {
-    schema:SNAPSHOT_STATE_SCHEMA,
-    days:[], // At most D-4…D. Each day is one per-stock peak-state telemetry record.
-    completed:0,
-    lastOutcome:null,
-    lastTag:null
-  };
-}
-function buildDecodedSnapshot({stamp,symbols,prices,featureRows,features,sessionTag}){
-  return {...stamp,symbols:[...symbols],prices,featureRows,featureCols:[...features],features:null,sessionTag:sessionTag||null};
-}
-function cloneSnapshotRuntime(runtime){
-  return {
-    ...emptySnapshotRuntime(),
-    ...(runtime||{}),
-    days:(runtime?.days||[]).map(day=>cloneDailyRecord(day,day.rocketSymbols||[],day.eligibleSymbols||[])),
-    lastOutcome:runtime?.lastOutcome?{...runtime.lastOutcome}:null
-  };
-}
-
-/*
-  Core temporal contract — v443
-
-  A stored day is not the final upload of that day. For every stock it retains the
-  feature state from that stock's highest observed 1D-change point, while the day
-  also retains the union of stocks that entered the live top-1% rocket set.
-
-  For current day D, rocket relevance compares that D rocket union with source states at:
-    D-1 (weight 4), D-2 (3), D-3 (2), D-4 (1).
-  Weights are normalized over the usable consecutive prior trading-day pairs.
-  Same-day uploads only revise D's compact telemetry record; they never form an
-  intraday training pair and no same-day return model exists.
-*/
-function buildStateFeatureRows(snapshot,features){
-  const out={};
-  (snapshot?.symbols||[]).forEach(symbol=>{
-    const src=snapshot.featureRows?.[symbol]||{};
-    const row={};
-    features.forEach(feature=>{row[feature]=src[feature]??null;});
-    out[symbol]=row;
-  });
-  return out;
-}
-function correlationFromPriorState(sourceSnapshot,currentSnapshot,eligibleSymbols,targetSymbols,features){
-  const eligible=eligibleSymbols instanceof Set?eligibleSymbols:new Set(eligibleSymbols||[]);
-  const target=targetSymbols instanceof Set?targetSymbols:new Set(targetSymbols||[]);
-  const featureRows=buildStateFeatureRows(sourceSnapshot,features);
-  const matched=(currentSnapshot?.symbols||[]).filter(symbol=>
-    eligible.has(symbol)&&sourceSnapshot?.featureRows?.[symbol]&&currentSnapshot?.featureRows?.[symbol]
-  );
-  const targetRelevance={};
-  const sampleCounts={};
-  const positiveCounts={};
-  const lowSampleFeatures=[];
-  for(const feature of features){
-    const xs=[],ys=[];
-    matched.forEach(symbol=>{
-      const value=featureRows[symbol]?.[feature];
-      if(value==null||!isFinite(value)) return;
-      xs.push(value);
-      ys.push(target.has(symbol)?1:0);
-    });
-    const samples=matchedPairCount(xs,ys);
-    const positives=ys.reduce((sum,v)=>sum+(v===1?1:0),0);
-    const negatives=samples-positives;
-    sampleCounts[feature]=samples;
-    positiveCounts[feature]=positives;
-    if(samples<30){
-      lowSampleFeatures.push({feature,samples,positiveCount:positives,reason:'low_total_sample'});
-      targetRelevance[feature]=0;
-    }else if(positives<10){
-      lowSampleFeatures.push({feature,samples,positiveCount:positives,reason:'low_positive_count'});
-      targetRelevance[feature]=0;
-    }else if(negatives<1){
-      lowSampleFeatures.push({feature,samples,positiveCount:positives,reason:'low_negative_count'});
-      targetRelevance[feature]=0;
-    }else{
-      const ordered=xs.map((value,index)=>({value,positive:ys[index]===1})).sort((a,b)=>a.value-b.value);
-      let rankSumPos=0;
-      for(let i=0,rank=1;i<ordered.length;){
-        let j=i+1;
-        while(j<ordered.length&&ordered[j].value===ordered[i].value) j++;
-        const avgRank=(rank+rank+(j-i)-1)/2;
-        for(let k=i;k<j;k++) if(ordered[k].positive) rankSumPos+=avgRank;
-        rank+=j-i;i=j;
-      }
-      const auc=(rankSumPos-(positives*(positives+1)/2))/(positives*negatives);
-      targetRelevance[feature]=isFinite(auc)?(auc-0.5)*2:0;
-    }
-  }
-  return {targetRelevance,matched,featureRows,sampleCounts,positiveCounts,lowSampleFeatures};
-}
-function snapshotPriceMoves(previous,current){
-  const currentIndex=new Map((current?.symbols||[]).map((symbol,index)=>[symbol,index]));
-  const out={};
-  (previous?.symbols||[]).forEach((symbol,index)=>{
-    const ci=currentIndex.get(symbol);
-    const prior=previous.prices?.[index], now=ci==null?null:current.prices?.[ci];
-    if(prior>0&&now>0) out[symbol]=+(((now/prior)-1)*100).toFixed(2);
-  });
-  return out;
-}
-function hasUsableCorrelation(corr){
-  return !!corr&&Object.values(corr).some(v=>v!=null&&isFinite(v)&&Math.abs(v)>0.0001);
-}
-function getAverageLearningHorizon(){
-  const pairs=Array.isArray(ACC_CORR?.lagPairs)?ACC_CORR.lagPairs:[];
-  if(!pairs.length) return null;
-  const total=pairs.reduce((sum,p)=>sum+(Number(p.weight)||0),0)||1;
-  const tradingDays=pairs.reduce((sum,p)=>sum+(Number(p.lag)||0)*(Number(p.weight)||0),0)/total;
-  return {tradingDays,count:pairs.length};
-}
 function previousTradingSessionDate(dateText){
   if(!dateText) return null;
   const date=new Date(dateText+'T12:00:00Z');
@@ -2451,2333 +1880,220 @@ function previousTradingSessionDate(dateText){
     if(dow!==0&&dow!==6&&!NSE_HOLIDAYS.has(key)) return key;
   }while(true);
 }
-function getLatestDailyRecord(runtime){
-  const days=Array.isArray(runtime?.days)?runtime.days:[];
-  return days.length?days[days.length-1]:null;
-}
-function cloneDailyRecord(snapshot,targetSymbols,eligibleSymbols){
-  const symbols=[...(snapshot?.symbols||[])];
-  const featureRows={};
-  symbols.forEach(symbol=>{featureRows[symbol]={...(snapshot.featureRows?.[symbol]||{})};});
-  return {
-    ...snapshot,
-    symbols,
-    prices:Float32Array.from(snapshot?.prices||[]),
-    featureRows,
-    featureCols:[...(snapshot?.featureCols||[])],
-    rocketSymbols:[...(targetSymbols||[])],
-    eligibleSymbols:[...(eligibleSymbols||[])],
-    pickUploads:Array.isArray(snapshot?.pickUploads)?snapshot.pickUploads.map(upload=>({
-      ts:Number(upload.ts)||0,
-      tag:upload.tag||null,
-      basis:upload.basis||null,
-        strategies:Object.fromEntries(Object.entries(upload.strategies||{}).map(([name,cohort])=>[name,compactStoredStrategyCohort(cohort)]))
-    })) : [],
-    filterUploads:Array.isArray(snapshot?.filterUploads)?snapshot.filterUploads.map(compactFilterAuditUpload):[],
-    sampleCount:1,
-    latestSessionTag:snapshot?.sessionTag||null
-  };
-}
-function mergeDailyRecord(day,currentSnapshot,rocketMetricKey,targetSymbols,eligibleSymbols,sessionTag){
-  const priceIndex=new Map((day.symbols||[]).map((symbol,index)=>[symbol,index]));
-  const currentIndex=new Map((currentSnapshot.symbols||[]).map((symbol,index)=>[symbol,index]));
-  (currentSnapshot.symbols||[]).forEach(symbol=>{
-    const currentRow=currentSnapshot.featureRows?.[symbol]||{};
-    const currentPriceIndex=currentIndex.get(symbol);
-    const previousRow=day.featureRows?.[symbol]||null;
-    const currentMetric=rocketMetricKey?currentRow[rocketMetricKey]:null;
-    const previousMetric=rocketMetricKey?previousRow?.[rocketMetricKey]:null;
-    let shouldReplace=!previousRow||(
-      currentMetric!=null&&isFinite(currentMetric)&&
-      (previousMetric==null||!isFinite(previousMetric)||currentMetric>previousMetric)
-    );
-    let index=priceIndex.get(symbol);
-    if(index==null){
-      index=day.symbols.length;
-      day.symbols.push(symbol);
-      priceIndex.set(symbol,index);
-      const nextPrices=new Float32Array(day.prices.length+1);
-      nextPrices.set(day.prices,0);
-      day.prices=nextPrices;
-      shouldReplace=true;
-    }
-    if(shouldReplace){
-      day.featureRows[symbol]={...currentRow};
-      const price=currentSnapshot.prices?.[currentPriceIndex];
-      if(price!=null&&isFinite(price)) day.prices[index]=price;
-    }
-  });
-  const rockets=new Set(day.rocketSymbols||[]);
-  (targetSymbols||[]).forEach(symbol=>rockets.add(symbol));
-  day.rocketSymbols=[...rockets];
-  const eligible=new Set(day.eligibleSymbols||[]);
-  (eligibleSymbols||[]).forEach(symbol=>eligible.add(symbol));
-  day.eligibleSymbols=[...eligible];
-  if(Array.isArray(currentSnapshot?.pickUploads)&&currentSnapshot.pickUploads.length){
-    const existing=new Set((day.pickUploads||[]).map(upload=>`${upload.ts||0}|${upload.tag||''}`));
-    const merged=[...(day.pickUploads||[])];
-    currentSnapshot.pickUploads.forEach(upload=>{
-      const key=`${upload.ts||0}|${upload.tag||''}`;
-      if(existing.has(key)) return;
-      existing.add(key);
-      merged.push({
-        ts:Number(upload.ts)||0,
-        tag:upload.tag||null,
-        basis:upload.basis||null,
-      strategies:Object.fromEntries(Object.entries(upload.strategies||{}).map(([name,cohort])=>[name,compactStoredStrategyCohort(cohort)]))
-      });
-    });
-    day.pickUploads=merged;
-  }
-  if(Array.isArray(currentSnapshot?.filterUploads)&&currentSnapshot.filterUploads.length){
-    const existing=new Set((day.filterUploads||[]).map(upload=>`${upload.ts||0}|${upload.tag||''}`));
-    const merged=[...(day.filterUploads||[])];
-    currentSnapshot.filterUploads.forEach(upload=>{
-      const clean=compactFilterAuditUpload(upload),key=`${clean.ts||0}|${clean.tag||''}`;
-      if(!existing.has(key)){existing.add(key);merged.push(clean);}
-    });
-    day.filterUploads=merged;
-  }
-  day.timestamp=Math.max(Number(day.timestamp)||0,Number(currentSnapshot.timestamp)||0);
-  day.minutes=currentSnapshot.minutes;
-  day.inSession=currentSnapshot.inSession;
-  day.baselineEligible=currentSnapshot.baselineEligible;
-  day.latestSessionTag=sessionTag||currentSnapshot.sessionTag||day.latestSessionTag||null;
-  day.sampleCount=(Number(day.sampleCount)||0)+1;
-  return day;
-}
-function trimDailyRecords(days){
-  return [...(days||[])]
-    .sort((a,b)=>String(a.sessionDate).localeCompare(String(b.sessionDate))||((a.timestamp||0)-(b.timestamp||0)))
-    .slice(-DAILY_TRAJECTORY_TOTAL_DAYS);
-}
-// Records the engine's flagged buy candidates onto the stored day, so later uploads can
-// score them against subsequently-observed rockets — entirely within the 5-day window.
-function recordDayPredictions(runtime,sessionDate,predictedSymbols){
-  const day=(runtime?.days||[]).find(d=>d.sessionDate===sessionDate);
-  if(!day) return false;
-  day.predictedSymbols=[...new Set([...(day.predictedSymbols||[]),
-    ...(predictedSymbols||[]).map(normSym).filter(Boolean)])];
-  _pickStateCache=null;
-  return true;
-}
-function compactCohortSymbols(rows,limit=20){
-  return (rows||[])
-    .map((row,i)=>({symbol:normSym(row?.symbol),rank:i+1,score:row?.rocketScore==null?null:Number(row.rocketScore),inputs:row?.inputs||null}))
-    .filter(row=>row.symbol)
-    .slice(0,limit);
-}
-function normalizeCohortPick(item,index=0){
-  const symbol=normSym(item?.symbol||item?.s||item);
-  if(!symbol) return null;
-  const rank=Number(item?.rank??item?.r??index+1);
-  const rawScore=item?.score??item?.q;
-  const score=rawScore==null||rawScore===''?null:Number(rawScore);
-  const inputs=item?.inputs??item?.x??null;
-  return {
-    symbol,
-    rank:Number.isFinite(rank)&&rank>0?rank:index+1,
-    score:Number.isFinite(score)?score:null,
-    inputs:inputs&&typeof inputs==='object'?inputs:null
-  };
-}
-function normalizeStrategyCohort(value){
-  if(Array.isArray(value)){
-    return {available:true,picks:value.map(normalizeCohortPick).filter(Boolean)};
-  }
-  const picks=Array.isArray(value?.picks)?value.picks:(Array.isArray(value?.p)?value.p:[]);
-  return {
-    available:value?.available!==false&&value?.ok!==0,
-    unavailableReason:value?.unavailableReason||value?.why||null,
-    picks:picks.map(normalizeCohortPick).filter(Boolean)
-  };
-}
-function compactStoredStrategyCohort(value){
-  const cohort=normalizeStrategyCohort(value);
-  return {
-    ok:cohort.available?1:0,
-    why:cohort.unavailableReason||null,
-    p:cohort.picks.map(item=>({
-      s:item.symbol,r:item.rank,
-      q:Number.isFinite(item.score)?+item.score.toFixed(4):null,
-      x:item.inputs||null
-    }))
-  };
-}
-function normalizeFilterAuditUpload(upload){
-  const finiteOrNull=value=>value==null||value===''?null:(Number.isFinite(Number(value))?Number(value):null);
-  return {
-    ts:Number(upload?.ts)||0,
-    tag:upload?.tag||null,
-    rows:(upload?.rows||upload?.r||[]).map(item=>({
-      symbol:normSym(item?.symbol||item?.s),
-      first:item?.first||item?.f||null,
-      all:[...(item?.all||item?.a||[])].filter(Boolean),
-      bucket:item?.bucket||item?.b||null,
-      price:finiteOrNull(item?.price??item?.p),
-      change:finiteOrNull(item?.change??item?.c),
-      score:finiteOrNull(item?.score??item?.q),
-      atr:finiteOrNull(item?.atr??item?.v),
-      stopPct:finiteOrNull(item?.stopPct??item?.sl),
-      targetPct:finiteOrNull(item?.targetPct??item?.tgt)
-    })).filter(item=>item.symbol&&item.first),
-    top:(upload?.top||[]).map(item=>({symbol:normSym(item?.symbol||item?.s),change:finiteOrNull(item?.change??item?.c)})).filter(item=>item.symbol&&Number.isFinite(item.change)),
-    observed:(upload?.observed||upload?.o||[]).map(item=>({symbol:normSym(item?.symbol||item?.s),change:finiteOrNull(item?.change??item?.c)})).filter(item=>item.symbol&&Number.isFinite(item.change))
-  };
-}
-function compactFilterAuditUpload(upload){
-  const clean=normalizeFilterAuditUpload(upload);
-  return {ts:clean.ts,tag:clean.tag,
-    r:clean.rows.map(item=>({s:item.symbol,f:item.first,a:item.all,b:item.bucket,p:item.price,c:item.change,q:item.score,v:item.atr,sl:item.stopPct,tgt:item.targetPct})),
-    top:clean.top.map(item=>({s:item.symbol,c:item.change})),
-    o:clean.observed.map(item=>({s:item.symbol,c:item.change}))};
-}
-function unionCompactCohortSymbols(chunks,limit=20){
-  const seen=new Set();
-  const out=[];
-  for(const chunk of chunks||[]){
-    for(const item of chunk||[]){
-      const sym=normSym(item?.symbol||item?.s||item);
-      if(!sym||seen.has(sym)) continue;
-      seen.add(sym);
-      out.push({symbol:sym,rank:out.length+1,score:isFinite(Number(item?.score))?Number(item.score):null});
-      if(out.length>=limit) return out;
-    }
-  }
-  return out;
-}
-const LOADED_SPRING_KEY='loaded_spring';
-const LOADED_SPRING_FLAG_COUNT=5;
-const LOADED_SPRING_RESERVE_COUNT=5;
-const LOADED_SPRING_MIN_IMPROVEMENTS=4;
-const LOADED_SPRING_DNA_WEIGHTS={adr:18,marketCap:18,ema50Distance:14,dmiBalance:14,shareholders:8,mfi:7,rsi:7,volatility:5,roc:5,rangePosition:4};
-const LOADED_SPRING_IGNITION_WEIGHTS={roc:25,avgTurnoverRank:20,mfi:15,dmi15Balance:15,ema50Distance:10,macdHistogram:10,rsi30:5};
-const LOADED_SPRING_LIMITS={
-  minPrice:10,maxPrice:5000,minMarketCap:5e8,maxMarketCap:5e11,minAvgTurnover:1e7,
-  minTurnover:5e6,minVolume:10000,minTradeChange:-5,maxTradeChange:8,minAdr:3.5,
-  minEma50Distance:0,maxEma50Distance:20,minRsi:47,maxRsi:72,minMfi:45,maxMfi:92,
-  minProfileChange:-1.5,maxProfileChange:3.5,maxPullback:3.5,minRangePosition:25
+
+// ══════════════════════════════════════════════════
+// RADAR COMPOSITE SCORER (v517)
+// One same-day transparent cross-sectional model: typed transformations, robust
+// winsorized percentiles, a shrunk same-day rocket-archetype diagnostic blended
+// with finance priors across seven budgeted groups, then NSE-report penalties.
+// It learns nothing across days and stores no rolling state.
+// ══════════════════════════════════════════════════
+const RADAR_GROUPS={
+  participation:{label:'Participation',budget:20,desc:'Relative volume, money flow and turnover impulse'},
+  momentum:{label:'Momentum',budget:20,desc:'ROC, oscillators and multi-timeframe thrust'},
+  trend:{label:'Trend',budget:18,desc:'MA, DMI/ADX, Aroon and Ichimoku alignment'},
+  structure:{label:'Structure',budget:17,desc:'Gap, range, bands, channels and pivots'},
+  liquidity:{label:'Liquidity',budget:12,desc:'Turnover, volume, market cap and tradability'},
+  volatility:{label:'Volatility',budget:8,desc:'ATR and range expansion without chaos'},
+  context:{label:'Context',budget:5,desc:'Sector-relative regime and fundamentals'}
 };
-function findSpringColumn(cols,patterns){
-  return (cols||[]).find(col=>patterns.some(pattern=>pattern.test(String(col))))||null;
+const RADAR_RATING={'strong sell':-2,'sell':-1,'neutral':0,'buy':1,'strong buy':2};
+const RADAR_LIQ_STEPS=[0,5e5,25e5,1e7,5e7,1e8,1e9,1e10];
+const RADAR_LIQ_LABELS=['Any','₹5L','₹25L','₹1Cr','₹5Cr','₹10Cr','₹100Cr','₹1000Cr'];
+const radarNum=v=>{if(v===null||v===undefined||v==='')return null;const x=Number(String(v).replace(/[,%₹\s]/g,''));return Number.isFinite(x)?x:null;};
+const clamp01=(x,a=0,b=1)=>Math.max(a,Math.min(b,x));
+function radarIdx(headers,name){return headers.indexOf(name);}
+function radarPct(sorted,x){if(x===null||!sorted.length)return null;let lo=0,hi=sorted.length;while(lo<hi){const m=(lo+hi)>>1;if(sorted[m]<=x)lo=m+1;else hi=m;}return clamp01((lo-.5)/sorted.length);}
+function radarQuant(a,p){if(!a.length)return null;const z=(a.length-1)*p,l=Math.floor(z),f=z-l;return a[l]+(a[Math.min(a.length-1,l+1)]-a[l])*f;}
+function radarGroupFor(h){
+  const s=h.toLowerCase();
+  if(/relative volume|volume change|money flow|chaikin|bull bear power|volume-weighted/.test(s))return'participation';
+  if(/rate of change|momentum|relative strength|stochastic|commodity channel|awesome oscillator|moving average convergence|ultimate oscillator/.test(s))return'momentum';
+  if(/moving average|aroon|directional|ichimoku|parabolic sar|technical rating|oscillators rating/.test(s))return'trend';
+  if(/gap|high|low|open|bollinger|donchian|keltner|pivot|price change|average daily range/.test(s))return'structure';
+  if(/turnover|volume|market capitalization|shareholder|price to earnings|average volume/.test(s))return'liquidity';
+  if(/volatility|average true range/.test(s))return'volatility';
+  return'context';
 }
-function detectLoadedSpringColumns(day){
-  const cols=getDayFeatureCols(day);
-  return {
-    price:findSpringColumn(cols,[/^price$/]),
-    change:findSpringColumn(cols,[/^price_change_1_day$/,/price_change.*1_day/]),
-    marketCap:findSpringColumn(cols,[/^market_capitalization$/,/market_cap/]),
-    avgTurnover:findSpringColumn(cols,[/price_average_volume.*10_days/]),
-    turnover:findSpringColumn(cols,[/price_volume_turnover_1_day/]),
-    volume:findSpringColumn(cols,[/^volume_1_day$/,/^volume$/]),
-    adr:findSpringColumn(cols,[/^average_daily_range$/,/average_daily_range.*percent/]),
-    ema50:findSpringColumn(cols,[/exponential_moving_average_50_1_day/]),
-    dmiPlus:findSpringColumn(cols,[/directional_movement_index_14_1_day_positive/]),
-    dmiMinus:findSpringColumn(cols,[/directional_movement_index_14_1_day_negative/]),
-    shareholders:findSpringColumn(cols,[/number_of_shareholders/]),
-    mfi:findSpringColumn(cols,[/money_flow_index_14_1_day/]),
-    rsi:findSpringColumn(cols,[/relative_strength_index_14_1_day/]),
-    volatility:findSpringColumn(cols,[/volatility_1_day/]),
-    roc:findSpringColumn(cols,[/rate_of_change_9_1_day/]),
-    rangePosition:findSpringColumn(cols,[/^range_pos$/]),
-    pullback:findSpringColumn(cols,[/^pullback_from_high_pct$/]),
-    dmi15Plus:findSpringColumn(cols,[/directional_movement_index_14_15_minutes_positive/]),
-    dmi15Minus:findSpringColumn(cols,[/directional_movement_index_14_15_minutes_negative/]),
-    macd:findSpringColumn(cols,[/moving_average_convergence_divergence_12_26_1_day_level/]),
-    macdSignal:findSpringColumn(cols,[/moving_average_convergence_divergence_12_26_1_day_signal/]),
-    rsi30:findSpringColumn(cols,[/relative_strength_index_14_30_minutes/])
-  };
+function radarIsPriceLevel(h){
+  return /moving average|bollinger|donchian|keltner|pivot points|ichimoku|parabolic sar|volume-weighted average price|volume-weighted moving average|hull moving average|high,|low,|open,/.test(h.toLowerCase())&&!/percentage|%/.test(h);
 }
-function springPercentileMap(items,key,reverse=false){
-  const sorted=items.map(item=>({symbol:item.symbol,raw:item[key]})).filter(item=>item.raw!=null&&item.raw!=='').map(item=>({...item,value:Number(item.raw)})).filter(item=>isFinite(item.value)).sort((a,b)=>a.value-b.value);
-  const out=new Map();
-  for(let start=0;start<sorted.length;){
-    let end=start;while(end+1<sorted.length&&sorted[end+1].value===sorted[start].value)end++;
-    const rank=sorted.length>1?((start+end)/2)/(sorted.length-1):0.5;
-    for(let i=start;i<=end;i++)out.set(sorted[i].symbol,reverse?1-rank:rank);
-    start=end+1;
-  }
-  return out;
+function radarTransformed(raw,f,priceI){
+  const rv=raw[f.i];
+  if(f.rating)return RADAR_RATING[String(rv).toLowerCase()]??null;
+  let x=radarNum(rv);
+  if(x===null)return null;
+  if(radarIsPriceLevel(f.name)){const p=radarNum(raw[priceI]);if(p&&x)return 100*(p/x-1);}
+  if(/volume|turnover|market capitalization|shareholder/.test(f.name.toLowerCase()))return Math.sign(x)*Math.log1p(Math.abs(x));
+  if(f.name==='Price to earnings ratio')return Math.sign(x)*Math.log1p(Math.abs(x));
+  if(f.name==='Price')return Math.log1p(Math.max(0,x));
+  return x;
 }
-function weightedSpringScore(item,maps,weights){
-  let total=0,used=0;
-  Object.entries(weights).forEach(([key,weight])=>{
-    const value=maps[key]?.get(item.symbol);
-    if(value==null||!isFinite(value)) return;
-    total+=value*weight;used+=weight;
-  });
-  return used?total/used*100:null;
+function radarPrior(feature,p){
+  const s=feature.name.toLowerCase();
+  if(p===null)return null;
+  if(/negative|aroon.*down/.test(s))return 1-2*p;
+  if(/relative strength|stochastic|money flow|commodity channel|ultimate oscillator/.test(s))return clamp01(1-Math.abs(p-.68)/.68,0,1)*2-1;
+  if(/volatility|true range|daily range/.test(s))return clamp01(1-Math.abs(p-.64)/.64,0,1)*2-1;
+  if(/gap|price change/.test(s))return clamp01(1-Math.abs(p-.72)/.72,0,1)*2-1;
+  if(s==='price to earnings ratio')return 0;
+  return 2*p-1;
 }
-function buildLoadedSpringSelection(day,prevDay,pool,limit=LOADED_SPRING_FLAG_COUNT+LOADED_SPRING_RESERVE_COUNT){
-  if(!day||!prevDay) return {available:false,unavailableReason:'previous accepted ALL NSE snapshot unavailable',picks:[],reserves:[]};
-  const currentCols=detectLoadedSpringColumns(day),previousCols=detectLoadedSpringColumns(prevDay);
-  const requiredCurrent=['price','change','marketCap','avgTurnover','turnover','volume','adr','ema50','dmiPlus','dmiMinus','shareholders','mfi','rsi','volatility','roc','rangePosition','pullback','dmi15Plus','dmi15Minus','macd','macdSignal','rsi30'];
-  const requiredPrevious=['price','avgTurnover','ema50','mfi','roc','dmi15Plus','dmi15Minus','macd','macdSignal','rsi30'];
-  const missing=[...requiredCurrent.filter(key=>!currentCols[key]).map(key=>'current '+key),...requiredPrevious.filter(key=>!previousCols[key]).map(key=>'previous '+key)];
-  if(missing.length) return {available:false,unavailableReason:'missing '+missing.join(', '),picks:[],reserves:[]};
-  const currentRows=day.featureRows||{},previousRows=prevDay.featureRows||{},currentRockets=new Set(day.rocketSymbols||[]);
-  const value=(row,col)=>{const raw=row?.[col];if(raw==null||raw==='')return null;const v=Number(raw);return isFinite(v)?v:null;};
-  const candidates=[];
-  for(const symbol of pool||[]){
-    const row=currentRows[symbol],prev=previousRows[symbol];
-    if(!row||!prev||currentRockets.has(symbol)) continue;
-    const price=value(row,currentCols.price),change=value(row,currentCols.change),marketCap=value(row,currentCols.marketCap);
-    const avgTurnover=value(row,currentCols.avgTurnover),turnover=value(row,currentCols.turnover),volume=value(row,currentCols.volume);
-    const adr=value(row,currentCols.adr),ema50=value(row,currentCols.ema50),dmiPlus=value(row,currentCols.dmiPlus),dmiMinus=value(row,currentCols.dmiMinus);
-    const shareholders=value(row,currentCols.shareholders),mfi=value(row,currentCols.mfi),rsi=value(row,currentCols.rsi);
-    const volatility=value(row,currentCols.volatility),roc=value(row,currentCols.roc),rangePosition=value(row,currentCols.rangePosition),pullback=value(row,currentCols.pullback);
-    if([price,change,marketCap,avgTurnover,turnover,volume,adr,ema50,dmiPlus,dmiMinus,shareholders,mfi,rsi,volatility,roc,rangePosition,pullback].some(v=>v==null)) continue;
-    const ema50Distance=ema50>0?(price/ema50-1)*100:null,dmiBalance=dmiPlus-dmiMinus;
-    if(!(price>=LOADED_SPRING_LIMITS.minPrice&&price<=LOADED_SPRING_LIMITS.maxPrice&&marketCap>=LOADED_SPRING_LIMITS.minMarketCap&&marketCap<=LOADED_SPRING_LIMITS.maxMarketCap&&avgTurnover>=LOADED_SPRING_LIMITS.minAvgTurnover&&turnover>=LOADED_SPRING_LIMITS.minTurnover&&volume>=LOADED_SPRING_LIMITS.minVolume&&change>=LOADED_SPRING_LIMITS.minTradeChange&&change<=LOADED_SPRING_LIMITS.maxTradeChange)) continue;
-    if(!(adr>=LOADED_SPRING_LIMITS.minAdr&&ema50Distance>=LOADED_SPRING_LIMITS.minEma50Distance&&ema50Distance<=LOADED_SPRING_LIMITS.maxEma50Distance&&dmiBalance>0&&rsi>=LOADED_SPRING_LIMITS.minRsi&&rsi<=LOADED_SPRING_LIMITS.maxRsi&&mfi>=LOADED_SPRING_LIMITS.minMfi&&mfi<=LOADED_SPRING_LIMITS.maxMfi&&change>=LOADED_SPRING_LIMITS.minProfileChange&&change<=LOADED_SPRING_LIMITS.maxProfileChange&&pullback<=LOADED_SPRING_LIMITS.maxPullback&&rangePosition>=LOADED_SPRING_LIMITS.minRangePosition)) continue;
-    const prevPrice=value(prev,previousCols.price),prevEma=value(prev,previousCols.ema50);
-    const delta=(current,prior)=>current!=null&&prior!=null?current-prior:null;
-    const currentDmi15Plus=value(row,currentCols.dmi15Plus),currentDmi15Minus=value(row,currentCols.dmi15Minus);
-    const previousDmi15Plus=value(prev,previousCols.dmi15Plus),previousDmi15Minus=value(prev,previousCols.dmi15Minus);
-    const currentMacd=value(row,currentCols.macd),currentMacdSignal=value(row,currentCols.macdSignal);
-    const previousMacd=value(prev,previousCols.macd),previousMacdSignal=value(prev,previousCols.macdSignal);
-    const ignition={
-      roc:delta(roc,value(prev,previousCols.roc)),
-      mfi:delta(mfi,value(prev,previousCols.mfi)),
-      dmi15Balance:[currentDmi15Plus,currentDmi15Minus,previousDmi15Plus,previousDmi15Minus].every(v=>v!=null)?(currentDmi15Plus-currentDmi15Minus)-(previousDmi15Plus-previousDmi15Minus):null,
-      ema50Distance:delta(ema50Distance,prevEma>0&&prevPrice>0?(prevPrice/prevEma-1)*100:null),
-      macdHistogram:[currentMacd,currentMacdSignal,previousMacd,previousMacdSignal].every(v=>v!=null)?(currentMacd-currentMacdSignal)-(previousMacd-previousMacdSignal):null,
-      rsi30:delta(value(row,currentCols.rsi30),value(prev,previousCols.rsi30))
-    };
-    if(Object.values(ignition).some(v=>v==null||!isFinite(v))) continue;
-    const prevAvgTurnover=value(prev,previousCols.avgTurnover);
-    if(prevAvgTurnover==null) continue;
-    candidates.push({symbol,adr,marketCap,ema50Distance,dmiBalance,shareholders,mfi,rsi,volatility,roc,rangePosition,avgTurnover,prevAvgTurnover,ignition,change,pullback});
-  }
-  if(!candidates.length) return {available:true,picks:[],reserves:[]};
-  const currentTurnRank=springPercentileMap(candidates,'avgTurnover');
-  const previousTurnItems=candidates.map(item=>({symbol:item.symbol,avgTurnover:item.prevAvgTurnover}));
-  const previousTurnRank=springPercentileMap(previousTurnItems,'avgTurnover');
-  candidates.forEach(item=>{item.ignition.avgTurnoverRank=(currentTurnRank.get(item.symbol)??0)-(previousTurnRank.get(item.symbol)??0);item.improvements=Object.values(item.ignition).filter(v=>v>0).length;});
-  const qualified=candidates.filter(item=>item.improvements>=LOADED_SPRING_MIN_IMPROVEMENTS);
-  const dnaMaps={
-    adr:springPercentileMap(qualified,'adr'),marketCap:springPercentileMap(qualified,'marketCap',true),ema50Distance:springPercentileMap(qualified,'ema50Distance'),
-    dmiBalance:springPercentileMap(qualified,'dmiBalance'),shareholders:springPercentileMap(qualified,'shareholders',true),mfi:springPercentileMap(qualified,'mfi'),
-    rsi:springPercentileMap(qualified,'rsi'),volatility:springPercentileMap(qualified,'volatility'),roc:springPercentileMap(qualified,'roc'),rangePosition:springPercentileMap(qualified,'rangePosition')
-  };
-  const ignitionMaps=Object.fromEntries(Object.keys(LOADED_SPRING_IGNITION_WEIGHTS).map(key=>[key,springPercentileMap(qualified.map(item=>({symbol:item.symbol,[key]:item.ignition[key]})),key)]));
-  const ranked=qualified.map(item=>{
-    const dnaScore=weightedSpringScore(item,dnaMaps,LOADED_SPRING_DNA_WEIGHTS);
-    const ignitionScore=weightedSpringScore(item,ignitionMaps,LOADED_SPRING_IGNITION_WEIGHTS);
-    const score=(dnaScore*0.65)+(ignitionScore*0.35);
-    return {symbol:item.symbol,score,inputs:{loadedSpringScore:+score.toFixed(2),rocketDnaScore:+dnaScore.toFixed(2),freshIgnitionScore:+ignitionScore.toFixed(2),improvingMeasures:item.improvements,price:+Number(day.featureRows[item.symbol][currentCols.price]).toFixed(2),change:+item.change.toFixed(2),adr:+item.adr.toFixed(2),dmiBalance:+item.dmiBalance.toFixed(2),rsi:+item.rsi.toFixed(2),mfi:+item.mfi.toFixed(2),ema50Distance:+item.ema50Distance.toFixed(2),marketCap:Math.round(item.marketCap),shareholders:Math.round(item.shareholders),roc:+item.roc.toFixed(2),rangePosition:+item.rangePosition.toFixed(2),pullback:+item.pullback.toFixed(2)}};
-  }).sort((a,b)=>b.score-a.score||a.symbol.localeCompare(b.symbol)).slice(0,limit).map((item,index)=>({...item,rank:index+1}));
-  return {available:true,picks:ranked.slice(0,LOADED_SPRING_FLAG_COUNT),reserves:ranked.slice(LOADED_SPRING_FLAG_COUNT)};
+function radarSetupLabel(r){
+  const b=[];
+  if(r.parts.participation>=67)b.push('Volume ignition');
+  if(r.parts.structure>=67)b.push('Breakout coil');
+  if(r.parts.trend>=67)b.push('Trend alignment');
+  if(r.parts.momentum>=67)b.push('Momentum stack');
+  if(r.parts.volatility>=65&&r.parts.structure<67)b.push('Range expansion');
+  return b.slice(0,2).join(' + ')||'Mixed setup';
 }
-function getDayStrategyCohorts(day,prevDay,rows,history=[]){
-  const uploadRows=(rows||[]).filter(row=>row?.symbol);
-  const uploadFeatureCols=[...new Set(uploadRows.flatMap(row=>Object.keys(row._features||{})))];
-  day={...day,
-    symbols:uploadRows.map(row=>row.symbol),
-    prices:Float32Array.from(uploadRows,row=>Number(row.price)||NaN),
-    featureCols:uploadFeatureCols,
-    featureRows:Object.fromEntries(uploadRows.map(row=>[row.symbol,{...(row._features||{})}]))
-  };
-  const eligible=new Set((day?.eligibleSymbols||[]).filter(Boolean));
-  const heldPositions=getHeldPositionMap();
-  const commonRows=(rows||[]).filter(row=>{
-    const candidate={...row,_features:row._features||{}};
-    return eligible.has(row.symbol)&&!getFilterBarReason(candidate,{ignoreMinScore:true})&&!applyHeldDisplayState(candidate,heldPositions);
-  });
-  const pool=commonRows.map(row=>row.symbol);
-  const n=20;
-  const available=picks=>({available:true,picks:picks||[]});
-  const cohorts={engine:available(compactCohortSymbols([...commonRows].sort((a,b)=>(b.rocketScore||0)-(a.rocketScore||0)),n))};
-  cohorts[MOMENTUM_VOLUME_KEY]=buildMomentumVolumeContinuation(day,pool,n);
-  cohorts[VOL_CONTRACTION_KEY]=buildVolatilityContractionBreakout(day,pool,n);
-  cohorts[LOADED_SPRING_KEY]=buildLoadedSpringSelection(day,prevDay,pool);
-  cohorts[DONCHIAN_VB_KEY]=buildDonchianBreakoutSelection(day,prevDay,pool,n);
-  const rand=seededRand(day?.sessionDate||''),rp=[...pool],rout=[];
-  while(rp.length&&rout.length<n) rout.push(rp.splice(Math.floor(rand()*rp.length),1)[0]);
-  cohorts.random=available(compactCohortSymbols(rout.map(sym=>({symbol:sym,rocketScore:null})),n));
-  return applyBreadthOrderingOverlay(cohorts,day);
+// Supplements: authoritative exchange context assembled from the already-parsed NSE maps
+// (sec_list price bands, bhav delivery/close/avg, REG1 series/status/flags, 52W, deals).
+function buildRadarSupplements(){
+  const meta={};
+  const get=sym=>meta[sym]??={symbol:sym,flags:[],bulkNet:0};
+  Object.entries(NSE_PRICE_BAND).forEach(([sym,pb])=>{const m=get(sym);m.band=pb?.bandPct??null;m.series=m.series||'EQ';});
+  Object.entries(NSE_BHAV).forEach(([sym,b])=>{const m=get(sym);m.series=m.series||'EQ';m.delivery=b.delivPct;m.trades=b.trades;m.officialClose=b.officialClose;m.officialAvg=b.officialAvg;});
+  NSE_NON_EQ.forEach(sym=>{get(sym).series='NON-EQ';});
+  Object.entries(NSE_STATUS).forEach(([sym,st])=>{get(sym).status=st;});
+  Object.entries(NSE_52W).forEach(([sym,w])=>{const m=get(sym);m.high52=w.high52w;m.low52=w.low52w;});
+  Object.keys(NSE_BULK).forEach(sym=>{get(sym).bulkNet+=1;}); // BUY-side bulk deals only are retained
+  Object.keys(NSE_BLOCK).forEach(sym=>{get(sym).bulkNet+=1;});
+  Object.entries(SURV_ALL_HITS).forEach(([sym,hits])=>{get(sym).flags=Object.keys(hits||{});});
+  return meta;
 }
-function buildAuthoritativePickUploadRecord({runtime,rows,sessionDate,sessionTag,timestamp}){
-  const days=[...(runtime?.days||[])].sort((a,b)=>String(a.sessionDate).localeCompare(String(b.sessionDate)));
-  const current=days.find(d=>d.sessionDate===sessionDate)||getLatestDailyRecord(runtime)||null;
-  const prev=days.filter(d=>String(d.sessionDate)<String(sessionDate)).slice(-1)[0]||null;
-  if(!current) return null;
-  const strategies=getDayStrategyCohorts(current,prev,rows||[],days.filter(day=>String(day.sessionDate)<String(sessionDate)));
-  const engineRowCount=compactCohortSymbols(getDisplayedEntryCandidates(rows||[],{ignoreMinScore:true}),20).length;
-  return {
-    ts:Number(timestamp)||Date.now(),
-    tag:sessionTag||null,
-    sessionDate,
-    basis:{
-      eligibleCount:(current.eligibleSymbols||[]).length,
-      engineCount:engineRowCount,
-      poolCap:20,
-      hardFiltered:Math.max(0,(REMOVED.uc||0)+(REMOVED.surv||0)+(REMOVED.nonEq||0)+(REMOVED.liq||0)+(REMOVED.fscore||0)+(REMOVED.atr||0)),
-      entryBlocked:GEOMETRY_GATE_SUMMARY.gatedOut||0
-    },
-    strategies:Object.fromEntries(Object.entries(strategies).map(([name,cohort])=>[name,compactStoredStrategyCohort(cohort)]))
-  };
-}
-function recordAuthoritativePickUpload(runtime,sessionDate,uploadRecord){
-  if(!runtime?.days?.length||!uploadRecord?.strategies) return false;
-  const day=(runtime.days||[]).find(d=>d.sessionDate===sessionDate);
-  if(!day) return false;
-  if(!Array.isArray(day.pickUploads)) day.pickUploads=[];
-  const key=`${uploadRecord.ts||0}|${uploadRecord.tag||''}`;
-  if(day.pickUploads.some(u=>`${u.ts||0}|${u.tag||''}`===key)) return false;
-  day.pickUploads.push({
-    ts:Number(uploadRecord.ts)||Date.now(),
-    tag:uploadRecord.tag||null,
-    basis:uploadRecord.basis||null,
-    strategies:Object.fromEntries(Object.entries(uploadRecord.strategies||{}).map(([name,cohort])=>[name,compactStoredStrategyCohort(cohort)]))
-  });
-  _pickStateCache=null;
-  return true;
-}
-function collectDayStrategyEvidence(day){
-  const out={};
-  (day?.pickUploads||[]).forEach(upload=>{
-    Object.entries(upload.strategies||{}).forEach(([name,value])=>{
-      const cohort=normalizeStrategyCohort(value);
-      if(!out[name]) out[name]={availableUploads:0,picks:new Map(),firstTs:null,unavailableReasons:new Set()};
-      const evidence=out[name];
-      if(!cohort.available){if(cohort.unavailableReason)evidence.unavailableReasons.add(cohort.unavailableReason);return;}
-      evidence.availableUploads++;
-      if(evidence.firstTs==null||Number(upload.ts)<evidence.firstTs)evidence.firstTs=Number(upload.ts)||0;
-      cohort.picks.forEach(item=>{if(item.symbol&&!evidence.picks.has(item.symbol))evidence.picks.set(item.symbol,item);});
-    });
-  });
-  return out;
-}
-function collectDayStrategySymbols(day){
-  return Object.fromEntries(Object.entries(collectDayStrategyEvidence(day)).map(([name,evidence])=>[name,new Set(evidence.picks.keys())]));
-}
-function getStrategySelectionForDay(day,name,legacyPool,prevDay,laterRockets,opts={}){
-  if(!opts.ignoreAuthoritative){
-    const union=collectDayStrategySymbols(day);
-    const auth=union[name];
-    if(auth&&auth.size)return [...auth].slice(0,20);
-  }
-  if(name==='engine') return [...(day?.predictedSymbols||[])].slice(0,20);
-  if(name===MOMENTUM_VOLUME_KEY) return []; // forward-only: no reconstructed cohorts
-  if(name===VOL_CONTRACTION_KEY) return []; // forward-only: fixed-rule audit is not ladder evidence
-  if(name===LOADED_SPRING_KEY) return [];
-  if(name===DONCHIAN_VB_KEY) return []; // forward-only: no reconstructed cohorts
-  const pool=legacyPool||[];
-  const n=20;
-  if(name==='target_1m5m') return pickTarget1m5mSymbols(day,pool,n);
-  if(name==='momentum'){
-    const prevKey=prevDay?_dayPriceChangeKey(prevDay):null;
-    return prevKey
-      ? pool.map(sym=>({sym,m:Number(prevDay?.featureRows?.[sym]?.[prevKey])})).filter(x=>x.m!=null&&isFinite(x.m)).sort((a,b)=>b.m-a.m).slice(0,n).map(x=>x.sym)
-      : [];
-  }
-  if(name==='persistence'){
-    const prevRockets=new Set(prevDay?.rocketSymbols||[]);
-    return pool.filter(sym=>prevRockets.has(sym)).slice(0,n);
-  }
-  if(name==='early_mover'){
-    const key=_dayPriceChangeKey(day);
-    return key
-      ? pool.map(sym=>({sym,c:Number(day?.featureRows?.[sym]?.[key])})).filter(x=>isFinite(x.c)&&x.c>=3&&x.c<6).sort((a,b)=>b.c-a.c).slice(0,n).map(x=>x.sym)
-      : [];
-  }
-  if(PICK_COMPOSITES[name]) return pickCompositeSymbols(day,pool,n,PICK_COMPOSITES[name]);
-  if(MOM_CONT_STRATEGY_BY_KEY[name]) return pickMomentumContinuationSymbols(day,prevDay,pool,n,MOM_CONT_STRATEGY_BY_KEY[name])||[];
-  if(RATING_STRATEGY_BY_KEY[name]) return pickRatingSymbols(day,pool,n,RATING_STRATEGY_BY_KEY[name])||[];
-  if(['high52w_mom','volume_shock','range_squeeze','delivery_surge','oversold_snap'].includes(name)) return pickQuantSymbols(name,day,prevDay,pool,n)||[];
-  if(name==='random'){
-    const rand=seededRand(day?.sessionDate||''),rp=[...pool],rout=[];
-    while(rp.length&&rout.length<n) rout.push(rp.splice(Math.floor(rand()*rp.length),1)[0]);
-    return rout;
-  }
-  return [];
-}
-// Pick-source championship: grade strategies on hit rate AND cost-adjusted profit per flag.
-// Random is a control only; every other strategy can run the live pick list.
-const PICK_CHAMPION_STORE='rs_pick_champion_v1';
-const PICK_DISABLED_STORE='rs_pick_disabled_v1';
-const PICK_CHAMPION_BAR='v516';
-const PICK_MIN_EVAL_DAYS=4;
-const RATING_BUY=4;
-const RATING_STRONG_BUY=5;
-const MOMC_MIN_PREV_MOVE_PCT=5;
-const MOMC_MIN_GAP_PCT=0.5;
-// Confirmed Donchian Volume Breakout — manually specified forward-only ladder strategy
-// (Brock/Lakonishok/LeBaron 1992 trading-range breaks; Lee/Swaminathan 2000 volume confirmation).
-const DONCHIAN_VB_KEY='donchian_volume_breakout';
-const DVB_CHANNEL_BAND=0.995;      // 0.5% band around the Donchian 20-day upper channel
-const DVB_RVOL_MIN=1.5;            // Relative Volume at Time participation floor
-const DVB_ADX_MIN=20;              // daily ADX trend-strength floor
-const DVB_HIGH_RETENTION_MAX_PCT=1.0; // max % below the day High to still count as holding the breakout
-const MOMENTUM_VOLUME_KEY='momentum_volume_continuation';
-const VOL_CONTRACTION_KEY='volatility_contraction_breakout';
-const PICK_STRATEGY_LABELS={
-  [MOMENTUM_VOLUME_KEY]:'Momentum + Volume Continuation',
-  [VOL_CONTRACTION_KEY]:'Volatility Contraction Breakout',
-  engine:'Engine',loaded_spring:'Loaded Spring',
-  [DONCHIAN_VB_KEY]:'Confirmed Donchian Breakout',
-  random:'Random',actual_you:'Actual (You)'
-};
-const PICK_RETIRED_LABELS={
-  breadth_relative:'Breadth Relative Strength',momentum:'Momentum',persistence:'Persistence',early_mover:'Early Mover 3-6%',
-  ta_composite:'TA Composite',fa_composite:'FA Composite',mom_cont_buy:'Mom-Cont >=5% (Buy)',mom_cont_sbuy:'Mom-Cont >=5% (SBuy)',
-  target_1m5m:'Target + 1m > 5m',rating_ma_buy:'MA = Buy',rating_osc_buy:'Osc = Buy',rating_tech_buy:'Tech = Buy',
-  rating_ma_osc_buy:'MA+Osc = Buy',rating_ma_tech_buy:'MA+Tech = Buy',rating_osc_tech_buy:'Osc+Tech = Buy',rating_all3_buy:'All-3 = Buy',
-  rating_ma_sbuy:'MA = Strong Buy',rating_osc_sbuy:'Osc = Strong Buy',rating_tech_sbuy:'Tech = Strong Buy',
-  rating_ma_osc_sbuy:'MA+Osc = Strong Buy',rating_ma_tech_sbuy:'MA+Tech = Strong Buy',rating_osc_tech_sbuy:'Osc+Tech = Strong Buy',rating_all3_sbuy:'All-3 = Strong Buy',
-  high52w_mom:'52W-High Momentum',volume_shock:'Volume Shock',range_squeeze:'Range Squeeze',delivery_surge:'Delivery Surge',oversold_snap:'Oversold Snap'
-};
-const PICK_PERMANENT_STRATEGIES=new Set([MOMENTUM_VOLUME_KEY,VOL_CONTRACTION_KEY,'engine',LOADED_SPRING_KEY,DONCHIAN_VB_KEY,'random','actual_you']);
-// Rule-audit text shown in the ladder row tooltip for manually specified rule strategies.
-const PICK_STRATEGY_RULES={
-  [MOMENTUM_VOLUME_KEY]:'Qualify: 1-6.5% daily move, positive from open, above VWAP, within 1.25% of the day high, positive 1m and 5m movement, DMI+ > DMI-, daily ADX >= 18, and market-relative participation floors that tighten when breadth is weak. Rank: relative strength 30%, relative volume 20%, drive from open 15%, high retention 15%, DMI spread 10%, five-minute continuation 10%.',
-  [VOL_CONTRACTION_KEY]:'Qualify: Bollinger(20) width in the narrowest 35% of the eligible universe, Price at or within 0.5% of the upper band, Price above VWAP, positive Change from Open, Relative Volume at Time >= 1.5, and DMI+ > DMI-. Rank: 40% 1-day relative strength + 25% capped relative volume + 20% high retention + 15% capped ADX.',
-  [DONCHIAN_VB_KEY]:'Qualify: prev Price < 99.5% of prev Donchian(20) Upper AND current Price >= 99.5% of current Donchian(20) Upper AND Price > VWAP AND Relative Volume at Time >= '+DVB_RVOL_MIN+' AND ADX(14,1D) >= '+DVB_ADX_MIN+' AND DMI+ > DMI- AND Change from Open > 0 AND Price within '+DVB_HIGH_RETENTION_MAX_PCT+'% of day High. Rank: 40% RVol-at-time pct + 25% ADX pct + 20% DMI spread pct + 15% high-retention pct.'
-};
-function getPickStrategyLabel(name){return PICK_STRATEGY_LABELS[name]||PICK_RETIRED_LABELS[name]||name;}
-const QS_RVOL_MIN=2.0,QS_QUIET_CHG_MIN=0,QS_QUIET_CHG_MAX=3,QS_DELIV_MIN=60,QS_RSI_OVERSOLD=30,QS_SQUEEZE_RATIO=0.5;
-const RATING_STRATEGIES=[
-  {key:'rating_ma_buy',target:RATING_BUY,parts:['ma']},
-  {key:'rating_osc_buy',target:RATING_BUY,parts:['osc']},
-  {key:'rating_tech_buy',target:RATING_BUY,parts:['tech']},
-  {key:'rating_ma_osc_buy',target:RATING_BUY,parts:['ma','osc']},
-  {key:'rating_ma_tech_buy',target:RATING_BUY,parts:['ma','tech']},
-  {key:'rating_osc_tech_buy',target:RATING_BUY,parts:['osc','tech']},
-  {key:'rating_all3_buy',target:RATING_BUY,parts:['ma','osc','tech']},
-  {key:'rating_ma_sbuy',target:RATING_STRONG_BUY,parts:['ma']},
-  {key:'rating_osc_sbuy',target:RATING_STRONG_BUY,parts:['osc']},
-  {key:'rating_tech_sbuy',target:RATING_STRONG_BUY,parts:['tech']},
-  {key:'rating_ma_osc_sbuy',target:RATING_STRONG_BUY,parts:['ma','osc']},
-  {key:'rating_ma_tech_sbuy',target:RATING_STRONG_BUY,parts:['ma','tech']},
-  {key:'rating_osc_tech_sbuy',target:RATING_STRONG_BUY,parts:['osc','tech']},
-  {key:'rating_all3_sbuy',target:RATING_STRONG_BUY,parts:['ma','osc','tech']}
-];
-const RATING_STRATEGY_BY_KEY=Object.fromEntries(RATING_STRATEGIES.map(s=>[s.key,s]));
-const MOM_CONT_STRATEGIES=[
-  {key:'mom_cont_buy',target:RATING_BUY},
-  {key:'mom_cont_sbuy',target:RATING_STRONG_BUY}
-];
-const MOM_CONT_STRATEGY_BY_KEY=Object.fromEntries(MOM_CONT_STRATEGIES.map(s=>[s.key,s]));
-function detectShortChangeColumns(day){
-  const cols=getDayFeatureCols(day);
-  return {
-    oneMinute:findFeatureColumn(cols,[/price_change.*1.*minute/,/change.*1.*minute/]),
-    fiveMinute:findFeatureColumn(cols,[/price_change.*5.*minute/,/change.*5.*minute/])
-  };
-}
-function pickTarget1m5mSymbols(day,pool,n){
-  const cols=detectShortChangeColumns(day);
-  const dayKey=_dayPriceChangeKey(day);
-  const target=Number(getEffectiveTgtPct());
-  if(!(target>0)||!dayKey||!cols.oneMinute||!cols.fiveMinute) return [];
-  const rand=seededRand(String(day?.sessionDate||'')+'|target_1m5m');
-  const ranked=[];
-  for(const sym of pool||[]){
-    const row=day?.featureRows?.[sym]||{};
-    const dayCh=Number(row?.[dayKey]);
-    const one=Number(row?.[cols.oneMinute]);
-    const five=Number(row?.[cols.fiveMinute]);
-    if(!isFinite(dayCh)||!isFinite(one)||!isFinite(five)) continue;
-    if(dayCh<target||!(five>0)||!(one>five)) continue;
-    ranked.push({sym,one,five,dayCh,tie:rand()});
-  }
-  return ranked.sort((a,b)=>b.one-a.one||b.five-a.five||b.dayCh-a.dayCh||a.tie-b.tie).slice(0,n).map(x=>x.sym);
-}
-function liveTarget1m5mMetric(s){
-  const row=s?._features||{};
-  const dayCh=Number(s?.priceChange);
-  const cols=detectShortChangeColumns({featureRows:{[s?.symbol||'']:row}});
-  const one=Number(row?.[cols.oneMinute]);
-  const five=Number(row?.[cols.fiveMinute]);
-  const target=Number(getEffectiveTgtPct());
-  if(!(target>0)||!isFinite(dayCh)||!isFinite(one)||!isFinite(five)) return -Infinity;
-  if(dayCh<target||!(five>0)||!(one>five)) return -Infinity;
-  return one;
-}
-const PICK_COMPOSITES={
-  ta_composite:[
-    {pattern:/average_directional|adx/,dir:1},
-    {pattern:/relative_volume|volume.*change|rvol/,dir:1},
-    {pattern:/stochastic_rsi|relative_strength_index|\brsi\b/,dir:1},
-    {pattern:/perf.*1_week|price_change.*1_week|change_from_open|from_open/,dir:1}
-  ],
-  fa_composite:[
-    {pattern:/piotroski/,dir:1},
-    {pattern:/price_to_earnings|price_earnings|\bpe_ratio\b/,dir:-1,positiveOnly:true},
-    {pattern:/return_on_equity|\broe\b/,dir:1},
-    {pattern:/eps.*growth|earnings.*growth|revenue.*growth/,dir:1},
-    {pattern:/debt_to_equity|debt.*equity/,dir:-1}
-  ]
-};
-function getPickDisabledStrategies(){
-  const saved=FS.get(PICK_DISABLED_STORE);
-  return new Set((Array.isArray(saved)?saved:[])
-    .map(key=>String(key||''))
-    .filter(key=>PICK_STRATEGY_LABELS[key]&&!PICK_PERMANENT_STRATEGIES.has(key)));
-}
-
-function isPickStrategyDisabled(name){return getPickDisabledStrategies().has(name);}
-function isChampionEligible(name){return !!PICK_STRATEGY_LABELS[name]&&name!=='random'&&name!=='actual_you'&&!isPickStrategyDisabled(name);}
-function getPickRosterStrategies(){
-  return Object.keys(PICK_STRATEGY_LABELS).filter(key=>!PICK_PERMANENT_STRATEGIES.has(key));
-}
-function savePickDisabledStrategies(disabled){
-  const next=[...disabled].filter(key=>getPickRosterStrategies().includes(key)).sort();
-  FS.set(PICK_DISABLED_STORE,next);
-  _pickStateCache=null;
-  applyFilters();
-}
-function disablePickStrategy(name){
-  if(PICK_PERMANENT_STRATEGIES.has(name)) return;
-  const disabled=getPickDisabledStrategies();disabled.add(name);
-  savePickDisabledStrategies(disabled);
-}
-function enablePickStrategy(name){
-  const disabled=getPickDisabledStrategies();disabled.delete(name);
-  savePickDisabledStrategies(disabled); // Re-enabled strategies use the full stored window again.
-}
-function seededRand(seedText){
-  let seed=0;String(seedText||'').split('').forEach(ch=>{seed=((seed*31)+ch.charCodeAt(0))>>>0;});
-  return ()=>{seed=(1664525*seed+1013904223)>>>0;return seed/4294967296;};
-}
-function _dayPriceChangeKey(day){
-  const cols=day?.featureCols?.length?day.featureCols:Object.keys(day?.featureRows?.[day?.symbols?.[0]]||{});
-  return cols.find(c=>/price_change/.test(c)&&/1_day/.test(c)&&!/open|from/.test(c))||cols.find(c=>/price_change/.test(c))||null;
-}
-function getDayFeatureCols(day){
-  if(day?.featureCols?.length) return day.featureCols;
-  const cols=new Set();
-  Object.values(day?.featureRows||{}).forEach(row=>Object.keys(row||{}).forEach(k=>cols.add(k)));
-  return [...cols];
-}
-function detectCompositeComponents(cols,components){
-  return (components||[]).map(c=>{
-    const key=(cols||[]).find(col=>c.pattern.test(String(col).toLowerCase()));
-    return key?{...c,key}:null;
-  }).filter(Boolean);
-}
-function compositeValue(row,component){
-  const v=Number(row?.[component.key]);
-  if(!isFinite(v)) return null;
-  if(component.positiveOnly&&v<=0) return null;
-  return v;
-}
-function pickCompositeSymbols(day,pool,n,components){
-  const detected=detectCompositeComponents(getDayFeatureCols(day),components);
-  if(detected.length<2) return [];
-  const scores=new Map();
-  detected.forEach(component=>{
-    const vals=(pool||[])
-      .map(sym=>({sym,v:compositeValue(day?.featureRows?.[sym],component)}))
-      .filter(x=>x.v!=null&&isFinite(x.v));
-    if(!vals.length) return;
-    vals.sort((a,b)=>(a.v*component.dir)-(b.v*component.dir));
-    const denom=Math.max(1,vals.length-1);
-    vals.forEach((x,idx)=>{
-      const rank=vals.length===1?1:idx/denom;
-      const rec=scores.get(x.sym)||{sum:0,n:0};
-      rec.sum+=rank;rec.n++;
-      scores.set(x.sym,rec);
-    });
-  });
-  return [...scores.entries()]
-    .filter(([,r])=>r.n>=2)
-    .map(([sym,r])=>({sym,score:r.sum/r.n}))
-    .sort((a,b)=>b.score-a.score||String(a.sym).localeCompare(String(b.sym)))
-    .slice(0,n)
-    .map(x=>x.sym);
-}
-function liveCompositeMetric(features,components){
-  const detected=detectCompositeComponents(Object.keys(features||{}),components);
-  const vals=detected.map(component=>{
-    const v=compositeValue(features,component);
-    if(v==null) return null;
-    const directional=v*component.dir;
-    return 0.5+(Math.atan(directional)/Math.PI);
-  }).filter(v=>v!=null&&isFinite(v));
-  if(vals.length<2) return -Infinity;
-  return vals.reduce((sum,v)=>sum+v,0)/vals.length;
-}
-const RATING_FEATURE_KEYS={
-  ma:'moving_averages_rating_1_day',
-  osc:'oscillators_rating_1_day',
-  tech:'technical_rating_1_day'
-};
-const MOM_CONT_FEATURE_KEYS={
-  prevMove:'price_change_1_day',
-  prevMa:'moving_averages_rating_1_day',
-  prevTech:'technical_rating_1_day',
-  gap:'gap_1_day',
-  roc:'rate_of_change_9_1_day'
-};
-function dayHasFeatureColumn(day,key){
-  return getDayFeatureCols(day).includes(key);
-}
-function finiteFeature(row,key){
-  const v=Number(row?.[key]);
-  return isFinite(v)?v:null;
-}
-function findFeatureColumn(cols,patterns){
-  return (cols||[]).find(col=>patterns.some(pattern=>pattern.test(String(col).toLowerCase())))||null;
-}
-function detectQuantColumns(day){
-  const cols=getDayFeatureCols(day);
-  return {
-    high52:findFeatureColumn(cols,[/pct.*52.*high/,/52.*high.*pct/]),
-    rvol:findFeatureColumn(cols,[/relative.*volume/,/\brvol\b/]),
-    delivery:findFeatureColumn(cols,[/delivery.*pct/,/delivery.*percent/]),
-    rsi:findFeatureColumn(cols,[/relative.*strength.*index/,/\brsi(?:_|$)/]),
-    high:findFeatureColumn(cols,[/^high_1_day$/,/^high$/]),
-    low:findFeatureColumn(cols,[/^low_1_day$/,/^low$/]),
-    adr:findFeatureColumn(cols,[/average.*daily.*range/,/\badr\b/]),
-    atr:findFeatureColumn(cols,[/average.*true.*range.*(?:pct|percent)/,/\batr.*(?:pct|percent)/])
-  };
-}
-function getDayChange(row,day){
-  const key=_dayPriceChangeKey(day);
-  return key?finiteFeature(row,key):null;
-}
-function pickQuantSymbols(key,day,prevDay,pool,n){
-  const cols=detectQuantColumns(day);
-  const prevCols=prevDay?detectQuantColumns(prevDay):null;
-  const rand=seededRand(String(day?.sessionDate||'')+'|'+key);
-  const tie=Object.fromEntries((pool||[]).map(sym=>[sym,rand()]));
-  const ranked=[];
-  for(const sym of pool||[]){
-    const row=day?.featureRows?.[sym]||{};
-    const change=getDayChange(row,day);
-    let metric=null;
-    if(key==='high52w_mom'){
-      const value=finiteFeature(row,cols.high52); if(!cols.high52||value==null) continue;
-      metric=value;
-    }else if(key==='volume_shock'){
-      const value=finiteFeature(row,cols.rvol); if(!cols.rvol||value==null||change==null||value<QS_RVOL_MIN||change<QS_QUIET_CHG_MIN||change>QS_QUIET_CHG_MAX) continue;
-      metric=value;
-    }else if(key==='range_squeeze'){
-      if(!prevDay||!prevCols?.high||!prevCols.low||!prevCols.adr||change==null||change<=0) continue;
-      const prevRow=prevDay.featureRows?.[sym]||{};
-      const high=finiteFeature(prevRow,prevCols.high),low=finiteFeature(prevRow,prevCols.low),adr=finiteFeature(prevRow,prevCols.adr);
-      const priceIndex=(prevDay.symbols||[]).indexOf(sym),price=priceIndex>=0?Number(prevDay.prices?.[priceIndex]):null;
-      if([high,low,adr,price].some(v=>v==null||!isFinite(v))||!(price>0)||((high-low)/price*100)>QS_SQUEEZE_RATIO*adr) continue;
-      metric=(high-low)/price*100;
-    }else if(key==='delivery_surge'){
-      const value=finiteFeature(row,cols.delivery); if(!cols.delivery||value==null||change==null||value<QS_DELIV_MIN||change<QS_QUIET_CHG_MIN||change>QS_QUIET_CHG_MAX) continue;
-      metric=value;
-    }else if(key==='oversold_snap'){
-      const value=finiteFeature(row,cols.rsi); if(!cols.rsi||value==null||change==null||value>=QS_RSI_OVERSOLD||change<=0) continue;
-      metric=value;
+function radarAnalyze(headers,rawRows,supplements={},heldSymbols=new Set()){
+  const priceI=radarIdx(headers,'Price'),targetI=radarIdx(headers,'Price change %, 1 day'),sectorI=radarIdx(headers,'Sector'),symbolI=radarIdx(headers,'Symbol'),descI=radarIdx(headers,'Description');
+  if(symbolI<0||priceI<0||targetI<0)throw Error('Expected Symbol, Price, and Price change %, 1 day columns.');
+  const rockets=rawRows.map((r,i)=>({i,y:radarNum(r[targetI])})).filter(x=>x.y!==null&&x.y>=10).map(x=>x.i),rset=new Set(rockets);
+  const sectorBuckets={};
+  for(const r of rawRows){const s=r[sectorI]||'Unknown',v=radarNum(r[targetI]);if(v!==null)(sectorBuckets[s]??=[]).push(clamp01(v,-10,10));}
+  const sectorMeans=Object.fromEntries(Object.entries(sectorBuckets).map(([s,a])=>[s,a.reduce((x,y)=>x+y,0)/a.length])),sectorSorted=Object.values(sectorMeans).sort((a,b)=>a-b);
+  const minObs=Math.max(25,Math.floor(rawRows.length*.08));
+  const features=[];
+  for(let i=0;i<headers.length;i++){
+    const name=headers[i],rating=/rating/i.test(name);
+    if([symbolI,descI,sectorI,targetI].includes(i)||/ - Currency$/.test(name))continue;
+    const f={i,name,group:radarGroupFor(name),rating};
+    let vals=[];
+    for(let ri=0;ri<rawRows.length;ri++){const v=radarTransformed(rawRows[ri],f,priceI);if(v!==null)vals.push(v);}
+    vals.sort((a,b)=>a-b);
+    if(vals.length<minObs||vals[0]===vals[vals.length-1])continue;
+    const q02=radarQuant(vals,.02),q98=radarQuant(vals,.98),wins=vals.map(v=>clamp01(v,q02,q98)).sort((a,b)=>a-b);
+    f.sorted=wins;f.coverage=vals.length/rawRows.length;
+    let ar=[],ao=[];
+    for(let ri=0;ri<rawRows.length;ri++){
+      let v=radarTransformed(rawRows[ri],f,priceI);
+      if(v===null)continue;
+      const p=radarPct(wins,clamp01(v,q02,q98));
+      (rset.has(ri)?ar:ao).push(p);
     }
-    if(metric!=null) ranked.push({sym,metric,tie:tie[sym]??0});
+    const mr=ar.length?ar.reduce((a,b)=>a+b,0)/ar.length:.5,mo=ao.length?ao.reduce((a,b)=>a+b,0)/ao.length:.5;
+    f.effect=clamp01((mr-mo)*2,-1,1);
+    f.reliability=Math.sqrt(f.coverage)*(rockets.length/(rockets.length+12));
+    f.weight=(.07+Math.abs(f.effect))*.6+.4*Math.sqrt(f.coverage);
+    features.push(f);
   }
-  const asc=key==='range_squeeze'||key==='oversold_snap';
-  return ranked.sort((a,b)=>(asc?a.metric-b.metric:b.metric-a.metric)||a.tie-b.tie).slice(0,n).map(x=>x.sym);
-}
-function getQuantLiveMetric(key,s,yd){
-  const row=s?._features||{},change=Number(s?.priceChange);
-  const todayCols=detectQuantColumns({featureRows:{[s?.symbol||'']:row}});
-  if(key==='high52w_mom') return finiteFeature(row,todayCols.high52)??-Infinity;
-  if(key==='volume_shock'){
-    const v=finiteFeature(row,todayCols.rvol);return v!=null&&v>=QS_RVOL_MIN&&isFinite(change)&&change>=QS_QUIET_CHG_MIN&&change<=QS_QUIET_CHG_MAX?v:-Infinity;
-  }
-  if(key==='delivery_surge'){
-    const v=finiteFeature(row,todayCols.delivery);return v!=null&&v>=QS_DELIV_MIN&&isFinite(change)&&change>=QS_QUIET_CHG_MIN&&change<=QS_QUIET_CHG_MAX?v:-Infinity;
-  }
-  if(key==='oversold_snap'){
-    const v=finiteFeature(row,todayCols.rsi);return v!=null&&v<QS_RSI_OVERSOLD&&isFinite(change)&&change>0?-v:-Infinity;
-  }
-  if(key==='range_squeeze'){
-    const prevRow=yd?.features?.get(s?.symbol);if(!prevRow||!isFinite(change)||change<=0)return -Infinity;
-    const prevCols=detectQuantColumns({featureRows:{[s?.symbol||'']:prevRow}});
-    const high=finiteFeature(prevRow,prevCols.high),low=finiteFeature(prevRow,prevCols.low),adr=finiteFeature(prevRow,prevCols.adr);
-    const price=Number(yd?.prices?.get(s?.symbol));
-    if([high,low,adr,price].some(v=>v==null||!isFinite(v))||!(price>0)) return -Infinity;
-    const tightness=(high-low)/price*100;
-    return tightness<=QS_SQUEEZE_RATIO*adr?-tightness:-Infinity;
-  }
-  return -Infinity;
-}
-function hasMomentumContinuationColumns(day,prevDay){
-  return !!day&&!!prevDay&&
-    dayHasFeatureColumn(prevDay,MOM_CONT_FEATURE_KEYS.prevMove)&&
-    dayHasFeatureColumn(prevDay,MOM_CONT_FEATURE_KEYS.prevMa)&&
-    dayHasFeatureColumn(prevDay,MOM_CONT_FEATURE_KEYS.prevTech)&&
-    dayHasFeatureColumn(day,MOM_CONT_FEATURE_KEYS.gap)&&
-    dayHasFeatureColumn(day,MOM_CONT_FEATURE_KEYS.roc);
-}
-function detectRatingColumns(day){
-  const cols=getDayFeatureCols(day).map(c=>String(c));
-  const find=re=>cols.find(c=>re.test(c.toLowerCase()))||null;
-  return {
-    ma:find(/moving_averages_rating_1_day|moving.*average.*rating/),
-    osc:find(/oscillators_rating_1_day|oscillator.*rating/),
-    tech:find(/technical_rating_1_day|technical.*rating/)
-  };
-}
-// Rating strategies are rating-filtered momentum rules: same-day 1D-change sorting
-// is deliberate, so the existing Momentum row is the control for the rating's marginal contribution.
-function pickRatingSymbols(day,pool,n,strategy){
-  const ratingCols=detectRatingColumns(day);
-  const needed=strategy.parts||[];
-  if(needed.some(part=>!ratingCols[part])) return [];
-  const priceKey=_dayPriceChangeKey(day);
-  const rand=seededRand(String(day?.sessionDate||'')+'|'+strategy.key);
-  const tie=Object.fromEntries((pool||[]).map(sym=>[sym,rand()]));
-  return (pool||[])
-    .filter(sym=>needed.every(part=>{
-      const v=Number(day?.featureRows?.[sym]?.[ratingCols[part]]);
-      return isFinite(v)&&Math.round(v)===strategy.target;
-    }))
-    .map(sym=>{
-      const ch=priceKey?Number(day?.featureRows?.[sym]?.[priceKey]):null;
-      return {sym,ch:isFinite(ch)?ch:null,tie:tie[sym]??0};
-    })
-    .sort((a,b)=>{
-      if(a.ch!=null&&b.ch!=null&&b.ch!==a.ch) return b.ch-a.ch;
-      if(a.ch!=null&&b.ch==null) return -1;
-      if(a.ch==null&&b.ch!=null) return 1;
-      return a.tie-b.tie;
-    })
-    .slice(0,n)
-    .map(x=>x.sym);
-}
-function liveRatingMetric(s,strategy){
-  const features=s?._features||{};
-  const needed=strategy?.parts||[];
-  if(!needed.length) return -Infinity;
-  const ok=needed.every(part=>{
-    const v=Number(features[RATING_FEATURE_KEYS[part]]);
-    return isFinite(v)&&Math.round(v)===strategy.target;
-  });
-  if(!ok) return -Infinity;
-  const direct=Number(s.priceChange);
-  if(isFinite(direct)) return direct;
-  const key=Object.keys(features).find(c=>/price_change/.test(c)&&/1_day/.test(c)&&!/open|from/.test(c))||Object.keys(features).find(c=>/price_change/.test(c));
-  const change=Number(features[key]);
-  return isFinite(change)?change:-Infinity;
-}
-function momentumContinuationMetricFromRows(prevRow,todayRow,strategy){
-  const move=finiteFeature(prevRow,MOM_CONT_FEATURE_KEYS.prevMove);
-  const ma=finiteFeature(prevRow,MOM_CONT_FEATURE_KEYS.prevMa);
-  const tech=finiteFeature(prevRow,MOM_CONT_FEATURE_KEYS.prevTech);
-  const gap=finiteFeature(todayRow,MOM_CONT_FEATURE_KEYS.gap);
-  const roc=finiteFeature(todayRow,MOM_CONT_FEATURE_KEYS.roc);
-  if([move,ma,tech,gap,roc].some(v=>v==null)) return -Infinity;
-  if(move<MOMC_MIN_PREV_MOVE_PCT) return -Infinity;
-  if(Math.round(ma)!==strategy.target||Math.round(tech)!==strategy.target) return -Infinity;
-  if(gap<=MOMC_MIN_GAP_PCT||roc<=0) return -Infinity;
-  return move;
-}
-function pickMomentumContinuationSymbols(day,prevDay,pool,n,strategy){
-  if(!hasMomentumContinuationColumns(day,prevDay)) return null;
-  const prevRows=prevDay?.featureRows||{};
-  const todayRows=day?.featureRows||{};
-  const rand=seededRand(String(day?.sessionDate||'')+'|'+strategy.key);
-  const tie=Object.fromEntries((pool||[]).map(sym=>[sym,rand()]));
-  return (pool||[])
-    .filter(sym=>prevRows[sym]&&todayRows[sym])
-    .map(sym=>({sym,metric:momentumContinuationMetricFromRows(prevRows[sym],todayRows[sym],strategy),tie:tie[sym]??0}))
-    .filter(x=>isFinite(x.metric))
-    .sort((a,b)=>b.metric-a.metric||a.tie-b.tie)
-    .slice(0,n)
-    .map(x=>x.sym);
-}
-function liveMomentumContinuationMetric(s,yd,strategy){
-  const prevRow=yd?.features?.get(s?.symbol);
-  if(!prevRow) return -Infinity;
-  return momentumContinuationMetricFromRows(prevRow,s?._features||{},strategy);
-}
-function simulateStoredExitPct(days,startIndex,symbol){
-  const entryDay=days[startIndex];
-  const entryIndex=(entryDay?.symbols||[]).indexOf(symbol);
-  const entry=entryIndex>=0?Number(entryDay.prices?.[entryIndex]):null;
-  if(!(entry>0)) return null;
-  const targetPct=Number(getEffectiveTgtPct());
-  if(!(targetPct>0)) return null;
-  const atr=finiteFeature(entryDay.featureRows?.[symbol],detectQuantColumns(entryDay).atr);
-  const stopPct=getActiveStopDistancePct(atr);
-  const target=entry*(1+targetPct/100),stop=entry*(1-stopPct/100);
-  const priceOf=(day)=>{const idx=(day?.symbols||[]).indexOf(symbol);return idx>=0?Number(day.prices?.[idx]):null;};
-  for(let j=startIndex+1;j<days.length;j++){
-    const next=days[j],row=next.featureRows?.[symbol]||{},cols=detectQuantColumns(next);
-    const storedHigh=finiteFeature(row,cols.high),storedLow=finiteFeature(row,cols.low);
-    const fallback=priceOf(next);
-    // A daily bar that reaches both levels has no intraday order; count it as the stop.
-    const high=storedHigh!=null&&storedLow!=null?storedHigh:fallback;
-    const low=storedHigh!=null&&storedLow!=null?storedLow:fallback;
-    if(!(isFinite(high)&&isFinite(low))) continue;
-    if(low<=stop&&high>=target) return -stopPct;
-    if(low<=stop) return -stopPct;
-    if(high>=target) return targetPct;
-  }
-  const last=priceOf(days[days.length-1]);
-  return last>0?((last/entry)-1)*100:null;
-}
-function addActualYouRow(ladder,days){
-  if(!days.length) return ladder;
-  const min=String(days[0].sessionDate||''),max=String(days[days.length-1].sessionDate||'');
-  const trips=getAdaptiveTradeTrips(TRADEBOOK_STATS?.tripsData).filter(trip=>{
-    const sell=String(trip?.sellDate||'');return sell>=min&&sell<=max;
-  }).map(trip=>{
-    const capital=Number(trip?.capital),net=Number(trip?.netPnl);
-    return capital>0&&isFinite(net)?{...trip,pct:net/capital*100}:null;
-  }).filter(Boolean);
-  if(!trips.length) return ladder;
-  const avg=meanArr(trips.map(trip=>trip.pct));
-  ladder.push({name:'actual_you',label:PICK_STRATEGY_LABELS.actual_you,championEligible:false,
-    evalDays:new Set(trips.map(trip=>trip.sellDate)).size,flagged:trips.length,
-    hits:trips.filter(trip=>trip.netPnl>0).length,hitRate:trips.filter(trip=>trip.netPnl>0).length/trips.length,
-    peakNetPct:null,exitNetPct:+avg.toFixed(2)});
-  return ladder;
-}
-function computeEpisodeStrategyLadder(){
-  const ledger=getOutcomeEpisodeLedger();
-  const horizon=Math.max(1,Number(ledger.horizon?.active)||Number(getAdaptiveOutcomeHorizonDays?.())||OUTCOME_EPISODE_MAX_SESSIONS);
-  const asOfDate=ledger.horizon?.lastDate||null;
-  const episodes=Object.values(ledger.episodes||{}).filter(item=>!item.legacy);
-  const strategyEpisodes=episodes.filter(item=>item.source==='strategy');
-  const newestEntryDate=strategyEpisodes.map(item=>item.entryDate).filter(Boolean).sort().slice(-1)[0]||null;
-  const names=new Set(Object.keys(PICK_STRATEGY_LABELS).filter(name=>name!=='actual_you'));
-  // Historical strategies remain visible forever even when they no longer issue fresh picks.
-  strategyEpisodes.forEach(item=>{if(item.strategy)names.add(item.strategy);});
-  const buildRow=(name,all)=>{
-    const outcomes=all.map(episode=>({episode,value:episodeReturnAtHorizon(episode,horizon,asOfDate)}));
-    const pending=outcomes.filter(item=>item.value==null||!isFinite(item.value)).map(item=>item.episode);
-    const mature=all.filter(item=>item.entryDate!==newestEntryDate);
-    const evaluated=outcomes.filter(item=>item.value!=null&&isFinite(item.value));
-    const horizonHits=evaluated.filter(item=>item.episode.milestones?.[10]?.sessions!=null&&Number(item.episode.milestones[10].sessions)<=horizon).length;
-    const observedHorizonHits=all.filter(item=>item.milestones?.[10]?.sessions!=null&&Number(item.milestones[10].sessions)<=horizon).length;
-    const observed=all.map(episode=>{
-      if(episode.milestones?.[10]?.sessions!=null&&Number(episode.milestones[10].sessions)<=horizon)return {episode,value:10};
-      const rawCurrent=episode.currentReturnPct;
-      const current=rawCurrent==null?NaN:Number(rawCurrent);
-      if(isFinite(current))return {episode,value:current};
-      const latest=[...(episode.observations||[])].sort((a,b)=>Number(b.s)-Number(a.s)||String(b.d).localeCompare(String(a.d)))[0];
-      const value=Number(latest?.c);
-      return isFinite(value)?{episode,value}:null;
-    }).filter(Boolean);
-    const sameDayHits=mature.filter(item=>item.milestones?.[10]?.sessions!=null&&Number(item.milestones[10].sessions)===0).length;
-    const moveMinutes=mature.map(item=>{
-      const milestone=item.milestones?.[3];
-      return Number(milestone?.sessions)===0&&Number(milestone?.ts)>Number(item.entryTs)?(Number(milestone.ts)-Number(item.entryTs))/60000:null;
-    }).filter(value=>value!=null&&isFinite(value)&&value>=0);
-    const doveBefore=mature.filter(item=>{
-      const diveTs=Number(item.dive2?.ts);if(!(diveTs>0))return false;
-      const firstMilestoneTs=Math.min(...Object.values(item.milestones||{}).map(value=>Number(value?.ts)).filter(value=>value>0));
-      return !isFinite(firstMilestoneTs)||diveTs<firstMilestoneTs;
-    }).length;
-    const net=evaluated.map(item=>item.value-estimateRoundTripCostPct(Math.max(0.5,Math.abs(item.value))));
-    const liveNet=observed.map(item=>item.value-estimateRoundTripCostPct(Math.max(0.5,Math.abs(item.value))));
-    return {name,label:getPickStrategyLabel(name),championEligible:isChampionEligible(name),evidenceStatus:'authoritative',episodeBased:true,horizon,
-      observationDays:new Set(mature.map(item=>item.evaluatedThrough).filter(Boolean)).size,
-      evalDays:new Set(evaluated.map(item=>item.episode.entryDate)).size,entryDays:new Set(all.map(item=>item.entryDate)).size,
-      flagged:all.length,pendingFlagged:pending.length,evaluatedFlagged:evaluated.length,hits:horizonHits,hitRate:evaluated.length?horizonHits/evaluated.length:null,
-      observedHorizonHits,observedHorizonRate:all.length?observedHorizonHits/all.length:null,
-      observedFlagged:observed.length,liveNetPct:liveNet.length?+meanArr(liveNet).toFixed(2):null,
-      sameDay10Rate:mature.length?sameDayHits/mature.length:null,doveBeforeMilestoneRate:mature.length?doveBefore/mature.length:null,
-      medianMinutesToMove:moveMinutes.length?+medianOutcomeValue(moveMinutes).toFixed(1):null,
-      exitNetPct:net.length?+meanArr(net).toFixed(2):null,firstDate:all.map(item=>item.entryDate).sort()[0]||null};
-  };
-  const rows=[...names].map(name=>buildRow(name,strategyEpisodes.filter(item=>item.strategy===name)));
-  const trades=episodes.filter(item=>item.source==='trade');
-  rows.push({...buildRow('actual_you',trades),championEligible:false});
-  return rows;
-}
-function percentileMap(items,valueOf){
-  const valid=(items||[]).map(item=>({item,value:Number(valueOf(item))})).filter(entry=>isFinite(entry.value)).sort((a,b)=>a.value-b.value);
-  const out=new Map();
-  valid.forEach((entry,index)=>{
-    let first=index,last=index;
-    while(first>0&&valid[first-1].value===entry.value)first--;
-    while(last+1<valid.length&&valid[last+1].value===entry.value)last++;
-    out.set(entry.item,(first+last+1)/(2*valid.length));
-  });
-  return out;
-}
-function getDayBreadthRelationState(day){
-  const key=_dayPriceChangeKey(day),symbols=(day?.symbols||Object.keys(day?.featureRows||{})).filter(Boolean);
-  if(!key||!symbols.length)return {available:false,breadth:null,relation:new Map(),relationPct:new Map()};
-  const values=symbols.map(symbol=>({symbol,change:Number(day?.featureRows?.[symbol]?.[key])})).filter(item=>isFinite(item.change));
-  if(!values.length)return {available:false,breadth:null,relation:new Map(),relationPct:new Map()};
-  const breadth=values.filter(item=>item.change>0).length/values.length;
-  const changePct=percentileMap(values,item=>item.change),relation=new Map();
-  values.forEach(item=>relation.set(item.symbol,(changePct.get(item)||0)-breadth));
-  const rankedRelations=percentileMap(values,item=>relation.get(item.symbol));
-  const relationPct=new Map(values.map(item=>[item.symbol,rankedRelations.get(item)]));
-  return {available:true,breadth,relation,relationPct};
-}
-function buildBreadthRelativeSelection(day,history,pool,limit=20){
-  const current=getDayBreadthRelationState(day);
-  const priors=(history||[]).filter(item=>String(item.sessionDate)<String(day?.sessionDate)).slice(-4).map(getDayBreadthRelationState).filter(item=>item.available);
-  if(!current.available||!priors.length)return {available:false,unavailableReason:'current breadth plus one prior daily snapshot required',picks:[]};
-  const rockets=new Set(day?.rocketSymbols||[]),rows=[];
-  for(const symbol of pool||[]){
-    if(rockets.has(symbol)||!current.relation.has(symbol))continue;
-    const priorRelations=priors.map(item=>item.relation.get(symbol)).filter(isFinite);
-    if(!priorRelations.length)continue;
-    rows.push({symbol,currentPct:current.relationPct.get(symbol)||0,meanRelation:meanArr(priorRelations),consistency:priorRelations.filter(value=>value>0).length/priorRelations.length});
-  }
-  const meanPct=percentileMap(rows,item=>item.meanRelation);
-  const ranked=rows.map(item=>{
-    const score=100*((0.5*item.currentPct)+(0.3*(meanPct.get(item)||0))+(0.2*item.consistency));
-    return {symbol:item.symbol,score,inputs:{nativeScore:+score.toFixed(2),breadth:+current.breadth.toFixed(4),breadthRelation:+current.relation.get(item.symbol).toFixed(4),breadthRelationPct:+item.currentPct.toFixed(4),priorMeanRelation:+item.meanRelation.toFixed(4),positiveRelationConsistency:+item.consistency.toFixed(4)}};
-  }).sort((a,b)=>b.score-a.score||a.symbol.localeCompare(b.symbol)).slice(0,limit).map((item,index)=>({...item,rank:index+1}));
-  return {available:true,picks:ranked};
-}
-function applyBreadthOrderingOverlay(cohorts,day){
-  const state=getDayBreadthRelationState(day);if(!state.available)return cohorts;
-  Object.entries(cohorts||{}).forEach(([name,cohort])=>{
-    if(name==='random'||name==='breadth_relative'||name===MOMENTUM_VOLUME_KEY||name===VOL_CONTRACTION_KEY||!cohort?.available||!cohort.picks?.length)return;
-    const nativePct=percentileMap(cohort.picks,item=>Number.isFinite(Number(item.score))?Number(item.score):-Number(item.rank||999));
-    cohort.picks=cohort.picks.map(item=>{
-      const native=Number.isFinite(Number(item.score))?Number(item.score):null;
-      const breadthPct=state.relationPct.get(item.symbol)??0;
-      const finalScore=100*((0.8*(nativePct.get(item)||0))+(0.2*breadthPct));
-      return {...item,score:finalScore,inputs:{...(item.inputs||{}),nativeScore:native,breadth:+state.breadth.toFixed(4),breadthRelation:+Number(state.relation.get(item.symbol)||0).toFixed(4),breadthRelationPct:+breadthPct.toFixed(4),finalOrderingScore:+finalScore.toFixed(2)}};
-    }).sort((a,b)=>b.score-a.score||a.symbol.localeCompare(b.symbol)).map((item,index)=>({...item,rank:index+1}));
-  });
-  return cohorts;
-}
-const MOMENTUM_VOLUME_FEATURES={
-  price:'price',vwap:'volume_weighted_average_price_1_day',high:'high_1_day',
-  fromOpen:'change_from_open_1_day',rvol:'relative_volume_at_time',adx:'average_directional_index_14_1_day',
-  dmiPlus:'directional_movement_index_14_1_day_positive',dmiMinus:'directional_movement_index_14_1_day_negative'
-};
-function buildMomentumVolumeContinuation(day,pool,limit=20){
-  if(!day)return {available:false,unavailableReason:'current daily snapshot unavailable',picks:[]};
-  const dayChangeKey=_dayPriceChangeKey(day),short=detectShortChangeColumns(day);
-  const required=[dayChangeKey,short.oneMinute,short.fiveMinute,...Object.values(MOMENTUM_VOLUME_FEATURES)];
-  const missing=required.filter(key=>!key||!dayHasFeatureColumn(day,key));
-  if(missing.length)return {available:false,unavailableReason:'required momentum columns unavailable',picks:[]};
-  const market=getDayBreadthRelationState(day);
-  if(!market.available)return {available:false,unavailableReason:'market breadth unavailable',picks:[]};
-  const weakBreadth=market.breadth<0.40;
-  const relativeFloor=weakBreadth?0.85:0.75;
-  const rvolFloor=weakBreadth?1.5:1.2;
-  const rows=[];
-  for(const symbol of pool||[]){
-    const row=day.featureRows?.[symbol];if(!row)continue;
-    const change=finiteFeature(row,dayChangeKey),m1=finiteFeature(row,short.oneMinute),m5=finiteFeature(row,short.fiveMinute);
-    const price=finiteFeature(row,MOMENTUM_VOLUME_FEATURES.price),vwap=finiteFeature(row,MOMENTUM_VOLUME_FEATURES.vwap);
-    const high=finiteFeature(row,MOMENTUM_VOLUME_FEATURES.high),fromOpen=finiteFeature(row,MOMENTUM_VOLUME_FEATURES.fromOpen);
-    const rvol=finiteFeature(row,MOMENTUM_VOLUME_FEATURES.rvol),adx=finiteFeature(row,MOMENTUM_VOLUME_FEATURES.adx);
-    const dmiPlus=finiteFeature(row,MOMENTUM_VOLUME_FEATURES.dmiPlus),dmiMinus=finiteFeature(row,MOMENTUM_VOLUME_FEATURES.dmiMinus);
-    const relative=market.relationPct.get(symbol),highGap=price>0&&high>0?(high-price)/high*100:null;
-    if([change,m1,m5,price,vwap,high,fromOpen,rvol,adx,dmiPlus,dmiMinus,relative,highGap].some(value=>value==null||!isFinite(value)))continue;
-    if(!(change>=1&&change<=6.5&&fromOpen>=0.5&&price>vwap&&highGap<=1.25&&m1>=0&&m5>0))continue;
-    if(!(rvol>=rvolFloor&&relative>=relativeFloor&&adx>=18&&dmiPlus>dmiMinus))continue;
-    rows.push({symbol,change,m1,m5,fromOpen,rvol,adx,dmiSpread:dmiPlus-dmiMinus,relative,highGap});
-  }
-  const rvolPct=percentileMap(rows,item=>item.rvol),openPct=percentileMap(rows,item=>item.fromOpen);
-  const retentionPct=percentileMap(rows,item=>-item.highGap),dmiPct=percentileMap(rows,item=>item.dmiSpread);
-  const m5Pct=percentileMap(rows,item=>item.m5);
-  const ranked=rows.map(item=>{
-    const score=100*((0.30*item.relative)+(0.20*(rvolPct.get(item)||0))+(0.15*(openPct.get(item)||0))+
-      (0.15*(retentionPct.get(item)||0))+(0.10*(dmiPct.get(item)||0))+(0.10*(m5Pct.get(item)||0)));
-    return {symbol:item.symbol,score,inputs:{nativeScore:+score.toFixed(2),marketBreadth:+market.breadth.toFixed(4),
-      relativeStrengthPct:+item.relative.toFixed(4),relativeFloor,rvolFloor,rvolAtTime:+item.rvol.toFixed(3),
-      change:+item.change.toFixed(3),changeFromOpen:+item.fromOpen.toFixed(3),m1:+item.m1.toFixed(3),m5:+item.m5.toFixed(3),
-      highGapPct:+item.highGap.toFixed(3),adx:+item.adx.toFixed(3),dmiSpread:+item.dmiSpread.toFixed(3)}};
-  }).sort((a,b)=>b.score-a.score||a.symbol.localeCompare(b.symbol)).slice(0,limit).map((item,index)=>({...item,rank:index+1}));
-  return {available:true,picks:ranked};
-}
-const VOL_CONTRACTION_FEATURES={
-  price:'price',upper:'bollinger_bands_20_1_day_upper',basis:'bollinger_bands_20_1_day_basis',lower:'bollinger_bands_20_1_day_lower',
-  vwap:'volume_weighted_average_price_1_day',high:'high_1_day',fromOpen:'change_from_open_1_day',rvol:'relative_volume_at_time',
-  adx:'average_directional_index_14_1_day',dmiPlus:'directional_movement_index_14_1_day_positive',dmiMinus:'directional_movement_index_14_1_day_negative'
-};
-function buildVolatilityContractionBreakout(day,pool,limit=20){
-  if(!day)return {available:false,unavailableReason:'current daily snapshot unavailable',picks:[]};
-  const dayChangeKey=_dayPriceChangeKey(day);
-  const required=[dayChangeKey,...Object.values(VOL_CONTRACTION_FEATURES)];
-  if(required.some(key=>!key||!dayHasFeatureColumn(day,key)))return {available:false,unavailableReason:'required Bollinger breakout columns unavailable',picks:[]};
-  const widthRows=[];
-  for(const symbol of pool||[]){
-    const row=day.featureRows?.[symbol];if(!row)continue;
-    const upper=finiteFeature(row,VOL_CONTRACTION_FEATURES.upper),basis=finiteFeature(row,VOL_CONTRACTION_FEATURES.basis),lower=finiteFeature(row,VOL_CONTRACTION_FEATURES.lower);
-    if(upper!=null&&basis>0&&lower!=null&&upper>=lower)widthRows.push({symbol,width:(upper-lower)/basis});
-  }
-  const widthPct=percentileMap(widthRows,item=>item.width);
-  const changePct=percentileMap(widthRows,item=>finiteFeature(day.featureRows?.[item.symbol],dayChangeKey)),rows=[];
-  for(const item of widthRows){
-    const symbol=item.symbol,row=day.featureRows[symbol],price=finiteFeature(row,VOL_CONTRACTION_FEATURES.price);
-    const upper=finiteFeature(row,VOL_CONTRACTION_FEATURES.upper),vwap=finiteFeature(row,VOL_CONTRACTION_FEATURES.vwap),high=finiteFeature(row,VOL_CONTRACTION_FEATURES.high);
-    const fromOpen=finiteFeature(row,VOL_CONTRACTION_FEATURES.fromOpen),rvol=finiteFeature(row,VOL_CONTRACTION_FEATURES.rvol),adx=finiteFeature(row,VOL_CONTRACTION_FEATURES.adx);
-    const dmiPlus=finiteFeature(row,VOL_CONTRACTION_FEATURES.dmiPlus),dmiMinus=finiteFeature(row,VOL_CONTRACTION_FEATURES.dmiMinus),change=finiteFeature(row,dayChangeKey);
-    const contractionPct=widthPct.get(item),relative=changePct.get(item),highGap=price>0&&high>0?(high-price)/high*100:null;
-    if([price,upper,vwap,high,fromOpen,rvol,dmiPlus,dmiMinus,change,contractionPct,relative,highGap].some(value=>value==null||!isFinite(value)))continue;
-    if(!(contractionPct<=0.35&&price>=upper*0.995&&price>vwap&&fromOpen>0&&rvol>=1.5&&dmiPlus>dmiMinus))continue;
-    const score=(40*relative)+(25*(Math.min(rvol,5)/5))+(20*Math.max(0,1-(highGap/5)))+(15*(Math.min(Math.max(adx||0,0),50)/50));
-    rows.push({symbol,score,inputs:{nativeScore:+score.toFixed(2),bollingerWidth:+item.width.toFixed(5),widthPercentile:+contractionPct.toFixed(4),
-      relativeStrengthPct:+relative.toFixed(4),price:+price.toFixed(4),upperBand:+upper.toFixed(4),vwap:+vwap.toFixed(4),rvolAtTime:+rvol.toFixed(3),
-      change:+change.toFixed(3),changeFromOpen:+fromOpen.toFixed(3),highGapPct:+highGap.toFixed(3),adx:adx==null?null:+adx.toFixed(3),
-      dmiPlus:+dmiPlus.toFixed(3),dmiMinus:+dmiMinus.toFixed(3),dmiSpread:+(dmiPlus-dmiMinus).toFixed(3)}});
-  }
-  const ranked=rows.sort((a,b)=>b.score-a.score||a.symbol.localeCompare(b.symbol)).slice(0,limit).map((item,index)=>({...item,rank:index+1}));
-  return {available:true,picks:ranked};
-}
-// Confirmed Donchian Volume Breakout: fresh 20-day upper-channel approach/break with
-// volume, trend, direction, session-drive and high-retention confirmations. One shared
-// implementation serves accepted-upload cohorts and live champion ordering.
-const DVB_FEATURE_KEYS={
-  price:'price',
-  donchUpper:'donchian_channels_20_1_day_upper',
-  vwap:'volume_weighted_average_price_1_day',
-  rvolAtTime:'relative_volume_at_time',
-  adx:'average_directional_index_14_1_day',
-  dmiPlus:'directional_movement_index_14_1_day_positive',
-  dmiMinus:'directional_movement_index_14_1_day_negative',
-  fromOpen:'change_from_open_1_day',
-  high:'high_1_day'
-};
-function buildDonchianBreakoutSelection(day,prevDay,pool,limit=20){
-  if(!day) return {available:false,unavailableReason:'current daily snapshot unavailable',picks:[]};
-  if(!prevDay) return {available:false,unavailableReason:'previous accepted model-day snapshot required',picks:[]};
-  const missing=Object.entries(DVB_FEATURE_KEYS).filter(([,key])=>!dayHasFeatureColumn(day,key)).map(([,key])=>key);
-  ['price','donchUpper'].forEach(part=>{if(!dayHasFeatureColumn(prevDay,DVB_FEATURE_KEYS[part]))missing.push('previous-day '+DVB_FEATURE_KEYS[part]);});
-  if(missing.length) return {available:false,unavailableReason:'required columns missing: '+[...new Set(missing)].join(', '),picks:[]};
-  const rows=[];
-  for(const symbol of pool||[]){
-    const row=day?.featureRows?.[symbol],prevRow=prevDay?.featureRows?.[symbol];
-    if(!row||!prevRow) continue;
-    const price=finiteFeature(row,DVB_FEATURE_KEYS.price);
-    const upper=finiteFeature(row,DVB_FEATURE_KEYS.donchUpper);
-    const vwap=finiteFeature(row,DVB_FEATURE_KEYS.vwap);
-    const rvol=finiteFeature(row,DVB_FEATURE_KEYS.rvolAtTime);
-    const adx=finiteFeature(row,DVB_FEATURE_KEYS.adx);
-    const dmiPlus=finiteFeature(row,DVB_FEATURE_KEYS.dmiPlus);
-    const dmiMinus=finiteFeature(row,DVB_FEATURE_KEYS.dmiMinus);
-    const fromOpen=finiteFeature(row,DVB_FEATURE_KEYS.fromOpen);
-    const high=finiteFeature(row,DVB_FEATURE_KEYS.high);
-    const prevPrice=finiteFeature(prevRow,DVB_FEATURE_KEYS.price);
-    const prevUpper=finiteFeature(prevRow,DVB_FEATURE_KEYS.donchUpper);
-    // Every rule input must be a real value; no proxies or fabricated defaults.
-    if([price,upper,vwap,rvol,adx,dmiPlus,dmiMinus,fromOpen,high,prevPrice,prevUpper].some(v=>v==null)) continue;
-    if(!(price>0&&prevPrice>0&&upper>0&&prevUpper>0&&high>0)) continue;
-    const highGapPct=(high-price)/high*100;
-    if(!(prevPrice<prevUpper*DVB_CHANNEL_BAND)) continue;      // 1. fresh approach: yesterday still below the band
-    if(!(price>=upper*DVB_CHANNEL_BAND)) continue;             // 1. current at/within 0.5% of the upper channel
-    if(!(price>vwap)) continue;                                // 2. above intraday value
-    if(!(rvol>=DVB_RVOL_MIN)) continue;                        // 3. participation confirmation
-    if(!(adx>=DVB_ADX_MIN)) continue;                          // 4. established trend strength
-    if(!(dmiPlus>dmiMinus)) continue;                          // 5. bullish directional control
-    if(!(fromOpen>0)) continue;                                // 6. positive session drive
-    if(!(highGapPct<=DVB_HIGH_RETENTION_MAX_PCT)) continue;    // 7. holding the breakout
-    rows.push({symbol,rvol,adx,dmiSpread:dmiPlus-dmiMinus,highGapPct,
-      raw:{price:+price.toFixed(4),prevPrice:+prevPrice.toFixed(4),donchUpper:+upper.toFixed(4),prevDonchUpper:+prevUpper.toFixed(4),vwap:+vwap.toFixed(4),rvolAtTime:+rvol.toFixed(4),adx:+adx.toFixed(4),dmiPlus:+dmiPlus.toFixed(4),dmiMinus:+dmiMinus.toFixed(4),changeFromOpen:+fromOpen.toFixed(4),high:+high.toFixed(4),highGapPct:+highGapPct.toFixed(4)}});
-  }
-  const rvolPct=percentileMap(rows,item=>item.rvol);
-  const adxPct=percentileMap(rows,item=>item.adx);
-  const spreadPct=percentileMap(rows,item=>item.dmiSpread);
-  const retentionPct=percentileMap(rows,item=>-item.highGapPct); // smaller gap below the day High ranks better
-  const ranked=rows.map(item=>{
-    const score=100*((0.40*(rvolPct.get(item)||0))+(0.25*(adxPct.get(item)||0))+(0.20*(spreadPct.get(item)||0))+(0.15*(retentionPct.get(item)||0)));
-    return {symbol:item.symbol,score,inputs:{nativeScore:+score.toFixed(2),...item.raw}};
-  }).sort((a,b)=>b.score-a.score||a.symbol.localeCompare(b.symbol)).slice(0,limit).map((item,index)=>({...item,rank:index+1}));
-  return {available:true,picks:ranked};
-}
-function computeInternalWindowStrategyEvidence(runtime){
-  const days=[...(runtime?.days||[])].sort((a,b)=>String(a.sessionDate).localeCompare(String(b.sessionDate)));
-  const priceOf=(day,symbol)=>{const idx=(day?.symbols||[]).indexOf(symbol);return idx>=0?Number(day.prices?.[idx]):null;};
-  const authAgg={},legacyAgg={};
-  const add=(agg,name,picks,laterRockets,peakOf,exitOf,meta={})=>{
-    if(isPickStrategyDisabled(name)) return;
-    const list=(picks||[]).filter(Boolean);
-    const a=agg[name]=agg[name]||{name,label:PICK_STRATEGY_LABELS[name]||name,championEligible:isChampionEligible(name),observationDays:0,evalDays:0,flagged:0,pendingFlagged:0,hits:0,arrivalSum:0,arrivalN:0,peakSum:0,peakN:0,exitSum:0,exitN:0,firstDate:null};
-    a.observationDays++;
-    if(!a.firstDate||String(meta.sessionDate)<a.firstDate)a.firstDate=String(meta.sessionDate||'');
-    if(meta.pending){a.pendingFlagged+=list.length;return;}
-    if(!list.length) return;
-    a.evalDays++;a.flagged+=list.length;
-    list.forEach(sym=>{
-      if(laterRockets.has(sym)){
-        a.hits++;
-        const arrival=meta.arrivalOf?.(sym);
-        if(arrival!=null&&isFinite(arrival)&&arrival>0){a.arrivalSum+=arrival;a.arrivalN++;}
-      }
-      const peak=peakOf(sym);
-      if(peak!=null&&isFinite(peak)){
-        a.peakSum+=peak;
-        a.peakN++;
-      }
-      const exit=exitOf(sym);
-      if(exit!=null&&isFinite(exit)){
-        a.exitSum+=exit-estimateRoundTripCostPct(Math.max(0.5,Math.abs(exit)));
-        a.exitN++;
-      }
-    });
-  };
-  const strategyNames=[MOMENTUM_VOLUME_KEY,VOL_CONTRACTION_KEY,'engine',LOADED_SPRING_KEY,DONCHIAN_VB_KEY,'random'];
-  days.forEach((day,i)=>{
-    const auth=collectDayStrategyEvidence(day);
-    if(i>=days.length-1){
-      strategyNames.forEach(name=>{
-        const evidence=auth[name];
-        if(evidence?.availableUploads>0)add(authAgg,name,[...evidence.picks.keys()],new Set(),()=>null,()=>null,{pending:true,sessionDate:day.sessionDate});
-      });
-      return;
+  const turnI=radarIdx(headers,'Price × volume (turnover), 1 day'),relI=radarIdx(headers,'Relative volume, 1 day'),relAtI=radarIdx(headers,'Relative volume at time'),volChgI=radarIdx(headers,'Volume change %, 1 day'),gapI=radarIdx(headers,'Gap %, 1 day'),adrI=radarIdx(headers,'Average daily range %'),atrI=radarIdx(headers,'Average true range %, 14, 1 day'),atrWeekI=radarIdx(headers,'Average true range %, 14, 1 week'),volI=radarIdx(headers,'Volatility, 1 day'),highI=radarIdx(headers,'High, 1 day'),lowI=radarIdx(headers,'Low, 1 day');
+  const allRows=rawRows.map((raw,ri)=>{
+    const parts={},weights={},contrib=[];
+    for(const g in RADAR_GROUPS){parts[g]=0;weights[g]=0;}
+    let observed=0;
+    for(const f of features){
+      let v=radarTransformed(raw,f,priceI);
+      if(v===null)continue;
+      v=clamp01(v,radarQuant(f.sorted,.02),radarQuant(f.sorted,.98));
+      const p=radarPct(f.sorted,v),learn=Math.sign(f.effect||1)*(2*p-1),alpha=clamp01(Math.abs(f.effect)*1.35,.12,.58),sig=alpha*learn+(1-alpha)*radarPrior(f,p),w=f.weight;
+      parts[f.group]+=sig*w;weights[f.group]+=w;observed++;
+      contrib.push({name:f.name,group:f.group,p,sig,impact:sig*w});
     }
-    const later=new Set();
-    for(let j=i+1;j<days.length;j++) (days[j].rocketSymbols||[]).forEach(s=>later.add(s));
-    const peakOf=sym=>{
-      const base=priceOf(day,sym);
-      if(!(base>0)) return null;
-      let best=null;
-      for(let j=i+1;j<days.length;j++){
-        const price=priceOf(days[j],sym);
-        if(price>0){const move=(price/base-1)*100;if(best==null||move>best) best=move;}
-      }
-      return best;
-    };
-    const exitOf=sym=>simulateStoredExitPct(days,i,sym);
-    const arrivalOf=sym=>{
-      for(let j=i+1;j<days.length;j++)if((days[j].rocketSymbols||[]).includes(sym))return tradingDaysBetween(day.sessionDate,days[j].sessionDate);
-      return null;
-    };
-    const pool=day.eligibleSymbols||[];
-    const key=_dayPriceChangeKey(day);
-    const prev=days[i-1]||null;
-    const legacyPickFor=name=>{
-      if(name==='engine') return [...(day.predictedSymbols||[])].slice(0,20);
-      if(name==='target_1m5m') return [];
-      return getStrategySelectionForDay(day,name,pool,prev,later,{ignoreAuthoritative:true}).slice(0,20);
-    };
-    strategyNames.forEach(name=>{
-      const evidence=auth[name];
-      if(evidence?.availableUploads>0)add(authAgg,name,[...evidence.picks.keys()],later,peakOf,exitOf,{sessionDate:day.sessionDate,arrivalOf});
-      add(legacyAgg,name,legacyPickFor(name),later,peakOf,exitOf,{sessionDate:day.sessionDate,arrivalOf});
-    });
-  });
-  const finalize=a=>{
-    const grossPeakAvg=a.peakN?a.peakSum/a.peakN:null;
-    const peakNetPct=grossPeakAvg!=null?+(grossPeakAvg-estimateRoundTripCostPct(Math.max(0.5,grossPeakAvg))).toFixed(2):null;
-    return {...a,hitRate:a.flagged?a.hits/a.flagged:null,avgRocketDays:a.arrivalN?+Number(a.arrivalSum/a.arrivalN).toFixed(1):null,peakNetPct,
-      exitNetPct:a.exitN?+(a.exitSum/a.exitN).toFixed(2):null};
-  };
-  const authRows=Object.fromEntries(Object.entries(authAgg).map(([name,a])=>[name,finalize(a)]));
-  const legacyRows=Object.fromEntries(Object.entries(legacyAgg).map(([name,a])=>[name,finalize(a)]));
-  const ladder=strategyNames.filter(name=>authRows[name]||legacyRows[name]).map(name=>{
-    const auth=authRows[name]||null,legacy=legacyRows[name]||null;
-    if(auth)return {...auth,evidenceStatus:'authoritative',legacy};
-    return {...legacy,evidenceStatus:'legacy',championEligible:false,legacy:null};
-  });
-  const base=addActualYouRow(ladder,days);
-  return base;
-}
-function computeStrategyLadder(){return computeEpisodeStrategyLadder();}
-function comparePickLadderRows(a,b){
-  return (b.sameDay10Rate??-Infinity)-(a.sameDay10Rate??-Infinity)||
-    (b.liveNetPct??b.exitNetPct??-Infinity)-(a.liveNetPct??a.exitNetPct??-Infinity)||
-    String(a.label||a.name).localeCompare(String(b.label||b.name));
-}
-function getWarmupPickLeader(ladder){
-  return (ladder||[]).filter(row=>
-    row.evidenceStatus==='authoritative'&&
-    isChampionEligible(row.name)&&
-    Number(row.observedFlagged)>0&&
-    [row.sameDay10Rate,row.liveNetPct,row.exitNetPct,row.hitRate].some(value=>value!=null&&isFinite(value))
-  ).sort(comparePickLadderRows)[0]||null;
-}
-function resolvePickChampion(ladder){
-  const horizon=getOutcomeHorizonSummary();
-  const fallback={name:MOMENTUM_VOLUME_KEY,since:null,metric:null,bar:PICK_CHAMPION_BAR,default:true};
-  const raw=FS.get(PICK_CHAMPION_STORE);
-  const stored=(raw&&raw.bar===PICK_CHAMPION_BAR)?raw:fallback;
-  if(horizon.phase!=='dynamic'){
-    if(raw?.name!==fallback.name||raw?.bar!==PICK_CHAMPION_BAR||raw?.default!==true)FS.set(PICK_CHAMPION_STORE,fallback);
-    return fallback;
-  }
-  const eligible=(ladder||[]).filter(s=>s.evidenceStatus==='authoritative'&&isChampionEligible(s.name)&&s.evalDays>=PICK_MIN_EVAL_DAYS&&s.flagged>=10&&Number(s.exitNetPct)>0);
-  if(!eligible.length){
-    if(raw?.name!==fallback.name||raw?.bar!==PICK_CHAMPION_BAR) FS.set(PICK_CHAMPION_STORE,fallback);
-    return fallback;
-  }
-  const ranked=eligible.slice().sort((a,b)=>{
-    const ex=(Number(b.exitNetPct)||-Infinity)-(Number(a.exitNetPct)||-Infinity);
-    if(ex) return ex;
-    const pk=(Number(b.peakNetPct)||-Infinity)-(Number(a.peakNetPct)||-Infinity);
-    if(pk) return pk;
-    const hr=(Number(b.hitRate)||-Infinity)-(Number(a.hitRate)||-Infinity);
-    if(hr) return hr;
-    const ed=(Number(b.evalDays)||0)-(Number(a.evalDays)||0);
-    if(ed) return ed;
-    return String(a.label||a.name).localeCompare(String(b.label||b.name));
-  });
-  const best=ranked[0]||fallback;
-  if(best.name!==stored.name||stored.metric!==best.exitNetPct||stored.bar!==PICK_CHAMPION_BAR||stored.default||stored.provisional){
-    const next={name:best.name,since:best.name===stored.name?stored.since:getSessionDate(),metric:best.exitNetPct,bar:PICK_CHAMPION_BAR};
-    FS.set(PICK_CHAMPION_STORE,next);
-    return next;
-  }
-  return stored;
-}
-function buildPickDiagnostics(ladder,runtime){
-  const days=[...(runtime?.days||[])];
-  const authDays=days.filter(day=>Array.isArray(day.pickUploads)&&day.pickUploads.length);
-  const firstAuthoritativeDate=authDays.length?authDays[0].sessionDate||null:null;
-  const uploadCount=authDays.reduce((sum,day)=>sum+(day.pickUploads?.length||0),0);
-  const unionDayCount=authDays.length;
-  const strategyRows=(ladder||[]).filter(row=>row.name&&row.name!=='actual_you');
-  const dayStrategySets=authDays.map(day=>({day,sets:collectDayStrategySymbols(day)}));
-  const pairs=[];
-  for(let i=0;i<strategyRows.length;i++){
-    for(let j=i+1;j<strategyRows.length;j++){
-      const a=strategyRows[i].name,b=strategyRows[j].name;
-      const samples=[];
-      dayStrategySets.forEach(({sets})=>{
-        const sa=sets[a],sb=sets[b];
-        if(!sa?.size||!sb?.size) return;
-        const inter=[...sa].filter(sym=>sb.has(sym)).length;
-        const union=new Set([...sa,...sb]).size;
-        if(union>0) samples.push(inter/union);
-      });
-      if(samples.length){
-        const avg=samples.reduce((s,v)=>s+v,0)/samples.length;
-        if(avg>=0.6){
-          pairs.push({a,b,avg:+avg.toFixed(2),days:samples.length,identical:avg>=0.95});
-        }
-      }
-    }
-  }
-  pairs.sort((a,b)=>b.avg-a.avg||b.days-a.days||String(a.a).localeCompare(String(b.a)));
-  const engineRow=(ladder||[]).find(row=>row.name==='engine')||null;
-  const bestChallenger=[...(ladder||[])].filter(row=>row.evidenceStatus==='authoritative'&&row.name!=='engine'&&row.name!=='actual_you'&&row.observedFlagged>0).sort((a,b)=>
-    (Number.isFinite(Number(b.liveNetPct??b.exitNetPct))?Number(b.liveNetPct??b.exitNetPct):-Infinity)-(Number.isFinite(Number(a.liveNetPct??a.exitNetPct))?Number(a.liveNetPct??a.exitNetPct):-Infinity)||
-    (Number(b.peakNetPct)||-Infinity)-(Number(a.peakNetPct)||-Infinity)
-  )[0]||null;
-  return {
-    authoritative:authDays.length>0,
-    firstAuthoritativeDate,
-    uploadCount,
-    unionDayCount,
-    legacyOnly:!authDays.length,
-    correlatedPairs:pairs.slice(0,3),
-    engineCohortSize:Number(engineRow?.flagged)||0,
-    challengerCohortSize:Number(bestChallenger?.flagged)||0,
-    bestChallenger:bestChallenger?{name:bestChallenger.name,label:bestChallenger.label,exitNetPct:bestChallenger.exitNetPct,liveNetPct:bestChallenger.liveNetPct,peakNetPct:bestChallenger.peakNetPct}:null
-  };
-}
-let _pickStateCache=null;
-function getPickState(){
-  const horizon=getOutcomeHorizonSummary();
-  const tag=String(window._lastScannerSessionTag||'')+'|'+((SNAPSHOT_RUNTIME?.days||[]).length)+'|'+[...getPickDisabledStrategies()].sort().join(',')+'|'+horizon.revision;
-  if(_pickStateCache?.tag===tag) return _pickStateCache.v;
-  let ladder=[];
-  try{ladder=computeStrategyLadder(SNAPSHOT_RUNTIME);}catch(e){console.warn('strategy ladder failed',e);}
-  let champ={name:'engine',since:null,metric:null};
-  try{champ=resolvePickChampion(ladder);}catch(e){console.warn('champion resolve failed',e);}
-  if(champ.name===MOMENTUM_VOLUME_KEY){
-    const live=getMomentumVolumeLiveState();
-    if(!live.available) champ={name:'engine',since:null,metric:null,default:true,fallbackSourceLabel:getPickStrategyLabel(MOMENTUM_VOLUME_KEY),fallbackReason:live.unavailableReason||'Momentum + Volume Continuation unavailable'};
-  }
-  if(champ.name===VOL_CONTRACTION_KEY){
-    const live=getVolatilityContractionLiveState();
-    if(!live.available) champ={name:'engine',since:null,metric:null,default:true,fallbackSourceLabel:getPickStrategyLabel(VOL_CONTRACTION_KEY),fallbackReason:live.unavailableReason||'Volatility Contraction Breakout unavailable'};
-  }
-  if(champ.name===LOADED_SPRING_KEY){
-    const live=getLoadedSpringLiveState();
-    if(!live.available) champ={name:'engine',since:null,metric:null,default:true,fallbackSourceLabel:getPickStrategyLabel(LOADED_SPRING_KEY),fallbackReason:live.unavailableReason||'Loaded Spring unavailable'};
-  }
-  if(champ.name===DONCHIAN_VB_KEY){
-    const live=getDonchianBreakoutLiveState();
-    if(!live.available) champ={name:'engine',since:null,metric:null,default:true,fallbackSourceLabel:getPickStrategyLabel(DONCHIAN_VB_KEY),fallbackReason:live.unavailableReason||'Confirmed Donchian Breakout unavailable'};
-  }
-  if(champ.name!=='engine'&&ALL.length){
-    const yd=getYesterdayStateMaps();
-    const hasLivePick=ALL.some(row=>getChampionRowMetric(champ.name,row,yd)!==-Infinity);
-    if(!hasLivePick){
-      const fallbackName=champ.name;
-      champ={name:'engine',since:null,metric:null,default:true,provisional:champ.provisional,
-        fallbackSourceLabel:getPickStrategyLabel(fallbackName),
-        fallbackReason:'No live picks are available from the restored or current scanner data.'};
-    }
-  }
-  const diagnostics=buildPickDiagnostics(ladder,SNAPSHOT_RUNTIME);
-  const v={...champ,label:getPickStrategyLabel(champ.name),ladder,diagnostics,horizon};
-  _pickStateCache={tag,v};
-  return v;
-}
-let _loadedSpringLiveCache=null;
-function getLoadedSpringLiveState(){
-  const tag=String(window._lastScannerSessionTag||'')+'|'+(SNAPSHOT_RUNTIME?.days?.length||0);
-  if(_loadedSpringLiveCache?.tag===tag) return _loadedSpringLiveCache.value;
-  const days=[...(SNAPSHOT_RUNTIME?.days||[])].sort((a,b)=>String(a.sessionDate).localeCompare(String(b.sessionDate)));
-  // The persisted daily telemetry record already holds the full column set straight
-  // from ALL NSE.csv (packScannerSnapshot stores every FEATS column, never a reduced
-  // subset) -- it is the single source of truth here. Do not reconstruct a second copy
-  // from the live `ALL` array: after a page restore ALL's `_features` only carries the
-  // top-10 dynamic-column subset (rs_data display cache), which falsely reports most
-  // technical columns as missing.
-  const current=days[days.length-1]||null;
-  const previous=current?days.filter(day=>String(day.sessionDate)<String(current.sessionDate)).slice(-1)[0]||null:null;
-  const result=buildLoadedSpringSelection(current,previous,current?.eligibleSymbols||[]);
-  const metrics=new Map((result.picks||[]).map(item=>[item.symbol,Number(item.score)]));
-  const value={...result,metrics};
-  _loadedSpringLiveCache={tag,value};
-  return value;
-}
-function getMomentumVolumeLiveState(){
-  const days=[...(SNAPSHOT_RUNTIME?.days||[])].sort((a,b)=>String(a.sessionDate).localeCompare(String(b.sessionDate)));
-  const current=days[days.length-1]||null;
-  const result=buildMomentumVolumeContinuation(current,current?.eligibleSymbols||[],20);
-  return {...result,metrics:new Map((result.picks||[]).map(item=>[item.symbol,Number(item.score)]))};
-}
-function getVolatilityContractionLiveState(){
-  const days=[...(SNAPSHOT_RUNTIME?.days||[])].sort((a,b)=>String(a.sessionDate).localeCompare(String(b.sessionDate)));
-  const current=days[days.length-1]||null;
-  const result=buildVolatilityContractionBreakout(current,current?.eligibleSymbols||[],20);
-  return {...result,metrics:new Map((result.picks||[]).map(item=>[item.symbol,Number(item.score)]))};
-}
-function getBreadthRelativeLiveState(){
-  const days=[...(SNAPSHOT_RUNTIME?.days||[])].sort((a,b)=>String(a.sessionDate).localeCompare(String(b.sessionDate)));
-  const current=days[days.length-1]||null;
-  const result=buildBreadthRelativeSelection(current,days.slice(0,-1),current?.eligibleSymbols||[],20);
-  return {...result,metrics:new Map((result.picks||[]).map(item=>[item.symbol,Number(item.score)]))};
-}
-function getDonchianBreakoutLiveState(){
-  // Reads the persisted daily telemetry records directly (full stored column set),
-  // so compact startup restoration serves the same qualification/ranking implementation.
-  const days=[...(SNAPSHOT_RUNTIME?.days||[])].sort((a,b)=>String(a.sessionDate).localeCompare(String(b.sessionDate)));
-  const current=days[days.length-1]||null;
-  const previous=current?days.filter(day=>String(day.sessionDate)<String(current.sessionDate)).slice(-1)[0]||null:null;
-  const result=buildDonchianBreakoutSelection(current,previous,current?.eligibleSymbols||[],20);
-  return {...result,metrics:new Map((result.picks||[]).map(item=>[item.symbol,Number(item.score)]))};
-}
-function getRowBreadthRelationState(rows){
-  const items=(rows||[]).map(row=>({symbol:row.symbol,change:Number(row.priceChange)})).filter(item=>item.symbol&&isFinite(item.change));
-  if(!items.length)return {available:false,breadth:null,relation:new Map(),relationPct:new Map()};
-  const breadth=items.filter(item=>item.change>0).length/items.length,changePct=percentileMap(items,item=>item.change),relation=new Map();
-  items.forEach(item=>relation.set(item.symbol,(changePct.get(item)||0)-breadth));
-  const ranks=percentileMap(items,item=>relation.get(item.symbol));
-  return {available:true,breadth,relation,relationPct:new Map(items.map(item=>[item.symbol,ranks.get(item)]))};
-}
-function getLiveBreadthRelationState(){return getRowBreadthRelationState(ALL);}
-function getYesterdayStateMaps(){
-  const days=[...(SNAPSHOT_RUNTIME?.days||[])].sort((a,b)=>String(a.sessionDate).localeCompare(String(b.sessionDate)));
-  const today=getSessionDate();
-  let prev=null;
-  days.forEach(d=>{if(String(d.sessionDate)<today)prev=d;});
-  if(!prev) return {peak:new Map(),rockets:new Set(),features:new Map(),prices:new Map()};
-  const key=_dayPriceChangeKey(prev);
-  const peak=new Map();
-  if(key)(prev.symbols||[]).forEach(sym=>{const v=Number(prev.featureRows?.[sym]?.[key]);if(isFinite(v))peak.set(sym,v);});
-  const features=new Map();
-  Object.entries(prev.featureRows||{}).forEach(([sym,row])=>features.set(sym,row));
-  const prices=new Map();
-  (prev.symbols||[]).forEach((sym,i)=>{const price=Number(prev.prices?.[i]);if(isFinite(price)&&price>0)prices.set(sym,price);});
-  return {peak,rockets:new Set(prev.rocketSymbols||[]),features,prices};
-}
-let _strategyMetricSnapshotCache=null;
-function getStrategyMetricSnapshotState(){
-  const days=[...(SNAPSHOT_RUNTIME?.days||[])].sort((a,b)=>String(a.sessionDate).localeCompare(String(b.sessionDate)));
-  const current=days[days.length-1]||null;
-  const tag=String(window._lastScannerSessionTag||'')+'|'+String(current?.sessionDate||'')+'|'+(current?.symbols?.length||0);
-  if(_strategyMetricSnapshotCache?.tag===tag)return _strategyMetricSnapshotCache.value;
-  const priceKey=current?_dayPriceChangeKey(current):null;
-  const prices=new Map((current?.symbols||[]).map((symbol,index)=>[symbol,Number(current.prices?.[index])]));
-  const value={rows:new Map(Object.entries(current?.featureRows||{})),prices,priceKey};
-  _strategyMetricSnapshotCache={tag,value};
-  return value;
-}
-function getStrategyMetricRow(row){
-  if(!row?.symbol)return row;
-  const snapshot=getStrategyMetricSnapshotState(),full=snapshot.rows.get(row.symbol);
-  if(!full)return row;
-  const snapshotChange=snapshot.priceKey?Number(full[snapshot.priceKey]):null;
-  const snapshotPrice=Number(snapshot.prices.get(row.symbol));
-  return {...row,
-    price:Number(row.price)>0?row.price:(snapshotPrice>0?snapshotPrice:row.price),
-    priceChange:Number.isFinite(Number(row.priceChange))?row.priceChange:(Number.isFinite(snapshotChange)?snapshotChange:row.priceChange),
-    _features:{...full,...(row._features||{})}
-  };
-}
-// Live ordering metric for the champion's picks; -Infinity = not picked by this strategy.
-function getChampionRowMetric(champ,s,yd){
-  const live=getStrategyMetricRow(s);
-  if(champ===MOMENTUM_VOLUME_KEY) return getMomentumVolumeLiveState().metrics.get(live.symbol)??-Infinity;
-  if(champ===VOL_CONTRACTION_KEY) return getVolatilityContractionLiveState().metrics.get(live.symbol)??-Infinity;
-  if(champ===LOADED_SPRING_KEY) return getLoadedSpringLiveState().metrics.get(live.symbol)??-Infinity;
-  if(champ==='breadth_relative') return getBreadthRelativeLiveState().metrics.get(live.symbol)??-Infinity;
-  if(champ===DONCHIAN_VB_KEY) return getDonchianBreakoutLiveState().metrics.get(live.symbol)??-Infinity;
-  if(champ==='momentum'){const m=yd.peak.get(live.symbol);return m!=null&&isFinite(m)?m:-Infinity;}
-  if(champ==='persistence') return yd.rockets.has(live.symbol)?(1000+(yd.peak.get(live.symbol)||0)):-Infinity;
-  if(champ==='early_mover'){const c=Number(live.priceChange);return (isFinite(c)&&c>=3&&c<6)?c:-Infinity;}
-  if(champ==='target_1m5m') return liveTarget1m5mMetric(live);
-  if(champ==='ta_composite') return liveCompositeMetric(live._features||{},PICK_COMPOSITES.ta_composite);
-  if(champ==='fa_composite') return liveCompositeMetric(live._features||{},PICK_COMPOSITES.fa_composite);
-  if(MOM_CONT_STRATEGY_BY_KEY[champ]) return liveMomentumContinuationMetric(live,yd,MOM_CONT_STRATEGY_BY_KEY[champ]);
-  if(RATING_STRATEGY_BY_KEY[champ]) return liveRatingMetric(live,RATING_STRATEGY_BY_KEY[champ]);
-  if(['high52w_mom','volume_shock','range_squeeze','delivery_surge','oversold_snap'].includes(champ)) return getQuantLiveMetric(champ,live,yd);
-  return Number(live.rankScore??live.rocketScore)||0;
-}
-function getTrailingTrajectorySources(runtime,currentDate){
-  const byDate=new Map((runtime?.days||[]).map(day=>[day.sessionDate,day]));
-  const sources=[];
-  let expected=previousTradingSessionDate(currentDate);
-  for(let lag=1;lag<=DAILY_TRAJECTORY_PRIOR_DAYS;lag++){
-    const source=byDate.get(expected);
-    // A weekday absent from the user's scan history is not a holiday and must not
-    // be silently compressed into a false one-day transition.
-    if(!source) break;
-    sources.push({lag,source});
-    expected=previousTradingSessionDate(expected);
-  }
-  return sources;
-}
-function combineTrajectoryPairs({sources,currentDay,features}){
-  const targetSymbols=new Set(currentDay?.rocketSymbols||[]);
-  const eligibleSymbols=new Set(currentDay?.eligibleSymbols||[]);
-  const valid=[];
-  for(const {lag,source} of sources||[]){
-    const pair=correlationFromPriorState(source,currentDay,eligibleSymbols,targetSymbols,features);
-    if(pair.matched.length<100) continue;
-    valid.push({lag,source,pair,rawWeight:0});
-  }
-  // Warmup compresses the same linear ladder: 1 source = 100%; two sources = 2:1;
-  // three = 3:2:1; mature D-1…D-4 = 4:3:2:1.
-  valid.sort((a,b)=>a.lag-b.lag);
-  const weightOffset=DAILY_TRAJECTORY_WEIGHT_STEPS.length-valid.length;
-  valid.forEach((item,index)=>{item.rawWeight=DAILY_TRAJECTORY_WEIGHT_STEPS[weightOffset+index];});
-  const totalWeight=valid.reduce((sum,item)=>sum+item.rawWeight,0)||0;
-  valid.forEach(item=>{item.weight=totalWeight?item.rawWeight/totalWeight:0;});
-  const lowSampleFeatures=[];
-  const targetRelevanceByLag={};
-  const featureStability={};
-  const targetRelevance=Object.fromEntries((features||[]).map(feature=>{
-    const usable=valid.filter(item=>(item.pair.sampleCounts?.[feature]||0)>=30&&(item.pair.positiveCounts?.[feature]||0)>=10);
-    const featureWeight=usable.reduce((sum,item)=>sum+item.rawWeight,0)||0;
-    if(usable.length<valid.length){
-      valid.forEach(item=>{
-        const samples=item.pair.sampleCounts?.[feature]||0;
-        const positiveCount=item.pair.positiveCounts?.[feature]||0;
-        if(samples<30) lowSampleFeatures.push({feature,lag:item.lag,samples,positiveCount,reason:'low_total_sample'});
-        else if(positiveCount<10) lowSampleFeatures.push({feature,lag:item.lag,samples,positiveCount,reason:'low_positive_count'});
-      });
-    }
-    const value=featureWeight
-      ?usable.reduce((sum,item)=>sum+(item.rawWeight/featureWeight)*(item.pair.targetRelevance?.[feature]??0),0)
-      :0;
-    const lagValues=usable.map(item=>Number(item.pair.targetRelevance?.[feature])).filter(v=>isFinite(v));
-    targetRelevanceByLag[feature]=usable.map(item=>({
-      lag:item.lag,
-      relevance:isFinite(Number(item.pair.targetRelevance?.[feature]))?Number(item.pair.targetRelevance?.[feature]):0
-    }));
-    if(lagValues.length){
-      const meanSigned=mean(lagValues);
-      const meanMagnitude=mean(lagValues.map(v=>Math.abs(v)));
-      const dispersion=Math.sqrt(mean(lagValues.map(v=>(v-meanSigned)*(v-meanSigned))));
-      featureStability[feature]=meanMagnitude>0?Math.max(0,Math.min(1,1-(dispersion/meanMagnitude))):0;
-    }else{
-      featureStability[feature]=0;
-    }
-    return [feature,value];
-  }));
-  const nearest=valid.find(item=>item.lag===1)||null;
-  const targetRelevanceToday=Object.fromEntries((features||[]).map(feature=>[
-    feature,nearest?(nearest.pair.targetRelevance?.[feature]??0):null
-  ]));
-  return {valid,targetRelevance,targetRelevanceToday,targetRelevanceByLag,featureStability,nearest,lowSampleFeatures};
-}
-function computeFeatureRedundancy(featureA,featureB,featureRows){
-  const xs=[],ys=[];
-  (featureRows||[]).forEach(row=>{
-    xs.push(row?.[featureA]??null);
-    ys.push(row?.[featureB]??null);
-  });
-  return Math.abs(spearman(xs,ys)||0);
-}
-function selectRocketRelevanceFeatures(features,targetRelevance,featureStability={},featureRows=[]){
-  const list=[...(features||[])];
-  const mrmr={};
-  const relevance={};
-  list.forEach(feature=>{
-    const rel=Math.abs(Number(targetRelevance?.[feature])||0);
-    const stability=Math.max(0,Math.min(1,Number(featureStability?.[feature])||0));
-    const stableRelevance=rel*stability;
-    relevance[feature]=rel;
-    mrmr[feature]={rel,stability,stableRelevance,red:0,baseScore:stableRelevance,reliability:stability,score:0,selected:false,accountability:null};
-  });
-  const candidates=list
-    .filter(feature=>(mrmr[feature]?.stableRelevance||0)>0)
-    .sort((a,b)=>(mrmr[b].stableRelevance||0)-(mrmr[a].stableRelevance||0));
-  const selected=[];
-  const redundancyCache=new Map();
-  const redundancy=(a,b)=>{
-    const key=a<b?`${a}\u0000${b}`:`${b}\u0000${a}`;
-    if(!redundancyCache.has(key)) redundancyCache.set(key,computeFeatureRedundancy(a,b,featureRows));
-    return redundancyCache.get(key);
-  };
-  while(selected.length<candidates.length){
-    let best=null;
-    candidates.forEach(feature=>{
-      if(selected.includes(feature)) return;
-      const red=selected.length?mean(selected.map(existing=>redundancy(feature,existing))):0;
-      const score=(mrmr[feature].stableRelevance||0)*Math.max(0,1-red);
-      if(!best||score>best.score||(score===best.score&&mrmr[feature].stableRelevance>mrmr[best.feature].stableRelevance)){
-        best={feature,red,score};
-      }
-    });
-    if(!best||best.score<=0) break;
-    selected.push(best.feature);
-    mrmr[best.feature]={...mrmr[best.feature],red:best.red,score:best.score,selected:true,
-      accountability:{relevance:relevance[best.feature],stability:mrmr[best.feature].stability,stableRelevance:mrmr[best.feature].stableRelevance,redundancy:best.red,criterion:'stability-weighted MID'}};
-  }
-  list.forEach(feature=>{
-    if(mrmr[feature].selected) return;
-    mrmr[feature]={...mrmr[feature],score:0,
-      accountability:{relevance:relevance[feature],stability:mrmr[feature].stability,stableRelevance:mrmr[feature].stableRelevance}};
-  });
-  const total=selected.reduce((sum,feature)=>sum+(mrmr[feature].score||0),0)||1;
-  const weights=Object.fromEntries(list.map(feature=>[
-    feature,mrmr[feature].selected?(mrmr[feature].score||0)/total:0
-  ]));
-  return {mrmr,selectedFeatures:selected,weights};
-}
-function compactNumericMap(map){
-  const out={};
-  Object.entries(map||{}).forEach(([key,value])=>{
-    const n=Number(value);
-    if(Number.isFinite(n)) out[key]=+n.toFixed(6);
-  });
-  return out;
-}
-function getCompletedDayFallbackSelection({features,map,today,featureRows}){
-  if(!map||!map.date||!map.targetRelevance||!map.featureStability||!today) return null;
-  if(String(map.date)>=String(today)) return null;
-  const age=tradingDaysBetween(map.date,today);
-  if(age==null||age<=0||age>5) return null;
-  const selection=selectRocketRelevanceFeatures(features,map.targetRelevance,map.featureStability,featureRows);
-  const weightTotal=selection.selectedFeatures.reduce((sum,feature)=>sum+(selection.weights[feature]||0),0);
-  if(selection.selectedFeatures.length<1||weightTotal<=0) return null;
-  return {...selection,weightTotal,age};
-}
-function persistLastUsableCompletedMap({date,targetRelevance,featureStability}){
-  if(!date||!ACC_CORR||ACC_CORR.corrSchema!==CORR_SCHEMA) return;
-  const map={
-    date,
-    targetRelevance:compactNumericMap(targetRelevance),
-    featureStability:compactNumericMap(featureStability)
-  };
-  ACC_CORR={...ACC_CORR,lastUsableMap:map};
-  FS.set(modeKey(CORR_STORE),ACC_CORR);
-}
-async function advanceSnapshotLearning({rows,features,priceKey,rocketMetricKey,sessionTag,targetSymbols,eligibleSymbols,advance=true,snapshotTimestamp=Date.now(),previewOnly=false}){
-  let runtime=previewOnly?cloneSnapshotRuntime(SNAPSHOT_RUNTIME):SNAPSHOT_RUNTIME;
-  if(!runtime||runtime.schema!==SNAPSHOT_STATE_SCHEMA) runtime=emptySnapshotRuntime();
-  if(!previewOnly) SNAPSHOT_RUNTIME=runtime;
-  let accCorr=ACC_CORR;
-  if(accCorr?.corrSchema!==CORR_SCHEMA){
-    accCorr={corrSchema:CORR_SCHEMA,corr:{},dailyCorr:{},sessions:0,learnSessions:0,dailySessions:0,lagPairs:[]};
-    if(!previewOnly) ACC_CORR=accCorr;
-  }
-  const rawStamp=snapshotStamp(snapshotTimestamp);
-  const latestStored=getLatestDailyRecord(runtime);
-  // Restore-only Drive hydration must retain the saved day identity instead of using
-  // the file's Drive-modification timestamp as a synthetic fresh trading session.
-  const stamp=!advance&&latestStored
-    ?{...rawStamp,timestamp:latestStored.timestamp,sessionDate:latestStored.sessionDate,
-      minutes:latestStored.minutes,inSession:latestStored.inSession,baselineEligible:latestStored.baselineEligible}
-    :rawStamp;
-  const liveRocketSet=targetSymbols instanceof Set?targetSymbols:new Set(targetSymbols||[]);
-  const liveEligibleSet=eligibleSymbols instanceof Set?eligibleSymbols:new Set(eligibleSymbols||[]);
-  const cleanRows=rows.filter(row=>row.symbol&&priceKey&&row[priceKey]>0);
-  const symbols=cleanRows.map(row=>row.symbol);
-  const prices=Float32Array.from(cleanRows,row=>row[priceKey]);
-  const featureRows=Object.fromEntries(cleanRows.map(row=>[
-    row.symbol,Object.fromEntries(features.map(f=>[f,row[f]??null]))
-  ]));
-  const currentSnapshot=buildDecodedSnapshot({stamp,symbols,prices,featureRows,features,sessionTag});
-
-  const sameDayRecord=(runtime.days||[]).find(day=>day.sessionDate===stamp.sessionDate)||null;
-  const duplicate=!!sessionTag&&runtime.lastTag===sessionTag&&sameDayRecord?.sessionDate===stamp.sessionDate;
-  const newerStored=(runtime.days||[]).some(day=>
-    String(day.sessionDate)>String(stamp.sessionDate)||
-    (day.sessionDate===stamp.sessionDate&&((Number(day.timestamp)||0)>(Number(stamp.timestamp)||0)))
-  );
-  const canAdvance=advance&&stamp.telemetryEligible&&!duplicate&&!newerStored;
-  let currentDay=sameDayRecord;
-
-  if(canAdvance){
-    if(currentDay){
-      mergeDailyRecord(currentDay,currentSnapshot,rocketMetricKey,liveRocketSet,liveEligibleSet,sessionTag);
-    }else{
-      currentDay=cloneDailyRecord(currentSnapshot,liveRocketSet,liveEligibleSet);
-      runtime.days.push(currentDay);
-      runtime.days=trimDailyRecords(runtime.days);
-      currentDay=runtime.days.find(day=>day.sessionDate===stamp.sessionDate)||currentDay;
-    }
-    runtime.completed=runtime.days.length;
-    runtime.lastTag=sessionTag||null;
-    if(!previewOnly) window._snapshotRuntimeDirty=true;
-  }
-
-  const currentForLearning=currentDay&&currentDay.sessionDate===stamp.sessionDate?currentDay:null;
-  const sources=currentForLearning?getTrailingTrajectorySources(runtime,currentForLearning.sessionDate):[];
-  const combined=currentForLearning
-    ?combineTrajectoryPairs({sources,currentDay:currentForLearning,features})
-    :{valid:[],targetRelevance:{},targetRelevanceToday:Object.fromEntries(features.map(f=>[f,null])),targetRelevanceByLag:{},featureStability:Object.fromEntries(features.map(f=>[f,0])),nearest:null};
-  const hasScoringEvidence=combined.valid.length>0;
-  const targetRelevance=hasScoringEvidence
-    ?combined.targetRelevance
-    :(accCorr?.dailyCorr||accCorr?.corr||Object.fromEntries(features.map(f=>[f,0])));
-  const targetRelevanceToday=combined.targetRelevanceToday;
-  const nearestSource=combined.nearest?.source||sources.find(item=>item.lag===1)?.source||null;
-  const intervalMoves=nearestSource?snapshotPriceMoves(nearestSource,currentSnapshot):{};
-
-  if(canAdvance){
-    accCorr={
-      ...accCorr,
-      corrSchema:CORR_SCHEMA,
-      corr:combined.targetRelevance,
-      dailyCorr:combined.targetRelevance,
-      sessions:combined.valid.length,
-      learnSessions:combined.valid.length,
-      dailySessions:combined.valid.length,
-      lagPairs:combined.valid.map(item=>({lag:item.lag,sourceDate:item.source.sessionDate,matched:item.pair.matched.length,weight:item.weight})),
-      currentDate:currentForLearning?.sessionDate||null,
-      rocketCount:(currentForLearning?.rocketSymbols||[]).length,
-      lastUpdated:new Date().toISOString(),
-      lastTag:sessionTag||null
-    };
-    runtime.lastOutcome={
-      currentDate:currentForLearning?.sessionDate||null,
-      rockets:(currentForLearning?.rocketSymbols||[]).length,
-      pairs:accCorr.lagPairs,
-      model:'five_session_rolling_daily_rocket_trajectory'
-    };
-    if(!previewOnly) window._snapshotRuntimeDirty=true;
-  }
-
-  let note='';
-  if(!hasScoringEvidence){
-    if(!currentForLearning) note='WARMUP: save a daily telemetry record first.';
-    else if(!sources.length) note='WARMUP: Day 1 telemetry saved. Scores begin after the next NSE trading-day rocket outcome.';
-    else note='WARMUP: the available prior-day telemetry matched fewer than 100 live-eligible stocks.';
-  }else{
-    const weights=accCorr?.lagPairs||combined.valid.map(item=>({lag:item.lag,weight:item.weight}));
-    const weightText=weights.map(item=>`D-${item.lag} ${(item.weight*100).toFixed(0)}%`).join(', ');
-    note=`Scoring from ${combined.valid.length} prior daily state snapshot${combined.valid.length===1?'':'s'} against today’s ${currentForLearning.rocketSymbols.length} observed rockets (${weightText}). Same-day uploads only refresh today’s telemetry.`;
-  }
-  accCorr.laggedNote=note;
-  if(!previewOnly){
-    ACC_CORR=accCorr;
-    FS.set(modeKey(CORR_STORE),ACC_CORR);
-  }
-
-  const scoringFeatureRows=buildStateFeatureRows(currentSnapshot,features);
-  return {
-    targetRelevance,
-    targetRelevanceToday,
-    targetRelevanceByLag:combined.targetRelevanceByLag||{},
-    featureStability:combined.featureStability||Object.fromEntries(features.map(f=>[f,0])),
-    completedNow:combined.valid.length,
-    note,
-    runtime,
-    hadPriorCorr:(accCorr?.dailySessions||0)>0,
-    hasPrimaryComparison:combined.valid.length>0,
-    hasBaselineEvidence:false,
-    hasScoringEvidence,
-    baselineCreated:canAdvance&&!sameDayRecord,
-    primaryRelevance:combined.nearest?.pair?.targetRelevance||null,
-    intervalMoves,
-    scoringFeatureRows,
-    currentRocketSymbols:[...(currentForLearning?.rocketSymbols||[])],
-    lowSampleFeatures:combined.lowSampleFeatures||[],
-    lagPairs:accCorr?.lagPairs||[],
-    deltaFeatureSchema:DELTA_FEATURE_SCHEMA,
-    intervalElapsedMinutes:null,
-    freshSignalCount:hasScoringEvidence?Object.values(targetRelevanceToday).filter(v=>v!=null&&isFinite(v)&&Math.abs(v)>0.0001).length:0,
-    scoringSource:hasScoringEvidence?'five_session_rolling_daily_rocket_trajectory':'warmup',
-    dailyScoreReady:hasScoringEvidence,
-    snapshotPairs:combined.valid.length
-  };
-}
-
-// ── Engine ──
-async function runEngine(raw, sessionTag, options={}){
-  if(!raw.length) return;
-  const advanceSnapshot=options.advanceSnapshot!==false;
-
-  // ── Auto-detect columns from CSV headers ──
-  const allHeaders = Object.keys(raw[0]);
-
-  // Find symbol/name. Every retained rating column is converted to an ordered numeric feature.
-  const symCol   = allHeaders.find(h => raw.slice(0,5).every(r => /^[A-Z0-9&.-]{1,20}$/.test((r[h]||'').trim()))) || allHeaders[0];
-  const nameCol  = allHeaders.find(h => h !== symCol && raw.slice(0,5).some(r => (r[h]||'').trim().length > 10 && isNaN(parseFloat(r[h])))) || '';
-  const RATING_MAP={'strong sell':1,'sell':2,'neutral':3,'buy':4,'strong buy':5};
-  const ratingValue=v=>RATING_MAP[String(v||'').trim().toLowerCase()]??null;
-  const ratingCols=allHeaders.filter(h=>{
-    if(!/rating/i.test(h)) return false;
-    const sample=raw.slice(0,50).map(r=>ratingValue(r[h])).filter(v=>v!=null);
-    return sample.length>0;
-  });
-  const ratingColSet=new Set(ratingCols);
-
-  // Numeric detection: sample first 50 rows (skip blanks), column is numeric
-  // if at least 30% of non-blank values parse as a real finite number
-  const numericCols = allHeaders.filter(h => {
-    if(h === symCol || h === nameCol || ratingColSet.has(h)) return false;
-    const nonBlank = raw.slice(0, 50).map(r => (r[h]||'').trim()).filter(v => v !== '');
-    if(nonBlank.length < 3) return false;
-    const numericCount = nonBlank.filter(v => {
-      const n = parseFloat(v.replace(/,/g,''));
-      return isFinite(n);
-    }).length;
-    return (numericCount / nonBlank.length) >= 0.3;
-  });
-
-  // Map column header → safe JS key (lowercase, alphanumeric + underscore)
-  function safeKey(h){ return h.toLowerCase().replace(/[^a-z0-9]+/g,'_').replace(/^_|_$/g,''); }
-  const COL_MAP = {}; // safeKey → original header
-  numericCols.forEach(h => { COL_MAP[safeKey(h)] = h; });
-  // Convert every retained textual rating into a 1..5 ordered numeric relevance feature.
-  ratingCols.forEach(h => { COL_MAP[safeKey(h)] = h; });
-
-  // ── Known special mappings for derived features ──
-  // These tell us which safeKey holds which meaning for computed features
-  const findKey = pattern => Object.keys(COL_MAP).find(k => pattern.test(k)) || null;
-  const K = {
-    price:        findKey(/^price$/),
-    price_change: findKey(/price_change.*1_day|1_day.*price_change|^change.*1_day$/),
-    atr_pct:      findKey(/average_true_range_.*14.*1_day|atr_.*14.*1_day/),
-    perf_1w:      findKey(/performance.*1_week|perf.*1_week|1_week.*perf/),
-    volume:       findKey(/^volume_1_day$|^volume$/),
-    turnover:     findKey(/price_volume_turnover_1_day/),
-    avg_volume_10d: findKey(/average_volume.*10_days|volume.*10_days.*average/),
-    avg_turnover_10d: findKey(/price_average_volume.*10_days|price.*average_volume.*10_days|average_volume.*10_days.*price/),
-    market_cap:   findKey(/market_capitalization|market_cap/),
-    shareholders: findKey(/number_of_shareholders/),
-    piotroski:    findKey(/piotroski/),
-    high_1d:      findKey(/^high_1_day$/),
-    low_1d:       findKey(/^low_1_day$/),
-    open_1d:      findKey(/^open_1_day$/),
-    vwap:         findKey(/volume_weighted_average_price.*1_day/),
-  };
-  const parsed = raw.map(r => {
-    const d = {};
-    // Parse numeric columns, then convert textual ratings to 1..5.
-    for(const [key, col] of Object.entries(COL_MAP)){
-      d[key] = ratingColSet.has(col)?ratingValue(r[col]):num(r[col]);
-    }
-    d.symbol = normSym(r[symCol]);
-    d.name   = (r[nameCol]||'').trim();
-    return d;
-  });
-
-  // ── Auto-detect Sector / Industry columns ──
-  // Look for text columns with repeated categorical values (not unique per row like name/symbol)
-  const SECTOR_PATTERNS = /^sector$/i;
-  const INDUSTRY_PATTERNS = /^industry$/i;
-  let sectorCol = allHeaders.find(h => SECTOR_PATTERNS.test(h.trim())) || null;
-  let industryCol = allHeaders.find(h => INDUSTRY_PATTERNS.test(h.trim())) || null;
-  // Fallback: detect any text column with 5-50 unique values (categorical grouping)
-  if(!sectorCol || !industryCol){
-    const candidates = allHeaders.filter(h => h!==symCol && h!==nameCol && !ratingColSet.has(h) && !numericCols.includes(h));
-    for(const h of candidates){
-      const vals = raw.slice(0,200).map(r=>(r[h]||'').trim()).filter(v=>v);
-      const uniq = new Set(vals);
-      if(vals.length>=50 && uniq.size>=5 && uniq.size<=50){
-        if(!sectorCol) sectorCol=h;
-        else if(!industryCol) industryCol=h;
-      }
-    }
-  }
-  // Attach sector/industry text to parsed rows
-  if(sectorCol) parsed.forEach((d,i) => { d._sector = (raw[i][sectorCol]||'').trim(); });
-  if(industryCol) parsed.forEach((d,i) => { d._industry = (raw[i][industryCol]||'').trim(); });
-
-  // ── Computed features — only those requiring external data or text decoding ──
-  // All other derived features removed: rocket relevance will discover correlations from raw columns
-  parsed.forEach(d => {
-    // MA rating: text → numeric (required to use as a feature)
-    // NSE enrichment: not in the TradingView CSV, so add it here.
-    const bh=NSE_BHAV[d.symbol]||{}, wk=NSE_52W[d.symbol]||{}, pb=NSE_PRICE_BAND[d.symbol]||{};
-    d.delivery_pct = bh.delivPct ?? null;
-    d.nse_vol      = bh.nseVol   ?? null;
-    d.high_52w     = wk.high52w  ?? null;
-    d.low_52w      = wk.low52w   ?? null;
-    d.price_band_pct = pb.bandPct ?? null;
-    d.pct_to_upper_band = (d.price_band_pct!=null&&K.price_change&&d[K.price_change]!=null) ? (d.price_band_pct-d[K.price_change]) : null;
-    const price=d[K.price], h52=d.high_52w, l52=d.low_52w;
-    if(price!=null&&h52!=null&&l52!=null&&(h52-l52)>0){
-      d.range_pos         = ((price-l52)/(h52-l52))*100;
-      d.pct_from_52w_high = ((price-h52)/h52)*100;
-    } else { d.range_pos=null; d.pct_from_52w_high=null; }
-    // Peak retention: how much of today's range has the stock held?
-    const hi1d=K.high_1d?d[K.high_1d]:null, lo1d=K.low_1d?d[K.low_1d]:null;
-    if(price!=null&&hi1d!=null&&lo1d!=null&&(hi1d-lo1d)>0){
-      d.peak_retention=((price-lo1d)/(hi1d-lo1d))*100;
-      d.pullback_from_high_pct=(hi1d>0)?((hi1d-price)/hi1d)*100:null;
-    } else { d.peak_retention=null; d.pullback_from_high_pct=null; }
-    const open1d=K.open_1d?d[K.open_1d]:null;
-    d.from_open_pct=(price!=null&&open1d>0)?((price-open1d)/open1d)*100:null;
-  });
-
-  // FEATS: every retained numeric or converted-rating analytical field in ALL NSE,
-  // plus NSE-derived fields. Do not pre-prune similar indicators; each feature earns weight from its own rocket correlation.
-  const NSE_DERIVED = ['delivery_pct','range_pos','pct_from_52w_high','peak_retention','pullback_from_high_pct','from_open_pct','price_band_pct','pct_to_upper_band'];
-  const ALL_CANDIDATE_FEATURES = [...new Set([...Object.keys(COL_MAP), ...NSE_DERIVED])];
-  const FEATS = [...ALL_CANDIDATE_FEATURES];
-
-  const LABELS = {};
-  for(const key of Object.keys(COL_MAP)) LABELS[key] = COL_MAP[key];
-  LABELS.delivery_pct      = 'Delivery %';
-  LABELS.range_pos         = '52W Range Position %';
-  LABELS.pct_from_52w_high = '% From 52W High';
-  LABELS.peak_retention    = 'Peak Retention %';
-  LABELS.pullback_from_high_pct = 'Pullback From Day High %';
-  LABELS.from_open_pct     = '% From Day Open';
-  LABELS.price_band_pct    = 'NSE Price Band %';
-  LABELS.pct_to_upper_band = '% To Upper Band';
-
-  // ── Market breadth context (full universe, before filters) ──
-  const allAdvancing = parsed.filter(d => {
-    const pc = K.price_change ? d[K.price_change] : null;
-    return pc !== null && pc > 0;
-  }).length;
-  const marketBreadth = parsed.length > 0 ? allAdvancing / parsed.length : 0.5;
-  const breadthRank=percentileMap(parsed,d=>K.price_change?d[K.price_change]:NaN);
-  parsed.forEach(d=>{const rank=breadthRank.get(d);d.breadth_relation=rank==null?null:rank-marketBreadth;});
-  FEATS.push('breadth_relation');
-  LABELS.breadth_relation='Stock vs Market Breadth';
-  const totalParsed = parsed.length;
-  window._lastObservedDailyMoves=parsed.map(d=>({
-      symbol:d.symbol,
-      price:K.price?d[K.price]:null,
-      priceChange:K.price_change?d[K.price_change]:null,
-      high1d:K.high_1d?d[K.high_1d]:null,
-      low1d:K.low_1d?d[K.low_1d]:null,
-      open1d:K.open_1d?d[K.open_1d]:null,
-      peakRetention:d.peak_retention,
-      pullbackFromHighPct:d.pullback_from_high_pct,
-      fromOpenPct:d.from_open_pct,
-      rocketMove:getIntradayRocketMove(d,K.price,K.price_change,K.high_1d)
-    })).filter(d=>d.symbol);
-  // ── Compute Sector / Industry breadth features (full universe) ──
-  if(sectorCol && K.price_change){
-    const secMap={};
-    parsed.forEach(d=>{
-      const s=d._sector; if(!s) return;
-      if(!secMap[s]) secMap[s]={up:0,total:0,changes:[]};
-      const pc=d[K.price_change];
-      secMap[s].total++;
-      if(pc!=null&&pc>0) secMap[s].up++;
-      if(pc!=null) secMap[s].changes.push(pc);
-    });
-    Object.values(secMap).forEach(s=>{
-      s.changes.sort((a,b)=>a-b);
-      s.median=s.changes.length?s.changes[Math.floor(s.changes.length/2)]:0;
-    });
-    parsed.forEach(d=>{
-      const s=secMap[d._sector];
-      d.sector_breadth = s && s.total>=3 ? (s.up/s.total)*100 : null;
-      const pc=K.price_change?d[K.price_change]:null;
-      d.sector_rel_strength = (s && pc!=null && s.total>=3) ? pc - s.median : null;
-    });
-    FEATS.push('sector_breadth','sector_rel_strength');
-    LABELS.sector_breadth='Sector Breadth %';
-    LABELS.sector_rel_strength='Sector Relative Strength';
-  }
-  if(industryCol && K.price_change){
-    const indMap={};
-    parsed.forEach(d=>{
-      const ind=d._industry; if(!ind) return;
-      if(!indMap[ind]) indMap[ind]={up:0,total:0};
-      indMap[ind].total++;
-      const pc=d[K.price_change];
-      if(pc!=null&&pc>0) indMap[ind].up++;
-    });
-    parsed.forEach(d=>{
-      const ind=indMap[d._industry];
-      d.industry_breadth = ind && ind.total>=3 ? (ind.up/ind.total)*100 : null;
-    });
-    FEATS.push('industry_breadth');
-    LABELS.industry_breadth='Industry Breadth %';
-  }
-  const staticInteractionDefs=[
-    {key:'volume_rank_x_atr_pct_rank',left:K.volume,right:K.atr_pct,label:'Volume Rank x ATR % Rank'},
-    {key:'delivery_pct_rank_x_pct_to_upper_band_rank',left:'delivery_pct',right:'pct_to_upper_band',label:'Delivery % Rank x Upper Band Gap Rank'},
-    {key:'range_pos_rank_x_sector_breadth_rank',left:'range_pos',right:'sector_breadth',label:'52W Range Rank x Sector Breadth Rank'},
-    {key:'piotroski_rank_x_perf_1w_rank',left:K.piotroski,right:K.perf_1w,label:'Piotroski Rank x 1W Performance Rank'}
-  ];
-  applyRankProductInteractions(parsed,staticInteractionDefs);
-  staticInteractionDefs.forEach(def=>{
-    FEATS.push(def.key);
-    LABELS[def.key]=def.label;
-  });
-
-  const learningUniverse=parsed.filter(d=>d.symbol&&(!K.price||d[K.price]!==0));
-  const FEATS_UNIQUE=[...new Set(FEATS)];
-  FEATS.length=0;FEATS.push(...FEATS_UNIQUE);
-  let snapshotLearning=null; // populated after current tradeability filters create today's top-1% label
-
-  // ── Recommendation filters ──
-  // These rows remain in learningUniverse and snapshots; only live eligibility is filtered.
-  REMOVED={uc:0,surv:0,nonEq:0,liq:0,fscore:0,atr:0,survRules:{}};
-  const filtered=parsed.filter(d=>{
-    const pc=K.price_change?d[K.price_change]:null;
-    const priceBand=d.price_band_pct;
-    const auditUcCeiling=(priceBand!=null&&isFinite(priceBand)&&priceBand>0)?priceBand:STOCK_RUNWAY_CEILING_PCT;
-    const auditUcBuffer=(priceBand!=null&&isFinite(priceBand)&&priceBand>0)?PRICE_BAND_BLOCK_BUFFER_PCT:0;
-    const auditAvgVol=K.avg_volume_10d?d[K.avg_volume_10d]:null;
-    const auditAvgTurnover=K.avg_turnover_10d
-      ?d[K.avg_turnover_10d]
-      :(auditAvgVol!=null&&K.price?d[K.price]*auditAvgVol:null);
-    const auditReasons=[];
-    if(!d.symbol||(K.price&&d[K.price]===0))auditReasons.push({key:'zero_price',bucket:'liq'});
-    if(pc!==null&&pc>=auditUcCeiling-auditUcBuffer)auditReasons.push({key:'upper_circuit',bucket:'uc'});
-    if(NSE_NON_EQ.has(d.symbol))auditReasons.push({key:'non_eq',bucket:'nonEq'});
-    (Array.isArray(NSE_SURV[d.symbol])?NSE_SURV[d.symbol]:[]).forEach(rule=>auditReasons.push({key:`surv:${rule}`,bucket:'surv'}));
-    if(!passesAverageLiquidity(auditAvgVol,auditAvgTurnover))auditReasons.push({key:'liquidity',bucket:'liq'});
-    if((K.piotroski?d[K.piotroski]:null)===0)auditReasons.push({key:'zero_f_score',bucket:'fscore'});
-    const auditAtr=K.atr_pct?d[K.atr_pct]:null;
-    if(auditAtr!==null&&auditAtr<=0)auditReasons.push({key:'invalid_atr',bucket:'atr'});
-    d._hardFilterReasons=auditReasons;
-    const _track=(bucket)=>{
-      d._hardFiltered=true;
-      d._filterBucket=bucket;
-      REMOVED[bucket]++;
-    };
-    if(!d.symbol||(K.price&&d[K.price]===0)){_track('liq');return false;}
-    // Upper circuit — stock-only market structure filter
-
-    const ucCeiling=(priceBand!=null&&isFinite(priceBand)&&priceBand>0)?priceBand:STOCK_RUNWAY_CEILING_PCT;
-    const ucBuffer=(priceBand!=null&&isFinite(priceBand)&&priceBand>0)?PRICE_BAND_BLOCK_BUFFER_PCT:0;
-    if(pc!==null&&pc>=ucCeiling-ucBuffer){_track('uc');return false;}
-    // Non-EQ series (BE/BZ/SZ/SM/ST) — stock-only T2T settlement filter
-    if(NSE_NON_EQ.has(d.symbol)){_track('nonEq');return false;}
-    // Surveillance — stock-only user custom rules
-    if(NSE_SURV[d.symbol]){
-      _track('surv');
-      const rules=Array.isArray(NSE_SURV[d.symbol])?NSE_SURV[d.symbol]:[];
-      if(rules.length){const primary=rules[0];REMOVED.survRules[primary]=(REMOVED.survRules[primary]||0)+1;}
-      return false;
-    }
-    // Stable average liquidity floor
-    const avgVol10D=K.avg_volume_10d?d[K.avg_volume_10d]:null;
-    const avgTurnover=K.avg_turnover_10d
-      ?d[K.avg_turnover_10d]
-      :(avgVol10D!=null&&K.price?d[K.price]*avgVol10D:null);
-    if(!passesAverageLiquidity(avgVol10D,avgTurnover)){
-      _track('liq');return false;
-    }
-    // Piotroski — stock-only fundamental data filter
-    const pio=K.piotroski?d[K.piotroski]:null;
-    if(pio===0){_track('fscore');return false;}
-    // ATR — zero/negative values are invalid; blanks pass through as unknown
-    const atr=K.atr_pct?d[K.atr_pct]:null;
-    if(atr!==null&&atr<=0){_track('atr');return false;}
-    d._hardFiltered=false;
-    d._filterBucket='';
-    return true;
-  });
-  // Current-day target: the top 1% of live-eligible stocks by 1D price change.
-  // This is deliberately calculated only after current tradeability exclusions.
-  const targetRanked=filtered
-    .map((d,i)=>({i,value:K.price_change?d[K.price_change]:null}))
-    .filter(x=>x.value!=null&&isFinite(x.value))
-    .sort((a,b)=>b.value-a.value);
-  const targetCount=Math.max(1,Math.floor(targetRanked.length*ROCKET_TOP_FRACTION));
-  const currentTop10Symbols=new Set(targetRanked.slice(0,targetCount).map(x=>filtered[x.i].symbol));
-  const previewLearning=await advanceSnapshotLearning({rows:learningUniverse,features:FEATS,priceKey:K.price,rocketMetricKey:K.price_change,
-    sessionTag,targetSymbols:currentTop10Symbols,eligibleSymbols:new Set(filtered.map(d=>d.symbol)),advance:advanceSnapshot,snapshotTimestamp:options.snapshotTimestamp||Date.now(),previewOnly:true});
-  const previewSelection=selectRocketRelevanceFeatures(FEATS,previewLearning.targetRelevance,previewLearning.featureStability,filtered.map(d=>previewLearning.scoringFeatureRows[d.symbol]||{}));
-  const breadthInteractionDefs=buildBreadthInteractionDefs(
-    previewSelection.selectedFeatures,
-    previewSelection.weights,
-    LABELS,
-    FEATS,
-    filtered.map(d=>previewLearning.scoringFeatureRows[d.symbol]||{})
-  );
-  applyMarketBreadthInteractions(parsed,breadthInteractionDefs,marketBreadth);
-  breadthInteractionDefs.forEach(def=>{
-    FEATS.push(def.key);
-    LABELS[def.key]=def.label;
-  });
-  const FEATS_WITH_INTERACTIONS=[...new Set(FEATS)];
-  FEATS.length=0;FEATS.push(...FEATS_WITH_INTERACTIONS);
-  snapshotLearning=await advanceSnapshotLearning({rows:learningUniverse,features:FEATS,priceKey:K.price,rocketMetricKey:K.price_change,
-    sessionTag,targetSymbols:currentTop10Symbols,eligibleSymbols:new Set(filtered.map(d=>d.symbol)),advance:advanceSnapshot,snapshotTimestamp:options.snapshotTimestamp||Date.now()});
-
-  // Expose current full-universe values for outcome and diagnostics only.
-  window._lastEngineFeats = FEATS;
-  window._lastParsedFiltered = filtered;
-  window._lastParsedForSnapshot = learningUniverse;
-
-  const todaySessionDate=getModelTradingDate(options.snapshotTimestamp||Date.now());
-  const liveTargetRelevance=snapshotLearning.targetRelevance;
-  const targetRelevanceToday=snapshotLearning.targetRelevanceToday;
-  const todayRocketSet=new Set(snapshotLearning.currentRocketSymbols||[]);
-  const freshSignalCount=snapshotLearning.freshSignalCount;
-  const currentUploadLearned=snapshotLearning.completedNow>0;
-  // A score exists as soon as one honest prior daily state can explain today's observed rocket set.
-  const hasRecommendationEvidence=!!snapshotLearning.hasScoringEvidence;
-  const useFreshCorr=true;
-  let scoringSource=snapshotLearning.scoringSource||'warmup';
-  const laggedNote=snapshotLearning.note;
-  const recOutcomeSummary=getRecommendationOutcomeSummary();
-  const entryOutcomeSummary=getExecutedEntryOutcomeSummary();
-  const recommendationFeedback={samples:recOutcomeSummary.evaluated,rockets:recOutcomeSummary.rockets,failures:recOutcomeSummary.failures};
-  const executedEntryFeedback={samples:entryOutcomeSummary.completed,profitable:entryOutcomeSummary.positive};
-
-  // Keep price_change reference for stats display
-  const withPC=filtered.map((d,i)=>({i,pc:K.price_change?d[K.price_change]:null})).filter(x=>x.pc!==null);
-  withPC.sort((a,b)=>b.pc-a.pc);
-
-  // Rocket relevance scores current feature states using correlations learned only from earlier feature states and later outcomes.
-  const scoringFeatureRows=snapshotLearning.scoringFeatureRows||{};
-  const scoringRows=learningUniverse.map(d=>scoringFeatureRows[d.symbol]||{});
-  // Feature selection uses greedy mRMR: rank-relevance minus same-day cross-sectional redundancy.
-  const featureRowsForSelection=filtered.map(d=>scoringFeatureRows[d.symbol]||{});
-  let activeTargetRelevance=liveTargetRelevance;
-  let activeFeatureStability=snapshotLearning.featureStability||{};
-  let {mrmr,selectedFeatures,weights}=selectRocketRelevanceFeatures(FEATS,activeTargetRelevance,activeFeatureStability,featureRowsForSelection);
-  let selectedWeightTotal=selectedFeatures.reduce((sum,feature)=>sum+(weights[feature]||0),0);
-  const scoringUsable=hasRecommendationEvidence&&selectedFeatures.length>0&&selectedWeightTotal>0;
-  let fallbackActive=false;
-  if(scoringUsable){
-    persistLastUsableCompletedMap({date:todaySessionDate,targetRelevance:liveTargetRelevance,featureStability:snapshotLearning.featureStability||{}});
-  }else{
-    const fallback=getCompletedDayFallbackSelection({
-      features:FEATS,
-      map:ACC_CORR?.lastUsableMap,
-      today:todaySessionDate,
-      featureRows:featureRowsForSelection
-    });
-    if(fallback){
-      fallbackActive=true;
-      activeTargetRelevance=ACC_CORR.lastUsableMap.targetRelevance;
-      activeFeatureStability=ACC_CORR.lastUsableMap.featureStability;
-      mrmr=fallback.mrmr;
-      selectedFeatures=fallback.selectedFeatures;
-      weights=fallback.weights;
-      selectedWeightTotal=fallback.weightTotal;
-      scoringSource='completed_day_fallback';
-    }
-  }
-  const scoringActive=scoringUsable||fallbackActive;
-  const scoreGatedReason=fallbackActive
-    ? `scores from last completed day (${ACC_CORR.lastUsableMap.date}) - live map activates at 10 rocket-positives today (currently ${todayRocketSet.size})`
-    : hasRecommendationEvidence&&!scoringUsable
-    ? `learning gated: only ${todayRocketSet.size} rocket-positives today (need 10) - neutral scores`
-    : '';
-  const outcomeReliabilityModel=buildOutcomeReliabilityModel(FEATS,weights);
-
-  const pctls={};
-  for(const f of FEATS)pctls[f]=pctRank(filtered.map(d=>scoringFeatureRows[d.symbol]?.[f]??null));
-  const results=filtered.map((d,idx)=>{
     let rawScore=0;
-    for(const f of FEATS){
-      const w=weights[f],p=pctls[f][idx];
-      // Missing values remain direction-neutral at the conservative 35th-percentile fallback.
-      // Only observed values are inverted for a negative learned correlation.
-      const directedPercentile=(p==null||!Number.isFinite(p))
-        ?0.35
-        :(activeTargetRelevance[f]>=0?p:(1-p));
-      rawScore+=w*directedPercentile;
+    for(const g in RADAR_GROUPS){
+      parts[g]=weights[g]?50+50*parts[g]/weights[g]:50;
+      if(g==='context'){const sp=radarPct(sectorSorted,sectorMeans[raw[sectorI]||'Unknown']??0);parts[g]=parts[g]*.7+sp*100*.3;}
+      rawScore+=parts[g]*RADAR_GROUPS[g].budget/100;
     }
-    const learnedMrmrScore=scoringActive?Math.round(rawScore*1000)/10:null;
-    const currentFeatures=Object.fromEntries(FEATS.map(f=>[f,scoringFeatureRows[d.symbol]?.[f]??null]));
-    // Outcome learning remains visible as confidence evidence only. It never alters Rocket Score or rank.
-    const outcomeReliability=scoringActive?getOutcomeReliabilityAdjustment(currentFeatures,outcomeReliabilityModel,weights):{delta:0,confidence:0,matched:0};
-    // Warm-up has no predictive evidence yet. A neutral 50 keeps every selected
-    // stock equally weighted for allocation without pretending it is a learned score.
-    const score=scoringActive?learnedMrmrScore:WARMUP_NEUTRAL_SCORE;
-
-    const vol=(K.volume?d[K.volume]:null);
-    const flags=[];
-    if(NSE_BULK[d.symbol]) flags.push('BULK');
-    if(NSE_BLOCK[d.symbol]) flags.push('BLK');
-    // Surveillance rules flagging this stock — used to show a warning badge in the table
-    const _survRules=NSE_SURV[d.symbol]||null;
-    const _isSurv=Array.isArray(_survRules)&&_survRules.length>0;
-    const rocketMove=getIntradayRocketMove(d,K.price,K.price_change,K.high_1d);
-    const tslRefPoints=getRecommendedTslPoints({
-      price:d.price,
-      priceChange:d.priceChange,
-      snapshotChange:snapshotLearning.intervalMoves?.[d.symbol]??null,
-      rocketMove,
-      velocityPotential:d.pctToUpperBand,
-      pullbackFromHighPct:d.pullbackFromHighPct,
-      peakRetention:d.peakRetention,
-      delivPct:d.delivery_pct
-    });
-
-    return{
-      symbol:d.symbol, name:d.name,
-      sector:d._sector||'', industry:d._industry||'',
-      sectorBreadth:d.sector_breadth??null,
-      price:(K.price?d[K.price]:null),
-      priceChange:(K.price_change?d[K.price_change]:null),
-      snapshotChange:snapshotLearning.intervalMoves?.[d.symbol]??null,
-      rocketToday:todayRocketSet.has(d.symbol),
-      rocketNow:currentTop10Symbols.has(d.symbol),
-      rocketMove,
-      volume:vol,
-      marketCap:(K.market_cap?d[K.market_cap]:null),
-      atr:(K.atr_pct?d[K.atr_pct]:null),
-      high1d:(K.high_1d?d[K.high_1d]:null),
-      low1d:(K.low_1d?d[K.low_1d]:null),
-      open1d:(K.open_1d?d[K.open_1d]:null),
-      peakRetention:d.peak_retention,
-      pullbackFromHighPct:d.pullback_from_high_pct,
-      fromOpenPct:d.from_open_pct,
-      vwap:(K.vwap?d[K.vwap]:null),
-      piotroski:(K.piotroski?d[K.piotroski]:null),
-      shareholders:(K.shareholders?d[K.shareholders]:null),
-      perf1w:(K.perf_1w?d[K.perf_1w]:null),
-      delivPct:d.delivery_pct,
-      rangePos:d.range_pos,
-      pctFrom52wHigh:d.pct_from_52w_high,
-      pctToUpperBand:d.pct_to_upper_band,
-      rocketScore:score, mrmrScore:learnedMrmrScore, outcomeAdj:outcomeReliability.delta,
-      outcomeReliability:outcomeReliability.confidence, outcomeEvidence:outcomeReliability.matched,
-      flags,
-      isSurv:_isSurv, survRules:_survRules,
-      // Calculated SL/Target per stock — adaptive from tradebook if available
-      slPct: (()=>{
-        const atr=K.atr_pct?d[K.atr_pct]:null;
-        const raw=atr>0?atr*SL_ATR_MULT:null;
-        const active=getActiveStopDistancePct(atr);
-        d._slRawDistance=raw;
-        d._slCapped=raw!=null&&Math.abs(raw-active)>1e-9;
-        return -active;
-      })(),
-      slRawPct:d._slRawDistance,
-      slCapped:!!d._slCapped,
-      tgtPct: (()=>{
-        if(TRADEBOOK_STATS&&TRADEBOOK_STATS.adaptiveTGT) return TRADEBOOK_STATS.adaptiveTGT;
-        const atr=K.atr_pct?d[K.atr_pct]:null;
-        const p1w=K.perf_1w?d[K.perf_1w]:null;
-        const dailyMove=p1w!=null?Math.abs(p1w)/5:null;
-        const slBase=atr>0?atr*1.5:1.0;
-        const rrFloor=slBase*1.5;
-        return dailyMove!=null?Math.max(rrFloor,dailyMove):rrFloor;
-      })(),
-      tslRefPoints,
-    };
+    const symbol=normSym(raw[symbolI]),meta=supplements[symbol]||{},series=String(meta.series||'Unknown').toUpperCase(),band=meta.band,status=String(meta.status||'A').toUpperCase();
+    const eqEligible=series==='EQ'&&status==='A',basketEligible=eqEligible&&(band===null||band===undefined||band>=10);
+    const day=radarNum(raw[targetI])||0,turn=radarNum(raw[turnI])||0,price=radarNum(raw[priceI])||0,gap=Math.abs(radarNum(raw[gapI])||0),quality=features.length?observed/features.length:0;
+    const relvol=radarNum(raw[relI]),relAt=radarNum(raw[relAtI]),volChg=radarNum(raw[volChgI]);
+    const atrPct=radarNum(raw[atrI]);
+    const rangePct=Math.max(radarNum(raw[adrI])||0,atrPct||0,radarNum(raw[volI])||0,(radarNum(raw[atrWeekI])||0)/Math.sqrt(5));
+    const stretch=rangePct?10/rangePct:99;
+    const participationReady=(relvol||0)>=1.2||(relAt||0)>=1.5||(volChg||0)>=30;
+    const impulseReady=(day>=.5&&day<8)||parts.momentum>=62||parts.trend>=65;
+    const rocketReady=rangePct>=3.5&&participationReady&&impulseReady&&quality>=.7&&turn>=25e5&&price>=10&&basketEligible;
+    const gateReasons=[];
+    if(series!=='EQ')gateReasons.push(series==='UNKNOWN'?'exchange series unverified':'non-EQ series');
+    if(status!=='A')gateReasons.push('inactive exchange status');
+    if(band!==null&&band!==undefined&&band<10)gateReasons.push(band+'% price band cannot permit a 10% move');
+    if(rangePct<3.5)gateReasons.push('range capacity below 3.5%');
+    if(!participationReady)gateReasons.push('no participation ignition');
+    if(!impulseReady)gateReasons.push('no directional impulse');
+    if(quality<.7)gateReasons.push('insufficient feature coverage');
+    if(turn<25e5)gateReasons.push('turnover below ₹25L');
+    if(price<10)gateReasons.push('price below ₹10');
+    rawScore*=.88+.12*quality;
+    if(series==='UNKNOWN')rawScore-=8;else if(series!=='EQ')rawScore-=50;
+    if(status!=='A')rawScore-=50;
+    if(band!==null&&band!==undefined&&band<10)rawScore-=35;else if(band===10)rawScore-=3;
+    if(meta.flags?.length)rawScore-=Math.min(12,meta.flags.length*2);
+    if(meta.delivery!==null&&meta.delivery!==undefined)rawScore+=clamp01(1-Math.abs(meta.delivery-55)/55,0,1)*3-1;
+    if(meta.officialClose&&meta.officialAvg)rawScore+=meta.officialClose>=meta.officialAvg?1:-1;
+    if(meta.high52&&meta.low52&&meta.high52>meta.low52)rawScore+=(clamp01((price-meta.low52)/(meta.high52-meta.low52))-.5)*4;
+    if(meta.bulkNet)rawScore+=meta.bulkNet>0?1.5:-1.5;
+    if(stretch>4)rawScore-=22;else if(stretch>3)rawScore-=14;else if(stretch>2.5)rawScore-=7;
+    if(!participationReady)rawScore-=7;
+    if(!impulseReady)rawScore-=5;
+    if(day>8)rawScore-=Math.min(13,(day-8)*1.7);
+    if(gap>7)rawScore-=Math.min(6,(gap-7)*.8);
+    if(turn<5e5)rawScore-=7;
+    if(price<5)rawScore-=5;
+    return {symbol,name:String(raw[descI]||symbol),sector:raw[sectorI]||'',rawScore,parts,contrib,quality,
+      price,day,priceChange:day,turnover:turn,relvol,gap,rangePct,stretch,atr:atrPct,
+      high1d:highI>=0?radarNum(raw[highI]):null,low1d:lowI>=0?radarNum(raw[lowI]):null,rocketToday:day>=10,
+      rocketReady,gateReasons,series,band:band??null,status,eqEligible,basketEligible,meta};
   });
-
-  // Dynamic columns show the strongest selected rocket-relevance features.
-  const top10Feats=[...selectedFeatures].sort((a,b)=>(weights[b]||0)-(weights[a]||0)).slice(0,10);
-  // Attach ALL feature values to each result for dynamic column display
-  results.forEach((r,idx)=>{
-    const d=filtered[idx];
-    r._features={};
-    for(const f of FEATS){
-      r._features[f]=scoringFeatureRows[d.symbol]?.[f]??null;
-    }
-  });
-  // ── Score ALL parsed stocks (including hard-filter exclusions) into SCORE_MAP ──
-  SCORE_MAP={};
-  results.forEach(r=>{SCORE_MAP[r.symbol]=r.rocketScore;});
-  const _sf={};
-  for(const f of FEATS)_sf[f]=filtered.map(d=>scoringFeatureRows[d.symbol]?.[f]??null).filter(v=>v!=null&&!isNaN(v)).sort((a,b)=>a-b);
-  const _filtSet=new Set(filtered.map(d=>d.symbol));
-  parsed.forEach(d=>{
-    if(_filtSet.has(d.symbol))return;
-    let rs=0;
-    for(const f of FEATS){
-      const w=weights[f],v=scoringFeatureRows[d.symbol]?.[f]??null;
-      const arr=_sf[f];
-      let rank=null;
-      if(v!=null&&!isNaN(v)&&arr.length){
-        let lo=0,hi=arr.length;
-        while(lo<hi){const mid=(lo+hi)>>1;if(arr[mid]<=v)lo=mid+1;else hi=mid;}
-        rank=arr.length>1?Math.min(1,Math.max(0,(lo-0.5)/(arr.length-1))):0.5;
-      }
-      // Keep hard-filtered rows consistent with the main score path: missing is 0.35,
-      // while negative correlations invert observed ranks only.
-      const directedRank=(rank==null||!Number.isFinite(rank))
-        ?0.35
-        :(activeTargetRelevance[f]>=0?rank:(1-rank));
-      rs+=w*directedRank;
-    }
-    SCORE_MAP[d.symbol]=scoringActive?Math.round(rs*1000)/10:WARMUP_NEUTRAL_SCORE;
-  });
-  parsed.forEach(d=>{d.rocketScore=SCORE_MAP[d.symbol]??null;});
-  window._lastHardFilterShadowRows=parsed.filter(d=>d._hardFiltered).map(d=>({
-    symbol:d.symbol,
-    reasons:(d._hardFilterReasons||[]).map(reason=>({key:reason.key,bucket:reason.bucket})),
-    price:K.price?d[K.price]:null,
-    change:K.price_change?d[K.price_change]:null,
-    score:d.rocketScore,
-    atr:K.atr_pct?d[K.atr_pct]:null
-  }));
-  const interactionFeatureKeys=new Set([...staticInteractionDefs.map(def=>def.key),...breadthInteractionDefs.map(def=>def.key)]);
-  const selectedInteractions=selectedFeatures
-    .filter(feature=>interactionFeatureKeys.has(feature))
-    .map(feature=>({feature,label:LABELS[feature]||feature,weight:weights[feature]||0}));
-  const featureStability=activeFeatureStability;
-  const stabilityValues=FEATS.map(f=>Number(featureStability[f])||0).filter(v=>isFinite(v)).sort((a,b)=>a-b);
-  const stabilityAt=pct=>stabilityValues.length?stabilityValues[Math.min(stabilityValues.length-1,Math.max(0,Math.floor((stabilityValues.length-1)*pct)))]:0;
-  const stabilitySummary={
-    min:stabilityAt(0),
-    p25:stabilityAt(0.25),
-    median:stabilityAt(0.5),
-    p75:stabilityAt(0.75),
-    max:stabilityAt(1),
-    nearZero:stabilityValues.filter(v=>v<=0.05).length,
-    nearOne:stabilityValues.filter(v=>v>=0.95).length,
-    total:stabilityValues.length
-  };
-  const positionTslGapModel=persistPositionTslGapModel(results,getModelTradingDate(options.snapshotTimestamp||Date.now()));
-  ENGINE_DATA={targetRelevance:activeTargetRelevance,targetRelevanceToday,mrmr,weights,features:FEATS,selectedFeatures,labels:LABELS,top10Feats,accSessions:ACC_CORR?.sessions||0,laggedNote:laggedNote||'',
-    marketBreadth:marketBreadth,
-    regimeExposureFactor:1,
-    featureStability,
-    targetRelevanceByLag:snapshotLearning.targetRelevanceByLag||{},
-    stabilitySummary,
-    interactionFeatures:{
-      static:staticInteractionDefs.map(def=>({feature:def.key,label:def.label,left:def.left||null,right:def.right||null})),
-      breadth:breadthInteractionDefs.map(def=>({feature:def.key,label:def.label,left:def.left,partnerWeight:def.partnerWeight||0})),
-      selected:selectedInteractions
-    },
-    recommendationFeedback,executedEntryFeedback,
-    outcomeScoreOverlay:{active:outcomeReliabilityModel.active,samples:outcomeReliabilityModel.samples.length,features:outcomeReliabilityModel.features.length,maxAdjustment:0,mode:'confidence_badge_only'},
-    scoringModel:'five_session_rolling_daily_rocket_trajectory_mrmr',
-    deltaFeatureSchema:DELTA_FEATURE_SCHEMA,
-    deltaOnlyFeatureCount:FEATS.length,
-    excludedSlowFeatureCount:0,
-    useFreshCorr, hasRecommendationEvidence:scoringActive, scoreGatedReason, currentUploadLearned, freshSignalCount,
-    scoringSource,
-    useAccCorr: snapshotLearning.hadPriorCorr,
-    snapshotElapsedMinutes:null,
-    snapshotDisplayElapsedMinutes:snapshotLearning.intervalElapsedMinutes??null,
-    snapshotPairs:snapshotLearning.snapshotPairs??0,
-    lowSampleFeatures:snapshotLearning.lowSampleFeatures||[],
-    sectorCol: sectorCol?true:false, industryCol: industryCol?true:false,
-    totalParsed: totalParsed,
-    hardFilterSchema:HARD_FILTER_SCHEMA,
-    positionTslGapModel,
-    removed: {...REMOVED},
-    survSize: Object.keys(NSE_SURV).length,
-    survRuleRows: getSurvRules().map(rule=>({
-      key:rule.key,label:rule.label,column:rule.column,
-      active:SURV_HEADERS.map(h=>String(h).trim().toLowerCase()).includes(rule.column.toLowerCase()),
-      flagged:SURV_RULE_HITS[rule.key]||0,
-      removed:REMOVED.survRules?.[rule.key]||0,
-    }))
-  };
-  COLS=getCols(); // refresh dynamic columns
-  // Persist compact methodology summaries; the O(n²) pair matrix is recomputed per run.
-  try{
-    const methSave={targetRelevance:ENGINE_DATA.targetRelevance,targetRelevanceToday,featureStability:ENGINE_DATA.featureStability,targetRelevanceByLag:ENGINE_DATA.targetRelevanceByLag,stabilitySummary:ENGINE_DATA.stabilitySummary,mrmr:ENGINE_DATA.mrmr,weights:ENGINE_DATA.weights,
-      features:ENGINE_DATA.features,labels:ENGINE_DATA.labels,top10Feats:ENGINE_DATA.top10Feats,accSessions:ENGINE_DATA.accSessions,laggedNote:ENGINE_DATA.laggedNote,
-      marketBreadth:ENGINE_DATA.marketBreadth,useFreshCorr:ENGINE_DATA.useFreshCorr,hasRecommendationEvidence:ENGINE_DATA.hasRecommendationEvidence,currentUploadLearned:ENGINE_DATA.currentUploadLearned,freshSignalCount:ENGINE_DATA.freshSignalCount,scoringSource:ENGINE_DATA.scoringSource,useAccCorr:ENGINE_DATA.useAccCorr,sectorCol:ENGINE_DATA.sectorCol,industryCol:ENGINE_DATA.industryCol,
-      totalParsed:totalParsed,hardFilterSchema:HARD_FILTER_SCHEMA,removed:{...REMOVED},survSize:Object.keys(NSE_SURV).length,
-      recommendationFeedback,executedEntryFeedback,outcomeScoreOverlay:ENGINE_DATA.outcomeScoreOverlay,
-      hardFilterAudit:ENGINE_DATA.hardFilterAudit||null,pickDiagnostics:getPickState()?.diagnostics||null,
-      snapshotElapsedMinutes:ENGINE_DATA.snapshotElapsedMinutes,snapshotDisplayElapsedMinutes:ENGINE_DATA.snapshotDisplayElapsedMinutes,
-      snapshotPairs:ENGINE_DATA.snapshotPairs,lowSampleFeatures:ENGINE_DATA.lowSampleFeatures||[],scoringModel:ENGINE_DATA.scoringModel,deltaFeatureSchema:ENGINE_DATA.deltaFeatureSchema,
-      interactionFeatures:ENGINE_DATA.interactionFeatures};
-    FS.set(modeKey(METH_STORE),methSave);
-  }catch(e){console.warn('Could not save methodology data',e);}
-  persistMethodologySnapshot();
-  return results;
+  // Held positions never re-enter the buy ranking; suppression uses the full held map
+  // (Holdings + Positions + today's net Orders), richer than an orders-only check.
+  const rows=allRows.filter(r=>!heldSymbols.has(r.symbol));
+  const suppressedHeld=allRows.length-rows.length;
+  const rawScores=rows.map(r=>r.rawScore).sort((a,b)=>a-b);
+  for(const r of rows){
+    r.score=+(100*Math.pow(radarPct(rawScores,r.rawScore),4)).toFixed(1);
+    r.rocketScore=r.score; // allocation/export alias
+    r.risk=!r.basketEligible||r.meta.flags?.length>=3||r.turnover<25e5||r.price<10?'High':(r.gap>6||r.day>6||r.parts.volatility<38?'Medium':'Low');
+    r.setup=r.series!=='EQ'?(r.series==='UNKNOWN'?'Series unverified':'Non-EQ series'):r.band!==null&&r.band<10?`${r.band}% price band`:radarSetupLabel(r);
+  }
+  rows.sort((a,b)=>b.score-a.score||a.symbol.localeCompare(b.symbol));
+  rows.forEach((r,i)=>{r.rank=i+1;});
+  return {rows,features,rockets:rockets.length,suppressedHeld,ids:{priceI,targetI,sectorI,symbolI,descI}};
 }
-
-// ── Rendering ──
+// Score the current upload (object rows from parseCSV) through the Radar composite.
+function radarScoreRows(objRows){
+  const headers=objRows?._headers||Object.keys(objRows?.[0]||{});
+  const matrix=(objRows||[]).map(o=>headers.map(h=>o[h]??''));
+  const heldPos=getHeldPositionMap();
+  const held=new Set(Object.keys(heldPos).map(normSym));
+  const t0=performance.now();
+  const result=radarAnalyze(headers,matrix,buildRadarSupplements(),held);
+  RADAR={headers,matrix,features:result.features,ids:result.ids,rockets:result.rockets,ms:performance.now()-t0,sourceNote:'',scoredAt:Date.now()};
+  SUPPRESSED_HELD=result.suppressedHeld;
+  return result.rows;
+}
+// Outcome-tracking rows for the surviving Harvest/entry outcome stores.
+function buildObservedDailyMoves(objRows){
+  const headers=objRows?._headers||Object.keys(objRows?.[0]||{});
+  const highCol=findHeader(headers,[/^high, 1 day$/i]);
+  const lowCol=findHeader(headers,[/^low, 1 day$/i]);
+  const changeCol=findHeader(headers,[/^price change %, 1 day$/i]);
+  return (objRows||[]).map(r=>{
+    const symbol=normSym(r['Symbol']);
+    if(!symbol) return null;
+    return {symbol,price:num(r['Price']),high1d:highCol?num(r[highCol]):null,low1d:lowCol?num(r[lowCol]):null,priceChange:changeCol?num(r[changeCol]):null};
+  }).filter(Boolean);
+}
 function getHoldingAvgCost(symbol){
   symbol=normSym(symbol);
   if(!symbol) return null;
@@ -5122,109 +2438,10 @@ function buildGoalCard(){
   const title='Required NET compounding per NSE trading day on FREE capital (Capital ₹ + today\'s sell proceeds). Informational only; does not change targets.';
   return `<div class="st" title="${title}"><div class="st-l">Goal · ₹${goalFmtRs(g.target)} · ${days} td left</div><div class="st-v" style="color:${col}">${reqStr}%/day ${badge}</div><div class="st-d">${freeStr} · need ${needRs!=null?'₹'+goalFmtRs(needRs)+'/day':'—/day'} · achieved ${ach!=null?(ach*100).toFixed(2)+'%/day':'—/day'} (30d)</div></div>`;
 }
-function pickLadderDisplayRows(ladder){
-  return (ladder||[]).sort(comparePickLadderRows);
-}
-function getPickEligibilityReason(row,pickState=null){
-  if(row?.name==='random'||row?.name==='actual_you') return 'Control only';
-  if(!PICK_STRATEGY_LABELS[row?.name]) return 'Historical only';
-  if(row?.evidenceStatus!=='authoritative') return 'Legacy cannot govern';
-  if(getOutcomeHorizonSummary().phase!=='dynamic') return row?.name===pickState?.name?'Warm-up leader':'Provisional ranking';
-  if(row?.episodeBased&&(row?.flagged||0)<10) return `${row?.flagged||0}/10 episodes`;
-  const minDays=PICK_MIN_EVAL_DAYS;
-  if((row?.evalDays||0)<minDays) return `${row?.evalDays||0}/${minDays} authoritative days`;
-  if(!(Number(row?.exitNetPct)>0)) return 'Exit must be positive';
-  return 'Eligible';
-}
-function buildPickLadderHTML(){
-  const ps=getPickState(),rows=pickLadderDisplayRows(ps.ladder);
-  const pct=v=>v!=null&&isFinite(v)?(v*100).toFixed(1)+'%':'-';
-  const net=v=>v!=null&&isFinite(v)?(v>=0?'+':'')+v.toFixed(2)+'%':'-';
-  const body=rows.map(r=>{
-    const isCh=r.name===ps.name;
-    const label=(r.label||getPickStrategyLabel(r.name))+(r.name==='random'?' (control)':'')+(isCh?(ps.default?' [default]':' [champion]'):'');
-    const remove=!PICK_STRATEGY_LABELS[r.name]||PICK_PERMANENT_STRATEGIES.has(r.name)?'':`<button onclick="disablePickStrategy('${r.name}')" title="Remove ${escHtml(r.label)} from the ladder" aria-label="Remove ${escHtml(r.label)}" style="border:0;background:transparent;color:var(--red);font:inherit;font-size:16px;cursor:pointer;padding:0 4px">x</button>`;
-    const rule=PICK_STRATEGY_RULES[r.name]||'';
-    const examples=(r.rocketExamples||[]).slice(0,8);
-    const exampleHtml=examples.length?`<div style="margin-top:3px;font-size:10px;line-height:1.35;color:var(--t3)">Top rockets: ${examples.map(item=>escHtml(item)).join(' | ')}</div>`:'';
-    const evaluated=Number(r.evaluatedFlagged)||0,hits=Number(r.hits)||0;
-    const observedHits=Number(r.observedHorizonHits)||0,flagged=Number(r.flagged)||0;
-    const horizonResult=`${observedHits} / ${flagged}${flagged?` (${pct(r.observedHorizonRate)})`:''}`;
-    const settledTitle=evaluated?`Fully evaluated comparison: ${hits} / ${evaluated} (${pct(r.hitRate)})`:'No flags have completed the full horizon yet';
-    const observed=Number(r.observedFlagged)||0;
-    const liveResult=observed?`${net(r.liveNetPct)} <span style="color:var(--t3);font-size:9px">(${observed} observed)</span>`:'-';
-    const finalResult=evaluated?`${net(r.exitNetPct)} <span style="color:var(--t3);font-size:9px">(${evaluated} evaluated)</span>`:'pending';
-    const netResult=`<div>${liveResult}</div><div style="color:var(--t3);font-size:9px">Final: ${finalResult}</div>`;
-    return `<tr title="${escHtml(rule)}" style="${isCh?'font-weight:800;color:var(--t1)':''}"><td>${label}${exampleHtml}</td><td>${r.entryDays||0}</td><td>${r.flagged||0}</td><td>${r.pendingFlagged||0}</td><td style="font-weight:800">${pct(r.sameDay10Rate)}</td><td title="${settledTitle}">${horizonResult}</td><td>${netResult}</td><td>${r.medianMinutesToMove!=null?Number(r.medianMinutesToMove).toFixed(1):'-'}</td><td>${getPickEligibilityReason(r,ps)}</td><td style="text-align:center">${remove}</td></tr>`;
-  }).join('');
-  return `<div style="overflow-x:auto"><table class="ct" style="min-width:980px;font-size:11px"><thead><tr><th>Pick Source</th><th>Entry Days</th><th>Flags</th><th title="Flags whose full evaluation horizon has not elapsed or whose horizon observation is unavailable">Pending</th><th title="Post-flag 10% milestones on the entry day">Same-day 10%</th><th title="Actual flags that have reached 10% within the horizon / all flags, with the observed rate in brackets">10% &lt;= horizon<br><span style="font-size:9px">hits / flags</span></th><th title="Live is the latest cost-adjusted mark across all observed flags. Final uses only flags whose complete horizon has elapsed.">Net %/flag<br><span style="font-size:9px">live + final</span></th><th title="Median minutes from flag to the first same-day 3% milestone">Med mins to move</th><th>Authority</th><th></th></tr></thead><tbody>${body||'<tr><td colspan="10" style="color:var(--t3)">No outcome episodes yet.</td></tr>'}</tbody></table></div>`;
-}
-function buildPickRosterControls(){
-  const disabled=[...getPickDisabledStrategies()].sort();
-  if(!disabled.length) return '';
-  return `<div style="display:flex;align-items:center;gap:6px;margin:0 0 8px;font-size:11px"><select id="pickRosterAdd" style="max-width:230px;font:inherit"><option value="">Disabled strategy...</option>${disabled.map(key=>`<option value="${key}">${escHtml(getPickStrategyLabel(key))}</option>`).join('')}</select><button onclick="enablePickStrategy(document.getElementById('pickRosterAdd').value)" style="font:inherit;cursor:pointer">Add</button></div>`;
-}
-let PICK_LADDER_COLLAPSED=false;
-function togglePickLadderPanel(){
-  PICK_LADDER_COLLAPSED=!PICK_LADDER_COLLAPSED;
-  renderPickLadderPanel();
-}
-function renderPickLadderPanel(){
-  const el=document.getElementById('pickLadderPanel');
-  if(!el) return;
-  const ps=getPickState();
-  const disabled=getPickDisabledStrategies().size;
-  const active=Object.keys(PICK_STRATEGY_LABELS).filter(key=>key!=='actual_you'&&!isPickStrategyDisabled(key)).length;
-  const roster=`${active} active${disabled?' · '+disabled+' disabled':''}`;
-  const header=`🏆 Pick Championship Ladder — ${ps.default?'Default':'Champion'}: ${escHtml(ps.label||'Momentum + Volume Continuation')}`;
-  el.innerHTML=`<div style="margin:10px 0 14px;border:1px solid var(--border);border-radius:8px;background:var(--bg-card);overflow:hidden">
-    <button onclick="togglePickLadderPanel()" style="width:100%;display:flex;justify-content:space-between;align-items:center;gap:10px;background:transparent;border:0;color:var(--t1);padding:10px 12px;font-weight:800;font-family:inherit;cursor:pointer;text-align:left">
-      <span>${header} <span style="color:var(--t3);font-size:11px">${roster}</span></span><span style="color:var(--t3);font-size:12px">${PICK_LADDER_COLLAPSED?'Show':'Hide'}</span>
-    </button>
-    <div style="${PICK_LADDER_COLLAPSED?'display:none;':''}padding:0 10px 10px">${buildPickRosterControls()}<div style="color:var(--t3);font-size:11px;margin:0 0 8px">Same-day rockets are shown first; Live Net continuously updates warm-up ranking, while completed-horizon Final Net governs mature championship authority.</div>${buildPickLadderHTML()}</div>
-  </div>`;
-}
-// Pick-source championship card: champion status only; the full ladder lives above Rankings.
-function buildPickSourceCard(){
-  const ps=getPickState();
-  const champion=ps.ladder.find(row=>row.name===ps.name);
-  const col=ps.name==='engine'?'var(--cyan)':'var(--fire)';
-  const note=ps.fallbackReason?'TEMPORARY FALLBACK':(ps.provisional?'PROVISIONAL WARM-UP LEADER':(ps.default?'DEFAULT DURING WARM-UP':(ps.name==='engine'?'engine picks':'RUNNING THE SHOW')));
-  const finalNet=champion?.exitNetPct,liveNet=champion?.liveNetPct;
-  const fmt=v=>v!=null&&isFinite(v)?(v>=0?'+':'')+v.toFixed(2)+'%':'—';
-  const title=`Momentum + Volume Continuation remains the default during episode-ledger warm-up. After the dynamic horizon activates, a strategy needs at least 10 evaluable episodes across ${PICK_MIN_EVAL_DAYS} entry dates and positive Final Net to become champion.`;
-  const netMode=ps.horizon?.phase==='dynamic'?'Final':'Live',displayNet=netMode==='Final'?finalNet:(liveNet??finalNet);
-  const detail=ps.fallbackReason?`${escHtml(ps.fallbackSourceLabel||ps.label)} unavailable: ${escHtml(ps.fallbackReason)}`:`Same-day 10% ${champion?.sameDay10Rate!=null?(champion.sameDay10Rate*100).toFixed(1)+'%':'—'} · ${netMode} net ${fmt(displayNet)}/flag`;
-  return `<div class="st" title="${title}"><div class="st-l">Pick Source</div><div class="st-v" style="color:${col};font-size:16px">${ps.label||'Momentum + Volume Continuation'} <span style="font-size:10px;color:var(--t3)">${note}${ps.since?' · since '+ps.since:''}</span></div><div class="st-d">${detail}</div></div>`;
-}
-function buildPickDiagnosticsCard(){
-  const ps=getPickState();
-  const d=ps.diagnostics||{};
-  const mode='episode ledger';
-  const first=d.firstAuthoritativeDate||'—';
-  const bestCh=d.bestChallenger;
-  const challengerNet=bestCh?(bestCh.liveNetPct??bestCh.exitNetPct):null;
-  const challengerTxt=bestCh&&challengerNet!=null?`${getPickStrategyLabel(bestCh.name)} ${Number(challengerNet)>=0?'+':''}${Number(challengerNet).toFixed(2)}% live net`: 'no observed challenger yet';
-  const h=ps.horizon||{},horizonTxt=h.phase==='dynamic'?`${h.active}-session dynamic horizon`:`ledger warm-up ${h.episodeCount||0}/${OUTCOME_HORIZON_MIN_EPISODES} episodes · ${h.entryDateCount||0}/${OUTCOME_HORIZON_MIN_DATES} entry dates`;
-  return `<div class="st" title="Every pick source is judged from forward outcome episodes opened at its flag-time price."><div class="st-l">Pick Outcomes</div><div class="st-v" style="font-size:15px;color:var(--t1)">${mode}</div><div class="st-d">${horizonTxt} · first ${first} · ${challengerTxt}</div></div>`;
-}
 function renderStats(){
   const t=ALL.length;
   const bull=ALL.filter(s=>(s.priceChange||0)>0).length;
-  const totalParsed=ENGINE_DATA?.totalParsed||t;
-  const top=ALL[0];
-
-  // Score spread: shows if engine is differentiating
-  const scores=ALL.map(s=>s.rocketScore).filter(v=>isFinite(v));
-  const scoreReady=!!ENGINE_DATA?.hasRecommendationEvidence;
-  const scoreMax=scores.length?Math.max(...scores).toFixed(1):'—';
-  const scoreMin=scores.length?Math.min(...scores).toFixed(1):'—';
-  const scoreSpread=scores.length?(Math.max(...scores)-Math.min(...scores)).toFixed(1):'—';
-  const scoreSpreadDetail=scoreReady
-    ? `${scoreMax} top · ${scoreMin} low`
-    : `warm-up · neutral ${WARMUP_NEUTRAL_SCORE.toFixed(1)} · equal allocation`;
-
-  const effectiveScoreSpreadDetail=ENGINE_DATA?.scoreGatedReason||scoreSpreadDetail;
+  const top=FILT[0]||ALL[0];
 
   // Compute top sector by breadth
   const secBreadths={};
@@ -5284,30 +2501,21 @@ function renderStats(){
     return `<div class="st"><div class="st-l">SL / Harvest GTT</div><div class="st-v" style="font-size:15px"><span style="color:var(--red)">−${_sl}%</span><span style="color:var(--t3);font-size:12px"> / </span><span style="color:var(--green)">+${_tgt}%</span></div><div class="st-d">R:R ${rr}${costStr}${netStr}${confStr} · ${harvestPlan.source}${learnedStr}${holdStr}${opportunityStr}${goalStr}</div></div>`;
   })();
 
-  document.getElementById('statsBar').innerHTML=`
-    <div class="st"><div class="st-l">Eligible Universe</div><div class="st-v">${t.toLocaleString()}</div><div class="st-d">of ${totalParsed.toLocaleString()} parsed · <span style="color:var(--green)">${bull} up</span> · <span style="color:var(--red)">${t-bull} down/flat</span></div></div>
-    ${slTgtCard}
-    <div class="st"><div class="st-l">Score Spread</div><div class="st-v">${scoreSpread}</div><div class="st-d">${effectiveScoreSpreadDetail}</div></div>
-    <div class="st"><div class="st-l">Top Sector</div><div class="st-v" style="font-size:15px;color:var(--green)">${topSec}</div><div class="st-d">${topSecPct.toFixed(0)}% advancing</div></div>
-    <div class="st"><div class="st-l">Breadth</div><div class="st-v" style="color:var(--cyan)">${ENGINE_DATA.marketBreadth!=null?(ENGINE_DATA.marketBreadth*100).toFixed(0):(bull/t*100).toFixed(0)}%</div><div class="st-d">${bull.toLocaleString()} advancing · ${(t-bull).toLocaleString()} down/flat · ${ENGINE_DATA.accSessions||0} learned horizons</div></div>${bookedCard}${buildGoalCard()}${buildPickSourceCard()}${buildPickDiagnosticsCard()}`;
-  renderPickLadderPanel();
+  const topScore=top&&isFinite(top.score)?Number(top.score).toFixed(1):'—';
+  const rocketsCard=`<div class="st"><div class="st-l">Rockets Today</div><div class="st-v" style="color:var(--fire)">${(RADAR.rockets||0).toLocaleString()}</div><div class="st-d">same-day ≥10% movers · shape today's archetype diagnostic</div></div>`;
+  const scoreCard=`<div class="st"><div class="st-l">Top Score</div><div class="st-v">${topScore}</div><div class="st-d">${FILT.length.toLocaleString()} displayed · ${RADAR.features.length||0} modeled features · relative, not probability</div></div>`;
 
-  // Row 1: hard-filter removal pills
+  document.getElementById('statsBar').innerHTML=`
+    <div class="st"><div class="st-l">Scanned Universe</div><div class="st-v">${t.toLocaleString()}</div><div class="st-d"><span style="color:var(--green)">${bull} up</span> · <span style="color:var(--red)">${t-bull} down/flat</span> · breadth ${t?(bull/t*100).toFixed(0):'—'}%</div></div>
+    ${scoreCard}
+    ${rocketsCard}
+    ${slTgtCard}
+    <div class="st"><div class="st-l">Top Sector</div><div class="st-v" style="font-size:15px;color:var(--green)">${topSec}</div><div class="st-d">${topSecPct.toFixed(0)}% advancing</div></div>${bookedCard}${buildGoalCard()}`;
+
   const filterPills=[];
-  if(REMOVED.nonEq>0)filterPills.push(`<span class="info-pill pill-orange" title="Non-EQ series (BE/BZ/SZ/SM/ST) — T2T settlement, excluded from recommendations and retained in learning.">⚠ ${REMOVED.nonEq} non-EQ removed</span>`);
-  if(REMOVED.surv>0){const _sre=Object.entries(REMOVED.survRules||{}).sort((a,b)=>b[1]-a[1]).slice(0,5);const _srm=Object.fromEntries(getSurvRules().map(r=>[r.key,r.label]));const _srtip=_sre.map(([k,v])=>`${_srm[k]||k}: ${v}`).join(' · ');filterPills.push(`<span class="info-pill pill-red" title="Surveillance-flagged — excluded from recommendations and retained in learning. Top rules: ${escHtml(_srtip)}">⚠ ${REMOVED.surv} surveillance removed</span>`);}
-  if(REMOVED.liq>0)filterPills.push(`<span class="info-pill pill-blue">🚫 ${REMOVED.liq} low liquidity removed</span>`);
-  if(REMOVED.fscore>0)filterPills.push(`<span class="info-pill pill-gray">🚫 ${REMOVED.fscore} zero F-Score removed</span>`);
-  if(REMOVED.atr>0)filterPills.push(`<span class="info-pill pill-amber">🚫 ${REMOVED.atr} zero/invalid ATR removed</span>`);
-  if(GEOMETRY_GATE_SUMMARY.gatedOut>0)filterPills.push(`<span class="info-pill pill-amber" title="Entry geometry gate: upper-circuit room must be at least ${GEOMETRY_MIN_RR}x capped SL risk. Missing upper-band data falls back to relevance-only instead of filtering.">Geometry gate: ${GEOMETRY_GATE_SUMMARY.gatedOut} excluded for insufficient headroom</span>`);
-  if(GEOMETRY_GATE_SUMMARY.unverifiedFallback>0)filterPills.push(`<span class="info-pill pill-gray" title="NSE upper-band room missing today; these stocks remain eligible and rank on relevance only.">${GEOMETRY_GATE_SUMMARY.unverifiedFallback} room unverified</span>`);
-  const topUpCt=FILT.filter(s=>s._isTopUp).length;
-  if(topUpCt>0)filterPills.push(`<span class="info-pill pill-fire" title="Already in portfolio — shown as top-up candidates.">↑ ${topUpCt} top-up</span>`);
-  if(SUPPRESSED_HELD>0)filterPills.push(`<span class="info-pill pill-rose" title="Short positions and zero-qty holdings are always hidden.">📌 ${SUPPRESSED_HELD} held</span>`);
-  const bulkCt=ALL.filter(s=>s.flags.includes('BULK')).length;
-  const blkCt=ALL.filter(s=>s.flags.includes('BLK')).length;
-  if(bulkCt>0)filterPills.push(`<span class="info-pill pill-lime">📦 ${bulkCt} bulk deals</span>`);
-  if(blkCt>0)filterPills.push(`<span class="info-pill pill-purple">🧱 ${blkCt} block deals</span>`);
+  if(SUPPRESSED_HELD>0)filterPills.push(`<span class="info-pill pill-rose" title="Held positions (Holdings + Positions + today's net Orders buys) never re-enter the buy ranking.">📌 ${SUPPRESSED_HELD} held suppressed</span>`);
+  const inelig=ALL.filter(s=>s.basketEligible===false).length;
+  if(inelig>0)filterPills.push(`<span class="info-pill pill-orange" title="Non-EQ series, inactive status, or a price band below 10% — visible in the ranking with penalties, but never exported to the basket.">⚠ ${inelig} basket-ineligible (ranked with penalties)</span>`);
 
   // Row 2: analysis / insight pills
   const infoPills=[];
@@ -5542,7 +2750,6 @@ function renderPerformance(){
     ? `${recPos.source}${posRatio?` · ${(posRatio*100).toFixed(0)}% of avg`:''}`
     : recPos.source;
 
-  const learningHorizon=getAverageLearningHorizon();
   const kpis=[
     {label:'Net P&L',value:fmtPerfRs(p.totalNetPnlRs),color:clr(p.totalNetPnlRs),sub:`${p.roundTrips} lots · ${spanTradingDays||p.totalTradingDays} trading days${preSystemLots?` · ${preSystemLots} pre-system ignored`:''}`},
     {label:'Expectancy',value:fmtPerfRs(p.expectancy),color:clr(p.expectancy),sub:'Net ₹ per FIFO lot'},
@@ -5556,7 +2763,6 @@ function renderPerformance(){
     {label:'Avg Hold',value:p.avgHoldDays+'d',color:'var(--t1)',sub:'Avg position duration'},
     {label:'Avg Position',value:fmtINR(p.avgCapital||0),color:'var(--t1)',sub:'Observed avg capital per position'},
     {label:'Avg Positions/Entry Day',value:p.avgPositionsPerEntryDay.toFixed(2),color:'var(--t1)',sub:`${p.positionCount} positions across ${p.entryDays} entry days`},
-    {label:'Avg Learning Lookback',value:learningHorizon?learningHorizon.tradingDays.toFixed(1)+'d':'—',color:learningHorizon?'var(--cyan)':'var(--t3)',sub:learningHorizon?`${learningHorizon.count} weighted prior trading-day states`:'Starts after Day 2'},
     {label:'Recommended Position',value:recPos.value?fmtINR(recPos.value):'—',color:recPos.value?'var(--amber)':'var(--t3)',sub:recPosSub},
     {label:'Review After',value:effectiveReviewDays?effectiveReviewDays+'d':'—',color:effectiveReviewDays?'var(--amber)':'var(--t3)',sub:exitPolicy&&exitPolicy.velocityPctPerDay!=null?`Realised baseline ${exitPolicy.holdDays}d · rocket timing floor`:'Re-upload tradebook to learn'},
     {label:'Largest Loss',value:fmtSignedINR(p.largestLossRs),color:'var(--red)',sub:'Single lot, net'},
@@ -6098,12 +3304,8 @@ async function refreshRankingsAfterSurvRuleChange(){
     return;
   }
   try{
-    const tag=window._lastScannerSessionTag||ACC_CORR?.lastTag||scannerSessionTag(fileName,raw);
-    if(!ACC_CORR||ACC_CORR.lastTag!==tag) ACC_CORR={...(ACC_CORR||{corr:{},sessions:0}),lastTag:tag};
-    ALL=await runEngine(raw,tag,{advanceSnapshot:false})||[];
-    ALL.sort((a,b)=>b.rocketScore-a.rocketScore);
-    const rc=FS.get(modeKey(REC_COUNT_STORE))||{}, rcD=rc[getSessionDate()]||{};
-    ALL.forEach(s=>{s.seen=rcD[s.symbol]||0;});
+    const tag=window._lastScannerSessionTag||scannerSessionTag(fileName,raw);
+    ALL=radarScoreRows(raw);
     const ft=document.getElementById('fileTag');if(ft)ft.textContent=fileName+' · '+raw.length+' stocks';
     window._lastScannerSessionTag=tag;
     FILT=[...ALL];
@@ -6128,26 +3330,22 @@ async function addSurvRule(colArg){
   SURV_CUSTOM_RULES.push({key,column,label:column});
   saveSurvRules();
   rebuildActiveSurveillanceHits();
-  if(ENGINE_DATA){ENGINE_DATA.survRuleRows=syncSurvRuleRows(ENGINE_DATA.survRuleRows||[]);persistMethodologySnapshot();}
   _refreshHFSection();
   await refreshRankingsAfterSurvRuleChange();
-  showToast(`<strong>Added hard filter</strong> &mdash; ${escHtml(column)}. It will be applied whenever that REG1 column is flagged.`,3500);
+  showToast(`<strong>Added surveillance rule</strong> &mdash; ${escHtml(column)}. Flags on that REG1 column now appear in monitoring and the score penalty context.`,3500);
 }
 async function removeSurvRule(key){
   SURV_CUSTOM_RULES=SURV_CUSTOM_RULES.filter(rule=>rule.key!==key&&survRuleKey(rule.column||rule.label)!==key);
   saveSurvRules();
   rebuildActiveSurveillanceHits();
-  if(ENGINE_DATA){ENGINE_DATA.survRuleRows=syncSurvRuleRows(ENGINE_DATA.survRuleRows||[]);persistMethodologySnapshot();}
   _refreshHFSection();
   await refreshRankingsAfterSurvRuleChange();
   showToast('Surveillance rule removed.',2500);
 }
 function buildHardFilterMethodologyHTML(E){
-  const rows=getHardFilterRowsFromEngine(E);
-  const survRows=rows.filter(r=>r.kind==='surv');
-  const survRemoved=survRows.reduce((s,r)=>s+(r.active&&r.removed!=null?r.removed:0),0);
-
-  // ── Surveillance Table — only surv rows, all with Remove buttons ──
+  // v517: surveillance columns no longer hard-remove rows. Every REG1 flag now enters
+  // the Radar composite as a score penalty and blocks nothing by itself; this table
+  // remains the configuration/monitoring surface for the columns you track.
   const addedRuleKeys=new Set(getSurvRules().map(r=>r.key));
   const availableCols=(SURV_FILE_RULES.length>0?SURV_FILE_RULES:SURV_HEADERS.filter(h=>{
     const hl=h.trim().toLowerCase();
@@ -6155,31 +3353,30 @@ function buildHardFilterMethodologyHTML(E){
   })).map(r=>r.column||r).filter(h=>!addedRuleKeys.has(survRuleKey(h)));
   const datalistHtml=availableCols.map(col=>`<option value="${escHtml(col)}"></option>`).join('');
 
-  // Live holdings P&L is deliberately shared with the correlation table below:
-  // it is current unrealised P&L for stocks currently flagged under this exact REG1 column.
+  // Live holdings P&L is deliberately shared with the correlation table below.
   // Rule rows can overlap, so P&L is meaningful per rule but must never be totalled across rules.
   const heldPnlByRule=Object.fromEntries(getCurrentSurvHoldingRows().map(row=>[row.key,row]));
-  const hfRows=survRows.map(row=>{
-    const held=heldPnlByRule[row.ruleKey||'']||null;
+  const fileRuleKeys=new Set((SURV_FILE_RULES||[]).map(r=>r.key));
+  const hfRows=getSurvRules().map(rule=>{
+    const held=heldPnlByRule[rule.key]||null;
+    const active=!SURV_HEADERS.length||fileRuleKeys.has(rule.key);
     return {
-      criteria:row.criteria,
-      removedSort:row.active&&row.removed!=null?(row.removed||0):-1,
+      criteria:rule.column||rule.label,
+      flagged:SURV_RULE_HITS[rule.key]||0,
       heldPnlRs:held?.pnlRs??null,
       heldPnlPct:held?.pnlPct??null,
       heldCount:held?.lastCount??0,
-      active:row.active, kind:row.kind, missing:!!row.missing, ruleKey:row.ruleKey||'',
-      inactiveNote:row.missing
-        ?'⚠ Column not found in REG1 file — ALL stocks blocked as precaution. Remove and re-add with correct column name.'
-        :(!row.active?'Inactive — REG1 column not found in last upload':''),
+      active, ruleKey:rule.key,
+      inactiveNote:active?'':'Inactive — REG1 column not found in last upload',
     };
   });
   const hfCols=[
     {key:'criteria',label:'REG1 Column',align:'left',
-      fmt:(v,r)=>`<span style="font-size:11px;color:${r.missing?'var(--amber)':r.active?'var(--t1)':'var(--t3)'}">${escHtml(v)}${r.inactiveNote?`<div style="font-size:10px;color:${r.missing?'var(--amber)':'var(--red)'};margin-top:2px">${r.inactiveNote}</div>`:''}</span>`,
+      fmt:(v,r)=>`<span style="font-size:11px;color:${r.active?'var(--t1)':'var(--t3)'}">${escHtml(v)}${r.inactiveNote?`<div style="font-size:10px;color:var(--red);margin-top:2px">${r.inactiveNote}</div>`:''}</span>`,
       totFmt:()=>`<span style="font-size:11px;color:var(--t2);font-weight:700">Total</span>`},
-    {key:'removedSort',label:'Removed',align:'right',
-      fmt:(v)=>v>=0?`<span style="color:${v>0?'var(--red)':'var(--t3)'};font-weight:700;font-family:'DM Mono',monospace">${v.toLocaleString()}</span>`:'&mdash;',
-      totFmt:(v)=>`<span style="color:var(--red);font-weight:700;font-family:'DM Mono',monospace">${v.toLocaleString()}</span>`},
+    {key:'flagged',label:'Flagged',align:'right',
+      fmt:(v,r)=>r.active?`<span style="color:${v>0?'var(--amber)':'var(--t3)'};font-weight:700;font-family:'DM Mono',monospace">${(v||0).toLocaleString()}</span>`:'&mdash;',
+      totFmt:(v)=>`<span style="color:var(--amber);font-weight:700;font-family:'DM Mono',monospace">${(v||0).toLocaleString()}</span>`},
     {key:'heldPnlRs',label:'Held P&L ₹',align:'right',
       fmt:(v,r)=>v==null?'&mdash;':`<span style="color:${v<0?'var(--red)':v>0?'var(--green)':'var(--t3)'};font-weight:700;font-family:'DM Mono',monospace" title="Current unrealised P&L across ${r.heldCount||0} held stock${(r.heldCount||0)===1?'':'s'} currently flagged by this REG1 column">${fmtSignedINR(v)}</span>`,
       totFmt:()=>`<span title="Rule-level P&L overlaps when a holding has multiple REG1 flags, so there is no P&L total.">&mdash;</span>`},
@@ -6190,39 +3387,19 @@ function buildHardFilterMethodologyHTML(E){
       fmt:(v,r)=>`<button onclick="removeSurvRule('${v}')" style="padding:4px 8px;border-radius:6px;border:1px solid rgba(239,68,68,.3);background:rgba(239,68,68,.08);color:var(--red);font-size:10px;font-weight:700;cursor:pointer">Remove</button>`,
       totFmt:()=>''},
   ];
-  const hfTotalsRemoved=hfRows.reduce((s,r)=>s+(r.removedSort>=0?r.removedSort:0),0);
-  _methTbls.hf=makeSortableTable('tbl-hf',hfCols,hfRows,'removedSort',-1,null,{
-    criteria:null,removedSort:hfTotalsRemoved,ruleKey:null,
+  const hfTotalsFlagged=hfRows.reduce((s,r)=>s+(r.active?(r.flagged||0):0),0);
+  _methTbls.hf=makeSortableTable('tbl-hf',hfCols,hfRows,'flagged',-1,null,{
+    criteria:null,flagged:hfTotalsFlagged,ruleKey:null,
   });
 
-  const survSize=E?.survSize??0;
   const survActiveThisSession=SURV_HEADERS.length>0;
   const survMeta=survActiveThisSession
-    ? `<div style="font-size:11px;color:var(--t3);margin-top:8px">REG1 file active this session. Removed counts are primary-rule removals and don't double-count.</div>`
-    : (survSize>0
-      ? `<div style="font-size:11px;color:var(--amber);margin-top:8px">Showing last saved run (${survSize} flagged). Load NSE ZIP this session to refresh.</div>`
-      : `<div style="margin-top:8px;padding:8px 10px;background:rgba(239,68,68,.08);border:1px solid rgba(239,68,68,.25);border-radius:8px;font-size:11px;color:var(--red)">NSE REG1 data not active — surveillance rows shown for configuration only, won't filter until a REG1 file is loaded.</div>`);
+    ? `<div style="font-size:11px;color:var(--t3);margin-top:8px">REG1 file active this session. Every flagged REG1 column (not only the rows configured here) subtracts up to 12 points from the Radar composite score and appears on the stock's ⚠ badge.</div>`
+    : `<div style="margin-top:8px;padding:8px 10px;background:rgba(239,68,68,.08);border:1px solid rgba(239,68,68,.25);border-radius:8px;font-size:11px;color:var(--red)">NSE REG1 data not active — surveillance context is unavailable until a REG1 file is loaded.</div>`;
 
-  const audit=E?.hardFilterAudit||window._lastHardFilterAudit||null;
-  const persisted=audit?.persisted||null;
-  const auditPct=value=>value!=null&&Number.isFinite(Number(value))?`${Number(value)>=0?'+':''}${Number(value).toFixed(2)}%`:'—';
-  const auditRows=(persisted?.rows||[]).sort((a,b)=>(b.excluded||0)-(a.excluded||0)).map(row=>`<tr>
-    <td>${escHtml(row.label||row.key)}</td><td>${escHtml(row.bucket||'')}</td><td>${row.excluded||0}</td><td>${row.hits||0}</td>
-    <td>${row.hitRate!=null?(row.hitRate*100).toFixed(1)+'%':'—'}</td><td>${auditPct(row.peakNetPct)}</td><td>${auditPct(row.exitNetPct)}</td><td>${auditPct(row.worst)}</td>
-  </tr>`).join('');
-  const missed=persisted?.missedMovers||[];
-  const auditMeta=audit?`
-    <div style="font-size:11px;color:var(--t3);margin-top:4px">Forward audit starts ${persisted?.firstDate||'after the next accepted upload'} · ${persisted?.evaluableDays||0} evaluable day${(persisted?.evaluableDays||0)===1?'':'s'} · ${persisted?.pending||0} exclusions pending a later outcome. No older results are backfilled.</div>
-    <div style="font-size:11px;color:var(--t3);margin-top:6px">Completed-day top movers: ${missed.filter(r=>r.category==='structural').length} structurally ineligible · ${missed.filter(r=>r.category==='lateSeen').length} already moving at first upload · ${missed.filter(r=>r.category==='filteredBeforeMove').length} filtered before move · ${missed.filter(r=>r.category==='eligibleUnselected').length} eligible but unselected · ${missed.filter(r=>r.category==='selectedBeforeMove').length} Engine-selected before move.</div>
-    <div style="overflow-x:auto;margin-top:10px"><table class="ct" style="min-width:760px;font-size:10px"><thead><tr><th>First decisive filter</th><th>Type</th><th>Excluded</th><th>Later hits</th><th>Hit rate</th><th>Peak/flag</th><th>Exit/flag</th><th>Worst adverse</th></tr></thead><tbody>${auditRows||'<tr><td colspan="8" style="color:var(--t3)">No filter has a completed forward outcome yet.</td></tr>'}</tbody></table></div>
-  `:'';
-  const totalRemoved=(REMOVED.uc||0)+(REMOVED.surv||0)+(REMOVED.nonEq||0)+(REMOVED.liq||0)+(REMOVED.fscore||0)+(REMOVED.atr||0);
   return `
-    <h3 id="meth-filters" style="margin-top:28px">Hard Filters <span style="font-size:12px;color:var(--t3);font-weight:400">(${totalRemoved} removals in latest saved run)</span></h3>
-    <div style="background:var(--bg-card);border:1px solid var(--border);border-radius:10px;padding:10px 12px;margin:10px 0 14px">${auditMeta||'<div style="font-size:11px;color:var(--t3)">Audit snapshot will appear after the next ranked upload.</div>'}</div>
-
-    <h4 style="margin:20px 0 8px;font-size:12px;color:var(--t2);font-weight:700;text-transform:uppercase;letter-spacing:.5px">Surveillance Filters (NSE REG1)</h4>
-    <p style="color:var(--t3);font-size:11px;margin-bottom:10px">Each row is an exact REG1 column. Any stock flagged under that column is removed from scanning.</p>
+    <h3 id="meth-filters" style="margin-top:28px">Surveillance Monitoring (NSE REG1)</h3>
+    <p style="color:var(--t3);font-size:11px;margin-bottom:10px">Each row is an exact REG1 column you monitor. Flags penalize the composite score and mark the stock; exchange series, status and price band separately govern basket eligibility.</p>
     <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:8px">
       <input id="survRuleInput" type="text" placeholder="${SURV_HEADERS.length?'Type to search REG1 columns…':'Load NSE ZIP to enable suggestions'}" list="survRuleDatalist" onkeydown="if(event.key==='Enter'){event.preventDefault();addSurvRule();}" style="flex:1;min-width:260px;padding:9px 12px;background:var(--bg-card);border:1px solid var(--border);border-radius:8px;color:var(--t1);font-size:12px;outline:none">
       <datalist id="survRuleDatalist">${datalistHtml}</datalist>
@@ -6393,183 +3570,103 @@ function renderMethodology(){
     if(mc) mc.innerHTML=`<div style="padding:20px;background:rgba(239,68,68,.08);border:1px solid rgba(239,68,68,.3);border-radius:10px;color:var(--red);font-family:'DM Mono',monospace;font-size:12px"><strong>Methodology render error</strong><pre style="margin-top:10px;white-space:pre-wrap;font-size:11px;color:var(--t2)">${escHtml(err&&err.stack||String(err))}</pre></div>`;
   }
 }
+function buildRadarLedgerHTML(){
+  if(!RADAR.headers.length) return '<p style="color:var(--t3);font-size:12px">Load files to audit every screener column. The ledger is rebuilt from each fresh upload.</p>';
+  const byIndex=new Map(RADAR.features.map(f=>[f.i,f]));
+  const rowsCount=RADAR.matrix.length||1;
+  const ledgerRows=RADAR.headers.map((h,i)=>{
+    const f=byIndex.get(i);
+    let use,group='Audit',w=0,sep=null;
+    let cov=f?f.coverage:(RADAR.matrix.length?RADAR.matrix.filter(r=>r[i]!==''&&r[i]!=null).length/rowsCount:0);
+    if(i===RADAR.ids.targetI)use='Same-day rocket label and overextension control; excluded from modeled predictors';
+    else if(i===RADAR.ids.symbolI||i===RADAR.ids.descI)use='Identifier / display only';
+    else if(i===RADAR.ids.sectorI){use='Sector peer context and display';group='Context';}
+    else if(/ - Currency$/.test(h))use='Unit metadata; zero weight when constant';
+    else if(f){use=radarIsPriceLevel(h)?'Converted to % distance from current price, then ranked':'Winsorized and cross-sectionally percentile-ranked';group=RADAR_GROUPS[f.group].label;w=f.weight;sep=f.effect;}
+    else use=cov===0?'Empty in this snapshot; retained in audit':'Constant, sparse, or non-numeric; retained in audit';
+    return `<tr><td style="font-family:'Plus Jakarta Sans',sans-serif;font-weight:600;color:var(--t1);white-space:normal;min-width:230px">${escHtml(h)}</td><td style="font-size:11px;color:var(--t2)">${escHtml(use)}</td><td style="font-size:10px;color:var(--cyan);text-transform:uppercase;font-weight:700">${group}</td><td style="font-weight:700">${w?w.toFixed(3):'0'}</td><td><span style="display:inline-block;width:7px;height:7px;border-radius:50%;margin-right:5px;background:${cov>.9?'var(--green)':cov>.5?'var(--amber)':'var(--red)'}"></span>${(cov*100).toFixed(0)}%</td><td>${sep===null?'—':`<span class="${sep>=0?'pos':'neg'}">${sep>=0?'+':''}${(sep*100).toFixed(1)} pp</span>`}</td></tr>`;
+  }).join('');
+  return `<div class="corr-wrap"><table class="ct"><thead><tr><th>Column / Feature</th><th>Use</th><th>Group</th><th>Model Weight</th><th>Coverage</th><th>Today-Rocket Separation</th></tr></thead><tbody>${ledgerRows}</tbody></table></div>`;
+}
 function _renderMethodologyInner(){
-  const E=ENGINE_DATA;
-  if(!E||!E.features||!E.features.length||!E.mrmr||!E.weights||!E.targetRelevance)return;
-  // Guard all potentially missing fields
-  if(!E.labels) E.labels={};
-  if(E.accSessions==null) E.accSessions=0;
-  if(!E.laggedNote) E.laggedNote='';
-  if(!E.targetRelevanceToday) E.targetRelevanceToday={};
-  if(!E.featureStability) E.featureStability={};
-  const sorted=[...E.features].sort((a,b)=>E.mrmr[b].score-E.mrmr[a].score);
-  const maxW=sorted.reduce((m,f)=>Math.max(m,E.weights[f]||0),0)||1;
-  const NSE_FEATS=new Set(['delivery_pct','price_band_pct']);
-  const CALC_FEATS=new Set(['range_pos','pct_from_52w_high','pct_to_upper_band','peak_retention','pullback_from_high_pct','from_open_pct','sector_breadth','sector_rel_strength','industry_breadth']);
-  const getFeatureSource=f=>{
-    if(NSE_FEATS.has(f)) return 'NSE';
-    if(String(f).includes('_rank_x_')||String(f).startsWith('market_breadth_x_')) return 'Calc';
-    if(CALC_FEATS.has(f)) return 'Calc';
-    return 'TV';
-  };
-  const rs = {
-  };
-  const scoreCorrSource = E.hasRecommendationEvidence
-    ? 'Current feature states are scored using live AUC relevance learned from earlier-state → later-rocket pairs'
-    : `Warm-up: neutral ${WARMUP_NEUTRAL_SCORE.toFixed(1)} scores and equal allocation remain usable until the first learned pair`;
-  const sessLabel = `${E.accSessions||0} usable daily state pair${(E.accSessions||0)===1?'':'s'} · ${E.laggedNote||'waiting for Day 2'}`;
-  const breadthPct=E.marketBreadth!=null?(E.marketBreadth*100).toFixed(0):'?';
-  const recFeedback=E.recommendationFeedback;
-  const entryFeedback=E.executedEntryFeedback;
-  const overlay=E.outcomeScoreOverlay||{};
-  const stabilitySummary=E.stabilitySummary||{};
-  const feedbackText=`Shortlist outcomes: ${recFeedback?.samples||0}; executed-entry outcomes: ${entryFeedback?.samples||0}. Raw rocket relevance learns which earlier feature states precede later rocket outcomes. Feature weight is relevance scaled by cross-day stability, then redundancy-adjusted. Completed recommendation and entry outcomes remain confidence context only and continue refining targets, sizing, and review timing.`;
-  const lowSamples=Array.isArray(E.lowSampleFeatures)?E.lowSampleFeatures:[];
-  const lowReasonLabel=reason=>reason==='low_positive_count'?'positive count':'total samples';
-  const lowSamplePreview=lowSamples.slice(0,12).map(item=>`${E.labels?.[item.feature]||item.feature} D-${item.lag} (${lowReasonLabel(item.reason)}: ${item.reason==='low_positive_count'?(item.positiveCount??0):(item.samples??0)})`).join(', ');
-  const lowSampleText=lowSamples.length
-    ?`${lowSamples.length} feature/lag relevance cells failed a reliability gate and were excluded from the live AUC blend${lowSamplePreview?': '+lowSamplePreview+(lowSamples.length>12?' ...':''):'.'}`
-    :'No selected learning pair hit the AUC total-sample or positive-count gate.';
-  const breadthCardHTML=`<div class="breadth-bar">
-    <div class="breadth-badge" style="color:var(--cyan)">${breadthPct}% Breadth</div>
-    <div class="breadth-meta">
-      <div style="color:var(--t1);font-weight:600">${scoreCorrSource}</div>
-      <div>Breadth: ${E.marketBreadth!=null?(E.marketBreadth*100).toFixed(0)+'%':'?'} · ${sessLabel}</div>
-    </div>
-    <div class="breadth-sessions">
-      <span>🐂 ${rs.bull||0}</span>
-      <span>🐻 ${rs.bear||0}</span>
-      <span>➡ ${rs.neutral||0}</span>
-    </div>
-  </div>`;
   const mc=document.getElementById('methContent');
   if(!mc) return;
-
-  mc.innerHTML=''; // clear before rebuild
-
-  let wtHTML=`<table class="ct"><thead><tr><th>Feature</th><th>Src</th><th>AUC Relevance</th><th>Stability</th><th>D-1 AUC</th><th>Direction</th><th>mRMR Score</th><th class="bar-cell">Weight</th><th>Wt%</th></tr></thead><tbody>`;
-  for(const f of sorted){
-    const tc=E.targetRelevance[f],m=E.mrmr[f],w=E.weights[f];
-    const stability=E.featureStability?.[f];
-    const dir=tc>=0?'<span style="color:var(--green)">↑</span>':'<span style="color:var(--red)">↓</span>';
-    const bw=Math.round((w||0)/maxW*100),bc=(tc||0)>=0?'var(--green)':'var(--red)';
-    const srcType=getFeatureSource(f);
-    const src=srcType==='NSE'?'<span style="color:var(--cyan);font-size:9px;font-weight:700">NSE</span>':srcType==='Calc'?'<span style="color:var(--purple);font-size:9px;font-weight:700">Calc</span>':'<span style="color:var(--t3);font-size:9px">TV</span>';
-    const todayR=E.targetRelevanceToday?.[f];
-    const todayCell=todayR!=null&&!isNaN(todayR)?`<span style="color:${todayR>=0?'var(--green)':'var(--red)'};font-size:10px">${(todayR??0).toFixed(3)}</span>`:'—';
-    const _n=v=>isFinite(v)?v:0;
-    const tcS=tc!=null&&isFinite(tc)?tc.toFixed(3):'—'; const stS=stability!=null&&isFinite(stability)?stability.toFixed(2):'—'; const scS=m&&m.score!=null&&isFinite(m.score)?m.score.toFixed(4):'—'; const wS=w!=null&&isFinite(w)?(w*100).toFixed(1):'—';
-    wtHTML+=`<tr>
-      <td style="font-family:'Plus Jakarta Sans',sans-serif;font-weight:600;color:var(--t1)">${E.labels[f]||f}</td><td>${src}</td><td style="color:${(tc||0)>=0?'var(--green)':'var(--red)'};font-weight:600">${tcS}</td><td style="font-weight:700;color:${(stability||0)>=0.75?'var(--green)':(stability||0)<=0.2?'var(--red)':'var(--amber)'}">${stS}</td><td>${todayCell}</td><td>${dir}</td><td style="font-weight:700">${scS}</td><td class="bar-cell"><span class="cb" style="width:${bw}%;background:${bc};opacity:.5"></span></td><td style="font-weight:800">${wS}%</td>
-    </tr>`;
-  }
-  wtHTML+='</tbody></table>';
-  // Section counts for display
-  const _featureCount=sorted.length;
-
-  const hardFiltersHTML=buildHardFilterMethodologyHTML(E);
-  const outcomeHorizon=getOutcomeHorizonSummary();
-  const episodeAnalytics=getOutcomeEpisodeAnalytics();
-  const outcomePct=value=>value==null||!isFinite(value)?'—':(value*100).toFixed(1)+'%';
-  const outcomeNum=(value,digits=2)=>value==null||!isFinite(value)?'—':Number(value).toFixed(digits);
-  const horizonMode=outcomeHorizon.phase==='dynamic'?'Dynamically learned':'Fixed recent-window evidence';
-  const horizonValue=outcomeHorizon.phase==='dynamic'?`${outcomeHorizon.active} trading sessions`:`up to ${PICK_MIN_EVAL_DAYS} evaluable days`;
-  const horizonRows=(episodeAnalytics.curves||[]).map(row=>`<tr><td>${row.horizon}</td><td>${row.sample}</td><td>${outcomePct(row.hitRate)}</td><td>${outcomeNum(row.medianUnresolvedReturn)}%</td><td>${outcomeNum(row.capitalVelocity,4)}</td></tr>`).join('');
-  const horizonStatus=outcomeHorizon.phase==='dynamic'
-    ?`Active horizon: ${outcomeHorizon.active} trading sessions.`
-    :`Warm-up: ${outcomeHorizon.episodeCount||0}/${OUTCOME_HORIZON_MIN_EPISODES} forward strategy episodes across ${outcomeHorizon.entryDateCount||0}/${OUTCOME_HORIZON_MIN_DATES} entry dates.`;
+  const groupsHTML=Object.values(RADAR_GROUPS).map(g=>`<div class="rr-group"><b>${g.label}<i>${g.budget}%</i></b><span>${g.desc}</span><meter min="0" max="20" value="${g.budget}"></meter></div>`).join('');
+  const diagHTML=`
+    <div class="rr-diag">
+      <div><b>${RADAR.rockets||0}</b><span>same-day ≥10% rockets</span></div>
+      <div><b>${RADAR.features.length||0}</b><span>informative modeled features</span></div>
+      <div><b>${RADAR.headers.length||0}</b><span>screener columns audited</span></div>
+      <div><b>${RADAR.ms?(RADAR.ms/1000).toFixed(2)+'s':'—'}</b><span>parse + score time</span></div>
+    </div>`;
+  const hardFiltersHTML=buildHardFilterMethodologyHTML(ENGINE_DATA);
   mc.innerHTML=`
     <nav style="position:sticky;top:var(--hdr-h,72px);z-index:50;background:var(--bg);padding:8px 0 10px;margin-bottom:8px;display:flex;gap:6px;flex-wrap:wrap;border-bottom:1px solid var(--border);box-shadow:0 2px 8px rgba(0,0,0,0.3);overflow-x:auto;-webkit-overflow-scrolling:touch">
-      <a href="#meth-filters" onclick="event.preventDefault();scrollToSection('meth-filters')" style="padding:4px 12px;border-radius:6px;background:var(--bg-card);border:1px solid var(--border);color:var(--t2);font-size:11px;font-weight:600;text-decoration:none;cursor:pointer">🛡 Hard Filters</a>
-      <a href="#meth-surv-corr" onclick="event.preventDefault();scrollToSection('meth-surv-corr')" style="padding:4px 12px;border-radius:6px;background:var(--bg-card);border:1px solid var(--border);color:var(--t2);font-size:11px;font-weight:600;text-decoration:none;cursor:pointer">📊 Surv P&L</a>
-      <a href="#meth-breadth" onclick="event.preventDefault();scrollToSection('meth-breadth')" style="padding:4px 12px;border-radius:6px;background:var(--bg-card);border:1px solid var(--border);color:var(--t2);font-size:11px;font-weight:600;text-decoration:none;cursor:pointer">Breadth</a>
-      <a href="#meth-engine" onclick="event.preventDefault();scrollToSection('meth-engine')" style="padding:4px 12px;border-radius:6px;background:var(--bg-card);border:1px solid var(--border);color:var(--t2);font-size:11px;font-weight:600;text-decoration:none;cursor:pointer">⚙ Engine</a>
-      <a href="#meth-pick-horizon" onclick="event.preventDefault();scrollToSection('meth-pick-horizon')" style="padding:4px 12px;border-radius:6px;background:var(--bg-card);border:1px solid var(--border);color:var(--t2);font-size:11px;font-weight:600;text-decoration:none;cursor:pointer">Pick Horizon</a>
-      <a href="#meth-weights" onclick="event.preventDefault();scrollToSection('meth-weights')" style="padding:4px 12px;border-radius:6px;background:var(--bg-card);border:1px solid var(--border);color:var(--t2);font-size:11px;font-weight:600;text-decoration:none;cursor:pointer">📊 Weights (${_featureCount})</a>
+      <a href="#meth-scoring" onclick="event.preventDefault();scrollToSection('meth-scoring')" style="padding:4px 12px;border-radius:6px;background:var(--bg-card);border:1px solid var(--border);color:var(--t2);font-size:11px;font-weight:600;text-decoration:none;cursor:pointer">⚙ Scoring System</a>
+      <a href="#meth-ledger" onclick="event.preventDefault();scrollToSection('meth-ledger')" style="padding:4px 12px;border-radius:6px;background:var(--bg-card);border:1px solid var(--border);color:var(--t2);font-size:11px;font-weight:600;text-decoration:none;cursor:pointer">📒 Feature Ledger</a>
+      <a href="#meth-filters" onclick="event.preventDefault();scrollToSection('meth-filters')" style="padding:4px 12px;border-radius:6px;background:var(--bg-card);border:1px solid var(--border);color:var(--t2);font-size:11px;font-weight:600;text-decoration:none;cursor:pointer">🛡 Surveillance</a>
+      <a href="#meth-guide" onclick="event.preventDefault();scrollToSection('meth-guide')" style="padding:4px 12px;border-radius:6px;background:var(--bg-card);border:1px solid var(--border);color:var(--t2);font-size:11px;font-weight:600;text-decoration:none;cursor:pointer">📖 Use & Risk</a>
     </nav>
+    <h3 id="meth-scoring">Radar Composite — Same-Day Transparent Scoring</h3>
+    <p><strong>Evidence boundary:</strong> one day's cross-section cannot train or validate tomorrow's probability. The score is a transparent relative ranking built from robust market-wide normalization, a same-day rocket-archetype diagnostic, and engineered continuation priors. It is a research screener, not investment advice.</p>
+    <div class="m-grid">
+      <div class="m-card"><h4>Composite Architecture</h4><p>Every informative screener column enters through a typed transformation, a robust percentile, and a budgeted feature group. Exchange reports add authoritative series, price band, status, delivery, trades, 52-week range, surveillance and deal context.</p><div class="rr-groups" style="margin-top:10px">${groupsHTML}</div></div>
+      <div class="m-card"><h4>What the Score Does</h4><ol style="padding-left:18px;color:var(--t2);font-size:12px;line-height:1.7">
+        <li>Winsorizes transformed numeric inputs at the 2nd and 98th percentiles.</li>
+        <li>Converts values to ranks across the uploaded universe, preventing unit scale from dominating.</li>
+        <li>Measures each feature’s separation between today’s ≥10% movers and the rest, then heavily shrinks it because today supplies few rockets.</li>
+        <li>Blends that diagnostic with finance-aware priors for momentum, participation, breakout structure, liquidity, volatility and trend.</li>
+        <li>Cross-checks official delivery, close versus average price, 52-week position, deal activity and surveillance flags.</li>
+        <li>Strongly penalizes non-EQ, inactive and sub-10% price-band securities while retaining them in the visible ranking for audit. Only eligible securities enter the basket.</li>
+        <li>Penalizes a required 10% move above 2.5 normal daily ranges; moves above three ranges receive a severe penalty.</li>
+      </ol>${diagHTML}</div>
+      <div class="m-card"><h4>Held Suppression & Basket</h4><p>Held positions (Holdings + Positions + today's net Orders buys) never re-enter the buy ranking. The basket keeps the learned exit system: quantities come from the charge-aware score-weighted allocator, and every exported order carries the Harvest GTT target plus the ATR-scaled capped stop (${SL_MIN_PCT.toFixed(1)}%–${SL_MAX_PCT.toFixed(1)}%).</p></div>
+      <div class="m-card"><h4>What Still Learns</h4><p>The scorer itself is stateless by design. The execution layer keeps learning from your own results: the Harvest GTT target from flagged candidates' later attainable highs, the adaptive stop and review horizon from realised tradebook outcomes, position sizing from realised risk, and the same-day exit diagnostic from your sells against that day's highs.</p></div>
+    </div>
+    <h3 id="meth-ledger" style="margin-top:28px">Feature Ledger <span style="font-size:12px;color:var(--t3);font-weight:400">(${RADAR.features.length||0} modeled of ${RADAR.headers.length||0} columns)</span></h3>
+    ${buildRadarLedgerHTML()}
     <div id="meth-hf-wrap">${hardFiltersHTML}</div>
-    <div id="meth-breadth">${breadthCardHTML}</div>
-    <h3 id="meth-engine" style="margin-top:18px">Scoring Engine — Five-Session Rocket Relevance</h3>
-    <p id="mrmrLearningModeNote"><strong>Current learning mode:</strong> App receipt time controls the single model clock. A new trading day begins at 9:00 AM IST; post-market and pre-open uploads continue to revise the latest valid day until the next valid 9:00 AM. Every stock keeps its highest observed 1D-change state, and current Day-D rockets are compared with D-1, D-2, D-3 and D-4. Same-day uploads never create intraday training pairs.</p>
+    <h3 id="meth-guide" style="margin-top:28px">Use & Risk</h3>
     <div class="m-grid">
-      <div class="m-card"><h4>Learning Target</h4><p>Any stock that enters the live top 1% by 1D change during day D receives label 1 for that day. Its target flag remains set even if a later upload shows it outside the top 1%. The day’s source state for every stock is overwritten only when that stock reaches a higher observed 1D change.</p></div>
-      <div class="m-card"><h4>📡 How the Engine Learns</h4><p>Current Day-D rockets are compared directly with the same stocks’ states at D-1, D-2, D-3 and D-4, never as chained day-to-day transitions. The newest usable state receives weight 4, then 3, 2 and 1, normalized across available pairs. Scores begin on Day 2 and use the current live state to rank stocks for later rocket potential.</p></div>
-      <div class="m-card"><h4>Low-Sample Diagnostics</h4><p>${lowSampleText}</p></div>
-      <div class="m-card"><h4>Outcome Self-Correction</h4><p>${feedbackText} Outcome evidence is displayed as confidence context only. It does not add or subtract points from Rocket Score.</p></div>
-      <div class="m-card"><h4>Feature Weighting</h4><p>Every indicator receives a cross-day stability factor from its D-1...D-4 relevance track record. Final weight starts as absolute AUC relevance times stability, then mRMR redundancy reduces overlapping stable signals. All features are considered with no fixed cap; unstable or random features self-cancel toward zero weight, so the feature list decides its own effective size.</p></div>
-      <div class="m-card"><h4>Entry Geometry Gate</h4><p>After live relevance and entry-fade checks, a fresh recommendation must still have favorable reward:risk geometry: room to upper circuit (pct_to_upper_band) must be at least ${GEOMETRY_MIN_RR}x the active stop distance. Stop distance is volatility-scaled from daily ATR and clamped to ${SL_MIN_PCT.toFixed(1)}%-${SL_MAX_PCT.toFixed(1)}%, so high-ATR stocks need honest runway. If upper-band room is missing for a stock, it is kept as geometry-unverified and ranks on relevance alone rather than being silently removed.</p></div>
-      <div class="m-card"><h4>Stability Spread</h4><p>Stability min ${((stabilitySummary.min||0)*100).toFixed(0)}%, median ${((stabilitySummary.median||0)*100).toFixed(0)}%, max ${((stabilitySummary.max||0)*100).toFixed(0)}%. Near-zero: ${stabilitySummary.nearZero||0}; near-one: ${stabilitySummary.nearOne||0}; tracked features: ${stabilitySummary.total||0}.</p></div>
-      <div class="m-card"><h4>🎯 Max 1D Filter</h4><p>Set <em>Max 1D %</em> in the filter bar to hide stocks that have already moved too much today (default 5%). Entry-ceiling filtering has been removed; strong candidates are no longer hidden just because current price is above a calculated buy ceiling.</p></div>
-      <div class="m-card"><h4>🚫 Recommendation Filters</h4><p>The learning universe keeps every valid parsed NSE symbol. Recommendation eligibility separately excludes zero-price rows, stocks at/near their NSE price band, non-EQ series, surveillance-flagged stocks, insufficient liquidity, invalid ATR, stocks already in the current day's rocket union, and live entries that have faded from the day high by the harvest-target zone. Delivery, peak retention, pullback from high, RVOL, DMI, MFI, RSI, and sell pressure remain learnable features. Currently structurally filtered from recommendations: ${(REMOVED.uc||0)+(REMOVED.surv||0)+(REMOVED.nonEq||0)+(REMOVED.liq||0)+(REMOVED.fscore||0)+(REMOVED.atr||0)} stocks.</p></div>
-      <div class="m-card"><h4>Breadth and Relative Strength</h4><p>Each stock's 1-day-change percentile is measured against advancing-stock breadth. Engine learning receives the direct feature and the remaining specialist strategies retain a 20% breadth-relative ordering component. Momentum + Volume Continuation goes further: market-relative strength is an admission rule, and both its relative-strength and relative-volume floors tighten below 40% breadth.</p></div>
-      <div class="m-card"><h4>📊 Sector & Industry Breadth</h4><p>${E.sectorCol?'<span style="color:var(--green)">✓</span> Sector breadth, sector relative strength':'<span style="color:var(--red)">✗</span> No Sector column detected'}${E.industryCol?', <span style="color:var(--green)">✓</span> industry breadth':''} — computed from today\'s full universe and fed into rocket relevance as features. Stocks outperforming their sector score higher regardless of market direction.</p></div>
+      <div class="m-card"><h4>Entry Workflow</h4><ol style="padding-left:18px;color:var(--t2);font-size:12px;line-height:1.7">
+        <li>Upload a screener snapshot at a consistent time.</li>
+        <li>Start with liquid, low- or medium-risk names whose top contributions span several groups.</li>
+        <li>Reject candidates driven by one heroic feature, corporate-action distortions, circuits, stale prints, surveillance restrictions, or news you have not checked.</li>
+        <li>Demand confirmation: hold above VWAP/opening range, participation that persists, and a pre-defined invalidation price.</li>
+        <li>Cap position size from account risk, not from enthusiasm. Enthusiasm has never met a denominator it respected.</li>
+      </ol></div>
+      <div class="m-card"><h4>Interpretation</h4><ul style="padding-left:18px;color:var(--t2);font-size:12px;line-height:1.7">
+        <li><b style="color:var(--green)">80–100:</b> strongest relative continuation setup.</li>
+        <li><b style="color:var(--green)">65–79.9:</b> watchlist; confirmation required.</li>
+        <li><b style="color:var(--amber)">50–64.9:</b> mixed evidence.</li>
+        <li><b style="color:var(--t3)">Below 50:</b> weak under this model.</li>
+        <li>The score is ordinal and cross-sectional. A score of 90 does not mean a 90% chance.</li>
+        <li>A real probability model needs many dated snapshots and their next-day outcomes; the surviving outcome stores collect exactly that execution evidence.</li>
+      </ul></div>
     </div>
-
-    <h3 id="meth-pick-horizon" style="margin-top:28px">Focused Strategy Ladder & Dynamic Pick Horizon</h3>
-    <div class="m-grid">
-      <div class="m-card"><h4>Momentum + Volume Continuation</h4><p>The warm-up default seeks an early 1-6.5% move that is leading the market, above VWAP, close to the day high and still positive over both one and five minutes. Relative volume, ADX and DMI confirm participation and directional control. Weak breadth raises both the relative-strength and volume requirements. It ranks only qualified stocks; it does not rescue laggards with a scoring bonus.</p></div>
-      <div class="m-card"><h4>Volatility Contraction Breakout</h4><p>A forward-only challenger selected by the screenshot-strategy audit. Bollinger width must be in the narrowest 35% of the eligible universe, price must reach the upper-band zone while remaining above VWAP, Change from Open must be positive, Relative Volume at Time must be at least 1.5, and DMI+ must exceed DMI-. The fixed-rule five-snapshot audit produced 24 flags across four entry dates: 25.0% reached 3%, 16.7% reached 5%, and 4.2% reached 10%, versus Random at 17.5%, 7.5%, and 2.5%. Its average final return was not positive after estimated costs, so this evidence admits it only as a challenger; forward episodes decide authority.</p></div>
-      <div class="m-card"><h4>Loaded Spring</h4><p>A distinct pre-breakout challenger that requires tradeability and a coiled daily profile, then ranks candidates with 65% Rocket DNA and 35% fresh ignition against the previous accepted ALL NSE snapshot. It remains active unchanged: unlike Volatility Contraction Breakout, it does not require a narrow Bollinger width or an upper-band breakout.</p></div>
-      <div class="m-card"><h4>One Cumulative Episode Scoreboard</h4><p>Every forward strategy flag and new tradebook BUY opens an independent episode at its actionable flag or fill price. New uploads append observations to the existing ledger; local and Drive ledgers are unioned, never replaced, and historical strategy rows remain visible even after a rule stops issuing fresh picks. Entry-day milestones use only later uploads and new post-flag highs or lows, with timestamps for first 3%, 5%, 10% and 2% adverse crossings.</p></div>
-      <div class="m-card"><h4>Confirmed Donchian Breakout</h4><p>A narrow fresh-channel-break challenger. Yesterday must be below the 20-day upper-channel band; today must reach it while staying above VWAP, holding near the high and passing relative-volume, ADX, DMI and from-open confirmations. The active ladder contains Momentum + Volume Continuation, Volatility Contraction Breakout, Engine, Loaded Spring, Confirmed Donchian Breakout and Random control. Existing distinct strategies remain active; only demonstrably duplicate rules may be consolidated.</p></div>
-      <div class="m-card"><h4>Capital-Velocity Horizon</h4><p>${horizonStatus} Candidate horizons are 3, 5, 10, 15, 20 and 30 trading sessions. A 10% hit before H counts as +10%; otherwise the observed return at H is used. Average return divided by H selects capital velocity. A switch must be at least 10% better and persist for three accepted trading days.</p></div>
-      <div class="m-card"><h4>Current Evaluation Evidence</h4><p><strong>${horizonValue}</strong> · ${horizonMode}<br>Evaluable episodes: ${episodeAnalytics.evaluableCount||0} of ${episodeAnalytics.episodeCount||0}<br>Observed hit rates: 3% ${outcomePct(episodeAnalytics.hit3)} · 5% ${outcomePct(episodeAnalytics.hit5)} · 10% ${outcomePct(episodeAnalytics.hit10)}<br>Median sessions to 10%: ${outcomeNum(episodeAnalytics.medianSessionsTo10,1)} · median drawdown before success: ${outcomeNum(episodeAnalytics.medianDrawdownBeforeSuccess)}% · expired: ${outcomePct(episodeAnalytics.expiredRate)}<br>Active since: ${outcomeHorizon.activeSince||'—'} · phase: ${outcomeHorizon.phase||'warmup'}</p></div>
-    </div>
-    <div style="overflow-x:auto"><table class="ct" style="min-width:620px;font-size:11px"><thead><tr><th>Horizon</th><th>Sample</th><th>10% Hit Rate</th><th>Median Unresolved Return</th><th>Capital Velocity</th></tr></thead><tbody>${horizonRows}</tbody></table></div>
-
-    <p style="color:var(--t3);font-style:italic;margin-top:4px">⚠ Quantitative screening only. Not financial advice. Past momentum ≠ future returns.</p>
-
-    <h3 id="meth-weights" style="margin-top:28px">Feature Weights <span style="font-size:12px;color:var(--t3);font-weight:400">(${_featureCount})</span></h3>
-    <div class="corr-wrap">${wtHTML}</div>`;
+    <p style="color:var(--t3);font-style:italic;margin-top:4px">⚠ Quantitative screening only. Not financial advice. Past momentum ≠ future returns.</p>`;
   setTimeout(()=>{_methTbls.hf?.render();_methTbls.sc?.render();},0);
 }
 
 // Fixed columns + dynamic top 10 rocket-relevance features (skip empty ones)
 function getCols(){
-  const intervalLabel='Vs D-1 %';
-  const fixed=[
+  return [
     {key:'chk',label:'',s:0},
-    {key:'_rank',label:'#',s:1},
-    {key:'rocketScore',label:'Score',s:1},{key:'symbol',label:'Symbol',s:1},
-    {key:'price',label:'Price ₹',s:1},{key:'snapshotChange',label:intervalLabel,s:1},
-      {key:'priceChange',label:'Chg 1D%',s:1},{key:'tslRefPoints',label:'TSL pts',s:1},{key:'velocityPotential',label:'Room%',s:1},{key:'delivPct',label:'Deliv%',s:1},
-    {key:'alloc',label:'Alloc ₹',s:0},{key:'volume',label:'Volume',s:1},
+    {key:'rank',label:'#',s:1},
+    {key:'score',label:'Rocket Score',s:1},
+    {key:'symbol',label:'Symbol',s:1},
+    {key:'setup',label:'Setup',s:1},
+    {key:'series',label:'Series / Band',s:1},
+    {key:'stretch',label:'10% Stretch',s:1},
+    {key:'price',label:'Price ₹',s:1},
+    {key:'day',label:'Day %',s:1},
+    {key:'relvol',label:'Rel Vol',s:1},
+    {key:'turnover',label:'Liquidity',s:1},
+    {key:'alloc',label:'Alloc ₹',s:0},
+    {key:'risk',label:'Risk',s:1},
   ];
-  // Dynamic columns from rocket-relevance features — skip any that are all null across displayed stocks
-  const allFeats=ENGINE_DATA?.top10Feats||[];
-  const labels=ENGINE_DATA?.labels||{};
-  const pool=FILT.length?FILT:ALL;
-  // Features already shown as fixed columns — skip from dynamic to avoid duplicates
-  const fixedFeatKeys=new Set(['delivery_pct','pct_to_upper_band','price','volume','volume_1_day']);
-  if(ENGINE_DATA?.features){
-    const pcPat=/price_change.*1_day|1_day.*price_change|^change.*1_day$/;
-    ENGINE_DATA.features.forEach(f=>{if(pcPat.test(f))fixedFeatKeys.add(f);});
-  }
-  const dynamic=[];
-  for(const f of allFeats){
-    if(dynamic.length>=10) break;
-    if(fixedFeatKeys.has(f)) continue;
-    // Check if at least one stock has a non-null value for this feature
-    const hasData=pool.some(s=>s._features&&s._features[f]!=null);
-    if(!hasData) continue;
-    dynamic.push({key:'_feat_'+f,featKey:f,label:labels[f]||f,s:1,isDynamic:true});
-  }
-  // If we didn't get 10 from top10, try further features
-  if(dynamic.length<10&&ENGINE_DATA?.features){
-    const weights=ENGINE_DATA.weights||{};
-    const remaining=[...ENGINE_DATA.features]
-      .filter(f=>!allFeats.includes(f)&&!fixedFeatKeys.has(f))
-      .sort((a,b)=>(weights[b]||0)-(weights[a]||0));
-    for(const f of remaining){
-      if(dynamic.length>=10) break;
-      const hasData=pool.some(s=>s._features&&s._features[f]!=null);
-      if(!hasData) continue;
-      dynamic.push({key:'_feat_'+f,featKey:f,label:labels[f]||f,s:1,isDynamic:true});
-    }
-  }
-  return [...fixed,...dynamic];
 }
-let COLS=getCols(); // initialize, updated on each engine run
+let COLS=getCols();
 
 function updateSelectAll(){
   const allSyms=FILT.map(s=>s.symbol);
@@ -6589,348 +3686,11 @@ function toggleStock(sym,checked){
   updateSelectAll();
   recomputeAlloc();
 }
-function assignDisplayRanks(rows){
-  [...rows].sort((a,b)=>{
-    const ar=a.rankScore??a.rocketScore??-Infinity;
-    const br=b.rankScore??b.rocketScore??-Infinity;
-    if(br!==ar) return br-ar;
-    const rs=(b.rocketScore??-Infinity)-(a.rocketScore??-Infinity);
-    if(rs) return rs;
-    return String(a.symbol||'').localeCompare(String(b.symbol||''));
-  }).forEach((s,i)=>{s._rank=i+1;});
-}
-function rankTitle(s){
-  const score=isFinite(s.rocketScore)?Number(s.rocketScore).toFixed(1):'—';
-  if(s._geometryUnverified) return `#${s._rank} — score ${score} · room unverified, no tilt`;
-  const pct=Number(s.normalizedVelocityPotential)||0;
-  const factor=1+VELOCITY_WEIGHT*pct;
-  return `#${s._rank} — score ${score} × ${factor.toFixed(2)} room tilt`;
-}
-
-// ── Score-weighted allocation across selected stocks ──
-// Execution is MARKET. This price is only a conservative sizing/target reference so
-// a small upward move between export and fill does not over-allocate the basket.
 function getBuyPrice(s){
   const ltp=s.price>0?s.price:0;
   if(!(ltp>0)) return 0;
   const budgetReference=ltp*(1+BASKET_MARKET_BUDGET_BUFFER_PCT/100);
   return parseFloat(tickPrice(budgetReference).toFixed(2));
-}
-function getRunwayCeilingPct(s){
-  return (s&&s.price_band_pct!=null&&isFinite(s.price_band_pct)&&s.price_band_pct>0)?s.price_band_pct:STOCK_RUNWAY_CEILING_PCT;
-}
-function getMaxEntry(s){
-  const ceiling=getRunwayCeilingPct(s);
-  if(!isFinite(ceiling)) return null;
-  const pc=s.priceChange;
-  if(s.price==null||s.price<=0||pc==null||!isFinite(pc)) return null;
-  const tgt=getEffectiveTgtPct()||3.7;
-  const openPrice=s.price/(1+pc/100);
-  return tickPrice(openPrice*(1+ceiling/100)/(1+tgt/100));
-}
-/*
-  Exclusion audit, 2026-07-01:
-  - The already-rocketed branch below excludes only stocks in today's persisted top-1%
-    rocket union (`ROCKET_TOP_FRACTION = 0.01`). A partial mover below that cutoff is
-    not benched by `rocketToday`, unless it touched the same-day top-1% set earlier.
-  - The entry-fade branch can bench a not-yet-rocketed partial mover when it is positive
-    on the day but has already pulled back through the harvest zone from the day high:
-    pullback >= targetPct * 2, or pullback >= targetPct with peak retention below 70%.
-  This block documents current behavior only; it intentionally changes no thresholds.
-*/
-function getEntryFadeReason(s){
-  if(!s) return '';
-  const pc=Number(s.priceChange);
-  if(!(pc>0)) return '';
-  const targetPct=Number(getEffectiveTgtPct())||1.2;
-  const pullback=Number(s.pullbackFromHighPct);
-  const retention=Number(s.peakRetention);
-  if(!Number.isFinite(pullback)||pullback<=0) return '';
-  const severeGiveback=targetPct*ENTRY_FADE_SEVERE_TARGET_MULT;
-  if(pullback>=severeGiveback){
-    return `Fading entry: ${pullback.toFixed(2)}% below day high (>${severeGiveback.toFixed(2)}% harvest give-back)`;
-  }
-  if(pullback>=targetPct&&Number.isFinite(retention)&&retention<ENTRY_FADE_RETENTION_FLOOR){
-    return `Fading entry: ${pullback.toFixed(2)}% below day high, retained ${retention.toFixed(0)}% of range`;
-  }
-  return '';
-}
-function getGeometryHeadroomPct(s){
-  const raw=s?.pctToUpperBand??s?._features?.pct_to_upper_band;
-  if(raw==null) return null;
-  const v=Number(raw);
-  if(!Number.isFinite(v)) return null;
-  return Math.max(0,v);
-}
-function evaluateEntryGeometry(s){
-  const headroom=getGeometryHeadroomPct(s);
-  const risk=getRowStopDistancePct(s);
-  const out={passes:true,unverified:false,headroom,risk,required:null,reason:''};
-  if(headroom==null){
-    out.unverified=true;
-    return out;
-  }
-  if(!(risk>0)) return out;
-  out.required=GEOMETRY_MIN_RR*risk;
-  if(headroom+1e-9<out.required){
-    out.passes=false;
-    out.reason=`Insufficient headroom: ${headroom.toFixed(2)}% room vs ${risk.toFixed(2)}% risk (need ${GEOMETRY_MIN_RR}x)`;
-  }
-  return out;
-}
-function applyEntryGeometryState(s){
-  const g=evaluateEntryGeometry(s);
-  s._geometryChecked=true;
-  s._geometryUnverified=!!g.unverified;
-  s._geometryBlocked=!g.passes;
-  s.velocityPotential=g.headroom;
-  s.geometryRiskPct=g.risk;
-  s.geometryRequiredPct=g.required;
-  s.geometryRR=(g.headroom!=null&&g.risk>0)?g.headroom/g.risk:null;
-  return g;
-}
-function applyVelocityPotentialRanking(rows){
-  const verified=rows.filter(s=>!s._geometryUnverified&&s.velocityPotential!=null&&Number.isFinite(Number(s.velocityPotential)));
-  const sorted=[...verified].sort((a,b)=>(Number(a.velocityPotential)||0)-(Number(b.velocityPotential)||0));
-  const denom=Math.max(1,sorted.length-1);
-  const pctBySymbol=new Map();
-  sorted.forEach((s,i)=>pctBySymbol.set(s.symbol,sorted.length===1?1:i/denom));
-  rows.forEach(s=>{
-    const base=Number(s.rocketScore)||0;
-    const pct=s._geometryUnverified?0:(pctBySymbol.get(s.symbol)??0);
-    s.normalizedVelocityPotential=pct;
-    s.rankScore=base*(1+VELOCITY_WEIGHT*pct);
-  });
-}
-function getMinScoreFloor(){
-  const raw=String(document.getElementById('fMinScore')?.value??'').trim();
-  if(raw==='') return MIN_SCORE_DEFAULT;
-  const parsed=parseFloat(raw);
-  return Number.isFinite(parsed)?parsed:MIN_SCORE_DEFAULT;
-}
-function getTopRankCap(){
-  const raw=String(document.getElementById('fTopRank')?.value??'').trim();
-  const parsed=parseInt(raw,10)||20;
-  return Math.max(1,Math.min(20,parsed));
-}
-function getTopRankFilterPill(){
-  const raw=String(document.getElementById('fTopRank')?.value??'').trim();
-  if(raw==='') return null;
-  const parsed=parseInt(raw,10);
-  if(!Number.isFinite(parsed)) return null;
-  const cap=Math.max(1,Math.min(20,parsed));
-  return cap<20?`Top ≤${cap}`:null;
-}
-function getPerStockBudgetCap(){
-  const maxAlloc=parseFloat(document.getElementById('fMaxAlloc')?.value)||0;
-  const capital=parseFloat(document.getElementById('fCapital')?.value)||0;
-  const caps=[maxAlloc,capital].filter(v=>v>0&&isFinite(v));
-  return caps.length?Math.min(...caps):null;
-}
-function getFilterBarReason(s,opts={}){
-  const minScore=getMinScoreFloor();
-  const bandReason=getPriceBandBlockReason(s);
-  if(bandReason) return bandReason;
-  if(s.rocketToday) return s.rocketNow?'Already in today’s live rocket set':'Already rocketed earlier today';
-  const fadeReason=getEntryFadeReason(s);
-  if(fadeReason) return fadeReason;
-  const geometry=applyEntryGeometryState(s);
-  if(!geometry.passes) return geometry.reason;
-  if(!opts.ignoreMinScore&&ENGINE_DATA?.hasRecommendationEvidence&&minScore>0&&s.rocketScore<minScore&&getPickState().name==='engine') return `Score ${s.rocketScore?.toFixed?.(1)||s.rocketScore} < ${minScore}`;
-  if(s.price!=null&&s.price<MIN_PRICE_FLOOR) return `Price ${fmtINR(s.price)} < ${fmtINR(MIN_PRICE_FLOOR)}`;
-  if(s.marketCap!=null&&s.marketCap<MIN_MCAP_FLOOR) return `MCap ₹${fV(s.marketCap)} < ₹${fV(MIN_MCAP_FLOOR)}`;
-  const budgetCap=getPerStockBudgetCap();
-  if(budgetCap!=null&&getBuyPrice(s)>budgetCap) return '1 share exceeds per-stock budget';
-  return '';
-}
-function classifyFilterReasonBucket(reason,row){
-  if(row?._hardFiltered) return row._filterBucket||'hard';
-  const text=String(reason||'');
-  if(!text) return '';
-  if(text.startsWith('Already in today')) return 'priorMove';
-  if(text.startsWith('Already rocketed')) return 'priorMove';
-  if(text.startsWith('Fading entry')) return 'entryFade';
-  if(text.startsWith('Insufficient headroom')) return 'geometry';
-  if(text.startsWith('Held &')) return 'held';
-  if(text.startsWith('Score ')) return 'minScore';
-  if(text.startsWith('Price ')||text.startsWith('MCap ')) return 'structural';
-  if(text.startsWith('1 share exceeds')) return 'budget';
-  return 'other';
-}
-function auditReason(key,bucket,label){return {key,bucket,label:label||key};}
-function getPostFilterAuditReasons(s,heldPositions){
-  const reasons=[];
-  const band=getPriceBandBlockReason(s);
-  if(band)reasons.push(auditReason('upper_band_entry','entryGate',band));
-  if(s.rocketToday)reasons.push(auditReason(s.rocketNow?'prior_move_live':'prior_move_earlier','priorMove',s.rocketNow?'Already in today\'s live rocket set':'Already rocketed earlier today'));
-  const fade=getEntryFadeReason(s);
-  if(fade)reasons.push(auditReason('entry_fade','entryGate',fade));
-  const geometry=applyEntryGeometryState(s);
-  if(!geometry.passes)reasons.push(auditReason('reward_risk_geometry','entryGate',geometry.reason));
-  const minScore=getMinScoreFloor();
-  if(ENGINE_DATA?.hasRecommendationEvidence&&minScore>0&&s.rocketScore<minScore&&getPickState().name==='engine')reasons.push(auditReason('minimum_score','entryGate',`Score below ${minScore}`));
-  if(s.price!=null&&s.price<MIN_PRICE_FLOOR)reasons.push(auditReason('minimum_price','structural','Below minimum price'));
-  if(s.marketCap!=null&&s.marketCap<MIN_MCAP_FLOOR)reasons.push(auditReason('minimum_market_cap','structural','Below minimum market cap'));
-  const budgetCap=getPerStockBudgetCap();
-  if(budgetCap!=null&&getBuyPrice(s)>budgetCap)reasons.push(auditReason('per_stock_budget','entryGate','One share exceeds per-stock budget'));
-  const held=applyHeldDisplayState(s,heldPositions||getHeldPositionMap());
-  if(held)reasons.push(auditReason('held_position','entryGate',held));
-  return reasons;
-}
-function hardFilterAuditBucket(bucket){
-  if(bucket==='atr')return 'dataValidity';
-  if(bucket==='fscore')return 'fundamental';
-  return 'structural';
-}
-function buildFilterAuditUploadRecord({rows,sessionTag,timestamp}){
-  const targetPct=Number(getEffectiveTgtPct())||null;
-  const heldPositions=getHeldPositionMap();
-  const records=[];
-  (window._lastHardFilterShadowRows||[]).forEach(item=>{
-    const reasons=(item.reasons||[]).map(reason=>auditReason(reason.key,hardFilterAuditBucket(reason.bucket),reason.key));
-    if(!reasons.length)return;
-    records.push({symbol:item.symbol,first:reasons[0].key,all:reasons.map(reason=>reason.key),bucket:reasons[0].bucket,
-      price:item.price,change:item.change,score:item.score,atr:item.atr,
-      stopPct:getActiveStopDistancePct(item.atr),targetPct});
-  });
-  (rows||[]).forEach(row=>{
-    const reasons=getPostFilterAuditReasons({...row,_features:row._features||{}},heldPositions);
-    if(!reasons.length)return;
-    records.push({symbol:row.symbol,first:reasons[0].key,all:reasons.map(reason=>reason.key),bucket:reasons[0].bucket,
-      price:row.price,change:row.priceChange,score:row.rocketScore,atr:row.atr,
-      stopPct:getActiveStopDistancePct(row.atr),targetPct});
-  });
-  const top=[...(window._lastObservedDailyMoves||[])]
-    .filter(item=>item?.symbol&&Number.isFinite(Number(item.priceChange)))
-    .sort((a,b)=>Number(b.priceChange)-Number(a.priceChange)).slice(0,20)
-    .map(item=>({symbol:item.symbol,change:Number(item.priceChange)}));
-  const observed=[...(window._lastObservedDailyMoves||[])]
-    .filter(item=>item?.symbol&&Number.isFinite(Number(item.priceChange)))
-    .map(item=>({symbol:item.symbol,change:Number(item.priceChange)}));
-  return compactFilterAuditUpload({ts:Number(timestamp)||Date.now(),tag:sessionTag||null,rows:records,top,observed});
-}
-function recordFilterAuditUpload(runtime,sessionDate,upload){
-  const day=(runtime?.days||[]).find(item=>item.sessionDate===sessionDate);
-  if(!day||!upload)return false;
-  if(!Array.isArray(day.filterUploads))day.filterUploads=[];
-  const clean=compactFilterAuditUpload(upload),key=`${clean.ts||0}|${clean.tag||''}`;
-  if(day.filterUploads.some(item=>`${item.ts||0}|${item.tag||''}`===key))return false;
-  if(day.filterUploads.length)clean.o=[];
-  day.filterUploads.push(clean);
-  return true;
-}
-const FILTER_AUDIT_LABELS={
-  zero_price:'Zero/invalid price',upper_circuit:'Upper circuit',non_eq:'Non-equity series',liquidity:'Liquidity',
-  zero_f_score:'Piotroski zero',invalid_atr:'Invalid ATR',upper_band_entry:'Upper-band entry',
-  prior_move_live:'Already in live rocket set',prior_move_earlier:'Already rocketed earlier',entry_fade:'Entry fade',
-  reward_risk_geometry:'Reward/risk geometry',minimum_score:'Minimum score',minimum_price:'Minimum price',
-  minimum_market_cap:'Minimum market cap',per_stock_budget:'Per-stock budget',held_position:'Held position'
-};
-const FILTER_AUDIT_TYPES={
-  zero_price:'structural',upper_circuit:'structural',non_eq:'structural',liquidity:'structural',
-  zero_f_score:'fundamental',invalid_atr:'dataValidity',upper_band_entry:'entryGate',
-  prior_move_live:'priorMove',prior_move_earlier:'priorMove',entry_fade:'entryGate',reward_risk_geometry:'entryGate',
-  minimum_score:'entryGate',minimum_price:'structural',minimum_market_cap:'structural',per_stock_budget:'entryGate',held_position:'entryGate'
-};
-function filterAuditLabel(key){
-  if(String(key||'').startsWith('surv:')){
-    const rule=String(key).slice(5),row=SURV_CUSTOM_RULES.find(item=>item.key===rule);
-    return `Surveillance: ${row?.label||rule}`;
-  }
-  return FILTER_AUDIT_LABELS[key]||key||'Unknown';
-}
-function computeFilterShadowOutcome(days,dayIndex,record){
-  const entry=Number(record?.price),stopPct=Math.abs(Number(record?.stopPct)),targetPct=Number(record?.targetPct);
-  if(!(entry>0)||!(stopPct>0)||!(targetPct>0))return null;
-  const stop=entry*(1-stopPct/100),target=entry*(1+targetPct/100);
-  let peak=null,worst=null,last=null,exit=null;
-  for(let j=dayIndex+1;j<days.length;j++){
-    const day=days[j],row=day?.featureRows?.[record.symbol]||{};
-    const cols=getDayFeatureCols(day);
-    const highKey=findFeatureColumn(cols,[/^high_1_day$/,/^high.*1.*day/]);
-    const lowKey=findFeatureColumn(cols,[/^low_1_day$/,/^low.*1.*day/]);
-    const high=finiteFeature(row,highKey),low=finiteFeature(row,lowKey);
-    const idx=(day?.symbols||[]).indexOf(record.symbol),close=idx>=0?Number(day.prices?.[idx]):null;
-    const hi=high??(Number.isFinite(close)?close:null),lo=low??(Number.isFinite(close)?close:null);
-    if(hi!=null){const move=(hi/entry-1)*100;if(peak==null||move>peak)peak=move;}
-    if(lo!=null){const move=(lo/entry-1)*100;if(worst==null||move<worst)worst=move;}
-    if(Number.isFinite(close)&&close>0)last=close;
-    if(exit==null&&lo!=null&&lo<=stop)exit=-stopPct;
-    else if(exit==null&&hi!=null&&hi>=target)exit=targetPct;
-  }
-  if(exit==null&&last>0)exit=(last/entry-1)*100;
-  return {peak,exit:exit!=null?exit-estimateRoundTripCostPct(Math.max(0.5,Math.abs(exit))):null,worst,hit:peak!=null&&peak>=targetPct};
-}
-function computePersistedHardFilterAudit(runtime){
-  const days=[...(runtime?.days||[])].sort((a,b)=>String(a.sessionDate).localeCompare(String(b.sessionDate)));
-  const buckets={},missedMovers=[];
-  let firstDate=null,evaluableDays=0,pending=0;
-  const moveThreshold=Math.max(3,Number(getEffectiveTgtPct())||3);
-  days.forEach((day,i)=>{
-    const uploads=(day.filterUploads||[]).map(normalizeFilterAuditUpload).sort((a,b)=>a.ts-b.ts);
-    if(!uploads.length)return;
-    if(!firstDate)firstDate=day.sessionDate;
-    const firstBySymbol=new Map();
-    uploads.forEach(upload=>upload.rows.forEach(record=>{if(!firstBySymbol.has(record.symbol))firstBySymbol.set(record.symbol,{...record,ts:upload.ts});}));
-    if(i>=days.length-1){pending+=firstBySymbol.size;return;}
-    evaluableDays++;
-    firstBySymbol.forEach(record=>{
-      const outcome=computeFilterShadowOutcome(days,i,record);
-      const a=buckets[record.first]=buckets[record.first]||{key:record.first,label:filterAuditLabel(record.first),bucket:record.bucket,excluded:0,hits:0,peakSum:0,peakN:0,exitSum:0,exitN:0,worst:null,additional:0};
-      a.excluded++;
-      a.additional+=Math.max(0,(record.all||[]).length-1);
-      if(outcome?.hit)a.hits++;
-      if(Number.isFinite(outcome?.peak)){a.peakSum+=outcome.peak;a.peakN++;}
-      if(Number.isFinite(outcome?.exit)){a.exitSum+=outcome.exit;a.exitN++;}
-      if(Number.isFinite(outcome?.worst)&&(a.worst==null||outcome.worst<a.worst))a.worst=outcome.worst;
-    });
-    const finalTop=uploads[uploads.length-1].top||[];
-    const firstObserved=new Map((uploads.find(upload=>upload.observed.length)?.observed||[]).map(item=>[item.symbol,item.change]));
-    const firstEnginePickTs=new Map();
-    (day.pickUploads||[]).slice().sort((a,b)=>(a.ts||0)-(b.ts||0)).forEach(upload=>{
-      const evidence=normalizeStrategyCohort(upload.strategies?.engine);
-      evidence.picks.forEach(item=>{if(!firstEnginePickTs.has(item.symbol))firstEnginePickTs.set(item.symbol,Number(upload.ts)||0);});
-    });
-    finalTop.forEach(item=>{
-      const rejected=firstBySymbol.get(item.symbol)||null,initial=firstObserved.get(item.symbol);
-      const late=Number.isFinite(initial)&&initial>=moveThreshold;
-      const crossing=uploads.find(upload=>(upload.top||[]).some(top=>top.symbol===item.symbol&&top.change>=moveThreshold));
-      const crossingTs=Number(crossing?.ts)||Infinity,pickTs=firstEnginePickTs.get(item.symbol)??Infinity;
-      const selectedBefore=pickTs<crossingTs;
-      const rejectedBefore=Number(rejected?.ts)<crossingTs;
-      const category=rejected?.bucket==='structural'?'structural':late?'lateSeen':rejected&&rejectedBefore?'filteredBeforeMove':selectedBefore?'selectedBeforeMove':'eligibleUnselected';
-      missedMovers.push({date:day.sessionDate,symbol:item.symbol,category,reason:rejected?.first||null,firstChange:Number.isFinite(initial)?initial:null,finalChange:item.change});
-    });
-  });
-  Object.keys(FILTER_AUDIT_LABELS).forEach(key=>{
-    if(!buckets[key])buckets[key]={key,label:FILTER_AUDIT_LABELS[key],bucket:FILTER_AUDIT_TYPES[key],excluded:0,hits:0,peakSum:0,peakN:0,exitSum:0,exitN:0,worst:null,additional:0};
-  });
-  SURV_CUSTOM_RULES.forEach(rule=>{
-    const key=`surv:${rule.key}`;
-    if(!buckets[key])buckets[key]={key,label:`Surveillance: ${rule.label}`,bucket:'structural',excluded:0,hits:0,peakSum:0,peakN:0,exitSum:0,exitN:0,worst:null,additional:0};
-  });
-  const rows=Object.values(buckets).map(a=>({...a,hitRate:a.excluded?a.hits/a.excluded:null,peakNetPct:a.peakN?+(a.peakSum/a.peakN-estimateRoundTripCostPct(Math.max(0.5,a.peakSum/a.peakN))).toFixed(2):null,exitNetPct:a.exitN?+(a.exitSum/a.exitN).toFixed(2):null}));
-  return {firstDate,evaluableDays,pending,rows,missedMovers};
-}
-function buildHardFilterAuditSnapshot(rows,hiddenReasons){
-  const bucketCounts={structural:0,dataValidity:0,priorMove:0,entryGate:0,other:0};
-  const top20=[...(window._lastObservedDailyMoves||[])]
-    .filter(x=>x?.symbol)
-    .sort((a,b)=>(Number(b.priceChange)||-Infinity)-(Number(a.priceChange)||-Infinity))
-    .slice(0,20);
-  const liveSelections=new Set(getDisplayedEntryCandidates(rows||[]).map(s=>s.symbol));
-  const top20Missed=top20.map(item=>{
-    const row=(rows||[]).find(r=>r.symbol===item.symbol)||null;
-    const reason=hiddenReasons?.[item.symbol]||getFilterBarReason(row||{symbol:item.symbol,price:item.price,priceChange:item.priceChange,_features:{pct_to_upper_band:item.pctToUpperBand}});
-    const bucket=classifyFilterReasonBucket(reason,row);
-    if(bucket==='structural') bucketCounts.structural++;
-    else if(bucket==='dataValidity') bucketCounts.dataValidity++;
-    else if(bucket==='priorMove') bucketCounts.priorMove++;
-    else if(bucket==='geometry'||bucket==='entryFade'||bucket==='held'||bucket==='minScore'||bucket==='budget') bucketCounts.entryGate++;
-    else bucketCounts.other++;
-    return {symbol:item.symbol,bucket,reason,selected:liveSelections.has(item.symbol),price:item.price??null,priceChange:item.priceChange??null};
-  });
-  return {generatedAt:new Date().toISOString(),...bucketCounts,top20Missed,persisted:computePersistedHardFilterAudit(SNAPSHOT_RUNTIME)};
 }
 function getHeldPositionMap(){
   const heldPos={};
@@ -7005,35 +3765,6 @@ function getCombinedOpenPositionMap(){
   Object.values(combined).forEach(pos=>{pos.avg=pos.avg>0?+pos.avg.toFixed(4):0;});
   return combined;
 }
-function applyHeldDisplayState(s,heldPos){
-  const pos=heldPos[s.symbol];
-  if(!pos) return '';
-  const {qty,avg}=pos;
-  const cur=s.price;
-  if(qty<=0) return 'Held/closed or short today';
-  if(!avg||cur==null||cur<=0) return 'Held, avg cost unavailable';
-  const pnlPct=((cur-avg)/avg)*100;
-  s._heldAvg=avg;s._heldQty=qty;
-  if(pnlPct<0){
-    s._isHeldRisk=true;s._heldDrop=+(-pnlPct).toFixed(2);
-    return `Held & down ${Math.abs(pnlPct).toFixed(2)}% - review exit, do not average down`;
-  }
-  return `Held & up ${pnlPct.toFixed(2)}% - already owned, do not top up at a higher price`;
-}
-function toggleFilteredCandidates(){
-  SHOW_FILTERED_CANDIDATES=!SHOW_FILTERED_CANDIDATES;
-  applyFilters();
-}
-function keepFilteredCandidate(sym){
-  KEEP_FILTER_OVERRIDES.add(sym);
-  applyFilters();
-}
-function removeFilterOverride(sym){
-  KEEP_FILTER_OVERRIDES.delete(sym);
-  applyFilters();
-}
-// Fixed Harvest GTT% (gross sell-price delta from buy): hard high-move outcomes
-// choose a reachable net target, then costs are added so the GTT covers charges.
 function estimateRoundTripCostPct(grossTargetPct=1){
   const avgTurnoverPct=TRADEBOOK_STATS?.avgChargePct;
   if(avgTurnoverPct!=null&&isFinite(avgTurnoverPct)&&avgTurnoverPct>0){
@@ -7282,24 +4013,15 @@ function computeAlloc(capital, selList){
     return {ok:true,expectedNet:qty*buyP*(tgtPct/100)-charges,charges,tgtPct};
   }
 
-  const topupPctEl=document.getElementById('fTopupAlloc');
-  const topupMult=Math.min(1,Math.max(0.1,((topupPctEl?parseFloat(topupPctEl.value)||50:50)/100)));
-  const activePick=getPickState();
-  const championOrder=[...selList].sort((a,b)=>(a._rank??Infinity)-(b._rank??Infinity));
-  const championWeights=new Map(championOrder.map((s,i)=>[s.symbol,Math.max(1,championOrder.length-i)]));
-  const rawScore=s=>activePick.name==='engine'
-    ?Math.max(0,Number(s.rocketScore)||0)
-    :(championWeights.get(s.symbol)||1);
+  const rawScore=s=>Math.max(0,Number(s.rocketScore)||0);
   const totalRawScore=selList.reduce((sum,s)=>sum+rawScore(s),0)||1;
   const sortedSel=[...selList].sort((a,b)=>rawScore(b)-rawScore(a));
   const allocMap={},limits={};
 
-  // Top-up percentage is a hard TOTAL allocation cap for the single stock order.
   for(const s of sortedSel){
     const buyP=getBuyPrice(s);
     if(!(buyP>0)) continue;
-    const normalBudget=Math.min(spendableCapital*(rawScore(s)/totalRawScore),cap);
-    const rowLimit=s._isTopUp?normalBudget*topupMult:normalBudget;
+    const rowLimit=Math.min(spendableCapital*(rawScore(s)/totalRawScore),cap);
     limits[s.symbol]=rowLimit;
     const qty=affordableQty(rowLimit,buyP,rowLimit);
     if(qty<=0) continue;
@@ -7398,18 +4120,14 @@ function recomputeAlloc(){
 function renderBasketBtn(){
   const selList=FILT.filter(s=>SELECTED.has(s.symbol));
   const buyCount=selList.length;
-  const holdCount=(HOLDINGS&&HOLDINGS.length>0)||(POSITIONS&&POSITIONS.length>0)?1:0;
   const buyBtn=document.getElementById('basketBtn');
   if(buyBtn){
     const cntSpan=document.getElementById('basketCount');
-    const isWarmup=!ENGINE_DATA?.hasRecommendationEvidence;
     if(cntSpan)cntSpan.textContent=buyCount>0?`(${buyCount})`:'';
     buyBtn.disabled=buyCount===0;
     buyBtn.title=buyCount===0
       ? 'Select at least one stock to export a Zerodha basket order.'
-      : isWarmup
-        ? `Export selected stocks as a Zerodha basket using neutral warm-up score ${WARMUP_NEUTRAL_SCORE.toFixed(1)} and equal allocation.`
-        : 'Export selected stocks as Zerodha basket order';
+      : 'Export selected stocks as Zerodha basket order';
   }
 }
 function renderBasketSummary(){
@@ -7435,10 +4153,7 @@ function renderHead(){
       </th>`;
     }
     const arr=c.key===SCOL?(SDIR===-1?'▼':'▲'):'';
-    const sortKey=c.isDynamic?c.key:c.key;
-    const shortLabel=c.isDynamic?(c.label.length>25?c.label.substring(0,25)+'…':c.label):c.label;
-    const tooltip=c.isDynamic?c.label:'';
-    return`<th class="${c.key===SCOL?'sorted':''}" ${c.s?`onclick="doSort('${sortKey}')"`:''} ${tooltip?`title="${tooltip}"`:''} ${c.isDynamic?'style="font-size:10px;max-width:90px;white-space:normal;word-wrap:break-word;line-height:1.2"':''}>${shortLabel}<span class="sa">${arr}</span></th>`;
+    return`<th class="${c.key===SCOL?'sorted':''}" ${c.s?`onclick="doSort('${c.key}')"`:''}>${c.label}<span class="sa">${arr}</span></th>`;
   }).join('')+'</tr>';
   // fix indeterminate state
   const sa=document.getElementById('chk-all');
@@ -7462,6 +4177,16 @@ function fPerf(v){
   return`<span style="color:${c};font-weight:600">${v>0?'+':''}${v.toFixed(1)}%</span>`;
 }
 
+function radarRiskPill(risk){
+  const cls=risk==='Low'?'pill-green':risk==='Medium'?'pill-amber':'pill-red';
+  return `<span class="info-pill ${cls}" style="padding:2px 8px;font-size:10px">${escHtml(risk||'—')}</span>`;
+}
+function radarSeriesBandPill(s){
+  const ok=s.basketEligible!==false;
+  const band=s.band!=null?s.band+'%':'No band';
+  const title=ok?'Active EQ security; eligible for the Zerodha basket.':'Ineligible for the basket: '+escHtml((s.gateReasons||[]).slice(0,3).join(', ')||'exchange eligibility');
+  return `<span class="info-pill ${ok?'pill-green':'pill-red'}" style="padding:2px 8px;font-size:10px" title="${title}">${escHtml(s.series||'—')} · ${band}</span>`;
+}
 function renderTable(){
   const capital=parseFloat(document.getElementById('fCapital').value)||0;
   // Allocation only across SELECTED instruments
@@ -7471,64 +4196,32 @@ function renderTable(){
 
   const start=(PG-1)*PGSZ,pg=FILT.slice(start,start+PGSZ);
 
-  document.getElementById('tBody').innerHTML=pg.map((s,i)=>{
-    const rk=start+i+1;
+  document.getElementById('tBody').innerHTML=pg.map(s=>{
     const isSelected=SELECTED.has(s.symbol);
     const am=allocMap[s.symbol];
-
-
-    // Fixed cells
-    const filterBadge=s._forceKept
-      ? `<span style="font-size:8px;background:rgba(34,197,94,.14);color:var(--green);border-radius:4px;padding:1px 5px;margin-left:5px;font-weight:700;vertical-align:middle" title="Kept this session despite filter: ${escHtml(s._filterReason||'override')}">KEPT</span>`
-      : s._filterPreview
-        ? `<span style="font-size:8px;background:rgba(251,191,36,.14);color:var(--amber);border-radius:4px;padding:1px 5px;margin-left:5px;font-weight:700;vertical-align:middle" title="${escHtml(s._filterReason||'filtered')}">FILTERED</span>`
-        : '';
-    const filterAction=s._filterPreview
-      ? `<button onclick="keepFilteredCandidate('${s.symbol}')" title="Keep this stock in Rankings for this page session only" style="margin-left:6px;padding:2px 6px;border-radius:5px;border:1px solid rgba(34,197,94,.35);background:rgba(34,197,94,.1);color:var(--green);font-size:9px;font-weight:800;cursor:pointer">Keep</button>`
-      : s._forceKept
-        ? `<button onclick="removeFilterOverride('${s.symbol}')" title="Remove this filter override" style="margin-left:6px;padding:2px 6px;border-radius:5px;border:1px solid rgba(239,68,68,.35);background:rgba(239,68,68,.08);color:var(--red);font-size:9px;font-weight:800;cursor:pointer">Unkeep</button>`
-        : '';
-
-    const isWarmupScore=!ENGINE_DATA?.hasRecommendationEvidence;
-    const scoreText=isFinite(s.rocketScore)?s.rocketScore.toFixed(1):'—';
-    const scoreTitle=isWarmupScore
-      ? `Neutral warm-up score (${WARMUP_NEUTRAL_SCORE}). Allocation is equal across selected stocks until the first learned rocket-relevance score is available.`
-      : 'Learned Rocket Score from the rolling five-session rocket-relevance model.';
-    const roomCell=s._geometryUnverified
-      ? `<span style="font-size:9px;background:rgba(148,163,184,.14);color:var(--t2);border-radius:4px;padding:2px 5px;font-weight:700" title="Upper-band room unavailable; relevance-only ranking fallback.">room unverified</span>`
-      : s.velocityPotential!=null&&isFinite(Number(s.velocityPotential))
-        ? `<span style="color:${Number(s.velocityPotential)>=((s.geometryRequiredPct||0))?'var(--green)':'var(--amber)'};font-weight:700">${Number(s.velocityPotential).toFixed(2)}%</span>`
-        : '<span style="color:var(--t3);font-size:11px">—</span>';
-    let cells=`
-      <td style="text-align:center"><input type="checkbox" ${isSelected?'checked':''} ${s._filterPreview?'disabled':''} style="width:14px;height:14px;accent-color:var(--amber);cursor:${s._filterPreview?'not-allowed':'pointer'}" onchange="toggleStock('${s.symbol}',this.checked)"></td>
-      <td title="${escHtml(rankTitle(s))}" style="font-family:'DM Mono',monospace;font-weight:800;color:var(--t1);text-align:right">${s._rank??'—'}</td>
-      <td><span class="sc-m" title="${scoreTitle}">${scoreText}</span></td>
-      <td style="font-family:'Plus Jakarta Sans',sans-serif"><div style="font-weight:700;font-size:13px;color:var(--t1)">${s.symbol}${(()=>{const sv=s.seen||0;if(!sv) return '';return`<sub style="font-size:11px;color:var(--amber);font-weight:700;margin-left:3px;font-family:'DM Mono',monospace" title="Seen ${sv}× today">${sv}×</sub>`;})()}${filterBadge}${filterAction}${s._isTopUp?`<span style="font-size:8px;background:rgba(251,146,60,.15);color:var(--fire);border-radius:4px;padding:1px 5px;margin-left:5px;font-weight:700;vertical-align:middle">↑ TOP-UP</span>`:''}${(()=>{const c=Number(s.outcomeReliability||0),n=Number(s.outcomeEvidence||0);if(!(c>0)||!(n>0)) return '';const pct=Math.round(c*100);return `<span style="font-size:8px;background:rgba(167,139,250,.14);color:var(--purple);border-radius:4px;padding:1px 5px;margin-left:5px;font-weight:700;vertical-align:middle" title="Outcome-pattern confidence only. It does not change Rocket Score or rank. ${n} historical matches.">◉ ${pct}% CONF</span>`;})()}${(()=>{if(!s.isSurv) return '';const labels=(s.survRules||[]).map(k=>{const r=SURV_CUSTOM_RULES.find(x=>x.key===k);return r?r.label:k;}).join(' · ');return `<span style="font-size:8px;background:rgba(239,68,68,.15);color:var(--red);border-radius:4px;padding:1px 5px;margin-left:5px;font-weight:700;vertical-align:middle" title="NSE Surveillance: ${escHtml(labels)}">⚠ SURV</span>`;})()}</div><div style="font-size:9px;color:${s._filterPreview?'var(--amber)':'var(--t3)'};max-width:220px;overflow:hidden;text-overflow:ellipsis">${s._filterPreview||s._forceKept?escHtml(s._filterReason||'filtered'):(s.name+(s._isTopUp&&s._heldAvg?` · avg ${fmtINR(s._heldAvg)}`:''))}</div></td>
+    const canBuy=s.basketEligible!==false;
+    const scoreText=isFinite(s.score)?Number(s.score).toFixed(1):'—';
+    const stretchColor=s.stretch<=2.5?'var(--green)':s.stretch>3?'var(--red)':'var(--amber)';
+    const cells=`
+      <td style="text-align:center"><input type="checkbox" ${isSelected?'checked':''} ${canBuy?'':'disabled'} style="width:14px;height:14px;accent-color:var(--amber);cursor:${canBuy?'pointer':'not-allowed'}" onclick="event.stopPropagation()" onchange="toggleStock('${s.symbol}',this.checked)" title="${canBuy?'Include in the Zerodha basket export':'Ineligible for the basket'}"></td>
+      <td style="font-family:'DM Mono',monospace;font-weight:800;color:var(--t1);text-align:right">${s.rank??'—'}</td>
+      <td><span class="sc-m" title="Relative same-day composite score (0-100 percentile, top-weighted). It is a ranking, not a probability.">${scoreText}</span><span class="score-bar"><i style="width:${Math.max(0,Math.min(100,Number(s.score)||0))}%"></i></span></td>
+      <td style="font-family:'Plus Jakarta Sans',sans-serif"><div style="font-weight:700;font-size:13px;color:var(--t1)">${s.symbol}${(()=>{const flags=s.meta?.flags||[];if(!flags.length)return '';return `<span style="font-size:8px;background:rgba(239,68,68,.15);color:var(--red);border-radius:4px;padding:1px 5px;margin-left:5px;font-weight:700;vertical-align:middle" title="NSE surveillance flags: ${escHtml(flags.join(' · '))}">⚠ ${flags.length}</span>`;})()}</div><div style="font-size:9px;color:var(--t3);max-width:220px;overflow:hidden;text-overflow:ellipsis">${escHtml(s.name||'')}</div></td>
+      <td style="font-size:11px;color:var(--t2)">${escHtml(s.setup||'—')}</td>
+      <td>${radarSeriesBandPill(s)}</td>
+      <td style="color:${stretchColor};font-weight:700" title="A 10% move is this many multiples of the strongest daily-range estimate. Lower is more feasible.">${s.stretch!=null&&isFinite(s.stretch)?Number(s.stretch).toFixed(1)+'×':'—'}</td>
       <td>${fmtINR(s.price)}</td>
-      <td>${fPerf(s.snapshotChange)}</td>
-      <td>${fPerf(s.priceChange)}</td>
-      <td style="font-family:'DM Mono',monospace;font-weight:700;color:var(--amber)">${s.tslRefPoints!=null?Number(s.tslRefPoints).toFixed(2):'-'}</td>
-      <td>${roomCell}</td>
-      <td>${fDel(s.delivPct)}</td>
+      <td>${fPerf(s.day??s.priceChange)}</td>
+      <td>${s.relvol!=null&&isFinite(s.relvol)?Number(s.relvol).toFixed(2)+'×':'—'}</td>
+      <td>${fV(s.turnover)}</td>
       <td class="alloc-cell" data-sym="${s.symbol}">${(()=>{
         if(!am) return '<span style="color:var(--t3);font-size:11px">—</span>';
         return `<span style="color:var(--amber);font-weight:700;font-family:'DM Mono',monospace;font-size:12px">${fmtINR(am.alloc)}</span><div style="font-size:9px;color:var(--t3);margin-top:1px">${am.qty} ${unitLabel}</div>`;
       })()}</td>
-      <td>${fV(s.volume)}</td>`;
-
-    // Dynamic rocket-relevance feature cells — from COLS (already filtered for non-empty)
-    for(const c of COLS){
-      if(!c.isDynamic) continue;
-      const v=s._features?s._features[c.featKey]:null;
-      if(v===null||v===undefined) cells+='<td style="color:var(--t3);font-size:11px">—</td>';
-      else if(typeof v==='number'){
-        const c=v>0?'var(--green)':v<0?'var(--red)':'var(--t2)';
-        cells+=`<td style="color:${c};font-weight:600;font-size:11px">${v>=1000?fV(v):v.toFixed(v>=100?0:v>=10?1:2)}</td>`;
-      } else cells+=`<td style="font-size:10px;color:var(--t2)">${v}</td>`;
-    }
-    let _trStyle=s._filterPreview?'background:rgba(251,191,36,.035);outline:1px dashed rgba(251,191,36,.22);outline-offset:-1px':(s._forceKept?'background:rgba(34,197,94,.035);outline:1px solid rgba(34,197,94,.18);outline-offset:-1px':(s._isTopUp?'background:rgba(251,146,60,.05);outline:1px solid rgba(251,146,60,.18);outline-offset:-1px':''));
-    if(isSelected&&!s._forceKept&&!s._filterPreview) _trStyle='background:rgba(251,191,36,.04);outline:1px solid rgba(251,191,36,.12);outline-offset:-1px';
-    return`<tr style="${_trStyle}">${cells}</tr>`;
+      <td>${radarRiskPill(s.risk)}</td>`;
+    let _trStyle='cursor:pointer';
+    if(isSelected) _trStyle+=';background:rgba(251,191,36,.04);outline:1px solid rgba(251,191,36,.12);outline-offset:-1px';
+    return`<tr style="${_trStyle}" onclick="showRadarDetail('${s.symbol}')" title="Click for the full scoring breakdown">${cells}</tr>`;
   }).join('');
   renderPgn();
   updateSelectAll();
@@ -7557,14 +4250,7 @@ function doSort(col){if(SCOL===col)SDIR*=-1;else{SCOL=col;SDIR=-1;}applySort();P
 function applySort(){
   const col=SCOL;
   FILT.sort((a,b)=>{
-    let va,vb;
-    if(col.startsWith('_feat_')){
-      const fk=col.substring(6);
-      va=a._features?a._features[fk]:null;
-      vb=b._features?b._features[fk]:null;
-    } else {
-      va=a[col];vb=b[col];
-    }
+    const va=a[col],vb=b[col];
     if(va===null||va===undefined)return 1;if(vb===null||vb===undefined)return-1;
     if(typeof va==='string')return va.localeCompare(vb)*SDIR;return(va-vb)*SDIR;
   });
@@ -7577,106 +4263,51 @@ function toggleFilters(){
   if(a) a.textContent=collapsed?'▶':'▼';
 }
 function applyFilters(){
-  ALL.forEach(x=>{delete x._filterReason;delete x._filterPreview;delete x._forceKept;delete x._isTopUp;delete x._heldAvg;delete x._heldQty;delete x._topUpGain;delete x._isHeldRisk;delete x._heldDrop;delete x._geometryChecked;delete x._geometryUnverified;delete x._geometryBlocked;delete x.velocityPotential;delete x.normalizedVelocityPotential;delete x.rankScore;delete x._rank;delete x.geometryRiskPct;delete x.geometryRequiredPct;delete x.geometryRR;});
-  const hiddenReasons={};
-  const visible=[];
-  ALL.forEach(x=>{
-    const reason=getFilterBarReason(x);
-    if(reason) hiddenReasons[x.symbol]=reason;
-    else visible.push(x);
-  });
-  FILT=visible;
-  applyVelocityPotentialRanking(FILT);
-  GEOMETRY_GATE_SUMMARY={
-    input:ALL.filter(s=>s._geometryChecked).length,
-    gatedOut:ALL.filter(s=>s._geometryBlocked).length,
-    unverifiedFallback:FILT.filter(s=>s._geometryUnverified).length,
-    finalRecommended:0,
-    slCapClamped:ALL.filter(s=>s.slCapped).length,
-    velocityTilted:FILT.filter(s=>!s._geometryUnverified&&s.normalizedVelocityPotential>0).length
-  };
-
-  // Every held long position is excluded from new buys: no averaging down and no higher-price top-ups.
+  // The Radar composite pre-ranks every uploaded row; the filter bar only narrows
+  // what is displayed. Held positions were already suppressed at scoring time.
+  const q=(document.getElementById('fSearch')?.value||'').trim().toLowerCase();
+  const risk=document.getElementById('fRisk')?.value||'';
+  const turnIdx=+(document.getElementById('fMinTurnover')?.value||0);
+  const minTurn=RADAR_LIQ_STEPS[turnIdx]||0;
+  const rowsRaw=(document.getElementById('fRows')?.value||'').trim();
+  const rowCap=rowsRaw===''?20:Math.max(1,Math.floor(+rowsRaw)||20);
+  // Held suppression also applies here: portfolio files can parse after the scanner
+  // file in the same load, so display time re-checks the full current held map.
+  const heldPos=getHeldPositionMap();
   SUPPRESSED_HELD=0;
-  {
-    const heldPos=getHeldPositionMap();
-    if(Object.keys(heldPos).length){
-      FILT=FILT.filter(x=>{
-        const reason=applyHeldDisplayState(x,heldPos);
-        if(!reason) return true;
-        hiddenReasons[x.symbol]=reason;
-        SUPPRESSED_HELD++;
-        return false;
-      });
-    }
-  }
-  applyVelocityPotentialRanking(FILT);
-  GEOMETRY_GATE_SUMMARY.unverifiedFallback=FILT.filter(s=>s._geometryUnverified).length;
-  GEOMETRY_GATE_SUMMARY.velocityTilted=FILT.filter(s=>!s._geometryUnverified&&s.normalizedVelocityPotential>0).length;
-  assignDisplayRanks(FILT);
-  // v483: when a non-engine strategy is champion, it runs the show — its picks form
-  // the list, ordered by its own metric. All structural/entry gates above still apply.
-  const _pick=getPickState();
-  const yd=getYesterdayStateMaps();
-  FILT.forEach(s=>{s._champMetric=_pick.name==='engine'?Number(s.rankScore??s.rocketScore)||0:getChampionRowMetric(_pick.name,s,yd);});
-  if(_pick.name!=='engine'){
-    const dropped=FILT.filter(s=>s._champMetric===-Infinity);
-    dropped.forEach(s=>{hiddenReasons[s.symbol]=`Not picked by ${_pick.label}`;});
-    FILT=FILT.filter(s=>s._champMetric!==-Infinity);
-  }
-  const breadthState=getLiveBreadthRelationState();
-  if(_pick.name!=='breadth_relative'&&breadthState.available&&FILT.length){
-    const nativePct=percentileMap(FILT,s=>s._champMetric);
-    FILT.forEach(s=>{
-      s._nativeStrategyMetric=s._champMetric;
-      s._breadthRelation=breadthState.relation.get(s.symbol)??null;
-      s._champMetric=100*((0.8*(nativePct.get(s)||0))+(0.2*(breadthState.relationPct.get(s.symbol)||0)));
-    });
-  }
-  FILT.sort((a,b)=>b._champMetric-a._champMetric||a.symbol.localeCompare(b.symbol)).forEach((s,i)=>{s._rank=i+1;});
-
-  // Hard cap at 20 (Zerodha basket limit), optionally tightened by Top #.
-  const displayCap=getTopRankCap();
-  if(FILT.length>displayCap){
-    const rankSorted=[...FILT].sort((a,b)=>(a._rank??Infinity)-(b._rank??Infinity));
-    const capped=rankSorted.slice(0,displayCap);
-    rankSorted.slice(displayCap).forEach(x=>{hiddenReasons[x.symbol]=`Outside current top-${displayCap} display cap`;});
-    FILT=capped;
-  }
-  applySort();
-  GEOMETRY_GATE_SUMMARY.finalRecommended=FILT.length;
-  window._lastGeometryGateSummary={...GEOMETRY_GATE_SUMMARY};
-
-  const currentSyms=new Set(FILT.map(s=>s.symbol));
-  const overrideRows=[];
-  KEEP_FILTER_OVERRIDES.forEach(sym=>{
-    const s=ALL.find(x=>x.symbol===sym);
-    if(!s||currentSyms.has(sym)) return;
-    s._forceKept=true;
-    s._filterReason=hiddenReasons[sym]||getFilterBarReason(s)||'Display filter override';
-    overrideRows.push(s);
-    currentSyms.add(sym);
+  let rows=ALL.filter(s=>{
+    if(heldPos[s.symbol]){SUPPRESSED_HELD++;return false;}
+    return (s.turnover||0)>=minTurn&&(!risk||s.risk===risk)&&(!q||[s.symbol,s.name,s.sector].join(' ').toLowerCase().includes(q));
   });
-  const previewRows=[];
-  if(SHOW_FILTERED_CANDIDATES){
-    ALL.filter(s=>!currentSyms.has(s.symbol)&&hiddenReasons[s.symbol])
-      .sort((a,b)=>(b.rocketScore||0)-(a.rocketScore||0))
-      .slice(0,20)
-      .forEach(s=>{s._filterPreview=true;s._filterReason=hiddenReasons[s.symbol];previewRows.push(s);});
-  }
-  FILT=[...overrideRows,...FILT,...previewRows];
+  rows.sort((a,b)=>(a.rank??Infinity)-(b.rank??Infinity));
+  FILT=rows.slice(0,rowCap);
   applySort();
 
-  // SELECTED is auto-derived from FILT every filter pass. Checkboxes are a
-  // post-filter convenience for tweaking the export — not persisted state.
-  SELECTED=new Set(FILT.filter(s=>!s._filterPreview).map(s=>s.symbol));
-
-  window._lastHardFilterAudit=buildHardFilterAuditSnapshot(ALL,hiddenReasons);
-  if(ENGINE_DATA) ENGINE_DATA.hardFilterAudit=window._lastHardFilterAudit;
+  // SELECTED is auto-derived from FILT every filter pass: basket-eligible rows only,
+  // capped at Zerodha's 20-order limit. Checkboxes remain a post-filter convenience.
+  SELECTED=new Set(FILT.filter(s=>s.basketEligible!==false).slice(0,20).map(s=>s.symbol));
 
   PG=1;renderHead();renderTable();renderStatusBar();saveFilterState();updateTabCounts();
   if(ALL.length) try{renderStats();}catch(e){}
 }
+function showRadarDetail(sym){
+  const r=ALL.find(x=>x.symbol===sym);
+  const dlg=document.getElementById('radarDetail');
+  if(!r||!dlg) return;
+  document.getElementById('radarDetailTitle').textContent=`${r.symbol} · ${isFinite(r.score)?Number(r.score).toFixed(1):'—'} · ${r.risk||'—'} risk`;
+  const groups=Object.entries(RADAR_GROUPS).map(([k,g])=>`<div class="rr-group"><b>${g.label}<i>${r.parts?fmt(r.parts[k],0):'—'}/100</i></b><meter min="0" max="100" value="${r.parts?.[k]??0}"></meter></div>`).join('');
+  const contribs=[...(r.contrib||[])].sort((a,b)=>Math.abs(b.impact)-Math.abs(a.impact)).slice(0,36).map(x=>`<div class="rr-contrib"><div><b>${escHtml(x.name)}</b><small>${RADAR_GROUPS[x.group]?.label||x.group} · percentile ${fmt(x.p*100,0)}</small></div><b class="${x.impact>=0?'pos':'neg'}">${x.impact>=0?'+':''}${fmt(x.impact,3)}</b></div>`).join('');
+  const gate=r.rocketReady?'Meets the model’s high-feasibility criteria.':'Feasibility cautions: '+escHtml((r.gateReasons||[]).join(', ')||'not evaluated')+'.';
+  const flags=(r.meta?.flags||[]).length?escHtml(r.meta.flags.join(', ')):'none';
+  const detailNote=(r.contrib||[]).length?'':'<div style="color:var(--amber);font-size:11px;margin-bottom:8px">Restored compact ranking — load files again for the full per-feature breakdown.</div>';
+  document.getElementById('radarDetailBody').innerHTML=`${detailNote}<div class="rr-groups">${groups}</div>
+    <div class="rr-read"><b>Exchange check:</b> Series ${escHtml(r.series||'—')}, price band ${r.band??'not supplied'}, status ${escHtml(r.status||'—')}; basket ${r.basketEligible!==false?'eligible':'ineligible'}. Official delivery ${r.meta?.delivery==null?'unavailable':fmt(r.meta.delivery,1)+'%'}, trades ${r.meta?.trades==null?'unavailable':fmt(r.meta.trades,0)}, surveillance flags: ${flags}.<br>
+    <b>Feasibility:</b> ${gate} Strongest daily range estimate ${fmt(r.rangePct,2)}%; a 10% move is ${fmt(r.stretch,2)}× that range. The stock remains ranked either way.<br>
+    <b>Read:</b> ${escHtml(r.setup||'—')}. Data coverage ${r.quality!=null?fmt(r.quality*100,0)+'%':'—'}, day move ${(r.day??0)>=0?'+':''}${fmt(r.day,2)}%, relative volume ${r.relvol==null?'unavailable':fmt(r.relvol,2)+'×'}, turnover ${fV(r.turnover)}. Rank is relative, not a literal probability.</div>
+    ${contribs?`<h3 style="font-size:14px;margin:12px 0 8px">Largest feature contributions</h3><div class="rr-contribs">${contribs}</div>`:''}`;
+  dlg.showModal();
+}
+function closeRadarDetail(){document.getElementById('radarDetail')?.close();}
 
 let APPLY_FILTERS_TIMER=null;
 function scheduleApplyFilters(){
@@ -7688,12 +4319,12 @@ function scheduleApplyFilters(){
 function renderStatusBar(){
   const total=ALL.length,shown=FILT.length;
   const tags=[];
-  const minScore2=getMinScoreFloor();
-  const topRankPill=getTopRankFilterPill();
-  if(topRankPill)tags.push(topRankPill);
-  const _pickTag=getPickState();
-  if(_pickTag.name!=='engine')tags.push('Picks: '+_pickTag.label);
-  if(ENGINE_DATA?.hasRecommendationEvidence&&minScore2>0&&_pickTag.name==='engine')tags.push('Score≥'+minScore2);
+  const risk=document.getElementById('fRisk')?.value||'';
+  if(risk)tags.push(risk+' risk');
+  const turnIdx=+(document.getElementById('fMinTurnover')?.value||0);
+  if(turnIdx>0)tags.push('TO≥'+RADAR_LIQ_LABELS[turnIdx]);
+  const q=(document.getElementById('fSearch')?.value||'').trim();
+  if(q)tags.push('“'+escHtml(q)+'”');
   const capital=parseFloat(document.getElementById('fCapital').value)||0;
   const isFiltered=tags.length>0||shown<total;
   const countColor=shown<total?'var(--fire)':'var(--green)';
@@ -7732,20 +4363,16 @@ function renderStatusBar(){
   } else if(capital>0){
     html+=` <span style="color:var(--t3);font-size:11px;margin-left:8px">· select ${instrumentLabel} to allocate ${fmtINR(capital)}</span>`;
   }
+  if(SUPPRESSED_HELD>0)html+=` <span class="sb-tag" style="margin-left:8px" title="Held positions (Holdings + Positions + today's net Orders buys) never re-enter the buy ranking.">📌 ${SUPPRESSED_HELD} held suppressed</span>`;
   if(tags.length){html+=`<span class="sb-sep">|</span>`;html+=tags.map(t=>`<span class="sb-tag">${t}</span>`).join('');}
-  const previewCt=FILT.filter(s=>s._filterPreview).length;
-  const keptCt=FILT.filter(s=>s._forceKept).length;
-  html+=`<button class="sb-clear" onclick="toggleFilteredCandidates()" title="Review high-score engine candidates hidden by display filters" style="border-color:${SHOW_FILTERED_CANDIDATES?'rgba(251,191,36,.45)':'var(--border)'};color:${SHOW_FILTERED_CANDIDATES?'var(--amber)':'var(--t2)'}">${SHOW_FILTERED_CANDIDATES?'Hide':'Show'} filtered${previewCt?` (${previewCt})`:''}</button>`;
-  if(keptCt) html+=`<span class="sb-tag" title="Session-only. Clears on refresh, upload, or page reload.">${keptCt} kept this session</span>`;
   if(isFiltered)html+=`<button class="sb-clear" onclick="clearFilters()">✕ Clear filters</button>`;
   const el=document.getElementById('statusBar');
   if(el)el.innerHTML=html;
 }
 
 function clearFilters(){
-  ['fMinScore','fTopRank','fMaxAlloc'].forEach(id=>{const el=document.getElementById(id);if(el)el.value='';});
-  const topupEl=document.getElementById('fTopupAlloc');if(topupEl)topupEl.value='50';
-  const minScoreEl=document.getElementById('fMinScore');if(minScoreEl)minScoreEl.value='';
+  ['fSearch','fRisk','fRows'].forEach(id=>{const el=document.getElementById(id);if(el)el.value='';});
+  const turnEl=document.getElementById('fMinTurnover');if(turnEl)turnEl.value='0';
   applyLearnedMaxAllocDefault();
   applyFilters();
   localStorage.removeItem(SCANNER_STORE);
@@ -7912,8 +4539,7 @@ function exportBrain(){
   };
   out._summary={
     market:'Stocks',
-    sessions:brain[modeKey(CORR_STORE)]?.sessions||0,
-    features:brain[modeKey(METH_STORE)]?.features?.length||0
+    stocks:brain[modeKey(ALL_STORE)]?.data?.length||0
   };
   const json=JSON.stringify(out);
   out._sizeKB=Math.round(json.length/1024);
@@ -7923,7 +4549,7 @@ function exportBrain(){
   a.download=`rocket_brain_${new Date().toISOString().split('T')[0]}.json`;
   a.click();
   const s=out._summary;
-  showToast(`<strong>Brain exported</strong> (${out._sizeKB} KB) · ${s.sessions} sessions · ${s.features} features · ${s.stocks} stocks`);
+  showToast(`<strong>Brain exported</strong> (${out._sizeKB} KB) · ${s.stocks} cached ranked stocks`);
 }
 
 function importBrain(event){
@@ -7934,7 +4560,7 @@ function importBrain(event){
     try{
       const brain=JSON.parse(e.target.result);
       const isExport=!!(brain._version&&brain._version.startsWith('rscanner_brain'));
-      const isRawBrain=!!(brain&&typeof brain==='object'&&(brain[CORR_STORE]||brain[ALL_STORE]||brain[TRADEBOOK_STORE]||brain[SNAPSHOT_STATE_STORE]));
+      const isRawBrain=!!(brain&&typeof brain==='object'&&(brain[ALL_STORE]||brain[TRADEBOOK_STORE]||brain['rs_corr']||brain['rs_snapshot_mrmr_v1']||brain[SAME_DAY_EXIT_OPPORTUNITY_STORE]||brain[RECOMMEND_OUTCOME_STORE]));
       if(!isExport&&!isRawBrain){
         showToast('Invalid brain file — not a Rocket Scanner export.', 5000, true);return;
       }
@@ -7950,8 +4576,7 @@ function importBrain(event){
       data=pruneBrainForStorage(data);
       const ok=await FS.write(data);
       if(!ok){showToast('Failed to write brain file.', 5000, true);return;}
-      const s=brain._summary||{sessions:data[CORR_STORE]?.sessions||0};
-      showToast(`<strong>Brain imported</strong> — ${s.sessions||0} sessions · Reloading...`, 3000);
+      showToast(`<strong>Brain imported</strong> · Reloading...`, 3000);
       setTimeout(()=>location.reload(),1500);
     }catch(err){
       showToast('Failed to parse brain file: '+err.message, 5000, true);
@@ -7965,12 +4590,11 @@ function showBrainPrompt(){
   // Remove any existing toast
   const old=document.getElementById('brainToast');
   if(old) old.remove();
-  const sessions=ACC_CORR?.sessions||1;
   const toast=document.createElement('div');
   toast.className='brain-toast';
   toast.id='brainToast';
   toast.innerHTML=`
-    <div class="brain-toast-msg"><strong>Brain updated</strong> · ${sessions} session${sessions!==1?'s':''} accumulated</div>
+    <div class="brain-toast-msg"><strong>Brain updated</strong></div>
     <button class="brain-toast-btn" onclick="exportBrain();document.getElementById('brainToast')?.remove()">💾 Export Brain</button>
     <button class="brain-toast-x" onclick="this.parentElement.remove()" title="Dismiss">✕</button>`;
   document.body.appendChild(toast);
@@ -7987,12 +4611,10 @@ function resetBrain(btn){
     setTimeout(()=>{if(btn._stage===1){btn._stage=0;btn.innerHTML='🗑 Reset Brain';btn.style.background='';btn.style.borderColor='rgba(239,68,68,.3)';}},4000);
     return;
   }
-  // Stage 2: second click → final warning with stock-session count
+  // Stage 2: second click → final warning
   if(btn._stage===1){
-    const brain=FS.getBrain()||{};
-    const s=brain[CORR_STORE]?.sessions||0;
     btn._stage=2;
-    btn.innerHTML=`🗑 CONFIRM: clear ${s} learned horizons?`;
+    btn.innerHTML=`🗑 CONFIRM: clear saved app state?`;
     btn.style.background='rgba(239,68,68,.25)';btn.style.borderColor='var(--red)';btn.style.color='#fff';
     setTimeout(()=>{if(btn._stage===2){btn._stage=0;btn.innerHTML='🗑 Reset Brain';btn.style.background='';btn.style.borderColor='rgba(239,68,68,.3)';btn.style.color='var(--red)';}},6000);
     return;
@@ -8001,13 +4623,13 @@ function resetBrain(btn){
   FS.reset({});
   localStorage.removeItem(SCANNER_STORE);
   localStorage.removeItem(SHARED_FILTER_STORE);
-  ACC_CORR=null;SNAPSHOT_RUNTIME=null;
   ALL=[]; FILT=[]; ENGINE_DATA={};
+  RADAR={headers:[],matrix:[],features:[],ids:{},rockets:0,ms:0,sourceNote:'',scoredAt:null};
   HOLDINGS=[]; POSITIONS=[]; ORDERS_TODAY=null; TRADEBOOK_STATS=null; LAST_BUY_DATE_MAP={};
   HOLD_COST_MAP={}; SURV_CORR_ACC={};
   btn._stage=0;
   btn.innerHTML='🗑 Reset Brain';btn.style.background='';btn.style.borderColor='rgba(239,68,68,.3)';btn.style.color='var(--red)';
-  showToast('<strong>Brain reset.</strong> Cleared accumulated learning and saved filters. The next upload will establish a new snapshot baseline. Uploaded input files remain in Google Drive.',7000);
+  showToast('<strong>Brain reset.</strong> Cleared saved app state and filters. The next upload rebuilds the ranking fresh. Uploaded input files remain in Google Drive.',7000);
   setTimeout(()=>location.reload(),2000);
 }
 
@@ -8202,7 +4824,6 @@ async function hydrateSessionCSVsFromWorkspace(){
       if(selected.persist) updates[TRADEBOOK_STORE]=selected.persist;
       if(selected.meta) FS.set(TRADEBOOK_META_STORE,selected.meta);
     }
-    syncTradebookOutcomeEpisodes();
     updateFileLoadStatus('TRADEBOOK.csv','loaded');
   }
   syncExecutedRecommendedEntries();
@@ -8440,9 +5061,6 @@ function planBasketExport(capital, selected){
 
 
 function exportBasket(){
-  // Warm-up exports are allowed. Neutral score 50 produces equal allocation until
-  // an honest learned rocket-relevance score becomes available.
-  const isWarmup=!ENGINE_DATA?.hasRecommendationEvidence;
   const capital=parseFloat(document.getElementById('fCapital').value)||0;
   const selList=FILT.filter(s=>SELECTED.has(s.symbol));
   if(!selList.length){showToast('Select at least one stock first.',3000,true);return;}
@@ -8516,8 +5134,7 @@ function exportBasket(){
   const planNote=` · Harvest ${adaptiveTGT.toFixed(2)}% (net ~${harvestPlan.expectedNetPct.toFixed(2)}% after costs)`;
   const floorNote=harvestPlan.warning?` · target floor active`:``;
   const limitNote=limitOmitted>0?` · ${limitOmitted} lower-priority stock${limitOmitted===1?'':'s'} omitted to keep the basket within Zerodha's 20-order limit`:'';
-  const warmupNote=isWarmup?` · neutral warm-up ${WARMUP_NEUTRAL_SCORE.toFixed(1)} score, equal allocation`:'';
-  showToast(`<strong>Exported ${orders.length} CNC MARKET BUY orders</strong> as Zerodha_Basket_Buy JSON${targetNote}${planNote}${floorNote}${warmupNote}${rejNote}${limitNote}`);
+  showToast(`<strong>Exported ${orders.length} CNC MARKET BUY orders</strong> as Zerodha_Basket_Buy JSON${targetNote}${planNote}${floorNote}${rejNote}${limitNote}`);
 }
 
 // ── Basket export helper: Zerodha limits 20 orders per basket ──
@@ -8533,10 +5150,7 @@ function downloadBasket(orders, filename){
 function switchTab(n){
   document.querySelectorAll('#mainTabs .tab').forEach((t,i)=>t.classList.toggle('act',i===n));
   document.querySelectorAll('.tp').forEach((t,i)=>t.classList.toggle('act',i===n));
-  const ladderPanel=document.getElementById('pickLadderPanel');
-  if(ladderPanel) ladderPanel.style.display=n===0?'':'none';
   updateTabCounts();
-  if(n===0) renderPickLadderPanel();
   if(n===1) renderMethodology();
   if(n===2) renderPerformance();
 }
@@ -8544,7 +5158,7 @@ function updateTabCounts(){
   const c0=document.getElementById('tabCount0');
   const c1=document.getElementById('tabCount1');
   if(c0) c0.textContent=FILT.length?'('+FILT.length+')':'';
-  if(c1) c1.textContent=ENGINE_DATA?.features?'('+ENGINE_DATA.features.length+')':'';
+  if(c1) c1.textContent=RADAR.features.length?'('+RADAR.features.length+')':'';
 }
 
 // ── NSE Direct Fetch ──
@@ -8658,221 +5272,37 @@ function renderFileLoadStatus(){
 
 function captureScannerRuntime(){
   return {
-    mode:MARKET_MODE,ALL,FILT,ENGINE_DATA,ACC_CORR,SNAPSHOT_RUNTIME,
-    REMOVED,SCORE_MAP,COLS,_tvLoadedThisSession,
-    lastRawTV:window._lastRawTV,lastScannerSessionTag:window._lastScannerSessionTag,
-    lastEngineFeats:window._lastEngineFeats,lastParsedFiltered:window._lastParsedFiltered,lastParsedForSnapshot:window._lastParsedForSnapshot,
-    snapshotRuntimeDirty:window._snapshotRuntimeDirty
+    mode:MARKET_MODE,ALL,FILT,RADAR,_tvLoadedThisSession,
+    lastRawTV:window._lastRawTV,lastScannerSessionTag:window._lastScannerSessionTag
   };
 }
 function restoreScannerRuntime(s){
-  MARKET_MODE=s.mode;ALL=s.ALL;FILT=s.FILT;ENGINE_DATA=s.ENGINE_DATA;ACC_CORR=s.ACC_CORR;SNAPSHOT_RUNTIME=s.SNAPSHOT_RUNTIME;
-  REMOVED=s.REMOVED;SCORE_MAP=s.SCORE_MAP;COLS=s.COLS;_tvLoadedThisSession=s._tvLoadedThisSession;
+  MARKET_MODE=s.mode;ALL=s.ALL;FILT=s.FILT;RADAR=s.RADAR;_tvLoadedThisSession=s._tvLoadedThisSession;
   window._lastRawTV=s.lastRawTV;window._lastScannerSessionTag=s.lastScannerSessionTag;
-  window._lastEngineFeats=s.lastEngineFeats;window._lastParsedFiltered=s.lastParsedFiltered;window._lastParsedForSnapshot=s.lastParsedForSnapshot;
-  window._snapshotRuntimeDirty=s.snapshotRuntimeDirty;
 }
 function compactRankingRows(rows){
-  const featureKeys=ENGINE_DATA?.top10Feats||[];
+  // Compact startup-display cache for the Radar composite ranking. Group parts and the
+  // per-feature contribution list are session-only; a fresh upload restores full detail.
   return (rows||[]).map(s=>({
-    symbol:s.symbol,name:s.name,sector:s.sector,industry:s.industry,sectorBreadth:s.sectorBreadth,
-    price:s.price,priceChange:s.priceChange,snapshotChange:s.snapshotChange,rocketMove:s.rocketMove,
-    volume:s.volume,marketCap:s.marketCap,atr:s.atr,
-    high1d:s.high1d,low1d:s.low1d,vwap:s.vwap,piotroski:s.piotroski,shareholders:s.shareholders,
-    perf1w:s.perf1w,delivPct:s.delivPct,rangePos:s.rangePos,pctFrom52wHigh:s.pctFrom52wHigh,
-    rocketScore:s.rocketScore,flags:s.flags||[],isSurv:!!s.isSurv,survRules:s.survRules||null,
-    slPct:s.slPct,tgtPct:s.tgtPct,seen:s.seen||0,
-    _features:Object.fromEntries(featureKeys.filter(f=>s._features?.[f]!=null).map(f=>[f,s._features[f]]))
+    symbol:s.symbol,name:s.name,sector:s.sector,
+    price:s.price,day:s.day,priceChange:s.priceChange,
+    score:s.score,rocketScore:s.rocketScore,rank:s.rank,
+    setup:s.setup,risk:s.risk,series:s.series,band:s.band??null,status:s.status,
+    basketEligible:s.basketEligible!==false,eqEligible:s.eqEligible!==false,
+    stretch:s.stretch,rangePct:s.rangePct,relvol:s.relvol??null,gap:s.gap??null,
+    turnover:s.turnover,atr:s.atr??null,quality:s.quality??null,
+    rocketReady:!!s.rocketReady,gateReasons:(s.gateReasons||[]).slice(0,9),
+    meta:{delivery:s.meta?.delivery??null,trades:s.meta?.trades??null,flags:(s.meta?.flags||[]).slice(0,12),band:s.meta?.band??null}
   }));
-}
-function getIntradayRocketMove(row,priceKey,changeKey,highKey){
-  const closeMove=changeKey?Number(row?.[changeKey]):null;
-  const price=priceKey?Number(row?.[priceKey]):null;
-  const high=highKey?Number(row?.[highKey]):null;
-  let highMove=null;
-  if(isFinite(price)&&price>0&&isFinite(closeMove)&&1+(closeMove/100)>0&&isFinite(high)&&high>0){
-    const priorClose=price/(1+(closeMove/100));
-    if(priorClose>0) highMove=((high-priorClose)/priorClose)*100;
-  }
-  if(isFinite(highMove)&&isFinite(closeMove)) return Math.max(highMove,closeMove);
-  if(isFinite(highMove)) return highMove;
-  return isFinite(closeMove)?closeMove:null;
-}
-function snapshotHasData(snapshot){
-  return !!(snapshot&&(/^(u16|f32|f32-gzip)-column-v1$/.test(snapshot.format)?snapshot.symbols?.length&&snapshot.data:snapshot.stocks));
-}
-function cloneTelemetryRecord(snapshot){
-  const symbols=[...(snapshot?.symbols||[])];
-  const featureRows={};
-  symbols.forEach(symbol=>{featureRows[symbol]={...(snapshot?.featureRows?.[symbol]||{})};});
-  return {
-    ...snapshot,
-    symbols,
-    prices:Float32Array.from(snapshot?.prices||[]),
-    featureRows,
-    featureCols:[...(snapshot?.featureCols||[])],
-    rocketSymbols:[...(snapshot?.rocketSymbols||[])],
-    eligibleSymbols:[...(snapshot?.eligibleSymbols||[])]
-  };
-}
-function bytesToBase64(bytes){
-  let binary='';
-  for(let i=0;i<bytes.length;i+=0x8000) binary+=String.fromCharCode(...bytes.subarray(i,i+0x8000));
-  return btoa(binary);
-}
-function base64ToBytes(text){
-  const binary=atob(text||''),bytes=new Uint8Array(binary.length);
-  for(let i=0;i<binary.length;i++) bytes[i]=binary.charCodeAt(i);
-  return bytes;
-}
-async function gzipBytes(bytes){
-  if(typeof CompressionStream==='undefined') return null;
-  const stream=new Blob([bytes]).stream().pipeThrough(new CompressionStream('gzip'));
-  return new Uint8Array(await new Response(stream).arrayBuffer());
-}
-async function gunzipBytes(bytes){
-  if(typeof DecompressionStream==='undefined') throw new Error('This browser cannot decompress packed snapshots.');
-  const stream=new Blob([bytes]).stream().pipeThrough(new DecompressionStream('gzip'));
-  return new Uint8Array(await new Response(stream).arrayBuffer());
-}
-function snapshotStamp(receivedAt=Date.now()){
-  const clock=istClock(receivedAt);
-  return {
-    timestamp:clock.timestamp,
-    sessionDate:getModelTradingDate(clock.timestamp),
-    minutes:clock.mins,
-    // 16:00 ends live-market behaviour only. Model-day ownership rolls at the next
-    // valid 09:00 boundary, so post-market and pre-open receipts still revise D.
-    inSession:clock.mins>=DAY_START_MIN&&clock.mins<DAY_END_MIN,
-    baselineEligible:true,
-    telemetryEligible:true,
-  };
-}
-function isValidSnapshotTransition(previous,current){
-  // Retained for diagnostics: valid primary transitions are consecutive NSE trading days only.
-  return !!previous&&!!current&&!!(previous.baselineEligible??previous.inSession)&&!!current.inSession&&
-    tradingDaysBetween(previous.sessionDate,current.sessionDate)===1&&current.timestamp>previous.timestamp;
-}
-async function packFloat32Values(values){
-  const array=values instanceof Float32Array?values:Float32Array.from(values||[],v=>isFinite(v)?v:NaN);
-  const raw=new Uint8Array(array.buffer,array.byteOffset,array.byteLength),compressed=await gzipBytes(raw);
-  return {format:compressed?'f32-gzip-v1':'f32-v1',length:array.length,data:bytesToBase64(compressed||raw)};
-}
-async function unpackFloat32Values(source){
-  if(!source?.data) return new Float32Array(0);
-  const packed=base64ToBytes(source.data),bytes=source.format==='f32-gzip-v1'?await gunzipBytes(packed):packed;
-  const view=new Float32Array(bytes.buffer,bytes.byteOffset,Math.floor(bytes.byteLength/4));
-  return new Float32Array(view);
-}
-async function decodePackedDailyRecord(packed){
-  if(!packed) return null;
-  const prices=await unpackFloat32Values(packed.prices);
-  const featureRows=await decodeScannerSnapshot(packed.features);
-  return {
-    ...packed,
-    prices,
-    featureRows,
-    featureCols:packed.features?.cols||packed.featureCols||[],
-    rocketSymbols:Array.isArray(packed.rocketSymbols)?packed.rocketSymbols.map(normSym).filter(Boolean):[],
-    eligibleSymbols:Array.isArray(packed.eligibleSymbols)?packed.eligibleSymbols.map(normSym).filter(Boolean):[],
-    pickUploads:Array.isArray(packed.pickUploads)?packed.pickUploads.map(upload=>({
-      ts:Number(upload.ts)||0,
-      tag:upload.tag||null,
-      basis:upload.basis||null,
-      strategies:Object.fromEntries(Object.entries(upload.strategies||{}).map(([name,cohort])=>[name,compactStoredStrategyCohort(cohort)]))
-    })) : [],
-    filterUploads:Array.isArray(packed.filterUploads)?packed.filterUploads.map(compactFilterAuditUpload):[],
-    predictedSymbols:Array.isArray(packed.predictedSymbols)?packed.predictedSymbols.map(normSym).filter(Boolean):[],
-    sampleCount:Number(packed.sampleCount)||1
-  };
-}
-async function encodePackedDailyRecord(snapshot){
-  if(!snapshot) return null;
-  return {
-    timestamp:snapshot.timestamp,sessionDate:snapshot.sessionDate,minutes:snapshot.minutes,
-    inSession:snapshot.inSession,baselineEligible:snapshot.baselineEligible??snapshot.inSession,symbols:[...(snapshot.symbols||[])],
-    prices:await packFloat32Values(snapshot.prices),
-    features:snapshot.features||await packScannerSnapshot(
-      (snapshot.symbols||[]).map(symbol=>({symbol,...(snapshot.featureRows?.[symbol]||{})})),snapshot.featureCols||[]
-    ),
-    rocketSymbols:[...(snapshot.rocketSymbols||[])],
-    eligibleSymbols:[...(snapshot.eligibleSymbols||[])],
-    pickUploads:Array.isArray(snapshot.pickUploads)?snapshot.pickUploads.map(upload=>({
-      ts:Number(upload.ts)||0,
-      tag:upload.tag||null,
-      basis:upload.basis||null,
-      strategies:Object.fromEntries(Object.entries(upload.strategies||{}).map(([name,cohort])=>[name,compactStoredStrategyCohort(cohort)]))
-    })) : [],
-    filterUploads:Array.isArray(snapshot.filterUploads)?snapshot.filterUploads.map(compactFilterAuditUpload):[],
-    predictedSymbols:[...(snapshot.predictedSymbols||[])],
-    sampleCount:Number(snapshot.sampleCount)||1,
-    latestSessionTag:snapshot.latestSessionTag||null
-  };
-}
-async function decodeSnapshotState(source){
-  // v443 changes both the session ownership clock and feature-selection rule.
-  // Older packed telemetry is deliberately discarded rather than mixed with state
-  // created under a different trading-day contract.
-  if(!source||source.schema!==SNAPSHOT_STATE_SCHEMA) return emptySnapshotRuntime();
-  const decoded=[];
-  for(const packed of source.days||[]){
-    const day=await decodePackedDailyRecord(packed);
-    if(day?.sessionDate&&day.symbols?.length) decoded.push(day);
-  }
-  return {...emptySnapshotRuntime(),...source,schema:SNAPSHOT_STATE_SCHEMA,days:trimDailyRecords(decoded)};
-}
-async function encodeSnapshotState(runtime){
-  const days=[];
-  for(const day of trimDailyRecords(runtime?.days||[])) days.push(await encodePackedDailyRecord(day));
-  return {schema:SNAPSHOT_STATE_SCHEMA,days,
-    completed:Math.min(DAILY_TRAJECTORY_TOTAL_DAYS,Number(runtime?.completed)||days.length),
-    lastOutcome:runtime?.lastOutcome||null,lastTag:runtime?.lastTag||null};
-}
-async function packScannerSnapshot(rows,cols){
-  const clean=(rows||[]).filter(d=>normSym(d.symbol));
-  const values=new Float32Array(clean.length*cols.length);
-  clean.forEach((d,r)=>cols.forEach((f,c)=>{
-    const v=Number(d[f]);
-    values[r*cols.length+c]=isFinite(v)?v:NaN;
-  }));
-  const raw=new Uint8Array(values.buffer),compressed=await gzipBytes(raw);
-  return {format:compressed?'f32-gzip-column-v1':'f32-column-v1',cols,symbols:clean.map(d=>normSym(d.symbol)),
-    data:bytesToBase64(compressed||raw)};
-}
-async function decodeScannerSnapshot(source){
-  const out={};
-  if(source?.format==='f32-column-v1'||source?.format==='f32-gzip-column-v1'){
-    const packed=base64ToBytes(source.data),bytes=source.format==='f32-gzip-column-v1'?await gunzipBytes(packed):packed;
-    const values=new Float32Array(bytes.buffer,bytes.byteOffset,Math.floor(bytes.byteLength/4));
-    (source.symbols||[]).forEach((sym,r)=>{
-      const obj={};(source.cols||[]).forEach((f,c)=>{const v=values[r*source.cols.length+c];obj[f]=isFinite(v)?v:null;});
-      out[normSym(sym)]=obj;
-    });
-    return out;
-  }
-  if(source?.format==='u16-column-v1'){
-    const bytes=base64ToBytes(source.data),values=new Uint16Array(bytes.buffer,bytes.byteOffset,Math.floor(bytes.byteLength/2));
-    (source.symbols||[]).forEach((sym,r)=>{
-      const obj={};(source.cols||[]).forEach((f,c)=>{
-        const q=values[r*source.cols.length+c],min=source.mins?.[c],max=source.maxs?.[c];
-        obj[f]=q===65535||min==null||max==null?null:(max===min?min:min+(q/65534)*(max-min));
-      });
-      out[normSym(sym)]=obj;
-    });
-    return out;
-  }
-  if(source?.cols){Object.entries(source.stocks||{}).forEach(([sym,vals])=>{const obj={};source.cols.forEach((f,i)=>obj[f]=vals[i]);out[normSym(sym)]=obj;});return out;}
-  Object.entries(source?.stocks||source||{}).forEach(([sym,features])=>{if(features&&typeof features==='object')out[normSym(sym)]=features;});
-  return out;
 }
 function applySavedFiltersForMode(mode){
-  const ids=['fMinScore','fTopRank','fCapital','fMaxAlloc','fTopupAlloc'];
+  const ids=['fSearch','fRisk','fRows','fMinTurnover','fCapital','fMaxAlloc'];
   const prev={};
   ids.forEach(id=>{const el=document.getElementById(id);if(el)prev[id]=el.value;});
   try{
     const st=JSON.parse(localStorage.getItem(modeKey(SCANNER_STORE,mode))||'{}');
     const shared=JSON.parse(localStorage.getItem(SHARED_FILTER_STORE)||'{}');
-    const map={minScore:'fMinScore',topRank:'fTopRank',topupAlloc:'fTopupAlloc'};
+    const map={risk:'fRisk',rows:'fRows',minTurnover:'fMinTurnover'};
     Object.entries(map).forEach(([k,id])=>{const el=document.getElementById(id);if(el&&st[k]!=null)el.value=st[k];});
     const capEl=document.getElementById('fCapital');if(capEl&&shared.capital!=null)capEl.value=shared.capital;
     const maxEl=document.getElementById('fMaxAlloc');if(maxEl&&shared.maxAlloc!=null)maxEl.value=shared.maxAlloc;
@@ -8880,63 +5310,37 @@ function applySavedFiltersForMode(mode){
   return ()=>ids.forEach(id=>{const el=document.getElementById(id);if(el&&prev[id]!=null)el.value=prev[id];});
 }async function processScannerUpload(scannerFile, mode, options={}){
   if(!scannerFile) return false;
-  // This is the only scanner timestamp used by rocket relevance. File metadata, Drive metadata
+  // App receipt time remains the one session clock. File metadata, Drive metadata
   // and BUILD_TS are deployment/storage facts, never trading-session facts.
   const receivedAt=Date.now();
   const original=captureScannerRuntime();
   const restoreFilters=applySavedFiltersForMode(mode);
   let completed=false;
   MARKET_MODE=mode;
-  ACC_CORR=FS.get(modeKey(CORR_STORE,mode));
-  const correlationCompatible=ACC_CORR?.corrSchema===CORR_SCHEMA;
-  SNAPSHOT_RUNTIME=await decodeSnapshotState(FS.get(modeKey(SNAPSHOT_STATE_STORE,mode)));
-  window._snapshotRuntimeDirty=false;
-  if(!correlationCompatible){
-    SNAPSHOT_RUNTIME=emptySnapshotRuntime();
-    window._snapshotRuntimeDirty=true;
-  }
   try{
     setLoadMsg('Parsing stock TradingView data...');
     const text=await scannerFile.text();
     const raw=parseCSV(text);
     const ok=isAllNseFilename(scannerFile.name)||looksLikeAllNseRows(raw);
     if(!ok){console.warn('Non-scanner CSV ignored:',scannerFile.name,'rows:',raw.length);return false;}
-    setLoadMsg('Running stock rocket-relevance engine across '+raw.length+' stocks...');
+    setLoadMsg('Scoring '+raw.length+' stocks with the Radar composite...');
     await new Promise(r=>setTimeout(r,60));
     window._lastRawTV=raw;
     const sessionTag=scannerSessionTag(scannerFile.name,raw,text);
     const uploadSession=getModelTradingDate(receivedAt);
-    const receiptClock=istClock(receivedAt);
-    const receivedDuringMarket=receiptClock.mins>=DAY_START_MIN&&receiptClock.mins<DAY_END_MIN;
-    const isDuplicateSession=!!(SNAPSHOT_RUNTIME?.lastTag===sessionTag&&getLatestDailyRecord(SNAPSHOT_RUNTIME)?.sessionDate===uploadSession);
     window._lastScannerSessionTag=sessionTag;
-    const restoreOnly=options.restoreOnly===true;
-    ALL=await runEngine(raw,sessionTag,{
-      advanceSnapshot:!restoreOnly,
-      snapshotTimestamp:receivedAt
-    })||[];
-    enrichRowsWithNSEData(ALL);
-    ALL.sort((a,b)=>b.rocketScore-a.rocketScore);
-    const rcToday=uploadSession, rc=FS.get(modeKey(REC_COUNT_STORE,mode))||{};
-    if(!rc[rcToday])rc[rcToday]={};
-    const countSeen=!restoreOnly&&!isDuplicateSession&&receivedDuringMarket;
-    ALL.forEach(s=>{
-      if(countSeen) rc[rcToday][s.symbol]=(rc[rcToday][s.symbol]||0)+1;
-      s.seen=rc[rcToday][s.symbol]||0;
-    });
-    if(countSeen) FS.set(modeKey(REC_COUNT_STORE,mode),rc);
+    ALL=radarScoreRows(raw);
     const fileTag=scannerFile.name+' · '+raw.length+' stocks';
     try{const ft=document.getElementById('fileTag');if(ft)ft.textContent=fileTag;}catch(e){}
-    FS.set(modeKey(ALL_STORE,mode),{data:compactRankingRows(ALL),fileTag,ts:new Date().toISOString()});
-    if(window._snapshotRuntimeDirty&&SNAPSHOT_RUNTIME){
-      FS.set(modeKey(SNAPSHOT_STATE_STORE,mode),await encodeSnapshotState(SNAPSHOT_RUNTIME));
-    }
+    FS.set(modeKey(ALL_STORE,mode),{schema:ALL_STORE_SCHEMA,data:compactRankingRows(ALL),fileTag,rockets:RADAR.rockets,featureCount:RADAR.features.length,ts:new Date().toISOString()});
     if(mode==='stock'){
+      // The Harvest target and executed-entry feedback keep learning from flagged
+      // candidates' later attainable highs; the scorer itself stays stateless.
       const threshold=getEffectiveTgtPct()||TRADEBOOK_STATS?.adaptiveTGT||4;
       const eligibleCandidates=getDisplayedEntryCandidates(ALL).filter(s=>s.price>0);
-      const outcomeFeatureOrder=getOutcomeFeatureOrderFromEngine();
       const recommendations=eligibleCandidates
-        .map((s,i)=>({symbol:s.symbol,entryPrice:s.price,score:s.rocketScore,rank:i+1,features:compactOutcomeFeatures(s._features,outcomeFeatureOrder)}));
+        .map((s,i)=>({symbol:s.symbol,entryPrice:s.price,score:s.score,rank:i+1,features:{}}));
+      window._lastObservedDailyMoves=buildObservedDailyMoves(raw);
       window._lastStockOutcomeScan={
         date:uploadSession,sourceDate:uploadSession,ts:receivedAt,threshold,
         rows:window._lastObservedDailyMoves||[],
@@ -8944,29 +5348,6 @@ function applySavedFiltersForMode(mode){
       };
       recordRecommendationOutcomeScan(window._lastStockOutcomeScan);
       recordDisplayedEntryCohort({date:uploadSession,candidates:eligibleCandidates});
-      // 5-day rolling self-accuracy: attach today's flagged buy candidates to the stored
-      // day so later in-window uploads can score them against observed rockets. Reuses the
-      // 5-day snapshot store — nothing persists beyond the window.
-      if(SNAPSHOT_RUNTIME&&recordDayPredictions(SNAPSHOT_RUNTIME,uploadSession,eligibleCandidates.map(s=>s.symbol))){
-        FS.set(modeKey(SNAPSHOT_STATE_STORE,mode),await encodeSnapshotState(SNAPSHOT_RUNTIME));
-      }
-      if(SNAPSHOT_RUNTIME&&!restoreOnly&&!isDuplicateSession){
-        const pickUpload=buildAuthoritativePickUploadRecord({
-          runtime:SNAPSHOT_RUNTIME,
-          rows:ALL,
-          sessionDate:uploadSession,
-          sessionTag,
-          timestamp:receivedAt
-        });
-        const pickRecorded=pickUpload&&recordAuthoritativePickUpload(SNAPSHOT_RUNTIME,uploadSession,pickUpload);
-        const filterRecorded=recordFilterAuditUpload(SNAPSHOT_RUNTIME,uploadSession,buildFilterAuditUploadRecord({
-          rows:ALL,sessionTag,timestamp:receivedAt
-        }));
-        if(pickRecorded||filterRecorded){
-          FS.set(modeKey(SNAPSHOT_STATE_STORE,mode),await encodeSnapshotState(SNAPSHOT_RUNTIME));
-        }
-        if(pickRecorded) recordOutcomeEpisodesForAcceptedScan(window._lastStockOutcomeScan,pickUpload);
-      }
       syncExecutedRecommendedEntries();
     }
     FILT=[...ALL];_tvLoadedThisSession=true;
@@ -9097,7 +5478,6 @@ async function processFiles(files,sourceLabel){
       if(selected.persist) try{FS.set(TRADEBOOK_STORE,selected.persist);}catch(e){}
       if(selected.meta) try{FS.set(TRADEBOOK_META_STORE,selected.meta);}catch(e){}
     }
-    syncTradebookOutcomeEpisodes();
     updateFileLoadStatus('TRADEBOOK.csv','loaded');
   }
   syncExecutedRecommendedEntries();
@@ -9140,8 +5520,6 @@ document.getElementById('fMaxAlloc')?.addEventListener('input',e=>{delete e.targ
 // SCANNER FILTER PERSISTENCE
 // ══════════════════════════════════════════════════
 
-let ACC_CORR=null; // derived rocket relevance for the current rolling daily trajectory window
-let SNAPSHOT_RUNTIME=null; // decoded five-day per-stock daily telemetry window
 
 // ── Async app init: load brain file → hydrate all state → render ──
 async function initApp(){
@@ -9159,82 +5537,27 @@ async function initApp(){
   }
   if(brain){
     FS.load(brain);
-    const savedCorr=brain[modeKey(CORR_STORE)];
-    const correlationCompatible=savedCorr?.corrSchema===CORR_SCHEMA;
-    // Load NSE holidays first (needed for staleness check below)
+    // Load NSE holidays first (compact calendar is intentionally persisted).
     try{const hols=brain[NSE_HOLIDAYS_STORE];if(Array.isArray(hols)&&hols.length) NSE_HOLIDAYS=new Set(hols);}catch(e){}
 
-    // Step 1: Load correlations
-    try{
-      if(correlationCompatible){
-        ACC_CORR=savedCorr;
-      }else{
-        ACC_CORR={
-          corr:{},dailyCorr:{},sessions:0,learnSessions:0,dailySessions:0,lagPairs:[],corrSchema:CORR_SCHEMA
-        };
-        console.log('INIT: reset incompatible correlation and snapshot state for the rolling daily-telemetry model.');
-      }
-    }catch(e){}
-    try{
-      SNAPSHOT_RUNTIME=await decodeSnapshotState(brain[modeKey(SNAPSHOT_STATE_STORE)]);
-      if(!correlationCompatible) SNAPSHOT_RUNTIME=emptySnapshotRuntime();
-    }catch(e){SNAPSHOT_RUNTIME=emptySnapshotRuntime();}
-
-    // Step 2: Load scan data
+    // Step 1: Restore the compact Radar ranking cache for immediate display.
     try{
       const saved=brain[modeKey(ALL_STORE)];
-      if(saved&&saved.data&&saved.data.length){
-        const restoredHasEvidence=!!brain[modeKey(METH_STORE)]?.hasRecommendationEvidence;
-        ALL=saved.data.map(s=>({
-          flags:[],...s,symbol:normSym(s.symbol),
-          rocketScore:restoredHasEvidence&&correlationCompatible&&isFinite(s.rocketScore)
-            ?s.rocketScore
-            :WARMUP_NEUTRAL_SCORE
-        })).filter(s=>s.symbol);
-        SCORE_MAP=Object.fromEntries(ALL.map(s=>[s.symbol,s.rocketScore]));
+      if(saved?.schema===ALL_STORE_SCHEMA&&saved.data&&saved.data.length){
+        ALL=saved.data.map(s=>({...s,symbol:normSym(s.symbol)})).filter(s=>s.symbol);
+        RADAR.rockets=Number(saved.rockets)||0;
         FILT=[...ALL];
-        SELECTED=new Set(ALL.map(s=>s.symbol));
+        SELECTED=new Set(ALL.filter(s=>s.basketEligible!==false).slice(0,20).map(s=>s.symbol));
         if(saved.fileTag){const ft=document.getElementById('fileTag');if(ft)ft.textContent=saved.fileTag;}
-        if(saved.ts){const _ist=new Date(saved.ts+5.5*3600000);
-          // Track the saved scan date so the stale banner can check if it's from today
-          _scanSavedDate=_ist.toISOString().slice(0,10);
-        }
-        console.log('INIT: restored',ALL.length,'stocks from file');
-        // Restore Seen counts for today
-        try{const _rcS=brain[modeKey(REC_COUNT_STORE)];if(_rcS&&typeof _rcS==='object'){
-          const _rcD=_rcS[getSessionDate()]||{};
-          ALL.forEach(s=>{s.seen=_rcD[s.symbol]||0;});
-        }}catch(e){}
+        console.log('INIT: restored',ALL.length,'ranked stocks from the Radar cache');
+      } else if(saved?.data?.length){
+        console.log('INIT: pre-Radar ranking cache found; waiting for a fresh upload instead of restoring engine-era rows.');
       }
-    }catch(e){console.error('INIT step2 data failed:',e);}
+    }catch(e){console.error('INIT step1 data failed:',e);}
 
-    // Step 2b: Restore methodology
-    try{
-      const meth=brain[modeKey(METH_STORE)];
-      if(correlationCompatible&&meth&&meth.features&&meth.features.length){
-        ENGINE_DATA={...meth};
-        COLS=getCols();
-        // Restore REMOVED counts so filter pills show correctly on page load.
-        // Older brain snapshots counted null/blank values as removals; those counts
-        // are intentionally not restored under the current hard-filter schema.
-        if(meth.removed&&typeof meth.removed==='object'){
-          const restored=meth.hardFilterSchema===HARD_FILTER_SCHEMA?meth.removed:{};
-          REMOVED={uc:0,surv:0,nonEq:0,survRules:{},liq:0,fscore:0,atr:0,...restored};
-          delete REMOVED.rockets;
-          if(typeof REMOVED.survRules!=='object'||Array.isArray(REMOVED.survRules)) REMOVED.survRules={};
-          ENGINE_DATA.removed=REMOVED;
-        }
-        console.log('INIT: restored methodology data,',meth.features.length,'features');
-      }
-    }catch(e){console.error('INIT step2b meth restore failed:',e);}
-
-    // Step 2c: Restore compact learned/runtime state only. Holdings, positions,
-    // orders, and tradebook are source-derived and hydrate from canonical Drive inputs.
-    // Restore NSE holidays because this compact calendar is intentionally persisted.
-    try{const hols=brain[NSE_HOLIDAYS_STORE];if(Array.isArray(hols)&&hols.length) NSE_HOLIDAYS=new Set(hols);}catch(e){}
-
-    // Step 2d: Restore surveillance P&L correlation accumulator
+    // Step 2: Restore surveillance P&L correlation accumulator
     try{const sc=brain[SURV_CORR_STORE];if(sc&&typeof sc==='object') SURV_CORR_ACC=sc;}catch(e){}
+
     // Purge stale identity-column entries (one-time cleanup, no write-back needed)
     {const _pNF=new Set(['scripcode','symbol','nse exclusive','status','series']);
     Object.keys(SURV_CORR_ACC).forEach(k=>{const c=SURV_CORR_ACC[k]?.col||'';const hl=c.trim().toLowerCase();if(_pNF.has(hl)||/^filler/i.test(c.trim())) delete SURV_CORR_ACC[k];});}
@@ -9252,12 +5575,11 @@ async function initApp(){
   }
 
   // Restore configured surveillance rules, or seed the defaults for a fresh/reset brain,
-  // before REG1 ZIP hydration so hard filtering is active on the first new scan.
+  // before REG1 ZIP hydration so surveillance monitoring is active on the first new scan.
   try{loadSurvRules();}catch(e){SURV_CUSTOM_RULES=SURV_SEED_RULES.map(r=>({key:survRuleKey(r.column),column:r.column,label:r.label}));}
 
   // Prefer the same local upload folder used by Load Files; Drive copies are fallback.
   try{await hydrateSessionCSVsFromPreferredInputs('INIT');}catch(e){console.warn('INIT: input hydration failed',e);}
-  try{enrichRowsWithNSEData(ALL);}catch(e){console.warn('INIT: NSE row enrichment failed',e);}
 
   // Rankings render first; performance analytics are scheduled below as an idle task.
   try{const pe=document.getElementById('perfContent');if(pe&&!PERF_RENDERED)pe.innerHTML=`<div style="text-align:center;padding:60px 40px;color:var(--t2)"><div style="font-size:34px;margin-bottom:14px">📈</div><div style="font-size:15px;font-weight:700;color:var(--t1);margin-bottom:8px">Calculating performance</div><div>Rankings load first; trade analytics continue automatically.</div></div>`;}catch(e){}
@@ -9266,7 +5588,7 @@ async function initApp(){
   try{if(ALL.length) renderStats();}catch(e){console.error('INIT step3 renderStats failed:',e);}
 
   // Step 4: Render methodology
-  try{if(ALL.length&&ENGINE_DATA&&ENGINE_DATA.features) renderMethodology();}catch(e){console.error('INIT step4 renderMethodology failed:',e);}
+  try{renderMethodology();}catch(e){console.error('INIT step4 renderMethodology failed:',e);}
 
   // Step 5: Load filter state (still from localStorage)
   try{loadFilterState();}catch(e){console.error('INIT step5 loadFilterState failed:',e);}
@@ -9287,9 +5609,9 @@ initApp();
 
 function saveFilterState(){
   const state={
-    minScore:document.getElementById('fMinScore')?.value||String(MIN_SCORE_DEFAULT),
-    topRank:document.getElementById('fTopRank')?.value||'',
-    topupAlloc:document.getElementById('fTopupAlloc')?.value||'50',
+    risk:document.getElementById('fRisk')?.value||'',
+    rows:document.getElementById('fRows')?.value||'',
+    minTurnover:document.getElementById('fMinTurnover')?.value||'0',
     sortCol:SCOL,
     sortDir:SDIR,
   };
@@ -9305,21 +5627,19 @@ function loadFilterState(){
   try{
     const state=JSON.parse(localStorage.getItem(modeKey(SCANNER_STORE))||'{}');
     const shared=JSON.parse(localStorage.getItem(SHARED_FILTER_STORE)||'{}');
-    if(state.minScore){const el=document.getElementById('fMinScore');if(el)el.value=state.minScore;}
-    if(state.topRank!=null){const el=document.getElementById('fTopRank');if(el)el.value=state.topRank;}
+    if(state.risk!=null){const el=document.getElementById('fRisk');if(el)el.value=state.risk;}
+    if(state.rows!=null){const el=document.getElementById('fRows');if(el)el.value=state.rows;}
+    if(state.minTurnover!=null){const el=document.getElementById('fMinTurnover');if(el)el.value=state.minTurnover;}
     const sharedCapital=shared.capital!=null?shared.capital:state.capital;
     const sharedMaxAlloc=shared.maxAlloc!=null?shared.maxAlloc:state.maxAlloc;
     if(sharedCapital){const el=document.getElementById('fCapital');if(el)el.value=sharedCapital;}
     if(sharedMaxAlloc){const el=document.getElementById('fMaxAlloc');if(el)el.value=sharedMaxAlloc;}
-    if(state.topupAlloc!=null){const el=document.getElementById('fTopupAlloc');if(el)el.value=state.topupAlloc;}
     applyLearnedMaxAllocDefault();
-    if(state.sortCol==='rocketScore'&&Number(state.sortDir)<0){SCOL='_rank';SDIR=1;}
-    else {
-      if(state.sortCol)SCOL=state.sortCol;
-      if(state.sortDir)SDIR=state.sortDir;
-    }
+    // Legacy engine sort columns migrate to the Radar rank ordering once.
+    const legacy=new Set(['_rank','rocketScore','snapshotChange','tslRefPoints','velocityPotential','delivPct','volume']);
+    if(state.sortCol&&!legacy.has(state.sortCol))SCOL=state.sortCol;
+    if(state.sortDir&&!legacy.has(state.sortCol||''))SDIR=state.sortDir;
   }catch(e){console.warn('Could not load filter state',e);}
-
 }
 // ── Fixed horizontal scrollbar always at viewport bottom ──
 function initFixedScroll(){
