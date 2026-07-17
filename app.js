@@ -1,5 +1,5 @@
-const BUILD_TS='2026-07-17 19:59 IST'; // release build time (IST)
-const APP_VERSION=517; // Radar composite core: stateless same-day transparent scorer replaces the learning engine.
+const BUILD_TS='2026-07-17 20:14 IST'; // release build time (IST)
+const APP_VERSION=518; // Radar feature-parity completion: signed deal net, series letters, full-universe rows, persisted export exclusions.
 const GOOGLE_DRIVE_CLIENT_ID='1015012642264-oi2nelv3v90k3d39r994a6nelgjs2a56.apps.googleusercontent.com'; // Public OAuth Web Client ID.
 const PRICE_BAND_BLOCK_BUFFER_PCT=0.15; // Treat rounded 4.9/9.9/19.9 rows as effectively band-locked.
 const BASKET_CASH_RESERVE_RS=1; // Leave a rupee for broker-side tax/rounding differences.
@@ -85,6 +85,7 @@ let PERF_RENDER_WAITING_FOR_VISIBLE=false;
 let ENGINE_DATA={}; // legacy engine metadata shell; the Radar composite keeps its own RADAR state
 let SUPPRESSED_HELD=0; // count of stocks hidden because already held in POSITIONS
 let SELECTED=new Set(); // symbols selected for basket — recomputed from FILT each applyFilters
+let EXPORT_EXCLUDED=new Set(); // symbols the user unchecked from export — persisted in rs_filters
 let FILE_LOAD_STATUS={source:null,when:null,files:[]};
 // Radar composite scorer state (v517): one same-day transparent cross-sectional model.
 let RADAR={headers:[],matrix:[],features:[],ids:{},rockets:0,ms:0,sourceNote:'',scoredAt:null};
@@ -938,6 +939,8 @@ async function connectCloudStorage(opts={}){
 })();
 let NSE_BHAV={},NSE_52W={},NSE_SURV={},NSE_BULK={},NSE_BLOCK={},NSE_PRICE_BAND={};
 let NSE_STATUS={}; // {symbol -> exchange status letter from REG1 (A = active)}
+let NSE_SERIES={}; // {symbol -> exchange series letters from REG1 (EQ, BE, BZ, SM, ST, SZ)}
+let NSE_DEAL_NET={}; // {symbol -> signed net deal quantity (BUY − SELL) across bulk + block files}
 let NSE_NON_EQ=new Set(); // symbols in non-EQ series (BE,BZ,SZ,SM,ST) — excluded from display, kept in learning
 let NSE_HOLIDAYS=new Set(); // Set of 'YYYY-MM-DD' strings for NSE trading holidays
 let SURV_CUSTOM_RULES=[]; // [{key,column,label}] all surveillance rules — user-managed, persisted in brain
@@ -1338,6 +1341,7 @@ function parseSurv(text){
   const rows=parseCSV(text);
   NSE_SURV={};
   NSE_STATUS={};
+  NSE_SERIES={};
   NSE_NON_EQ=new Set();
   SURV_HEADERS=[];
   SURV_RULE_HITS={};
@@ -1377,7 +1381,7 @@ function parseSurv(text){
   rows.forEach(r=>{
     const sym=normSym(symCol?r[symCol]:r['Symbol']);if(!sym)return;
     // Track non-EQ series — BE/BZ/SZ/SM/ST can't be bought normally
-    if(seriesCol){const s=(r[seriesCol]||'').trim().toUpperCase();if(s&&s!=='EQ')NSE_NON_EQ.add(sym);}
+    if(seriesCol){const s=(r[seriesCol]||'').trim().toUpperCase();if(s){NSE_SERIES[sym]=s;if(s!=='EQ')NSE_NON_EQ.add(sym);}}
     if(statusCol){const st=(r[statusCol]||'').trim().toUpperCase();if(st)NSE_STATUS[sym]=st;}
     const hits=[];
     activeRules.forEach(rule=>{
@@ -1394,7 +1398,10 @@ function parseSurv(text){
 function parseDeal(text,map){
   parseCSV(text).forEach(r=>{
     const sym=normSym(r['Symbol']);if(!sym)return;
-    if((r['Buy/Sell']||'').trim().toUpperCase()==='BUY')map[sym]=true;
+    const side=(r['Buy/Sell']||'').trim().toUpperCase();
+    const qty=num(r['Quantity Traded'])||0;
+    if(side==='BUY'){map[sym]=true;NSE_DEAL_NET[sym]=(NSE_DEAL_NET[sym]||0)+qty;}
+    else if(side==='SELL'){NSE_DEAL_NET[sym]=(NSE_DEAL_NET[sym]||0)-qty;}
   });
 }
 function parseNSEHolidays(text){
@@ -1955,11 +1962,12 @@ function buildRadarSupplements(){
   const get=sym=>meta[sym]??={symbol:sym,flags:[],bulkNet:0};
   Object.entries(NSE_PRICE_BAND).forEach(([sym,pb])=>{const m=get(sym);m.band=pb?.bandPct??null;m.series=m.series||'EQ';});
   Object.entries(NSE_BHAV).forEach(([sym,b])=>{const m=get(sym);m.series=m.series||'EQ';m.delivery=b.delivPct;m.trades=b.trades;m.officialClose=b.officialClose;m.officialAvg=b.officialAvg;});
-  NSE_NON_EQ.forEach(sym=>{get(sym).series='NON-EQ';});
+  Object.entries(NSE_SERIES).forEach(([sym,ser])=>{const m=get(sym);if(ser)m.series=ser;});
   Object.entries(NSE_STATUS).forEach(([sym,st])=>{get(sym).status=st;});
   Object.entries(NSE_52W).forEach(([sym,w])=>{const m=get(sym);m.high52=w.high52w;m.low52=w.low52w;});
-  Object.keys(NSE_BULK).forEach(sym=>{get(sym).bulkNet+=1;}); // BUY-side bulk deals only are retained
-  Object.keys(NSE_BLOCK).forEach(sym=>{get(sym).bulkNet+=1;});
+  // Signed net deal quantity (BUY − SELL) across bulk + block files, matching the Radar:
+  // net buying earns +1.5, net selling −1.5 in the penalty layer.
+  Object.entries(NSE_DEAL_NET).forEach(([sym,net])=>{get(sym).bulkNet=Number(net)||0;});
   Object.entries(SURV_ALL_HITS).forEach(([sym,hits])=>{get(sym).flags=Object.keys(hits||{});});
   return meta;
 }
@@ -2025,7 +2033,7 @@ function radarAnalyze(headers,rawRows,supplements={},heldSymbols=new Set()){
     const impulseReady=(day>=.5&&day<8)||parts.momentum>=62||parts.trend>=65;
     const rocketReady=rangePct>=3.5&&participationReady&&impulseReady&&quality>=.7&&turn>=25e5&&price>=10&&basketEligible;
     const gateReasons=[];
-    if(series!=='EQ')gateReasons.push(series==='UNKNOWN'?'exchange series unverified':'non-EQ series');
+    if(series!=='EQ')gateReasons.push(series==='UNKNOWN'?'exchange series unverified':'non-EQ series '+series);
     if(status!=='A')gateReasons.push('inactive exchange status');
     if(band!==null&&band!==undefined&&band<10)gateReasons.push(band+'% price band cannot permit a 10% move');
     if(rangePct<3.5)gateReasons.push('range capacity below 3.5%');
@@ -2064,7 +2072,7 @@ function radarAnalyze(headers,rawRows,supplements={},heldSymbols=new Set()){
     r.score=+(100*Math.pow(radarPct(rawScores,r.rawScore),4)).toFixed(1);
     r.rocketScore=r.score; // allocation/export alias
     r.risk=!r.basketEligible||r.meta.flags?.length>=3||r.turnover<25e5||r.price<10?'High':(r.gap>6||r.day>6||r.parts.volatility<38?'Medium':'Low');
-    r.setup=r.series!=='EQ'?(r.series==='UNKNOWN'?'Series unverified':'Non-EQ series'):r.band!==null&&r.band<10?`${r.band}% price band`:radarSetupLabel(r);
+    r.setup=r.series!=='EQ'?(r.series==='UNKNOWN'?'Series unverified':`Non-EQ · ${r.series}`):r.band!==null&&r.band<10?`${r.band}% price band`:radarSetupLabel(r);
   }
   rows.sort((a,b)=>b.score-a.score||a.symbol.localeCompare(b.symbol));
   rows.forEach((r,i)=>{r.rank=i+1;});
@@ -2502,8 +2510,12 @@ function renderStats(){
   })();
 
   const topScore=top&&isFinite(top.score)?Number(top.score).toFixed(1):'—';
+  const riskCounts={Low:0,Medium:0,High:0};
+  FILT.forEach(s=>{if(riskCounts[s.risk]!=null)riskCounts[s.risk]++;});
+  const medianRisk=Object.entries(riskCounts).sort((a,b)=>b[1]-a[1])[0]?.[0]||'—';
+  const selCount=FILT.filter(s=>SELECTED.has(s.symbol)).length;
   const rocketsCard=`<div class="st"><div class="st-l">Rockets Today</div><div class="st-v" style="color:var(--fire)">${(RADAR.rockets||0).toLocaleString()}</div><div class="st-d">same-day ≥10% movers · shape today's archetype diagnostic</div></div>`;
-  const scoreCard=`<div class="st"><div class="st-l">Top Score</div><div class="st-v">${topScore}</div><div class="st-d">${FILT.length.toLocaleString()} displayed · ${RADAR.features.length||0} modeled features · relative, not probability</div></div>`;
+  const scoreCard=`<div class="st"><div class="st-l">Top Score</div><div class="st-v">${topScore}</div><div class="st-d">${FILT.length.toLocaleString()} displayed · ${selCount} selected for export · median risk ${medianRisk} · ${RADAR.features.length||0} modeled features</div></div>`;
 
   document.getElementById('statsBar').innerHTML=`
     <div class="st"><div class="st-l">Scanned Universe</div><div class="st-v">${t.toLocaleString()}</div><div class="st-d"><span style="color:var(--green)">${bull} up</span> · <span style="color:var(--red)">${t-bull} down/flat</span> · breadth ${t?(bull/t*100).toFixed(0):'—'}%</div></div>
@@ -3676,13 +3688,21 @@ function updateSelectAll(){
   renderBasketBtn();
 }
 function toggleSelectAll(checked){
-  if(checked)FILT.forEach(s=>SELECTED.add(s.symbol));
-  else FILT.forEach(s=>SELECTED.delete(s.symbol));
+  if(checked){
+    FILT.forEach(s=>EXPORT_EXCLUDED.delete(s.symbol));
+    SELECTED=new Set(FILT.filter(s=>s.basketEligible!==false).slice(0,20).map(s=>s.symbol));
+  } else {
+    FILT.forEach(s=>{if(s.basketEligible!==false)EXPORT_EXCLUDED.add(s.symbol);});
+    SELECTED.clear();
+  }
+  saveFilterState();
   renderTable();
   renderBasketBtn();
 }
 function toggleStock(sym,checked){
-  if(checked)SELECTED.add(sym);else SELECTED.delete(sym);
+  if(checked){EXPORT_EXCLUDED.delete(sym);SELECTED.add(sym);}
+  else{EXPORT_EXCLUDED.add(sym);SELECTED.delete(sym);}
+  saveFilterState();
   updateSelectAll();
   recomputeAlloc();
 }
@@ -4222,7 +4242,7 @@ function renderTable(){
     let _trStyle='cursor:pointer';
     if(isSelected) _trStyle+=';background:rgba(251,191,36,.04);outline:1px solid rgba(251,191,36,.12);outline-offset:-1px';
     return`<tr style="${_trStyle}" onclick="showRadarDetail('${s.symbol}')" title="Click for the full scoring breakdown">${cells}</tr>`;
-  }).join('');
+  }).join('')||'<tr><td colspan="13"><div style="padding:48px 20px;text-align:center;color:var(--t3)">No stocks match the filters you selected.</div></td></tr>';
   renderPgn();
   updateSelectAll();
 }
@@ -4246,7 +4266,7 @@ function scrollToSection(id){
   window.scrollTo({top:y,behavior:'smooth'});
 }
 function goP(p){PG=p;renderTable();scrollToSection('tHead');}
-function doSort(col){if(SCOL===col)SDIR*=-1;else{SCOL=col;SDIR=-1;}applySort();PG=1;renderHead();renderTable();saveFilterState();}
+function doSort(col){if(SCOL===col)SDIR*=-1;else{SCOL=col;SDIR=['symbol','setup','series','risk'].includes(col)?1:-1;}applySort();PG=1;renderHead();renderTable();saveFilterState();}
 function applySort(){
   const col=SCOL;
   FILT.sort((a,b)=>{
@@ -4269,8 +4289,9 @@ function applyFilters(){
   const risk=document.getElementById('fRisk')?.value||'';
   const turnIdx=+(document.getElementById('fMinTurnover')?.value||0);
   const minTurn=RADAR_LIQ_STEPS[turnIdx]||0;
+  // Rows: blank shows the entire ranked universe (Radar behavior); a number caps the display.
   const rowsRaw=(document.getElementById('fRows')?.value||'').trim();
-  const rowCap=rowsRaw===''?20:Math.max(1,Math.floor(+rowsRaw)||20);
+  const rowCap=rowsRaw===''?null:Math.max(1,Math.floor(+rowsRaw)||1);
   // Held suppression also applies here: portfolio files can parse after the scanner
   // file in the same load, so display time re-checks the full current held map.
   const heldPos=getHeldPositionMap();
@@ -4280,12 +4301,12 @@ function applyFilters(){
     return (s.turnover||0)>=minTurn&&(!risk||s.risk===risk)&&(!q||[s.symbol,s.name,s.sector].join(' ').toLowerCase().includes(q));
   });
   rows.sort((a,b)=>(a.rank??Infinity)-(b.rank??Infinity));
-  FILT=rows.slice(0,rowCap);
+  FILT=rowCap!=null?rows.slice(0,rowCap):rows;
   applySort();
 
-  // SELECTED is auto-derived from FILT every filter pass: basket-eligible rows only,
-  // capped at Zerodha's 20-order limit. Checkboxes remain a post-filter convenience.
-  SELECTED=new Set(FILT.filter(s=>s.basketEligible!==false).slice(0,20).map(s=>s.symbol));
+  // SELECTED is auto-derived from FILT every filter pass: basket-eligible rows minus the
+  // user's persisted exclusions, capped at Zerodha's 20-order limit.
+  SELECTED=new Set(FILT.filter(s=>s.basketEligible!==false&&!EXPORT_EXCLUDED.has(s.symbol)).slice(0,20).map(s=>s.symbol));
 
   PG=1;renderHead();renderTable();renderStatusBar();saveFilterState();updateTabCounts();
   if(ALL.length) try{renderStats();}catch(e){}
@@ -5369,7 +5390,7 @@ async function processFiles(files,sourceLabel){
   // Upload canonical input files to Drive in the background. Rankings are built from
   // the selected local files immediately, because the market does not wait for Drive.
   saveInputsInBackground(files);
-  NSE_BHAV={};NSE_52W={};NSE_SURV={};NSE_BULK={};NSE_BLOCK={};NSE_PRICE_BAND={};
+  NSE_BHAV={};NSE_52W={};NSE_SURV={};NSE_BULK={};NSE_BLOCK={};NSE_PRICE_BAND={};NSE_DEAL_NET={};NSE_STATUS={};NSE_SERIES={};
   let tvFile=null,nseZip=null,holdFile=null,posFile=null,ordFile=null,tbFile=null,holidayFile=false,holidayFileName='';
   for(const f of files){
     const name=inputNameLower(f.name);
@@ -5609,9 +5630,11 @@ initApp();
 
 function saveFilterState(){
   const state={
+    search:document.getElementById('fSearch')?.value||'',
     risk:document.getElementById('fRisk')?.value||'',
     rows:document.getElementById('fRows')?.value||'',
     minTurnover:document.getElementById('fMinTurnover')?.value||'0',
+    exportExcluded:[...EXPORT_EXCLUDED].slice(0,200),
     sortCol:SCOL,
     sortDir:SDIR,
   };
@@ -5627,9 +5650,11 @@ function loadFilterState(){
   try{
     const state=JSON.parse(localStorage.getItem(modeKey(SCANNER_STORE))||'{}');
     const shared=JSON.parse(localStorage.getItem(SHARED_FILTER_STORE)||'{}');
+    if(state.search!=null){const el=document.getElementById('fSearch');if(el)el.value=state.search;}
     if(state.risk!=null){const el=document.getElementById('fRisk');if(el)el.value=state.risk;}
     if(state.rows!=null){const el=document.getElementById('fRows');if(el)el.value=state.rows;}
     if(state.minTurnover!=null){const el=document.getElementById('fMinTurnover');if(el)el.value=state.minTurnover;}
+    EXPORT_EXCLUDED=new Set(Array.isArray(state.exportExcluded)?state.exportExcluded.map(normSym).filter(Boolean):[]);
     const sharedCapital=shared.capital!=null?shared.capital:state.capital;
     const sharedMaxAlloc=shared.maxAlloc!=null?shared.maxAlloc:state.maxAlloc;
     if(sharedCapital){const el=document.getElementById('fCapital');if(el)el.value=sharedCapital;}

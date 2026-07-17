@@ -223,3 +223,4 @@ dialog#radarDetail::backdrop{background:rgba(2,5,7,.87)}
 .rr-close{border:1px solid var(--border);background:transparent;color:var(--t2);padding:6px 9px;border-radius:6px;cursor:pointer}
 .rr-close:hover{color:var(--t1);border-color:var(--border-hi)}
 @media(max-width:700px){.rr-groups,.rr-contribs,.rr-diag{grid-template-columns:1fr}}
+@media(prefers-reduced-motion:reduce){*{animation:none!important;transition:none!important}}
