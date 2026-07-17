@@ -1,5 +1,5 @@
-const BUILD_TS='2026-07-17 20:14 IST'; // release build time (IST)
-const APP_VERSION=518; // Radar feature-parity completion: signed deal net, series letters, full-universe rows, persisted export exclusions.
+const BUILD_TS='2026-07-17 20:29 IST'; // release build time (IST)
+const APP_VERSION=519; // Held-positions Radar panel, folder auto-refresh, header menu, surveillance hard filter, search memoization.
 const GOOGLE_DRIVE_CLIENT_ID='1015012642264-oi2nelv3v90k3d39r994a6nelgjs2a56.apps.googleusercontent.com'; // Public OAuth Web Client ID.
 const PRICE_BAND_BLOCK_BUFFER_PCT=0.15; // Treat rounded 4.9/9.9/19.9 rows as effectively band-locked.
 const BASKET_CASH_RESERVE_RS=1; // Leave a rupee for broker-side tax/rounding differences.
@@ -84,6 +84,7 @@ let PERF_RENDER_QUEUED=false;
 let PERF_RENDER_WAITING_FOR_VISIBLE=false;
 let ENGINE_DATA={}; // legacy engine metadata shell; the Radar composite keeps its own RADAR state
 let SUPPRESSED_HELD=0; // count of stocks hidden because already held in POSITIONS
+let SURV_HARD_REMOVED=0; // count of stocks weeded out by configured surveillance rules
 let SELECTED=new Set(); // symbols selected for basket — recomputed from FILT each applyFilters
 let EXPORT_EXCLUDED=new Set(); // symbols the user unchecked from export — persisted in rs_filters
 let FILE_LOAD_STATUS={source:null,when:null,files:[]};
@@ -1623,7 +1624,7 @@ function getDisplayedEntryCandidates(rows){
   if(!Array.isArray(rows)||!rows.length) return [];
   const heldPos=getHeldPositionMap();
   return rows
-    .filter(s=>s.symbol&&Number(s.price)>0&&s.basketEligible!==false&&!heldPos[s.symbol])
+    .filter(s=>s.symbol&&Number(s.price)>0&&s.basketEligible!==false&&!s._held&&!heldPos[s.symbol]&&!NSE_SURV[s.symbol]?.length)
     .sort((a,b)=>(Number(b.score)||0)-(Number(a.score)||0)||a.symbol.localeCompare(b.symbol))
     .slice(0,20);
 }
@@ -2063,10 +2064,14 @@ function radarAnalyze(headers,rawRows,supplements={},heldSymbols=new Set()){
       high1d:highI>=0?radarNum(raw[highI]):null,low1d:lowI>=0?radarNum(raw[lowI]):null,rocketToday:day>=10,
       rocketReady,gateReasons,series,band:band??null,status,eqEligible,basketEligible,meta};
   });
-  // Held positions never re-enter the buy ranking; suppression uses the full held map
-  // (Holdings + Positions + today's net Orders), richer than an orders-only check.
-  const rows=allRows.filter(r=>!heldSymbols.has(r.symbol));
-  const suppressedHeld=allRows.length-rows.length;
+  // Held positions never re-enter the buy ranking, but they DO stay in the scored
+  // universe (marked _held) so the Held Positions panel can show how the engine sees
+  // them. Display/selection/outcome paths suppress _held rows; with ~1-2% of rows held
+  // the percentile shift vs the standalone Radar (which dropped them pre-percentile)
+  // is negligible, and this visibility was owner-requested.
+  allRows.forEach(r=>{r._held=heldSymbols.has(r.symbol);});
+  const rows=allRows;
+  const suppressedHeld=allRows.filter(r=>r._held).length;
   const rawScores=rows.map(r=>r.rawScore).sort((a,b)=>a-b);
   for(const r of rows){
     r.score=+(100*Math.pow(radarPct(rawScores,r.rawScore),4)).toFixed(1);
@@ -3355,9 +3360,9 @@ async function removeSurvRule(key){
   showToast('Surveillance rule removed.',2500);
 }
 function buildHardFilterMethodologyHTML(E){
-  // v517: surveillance columns no longer hard-remove rows. Every REG1 flag now enters
-  // the Radar composite as a score penalty and blocks nothing by itself; this table
-  // remains the configuration/monitoring surface for the columns you track.
+  // Configured rules are a HARD filter (owner 2026-07-17): any stock flagged under a
+  // rule in this table is weeded out of Rankings, selection, and outcome candidates.
+  // Non-configured REG1 flags remain a Radar score penalty + badge only.
   const addedRuleKeys=new Set(getSurvRules().map(r=>r.key));
   const availableCols=(SURV_FILE_RULES.length>0?SURV_FILE_RULES:SURV_HEADERS.filter(h=>{
     const hl=h.trim().toLowerCase();
@@ -3406,12 +3411,12 @@ function buildHardFilterMethodologyHTML(E){
 
   const survActiveThisSession=SURV_HEADERS.length>0;
   const survMeta=survActiveThisSession
-    ? `<div style="font-size:11px;color:var(--t3);margin-top:8px">REG1 file active this session. Every flagged REG1 column (not only the rows configured here) subtracts up to 12 points from the Radar composite score and appears on the stock's ⚠ badge.</div>`
-    : `<div style="margin-top:8px;padding:8px 10px;background:rgba(239,68,68,.08);border:1px solid rgba(239,68,68,.25);border-radius:8px;font-size:11px;color:var(--red)">NSE REG1 data not active — surveillance context is unavailable until a REG1 file is loaded.</div>`;
+    ? `<div style="font-size:11px;color:var(--t3);margin-top:8px">REG1 file active this session. Configured rules above are a hard filter — flagged stocks are removed from Rankings entirely. Every other flagged REG1 column still subtracts up to 12 points from the Radar composite score and appears on the stock's ⚠ badge.</div>`
+    : `<div style="margin-top:8px;padding:8px 10px;background:rgba(239,68,68,.08);border:1px solid rgba(239,68,68,.25);border-radius:8px;font-size:11px;color:var(--red)">NSE REG1 data not active — surveillance rules cannot filter until a REG1 file is loaded.</div>`;
 
   return `
-    <h3 id="meth-filters" style="margin-top:28px">Surveillance Monitoring (NSE REG1)</h3>
-    <p style="color:var(--t3);font-size:11px;margin-bottom:10px">Each row is an exact REG1 column you monitor. Flags penalize the composite score and mark the stock; exchange series, status and price band separately govern basket eligibility.</p>
+    <h3 id="meth-filters" style="margin-top:28px">Surveillance Hard Filters (NSE REG1)</h3>
+    <p style="color:var(--t3);font-size:11px;margin-bottom:10px">Each row is an exact REG1 column. Any stock flagged under a configured column is weeded out of Rankings, basket selection, and outcome tracking. Exchange series, status and price band separately govern basket eligibility.</p>
     <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:8px">
       <input id="survRuleInput" type="text" placeholder="${SURV_HEADERS.length?'Type to search REG1 columns…':'Load NSE ZIP to enable suggestions'}" list="survRuleDatalist" onkeydown="if(event.key==='Enter'){event.preventDefault();addSurvRule();}" style="flex:1;min-width:260px;padding:9px 12px;background:var(--bg-card);border:1px solid var(--border);border-radius:8px;color:var(--t1);font-size:12px;outline:none">
       <datalist id="survRuleDatalist">${datalistHtml}</datalist>
@@ -3810,7 +3815,16 @@ function getHarvestOutcomeSamples(){
   });
   return samples;
 }
+// Memoized: the plan only changes on new uploads/outcome writes, but hot render paths
+// (allocation cells, status bar, stats) used to recompute it on every keystroke.
+let _harvestPlanMemo=null;
 function computeHarvestPlan(){
+  if(_harvestPlanMemo&&Date.now()-_harvestPlanMemo.t<1500) return _harvestPlanMemo.v;
+  const v=_computeHarvestPlanUncached();
+  _harvestPlanMemo={t:Date.now(),v};
+  return v;
+}
+function _computeHarvestPlanUncached(){
   const samples=getHarvestOutcomeSamples();
   const netSamples=samples.map(s=>s.net).filter(v=>isFinite(v)).sort((a,b)=>a-b);
   const desiredNet=HARVEST_DESIRED_NET_PCT;
@@ -4009,10 +4023,14 @@ function calcPositionTSL({sym, qty, avgCost, ltp, scannerRow, adaptiveSL, adapti
   };
 }
 
+let _allocMemo=null; // single-entry memo: renderTable and renderStatusBar share one pass
 function computeAlloc(capital, selList){
   if(!capital||!selList.length) return {};
   const maxAllocEl=document.getElementById('fMaxAlloc');
   const maxAllocV=maxAllocEl?parseFloat(maxAllocEl.value)||0:0;
+  const effTgt=getEffectiveTgtPct();
+  const memoKey=capital+'|'+maxAllocV+'|'+effTgt+'|'+selList.map(s=>s.symbol+':'+s.price+':'+s.rocketScore).join(',');
+  if(_allocMemo?.key===memoKey) return _allocMemo.val;
   const cap=maxAllocV>0?maxAllocV:capital;
   const spendableCapital=Math.max(0,capital-BASKET_CASH_RESERVE_RS);
   const buyDebit=(buyP,qty)=>qty>0?(buyP*qty)+calcZerodhaCharges(buyP,qty,false,false,false):0;
@@ -4023,7 +4041,6 @@ function computeAlloc(capital, selList){
     return qty;
   };
   function evalNet(s,buyP,qty){
-    const effTgt=getEffectiveTgtPct();
     const tgtPct=(effTgt!=null&&isFinite(effTgt))?effTgt:((s.tgtPct!=null&&isFinite(s.tgtPct))?s.tgtPct:null);
     if(tgtPct===null||tgtPct<=0) return {ok:true,skip:true};
     const sellP=buyP*(1+tgtPct/100);
@@ -4076,6 +4093,7 @@ function computeAlloc(capital, selList){
     }
   }
   Object.values(allocMap).forEach(am=>delete am.limit);
+  _allocMemo={key:memoKey,val:allocMap};
   return allocMap;
 }
 function getRecommendedPositionSize(perfStats){
@@ -4295,9 +4313,17 @@ function applyFilters(){
   // Held suppression also applies here: portfolio files can parse after the scanner
   // file in the same load, so display time re-checks the full current held map.
   const heldPos=getHeldPositionMap();
+  // Portfolio files can parse after the scanner file, so the held flag is refreshed
+  // here from the full current map rather than trusting the scoring-time snapshot.
+  ALL.forEach(s=>{s._held=!!heldPos[s.symbol];});
   SUPPRESSED_HELD=0;
+  SURV_HARD_REMOVED=0;
   let rows=ALL.filter(s=>{
-    if(heldPos[s.symbol]){SUPPRESSED_HELD++;return false;}
+    if(s._held){SUPPRESSED_HELD++;return false;}
+    // Configured surveillance rules are a HARD filter (owner 2026-07-17): any stock
+    // flagged under a rule in the Methodology table is weeded out of recommendations.
+    // Non-configured REG1 flags remain a score penalty + badge only.
+    if(NSE_SURV[s.symbol]?.length){SURV_HARD_REMOVED++;return false;}
     return (s.turnover||0)>=minTurn&&(!risk||s.risk===risk)&&(!q||[s.symbol,s.name,s.sector].join(' ').toLowerCase().includes(q));
   });
   rows.sort((a,b)=>(a.rank??Infinity)-(b.rank??Infinity));
@@ -4309,7 +4335,52 @@ function applyFilters(){
   SELECTED=new Set(FILT.filter(s=>s.basketEligible!==false&&!EXPORT_EXCLUDED.has(s.symbol)).slice(0,20).map(s=>s.symbol));
 
   PG=1;renderHead();renderTable();renderStatusBar();saveFilterState();updateTabCounts();
+  try{renderHeldRadarPanel();}catch(e){console.warn('Held panel render failed',e);}
   if(ALL.length) try{renderStats();}catch(e){}
+}
+// Held positions viewed through the Radar's eyes: suppressed from recommendations,
+// but scored with the same composite so their current engine standing stays visible.
+function renderHeldRadarPanel(){
+  const el=document.getElementById('heldRadarPanel');
+  if(!el) return;
+  const heldPos=getHeldPositionMap();
+  const syms=Object.keys(heldPos);
+  if(!syms.length||!ALL.length){el.innerHTML='';return;}
+  const bySym=new Map(ALL.map(r=>[r.symbol,r]));
+  const rows=syms.map(sym=>{
+    const s=bySym.get(sym)||null;
+    const pos=heldPos[sym]||{};
+    const ltp=Number(s?.price)>0?Number(s.price):null;
+    const avg=Number(pos.avg)>0?Number(pos.avg):null;
+    const pnlPct=(ltp&&avg)?((ltp-avg)/avg)*100:null;
+    return {sym,s,qty:Number(pos.qty)||null,avg,ltp,pnlPct};
+  }).sort((a,b)=>{
+    const sa=isFinite(Number(a.s?.score))?Number(a.s.score):-1;
+    const sb=isFinite(Number(b.s?.score))?Number(b.s.score):-1;
+    return sb-sa||a.sym.localeCompare(b.sym);
+  });
+  const body=rows.map(r=>{
+    const sc=r.s&&isFinite(r.s.score)?Number(r.s.score).toFixed(1):'—';
+    const pnlColor=r.pnlPct==null?'var(--t3)':r.pnlPct>=0?'var(--green)':'var(--red)';
+    const dayCell=r.s?fPerf(r.s.day??r.s.priceChange):'—';
+    const clickAttr=r.s?` onclick="showRadarDetail('${r.sym}')" style="cursor:pointer" title="Click for the full scoring breakdown"`:'';
+    return `<tr${clickAttr}>
+      <td style="font-weight:700;color:var(--t1)">${r.sym}</td>
+      <td>${r.qty!=null?r.qty:'—'}</td>
+      <td>${fmtINR(r.avg)}</td>
+      <td>${fmtINR(r.ltp)}</td>
+      <td style="color:${pnlColor};font-weight:700">${r.pnlPct==null?'—':(r.pnlPct>=0?'+':'')+r.pnlPct.toFixed(2)+'%'}</td>
+      <td><span class="sc-m">${sc}</span>${r.s?`<span class="score-bar"><i style="width:${Math.max(0,Math.min(100,Number(r.s.score)||0))}%"></i></span>`:''}</td>
+      <td>${r.s?.rank??'—'}</td>
+      <td style="font-size:11px;color:var(--t2)">${escHtml(r.s?.setup||'not in this upload')}</td>
+      <td>${dayCell}</td>
+      <td>${r.s?radarRiskPill(r.s.risk):'—'}</td>
+    </tr>`;
+  }).join('');
+  el.innerHTML=`<div style="margin:16px 0;border:1px solid var(--border);border-radius:10px;background:var(--bg-card);overflow:hidden">
+    <div style="padding:10px 14px;font-weight:800;font-size:13px;color:var(--t1);border-bottom:1px solid var(--border)">📌 Held Positions — Radar View <span style="font-size:11px;font-weight:500;color:var(--t3)">scored by the same engine, never recommended again · exits live on the Performance tab</span></div>
+    <div style="overflow-x:auto"><table class="ct" style="min-width:820px"><thead><tr><th>Symbol</th><th>Qty</th><th>Avg ₹</th><th>LTP ₹</th><th>P&L %</th><th>Radar Score</th><th>Rank</th><th>Setup</th><th>Day %</th><th>Risk</th></tr></thead><tbody>${body}</tbody></table></div>
+  </div>`;
 }
 function showRadarDetail(sym){
   const r=ALL.find(x=>x.symbol===sym);
@@ -4384,7 +4455,8 @@ function renderStatusBar(){
   } else if(capital>0){
     html+=` <span style="color:var(--t3);font-size:11px;margin-left:8px">· select ${instrumentLabel} to allocate ${fmtINR(capital)}</span>`;
   }
-  if(SUPPRESSED_HELD>0)html+=` <span class="sb-tag" style="margin-left:8px" title="Held positions (Holdings + Positions + today's net Orders buys) never re-enter the buy ranking.">📌 ${SUPPRESSED_HELD} held suppressed</span>`;
+  if(SUPPRESSED_HELD>0)html+=` <span class="sb-tag" style="margin-left:8px" title="Held positions (Holdings + Positions + today's net Orders buys) never re-enter the buy ranking. See the Held Positions panel below.">📌 ${SUPPRESSED_HELD} held suppressed</span>`;
+  if(SURV_HARD_REMOVED>0)html+=` <span class="sb-tag sb-tag-red" style="margin-left:4px" title="Weeded out by the configured surveillance rules in the Methodology table (hard filter).">⚠ ${SURV_HARD_REMOVED} surveillance removed</span>`;
   if(tags.length){html+=`<span class="sb-sep">|</span>`;html+=tags.map(t=>`<span class="sb-tag">${t}</span>`).join('');}
   if(isFiltered)html+=`<button class="sb-clear" onclick="clearFilters()">✕ Clear filters</button>`;
   const el=document.getElementById('statusBar');
@@ -4397,6 +4469,25 @@ function clearFilters(){
   applyLearnedMaxAllocDefault();
   applyFilters();
   localStorage.removeItem(SCANNER_STORE);
+}
+function toggleHeaderMenu(){
+  const menu=document.getElementById('headerMenu');
+  if(!menu) return;
+  const isHidden=menu.style.display==='none';
+  if(isHidden){
+    menu.style.display='block';
+    ['goalPopover','requiredFilesPopover'].forEach(id=>{const p=document.getElementById(id);if(p)p.style.display='none';});
+    if(!window._headerMenuClickListener){
+      window._headerMenuClickListener=true;
+      document.addEventListener('click',(e)=>{
+        if(!e.target.closest('#headerMenu')&&!e.target.closest('#menuBtn')){
+          const m=document.getElementById('headerMenu');if(m)m.style.display='none';
+        }
+      });
+    }
+  } else {
+    menu.style.display='none';
+  }
 }
 function toggleGoalPopover(){
   const pop=document.getElementById('goalPopover');
@@ -4476,6 +4567,34 @@ async function getLocalUploadFolderFiles(){
     console.warn('Stored local upload folder could not be read',e);
     return null;
   }
+}
+
+// ── Folder auto-refresh (owner-approved 2026-07-17, ported from the standalone Radar) ──
+// Watches the granted local upload folder every 15 seconds; any change to file names,
+// sizes, or timestamps re-ingests the folder automatically. Silent when no folder grant
+// exists, permission was revoked, the tab is hidden, or a load is already running.
+let _folderWatchTimer=null,_folderWatchSig='',_folderWatchBusy=false;
+function folderSignature(files){
+  return (files||[]).map(f=>`${f.name}:${f.size}:${f.lastModified}`).sort().join('|');
+}
+async function folderWatchTick(){
+  if(_folderWatchBusy||document.hidden) return;
+  try{
+    const local=await getLocalUploadFolderFiles();
+    if(!local?.files?.length) return;
+    const sig=folderSignature(local.files);
+    if(!_folderWatchSig){_folderWatchSig=sig;return;} // first sight = baseline, no re-run
+    if(sig===_folderWatchSig) return;
+    _folderWatchSig=sig;
+    _folderWatchBusy=true;
+    showToast('Folder change detected — refreshing…',3000);
+    await processFiles(local.files,local.sourceLabel+' · auto-refresh');
+  }catch(e){console.warn('Folder watch tick failed',e);}
+  finally{_folderWatchBusy=false;}
+}
+function startFolderWatch(){
+  if(_folderWatchTimer) return;
+  _folderWatchTimer=setInterval(folderWatchTick,15000);
 }
 
 async function hydrateSessionCSVsFromPreferredInputs(reason='startup'){
@@ -5312,7 +5431,7 @@ function compactRankingRows(rows){
     basketEligible:s.basketEligible!==false,eqEligible:s.eqEligible!==false,
     stretch:s.stretch,rangePct:s.rangePct,relvol:s.relvol??null,gap:s.gap??null,
     turnover:s.turnover,atr:s.atr??null,quality:s.quality??null,
-    rocketReady:!!s.rocketReady,gateReasons:(s.gateReasons||[]).slice(0,9),
+    rocketReady:!!s.rocketReady,gateReasons:(s.gateReasons||[]).slice(0,9),_held:!!s._held,
     meta:{delivery:s.meta?.delivery??null,trades:s.meta?.trades??null,flags:(s.meta?.flags||[]).slice(0,12),band:s.meta?.band??null}
   }));
 }
@@ -5386,6 +5505,12 @@ async function processFiles(files,sourceLabel){
     return false;
   }
   setFileLoadStatus(sourceLabel||'Scanner Uploads',files,'not in folder');
+  // Surveillance rules must exist before REG1 parsing; the unauthorized-boot path can
+  // reach here without initApp having seeded them.
+  if(!SURV_CUSTOM_RULES.length){try{loadSurvRules();}catch(e){}}
+  // Any deliberate or automatic load resets the folder-watch baseline so the watcher
+  // does not immediately re-process the files it (or the user) just loaded.
+  try{_folderWatchSig=folderSignature([...files]);}catch(e){}
   setLoading(true,String(FILE_LOAD_STATUS.source?`Processing selected files... · ${FILE_LOAD_STATUS.source}`:'Processing selected files...'));
   // Upload canonical input files to Drive in the background. Rankings are built from
   // the selected local files immediately, because the market does not wait for Drive.
@@ -5625,6 +5750,8 @@ async function initApp(){
   try{applyFilters();}catch(e){console.error('INIT step7 applyFilters failed:',e);}
   setLoading(false);
   schedulePerformanceRender();
+  // Radar-style auto-refresh: watch the granted local folder for new/changed files.
+  startFolderWatch();
 }
 initApp();
 

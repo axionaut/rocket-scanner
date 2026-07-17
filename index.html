@@ -25,11 +25,14 @@
    <div class="tab" onclick="switchTab(1)">🔬 Methodology <span id="tabCount1" style="font-size:10px;opacity:.7"></span></div>
    <div class="tab" onclick="switchTab(2)">📈 Performance</div>
   </div>
-  <button class="btn" onclick="exportBrain()" title="Export Brain — download a copy of the brain file" style="font-size:11px">💾 Export</button>
-  <button class="btn" onclick="document.getElementById('brainIn').click()" title="Import Brain — restore from a previously exported file" style="font-size:11px">🧠 Import</button>
   <input type="file" id="brainIn" accept=".json" style="display:none" onchange="importBrain(event)">
-  <button class="btn" onclick="resetBrain(this)" title="Reset Brain - clear accumulated learning and saved filters while retaining one valid prior-session comparison snapshot. Uploaded input files remain in Drive." style="font-size:11px;border-color:rgba(239,68,68,.3);color:var(--red)">🗑 Reset Brain</button>
   <div style="position:relative;display:flex;align-items:center">
+    <button class="btn" id="menuBtn" onclick="toggleHeaderMenu()" title="Brain backup, restore and reset" style="font-size:14px;padding:8px 12px">☰</button>
+    <div id="headerMenu" style="display:none;position:absolute;top:100%;left:0;margin-top:8px;background:var(--bg-raised);border:1px solid var(--border-hi);border-radius:10px;padding:8px;z-index:1000;box-shadow:0 8px 32px rgba(0,0,0,.35);min-width:190px">
+      <button onclick="exportBrain();toggleHeaderMenu()" title="Export Brain — download a copy of the brain file" style="display:block;width:100%;text-align:left;padding:9px 12px;background:transparent;border:0;border-radius:7px;color:var(--t1);font-family:inherit;font-size:12px;cursor:pointer" onmouseover="this.style.background='var(--bg-hover)'" onmouseout="this.style.background='transparent'">💾 Export Brain</button>
+      <button onclick="document.getElementById('brainIn').click();toggleHeaderMenu()" title="Import Brain — restore from a previously exported file" style="display:block;width:100%;text-align:left;padding:9px 12px;background:transparent;border:0;border-radius:7px;color:var(--t1);font-family:inherit;font-size:12px;cursor:pointer" onmouseover="this.style.background='var(--bg-hover)'" onmouseout="this.style.background='transparent'">🧠 Import Brain</button>
+      <button onclick="resetBrain(this)" title="Reset Brain — clear saved app state and filters. Uploaded input files remain in Drive." style="display:block;width:100%;text-align:left;padding:9px 12px;background:transparent;border:0;border-radius:7px;color:var(--red);font-family:inherit;font-size:12px;cursor:pointer" onmouseover="this.style.background='var(--bg-hover)'" onmouseout="this.style.background='transparent'">🗑 Reset Brain</button>
+    </div>
     <button class="btn" id="driveBtn" onclick="connectCloudStorage()" title="Connect or reconnect Google Drive">Drive</button>
     <button class="btn btn-fire" id="loadFilesBtn" onclick="handleCloudLoadAction()">Load Files</button>
     <button class="btn" onclick="toggleGoalPopover()" title="Goal settings" style="font-size:14px;padding:8px 12px;margin-left:4px">⚙ Goal</button>
@@ -77,6 +80,7 @@
   <div class="tbl-w" id="tblW"><table class="main"><thead id="tHead"></thead><tbody id="tBody"></tbody></table></div>
   </div>
   <div class="pgn" id="pgn"></div>
+  <div id="heldRadarPanel"></div>
   <div class="fixed-hscroll" id="fixedHScroll"><div class="fixed-hscroll-inner" id="fixedHScrollInner"></div></div>
  </div>
  <div class="tp" id="tab1"><div class="meth" id="methContent"></div></div>

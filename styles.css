@@ -160,7 +160,7 @@ table.main tbody td{padding:9px 11px;font-family:'DM Mono',monospace;font-size:1
 @media(max-width:480px){
   .stats{grid-template-columns:repeat(2,1fr)}
   .fg{min-width:calc(50% - 6px)}
-  .hdr-r .btn:not(#driveBtn):not(#loadFilesBtn){display:none}
+  .hdr-r .btn:not(#driveBtn):not(#loadFilesBtn):not(#menuBtn){display:none}
   #mobileMenuBtn{display:flex}
 }
 @media(max-width:768px){.hdr{padding:16px 0}.app{padding:0 12px}}
