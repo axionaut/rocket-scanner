@@ -1,5 +1,5 @@
-const BUILD_TS='2026-07-17 09:17 IST'; // release build time (IST)
-const APP_VERSION=513; // Daily strategy generator removed; Confirmed Donchian Volume Breakout ladder strategy added.
+const BUILD_TS='2026-07-17 09:34 IST'; // release build time (IST)
+const APP_VERSION=514; // Honest horizon hit counts and completed-cohort net returns in the pick ladder.
 const GOOGLE_DRIVE_CLIENT_ID='1015012642264-oi2nelv3v90k3d39r994a6nelgjs2a56.apps.googleusercontent.com'; // Public OAuth Web Client ID.
 const HARD_FILTER_SCHEMA='structural_tradeability_v2';
 const STOCK_RUNWAY_CEILING_PCT=19.5; // Intentional owner-approved forward-catch strategy filter: excludes stocks already near their circuit band (or caps max entry) since a stock that has already used up its daily range is a poor pre-rocket buy. Active fallback when NSE price-band data is unavailable.
@@ -1820,8 +1820,10 @@ function updateOutcomeEpisodesFromScan(ledger,scan){
   });
   return changed;
 }
-function episodeReturnAtHorizon(episode,horizon){
+function episodeReturnAtHorizon(episode,horizon,asOfDate){
   if(episode?.legacy) return null;
+  const age=asOfDate?tradingDaysBetween(episode.entryDate,asOfDate):null;
+  if(age==null||age<horizon) return null;
   const hit=episode.milestones?.[10];
   if(hit&&Number(hit.sessions)<=horizon) return 10;
   const observation=(episode.observations||[]).filter(item=>Number(item.s)>=horizon).sort((a,b)=>a.s-b.s)[0];
@@ -1831,7 +1833,7 @@ function calculateOutcomeHorizon(ledger,sessionDate){
   const episodes=Object.values(ledger.episodes||{}).filter(item=>item.source==='strategy'&&!item.legacy);
   const entryDates=new Set(episodes.map(item=>item.entryDate));
   const stats=OUTCOME_HORIZON_CANDIDATES.map(horizon=>{
-    const returns=episodes.map(episode=>episodeReturnAtHorizon(episode,horizon)).filter(value=>value!=null&&isFinite(value));
+    const returns=episodes.map(episode=>episodeReturnAtHorizon(episode,horizon,sessionDate)).filter(value=>value!=null&&isFinite(value));
     const avgReturn=returns.length?meanArr(returns):null;
     return {horizon,count:returns.length,avgReturn:avgReturn==null?null:+avgReturn.toFixed(3),velocity:avgReturn==null?null:+(avgReturn/horizon).toFixed(4)};
   });
@@ -1892,11 +1894,12 @@ function medianOutcomeValue(values){
 }
 function getOutcomeEpisodeAnalytics(){
   const ledger=getOutcomeEpisodeLedger();
+  const asOfDate=ledger.horizon?.lastDate||null;
   const episodes=Object.values(ledger.episodes||{}).filter(item=>item.source==='strategy'&&!item.legacy);
   const completed=episodes.filter(item=>item.status==='hit'||item.status==='expired');
   const rate=target=>completed.length?completed.filter(item=>item.milestones?.[target]).length/completed.length:null;
   const curves=OUTCOME_HORIZON_CANDIDATES.map(horizon=>{
-    const evaluable=episodes.filter(item=>episodeReturnAtHorizon(item,horizon)!=null);
+    const evaluable=episodes.filter(item=>episodeReturnAtHorizon(item,horizon,asOfDate)!=null);
     const hits=evaluable.filter(item=>Number(item.milestones?.[10]?.sessions)<=horizon).length;
     const unresolved=evaluable.filter(item=>!(Number(item.milestones?.[10]?.sessions)<=horizon)).map(item=>{
       const observation=(item.observations||[]).filter(row=>Number(row.s)>=horizon).sort((a,b)=>a.s-b.s)[0];
@@ -3335,6 +3338,7 @@ function addActualYouRow(ladder,days){
 function computeEpisodeStrategyLadder(){
   const ledger=getOutcomeEpisodeLedger();
   const horizon=Math.max(1,Number(ledger.horizon?.active)||Number(getAdaptiveOutcomeHorizonDays?.())||OUTCOME_EPISODE_MAX_SESSIONS);
+  const asOfDate=ledger.horizon?.lastDate||null;
   const episodes=Object.values(ledger.episodes||{}).filter(item=>!item.legacy);
   const strategyEpisodes=episodes.filter(item=>item.source==='strategy');
   const newestEntryDate=strategyEpisodes.map(item=>item.entryDate).filter(Boolean).sort().slice(-1)[0]||null;
@@ -3342,10 +3346,12 @@ function computeEpisodeStrategyLadder(){
   // Legacy auto_* generator episodes are pruned on ledger read; skip any stragglers here.
   strategyEpisodes.forEach(item=>{if(item.strategy&&!String(item.strategy).startsWith('auto_'))names.add(item.strategy);});
   const buildRow=(name,all)=>{
-    const pending=all.filter(item=>item.entryDate===newestEntryDate);
+    const outcomes=all.map(episode=>({episode,value:episodeReturnAtHorizon(episode,horizon,asOfDate)}));
+    const pending=outcomes.filter(item=>item.value==null||!isFinite(item.value)).map(item=>item.episode);
     const mature=all.filter(item=>item.entryDate!==newestEntryDate);
-    const evaluated=mature.map(episode=>({episode,value:episodeReturnAtHorizon(episode,horizon)})).filter(item=>item.value!=null&&isFinite(item.value));
+    const evaluated=outcomes.filter(item=>item.value!=null&&isFinite(item.value));
     const horizonHits=evaluated.filter(item=>Number(item.episode.milestones?.[10]?.sessions)<=horizon).length;
+    const observedHorizonHits=all.filter(item=>Number(item.milestones?.[10]?.sessions)<=horizon).length;
     const sameDayHits=mature.filter(item=>Number(item.milestones?.[10]?.sessions)===0).length;
     const moveMinutes=mature.map(item=>{
       const milestone=item.milestones?.[3];
@@ -3360,7 +3366,8 @@ function computeEpisodeStrategyLadder(){
     return {name,label:getPickStrategyLabel(name),championEligible:isChampionEligible(name),evidenceStatus:'authoritative',episodeBased:true,horizon,
       observationDays:new Set(mature.map(item=>item.evaluatedThrough).filter(Boolean)).size,
       evalDays:new Set(evaluated.map(item=>item.episode.entryDate)).size,entryDays:new Set(all.map(item=>item.entryDate)).size,
-      flagged:all.length,pendingFlagged:pending.length,hits:horizonHits,hitRate:evaluated.length?horizonHits/evaluated.length:null,
+      flagged:all.length,pendingFlagged:pending.length,evaluatedFlagged:evaluated.length,hits:horizonHits,hitRate:evaluated.length?horizonHits/evaluated.length:null,
+      observedHorizonHits,observedHorizonRate:all.length?observedHorizonHits/all.length:null,
       sameDay10Rate:mature.length?sameDayHits/mature.length:null,doveBeforeMilestoneRate:mature.length?doveBefore/mature.length:null,
       medianMinutesToMove:moveMinutes.length?+medianOutcomeValue(moveMinutes).toFixed(1):null,
       exitNetPct:net.length?+meanArr(net).toFixed(2):null,firstDate:all.map(item=>item.entryDate).sort()[0]||null};
@@ -3670,8 +3677,8 @@ function buildPickDiagnostics(ladder,runtime){
     unionDayCount,
     legacyOnly:!authDays.length,
     correlatedPairs:pairs.slice(0,3),
-    engineCohortSize:(Number(engineRow?.flagged)||0)+(Number(engineRow?.pendingFlagged)||0),
-    challengerCohortSize:(Number(bestChallenger?.flagged)||0)+(Number(bestChallenger?.pendingFlagged)||0),
+    engineCohortSize:Number(engineRow?.flagged)||0,
+    challengerCohortSize:Number(bestChallenger?.flagged)||0,
     bestChallenger:bestChallenger?{name:bestChallenger.name,label:bestChallenger.label,exitNetPct:bestChallenger.exitNetPct,peakNetPct:bestChallenger.peakNetPct}:null
   };
 }
@@ -5042,9 +5049,14 @@ function buildPickLadderHTML(){
     const rule=PICK_STRATEGY_RULES[r.name]||'';
     const examples=(r.rocketExamples||[]).slice(0,8);
     const exampleHtml=examples.length?`<div style="margin-top:3px;font-size:10px;line-height:1.35;color:var(--t3)">Top rockets: ${examples.map(item=>escHtml(item)).join(' | ')}</div>`:'';
-    return `<tr title="${escHtml(rule)}" style="${isCh?'font-weight:800;color:var(--t1)':''}"><td>${label}${exampleHtml}</td><td>${r.entryDays||0}</td><td>${r.flagged||0}</td><td>${r.pendingFlagged||0}</td><td style="font-weight:800">${pct(r.sameDay10Rate)}</td><td>${pct(r.hitRate)}</td><td>${net(r.exitNetPct)}</td><td>${r.medianMinutesToMove!=null?Number(r.medianMinutesToMove).toFixed(1):'-'}</td><td>${getPickEligibilityReason(r,ps)}</td><td style="text-align:center">${remove}</td></tr>`;
+    const evaluated=Number(r.evaluatedFlagged)||0,hits=Number(r.hits)||0;
+    const observedHits=Number(r.observedHorizonHits)||0,flagged=Number(r.flagged)||0;
+    const horizonResult=`${observedHits} / ${flagged}${flagged?` (${pct(r.observedHorizonRate)})`:''}`;
+    const settledTitle=evaluated?`Fully evaluated comparison: ${hits} / ${evaluated} (${pct(r.hitRate)})`:'No flags have completed the full horizon yet';
+    const netResult=evaluated?`${net(r.exitNetPct)} <span style="color:var(--t3);font-size:9px">(${evaluated} eval)</span>`:'-';
+    return `<tr title="${escHtml(rule)}" style="${isCh?'font-weight:800;color:var(--t1)':''}"><td>${label}${exampleHtml}</td><td>${r.entryDays||0}</td><td>${r.flagged||0}</td><td>${r.pendingFlagged||0}</td><td style="font-weight:800">${pct(r.sameDay10Rate)}</td><td title="${settledTitle}">${horizonResult}</td><td>${netResult}</td><td>${r.medianMinutesToMove!=null?Number(r.medianMinutesToMove).toFixed(1):'-'}</td><td>${getPickEligibilityReason(r,ps)}</td><td style="text-align:center">${remove}</td></tr>`;
   }).join('');
-  return `<div style="overflow-x:auto"><table class="ct" style="min-width:980px;font-size:11px"><thead><tr><th>Pick Source</th><th>Entry Days</th><th>Flags</th><th>Pending</th><th title="Post-flag 10% milestones on the entry day">Same-day 10%</th><th title="10% milestones within the active outcome horizon">10% &lt;= horizon</th><th>Net %/flag</th><th title="Median minutes from flag to the first same-day 3% milestone">Med mins to move</th><th>Authority</th><th></th></tr></thead><tbody>${body||'<tr><td colspan="10" style="color:var(--t3)">No outcome episodes yet.</td></tr>'}</tbody></table></div>`;
+  return `<div style="overflow-x:auto"><table class="ct" style="min-width:980px;font-size:11px"><thead><tr><th>Pick Source</th><th>Entry Days</th><th>Flags</th><th title="Flags whose full evaluation horizon has not elapsed or whose horizon observation is unavailable">Pending</th><th title="Post-flag 10% milestones on the entry day">Same-day 10%</th><th title="Actual flags that have reached 10% within the horizon / all flags, with the observed rate in brackets">10% &lt;= horizon<br><span style="font-size:9px">hits / flags</span></th><th title="Average horizon return after estimated round-trip costs, across fully evaluated flags only">Net %/flag</th><th title="Median minutes from flag to the first same-day 3% milestone">Med mins to move</th><th>Authority</th><th></th></tr></thead><tbody>${body||'<tr><td colspan="10" style="color:var(--t3)">No outcome episodes yet.</td></tr>'}</tbody></table></div>`;
 }
 function buildPickRosterControls(){
   const disabled=[...getPickDisabledStrategies()].sort();
