@@ -1,5 +1,5 @@
-const BUILD_TS='2026-07-17 20:29 IST'; // release build time (IST)
-const APP_VERSION=519; // Held-positions Radar panel, folder auto-refresh, header menu, surveillance hard filter, search memoization.
+const BUILD_TS='2026-07-18 07:40 IST'; // release build time (IST)
+const APP_VERSION=520; // Silent input-only folder watch, prefer-EQ series parsing, and bit-exact reference parity.
 const GOOGLE_DRIVE_CLIENT_ID='1015012642264-oi2nelv3v90k3d39r994a6nelgjs2a56.apps.googleusercontent.com'; // Public OAuth Web Client ID.
 const PRICE_BAND_BLOCK_BUFFER_PCT=0.15; // Treat rounded 4.9/9.9/19.9 rows as effectively band-locked.
 const BASKET_CASH_RESERVE_RS=1; // Leave a rupee for broker-side tax/rounding differences.
@@ -1382,8 +1382,11 @@ function parseSurv(text){
   rows.forEach(r=>{
     const sym=normSym(symCol?r[symCol]:r['Symbol']);if(!sym)return;
     // Track non-EQ series — BE/BZ/SZ/SM/ST can't be bought normally
-    if(seriesCol){const s=(r[seriesCol]||'').trim().toUpperCase();if(s){NSE_SERIES[sym]=s;if(s!=='EQ')NSE_NON_EQ.add(sym);}}
-    if(statusCol){const st=(r[statusCol]||'').trim().toUpperCase();if(st)NSE_STATUS[sym]=st;}
+    // Duplicate-symbol rows (warrants/partly-paid share the base symbol): the EQ row
+    // always wins so a W1/E1 sibling can never poison an equity's series or status.
+    const rowSeries=seriesCol?(r[seriesCol]||'').trim().toUpperCase():'';
+    if(rowSeries&&(NSE_SERIES[sym]==null||rowSeries==='EQ'))NSE_SERIES[sym]=rowSeries;
+    if(statusCol){const st=(r[statusCol]||'').trim().toUpperCase();if(st&&(NSE_STATUS[sym]==null||rowSeries==='EQ'))NSE_STATUS[sym]=st;}
     const hits=[];
     activeRules.forEach(rule=>{
       if(!rule.header) return;
@@ -1395,6 +1398,7 @@ function parseSurv(text){
     dataHdrs.forEach(h=>{if(isSurvFlag(r[h]))allHit[h]=true;});
     if(Object.keys(allHit).length) SURV_ALL_HITS[sym]=allHit;
   });
+  NSE_NON_EQ=new Set(Object.entries(NSE_SERIES).filter(([,v])=>v!=='EQ').map(([k])=>k));
 }
 function parseDeal(text,map){
   parseCSV(text).forEach(r=>{
@@ -2044,7 +2048,12 @@ function radarAnalyze(headers,rawRows,supplements={},heldSymbols=new Set()){
     if(turn<25e5)gateReasons.push('turnover below ₹25L');
     if(price<10)gateReasons.push('price below ₹10');
     rawScore*=.88+.12*quality;
-    if(series==='UNKNOWN')rawScore-=8;else if(series!=='EQ')rawScore-=50;
+    // Reference-exact: the standalone Radar tests series==='Unknown' AFTER uppercasing,
+    // so its −8 unknown-series branch is dead code and unverified series falls through
+    // to the −50 non-EQ penalty. Reproduced deliberately for bit-parity with the
+    // reference scorer (dev/assert-fidelity.js); switching to the author-intended −8
+    // would be an owner decision.
+    if(series!=='EQ')rawScore-=50;
     if(status!=='A')rawScore-=50;
     if(band!==null&&band!==undefined&&band<10)rawScore-=35;else if(band===10)rawScore-=3;
     if(meta.flags?.length)rawScore-=Math.min(12,meta.flags.length*2);
@@ -4574,8 +4583,40 @@ async function getLocalUploadFolderFiles(){
 // sizes, or timestamps re-ingests the folder automatically. Silent when no folder grant
 // exists, permission was revoked, the tab is hidden, or a load is already running.
 let _folderWatchTimer=null,_folderWatchSig='',_folderWatchBusy=false;
+// Only actual input files participate in change detection. The app itself writes
+// rocket_brain.json into the upload folder on every brain save — including it in the
+// signature made each refresh re-trigger the next one in an endless loop.
+function isWatchedInputFile(name){
+  const n=inputNameLower(name);
+  return isScannerCsvName(name)||isReportsZipName(name)||
+    ['holdings.csv','positions.csv','orders.csv','tradebook.csv','nse holidays.csv'].includes(n)||
+    isLooseNseSupportCsvName(name);
+}
 function folderSignature(files){
-  return (files||[]).map(f=>`${f.name}:${f.size}:${f.lastModified}`).sort().join('|');
+  return (files||[]).filter(f=>isWatchedInputFile(f?.name)).map(f=>`${f.name}:${f.size}:${f.lastModified}`).sort().join('|');
+}
+// Small corner pill instead of the full loader/toast: auto-refresh must never interrupt.
+function showAutoRefreshIndicator(state){
+  let el=document.getElementById('autoRefreshPill');
+  if(!el){
+    el=document.createElement('div');
+    el.id='autoRefreshPill';
+    el.style.cssText="position:fixed;bottom:16px;left:16px;z-index:998;padding:6px 12px;border-radius:20px;background:var(--bg-raised);border:1px solid var(--border-hi);color:var(--t2);font-size:11px;font-family:'DM Mono',monospace;box-shadow:0 4px 16px rgba(0,0,0,.35);display:none;align-items:center;gap:6px";
+    document.body.appendChild(el);
+  }
+  clearTimeout(el._hideTimer);
+  if(state==='refreshing'){
+    el.style.color='var(--t2)';
+    el.innerHTML='<span style="display:inline-block;animation:sp 1s linear infinite">⟳</span> auto-refresh';
+    el.style.display='flex';
+  } else if(state==='done'){
+    el.style.color='var(--green)';
+    el.innerHTML='✓ updated '+fileStatusClock();
+    el.style.display='flex';
+    el._hideTimer=setTimeout(()=>{el.style.display='none';el.style.color='var(--t2)';},4000);
+  } else {
+    el.style.display='none';
+  }
 }
 async function folderWatchTick(){
   if(_folderWatchBusy||document.hidden) return;
@@ -4583,13 +4624,18 @@ async function folderWatchTick(){
     const local=await getLocalUploadFolderFiles();
     if(!local?.files?.length) return;
     const sig=folderSignature(local.files);
+    if(!sig) return;
     if(!_folderWatchSig){_folderWatchSig=sig;return;} // first sight = baseline, no re-run
     if(sig===_folderWatchSig) return;
     _folderWatchSig=sig;
     _folderWatchBusy=true;
-    showToast('Folder change detected — refreshing…',3000);
-    await processFiles(local.files,local.sourceLabel+' · auto-refresh');
-  }catch(e){console.warn('Folder watch tick failed',e);}
+    showAutoRefreshIndicator('refreshing');
+    const ok=await processFiles(local.files,local.sourceLabel+' · auto-refresh',{silent:true});
+    showAutoRefreshIndicator(ok?'done':'hide');
+  }catch(e){
+    console.warn('Folder watch tick failed',e);
+    showAutoRefreshIndicator('hide');
+  }
   finally{_folderWatchBusy=false;}
 }
 function startFolderWatch(){
@@ -5499,9 +5545,10 @@ function applySavedFiltersForMode(mode){
   }
 }
 
-async function processFiles(files,sourceLabel){
+async function processFiles(files,sourceLabel,opts={}){
+  const silent=!!opts.silent; // watcher refreshes: no overlay, no toasts, corner pill only
   if(!(await ensureDriveReadyForLoad())){
-    setLoading(false);
+    if(!silent) setLoading(false);
     return false;
   }
   setFileLoadStatus(sourceLabel||'Scanner Uploads',files,'not in folder');
@@ -5511,7 +5558,7 @@ async function processFiles(files,sourceLabel){
   // Any deliberate or automatic load resets the folder-watch baseline so the watcher
   // does not immediately re-process the files it (or the user) just loaded.
   try{_folderWatchSig=folderSignature([...files]);}catch(e){}
-  setLoading(true,String(FILE_LOAD_STATUS.source?`Processing selected files... · ${FILE_LOAD_STATUS.source}`:'Processing selected files...'));
+  if(!silent) setLoading(true,String(FILE_LOAD_STATUS.source?`Processing selected files... · ${FILE_LOAD_STATUS.source}`:'Processing selected files...'));
   // Upload canonical input files to Drive in the background. Rankings are built from
   // the selected local files immediately, because the market does not wait for Drive.
   saveInputsInBackground(files);
@@ -5535,8 +5582,10 @@ async function processFiles(files,sourceLabel){
     }
   }
   if(!tvFile&&!nseZip&&!holdFile&&!posFile&&!ordFile&&!tbFile&&!holidayFile){
-    setLoading(false);
-    showToast('No files recognised. Upload the NSE scanner and/or Zerodha input files.',4000,true);
+    if(!silent){
+      setLoading(false);
+      showToast('No files recognised. Upload the NSE scanner and/or Zerodha input files.',4000,true);
+    }
     return false;
   }
 
@@ -5581,8 +5630,10 @@ async function processFiles(files,sourceLabel){
   const stockScannerProcessed=scannerJobs.some(j=>j.mode==='stock');
 
   if(!scannerJobs.length&&!nseZip&&!holdFile&&!posFile&&!ordFile&&!tbFile&&!holidayFile){
-    setLoading(false);
-    showToast('TradingView CSV not found in the selected Scanner Uploads folder.',4000,true);
+    if(!silent){
+      setLoading(false);
+      showToast('TradingView CSV not found in the selected Scanner Uploads folder.',4000,true);
+    }
     return false;
   }
 
@@ -5642,9 +5693,9 @@ async function processFiles(files,sourceLabel){
       }
     }finally{restoreScannerRuntime(rt);}
   }
-  setLoadMsg('Rendering rankings...');
+  if(!silent) setLoadMsg('Rendering rankings...');
   renderTradingDashboardNow();
-  setLoading(false);
+  if(!silent) setLoading(false);
   saveBrainInBackground('Brain saved after file processing');
   return true;
 }
