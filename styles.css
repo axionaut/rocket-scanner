@@ -215,8 +215,11 @@ table.main tbody td{padding:9px 11px;font-family:'DM Mono',monospace;font-size:1
 .rr-contrib small{display:block;color:var(--t3);font-size:9px;margin-top:3px}
 .rr-read{margin:12px 0;border-left:3px solid var(--cyan);background:var(--bg-raised);padding:12px;font-size:11px;line-height:1.55;color:var(--t2);border-radius:0 8px 8px 0}
 .rr-read b{color:var(--t1)}
-dialog#radarDetail{width:min(980px,95vw);max-height:90vh;padding:0;background:var(--bg);color:var(--t1);border:1px solid var(--border-hi);border-radius:10px;box-shadow:0 30px 120px rgba(0,0,0,.9)}
+dialog#radarDetail{width:min(980px,95vw);max-height:90vh;padding:0;background:var(--bg);color:var(--t1);border:1px solid var(--border-hi);border-radius:10px;box-shadow:0 30px 120px rgba(0,0,0,.9);margin:auto}
 dialog#radarDetail::backdrop{background:rgba(2,5,7,.87)}
+.rr-contrib b.pos{color:var(--green)}
+.rr-contrib b.neg{color:var(--red)}
+.rr-group meter{accent-color:var(--green)}
 .rr-modalhead{position:sticky;top:0;z-index:4;display:flex;justify-content:space-between;align-items:center;padding:15px 18px;background:var(--bg-raised);border-bottom:1px solid var(--border)}
 .rr-modalhead h2{margin:0;font:800 17px 'DM Mono',monospace}
 .rr-modalbody{padding:18px}

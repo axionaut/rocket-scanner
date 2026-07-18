@@ -1,5 +1,5 @@
-const BUILD_TS='2026-07-18 07:40 IST'; // release build time (IST)
-const APP_VERSION=520; // Silent input-only folder watch, prefer-EQ series parsing, and bit-exact reference parity.
+const BUILD_TS='2026-07-18 07:52 IST'; // release build time (IST)
+const APP_VERSION=521; // Centered color-coded detail modal, EXPORT column label, and mobile export path via the header menu.
 const GOOGLE_DRIVE_CLIENT_ID='1015012642264-oi2nelv3v90k3d39r994a6nelgjs2a56.apps.googleusercontent.com'; // Public OAuth Web Client ID.
 const PRICE_BAND_BLOCK_BUFFER_PCT=0.15; // Treat rounded 4.9/9.9/19.9 rows as effectively band-locked.
 const BASKET_CASH_RESERVE_RS=1; // Leave a rupee for broker-side tax/rounding differences.
@@ -4192,10 +4192,10 @@ function renderHead(){
     if(c.key==='chk'){
       return`<th style="width:32px;text-align:center;padding:8px 6px">
         <div style="display:flex;flex-direction:column;align-items:center;gap:3px">
-          <input type="checkbox" id="chk-all" ${allChecked?'checked':''} title="Select / deselect all"
+          <input type="checkbox" id="chk-all" ${allChecked?'checked':''} title="Select / deselect all for the basket export"
             style="width:14px;height:14px;accent-color:var(--amber);cursor:pointer"
             onchange="toggleSelectAll(this.checked)">
-          <span style="font-size:8px;color:var(--t3);letter-spacing:.3px;font-weight:700;text-transform:uppercase">ALL</span>
+          <span style="font-size:7px;color:var(--t3);letter-spacing:.3px;font-weight:700;text-transform:uppercase">Export</span>
         </div>
       </th>`;
     }
