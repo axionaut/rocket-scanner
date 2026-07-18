@@ -1,5 +1,5 @@
-const BUILD_TS='2026-07-18 07:52 IST'; // release build time (IST)
-const APP_VERSION=521; // Centered color-coded detail modal, EXPORT column label, and mobile export path via the header menu.
+const BUILD_TS='2026-07-18 09:32 IST'; // release build time (IST)
+const APP_VERSION=522; // Day-horizon goal with daily withdrawal drain and required-% answer in the popover.
 const GOOGLE_DRIVE_CLIENT_ID='1015012642264-oi2nelv3v90k3d39r994a6nelgjs2a56.apps.googleusercontent.com'; // Public OAuth Web Client ID.
 const PRICE_BAND_BLOCK_BUFFER_PCT=0.15; // Treat rounded 4.9/9.9/19.9 rows as effectively band-locked.
 const BASKET_CASH_RESERVE_RS=1; // Leave a rupee for broker-side tax/rounding differences.
@@ -2329,21 +2329,46 @@ const GOAL_STORE='rs_goal_v1';
 let _repsState=null; // {date,lastTotal,lastDelta} — session-only reps trigger state (v483)
 function getGoalConfig(){
   const g=FS.get(GOAL_STORE)||{};
-  const def=new Date();def.setFullYear(def.getFullYear()+1);
-  return {
-    target:(Number(g.target)>0)?Number(g.target):10000000,
-    date:(typeof g.date==='string'&&/^\d{4}-\d{2}-\d{2}$/.test(g.date))?g.date:def.toISOString().slice(0,10),
-    withdrawMonthly:Math.max(0,Number(g.withdrawMonthly)||0)
-  };
+  const target=(Number(g.target)>0)?Number(g.target):10000000;
+  const withdrawMonthly=Math.max(0,Number(g.withdrawMonthly)||0);
+  let days=Math.max(0,Math.floor(Number(g.days)||0));
+  let anchorDate=(typeof g.anchorDate==='string'&&/^\d{4}-\d{2}-\d{2}$/.test(g.anchorDate))?g.anchorDate:null;
+  // One-time migration from the old date-based config: convert the deadline into a
+  // trading-day horizon anchored today, preserving the same remaining runway.
+  if(!(days>0)&&typeof g.date==='string'&&/^\d{4}-\d{2}-\d{2}$/.test(g.date)){
+    days=goalTradingDaysUntil(g.date);
+    anchorDate=getSessionDate();
+  }
+  if(!(days>0)) days=250; // ~one trading year default
+  if(!anchorDate) anchorDate=getSessionDate();
+  return {target,days,anchorDate,withdrawMonthly};
+}
+function goalRemainingDays(g){
+  const elapsed=Number(tradingDaysBetween(g.anchorDate,getSessionDate()))||0;
+  return Math.max(0,g.days-Math.max(0,elapsed));
+}
+// Implied calendar end date: walk N trading days forward from today (display hint only).
+function goalImpliedEndDate(remainingDays){
+  const cur=new Date(getSessionDate()+'T12:00:00Z');
+  let n=0,guard=0;
+  while(n<remainingDays&&guard++<2600){
+    cur.setUTCDate(cur.getUTCDate()+1);
+    const dow=cur.getUTCDay();
+    if(dow!==0&&dow!==6&&!NSE_HOLIDAYS.has(cur.toISOString().slice(0,10))) n++;
+  }
+  return cur.toISOString().slice(0,10);
 }
 function onGoalChange(){
   const t=parseFloat(document.getElementById('goalTarget')?.value);
-  const d=document.getElementById('goalDate')?.value||'';
+  const d=parseFloat(document.getElementById('goalDays')?.value);
   const w=parseFloat(document.getElementById('goalWd')?.value);
   const cur=getGoalConfig();
+  const days=(d>0)?Math.floor(d):cur.days;
   FS.set(GOAL_STORE,{
     target:t>0?t:cur.target,
-    date:/^\d{4}-\d{2}-\d{2}$/.test(d)?d:cur.date,
+    days,
+    // Editing the horizon restarts the countdown from today; other edits keep it.
+    anchorDate:days!==cur.days?getSessionDate():cur.anchorDate,
     withdrawMonthly:w>=0?w:cur.withdrawMonthly
   });
   renderStats();
@@ -2361,11 +2386,12 @@ function goalTradingDaysUntil(dateStr){
   }
   return n;
 }
-// Withdrawals are debited every 21st trading day (~monthly). Binary search the net
-// per-trading-day compounding rate that lands the portfolio on the target by the date.
+// The monthly withdrawal is converted to a daily drain (₹/month ÷ 21 trading days).
+// Binary search the net per-trading-day compounding rate that lands on the target.
 function solveGoalDailyRate(start,target,days,wdMonthly){
   if(!(start>0)||!(days>0)||!(target>0)) return null;
-  const endCap=r=>{let c=start;for(let d=1;d<=days;d++){c*=1+r;if(wdMonthly>0&&d%21===0)c-=wdMonthly;}return c;};
+  const wdDaily=Math.max(0,Number(wdMonthly)||0)/21;
+  const endCap=r=>{let c=start;for(let d=1;d<=days;d++){c=c*(1+r)-wdDaily;}return c;};
   if(endCap(0)>=target) return 0;
   if(endCap(0.5)<target) return null;
   let lo=0,hi=0.5;
@@ -2391,9 +2417,9 @@ let _goalRateCache=null;
 function getGoalRequiredNetPct(){
   const g=getGoalConfig();
   const basis=getGoalPortfolioBasis();
-  const key=[g.target,g.date,g.withdrawMonthly,Math.round(basis)].join('|');
+  const days=goalRemainingDays(g);
+  const key=[g.target,g.days,g.anchorDate,days,g.withdrawMonthly,Math.round(basis)].join('|');
   if(_goalRateCache?.key===key) return _goalRateCache.v;
-  const days=goalTradingDaysUntil(g.date);
   const r=solveGoalDailyRate(basis,g.target,days,g.withdrawMonthly);
   const v=(r!=null&&r>0)?+(r*100).toFixed(3):null;
   _goalRateCache={key,v};
@@ -2429,13 +2455,27 @@ function buildGoalPopoverContent(){
   const g=getGoalConfig();
   const _in='background:transparent;border:1px solid var(--border-hi);border-radius:5px;color:var(--t1);font-size:10.5px;padding:2px 6px;font-family:inherit';
   const _lbl='font-size:8.5px;color:var(--t3);text-transform:uppercase;letter-spacing:.4px;display:block;margin-bottom:1px';
+  const remaining=goalRemainingDays(g);
+  const wdDaily=g.withdrawMonthly/21;
+  const basis=getGoalPortfolioBasis();
+  const req=getGoalRequiredNetPct();
+  const reqLine=basis>0
+    ?(remaining>0
+      ?(req!=null
+        ?`<span style="color:var(--amber);font-weight:700">Required now: +${req.toFixed(2)}%/trading day</span> · ≈ ₹${goalFmtRs(basis*req/100)}/day on free ₹${goalFmtRs(basis)}`
+        :(solveGoalDailyRate(basis,g.target,remaining,g.withdrawMonthly)===0
+          ?`<span style="color:var(--green);font-weight:700">Already covered</span> — free capital reaches the target with 0%/day`
+          :`<span style="color:var(--red);font-weight:700">Not reachable</span> — needs more than 50%/day from free ₹${goalFmtRs(basis)}`))
+      :`<span style="color:var(--amber);font-weight:700">Horizon elapsed</span> — set a new day count`)
+    :`Enter Capital ₹ in the filter bar to compute the required %/day.`;
   return `<div style="font-size:12px;color:var(--t1);margin-bottom:10px;font-weight:700">Goal</div>
   <div style="display:flex;gap:8px;align-items:flex-end;flex-wrap:wrap">
     <span><span style="${_lbl}">Target ₹</span><input id="goalTarget" type="number" value="${g.target}" style="width:92px;${_in}" onchange="onGoalChange()"></span>
-    <span><span style="${_lbl}">By</span><input id="goalDate" type="date" value="${g.date}" style="width:118px;${_in}" onchange="onGoalChange()"></span>
+    <span><span style="${_lbl}">In (trading days)</span><input id="goalDays" type="number" min="1" step="1" value="${g.days}" style="width:76px;${_in}" onchange="onGoalChange()" title="Editing this restarts the countdown from today."></span>
     <span><span style="${_lbl}">Withdraw ₹/mo</span><input id="goalWd" type="number" value="${g.withdrawMonthly}" style="width:76px;${_in}" onchange="onGoalChange()"></span>
   </div>
-  <div style="font-size:11px;line-height:1.5;color:var(--t2);margin-top:10px">Required NET %/trading day on free capital (Capital ₹ + today's sells). Informational — does not change targets.</div>`;
+  <div style="font-size:11px;line-height:1.6;color:var(--t2);margin-top:10px">${reqLine}</div>
+  <div style="font-size:10px;line-height:1.5;color:var(--t3);margin-top:6px">${remaining} trading days left (of ${g.days}, set ${g.anchorDate}) · ends ≈ ${goalImpliedEndDate(remaining)} · withdrawal drains ≈ ₹${goalFmtRs(wdDaily)}/trading day. Informational — never changes targets or allocation.</div>`;
 }
 function renderGoalPopover(){
   const content=document.getElementById('goalPopoverContent');
@@ -2445,11 +2485,14 @@ function buildGoalCard(){
   const g=getGoalConfig();
   const parts=getGoalFreeCapitalParts();
   const basis=parts.total;
-  const days=goalTradingDaysUntil(g.date);
-  const req=solveGoalDailyRate(basis,g.target,days,g.withdrawMonthly);
+  const days=goalRemainingDays(g);
+  const req=days>0?solveGoalDailyRate(basis,g.target,days,g.withdrawMonthly):null;
   const ach=getGoalAchievedDailyRate(basis);
   if(!(basis>0)){
     return `<div class="st"><div class="st-l">Goal · ₹${goalFmtRs(g.target)} · ${days} td left</div><div class="st-v" style="color:var(--t3)">—</div><div class="st-d">free ₹0 (cap ${goalFmtRs(parts.cap)} + sells ${goalFmtRs(parts.sells)}) · need —/day · achieved —/day (30d)</div></div>`;
+  }
+  if(days<=0){
+    return `<div class="st"><div class="st-l">Goal · ₹${goalFmtRs(g.target)}</div><div class="st-v" style="color:var(--amber)">horizon elapsed</div><div class="st-d">set a new day count in ⚙ Goal</div></div>`;
   }
   const reqStr=req==null?'>50':'+'+(req*100).toFixed(2);
   const needRs=req!=null?basis*req:null;
