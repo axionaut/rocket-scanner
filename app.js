@@ -1,5 +1,5 @@
-const BUILD_TS='2026-07-18 09:39 IST'; // release build time (IST)
-const APP_VERSION=523; // Goal withdrawals drain on calendar days; compounding stays on trading days.
+const BUILD_TS='2026-07-18 09:46 IST'; // release build time (IST)
+const APP_VERSION=524; // Goal target is earnings to generate, not a balance to reach.
 const GOOGLE_DRIVE_CLIENT_ID='1015012642264-oi2nelv3v90k3d39r994a6nelgjs2a56.apps.googleusercontent.com'; // Public OAuth Web Client ID.
 const PRICE_BAND_BLOCK_BUFFER_PCT=0.15; // Treat rounded 4.9/9.9/19.9 rows as effectively band-locked.
 const BASKET_CASH_RESERVE_RS=1; // Leave a rupee for broker-side tax/rounding differences.
@@ -2386,10 +2386,12 @@ function goalTradingDaysUntil(dateStr){
   }
   return n;
 }
-// Withdrawals drain every CALENDAR day (₹/month × 12 ÷ 365 — weekends and holidays
-// spend money too); compounding happens only on trading days. The real calendar is
-// walked once to get the day-gaps, then binary search finds the net per-trading-day
-// compounding rate that lands on the target.
+// The target is EARNINGS: cumulative trading profit generated from current total
+// capital within the horizon (owner definition, 2026-07-18). Withdrawals drain every
+// CALENDAR day (₹/month × 12 ÷ 365 — weekends and holidays spend money too) and shrink
+// the compounding base, but the earnings tally counts every rupee the capital makes.
+// Compounding happens only on trading days. The real calendar is walked once for the
+// day-gaps, then binary search finds the per-trading-day rate whose earnings hit target.
 function solveGoalDailyRate(start,target,days,wdMonthly){
   if(!(start>0)||!(days>0)||!(target>0)) return null;
   const wdDaily=Math.max(0,Number(wdMonthly)||0)*12/365;
@@ -2405,18 +2407,20 @@ function solveGoalDailyRate(start,target,days,wdMonthly){
       if(dow!==0&&dow!==6&&!NSE_HOLIDAYS.has(cur.toISOString().slice(0,10))){gaps.push(gap);gap=0;n++;}
     }
   }
-  const endCap=r=>{
-    let c=start;
+  const earned=r=>{
+    let c=start,e=0;
     for(const g of gaps){
-      c-=wdDaily*(g-1);   // non-trading days: spending continues, no compounding
-      c=c*(1+r)-wdDaily;  // trading day: compound, then that day's spending
+      c-=wdDaily*(g-1);            // non-trading days: spending continues, no earning
+      if(c<=0){c=Math.max(0,c);continue;}
+      const gain=c*r;
+      e+=gain;                     // profit tally: withdrawals never erase what was earned
+      c=c+gain-wdDaily;            // trading day: earn, then that day's spending
     }
-    return c;
+    return e;
   };
-  if(endCap(0)>=target) return 0;
-  if(endCap(0.5)<target) return null;
+  if(earned(0.5)<target) return null;
   let lo=0,hi=0.5;
-  for(let i=0;i<60;i++){const mid=(lo+hi)/2;if(endCap(mid)>=target)hi=mid;else lo=mid;}
+  for(let i=0;i<60;i++){const mid=(lo+hi)/2;if(earned(mid)>=target)hi=mid;else lo=mid;}
   return hi;
 }
 // Goal capital basis (v523, owner correction): compounding applies to TOTAL capital —
@@ -2496,15 +2500,13 @@ function buildGoalPopoverContent(){
   const reqLine=basis>0
     ?(remaining>0
       ?(req!=null
-        ?`<span style="color:var(--amber);font-weight:700">Required now: +${req.toFixed(2)}%/trading day</span> · ≈ ₹${goalFmtRs(basis*req/100)}/day on total ₹${goalFmtRs(basis)}`
-        :(solveGoalDailyRate(basis,g.target,remaining,g.withdrawMonthly)===0
-          ?`<span style="color:var(--green);font-weight:700">Already covered</span> — total capital reaches the target with 0%/day`
-          :`<span style="color:var(--red);font-weight:700">Not reachable</span> — needs more than 50%/day from total ₹${goalFmtRs(basis)}`))
+        ?`<span style="color:var(--amber);font-weight:700">Required now: +${req.toFixed(2)}%/trading day</span> · ≈ ₹${goalFmtRs(basis*req/100)}/day earnings on total ₹${goalFmtRs(basis)}`
+        :`<span style="color:var(--red);font-weight:700">Not reachable</span> — earning ₹${goalFmtRs(g.target)} in ${remaining} sessions needs more than 50%/day from total ₹${goalFmtRs(basis)}`)
       :`<span style="color:var(--amber);font-weight:700">Horizon elapsed</span> — set a new day count`)
     :`Enter Capital ₹ in the filter bar (or load holdings) to compute the required %/day.`;
   return `<div style="font-size:12px;color:var(--t1);margin-bottom:10px;font-weight:700">Goal</div>
   <div style="display:flex;gap:8px;align-items:flex-end;flex-wrap:wrap">
-    <span><span style="${_lbl}">Target ₹</span><input id="goalTarget" type="number" value="${g.target}" style="width:92px;${_in}" onchange="onGoalChange()"></span>
+    <span><span style="${_lbl}">Earn ₹ (profit)</span><input id="goalTarget" type="number" value="${g.target}" style="width:92px;${_in}" onchange="onGoalChange()" title="Trading profit to generate from current total capital within the horizon — not a balance to reach."></span>
     <span><span style="${_lbl}">In (trading days)</span><input id="goalDays" type="number" min="1" step="1" value="${g.days}" style="width:76px;${_in}" onchange="onGoalChange()" title="Editing this restarts the countdown from today."></span>
     <span><span style="${_lbl}">Withdraw ₹/mo</span><input id="goalWd" type="number" value="${g.withdrawMonthly}" style="width:76px;${_in}" onchange="onGoalChange()"></span>
   </div>
@@ -2523,10 +2525,10 @@ function buildGoalCard(){
   const req=days>0?solveGoalDailyRate(basis,g.target,days,g.withdrawMonthly):null;
   const ach=getGoalAchievedDailyRate(basis);
   if(!(basis>0)){
-    return `<div class="st"><div class="st-l">Goal · ₹${goalFmtRs(g.target)} · ${days} td left</div><div class="st-v" style="color:var(--t3)">—</div><div class="st-d">total ₹0 (cap ${goalFmtRs(parts.cap)} + sells ${goalFmtRs(parts.sells)} + invested ${goalFmtRs(parts.invested)}) · need —/day · achieved —/day (30d)</div></div>`;
+    return `<div class="st"><div class="st-l">Goal · earn ₹${goalFmtRs(g.target)} · ${days} td left</div><div class="st-v" style="color:var(--t3)">—</div><div class="st-d">total ₹0 (cap ${goalFmtRs(parts.cap)} + sells ${goalFmtRs(parts.sells)} + invested ${goalFmtRs(parts.invested)}) · need —/day · achieved —/day (30d)</div></div>`;
   }
   if(days<=0){
-    return `<div class="st"><div class="st-l">Goal · ₹${goalFmtRs(g.target)}</div><div class="st-v" style="color:var(--amber)">horizon elapsed</div><div class="st-d">set a new day count in ⚙ Goal</div></div>`;
+    return `<div class="st"><div class="st-l">Goal · earn ₹${goalFmtRs(g.target)}</div><div class="st-v" style="color:var(--amber)">horizon elapsed</div><div class="st-d">set a new day count in ⚙ Goal</div></div>`;
   }
   const reqStr=req==null?'>50':'+'+(req*100).toFixed(2);
   const needRs=req!=null?basis*req:null;
@@ -2534,8 +2536,8 @@ function buildGoalCard(){
   const col=req==null?'var(--red)':(onTrack?'var(--green)':'var(--amber)');
   const badge=ach!=null?(onTrack?'<span style="color:var(--green);font-size:11px">✓ on track</span>':'<span style="color:var(--amber);font-size:11px">behind</span>'):'<span style="color:var(--t3);font-size:11px">no 30d trades</span>';
   const freeStr=`total ₹${goalFmtRs(basis)} (free ${goalFmtRs(parts.free)} + invested ${goalFmtRs(parts.invested)})`;
-  const title='Required NET compounding per NSE trading day on TOTAL capital (Capital ₹ + today\'s sell proceeds + market value of holdings/positions). Informational only; does not change targets.';
-  return `<div class="st" title="${title}"><div class="st-l">Goal · ₹${goalFmtRs(g.target)} · ${days} td left</div><div class="st-v" style="color:${col}">${reqStr}%/day ${badge}</div><div class="st-d">${freeStr} · need ${needRs!=null?'₹'+goalFmtRs(needRs)+'/day':'—/day'} · achieved ${ach!=null?(ach*100).toFixed(2)+'%/day':'—/day'} (30d)</div></div>`;
+  const title='Required NET earnings per NSE trading day, as % of TOTAL capital (Capital ₹ + today\'s sell proceeds + market value of holdings/positions), to generate the target profit within the horizon while withdrawals drain daily. Informational only; does not change targets.';
+  return `<div class="st" title="${title}"><div class="st-l">Goal · earn ₹${goalFmtRs(g.target)} · ${days} td left</div><div class="st-v" style="color:${col}">${reqStr}%/day ${badge}</div><div class="st-d">${freeStr} · need ${needRs!=null?'₹'+goalFmtRs(needRs)+'/day':'—/day'} · achieved ${ach!=null?(ach*100).toFixed(2)+'%/day':'—/day'} (30d)</div></div>`;
 }
 function renderStats(){
   const t=ALL.length;
