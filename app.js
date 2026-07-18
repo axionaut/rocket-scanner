@@ -1,5 +1,5 @@
-const BUILD_TS='2026-07-18 09:46 IST'; // release build time (IST)
-const APP_VERSION=524; // Goal target is earnings to generate, not a balance to reach.
+const BUILD_TS='2026-07-18 12:30 IST'; // release build time (IST)
+const APP_VERSION=525; // Goal-led export target: lower of learned Harvest / goal-required, floored so charges never eat the edge.
 const GOOGLE_DRIVE_CLIENT_ID='1015012642264-oi2nelv3v90k3d39r994a6nelgjs2a56.apps.googleusercontent.com'; // Public OAuth Web Client ID.
 const PRICE_BAND_BLOCK_BUFFER_PCT=0.15; // Treat rounded 4.9/9.9/19.9 rows as effectively band-locked.
 const BASKET_CASH_RESERVE_RS=1; // Leave a rupee for broker-side tax/rounding differences.
@@ -2587,8 +2587,9 @@ function renderStats(){
   const slTgtCard=(()=>{
     if(!TRADEBOOK_STATS?.adaptiveSL) return '';
     const harvestPlan=computeHarvestPlan();
+    const active=getActiveTargetInfo();
     const _sl=TRADEBOOK_STATS.adaptiveSL.toFixed(2);
-    const _tgt=(harvestPlan.targetPct||TRADEBOOK_STATS.adaptiveTGT).toFixed(2);
+    const _tgt=(active.tgtPct||harvestPlan.targetPct||TRADEBOOK_STATS.adaptiveTGT).toFixed(2);
     const rr=(parseFloat(_sl)>0?(parseFloat(_tgt)/parseFloat(_sl)):0).toFixed(2);
     const reviewDays=getEffectiveReviewDays();
     const holdStr=reviewDays?` · review &gt;${reviewDays}d`:'';
@@ -2598,8 +2599,11 @@ function renderStats(){
     const costStr=` · <span style="color:var(--t2)" title="Estimated round-trip charges as % of buy capital">cost ~${harvestPlan.costPct.toFixed(2)}%</span>`;
     const netStr=` · net ~${harvestPlan.expectedNetPct.toFixed(2)}%`;
     const confStr=harvestPlan.confidence!=null?` · hit ${(harvestPlan.confidence*100).toFixed(0)}% hist`:'';
-    const goalStr=harvestPlan.goalNetPct!=null&&isFinite(harvestPlan.goalNetPct)?` · goal needs ${harvestPlan.goalNetPct.toFixed(2)}%/day`:'';
-    return `<div class="st"><div class="st-l">SL / Harvest GTT</div><div class="st-v" style="font-size:15px"><span style="color:var(--red)">−${_sl}%</span><span style="color:var(--t3);font-size:12px"> / </span><span style="color:var(--green)">+${_tgt}%</span></div><div class="st-d">R:R ${rr}${costStr}${netStr}${confStr} · ${harvestPlan.source}${learnedStr}${holdStr}${opportunityStr}${goalStr}</div></div>`;
+    // Show which target is driving the export and where the other one sits.
+    const srcStr=active.source==='goal'
+      ? ` · <span style="color:var(--amber)" title="Goal-led target is lower than the learned Harvest ${active.harvestPct.toFixed(2)}%, so it drives the basket (higher hit rate, still meets your goal after charges).">goal-led (Harvest ${active.harvestPct.toFixed(2)}%)</span>`
+      : (active.goalPct!=null?` · <span style="color:var(--t2)" title="Learned Harvest is at or below the goal-led ${active.goalPct.toFixed(2)}%, so Harvest drives the basket.">Harvest-led (goal ${active.goalPct.toFixed(2)}%)</span>`:` · ${harvestPlan.source}`);
+    return `<div class="st"><div class="st-l">SL / Harvest GTT</div><div class="st-v" style="font-size:15px"><span style="color:var(--red)">−${_sl}%</span><span style="color:var(--t3);font-size:12px"> / </span><span style="color:var(--green)">+${_tgt}%</span></div><div class="st-d">R:R ${rr}${costStr}${netStr}${confStr}${srcStr}${learnedStr}${holdStr}${opportunityStr}</div></div>`;
   })();
 
   const topScore=top&&isFinite(top.score)?Number(top.score).toFixed(1):'—';
@@ -3952,8 +3956,29 @@ function _computeHarvestPlanUncached(){
     warning:belowFloor?'Recent reachable moves are below the desired net floor.':null
   };
 }
+// Goal-led target (owner decision 2026-07-18, reversing the informational-only rule):
+// the goal's required NET %/day converts to a gross GTT by adding real round-trip
+// charges, floored at the minimum useful net (HARVEST_DESIRED_NET_PCT) so a tiny goal
+// can never set a target where charges eat the edge.
+function getGoalLedTargetPct(){
+  const goalNet=getGoalRequiredNetPct(); // required NET %/trading day on total capital
+  if(goalNet==null||!isFinite(goalNet)||goalNet<=0) return null;
+  const netEff=Math.max(goalNet,HARVEST_DESIRED_NET_PCT);
+  let gross=netEff+estimateRoundTripCostPct(netEff+0.35);
+  gross=roundPct05(netEff+estimateRoundTripCostPct(gross));
+  return gross;
+}
+// The single active target: whichever is LOWER — the learned Harvest gross or the
+// goal-led gross. A lower goal-led target hits more often while still meeting the
+// owner's stated need; Harvest remains the ceiling and the fallback.
+function getActiveTargetInfo(){
+  const harvest=computeHarvestPlan().targetPct;
+  const goal=getGoalLedTargetPct();
+  if(goal!=null&&goal<harvest) return {tgtPct:goal,source:'goal',harvestPct:harvest,goalPct:goal};
+  return {tgtPct:harvest,source:'harvest',harvestPct:harvest,goalPct:goal};
+}
 function getEffectiveTgtPct(){
-  return computeHarvestPlan().targetPct;
+  return getActiveTargetInfo().tgtPct;
 }
 
 function calendarDaysHeld(dateStr){
@@ -4518,9 +4543,10 @@ function renderStatusBar(){
     const actualDeployed=Object.values(am2).reduce((s,a)=>s+(a.debit??a.alloc),0);
     const stockCount=Object.keys(am2).length;
     html+=` <span style="color:var(--amber);font-size:11px;font-family:'DM Mono',monospace;font-weight:700;margin-left:8px" title="All-in estimated buy debit: limit-price notional plus CNC buy-side charges.">· ${stockCount} ${allocatedLabel} · ${fmtINR(actualDeployed)} of ${fmtINR(capital)} all-in</span>`;
-    // Expected net at fixed Harvest GTT% — feedback, not input.
+    // Expected net at the ACTIVE GTT% (lower of Harvest / goal-led) — feedback, not input.
     const harvestPlan=computeHarvestPlan();
-    const tgtPct=harvestPlan.targetPct;
+    const active=getActiveTargetInfo();
+    const tgtPct=active.tgtPct;
     if(tgtPct>0){
       let totalNet=0;
       for(const sym in am2){
@@ -4531,11 +4557,12 @@ function renderStatusBar(){
         }
       }
       const goalCoverage=harvestPlan.dailyGoal>0?Math.max(0,totalNet)/harvestPlan.dailyGoal:0;
+      const srcLbl=active.source==='goal'?'goal-led':'harvest';
       const needed=harvestPlan.capitalNeeded?` Capital needed for ${fmtINR(harvestPlan.dailyGoal)} at this learned edge: ${fmtINR(harvestPlan.capitalNeeded)}.`:'';
       const warn=harvestPlan.warning?` Warning: ${harvestPlan.warning}`:'';
-      const tip=`Fixed Harvest GTT ${tgtPct.toFixed(2)}%, expected net ${harvestPlan.expectedNetPct.toFixed(2)}% after ~${harvestPlan.costPct.toFixed(2)}% costs. Source: ${harvestPlan.source}.${needed}${warn}`;
+      const tip=`Active ${srcLbl} GTT ${tgtPct.toFixed(2)}% (lower of Harvest ${active.harvestPct.toFixed(2)}%${active.goalPct!=null?` / goal-led ${active.goalPct.toFixed(2)}%`:''}), charge-aware net. Source: ${harvestPlan.source}.${needed}${warn}`;
       const color=totalNet>=0?'var(--green)':'var(--red)';
-      html+=` <span style="color:${color};font-size:11px;font-family:'DM Mono',monospace;font-weight:700;margin-left:8px" title="${tip}">· 🎯 ${fmtINR(totalNet)} net @ harvest ${tgtPct.toFixed(1)}% · ${(goalCoverage*100).toFixed(0)}% of ${fmtINR(harvestPlan.dailyGoal)}</span>`;
+      html+=` <span style="color:${color};font-size:11px;font-family:'DM Mono',monospace;font-weight:700;margin-left:8px" title="${tip}">· 🎯 ${fmtINR(totalNet)} net @ ${srcLbl} ${tgtPct.toFixed(1)}% · ${(goalCoverage*100).toFixed(0)}% of ${fmtINR(harvestPlan.dailyGoal)}</span>`;
       if(harvestPlan.warning){
         html+=` <span style="color:var(--amber);font-size:11px;font-family:'DM Mono',monospace;font-weight:700;margin-left:8px" title="${harvestPlan.warning}">· target floor active</span>`;
       }
@@ -5334,7 +5361,8 @@ function exportBasket(){
   const limitOmitted=Math.max(0,selList.length-bandRejected-exportList.length);
 
   const harvestPlan=computeHarvestPlan();
-  const adaptiveTGT=roundPct05(harvestPlan.targetPct||(TRADEBOOK_STATS?TRADEBOOK_STATS.adaptiveTGT:3.7));
+  const active=getActiveTargetInfo();
+  const adaptiveTGT=roundPct05(active.tgtPct||harvestPlan.targetPct||(TRADEBOOK_STATS?TRADEBOOK_STATS.adaptiveTGT:3.7));
 
   const orders=[];
   let rejectedCount=bandRejected;
@@ -5396,7 +5424,8 @@ function exportBasket(){
   downloadBasket(orders,'Zerodha_Basket_Buy');
   const rejNote=rejectedCount>0?` · ${rejectedCount} skipped (eligibility/allocation)`:'';
   const targetNote=` · target + SL GTT per stock`;
-  const planNote=` · Harvest ${adaptiveTGT.toFixed(2)}% (net ~${harvestPlan.expectedNetPct.toFixed(2)}% after costs)`;
+  const srcLabel=active.source==='goal'?'goal-led':'Harvest';
+  const planNote=` · ${srcLabel} ${adaptiveTGT.toFixed(2)}% GTT`;
   const floorNote=harvestPlan.warning?` · target floor active`:``;
   const limitNote=limitOmitted>0?` · ${limitOmitted} lower-priority stock${limitOmitted===1?'':'s'} omitted to keep the basket within Zerodha's 20-order limit`:'';
   showToast(`<strong>Exported ${orders.length} CNC MARKET BUY orders</strong> as Zerodha_Basket_Buy JSON${targetNote}${planNote}${floorNote}${rejNote}${limitNote}`);
