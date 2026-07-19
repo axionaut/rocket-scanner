@@ -1,5 +1,5 @@
-const BUILD_TS='2026-07-18 12:30 IST'; // release build time (IST)
-const APP_VERSION=525; // Goal-led export target: lower of learned Harvest / goal-required, floored so charges never eat the edge.
+const BUILD_TS='2026-07-19 09:22 IST'; // release build time (IST)
+const APP_VERSION=526; // Indicator Watch: automated forward orientation guardrail (display-only, bounded, flags backwards priors for review).
 const GOOGLE_DRIVE_CLIENT_ID='1015012642264-oi2nelv3v90k3d39r994a6nelgjs2a56.apps.googleusercontent.com'; // Public OAuth Web Client ID.
 const PRICE_BAND_BLOCK_BUFFER_PCT=0.15; // Treat rounded 4.9/9.9/19.9 rows as effectively band-locked.
 const BASKET_CASH_RESERVE_RS=1; // Leave a rupee for broker-side tax/rounding differences.
@@ -2116,6 +2116,183 @@ function buildObservedDailyMoves(objRows){
     return {symbol,price:num(r['Price']),high1d:highCol?num(r[highCol]):null,low1d:lowCol?num(r[lowCol]):null,priceChange:changeCol?num(r[changeCol]):null};
   }).filter(Boolean);
 }
+// ══════════════════════════════════════════════════
+// INDICATOR WATCH (v526) — display-only orientation guardrail.
+// Automated forward measurement replacing manual eyeballing of ~170 indicators.
+// For every MONOTONIC-prior indicator it records, each accepted session, where each
+// stock sat (decile). Five trading sessions later it asks: did the end the prior
+// REWARDS actually hold more of the movers, or fewer? It keeps a rolling 30-session
+// tally per indicator, for BOTH forward outcomes (a stock posting a >=5% day-move and a
+// >=10% day-move within the window). An indicator is flagged only when it is "backwards"
+// on BOTH outcomes past a Bonferroni-corrected bar (owner choice: strictest). It NEVER
+// changes scoring — a flag is a note to review; inverting a prior stays a deliberate code
+// change. State is bounded (<=window snapshots + a 30-long log), append-only, and gap-
+// robust: a missed upload just yields fewer samples, never corrupt rolling state (the
+// v1 failure mode cannot recur here).
+// ══════════════════════════════════════════════════
+const INDICATOR_WATCH_STORE='rs_indicator_watch_v1';
+const IW_SCHEMA='indicator_watch_v1';
+const IW_WINDOW=5;            // forward trading sessions
+const IW_LOG_MAX=30;         // rolling evaluated-session tally per indicator/outcome
+const IW_MIN_SESSIONS=20;    // need this many resolved samples before any evaluation
+const IW_MIN_MOVERS=5;       // a session contributes to an outcome only with >= this many movers
+const IW_MIN_EFFECT=0.08;    // |mean forward effect| must clear this (not just be significant)
+const IW_SIGN_FRACTION=0.70; // >= this fraction of samples must share the backwards sign
+const IW_T_CRIT=3.5;         // ~Bonferroni two-sided z across ~120 monotonic features
+const IW_MIN_TURNOVER=25e5;  // watch only tradeable stocks (turnover >= ₹25L); keeps signal + storage honest
+async function iwDeflateB64(u8){
+  try{
+    const stream=new Blob([u8]).stream().pipeThrough(new CompressionStream('deflate-raw'));
+    const buf=new Uint8Array(await new Response(stream).arrayBuffer());
+    let s='';for(let i=0;i<buf.length;i+=8192) s+=String.fromCharCode.apply(null,buf.subarray(i,i+8192));
+    return btoa(s);
+  }catch(e){console.warn('IW deflate failed',e);return null;}
+}
+async function iwInflate(b64){
+  const bin=atob(b64),u8=new Uint8Array(bin.length);
+  for(let i=0;i<bin.length;i++)u8[i]=bin.charCodeAt(i);
+  const stream=new Blob([u8]).stream().pipeThrough(new DecompressionStream('deflate-raw'));
+  return new Uint8Array(await new Response(stream).arrayBuffer());
+}
+// Prior orientation for the watch: +1 monotonic high-good, -1 inverted (high-bad),
+// 0 = peak/neutral (not orientation-testable this way, excluded).
+function iwPriorSign(feature){
+  const lo=radarPrior(feature,0.05),hi=radarPrior(feature,0.95),mid=radarPrior(feature,0.50);
+  if(Math.abs(lo)<0.02&&Math.abs(mid)<0.02&&Math.abs(hi)<0.02) return 0; // neutral (PE)
+  if(mid>hi+0.05&&mid>lo+0.05) return 0;                                  // peak
+  if(hi>lo+0.1) return 1;
+  if(hi<lo-0.1) return -1;
+  return 0;
+}
+function getIndicatorWatchStore(){
+  const raw=FS.get(INDICATOR_WATCH_STORE);
+  if(raw?.schema===IW_SCHEMA) return raw;
+  return {schema:IW_SCHEMA,window:IW_WINDOW,pending:[],dailyMovers:[],log:{},resolvedSessions:0,updatedAt:null};
+}
+// Record the current session and resolve any anchors that have matured. Fire-and-forget
+// from the upload path so it never delays rankings.
+async function recordIndicatorWatch(sessionDate){
+  try{
+    if(!Array.isArray(ALL)||!ALL.length||!RADAR.features?.length) return;
+    // Only monotonic-prior features are orientation-testable.
+    const monoFeats=RADAR.features.map(f=>({name:f.name,sign:iwPriorSign(f)})).filter(f=>f.sign!==0);
+    if(!monoFeats.length) return;
+    const featNames=monoFeats.map(f=>f.name);
+    const featIndex=new Map(featNames.map((n,i)=>[n,i]));
+    const nF=featNames.length;
+    // Restrict the watch to reasonably-LIQUID stocks (turnover >= IW_MIN_TURNOVER). This is
+    // both correctness (a penny stock ticking to +10% on no volume is untradeable noise that
+    // would pollute the mover sets and bias orientation) and a big storage cut.
+    const liquid=s=>Number(s.turnover)>=IW_MIN_TURNOVER;
+    const symbols=[];
+    const deciles=[]; // per-stock Uint8 (length nF, 255=missing) — built now, packed after
+    for(const s of ALL){
+      if(!s.symbol||!Array.isArray(s.contrib)||!liquid(s)) continue;
+      const row=new Uint8Array(nF).fill(255);
+      let any=false;
+      for(const c of s.contrib){
+        const fi=featIndex.get(c.name);
+        if(fi===undefined) continue;
+        const d=Math.max(0,Math.min(9,Math.floor((Number(c.p)||0)*10)));
+        row[fi]=d;any=true;
+      }
+      if(any){symbols.push(s.symbol);deciles.push(row);}
+    }
+    if(symbols.length<50) return;
+    // Today's mover sets (same-day day-move thresholds among liquid stocks).
+    const m5=[],m10=[];
+    for(const s of ALL){const d=Number(s.day??s.priceChange);if(!isFinite(d)||!liquid(s))continue;if(d>=10)m10.push(s.symbol);if(d>=5)m5.push(s.symbol);}
+    const store=getIndicatorWatchStore();
+    // Per-feature anchor sum/count of deciles (for the non-mover baseline at resolution).
+    const sum=new Float64Array(nF),cnt=new Uint32Array(nF);
+    for(const row of deciles) for(let i=0;i<nF;i++){if(row[i]!==255){sum[i]+=row[i];cnt[i]++;}}
+    const flat=new Uint8Array(symbols.length*nF);
+    for(let r=0;r<deciles.length;r++) flat.set(deciles[r],r*nF);
+    const packed=await iwDeflateB64(flat);
+    if(!packed) return;
+    // Dedup within a session: the latest upload of a date replaces that date's anchor/movers.
+    store.dailyMovers=store.dailyMovers.filter(x=>x.date!==sessionDate);
+    store.dailyMovers.push({date:sessionDate,m5,m10});
+    store.dailyMovers.sort((a,b)=>String(a.date).localeCompare(String(b.date)));
+    store.dailyMovers=store.dailyMovers.slice(-(IW_WINDOW+1));
+    store.pending=store.pending.filter(a=>a.date!==sessionDate);
+    store.pending.push({date:sessionDate,ns:symbols.length,nF,featNames,signs:monoFeats.map(f=>f.sign),
+      symbols,packed,sum:Array.from(sum,v=>+v.toFixed(1)),cnt:Array.from(cnt)});
+    // Resolve matured anchors (>= IW_WINDOW trading sessions elapsed by uploaded dates).
+    const stillPending=[];
+    for(const a of store.pending){
+      const elapsed=Number(tradingDaysBetween(a.date,sessionDate));
+      if(!(elapsed>=IW_WINDOW)){stillPending.push(a);continue;}
+      await iwResolveAnchor(store,a);
+    }
+    store.pending=stillPending;
+    store.updatedAt=new Date().toISOString();
+    FS.set(INDICATOR_WATCH_STORE,store);
+  }catch(e){console.warn('recordIndicatorWatch failed',e);}
+}
+async function iwResolveAnchor(store,a){
+  try{
+    // Movers within the window: any stock hitting the threshold on a day strictly after
+    // the anchor and within IW_WINDOW trading sessions.
+    const win=store.dailyMovers.filter(x=>String(x.date)>String(a.date)&&Number(tradingDaysBetween(a.date,x.date))<=IW_WINDOW);
+    const set5=new Set(),set10=new Set();
+    win.forEach(x=>{(x.m5||[]).forEach(s=>set5.add(s));(x.m10||[]).forEach(s=>set10.add(s));});
+    const flat=await iwInflate(a.packed);
+    const nF=a.nF,syms=a.symbols;
+    const foldOutcome=(moverSet,minMovers,key)=>{
+      // Per feature: mover decile mean vs non-mover decile mean, normalized to [-1,1].
+      const moverSum=new Float64Array(nF),moverCnt=new Uint32Array(nF);
+      let movers=0;
+      for(let r=0;r<syms.length;r++){
+        if(!moverSet.has(syms[r])) continue;
+        movers++;
+        const base=r*nF;
+        for(let i=0;i<nF;i++){const d=flat[base+i];if(d!==255){moverSum[i]+=d;moverCnt[i]++;}}
+      }
+      if(movers<minMovers) return; // too few movers this session to trust the direction
+      for(let i=0;i<nF;i++){
+        const mc=moverCnt[i];if(mc<3) continue;
+        const nonC=a.cnt[i]-mc,nonSum=a.sum[i]-moverSum[i];
+        if(nonC<3) continue;
+        const e=((moverSum[i]/mc)-(nonSum/nonC))/9; // decile-mean gap, normalized
+        const name=a.featNames[i];
+        const rec=store.log[name]||(store.log[name]={sign:a.signs[i],e5:[],e10:[]});
+        rec.sign=a.signs[i];
+        rec[key].push(+e.toFixed(4));
+        if(rec[key].length>IW_LOG_MAX) rec[key].shift();
+      }
+    };
+    foldOutcome(set5,IW_MIN_MOVERS,'e5');
+    foldOutcome(set10,Math.max(2,Math.floor(IW_MIN_MOVERS/2)),'e10'); // 10% movers are rarer
+    store.resolvedSessions=(store.resolvedSessions||0)+1;
+  }catch(e){console.warn('iwResolveAnchor failed',e);}
+}
+// Evaluate the rolling log: which indicators are backwards on BOTH outcomes, strictly.
+function evaluateIndicatorWatch(){
+  const store=getIndicatorWatchStore();
+  const backwardsOn=(arr,sign)=>{
+    const n=arr.length;
+    if(n<IW_MIN_SESSIONS) return null;
+    const mean=arr.reduce((s,v)=>s+v,0)/n;
+    const varr=arr.reduce((s,v)=>s+(v-mean)*(v-mean),0)/Math.max(1,n-1);
+    const se=Math.sqrt(varr/n)||1e-9;
+    const t=mean/se;
+    const backSign=-sign; // rewarded end holds FEWER movers => effect sign opposite to prior
+    const sameSignFrac=arr.filter(v=>Math.sign(v)===backSign).length/n;
+    const ok=Math.sign(mean)===backSign&&Math.abs(t)>=IW_T_CRIT&&Math.abs(mean)>=IW_MIN_EFFECT&&sameSignFrac>=IW_SIGN_FRACTION;
+    return {ok,mean:+mean.toFixed(3),n,t:+t.toFixed(2)};
+  };
+  const flags=[];
+  const tested=Object.keys(store.log).filter(name=>{
+    const r=store.log[name];return (r.e5?.length||0)>=IW_MIN_SESSIONS&&(r.e10?.length||0)>=IW_MIN_SESSIONS;
+  });
+  Object.entries(store.log).forEach(([name,r])=>{
+    const b5=backwardsOn(r.e5||[],r.sign),b10=backwardsOn(r.e10||[],r.sign);
+    if(b5?.ok&&b10?.ok) flags.push({name,sign:r.sign,e5:b5,e10:b10});
+  });
+  return {resolvedSessions:store.resolvedSessions||0,pending:store.pending?.length||0,
+    testable:tested.length,logged:Object.keys(store.log).length,flags};
+}
 function getHoldingAvgCost(symbol){
   symbol=normSym(symbol);
   if(!symbol) return null;
@@ -3697,6 +3874,31 @@ function buildRadarLedgerHTML(){
   }).join('');
   return `<div class="corr-wrap"><table class="ct"><thead><tr><th>Column / Feature</th><th>Use</th><th>Group</th><th>Model Weight</th><th>Coverage</th><th>Today-Rocket Separation</th></tr></thead><tbody>${ledgerRows}</tbody></table></div>`;
 }
+function buildIndicatorWatchHTML(){
+  let w;try{w=evaluateIndicatorWatch();}catch(e){return '';}
+  const resolved=w.resolvedSessions||0;
+  const collecting=resolved<IW_MIN_SESSIONS;
+  const head=`<h3 id="meth-watch" style="margin-top:28px">Indicator Watch <span style="font-size:12px;color:var(--t3);font-weight:400">automatic orientation guardrail</span></h3>`;
+  const intro=`<p style="color:var(--t2);font-size:12.5px;line-height:1.7">Each accepted session the system records where every liquid stock (turnover ≥ ₹25L) sits on every direction-testable indicator, then ${IW_WINDOW} sessions later checks whether the end the model <em>rewards</em> actually held more of the movers — or fewer. It keeps a rolling ${IW_LOG_MAX}-session tally per indicator and flags one only when it looks backwards on <strong>both</strong> a +5% and a +10% forward move, past a strict bar corrected for watching so many at once. Nothing changes automatically — a flag is a note to bring to review before inverting anything.</p>`;
+  if(collecting){
+    return `${head}${intro}<div style="background:var(--bg-card);border:1px solid var(--border);border-radius:10px;padding:14px 18px;font-size:12px;color:var(--t2)">⏳ Collecting evidence — <strong>${resolved}/${IW_MIN_SESSIONS}</strong> resolved sessions (need ${IW_MIN_SESSIONS} before any warning; ${w.pending} snapshot${w.pending===1?'':'s'} awaiting their ${IW_WINDOW}-session resolution). No orientation warnings until enough forward data exists.</div>`;
+  }
+  if(!w.flags.length){
+    return `${head}${intro}<div style="background:var(--bg-card);border:1px solid rgba(34,197,94,.25);border-radius:10px;padding:14px 18px;font-size:12px;color:var(--t2)">✓ No indicator is backwards on both outcomes over the last ${resolved} resolved sessions (${w.testable} indicators have enough samples to test). Every direction-testable prior is oriented consistently with the forward evidence.</div>`;
+  }
+  const rows=w.flags.map(f=>{
+    const dir=f.sign>0?'rewards its HIGH end':'rewards its LOW end';
+    return `<tr>
+      <td style="font-weight:700;color:var(--t1)">${escHtml(f.name)}</td>
+      <td style="font-size:11px;color:var(--t2)">prior ${dir}</td>
+      <td style="color:var(--red);font-weight:700;font-family:'DM Mono',monospace">${f.e5.mean>0?'+':''}${f.e5.mean} (n${f.e5.n})</td>
+      <td style="color:var(--red);font-weight:700;font-family:'DM Mono',monospace">${f.e10.mean>0?'+':''}${f.e10.mean} (n${f.e10.n})</td>
+    </tr>`;
+  }).join('');
+  return `${head}${intro}
+    <div style="background:rgba(239,68,68,.06);border:1px solid rgba(239,68,68,.3);border-radius:10px;padding:12px 16px;margin-bottom:10px;font-size:12px;color:var(--t1)"><strong>⚠ ${w.flags.length} indicator${w.flags.length===1?'':'s'} looks backwards over the last ${resolved} sessions.</strong> The rewarded end held <em>fewer</em> movers on both +5% and +10%. Bring these to review — inverting a prior is a deliberate, logged code change, never automatic.</div>
+    <div style="overflow-x:auto"><table class="ct" style="min-width:620px"><thead><tr><th>Indicator</th><th>Prior orientation</th><th title="Mean forward decile gap (mover minus non-mover), normalized; negative vs the rewarded end = backwards">+5% forward gap</th><th>+10% forward gap</th></tr></thead><tbody>${rows}</tbody></table></div>`;
+}
 function _renderMethodologyInner(){
   const mc=document.getElementById('methContent');
   if(!mc) return;
@@ -3713,6 +3915,7 @@ function _renderMethodologyInner(){
     <nav style="position:sticky;top:var(--hdr-h,72px);z-index:50;background:var(--bg);padding:8px 0 10px;margin-bottom:8px;display:flex;gap:6px;flex-wrap:wrap;border-bottom:1px solid var(--border);box-shadow:0 2px 8px rgba(0,0,0,0.3);overflow-x:auto;-webkit-overflow-scrolling:touch">
       <a href="#meth-scoring" onclick="event.preventDefault();scrollToSection('meth-scoring')" style="padding:4px 12px;border-radius:6px;background:var(--bg-card);border:1px solid var(--border);color:var(--t2);font-size:11px;font-weight:600;text-decoration:none;cursor:pointer">⚙ Scoring System</a>
       <a href="#meth-ledger" onclick="event.preventDefault();scrollToSection('meth-ledger')" style="padding:4px 12px;border-radius:6px;background:var(--bg-card);border:1px solid var(--border);color:var(--t2);font-size:11px;font-weight:600;text-decoration:none;cursor:pointer">📒 Feature Ledger</a>
+      <a href="#meth-watch" onclick="event.preventDefault();scrollToSection('meth-watch')" style="padding:4px 12px;border-radius:6px;background:var(--bg-card);border:1px solid var(--border);color:var(--t2);font-size:11px;font-weight:600;text-decoration:none;cursor:pointer">🧭 Indicator Watch</a>
       <a href="#meth-filters" onclick="event.preventDefault();scrollToSection('meth-filters')" style="padding:4px 12px;border-radius:6px;background:var(--bg-card);border:1px solid var(--border);color:var(--t2);font-size:11px;font-weight:600;text-decoration:none;cursor:pointer">🛡 Surveillance</a>
       <a href="#meth-guide" onclick="event.preventDefault();scrollToSection('meth-guide')" style="padding:4px 12px;border-radius:6px;background:var(--bg-card);border:1px solid var(--border);color:var(--t2);font-size:11px;font-weight:600;text-decoration:none;cursor:pointer">📖 Use & Risk</a>
     </nav>
@@ -3734,6 +3937,7 @@ function _renderMethodologyInner(){
     </div>
     <h3 id="meth-ledger" style="margin-top:28px">Feature Ledger <span style="font-size:12px;color:var(--t3);font-weight:400">(${RADAR.features.length||0} modeled of ${RADAR.headers.length||0} columns)</span></h3>
     ${buildRadarLedgerHTML()}
+    ${buildIndicatorWatchHTML()}
     <div id="meth-hf-wrap">${hardFiltersHTML}</div>
     <h3 id="meth-guide" style="margin-top:28px">Use & Risk</h3>
     <div class="m-grid">
@@ -5642,6 +5846,8 @@ function applySavedFiltersForMode(mode){
       };
       recordRecommendationOutcomeScan(window._lastStockOutcomeScan);
       recordDisplayedEntryCohort({date:uploadSession,candidates:eligibleCandidates});
+      // Indicator-orientation watch: fire-and-forget so compression never delays rankings.
+      recordIndicatorWatch(uploadSession).catch(e=>console.warn('indicator watch record failed',e));
       syncExecutedRecommendedEntries();
     }
     FILT=[...ALL];_tvLoadedThisSession=true;
