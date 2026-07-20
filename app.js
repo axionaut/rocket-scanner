@@ -1,5 +1,5 @@
-const BUILD_TS='2026-07-19 09:22 IST'; // release build time (IST)
-const APP_VERSION=526; // Indicator Watch: automated forward orientation guardrail (display-only, bounded, flags backwards priors for review).
+const BUILD_TS='2026-07-20 09:26 IST'; // release build time (IST)
+const APP_VERSION=527; // Use the new ALL NSE columns: "High, 52 weeks" rides the price-level path as breakout-proximity (no code change); "Free float %" routed to Liquidity with an inverted prior (low float = explosive).
 const GOOGLE_DRIVE_CLIENT_ID='1015012642264-oi2nelv3v90k3d39r994a6nelgjs2a56.apps.googleusercontent.com'; // Public OAuth Web Client ID.
 const PRICE_BAND_BLOCK_BUFFER_PCT=0.15; // Treat rounded 4.9/9.9/19.9 rows as effectively band-locked.
 const BASKET_CASH_RESERVE_RS=1; // Leave a rupee for broker-side tax/rounding differences.
@@ -1923,7 +1923,7 @@ function radarGroupFor(h){
   if(/rate of change|momentum|relative strength|stochastic|commodity channel|awesome oscillator|moving average convergence|ultimate oscillator/.test(s))return'momentum';
   if(/moving average|aroon|directional|ichimoku|parabolic sar|technical rating|oscillators rating/.test(s))return'trend';
   if(/gap|high|low|open|bollinger|donchian|keltner|pivot|price change|average daily range/.test(s))return'structure';
-  if(/turnover|volume|market capitalization|shareholder|price to earnings|average volume/.test(s))return'liquidity';
+  if(/turnover|volume|market capitalization|shareholder|price to earnings|average volume|free float/.test(s))return'liquidity';
   if(/volatility|average true range/.test(s))return'volatility';
   return'context';
 }
@@ -1944,7 +1944,7 @@ function radarTransformed(raw,f,priceI){
 function radarPrior(feature,p){
   const s=feature.name.toLowerCase();
   if(p===null)return null;
-  if(/negative|aroon.*down/.test(s))return 1-2*p;
+  if(/negative|aroon.*down|free float/.test(s))return 1-2*p;
   if(/relative strength|stochastic|money flow|commodity channel|ultimate oscillator/.test(s))return clamp01(1-Math.abs(p-.68)/.68,0,1)*2-1;
   if(/volatility|true range|daily range/.test(s))return clamp01(1-Math.abs(p-.64)/.64,0,1)*2-1;
   if(/gap|price change/.test(s))return clamp01(1-Math.abs(p-.72)/.72,0,1)*2-1;
