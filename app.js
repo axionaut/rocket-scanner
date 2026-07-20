@@ -1,5 +1,5 @@
-const BUILD_TS='2026-07-20 14:01 IST'; // release build time (IST)
-const APP_VERSION=530; // Filters persist across refresh; Latest Session + Open Positions moved under the Rankings table and driven by one search; recommendations table scrolls instead of paginating.
+const BUILD_TS='2026-07-20 14:12 IST'; // release build time (IST)
+const APP_VERSION=531; // Restore the vertical spacing the removed pagination block used to provide between the Rankings tables.
 const GOOGLE_DRIVE_CLIENT_ID='1015012642264-oi2nelv3v90k3d39r994a6nelgjs2a56.apps.googleusercontent.com'; // Public OAuth Web Client ID.
 const PRICE_BAND_BLOCK_BUFFER_PCT=0.15; // Treat rounded 4.9/9.9/19.9 rows as effectively band-locked.
 const BASKET_CASH_RESERVE_RS=1; // Leave a rupee for broker-side tax/rounding differences.
@@ -3016,7 +3016,7 @@ function buildLatestSessionPanel(query=''){
   const clr=(v)=>v===0?'var(--t2)':v>0?'var(--green)':'var(--red)';
   const fmtPerfRs=(v)=>fmtSignedINR(v);
   const fmtPct=(v)=>(v>=0?'+':'')+v.toFixed(2)+'%';
-  const card=inner=>`<div id="rank-latest-session-card" style="background:var(--bg-card);border:1px solid var(--border);border-radius:10px;margin-bottom:12px;overflow:hidden">${inner}</div>`;
+  const card=inner=>`<div id="rank-latest-session-card" style="background:var(--bg-card);border:1px solid var(--border);border-radius:10px;overflow:hidden">${inner}</div>`;
   const summary=getLatestBookedSummary();
   PERF_LATEST_SUMMARY=summary; // cache for the renderStats card — single source of truth
   const orderBooked=summary?.source==='Orders.csv'?summary:null;
@@ -3243,7 +3243,7 @@ function buildOpenPositionsPanel(query=''){
   const radarNote=ALL.length
     ?'Radar context is from the current ALL NSE upload. Click a symbol for its scoring breakdown.'
     :'Load ALL NSE.csv to add Radar score, rank, setup, day change, and risk.';
-  const html=`<div id="rank-open-positions-card" style="background:var(--bg-card);border:1px solid var(--border);border-radius:10px;margin-bottom:12px;overflow:hidden">
+  const html=`<div id="rank-open-positions-card" style="background:var(--bg-card);border:1px solid var(--border);border-radius:10px;overflow:hidden">
     <div style="padding:12px 16px;border-bottom:1px solid var(--border)">
       <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:8px;margin-bottom:6px">
         <span style="font-size:11px;font-weight:800;color:var(--t1);text-transform:uppercase;letter-spacing:.08em">Open Positions${panelFilterTag(rows,shown,query)}</span>
