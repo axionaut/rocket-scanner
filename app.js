@@ -1,5 +1,5 @@
-const BUILD_TS='2026-07-20 16:14 IST'; // release build time (IST)
-const APP_VERSION=532; // Goal horizon is a deadline date (days derived); today's booked P&L from Orders reaches the tradebook-derived money totals without touching the learning path.
+const BUILD_TS='2026-07-20 16:33 IST'; // release build time (IST)
+const APP_VERSION=533; // Only changed inputs re-upload to Drive (silent refreshes stay quiet); score traffic-light bands applied to every score surface from one definition.
 const GOOGLE_DRIVE_CLIENT_ID='1015012642264-oi2nelv3v90k3d39r994a6nelgjs2a56.apps.googleusercontent.com'; // Public OAuth Web Client ID.
 const PRICE_BAND_BLOCK_BUFFER_PCT=0.15; // Treat rounded 4.9/9.9/19.9 rows as effectively band-locked.
 const BASKET_CASH_RESERVE_RS=1; // Leave a rupee for broker-side tax/rounding differences.
@@ -832,13 +832,29 @@ function idleTask(fn,timeout=1200){
   if('requestIdleCallback' in window) requestIdleCallback(run,{timeout});
   else setTimeout(run,60);
 }
-function saveInputsInBackground(files){
+// Drive copies of the canonical inputs are what hydrate a second device, so this stays —
+// but only for files that actually CHANGED. Before v533 every processFiles() call, including
+// each 15-second auto-refresh tick, re-uploaded all seven inputs (multi-MB CSV + ZIP) and
+// toasted about it; the encode/upload work landed inside the scoring window and competed
+// with the render. Now unchanged files are skipped, the work is deferred further, and a
+// silent auto-refresh never toasts.
+const _driveInputSigs=new Map(); // lowercased file name -> "size:lastModified"
+const driveInputKey=f=>String(f?.name||'').toLowerCase();
+const driveInputSig=f=>`${f?.size}:${f?.lastModified}`;
+const driveInputNeedsPush=f=>_driveInputSigs.get(driveInputKey(f))!==driveInputSig(f);
+const markDriveInputPushed=f=>_driveInputSigs.set(driveInputKey(f),driveInputSig(f));
+function saveInputsInBackground(files,{silent=false}={}){
   if(!files?.length||!FS.hasFolder()) return;
+  const pending=files.filter(driveInputNeedsPush);
+  if(!pending.length) return; // nothing changed since the last push — no upload, no toast
   idleTask(()=>{
-    FS.saveUploadedInputs(files)
-      .then(n=>{if(n) showToast(`Saved ${n} input file${n!==1?'s':''} to Drive in background.`,2500);})
+    FS.saveUploadedInputs(pending)
+      .then(n=>{
+        pending.forEach(markDriveInputPushed);
+        if(n&&!silent) showToast(`Saved ${n} input file${n!==1?'s':''} to Drive in background.`,2500);
+      })
       .catch(e=>showToast('Background Drive input save failed: '+(e.message||e),5000,true));
-  },1800);
+  },6000);
 }
 function saveBrainInBackground(label='Brain saved'){
   idleTask(()=>{
@@ -1957,6 +1973,28 @@ function radarPrior(feature,p){
   if(s==='price to earnings ratio')return 0;
   return 2*p-1;
 }
+// Traffic-light bands for the composite score. Single source of truth: the Methodology
+// Interpretation list, the rankings table, the open-positions table and the detail modal
+// all read these, so a colour can never mean two different things (owner, v533).
+const RADAR_SCORE_BANDS=[
+  {min:80,color:'var(--green)',range:'80–100',note:'strongest relative continuation setup.'},
+  {min:65,color:'var(--amber)',range:'65–79.9',note:'watchlist; confirmation required.'},
+  {min:50,color:'var(--orange)',range:'50–64.9',note:'mixed evidence.'},
+  {min:-Infinity,color:'var(--red)',range:'Below 50',note:'weak under this model.'}
+];
+function radarScoreColor(score){
+  const s=Number(score);
+  if(score===null||score===undefined||!isFinite(s)) return 'var(--t3)';
+  return RADAR_SCORE_BANDS.find(b=>s>=b.min).color;
+}
+// Score number + proportional bar, both tinted by the band.
+function radarScoreCell(score,title=''){
+  const s=Number(score);
+  if(score===null||score===undefined||!isFinite(s)) return '<span class="sc-m" style="color:var(--t3)">—</span>';
+  const c=radarScoreColor(s);
+  return `<span class="sc-m" style="color:${c}"${title?` title="${escHtml(title)}"`:''}>${s.toFixed(1)}</span>`
+    +`<span class="score-bar"><i style="width:${Math.max(0,Math.min(100,s))}%;background:${c}"></i></span>`;
+}
 function radarSetupLabel(r){
   const b=[];
   if(r.parts.participation>=67)b.push('Volume ignition');
@@ -2813,7 +2851,7 @@ function renderStats(){
   const medianRisk=Object.entries(riskCounts).sort((a,b)=>b[1]-a[1])[0]?.[0]||'—';
   const selCount=FILT.filter(s=>SELECTED.has(s.symbol)).length;
   const rocketsCard=`<div class="st"><div class="st-l">Rockets Today</div><div class="st-v" style="color:var(--fire)">${(RADAR.rockets||0).toLocaleString()}</div><div class="st-d">same-day ≥10% movers · shape today's archetype diagnostic</div></div>`;
-  const scoreCard=`<div class="st"><div class="st-l">Top Score</div><div class="st-v">${topScore}</div><div class="st-d">${FILT.length.toLocaleString()} displayed · ${selCount} selected for export · median risk ${medianRisk} · ${RADAR.features.length||0} modeled features</div></div>`;
+  const scoreCard=`<div class="st"><div class="st-l">Top Score</div><div class="st-v" style="color:${radarScoreColor(top?.score)}">${topScore}</div><div class="st-d">${FILT.length.toLocaleString()} displayed · ${selCount} selected for export · median risk ${medianRisk} · ${RADAR.features.length||0} modeled features</div></div>`;
 
   document.getElementById('statsBar').innerHTML=`
     <div class="st"><div class="st-l">Scanned Universe</div><div class="st-v">${t.toLocaleString()}</div><div class="st-d"><span style="color:var(--green)">${bull} up</span> · <span style="color:var(--red)">${t-bull} down/flat</span> · breadth ${t?(bull/t*100).toFixed(0):'—'}%</div></div>
@@ -3246,7 +3284,7 @@ function buildOpenPositionsPanel(query=''){
     {key:'targetPrice',label:'Target ₹',align:'right',fmt:v=>v!=null?fmtINR(v)+`<span style="font-size:10px;color:var(--t3);margin-left:4px">+${adaptiveTGT}%</span>`:'—',clrFn:()=>'var(--green)'},
     {key:'stopPrice',label:'SL ₹',align:'right',fmt:(v,row)=>v!=null?fmtINR(v)+`<span style="font-size:10px;color:var(--t3);margin-left:4px">-${getRowStopDistancePct(row.scannerRow).toFixed(2)}%</span>`:'—',clrFn:()=>'var(--red)'},
     {key:'tslPoints',label:'TSL pts',align:'right',bold:true,fmt:v=>v!=null?Number(v).toFixed(2):'—',clrFn:v=>v==null?'var(--t3)':'var(--amber)'},
-    {key:'score',label:'Radar Score',align:'right',bold:true,fmt:v=>v!=null?`<span class="sc-m">${v.toFixed(1)}</span><span class="score-bar"><i style="width:${Math.max(0,Math.min(100,v))}%"></i></span>`:'—',clrFn:()=>'var(--t1)'},
+    {key:'score',label:'Radar Score',align:'right',bold:true,fmt:v=>radarScoreCell(v),clrFn:()=>'var(--t1)'},
     {key:'rank',label:'Rank',align:'right',fmt:v=>v??'—',clrFn:()=>'var(--t2)'},
     {key:'setup',label:'Setup',align:'left',fmt:v=>v?`<span style="font-size:11px;color:var(--t2)">${escHtml(v)}</span>`:'<span style="color:var(--t3)">not in this upload</span>'},
     {key:'dayPct',label:'Day %',align:'right',fmt:fPerf,clrFn:()=>'var(--t2)'},
@@ -3969,10 +4007,7 @@ function _renderMethodologyInner(){
         <li>Cap position size from account risk, not from enthusiasm. Enthusiasm has never met a denominator it respected.</li>
       </ol></div>
       <div class="m-card"><h4>Interpretation</h4><ul style="padding-left:18px;color:var(--t2);font-size:12px;line-height:1.7">
-        <li><b style="color:var(--green)">80–100:</b> strongest relative continuation setup.</li>
-        <li><b style="color:var(--green)">65–79.9:</b> watchlist; confirmation required.</li>
-        <li><b style="color:var(--amber)">50–64.9:</b> mixed evidence.</li>
-        <li><b style="color:var(--t3)">Below 50:</b> weak under this model.</li>
+        ${RADAR_SCORE_BANDS.map(b=>`<li><b style="color:${b.color}">${b.range}:</b> ${b.note}</li>`).join('')}
         <li>The score is ordinal and cross-sectional. A score of 90 does not mean a 90% chance.</li>
         <li>A real probability model needs many dated snapshots and their next-day outcomes; the surviving outcome stores collect exactly that execution evidence.</li>
       </ul></div>
@@ -4584,7 +4619,7 @@ function renderTable(){
     const cells=`
       <td style="text-align:center"><input type="checkbox" ${isSelected?'checked':''} ${canBuy?'':'disabled'} style="width:14px;height:14px;accent-color:var(--amber);cursor:${canBuy?'pointer':'not-allowed'}" onclick="event.stopPropagation()" onchange="toggleStock('${s.symbol}',this.checked)" title="${canBuy?'Include in the Zerodha basket export':'Ineligible for the basket'}"></td>
       <td style="font-family:'DM Mono',monospace;font-weight:800;color:var(--t1);text-align:right">${s.rank??'—'}</td>
-      <td><span class="sc-m" title="Relative same-day composite score (0-100 percentile, top-weighted). It is a ranking, not a probability.">${scoreText}</span><span class="score-bar"><i style="width:${Math.max(0,Math.min(100,Number(s.score)||0))}%"></i></span></td>
+      <td>${radarScoreCell(s.score,'Relative same-day composite score (0-100 percentile, top-weighted). It is a ranking, not a probability.')}</td>
       <td style="font-family:'Plus Jakarta Sans',sans-serif"><div style="font-weight:700;font-size:13px;color:var(--t1)">${s.symbol}${(()=>{const flags=s.meta?.flags||[];if(!flags.length)return '';return `<span style="font-size:8px;background:rgba(239,68,68,.15);color:var(--red);border-radius:4px;padding:1px 5px;margin-left:5px;font-weight:700;vertical-align:middle" title="NSE surveillance flags: ${escHtml(flags.join(' · '))}">⚠ ${flags.length}</span>`;})()}</div><div style="font-size:9px;color:var(--t3);max-width:220px;overflow:hidden;text-overflow:ellipsis">${escHtml(s.name||'')}</div></td>
       <td style="font-size:11px;color:var(--t2)">${escHtml(s.setup||'—')}</td>
       <td>${radarSeriesBandPill(s)}</td>
@@ -4687,7 +4722,8 @@ function showRadarDetail(sym){
   const r=ALL.find(x=>x.symbol===sym);
   const dlg=document.getElementById('radarDetail');
   if(!r||!dlg) return;
-  document.getElementById('radarDetailTitle').textContent=`${r.symbol} · ${isFinite(r.score)?Number(r.score).toFixed(1):'—'} · ${r.risk||'—'} risk`;
+  // innerHTML (not textContent) so the score carries its band colour; both interpolations are escaped.
+  document.getElementById('radarDetailTitle').innerHTML=`${escHtml(r.symbol)} · <span style="color:${radarScoreColor(r.score)}">${isFinite(r.score)?Number(r.score).toFixed(1):'—'}</span> · ${escHtml(r.risk||'—')} risk`;
   const groups=Object.entries(RADAR_GROUPS).map(([k,g])=>`<div class="rr-group"><b>${g.label}<i>${r.parts?fmt(r.parts[k],0):'—'}/100</i></b><meter min="0" max="100" value="${r.parts?.[k]??0}"></meter></div>`).join('');
   const contribs=[...(r.contrib||[])].sort((a,b)=>Math.abs(b.impact)-Math.abs(a.impact)).slice(0,36).map(x=>`<div class="rr-contrib"><div><b>${escHtml(x.name)}</b><small>${RADAR_GROUPS[x.group]?.label||x.group} · percentile ${fmt(x.p*100,0)}</small></div><b class="${x.impact>=0?'pos':'neg'}">${x.impact>=0?'+':''}${fmt(x.impact,3)}</b></div>`).join('');
   const gate=r.rocketReady?'Meets the model’s high-feasibility criteria.':'Feasibility cautions: '+escHtml((r.gateReasons||[]).join(', ')||'not evaluated')+'.';
@@ -5883,9 +5919,9 @@ async function processFiles(files,sourceLabel,opts={}){
   // does not immediately re-process the files it (or the user) just loaded.
   try{_folderWatchSig=folderSignature([...files]);}catch(e){}
   if(!silent) setLoading(true,String(FILE_LOAD_STATUS.source?`Processing selected files... · ${FILE_LOAD_STATUS.source}`:'Processing selected files...'));
-  // Upload canonical input files to Drive in the background. Rankings are built from
-  // the selected local files immediately, because the market does not wait for Drive.
-  saveInputsInBackground(files);
+  // Upload CHANGED canonical input files to Drive in the background. Rankings are built
+  // from the selected local files immediately, because the market does not wait for Drive.
+  saveInputsInBackground(files,{silent});
   NSE_BHAV={};NSE_52W={};NSE_SURV={};NSE_BULK={};NSE_BLOCK={};NSE_PRICE_BAND={};NSE_DEAL_NET={};NSE_STATUS={};NSE_SERIES={};
   let tvFile=null,nseZip=null,holdFile=null,posFile=null,ordFile=null,tbFile=null,holidayFile=false,holidayFileName='';
   for(const f of files){
