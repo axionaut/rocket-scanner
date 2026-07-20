@@ -1,5 +1,5 @@
-const BUILD_TS='2026-07-20 11:27 IST'; // release build time (IST)
-const APP_VERSION=528; // Use the new ALL NSE columns: "High, 52 weeks" rides the price-level path as breakout-proximity (no code change); "Free float %" routed to Liquidity with an inverted prior (low float = explosive).
+const BUILD_TS='2026-07-20 13:29 IST'; // release build time (IST)
+const APP_VERSION=529; // Unified live Open Positions view; the Radar scoring engine is unchanged.
 const GOOGLE_DRIVE_CLIENT_ID='1015012642264-oi2nelv3v90k3d39r994a6nelgjs2a56.apps.googleusercontent.com'; // Public OAuth Web Client ID.
 const PRICE_BAND_BLOCK_BUFFER_PCT=0.15; // Treat rounded 4.9/9.9/19.9 rows as effectively band-locked.
 const BASKET_CASH_RESERVE_RS=1; // Leave a rupee for broker-side tax/rounding differences.
@@ -2074,8 +2074,8 @@ function radarAnalyze(headers,rawRows,supplements={},heldSymbols=new Set()){
       rocketReady,gateReasons,series,band:band??null,status,eqEligible,basketEligible,meta};
   });
   // Held positions never re-enter the buy ranking, but they DO stay in the scored
-  // universe (marked _held) so the Held Positions panel can show how the engine sees
-  // them. Display/selection/outcome paths suppress _held rows; with ~1-2% of rows held
+  // universe (marked _held) so the Performance Open Positions table can show Radar context.
+  // Display/selection/outcome paths suppress _held rows; with ~1-2% of rows held
   // the percentile shift vs the standalone Radar (which dropped them pre-percentile)
   // is negligible, and this visibility was owner-requested.
   allRows.forEach(r=>{r._held=heldSymbols.has(r.symbol);});
@@ -2981,6 +2981,100 @@ function getAdaptiveTradeTrips(trips){
   return rows.length?rows:(trips||[]);
 }
 
+// One current-position view: the live portfolio merge plus the existing Radar context.
+// It reads the exit-policy helpers but never feeds anything back into scoring.
+function buildOpenPositionsPanel(){
+  const adaptiveTGT=getEffectiveTgtPct()||(TRADEBOOK_STATS?.adaptiveTGT||3.7);
+  const reviewDays=getEffectiveReviewDays()||5;
+  const scannerBySymbol=new Map(ALL.map(row=>[row.symbol,row]));
+  const tslStore=getPositionTslStore();
+  const tslNext=tslStore.gapModel?{gapModel:tslStore.gapModel}:{};
+  let tslChanged=false;
+  const rows=[];
+
+  Object.values(getCombinedOpenPositionMap()).forEach(pos=>{
+    const qty=Number(pos?.qty)||0;
+    if(!(qty>0)||!pos.symbol) return;
+    const scannerRow=scannerBySymbol.get(pos.symbol)||null;
+    const ltp=Number(scannerRow?.price)>0
+      ?Number(scannerRow.price)
+      :Number(pos.ltp)>0?Number(pos.ltp):null;
+    const avg=Number(pos.avg)>0?Number(pos.avg):(HOLD_COST_MAP[pos.symbol]||null);
+    const pnlPct=(avg&&ltp)?+((ltp-avg)/avg*100).toFixed(2):null;
+    const pnlRs=(avg&&ltp)?+((ltp-avg)*qty).toFixed(0):null;
+    const daysHeld=getOpenPositionDaysHeld(pos.symbol,qty);
+    const capital=avg?+(avg*qty).toFixed(0):null;
+    const stopPct=getRowStopDistancePct(scannerRow);
+    const targetPrice=avg?tickPrice(avg*(1+adaptiveTGT/100)):null;
+    const stopPrice=avg?tickPrice(avg*(1-stopPct/100)):null;
+    const tslInfo=calcPositionTSL({
+      sym:pos.symbol,qty,avgCost:avg,ltp,scannerRow,adaptiveSL:stopPct,
+      adaptiveTGT,prev:tslStore[pos.symbol]
+    });
+    if(tslInfo){
+      tslNext[pos.symbol]=tslInfo;
+      if(JSON.stringify(tslStore[pos.symbol]||{})!==JSON.stringify(tslInfo)) tslChanged=true;
+    }
+    rows.push({
+      sym:pos.symbol,qty,avg,ltp,pnlPct,pnlRs,capital,daysHeld,targetPrice,stopPrice,
+      tslPoints:tslInfo?.trailStepPoints??tslInfo?.trailPoints??null,
+      score:isFinite(Number(scannerRow?.score))?Number(scannerRow.score):null,
+      rank:scannerRow?.rank??null,setup:scannerRow?.setup||'',
+      dayPct:scannerRow?.day??scannerRow?.priceChange??null,risk:scannerRow?.risk||'',
+      scannerRow
+    });
+  });
+
+  if(!rows.length){
+    if(Object.keys(tslStore).some(isPositionTslSymbolKey)) FS.set(POS_TSL_STORE,tslStore.gapModel?{gapModel:tslStore.gapModel}:{});
+    return {html:'',table:null};
+  }
+  if(Object.keys(tslStore).some(sym=>isPositionTslSymbolKey(sym)&&!tslNext[sym])) tslChanged=true;
+  if(tslChanged) FS.set(POS_TSL_STORE,tslNext);
+
+  const daysFmt=(v)=>{
+    if(v==null) return '<span style="color:var(--t3)">—</span>';
+    const color=v>reviewDays?'var(--red)':v>=reviewDays?'var(--amber)':'var(--t1)';
+    return `<span title="Quantity-weighted age of remaining FIFO buy lots" style="color:${color};font-weight:${v>reviewDays?700:500}">${v}d</span>`;
+  };
+  const cols=[
+    {key:'sym',label:'Symbol',align:'left',bold:true,fmt:(v,row)=>row.scannerRow?`<button onclick="showRadarDetail(${escHtml(JSON.stringify(String(v)))})" style="padding:0;border:0;background:transparent;color:var(--t1);font:inherit;font-weight:700;cursor:pointer" title="Show Radar scoring breakdown">${escHtml(v)}</button>`:escHtml(v)},
+    {key:'qty',label:'Qty',align:'right',fmt:v=>v,clrFn:()=>'var(--t2)'},
+    {key:'avg',label:'Avg ₹',align:'right',fmt:v=>v!=null?Number(v).toLocaleString('en-IN',INR_2):'—',clrFn:()=>'var(--t2)'},
+    {key:'ltp',label:'LTP ₹',align:'right',fmt:v=>v!=null?Number(v).toLocaleString('en-IN',INR_2):'—',clrFn:()=>'var(--t1)'},
+    {key:'pnlPct',label:'P&L %',align:'right',bold:true,fmt:v=>v!=null?(v>=0?'+':'')+v.toFixed(2)+'%':'—',clrFn:v=>v==null?'var(--t3)':v>0?'var(--green)':v<0?'var(--red)':'var(--t2)'},
+    {key:'pnlRs',label:'P&L ₹',align:'right',fmt:v=>v!=null?fmtSignedINR(v):'—',clrFn:v=>v==null?'var(--t3)':v>0?'var(--green)':v<0?'var(--red)':'var(--t2)'},
+    {key:'capital',label:'Capital ₹',align:'right',fmt:v=>v!=null?fmtINR(v):'—',clrFn:()=>'var(--t2)'},
+    {key:'daysHeld',label:'Days Held',align:'right',fmt:daysFmt,clrFn:()=>'var(--t1)'},
+    {key:'targetPrice',label:'Target ₹',align:'right',fmt:v=>v!=null?fmtINR(v)+`<span style="font-size:10px;color:var(--t3);margin-left:4px">+${adaptiveTGT}%</span>`:'—',clrFn:()=>'var(--green)'},
+    {key:'stopPrice',label:'SL ₹',align:'right',fmt:(v,row)=>v!=null?fmtINR(v)+`<span style="font-size:10px;color:var(--t3);margin-left:4px">-${getRowStopDistancePct(row.scannerRow).toFixed(2)}%</span>`:'—',clrFn:()=>'var(--red)'},
+    {key:'tslPoints',label:'TSL pts',align:'right',bold:true,fmt:v=>v!=null?Number(v).toFixed(2):'—',clrFn:v=>v==null?'var(--t3)':'var(--amber)'},
+    {key:'score',label:'Radar Score',align:'right',bold:true,fmt:v=>v!=null?`<span class="sc-m">${v.toFixed(1)}</span><span class="score-bar"><i style="width:${Math.max(0,Math.min(100,v))}%"></i></span>`:'—',clrFn:()=>'var(--t1)'},
+    {key:'rank',label:'Rank',align:'right',fmt:v=>v??'—',clrFn:()=>'var(--t2)'},
+    {key:'setup',label:'Setup',align:'left',fmt:v=>v?`<span style="font-size:11px;color:var(--t2)">${escHtml(v)}</span>`:'<span style="color:var(--t3)">not in this upload</span>'},
+    {key:'dayPct',label:'Day %',align:'right',fmt:fPerf,clrFn:()=>'var(--t2)'},
+    {key:'risk',label:'Risk',align:'left',fmt:v=>v?radarRiskPill(v):'—'}
+  ];
+  const totalCapital=rows.reduce((sum,row)=>sum+(row.capital||0),0);
+  const totalPnl=rows.reduce((sum,row)=>sum+(row.pnlRs||0),0);
+  const pnlColor=totalPnl>0?'var(--green)':totalPnl<0?'var(--red)':'var(--t3)';
+  const table=makeSortableTable('perf-open-positions',cols,rows,'score',-1);
+  const radarNote=ALL.length
+    ?'Radar context is from the current ALL NSE upload. Click a symbol for its scoring breakdown.'
+    :'Load ALL NSE.csv to add Radar score, rank, setup, day change, and risk.';
+  const html=`<div id="perf-open-positions-card" style="background:var(--bg-card);border:1px solid var(--border);border-radius:10px;margin-bottom:12px;overflow:hidden">
+    <div style="padding:12px 16px;border-bottom:1px solid var(--border)">
+      <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:8px;margin-bottom:6px">
+        <span style="font-size:11px;font-weight:800;color:var(--t1);text-transform:uppercase;letter-spacing:.08em">Open Positions</span>
+        <span style="font-size:12px;font-weight:700;color:${pnlColor}">${rows.length} live position${rows.length===1?'':'s'} · ${fmtINR(totalCapital)} deployed · ${fmtSignedINR(totalPnl)}</span>
+      </div>
+      <div style="font-size:12px;color:var(--t2);line-height:1.5">Live merge of Holdings, Positions, and today's net buys. Held stocks stay excluded from new recommendations; Target, SL, and TSL use the existing exit policy. ${radarNote}</div>
+    </div>
+    <div style="overflow-x:auto">${table.getHtml()}</div>
+  </div>`;
+  return {html,table};
+}
+
 function renderPerformance(){
   PERF_RENDERED=true;
   const el=document.getElementById('perfContent');
@@ -2988,25 +3082,30 @@ function renderPerformance(){
   const hdrEl=document.querySelector('.hdr');
   if(hdrEl) document.documentElement.style.setProperty('--hdr-h',hdrEl.offsetHeight+'px');
   const tb=TRADEBOOK_STATS;
-  if(!tb){
-    el.innerHTML=`<div style="text-align:center;padding:80px 40px;color:var(--t2)"><div style="font-size:36px;margin-bottom:16px">📒</div><div style="font-size:16px;font-weight:700;color:var(--t1);margin-bottom:8px">No Tradebook Loaded</div><div>Upload TRADEBOOK.csv to see performance analytics.</div></div>`;
-    return;
-  }
-  // Re-apply the realised tradebook exit policy after tradebook refresh.
-  if(tb.tripsData?.length){
+  // Re-apply the realised tradebook exit policy BEFORE the panel is built: it reads
+  // getEffectiveTgtPct/getEffectiveReviewDays, which this refresh is what feeds.
+  if(tb?.tripsData?.length){
     refreshExitPolicyFromFeedback(tb);
     try{FS.set(TRADEBOOK_STORE,tb);}catch(e){}
   }
+  const openPositionsPanel=buildOpenPositionsPanel();
+  if(!tb){
+    el.innerHTML=`<div style="padding:12px 16px">${openPositionsPanel.html}<div style="text-align:center;padding:60px 40px;color:var(--t2)"><div style="font-size:16px;font-weight:700;color:var(--t1);margin-bottom:8px">No Tradebook Loaded</div><div>Upload TRADEBOOK.csv to see performance analytics.</div></div></div>`;
+    setTimeout(()=>openPositionsPanel.table?.render(),0);
+    return;
+  }
+
   const clr=(v)=>v===0?'var(--t2)':v>0?'var(--green)':'var(--red)';
   const fmtPerfRs=(v)=>fmtSignedINR(v);
   const fmtPct=(v)=>(v>=0?'+':'')+v.toFixed(2)+'%';
 
   const allTripsRaw=tb.tripsData||[];
   if(!allTripsRaw.length&&tb.roundTrips>0){
-    // Old brain data — tripsData field didn't exist before this version
-    el.innerHTML=`<div style="text-align:center;padding:80px 40px;color:var(--t2)"><div style="font-size:36px;margin-bottom:16px">🔄</div><div style="font-size:16px;font-weight:700;color:var(--t1);margin-bottom:8px">Re-upload TRADEBOOK.csv</div><div>Brain has ${tb.roundTrips} trades stored in the old format. Re-upload TRADEBOOK.csv once to rebuild with full trip data.</div></div>`;
+    el.innerHTML=`<div style="padding:12px 16px">${openPositionsPanel.html}<div style="text-align:center;padding:60px 40px;color:var(--t2)"><div style="font-size:16px;font-weight:700;color:var(--t1);margin-bottom:8px">Re-upload TRADEBOOK.csv</div><div>Brain has ${tb.roundTrips} trades stored in the old format. Re-upload TRADEBOOK.csv once to rebuild with full trip data.</div></div></div>`;
+    setTimeout(()=>openPositionsPanel.table?.render(),0);
     return;
   }
+
   const allTrips=allTripsRaw;
   const adaptiveAllTrips=getAdaptiveTradeTrips(allTrips);
   const preSystemLots=Math.max(0,allTrips.length-adaptiveAllTrips.length);
@@ -3299,154 +3398,8 @@ function renderPerformance(){
     </div>`;
   }
 
-  // ── Time-Stop Alert: open positions held past the learned review horizon ──
-  // Built from HOLDINGS + POSITIONS (qty>0). Days held is quantity-weighted from
-  // unmatched FIFO tradebook buy lots, so small top-ups do not reset old holdings.
-  // Action thresholds are derived from this user's own tradebook below.
-  let timeStopHtml='', timeStopTblObj=null;
-  (function(){
-    const adaptiveTGT=getEffectiveTgtPct()||(TRADEBOOK_STATS?.adaptiveTGT||3.7);
-    // Apply the net profit-per-day horizon learned from closed tradebook outcomes.
-    const cutoffDays=getEffectiveReviewDays()||5;
-    const _longRows=allTrips.length?allTrips.filter(t=>t.holdDays>cutoffDays):[];
-    const _longWins=_longRows.filter(t=>t.netPnlPct>0).length;
-    const _longTotal=_longRows.length;
-    const _longPnl=_longRows.reduce((s,t)=>s+(t.netPnl||0),0);
-    const _longWR=_longTotal?Math.round(_longWins/_longTotal*100):0;
-
-    // ── Build live open-position rows ──
-    const _rows=[];
-    const _tslStore=getPositionTslStore();
-    const _tslNext=_tslStore.gapModel?{gapModel:_tslStore.gapModel}:{};
-    let _tslChanged=false;
-    const _addPos=(sym,qty,avg,ltpHint)=>{
-      if(!sym||qty<=0) return;
-      const scannerRow=ALL.find(s=>s.symbol===sym);
-      const ltp=scannerRow?.price
-        ||(POSITIONS?.find(p=>p.symbol===sym)?.ltp)
-        ||(HOLDINGS?.find(h=>h.symbol===sym)?.ltp)
-        ||ltpHint||null;
-      const avgCost=avg||HOLD_COST_MAP[sym]||null;
-      const pnlPct=(avgCost&&ltp)?+((ltp-avgCost)/avgCost*100).toFixed(2):null;
-      const pnlRs=(avgCost&&ltp&&qty)?+((ltp-avgCost)*qty).toFixed(0):null;
-      const daysHeld=getOpenPositionDaysHeld(sym,qty);
-      const capDeployed=(avgCost&&qty)?+(avgCost*qty).toFixed(0):null;
-      const activeSL=getRowStopDistancePct(scannerRow);
-      const tgtPrice=avgCost?tickPrice(avgCost*(1+adaptiveTGT/100)):null;
-      const slPrice=avgCost?tickPrice(avgCost*(1-activeSL/100)):null;
-      // Distance to SL: positive = above SL (safe), negative = breached SL
-      const distSL=(ltp!=null&&slPrice!=null&&slPrice>0)?+((ltp-slPrice)/slPrice*100).toFixed(2):null;
-      const tslInfo=calcPositionTSL({sym,qty,avgCost,ltp,scannerRow,adaptiveSL:activeSL,adaptiveTGT,prev:_tslStore[sym]});
-      if(tslInfo){
-        _tslNext[sym]=tslInfo;
-        if(JSON.stringify(_tslStore[sym]||{})!==JSON.stringify(tslInfo)) _tslChanged=true;
-      }
-      const signal=null; // computed below after all rows collected — needs cross-row normalisation
-      const rawTslPrice=tslInfo?.tsl??null;
-      const tslPrice=rawTslPrice;
-      _rows.push({sym,qty,avg:avgCost,ltp,pnlPct,pnlRs,daysHeld,capDeployed,tgtPrice,slPrice,distSL,
-        tslPrice,tslRawPrice:rawTslPrice,tslGapPct:tslInfo?.gapPct??null,tslPeakPct:tslInfo?.peakProfitPct??null,
-        tslLockPct:tslInfo?.lockPct??null,tslPoints:tslInfo?.trailStepPoints??tslInfo?.trailPoints??null,
-        tslDistance:tslInfo?.distancePoints??null,tslBasis:tslInfo?.basis||'',tslMode:tslInfo?.mode||'protect',
-        tslTargetPct:tslInfo?.targetPct??adaptiveTGT,signal,
-        _sortDays:daysHeld==null?-1:daysHeld});
-    };
-    Object.values(getCombinedOpenPositionMap()).forEach(pos=>{
-      if(pos.qty>0) _addPos(pos.symbol,pos.qty,pos.avg,pos.ltp);
-    });
-    if(!_rows.length){
-      if(Object.keys(_tslStore).some(isPositionTslSymbolKey)) FS.set(POS_TSL_STORE,_tslStore.gapModel?{gapModel:_tslStore.gapModel}:{});
-      return; // nothing to show
-    }
-    if(Object.keys(_tslStore).some(sym=>isPositionTslSymbolKey(sym)&&!_tslNext[sym])) _tslChanged=true;
-    if(_tslChanged) FS.set(POS_TSL_STORE,_tslNext);
-
-    // ── Signal: composite exit urgency score ──
-    // Components: P&L% (40%), P&L ₹ (30%), Days Held (20%), Distance to SL (10%)
-    // All normalised to [-1,+1] across current rows. Lower = more urgent to exit.
-    // Days Held contribution is sign-flipped: more days → more negative (penalise time drag on losers).
-    // 0d positions get null — too early to judge.
-    {
-      const _norm=(vals)=>{
-        const clean=vals.filter(v=>v!=null&&isFinite(v));
-        if(!clean.length) return vals.map(()=>0);
-        const mn=Math.min(...clean), mx=Math.max(...clean);
-        return vals.map(v=>(v==null||!isFinite(v))?null:(mx===mn?0:2*(v-mn)/(mx-mn)-1));
-      };
-      const eligible=_rows.filter(r=>r.daysHeld!=null&&r.daysHeld>=1);
-      if(eligible.length){
-        const nPnlPct =_norm(eligible.map(r=>r.pnlPct));
-        const nPnlRs  =_norm(eligible.map(r=>r.pnlRs));
-        const nDays   =_norm(eligible.map(r=>r.daysHeld));  // flipped below
-        const nDistSL =_norm(eligible.map(r=>r.distSL));
-        eligible.forEach((r,i)=>{
-          const pp=nPnlPct[i]??0, pr=nPnlRs[i]??0, dy=nDays[i]??0, sl=nDistSL[i]??0;
-          r.signal=+((pp + pr + (-dy) + sl) / 4).toFixed(2);
-        });
-      }
-    }
-
-    // Negative signal = underperforming (exit candidates), positive = holding well
-    const _negCount=_rows.filter(r=>r.signal!=null&&r.signal<0).length;
-    const _posCount=_rows.filter(r=>r.signal!=null&&r.signal>=0).length;
-    const _flaggedCap=_rows.filter(r=>r.signal!=null&&r.signal<0).reduce((s,r)=>s+(r.capDeployed||0),0);
-    const _totalCap=_rows.reduce((s,r)=>s+(r.capDeployed||0),0);
-    const _flaggedPct=_totalCap?Math.round(_flaggedCap/_totalCap*100):0;
-
-    const _daysFmt=v=>{
-      if(v==null) return '<span style="color:var(--t3)">—</span>';
-      const c=v>cutoffDays?'var(--red)':v>=cutoffDays?'var(--amber)':'var(--t1)';
-      return `<span title="Quantity-weighted age of remaining FIFO buy lots" style="color:${c};font-weight:${v>cutoffDays?700:500}">${v}d</span>`;
-    };
-    const cols=[
-      {key:'sym',label:'Symbol',align:'left',fmt:v=>v,clrFn:()=>'var(--t1)',bold:true},
-      {key:'qty',label:'Qty',align:'right',fmt:v=>v,clrFn:()=>'var(--t2)'},
-      {key:'avg',label:'Avg ₹',align:'right',fmt:v=>v!=null?Number(v).toLocaleString('en-IN',INR_2):'—',clrFn:()=>'var(--t2)'},
-      {key:'ltp',label:'LTP ₹',align:'right',fmt:v=>v!=null?Number(v).toLocaleString('en-IN',INR_2):'—',clrFn:()=>'var(--t1)'},
-      {key:'pnlPct',label:'P&L %',align:'right',bold:true,fmt:v=>v!=null?(v>=0?'+':'')+v.toFixed(2)+'%':'—',clrFn:v=>v==null?'var(--t3)':v>0?'var(--green)':v<0?'var(--red)':'var(--t2)'},
-      {key:'pnlRs',label:'P&L ₹',align:'right',fmt:v=>v!=null?fmtSignedINR(v):'—',clrFn:v=>v==null?'var(--t3)':v>0?'var(--green)':v<0?'var(--red)':'var(--t2)'},
-      {key:'capDeployed',label:'Capital ₹',align:'right',fmt:fmtINR,clrFn:()=>'var(--t2)'},
-      {key:'_sortDays',label:'Days Held',align:'right',fmt:(v,r)=>_daysFmt(r.daysHeld),clrFn:()=>'var(--t1)'},
-      {key:'tgtPrice',label:'Target ₹',align:'right',fmt:(v,r)=>v!=null?fmtINR(v)+`<span style="font-size:10px;color:var(--t3);margin-left:4px">+${adaptiveTGT}%</span>`:'—',clrFn:()=>'var(--green)'},
-      {key:'slPrice',label:'SL ₹',align:'right',fmt:(v,r)=>v!=null?fmtINR(v)+`<span style="font-size:10px;color:var(--t3);margin-left:4px">-${getRowStopDistancePct(ALL.find(s=>s.symbol===r.sym)).toFixed(2)}%</span>`:'—',clrFn:()=>'var(--red)'},
-      {key:'tslPoints',label:'TSL pts',align:'right',bold:true,fmt:v=>v!=null?Number(v).toFixed(2):'-',clrFn:v=>v==null?'var(--t3)':'var(--amber)'},
-      {key:'signal',label:'Signal',align:'right',bold:true,fmt:v=>v!=null?(v>=0?'+':'')+v.toFixed(2):'—',clrFn:v=>v==null?'var(--t3)':v>0?'var(--green)':v<0?'var(--red)':'var(--t2)'},
-    ];
-    // Sort: signal ascending (worst first), then days desc
-    const _sorted=[..._rows].sort((a,b)=>(a.signal??999)-(b.signal??999)||b._sortDays-a._sortDays);
-    timeStopTblObj=makeSortableTable('perf-timestop',cols,_sorted,'signal',1);
-
-    // ── Header summary ──
-    const _summaryColor=_negCount>0?'var(--red)':'var(--green)';
-    const _summaryIcon=_negCount>0?'🛑':'✅';
-    const _summaryText=_negCount>0
-      ?`<strong style="color:var(--red)">${_negCount}</strong> of ${_rows.length} positions with negative signal (${_flaggedPct}% of capital ${fmtINR(_flaggedCap)} underperforming)`
-      :allTrips.length
-        ?`All ${_rows.length} positions showing positive signal.`
-        :`${_rows.length} live held positions loaded from Holdings.csv / Positions.csv. Tradebook history is optional for the age-based evidence.`;
-
-    const _badges=[
-      _negCount>0?`<span style="padding:3px 10px;border-radius:12px;background:rgba(239,68,68,.18);color:var(--red);font-weight:700;font-size:11px">🛑 ${_negCount} NEGATIVE</span>`:'',
-      _posCount>0?`<span style="padding:3px 10px;border-radius:12px;background:rgba(34,197,94,.12);color:var(--green);font-weight:700;font-size:11px">✅ ${_posCount} POSITIVE</span>`:'',
-    ].filter(Boolean).join(' ');
-
-    const _evidence=_longTotal>0
-      ?`<div style="font-size:11px;color:var(--t3);margin-top:6px;line-height:1.5"><strong style="color:var(--t2)">Signal</strong> = avg(P&amp;L%, P&amp;L ₹, −Days Held, Dist-to-SL), all cross-normalised to [−1,+1]. Days Held is quantity-weighted across the remaining FIFO buy lots. Equal weights — lower = more urgent to exit. The tradebook exit policy reviews positions after <strong style="color:var(--amber)">${cutoffDays}d</strong>; historically, trips beyond it had a <strong style="color:${_longWR<50?'var(--red)':'var(--amber)'}">${_longWR}% win rate</strong> across ${_longTotal} lots (net ${fmtSignedINR(_longPnl)}).</div>`
-      :'';
-
-    timeStopHtml=`<div id="perf-timestop-card" style="background:var(--bg-card);border:1px solid ${_negCount>0?'rgba(239,68,68,.4)':'var(--border)'};border-radius:10px;margin-bottom:12px;overflow:hidden">
-      <div style="padding:12px 16px;border-bottom:1px solid var(--border)">
-        <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:8px;margin-bottom:6px">
-          <span style="font-size:11px;font-weight:800;color:${_summaryColor};text-transform:uppercase;letter-spacing:.08em">${_summaryIcon} Open Positions</span>
-          <div style="display:flex;gap:6px;flex-wrap:wrap">${_badges}</div>
-        </div>
-        <div style="font-size:12px;color:var(--t2);line-height:1.5">${_summaryText}</div>
-        ${_evidence}
-      </div>
-      <div style="overflow-x:auto">${timeStopTblObj.getHtml()}</div>
-    </div>`;
-  })();
-
+  const openPositionsHtml=openPositionsPanel.html;
+  const openPositionsTable=openPositionsPanel.table;
   const periodPills=['all','1m','3m','6m','1y'].map(p=>{
     const active=PERF_PERIOD_FILTER===p;
     const label=p==='all'?'All':p==='1m'?'1M':p==='3m'?'3M':p==='6m'?'6M':'1Y';
@@ -3465,7 +3418,7 @@ function renderPerformance(){
 
   const _navLink=(id,label,show)=>show?`<a href="#${id}" onclick="event.preventDefault();scrollToSection('${id}')" style="padding:4px 12px;border-radius:6px;background:var(--bg-card);border:1px solid var(--border);color:var(--t2);font-size:11px;font-weight:600;text-decoration:none;cursor:pointer;white-space:nowrap">${label}</a>`:'';
   const perfNav=`<nav style="position:sticky;top:var(--hdr-h,72px);z-index:50;background:var(--bg);padding:8px 0 10px;margin-bottom:8px;display:flex;gap:6px;flex-wrap:wrap;border-bottom:1px solid var(--border);box-shadow:0 2px 8px rgba(0,0,0,0.3);overflow-x:auto;-webkit-overflow-scrolling:touch">
-    ${_navLink('perf-timestop-card','📊 Positions',!!timeStopHtml)}
+    ${_navLink('perf-open-positions-card','📊 Positions',!!openPositionsHtml)}
     ${_navLink('perf-kpi','📊 KPIs',true)}
     ${_navLink('perf-outcomes','Outcome Feedback',true)}
 
@@ -3491,7 +3444,7 @@ function renderPerformance(){
   el.innerHTML=`
     <div style="padding:12px 16px">
       ${todayHtml}
-      ${timeStopHtml}
+      ${openPositionsHtml}
       ${perfNav}
       ${periodPillsHtml}
       <div style="font-size:10px;color:var(--t3);margin-bottom:12px">${periodLabel} · ${p.roundTrips} lots</div>
@@ -3502,7 +3455,7 @@ function renderPerformance(){
       ${p.symBreakdown.length?perfCard('Stocks',symTbl.getHtml(),'360px','perf-stocks'):''}
     </div>`;
 
-  setTimeout(()=>{monthTbl.render();symTbl.render();tradeWindowTbl.render();if(timeStopTblObj)timeStopTblObj.render();},0);
+  setTimeout(()=>{monthTbl.render();symTbl.render();tradeWindowTbl.render();if(openPositionsTable)openPositionsTable.render();},0);
 }
 
 function schedulePerformanceRender(){
@@ -4653,52 +4606,7 @@ function applyFilters(){
   SELECTED=new Set(FILT.filter(s=>s.basketEligible!==false&&!EXPORT_EXCLUDED.has(s.symbol)).slice(0,20).map(s=>s.symbol));
 
   PG=1;renderHead();renderTable();renderStatusBar();saveFilterState();updateTabCounts();
-  try{renderHeldRadarPanel();}catch(e){console.warn('Held panel render failed',e);}
   if(ALL.length) try{renderStats();}catch(e){}
-}
-// Held positions viewed through the Radar's eyes: suppressed from recommendations,
-// but scored with the same composite so their current engine standing stays visible.
-function renderHeldRadarPanel(){
-  const el=document.getElementById('heldRadarPanel');
-  if(!el) return;
-  const heldPos=getHeldPositionMap();
-  const syms=Object.keys(heldPos);
-  if(!syms.length||!ALL.length){el.innerHTML='';return;}
-  const bySym=new Map(ALL.map(r=>[r.symbol,r]));
-  const rows=syms.map(sym=>{
-    const s=bySym.get(sym)||null;
-    const pos=heldPos[sym]||{};
-    const ltp=Number(s?.price)>0?Number(s.price):null;
-    const avg=Number(pos.avg)>0?Number(pos.avg):null;
-    const pnlPct=(ltp&&avg)?((ltp-avg)/avg)*100:null;
-    return {sym,s,qty:Number(pos.qty)||null,avg,ltp,pnlPct};
-  }).sort((a,b)=>{
-    const sa=isFinite(Number(a.s?.score))?Number(a.s.score):-1;
-    const sb=isFinite(Number(b.s?.score))?Number(b.s.score):-1;
-    return sb-sa||a.sym.localeCompare(b.sym);
-  });
-  const body=rows.map(r=>{
-    const sc=r.s&&isFinite(r.s.score)?Number(r.s.score).toFixed(1):'—';
-    const pnlColor=r.pnlPct==null?'var(--t3)':r.pnlPct>=0?'var(--green)':'var(--red)';
-    const dayCell=r.s?fPerf(r.s.day??r.s.priceChange):'—';
-    const clickAttr=r.s?` onclick="showRadarDetail('${r.sym}')" style="cursor:pointer" title="Click for the full scoring breakdown"`:'';
-    return `<tr${clickAttr}>
-      <td style="font-weight:700;color:var(--t1)">${r.sym}</td>
-      <td>${r.qty!=null?r.qty:'—'}</td>
-      <td>${fmtINR(r.avg)}</td>
-      <td>${fmtINR(r.ltp)}</td>
-      <td style="color:${pnlColor};font-weight:700">${r.pnlPct==null?'—':(r.pnlPct>=0?'+':'')+r.pnlPct.toFixed(2)+'%'}</td>
-      <td><span class="sc-m">${sc}</span>${r.s?`<span class="score-bar"><i style="width:${Math.max(0,Math.min(100,Number(r.s.score)||0))}%"></i></span>`:''}</td>
-      <td>${r.s?.rank??'—'}</td>
-      <td style="font-size:11px;color:var(--t2)">${escHtml(r.s?.setup||'not in this upload')}</td>
-      <td>${dayCell}</td>
-      <td>${r.s?radarRiskPill(r.s.risk):'—'}</td>
-    </tr>`;
-  }).join('');
-  el.innerHTML=`<div style="margin:16px 0;border:1px solid var(--border);border-radius:10px;background:var(--bg-card);overflow:hidden">
-    <div style="padding:10px 14px;font-weight:800;font-size:13px;color:var(--t1);border-bottom:1px solid var(--border)">📌 Held Positions — Radar View <span style="font-size:11px;font-weight:500;color:var(--t3)">scored by the same engine, never recommended again · exits live on the Performance tab</span></div>
-    <div style="overflow-x:auto"><table class="ct" style="min-width:820px"><thead><tr><th>Symbol</th><th>Qty</th><th>Avg ₹</th><th>LTP ₹</th><th>P&L %</th><th>Radar Score</th><th>Rank</th><th>Setup</th><th>Day %</th><th>Risk</th></tr></thead><tbody>${body}</tbody></table></div>
-  </div>`;
 }
 function showRadarDetail(sym){
   const r=ALL.find(x=>x.symbol===sym);
@@ -4775,7 +4683,7 @@ function renderStatusBar(){
   } else if(capital>0){
     html+=` <span style="color:var(--t3);font-size:11px;margin-left:8px">· select ${instrumentLabel} to allocate ${fmtINR(capital)}</span>`;
   }
-  if(SUPPRESSED_HELD>0)html+=` <span class="sb-tag" style="margin-left:8px" title="Held positions (Holdings + Positions + today's net Orders buys) never re-enter the buy ranking. See the Held Positions panel below.">📌 ${SUPPRESSED_HELD} held suppressed</span>`;
+  if(SUPPRESSED_HELD>0)html+=` <span class="sb-tag" style="margin-left:8px" title="Held positions (Holdings + Positions + today's net Orders buys) never re-enter the buy ranking. See Open Positions on the Performance tab.">📌 ${SUPPRESSED_HELD} held suppressed</span>`;
   if(SURV_HARD_REMOVED>0)html+=` <span class="sb-tag sb-tag-red" style="margin-left:4px" title="Weeded out by the configured surveillance rules in the Methodology table (hard filter).">⚠ ${SURV_HARD_REMOVED} surveillance removed</span>`;
   if(tags.length){html+=`<span class="sb-sep">|</span>`;html+=tags.map(t=>`<span class="sb-tag">${t}</span>`).join('');}
   if(isFiltered)html+=`<button class="sb-clear" onclick="clearFilters()">✕ Clear filters</button>`;
