@@ -1,5 +1,5 @@
-const BUILD_TS='2026-07-20 14:12 IST'; // release build time (IST)
-const APP_VERSION=531; // Restore the vertical spacing the removed pagination block used to provide between the Rankings tables.
+const BUILD_TS='2026-07-20 16:14 IST'; // release build time (IST)
+const APP_VERSION=532; // Goal horizon is a deadline date (days derived); today's booked P&L from Orders reaches the tradebook-derived money totals without touching the learning path.
 const GOOGLE_DRIVE_CLIENT_ID='1015012642264-oi2nelv3v90k3d39r994a6nelgjs2a56.apps.googleusercontent.com'; // Public OAuth Web Client ID.
 const PRICE_BAND_BLOCK_BUFFER_PCT=0.15; // Treat rounded 4.9/9.9/19.9 rows as effectively band-locked.
 const BASKET_CASH_RESERVE_RS=1; // Leave a rupee for broker-side tax/rounding differences.
@@ -2458,6 +2458,27 @@ function computeLatestOrderBooked(){
   return {source:'Orders.csv',date:session.date,total,rows,unknownRows,hasOrders:session.orders.length>0};
 }
 
+// Zerodha exports the tradebook end-of-day, so P&L booked TODAY is absent from every
+// tradebook-derived stat until the next export (observed 2026-07-20: tradebook ended
+// 07-17 while ₹1,253 was already booked today). Orders.csv carries it, so surface it as
+// an explicit addendum to the money totals. Deliberately NOT merged into `trips`: the
+// learned exit policy and position sizing must keep running on settled tradebook data,
+// and same-day order rows have no buy date or hold days to model with (v532).
+function getTodayBookedAddendum(){
+  const booked=computeLatestOrderBooked();
+  if(!booked?.rows?.length) return null;
+  const tbDate=TRADEBOOK_STATS?._loadedThisSession?(TRADEBOOK_STATS.lastDate||''):'';
+  if(tbDate&&booked.date&&tbDate>=booked.date) return null; // already settled — never double-count
+  const known=booked.rows.filter(r=>r.netPnl!=null&&isFinite(r.netPnl));
+  if(!known.length) return null;
+  return {
+    date:booked.date,
+    amount:+known.reduce((s,r)=>s+r.netPnl,0).toFixed(0),
+    lots:known.length,
+    unknownRows:booked.unknownRows||0,
+    tradebookDate:tbDate||null
+  };
+}
 function getLatestBookedSummary(){
   const orderBooked=computeLatestOrderBooked();
   const currentOrderSession=ORDERS_TODAY?._loadedThisSession?getLatestOrderSession():null;
@@ -2510,26 +2531,26 @@ function getSameDayExitOpportunitySummary(){
 // scoring, or allocation. Config persists in brain (GOAL_STORE) for cross-device sync.
 const GOAL_STORE='rs_goal_v1';
 let _repsState=null; // {date,lastTotal,lastDelta} — session-only reps trigger state (v483)
+// The horizon is a DEADLINE DATE (owner, v532 — reverses the v522 day-count shape).
+// Remaining trading days are derived from it every render, so the countdown stays
+// correct on its own and there is no anchor to drift.
 function getGoalConfig(){
   const g=FS.get(GOAL_STORE)||{};
   const target=(Number(g.target)>0)?Number(g.target):10000000;
   const withdrawMonthly=Math.max(0,Number(g.withdrawMonthly)||0);
-  let days=Math.max(0,Math.floor(Number(g.days)||0));
-  let anchorDate=(typeof g.anchorDate==='string'&&/^\d{4}-\d{2}-\d{2}$/.test(g.anchorDate))?g.anchorDate:null;
-  // One-time migration from the old date-based config: convert the deadline into a
-  // trading-day horizon anchored today, preserving the same remaining runway.
-  if(!(days>0)&&typeof g.date==='string'&&/^\d{4}-\d{2}-\d{2}$/.test(g.date)){
-    days=goalTradingDaysUntil(g.date);
-    anchorDate=getSessionDate();
+  const isDate=v=>typeof v==='string'&&/^\d{4}-\d{2}-\d{2}$/.test(v);
+  let endDate=isDate(g.endDate)?g.endDate:null;
+  // Migrate the v522–v531 {days, anchorDate} horizon into the equivalent deadline,
+  // preserving the runway the user still had left. Legacy {date} maps straight across.
+  if(!endDate&&isDate(g.date)) endDate=g.date;
+  if(!endDate&&Number(g.days)>0){
+    const elapsed=isDate(g.anchorDate)?Math.max(0,Number(tradingDaysBetween(g.anchorDate,getSessionDate()))||0):0;
+    endDate=goalImpliedEndDate(Math.max(0,Math.floor(Number(g.days))-elapsed));
   }
-  if(!(days>0)) days=250; // ~one trading year default
-  if(!anchorDate) anchorDate=getSessionDate();
-  return {target,days,anchorDate,withdrawMonthly};
+  if(!endDate) endDate=goalImpliedEndDate(250); // ~one trading year default
+  return {target,endDate,days:goalTradingDaysUntil(endDate),withdrawMonthly};
 }
-function goalRemainingDays(g){
-  const elapsed=Number(tradingDaysBetween(g.anchorDate,getSessionDate()))||0;
-  return Math.max(0,g.days-Math.max(0,elapsed));
-}
+function goalRemainingDays(g){return Math.max(0,Number(g.days)||0);}
 // Implied calendar end date: walk N trading days forward from today (display hint only).
 function goalImpliedEndDate(remainingDays){
   const cur=new Date(getSessionDate()+'T12:00:00Z');
@@ -2543,15 +2564,12 @@ function goalImpliedEndDate(remainingDays){
 }
 function onGoalChange(){
   const t=parseFloat(document.getElementById('goalTarget')?.value);
-  const d=parseFloat(document.getElementById('goalDays')?.value);
+  const e=String(document.getElementById('goalEnd')?.value||'').trim();
   const w=parseFloat(document.getElementById('goalWd')?.value);
   const cur=getGoalConfig();
-  const days=(d>0)?Math.floor(d):cur.days;
   FS.set(GOAL_STORE,{
     target:t>0?t:cur.target,
-    days,
-    // Editing the horizon restarts the countdown from today; other edits keep it.
-    anchorDate:days!==cur.days?getSessionDate():cur.anchorDate,
+    endDate:/^\d{4}-\d{2}-\d{2}$/.test(e)?e:cur.endDate,
     withdrawMonthly:w>=0?w:cur.withdrawMonthly
   });
   renderStats();
@@ -2639,7 +2657,7 @@ function getGoalRequiredNetPct(){
   const g=getGoalConfig();
   const basis=getGoalPortfolioBasis();
   const days=goalRemainingDays(g);
-  const key=[g.target,g.days,g.anchorDate,days,g.withdrawMonthly,Math.round(basis)].join('|');
+  const key=[g.target,g.endDate,days,g.withdrawMonthly,Math.round(basis)].join('|');
   if(_goalRateCache?.key===key) return _goalRateCache.v;
   const r=solveGoalDailyRate(basis,g.target,days,g.withdrawMonthly);
   const v=(r!=null&&r>0)?+(r*100).toFixed(3):null;
@@ -2685,16 +2703,16 @@ function buildGoalPopoverContent(){
       ?(req!=null
         ?`<span style="color:var(--amber);font-weight:700">Required now: +${req.toFixed(2)}%/trading day</span> · ≈ ₹${goalFmtRs(basis*req/100)}/day earnings on total ₹${goalFmtRs(basis)}`
         :`<span style="color:var(--red);font-weight:700">Not reachable</span> — earning ₹${goalFmtRs(g.target)} in ${remaining} sessions needs more than 50%/day from total ₹${goalFmtRs(basis)}`)
-      :`<span style="color:var(--amber);font-weight:700">Horizon elapsed</span> — set a new day count`)
+      :`<span style="color:var(--amber);font-weight:700">Deadline reached</span> — pick a later date`)
     :`Enter Capital ₹ in the filter bar (or load holdings) to compute the required %/day.`;
   return `<div style="font-size:12px;color:var(--t1);margin-bottom:10px;font-weight:700">Goal</div>
   <div style="display:flex;gap:8px;align-items:flex-end;flex-wrap:wrap">
     <span><span style="${_lbl}">Earn ₹ (profit)</span><input id="goalTarget" type="number" value="${g.target}" style="width:92px;${_in}" onchange="onGoalChange()" title="Trading profit to generate from current total capital within the horizon — not a balance to reach."></span>
-    <span><span style="${_lbl}">In (trading days)</span><input id="goalDays" type="number" min="1" step="1" value="${g.days}" style="width:76px;${_in}" onchange="onGoalChange()" title="Editing this restarts the countdown from today."></span>
+    <span><span style="${_lbl}">By (deadline)</span><input id="goalEnd" type="date" min="${getSessionDate()}" value="${g.endDate}" style="width:126px;${_in}" onchange="onGoalChange()" title="Deadline for the earnings target. Trading days left are counted from today to this date, skipping weekends and NSE holidays."></span>
     <span><span style="${_lbl}">Withdraw ₹/mo</span><input id="goalWd" type="number" value="${g.withdrawMonthly}" style="width:76px;${_in}" onchange="onGoalChange()"></span>
   </div>
   <div style="font-size:11px;line-height:1.6;color:var(--t2);margin-top:10px">${reqLine}</div>
-  <div style="font-size:10px;line-height:1.5;color:var(--t3);margin-top:6px">${remaining} trading days left (of ${g.days}, set ${g.anchorDate}) · ends ≈ ${goalImpliedEndDate(remaining)} · withdrawal drains ≈ ₹${goalFmtRs(wdDaily)}/calendar day (weekends and holidays included). Informational — never changes targets or allocation.</div>`;
+  <div style="font-size:10px;line-height:1.5;color:var(--t3);margin-top:6px">${remaining} trading day${remaining===1?'':'s'} left until ${g.endDate} (weekends and NSE holidays excluded) · withdrawal drains ≈ ₹${goalFmtRs(wdDaily)}/calendar day (weekends and holidays included). Informational — never changes targets or allocation.</div>`;
 }
 function renderGoalPopover(){
   const content=document.getElementById('goalPopoverContent');
@@ -3314,8 +3332,13 @@ function renderPerformance(){
     ? `${recPos.source}${posRatio?` · ${(posRatio*100).toFixed(0)}% of avg`:''}`
     : recPos.source;
 
+  // Today's booked P&L is not in the tradebook yet — add it to the money total so the
+  // headline matches reality, and say so explicitly rather than silently blending it.
+  const todayAdd=getTodayBookedAddendum();
+  const netWithToday=p.totalNetPnlRs+(todayAdd?.amount||0);
+  const todayNote=todayAdd?` · incl. ${fmtPerfRs(todayAdd.amount)} booked ${todayAdd.date} from Orders (tradebook ends ${todayAdd.tradebookDate||'—'})`:'';
   const kpis=[
-    {label:'Net P&L',value:fmtPerfRs(p.totalNetPnlRs),color:clr(p.totalNetPnlRs),sub:`${p.roundTrips} lots · ${spanTradingDays||p.totalTradingDays} trading days${preSystemLots?` · ${preSystemLots} pre-system ignored`:''}`},
+    {label:'Net P&L',value:fmtPerfRs(netWithToday),color:clr(netWithToday),sub:`${p.roundTrips}${todayAdd?`+${todayAdd.lots}`:''} lots · ${spanTradingDays||p.totalTradingDays} trading days${todayNote}${preSystemLots?` · ${preSystemLots} pre-system ignored`:''}`},
     {label:'Expectancy',value:fmtPerfRs(p.expectancy),color:clr(p.expectancy),sub:'Net ₹ per FIFO lot'},
     {label:'Profit Factor',value:p.profitFactor!=null?p.profitFactor:'—',color:p.profitFactor>=1.5?'var(--green)':p.profitFactor>=1?'var(--amber)':'var(--red)',sub:'Gross wins ÷ gross losses'},
     {label:'Win Rate',value:p.winRate+'%',color:p.winRate>=55?'var(--green)':p.winRate>=45?'var(--amber)':'var(--red)',sub:`${p.winners}W · ${p.losers}L lots`},
@@ -3366,13 +3389,16 @@ function renderPerformance(){
     {key:'avgCalDay',label:'Avg/Cal Day',align:'right',fmt:fmtPerfRs,clrFn:clr},
   ];
   const monthMap={};
-  adaptiveAllTrips.forEach(r=>{
-    const ym=r.sellDate.substring(0,7);
-    if(!monthMap[ym]) monthMap[ym]={month:ym,pnl:0,trades:0,days:0,_dates:new Set(),_minDate:r.sellDate,_maxDate:r.sellDate};
-    monthMap[ym].pnl+=r.netPnl; monthMap[ym].trades++; monthMap[ym]._dates.add(r.sellDate);
-    if(r.sellDate<monthMap[ym]._minDate) monthMap[ym]._minDate=r.sellDate;
-    if(r.sellDate>monthMap[ym]._maxDate) monthMap[ym]._maxDate=r.sellDate;
-  });
+  const addToMonth=(sellDate,pnl,trades)=>{
+    const ym=sellDate.substring(0,7);
+    if(!monthMap[ym]) monthMap[ym]={month:ym,pnl:0,trades:0,days:0,_dates:new Set(),_minDate:sellDate,_maxDate:sellDate};
+    monthMap[ym].pnl+=pnl; monthMap[ym].trades+=trades; monthMap[ym]._dates.add(sellDate);
+    if(sellDate<monthMap[ym]._minDate) monthMap[ym]._minDate=sellDate;
+    if(sellDate>monthMap[ym]._maxDate) monthMap[ym]._maxDate=sellDate;
+  };
+  adaptiveAllTrips.forEach(r=>addToMonth(r.sellDate,r.netPnl,1));
+  // Same reason as the Net P&L KPI: today is booked but not yet in the tradebook.
+  if(todayAdd) addToMonth(todayAdd.date,todayAdd.amount,todayAdd.lots);
   const _allMonths=Object.keys(monthMap).sort();
   const _firstMonth=_allMonths[0], _lastMonth=_allMonths.at(-1);
   const _todayYM=getSessionDate().substring(0,7);
