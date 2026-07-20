@@ -108,11 +108,23 @@ table.main tbody td{padding:9px 11px;font-family:'DM Mono',monospace;font-size:1
 .kpi-val{font-size:20px;font-weight:800;margin-top:4px;font-family:'DM Mono',monospace}
 .kpi-sub{font-size:11px;color:var(--t2);margin-top:3px}
 .pos{color:var(--green)}.neg{color:var(--red)}.mut{color:var(--t3)}
-/* Rankings portfolio panels (v531). The recommendations table has margin-bottom:0 and
-   .fixed-hscroll is position:fixed, so these containers own all the vertical rhythm
-   below the table — the removed .pgn block used to supply it. */
+/* Rankings portfolio panels (v531). Spacing is owned by these containers plus the
+   pagination block above them, so the cards themselves carry no bottom margin. */
 #rankLatestSession,#rankOpenPositions{margin-top:24px}
 #rankOpenPositions{margin-bottom:40px}
+/* Pagination — restored in v534 by owner request. Bottom margin stays 0 because
+   #rankLatestSession below it supplies the gap. */
+.pgn{display:flex;justify-content:center;align-items:center;gap:6px;margin:20px 0 0}
+.pgn:empty{display:none}
+.pgn button{padding:7px 12px;background:var(--bg-card);border:1px solid var(--border);border-radius:6px;color:var(--t2);cursor:pointer;font-family:'DM Mono',monospace;font-size:11px;transition:all .2s}
+.pgn button:hover{border-color:var(--blue);color:var(--t1)}
+.pgn button.act{background:var(--blue);color:#fff;border-color:var(--blue)}
+.pgn button:disabled{opacity:.3;cursor:not-allowed}
+.pg-i{color:var(--t3);font-size:11px}
+/* Collapsible diagnostics block under the primary KPIs (v534). */
+.perf-more{margin-top:12px}
+.perf-more>summary{cursor:pointer;color:var(--t2);font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.08em;padding:8px 2px;user-select:none;list-style:revert}
+.perf-more>summary:hover{color:var(--t1)}
 .cb-drop{position:relative;display:inline-block}
 .cb-drop-btn{display:flex;align-items:center;gap:8px;padding:10px 14px;background:var(--bg-card);border:1px solid var(--border);border-radius:8px;color:var(--t1);font-family:'Plus Jakarta Sans',sans-serif;font-size:12px;cursor:pointer;font-weight:500;transition:all .2s;white-space:nowrap;min-width:130px;justify-content:space-between}
 .cb-drop-btn:hover,.cb-drop.open .cb-drop-btn{border-color:var(--blue);background:var(--bg-hover)}

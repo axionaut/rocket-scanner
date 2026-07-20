@@ -1,5 +1,5 @@
-const BUILD_TS='2026-07-20 16:33 IST'; // release build time (IST)
-const APP_VERSION=533; // Only changed inputs re-upload to Drive (silent refreshes stay quiet); score traffic-light bands applied to every score surface from one definition.
+const BUILD_TS='2026-07-20 17:11 IST'; // release build time (IST)
+const APP_VERSION=534; // Score bands are four distinct hues (green/yellow/light blue/red); pagination restored; Performance KPIs cut to a decision-first grid with honest diagnostic labels.
 const GOOGLE_DRIVE_CLIENT_ID='1015012642264-oi2nelv3v90k3d39r994a6nelgjs2a56.apps.googleusercontent.com'; // Public OAuth Web Client ID.
 const PRICE_BAND_BLOCK_BUFFER_PCT=0.15; // Treat rounded 4.9/9.9/19.9 rows as effectively band-locked.
 const BASKET_CASH_RESERVE_RS=1; // Leave a rupee for broker-side tax/rounding differences.
@@ -74,7 +74,7 @@ function updateModeUI(){
   if(brand) brand.textContent='Same-Day Composite Radar';
   document.querySelectorAll('.currency-lbl').forEach(el=>{el.textContent='₹';});
 }
-let ALL=[],FILT=[],SCOL='rank',SDIR=1;
+let ALL=[],FILT=[],PG=1,PGSZ=100,SCOL='rank',SDIR=1;
 let _tvLoadedThisSession=false; // true once a TV CSV has been processed this session
 let PERF_PERIOD_FILTER='all'; // 'all' | '1m' | '3m' | '6m' | '1y'
 let PERF_TRADE_WINDOWS=[]; // cached trade window rows from renderPerformance — used by current-window pill
@@ -1976,10 +1976,13 @@ function radarPrior(feature,p){
 // Traffic-light bands for the composite score. Single source of truth: the Methodology
 // Interpretation list, the rankings table, the open-positions table and the detail modal
 // all read these, so a colour can never mean two different things (owner, v533).
+// Four DISTINCT hues, not a gradient: amber vs orange were indistinguishable on the
+// owner's monitor, so the third band is light blue on purpose (owner, v534). Do not
+// "restore" the hot-to-cold ordering — separability is the requirement here.
 const RADAR_SCORE_BANDS=[
   {min:80,color:'var(--green)',range:'80–100',note:'strongest relative continuation setup.'},
   {min:65,color:'var(--amber)',range:'65–79.9',note:'watchlist; confirmation required.'},
-  {min:50,color:'var(--orange)',range:'50–64.9',note:'mixed evidence.'},
+  {min:50,color:'var(--cyan)',range:'50–64.9',note:'mixed evidence.'},
   {min:-Infinity,color:'var(--red)',range:'Below 50',note:'weak under this model.'}
 ];
 function radarScoreColor(score){
@@ -3375,47 +3378,63 @@ function renderPerformance(){
   const todayAdd=getTodayBookedAddendum();
   const netWithToday=p.totalNetPnlRs+(todayAdd?.amount||0);
   const todayNote=todayAdd?` · incl. ${fmtPerfRs(todayAdd.amount)} booked ${todayAdd.date} from Orders (tradebook ends ${todayAdd.tradebookDate||'—'})`:'';
+  // Two tiers (owner, v534). PRIMARY answers the only questions that change a decision:
+  // am I making money, what is the risk, how big should the next position be, and when
+  // do I review it. Everything else is real but diagnostic, so it sits behind a native
+  // <details> instead of forming a 24-card wall.
   const kpis=[
     {label:'Net P&L',value:fmtPerfRs(netWithToday),color:clr(netWithToday),sub:`${p.roundTrips}${todayAdd?`+${todayAdd.lots}`:''} lots · ${spanTradingDays||p.totalTradingDays} trading days${todayNote}${preSystemLots?` · ${preSystemLots} pre-system ignored`:''}`},
-    {label:'Expectancy',value:fmtPerfRs(p.expectancy),color:clr(p.expectancy),sub:'Net ₹ per FIFO lot'},
-    {label:'Profit Factor',value:p.profitFactor!=null?p.profitFactor:'—',color:p.profitFactor>=1.5?'var(--green)':p.profitFactor>=1?'var(--amber)':'var(--red)',sub:'Gross wins ÷ gross losses'},
     {label:'Win Rate',value:p.winRate+'%',color:p.winRate>=55?'var(--green)':p.winRate>=45?'var(--amber)':'var(--red)',sub:`${p.winners}W · ${p.losers}L lots`},
-    {label:'Profitable Days',value:p.pctProfitableDays+'%',color:p.pctProfitableDays>=60?'var(--green)':p.pctProfitableDays>=50?'var(--amber)':'var(--red)',sub:`${p.profitableDays} of ${p.totalTradingDays} days`},
+    {label:'Expectancy',value:fmtPerfRs(p.expectancy),color:clr(p.expectancy),sub:'Net ₹ you make per lot, on average'},
+    {label:'Profit Factor',value:p.profitFactor!=null?p.profitFactor:'—',color:p.profitFactor>=1.5?'var(--green)':p.profitFactor>=1?'var(--amber)':'var(--red)',sub:'Gross wins ÷ gross losses · above 1 = profitable'},
+    {label:'Recommended Position',value:recPos.value?fmtINR(recPos.value):'—',color:recPos.value?'var(--amber)':'var(--t3)',sub:`Auto-fills Max Alloc · ${recPosSub}`},
+    {label:'Review After',value:effectiveReviewDays?effectiveReviewDays+'d':'—',color:effectiveReviewDays?'var(--amber)':'var(--t3)',sub:exitPolicy&&exitPolicy.velocityPctPerDay!=null?`Exit review horizon · realised baseline ${exitPolicy.holdDays}d`:'Re-upload tradebook to learn'},
+    {label:'Max Drawdown',value:p.maxDrawdown>0?fmtSignedINR(-p.maxDrawdown):'—',color:'var(--red)',sub:'Worst peak-to-trough fall in this period'},
+    {label:'Largest Loss',value:fmtSignedINR(p.largestLossRs),color:'var(--red)',sub:'Worst single lot, net of charges'},
+    {label:'Avg Hold',value:p.avgHoldDays+'d',color:'var(--t1)',sub:'How long a position actually lasts'},
+  ];
+  if(recSummary.evaluated){
+    kpis.push({label:'Rocket Conversion',value:recSummary.conversionPct+'%',color:recSummary.conversionPct>=20?'var(--green)':recSummary.conversionPct>=10?'var(--amber)':'var(--red)',sub:`Picks that hit the target · ${recSummary.rockets}/${recSummary.evaluated} completed`});
+  }
+
+  // Diagnostics. Labels here state honestly what each number IS and whether the exit
+  // policy actually consumes it — several previously claimed authorship of a policy that
+  // is in fact derived from a percentile of the same pool, not from these means.
+  const detailKpis=[
     {label:'Avg P&L/Trading Day',value:fmtPerfRs(p.avgDailyPnl),color:clr(p.avgDailyPnl),sub:`On ${p.totalTradingDays} days traded, net of charges`},
     {label:'Avg P&L/Cal Day',value:avgCalDayPnl!=null?fmtPerfRs(avgCalDayPnl):'—',color:avgCalDayPnl!=null?clr(avgCalDayPnl):'var(--t3)',sub:calDayCount?`Over ${calDayCount} calendar days`:'Insufficient date range'},
-    {label:'Largest Win',value:fmtSignedINR(p.largestWinRs),color:'var(--green)',sub:'Single lot, net'},
-    {label:'Max Win Streak',value:p.maxWinStreak+' days',color:p.maxWinStreak>=5?'var(--green)':p.maxWinStreak>=3?'var(--amber)':'var(--t1)',sub:'Consecutive profitable days'},
-    {label:'Avg Hold',value:p.avgHoldDays+'d',color:'var(--t1)',sub:'Avg position duration'},
-    {label:'Avg Position',value:fmtINR(p.avgCapital||0),color:'var(--t1)',sub:'Observed avg capital per position'},
-    {label:'Avg Positions/Entry Day',value:p.avgPositionsPerEntryDay.toFixed(2),color:'var(--t1)',sub:`${p.positionCount} positions across ${p.entryDays} entry days`},
-    {label:'Recommended Position',value:recPos.value?fmtINR(recPos.value):'—',color:recPos.value?'var(--amber)':'var(--t3)',sub:recPosSub},
-    {label:'Review After',value:effectiveReviewDays?effectiveReviewDays+'d':'—',color:effectiveReviewDays?'var(--amber)':'var(--t3)',sub:exitPolicy&&exitPolicy.velocityPctPerDay!=null?`Realised baseline ${exitPolicy.holdDays}d · rocket timing floor`:'Re-upload tradebook to learn'},
-    {label:'Largest Loss',value:fmtSignedINR(p.largestLossRs),color:'var(--red)',sub:'Single lot, net'},
-    {label:'Max Drawdown',value:p.maxDrawdown>0?fmtSignedINR(-p.maxDrawdown):'—',color:'var(--red)',sub:'Peak-to-trough in period'},
-    {label:'Max Loss Streak',value:p.maxLossStreak+' days',color:p.maxLossStreak>=5?'var(--red)':p.maxLossStreak>=3?'var(--amber)':'var(--green)',sub:'Consecutive losing days'},
+    {label:'Profitable Days',value:p.pctProfitableDays+'%',color:p.pctProfitableDays>=60?'var(--green)':p.pctProfitableDays>=50?'var(--amber)':'var(--red)',sub:`${p.profitableDays} of ${p.totalTradingDays} days`},
     {label:'Best Day',value:p.maxProfitDay?fmtSignedINR(p.maxProfitDay.pnl):'—',color:p.maxProfitDay&&p.maxProfitDay.pnl>0?'var(--green)':'var(--t3)',sub:p.maxProfitDay?p.maxProfitDay.date+' · '+p.maxProfitDay.count+' lots':'No data'},
     {label:'Worst Day',value:p.maxLossDay?fmtSignedINR(p.maxLossDay.pnl):'—',color:p.maxLossDay&&p.maxLossDay.pnl<0?'var(--red)':'var(--t3)',sub:p.maxLossDay?p.maxLossDay.date+' · '+p.maxLossDay.count+' lots':'No data'},
+    {label:'Largest Win',value:fmtSignedINR(p.largestWinRs),color:'var(--green)',sub:'Best single lot, net'},
+    {label:'Max Win Streak',value:p.maxWinStreak+' days',color:p.maxWinStreak>=5?'var(--green)':p.maxWinStreak>=3?'var(--amber)':'var(--t1)',sub:'Consecutive profitable days'},
+    {label:'Max Loss Streak',value:p.maxLossStreak+' days',color:p.maxLossStreak>=5?'var(--red)':p.maxLossStreak>=3?'var(--amber)':'var(--green)',sub:'Consecutive losing days'},
+    {label:'Avg Position',value:fmtINR(p.avgCapital||0),color:'var(--t1)',sub:'Observed avg capital per position'},
+    {label:'Avg Positions/Entry Day',value:p.avgPositionsPerEntryDay.toFixed(2),color:'var(--t1)',sub:`${p.positionCount} positions across ${p.entryDays} entry days`},
   ];
   if(recSummary.evaluated){
     const bestUpside=recSummary.avgBestHighPct;
-    kpis.splice(11,0,
-      {label:'Rocket Conversion',value:recSummary.conversionPct+'%',color:recSummary.conversionPct>=20?'var(--green)':recSummary.conversionPct>=10?'var(--amber)':'var(--red)',sub:`Score overlay · ${recSummary.rockets}/${recSummary.evaluated} completed picks`},
-      {label:'Shortlist Peak',value:bestUpside!=null?(bestUpside>=0?'+':'')+bestUpside.toFixed(2)+'%':'—',color:bestUpside!=null?(bestUpside>=0?'var(--green)':'var(--red)'):'var(--t3)',sub:'Score overlay + TGT policy'},
-      {label:'Avg Time to Rocket',value:recSummary.avgRocketDays!=null?recSummary.avgRocketDays+'d':'—',color:recSummary.avgRocketDays!=null?'var(--amber)':'var(--t3)',sub:recSummary.rocketArrivalCount?`Sets ${recSummary.horizonDays}d learning window · ${recSummary.rocketArrivalCount} conversions`:`Sets ${recSummary.horizonDays}d learning window`}
+    detailKpis.push(
+      {label:'Shortlist Best High (mean)',value:bestUpside!=null?(bestUpside>=0?'+':'')+bestUpside.toFixed(2)+'%':'—',color:bestUpside!=null?(bestUpside>=0?'var(--green)':'var(--red)'):'var(--t3)',sub:'Avg best GROSS high a shortlisted pick reached · pre-cost, not the target'},
+      {label:'Time to Rocket (mean)',value:recSummary.avgRocketDays!=null?recSummary.avgRocketDays+'d':'—',color:recSummary.avgRocketDays!=null?'var(--amber)':'var(--t3)',sub:`Mean days to convert · the ${recSummary.horizonDays}d window comes from the 75th percentile, not this mean`}
     );
   }
   if(entrySummary.completed){
-    kpis.splice(11,0,
-      {label:'Entry Peak / Day',value:(entrySummary.avgVelocity>=0?'+':'')+entrySummary.avgVelocity.toFixed(3)+'%/d',color:entrySummary.avgVelocity>=0?'var(--green)':'var(--red)',sub:`Score overlay · ${entrySummary.positive}/${entrySummary.completed} positive`},
-      {label:'Entry Peak Net',value:(entrySummary.avgBestNet>=0?'+':'')+entrySummary.avgBestNet.toFixed(2)+'%',color:entrySummary.avgBestNet>=0?'var(--green)':'var(--red)',sub:`Feeds TGT policy · ${entrySummary.topups} top-ups`}
+    detailKpis.push(
+      {label:'Entry Best Net (mean)',value:(entrySummary.avgBestNet>=0?'+':'')+entrySummary.avgBestNet.toFixed(2)+'%',color:entrySummary.avgBestNet>=0?'var(--green)':'var(--red)',sub:`Avg best NET high after entry · Harvest uses a percentile of this pool, not the mean`},
+      {label:'Entry Peak Velocity',value:(entrySummary.avgVelocity>=0?'+':'')+entrySummary.avgVelocity.toFixed(3)+'%/d',color:entrySummary.avgVelocity>=0?'var(--green)':'var(--red)',sub:`Speed to peak · ${entrySummary.positive}/${entrySummary.completed} positive · display only, feeds nothing`}
     );
   }
-  const kpiHtml=`<div class="kpi-grid">`+kpis.map(k=>`
+
+  const kpiCard=k=>`
     <div class="kpi-card">
       <div class="kpi-lbl">${k.label}</div>
       <div class="kpi-val" style="color:${k.color}">${k.value}</div>
       <div class="kpi-sub">${k.sub}</div>
-    </div>`).join('')+'</div>';
+    </div>`;
+  const kpiHtml=`<div class="kpi-grid">`+kpis.map(kpiCard).join('')+'</div>'
+    +`<details class="perf-more"><summary>More detail (${detailKpis.length} diagnostics)</summary>`
+    +`<div class="kpi-grid" style="margin-top:10px">`+detailKpis.map(kpiCard).join('')+'</div></details>';
 
   const monthCols=[
     {key:'month',label:'Month',align:'left',fmt:v=>v,clrFn:()=>'var(--t1)'},
@@ -4609,8 +4628,10 @@ function renderTable(){
   const allocMap=computeAlloc(capital, selList);
   const unitLabel='shares';
 
-  // No pagination: the whole filtered set renders and the page scrolls (owner, v530).
-  document.getElementById('tBody').innerHTML=FILT.map(s=>{
+  // Pagination restored in v534 (owner): 100 rows/page keeps the DOM small, which is
+  // also what kept the full-universe render off the typing path.
+  const start=(PG-1)*PGSZ,pg=FILT.slice(start,start+PGSZ);
+  document.getElementById('tBody').innerHTML=pg.map(s=>{
     const isSelected=SELECTED.has(s.symbol);
     const am=allocMap[s.symbol];
     const canBuy=s.basketEligible!==false;
@@ -4637,7 +4658,21 @@ function renderTable(){
     if(isSelected) _trStyle+=';background:rgba(251,191,36,.04);outline:1px solid rgba(251,191,36,.12);outline-offset:-1px';
     return`<tr style="${_trStyle}" onclick="showRadarDetail('${s.symbol}')" title="Click for the full scoring breakdown">${cells}</tr>`;
   }).join('')||'<tr><td colspan="13"><div style="padding:48px 20px;text-align:center;color:var(--t3)">No stocks match the filters you selected.</div></td></tr>';
+  renderPgn();
   updateSelectAll();
+}
+
+function renderPgn(){
+  const tot=FILT.length,tp=Math.ceil(tot/PGSZ),c=document.getElementById('pgn');
+  if(!c) return;
+  if(tp<=1){c.innerHTML='';return;}
+  let h=`<button ${PG===1?'disabled':''} onclick="goP(${PG-1})">‹</button>`;
+  let s=Math.max(1,PG-3),e=Math.min(tp,PG+3);
+  if(s>1)h+=`<button onclick="goP(1)">1</button>`;if(s>2)h+=`<span class="pg-i">…</span>`;
+  for(let i=s;i<=e;i++)h+=`<button class="${i===PG?'act':''}" onclick="goP(${i})">${i}</button>`;
+  if(e<tp-1)h+=`<span class="pg-i">…</span>`;if(e<tp)h+=`<button onclick="goP(${tp})">${tp}</button>`;
+  h+=`<button ${PG===tp?'disabled':''} onclick="goP(${PG+1})">›</button><span class="pg-i" style="margin-left:10px">${tot.toLocaleString()} stocks</span>`;
+  c.innerHTML=h;
 }
 // Scroll to section with offset for sticky header (72px) + nav (44px)
 function scrollToSection(id){
@@ -4646,7 +4681,8 @@ function scrollToSection(id){
   const y=el.getBoundingClientRect().top+window.pageYOffset-130;
   window.scrollTo({top:y,behavior:'smooth'});
 }
-function doSort(col){if(SCOL===col)SDIR*=-1;else{SCOL=col;SDIR=['symbol','setup','series','risk'].includes(col)?1:-1;}applySort();renderHead();renderTable();saveFilterState();}
+function goP(p){PG=p;renderTable();scrollToSection('tHead');}
+function doSort(col){if(SCOL===col)SDIR*=-1;else{SCOL=col;SDIR=['symbol','setup','series','risk'].includes(col)?1:-1;}applySort();PG=1;renderHead();renderTable();saveFilterState();}
 function applySort(){
   const col=SCOL;
   FILT.sort((a,b)=>{
@@ -4696,7 +4732,7 @@ function applyFilters(){
   // user's persisted exclusions, capped at Zerodha's 20-order limit.
   SELECTED=new Set(FILT.filter(s=>s.basketEligible!==false&&!EXPORT_EXCLUDED.has(s.symbol)).slice(0,20).map(s=>s.symbol));
 
-  renderHead();renderTable();renderStatusBar();saveFilterState();updateTabCounts();
+  PG=1;renderHead();renderTable();renderStatusBar();saveFilterState();updateTabCounts();
   try{renderRankingsPanels();}catch(e){console.warn('Rankings panels render failed',e);}
   if(ALL.length) try{renderStats();}catch(e){}
 }
