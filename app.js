@@ -1,5 +1,5 @@
-const BUILD_TS='2026-07-20 13:29 IST'; // release build time (IST)
-const APP_VERSION=529; // Unified live Open Positions view; the Radar scoring engine is unchanged.
+const BUILD_TS='2026-07-20 14:01 IST'; // release build time (IST)
+const APP_VERSION=530; // Filters persist across refresh; Latest Session + Open Positions moved under the Rankings table and driven by one search; recommendations table scrolls instead of paginating.
 const GOOGLE_DRIVE_CLIENT_ID='1015012642264-oi2nelv3v90k3d39r994a6nelgjs2a56.apps.googleusercontent.com'; // Public OAuth Web Client ID.
 const PRICE_BAND_BLOCK_BUFFER_PCT=0.15; // Treat rounded 4.9/9.9/19.9 rows as effectively band-locked.
 const BASKET_CASH_RESERVE_RS=1; // Leave a rupee for broker-side tax/rounding differences.
@@ -74,11 +74,11 @@ function updateModeUI(){
   if(brand) brand.textContent='Same-Day Composite Radar';
   document.querySelectorAll('.currency-lbl').forEach(el=>{el.textContent='₹';});
 }
-let ALL=[],FILT=[],PG=1,PGSZ=100,SCOL='rank',SDIR=1;
+let ALL=[],FILT=[],SCOL='rank',SDIR=1;
 let _tvLoadedThisSession=false; // true once a TV CSV has been processed this session
 let PERF_PERIOD_FILTER='all'; // 'all' | '1m' | '3m' | '6m' | '1y'
 let PERF_TRADE_WINDOWS=[]; // cached trade window rows from renderPerformance — used by current-window pill
-let PERF_LATEST_SUMMARY=null; // cached latest session summary from renderPerformance — used by renderStats card
+let PERF_LATEST_SUMMARY=null; // cached latest session summary from buildLatestSessionPanel — used by renderStats card
 let PERF_RENDERED=false; // true after background or foreground performance calculation
 let PERF_RENDER_QUEUED=false;
 let PERF_RENDER_WAITING_FOR_VISIBLE=false;
@@ -87,6 +87,10 @@ let SUPPRESSED_HELD=0; // count of stocks hidden because already held in POSITIO
 let SURV_HARD_REMOVED=0; // count of stocks weeded out by configured surveillance rules
 let SELECTED=new Set(); // symbols selected for basket — recomputed from FILT each applyFilters
 let EXPORT_EXCLUDED=new Set(); // symbols the user unchecked from export — persisted in rs_filters
+// Startup hydration renders (and therefore calls applyFilters → saveFilterState) before
+// the saved filters have been read back into the DOM. Without this latch those empty
+// inputs overwrite the stored state, so every refresh reset the user's filters.
+let FILTERS_RESTORED=false;
 let FILE_LOAD_STATUS={source:null,when:null,files:[]};
 // Radar composite scorer state (v517): one same-day transparent cross-sectional model.
 let RADAR={headers:[],matrix:[],features:[],ids:{},rockets:0,ms:0,sourceNote:'',scoredAt:null};
@@ -850,7 +854,9 @@ function renderTradingDashboardNow(){
     document.getElementById('noDataBanner').style.display=ALL.length?'none':'flex';
   }catch(e){}
   try{renderMethodology();}catch(e){console.warn('Methodology render failed',e);}
-  try{if(ALL.length) applyFilters();}catch(e){console.warn('Fast ranking render failed',e);}
+  // applyFilters renders the Rankings panels; without scanner rows it never runs, so the
+  // portfolio-only tables are rendered directly in that case.
+  try{if(ALL.length) applyFilters(); else renderRankingsPanels();}catch(e){console.warn('Fast ranking render failed',e);}
   schedulePerformanceRender();
 }
 
@@ -2981,9 +2987,182 @@ function getAdaptiveTradeTrips(trips){
   return rows.length?rows:(trips||[]);
 }
 
+// ── Shared search plumbing for the three Rankings tables ──────────────────────
+// The Rankings search box narrows the recommendations table, the Latest Session
+// table and the Open Positions table together, so a symbol can be found wherever
+// it currently lives (owner, v530).
+function rankingsSearchQuery(){
+  return String(document.getElementById('fSearch')?.value||'').trim().toLowerCase();
+}
+function filterPanelRows(rows,query,fieldsFn){
+  const q=String(query||'').trim().toLowerCase();
+  if(!q) return rows;
+  return rows.filter(row=>fieldsFn(row).filter(Boolean).join(' ').toLowerCase().includes(q));
+}
+function panelFilterTag(all,shown,query){
+  const q=String(query||'').trim();
+  if(!q||shown.length===all.length) return '';
+  return ` <span style="font-weight:500;text-transform:none;letter-spacing:0;color:var(--t3)">· ${shown.length} of ${all.length} matching "${escHtml(q)}"</span>`;
+}
+function panelNoMatchHtml(query,noun){
+  return `<div style="padding:14px 16px;color:var(--t3);font-size:12px">No ${noun} matches "${escHtml(String(query||'').trim())}".</div>`;
+}
+
+// Latest Session — whichever source (Orders.csv or Tradebook) has the newer date.
+// Extracted from renderPerformance so the Rankings tab can host it next to the
+// recommendations and open-position tables under one shared search box (v530).
+// Header totals stay whole-session; the table and its footer follow the search.
+function buildLatestSessionPanel(query=''){
+  const clr=(v)=>v===0?'var(--t2)':v>0?'var(--green)':'var(--red)';
+  const fmtPerfRs=(v)=>fmtSignedINR(v);
+  const fmtPct=(v)=>(v>=0?'+':'')+v.toFixed(2)+'%';
+  const card=inner=>`<div id="rank-latest-session-card" style="background:var(--bg-card);border:1px solid var(--border);border-radius:10px;margin-bottom:12px;overflow:hidden">${inner}</div>`;
+  const summary=getLatestBookedSummary();
+  PERF_LATEST_SUMMARY=summary; // cache for the renderStats card — single source of truth
+  const orderBooked=summary?.source==='Orders.csv'?summary:null;
+
+  if(orderBooked){
+    const allRows=orderBooked.rows;
+    const latestDate=orderBooked.date||getSessionDate();
+    const latestTotal=orderBooked.total;
+    const latestUnknownRows=orderBooked.unknownRows||0;
+    const latestUnknownWarning=latestUnknownRows>0?` <span style="font-size:10px;color:var(--amber);font-weight:700">&#9888; excludes ${latestUnknownRows} row${latestUnknownRows===1?'':'s'} with unknown cost</span>`:'';
+    const rows=filterPanelRows(allRows,query,r=>[r.sym]);
+    const shownSummary=summarizeExitPnlRows(rows);
+    const shownTotal=rows.reduce((s,r)=>s+(r.netPnl||0),0);
+    const _chFmt=v=>fmtNegINR(v);const _chClr=()=>'var(--red)';
+    const latestCols=[
+      {key:'sym',label:'Symbol',align:'left',fmt:v=>v,clrFn:()=>'var(--t1)',bold:true},
+      {key:'lots',label:'Trades',align:'right',fmt:v=>v,clrFn:()=>'var(--t2)'},
+      {key:'buyPrice',label:'Buy ₹',align:'right',fmt:(v,r)=>v!=null?Number(v).toLocaleString('en-IN',INR_2):`<span style="color:var(--amber);font-size:10px" title="Load Holdings.csv to see avg cost">avg cost?</span>`,clrFn:()=>'var(--t2)'},
+      {key:'sellPrice',label:'Sell ₹',align:'right',fmt:v=>Number(v).toLocaleString('en-IN',INR_2),clrFn:()=>'var(--t2)'},
+      {key:'priceDiff',label:'Diff ₹',align:'right',fmt:v=>v!=null?fmtSignedINR(v).replace('₹','₹/sh '):'—',clrFn:v=>v!=null?clr(v):'var(--t3)'},
+      {key:'currentPrice',label:'Now ₹',align:'right',fmt:v=>v!=null?Number(v).toLocaleString('en-IN',INR_2):'—',clrFn:()=>'var(--t2)'},
+      {key:'reversePnl',label:'Reverse ₹',align:'right',bold:true,fmt:(v,r)=>v!=null?`<span title="${escHtml(r.reverseStatus||'')}">${fmtPerfRs(v)}</span>`:'—',clrFn:v=>v!=null?clr(v):'var(--t3)'},
+      {key:'_brok',label:'Brokerage',align:'right',fmt:_chFmt,clrFn:_chClr},
+      {key:'_stt',label:'STT/CTT',align:'right',fmt:_chFmt,clrFn:_chClr},
+      {key:'_txn',label:'Txn',align:'right',fmt:_chFmt,clrFn:_chClr},
+      {key:'_gst',label:'GST',align:'right',fmt:_chFmt,clrFn:_chClr},
+      {key:'_sebi',label:'SEBI',align:'right',fmt:_chFmt,clrFn:_chClr},
+      {key:'_stamp',label:'Stamp',align:'right',fmt:_chFmt,clrFn:_chClr},
+      {key:'_dp',label:'DP',align:'right',fmt:_chFmt,clrFn:_chClr},
+      {key:'charges',label:'Total Charges',align:'right',bold:true,fmt:fmtNegINR,clrFn:()=>'var(--red)'},
+      {key:'grossPnl',label:'Gross P&L',align:'right',bold:true,fmt:v=>v!=null?fmtPerfRs(v):'—',clrFn:v=>v!=null?clr(v):'var(--t3)'},
+      {key:'netPnl',label:'Net P&L',align:'right',bold:true,fmt:(v,r)=>v!=null?fmtPerfRs(v):`<span style="color:var(--amber);font-size:10px">unknown</span>`,clrFn:(v)=>v!=null?clr(v):'var(--amber)'},
+      {key:'netPnlPct',label:'P&L %',align:'right',bold:true,fmt:v=>v!=null?fmtPct(v):`<span style="color:var(--amber);font-size:10px">unknown</span>`,clrFn:v=>v!=null?clr(v):'var(--amber)'},
+    ];
+    const latestTbl=makeSortableTable('rank-latest-session',latestCols,rows,'_sort',-1);
+    const emptyNote=String(query||'').trim()
+      ?panelNoMatchHtml(query,'booked trade')
+      :`<div style="padding:12px 16px;color:var(--t3);font-size:12px">No sell orders found in Orders.csv — only sell orders generate P&L rows.</div>`;
+    const html=card(`
+      <div style="padding:10px 16px;display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:6px;border-bottom:1px solid var(--border)">
+        <span style="font-size:10px;font-weight:700;color:var(--t2);text-transform:uppercase;letter-spacing:.1em">Latest Session — ${latestDate} <span style="font-weight:400;color:var(--t3)">(Orders.csv · holdings/same-day buys)</span>${panelFilterTag(allRows,rows,query)}</span>
+        <span style="font-size:15px;font-weight:800;color:${clr(latestTotal)};font-family:'DM Mono',monospace">${allRows.length?fmtPerfRs(latestTotal):''} <span style="font-size:10px;color:var(--t3);font-weight:400">${allRows.length?'net of charges':''}</span>${latestUnknownWarning}</span>
+      </div>
+      ${rows.length?`<div style="overflow-x:auto">${latestTbl.getHtml()}</div>`:emptyNote}`);
+    const render=()=>{
+      if(!rows.length) return;
+      latestTbl.render();
+      const _lt=document.getElementById('rank-latest-session');
+      if(_lt&&(rows.length>1||latestUnknownRows>0)){
+        const _sum=(k)=>rows.reduce((s,r)=>s+(r[k]||0),0);
+        const _p=v=>fmtPerfRs(v);
+        const td=(v,extra='')=>`<td style="padding:7px 10px;text-align:right;white-space:nowrap;font-weight:700;${extra}">${v}</td>`;
+        const tfoot=document.createElement('tfoot');
+        tfoot.innerHTML=`<tr style="border-top:2px solid var(--border-hi);background:rgba(148,163,184,.05)">
+          <td style="padding:7px 10px;font-weight:700;color:var(--t2);white-space:nowrap">Total (${rows.length})${latestUnknownRows?` <span style="color:var(--amber)">&#9888; excludes ${latestUnknownRows} unknown</span>`:''}</td>
+          ${td('—','color:var(--t3)')}
+          ${td('—','color:var(--t3)')}
+          ${td('—','color:var(--t3)')}
+          ${td('—','color:var(--t3)')}
+          ${td('—','color:var(--t3)')}
+          ${td(shownSummary.reverseCount?fmtPerfRs(shownSummary.reverse):'—','color:'+(shownSummary.reverse>=0?'var(--green)':'var(--red)'))}
+          ${td(fmtNegINR(_sum('_brok')),'color:var(--red)')}
+          ${td(fmtNegINR(_sum('_stt')),'color:var(--red)')}
+          ${td(fmtNegINR(_sum('_txn')),'color:var(--red)')}
+          ${td(fmtNegINR(_sum('_gst')),'color:var(--red)')}
+          ${td(fmtNegINR(_sum('_sebi')),'color:var(--red)')}
+          ${td(fmtNegINR(_sum('_stamp')),'color:var(--red)')}
+          ${td(fmtNegINR(_sum('_dp')),'color:var(--red)')}
+          ${td(fmtNegINR(_sum('charges')),'color:var(--red)')}
+          ${td(shownSummary.known.length?_p(shownSummary.gross):'—','color:'+(shownSummary.gross>=0?'var(--green)':'var(--red)'))}
+          ${td(_p(shownTotal),'color:'+(shownTotal>=0?'var(--green)':'var(--red)'))}
+          ${td(shownSummary.pct==null?'--':fmtPct(shownSummary.pct),'color:'+(shownSummary.pct==null?'var(--t3)':shownSummary.pct>=0?'var(--green)':'var(--red)'))}
+        </tr>`;
+        _lt.appendChild(tfoot);
+      }
+    };
+    return {html,render};
+  }
+
+  if(summary?.source==='Tradebook'){
+    const allRows=summary.rows.map(r=>{
+      const capital=r.capital??((r.buyPrice||0)*(r.qty||0));
+      const netPnlPct=r.netPnlPct??(capital>0?+(r.netPnl/capital*100).toFixed(2):null);
+      return enrichExitPnlRow({...r,capital,netPnlPct,_sort:r.netPnl});
+    });
+    const tbDate=summary.date||'';
+    const tbTotal=+(allRows.reduce((s,r)=>s+r.netPnl,0)).toFixed(0);
+    const rows=filterPanelRows(allRows,query,r=>[r.sym]);
+    const tbSummary=summarizeExitPnlRows(rows);
+    const shownTotal=+(rows.reduce((s,r)=>s+r.netPnl,0)).toFixed(0);
+    const tbCols=[
+      {key:'sym',label:'Symbol',align:'left',fmt:v=>`<span style="font-weight:700;font-size:12px">${escHtml(v)}</span>`},
+      {key:'lots',label:'Lots',align:'right',fmt:v=>`<span style="color:var(--t2)">${v}</span>`},
+      {key:'buyPrice',label:'Buy ₹',align:'right',fmt:v=>`<span style="font-family:'DM Mono',monospace">${Number(v).toLocaleString('en-IN',INR_2)}</span>`},
+      {key:'sellPrice',label:'Sell ₹',align:'right',fmt:v=>`<span style="font-family:'DM Mono',monospace">${Number(v).toLocaleString('en-IN',INR_2)}</span>`},
+      {key:'priceDiff',label:'Diff ₹',align:'right',fmt:v=>v!=null?fmtSignedINR(v).replace('₹','₹/sh '):'—',clrFn:v=>v!=null?clr(v):'var(--t3)'},
+      {key:'currentPrice',label:'Now ₹',align:'right',fmt:v=>v!=null?Number(v).toLocaleString('en-IN',INR_2):'—',clrFn:()=>'var(--t2)'},
+      {key:'reversePnl',label:'Reverse ₹',align:'right',bold:true,fmt:(v,r)=>v!=null?`<span title="${escHtml(r.reverseStatus||'')}">${fmtPerfRs(v)}</span>`:'—',clrFn:v=>v!=null?clr(v):'var(--t3)'},
+      {key:'charges',label:'Charges ₹',align:'right',bold:true,fmt:fmtNegINR,clrFn:()=>'var(--red)'},
+      {key:'grossPnl',label:'Gross P&L',align:'right',bold:true,fmt:v=>v!=null?fmtPerfRs(v):'—',clrFn:v=>v!=null?clr(v):'var(--t3)'},
+      {key:'netPnl',label:'Net P&L',align:'right',bold:true,fmt:fmtPerfRs,clrFn:clr},
+      {key:'netPnlPct',label:'P&L %',align:'right',bold:true,fmt:v=>v!=null?fmtPct(v):'--',clrFn:v=>v!=null?clr(v):'var(--t3)'},
+    ];
+    const tbTbl=makeSortableTable('rank-latest-session',tbCols,rows,'_sort',-1);
+    const html=card(`
+      <div style="padding:10px 16px;display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:6px;border-bottom:1px solid var(--border)">
+        <span style="font-size:10px;font-weight:700;color:var(--t2);text-transform:uppercase;letter-spacing:.1em">Latest Session — ${tbDate} <span style="font-weight:400;color:var(--t3)">(Tradebook · charges included)</span>${panelFilterTag(allRows,rows,query)}</span>
+        <span style="font-size:15px;font-weight:800;color:${clr(tbTotal)};font-family:'DM Mono',monospace">${fmtPerfRs(tbTotal)} <span style="font-size:10px;color:var(--t3);font-weight:400">net of charges</span></span>
+      </div>
+      ${rows.length?`<div style="overflow-x:auto">${tbTbl.getHtml()}</div>`:panelNoMatchHtml(query,'booked trade')}`);
+    const render=()=>{
+      if(!rows.length) return;
+      tbTbl.render();
+      const _lt=document.getElementById('rank-latest-session');
+      if(_lt&&rows.length>1){
+        const tfoot=document.createElement('tfoot');
+        const totCh=rows.reduce((s,r)=>s+(r.charges||0),0);
+        tfoot.innerHTML=`<tr style="border-top:2px solid var(--border-hi);background:rgba(148,163,184,.05)">
+          <td style="padding:7px 10px;font-weight:700;color:var(--t2)">Total (${rows.length})</td>
+          <td style="padding:7px 10px;text-align:right;color:var(--t3)">—</td>
+          <td style="padding:7px 10px;text-align:right;color:var(--t3)">—</td>
+          <td style="padding:7px 10px;text-align:right;color:var(--t3)">—</td>
+          <td style="padding:7px 10px;text-align:right;color:var(--t3)">—</td>
+          <td style="padding:7px 10px;text-align:right;color:var(--t3)">—</td>
+          <td style="padding:7px 10px;text-align:right;font-weight:700;color:${tbSummary.reverse>=0?'var(--green)':'var(--red)'}">${tbSummary.reverseCount?fmtSignedINR(tbSummary.reverse):'—'}</td>
+          <td style="padding:7px 10px;text-align:right;font-weight:700;color:var(--red)">${fmtNegINR(totCh)}</td>
+          <td style="padding:7px 10px;text-align:right;font-weight:700;color:${tbSummary.gross>=0?'var(--green)':'var(--red)'}">${tbSummary.known.length?fmtSignedINR(tbSummary.gross):'—'}</td>
+          <td style="padding:7px 10px;text-align:right;font-weight:700;color:${shownTotal>=0?'var(--green)':'var(--red)'}">${fmtSignedINR(shownTotal)}</td>
+          <td style="padding:7px 10px;text-align:right;font-weight:700;color:${tbSummary.pct==null?'var(--t3)':tbSummary.pct>=0?'var(--green)':'var(--red)'}">${tbSummary.pct==null?'--':fmtPct(tbSummary.pct)}</td>
+        </tr>`;
+        _lt.appendChild(tfoot);
+      }
+    };
+    return {html,render};
+  }
+
+  return {html:card(`<div style="padding:14px 16px;color:var(--t3);font-size:12px">
+      <span style="font-weight:600;color:var(--t2)">Latest Session</span> — Upload <strong>Tradebook.csv</strong> or <strong>Orders.csv</strong> to see session P&amp;L.
+    </div>`),render:()=>{}};
+}
+
 // One current-position view: the live portfolio merge plus the existing Radar context.
 // It reads the exit-policy helpers but never feeds anything back into scoring.
-function buildOpenPositionsPanel(){
+// `query` filters only what is DISPLAYED — TSL state is always computed and persisted
+// from the full position set, so searching can never prune the TSL store.
+function buildOpenPositionsPanel(query=''){
   const adaptiveTGT=getEffectiveTgtPct()||(TRADEBOOK_STATS?.adaptiveTGT||3.7);
   const reviewDays=getEffectiveReviewDays()||5;
   const scannerBySymbol=new Map(ALL.map(row=>[row.symbol,row]));
@@ -3055,24 +3234,26 @@ function buildOpenPositionsPanel(){
     {key:'dayPct',label:'Day %',align:'right',fmt:fPerf,clrFn:()=>'var(--t2)'},
     {key:'risk',label:'Risk',align:'left',fmt:v=>v?radarRiskPill(v):'—'}
   ];
+  // Header totals always describe the WHOLE portfolio; the table shows the search match.
   const totalCapital=rows.reduce((sum,row)=>sum+(row.capital||0),0);
   const totalPnl=rows.reduce((sum,row)=>sum+(row.pnlRs||0),0);
   const pnlColor=totalPnl>0?'var(--green)':totalPnl<0?'var(--red)':'var(--t3)';
-  const table=makeSortableTable('perf-open-positions',cols,rows,'score',-1);
+  const shown=filterPanelRows(rows,query,row=>[row.sym,row.scannerRow?.name,row.scannerRow?.sector]);
+  const table=makeSortableTable('rank-open-positions',cols,shown,'score',-1);
   const radarNote=ALL.length
     ?'Radar context is from the current ALL NSE upload. Click a symbol for its scoring breakdown.'
     :'Load ALL NSE.csv to add Radar score, rank, setup, day change, and risk.';
-  const html=`<div id="perf-open-positions-card" style="background:var(--bg-card);border:1px solid var(--border);border-radius:10px;margin-bottom:12px;overflow:hidden">
+  const html=`<div id="rank-open-positions-card" style="background:var(--bg-card);border:1px solid var(--border);border-radius:10px;margin-bottom:12px;overflow:hidden">
     <div style="padding:12px 16px;border-bottom:1px solid var(--border)">
       <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:8px;margin-bottom:6px">
-        <span style="font-size:11px;font-weight:800;color:var(--t1);text-transform:uppercase;letter-spacing:.08em">Open Positions</span>
+        <span style="font-size:11px;font-weight:800;color:var(--t1);text-transform:uppercase;letter-spacing:.08em">Open Positions${panelFilterTag(rows,shown,query)}</span>
         <span style="font-size:12px;font-weight:700;color:${pnlColor}">${rows.length} live position${rows.length===1?'':'s'} · ${fmtINR(totalCapital)} deployed · ${fmtSignedINR(totalPnl)}</span>
       </div>
       <div style="font-size:12px;color:var(--t2);line-height:1.5">Live merge of Holdings, Positions, and today's net buys. Held stocks stay excluded from new recommendations; Target, SL, and TSL use the existing exit policy. ${radarNote}</div>
     </div>
-    <div style="overflow-x:auto">${table.getHtml()}</div>
+    ${shown.length?`<div style="overflow-x:auto">${table.getHtml()}</div>`:panelNoMatchHtml(query,'open position')}
   </div>`;
-  return {html,table};
+  return {html,table:shown.length?table:null};
 }
 
 function renderPerformance(){
@@ -3088,10 +3269,9 @@ function renderPerformance(){
     refreshExitPolicyFromFeedback(tb);
     try{FS.set(TRADEBOOK_STORE,tb);}catch(e){}
   }
-  const openPositionsPanel=buildOpenPositionsPanel();
+  // Latest Session and Open Positions now live on the Rankings tab (v530).
   if(!tb){
-    el.innerHTML=`<div style="padding:12px 16px">${openPositionsPanel.html}<div style="text-align:center;padding:60px 40px;color:var(--t2)"><div style="font-size:16px;font-weight:700;color:var(--t1);margin-bottom:8px">No Tradebook Loaded</div><div>Upload TRADEBOOK.csv to see performance analytics.</div></div></div>`;
-    setTimeout(()=>openPositionsPanel.table?.render(),0);
+    el.innerHTML=`<div style="padding:12px 16px"><div style="text-align:center;padding:60px 40px;color:var(--t2)"><div style="font-size:16px;font-weight:700;color:var(--t1);margin-bottom:8px">No Tradebook Loaded</div><div>Upload TRADEBOOK.csv to see performance analytics. Open Positions and Latest Session are on the Rankings tab.</div></div></div>`;
     return;
   }
 
@@ -3101,8 +3281,7 @@ function renderPerformance(){
 
   const allTripsRaw=tb.tripsData||[];
   if(!allTripsRaw.length&&tb.roundTrips>0){
-    el.innerHTML=`<div style="padding:12px 16px">${openPositionsPanel.html}<div style="text-align:center;padding:60px 40px;color:var(--t2)"><div style="font-size:16px;font-weight:700;color:var(--t1);margin-bottom:8px">Re-upload TRADEBOOK.csv</div><div>Brain has ${tb.roundTrips} trades stored in the old format. Re-upload TRADEBOOK.csv once to rebuild with full trip data.</div></div></div>`;
-    setTimeout(()=>openPositionsPanel.table?.render(),0);
+    el.innerHTML=`<div style="padding:12px 16px"><div style="text-align:center;padding:60px 40px;color:var(--t2)"><div style="font-size:16px;font-weight:700;color:var(--t1);margin-bottom:8px">Re-upload TRADEBOOK.csv</div><div>Brain has ${tb.roundTrips} trades stored in the old format. Re-upload TRADEBOOK.csv once to rebuild with full trip data.</div></div></div>`;
     return;
   }
 
@@ -3264,142 +3443,6 @@ function renderPerformance(){
   const tradeWindowTbl=makeSortableTable('tbl-trade-windows',tradeWindowCols,tradeWindowRows,'hour',1,row=>row.hour===_twBucket?'background:rgba(99,102,241,.12);outline:1px solid rgba(99,102,241,.3);outline-offset:-1px':'');
   const hasTradeWindows=tradeWindowRows.length>0;
 
-  // Latest Session — pick whichever source (Orders.csv or Tradebook) has the newer date.
-  let todayHtml='';
-  const _latestSummary=getLatestBookedSummary();
-  PERF_LATEST_SUMMARY=_latestSummary; // cache for renderStats card — single source of truth
-  const orderBooked=_latestSummary?.source==='Orders.csv'?_latestSummary:null;
-  if(orderBooked){
-    const latestRows=orderBooked.rows;
-    const latestDate=orderBooked.date||getSessionDate();
-    const latestTotal=orderBooked.total;
-    const latestSummary=summarizeExitPnlRows(latestRows);
-    const latestTotalPct=latestSummary.pct;
-    const latestUnknownRows=orderBooked.unknownRows||0;
-    const latestUnknownWarning=latestUnknownRows>0?` <span style="font-size:10px;color:var(--amber);font-weight:700">&#9888; excludes ${latestUnknownRows} row${latestUnknownRows===1?'':'s'} with unknown cost</span>`:'';
-    const _chFmt=v=>fmtNegINR(v);const _chClr=()=>'var(--red)';
-    const latestCols=[
-      {key:'sym',label:'Symbol',align:'left',fmt:v=>v,clrFn:()=>'var(--t1)',bold:true},
-      {key:'lots',label:'Trades',align:'right',fmt:v=>v,clrFn:()=>'var(--t2)'},
-      {key:'buyPrice',label:'Buy ₹',align:'right',fmt:(v,r)=>v!=null?Number(v).toLocaleString('en-IN',INR_2):`<span style="color:var(--amber);font-size:10px" title="Load Holdings.csv to see avg cost">avg cost?</span>`,clrFn:()=>'var(--t2)'},
-      {key:'sellPrice',label:'Sell ₹',align:'right',fmt:v=>Number(v).toLocaleString('en-IN',INR_2),clrFn:()=>'var(--t2)'},
-      {key:'priceDiff',label:'Diff ₹',align:'right',fmt:v=>v!=null?fmtSignedINR(v).replace('₹','₹/sh '):'—',clrFn:v=>v!=null?clr(v):'var(--t3)'},
-      {key:'currentPrice',label:'Now ₹',align:'right',fmt:v=>v!=null?Number(v).toLocaleString('en-IN',INR_2):'—',clrFn:()=>'var(--t2)'},
-      {key:'reversePnl',label:'Reverse ₹',align:'right',bold:true,fmt:(v,r)=>v!=null?`<span title="${escHtml(r.reverseStatus||'')}">${fmtPerfRs(v)}</span>`:'—',clrFn:v=>v!=null?clr(v):'var(--t3)'},
-      {key:'_brok',label:'Brokerage',align:'right',fmt:_chFmt,clrFn:_chClr},
-      {key:'_stt',label:'STT/CTT',align:'right',fmt:_chFmt,clrFn:_chClr},
-      {key:'_txn',label:'Txn',align:'right',fmt:_chFmt,clrFn:_chClr},
-      {key:'_gst',label:'GST',align:'right',fmt:_chFmt,clrFn:_chClr},
-      {key:'_sebi',label:'SEBI',align:'right',fmt:_chFmt,clrFn:_chClr},
-      {key:'_stamp',label:'Stamp',align:'right',fmt:_chFmt,clrFn:_chClr},
-      {key:'_dp',label:'DP',align:'right',fmt:_chFmt,clrFn:_chClr},
-      {key:'charges',label:'Total Charges',align:'right',bold:true,fmt:fmtNegINR,clrFn:()=>'var(--red)'},
-      {key:'grossPnl',label:'Gross P&L',align:'right',bold:true,fmt:v=>v!=null?fmtPerfRs(v):'—',clrFn:v=>v!=null?clr(v):'var(--t3)'},
-      {key:'netPnl',label:'Net P&L',align:'right',bold:true,fmt:(v,r)=>v!=null?fmtPerfRs(v):`<span style="color:var(--amber);font-size:10px">unknown</span>`,clrFn:(v)=>v!=null?clr(v):'var(--amber)'},
-      {key:'netPnlPct',label:'P&L %',align:'right',bold:true,fmt:v=>v!=null?fmtPct(v):`<span style="color:var(--amber);font-size:10px">unknown</span>`,clrFn:v=>v!=null?clr(v):'var(--amber)'},
-    ];
-    const latestTbl=makeSortableTable('perf-latest',latestCols,latestRows,'_sort',-1);
-    const headerNote=latestRows.length?'':`<div style="padding:12px 16px;color:var(--t3);font-size:12px">No sell orders found in Orders.csv — only sell orders generate P&L rows.</div>`;
-    todayHtml=`<div style="background:var(--bg-card);border:1px solid var(--border);border-radius:10px;margin-bottom:12px;overflow:hidden">
-      <div style="padding:10px 16px;display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:6px;border-bottom:1px solid var(--border)">
-        <span style="font-size:10px;font-weight:700;color:var(--t2);text-transform:uppercase;letter-spacing:.1em">Latest Session — ${latestDate} <span style="font-weight:400;color:var(--t3)">(Orders.csv · holdings/same-day buys)</span></span>
-        <span style="font-size:15px;font-weight:800;color:${clr(latestTotal)};font-family:'DM Mono',monospace">${latestRows.length?fmtPerfRs(latestTotal):''} <span style="font-size:10px;color:var(--t3);font-weight:400">${latestRows.length?'net of charges':''}</span>${latestUnknownWarning}</span>
-      </div>
-      ${latestRows.length?`<div style="overflow-x:auto">${latestTbl.getHtml()}</div>`:headerNote}
-    </div>`;
-    setTimeout(()=>{
-      latestTbl.render();
-      const _lt=document.getElementById('perf-latest');
-      if(_lt&&(latestRows.length>1||latestUnknownRows>0)){
-        const _sum=(k)=>latestRows.reduce((s,r)=>s+(r[k]||0),0);
-        const _c=v=>v>0?'var(--red)':'var(--t2)';
-        const _p=v=>fmtPerfRs(v);
-        const td=(v,extra='')=>`<td style="padding:7px 10px;text-align:right;white-space:nowrap;font-weight:700;${extra}">${v}</td>`;
-        const tfoot=document.createElement('tfoot');
-        tfoot.innerHTML=`<tr style="border-top:2px solid var(--border-hi);background:rgba(148,163,184,.05)">
-          <td style="padding:7px 10px;font-weight:700;color:var(--t2);white-space:nowrap">Total (${latestRows.length})${latestUnknownRows?` <span style="color:var(--amber)">&#9888; excludes ${latestUnknownRows} unknown</span>`:''}</td>
-          ${td('—','color:var(--t3)')}
-          ${td('—','color:var(--t3)')}
-          ${td('—','color:var(--t3)')}
-          ${td('—','color:var(--t3)')}
-          ${td('—','color:var(--t3)')}
-          ${td(latestSummary.reverseCount?fmtPerfRs(latestSummary.reverse):'—','color:'+(latestSummary.reverse>=0?'var(--green)':'var(--red)'))}
-          ${td(fmtNegINR(_sum('_brok')),'color:var(--red)')}
-          ${td(fmtNegINR(_sum('_stt')),'color:var(--red)')}
-          ${td(fmtNegINR(_sum('_txn')),'color:var(--red)')}
-          ${td(fmtNegINR(_sum('_gst')),'color:var(--red)')}
-          ${td(fmtNegINR(_sum('_sebi')),'color:var(--red)')}
-          ${td(fmtNegINR(_sum('_stamp')),'color:var(--red)')}
-          ${td(fmtNegINR(_sum('_dp')),'color:var(--red)')}
-          ${td(fmtNegINR(_sum('charges')),'color:var(--red)')}
-          ${td(latestSummary.known.length?_p(latestSummary.gross):'—','color:'+(latestSummary.gross>=0?'var(--green)':'var(--red)'))}
-          ${td(_p(latestTotal),'color:'+(latestTotal>=0?'var(--green)':'var(--red)'))}
-          ${td(latestTotalPct==null?'--':fmtPct(latestTotalPct),'color:'+(latestTotalPct==null?'var(--t3)':latestTotalPct>=0?'var(--green)':'var(--red)'))}
-        </tr>`;
-        _lt.appendChild(tfoot);
-      }
-    },0);
-  } else if(_latestSummary?.source==='Tradebook'){
-    const tbRows=_latestSummary.rows.map(r=>{
-      const capital=r.capital??((r.buyPrice||0)*(r.qty||0));
-      const netPnlPct=r.netPnlPct??(capital>0?+(r.netPnl/capital*100).toFixed(2):null);
-      return enrichExitPnlRow({...r,capital,netPnlPct,_sort:r.netPnl});
-    });
-    const tbDate=_latestSummary.date||'';
-    const tbTotal=+(tbRows.reduce((s,r)=>s+r.netPnl,0)).toFixed(0);
-    const tbSummary=summarizeExitPnlRows(tbRows);
-    const tbTotalPct=tbSummary.pct;
-    const tbCols=[
-      {key:'sym',label:'Symbol',align:'left',fmt:v=>`<span style="font-weight:700;font-size:12px">${escHtml(v)}</span>`},
-      {key:'lots',label:'Lots',align:'right',fmt:v=>`<span style="color:var(--t2)">${v}</span>`},
-      {key:'buyPrice',label:'Buy ₹',align:'right',fmt:v=>`<span style="font-family:'DM Mono',monospace">${Number(v).toLocaleString('en-IN',INR_2)}</span>`},
-      {key:'sellPrice',label:'Sell ₹',align:'right',fmt:v=>`<span style="font-family:'DM Mono',monospace">${Number(v).toLocaleString('en-IN',INR_2)}</span>`},
-      {key:'priceDiff',label:'Diff ₹',align:'right',fmt:v=>v!=null?fmtSignedINR(v).replace('₹','₹/sh '):'—',clrFn:v=>v!=null?clr(v):'var(--t3)'},
-      {key:'currentPrice',label:'Now ₹',align:'right',fmt:v=>v!=null?Number(v).toLocaleString('en-IN',INR_2):'—',clrFn:()=>'var(--t2)'},
-      {key:'reversePnl',label:'Reverse ₹',align:'right',bold:true,fmt:(v,r)=>v!=null?`<span title="${escHtml(r.reverseStatus||'')}">${fmtPerfRs(v)}</span>`:'—',clrFn:v=>v!=null?clr(v):'var(--t3)'},
-      {key:'charges',label:'Charges ₹',align:'right',bold:true,fmt:fmtNegINR,clrFn:()=>'var(--red)'},
-      {key:'grossPnl',label:'Gross P&L',align:'right',bold:true,fmt:v=>v!=null?fmtPerfRs(v):'—',clrFn:v=>v!=null?clr(v):'var(--t3)'},
-      {key:'netPnl',label:'Net P&L',align:'right',bold:true,fmt:fmtPerfRs,clrFn:clr},
-      {key:'netPnlPct',label:'P&L %',align:'right',bold:true,fmt:v=>v!=null?fmtPct(v):'--',clrFn:v=>v!=null?clr(v):'var(--t3)'},
-    ];
-    const tbTbl=makeSortableTable('perf-latest',tbCols,tbRows,'_sort',-1);
-    todayHtml=`<div style="background:var(--bg-card);border:1px solid var(--border);border-radius:10px;margin-bottom:12px;overflow:hidden">
-      <div style="padding:10px 16px;display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:6px;border-bottom:1px solid var(--border)">
-        <span style="font-size:10px;font-weight:700;color:var(--t2);text-transform:uppercase;letter-spacing:.1em">Latest Session — ${tbDate} <span style="font-weight:400;color:var(--t3)">(Tradebook · charges included)</span></span>
-        <span style="font-size:15px;font-weight:800;color:${clr(tbTotal)};font-family:'DM Mono',monospace">${fmtPerfRs(tbTotal)} <span style="font-size:10px;color:var(--t3);font-weight:400">net of charges</span></span>
-      </div>
-      <div style="overflow-x:auto">${tbTbl.getHtml()}</div>
-    </div>`;
-    setTimeout(()=>{
-      tbTbl.render();
-      const _lt=document.getElementById('perf-latest');
-      if(_lt&&tbRows.length>1){
-        const tfoot=document.createElement('tfoot');
-        const totCh=tbRows.reduce((s,r)=>s+(r.charges||0),0);
-        tfoot.innerHTML=`<tr style="border-top:2px solid var(--border-hi);background:rgba(148,163,184,.05)">
-          <td style="padding:7px 10px;font-weight:700;color:var(--t2)">Total (${tbRows.length})</td>
-          <td style="padding:7px 10px;text-align:right;color:var(--t3)">—</td>
-          <td style="padding:7px 10px;text-align:right;color:var(--t3)">—</td>
-          <td style="padding:7px 10px;text-align:right;color:var(--t3)">—</td>
-          <td style="padding:7px 10px;text-align:right;color:var(--t3)">—</td>
-          <td style="padding:7px 10px;text-align:right;color:var(--t3)">—</td>
-          <td style="padding:7px 10px;text-align:right;font-weight:700;color:${tbSummary.reverse>=0?'var(--green)':'var(--red)'}">${tbSummary.reverseCount?fmtSignedINR(tbSummary.reverse):'—'}</td>
-          <td style="padding:7px 10px;text-align:right;font-weight:700;color:var(--red)">${fmtNegINR(totCh)}</td>
-          <td style="padding:7px 10px;text-align:right;font-weight:700;color:${tbSummary.gross>=0?'var(--green)':'var(--red)'}">${tbSummary.known.length?fmtSignedINR(tbSummary.gross):'—'}</td>
-          <td style="padding:7px 10px;text-align:right;font-weight:700;color:${tbTotal>=0?'var(--green)':'var(--red)'}">${fmtSignedINR(tbTotal)}</td>
-          <td style="padding:7px 10px;text-align:right;font-weight:700;color:${tbTotalPct==null?'var(--t3)':tbTotalPct>=0?'var(--green)':'var(--red)'}">${tbTotalPct==null?'--':fmtPct(tbTotalPct)}</td>
-        </tr>`;
-        _lt.appendChild(tfoot);
-      }
-    },0);
-  } else {
-    todayHtml=`<div style="background:var(--bg-card);border:1px solid var(--border);border-radius:10px;margin-bottom:12px;padding:14px 16px;color:var(--t3);font-size:12px">
-      <span style="font-weight:600;color:var(--t2)">Latest Session</span> — Upload <strong>Tradebook.csv</strong> or <strong>Orders.csv</strong> to see session P&amp;L.
-    </div>`;
-  }
-
-  const openPositionsHtml=openPositionsPanel.html;
-  const openPositionsTable=openPositionsPanel.table;
   const periodPills=['all','1m','3m','6m','1y'].map(p=>{
     const active=PERF_PERIOD_FILTER===p;
     const label=p==='all'?'All':p==='1m'?'1M':p==='3m'?'3M':p==='6m'?'6M':'1Y';
@@ -3418,7 +3461,6 @@ function renderPerformance(){
 
   const _navLink=(id,label,show)=>show?`<a href="#${id}" onclick="event.preventDefault();scrollToSection('${id}')" style="padding:4px 12px;border-radius:6px;background:var(--bg-card);border:1px solid var(--border);color:var(--t2);font-size:11px;font-weight:600;text-decoration:none;cursor:pointer;white-space:nowrap">${label}</a>`:'';
   const perfNav=`<nav style="position:sticky;top:var(--hdr-h,72px);z-index:50;background:var(--bg);padding:8px 0 10px;margin-bottom:8px;display:flex;gap:6px;flex-wrap:wrap;border-bottom:1px solid var(--border);box-shadow:0 2px 8px rgba(0,0,0,0.3);overflow-x:auto;-webkit-overflow-scrolling:touch">
-    ${_navLink('perf-open-positions-card','📊 Positions',!!openPositionsHtml)}
     ${_navLink('perf-kpi','📊 KPIs',true)}
     ${_navLink('perf-outcomes','Outcome Feedback',true)}
 
@@ -3443,8 +3485,6 @@ function renderPerformance(){
 
   el.innerHTML=`
     <div style="padding:12px 16px">
-      ${todayHtml}
-      ${openPositionsHtml}
       ${perfNav}
       ${periodPillsHtml}
       <div style="font-size:10px;color:var(--t3);margin-bottom:12px">${periodLabel} · ${p.roundTrips} lots</div>
@@ -3455,7 +3495,7 @@ function renderPerformance(){
       ${p.symBreakdown.length?perfCard('Stocks',symTbl.getHtml(),'360px','perf-stocks'):''}
     </div>`;
 
-  setTimeout(()=>{monthTbl.render();symTbl.render();tradeWindowTbl.render();if(openPositionsTable)openPositionsTable.render();},0);
+  setTimeout(()=>{monthTbl.render();symTbl.render();tradeWindowTbl.render();},0);
 }
 
 function schedulePerformanceRender(){
@@ -4471,10 +4511,15 @@ function renderHead(){
 
 function fmt(v,d=2){return v===null||v===undefined||isNaN(v)?'—':Number(v).toFixed(d);}
 const INR_2={minimumFractionDigits:2,maximumFractionDigits:2};
-function fmtINR(v){return v===null||v===undefined||isNaN(v)?'—':'₹'+Number(v).toLocaleString('en-IN',INR_2);}
-function fmtSignedINR(v){return v===null||v===undefined||isNaN(v)?'—':(v>=0?'+':'−')+'₹'+Math.abs(Number(v)).toLocaleString('en-IN',INR_2);}
-function fmtNegINR(v){return v>0?'−₹'+Number(v).toLocaleString('en-IN',INR_2):'—';}
-function fV(v){if(v===null||isNaN(v))return'—';if(v>=1e7)return(v/1e7).toFixed(2)+'Cr';if(v>=1e5)return(v/1e5).toFixed(2)+'L';if(v>=1e3)return(v/1e3).toFixed(2)+'K';return Number(v).toLocaleString('en-IN',INR_2);}
+// One cached Intl instance. Constructing a formatter per call is what made the
+// full-universe table render slow once pagination was removed (v530); output is
+// byte-identical to Number(v).toLocaleString('en-IN',INR_2).
+const INR_2_FMT=new Intl.NumberFormat('en-IN',INR_2);
+const inr2=v=>INR_2_FMT.format(Number(v));
+function fmtINR(v){return v===null||v===undefined||isNaN(v)?'—':'₹'+inr2(v);}
+function fmtSignedINR(v){return v===null||v===undefined||isNaN(v)?'—':(v>=0?'+':'−')+'₹'+inr2(Math.abs(Number(v)));}
+function fmtNegINR(v){return v>0?'−₹'+inr2(v):'—';}
+function fV(v){if(v===null||isNaN(v))return'—';if(v>=1e7)return(v/1e7).toFixed(2)+'Cr';if(v>=1e5)return(v/1e5).toFixed(2)+'L';if(v>=1e3)return(v/1e3).toFixed(2)+'K';return inr2(v);}
 function fDel(v){
   if(v===null||v===undefined||isNaN(v))return'—';
   const c=v>=60?'var(--green)':v>=40?'var(--cyan)':v>=25?'var(--orange)':'var(--red)';
@@ -4503,9 +4548,8 @@ function renderTable(){
   const allocMap=computeAlloc(capital, selList);
   const unitLabel='shares';
 
-  const start=(PG-1)*PGSZ,pg=FILT.slice(start,start+PGSZ);
-
-  document.getElementById('tBody').innerHTML=pg.map(s=>{
+  // No pagination: the whole filtered set renders and the page scrolls (owner, v530).
+  document.getElementById('tBody').innerHTML=FILT.map(s=>{
     const isSelected=SELECTED.has(s.symbol);
     const am=allocMap[s.symbol];
     const canBuy=s.basketEligible!==false;
@@ -4532,20 +4576,7 @@ function renderTable(){
     if(isSelected) _trStyle+=';background:rgba(251,191,36,.04);outline:1px solid rgba(251,191,36,.12);outline-offset:-1px';
     return`<tr style="${_trStyle}" onclick="showRadarDetail('${s.symbol}')" title="Click for the full scoring breakdown">${cells}</tr>`;
   }).join('')||'<tr><td colspan="13"><div style="padding:48px 20px;text-align:center;color:var(--t3)">No stocks match the filters you selected.</div></td></tr>';
-  renderPgn();
   updateSelectAll();
-}
-
-function renderPgn(){
-  const tot=FILT.length,tp=Math.ceil(tot/PGSZ),c=document.getElementById('pgn');
-  if(tp<=1){c.innerHTML='';return;}
-  let h=`<button ${PG===1?'disabled':''} onclick="goP(${PG-1})">‹</button>`;
-  let s=Math.max(1,PG-3),e=Math.min(tp,PG+3);
-  if(s>1)h+=`<button onclick="goP(1)">1</button>`;if(s>2)h+=`<span class="pg-i">…</span>`;
-  for(let i=s;i<=e;i++)h+=`<button class="${i===PG?'act':''}" onclick="goP(${i})">${i}</button>`;
-  if(e<tp-1)h+=`<span class="pg-i">…</span>`;if(e<tp)h+=`<button onclick="goP(${tp})">${tp}</button>`;
-  h+=`<button ${PG===tp?'disabled':''} onclick="goP(${PG+1})">›</button><span class="pg-i" style="margin-left:10px">${tot.toLocaleString()} stocks</span>`;
-  c.innerHTML=h;
 }
 // Scroll to section with offset for sticky header (72px) + nav (44px)
 function scrollToSection(id){
@@ -4554,8 +4585,7 @@ function scrollToSection(id){
   const y=el.getBoundingClientRect().top+window.pageYOffset-130;
   window.scrollTo({top:y,behavior:'smooth'});
 }
-function goP(p){PG=p;renderTable();scrollToSection('tHead');}
-function doSort(col){if(SCOL===col)SDIR*=-1;else{SCOL=col;SDIR=['symbol','setup','series','risk'].includes(col)?1:-1;}applySort();PG=1;renderHead();renderTable();saveFilterState();}
+function doSort(col){if(SCOL===col)SDIR*=-1;else{SCOL=col;SDIR=['symbol','setup','series','risk'].includes(col)?1:-1;}applySort();renderHead();renderTable();saveFilterState();}
 function applySort(){
   const col=SCOL;
   FILT.sort((a,b)=>{
@@ -4605,8 +4635,27 @@ function applyFilters(){
   // user's persisted exclusions, capped at Zerodha's 20-order limit.
   SELECTED=new Set(FILT.filter(s=>s.basketEligible!==false&&!EXPORT_EXCLUDED.has(s.symbol)).slice(0,20).map(s=>s.symbol));
 
-  PG=1;renderHead();renderTable();renderStatusBar();saveFilterState();updateTabCounts();
+  renderHead();renderTable();renderStatusBar();saveFilterState();updateTabCounts();
+  try{renderRankingsPanels();}catch(e){console.warn('Rankings panels render failed',e);}
   if(ALL.length) try{renderStats();}catch(e){}
+}
+// Latest Session and Open Positions sit under the recommendations table on Rankings and
+// answer the same search box, so a symbol is found wherever it currently lives (v530).
+// Both are rendered synchronously after their markup is in the DOM.
+function renderRankingsPanels(){
+  const q=rankingsSearchQuery();
+  const latestEl=document.getElementById('rankLatestSession');
+  if(latestEl){
+    const latest=buildLatestSessionPanel(q);
+    latestEl.innerHTML=latest.html;
+    latest.render();
+  }
+  const posEl=document.getElementById('rankOpenPositions');
+  if(posEl){
+    const positions=buildOpenPositionsPanel(q);
+    posEl.innerHTML=positions.html;
+    positions.table?.render();
+  }
 }
 function showRadarDetail(sym){
   const r=ALL.find(x=>x.symbol===sym);
@@ -6024,6 +6073,10 @@ async function initApp(){
   // before REG1 ZIP hydration so surveillance monitoring is active on the first new scan.
   try{loadSurvRules();}catch(e){SURV_CUSTOM_RULES=SURV_SEED_RULES.map(r=>({key:survRuleKey(r.column),column:r.column,label:r.label}));}
 
+  // Restore saved filters BEFORE hydration: hydration renders, and rendering saves filter
+  // state, so reading them back afterwards would persist blank inputs over the real ones.
+  try{loadFilterState();}catch(e){console.error('INIT loadFilterState failed:',e);}
+
   // Prefer the same local upload folder used by Load Files; Drive copies are fallback.
   try{await hydrateSessionCSVsFromPreferredInputs('INIT');}catch(e){console.warn('INIT: input hydration failed',e);}
 
@@ -6036,7 +6089,7 @@ async function initApp(){
   // Step 4: Render methodology
   try{renderMethodology();}catch(e){console.error('INIT step4 renderMethodology failed:',e);}
 
-  // Step 5: Load filter state (still from localStorage)
+  // Step 5: Re-apply filter state now that the tradebook can supply the learned Max Alloc.
   try{loadFilterState();}catch(e){console.error('INIT step5 loadFilterState failed:',e);}
 
   // Step 6: Show header + dash before applyFilters so renderTable works into a visible element
@@ -6056,6 +6109,7 @@ async function initApp(){
 initApp();
 
 function saveFilterState(){
+  if(!FILTERS_RESTORED) return; // never persist the blank pre-restore inputs
   const state={
     search:document.getElementById('fSearch')?.value||'',
     risk:document.getElementById('fRisk')?.value||'',
@@ -6092,6 +6146,7 @@ function loadFilterState(){
     if(state.sortCol&&!legacy.has(state.sortCol))SCOL=state.sortCol;
     if(state.sortDir&&!legacy.has(state.sortCol||''))SDIR=state.sortDir;
   }catch(e){console.warn('Could not load filter state',e);}
+  FILTERS_RESTORED=true;
 }
 // ── Fixed horizontal scrollbar always at viewport bottom ──
 function initFixedScroll(){
