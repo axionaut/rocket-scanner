@@ -1,5 +1,5 @@
-const BUILD_TS='2026-07-20 09:26 IST'; // release build time (IST)
-const APP_VERSION=527; // Use the new ALL NSE columns: "High, 52 weeks" rides the price-level path as breakout-proximity (no code change); "Free float %" routed to Liquidity with an inverted prior (low float = explosive).
+const BUILD_TS='2026-07-20 11:27 IST'; // release build time (IST)
+const APP_VERSION=528; // Use the new ALL NSE columns: "High, 52 weeks" rides the price-level path as breakout-proximity (no code change); "Free float %" routed to Liquidity with an inverted prior (low float = explosive).
 const GOOGLE_DRIVE_CLIENT_ID='1015012642264-oi2nelv3v90k3d39r994a6nelgjs2a56.apps.googleusercontent.com'; // Public OAuth Web Client ID.
 const PRICE_BAND_BLOCK_BUFFER_PCT=0.15; // Treat rounded 4.9/9.9/19.9 rows as effectively band-locked.
 const BASKET_CASH_RESERVE_RS=1; // Leave a rupee for broker-side tax/rounding differences.
@@ -3305,11 +3305,10 @@ function renderPerformance(){
   // Action thresholds are derived from this user's own tradebook below.
   let timeStopHtml='', timeStopTblObj=null;
   (function(){
-    if(!allTrips.length) return;
     const adaptiveTGT=getEffectiveTgtPct()||(TRADEBOOK_STATS?.adaptiveTGT||3.7);
     // Apply the net profit-per-day horizon learned from closed tradebook outcomes.
     const cutoffDays=getEffectiveReviewDays()||5;
-    const _longRows=allTrips.filter(t=>t.holdDays>cutoffDays);
+    const _longRows=allTrips.length?allTrips.filter(t=>t.holdDays>cutoffDays):[];
     const _longWins=_longRows.filter(t=>t.netPnlPct>0).length;
     const _longTotal=_longRows.length;
     const _longPnl=_longRows.reduce((s,t)=>s+(t.netPnl||0),0);
@@ -3422,7 +3421,9 @@ function renderPerformance(){
     const _summaryIcon=_negCount>0?'🛑':'✅';
     const _summaryText=_negCount>0
       ?`<strong style="color:var(--red)">${_negCount}</strong> of ${_rows.length} positions with negative signal (${_flaggedPct}% of capital ${fmtINR(_flaggedCap)} underperforming)`
-      :`All ${_rows.length} positions showing positive signal.`;
+      :allTrips.length
+        ?`All ${_rows.length} positions showing positive signal.`
+        :`${_rows.length} live held positions loaded from Holdings.csv / Positions.csv. Tradebook history is optional for the age-based evidence.`;
 
     const _badges=[
       _negCount>0?`<span style="padding:3px 10px;border-radius:12px;background:rgba(239,68,68,.18);color:var(--red);font-weight:700;font-size:11px">🛑 ${_negCount} NEGATIVE</span>`:'',
@@ -5556,7 +5557,7 @@ function planBasketExport(capital, selected){
 }
 
 
-function exportBasket(){
+async function exportBasket(){
   const capital=parseFloat(document.getElementById('fCapital').value)||0;
   const selList=FILT.filter(s=>SELECTED.has(s.symbol));
   if(!selList.length){showToast('Select at least one stock first.',3000,true);return;}
@@ -5625,24 +5626,50 @@ function exportBasket(){
       return;
     }
   }
-  downloadBasket(orders,'Zerodha_Basket_Buy');
-  const rejNote=rejectedCount>0?` · ${rejectedCount} skipped (eligibility/allocation)`:'';
+  const saved=await saveBasketToScannerUploads(orders,'Zerodha_Basket_Buy');
+  if(!saved) return;
+  const rejNote = rejectedCount>0
+    ? ` · ${rejectedCount} skipped (eligibility/allocation)`
+    : '';
   const targetNote=` · target + SL GTT per stock`;
   const srcLabel=active.source==='goal'?'goal-led':'Harvest';
   const planNote=` · ${srcLabel} ${adaptiveTGT.toFixed(2)}% GTT`;
   const floorNote=harvestPlan.warning?` · target floor active`:``;
   const limitNote=limitOmitted>0?` · ${limitOmitted} lower-priority stock${limitOmitted===1?'':'s'} omitted to keep the basket within Zerodha's 20-order limit`:'';
-  showToast(`<strong>Exported ${orders.length} CNC MARKET BUY orders</strong> as Zerodha_Basket_Buy JSON${targetNote}${planNote}${floorNote}${rejNote}${limitNote}`);
+  showToast(`<strong>Saved ${orders.length} CNC MARKET BUY orders</strong> in Scanner Uploads as Zerodha_Basket_Buy JSON${targetNote}${planNote}${floorNote}${rejNote}${limitNote}`);
 }
 
-// ── Basket export helper: Zerodha limits 20 orders per basket ──
-function downloadBasket(orders, filename){
+async function saveBasketToScannerUploads(orders, filename){
   if(orders.length>20) throw new Error(`Refusing to truncate basket with ${orders.length} orders`);
-  const blob=new Blob([JSON.stringify(orders,null,2)],{type:'application/json'});
-  const a=document.createElement('a');
-  a.href=URL.createObjectURL(blob);
-  a.download=filename+'.json';
-  a.click();
+  const root=await FS.getStoredUploadDirHandle?.().catch(()=>null);
+  if(!root){
+    showToast('Open the Scanner Uploads folder first, then export the basket again.',5000,true);
+    return false;
+  }
+  let uploadHandle=root;
+  if(uploadHandle.name!=='Scanner Uploads'){
+    try{uploadHandle=await uploadHandle.getDirectoryHandle('Scanner Uploads');}
+    catch(e){uploadHandle=null;}
+  }
+  if(!uploadHandle){
+    showToast('Scanner Uploads folder was not found under the selected local folder.',5000,true);
+    return false;
+  }
+  try{
+    if(uploadHandle.queryPermission&&await uploadHandle.queryPermission({mode:'readwrite'})!=='granted'){
+      showToast('Write access to Scanner Uploads is not available. Re-open the folder and try again.',6000,true);
+      return false;
+    }
+    const fileHandle=await uploadHandle.getFileHandle(filename+'.json',{create:true});
+    const writable=await fileHandle.createWritable();
+    await writable.write(JSON.stringify(orders,null,2));
+    await writable.close();
+    return true;
+  }catch(e){
+    console.error('Basket save failed',e);
+    showToast('Could not save the basket into Scanner Uploads: '+(e?.message||e),6000,true);
+    return false;
+  }
 }
 
 function switchTab(n){
