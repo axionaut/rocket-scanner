@@ -1,5 +1,5 @@
-const BUILD_TS='2026-07-21 12:32 IST'; // release build time (IST)
-const APP_VERSION=541; // Folder-watch quiescence guard: auto-refresh ingests only after the upload folder is stable for a full interval and ALL NSE.csv is present — no partial ingest when a tick fires mid-download on a second monitor.
+const BUILD_TS='2026-07-21 12:38 IST'; // release build time (IST)
+const APP_VERSION=542; // Folder-watch quiescence guard: auto-refresh ingests only after the upload folder is stable for a full interval (files are overwritten in place, so a mid-download tick waits) — dropped the pointless ALL-NSE-present check.
 const GOOGLE_DRIVE_CLIENT_ID='1015012642264-oi2nelv3v90k3d39r994a6nelgjs2a56.apps.googleusercontent.com'; // Public OAuth Web Client ID.
 const PRICE_BAND_BLOCK_BUFFER_PCT=0.15; // Treat rounded 4.9/9.9/19.9 rows as effectively band-locked.
 const BASKET_CASH_RESERVE_RS=1; // Leave a rupee for broker-side tax/rounding differences.
@@ -5207,15 +5207,15 @@ async function folderWatchTick(){
     if(sig===_folderWatchSig){_folderWatchPendingSig=sig;return;} // unchanged since last ingest
     // The set changed vs the last ingested one. Do NOT ingest yet — first require the
     // folder to have SETTLED, i.e. the signature is identical to the previous tick, so no
-    // file was added or is still growing in the last ~15s. This is the two-monitor guard:
+    // file is still being written in the last ~15s. This is the two-monitor guard:
     // `document.hidden` is false while the tab merely sits on another monitor, so a tick
     // can fire mid-download; without this, it would ingest a half-written or incomplete
-    // set (a partial ALL NSE distorts every percentile). While you keep dropping files the
-    // signature moves every tick and we keep waiting.
+    // set (a partial ALL NSE distorts every percentile). Files are OVERWRITTEN in place on
+    // each download, so their size/mtime is in flux until each finishes — the signature
+    // moves every tick and we keep waiting until the whole set stops changing. (No
+    // ALL-NSE-present check: the owner always overwrites it so it is never absent, and
+    // requiring it would wrongly block portfolio-only auto-refresh.)
     if(sig!==_folderWatchPendingSig){_folderWatchPendingSig=sig;return;} // still changing → wait a cycle
-    // Settled. Also never ingest a set that has no ALL NSE.csv (the scanner file the whole
-    // ranking is built from) — wait until it is present.
-    if(!local.files.some(f=>isScannerCsvName(f?.name))) return;
     _folderWatchSig=sig;
     _folderWatchPendingSig=sig;
     _folderWatchBusy=true;
