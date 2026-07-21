@@ -1,5 +1,5 @@
-const BUILD_TS='2026-07-21 07:07 IST'; // release build time (IST)
-const APP_VERSION=536; // Movable table columns: drag any header to reorder; per-table order persists across sessions (localStorage), totals and cells follow the moved column.
+const BUILD_TS='2026-07-21 09:33 IST'; // release build time (IST)
+const APP_VERSION=537; // Outcome Feedback moves to the bottom of Performance; Same-Day Exit Headroom KPI quantifies how far stocks kept rising past manual exits (target learning unchanged — already capability-based).
 const GOOGLE_DRIVE_CLIENT_ID='1015012642264-oi2nelv3v90k3d39r994a6nelgjs2a56.apps.googleusercontent.com'; // Public OAuth Web Client ID.
 const PRICE_BAND_BLOCK_BUFFER_PCT=0.15; // Treat rounded 4.9/9.9/19.9 rows as effectively band-locked.
 const BASKET_CASH_RESERVE_RS=1; // Leave a rupee for broker-side tax/rounding differences.
@@ -3524,6 +3524,16 @@ function renderPerformance(){
   if(recSummary.evaluated){
     kpis.push({label:'Rocket Conversion',value:recSummary.conversionPct+'%',color:recSummary.conversionPct>=20?'var(--green)':recSummary.conversionPct>=10?'var(--amber)':'var(--red)',sub:`Picks that hit the target · ${recSummary.rockets}/${recSummary.evaluated} completed`});
   }
+  // Same-day exit headroom (owner insight 2026-07-21): on the days you sold, how much
+  // higher did the stock trade AFTER your exit that same day? This is the measured cost
+  // of overriding the GTT manually — the decision it changes is "hold to the target".
+  // Diagnostic store only; it feeds no policy.
+  const exitOpp=getSameDayExitOpportunitySummary();
+  if(exitOpp.exits>=5){
+    const activeTgt=(typeof getEffectiveTgtPct==='function')?getEffectiveTgtPct():null;
+    const missColor=activeTgt!=null&&exitOpp.avgMissed>=activeTgt?'var(--red)':exitOpp.avgMissed>=1?'var(--amber)':'var(--green)';
+    kpis.push({label:'Same-Day Exit Headroom',value:'+'+exitOpp.avgMissed.toFixed(2)+'%',color:missColor,sub:`Stock kept rising past your exit on ${exitOpp.upsideExits}/${exitOpp.exits} sell days · ${fmtINR(exitOpp.missedValue)} left same-day${activeTgt!=null?` · active target is ${activeTgt.toFixed(1)}%`:''}`});
+  }
 
   // Diagnostics. Labels here state honestly what each number IS and whether the exit
   // policy actually consumes it — several previously claimed authorship of a policy that
@@ -3673,11 +3683,10 @@ function renderPerformance(){
   const _navLink=(id,label,show)=>show?`<a href="#${id}" onclick="event.preventDefault();scrollToSection('${id}')" style="padding:4px 12px;border-radius:6px;background:var(--bg-card);border:1px solid var(--border);color:var(--t2);font-size:11px;font-weight:600;text-decoration:none;cursor:pointer;white-space:nowrap">${label}</a>`:'';
   const perfNav=`<nav style="position:sticky;top:var(--hdr-h,72px);z-index:50;background:var(--bg);padding:8px 0 10px;margin-bottom:8px;display:flex;gap:6px;flex-wrap:wrap;border-bottom:1px solid var(--border);box-shadow:0 2px 8px rgba(0,0,0,0.3);overflow-x:auto;-webkit-overflow-scrolling:touch">
     ${_navLink('perf-kpi','📊 KPIs',true)}
-    ${_navLink('perf-outcomes','Outcome Feedback',true)}
-
     ${_navLink('perf-monthly','📅 Monthly',monthRows.length>0)}
     ${_navLink('perf-trade-windows','🕐 Trading Windows',hasTradeWindows)}
     ${_navLink('perf-stocks','📈 Stocks',p.symBreakdown.length>0)}
+    ${_navLink('perf-outcomes','Outcome Feedback',true)}
   </nav>`;
   const entryOutcomeText=entrySummary.completed
     ? `${entrySummary.completed} actual recommended buys assessed over their adaptive outcome windows (${entrySummary.topups} top-ups). Their average best net opportunity is ${entrySummary.avgBestNet>=0?'+':''}${entrySummary.avgBestNet.toFixed(2)}%; their best observed peak velocity averages ${entrySummary.avgVelocity>=0?'+':''}${entrySummary.avgVelocity.toFixed(3)}%/day. These outcomes provide confidence context only and refine the single target policy with sample-size confidence.`
@@ -3703,10 +3712,10 @@ function renderPerformance(){
       ${periodPillsHtml}
       <div style="font-size:10px;color:var(--t3);margin-bottom:12px">${periodLabel} · ${p.roundTrips} lots</div>
       <div id="perf-kpi">${kpiHtml}</div>
-      ${outcomeHtml}
       ${monthRows.length?perfCard('Monthly Breakdown',monthTbl.getHtml(),'','perf-monthly'):''}
       ${hasTradeWindows?perfCard('Trading Windows <span style="font-size:10px;color:var(--t3);font-weight:400">Buy Edge &gt; 2 = Enter · Sell Edge &gt; 2 = Exit · hover Edge columns to sort</span>',tradeWindowTbl.getHtml(),'','perf-trade-windows'):''}
       ${p.symBreakdown.length?perfCard('Stocks',symTbl.getHtml(),'360px','perf-stocks'):''}
+      ${outcomeHtml}
     </div>`;
 
   setTimeout(()=>{monthTbl.render();symTbl.render();tradeWindowTbl.render();},0);
