@@ -1,5 +1,5 @@
-const BUILD_TS='2026-07-21 12:38 IST'; // release build time (IST)
-const APP_VERSION=542; // Folder-watch quiescence guard: auto-refresh ingests only after the upload folder is stable for a full interval (files are overwritten in place, so a mid-download tick waits) — dropped the pointless ALL-NSE-present check.
+const BUILD_TS='2026-07-21 16:36 IST'; // release build time (IST)
+const APP_VERSION=543; // Capital ₹ and Max Alloc ₹ show a computed default (Capital = deployed book from CSVs, also the goal basis; Max Alloc = learned Position Size); type to override, clear to restore the default.
 const GOOGLE_DRIVE_CLIENT_ID='1015012642264-oi2nelv3v90k3d39r994a6nelgjs2a56.apps.googleusercontent.com'; // Public OAuth Web Client ID.
 const PRICE_BAND_BLOCK_BUFFER_PCT=0.15; // Treat rounded 4.9/9.9/19.9 rows as effectively band-locked.
 const BASKET_CASH_RESERVE_RS=1; // Leave a rupee for broker-side tax/rounding differences.
@@ -2695,40 +2695,68 @@ function projectGoalCompletionDate(start,target,netPctPerDay,wdMonthly){
   }
   return null;
 }
-// Goal capital basis (v540, owner correction): the basis is your working book =
-// live market value of what you hold + idle cash freed by selling that you have NOT
-// put back to work. `invested` (holdings + positions + today's net buys at live price)
-// already contains everything rebought, so only the LEFTOVER sell cash is added:
-//   idleCash = max(0, today's sells − today's buys).
-// Recycled sell cash (rebought same day) is therefore counted once, in the position it
-// bought — never twice (the v539 bug added ALL sells and inflated ~₹7.5L vs ~₹5.5L; the
-// v539 over-correction dropped ALL sells and lost genuinely idle cash). The manual
-// "Capital ₹" filter field stays excluded (it is a basket-sizing input, and any external
-// idle cash it represents is the owner's call to leave out).
+// Computed total deployed capital, from the CSVs only (v543): your full deployed book =
+// holdings + every open position (including today's BTST buys), via the combined map over
+// Holdings + Positions + today's net Orders buys. `holdings` = Σ(qty × LTP) over
+// Holdings.csv (matches Zerodha "Holdings · Current value"); `total` is the combined book,
+// and the BTST-locked delivery margin is the margin behind those positions, already
+// represented by them, so it is not added again. This is the DEFAULT for the Capital ₹
+// field — one value drives the goal basis and allocation, and the owner can override it.
+function getComputedCapital(){
+  const liveBySym=new Map(ALL.map(r=>[r.symbol,Number(r.price)||0]));
+  const px=(sym,fallback)=>liveBySym.get(sym)||Number(fallback)||0;
+  let holdings=0;
+  (HOLDINGS||[]).forEach(h=>{ if(h.qty>0) holdings+=h.qty*px(h.symbol,h.ltp||h.avgCost); });
+  let total=0;
+  Object.values(getCombinedOpenPositionMap()).forEach(p=>{ if(Number(p.qty)>0) total+=Number(p.qty)*px(p.symbol,p.ltp||p.avg); });
+  holdings=+holdings.toFixed(0); total=+total.toFixed(0);
+  return {holdings,positions:Math.max(0,total-holdings),total:Math.max(0,total)};
+}
+// Goal capital basis = the Capital ₹ field, which DEFAULTS to the computed book above
+// (`applyCapitalDefault` fills it). If the owner overrides the field, the goal follows; if
+// the field is momentarily empty, fall back to the computed value so the goal never reads 0.
 function getGoalFreeCapitalParts(){
-  const cap=parseFloat(document.getElementById('fCapital')?.value)||0;
-  let sells=0,buys=0;
-  if(ORDERS_TODAY?._loadedThisSession){
-    const today=getSessionDate();
-    (ORDERS_TODAY||[]).forEach(o=>{
-      if(normOrderDate(o.time)!==today) return;
-      const val=(Number(o.qty)||0)*(Number(o.price)||0);
-      if(o.type==='SELL') sells+=val;
-      else if(o.type==='BUY') buys+=val;
-    });
-  }
-  const idleCash=Math.max(0,sells-buys); // sell proceeds not redeployed today = free cash
-  let invested=0;
-  try{
-    const liveBySym=new Map(ALL.map(r=>[r.symbol,Number(r.price)||0]));
-    Object.values(getCombinedOpenPositionMap()).forEach(p=>{
-      const qty=Number(p.qty)||0;
-      if(!(qty>0)) return;
-      const px=liveBySym.get(p.symbol)||Number(p.ltp)||Number(p.avg)||0;
-      invested+=qty*px;
-    });
-  }catch(e){}
-  return {cap,sells,buys,idleCash,invested,free:invested+idleCash,total:Math.max(0,invested+idleCash)};
+  const c=getComputedCapital();
+  const field=parseFloat(document.getElementById('fCapital')?.value)||0;
+  const isDefault=document.getElementById('fCapital')?.dataset.autoDefault==='1';
+  const total=field>0?field:c.total;
+  const overridden=field>0&&!isDefault&&Math.round(field)!==Math.round(c.total);
+  // Back-compat keys (invested/free/cap) kept for any older reader.
+  return {holdings:c.holdings,positions:c.positions,computed:c.total,field,overridden,
+          invested:total,cap:field,sells:0,buys:0,idleCash:0,cash:0,free:total,total:Math.max(0,total)};
+}
+// Fill the Capital ₹ field with the computed book when it is empty (the default). Never
+// fights an active edit unless forced (blur/Enter commit). Sets `autoDefault` so the auto
+// value is not persisted as a manual override.
+function applyCapitalDefault(force){
+  const el=document.getElementById('fCapital');
+  if(!el) return false;
+  if(String(el.value||'').trim()) return false;            // has a value → leave it
+  if(!force && document.activeElement===el) return false;  // mid-edit, not forced
+  const c=getComputedCapital();
+  if(!(c.total>0)) return false;
+  el.value=String(Math.round(c.total));
+  el.dataset.autoDefault='1';
+  el.title=`Default = computed capital ₹${Math.round(c.total).toLocaleString('en-IN')} (holdings ₹${c.holdings.toLocaleString('en-IN')} + open positions ₹${c.positions.toLocaleString('en-IN')}). Type to override; clear to restore this.`;
+  return true;
+}
+function onCapitalInput(){
+  const el=document.getElementById('fCapital');
+  if(el&&String(el.value||'').trim()) el.dataset.autoDefault=''; // a typed value is a manual override
+  scheduleApplyFilters();
+}
+function onCapitalChange(){
+  const el=document.getElementById('fCapital');
+  if(el&&!String(el.value||'').trim()){ applyCapitalDefault(true); scheduleApplyFilters(); } // erased → restore default
+}
+function onMaxAllocInput(){
+  const el=document.getElementById('fMaxAlloc');
+  if(el&&String(el.value||'').trim()) el.dataset.autoDefault='';
+  scheduleApplyFilters();
+}
+function onMaxAllocChange(){
+  const el=document.getElementById('fMaxAlloc');
+  if(el&&!String(el.value||'').trim()){ applyLearnedMaxAllocDefault(); scheduleApplyFilters(); }
 }
 function getGoalPortfolioBasis(){return getGoalFreeCapitalParts().total;}
 let _goalRateCache=null;
@@ -2842,10 +2870,10 @@ function buildGoalCard(){
   const onTrack=req!=null&&ach!=null&&ach>=req;
   const col=req==null?'var(--red)':(onTrack?'var(--green)':'var(--amber)');
   const badge=ach!=null?(onTrack?'<span style="color:var(--green);font-size:11px">✓ on track</span>':'<span style="color:var(--amber);font-size:11px">behind</span>'):'<span style="color:var(--t3);font-size:11px">no 30d trades</span>';
-  const freeStr=parts.idleCash>0
-    ?`basis ₹${goalFmtRs(basis)} (held ${goalFmtRs(parts.invested)} + freed cash ${goalFmtRs(parts.idleCash)})`
-    :`basis ₹${goalFmtRs(basis)} (live market value of holdings + positions)`;
-  const title='Required NET earnings per NSE trading day, as % of your working book = live market value of holdings + positions + today\'s net buys, PLUS idle cash freed by selling that was not redeployed (max(0, today\'s sells − today\'s buys)). Recycled sell cash is counted once inside the position it rebought, never twice; the manual Capital ₹ field is excluded. Informational only; does not change targets.';
+  const freeStr=parts.overridden
+    ?`capital ₹${goalFmtRs(basis)} (your Capital ₹ override · computed book ₹${goalFmtRs(parts.computed)})`
+    :`capital ₹${goalFmtRs(basis)} (holdings ${goalFmtRs(parts.holdings)} + open positions ${goalFmtRs(parts.positions)})`;
+  const title='Required NET earnings per NSE trading day, as % of your capital. Capital = the Capital ₹ field, which DEFAULTS to your computed deployed book (holdings + every open position incl. BTST, from the CSVs) and can be overridden; clearing the field restores the default. Informational only; does not change targets.';
   return `<div class="st" title="${title}"><div class="st-l">Goal · earn ₹${goalFmtRs(g.target)} · ${days} td left</div><div class="st-v" style="color:${col}">${reqStr}%/day ${badge}</div><div class="st-d">${freeStr} · need ${needRs!=null?'₹'+goalFmtRs(needRs)+'/day':'—/day'} · achieved ${ach!=null?(ach*100).toFixed(2)+'%/day':'—/day'} (30d)</div></div>`;
 }
 function renderStats(){
@@ -4726,6 +4754,7 @@ function getRecommendedPositionSize(perfStats){
 function applyLearnedMaxAllocDefault(recPos=null){
   const el=document.getElementById('fMaxAlloc');
   if(!el||String(el.value||'').trim()) return false;
+  if(document.activeElement===el) return false; // never refill while the field is being edited
   let rec=recPos;
   if(!rec){
     const trips=getAdaptiveTradeTrips(TRADEBOOK_STATS?.tripsData||[]);
@@ -4913,6 +4942,10 @@ function toggleFilters(){
 function applyFilters(){
   // The Radar composite pre-ranks every uploaded row; the filter bar only narrows
   // what is displayed. Held positions were already suppressed at scoring time.
+  // Capital/Max-Alloc show their computed defaults once data is loaded (focus-guarded,
+  // so this never overwrites a value you are mid-typing).
+  applyCapitalDefault();
+  applyLearnedMaxAllocDefault();
   const q=(document.getElementById('fSearch')?.value||'').trim().toLowerCase();
   const risk=document.getElementById('fRisk')?.value||'';
   const turnIdx=+(document.getElementById('fMinTurnover')?.value||0);
@@ -6443,8 +6476,11 @@ function saveFilterState(){
   };
   localStorage.setItem(modeKey(SCANNER_STORE), JSON.stringify(state));
   const maxAllocEl=document.getElementById('fMaxAlloc');
+  const capEl=document.getElementById('fCapital');
   localStorage.setItem(SHARED_FILTER_STORE, JSON.stringify({
-    capital:document.getElementById('fCapital')?.value||'',
+    // Auto-filled defaults are not persisted as manual values — so a later data change
+    // recomputes the default rather than sticking to a stale saved number.
+    capital:capEl?.dataset.autoDefault==='1'?'':(capEl?.value||''),
     maxAlloc:maxAllocEl?.dataset.autoDefault==='1'?'':(maxAllocEl?.value||'')
   }));
 }
@@ -6463,6 +6499,7 @@ function loadFilterState(){
     if(sharedCapital){const el=document.getElementById('fCapital');if(el)el.value=sharedCapital;}
     if(sharedMaxAlloc){const el=document.getElementById('fMaxAlloc');if(el)el.value=sharedMaxAlloc;}
     applyLearnedMaxAllocDefault();
+    applyCapitalDefault(); // empty Capital ₹ falls back to the computed book
     // Legacy engine sort columns migrate to the Radar rank ordering once.
     const legacy=new Set(['_rank','rocketScore','snapshotChange','tslRefPoints','velocityPotential','delivPct','volume']);
     if(state.sortCol&&!legacy.has(state.sortCol))SCOL=state.sortCol;
