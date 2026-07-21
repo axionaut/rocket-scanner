@@ -1,5 +1,5 @@
-const BUILD_TS='2026-07-21 11:52 IST'; // release build time (IST)
-const APP_VERSION=539; // Goal basis is now the live market value of the held book only — the manual Capital field and today's sell proceeds no longer inflate it (double-count fix).
+const BUILD_TS='2026-07-21 12:02 IST'; // release build time (IST)
+const APP_VERSION=540; // Goal basis adds idle cash freed by selling (max(0,sells−buys)) back to held market value; projected-finish line leads with a plain readable date and a months-from-deadline gap.
 const GOOGLE_DRIVE_CLIENT_ID='1015012642264-oi2nelv3v90k3d39r994a6nelgjs2a56.apps.googleusercontent.com'; // Public OAuth Web Client ID.
 const PRICE_BAND_BLOCK_BUFFER_PCT=0.15; // Treat rounded 4.9/9.9/19.9 rows as effectively band-locked.
 const BASKET_CASH_RESERVE_RS=1; // Leave a rupee for broker-side tax/rounding differences.
@@ -2695,23 +2695,29 @@ function projectGoalCompletionDate(start,target,netPctPerDay,wdMonthly){
   }
   return null;
 }
-// Goal capital basis (v539, owner correction): the basis is the LIVE MARKET VALUE of
-// what is currently held — holdings + positions + today's net buys, at live scanner
-// price. The manual "Capital ₹" filter field is deliberately excluded (owner: it is a
-// basket-sizing input, not deployable book value). Today's sell PROCEEDS are also NOT
-// added on top: same-day sale cash is normally recycled straight back into the very
-// positions already counted here, so adding it double-counted the book and inflated the
-// basis (~₹7.5L shown vs the ~₹5.5L actually working). cap/sells stay in the return for
-// display transparency but never enter `total`.
+// Goal capital basis (v540, owner correction): the basis is your working book =
+// live market value of what you hold + idle cash freed by selling that you have NOT
+// put back to work. `invested` (holdings + positions + today's net buys at live price)
+// already contains everything rebought, so only the LEFTOVER sell cash is added:
+//   idleCash = max(0, today's sells − today's buys).
+// Recycled sell cash (rebought same day) is therefore counted once, in the position it
+// bought — never twice (the v539 bug added ALL sells and inflated ~₹7.5L vs ~₹5.5L; the
+// v539 over-correction dropped ALL sells and lost genuinely idle cash). The manual
+// "Capital ₹" filter field stays excluded (it is a basket-sizing input, and any external
+// idle cash it represents is the owner's call to leave out).
 function getGoalFreeCapitalParts(){
   const cap=parseFloat(document.getElementById('fCapital')?.value)||0;
-  let sells=0;
+  let sells=0,buys=0;
   if(ORDERS_TODAY?._loadedThisSession){
     const today=getSessionDate();
     (ORDERS_TODAY||[]).forEach(o=>{
-      if(o.type==='SELL'&&normOrderDate(o.time)===today) sells+=(Number(o.qty)||0)*(Number(o.price)||0);
+      if(normOrderDate(o.time)!==today) return;
+      const val=(Number(o.qty)||0)*(Number(o.price)||0);
+      if(o.type==='SELL') sells+=val;
+      else if(o.type==='BUY') buys+=val;
     });
   }
+  const idleCash=Math.max(0,sells-buys); // sell proceeds not redeployed today = free cash
   let invested=0;
   try{
     const liveBySym=new Map(ALL.map(r=>[r.symbol,Number(r.price)||0]));
@@ -2722,7 +2728,7 @@ function getGoalFreeCapitalParts(){
       invested+=qty*px;
     });
   }catch(e){}
-  return {cap,sells,invested,free:invested,total:Math.max(0,invested)};
+  return {cap,sells,buys,idleCash,invested,free:invested+idleCash,total:Math.max(0,invested+idleCash)};
 }
 function getGoalPortfolioBasis(){return getGoalFreeCapitalParts().total;}
 let _goalRateCache=null;
@@ -2799,10 +2805,18 @@ function buildGoalPopoverContent(){
     if(!(netPct>0)) return '';
     const proj=projectGoalCompletionDate(basis,g.target,netPct,g.withdrawMonthly);
     const srcLbl=at.source==='goal'?'goal-led':'Harvest';
-    if(!proj) return `<div style="font-size:11px;line-height:1.6;margin-top:6px;color:var(--red)">Projected finish at the active ${srcLbl} target (${at.tgtPct.toFixed(1)}% gross ≈ ${netPct.toFixed(2)}% net/trading day): <b>not within 8 years</b> — withdrawals outpace that target on this capital.</div>`;
+    const rate=`${at.tgtPct.toFixed(1)}% gross ≈ ${netPct.toFixed(2)}% net/day`;
+    if(!proj) return `<div style="font-size:11px;line-height:1.6;margin-top:6px;color:var(--red)">At the active ${srcLbl} target (${rate}) you don't reach the goal within 8 years — the target is too low for this book plus withdrawals. Raise the target or extend the deadline.</div>`;
+    // Lead with a plain, readable date; express the deadline gap in months (or days when
+    // close) so nothing has to be mentally converted.
+    const MON=['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+    const readable=d=>{const [y,m,dd]=d.split('-');return `${+dd} ${MON[+m-1]} ${y}`;};
     const late=proj>g.endDate;
-    const gapDays=Math.abs(Number(tradingDaysBetween(late?g.endDate:proj,late?proj:g.endDate))||0);
-    return `<div style="font-size:11px;line-height:1.6;margin-top:6px;color:var(--t2)">Projected finish at the active ${srcLbl} target (${at.tgtPct.toFixed(1)}% gross ≈ ${netPct.toFixed(2)}% net/trading day, hit daily): <b style="color:${late?'var(--amber)':'var(--green)'}">${proj}</b> — ${late?`≈ ${gapDays} trading days past`:`≈ ${gapDays} trading days before`} the deadline. Best-case pace (assumes the target fills every session), not a forecast.</div>`;
+    const calDays=Math.abs(Math.round((new Date(proj+'T12:00:00Z')-new Date(g.endDate+'T12:00:00Z'))/86400000));
+    const gap=calDays<=1?'right on your deadline'
+      :calDays<45?`≈ ${calDays} days ${late?'after':'ahead of'} your ${readable(g.endDate)} deadline`
+      :`≈ ${Math.round(calDays/30)} months ${late?'after':'ahead of'} your ${readable(g.endDate)} deadline`;
+    return `<div style="font-size:11px;line-height:1.6;margin-top:6px;color:var(--t2)">At the active ${srcLbl} target (${rate}, hit every session) you'd reach the goal around <b style="color:${late?'var(--amber)':'var(--green)'}">${readable(proj)}</b> — ${gap}. Best-case pace, not a forecast.</div>`;
   })()}
   <div style="font-size:10px;line-height:1.5;color:var(--t3);margin-top:6px">${remaining} trading day${remaining===1?'':'s'} left until ${g.endDate} (weekends and NSE holidays excluded) · withdrawal drains ≈ ₹${goalFmtRs(wdDaily)}/calendar day (weekends and holidays included). Informational — never changes targets or allocation.</div>`;
 }
@@ -2828,8 +2842,10 @@ function buildGoalCard(){
   const onTrack=req!=null&&ach!=null&&ach>=req;
   const col=req==null?'var(--red)':(onTrack?'var(--green)':'var(--amber)');
   const badge=ach!=null?(onTrack?'<span style="color:var(--green);font-size:11px">✓ on track</span>':'<span style="color:var(--amber);font-size:11px">behind</span>'):'<span style="color:var(--t3);font-size:11px">no 30d trades</span>';
-  const freeStr=`basis ₹${goalFmtRs(basis)} (live market value of holdings + positions)`;
-  const title='Required NET earnings per NSE trading day, as % of your working book (live market value of holdings + positions + today\'s net buys; the manual Capital ₹ field and today\'s sell proceeds are excluded so the book is not double-counted), to generate the target profit within the horizon while withdrawals drain daily. Informational only; does not change targets.';
+  const freeStr=parts.idleCash>0
+    ?`basis ₹${goalFmtRs(basis)} (held ${goalFmtRs(parts.invested)} + freed cash ${goalFmtRs(parts.idleCash)})`
+    :`basis ₹${goalFmtRs(basis)} (live market value of holdings + positions)`;
+  const title='Required NET earnings per NSE trading day, as % of your working book = live market value of holdings + positions + today\'s net buys, PLUS idle cash freed by selling that was not redeployed (max(0, today\'s sells − today\'s buys)). Recycled sell cash is counted once inside the position it rebought, never twice; the manual Capital ₹ field is excluded. Informational only; does not change targets.';
   return `<div class="st" title="${title}"><div class="st-l">Goal · earn ₹${goalFmtRs(g.target)} · ${days} td left</div><div class="st-v" style="color:${col}">${reqStr}%/day ${badge}</div><div class="st-d">${freeStr} · need ${needRs!=null?'₹'+goalFmtRs(needRs)+'/day':'—/day'} · achieved ${ach!=null?(ach*100).toFixed(2)+'%/day':'—/day'} (30d)</div></div>`;
 }
 function renderStats(){
