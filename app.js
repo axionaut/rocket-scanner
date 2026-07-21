@@ -1,5 +1,5 @@
-const BUILD_TS='2026-07-21 06:58 IST'; // release build time (IST)
-const APP_VERSION=535; // Recommendation-tracking visualization: shortlist rank heatmap + per-issue outcome dumbbells in the Outcome Feedback card, built solely from the existing outcome stores.
+const BUILD_TS='2026-07-21 07:07 IST'; // release build time (IST)
+const APP_VERSION=536; // Movable table columns: drag any header to reorder; per-table order persists across sessions (localStorage), totals and cells follow the moved column.
 const GOOGLE_DRIVE_CLIENT_ID='1015012642264-oi2nelv3v90k3d39r994a6nelgjs2a56.apps.googleusercontent.com'; // Public OAuth Web Client ID.
 const PRICE_BAND_BLOCK_BUFFER_PCT=0.15; // Treat rounded 4.9/9.9/19.9 rows as effectively band-locked.
 const BASKET_CASH_RESERVE_RS=1; // Leave a rupee for broker-side tax/rounding differences.
@@ -2900,7 +2900,48 @@ function renderStats(){
   void infoBarEl.offsetHeight;
 }
 
+// ── Movable table columns (v536, owner) ───────────────────────────────────────
+// Every data table's column order is user-draggable (HTML5 drag on the header) and
+// persists in localStorage per table key, so a reorder survives refresh. Saved order
+// lists existing keys first; columns added in later versions append at the end.
+const COL_ORDER_LS='rs_col_order_v1';
+function loadColOrders(){try{return JSON.parse(localStorage.getItem(COL_ORDER_LS)||'{}')||{};}catch(e){return {};}}
+function saveColOrder(tableKey,keys){try{const all=loadColOrders();all[tableKey]=keys;localStorage.setItem(COL_ORDER_LS,JSON.stringify(all));}catch(e){}}
+function applyColOrder(tableKey,cols){
+  const saved=loadColOrders()[tableKey];
+  if(!Array.isArray(saved)||!saved.length) return cols;
+  const byKey=new Map(cols.map(c=>[c.key,c]));
+  const ordered=saved.map(k=>byKey.get(k)).filter(Boolean);
+  const seen=new Set(ordered.map(c=>c.key));
+  return [...ordered,...cols.filter(c=>!seen.has(c.key))];
+}
+// Wire drag-to-reorder on a table's header cells. On drop: persist the new order and
+// hand it to onReorder, which re-renders that table (tbody/tfoot follow the cols).
+function attachColDrag(tableEl,tableKey,onReorder){
+  const ths=[...tableEl.querySelectorAll('thead th[data-key]')];
+  ths.forEach(th=>{
+    th.draggable=true;
+    th.title=(th.title?th.title+' · ':'')+'Drag to reorder columns';
+    th.addEventListener('dragstart',e=>{e.dataTransfer.setData('text/col-key',th.dataset.key);e.dataTransfer.effectAllowed='move';th.style.opacity='.35';});
+    th.addEventListener('dragend',()=>{th.style.opacity='';ths.forEach(t=>{t.style.boxShadow='';});});
+    th.addEventListener('dragover',e=>{if(e.dataTransfer.types.includes('text/col-key')){e.preventDefault();e.dataTransfer.dropEffect='move';th.style.boxShadow='inset 2px 0 0 var(--amber)';}});
+    th.addEventListener('dragleave',()=>{th.style.boxShadow='';});
+    th.addEventListener('drop',e=>{
+      e.preventDefault();th.style.boxShadow='';
+      const from=e.dataTransfer.getData('text/col-key'),to=th.dataset.key;
+      if(!from||from===to) return;
+      const keys=[...tableEl.querySelectorAll('thead th[data-key]')].map(t=>t.dataset.key);
+      const fi=keys.indexOf(from),ti=keys.indexOf(to);
+      if(fi<0||ti<0) return;
+      keys.splice(fi,1);
+      keys.splice(fi<ti?ti:ti,0,from); // dropping on a column takes its place
+      saveColOrder(tableKey,keys);
+      onReorder(keys);
+    });
+  });
+}
 function makeSortableTable(id, cols, rows, defaultSortKey, defaultDir=-1, rowStyleFn=null, totalsRow=null){
+  cols=applyColOrder(id,cols.slice());
   const thStyle=(align)=>`padding:6px 10px;text-align:${align};cursor:pointer;user-select:none;white-space:nowrap`;
   const tdStyle=(align,extra='')=>`padding:7px 10px;text-align:${align};white-space:nowrap${extra?';'+extra:''}`;
   let sortKey=defaultSortKey, sortDir=defaultDir;
@@ -2924,12 +2965,22 @@ function makeSortableTable(id, cols, rows, defaultSortKey, defaultDir=-1, rowSty
     const tfoot=totalsRow?`<tfoot><tr style="border-top:2px solid var(--border-hi);background:var(--bg-raised)">${
       cols.map(c=>{
         const v=totalsRow[c.key];
-        const display=c.totFmt?c.totFmt(v):(v!=null?v:'');
-        return `<td style="${tdStyle(c.align||'right','font-weight:700;color:var(--t1)')}">${display}</td>`;
+        const display=c.totFmt?c.totFmt(v,totalsRow):(v!=null?v:'');
+        const totColor=c.totClrFn?c.totClrFn(v,totalsRow):'var(--t1)';
+        return `<td style="${tdStyle(c.align||'right','font-weight:700;color:'+totColor)}">${display}</td>`;
       }).join('')
     }</tr></tfoot>`:'';
     const tbl=document.getElementById(id);
-    if(tbl){tbl.innerHTML=thead+tbody+tfoot;attachSort(tbl);}
+    if(tbl){
+      tbl.innerHTML=thead+tbody+tfoot;
+      attachSort(tbl);
+      // Drag-to-reorder: persist per table id; re-render so tbody/tfoot follow.
+      attachColDrag(tbl,id,keys=>{
+        const pos=new Map(keys.map((k,i)=>[k,i]));
+        cols.sort((a,b)=>(pos.get(a.key)??99)-(pos.get(b.key)??99));
+        render();
+      });
+    }
   }
   function attachSort(tbl){
     tbl.querySelectorAll('th[data-key]').forEach(th=>{
@@ -3091,27 +3142,42 @@ function buildLatestSessionPanel(query=''){
     const shownSummary=summarizeExitPnlRows(rows);
     const shownTotal=rows.reduce((s,r)=>s+(r.netPnl||0),0);
     const _chFmt=v=>fmtNegINR(v);const _chClr=()=>'var(--red)';
+    // Totals ride the component's totalsRow (keyed by column) so they follow any
+    // user-dragged column order — the old hand-built tfoot assumed a fixed sequence.
+    const _dash={totFmt:()=>'—',totClrFn:()=>'var(--t3)'};
+    const _signTot={totFmt:v=>v!=null?fmtPerfRs(v):'—',totClrFn:v=>v!=null?(v>=0?'var(--green)':'var(--red)'):'var(--t3)'};
+    const _chTot={totFmt:v=>fmtNegINR(v),totClrFn:()=>'var(--red)'};
     const latestCols=[
-      {key:'sym',label:'Symbol',align:'left',fmt:v=>v,clrFn:()=>'var(--t1)',bold:true},
-      {key:'lots',label:'Trades',align:'right',fmt:v=>v,clrFn:()=>'var(--t2)'},
-      {key:'buyPrice',label:'Buy ₹',align:'right',fmt:(v,r)=>v!=null?Number(v).toLocaleString('en-IN',INR_2):`<span style="color:var(--amber);font-size:10px" title="Load Holdings.csv to see avg cost">avg cost?</span>`,clrFn:()=>'var(--t2)'},
-      {key:'sellPrice',label:'Sell ₹',align:'right',fmt:v=>Number(v).toLocaleString('en-IN',INR_2),clrFn:()=>'var(--t2)'},
-      {key:'priceDiff',label:'Diff ₹',align:'right',fmt:v=>v!=null?fmtSignedINR(v).replace('₹','₹/sh '):'—',clrFn:v=>v!=null?clr(v):'var(--t3)'},
-      {key:'currentPrice',label:'Now ₹',align:'right',fmt:v=>v!=null?Number(v).toLocaleString('en-IN',INR_2):'—',clrFn:()=>'var(--t2)'},
-      {key:'reversePnl',label:'Reverse ₹',align:'right',bold:true,fmt:(v,r)=>v!=null?`<span title="${escHtml(r.reverseStatus||'')}">${fmtPerfRs(v)}</span>`:'—',clrFn:v=>v!=null?clr(v):'var(--t3)'},
-      {key:'_brok',label:'Brokerage',align:'right',fmt:_chFmt,clrFn:_chClr},
-      {key:'_stt',label:'STT/CTT',align:'right',fmt:_chFmt,clrFn:_chClr},
-      {key:'_txn',label:'Txn',align:'right',fmt:_chFmt,clrFn:_chClr},
-      {key:'_gst',label:'GST',align:'right',fmt:_chFmt,clrFn:_chClr},
-      {key:'_sebi',label:'SEBI',align:'right',fmt:_chFmt,clrFn:_chClr},
-      {key:'_stamp',label:'Stamp',align:'right',fmt:_chFmt,clrFn:_chClr},
-      {key:'_dp',label:'DP',align:'right',fmt:_chFmt,clrFn:_chClr},
-      {key:'charges',label:'Total Charges',align:'right',bold:true,fmt:fmtNegINR,clrFn:()=>'var(--red)'},
-      {key:'grossPnl',label:'Gross P&L',align:'right',bold:true,fmt:v=>v!=null?fmtPerfRs(v):'—',clrFn:v=>v!=null?clr(v):'var(--t3)'},
-      {key:'netPnl',label:'Net P&L',align:'right',bold:true,fmt:(v,r)=>v!=null?fmtPerfRs(v):`<span style="color:var(--amber);font-size:10px">unknown</span>`,clrFn:(v)=>v!=null?clr(v):'var(--amber)'},
-      {key:'netPnlPct',label:'P&L %',align:'right',bold:true,fmt:v=>v!=null?fmtPct(v):`<span style="color:var(--amber);font-size:10px">unknown</span>`,clrFn:v=>v!=null?clr(v):'var(--amber)'},
+      {key:'sym',label:'Symbol',align:'left',fmt:v=>v,clrFn:()=>'var(--t1)',bold:true,totFmt:v=>v??'',totClrFn:()=>'var(--t2)'},
+      {key:'lots',label:'Trades',align:'right',fmt:v=>v,clrFn:()=>'var(--t2)',..._dash},
+      {key:'buyPrice',label:'Buy ₹',align:'right',fmt:(v,r)=>v!=null?Number(v).toLocaleString('en-IN',INR_2):`<span style="color:var(--amber);font-size:10px" title="Load Holdings.csv to see avg cost">avg cost?</span>`,clrFn:()=>'var(--t2)',..._dash},
+      {key:'sellPrice',label:'Sell ₹',align:'right',fmt:v=>Number(v).toLocaleString('en-IN',INR_2),clrFn:()=>'var(--t2)',..._dash},
+      {key:'priceDiff',label:'Diff ₹',align:'right',fmt:v=>v!=null?fmtSignedINR(v).replace('₹','₹/sh '):'—',clrFn:v=>v!=null?clr(v):'var(--t3)',..._dash},
+      {key:'currentPrice',label:'Now ₹',align:'right',fmt:v=>v!=null?Number(v).toLocaleString('en-IN',INR_2):'—',clrFn:()=>'var(--t2)',..._dash},
+      {key:'reversePnl',label:'Reverse ₹',align:'right',bold:true,fmt:(v,r)=>v!=null?`<span title="${escHtml(r.reverseStatus||'')}">${fmtPerfRs(v)}</span>`:'—',clrFn:v=>v!=null?clr(v):'var(--t3)',..._signTot},
+      {key:'_brok',label:'Brokerage',align:'right',fmt:_chFmt,clrFn:_chClr,..._chTot},
+      {key:'_stt',label:'STT/CTT',align:'right',fmt:_chFmt,clrFn:_chClr,..._chTot},
+      {key:'_txn',label:'Txn',align:'right',fmt:_chFmt,clrFn:_chClr,..._chTot},
+      {key:'_gst',label:'GST',align:'right',fmt:_chFmt,clrFn:_chClr,..._chTot},
+      {key:'_sebi',label:'SEBI',align:'right',fmt:_chFmt,clrFn:_chClr,..._chTot},
+      {key:'_stamp',label:'Stamp',align:'right',fmt:_chFmt,clrFn:_chClr,..._chTot},
+      {key:'_dp',label:'DP',align:'right',fmt:_chFmt,clrFn:_chClr,..._chTot},
+      {key:'charges',label:'Total Charges',align:'right',bold:true,fmt:fmtNegINR,clrFn:()=>'var(--red)',..._chTot},
+      {key:'grossPnl',label:'Gross P&L',align:'right',bold:true,fmt:v=>v!=null?fmtPerfRs(v):'—',clrFn:v=>v!=null?clr(v):'var(--t3)',..._signTot},
+      {key:'netPnl',label:'Net P&L',align:'right',bold:true,fmt:(v,r)=>v!=null?fmtPerfRs(v):`<span style="color:var(--amber);font-size:10px">unknown</span>`,clrFn:(v)=>v!=null?clr(v):'var(--amber)',..._signTot},
+      {key:'netPnlPct',label:'P&L %',align:'right',bold:true,fmt:v=>v!=null?fmtPct(v):`<span style="color:var(--amber);font-size:10px">unknown</span>`,clrFn:v=>v!=null?clr(v):'var(--amber)',totFmt:v=>v==null?'--':fmtPct(v),totClrFn:v=>v==null?'var(--t3)':v>=0?'var(--green)':'var(--red)'},
     ];
-    const latestTbl=makeSortableTable('rank-latest-session',latestCols,rows,'_sort',-1);
+    const _sum=k=>rows.reduce((s,r)=>s+(r[k]||0),0);
+    const latestTotals=(rows.length>1||latestUnknownRows>0)?{
+      sym:`Total (${rows.length})${latestUnknownRows?` <span style="color:var(--amber)">&#9888; excludes ${latestUnknownRows} unknown</span>`:''}`,
+      reversePnl:shownSummary.reverseCount?shownSummary.reverse:null,
+      _brok:_sum('_brok'),_stt:_sum('_stt'),_txn:_sum('_txn'),_gst:_sum('_gst'),_sebi:_sum('_sebi'),_stamp:_sum('_stamp'),_dp:_sum('_dp'),
+      charges:_sum('charges'),
+      grossPnl:shownSummary.known.length?shownSummary.gross:null,
+      netPnl:shownTotal,
+      netPnlPct:shownSummary.pct
+    }:null;
+    const latestTbl=makeSortableTable('rank-latest-session',latestCols,rows,'_sort',-1,null,latestTotals);
     const emptyNote=String(query||'').trim()
       ?panelNoMatchHtml(query,'booked trade')
       :`<div style="padding:12px 16px;color:var(--t3);font-size:12px">No sell orders found in Orders.csv — only sell orders generate P&L rows.</div>`;
@@ -3121,38 +3187,7 @@ function buildLatestSessionPanel(query=''){
         <span style="font-size:15px;font-weight:800;color:${clr(latestTotal)};font-family:'DM Mono',monospace">${allRows.length?fmtPerfRs(latestTotal):''} <span style="font-size:10px;color:var(--t3);font-weight:400">${allRows.length?'net of charges':''}</span>${latestUnknownWarning}</span>
       </div>
       ${rows.length?`<div style="overflow-x:auto">${latestTbl.getHtml()}</div>`:emptyNote}`);
-    const render=()=>{
-      if(!rows.length) return;
-      latestTbl.render();
-      const _lt=document.getElementById('rank-latest-session');
-      if(_lt&&(rows.length>1||latestUnknownRows>0)){
-        const _sum=(k)=>rows.reduce((s,r)=>s+(r[k]||0),0);
-        const _p=v=>fmtPerfRs(v);
-        const td=(v,extra='')=>`<td style="padding:7px 10px;text-align:right;white-space:nowrap;font-weight:700;${extra}">${v}</td>`;
-        const tfoot=document.createElement('tfoot');
-        tfoot.innerHTML=`<tr style="border-top:2px solid var(--border-hi);background:rgba(148,163,184,.05)">
-          <td style="padding:7px 10px;font-weight:700;color:var(--t2);white-space:nowrap">Total (${rows.length})${latestUnknownRows?` <span style="color:var(--amber)">&#9888; excludes ${latestUnknownRows} unknown</span>`:''}</td>
-          ${td('—','color:var(--t3)')}
-          ${td('—','color:var(--t3)')}
-          ${td('—','color:var(--t3)')}
-          ${td('—','color:var(--t3)')}
-          ${td('—','color:var(--t3)')}
-          ${td(shownSummary.reverseCount?fmtPerfRs(shownSummary.reverse):'—','color:'+(shownSummary.reverse>=0?'var(--green)':'var(--red)'))}
-          ${td(fmtNegINR(_sum('_brok')),'color:var(--red)')}
-          ${td(fmtNegINR(_sum('_stt')),'color:var(--red)')}
-          ${td(fmtNegINR(_sum('_txn')),'color:var(--red)')}
-          ${td(fmtNegINR(_sum('_gst')),'color:var(--red)')}
-          ${td(fmtNegINR(_sum('_sebi')),'color:var(--red)')}
-          ${td(fmtNegINR(_sum('_stamp')),'color:var(--red)')}
-          ${td(fmtNegINR(_sum('_dp')),'color:var(--red)')}
-          ${td(fmtNegINR(_sum('charges')),'color:var(--red)')}
-          ${td(shownSummary.known.length?_p(shownSummary.gross):'—','color:'+(shownSummary.gross>=0?'var(--green)':'var(--red)'))}
-          ${td(_p(shownTotal),'color:'+(shownTotal>=0?'var(--green)':'var(--red)'))}
-          ${td(shownSummary.pct==null?'--':fmtPct(shownSummary.pct),'color:'+(shownSummary.pct==null?'var(--t3)':shownSummary.pct>=0?'var(--green)':'var(--red)'))}
-        </tr>`;
-        _lt.appendChild(tfoot);
-      }
-    };
+    const render=()=>{if(rows.length)latestTbl.render();};
     return {html,render};
   }
 
@@ -3167,49 +3202,37 @@ function buildLatestSessionPanel(query=''){
     const rows=filterPanelRows(allRows,query,r=>[r.sym]);
     const tbSummary=summarizeExitPnlRows(rows);
     const shownTotal=+(rows.reduce((s,r)=>s+r.netPnl,0)).toFixed(0);
+    const _dash={totFmt:()=>'—',totClrFn:()=>'var(--t3)'};
+    const _signTot={totFmt:v=>v!=null?fmtPerfRs(v):'—',totClrFn:v=>v!=null?(v>=0?'var(--green)':'var(--red)'):'var(--t3)'};
     const tbCols=[
-      {key:'sym',label:'Symbol',align:'left',fmt:v=>`<span style="font-weight:700;font-size:12px">${escHtml(v)}</span>`},
-      {key:'lots',label:'Lots',align:'right',fmt:v=>`<span style="color:var(--t2)">${v}</span>`},
-      {key:'buyPrice',label:'Buy ₹',align:'right',fmt:v=>`<span style="font-family:'DM Mono',monospace">${Number(v).toLocaleString('en-IN',INR_2)}</span>`},
-      {key:'sellPrice',label:'Sell ₹',align:'right',fmt:v=>`<span style="font-family:'DM Mono',monospace">${Number(v).toLocaleString('en-IN',INR_2)}</span>`},
-      {key:'priceDiff',label:'Diff ₹',align:'right',fmt:v=>v!=null?fmtSignedINR(v).replace('₹','₹/sh '):'—',clrFn:v=>v!=null?clr(v):'var(--t3)'},
-      {key:'currentPrice',label:'Now ₹',align:'right',fmt:v=>v!=null?Number(v).toLocaleString('en-IN',INR_2):'—',clrFn:()=>'var(--t2)'},
-      {key:'reversePnl',label:'Reverse ₹',align:'right',bold:true,fmt:(v,r)=>v!=null?`<span title="${escHtml(r.reverseStatus||'')}">${fmtPerfRs(v)}</span>`:'—',clrFn:v=>v!=null?clr(v):'var(--t3)'},
-      {key:'charges',label:'Charges ₹',align:'right',bold:true,fmt:fmtNegINR,clrFn:()=>'var(--red)'},
-      {key:'grossPnl',label:'Gross P&L',align:'right',bold:true,fmt:v=>v!=null?fmtPerfRs(v):'—',clrFn:v=>v!=null?clr(v):'var(--t3)'},
-      {key:'netPnl',label:'Net P&L',align:'right',bold:true,fmt:fmtPerfRs,clrFn:clr},
-      {key:'netPnlPct',label:'P&L %',align:'right',bold:true,fmt:v=>v!=null?fmtPct(v):'--',clrFn:v=>v!=null?clr(v):'var(--t3)'},
+      {key:'sym',label:'Symbol',align:'left',fmt:v=>`<span style="font-weight:700;font-size:12px">${escHtml(v)}</span>`,totFmt:v=>v??'',totClrFn:()=>'var(--t2)'},
+      {key:'lots',label:'Lots',align:'right',fmt:v=>`<span style="color:var(--t2)">${v}</span>`,..._dash},
+      {key:'buyPrice',label:'Buy ₹',align:'right',fmt:v=>`<span style="font-family:'DM Mono',monospace">${Number(v).toLocaleString('en-IN',INR_2)}</span>`,..._dash},
+      {key:'sellPrice',label:'Sell ₹',align:'right',fmt:v=>`<span style="font-family:'DM Mono',monospace">${Number(v).toLocaleString('en-IN',INR_2)}</span>`,..._dash},
+      {key:'priceDiff',label:'Diff ₹',align:'right',fmt:v=>v!=null?fmtSignedINR(v).replace('₹','₹/sh '):'—',clrFn:v=>v!=null?clr(v):'var(--t3)',..._dash},
+      {key:'currentPrice',label:'Now ₹',align:'right',fmt:v=>v!=null?Number(v).toLocaleString('en-IN',INR_2):'—',clrFn:()=>'var(--t2)',..._dash},
+      {key:'reversePnl',label:'Reverse ₹',align:'right',bold:true,fmt:(v,r)=>v!=null?`<span title="${escHtml(r.reverseStatus||'')}">${fmtPerfRs(v)}</span>`:'—',clrFn:v=>v!=null?clr(v):'var(--t3)',..._signTot},
+      {key:'charges',label:'Charges ₹',align:'right',bold:true,fmt:fmtNegINR,clrFn:()=>'var(--red)',totFmt:v=>fmtNegINR(v),totClrFn:()=>'var(--red)'},
+      {key:'grossPnl',label:'Gross P&L',align:'right',bold:true,fmt:v=>v!=null?fmtPerfRs(v):'—',clrFn:v=>v!=null?clr(v):'var(--t3)',..._signTot},
+      {key:'netPnl',label:'Net P&L',align:'right',bold:true,fmt:fmtPerfRs,clrFn:clr,..._signTot},
+      {key:'netPnlPct',label:'P&L %',align:'right',bold:true,fmt:v=>v!=null?fmtPct(v):'--',clrFn:v=>v!=null?clr(v):'var(--t3)',totFmt:v=>v==null?'--':fmtPct(v),totClrFn:v=>v==null?'var(--t3)':v>=0?'var(--green)':'var(--red)'},
     ];
-    const tbTbl=makeSortableTable('rank-latest-session',tbCols,rows,'_sort',-1);
+    const tbTotals=rows.length>1?{
+      sym:`Total (${rows.length})`,
+      reversePnl:tbSummary.reverseCount?tbSummary.reverse:null,
+      charges:rows.reduce((s,r)=>s+(r.charges||0),0),
+      grossPnl:tbSummary.known.length?tbSummary.gross:null,
+      netPnl:shownTotal,
+      netPnlPct:tbSummary.pct
+    }:null;
+    const tbTbl=makeSortableTable('rank-latest-session',tbCols,rows,'_sort',-1,null,tbTotals);
     const html=card(`
       <div style="padding:10px 16px;display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:6px;border-bottom:1px solid var(--border)">
         <span style="font-size:10px;font-weight:700;color:var(--t2);text-transform:uppercase;letter-spacing:.1em">Latest Session — ${tbDate} <span style="font-weight:400;color:var(--t3)">(Tradebook · charges included)</span>${panelFilterTag(allRows,rows,query)}</span>
         <span style="font-size:15px;font-weight:800;color:${clr(tbTotal)};font-family:'DM Mono',monospace">${fmtPerfRs(tbTotal)} <span style="font-size:10px;color:var(--t3);font-weight:400">net of charges</span></span>
       </div>
       ${rows.length?`<div style="overflow-x:auto">${tbTbl.getHtml()}</div>`:panelNoMatchHtml(query,'booked trade')}`);
-    const render=()=>{
-      if(!rows.length) return;
-      tbTbl.render();
-      const _lt=document.getElementById('rank-latest-session');
-      if(_lt&&rows.length>1){
-        const tfoot=document.createElement('tfoot');
-        const totCh=rows.reduce((s,r)=>s+(r.charges||0),0);
-        tfoot.innerHTML=`<tr style="border-top:2px solid var(--border-hi);background:rgba(148,163,184,.05)">
-          <td style="padding:7px 10px;font-weight:700;color:var(--t2)">Total (${rows.length})</td>
-          <td style="padding:7px 10px;text-align:right;color:var(--t3)">—</td>
-          <td style="padding:7px 10px;text-align:right;color:var(--t3)">—</td>
-          <td style="padding:7px 10px;text-align:right;color:var(--t3)">—</td>
-          <td style="padding:7px 10px;text-align:right;color:var(--t3)">—</td>
-          <td style="padding:7px 10px;text-align:right;color:var(--t3)">—</td>
-          <td style="padding:7px 10px;text-align:right;font-weight:700;color:${tbSummary.reverse>=0?'var(--green)':'var(--red)'}">${tbSummary.reverseCount?fmtSignedINR(tbSummary.reverse):'—'}</td>
-          <td style="padding:7px 10px;text-align:right;font-weight:700;color:var(--red)">${fmtNegINR(totCh)}</td>
-          <td style="padding:7px 10px;text-align:right;font-weight:700;color:${tbSummary.gross>=0?'var(--green)':'var(--red)'}">${tbSummary.known.length?fmtSignedINR(tbSummary.gross):'—'}</td>
-          <td style="padding:7px 10px;text-align:right;font-weight:700;color:${shownTotal>=0?'var(--green)':'var(--red)'}">${fmtSignedINR(shownTotal)}</td>
-          <td style="padding:7px 10px;text-align:right;font-weight:700;color:${tbSummary.pct==null?'var(--t3)':tbSummary.pct>=0?'var(--green)':'var(--red)'}">${tbSummary.pct==null?'--':fmtPct(tbSummary.pct)}</td>
-        </tr>`;
-        _lt.appendChild(tfoot);
-      }
-    };
+    const render=()=>{if(rows.length)tbTbl.render();};
     return {html,render};
   }
 
@@ -4145,7 +4168,8 @@ function _renderMethodologyInner(){
 
 // Fixed columns + dynamic top 10 rocket-relevance features (skip empty ones)
 function getCols(){
-  return [
+  // User-dragged column order (v536) applies here so header and cells always agree.
+  return applyColOrder('main-rankings',[
     {key:'chk',label:'',s:0},
     {key:'rank',label:'#',s:1},
     {key:'score',label:'Rocket Score',s:1},
@@ -4159,7 +4183,7 @@ function getCols(){
     {key:'turnover',label:'Liquidity',s:1},
     {key:'alloc',label:'Alloc ₹',s:0},
     {key:'risk',label:'Risk',s:1},
-  ];
+  ]);
 }
 let COLS=getCols();
 
@@ -4680,7 +4704,7 @@ function renderHead(){
   const someChecked=FILT.some(s=>SELECTED.has(s.symbol));
   document.getElementById('tHead').innerHTML='<tr>'+COLS.map(c=>{
     if(c.key==='chk'){
-      return`<th style="width:32px;text-align:center;padding:8px 6px">
+      return`<th data-key="chk" style="width:32px;text-align:center;padding:8px 6px">
         <div style="display:flex;flex-direction:column;align-items:center;gap:3px">
           <input type="checkbox" id="chk-all" ${allChecked?'checked':''} title="Select / deselect all for the basket export"
             style="width:14px;height:14px;accent-color:var(--amber);cursor:pointer"
@@ -4690,8 +4714,10 @@ function renderHead(){
       </th>`;
     }
     const arr=c.key===SCOL?(SDIR===-1?'▼':'▲'):'';
-    return`<th class="${c.key===SCOL?'sorted':''}" ${c.s?`onclick="doSort('${c.key}')"`:''}>${c.label}<span class="sa">${arr}</span></th>`;
+    return`<th data-key="${c.key}" class="${c.key===SCOL?'sorted':''}" ${c.s?`onclick="doSort('${c.key}')"`:''}>${c.label}<span class="sa">${arr}</span></th>`;
   }).join('')+'</tr>';
+  // Drag-to-reorder columns; the saved order re-enters through getCols() (v536).
+  attachColDrag(document.getElementById('tHead').parentElement,'main-rankings',()=>{COLS=getCols();renderHead();renderTable();});
   // fix indeterminate state
   const sa=document.getElementById('chk-all');
   if(sa&&!allChecked&&someChecked)sa.indeterminate=true;
@@ -4743,29 +4769,32 @@ function renderTable(){
     const isSelected=SELECTED.has(s.symbol);
     const am=allocMap[s.symbol];
     const canBuy=s.basketEligible!==false;
-    const scoreText=isFinite(s.score)?Number(s.score).toFixed(1):'—';
     const stretchColor=s.stretch<=2.5?'var(--green)':s.stretch>3?'var(--red)':'var(--amber)';
-    const cells=`
-      <td style="text-align:center"><input type="checkbox" ${isSelected?'checked':''} ${canBuy?'':'disabled'} style="width:14px;height:14px;accent-color:var(--amber);cursor:${canBuy?'pointer':'not-allowed'}" onclick="event.stopPropagation()" onchange="toggleStock('${s.symbol}',this.checked)" title="${canBuy?'Include in the Zerodha basket export':'Ineligible for the basket'}"></td>
-      <td style="font-family:'DM Mono',monospace;font-weight:800;color:var(--t1);text-align:right">${s.rank??'—'}</td>
-      <td>${radarScoreCell(s.score,'Relative same-day composite score (0-100 percentile, top-weighted). It is a ranking, not a probability.')}</td>
-      <td style="font-family:'Plus Jakarta Sans',sans-serif"><div style="font-weight:700;font-size:13px;color:var(--t1)">${s.symbol}${(()=>{const flags=s.meta?.flags||[];if(!flags.length)return '';return `<span style="font-size:8px;background:rgba(239,68,68,.15);color:var(--red);border-radius:4px;padding:1px 5px;margin-left:5px;font-weight:700;vertical-align:middle" title="NSE surveillance flags: ${escHtml(flags.join(' · '))}">⚠ ${flags.length}</span>`;})()}</div><div style="font-size:9px;color:var(--t3);max-width:220px;overflow:hidden;text-overflow:ellipsis">${escHtml(s.name||'')}</div></td>
-      <td style="font-size:11px;color:var(--t2)">${escHtml(s.setup||'—')}</td>
-      <td>${radarSeriesBandPill(s)}</td>
-      <td style="color:${stretchColor};font-weight:700" title="A 10% move is this many multiples of the strongest daily-range estimate. Lower is more feasible.">${s.stretch!=null&&isFinite(s.stretch)?Number(s.stretch).toFixed(1)+'×':'—'}</td>
-      <td>${fmtINR(s.price)}</td>
-      <td>${fPerf(s.day??s.priceChange)}</td>
-      <td>${s.relvol!=null&&isFinite(s.relvol)?Number(s.relvol).toFixed(2)+'×':'—'}</td>
-      <td>${fV(s.turnover)}</td>
-      <td class="alloc-cell" data-sym="${s.symbol}">${(()=>{
+    // Cells are keyed and joined in COLS order so they always match the (possibly
+    // user-reordered) header (v536).
+    const cellH={
+      chk:`<td style="text-align:center"><input type="checkbox" ${isSelected?'checked':''} ${canBuy?'':'disabled'} style="width:14px;height:14px;accent-color:var(--amber);cursor:${canBuy?'pointer':'not-allowed'}" onclick="event.stopPropagation()" onchange="toggleStock('${s.symbol}',this.checked)" title="${canBuy?'Include in the Zerodha basket export':'Ineligible for the basket'}"></td>`,
+      rank:`<td style="font-family:'DM Mono',monospace;font-weight:800;color:var(--t1);text-align:right">${s.rank??'—'}</td>`,
+      score:`<td>${radarScoreCell(s.score,'Relative same-day composite score (0-100 percentile, top-weighted). It is a ranking, not a probability.')}</td>`,
+      symbol:`<td style="font-family:'Plus Jakarta Sans',sans-serif"><div style="font-weight:700;font-size:13px;color:var(--t1)">${s.symbol}${(()=>{const flags=s.meta?.flags||[];if(!flags.length)return '';return `<span style="font-size:8px;background:rgba(239,68,68,.15);color:var(--red);border-radius:4px;padding:1px 5px;margin-left:5px;font-weight:700;vertical-align:middle" title="NSE surveillance flags: ${escHtml(flags.join(' · '))}">⚠ ${flags.length}</span>`;})()}</div><div style="font-size:9px;color:var(--t3);max-width:220px;overflow:hidden;text-overflow:ellipsis">${escHtml(s.name||'')}</div></td>`,
+      setup:`<td style="font-size:11px;color:var(--t2)">${escHtml(s.setup||'—')}</td>`,
+      series:`<td>${radarSeriesBandPill(s)}</td>`,
+      stretch:`<td style="color:${stretchColor};font-weight:700" title="A 10% move is this many multiples of the strongest daily-range estimate. Lower is more feasible.">${s.stretch!=null&&isFinite(s.stretch)?Number(s.stretch).toFixed(1)+'×':'—'}</td>`,
+      price:`<td>${fmtINR(s.price)}</td>`,
+      day:`<td>${fPerf(s.day??s.priceChange)}</td>`,
+      relvol:`<td>${s.relvol!=null&&isFinite(s.relvol)?Number(s.relvol).toFixed(2)+'×':'—'}</td>`,
+      turnover:`<td>${fV(s.turnover)}</td>`,
+      alloc:`<td class="alloc-cell" data-sym="${s.symbol}">${(()=>{
         if(!am) return '<span style="color:var(--t3);font-size:11px">—</span>';
         return `<span style="color:var(--amber);font-weight:700;font-family:'DM Mono',monospace;font-size:12px">${fmtINR(am.alloc)}</span><div style="font-size:9px;color:var(--t3);margin-top:1px">${am.qty} ${unitLabel}</div>`;
-      })()}</td>
-      <td>${radarRiskPill(s.risk)}</td>`;
+      })()}</td>`,
+      risk:`<td>${radarRiskPill(s.risk)}</td>`
+    };
+    const cells=COLS.map(c=>cellH[c.key]||'<td></td>').join('');
     let _trStyle='cursor:pointer';
     if(isSelected) _trStyle+=';background:rgba(251,191,36,.04);outline:1px solid rgba(251,191,36,.12);outline-offset:-1px';
     return`<tr style="${_trStyle}" onclick="showRadarDetail('${s.symbol}')" title="Click for the full scoring breakdown">${cells}</tr>`;
-  }).join('')||'<tr><td colspan="13"><div style="padding:48px 20px;text-align:center;color:var(--t3)">No stocks match the filters you selected.</div></td></tr>';
+  }).join('')||`<tr><td colspan="${COLS.length}"><div style="padding:48px 20px;text-align:center;color:var(--t3)">No stocks match the filters you selected.</div></td></tr>`;
   renderPgn();
   updateSelectAll();
 }
