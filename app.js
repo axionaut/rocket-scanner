@@ -1,5 +1,5 @@
-const BUILD_TS='2026-07-21 16:46 IST'; // release build time (IST)
-const APP_VERSION=544; // Projected goal date now leads with the REALISTIC pace from the tradebook (getGoalAchievedDailyRate), with the target best-case as a secondary line.
+const BUILD_TS='2026-07-21 17:14 IST'; // release build time (IST)
+const APP_VERSION=545; // Capital/Max Alloc defaults live in the placeholder and the calculation falls back to them when the field is empty — clearing a value returns to the default, never to empty/uncapped.
 const GOOGLE_DRIVE_CLIENT_ID='1015012642264-oi2nelv3v90k3d39r994a6nelgjs2a56.apps.googleusercontent.com'; // Public OAuth Web Client ID.
 const PRICE_BAND_BLOCK_BUFFER_PCT=0.15; // Treat rounded 4.9/9.9/19.9 rows as effectively band-locked.
 const BASKET_CASH_RESERVE_RS=1; // Leave a rupee for broker-side tax/rounding differences.
@@ -2712,51 +2712,49 @@ function getComputedCapital(){
   holdings=+holdings.toFixed(0); total=+total.toFixed(0);
   return {holdings,positions:Math.max(0,total-holdings),total:Math.max(0,total)};
 }
-// Goal capital basis = the Capital ₹ field, which DEFAULTS to the computed book above
-// (`applyCapitalDefault` fills it). If the owner overrides the field, the goal follows; if
-// the field is momentarily empty, fall back to the computed value so the goal never reads 0.
+// ── Filter defaults live in the PLACEHOLDER; calculations fall back to them when the field
+// is empty (owner, v545). Deleting your value returns to the default — never to empty
+// (which for Capital meant 0 and for Max Alloc meant no cap → full allocation). The field
+// holds ONLY a manual override; an empty field means "use the default", shown greyed in the
+// placeholder. Capital default = computed deployed book; Max Alloc default = learned
+// Position Size. There is no more auto-fill of the field value or `autoDefault` flag.
+function getDefaultCapital(){ return getComputedCapital().total; }
+let _defMaxAllocMemo=null;
+function getDefaultMaxAlloc(){
+  const tb=TRADEBOOK_STATS?.tripsData;
+  if(_defMaxAllocMemo&&_defMaxAllocMemo.tb===tb) return _defMaxAllocMemo.v;
+  const trips=getAdaptiveTradeTrips(tb||[]);
+  const rec=trips.length?getRecommendedPositionSize(computePerfStats(trips)):null;
+  const v=rec&&rec.value>0?Math.round(rec.value):0;
+  _defMaxAllocMemo={tb,v};
+  return v;
+}
+function getEffectiveCapital(){
+  const v=parseFloat(document.getElementById('fCapital')?.value);
+  return (Number.isFinite(v)&&v>0)?v:getDefaultCapital();
+}
+function getEffectiveMaxAlloc(){
+  const v=parseFloat(document.getElementById('fMaxAlloc')?.value);
+  return (Number.isFinite(v)&&v>0)?v:getDefaultMaxAlloc();
+}
+// Show each default in its field's placeholder so an empty field visibly reflects what the
+// calculation will use (grey = default in effect; a typed value = your override).
+function updateFilterPlaceholders(){
+  const capEl=document.getElementById('fCapital');
+  if(capEl){ const d=getDefaultCapital(); if(d>0){ capEl.placeholder=String(Math.round(d)); capEl.title=`Empty = your computed capital ₹${Math.round(d).toLocaleString('en-IN')} (holdings + open positions). Type a value to override.`; } }
+  const maxEl=document.getElementById('fMaxAlloc');
+  if(maxEl){ const d=getDefaultMaxAlloc(); if(d>0){ maxEl.placeholder=String(d); maxEl.title=`Empty = learned Position Size ₹${d.toLocaleString('en-IN')}. Type a value to override the per-stock cap.`; } else { maxEl.placeholder='no cap'; } }
+}
+// Goal capital basis = effective capital (the field if the owner typed one, else the
+// computed deployed book). An empty field means the default, never zero.
 function getGoalFreeCapitalParts(){
   const c=getComputedCapital();
-  const field=parseFloat(document.getElementById('fCapital')?.value)||0;
-  const isDefault=document.getElementById('fCapital')?.dataset.autoDefault==='1';
-  const total=field>0?field:c.total;
-  const overridden=field>0&&!isDefault&&Math.round(field)!==Math.round(c.total);
-  // Back-compat keys (invested/free/cap) kept for any older reader.
-  return {holdings:c.holdings,positions:c.positions,computed:c.total,field,overridden,
-          invested:total,cap:field,sells:0,buys:0,idleCash:0,cash:0,free:total,total:Math.max(0,total)};
-}
-// Fill the Capital ₹ field with the computed book when it is empty (the default). Never
-// fights an active edit unless forced (blur/Enter commit). Sets `autoDefault` so the auto
-// value is not persisted as a manual override.
-function applyCapitalDefault(force){
-  const el=document.getElementById('fCapital');
-  if(!el) return false;
-  if(String(el.value||'').trim()) return false;            // has a value → leave it
-  if(!force && document.activeElement===el) return false;  // mid-edit, not forced
-  const c=getComputedCapital();
-  if(!(c.total>0)) return false;
-  el.value=String(Math.round(c.total));
-  el.dataset.autoDefault='1';
-  el.title=`Default = computed capital ₹${Math.round(c.total).toLocaleString('en-IN')} (holdings ₹${c.holdings.toLocaleString('en-IN')} + open positions ₹${c.positions.toLocaleString('en-IN')}). Type to override; clear to restore this.`;
-  return true;
-}
-function onCapitalInput(){
-  const el=document.getElementById('fCapital');
-  if(el&&String(el.value||'').trim()) el.dataset.autoDefault=''; // a typed value is a manual override
-  scheduleApplyFilters();
-}
-function onCapitalChange(){
-  const el=document.getElementById('fCapital');
-  if(el&&!String(el.value||'').trim()){ applyCapitalDefault(true); scheduleApplyFilters(); } // erased → restore default
-}
-function onMaxAllocInput(){
-  const el=document.getElementById('fMaxAlloc');
-  if(el&&String(el.value||'').trim()) el.dataset.autoDefault='';
-  scheduleApplyFilters();
-}
-function onMaxAllocChange(){
-  const el=document.getElementById('fMaxAlloc');
-  if(el&&!String(el.value||'').trim()){ applyLearnedMaxAllocDefault(); scheduleApplyFilters(); }
+  const typed=parseFloat(document.getElementById('fCapital')?.value);
+  const hasManual=Number.isFinite(typed)&&typed>0;
+  const total=hasManual?typed:c.total;
+  return {holdings:c.holdings,positions:c.positions,computed:c.total,field:hasManual?typed:0,
+          overridden:hasManual&&Math.round(typed)!==Math.round(c.total),
+          invested:total,cap:hasManual?typed:0,sells:0,buys:0,idleCash:0,cash:0,free:total,total:Math.max(0,total)};
 }
 function getGoalPortfolioBasis(){return getGoalFreeCapitalParts().total;}
 let _goalRateCache=null;
@@ -3614,7 +3612,7 @@ function renderPerformance(){
   const recSummary=getRecommendationOutcomeSummary();
   const entrySummary=getExecutedEntryOutcomeSummary();
   const recPos=getRecommendedPositionSize(p);
-  applyLearnedMaxAllocDefault(recPos);
+  updateFilterPlaceholders();
   const posRatio=(p.avgCapital>0&&recPos.value)?recPos.value/p.avgCapital:null;
   const recPosSub=recPos.value
     ? `${recPos.source}${posRatio?` · ${(posRatio*100).toFixed(0)}% of avg`:''}`
@@ -4677,8 +4675,7 @@ function calcPositionTSL({sym, qty, avgCost, ltp, scannerRow, adaptiveSL, adapti
 let _allocMemo=null; // single-entry memo: renderTable and renderStatusBar share one pass
 function computeAlloc(capital, selList){
   if(!capital||!selList.length) return {};
-  const maxAllocEl=document.getElementById('fMaxAlloc');
-  const maxAllocV=maxAllocEl?parseFloat(maxAllocEl.value)||0:0;
+  const maxAllocV=getEffectiveMaxAlloc(); // typed value, else the learned Position Size default
   const effTgt=getEffectiveTgtPct();
   const memoKey=capital+'|'+maxAllocV+'|'+effTgt+'|'+selList.map(s=>s.symbol+':'+s.price+':'+s.rocketScore).join(',');
   if(_allocMemo?.key===memoKey) return _allocMemo.val;
@@ -4776,24 +4773,8 @@ function getRecommendedPositionSize(perfStats){
   rec=Math.max(avgActual*0.4,Math.min(avgActual*2.0,rec));
   return {value:Math.round(rec),source:`Learned risk ${fmtINR(Math.round(learnedRiskRs))} @ SL ${adaptiveSL}%`,riskRs:Math.round(learnedRiskRs),kellyPct:kelly*100,riskMult};
 }
-function applyLearnedMaxAllocDefault(recPos=null){
-  const el=document.getElementById('fMaxAlloc');
-  if(!el||String(el.value||'').trim()) return false;
-  if(document.activeElement===el) return false; // never refill while the field is being edited
-  let rec=recPos;
-  if(!rec){
-    const trips=getAdaptiveTradeTrips(TRADEBOOK_STATS?.tripsData||[]);
-    if(trips.length) rec=getRecommendedPositionSize(computePerfStats(trips));
-  }
-  const value=rec?.value;
-  if(!(value>0)) return false;
-  el.value=String(Math.round(value));
-  el.dataset.autoDefault='1';
-  el.title=rec?.source?`Default from Performance Position Size: ${rec.source}`:'Default from Performance Position Size';
-  return true;
-}
 function recomputeAlloc(){
-  const capital=parseFloat(document.getElementById('fCapital').value)||0;
+  const capital=getEffectiveCapital();
   if(!capital){document.querySelectorAll('.alloc-cell').forEach(el=>el.innerHTML='<span style="color:var(--t3);font-size:11px">—</span>');return;}
   const selList=FILT.filter(s=>SELECTED.has(s.symbol));
   const allocMap=computeAlloc(capital, selList);
@@ -4821,7 +4802,7 @@ function renderBasketBtn(){
   }
 }
 function renderBasketSummary(){
-  const capital=parseFloat(document.getElementById('fCapital').value)||0;
+  const capital=getEffectiveCapital();
   const selList=FILT.filter(s=>SELECTED.has(s.symbol));
   const sb=document.getElementById('statusBar');
   // update status bar — triggered via renderStatusBar, so leave it
@@ -4885,7 +4866,7 @@ function radarSeriesBandPill(s){
   return `<span class="info-pill ${ok?'pill-green':'pill-red'}" style="padding:2px 8px;font-size:10px" title="${title}">${escHtml(s.series||'—')} · ${band}</span>`;
 }
 function renderTable(){
-  const capital=parseFloat(document.getElementById('fCapital').value)||0;
+  const capital=getEffectiveCapital();
   // Allocation only across SELECTED instruments
   const selList=FILT.filter(s=>SELECTED.has(s.symbol));
   const allocMap=computeAlloc(capital, selList);
@@ -4967,10 +4948,9 @@ function toggleFilters(){
 function applyFilters(){
   // The Radar composite pre-ranks every uploaded row; the filter bar only narrows
   // what is displayed. Held positions were already suppressed at scoring time.
-  // Capital/Max-Alloc show their computed defaults once data is loaded (focus-guarded,
-  // so this never overwrites a value you are mid-typing).
-  applyCapitalDefault();
-  applyLearnedMaxAllocDefault();
+  // Capital/Max-Alloc show their computed defaults in the placeholder; the calculation
+  // falls back to those defaults whenever the field is empty.
+  updateFilterPlaceholders();
   const q=(document.getElementById('fSearch')?.value||'').trim().toLowerCase();
   const risk=document.getElementById('fRisk')?.value||'';
   const turnIdx=+(document.getElementById('fMinTurnover')?.value||0);
@@ -5060,7 +5040,7 @@ function renderStatusBar(){
   if(turnIdx>0)tags.push('TO≥'+RADAR_LIQ_LABELS[turnIdx]);
   const q=(document.getElementById('fSearch')?.value||'').trim();
   if(q)tags.push('“'+escHtml(q)+'”');
-  const capital=parseFloat(document.getElementById('fCapital').value)||0;
+  const capital=getEffectiveCapital();
   const isFiltered=tags.length>0||shown<total;
   const countColor=shown<total?'var(--fire)':'var(--green)';
   const instrumentLabel='stocks';
@@ -5111,7 +5091,7 @@ function renderStatusBar(){
 function clearFilters(){
   ['fSearch','fRisk','fRows'].forEach(id=>{const el=document.getElementById(id);if(el)el.value='';});
   const turnEl=document.getElementById('fMinTurnover');if(turnEl)turnEl.value='0';
-  applyLearnedMaxAllocDefault();
+  updateFilterPlaceholders();
   applyFilters();
   localStorage.removeItem(SCANNER_STORE);
 }
@@ -5895,7 +5875,7 @@ function planBasketExport(capital, selected){
 
 
 async function exportBasket(){
-  const capital=parseFloat(document.getElementById('fCapital').value)||0;
+  const capital=getEffectiveCapital();
   const selList=FILT.filter(s=>SELECTED.has(s.symbol));
   if(!selList.length){showToast('Select at least one stock first.',3000,true);return;}
   const bandRejected=selList.filter(s=>getPriceBandBlockReason(s)).length;
@@ -6388,7 +6368,6 @@ document.getElementById('fInDir').addEventListener('change',e=>{
     showToast('Could not load the selected files: '+(error?.message||error),6000,true);
   });
 });
-document.getElementById('fMaxAlloc')?.addEventListener('input',e=>{delete e.target.dataset.autoDefault;});
 
 
 // ══════════════════════════════════════════════════
@@ -6503,10 +6482,10 @@ function saveFilterState(){
   const maxAllocEl=document.getElementById('fMaxAlloc');
   const capEl=document.getElementById('fCapital');
   localStorage.setItem(SHARED_FILTER_STORE, JSON.stringify({
-    // Auto-filled defaults are not persisted as manual values — so a later data change
-    // recomputes the default rather than sticking to a stale saved number.
-    capital:capEl?.dataset.autoDefault==='1'?'':(capEl?.value||''),
-    maxAlloc:maxAllocEl?.dataset.autoDefault==='1'?'':(maxAllocEl?.value||'')
+    // The fields hold only manual overrides now; an empty field means "use the computed
+    // default" (shown in the placeholder), so we persist the raw value as-is.
+    capital:capEl?.value||'',
+    maxAlloc:maxAllocEl?.value||''
   }));
 }
 
@@ -6523,8 +6502,7 @@ function loadFilterState(){
     const sharedMaxAlloc=shared.maxAlloc!=null?shared.maxAlloc:state.maxAlloc;
     if(sharedCapital){const el=document.getElementById('fCapital');if(el)el.value=sharedCapital;}
     if(sharedMaxAlloc){const el=document.getElementById('fMaxAlloc');if(el)el.value=sharedMaxAlloc;}
-    applyLearnedMaxAllocDefault();
-    applyCapitalDefault(); // empty Capital ₹ falls back to the computed book
+    updateFilterPlaceholders(); // empty fields show + use the computed defaults
     // Legacy engine sort columns migrate to the Radar rank ordering once.
     const legacy=new Set(['_rank','rocketScore','snapshotChange','tslRefPoints','velocityPotential','delivPct','volume']);
     if(state.sortCol&&!legacy.has(state.sortCol))SCOL=state.sortCol;
