@@ -1,5 +1,5 @@
-const BUILD_TS='2026-07-21 17:14 IST'; // release build time (IST)
-const APP_VERSION=545; // Capital/Max Alloc defaults live in the placeholder and the calculation falls back to them when the field is empty — clearing a value returns to the default, never to empty/uncapped.
+const BUILD_TS='2026-07-21 17:35 IST'; // release build time (IST)
+const APP_VERSION=546; // "Removed from rankings" audit table (held / surveillance, with reason, sorted by rank) explains every gap in the rank sequence; Latest Session gains Radar Score + Rank and drops the useless Trades column.
 const GOOGLE_DRIVE_CLIENT_ID='1015012642264-oi2nelv3v90k3d39r994a6nelgjs2a56.apps.googleusercontent.com'; // Public OAuth Web Client ID.
 const PRICE_BAND_BLOCK_BUFFER_PCT=0.15; // Treat rounded 4.9/9.9/19.9 rows as effectively band-locked.
 const BASKET_CASH_RESERVE_RS=1; // Leave a rupee for broker-side tax/rounding differences.
@@ -86,6 +86,8 @@ let PERF_RENDER_WAITING_FOR_VISIBLE=false;
 let ENGINE_DATA={}; // legacy engine metadata shell; the Radar composite keeps its own RADAR state
 let SUPPRESSED_HELD=0; // count of stocks hidden because already held in POSITIONS
 let SURV_HARD_REMOVED=0; // count of stocks weeded out by configured surveillance rules
+let REMOVED_ROWS=[]; // [{s, reason:'held'|'surv', rules?}] captured each applyFilters pass so the
+                     // "Removed from rankings" table can explain every gap in the rank sequence (v546)
 let SELECTED=new Set(); // symbols selected for basket — recomputed from FILT each applyFilters
 let EXPORT_EXCLUDED=new Set(); // symbols the user unchecked from export — persisted in rs_filters
 // Startup hydration renders (and therefore calls applyFilters → saveFilterState) before
@@ -3244,6 +3246,14 @@ function buildLatestSessionPanel(query=''){
   const clr=(v)=>v===0?'var(--t2)':v>0?'var(--green)':'var(--red)';
   const fmtPerfRs=(v)=>fmtSignedINR(v);
   const fmtPct=(v)=>(v>=0?'+':'')+v.toFixed(2)+'%';
+  // Attach Radar score/rank to each sold row so the session shows the scoring context of
+  // what was exited (owner v546); the 'Trades' count column was dropped as noise.
+  const _latestAllBySym=new Map(ALL.map(x=>[x.symbol,x]));
+  const withRadar=arr=>{arr.forEach(r=>{const a=_latestAllBySym.get(r.sym);r._score=a&&isFinite(Number(a.score))?Number(a.score):null;r._rank=a?.rank??null;});return arr;};
+  const radarCols=dash=>[
+    {key:'_score',label:'Radar Score',align:'right',bold:true,fmt:v=>radarScoreCell(v),clrFn:()=>'var(--t1)',...dash},
+    {key:'_rank',label:'Rank',align:'right',fmt:v=>v??'—',clrFn:()=>'var(--t2)',...dash},
+  ];
   const card=inner=>`<div id="rank-latest-session-card" style="background:var(--bg-card);border:1px solid var(--border);border-radius:10px;overflow:hidden">${inner}</div>`;
   const summary=getLatestBookedSummary();
   PERF_LATEST_SUMMARY=summary; // cache for the renderStats card — single source of truth
@@ -3255,7 +3265,7 @@ function buildLatestSessionPanel(query=''){
     const latestTotal=orderBooked.total;
     const latestUnknownRows=orderBooked.unknownRows||0;
     const latestUnknownWarning=latestUnknownRows>0?` <span style="font-size:10px;color:var(--amber);font-weight:700">&#9888; excludes ${latestUnknownRows} row${latestUnknownRows===1?'':'s'} with unknown cost</span>`:'';
-    const rows=filterPanelRows(allRows,query,r=>[r.sym]);
+    const rows=withRadar(filterPanelRows(allRows,query,r=>[r.sym]));
     const shownSummary=summarizeExitPnlRows(rows);
     const shownTotal=rows.reduce((s,r)=>s+(r.netPnl||0),0);
     const _chFmt=v=>fmtNegINR(v);const _chClr=()=>'var(--red)';
@@ -3266,7 +3276,7 @@ function buildLatestSessionPanel(query=''){
     const _chTot={totFmt:v=>fmtNegINR(v),totClrFn:()=>'var(--red)'};
     const latestCols=[
       {key:'sym',label:'Symbol',align:'left',fmt:v=>v,clrFn:()=>'var(--t1)',bold:true,totFmt:v=>v??'',totClrFn:()=>'var(--t2)'},
-      {key:'lots',label:'Trades',align:'right',fmt:v=>v,clrFn:()=>'var(--t2)',..._dash},
+      ...radarCols(_dash),
       {key:'buyPrice',label:'Buy ₹',align:'right',fmt:(v,r)=>v!=null?Number(v).toLocaleString('en-IN',INR_2):`<span style="color:var(--amber);font-size:10px" title="Load Holdings.csv to see avg cost">avg cost?</span>`,clrFn:()=>'var(--t2)',..._dash},
       {key:'sellPrice',label:'Sell ₹',align:'right',fmt:v=>Number(v).toLocaleString('en-IN',INR_2),clrFn:()=>'var(--t2)',..._dash},
       {key:'priceDiff',label:'Diff ₹',align:'right',fmt:v=>v!=null?fmtSignedINR(v).replace('₹','₹/sh '):'—',clrFn:v=>v!=null?clr(v):'var(--t3)',..._dash},
@@ -3316,14 +3326,14 @@ function buildLatestSessionPanel(query=''){
     });
     const tbDate=summary.date||'';
     const tbTotal=+(allRows.reduce((s,r)=>s+r.netPnl,0)).toFixed(0);
-    const rows=filterPanelRows(allRows,query,r=>[r.sym]);
+    const rows=withRadar(filterPanelRows(allRows,query,r=>[r.sym]));
     const tbSummary=summarizeExitPnlRows(rows);
     const shownTotal=+(rows.reduce((s,r)=>s+r.netPnl,0)).toFixed(0);
     const _dash={totFmt:()=>'—',totClrFn:()=>'var(--t3)'};
     const _signTot={totFmt:v=>v!=null?fmtPerfRs(v):'—',totClrFn:v=>v!=null?(v>=0?'var(--green)':'var(--red)'):'var(--t3)'};
     const tbCols=[
       {key:'sym',label:'Symbol',align:'left',fmt:v=>`<span style="font-weight:700;font-size:12px">${escHtml(v)}</span>`,totFmt:v=>v??'',totClrFn:()=>'var(--t2)'},
-      {key:'lots',label:'Lots',align:'right',fmt:v=>`<span style="color:var(--t2)">${v}</span>`,..._dash},
+      ...radarCols(_dash),
       {key:'buyPrice',label:'Buy ₹',align:'right',fmt:v=>`<span style="font-family:'DM Mono',monospace">${Number(v).toLocaleString('en-IN',INR_2)}</span>`,..._dash},
       {key:'sellPrice',label:'Sell ₹',align:'right',fmt:v=>`<span style="font-family:'DM Mono',monospace">${Number(v).toLocaleString('en-IN',INR_2)}</span>`,..._dash},
       {key:'priceDiff',label:'Diff ₹',align:'right',fmt:v=>v!=null?fmtSignedINR(v).replace('₹','₹/sh '):'—',clrFn:v=>v!=null?clr(v):'var(--t3)',..._dash},
@@ -4966,12 +4976,13 @@ function applyFilters(){
   ALL.forEach(s=>{s._held=!!heldPos[s.symbol];});
   SUPPRESSED_HELD=0;
   SURV_HARD_REMOVED=0;
+  REMOVED_ROWS=[];
   let rows=ALL.filter(s=>{
-    if(s._held){SUPPRESSED_HELD++;return false;}
+    if(s._held){SUPPRESSED_HELD++;REMOVED_ROWS.push({s,reason:'held'});return false;}
     // Configured surveillance rules are a HARD filter (owner 2026-07-17): any stock
     // flagged under a rule in the Methodology table is weeded out of recommendations.
     // Non-configured REG1 flags remain a score penalty + badge only.
-    if(NSE_SURV[s.symbol]?.length){SURV_HARD_REMOVED++;return false;}
+    if(NSE_SURV[s.symbol]?.length){SURV_HARD_REMOVED++;REMOVED_ROWS.push({s,reason:'surv',rules:NSE_SURV[s.symbol]});return false;}
     return (s.turnover||0)>=minTurn&&(!risk||s.risk===risk)&&(!q||[s.symbol,s.name,s.sector].join(' ').toLowerCase().includes(q));
   });
   rows.sort((a,b)=>(a.rank??Infinity)-(b.rank??Infinity));
@@ -4991,6 +5002,8 @@ function applyFilters(){
 // Both are rendered synchronously after their markup is in the DOM.
 function renderRankingsPanels(){
   const q=rankingsSearchQuery();
+  const remEl=document.getElementById('rankRemoved');
+  if(remEl) remEl.innerHTML=buildRemovedPanel(q);
   const latestEl=document.getElementById('rankLatestSession');
   if(latestEl){
     const latest=buildLatestSessionPanel(q);
@@ -5003,6 +5016,56 @@ function renderRankingsPanels(){
     posEl.innerHTML=positions.html;
     positions.table?.render();
   }
+}
+// Map configured-surveillance rule keys → their human labels.
+function survRuleLabels(keys){
+  const map=new Map((SURV_CUSTOM_RULES||[]).map(r=>[r.key,r.label]));
+  return (keys||[]).map(k=>map.get(k)||k);
+}
+// "Removed from rankings" audit (v546, owner): every stock kept out of the recommendations
+// list, with WHY — held (already in your book, see Open Positions) or a configured
+// surveillance rule. Sorted by rank so it explains the gaps at the top of the list first;
+// answers the same Rankings search box; capped to the top 100 by rank for a bounded DOM.
+function buildRemovedPanel(query=''){
+  const all=[...REMOVED_ROWS].sort((a,b)=>(a.s.rank??1e9)-(b.s.rank??1e9));
+  if(!all.length) return '';
+  const heldN=all.filter(r=>r.reason==='held').length, survN=all.length-heldN;
+  const shown=filterPanelRows(all,query,r=>[r.s.symbol,r.s.name,r.s.sector]);
+  const CAP=100;
+  const view=shown.slice(0,CAP);
+  const rowsHtml=view.map(r=>{
+    const s=r.s;
+    const reason=r.reason==='held'
+      ?`<span style="font-size:9px;background:rgba(244,114,182,.12);color:#f472b6;border:1px solid rgba(244,114,182,.25);border-radius:5px;padding:1px 7px;white-space:nowrap">📌 Held · in Open Positions</span>`
+      :(()=>{const labels=survRuleLabels(r.rules);return `<span style="font-size:9px;background:rgba(239,68,68,.12);color:var(--red);border:1px solid rgba(239,68,68,.25);border-radius:5px;padding:1px 7px;white-space:nowrap" title="Configured surveillance rule(s): ${escHtml(labels.join(' · '))}">⚠ ${escHtml(labels[0]||'surveillance')}${labels.length>1?` +${labels.length-1}`:''}</span>`;})();
+    return `<tr style="border-bottom:1px solid var(--border)">
+      <td style="padding:6px 10px;text-align:right;font-family:'DM Mono',monospace;color:var(--t2)">#${s.rank??'—'}</td>
+      <td style="padding:6px 10px"><span style="font-weight:700;color:var(--t1);font-size:12px">${escHtml(s.symbol)}</span> <span style="color:var(--t3);font-size:10px">${escHtml((s.name||'').slice(0,28))}</span></td>
+      <td style="padding:6px 10px;text-align:right">${radarScoreCell(s.score)}</td>
+      <td style="padding:6px 10px;text-align:right">${fPerf(s.day??s.priceChange)}</td>
+      <td style="padding:6px 10px">${reason}</td>
+    </tr>`;
+  }).join('');
+  const tag=query&&shown.length!==all.length?` <span style="font-weight:500;text-transform:none;letter-spacing:0;color:var(--t3)">· ${shown.length} of ${all.length} matching "${escHtml(query)}"</span>`:'';
+  const capNote=shown.length>CAP?`<div style="padding:6px 10px;font-size:10px;color:var(--t3)">Showing the top ${CAP} by rank · ${shown.length-CAP} more removed further down the ranking.</div>`:'';
+  const body=shown.length
+    ?`<div style="max-height:320px;overflow:auto"><table style="width:100%;border-collapse:collapse;font-size:12px">
+        <thead><tr style="color:var(--t3);border-bottom:1px solid var(--border);position:sticky;top:0;background:var(--bg-card)">
+          <th style="padding:6px 10px;text-align:right;font-size:10px;text-transform:uppercase">Rank</th>
+          <th style="padding:6px 10px;text-align:left;font-size:10px;text-transform:uppercase">Symbol</th>
+          <th style="padding:6px 10px;text-align:right;font-size:10px;text-transform:uppercase">Score</th>
+          <th style="padding:6px 10px;text-align:right;font-size:10px;text-transform:uppercase">Day %</th>
+          <th style="padding:6px 10px;text-align:left;font-size:10px;text-transform:uppercase">Reason removed</th>
+        </tr></thead><tbody>${rowsHtml}</tbody></table></div>${capNote}`
+    :panelNoMatchHtml(query,'removed stock');
+  // Collapsed by default (details) — unobtrusive but always one click from the answer.
+  return `<details id="rank-removed-card" style="background:var(--bg-card);border:1px solid var(--border);border-radius:10px;overflow:hidden">
+    <summary style="padding:10px 16px;cursor:pointer;list-style:revert;user-select:none">
+      <span style="font-size:10px;font-weight:700;color:var(--t2);text-transform:uppercase;letter-spacing:.1em">Removed from rankings — ${all.length}${tag}</span>
+      <span style="font-size:11px;color:var(--t3);font-weight:400;margin-left:8px">📌 ${heldN} held · ⚠ ${survN} surveillance · why the ranks skip</span>
+    </summary>
+    ${body}
+  </details>`;
 }
 function showRadarDetail(sym){
   const r=ALL.find(x=>x.symbol===sym);
