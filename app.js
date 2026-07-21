@@ -1,5 +1,5 @@
-const BUILD_TS='2026-07-21 11:34 IST'; // release build time (IST)
-const APP_VERSION=538; // Goal popover shows a projected completion date at the active target (informational); Open Positions and Latest Session panels swapped on Rankings.
+const BUILD_TS='2026-07-21 11:52 IST'; // release build time (IST)
+const APP_VERSION=539; // Goal basis is now the live market value of the held book only — the manual Capital field and today's sell proceeds no longer inflate it (double-count fix).
 const GOOGLE_DRIVE_CLIENT_ID='1015012642264-oi2nelv3v90k3d39r994a6nelgjs2a56.apps.googleusercontent.com'; // Public OAuth Web Client ID.
 const PRICE_BAND_BLOCK_BUFFER_PCT=0.15; // Treat rounded 4.9/9.9/19.9 rows as effectively band-locked.
 const BASKET_CASH_RESERVE_RS=1; // Leave a rupee for broker-side tax/rounding differences.
@@ -2695,9 +2695,14 @@ function projectGoalCompletionDate(start,target,netPctPerDay,wdMonthly){
   }
   return null;
 }
-// Goal capital basis (v523, owner correction): compounding applies to TOTAL capital —
-// deployable cash + today's sell proceeds + the current market value of everything
-// already invested (holdings + positions, live scanner price preferred).
+// Goal capital basis (v539, owner correction): the basis is the LIVE MARKET VALUE of
+// what is currently held — holdings + positions + today's net buys, at live scanner
+// price. The manual "Capital ₹" filter field is deliberately excluded (owner: it is a
+// basket-sizing input, not deployable book value). Today's sell PROCEEDS are also NOT
+// added on top: same-day sale cash is normally recycled straight back into the very
+// positions already counted here, so adding it double-counted the book and inflated the
+// basis (~₹7.5L shown vs the ~₹5.5L actually working). cap/sells stay in the return for
+// display transparency but never enter `total`.
 function getGoalFreeCapitalParts(){
   const cap=parseFloat(document.getElementById('fCapital')?.value)||0;
   let sells=0;
@@ -2717,8 +2722,7 @@ function getGoalFreeCapitalParts(){
       invested+=qty*px;
     });
   }catch(e){}
-  const free=Math.max(0,cap+sells);
-  return {cap,sells,invested,free,total:Math.max(0,free+invested)};
+  return {cap,sells,invested,free:invested,total:Math.max(0,invested)};
 }
 function getGoalPortfolioBasis(){return getGoalFreeCapitalParts().total;}
 let _goalRateCache=null;
@@ -2772,7 +2776,7 @@ function buildGoalPopoverContent(){
   const reqLine=basis>0
     ?(remaining>0
       ?(req!=null
-        ?`<span style="color:var(--amber);font-weight:700">Required now: +${req.toFixed(2)}%/trading day</span> · ≈ ₹${goalFmtRs(basis*req/100)}/day earnings on total ₹${goalFmtRs(basis)}`
+        ?`<span style="color:var(--amber);font-weight:700">Required now: +${req.toFixed(2)}%/trading day</span> · ≈ ₹${goalFmtRs(basis*req/100)}/day earnings on book ₹${goalFmtRs(basis)}`
         :`<span style="color:var(--red);font-weight:700">Not reachable</span> — earning ₹${goalFmtRs(g.target)} in ${remaining} sessions needs more than 50%/day from total ₹${goalFmtRs(basis)}`)
       :`<span style="color:var(--amber);font-weight:700">Deadline reached</span> — pick a later date`)
     :`Enter Capital ₹ in the filter bar (or load holdings) to compute the required %/day.`;
@@ -2814,7 +2818,7 @@ function buildGoalCard(){
   const req=days>0?solveGoalDailyRate(basis,g.target,days,g.withdrawMonthly):null;
   const ach=getGoalAchievedDailyRate(basis);
   if(!(basis>0)){
-    return `<div class="st"><div class="st-l">Goal · earn ₹${goalFmtRs(g.target)} · ${days} td left</div><div class="st-v" style="color:var(--t3)">—</div><div class="st-d">total ₹0 (cap ${goalFmtRs(parts.cap)} + sells ${goalFmtRs(parts.sells)} + invested ${goalFmtRs(parts.invested)}) · need —/day · achieved —/day (30d)</div></div>`;
+    return `<div class="st"><div class="st-l">Goal · earn ₹${goalFmtRs(g.target)} · ${days} td left</div><div class="st-v" style="color:var(--t3)">—</div><div class="st-d">basis ₹0 · load Holdings/Positions to value your book · need —/day · achieved —/day (30d)</div></div>`;
   }
   if(days<=0){
     return `<div class="st"><div class="st-l">Goal · earn ₹${goalFmtRs(g.target)}</div><div class="st-v" style="color:var(--amber)">horizon elapsed</div><div class="st-d">set a new day count in ⚙ Goal</div></div>`;
@@ -2824,8 +2828,8 @@ function buildGoalCard(){
   const onTrack=req!=null&&ach!=null&&ach>=req;
   const col=req==null?'var(--red)':(onTrack?'var(--green)':'var(--amber)');
   const badge=ach!=null?(onTrack?'<span style="color:var(--green);font-size:11px">✓ on track</span>':'<span style="color:var(--amber);font-size:11px">behind</span>'):'<span style="color:var(--t3);font-size:11px">no 30d trades</span>';
-  const freeStr=`total ₹${goalFmtRs(basis)} (free ${goalFmtRs(parts.free)} + invested ${goalFmtRs(parts.invested)})`;
-  const title='Required NET earnings per NSE trading day, as % of TOTAL capital (Capital ₹ + today\'s sell proceeds + market value of holdings/positions), to generate the target profit within the horizon while withdrawals drain daily. Informational only; does not change targets.';
+  const freeStr=`basis ₹${goalFmtRs(basis)} (live market value of holdings + positions)`;
+  const title='Required NET earnings per NSE trading day, as % of your working book (live market value of holdings + positions + today\'s net buys; the manual Capital ₹ field and today\'s sell proceeds are excluded so the book is not double-counted), to generate the target profit within the horizon while withdrawals drain daily. Informational only; does not change targets.';
   return `<div class="st" title="${title}"><div class="st-l">Goal · earn ₹${goalFmtRs(g.target)} · ${days} td left</div><div class="st-v" style="color:${col}">${reqStr}%/day ${badge}</div><div class="st-d">${freeStr} · need ${needRs!=null?'₹'+goalFmtRs(needRs)+'/day':'—/day'} · achieved ${ach!=null?(ach*100).toFixed(2)+'%/day':'—/day'} (30d)</div></div>`;
 }
 function renderStats(){
