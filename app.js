@@ -1,5 +1,5 @@
-const BUILD_TS='2026-07-20 17:11 IST'; // release build time (IST)
-const APP_VERSION=534; // Score bands are four distinct hues (green/yellow/light blue/red); pagination restored; Performance KPIs cut to a decision-first grid with honest diagnostic labels.
+const BUILD_TS='2026-07-21 06:58 IST'; // release build time (IST)
+const APP_VERSION=535; // Recommendation-tracking visualization: shortlist rank heatmap + per-issue outcome dumbbells in the Outcome Feedback card, built solely from the existing outcome stores.
 const GOOGLE_DRIVE_CLIENT_ID='1015012642264-oi2nelv3v90k3d39r994a6nelgjs2a56.apps.googleusercontent.com'; // Public OAuth Web Client ID.
 const PRICE_BAND_BLOCK_BUFFER_PCT=0.15; // Treat rounded 4.9/9.9/19.9 rows as effectively band-locked.
 const BASKET_CASH_RESERVE_RS=1; // Leave a rupee for broker-side tax/rounding differences.
@@ -77,6 +77,7 @@ function updateModeUI(){
 let ALL=[],FILT=[],PG=1,PGSZ=100,SCOL='rank',SDIR=1;
 let _tvLoadedThisSession=false; // true once a TV CSV has been processed this session
 let PERF_PERIOD_FILTER='all'; // 'all' | '1m' | '3m' | '6m' | '1y'
+let PERF_TRACK_ISSUE=null; // issue date selected in the recommendation-tracking outcome panel
 let PERF_TRADE_WINDOWS=[]; // cached trade window rows from renderPerformance — used by current-window pill
 let PERF_LATEST_SUMMARY=null; // cached latest session summary from buildLatestSessionPanel — used by renderStats card
 let PERF_RENDERED=false; // true after background or foreground performance calculation
@@ -3315,6 +3316,110 @@ function buildOpenPositionsPanel(query=''){
   return {html,table:shown.length?table:null};
 }
 
+// ── Recommendation tracking visualization (v535) ──────────────────────────────
+// Built ONLY from data the app already records (owner constraint): the shortlist
+// outcome store keeps, per issue date, each pick's rank/score plus running outcome
+// aggregates (best high + day, worst low, final close, rocket day). Granularity is
+// one point per TRADING DAY — intraday refreshes are deliberately deduped at record
+// time — and per-pick history is aggregate, not a day-by-day polyline. The two
+// panels below draw exactly what exists and nothing more.
+function buildRecommendationTrackingHTML(){
+  const issues=Object.values((FS.get(RECOMMEND_OUTCOME_STORE)||{}).issues||{})
+    .filter(i=>i?.date&&Array.isArray(i.picks)&&i.picks.length)
+    .sort((a,b)=>a.date<b.date?-1:1);
+  if(!issues.length) return '';
+  const pct=v=>(v>=0?'+':'')+Number(v).toFixed(1)+'%';
+  const dd=d=>d.slice(8); // day-of-month column label; full date rides the tooltip
+
+  // ── Panel A — shortlist rank heatmap: one column per session, one row per symbol.
+  // Sequential single-hue ramp (cyan, deeper = better rank). The exception gets the
+  // ink: 84.7% of completed picks rocket, so ONLY the failures are marked (red
+  // underline). Rockets are the quiet norm.
+  const bySym={};
+  issues.forEach(issue=>(issue.picks||[]).forEach(p=>{
+    if(!p?.symbol) return;
+    const e=bySym[p.symbol]??={symbol:p.symbol,cells:{},n:0,bestRank:Infinity,last:''};
+    e.cells[issue.date]=p; e.n++;
+    if(p.rank&&p.rank<e.bestRank) e.bestRank=p.rank;
+    if(issue.date>e.last) e.last=issue.date;
+  }));
+  const heatRows=Object.values(bySym).sort((a,b)=>b.n-a.n||a.bestRank-b.bestRank||(a.last<b.last?1:-1));
+  const rankAlpha=r=>!r?0.22:r<=5?0.85:r<=10?0.58:r<=15?0.38:0.22;
+  const CELL='width:20px;height:14px;border-radius:2px;flex:0 0 20px;';
+  const headHtml=`<div style="display:flex;gap:2px;align-items:flex-end;margin-left:96px">${issues.map(i=>`<span style="${CELL}font-size:8.5px;color:var(--t3);text-align:center;font-family:'DM Mono',monospace;height:auto" title="${i.date}">${dd(i.date)}</span>`).join('')}</div>`;
+  const rowsHtml=heatRows.map(row=>{
+    const cells=issues.map(issue=>{
+      const p=row.cells[issue.date];
+      if(!p) return `<span style="${CELL}background:rgba(148,163,184,.06)"></span>`;
+      const failed=p.complete&&!p.rocketDate;
+      const outcome=p.rocketDate?`rocketed d${p.rocketDays}`:p.complete?`no +10% within ${p.horizonDays||''}d`:`pending · ${p.observations||0} obs`;
+      const tip=`${row.symbol} · ${issue.date} · rank ${p.rank??'—'} · score ${p.score!=null?Number(p.score).toFixed(1):'—'} · ${outcome}${p.bestHighProfitPct!=null?` · best ${pct(p.bestHighProfitPct)}`:''}`;
+      return `<span style="${CELL}background:rgba(6,182,212,${rankAlpha(p.rank)});${failed?'box-shadow:inset 0 -2px 0 var(--red);':''}" title="${escHtml(tip)}"></span>`;
+    }).join('');
+    return `<div style="display:flex;gap:2px;align-items:center;margin-top:2px"><span style="width:92px;flex:0 0 92px;font-size:10px;color:var(--t2);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;padding-right:4px" title="${escHtml(row.symbol)} · shortlisted ${row.n}× · best rank ${row.bestRank}">${escHtml(row.symbol)}</span>${cells}</div>`;
+  }).join('');
+  const heatHtml=`
+    <div style="font-size:11px;font-weight:700;color:var(--t1);margin-bottom:2px">Shortlist tracking — rank per session</div>
+    <div style="font-size:10px;color:var(--t3);margin-bottom:8px">${heatRows.length} symbols × ${issues.length} sessions · one cell per trading day (intraday refreshes are deduped at record time) · deeper cyan = better rank</div>
+    ${headHtml}
+    <div style="max-height:300px;overflow:auto;overflow-x:visible">${rowsHtml}</div>
+    <div style="display:flex;gap:14px;flex-wrap:wrap;align-items:center;margin-top:8px;font-size:10px;color:var(--t3)">
+      ${[['1–5',0.85],['6–10',0.58],['11–15',0.38],['16+',0.22]].map(([l,a])=>`<span style="display:inline-flex;align-items:center;gap:4px"><span style="width:12px;height:10px;border-radius:2px;background:rgba(6,182,212,${a})"></span>rank ${l}</span>`).join('')}
+      <span style="display:inline-flex;align-items:center;gap:4px"><span style="width:12px;height:10px;border-radius:2px;background:rgba(6,182,212,.4);box-shadow:inset 0 -2px 0 var(--red)"></span>completed without a +10% move</span>
+      <span style="display:inline-flex;align-items:center;gap:4px"><span style="width:12px;height:10px;border-radius:2px;background:rgba(148,163,184,.06)"></span>not shortlisted</span>
+    </div>`;
+
+  // ── Panel B — outcome ranges for one issue date: what each pick did after being
+  // recommended. Position carries the story (bar above/below the entry baseline);
+  // green/red is redundant with position, so the deutan 6–8 ΔE band is covered by
+  // secondary encoding per the palette validator's own rule.
+  const desc=[...issues].reverse();
+  const defaultIssue=(desc.find(i=>(i.picks||[]).some(p=>p.observations>0))||desc[0]).date;
+  if(!PERF_TRACK_ISSUE||!issues.some(i=>i.date===PERF_TRACK_ISSUE)) PERF_TRACK_ISSUE=defaultIssue;
+  const sel=issues.find(i=>i.date===PERF_TRACK_ISSUE);
+  const picks=[...(sel.picks||[])].sort((a,b)=>(a.rank||99)-(b.rank||99));
+  const observed=picks.filter(p=>p.observations>0&&p.bestHighProfitPct!=null);
+  const unobserved=picks.length-observed.length;
+  const lo=Math.min(-2,...observed.map(p=>p.worstLowProfitPct??0))-1;
+  const hi=Math.max(12,...observed.map(p=>p.bestHighProfitPct??0))+1;
+  const X=v=>((v-lo)/(hi-lo)*100).toFixed(2)+'%';
+  const rocketed=observed.filter(p=>p.rocketDate).length;
+  const optHtml=desc.map(i=>`<option value="${i.date}" ${i.date===PERF_TRACK_ISSUE?'selected':''}>${i.date}</option>`).join('');
+  const trackRows=observed.map(p=>{
+    const wl=Math.min(0,p.worstLowProfitPct??0),bh=Math.max(0,p.bestHighProfitPct??0);
+    const fc=p.finalCloseProfitPct;
+    const outcome=p.rocketDate?`rocketed d${p.rocketDays}`:p.complete?'no +10% within window':'pending';
+    const tip=`${p.symbol} · rank ${p.rank??'—'} · best high ${pct(p.bestHighProfitPct)} (d${p.bestDays??'—'}) · worst ${p.worstLowProfitPct!=null?pct(p.worstLowProfitPct):'—'} · final close ${fc!=null?pct(fc):'—'} · ${outcome}`;
+    return `<div style="display:flex;align-items:center;gap:8px;margin-top:3px;${p.complete?'':'opacity:.55'}" title="${escHtml(tip)}">
+      <span style="width:92px;flex:0 0 92px;font-size:10px;color:var(--t2);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;text-align:right">${escHtml(p.symbol)}</span>
+      <span style="position:relative;flex:1;height:16px">
+        <span style="position:absolute;left:${X(0)};top:0;bottom:0;width:1px;background:var(--border-hi)"></span>
+        <span style="position:absolute;left:${X(10)};top:0;bottom:0;width:1px;background:rgba(251,191,36,.45)"></span>
+        ${wl<0?`<span style="position:absolute;left:${X(wl)};width:calc(${X(0)} - ${X(wl)});top:4px;height:8px;background:var(--red);border-radius:4px 0 0 4px"></span>`:''}
+        ${bh>0?`<span style="position:absolute;left:${X(0)};width:calc(${X(bh)} - ${X(0)});top:4px;height:8px;background:var(--green);border-radius:0 4px 4px 0"></span>`:''}
+        ${fc!=null?`<span style="position:absolute;left:${X(fc)};top:50%;width:8px;height:8px;margin:-4px 0 0 -4px;border-radius:50%;background:var(--t1);box-shadow:0 0 0 2px var(--bg-card)"></span>`:''}
+      </span>
+      <span style="width:84px;flex:0 0 84px;font-size:10px;color:var(--t3);font-family:'DM Mono',monospace">${pct(p.bestHighProfitPct)}${p.bestDays!=null?` d${p.bestDays}`:''}</span>
+    </div>`;
+  }).join('');
+  const dumbHtml=`
+    <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin:18px 0 2px">
+      <span style="font-size:11px;font-weight:700;color:var(--t1)">Pick outcomes after recommendation</span>
+      <select onchange="PERF_TRACK_ISSUE=this.value;renderPerformance()" style="padding:3px 8px;background:var(--bg-card);border:1px solid var(--border);border-radius:6px;color:var(--t1);font-size:11px;font-family:'DM Mono',monospace">${optHtml}</select>
+      <span style="font-size:10px;color:var(--t3)">${observed.length} observed picks · ${rocketed} rocketed${unobserved?` · ${unobserved} awaiting first next-session observation`:''}</span>
+    </div>
+    <div style="font-size:10px;color:var(--t3);margin-bottom:8px">Bar spans worst low → best high vs entry price · dot = latest close · amber line = the +10% rocket bar · dimmed rows still in their window</div>
+    ${observed.length?trackRows:`<div style="font-size:11px;color:var(--t3);padding:8px 0">No observations yet for this date — picks are first measured on the next session's upload.</div>`}
+    <div style="display:flex;gap:14px;flex-wrap:wrap;align-items:center;margin-top:8px;font-size:10px;color:var(--t3)">
+      <span style="display:inline-flex;align-items:center;gap:4px"><span style="width:12px;height:8px;border-radius:0 4px 4px 0;background:var(--green)"></span>above entry (best high)</span>
+      <span style="display:inline-flex;align-items:center;gap:4px"><span style="width:12px;height:8px;border-radius:4px 0 0 4px;background:var(--red)"></span>below entry (worst low)</span>
+      <span style="display:inline-flex;align-items:center;gap:4px"><span style="width:8px;height:8px;border-radius:50%;background:var(--t1);box-shadow:0 0 0 2px var(--bg-card)"></span>latest close</span>
+      <span style="display:inline-flex;align-items:center;gap:4px"><span style="width:1px;height:10px;background:rgba(251,191,36,.65)"></span>+10% target</span>
+    </div>`;
+
+  return `<div style="padding:14px 16px;border-bottom:1px solid var(--border)">${heatHtml}${dumbHtml}</div>`;
+}
+
 function renderPerformance(){
   PERF_RENDERED=true;
   const el=document.getElementById('perfContent');
@@ -3563,8 +3668,11 @@ function renderPerformance(){
   const escapeText=exitOpportunity.exits
     ? `${exitOpportunity.exits} symbol/date exits have same-day ALL NSE highs recorded. ${exitOpportunity.upsideExits} highs exceeded the quantity-weighted average sell price; sold-value-weighted missed upside averages ${exitOpportunity.avgMissed.toFixed(2)}% (${fmtINR(exitOpportunity.missedValue)}).`
     : `No same-day exit opportunities have been recorded yet. Load Orders, Tradebook, and ALL NSE for the sell day.`;
+  let trackingHtml='';
+  try{trackingHtml=buildRecommendationTrackingHTML();}catch(e){console.warn('Recommendation tracking viz failed',e);}
   const outcomeHtml=perfCard('Recommendation Outcome Feedback',
-    `<div style="padding:14px 16px;color:var(--t2);font-size:12px;line-height:1.7"><div><strong style="color:var(--t1)">Actual entries:</strong> ${entryOutcomeText}</div><div style="margin-top:8px"><strong style="color:var(--t1)">Eligible shortlist:</strong> ${outcomeText}</div><div style="margin-top:8px"><strong style="color:var(--t1)">Same-day exit opportunity:</strong> ${escapeText}</div><div style="margin-top:8px;color:var(--t3)">Earlier trading-day feature states versus the later current 1D top-1% outcome train raw rocket relevance. Completed shortlist and executed-entry outcomes are shown as confidence context only, while tradebook costs plus hard high-move outcomes refine sizing, review timing, and the single Harvest target.</div></div>`,'','perf-outcomes');
+    trackingHtml
+    +`<div style="padding:14px 16px;color:var(--t2);font-size:12px;line-height:1.7"><div><strong style="color:var(--t1)">Actual entries:</strong> ${entryOutcomeText}</div><div style="margin-top:8px"><strong style="color:var(--t1)">Eligible shortlist:</strong> ${outcomeText}</div><div style="margin-top:8px"><strong style="color:var(--t1)">Same-day exit opportunity:</strong> ${escapeText}</div><div style="margin-top:8px;color:var(--t3)">Earlier trading-day feature states versus the later current 1D top-1% outcome train raw rocket relevance. Completed shortlist and executed-entry outcomes are shown as confidence context only, while tradebook costs plus hard high-move outcomes refine sizing, review timing, and the single Harvest target.</div></div>`,'','perf-outcomes');
 
   el.innerHTML=`
     <div style="padding:12px 16px">
