@@ -1,5 +1,5 @@
-const BUILD_TS='2026-07-21 12:02 IST'; // release build time (IST)
-const APP_VERSION=540; // Goal basis adds idle cash freed by selling (max(0,sells−buys)) back to held market value; projected-finish line leads with a plain readable date and a months-from-deadline gap.
+const BUILD_TS='2026-07-21 12:32 IST'; // release build time (IST)
+const APP_VERSION=541; // Folder-watch quiescence guard: auto-refresh ingests only after the upload folder is stable for a full interval and ALL NSE.csv is present — no partial ingest when a tick fires mid-download on a second monitor.
 const GOOGLE_DRIVE_CLIENT_ID='1015012642264-oi2nelv3v90k3d39r994a6nelgjs2a56.apps.googleusercontent.com'; // Public OAuth Web Client ID.
 const PRICE_BAND_BLOCK_BUFFER_PCT=0.15; // Treat rounded 4.9/9.9/19.9 rows as effectively band-locked.
 const BASKET_CASH_RESERVE_RS=1; // Leave a rupee for broker-side tax/rounding differences.
@@ -5160,7 +5160,7 @@ async function getLocalUploadFolderFiles(){
 // Watches the granted local upload folder every 15 seconds; any change to file names,
 // sizes, or timestamps re-ingests the folder automatically. Silent when no folder grant
 // exists, permission was revoked, the tab is hidden, or a load is already running.
-let _folderWatchTimer=null,_folderWatchSig='',_folderWatchBusy=false;
+let _folderWatchTimer=null,_folderWatchSig='',_folderWatchBusy=false,_folderWatchPendingSig='';
 // Only actual input files participate in change detection. The app itself writes
 // rocket_brain.json into the upload folder on every brain save — including it in the
 // signature made each refresh re-trigger the next one in an endless loop.
@@ -5203,9 +5203,21 @@ async function folderWatchTick(){
     if(!local?.files?.length) return;
     const sig=folderSignature(local.files);
     if(!sig) return;
-    if(!_folderWatchSig){_folderWatchSig=sig;return;} // first sight = baseline, no re-run
-    if(sig===_folderWatchSig) return;
+    if(!_folderWatchSig){_folderWatchSig=sig;_folderWatchPendingSig=sig;return;} // baseline, no re-run
+    if(sig===_folderWatchSig){_folderWatchPendingSig=sig;return;} // unchanged since last ingest
+    // The set changed vs the last ingested one. Do NOT ingest yet — first require the
+    // folder to have SETTLED, i.e. the signature is identical to the previous tick, so no
+    // file was added or is still growing in the last ~15s. This is the two-monitor guard:
+    // `document.hidden` is false while the tab merely sits on another monitor, so a tick
+    // can fire mid-download; without this, it would ingest a half-written or incomplete
+    // set (a partial ALL NSE distorts every percentile). While you keep dropping files the
+    // signature moves every tick and we keep waiting.
+    if(sig!==_folderWatchPendingSig){_folderWatchPendingSig=sig;return;} // still changing → wait a cycle
+    // Settled. Also never ingest a set that has no ALL NSE.csv (the scanner file the whole
+    // ranking is built from) — wait until it is present.
+    if(!local.files.some(f=>isScannerCsvName(f?.name))) return;
     _folderWatchSig=sig;
+    _folderWatchPendingSig=sig;
     _folderWatchBusy=true;
     showAutoRefreshIndicator('refreshing');
     const ok=await processFiles(local.files,local.sourceLabel+' · auto-refresh',{silent:true});
@@ -6165,7 +6177,7 @@ async function processFiles(files,sourceLabel,opts={}){
   if(!SURV_CUSTOM_RULES.length){try{loadSurvRules();}catch(e){}}
   // Any deliberate or automatic load resets the folder-watch baseline so the watcher
   // does not immediately re-process the files it (or the user) just loaded.
-  try{_folderWatchSig=folderSignature([...files]);}catch(e){}
+  try{_folderWatchSig=folderSignature([...files]);_folderWatchPendingSig=_folderWatchSig;}catch(e){}
   if(!silent) setLoading(true,String(FILE_LOAD_STATUS.source?`Processing selected files... · ${FILE_LOAD_STATUS.source}`:'Processing selected files...'));
   // Upload CHANGED canonical input files to Drive in the background. Rankings are built
   // from the selected local files immediately, because the market does not wait for Drive.
