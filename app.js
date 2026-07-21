@@ -1,5 +1,5 @@
-const BUILD_TS='2026-07-21 16:36 IST'; // release build time (IST)
-const APP_VERSION=543; // Capital ₹ and Max Alloc ₹ show a computed default (Capital = deployed book from CSVs, also the goal basis; Max Alloc = learned Position Size); type to override, clear to restore the default.
+const BUILD_TS='2026-07-21 16:46 IST'; // release build time (IST)
+const APP_VERSION=544; // Projected goal date now leads with the REALISTIC pace from the tradebook (getGoalAchievedDailyRate), with the target best-case as a secondary line.
 const GOOGLE_DRIVE_CLIENT_ID='1015012642264-oi2nelv3v90k3d39r994a6nelgjs2a56.apps.googleusercontent.com'; // Public OAuth Web Client ID.
 const PRICE_BAND_BLOCK_BUFFER_PCT=0.15; // Treat rounded 4.9/9.9/19.9 rows as effectively band-locked.
 const BASKET_CASH_RESERVE_RS=1; // Leave a rupee for broker-side tax/rounding differences.
@@ -2822,29 +2822,54 @@ function buildGoalPopoverContent(){
   </div>
   <div style="font-size:11px;line-height:1.6;color:var(--t2);margin-top:10px">${reqLine}</div>
   ${(()=>{
-    // Projected finish at the ACTIVE target's expected net (v538, informational): the
-    // date the earnings tally would reach the goal if every trading day netted what the
-    // system's chosen target nets after charges. A best-case pace, not a forecast —
-    // said explicitly so it cannot be read as one.
+    // Projected finish date. PRIMARY = your REALISTIC pace from the tradebook (what you
+    // actually earn per day, 30d) — the honest picture the owner asked for (v544).
+    // SECONDARY = the best case if the active target filled every session. Informational.
     if(!(basis>0)) return '';
-    let at=null;try{at=getActiveTargetInfo();}catch(e){}
-    if(!at?.tgtPct) return '';
-    const netPct=+(at.tgtPct-estimateRoundTripCostPct(at.tgtPct)).toFixed(3);
-    if(!(netPct>0)) return '';
-    const proj=projectGoalCompletionDate(basis,g.target,netPct,g.withdrawMonthly);
-    const srcLbl=at.source==='goal'?'goal-led':'Harvest';
-    const rate=`${at.tgtPct.toFixed(1)}% gross ≈ ${netPct.toFixed(2)}% net/day`;
-    if(!proj) return `<div style="font-size:11px;line-height:1.6;margin-top:6px;color:var(--red)">At the active ${srcLbl} target (${rate}) you don't reach the goal within 8 years — the target is too low for this book plus withdrawals. Raise the target or extend the deadline.</div>`;
-    // Lead with a plain, readable date; express the deadline gap in months (or days when
-    // close) so nothing has to be mentally converted.
     const MON=['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
     const readable=d=>{const [y,m,dd]=d.split('-');return `${+dd} ${MON[+m-1]} ${y}`;};
-    const late=proj>g.endDate;
-    const calDays=Math.abs(Math.round((new Date(proj+'T12:00:00Z')-new Date(g.endDate+'T12:00:00Z'))/86400000));
-    const gap=calDays<=1?'right on your deadline'
-      :calDays<45?`≈ ${calDays} days ${late?'after':'ahead of'} your ${readable(g.endDate)} deadline`
-      :`≈ ${Math.round(calDays/30)} months ${late?'after':'ahead of'} your ${readable(g.endDate)} deadline`;
-    return `<div style="font-size:11px;line-height:1.6;margin-top:6px;color:var(--t2)">At the active ${srcLbl} target (${rate}, hit every session) you'd reach the goal around <b style="color:${late?'var(--amber)':'var(--green)'}">${readable(proj)}</b> — ${gap}. Best-case pace, not a forecast.</div>`;
+    const gapTxt=proj=>{
+      const late=proj>g.endDate;
+      const calDays=Math.abs(Math.round((new Date(proj+'T12:00:00Z')-new Date(g.endDate+'T12:00:00Z'))/86400000));
+      const t=calDays<=1?'right on your deadline'
+        :calDays<45?`≈ ${calDays} days ${late?'after':'ahead of'} your ${readable(g.endDate)} deadline`
+        :`≈ ${Math.round(calDays/30)} months ${late?'after':'ahead of'} your ${readable(g.endDate)} deadline`;
+      return {late,t};
+    };
+    const dateSpan=proj=>{const{late}=gapTxt(proj);return `<b style="color:${late?'var(--amber)':'var(--green)'}">${readable(proj)}</b>`;};
+
+    // PRIMARY — realized pace from the tradebook (getGoalAchievedDailyRate = net/day ÷ basis, 30d).
+    const ach=getGoalAchievedDailyRate(basis);
+    let realHtml;
+    if(ach==null){
+      realHtml=`<span style="color:var(--t3)">Realized pace: not enough recent tradebook history to project a date yet.</span>`;
+    }else if(ach<=0){
+      realHtml=`<span style="color:var(--red)">At your realized pace (${(ach*100).toFixed(2)}%/day, 30d tradebook) you are not gaining — no finish date until that turns positive.</span>`;
+    }else{
+      const rp=projectGoalCompletionDate(basis,g.target,ach*100,g.withdrawMonthly);
+      realHtml=rp
+        ? `At your <b>realized pace</b> (${(ach*100).toFixed(2)}% net/day, 30d tradebook): ${dateSpan(rp)} — ${gapTxt(rp).t}.`
+        : `At your realized pace (${(ach*100).toFixed(2)}%/day, 30d) the goal is not reached within 8 years — raise the pace, the target, or extend the deadline.`;
+    }
+
+    // SECONDARY — best case if the active target filled every session.
+    let bestHtml='';
+    try{
+      const at=getActiveTargetInfo();
+      if(at?.tgtPct){
+        const netPct=+(at.tgtPct-estimateRoundTripCostPct(at.tgtPct)).toFixed(3);
+        if(netPct>0){
+          const bp=projectGoalCompletionDate(basis,g.target,netPct,g.withdrawMonthly);
+          const srcLbl=at.source==='goal'?'goal-led':'Harvest';
+          bestHtml=bp
+            ? `Best case, if the ${srcLbl} target (${at.tgtPct.toFixed(1)}% ≈ ${netPct.toFixed(2)}% net/day) fills every session: ${dateSpan(bp)}.`
+            : `Best case at the ${srcLbl} target: not within 8 years.`;
+        }
+      }
+    }catch(e){}
+
+    return `<div style="font-size:11px;line-height:1.6;margin-top:6px;color:var(--t2)">${realHtml}</div>`
+      +(bestHtml?`<div style="font-size:10px;line-height:1.5;margin-top:3px;color:var(--t3)">${bestHtml}</div>`:'');
   })()}
   <div style="font-size:10px;line-height:1.5;color:var(--t3);margin-top:6px">${remaining} trading day${remaining===1?'':'s'} left until ${g.endDate} (weekends and NSE holidays excluded) · withdrawal drains ≈ ₹${goalFmtRs(wdDaily)}/calendar day (weekends and holidays included). Informational — never changes targets or allocation.</div>`;
 }
