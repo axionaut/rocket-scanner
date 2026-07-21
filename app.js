@@ -1,5 +1,5 @@
-const BUILD_TS='2026-07-21 17:35 IST'; // release build time (IST)
-const APP_VERSION=546; // "Removed from rankings" audit table (held / surveillance, with reason, sorted by rank) explains every gap in the rank sequence; Latest Session gains Radar Score + Rank and drops the useless Trades column.
+const BUILD_TS='2026-07-21 21:43 IST'; // release build time (IST)
+const APP_VERSION=547; // Manual Target % override (a third target superseding lower-of-Harvest/goal); Removed-from-rankings panel made a plain always-visible card at the bottom (no collapse/scroll).
 const GOOGLE_DRIVE_CLIENT_ID='1015012642264-oi2nelv3v90k3d39r994a6nelgjs2a56.apps.googleusercontent.com'; // Public OAuth Web Client ID.
 const PRICE_BAND_BLOCK_BUFFER_PCT=0.15; // Treat rounded 4.9/9.9/19.9 rows as effectively band-locked.
 const BASKET_CASH_RESERVE_RS=1; // Leave a rupee for broker-side tax/rounding differences.
@@ -2746,6 +2746,8 @@ function updateFilterPlaceholders(){
   if(capEl){ const d=getDefaultCapital(); if(d>0){ capEl.placeholder=String(Math.round(d)); capEl.title=`Empty = your computed capital ₹${Math.round(d).toLocaleString('en-IN')} (holdings + open positions). Type a value to override.`; } }
   const maxEl=document.getElementById('fMaxAlloc');
   if(maxEl){ const d=getDefaultMaxAlloc(); if(d>0){ maxEl.placeholder=String(d); maxEl.title=`Empty = learned Position Size ₹${d.toLocaleString('en-IN')}. Type a value to override the per-stock cap.`; } else { maxEl.placeholder='no cap'; } }
+  const tgtEl=document.getElementById('fTgtOverride');
+  if(tgtEl){ let d=0; try{d=getDefaultTgtPct();}catch(e){} if(d>0){ tgtEl.placeholder=d.toFixed(1); tgtEl.title=`Empty = the auto target ${d.toFixed(1)}% (lower of learned Harvest / goal-led). Type a value to OVERRIDE it — your number then drives every basket GTT and the stats.`; } }
 }
 // Goal capital basis = effective capital (the field if the owner typed one, else the
 // computed deployed book). An empty field means the default, never zero.
@@ -4517,11 +4519,22 @@ function getGoalLedTargetPct(){
 // The single active target: whichever is LOWER — the learned Harvest gross or the
 // goal-led gross. A lower goal-led target hits more often while still meeting the
 // owner's stated need; Harvest remains the ceiling and the fallback.
+// Three targets (owner v547): the learned Harvest %, the goal-led %, and a MANUAL override.
+// Normally the active target is the lower of Harvest/goal-led (anti-churn). A manual value
+// in the Target % field SUPERSEDES that rule entirely — the owner's number wins. The field
+// defaults (via placeholder) to the auto target, so leaving it empty keeps today's behavior.
 function getActiveTargetInfo(){
   const harvest=computeHarvestPlan().targetPct;
   const goal=getGoalLedTargetPct();
-  if(goal!=null&&goal<harvest) return {tgtPct:goal,source:'goal',harvestPct:harvest,goalPct:goal};
-  return {tgtPct:harvest,source:'harvest',harvestPct:harvest,goalPct:goal};
+  const auto=(goal!=null&&goal<harvest)?{tgtPct:goal,source:'goal'}:{tgtPct:harvest,source:'harvest'};
+  const manual=parseFloat(document.getElementById('fTgtOverride')?.value);
+  if(Number.isFinite(manual)&&manual>0) return {tgtPct:manual,source:'manual',harvestPct:harvest,goalPct:goal,autoPct:auto.tgtPct};
+  return {tgtPct:auto.tgtPct,source:auto.source,harvestPct:harvest,goalPct:goal,autoPct:auto.tgtPct};
+}
+function getDefaultTgtPct(){
+  const harvest=computeHarvestPlan().targetPct;
+  const goal=getGoalLedTargetPct();
+  return (goal!=null&&goal<harvest)?goal:harvest;
 }
 function getEffectiveTgtPct(){
   return getActiveTargetInfo().tgtPct;
@@ -5048,9 +5061,11 @@ function buildRemovedPanel(query=''){
   }).join('');
   const tag=query&&shown.length!==all.length?` <span style="font-weight:500;text-transform:none;letter-spacing:0;color:var(--t3)">· ${shown.length} of ${all.length} matching "${escHtml(query)}"</span>`:'';
   const capNote=shown.length>CAP?`<div style="padding:6px 10px;font-size:10px;color:var(--t3)">Showing the top ${CAP} by rank · ${shown.length-CAP} more removed further down the ranking.</div>`:'';
+  // Always visible, no collapse, no internal scroll (owner v547) — the page scrolls. Capped
+  // at the top 100 by rank so the DOM stays bounded; it sits last on the Rankings tab.
   const body=shown.length
-    ?`<div style="max-height:320px;overflow:auto"><table style="width:100%;border-collapse:collapse;font-size:12px">
-        <thead><tr style="color:var(--t3);border-bottom:1px solid var(--border);position:sticky;top:0;background:var(--bg-card)">
+    ?`<div><table style="width:100%;border-collapse:collapse;font-size:12px">
+        <thead><tr style="color:var(--t3);border-bottom:1px solid var(--border)">
           <th style="padding:6px 10px;text-align:right;font-size:10px;text-transform:uppercase">Rank</th>
           <th style="padding:6px 10px;text-align:left;font-size:10px;text-transform:uppercase">Symbol</th>
           <th style="padding:6px 10px;text-align:right;font-size:10px;text-transform:uppercase">Score</th>
@@ -5058,14 +5073,13 @@ function buildRemovedPanel(query=''){
           <th style="padding:6px 10px;text-align:left;font-size:10px;text-transform:uppercase">Reason removed</th>
         </tr></thead><tbody>${rowsHtml}</tbody></table></div>${capNote}`
     :panelNoMatchHtml(query,'removed stock');
-  // Collapsed by default (details) — unobtrusive but always one click from the answer.
-  return `<details id="rank-removed-card" style="background:var(--bg-card);border:1px solid var(--border);border-radius:10px;overflow:hidden">
-    <summary style="padding:10px 16px;cursor:pointer;list-style:revert;user-select:none">
+  return `<div id="rank-removed-card" style="background:var(--bg-card);border:1px solid var(--border);border-radius:10px;overflow:hidden">
+    <div style="padding:10px 16px;border-bottom:1px solid var(--border)">
       <span style="font-size:10px;font-weight:700;color:var(--t2);text-transform:uppercase;letter-spacing:.1em">Removed from rankings — ${all.length}${tag}</span>
       <span style="font-size:11px;color:var(--t3);font-weight:400;margin-left:8px">📌 ${heldN} held · ⚠ ${survN} surveillance · why the ranks skip</span>
-    </summary>
+    </div>
     ${body}
-  </details>`;
+  </div>`;
 }
 function showRadarDetail(sym){
   const r=ALL.find(x=>x.symbol===sym);
@@ -6548,7 +6562,8 @@ function saveFilterState(){
     // The fields hold only manual overrides now; an empty field means "use the computed
     // default" (shown in the placeholder), so we persist the raw value as-is.
     capital:capEl?.value||'',
-    maxAlloc:maxAllocEl?.value||''
+    maxAlloc:maxAllocEl?.value||'',
+    tgtOverride:document.getElementById('fTgtOverride')?.value||''
   }));
 }
 
@@ -6565,6 +6580,7 @@ function loadFilterState(){
     const sharedMaxAlloc=shared.maxAlloc!=null?shared.maxAlloc:state.maxAlloc;
     if(sharedCapital){const el=document.getElementById('fCapital');if(el)el.value=sharedCapital;}
     if(sharedMaxAlloc){const el=document.getElementById('fMaxAlloc');if(el)el.value=sharedMaxAlloc;}
+    if(shared.tgtOverride){const el=document.getElementById('fTgtOverride');if(el)el.value=shared.tgtOverride;}
     updateFilterPlaceholders(); // empty fields show + use the computed defaults
     // Legacy engine sort columns migrate to the Radar rank ordering once.
     const legacy=new Set(['_rank','rocketScore','snapshotChange','tslRefPoints','velocityPotential','delivPct','volume']);

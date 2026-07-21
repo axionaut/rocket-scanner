@@ -74,6 +74,7 @@
    <div class="fg"><span class="fg-lbl" style="color:var(--cyan)">Min Turnover</span><select id="fMinTurnover" style="padding:8px 10px;background:var(--bg-card);border:1px solid var(--border);border-radius:8px;color:var(--t1);font-size:12px;outline:none" onchange="scheduleApplyFilters()"><option value="0">Any</option><option value="1">₹5L</option><option value="2">₹25L</option><option value="3">₹1Cr</option><option value="4">₹5Cr</option><option value="5">₹10Cr</option><option value="6">₹100Cr</option><option value="7">₹1000Cr</option></select></div>
    <div class="fg"><span class="fg-lbl" style="color:var(--amber)">Capital ₹</span><input type="number" id="fCapital" placeholder="e.g. 100000" min="0" step="1000" style="width:110px;padding:8px 10px;background:var(--bg-card);border:1px solid var(--border);border-radius:8px;color:var(--t1);font-family:'DM Mono',monospace;font-size:12px;outline:none;transition:border .2s" onfocus="this.style.borderColor='var(--amber)'" onblur="this.style.borderColor='var(--border)'" oninput="scheduleApplyFilters()" title="Total capital pool. Empty uses your computed deployed book (shown in the placeholder); type to override."></div>
    <div class="fg"><span class="fg-lbl" style="color:var(--amber)">Max Alloc ₹</span><input type="number" id="fMaxAlloc" placeholder="e.g. 20000" min="0" step="1000" style="width:110px;padding:8px 10px;background:var(--bg-card);border:1px solid var(--border);border-radius:8px;color:var(--t1);font-family:'DM Mono',monospace;font-size:12px;outline:none;transition:border .2s" onfocus="this.style.borderColor='var(--amber)'" onblur="this.style.borderColor='var(--border)'" oninput="scheduleApplyFilters()" title="Per-stock allocation cap. Empty uses the learned Position Size (shown in the placeholder); type to override."></div>
+   <div class="fg"><span class="fg-lbl" style="color:var(--green)">Target %</span><input type="number" id="fTgtOverride" placeholder="auto" min="0" step="0.1" style="width:70px;padding:8px 10px;background:var(--bg-card);border:1px solid var(--border);border-radius:8px;color:var(--t1);font-family:'DM Mono',monospace;font-size:12px;outline:none;transition:border .2s" onfocus="this.style.borderColor='var(--green)'" onblur="this.style.borderColor='var(--border)'" oninput="scheduleApplyFilters()" title="Manual GTT target %. Empty uses the auto target (lower of learned Harvest / goal-led, shown in the placeholder); type a value to OVERRIDE it and supersede that rule."></div>
    <button class="btn" id="basketBtn" onclick="exportBasket()" disabled style="background:rgba(251,191,36,.12);border-color:rgba(251,191,36,.3);color:var(--amber);font-weight:700" title="Export selected stocks as Zerodha basket order">🧺 Buy Basket <span id="basketCount"></span></button>
   </div>
   <div class="status-bar" id="statusBar"></div>
@@ -82,9 +83,9 @@
   </div>
   <div class="pgn" id="pgn"></div>
   <div class="fixed-hscroll" id="fixedHScroll"><div class="fixed-hscroll-inner" id="fixedHScrollInner"></div></div>
-  <div id="rankRemoved"></div>
   <div id="rankOpenPositions"></div>
   <div id="rankLatestSession"></div>
+  <div id="rankRemoved"></div>
  </div>
  <div class="tp" id="tab1"><div class="meth" id="methContent"></div></div>
  <div class="tp" id="tab2"><div class="meth" id="perfContent"></div></div>
