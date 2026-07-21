@@ -1,5 +1,5 @@
-const BUILD_TS='2026-07-21 09:33 IST'; // release build time (IST)
-const APP_VERSION=537; // Outcome Feedback moves to the bottom of Performance; Same-Day Exit Headroom KPI quantifies how far stocks kept rising past manual exits (target learning unchanged — already capability-based).
+const BUILD_TS='2026-07-21 11:34 IST'; // release build time (IST)
+const APP_VERSION=538; // Goal popover shows a projected completion date at the active target (informational); Open Positions and Latest Session panels swapped on Rankings.
 const GOOGLE_DRIVE_CLIENT_ID='1015012642264-oi2nelv3v90k3d39r994a6nelgjs2a56.apps.googleusercontent.com'; // Public OAuth Web Client ID.
 const PRICE_BAND_BLOCK_BUFFER_PCT=0.15; // Treat rounded 4.9/9.9/19.9 rows as effectively band-locked.
 const BASKET_CASH_RESERVE_RS=1; // Leave a rupee for broker-side tax/rounding differences.
@@ -2666,6 +2666,35 @@ function solveGoalDailyRate(start,target,days,wdMonthly){
   for(let i=0;i<60;i++){const mid=(lo+hi)/2;if(earned(mid)>=target)hi=mid;else lo=mid;}
   return hi;
 }
+// Projected completion date at a given NET %/trading day (v538, informational).
+// The inverse of solveGoalDailyRate, walking the SAME calendar semantics forward:
+// withdrawals drain every calendar day, earnings compound only on trading days and
+// are tallied even while withdrawals shrink the base. Returns the date the earnings
+// tally reaches the target, or null if it never does within ~8 years at that pace.
+function projectGoalCompletionDate(start,target,netPctPerDay,wdMonthly){
+  if(!(start>0)||!(target>0)||!(netPctPerDay>0)) return null;
+  const r=netPctPerDay/100;
+  const wdDaily=Math.max(0,Number(wdMonthly)||0)*12/365;
+  const cur=new Date(getSessionDate()+'T12:00:00Z');
+  let c=start,e=0,guard=0;
+  while(guard++<2600){
+    cur.setUTCDate(cur.getUTCDate()+1);
+    const dow=cur.getUTCDay();
+    if(dow===0||dow===6||NSE_HOLIDAYS.has(cur.toISOString().slice(0,10))){
+      c=Math.max(0,c-wdDaily); // non-trading day: spending continues, no earning
+      continue;
+    }
+    if(c>0){
+      const gain=c*r;          // trading day: earn first, then that day's spending
+      e+=gain;c=c+gain-wdDaily;
+      if(c<0)c=0;
+      if(e>=target) return cur.toISOString().slice(0,10);
+    }else{
+      c=Math.max(0,c-wdDaily);
+    }
+  }
+  return null;
+}
 // Goal capital basis (v523, owner correction): compounding applies to TOTAL capital —
 // deployable cash + today's sell proceeds + the current market value of everything
 // already invested (holdings + positions, live scanner price preferred).
@@ -2754,6 +2783,23 @@ function buildGoalPopoverContent(){
     <span><span style="${_lbl}">Withdraw ₹/mo</span><input id="goalWd" type="number" value="${g.withdrawMonthly}" style="width:76px;${_in}" onchange="onGoalChange()"></span>
   </div>
   <div style="font-size:11px;line-height:1.6;color:var(--t2);margin-top:10px">${reqLine}</div>
+  ${(()=>{
+    // Projected finish at the ACTIVE target's expected net (v538, informational): the
+    // date the earnings tally would reach the goal if every trading day netted what the
+    // system's chosen target nets after charges. A best-case pace, not a forecast —
+    // said explicitly so it cannot be read as one.
+    if(!(basis>0)) return '';
+    let at=null;try{at=getActiveTargetInfo();}catch(e){}
+    if(!at?.tgtPct) return '';
+    const netPct=+(at.tgtPct-estimateRoundTripCostPct(at.tgtPct)).toFixed(3);
+    if(!(netPct>0)) return '';
+    const proj=projectGoalCompletionDate(basis,g.target,netPct,g.withdrawMonthly);
+    const srcLbl=at.source==='goal'?'goal-led':'Harvest';
+    if(!proj) return `<div style="font-size:11px;line-height:1.6;margin-top:6px;color:var(--red)">Projected finish at the active ${srcLbl} target (${at.tgtPct.toFixed(1)}% gross ≈ ${netPct.toFixed(2)}% net/trading day): <b>not within 8 years</b> — withdrawals outpace that target on this capital.</div>`;
+    const late=proj>g.endDate;
+    const gapDays=Math.abs(Number(tradingDaysBetween(late?g.endDate:proj,late?proj:g.endDate))||0);
+    return `<div style="font-size:11px;line-height:1.6;margin-top:6px;color:var(--t2)">Projected finish at the active ${srcLbl} target (${at.tgtPct.toFixed(1)}% gross ≈ ${netPct.toFixed(2)}% net/trading day, hit daily): <b style="color:${late?'var(--amber)':'var(--green)'}">${proj}</b> — ${late?`≈ ${gapDays} trading days past`:`≈ ${gapDays} trading days before`} the deadline. Best-case pace (assumes the target fills every session), not a forecast.</div>`;
+  })()}
   <div style="font-size:10px;line-height:1.5;color:var(--t3);margin-top:6px">${remaining} trading day${remaining===1?'':'s'} left until ${g.endDate} (weekends and NSE holidays excluded) · withdrawal drains ≈ ₹${goalFmtRs(wdDaily)}/calendar day (weekends and holidays included). Informational — never changes targets or allocation.</div>`;
 }
 function renderGoalPopover(){

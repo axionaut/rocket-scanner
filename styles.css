@@ -111,7 +111,7 @@ table.main tbody td{padding:9px 11px;font-family:'DM Mono',monospace;font-size:1
 /* Rankings portfolio panels (v531). Spacing is owned by these containers plus the
    pagination block above them, so the cards themselves carry no bottom margin. */
 #rankLatestSession,#rankOpenPositions{margin-top:24px}
-#rankOpenPositions{margin-bottom:40px}
+#rankLatestSession{margin-bottom:40px}
 /* Pagination — restored in v534 by owner request. Bottom margin stays 0 because
    #rankLatestSession below it supplies the gap. */
 .pgn{display:flex;justify-content:center;align-items:center;gap:6px;margin:20px 0 0}
