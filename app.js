@@ -1,5 +1,5 @@
-const BUILD_TS='2026-07-22 10:11 IST'; // release build time (IST)
-const APP_VERSION=549; // Auto-refresh now polls every 3s and reacts only to ALL NSE last-modified changes.
+const BUILD_TS='2026-07-22 11:59 IST'; // release build time (IST)
+const APP_VERSION=550; // Continuation-aware Radar ranking now prefers build-up and penalizes falling-knife spikes.
 const GOOGLE_DRIVE_CLIENT_ID='1015012642264-oi2nelv3v90k3d39r994a6nelgjs2a56.apps.googleusercontent.com'; // Public OAuth Web Client ID.
 const PRICE_BAND_BLOCK_BUFFER_PCT=0.15; // Treat rounded 4.9/9.9/19.9 rows as effectively band-locked.
 const BASKET_CASH_RESERVE_RS=1; // Leave a rupee for broker-side tax/rounding differences.
@@ -1972,6 +1972,21 @@ function radarTransformed(raw,f,priceI){
   if(f.name==='Price')return Math.log1p(Math.max(0,x));
   return x;
 }
+function getContinuationSignal(raw,targetI,priceHourI,price15I,price5I,relI,relAtI,volChgI){
+  const day=radarNum(raw[targetI])||0;
+  const vals=[priceHourI>=0?radarNum(raw[priceHourI]):null,price15I>=0?radarNum(raw[price15I]):null,price5I>=0?radarNum(raw[price5I]):null].filter(v=>v!==null);
+  const positive=vals.filter(v=>v>0).length;
+  const negative=vals.filter(v=>v<0).length;
+  const relvol=radarNum(raw[relI])||0;
+  const relAt=radarNum(raw[relAtI])||0;
+  const volChg=radarNum(raw[volChgI])||0;
+  const participationReady=(relvol>=1.2)||(relAt>=1.5)||(volChg>=20);
+  const dayStrength=day>=8?0.45:day>=3?0.25:0;
+  const intradayStrength=vals.length?positive/vals.length*0.45:0;
+  const participationStrength=participationReady?0.30:0;
+  const reversalPenalty=vals.length?negative/vals.length*0.40:0;
+  return clamp01(dayStrength+intradayStrength+participationStrength-reversalPenalty,-1,1);
+}
 function radarPrior(feature,p){
   const s=feature.name.toLowerCase();
   if(p===null)return null;
@@ -2035,7 +2050,10 @@ function buildRadarSupplements(){
 function radarAnalyze(headers,rawRows,supplements={},heldSymbols=new Set()){
   const priceI=radarIdx(headers,'Price'),targetI=radarIdx(headers,'Price change %, 1 day'),sectorI=radarIdx(headers,'Sector'),symbolI=radarIdx(headers,'Symbol'),descI=radarIdx(headers,'Description');
   if(symbolI<0||priceI<0||targetI<0)throw Error('Expected Symbol, Price, and Price change %, 1 day columns.');
-  const rockets=rawRows.map((r,i)=>({i,y:radarNum(r[targetI])})).filter(x=>x.y!==null&&x.y>=10).map(x=>x.i),rset=new Set(rockets);
+  const turnI=radarIdx(headers,'Price × volume (turnover), 1 day'),relI=radarIdx(headers,'Relative volume, 1 day'),relAtI=radarIdx(headers,'Relative volume at time'),volChgI=radarIdx(headers,'Volume change %, 1 day'),gapI=radarIdx(headers,'Gap %, 1 day'),adrI=radarIdx(headers,'Average daily range %'),atrI=radarIdx(headers,'Average true range %, 14, 1 day'),atrWeekI=radarIdx(headers,'Average true range %, 14, 1 week'),volI=radarIdx(headers,'Volatility, 1 day'),highI=radarIdx(headers,'High, 1 day'),lowI=radarIdx(headers,'Low, 1 day');
+  const priceHourI=radarIdx(headers,'Price change %, 1 hour'),price15I=radarIdx(headers,'Price change %, 15 minutes'),price5I=radarIdx(headers,'Price change %, 5 minutes');
+  const continuationSignals=rawRows.map(r=>getContinuationSignal(r,targetI,priceHourI,price15I,price5I,relI,relAtI,volChgI));
+  const continuationRows=continuationSignals.map((signal,i)=>signal>=.35?i:null).filter(i=>i!==null),rset=new Set(continuationRows);
   const sectorBuckets={};
   for(const r of rawRows){const s=r[sectorI]||'Unknown',v=radarNum(r[targetI]);if(v!==null)(sectorBuckets[s]??=[]).push(clamp01(v,-10,10));}
   const sectorMeans=Object.fromEntries(Object.entries(sectorBuckets).map(([s,a])=>[s,a.reduce((x,y)=>x+y,0)/a.length])),sectorSorted=Object.values(sectorMeans).sort((a,b)=>a-b);
@@ -2060,11 +2078,10 @@ function radarAnalyze(headers,rawRows,supplements={},heldSymbols=new Set()){
     }
     const mr=ar.length?ar.reduce((a,b)=>a+b,0)/ar.length:.5,mo=ao.length?ao.reduce((a,b)=>a+b,0)/ao.length:.5;
     f.effect=clamp01((mr-mo)*2,-1,1);
-    f.reliability=Math.sqrt(f.coverage)*(rockets.length/(rockets.length+12));
+    f.reliability=Math.sqrt(f.coverage)*(continuationRows.length/(continuationRows.length+12));
     f.weight=(.07+Math.abs(f.effect))*.6+.4*Math.sqrt(f.coverage);
     features.push(f);
   }
-  const turnI=radarIdx(headers,'Price × volume (turnover), 1 day'),relI=radarIdx(headers,'Relative volume, 1 day'),relAtI=radarIdx(headers,'Relative volume at time'),volChgI=radarIdx(headers,'Volume change %, 1 day'),gapI=radarIdx(headers,'Gap %, 1 day'),adrI=radarIdx(headers,'Average daily range %'),atrI=radarIdx(headers,'Average true range %, 14, 1 day'),atrWeekI=radarIdx(headers,'Average true range %, 14, 1 week'),volI=radarIdx(headers,'Volatility, 1 day'),highI=radarIdx(headers,'High, 1 day'),lowI=radarIdx(headers,'Low, 1 day');
   const allRows=rawRows.map((raw,ri)=>{
     const parts={},weights={},contrib=[];
     for(const g in RADAR_GROUPS){parts[g]=0;weights[g]=0;}
@@ -2090,8 +2107,11 @@ function radarAnalyze(headers,rawRows,supplements={},heldSymbols=new Set()){
     const atrPct=radarNum(raw[atrI]);
     const rangePct=Math.max(radarNum(raw[adrI])||0,atrPct||0,radarNum(raw[volI])||0,(radarNum(raw[atrWeekI])||0)/Math.sqrt(5));
     const stretch=rangePct?10/rangePct:99;
-    const participationReady=(relvol||0)>=1.2||(relAt||0)>=1.5||(volChg||0)>=30;
+    const participationReady=(relvol||0)>=1.2||(relAt||0)>=1.5||(volChg||0)>=20;
     const impulseReady=(day>=.5&&day<8)||parts.momentum>=62||parts.trend>=65;
+    const continuationScore=continuationSignals[ri]||0;
+    const followThroughBonus=continuationScore*8;
+    const fallingKnifePenalty=day>=8&&(continuationScore<.15||!participationReady)?-10:0;
     const rocketReady=rangePct>=3.5&&participationReady&&impulseReady&&quality>=.7&&turn>=25e5&&price>=10&&basketEligible;
     const gateReasons=[];
     if(series!=='EQ')gateReasons.push(series==='UNKNOWN'?'exchange series unverified':'non-EQ series '+series);
@@ -2120,6 +2140,7 @@ function radarAnalyze(headers,rawRows,supplements={},heldSymbols=new Set()){
     if(stretch>4)rawScore-=22;else if(stretch>3)rawScore-=14;else if(stretch>2.5)rawScore-=7;
     if(!participationReady)rawScore-=7;
     if(!impulseReady)rawScore-=5;
+    rawScore+=followThroughBonus+fallingKnifePenalty;
     if(day>8)rawScore-=Math.min(13,(day-8)*1.7);
     if(gap>7)rawScore-=Math.min(6,(gap-7)*.8);
     if(turn<5e5)rawScore-=7;
@@ -2146,7 +2167,7 @@ function radarAnalyze(headers,rawRows,supplements={},heldSymbols=new Set()){
   }
   rows.sort((a,b)=>b.score-a.score||a.symbol.localeCompare(b.symbol));
   rows.forEach((r,i)=>{r.rank=i+1;});
-  return {rows,features,rockets:rockets.length,suppressedHeld,ids:{priceI,targetI,sectorI,symbolI,descI}};
+  return {rows,features,rockets:continuationRows.length,suppressedHeld,ids:{priceI,targetI,sectorI,symbolI,descI}};
 }
 // Score the current upload (object rows from parseCSV) through the Radar composite.
 function radarScoreRows(objRows){
