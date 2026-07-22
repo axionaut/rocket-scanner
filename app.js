@@ -1,5 +1,6 @@
-const BUILD_TS='2026-07-22 21:09 IST'; // release build time (IST)
-const APP_VERSION=555; // v555 market-cycle stage awareness (stateless, self-calibrating): per-row stage label (1 accumulation · 2 breakout · 3 event · 4 profit-booking · 5 re-accumulation · 6 second-leg); a quiet-accumulation signal (conjunction-of-percentiles) injected via the rocket-diagnostic weighting; sell-the-news decay off Recent earnings date (horizon = review days); market intraday-breadth gauge in the status bar + basket export (entry timing, never changes ranking).
+const BUILD_TS='2026-07-22 21:32 IST'; // release build time (IST)
+const APP_VERSION=556; // v556: parse the NSE Market Activity Report (MA<date>.csv) — official Nifty %, advances/declines and sector index moves shown as market CONTEXT in the status bar (EOD data, display only, never fed into per-row scoring); MA added to the ℹ️ file manifest.
+// v555 market-cycle stage awareness (stateless, self-calibrating): per-row stage label (1 accumulation · 2 breakout · 3 event · 4 profit-booking · 5 re-accumulation · 6 second-leg); a quiet-accumulation signal (conjunction-of-percentiles) injected via the rocket-diagnostic weighting; sell-the-news decay off Recent earnings date (horizon = review days); market intraday-breadth gauge in the status bar + basket export (entry timing, never changes ranking).
 const GOOGLE_DRIVE_CLIENT_ID='1015012642264-oi2nelv3v90k3d39r994a6nelgjs2a56.apps.googleusercontent.com'; // Public OAuth Web Client ID.
 const PRICE_BAND_BLOCK_BUFFER_PCT=0.15; // Treat rounded 4.9/9.9/19.9 rows as effectively band-locked.
 const BASKET_CASH_RESERVE_RS=1; // Leave a rupee for broker-side tax/rounding differences.
@@ -977,6 +978,7 @@ let NSE_CORP_ACTION={}; // {symbol -> [{exDate:'YYYY-MM-DD', purpose, kind:'stru
 let NSE_BOARD_MEETING={}; // {symbol -> {date:'YYYY-MM-DD', purpose, isResults}} from PR-zip bm file (v554) — upcoming-event calendar
 let NSE_ANNOUNCE={}; // {symbol -> short label} from PR-zip an file (v554) — an announcement was filed this session
 let MARKET_INTRADAY=null; // v555 WS-D: {adv,dec,advPct,median} market breadth from change-from-open (entry-timing gauge)
+let NSE_MARKET=null; // v556: official Market Activity Report summary {date,dateISO,niftyPct,advances,declines,tradedValueCr,marketCapCr,indices} — EOD context, display only
 let NSE_NON_EQ=new Set(); // symbols in non-EQ series (BE,BZ,SZ,SM,ST) — excluded from display, kept in learning
 let NSE_HOLIDAYS=new Set(); // Set of 'YYYY-MM-DD' strings for NSE trading holidays
 let SURV_CUSTOM_RULES=[]; // [{key,column,label}] all surveillance rules — user-managed, persisted in brain
@@ -1497,6 +1499,27 @@ function parseAnnouncements(text){
     if(!NSE_ANNOUNCE[sym])NSE_ANNOUNCE[sym]=parts.slice(1).join(' : ').replace(new RegExp('^'+sym+'\\b\\s*','i'),'').trim().slice(0,120);
   });
 }
+// PR/daily-zip Market Activity Report MA<ddmmyyyy>.csv (v556). NSE end-of-day market summary:
+// date, index table (name + prev-close/open/high/low/close/gain-loss), ADVANCES/DECLINES, market
+// totals. Parsed for DISPLAY CONTEXT only (it is EOD data, so during a live intraday scan it is the
+// prior session) — never fed into the same-day per-row scoring, to avoid a timeframe mismatch.
+function parseMarketActivity(text){
+  const m={date:null,dateISO:null,niftyPct:null,advances:null,declines:null,tradedValueCr:null,marketCapCr:null,indices:{}};
+  const numf=s=>{const x=Number(String(s).replace(/[,%\s]/g,''));return Number.isFinite(x)?x:null;};
+  String(text||'').split(/\r?\n/).forEach(line=>{
+    const f=line.split(',');if(f.length<2)return;
+    const a=(f[1]||'').trim(),b=(f[2]||'').trim();
+    const dm=a.match(/^(\d{1,2})-([A-Za-z]{3})-(\d{4})$/);
+    if(!m.date&&dm){m.date=a;const mo=PR_MONTHS[dm[2].toLowerCase()];if(mo)m.dateISO=`${dm[3]}-${mo}-${dm[1].padStart(2,'0')}`;return;}
+    if(/^ADVANCES$/i.test(a)){m.advances=numf(b);return;}
+    if(/^DECLINES$/i.test(a)){m.declines=numf(b);return;}
+    if(/traded value/i.test(a)){m.tradedValueCr=numf(b);return;}
+    if(/total market cap/i.test(a)){m.marketCapCr=numf(b);return;}
+    // index rows: name + prev-close(f2)…close(f6)…gain-loss(f7). % = gain-loss / prev-close.
+    if(f.length>=8&&/[A-Za-z]/.test(a)){const prev=numf(f[2]),gl=numf(f[7]);if(prev!=null&&gl!=null&&prev!==0){const pct=gl/prev*100;m.indices[a]=pct;if(a==='Nifty 50')m.niftyPct=pct;}}
+  });
+  NSE_MARKET=m;
+}
 function parseNSEHolidays(text){
   // Format: Sr. No,Date,Day,Description — Date is DD-MMM-YYYY
   const months={jan:'01',feb:'02',mar:'03',apr:'04',may:'05',jun:'06',jul:'07',aug:'08',sep:'09',oct:'10',nov:'11',dec:'12'};
@@ -1966,6 +1989,7 @@ function detectNSE(filename,content){
   if(/^bc\d{6,8}\.csv$/.test(raw)){parseCorpActions(content);return null;} // PR-zip corporate actions (v552); null = no load-status pill (covered by the zip)
   if(/^bm\d{6,8}\.txt$/.test(raw)){parseBoardMeetings(content);return null;} // PR-zip board meetings (v554)
   if(/^an\d{6,8}\.txt$/.test(raw)){parseAnnouncements(content);return null;} // PR-zip announcements (v554)
+  if(/^ma\d{6,8}\.csv$/.test(raw)){parseMarketActivity(content);return'market';} // Market Activity Report (v556)
   if(fn.includes('nse holidays')){parseNSEHolidays(content);return'holidays';}
   return null;
 }
@@ -5429,9 +5453,20 @@ function renderStatusBar(){
     html+=` <span style="color:var(--t3);font-size:11px;margin-left:8px">· select ${instrumentLabel} to allocate ${fmtINR(capital)}</span>`;
   }
   // v555 WS-D: market intraday breadth gauge (entry timing). Market-wide, so it never changes the ranking.
+  // v556: enrich with the official Market Activity Report context (Nifty %, adv/dec, strongest/weakest sector).
   if(MARKET_INTRADAY&&MARKET_INTRADAY.advPct!=null){
     const up=MARKET_INTRADAY.advPct>=0.5,c=up?'var(--green)':'var(--red)',pct=(MARKET_INTRADAY.advPct*100).toFixed(0);
-    html+=` <span style="color:${c};font-size:11px;font-family:'DM Mono',monospace;font-weight:700;margin-left:8px" title="Market intraday breadth: ${MARKET_INTRADAY.adv} of ${MARKET_INTRADAY.adv+MARKET_INTRADAY.dec} stocks are trading above their open. Below 50% = broad intraday weakness → continuation odds are lower; consider waiting for the market to turn up. Entry-timing gauge only — it does NOT change the ranking.">· Market ${up?'▲':'▼'} ${pct}% up-from-open</span>`;
+    let officialInline='',officialTip='';
+    if(NSE_MARKET&&NSE_MARKET.niftyPct!=null){
+      const sgn=v=>(v>=0?'+':'')+v.toFixed(2)+'%';
+      officialInline=` · Nifty ${sgn(NSE_MARKET.niftyPct)}`;
+      const sect=Object.entries(NSE_MARKET.indices||{}).filter(([n])=>/^Nifty (Auto|Bank|IT|Pharma|FMCG|Metal|Realty|Energy|Media|Infra|PSU Bank|Fin Service|Healthcare|Consumption|Commodities|Serv Sector)$/.test(n)).sort((a,b)=>(b[1]||0)-(a[1]||0));
+      const ad=(NSE_MARKET.advances!=null&&NSE_MARKET.declines!=null)?` · Adv/Dec ${NSE_MARKET.advances}/${NSE_MARKET.declines}`:'';
+      const strong=sect[0]?` · strongest ${sect[0][0]} ${sgn(sect[0][1])}`:'',weak=sect.length>1?` · weakest ${sect[sect.length-1][0]} ${sgn(sect[sect.length-1][1])}`:'';
+      const stale=NSE_MARKET.dateISO&&NSE_MARKET.dateISO!==getSessionDate()?' (prior session — EOD)':' (EOD)';
+      officialTip=` — Official Market Activity ${NSE_MARKET.date||''}${stale}: Nifty ${sgn(NSE_MARKET.niftyPct)}${ad}${strong}${weak}. Context only, not in scoring.`;
+    }
+    html+=` <span style="color:${c};font-size:11px;font-family:'DM Mono',monospace;font-weight:700;margin-left:8px" title="Market intraday breadth: ${MARKET_INTRADAY.adv} of ${MARKET_INTRADAY.adv+MARKET_INTRADAY.dec} stocks are trading above their open. Below 50% = broad intraday weakness → continuation odds lower; consider waiting for the market to turn up. Entry-timing gauge only — it does NOT change the ranking.${officialTip}">· Market ${up?'▲':'▼'} ${pct}% up-from-open${officialInline}</span>`;
   }
   if(SUPPRESSED_HELD>0)html+=` <span class="sb-tag" style="margin-left:8px" title="Held positions (Holdings + Positions + today's net Orders buys) never re-enter the buy ranking. See Open Positions on the Performance tab.">📌 ${SUPPRESSED_HELD} held suppressed</span>`;
   if(SURV_HARD_REMOVED>0)html+=` <span class="sb-tag sb-tag-red" style="margin-left:4px" title="Weeded out by the configured surveillance rules in the Methodology table (hard filter).">⚠ ${SURV_HARD_REMOVED} surveillance removed</span>`;
@@ -6385,6 +6420,7 @@ function getExpectedInputFiles(){
     {key:'REG1_IND'+nd.ddmmyy+'.csv',label:'REG1_IND'+nd.ddmmyy+'.csv',parent:zipKey,nseType:'surv'},
     {key:'sec_bhavdata_full_'+nd.ddmmyyyy+'.csv',label:'sec_bhavdata_full_'+nd.ddmmyyyy+'.csv',parent:zipKey,nseType:'bhav'},
     {key:'sec_list_'+nd.ddmmyyyy+'.csv',label:'sec_list_'+nd.ddmmyyyy+'.csv',parent:zipKey,nseType:'price_band'},
+    {key:'MA'+nd.ddmmyy+'.csv',label:'MA'+nd.ddmmyy+'.csv (Market Activity)',parent:zipKey,nseType:'market'},
   ];
   return {canonical,nse,all:[...canonical,...nse]};
 }
@@ -6555,7 +6591,7 @@ async function processFiles(files,sourceLabel,opts={}){
   // Upload CHANGED canonical input files to Drive in the background. Rankings are built
   // from the selected local files immediately, because the market does not wait for Drive.
   saveInputsInBackground(files,{silent});
-  NSE_BHAV={};NSE_52W={};NSE_SURV={};NSE_BULK={};NSE_BLOCK={};NSE_PRICE_BAND={};NSE_DEAL_NET={};NSE_CORP_ACTION={};NSE_BOARD_MEETING={};NSE_ANNOUNCE={};NSE_STATUS={};NSE_SERIES={};
+  NSE_BHAV={};NSE_52W={};NSE_SURV={};NSE_BULK={};NSE_BLOCK={};NSE_PRICE_BAND={};NSE_DEAL_NET={};NSE_CORP_ACTION={};NSE_BOARD_MEETING={};NSE_ANNOUNCE={};NSE_MARKET=null;NSE_STATUS={};NSE_SERIES={};
   let tvFile=null,nseZip=null,holdFile=null,posFile=null,ordFile=null,tbFile=null,holidayFile=false,holidayFileName='';
   for(const f of files){
     const name=inputNameLower(f.name);
