@@ -1,5 +1,5 @@
-const BUILD_TS='2026-07-22 14:10 IST'; // release build time (IST)
-const APP_VERSION=553; // Self-calibrating pass over the v552 multi-timeframe scoring: removes all owner-tunable constants — chase relief = cross-sectional trend percentile, sector-relative day = self-weighted Momentum signal, dividend-materiality vs the stock's ADR, buyback reuses the ±1.5 deal-net unit, deal-net weight ties to the ₹25L line.
+const BUILD_TS='2026-07-22 20:35 IST'; // release build time (IST)
+const APP_VERSION=554; // v554: neutralised corp-action rows now DISPLAY the real day move (⚑ tag) while scoring stays neutralised; Event Risk flag from bm/an (board meetings + announcements) floors event-day rows at Medium risk and annotates the modal; Risk filter is multi-select; row-click opens the scoring modal on the Latest Session / Open Positions / Performance Stocks tables too.
 const GOOGLE_DRIVE_CLIENT_ID='1015012642264-oi2nelv3v90k3d39r994a6nelgjs2a56.apps.googleusercontent.com'; // Public OAuth Web Client ID.
 const PRICE_BAND_BLOCK_BUFFER_PCT=0.15; // Treat rounded 4.9/9.9/19.9 rows as effectively band-locked.
 const BASKET_CASH_RESERVE_RS=1; // Leave a rupee for broker-side tax/rounding differences.
@@ -974,6 +974,8 @@ let NSE_STATUS={}; // {symbol -> exchange status letter from REG1 (A = active)}
 let NSE_SERIES={}; // {symbol -> exchange series letters from REG1 (EQ, BE, BZ, SM, ST, SZ)}
 let NSE_DEAL_NET={}; // {symbol -> signed net deal quantity (BUY − SELL) across bulk + block files}
 let NSE_CORP_ACTION={}; // {symbol -> [{exDate:'YYYY-MM-DD', purpose, kind:'structural'|'dividend'|'buyback', divAmt}]} from PR-zip bc file (v552)
+let NSE_BOARD_MEETING={}; // {symbol -> {date:'YYYY-MM-DD', purpose, isResults}} from PR-zip bm file (v554) — upcoming-event calendar
+let NSE_ANNOUNCE={}; // {symbol -> short label} from PR-zip an file (v554) — an announcement was filed this session
 let NSE_NON_EQ=new Set(); // symbols in non-EQ series (BE,BZ,SZ,SM,ST) — excluded from display, kept in learning
 let NSE_HOLIDAYS=new Set(); // Set of 'YYYY-MM-DD' strings for NSE trading holidays
 let SURV_CUSTOM_RULES=[]; // [{key,column,label}] all surveillance rules — user-managed, persisted in brain
@@ -1468,6 +1470,32 @@ function parseCorpActions(text){
     (NSE_CORP_ACTION[sym]??=[]).push({exDate,purpose,kind,divAmt});
   });
 }
+const PR_MONTHS={jan:'01',feb:'02',mar:'03',apr:'04',may:'05',jun:'06',jul:'07',aug:'08',sep:'09',oct:'10',nov:'11',dec:'12'};
+// PR-zip board-meetings file bm<ddmmyyyy>.txt (v554). Line: "<company> <SYMBOL> : DD-MMM-YYYY : <purpose>".
+// An upcoming-event calendar — a results meeting on the session date flags an event day (idea #1 Event Risk).
+function parseBoardMeetings(text){
+  String(text||'').split(/\r?\n/).forEach((line,i)=>{
+    if(i===0||!line.trim())return; // header
+    const parts=line.split(' : ');
+    if(parts.length<2)return;
+    const sym=normSym(parts[0].trim().split(/\s+/).pop());if(!sym)return;
+    const dm=parts[1].trim().match(/^(\d{1,2})-([A-Za-z]{3})-(\d{4})$/);if(!dm)return;
+    const mo=PR_MONTHS[dm[2].toLowerCase()];if(!mo)return;
+    const date=`${dm[3]}-${mo}-${dm[1].padStart(2,'0')}`,purpose=parts.slice(2).join(' : ').trim();
+    NSE_BOARD_MEETING[sym]={date,purpose,isResults:/financial result/i.test(purpose)};
+  });
+}
+// PR-zip announcements file an<ddmmyyyy>.txt (v554). Line: "<company> <SYMBOL> : <category ...>[ : <text>]".
+// Presence = the company filed an announcement this session; stored short for the detail modal only (noisy → not scored).
+function parseAnnouncements(text){
+  String(text||'').split(/\r?\n/).forEach((line,i)=>{
+    if(i===0||!line.trim())return; // header
+    const parts=line.split(' : ');
+    if(parts.length<2)return;
+    const sym=normSym(parts[0].trim().split(/\s+/).pop());if(!sym)return;
+    if(!NSE_ANNOUNCE[sym])NSE_ANNOUNCE[sym]=parts.slice(1).join(' : ').replace(new RegExp('^'+sym+'\\b\\s*','i'),'').trim().slice(0,120);
+  });
+}
 function parseNSEHolidays(text){
   // Format: Sr. No,Date,Day,Description — Date is DD-MMM-YYYY
   const months={jan:'01',feb:'02',mar:'03',apr:'04',may:'05',jun:'06',jul:'07',aug:'08',sep:'09',oct:'10',nov:'11',dec:'12'};
@@ -1935,6 +1963,8 @@ function detectNSE(filename,content){
   if(fn.includes('bulk')){parseDeal(content,NSE_BULK);return'bulk';}
   if(fn.includes('block')){parseDeal(content,NSE_BLOCK);return'block';}
   if(/^bc\d{6,8}\.csv$/.test(raw)){parseCorpActions(content);return null;} // PR-zip corporate actions (v552); null = no load-status pill (covered by the zip)
+  if(/^bm\d{6,8}\.txt$/.test(raw)){parseBoardMeetings(content);return null;} // PR-zip board meetings (v554)
+  if(/^an\d{6,8}\.txt$/.test(raw)){parseAnnouncements(content);return null;} // PR-zip announcements (v554)
   if(fn.includes('nse holidays')){parseNSEHolidays(content);return'holidays';}
   return null;
 }
@@ -2082,6 +2112,12 @@ function buildRadarSupplements(){
   // and the R2 buyback bonus. Materiality of a dividend is decided at scoring time (needs price).
   const today=getSessionDate();
   Object.entries(NSE_CORP_ACTION).forEach(([sym,acts])=>{const t=(acts||[]).find(a=>a.exDate===today);if(t)get(sym).corpToday=t;});
+  // Board-meeting calendar (bm) + today's announcements (an), v554. Drives the Event Risk flag
+  // (idea #1): the score stays direction-neutral, but an event-day move is flagged as less
+  // pattern-reliable, so it floors risk at Medium and annotates the detail modal.
+  Object.entries(NSE_BOARD_MEETING).forEach(([sym,bm])=>{get(sym).boardMeeting=bm;});
+  Object.entries(NSE_ANNOUNCE).forEach(([sym,a])=>{get(sym).announceToday=a;});
+  Object.values(meta).forEach(m=>{m.eventToday=!!m.corpToday||!!(m.boardMeeting&&m.boardMeeting.date===today&&m.boardMeeting.isResults);});
   return meta;
 }
 function radarAnalyze(headers,rawRows,supplements={},heldSymbols=new Set()){
@@ -2105,6 +2141,9 @@ function radarAnalyze(headers,rawRows,supplements={},heldSymbols=new Set()){
     const adr=adrI>=0?radarNum(rawRows[ri][adrI]):null;
     const material=ca.kind==='structural'||(ca.kind==='dividend'&&price>0&&adr!==null&&ca.divAmt/price*100>=adr);
     if(!material)continue;
+    // Keep the REAL day move for DISPLAY (owner v554 — showing 0 hid the true −41% move); only the
+    // SCORING inputs are blanked so the mechanical move can't pollute the percentiles or penalties.
+    meta._realDay=targetI>=0?radarNum(rawRows[ri][targetI]):null;
     if(targetI>=0)rawRows[ri][targetI]='';
     if(changeOpenI>=0)rawRows[ri][changeOpenI]='';
     if(gapI>=0)rawRows[ri][gapI]='';
@@ -2250,9 +2289,12 @@ function radarAnalyze(headers,rawRows,supplements={},heldSymbols=new Set()){
     // the model's existing deal-net conviction unit (+1.5). Stateless: driven by the bc BUY BACK
     // corporate-action event, never a cross-day share-count delta.
     if(meta.corpToday?.kind==='buyback')rawScore+=1.5;
+    // Display the REAL day move for a neutralised corp-action row (scoring already used the blanked 0).
+    const dispDay=meta._corpNeutralised&&meta._realDay!=null?meta._realDay:day;
     return {symbol,name:String(raw[descI]||symbol),sector:raw[sectorI]||'',rawScore,parts,contrib,quality,
-      price,day,priceChange:day,turnover:turn,relvol,gap,rangePct,stretch,atr:atrPct,
+      price,day:dispDay,priceChange:dispDay,turnover:turn,relvol,gap,rangePct,stretch,atr:atrPct,
       high1d:highI>=0?radarNum(raw[highI]):null,low1d:lowI>=0?radarNum(raw[lowI]):null,rocketToday:day>=10,
+      corpAction:meta._corpNeutralised?(meta.corpToday?.purpose||'corporate action'):null,
       rocketReady,gateReasons,series,band:band??null,status,eqEligible,basketEligible,meta};
   });
   // Held positions never re-enter the buy ranking, but they DO stay in the scored
@@ -2268,6 +2310,9 @@ function radarAnalyze(headers,rawRows,supplements={},heldSymbols=new Set()){
     r.score=+(100*Math.pow(radarPct(rawScores,r.rawScore),4)).toFixed(1);
     r.rocketScore=r.score; // allocation/export alias
     r.risk=!r.basketEligible||r.meta.flags?.length>=3||r.turnover<25e5||r.price<10?'High':(r.gap>6||r.day>6||r.parts.volatility<38?'Medium':'Low');
+    // Event Risk (idea #1, v554): an event-day move (corp-action ex-date or results today) is less
+    // pattern-reliable, so never label it Low risk. Direction-neutral — it changes risk, not score.
+    if(r.risk==='Low'&&r.meta?.eventToday)r.risk='Medium';
     r.setup=r.series!=='EQ'?(r.series==='UNKNOWN'?'Series unverified':`Non-EQ · ${r.series}`):r.band!==null&&r.band<10?`${r.band}% price band`:radarSetupLabel(r);
   }
   rows.sort((a,b)=>b.score-a.score||a.symbol.localeCompare(b.symbol));
@@ -3195,7 +3240,7 @@ function attachColDrag(tableEl,tableKey,onReorder){
     });
   });
 }
-function makeSortableTable(id, cols, rows, defaultSortKey, defaultDir=-1, rowStyleFn=null, totalsRow=null){
+function makeSortableTable(id, cols, rows, defaultSortKey, defaultDir=-1, rowStyleFn=null, totalsRow=null, rowClickKey=null){
   cols=applyColOrder(id,cols.slice());
   const thStyle=(align)=>`padding:6px 10px;text-align:${align};cursor:pointer;user-select:none;white-space:nowrap`;
   const tdStyle=(align,extra='')=>`padding:7px 10px;text-align:${align};white-space:nowrap${extra?';'+extra:''}`;
@@ -3209,7 +3254,7 @@ function makeSortableTable(id, cols, rows, defaultSortKey, defaultDir=-1, rowSty
     const thead=`<thead><tr style="color:var(--t3);border-bottom:1px solid var(--border)">${
       cols.map(c=>`<th data-key="${c.key}" style="${thStyle(c.align||'right')}">${c.label}${sortKey===c.key?(sortDir>0?' ▲':' ▼'):''}</th>`).join('')
     }</tr></thead>`;
-    const tbody=`<tbody>${sorted.map(row=>{const _rs=rowStyleFn?rowStyleFn(row):'';return`<tr style="border-bottom:1px solid var(--border);color:var(--t1);${_rs}">${
+    const tbody=`<tbody>${sorted.map(row=>{const _rs=rowStyleFn?rowStyleFn(row):'';const _cs=rowClickKey?row[rowClickKey]:null;const _ca=_cs?` onclick="showRadarDetail('${String(_cs).replace(/'/g,'')}')" title="Click for the full scoring breakdown"`:'';return`<tr${_ca} style="border-bottom:1px solid var(--border);color:var(--t1);${_cs?'cursor:pointer;':''}${_rs}">${
       cols.map((c,i)=>{
         const v=row[c.key];
         const display=c.fmt?c.fmt(v,row):v;
@@ -3440,7 +3485,7 @@ function buildLatestSessionPanel(query=''){
       netPnl:shownTotal,
       netPnlPct:shownSummary.pct
     }:null;
-    const latestTbl=makeSortableTable('rank-latest-session',latestCols,rows,'_sort',-1,null,latestTotals);
+    const latestTbl=makeSortableTable('rank-latest-session',latestCols,rows,'_sort',-1,null,latestTotals,'sym');
     const emptyNote=String(query||'').trim()
       ?panelNoMatchHtml(query,'booked trade')
       :`<div style="padding:12px 16px;color:var(--t3);font-size:12px">No sell orders found in Orders.csv — only sell orders generate P&L rows.</div>`;
@@ -3488,7 +3533,7 @@ function buildLatestSessionPanel(query=''){
       netPnl:shownTotal,
       netPnlPct:tbSummary.pct
     }:null;
-    const tbTbl=makeSortableTable('rank-latest-session',tbCols,rows,'_sort',-1,null,tbTotals);
+    const tbTbl=makeSortableTable('rank-latest-session',tbCols,rows,'_sort',-1,null,tbTotals,'sym');
     const html=card(`
       <div style="padding:10px 16px;display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:6px;border-bottom:1px solid var(--border)">
         <span style="font-size:10px;font-weight:700;color:var(--t2);text-transform:uppercase;letter-spacing:.1em">Latest Session — ${tbDate} <span style="font-weight:400;color:var(--t3)">(Tradebook · charges included)</span>${panelFilterTag(allRows,rows,query)}</span>
@@ -3585,7 +3630,7 @@ function buildOpenPositionsPanel(query=''){
   const totalPnl=rows.reduce((sum,row)=>sum+(row.pnlRs||0),0);
   const pnlColor=totalPnl>0?'var(--green)':totalPnl<0?'var(--red)':'var(--t3)';
   const shown=filterPanelRows(rows,query,row=>[row.sym,row.scannerRow?.name,row.scannerRow?.sector]);
-  const table=makeSortableTable('rank-open-positions',cols,shown,'score',-1);
+  const table=makeSortableTable('rank-open-positions',cols,shown,'score',-1,null,null,'sym');
   const radarNote=ALL.length
     ?'Radar context is from the current ALL NSE upload. Click a symbol for its scoring breakdown.'
     :'Load ALL NSE.csv to add Radar score, rank, setup, day change, and risk.';
@@ -3889,7 +3934,7 @@ function renderPerformance(){
     {key:'avgPct',label:'Avg%',align:'right',fmt:fmtPct,clrFn:clr},
     {key:'edge',label:'Edge',align:'right',bold:true,fmt:v=>v.toFixed(2),clrFn:v=>v>100?'var(--green)':v>0?'var(--amber)':'var(--red)'},
   ];
-  const symTbl=makeSortableTable('perf-sym',symCols,symRows,'edge',-1);
+  const symTbl=makeSortableTable('perf-sym',symCols,symRows,'edge',-1,null,null,'sym');
 
   const timeFmt=v=>{const hh=Math.floor(v/60),mm=v%60,h12=hh===0?12:hh>12?hh-12:hh,mer=hh<12?'AM':'PM';return h12+':'+(mm===0?'00':String(mm).padStart(2,'0'))+' '+mer;};
   const _buyMap=Object.fromEntries((p.hourBreakdown||[]).map(r=>[r.hour,{...r,edge:+((r.winRate*r.avgPct)*Math.min(1,r.trades/5)).toFixed(2)}]));
@@ -5048,7 +5093,7 @@ function renderTable(){
       series:`<td>${radarSeriesBandPill(s)}</td>`,
       stretch:`<td style="color:${stretchColor};font-weight:700" title="A 10% move is this many multiples of the strongest daily-range estimate. Lower is more feasible.">${s.stretch!=null&&isFinite(s.stretch)?Number(s.stretch).toFixed(1)+'×':'—'}</td>`,
       price:`<td>${fmtINR(s.price)}</td>`,
-      day:`<td>${fPerf(s.day??s.priceChange)}</td>`,
+      day:`<td>${fPerf(s.day??s.priceChange)}${s.corpAction?`<span title="Corporate action (${escHtml(s.corpAction)}) — mechanical ex-date move, neutralised in scoring" style="font-size:9px;color:var(--amber);margin-left:4px;cursor:help">⚑</span>`:''}</td>`,
       relvol:`<td>${s.relvol!=null&&isFinite(s.relvol)?Number(s.relvol).toFixed(2)+'×':'—'}</td>`,
       turnover:`<td>${fV(s.turnover)}</td>`,
       alloc:`<td class="alloc-cell" data-sym="${s.symbol}">${(()=>{
@@ -5109,7 +5154,9 @@ function applyFilters(){
   // falls back to those defaults whenever the field is empty.
   updateFilterPlaceholders();
   const q=(document.getElementById('fSearch')?.value||'').trim().toLowerCase();
-  const risk=document.getElementById('fRisk')?.value||'';
+  // Risk filter now supports multiple levels (v554): the dropdown value is a comma-joined set
+  // (e.g. "Low,Medium"); empty = All.
+  const riskSel=(document.getElementById('fRisk')?.value||'').split(',').map(x=>x.trim()).filter(Boolean);
   const turnIdx=+(document.getElementById('fMinTurnover')?.value||0);
   const minTurn=RADAR_LIQ_STEPS[turnIdx]||0;
   // Rows: blank shows the entire ranked universe (Radar behavior); a number caps the display.
@@ -5130,7 +5177,7 @@ function applyFilters(){
     // flagged under a rule in the Methodology table is weeded out of recommendations.
     // Non-configured REG1 flags remain a score penalty + badge only.
     if(NSE_SURV[s.symbol]?.length){SURV_HARD_REMOVED++;REMOVED_ROWS.push({s,reason:'surv',rules:NSE_SURV[s.symbol]});return false;}
-    return (s.turnover||0)>=minTurn&&(!risk||s.risk===risk)&&(!q||[s.symbol,s.name,s.sector].join(' ').toLowerCase().includes(q));
+    return (s.turnover||0)>=minTurn&&(!riskSel.length||riskSel.includes(s.risk))&&(!q||[s.symbol,s.name,s.sector].join(' ').toLowerCase().includes(q));
   });
   rows.sort((a,b)=>(a.rank??Infinity)-(b.rank??Infinity));
   FILT=rowCap!=null?rows.slice(0,rowCap):rows;
@@ -5226,7 +5273,12 @@ function showRadarDetail(sym){
   const gate=r.rocketReady?'Meets the model’s high-feasibility criteria.':'Feasibility cautions: '+escHtml((r.gateReasons||[]).join(', ')||'not evaluated')+'.';
   const flags=(r.meta?.flags||[]).length?escHtml(r.meta.flags.join(', ')):'none';
   const corp=r.meta?.corpToday;
-  const corpNote=corp?` <b style="color:var(--amber)">Corp action:</b> ${escHtml(corp.purpose||corp.kind)} ex-date this session${r.meta?._corpNeutralised?' — mechanical day move neutralised, not scored (v552)':corp.kind==='buyback'?' — buyback bonus applied (v552)':''}.`:'';
+  const bm=r.meta?.boardMeeting;
+  const eventBits=[];
+  if(corp)eventBits.push(`corp action <b>${escHtml(corp.purpose||corp.kind)}</b> ex-date this session${r.meta?._corpNeutralised?' (mechanical move neutralised, not scored)':corp.kind==='buyback'?' (buyback conviction applied)':''}`);
+  if(bm)eventBits.push(`board meeting ${escHtml(bm.date)}${bm.isResults?' — results':''}${bm.date===getSessionDate()?' <b>(today)</b>':''}`);
+  if(r.meta?.announceToday)eventBits.push(`announcement filed today: ${escHtml(String(r.meta.announceToday))}`);
+  const corpNote=eventBits.length?` <b style="color:var(--amber)">Events:</b> ${eventBits.join('; ')}.`:'';
   const detailNote=(r.contrib||[]).length?'':'<div style="color:var(--amber);font-size:11px;margin-bottom:8px">Restored compact ranking — load files again for the full per-feature breakdown.</div>';
   document.getElementById('radarDetailBody').innerHTML=`${detailNote}<div class="rr-groups">${groups}</div>
     <div class="rr-read"><b>Exchange check:</b> Series ${escHtml(r.series||'—')}, price band ${r.band??'not supplied'}, status ${escHtml(r.status||'—')}; basket ${r.basketEligible!==false?'eligible':'ineligible'}. Official delivery ${r.meta?.delivery==null?'unavailable':fmt(r.meta.delivery,1)+'%'}, trades ${r.meta?.trades==null?'unavailable':fmt(r.meta.trades,0)}, surveillance flags: ${flags}.${corpNote}<br>
@@ -5248,7 +5300,7 @@ function renderStatusBar(){
   const total=ALL.length,shown=FILT.length;
   const tags=[];
   const risk=document.getElementById('fRisk')?.value||'';
-  if(risk)tags.push(risk+' risk');
+  if(risk)tags.push(risk.split(',').join(' + ')+' risk');
   const turnIdx=+(document.getElementById('fMinTurnover')?.value||0);
   if(turnIdx>0)tags.push('TO≥'+RADAR_LIQ_LABELS[turnIdx]);
   const q=(document.getElementById('fSearch')?.value||'').trim();
@@ -5785,7 +5837,7 @@ async function hydrateSessionCSVsFromWorkspace(){
             try{const buf=await entry.async('arraybuffer');await _hydrateZipEntries(await JSZip.loadAsync(buf));}catch(e){console.warn('Nested zip error:',fn,e);}
             continue;
           }
-          if(fn.endsWith('.csv')){
+          if(fn.endsWith('.csv')||fn.endsWith('.txt')){ // .txt covers the PR-zip bm/an event files (v554)
             const text=await entry.async('string');
             const type=detectNSE(fn,text);
             if(type) updateFileLoadStatusByNseType(type,'loaded');
@@ -6415,7 +6467,7 @@ async function processFiles(files,sourceLabel,opts={}){
   // Upload CHANGED canonical input files to Drive in the background. Rankings are built
   // from the selected local files immediately, because the market does not wait for Drive.
   saveInputsInBackground(files,{silent});
-  NSE_BHAV={};NSE_52W={};NSE_SURV={};NSE_BULK={};NSE_BLOCK={};NSE_PRICE_BAND={};NSE_DEAL_NET={};NSE_CORP_ACTION={};NSE_STATUS={};NSE_SERIES={};
+  NSE_BHAV={};NSE_52W={};NSE_SURV={};NSE_BULK={};NSE_BLOCK={};NSE_PRICE_BAND={};NSE_DEAL_NET={};NSE_CORP_ACTION={};NSE_BOARD_MEETING={};NSE_ANNOUNCE={};NSE_STATUS={};NSE_SERIES={};
   let tvFile=null,nseZip=null,holdFile=null,posFile=null,ordFile=null,tbFile=null,holidayFile=false,holidayFileName='';
   for(const f of files){
     const name=inputNameLower(f.name);
@@ -6461,7 +6513,7 @@ async function processFiles(files,sourceLabel,opts={}){
             continue;
           }
           // CSV inside the NSE reports ZIP — names inside this ZIP contain dates.
-          if(fn.endsWith('.csv')){
+          if(fn.endsWith('.csv')||fn.endsWith('.txt')){ // .txt covers the PR-zip bm/an event files (v554)
             setLoadMsg('Parsing '+fn+'...');
             const text=await entry.async('string');
             const type=detectNSE(fn,text);
