@@ -1,5 +1,5 @@
-const BUILD_TS='2026-07-21 21:54 IST'; // release build time (IST)
-const APP_VERSION=548; // Manual Target % override now reads as "manual" in the SL/Harvest stat card, status-bar allocation feedback, and goal projection, so an override is visibly confirmed.
+const BUILD_TS='2026-07-22 10:11 IST'; // release build time (IST)
+const APP_VERSION=549; // Auto-refresh now polls every 3s and reacts only to ALL NSE last-modified changes.
 const GOOGLE_DRIVE_CLIENT_ID='1015012642264-oi2nelv3v90k3d39r994a6nelgjs2a56.apps.googleusercontent.com'; // Public OAuth Web Client ID.
 const PRICE_BAND_BLOCK_BUFFER_PCT=0.15; // Treat rounded 4.9/9.9/19.9 rows as effectively band-locked.
 const BASKET_CASH_RESERVE_RS=1; // Leave a rupee for broker-side tax/rounding differences.
@@ -99,6 +99,12 @@ let FILE_LOAD_STATUS={source:null,when:null,files:[]};
 let RADAR={headers:[],matrix:[],features:[],ids:{},rockets:0,ms:0,sourceNote:'',scoredAt:null};
 const SCANNER_STORE='rs_filters';
 const SHARED_FILTER_STORE='rs_filters_shared';
+// The account-level trading inputs (Capital ₹, Max Alloc ₹, manual Target %) affect the GTT
+// and must be identical on every device, so they ride the Drive-synced brain — NOT only
+// per-device localStorage (v549 fix: a manual target set on one device now reaches the
+// others). localStorage stays as the offline mirror.
+const TRADE_INPUTS_STORE='rs_trade_inputs_v1';
+let _lastTradeInputSig=''; // gate brain writes to genuine trade-input changes, not every keystroke
 const ALL_STORE='rs_data';
 const ALL_STORE_SCHEMA='radar_composite_v1'; // same-day transparent composite scorer (v517)
 const HOLD_STORE='rs_holdings';
@@ -5276,21 +5282,13 @@ async function getLocalUploadFolderFiles(){
 }
 
 // ── Folder auto-refresh (owner-approved 2026-07-17, ported from the standalone Radar) ──
-// Watches the granted local upload folder every 15 seconds; any change to file names,
-// sizes, or timestamps re-ingests the folder automatically. Silent when no folder grant
-// exists, permission was revoked, the tab is hidden, or a load is already running.
-let _folderWatchTimer=null,_folderWatchSig='',_folderWatchBusy=false,_folderWatchPendingSig='';
-// Only actual input files participate in change detection. The app itself writes
-// rocket_brain.json into the upload folder on every brain save — including it in the
-// signature made each refresh re-trigger the next one in an endless loop.
-function isWatchedInputFile(name){
-  const n=inputNameLower(name);
-  return isScannerCsvName(name)||isReportsZipName(name)||
-    ['holdings.csv','positions.csv','orders.csv','tradebook.csv','nse holidays.csv'].includes(n)||
-    isLooseNseSupportCsvName(name);
-}
-function folderSignature(files){
-  return (files||[]).filter(f=>isWatchedInputFile(f?.name)).map(f=>`${f.name}:${f.size}:${f.lastModified}`).sort().join('|');
+// Watches the granted local upload folder every 3 seconds; only a change to the ALL NSE
+// file's lastModified triggers a refresh. Silent when no folder grant exists, permission
+// was revoked, the tab is hidden, or a load is already running.
+let _folderWatchTimer=null,_folderWatchBusy=false,_folderWatchAllNseLastModified=null;
+function getAllNseLastModified(files){
+  const allNse=(files||[]).find(f=>isScannerCsvName(f?.name));
+  return allNse?.lastModified ?? null;
 }
 // Small corner pill instead of the full loader/toast: auto-refresh must never interrupt.
 function showAutoRefreshIndicator(state){
@@ -5320,23 +5318,11 @@ async function folderWatchTick(){
   try{
     const local=await getLocalUploadFolderFiles();
     if(!local?.files?.length) return;
-    const sig=folderSignature(local.files);
-    if(!sig) return;
-    if(!_folderWatchSig){_folderWatchSig=sig;_folderWatchPendingSig=sig;return;} // baseline, no re-run
-    if(sig===_folderWatchSig){_folderWatchPendingSig=sig;return;} // unchanged since last ingest
-    // The set changed vs the last ingested one. Do NOT ingest yet — first require the
-    // folder to have SETTLED, i.e. the signature is identical to the previous tick, so no
-    // file is still being written in the last ~15s. This is the two-monitor guard:
-    // `document.hidden` is false while the tab merely sits on another monitor, so a tick
-    // can fire mid-download; without this, it would ingest a half-written or incomplete
-    // set (a partial ALL NSE distorts every percentile). Files are OVERWRITTEN in place on
-    // each download, so their size/mtime is in flux until each finishes — the signature
-    // moves every tick and we keep waiting until the whole set stops changing. (No
-    // ALL-NSE-present check: the owner always overwrites it so it is never absent, and
-    // requiring it would wrongly block portfolio-only auto-refresh.)
-    if(sig!==_folderWatchPendingSig){_folderWatchPendingSig=sig;return;} // still changing → wait a cycle
-    _folderWatchSig=sig;
-    _folderWatchPendingSig=sig;
+    const lastModified=getAllNseLastModified(local.files);
+    if(lastModified===null) return;
+    if(_folderWatchAllNseLastModified===null){_folderWatchAllNseLastModified=lastModified;return;} // baseline, no re-run
+    if(lastModified===_folderWatchAllNseLastModified)return; // unchanged since last ingest
+    _folderWatchAllNseLastModified=lastModified;
     _folderWatchBusy=true;
     showAutoRefreshIndicator('refreshing');
     const ok=await processFiles(local.files,local.sourceLabel+' · auto-refresh',{silent:true});
@@ -5349,7 +5335,7 @@ async function folderWatchTick(){
 }
 function startFolderWatch(){
   if(_folderWatchTimer) return;
-  _folderWatchTimer=setInterval(folderWatchTick,15000);
+  _folderWatchTimer=setInterval(folderWatchTick,3000);
 }
 
 async function hydrateSessionCSVsFromPreferredInputs(reason='startup'){
@@ -6296,7 +6282,7 @@ async function processFiles(files,sourceLabel,opts={}){
   if(!SURV_CUSTOM_RULES.length){try{loadSurvRules();}catch(e){}}
   // Any deliberate or automatic load resets the folder-watch baseline so the watcher
   // does not immediately re-process the files it (or the user) just loaded.
-  try{_folderWatchSig=folderSignature([...files]);_folderWatchPendingSig=_folderWatchSig;}catch(e){}
+  try{_folderWatchAllNseLastModified=getAllNseLastModified([...files]);}catch(e){}
   if(!silent) setLoading(true,String(FILE_LOAD_STATUS.source?`Processing selected files... · ${FILE_LOAD_STATUS.source}`:'Processing selected files...'));
   // Upload CHANGED canonical input files to Drive in the background. Rankings are built
   // from the selected local files immediately, because the market does not wait for Drive.
@@ -6562,13 +6548,24 @@ function saveFilterState(){
   localStorage.setItem(modeKey(SCANNER_STORE), JSON.stringify(state));
   const maxAllocEl=document.getElementById('fMaxAlloc');
   const capEl=document.getElementById('fCapital');
-  localStorage.setItem(SHARED_FILTER_STORE, JSON.stringify({
-    // The fields hold only manual overrides now; an empty field means "use the computed
-    // default" (shown in the placeholder), so we persist the raw value as-is.
+  // The fields hold only manual overrides now; an empty field means "use the computed
+  // default" (shown in the placeholder), so we persist the raw value as-is.
+  const tradeInputs={
     capital:capEl?.value||'',
     maxAlloc:maxAllocEl?.value||'',
     tgtOverride:document.getElementById('fTgtOverride')?.value||''
-  }));
+  };
+  localStorage.setItem(SHARED_FILTER_STORE, JSON.stringify(tradeInputs)); // offline mirror
+  // Sync the account-level trading inputs across devices via the brain, but only when they
+  // actually changed (not on search/risk/rows keystrokes) so we don't churn Drive writes.
+  try{
+    const sig=JSON.stringify(tradeInputs);
+    if(sig!==_lastTradeInputSig){
+      _lastTradeInputSig=sig;
+      FS.set(TRADE_INPUTS_STORE,tradeInputs);
+      saveBrainInBackground();
+    }
+  }catch(e){}
 }
 
 function loadFilterState(){
@@ -6580,11 +6577,16 @@ function loadFilterState(){
     if(state.rows!=null){const el=document.getElementById('fRows');if(el)el.value=state.rows;}
     if(state.minTurnover!=null){const el=document.getElementById('fMinTurnover');if(el)el.value=state.minTurnover;}
     EXPORT_EXCLUDED=new Set(Array.isArray(state.exportExcluded)?state.exportExcluded.map(normSym).filter(Boolean):[]);
-    const sharedCapital=shared.capital!=null?shared.capital:state.capital;
-    const sharedMaxAlloc=shared.maxAlloc!=null?shared.maxAlloc:state.maxAlloc;
+    // Trade inputs PREFER the Drive-synced brain (so laptop and phone agree); localStorage
+    // is the fallback when the brain has none yet (offline / first run).
+    let ti=null; try{ti=FS.get(TRADE_INPUTS_STORE);}catch(e){}
+    const pick=(k)=>(ti&&ti[k]!=null)?ti[k]:(shared[k]!=null?shared[k]:state[k]);
+    const sharedCapital=pick('capital'), sharedMaxAlloc=pick('maxAlloc'), sharedTgt=pick('tgtOverride');
     if(sharedCapital){const el=document.getElementById('fCapital');if(el)el.value=sharedCapital;}
     if(sharedMaxAlloc){const el=document.getElementById('fMaxAlloc');if(el)el.value=sharedMaxAlloc;}
-    if(shared.tgtOverride){const el=document.getElementById('fTgtOverride');if(el)el.value=shared.tgtOverride;}
+    if(sharedTgt){const el=document.getElementById('fTgtOverride');if(el)el.value=sharedTgt;}
+    // Prime the change-gate so the first save after load doesn't needlessly rewrite the brain.
+    _lastTradeInputSig=JSON.stringify({capital:sharedCapital||'',maxAlloc:sharedMaxAlloc||'',tgtOverride:sharedTgt||''});
     updateFilterPlaceholders(); // empty fields show + use the computed defaults
     // Legacy engine sort columns migrate to the Radar rank ordering once.
     const legacy=new Set(['_rank','rocketScore','snapshotChange','tslRefPoints','velocityPotential','delivPct','volume']);
