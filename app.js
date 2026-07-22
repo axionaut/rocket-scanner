@@ -1,5 +1,5 @@
-const BUILD_TS='2026-07-22 20:35 IST'; // release build time (IST)
-const APP_VERSION=554; // v554: neutralised corp-action rows now DISPLAY the real day move (⚑ tag) while scoring stays neutralised; Event Risk flag from bm/an (board meetings + announcements) floors event-day rows at Medium risk and annotates the modal; Risk filter is multi-select; row-click opens the scoring modal on the Latest Session / Open Positions / Performance Stocks tables too.
+const BUILD_TS='2026-07-22 21:09 IST'; // release build time (IST)
+const APP_VERSION=555; // v555 market-cycle stage awareness (stateless, self-calibrating): per-row stage label (1 accumulation · 2 breakout · 3 event · 4 profit-booking · 5 re-accumulation · 6 second-leg); a quiet-accumulation signal (conjunction-of-percentiles) injected via the rocket-diagnostic weighting; sell-the-news decay off Recent earnings date (horizon = review days); market intraday-breadth gauge in the status bar + basket export (entry timing, never changes ranking).
 const GOOGLE_DRIVE_CLIENT_ID='1015012642264-oi2nelv3v90k3d39r994a6nelgjs2a56.apps.googleusercontent.com'; // Public OAuth Web Client ID.
 const PRICE_BAND_BLOCK_BUFFER_PCT=0.15; // Treat rounded 4.9/9.9/19.9 rows as effectively band-locked.
 const BASKET_CASH_RESERVE_RS=1; // Leave a rupee for broker-side tax/rounding differences.
@@ -976,6 +976,7 @@ let NSE_DEAL_NET={}; // {symbol -> signed net deal quantity (BUY − SELL) acros
 let NSE_CORP_ACTION={}; // {symbol -> [{exDate:'YYYY-MM-DD', purpose, kind:'structural'|'dividend'|'buyback', divAmt}]} from PR-zip bc file (v552)
 let NSE_BOARD_MEETING={}; // {symbol -> {date:'YYYY-MM-DD', purpose, isResults}} from PR-zip bm file (v554) — upcoming-event calendar
 let NSE_ANNOUNCE={}; // {symbol -> short label} from PR-zip an file (v554) — an announcement was filed this session
+let MARKET_INTRADAY=null; // v555 WS-D: {adv,dec,advPct,median} market breadth from change-from-open (entry-timing gauge)
 let NSE_NON_EQ=new Set(); // symbols in non-EQ series (BE,BZ,SZ,SM,ST) — excluded from display, kept in learning
 let NSE_HOLIDAYS=new Set(); // Set of 'YYYY-MM-DD' strings for NSE trading holidays
 let SURV_CUSTOM_RULES=[]; // [{key,column,label}] all surveillance rules — user-managed, persisted in brain
@@ -2126,6 +2127,9 @@ function radarAnalyze(headers,rawRows,supplements={},heldSymbols=new Set()){
   const turnI=radarIdx(headers,'Price × volume (turnover), 1 day'),relI=radarIdx(headers,'Relative volume, 1 day'),relAtI=radarIdx(headers,'Relative volume at time'),volChgI=radarIdx(headers,'Volume change %, 1 day'),gapI=radarIdx(headers,'Gap %, 1 day'),adrI=radarIdx(headers,'Average daily range %'),atrI=radarIdx(headers,'Average true range %, 14, 1 day'),atrWeekI=radarIdx(headers,'Average true range %, 14, 1 week'),volI=radarIdx(headers,'Volatility, 1 day'),highI=radarIdx(headers,'High, 1 day'),lowI=radarIdx(headers,'Low, 1 day');
   const priceHourI=radarIdx(headers,'Price change %, 1 hour'),price15I=radarIdx(headers,'Price change %, 15 minutes'),price5I=radarIdx(headers,'Price change %, 5 minutes');
   const changeOpenI=radarIdx(headers,'Change from open %, 1 day'),perf1mI=radarIdx(headers,'Performance %, 1 month'),perf3mI=radarIdx(headers,'Performance %, 3 months');
+  // v555 market-cycle inputs: earnings dates (stateless days-since/days-to), 50-day MA (holding-above check).
+  const recentEarnI=radarIdx(headers,'Recent earnings date'),upcomingEarnI=radarIdx(headers,'Upcoming earnings date'),sma50I=radarIdx(headers,'Simple moving average, 50, 1 day');
+  const sessionDate=getSessionDate(),reviewDays=getEffectiveReviewDays(); // reviewDays null ⇒ post-event stages/decay don't fire (graceful, no constant)
   // R5 (v552, WS3): neutralise mechanical ex-date moves so they neither score the row nor
   // pollute the day-move percentiles. For a structural corp action (demerger/split/bonus/rights)
   // OR a material dividend (amount/price >= MATERIAL_DIV_PCT) whose ex-date is THIS session, blank
@@ -2207,6 +2211,41 @@ function radarAnalyze(headers,rawRows,supplements={},heldSymbols=new Set()){
       srFeat={sorted:wins,q02,q98,effect,weight:(.07+Math.abs(effect))*.6+.4*Math.sqrt(coverage)};
     }
   }
+  // ── v555 MARKET-CYCLE STAGE AWARENESS (stateless, self-calibrating) ──
+  // Cross-sectional distributions for the stage inputs. Percentiles (not fixed thresholds) define
+  // low/high, so the classifier recalibrates to each day's universe.
+  const _sortF=a=>a.filter(v=>v!==null&&isFinite(v)).sort((x,y)=>x-y);
+  const volArr=rawRows.map(raw=>{const a=radarNum(raw[adrI]),b=radarNum(raw[atrI]),c=radarNum(raw[volI]),d=radarNum(raw[atrWeekI]);const m=Math.max(a||0,b||0,c||0,(d||0)/Math.sqrt(5));return m>0?m:null;});
+  const dayAbsArr=rawRows.map(raw=>{const d=radarNum(raw[targetI]);return d===null?null:Math.abs(d);});
+  const relvolArr=rawRows.map(raw=>radarNum(raw[relI]));
+  const deliveryArr=rawRows.map(raw=>{const m=supplements[normSym(raw[symbolI])];return m&&m.delivery!=null?m.delivery:null;});
+  const breakoutArr=rawRows.map(raw=>{const m=supplements[normSym(raw[symbolI])],p=radarNum(raw[priceI]);return(m&&m.high52&&p)?p/m.high52:null;});
+  const chgOpenArr=rawRows.map(raw=>changeOpenI>=0?radarNum(raw[changeOpenI]):null);
+  const volSorted=_sortF(volArr),dayAbsSorted=_sortF(dayAbsArr),relvolSorted=_sortF(relvolArr),deliverySorted=_sortF(deliveryArr),breakoutSorted=_sortF(breakoutArr);
+  const pctOr=(sorted,v,dflt)=>v===null?dflt:radarPct(sorted,v);
+  const stagePct=rawRows.map((raw,ri)=>({
+    tPct:trendArr[ri]===null?0.5:radarPct(trendSorted,trendArr[ri]),
+    vPct:pctOr(volSorted,volArr[ri],0.5), dPct:pctOr(dayAbsSorted,dayAbsArr[ri],0),
+    uPct:pctOr(relvolSorted,relvolArr[ri],0.5), delPct:pctOr(deliverySorted,deliveryArr[ri],0.5),
+    bPct:pctOr(breakoutSorted,breakoutArr[ri],0.5)
+  }));
+  // WS-B accumulation signal: the CONJUNCTION (quiet + trending + accumulated + not-yet-spiked) is
+  // the edge, so a parameter-free product of percentiles. Injected per row through the same
+  // rocket-diagnostic × coverage weighting as every feature — no hand-set magnitude.
+  const accArr=stagePct.map(p=>p.tPct*(1-p.vPct)*p.delPct*(1-p.dPct));
+  let accFeat=null;
+  {
+    const vals=accArr.filter(v=>v!==null&&isFinite(v)).sort((a,b)=>a-b);
+    if(vals.length>=minObs&&vals[0]!==vals[vals.length-1]){
+      const q02=radarQuant(vals,.02),q98=radarQuant(vals,.98),wins=vals.map(v=>clamp01(v,q02,q98)).sort((a,b)=>a-b);
+      let ar=[],ao=[];
+      accArr.forEach((v,ri)=>{if(v===null)return;(rset.has(ri)?ar:ao).push(radarPct(wins,clamp01(v,q02,q98)));});
+      const mr=ar.length?ar.reduce((a,b)=>a+b,0)/ar.length:.5,mo=ao.length?ao.reduce((a,b)=>a+b,0)/ao.length:.5;
+      const effect=clamp01((mr-mo)*2,-1,1),coverage=vals.length/rawRows.length;
+      accFeat={sorted:wins,q02,q98,effect,weight:(.07+Math.abs(effect))*.6+.4*Math.sqrt(coverage)};
+    }
+  }
+  const STAGE_LABEL={1:'Accumulation',2:'Breakout',3:'Event day',4:'Profit-booking',5:'Re-accumulation',6:'Second leg'};
   const allRows=rawRows.map((raw,ri)=>{
     const parts={},weights={},contrib=[];
     for(const g in RADAR_GROUPS){parts[g]=0;weights[g]=0;}
@@ -2226,6 +2265,33 @@ function radarAnalyze(headers,rawRows,supplements={},heldSymbols=new Set()){
       parts.momentum+=sig*w;weights.momentum+=w;
       contrib.push({name:'Sector-relative day %',group:'momentum',p,sig,impact:sig*w});
     }
+    // ── v555 accumulation signal (WS-B) + sell-the-news decay (WS-C) + stage (WS-A) ──
+    const _m=supplements[normSym(raw[symbolI])]||{};
+    const _recEarn=recentEarnI>=0?String(raw[recentEarnI]||'').trim():'';
+    const _daysSince=(reviewDays!=null&&/^\d{4}-\d{2}-\d{2}$/.test(_recEarn))?tradingDaysBetween(_recEarn,sessionDate):null;
+    const _inDigestion=_daysSince!=null&&_daysSince>=0&&_daysSince<=reviewDays;
+    // WS-C: a freshly-reported name earns NO accumulation credit and regains it linearly by the learned
+    // review horizon (getEffectiveReviewDays) — magnitude-free, it just scales the self-calibrated signal.
+    const _accDecay=_inDigestion?clamp01(_daysSince/Math.max(1,reviewDays),0,1):1;
+    if(accFeat&&accArr[ri]!==null&&_accDecay>0){
+      const v=clamp01(accArr[ri],accFeat.q02,accFeat.q98),p=radarPct(accFeat.sorted,v),learn=Math.sign(accFeat.effect||1)*(2*p-1),alpha=clamp01(Math.abs(accFeat.effect)*1.35,.12,.58),sig=alpha*learn+(1-alpha)*(2*p-1),w=accFeat.weight*_accDecay;
+      parts.momentum+=sig*w;weights.momentum+=w;
+      contrib.push({name:'Accumulation (quiet strength)',group:'momentum',p,sig,impact:sig*w});
+    }
+    // WS-A stage (percentile bands + event/earnings flags). Stages 4/5/6 need reviewDays + earnings date.
+    const _P=stagePct[ri],_chgOpen=chgOpenArr[ri],_sma50=sma50I>=0?radarNum(raw[sma50I]):null,_priceMA=radarNum(raw[priceI]),_aboveMA=_sma50!=null&&_priceMA!=null&&_priceMA>_sma50;
+    let _stage=null;
+    if(_m.eventToday)_stage=3; // event today (corp-action ex-date or results board-meeting today)
+    else if(_inDigestion){
+      // Early in the post-results window (≤ a third of the review horizon) = profit-booking; later,
+      // a quiet name holding above its MA is re-accumulating, a fresh breakout is the second leg.
+      if(_daysSince<=Math.max(1,reviewDays/3))_stage=4;
+      else if(_P.bPct>0.67&&_P.tPct>0.67)_stage=6;
+      else if(_P.vPct<0.33&&_aboveMA&&_P.uPct<0.5)_stage=5;
+      else _stage=4;
+    }
+    else if(_P.dPct>0.67&&_P.uPct>0.67&&_P.bPct>0.67)_stage=2; // fresh high-volume breakout
+    else if(_P.vPct<0.33&&_P.tPct>0.5&&_P.delPct>0.67&&_P.dPct<0.33)_stage=1; // silent accumulation
     let rawScore=0;
     for(const g in RADAR_GROUPS){
       parts[g]=weights[g]?50+50*parts[g]/weights[g]:50;
@@ -2295,6 +2361,7 @@ function radarAnalyze(headers,rawRows,supplements={},heldSymbols=new Set()){
       price,day:dispDay,priceChange:dispDay,turnover:turn,relvol,gap,rangePct,stretch,atr:atrPct,
       high1d:highI>=0?radarNum(raw[highI]):null,low1d:lowI>=0?radarNum(raw[lowI]):null,rocketToday:day>=10,
       corpAction:meta._corpNeutralised?(meta.corpToday?.purpose||'corporate action'):null,
+      stage:_stage,stageLabel:_stage?STAGE_LABEL[_stage]:null,inDigestion:_inDigestion,daysSinceEarnings:_daysSince,
       rocketReady,gateReasons,series,band:band??null,status,eqEligible,basketEligible,meta};
   });
   // Held positions never re-enter the buy ranking, but they DO stay in the scored
@@ -2310,14 +2377,18 @@ function radarAnalyze(headers,rawRows,supplements={},heldSymbols=new Set()){
     r.score=+(100*Math.pow(radarPct(rawScores,r.rawScore),4)).toFixed(1);
     r.rocketScore=r.score; // allocation/export alias
     r.risk=!r.basketEligible||r.meta.flags?.length>=3||r.turnover<25e5||r.price<10?'High':(r.gap>6||r.day>6||r.parts.volatility<38?'Medium':'Low');
-    // Event Risk (idea #1, v554): an event-day move (corp-action ex-date or results today) is less
-    // pattern-reliable, so never label it Low risk. Direction-neutral — it changes risk, not score.
-    if(r.risk==='Low'&&r.meta?.eventToday)r.risk='Medium';
+    // Event Risk (idea #1, v554 + v555): an event-day (Stage 3) or a name still digesting its results
+    // (Stage 4 profit-booking) is less pattern-reliable, so never label it Low risk. Changes risk, not score.
+    if(r.risk==='Low'&&(r.meta?.eventToday||r.stage===3||r.stage===4))r.risk='Medium';
     r.setup=r.series!=='EQ'?(r.series==='UNKNOWN'?'Series unverified':`Non-EQ · ${r.series}`):r.band!==null&&r.band<10?`${r.band}% price band`:radarSetupLabel(r);
   }
   rows.sort((a,b)=>b.score-a.score||a.symbol.localeCompare(b.symbol));
   rows.forEach((r,i)=>{r.rank=i+1;});
-  return {rows,features,rockets:continuationRows.length,suppressedHeld,ids:{priceI,targetI,sectorI,symbolI,descI}};
+  // WS-D: stateless market intraday breadth (share of the universe up from open). Market-wide ⇒ it
+  // does NOT change the ranking; surfaced in the status bar + basket export as an entry-timing gauge.
+  const _open=chgOpenArr.filter(v=>v!==null&&isFinite(v)),_adv=_open.filter(v=>v>0).length,_dec=_open.filter(v=>v<0).length;
+  const marketIntraday=_open.length?{adv:_adv,dec:_dec,advPct:_adv/_open.length,median:radarQuant([..._open].sort((a,b)=>a-b),.5)}:null;
+  return {rows,features,rockets:continuationRows.length,suppressedHeld,marketIntraday,ids:{priceI,targetI,sectorI,symbolI,descI}};
 }
 // Score the current upload (object rows from parseCSV) through the Radar composite.
 function radarScoreRows(objRows){
@@ -2329,6 +2400,7 @@ function radarScoreRows(objRows){
   const result=radarAnalyze(headers,matrix,buildRadarSupplements(),held);
   RADAR={headers,matrix,features:result.features,ids:result.ids,rockets:result.rockets,ms:performance.now()-t0,sourceNote:'',scoredAt:Date.now()};
   SUPPRESSED_HELD=result.suppressedHeld;
+  MARKET_INTRADAY=result.marketIntraday; // v555 WS-D: market breadth for the status bar + basket export
   return result.rows;
 }
 // Outcome-tracking rows for the surviving Harvest/entry outcome stores.
@@ -5061,6 +5133,14 @@ function radarRiskPill(risk){
   const cls=risk==='Low'?'pill-green':risk==='Medium'?'pill-amber':'pill-red';
   return `<span class="info-pill ${cls}" style="padding:2px 8px;font-size:10px">${escHtml(risk||'—')}</span>`;
 }
+// v555 market-cycle stage pill. Colour = quality of the stage: accumulation/re-accumulation green,
+// breakout/second-leg cyan, event/profit-booking amber.
+function radarStagePill(r){
+  if(!r||!r.stage) return '';
+  const c={1:'var(--green)',5:'var(--green)',2:'var(--cyan)',6:'var(--cyan)',3:'var(--amber)',4:'var(--amber)'}[r.stage]||'var(--t3)';
+  const t={1:'Silent accumulation — quiet strength before a move (a higher-quality candidate)',5:'Re-accumulation — quiet, holding above its 50-day MA after digesting a result',2:'Initial breakout — fresh high-volume move through resistance',6:'Second leg — breakout with an already-established trend, the event behind it',3:'Event day — today’s move may be event-driven and less pattern-reliable',4:'Profit-booking — digesting a recent result'+(r.daysSinceEarnings!=null?` (${r.daysSinceEarnings}d since results)`:'')}[r.stage]||'';
+  return `<span style="font-size:8px;font-weight:700;border-radius:4px;padding:1px 5px;color:${c};border:1px solid ${c};white-space:nowrap;cursor:help" title="${escHtml(t)}">${escHtml(r.stageLabel||'')}</span>`;
+}
 function radarSeriesBandPill(s){
   const ok=s.basketEligible!==false;
   const band=s.band!=null?s.band+'%':'No band';
@@ -5089,7 +5169,7 @@ function renderTable(){
       rank:`<td style="font-family:'DM Mono',monospace;font-weight:800;color:var(--t1);text-align:right">${s.rank??'—'}</td>`,
       score:`<td>${radarScoreCell(s.score,'Relative same-day composite score (0-100 percentile, top-weighted). It is a ranking, not a probability.')}</td>`,
       symbol:`<td style="font-family:'Plus Jakarta Sans',sans-serif"><button type="button" onclick='event.stopPropagation();openTradingViewChart(${JSON.stringify(String(s.symbol))})' style="padding:0;border:0;background:transparent;color:inherit;text-align:left;cursor:pointer" title="Open TradingView chart"><div style="font-weight:700;font-size:13px;color:var(--t1)">${escHtml(s.symbol)}${(()=>{const flags=s.meta?.flags||[];if(!flags.length)return '';return `<span style="font-size:8px;background:rgba(239,68,68,.15);color:var(--red);border-radius:4px;padding:1px 5px;margin-left:5px;font-weight:700;vertical-align:middle" title="NSE surveillance flags: ${escHtml(flags.join(' · '))}">⚠ ${flags.length}</span>`;})()}</div><div style="font-size:9px;color:var(--t3);max-width:220px;overflow:hidden;text-overflow:ellipsis">${escHtml(s.name||'')}</div></button></td>`,
-      setup:`<td style="font-size:11px;color:var(--t2)">${escHtml(s.setup||'—')}</td>`,
+      setup:`<td style="font-size:11px;color:var(--t2)">${escHtml(s.setup||'—')}${s.stage?' '+radarStagePill(s):''}</td>`,
       series:`<td>${radarSeriesBandPill(s)}</td>`,
       stretch:`<td style="color:${stretchColor};font-weight:700" title="A 10% move is this many multiples of the strongest daily-range estimate. Lower is more feasible.">${s.stretch!=null&&isFinite(s.stretch)?Number(s.stretch).toFixed(1)+'×':'—'}</td>`,
       price:`<td>${fmtINR(s.price)}</td>`,
@@ -5283,6 +5363,7 @@ function showRadarDetail(sym){
   document.getElementById('radarDetailBody').innerHTML=`${detailNote}<div class="rr-groups">${groups}</div>
     <div class="rr-read"><b>Exchange check:</b> Series ${escHtml(r.series||'—')}, price band ${r.band??'not supplied'}, status ${escHtml(r.status||'—')}; basket ${r.basketEligible!==false?'eligible':'ineligible'}. Official delivery ${r.meta?.delivery==null?'unavailable':fmt(r.meta.delivery,1)+'%'}, trades ${r.meta?.trades==null?'unavailable':fmt(r.meta.trades,0)}, surveillance flags: ${flags}.${corpNote}<br>
     <b>Feasibility:</b> ${gate} Strongest daily range estimate ${fmt(r.rangePct,2)}%; a 10% move is ${fmt(r.stretch,2)}× that range. The stock remains ranked either way.<br>
+    ${r.stage?`<b>Market-cycle stage:</b> ${radarStagePill(r)} — ${escHtml({1:'silent accumulation (quiet strength before a move)',2:'initial breakout',3:'event day (move may be event-driven)',4:'profit-booking (digesting a recent result)',5:'re-accumulation',6:'second leg'}[r.stage]||'')}.<br>`:''}
     <b>Read:</b> ${escHtml(r.setup||'—')}. Data coverage ${r.quality!=null?fmt(r.quality*100,0)+'%':'—'}, day move ${(r.day??0)>=0?'+':''}${fmt(r.day,2)}%, relative volume ${r.relvol==null?'unavailable':fmt(r.relvol,2)+'×'}, turnover ${fV(r.turnover)}. Rank is relative, not a literal probability.</div>
     ${contribs?`<h3 style="font-size:14px;margin:12px 0 8px">Largest feature contributions</h3><div class="rr-contribs">${contribs}</div>`:''}`;
   dlg.showModal();
@@ -5346,6 +5427,11 @@ function renderStatusBar(){
     }
   } else if(capital>0){
     html+=` <span style="color:var(--t3);font-size:11px;margin-left:8px">· select ${instrumentLabel} to allocate ${fmtINR(capital)}</span>`;
+  }
+  // v555 WS-D: market intraday breadth gauge (entry timing). Market-wide, so it never changes the ranking.
+  if(MARKET_INTRADAY&&MARKET_INTRADAY.advPct!=null){
+    const up=MARKET_INTRADAY.advPct>=0.5,c=up?'var(--green)':'var(--red)',pct=(MARKET_INTRADAY.advPct*100).toFixed(0);
+    html+=` <span style="color:${c};font-size:11px;font-family:'DM Mono',monospace;font-weight:700;margin-left:8px" title="Market intraday breadth: ${MARKET_INTRADAY.adv} of ${MARKET_INTRADAY.adv+MARKET_INTRADAY.dec} stocks are trading above their open. Below 50% = broad intraday weakness → continuation odds are lower; consider waiting for the market to turn up. Entry-timing gauge only — it does NOT change the ranking.">· Market ${up?'▲':'▼'} ${pct}% up-from-open</span>`;
   }
   if(SUPPRESSED_HELD>0)html+=` <span class="sb-tag" style="margin-left:8px" title="Held positions (Holdings + Positions + today's net Orders buys) never re-enter the buy ranking. See Open Positions on the Performance tab.">📌 ${SUPPRESSED_HELD} held suppressed</span>`;
   if(SURV_HARD_REMOVED>0)html+=` <span class="sb-tag sb-tag-red" style="margin-left:4px" title="Weeded out by the configured surveillance rules in the Methodology table (hard filter).">⚠ ${SURV_HARD_REMOVED} surveillance removed</span>`;
@@ -6200,7 +6286,9 @@ async function exportBasket(){
   const planNote=` · ${srcLabel} ${adaptiveTGT.toFixed(2)}% GTT`;
   const floorNote=harvestPlan.warning?` · target floor active`:``;
   const limitNote=limitOmitted>0?` · ${limitOmitted} lower-priority stock${limitOmitted===1?'':'s'} omitted to keep the basket within Zerodha's 20-order limit`:'';
-  showToast(`<strong>Saved ${orders.length} CNC MARKET BUY orders</strong> in Scanner Uploads as Zerodha_Basket_Buy JSON${targetNote}${planNote}${floorNote}${rejNote}${limitNote}`);
+  // v555 WS-D: entry-timing note when the market is broadly intraday-weak (owner decides, not blocked).
+  const marketNote=(MARKET_INTRADAY&&MARKET_INTRADAY.advPct!=null&&MARKET_INTRADAY.advPct<0.5)?` · ⚠ market intraday-weak (only ${(MARKET_INTRADAY.advPct*100).toFixed(0)}% up-from-open) — continuation odds lower, consider waiting for the market to turn up`:'';
+  showToast(`<strong>Saved ${orders.length} CNC MARKET BUY orders</strong> in Scanner Uploads as Zerodha_Basket_Buy JSON${targetNote}${planNote}${floorNote}${rejNote}${limitNote}${marketNote}`);
 }
 
 async function saveBasketToScannerUploads(orders, filename){
