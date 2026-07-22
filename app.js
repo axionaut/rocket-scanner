@@ -1,5 +1,5 @@
-const BUILD_TS='2026-07-22 11:59 IST'; // release build time (IST)
-const APP_VERSION=550; // Continuation-aware Radar ranking now prefers build-up and penalizes falling-knife spikes.
+const BUILD_TS='2026-07-22 12:19 IST'; // release build time (IST)
+const APP_VERSION=551; // Symbol-name clicks now open TradingView in a new tab while row clicks keep the Radar detail modal.
 const GOOGLE_DRIVE_CLIENT_ID='1015012642264-oi2nelv3v90k3d39r994a6nelgjs2a56.apps.googleusercontent.com'; // Public OAuth Web Client ID.
 const PRICE_BAND_BLOCK_BUFFER_PCT=0.15; // Treat rounded 4.9/9.9/19.9 rows as effectively band-locked.
 const BASKET_CASH_RESERVE_RS=1; // Leave a rupee for broker-side tax/rounding differences.
@@ -1148,6 +1148,12 @@ function num(v){
 }
 function normSym(s){return String(s||'').trim().replace(/^[A-Z]+:/,'').replace(/_/g,'-').toUpperCase().replace(/-(EQ|BE|BZ|SM|ST|SZ)$/,'');}
 function escHtml(s){return String(s??'').replace(/[&<>"]/g,ch=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[ch]));}
+function openTradingViewChart(sym){
+  const symbol=String(sym??'').trim();
+  if(!symbol) return;
+  const url=`https://www.tradingview.com/chart/?symbol=NSE:${encodeURIComponent(symbol)}`;
+  window.open(url,'_blank','noopener,noreferrer');
+}
 function findHeader(hdrs,patterns){return hdrs.find(h=>patterns.some(p=>p.test(h.trim())))||null;}
 function meanArr(arr){return arr.length?arr.reduce((s,v)=>s+v,0)/arr.length:0;}
 function roundPct05(v){return +(Math.round(v/0.05)*0.05).toFixed(2);}
@@ -3458,7 +3464,7 @@ function buildOpenPositionsPanel(query=''){
     return `<span title="Quantity-weighted age of remaining FIFO buy lots" style="color:${color};font-weight:${v>reviewDays?700:500}">${v}d</span>`;
   };
   const cols=[
-    {key:'sym',label:'Symbol',align:'left',bold:true,fmt:(v,row)=>row.scannerRow?`<button onclick="showRadarDetail(${escHtml(JSON.stringify(String(v)))})" style="padding:0;border:0;background:transparent;color:var(--t1);font:inherit;font-weight:700;cursor:pointer" title="Show Radar scoring breakdown">${escHtml(v)}</button>`:escHtml(v)},
+    {key:'sym',label:'Symbol',align:'left',bold:true,fmt:(v,row)=>row.scannerRow?`<button type="button" onclick='event.stopPropagation();openTradingViewChart(${JSON.stringify(String(v))})' style="padding:0;border:0;background:transparent;color:var(--t1);font:inherit;font-weight:700;cursor:pointer;text-align:left" title="Open TradingView chart">${escHtml(v)}</button>`:escHtml(v)},
     {key:'qty',label:'Qty',align:'right',fmt:v=>v,clrFn:()=>'var(--t2)'},
     {key:'avg',label:'Avg ₹',align:'right',fmt:v=>v!=null?Number(v).toLocaleString('en-IN',INR_2):'—',clrFn:()=>'var(--t2)'},
     {key:'ltp',label:'LTP ₹',align:'right',fmt:v=>v!=null?Number(v).toLocaleString('en-IN',INR_2):'—',clrFn:()=>'var(--t1)'},
@@ -4938,7 +4944,7 @@ function renderTable(){
       chk:`<td style="text-align:center"><input type="checkbox" ${isSelected?'checked':''} ${canBuy?'':'disabled'} style="width:14px;height:14px;accent-color:var(--amber);cursor:${canBuy?'pointer':'not-allowed'}" onclick="event.stopPropagation()" onchange="toggleStock('${s.symbol}',this.checked)" title="${canBuy?'Include in the Zerodha basket export':'Ineligible for the basket'}"></td>`,
       rank:`<td style="font-family:'DM Mono',monospace;font-weight:800;color:var(--t1);text-align:right">${s.rank??'—'}</td>`,
       score:`<td>${radarScoreCell(s.score,'Relative same-day composite score (0-100 percentile, top-weighted). It is a ranking, not a probability.')}</td>`,
-      symbol:`<td style="font-family:'Plus Jakarta Sans',sans-serif"><div style="font-weight:700;font-size:13px;color:var(--t1)">${s.symbol}${(()=>{const flags=s.meta?.flags||[];if(!flags.length)return '';return `<span style="font-size:8px;background:rgba(239,68,68,.15);color:var(--red);border-radius:4px;padding:1px 5px;margin-left:5px;font-weight:700;vertical-align:middle" title="NSE surveillance flags: ${escHtml(flags.join(' · '))}">⚠ ${flags.length}</span>`;})()}</div><div style="font-size:9px;color:var(--t3);max-width:220px;overflow:hidden;text-overflow:ellipsis">${escHtml(s.name||'')}</div></td>`,
+      symbol:`<td style="font-family:'Plus Jakarta Sans',sans-serif"><button type="button" onclick='event.stopPropagation();openTradingViewChart(${JSON.stringify(String(s.symbol))})' style="padding:0;border:0;background:transparent;color:inherit;text-align:left;cursor:pointer" title="Open TradingView chart"><div style="font-weight:700;font-size:13px;color:var(--t1)">${escHtml(s.symbol)}${(()=>{const flags=s.meta?.flags||[];if(!flags.length)return '';return `<span style="font-size:8px;background:rgba(239,68,68,.15);color:var(--red);border-radius:4px;padding:1px 5px;margin-left:5px;font-weight:700;vertical-align:middle" title="NSE surveillance flags: ${escHtml(flags.join(' · '))}">⚠ ${flags.length}</span>`;})()}</div><div style="font-size:9px;color:var(--t3);max-width:220px;overflow:hidden;text-overflow:ellipsis">${escHtml(s.name||'')}</div></button></td>`,
       setup:`<td style="font-size:11px;color:var(--t2)">${escHtml(s.setup||'—')}</td>`,
       series:`<td>${radarSeriesBandPill(s)}</td>`,
       stretch:`<td style="color:${stretchColor};font-weight:700" title="A 10% move is this many multiples of the strongest daily-range estimate. Lower is more feasible.">${s.stretch!=null&&isFinite(s.stretch)?Number(s.stretch).toFixed(1)+'×':'—'}</td>`,
