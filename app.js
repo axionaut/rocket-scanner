@@ -1,5 +1,5 @@
-const BUILD_TS='2026-07-22 12:19 IST'; // release build time (IST)
-const APP_VERSION=551; // Symbol-name clicks now open TradingView in a new tab while row clicks keep the Radar detail modal.
+const BUILD_TS='2026-07-22 13:46 IST'; // release build time (IST)
+const APP_VERSION=552; // Multi-timeframe continuation scoring: Performance% features + trend-aware chase penalty, earnings-quality fundamentals, bc corporate-action feed (R5 neutralise ex-dates / R2 buyback bonus), sector-relative day, liquidity-weighted deal-net + battleground dampener.
 const GOOGLE_DRIVE_CLIENT_ID='1015012642264-oi2nelv3v90k3d39r994a6nelgjs2a56.apps.googleusercontent.com'; // Public OAuth Web Client ID.
 const PRICE_BAND_BLOCK_BUFFER_PCT=0.15; // Treat rounded 4.9/9.9/19.9 rows as effectively band-locked.
 const BASKET_CASH_RESERVE_RS=1; // Leave a rupee for broker-side tax/rounding differences.
@@ -973,6 +973,7 @@ let NSE_BHAV={},NSE_52W={},NSE_SURV={},NSE_BULK={},NSE_BLOCK={},NSE_PRICE_BAND={
 let NSE_STATUS={}; // {symbol -> exchange status letter from REG1 (A = active)}
 let NSE_SERIES={}; // {symbol -> exchange series letters from REG1 (EQ, BE, BZ, SM, ST, SZ)}
 let NSE_DEAL_NET={}; // {symbol -> signed net deal quantity (BUY − SELL) across bulk + block files}
+let NSE_CORP_ACTION={}; // {symbol -> [{exDate:'YYYY-MM-DD', purpose, kind:'structural'|'dividend'|'buyback', divAmt}]} from PR-zip bc file (v552)
 let NSE_NON_EQ=new Set(); // symbols in non-EQ series (BE,BZ,SZ,SM,ST) — excluded from display, kept in learning
 let NSE_HOLIDAYS=new Set(); // Set of 'YYYY-MM-DD' strings for NSE trading holidays
 let SURV_CUSTOM_RULES=[]; // [{key,column,label}] all surveillance rules — user-managed, persisted in brain
@@ -1446,6 +1447,27 @@ function parseDeal(text,map){
     else if(side==='SELL'){NSE_DEAL_NET[sym]=(NSE_DEAL_NET[sym]||0)-qty;}
   });
 }
+// PR-zip corporate-action file bc<ddmmyyyy>.csv (v552, WS3). Columns:
+// SERIES,SYMBOL,SECURITY,RECORD_DT,BC_STRT_DT,BC_END_DT,EX_DT,ND_STRT_DT,ND_END_DT,PURPOSE
+// (EX_DT is already YYYY-MM-DD). Equities only. Classifies each action so the scorer can
+// (R5) neutralise a mechanical ex-date move (demerger/split/bonus/rights/material dividend)
+// and (R2) reward a buyback — both statelessly, from the same-day event, no rolling state.
+function parseCorpActions(text){
+  parseCSV(text).forEach(r=>{
+    const series=String(r['SERIES']||'').trim().toUpperCase();
+    if(!/^(EQ|BE|BZ)$/.test(series))return; // equity series only
+    const sym=normSym(r['SYMBOL']);if(!sym)return;
+    const exDate=String(r['EX_DT']||r['RECORD_DT']||'').trim();
+    if(!/^\d{4}-\d{2}-\d{2}$/.test(exDate))return;
+    const purpose=String(r['PURPOSE']||'').trim().toUpperCase();
+    let kind=null,divAmt=0;
+    if(/DEMERGER|FVSPLT|SPLIT|BONUS|RIGHT/.test(purpose))kind='structural';
+    else if(/BUY\s*BACK|BUYBACK|CAPITAL RED/.test(purpose))kind='buyback';
+    else if(/DIV/.test(purpose)){kind='dividend';divAmt=(purpose.match(/\d+(?:\.\d+)?/g)||[]).reduce((a,b)=>a+Number(b),0);}
+    else return; // INTEREST PAYMENT / REDEMPTION (bonds) etc. — ignored
+    (NSE_CORP_ACTION[sym]??=[]).push({exDate,purpose,kind,divAmt});
+  });
+}
 function parseNSEHolidays(text){
   // Format: Sr. No,Date,Day,Description — Date is DD-MMM-YYYY
   const months={jan:'01',feb:'02',mar:'03',apr:'04',may:'05',jun:'06',jul:'07',aug:'08',sep:'09',oct:'10',nov:'11',dec:'12'};
@@ -1912,6 +1934,7 @@ function detectNSE(filename,content){
   if(fn.startsWith('reg1')||fn.includes('reg1 ind')||raw.includes('reg1_ind')){parseSurv(content);return'surv';}
   if(fn.includes('bulk')){parseDeal(content,NSE_BULK);return'bulk';}
   if(fn.includes('block')){parseDeal(content,NSE_BLOCK);return'block';}
+  if(/^bc\d{6,8}\.csv$/.test(raw)){parseCorpActions(content);return null;} // PR-zip corporate actions (v552); null = no load-status pill (covered by the zip)
   if(fn.includes('nse holidays')){parseNSEHolidays(content);return'holidays';}
   return null;
 }
@@ -1946,6 +1969,19 @@ const RADAR_GROUPS={
   volatility:{label:'Volatility',budget:8,desc:'ATR and range expansion without chaos'},
   context:{label:'Context',budget:5,desc:'Sector-relative regime and fundamentals'}
 };
+// v552 tunables (owner-tunable; the model proposes, the owner tunes after seeing live rankings).
+// WS1 continuation, WS3 corp-actions/buyback, WS4 sector-relative, WS5 red-flags, WS2 earnings quality.
+const V552={
+  CHASE_TREND_RELIEF:0.40,  // WS1: fraction of the day>8% chase penalty KEPT when 1M+3M trend confirms (0.4 = 60% relief for genuine continuation)
+  SECTOR_REL_K:0.30,        // WS4: rawScore per point of sector-relative day%, clamped
+  SECTOR_REL_CLAMP:6,       // WS4: clamp sector-relative day% to ±this before scaling (max ±1.8)
+  BUYBACK_BONUS:2.5,        // WS3/R2: stateless buyback (bc BUY BACK / capital reduction) event bonus
+  REV_MARGIN_PEN:3,         // WS2/R3: revenue-up but EPS-growth-down (profit-down) fade discount
+  WHIPSAW_PEN:3,            // WS5/R8: battleground — gap and change-from-open oppose, both large
+  WHIPSAW_MIN:3,            // WS5: |gap| and |change-from-open| must each clear this % to count as whipsaw
+  MATERIAL_DIV_PCT:2,       // WS3/R5: a dividend ex-date is neutralised only if amount/price >= this %
+  DEAL_LIQ_FLOOR:25e5       // WS5/R8: deal-net fully weighted at/above this turnover, linearly damped below
+};
 const RADAR_RATING={'strong sell':-2,'sell':-1,'neutral':0,'buy':1,'strong buy':2};
 const RADAR_LIQ_STEPS=[0,5e5,25e5,1e7,5e7,1e8,1e9,1e10];
 const RADAR_LIQ_LABELS=['Any','₹5L','₹25L','₹1Cr','₹5Cr','₹10Cr','₹100Cr','₹1000Cr'];
@@ -1956,6 +1992,11 @@ function radarPct(sorted,x){if(x===null||!sorted.length)return null;let lo=0,hi=
 function radarQuant(a,p){if(!a.length)return null;const z=(a.length-1)*p,l=Math.floor(z),f=z-l;return a[l]+(a[Math.min(a.length-1,l+1)]-a[l])*f;}
 function radarGroupFor(h){
   const s=h.toLowerCase();
+  // Multi-timeframe Performance % (v552, WS1/R1): short legs to Momentum, medium/long to Trend.
+  // Anchored ^performance so "Market capitalization performance %, 1 week" stays in Liquidity.
+  if(/^performance %, (1 week|1 month)$/.test(s))return'momentum';
+  if(/^performance %, (3 months|6 months|year to date|1 year)$/.test(s))return'trend';
+  if(/^sector-relative day/.test(s))return'momentum';
   if(/relative volume|volume change|money flow|chaikin|bull bear power|volume-weighted/.test(s))return'participation';
   if(/rate of change|momentum|relative strength|stochastic|commodity channel|awesome oscillator|moving average convergence|ultimate oscillator/.test(s))return'momentum';
   if(/moving average|aroon|directional|ichimoku|parabolic sar|technical rating|oscillators rating/.test(s))return'trend';
@@ -2051,6 +2092,10 @@ function buildRadarSupplements(){
   // net buying earns +1.5, net selling −1.5 in the penalty layer.
   Object.entries(NSE_DEAL_NET).forEach(([sym,net])=>{get(sym).bulkNet=Number(net)||0;});
   Object.entries(SURV_ALL_HITS).forEach(([sym,hits])=>{get(sym).flags=Object.keys(hits||{});});
+  // Corporate action whose ex-date is THIS session (v552, WS3): drives R5 neutralisation
+  // and the R2 buyback bonus. Materiality of a dividend is decided at scoring time (needs price).
+  const today=getSessionDate();
+  Object.entries(NSE_CORP_ACTION).forEach(([sym,acts])=>{const t=(acts||[]).find(a=>a.exDate===today);if(t)get(sym).corpToday=t;});
   return meta;
 }
 function radarAnalyze(headers,rawRows,supplements={},heldSymbols=new Set()){
@@ -2058,16 +2103,39 @@ function radarAnalyze(headers,rawRows,supplements={},heldSymbols=new Set()){
   if(symbolI<0||priceI<0||targetI<0)throw Error('Expected Symbol, Price, and Price change %, 1 day columns.');
   const turnI=radarIdx(headers,'Price × volume (turnover), 1 day'),relI=radarIdx(headers,'Relative volume, 1 day'),relAtI=radarIdx(headers,'Relative volume at time'),volChgI=radarIdx(headers,'Volume change %, 1 day'),gapI=radarIdx(headers,'Gap %, 1 day'),adrI=radarIdx(headers,'Average daily range %'),atrI=radarIdx(headers,'Average true range %, 14, 1 day'),atrWeekI=radarIdx(headers,'Average true range %, 14, 1 week'),volI=radarIdx(headers,'Volatility, 1 day'),highI=radarIdx(headers,'High, 1 day'),lowI=radarIdx(headers,'Low, 1 day');
   const priceHourI=radarIdx(headers,'Price change %, 1 hour'),price15I=radarIdx(headers,'Price change %, 15 minutes'),price5I=radarIdx(headers,'Price change %, 5 minutes');
+  const changeOpenI=radarIdx(headers,'Change from open %, 1 day'),perf1mI=radarIdx(headers,'Performance %, 1 month'),perf3mI=radarIdx(headers,'Performance %, 3 months'),revGrowthI=radarIdx(headers,'Revenue growth %, TTM YoY'),epsGrowthI=radarIdx(headers,'Earnings per share diluted growth %, TTM YoY');
+  // R5 (v552, WS3): neutralise mechanical ex-date moves so they neither score the row nor
+  // pollute the day-move percentiles. For a structural corp action (demerger/split/bonus/rights)
+  // OR a material dividend (amount/price >= MATERIAL_DIV_PCT) whose ex-date is THIS session, blank
+  // the day-move cells (day change / change-from-open / gap). Buybacks are NOT neutralised — they
+  // don't mechanically drop price and earn the R2 bonus in the penalty layer instead.
+  for(let ri=0;ri<rawRows.length;ri++){
+    const meta=supplements[normSym(rawRows[ri][symbolI])],ca=meta&&meta.corpToday;
+    if(!ca)continue;
+    const price=radarNum(rawRows[ri][priceI])||0;
+    const material=ca.kind==='structural'||(ca.kind==='dividend'&&price>0&&ca.divAmt/price*100>=V552.MATERIAL_DIV_PCT);
+    if(!material)continue;
+    if(targetI>=0)rawRows[ri][targetI]='';
+    if(changeOpenI>=0)rawRows[ri][changeOpenI]='';
+    if(gapI>=0)rawRows[ri][gapI]='';
+    meta._corpNeutralised=true;
+  }
   const continuationSignals=rawRows.map(r=>getContinuationSignal(r,targetI,priceHourI,price15I,price5I,relI,relAtI,volChgI));
   const continuationRows=continuationSignals.map((signal,i)=>signal>=.35?i:null).filter(i=>i!==null),rset=new Set(continuationRows);
   const sectorBuckets={};
   for(const r of rawRows){const s=r[sectorI]||'Unknown',v=radarNum(r[targetI]);if(v!==null)(sectorBuckets[s]??=[]).push(clamp01(v,-10,10));}
   const sectorMeans=Object.fromEntries(Object.entries(sectorBuckets).map(([s,a])=>[s,a.reduce((x,y)=>x+y,0)/a.length])),sectorSorted=Object.values(sectorMeans).sort((a,b)=>a-b);
+  // Sector MEDIAN of the day move (v552, WS4/R6): the sector-relative bonus below rewards a name
+  // out-performing its own sector (idiosyncratic strength), damping pure sector drift.
+  const sectorMedians=Object.fromEntries(Object.entries(sectorBuckets).map(([s,a])=>[s,radarQuant([...a].sort((x,y)=>x-y),.5)??0]));
   const minObs=Math.max(25,Math.floor(rawRows.length*.08));
   const features=[];
   for(let i=0;i<headers.length;i++){
     const name=headers[i],rating=/rating/i.test(name);
-    if([symbolI,descI,sectorI,targetI].includes(i)||/ - Currency$/.test(name))continue;
+    // v552: exclude the static share-count level from scoring — it is only a size proxy (already
+    // in Market cap), and R2's real signal (a buyback) arrives statelessly via the bc event, not
+    // via a cross-day share-count delta. Keep the column exported for possible future use.
+    if([symbolI,descI,sectorI,targetI].includes(i)||/ - Currency$/.test(name)||name==='Total common shares outstanding')continue;
     const f={i,name,group:radarGroupFor(name),rating};
     let vals=[];
     for(let ri=0;ri<rawRows.length;ri++){const v=radarTransformed(rawRows[ri],f,priceI);if(v!==null)vals.push(v);}
@@ -2142,15 +2210,32 @@ function radarAnalyze(headers,rawRows,supplements={},heldSymbols=new Set()){
     if(meta.delivery!==null&&meta.delivery!==undefined)rawScore+=clamp01(1-Math.abs(meta.delivery-55)/55,0,1)*3-1;
     if(meta.officialClose&&meta.officialAvg)rawScore+=meta.officialClose>=meta.officialAvg?1:-1;
     if(meta.high52&&meta.low52&&meta.high52>meta.low52)rawScore+=(clamp01((price-meta.low52)/(meta.high52-meta.low52))-.5)*4;
-    if(meta.bulkNet)rawScore+=meta.bulkNet>0?1.5:-1.5;
+    // WS5/R8 (v552): weight the signed bulk/block deal-net by liquidity — churn in illiquid
+    // micro-caps (AASTHA) is not the institutional conviction the flat ±1.5 assumes.
+    if(meta.bulkNet){const dw=clamp01(turn/V552.DEAL_LIQ_FLOOR,0,1);rawScore+=(meta.bulkNet>0?1.5:-1.5)*dw;}
     if(stretch>4)rawScore-=22;else if(stretch>3)rawScore-=14;else if(stretch>2.5)rawScore-=7;
     if(!participationReady)rawScore-=7;
     if(!impulseReady)rawScore-=5;
     rawScore+=followThroughBonus+fallingKnifePenalty;
-    if(day>8)rawScore-=Math.min(13,(day-8)*1.7);
+    // WS1/R1 (v552): trend-aware chase penalty — a big day-move sitting inside a positive 1M AND
+    // 3M trend is a genuine continuation and keeps only CHASE_TREND_RELIEF of the chase; a trendless
+    // one-day spike (the "hot-shot → next-day fade") keeps the full penalty.
+    if(day>8){const chase=Math.min(13,(day-8)*1.7);const p1=perf1mI>=0?radarNum(raw[perf1mI]):null,p3=perf3mI>=0?radarNum(raw[perf3mI]):null;const trendConfirms=p1!==null&&p1>0&&p3!==null&&p3>0;rawScore-=trendConfirms?chase*V552.CHASE_TREND_RELIEF:chase;}
     if(gap>7)rawScore-=Math.min(6,(gap-7)*.8);
     if(turn<5e5)rawScore-=7;
     if(price<5)rawScore-=5;
+    // WS4/R6 (v552): sector-relative out-performance — reward a name beating its own sector median
+    // (idiosyncratic strength), not mere sector drift. Skipped on neutralised corp-action rows.
+    if(!meta._corpNeutralised){const sectorRel=clamp01(day,-10,10)-(sectorMedians[raw[sectorI]||'Unknown']??0);rawScore+=clamp01(sectorRel,-V552.SECTOR_REL_CLAMP,V552.SECTOR_REL_CLAMP)*V552.SECTOR_REL_K;}
+    // WS2/R3 (v552): revenue up but diluted-EPS growth down = a profit-down fade, discount it.
+    const revG=revGrowthI>=0?radarNum(raw[revGrowthI]):null,epsG=epsGrowthI>=0?radarNum(raw[epsGrowthI]):null;
+    if(revG!==null&&epsG!==null&&revG>0&&epsG<0)rawScore-=V552.REV_MARGIN_PEN;
+    // WS3/R2 (v552): stateless buyback bonus — a bc BUY BACK / capital-reduction event this session.
+    if(meta.corpToday?.kind==='buyback')rawScore+=V552.BUYBACK_BONUS;
+    // WS5/R8 (v552): battleground whipsaw — gap and change-from-open oppose, both large = an
+    // unresolved fight (bull-trap / bear-trap), low-confidence for the next move.
+    const gapSigned=radarNum(raw[gapI]),chgOpen=changeOpenI>=0?radarNum(raw[changeOpenI]):null;
+    if(gapSigned!==null&&chgOpen!==null&&Math.sign(gapSigned)!==0&&Math.sign(chgOpen)!==0&&Math.sign(gapSigned)!==Math.sign(chgOpen)&&Math.abs(gapSigned)>=V552.WHIPSAW_MIN&&Math.abs(chgOpen)>=V552.WHIPSAW_MIN)rawScore-=V552.WHIPSAW_PEN;
     return {symbol,name:String(raw[descI]||symbol),sector:raw[sectorI]||'',rawScore,parts,contrib,quality,
       price,day,priceChange:day,turnover:turn,relvol,gap,rangePct,stretch,atr:atrPct,
       high1d:highI>=0?radarNum(raw[highI]):null,low1d:lowI>=0?radarNum(raw[lowI]):null,rocketToday:day>=10,
@@ -5126,9 +5211,11 @@ function showRadarDetail(sym){
   const contribs=[...(r.contrib||[])].sort((a,b)=>Math.abs(b.impact)-Math.abs(a.impact)).slice(0,36).map(x=>`<div class="rr-contrib"><div><b>${escHtml(x.name)}</b><small>${RADAR_GROUPS[x.group]?.label||x.group} · percentile ${fmt(x.p*100,0)}</small></div><b class="${x.impact>=0?'pos':'neg'}">${x.impact>=0?'+':''}${fmt(x.impact,3)}</b></div>`).join('');
   const gate=r.rocketReady?'Meets the model’s high-feasibility criteria.':'Feasibility cautions: '+escHtml((r.gateReasons||[]).join(', ')||'not evaluated')+'.';
   const flags=(r.meta?.flags||[]).length?escHtml(r.meta.flags.join(', ')):'none';
+  const corp=r.meta?.corpToday;
+  const corpNote=corp?` <b style="color:var(--amber)">Corp action:</b> ${escHtml(corp.purpose||corp.kind)} ex-date this session${r.meta?._corpNeutralised?' — mechanical day move neutralised, not scored (v552)':corp.kind==='buyback'?' — buyback bonus applied (v552)':''}.`:'';
   const detailNote=(r.contrib||[]).length?'':'<div style="color:var(--amber);font-size:11px;margin-bottom:8px">Restored compact ranking — load files again for the full per-feature breakdown.</div>';
   document.getElementById('radarDetailBody').innerHTML=`${detailNote}<div class="rr-groups">${groups}</div>
-    <div class="rr-read"><b>Exchange check:</b> Series ${escHtml(r.series||'—')}, price band ${r.band??'not supplied'}, status ${escHtml(r.status||'—')}; basket ${r.basketEligible!==false?'eligible':'ineligible'}. Official delivery ${r.meta?.delivery==null?'unavailable':fmt(r.meta.delivery,1)+'%'}, trades ${r.meta?.trades==null?'unavailable':fmt(r.meta.trades,0)}, surveillance flags: ${flags}.<br>
+    <div class="rr-read"><b>Exchange check:</b> Series ${escHtml(r.series||'—')}, price band ${r.band??'not supplied'}, status ${escHtml(r.status||'—')}; basket ${r.basketEligible!==false?'eligible':'ineligible'}. Official delivery ${r.meta?.delivery==null?'unavailable':fmt(r.meta.delivery,1)+'%'}, trades ${r.meta?.trades==null?'unavailable':fmt(r.meta.trades,0)}, surveillance flags: ${flags}.${corpNote}<br>
     <b>Feasibility:</b> ${gate} Strongest daily range estimate ${fmt(r.rangePct,2)}%; a 10% move is ${fmt(r.stretch,2)}× that range. The stock remains ranked either way.<br>
     <b>Read:</b> ${escHtml(r.setup||'—')}. Data coverage ${r.quality!=null?fmt(r.quality*100,0)+'%':'—'}, day move ${(r.day??0)>=0?'+':''}${fmt(r.day,2)}%, relative volume ${r.relvol==null?'unavailable':fmt(r.relvol,2)+'×'}, turnover ${fV(r.turnover)}. Rank is relative, not a literal probability.</div>
     ${contribs?`<h3 style="font-size:14px;margin:12px 0 8px">Largest feature contributions</h3><div class="rr-contribs">${contribs}</div>`:''}`;
@@ -6314,7 +6401,7 @@ async function processFiles(files,sourceLabel,opts={}){
   // Upload CHANGED canonical input files to Drive in the background. Rankings are built
   // from the selected local files immediately, because the market does not wait for Drive.
   saveInputsInBackground(files,{silent});
-  NSE_BHAV={};NSE_52W={};NSE_SURV={};NSE_BULK={};NSE_BLOCK={};NSE_PRICE_BAND={};NSE_DEAL_NET={};NSE_STATUS={};NSE_SERIES={};
+  NSE_BHAV={};NSE_52W={};NSE_SURV={};NSE_BULK={};NSE_BLOCK={};NSE_PRICE_BAND={};NSE_DEAL_NET={};NSE_CORP_ACTION={};NSE_STATUS={};NSE_SERIES={};
   let tvFile=null,nseZip=null,holdFile=null,posFile=null,ordFile=null,tbFile=null,holidayFile=false,holidayFileName='';
   for(const f of files){
     const name=inputNameLower(f.name);
