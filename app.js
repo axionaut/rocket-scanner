@@ -1,5 +1,5 @@
-const BUILD_TS='2026-07-21 21:43 IST'; // release build time (IST)
-const APP_VERSION=547; // Manual Target % override (a third target superseding lower-of-Harvest/goal); Removed-from-rankings panel made a plain always-visible card at the bottom (no collapse/scroll).
+const BUILD_TS='2026-07-21 21:54 IST'; // release build time (IST)
+const APP_VERSION=548; // Manual Target % override now reads as "manual" in the SL/Harvest stat card, status-bar allocation feedback, and goal projection, so an override is visibly confirmed.
 const GOOGLE_DRIVE_CLIENT_ID='1015012642264-oi2nelv3v90k3d39r994a6nelgjs2a56.apps.googleusercontent.com'; // Public OAuth Web Client ID.
 const PRICE_BAND_BLOCK_BUFFER_PCT=0.15; // Treat rounded 4.9/9.9/19.9 rows as effectively band-locked.
 const BASKET_CASH_RESERVE_RS=1; // Leave a rupee for broker-side tax/rounding differences.
@@ -2862,7 +2862,7 @@ function buildGoalPopoverContent(){
         const netPct=+(at.tgtPct-estimateRoundTripCostPct(at.tgtPct)).toFixed(3);
         if(netPct>0){
           const bp=projectGoalCompletionDate(basis,g.target,netPct,g.withdrawMonthly);
-          const srcLbl=at.source==='goal'?'goal-led':'Harvest';
+          const srcLbl=at.source==='manual'?'manual':at.source==='goal'?'goal-led':'Harvest';
           bestHtml=bp
             ? `Best case, if the ${srcLbl} target (${at.tgtPct.toFixed(1)}% ≈ ${netPct.toFixed(2)}% net/day) fills every session: ${dateSpan(bp)}.`
             : `Best case at the ${srcLbl} target: not within 8 years.`;
@@ -2964,7 +2964,9 @@ function renderStats(){
     const netStr=` · net ~${harvestPlan.expectedNetPct.toFixed(2)}%`;
     const confStr=harvestPlan.confidence!=null?` · hit ${(harvestPlan.confidence*100).toFixed(0)}% hist`:'';
     // Show which target is driving the export and where the other one sits.
-    const srcStr=active.source==='goal'
+    const srcStr=active.source==='manual'
+      ? ` · <span style="color:var(--green);font-weight:700" title="Your manual Target % override is driving the basket, superseding the auto target ${active.autoPct!=null?active.autoPct.toFixed(2)+'%':''} (lower of Harvest ${active.harvestPct.toFixed(2)}%${active.goalPct!=null?' / goal-led '+active.goalPct.toFixed(2)+'%':''}). Clear the Target % field to return to auto.">✎ manual (auto ${active.autoPct!=null?active.autoPct.toFixed(2):'—'}%)</span>`
+      : active.source==='goal'
       ? ` · <span style="color:var(--amber)" title="Goal-led target is lower than the learned Harvest ${active.harvestPct.toFixed(2)}%, so it drives the basket (higher hit rate, still meets your goal after charges).">goal-led (Harvest ${active.harvestPct.toFixed(2)}%)</span>`
       : (active.goalPct!=null?` · <span style="color:var(--t2)" title="Learned Harvest is at or below the goal-led ${active.goalPct.toFixed(2)}%, so Harvest drives the basket.">Harvest-led (goal ${active.goalPct.toFixed(2)}%)</span>`:` · ${harvestPlan.source}`);
     return `<div class="st"><div class="st-l">SL / Harvest GTT</div><div class="st-v" style="font-size:15px"><span style="color:var(--red)">−${_sl}%</span><span style="color:var(--t3);font-size:12px"> / </span><span style="color:var(--green)">+${_tgt}%</span></div><div class="st-d">R:R ${rr}${costStr}${netStr}${confStr}${srcStr}${learnedStr}${holdStr}${opportunityStr}</div></div>`;
@@ -5144,10 +5146,12 @@ function renderStatusBar(){
         }
       }
       const goalCoverage=harvestPlan.dailyGoal>0?Math.max(0,totalNet)/harvestPlan.dailyGoal:0;
-      const srcLbl=active.source==='goal'?'goal-led':'harvest';
+      const srcLbl=active.source==='manual'?'✎ manual':active.source==='goal'?'goal-led':'harvest';
       const needed=harvestPlan.capitalNeeded?` Capital needed for ${fmtINR(harvestPlan.dailyGoal)} at this learned edge: ${fmtINR(harvestPlan.capitalNeeded)}.`:'';
       const warn=harvestPlan.warning?` Warning: ${harvestPlan.warning}`:'';
-      const tip=`Active ${srcLbl} GTT ${tgtPct.toFixed(2)}% (lower of Harvest ${active.harvestPct.toFixed(2)}%${active.goalPct!=null?` / goal-led ${active.goalPct.toFixed(2)}%`:''}), charge-aware net. Source: ${harvestPlan.source}.${needed}${warn}`;
+      const tip=active.source==='manual'
+        ?`Your MANUAL GTT ${tgtPct.toFixed(2)}% is overriding the auto target ${active.autoPct!=null?active.autoPct.toFixed(2)+'%':''} (Harvest ${active.harvestPct.toFixed(2)}%${active.goalPct!=null?` / goal-led ${active.goalPct.toFixed(2)}%`:''}), charge-aware net. Clear Target % to return to auto.${needed}${warn}`
+        :`Active ${srcLbl} GTT ${tgtPct.toFixed(2)}% (lower of Harvest ${active.harvestPct.toFixed(2)}%${active.goalPct!=null?` / goal-led ${active.goalPct.toFixed(2)}%`:''}), charge-aware net. Source: ${harvestPlan.source}.${needed}${warn}`;
       const color=totalNet>=0?'var(--green)':'var(--red)';
       html+=` <span style="color:${color};font-size:11px;font-family:'DM Mono',monospace;font-weight:700;margin-left:8px" title="${tip}">· 🎯 ${fmtINR(totalNet)} net @ ${srcLbl} ${tgtPct.toFixed(1)}% · ${(goalCoverage*100).toFixed(0)}% of ${fmtINR(harvestPlan.dailyGoal)}</span>`;
       if(harvestPlan.warning){
