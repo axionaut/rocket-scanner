@@ -1,5 +1,5 @@
-const BUILD_TS='2026-07-22 14:04 IST'; // release build time (IST)
-const APP_VERSION=552; // Multi-timeframe continuation scoring, fully self-calibrating (no tunables): Performance% features (Momentum/Trend) + self-calibrating trend-percentile chase relief, earnings-quality fundamentals (Context), bc corporate-action feed (R5 neutralise mechanical ex-dates / R2 buyback), sector-relative day as a self-weighted Momentum signal, liquidity-weighted deal-net.
+const BUILD_TS='2026-07-22 14:10 IST'; // release build time (IST)
+const APP_VERSION=553; // Self-calibrating pass over the v552 multi-timeframe scoring: removes all owner-tunable constants — chase relief = cross-sectional trend percentile, sector-relative day = self-weighted Momentum signal, dividend-materiality vs the stock's ADR, buyback reuses the ±1.5 deal-net unit, deal-net weight ties to the ₹25L line.
 const GOOGLE_DRIVE_CLIENT_ID='1015012642264-oi2nelv3v90k3d39r994a6nelgjs2a56.apps.googleusercontent.com'; // Public OAuth Web Client ID.
 const PRICE_BAND_BLOCK_BUFFER_PCT=0.15; // Treat rounded 4.9/9.9/19.9 rows as effectively band-locked.
 const BASKET_CASH_RESERVE_RS=1; // Leave a rupee for broker-side tax/rounding differences.
