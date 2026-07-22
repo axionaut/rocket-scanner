@@ -1,5 +1,5 @@
-const BUILD_TS='2026-07-22 13:46 IST'; // release build time (IST)
-const APP_VERSION=552; // Multi-timeframe continuation scoring: Performance% features + trend-aware chase penalty, earnings-quality fundamentals, bc corporate-action feed (R5 neutralise ex-dates / R2 buyback bonus), sector-relative day, liquidity-weighted deal-net + battleground dampener.
+const BUILD_TS='2026-07-22 14:04 IST'; // release build time (IST)
+const APP_VERSION=552; // Multi-timeframe continuation scoring, fully self-calibrating (no tunables): Performance% features (Momentum/Trend) + self-calibrating trend-percentile chase relief, earnings-quality fundamentals (Context), bc corporate-action feed (R5 neutralise mechanical ex-dates / R2 buyback), sector-relative day as a self-weighted Momentum signal, liquidity-weighted deal-net.
 const GOOGLE_DRIVE_CLIENT_ID='1015012642264-oi2nelv3v90k3d39r994a6nelgjs2a56.apps.googleusercontent.com'; // Public OAuth Web Client ID.
 const PRICE_BAND_BLOCK_BUFFER_PCT=0.15; // Treat rounded 4.9/9.9/19.9 rows as effectively band-locked.
 const BASKET_CASH_RESERVE_RS=1; // Leave a rupee for broker-side tax/rounding differences.
@@ -1969,19 +1969,6 @@ const RADAR_GROUPS={
   volatility:{label:'Volatility',budget:8,desc:'ATR and range expansion without chaos'},
   context:{label:'Context',budget:5,desc:'Sector-relative regime and fundamentals'}
 };
-// v552 tunables (owner-tunable; the model proposes, the owner tunes after seeing live rankings).
-// WS1 continuation, WS3 corp-actions/buyback, WS4 sector-relative, WS5 red-flags, WS2 earnings quality.
-const V552={
-  CHASE_TREND_RELIEF:0.40,  // WS1: fraction of the day>8% chase penalty KEPT when 1M+3M trend confirms (0.4 = 60% relief for genuine continuation)
-  SECTOR_REL_K:0.30,        // WS4: rawScore per point of sector-relative day%, clamped
-  SECTOR_REL_CLAMP:6,       // WS4: clamp sector-relative day% to ±this before scaling (max ±1.8)
-  BUYBACK_BONUS:2.5,        // WS3/R2: stateless buyback (bc BUY BACK / capital reduction) event bonus
-  REV_MARGIN_PEN:3,         // WS2/R3: revenue-up but EPS-growth-down (profit-down) fade discount
-  WHIPSAW_PEN:3,            // WS5/R8: battleground — gap and change-from-open oppose, both large
-  WHIPSAW_MIN:3,            // WS5: |gap| and |change-from-open| must each clear this % to count as whipsaw
-  MATERIAL_DIV_PCT:2,       // WS3/R5: a dividend ex-date is neutralised only if amount/price >= this %
-  DEAL_LIQ_FLOOR:25e5       // WS5/R8: deal-net fully weighted at/above this turnover, linearly damped below
-};
 const RADAR_RATING={'strong sell':-2,'sell':-1,'neutral':0,'buy':1,'strong buy':2};
 const RADAR_LIQ_STEPS=[0,5e5,25e5,1e7,5e7,1e8,1e9,1e10];
 const RADAR_LIQ_LABELS=['Any','₹5L','₹25L','₹1Cr','₹5Cr','₹10Cr','₹100Cr','₹1000Cr'];
@@ -1996,7 +1983,6 @@ function radarGroupFor(h){
   // Anchored ^performance so "Market capitalization performance %, 1 week" stays in Liquidity.
   if(/^performance %, (1 week|1 month)$/.test(s))return'momentum';
   if(/^performance %, (3 months|6 months|year to date|1 year)$/.test(s))return'trend';
-  if(/^sector-relative day/.test(s))return'momentum';
   if(/relative volume|volume change|money flow|chaikin|bull bear power|volume-weighted/.test(s))return'participation';
   if(/rate of change|momentum|relative strength|stochastic|commodity channel|awesome oscillator|moving average convergence|ultimate oscillator/.test(s))return'momentum';
   if(/moving average|aroon|directional|ichimoku|parabolic sar|technical rating|oscillators rating/.test(s))return'trend';
@@ -2103,7 +2089,7 @@ function radarAnalyze(headers,rawRows,supplements={},heldSymbols=new Set()){
   if(symbolI<0||priceI<0||targetI<0)throw Error('Expected Symbol, Price, and Price change %, 1 day columns.');
   const turnI=radarIdx(headers,'Price × volume (turnover), 1 day'),relI=radarIdx(headers,'Relative volume, 1 day'),relAtI=radarIdx(headers,'Relative volume at time'),volChgI=radarIdx(headers,'Volume change %, 1 day'),gapI=radarIdx(headers,'Gap %, 1 day'),adrI=radarIdx(headers,'Average daily range %'),atrI=radarIdx(headers,'Average true range %, 14, 1 day'),atrWeekI=radarIdx(headers,'Average true range %, 14, 1 week'),volI=radarIdx(headers,'Volatility, 1 day'),highI=radarIdx(headers,'High, 1 day'),lowI=radarIdx(headers,'Low, 1 day');
   const priceHourI=radarIdx(headers,'Price change %, 1 hour'),price15I=radarIdx(headers,'Price change %, 15 minutes'),price5I=radarIdx(headers,'Price change %, 5 minutes');
-  const changeOpenI=radarIdx(headers,'Change from open %, 1 day'),perf1mI=radarIdx(headers,'Performance %, 1 month'),perf3mI=radarIdx(headers,'Performance %, 3 months'),revGrowthI=radarIdx(headers,'Revenue growth %, TTM YoY'),epsGrowthI=radarIdx(headers,'Earnings per share diluted growth %, TTM YoY');
+  const changeOpenI=radarIdx(headers,'Change from open %, 1 day'),perf1mI=radarIdx(headers,'Performance %, 1 month'),perf3mI=radarIdx(headers,'Performance %, 3 months');
   // R5 (v552, WS3): neutralise mechanical ex-date moves so they neither score the row nor
   // pollute the day-move percentiles. For a structural corp action (demerger/split/bonus/rights)
   // OR a material dividend (amount/price >= MATERIAL_DIV_PCT) whose ex-date is THIS session, blank
@@ -2113,7 +2099,11 @@ function radarAnalyze(headers,rawRows,supplements={},heldSymbols=new Set()){
     const meta=supplements[normSym(rawRows[ri][symbolI])],ca=meta&&meta.corpToday;
     if(!ca)continue;
     const price=radarNum(rawRows[ri][priceI])||0;
-    const material=ca.kind==='structural'||(ca.kind==='dividend'&&price>0&&ca.divAmt/price*100>=V552.MATERIAL_DIV_PCT);
+    // "Material" is self-calibrating per stock: a dividend is neutralised only when its ex-date drop
+    // (amount/price) exceeds the stock's own average daily range — i.e. it moves the price beyond
+    // normal daily noise. Structural actions (demerger/split/bonus/rights) are always mechanical.
+    const adr=adrI>=0?radarNum(rawRows[ri][adrI]):null;
+    const material=ca.kind==='structural'||(ca.kind==='dividend'&&price>0&&adr!==null&&ca.divAmt/price*100>=adr);
     if(!material)continue;
     if(targetI>=0)rawRows[ri][targetI]='';
     if(changeOpenI>=0)rawRows[ri][changeOpenI]='';
@@ -2125,9 +2115,15 @@ function radarAnalyze(headers,rawRows,supplements={},heldSymbols=new Set()){
   const sectorBuckets={};
   for(const r of rawRows){const s=r[sectorI]||'Unknown',v=radarNum(r[targetI]);if(v!==null)(sectorBuckets[s]??=[]).push(clamp01(v,-10,10));}
   const sectorMeans=Object.fromEntries(Object.entries(sectorBuckets).map(([s,a])=>[s,a.reduce((x,y)=>x+y,0)/a.length])),sectorSorted=Object.values(sectorMeans).sort((a,b)=>a-b);
-  // Sector MEDIAN of the day move (v552, WS4/R6): the sector-relative bonus below rewards a name
+  // Sector MEDIAN of the day move (v552, WS4/R6): the sector-relative signal below rewards a name
   // out-performing its own sector (idiosyncratic strength), damping pure sector drift.
   const sectorMedians=Object.fromEntries(Object.entries(sectorBuckets).map(([s,a])=>[s,radarQuant([...a].sort((x,y)=>x-y),.5)??0]));
+  // WS1/R1: medium-term trend metric (1M+3M performance) and its cross-sectional distribution. Its
+  // percentile self-calibrates the chase-penalty relief below — no fixed magic number.
+  const trendArr=rawRows.map(raw=>{const a=perf1mI>=0?radarNum(raw[perf1mI]):null,b=perf3mI>=0?radarNum(raw[perf3mI]):null;return(a===null||b===null)?null:a+b;});
+  const trendSorted=trendArr.filter(v=>v!==null).sort((x,y)=>x-y);
+  // WS4/R6: sector-relative day move per row (post-neutralisation; blanked rows are null).
+  const srArr=rawRows.map(raw=>{const d=radarNum(raw[targetI]);return d===null?null:clamp01(d,-10,10)-(sectorMedians[raw[sectorI]||'Unknown']??0);});
   const minObs=Math.max(25,Math.floor(rawRows.length*.08));
   const features=[];
   for(let i=0;i<headers.length;i++){
@@ -2156,6 +2152,22 @@ function radarAnalyze(headers,rawRows,supplements={},heldSymbols=new Set()){
     f.weight=(.07+Math.abs(f.effect))*.6+.4*Math.sqrt(f.coverage);
     features.push(f);
   }
+  // WS4/R6 (v552): the sector-relative day move is scored as a synthetic Momentum signal through
+  // the SAME self-calibrating machinery as every feature — its weight comes from the same-day
+  // rocket diagnostic (effect) × coverage, so there is no hand-set magnitude. It is kept out of
+  // `features` (whose entries are real columns read via radarTransformed) and injected per row below.
+  let srFeat=null;
+  {
+    const vals=srArr.filter(v=>v!==null).sort((a,b)=>a-b);
+    if(vals.length>=minObs&&vals[0]!==vals[vals.length-1]){
+      const q02=radarQuant(vals,.02),q98=radarQuant(vals,.98),wins=vals.map(v=>clamp01(v,q02,q98)).sort((a,b)=>a-b);
+      let ar=[],ao=[];
+      srArr.forEach((v,ri)=>{if(v===null)return;(rset.has(ri)?ar:ao).push(radarPct(wins,clamp01(v,q02,q98)));});
+      const mr=ar.length?ar.reduce((a,b)=>a+b,0)/ar.length:.5,mo=ao.length?ao.reduce((a,b)=>a+b,0)/ao.length:.5;
+      const effect=clamp01((mr-mo)*2,-1,1),coverage=vals.length/rawRows.length;
+      srFeat={sorted:wins,q02,q98,effect,weight:(.07+Math.abs(effect))*.6+.4*Math.sqrt(coverage)};
+    }
+  }
   const allRows=rawRows.map((raw,ri)=>{
     const parts={},weights={},contrib=[];
     for(const g in RADAR_GROUPS){parts[g]=0;weights[g]=0;}
@@ -2167,6 +2179,13 @@ function radarAnalyze(headers,rawRows,supplements={},heldSymbols=new Set()){
       const p=radarPct(f.sorted,v),learn=Math.sign(f.effect||1)*(2*p-1),alpha=clamp01(Math.abs(f.effect)*1.35,.12,.58),sig=alpha*learn+(1-alpha)*radarPrior(f,p),w=f.weight;
       parts[f.group]+=sig*w;weights[f.group]+=w;observed++;
       contrib.push({name:f.name,group:f.group,p,sig,impact:sig*w});
+    }
+    // WS4/R6: sector-relative day signal into Momentum, using the identical signal formula and a
+    // high-good prior (2p−1). Skipped on neutralised corp-action rows (srArr is null there).
+    if(srFeat&&srArr[ri]!==null){
+      const v=clamp01(srArr[ri],srFeat.q02,srFeat.q98),p=radarPct(srFeat.sorted,v),learn=Math.sign(srFeat.effect||1)*(2*p-1),alpha=clamp01(Math.abs(srFeat.effect)*1.35,.12,.58),sig=alpha*learn+(1-alpha)*(2*p-1),w=srFeat.weight;
+      parts.momentum+=sig*w;weights.momentum+=w;
+      contrib.push({name:'Sector-relative day %',group:'momentum',p,sig,impact:sig*w});
     }
     let rawScore=0;
     for(const g in RADAR_GROUPS){
@@ -2210,32 +2229,27 @@ function radarAnalyze(headers,rawRows,supplements={},heldSymbols=new Set()){
     if(meta.delivery!==null&&meta.delivery!==undefined)rawScore+=clamp01(1-Math.abs(meta.delivery-55)/55,0,1)*3-1;
     if(meta.officialClose&&meta.officialAvg)rawScore+=meta.officialClose>=meta.officialAvg?1:-1;
     if(meta.high52&&meta.low52&&meta.high52>meta.low52)rawScore+=(clamp01((price-meta.low52)/(meta.high52-meta.low52))-.5)*4;
-    // WS5/R8 (v552): weight the signed bulk/block deal-net by liquidity — churn in illiquid
-    // micro-caps (AASTHA) is not the institutional conviction the flat ±1.5 assumes.
-    if(meta.bulkNet){const dw=clamp01(turn/V552.DEAL_LIQ_FLOOR,0,1);rawScore+=(meta.bulkNet>0?1.5:-1.5)*dw;}
+    // WS5/R8 (v552): weight the signed bulk/block deal-net by liquidity — churn in an illiquid
+    // micro-cap (AASTHA) is not the institutional conviction the flat ±1.5 assumes. The ₹25L line
+    // is the model's existing tradeability threshold (rocketReady/risk/Indicator Watch), not a new knob.
+    if(meta.bulkNet){const dw=clamp01(turn/25e5,0,1);rawScore+=(meta.bulkNet>0?1.5:-1.5)*dw;}
     if(stretch>4)rawScore-=22;else if(stretch>3)rawScore-=14;else if(stretch>2.5)rawScore-=7;
     if(!participationReady)rawScore-=7;
     if(!impulseReady)rawScore-=5;
     rawScore+=followThroughBonus+fallingKnifePenalty;
-    // WS1/R1 (v552): trend-aware chase penalty — a big day-move sitting inside a positive 1M AND
-    // 3M trend is a genuine continuation and keeps only CHASE_TREND_RELIEF of the chase; a trendless
-    // one-day spike (the "hot-shot → next-day fade") keeps the full penalty.
-    if(day>8){const chase=Math.min(13,(day-8)*1.7);const p1=perf1mI>=0?radarNum(raw[perf1mI]):null,p3=perf3mI>=0?radarNum(raw[perf3mI]):null;const trendConfirms=p1!==null&&p1>0&&p3!==null&&p3>0;rawScore-=trendConfirms?chase*V552.CHASE_TREND_RELIEF:chase;}
+    // WS1/R1 (v552): trend-aware chase penalty. The relief is SELF-CALIBRATING — the fraction of the
+    // chase that is waived is the row's cross-sectional percentile of medium-term trend (1M+3M). A
+    // strong established uptrend (high percentile) is a genuine continuation and keeps almost none of
+    // the chase; a trendless one-day spike (low percentile, the "hot-shot → next-day fade") keeps it
+    // all. No magic constant. Missing performance data → full chase (unchanged prior behaviour).
+    if(day>8){const chase=Math.min(13,(day-8)*1.7);const tPct=trendArr[ri]===null?null:radarPct(trendSorted,trendArr[ri]);rawScore-=chase*(tPct===null?1:1-tPct);}
     if(gap>7)rawScore-=Math.min(6,(gap-7)*.8);
     if(turn<5e5)rawScore-=7;
     if(price<5)rawScore-=5;
-    // WS4/R6 (v552): sector-relative out-performance — reward a name beating its own sector median
-    // (idiosyncratic strength), not mere sector drift. Skipped on neutralised corp-action rows.
-    if(!meta._corpNeutralised){const sectorRel=clamp01(day,-10,10)-(sectorMedians[raw[sectorI]||'Unknown']??0);rawScore+=clamp01(sectorRel,-V552.SECTOR_REL_CLAMP,V552.SECTOR_REL_CLAMP)*V552.SECTOR_REL_K;}
-    // WS2/R3 (v552): revenue up but diluted-EPS growth down = a profit-down fade, discount it.
-    const revG=revGrowthI>=0?radarNum(raw[revGrowthI]):null,epsG=epsGrowthI>=0?radarNum(raw[epsGrowthI]):null;
-    if(revG!==null&&epsG!==null&&revG>0&&epsG<0)rawScore-=V552.REV_MARGIN_PEN;
-    // WS3/R2 (v552): stateless buyback bonus — a bc BUY BACK / capital-reduction event this session.
-    if(meta.corpToday?.kind==='buyback')rawScore+=V552.BUYBACK_BONUS;
-    // WS5/R8 (v552): battleground whipsaw — gap and change-from-open oppose, both large = an
-    // unresolved fight (bull-trap / bear-trap), low-confidence for the next move.
-    const gapSigned=radarNum(raw[gapI]),chgOpen=changeOpenI>=0?radarNum(raw[changeOpenI]):null;
-    if(gapSigned!==null&&chgOpen!==null&&Math.sign(gapSigned)!==0&&Math.sign(chgOpen)!==0&&Math.sign(gapSigned)!==Math.sign(chgOpen)&&Math.abs(gapSigned)>=V552.WHIPSAW_MIN&&Math.abs(chgOpen)>=V552.WHIPSAW_MIN)rawScore-=V552.WHIPSAW_PEN;
+    // WS3/R2 (v552): buyback event — treasury conviction, the same family as net-buying, so it uses
+    // the model's existing deal-net conviction unit (+1.5). Stateless: driven by the bc BUY BACK
+    // corporate-action event, never a cross-day share-count delta.
+    if(meta.corpToday?.kind==='buyback')rawScore+=1.5;
     return {symbol,name:String(raw[descI]||symbol),sector:raw[sectorI]||'',rawScore,parts,contrib,quality,
       price,day,priceChange:day,turnover:turn,relvol,gap,rangePct,stretch,atr:atrPct,
       high1d:highI>=0?radarNum(raw[highI]):null,low1d:lowI>=0?radarNum(raw[lowI]):null,rocketToday:day>=10,
