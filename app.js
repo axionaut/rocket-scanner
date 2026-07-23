@@ -1,5 +1,6 @@
-const BUILD_TS='2026-07-22 21:32 IST'; // release build time (IST)
-const APP_VERSION=556; // v556: parse the NSE Market Activity Report (MA<date>.csv) — official Nifty %, advances/declines and sector index moves shown as market CONTEXT in the status bar (EOD data, display only, never fed into per-row scoring); MA added to the ℹ️ file manifest.
+const BUILD_TS='2026-07-23 09:17 IST'; // release build time (IST)
+const APP_VERSION=557; // v557: stale Positions/Orders can no longer be counted as TODAY. Zerodha only rewrites those CSVs on a new trade, so the morning after a no-trade day they still hold yesterday's rows. The portfolio session date is now derived from the ORDERS ROW DATES (data, not file mtime — which can read "today" for yesterday's content); positions inherit it; undateable files/rows fail SAFE (stale) instead of being assumed current; and the status bar says so out loud.
+// v556: parse the NSE Market Activity Report (MA<date>.csv) — official Nifty %, advances/declines and sector index moves shown as market CONTEXT in the status bar (EOD data, display only, never fed into per-row scoring); MA added to the ℹ️ file manifest.
 // v555 market-cycle stage awareness (stateless, self-calibrating): per-row stage label (1 accumulation · 2 breakout · 3 event · 4 profit-booking · 5 re-accumulation · 6 second-leg); a quiet-accumulation signal (conjunction-of-percentiles) injected via the rocket-diagnostic weighting; sell-the-news decay off Recent earnings date (horizon = review days); market intraday-breadth gauge in the status bar + basket export (entry timing, never changes ranking).
 const GOOGLE_DRIVE_CLIENT_ID='1015012642264-oi2nelv3v90k3d39r994a6nelgjs2a56.apps.googleusercontent.com'; // Public OAuth Web Client ID.
 const PRICE_BAND_BLOCK_BUFFER_PCT=0.15; // Treat rounded 4.9/9.9/19.9 rows as effectively band-locked.
@@ -978,6 +979,7 @@ let NSE_CORP_ACTION={}; // {symbol -> [{exDate:'YYYY-MM-DD', purpose, kind:'stru
 let NSE_BOARD_MEETING={}; // {symbol -> {date:'YYYY-MM-DD', purpose, isResults}} from PR-zip bm file (v554) — upcoming-event calendar
 let NSE_ANNOUNCE={}; // {symbol -> short label} from PR-zip an file (v554) — an announcement was filed this session
 let MARKET_INTRADAY=null; // v555 WS-D: {adv,dec,advPct,median} market breadth from change-from-open (entry-timing gauge)
+let PORTFOLIO_STALE=null; // v557: {portfolioDate,stale,sessionDate} — Positions/Orders are from a prior session
 let NSE_MARKET=null; // v556: official Market Activity Report summary {date,dateISO,niftyPct,advances,declines,tradedValueCr,marketCapCr,indices} — EOD context, display only
 let NSE_NON_EQ=new Set(); // symbols in non-EQ series (BE,BZ,SZ,SM,ST) — excluded from display, kept in learning
 let NSE_HOLIDAYS=new Set(); // Set of 'YYYY-MM-DD' strings for NSE trading holidays
@@ -4185,12 +4187,47 @@ function scannerSessionTag(fileName, raw, sourceText=''){
 }
 function inputFileSessionDate(file){
   const ts=Number(file?.lastModified);
-  if(!(ts>0)) return getSessionDate();
+  // v557: return null (UNKNOWN) when there is no usable timestamp. Previously this returned
+  // getSessionDate(), i.e. "assume current" — a fail-OPEN default that let an undateable file
+  // (e.g. hydrated from Drive without mtime) be treated as this session's data.
+  if(!(ts>0)) return null;
   const ist=new Date(ts+5.5*3600000);
   return `${ist.getUTCFullYear()}-${String(ist.getUTCMonth()+1).padStart(2,'0')}-${String(ist.getUTCDate()).padStart(2,'0')}`;
 }
 function isCurrentSessionFile(file){
-  return inputFileSessionDate(file)===getSessionDate();
+  const d=inputFileSessionDate(file);
+  return d?d===getSessionDate():false; // unknown timestamp ⇒ treat as NOT current (fail-safe)
+}
+// v557: the portfolio session date derived from the DATA (Orders.csv row timestamps), not from file
+// metadata. Zerodha only rewrites Positions/Orders when a new trade happens, so the morning after a
+// no-trade day both files still hold yesterday's rows — and a file mtime can read "today" for
+// yesterday's CONTENT (re-save, folder copy, Drive re-upload). The row dates cannot lie.
+function getPortfolioSessionDate(orders){
+  const list=orders||ORDERS_TODAY;
+  if(!list?.length) return null;
+  let max=null;
+  for(const o of list){
+    const d=normOrderDate(o?.time);
+    if(/^\d{4}-\d{2}-\d{2}$/.test(d||'')&&(!max||d>max)) max=d;
+  }
+  return max;
+}
+// Single source of truth for "are the portfolio CSVs from THIS session?". Also records the answer in
+// PORTFOLIO_STALE so the status bar can say so out loud instead of silently dropping the data.
+function resolvePortfolioStaleness(){
+  const today=getSessionDate();
+  const portfolioDate=getPortfolioSessionDate();
+  const ordersStale=!!portfolioDate&&portfolioDate!==today;
+  PORTFOLIO_STALE={portfolioDate,stale:ordersStale,sessionDate:today};
+  return {today,portfolioDate,ordersStale};
+}
+// Positions carry no date of their own, so they inherit the orders' session: the two files are one
+// snapshot taken at the same moment. The DATA wins over the file mtime, which can read "today" for
+// yesterday's content (re-save, folder copy, Drive re-upload).
+function isPositionsFileCurrent(file){
+  const portfolioDate=getPortfolioSessionDate();
+  if(portfolioDate) return portfolioDate===getSessionDate();
+  return isCurrentSessionFile(file); // no dateable order rows → fall back to the file timestamp
 }
 async function refreshRankingsAfterSurvRuleChange(){
   if(!Object.keys(SURV_ALL_HITS||{}).length&&FS.hasFolder()){
@@ -5468,6 +5505,12 @@ function renderStatusBar(){
     }
     html+=` <span style="color:${c};font-size:11px;font-family:'DM Mono',monospace;font-weight:700;margin-left:8px" title="Market intraday breadth: ${MARKET_INTRADAY.adv} of ${MARKET_INTRADAY.adv+MARKET_INTRADAY.dec} stocks are trading above their open. Below 50% = broad intraday weakness → continuation odds lower; consider waiting for the market to turn up. Entry-timing gauge only — it does NOT change the ranking.${officialTip}">· Market ${up?'▲':'▼'} ${pct}% up-from-open${officialInline}</span>`;
   }
+  // v557: say it out loud when Positions/Orders are a prior session's snapshot. Zerodha only rewrites
+  // them on a new trade, so the morning after a no-trade day they still hold yesterday's rows — they
+  // are EXCLUDED from today's numbers rather than silently counted.
+  if(PORTFOLIO_STALE?.stale){
+    html+=` <span class="sb-tag sb-tag-red" style="margin-left:8px" title="Positions.csv and Orders.csv still hold the ${escHtml(PORTFOLIO_STALE.portfolioDate||'prior')} session (Zerodha only rewrites them when you place a new trade). They are EXCLUDED from today's booked P&L, held-suppression and open positions — Holdings.csv is used instead. Re-export them after your first trade today to bring them current.">⏳ Positions/Orders from ${escHtml(PORTFOLIO_STALE.portfolioDate||'prior session')} — excluded from today</span>`;
+  }
   if(SUPPRESSED_HELD>0)html+=` <span class="sb-tag" style="margin-left:8px" title="Held positions (Holdings + Positions + today's net Orders buys) never re-enter the buy ranking. See Open Positions on the Performance tab.">📌 ${SUPPRESSED_HELD} held suppressed</span>`;
   if(SURV_HARD_REMOVED>0)html+=` <span class="sb-tag sb-tag-red" style="margin-left:4px" title="Weeded out by the configured surveillance rules in the Methodology table (hard filter).">⚠ ${SURV_HARD_REMOVED} surveillance removed</span>`;
   if(tags.length){html+=`<span class="sb-sep">|</span>`;html+=tags.map(t=>`<span class="sb-tag">${t}</span>`).join('');}
@@ -5888,7 +5931,10 @@ function parseOrders(text){
     const qty=num(qtyRaw);
     const price=num(r[priceCol]);
     if(qty===null||qty===0||price===null) return null;
-    const time=String(r[timeCol]||'').trim()||getSessionDate();
+    // v557: an undateable row must NOT be stamped with today's session date — that made a stale
+    // Orders.csv (or one whose Time column failed to parse) masquerade as this session's trades.
+    // Left empty, it simply never matches a "today" filter.
+    const time=String(r[timeCol]||'').trim();
     const product=productCol?String(r[productCol]||'').trim().toUpperCase():'CNC';
     return {symbol:sym,type,qty,price,time,product};
   }).filter(Boolean);
@@ -5984,18 +6030,20 @@ async function hydrateSessionCSVsFromWorkspace(){
     updates[HOLD_STORE]={holdings:HOLDINGS,costMap:HOLD_COST_MAP,sourcePath:holdFile.path,lastModified:holdFile.lastModified};
     updateFileLoadStatus('Holdings.csv','loaded');
   }
-  if(posFile?.text){
-    const today=getSessionDate();
-    const positionsCurrent=isCurrentSessionFile(posFile);
-    POSITIONS=positionsCurrent?parsePositions(posFile.text):[];
-    updates[POS_STORE]={positions:POSITIONS,sessionDate:today,sourcePath:posFile.path,lastModified:posFile.lastModified,sourceDate:inputFileSessionDate(posFile),stale:!positionsCurrent};
-    updateFileLoadStatus('Positions.csv',positionsCurrent?'loaded':'stale',positionsCurrent?'':'stale - ignored');
-  }
+  // v557: orders first — their row dates decide which session the portfolio snapshot belongs to.
   if(ordFile?.text){
     ORDERS_TODAY=parseOrders(ordFile.text);
     if(ORDERS_TODAY) ORDERS_TODAY._loadedThisSession=true;
     updates[ORDERS_STORE]={orders:ORDERS_TODAY,sourcePath:ordFile.path,lastModified:ordFile.lastModified};
-    updateFileLoadStatus('Orders.csv','loaded');
+    const _ord=resolvePortfolioStaleness();
+    updateFileLoadStatus('Orders.csv',_ord.ordersStale?'stale':'loaded',_ord.ordersStale?`prior session ${_ord.portfolioDate||'unknown'} - excluded from today`:'');
+  }
+  if(posFile?.text){
+    const today=getSessionDate();
+    const positionsCurrent=isPositionsFileCurrent(posFile);
+    POSITIONS=positionsCurrent?parsePositions(posFile.text):[];
+    updates[POS_STORE]={positions:POSITIONS,sessionDate:today,sourcePath:posFile.path,lastModified:posFile.lastModified,sourceDate:inputFileSessionDate(posFile),stale:!positionsCurrent};
+    updateFileLoadStatus('Positions.csv',positionsCurrent?'loaded':'stale',positionsCurrent?'':'stale - ignored');
   }
   if(tbFile?.text){
     const tb=parseTradebook(tbFile.text);
@@ -6675,23 +6723,26 @@ async function processFiles(files,sourceLabel,opts={}){
     try{FS.set(HOLD_STORE,{holdings:HOLDINGS,costMap:HOLD_COST_MAP});}catch(e){}
     updateFileLoadStatus('Holdings.csv','loaded');
   }
-  if(posFile){
-    setLoadMsg('Processing positions...');
-    const posText=await posFile.text();
-    const posHash=(function(t){let h=0;for(let i=0;i<t.length;i++){h=((h<<5)-h)+t.charCodeAt(i);h|=0;}return h;})(posText);
-    const today=getSessionDate();
-    const positionsCurrent=isCurrentSessionFile(posFile);
-    POSITIONS=positionsCurrent?parsePositions(posText):[];
-    try{FS.set(POS_STORE,{positions:POSITIONS,hash:posHash,sessionDate:today,sourceDate:inputFileSessionDate(posFile),stale:!positionsCurrent});}catch(e){}
-    updateFileLoadStatus('Positions.csv',positionsCurrent?'loaded':'stale',positionsCurrent?'':'stale - ignored');
-  }
+  // v557: ORDERS are parsed BEFORE positions, because the orders' own row dates are the most
+  // trustworthy signal of which session the portfolio files describe (see resolvePortfolioStaleness).
   if(ordFile){
     setLoadMsg('Processing orders...');
     const ordText=await ordFile.text();
     ORDERS_TODAY=parseOrders(ordText);
     if(ORDERS_TODAY) ORDERS_TODAY._loadedThisSession=true;
     try{FS.set(ORDERS_STORE,{orders:ORDERS_TODAY,sourcePath:ordFile.name,lastModified:ordFile.lastModified});}catch(e){}
-    updateFileLoadStatus('Orders.csv','loaded');
+    const _ord=resolvePortfolioStaleness();
+    updateFileLoadStatus('Orders.csv',_ord.ordersStale?'stale':'loaded',_ord.ordersStale?`prior session ${_ord.portfolioDate||'unknown'} - excluded from today`:'');
+  }
+  if(posFile){
+    setLoadMsg('Processing positions...');
+    const posText=await posFile.text();
+    const posHash=(function(t){let h=0;for(let i=0;i<t.length;i++){h=((h<<5)-h)+t.charCodeAt(i);h|=0;}return h;})(posText);
+    const today=getSessionDate();
+    const positionsCurrent=isPositionsFileCurrent(posFile);
+    POSITIONS=positionsCurrent?parsePositions(posText):[];
+    try{FS.set(POS_STORE,{positions:POSITIONS,hash:posHash,sessionDate:today,sourceDate:inputFileSessionDate(posFile),stale:!positionsCurrent});}catch(e){}
+    updateFileLoadStatus('Positions.csv',positionsCurrent?'loaded':'stale',positionsCurrent?'':'stale - ignored');
   }
   if(tbFile){
     setLoadMsg('Analyzing tradebook...');
