@@ -1,10 +1,11 @@
-const BUILD_TS='2026-07-24 15:16 IST'; // release build time (IST)
-const APP_VERSION=560; // v560: upper-range entries now require continuing short-term confirmation and must not be extended above both Bollinger and Keltner upper bands. Either a 5m/15m stall or dual-band extension is enough to wait, closing the KRISHANA path that v559 left too permissive.
+const BUILD_TS='2026-07-24 16:05 IST'; // release build time (IST)
+const APP_VERSION=1060; // v1060: one-time +500 history correction; Max Allocation = capital ÷ average entry-day positions, capped at 0.10% of stock turnover, with shared ATR/range-specific targets and stops.
 // v556: parse the NSE Market Activity Report (MA<date>.csv) — official Nifty %, advances/declines and sector index moves shown as market CONTEXT in the status bar (EOD data, display only, never fed into per-row scoring); MA added to the ℹ️ file manifest.
 // v555 market-cycle stage awareness (stateless, self-calibrating): per-row stage label (1 accumulation · 2 breakout · 3 event · 4 profit-booking · 5 re-accumulation · 6 second-leg); a quiet-accumulation signal (conjunction-of-percentiles) injected via the rocket-diagnostic weighting; sell-the-news decay off Recent earnings date (horizon = review days); market intraday-breadth gauge in the status bar + basket export (entry timing, never changes ranking).
 const GOOGLE_DRIVE_CLIENT_ID='1015012642264-oi2nelv3v90k3d39r994a6nelgjs2a56.apps.googleusercontent.com'; // Public OAuth Web Client ID.
 const PRICE_BAND_BLOCK_BUFFER_PCT=0.15; // Treat rounded 4.9/9.9/19.9 rows as effectively band-locked.
 const BASKET_CASH_RESERVE_RS=1; // Leave a rupee for broker-side tax/rounding differences.
+const MAX_TURNOVER_PARTICIPATION=0.001; // Market-impact rail: never exceed 0.10% of a stock's daily rupee turnover.
 const BASKET_MARKET_BUDGET_BUFFER_PCT=0.25; // Sizing cushion only; exported buys remain MARKET orders.
 const SYSTEM_TRADE_START_DATE='2026-04-01'; // Adaptive stats use trades closed from this date onward.
 const HARVEST_DAILY_NET_GOAL_RS=15000; // North-star daily pure-profit goal, never a forced capital assumption.
@@ -102,7 +103,7 @@ let FILE_LOAD_STATUS={source:null,when:null,files:[]};
 let RADAR={headers:[],matrix:[],features:[],ids:{},rockets:0,ms:0,sourceNote:'',scoredAt:null};
 const SCANNER_STORE='rs_filters';
 const SHARED_FILTER_STORE='rs_filters_shared';
-// The account-level trading inputs (Capital ₹, Max Alloc ₹, manual Target %) affect the GTT
+// The account-level trading inputs (Capital ₹, Max Alloc ₹, manual Target anchor %) affect execution
 // and must be identical on every device, so they ride the Drive-synced brain — NOT only
 // per-device localStorage (v549 fix: a manual target set on one device now reaches the
 // others). localStorage stays as the offline mirror.
@@ -1181,7 +1182,10 @@ function getActiveStopDistancePct(atrPct){
 function getRowStopDistancePct(s){
   const explicit=Math.abs(Number(s?.slPct));
   if(explicit>0&&Number.isFinite(explicit)) return capSLDistancePct(explicit);
-  return getActiveStopDistancePct(s?.atr);
+  const atr=Number(s?.atr);
+  if(Number.isFinite(atr)&&atr>0) return getActiveStopDistancePct(atr);
+  const learned=Math.abs(Number(TRADEBOOK_STATS?.adaptiveSL));
+  return capSLDistancePct(learned>0?learned:SL_MIN_PCT);
 }
 function getTslMomentumTightenPct(row,peakProfitPct=0){
   const speed=Math.max(0,Number(row?.priceChange)||0,Number(row?.snapshotChange)||0,Number(row?.rocketMove)||0);
@@ -3048,17 +3052,28 @@ function getComputedCapital(){
 // is empty (owner, v545). Deleting your value returns to the default — never to empty
 // (which for Capital meant 0 and for Max Alloc meant no cap → full allocation). The field
 // holds ONLY a manual override; an empty field means "use the default", shown greyed in the
-// placeholder. Capital default = computed deployed book; Max Alloc default = learned
-// Position Size. There is no more auto-fill of the field value or `autoDefault` flag.
+// placeholder. Capital default = computed deployed book; Max Alloc default = capital
+// divided by average positions per entry day. There is no auto-fill or `autoDefault` flag.
 function getDefaultCapital(){ return getComputedCapital().total; }
 let _defMaxAllocMemo=null;
+let _avgTradesMemo=null;
+function getAverageTradesPerEntryDay(){
+  const tb=TRADEBOOK_STATS?.tripsData;
+  if(_avgTradesMemo&&_avgTradesMemo.tb===tb) return _avgTradesMemo.avg;
+  const trips=getAdaptiveTradeTrips(tb||[]);
+  if(!trips.length) return null;
+  const avg=Number(computePerfStats(trips).avgPositionsPerEntryDay);
+  const value=Number.isFinite(avg)&&avg>0?avg:null;
+  _avgTradesMemo={tb,avg:value};
+  return value;
+}
 function getDefaultMaxAlloc(){
   const tb=TRADEBOOK_STATS?.tripsData;
-  if(_defMaxAllocMemo&&_defMaxAllocMemo.tb===tb) return _defMaxAllocMemo.v;
-  const trips=getAdaptiveTradeTrips(tb||[]);
-  const rec=trips.length?getRecommendedPositionSize(computePerfStats(trips)):null;
-  const v=rec&&rec.value>0?Math.round(rec.value):0;
-  _defMaxAllocMemo={tb,v};
+  const capital=getEffectiveCapital();
+  if(_defMaxAllocMemo&&_defMaxAllocMemo.tb===tb&&_defMaxAllocMemo.capital===capital) return _defMaxAllocMemo.v;
+  const avgTrades=getAverageTradesPerEntryDay();
+  const v=capital>0&&avgTrades>0?Math.round(capital/avgTrades):0;
+  _defMaxAllocMemo={tb,capital,v,avgTrades};
   return v;
 }
 function getEffectiveCapital(){
@@ -3075,9 +3090,9 @@ function updateFilterPlaceholders(){
   const capEl=document.getElementById('fCapital');
   if(capEl){ const d=getDefaultCapital(); if(d>0){ capEl.placeholder=String(Math.round(d)); capEl.title=`Empty = your computed capital ₹${Math.round(d).toLocaleString('en-IN')} (holdings + open positions). Type a value to override.`; } }
   const maxEl=document.getElementById('fMaxAlloc');
-  if(maxEl){ const d=getDefaultMaxAlloc(); if(d>0){ maxEl.placeholder=String(d); maxEl.title=`Empty = learned Position Size ₹${d.toLocaleString('en-IN')}. Type a value to override the per-stock cap.`; } else { maxEl.placeholder='no cap'; } }
+  if(maxEl){ const d=getDefaultMaxAlloc(),avg=getAverageTradesPerEntryDay(),capital=getEffectiveCapital(); if(d>0&&avg>0){ maxEl.placeholder=String(d); maxEl.title=`Empty = Capital ₹${Math.round(capital).toLocaleString('en-IN')} ÷ ${avg.toFixed(2)} average positions per entry day = ₹${d.toLocaleString('en-IN')}. Type a value to override the per-stock cap.`; } else { maxEl.placeholder='need trade history'; } }
   const tgtEl=document.getElementById('fTgtOverride');
-  if(tgtEl){ let d=0; try{d=getDefaultTgtPct();}catch(e){} if(d>0){ tgtEl.placeholder=d.toFixed(1); tgtEl.title=`Empty = the auto target ${d.toFixed(1)}% (lower of learned Harvest / goal-led). Type a value to OVERRIDE it — your number then drives every basket GTT and the stats.`; } }
+  if(tgtEl){ let d=0; try{d=getDefaultTgtPct();}catch(e){} if(d>0){ tgtEl.placeholder=d.toFixed(1); tgtEl.title=`Empty = the auto portfolio target anchor ${d.toFixed(1)}% (lower of learned Harvest / goal-led). A typed value replaces the anchor; each stock still gets its own capacity-aware target.`; } }
 }
 // Goal capital basis = effective capital (the field if the owner typed one, else the
 // computed deployed book). An empty field means the default, never zero.
@@ -3156,7 +3171,7 @@ function buildGoalPopoverContent(){
   ${(()=>{
     // Projected finish date. PRIMARY = your REALISTIC pace from the tradebook (what you
     // actually earn per day, 30d) — the honest picture the owner asked for (v544).
-    // SECONDARY = the best case if the active target filled every session. Informational.
+    // SECONDARY = context if the portfolio target anchor were realised every session.
     if(!(basis>0)) return '';
     const MON=['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
     const readable=d=>{const [y,m,dd]=d.split('-');return `${+dd} ${MON[+m-1]} ${y}`;};
@@ -3184,7 +3199,7 @@ function buildGoalPopoverContent(){
         : `At your realized pace (${(ach*100).toFixed(2)}%/day, 30d) the goal is not reached within 8 years — raise the pace, the target, or extend the deadline.`;
     }
 
-    // SECONDARY — best case if the active target filled every session.
+    // SECONDARY — portfolio-anchor context, not a claim that every stock has this target.
     let bestHtml='';
     try{
       const at=getActiveTargetInfo();
@@ -3194,8 +3209,8 @@ function buildGoalPopoverContent(){
           const bp=projectGoalCompletionDate(basis,g.target,netPct,g.withdrawMonthly);
           const srcLbl=at.source==='manual'?'manual':at.source==='goal'?'goal-led':'Harvest';
           bestHtml=bp
-            ? `Best case, if the ${srcLbl} target (${at.tgtPct.toFixed(1)}% ≈ ${netPct.toFixed(2)}% net/day) fills every session: ${dateSpan(bp)}.`
-            : `Best case at the ${srcLbl} target: not within 8 years.`;
+            ? `Portfolio context, if the ${srcLbl} anchor (${at.tgtPct.toFixed(1)}% ≈ ${netPct.toFixed(2)}% net/day) were realised every session: ${dateSpan(bp)}.`
+            : `Portfolio context at the ${srcLbl} anchor: not within 8 years.`;
         }
       }
     }catch(e){}
@@ -3279,27 +3294,21 @@ function renderStats(){
   }
 
   const slTgtCard=(()=>{
-    if(!TRADEBOOK_STATS?.adaptiveSL) return '';
     const harvestPlan=computeHarvestPlan();
     const active=getActiveTargetInfo();
-    const _sl=TRADEBOOK_STATS.adaptiveSL.toFixed(2);
-    const _tgt=(active.tgtPct||harvestPlan.targetPct||TRADEBOOK_STATS.adaptiveTGT).toFixed(2);
-    const rr=(parseFloat(_sl)>0?(parseFloat(_tgt)/parseFloat(_sl)):0).toFixed(2);
+    const selected=FILT.filter(s=>SELECTED.has(s.symbol));
+    const summary=summarizeRowExitPolicies(selected.length?selected:FILT.slice(0,20));
+    if(!summary) return '';
+    const pctRange=(lo,hi,prefix)=>Math.abs(hi-lo)<0.001?`${prefix}${lo.toFixed(2)}%`:`${prefix}${lo.toFixed(2)}–${hi.toFixed(2)}%`;
     const reviewDays=getEffectiveReviewDays();
     const holdStr=reviewDays?` · review &gt;${reviewDays}d`:'';
     const learnedStr=harvestPlan.sampleCount?` · ${harvestPlan.sampleCount} move samples`:'';
     const opportunity=getSameDayExitOpportunitySummary();
     const opportunityStr=opportunity.exits?` · <span style="color:var(--amber)" title="${opportunity.exits} symbol/date exit${opportunity.exits===1?'':'s'} compared with the same day's ALL NSE high; ${opportunity.upsideExits} day high${opportunity.upsideExits===1?'':'s'} exceeded your quantity-weighted average sell price.">${opportunity.upsideExits}/${opportunity.exits} exit${opportunity.exits===1?'':'s'} left upside</span>`:'';
-    const costStr=` · <span style="color:var(--t2)" title="Estimated round-trip charges as % of buy capital">cost ~${harvestPlan.costPct.toFixed(2)}%</span>`;
-    const netStr=` · net ~${harvestPlan.expectedNetPct.toFixed(2)}%`;
     const confStr=harvestPlan.confidence!=null?` · hit ${(harvestPlan.confidence*100).toFixed(0)}% hist`:'';
-    // Show which target is driving the export and where the other one sits.
-    const srcStr=active.source==='manual'
-      ? ` · <span style="color:var(--green);font-weight:700" title="Your manual Target % override is driving the basket, superseding the auto target ${active.autoPct!=null?active.autoPct.toFixed(2)+'%':''} (lower of Harvest ${active.harvestPct.toFixed(2)}%${active.goalPct!=null?' / goal-led '+active.goalPct.toFixed(2)+'%':''}). Clear the Target % field to return to auto.">✎ manual (auto ${active.autoPct!=null?active.autoPct.toFixed(2):'—'}%)</span>`
-      : active.source==='goal'
-      ? ` · <span style="color:var(--amber)" title="Goal-led target is lower than the learned Harvest ${active.harvestPct.toFixed(2)}%, so it drives the basket (higher hit rate, still meets your goal after charges).">goal-led (Harvest ${active.harvestPct.toFixed(2)}%)</span>`
-      : (active.goalPct!=null?` · <span style="color:var(--t2)" title="Learned Harvest is at or below the goal-led ${active.goalPct.toFixed(2)}%, so Harvest drives the basket.">Harvest-led (goal ${active.goalPct.toFixed(2)}%)</span>`:` · ${harvestPlan.source}`);
-    return `<div class="st"><div class="st-l">SL / Harvest GTT</div><div class="st-v" style="font-size:15px"><span style="color:var(--red)">−${_sl}%</span><span style="color:var(--t3);font-size:12px"> / </span><span style="color:var(--green)">+${_tgt}%</span></div><div class="st-d">R:R ${rr}${costStr}${netStr}${confStr}${srcStr}${learnedStr}${holdStr}${opportunityStr}</div></div>`;
+    const srcLabel=active.source==='manual'?'manual':active.source==='goal'?'goal-led':'Harvest';
+    const fallbackStr=summary.fallbacks?` · ${summary.fallbacks} target fallback${summary.fallbacks===1?'':'s'}`:'';
+    return `<div class="st"><div class="st-l">Per-Stock Exit Policies</div><div class="st-v" style="font-size:15px"><span style="color:var(--red)">${pctRange(summary.stopMin,summary.stopMax,'−')}</span><span style="color:var(--t3);font-size:12px"> / </span><span style="color:var(--green)">${pctRange(summary.targetMin,summary.targetMax,'+')}</span></div><div class="st-d">${summary.count} stock${summary.count===1?'':'s'} · ${srcLabel} ${active.tgtPct.toFixed(2)}% anchor${fallbackStr}${confStr}${learnedStr}${holdStr}${opportunityStr}</div></div>`;
   })();
 
   const topScore=top&&isFinite(top.score)?Number(top.score).toFixed(1):'—';
@@ -3343,7 +3352,7 @@ function renderStats(){
     const opportunity=getSameDayExitOpportunitySummary();
     if(opportunity.exits){
       const realisedText=opportunity.avgRealised==null?'':` · realised ${opportunity.avgRealised>=0?'+':''}${opportunity.avgRealised.toFixed(2)}%`;
-      infoPills.push(`<span class="info-pill pill-amber" title="One exit means one symbol on one sell date. Sell fills are quantity-weighted; ALL NSE supplies that day's high. The average is weighted by sold value and includes 0% when the high did not exceed your average sell price. Diagnostic only; it does not change the Harvest GTT target.">🎯 ${opportunity.exits} exit${opportunity.exits===1?'':'s'}${realisedText} · ${opportunity.upsideExits} left upside · missed +${opportunity.avgMissed.toFixed(2)}% (${fmtINR(opportunity.missedValue)}) · diagnostic</span>`);
+      infoPills.push(`<span class="info-pill pill-amber" title="One exit means one symbol on one sell date. Sell fills are quantity-weighted; ALL NSE supplies that day's high. The average is weighted by sold value and includes 0% when the high did not exceed your average sell price. Diagnostic only; it does not change the portfolio target anchor or any stock exit policy.">🎯 ${opportunity.exits} exit${opportunity.exits===1?'':'s'}${realisedText} · ${opportunity.upsideExits} left upside · missed +${opportunity.avgMissed.toFixed(2)}% (${fmtINR(opportunity.missedValue)}) · diagnostic</span>`);
     }
   }catch(e){}
 
@@ -3708,7 +3717,6 @@ function buildLatestSessionPanel(query=''){
 // `query` filters only what is DISPLAYED — TSL state is always computed and persisted
 // from the full position set, so searching can never prune the TSL store.
 function buildOpenPositionsPanel(query=''){
-  const adaptiveTGT=getEffectiveTgtPct()||(TRADEBOOK_STATS?.adaptiveTGT||3.7);
   const reviewDays=getEffectiveReviewDays()||5;
   const scannerBySymbol=new Map(ALL.map(row=>[row.symbol,row]));
   const tslStore=getPositionTslStore();
@@ -3728,19 +3736,21 @@ function buildOpenPositionsPanel(query=''){
     const pnlRs=(avg&&ltp)?+((ltp-avg)*qty).toFixed(0):null;
     const daysHeld=getOpenPositionDaysHeld(pos.symbol,qty);
     const capital=avg?+(avg*qty).toFixed(0):null;
-    const stopPct=getRowStopDistancePct(scannerRow);
-    const targetPrice=avg?tickPrice(avg*(1+adaptiveTGT/100)):null;
+    const exitPolicy=getRowExitPolicy(scannerRow,avg);
+    const stopPct=exitPolicy.stopPct;
+    const targetPct=exitPolicy.targetPct;
+    const targetPrice=avg&&targetPct?tickPrice(avg*(1+targetPct/100)):null;
     const stopPrice=avg?tickPrice(avg*(1-stopPct/100)):null;
     const tslInfo=calcPositionTSL({
       sym:pos.symbol,qty,avgCost:avg,ltp,scannerRow,adaptiveSL:stopPct,
-      adaptiveTGT,prev:tslStore[pos.symbol]
+      adaptiveTGT:targetPct,prev:tslStore[pos.symbol]
     });
     if(tslInfo){
       tslNext[pos.symbol]=tslInfo;
       if(JSON.stringify(tslStore[pos.symbol]||{})!==JSON.stringify(tslInfo)) tslChanged=true;
     }
     rows.push({
-      sym:pos.symbol,qty,avg,ltp,pnlPct,pnlRs,capital,daysHeld,targetPrice,stopPrice,
+      sym:pos.symbol,qty,avg,ltp,pnlPct,pnlRs,capital,daysHeld,targetPrice,stopPrice,targetPct,exitPolicy,
       tslPoints:tslInfo?.trailStepPoints??tslInfo?.trailPoints??null,
       score:isFinite(Number(scannerRow?.score))?Number(scannerRow.score):null,
       rank:scannerRow?.rank??null,setup:scannerRow?.setup||'',
@@ -3770,8 +3780,8 @@ function buildOpenPositionsPanel(query=''){
     {key:'pnlRs',label:'P&L ₹',align:'right',fmt:v=>v!=null?fmtSignedINR(v):'—',clrFn:v=>v==null?'var(--t3)':v>0?'var(--green)':v<0?'var(--red)':'var(--t2)'},
     {key:'capital',label:'Capital ₹',align:'right',fmt:v=>v!=null?fmtINR(v):'—',clrFn:()=>'var(--t2)'},
     {key:'daysHeld',label:'Days Held',align:'right',fmt:daysFmt,clrFn:()=>'var(--t1)'},
-    {key:'targetPrice',label:'Target ₹',align:'right',fmt:v=>v!=null?fmtINR(v)+`<span style="font-size:10px;color:var(--t3);margin-left:4px">+${adaptiveTGT}%</span>`:'—',clrFn:()=>'var(--green)'},
-    {key:'stopPrice',label:'SL ₹',align:'right',fmt:(v,row)=>v!=null?fmtINR(v)+`<span style="font-size:10px;color:var(--t3);margin-left:4px">-${getRowStopDistancePct(row.scannerRow).toFixed(2)}%</span>`:'—',clrFn:()=>'var(--red)'},
+    {key:'targetPrice',label:'Target ₹',align:'right',fmt:(v,row)=>v!=null?fmtINR(v)+`<span style="font-size:10px;color:var(--t3);margin-left:4px">+${Number(row.targetPct).toFixed(2)}%</span>`:'—',clrFn:()=>'var(--green)'},
+    {key:'stopPrice',label:'SL ₹',align:'right',fmt:(v,row)=>v!=null?fmtINR(v)+`<span style="font-size:10px;color:var(--t3);margin-left:4px">-${Number(row.exitPolicy?.stopPct).toFixed(2)}%</span>`:'—',clrFn:()=>'var(--red)'},
     {key:'tslPoints',label:'TSL pts',align:'right',bold:true,fmt:v=>v!=null?Number(v).toFixed(2):'—',clrFn:v=>v==null?'var(--t3)':'var(--amber)'},
     {key:'score',label:'Radar Score',align:'right',bold:true,fmt:v=>radarScoreCell(v),clrFn:()=>'var(--t1)'},
     {key:'rank',label:'Rank',align:'right',fmt:v=>v??'—',clrFn:()=>'var(--t2)'},
@@ -3956,12 +3966,12 @@ function renderPerformance(){
   const effectiveReviewDays=getEffectiveReviewDays();
   const recSummary=getRecommendationOutcomeSummary();
   const entrySummary=getExecutedEntryOutcomeSummary();
-  const recPos=getRecommendedPositionSize(p);
   updateFilterPlaceholders();
-  const posRatio=(p.avgCapital>0&&recPos.value)?recPos.value/p.avgCapital:null;
-  const recPosSub=recPos.value
-    ? `${recPos.source}${posRatio?` · ${(posRatio*100).toFixed(0)}% of avg`:''}`
-    : recPos.source;
+  const allocationCapital=getEffectiveCapital();
+  const allocationCadence=getAverageTradesPerEntryDay();
+  const autoMaxAlloc=allocationCapital>0&&allocationCadence?Math.round(allocationCapital/allocationCadence):0;
+  const typedMaxAlloc=parseFloat(document.getElementById('fMaxAlloc')?.value);
+  const maxAllocOverride=Number.isFinite(typedMaxAlloc)&&typedMaxAlloc>0;
 
   // Today's booked P&L is not in the tradebook yet — add it to the money total so the
   // headline matches reality, and say so explicitly rather than silently blending it.
@@ -3977,7 +3987,7 @@ function renderPerformance(){
     {label:'Win Rate',value:p.winRate+'%',color:p.winRate>=55?'var(--green)':p.winRate>=45?'var(--amber)':'var(--red)',sub:`${p.winners}W · ${p.losers}L lots`},
     {label:'Expectancy',value:fmtPerfRs(p.expectancy),color:clr(p.expectancy),sub:'Net ₹ you make per lot, on average'},
     {label:'Profit Factor',value:p.profitFactor!=null?p.profitFactor:'—',color:p.profitFactor>=1.5?'var(--green)':p.profitFactor>=1?'var(--amber)':'var(--red)',sub:'Gross wins ÷ gross losses · above 1 = profitable'},
-    {label:'Recommended Position',value:recPos.value?fmtINR(recPos.value):'—',color:recPos.value?'var(--amber)':'var(--t3)',sub:`Auto-fills Max Alloc · ${recPosSub}`},
+    {label:'Max Allocation',value:autoMaxAlloc?fmtINR(autoMaxAlloc):'—',color:autoMaxAlloc?'var(--amber)':'var(--t3)',sub:autoMaxAlloc?`${fmtINR(allocationCapital)} capital ÷ ${allocationCadence.toFixed(2)} avg positions/entry day${maxAllocOverride?` · typed override ${fmtINR(typedMaxAlloc)} active`:''}`:'Load trade history to calculate trading cadence'},
     {label:'Review After',value:effectiveReviewDays?effectiveReviewDays+'d':'—',color:effectiveReviewDays?'var(--amber)':'var(--t3)',sub:exitPolicy&&exitPolicy.velocityPctPerDay!=null?`Exit review horizon · realised baseline ${exitPolicy.holdDays}d`:'Re-upload tradebook to learn'},
     {label:'Max Drawdown',value:p.maxDrawdown>0?fmtSignedINR(-p.maxDrawdown):'—',color:'var(--red)',sub:'Worst peak-to-trough fall in this period'},
     {label:'Largest Loss',value:fmtSignedINR(p.largestLossRs),color:'var(--red)',sub:'Worst single lot, net of charges'},
@@ -3994,7 +4004,7 @@ function renderPerformance(){
   if(exitOpp.exits>=5){
     const activeTgt=(typeof getEffectiveTgtPct==='function')?getEffectiveTgtPct():null;
     const missColor=activeTgt!=null&&exitOpp.avgMissed>=activeTgt?'var(--red)':exitOpp.avgMissed>=1?'var(--amber)':'var(--green)';
-    kpis.push({label:'Same-Day Exit Headroom',value:'+'+exitOpp.avgMissed.toFixed(2)+'%',color:missColor,sub:`Stock kept rising past your exit on ${exitOpp.upsideExits}/${exitOpp.exits} sell days · ${fmtINR(exitOpp.missedValue)} left same-day${activeTgt!=null?` · active target is ${activeTgt.toFixed(1)}%`:''}`});
+    kpis.push({label:'Same-Day Exit Headroom',value:'+'+exitOpp.avgMissed.toFixed(2)+'%',color:missColor,sub:`Stock kept rising past your exit on ${exitOpp.upsideExits}/${exitOpp.exits} sell days · ${fmtINR(exitOpp.missedValue)} left same-day${activeTgt!=null?` · target anchor is ${activeTgt.toFixed(1)}%`:''}`});
   }
 
   // Diagnostics. Labels here state honestly what each number IS and whether the exit
@@ -4010,7 +4020,7 @@ function renderPerformance(){
     {label:'Max Win Streak',value:p.maxWinStreak+' days',color:p.maxWinStreak>=5?'var(--green)':p.maxWinStreak>=3?'var(--amber)':'var(--t1)',sub:'Consecutive profitable days'},
     {label:'Max Loss Streak',value:p.maxLossStreak+' days',color:p.maxLossStreak>=5?'var(--red)':p.maxLossStreak>=3?'var(--amber)':'var(--green)',sub:'Consecutive losing days'},
     {label:'Avg Position',value:fmtINR(p.avgCapital||0),color:'var(--t1)',sub:'Observed avg capital per position'},
-    {label:'Avg Positions/Entry Day',value:p.avgPositionsPerEntryDay.toFixed(2),color:'var(--t1)',sub:`${p.positionCount} positions across ${p.entryDays} entry days`},
+    {label:'Avg Positions/Entry Day',value:allocationCadence!=null?allocationCadence.toFixed(2):'—',color:'var(--t1)',sub:'Distinct symbol + buy-date positions ÷ entry days · Max Allocation input'},
   ];
   if(recSummary.evaluated){
     const bestUpside=recSummary.avgBestHighPct;
@@ -4646,8 +4656,8 @@ function _renderMethodologyInner(){
         <li>Strongly penalizes non-EQ, inactive and sub-10% price-band securities while retaining them in the visible ranking for audit. Only eligible securities enter the basket.</li>
         <li>Penalizes a required 10% move above 2.5 normal daily ranges; moves above three ranges receive a severe penalty.</li>
       </ol>${diagHTML}</div>
-      <div class="m-card"><h4>Held Suppression & Basket</h4><p>Held positions (Holdings + Positions + today's net Orders buys) never re-enter the buy ranking. The basket keeps the learned exit system: quantities come from the charge-aware score-weighted allocator, and every exported order carries the Harvest GTT target plus the ATR-scaled capped stop (${SL_MIN_PCT.toFixed(1)}%–${SL_MAX_PCT.toFixed(1)}%).</p></div>
-      <div class="m-card"><h4>What Still Learns</h4><p>The scorer itself is stateless by design. The execution layer keeps learning from your own results: the Harvest GTT target from flagged candidates' later attainable highs, the adaptive stop and review horizon from realised tradebook outcomes, position sizing from realised risk, and the same-day exit diagnostic from your sells against that day's highs.</p></div>
+      <div class="m-card"><h4>Held Suppression & Basket</h4><p>Held positions (Holdings + Positions + today's net Orders buys) never re-enter the buy ranking. Quantities come from the charge-aware score-weighted allocator and can never exceed 0.10% of that stock's daily rupee turnover; missing turnover blocks a market order. Every exported order gets its own target from that stock's ATR/range capacity blended with the portfolio target anchor, plus its own ATR-scaled stop inside the existing ${SL_MIN_PCT.toFixed(1)}%–${SL_MAX_PCT.toFixed(1)}% risk rails.</p></div>
+      <div class="m-card"><h4>What Still Learns</h4><p>The scorer itself is stateless by design. The execution layer keeps learning portfolio context from your results: the target anchor from later attainable highs, the fallback stop and review horizon from realised outcomes, and the same-day exit diagnostic from your sells against that day's highs. Max Allocation is arithmetic, not learned risk sizing: Capital divided by average positions entered per day.</p></div>
     </div>
     <h3 id="meth-ledger" style="margin-top:28px">Feature Ledger <span style="font-size:12px;color:var(--t3);font-weight:400">(${RADAR.features.length||0} modeled of ${RADAR.headers.length||0} columns)</span></h3>
     ${buildRadarLedgerHTML()}
@@ -4884,13 +4894,9 @@ function getGoalLedTargetPct(){
   gross=roundPct05(netEff+estimateRoundTripCostPct(gross));
   return gross;
 }
-// The single active target: whichever is LOWER — the learned Harvest gross or the
-// goal-led gross. A lower goal-led target hits more often while still meeting the
-// owner's stated need; Harvest remains the ceiling and the fallback.
-// Three targets (owner v547): the learned Harvest %, the goal-led %, and a MANUAL override.
-// Normally the active target is the lower of Harvest/goal-led (anti-churn). A manual value
-// in the Target % field SUPERSEDES that rule entirely — the owner's number wins. The field
-// defaults (via placeholder) to the auto target, so leaving it empty keeps today's behavior.
+// Portfolio target anchor: lower of learned Harvest gross and goal-led gross, unless the
+// owner supplies a manual anchor. getRowExitPolicy() blends this context with each stock's
+// own ATR/range capacity; this value is no longer pasted onto every order.
 function getActiveTargetInfo(){
   const harvest=computeHarvestPlan().targetPct;
   const goal=getGoalLedTargetPct();
@@ -4906,6 +4912,62 @@ function getDefaultTgtPct(){
 }
 function getEffectiveTgtPct(){
   return getActiveTargetInfo().tgtPct;
+}
+
+// One execution policy per stock. The portfolio target remains an evidence anchor,
+// while the stock's ATR/range determine what that particular name can reasonably reach.
+function getRowExitPolicy(row,buyPrice=null){
+  const active=getActiveTargetInfo();
+  const anchor=Number(active.tgtPct)>0?Number(active.tgtPct):Math.abs(Number(TRADEBOOK_STATS?.adaptiveTGT))||null;
+  const atr=Number(row?.atr);
+  const range=Number(row?.rangePct);
+  const hasAtr=Number.isFinite(atr)&&atr>0;
+  const hasRange=Number.isFinite(range)&&range>0;
+  const capacity=hasAtr&&hasRange?Math.sqrt(atr*range):hasAtr?atr:hasRange?range:null;
+  let targetPct=anchor;
+  let targetSource='portfolio fallback';
+  if(capacity>0&&anchor>0){
+    const blended=Math.sqrt(capacity*anchor);
+    targetPct=roundPct05(Math.min(capacity,blended));
+    const capacityFloor=Math.floor(capacity*20)/20;
+    if(capacityFloor>0) targetPct=Math.min(targetPct,capacityFloor);
+    targetSource=hasAtr&&hasRange?'ATR × range capacity':'single stock-range capacity';
+  }
+  let minGrossPct=null;
+  if(targetPct>0){
+    minGrossPct=Math.ceil((HARVEST_DESIRED_NET_PCT+estimateRoundTripCostPct(targetPct))*20)/20;
+    minGrossPct=Math.ceil((HARVEST_DESIRED_NET_PCT+estimateRoundTripCostPct(minGrossPct))*20)/20;
+  }
+  const viable=targetPct>0&&(capacity==null||targetPct+1e-9>=minGrossPct);
+  const stopPct=getRowStopDistancePct(row);
+  const stopSource=(Math.abs(Number(row?.slPct))>0)?'explicit stock stop'
+    :hasAtr?'ATR stock stop'
+    :(Number(TRADEBOOK_STATS?.adaptiveSL)>0?'learned portfolio fallback':'minimum-risk fallback');
+  return {
+    targetPct:targetPct>0?+targetPct.toFixed(2):null,
+    stopPct:+stopPct.toFixed(2),
+    capacityPct:capacity>0?+capacity.toFixed(2):null,
+    minGrossPct:minGrossPct>0?+minGrossPct.toFixed(2):null,
+    viable,
+    targetSource,
+    stopSource,
+    anchorPct:anchor>0?+anchor.toFixed(2):null,
+    anchorSource:active.source,
+    fallback:capacity==null,
+    buyPrice:Number(buyPrice)>0?Number(buyPrice):null
+  };
+}
+function summarizeRowExitPolicies(rows){
+  const policies=(rows||[]).map(r=>getRowExitPolicy(r,r?.price)).filter(p=>p.targetPct>0&&p.stopPct>0&&p.viable);
+  if(!policies.length) return null;
+  const targets=policies.map(p=>p.targetPct).sort((a,b)=>a-b);
+  const stops=policies.map(p=>p.stopPct).sort((a,b)=>a-b);
+  return {
+    count:policies.length,
+    targetMin:targets[0],targetMax:targets.at(-1),
+    stopMin:stops[0],stopMax:stops.at(-1),
+    fallbacks:policies.filter(p=>p.fallback).length
+  };
 }
 
 function calendarDaysHeld(dateStr){
@@ -5064,11 +5126,15 @@ function calcPositionTSL({sym, qty, avgCost, ltp, scannerRow, adaptiveSL, adapti
 }
 
 let _allocMemo=null; // single-entry memo: renderTable and renderStatusBar share one pass
+function getTurnoverAllocationCap(row){
+  const turnover=Number(row?.turnover);
+  return Number.isFinite(turnover)&&turnover>0?turnover*MAX_TURNOVER_PARTICIPATION:0;
+}
 function computeAlloc(capital, selList){
   if(!capital||!selList.length) return {};
-  const maxAllocV=getEffectiveMaxAlloc(); // typed value, else the learned Position Size default
-  const effTgt=getEffectiveTgtPct();
-  const memoKey=capital+'|'+maxAllocV+'|'+effTgt+'|'+selList.map(s=>s.symbol+':'+s.price+':'+s.rocketScore).join(',');
+  const maxAllocV=getEffectiveMaxAlloc(); // typed value, else capital ÷ average entry-day positions
+  const targetAnchor=getEffectiveTgtPct();
+  const memoKey=capital+'|'+maxAllocV+'|'+targetAnchor+'|'+selList.map(s=>s.symbol+':'+s.price+':'+s.rocketScore+':'+s.atr+':'+s.rangePct+':'+s.turnover).join(',');
   if(_allocMemo?.key===memoKey) return _allocMemo.val;
   const cap=maxAllocV>0?maxAllocV:capital;
   const spendableCapital=Math.max(0,capital-BASKET_CASH_RESERVE_RS);
@@ -5080,13 +5146,15 @@ function computeAlloc(capital, selList){
     return qty;
   };
   function evalNet(s,buyP,qty){
-    const tgtPct=(effTgt!=null&&isFinite(effTgt))?effTgt:((s.tgtPct!=null&&isFinite(s.tgtPct))?s.tgtPct:null);
-    if(tgtPct===null||tgtPct<=0) return {ok:true,skip:true};
+    const policy=getRowExitPolicy(s,buyP);
+    const tgtPct=policy.targetPct;
+    if(!policy.viable) return {ok:false,rejected:true,reason:`stock capacity ${policy.capacityPct?.toFixed(2)??'—'}% is below the ${policy.minGrossPct?.toFixed(2)??'—'}% cost + net hurdle`,policy};
+    if(tgtPct===null||tgtPct<=0) return {ok:true,skip:true,policy};
     const sellP=buyP*(1+tgtPct/100);
     const buyChg=calcZerodhaCharges(buyP,qty,false);
     const sellChg=calcZerodhaCharges(sellP,qty,true);
     const charges=buyChg+sellChg;
-    return {ok:true,expectedNet:qty*buyP*(tgtPct/100)-charges,charges,tgtPct};
+    return {ok:true,expectedNet:qty*buyP*(tgtPct/100)-charges,charges,tgtPct,policy};
   }
 
   const rawScore=s=>Math.max(0,Number(s.rocketScore)||0);
@@ -5097,13 +5165,24 @@ function computeAlloc(capital, selList){
   for(const s of sortedSel){
     const buyP=getBuyPrice(s);
     if(!(buyP>0)) continue;
-    const rowLimit=Math.min(spendableCapital*(rawScore(s)/totalRawScore),cap);
+    const turnoverCap=getTurnoverAllocationCap(s);
+    if(!(turnoverCap>0)){
+      allocMap[s.symbol]={alloc:0,debit:0,qty:0,buyPrice:buyP,rejected:true,
+        reason:'missing daily turnover; market-impact safety cannot be verified',liquidityCap:0};
+      continue;
+    }
+    const rowLimit=Math.min(spendableCapital*(rawScore(s)/totalRawScore),cap,turnoverCap);
     limits[s.symbol]=rowLimit;
     const qty=affordableQty(rowLimit,buyP,rowLimit);
     if(qty<=0) continue;
     const ev=evalNet(s,buyP,qty);
+    if(ev.rejected){
+      allocMap[s.symbol]={alloc:0,debit:0,qty:0,buyPrice:buyP,rejected:true,reason:ev.reason,
+        stopDistancePct:ev.policy.stopPct,tgtPct:ev.policy.targetPct,exitPolicy:ev.policy,liquidityCap:turnoverCap};
+      continue;
+    }
     allocMap[s.symbol]={alloc:qty*buyP,debit:buyDebit(buyP,qty),buyCharges:calcZerodhaCharges(buyP,qty,false,false,false),qty,buyPrice:buyP,
-      limit:rowLimit,stopDistancePct:getRowStopDistancePct(s),expectedNet:ev.expectedNet,charges:ev.charges,tgtPct:ev.tgtPct};
+      limit:rowLimit,stopDistancePct:ev.policy.stopPct,expectedNet:ev.expectedNet,charges:ev.charges,tgtPct:ev.tgtPct,exitPolicy:ev.policy,liquidityCap:turnoverCap};
   }
 
   let deployed=Object.values(allocMap).reduce((sum,am)=>sum+am.debit,0);
@@ -5114,12 +5193,18 @@ function computeAlloc(capital, selList){
     for(const s of sortedSel){
       const rowLimit=limits[s.symbol]||0;
       let am=allocMap[s.symbol];
+      if(am?.rejected) continue;
       if(!am){
         const buyP=getBuyPrice(s);
         if(!(buyP>0)||rowLimit<buyP||buyDebit(buyP,1)>residual+0.001) continue;
         const qty=1,ev=evalNet(s,buyP,qty);
+        if(ev.rejected){
+          allocMap[s.symbol]={alloc:0,debit:0,qty:0,buyPrice:buyP,rejected:true,reason:ev.reason,
+            stopDistancePct:ev.policy.stopPct,tgtPct:ev.policy.targetPct,exitPolicy:ev.policy,liquidityCap:getTurnoverAllocationCap(s)};
+          continue;
+        }
         allocMap[s.symbol]={alloc:qty*buyP,debit:buyDebit(buyP,qty),buyCharges:calcZerodhaCharges(buyP,qty,false,false,false),qty,buyPrice:buyP,
-          limit:rowLimit,stopDistancePct:getRowStopDistancePct(s),expectedNet:ev.expectedNet,charges:ev.charges,tgtPct:ev.tgtPct};
+          limit:rowLimit,stopDistancePct:ev.policy.stopPct,expectedNet:ev.expectedNet,charges:ev.charges,tgtPct:ev.tgtPct,exitPolicy:ev.policy,liquidityCap:getTurnoverAllocationCap(s)};
         am=allocMap[s.symbol];
       }
       const buyP=am.buyPrice;
@@ -5135,35 +5220,6 @@ function computeAlloc(capital, selList){
   _allocMemo={key:memoKey,val:allocMap};
   return allocMap;
 }
-function getRecommendedPositionSize(perfStats){
-  const trips=getAdaptiveTradeTrips(TRADEBOOK_STATS?.tripsData||[]).filter(r=>r&&r.capital>0&&isFinite(r.netPnl)&&isFinite(r.netPnlPct));
-  const avgActual=perfStats?.avgCapital||TRADEBOOK_STATS?.avgCapital||0;
-  if(trips.length<20||!(avgActual>0)) return {value:avgActual?Math.round(avgActual):null,source:'Need more closed trades for learned sizing'};
-
-  const wins=trips.filter(r=>r.netPnl>0), losses=trips.filter(r=>r.netPnl<=0);
-  const median=(arr)=>{const a=arr.filter(v=>isFinite(v)).sort((x,y)=>x-y);return a.length?a[Math.floor(a.length/2)]:null;};
-  const avgWinPct=wins.length?meanArr(wins.map(r=>r.netPnlPct)):0;
-  const avgLossPct=losses.length?meanArr(losses.map(r=>r.netPnlPct)):0;
-  const winRate=trips.length?wins.length/trips.length:0;
-  const payoff=avgLossPct<0?avgWinPct/Math.abs(avgLossPct):0;
-  const kelly=payoff>0?winRate-(1-winRate)/payoff:0;
-  const profitFactor=perfStats?.profitFactor??null;
-  const adaptiveSL=capSLDistancePct(TRADEBOOK_STATS?.adaptiveSL||Math.abs(perfStats?.avgLossPct||0)||3)||3;
-  const medianLossRs=median(losses.map(r=>Math.abs(r.netPnl)));
-  const baseRiskRs=medianLossRs&&medianLossRs>0?medianLossRs:avgActual*(adaptiveSL/100);
-  const expectancy=perfStats?.expectancy||0;
-  const lossStreak=perfStats?.maxLossStreak||0;
-  let riskMult=0.75;
-  if(kelly>0) riskMult+=Math.min(0.45,kelly*1.25);
-  if(profitFactor!=null) riskMult+=Math.max(-0.25,Math.min(0.25,(profitFactor-1)*0.35));
-  if(expectancy>0&&baseRiskRs>0) riskMult+=Math.min(0.25,expectancy/(baseRiskRs*3));
-  if(lossStreak>=3) riskMult-=Math.min(0.25,(lossStreak-2)*0.05);
-  riskMult=Math.max(0.35,Math.min(1.5,riskMult));
-  const learnedRiskRs=baseRiskRs*riskMult;
-  let rec=adaptiveSL>0?learnedRiskRs/(adaptiveSL/100):avgActual;
-  rec=Math.max(avgActual*0.4,Math.min(avgActual*2.0,rec));
-  return {value:Math.round(rec),source:`Learned risk ${fmtINR(Math.round(learnedRiskRs))} @ SL ${adaptiveSL}%`,riskRs:Math.round(learnedRiskRs),kellyPct:kelly*100,riskMult};
-}
 function recomputeAlloc(){
   const capital=getEffectiveCapital();
   if(!capital){document.querySelectorAll('.alloc-cell').forEach(el=>el.innerHTML='<span style="color:var(--t3);font-size:11px">—</span>');return;}
@@ -5174,7 +5230,8 @@ function recomputeAlloc(){
     const sym=el.dataset.sym;
     if(!SELECTED.has(sym)){el.innerHTML='<span style="color:var(--t3);font-size:11px">—</span>';return;}
     const am=allocMap[sym];
-    if(!am){el.innerHTML='<span style="color:var(--red);font-size:10px">price too high</span>';return;}
+    if(!am){el.innerHTML='<span style="color:var(--red);font-size:10px" title="The score, Max Allocation, or 0.10% turnover cap is below one share.">cap below 1 share</span>';return;}
+    if(am.rejected){el.innerHTML=`<span style="color:var(--red);font-size:10px" title="${escHtml(am.reason||'Stock-specific target cannot clear costs and desired net.')}">no viable target</span>`;return;}
     el.innerHTML=`<span style="color:var(--amber);font-weight:700;font-family:'DM Mono',monospace;font-size:12px">${fmtINR(am.alloc)}</span><div style="font-size:9px;color:var(--t3);margin-top:1px">${am.qty} ${unitLabel}</div>`;
   });
   renderBasketSummary();
@@ -5295,6 +5352,7 @@ function renderTable(){
       turnover:`<td>${fV(s.turnover)}</td>`,
       alloc:`<td class="alloc-cell" data-sym="${s.symbol}">${(()=>{
         if(!am) return '<span style="color:var(--t3);font-size:11px">—</span>';
+        if(am.rejected) return `<span style="color:var(--red);font-size:10px" title="${escHtml(am.reason||'Stock-specific target cannot clear costs and desired net.')}">no viable target</span>`;
         return `<span style="color:var(--amber);font-weight:700;font-family:'DM Mono',monospace;font-size:12px">${fmtINR(am.alloc)}</span><div style="font-size:9px;color:var(--t3);margin-top:1px">${am.qty} ${unitLabel}</div>`;
       })()}</td>`,
       risk:`<td>${radarRiskPill(s.risk)}</td>`
@@ -5525,13 +5583,16 @@ function renderStatusBar(){
     const selList2=FILT.filter(s=>SELECTED.has(s.symbol));
     const am2=computeAlloc(capital,selList2);
     const actualDeployed=Object.values(am2).reduce((s,a)=>s+(a.debit??a.alloc),0);
-    const stockCount=Object.keys(am2).length;
+    const activeAlloc=Object.values(am2).filter(a=>!a.rejected&&a.qty>0);
+    const stockCount=activeAlloc.length;
     html+=` <span style="color:var(--amber);font-size:11px;font-family:'DM Mono',monospace;font-weight:700;margin-left:8px" title="All-in estimated buy debit: limit-price notional plus CNC buy-side charges.">· ${stockCount} ${allocatedLabel} · ${fmtINR(actualDeployed)} of ${fmtINR(capital)} all-in</span>`;
-    // Expected net at the ACTIVE GTT% (lower of Harvest / goal-led) — feedback, not input.
+    // Expected net uses each stock's own capacity-aware target. The Harvest/goal/manual
+    // value is an anchor only; it is never pasted uniformly onto every selected row.
     const harvestPlan=computeHarvestPlan();
     const active=getActiveTargetInfo();
-    const tgtPct=active.tgtPct;
-    if(tgtPct>0){
+    const targets=activeAlloc.map(a=>a.tgtPct).filter(v=>Number.isFinite(v)).sort((a,b)=>a-b);
+    const stops=activeAlloc.map(a=>a.stopDistancePct).filter(v=>Number.isFinite(v)).sort((a,b)=>a-b);
+    if(targets.length){
       let totalNet=0;
       for(const sym in am2){
         const a=am2[sym];
@@ -5541,14 +5602,14 @@ function renderStatusBar(){
         }
       }
       const goalCoverage=harvestPlan.dailyGoal>0?Math.max(0,totalNet)/harvestPlan.dailyGoal:0;
-      const srcLbl=active.source==='manual'?'✎ manual':active.source==='goal'?'goal-led':'harvest';
+      const srcLbl=active.source==='manual'?'✎ manual anchor':active.source==='goal'?'goal-led anchor':'Harvest anchor';
+      const targetRange=Math.abs(targets.at(-1)-targets[0])<0.001?targets[0].toFixed(2)+'%':`${targets[0].toFixed(2)}–${targets.at(-1).toFixed(2)}%`;
+      const stopRange=stops.length?(Math.abs(stops.at(-1)-stops[0])<0.001?stops[0].toFixed(2)+'%':`${stops[0].toFixed(2)}–${stops.at(-1).toFixed(2)}%`):'—';
       const needed=harvestPlan.capitalNeeded?` Capital needed for ${fmtINR(harvestPlan.dailyGoal)} at this learned edge: ${fmtINR(harvestPlan.capitalNeeded)}.`:'';
       const warn=harvestPlan.warning?` Warning: ${harvestPlan.warning}`:'';
-      const tip=active.source==='manual'
-        ?`Your MANUAL GTT ${tgtPct.toFixed(2)}% is overriding the auto target ${active.autoPct!=null?active.autoPct.toFixed(2)+'%':''} (Harvest ${active.harvestPct.toFixed(2)}%${active.goalPct!=null?` / goal-led ${active.goalPct.toFixed(2)}%`:''}), charge-aware net. Clear Target % to return to auto.${needed}${warn}`
-        :`Active ${srcLbl} GTT ${tgtPct.toFixed(2)}% (lower of Harvest ${active.harvestPct.toFixed(2)}%${active.goalPct!=null?` / goal-led ${active.goalPct.toFixed(2)}%`:''}), charge-aware net. Source: ${harvestPlan.source}.${needed}${warn}`;
+      const tip=`Per-stock targets ${targetRange} and ATR stops ${stopRange}; ${srcLbl} ${active.tgtPct.toFixed(2)}% supplies portfolio context only. Expected net is charge-aware.${needed}${warn}`;
       const color=totalNet>=0?'var(--green)':'var(--red)';
-      html+=` <span style="color:${color};font-size:11px;font-family:'DM Mono',monospace;font-weight:700;margin-left:8px" title="${tip}">· 🎯 ${fmtINR(totalNet)} net @ ${srcLbl} ${tgtPct.toFixed(1)}% · ${(goalCoverage*100).toFixed(0)}% of ${fmtINR(harvestPlan.dailyGoal)}</span>`;
+      html+=` <span style="color:${color};font-size:11px;font-family:'DM Mono',monospace;font-weight:700;margin-left:8px" title="${tip}">· 🎯 ${fmtINR(totalNet)} net @ stock targets ${targetRange} · ${(goalCoverage*100).toFixed(0)}% of ${fmtINR(harvestPlan.dailyGoal)}</span>`;
       if(harvestPlan.warning){
         html+=` <span style="color:var(--amber);font-size:11px;font-family:'DM Mono',monospace;font-weight:700;margin-left:8px" title="${harvestPlan.warning}">· target floor active</span>`;
       }
@@ -6367,16 +6428,16 @@ async function exportBasket(){
 
   const harvestPlan=computeHarvestPlan();
   const active=getActiveTargetInfo();
-  const adaptiveTGT=roundPct05(active.tgtPct||harvestPlan.targetPct||(TRADEBOOK_STATS?TRADEBOOK_STATS.adaptiveTGT:3.7));
 
   const orders=[];
   let rejectedCount=bandRejected;
   let orderSeq=0;
-  const pushBuyOrder=(s,qty,targetPct)=>{
+  const pushBuyOrder=(s,qty,policy)=>{
     if(qty<=0) return;
     const sym=s.symbol;
     const name=s.name||sym;
-    const slDistance=getRowStopDistancePct(s);
+    const targetPct=policy.targetPct;
+    const slDistance=policy.stopPct;
     const stoplossPct=-roundPct05(slDistance);
     orders.push({
       id:Date.now()+orderSeq++,
@@ -6406,11 +6467,27 @@ async function exportBasket(){
     if(am?.rejected){rejectedCount++;return;} // skip cost-floor rejections
     const qty = capital > 0 ? (am?.qty || 0) : 1;
     if(qty===0) return;
-    pushBuyOrder(s,qty,adaptiveTGT);
+    const policy=am?.exitPolicy||getRowExitPolicy(s,am?.buyPrice||s.price);
+    if(!policy.viable){rejectedCount++;return;}
+    pushBuyOrder(s,qty,policy);
   });
 
   if(!orders.length){showToast('Capital too low to buy even 1 share of any selected stock.',4000,true);return;}
   if(orders.length>20) throw new Error(`Basket planning invariant failed: ${orders.length} orders`);
+  // Independent defense in depth: computeAlloc already applies this cap, but never save a
+  // market order unless its notional is still at or below 0.10% of the latest daily turnover.
+  const impactViolation=exportList.find(s=>{
+    const am=basketAlloc[s.symbol];
+    const qty=am?.qty||(capital>0?0:1);
+    if(!(qty>0)) return false;
+    const budgetPrice=am?.buyPrice||getBuyPrice(s);
+    const turnoverCap=getTurnoverAllocationCap(s);
+    return !(turnoverCap>0)||qty*budgetPrice>turnoverCap+0.01;
+  });
+  if(impactViolation){
+    showToast(`Basket stopped: ${impactViolation.symbol} exceeds the 0.10% daily-turnover market-impact rail. Nothing exported.`,6000,true);
+    return;
+  }
   if(capital>0){
     // MARKET orders export with price: 0. Validate affordability against the
     // same buffered LTP references used by computeAlloc(), never against JSON price.
@@ -6431,9 +6508,13 @@ async function exportBasket(){
   const rejNote = rejectedCount>0
     ? ` · ${rejectedCount} skipped (eligibility/allocation)`
     : '';
-  const targetNote=` · target + SL GTT per stock`;
-  const srcLabel=active.source==='goal'?'goal-led':'Harvest';
-  const planNote=` · ${srcLabel} ${adaptiveTGT.toFixed(2)}% GTT`;
+  const targetNote=` · target + SL GTT per stock · ≤0.10% daily turnover`;
+  const srcLabel=active.source==='manual'?'manual':active.source==='goal'?'goal-led':'Harvest';
+  const policySummary=summarizeRowExitPolicies(exportList.filter(s=>basketAlloc[s.symbol]?.qty>0));
+  const targetRange=policySummary
+    ?(Math.abs(policySummary.targetMax-policySummary.targetMin)<0.001?`${policySummary.targetMin.toFixed(2)}%`:`${policySummary.targetMin.toFixed(2)}–${policySummary.targetMax.toFixed(2)}%`)
+    :'—';
+  const planNote=` · per-stock targets ${targetRange} (${srcLabel} ${active.tgtPct.toFixed(2)}% anchor)`;
   const floorNote=harvestPlan.warning?` · target floor active`:``;
   const limitNote=limitOmitted>0?` · ${limitOmitted} lower-priority stock${limitOmitted===1?'':'s'} omitted to keep the basket within Zerodha's 20-order limit`:'';
   // v555 WS-D: entry-timing note when the market is broadly intraday-weak (owner decides, not blocked).
