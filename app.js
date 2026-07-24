@@ -1,5 +1,5 @@
-const BUILD_TS='2026-07-24 14:41 IST'; // release build time (IST)
-const APP_VERSION=559; // v559: peak-chase entry timing is separate from breakout ranking. A stock in the upper quarter of today's range after using at least three quarters of its volatility-adjusted daily range, or already reversing on both 5m and 15m, waits for a pullback and cannot enter recommendations or basket export.
+const BUILD_TS='2026-07-24 15:16 IST'; // release build time (IST)
+const APP_VERSION=560; // v560: upper-range entries now require continuing short-term confirmation and must not be extended above both Bollinger and Keltner upper bands. Either a 5m/15m stall or dual-band extension is enough to wait, closing the KRISHANA path that v559 left too permissive.
 // v556: parse the NSE Market Activity Report (MA<date>.csv) — official Nifty %, advances/declines and sector index moves shown as market CONTEXT in the status bar (EOD data, display only, never fed into per-row scoring); MA added to the ℹ️ file manifest.
 // v555 market-cycle stage awareness (stateless, self-calibrating): per-row stage label (1 accumulation · 2 breakout · 3 event · 4 profit-booking · 5 re-accumulation · 6 second-leg); a quiet-accumulation signal (conjunction-of-percentiles) injected via the rocket-diagnostic weighting; sell-the-news decay off Recent earnings date (horizon = review days); market intraday-breadth gauge in the status bar + basket export (entry timing, never changes ranking).
 const GOOGLE_DRIVE_CLIENT_ID='1015012642264-oi2nelv3v90k3d39r994a6nelgjs2a56.apps.googleusercontent.com'; // Public OAuth Web Client ID.
@@ -2090,19 +2090,25 @@ function getPeakEntryTiming(row){
   const atPeak=rangeLocation>=.75;
   const rangeConsumed=rangeUsed>=.75;
   const p5=row?.price5m,p15=row?.price15m;
-  const reversing=p5!=null&&p15!=null&&isFinite(Number(p5))&&isFinite(Number(p15))&&Number(p5)<=0&&Number(p15)<=0;
-  const blocked=atPeak&&(rangeConsumed||reversing);
+  const p5Known=p5!=null&&isFinite(Number(p5)),p15Known=p15!=null&&isFinite(Number(p15));
+  const cooling=(p5Known&&Number(p5)<=0)||(p15Known&&Number(p15)<=0);
+  const bollUpper=row?.bollUpper,keltUpper=row?.keltUpper;
+  const bandsKnown=bollUpper!=null&&keltUpper!=null&&isFinite(Number(bollUpper))&&isFinite(Number(keltUpper))&&Number(bollUpper)>0&&Number(keltUpper)>0;
+  const bandExtended=bandsKnown&&price>Number(bollUpper)&&price>Number(keltUpper);
+  const blocked=atPeak&&(rangeConsumed||cooling||bandExtended);
   const pullbackPrice=blocked?high-(high-low)*.25:null;
-  const reason=!blocked?'':rangeConsumed&&reversing
-    ?'upper-quarter peak after consuming the expected range, with 5m/15m reversal'
-    :rangeConsumed?'upper-quarter peak after consuming the expected range'
-    :'upper-quarter peak with 5m/15m reversal';
+  const why=[];
+  if(rangeConsumed)why.push('expected range consumed');
+  if(cooling)why.push('5m/15m confirmation lost');
+  if(bandExtended)why.push('above both Bollinger and Keltner upper bands');
+  const reason=blocked?'upper-quarter peak: '+why.join(', '):'';
   return {
     blocked,
     rangeLocation:+(rangeLocation*100).toFixed(1),
     rangeUsed:+(rangeUsed*100).toFixed(1),
     headroomPct:+headroomPct.toFixed(2),
     pullbackPrice:pullbackPrice>0?+tickPrice(pullbackPrice).toFixed(2):null,
+    cooling,bandExtended,
     reason
   };
 }
@@ -2180,6 +2186,7 @@ function radarAnalyze(headers,rawRows,supplements={},heldSymbols=new Set()){
   const priceI=radarIdx(headers,'Price'),targetI=radarIdx(headers,'Price change %, 1 day'),sectorI=radarIdx(headers,'Sector'),symbolI=radarIdx(headers,'Symbol'),descI=radarIdx(headers,'Description');
   if(symbolI<0||priceI<0||targetI<0)throw Error('Expected Symbol, Price, and Price change %, 1 day columns.');
   const turnI=radarIdx(headers,'Price × volume (turnover), 1 day'),relI=radarIdx(headers,'Relative volume, 1 day'),relAtI=radarIdx(headers,'Relative volume at time'),volChgI=radarIdx(headers,'Volume change %, 1 day'),gapI=radarIdx(headers,'Gap %, 1 day'),adrI=radarIdx(headers,'Average daily range %'),atrI=radarIdx(headers,'Average true range %, 14, 1 day'),atrWeekI=radarIdx(headers,'Average true range %, 14, 1 week'),volI=radarIdx(headers,'Volatility, 1 day'),highI=radarIdx(headers,'High, 1 day'),lowI=radarIdx(headers,'Low, 1 day');
+  const bollUpperI=radarIdx(headers,'Bollinger Bands, 20, 1 day, Upper'),keltUpperI=radarIdx(headers,'Keltner channels, 20, 1 day, Upper');
   const priceHourI=radarIdx(headers,'Price change %, 1 hour'),price15I=radarIdx(headers,'Price change %, 15 minutes'),price5I=radarIdx(headers,'Price change %, 5 minutes');
   const changeOpenI=radarIdx(headers,'Change from open %, 1 day'),perf1mI=radarIdx(headers,'Performance %, 1 month'),perf3mI=radarIdx(headers,'Performance %, 3 months');
   // v555 market-cycle inputs: earnings dates (stateless days-since/days-to), 50-day MA (holding-above check).
@@ -2415,6 +2422,8 @@ function radarAnalyze(headers,rawRows,supplements={},heldSymbols=new Set()){
     const out={symbol,name:String(raw[descI]||symbol),sector:raw[sectorI]||'',rawScore,parts,contrib,quality,
       price,day:dispDay,priceChange:dispDay,turnover:turn,relvol,gap,rangePct,stretch,atr:atrPct,
       high1d:highI>=0?radarNum(raw[highI]):null,low1d:lowI>=0?radarNum(raw[lowI]):null,rocketToday:day>=10,
+      bollUpper:bollUpperI>=0?radarNum(raw[bollUpperI]):null,
+      keltUpper:keltUpperI>=0?radarNum(raw[keltUpperI]):null,
       price1h:priceHourI>=0?radarNum(raw[priceHourI]):null,
       price15m:price15I>=0?radarNum(raw[price15I]):null,
       price5m:price5I>=0?radarNum(raw[price5I]):null,
@@ -3310,7 +3319,7 @@ function renderStats(){
 
   const filterPills=[];
   if(SUPPRESSED_HELD>0)filterPills.push(`<span class="info-pill pill-rose" title="Held positions (Holdings + Positions + today's net Orders buys) never re-enter the buy ranking.">📌 ${SUPPRESSED_HELD} held suppressed</span>`);
-  if(PEAK_TIMING_REMOVED>0)filterPills.push(`<span class="info-pill pill-amber" title="Strong breakouts withheld from recommendations because price is in the upper quarter of today's range after consuming the expected daily move, or is reversing on both 5m and 15m. They remain honestly ranked in the removed audit and become eligible again after rebuilding entry headroom.">⏳ ${PEAK_TIMING_REMOVED} waiting for pullback</span>`);
+  if(PEAK_TIMING_REMOVED>0)filterPills.push(`<span class="info-pill pill-amber" title="Strong breakouts withheld because price is in the upper quarter of today's range and has consumed the expected move, lost confirmation on either 5m/15m, or extended above both Bollinger and Keltner upper bands. They remain honestly ranked and become eligible again after rebuilding entry headroom.">⏳ ${PEAK_TIMING_REMOVED} waiting for pullback</span>`);
   const inelig=ALL.filter(s=>s.basketEligible===false).length;
   if(inelig>0)filterPills.push(`<span class="info-pill pill-orange" title="Non-EQ series, inactive status, or a price band below 10% — visible in the ranking with penalties, but never exported to the basket.">⚠ ${inelig} basket-ineligible (ranked with penalties)</span>`);
 
@@ -6610,7 +6619,7 @@ function compactRankingRows(rows){
     basketEligible:s.basketEligible!==false,eqEligible:s.eqEligible!==false,
     stretch:s.stretch,rangePct:s.rangePct,relvol:s.relvol??null,gap:s.gap??null,
     turnover:s.turnover,atr:s.atr??null,quality:s.quality??null,
-    high1d:s.high1d??null,low1d:s.low1d??null,
+    high1d:s.high1d??null,low1d:s.low1d??null,bollUpper:s.bollUpper??null,keltUpper:s.keltUpper??null,
     price1h:s.price1h??null,price15m:s.price15m??null,price5m:s.price5m??null,
     entryReady:s.entryReady!==false,entryTiming:s.entryTiming||null,
     rocketReady:!!s.rocketReady,gateReasons:(s.gateReasons||[]).slice(0,9),_held:!!s._held,
