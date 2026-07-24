@@ -1,5 +1,5 @@
-const BUILD_TS='2026-07-24 12:25 IST'; // release build time (IST)
-const APP_VERSION=558; // v558: mixed same-session exits split today's matched buy quantity from the carried holding quantity, with the correct cost basis and charge treatment for each part.
+const BUILD_TS='2026-07-24 14:41 IST'; // release build time (IST)
+const APP_VERSION=559; // v559: peak-chase entry timing is separate from breakout ranking. A stock in the upper quarter of today's range after using at least three quarters of its volatility-adjusted daily range, or already reversing on both 5m and 15m, waits for a pullback and cannot enter recommendations or basket export.
 // v556: parse the NSE Market Activity Report (MA<date>.csv) — official Nifty %, advances/declines and sector index moves shown as market CONTEXT in the status bar (EOD data, display only, never fed into per-row scoring); MA added to the ℹ️ file manifest.
 // v555 market-cycle stage awareness (stateless, self-calibrating): per-row stage label (1 accumulation · 2 breakout · 3 event · 4 profit-booking · 5 re-accumulation · 6 second-leg); a quiet-accumulation signal (conjunction-of-percentiles) injected via the rocket-diagnostic weighting; sell-the-news decay off Recent earnings date (horizon = review days); market intraday-breadth gauge in the status bar + basket export (entry timing, never changes ranking).
 const GOOGLE_DRIVE_CLIENT_ID='1015012642264-oi2nelv3v90k3d39r994a6nelgjs2a56.apps.googleusercontent.com'; // Public OAuth Web Client ID.
@@ -88,7 +88,8 @@ let PERF_RENDER_WAITING_FOR_VISIBLE=false;
 let ENGINE_DATA={}; // legacy engine metadata shell; the Radar composite keeps its own RADAR state
 let SUPPRESSED_HELD=0; // count of stocks hidden because already held in POSITIONS
 let SURV_HARD_REMOVED=0; // count of stocks weeded out by configured surveillance rules
-let REMOVED_ROWS=[]; // [{s, reason:'held'|'surv', rules?}] captured each applyFilters pass so the
+let PEAK_TIMING_REMOVED=0; // count of strong-but-overextended rows waiting for entry headroom
+let REMOVED_ROWS=[]; // [{s, reason:'held'|'surv'|'peak', rules?}] captured each applyFilters pass so the
                      // "Removed from rankings" table can explain every gap in the rank sequence (v546)
 let SELECTED=new Set(); // symbols selected for basket — recomputed from FILT each applyFilters
 let EXPORT_EXCLUDED=new Set(); // symbols the user unchecked from export — persisted in rs_filters
@@ -2077,6 +2078,34 @@ function getContinuationSignal(raw,targetI,priceHourI,price15I,price5I,relI,relA
   const reversalPenalty=vals.length?negative/vals.length*0.40:0;
   return clamp01(dayStrength+intradayStrength+participationStrength-reversalPenalty,-1,1);
 }
+function getPeakEntryTiming(row){
+  const price=Number(row?.price),high=Number(row?.high1d),low=Number(row?.low1d);
+  const expectedRangePct=Number(row?.rangePct),day=Number(row?.day);
+  if(!(price>0)||!(high>low)||!(expectedRangePct>0)||!isFinite(day)){
+    return {blocked:false,rangeLocation:null,rangeUsed:null,headroomPct:null,pullbackPrice:null,reason:''};
+  }
+  const rangeLocation=clamp01((price-low)/(high-low),0,1);
+  const rangeUsed=Math.max(0,day)/expectedRangePct;
+  const headroomPct=Math.max(0,(high-price)/price*100);
+  const atPeak=rangeLocation>=.75;
+  const rangeConsumed=rangeUsed>=.75;
+  const p5=row?.price5m,p15=row?.price15m;
+  const reversing=p5!=null&&p15!=null&&isFinite(Number(p5))&&isFinite(Number(p15))&&Number(p5)<=0&&Number(p15)<=0;
+  const blocked=atPeak&&(rangeConsumed||reversing);
+  const pullbackPrice=blocked?high-(high-low)*.25:null;
+  const reason=!blocked?'':rangeConsumed&&reversing
+    ?'upper-quarter peak after consuming the expected range, with 5m/15m reversal'
+    :rangeConsumed?'upper-quarter peak after consuming the expected range'
+    :'upper-quarter peak with 5m/15m reversal';
+  return {
+    blocked,
+    rangeLocation:+(rangeLocation*100).toFixed(1),
+    rangeUsed:+(rangeUsed*100).toFixed(1),
+    headroomPct:+headroomPct.toFixed(2),
+    pullbackPrice:pullbackPrice>0?+tickPrice(pullbackPrice).toFixed(2):null,
+    reason
+  };
+}
 function radarPrior(feature,p){
   const s=feature.name.toLowerCase();
   if(p===null)return null;
@@ -2383,12 +2412,18 @@ function radarAnalyze(headers,rawRows,supplements={},heldSymbols=new Set()){
     if(meta.corpToday?.kind==='buyback')rawScore+=1.5;
     // Display the REAL day move for a neutralised corp-action row (scoring already used the blanked 0).
     const dispDay=meta._corpNeutralised&&meta._realDay!=null?meta._realDay:day;
-    return {symbol,name:String(raw[descI]||symbol),sector:raw[sectorI]||'',rawScore,parts,contrib,quality,
+    const out={symbol,name:String(raw[descI]||symbol),sector:raw[sectorI]||'',rawScore,parts,contrib,quality,
       price,day:dispDay,priceChange:dispDay,turnover:turn,relvol,gap,rangePct,stretch,atr:atrPct,
       high1d:highI>=0?radarNum(raw[highI]):null,low1d:lowI>=0?radarNum(raw[lowI]):null,rocketToday:day>=10,
+      price1h:priceHourI>=0?radarNum(raw[priceHourI]):null,
+      price15m:price15I>=0?radarNum(raw[price15I]):null,
+      price5m:price5I>=0?radarNum(raw[price5I]):null,
       corpAction:meta._corpNeutralised?(meta.corpToday?.purpose||'corporate action'):null,
       stage:_stage,stageLabel:_stage?STAGE_LABEL[_stage]:null,inDigestion:_inDigestion,daysSinceEarnings:_daysSince,
       rocketReady,gateReasons,series,band:band??null,status,eqEligible,basketEligible,meta};
+    out.entryTiming=getPeakEntryTiming(out);
+    out.entryReady=!out.entryTiming.blocked;
+    return out;
   });
   // Held positions never re-enter the buy ranking, but they DO stay in the scored
   // universe (marked _held) so the Performance Open Positions table can show Radar context.
@@ -3275,6 +3310,7 @@ function renderStats(){
 
   const filterPills=[];
   if(SUPPRESSED_HELD>0)filterPills.push(`<span class="info-pill pill-rose" title="Held positions (Holdings + Positions + today's net Orders buys) never re-enter the buy ranking.">📌 ${SUPPRESSED_HELD} held suppressed</span>`);
+  if(PEAK_TIMING_REMOVED>0)filterPills.push(`<span class="info-pill pill-amber" title="Strong breakouts withheld from recommendations because price is in the upper quarter of today's range after consuming the expected daily move, or is reversing on both 5m and 15m. They remain honestly ranked in the removed audit and become eligible again after rebuilding entry headroom.">⏳ ${PEAK_TIMING_REMOVED} waiting for pullback</span>`);
   const inelig=ALL.filter(s=>s.basketEligible===false).length;
   if(inelig>0)filterPills.push(`<span class="info-pill pill-orange" title="Non-EQ series, inactive status, or a price band below 10% — visible in the ranking with penalties, but never exported to the basket.">⚠ ${inelig} basket-ineligible (ranked with penalties)</span>`);
 
@@ -5322,6 +5358,7 @@ function applyFilters(){
   ALL.forEach(s=>{s._held=!!heldPos[s.symbol];});
   SUPPRESSED_HELD=0;
   SURV_HARD_REMOVED=0;
+  PEAK_TIMING_REMOVED=0;
   REMOVED_ROWS=[];
   let rows=ALL.filter(s=>{
     if(s._held){SUPPRESSED_HELD++;REMOVED_ROWS.push({s,reason:'held'});return false;}
@@ -5329,6 +5366,9 @@ function applyFilters(){
     // flagged under a rule in the Methodology table is weeded out of recommendations.
     // Non-configured REG1 flags remain a score penalty + badge only.
     if(NSE_SURV[s.symbol]?.length){SURV_HARD_REMOVED++;REMOVED_ROWS.push({s,reason:'surv',rules:NSE_SURV[s.symbol]});return false;}
+    // Ranking asks "what is breaking out?"; entry timing separately asks "is there still room to buy?"
+    // Keep the honest score/rank for audit, but never recommend/export an upper-range exhaustion entry.
+    if(s.entryReady===false){PEAK_TIMING_REMOVED++;REMOVED_ROWS.push({s,reason:'peak'});return false;}
     return (s.turnover||0)>=minTurn&&(!riskSel.length||riskSel.includes(s.risk))&&(!q||[s.symbol,s.name,s.sector].join(' ').toLowerCase().includes(q));
   });
   rows.sort((a,b)=>(a.rank??Infinity)-(b.rank??Infinity));
@@ -5375,7 +5415,9 @@ function survRuleLabels(keys){
 function buildRemovedPanel(query=''){
   const all=[...REMOVED_ROWS].sort((a,b)=>(a.s.rank??1e9)-(b.s.rank??1e9));
   if(!all.length) return '';
-  const heldN=all.filter(r=>r.reason==='held').length, survN=all.length-heldN;
+  const heldN=all.filter(r=>r.reason==='held').length;
+  const survN=all.filter(r=>r.reason==='surv').length;
+  const peakN=all.filter(r=>r.reason==='peak').length;
   const shown=filterPanelRows(all,query,r=>[r.s.symbol,r.s.name,r.s.sector]);
   const CAP=100;
   const view=shown.slice(0,CAP);
@@ -5383,7 +5425,9 @@ function buildRemovedPanel(query=''){
     const s=r.s;
     const reason=r.reason==='held'
       ?`<span style="font-size:9px;background:rgba(244,114,182,.12);color:#f472b6;border:1px solid rgba(244,114,182,.25);border-radius:5px;padding:1px 7px;white-space:nowrap">📌 Held · in Open Positions</span>`
-      :(()=>{const labels=survRuleLabels(r.rules);return `<span style="font-size:9px;background:rgba(239,68,68,.12);color:var(--red);border:1px solid rgba(239,68,68,.25);border-radius:5px;padding:1px 7px;white-space:nowrap" title="Configured surveillance rule(s): ${escHtml(labels.join(' · '))}">⚠ ${escHtml(labels[0]||'surveillance')}${labels.length>1?` +${labels.length-1}`:''}</span>`;})();
+      :r.reason==='peak'
+        ?`<span style="font-size:9px;background:rgba(245,158,11,.12);color:var(--amber);border:1px solid rgba(245,158,11,.3);border-radius:5px;padding:1px 7px;white-space:nowrap" title="${escHtml(r.s.entryTiming?.reason||'Entry is too close to the current peak')} · range location ${fmt(r.s.entryTiming?.rangeLocation,0)}% · expected range used ${fmt(r.s.entryTiming?.rangeUsed,0)}%${r.s.entryTiming?.pullbackPrice?` · wait near/below ${fmtINR(r.s.entryTiming.pullbackPrice)}`:''}">⏳ Wait for pullback</span>`
+        :(()=>{const labels=survRuleLabels(r.rules);return `<span style="font-size:9px;background:rgba(239,68,68,.12);color:var(--red);border:1px solid rgba(239,68,68,.25);border-radius:5px;padding:1px 7px;white-space:nowrap" title="Configured surveillance rule(s): ${escHtml(labels.join(' · '))}">⚠ ${escHtml(labels[0]||'surveillance')}${labels.length>1?` +${labels.length-1}`:''}</span>`;})();
     return `<tr style="border-bottom:1px solid var(--border)">
       <td style="padding:6px 10px;text-align:right;font-family:'DM Mono',monospace;color:var(--t2)">#${s.rank??'—'}</td>
       <td style="padding:6px 10px"><span style="font-weight:700;color:var(--t1);font-size:12px">${escHtml(s.symbol)}</span> <span style="color:var(--t3);font-size:10px">${escHtml((s.name||'').slice(0,28))}</span></td>
@@ -5409,7 +5453,7 @@ function buildRemovedPanel(query=''){
   return `<div id="rank-removed-card" style="background:var(--bg-card);border:1px solid var(--border);border-radius:10px;overflow:hidden">
     <div style="padding:10px 16px;border-bottom:1px solid var(--border)">
       <span style="font-size:10px;font-weight:700;color:var(--t2);text-transform:uppercase;letter-spacing:.1em">Removed from rankings — ${all.length}${tag}</span>
-      <span style="font-size:11px;color:var(--t3);font-weight:400;margin-left:8px">📌 ${heldN} held · ⚠ ${survN} surveillance · why the ranks skip</span>
+      <span style="font-size:11px;color:var(--t3);font-weight:400;margin-left:8px">📌 ${heldN} held · ⚠ ${survN} surveillance · ⏳ ${peakN} waiting for pullback · why the ranks skip</span>
     </div>
     ${body}
   </div>`;
@@ -5423,6 +5467,9 @@ function showRadarDetail(sym){
   const groups=Object.entries(RADAR_GROUPS).map(([k,g])=>`<div class="rr-group"><b>${g.label}<i>${r.parts?fmt(r.parts[k],0):'—'}/100</i></b><meter min="0" max="100" value="${r.parts?.[k]??0}"></meter></div>`).join('');
   const contribs=[...(r.contrib||[])].sort((a,b)=>Math.abs(b.impact)-Math.abs(a.impact)).slice(0,36).map(x=>`<div class="rr-contrib"><div><b>${escHtml(x.name)}</b><small>${RADAR_GROUPS[x.group]?.label||x.group} · percentile ${fmt(x.p*100,0)}</small></div><b class="${x.impact>=0?'pos':'neg'}">${x.impact>=0?'+':''}${fmt(x.impact,3)}</b></div>`).join('');
   const gate=r.rocketReady?'Meets the model’s high-feasibility criteria.':'Feasibility cautions: '+escHtml((r.gateReasons||[]).join(', ')||'not evaluated')+'.';
+  const entryNote=r.entryReady===false
+    ?`<br><b style="color:var(--amber)">Entry timing:</b> Wait for pullback — ${escHtml(r.entryTiming?.reason||'insufficient headroom')}. Range location ${fmt(r.entryTiming?.rangeLocation,0)}%, expected range used ${fmt(r.entryTiming?.rangeUsed,0)}%${r.entryTiming?.pullbackPrice?`, reconsider near/below ${fmtINR(r.entryTiming.pullbackPrice)}`:''}. The breakout rank is preserved, but recommendation and basket export are blocked.`
+    :'';
   const flags=(r.meta?.flags||[]).length?escHtml(r.meta.flags.join(', ')):'none';
   const corp=r.meta?.corpToday;
   const bm=r.meta?.boardMeeting;
@@ -5434,7 +5481,7 @@ function showRadarDetail(sym){
   const detailNote=(r.contrib||[]).length?'':'<div style="color:var(--amber);font-size:11px;margin-bottom:8px">Restored compact ranking — load files again for the full per-feature breakdown.</div>';
   document.getElementById('radarDetailBody').innerHTML=`${detailNote}<div class="rr-groups">${groups}</div>
     <div class="rr-read"><b>Exchange check:</b> Series ${escHtml(r.series||'—')}, price band ${r.band??'not supplied'}, status ${escHtml(r.status||'—')}; basket ${r.basketEligible!==false?'eligible':'ineligible'}. Official delivery ${r.meta?.delivery==null?'unavailable':fmt(r.meta.delivery,1)+'%'}, trades ${r.meta?.trades==null?'unavailable':fmt(r.meta.trades,0)}, surveillance flags: ${flags}.${corpNote}<br>
-    <b>Feasibility:</b> ${gate} Strongest daily range estimate ${fmt(r.rangePct,2)}%; a 10% move is ${fmt(r.stretch,2)}× that range. The stock remains ranked either way.<br>
+    <b>Feasibility:</b> ${gate} Strongest daily range estimate ${fmt(r.rangePct,2)}%; a 10% move is ${fmt(r.stretch,2)}× that range. The stock remains ranked either way.${entryNote}<br>
     ${r.stage?`<b>Market-cycle stage:</b> ${radarStagePill(r)} — ${escHtml({1:'silent accumulation (quiet strength before a move)',2:'initial breakout',3:'event day (move may be event-driven)',4:'profit-booking (digesting a recent result)',5:'re-accumulation',6:'second leg'}[r.stage]||'')}.<br>`:''}
     <b>Read:</b> ${escHtml(r.setup||'—')}. Data coverage ${r.quality!=null?fmt(r.quality*100,0)+'%':'—'}, day move ${(r.day??0)>=0?'+':''}${fmt(r.day,2)}%, relative volume ${r.relvol==null?'unavailable':fmt(r.relvol,2)+'×'}, turnover ${fV(r.turnover)}. Rank is relative, not a literal probability.</div>
     ${contribs?`<h3 style="font-size:14px;margin:12px 0 8px">Largest feature contributions</h3><div class="rr-contribs">${contribs}</div>`:''}`;
@@ -6287,7 +6334,7 @@ function calcZerodhaChargesSplit(price, qty, isSell, isIntraday, skipDp){
 }
 
 function planBasketExport(capital, selected){
-  let exportList=(selected||[]).filter(s=>!getPriceBandBlockReason(s));
+  let exportList=(selected||[]).filter(s=>s.entryReady!==false&&!getPriceBandBlockReason(s));
   let basketAlloc=computeAlloc(capital,exportList);
   const orderCount=()=>exportList.reduce((count,s)=>{
     const qty=capital>0?(basketAlloc[s.symbol]?.qty||0):1;
@@ -6563,6 +6610,9 @@ function compactRankingRows(rows){
     basketEligible:s.basketEligible!==false,eqEligible:s.eqEligible!==false,
     stretch:s.stretch,rangePct:s.rangePct,relvol:s.relvol??null,gap:s.gap??null,
     turnover:s.turnover,atr:s.atr??null,quality:s.quality??null,
+    high1d:s.high1d??null,low1d:s.low1d??null,
+    price1h:s.price1h??null,price15m:s.price15m??null,price5m:s.price5m??null,
+    entryReady:s.entryReady!==false,entryTiming:s.entryTiming||null,
     rocketReady:!!s.rocketReady,gateReasons:(s.gateReasons||[]).slice(0,9),_held:!!s._held,
     meta:{delivery:s.meta?.delivery??null,trades:s.meta?.trades??null,flags:(s.meta?.flags||[]).slice(0,12),band:s.meta?.band??null}
   }));
