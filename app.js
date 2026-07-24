@@ -1,5 +1,5 @@
-const BUILD_TS='2026-07-23 09:17 IST'; // release build time (IST)
-const APP_VERSION=557; // v557: stale Positions/Orders can no longer be counted as TODAY. Zerodha only rewrites those CSVs on a new trade, so the morning after a no-trade day they still hold yesterday's rows. The portfolio session date is now derived from the ORDERS ROW DATES (data, not file mtime — which can read "today" for yesterday's content); positions inherit it; undateable files/rows fail SAFE (stale) instead of being assumed current; and the status bar says so out loud.
+const BUILD_TS='2026-07-24 12:25 IST'; // release build time (IST)
+const APP_VERSION=558; // v558: mixed same-session exits split today's matched buy quantity from the carried holding quantity, with the correct cost basis and charge treatment for each part.
 // v556: parse the NSE Market Activity Report (MA<date>.csv) — official Nifty %, advances/declines and sector index moves shown as market CONTEXT in the status bar (EOD data, display only, never fed into per-row scoring); MA added to the ℹ️ file manifest.
 // v555 market-cycle stage awareness (stateless, self-calibrating): per-row stage label (1 accumulation · 2 breakout · 3 event · 4 profit-booking · 5 re-accumulation · 6 second-leg); a quiet-accumulation signal (conjunction-of-percentiles) injected via the rocket-diagnostic weighting; sell-the-news decay off Recent earnings date (horizon = review days); market intraday-breadth gauge in the status bar + basket export (entry timing, never changes ranking).
 const GOOGLE_DRIVE_CLIENT_ID='1015012642264-oi2nelv3v90k3d39r994a6nelgjs2a56.apps.googleusercontent.com'; // Public OAuth Web Client ID.
@@ -2717,14 +2717,35 @@ function computeLatestOrderBooked(){
     const totalSellQty=sells.reduce((s,o)=>s+o.qty,0);
     const avgSell=sells.reduce((s,o)=>s+o.price*o.qty,0)/totalSellQty;
     const holdingAvg=getHoldingAvgCost(sym);
-    const isSameDay=buys.length>0;
-    const isDelivery=!isSameDay;
-    let avgBuy, matchedQty, noAvgCost=false;
-    if(isDelivery){
-      matchedQty=totalSellQty;
-      if(holdingAvg!=null){
-        avgBuy=holdingAvg;
-      } else {
+    const totalBuyQty=buys.reduce((s,o)=>s+o.qty,0);
+    const sameDayQty=Math.min(totalBuyQty,totalSellQty);
+    const deliveryQty=totalSellQty-sameDayQty;
+    const todayAvg=totalBuyQty>0?buys.reduce((s,o)=>s+o.price*o.qty,0)/totalBuyQty:null;
+    const components=[];
+    const addKnownComponent=(qty,avgBuy,isSameDay)=>{
+      if(!(qty>0)||!(avgBuy>0)) return;
+      const skipDp=isSameDay||dpCharged.has(sym);
+      if(!isSameDay) dpCharged.add(sym);
+      const bcS=calcZerodhaChargesSplit(avgBuy,qty,false,isSameDay,false);
+      const scS=calcZerodhaChargesSplit(avgSell,qty,true,isSameDay,skipDp);
+      const parts={
+        _brok:+(bcS.brokerage+scS.brokerage).toFixed(2),
+        _stt:+(bcS.stt+scS.stt).toFixed(2),
+        _txn:+(bcS.txn+scS.txn).toFixed(2),
+        _sebi:+(bcS.sebi+scS.sebi).toFixed(2),
+        _gst:+(bcS.gst+scS.gst).toFixed(2),
+        _stamp:+(bcS.stamp+scS.stamp).toFixed(2),
+        _dp:+(bcS.dp+scS.dp).toFixed(2)
+      };
+      const charges=+sumChargeParts(parts).toFixed(0);
+      const capital=avgBuy*qty;
+      const netPnl=+((avgSell-avgBuy)*qty-charges).toFixed(0);
+      components.push({qty,avgBuy,capital,charges,netPnl,...parts});
+    };
+    if(sameDayQty>0) addKnownComponent(sameDayQty,todayAvg,true);
+    if(deliveryQty>0&&holdingAvg!=null) addKnownComponent(deliveryQty,holdingAvg,false);
+    if(deliveryQty>0&&holdingAvg==null){
+      if(sameDayQty===0){
         // If tradebook has the same sell date, use its exact FIFO-realized row.
         const tradebookRow=TRADEBOOK_STATS?._loadedThisSession
           && TRADEBOOK_STATS.lastDate===session.date
@@ -2733,39 +2754,29 @@ function computeLatestOrderBooked(){
           rows.push(enrichExitPnlRow({...tradebookRow,_sort:tradebookRow.netPnl}));
           return;
         }
-        // Holdings.csv not loaded or stock not found — show row with unknown P&L.
-        avgBuy=null;
-        noAvgCost=true;
       }
-    } else {
-      const totalBuyQty=buys.reduce((s,o)=>s+o.qty,0);
-      if(totalBuyQty<=0) return;
-      avgBuy=buys.reduce((s,o)=>s+o.price*o.qty,0)/totalBuyQty;
-      matchedQty=Math.min(totalBuyQty,totalSellQty);
-    }
-    const skipDp=isSameDay||dpCharged.has(sym);
-    if(!isSameDay) dpCharged.add(sym);
-    if(noAvgCost){
-      // No avg cost available — show sell-only charges, P&L unknown
-      const scS=calcZerodhaChargesSplit(avgSell,matchedQty,true,false,skipDp);
+      // Preserve a known intraday component, but disclose carried shares whose cost is unavailable.
+      const skipDp=dpCharged.has(sym);
+      dpCharged.add(sym);
+      const scS=calcZerodhaChargesSplit(avgSell,deliveryQty,true,false,skipDp);
       const _brok=+scS.brokerage.toFixed(2),_stt=+scS.stt.toFixed(2),_txn=+scS.txn.toFixed(2);
       const _sebi=+scS.sebi.toFixed(2),_gst=+scS.gst.toFixed(2),_stamp=+scS.stamp.toFixed(2),_dp=+scS.dp.toFixed(2);
       const charges=+sumChargeParts({_brok,_stt,_txn,_sebi,_gst,_stamp,_dp}).toFixed(0);
-      rows.push(enrichExitPnlRow({sym,lots:sells.length,qty:matchedQty,capital:null,buyPrice:null,sellPrice:+avgSell.toFixed(2),_brok,_stt,_txn,_sebi,_gst,_stamp,_dp,charges,winRate:null,netPnl:null,netPnlPct:null,_sort:-Infinity,_noAvgCost:true}));
-      return;
+      rows.push(enrichExitPnlRow({sym,lots:sells.length,qty:deliveryQty,capital:null,buyPrice:null,sellPrice:+avgSell.toFixed(2),_brok,_stt,_txn,_sebi,_gst,_stamp,_dp,charges,winRate:null,netPnl:null,netPnlPct:null,_sort:-Infinity,_noAvgCost:true}));
     }
-    const bcS=calcZerodhaChargesSplit(avgBuy,matchedQty,false,isSameDay,false);
-    const scS=calcZerodhaChargesSplit(avgSell,matchedQty,true,isSameDay,skipDp);
-    const _brok=+(bcS.brokerage+scS.brokerage).toFixed(2);
-    const _stt=+(bcS.stt+scS.stt).toFixed(2);
-    const _txn=+(bcS.txn+scS.txn).toFixed(2);
-    const _sebi=+(bcS.sebi+scS.sebi).toFixed(2);
-    const _gst=+(bcS.gst+scS.gst).toFixed(2);
-    const _stamp=+(bcS.stamp+scS.stamp).toFixed(2);
-    const _dp=+(bcS.dp+scS.dp).toFixed(2);
-    const charges=+sumChargeParts({_brok,_stt,_txn,_sebi,_gst,_stamp,_dp}).toFixed(0);
-    const netPnl=+((avgSell-avgBuy)*matchedQty-charges).toFixed(0);
-    const capital=avgBuy*matchedQty;
+    if(!components.length) return;
+    const matchedQty=components.reduce((sum,c)=>sum+c.qty,0);
+    const capital=components.reduce((sum,c)=>sum+c.capital,0);
+    const avgBuy=capital/matchedQty;
+    const _brok=+components.reduce((sum,c)=>sum+c._brok,0).toFixed(2);
+    const _stt=+components.reduce((sum,c)=>sum+c._stt,0).toFixed(2);
+    const _txn=+components.reduce((sum,c)=>sum+c._txn,0).toFixed(2);
+    const _sebi=+components.reduce((sum,c)=>sum+c._sebi,0).toFixed(2);
+    const _gst=+components.reduce((sum,c)=>sum+c._gst,0).toFixed(2);
+    const _stamp=+components.reduce((sum,c)=>sum+c._stamp,0).toFixed(2);
+    const _dp=+components.reduce((sum,c)=>sum+c._dp,0).toFixed(2);
+    const charges=+components.reduce((sum,c)=>sum+c.charges,0).toFixed(0);
+    const netPnl=+components.reduce((sum,c)=>sum+c.netPnl,0).toFixed(0);
     const netPnlPct=capital>0?+(netPnl/capital*100).toFixed(2):null;
     rows.push(enrichExitPnlRow({sym,lots:sells.length,qty:matchedQty,capital,buyPrice:+avgBuy.toFixed(2),sellPrice:+avgSell.toFixed(2),_brok,_stt,_txn,_sebi,_gst,_stamp,_dp,charges,winRate:netPnl>0?100:0,netPnl,netPnlPct,_sort:netPnl}));
   });
