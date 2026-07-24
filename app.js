@@ -1,5 +1,5 @@
-const BUILD_TS='2026-07-24 16:05 IST'; // release build time (IST)
-const APP_VERSION=1060; // v1060: one-time +500 history correction; Max Allocation = capital ÷ average entry-day positions, capped at 0.10% of stock turnover, with shared ATR/range-specific targets and stops.
+const BUILD_TS='2026-07-24 16:28 IST'; // release build time (IST)
+const APP_VERSION=1061; // v1061: true >=10% Rockets Today cohort restored; recommendation rows expose per-stock TGT/SL and the binding turnover allocation rail.
 // v556: parse the NSE Market Activity Report (MA<date>.csv) — official Nifty %, advances/declines and sector index moves shown as market CONTEXT in the status bar (EOD data, display only, never fed into per-row scoring); MA added to the ℹ️ file manifest.
 // v555 market-cycle stage awareness (stateless, self-calibrating): per-row stage label (1 accumulation · 2 breakout · 3 event · 4 profit-booking · 5 re-accumulation · 6 second-leg); a quiet-accumulation signal (conjunction-of-percentiles) injected via the rocket-diagnostic weighting; sell-the-news decay off Recent earnings date (horizon = review days); market intraday-breadth gauge in the status bar + basket export (entry timing, never changes ranking).
 const GOOGLE_DRIVE_CLIENT_ID='1015012642264-oi2nelv3v90k3d39r994a6nelgjs2a56.apps.googleusercontent.com'; // Public OAuth Web Client ID.
@@ -100,7 +100,7 @@ let EXPORT_EXCLUDED=new Set(); // symbols the user unchecked from export — per
 let FILTERS_RESTORED=false;
 let FILE_LOAD_STATUS={source:null,when:null,files:[]};
 // Radar composite scorer state (v517): one same-day transparent cross-sectional model.
-let RADAR={headers:[],matrix:[],features:[],ids:{},rockets:0,ms:0,sourceNote:'',scoredAt:null};
+let RADAR={headers:[],matrix:[],features:[],ids:{},rockets:0,continuationCount:0,ms:0,sourceNote:'',scoredAt:null};
 const SCANNER_STORE='rs_filters';
 const SHARED_FILTER_STORE='rs_filters_shared';
 // The account-level trading inputs (Capital ₹, Max Alloc ₹, manual Target anchor %) affect execution
@@ -110,7 +110,7 @@ const SHARED_FILTER_STORE='rs_filters_shared';
 const TRADE_INPUTS_STORE='rs_trade_inputs_v1';
 let _lastTradeInputSig=''; // gate brain writes to genuine trade-input changes, not every keystroke
 const ALL_STORE='rs_data';
-const ALL_STORE_SCHEMA='radar_composite_v1'; // same-day transparent composite scorer (v517)
+const ALL_STORE_SCHEMA='radar_composite_v2'; // v1061 invalidates cached rows carrying the old continuation-count-as-rockets bug.
 const HOLD_STORE='rs_holdings';
 const ORDERS_STORE='rs_orders';
 const POS_STORE='rs_positions';
@@ -2219,8 +2219,15 @@ function radarAnalyze(headers,rawRows,supplements={},heldSymbols=new Set()){
     if(gapI>=0)rawRows[ri][gapI]='';
     meta._corpNeutralised=true;
   }
+  // Keep the two concepts separate. True rockets (post corp-action neutralisation) are the
+  // positive cohort for same-day archetype measurement. The broader v550 continuation signal
+  // is only a per-row follow-through/falling-knife input; using its ~half-universe cohort here
+  // caused the Rockets Today card and every diagnostic effect orientation to become misleading.
+  const rocketRows=rawRows.map((r,i)=>({i,day:radarNum(r[targetI])}))
+    .filter(x=>x.day!==null&&x.day>=10).map(x=>x.i);
+  const rset=new Set(rocketRows);
   const continuationSignals=rawRows.map(r=>getContinuationSignal(r,targetI,priceHourI,price15I,price5I,relI,relAtI,volChgI));
-  const continuationRows=continuationSignals.map((signal,i)=>signal>=.35?i:null).filter(i=>i!==null),rset=new Set(continuationRows);
+  const continuationRows=continuationSignals.map((signal,i)=>signal>=.35?i:null).filter(i=>i!==null);
   const sectorBuckets={};
   for(const r of rawRows){const s=r[sectorI]||'Unknown',v=radarNum(r[targetI]);if(v!==null)(sectorBuckets[s]??=[]).push(clamp01(v,-10,10));}
   const sectorMeans=Object.fromEntries(Object.entries(sectorBuckets).map(([s,a])=>[s,a.reduce((x,y)=>x+y,0)/a.length])),sectorSorted=Object.values(sectorMeans).sort((a,b)=>a-b);
@@ -2257,7 +2264,7 @@ function radarAnalyze(headers,rawRows,supplements={},heldSymbols=new Set()){
     }
     const mr=ar.length?ar.reduce((a,b)=>a+b,0)/ar.length:.5,mo=ao.length?ao.reduce((a,b)=>a+b,0)/ao.length:.5;
     f.effect=clamp01((mr-mo)*2,-1,1);
-    f.reliability=Math.sqrt(f.coverage)*(continuationRows.length/(continuationRows.length+12));
+    f.reliability=Math.sqrt(f.coverage)*(rocketRows.length/(rocketRows.length+12));
     f.weight=(.07+Math.abs(f.effect))*.6+.4*Math.sqrt(f.coverage);
     features.push(f);
   }
@@ -2462,7 +2469,7 @@ function radarAnalyze(headers,rawRows,supplements={},heldSymbols=new Set()){
   // does NOT change the ranking; surfaced in the status bar + basket export as an entry-timing gauge.
   const _open=chgOpenArr.filter(v=>v!==null&&isFinite(v)),_adv=_open.filter(v=>v>0).length,_dec=_open.filter(v=>v<0).length;
   const marketIntraday=_open.length?{adv:_adv,dec:_dec,advPct:_adv/_open.length,median:radarQuant([..._open].sort((a,b)=>a-b),.5)}:null;
-  return {rows,features,rockets:continuationRows.length,suppressedHeld,marketIntraday,ids:{priceI,targetI,sectorI,symbolI,descI}};
+  return {rows,features,rockets:rocketRows.length,continuationCount:continuationRows.length,suppressedHeld,marketIntraday,ids:{priceI,targetI,sectorI,symbolI,descI}};
 }
 // Score the current upload (object rows from parseCSV) through the Radar composite.
 function radarScoreRows(objRows){
@@ -2472,7 +2479,7 @@ function radarScoreRows(objRows){
   const held=new Set(Object.keys(heldPos).map(normSym));
   const t0=performance.now();
   const result=radarAnalyze(headers,matrix,buildRadarSupplements(),held);
-  RADAR={headers,matrix,features:result.features,ids:result.ids,rockets:result.rockets,ms:performance.now()-t0,sourceNote:'',scoredAt:Date.now()};
+  RADAR={headers,matrix,features:result.features,ids:result.ids,rockets:result.rockets,continuationCount:result.continuationCount,ms:performance.now()-t0,sourceNote:'',scoredAt:Date.now()};
   SUPPRESSED_HELD=result.suppressedHeld;
   MARKET_INTRADAY=result.marketIntraday; // v555 WS-D: market breadth for the status bar + basket export
   return result.rows;
@@ -3316,7 +3323,7 @@ function renderStats(){
   FILT.forEach(s=>{if(riskCounts[s.risk]!=null)riskCounts[s.risk]++;});
   const medianRisk=Object.entries(riskCounts).sort((a,b)=>b[1]-a[1])[0]?.[0]||'—';
   const selCount=FILT.filter(s=>SELECTED.has(s.symbol)).length;
-  const rocketsCard=`<div class="st"><div class="st-l">Rockets Today</div><div class="st-v" style="color:var(--fire)">${(RADAR.rockets||0).toLocaleString()}</div><div class="st-d">same-day ≥10% movers · shape today's archetype diagnostic</div></div>`;
+  const rocketsCard=`<div class="st"><div class="st-l">Rockets Today</div><div class="st-v" style="color:var(--fire)">${(RADAR.rockets||0).toLocaleString()}</div><div class="st-d">true same-day ≥10% movers · diagnostic cohort${RADAR.continuationCount?` · ${RADAR.continuationCount.toLocaleString()} broader continuation signals scored separately`:''}</div></div>`;
   const scoreCard=`<div class="st"><div class="st-l">Top Score</div><div class="st-v" style="color:${radarScoreColor(top?.score)}">${topScore}</div><div class="st-d">${FILT.length.toLocaleString()} displayed · ${selCount} selected for export · median risk ${medianRisk} · ${RADAR.features.length||0} modeled features</div></div>`;
 
   document.getElementById('statsBar').innerHTML=`
@@ -4697,6 +4704,8 @@ function getCols(){
     {key:'day',label:'Day %',s:1},
     {key:'relvol',label:'Rel Vol',s:1},
     {key:'turnover',label:'Liquidity',s:1},
+    {key:'tgt',label:'TGT %',s:0},
+    {key:'sl',label:'SL %',s:0},
     {key:'alloc',label:'Alloc ₹',s:0},
     {key:'risk',label:'Risk',s:1},
   ]);
@@ -5160,7 +5169,7 @@ function computeAlloc(capital, selList){
   const rawScore=s=>Math.max(0,Number(s.rocketScore)||0);
   const totalRawScore=selList.reduce((sum,s)=>sum+rawScore(s),0)||1;
   const sortedSel=[...selList].sort((a,b)=>rawScore(b)-rawScore(a));
-  const allocMap={},limits={};
+  const allocMap={},limits={},limitReasons={};
 
   for(const s of sortedSel){
     const buyP=getBuyPrice(s);
@@ -5171,18 +5180,22 @@ function computeAlloc(capital, selList){
         reason:'missing daily turnover; market-impact safety cannot be verified',liquidityCap:0};
       continue;
     }
-    const rowLimit=Math.min(spendableCapital*(rawScore(s)/totalRawScore),cap,turnoverCap);
+    const scoreLimit=spendableCapital*(rawScore(s)/totalRawScore);
+    const rowLimit=Math.min(scoreLimit,cap,turnoverCap);
+    const limitReason=turnoverCap<=scoreLimit+0.01&&turnoverCap<=cap+0.01?'turnover'
+      :cap<=scoreLimit+0.01?'max allocation':'score weight';
     limits[s.symbol]=rowLimit;
+    limitReasons[s.symbol]=limitReason;
     const qty=affordableQty(rowLimit,buyP,rowLimit);
     if(qty<=0) continue;
     const ev=evalNet(s,buyP,qty);
     if(ev.rejected){
       allocMap[s.symbol]={alloc:0,debit:0,qty:0,buyPrice:buyP,rejected:true,reason:ev.reason,
-        stopDistancePct:ev.policy.stopPct,tgtPct:ev.policy.targetPct,exitPolicy:ev.policy,liquidityCap:turnoverCap};
+        stopDistancePct:ev.policy.stopPct,tgtPct:ev.policy.targetPct,exitPolicy:ev.policy,liquidityCap:turnoverCap,limitReason};
       continue;
     }
     allocMap[s.symbol]={alloc:qty*buyP,debit:buyDebit(buyP,qty),buyCharges:calcZerodhaCharges(buyP,qty,false,false,false),qty,buyPrice:buyP,
-      limit:rowLimit,stopDistancePct:ev.policy.stopPct,expectedNet:ev.expectedNet,charges:ev.charges,tgtPct:ev.tgtPct,exitPolicy:ev.policy,liquidityCap:turnoverCap};
+      limit:rowLimit,stopDistancePct:ev.policy.stopPct,expectedNet:ev.expectedNet,charges:ev.charges,tgtPct:ev.tgtPct,exitPolicy:ev.policy,liquidityCap:turnoverCap,limitReason};
   }
 
   let deployed=Object.values(allocMap).reduce((sum,am)=>sum+am.debit,0);
@@ -5200,11 +5213,11 @@ function computeAlloc(capital, selList){
         const qty=1,ev=evalNet(s,buyP,qty);
         if(ev.rejected){
           allocMap[s.symbol]={alloc:0,debit:0,qty:0,buyPrice:buyP,rejected:true,reason:ev.reason,
-            stopDistancePct:ev.policy.stopPct,tgtPct:ev.policy.targetPct,exitPolicy:ev.policy,liquidityCap:getTurnoverAllocationCap(s)};
+            stopDistancePct:ev.policy.stopPct,tgtPct:ev.policy.targetPct,exitPolicy:ev.policy,liquidityCap:getTurnoverAllocationCap(s),limitReason:limitReasons[s.symbol]};
           continue;
         }
         allocMap[s.symbol]={alloc:qty*buyP,debit:buyDebit(buyP,qty),buyCharges:calcZerodhaCharges(buyP,qty,false,false,false),qty,buyPrice:buyP,
-          limit:rowLimit,stopDistancePct:ev.policy.stopPct,expectedNet:ev.expectedNet,charges:ev.charges,tgtPct:ev.tgtPct,exitPolicy:ev.policy,liquidityCap:getTurnoverAllocationCap(s)};
+          limit:rowLimit,stopDistancePct:ev.policy.stopPct,expectedNet:ev.expectedNet,charges:ev.charges,tgtPct:ev.tgtPct,exitPolicy:ev.policy,liquidityCap:getTurnoverAllocationCap(s),limitReason:limitReasons[s.symbol]};
         am=allocMap[s.symbol];
       }
       const buyP=am.buyPrice;
@@ -5220,6 +5233,12 @@ function computeAlloc(capital, selList){
   _allocMemo={key:memoKey,val:allocMap};
   return allocMap;
 }
+function allocationSubline(am,unitLabel='shares'){
+  if(am?.limitReason==='turnover'){
+    return `<div style="font-size:9px;color:var(--amber);margin-top:1px" title="Market-impact rail: allocation is capped at 0.10% of daily turnover (${fmtINR(am.liquidityCap)}), then rounded down to whole ${unitLabel}.">turnover cap · ${am.qty} ${unitLabel}</div>`;
+  }
+  return `<div style="font-size:9px;color:var(--t3);margin-top:1px">${am.qty} ${unitLabel}</div>`;
+}
 function recomputeAlloc(){
   const capital=getEffectiveCapital();
   if(!capital){document.querySelectorAll('.alloc-cell').forEach(el=>el.innerHTML='<span style="color:var(--t3);font-size:11px">—</span>');return;}
@@ -5232,7 +5251,7 @@ function recomputeAlloc(){
     const am=allocMap[sym];
     if(!am){el.innerHTML='<span style="color:var(--red);font-size:10px" title="The score, Max Allocation, or 0.10% turnover cap is below one share.">cap below 1 share</span>';return;}
     if(am.rejected){el.innerHTML=`<span style="color:var(--red);font-size:10px" title="${escHtml(am.reason||'Stock-specific target cannot clear costs and desired net.')}">no viable target</span>`;return;}
-    el.innerHTML=`<span style="color:var(--amber);font-weight:700;font-family:'DM Mono',monospace;font-size:12px">${fmtINR(am.alloc)}</span><div style="font-size:9px;color:var(--t3);margin-top:1px">${am.qty} ${unitLabel}</div>`;
+    el.innerHTML=`<span style="color:var(--amber);font-weight:700;font-family:'DM Mono',monospace;font-size:12px">${fmtINR(am.alloc)}</span>${allocationSubline(am,unitLabel)}`;
   });
   renderBasketSummary();
 }
@@ -5334,6 +5353,7 @@ function renderTable(){
   document.getElementById('tBody').innerHTML=pg.map(s=>{
     const isSelected=SELECTED.has(s.symbol);
     const am=allocMap[s.symbol];
+    const exitPolicy=getRowExitPolicy(s,getBuyPrice(s));
     const canBuy=s.basketEligible!==false;
     const stretchColor=s.stretch<=2.5?'var(--green)':s.stretch>3?'var(--red)':'var(--amber)';
     // Cells are keyed and joined in COLS order so they always match the (possibly
@@ -5350,10 +5370,12 @@ function renderTable(){
       day:`<td>${fPerf(s.day??s.priceChange)}${s.corpAction?`<span title="Corporate action (${escHtml(s.corpAction)}) — mechanical ex-date move, neutralised in scoring" style="font-size:9px;color:var(--amber);margin-left:4px;cursor:help">⚑</span>`:''}</td>`,
       relvol:`<td>${s.relvol!=null&&isFinite(s.relvol)?Number(s.relvol).toFixed(2)+'×':'—'}</td>`,
       turnover:`<td>${fV(s.turnover)}</td>`,
+      tgt:`<td style="color:${exitPolicy.viable?'var(--green)':'var(--red)'};font-weight:700" title="${escHtml(exitPolicy.viable?`${exitPolicy.targetSource}; portfolio anchor ${exitPolicy.anchorPct?.toFixed(2)??'—'}%`:`Stock capacity ${exitPolicy.capacityPct?.toFixed(2)??'—'}% cannot clear the ${exitPolicy.minGrossPct?.toFixed(2)??'—'}% cost + net hurdle`)}">${exitPolicy.viable&&exitPolicy.targetPct!=null?'+'+exitPolicy.targetPct.toFixed(2)+'%':'—'}</td>`,
+      sl:`<td style="color:var(--red);font-weight:700" title="${escHtml(exitPolicy.stopSource)}">−${exitPolicy.stopPct.toFixed(2)}%</td>`,
       alloc:`<td class="alloc-cell" data-sym="${s.symbol}">${(()=>{
         if(!am) return '<span style="color:var(--t3);font-size:11px">—</span>';
         if(am.rejected) return `<span style="color:var(--red);font-size:10px" title="${escHtml(am.reason||'Stock-specific target cannot clear costs and desired net.')}">no viable target</span>`;
-        return `<span style="color:var(--amber);font-weight:700;font-family:'DM Mono',monospace;font-size:12px">${fmtINR(am.alloc)}</span><div style="font-size:9px;color:var(--t3);margin-top:1px">${am.qty} ${unitLabel}</div>`;
+        return `<span style="color:var(--amber);font-weight:700;font-family:'DM Mono',monospace;font-size:12px">${fmtINR(am.alloc)}</span>${allocationSubline(am,unitLabel)}`;
       })()}</td>`,
       risk:`<td>${radarRiskPill(s.risk)}</td>`
     };
@@ -6744,7 +6766,7 @@ function applySavedFiltersForMode(mode){
     ALL=radarScoreRows(raw);
     const fileTag=scannerFile.name+' · '+raw.length+' stocks';
     try{const ft=document.getElementById('fileTag');if(ft)ft.textContent=fileTag;}catch(e){}
-    FS.set(modeKey(ALL_STORE,mode),{schema:ALL_STORE_SCHEMA,data:compactRankingRows(ALL),fileTag,rockets:RADAR.rockets,featureCount:RADAR.features.length,ts:new Date().toISOString()});
+    FS.set(modeKey(ALL_STORE,mode),{schema:ALL_STORE_SCHEMA,data:compactRankingRows(ALL),fileTag,rockets:RADAR.rockets,continuationCount:RADAR.continuationCount,featureCount:RADAR.features.length,ts:new Date().toISOString()});
     if(mode==='stock'){
       // The Harvest target and executed-entry feedback keep learning from flagged
       // candidates' later attainable highs; the scorer itself stays stateless.
@@ -6973,6 +6995,7 @@ async function initApp(){
       if(saved?.schema===ALL_STORE_SCHEMA&&saved.data&&saved.data.length){
         ALL=saved.data.map(s=>({...s,symbol:normSym(s.symbol)})).filter(s=>s.symbol);
         RADAR.rockets=Number(saved.rockets)||0;
+        RADAR.continuationCount=Number(saved.continuationCount)||0;
         FILT=[...ALL];
         SELECTED=new Set(ALL.filter(s=>s.basketEligible!==false).slice(0,20).map(s=>s.symbol));
         if(saved.fileTag){const ft=document.getElementById('fileTag');if(ft)ft.textContent=saved.fileTag;}
