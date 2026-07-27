@@ -1,5 +1,5 @@
-const BUILD_TS='2026-07-27 10:08 IST'; // release build time (IST)
-const APP_VERSION=1062; // v1062: held-suppression keys on NET-LONG exposure only — a stock sold today (net qty<=0) is no longer discouraged and can re-enter recommendations; buys and partial sells that stay net-long remain suppressed.
+const BUILD_TS='2026-07-27 12:52 IST'; // release build time (IST)
+const APP_VERSION=1063; // v1063: block gap-led opening-spike fades when the gap outweighs post-open drift, short-term confirmation is cooling, and price remains above both upper envelopes.
 // v556: parse the NSE Market Activity Report (MA<date>.csv) — official Nifty %, advances/declines and sector index moves shown as market CONTEXT in the status bar (EOD data, display only, never fed into per-row scoring); MA added to the ℹ️ file manifest.
 // v555 market-cycle stage awareness (stateless, self-calibrating): per-row stage label (1 accumulation · 2 breakout · 3 event · 4 profit-booking · 5 re-accumulation · 6 second-leg); a quiet-accumulation signal (conjunction-of-percentiles) injected via the rocket-diagnostic weighting; sell-the-news decay off Recent earnings date (horizon = review days); market intraday-breadth gauge in the status bar + basket export (entry timing, never changes ranking).
 const GOOGLE_DRIVE_CLIENT_ID='1015012642264-oi2nelv3v90k3d39r994a6nelgjs2a56.apps.googleusercontent.com'; // Public OAuth Web Client ID.
@@ -110,7 +110,7 @@ const SHARED_FILTER_STORE='rs_filters_shared';
 const TRADE_INPUTS_STORE='rs_trade_inputs_v1';
 let _lastTradeInputSig=''; // gate brain writes to genuine trade-input changes, not every keystroke
 const ALL_STORE='rs_data';
-const ALL_STORE_SCHEMA='radar_composite_v2'; // v1061 invalidates cached rows carrying the old continuation-count-as-rockets bug.
+const ALL_STORE_SCHEMA='radar_composite_v3'; // v1063 adds signed-gap/post-open fields and recomputes gap-fade entry readiness.
 const HOLD_STORE='rs_holdings';
 const ORDERS_STORE='rs_orders';
 const POS_STORE='rs_positions';
@@ -2099,20 +2099,33 @@ function getPeakEntryTiming(row){
   const bollUpper=row?.bollUpper,keltUpper=row?.keltUpper;
   const bandsKnown=bollUpper!=null&&keltUpper!=null&&isFinite(Number(bollUpper))&&isFinite(Number(keltUpper))&&Number(bollUpper)>0&&Number(keltUpper)>0;
   const bandExtended=bandsKnown&&price>Number(bollUpper)&&price>Number(keltUpper);
-  const blocked=atPeak&&(rangeConsumed||cooling||bandExtended);
-  const pullbackPrice=blocked?high-(high-low)*.25:null;
+  const gapKnown=row?.gapSigned!=null&&isFinite(Number(row.gapSigned));
+  const changeOpenKnown=row?.changeOpen!=null&&isFinite(Number(row.changeOpen));
+  const gapSigned=gapKnown?Number(row.gapSigned):null;
+  const changeOpen=changeOpenKnown?Number(row.changeOpen):null;
+  // R4b execution form: a positive opening gap is not follow-through when the gap still
+  // contributes more than the post-open drift, the short tape is cooling, and price remains
+  // outside both envelopes. Unlike the upper-quarter gate, this remains blocked after the
+  // opening spike has fallen toward the session low. No tunable magnitude is introduced.
+  const gapLedFade=gapSigned>0&&changeOpenKnown&&gapSigned>Math.max(0,changeOpen)&&cooling&&bandExtended;
+  const peakBlocked=atPeak&&(rangeConsumed||cooling||bandExtended);
+  const blocked=peakBlocked||gapLedFade;
+  const pullbackPrice=peakBlocked?high-(high-low)*.25:null;
   const why=[];
   if(rangeConsumed)why.push('expected range consumed');
   if(cooling)why.push('5m/15m confirmation lost');
   if(bandExtended)why.push('above both Bollinger and Keltner upper bands');
-  const reason=blocked?'upper-quarter peak: '+why.join(', '):'';
+  const reason=gapLedFade
+    ?'gap-led fade: opening gap outweighs post-open drift, 5m/15m confirmation lost, above both Bollinger and Keltner upper bands'
+    :peakBlocked?'upper-quarter peak: '+why.join(', '):'';
   return {
     blocked,
     rangeLocation:+(rangeLocation*100).toFixed(1),
     rangeUsed:+(rangeUsed*100).toFixed(1),
     headroomPct:+headroomPct.toFixed(2),
     pullbackPrice:pullbackPrice>0?+tickPrice(pullbackPrice).toFixed(2):null,
-    cooling,bandExtended,
+    cooling,bandExtended,gapLedFade,
+    action:gapLedFade?'wait for post-open confirmation':peakBlocked?'wait for pullback':'',
     reason
   };
 }
@@ -2373,7 +2386,8 @@ function radarAnalyze(headers,rawRows,supplements={},heldSymbols=new Set()){
     }
     const symbol=normSym(raw[symbolI]),meta=supplements[symbol]||{},series=String(meta.series||'Unknown').toUpperCase(),band=meta.band,status=String(meta.status||'A').toUpperCase();
     const eqEligible=series==='EQ'&&status==='A',basketEligible=eqEligible&&(band===null||band===undefined||band>=10);
-    const day=radarNum(raw[targetI])||0,turn=radarNum(raw[turnI])||0,price=radarNum(raw[priceI])||0,gap=Math.abs(radarNum(raw[gapI])||0),quality=features.length?observed/features.length:0;
+    const day=radarNum(raw[targetI])||0,turn=radarNum(raw[turnI])||0,price=radarNum(raw[priceI])||0;
+    const gapSigned=radarNum(raw[gapI]),gap=Math.abs(gapSigned||0),changeOpen=radarNum(raw[changeOpenI]),quality=features.length?observed/features.length:0;
     const relvol=radarNum(raw[relI]),relAt=radarNum(raw[relAtI]),volChg=radarNum(raw[volChgI]);
     const atrPct=radarNum(raw[atrI]);
     const rangePct=Math.max(radarNum(raw[adrI])||0,atrPct||0,radarNum(raw[volI])||0,(radarNum(raw[atrWeekI])||0)/Math.sqrt(5));
@@ -2431,7 +2445,7 @@ function radarAnalyze(headers,rawRows,supplements={},heldSymbols=new Set()){
     // Display the REAL day move for a neutralised corp-action row (scoring already used the blanked 0).
     const dispDay=meta._corpNeutralised&&meta._realDay!=null?meta._realDay:day;
     const out={symbol,name:String(raw[descI]||symbol),sector:raw[sectorI]||'',rawScore,parts,contrib,quality,
-      price,day:dispDay,priceChange:dispDay,turnover:turn,relvol,gap,rangePct,stretch,atr:atrPct,
+      price,day:dispDay,priceChange:dispDay,turnover:turn,relvol,gap,gapSigned,changeOpen,rangePct,stretch,atr:atrPct,
       high1d:highI>=0?radarNum(raw[highI]):null,low1d:lowI>=0?radarNum(raw[lowI]):null,rocketToday:day>=10,
       bollUpper:bollUpperI>=0?radarNum(raw[bollUpperI]):null,
       keltUpper:keltUpperI>=0?radarNum(raw[keltUpperI]):null,
@@ -5521,7 +5535,7 @@ function buildRemovedPanel(query=''){
     const reason=r.reason==='held'
       ?`<span style="font-size:9px;background:rgba(244,114,182,.12);color:#f472b6;border:1px solid rgba(244,114,182,.25);border-radius:5px;padding:1px 7px;white-space:nowrap">📌 Held · in Open Positions</span>`
       :r.reason==='peak'
-        ?`<span style="font-size:9px;background:rgba(245,158,11,.12);color:var(--amber);border:1px solid rgba(245,158,11,.3);border-radius:5px;padding:1px 7px;white-space:nowrap" title="${escHtml(r.s.entryTiming?.reason||'Entry is too close to the current peak')} · range location ${fmt(r.s.entryTiming?.rangeLocation,0)}% · expected range used ${fmt(r.s.entryTiming?.rangeUsed,0)}%${r.s.entryTiming?.pullbackPrice?` · wait near/below ${fmtINR(r.s.entryTiming.pullbackPrice)}`:''}">⏳ Wait for pullback</span>`
+        ?`<span style="font-size:9px;background:rgba(245,158,11,.12);color:var(--amber);border:1px solid rgba(245,158,11,.3);border-radius:5px;padding:1px 7px;white-space:nowrap" title="${escHtml(r.s.entryTiming?.reason||'Entry timing is not confirmed')} · range location ${fmt(r.s.entryTiming?.rangeLocation,0)}% · expected range used ${fmt(r.s.entryTiming?.rangeUsed,0)}%${r.s.entryTiming?.pullbackPrice?` · wait near/below ${fmtINR(r.s.entryTiming.pullbackPrice)}`:''}">⏳ ${r.s.entryTiming?.gapLedFade?'Wait for confirmation':'Wait for pullback'}</span>`
         :(()=>{const labels=survRuleLabels(r.rules);return `<span style="font-size:9px;background:rgba(239,68,68,.12);color:var(--red);border:1px solid rgba(239,68,68,.25);border-radius:5px;padding:1px 7px;white-space:nowrap" title="Configured surveillance rule(s): ${escHtml(labels.join(' · '))}">⚠ ${escHtml(labels[0]||'surveillance')}${labels.length>1?` +${labels.length-1}`:''}</span>`;})();
     return `<tr style="border-bottom:1px solid var(--border)">
       <td style="padding:6px 10px;text-align:right;font-family:'DM Mono',monospace;color:var(--t2)">#${s.rank??'—'}</td>
@@ -5563,7 +5577,7 @@ function showRadarDetail(sym){
   const contribs=[...(r.contrib||[])].sort((a,b)=>Math.abs(b.impact)-Math.abs(a.impact)).slice(0,36).map(x=>`<div class="rr-contrib"><div><b>${escHtml(x.name)}</b><small>${RADAR_GROUPS[x.group]?.label||x.group} · percentile ${fmt(x.p*100,0)}</small></div><b class="${x.impact>=0?'pos':'neg'}">${x.impact>=0?'+':''}${fmt(x.impact,3)}</b></div>`).join('');
   const gate=r.rocketReady?'Meets the model’s high-feasibility criteria.':'Feasibility cautions: '+escHtml((r.gateReasons||[]).join(', ')||'not evaluated')+'.';
   const entryNote=r.entryReady===false
-    ?`<br><b style="color:var(--amber)">Entry timing:</b> Wait for pullback — ${escHtml(r.entryTiming?.reason||'insufficient headroom')}. Range location ${fmt(r.entryTiming?.rangeLocation,0)}%, expected range used ${fmt(r.entryTiming?.rangeUsed,0)}%${r.entryTiming?.pullbackPrice?`, reconsider near/below ${fmtINR(r.entryTiming.pullbackPrice)}`:''}. The breakout rank is preserved, but recommendation and basket export are blocked.`
+    ?`<br><b style="color:var(--amber)">Entry timing:</b> ${r.entryTiming?.gapLedFade?'Wait for post-open confirmation':'Wait for pullback'} — ${escHtml(r.entryTiming?.reason||'insufficient headroom')}. Range location ${fmt(r.entryTiming?.rangeLocation,0)}%, expected range used ${fmt(r.entryTiming?.rangeUsed,0)}%${r.entryTiming?.pullbackPrice?`, reconsider near/below ${fmtINR(r.entryTiming.pullbackPrice)}`:''}. The breakout rank is preserved, but recommendation and basket export are blocked.`
     :'';
   const flags=(r.meta?.flags||[]).length?escHtml(r.meta.flags.join(', ')):'none';
   const corp=r.meta?.corpToday;
@@ -6727,6 +6741,7 @@ function compactRankingRows(rows){
     setup:s.setup,risk:s.risk,series:s.series,band:s.band??null,status:s.status,
     basketEligible:s.basketEligible!==false,eqEligible:s.eqEligible!==false,
     stretch:s.stretch,rangePct:s.rangePct,relvol:s.relvol??null,gap:s.gap??null,
+    gapSigned:s.gapSigned??null,changeOpen:s.changeOpen??null,
     turnover:s.turnover,atr:s.atr??null,quality:s.quality??null,
     high1d:s.high1d??null,low1d:s.low1d??null,bollUpper:s.bollUpper??null,keltUpper:s.keltUpper??null,
     price1h:s.price1h??null,price15m:s.price15m??null,price5m:s.price5m??null,
