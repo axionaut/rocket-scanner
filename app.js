@@ -1,5 +1,5 @@
-const BUILD_TS='2026-07-24 16:28 IST'; // release build time (IST)
-const APP_VERSION=1061; // v1061: true >=10% Rockets Today cohort restored; recommendation rows expose per-stock TGT/SL and the binding turnover allocation rail.
+const BUILD_TS='2026-07-27 10:08 IST'; // release build time (IST)
+const APP_VERSION=1062; // v1062: held-suppression keys on NET-LONG exposure only — a stock sold today (net qty<=0) is no longer discouraged and can re-enter recommendations; buys and partial sells that stay net-long remain suppressed.
 // v556: parse the NSE Market Activity Report (MA<date>.csv) — official Nifty %, advances/declines and sector index moves shown as market CONTEXT in the status bar (EOD data, display only, never fed into per-row scoring); MA added to the ℹ️ file manifest.
 // v555 market-cycle stage awareness (stateless, self-calibrating): per-row stage label (1 accumulation · 2 breakout · 3 event · 4 profit-booking · 5 re-accumulation · 6 second-leg); a quiet-accumulation signal (conjunction-of-percentiles) injected via the rocket-diagnostic weighting; sell-the-news decay off Recent earnings date (horizon = review days); market intraday-breadth gauge in the status bar + basket export (entry timing, never changes ranking).
 const GOOGLE_DRIVE_CLIENT_ID='1015012642264-oi2nelv3v90k3d39r994a6nelgjs2a56.apps.googleusercontent.com'; // Public OAuth Web Client ID.
@@ -4746,8 +4746,14 @@ function getBuyPrice(s){
 }
 function getHeldPositionMap(){
   const heldPos={};
+  // Held-suppression keys on NET-LONG exposure only (v1062). A stock SOLD today nets to qty<=0 in the
+  // combined map (a POSITIONS short leg, or an orders net-sell); it is no longer held, so a FRESH buy
+  // of it must NOT be discouraged — it stays eligible for recommendations. Only actual holdings
+  // (net qty>0) are suppressed. Today's BUY orders still net positive, so they remain suppressed;
+  // a partial sell that leaves qty>0 stays held. (Open Positions still shows shorts via
+  // getCombinedOpenPositionMap, which is unchanged.)
   Object.values(getCombinedOpenPositionMap()).forEach(pos=>{
-    heldPos[pos.symbol]={qty:pos.qty,avg:pos.avg};
+    if(pos.qty>0) heldPos[pos.symbol]={qty:pos.qty,avg:pos.avg};
   });
   return heldPos;
 }
