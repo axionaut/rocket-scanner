@@ -1,5 +1,5 @@
-const BUILD_TS='2026-07-27 12:52 IST'; // release build time (IST)
-const APP_VERSION=1063; // v1063: block gap-led opening-spike fades when the gap outweighs post-open drift, short-term confirmation is cooling, and price remains above both upper envelopes.
+const BUILD_TS='2026-07-27 14:26 IST'; // release build time (IST)
+const APP_VERSION=1064; // v1064: tradebook timing uses distinct entry episodes, same-day/hold-context ranks, day-cluster stability, and a conservative execution-only timing consensus.
 // v556: parse the NSE Market Activity Report (MA<date>.csv) — official Nifty %, advances/declines and sector index moves shown as market CONTEXT in the status bar (EOD data, display only, never fed into per-row scoring); MA added to the ℹ️ file manifest.
 // v555 market-cycle stage awareness (stateless, self-calibrating): per-row stage label (1 accumulation · 2 breakout · 3 event · 4 profit-booking · 5 re-accumulation · 6 second-leg); a quiet-accumulation signal (conjunction-of-percentiles) injected via the rocket-diagnostic weighting; sell-the-news decay off Recent earnings date (horizon = review days); market intraday-breadth gauge in the status bar + basket export (entry timing, never changes ranking).
 const GOOGLE_DRIVE_CLIENT_ID='1015012642264-oi2nelv3v90k3d39r994a6nelgjs2a56.apps.googleusercontent.com'; // Public OAuth Web Client ID.
@@ -81,7 +81,6 @@ let ALL=[],FILT=[],PG=1,PGSZ=100,SCOL='rank',SDIR=1;
 let _tvLoadedThisSession=false; // true once a TV CSV has been processed this session
 let PERF_PERIOD_FILTER='all'; // 'all' | '1m' | '3m' | '6m' | '1y'
 let PERF_TRACK_ISSUE=null; // issue date selected in the recommendation-tracking outcome panel
-let PERF_TRADE_WINDOWS=[]; // cached trade window rows from renderPerformance — used by current-window pill
 let PERF_LATEST_SUMMARY=null; // cached latest session summary from buildLatestSessionPanel — used by renderStats card
 let PERF_RENDERED=false; // true after background or foreground performance calculation
 let PERF_RENDER_QUEUED=false;
@@ -90,6 +89,7 @@ let ENGINE_DATA={}; // legacy engine metadata shell; the Radar composite keeps i
 let SUPPRESSED_HELD=0; // count of stocks hidden because already held in POSITIONS
 let SURV_HARD_REMOVED=0; // count of stocks weeded out by configured surveillance rules
 let PEAK_TIMING_REMOVED=0; // count of strong-but-overextended rows waiting for entry headroom
+let CURRENT_TRADE_TIMING={state:'Neutral',reason:'Trade timing evidence is not loaded.',evidence:[]};
 let REMOVED_ROWS=[]; // [{s, reason:'held'|'surv'|'peak', rules?}] captured each applyFilters pass so the
                      // "Removed from rankings" table can explain every gap in the rank sequence (v546)
 let SELECTED=new Set(); // symbols selected for basket — recomputed from FILT each applyFilters
@@ -117,6 +117,7 @@ const POS_STORE='rs_positions';
 const POS_TSL_STORE='rs_position_tsl';
 const TRADEBOOK_STORE='rs_tradebook';
 const TRADEBOOK_META_STORE='rs_tradebook_meta_v1';
+const TRADE_TIMING_CONTEXT_STORE='rs_trade_timing_context_v1';
 const SURV_RULE_STORE='rs_surv_rules';
 const SURV_CORR_STORE='rs_surv_corr';
 const SAME_DAY_EXIT_OPPORTUNITY_STORE='rs_same_day_exit_opportunity_v3';
@@ -241,7 +242,18 @@ function pruneBrainForStorage(brain){
 function mergeCumulativeBrain(first,second){
   const base=(first&&typeof first==='object')?first:{};
   const incoming=(second&&typeof second==='object')?second:{};
-  return {...base,...incoming};
+  const merged={...base,...incoming};
+  const a=base[TRADE_TIMING_CONTEXT_STORE],b=incoming[TRADE_TIMING_CONTEXT_STORE];
+  if(a?.entries||b?.entries){
+    const entries={...(a?.entries||{}),...(b?.entries||{})};
+    const keys=Object.keys(entries).sort((x,y)=>String(entries[x]?.orderTime||x).localeCompare(String(entries[y]?.orderTime||y)));
+    while(keys.length>500) delete entries[keys.shift()];
+    merged[TRADE_TIMING_CONTEXT_STORE]={
+      version:1,entries,
+      updatedAt:[a?.updatedAt,b?.updatedAt].filter(Boolean).sort().at(-1)||new Date().toISOString()
+    };
+  }
+  return merged;
 }
 let TRADEBOOK_STATS=null; // Includes the realised exit-policy baseline, later refined by outcome learning.
 let LAST_BUY_DATE_MAP={}; // Legacy latest-buy map retained for stored-brain compatibility.
@@ -1827,6 +1839,7 @@ function estimatedEntryNetPct(entry,exitPrice){
 function assessExecutedEntryOutcomeScan(scan){
   if(!scan?.date||!scan.rows?.length) return;
   syncExecutedRecommendedEntries();
+  try{recordTradeTimingEntryContext();}catch(e){console.warn('Trade timing context capture failed',e);}
   const store=FS.get(ENTRY_OUTCOME_STORE);
   if(!store?.entries) return;
   const rowMap=Object.fromEntries(scan.rows.map(r=>[r.symbol,r]));
@@ -3349,25 +3362,18 @@ function renderStats(){
 
   const filterPills=[];
   if(SUPPRESSED_HELD>0)filterPills.push(`<span class="info-pill pill-rose" title="Held positions (Holdings + Positions + today's net Orders buys) never re-enter the buy ranking.">📌 ${SUPPRESSED_HELD} held suppressed</span>`);
-  if(PEAK_TIMING_REMOVED>0)filterPills.push(`<span class="info-pill pill-amber" title="Strong breakouts withheld because price is in the upper quarter of today's range and has consumed the expected move, lost confirmation on either 5m/15m, or extended above both Bollinger and Keltner upper bands. They remain honestly ranked and become eligible again after rebuilding entry headroom.">⏳ ${PEAK_TIMING_REMOVED} waiting for pullback</span>`);
+  if(PEAK_TIMING_REMOVED>0)filterPills.push(`<span class="info-pill pill-amber" title="Ranked stocks withheld by the entry-timing gate: upper-range exhaustion or a gap-led fade without post-open confirmation. Rank is preserved.">⏳ ${PEAK_TIMING_REMOVED} waiting for entry confirmation</span>`);
   const inelig=ALL.filter(s=>s.basketEligible===false).length;
   if(inelig>0)filterPills.push(`<span class="info-pill pill-orange" title="Non-EQ series, inactive status, or a price band below 10% — visible in the ranking with penalties, but never exported to the basket.">⚠ ${inelig} basket-ineligible (ranked with penalties)</span>`);
 
   // Row 2: analysis / insight pills
   const infoPills=[];
-  if(PERF_TRADE_WINDOWS.length){
-    const {mins}=istNow();
-    const curBucket=Math.floor(mins/30)*30;
-    const cw=PERF_TRADE_WINDOWS.find(r=>r.hour===curBucket);
-    if(cw){
-      const hh=Math.floor(curBucket/60),mm=curBucket%60,h12=hh===0?12:hh>12?hh-12:hh,mer=hh<12?'AM':'PM';
-      const slotLabel=h12+':'+(mm===0?'00':String(mm).padStart(2,'0'))+' '+mer;
-      const buyPart=cw.bWin!=null?`Buy ${cw.bWin}% win`:'';
-      const sellPart=cw.sWin!=null?`Sell ${cw.sWin}% win`:'';
-      const sigPart=cw.action!=='&mdash;'?` · <strong>${cw.action}</strong>`:'';
-      const parts=[buyPart,sellPart].filter(Boolean).join(' · ');
-      if(parts)infoPills.push(`<span class="info-pill" style="background:rgba(99,102,241,.12);border-color:rgba(99,102,241,.3);color:var(--t2)" title="Historical win rates for the current 30-min slot from your tradebook">🕐 ${slotLabel}: ${parts}${sigPart}</span>`);
-    }
+  const timingDecision=getCurrentTradeTimingDecision();
+  if(timingDecision.model?.episodeCount){
+    const c=timingDecision.state==='Prefer'?'var(--green)':timingDecision.state==='Avoid'?'var(--red)':'var(--t2)';
+    const ctx=timingDecision.context;
+    const evidence=timingDecision.evidence.map(r=>`${r.label}: ${r.state} (${(r.peerShrunk*100).toFixed(1)}% peer / ${(r.holdShrunk*100).toFixed(1)}% hold-adjusted)`).join(' · ');
+    infoPills.push(`<span class="info-pill" style="background:rgba(99,102,241,.12);border-color:rgba(99,102,241,.3);color:${c}" title="${escHtml(timingDecision.reason)} ${escHtml(evidence)}">🕐 Next entry #${ctx.ordinal}: <strong>${timingDecision.state}</strong></span>`);
   }
   try{
     const opportunity=getSameDayExitOpportunitySummary();
@@ -3580,6 +3586,234 @@ function getAdaptiveTradeTrips(trips){
   const effectiveStart=dates.length?dates[0]>SYSTEM_TRADE_START_DATE?dates[0]:SYSTEM_TRADE_START_DATE:SYSTEM_TRADE_START_DATE;
   const rows=(trips||[]).filter(r=>r&&r.sellDate>=effectiveStart);
   return rows.length?rows:(trips||[]);
+}
+
+// Trade timing evidence (v1064). One entry decision is the unit, not a FIFO exit
+// fragment. Outcomes are converted to bounded within-day and hold-context ranks so
+// a single spectacular win/loss cannot manufacture an entry signal.
+let _tradeTimingMemo=null;
+function tradeClockMinute(value){
+  const m=String(value||'').match(/(?:T|\s|^)(\d{1,2}):(\d{2})(?::\d{2})?/);
+  if(!m) return null;
+  const minute=Number(m[1])*60+Number(m[2]);
+  return Number.isFinite(minute)?minute:null;
+}
+function tradeMedian(values){
+  const a=(values||[]).filter(Number.isFinite).sort((x,y)=>x-y);
+  if(!a.length) return null;
+  const mid=Math.floor(a.length/2);
+  return a.length%2?a[mid]:(a[mid-1]+a[mid])/2;
+}
+function tradeRanks(rows,valueKey,outKey){
+  const sorted=rows.map(row=>({row,value:Number(row[valueKey])}))
+    .filter(x=>Number.isFinite(x.value)).sort((a,b)=>a.value-b.value);
+  if(!sorted.length) return;
+  if(sorted.length===1){sorted[0].row[outKey]=.5;return;}
+  for(let start=0;start<sorted.length;){
+    let end=start+1;
+    while(end<sorted.length&&sorted[end].value===sorted[start].value) end++;
+    const rank=((start+end-1)/2)/(sorted.length-1);
+    for(let i=start;i<end;i++) sorted[i].row[outKey]=rank;
+    start=end;
+  }
+}
+function buildTradeEntryEpisodes(trips){
+  const map={};
+  (trips||[]).forEach(r=>{
+    const symbol=normSym(r?.sym),date=String(r?.buyDate||''),time=String(r?.buyTime||'');
+    const capital=Number(r?.capital),net=Number(r?.netPnl),qty=Number(r?.qty),hold=Number(r?.holdDays);
+    if(!symbol||!date||!time||!(capital>0)||!Number.isFinite(net)) return;
+    const key=symbol+'|'+date+'|'+time;
+    const e=map[key]||(map[key]={key,symbol,date,time,capital:0,netPnl:0,qty:0,holdCapitalDays:0,exitFragments:0});
+    e.capital+=capital;e.netPnl+=net;e.qty+=Number.isFinite(qty)?qty:0;
+    e.holdCapitalDays+=(Number.isFinite(hold)?hold:0)*capital;e.exitFragments++;
+  });
+  return Object.values(map).map(e=>{
+    e.netPnlPct=e.capital>0?e.netPnl/e.capital*100:0;
+    e.holdDays=e.capital>0?e.holdCapitalDays/e.capital:0;
+    e.minute=tradeClockMinute(e.time);
+    return e;
+  }).filter(e=>e.minute!==null);
+}
+function tradeLooRange(dayValues){
+  if(!dayValues||dayValues.length<2) return null;
+  const total=dayValues.reduce((s,v)=>s+v,0);
+  const loo=dayValues.map(v=>(total-v)/(dayValues.length-1));
+  return {min:Math.min(...loo),max:Math.max(...loo)};
+}
+function buildTradeTimingModel(trips){
+  const adaptive=getAdaptiveTradeTrips(trips||[]);
+  const memoKey=adaptive.length+'|'+(adaptive.at(-1)?.sellDate||'')+'|'+(adaptive.at(-1)?.netPnl||0);
+  if(_tradeTimingMemo?.key===memoKey) return _tradeTimingMemo.value;
+  const episodes=buildTradeEntryEpisodes(adaptive);
+  if(!episodes.length){
+    const empty={episodes:[],episodeCount:0,entryDays:0,rows:[],groups:{window:[],ordinal:[],phase:[],spacing:[]}};
+    _tradeTimingMemo={key:memoKey,value:empty};return empty;
+  }
+
+  const byDay={};
+  episodes.forEach(e=>(byDay[e.date]??=[]).push(e));
+  Object.values(byDay).forEach(dayRows=>{
+    dayRows.sort((a,b)=>a.time.localeCompare(b.time)||a.symbol.localeCompare(b.symbol));
+    dayRows.forEach((e,index)=>{
+      e.ordinal=index+1;e.dayEntries=dayRows.length;
+      e.phase=dayRows.length===1?'Only':index===0?'First':index===dayRows.length-1?'Last':'Middle';
+      e.spacingMinutes=index?Math.max(0,e.minute-dayRows[index-1].minute):null;
+      e.windowMinute=Math.floor(e.minute/30)*30;
+      e.ordinalKey=e.ordinal>=5?'5+':String(e.ordinal);
+      e.spacingKey=e.spacingMinutes===null?'First entry'
+        :e.spacingMinutes===0?'Same batch'
+        :e.spacingMinutes<15?'<15m'
+        :e.spacingMinutes<30?'15–29m'
+        :e.spacingMinutes<60?'30–59m':'60m+';
+    });
+    tradeRanks(dayRows,'netPnlPct','dayRank');
+  });
+
+  // Intraday is semantic; positive hold periods split at their observed terciles.
+  const positiveHolds=episodes.map(e=>e.holdDays).filter(v=>v>0).sort((a,b)=>a-b);
+  const holdCut=p=>positiveHolds.length?positiveHolds[Math.min(positiveHolds.length-1,Math.floor((positiveHolds.length-1)*p))]:0;
+  const holdCut1=holdCut(1/3),holdCut2=holdCut(2/3);
+  episodes.forEach(e=>{
+    e.holdStratum=e.holdDays===0?'Intraday'
+      :e.holdDays<=holdCut1?`≤${Math.max(1,Math.ceil(holdCut1))}d`
+      :e.holdDays<=holdCut2?`≤${Math.max(1,Math.ceil(holdCut2))}d`
+      :`>${Math.max(1,Math.ceil(holdCut2))}d`;
+  });
+  const byHold={};
+  episodes.forEach(e=>(byHold[e.holdStratum]??=[]).push(e));
+  Object.values(byHold).forEach(rows=>tradeRanks(rows,'netPnlPct','holdRank'));
+
+  function makeSlice(dimension,key,label,rows){
+    const daily={};
+    rows.forEach(e=>(daily[e.date]??=[]).push(e));
+    const dayRows=Object.entries(daily).map(([date,list])=>({
+      date,
+      peer:meanArr(list.map(e=>Number.isFinite(e.dayRank)?e.dayRank:.5)),
+      hold:meanArr(list.map(e=>Number.isFinite(e.holdRank)?e.holdRank:.5)),
+      medianReturn:tradeMedian(list.map(e=>e.netPnlPct))
+    }));
+    const peerDays=dayRows.map(d=>d.peer),holdDays=dayRows.map(d=>d.hold);
+    const holdCounts={};
+    rows.forEach(e=>holdCounts[e.holdStratum]=(holdCounts[e.holdStratum]||0)+1);
+    return {
+      dimension,key,label,episodes:rows.length,days:dayRows.length,
+      peerRank:meanArr(peerDays),holdRank:meanArr(holdDays),
+      peerLoo:tradeLooRange(peerDays),holdLoo:tradeLooRange(holdDays),
+      robustReturnPct:tradeMedian(dayRows.map(d=>d.medianReturn)),
+      holdMix:Object.entries(holdCounts).map(([k,n])=>`${k} ${n}`).join(' · '),
+      state:'Neutral',stability:'collecting'
+    };
+  }
+  const groups={window:[],ordinal:[],phase:[],spacing:[]};
+  const addSlices=(dimension,keyFn,labelFn)=>{
+    const buckets={};
+    episodes.forEach(e=>{const key=keyFn(e);if(key!=null)(buckets[key]??=[]).push(e);});
+    Object.entries(buckets).forEach(([key,rows])=>groups[dimension].push(makeSlice(dimension,key,labelFn(key),rows)));
+  };
+  const fmtMinute=m=>{const h=Math.floor(m/60),mm=m%60,h12=h===0?12:h>12?h-12:h;return `${h12}:${String(mm).padStart(2,'0')} ${h<12?'AM':'PM'}`;};
+  addSlices('window',e=>String(e.windowMinute),key=>fmtMinute(Number(key)));
+  addSlices('ordinal',e=>e.ordinalKey,key=>key==='5+'?'Trade 5+':`Trade ${key}`);
+  addSlices('phase',e=>e.phase,key=>`${key} trade`);
+  addSlices('spacing',e=>e.spacingKey,key=>key);
+  groups.window.sort((a,b)=>Number(a.key)-Number(b.key));
+  groups.ordinal.sort((a,b)=>(a.key==='5+'?5:Number(a.key))-(b.key==='5+'?5:Number(b.key)));
+  const phaseOrder={Only:0,First:1,Middle:2,Last:3};
+  groups.phase.sort((a,b)=>(phaseOrder[a.key]??9)-(phaseOrder[b.key]??9));
+  const spacingOrder={'First entry':0,'Same batch':1,'<15m':2,'15–29m':3,'30–59m':4,'60m+':5};
+  groups.spacing.sort((a,b)=>(spacingOrder[a.key]??9)-(spacingOrder[b.key]??9));
+
+  Object.values(groups).forEach(slices=>{
+    const medianCoverage=tradeMedian(slices.map(r=>r.days))||Infinity;
+    slices.forEach(r=>{
+      const covered=r.days>=medianCoverage;
+      const peerPos=r.peerLoo&&r.peerLoo.min>.5,peerNeg=r.peerLoo&&r.peerLoo.max<.5;
+      const holdPos=r.holdLoo&&r.holdLoo.min>.5,holdNeg=r.holdLoo&&r.holdLoo.max<.5;
+      r.peerShrunk=.5+(r.peerRank-.5)*(r.days/(r.days+medianCoverage));
+      r.holdShrunk=.5+(r.holdRank-.5)*(r.days/(r.days+medianCoverage));
+      if(covered&&peerPos&&holdPos){r.state='Prefer';r.stability='stable positive';}
+      else if(covered&&peerNeg&&holdNeg){r.state='Avoid';r.stability='stable negative';}
+      else r.stability=covered?'mixed / context-dependent':'collecting';
+    });
+  });
+  const rows=[...groups.window,...groups.ordinal,...groups.phase,...groups.spacing];
+  const model={episodes,episodeCount:episodes.length,entryDays:Object.keys(byDay).length,groups,rows,holdCuts:[holdCut1,holdCut2]};
+  _tradeTimingMemo={key:memoKey,value:model};
+  return model;
+}
+function getTradeTimingModel(){return buildTradeTimingModel(TRADEBOOK_STATS?.tripsData||[]);}
+function getTodayTradeTimingContext(){
+  const today=getSessionDate();
+  const buys=(ORDERS_TODAY||[]).filter(o=>o.type==='BUY'&&normOrderDate(o.time)===today&&tradeClockMinute(o.time)!==null);
+  const bySymbol={};
+  buys.forEach(o=>{const symbol=normSym(o.symbol);if(!bySymbol[symbol]||String(o.time)<String(bySymbol[symbol].time))bySymbol[symbol]=o;});
+  const entries=Object.values(bySymbol).sort((a,b)=>String(a.time).localeCompare(String(b.time)));
+  const nowMinute=istNow().mins,lastMinute=entries.length?tradeClockMinute(entries.at(-1).time):null;
+  const ordinal=entries.length+1,spacing=lastMinute===null?null:Math.max(0,nowMinute-lastMinute);
+  return {
+    nowMinute,windowKey:String(Math.floor(nowMinute/30)*30),
+    ordinal,ordinalKey:ordinal>=5?'5+':String(ordinal),
+    spacingMinutes:spacing,
+    spacingKey:spacing===null?'First entry':spacing===0?'Same batch':spacing<15?'<15m':spacing<30?'15–29m':spacing<60?'30–59m':'60m+',
+    completedEntries:entries.length
+  };
+}
+function getCurrentTradeTimingDecision(){
+  const model=getTradeTimingModel(),context=getTodayTradeTimingContext();
+  if(!model.episodeCount) return {state:'Neutral',reason:'No resolved tradebook entry episodes yet.',evidence:[],context};
+  const windowRow=model.groups.window.find(r=>r.key===context.windowKey)||null;
+  const ordinalRow=model.groups.ordinal.find(r=>r.key===context.ordinalKey)||null;
+  const spacingRow=model.groups.spacing.find(r=>r.key===context.spacingKey)||null;
+  const relative=[ordinalRow,spacingRow].filter(Boolean),evidence=[windowRow,...relative].filter(Boolean);
+  const opposite=state=>evidence.some(r=>r.state!=='Neutral'&&r.state!==state);
+  let state='Neutral';
+  if(windowRow?.state==='Avoid'&&relative.some(r=>r.state==='Avoid')&&!opposite('Avoid')) state='Avoid';
+  else if(windowRow?.state==='Prefer'&&relative.some(r=>r.state==='Prefer')&&!opposite('Prefer')) state='Prefer';
+  const named=evidence.filter(r=>r.state===state&&state!=='Neutral').map(r=>r.label);
+  const reason=state==='Avoid'
+    ?`Historically weak timing across ${named.join(' + ')} after same-day and holding-context controls.`
+    :state==='Prefer'
+      ?`Historically favourable timing across ${named.join(' + ')}; live stock/tape gates still control entry.`
+      :`Timing evidence is mixed or still collecting for ${evidence.map(r=>r.label).join(' + ')||'this entry context'}.`;
+  return {state,reason,evidence,context,model};
+}
+function recordTradeTimingEntryContext(){
+  const today=getSessionDate();
+  const buys=(ORDERS_TODAY||[]).filter(o=>o.type==='BUY'&&normOrderDate(o.time)===today&&tradeClockMinute(o.time)!==null);
+  if(!buys.length||!ALL.length) return 0;
+  const bySymbol={};
+  buys.forEach(o=>{const symbol=normSym(o.symbol);if(!bySymbol[symbol]||String(o.time)<String(bySymbol[symbol].time))bySymbol[symbol]=o;});
+  const ordered=Object.values(bySymbol).sort((a,b)=>String(a.time).localeCompare(String(b.time)));
+  const store=FS.get(TRADE_TIMING_CONTEXT_STORE)||{version:1,entries:{}};
+  let added=0;
+  ordered.forEach((order,index)=>{
+    const symbol=normSym(order.symbol),key=today+'|'+symbol;
+    if(store.entries[key]) return; // first observed scanner context is immutable
+    const row=ALL.find(s=>s.symbol===symbol);
+    if(!row) return;
+    const minute=tradeClockMinute(order.time);
+    const prior=index?tradeClockMinute(ordered[index-1].time):null;
+    store.entries[key]={
+      id:key,date:today,symbol,orderTime:order.time,orderMinute:minute,
+      ordinal:index+1,spacingMinutes:prior===null?null:Math.max(0,minute-prior),
+      price:Number(order.price)||null,
+      rank:row.rank??null,score:row.score??null,setup:row.setup||null,stage:row.stage??null,risk:row.risk||null,
+      gap:row.gapSigned??row.gap??null,changeOpen:row.changeOpen??null,
+      price1h:row.price1h??null,price15m:row.price15m??null,price5m:row.price5m??null,
+      entryTiming:row.entryTiming||null,
+      marketAdvPct:MARKET_INTRADAY?.advPct??null,
+      observedAt:new Date().toISOString(),
+      observationNote:'first scanner snapshot after the completed buy was detected'
+    };
+    added++;
+  });
+  const keys=Object.keys(store.entries).sort((a,b)=>{
+    const av=store.entries[a]?.orderTime||a,bv=store.entries[b]?.orderTime||b;
+    return av.localeCompare(bv);
+  });
+  while(keys.length>500) delete store.entries[keys.shift()];
+  if(added){store.updatedAt=new Date().toISOString();FS.set(TRADE_TIMING_CONTEXT_STORE,store);}
+  return added;
 }
 
 // ── Shared search plumbing for the three Rankings tables ──────────────────────
@@ -4121,41 +4355,34 @@ function renderPerformance(){
   ];
   const symTbl=makeSortableTable('perf-sym',symCols,symRows,'edge',-1,null,null,'sym');
 
-  const timeFmt=v=>{const hh=Math.floor(v/60),mm=v%60,h12=hh===0?12:hh>12?hh-12:hh,mer=hh<12?'AM':'PM';return h12+':'+(mm===0?'00':String(mm).padStart(2,'0'))+' '+mer;};
-  const _buyMap=Object.fromEntries((p.hourBreakdown||[]).map(r=>[r.hour,{...r,edge:+((r.winRate*r.avgPct)*Math.min(1,r.trades/5)).toFixed(2)}]));
-  const _sellMap=Object.fromEntries((p.sellHourBreakdown||[]).map(r=>[r.hour,{...r,edge:+((r.winRate*r.avgPct)*Math.min(1,r.trades/5)).toFixed(2)}]));
-  const _allHours=[...new Set([...Object.keys(_buyMap),...Object.keys(_sellMap)].map(Number))].sort((a,b)=>a-b);
-  const _med=arr=>{if(!arr.length)return 0;const s=[...arr].sort((a,b)=>a-b);return s[Math.floor(s.length/2)];};
-  const _medBuy=_med(Object.values(_buyMap).map(r=>r.edge));
-  const _medSell=_med(Object.values(_sellMap).map(r=>r.edge));
-  const tradeWindowRows=_allHours.map(h=>{
-    const b=_buyMap[h], s=_sellMap[h];
-    const bEdge=b?b.edge:null, sEdge=s?s.edge:null;
-    const goodBuy=bEdge!=null&&bEdge>=_medBuy;
-    const goodSell=sEdge!=null&&sEdge>=_medSell;
-    let action='&mdash;', actionC='var(--t3)';
-    if(goodBuy&&goodSell){action='Enter + Exit';actionC='var(--cyan)';}
-    else if(goodBuy){action='Enter';actionC='var(--green)';}
-    else if(goodSell){action='Exit';actionC='var(--amber)';}
-    return {hour:h,bTrades:b?b.trades:null,bWin:b?b.winRate:null,bEdge,sTrades:s?s.trades:null,sWin:s?s.winRate:null,sEdge,action,actionC};
-  });
-  PERF_TRADE_WINDOWS=tradeWindowRows;
-  const NA='<span style="color:var(--t3)">&mdash;</span>';
-  const winClr=v=>v>=60?'var(--green)':v>=40?'var(--amber)':'var(--red)';
-  const edgeClr=v=>v>2?'var(--green)':v>0?'var(--amber)':'var(--red)';
-  const tradeWindowCols=[
-    {key:'hour',label:'Time',align:'left',fmt:timeFmt,clrFn:()=>'var(--t1)'},
-    {key:'bTrades',label:'Buy Lots',align:'right',fmt:v=>v??NA,clrFn:()=>'var(--t2)'},
-    {key:'bWin',label:'Buy Win%',align:'right',fmt:v=>v!=null?v+'%':NA,clrFn:v=>v!=null?winClr(v):'var(--t3)'},
-    {key:'bEdge',label:'Buy Edge',align:'right',bold:true,fmt:v=>v!=null?v.toFixed(2):NA,clrFn:v=>v!=null?edgeClr(v):'var(--t3)'},
-    {key:'sTrades',label:'Sell Lots',align:'right',fmt:v=>v??NA,clrFn:()=>'var(--t2)'},
-    {key:'sWin',label:'Sell Win%',align:'right',fmt:v=>v!=null?v+'%':NA,clrFn:v=>v!=null?winClr(v):'var(--t3)'},
-    {key:'sEdge',label:'Sell Edge',align:'right',bold:true,fmt:v=>v!=null?v.toFixed(2):NA,clrFn:v=>v!=null?edgeClr(v):'var(--t3)'},
-    {key:'action',label:'Signal',align:'left',fmt:(v,row)=>`<span style="color:${row.actionC};font-weight:700">${v}</span>`,clrFn:()=>''},
+  const timingModel=buildTradeTimingModel(adaptiveAllTrips);
+  const timingRows=timingModel.rows.map(r=>({
+    ...r,
+    slice:`${({window:'Clock',ordinal:'Order',phase:'Day phase',spacing:'Spacing'}[r.dimension]||r.dimension)} · ${r.label}`,
+    peerPct:+(r.peerShrunk*100).toFixed(1),
+    holdPct:+(r.holdShrunk*100).toFixed(1),
+    robustPct:+Number(r.robustReturnPct||0).toFixed(2)
+  }));
+  const stateColor=s=>s==='Prefer'?'var(--green)':s==='Avoid'?'var(--red)':'var(--t3)';
+  const timingCols=[
+    {key:'slice',label:'Entry context',align:'left',fmt:v=>escHtml(v),clrFn:()=>'var(--t1)',bold:true},
+    {key:'episodes',label:'Entries',align:'right',fmt:v=>v,clrFn:()=>'var(--t2)'},
+    {key:'days',label:'Days',align:'right',fmt:v=>v,clrFn:()=>'var(--t2)'},
+    {key:'peerPct',label:'Same-day peer rank',align:'right',fmt:v=>v.toFixed(1)+'%',clrFn:v=>v>50?'var(--green)':v<50?'var(--red)':'var(--t3)'},
+    {key:'holdPct',label:'Hold-adjusted rank',align:'right',fmt:v=>v.toFixed(1)+'%',clrFn:v=>v>50?'var(--green)':v<50?'var(--red)':'var(--t3)'},
+    {key:'robustPct',label:'Median day return',align:'right',fmt:v=>fmtPct(v),clrFn:clr},
+    {key:'holdMix',label:'Hold mix',align:'left',fmt:v=>escHtml(v),clrFn:()=>'var(--t3)'},
+    {key:'stability',label:'Stability',align:'left',fmt:v=>escHtml(v),clrFn:()=>'var(--t2)'},
+    {key:'state',label:'Timing state',align:'left',bold:true,fmt:v=>`<span style="color:${stateColor(v)}">${escHtml(v)}</span>`,clrFn:()=>''},
   ];
-  const {mins:_twMins}=istNow();const _twBucket=Math.floor(_twMins/30)*30;
-  const tradeWindowTbl=makeSortableTable('tbl-trade-windows',tradeWindowCols,tradeWindowRows,'hour',1,row=>row.hour===_twBucket?'background:rgba(99,102,241,.12);outline:1px solid rgba(99,102,241,.3);outline-offset:-1px':'');
-  const hasTradeWindows=tradeWindowRows.length>0;
+  const currentTiming=getCurrentTradeTimingDecision();
+  const timingTbl=makeSortableTable('tbl-trade-timing',timingCols,timingRows,'slice',1,row=>{
+    const isCurrent=row.dimension==='window'&&row.key===currentTiming.context.windowKey;
+    const isOrdinal=row.dimension==='ordinal'&&row.key===currentTiming.context.ordinalKey;
+    const isSpacing=row.dimension==='spacing'&&row.key===currentTiming.context.spacingKey;
+    return isCurrent||isOrdinal||isSpacing?'background:rgba(99,102,241,.12);outline:1px solid rgba(99,102,241,.3);outline-offset:-1px':'';
+  });
+  const hasTradeWindows=timingRows.length>0;
 
   const periodPills=['all','1m','3m','6m','1y'].map(p=>{
     const active=PERF_PERIOD_FILTER===p;
@@ -4177,7 +4404,7 @@ function renderPerformance(){
   const perfNav=`<nav style="position:sticky;top:var(--hdr-h,72px);z-index:50;background:var(--bg);padding:8px 0 10px;margin-bottom:8px;display:flex;gap:6px;flex-wrap:wrap;border-bottom:1px solid var(--border);box-shadow:0 2px 8px rgba(0,0,0,0.3);overflow-x:auto;-webkit-overflow-scrolling:touch">
     ${_navLink('perf-kpi','📊 KPIs',true)}
     ${_navLink('perf-monthly','📅 Monthly',monthRows.length>0)}
-    ${_navLink('perf-trade-windows','🕐 Trading Windows',hasTradeWindows)}
+    ${_navLink('perf-trade-windows','🕐 Entry Timing Evidence',hasTradeWindows)}
     ${_navLink('perf-stocks','📈 Stocks',p.symBreakdown.length>0)}
     ${_navLink('perf-outcomes','Outcome Feedback',true)}
   </nav>`;
@@ -4206,12 +4433,12 @@ function renderPerformance(){
       <div style="font-size:10px;color:var(--t3);margin-bottom:12px">${periodLabel} · ${p.roundTrips} lots</div>
       <div id="perf-kpi">${kpiHtml}</div>
       ${monthRows.length?perfCard('Monthly Breakdown',monthTbl.getHtml(),'','perf-monthly'):''}
-      ${hasTradeWindows?perfCard('Trading Windows <span style="font-size:10px;color:var(--t3);font-weight:400">Buy Edge &gt; 2 = Enter · Sell Edge &gt; 2 = Exit · hover Edge columns to sort</span>',tradeWindowTbl.getHtml(),'','perf-trade-windows'):''}
+      ${hasTradeWindows?perfCard(`Entry Timing Evidence <span style="font-size:10px;color:var(--t3);font-weight:400">${timingModel.episodeCount} distinct entries · ${timingModel.entryDays} entry days · day-equal, hold-adjusted, leave-one-day-out stability · current: <b style="color:${stateColor(currentTiming.state)}">${currentTiming.state}</b></span>`,timingTbl.getHtml(),'','perf-trade-windows'):''}
       ${p.symBreakdown.length?perfCard('Stocks',symTbl.getHtml(),'360px','perf-stocks'):''}
       ${outcomeHtml}
     </div>`;
 
-  setTimeout(()=>{monthTbl.render();symTbl.render();tradeWindowTbl.render();},0);
+  setTimeout(()=>{monthTbl.render();symTbl.render();timingTbl.render();},0);
 }
 
 function schedulePerformanceRender(){
@@ -4735,6 +4962,8 @@ function updateSelectAll(){
 }
 function toggleSelectAll(checked){
   if(checked){
+    CURRENT_TRADE_TIMING=getCurrentTradeTimingDecision();
+    if(CURRENT_TRADE_TIMING.state==='Avoid'){SELECTED.clear();renderTable();renderBasketBtn();return;}
     FILT.forEach(s=>EXPORT_EXCLUDED.delete(s.symbol));
     SELECTED=new Set(FILT.filter(s=>s.basketEligible!==false).slice(0,20).map(s=>s.symbol));
   } else {
@@ -4746,6 +4975,8 @@ function toggleSelectAll(checked){
   renderBasketBtn();
 }
 function toggleStock(sym,checked){
+  CURRENT_TRADE_TIMING=getCurrentTradeTimingDecision();
+  if(checked&&CURRENT_TRADE_TIMING.state==='Avoid'){SELECTED.delete(sym);renderTable();renderBasketBtn();return;}
   if(checked){EXPORT_EXCLUDED.delete(sym);SELECTED.add(sym);}
   else{EXPORT_EXCLUDED.add(sym);SELECTED.delete(sym);}
   saveFilterState();
@@ -5284,7 +5515,7 @@ function renderBasketBtn(){
     if(cntSpan)cntSpan.textContent=buyCount>0?`(${buyCount})`:'';
     buyBtn.disabled=buyCount===0;
     buyBtn.title=buyCount===0
-      ? 'Select at least one stock to export a Zerodha basket order.'
+      ? (CURRENT_TRADE_TIMING.state==='Avoid'?CURRENT_TRADE_TIMING.reason:'Select at least one stock to export a Zerodha basket order.')
       : 'Export selected stocks as Zerodha basket order';
   }
 }
@@ -5299,12 +5530,13 @@ function renderHead(){
   COLS=getCols(); // refresh in case ENGINE_DATA changed
   const allChecked=FILT.length>0&&FILT.every(s=>SELECTED.has(s.symbol));
   const someChecked=FILT.some(s=>SELECTED.has(s.symbol));
+  const timingBlocked=CURRENT_TRADE_TIMING.state==='Avoid';
   document.getElementById('tHead').innerHTML='<tr>'+COLS.map(c=>{
     if(c.key==='chk'){
       return`<th data-key="chk" style="width:32px;text-align:center;padding:8px 6px">
         <div style="display:flex;flex-direction:column;align-items:center;gap:3px">
-          <input type="checkbox" id="chk-all" ${allChecked?'checked':''} title="Select / deselect all for the basket export"
-            style="width:14px;height:14px;accent-color:var(--amber);cursor:pointer"
+          <input type="checkbox" id="chk-all" ${allChecked?'checked':''} ${timingBlocked?'disabled':''} title="${timingBlocked?escHtml(CURRENT_TRADE_TIMING.reason):'Select / deselect all for the basket export'}"
+            style="width:14px;height:14px;accent-color:var(--amber);cursor:${timingBlocked?'not-allowed':'pointer'}"
             onchange="toggleSelectAll(this.checked)">
           <span style="font-size:7px;color:var(--t3);letter-spacing:.3px;font-weight:700;text-transform:uppercase">Export</span>
         </div>
@@ -5374,12 +5606,12 @@ function renderTable(){
     const isSelected=SELECTED.has(s.symbol);
     const am=allocMap[s.symbol];
     const exitPolicy=getRowExitPolicy(s,getBuyPrice(s));
-    const canBuy=s.basketEligible!==false;
+    const canBuy=s.basketEligible!==false&&CURRENT_TRADE_TIMING.state!=='Avoid';
     const stretchColor=s.stretch<=2.5?'var(--green)':s.stretch>3?'var(--red)':'var(--amber)';
     // Cells are keyed and joined in COLS order so they always match the (possibly
     // user-reordered) header (v536).
     const cellH={
-      chk:`<td style="text-align:center"><input type="checkbox" ${isSelected?'checked':''} ${canBuy?'':'disabled'} style="width:14px;height:14px;accent-color:var(--amber);cursor:${canBuy?'pointer':'not-allowed'}" onclick="event.stopPropagation()" onchange="toggleStock('${s.symbol}',this.checked)" title="${canBuy?'Include in the Zerodha basket export':'Ineligible for the basket'}"></td>`,
+      chk:`<td style="text-align:center"><input type="checkbox" ${isSelected?'checked':''} ${canBuy?'':'disabled'} style="width:14px;height:14px;accent-color:var(--amber);cursor:${canBuy?'pointer':'not-allowed'}" onclick="event.stopPropagation()" onchange="toggleStock('${s.symbol}',this.checked)" title="${canBuy?'Include in the Zerodha basket export':CURRENT_TRADE_TIMING.state==='Avoid'?escHtml(CURRENT_TRADE_TIMING.reason):'Ineligible for the basket'}"></td>`,
       rank:`<td style="font-family:'DM Mono',monospace;font-weight:800;color:var(--t1);text-align:right">${s.rank??'—'}</td>`,
       score:`<td>${radarScoreCell(s.score,'Relative same-day composite score (0-100 percentile, top-weighted). It is a ranking, not a probability.')}</td>`,
       symbol:`<td style="font-family:'Plus Jakarta Sans',sans-serif"><button type="button" onclick='event.stopPropagation();openTradingViewChart(${JSON.stringify(String(s.symbol))})' style="padding:0;border:0;background:transparent;color:inherit;text-align:left;cursor:pointer" title="Open TradingView chart"><div style="font-weight:700;font-size:13px;color:var(--t1)">${escHtml(s.symbol)}${(()=>{const flags=s.meta?.flags||[];if(!flags.length)return '';return `<span style="font-size:8px;background:rgba(239,68,68,.15);color:var(--red);border-radius:4px;padding:1px 5px;margin-left:5px;font-weight:700;vertical-align:middle" title="NSE surveillance flags: ${escHtml(flags.join(' · '))}">⚠ ${flags.length}</span>`;})()}</div><div style="font-size:9px;color:var(--t3);max-width:220px;overflow:hidden;text-overflow:ellipsis">${escHtml(s.name||'')}</div></button></td>`,
@@ -5484,9 +5716,12 @@ function applyFilters(){
   FILT=rowCap!=null?rows.slice(0,rowCap):rows;
   applySort();
 
+  CURRENT_TRADE_TIMING=getCurrentTradeTimingDecision();
   // SELECTED is auto-derived from FILT every filter pass: basket-eligible rows minus the
   // user's persisted exclusions, capped at Zerodha's 20-order limit.
-  SELECTED=new Set(FILT.filter(s=>s.basketEligible!==false&&!EXPORT_EXCLUDED.has(s.symbol)).slice(0,20).map(s=>s.symbol));
+  SELECTED=CURRENT_TRADE_TIMING.state==='Avoid'
+    ?new Set()
+    :new Set(FILT.filter(s=>s.basketEligible!==false&&!EXPORT_EXCLUDED.has(s.symbol)).slice(0,20).map(s=>s.symbol));
 
   PG=1;renderHead();renderTable();renderStatusBar();saveFilterState();updateTabCounts();
   try{renderRankingsPanels();}catch(e){console.warn('Rankings panels render failed',e);}
@@ -6446,6 +6681,8 @@ function calcZerodhaChargesSplit(price, qty, isSell, isIntraday, skipDp){
 }
 
 function planBasketExport(capital, selected){
+  const timing=getCurrentTradeTimingDecision();
+  if(timing.state==='Avoid') return {exportList:[],basketAlloc:{},orderCount:()=>0,timingBlocked:true,timing};
   let exportList=(selected||[]).filter(s=>s.entryReady!==false&&!getPriceBandBlockReason(s));
   let basketAlloc=computeAlloc(capital,exportList);
   const orderCount=()=>exportList.reduce((count,s)=>{
@@ -6465,7 +6702,8 @@ async function exportBasket(){
   const selList=FILT.filter(s=>SELECTED.has(s.symbol));
   if(!selList.length){showToast('Select at least one stock first.',3000,true);return;}
   const bandRejected=selList.filter(s=>getPriceBandBlockReason(s)).length;
-  const {exportList,basketAlloc}=planBasketExport(capital,selList);
+  const {exportList,basketAlloc,timingBlocked,timing}=planBasketExport(capital,selList);
+  if(timingBlocked){showToast(timing.reason,6000,true);return;}
   const limitOmitted=Math.max(0,selList.length-bandRejected-exportList.length);
 
   const harvestPlan=computeHarvestPlan();
