@@ -1,7 +1,7 @@
-const BUILD_TS='2026-07-27 14:26 IST'; // release build time (IST)
-const APP_VERSION=1064; // v1064: tradebook timing uses distinct entry episodes, same-day/hold-context ranks, day-cluster stability, and a conservative execution-only timing consensus.
+const BUILD_TS='2026-07-28 09:59 IST'; // release build time (IST)
+const APP_VERSION=1065; // v1065: opening discovery, momentum-leg maturity, market breadth, failed-breakout rejection, and per-order basket timing jointly govern entry eligibility.
 // v556: parse the NSE Market Activity Report (MA<date>.csv) — official Nifty %, advances/declines and sector index moves shown as market CONTEXT in the status bar (EOD data, display only, never fed into per-row scoring); MA added to the ℹ️ file manifest.
-// v555 market-cycle stage awareness (stateless, self-calibrating): per-row stage label (1 accumulation · 2 breakout · 3 event · 4 profit-booking · 5 re-accumulation · 6 second-leg); a quiet-accumulation signal (conjunction-of-percentiles) injected via the rocket-diagnostic weighting; sell-the-news decay off Recent earnings date (horizon = review days); market intraday-breadth gauge in the status bar + basket export (entry timing, never changes ranking).
+// v555 market-cycle stage awareness (stateless, self-calibrating): per-row stage label (1 accumulation · 2 breakout · 3 event · 4 profit-booking · 5 re-accumulation · 6 second-leg); a quiet-accumulation signal (conjunction-of-percentiles) injected via the rocket-diagnostic weighting; sell-the-news decay off Recent earnings date (horizon = review days). v1065 makes the market-breadth gauge an entry-eligibility input while still never changing ranking.
 const GOOGLE_DRIVE_CLIENT_ID='1015012642264-oi2nelv3v90k3d39r994a6nelgjs2a56.apps.googleusercontent.com'; // Public OAuth Web Client ID.
 const PRICE_BAND_BLOCK_BUFFER_PCT=0.15; // Treat rounded 4.9/9.9/19.9 rows as effectively band-locked.
 const BASKET_CASH_RESERVE_RS=1; // Leave a rupee for broker-side tax/rounding differences.
@@ -88,7 +88,7 @@ let PERF_RENDER_WAITING_FOR_VISIBLE=false;
 let ENGINE_DATA={}; // legacy engine metadata shell; the Radar composite keeps its own RADAR state
 let SUPPRESSED_HELD=0; // count of stocks hidden because already held in POSITIONS
 let SURV_HARD_REMOVED=0; // count of stocks weeded out by configured surveillance rules
-let PEAK_TIMING_REMOVED=0; // count of strong-but-overextended rows waiting for entry headroom
+let PEAK_TIMING_REMOVED=0; // count of ranked rows withheld by stock/market entry confirmation
 let CURRENT_TRADE_TIMING={state:'Neutral',reason:'Trade timing evidence is not loaded.',evidence:[]};
 let REMOVED_ROWS=[]; // [{s, reason:'held'|'surv'|'peak', rules?}] captured each applyFilters pass so the
                      // "Removed from rankings" table can explain every gap in the rank sequence (v546)
@@ -2112,6 +2112,9 @@ function getPeakEntryTiming(row){
   const bollUpper=row?.bollUpper,keltUpper=row?.keltUpper;
   const bandsKnown=bollUpper!=null&&keltUpper!=null&&isFinite(Number(bollUpper))&&isFinite(Number(keltUpper))&&Number(bollUpper)>0&&Number(keltUpper)>0;
   const bandExtended=bandsKnown&&price>Number(bollUpper)&&price>Number(keltUpper);
+  const vwap=Number(row?.vwap),vwapKnown=vwap>0&&isFinite(vwap);
+  const belowVwap=vwapKnown&&price<vwap;
+  const highBrokeEnvelope=bandsKnown&&high>Math.min(Number(bollUpper),Number(keltUpper));
   const gapKnown=row?.gapSigned!=null&&isFinite(Number(row.gapSigned));
   const changeOpenKnown=row?.changeOpen!=null&&isFinite(Number(row.changeOpen));
   const gapSigned=gapKnown?Number(row.gapSigned):null;
@@ -2120,16 +2123,22 @@ function getPeakEntryTiming(row){
   // contributes more than the post-open drift, the short tape is cooling, and price remains
   // outside both envelopes. Unlike the upper-quarter gate, this remains blocked after the
   // opening spike has fallen toward the session low. No tunable magnitude is introduced.
-  const gapLedFade=gapSigned>0&&changeOpenKnown&&gapSigned>Math.max(0,changeOpen)&&cooling&&bandExtended;
+  const gapLedFade=gapSigned>0&&changeOpenKnown&&gapSigned>Math.max(0,changeOpen)&&cooling&&(bandExtended||belowVwap);
+  // A breakout does not become safe merely because it has already fallen away from its peak.
+  // Once the session high cleared an upper envelope, cooling below VWAP is rejection/distribution,
+  // independent of where the current price now sits inside the expanding session range.
+  const failedBreakout=highBrokeEnvelope&&belowVwap&&cooling;
   const peakBlocked=atPeak&&(rangeConsumed||cooling||bandExtended);
-  const blocked=peakBlocked||gapLedFade;
+  const blocked=peakBlocked||gapLedFade||failedBreakout;
   const pullbackPrice=peakBlocked?high-(high-low)*.25:null;
   const why=[];
   if(rangeConsumed)why.push('expected range consumed');
   if(cooling)why.push('5m/15m confirmation lost');
   if(bandExtended)why.push('above both Bollinger and Keltner upper bands');
   const reason=gapLedFade
-    ?'gap-led fade: opening gap outweighs post-open drift, 5m/15m confirmation lost, above both Bollinger and Keltner upper bands'
+    ?`gap-led fade: opening gap outweighs post-open drift, 5m/15m confirmation lost, ${belowVwap?'price is below VWAP':'price remains above both upper envelopes'}`
+    :failedBreakout
+      ?'failed breakout: session high cleared an upper envelope, but price is now below VWAP with 5m/15m confirmation lost'
     :peakBlocked?'upper-quarter peak: '+why.join(', '):'';
   return {
     blocked,
@@ -2137,8 +2146,27 @@ function getPeakEntryTiming(row){
     rangeUsed:+(rangeUsed*100).toFixed(1),
     headroomPct:+headroomPct.toFixed(2),
     pullbackPrice:pullbackPrice>0?+tickPrice(pullbackPrice).toFixed(2):null,
-    cooling,bandExtended,gapLedFade,
-    action:gapLedFade?'wait for post-open confirmation':peakBlocked?'wait for pullback':'',
+    cooling,bandExtended,belowVwap,highBrokeEnvelope,gapLedFade,failedBreakout,
+    action:(gapLedFade||failedBreakout)?'wait for post-open confirmation':peakBlocked?'wait for pullback':'',
+    reason
+  };
+}
+function getMarketAlignedEntryTiming(row,marketIntraday=MARKET_INTRADAY,minute=istNow().mins){
+  const local=row?.entryTiming&&row.entryTiming._local===true?row.entryTiming:getPeakEntryTiming(row);
+  const marketWeak=marketIntraday?.advPct!=null&&Number(marketIntraday.advPct)<.5;
+  const vwap=Number(row?.vwap),price=Number(row?.price),changeOpen=Number(row?.changeOpen);
+  const p5=Number(row?.price5m),p15=Number(row?.price15m);
+  const postOpening=Number(minute)>=570;
+  const stockConfirmed=postOpening&&vwap>0&&price>=vwap&&changeOpen>0&&p5>0&&p15>0;
+  const weakMarketBlocked=marketWeak&&!stockConfirmed;
+  const blocked=!!local.blocked||weakMarketBlocked;
+  const stageNote=row?.stage===6?' for an established-leg breakout':'';
+  const reason=local.reason||(weakMarketBlocked
+    ?`broad market is weak (${(Number(marketIntraday.advPct)*100).toFixed(0)}% above open); this stock has not confirmed above VWAP, above its open, and on completed positive 5m/15m tape${stageNote}`
+    :'');
+  return {
+    ...local,_local:false,blocked,marketWeak,stockConfirmed,weakMarketBlocked,
+    action:local.action||(weakMarketBlocked?'wait for stock + market confirmation':''),
     reason
   };
 }
@@ -2219,6 +2247,7 @@ function radarAnalyze(headers,rawRows,supplements={},heldSymbols=new Set()){
   const bollUpperI=radarIdx(headers,'Bollinger Bands, 20, 1 day, Upper'),keltUpperI=radarIdx(headers,'Keltner channels, 20, 1 day, Upper');
   const priceHourI=radarIdx(headers,'Price change %, 1 hour'),price15I=radarIdx(headers,'Price change %, 15 minutes'),price5I=radarIdx(headers,'Price change %, 5 minutes');
   const changeOpenI=radarIdx(headers,'Change from open %, 1 day'),perf1mI=radarIdx(headers,'Performance %, 1 month'),perf3mI=radarIdx(headers,'Performance %, 3 months');
+  const vwapI=radarIdx(headers,'Volume-weighted average price, 1 day');
   // v555 market-cycle inputs: earnings dates (stateless days-since/days-to), 50-day MA (holding-above check).
   const recentEarnI=radarIdx(headers,'Recent earnings date'),upcomingEarnI=radarIdx(headers,'Upcoming earnings date'),sma50I=radarIdx(headers,'Simple moving average, 50, 1 day');
   const sessionDate=getSessionDate(),reviewDays=getEffectiveReviewDays(); // reviewDays null ⇒ post-event stages/decay don't fire (graceful, no constant)
@@ -2389,7 +2418,7 @@ function radarAnalyze(headers,rawRows,supplements={},heldSymbols=new Set()){
       else if(_P.vPct<0.33&&_aboveMA&&_P.uPct<0.5)_stage=5;
       else _stage=4;
     }
-    else if(_P.dPct>0.67&&_P.uPct>0.67&&_P.bPct>0.67)_stage=2; // fresh high-volume breakout
+    else if(_P.dPct>0.67&&_P.uPct>0.67&&_P.bPct>0.67)_stage=_P.tPct>0.67?6:2; // established-trend second leg vs first-leg breakout
     else if(_P.vPct<0.33&&_P.tPct>0.5&&_P.delPct>0.67&&_P.dPct<0.33)_stage=1; // silent accumulation
     let rawScore=0;
     for(const g in RADAR_GROUPS){
@@ -2460,13 +2489,15 @@ function radarAnalyze(headers,rawRows,supplements={},heldSymbols=new Set()){
     const out={symbol,name:String(raw[descI]||symbol),sector:raw[sectorI]||'',rawScore,parts,contrib,quality,
       price,day:dispDay,priceChange:dispDay,turnover:turn,relvol,gap,gapSigned,changeOpen,rangePct,stretch,atr:atrPct,
       high1d:highI>=0?radarNum(raw[highI]):null,low1d:lowI>=0?radarNum(raw[lowI]):null,rocketToday:day>=10,
+      vwap:vwapI>=0?radarNum(raw[vwapI]):null,
       bollUpper:bollUpperI>=0?radarNum(raw[bollUpperI]):null,
       keltUpper:keltUpperI>=0?radarNum(raw[keltUpperI]):null,
       price1h:priceHourI>=0?radarNum(raw[priceHourI]):null,
       price15m:price15I>=0?radarNum(raw[price15I]):null,
       price5m:price5I>=0?radarNum(raw[price5I]):null,
       corpAction:meta._corpNeutralised?(meta.corpToday?.purpose||'corporate action'):null,
-      stage:_stage,stageLabel:_stage?STAGE_LABEL[_stage]:null,inDigestion:_inDigestion,daysSinceEarnings:_daysSince,
+      stage:_stage,stageLabel:_stage?STAGE_LABEL[_stage]:null,legTrendPct:_P.tPct,legHighPct:_P.bPct,
+      inDigestion:_inDigestion,daysSinceEarnings:_daysSince,
       rocketReady,gateReasons,series,band:band??null,status,eqEligible,basketEligible,meta};
     out.entryTiming=getPeakEntryTiming(out);
     out.entryReady=!out.entryTiming.blocked;
@@ -2496,6 +2527,13 @@ function radarAnalyze(headers,rawRows,supplements={},heldSymbols=new Set()){
   // does NOT change the ranking; surfaced in the status bar + basket export as an entry-timing gauge.
   const _open=chgOpenArr.filter(v=>v!==null&&isFinite(v)),_adv=_open.filter(v=>v>0).length,_dec=_open.filter(v=>v<0).length;
   const marketIntraday=_open.length?{adv:_adv,dec:_dec,advPct:_adv/_open.length,median:radarQuant([..._open].sort((a,b)=>a-b),.5)}:null;
+  // Rank answers what is moving; this second pass answers whether the move is executable in
+  // the current market. Breadth is known only after the whole cross-section has been measured.
+  const decisionMinute=istNow().mins;
+  rows.forEach(r=>{
+    r.entryTiming=getMarketAlignedEntryTiming(r,marketIntraday,decisionMinute);
+    r.entryReady=!r.entryTiming.blocked;
+  });
   return {rows,features,rockets:rocketRows.length,continuationCount:continuationRows.length,suppressedHeld,marketIntraday,ids:{priceI,targetI,sectorI,symbolI,descI}};
 }
 // Score the current upload (object rows from parseCSV) through the Radar composite.
@@ -3362,7 +3400,7 @@ function renderStats(){
 
   const filterPills=[];
   if(SUPPRESSED_HELD>0)filterPills.push(`<span class="info-pill pill-rose" title="Held positions (Holdings + Positions + today's net Orders buys) never re-enter the buy ranking.">📌 ${SUPPRESSED_HELD} held suppressed</span>`);
-  if(PEAK_TIMING_REMOVED>0)filterPills.push(`<span class="info-pill pill-amber" title="Ranked stocks withheld by the entry-timing gate: upper-range exhaustion or a gap-led fade without post-open confirmation. Rank is preserved.">⏳ ${PEAK_TIMING_REMOVED} waiting for entry confirmation</span>`);
+  if(PEAK_TIMING_REMOVED>0)filterPills.push(`<span class="info-pill pill-amber" title="Ranked stocks withheld by the unified entry gate: peak/rejection geometry or missing stock confirmation in weak market breadth. Rank is preserved.">⏳ ${PEAK_TIMING_REMOVED} waiting for entry confirmation</span>`);
   const inelig=ALL.filter(s=>s.basketEligible===false).length;
   if(inelig>0)filterPills.push(`<span class="info-pill pill-orange" title="Non-EQ series, inactive status, or a price band below 10% — visible in the ranking with penalties, but never exported to the basket.">⚠ ${inelig} basket-ineligible (ranked with penalties)</span>`);
 
@@ -3758,8 +3796,27 @@ function getTodayTradeTimingContext(){
     completedEntries:entries.length
   };
 }
-function getCurrentTradeTimingDecision(){
-  const model=getTradeTimingModel(),context=getTodayTradeTimingContext();
+function getProposedTradeTimingContext(baseContext,offset=0){
+  const base=baseContext||getTodayTradeTimingContext(),n=Math.max(0,Number(offset)||0);
+  if(!n) return {...base};
+  const ordinal=base.ordinal+n;
+  return {
+    ...base,ordinal,ordinalKey:ordinal>=5?'5+':String(ordinal),
+    spacingMinutes:0,spacingKey:'Same batch'
+  };
+}
+function getCurrentTradeTimingDecision(contextOverride=null){
+  const model=getTradeTimingModel(),context=contextOverride||getTodayTradeTimingContext();
+  // Indian continuous trading starts at 09:15. Until 09:30 there is no completed 15-minute
+  // candle, so 5m/15m/1h readings can be the same unfinished opening impulse rather than
+  // independent confirmation. Keep rankings visible, but make the execution state Avoid.
+  if(context.nowMinute<570){
+    return {
+      state:'Avoid',
+      reason:'Opening discovery is still in progress; wait for the first completed 15-minute bar at 09:30 IST.',
+      evidence:[],context,model,openingDiscovery:true
+    };
+  }
   if(!model.episodeCount) return {state:'Neutral',reason:'No resolved tradebook entry episodes yet.',evidence:[],context};
   const windowRow=model.groups.window.find(r=>r.key===context.windowKey)||null;
   const ordinalRow=model.groups.ordinal.find(r=>r.key===context.ordinalKey)||null;
@@ -3800,8 +3857,9 @@ function recordTradeTimingEntryContext(){
       rank:row.rank??null,score:row.score??null,setup:row.setup||null,stage:row.stage??null,risk:row.risk||null,
       gap:row.gapSigned??row.gap??null,changeOpen:row.changeOpen??null,
       price1h:row.price1h??null,price15m:row.price15m??null,price5m:row.price5m??null,
+      vwap:row.vwap??null,legTrendPct:row.legTrendPct??null,legHighPct:row.legHighPct??null,
       entryTiming:row.entryTiming||null,
-      marketAdvPct:MARKET_INTRADAY?.advPct??null,
+      marketAdvPct:MARKET_INTRADAY?.advPct??null,marketMedian:MARKET_INTRADAY?.median??null,
       observedAt:new Date().toISOString(),
       observationNote:'first scanner snapshot after the completed buy was detected'
     };
@@ -5770,7 +5828,7 @@ function buildRemovedPanel(query=''){
     const reason=r.reason==='held'
       ?`<span style="font-size:9px;background:rgba(244,114,182,.12);color:#f472b6;border:1px solid rgba(244,114,182,.25);border-radius:5px;padding:1px 7px;white-space:nowrap">📌 Held · in Open Positions</span>`
       :r.reason==='peak'
-        ?`<span style="font-size:9px;background:rgba(245,158,11,.12);color:var(--amber);border:1px solid rgba(245,158,11,.3);border-radius:5px;padding:1px 7px;white-space:nowrap" title="${escHtml(r.s.entryTiming?.reason||'Entry timing is not confirmed')} · range location ${fmt(r.s.entryTiming?.rangeLocation,0)}% · expected range used ${fmt(r.s.entryTiming?.rangeUsed,0)}%${r.s.entryTiming?.pullbackPrice?` · wait near/below ${fmtINR(r.s.entryTiming.pullbackPrice)}`:''}">⏳ ${r.s.entryTiming?.gapLedFade?'Wait for confirmation':'Wait for pullback'}</span>`
+        ?`<span style="font-size:9px;background:rgba(245,158,11,.12);color:var(--amber);border:1px solid rgba(245,158,11,.3);border-radius:5px;padding:1px 7px;white-space:nowrap" title="${escHtml(r.s.entryTiming?.reason||'Entry timing is not confirmed')} · range location ${fmt(r.s.entryTiming?.rangeLocation,0)}% · expected range used ${fmt(r.s.entryTiming?.rangeUsed,0)}%${r.s.entryTiming?.pullbackPrice?` · wait near/below ${fmtINR(r.s.entryTiming.pullbackPrice)}`:''}">⏳ ${escHtml(r.s.entryTiming?.action||'Wait for confirmation')}</span>`
         :(()=>{const labels=survRuleLabels(r.rules);return `<span style="font-size:9px;background:rgba(239,68,68,.12);color:var(--red);border:1px solid rgba(239,68,68,.25);border-radius:5px;padding:1px 7px;white-space:nowrap" title="Configured surveillance rule(s): ${escHtml(labels.join(' · '))}">⚠ ${escHtml(labels[0]||'surveillance')}${labels.length>1?` +${labels.length-1}`:''}</span>`;})();
     return `<tr style="border-bottom:1px solid var(--border)">
       <td style="padding:6px 10px;text-align:right;font-family:'DM Mono',monospace;color:var(--t2)">#${s.rank??'—'}</td>
@@ -5797,7 +5855,7 @@ function buildRemovedPanel(query=''){
   return `<div id="rank-removed-card" style="background:var(--bg-card);border:1px solid var(--border);border-radius:10px;overflow:hidden">
     <div style="padding:10px 16px;border-bottom:1px solid var(--border)">
       <span style="font-size:10px;font-weight:700;color:var(--t2);text-transform:uppercase;letter-spacing:.1em">Removed from rankings — ${all.length}${tag}</span>
-      <span style="font-size:11px;color:var(--t3);font-weight:400;margin-left:8px">📌 ${heldN} held · ⚠ ${survN} surveillance · ⏳ ${peakN} waiting for pullback · why the ranks skip</span>
+      <span style="font-size:11px;color:var(--t3);font-weight:400;margin-left:8px">📌 ${heldN} held · ⚠ ${survN} surveillance · ⏳ ${peakN} waiting for entry confirmation · why the ranks skip</span>
     </div>
     ${body}
   </div>`;
@@ -5812,7 +5870,7 @@ function showRadarDetail(sym){
   const contribs=[...(r.contrib||[])].sort((a,b)=>Math.abs(b.impact)-Math.abs(a.impact)).slice(0,36).map(x=>`<div class="rr-contrib"><div><b>${escHtml(x.name)}</b><small>${RADAR_GROUPS[x.group]?.label||x.group} · percentile ${fmt(x.p*100,0)}</small></div><b class="${x.impact>=0?'pos':'neg'}">${x.impact>=0?'+':''}${fmt(x.impact,3)}</b></div>`).join('');
   const gate=r.rocketReady?'Meets the model’s high-feasibility criteria.':'Feasibility cautions: '+escHtml((r.gateReasons||[]).join(', ')||'not evaluated')+'.';
   const entryNote=r.entryReady===false
-    ?`<br><b style="color:var(--amber)">Entry timing:</b> ${r.entryTiming?.gapLedFade?'Wait for post-open confirmation':'Wait for pullback'} — ${escHtml(r.entryTiming?.reason||'insufficient headroom')}. Range location ${fmt(r.entryTiming?.rangeLocation,0)}%, expected range used ${fmt(r.entryTiming?.rangeUsed,0)}%${r.entryTiming?.pullbackPrice?`, reconsider near/below ${fmtINR(r.entryTiming.pullbackPrice)}`:''}. The breakout rank is preserved, but recommendation and basket export are blocked.`
+    ?`<br><b style="color:var(--amber)">Entry timing:</b> ${escHtml(r.entryTiming?.action||'Wait for confirmation')} — ${escHtml(r.entryTiming?.reason||'insufficient confirmation')}. Range location ${fmt(r.entryTiming?.rangeLocation,0)}%, expected range used ${fmt(r.entryTiming?.rangeUsed,0)}%${r.entryTiming?.pullbackPrice?`, reconsider near/below ${fmtINR(r.entryTiming.pullbackPrice)}`:''}. The breakout rank is preserved, but recommendation and basket export are blocked.`
     :'';
   const flags=(r.meta?.flags||[]).length?escHtml(r.meta.flags.join(', ')):'none';
   const corp=r.meta?.corpToday;
@@ -5908,7 +5966,7 @@ function renderStatusBar(){
       const stale=NSE_MARKET.dateISO&&NSE_MARKET.dateISO!==getSessionDate()?' (prior session — EOD)':' (EOD)';
       officialTip=` — Official Market Activity ${NSE_MARKET.date||''}${stale}: Nifty ${sgn(NSE_MARKET.niftyPct)}${ad}${strong}${weak}. Context only, not in scoring.`;
     }
-    html+=` <span style="color:${c};font-size:11px;font-family:'DM Mono',monospace;font-weight:700;margin-left:8px" title="Market intraday breadth: ${MARKET_INTRADAY.adv} of ${MARKET_INTRADAY.adv+MARKET_INTRADAY.dec} stocks are trading above their open. Below 50% = broad intraday weakness → continuation odds lower; consider waiting for the market to turn up. Entry-timing gauge only — it does NOT change the ranking.${officialTip}">· Market ${up?'▲':'▼'} ${pct}% up-from-open${officialInline}</span>`;
+    html+=` <span style="color:${c};font-size:11px;font-family:'DM Mono',monospace;font-weight:700;margin-left:8px" title="Market intraday breadth: ${MARKET_INTRADAY.adv} of ${MARKET_INTRADAY.adv+MARKET_INTRADAY.dec} stocks are trading above their open. Below 50% = broad intraday weakness: new entries must independently confirm above VWAP/open with completed positive 5m/15m tape. This changes entry eligibility, never Radar score/rank.${officialTip}">· Market ${up?'▲':'▼'} ${pct}% up-from-open${officialInline}</span>`;
   }
   // v557: say it out loud when Positions/Orders are a prior session's snapshot. Zerodha only rewrites
   // them on a new trade, so the morning after a no-trade day they still hold yesterday's rows — they
@@ -6681,9 +6739,16 @@ function calcZerodhaChargesSplit(price, qty, isSell, isIntraday, skipDp){
 }
 
 function planBasketExport(capital, selected){
-  const timing=getCurrentTradeTimingDecision();
+  const baseContext=getTodayTradeTimingContext();
+  const timing=getCurrentTradeTimingDecision(baseContext);
   if(timing.state==='Avoid') return {exportList:[],basketAlloc:{},orderCount:()=>0,timingBlocked:true,timing};
-  let exportList=(selected||[]).filter(s=>s.entryReady!==false&&!getPriceBandBlockReason(s));
+  const timingRejected=[];
+  let exportList=[];
+  (selected||[]).filter(s=>s.entryReady!==false&&!getPriceBandBlockReason(s)).forEach((s,index)=>{
+    const proposedTiming=getCurrentTradeTimingDecision(getProposedTradeTimingContext(baseContext,index));
+    if(proposedTiming.state==='Avoid') timingRejected.push({symbol:s.symbol,timing:proposedTiming});
+    else exportList.push(s);
+  });
   let basketAlloc=computeAlloc(capital,exportList);
   const orderCount=()=>exportList.reduce((count,s)=>{
     const qty=capital>0?(basketAlloc[s.symbol]?.qty||0):1;
@@ -6693,7 +6758,7 @@ function planBasketExport(capital, selected){
     exportList=exportList.slice(0,-1);
     basketAlloc=computeAlloc(capital,exportList);
   }
-  return {exportList,basketAlloc,orderCount:orderCount()};
+  return {exportList,basketAlloc,orderCount:orderCount(),timingRejected,timingBlocked:false,timing};
 }
 
 
@@ -6702,7 +6767,7 @@ async function exportBasket(){
   const selList=FILT.filter(s=>SELECTED.has(s.symbol));
   if(!selList.length){showToast('Select at least one stock first.',3000,true);return;}
   const bandRejected=selList.filter(s=>getPriceBandBlockReason(s)).length;
-  const {exportList,basketAlloc,timingBlocked,timing}=planBasketExport(capital,selList);
+  const {exportList,basketAlloc,timingBlocked,timing,timingRejected=[]}=planBasketExport(capital,selList);
   if(timingBlocked){showToast(timing.reason,6000,true);return;}
   const limitOmitted=Math.max(0,selList.length-bandRejected-exportList.length);
 
@@ -6797,9 +6862,11 @@ async function exportBasket(){
   const planNote=` · per-stock targets ${targetRange} (${srcLabel} ${active.tgtPct.toFixed(2)}% anchor)`;
   const floorNote=harvestPlan.warning?` · target floor active`:``;
   const limitNote=limitOmitted>0?` · ${limitOmitted} lower-priority stock${limitOmitted===1?'':'s'} omitted to keep the basket within Zerodha's 20-order limit`:'';
-  // v555 WS-D: entry-timing note when the market is broadly intraday-weak (owner decides, not blocked).
-  const marketNote=(MARKET_INTRADAY&&MARKET_INTRADAY.advPct!=null&&MARKET_INTRADAY.advPct<0.5)?` · ⚠ market intraday-weak (only ${(MARKET_INTRADAY.advPct*100).toFixed(0)}% up-from-open) — continuation odds lower, consider waiting for the market to turn up`:'';
-  showToast(`<strong>Saved ${orders.length} CNC MARKET BUY orders</strong> in Scanner Uploads as Zerodha_Basket_Buy JSON${targetNote}${planNote}${floorNote}${rejNote}${limitNote}${marketNote}`);
+  const timingNote=timingRejected.length
+    ?` · ${timingRejected.length} omitted by proposed ordinal/same-batch timing (${timingRejected.map(r=>r.symbol).join(', ')})`
+    :'';
+  const marketNote=(MARKET_INTRADAY&&MARKET_INTRADAY.advPct!=null&&MARKET_INTRADAY.advPct<0.5)?` · market confirmation enforced at ${(MARKET_INTRADAY.advPct*100).toFixed(0)}% breadth`:'';
+  showToast(`<strong>Saved ${orders.length} CNC MARKET BUY orders</strong> in Scanner Uploads as Zerodha_Basket_Buy JSON${targetNote}${planNote}${floorNote}${rejNote}${limitNote}${timingNote}${marketNote}`);
 }
 
 async function saveBasketToScannerUploads(orders, filename){
@@ -6981,8 +7048,9 @@ function compactRankingRows(rows){
     stretch:s.stretch,rangePct:s.rangePct,relvol:s.relvol??null,gap:s.gap??null,
     gapSigned:s.gapSigned??null,changeOpen:s.changeOpen??null,
     turnover:s.turnover,atr:s.atr??null,quality:s.quality??null,
-    high1d:s.high1d??null,low1d:s.low1d??null,bollUpper:s.bollUpper??null,keltUpper:s.keltUpper??null,
+    high1d:s.high1d??null,low1d:s.low1d??null,vwap:s.vwap??null,bollUpper:s.bollUpper??null,keltUpper:s.keltUpper??null,
     price1h:s.price1h??null,price15m:s.price15m??null,price5m:s.price5m??null,
+    stage:s.stage??null,stageLabel:s.stageLabel??null,legTrendPct:s.legTrendPct??null,legHighPct:s.legHighPct??null,
     entryReady:s.entryReady!==false,entryTiming:s.entryTiming||null,
     rocketReady:!!s.rocketReady,gateReasons:(s.gateReasons||[]).slice(0,9),_held:!!s._held,
     meta:{delivery:s.meta?.delivery??null,trades:s.meta?.trades??null,flags:(s.meta?.flags||[]).slice(0,12),band:s.meta?.band??null}
