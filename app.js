@@ -1,5 +1,5 @@
-const BUILD_TS='2026-07-28 10:12 IST'; // release build time (IST)
-const APP_VERSION=1066; // v1066: cross-stock ordinal/spacing evidence is behavioral diagnostics only; stock eligibility cannot change because unrelated buys came first.
+const BUILD_TS='2026-07-28 10:36 IST'; // release build time (IST)
+const APP_VERSION=1067; // v1067: Performance shows clock-window outcomes only; cross-stock ordinal/phase/spacing constructs have no visible or execution role.
 // v556: parse the NSE Market Activity Report (MA<date>.csv) — official Nifty %, advances/declines and sector index moves shown as market CONTEXT in the status bar (EOD data, display only, never fed into per-row scoring); MA added to the ℹ️ file manifest.
 // v555 market-cycle stage awareness (stateless, self-calibrating): per-row stage label (1 accumulation · 2 breakout · 3 event · 4 profit-booking · 5 re-accumulation · 6 second-leg); a quiet-accumulation signal (conjunction-of-percentiles) injected via the rocket-diagnostic weighting; sell-the-news decay off Recent earnings date (horizon = review days). v1065 makes the market-breadth gauge an entry-eligibility input while still never changing ranking.
 const GOOGLE_DRIVE_CLIENT_ID='1015012642264-oi2nelv3v90k3d39r994a6nelgjs2a56.apps.googleusercontent.com'; // Public OAuth Web Client ID.
@@ -3406,14 +3406,6 @@ function renderStats(){
 
   // Row 2: analysis / insight pills
   const infoPills=[];
-  const timingDecision=getCurrentTradeTimingDecision();
-  if(timingDecision.model?.episodeCount){
-    const diagnosticState=timingDecision.diagnosticState||timingDecision.state;
-    const c=diagnosticState==='Prefer'?'var(--green)':diagnosticState==='Avoid'?'var(--red)':'var(--t2)';
-    const ctx=timingDecision.context;
-    const evidence=timingDecision.evidence.map(r=>`${r.label}: ${r.state} (${(r.peerShrunk*100).toFixed(1)}% peer / ${(r.holdShrunk*100).toFixed(1)}% hold-adjusted)`).join(' · ');
-    infoPills.push(`<span class="info-pill" style="background:rgba(99,102,241,.12);border-color:rgba(99,102,241,.3);color:${c}" title="${escHtml(timingDecision.reason)} ${escHtml(evidence)}">🕐 Behavioral timing: <strong>${diagnosticState}</strong> · display only</span>`);
-  }
   try{
     const opportunity=getSameDayExitOpportunitySummary();
     if(opportunity.exits){
@@ -3811,25 +3803,12 @@ function getCurrentTradeTimingDecision(contextOverride=null){
   }
   if(!model.episodeCount) return {state:'Neutral',reason:'No resolved tradebook entry episodes yet.',evidence:[],context};
   const windowRow=model.groups.window.find(r=>r.key===context.windowKey)||null;
-  const ordinalRow=model.groups.ordinal.find(r=>r.key===context.ordinalKey)||null;
-  const spacingRow=model.groups.spacing.find(r=>r.key===context.spacingKey)||null;
-  const relative=[ordinalRow,spacingRow].filter(Boolean),evidence=[windowRow,...relative].filter(Boolean);
-  const opposite=state=>evidence.some(r=>r.state!=='Neutral'&&r.state!==state);
-  let diagnosticState='Neutral';
-  if(windowRow?.state==='Avoid'&&relative.some(r=>r.state==='Avoid')&&!opposite('Avoid')) diagnosticState='Avoid';
-  else if(windowRow?.state==='Prefer'&&relative.some(r=>r.state==='Prefer')&&!opposite('Prefer')) diagnosticState='Prefer';
-  const named=evidence.filter(r=>r.state===diagnosticState&&diagnosticState!=='Neutral').map(r=>r.label);
-  const diagnosticReason=diagnosticState==='Avoid'
-    ?`Historically weak behavioral context across ${named.join(' + ')} after same-day and holding-context controls.`
-    :diagnosticState==='Prefer'
-      ?`Historically favourable behavioral context across ${named.join(' + ')}.`
-      :`Behavioral timing evidence is mixed or still collecting for ${evidence.map(r=>r.label).join(' + ')||'this entry context'}.`;
-  // Ordinal/spacing describe the owner's behavior and portfolio cadence; they are not causal
-  // properties of a different stock. Only the structural unfinished-opening state above has
-  // execution authority. Everything below remains visible diagnostics and returns Neutral.
+  const evidence=[windowRow].filter(Boolean);
+  // Clock-window outcomes remain descriptive. Cross-stock ordinal/phase/spacing constructs
+  // have no visible or execution role; only unfinished opening discovery above can block.
   return {
-    state:'Neutral',diagnosticState,
-    reason:`${diagnosticReason} Display only — another stock's purchase order or spacing never changes this stock's eligibility.`,
+    state:'Neutral',diagnosticState:windowRow?.state||'Neutral',
+    reason:'Historical clock-window outcome is display only and never changes stock eligibility.',
     evidence,context,model
   };
 }
@@ -4413,16 +4392,16 @@ function renderPerformance(){
   const symTbl=makeSortableTable('perf-sym',symCols,symRows,'edge',-1,null,null,'sym');
 
   const timingModel=buildTradeTimingModel(adaptiveAllTrips);
-  const timingRows=timingModel.rows.map(r=>({
+  const timingRows=timingModel.groups.window.map(r=>({
     ...r,
-    slice:`${({window:'Clock',ordinal:'Order',phase:'Day phase',spacing:'Spacing'}[r.dimension]||r.dimension)} · ${r.label}`,
+    slice:r.label,
     peerPct:+(r.peerShrunk*100).toFixed(1),
     holdPct:+(r.holdShrunk*100).toFixed(1),
     robustPct:+Number(r.robustReturnPct||0).toFixed(2)
   }));
   const stateColor=s=>s==='Prefer'?'var(--green)':s==='Avoid'?'var(--red)':'var(--t3)';
   const timingCols=[
-    {key:'slice',label:'Entry context',align:'left',fmt:v=>escHtml(v),clrFn:()=>'var(--t1)',bold:true},
+    {key:'slice',label:'Clock window',align:'left',fmt:v=>escHtml(v),clrFn:()=>'var(--t1)',bold:true},
     {key:'episodes',label:'Entries',align:'right',fmt:v=>v,clrFn:()=>'var(--t2)'},
     {key:'days',label:'Days',align:'right',fmt:v=>v,clrFn:()=>'var(--t2)'},
     {key:'peerPct',label:'Same-day peer rank',align:'right',fmt:v=>v.toFixed(1)+'%',clrFn:v=>v>50?'var(--green)':v<50?'var(--red)':'var(--t3)'},
@@ -4435,9 +4414,7 @@ function renderPerformance(){
   const currentTiming=getCurrentTradeTimingDecision();
   const timingTbl=makeSortableTable('tbl-trade-timing',timingCols,timingRows,'slice',1,row=>{
     const isCurrent=row.dimension==='window'&&row.key===currentTiming.context.windowKey;
-    const isOrdinal=row.dimension==='ordinal'&&row.key===currentTiming.context.ordinalKey;
-    const isSpacing=row.dimension==='spacing'&&row.key===currentTiming.context.spacingKey;
-    return isCurrent||isOrdinal||isSpacing?'background:rgba(99,102,241,.12);outline:1px solid rgba(99,102,241,.3);outline-offset:-1px':'';
+    return isCurrent?'background:rgba(99,102,241,.12);outline:1px solid rgba(99,102,241,.3);outline-offset:-1px':'';
   });
   const hasTradeWindows=timingRows.length>0;
 
@@ -4461,7 +4438,7 @@ function renderPerformance(){
   const perfNav=`<nav style="position:sticky;top:var(--hdr-h,72px);z-index:50;background:var(--bg);padding:8px 0 10px;margin-bottom:8px;display:flex;gap:6px;flex-wrap:wrap;border-bottom:1px solid var(--border);box-shadow:0 2px 8px rgba(0,0,0,0.3);overflow-x:auto;-webkit-overflow-scrolling:touch">
     ${_navLink('perf-kpi','📊 KPIs',true)}
     ${_navLink('perf-monthly','📅 Monthly',monthRows.length>0)}
-    ${_navLink('perf-trade-windows','🕐 Entry Timing Evidence',hasTradeWindows)}
+    ${_navLink('perf-trade-windows','🕐 Time-of-day Outcomes',hasTradeWindows)}
     ${_navLink('perf-stocks','📈 Stocks',p.symBreakdown.length>0)}
     ${_navLink('perf-outcomes','Outcome Feedback',true)}
   </nav>`;
@@ -4490,7 +4467,7 @@ function renderPerformance(){
       <div style="font-size:10px;color:var(--t3);margin-bottom:12px">${periodLabel} · ${p.roundTrips} lots</div>
       <div id="perf-kpi">${kpiHtml}</div>
       ${monthRows.length?perfCard('Monthly Breakdown',monthTbl.getHtml(),'','perf-monthly'):''}
-      ${hasTradeWindows?perfCard(`Entry Timing Evidence <span style="font-size:10px;color:var(--t3);font-weight:400">${timingModel.episodeCount} distinct entries · ${timingModel.entryDays} entry days · day-equal, hold-adjusted, leave-one-day-out stability · behavioral diagnostics only; no cross-stock execution authority</span>`,timingTbl.getHtml(),'','perf-trade-windows'):''}
+      ${hasTradeWindows?perfCard(`Time-of-day Outcomes — Diagnostic Only <span style="font-size:10px;color:var(--t3);font-weight:400">${timingModel.episodeCount} distinct entries · ${timingModel.entryDays} entry days · clock windows only · descriptive, never a recommendation rule</span>`,timingTbl.getHtml(),'','perf-trade-windows'):''}
       ${p.symBreakdown.length?perfCard('Stocks',symTbl.getHtml(),'360px','perf-stocks'):''}
       ${outcomeHtml}
     </div>`;
