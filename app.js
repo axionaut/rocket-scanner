@@ -1,5 +1,5 @@
-const BUILD_TS='2026-07-28 12:52 IST'; // release build time (IST)
-const APP_VERSION=1069; // v1069: weak-market confirmation is structural (above VWAP + above open), never a 5m/15m tick and never clock-gated.
+const BUILD_TS='2026-07-28 13:40 IST'; // release build time (IST)
+const APP_VERSION=1070; // v1070: held no longer blocks a recommendation (top-up sized against blended average cost); every stock table opens chart on name, modal on row.
 // v556: parse the NSE Market Activity Report (MA<date>.csv) — official Nifty %, advances/declines and sector index moves shown as market CONTEXT in the status bar (EOD data, display only, never fed into per-row scoring); MA added to the ℹ️ file manifest.
 // v555 market-cycle stage awareness (stateless, self-calibrating): per-row stage label (1 accumulation · 2 breakout · 3 event · 4 profit-booking · 5 re-accumulation · 6 second-leg); a quiet-accumulation signal (conjunction-of-percentiles) injected via the rocket-diagnostic weighting; sell-the-news decay off Recent earnings date (horizon = review days). v1065 makes the market-breadth gauge an entry-eligibility input while still never changing ranking.
 const GOOGLE_DRIVE_CLIENT_ID='1015012642264-oi2nelv3v90k3d39r994a6nelgjs2a56.apps.googleusercontent.com'; // Public OAuth Web Client ID.
@@ -86,7 +86,7 @@ let PERF_RENDERED=false; // true after background or foreground performance calc
 let PERF_RENDER_QUEUED=false;
 let PERF_RENDER_WAITING_FOR_VISIBLE=false;
 let ENGINE_DATA={}; // legacy engine metadata shell; the Radar composite keeps its own RADAR state
-let SUPPRESSED_HELD=0; // count of stocks hidden because already held in POSITIONS
+let SUPPRESSED_HELD=0; // count of RANKED stocks you already hold (v1070: informational, no longer hidden)
 let SURV_HARD_REMOVED=0; // count of stocks weeded out by configured surveillance rules
 let PEAK_TIMING_REMOVED=0; // count of ranked rows withheld by stock/market entry confirmation
 let CURRENT_TRADE_TIMING={state:'Neutral',reason:'Trade timing evidence is not loaded.',evidence:[]};
@@ -1176,6 +1176,20 @@ function openTradingViewChart(sym){
   const url=`https://www.tradingview.com/chart/?symbol=NSE:${encodeURIComponent(symbol)}`;
   window.open(url,'_blank','noopener,noreferrer');
 }
+// ONE symbol cell for every table that names a stock (owner, v1070): the stock NAME opens the
+// TradingView chart in a new tab, the ROW opens the Radar scoring modal. stopPropagation is what
+// keeps the two apart. Used by the rankings table, Removed from rankings, Latest Session, Open
+// Positions and Performance Stocks so the interaction is identical wherever a symbol appears —
+// add new symbol surfaces through this helper rather than hand-rolling another cell.
+// Safe unconditionally: openTradingViewChart resolves by symbol, and showRadarDetail no-ops when
+// the symbol is not in the current scan.
+function symbolChartButton(sym,innerHtml=null,extraStyle=''){
+  const s=String(sym??'');
+  if(!s) return '';
+  return `<button type="button" onclick='event.stopPropagation();openTradingViewChart(${JSON.stringify(s)})'`
+    +` style="padding:0;border:0;background:transparent;color:inherit;font:inherit;text-align:left;cursor:pointer;${extraStyle}"`
+    +` title="Open the TradingView chart for ${escHtml(s)}">${innerHtml??escHtml(s)}</button>`;
+}
 function findHeader(hdrs,patterns){return hdrs.find(h=>patterns.some(p=>p.test(h.trim())))||null;}
 function meanArr(arr){return arr.length?arr.reduce((s,v)=>s+v,0)/arr.length:0;}
 function roundPct05(v){return +(Math.round(v/0.05)*0.05).toFixed(2);}
@@ -1754,11 +1768,12 @@ function getRecommendationOutcomeSummary(){
   };
 }
 function getDisplayedEntryCandidates(rows){
-  // Top-20 actionable Radar candidates: basket-eligible, valid price, not held.
+  // Top-20 actionable Radar candidates: basket-eligible, valid price, not surveillance-flagged.
   if(!Array.isArray(rows)||!rows.length) return [];
-  const heldPos=getHeldPositionMap();
   return rows
-    .filter(s=>s.symbol&&Number(s.price)>0&&s.basketEligible!==false&&!s._held&&!heldPos[s.symbol]&&!NSE_SURV[s.symbol]?.length)
+    // v1070: held no longer excludes a candidate — this cohort must mirror what the ranking
+    // actually recommends, or the outcome store measures a different list than the one shown.
+    .filter(s=>s.symbol&&Number(s.price)>0&&s.basketEligible!==false&&!NSE_SURV[s.symbol]?.length)
     .sort((a,b)=>(Number(b.score)||0)-(Number(a.score)||0)||a.symbol.localeCompare(b.symbol))
     .slice(0,20);
 }
@@ -3461,7 +3476,7 @@ function renderStats(){
     <div class="st"><div class="st-l">Top Sector</div><div class="st-v" style="font-size:15px;color:var(--green)">${topSec}</div><div class="st-d">${topSecPct.toFixed(0)}% advancing</div></div>${bookedCard}${buildGoalCard()}`;
 
   const filterPills=[];
-  if(SUPPRESSED_HELD>0)filterPills.push(`<span class="info-pill pill-rose" title="Held positions (Holdings + Positions + today's net Orders buys) never re-enter the buy ranking.">📌 ${SUPPRESSED_HELD} held suppressed</span>`);
+  if(SUPPRESSED_HELD>0)filterPills.push(`<span class="info-pill pill-rose" title="Stocks you already hold (Holdings + Positions + today's net Orders buys). Since v1070 these stay in the ranking and can be recommended again — the badge is a duplicate-buy warning, not a filter.">📌 ${SUPPRESSED_HELD} already held</span>`);
   if(PEAK_TIMING_REMOVED>0)filterPills.push(`<span class="info-pill pill-amber" title="Ranked stocks withheld by the unified entry gate: peak/rejection geometry or missing stock confirmation in weak market breadth. Rank is preserved.">⏳ ${PEAK_TIMING_REMOVED} waiting for entry confirmation</span>`);
   const inelig=ALL.filter(s=>s.basketEligible===false).length;
   if(inelig>0)filterPills.push(`<span class="info-pill pill-orange" title="Non-EQ series, inactive status, or a price band below 10% — visible in the ranking with penalties, but never exported to the basket.">⚠ ${inelig} basket-ineligible (ranked with penalties)</span>`);
@@ -3974,7 +3989,7 @@ function buildLatestSessionPanel(query=''){
     const _signTot={totFmt:v=>v!=null?fmtPerfRs(v):'—',totClrFn:v=>v!=null?(v>=0?'var(--green)':'var(--red)'):'var(--t3)'};
     const _chTot={totFmt:v=>fmtNegINR(v),totClrFn:()=>'var(--red)'};
     const latestCols=[
-      {key:'sym',label:'Symbol',align:'left',fmt:v=>v,clrFn:()=>'var(--t1)',bold:true,totFmt:v=>v??'',totClrFn:()=>'var(--t2)'},
+      {key:'sym',label:'Symbol',align:'left',fmt:v=>symbolChartButton(v),clrFn:()=>'var(--t1)',bold:true,totFmt:v=>v??'',totClrFn:()=>'var(--t2)'},
       ...radarCols(_dash),
       {key:'buyPrice',label:'Buy ₹',align:'right',fmt:(v,r)=>v!=null?Number(v).toLocaleString('en-IN',INR_2):`<span style="color:var(--amber);font-size:10px" title="Load Holdings.csv to see avg cost">avg cost?</span>`,clrFn:()=>'var(--t2)',..._dash},
       {key:'sellPrice',label:'Sell ₹',align:'right',fmt:v=>Number(v).toLocaleString('en-IN',INR_2),clrFn:()=>'var(--t2)',..._dash},
@@ -4031,7 +4046,7 @@ function buildLatestSessionPanel(query=''){
     const _dash={totFmt:()=>'—',totClrFn:()=>'var(--t3)'};
     const _signTot={totFmt:v=>v!=null?fmtPerfRs(v):'—',totClrFn:v=>v!=null?(v>=0?'var(--green)':'var(--red)'):'var(--t3)'};
     const tbCols=[
-      {key:'sym',label:'Symbol',align:'left',fmt:v=>`<span style="font-weight:700;font-size:12px">${escHtml(v)}</span>`,totFmt:v=>v??'',totClrFn:()=>'var(--t2)'},
+      {key:'sym',label:'Symbol',align:'left',fmt:v=>symbolChartButton(v,`<span style="font-weight:700;font-size:12px">${escHtml(v)}</span>`),totFmt:v=>v??'',totClrFn:()=>'var(--t2)'},
       ...radarCols(_dash),
       {key:'buyPrice',label:'Buy ₹',align:'right',fmt:v=>`<span style="font-family:'DM Mono',monospace">${Number(v).toLocaleString('en-IN',INR_2)}</span>`,..._dash},
       {key:'sellPrice',label:'Sell ₹',align:'right',fmt:v=>`<span style="font-family:'DM Mono',monospace">${Number(v).toLocaleString('en-IN',INR_2)}</span>`,..._dash},
@@ -4127,7 +4142,9 @@ function buildOpenPositionsPanel(query=''){
     return `<span title="Quantity-weighted age of remaining FIFO buy lots" style="color:${color};font-weight:${v>reviewDays?700:500}">${v}d</span>`;
   };
   const cols=[
-    {key:'sym',label:'Symbol',align:'left',bold:true,fmt:(v,row)=>row.scannerRow?`<button type="button" onclick='event.stopPropagation();openTradingViewChart(${JSON.stringify(String(v))})' style="padding:0;border:0;background:transparent;color:var(--t1);font:inherit;font-weight:700;cursor:pointer;text-align:left" title="Open TradingView chart">${escHtml(v)}</button>`:escHtml(v)},
+    // v1070: the chart link no longer depends on the stock being in the current scan —
+    // TradingView resolves by symbol, so a held name absent from today's file still charts.
+    {key:'sym',label:'Symbol',align:'left',bold:true,fmt:v=>symbolChartButton(v)},
     {key:'qty',label:'Qty',align:'right',fmt:v=>v,clrFn:()=>'var(--t2)'},
     {key:'avg',label:'Avg ₹',align:'right',fmt:v=>v!=null?Number(v).toLocaleString('en-IN',INR_2):'—',clrFn:()=>'var(--t2)'},
     {key:'ltp',label:'LTP ₹',align:'right',fmt:v=>v!=null?Number(v).toLocaleString('en-IN',INR_2):'—',clrFn:()=>'var(--t1)'},
@@ -4446,7 +4463,7 @@ function renderPerformance(){
 
   const symRows=(p.symBreakdown||[]).map(r=>({...r,edge:+((r.winRate*r.avgPct)*Math.min(1,r.trades/5)).toFixed(2)}));
   const symCols=[
-    {key:'sym',label:'Symbol',align:'left',fmt:v=>v,clrFn:()=>'var(--t1)',bold:true},
+    {key:'sym',label:'Symbol',align:'left',fmt:v=>symbolChartButton(v),clrFn:()=>'var(--t1)',bold:true},
     {key:'netPnl',label:'Net P&L',align:'right',bold:true,fmt:fmtPerfRs,clrFn:clr},
     {key:'trades',label:'Lots',align:'right',fmt:v=>v,clrFn:()=>'var(--t2)'},
     {key:'winRate',label:'Win%',align:'right',fmt:v=>v+'%',clrFn:v=>v>=60?'var(--green)':v>=40?'var(--amber)':'var(--red)'},
@@ -5484,11 +5501,41 @@ function getTurnoverAllocationCap(row){
   const turnover=Number(row?.turnover);
   return Number.isFinite(turnover)&&turnover>0?turnover*MAX_TURNOVER_PARTICIPATION:0;
 }
+// v1070 TOP-UP SIZING (owner). Since held stocks can be recommended again, the size of an ADD must
+// be governed by what it does to the blended average cost — the position, not just the new order.
+//   UNDERWATER (price < avg): the add pulls the average DOWN toward the current price, which is
+//     what the owner wants, so it is capped only by the normal rails (max-alloc / turnover /
+//     score weight). "Give it the max" — nothing extra is imposed here.
+//   IN PROFIT (price > avg): the add pushes the average UP. Bound it so that if the NEW entry's
+//     own stop is hit, the BLENDED position is still not at a loss:
+//         newAvg <= price x (1 - stop%/100)
+//     Solving (Q*A + q*P)/(Q+q) <= P*(1-s) for q gives  q <= Q * (P*(1-s) - A) / (P*s).
+//     If the existing average is already above that stop level there is no cushion left and no
+//     add is allowed — buying more would create a position that loses money on its own stop.
+// Uses getRowStopDistancePct, an existing per-stock model unit, so no new tunable constant.
+function getHeldTopUpNotionalCap(s,buyP,heldMap=null){
+  const held=(heldMap||getHeldPositionMap())[s.symbol];
+  if(!held||!(held.qty>0)) return Infinity;      // not held: normal rails only
+  const avg=Number(held.avg),price=Number(buyP);
+  if(!(avg>0)||!(price>0)) return Infinity;      // unknown cost basis: do not invent a cap
+  if(price<=avg) return Infinity;                // underwater: allow the maximum the rails permit
+  const stopFrac=getRowStopDistancePct(s)/100;
+  if(!(stopFrac>0)) return Infinity;
+  const stopPrice=price*(1-stopFrac);
+  if(avg>=stopPrice) return 0;                   // no cushion left
+  return Math.max(0,held.qty*(stopPrice-avg)/(price*stopFrac)*price);
+}
 function computeAlloc(capital, selList){
   if(!capital||!selList.length) return {};
   const maxAllocV=getEffectiveMaxAlloc(); // typed value, else capital ÷ average entry-day positions
   const targetAnchor=getEffectiveTgtPct();
-  const memoKey=capital+'|'+maxAllocV+'|'+targetAnchor+'|'+selList.map(s=>s.symbol+':'+s.price+':'+s.rocketScore+':'+s.atr+':'+s.rangePct+':'+s.turnover).join(',');
+  // Held qty/avg are part of the key (v1070): the top-up cap depends on them, so a fill that
+  // changes the position must invalidate the memo or the next basket would reuse a stale cap.
+  const heldMap=getHeldPositionMap();
+  const memoKey=capital+'|'+maxAllocV+'|'+targetAnchor+'|'+selList.map(s=>{
+    const h=heldMap[s.symbol];
+    return s.symbol+':'+s.price+':'+s.rocketScore+':'+s.atr+':'+s.rangePct+':'+s.turnover+':'+(h?h.qty+'@'+h.avg:'-');
+  }).join(',');
   if(_allocMemo?.key===memoKey) return _allocMemo.val;
   const cap=maxAllocV>0?maxAllocV:capital;
   const spendableCapital=Math.max(0,capital-BASKET_CASH_RESERVE_RS);
@@ -5526,8 +5573,10 @@ function computeAlloc(capital, selList){
       continue;
     }
     const scoreLimit=spendableCapital*(rawScore(s)/totalRawScore);
-    const rowLimit=Math.min(scoreLimit,cap,turnoverCap);
-    const limitReason=turnoverCap<=scoreLimit+0.01&&turnoverCap<=cap+0.01?'turnover'
+    const topUpCap=getHeldTopUpNotionalCap(s,buyP,heldMap); // Infinity unless held and in profit
+    const rowLimit=Math.min(scoreLimit,cap,turnoverCap,topUpCap);
+    const limitReason=topUpCap<=Math.min(scoreLimit,cap,turnoverCap)+0.01?'top-up average cost'
+      :turnoverCap<=scoreLimit+0.01&&turnoverCap<=cap+0.01?'turnover'
       :cap<=scoreLimit+0.01?'max allocation':'score weight';
     limits[s.symbol]=rowLimit;
     limitReasons[s.symbol]=limitReason;
@@ -5579,6 +5628,11 @@ function computeAlloc(capital, selList){
   return allocMap;
 }
 function allocationSubline(am,unitLabel='shares'){
+  if(am?.limitReason==='top-up average cost'){
+    // v1070: an add to a stock already in profit, sized so the blended average stays below the
+    // new entry's own stop. A zero here means the existing average has no cushion left.
+    return `<div style="font-size:9px;color:#f472b6;margin-top:1px" title="You already hold this at a profit. The add is sized so the blended average cost stays below this entry's own stop price — if the stop is hit, the combined position is still not at a loss.">📌 top-up capped · ${am.qty} ${unitLabel}</div>`;
+  }
   if(am?.limitReason==='turnover'){
     return `<div style="font-size:9px;color:var(--amber);margin-top:1px" title="Market-impact rail: allocation is capped at 0.10% of daily turnover (${fmtINR(am.liquidityCap)}), then rounded down to whole ${unitLabel}.">turnover cap · ${am.qty} ${unitLabel}</div>`;
   }
@@ -5708,7 +5762,7 @@ function renderTable(){
       chk:`<td style="text-align:center"><input type="checkbox" ${isSelected?'checked':''} ${canBuy?'':'disabled'} style="width:14px;height:14px;accent-color:var(--amber);cursor:${canBuy?'pointer':'not-allowed'}" onclick="event.stopPropagation()" onchange="toggleStock('${s.symbol}',this.checked)" title="${canBuy?'Include in the Zerodha basket export':'Ineligible for the basket'}"></td>`,
       rank:`<td style="font-family:'DM Mono',monospace;font-weight:800;color:var(--t1);text-align:right">${s.rank??'—'}</td>`,
       score:`<td>${radarScoreCell(s.score,'Relative same-day composite score (0-100 percentile, top-weighted). It is a ranking, not a probability.')}</td>`,
-      symbol:`<td style="font-family:'Plus Jakarta Sans',sans-serif"><button type="button" onclick='event.stopPropagation();openTradingViewChart(${JSON.stringify(String(s.symbol))})' style="padding:0;border:0;background:transparent;color:inherit;text-align:left;cursor:pointer" title="Open TradingView chart"><div style="font-weight:700;font-size:13px;color:var(--t1)">${escHtml(s.symbol)}${(()=>{const flags=s.meta?.flags||[];if(!flags.length)return '';return `<span style="font-size:8px;background:rgba(239,68,68,.15);color:var(--red);border-radius:4px;padding:1px 5px;margin-left:5px;font-weight:700;vertical-align:middle" title="NSE surveillance flags: ${escHtml(flags.join(' · '))}">⚠ ${flags.length}</span>`;})()}</div><div style="font-size:9px;color:var(--t3);max-width:220px;overflow:hidden;text-overflow:ellipsis">${escHtml(s.name||'')}</div></button></td>`,
+      symbol:`<td style="font-family:'Plus Jakarta Sans',sans-serif"><button type="button" onclick='event.stopPropagation();openTradingViewChart(${JSON.stringify(String(s.symbol))})' style="padding:0;border:0;background:transparent;color:inherit;text-align:left;cursor:pointer" title="Open TradingView chart"><div style="font-weight:700;font-size:13px;color:var(--t1)">${escHtml(s.symbol)}${(()=>{const flags=s.meta?.flags||[];if(!flags.length)return '';return `<span style="font-size:8px;background:rgba(239,68,68,.15);color:var(--red);border-radius:4px;padding:1px 5px;margin-left:5px;font-weight:700;vertical-align:middle" title="NSE surveillance flags: ${escHtml(flags.join(' · '))}">⚠ ${flags.length}</span>`;})()}${s._held?`<span style="font-size:8px;background:rgba(244,114,182,.15);color:#f472b6;border-radius:4px;padding:1px 5px;margin-left:5px;font-weight:700;vertical-align:middle" title="You already hold this. Held stocks stay in the ranking (v1070) and can be recommended again — buying here ADDS to the existing position.">📌 held</span>`:''}</div><div style="font-size:9px;color:var(--t3);max-width:220px;overflow:hidden;text-overflow:ellipsis">${escHtml(s.name||'')}</div></button></td>`,
       setup:`<td style="font-size:11px;color:var(--t2)">${escHtml(s.setup||'—')}${s.stage?' '+radarStagePill(s):''}</td>`,
       series:`<td>${radarSeriesBandPill(s)}</td>`,
       stretch:`<td style="color:${stretchColor};font-weight:700" title="A 10% move is this many multiples of the strongest daily-range estimate. Lower is more feasible.">${s.stretch!=null&&isFinite(s.stretch)?Number(s.stretch).toFixed(1)+'×':'—'}</td>`,
@@ -5796,7 +5850,12 @@ function applyFilters(){
   PEAK_TIMING_REMOVED=0;
   REMOVED_ROWS=[];
   let rows=ALL.filter(s=>{
-    if(s._held){SUPPRESSED_HELD++;REMOVED_ROWS.push({s,reason:'held'});return false;}
+    // v1070 (owner): holding a stock NO LONGER blocks it. If it is still the best name in the
+    // cross-section, already owning some of it is not a reason to refuse it — the ranking answers
+    // "what is the strongest setup", not "what do I not own yet". `_held` is still tracked and
+    // shown as a badge so a repeat buy is never accidental, and it still drives the Open Positions
+    // panel, but it removes nothing. Every OTHER removal rule below is deliberately untouched.
+    if(s._held)SUPPRESSED_HELD++;
     // Configured surveillance rules are a HARD filter (owner 2026-07-17): any stock
     // flagged under a rule in the Methodology table is weeded out of recommendations.
     // Non-configured REG1 flags remain a score penalty + badge only.
@@ -5866,9 +5925,11 @@ function buildRemovedPanel(query=''){
       :r.reason==='peak'
         ?`<span style="font-size:9px;background:rgba(245,158,11,.12);color:var(--amber);border:1px solid rgba(245,158,11,.3);border-radius:5px;padding:1px 7px;white-space:nowrap" title="${escHtml(r.s.entryTiming?.reason||'Entry timing is not confirmed')} · range location ${fmt(r.s.entryTiming?.rangeLocation,0)}% · expected range used ${fmt(r.s.entryTiming?.rangeUsed,0)}%${r.s.entryTiming?.pullbackPrice?` · wait near/below ${fmtINR(r.s.entryTiming.pullbackPrice)}`:''}">⏳ ${escHtml(r.s.entryTiming?.action||'Wait for confirmation')}</span>`
         :(()=>{const labels=survRuleLabels(r.rules);return `<span style="font-size:9px;background:rgba(239,68,68,.12);color:var(--red);border:1px solid rgba(239,68,68,.25);border-radius:5px;padding:1px 7px;white-space:nowrap" title="Configured surveillance rule(s): ${escHtml(labels.join(' · '))}">⚠ ${escHtml(labels[0]||'surveillance')}${labels.length>1?` +${labels.length-1}`:''}</span>`;})();
-    return `<tr style="border-bottom:1px solid var(--border)">
+    // Same interaction as every other stock table (owner, v1070): the NAME opens the
+    // TradingView chart, the ROW opens the Radar scoring breakdown.
+    return `<tr onclick="showRadarDetail('${s.symbol}')" title="Click for the full scoring breakdown" style="border-bottom:1px solid var(--border);cursor:pointer">
       <td style="padding:6px 10px;text-align:right;font-family:'DM Mono',monospace;color:var(--t2)">#${s.rank??'—'}</td>
-      <td style="padding:6px 10px"><span style="font-weight:700;color:var(--t1);font-size:12px">${escHtml(s.symbol)}</span> <span style="color:var(--t3);font-size:10px">${escHtml((s.name||'').slice(0,28))}</span></td>
+      <td style="padding:6px 10px">${symbolChartButton(s.symbol,`<span style="font-weight:700;color:var(--t1);font-size:12px">${escHtml(s.symbol)}</span> <span style="color:var(--t3);font-size:10px">${escHtml((s.name||'').slice(0,28))}</span>`)}</td>
       <td style="padding:6px 10px;text-align:right">${radarScoreCell(s.score)}</td>
       <td style="padding:6px 10px;text-align:right">${fPerf(s.day??s.priceChange)}</td>
       <td style="padding:6px 10px">${reason}</td>
@@ -5891,7 +5952,7 @@ function buildRemovedPanel(query=''){
   return `<div id="rank-removed-card" style="background:var(--bg-card);border:1px solid var(--border);border-radius:10px;overflow:hidden">
     <div style="padding:10px 16px;border-bottom:1px solid var(--border)">
       <span style="font-size:10px;font-weight:700;color:var(--t2);text-transform:uppercase;letter-spacing:.1em">Removed from rankings — ${all.length}${tag}</span>
-      <span style="font-size:11px;color:var(--t3);font-weight:400;margin-left:8px">📌 ${heldN} held · ⚠ ${survN} surveillance · ⏳ ${peakN} waiting for entry confirmation · why the ranks skip</span>
+      <span style="font-size:11px;color:var(--t3);font-weight:400;margin-left:8px">${[heldN?`📌 ${heldN} held`:'',survN?`⚠ ${survN} surveillance`:'',peakN?`⏳ ${peakN} waiting for entry confirmation`:''].filter(Boolean).join(' · ')}${(heldN||survN||peakN)?' · ':''}why the ranks skip</span>
     </div>
     ${body}
   </div>`;
@@ -6010,7 +6071,7 @@ function renderStatusBar(){
   if(PORTFOLIO_STALE?.stale){
     html+=` <span class="sb-tag sb-tag-red" style="margin-left:8px" title="Positions.csv and Orders.csv still hold the ${escHtml(PORTFOLIO_STALE.portfolioDate||'prior')} session (Zerodha only rewrites them when you place a new trade). They are EXCLUDED from today's booked P&L, held-suppression and open positions — Holdings.csv is used instead. Re-export them after your first trade today to bring them current.">⏳ Positions/Orders from ${escHtml(PORTFOLIO_STALE.portfolioDate||'prior session')} — excluded from today</span>`;
   }
-  if(SUPPRESSED_HELD>0)html+=` <span class="sb-tag" style="margin-left:8px" title="Held positions (Holdings + Positions + today's net Orders buys) never re-enter the buy ranking. See Open Positions on the Performance tab.">📌 ${SUPPRESSED_HELD} held suppressed</span>`;
+  if(SUPPRESSED_HELD>0)html+=` <span class="sb-tag" style="margin-left:8px" title="Stocks you already hold (Holdings + Positions + today's net Orders buys). Since v1070 they remain in the ranking and can be recommended again — buying adds to the existing position. See Open Positions below.">📌 ${SUPPRESSED_HELD} already held</span>`;
   if(SURV_HARD_REMOVED>0)html+=` <span class="sb-tag sb-tag-red" style="margin-left:4px" title="Weeded out by the configured surveillance rules in the Methodology table (hard filter).">⚠ ${SURV_HARD_REMOVED} surveillance removed</span>`;
   if(tags.length){html+=`<span class="sb-sep">|</span>`;html+=tags.map(t=>`<span class="sb-tag">${t}</span>`).join('');}
   if(isFiltered)html+=`<button class="sb-clear" onclick="clearFilters()">✕ Clear filters</button>`;
