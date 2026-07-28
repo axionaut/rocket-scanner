@@ -1,5 +1,5 @@
-const BUILD_TS='2026-07-28 10:36 IST'; // release build time (IST)
-const APP_VERSION=1067; // v1067: Performance shows clock-window outcomes only; cross-stock ordinal/phase/spacing constructs have no visible or execution role.
+const BUILD_TS='2026-07-28 12:26 IST'; // release build time (IST)
+const APP_VERSION=1068; // v1068: participation tail de-clipped; gated ignition track ranks by extremity (max of composite/ignition percentile); clock never gates export or selection.
 // v556: parse the NSE Market Activity Report (MA<date>.csv) — official Nifty %, advances/declines and sector index moves shown as market CONTEXT in the status bar (EOD data, display only, never fed into per-row scoring); MA added to the ℹ️ file manifest.
 // v555 market-cycle stage awareness (stateless, self-calibrating): per-row stage label (1 accumulation · 2 breakout · 3 event · 4 profit-booking · 5 re-accumulation · 6 second-leg); a quiet-accumulation signal (conjunction-of-percentiles) injected via the rocket-diagnostic weighting; sell-the-news decay off Recent earnings date (horizon = review days). v1065 makes the market-breadth gauge an entry-eligibility input while still never changing ranking.
 const GOOGLE_DRIVE_CLIENT_ID='1015012642264-oi2nelv3v90k3d39r994a6nelgjs2a56.apps.googleusercontent.com'; // Public OAuth Web Client ID.
@@ -2207,6 +2207,9 @@ function radarScoreCell(score,title=''){
 }
 function radarSetupLabel(r){
   const b=[];
+  // v1068: when ignition is what earned the rank, say so first — otherwise the row reads as a
+  // generic "Volume ignition" from the group part and the user cannot tell the two apart.
+  if(r.igniteReady&&(r.ignitePct||0)>=.9&&(r.ignitePct||0)>=(r.compositePct||0))b.push('Ignition');
   if(r.parts.participation>=67)b.push('Volume ignition');
   if(r.parts.structure>=67)b.push('Breakout coil');
   if(r.parts.trend>=67)b.push('Trend alignment');
@@ -2308,8 +2311,16 @@ function radarAnalyze(headers,rawRows,supplements={},heldSymbols=new Set()){
     for(let ri=0;ri<rawRows.length;ri++){const v=radarTransformed(rawRows[ri],f,priceI);if(v!==null)vals.push(v);}
     vals.sort((a,b)=>a-b);
     if(vals.length<minObs||vals[0]===vals[vals.length-1])continue;
-    const q02=radarQuant(vals,.02),q98=radarQuant(vals,.98),wins=vals.map(v=>clamp01(v,q02,q98)).sort((a,b)=>a-b);
-    f.sorted=wins;f.coverage=vals.length/rawRows.length;
+    // v1068 DE-CLIPPING. Winsorising the UPPER tail at the 98th percentile is correct when
+    // outliers are noise. For the Participation group the outliers ARE the target: measured on
+    // 2026-07-28, `Relative volume at time` had median 0.67, q98 8.68 and max 122.58 — the top
+    // 60 stocks all collapsed onto 8.68, so a 122x ignition scored identically to an 8.7x one,
+    // and 3 of that day's 6 rockets sat inside that flattened blob. Participation keeps its
+    // lower clip (junk protection) and keeps its full upper tail. Every other group is unchanged.
+    const tailFeature=f.group==='participation';
+    const q02=radarQuant(vals,.02),q98=tailFeature?vals[vals.length-1]:radarQuant(vals,.98);
+    const wins=vals.map(v=>clamp01(v,q02,q98)).sort((a,b)=>a-b);
+    f.sorted=wins;f.lo=q02;f.hi=q98;f.coverage=vals.length/rawRows.length;
     let ar=[],ao=[];
     for(let ri=0;ri<rawRows.length;ri++){
       let v=radarTransformed(rawRows[ri],f,priceI);
@@ -2373,6 +2384,26 @@ function radarAnalyze(headers,rawRows,supplements={},heldSymbols=new Set()){
       accFeat={sorted:wins,q02,q98,effect,weight:(.07+Math.abs(effect))*.6+.4*Math.sqrt(coverage)};
     }
   }
+  // ── v1068 IGNITION TRACK (finds the tail the composite averages away) ─────────────────
+  // Measured on the 2026-07-28 tradeable universe (EQ + basket-eligible + turnover >= 25L,
+  // n=1373, 20 names >= +5%, base rate 1.46%):
+  //   * direction gate alone (above VWAP AND above open): base rate 1.46% -> 6.40%  (4.4x)
+  //   * within the gated pool, volume extremity is cleanly MONOTONIC by decile:
+  //       deciles 1-5 -> 0.0% hit, d8 3.4%, d9 6.9%, d10 (relAt 4.57-104.69) -> 38.9%
+  //   * gated + extremity, top 20 -> 12/20 = 60% hit (9.4x over the gated pool, 41x overall)
+  //     vs the composite's 6/20 on the same universe and day.
+  // UNGATED extremity is NOT a buy signal: the top relative-volume decile of the whole universe
+  // is 12.1% up >= 5% but also 6.4% DOWN >= 5%. Heavy volume means something is happening, not
+  // that it is happening upward — the direction gate is what turns it into a signal, and it must
+  // never be dropped. Strength is log-summed and never upper-clipped (see the de-clipping note).
+  const igniteArr=rawRows.map((raw,ri)=>{
+    const p=radarNum(raw[priceI]),vw=vwapI>=0?radarNum(raw[vwapI]):null,co=chgOpenArr[ri];
+    if(!(p>0)||!(vw>0)||co===null||!(p>vw)||!(co>0))return null; // direction gate
+    const ra=relAtI>=0?radarNum(raw[relAtI]):null,r1=relI>=0?radarNum(raw[relI]):null;
+    if(ra===null&&r1===null)return null;
+    return Math.log1p(Math.max(0,ra??0))+Math.log1p(Math.max(0,r1??0));
+  });
+  const igniteSorted=igniteArr.filter(v=>v!==null&&isFinite(v)).sort((a,b)=>a-b);
   const STAGE_LABEL={1:'Accumulation',2:'Breakout',3:'Event day',4:'Profit-booking',5:'Re-accumulation',6:'Second leg'};
   const allRows=rawRows.map((raw,ri)=>{
     const parts={},weights={},contrib=[];
@@ -2381,7 +2412,10 @@ function radarAnalyze(headers,rawRows,supplements={},heldSymbols=new Set()){
     for(const f of features){
       let v=radarTransformed(raw,f,priceI);
       if(v===null)continue;
-      v=clamp01(v,radarQuant(f.sorted,.02),radarQuant(f.sorted,.98));
+      // Use the bounds the feature was actually built with (v1068). Re-deriving 2nd/98th from the
+      // already-winsorised array double-clipped every feature and would re-flatten the
+      // participation tail this release deliberately preserves.
+      v=clamp01(v,f.lo,f.hi);
       const p=radarPct(f.sorted,v),learn=Math.sign(f.effect||1)*(2*p-1),alpha=clamp01(Math.abs(f.effect)*1.35,.12,.58),sig=alpha*learn+(1-alpha)*radarPrior(f,p),w=f.weight;
       parts[f.group]+=sig*w;weights[f.group]+=w;observed++;
       contrib.push({name:f.name,group:f.group,p,sig,impact:sig*w});
@@ -2498,7 +2532,10 @@ function radarAnalyze(headers,rawRows,supplements={},heldSymbols=new Set()){
       corpAction:meta._corpNeutralised?(meta.corpToday?.purpose||'corporate action'):null,
       stage:_stage,stageLabel:_stage?STAGE_LABEL[_stage]:null,legTrendPct:_P.tPct,legHighPct:_P.bPct,
       inDigestion:_inDigestion,daysSinceEarnings:_daysSince,
-      rocketReady,gateReasons,series,band:band??null,status,eqEligible,basketEligible,meta};
+      rocketReady,gateReasons,series,band:band??null,status,eqEligible,basketEligible,meta,
+      igniteReady:igniteArr[ri]!==null,
+      igniteStrength:igniteArr[ri]===null?null:+igniteArr[ri].toFixed(4),
+      ignitePct:igniteArr[ri]===null?0:radarPct(igniteSorted,igniteArr[ri])};
     out.entryTiming=getPeakEntryTiming(out);
     out.entryReady=!out.entryTiming.blocked;
     return out;
@@ -2513,7 +2550,19 @@ function radarAnalyze(headers,rawRows,supplements={},heldSymbols=new Set()){
   const suppressedHeld=allRows.filter(r=>r._held).length;
   const rawScores=rows.map(r=>r.rawScore).sort((a,b)=>a-b);
   for(const r of rows){
-    r.score=+(100*Math.pow(radarPct(rawScores,r.rawScore),4)).toFixed(1);
+    // v1068: EXTREMITY, NOT BALANCE. rawScore is a budget-weighted MEAN across seven groups, and a
+    // mean structurally prefers the well-rounded to the extreme — on 2026-07-28 its top 20 was IT
+    // large caps in a sector move (COFORGE, TCS, NAUKRI...), names that cannot physically move 10%,
+    // while the day's two tradeable rockets sat at rank 36 and 56. A rocket is extreme in ONE
+    // dimension (participation) and ordinary elsewhere, so it can only ever lose an average.
+    // Taking the MAX of the two percentiles lets either kind of evidence carry a stock on its own
+    // merit: balanced names keep their composite standing, igniting names are no longer averaged
+    // out. It is parameter-free — both inputs are cross-sectional percentiles on the same scale —
+    // and ignitePct is 0 for anything failing the direction gate, so nothing is promoted on volume
+    // alone. The ^4 top-weighting still crushes mid-percentiles, so a merely-median ignition
+    // cannot lift a weak row into contention.
+    r.compositePct=radarPct(rawScores,r.rawScore);
+    r.score=+(100*Math.pow(Math.max(r.compositePct,r.ignitePct||0),4)).toFixed(1);
     r.rocketScore=r.score; // allocation/export alias
     r.risk=!r.basketEligible||r.meta.flags?.length>=3||r.turnover<25e5||r.price<10?'High':(r.gap>6||r.day>6||r.parts.volatility<38?'Medium':'Low');
     // Event Risk (idea #1, v554 + v555): an event-day (Stage 3) or a name still digesting its results
@@ -3793,19 +3842,21 @@ function getCurrentTradeTimingDecision(contextOverride=null){
   const model=getTradeTimingModel(),context=contextOverride||getTodayTradeTimingContext();
   // Indian continuous trading starts at 09:15. Until 09:30 there is no completed 15-minute
   // candle, so 5m/15m/1h readings can be the same unfinished opening impulse rather than
-  // independent confirmation. Keep rankings visible, but make the execution state Avoid.
+  // independent confirmation. That is worth SAYING, and nothing more (owner, v1068): the clock
+  // never withholds a recommendation, empties the selection, or refuses an export. The trading
+  // day starts at 09:15 and the app must be usable from 09:15. Diagnostic state only.
   if(context.nowMinute<570){
     return {
-      state:'Avoid',
-      reason:'Opening discovery is still in progress; wait for the first completed 15-minute bar at 09:30 IST.',
+      state:'Neutral',diagnosticState:'Opening discovery',
+      reason:'Before 09:30 IST there is no completed 15-minute bar, so the 5m/15m/1h readings may be the same unfinished opening impulse. Shown for context; it does not restrict anything.',
       evidence:[],context,model,openingDiscovery:true
     };
   }
   if(!model.episodeCount) return {state:'Neutral',reason:'No resolved tradebook entry episodes yet.',evidence:[],context};
   const windowRow=model.groups.window.find(r=>r.key===context.windowKey)||null;
   const evidence=[windowRow].filter(Boolean);
-  // Clock-window outcomes remain descriptive. Cross-stock ordinal/phase/spacing constructs
-  // have no visible or execution role; only unfinished opening discovery above can block.
+  // Clock-window outcomes remain descriptive. Nothing on this path — not the clock, not the
+  // opening window, not cross-stock ordinal/phase/spacing — has execution authority.
   return {
     state:'Neutral',diagnosticState:windowRow?.state||'Neutral',
     reason:'Historical clock-window outcome is display only and never changes stock eligibility.',
@@ -4996,8 +5047,6 @@ function updateSelectAll(){
 }
 function toggleSelectAll(checked){
   if(checked){
-    CURRENT_TRADE_TIMING=getCurrentTradeTimingDecision();
-    if(CURRENT_TRADE_TIMING.state==='Avoid'){SELECTED.clear();renderTable();renderBasketBtn();return;}
     FILT.forEach(s=>EXPORT_EXCLUDED.delete(s.symbol));
     SELECTED=new Set(FILT.filter(s=>s.basketEligible!==false).slice(0,20).map(s=>s.symbol));
   } else {
@@ -5009,8 +5058,6 @@ function toggleSelectAll(checked){
   renderBasketBtn();
 }
 function toggleStock(sym,checked){
-  CURRENT_TRADE_TIMING=getCurrentTradeTimingDecision();
-  if(checked&&CURRENT_TRADE_TIMING.state==='Avoid'){SELECTED.delete(sym);renderTable();renderBasketBtn();return;}
   if(checked){EXPORT_EXCLUDED.delete(sym);SELECTED.add(sym);}
   else{EXPORT_EXCLUDED.add(sym);SELECTED.delete(sym);}
   saveFilterState();
@@ -5549,7 +5596,7 @@ function renderBasketBtn(){
     if(cntSpan)cntSpan.textContent=buyCount>0?`(${buyCount})`:'';
     buyBtn.disabled=buyCount===0;
     buyBtn.title=buyCount===0
-      ? (CURRENT_TRADE_TIMING.state==='Avoid'?CURRENT_TRADE_TIMING.reason:'Select at least one stock to export a Zerodha basket order.')
+      ? 'Select at least one stock to export a Zerodha basket order.'
       : 'Export selected stocks as Zerodha basket order';
   }
 }
@@ -5564,7 +5611,7 @@ function renderHead(){
   COLS=getCols(); // refresh in case ENGINE_DATA changed
   const allChecked=FILT.length>0&&FILT.every(s=>SELECTED.has(s.symbol));
   const someChecked=FILT.some(s=>SELECTED.has(s.symbol));
-  const timingBlocked=CURRENT_TRADE_TIMING.state==='Avoid';
+  const timingBlocked=false; // the clock never disables selection (owner, v1068)
   document.getElementById('tHead').innerHTML='<tr>'+COLS.map(c=>{
     if(c.key==='chk'){
       return`<th data-key="chk" style="width:32px;text-align:center;padding:8px 6px">
@@ -5640,12 +5687,12 @@ function renderTable(){
     const isSelected=SELECTED.has(s.symbol);
     const am=allocMap[s.symbol];
     const exitPolicy=getRowExitPolicy(s,getBuyPrice(s));
-    const canBuy=s.basketEligible!==false&&CURRENT_TRADE_TIMING.state!=='Avoid';
+    const canBuy=s.basketEligible!==false;
     const stretchColor=s.stretch<=2.5?'var(--green)':s.stretch>3?'var(--red)':'var(--amber)';
     // Cells are keyed and joined in COLS order so they always match the (possibly
     // user-reordered) header (v536).
     const cellH={
-      chk:`<td style="text-align:center"><input type="checkbox" ${isSelected?'checked':''} ${canBuy?'':'disabled'} style="width:14px;height:14px;accent-color:var(--amber);cursor:${canBuy?'pointer':'not-allowed'}" onclick="event.stopPropagation()" onchange="toggleStock('${s.symbol}',this.checked)" title="${canBuy?'Include in the Zerodha basket export':CURRENT_TRADE_TIMING.state==='Avoid'?escHtml(CURRENT_TRADE_TIMING.reason):'Ineligible for the basket'}"></td>`,
+      chk:`<td style="text-align:center"><input type="checkbox" ${isSelected?'checked':''} ${canBuy?'':'disabled'} style="width:14px;height:14px;accent-color:var(--amber);cursor:${canBuy?'pointer':'not-allowed'}" onclick="event.stopPropagation()" onchange="toggleStock('${s.symbol}',this.checked)" title="${canBuy?'Include in the Zerodha basket export':'Ineligible for the basket'}"></td>`,
       rank:`<td style="font-family:'DM Mono',monospace;font-weight:800;color:var(--t1);text-align:right">${s.rank??'—'}</td>`,
       score:`<td>${radarScoreCell(s.score,'Relative same-day composite score (0-100 percentile, top-weighted). It is a ranking, not a probability.')}</td>`,
       symbol:`<td style="font-family:'Plus Jakarta Sans',sans-serif"><button type="button" onclick='event.stopPropagation();openTradingViewChart(${JSON.stringify(String(s.symbol))})' style="padding:0;border:0;background:transparent;color:inherit;text-align:left;cursor:pointer" title="Open TradingView chart"><div style="font-weight:700;font-size:13px;color:var(--t1)">${escHtml(s.symbol)}${(()=>{const flags=s.meta?.flags||[];if(!flags.length)return '';return `<span style="font-size:8px;background:rgba(239,68,68,.15);color:var(--red);border-radius:4px;padding:1px 5px;margin-left:5px;font-weight:700;vertical-align:middle" title="NSE surveillance flags: ${escHtml(flags.join(' · '))}">⚠ ${flags.length}</span>`;})()}</div><div style="font-size:9px;color:var(--t3);max-width:220px;overflow:hidden;text-overflow:ellipsis">${escHtml(s.name||'')}</div></button></td>`,
@@ -5753,9 +5800,9 @@ function applyFilters(){
   CURRENT_TRADE_TIMING=getCurrentTradeTimingDecision();
   // SELECTED is auto-derived from FILT every filter pass: basket-eligible rows minus the
   // user's persisted exclusions, capped at Zerodha's 20-order limit.
-  SELECTED=CURRENT_TRADE_TIMING.state==='Avoid'
-    ?new Set()
-    :new Set(FILT.filter(s=>s.basketEligible!==false&&!EXPORT_EXCLUDED.has(s.symbol)).slice(0,20).map(s=>s.symbol));
+  // Trade-timing state is DIAGNOSTIC ONLY and never empties the selection (owner, v1068):
+  // what is recommended is decided by the row's own evidence, not by the wall clock.
+  SELECTED=new Set(FILT.filter(s=>s.basketEligible!==false&&!EXPORT_EXCLUDED.has(s.symbol)).slice(0,20).map(s=>s.symbol));
 
   PG=1;renderHead();renderTable();renderStatusBar();saveFilterState();updateTabCounts();
   try{renderRankingsPanels();}catch(e){console.warn('Rankings panels render failed',e);}
@@ -6717,7 +6764,10 @@ function calcZerodhaChargesSplit(price, qty, isSell, isIntraday, skipDp){
 function planBasketExport(capital, selected){
   const baseContext=getTodayTradeTimingContext();
   const timing=getCurrentTradeTimingDecision(baseContext);
-  if(timing.state==='Avoid') return {exportList:[],basketAlloc:{},orderCount:()=>0,timingBlocked:true,timing};
+  // Export is an OPERATIONAL action, never a judgement (owner, v1068). It must always emit the
+  // current recommendations — at 09:15, at midnight, on a holiday. Selection quality is decided
+  // upstream by each row's own evidence (entryReady, price band, basket eligibility); the wall
+  // clock has no authority here. Never reintroduce a clock gate on this path.
   let exportList=(selected||[]).filter(s=>s.entryReady!==false&&!getPriceBandBlockReason(s));
   let basketAlloc=computeAlloc(capital,exportList);
   const orderCount=()=>exportList.reduce((count,s)=>{
@@ -6728,6 +6778,7 @@ function planBasketExport(capital, selected){
     exportList=exportList.slice(0,-1);
     basketAlloc=computeAlloc(capital,exportList);
   }
+  // timingBlocked is retained as a permanently-false field so existing callers keep working.
   return {exportList,basketAlloc,orderCount:orderCount(),timingBlocked:false,timing};
 }
 
@@ -6737,8 +6788,7 @@ async function exportBasket(){
   const selList=FILT.filter(s=>SELECTED.has(s.symbol));
   if(!selList.length){showToast('Select at least one stock first.',3000,true);return;}
   const bandRejected=selList.filter(s=>getPriceBandBlockReason(s)).length;
-  const {exportList,basketAlloc,timingBlocked,timing}=planBasketExport(capital,selList);
-  if(timingBlocked){showToast(timing.reason,6000,true);return;}
+  const {exportList,basketAlloc}=planBasketExport(capital,selList);
   const limitOmitted=Math.max(0,selList.length-bandRejected-exportList.length);
 
   const harvestPlan=computeHarvestPlan();
@@ -7018,6 +7068,7 @@ function compactRankingRows(rows){
     high1d:s.high1d??null,low1d:s.low1d??null,vwap:s.vwap??null,bollUpper:s.bollUpper??null,keltUpper:s.keltUpper??null,
     price1h:s.price1h??null,price15m:s.price15m??null,price5m:s.price5m??null,
     stage:s.stage??null,stageLabel:s.stageLabel??null,legTrendPct:s.legTrendPct??null,legHighPct:s.legHighPct??null,
+    igniteReady:!!s.igniteReady,igniteStrength:s.igniteStrength??null,ignitePct:s.ignitePct??0,compositePct:s.compositePct??null,
     entryReady:s.entryReady!==false,entryTiming:s.entryTiming||null,
     rocketReady:!!s.rocketReady,gateReasons:(s.gateReasons||[]).slice(0,9),_held:!!s._held,
     meta:{delivery:s.meta?.delivery??null,trades:s.meta?.trades??null,flags:(s.meta?.flags||[]).slice(0,12),band:s.meta?.band??null}
