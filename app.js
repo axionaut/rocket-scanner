@@ -1,5 +1,5 @@
-const BUILD_TS='2026-07-28 13:40 IST'; // release build time (IST)
-const APP_VERSION=1070; // v1070: held no longer blocks a recommendation (top-up sized against blended average cost); every stock table opens chart on name, modal on row.
+const BUILD_TS='2026-07-28 15:51 IST'; // release build time (IST)
+const APP_VERSION=1071; // v1071: volume baselines + beta excluded from features (size/beta bias); ignition gains a 60-day volume-norm term.
 // v556: parse the NSE Market Activity Report (MA<date>.csv) — official Nifty %, advances/declines and sector index moves shown as market CONTEXT in the status bar (EOD data, display only, never fed into per-row scoring); MA added to the ℹ️ file manifest.
 // v555 market-cycle stage awareness (stateless, self-calibrating): per-row stage label (1 accumulation · 2 breakout · 3 event · 4 profit-booking · 5 re-accumulation · 6 second-leg); a quiet-accumulation signal (conjunction-of-percentiles) injected via the rocket-diagnostic weighting; sell-the-news decay off Recent earnings date (horizon = review days). v1065 makes the market-breadth gauge an entry-eligibility input while still never changing ranking.
 const GOOGLE_DRIVE_CLIENT_ID='1015012642264-oi2nelv3v90k3d39r994a6nelgjs2a56.apps.googleusercontent.com'; // Public OAuth Web Client ID.
@@ -2060,6 +2060,25 @@ const RADAR_GROUPS={
   context:{label:'Context',budget:5,desc:'Sector-relative regime and fundamentals'}
 };
 const RADAR_RATING={'strong sell':-2,'sell':-1,'neutral':0,'buy':1,'strong buy':2};
+// Columns that are EXPORTED but deliberately NOT modelled as features. Exporting and scoring are
+// separate decisions: the data stays available for derived signals and future use, it simply does
+// not earn a feature weight of its own. Never remove these from the TradingView export (v1071).
+const RADAR_EXCLUDED_FEATURES=new Set([
+  // Static share count is only a size proxy (already covered by Market cap); R2's real signal is a
+  // buyback event, which arrives statelessly via the bc corporate action, not a share-count delta.
+  'Total common shares outstanding',
+  // v1071: absolute average-volume levels match /volume/, so they are signed-log compressed and
+  // routed to Liquidity with a high-good prior — which makes them pure LARGE-CAP SIZE proxies
+  // (big companies trade big volume). Three of them would tilt a 12-point budget toward mega-caps,
+  // the exact failure the v1068 ignition track exists to counter. They are still used, but as the
+  // DENOMINATOR of the ignition ratio below, never as standalone features.
+  'Average volume, 30 days','Average volume, 60 days','Average volume, 90 days',
+  // v1071: Beta has no radarGroupFor match, so it lands in Context with a LINEAR HIGH-GOOD prior —
+  // the model would score high beta well on every day, including red ones. That is precisely the
+  // green-day/red-day asymmetry under investigation. Kept in the export so the data accumulates;
+  // re-enable only together with breadth-conditional handling.
+  'Beta, 1 year'
+]);
 const RADAR_LIQ_STEPS=[0,5e5,25e5,1e7,5e7,1e8,1e9,1e10];
 const RADAR_LIQ_LABELS=['Any','₹5L','₹25L','₹1Cr','₹5Cr','₹10Cr','₹100Cr','₹1000Cr'];
 const radarNum=v=>{if(v===null||v===undefined||v==='')return null;const x=Number(String(v).replace(/[,%₹\s]/g,''));return Number.isFinite(x)?x:null;};
@@ -2277,6 +2296,12 @@ function radarAnalyze(headers,rawRows,supplements={},heldSymbols=new Set()){
   const priceHourI=radarIdx(headers,'Price change %, 1 hour'),price15I=radarIdx(headers,'Price change %, 15 minutes'),price5I=radarIdx(headers,'Price change %, 5 minutes');
   const changeOpenI=radarIdx(headers,'Change from open %, 1 day'),perf1mI=radarIdx(headers,'Performance %, 1 month'),perf3mI=radarIdx(headers,'Performance %, 3 months');
   const vwapI=radarIdx(headers,'Volume-weighted average price, 1 day');
+  // v1071 ignition denominator: today's volume against a 60-DAY baseline. 'Relative volume, 1 day'
+  // uses a ~10-day baseline, so a stock that has been busy all fortnight already looks normal;
+  // a 60-day reference catches a name waking up after months of neglect. 60 is the anchor: 30 is
+  // noisy after one busy fortnight, 90 drifts across regime changes. Both remain exported.
+  // NB: `volI` is already taken by 'Volatility, 1 day' — this is share VOLUME, hence dayVolI.
+  const dayVolI=radarIdx(headers,'Volume, 1 day'),avgVol60I=radarIdx(headers,'Average volume, 60 days');
   // v555 market-cycle inputs: earnings dates (stateless days-since/days-to), 50-day MA (holding-above check).
   const recentEarnI=radarIdx(headers,'Recent earnings date'),upcomingEarnI=radarIdx(headers,'Upcoming earnings date'),sma50I=radarIdx(headers,'Simple moving average, 50, 1 day');
   const sessionDate=getSessionDate(),reviewDays=getEffectiveReviewDays(); // reviewDays null ⇒ post-event stages/decay don't fire (graceful, no constant)
@@ -2331,7 +2356,7 @@ function radarAnalyze(headers,rawRows,supplements={},heldSymbols=new Set()){
     // v552: exclude the static share-count level from scoring — it is only a size proxy (already
     // in Market cap), and R2's real signal (a buyback) arrives statelessly via the bc event, not
     // via a cross-day share-count delta. Keep the column exported for possible future use.
-    if([symbolI,descI,sectorI,targetI].includes(i)||/ - Currency$/.test(name)||name==='Total common shares outstanding')continue;
+    if([symbolI,descI,sectorI,targetI].includes(i)||/ - Currency$/.test(name)||RADAR_EXCLUDED_FEATURES.has(name))continue;
     const f={i,name,group:radarGroupFor(name),rating};
     let vals=[];
     for(let ri=0;ri<rawRows.length;ri++){const v=radarTransformed(rawRows[ri],f,priceI);if(v!==null)vals.push(v);}
@@ -2429,8 +2454,14 @@ function radarAnalyze(headers,rawRows,supplements={},heldSymbols=new Set()){
     // VWAP and disagreed. This is the ONE definition of "confirmed direction" in the codebase.
     if(!(p>0)||!(vw>0)||co===null||!(p>=vw)||!(co>0))return null;
     const ra=relAtI>=0?radarNum(raw[relAtI]):null,r1=relI>=0?radarNum(raw[relI]):null;
-    if(ra===null&&r1===null)return null;
-    return Math.log1p(Math.max(0,ra??0))+Math.log1p(Math.max(0,r1??0));
+    // v1071 third term: volume vs its own 60-day norm. ADDITIVE, not a replacement — `relAt` is
+    // what surfaced AGARIND at 104x on 2026-07-28 and must not be diluted away. A genuine ignition
+    // is extreme on all three at once, and because the terms are log-summed and the upper tail is
+    // never clipped (v1068 de-clipping), the extremity that makes this track work is preserved.
+    const vol=dayVolI>=0?radarNum(raw[dayVolI]):null,av60=avgVol60I>=0?radarNum(raw[avgVol60I]):null;
+    const r60=(vol!==null&&av60!==null&&av60>0)?vol/av60:null;
+    if(ra===null&&r1===null&&r60===null)return null;
+    return Math.log1p(Math.max(0,ra??0))+Math.log1p(Math.max(0,r1??0))+Math.log1p(Math.max(0,r60??0));
   });
   const igniteSorted=igniteArr.filter(v=>v!==null&&isFinite(v)).sort((a,b)=>a-b);
   const STAGE_LABEL={1:'Accumulation',2:'Breakout',3:'Event day',4:'Profit-booking',5:'Re-accumulation',6:'Second leg'};
