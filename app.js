@@ -1,5 +1,5 @@
-const BUILD_TS='2026-07-28 12:26 IST'; // release build time (IST)
-const APP_VERSION=1068; // v1068: participation tail de-clipped; gated ignition track ranks by extremity (max of composite/ignition percentile); clock never gates export or selection.
+const BUILD_TS='2026-07-28 12:52 IST'; // release build time (IST)
+const APP_VERSION=1069; // v1069: weak-market confirmation is structural (above VWAP + above open), never a 5m/15m tick and never clock-gated.
 // v556: parse the NSE Market Activity Report (MA<date>.csv) — official Nifty %, advances/declines and sector index moves shown as market CONTEXT in the status bar (EOD data, display only, never fed into per-row scoring); MA added to the ℹ️ file manifest.
 // v555 market-cycle stage awareness (stateless, self-calibrating): per-row stage label (1 accumulation · 2 breakout · 3 event · 4 profit-booking · 5 re-accumulation · 6 second-leg); a quiet-accumulation signal (conjunction-of-percentiles) injected via the rocket-diagnostic weighting; sell-the-news decay off Recent earnings date (horizon = review days). v1065 makes the market-breadth gauge an entry-eligibility input while still never changing ranking.
 const GOOGLE_DRIVE_CLIENT_ID='1015012642264-oi2nelv3v90k3d39r994a6nelgjs2a56.apps.googleusercontent.com'; // Public OAuth Web Client ID.
@@ -2151,13 +2151,24 @@ function getPeakEntryTiming(row){
     reason
   };
 }
-function getMarketAlignedEntryTiming(row,marketIntraday=MARKET_INTRADAY,minute=istNow().mins){
+function getMarketAlignedEntryTiming(row,marketIntraday=MARKET_INTRADAY){
   const local=row?.entryTiming&&row.entryTiming._local===true?row.entryTiming:getPeakEntryTiming(row);
   const marketWeak=marketIntraday?.advPct!=null&&Number(marketIntraday.advPct)<.5;
   const vwap=Number(row?.vwap),price=Number(row?.price),changeOpen=Number(row?.changeOpen);
-  const p5=Number(row?.price5m),p15=Number(row?.price15m);
-  const postOpening=Number(minute)>=570;
-  const stockConfirmed=postOpening&&vwap>0&&price>=vwap&&changeOpen>0&&p5>0&&p15>0;
+  // v1069: confirmation is STRUCTURAL (holding above VWAP and above its own open), never a tick.
+  // The v1065 form also required price5m>0 && price15m>0 and minute>=570. Measured on the
+  // 2026-07-28 file: that rule blocked 92% of the whole eligible universe (the peak gate blocked
+  // 1%), and the 5m change it keyed on has median +0.01% with a p10-p90 of -0.12%..+0.23% in the
+  // top 100 — microstructure noise, non-positive for 45% of rows at any instant. Because a stock
+  // that has already run is likelier to be mid-pause, it removed the LEADERS: passed rows averaged
+  // +2.85% on the day vs +3.92% for blocked ones, and the surviving top 20 shifted from ranks
+  // 1-30 to ranks 10-143 (mean day 5.42% -> 2.45%, 9/20 above +5% -> 0/20, one rocket -> none).
+  // Structural-only also beats no gate at all (5.42% vs 4.89%), so the VWAP/open condition is
+  // kept and only the tick coin-flip is dropped. This is now the SAME definition the v1068
+  // ignition gate uses — one meaning of "confirmed direction" in the codebase, not two.
+  // The minute>=570 term is also gone: it was surviving clock authority (v1068 owner rule) and
+  // would have blocked every stock in a weak market before 09:30, when the day legitimately starts.
+  const stockConfirmed=vwap>0&&price>=vwap&&changeOpen>0;
   const weakMarketBlocked=marketWeak&&!stockConfirmed;
   const blocked=!!local.blocked||weakMarketBlocked;
   const stageNote=row?.stage===6?' for an established-leg breakout':'';
@@ -2398,7 +2409,10 @@ function radarAnalyze(headers,rawRows,supplements={},heldSymbols=new Set()){
   // never be dropped. Strength is log-summed and never upper-clipped (see the de-clipping note).
   const igniteArr=rawRows.map((raw,ri)=>{
     const p=radarNum(raw[priceI]),vw=vwapI>=0?radarNum(raw[vwapI]):null,co=chgOpenArr[ri];
-    if(!(p>0)||!(vw>0)||co===null||!(p>vw)||!(co>0))return null; // direction gate
+    // Direction gate. `p>=vw` (not `p>vw`) to match getMarketAlignedEntryTiming's long-standing
+    // semantics — v1069: the two gates must state the same thing, and 4 thin names sat exactly at
+    // VWAP and disagreed. This is the ONE definition of "confirmed direction" in the codebase.
+    if(!(p>0)||!(vw>0)||co===null||!(p>=vw)||!(co>0))return null;
     const ra=relAtI>=0?radarNum(raw[relAtI]):null,r1=relI>=0?radarNum(raw[relI]):null;
     if(ra===null&&r1===null)return null;
     return Math.log1p(Math.max(0,ra??0))+Math.log1p(Math.max(0,r1??0));
@@ -2578,9 +2592,8 @@ function radarAnalyze(headers,rawRows,supplements={},heldSymbols=new Set()){
   const marketIntraday=_open.length?{adv:_adv,dec:_dec,advPct:_adv/_open.length,median:radarQuant([..._open].sort((a,b)=>a-b),.5)}:null;
   // Rank answers what is moving; this second pass answers whether the move is executable in
   // the current market. Breadth is known only after the whole cross-section has been measured.
-  const decisionMinute=istNow().mins;
   rows.forEach(r=>{
-    r.entryTiming=getMarketAlignedEntryTiming(r,marketIntraday,decisionMinute);
+    r.entryTiming=getMarketAlignedEntryTiming(r,marketIntraday);
     r.entryReady=!r.entryTiming.blocked;
   });
   return {rows,features,rockets:rocketRows.length,continuationCount:continuationRows.length,suppressedHeld,marketIntraday,ids:{priceI,targetI,sectorI,symbolI,descI}};
