@@ -1,5 +1,5 @@
-const BUILD_TS='2026-07-28 09:59 IST'; // release build time (IST)
-const APP_VERSION=1065; // v1065: opening discovery, momentum-leg maturity, market breadth, failed-breakout rejection, and per-order basket timing jointly govern entry eligibility.
+const BUILD_TS='2026-07-28 10:12 IST'; // release build time (IST)
+const APP_VERSION=1066; // v1066: cross-stock ordinal/spacing evidence is behavioral diagnostics only; stock eligibility cannot change because unrelated buys came first.
 // v556: parse the NSE Market Activity Report (MA<date>.csv) — official Nifty %, advances/declines and sector index moves shown as market CONTEXT in the status bar (EOD data, display only, never fed into per-row scoring); MA added to the ℹ️ file manifest.
 // v555 market-cycle stage awareness (stateless, self-calibrating): per-row stage label (1 accumulation · 2 breakout · 3 event · 4 profit-booking · 5 re-accumulation · 6 second-leg); a quiet-accumulation signal (conjunction-of-percentiles) injected via the rocket-diagnostic weighting; sell-the-news decay off Recent earnings date (horizon = review days). v1065 makes the market-breadth gauge an entry-eligibility input while still never changing ranking.
 const GOOGLE_DRIVE_CLIENT_ID='1015012642264-oi2nelv3v90k3d39r994a6nelgjs2a56.apps.googleusercontent.com'; // Public OAuth Web Client ID.
@@ -3408,10 +3408,11 @@ function renderStats(){
   const infoPills=[];
   const timingDecision=getCurrentTradeTimingDecision();
   if(timingDecision.model?.episodeCount){
-    const c=timingDecision.state==='Prefer'?'var(--green)':timingDecision.state==='Avoid'?'var(--red)':'var(--t2)';
+    const diagnosticState=timingDecision.diagnosticState||timingDecision.state;
+    const c=diagnosticState==='Prefer'?'var(--green)':diagnosticState==='Avoid'?'var(--red)':'var(--t2)';
     const ctx=timingDecision.context;
     const evidence=timingDecision.evidence.map(r=>`${r.label}: ${r.state} (${(r.peerShrunk*100).toFixed(1)}% peer / ${(r.holdShrunk*100).toFixed(1)}% hold-adjusted)`).join(' · ');
-    infoPills.push(`<span class="info-pill" style="background:rgba(99,102,241,.12);border-color:rgba(99,102,241,.3);color:${c}" title="${escHtml(timingDecision.reason)} ${escHtml(evidence)}">🕐 Next entry #${ctx.ordinal}: <strong>${timingDecision.state}</strong></span>`);
+    infoPills.push(`<span class="info-pill" style="background:rgba(99,102,241,.12);border-color:rgba(99,102,241,.3);color:${c}" title="${escHtml(timingDecision.reason)} ${escHtml(evidence)}">🕐 Behavioral timing: <strong>${diagnosticState}</strong> · display only</span>`);
   }
   try{
     const opportunity=getSameDayExitOpportunitySummary();
@@ -3796,15 +3797,6 @@ function getTodayTradeTimingContext(){
     completedEntries:entries.length
   };
 }
-function getProposedTradeTimingContext(baseContext,offset=0){
-  const base=baseContext||getTodayTradeTimingContext(),n=Math.max(0,Number(offset)||0);
-  if(!n) return {...base};
-  const ordinal=base.ordinal+n;
-  return {
-    ...base,ordinal,ordinalKey:ordinal>=5?'5+':String(ordinal),
-    spacingMinutes:0,spacingKey:'Same batch'
-  };
-}
 function getCurrentTradeTimingDecision(contextOverride=null){
   const model=getTradeTimingModel(),context=contextOverride||getTodayTradeTimingContext();
   // Indian continuous trading starts at 09:15. Until 09:30 there is no completed 15-minute
@@ -3823,16 +3815,23 @@ function getCurrentTradeTimingDecision(contextOverride=null){
   const spacingRow=model.groups.spacing.find(r=>r.key===context.spacingKey)||null;
   const relative=[ordinalRow,spacingRow].filter(Boolean),evidence=[windowRow,...relative].filter(Boolean);
   const opposite=state=>evidence.some(r=>r.state!=='Neutral'&&r.state!==state);
-  let state='Neutral';
-  if(windowRow?.state==='Avoid'&&relative.some(r=>r.state==='Avoid')&&!opposite('Avoid')) state='Avoid';
-  else if(windowRow?.state==='Prefer'&&relative.some(r=>r.state==='Prefer')&&!opposite('Prefer')) state='Prefer';
-  const named=evidence.filter(r=>r.state===state&&state!=='Neutral').map(r=>r.label);
-  const reason=state==='Avoid'
-    ?`Historically weak timing across ${named.join(' + ')} after same-day and holding-context controls.`
-    :state==='Prefer'
-      ?`Historically favourable timing across ${named.join(' + ')}; live stock/tape gates still control entry.`
-      :`Timing evidence is mixed or still collecting for ${evidence.map(r=>r.label).join(' + ')||'this entry context'}.`;
-  return {state,reason,evidence,context,model};
+  let diagnosticState='Neutral';
+  if(windowRow?.state==='Avoid'&&relative.some(r=>r.state==='Avoid')&&!opposite('Avoid')) diagnosticState='Avoid';
+  else if(windowRow?.state==='Prefer'&&relative.some(r=>r.state==='Prefer')&&!opposite('Prefer')) diagnosticState='Prefer';
+  const named=evidence.filter(r=>r.state===diagnosticState&&diagnosticState!=='Neutral').map(r=>r.label);
+  const diagnosticReason=diagnosticState==='Avoid'
+    ?`Historically weak behavioral context across ${named.join(' + ')} after same-day and holding-context controls.`
+    :diagnosticState==='Prefer'
+      ?`Historically favourable behavioral context across ${named.join(' + ')}.`
+      :`Behavioral timing evidence is mixed or still collecting for ${evidence.map(r=>r.label).join(' + ')||'this entry context'}.`;
+  // Ordinal/spacing describe the owner's behavior and portfolio cadence; they are not causal
+  // properties of a different stock. Only the structural unfinished-opening state above has
+  // execution authority. Everything below remains visible diagnostics and returns Neutral.
+  return {
+    state:'Neutral',diagnosticState,
+    reason:`${diagnosticReason} Display only — another stock's purchase order or spacing never changes this stock's eligibility.`,
+    evidence,context,model
+  };
 }
 function recordTradeTimingEntryContext(){
   const today=getSessionDate();
@@ -4431,7 +4430,7 @@ function renderPerformance(){
     {key:'robustPct',label:'Median day return',align:'right',fmt:v=>fmtPct(v),clrFn:clr},
     {key:'holdMix',label:'Hold mix',align:'left',fmt:v=>escHtml(v),clrFn:()=>'var(--t3)'},
     {key:'stability',label:'Stability',align:'left',fmt:v=>escHtml(v),clrFn:()=>'var(--t2)'},
-    {key:'state',label:'Timing state',align:'left',bold:true,fmt:v=>`<span style="color:${stateColor(v)}">${escHtml(v)}</span>`,clrFn:()=>''},
+    {key:'state',label:'Diagnostic state',align:'left',bold:true,fmt:v=>`<span style="color:${stateColor(v)}">${escHtml(v)}</span>`,clrFn:()=>''},
   ];
   const currentTiming=getCurrentTradeTimingDecision();
   const timingTbl=makeSortableTable('tbl-trade-timing',timingCols,timingRows,'slice',1,row=>{
@@ -4491,7 +4490,7 @@ function renderPerformance(){
       <div style="font-size:10px;color:var(--t3);margin-bottom:12px">${periodLabel} · ${p.roundTrips} lots</div>
       <div id="perf-kpi">${kpiHtml}</div>
       ${monthRows.length?perfCard('Monthly Breakdown',monthTbl.getHtml(),'','perf-monthly'):''}
-      ${hasTradeWindows?perfCard(`Entry Timing Evidence <span style="font-size:10px;color:var(--t3);font-weight:400">${timingModel.episodeCount} distinct entries · ${timingModel.entryDays} entry days · day-equal, hold-adjusted, leave-one-day-out stability · current: <b style="color:${stateColor(currentTiming.state)}">${currentTiming.state}</b></span>`,timingTbl.getHtml(),'','perf-trade-windows'):''}
+      ${hasTradeWindows?perfCard(`Entry Timing Evidence <span style="font-size:10px;color:var(--t3);font-weight:400">${timingModel.episodeCount} distinct entries · ${timingModel.entryDays} entry days · day-equal, hold-adjusted, leave-one-day-out stability · behavioral diagnostics only; no cross-stock execution authority</span>`,timingTbl.getHtml(),'','perf-trade-windows'):''}
       ${p.symBreakdown.length?perfCard('Stocks',symTbl.getHtml(),'360px','perf-stocks'):''}
       ${outcomeHtml}
     </div>`;
@@ -6742,13 +6741,7 @@ function planBasketExport(capital, selected){
   const baseContext=getTodayTradeTimingContext();
   const timing=getCurrentTradeTimingDecision(baseContext);
   if(timing.state==='Avoid') return {exportList:[],basketAlloc:{},orderCount:()=>0,timingBlocked:true,timing};
-  const timingRejected=[];
-  let exportList=[];
-  (selected||[]).filter(s=>s.entryReady!==false&&!getPriceBandBlockReason(s)).forEach((s,index)=>{
-    const proposedTiming=getCurrentTradeTimingDecision(getProposedTradeTimingContext(baseContext,index));
-    if(proposedTiming.state==='Avoid') timingRejected.push({symbol:s.symbol,timing:proposedTiming});
-    else exportList.push(s);
-  });
+  let exportList=(selected||[]).filter(s=>s.entryReady!==false&&!getPriceBandBlockReason(s));
   let basketAlloc=computeAlloc(capital,exportList);
   const orderCount=()=>exportList.reduce((count,s)=>{
     const qty=capital>0?(basketAlloc[s.symbol]?.qty||0):1;
@@ -6758,7 +6751,7 @@ function planBasketExport(capital, selected){
     exportList=exportList.slice(0,-1);
     basketAlloc=computeAlloc(capital,exportList);
   }
-  return {exportList,basketAlloc,orderCount:orderCount(),timingRejected,timingBlocked:false,timing};
+  return {exportList,basketAlloc,orderCount:orderCount(),timingBlocked:false,timing};
 }
 
 
@@ -6767,7 +6760,7 @@ async function exportBasket(){
   const selList=FILT.filter(s=>SELECTED.has(s.symbol));
   if(!selList.length){showToast('Select at least one stock first.',3000,true);return;}
   const bandRejected=selList.filter(s=>getPriceBandBlockReason(s)).length;
-  const {exportList,basketAlloc,timingBlocked,timing,timingRejected=[]}=planBasketExport(capital,selList);
+  const {exportList,basketAlloc,timingBlocked,timing}=planBasketExport(capital,selList);
   if(timingBlocked){showToast(timing.reason,6000,true);return;}
   const limitOmitted=Math.max(0,selList.length-bandRejected-exportList.length);
 
@@ -6862,11 +6855,8 @@ async function exportBasket(){
   const planNote=` · per-stock targets ${targetRange} (${srcLabel} ${active.tgtPct.toFixed(2)}% anchor)`;
   const floorNote=harvestPlan.warning?` · target floor active`:``;
   const limitNote=limitOmitted>0?` · ${limitOmitted} lower-priority stock${limitOmitted===1?'':'s'} omitted to keep the basket within Zerodha's 20-order limit`:'';
-  const timingNote=timingRejected.length
-    ?` · ${timingRejected.length} omitted by proposed ordinal/same-batch timing (${timingRejected.map(r=>r.symbol).join(', ')})`
-    :'';
   const marketNote=(MARKET_INTRADAY&&MARKET_INTRADAY.advPct!=null&&MARKET_INTRADAY.advPct<0.5)?` · market confirmation enforced at ${(MARKET_INTRADAY.advPct*100).toFixed(0)}% breadth`:'';
-  showToast(`<strong>Saved ${orders.length} CNC MARKET BUY orders</strong> in Scanner Uploads as Zerodha_Basket_Buy JSON${targetNote}${planNote}${floorNote}${rejNote}${limitNote}${timingNote}${marketNote}`);
+  showToast(`<strong>Saved ${orders.length} CNC MARKET BUY orders</strong> in Scanner Uploads as Zerodha_Basket_Buy JSON${targetNote}${planNote}${floorNote}${rejNote}${limitNote}${marketNote}`);
 }
 
 async function saveBasketToScannerUploads(orders, filename){
