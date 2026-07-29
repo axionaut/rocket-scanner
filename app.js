@@ -1,5 +1,5 @@
-const BUILD_TS='2026-07-29 10:45 IST'; // release build time (IST)
-const APP_VERSION=1075; // v1075: entry-timing peak gate demoted from hard filter to label - first forward test found extension predicts continuation.
+const BUILD_TS='2026-07-29 11:21 IST'; // release build time (IST)
+const APP_VERSION=1076; // v1076: PR-zip pd/bh/hl/gl parsed (index OHLC + India VIX, upper-circuit list, new 52w highs, index membership) + market regime stamped on outcomes.
 // v556: parse the NSE Market Activity Report (MA<date>.csv) — official Nifty %, advances/declines and sector index moves shown as market CONTEXT in the status bar (EOD data, display only, never fed into per-row scoring); MA added to the ℹ️ file manifest.
 // v555 market-cycle stage awareness (stateless, self-calibrating): per-row stage label (1 accumulation · 2 breakout · 3 event · 4 profit-booking · 5 re-accumulation · 6 second-leg); a quiet-accumulation signal (conjunction-of-percentiles) injected via the rocket-diagnostic weighting; sell-the-news decay off Recent earnings date (horizon = review days). v1065 makes the market-breadth gauge an entry-eligibility input while still never changing ranking.
 const GOOGLE_DRIVE_CLIENT_ID='1015012642264-oi2nelv3v90k3d39r994a6nelgjs2a56.apps.googleusercontent.com'; // Public OAuth Web Client ID.
@@ -995,6 +995,14 @@ let NSE_ANNOUNCE={}; // {symbol -> short label} from PR-zip an file (v554) — a
 let MARKET_INTRADAY=null; // v555 WS-D: {adv,dec,advPct,median} market breadth from change-from-open (entry-timing gauge)
 let PORTFOLIO_STALE=null; // v557: {portfolioDate,stale,sessionDate} — Positions/Orders are from a prior session
 let NSE_MARKET=null; // v556: official Market Activity Report summary {date,dateISO,niftyPct,advances,declines,tradedValueCr,marketCapCr,indices} — EOD context, display only
+// v1076: PR-zip data surveyed in RULES.md Appendix E and previously never parsed.
+let NSE_INDEX={};        // {indexName -> {close,prev,pct,high52,low52,rangePos}} from pd IND_SEC='Y' rows; includes India VIX
+let NSE_NAME_TO_SYM={};  // {UPPERCASED security NAME -> symbol} from pd - the join key for the name-keyed files
+let NSE_BAND_HIT={};     // {symbol -> 'H'|'L'} from bh: securities that HIT their price band (the upper-circuit list)
+let NSE_NEW_HL_BYNAME={};// {UPPERCASED name -> {status,now,prev}} from hl: NEW 52-week high/low (resolved lazily)
+let NSE_INDEX_GROUP_BYNAME={}; // {UPPERCASED name -> 'Nifty 50'|'Nifty Next 50'|'Other'} from gl (resolved lazily)
+let NSE_INDEX_GROUP_BYSYM={}; // {symbol -> 'Nifty 50'} straight from pd IND_SEC (symbol-keyed, no name join)
+let MARKET_REGIME=null;  // v1076: market regime stamped onto recorded outcomes; NOT a scoring input
 let NSE_NON_EQ=new Set(); // symbols in non-EQ series (BE,BZ,SZ,SM,ST) — excluded from display, kept in learning
 let NSE_HOLIDAYS=new Set(); // Set of 'YYYY-MM-DD' strings for NSE trading holidays
 let SURV_CUSTOM_RULES=[]; // [{key,column,label}] all surveillance rules — user-managed, persisted in brain
@@ -1536,6 +1544,141 @@ function parseAnnouncements(text){
 // date, index table (name + prev-close/open/high/low/close/gain-loss), ADVANCES/DECLINES, market
 // totals. Parsed for DISPLAY CONTEXT only (it is EOD data, so during a live intraday scan it is the
 // prior session) — never fed into the same-day per-row scoring, to avoid a timeframe mismatch.
+// -- v1076 PR-zip parsers (surveyed 2026-07-29, RULES.md Appendix E) ----------
+// These NSE files contain no quoted commas, so a plain split is safe and much cheaper.
+function _nseCells(line){return String(line||'').split(',').map(c=>c.trim());}
+// pd<ddmmyyyy>.csv - the same payload as pr but WITH a SYMBOL column, so it serves two purposes:
+// IND_SEC='Y' rows give index OHLC + 52-week range (Nifty 50, Midcap, Bank, and INDIA VIX), and the
+// equity rows give the NAME -> SYMBOL map that the name-keyed files (hl, gl) need to be usable.
+function parsePdIndexAndNames(text){
+  const lines=String(text||'').split(/\r?\n/).filter(Boolean);
+  if(!lines.length) return;
+  const head=_nseCells(lines[0]).map(h=>h.toUpperCase());
+  const ix=n=>head.indexOf(n);
+  const iSym=ix('SYMBOL'),iSec=ix('SECURITY'),iPrev=ix('PREV_CL_PR'),iClose=ix('CLOSE_PRICE'),
+        iInd=ix('IND_SEC'),iHi=ix('HI_52_WK'),iLo=ix('LO_52_WK');
+  if(iSec<0||iClose<0) return;
+  const num=v=>{const x=Number(String(v||'').replace(/,/g,''));return Number.isFinite(x)?x:null;};
+  for(let k=1;k<lines.length;k++){
+    const f=_nseCells(lines[k]); if(f.length<head.length) continue;
+    const name=(f[iSec]||'').trim(); if(!name) continue;
+    const sym0=iSym>=0?normSym(f[iSym]):'';
+    const isConstituent=iInd>=0&&(f[iInd]||'').toUpperCase()==='Y';
+    // CRITICAL: IND_SEC='Y' does NOT mark an index row — it marks an index CONSTITUENT.
+    // In pd, 139 rows are true indices (IND_SEC=Y, blank SERIES, NO SYMBOL) and a further 50 are
+    // Nifty 50 member EQUITIES (IND_SEC=Y, SERIES=EQ, WITH a symbol). Keying on IND_SEC alone
+    // classified TCS and 49 other large caps as indices and dropped them from the name map, which
+    // is why Nifty 50 membership resolved to zero. An index row is one with NO SYMBOL.
+    if(!sym0){
+      if(!isConstituent) continue;
+      const close=num(f[iClose]),prev=num(f[iPrev]),hi=num(f[iHi]),lo=num(f[iLo]);
+      if(close===null) continue;
+      NSE_INDEX[name]={close,prev,
+        pct:(prev&&prev!==0)?+(((close-prev)/prev)*100).toFixed(2):null,
+        high52:hi||null,low52:lo||null,
+        rangePos:(hi&&lo&&hi>lo)?+(((close-lo)/(hi-lo))*100).toFixed(1):null};
+    } else {
+      NSE_NAME_TO_SYM[name.toUpperCase()]=sym0;
+      // A symbol-bearing row flagged IND_SEC=Y is a Nifty 50 constituent. This is a SYMBOL-keyed
+      // membership source, far more reliable than joining gl's truncated 24-char names.
+      if(isConstituent) NSE_INDEX_GROUP_BYSYM[sym0]='Nifty 50';
+    }
+  }
+}
+// bh<ddmmyyyy>.csv - securities that HIT their price band today (SYMBOL,SERIES,SECURITY,HIGH/LOW).
+// This is the literal upper-circuit list, kept as a labelled cohort for forward learning.
+function parseBandHits(text){
+  const lines=String(text||'').split(/\r?\n/).filter(Boolean);
+  const head=_nseCells(lines[0]||'').map(h=>h.toUpperCase());
+  const iSym=head.indexOf('SYMBOL'),iHL=head.findIndex(h=>h.includes('HIGH'));
+  if(iSym<0||iHL<0) return;
+  for(let k=1;k<lines.length;k++){
+    const f=_nseCells(lines[k]); if(f.length<=Math.max(iSym,iHL)) continue;
+    const sym=normSym(f[iSym]),hl=(f[iHL]||'').toUpperCase();
+    if(sym&&(hl==='H'||hl==='L')) NSE_BAND_HIT[sym]=hl;
+  }
+}
+// hl<ddmmyyyy>.csv - securities that made a NEW 52-week high or low. Keyed on the padded security
+// NAME, so it is stored BY NAME and resolved through NSE_NAME_TO_SYM at read time: zip members
+// arrive in arbitrary order, and resolving eagerly here would silently drop every row when hl
+// happens to parse before pd.
+function parseNewHighLow(text){
+  const lines=String(text||'').split(/\r?\n/).filter(Boolean);
+  const head=_nseCells(lines[0]||'').map(h=>h.toUpperCase());
+  const iSec=head.indexOf('SECURITY'),iNew=head.indexOf('NEW'),iPrev=head.indexOf('PREVIOUS'),
+        iSt=head.findIndex(h=>h.includes('STATUS'));
+  if(iSec<0||iSt<0) return;
+  const num=v=>{const x=Number(String(v||'').replace(/,/g,''));return Number.isFinite(x)?x:null;};
+  for(let k=1;k<lines.length;k++){
+    const f=_nseCells(lines[k]); if(f.length<=iSt) continue;
+    const name=(f[iSec]||'').trim().toUpperCase(),st=(f[iSt]||'').toUpperCase();
+    if(!name||(st!=='H'&&st!=='L')) continue;
+    NSE_NEW_HL_BYNAME[name]={status:st,now:iNew>=0?num(f[iNew]):null,prev:iPrev>=0?num(f[iPrev]):null};
+  }
+}
+// gl<ddmmyyyy>.csv - gainers/losers under section headers ("Nifty 50 Sec.", "Nifty Next 50 Sec.",
+// "OTHER SECURITIES"). A header row has an EMPTY first cell and the section name in the second.
+// This is the app's only source of index membership.
+function parseIndexGroups(text){
+  const lines=String(text||'').split(/\r?\n/);
+  let group='Other';
+  for(let k=1;k<lines.length;k++){
+    const f=_nseCells(lines[k]); if(f.length<2) continue;
+    const gl=(f[0]||'').toUpperCase(),name=(f[1]||'').trim();
+    if(!gl&&name){
+      const u=name.toUpperCase();
+      group=u.includes('NIFTY 50')?'Nifty 50':u.includes('NEXT 50')?'Nifty Next 50':'Other';
+      continue;
+    }
+    // FIRST assignment wins. The file lists Nifty 50, then Nifty Next 50, then OTHER SECURITIES —
+    // and OTHER repeats the index constituents, so last-write-wins silently reclassified every
+    // Nifty 50 name as 'Other' (measured: 0 Nifty 50 members before this fix).
+    if((gl==='G'||gl==='L')&&name){
+      const key=name.toUpperCase();
+      if(!(key in NSE_INDEX_GROUP_BYNAME)) NSE_INDEX_GROUP_BYNAME[key]=group;
+    }
+  }
+}
+// Lazy resolvers so member order inside the zip cannot matter.
+function getNewHighLowMap(){
+  const out={};
+  Object.entries(NSE_NEW_HL_BYNAME).forEach(([name,v])=>{const sym=NSE_NAME_TO_SYM[name];if(sym)out[sym]=v;});
+  return out;
+}
+function getIndexGroupMap(){
+  // gl's names are truncated to 24 characters, so the name join is lossy. pd's symbol-keyed
+  // constituent flag is authoritative for Nifty 50 and takes precedence.
+  const out={};
+  Object.entries(NSE_INDEX_GROUP_BYNAME).forEach(([name,g])=>{const sym=NSE_NAME_TO_SYM[name];if(sym)out[sym]=g;});
+  Object.entries(NSE_INDEX_GROUP_BYSYM).forEach(([sym,g])=>{out[sym]=g;});
+  return out;
+}
+// v1076 MARKET REGIME. Assembled from the index rows (Nifty and India VIX with their own 52-week
+// ranges), the official Market Activity advances/declines, and live intraday breadth.
+// It is deliberately NOT a scoring input. It is stamped onto every recorded outcome so that D1
+// (ignition vs composite) and D4 (extension predicts continuation) can be evaluated WITHIN a regime
+// instead of pooled: D4 was measured on a tape where India VIX sat at the 19th percentile of its own
+// 52-week range, which is exactly the condition that flatters momentum continuation. Averaging that
+// with a stressed tape produces a number describing neither.
+// The label is a percentile of VIX's OWN 52-week range, so no fixed VIX level is hard-coded.
+function buildMarketRegime(){
+  const idx=n=>NSE_INDEX[n]||null;
+  const vix=idx('India VIX'),nifty=idx('Nifty 50'),mid=idx('NIFTY MIDCAP 150')||idx('Nifty Midcap 50');
+  const adv=NSE_MARKET&&NSE_MARKET.advances!=null?NSE_MARKET.advances:null;
+  const dec=NSE_MARKET&&NSE_MARKET.declines!=null?NSE_MARKET.declines:null;
+  const breadth=(MARKET_INTRADAY&&MARKET_INTRADAY.advPct!=null)?+(MARKET_INTRADAY.advPct*100).toFixed(1):null;
+  const vp=vix?vix.rangePos:null;
+  if(!vix&&!nifty&&adv===null&&breadth===null) return null;
+  return {
+    vix:vix?vix.close:null, vixPct:vix?vix.pct:null, vixRangePos:vp,
+    niftyPct:nifty?nifty.pct:null, niftyRangePos:nifty?nifty.rangePos:null,
+    midcapRangePos:mid?mid.rangePos:null,
+    advances:adv, declines:dec,
+    advDecRatio:(adv!=null&&dec)?+(adv/dec).toFixed(2):null,
+    breadthPct:breadth,
+    label:vp===null?'unknown':vp<25?'calm':vp<50?'normal':vp<75?'elevated':'stressed'
+  };
+}
 function parseMarketActivity(text){
   const m={date:null,dateISO:null,niftyPct:null,advances:null,declines:null,tradedValueCr:null,marketCapCr:null,indices:{}};
   const numf=s=>{const x=Number(String(s).replace(/[,%\s]/g,''));return Number.isFinite(x)?x:null;};
@@ -1726,6 +1869,11 @@ function recordRecommendationOutcomeScan(scan){
   if(scan.recommendations?.length&&(!currentIssue||(currentIssue.picks||[]).every(p=>(p.observations||0)===0))){
     store.issues[scan.date]={
       date:scan.date,threshold:scan.threshold,horizonDays:adaptiveHorizon,
+      // v1076: the market REGIME this cohort was issued into. Every forward conclusion drawn from
+      // this store (RULES.md D1, D4) is conditional on the tape it was measured in, and pooling a
+      // calm trending market with a stressed one averages two different markets into nothing. D4
+      // was measured at a 19th-percentile VIX; nothing recorded that until now.
+      regime:(typeof MARKET_REGIME!=='undefined'&&MARKET_REGIME)?MARKET_REGIME:null,
       picks:scan.recommendations.map(p=>({symbol:p.symbol,entryPrice:p.entryPrice,score:p.score,rank:p.rank,
         features:compactOutcomeFeatures(p.features,outcomeFeatureOrder),
         // v1073: the entry-gate state AT ISSUE TIME. Without this the store cannot say whether a
@@ -2049,6 +2197,10 @@ function detectNSE(filename,content){
   if(/^bc\d{6,8}\.csv$/.test(raw)){parseCorpActions(content);return null;} // PR-zip corporate actions (v552); null = no load-status pill (covered by the zip)
   if(/^bm\d{6,8}\.txt$/.test(raw)){parseBoardMeetings(content);return null;} // PR-zip board meetings (v554)
   if(/^an\d{6,8}\.txt$/.test(raw)){parseAnnouncements(content);return null;} // PR-zip announcements (v554)
+  if(/^pd\d{6,8}\.csv$/.test(raw)){parsePdIndexAndNames(content);return null;} // PR-zip index OHLC + name->symbol map (v1076)
+  if(/^bh\d{6,8}\.csv$/.test(raw)){parseBandHits(content);return null;}          // PR-zip price-band hits = upper circuits (v1076)
+  if(/^hl\d{6,8}\.csv$/.test(raw)){parseNewHighLow(content);return null;}        // PR-zip NEW 52-week highs/lows (v1076)
+  if(/^gl\d{6,8}\.csv$/.test(raw)){parseIndexGroups(content);return null;}       // PR-zip index membership (v1076)
   if(/^ma\d{6,8}\.csv$/.test(raw)){parseMarketActivity(content);return'market';} // Market Activity Report (v556)
   if(fn.includes('nse holidays')){parseNSEHolidays(content);return'holidays';}
   return null;
@@ -6168,6 +6320,10 @@ function renderStatusBar(){
     if(NSE_MARKET&&NSE_MARKET.niftyPct!=null){
       const sgn=v=>(v>=0?'+':'')+v.toFixed(2)+'%';
       officialInline=` · Nifty ${sgn(NSE_MARKET.niftyPct)}`;
+      // v1076: regime label + India VIX percentile of its own 52-week range.
+      if(MARKET_REGIME&&MARKET_REGIME.vix!=null){
+        officialInline+=` · VIX ${MARKET_REGIME.vix.toFixed(2)}${MARKET_REGIME.vixRangePos!=null?` (${MARKET_REGIME.vixRangePos.toFixed(0)}th pct → ${MARKET_REGIME.label})`:''}`;
+      }
       const sect=Object.entries(NSE_MARKET.indices||{}).filter(([n])=>/^Nifty (Auto|Bank|IT|Pharma|FMCG|Metal|Realty|Energy|Media|Infra|PSU Bank|Fin Service|Healthcare|Consumption|Commodities|Serv Sector)$/.test(n)).sort((a,b)=>(b[1]||0)-(a[1]||0));
       const ad=(NSE_MARKET.advances!=null&&NSE_MARKET.declines!=null)?` · Adv/Dec ${NSE_MARKET.advances}/${NSE_MARKET.declines}`:'';
       const strong=sect[0]?` · strongest ${sect[0][0]} ${sgn(sect[0][1])}`:'',weak=sect.length>1?` · weakest ${sect[sect.length-1][0]} ${sgn(sect[sect.length-1][1])}`:'';
@@ -7312,6 +7468,9 @@ function applySavedFiltersForMode(mode){
     const uploadSession=getModelTradingDate(receivedAt);
     window._lastScannerSessionTag=sessionTag;
     ALL=radarScoreRows(raw);
+    // v1076: build the regime AFTER scoring — it needs the zip's index rows plus the live intraday
+    // breadth that radarScoreRows computes. Display + outcome stamping only; never a scoring input.
+    try{MARKET_REGIME=buildMarketRegime();}catch(e){console.warn('regime build failed',e);MARKET_REGIME=null;}
     const fileTag=scannerFile.name+' · '+raw.length+' stocks';
     try{const ft=document.getElementById('fileTag');if(ft)ft.textContent=fileTag;}catch(e){}
     FS.set(modeKey(ALL_STORE,mode),{schema:ALL_STORE_SCHEMA,data:compactRankingRows(ALL),fileTag,rockets:RADAR.rockets,continuationCount:RADAR.continuationCount,featureCount:RADAR.features.length,ts:new Date().toISOString()});
@@ -7368,7 +7527,7 @@ async function processFiles(files,sourceLabel,opts={}){
   // Upload CHANGED canonical input files to Drive in the background. Rankings are built
   // from the selected local files immediately, because the market does not wait for Drive.
   saveInputsInBackground(files,{silent});
-  NSE_BHAV={};NSE_52W={};NSE_SURV={};NSE_BULK={};NSE_BLOCK={};NSE_PRICE_BAND={};NSE_DEAL_NET={};NSE_CORP_ACTION={};NSE_BOARD_MEETING={};NSE_ANNOUNCE={};NSE_MARKET=null;NSE_STATUS={};NSE_SERIES={};
+  NSE_BHAV={};NSE_52W={};NSE_SURV={};NSE_BULK={};NSE_BLOCK={};NSE_PRICE_BAND={};NSE_DEAL_NET={};NSE_CORP_ACTION={};NSE_BOARD_MEETING={};NSE_ANNOUNCE={};NSE_MARKET=null;NSE_INDEX={};NSE_NAME_TO_SYM={};NSE_BAND_HIT={};NSE_NEW_HL_BYNAME={};NSE_INDEX_GROUP_BYNAME={};NSE_INDEX_GROUP_BYSYM={};MARKET_REGIME=null;NSE_STATUS={};NSE_SERIES={};
   let tvFile=null,nseZip=null,holdFile=null,posFile=null,ordFile=null,tbFile=null,holidayFile=false,holidayFileName='';
   for(const f of files){
     const name=inputNameLower(f.name);
