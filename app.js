@@ -1,5 +1,5 @@
-const BUILD_TS='2026-07-29 08:36 IST'; // release build time (IST)
-const APP_VERSION=1072; // v1072: R2 buyback bonus retired (its only evidence was a crypto event, voided); rule graduation/retirement bar adopted.
+const BUILD_TS='2026-07-29 09:47 IST'; // release build time (IST)
+const APP_VERSION=1073; // v1073: per-stock target tracks its own capacity (no anchor drag); day-1 time exit; FIFO intraday round-trip fix.
 // v556: parse the NSE Market Activity Report (MA<date>.csv) — official Nifty %, advances/declines and sector index moves shown as market CONTEXT in the status bar (EOD data, display only, never fed into per-row scoring); MA added to the ℹ️ file manifest.
 // v555 market-cycle stage awareness (stateless, self-calibrating): per-row stage label (1 accumulation · 2 breakout · 3 event · 4 profit-booking · 5 re-accumulation · 6 second-leg); a quiet-accumulation signal (conjunction-of-percentiles) injected via the rocket-diagnostic weighting; sell-the-news decay off Recent earnings date (horizon = review days). v1065 makes the market-breadth gauge an entry-eligibility input while still never changing ranking.
 const GOOGLE_DRIVE_CLIENT_ID='1015012642264-oi2nelv3v90k3d39r994a6nelgjs2a56.apps.googleusercontent.com'; // Public OAuth Web Client ID.
@@ -4156,8 +4156,19 @@ function buildOpenPositionsPanel(query=''){
       tslNext[pos.symbol]=tslInfo;
       if(JSON.stringify(tslStore[pos.symbol]||{})!==JSON.stringify(tslInfo)) tslChanged=true;
     }
+    // v1073 DAY-1 TIME EXIT. Measured on the fresh tradebook cohort (bought 2026-07-13+, n=320):
+    // 0-day holds made +Rs 11,743, 1-day +Rs 54, 2-3 day -Rs 3,600, 4-7 day -Rs 2,620. Every rupee of
+    // profit came from positions that resolved the same day; the 131 trips that survived past day 1
+    // cost -Rs 6,220 between them. Separately, 310 graded picks reached a mean peak of +5.13% but
+    // closed at +0.80% - an 84% give-back. A position that has NOT hit its target by the end of its
+    // first day is, on this evidence, no longer working; holding it is what fills the book with the
+    // permanently-red residue the owner sees. Flag it for exit. This is a DISPLAYED decision, never
+    // an automatic order - execution stays manual, and it never touches score or rank.
+    const hitTarget=(avg&&ltp&&targetPct)?(ltp>=avg*(1+targetPct/100)):false;
+    const timeExit=daysHeld!=null&&daysHeld>=1&&!hitTarget;
     rows.push({
       sym:pos.symbol,qty,avg,ltp,pnlPct,pnlRs,capital,daysHeld,targetPrice,stopPrice,targetPct,exitPolicy,
+      timeExit,hitTarget,
       tslPoints:tslInfo?.trailStepPoints??tslInfo?.trailPoints??null,
       score:isFinite(Number(scannerRow?.score))?Number(scannerRow.score):null,
       rank:scannerRow?.rank??null,setup:scannerRow?.setup||'',
@@ -4189,6 +4200,13 @@ function buildOpenPositionsPanel(query=''){
     {key:'pnlRs',label:'P&L ₹',align:'right',fmt:v=>v!=null?fmtSignedINR(v):'—',clrFn:v=>v==null?'var(--t3)':v>0?'var(--green)':v<0?'var(--red)':'var(--t2)'},
     {key:'capital',label:'Capital ₹',align:'right',fmt:v=>v!=null?fmtINR(v):'—',clrFn:()=>'var(--t2)'},
     {key:'daysHeld',label:'Days Held',align:'right',fmt:daysFmt,clrFn:()=>'var(--t1)'},
+    // v1073: the day-1 time exit, shown next to Days Held so the two read together.
+    {key:'timeExit',label:'Action',align:'left',fmt:(v,row)=>row.hitTarget
+      ? `<span style="font-size:9px;background:rgba(34,197,94,.14);color:var(--green);border-radius:5px;padding:1px 7px;white-space:nowrap" title="Trading at or above its target — the exit policy has done its job.">at target</span>`
+      : v
+        ? `<span style="font-size:9px;background:rgba(245,158,11,.14);color:var(--amber);border:1px solid rgba(245,158,11,.3);border-radius:5px;padding:1px 7px;white-space:nowrap" title="Held past its first day without reaching target. Measured on the fresh cohort: same-day resolutions made +Rs 11,743 while the 131 trips that survived past day 1 lost -Rs 6,220 between them, and picks give back 84% of their peak on average. Displayed decision only — no order is placed.">time exit</span>`
+        : `<span style="font-size:9px;color:var(--t3)">holding</span>`,
+      clrFn:()=>''},
     {key:'targetPrice',label:'Target ₹',align:'right',fmt:(v,row)=>v!=null?fmtINR(v)+`<span style="font-size:10px;color:var(--t3);margin-left:4px">+${Number(row.targetPct).toFixed(2)}%</span>`:'—',clrFn:()=>'var(--green)'},
     {key:'stopPrice',label:'SL ₹',align:'right',fmt:(v,row)=>v!=null?fmtINR(v)+`<span style="font-size:10px;color:var(--t3);margin-left:4px">-${Number(row.exitPolicy?.stopPct).toFixed(2)}%</span>`:'—',clrFn:()=>'var(--red)'},
     {key:'tslPoints',label:'TSL pts',align:'right',bold:true,fmt:v=>v!=null?Number(v).toFixed(2):'—',clrFn:v=>v==null?'var(--t3)':'var(--amber)'},
@@ -5334,12 +5352,27 @@ function getRowExitPolicy(row,buyPrice=null){
   const capacity=hasAtr&&hasRange?Math.sqrt(atr*range):hasAtr?atr:hasRange?range:null;
   let targetPct=anchor;
   let targetSource='portfolio fallback';
-  if(capacity>0&&anchor>0){
-    const blended=Math.sqrt(capacity*anchor);
-    targetPct=roundPct05(Math.min(capacity,blended));
-    const capacityFloor=Math.floor(capacity*20)/20;
-    if(capacityFloor>0) targetPct=Math.min(targetPct,capacityFloor);
+  if(capacity>0){
+    // v1073: the target is the STOCK'S OWN measured capacity. It is no longer geometrically dragged
+    // toward the portfolio anchor. The old form was min(capacity, sqrt(capacity × anchor)), and with
+    // an anchor around 2.3% that blend pulled EVERY target below its own stop: measured 2026-07-29
+    // over 400 live rows, reward:risk was median 0.53, max 0.80, and NOT ONE row of 400 reached 1.0.
+    // Across 310 graded picks the mean peak actually reached was +5.13% while the median target was
+    // set at 3.05% — capping winners at ~60% of what they reach while risking 5.79% to do it. That
+    // asymmetry, not the scorer, is why the open book is permanently red: the target harvests the
+    // winners out and the wider stop leaves the losers sitting.
+    // The anchor is retained as portfolio CONTEXT (returned as anchorPct) and an explicit MANUAL
+    // override still wins outright, because that is the owner typing an instruction. What the anchor
+    // may no longer do is cap an individual stock below its own demonstrated ability.
+    // FLOOR to 0.05, never round: roundPct05 can round UP past capacity (e.g. 1.93 -> 1.95), and
+    // the v1060 contract is that a stock's target never exceeds its own movement capacity.
+    const toStep=v=>Math.floor(v*20)/20;
+    targetPct=toStep(capacity);
     targetSource=hasAtr&&hasRange?'ATR × range capacity':'single stock-range capacity';
+    if(active.source==='manual'&&anchor>0){
+      targetPct=toStep(Math.min(anchor,capacity));
+      targetSource='manual anchor (capped at stock capacity)';
+    }
   }
   let minGrossPct=null;
   if(targetPct>0){
@@ -5351,9 +5384,13 @@ function getRowExitPolicy(row,buyPrice=null){
   const stopSource=(Math.abs(Number(row?.slPct))>0)?'explicit stock stop'
     :hasAtr?'ATR stock stop'
     :(Number(TRADEBOOK_STATS?.adaptiveSL)>0?'learned portfolio fallback':'minimum-risk fallback');
+  // v1073: reward:risk is returned on EVERY row and rendered in the TGT/SL tooltips. It sat below
+  // 1.0 on 400/400 rows for releases without anyone noticing, because nothing ever displayed it.
+  const rewardRisk=(targetPct>0&&stopPct>0)?+(targetPct/stopPct).toFixed(2):null;
   return {
     targetPct:targetPct>0?+targetPct.toFixed(2):null,
     stopPct:+stopPct.toFixed(2),
+    rewardRisk,
     capacityPct:capacity>0?+capacity.toFixed(2):null,
     minGrossPct:minGrossPct>0?+minGrossPct.toFixed(2):null,
     viable,
@@ -5808,7 +5845,7 @@ function renderTable(){
       relvol:`<td>${s.relvol!=null&&isFinite(s.relvol)?Number(s.relvol).toFixed(2)+'×':'—'}</td>`,
       turnover:`<td>${fV(s.turnover)}</td>`,
       tgt:`<td style="color:${exitPolicy.viable?'var(--green)':'var(--red)'};font-weight:700" title="${escHtml(exitPolicy.viable?`${exitPolicy.targetSource}; portfolio anchor ${exitPolicy.anchorPct?.toFixed(2)??'—'}%`:`Stock capacity ${exitPolicy.capacityPct?.toFixed(2)??'—'}% cannot clear the ${exitPolicy.minGrossPct?.toFixed(2)??'—'}% cost + net hurdle`)}">${exitPolicy.viable&&exitPolicy.targetPct!=null?'+'+exitPolicy.targetPct.toFixed(2)+'%':'—'}</td>`,
-      sl:`<td style="color:var(--red);font-weight:700" title="${escHtml(exitPolicy.stopSource)}">−${exitPolicy.stopPct.toFixed(2)}%</td>`,
+      sl:`<td style="color:var(--red);font-weight:700" title="${escHtml(exitPolicy.stopSource+(exitPolicy.rewardRisk!=null?` · reward:risk ${exitPolicy.rewardRisk.toFixed(2)} (target ${exitPolicy.targetPct}% vs stop ${exitPolicy.stopPct.toFixed(2)}%)`+(exitPolicy.rewardRisk<1?' — BELOW 1.0: this stock risks more than it aims to make':''):''))}">−${exitPolicy.stopPct.toFixed(2)}%</td>`,
       alloc:`<td class="alloc-cell" data-sym="${s.symbol}">${(()=>{
         if(!am) return '<span style="color:var(--t3);font-size:11px">—</span>';
         if(am.rejected) return `<span style="color:var(--red);font-size:10px" title="${escHtml(am.reason||'Stock-specific target cannot clear costs and desired net.')}">no viable target</span>`;
@@ -6691,14 +6728,31 @@ function parseTradebook(text){
     bySymbol[sym].push({type,qty:Math.abs(qty),price,date,time});
   });
 
-  // Consolidate multiple fills of same stock/day/type into one entry (qty-weighted avg price).
-  // This matches Zerodha's per-day P&L approach and prevents fill fragmentation.
+  // Consolidate multiple fills of the same stock/day/type into one entry (qty-weighted avg price)
+  // to prevent fill fragmentation — but ONLY across CONSECUTIVE same-type fills.
+  //
+  // v1073 FIX. This previously keyed on `type|date`, which merged EVERY buy on a date into one lot
+  // stamped at the first fill's time. On a day that went buy -> sell -> buy, that handed the later
+  // buy's shares to the earlier sell and blended their prices, so FIFO matched a sell against stock
+  // not yet owned. Measured on RICOAUTO (12 buys / 15 sells, 998 qty each way, heavily round-tripped):
+  // the 2026-07-28 exit was reported at buy 119.75 / gross +Rs 6,788, when true per-fill FIFO gives
+  // 143.30 / +Rs 1,325 — a Rs 5,463 overstatement that inflated the whole Latest Session panel to
+  // +Rs 5,745 gross against an actual +Rs 281. Zerodha's own holdings average for RICOAUTO was
+  // 141.15, corroborating the per-fill figure over the consolidated one. Symbols that are not
+  // round-tripped intraday (GANESHBE, MONARCH, INDOFARM, UFLEX) were unaffected either way.
+  //
+  // Fills are also time-sorted BEFORE grouping: file order is not guaranteed chronological, and a
+  // mis-ordered pair would otherwise be merged into the wrong lot.
   Object.keys(bySymbol).forEach(sym=>{
-    const grps={};const order=[];
-    bySymbol[sym].forEach(t=>{
-      const k=t.type+'|'+t.date;
-      if(!grps[k]){grps[k]={type:t.type,qty:0,totalVal:0,date:t.date,time:t.time};order.push(grps[k]);}
-      grps[k].qty+=t.qty; grps[k].totalVal+=t.price*t.qty;
+    const src=bySymbol[sym].slice().sort((a,b)=>String(a.time||'').localeCompare(String(b.time||'')));
+    const order=[];
+    src.forEach(t=>{
+      const last=order[order.length-1];
+      if(last&&last.type===t.type&&last.date===t.date){
+        last.qty+=t.qty; last.totalVal+=t.price*t.qty;
+      } else {
+        order.push({type:t.type,qty:t.qty,totalVal:t.price*t.qty,date:t.date,time:t.time});
+      }
     });
     bySymbol[sym]=order.map(g=>({...g,price:g.qty?g.totalVal/g.qty:0}));
   });
