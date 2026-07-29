@@ -1,5 +1,5 @@
-const BUILD_TS='2026-07-29 09:47 IST'; // release build time (IST)
-const APP_VERSION=1073; // v1073: per-stock target tracks its own capacity (no anchor drag); day-1 time exit; FIFO intraday round-trip fix.
+const BUILD_TS='2026-07-29 10:09 IST'; // release build time (IST)
+const APP_VERSION=1074; // v1074: outcome store now stamps entry-gate state + true Radar rank, so the wait-for-pullback gate can be falsified.
 // v556: parse the NSE Market Activity Report (MA<date>.csv) — official Nifty %, advances/declines and sector index moves shown as market CONTEXT in the status bar (EOD data, display only, never fed into per-row scoring); MA added to the ℹ️ file manifest.
 // v555 market-cycle stage awareness (stateless, self-calibrating): per-row stage label (1 accumulation · 2 breakout · 3 event · 4 profit-booking · 5 re-accumulation · 6 second-leg); a quiet-accumulation signal (conjunction-of-percentiles) injected via the rocket-diagnostic weighting; sell-the-news decay off Recent earnings date (horizon = review days). v1065 makes the market-breadth gauge an entry-eligibility input while still never changing ranking.
 const GOOGLE_DRIVE_CLIENT_ID='1015012642264-oi2nelv3v90k3d39r994a6nelgjs2a56.apps.googleusercontent.com'; // Public OAuth Web Client ID.
@@ -1728,6 +1728,24 @@ function recordRecommendationOutcomeScan(scan){
       date:scan.date,threshold:scan.threshold,horizonDays:adaptiveHorizon,
       picks:scan.recommendations.map(p=>({symbol:p.symbol,entryPrice:p.entryPrice,score:p.score,rank:p.rank,
         features:compactOutcomeFeatures(p.features,outcomeFeatureOrder),
+        // v1073: the entry-gate state AT ISSUE TIME. Without this the store cannot say whether a
+        // graded pick was one the gate approved or one it withheld, so "is wait-for-pullback worth
+        // it?" is unanswerable — which is exactly the state it was in. entryReady false means the
+        // gate said wait; blockReason names which sub-condition fired, because they are different
+        // claims: rangeConsumed/bandExtended are structural, while cooling is a 5m/15m tick that was
+        // measured at v1069 to be microstructure noise (median +0.01%, non-positive 45% of the time).
+        entryReady:p.entryReady!==false,
+        blockReason:p.entryReady===false?[
+          (p.entryTiming?.rangeUsed>=75?'rangeConsumed':''),
+          (p.entryTiming?.cooling?'cooling':''),
+          (p.entryTiming?.bandExtended?'bandExtended':''),
+          (p.entryTiming?.gapLedFade?'gapLedFade':''),
+          (p.entryTiming?.failedBreakout?'failedBreakout':''),
+          (p.entryTiming?.weakMarketBlocked?'weakMarket':'')
+        ].filter(Boolean).join('+')||'peak':null,
+        rangeLocationAtIssue:p.entryTiming?.rangeLocation??null,
+        rangeUsedAtIssue:p.entryTiming?.rangeUsed??null,
+        radarRank:p.radarRank??null,
         observations:0,evaluatedThrough:null,rocketDate:null,rocketDays:null,
         bestHighProfitPct:null,bestCloseProfitPct:null,finalCloseProfitPct:null,worstLowProfitPct:null,
         conversionHighProfitPct:null,conversionCloseProfitPct:null,conversionWorstLowProfitPct:null,conversionAssessed:false,
@@ -1768,11 +1786,18 @@ function getRecommendationOutcomeSummary(){
   };
 }
 function getDisplayedEntryCandidates(rows){
-  // Top-20 actionable Radar candidates: basket-eligible, valid price, not surveillance-flagged.
+  // Top-20 Radar candidates: basket-eligible, valid price, not surveillance-flagged.
+  //
+  // DELIBERATELY DOES NOT FILTER `entryReady` (v1073 — do not "fix" this to match applyFilters).
+  // applyFilters removes entry-blocked rows from the DISPLAY; this cohort keeps them, so the outcome
+  // store grades blocked and ready picks side by side. That mismatch is the ONLY control group the
+  // app has for answering whether the "wait for pullback" gate earns its place: without it, every
+  // graded pick would be one the gate already approved and the gate could never be falsified.
+  // Each pick now carries its entryReady state and block reason (see recordRecommendationOutcomeScan),
+  // so the two cohorts can be compared on forward outcomes rather than on same-day circular evidence.
   if(!Array.isArray(rows)||!rows.length) return [];
   return rows
-    // v1070: held no longer excludes a candidate — this cohort must mirror what the ranking
-    // actually recommends, or the outcome store measures a different list than the one shown.
+    // v1070: held no longer excludes a candidate.
     .filter(s=>s.symbol&&Number(s.price)>0&&s.basketEligible!==false&&!NSE_SURV[s.symbol]?.length)
     .sort((a,b)=>(Number(b.score)||0)-(Number(a.score)||0)||a.symbol.localeCompare(b.symbol))
     .slice(0,20);
@@ -7282,8 +7307,16 @@ function applySavedFiltersForMode(mode){
       // candidates' later attainable highs; the scorer itself stays stateless.
       const threshold=getEffectiveTgtPct()||TRADEBOOK_STATS?.adaptiveTGT||4;
       const eligibleCandidates=getDisplayedEntryCandidates(ALL).filter(s=>s.price>0);
+      // v1073: carry the entry-gate state and the TRUE Radar rank into the outcome record.
+      // `rank:i+1` alone was the position within this cohort, not the stock's rank in the full
+      // cross-section — so every historical rank-bucket analysis was really bucketing cohort index.
+      // Both are kept: `rank` stays the cohort slot for continuity with existing records, and
+      // `radarRank` is the real one. entryReady/entryTiming let the store separate picks the
+      // "wait for pullback" gate approved from the ones it withheld.
       const recommendations=eligibleCandidates
-        .map((s,i)=>({symbol:s.symbol,entryPrice:s.price,score:s.score,rank:i+1,features:{}}));
+        .map((s,i)=>({symbol:s.symbol,entryPrice:s.price,score:s.score,rank:i+1,
+          radarRank:s.rank??null,entryReady:s.entryReady!==false,entryTiming:s.entryTiming||null,
+          features:{}}));
       window._lastObservedDailyMoves=buildObservedDailyMoves(raw);
       window._lastStockOutcomeScan={
         date:uploadSession,sourceDate:uploadSession,ts:receivedAt,threshold,
