@@ -1,5 +1,5 @@
-const BUILD_TS='2026-07-28 15:51 IST'; // release build time (IST)
-const APP_VERSION=1071; // v1071: volume baselines + beta excluded from features (size/beta bias); ignition gains a 60-day volume-norm term.
+const BUILD_TS='2026-07-29 08:36 IST'; // release build time (IST)
+const APP_VERSION=1072; // v1072: R2 buyback bonus retired (its only evidence was a crypto event, voided); rule graduation/retirement bar adopted.
 // v556: parse the NSE Market Activity Report (MA<date>.csv) — official Nifty %, advances/declines and sector index moves shown as market CONTEXT in the status bar (EOD data, display only, never fed into per-row scoring); MA added to the ℹ️ file manifest.
 // v555 market-cycle stage awareness (stateless, self-calibrating): per-row stage label (1 accumulation · 2 breakout · 3 event · 4 profit-booking · 5 re-accumulation · 6 second-leg); a quiet-accumulation signal (conjunction-of-percentiles) injected via the rocket-diagnostic weighting; sell-the-news decay off Recent earnings date (horizon = review days). v1065 makes the market-breadth gauge an entry-eligibility input while still never changing ranking.
 const GOOGLE_DRIVE_CLIENT_ID='1015012642264-oi2nelv3v90k3d39r994a6nelgjs2a56.apps.googleusercontent.com'; // Public OAuth Web Client ID.
@@ -2574,10 +2574,16 @@ function radarAnalyze(headers,rawRows,supplements={},heldSymbols=new Set()){
     if(gap>7)rawScore-=Math.min(6,(gap-7)*.8);
     if(turn<5e5)rawScore-=7;
     if(price<5)rawScore-=5;
-    // WS3/R2 (v552): buyback event — treasury conviction, the same family as net-buying, so it uses
-    // the model's existing deal-net conviction unit (+1.5). Stateless: driven by the bc BUY BACK
-    // corporate-action event, never a cross-day share-count delta.
-    if(meta.corpToday?.kind==='buyback')rawScore+=1.5;
+    // R2 (buyback bonus) RETIRED in v1072. It was introduced in v552 as a +1.5 "treasury conviction"
+    // term, but its ONLY supporting event (E2) was a CRYPTO token buyback-and-burn logged from a
+    // crypto calendar under the ticker RAIN — which on NSE is Rain Industries Limited, an unrelated
+    // Process-industries company that had no buyback at all (trading window closed 1-Jul..10-Aug-2026;
+    // the company publicly stated there was no unpublished price-sensitive information). Verified and
+    // voided 2026-07-29. The rule therefore had ZERO evidence in this market and is removed rather
+    // than left scoring live positions. The `kind==='buyback'` CLASSIFICATION is deliberately kept
+    // (see parseCorpActions): R5 relies on it to NOT neutralise a buyback the way it neutralises a
+    // mechanical split/bonus/demerger ex-date move. Re-introduce only if a real NSE buyback event
+    // earns confirmations under the graduation bar in RULES.md.
     // Display the REAL day move for a neutralised corp-action row (scoring already used the blanked 0).
     const dispDay=meta._corpNeutralised&&meta._realDay!=null?meta._realDay:day;
     const out={symbol,name:String(raw[descI]||symbol),sector:raw[sectorI]||'',rawScore,parts,contrib,quality,
