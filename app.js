@@ -1,5 +1,5 @@
-const BUILD_TS='2026-07-29 10:09 IST'; // release build time (IST)
-const APP_VERSION=1074; // v1074: outcome store now stamps entry-gate state + true Radar rank, so the wait-for-pullback gate can be falsified.
+const BUILD_TS='2026-07-29 10:45 IST'; // release build time (IST)
+const APP_VERSION=1075; // v1075: entry-timing peak gate demoted from hard filter to label - first forward test found extension predicts continuation.
 // v556: parse the NSE Market Activity Report (MA<date>.csv) — official Nifty %, advances/declines and sector index moves shown as market CONTEXT in the status bar (EOD data, display only, never fed into per-row scoring); MA added to the ℹ️ file manifest.
 // v555 market-cycle stage awareness (stateless, self-calibrating): per-row stage label (1 accumulation · 2 breakout · 3 event · 4 profit-booking · 5 re-accumulation · 6 second-leg); a quiet-accumulation signal (conjunction-of-percentiles) injected via the rocket-diagnostic weighting; sell-the-news decay off Recent earnings date (horizon = review days). v1065 makes the market-breadth gauge an entry-eligibility input while still never changing ranking.
 const GOOGLE_DRIVE_CLIENT_ID='1015012642264-oi2nelv3v90k3d39r994a6nelgjs2a56.apps.googleusercontent.com'; // Public OAuth Web Client ID.
@@ -3539,7 +3539,7 @@ function renderStats(){
 
   const filterPills=[];
   if(SUPPRESSED_HELD>0)filterPills.push(`<span class="info-pill pill-rose" title="Stocks you already hold (Holdings + Positions + today's net Orders buys). Since v1070 these stay in the ranking and can be recommended again — the badge is a duplicate-buy warning, not a filter.">📌 ${SUPPRESSED_HELD} already held</span>`);
-  if(PEAK_TIMING_REMOVED>0)filterPills.push(`<span class="info-pill pill-amber" title="Ranked stocks withheld by the unified entry gate: peak/rejection geometry or missing stock confirmation in weak market breadth. Rank is preserved.">⏳ ${PEAK_TIMING_REMOVED} waiting for entry confirmation</span>`);
+  if(PEAK_TIMING_REMOVED>0)filterPills.push(`<span class="info-pill pill-amber" title="Ranked stocks flagged as extended by the entry-timing evidence. Since v1075 this is a LABEL, not a filter — they remain recommendable and exportable. A forward test (2026-07-28 close to 2026-07-29, n=1618) found extension predicted continuation, not reversal.">⚡ ${PEAK_TIMING_REMOVED} extended</span>`);
   const inelig=ALL.filter(s=>s.basketEligible===false).length;
   if(inelig>0)filterPills.push(`<span class="info-pill pill-orange" title="Non-EQ series, inactive status, or a price band below 10% — visible in the ranking with penalties, but never exported to the basket.">⚠ ${inelig} basket-ineligible (ranked with penalties)</span>`);
 
@@ -5861,7 +5861,7 @@ function renderTable(){
       chk:`<td style="text-align:center"><input type="checkbox" ${isSelected?'checked':''} ${canBuy?'':'disabled'} style="width:14px;height:14px;accent-color:var(--amber);cursor:${canBuy?'pointer':'not-allowed'}" onclick="event.stopPropagation()" onchange="toggleStock('${s.symbol}',this.checked)" title="${canBuy?'Include in the Zerodha basket export':'Ineligible for the basket'}"></td>`,
       rank:`<td style="font-family:'DM Mono',monospace;font-weight:800;color:var(--t1);text-align:right">${s.rank??'—'}</td>`,
       score:`<td>${radarScoreCell(s.score,'Relative same-day composite score (0-100 percentile, top-weighted). It is a ranking, not a probability.')}</td>`,
-      symbol:`<td style="font-family:'Plus Jakarta Sans',sans-serif"><button type="button" onclick='event.stopPropagation();openTradingViewChart(${JSON.stringify(String(s.symbol))})' style="padding:0;border:0;background:transparent;color:inherit;text-align:left;cursor:pointer" title="Open TradingView chart"><div style="font-weight:700;font-size:13px;color:var(--t1)">${escHtml(s.symbol)}${(()=>{const flags=s.meta?.flags||[];if(!flags.length)return '';return `<span style="font-size:8px;background:rgba(239,68,68,.15);color:var(--red);border-radius:4px;padding:1px 5px;margin-left:5px;font-weight:700;vertical-align:middle" title="NSE surveillance flags: ${escHtml(flags.join(' · '))}">⚠ ${flags.length}</span>`;})()}${s._held?`<span style="font-size:8px;background:rgba(244,114,182,.15);color:#f472b6;border-radius:4px;padding:1px 5px;margin-left:5px;font-weight:700;vertical-align:middle" title="You already hold this. Held stocks stay in the ranking (v1070) and can be recommended again — buying here ADDS to the existing position.">📌 held</span>`:''}</div><div style="font-size:9px;color:var(--t3);max-width:220px;overflow:hidden;text-overflow:ellipsis">${escHtml(s.name||'')}</div></button></td>`,
+      symbol:`<td style="font-family:'Plus Jakarta Sans',sans-serif"><button type="button" onclick='event.stopPropagation();openTradingViewChart(${JSON.stringify(String(s.symbol))})' style="padding:0;border:0;background:transparent;color:inherit;text-align:left;cursor:pointer" title="Open TradingView chart"><div style="font-weight:700;font-size:13px;color:var(--t1)">${escHtml(s.symbol)}${(()=>{const flags=s.meta?.flags||[];if(!flags.length)return '';return `<span style="font-size:8px;background:rgba(239,68,68,.15);color:var(--red);border-radius:4px;padding:1px 5px;margin-left:5px;font-weight:700;vertical-align:middle" title="NSE surveillance flags: ${escHtml(flags.join(' · '))}">⚠ ${flags.length}</span>`;})()}${s._held?`<span style="font-size:8px;background:rgba(244,114,182,.15);color:#f472b6;border-radius:4px;padding:1px 5px;margin-left:5px;font-weight:700;vertical-align:middle" title="You already hold this. Held stocks stay in the ranking (v1070) and can be recommended again — buying here ADDS to the existing position.">📌 held</span>`:''}${s.entryReady===false?`<span style="font-size:8px;background:rgba(245,158,11,.15);color:var(--amber);border-radius:4px;padding:1px 5px;margin-left:5px;font-weight:700;vertical-align:middle" title="${escHtml('Extended: '+(s.entryTiming?.reason||'upper-range entry')+'. Shown for context only — since v1075 this no longer withholds the stock. A forward test (28-Jul close to 29-Jul, n=1618) found extension predicted CONTINUATION: the 100-150% range-used bucket returned +1.40% next day against +0.75% for unblocked stocks.')}">⚡ extended</span>`:''}</div><div style="font-size:9px;color:var(--t3);max-width:220px;overflow:hidden;text-overflow:ellipsis">${escHtml(s.name||'')}</div></button></td>`,
       setup:`<td style="font-size:11px;color:var(--t2)">${escHtml(s.setup||'—')}${s.stage?' '+radarStagePill(s):''}</td>`,
       series:`<td>${radarSeriesBandPill(s)}</td>`,
       stretch:`<td style="color:${stretchColor};font-weight:700" title="A 10% move is this many multiples of the strongest daily-range estimate. Lower is more feasible.">${s.stretch!=null&&isFinite(s.stretch)?Number(s.stretch).toFixed(1)+'×':'—'}</td>`,
@@ -5959,9 +5959,21 @@ function applyFilters(){
     // flagged under a rule in the Methodology table is weeded out of recommendations.
     // Non-configured REG1 flags remain a score penalty + badge only.
     if(NSE_SURV[s.symbol]?.length){SURV_HARD_REMOVED++;REMOVED_ROWS.push({s,reason:'surv',rules:NSE_SURV[s.symbol]});return false;}
-    // Ranking asks "what is breaking out?"; entry timing separately asks "is there still room to buy?"
-    // Keep the honest score/rank for audit, but never recommend/export an upper-range exhaustion entry.
-    if(s.entryReady===false){PEAK_TIMING_REMOVED++;REMOVED_ROWS.push({s,reason:'peak'});return false;}
+    // v1075: entry timing is a LABEL, not a filter. It shipped in v559/v560 on assertion and was
+    // never evidenced. First forward test (2026-07-28 close -> 2026-07-29, EQ + turnover >= Rs 25L,
+    // n=1618, non-circular because the state is taken at the PRIOR close):
+    //   rangeUsed <25% (not blocked)   mean next +0.75%   12.8% next-day >= +2%
+    //   rangeUsed 75-100%  BLOCKED     mean next +0.75%   19.4%
+    //   rangeUsed 100-150% BLOCKED     mean next +1.40%   23.1%   <- the BEST bucket
+    //   rangeLocation top quarter (atPeak, the AND-gate)  +0.73%  18.1%  <- highest hit rate
+    // Extension predicted CONTINUATION, not reversal, so the gate was removing the best cohort —
+    // 9 of 9 in the top 10 on 2026-07-29. The `cooling` sub-term is separately a proven coin flip
+    // (v1069: price5m median +0.01%, non-positive 45% of the time) and drove 107 of 177 blocks.
+    // The state is still computed, still recorded per-pick for grading, and still shown as a badge
+    // and in the Removed panel — it simply no longer removes a stock from recommendation or export.
+    // CAVEAT recorded in RULES.md D4: this is ONE day pair on a green tape. If the accumulating
+    // per-pick evidence reverses it, restore the block here.
+    if(s.entryReady===false)PEAK_TIMING_REMOVED++;
     return (s.turnover||0)>=minTurn&&(!riskSel.length||riskSel.includes(s.risk))&&(!q||[s.symbol,s.name,s.sector].join(' ').toLowerCase().includes(q));
   });
   rows.sort((a,b)=>(a.rank??Infinity)-(b.rank??Infinity));
@@ -6958,7 +6970,8 @@ function planBasketExport(capital, selected){
   // current recommendations — at 09:15, at midnight, on a holiday. Selection quality is decided
   // upstream by each row's own evidence (entryReady, price band, basket eligibility); the wall
   // clock has no authority here. Never reintroduce a clock gate on this path.
-  let exportList=(selected||[]).filter(s=>s.entryReady!==false&&!getPriceBandBlockReason(s));
+  // v1075: entryReady is no longer an export veto (see applyFilters for the forward evidence).
+  let exportList=(selected||[]).filter(s=>!getPriceBandBlockReason(s));
   let basketAlloc=computeAlloc(capital,exportList);
   const orderCount=()=>exportList.reduce((count,s)=>{
     const qty=capital>0?(basketAlloc[s.symbol]?.qty||0):1;
