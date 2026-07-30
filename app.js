@@ -1,5 +1,5 @@
-const BUILD_TS='2026-07-30 08:21 IST'; // release build time (IST)
-const APP_VERSION=1078; // v1078: capital = invested + cash in hand (last session sells - buys, signed); stats consolidated to 7 cards with Market + Goal today/remaining.
+const BUILD_TS='2026-07-30 08:46 IST'; // release build time (IST)
+const APP_VERSION=1079; // v1079: capital = delivery + UNSETTLED today-buys + un-redeployed freed cash (fixes a settled-position double-count); Top Score card dropped.
 // v556: parse the NSE Market Activity Report (MA<date>.csv) — official Nifty %, advances/declines and sector index moves shown as market CONTEXT in the status bar (EOD data, display only, never fed into per-row scoring); MA added to the ℹ️ file manifest.
 // v555 market-cycle stage awareness (stateless, self-calibrating): per-row stage label (1 accumulation · 2 breakout · 3 event · 4 profit-booking · 5 re-accumulation · 6 second-leg); a quiet-accumulation signal (conjunction-of-percentiles) injected via the rocket-diagnostic weighting; sell-the-news decay off Recent earnings date (horizon = review days). v1065 makes the market-breadth gauge an entry-eligibility input while still never changing ranking.
 const GOOGLE_DRIVE_CLIENT_ID='1015012642264-oi2nelv3v90k3d39r994a6nelgjs2a56.apps.googleusercontent.com'; // Public OAuth Web Client ID.
@@ -993,6 +993,10 @@ let NSE_CORP_ACTION={}; // {symbol -> [{exDate:'YYYY-MM-DD', purpose, kind:'stru
 let NSE_BOARD_MEETING={}; // {symbol -> {date:'YYYY-MM-DD', purpose, isResults}} from PR-zip bm file (v554) — upcoming-event calendar
 let NSE_ANNOUNCE={}; // {symbol -> short label} from PR-zip an file (v554) — an announcement was filed this session
 let MARKET_INTRADAY=null; // v555 WS-D: {adv,dec,advPct,median} market breadth from change-from-open (entry-timing gauge)
+// v1079: the export DATE of each portfolio file, from its own lastModified. Needed because a
+// CNC buy reaches holdings on T+1: when holdings.csv is dated LATER than positions.csv, those
+// position buys have already settled into holdings and must not be added again.
+let PORTFOLIO_FILE_DATES={holdings:null,positions:null,orders:null};
 let PORTFOLIO_STALE=null; // v557: {portfolioDate,stale,sessionDate} — Positions/Orders are from a prior session
 let NSE_MARKET=null; // v556: official Market Activity Report summary {date,dateISO,niftyPct,advances,declines,tradedValueCr,marketCapCr,indices} — EOD context, display only
 // v1076: PR-zip data surveyed in RULES.md Appendix E and previously never parsed.
@@ -3419,49 +3423,80 @@ function projectGoalCompletionDate(start,target,netPctPerDay,wdMonthly,reinvestP
 // and the BTST-locked delivery margin is the margin behind those positions, already
 // represented by them, so it is not added again. This is the DEFAULT for the Capital ₹
 // field — one value drives the goal basis and allocation, and the owner can override it.
-// v1078 (owner): CASH IN HAND = (sells - buys) over the LAST SESSION in orders.csv.
-// Two owner corrections are baked in here:
-//  1. SIGNED, not floored at zero. If more was bought than sold, cash in hand genuinely went
-//     NEGATIVE - CNC lets you buy against unsettled sale proceeds, so the account really is short
-//     that amount. Flooring at zero would have reported buying power that does not exist.
-//  2. "Today" means the LAST SESSION PRESENT IN THE FILE, not the current calendar date. Orders.csv
-//     is exported end-of-day, so on any morning the newest session in it is yesterday's, and
-//     requiring a match against getSessionDate() made the whole cash term silently vanish.
-// So: capital = current invested value + cash in hand. Gross of charges - brokerage on one day's
-// turnover is immaterial against the basis.
-// An earlier attempt (v539) added ALL sells ever, double-counting stock bought on earlier days and
-// inflating the basis by roughly Rs 7.5L; the over-correction zeroed the term and it has read 0 ever
-// since. Netting one session's sells against that same session's buys is the correct form.
-function getTodayFreedCash(){
-  const orders=Array.isArray(ORDERS_TODAY)?ORDERS_TODAY:[];
-  if(!orders.length) return {date:null,sells:0,buys:0,cash:0};
-  let last=null;
-  orders.forEach(o=>{const d=normOrderDate(o.time);if(d&&(last===null||d>last))last=d;});
-  if(!last) return {date:null,sells:0,buys:0,cash:0};
-  let sells=0,buys=0;
-  orders.forEach(o=>{
-    if(normOrderDate(o.time)!==last) return;
-    const v=(Number(o.qty)||0)*(Number(o.price)||0);
-    if(!(v>0)) return;
-    if(o.type==='SELL') sells+=v; else if(o.type==='BUY') buys+=v;
+// v1079 (owner) CAPITAL. Three buckets, from the owner's own description of how Zerodha reports:
+//   DELIVERY  - holdings.csv, qty>0, at live price. Settled capital.
+//   TODAY'S BUYS - positions.csv, qty>0. A buy reaches HOLDINGS only on T+1, so while positions.csv
+//                  is the CURRENT session these are capital that holdings does not yet know about.
+//   FREED CASH - positions.csv, qty<0. Sell legs are capital released today, whether the stock came
+//                  from holdings or from an intraday buy. Some of it may already have been spent on
+//                  today's buys (which are counted in the bucket above); only the unspent remainder
+//                  is idle cash.
+//
+// THE BUG THIS FIXES: capital was built from getCombinedOpenPositionMap(), which does `pos.qty +=
+// liveQty` - it ADDS a live position on top of the settled holding. That is right while the
+// positions file is current, but once it is a PRIOR session those same buys have already settled
+// into holdings and get counted twice. Measured 2026-07-30 (holdings.csv 07:35 vs positions.csv from
+// 07-29 16:07): APCOTEXIND 44, GHCLTEXTIL 278, M&MFIN 60 and RATNAVEER 75 appeared in BOTH, and
+// capital was overstated by exactly the Rs 1,00,795 it was reporting as "positions".
+//
+// Idle cash is FLOORED at zero, deliberately: spending more than the day's sale proceeds means the
+// excess came from cash that is already represented inside the holdings/positions value, so
+// subtracting it would double-remove. (A signed version was tried in v1078 and was wrong for exactly
+// this case.)
+// True when holdings.csv was exported on a LATER calendar day than positions.csv, i.e. the T+1
+// settlement has happened and the position buy legs are already inside the holdings figure.
+// Uses the files' own dates, not the model session clock: getSessionDate() rolls back to the prior
+// trading day before 09:00, so on any pre-open morning it reports the SAME date as yesterday's
+// positions file and cannot distinguish the two (measured 2026-07-30 08:21 - PORTFOLIO_STALE said
+// stale:false while holdings was 07-30 and positions 07-29).
+// lastModified (epoch ms) -> IST calendar date. IST because the trading day and the export both
+// happen in IST; using UTC would roll the date at 05:30 local and mis-order morning exports.
+function fileDateISO(ms){
+  const n=Number(ms);
+  if(!Number.isFinite(n)||n<=0) return null;
+  return new Date(n+5.5*3600*1000).toISOString().slice(0,10);
+}
+function positionsAlreadySettled(){
+  const h=PORTFOLIO_FILE_DATES&&PORTFOLIO_FILE_DATES.holdings;
+  const pd=PORTFOLIO_FILE_DATES&&PORTFOLIO_FILE_DATES.positions;
+  if(!h||!pd) return false;   // unknown -> behave as before (additive)
+  return h>pd;
+}
+function getCapitalBuckets(){
+  const liveBySym=new Map((typeof ALL!=='undefined'?ALL:[]).map(r=>[r.symbol,Number(r.price)||0]));
+  const px=(sym,fb)=>liveBySym.get(sym)||Number(fb)||0;
+  let delivery=0;
+  (HOLDINGS||[]).forEach(h=>{ if(h&&h.qty>0) delivery+=h.qty*px(h.symbol,h.ltp||h.avgCost); });
+  // Two independent reasons a position's buy leg must NOT be added on top of holdings:
+  //  1. holdings.csv is dated later than positions.csv -> T+1 settled it in already.
+  //  2. PORTFOLIO_STALE says the positions/orders files are from a prior session.
+  const posStale=positionsAlreadySettled()
+    ||!!(typeof PORTFOLIO_STALE!=='undefined'&&PORTFOLIO_STALE&&PORTFOLIO_STALE.stale);
+  let todayBuys=0,buyCost=0,sellProceeds=0;
+  (POSITIONS||[]).forEach(pp=>{
+    if(!pp||!isFinite(Number(pp.qty))) return;
+    const q=Number(pp.qty)||0, avg=Number(pp.avg??pp.avgCost)||0;
+    if(q>0){
+      buyCost+=q*avg;                                   // cash spent today
+      if(!posStale) todayBuys+=q*px(pp.symbol,pp.ltp||avg); // not yet in holdings
+    } else if(q<0){
+      sellProceeds+=Math.abs(q)*avg;                    // capital freed today
+    }
   });
-  sells=+sells.toFixed(0); buys=+buys.toFixed(0);
-  return {date:last,sells,buys,cash:+(sells-buys).toFixed(0)};
+  const idleCash=Math.max(0,+(sellProceeds-buyCost).toFixed(0));
+  delivery=+delivery.toFixed(0); todayBuys=+todayBuys.toFixed(0);
+  return {delivery,todayBuys,sellProceeds:+sellProceeds.toFixed(0),buyCost:+buyCost.toFixed(0),
+          idleCash,posStale,
+          invested:delivery+todayBuys,
+          total:Math.max(0,delivery+todayBuys+idleCash)};
 }
 function getComputedCapital(){
-  const liveBySym=new Map(ALL.map(r=>[r.symbol,Number(r.price)||0]));
-  const px=(sym,fallback)=>liveBySym.get(sym)||Number(fallback)||0;
-  let holdings=0;
-  (HOLDINGS||[]).forEach(h=>{ if(h.qty>0) holdings+=h.qty*px(h.symbol,h.ltp||h.avgCost); });
-  let total=0;
-  Object.values(getCombinedOpenPositionMap()).forEach(p=>{ if(Number(p.qty)>0) total+=Number(p.qty)*px(p.symbol,p.ltp||p.avg); });
-  holdings=+holdings.toFixed(0); total=+total.toFixed(0);
-  // v1078: capital = invested book + cash in hand (signed) from the last session's sells vs buys.
-  const c=getTodayFreedCash();
-  const invested=Math.max(0,total);
-  return {holdings,positions:Math.max(0,total-holdings),invested,
-          cashDate:c.date,sells:c.sells,buys:c.buys,idleCash:c.cash,
-          total:Math.max(0,invested+c.cash)};
+  const b=getCapitalBuckets();
+  // `positions` is kept as a reported field for the existing sub-lines; it is today's un-settled
+  // buys only, never a second copy of the holdings.
+  return {holdings:b.delivery,positions:b.todayBuys,invested:b.invested,
+          sells:b.sellProceeds,buys:b.buyCost,idleCash:b.idleCash,posStale:b.posStale,
+          total:b.total};
 }
 // ── Filter defaults live in the PLACEHOLDER; calculations fall back to them when the field
 // is empty (owner, v545). Deleting your value returns to the default — never to empty
@@ -3523,6 +3558,7 @@ function getGoalFreeCapitalParts(){
           invested:hasManual?typed:(c.invested??c.total),cap:hasManual?typed:0,
           sells:hasManual?0:c.sells,buys:hasManual?0:c.buys,
           idleCash:hasManual?0:c.idleCash,cash:hasManual?0:c.idleCash,
+          posStale:c.posStale,
           free:total,total:Math.max(0,total)};
 }
 function getGoalPortfolioBasis(){return getGoalFreeCapitalParts().total;}
@@ -3665,7 +3701,7 @@ function buildGoalCard(){
   const badge=ach!=null?(onTrack?'<span style="color:var(--green);font-size:11px">✓ on track</span>':'<span style="color:var(--amber);font-size:11px">behind</span>'):'<span style="color:var(--t3);font-size:11px">no 30d trades</span>';
   const freeStr=parts.overridden
     ?`capital ₹${goalFmtRs(basis)} (your Capital ₹ override · computed book ₹${goalFmtRs(parts.computed)})`
-    :`capital ₹${goalFmtRs(basis)} (invested ${goalFmtRs(parts.invested)}${parts.idleCash?` ${parts.idleCash>=0?'+':'−'} cash in hand ${goalFmtRs(Math.abs(parts.idleCash))}`:''})`;
+    :`capital ₹${goalFmtRs(basis)} (delivery ${goalFmtRs(parts.holdings)}${parts.positions?` + today's buys ${goalFmtRs(parts.positions)}`:''}${parts.idleCash?` + freed cash ${goalFmtRs(parts.idleCash)}`:''}${parts.posStale?' · positions file is a prior session, its buys already settled into delivery':''})`;
   const title='Required NET earnings per NSE trading day, as % of your capital. Capital = the Capital ₹ field, which DEFAULTS to your computed deployed book (holdings + every open position incl. BTST, from the CSVs) and can be overridden; clearing the field restores the default. Informational only; does not change targets.';
   // v1078 (owner): the card must answer TODAY (how much do I need to make, how much have I made)
   // and REMAINING (how much of the goal is left). "Need/day" was already here; today's PROGRESS
@@ -3779,12 +3815,13 @@ function renderStats(){
   const universeCard = `<div class="st" title="Scan size and what survived filtering.">
     <div class="st-l">Universe</div>
     <div class="st-v">${t.toLocaleString()}</div>
-    <div class="st-d"><span style="color:var(--green)">${bull} up</span> · <span style="color:var(--red)">${t - bull} down/flat</span> · ${FILT.length.toLocaleString()} shown · ${selCount} selected · ${RADAR.features.length || 0} features</div></div>`;
+    <div class="st-d"><span style="color:var(--green)">${bull} up</span> · <span style="color:var(--red)">${t - bull} down/flat</span> · ${FILT.length.toLocaleString()} shown · ${selCount} selected · ${RADAR.features.length || 0} features${top ? ' · top ' + escHtml(top.symbol) + ' ' + topScore : ''}</div></div>`;
 
-  const scoreCard2 = `<div class="st"><div class="st-l">Top Score</div><div class="st-v" style="color:${radarScoreColor(top?.score)}">${topScore}</div><div class="st-d">${top ? escHtml(top.symbol) + ' · ' : ''}median risk ${medianRisk}</div></div>`;
+  // v1079: the Top Score card was removed (owner: worthless). Six cards now; the ceiling is 7.
+
 
   document.getElementById('statsBar').innerHTML =
-    marketCard + universeCard + scoreCard2 + rocketsCard + slTgtCard + bookedCard + buildGoalCard();
+    marketCard + universeCard + rocketsCard + slTgtCard + bookedCard + buildGoalCard();
 
   const filterPills=[];
   if(SUPPRESSED_HELD>0)filterPills.push(`<span class="info-pill pill-rose" title="Stocks you already hold (Holdings + Positions + today's net Orders buys). Since v1070 these stay in the ranking and can be recommended again — the badge is a duplicate-buy warning, not a filter.">📌 ${SUPPRESSED_HELD} already held</span>`);
@@ -6957,6 +6994,7 @@ async function hydrateSessionCSVsFromWorkspace(){
   const updates={};
   if(holdFile?.text){
     HOLDINGS=parseHoldings(holdFile.text);
+    PORTFOLIO_FILE_DATES.holdings=fileDateISO(holdFile.lastModified); // v1079
     updates[HOLD_STORE]={holdings:HOLDINGS,costMap:HOLD_COST_MAP,sourcePath:holdFile.path,lastModified:holdFile.lastModified};
     updateFileLoadStatus('Holdings.csv','loaded');
   }
@@ -6972,6 +7010,7 @@ async function hydrateSessionCSVsFromWorkspace(){
     const today=getSessionDate();
     const positionsCurrent=isPositionsFileCurrent(posFile);
     POSITIONS=positionsCurrent?parsePositions(posFile.text):[];
+    PORTFOLIO_FILE_DATES.positions=fileDateISO(posFile.lastModified); // v1079
     updates[POS_STORE]={positions:POSITIONS,sessionDate:today,sourcePath:posFile.path,lastModified:posFile.lastModified,sourceDate:inputFileSessionDate(posFile),stale:!positionsCurrent};
     updateFileLoadStatus('Positions.csv',positionsCurrent?'loaded':'stale',positionsCurrent?'':'stale - ignored');
   }
@@ -7711,6 +7750,7 @@ async function processFiles(files,sourceLabel,opts={}){
     setLoadMsg('Processing holdings...');
     const holdText=await holdFile.text();
     HOLDINGS=parseHoldings(holdText);
+    PORTFOLIO_FILE_DATES.holdings=fileDateISO(holdFile.lastModified); // v1079
     try{FS.set(HOLD_STORE,{holdings:HOLDINGS,costMap:HOLD_COST_MAP});}catch(e){}
     updateFileLoadStatus('Holdings.csv','loaded');
   }
@@ -7732,6 +7772,7 @@ async function processFiles(files,sourceLabel,opts={}){
     const today=getSessionDate();
     const positionsCurrent=isPositionsFileCurrent(posFile);
     POSITIONS=positionsCurrent?parsePositions(posText):[];
+    PORTFOLIO_FILE_DATES.positions=fileDateISO(posFile.lastModified); // v1079
     try{FS.set(POS_STORE,{positions:POSITIONS,hash:posHash,sessionDate:today,sourceDate:inputFileSessionDate(posFile),stale:!positionsCurrent});}catch(e){}
     updateFileLoadStatus('Positions.csv',positionsCurrent?'loaded':'stale',positionsCurrent?'':'stale - ignored');
   }
