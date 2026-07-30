@@ -1,5 +1,5 @@
-const BUILD_TS='2026-07-30 12:40 IST'; // release build time (IST)
-const APP_VERSION=1081; // v1081: price-band headroom is a hard constraint — a target that cannot be reached inside the day's band blocks the buy and clamps the sell.
+const BUILD_TS='2026-07-30 13:05 IST'; // release build time (IST)
+const APP_VERSION=1082; // v1082: a sell order is exported only when its target is above the last price — a limit at/below LTP is an instant liquidation, not a target.
 // v556: parse the NSE Market Activity Report (MA<date>.csv) — official Nifty %, advances/declines and sector index moves shown as market CONTEXT in the status bar (EOD data, display only, never fed into per-row scoring); MA added to the ℹ️ file manifest.
 // v555 market-cycle stage awareness (stateless, self-calibrating): per-row stage label (1 accumulation · 2 breakout · 3 event · 4 profit-booking · 5 re-accumulation · 6 second-leg); a quiet-accumulation signal (conjunction-of-percentiles) injected via the rocket-diagnostic weighting; sell-the-news decay off Recent earnings date (horizon = review days). v1065 makes the market-breadth gauge an entry-eligibility input while still never changing ranking.
 const GOOGLE_DRIVE_CLIENT_ID='1015012642264-oi2nelv3v90k3d39r994a6nelgjs2a56.apps.googleusercontent.com'; // Public OAuth Web Client ID.
@@ -7547,6 +7547,19 @@ function buildSellTargetOrders(){
     let bandClamped=false;
     if(uc&&price>uc.ucPrice){ price=Math.floor(uc.ucPrice/0.05)*0.05; bandClamped=true; }
     if(!(price>0)){ skipped.push(sym+' (bad price)'); return; }
+    // v1082 (owner): only export a sell whose target is ABOVE the last price. A LIMIT SELL at or
+    // below LTP crosses the spread and fills immediately — that is a liquidation at the market, not
+    // a target order, and exporting one would silently dump a position the moment the basket runs.
+    // Two ways a row lands here: the position is already trading past its target (nothing to wait
+    // for — that is an exit decision for the Open Positions panel, not a resting order), or the
+    // v1081 band clamp pulled the limit under the LTP because the target sits outside today's band
+    // (observed 2026-07-30: SMLMAH clamped to Rs 5,479.15 against an LTP of Rs 5,479.20). In both
+    // cases the honest action is to omit the order and say so, not to place an instant sell.
+    // Guarded on ltp>0 so an unknown last price never suppresses a legitimate target.
+    if(ltp>0&&!(price>ltp)){
+      skipped.push(sym+(bandClamped?' (target outside the price band)':' (already at or above target)'));
+      return;
+    }
     orders.push({
       id:Date.now()+seq++,
       instrument:{
@@ -7579,7 +7592,8 @@ function buildSellTargetOrders(){
 async function exportSellTargets(){
   const {orders,skipped}=buildSellTargetOrders();
   if(!orders.length){
-    showToast('No open position has a usable cost basis and target to sell against.',4500,true);
+    showToast('No sell order to export — every open position is either already at/above its target or has no usable cost basis.'
+      +(skipped.length?` (${skipped.join(', ')})`:''),7000,true);
     return;
   }
   // Zerodha's basket limit is the same 20 as the buy path.
@@ -7595,8 +7609,8 @@ async function exportSellTargets(){
   showToast(`Sell basket saved: ${orders.length} LIMIT sells at revised targets`
     +(nearest&&nearest._meta.gainPctFromLtp!=null?` · nearest ${nearest.instrument.symbol} +${nearest._meta.gainPctFromLtp}% from LTP`:'')
     +(clamped.length?` · ${clamped.length} capped at the upper circuit (${clamped.map(o=>o.instrument.symbol).join(', ')}) — the goal target is outside today's band`:'')
-    +(skipped.length?` · skipped ${skipped.length}`:'')
-    +' · WARNING: cancel any existing GTTs on these first, or a fill on both will short you.',11000);
+    +(skipped.length?` · no order for ${skipped.length}: ${skipped.join(', ')}`:'')
+    +' · WARNING: cancel any existing GTTs on these first, or a fill on both will short you.',13000);
 }
 async function saveBasketToScannerUploads(orders, filename){
   if(orders.length>20) throw new Error(`Refusing to truncate basket with ${orders.length} orders`);
