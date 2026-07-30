@@ -1,5 +1,5 @@
-const BUILD_TS='2026-07-30 13:05 IST'; // release build time (IST)
-const APP_VERSION=1082; // v1082: a sell order is exported only when its target is above the last price — a limit at/below LTP is an instant liquidation, not a target.
+const BUILD_TS='2026-07-30 14:19 IST'; // release build time (IST)
+const APP_VERSION=1083; // v1083: rocket cohort must clear minObs before it sets feature weights (stops the label leak); target must fit under the session ceiling; buy basket exports the target leg only.
 // v556: parse the NSE Market Activity Report (MA<date>.csv) — official Nifty %, advances/declines and sector index moves shown as market CONTEXT in the status bar (EOD data, display only, never fed into per-row scoring); MA added to the ℹ️ file manifest.
 // v555 market-cycle stage awareness (stateless, self-calibrating): per-row stage label (1 accumulation · 2 breakout · 3 event · 4 profit-booking · 5 re-accumulation · 6 second-leg); a quiet-accumulation signal (conjunction-of-percentiles) injected via the rocket-diagnostic weighting; sell-the-news decay off Recent earnings date (horizon = review days). v1065 makes the market-breadth gauge an entry-eligibility input while still never changing ranking.
 const GOOGLE_DRIVE_CLIENT_ID='1015012642264-oi2nelv3v90k3d39r994a6nelgjs2a56.apps.googleusercontent.com'; // Public OAuth Web Client ID.
@@ -1437,6 +1437,34 @@ function getUpperCircuitInfo(row,refPrice=null){
   const ref=Number(refPrice)>0?Number(refPrice):px;
   return {band,prevClose,ucPrice,refPrice:ref,runwayPct:(ucPrice/ref-1)*100};
 }
+// v1083 (owner): the STATISTICAL ceiling, the sibling of getUpperCircuitInfo's regulatory one.
+//
+// How much higher can this stock plausibly trade today? A stock's typical daily travel is
+// `rangePct` (the strongest of ADR / ATR-1d / volatility-1d / weekly-ATR÷√5 — the same estimate the
+// 10%-stretch penalty uses), so the plausible session ceiling is the day's LOW plus one typical
+// day's range. Runway is then measured from the buy price exactly as it is for the circuit.
+//
+// Measured from the LOW, not from the realised high−low span, and that choice matters: a stock that
+// ran up, faded back and is now sitting near its low has "spent" its range under a high−low measure
+// while still having room to travel upward, and blocking it would be wrong. Anchoring on the low
+// asks the only question a long entry cares about — how much further UP can it go — and a stock
+// grinding steadily upward all session correctly runs out of ceiling while a whipsawed one does not.
+//
+// Measured 2026-07-30 midday: the top 20 had consumed 86% of expected range (8.37% used of 9.78%),
+// and 14 of 20 could not travel the 1.9% target with what remained (ASIANENE 0.11% left, UNIPARTS
+// 0.11%, SONACOMS 0.28%). The scorer picks the most volatile names in the market — rank 1-20 median
+// range 9.78% vs 4.06% deep in the list — and then recommends them once the move is spent.
+//
+// Fails OPEN when the low or the range estimate is missing. At 09:15 the low sits at ~price, so the
+// ceiling is a full range above and nothing is blocked — the morning path is untouched by design.
+function getSessionCeilingInfo(row,refPrice=null){
+  const low=Number(row?.low1d), rangePct=Number(row?.rangePct);
+  if(!(low>0)||!(rangePct>0)) return null;
+  const ceiling=low*(1+rangePct/100);
+  const ref=Number(refPrice)>0?Number(refPrice):Number(row?.price);
+  if(!(ref>0)) return null;
+  return {rangePct,low,ceiling,refPrice:ref,runwayPct:(ceiling/ref-1)*100};
+}
 function parse52W(text){
   const lines=parseCSVRaw(text);
   let hi=-1;
@@ -2563,6 +2591,32 @@ function radarAnalyze(headers,rawRows,supplements={},heldSymbols=new Set()){
   // WS4/R6: sector-relative day move per row (post-neutralisation; blanked rows are null).
   const srArr=rawRows.map(raw=>{const d=radarNum(raw[targetI]);return d===null?null:clamp01(d,-10,10)-(sectorMedians[raw[sectorI]||'Unknown']??0);});
   const minObs=Math.max(25,Math.floor(rawRows.length*.08));
+  // ── v1083: THE ROCKET COHORT MUST CLEAR THE SAME BAR EVERY FEATURE MUST CLEAR ──────────────
+  // A feature is only modeled when it has >= minObs finite values. The rocket cohort that sets
+  // EVERY feature's `effect` faced no such bar, so a handful of rows could set 108 weights.
+  //
+  // Measured 2026-07-30 midday: 1,749 tradeable rows, rocket cohort = 5. Dozens of features
+  // saturated at the |effect| = 1.0 CLAMP - Hull MA 1.000, Volatility-1d 1.000, Open-1d 0.993,
+  // Change-from-open 0.993, VWAP-1d 0.982, Low-1d 0.981. That is not signal, it is the LABEL
+  // LEAKING INTO THE FEATURES: price-level columns are transformed to 100x(price/level - 1), so for
+  // a stock up 12% today `price/open - 1` IS +12%. The rocket label is "up >= 10% today". Those
+  // columns therefore separate the cohort perfectly by construction, and 73% of total feature
+  // weight landed on same-session-move features (mean weight .82 vs .72 for everything else).
+  // Since alpha = clamp(|effect| x 1.35, .12, .58), a saturated effect also pushes the per-row
+  // signal to the .58 CEILING - 58% driven by the leaked percentile instead of the prior.
+  //
+  // The consequence is a circular ranking: it stops asking "what is about to move" and starts
+  // asking "which stocks most resemble the few that already moved today" - i.e. it ranks completed
+  // moves to the top, which is exactly where a same-day target cannot be reached.
+  //
+  // At 09:15 this cannot happen: no stock is at +10% yet, the cohort is EMPTY, mr falls back to .5,
+  // every effect is ~0, alpha sits at its .12 FLOOR and the score is ~88% prior-driven - a broad
+  // structural blend of yesterday's setup plus the opening gap. That is the configuration the owner
+  // reports as reliable. Applying the existing minObs bar keeps the scorer in that configuration
+  // until the cohort is genuinely large enough to estimate an effect from.
+  //
+  // Reuses minObs rather than introducing a threshold, so there is no new tunable constant.
+  const rocketCohortTrusted=rocketRows.length>=minObs;
   const features=[];
   for(let i=0;i<headers.length;i++){
     const name=headers[i],rating=/rating/i.test(name);
@@ -2593,7 +2647,9 @@ function radarAnalyze(headers,rawRows,supplements={},heldSymbols=new Set()){
       (rset.has(ri)?ar:ao).push(p);
     }
     const mr=ar.length?ar.reduce((a,b)=>a+b,0)/ar.length:.5,mo=ao.length?ao.reduce((a,b)=>a+b,0)/ao.length:.5;
-    f.effect=clamp01((mr-mo)*2,-1,1);
+    // v1083: the rocket cohort must clear the SAME minimum-observation bar every feature must clear
+    // before it is modeled at all. See rocketCohortTrusted above for the full reasoning.
+    f.effect=rocketCohortTrusted?clamp01((mr-mo)*2,-1,1):0;
     f.reliability=Math.sqrt(f.coverage)*(rocketRows.length/(rocketRows.length+12));
     f.weight=(.07+Math.abs(f.effect))*.6+.4*Math.sqrt(f.coverage);
     features.push(f);
@@ -2610,7 +2666,7 @@ function radarAnalyze(headers,rawRows,supplements={},heldSymbols=new Set()){
       let ar=[],ao=[];
       srArr.forEach((v,ri)=>{if(v===null)return;(rset.has(ri)?ar:ao).push(radarPct(wins,clamp01(v,q02,q98)));});
       const mr=ar.length?ar.reduce((a,b)=>a+b,0)/ar.length:.5,mo=ao.length?ao.reduce((a,b)=>a+b,0)/ao.length:.5;
-      const effect=clamp01((mr-mo)*2,-1,1),coverage=vals.length/rawRows.length;
+      const effect=rocketCohortTrusted?clamp01((mr-mo)*2,-1,1):0,coverage=vals.length/rawRows.length;
       srFeat={sorted:wins,q02,q98,effect,weight:(.07+Math.abs(effect))*.6+.4*Math.sqrt(coverage)};
     }
   }
@@ -2644,7 +2700,7 @@ function radarAnalyze(headers,rawRows,supplements={},heldSymbols=new Set()){
       let ar=[],ao=[];
       accArr.forEach((v,ri)=>{if(v===null)return;(rset.has(ri)?ar:ao).push(radarPct(wins,clamp01(v,q02,q98)));});
       const mr=ar.length?ar.reduce((a,b)=>a+b,0)/ar.length:.5,mo=ao.length?ao.reduce((a,b)=>a+b,0)/ao.length:.5;
-      const effect=clamp01((mr-mo)*2,-1,1),coverage=vals.length/rawRows.length;
+      const effect=rocketCohortTrusted?clamp01((mr-mo)*2,-1,1):0,coverage=vals.length/rawRows.length;
       accFeat={sorted:wins,q02,q98,effect,weight:(.07+Math.abs(effect))*.6+.4*Math.sqrt(coverage)};
     }
   }
@@ -5743,7 +5799,12 @@ function getRowExitPolicy(row,buyPrice=null,activeInfo=null){
   const bandRef=Number(buyPrice)>0?Number(buyPrice):getBuyPrice(row||{});
   const uc=getUpperCircuitInfo(row,bandRef);
   const bandLimited=!!(uc&&targetPct>0&&uc.runwayPct<targetPct);
-  const viable=targetPct>0&&!bandLimited&&(capacity==null||targetPct+1e-9>=minGrossPct);
+  // v1083: the same test against the STATISTICAL ceiling (day's low + one typical day's range).
+  // The circuit is what the stock may LEGALLY reach; this is what it may PLAUSIBLY reach. A row
+  // needs the target to fit under both. Reported separately so the two causes stay distinguishable.
+  const sc=getSessionCeilingInfo(row,bandRef);
+  const rangeExhausted=!!(sc&&targetPct>0&&sc.runwayPct<targetPct);
+  const viable=targetPct>0&&!bandLimited&&!rangeExhausted&&(capacity==null||targetPct+1e-9>=minGrossPct);
   const stopPct=getRowStopDistancePct(row);
   const stopSource=(Math.abs(Number(row?.slPct))>0)?'explicit stock stop'
     :hasAtr?'ATR stock stop'
@@ -5767,6 +5828,9 @@ function getRowExitPolicy(row,buyPrice=null,activeInfo=null){
     bandPct:uc?uc.band:null,
     ucPrice:uc?+uc.ucPrice.toFixed(2):null,
     bandRunwayPct:uc?+uc.runwayPct.toFixed(2):null,
+    rangeExhausted,
+    sessionCeiling:sc?+sc.ceiling.toFixed(2):null,
+    sessionRunwayPct:sc?+sc.runwayPct.toFixed(2):null,
     targetSource,
     stopSource,
     anchorPct:anchor>0?+anchor.toFixed(2):null,
@@ -6007,6 +6071,7 @@ function getAllocationBlockReason(s,ctx=null){
   if(rail<buyP) return `allocation rails (${fmtINR(rail)}) are below one share at ${fmtINR(buyP)}`;
   const policy=getRowExitPolicy(s,buyP,c.active);
   if(policy&&policy.bandLimited) return `only ${policy.bandRunwayPct}% left to the ${policy.bandPct}% upper circuit (₹${policy.ucPrice}) — the ${policy.targetPct}% target cannot be reached inside today's band`;
+  if(policy&&policy.rangeExhausted) return `only ${policy.sessionRunwayPct}% left of today's expected ${policy.capacityPct??'—'}% range (ceiling ₹${policy.sessionCeiling}) — the move is spent and the ${policy.targetPct}% target is out of reach today`;
   if(policy&&policy.viable===false) return policy.capacityPct!=null
     ? `stock capacity ${policy.capacityPct.toFixed(2)}% cannot clear the ${policy.minGrossPct?.toFixed(2)??'—'}% cost + net hurdle`
     : 'no viable target after costs';
@@ -7414,8 +7479,6 @@ async function exportBasket(){
     const sym=s.symbol;
     const name=s.name||sym;
     const targetPct=policy.targetPct;
-    const slDistance=policy.stopPct;
-    const stoplossPct=-roundPct05(slDistance);
     orders.push({
       id:Date.now()+orderSeq++,
       instrument:{
@@ -7434,8 +7497,11 @@ async function exportBasket(){
         quantity:qty,price:0,
         triggerPrice:0,disclosedQuantity:0,lastPrice:Number(s.price)||0,
         variety:'regular',
-        gtt:{target:targetPct,stoploss:stoplossPct},
-        tags:['TGT','SL']
+        // v1083 (owner): TARGET ONLY. The stop leg is no longer exported — the owner manages losses
+        // manually. The stop is still computed and shown (SL % column, Open Positions, allocation
+        // sizing all keep using getRowStopDistancePct); it simply never leaves the app as an order.
+        gtt:{target:targetPct},
+        tags:['TGT']
       }
     });
   };
