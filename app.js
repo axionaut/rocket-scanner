@@ -1,5 +1,5 @@
-const BUILD_TS='2026-07-30 09:46 IST'; // release build time (IST)
-const APP_VERSION=1080; // v1080: Sell Targets export (fresh LIMIT sells at revised targets, since a GTT cannot be modified); rows that can never be allocated a share are no longer recommendations.
+const BUILD_TS='2026-07-30 12:40 IST'; // release build time (IST)
+const APP_VERSION=1081; // v1081: price-band headroom is a hard constraint — a target that cannot be reached inside the day's band blocks the buy and clamps the sell.
 // v556: parse the NSE Market Activity Report (MA<date>.csv) — official Nifty %, advances/declines and sector index moves shown as market CONTEXT in the status bar (EOD data, display only, never fed into per-row scoring); MA added to the ℹ️ file manifest.
 // v555 market-cycle stage awareness (stateless, self-calibrating): per-row stage label (1 accumulation · 2 breakout · 3 event · 4 profit-booking · 5 re-accumulation · 6 second-leg); a quiet-accumulation signal (conjunction-of-percentiles) injected via the rocket-diagnostic weighting; sell-the-news decay off Recent earnings date (horizon = review days). v1065 makes the market-breadth gauge an entry-eligibility input while still never changing ranking.
 const GOOGLE_DRIVE_CLIENT_ID='1015012642264-oi2nelv3v90k3d39r994a6nelgjs2a56.apps.googleusercontent.com'; // Public OAuth Web Client ID.
@@ -1412,6 +1412,30 @@ function getPriceBandBlockReason(s){
   const pc=s?.priceChange;
   if(pc!=null&&isFinite(pc)&&pc>=band-PRICE_BAND_BLOCK_BUFFER_PCT) return `Near ${band}% NSE price band`;
   return '';
+}
+// v1081 (owner): how much room is left before the stock locks at its upper circuit.
+//
+// The previous close is DERIVED from the scanner's own price and day% rather than read from the
+// bhav copy, deliberately: the band is judged against the same two numbers the rest of the row is
+// scored on, so the arithmetic cannot disagree with itself if the zip is a session behind. Verified
+// 2026-07-30 on SMLMAH — derived prev close Rs 4,566.00 on a 20% band gives an upper circuit of
+// Rs 5,479.20, which is EXACTLY the day's observed high, to the paisa.
+//
+// `refPrice` should be the BUY price (LTP + BASKET_MARKET_BUDGET_BUFFER_PCT), not the last price, so
+// the runway is measured from where the order would actually fill. That is what supplies the
+// slippage cushion the owner asked for, using the buffer the app already owns rather than a new
+// constant. Measured the same day: SMLMAH exported at Rs 5,435 and filled at Rs 5,439.82 — 0.09%,
+// comfortably inside the 0.25% buffer.
+function getUpperCircuitInfo(row,refPrice=null){
+  const band=row?.price_band_pct??getNSEPriceBandPct(row?.symbol);
+  if(!(band!=null&&isFinite(band)&&band>0)) return null;   // no band on file: fail open
+  const pc=Number(row?.priceChange), px=Number(row?.price);
+  if(!Number.isFinite(pc)||!(px>0)) return null;
+  const prevClose=px/(1+pc/100);
+  if(!(prevClose>0)) return null;
+  const ucPrice=prevClose*(1+band/100);
+  const ref=Number(refPrice)>0?Number(refPrice):px;
+  return {band,prevClose,ucPrice,refPrice:ref,runwayPct:(ucPrice/ref-1)*100};
 }
 function parse52W(text){
   const lines=parseCSVRaw(text);
@@ -5703,7 +5727,23 @@ function getRowExitPolicy(row,buyPrice=null,activeInfo=null){
     minGrossPct=Math.ceil((HARVEST_DESIRED_NET_PCT+estimateRoundTripCostPct(targetPct))*20)/20;
     minGrossPct=Math.ceil((HARVEST_DESIRED_NET_PCT+estimateRoundTripCostPct(minGrossPct))*20)/20;
   }
-  const viable=targetPct>0&&(capacity==null||targetPct+1e-9>=minGrossPct);
+  // v1081 (owner): PRICE-BAND HEADROOM IS A HARD CONSTRAINT, not a capacity opinion.
+  // Measured 2026-07-30 on SMLMAH: the basket exported it at 11:09:24 at Rs 5,435 — already +19.0%
+  // on a 20% band, with the upper circuit at Rs 5,479.20, i.e. 0.81% of runway against a 1.85%
+  // target. It filled 13 seconds later at Rs 5,439.82 (0.09% slippage, so this was NOT slippage),
+  // and the attached GTT target of Rs 5,540.45 sat Rs 61 ABOVE the maximum price the stock is
+  // permitted to trade at that day. The stock then ran to Rs 5,479.20 — exactly the circuit, as far
+  // as it could legally go — and the target was still unreachable.
+  //
+  // This is arithmetic, not a judgement about whether momentum continues: continuation DID happen
+  // and the trade still could not make target. So unlike `reachable` (ATR, a reported flag only),
+  // insufficient band headroom makes the row NOT VIABLE, which drops it out through the v1080
+  // allocation gate. Runway is measured from the BUY price, so the 0.25% market-order buffer is the
+  // slippage cushion. Fails OPEN when the band or day% is unknown.
+  const bandRef=Number(buyPrice)>0?Number(buyPrice):getBuyPrice(row||{});
+  const uc=getUpperCircuitInfo(row,bandRef);
+  const bandLimited=!!(uc&&targetPct>0&&uc.runwayPct<targetPct);
+  const viable=targetPct>0&&!bandLimited&&(capacity==null||targetPct+1e-9>=minGrossPct);
   const stopPct=getRowStopDistancePct(row);
   const stopSource=(Math.abs(Number(row?.slPct))>0)?'explicit stock stop'
     :hasAtr?'ATR stock stop'
@@ -5723,6 +5763,10 @@ function getRowExitPolicy(row,buyPrice=null,activeInfo=null){
     capacityPct:capacity>0?+capacity.toFixed(2):null,
     minGrossPct:minGrossPct>0?+minGrossPct.toFixed(2):null,
     viable,
+    bandLimited,
+    bandPct:uc?uc.band:null,
+    ucPrice:uc?+uc.ucPrice.toFixed(2):null,
+    bandRunwayPct:uc?+uc.runwayPct.toFixed(2):null,
     targetSource,
     stopSource,
     anchorPct:anchor>0?+anchor.toFixed(2):null,
@@ -5962,6 +6006,7 @@ function getAllocationBlockReason(s,ctx=null){
   const rail=Math.min(c.maxAlloc>0?c.maxAlloc:c.capital,turnoverCap,topUpCap);
   if(rail<buyP) return `allocation rails (${fmtINR(rail)}) are below one share at ${fmtINR(buyP)}`;
   const policy=getRowExitPolicy(s,buyP,c.active);
+  if(policy&&policy.bandLimited) return `only ${policy.bandRunwayPct}% left to the ${policy.bandPct}% upper circuit (₹${policy.ucPrice}) — the ${policy.targetPct}% target cannot be reached inside today's band`;
   if(policy&&policy.viable===false) return policy.capacityPct!=null
     ? `stock capacity ${policy.capacityPct.toFixed(2)}% cannot clear the ${policy.minGrossPct?.toFixed(2)??'—'}% cost + net hurdle`
     : 'no viable target after costs';
@@ -7490,7 +7535,17 @@ function buildSellTargetOrders(){
     const policy=getRowExitPolicy(row||{symbol:sym,price:ltp},avg);
     const tgtPct=Number(policy&&policy.targetPct);
     if(!(tgtPct>0)){ skipped.push(sym+' (no target)'); return; }
-    const price=tickPrice(avg*(1+tgtPct/100));
+    // v1081: a LIMIT price above the day's upper circuit is REJECTED by the exchange — the order
+    // simply never reaches the book. Observed 2026-07-30: SMLMAH's goal target of Rs 5,540.45 sat
+    // above its Rs 5,479.20 circuit. Clamp to the highest tick still inside the band so the order is
+    // at least placeable; it then fills only if the stock locks at the circuit, which is the best
+    // available outcome for that position today. Floor (not round) to the tick so the clamp can
+    // never round back above the limit. Unlike the BUY side this never drops the row — an open
+    // position still needs an exit order.
+    let price=tickPrice(avg*(1+tgtPct/100));
+    const uc=row?getUpperCircuitInfo(row,ltp):null;
+    let bandClamped=false;
+    if(uc&&price>uc.ucPrice){ price=Math.floor(uc.ucPrice/0.05)*0.05; bandClamped=true; }
     if(!(price>0)){ skipped.push(sym+' (bad price)'); return; }
     orders.push({
       id:Date.now()+seq++,
@@ -7513,7 +7568,8 @@ function buildSellTargetOrders(){
         tags:['TGT']
       },
       _meta:{avg:+avg.toFixed(2),targetPct:tgtPct,stopPct:policy.stopPct,
-             ltp:+Number(ltp||0).toFixed(2),
+             ltp:+Number(ltp||0).toFixed(2),bandClamped,
+             ucPrice:uc?+uc.ucPrice.toFixed(2):null,
              gainPctFromLtp:ltp>0?+(((price-ltp)/ltp)*100).toFixed(2):null}
     });
   });
@@ -7535,8 +7591,10 @@ async function exportSellTargets(){
   const saved=await saveBasketToScannerUploads(payload,'Zerodha_Basket_Sell');
   if(!saved) return;
   const nearest=orders[0];
+  const clamped=orders.filter(o=>o._meta.bandClamped);
   showToast(`Sell basket saved: ${orders.length} LIMIT sells at revised targets`
     +(nearest&&nearest._meta.gainPctFromLtp!=null?` · nearest ${nearest.instrument.symbol} +${nearest._meta.gainPctFromLtp}% from LTP`:'')
+    +(clamped.length?` · ${clamped.length} capped at the upper circuit (${clamped.map(o=>o.instrument.symbol).join(', ')}) — the goal target is outside today's band`:'')
     +(skipped.length?` · skipped ${skipped.length}`:'')
     +' · WARNING: cancel any existing GTTs on these first, or a fill on both will short you.',11000);
 }
