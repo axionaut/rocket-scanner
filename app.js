@@ -1,5 +1,5 @@
-const BUILD_TS='2026-07-30 08:46 IST'; // release build time (IST)
-const APP_VERSION=1079; // v1079: capital = delivery + UNSETTLED today-buys + un-redeployed freed cash (fixes a settled-position double-count); Top Score card dropped.
+const BUILD_TS='2026-07-30 09:46 IST'; // release build time (IST)
+const APP_VERSION=1080; // v1080: Sell Targets export (fresh LIMIT sells at revised targets, since a GTT cannot be modified); rows that can never be allocated a share are no longer recommendations.
 // v556: parse the NSE Market Activity Report (MA<date>.csv) — official Nifty %, advances/declines and sector index moves shown as market CONTEXT in the status bar (EOD data, display only, never fed into per-row scoring); MA added to the ℹ️ file manifest.
 // v555 market-cycle stage awareness (stateless, self-calibrating): per-row stage label (1 accumulation · 2 breakout · 3 event · 4 profit-booking · 5 re-accumulation · 6 second-leg); a quiet-accumulation signal (conjunction-of-percentiles) injected via the rocket-diagnostic weighting; sell-the-news decay off Recent earnings date (horizon = review days). v1065 makes the market-breadth gauge an entry-eligibility input while still never changing ranking.
 const GOOGLE_DRIVE_CLIENT_ID='1015012642264-oi2nelv3v90k3d39r994a6nelgjs2a56.apps.googleusercontent.com'; // Public OAuth Web Client ID.
@@ -90,7 +90,8 @@ let SUPPRESSED_HELD=0; // count of RANKED stocks you already hold (v1070: inform
 let SURV_HARD_REMOVED=0; // count of stocks weeded out by configured surveillance rules
 let PEAK_TIMING_REMOVED=0; // count of ranked rows withheld by stock/market entry confirmation
 let CURRENT_TRADE_TIMING={state:'Neutral',reason:'Trade timing evidence is not loaded.',evidence:[]};
-let REMOVED_ROWS=[]; // [{s, reason:'held'|'surv'|'peak', rules?}] captured each applyFilters pass so the
+let ALLOC_BLOCKED=0; // count of ranked rows removed because no share can be allocated to them (v1080)
+let REMOVED_ROWS=[]; // [{s, reason:'held'|'surv'|'peak'|'alloc', rules?, detail?}] captured each applyFilters pass so the
                      // "Removed from rankings" table can explain every gap in the rank sequence (v546)
 let SELECTED=new Set(); // symbols selected for basket — recomputed from FILT each applyFilters
 let EXPORT_EXCLUDED=new Set(); // symbols the user unchecked from export — persisted in rs_filters
@@ -1947,6 +1948,13 @@ function getDisplayedEntryCandidates(rows){
   // graded pick would be one the gate already approved and the gate could never be falsified.
   // Each pick now carries its entryReady state and block reason (see recordRecommendationOutcomeScan),
   // so the two cohorts can be compared on forward outcomes rather than on same-day circular evidence.
+  //
+  // ALSO DELIBERATELY DOES NOT FILTER the v1080 allocation gate. That gate is correct for the
+  // DISPLAY and the basket — an unbuyable row is not a recommendation — but allocation capacity is a
+  // property of the OWNER'S PORTFOLIO on the day (what is already held, at what average, with how
+  // much cash), not of the scorer's pick. Filtering the outcome cohort by it would make the
+  // accumulating forward-outcome evidence depend on the account balance, so RULES.md D1/D4 would be
+  // measuring the book instead of the model. Same reasoning as the entryReady divergence above.
   if(!Array.isArray(rows)||!rows.length) return [];
   return rows
     // v1070: held no longer excludes a candidate.
@@ -5653,8 +5661,12 @@ function getEffectiveTgtPct(){
 
 // One execution policy per stock. The portfolio target remains an evidence anchor,
 // while the stock's ATR/range determine what that particular name can reasonably reach.
-function getRowExitPolicy(row,buyPrice=null){
-  const active=getActiveTargetInfo();
+// `activeInfo` lets a caller that evaluates MANY rows in one pass resolve the portfolio target
+// anchor once and hand it in. getActiveTargetInfo() costs ~2.3ms (it walks the goal solve and the
+// harvest outcome pool), which is invisible for one row and fatal across the universe — the v1080
+// allocation gate ran 7s on 2,962 rows before this. Omit it and the behaviour is unchanged.
+function getRowExitPolicy(row,buyPrice=null,activeInfo=null){
+  const active=activeInfo||getActiveTargetInfo();
   const anchor=Number(active.tgtPct)>0?Number(active.tgtPct):Math.abs(Number(TRADEBOOK_STATS?.adaptiveTGT))||null;
   const atr=Number(row?.atr);
   const range=Number(row?.rangePct);
@@ -5915,6 +5927,45 @@ function getHeldTopUpNotionalCap(s,buyP,heldMap=null){
   const stopPrice=price*(1-stopFrac);
   if(avg>=stopPrice) return 0;                   // no cushion left
   return Math.max(0,held.qty*(stopPrice-avg)/(price*stopFrac)*price);
+}
+// v1080 (owner): "If it doesn't qualify for allocation, it should not be in recommendations."
+// A row that can never receive a single share was still rendering at rank 1-3, still sitting checked,
+// still counting toward "Buy Basket (N)" and still consuming one of the 20 selection slots — while
+// being unbuyable. Observed 2026-07-30: JAGSNBHARM held 120 @ Rs 255.30, last Rs 256.30, so it is in
+// profit; its own stop is 6.28%, putting the new entry's stop price at Rs 240.20, BELOW the existing
+// average — getHeldTopUpNotionalCap correctly returns 0 (any add makes a blended position that loses
+// on its own stop), but nothing acted on that zero.
+//
+// This returns a reason ONLY for causes that are independent of how capital is split across the
+// basket. A row that misses out purely because 20 names shared the money is a CAPITAL problem, not a
+// disqualification — pass 2 of computeAlloc usually gives it a share — so the score-weight limit is
+// deliberately NOT consulted here. Blocking on it would make a stock's eligibility depend on how many
+// other stocks happen to rank near it, which is the same non-causal cross-stock coupling v1066 removed.
+//
+// Returns null when the row is allocatable, else a short human reason.
+function getAllocationPassContext(){
+  return {capital:getEffectiveCapital(),maxAlloc:getEffectiveMaxAlloc(),
+          heldMap:getHeldPositionMap(),active:getActiveTargetInfo()};
+}
+// `ctx` carries the pass-constants (capital, max allocation, held map, target anchor) so a caller
+// scanning the whole universe resolves them ONCE — see getAllocationPassContext(). Called without
+// one it resolves them itself, which is correct but ~4ms per row.
+function getAllocationBlockReason(s,ctx=null){
+  const c=ctx||getAllocationPassContext();
+  if(!(c.capital>0)) return null;         // no capital known: nothing to judge with, never filter
+  const buyP=getBuyPrice(s);
+  if(!(buyP>0)) return null;              // no price: the scorer already handles this elsewhere
+  const turnoverCap=getTurnoverAllocationCap(s);
+  if(!(turnoverCap>0)) return 'no daily turnover — market-impact safety cannot be verified';
+  const topUpCap=getHeldTopUpNotionalCap(s,buyP,c.heldMap);
+  if(!(topUpCap>0)) return 'already held at a profit with no cushion — an add would put the blended position at a loss on its own stop';
+  const rail=Math.min(c.maxAlloc>0?c.maxAlloc:c.capital,turnoverCap,topUpCap);
+  if(rail<buyP) return `allocation rails (${fmtINR(rail)}) are below one share at ${fmtINR(buyP)}`;
+  const policy=getRowExitPolicy(s,buyP,c.active);
+  if(policy&&policy.viable===false) return policy.capacityPct!=null
+    ? `stock capacity ${policy.capacityPct.toFixed(2)}% cannot clear the ${policy.minGrossPct?.toFixed(2)??'—'}% cost + net hurdle`
+    : 'no viable target after costs';
+  return null;
 }
 function computeAlloc(capital, selList){
   if(!capital||!selList.length) return {};
@@ -6239,7 +6290,11 @@ function applyFilters(){
   SUPPRESSED_HELD=0;
   SURV_HARD_REMOVED=0;
   PEAK_TIMING_REMOVED=0;
+  ALLOC_BLOCKED=0;
   REMOVED_ROWS=[];
+  // Resolved ONCE: the allocation gate below runs per row over the full universe, and its inputs
+  // (capital, max allocation, held map, portfolio target anchor) are constant for the pass.
+  const allocCtx=getAllocationPassContext();
   let rows=ALL.filter(s=>{
     // v1070 (owner): holding a stock NO LONGER blocks it. If it is still the best name in the
     // cross-section, already owning some of it is not a reason to refuse it — the ranking answers
@@ -6266,7 +6321,14 @@ function applyFilters(){
     // CAVEAT recorded in RULES.md D4: this is ONE day pair on a green tape. If the accumulating
     // per-pick evidence reverses it, restore the block here.
     if(s.entryReady===false)PEAK_TIMING_REMOVED++;
-    return (s.turnover||0)>=minTurn&&(!riskSel.length||riskSel.includes(s.risk))&&(!q||[s.symbol,s.name,s.sector].join(' ').toLowerCase().includes(q));
+    // Cheap display filters run FIRST so the allocation gate below only evaluates rows that would
+    // actually be shown — it is the most expensive test in this predicate.
+    if(!((s.turnover||0)>=minTurn&&(!riskSel.length||riskSel.includes(s.risk))&&(!q||[s.symbol,s.name,s.sector].join(' ').toLowerCase().includes(q)))) return false;
+    // v1080 (owner): a row that can never be allocated a single share is not a recommendation.
+    // Structural causes only (see getAllocationBlockReason) — never the capital split.
+    const allocBlock=getAllocationBlockReason(s,allocCtx);
+    if(allocBlock){ALLOC_BLOCKED++;REMOVED_ROWS.push({s,reason:'alloc',detail:allocBlock});return false;}
+    return true;
   });
   rows.sort((a,b)=>(a.rank??Infinity)-(b.rank??Infinity));
   FILT=rowCap!=null?rows.slice(0,rowCap):rows;
@@ -6318,6 +6380,7 @@ function buildRemovedPanel(query=''){
   const heldN=all.filter(r=>r.reason==='held').length;
   const survN=all.filter(r=>r.reason==='surv').length;
   const peakN=all.filter(r=>r.reason==='peak').length;
+  const allocN=all.filter(r=>r.reason==='alloc').length;
   const shown=filterPanelRows(all,query,r=>[r.s.symbol,r.s.name,r.s.sector]);
   const CAP=100;
   const view=shown.slice(0,CAP);
@@ -6325,6 +6388,8 @@ function buildRemovedPanel(query=''){
     const s=r.s;
     const reason=r.reason==='held'
       ?`<span style="font-size:9px;background:rgba(244,114,182,.12);color:#f472b6;border:1px solid rgba(244,114,182,.25);border-radius:5px;padding:1px 7px;white-space:nowrap">📌 Held · in Open Positions</span>`
+      :r.reason==='alloc'
+        ?`<span style="font-size:9px;background:rgba(148,163,184,.12);color:var(--t2);border:1px solid rgba(148,163,184,.28);border-radius:5px;padding:1px 7px;white-space:nowrap" title="${escHtml(r.detail||'')}">🚫 Cannot allocate</span>`
       :r.reason==='peak'
         ?`<span style="font-size:9px;background:rgba(245,158,11,.12);color:var(--amber);border:1px solid rgba(245,158,11,.3);border-radius:5px;padding:1px 7px;white-space:nowrap" title="${escHtml(r.s.entryTiming?.reason||'Entry timing is not confirmed')} · range location ${fmt(r.s.entryTiming?.rangeLocation,0)}% · expected range used ${fmt(r.s.entryTiming?.rangeUsed,0)}%${r.s.entryTiming?.pullbackPrice?` · wait near/below ${fmtINR(r.s.entryTiming.pullbackPrice)}`:''}">⏳ ${escHtml(r.s.entryTiming?.action||'Wait for confirmation')}</span>`
         :(()=>{const labels=survRuleLabels(r.rules);return `<span style="font-size:9px;background:rgba(239,68,68,.12);color:var(--red);border:1px solid rgba(239,68,68,.25);border-radius:5px;padding:1px 7px;white-space:nowrap" title="Configured surveillance rule(s): ${escHtml(labels.join(' · '))}">⚠ ${escHtml(labels[0]||'surveillance')}${labels.length>1?` +${labels.length-1}`:''}</span>`;})();
@@ -6355,7 +6420,7 @@ function buildRemovedPanel(query=''){
   return `<div id="rank-removed-card" style="background:var(--bg-card);border:1px solid var(--border);border-radius:10px;overflow:hidden">
     <div style="padding:10px 16px;border-bottom:1px solid var(--border)">
       <span style="font-size:10px;font-weight:700;color:var(--t2);text-transform:uppercase;letter-spacing:.1em">Removed from rankings — ${all.length}${tag}</span>
-      <span style="font-size:11px;color:var(--t3);font-weight:400;margin-left:8px">${[heldN?`📌 ${heldN} held`:'',survN?`⚠ ${survN} surveillance`:'',peakN?`⏳ ${peakN} waiting for entry confirmation`:''].filter(Boolean).join(' · ')}${(heldN||survN||peakN)?' · ':''}why the ranks skip</span>
+      <span style="font-size:11px;color:var(--t3);font-weight:400;margin-left:8px">${[heldN?`📌 ${heldN} held`:'',survN?`⚠ ${survN} surveillance`:'',peakN?`⏳ ${peakN} waiting for entry confirmation`:'',allocN?`🚫 ${allocN} not allocatable`:''].filter(Boolean).join(' · ')}${(heldN||survN||peakN||allocN)?' · ':''}why the ranks skip</span>
     </div>
     ${body}
   </div>`;
@@ -6480,6 +6545,7 @@ function renderStatusBar(){
   }
   if(SUPPRESSED_HELD>0)html+=` <span class="sb-tag" style="margin-left:8px" title="Stocks you already hold (Holdings + Positions + today's net Orders buys). Since v1070 they remain in the ranking and can be recommended again — buying adds to the existing position. See Open Positions below.">📌 ${SUPPRESSED_HELD} already held</span>`;
   if(SURV_HARD_REMOVED>0)html+=` <span class="sb-tag sb-tag-red" style="margin-left:4px" title="Weeded out by the configured surveillance rules in the Methodology table (hard filter).">⚠ ${SURV_HARD_REMOVED} surveillance removed</span>`;
+  if(ALLOC_BLOCKED>0)html+=` <span class="sb-tag" style="margin-left:4px" title="Removed because no share can be allocated to them: no daily turnover, allocation rails below one share, no viable target after costs, or already held at a profit with no cushion for an add. Listed with the reason in Removed from rankings.">🚫 ${ALLOC_BLOCKED} not allocatable</span>`;
   if(tags.length){html+=`<span class="sb-sep">|</span>`;html+=tags.map(t=>`<span class="sb-tag">${t}</span>`).join('');}
   if(isFiltered)html+=`<button class="sb-clear" onclick="clearFilters()">✕ Clear filters</button>`;
   const el=document.getElementById('statusBar');
@@ -7387,6 +7453,93 @@ async function exportBasket(){
   showToast(`<strong>Saved ${orders.length} CNC MARKET BUY orders</strong> in Scanner Uploads as Zerodha_Basket_Buy JSON${targetNote}${planNote}${floorNote}${rejNote}${limitNote}${marketNote}`);
 }
 
+// v1080 (owner): EXPORT FRESH SELL ORDERS AT THE REVISED TARGETS.
+// Why this exists: targets move during the session (the goal-driven rate re-solves as capital and
+// remaining days change), and a Zerodha GTT CANNOT be modified. The only way to act on a revised
+// target is to place a new order. This emits one LIMIT SELL per open position at its CURRENT target
+// price, as a basket, so the whole book can be re-armed in one action.
+//
+// Scope: everything currently open - settled holdings AND today's unsettled position buys - via
+// getCombinedOpenPositionMap(), which is the same source the Open Positions panel uses, so the
+// exported prices always match what that table is showing.
+//
+// Target price is derived from the position's own AVERAGE COST (avg x (1 + targetPct/100)), not from
+// the last price: the exit answers "what do I need out of this position", and basing it on the live
+// price would silently move the goalposts every time the stock ticks. This is exactly the
+// targetPrice the Open Positions panel already displays.
+//
+// NO GTT block is attached. Zerodha sell baskets do not support GTT (a long-standing app limitation
+// recorded in CLAUDE.md), which is the whole reason this button is needed.
+//
+// DOUBLE-SELL HAZARD - surfaced to the user, not silently handled: if an OLD GTT is still live on a
+// position and one of these limit orders also fills, the position can be sold twice, leaving a
+// short. The app cannot see resting GTTs (no input file exposes them), so it cannot dedupe them. The
+// toast and the saved file both say so.
+function buildSellTargetOrders(){
+  const map=getCombinedOpenPositionMap();
+  const live=new Map((typeof ALL!=='undefined'?ALL:[]).map(r=>[r.symbol,r]));
+  const orders=[],skipped=[];
+  let seq=0;
+  Object.values(map).forEach(pos=>{
+    const sym=pos&&pos.symbol, qty=Math.floor(Number(pos&&pos.qty)||0);
+    if(!sym||qty<=0) return;                       // long positions only; shorts are not ours to exit
+    const avg=Number(pos.avg)||0;
+    const row=live.get(sym)||null;
+    const ltp=Number(pos.ltp)||Number(row&&row.price)||0;
+    if(!(avg>0)){ skipped.push(sym+' (no cost basis)'); return; }
+    const policy=getRowExitPolicy(row||{symbol:sym,price:ltp},avg);
+    const tgtPct=Number(policy&&policy.targetPct);
+    if(!(tgtPct>0)){ skipped.push(sym+' (no target)'); return; }
+    const price=tickPrice(avg*(1+tgtPct/100));
+    if(!(price>0)){ skipped.push(sym+' (bad price)'); return; }
+    orders.push({
+      id:Date.now()+seq++,
+      instrument:{
+        tradingsymbol:sym,scripCode:'',type:'EQ',symbol:sym,
+        segment:'NSE',exchange:'NSE',tickSize:0.01,lotSize:1,
+        company:(row&&row.name)||sym,tradable:true,precision:2,
+        fullName:sym,niceName:sym,niceNameHTML:sym,stockWidget:true,
+        exchangeToken:0,instrumentToken:0,isin:'',
+        related:[],underlying:null,auctionNumber:null,
+        isEquity:true,isWeekly:false
+      },
+      weight:0,
+      params:{
+        transactionType:'SELL',product:'CNC',orderType:'LIMIT',
+        validity:'DAY',validityTTL:1,
+        quantity:qty,price:+price.toFixed(2),
+        triggerPrice:0,disclosedQuantity:0,lastPrice:ltp,
+        variety:'regular',
+        tags:['TGT']
+      },
+      _meta:{avg:+avg.toFixed(2),targetPct:tgtPct,stopPct:policy.stopPct,
+             ltp:+Number(ltp||0).toFixed(2),
+             gainPctFromLtp:ltp>0?+(((price-ltp)/ltp)*100).toFixed(2):null}
+    });
+  });
+  orders.sort((a,b)=>(a._meta.gainPctFromLtp??1e9)-(b._meta.gainPctFromLtp??1e9));
+  return {orders,skipped};
+}
+async function exportSellTargets(){
+  const {orders,skipped}=buildSellTargetOrders();
+  if(!orders.length){
+    showToast('No open position has a usable cost basis and target to sell against.',4500,true);
+    return;
+  }
+  // Zerodha's basket limit is the same 20 as the buy path.
+  if(orders.length>20){
+    showToast(`${orders.length} open positions exceed Zerodha's 20-order basket limit — exporting the 20 closest to target.`,6000,true);
+    orders.length=20;
+  }
+  const payload=orders.map(o=>{const c={...o};delete c._meta;return c;});
+  const saved=await saveBasketToScannerUploads(payload,'Zerodha_Basket_Sell');
+  if(!saved) return;
+  const nearest=orders[0];
+  showToast(`Sell basket saved: ${orders.length} LIMIT sells at revised targets`
+    +(nearest&&nearest._meta.gainPctFromLtp!=null?` · nearest ${nearest.instrument.symbol} +${nearest._meta.gainPctFromLtp}% from LTP`:'')
+    +(skipped.length?` · skipped ${skipped.length}`:'')
+    +' · WARNING: cancel any existing GTTs on these first, or a fill on both will short you.',11000);
+}
 async function saveBasketToScannerUploads(orders, filename){
   if(orders.length>20) throw new Error(`Refusing to truncate basket with ${orders.length} orders`);
   const root=await FS.getStoredUploadDirHandle?.().catch(()=>null);
