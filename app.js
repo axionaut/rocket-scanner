@@ -1,5 +1,5 @@
-const BUILD_TS='2026-07-30 14:19 IST'; // release build time (IST)
-const APP_VERSION=1083; // v1083: rocket cohort must clear minObs before it sets feature weights (stops the label leak); target must fit under the session ceiling; buy basket exports the target leg only.
+const BUILD_TS='2026-07-31 10:16 IST'; // release build time (IST)
+const APP_VERSION=1084; // v1084: price-level features are anchored on the day's OPEN, not the live price, so a multi-day level stops restating today's move; true tie midranks; historical-only range capacity; Open-1d duplicate removed; basket takes rank order, not table order.
 // v556: parse the NSE Market Activity Report (MA<date>.csv) — official Nifty %, advances/declines and sector index moves shown as market CONTEXT in the status bar (EOD data, display only, never fed into per-row scoring); MA added to the ℹ️ file manifest.
 // v555 market-cycle stage awareness (stateless, self-calibrating): per-row stage label (1 accumulation · 2 breakout · 3 event · 4 profit-booking · 5 re-accumulation · 6 second-leg); a quiet-accumulation signal (conjunction-of-percentiles) injected via the rocket-diagnostic weighting; sell-the-news decay off Recent earnings date (horizon = review days). v1065 makes the market-breadth gauge an entry-eligibility input while still never changing ranking.
 const GOOGLE_DRIVE_CLIENT_ID='1015012642264-oi2nelv3v90k3d39r994a6nelgjs2a56.apps.googleusercontent.com'; // Public OAuth Web Client ID.
@@ -111,7 +111,7 @@ const SHARED_FILTER_STORE='rs_filters_shared';
 const TRADE_INPUTS_STORE='rs_trade_inputs_v1';
 let _lastTradeInputSig=''; // gate brain writes to genuine trade-input changes, not every keystroke
 const ALL_STORE='rs_data';
-const ALL_STORE_SCHEMA='radar_composite_v3'; // v1063 adds signed-gap/post-open fields and recomputes gap-fade entry readiness.
+const ALL_STORE_SCHEMA='radar_composite_v4'; // v1084 changes the price-level numerator vintage and the tie percentile, so every cached score is stale — older caches must be rescored, not restored.
 const HOLD_STORE='rs_holdings';
 const ORDERS_STORE='rs_orders';
 const POS_STORE='rs_positions';
@@ -2308,6 +2308,14 @@ const RADAR_EXCLUDED_FEATURES=new Set([
   // Static share count is only a size proxy (already covered by Market cap); R2's real signal is a
   // buyback event, which arrives statelessly via the bc corporate action, not a share-count delta.
   'Total common shares outstanding',
+  // v1084: `Open, 1 day` is a price-level column, so radarTransformed turns it into
+  // `100 × (price/open − 1)` — which IS change-from-open. Verified against the dedicated
+  // `Change from open %, 1 day` column on the 2026-07-30 14:16 file: max absolute difference
+  // 0.000000 across 2,963 rows, i.e. bit-identical. Structure was counting change-from-open
+  // TWICE under two names. The column stays exported and is still read as the numerator anchor
+  // for every multi-day price-level feature (see radarIsSessionLevel); it simply earns no
+  // feature weight of its own.
+  'Open, 1 day',
   // v1071: absolute average-volume levels match /volume/, so they are signed-log compressed and
   // routed to Liquidity with a high-good prior — which makes them pure LARGE-CAP SIZE proxies
   // (big companies trade big volume). Three of them would tilt a 12-point budget toward mega-caps,
@@ -2325,7 +2333,21 @@ const RADAR_LIQ_LABELS=['Any','₹5L','₹25L','₹1Cr','₹5Cr','₹10Cr','₹1
 const radarNum=v=>{if(v===null||v===undefined||v==='')return null;const x=Number(String(v).replace(/[,%₹\s]/g,''));return Number.isFinite(x)?x:null;};
 const clamp01=(x,a=0,b=1)=>Math.max(a,Math.min(b,x));
 function radarIdx(headers,name){return headers.indexOf(name);}
-function radarPct(sorted,x){if(x===null||!sorted.length)return null;let lo=0,hi=sorted.length;while(lo<hi){const m=(lo+hi)>>1;if(sorted[m]<=x)lo=m+1;else hi=m;}return clamp01((lo-.5)/sorted.length);}
+// v1084: TRUE TIE MIDRANKS. The former upper-bound-only search handed every member of a tie block
+// the TOP of that block. Measured on the 2026-07-30 14:16 file: 448 rows print an exact 0.00% five-
+// minute change, and they were all scored at the 54.5th percentile instead of their true 46.9th
+// midrank. That matters because the `/gap|price change/` prior PEAKS at p=.72 — the mispricing
+// pushes a stock that has not moved at all toward the most-rewarded point of the curve. The defect
+// scales with tie density, so it is worst exactly where the data is flattest.
+function radarPct(sorted,x){
+  if(x===null||!sorted.length)return null;
+  let lo=0,hi=sorted.length;
+  while(lo<hi){const m=(lo+hi)>>1;if(sorted[m]<x)lo=m+1;else hi=m;}
+  const lower=lo;
+  hi=sorted.length;
+  while(lo<hi){const m=(lo+hi)>>1;if(sorted[m]<=x)lo=m+1;else hi=m;}
+  return clamp01((lower+lo)/(2*sorted.length));
+}
 function radarQuant(a,p){if(!a.length)return null;const z=(a.length-1)*p,l=Math.floor(z),f=z-l;return a[l]+(a[Math.min(a.length-1,l+1)]-a[l])*f;}
 function radarGroupFor(h){
   const s=h.toLowerCase();
@@ -2344,12 +2366,52 @@ function radarGroupFor(h){
 function radarIsPriceLevel(h){
   return /moving average|bollinger|donchian|keltner|pivot points|ichimoku|parabolic sar|volume-weighted average price|volume-weighted moving average|hull moving average|high,|low,|open,/.test(h.toLowerCase())&&!/percentage|%/.test(h);
 }
-function radarTransformed(raw,f,priceI){
+// ── v1084: PRICE-LEVEL NUMERATOR VINTAGE ───────────────────────────────────────────────────────
+// A price-level feature is `100 × (numerator / level − 1)`. The numerator was ALWAYS the live
+// price. The denominators are MULTI-DAY aggregates — SMA-50, EMA-200, Bollinger/Keltner/Donchian,
+// Ichimoku, Hull-9, SAR — which absorb today's move at 1/50, 1/200, 1/20, or (Classic pivots,
+// computed from yesterday's HLC) not at all. So through the session:
+//
+//     feature(t)  ≈  feature(previous close)  +  today's move %
+//
+// an ADDITIVE COMMON-MODE SHIFT applied to all ~34 of them at once, in the same direction. At
+// 09:20 the shift is ~0 and each feature measures what it was designed to measure: multi-day
+// position. By 14:00 it is the full day move, and they have quietly become restatements of it.
+// Measured on the 2026-07-30 14:16 file, swapping the numerator to the day's OPEN: mean |Spearman|
+// against today's move falls 0.205 → 0.091 across 34 features; Hull-9 collapses 0.652 → 0.111,
+// Ichimoku conversion 0.325 → 0.078, Keltner basis 0.261 → 0.058, VWMA-20 0.220 → 0.045.
+//
+// Why this biases rather than merely blurs: almost every one of these falls through to the DEFAULT
+// prior `2p − 1` — linear, monotone, high-is-good, UNDAMPED. The only family built to damp an
+// extreme day move is `/gap|price change/`, which peaks at .72. So today's move entered the score
+// through ~34 undamped channels spanning Trend, Structure and Participation, against ONE damped
+// one. That is why the top of the ranking filled with names that had already run.
+//
+// OPEN, not previous close, deliberately: the gap is already its own feature with a damped prior,
+// so an open-anchored numerator avoids counting the gap twice. Fails open to the live price when
+// the open is missing, so a thin row is never dropped for want of it.
+//
+// Levels that are INTRINSICALLY today-measures keep the live price — asking "where is price now
+// relative to today's VWAP / today's high / today's low" is the whole point of those, and the data
+// agrees: swapping VWAP moved it only 0.523 → 0.469, and `High, 1 day` moved the WRONG way.
+function radarIsSessionLevel(h){
+  const s=String(h||'').trim().toLowerCase();
+  return /volume-weighted average price/.test(s)||/^(high|low|open), 1 day$/.test(s);
+}
+function radarTransformed(raw,f,priceI,openI=-1){
   const rv=raw[f.i];
   if(f.rating)return RADAR_RATING[String(rv).toLowerCase()]??null;
   let x=radarNum(rv);
   if(x===null)return null;
-  if(radarIsPriceLevel(f.name)){const p=radarNum(raw[priceI]);if(p&&x)return 100*(p/x-1);}
+  if(radarIsPriceLevel(f.name)){
+    const p=radarNum(raw[priceI]);
+    if(radarIsSessionLevel(f.name)){if(p&&x)return 100*(p/x-1);}
+    else{
+      const o=openI>=0?radarNum(raw[openI]):null;
+      const ref=(o!==null&&o>0)?o:p;
+      if(ref&&x)return 100*(ref/x-1);
+    }
+  }
   if(/volume|turnover|market capitalization|shareholder/.test(f.name.toLowerCase()))return Math.sign(x)*Math.log1p(Math.abs(x));
   if(f.name==='Price to earnings ratio')return Math.sign(x)*Math.log1p(Math.abs(x));
   if(f.name==='Price')return Math.log1p(Math.max(0,x));
@@ -2532,7 +2594,7 @@ function buildRadarSupplements(){
 function radarAnalyze(headers,rawRows,supplements={},heldSymbols=new Set()){
   const priceI=radarIdx(headers,'Price'),targetI=radarIdx(headers,'Price change %, 1 day'),sectorI=radarIdx(headers,'Sector'),symbolI=radarIdx(headers,'Symbol'),descI=radarIdx(headers,'Description');
   if(symbolI<0||priceI<0||targetI<0)throw Error('Expected Symbol, Price, and Price change %, 1 day columns.');
-  const turnI=radarIdx(headers,'Price × volume (turnover), 1 day'),relI=radarIdx(headers,'Relative volume, 1 day'),relAtI=radarIdx(headers,'Relative volume at time'),volChgI=radarIdx(headers,'Volume change %, 1 day'),gapI=radarIdx(headers,'Gap %, 1 day'),adrI=radarIdx(headers,'Average daily range %'),atrI=radarIdx(headers,'Average true range %, 14, 1 day'),atrWeekI=radarIdx(headers,'Average true range %, 14, 1 week'),volI=radarIdx(headers,'Volatility, 1 day'),highI=radarIdx(headers,'High, 1 day'),lowI=radarIdx(headers,'Low, 1 day');
+  const turnI=radarIdx(headers,'Price × volume (turnover), 1 day'),relI=radarIdx(headers,'Relative volume, 1 day'),relAtI=radarIdx(headers,'Relative volume at time'),volChgI=radarIdx(headers,'Volume change %, 1 day'),gapI=radarIdx(headers,'Gap %, 1 day'),adrI=radarIdx(headers,'Average daily range %'),atrI=radarIdx(headers,'Average true range %, 14, 1 day'),atrWeekI=radarIdx(headers,'Average true range %, 14, 1 week'),volI=radarIdx(headers,'Volatility, 1 day'),highI=radarIdx(headers,'High, 1 day'),lowI=radarIdx(headers,'Low, 1 day'),openI=radarIdx(headers,'Open, 1 day');
   const bollUpperI=radarIdx(headers,'Bollinger Bands, 20, 1 day, Upper'),keltUpperI=radarIdx(headers,'Keltner channels, 20, 1 day, Upper');
   const priceHourI=radarIdx(headers,'Price change %, 1 hour'),price15I=radarIdx(headers,'Price change %, 15 minutes'),price5I=radarIdx(headers,'Price change %, 5 minutes');
   const changeOpenI=radarIdx(headers,'Change from open %, 1 day'),perf1mI=radarIdx(headers,'Performance %, 1 month'),perf3mI=radarIdx(headers,'Performance %, 3 months');
@@ -2626,7 +2688,7 @@ function radarAnalyze(headers,rawRows,supplements={},heldSymbols=new Set()){
     if([symbolI,descI,sectorI,targetI].includes(i)||/ - Currency$/.test(name)||RADAR_EXCLUDED_FEATURES.has(name))continue;
     const f={i,name,group:radarGroupFor(name),rating};
     let vals=[];
-    for(let ri=0;ri<rawRows.length;ri++){const v=radarTransformed(rawRows[ri],f,priceI);if(v!==null)vals.push(v);}
+    for(let ri=0;ri<rawRows.length;ri++){const v=radarTransformed(rawRows[ri],f,priceI,openI);if(v!==null)vals.push(v);}
     vals.sort((a,b)=>a-b);
     if(vals.length<minObs||vals[0]===vals[vals.length-1])continue;
     // v1068 DE-CLIPPING. Winsorising the UPPER tail at the 98th percentile is correct when
@@ -2641,7 +2703,7 @@ function radarAnalyze(headers,rawRows,supplements={},heldSymbols=new Set()){
     f.sorted=wins;f.lo=q02;f.hi=q98;f.coverage=vals.length/rawRows.length;
     let ar=[],ao=[];
     for(let ri=0;ri<rawRows.length;ri++){
-      let v=radarTransformed(rawRows[ri],f,priceI);
+      let v=radarTransformed(rawRows[ri],f,priceI,openI);
       if(v===null)continue;
       const p=radarPct(wins,clamp01(v,q02,q98));
       (rset.has(ri)?ar:ao).push(p);
@@ -2674,7 +2736,12 @@ function radarAnalyze(headers,rawRows,supplements={},heldSymbols=new Set()){
   // Cross-sectional distributions for the stage inputs. Percentiles (not fixed thresholds) define
   // low/high, so the classifier recalibrates to each day's universe.
   const _sortF=a=>a.filter(v=>v!==null&&isFinite(v)).sort((x,y)=>x-y);
-  const volArr=rawRows.map(raw=>{const a=radarNum(raw[adrI]),b=radarNum(raw[atrI]),c=radarNum(raw[volI]),d=radarNum(raw[atrWeekI]);const m=Math.max(a||0,b||0,c||0,(d||0)/Math.sqrt(5));return m>0?m:null;});
+  // v1084: HISTORICAL movement capacity only — `Volatility, 1 day` is deliberately NOT in this max.
+  // It expands with the CURRENT session's realised move, so it lets an already-spent spike widen its
+  // own capacity estimate. Measured on the 2026-07-30 14:16 file it EXCEEDED daily ATR on 793 of
+  // 2,965 rows (26.8%), i.e. for a quarter of the universe today's own move was setting the range.
+  // It is still scored as a Volatility feature and still reported; it just cannot manufacture runway.
+  const volArr=rawRows.map(raw=>{const a=radarNum(raw[adrI]),b=radarNum(raw[atrI]),d=radarNum(raw[atrWeekI]);const m=Math.max(a||0,b||0,(d||0)/Math.sqrt(5));return m>0?m:null;});
   const dayAbsArr=rawRows.map(raw=>{const d=radarNum(raw[targetI]);return d===null?null:Math.abs(d);});
   const relvolArr=rawRows.map(raw=>radarNum(raw[relI]));
   const deliveryArr=rawRows.map(raw=>{const m=supplements[normSym(raw[symbolI])];return m&&m.delivery!=null?m.delivery:null;});
@@ -2739,7 +2806,7 @@ function radarAnalyze(headers,rawRows,supplements={},heldSymbols=new Set()){
     for(const g in RADAR_GROUPS){parts[g]=0;weights[g]=0;}
     let observed=0;
     for(const f of features){
-      let v=radarTransformed(raw,f,priceI);
+      let v=radarTransformed(raw,f,priceI,openI);
       if(v===null)continue;
       // Use the bounds the feature was actually built with (v1068). Re-deriving 2nd/98th from the
       // already-winsorised array double-clipped every feature and would re-flatten the
@@ -2795,7 +2862,11 @@ function radarAnalyze(headers,rawRows,supplements={},heldSymbols=new Set()){
     const gapSigned=radarNum(raw[gapI]),gap=Math.abs(gapSigned||0),changeOpen=radarNum(raw[changeOpenI]),quality=features.length?observed/features.length:0;
     const relvol=radarNum(raw[relI]),relAt=radarNum(raw[relAtI]),volChg=radarNum(raw[volChgI]);
     const atrPct=radarNum(raw[atrI]);
-    const rangePct=Math.max(radarNum(raw[adrI])||0,atrPct||0,radarNum(raw[volI])||0,(radarNum(raw[atrWeekI])||0)/Math.sqrt(5));
+    // v1084: historical capacity only (see volArr above). `Volatility, 1 day` is excluded because it
+    // is an OUTCOME of today's move, and this figure feeds the 10%-stretch penalty, target
+    // reachability and the v1083 session ceiling — all of which must not widen as a stock runs.
+    const sessionVolatilityPct=radarNum(raw[volI]);
+    const rangePct=Math.max(radarNum(raw[adrI])||0,atrPct||0,(radarNum(raw[atrWeekI])||0)/Math.sqrt(5));
     const stretch=rangePct?10/rangePct:99;
     const participationReady=(relvol||0)>=1.2||(relAt||0)>=1.5||(volChg||0)>=20;
     const impulseReady=(day>=.5&&day<8)||parts.momentum>=62||parts.trend>=65;
@@ -2856,7 +2927,7 @@ function radarAnalyze(headers,rawRows,supplements={},heldSymbols=new Set()){
     // Display the REAL day move for a neutralised corp-action row (scoring already used the blanked 0).
     const dispDay=meta._corpNeutralised&&meta._realDay!=null?meta._realDay:day;
     const out={symbol,name:String(raw[descI]||symbol),sector:raw[sectorI]||'',rawScore,parts,contrib,quality,
-      price,day:dispDay,priceChange:dispDay,turnover:turn,relvol,gap,gapSigned,changeOpen,rangePct,stretch,atr:atrPct,
+      price,day:dispDay,priceChange:dispDay,turnover:turn,relvol,gap,gapSigned,changeOpen,rangePct,sessionVolatilityPct,stretch,atr:atrPct,
       high1d:highI>=0?radarNum(raw[highI]):null,low1d:lowI>=0?radarNum(raw[lowI]):null,rocketToday:day>=10,
       vwap:vwapI>=0?radarNum(raw[vwapI]):null,
       bollUpper:bollUpperI>=0?radarNum(raw[bollUpperI]):null,
@@ -6449,7 +6520,12 @@ function applyFilters(){
   // user's persisted exclusions, capped at Zerodha's 20-order limit.
   // Trade-timing state is DIAGNOSTIC ONLY and never empties the selection (owner, v1068):
   // what is recommended is decided by the row's own evidence, not by the wall clock.
-  SELECTED=new Set(FILT.filter(s=>s.basketEligible!==false&&!EXPORT_EXCLUDED.has(s.symbol)).slice(0,20).map(s=>s.symbol));
+  // v1084: take the 20 by RADAR RANK, not by the table's current presentation order. `applySort()`
+  // above reorders FILT in place for display, so before this the basket silently changed whenever a
+  // column header was clicked — sorting by Day % handed the export the 20 biggest movers instead of
+  // the 20 best-scoring rows. Presentation must never decide what gets bought.
+  const selectionRows=[...FILT].sort((a,b)=>(a.rank??Infinity)-(b.rank??Infinity));
+  SELECTED=new Set(selectionRows.filter(s=>s.basketEligible!==false&&!EXPORT_EXCLUDED.has(s.symbol)).slice(0,20).map(s=>s.symbol));
 
   PG=1;renderHead();renderTable();renderStatusBar();saveFilterState();updateTabCounts();
   try{renderRankingsPanels();}catch(e){console.warn('Rankings panels render failed',e);}
@@ -7854,7 +7930,7 @@ function compactRankingRows(rows){
     score:s.score,rocketScore:s.rocketScore,rank:s.rank,
     setup:s.setup,risk:s.risk,series:s.series,band:s.band??null,status:s.status,
     basketEligible:s.basketEligible!==false,eqEligible:s.eqEligible!==false,
-    stretch:s.stretch,rangePct:s.rangePct,relvol:s.relvol??null,gap:s.gap??null,
+    stretch:s.stretch,rangePct:s.rangePct,sessionVolatilityPct:s.sessionVolatilityPct??null,relvol:s.relvol??null,gap:s.gap??null,
     gapSigned:s.gapSigned??null,changeOpen:s.changeOpen??null,
     turnover:s.turnover,atr:s.atr??null,quality:s.quality??null,
     high1d:s.high1d??null,low1d:s.low1d??null,vwap:s.vwap??null,bollUpper:s.bollUpper??null,keltUpper:s.keltUpper??null,
