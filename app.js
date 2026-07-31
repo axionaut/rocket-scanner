@@ -1,5 +1,5 @@
-const BUILD_TS='2026-07-31 10:16 IST'; // release build time (IST)
-const APP_VERSION=1084; // v1084: price-level features are anchored on the day's OPEN, not the live price, so a multi-day level stops restating today's move; true tie midranks; historical-only range capacity; Open-1d duplicate removed; basket takes rank order, not table order.
+const BUILD_TS='2026-07-31 10:56 IST'; // release build time (IST)
+const APP_VERSION=1085; // v1085: a rocket is now a stock that reaches its own TARGET before its own STOP within 2 trading days (owner) — a forward, path-dependent label resolved in the outcome store; no same-day cohort may set a feature effect at any density.
 // v556: parse the NSE Market Activity Report (MA<date>.csv) — official Nifty %, advances/declines and sector index moves shown as market CONTEXT in the status bar (EOD data, display only, never fed into per-row scoring); MA added to the ℹ️ file manifest.
 // v555 market-cycle stage awareness (stateless, self-calibrating): per-row stage label (1 accumulation · 2 breakout · 3 event · 4 profit-booking · 5 re-accumulation · 6 second-leg); a quiet-accumulation signal (conjunction-of-percentiles) injected via the rocket-diagnostic weighting; sell-the-news decay off Recent earnings date (horizon = review days). v1065 makes the market-breadth gauge an entry-eligibility input while still never changing ranking.
 const GOOGLE_DRIVE_CLIENT_ID='1015012642264-oi2nelv3v90k3d39r994a6nelgjs2a56.apps.googleusercontent.com'; // Public OAuth Web Client ID.
@@ -111,7 +111,7 @@ const SHARED_FILTER_STORE='rs_filters_shared';
 const TRADE_INPUTS_STORE='rs_trade_inputs_v1';
 let _lastTradeInputSig=''; // gate brain writes to genuine trade-input changes, not every keystroke
 const ALL_STORE='rs_data';
-const ALL_STORE_SCHEMA='radar_composite_v4'; // v1084 changes the price-level numerator vintage and the tie percentile, so every cached score is stale — older caches must be rescored, not restored.
+const ALL_STORE_SCHEMA='radar_composite_v5'; // v1085 adds open1d and redefines rocketToday (target before stop), so older caches must be rescored.
 const HOLD_STORE='rs_holdings';
 const ORDERS_STORE='rs_orders';
 const POS_STORE='rs_positions';
@@ -1793,6 +1793,80 @@ function percentileValue(values,pct){
   if(!sorted.length) return null;
   return sorted[Math.min(sorted.length-1,Math.max(0,Math.floor((sorted.length-1)*pct)))];
 }
+// ── v1085: THE ROCKET DEFINITION ───────────────────────────────────────────────────────────────
+// Owner, 2026-07-31, replacing "same-day move >= 10%" outright and knowingly departing from the
+// same-day core philosophy:
+//
+//     A rocket is a stock that rises to ITS OWN TARGET within 2 trading days (the issue day and
+//     the next, skipping weekends and NSE holidays) WITHOUT first falling to ITS OWN STOP.
+//
+// The stop clause is the point of the change. The owner's complaint is that picks dip through the
+// stop and only then run to target, which books a loss and forfeits the move — which is also why
+// v1083 stopped exporting a stoploss leg. Under the old bar that pick scored as a success; under
+// this one it does not, so the measurement finally agrees with the P&L.
+//
+// THIS LABEL IS FORWARD-LOOKING AND PATH-DEPENDENT, WITH TWO HARD CONSEQUENCES.
+// (1) It cannot exist at scan time, so it can never set a feature's direction or weight in a
+//     same-day scorer. Any same-day cohort that stood in for it would be a restatement of today's
+//     move — the v1083 label leak — and it would be far worse now, because this label is ~51x
+//     denser (measured on the 2026-07-30 tradeable universe, n=1418: day-1 target-before-stop
+//     fires on 25.2% of rows against 0.49% for the >=10% bar), so it would clear `minObs` easily
+//     and re-arm every effect. `radarAnalyze` therefore holds all feature effects at 0; see there.
+// (2) It is resolved from daily bars, so within ONE day the ORDER of the two barrier touches is
+//     unknowable. Measured: only 2 of 1418 rows (0.14%) touch both in a day, because the stop
+//     (median 5.24%) sits far outside the target (~1.9%). Those are recorded as 'ambiguous' and
+//     counted as NOT rockets — conservative in the direction of the owner's complaint — and the
+//     count is kept so the assumption stays auditable rather than silent.
+const ROCKET_HORIZON_DAYS=2; // the issue day + the next trading day
+const ROCKET_OUTCOME={ROCKET:'rocket',STOPPED:'stopped',AMBIGUOUS:'ambiguous',PENDING:'pending',EXPIRED:'expired'};
+// Resolve ONE day's bar against a pick's two barriers.
+//
+// `prevHigh`/`prevLow` are the day's extremes AS THEY STOOD WHEN THE PICK WAS ISSUED, and they
+// matter only on the issue day itself: that bar already contains price action from BEFORE the
+// recommendation existed, and a stop "breach" that happened at 09:20 cannot be charged to a pick
+// made at 14:00. A barrier therefore counts on the issue day only when the bar made a NEW extreme
+// past it after issue. On later days the whole bar is attributable and prevHigh/prevLow are null.
+function resolveRocketDay(bar,entryPrice,targetPct,stopPct,prevHigh=null,prevLow=null){
+  if(!(entryPrice>0)||!(targetPct>0)||!(stopPct>0)) return null;
+  const up=entryPrice*(1+targetPct/100), dn=entryPrice*(1-stopPct/100);
+  const hi=Number(bar?.high1d), lo=Number(bar?.low1d);
+  const newHigh=prevHigh==null||!(prevHigh>0)?true:hi>prevHigh+1e-9;
+  const newLow =prevLow ==null||!(prevLow >0)?true:lo<prevLow -1e-9;
+  const hitUp=hi>0&&hi>=up&&newHigh;
+  const hitDn=lo>0&&lo<=dn&&newLow;
+  if(hitUp&&hitDn) return ROCKET_OUTCOME.AMBIGUOUS;
+  if(hitUp) return ROCKET_OUTCOME.ROCKET;
+  if(hitDn) return ROCKET_OUTCOME.STOPPED;
+  return null; // neither barrier touched — still live
+}
+// Did this pick's resolved state count as a rocket? Ambiguity is deliberately NOT a rocket.
+function isRocketOutcome(p){return p?.rocketOutcome===ROCKET_OUTCOME.ROCKET;}
+// Advance ONE pick's rocket state using the bar observed on the scan `gap` trading days after
+// issue. First passage wins: once a pick resolves it is never revisited, so a stock that stops out
+// on day 1 and rallies on day 2 stays STOPPED — which is the whole point of the definition.
+// Each (pick, day) is applied at most once, so re-uploading the same session cannot double-count.
+function resolveRocketForPick(p,bar,gap,scanDate){
+  if(!p||!bar) return;
+  if(p.rocketOutcome&&p.rocketOutcome!==ROCKET_OUTCOME.PENDING) return; // already resolved
+  if(!(p.entryPrice>0)||!(p.targetPct>0)||!(p.stopPct>0)){
+    p.rocketOutcome=p.rocketOutcome||ROCKET_OUTCOME.PENDING;
+    p.rocketUnresolvedReason='no per-stock target/stop recorded at issue';
+    return;
+  }
+  const horizon=Math.max(1,p.rocketHorizonDays||ROCKET_HORIZON_DAYS);
+  if(gap>horizon-1){ // window closed without either barrier being touched
+    p.rocketOutcome=ROCKET_OUTCOME.EXPIRED;p.rocketResolvedOn=scanDate;p.rocketResolvedDay=gap;
+    return;
+  }
+  if(p.rocketDaysSeen&&p.rocketDaysSeen.includes(gap)) return;
+  p.rocketDaysSeen=[...(p.rocketDaysSeen||[]),gap];
+  // Only the ISSUE day needs its pre-recommendation action excluded (see resolveRocketDay).
+  const res=resolveRocketDay(bar,p.entryPrice,p.targetPct,p.stopPct,
+    gap===0?p.high1dAtIssue:null, gap===0?p.low1dAtIssue:null);
+  if(!res) return; // still live inside the window
+  p.rocketOutcome=res;p.rocketResolvedOn=scanDate;p.rocketResolvedDay=gap;
+  if(res===ROCKET_OUTCOME.ROCKET){p.rocketDate=scanDate;p.rocketDays=gap;}
+}
 function getRocketArrivalStats(){
   const issues=Object.values((FS.get(RECOMMEND_OUTCOME_STORE)||{}).issues||{});
   const days=issues.flatMap(issue=>(issue.picks||[]).map(p=>p.rocketDays)).filter(v=>v!=null&&isFinite(v)&&v>0);
@@ -1878,14 +1952,31 @@ function recordRecommendationOutcomeScan(scan){
     const checkpoint=getOutcomeCheckpointDays(horizon);
     issue.horizonDays=horizon;
     const gap=tradingDaysBetween(issue.date,scan.date);
-    if(gap==null||gap<=0) return;
+    if(gap==null||gap<0) return;
+    // v1085: the ROCKET window runs over gap 0..ROCKET_HORIZON_DAYS-1 (the issue day and the next),
+    // which is resolved on its own schedule below and independently of the legacy profit horizon.
+    // gap===0 is a LATER SCAN ON THE ISSUE DAY — the post-close export is what finally closes the
+    // issue day's bar — so it is no longer skipped outright. It still contributes nothing to the
+    // legacy running high/low stats, which are defined over subsequent days.
+    if(gap===0){
+      (issue.picks||[]).forEach(p=>{
+        const row=rowMap[p.symbol];
+        if(row) resolveRocketForPick(p,row,gap,scan.date);
+      });
+      return;
+    }
     if(gap>horizon){
-      (issue.picks||[]).forEach(p=>{p.complete=true;});
+      (issue.picks||[]).forEach(p=>{
+        const row=rowMap[p.symbol];
+        if(row) resolveRocketForPick(p,row,gap,scan.date);
+        p.complete=true;
+      });
       return;
     }
     (issue.picks||[]).forEach(p=>{
       const row=rowMap[p.symbol];
       if(!row||!(p.entryPrice>0)) return;
+      resolveRocketForPick(p,row,gap,scan.date);
       if(p.evaluatedThrough===scan.date) return;
       const highProfit=row.high1d>0?((row.high1d-p.entryPrice)/p.entryPrice)*100:null;
       const closeProfit=row.price>0?((row.price-p.entryPrice)/p.entryPrice)*100:null;
@@ -1970,7 +2061,16 @@ function getRecommendationOutcomeSummary(){
     .filter(p=>p.complete&&p.observations>0)
     .map(p=>({p,threshold:issue.threshold})));
   const picks=assessed.map(x=>x.p);
-  const rockets=picks.filter(p=>p.rocketDate);
+  // v1085: a rocket is a RESOLVED forward outcome (target before stop within ROCKET_HORIZON_DAYS),
+  // not a same-day threshold crossing. The three failure modes are kept apart because they mean
+  // different things: `stopped` is the owner's actual complaint (it dipped first), `expired` simply
+  // never travelled, and `ambiguous` touched both barriers inside one daily bar so the order is
+  // unknowable — counted as NOT a rocket, and surfaced so that assumption stays visible.
+  const rockets=picks.filter(p=>isRocketOutcome(p));
+  const stoppedOut=picks.filter(p=>p.rocketOutcome===ROCKET_OUTCOME.STOPPED);
+  const ambiguous=picks.filter(p=>p.rocketOutcome===ROCKET_OUTCOME.AMBIGUOUS);
+  const expired=picks.filter(p=>p.rocketOutcome===ROCKET_OUTCOME.EXPIRED);
+  const pendingRocket=picks.filter(p=>!p.rocketOutcome||p.rocketOutcome===ROCKET_OUTCOME.PENDING);
   const currentHorizon=getAdaptiveOutcomeHorizonDays();
   const fastRockets=rockets.filter(p=>(p.rocketDays??currentHorizon)<=getOutcomeCheckpointDays(p.horizonDays||currentHorizon));
   const delayedRockets=rockets.length-fastRockets.length;
@@ -1980,9 +2080,12 @@ function getRecommendationOutcomeSummary(){
   const earlyFailures=assessed.filter(({p,threshold})=>p.conversionAssessed&&!p.rocketDate&&calcRecommendationOutcomeScore(p,threshold)<0);
   return {
     evaluated:picks.length,rockets:rockets.length,
+    stoppedOut:stoppedOut.length,ambiguousRockets:ambiguous.length,
+    expiredRockets:expired.length,pendingRockets:pendingRocket.length,
+    resolvedRockets:picks.length-pendingRocket.length,
     fastRockets:fastRockets.length,delayedRockets,earlyFailures:earlyFailures.length,
     failures:failures.length,
-    conversionPct:picks.length?+(rockets.length/picks.length*100).toFixed(1):null,
+    conversionPct:(picks.length-pendingRocket.length)?+(rockets.length/(picks.length-pendingRocket.length)*100).toFixed(1):null,
     rocketArrivalCount:observedRockets.length,
     avgRocketDays:observedRockets.length?+(meanArr(observedRockets.map(p=>p.rocketDays)).toFixed(1)):null,
     avgBestHighPct:upsides.length?+meanArr(upsides).toFixed(2):null,
@@ -2287,7 +2390,7 @@ function previousTradingSessionDate(dateText){
 // ══════════════════════════════════════════════════
 // RADAR COMPOSITE SCORER (v517)
 // One same-day transparent cross-sectional model: typed transformations, robust
-// winsorized percentiles, a shrunk same-day rocket-archetype diagnostic blended
+// winsorized percentiles, a same-day rocket diagnostic measured but NOT applied (v1085), blended
 // with finance priors across seven budgeted groups, then NSE-report penalties.
 // It learns nothing across days and stores no rolling state.
 // ══════════════════════════════════════════════════
@@ -2635,8 +2738,37 @@ function radarAnalyze(headers,rawRows,supplements={},heldSymbols=new Set()){
   // positive cohort for same-day archetype measurement. The broader v550 continuation signal
   // is only a per-row follow-through/falling-knife input; using its ~half-universe cohort here
   // caused the Rockets Today card and every diagnostic effect orientation to become misleading.
-  const rocketRows=rawRows.map((r,i)=>({i,day:radarNum(r[targetI])}))
-    .filter(x=>x.day!==null&&x.day>=10).map(x=>x.i);
+  // v1085: DAY 1 of the owner's rocket definition, as a DISPLAY DIAGNOSTIC ONLY.
+  // The real label is forward (target before stop across 2 trading days) and is resolved in the
+  // outcome store, not here. What can be seen from one snapshot is the issue day's leg: did the
+  // bar reach the stock's target above its OPEN without first reaching its stop below it. That is
+  // strictly closer to the owner's definition than the retired ">= 10% today" bar, and it is what
+  // the "Rockets Today" card now counts.
+  //
+  // IT MUST NEVER SET A FEATURE EFFECT. It is a restatement of today's move, so it separates any
+  // same-day-move feature perfectly by construction — the v1083 label leak — and it is now ~51x
+  // denser than the old bar (25.2% of the tradeable universe vs 0.49%, measured 2026-07-30), so
+  // it would sail past `minObs` and re-arm every effect at full strength. See the effect line.
+  // The session's portfolio target anchor, resolved ONCE. Only the day-1 rocket diagnostic below
+  // uses it; it never enters a feature, a percentile or the composite. Wrapped because it walks
+  // the goal solve and the harvest pool, and a scoring pass must not die if either is unavailable.
+  // NB ORDERING: processFiles scores the scanner file BEFORE the portfolio files parse, so this
+  // can resolve to a fallback anchor rather than the fully-informed one shown later in the UI.
+  // That is tolerable because the cohort is display-only, but the value used is RECORDED on RADAR
+  // so the label stays reproducible instead of silently drifting from the displayed target.
+  let _radarSessionTargetPct=null;
+  try{const t=Number(getEffectiveTgtPct());if(t>0)_radarSessionTargetPct=t;}catch(e){}
+  const rocketRows=rawRows.map((raw,i)=>{
+    const o=openI>=0?radarNum(raw[openI]):null;
+    const hi=highI>=0?radarNum(raw[highI]):null;
+    const lo=lowI>=0?radarNum(raw[lowI]):null;
+    const atrPct=radarNum(raw[atrI]);
+    if(!(o>0)||!(hi>0)||!(lo>0)) return null;
+    const tgt=Number(_radarSessionTargetPct)>0?Number(_radarSessionTargetPct):null;
+    const stop=atrPct>0?clampNum(SL_ATR_MULT*atrPct,SL_MIN_PCT,SL_MAX_PCT):null;
+    if(!(tgt>0)||!(stop>0)) return null;
+    return resolveRocketDay({high1d:hi,low1d:lo},o,tgt,stop)===ROCKET_OUTCOME.ROCKET?i:null;
+  }).filter(i=>i!==null);
   const rset=new Set(rocketRows);
   const continuationSignals=rawRows.map(r=>getContinuationSignal(r,targetI,priceHourI,price15I,price5I,relI,relAtI,volChgI));
   const continuationRows=continuationSignals.map((signal,i)=>signal>=.35?i:null).filter(i=>i!==null);
@@ -2678,7 +2810,21 @@ function radarAnalyze(headers,rawRows,supplements={},heldSymbols=new Set()){
   // until the cohort is genuinely large enough to estimate an effect from.
   //
   // Reuses minObs rather than introducing a threshold, so there is no new tunable constant.
-  const rocketCohortTrusted=rocketRows.length>=minObs;
+  //
+  // ── v1085 CLOSES THIS PERMANENTLY ──────────────────────────────────────────────────────────
+  // v1083's minObs gate worked only because the ">= 10% today" cohort was tiny (6 rows against a
+  // minObs of 237) and so never armed. The owner's new rocket definition is FORWARD-LOOKING —
+  // target before stop across 2 trading days — and cannot be evaluated at scan time at all. The
+  // only same-day stand-in is `rocketRows` above, which fires on 25.2% of the tradeable universe;
+  // that clears minObs comfortably and would re-arm every effect with a label made of today's move.
+  //
+  // So the size test is no longer sufficient and is no longer used for this: NO same-day cohort may
+  // set a feature's direction or weight, at any density. `diagnosticEffect` keeps the separation
+  // for the audit ledger, `effect` is held at 0, and the weight reduces to coverage alone. The
+  // scorer therefore stays in the prior-driven configuration the owner reports as reliable at
+  // 09:15, at every hour of the day. Cross-day learning from the RESOLVED labels is a separate
+  // decision that needs accumulated evidence; nothing here consumes them.
+  const rocketCohortTrusted=false;
   const features=[];
   for(let i=0;i<headers.length;i++){
     const name=headers[i],rating=/rating/i.test(name);
@@ -2711,7 +2857,9 @@ function radarAnalyze(headers,rawRows,supplements={},heldSymbols=new Set()){
     const mr=ar.length?ar.reduce((a,b)=>a+b,0)/ar.length:.5,mo=ao.length?ao.reduce((a,b)=>a+b,0)/ao.length:.5;
     // v1083: the rocket cohort must clear the SAME minimum-observation bar every feature must clear
     // before it is modeled at all. See rocketCohortTrusted above for the full reasoning.
-    f.effect=rocketCohortTrusted?clamp01((mr-mo)*2,-1,1):0;
+    // v1085: the separation is still MEASURED (the ledger shows it) but never APPLIED.
+    f.diagnosticEffect=clamp01((mr-mo)*2,-1,1);
+    f.effect=rocketCohortTrusted?f.diagnosticEffect:0;
     f.reliability=Math.sqrt(f.coverage)*(rocketRows.length/(rocketRows.length+12));
     f.weight=(.07+Math.abs(f.effect))*.6+.4*Math.sqrt(f.coverage);
     features.push(f);
@@ -2728,8 +2876,9 @@ function radarAnalyze(headers,rawRows,supplements={},heldSymbols=new Set()){
       let ar=[],ao=[];
       srArr.forEach((v,ri)=>{if(v===null)return;(rset.has(ri)?ar:ao).push(radarPct(wins,clamp01(v,q02,q98)));});
       const mr=ar.length?ar.reduce((a,b)=>a+b,0)/ar.length:.5,mo=ao.length?ao.reduce((a,b)=>a+b,0)/ao.length:.5;
-      const effect=rocketCohortTrusted?clamp01((mr-mo)*2,-1,1):0,coverage=vals.length/rawRows.length;
-      srFeat={sorted:wins,q02,q98,effect,weight:(.07+Math.abs(effect))*.6+.4*Math.sqrt(coverage)};
+      const diagnosticEffect=clamp01((mr-mo)*2,-1,1);
+      const effect=rocketCohortTrusted?diagnosticEffect:0,coverage=vals.length/rawRows.length;
+      srFeat={sorted:wins,q02,q98,effect,diagnosticEffect,weight:(.07+Math.abs(effect))*.6+.4*Math.sqrt(coverage)};
     }
   }
   // ── v555 MARKET-CYCLE STAGE AWARENESS (stateless, self-calibrating) ──
@@ -2767,8 +2916,9 @@ function radarAnalyze(headers,rawRows,supplements={},heldSymbols=new Set()){
       let ar=[],ao=[];
       accArr.forEach((v,ri)=>{if(v===null)return;(rset.has(ri)?ar:ao).push(radarPct(wins,clamp01(v,q02,q98)));});
       const mr=ar.length?ar.reduce((a,b)=>a+b,0)/ar.length:.5,mo=ao.length?ao.reduce((a,b)=>a+b,0)/ao.length:.5;
-      const effect=rocketCohortTrusted?clamp01((mr-mo)*2,-1,1):0,coverage=vals.length/rawRows.length;
-      accFeat={sorted:wins,q02,q98,effect,weight:(.07+Math.abs(effect))*.6+.4*Math.sqrt(coverage)};
+      const diagnosticEffect=clamp01((mr-mo)*2,-1,1);
+      const effect=rocketCohortTrusted?diagnosticEffect:0,coverage=vals.length/rawRows.length;
+      accFeat={sorted:wins,q02,q98,effect,diagnosticEffect,weight:(.07+Math.abs(effect))*.6+.4*Math.sqrt(coverage)};
     }
   }
   // ── v1068 IGNITION TRACK (finds the tail the composite averages away) ─────────────────
@@ -2928,7 +3078,7 @@ function radarAnalyze(headers,rawRows,supplements={},heldSymbols=new Set()){
     const dispDay=meta._corpNeutralised&&meta._realDay!=null?meta._realDay:day;
     const out={symbol,name:String(raw[descI]||symbol),sector:raw[sectorI]||'',rawScore,parts,contrib,quality,
       price,day:dispDay,priceChange:dispDay,turnover:turn,relvol,gap,gapSigned,changeOpen,rangePct,sessionVolatilityPct,stretch,atr:atrPct,
-      high1d:highI>=0?radarNum(raw[highI]):null,low1d:lowI>=0?radarNum(raw[lowI]):null,rocketToday:day>=10,
+      high1d:highI>=0?radarNum(raw[highI]):null,low1d:lowI>=0?radarNum(raw[lowI]):null,open1d:openI>=0?radarNum(raw[openI]):null,rocketToday:rset.has(ri),
       vwap:vwapI>=0?radarNum(raw[vwapI]):null,
       bollUpper:bollUpperI>=0?radarNum(raw[bollUpperI]):null,
       keltUpper:keltUpperI>=0?radarNum(raw[keltUpperI]):null,
@@ -2988,7 +3138,7 @@ function radarAnalyze(headers,rawRows,supplements={},heldSymbols=new Set()){
     r.entryTiming=getMarketAlignedEntryTiming(r,marketIntraday);
     r.entryReady=!r.entryTiming.blocked;
   });
-  return {rows,features,rockets:rocketRows.length,continuationCount:continuationRows.length,suppressedHeld,marketIntraday,ids:{priceI,targetI,sectorI,symbolI,descI}};
+  return {rows,features,rockets:rocketRows.length,rocketTargetPct:_radarSessionTargetPct,continuationCount:continuationRows.length,suppressedHeld,marketIntraday,ids:{priceI,targetI,sectorI,symbolI,descI}};
 }
 // Score the current upload (object rows from parseCSV) through the Radar composite.
 function radarScoreRows(objRows){
@@ -2998,7 +3148,7 @@ function radarScoreRows(objRows){
   const held=new Set(Object.keys(heldPos).map(normSym));
   const t0=performance.now();
   const result=radarAnalyze(headers,matrix,buildRadarSupplements(),held);
-  RADAR={headers,matrix,features:result.features,ids:result.ids,rockets:result.rockets,continuationCount:result.continuationCount,ms:performance.now()-t0,sourceNote:'',scoredAt:Date.now()};
+  RADAR={headers,matrix,features:result.features,ids:result.ids,rockets:result.rockets,rocketTargetPct:result.rocketTargetPct??null,continuationCount:result.continuationCount,ms:performance.now()-t0,sourceNote:'',scoredAt:Date.now()};
   SUPPRESSED_HELD=result.suppressedHeld;
   MARKET_INTRADAY=result.marketIntraday; // v555 WS-D: market breadth for the status bar + basket export
   return result.rows;
@@ -3944,7 +4094,7 @@ function renderStats(){
   FILT.forEach(s=>{if(riskCounts[s.risk]!=null)riskCounts[s.risk]++;});
   const medianRisk=Object.entries(riskCounts).sort((a,b)=>b[1]-a[1])[0]?.[0]||'—';
   const selCount=FILT.filter(s=>SELECTED.has(s.symbol)).length;
-  const rocketsCard=`<div class="st"><div class="st-l">Rockets Today</div><div class="st-v" style="color:var(--fire)">${(RADAR.rockets||0).toLocaleString()}</div><div class="st-d">true same-day ≥10% movers · diagnostic cohort${RADAR.continuationCount?` · ${RADAR.continuationCount.toLocaleString()} broader continuation signals scored separately`:''}</div></div>`;
+  const rocketsCard=`<div class="st"><div class="st-l">Rockets Today</div><div class="st-v" style="color:var(--fire)">${(RADAR.rockets||0).toLocaleString()}</div><div class="st-d" title="v1085 definition: reached its own target before its own stop. This card shows DAY 1 only — the full label runs over 2 trading days and is resolved in the outcome store after the next session. Diagnostic; it sets no feature weight.">reached target before stop today · day 1 of 2 · diagnostic${RADAR.continuationCount?` · ${RADAR.continuationCount.toLocaleString()} broader continuation signals scored separately`:''}</div></div>`;
   const scoreCard=`<div class="st"><div class="st-l">Top Score</div><div class="st-v" style="color:${radarScoreColor(top?.score)}">${topScore}</div><div class="st-d">${FILT.length.toLocaleString()} displayed · ${selCount} selected for export · median risk ${medianRisk} · ${RADAR.features.length||0} modeled features</div></div>`;
 
   // v1078 (owner): SEVEN cards, no more. Consolidated rather than appended -
@@ -4891,7 +5041,7 @@ function renderPerformance(){
     {label:'Avg Hold',value:p.avgHoldDays+'d',color:'var(--t1)',sub:'How long a position actually lasts'},
   ];
   if(recSummary.evaluated){
-    kpis.push({label:'Rocket Conversion',value:recSummary.conversionPct+'%',color:recSummary.conversionPct>=20?'var(--green)':recSummary.conversionPct>=10?'var(--amber)':'var(--red)',sub:`Picks that hit the target · ${recSummary.rockets}/${recSummary.evaluated} completed`});
+    kpis.push({label:'Rocket Conversion',value:recSummary.conversionPct+'%',color:recSummary.conversionPct>=20?'var(--green)':recSummary.conversionPct>=10?'var(--amber)':'var(--red)',sub:`Hit target before stop within ${ROCKET_HORIZON_DAYS} trading days · ${recSummary.rockets}/${recSummary.resolvedRockets} resolved`+(recSummary.stoppedOut?` · ${recSummary.stoppedOut} stopped first`:'')+(recSummary.pendingRockets?` · ${recSummary.pendingRockets} still open`:'')});
   }
   // Same-day exit headroom (owner insight 2026-07-21): on the days you sold, how much
   // higher did the stock trade AFTER your exit that same day? This is the measured cost
@@ -5480,7 +5630,7 @@ function buildRadarLedgerHTML(){
     else if(i===RADAR.ids.symbolI||i===RADAR.ids.descI)use='Identifier / display only';
     else if(i===RADAR.ids.sectorI){use='Sector peer context and display';group='Context';}
     else if(/ - Currency$/.test(h))use='Unit metadata; zero weight when constant';
-    else if(f){use=radarIsPriceLevel(h)?'Converted to % distance from current price, then ranked':'Winsorized and cross-sectionally percentile-ranked';group=RADAR_GROUPS[f.group].label;w=f.weight;sep=f.effect;}
+    else if(f){use=radarIsPriceLevel(h)?'Converted to % distance from current price, then ranked':'Winsorized and cross-sectionally percentile-ranked';group=RADAR_GROUPS[f.group].label;w=f.weight;sep=f.diagnosticEffect??f.effect;}
     else use=cov===0?'Empty in this snapshot; retained in audit':'Constant, sparse, or non-numeric; retained in audit';
     return `<tr><td style="font-family:'Plus Jakarta Sans',sans-serif;font-weight:600;color:var(--t1);white-space:normal;min-width:230px">${escHtml(h)}</td><td style="font-size:11px;color:var(--t2)">${escHtml(use)}</td><td style="font-size:10px;color:var(--cyan);text-transform:uppercase;font-weight:700">${group}</td><td style="font-weight:700">${w?w.toFixed(3):'0'}</td><td><span style="display:inline-block;width:7px;height:7px;border-radius:50%;margin-right:5px;background:${cov>.9?'var(--green)':cov>.5?'var(--amber)':'var(--red)'}"></span>${(cov*100).toFixed(0)}%</td><td>${sep===null?'—':`<span class="${sep>=0?'pos':'neg'}">${sep>=0?'+':''}${(sep*100).toFixed(1)} pp</span>`}</td></tr>`;
   }).join('');
@@ -5517,7 +5667,7 @@ function _renderMethodologyInner(){
   const groupsHTML=Object.values(RADAR_GROUPS).map(g=>`<div class="rr-group"><b>${g.label}<i>${g.budget}%</i></b><span>${g.desc}</span><meter min="0" max="20" value="${g.budget}"></meter></div>`).join('');
   const diagHTML=`
     <div class="rr-diag">
-      <div><b>${RADAR.rockets||0}</b><span>same-day ≥10% rockets</span></div>
+      <div><b>${RADAR.rockets||0}</b><span>day-1 rockets (target before stop)</span></div>
       <div><b>${RADAR.features.length||0}</b><span>informative modeled features</span></div>
       <div><b>${RADAR.headers.length||0}</b><span>screener columns audited</span></div>
       <div><b>${RADAR.ms?(RADAR.ms/1000).toFixed(2)+'s':'—'}</b><span>parse + score time</span></div>
@@ -5532,13 +5682,13 @@ function _renderMethodologyInner(){
       <a href="#meth-guide" onclick="event.preventDefault();scrollToSection('meth-guide')" style="padding:4px 12px;border-radius:6px;background:var(--bg-card);border:1px solid var(--border);color:var(--t2);font-size:11px;font-weight:600;text-decoration:none;cursor:pointer">📖 Use & Risk</a>
     </nav>
     <h3 id="meth-scoring">Radar Composite — Same-Day Transparent Scoring</h3>
-    <p><strong>Evidence boundary:</strong> one day's cross-section cannot train or validate tomorrow's probability. The score is a transparent relative ranking built from robust market-wide normalization, a same-day rocket-archetype diagnostic, and engineered continuation priors. It is a research screener, not investment advice.</p>
+    <p><strong>Evidence boundary:</strong> one day's cross-section cannot train or validate a forward outcome. A <strong>rocket</strong> means a stock that reached its own target before its own stop within ${ROCKET_HORIZON_DAYS} trading days — a FORWARD, path-dependent label that does not exist at scan time, so it never sets a feature's direction or weight. The score is a transparent relative ranking built from robust market-wide normalization and engineered priors; the rocket separation is measured for audit only. It is a research screener, not investment advice.</p>
     <div class="m-grid">
       <div class="m-card"><h4>Composite Architecture</h4><p>Every informative screener column enters through a typed transformation, a robust percentile, and a budgeted feature group. Exchange reports add authoritative series, price band, status, delivery, trades, 52-week range, surveillance and deal context.</p><div class="rr-groups" style="margin-top:10px">${groupsHTML}</div></div>
       <div class="m-card"><h4>What the Score Does</h4><ol style="padding-left:18px;color:var(--t2);font-size:12px;line-height:1.7">
         <li>Winsorizes transformed numeric inputs at the 2nd and 98th percentiles.</li>
         <li>Converts values to ranks across the uploaded universe, preventing unit scale from dominating.</li>
-        <li>Measures each feature’s separation between today’s ≥10% movers and the rest, then heavily shrinks it because today supplies few rockets.</li>
+        <li>Reports each feature’s separation between today’s day-1 rockets (reached target before stop) and the rest for audit, but never feeds that same-session label back into the score.</li>
         <li>Blends that diagnostic with finance-aware priors for momentum, participation, breakout structure, liquidity, volatility and trend.</li>
         <li>Cross-checks official delivery, close versus average price, 52-week position, deal activity and surveillance flags.</li>
         <li>Strongly penalizes non-EQ, inactive and sub-10% price-band securities while retaining them in the visible ranking for audit. Only eligible securities enter the basket.</li>
@@ -7930,7 +8080,7 @@ function compactRankingRows(rows){
     score:s.score,rocketScore:s.rocketScore,rank:s.rank,
     setup:s.setup,risk:s.risk,series:s.series,band:s.band??null,status:s.status,
     basketEligible:s.basketEligible!==false,eqEligible:s.eqEligible!==false,
-    stretch:s.stretch,rangePct:s.rangePct,sessionVolatilityPct:s.sessionVolatilityPct??null,relvol:s.relvol??null,gap:s.gap??null,
+    stretch:s.stretch,rangePct:s.rangePct,sessionVolatilityPct:s.sessionVolatilityPct??null,open1d:s.open1d??null,relvol:s.relvol??null,gap:s.gap??null,
     gapSigned:s.gapSigned??null,changeOpen:s.changeOpen??null,
     turnover:s.turnover,atr:s.atr??null,quality:s.quality??null,
     high1d:s.high1d??null,low1d:s.low1d??null,vwap:s.vwap??null,bollUpper:s.bollUpper??null,keltUpper:s.keltUpper??null,
@@ -7994,10 +8144,27 @@ function applySavedFiltersForMode(mode){
       // Both are kept: `rank` stays the cohort slot for continuity with existing records, and
       // `radarRank` is the real one. entryReady/entryTiming let the store separate picks the
       // "wait for pullback" gate approved from the ones it withheld.
+      // v1085: every pick carries its OWN two barriers and the bar as it stood at issue. The
+      // rocket label is per-stock (target and stop are both stock-specific), so a single
+      // issue-level threshold cannot express it; and without high/low AT ISSUE the issue day's
+      // bar cannot be split into pre- and post-recommendation action. See resolveRocketDay.
+      const allocCtx=getAllocationPassContext();
       const recommendations=eligibleCandidates
-        .map((s,i)=>({symbol:s.symbol,entryPrice:s.price,score:s.score,rank:i+1,
-          radarRank:s.rank??null,entryReady:s.entryReady!==false,entryTiming:s.entryTiming||null,
-          features:{}}));
+        .map((s,i)=>{
+          let targetPct=null,stopPct=null;
+          try{
+            const pol=getRowExitPolicy(s,getBuyPrice(s),allocCtx?.active);
+            targetPct=Number(pol?.targetPct)>0?Number(pol.targetPct):null;
+            stopPct=Number(pol?.stopPct)>0?Number(pol.stopPct):null;
+          }catch(e){}
+          return {symbol:s.symbol,entryPrice:s.price,score:s.score,rank:i+1,
+            radarRank:s.rank??null,entryReady:s.entryReady!==false,entryTiming:s.entryTiming||null,
+            targetPct,stopPct,
+            high1dAtIssue:Number(s.high1d)>0?Number(s.high1d):null,
+            low1dAtIssue:Number(s.low1d)>0?Number(s.low1d):null,
+            rocketOutcome:ROCKET_OUTCOME.PENDING,rocketHorizonDays:ROCKET_HORIZON_DAYS,
+            features:{}};
+        });
       window._lastObservedDailyMoves=buildObservedDailyMoves(raw);
       window._lastStockOutcomeScan={
         date:uploadSession,sourceDate:uploadSession,ts:receivedAt,threshold,
