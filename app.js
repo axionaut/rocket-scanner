@@ -1,5 +1,5 @@
-const BUILD_TS='2026-07-31 11:42 IST'; // release build time (IST)
-const APP_VERSION=1086; // v1086: feasibility (headroom to the session ceiling and the upper circuit vs the target) is now PART of the score, so rank 1 is the best stock that can actually reach target from the buy price; recommendations are drawn only from the top RECOMMEND_MAX_RANK=10; Rocket Conversion no longer renders "null%".
+const BUILD_TS='2026-07-31 14:26 IST'; // release build time (IST)
+const APP_VERSION=1087; // v1087: a recommendation must be LIFTING OFF - above VWAP, above its own open and green on the day - and that direction now moves the RANK, not just a filter; no rank vanishes without a stated reason; the Rows display cap no longer caps the basket.
 // v556: parse the NSE Market Activity Report (MA<date>.csv) — official Nifty %, advances/declines and sector index moves shown as market CONTEXT in the status bar (EOD data, display only, never fed into per-row scoring); MA added to the ℹ️ file manifest.
 // v555 market-cycle stage awareness (stateless, self-calibrating): per-row stage label (1 accumulation · 2 breakout · 3 event · 4 profit-booking · 5 re-accumulation · 6 second-leg); a quiet-accumulation signal (conjunction-of-percentiles) injected via the rocket-diagnostic weighting; sell-the-news decay off Recent earnings date (horizon = review days). v1065 makes the market-breadth gauge an entry-eligibility input while still never changing ranking.
 const GOOGLE_DRIVE_CLIENT_ID='1015012642264-oi2nelv3v90k3d39r994a6nelgjs2a56.apps.googleusercontent.com'; // Public OAuth Web Client ID.
@@ -99,6 +99,7 @@ let SURV_HARD_REMOVED=0; // count of stocks weeded out by configured surveillanc
 let PEAK_TIMING_REMOVED=0; // count of ranked rows withheld by stock/market entry confirmation
 let CURRENT_TRADE_TIMING={state:'Neutral',reason:'Trade timing evidence is not loaded.',evidence:[]};
 let ALLOC_BLOCKED=0; // count of ranked rows removed because no share can be allocated to them (v1080)
+let DIRECTION_REMOVED=0; // v1087: ranked rows removed for not currently going UP (below VWAP/open, or red on the day)
 let REMOVED_ROWS=[]; // [{s, reason:'held'|'surv'|'peak'|'alloc', rules?, detail?}] captured each applyFilters pass so the
                      // "Removed from rankings" table can explain every gap in the rank sequence (v546)
 let SELECTED=new Set(); // symbols selected for basket — recomputed from FILT each applyFilters
@@ -119,7 +120,7 @@ const SHARED_FILTER_STORE='rs_filters_shared';
 const TRADE_INPUTS_STORE='rs_trade_inputs_v1';
 let _lastTradeInputSig=''; // gate brain writes to genuine trade-input changes, not every keystroke
 const ALL_STORE='rs_data';
-const ALL_STORE_SCHEMA='radar_composite_v6'; // v1086 folds feasibility into the score and adds setupPct/feasibility, so every cached score is stale.
+const ALL_STORE_SCHEMA='radar_composite_v7'; // v1087 adds the direction term to the score and caches directionConfirmed.
 const HOLD_STORE='rs_holdings';
 const ORDERS_STORE='rs_orders';
 const POS_STORE='rs_positions';
@@ -3165,8 +3166,24 @@ function radarAnalyze(headers,rawRows,supplements={},heldSymbols=new Set()){
         _feas=clamp01(_room/_tgt,0,1);
       }
     }
+    // ── v1087: DIRECTION IS PART OF THE SCORE, NOT A FILTER AFTER IT ─────────────────────────
+    // Owner: the engine must catch a stock at LIFTOFF — about to reach target in the next ~15
+    // minutes — not one that merely looks good on yesterday's structure. `setupPct` is
+    // `max(compositePct, ignitePct)`, and ignitePct is 0 whenever the direction gate fails, so a
+    // falling stock could rank #1 on setup ALONE. Measured on the 11:09 file: all five
+    // recommendations were BELOW VWAP, four of five BELOW their own open, and only 8 of the top 30
+    // were confirmed in either sense — which is exactly why they fell the moment they were bought.
+    //
+    // Filtering them out afterwards is not enough: the ranking still ordered by setup, so the top
+    // 10 emptied entirely and the basket came out with ZERO names. Direction has to move the rank.
+    // The test is the codebase's ONE definition of confirmed direction (v1069, above VWAP and
+    // above the open) plus the owner's rule that a stock red on the day is weak or confused.
+    // A non-confirmed row scores 0 and sinks; `setupPct` is retained so its standing stays auditable.
+    const _dirOk=(Number(r.vwap)>0&&Number(r.price)>=Number(r.vwap))
+      &&Number(r.changeOpen)>0&&Number(r.day)>0;
+    r.directionConfirmed=!!_dirOk;
     r.feasibility=+_feas.toFixed(4);
-    r.score=+(100*Math.pow(r.setupPct*_feas,4)).toFixed(1);
+    r.score=+(100*Math.pow(r.setupPct*_feas*(_dirOk?1:0),4)).toFixed(1);
     r.rocketScore=r.score; // allocation/export alias
     r.risk=!r.basketEligible||r.meta.flags?.length>=3||r.turnover<25e5||r.price<10?'High':(r.gap>6||r.day>6||r.parts.volatility<38?'Medium':'Low');
     // Event Risk (idea #1, v554 + v555): an event-day (Stage 3) or a name still digesting its results
@@ -6680,6 +6697,7 @@ function applyFilters(){
   SURV_HARD_REMOVED=0;
   PEAK_TIMING_REMOVED=0;
   ALLOC_BLOCKED=0;
+  DIRECTION_REMOVED=0;
   REMOVED_ROWS=[];
   // Resolved ONCE: the allocation gate below runs per row over the full universe, and its inputs
   // (capital, max allocation, held map, portfolio target anchor) are constant for the pass.
@@ -6710,9 +6728,41 @@ function applyFilters(){
     // CAVEAT recorded in RULES.md D4: this is ONE day pair on a green tape. If the accumulating
     // per-pick evidence reverses it, restore the block here.
     if(s.entryReady===false)PEAK_TIMING_REMOVED++;
+    // ── v1087: THE STOCK MUST BE GOING UP RIGHT NOW ────────────────────────────────────────────
+    // Owner, 2026-07-31: the system must recommend stocks about to reach target in the NEXT ~15
+    // MINUTES — caught at LIFTOFF — not names that merely look good on yesterday's structure.
+    // Measured on the 11:09 file, this was THE defect: `setupPct = max(compositePct, ignitePct)`
+    // lets a stock rank #1 on setup ALONE, because ignitePct is 0 whenever the direction gate
+    // fails. Every one of the five recommendations was BELOW VWAP and four of five were BELOW
+    // their own open at issue — they were already falling when they were recommended, and they
+    // kept falling. Only 8 of the top 30 were above both VWAP and open.
+    //
+    // The test is the codebase's ONE definition of confirmed direction (v1069): above VWAP and
+    // above the day's open. v1069 measured the structural form FAVOURABLY (top-20 mean day 5.42%
+    // with it vs 4.89% with no gate), and deliberately dropped the 5m/15m tick terms as
+    // microstructure coin flips — that finding is preserved here, so this adds no new magnitude.
+    // Plus the owner's explicit rule: a stock red on the day is weak or confused, so it is out.
+    const _vw=Number(s.vwap), _px=Number(s.price), _co=Number(s.changeOpen), _day=Number(s.day);
+    const _aboveVwap=_vw>0&&_px>=_vw;
+    const _aboveOpen=Number.isFinite(_co)&&_co>0;
+    const _greenDay=Number.isFinite(_day)&&_day>0;
+    if(!(_aboveVwap&&_aboveOpen&&_greenDay)){
+      DIRECTION_REMOVED++;
+      const why=[];
+      if(!_greenDay)why.push('red on the day ('+(Number.isFinite(_day)?_day.toFixed(2)+'%':'no day move')+')');
+      if(!_aboveVwap)why.push(_vw>0?'below VWAP ('+((_px/_vw-1)*100).toFixed(2)+'%)':'no VWAP on file');
+      if(!_aboveOpen)why.push(Number.isFinite(_co)?'below its open ('+_co.toFixed(2)+'%)':'no change-from-open');
+      REMOVED_ROWS.push({s,reason:'direction',detail:'not lifting off: '+why.join(', ')});
+      return false;
+    }
     // Cheap display filters run FIRST so the allocation gate below only evaluates rows that would
     // actually be shown — it is the most expensive test in this predicate.
-    if(!((s.turnover||0)>=minTurn&&(!riskSel.length||riskSel.includes(s.risk))&&(!q||[s.symbol,s.name,s.sector].join(' ').toLowerCase().includes(q)))) return false;
+    // v1087: these are the USER'S OWN filter settings, but they were returning false SILENTLY, so
+    // a rank dropped by the Risk or Min-Turnover selector vanished from the table AND from the
+    // "why the ranks skip" panel. The owner hit exactly this: ranks #1 and #3 appeared in neither.
+    if((s.turnover||0)<minTurn){REMOVED_ROWS.push({s,reason:'filter',detail:'below the Min Turnover filter ('+fmtINR(minTurn)+')'});return false;}
+    if(riskSel.length&&!riskSel.includes(s.risk)){REMOVED_ROWS.push({s,reason:'filter',detail:s.risk+' risk — excluded by your Risk filter'});return false;}
+    if(q&&![s.symbol,s.name,s.sector].join(' ').toLowerCase().includes(q)) return false;
     // v1080 (owner): a row that can never be allocated a single share is not a recommendation.
     // Structural causes only (see getAllocationBlockReason) — never the capital split.
     const allocBlock=getAllocationBlockReason(s,allocCtx);
@@ -6736,7 +6786,10 @@ function applyFilters(){
   // inside the score, a row deep in the list is genuinely worse — not merely unlucky — so reaching
   // past the cap to fill 20 slots would be backfilling with names the model already ranked down.
   // Buying fewer is the correct outcome when fewer qualify.
-  const selectionRows=[...FILT].sort((a,b)=>(a.rank??Infinity)-(b.rank??Infinity));
+  // v1087: build the basket from the FULL filtered set, not from FILT — `Rows` is a DISPLAY cap
+  // (CLAUDE.md: "selection still caps at 20"), but FILT is truncated by it, so setting Rows=5 was
+  // silently limiting the basket to 5 names. Display and selection are separate concerns.
+  const selectionRows=[...rows].sort((a,b)=>(a.rank??Infinity)-(b.rank??Infinity));
   SELECTED=new Set(selectionRows
     .filter(s=>s.basketEligible!==false&&!EXPORT_EXCLUDED.has(s.symbol)&&(s.rank??Infinity)<=RECOMMEND_MAX_RANK)
     .slice(0,20).map(s=>s.symbol));
@@ -6779,6 +6832,8 @@ function buildRemovedPanel(query=''){
   if(!all.length) return '';
   const heldN=all.filter(r=>r.reason==='held').length;
   const survN=all.filter(r=>r.reason==='surv').length;
+  const dirN=all.filter(r=>r.reason==='direction').length;
+  const filtN=all.filter(r=>r.reason==='filter').length;
   const peakN=all.filter(r=>r.reason==='peak').length;
   const allocN=all.filter(r=>r.reason==='alloc').length;
   const shown=filterPanelRows(all,query,r=>[r.s.symbol,r.s.name,r.s.sector]);
@@ -6786,7 +6841,11 @@ function buildRemovedPanel(query=''){
   const view=shown.slice(0,CAP);
   const rowsHtml=view.map(r=>{
     const s=r.s;
-    const reason=r.reason==='held'
+    const reason=r.reason==='direction'
+      ?`<span style="font-size:9px;background:rgba(239,68,68,.12);color:var(--red);border:1px solid rgba(239,68,68,.25);border-radius:5px;padding:1px 7px;white-space:nowrap" title="${escHtml(r.detail||'')}">📉 Not lifting off</span>`
+      :r.reason==='filter'
+      ?`<span style="font-size:9px;background:rgba(148,163,184,.10);color:var(--t2);border:1px solid rgba(148,163,184,.22);border-radius:5px;padding:1px 7px;white-space:nowrap" title="${escHtml(r.detail||'')}">⚙ Your filter</span>`
+      :r.reason==='held'
       ?`<span style="font-size:9px;background:rgba(244,114,182,.12);color:#f472b6;border:1px solid rgba(244,114,182,.25);border-radius:5px;padding:1px 7px;white-space:nowrap">📌 Held · in Open Positions</span>`
       :r.reason==='alloc'
         ?`<span style="font-size:9px;background:rgba(148,163,184,.12);color:var(--t2);border:1px solid rgba(148,163,184,.28);border-radius:5px;padding:1px 7px;white-space:nowrap" title="${escHtml(r.detail||'')}">🚫 Cannot allocate</span>`
@@ -6820,7 +6879,7 @@ function buildRemovedPanel(query=''){
   return `<div id="rank-removed-card" style="background:var(--bg-card);border:1px solid var(--border);border-radius:10px;overflow:hidden">
     <div style="padding:10px 16px;border-bottom:1px solid var(--border)">
       <span style="font-size:10px;font-weight:700;color:var(--t2);text-transform:uppercase;letter-spacing:.1em">Removed from rankings — ${all.length}${tag}</span>
-      <span style="font-size:11px;color:var(--t3);font-weight:400;margin-left:8px">${[heldN?`📌 ${heldN} held`:'',survN?`⚠ ${survN} surveillance`:'',peakN?`⏳ ${peakN} waiting for entry confirmation`:'',allocN?`🚫 ${allocN} not allocatable`:''].filter(Boolean).join(' · ')}${(heldN||survN||peakN||allocN)?' · ':''}why the ranks skip</span>
+      <span style="font-size:11px;color:var(--t3);font-weight:400;margin-left:8px">${[dirN?`📉 ${dirN} not lifting off`:'',heldN?`📌 ${heldN} held`:'',survN?`⚠ ${survN} surveillance`:'',peakN?`⏳ ${peakN} waiting for entry confirmation`:'',allocN?`🚫 ${allocN} not allocatable`:'',filtN?`⚙ ${filtN} by your filters`:''].filter(Boolean).join(' · ')}${(heldN||survN||peakN||allocN||dirN||filtN)?' · ':''}why the ranks skip</span>
     </div>
     ${body}
   </div>`;
@@ -8150,7 +8209,7 @@ function compactRankingRows(rows){
     high1d:s.high1d??null,low1d:s.low1d??null,vwap:s.vwap??null,bollUpper:s.bollUpper??null,keltUpper:s.keltUpper??null,
     price1h:s.price1h??null,price15m:s.price15m??null,price5m:s.price5m??null,
     stage:s.stage??null,stageLabel:s.stageLabel??null,legTrendPct:s.legTrendPct??null,legHighPct:s.legHighPct??null,
-    igniteReady:!!s.igniteReady,igniteStrength:s.igniteStrength??null,ignitePct:s.ignitePct??0,compositePct:s.compositePct??null,setupPct:s.setupPct??null,feasibility:s.feasibility??null,
+    igniteReady:!!s.igniteReady,igniteStrength:s.igniteStrength??null,ignitePct:s.ignitePct??0,compositePct:s.compositePct??null,setupPct:s.setupPct??null,feasibility:s.feasibility??null,directionConfirmed:!!s.directionConfirmed,
     entryReady:s.entryReady!==false,entryTiming:s.entryTiming||null,
     rocketReady:!!s.rocketReady,gateReasons:(s.gateReasons||[]).slice(0,9),_held:!!s._held,
     meta:{delivery:s.meta?.delivery??null,trades:s.meta?.trades??null,flags:(s.meta?.flags||[]).slice(0,12),band:s.meta?.band??null}
