@@ -1,5 +1,5 @@
-const BUILD_TS='2026-07-31 16:25 IST'; // release build time (IST)
-const APP_VERSION=1088; // v1088: Avg Cost card makes the allocation hurdle visible; the Market card leads with a LIVE Nifty 50 rebuilt cap-weighted from its own constituents instead of the EOD index row, with VIX shown as a number and marked prev-close.
+const BUILD_TS='2026-07-31 16:41 IST'; // release build time (IST)
+const APP_VERSION=1089; // v1089: the Avg Cost card is ONE value-weighted number covering every recorded charge, including day-level DP, with no trip dropped for lacking a cost basis.
 // v556: parse the NSE Market Activity Report (MA<date>.csv) — official Nifty %, advances/declines and sector index moves shown as market CONTEXT in the status bar (EOD data, display only, never fed into per-row scoring); MA added to the ℹ️ file manifest.
 // v555 market-cycle stage awareness (stateless, self-calibrating): per-row stage label (1 accumulation · 2 breakout · 3 event · 4 profit-booking · 5 re-accumulation · 6 second-leg); a quiet-accumulation signal (conjunction-of-percentiles) injected via the rocket-diagnostic weighting; sell-the-news decay off Recent earnings date (horizon = review days). v1065 makes the market-breadth gauge an entry-eligibility input while still never changing ranking.
 const GOOGLE_DRIVE_CLIENT_ID='1015012642264-oi2nelv3v90k3d39r994a6nelgjs2a56.apps.googleusercontent.com'; // Public OAuth Web Client ID.
@@ -4223,25 +4223,34 @@ function renderStats(){
   // allocation via estimateRoundTripCostPct() — a target that cannot clear it is refused — but it
   // was computed and never shown, so the hurdle was invisible. Mean AND median are both given
   // because the flat ₹15.34 DP fee per sell day makes the mean lot-size dependent and skewed.
+  // ONE NUMBER (owner, 2026-07-31): what a round trip costs, full stop. It is VALUE-WEIGHTED —
+  // total charges over total value traded — not a mean of per-trip percentages. That distinction
+  // matters: the flat ₹15.34 DP fee per sell day dominates a small lot, so averaging the per-trip
+  // ratios over-weights tiny trades and overstates the cost (0.258% vs the 0.13% actually paid).
+  // Value weighting answers the question asked: of everything I traded, what share went to charges.
+  // The breakdown, and the hurdle this feeds, live in the tooltip so the card stays one number.
   const costCard = (() => {
     const trips = (TRADEBOOK_STATS && TRADEBOOK_STATS.tripsData) || [];
-    const valid = trips.filter(r => r.buyPrice > 0 && r.sellPrice > 0 && r.qty > 0 && r.charges >= 0);
-    const pcts = valid.map(r => r.charges / ((r.buyPrice + r.sellPrice) * r.qty) * 100).sort((a, b) => a - b);
-    const rs = valid.map(r => r.charges).sort((a, b) => a - b);
-    const med = a => a.length ? a[Math.floor(a.length / 2)] : null;
-    const meanPct = TRADEBOOK_STATS && TRADEBOOK_STATS.avgChargePct != null ? TRADEBOOK_STATS.avgChargePct : null;
-    const medPct = med(pcts), medRs = med(rs);
-    const roundTrip = estimateRoundTripCostPct(getEffectiveTgtPct() || 1);
-    const shown = medPct != null ? medPct : meanPct;
-    return `<div class="st" title="Cost of a round trip as a share of the value traded, from your own closed trips. The MEDIAN is the headline because the flat ₹15.34 DP fee per sell day makes the mean depend on lot size. 'Hurdle' is what estimateRoundTripCostPct() actually charges a candidate: a stock whose target cannot clear it is refused allocation${valid.length ? '' : ' — with no tradebook loaded this falls back to a hardcoded 0.35%'}.">
+    // EVERYTHING (owner, 2026-07-31), including charges that attach to a DAY rather than a trade.
+    // DP is ₹15.34 per ISIN per sell day and is booked once on that day's first trip (see
+    // dpCharged/skipDp), so it is already inside these totals — but the previous filter required a
+    // clean buy AND sell price, which silently dropped the charges on any trip lacking a cost
+    // basis. Nothing is dropped now: every recorded charge counts, and each leg contributes to the
+    // traded value only when its price is known, so a partial trip understates neither side.
+    const valid = trips.filter(r => r.qty > 0 && r.charges >= 0);
+    const totCharges = valid.reduce((a, r) => a + r.charges, 0);
+    const totValue = valid.reduce((a, r) =>
+      a + (r.buyPrice > 0 ? r.buyPrice * r.qty : 0) + (r.sellPrice > 0 ? r.sellPrice * r.qty : 0), 0);
+    const costPct = totValue > 0 ? totCharges / totValue * 100 : null;
+    const perLot = valid.length ? totCharges / valid.length : null;
+    const hurdle = estimateRoundTripCostPct(getEffectiveTgtPct() || 1);
+    const tip = valid.length
+      ? `All-in cost of one round trip: ₹${Math.round(totCharges).toLocaleString('en-IN')} of charges over ₹${Math.round(totValue).toLocaleString('en-IN')} traded across ${valid.length.toLocaleString()} closed trips — every charge recorded: brokerage, STT, exchange, GST, SEBI, stamp and DP — including DP, which is ₹15.34 per ISIN per SELL DAY rather than per trade. Not captured: Zerodha's other credits and debits (clearing, IPFT), which no input file exposes. Value-weighted, so it is what you actually paid rather than an average of ratios (a mean of per-trip percentages reads ${(TRADEBOOK_STATS && TRADEBOOK_STATS.avgChargePct != null ? TRADEBOOK_STATS.avgChargePct.toFixed(3) : '—')}%, inflated by the flat ₹15.34 DP fee on small lots). Works out to about ₹${perLot != null ? Math.round(perLot) : '—'} a trip. The allocator charges ${hurdle.toFixed(2)}% when testing whether a stock's target clears costs.`
+      : `No tradebook loaded, so the allocator falls back to a hardcoded ${hurdle.toFixed(2)}% when testing whether a stock's target clears costs.`;
+    return `<div class="st" title="${escHtml(tip)}">
       <div class="st-l">Avg Cost</div>
-      <div class="st-v" style="font-size:15px;color:${shown == null ? 'var(--t3)' : shown >= 0.30 ? 'var(--amber)' : 'var(--cyan)'}">${shown != null ? shown.toFixed(3) + '%' : '—'}</div>
-      <div class="st-d">${[
-        medRs != null ? `median ₹${medRs.toFixed(0)}/lot` : '',
-        meanPct != null ? `mean ${meanPct.toFixed(3)}%` : '',
-        `hurdle ${roundTrip.toFixed(2)}%${valid.length ? '' : ' (fallback)'}`,
-        valid.length ? `${valid.length.toLocaleString()} closed trips` : 'no tradebook loaded'
-      ].filter(Boolean).join(' · ')}</div></div>`;
+      <div class="st-v" style="font-size:15px;color:${costPct == null ? 'var(--t3)' : costPct >= 0.30 ? 'var(--amber)' : 'var(--cyan)'}">${costPct != null ? costPct.toFixed(2) + '%' : '—'}</div>
+      <div class="st-d">${costPct != null ? 'per round trip, all-in' : 'no tradebook loaded'}</div></div>`;
   })();
 
   const universeCard = `<div class="st" title="Scan size and what survived filtering.">
