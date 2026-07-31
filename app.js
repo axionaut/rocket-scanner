@@ -1,5 +1,5 @@
-const BUILD_TS='2026-07-31 14:26 IST'; // release build time (IST)
-const APP_VERSION=1087; // v1087: a recommendation must be LIFTING OFF - above VWAP, above its own open and green on the day - and that direction now moves the RANK, not just a filter; no rank vanishes without a stated reason; the Rows display cap no longer caps the basket.
+const BUILD_TS='2026-07-31 16:25 IST'; // release build time (IST)
+const APP_VERSION=1088; // v1088: Avg Cost card makes the allocation hurdle visible; the Market card leads with a LIVE Nifty 50 rebuilt cap-weighted from its own constituents instead of the EOD index row, with VIX shown as a number and marked prev-close.
 // v556: parse the NSE Market Activity Report (MA<date>.csv) — official Nifty %, advances/declines and sector index moves shown as market CONTEXT in the status bar (EOD data, display only, never fed into per-row scoring); MA added to the ℹ️ file manifest.
 // v555 market-cycle stage awareness (stateless, self-calibrating): per-row stage label (1 accumulation · 2 breakout · 3 event · 4 profit-booking · 5 re-accumulation · 6 second-leg); a quiet-accumulation signal (conjunction-of-percentiles) injected via the rocket-diagnostic weighting; sell-the-news decay off Recent earnings date (horizon = review days). v1065 makes the market-breadth gauge an entry-eligibility input while still never changing ranking.
 const GOOGLE_DRIVE_CLIENT_ID='1015012642264-oi2nelv3v90k3d39r994a6nelgjs2a56.apps.googleusercontent.com'; // Public OAuth Web Client ID.
@@ -120,7 +120,7 @@ const SHARED_FILTER_STORE='rs_filters_shared';
 const TRADE_INPUTS_STORE='rs_trade_inputs_v1';
 let _lastTradeInputSig=''; // gate brain writes to genuine trade-input changes, not every keystroke
 const ALL_STORE='rs_data';
-const ALL_STORE_SCHEMA='radar_composite_v7'; // v1087 adds the direction term to the score and caches directionConfirmed.
+const ALL_STORE_SCHEMA='radar_composite_v8'; // v1088 caches marketCap for the live Nifty proxy.
 const HOLD_STORE='rs_holdings';
 const ORDERS_STORE='rs_orders';
 const POS_STORE='rs_positions';
@@ -1727,6 +1727,30 @@ function getIndexGroupMap(){
 // 52-week range, which is exactly the condition that flatters momentum continuation. Averaging that
 // with a stressed tape produces a number describing neither.
 // The label is a percentile of VIX's OWN 52-week range, so no fixed VIX level is hard-coded.
+// ── v1088: LIVE Nifty 50, computed from its own constituents ──────────────────────────────────
+// The index rows in the daily NSE zip are END-OF-DAY, so during a live session `Nifty 50` is
+// YESTERDAY'S close — a static number presented as market status (owner, 2026-07-31). The scanner
+// file, by contrast, is a live export, and `NSE_INDEX_GROUP_BYSYM` identifies the 50 constituents
+// by SYMBOL (v1076). So the index move is reconstructed here from the live rows: a
+// FREE-FLOAT-UNAWARE but market-cap-weighted mean of constituent day moves, which is how the index
+// itself is built and tracks it closely. Reported with its constituent count so partial coverage
+// is visible rather than silently wrong; falls back to the EOD value when membership is unknown.
+function buildLiveNiftyProxy(rows){
+  // Only an OMITTED argument falls back to the global universe. An explicitly empty array must
+  // yield null — otherwise "compute this for no rows" silently returns the whole market.
+  const src=Array.isArray(rows)?rows:(typeof ALL!=='undefined'?ALL:[]);
+  if(!src.length||!NSE_INDEX_GROUP_BYSYM) return null;
+  let wsum=0,w=0,n=0,adv=0;
+  for(const r of src){
+    if(NSE_INDEX_GROUP_BYSYM[r.symbol]!=='Nifty 50') continue;
+    const d=Number(r.day), mc=Number(r.marketCap);
+    if(!Number.isFinite(d)) continue;
+    const wt=(Number.isFinite(mc)&&mc>0)?mc:1; // equal-weight fallback when market cap is absent
+    wsum+=d*wt; w+=wt; n++; if(d>0)adv++;
+  }
+  if(!n||!(w>0)) return null;
+  return {pct:+(wsum/w).toFixed(2), members:n, advancing:adv, weighted:src.some(r=>Number(r.marketCap)>0)};
+}
 function buildMarketRegime(){
   const idx=n=>NSE_INDEX[n]||null;
   const vix=idx('India VIX'),nifty=idx('Nifty 50'),mid=idx('NIFTY MIDCAP 150')||idx('Nifty Midcap 50');
@@ -2706,7 +2730,7 @@ function buildRadarSupplements(){
 function radarAnalyze(headers,rawRows,supplements={},heldSymbols=new Set()){
   const priceI=radarIdx(headers,'Price'),targetI=radarIdx(headers,'Price change %, 1 day'),sectorI=radarIdx(headers,'Sector'),symbolI=radarIdx(headers,'Symbol'),descI=radarIdx(headers,'Description');
   if(symbolI<0||priceI<0||targetI<0)throw Error('Expected Symbol, Price, and Price change %, 1 day columns.');
-  const turnI=radarIdx(headers,'Price × volume (turnover), 1 day'),relI=radarIdx(headers,'Relative volume, 1 day'),relAtI=radarIdx(headers,'Relative volume at time'),volChgI=radarIdx(headers,'Volume change %, 1 day'),gapI=radarIdx(headers,'Gap %, 1 day'),adrI=radarIdx(headers,'Average daily range %'),atrI=radarIdx(headers,'Average true range %, 14, 1 day'),atrWeekI=radarIdx(headers,'Average true range %, 14, 1 week'),volI=radarIdx(headers,'Volatility, 1 day'),highI=radarIdx(headers,'High, 1 day'),lowI=radarIdx(headers,'Low, 1 day'),openI=radarIdx(headers,'Open, 1 day');
+  const turnI=radarIdx(headers,'Price × volume (turnover), 1 day'),relI=radarIdx(headers,'Relative volume, 1 day'),relAtI=radarIdx(headers,'Relative volume at time'),volChgI=radarIdx(headers,'Volume change %, 1 day'),gapI=radarIdx(headers,'Gap %, 1 day'),adrI=radarIdx(headers,'Average daily range %'),atrI=radarIdx(headers,'Average true range %, 14, 1 day'),atrWeekI=radarIdx(headers,'Average true range %, 14, 1 week'),volI=radarIdx(headers,'Volatility, 1 day'),highI=radarIdx(headers,'High, 1 day'),lowI=radarIdx(headers,'Low, 1 day'),openI=radarIdx(headers,'Open, 1 day'),mcapI=radarIdx(headers,'Market capitalization');
   const bollUpperI=radarIdx(headers,'Bollinger Bands, 20, 1 day, Upper'),keltUpperI=radarIdx(headers,'Keltner channels, 20, 1 day, Upper');
   const priceHourI=radarIdx(headers,'Price change %, 1 hour'),price15I=radarIdx(headers,'Price change %, 15 minutes'),price5I=radarIdx(headers,'Price change %, 5 minutes');
   const changeOpenI=radarIdx(headers,'Change from open %, 1 day'),perf1mI=radarIdx(headers,'Performance %, 1 month'),perf3mI=radarIdx(headers,'Performance %, 3 months');
@@ -3087,7 +3111,7 @@ function radarAnalyze(headers,rawRows,supplements={},heldSymbols=new Set()){
     const dispDay=meta._corpNeutralised&&meta._realDay!=null?meta._realDay:day;
     const out={symbol,name:String(raw[descI]||symbol),sector:raw[sectorI]||'',rawScore,parts,contrib,quality,
       price,day:dispDay,priceChange:dispDay,turnover:turn,relvol,gap,gapSigned,changeOpen,rangePct,sessionVolatilityPct,stretch,atr:atrPct,
-      high1d:highI>=0?radarNum(raw[highI]):null,low1d:lowI>=0?radarNum(raw[lowI]):null,open1d:openI>=0?radarNum(raw[openI]):null,rocketToday:rset.has(ri),
+      high1d:highI>=0?radarNum(raw[highI]):null,low1d:lowI>=0?radarNum(raw[lowI]):null,open1d:openI>=0?radarNum(raw[openI]):null,marketCap:mcapI>=0?radarNum(raw[mcapI]):null,rocketToday:rset.has(ri),
       vwap:vwapI>=0?radarNum(raw[vwapI]):null,
       bollUpper:bollUpperI>=0?radarNum(raw[bollUpperI]):null,
       keltUpper:keltUpperI>=0?radarNum(raw[keltUpperI]):null,
@@ -4176,26 +4200,61 @@ function renderStats(){
     : reg && reg.label === 'normal' ? 'var(--cyan)'
     : reg && reg.label === 'elevated' ? 'var(--amber)'
     : reg && reg.label === 'stressed' ? 'var(--red)' : 'var(--t2)';
-  const marketCard = `<div class="st" title="Market regime. VIX is shown as a percentile of its OWN 52-week range, so no volatility level is hard-coded. Breadth is the share of the scanned universe trading above its open. Regime is recorded on every outcome so results can be read within a regime rather than pooled — it never scores a stock.">
-    <div class="st-l">Market</div>
-    <div class="st-v" style="font-size:15px;color:${regTone}">${reg && reg.label !== 'unknown' ? escHtml(reg.label.toUpperCase()) : (breadthPct != null ? breadthPct.toFixed(0) + '% breadth' : '—')}</div>
+  // v1088 (owner): the headline is the LIVE Nifty 50 move rebuilt from its own constituents in the
+  // live scanner export, not the EOD index row from the daily zip — that row is yesterday's close
+  // during a session, and showing a stale number as market status is worse than showing none.
+  // The regime word ("CALM") is demoted to a tone and a tooltip; VIX keeps its actual number and is
+  // explicitly marked prev-close, because no input carries a live VIX.
+  const live = (typeof buildLiveNiftyProxy === 'function') ? buildLiveNiftyProxy(ALL) : null;
+  const nifty = live ? live.pct : (reg && reg.niftyPct != null ? reg.niftyPct : null);
+  const niftyTone = nifty == null ? 'var(--t2)' : nifty >= 0 ? 'var(--green)' : 'var(--red)';
+  const marketCard = `<div class="st" title="NIFTY 50 rebuilt LIVE from its ${live ? live.members : 50} constituents in this scan, market-cap weighted — the index row in the daily NSE zip is end-of-day, so mid-session it is yesterday's close. Breadth is the share of the scanned universe trading above its open (live). VIX has no live source in any input: it is the previous close, shown as a percentile of its OWN 52-week range so no volatility level is hard-coded. Regime is recorded on every outcome so results can be read within a regime rather than pooled — it never scores a stock.">
+    <div class="st-l">Market${live ? '' : ' · EOD'}</div>
+    <div class="st-v" style="font-size:15px;color:${niftyTone}">${nifty != null ? `NIFTY ${nifty >= 0 ? '+' : ''}${nifty.toFixed(2)}%` : (breadthPct != null ? breadthPct.toFixed(0) + '% breadth' : '—')}</div>
     <div class="st-d">${[
-      reg && reg.vix != null ? `VIX ${reg.vix.toFixed(2)}${reg.vixRangePos != null ? ` (${reg.vixRangePos.toFixed(0)}th pct)` : ''}` : '',
-      reg && reg.niftyPct != null ? `Nifty ${reg.niftyPct >= 0 ? '+' : ''}${reg.niftyPct.toFixed(2)}%` : '',
+      live ? `${live.advancing}/${live.members} Nifty up · live` : (reg && reg.niftyPct != null ? 'prev close' : ''),
       breadthPct != null ? `breadth ${breadthPct.toFixed(0)}%` : '',
+      reg && reg.advances != null && reg.declines != null ? `A/D ${reg.advances.toLocaleString()}:${reg.declines.toLocaleString()}` : '',
+      reg && reg.vix != null ? `VIX ${reg.vix.toFixed(2)} <span style="color:${regTone}">${reg.vixRangePos != null ? `${reg.vixRangePos.toFixed(0)}th pct` : ''}${reg.label && reg.label !== 'unknown' ? ` ${escHtml(reg.label)}` : ''}</span> <span style="color:var(--t3)">prev close</span>` : '',
       topSec && topSec !== '—' ? `${escHtml(topSec)} leading` : ''
     ].filter(Boolean).join(' · ')}</div></div>`;
+
+  // v1088 (owner): average round-trip COST as a percentage, on a card. This number already gated
+  // allocation via estimateRoundTripCostPct() — a target that cannot clear it is refused — but it
+  // was computed and never shown, so the hurdle was invisible. Mean AND median are both given
+  // because the flat ₹15.34 DP fee per sell day makes the mean lot-size dependent and skewed.
+  const costCard = (() => {
+    const trips = (TRADEBOOK_STATS && TRADEBOOK_STATS.tripsData) || [];
+    const valid = trips.filter(r => r.buyPrice > 0 && r.sellPrice > 0 && r.qty > 0 && r.charges >= 0);
+    const pcts = valid.map(r => r.charges / ((r.buyPrice + r.sellPrice) * r.qty) * 100).sort((a, b) => a - b);
+    const rs = valid.map(r => r.charges).sort((a, b) => a - b);
+    const med = a => a.length ? a[Math.floor(a.length / 2)] : null;
+    const meanPct = TRADEBOOK_STATS && TRADEBOOK_STATS.avgChargePct != null ? TRADEBOOK_STATS.avgChargePct : null;
+    const medPct = med(pcts), medRs = med(rs);
+    const roundTrip = estimateRoundTripCostPct(getEffectiveTgtPct() || 1);
+    const shown = medPct != null ? medPct : meanPct;
+    return `<div class="st" title="Cost of a round trip as a share of the value traded, from your own closed trips. The MEDIAN is the headline because the flat ₹15.34 DP fee per sell day makes the mean depend on lot size. 'Hurdle' is what estimateRoundTripCostPct() actually charges a candidate: a stock whose target cannot clear it is refused allocation${valid.length ? '' : ' — with no tradebook loaded this falls back to a hardcoded 0.35%'}.">
+      <div class="st-l">Avg Cost</div>
+      <div class="st-v" style="font-size:15px;color:${shown == null ? 'var(--t3)' : shown >= 0.30 ? 'var(--amber)' : 'var(--cyan)'}">${shown != null ? shown.toFixed(3) + '%' : '—'}</div>
+      <div class="st-d">${[
+        medRs != null ? `median ₹${medRs.toFixed(0)}/lot` : '',
+        meanPct != null ? `mean ${meanPct.toFixed(3)}%` : '',
+        `hurdle ${roundTrip.toFixed(2)}%${valid.length ? '' : ' (fallback)'}`,
+        valid.length ? `${valid.length.toLocaleString()} closed trips` : 'no tradebook loaded'
+      ].filter(Boolean).join(' · ')}</div></div>`;
+  })();
 
   const universeCard = `<div class="st" title="Scan size and what survived filtering.">
     <div class="st-l">Universe</div>
     <div class="st-v">${t.toLocaleString()}</div>
     <div class="st-d"><span style="color:var(--green)">${bull} up</span> · <span style="color:var(--red)">${t - bull} down/flat</span> · ${FILT.length.toLocaleString()} shown · ${selCount} selected · ${RADAR.features.length || 0} features${top ? ' · top ' + escHtml(top.symbol) + ' ' + topScore : ''}</div></div>`;
 
-  // v1079: the Top Score card was removed (owner: worthless). Six cards now; the ceiling is 7.
+  // v1079: the Top Score card was removed (owner: worthless). v1088 adds Avg Cost (owner) — SEVEN
+  // cards now, which is exactly the owner's ceiling. Nothing further may be added without removing one.
 
 
   document.getElementById('statsBar').innerHTML =
-    marketCard + universeCard + rocketsCard + slTgtCard + bookedCard + buildGoalCard();
+    marketCard + universeCard + costCard + rocketsCard + slTgtCard + bookedCard + buildGoalCard();
 
   const filterPills=[];
   if(SUPPRESSED_HELD>0)filterPills.push(`<span class="info-pill pill-rose" title="Stocks you already hold (Holdings + Positions + today's net Orders buys). Since v1070 these stay in the ranking and can be recommended again — the badge is a duplicate-buy warning, not a filter.">📌 ${SUPPRESSED_HELD} already held</span>`);
@@ -8209,7 +8268,7 @@ function compactRankingRows(rows){
     high1d:s.high1d??null,low1d:s.low1d??null,vwap:s.vwap??null,bollUpper:s.bollUpper??null,keltUpper:s.keltUpper??null,
     price1h:s.price1h??null,price15m:s.price15m??null,price5m:s.price5m??null,
     stage:s.stage??null,stageLabel:s.stageLabel??null,legTrendPct:s.legTrendPct??null,legHighPct:s.legHighPct??null,
-    igniteReady:!!s.igniteReady,igniteStrength:s.igniteStrength??null,ignitePct:s.ignitePct??0,compositePct:s.compositePct??null,setupPct:s.setupPct??null,feasibility:s.feasibility??null,directionConfirmed:!!s.directionConfirmed,
+    igniteReady:!!s.igniteReady,igniteStrength:s.igniteStrength??null,ignitePct:s.ignitePct??0,compositePct:s.compositePct??null,setupPct:s.setupPct??null,feasibility:s.feasibility??null,directionConfirmed:!!s.directionConfirmed,marketCap:s.marketCap??null,
     entryReady:s.entryReady!==false,entryTiming:s.entryTiming||null,
     rocketReady:!!s.rocketReady,gateReasons:(s.gateReasons||[]).slice(0,9),_held:!!s._held,
     meta:{delivery:s.meta?.delivery??null,trades:s.meta?.trades??null,flags:(s.meta?.flags||[]).slice(0,12),band:s.meta?.band??null}
