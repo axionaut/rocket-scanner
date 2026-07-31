@@ -1,5 +1,5 @@
-const BUILD_TS='2026-07-31 10:56 IST'; // release build time (IST)
-const APP_VERSION=1085; // v1085: a rocket is now a stock that reaches its own TARGET before its own STOP within 2 trading days (owner) — a forward, path-dependent label resolved in the outcome store; no same-day cohort may set a feature effect at any density.
+const BUILD_TS='2026-07-31 11:42 IST'; // release build time (IST)
+const APP_VERSION=1086; // v1086: feasibility (headroom to the session ceiling and the upper circuit vs the target) is now PART of the score, so rank 1 is the best stock that can actually reach target from the buy price; recommendations are drawn only from the top RECOMMEND_MAX_RANK=10; Rocket Conversion no longer renders "null%".
 // v556: parse the NSE Market Activity Report (MA<date>.csv) — official Nifty %, advances/declines and sector index moves shown as market CONTEXT in the status bar (EOD data, display only, never fed into per-row scoring); MA added to the ℹ️ file manifest.
 // v555 market-cycle stage awareness (stateless, self-calibrating): per-row stage label (1 accumulation · 2 breakout · 3 event · 4 profit-booking · 5 re-accumulation · 6 second-leg); a quiet-accumulation signal (conjunction-of-percentiles) injected via the rocket-diagnostic weighting; sell-the-news decay off Recent earnings date (horizon = review days). v1065 makes the market-breadth gauge an entry-eligibility input while still never changing ranking.
 const GOOGLE_DRIVE_CLIENT_ID='1015012642264-oi2nelv3v90k3d39r994a6nelgjs2a56.apps.googleusercontent.com'; // Public OAuth Web Client ID.
@@ -7,6 +7,14 @@ const PRICE_BAND_BLOCK_BUFFER_PCT=0.15; // Treat rounded 4.9/9.9/19.9 rows as ef
 const BASKET_CASH_RESERVE_RS=1; // Leave a rupee for broker-side tax/rounding differences.
 const MAX_TURNOVER_PARTICIPATION=0.001; // Market-impact rail: never exceed 0.10% of a stock's daily rupee turnover.
 const BASKET_MARKET_BUDGET_BUFFER_PCT=0.25; // Sizing cushion only; exported buys remain MARKET orders.
+// v1086 (OWNER-SET, not learned): recommendations may only be drawn from the top of the ranking.
+// The owner's rule is "do not recommend or export anything above rank 10". Before v1086 the
+// ranking answered a different question than the basket did, so the list backfilled from ranks
+// 14/22/27 after the top was deleted; now that feasibility is inside the score, the top of the
+// ranking IS the actionable set, and this rail makes the app buy FEWER names rather than reach
+// deeper for filler. It is a risk preference like Zerodha's 20-order basket cap, not a tunable
+// the model calibrates — see the no-tunable-constants rule.
+const RECOMMEND_MAX_RANK=10;
 const SYSTEM_TRADE_START_DATE='2026-04-01'; // Adaptive stats use trades closed from this date onward.
 const HARVEST_DAILY_NET_GOAL_RS=15000; // North-star daily pure-profit goal, never a forced capital assumption.
 const HARVEST_DESIRED_NET_PCT=0.60; // Minimum useful net profit after charges for capital rotation.
@@ -111,7 +119,7 @@ const SHARED_FILTER_STORE='rs_filters_shared';
 const TRADE_INPUTS_STORE='rs_trade_inputs_v1';
 let _lastTradeInputSig=''; // gate brain writes to genuine trade-input changes, not every keystroke
 const ALL_STORE='rs_data';
-const ALL_STORE_SCHEMA='radar_composite_v5'; // v1085 adds open1d and redefines rocketToday (target before stop), so older caches must be rescored.
+const ALL_STORE_SCHEMA='radar_composite_v6'; // v1086 folds feasibility into the score and adds setupPct/feasibility, so every cached score is stale.
 const HOLD_STORE='rs_holdings';
 const ORDERS_STORE='rs_orders';
 const POS_STORE='rs_positions';
@@ -3118,7 +3126,47 @@ function radarAnalyze(headers,rawRows,supplements={},heldSymbols=new Set()){
     // alone. The ^4 top-weighting still crushes mid-percentiles, so a merely-median ignition
     // cannot lift a weak row into contention.
     r.compositePct=radarPct(rawScores,r.rawScore);
-    r.score=+(100*Math.pow(Math.max(r.compositePct,r.ignitePct||0),4)).toFixed(1);
+    r.setupPct=Math.max(r.compositePct,r.ignitePct||0);
+    // ── v1086: FEASIBILITY IS PART OF THE RANK, NOT A FILTER AFTER IT ─────────────────────────
+    // Owner, 2026-07-31: "Rank 1 should be the one stock which has the highest chance of achieving
+    // our target from the recommended price point." The ranking used to answer a different
+    // question — "which stock has the best setup" — and a separate gate then deleted the rows that
+    // could not actually be bought. Measured on the 11:09 live file: of the top 400 basket-eligible
+    // rows, 207 were blocked for STOCK-INTRINSIC reasons (204 move-spent, 3 no circuit headroom)
+    // against 3 for portfolio reasons, and only ONE of the top 10 was recommendable. Rank 1
+    // (DEEPINDS) had -0.75% of runway against a 1.85% target; rank 6 (UEL) had -9% and was sitting
+    // on its circuit at +20%. Those are not near-misses, they are arithmetic impossibilities.
+    //
+    // So the two headroom facts — how far to the session ceiling, how far to the upper circuit —
+    // now SCALE the score instead of vetoing it afterwards. Both are already computed here, both
+    // are properties of the STOCK, and both are measured from the same buffered buy price the
+    // sizing uses. `headroom / target` is a pure ratio of two existing quantities: at or below 1
+    // the stock cannot reach target from here and the score goes to 0, so it sinks to the bottom
+    // of the ranking on its own instead of occupying rank 1 with a "cannot allocate" tag.
+    //
+    // WHAT IS DELIBERATELY EXCLUDED: capital, Max Alloc, the 0.10%-of-turnover rail, the held
+    // top-up cushion and the 20-order cap. Those depend on the owner's book and on which OTHER
+    // stocks were selected, so admitting them would make a stock's rank depend on its neighbours —
+    // the non-causal cross-stock coupling v1066 removed and v1080 explicitly refused. They remain
+    // post-filters. The target anchor IS admitted because it is one scalar applied identically to
+    // every row: it cannot reorder stocks relative to each other, it only sets the bar they clear.
+    const _tgt=Number(_radarSessionTargetPct)>0?Number(_radarSessionTargetPct):null;
+    const _buy=r.price>0?r.price*(1+BASKET_MARKET_BUDGET_BUFFER_PCT/100):null;
+    let _feas=1;
+    if(_tgt&&_buy>0){
+      const runways=[];
+      if(r.low1d>0&&r.rangePct>0) runways.push((r.low1d*(1+r.rangePct/100)/_buy-1)*100);
+      const _uc=getUpperCircuitInfo(r,_buy);
+      if(_uc&&isFinite(_uc.runwayPct)) runways.push(_uc.runwayPct);
+      if(runways.length){
+        // The binding constraint is the tightest ceiling, and it must cover the target with the
+        // same slippage cushion the order already budgets for (v1081's rule, reused not re-tuned).
+        const _room=Math.min(...runways);
+        _feas=clamp01(_room/_tgt,0,1);
+      }
+    }
+    r.feasibility=+_feas.toFixed(4);
+    r.score=+(100*Math.pow(r.setupPct*_feas,4)).toFixed(1);
     r.rocketScore=r.score; // allocation/export alias
     r.risk=!r.basketEligible||r.meta.flags?.length>=3||r.turnover<25e5||r.price<10?'High':(r.gap>6||r.day>6||r.parts.volatility<38?'Medium':'Low');
     // Event Risk (idea #1, v554 + v555): an event-day (Stage 3) or a name still digesting its results
@@ -5041,7 +5089,17 @@ function renderPerformance(){
     {label:'Avg Hold',value:p.avgHoldDays+'d',color:'var(--t1)',sub:'How long a position actually lasts'},
   ];
   if(recSummary.evaluated){
-    kpis.push({label:'Rocket Conversion',value:recSummary.conversionPct+'%',color:recSummary.conversionPct>=20?'var(--green)':recSummary.conversionPct>=10?'var(--amber)':'var(--red)',sub:`Hit target before stop within ${ROCKET_HORIZON_DAYS} trading days · ${recSummary.rockets}/${recSummary.resolvedRockets} resolved`+(recSummary.stoppedOut?` · ${recSummary.stoppedOut} stopped first`:'')+(recSummary.pendingRockets?` · ${recSummary.pendingRockets} still open`:'')});
+    // v1086 fix: v1085 rendered `null + '%'` as the literal string "null%" whenever nothing had
+    // resolved yet — which is the normal state on the day the definition changes, since every
+    // pre-v1085 pick lacks the barriers needed to resolve. An unresolved metric must say so.
+    const _conv=recSummary.conversionPct;
+    const _hasConv=_conv!=null&&isFinite(_conv);
+    kpis.push({label:'Rocket Conversion',
+      value:_hasConv?_conv+'%':'—',
+      color:!_hasConv?'var(--t3)':_conv>=20?'var(--green)':_conv>=10?'var(--amber)':'var(--red)',
+      sub:_hasConv
+        ?`Hit target before stop within ${ROCKET_HORIZON_DAYS} trading days · ${recSummary.rockets}/${recSummary.resolvedRockets} resolved`+(recSummary.stoppedOut?` · ${recSummary.stoppedOut} stopped first`:'')+(recSummary.pendingRockets?` · ${recSummary.pendingRockets} still open`:'')
+        :`No pick has resolved yet under the v1085 definition (target before stop within ${ROCKET_HORIZON_DAYS} trading days). ${recSummary.pendingRockets||0} awaiting resolution — picks recorded before the definition changed carry no target/stop and can never resolve. Needs a post-close upload to close each issue day.`});
   }
   // Same-day exit headroom (owner insight 2026-07-21): on the days you sold, how much
   // higher did the stock trade AFTER your exit that same day? This is the measured cost
@@ -6674,8 +6732,14 @@ function applyFilters(){
   // above reorders FILT in place for display, so before this the basket silently changed whenever a
   // column header was clicked — sorting by Day % handed the export the 20 biggest movers instead of
   // the 20 best-scoring rows. Presentation must never decide what gets bought.
+  // v1086: draw ONLY from the top of the ranking (RECOMMEND_MAX_RANK). Now that feasibility is
+  // inside the score, a row deep in the list is genuinely worse — not merely unlucky — so reaching
+  // past the cap to fill 20 slots would be backfilling with names the model already ranked down.
+  // Buying fewer is the correct outcome when fewer qualify.
   const selectionRows=[...FILT].sort((a,b)=>(a.rank??Infinity)-(b.rank??Infinity));
-  SELECTED=new Set(selectionRows.filter(s=>s.basketEligible!==false&&!EXPORT_EXCLUDED.has(s.symbol)).slice(0,20).map(s=>s.symbol));
+  SELECTED=new Set(selectionRows
+    .filter(s=>s.basketEligible!==false&&!EXPORT_EXCLUDED.has(s.symbol)&&(s.rank??Infinity)<=RECOMMEND_MAX_RANK)
+    .slice(0,20).map(s=>s.symbol));
 
   PG=1;renderHead();renderTable();renderStatusBar();saveFilterState();updateTabCounts();
   try{renderRankingsPanels();}catch(e){console.warn('Rankings panels render failed',e);}
@@ -8086,7 +8150,7 @@ function compactRankingRows(rows){
     high1d:s.high1d??null,low1d:s.low1d??null,vwap:s.vwap??null,bollUpper:s.bollUpper??null,keltUpper:s.keltUpper??null,
     price1h:s.price1h??null,price15m:s.price15m??null,price5m:s.price5m??null,
     stage:s.stage??null,stageLabel:s.stageLabel??null,legTrendPct:s.legTrendPct??null,legHighPct:s.legHighPct??null,
-    igniteReady:!!s.igniteReady,igniteStrength:s.igniteStrength??null,ignitePct:s.ignitePct??0,compositePct:s.compositePct??null,
+    igniteReady:!!s.igniteReady,igniteStrength:s.igniteStrength??null,ignitePct:s.ignitePct??0,compositePct:s.compositePct??null,setupPct:s.setupPct??null,feasibility:s.feasibility??null,
     entryReady:s.entryReady!==false,entryTiming:s.entryTiming||null,
     rocketReady:!!s.rocketReady,gateReasons:(s.gateReasons||[]).slice(0,9),_held:!!s._held,
     meta:{delivery:s.meta?.delivery??null,trades:s.meta?.trades??null,flags:(s.meta?.flags||[]).slice(0,12),band:s.meta?.band??null}
