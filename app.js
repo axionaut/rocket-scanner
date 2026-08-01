@@ -1,5 +1,5 @@
-const BUILD_TS='2026-07-31 16:46 IST'; // release build time (IST)
-const APP_VERSION=1090; // v1090: the Zerodha rate card CSV is now a TESTED contract - all seven charge rows pinned to calcZerodhaChargesSplit - and the Avg Cost tooltip names it as the source.
+const BUILD_TS='2026-08-01 13:30 IST'; // release build time (IST)
+const APP_VERSION=1091; // v1091: recommendations and exports are limited to GREEN-scored rows (the RADAR_SCORE_BANDS top band) instead of the top 10 by rank - a quality bar, not a slot budget, so the basket size follows the market.
 // v556: parse the NSE Market Activity Report (MA<date>.csv) — official Nifty %, advances/declines and sector index moves shown as market CONTEXT in the status bar (EOD data, display only, never fed into per-row scoring); MA added to the ℹ️ file manifest.
 // v555 market-cycle stage awareness (stateless, self-calibrating): per-row stage label (1 accumulation · 2 breakout · 3 event · 4 profit-booking · 5 re-accumulation · 6 second-leg); a quiet-accumulation signal (conjunction-of-percentiles) injected via the rocket-diagnostic weighting; sell-the-news decay off Recent earnings date (horizon = review days). v1065 makes the market-breadth gauge an entry-eligibility input while still never changing ranking.
 const GOOGLE_DRIVE_CLIENT_ID='1015012642264-oi2nelv3v90k3d39r994a6nelgjs2a56.apps.googleusercontent.com'; // Public OAuth Web Client ID.
@@ -7,14 +7,10 @@ const PRICE_BAND_BLOCK_BUFFER_PCT=0.15; // Treat rounded 4.9/9.9/19.9 rows as ef
 const BASKET_CASH_RESERVE_RS=1; // Leave a rupee for broker-side tax/rounding differences.
 const MAX_TURNOVER_PARTICIPATION=0.001; // Market-impact rail: never exceed 0.10% of a stock's daily rupee turnover.
 const BASKET_MARKET_BUDGET_BUFFER_PCT=0.25; // Sizing cushion only; exported buys remain MARKET orders.
-// v1086 (OWNER-SET, not learned): recommendations may only be drawn from the top of the ranking.
-// The owner's rule is "do not recommend or export anything above rank 10". Before v1086 the
-// ranking answered a different question than the basket did, so the list backfilled from ranks
-// 14/22/27 after the top was deleted; now that feasibility is inside the score, the top of the
-// ranking IS the actionable set, and this rail makes the app buy FEWER names rather than reach
-// deeper for filler. It is a risk preference like Zerodha's 20-order basket cap, not a tunable
-// the model calibrates — see the no-tunable-constants rule.
-const RECOMMEND_MAX_RANK=10;
+// v1086's `RECOMMEND_MAX_RANK = 10` was RETIRED in v1091 (owner): the recommendation bar is now
+// score QUALITY, not rank position — see RECOMMEND_MIN_SCORE, derived from RADAR_SCORE_BANDS.
+// A rank cap hands over ten names regardless of how good they are; the green band lets the count
+// follow the market. Do not reintroduce a positional cap.
 const SYSTEM_TRADE_START_DATE='2026-04-01'; // Adaptive stats use trades closed from this date onward.
 const HARVEST_DAILY_NET_GOAL_RS=15000; // North-star daily pure-profit goal, never a forced capital assumption.
 const HARVEST_DESIRED_NET_PCT=0.60; // Minimum useful net profit after charges for capital rotation.
@@ -2681,6 +2677,11 @@ function radarScoreColor(score){
   if(score===null||score===undefined||!isFinite(s)) return 'var(--t3)';
   return RADAR_SCORE_BANDS.find(b=>s>=b.min).color;
 }
+// v1091 (owner): only GREEN-scored rows may be recommended or exported. The threshold is READ FROM
+// the band table rather than written as a literal, so the rule and the colour on screen can never
+// disagree — if a band edge moves, this follows it. Green is the top band by construction.
+const RECOMMEND_MIN_SCORE=RADAR_SCORE_BANDS.reduce((hi,b)=>Math.max(hi,isFinite(b.min)?b.min:-Infinity),-Infinity);
+function isGreenScore(score){const s=Number(score);return isFinite(s)&&s>=RECOMMEND_MIN_SCORE;}
 // Score number + proportional bar, both tinted by the band.
 function radarScoreCell(score,title=''){
   const s=Number(score);
@@ -6850,16 +6851,22 @@ function applyFilters(){
   // above reorders FILT in place for display, so before this the basket silently changed whenever a
   // column header was clicked — sorting by Day % handed the export the 20 biggest movers instead of
   // the 20 best-scoring rows. Presentation must never decide what gets bought.
-  // v1086: draw ONLY from the top of the ranking (RECOMMEND_MAX_RANK). Now that feasibility is
-  // inside the score, a row deep in the list is genuinely worse — not merely unlucky — so reaching
-  // past the cap to fill 20 slots would be backfilling with names the model already ranked down.
-  // Buying fewer is the correct outcome when fewer qualify.
   // v1087: build the basket from the FULL filtered set, not from FILT — `Rows` is a DISPLAY cap
   // (CLAUDE.md: "selection still caps at 20"), but FILT is truncated by it, so setting Rows=5 was
   // silently limiting the basket to 5 names. Display and selection are separate concerns.
+  //
+  // v1091 (owner) REPLACES v1086's `rank <= 10` cap with a QUALITY bar: only GREEN-scored rows may
+  // be recommended or exported. A rank cap says "the best ten, whatever they are" — on a poor day
+  // that still hands over ten mediocre names, and on a strong day it refuses the eleventh good one.
+  // The green band asks the question that matters: is this setup actually strong? The count then
+  // follows the market instead of a fixed slot budget — fewer names on a weak tape, more on a
+  // strong one, still capped at Zerodha's 20-order basket limit. It also retires a constant that
+  // had to be flagged as owner-set rather than calibrated: the threshold now comes from
+  // RADAR_SCORE_BANDS, the same table that colours the score on screen, so the rule and the colour
+  // can never disagree. Non-green rows remain VISIBLE and ranked — they are simply not bought.
   const selectionRows=[...rows].sort((a,b)=>(a.rank??Infinity)-(b.rank??Infinity));
   SELECTED=new Set(selectionRows
-    .filter(s=>s.basketEligible!==false&&!EXPORT_EXCLUDED.has(s.symbol)&&(s.rank??Infinity)<=RECOMMEND_MAX_RANK)
+    .filter(s=>s.basketEligible!==false&&!EXPORT_EXCLUDED.has(s.symbol)&&isGreenScore(s.score))
     .slice(0,20).map(s=>s.symbol));
 
   PG=1;renderHead();renderTable();renderStatusBar();saveFilterState();updateTabCounts();
@@ -7862,7 +7869,11 @@ function planBasketExport(capital, selected){
   // upstream by each row's own evidence (entryReady, price band, basket eligibility); the wall
   // clock has no authority here. Never reintroduce a clock gate on this path.
   // v1075: entryReady is no longer an export veto (see applyFilters for the forward evidence).
-  let exportList=(selected||[]).filter(s=>!getPriceBandBlockReason(s));
+  // v1091: the export path re-verifies the GREEN bar itself rather than trusting its caller, the
+  // same way it already re-verifies price band, capital and turnover participation. `applyFilters`
+  // is the normal source of `selected`, but a stale selection restored from cache, a hand-built
+  // list, or a future caller must never be able to slip a sub-green row into a real order.
+  let exportList=(selected||[]).filter(s=>!getPriceBandBlockReason(s)&&isGreenScore(s.score));
   let basketAlloc=computeAlloc(capital,exportList);
   const orderCount=()=>exportList.reduce((count,s)=>{
     const qty=capital>0?(basketAlloc[s.symbol]?.qty||0):1;
