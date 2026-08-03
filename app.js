@@ -1,5 +1,5 @@
-const BUILD_TS='2026-08-03 17:00 IST'; // release build time (IST)
-const APP_VERSION=1095; // v1095: Left on Table measures what the stock did AFTER the exit (price now vs sell price), correcting v1094 which used the day's HIGH - a price that may have printed before the sell and was never capturable.
+const BUILD_TS='2026-08-03 17:20 IST'; // release build time (IST)
+const APP_VERSION=1096; // v1096: executed buys get the same attribution rule as recommendation picks - the day extremes AS AT THE BUY are recorded from the orders.csv fill timestamp, so a low that printed before the fill is no longer charged to the trade as adverse excursion, and a pre-buy high no longer seeds the trailing stop.
 // v1093: a baseline reward:risk MEASURED on the cross-section (last completed bhav session) instead of learned from the owner's own fills - reported on every row, deliberately not enforced. Includes v1092: position size split by Radar score / stop distance, so equally-scored names carry equal RUPEE risk, plus an opt-in Risk /trade cap.
 // v556: parse the NSE Market Activity Report (MA<date>.csv) — official Nifty %, advances/declines and sector index moves shown as market CONTEXT in the status bar (EOD data, display only, never fed into per-row scoring); MA added to the ℹ️ file manifest.
 // v555 market-cycle stage awareness (stateless, self-calibrating): per-row stage label (1 accumulation · 2 breakout · 3 event · 4 profit-booking · 5 re-accumulation · 6 second-leg); a quiet-accumulation signal (conjunction-of-percentiles) injected via the rocket-diagnostic weighting; sell-the-news decay off Recent earnings date (horizon = review days). v1065 makes the market-breadth gauge an entry-eligibility input while still never changing ranking.
@@ -2299,11 +2299,40 @@ function assessExecutedEntryOutcomeScan(scan){
     const row=rowMap[entry.symbol];
     if(!row) return;
     const entryRef=Number(entry.referencePrice||entry.buyPrice);
-    if(entryRef>0&&row.low1d>0&&gap>=0){
-      const adverse=Math.max(0,((entryRef-row.low1d)/entryRef)*100);
-      if(entry.maxAdversePct==null||adverse>entry.maxAdversePct){
-        entry.maxAdversePct=+adverse.toFixed(2);
-        changed=true;
+    // v1096: ATTRIBUTION. On the ENTRY DAY the bar contains action from before the trade existed, so
+    // a low that printed at 09:30 cannot be charged to a 14:00 buy — the same rule v1085 applies to
+    // recommendation picks, which was never applied here. Previously this ran at `gap>=0` and took
+    // the entry day's ENTIRE low, while the HIGH side four lines below excluded the entry day
+    // outright (`gap<=0` returns). That asymmetry inflated every adverse figure.
+    //
+    // On the entry day a drawdown now counts only if it made a NEW low past the extreme observed at
+    // the buy (getBuyContextBaseline). With no baseline the entry day is skipped and counted as
+    // UNATTRIBUTABLE rather than guessed at. On later days the whole bar is attributable, unchanged.
+    //
+    // The high side stays entry-day-EXCLUDED, and that is now a deliberate choice rather than an
+    // accident: `bestNetHighPct` feeds computeHarvestPlan's target anchor, so admitting entry-day
+    // highs would raise the learned target on a data change alone. Fixing the over-count and leaving
+    // the conservative side conservative is the honest asymmetry; revisit it with its own measurement.
+    if(entryRef>0&&row.low1d>0){
+      let lowForEntry=null;
+      if(gap>0){
+        lowForEntry=row.low1d;                        // whole bar is after the trade
+      } else if(gap===0){
+        const base=getBuyContextBaseline(entry.symbol,scan.date);
+        if(base&&base.low>0){
+          if(row.low1d<base.low-1e-9) lowForEntry=row.low1d;   // a NEW low after the buy
+        } else {
+          entry.entryDayAdverseUnattributable=true;   // no baseline: say so, do not measure
+          changed=true;
+        }
+      }
+      if(lowForEntry!=null){
+        const adverse=Math.max(0,((entryRef-lowForEntry)/entryRef)*100);
+        if(entry.maxAdversePct==null||adverse>entry.maxAdversePct){
+          entry.maxAdversePct=+adverse.toFixed(2);
+          entry.maxAdverseAttributed=gap>0?'later-day':'entry-day-new-low';
+          changed=true;
+        }
       }
     }
     if(gap<=0||entry.evaluatedThrough===scan.date) return;
@@ -4870,6 +4899,24 @@ function getCurrentTradeTimingDecision(contextOverride=null){
     evidence,context,model
   };
 }
+// v1096: the extremes observed at a buy, used as the attribution baseline on the ENTRY DAY.
+// Returns null when no context was captured for that (date, symbol) — in which case the entry day
+// is UNATTRIBUTABLE and must be skipped rather than measured against the whole day's bar.
+//
+// HONEST BOUND ON PRECISION: the snapshot is the first one taken after the buy was DETECTED, and
+// detection depends on when orders.csv is re-exported and re-ingested — it is not the fill instant
+// (v1064 already refused to claim that). So `low1dAtBuy` is at or below the true low-at-fill, which
+// makes this test CONSERVATIVE: it can miss some genuine post-fill drawdown, but it can no longer
+// invent drawdown that happened before the trade existed. Under-counting a real adverse move is the
+// safe direction here — the previous behaviour over-counted it, and MAE is the number cited for NOT
+// tightening the stop, so an inflated figure argued for a looser stop than the evidence supports.
+function getBuyContextBaseline(symbol,date){
+  const e=FS.get(TRADE_TIMING_CONTEXT_STORE)?.entries?.[date+'|'+normSym(symbol)];
+  if(!e) return null;
+  const hi=Number(e.high1dAtBuy),lo=Number(e.low1dAtBuy);
+  if(!(hi>0)&&!(lo>0)) return null;   // pre-v1096 entry: captured, but without the extremes
+  return {high:hi>0?hi:null,low:lo>0?lo:null,orderTime:e.orderTime||null};
+}
 function recordTradeTimingEntryContext(){
   const today=getSessionDate();
   const buys=(ORDERS_TODAY||[]).filter(o=>o.type==='BUY'&&normOrderDate(o.time)===today&&tradeClockMinute(o.time)!==null);
@@ -4890,6 +4937,18 @@ function recordTradeTimingEntryContext(){
       id:key,date:today,symbol,orderTime:order.time,orderMinute:minute,
       ordinal:index+1,spacingMinutes:prior===null?null:Math.max(0,minute-prior),
       price:Number(order.price)||null,
+      // v1096: the day's extremes AS THEY STOOD when this buy was first observed — the executed-trade
+      // equivalent of v1085's high1dAtIssue/low1dAtIssue. Without them nothing downstream can tell a
+      // low that printed BEFORE the fill from one that came after, and `syncExecutedRecommendedEntries`
+      // was charging the entry day's ENTIRE low to the entry as adverse excursion.
+      // ctxVersion 2 = this entry carries the extremes. Entries written before v1096 stay at
+      // version 1 and are DELIBERATELY NOT backfilled: the extremes must be the ones observed at
+      // the buy, and a later snapshot's high is exactly the contamination this release removes.
+      // A version-1 entry simply means the entry day is unattributable, which is the honest state.
+      ctxVersion:2,
+      high1dAtBuy:Number(row.high1d)>0?Number(row.high1d):null,
+      low1dAtBuy:Number(row.low1d)>0?Number(row.low1d):null,
+      priceAtObservation:Number(row.price)>0?Number(row.price):null,
       rank:row.rank??null,score:row.score??null,setup:row.setup||null,stage:row.stage??null,risk:row.risk||null,
       gap:row.gapSigned??row.gap??null,changeOpen:row.changeOpen??null,
       price1h:row.price1h??null,price15m:row.price15m??null,price5m:row.price5m??null,
@@ -6622,7 +6681,18 @@ function calcPositionTSL({sym, qty, avgCost, ltp, scannerRow, adaptiveSL, adapti
   const gapModel=store.gapModel||null;
   const prevPosition=(prev&&typeof prev==='object')?prev:{};
   const targetPct=(adaptiveTGT&&isFinite(adaptiveTGT)&&adaptiveTGT>0)?adaptiveTGT:4.2;
-  const dayHigh=(scannerRow?.high1d!=null&&isFinite(scannerRow.high1d))?Number(scannerRow.high1d):null;
+  // v1096: on the day the position was opened, the day's high may have printed BEFORE the buy. Using
+  // it seeds the trail from a peak the position never held, which sets the stop higher than the
+  // position ever justified and can exit on a move that was never participated in. If a buy context
+  // was captured today, only the part of the high made AFTER the buy is usable; with no baseline the
+  // day high is left out and the trail seeds from the live price, which is always attributable.
+  let dayHigh=(scannerRow?.high1d!=null&&isFinite(scannerRow.high1d))?Number(scannerRow.high1d):null;
+  const _openedToday=(ORDERS_TODAY||[]).some(o=>o.type==='BUY'&&normSym(o.symbol)===normSym(sym)
+    &&normOrderDate(o.time)===getSessionDate());
+  if(_openedToday&&dayHigh!=null){
+    const base=getBuyContextBaseline(sym,getSessionDate());
+    dayHigh=(base&&base.high>0&&dayHigh>base.high+1e-9)?dayHigh:null;
+  }
   const avgChanged=prevPosition?.avg!=null&&Math.abs(prevPosition.avg-avgCost)/avgCost>0.01;
   const qtyIncreased=prevPosition?.qty!=null&&qty>prevPosition.qty;
   const reset=!!(avgChanged||qtyIncreased);
