@@ -1,5 +1,5 @@
-const BUILD_TS='2026-08-01 13:30 IST'; // release build time (IST)
-const APP_VERSION=1091; // v1091: recommendations and exports are limited to GREEN-scored rows (the RADAR_SCORE_BANDS top band) instead of the top 10 by rank - a quality bar, not a slot budget, so the basket size follows the market.
+const BUILD_TS='2026-08-03 12:02 IST'; // release build time (IST)
+const APP_VERSION=1093; // v1093: a baseline reward:risk MEASURED on the cross-section (last completed bhav session) instead of learned from the owner's own fills - reported on every row, deliberately not enforced. Includes v1092: position size split by Radar score / stop distance, so equally-scored names carry equal RUPEE risk, plus an opt-in Risk /trade cap.
 // v556: parse the NSE Market Activity Report (MA<date>.csv) — official Nifty %, advances/declines and sector index moves shown as market CONTEXT in the status bar (EOD data, display only, never fed into per-row scoring); MA added to the ℹ️ file manifest.
 // v555 market-cycle stage awareness (stateless, self-calibrating): per-row stage label (1 accumulation · 2 breakout · 3 event · 4 profit-booking · 5 re-accumulation · 6 second-leg); a quiet-accumulation signal (conjunction-of-percentiles) injected via the rocket-diagnostic weighting; sell-the-news decay off Recent earnings date (horizon = review days). v1065 makes the market-breadth gauge an entry-eligibility input while still never changing ranking.
 const GOOGLE_DRIVE_CLIENT_ID='1015012642264-oi2nelv3v90k3d39r994a6nelgjs2a56.apps.googleusercontent.com'; // Public OAuth Web Client ID.
@@ -1376,8 +1376,14 @@ function parseBhavdata(text){
   parseCSV(text).forEach(r=>{
     const sym=normSym(r['SYMBOL']);
     if(!sym||(r['SERIES']||'').trim()!=='EQ')return;
+    // v1093: OPEN/HIGH/LOW are kept as well. They are the LAST COMPLETED session's full bar —
+    // the only complete bar the app has — and the achievability sweep needs a complete bar to ask
+    // "at target T against stop S, what fraction of the market reached T first?". Measuring that on
+    // the live intraday file would understate every hit rate by however much of the day is left.
     NSE_BHAV[sym]={delivPct:num(r['DELIV_PER']),nseVol:num(r['TTL_TRD_QNTY']),
-      officialClose:num(r['CLOSE_PRICE']),officialAvg:num(r['AVG_PRICE']),trades:num(r['NO_OF_TRADES'])};
+      officialClose:num(r['CLOSE_PRICE']),officialAvg:num(r['AVG_PRICE']),trades:num(r['NO_OF_TRADES']),
+      open:num(r['OPEN_PRICE']),high:num(r['HIGH_PRICE']),low:num(r['LOW_PRICE']),
+      prevClose:num(r['PREV_CLOSE']),dateStr:(r['DATE1']||'').trim()};
   });
 }
 function parsePriceBand(text){
@@ -3933,6 +3939,68 @@ function getEffectiveMaxAlloc(){
   const v=parseFloat(document.getElementById('fMaxAlloc')?.value);
   return (Number.isFinite(v)&&v>0)?v:getDefaultMaxAlloc();
 }
+// ── Risk per trade (v1092) ───────────────────────────────────────────────────────────────────
+// Two DIFFERENT quantities, deliberately kept apart:
+//   RELATIVE risk — is every position risking the same rupees as every other? Fixed by the
+//     score÷stop weight inside computeAlloc. Needs no field: it is a ratio, and the stop supplies it.
+//   ABSOLUTE risk — how many rupees does ONE trade risk? This already had an answer (alloc × stop%);
+//     it was simply never displayed. The field below OVERRIDES that computed number, it does not
+//     create it — the same pattern as Capital and Max Alloc, whose defaults sit in the placeholder.
+//
+// It is a CAP, never a target: it can only reduce a position, never grow one past Max Alloc or the
+// 0.10% turnover rail. Making it a third competing budget would leave "why was this capped"
+// ambiguous, and a risk budget that INCREASES size is how a wide-stop name eats the book.
+function rowRiskRupees(notional,stopPct){
+  const n=Number(notional),s=Number(stopPct);
+  return (n>0&&s>0)?n*(s/100):0;
+}
+// The notional at which this row's own stop costs exactly `riskRs`. Infinity = no budget set.
+function riskNotionalCap(s,riskRs){
+  if(!(riskRs>0)) return Infinity;
+  const stop=getRowStopDistancePct(s);
+  return stop>0?riskRs/(stop/100):Infinity;
+}
+let _defRiskMemo=null;
+// Default = the risk the EXISTING rails already imply: a full Max Alloc position at the median stop
+// of the current candidate pool. Non-circular by construction — Max Alloc depends on capital and
+// trade cadence, never on the risk budget — so this reports what you have been risking all along
+// rather than inventing a number. An empty field therefore changes nothing about total deployment.
+function getDefaultRiskPerTrade(){
+  const maxAlloc=getEffectiveMaxAlloc();
+  if(!(maxAlloc>0)) return 0;
+  const pool=(FILT&&FILT.length?FILT:ALL)||[];
+  const stops=pool.map(getRowStopDistancePct).filter(v=>Number.isFinite(v)&&v>0).sort((a,b)=>a-b);
+  if(!stops.length) return 0;
+  const sig=maxAlloc+'|'+stops.length+'|'+stops[0]+'|'+stops.at(-1);
+  if(_defRiskMemo&&_defRiskMemo.sig===sig) return _defRiskMemo.v;
+  const mid=stops.length%2?stops[(stops.length-1)/2]:(stops[stops.length/2-1]+stops[stops.length/2])/2;
+  const v=Math.round(rowRiskRupees(maxAlloc,mid));
+  _defRiskMemo={sig,v,medianStopPct:mid};
+  return v;
+}
+// DELIBERATELY unlike Capital and Max Alloc: an empty field means NO CAP, not "use the default".
+// getDefaultRiskPerTrade is a DISPLAY default — it reports the risk the existing rails already
+// imply so the placeholder is a real number rather than a guess — but applying it would silently
+// bind on every above-median-stop row and change sizing the moment this release shipped. The
+// behavioural change in v1092 is the score÷stop REDISTRIBUTION, which needs no budget; the cap is
+// opt-in, so an untouched filter bar deploys exactly the same total as before.
+function getEffectiveRiskPerTrade(){
+  const v=parseFloat(document.getElementById('fRiskPerTrade')?.value);
+  return (Number.isFinite(v)&&v>0)?v:0;
+}
+// Which cap actually bound this row. Ordered most-specific first so the label names the real
+// constraint rather than whichever happened to tie; 'risk cap' and 'max allocation' can coincide
+// exactly at the default (a full Max Alloc position at the median stop IS the default budget),
+// in which case Max Alloc is reported since it is the older, more familiar rail.
+function allocLimitReason(caps){
+  const {score,max,turnover,topUp,risk}=caps;
+  const lo=Math.min(score,max,turnover,topUp,risk),e=0.01;
+  if(topUp<=lo+e) return 'top-up average cost';
+  if(turnover<=lo+e) return 'turnover';
+  if(max<=lo+e) return 'max allocation';
+  if(risk<=lo+e) return 'risk cap';
+  return 'risk weight';
+}
 // Show each default in its field's placeholder so an empty field visibly reflects what the
 // calculation will use (grey = default in effect; a typed value = your override).
 function updateFilterPlaceholders(){
@@ -3940,6 +4008,11 @@ function updateFilterPlaceholders(){
   if(capEl){ const d=getDefaultCapital(); if(d>0){ capEl.placeholder=String(Math.round(d)); capEl.title=`Empty = your computed capital ₹${Math.round(d).toLocaleString('en-IN')} (holdings + open positions). Type a value to override.`; } }
   const maxEl=document.getElementById('fMaxAlloc');
   if(maxEl){ const d=getDefaultMaxAlloc(),avg=getAverageTradesPerEntryDay(),capital=getEffectiveCapital(); if(d>0&&avg>0){ maxEl.placeholder=String(d); maxEl.title=`Empty = Capital ₹${Math.round(capital).toLocaleString('en-IN')} ÷ ${avg.toFixed(2)} average positions per entry day = ₹${d.toLocaleString('en-IN')}. Type a value to override the per-stock cap.`; } else { maxEl.placeholder='need trade history'; } }
+  const riskEl=document.getElementById('fRiskPerTrade');
+  if(riskEl){ const d=getDefaultRiskPerTrade(),med=_defRiskMemo?.medianStopPct,ma=getEffectiveMaxAlloc();
+    if(d>0&&med>0){ riskEl.placeholder=String(d);
+      riskEl.title=`Empty = NO cap; sizing follows Radar score ÷ stop distance and the existing rails, which today imply about ₹${d.toLocaleString('en-IN')} at risk for a full Max Alloc ₹${Math.round(ma).toLocaleString('en-IN')} position at the ${med.toFixed(2)}% median stop. Type a value to cap what any one position may lose — it can only shrink a position, never grow one.`; }
+    else { riskEl.placeholder='auto'; } }
   const tgtEl=document.getElementById('fTgtOverride');
   if(tgtEl){ let d=0; try{d=getDefaultTgtPct();}catch(e){} if(d>0){ tgtEl.placeholder=d.toFixed(1); tgtEl.title=`Empty = the auto portfolio target anchor ${d.toFixed(1)}% (lower of learned Harvest / goal-led). A typed value replaces the anchor; each stock still gets its own capacity-aware target.`; } }
 }
@@ -6110,6 +6183,74 @@ function getEffectiveTgtPct(){
 // anchor once and hand it in. getActiveTargetInfo() costs ~2.3ms (it walks the goal solve and the
 // harvest outcome pool), which is invisible for one row and fatal across the universe — the v1080
 // allocation gate ran 7s on 2,962 rows before this. Omit it and the behaviour is unchanged.
+// ── v1093: the ACHIEVABILITY CURVE — a baseline reward:risk that is not learned from results ──
+//
+// Owner rule (2026-08-03): "R:R is not to be learnt from past and applied to future if it's bad.
+// If it's good, that should be the baseline, but if it's bad, there should be a good default
+// baseline based on data."
+//
+// The trap this avoids: the tradebook's 76% win rate was PRODUCED BY harvesting at ~1.9%. Using
+// it to justify ~1.9% is a closed loop — the same circularity v1074 named, one level up. So the
+// baseline is measured on the CROSS-SECTION instead: over the last COMPLETED session, at each
+// candidate target T against each stock's OWN ATR stop, what fraction of the tradeable market
+// reached T before its stop? That is a fact about the market, not about the owner's fills.
+//
+// The bar MUST be complete, so it comes from the bhav copy (last completed session), never the
+// live intraday file — with part of the day still to run every hit rate would be understated.
+// Stateless in the app's sense: one session, recomputed daily, nothing accumulated.
+const ACHIEVE_MIN_ROWS=200;         // below this the curve is not trusted and nothing is floored
+let _achieveMemo=null;
+function buildAchievabilityCurve(){
+  const bhavN=Object.keys(NSE_BHAV||{}).length;
+  const sig=bhavN+'|'+(ALL?.length||0)+'|'+(TRADEBOOK_STATS?.adaptiveSL??'');
+  if(_achieveMemo&&_achieveMemo.sig===sig) return _achieveMemo.val;
+  let val=null;
+  try{
+    const rows=[];
+    for(const r of (ALL||[])){
+      const b=NSE_BHAV[r.symbol];
+      if(!b||!(b.open>0)||!(b.high>0)||!(b.low>0)) continue;
+      if(r.basketEligible===false) continue;
+      if(!(Number(r.turnover)>=2500000)||!(b.open>=10)) continue;   // the tradeable universe
+      const stop=getRowStopDistancePct(r);
+      if(!(stop>0)) continue;
+      rows.push({stop,entry:b.open,close:b.officialClose,bar:{high1d:b.high,low1d:b.low}});
+    }
+    if(rows.length>=ACHIEVE_MIN_ROWS){
+      const stops=rows.map(x=>x.stop).sort((a,b)=>a-b);
+      const medStop=stops[Math.floor(stops.length/2)];
+      const cost=estimateRoundTripCostPct(2)||0;
+      let best=null; const curve=[];
+      // The grid spans the observed stop distribution rather than round numbers, so no constant
+      // is invented: the question is only ever "what multiple of the risk is worth aiming for".
+      for(let t=stops[0]*0.2;t<=stops.at(-1)*1.05;t+=0.25){
+        const T=+t.toFixed(2);
+        let win=0,lose=0,neither=0,neitherSum=0;
+        for(const x of rows){
+          const o=resolveRocketDay(x.bar,x.entry,T,x.stop);
+          if(o===ROCKET_OUTCOME.ROCKET) win++;
+          else if(o===ROCKET_OUTCOME.STOPPED||o===ROCKET_OUTCOME.AMBIGUOUS) lose++;   // v1085: ambiguous is not a win
+          else { neither++; if(x.close>0) neitherSum+=100*(x.close/x.entry-1); }
+        }
+        const n=rows.length, p=win/n, q=lose/n, m=neither/n;
+        // The unresolved bucket is NOT free — it exits wherever the stock closed, which is what a
+        // time exit realises. Ignoring it would make every large target look artificially safe.
+        const exp=p*T - q*medStop + m*(neither?neitherSum/neither:0) - cost;
+        curve.push({T,p,q,m,exp});
+        if(!best||exp>best.exp) best={T,p,q,m,exp};
+      }
+      val={bestT:best.T,rr:+(best.T/medStop).toFixed(2),hitRate:best.p,expectancy:best.exp,
+           medStop,n:rows.length,dateStr:NSE_BHAV[Object.keys(NSE_BHAV)[0]]?.dateStr||null,curve};
+    }
+  }catch(e){ val=null; }   // fails OPEN: no curve means no floor, never a broken target
+  _achieveMemo={sig,val};
+  return val;
+}
+// The baseline multiple of risk worth aiming for. null when the curve cannot be trusted.
+function getBaselineRewardRisk(){
+  const c=buildAchievabilityCurve();
+  return c&&c.rr>0?c.rr:null;
+}
 function getRowExitPolicy(row,buyPrice=null,activeInfo=null){
   const active=activeInfo||getActiveTargetInfo();
   const anchor=Number(active.tgtPct)>0?Number(active.tgtPct):Math.abs(Number(TRADEBOOK_STATS?.adaptiveTGT))||null;
@@ -6143,6 +6284,26 @@ function getRowExitPolicy(row,buyPrice=null,activeInfo=null){
     targetPct=toStep(capacity);
     targetSource='stock capacity fallback (no goal rate available)';
   }
+  const stopPct=getRowStopDistancePct(row);
+  // v1093 (owner): "R:R is not to be learnt from past and applied to future if it's bad. If it's
+  // good, that should be the baseline, but if it's bad, there should be a good default baseline
+  // based on data." The baseline is now MEASURED (buildAchievabilityCurve) — and it is REPORTED,
+  // not enforced, for a reason established by measurement rather than caution.
+  //
+  // ENFORCING IT WAS BUILT, MEASURED AND BACKED OUT. Flooring the target at baselineRR x stop on
+  // the 2026-07-31 curve (baseline 1.28x, median stop 5.14%) moved the median target 1.90% -> 6.55%
+  // and made 1,491 of 1,498 tradeable rows NON-VIABLE through the v1083 session ceiling: the
+  // displayed list collapsed to 2 rows and the basket to ZERO. That is not a tuning problem, it is
+  // a HORIZON CONTRADICTION and it is pre-existing. The curve is measured open-to-close over a
+  // COMPLETE day, and v1085 already defines success as target-before-stop within TWO trading days,
+  // but getRowExitPolicy's viability test is still same-day: the session ceiling asks what is
+  // reachable FROM NOW, and by mid-session most of a day's range is already spent. So the app is
+  // currently asking for a same-day move while grading itself on a two-day outcome. Reconciling
+  // those is the next change; forcing the target first would simply have stopped recommending.
+  //
+  // Precedent for reporting rather than capping: v1077 kept ATR as the `reachable` FLAG.
+  const baseRR=getBaselineRewardRisk();
+  const rrFloorPct=(baseRR>0&&stopPct>0)?toStep(stopPct*baseRR):null;
   let minGrossPct=null;
   if(targetPct>0){
     minGrossPct=Math.ceil((HARVEST_DESIRED_NET_PCT+estimateRoundTripCostPct(targetPct))*20)/20;
@@ -6170,7 +6331,6 @@ function getRowExitPolicy(row,buyPrice=null,activeInfo=null){
   const sc=getSessionCeilingInfo(row,bandRef);
   const rangeExhausted=!!(sc&&targetPct>0&&sc.runwayPct<targetPct);
   const viable=targetPct>0&&!bandLimited&&!rangeExhausted&&(capacity==null||targetPct+1e-9>=minGrossPct);
-  const stopPct=getRowStopDistancePct(row);
   const stopSource=(Math.abs(Number(row?.slPct))>0)?'explicit stock stop'
     :hasAtr?'ATR stock stop'
     :(Number(TRADEBOOK_STATS?.adaptiveSL)>0?'learned portfolio fallback':'minimum-risk fallback');
@@ -6200,6 +6360,10 @@ function getRowExitPolicy(row,buyPrice=null,activeInfo=null){
     stopSource,
     anchorPct:anchor>0?+anchor.toFixed(2):null,
     anchorSource:active.source,
+    // v1093, all REPORTED (see the note above — measured, deliberately not enforced):
+    rrFloorPct,                                  // the target the measured baseline would ask for
+    baselineRR:baseRR??null,                     // market-measured multiple of risk worth aiming at
+    meetsBaselineRR:(baseRR>0&&targetPct>0&&stopPct>0)?(targetPct/stopPct)+1e-9>=baseRR:null,
     fallback:capacity==null,
     buyPrice:Number(buyPrice)>0?Number(buyPrice):null
   };
@@ -6381,7 +6545,7 @@ function getTurnoverAllocationCap(row){
 // be governed by what it does to the blended average cost — the position, not just the new order.
 //   UNDERWATER (price < avg): the add pulls the average DOWN toward the current price, which is
 //     what the owner wants, so it is capped only by the normal rails (max-alloc / turnover /
-//     score weight). "Give it the max" — nothing extra is imposed here.
+//     risk weight / risk budget). "Give it the max" — nothing extra is imposed here.
 //   IN PROFIT (price > avg): the add pushes the average UP. Bound it so that if the NEW entry's
 //     own stop is hit, the BLENDED position is still not at a loss:
 //         newAvg <= price x (1 - stop%/100)
@@ -6418,6 +6582,7 @@ function getHeldTopUpNotionalCap(s,buyP,heldMap=null){
 // Returns null when the row is allocatable, else a short human reason.
 function getAllocationPassContext(){
   return {capital:getEffectiveCapital(),maxAlloc:getEffectiveMaxAlloc(),
+          riskPerTrade:getEffectiveRiskPerTrade(),
           heldMap:getHeldPositionMap(),active:getActiveTargetInfo()};
 }
 // `ctx` carries the pass-constants (capital, max allocation, held map, target anchor) so a caller
@@ -6432,7 +6597,12 @@ function getAllocationBlockReason(s,ctx=null){
   if(!(turnoverCap>0)) return 'no daily turnover — market-impact safety cannot be verified';
   const topUpCap=getHeldTopUpNotionalCap(s,buyP,c.heldMap);
   if(!(topUpCap>0)) return 'already held at a profit with no cushion — an add would put the blended position at a loss on its own stop';
-  const rail=Math.min(c.maxAlloc>0?c.maxAlloc:c.capital,turnoverCap,topUpCap);
+  // v1092: the risk budget joins the rails here for the same reason Max Alloc is already here —
+  // both are portfolio-level caps that can leave a row unable to hold a single share, and a row
+  // that cannot be bought should not be recommended. The score-weight share is still deliberately
+  // excluded (v1080): that one depends on which OTHER stocks were selected.
+  const riskCap=riskNotionalCap(s,c.riskPerTrade);
+  const rail=Math.min(c.maxAlloc>0?c.maxAlloc:c.capital,turnoverCap,topUpCap,riskCap);
   if(rail<buyP) return `allocation rails (${fmtINR(rail)}) are below one share at ${fmtINR(buyP)}`;
   const policy=getRowExitPolicy(s,buyP,c.active);
   if(policy&&policy.bandLimited) return `only ${policy.bandRunwayPct}% left to the ${policy.bandPct}% upper circuit (₹${policy.ucPrice}) — the ${policy.targetPct}% target cannot be reached inside today's band`;
@@ -6449,9 +6619,12 @@ function computeAlloc(capital, selList){
   // Held qty/avg are part of the key (v1070): the top-up cap depends on them, so a fill that
   // changes the position must invalidate the memo or the next basket would reuse a stale cap.
   const heldMap=getHeldPositionMap();
-  const memoKey=capital+'|'+maxAllocV+'|'+targetAnchor+'|'+selList.map(s=>{
+  const riskPerTrade=getEffectiveRiskPerTrade();
+  // slPct joins the key with atr: both feed getRowStopDistancePct, which now drives the WEIGHT and
+  // not just the displayed stop, so a change in either must invalidate the memo.
+  const memoKey=capital+'|'+maxAllocV+'|'+targetAnchor+'|'+riskPerTrade+'|'+selList.map(s=>{
     const h=heldMap[s.symbol];
-    return s.symbol+':'+s.price+':'+s.rocketScore+':'+s.atr+':'+s.rangePct+':'+s.turnover+':'+(h?h.qty+'@'+h.avg:'-');
+    return s.symbol+':'+s.price+':'+s.rocketScore+':'+s.atr+':'+s.slPct+':'+s.rangePct+':'+s.turnover+':'+(h?h.qty+'@'+h.avg:'-');
   }).join(',');
   if(_allocMemo?.key===memoKey) return _allocMemo.val;
   const cap=maxAllocV>0?maxAllocV:capital;
@@ -6476,7 +6649,23 @@ function computeAlloc(capital, selList){
   }
 
   const rawScore=s=>Math.max(0,Number(s.rocketScore)||0);
-  const totalRawScore=selList.reduce((sum,s)=>sum+rawScore(s),0)||1;
+  // v1092: the pot is split by score ÷ stop distance, not by score alone. Same total deployment —
+  // this is a REDISTRIBUTION, not a new budget — but two equally-scored names no longer draw the
+  // same rupees when one stops out at 3% and the other at 8%. Before this, that pair carried 2.7x
+  // different rupee risk for identical conviction, purely because nothing normalised for the stop.
+  // Because alloc ∝ 1/stop, alloc × stop is constant across equally-scored rows: equal risk per
+  // trade falls out of the arithmetic with no new field and no new constant (getRowStopDistancePct
+  // is an existing per-row unit). The caps (Max Alloc, the 0.10% turnover rail, the held top-up
+  // cushion) are untouched and still apply after this weight — only the pre-cap share changed.
+  const riskWeight=s=>{
+    const sc=rawScore(s);
+    if(!(sc>0)) return 0;
+    const stop=getRowStopDistancePct(s);          // already clamped to SL_MIN_PCT..SL_MAX_PCT
+    return stop>0?sc/stop:0;
+  };
+  const totalRiskWeight=selList.reduce((sum,s)=>sum+riskWeight(s),0)||1;
+  // Residual redistribution (pass 2) still walks by CONVICTION, not by weight: the spare rupee
+  // should go to the best setup. Risk normalisation governs the size of the slice, not its priority.
   const sortedSel=[...selList].sort((a,b)=>rawScore(b)-rawScore(a));
   const allocMap={},limits={},limitReasons={};
 
@@ -6489,12 +6678,11 @@ function computeAlloc(capital, selList){
         reason:'missing daily turnover; market-impact safety cannot be verified',liquidityCap:0};
       continue;
     }
-    const scoreLimit=spendableCapital*(rawScore(s)/totalRawScore);
+    const scoreLimit=spendableCapital*(riskWeight(s)/totalRiskWeight);
     const topUpCap=getHeldTopUpNotionalCap(s,buyP,heldMap); // Infinity unless held and in profit
-    const rowLimit=Math.min(scoreLimit,cap,turnoverCap,topUpCap);
-    const limitReason=topUpCap<=Math.min(scoreLimit,cap,turnoverCap)+0.01?'top-up average cost'
-      :turnoverCap<=scoreLimit+0.01&&turnoverCap<=cap+0.01?'turnover'
-      :cap<=scoreLimit+0.01?'max allocation':'score weight';
+    const riskCap=riskNotionalCap(s,riskPerTrade);          // Infinity when no risk budget is set
+    const rowLimit=Math.min(scoreLimit,cap,turnoverCap,topUpCap,riskCap);
+    const limitReason=allocLimitReason({score:scoreLimit,max:cap,turnover:turnoverCap,topUp:topUpCap,risk:riskCap});
     limits[s.symbol]=rowLimit;
     limitReasons[s.symbol]=limitReason;
     const qty=affordableQty(rowLimit,buyP,rowLimit);
@@ -6540,20 +6728,38 @@ function computeAlloc(capital, selList){
       residual-=incremental; deployed+=incremental; progress=true;
     }
   }
-  Object.values(allocMap).forEach(am=>delete am.limit);
+  // riskRs is stamped ONCE here, after pass 2 has finished growing positions, so it can never
+  // describe a stale quantity. It is the rupees this position loses if its own stop is hit —
+  // the number the Risk ₹/trade budget caps, and the one surfaced in the Alloc cell.
+  Object.values(allocMap).forEach(am=>{
+    delete am.limit;
+    am.riskRs=rowRiskRupees(am.alloc,am.stopDistancePct);
+  });
   _allocMemo={key:memoKey,val:allocMap};
   return allocMap;
 }
 function allocationSubline(am,unitLabel='shares'){
+  // v1092: every allocation now states what it RISKS, not just what it costs. This number was
+  // always determined (alloc × the row's own stop) — it was simply never shown, which is why the
+  // Risk ₹/trade budget is an override on a visible default rather than a number typed into a vacuum.
+  const riskTip=am?.riskRs>0
+    ? ` Risks ${fmtINR(am.riskRs)} if its ${Number(am.stopDistancePct).toFixed(2)}% stop is hit.`
+    : '';
+  if(am?.limitReason==='risk cap'){
+    return `<div style="font-size:9px;color:var(--cyan);margin-top:1px" title="Sized down to fit the Risk ₹/trade budget at this stock's own ${Number(am.stopDistancePct).toFixed(2)}% stop.${riskTip}">risk cap · ${am.qty} ${unitLabel} · risk ${fmtINR(am.riskRs)}</div>`;
+  }
   if(am?.limitReason==='top-up average cost'){
     // v1070: an add to a stock already in profit, sized so the blended average stays below the
     // new entry's own stop. A zero here means the existing average has no cushion left.
-    return `<div style="font-size:9px;color:#f472b6;margin-top:1px" title="You already hold this at a profit. The add is sized so the blended average cost stays below this entry's own stop price — if the stop is hit, the combined position is still not at a loss.">📌 top-up capped · ${am.qty} ${unitLabel}</div>`;
+    return `<div style="font-size:9px;color:#f472b6;margin-top:1px" title="You already hold this at a profit. The add is sized so the blended average cost stays below this entry's own stop price — if the stop is hit, the combined position is still not at a loss.${riskTip}">📌 top-up capped · ${am.qty} ${unitLabel}</div>`;
   }
   if(am?.limitReason==='turnover'){
-    return `<div style="font-size:9px;color:var(--amber);margin-top:1px" title="Market-impact rail: allocation is capped at 0.10% of daily turnover (${fmtINR(am.liquidityCap)}), then rounded down to whole ${unitLabel}.">turnover cap · ${am.qty} ${unitLabel}</div>`;
+    return `<div style="font-size:9px;color:var(--amber);margin-top:1px" title="Market-impact rail: allocation is capped at 0.10% of daily turnover (${fmtINR(am.liquidityCap)}), then rounded down to whole ${unitLabel}.${riskTip}">turnover cap · ${am.qty} ${unitLabel}</div>`;
   }
-  return `<div style="font-size:9px;color:var(--t3);margin-top:1px">${am.qty} ${unitLabel}</div>`;
+  const sizedBy=am?.limitReason==='risk weight'
+    ? `Sized by Radar score ÷ this stock's ${Number(am.stopDistancePct).toFixed(2)}% stop, so equally-scored names carry equal rupee risk.`
+    : 'Capped by the Max Allocation rail.';
+  return `<div style="font-size:9px;color:var(--t3);margin-top:1px" title="${sizedBy}${riskTip}">${am.qty} ${unitLabel}${am?.riskRs>0?` · risk ${fmtINR(am.riskRs)}`:''}</div>`;
 }
 function recomputeAlloc(){
   const capital=getEffectiveCapital();
@@ -7020,6 +7226,19 @@ function renderStatusBar(){
     const activeAlloc=Object.values(am2).filter(a=>!a.rejected&&a.qty>0);
     const stockCount=activeAlloc.length;
     html+=` <span style="color:var(--amber);font-size:11px;font-family:'DM Mono',monospace;font-weight:700;margin-left:8px" title="All-in estimated buy debit: limit-price notional plus CNC buy-side charges.">· ${stockCount} ${allocatedLabel} · ${fmtINR(actualDeployed)} of ${fmtINR(capital)} all-in</span>`;
+    // v1092: what the basket RISKS, alongside what it costs. Sum of each position's own
+    // stop loss, plus the spread — a tight spread is the visible proof that the score÷stop
+    // weight is equalising risk; a wide one means the caps (turnover, top-up, Max Alloc) are
+    // binding and overriding the weight, which is correct but worth seeing.
+    const risks=activeAlloc.map(a=>a.riskRs).filter(v=>Number.isFinite(v)&&v>0).sort((a,b)=>a-b);
+    if(risks.length){
+      const totalRisk=risks.reduce((x,y)=>x+y,0);
+      const riskPct=capital>0?(totalRisk/capital)*100:0;
+      const spread=risks.length>1?`${fmtINR(risks[0])}–${fmtINR(risks.at(-1))}`:fmtINR(risks[0]);
+      const budget=getEffectiveRiskPerTrade();
+      const budgetLbl=budget>0?` Risk ₹/trade budget: ${fmtINR(budget)} per position.`:'';
+      html+=` <span style="color:var(--cyan);font-size:11px;font-family:'DM Mono',monospace;font-weight:700;margin-left:8px" title="Total rupees at risk if every position in this basket hits its own stop — ${spread} per position across ${risks.length}. Positions are sized by Radar score ÷ stop distance, so equally-scored names carry equal rupee risk; a wide spread here means a cap (turnover, Max Allocation, top-up cushion) is binding instead of the weight.${budgetLbl}">· 🛡 ${fmtINR(totalRisk)} at risk (${riskPct.toFixed(1)}% of capital) · ${spread}/trade</span>`;
+    }
     // Expected net uses each stock's own capacity-aware target. The Harvest/goal/manual
     // value is an anchor only; it is never pasted uniformly onto every selected row.
     const harvestPlan=computeHarvestPlan();
@@ -7046,6 +7265,17 @@ function renderStatusBar(){
       html+=` <span style="color:${color};font-size:11px;font-family:'DM Mono',monospace;font-weight:700;margin-left:8px" title="${tip}">· 🎯 ${fmtINR(totalNet)} net @ stock targets ${targetRange} · ${(goalCoverage*100).toFixed(0)}% of ${fmtINR(harvestPlan.dailyGoal)}</span>`;
       if(harvestPlan.warning){
         html+=` <span style="color:var(--amber);font-size:11px;font-family:'DM Mono',monospace;font-weight:700;margin-left:8px" title="${harvestPlan.warning}">· target floor active</span>`;
+      }
+      // v1093: the measured baseline reward:risk, and where this basket sits against it.
+      // Reported only — see the horizon-contradiction note in getRowExitPolicy.
+      const curve=buildAchievabilityCurve();
+      if(curve&&curve.rr>0&&stops.length&&targets.length){
+        const medT=targets[Math.floor(targets.length/2)],medS=stops[Math.floor(stops.length/2)];
+        const rr=medS>0?medT/medS:0;
+        const short=rr<curve.rr;
+        const col=short?'var(--amber)':'var(--green)';
+        const tip=`Measured on the last COMPLETED session (${escHtml(curve.dateStr||'—')}, ${curve.n.toLocaleString()} tradeable stocks): sweeping every candidate target against each stock's own ATR stop, expectancy peaks at a ${curve.bestT}% target against a ${curve.medStop.toFixed(2)}% median stop — a baseline of ${curve.rr}x risk, reached by ${(curve.hitRate*100).toFixed(1)}% of the market. This basket's median target ${medT.toFixed(2)}% against its ${medS.toFixed(2)}% median stop is ${rr.toFixed(2)}x. Measured on the CROSS-SECTION, never on your own fills, so a bad realised ratio cannot justify itself. REPORTED ONLY: it does not move any target — enforcing it was built and backed out because the curve is a full-day measure while row viability is still same-day (see CLAUDE.md v1093).`;
+        html+=` <span style="color:${col};font-size:11px;font-family:'DM Mono',monospace;font-weight:700;margin-left:8px" title="${tip}">· ⚖ R:R ${rr.toFixed(2)}x vs ${curve.rr}x baseline${short?' — short':''}</span>`;
       }
     }
   } else if(capital>0){
@@ -8295,7 +8525,7 @@ function compactRankingRows(rows){
   }));
 }
 function applySavedFiltersForMode(mode){
-  const ids=['fSearch','fRisk','fRows','fMinTurnover','fCapital','fMaxAlloc'];
+  const ids=['fSearch','fRisk','fRows','fMinTurnover','fCapital','fMaxAlloc','fRiskPerTrade'];
   const prev={};
   ids.forEach(id=>{const el=document.getElementById(id);if(el)prev[id]=el.value;});
   try{
@@ -8305,6 +8535,7 @@ function applySavedFiltersForMode(mode){
     Object.entries(map).forEach(([k,id])=>{const el=document.getElementById(id);if(el&&st[k]!=null)el.value=st[k];});
     const capEl=document.getElementById('fCapital');if(capEl&&shared.capital!=null)capEl.value=shared.capital;
     const maxEl=document.getElementById('fMaxAlloc');if(maxEl&&shared.maxAlloc!=null)maxEl.value=shared.maxAlloc;
+    const rkEl=document.getElementById('fRiskPerTrade');if(rkEl&&shared.riskPerTrade!=null)rkEl.value=shared.riskPerTrade;
   }catch(e){}
   return ()=>ids.forEach(id=>{const el=document.getElementById(id);if(el&&prev[id]!=null)el.value=prev[id];});
 }async function processScannerUpload(scannerFile, mode, options={}){
@@ -8677,7 +8908,8 @@ function saveFilterState(){
   const tradeInputs={
     capital:capEl?.value||'',
     maxAlloc:maxAllocEl?.value||'',
-    tgtOverride:document.getElementById('fTgtOverride')?.value||''
+    tgtOverride:document.getElementById('fTgtOverride')?.value||'',
+    riskPerTrade:document.getElementById('fRiskPerTrade')?.value||''
   };
   localStorage.setItem(SHARED_FILTER_STORE, JSON.stringify(tradeInputs)); // offline mirror
   // Sync the account-level trading inputs across devices via the brain, but only when they
@@ -8706,11 +8938,13 @@ function loadFilterState(){
     let ti=null; try{ti=FS.get(TRADE_INPUTS_STORE);}catch(e){}
     const pick=(k)=>(ti&&ti[k]!=null)?ti[k]:(shared[k]!=null?shared[k]:state[k]);
     const sharedCapital=pick('capital'), sharedMaxAlloc=pick('maxAlloc'), sharedTgt=pick('tgtOverride');
+    const sharedRisk=pick('riskPerTrade');
     if(sharedCapital){const el=document.getElementById('fCapital');if(el)el.value=sharedCapital;}
     if(sharedMaxAlloc){const el=document.getElementById('fMaxAlloc');if(el)el.value=sharedMaxAlloc;}
     if(sharedTgt){const el=document.getElementById('fTgtOverride');if(el)el.value=sharedTgt;}
+    if(sharedRisk){const el=document.getElementById('fRiskPerTrade');if(el)el.value=sharedRisk;}
     // Prime the change-gate so the first save after load doesn't needlessly rewrite the brain.
-    _lastTradeInputSig=JSON.stringify({capital:sharedCapital||'',maxAlloc:sharedMaxAlloc||'',tgtOverride:sharedTgt||''});
+    _lastTradeInputSig=JSON.stringify({capital:sharedCapital||'',maxAlloc:sharedMaxAlloc||'',tgtOverride:sharedTgt||'',riskPerTrade:sharedRisk||''});
     updateFilterPlaceholders(); // empty fields show + use the computed defaults
     // Legacy engine sort columns migrate to the Radar rank ordering once.
     const legacy=new Set(['_rank','rocketScore','snapshotChange','tslRefPoints','velocityPotential','delivPct','volume']);
