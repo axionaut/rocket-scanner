@@ -1,5 +1,5 @@
-const BUILD_TS='2026-08-03 16:09 IST'; // release build time (IST)
-const APP_VERSION=1094; // v1094: the outcome store finally PERSISTS each pick's target/stop - v1085 added them to the caller and the whitelist mapper silently dropped them, so no pick has ever been resolvable; the first cohort of the day now wins so a post-close re-scan cannot overwrite the list that was shown; Latest Session replaces Reverse with money Left on Table (rupees and %).
+const BUILD_TS='2026-08-03 17:00 IST'; // release build time (IST)
+const APP_VERSION=1095; // v1095: Left on Table measures what the stock did AFTER the exit (price now vs sell price), correcting v1094 which used the day's HIGH - a price that may have printed before the sell and was never capturable.
 // v1093: a baseline reward:risk MEASURED on the cross-section (last completed bhav session) instead of learned from the owner's own fills - reported on every row, deliberately not enforced. Includes v1092: position size split by Radar score / stop distance, so equally-scored names carry equal RUPEE risk, plus an opt-in Risk /trade cap.
 // v556: parse the NSE Market Activity Report (MA<date>.csv) — official Nifty %, advances/declines and sector index moves shown as market CONTEXT in the status bar (EOD data, display only, never fed into per-row scoring); MA added to the ℹ️ file manifest.
 // v555 market-cycle stage awareness (stateless, self-calibrating): per-row stage label (1 accumulation · 2 breakout · 3 event · 4 profit-booking · 5 re-accumulation · 6 second-leg); a quiet-accumulation signal (conjunction-of-percentiles) injected via the rocket-diagnostic weighting; sell-the-news decay off Recent earnings date (horizon = review days). v1065 makes the market-breadth gauge an entry-eligibility input while still never changing ranking.
@@ -3543,25 +3543,33 @@ function dayHighForSymbol(sym){
   const hi=Number(row?.high1d);
   return hi>0?hi:null;
 }
-// v1094 (owner): "Reverse ₹" is replaced by MONEY LEFT ON THE TABLE.
+// v1095 (owner correction to v1094): LEFT ON THE TABLE MEASURES WHAT HAPPENED **AFTER** THE SELL.
 //
-// Reverse ₹ answered "could I buy it back cheaper than I sold it?" — a re-entry question about a
-// position that is already closed. What the owner actually wants to know is how well the EXIT was
-// timed: against the best price the stock reached that day, how much did selling early cost?
+// v1094 shipped this as `(day's high − sell price) × qty`, which is WRONG for the question being
+// asked. The day's high is not attributable to the post-sell window: if a stock peaked at 10:15 and
+// the exit was at 14:00, that high was never available to hold out for, and the column charged the
+// exit for a move it could not have captured. The owner's definition is "the stock went higher
+// after we sold" — a forward measure from the exit, not a best-of-day one.
 //
-//   leftOnTableRs  = (day's high - sell price) x qty     rupees forgone
-//   leftOnTablePct = (day's high - sell price) / sell x 100
+//   leftOnTableRs  = (price now − sell price) × qty
+//   leftOnTablePct = (price now − sell price) / sell × 100
 //
-// ZERO IS THE GOOD CASE — it means the exit landed on the day's high. Positive is money forgone
-// (coloured red, opposite to every other money column here, because a big number is a bad result).
-// A NEGATIVE value is the "opposite" case the owner asked for: the sell printed above the day's
-// high on record, which can only happen when the two sources disagree, so it is reported as such
-// rather than dressed up as a win.
+// POSITIVE = it kept going up after the exit; that is money left on the table (red — a large
+// number is a bad outcome). NEGATIVE = it fell after the exit, so the sell was well timed and the
+// number is a saving (green). This is the "or the opposite, whatever applies" case, and unlike
+// v1094's version it is a real, common outcome rather than a data-mismatch artefact.
 //
-// PROVENANCE GUARD: `high1d` comes from the CURRENT scanner snapshot, so it only describes the
-// booking session when the two dates agree. When they do not, the number would silently compare a
-// sell from one day against another day's high — it is withheld with a stated reason instead.
-// While the market is open the high is also still forming, so the figure can only grow.
+// KNOWN LIMITATION, stated rather than papered over: the app has NO intraday series — only OHLC and
+// the current price — so a spike after the exit that faded back before the close is invisible here,
+// and the true post-sell peak cannot be recovered from any input the app reads. The day's high is
+// therefore reported in the TOOLTIP as unattributed context (it may pre- or post-date the exit) and
+// never in the number. Reconstructing the real post-sell peak would need intraday bars keyed to the
+// fill time, which no current input supplies.
+//
+// PROVENANCE GUARD: the comparison price comes from the CURRENT scanner snapshot, so it only
+// describes the booking session when the two dates agree — otherwise it would measure a sell from
+// one day against another day's price, and it is withheld with a stated reason instead. While the
+// market is open the figure is still moving, and the tooltip says so.
 function enrichExitPnlRow(row,bookedDate=null){
   const qty=Number(row?.qty)||0;
   const buy=Number(row?.buyPrice);
@@ -3581,22 +3589,24 @@ function enrichExitPnlRow(row,bookedDate=null){
   const sessionMatch=bookedDate?(scanDate?bookedDate===scanDate:null):null;
   out.leftOnTableRs=null; out.leftOnTablePct=null;
   if(sessionMatch===false){
-    out.leftOnTableNote=`The scanner file is session ${scanDate}, but this was booked on ${bookedDate} — today's high cannot describe that day's exit.`;
+    out.leftOnTableNote=`The scanner file is session ${scanDate}, but this was booked on ${bookedDate} — a price from a different session cannot say what happened after that exit.`;
   }else if(!(qty>0)||!(sell>0)){
     out.leftOnTableNote='No sell price or quantity on this row.';
-  }else if(dayHigh==null){
-    out.leftOnTableNote='This symbol has no day high in the current scanner file.';
+  }else if(current==null){
+    out.leftOnTableNote='This symbol is not in the current scanner file, so there is no post-sell price to compare against.';
   }else{
-    out.leftOnTableRs=+((dayHigh-sell)*qty).toFixed(0);
-    out.leftOnTablePct=+(((dayHigh-sell)/sell)*100).toFixed(2);
-    out.dayHigh=+dayHigh.toFixed(2);
+    out.leftOnTableRs=+((current-sell)*qty).toFixed(0);
+    out.leftOnTablePct=+(((current-sell)/sell)*100).toFixed(2);
+    if(dayHigh!=null) out.dayHigh=+dayHigh.toFixed(2);
     const unverified=sessionMatch===null?' Booking date unknown, so the session match is unverified.':'';
-    const live=(typeof isMarketHours==='function'&&isMarketHours())?' The market is still open, so the high can still rise.':'';
+    const live=(typeof isMarketHours==='function'&&isMarketHours())?' The market is still open, so this is still moving.':'';
+    // The day's high is CONTEXT ONLY - it may have printed before the exit, so it is never the number.
+    const hiCtx=dayHigh!=null?` The day's high was ₹${dayHigh.toFixed(2)}, but the app has no intraday series, so whether that came before or after the exit is unknown.`:'';
     out.leftOnTableNote=out.leftOnTableRs>0
-      ? `Sold at ₹${sell.toFixed(2)} against a day high of ₹${dayHigh.toFixed(2)} — ${fmtINR(out.leftOnTableRs)} (${out.leftOnTablePct.toFixed(2)}%) left on the table across ${qty} shares.${live}${unverified}`
+      ? `Sold at ₹${sell.toFixed(2)}; it is now ₹${current.toFixed(2)} — it kept rising after the exit, leaving ${fmtINR(out.leftOnTableRs)} (${out.leftOnTablePct.toFixed(2)}%) on the table across ${qty} shares.${live}${hiCtx}${unverified}`
       : out.leftOnTableRs===0
-        ? `Exited at the day's high of ₹${dayHigh.toFixed(2)} — nothing left on the table.${unverified}`
-        : `Sell price ₹${sell.toFixed(2)} is ABOVE the recorded day high ₹${dayHigh.toFixed(2)}, which the two sources should not disagree on — treat as a data mismatch, not a gain.${unverified}`;
+        ? `Sold at ₹${sell.toFixed(2)} and it has not moved since — nothing left on the table.${hiCtx}${unverified}`
+        : `Sold at ₹${sell.toFixed(2)}; it is now ₹${current.toFixed(2)} — it FELL after the exit, so the sell saved ${fmtINR(Math.abs(out.leftOnTableRs))} (${Math.abs(out.leftOnTablePct).toFixed(2)}%).${live}${hiCtx}${unverified}`;
   }
   return out;
 }
@@ -4937,9 +4947,10 @@ function buildLatestSessionPanel(query=''){
     {key:'_score',label:'Radar Score',align:'right',bold:true,fmt:v=>radarScoreCell(v),clrFn:()=>'var(--t1)',...dash},
     {key:'_rank',label:'Rank',align:'right',fmt:v=>v??'—',clrFn:()=>'var(--t2)',...dash},
   ];
-  // v1094: Left on Table replaces Reverse ₹ — see enrichExitPnlRow. The colour scale is DELIBERATELY
-  // inverted against every other money column in this table: a large number here is a bad outcome
-  // (the exit gave up a lot), and zero is the perfect exit, so red is up and green is nil.
+  // v1094/v1095: Left on Table replaces Reverse ₹ — see enrichExitPnlRow. It measures what the stock
+  // did AFTER the exit. The colour scale is DELIBERATELY inverted against every other money column
+  // here: positive means it kept running without you (bad, red), negative means it fell after you
+  // sold (the exit saved money, green).
   const leftClr=v=>v==null?'var(--t3)':v>0?'var(--red)':v===0?'var(--green)':'var(--amber)';
   const _leftTot={totFmt:v=>v!=null?fmtINR(v):'—',totClrFn:leftClr};
   const _leftPctTot={totFmt:v=>v!=null?v.toFixed(2)+'%':'—',totClrFn:leftClr};
