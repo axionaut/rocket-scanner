@@ -1,5 +1,6 @@
-const BUILD_TS='2026-08-03 12:02 IST'; // release build time (IST)
-const APP_VERSION=1093; // v1093: a baseline reward:risk MEASURED on the cross-section (last completed bhav session) instead of learned from the owner's own fills - reported on every row, deliberately not enforced. Includes v1092: position size split by Radar score / stop distance, so equally-scored names carry equal RUPEE risk, plus an opt-in Risk /trade cap.
+const BUILD_TS='2026-08-03 16:09 IST'; // release build time (IST)
+const APP_VERSION=1094; // v1094: the outcome store finally PERSISTS each pick's target/stop - v1085 added them to the caller and the whitelist mapper silently dropped them, so no pick has ever been resolvable; the first cohort of the day now wins so a post-close re-scan cannot overwrite the list that was shown; Latest Session replaces Reverse with money Left on Table (rupees and %).
+// v1093: a baseline reward:risk MEASURED on the cross-section (last completed bhav session) instead of learned from the owner's own fills - reported on every row, deliberately not enforced. Includes v1092: position size split by Radar score / stop distance, so equally-scored names carry equal RUPEE risk, plus an opt-in Risk /trade cap.
 // v556: parse the NSE Market Activity Report (MA<date>.csv) — official Nifty %, advances/declines and sector index moves shown as market CONTEXT in the status bar (EOD data, display only, never fed into per-row scoring); MA added to the ℹ️ file manifest.
 // v555 market-cycle stage awareness (stateless, self-calibrating): per-row stage label (1 accumulation · 2 breakout · 3 event · 4 profit-booking · 5 re-accumulation · 6 second-leg); a quiet-accumulation signal (conjunction-of-percentiles) injected via the rocket-diagnostic weighting; sell-the-news decay off Recent earnings date (horizon = review days). v1065 makes the market-breadth gauge an entry-eligibility input while still never changing ranking.
 const GOOGLE_DRIVE_CLIENT_ID='1015012642264-oi2nelv3v90k3d39r994a6nelgjs2a56.apps.googleusercontent.com'; // Public OAuth Web Client ID.
@@ -2049,7 +2050,46 @@ function recordRecommendationOutcomeScan(scan){
     });
   });
   const currentIssue=store.issues[scan.date];
-  if(scan.recommendations?.length&&(!currentIssue||(currentIssue.picks||[]).every(p=>(p.observations||0)===0))){
+  // v1094: THE FIRST COHORT OF THE DAY WINS. The old guard replaced the day's picks whenever every
+  // existing pick still had `observations === 0`, which is true for EVERY same-day re-scan — so the
+  // stored cohort was always the LAST scan of the day, not the list that was actually on screen when
+  // the owner acted. The post-close upload (the one that closes the issue day's bar) therefore
+  // overwrote the morning's recommendations with a post-close re-score: observed 2026-08-03, where a
+  // basket was exported at 11:09 but the store held a 15:46 cohort ranking CENTENKA first.
+  //
+  // That silently defeats the whole point of the store. Grading a list rebuilt from closing data is
+  // measuring a list nobody ever saw - the v1074 circularity trap - and it is exactly what Leg 2 of
+  // the post-close routine is contractually forbidden from doing. Later scans still EVALUATE the
+  // cohort (the loop above), they just cannot REPLACE it.
+  // v1094 REPAIR PATH. The two changes above collide on one case: a cohort recorded by an EARLIER
+  // build carries no barriers (the mapper dropped them), and "first cohort wins" would now protect
+  // that useless record forever — today's 20 picks would stay unresolvable exactly like the 450
+  // before them. So a barrier-less pick is BACKFILLED rather than replaced: the cohort's identity
+  // (which stocks, at what rank, at what entry price) is left exactly as issued, and only the
+  // missing target/stop are filled in from the current policy.
+  //
+  // Those barriers are NOT the ones that existed at issue time — the anchor moves during the day —
+  // so each repaired pick is stamped `barriersBackfilledOn`. Any analysis that needs strict
+  // as-issued barriers must exclude them; without the stamp the approximation would be invisible.
+  // Picks that already have barriers are never touched, so this cannot run twice on one pick.
+  if(currentIssue&&scan.recommendations?.length){
+    const fresh=Object.fromEntries(scan.recommendations.map(r=>[r.symbol,r]));
+    (currentIssue.picks||[]).forEach(p=>{
+      if(Number(p.targetPct)>0&&Number(p.stopPct)>0) return;   // already usable
+      const r=fresh[p.symbol];
+      if(!r||!(Number(r.targetPct)>0)||!(Number(r.stopPct)>0)) return;
+      p.targetPct=Number(r.targetPct);
+      p.stopPct=Number(r.stopPct);
+      if(p.high1dAtIssue==null&&Number(r.high1dAtIssue)>0) p.high1dAtIssue=Number(r.high1dAtIssue);
+      if(p.low1dAtIssue==null&&Number(r.low1dAtIssue)>0) p.low1dAtIssue=Number(r.low1dAtIssue);
+      p.rocketOutcome=p.rocketOutcome||ROCKET_OUTCOME.PENDING;
+      p.rocketHorizonDays=p.rocketHorizonDays||ROCKET_HORIZON_DAYS;
+      p.barriersBackfilledOn=scan.date;
+      delete p.rocketUnresolvedReason;
+    });
+  }
+  const isNewIssueDate=!currentIssue||!(currentIssue.picks||[]).length;
+  if(scan.recommendations?.length&&isNewIssueDate){
     store.issues[scan.date]={
       date:scan.date,threshold:scan.threshold,horizonDays:adaptiveHorizon,
       // v1076: the market REGIME this cohort was issued into. Every forward conclusion drawn from
@@ -2077,6 +2117,22 @@ function recordRecommendationOutcomeScan(scan){
         rangeLocationAtIssue:p.entryTiming?.rangeLocation??null,
         rangeUsedAtIssue:p.entryTiming?.rangeUsed??null,
         radarRank:p.radarRank??null,
+        // v1094 BUG FIX: these five were computed by the caller and then SILENTLY DROPPED here.
+        // This mapper rebuilds every pick from an explicit whitelist, and v1085 added the barrier
+        // fields to the caller (processScannerUpload) without adding them to the whitelist — so no
+        // pick has EVER carried them. Verified in the live brain 2026-08-03: 470 picks across 27
+        // issue dates, ZERO with targetPct/stopPct, including picks written by v1093. Every one hit
+        // the `!(p.targetPct>0)` branch in resolveRocketForPick and parked at PENDING, which is why
+        // Rocket Conversion has never rendered a number and why the 450 pending picks were being
+        // explained away as "legacy picks predating the definition" — they are not, the field was
+        // dropped at write time. Without high1d/low1dAtIssue the issue day's bar also cannot be
+        // split into pre- and post-recommendation action (see resolveRocketDay's prevHigh/prevLow).
+        targetPct:Number(p.targetPct)>0?Number(p.targetPct):null,
+        stopPct:Number(p.stopPct)>0?Number(p.stopPct):null,
+        high1dAtIssue:Number(p.high1dAtIssue)>0?Number(p.high1dAtIssue):null,
+        low1dAtIssue:Number(p.low1dAtIssue)>0?Number(p.low1dAtIssue):null,
+        rocketOutcome:p.rocketOutcome||ROCKET_OUTCOME.PENDING,
+        rocketHorizonDays:p.rocketHorizonDays||ROCKET_HORIZON_DAYS,
         observations:0,evaluatedThrough:null,rocketDate:null,rocketDays:null,
         bestHighProfitPct:null,bestCloseProfitPct:null,finalCloseProfitPct:null,worstLowProfitPct:null,
         conversionHighProfitPct:null,conversionCloseProfitPct:null,conversionWorstLowProfitPct:null,conversionAssessed:false,
@@ -3482,7 +3538,31 @@ function currentPriceForSymbol(symbol){
   return price>0?price:null;
 }
 
-function enrichExitPnlRow(row){
+function dayHighForSymbol(sym){
+  const row=ALL.find(s=>s.symbol===sym);
+  const hi=Number(row?.high1d);
+  return hi>0?hi:null;
+}
+// v1094 (owner): "Reverse ₹" is replaced by MONEY LEFT ON THE TABLE.
+//
+// Reverse ₹ answered "could I buy it back cheaper than I sold it?" — a re-entry question about a
+// position that is already closed. What the owner actually wants to know is how well the EXIT was
+// timed: against the best price the stock reached that day, how much did selling early cost?
+//
+//   leftOnTableRs  = (day's high - sell price) x qty     rupees forgone
+//   leftOnTablePct = (day's high - sell price) / sell x 100
+//
+// ZERO IS THE GOOD CASE — it means the exit landed on the day's high. Positive is money forgone
+// (coloured red, opposite to every other money column here, because a big number is a bad result).
+// A NEGATIVE value is the "opposite" case the owner asked for: the sell printed above the day's
+// high on record, which can only happen when the two sources disagree, so it is reported as such
+// rather than dressed up as a win.
+//
+// PROVENANCE GUARD: `high1d` comes from the CURRENT scanner snapshot, so it only describes the
+// booking session when the two dates agree. When they do not, the number would silently compare a
+// sell from one day against another day's high — it is withheld with a stated reason instead.
+// While the market is open the high is also still forming, so the figure can only grow.
+function enrichExitPnlRow(row,bookedDate=null){
   const qty=Number(row?.qty)||0;
   const buy=Number(row?.buyPrice);
   const sell=Number(row?.sellPrice);
@@ -3495,14 +3575,28 @@ function enrichExitPnlRow(row){
     out.priceDiff=null;
     out.grossPnl=null;
   }
-  if(qty>0&&isFinite(sell)&&sell>0&&current!=null){
-    out.currentPrice=+current.toFixed(2);
-    out.reversePnl=+((sell-current)*qty).toFixed(0);
-    out.reverseStatus=out.reversePnl>0?'Cheaper re-entry':out.reversePnl<0?'Costlier re-entry':'Flat re-entry';
+  out.currentPrice=current!=null?+current.toFixed(2):null;
+  const dayHigh=dayHighForSymbol(row?.sym);
+  const scanDate=(typeof getSessionDate==='function')?getSessionDate():null;
+  const sessionMatch=bookedDate?(scanDate?bookedDate===scanDate:null):null;
+  out.leftOnTableRs=null; out.leftOnTablePct=null;
+  if(sessionMatch===false){
+    out.leftOnTableNote=`The scanner file is session ${scanDate}, but this was booked on ${bookedDate} — today's high cannot describe that day's exit.`;
+  }else if(!(qty>0)||!(sell>0)){
+    out.leftOnTableNote='No sell price or quantity on this row.';
+  }else if(dayHigh==null){
+    out.leftOnTableNote='This symbol has no day high in the current scanner file.';
   }else{
-    out.currentPrice=current!=null?+current.toFixed(2):null;
-    out.reversePnl=null;
-    out.reverseStatus='No live price';
+    out.leftOnTableRs=+((dayHigh-sell)*qty).toFixed(0);
+    out.leftOnTablePct=+(((dayHigh-sell)/sell)*100).toFixed(2);
+    out.dayHigh=+dayHigh.toFixed(2);
+    const unverified=sessionMatch===null?' Booking date unknown, so the session match is unverified.':'';
+    const live=(typeof isMarketHours==='function'&&isMarketHours())?' The market is still open, so the high can still rise.':'';
+    out.leftOnTableNote=out.leftOnTableRs>0
+      ? `Sold at ₹${sell.toFixed(2)} against a day high of ₹${dayHigh.toFixed(2)} — ${fmtINR(out.leftOnTableRs)} (${out.leftOnTablePct.toFixed(2)}%) left on the table across ${qty} shares.${live}${unverified}`
+      : out.leftOnTableRs===0
+        ? `Exited at the day's high of ₹${dayHigh.toFixed(2)} — nothing left on the table.${unverified}`
+        : `Sell price ₹${sell.toFixed(2)} is ABOVE the recorded day high ₹${dayHigh.toFixed(2)}, which the two sources should not disagree on — treat as a data mismatch, not a gain.${unverified}`;
   }
   return out;
 }
@@ -3513,9 +3607,15 @@ function summarizeExitPnlRows(rows){
   const net=known.reduce((s,r)=>s+(r.netPnl||0),0);
   const gross=known.reduce((s,r)=>s+(r.grossPnl||0),0);
   const charges=known.reduce((s,r)=>s+(r.charges||0),0);
-  const reverse=(rows||[]).filter(r=>r.reversePnl!=null).reduce((s,r)=>s+r.reversePnl,0);
-  const reverseCount=(rows||[]).filter(r=>r.reversePnl!=null).length;
-  return {known,capital,net,gross,charges,reverse,reverseCount,pct:capital>0?+(net/capital*100).toFixed(2):null};
+  // v1094: totals for money left on the table. The % total is PROCEEDS-WEIGHTED, not a mean of the
+  // per-row percentages — averaging percentages across positions of different size would let a tiny
+  // position swing the headline.
+  const leftRows=(rows||[]).filter(r=>r.leftOnTableRs!=null);
+  const leftRs=leftRows.reduce((s,r)=>s+r.leftOnTableRs,0);
+  const leftProceeds=leftRows.reduce((s,r)=>s+(Number(r.sellPrice)||0)*(Number(r.qty)||0),0);
+  const leftPct=leftProceeds>0?+((leftRs/leftProceeds)*100).toFixed(2):null;
+  return {known,capital,net,gross,charges,pct:capital>0?+(net/capital*100).toFixed(2):null,
+          leftRs,leftPct,leftCount:leftRows.length};
 }
 
 function computeLatestOrderBooked(){
@@ -3571,7 +3671,7 @@ function computeLatestOrderBooked(){
           && TRADEBOOK_STATS.lastDate===session.date
           && TRADEBOOK_STATS.lastDayRows?.find(r=>r.sym===sym);
         if(tradebookRow){
-          rows.push(enrichExitPnlRow({...tradebookRow,_sort:tradebookRow.netPnl}));
+          rows.push(enrichExitPnlRow({...tradebookRow,_sort:tradebookRow.netPnl},session.date));
           return;
         }
       }
@@ -3582,7 +3682,7 @@ function computeLatestOrderBooked(){
       const _brok=+scS.brokerage.toFixed(2),_stt=+scS.stt.toFixed(2),_txn=+scS.txn.toFixed(2);
       const _sebi=+scS.sebi.toFixed(2),_gst=+scS.gst.toFixed(2),_stamp=+scS.stamp.toFixed(2),_dp=+scS.dp.toFixed(2);
       const charges=+sumChargeParts({_brok,_stt,_txn,_sebi,_gst,_stamp,_dp}).toFixed(0);
-      rows.push(enrichExitPnlRow({sym,lots:sells.length,qty:deliveryQty,capital:null,buyPrice:null,sellPrice:+avgSell.toFixed(2),_brok,_stt,_txn,_sebi,_gst,_stamp,_dp,charges,winRate:null,netPnl:null,netPnlPct:null,_sort:-Infinity,_noAvgCost:true}));
+      rows.push(enrichExitPnlRow({sym,lots:sells.length,qty:deliveryQty,capital:null,buyPrice:null,sellPrice:+avgSell.toFixed(2),_brok,_stt,_txn,_sebi,_gst,_stamp,_dp,charges,winRate:null,netPnl:null,netPnlPct:null,_sort:-Infinity,_noAvgCost:true},session.date));
     }
     if(!components.length) return;
     const matchedQty=components.reduce((sum,c)=>sum+c.qty,0);
@@ -3598,7 +3698,7 @@ function computeLatestOrderBooked(){
     const charges=+components.reduce((sum,c)=>sum+c.charges,0).toFixed(0);
     const netPnl=+components.reduce((sum,c)=>sum+c.netPnl,0).toFixed(0);
     const netPnlPct=capital>0?+(netPnl/capital*100).toFixed(2):null;
-    rows.push(enrichExitPnlRow({sym,lots:sells.length,qty:matchedQty,capital,buyPrice:+avgBuy.toFixed(2),sellPrice:+avgSell.toFixed(2),_brok,_stt,_txn,_sebi,_gst,_stamp,_dp,charges,winRate:netPnl>0?100:0,netPnl,netPnlPct,_sort:netPnl}));
+    rows.push(enrichExitPnlRow({sym,lots:sells.length,qty:matchedQty,capital,buyPrice:+avgBuy.toFixed(2),sellPrice:+avgSell.toFixed(2),_brok,_stt,_txn,_sebi,_gst,_stamp,_dp,charges,winRate:netPnl>0?100:0,netPnl,netPnlPct,_sort:netPnl},session.date));
   });
   const total=rows.reduce((s,r)=>s+(r.netPnl||0),0);
   const unknownRows=rows.filter(r=>r.netPnl==null).length;
@@ -3645,14 +3745,14 @@ function getLatestBookedSummary(){
     const tbDate=TRADEBOOK_STATS.lastDate||'';
     if(tbDate>ordDate){
       // Tradebook has a newer session (e.g. GTT triggered day after Orders.csv)
-      const rows=TRADEBOOK_STATS.lastDayRows.map(r=>enrichExitPnlRow({...r,_sort:r.netPnl}));
+      const rows=TRADEBOOK_STATS.lastDayRows.map(r=>enrichExitPnlRow({...r,_sort:r.netPnl},tbDate));
       return {source:'Tradebook',date:tbDate,total:+rows.reduce((s,r)=>s+r.netPnl,0).toFixed(0),rows,unknownRows:0};
     }
     return orderBooked;
   }
   if(orderBooked) return orderBooked;
   if(tbLoaded){
-    const rows=TRADEBOOK_STATS.lastDayRows.map(r=>enrichExitPnlRow({...r,_sort:r.netPnl}));
+    const rows=TRADEBOOK_STATS.lastDayRows.map(r=>enrichExitPnlRow({...r,_sort:r.netPnl},TRADEBOOK_STATS.lastDate||null));
     return {source:'Tradebook',date:TRADEBOOK_STATS.lastDate||'',total:+rows.reduce((s,r)=>s+r.netPnl,0).toFixed(0),rows,unknownRows:0};
   }
   return null;
@@ -4228,7 +4328,12 @@ function renderStats(){
     const pnlSummary=summarizeExitPnlRows(booked.rows||[]);
     const grossStr=pnlSummary.known.length?`gross ${fmtSignedINR(pnlSummary.gross)}`:'gross —';
     const costStr=pnlSummary.known.length?`cost ${fmtNegINR(pnlSummary.charges)}`:'cost —';
-    const reverseStr=pnlSummary.reverseCount?`reverse ${fmtSignedINR(pnlSummary.reverse)}`:'reverse —';
+    // v1094: the Booked card's sub-line followed the same metric as the table column, so it moves
+    // with it — leaving a retired "reverse" figure here while the column showed something else
+    // would have put two different answers to the same question on one screen.
+    const reverseStr=pnlSummary.leftCount
+      ?`left on table ${fmtINR(pnlSummary.leftRs)}${pnlSummary.leftPct!=null?` (${pnlSummary.leftPct.toFixed(2)}%)`:''}`
+      :'left on table —';
     const unknownWarning=booked.unknownRows>0?` · <span style="color:var(--amber)">&#9888; excludes ${booked.unknownRows} row${booked.unknownRows===1?'':'s'} with unknown cost</span>`:'';
     bookedCard=`
       <div class="st"><div class="st-l">${bookedLabel}</div><div class="st-v" style="color:${booked.total>=0?'var(--green)':'var(--red)'}">${fmtSignedINR(booked.total)}</div><div class="st-d">${dateLabel} · ${srcLabel} · ${grossStr} · ${costStr} · ${reverseStr}${unknownWarning}${repsTotal}</div></div>`;
@@ -4832,6 +4937,24 @@ function buildLatestSessionPanel(query=''){
     {key:'_score',label:'Radar Score',align:'right',bold:true,fmt:v=>radarScoreCell(v),clrFn:()=>'var(--t1)',...dash},
     {key:'_rank',label:'Rank',align:'right',fmt:v=>v??'—',clrFn:()=>'var(--t2)',...dash},
   ];
+  // v1094: Left on Table replaces Reverse ₹ — see enrichExitPnlRow. The colour scale is DELIBERATELY
+  // inverted against every other money column in this table: a large number here is a bad outcome
+  // (the exit gave up a lot), and zero is the perfect exit, so red is up and green is nil.
+  const leftClr=v=>v==null?'var(--t3)':v>0?'var(--red)':v===0?'var(--green)':'var(--amber)';
+  const _leftTot={totFmt:v=>v!=null?fmtINR(v):'—',totClrFn:leftClr};
+  const _leftPctTot={totFmt:v=>v!=null?v.toFixed(2)+'%':'—',totClrFn:leftClr};
+  const _leftCols=(rsTot,pctTot)=>[
+    {key:'leftOnTableRs',label:'Left on Table ₹',align:'right',bold:true,
+     fmt:(v,r)=>v!=null
+       ?`<span title="${escHtml(r.leftOnTableNote||'')}">${fmtINR(v)}</span>`
+       :`<span style="color:var(--t3)" title="${escHtml(r.leftOnTableNote||'')}">—</span>`,
+     clrFn:leftClr,...rsTot},
+    {key:'leftOnTablePct',label:'Left on Table %',align:'right',
+     fmt:(v,r)=>v!=null
+       ?`<span title="${escHtml(r.leftOnTableNote||'')}">${v.toFixed(2)}%</span>`
+       :`<span style="color:var(--t3)">—</span>`,
+     clrFn:leftClr,...pctTot},
+  ];
   const card=inner=>`<div id="rank-latest-session-card" style="background:var(--bg-card);border:1px solid var(--border);border-radius:10px;overflow:hidden">${inner}</div>`;
   const summary=getLatestBookedSummary();
   PERF_LATEST_SUMMARY=summary; // cache for the renderStats card — single source of truth
@@ -4859,7 +4982,7 @@ function buildLatestSessionPanel(query=''){
       {key:'sellPrice',label:'Sell ₹',align:'right',fmt:v=>Number(v).toLocaleString('en-IN',INR_2),clrFn:()=>'var(--t2)',..._dash},
       {key:'priceDiff',label:'Diff ₹',align:'right',fmt:v=>v!=null?fmtSignedINR(v).replace('₹','₹/sh '):'—',clrFn:v=>v!=null?clr(v):'var(--t3)',..._dash},
       {key:'currentPrice',label:'Now ₹',align:'right',fmt:v=>v!=null?Number(v).toLocaleString('en-IN',INR_2):'—',clrFn:()=>'var(--t2)',..._dash},
-      {key:'reversePnl',label:'Reverse ₹',align:'right',bold:true,fmt:(v,r)=>v!=null?`<span title="${escHtml(r.reverseStatus||'')}">${fmtPerfRs(v)}</span>`:'—',clrFn:v=>v!=null?clr(v):'var(--t3)',..._signTot},
+      ..._leftCols(_leftTot,_leftPctTot),
       {key:'_brok',label:'Brokerage',align:'right',fmt:_chFmt,clrFn:_chClr,..._chTot},
       {key:'_stt',label:'STT/CTT',align:'right',fmt:_chFmt,clrFn:_chClr,..._chTot},
       {key:'_txn',label:'Txn',align:'right',fmt:_chFmt,clrFn:_chClr,..._chTot},
@@ -4875,7 +4998,8 @@ function buildLatestSessionPanel(query=''){
     const _sum=k=>rows.reduce((s,r)=>s+(r[k]||0),0);
     const latestTotals=(rows.length>1||latestUnknownRows>0)?{
       sym:`Total (${rows.length})${latestUnknownRows?` <span style="color:var(--amber)">&#9888; excludes ${latestUnknownRows} unknown</span>`:''}`,
-      reversePnl:shownSummary.reverseCount?shownSummary.reverse:null,
+      leftOnTableRs:shownSummary.leftCount?shownSummary.leftRs:null,
+      leftOnTablePct:shownSummary.leftCount?shownSummary.leftPct:null,
       _brok:_sum('_brok'),_stt:_sum('_stt'),_txn:_sum('_txn'),_gst:_sum('_gst'),_sebi:_sum('_sebi'),_stamp:_sum('_stamp'),_dp:_sum('_dp'),
       charges:_sum('charges'),
       grossPnl:shownSummary.known.length?shownSummary.gross:null,
@@ -4900,7 +5024,7 @@ function buildLatestSessionPanel(query=''){
     const allRows=summary.rows.map(r=>{
       const capital=r.capital??((r.buyPrice||0)*(r.qty||0));
       const netPnlPct=r.netPnlPct??(capital>0?+(r.netPnl/capital*100).toFixed(2):null);
-      return enrichExitPnlRow({...r,capital,netPnlPct,_sort:r.netPnl});
+      return enrichExitPnlRow({...r,capital,netPnlPct,_sort:r.netPnl},summary.date||null);
     });
     const tbDate=summary.date||'';
     const tbTotal=+(allRows.reduce((s,r)=>s+r.netPnl,0)).toFixed(0);
@@ -4916,7 +5040,7 @@ function buildLatestSessionPanel(query=''){
       {key:'sellPrice',label:'Sell ₹',align:'right',fmt:v=>`<span style="font-family:'DM Mono',monospace">${Number(v).toLocaleString('en-IN',INR_2)}</span>`,..._dash},
       {key:'priceDiff',label:'Diff ₹',align:'right',fmt:v=>v!=null?fmtSignedINR(v).replace('₹','₹/sh '):'—',clrFn:v=>v!=null?clr(v):'var(--t3)',..._dash},
       {key:'currentPrice',label:'Now ₹',align:'right',fmt:v=>v!=null?Number(v).toLocaleString('en-IN',INR_2):'—',clrFn:()=>'var(--t2)',..._dash},
-      {key:'reversePnl',label:'Reverse ₹',align:'right',bold:true,fmt:(v,r)=>v!=null?`<span title="${escHtml(r.reverseStatus||'')}">${fmtPerfRs(v)}</span>`:'—',clrFn:v=>v!=null?clr(v):'var(--t3)',..._signTot},
+      ..._leftCols(_leftTot,_leftPctTot),
       {key:'charges',label:'Charges ₹',align:'right',bold:true,fmt:fmtNegINR,clrFn:()=>'var(--red)',totFmt:v=>fmtNegINR(v),totClrFn:()=>'var(--red)'},
       {key:'grossPnl',label:'Gross P&L',align:'right',bold:true,fmt:v=>v!=null?fmtPerfRs(v):'—',clrFn:v=>v!=null?clr(v):'var(--t3)',..._signTot},
       {key:'netPnl',label:'Net P&L',align:'right',bold:true,fmt:fmtPerfRs,clrFn:clr,..._signTot},
@@ -4924,7 +5048,8 @@ function buildLatestSessionPanel(query=''){
     ];
     const tbTotals=rows.length>1?{
       sym:`Total (${rows.length})`,
-      reversePnl:tbSummary.reverseCount?tbSummary.reverse:null,
+      leftOnTableRs:tbSummary.leftCount?tbSummary.leftRs:null,
+      leftOnTablePct:tbSummary.leftCount?tbSummary.leftPct:null,
       charges:rows.reduce((s,r)=>s+(r.charges||0),0),
       grossPnl:tbSummary.known.length?tbSummary.gross:null,
       netPnl:shownTotal,
