@@ -1,5 +1,5 @@
-const BUILD_TS='2026-08-05 16:02 IST'; // release build time (IST)
-const APP_VERSION=1097; // v1097: the goal-required base target now carries a per-stock nudge - the money left on the table, measured across sessions and distributed by Radar score - while every eligibility test stays pinned to the base rate; and the dead `Upcoming earnings date` column finally drives a reported pre-results quiet-drift flag.
+const BUILD_TS='2026-08-05 16:44 IST'; // release build time (IST)
+const APP_VERSION=1098; // v1098: the drift into a results date is measured from dated official closes over 3 sessions instead of being subtracted out of a 1-week column - percentage changes compound, and the old subtraction overstated the drift by up to 0.69pp on exactly the biggest movers.
 // v1093: a baseline reward:risk MEASURED on the cross-section (last completed bhav session) instead of learned from the owner's own fills - reported on every row, deliberately not enforced. Includes v1092: position size split by Radar score / stop distance, so equally-scored names carry equal RUPEE risk, plus an opt-in Risk /trade cap.
 // v556: parse the NSE Market Activity Report (MA<date>.csv) — official Nifty %, advances/declines and sector index moves shown as market CONTEXT in the status bar (EOD data, display only, never fed into per-row scoring); MA added to the ℹ️ file manifest.
 // v555 market-cycle stage awareness (stateless, self-calibrating): per-row stage label (1 accumulation · 2 breakout · 3 event · 4 profit-booking · 5 re-accumulation · 6 second-leg); a quiet-accumulation signal (conjunction-of-percentiles) injected via the rocket-diagnostic weighting; sell-the-news decay off Recent earnings date (horizon = review days). v1065 makes the market-breadth gauge an entry-eligibility input while still never changing ranking.
@@ -117,7 +117,7 @@ const SHARED_FILTER_STORE='rs_filters_shared';
 const TRADE_INPUTS_STORE='rs_trade_inputs_v1';
 let _lastTradeInputSig=''; // gate brain writes to genuine trade-input changes, not every keystroke
 const ALL_STORE='rs_data';
-const ALL_STORE_SCHEMA='radar_composite_v9'; // v1097 caches the pre-results drift signal.
+const ALL_STORE_SCHEMA='radar_composite_v10'; // v1098 caches the true multi-session drift.
 const HOLD_STORE='rs_holdings';
 const ORDERS_STORE='rs_orders';
 const POS_STORE='rs_positions';
@@ -137,6 +137,12 @@ const RECOMMEND_MIN_PROGRESS_FRACTION=0.25;
 const LEFT_ON_TABLE_STORE='rs_left_on_table_v1';
 const LEFT_ON_TABLE_KEEP_SESSIONS=30;   // how much history is retained
 const LEFT_ON_TABLE_POOL_SESSIONS=10;   // how much of it the pool actually reads
+// v1098: dated official closes, so a multi-session drift can be measured properly. The app has never
+// retained any price history — NSE_BHAV is rebuilt from the current zip on every load — which is why
+// v1097 had to approximate "the drift into the results" from a 1-week column.
+const PRICE_HISTORY_STORE='rs_price_history_v1';
+const PRICE_HISTORY_KEEP_SESSIONS=8;    // enough for a 3-session drift plus slack for missed uploads
+const PRE_RESULTS_DRIFT_SESSIONS=3;     // the owner's 2-3 day window, measured to the last close before today
 const ENTRY_OUTCOME_STORE='rs_entry_outcomes_delta_v1';
 const OUTCOME_HORIZON_FALLBACK_DAYS=5;
 const OUTCOME_HORIZON_MAX_DAYS=20;
@@ -1393,6 +1399,66 @@ function parseBhavdata(text){
       open:num(r['OPEN_PRICE']),high:num(r['HIGH_PRICE']),low:num(r['LOW_PRICE']),
       prevClose:num(r['PREV_CLOSE']),dateStr:(r['DATE1']||'').trim()};
   });
+}
+// ── v1098 dated price history ────────────────────────────────────────────────
+// GAP-ROBUST BY CONSTRUCTION, because this is the same class of multi-day state whose corruption was
+// the v1 failure. Closes are stored under their OWN session date from the bhav copy's DATE1 — never
+// under "today" and never carried forward — and every read demands the exact dates it needs and
+// returns null otherwise. A missed upload therefore yields NO SIGNAL, never a wrong one.
+function nseDateToISO(s){
+  const m=String(s||'').trim().match(/^(\d{1,2})-([A-Za-z]{3})-(\d{4})$/);
+  if(!m) return null;
+  const mo=PR_MONTHS[m[2].toLowerCase()];
+  return mo?`${m[3]}-${mo}-${m[1].padStart(2,'0')}`:null;
+}
+function recordPriceHistoryFromBhav(){
+  const byDate={};
+  for(const sym of Object.keys(NSE_BHAV||{})){
+    const b=NSE_BHAV[sym];
+    const iso=nseDateToISO(b?.dateStr);
+    if(!iso||!(Number(b?.officialClose)>0)) continue;
+    (byDate[iso]=byDate[iso]||{})[sym]=+Number(b.officialClose).toFixed(2);
+  }
+  const dates=Object.keys(byDate);
+  if(!dates.length) return null;
+  const raw=FS.get(PRICE_HISTORY_STORE);
+  const store=(raw&&typeof raw==='object'&&raw.sessions)?raw:{version:1,sessions:{}};
+  const sessions={...store.sessions};
+  let changed=false;
+  for(const d of dates){
+    // Re-uploading a session overwrites that date rather than accumulating — idempotent by date key.
+    if(JSON.stringify(sessions[d]||null)!==JSON.stringify(byDate[d])){ sessions[d]=byDate[d]; changed=true; }
+  }
+  const keep=Object.keys(sessions).sort().slice(-PRICE_HISTORY_KEEP_SESSIONS);
+  for(const d of Object.keys(sessions)) if(!keep.includes(d)){ delete sessions[d]; changed=true; }
+  if(!changed) return store;
+  const out={version:1,sessions};
+  FS.set(PRICE_HISTORY_STORE,out);
+  return out;
+}
+// The move over the N sessions ENDING AT THE LAST CLOSE BEFORE `beforeDate` — i.e. the drift INTO
+// today, with today's own reaction excluded outright rather than subtracted back out.
+//
+// v1097 approximated this as (week% - day%). That was wrong twice: percentage changes COMPOUND so the
+// subtraction overstated the drift by up to 0.69pp, and the error scaled with today's move, meaning it
+// inflated precisely the big movers whose drift the threshold is measured from; and TradingView's
+// "1 week" is ~5 sessions, so a stock that jumped once five days ago and then went flat was
+// indistinguishable from one that rose steadily for three. Both are fixed here.
+function buildDriftIntoEventMap(beforeDate,sessions=PRE_RESULTS_DRIFT_SESSIONS){
+  const raw=FS.get(PRICE_HISTORY_STORE);
+  const store=(raw&&typeof raw==='object'&&raw.sessions)?raw.sessions:null;
+  if(!store) return {map:{},sessionsUsed:0,from:null,to:null};
+  const dates=Object.keys(store).sort().filter(d=>!beforeDate||d<beforeDate);
+  if(dates.length<sessions+1) return {map:{},sessionsUsed:0,from:null,to:null};
+  const to=dates[dates.length-1], from=dates[dates.length-1-sessions];
+  const a=store[from]||{}, b=store[to]||{};
+  const map={};
+  for(const sym of Object.keys(b)){
+    const p0=a[sym], p1=b[sym];
+    if(!(p0>0)||!(p1>0)) continue;          // a symbol missing either end gets no drift, not a zero
+    map[sym]=+((p1/p0-1)*100).toFixed(2);
+  }
+  return {map,sessionsUsed:sessions,from,to};
 }
 function parsePriceBand(text){
   parseCSV(text).forEach(r=>{
@@ -2891,6 +2957,9 @@ function radarAnalyze(headers,rawRows,supplements={},heldSymbols=new Set()){
   // so the label stays reproducible instead of silently drifting from the displayed target.
   let _radarSessionTargetPct=null;
   try{const t=Number(getEffectiveTgtPct());if(t>0)_radarSessionTargetPct=t;}catch(e){}
+  // v1098: resolved ONCE per scoring pass, not per row — it is a store read plus a full-universe walk.
+  let _driftInfo={map:{},sessionsUsed:0,from:null,to:null};
+  try{ _driftInfo=buildDriftIntoEventMap(sessionDate,PRE_RESULTS_DRIFT_SESSIONS); }catch(e){}
   const rocketRows=rawRows.map((raw,i)=>{
     const o=openI>=0?radarNum(raw[openI]):null;
     const hi=highI>=0?radarNum(raw[highI]):null;
@@ -3152,17 +3221,33 @@ function radarAnalyze(headers,rawRows,supplements={},heldSymbols=new Set()){
     const _weekChg=weekChgI>=0?radarNum(raw[weekChgI]):null;
     // `day` and `participationReady` are declared LATER in this loop, so both are recomputed here from
     // the same columns rather than referenced early. The ignition test is the model's existing
-    // definition (RelVol >= 1.2 OR RelVol-at-time >= 1.5 OR volume change >= 30%), not a new one.
+    // definition (RelVol >= 1.2 OR RelVol-at-time >= 1.5 OR volume change >= 30%), not a one-off.
     const _dayPct=radarNum(raw[targetI])||0;
     const _partReady=(relI>=0&&radarNum(raw[relI])>=1.2)
       ||(relAtI>=0&&radarNum(raw[relAtI])>=1.5)
       ||(volChgI>=0&&radarNum(raw[volChgI])>=30);
-    const _quietRise=_weekChg!=null&&_weekChg>0&&_dayPct>0&&!_partReady;
+    // v1098: the drift INTO today, measured properly. Preferred source is the dated price history
+    // (a true 3-session close-to-close move with today excluded outright). The week column is the
+    // fallback while the history fills, and it is now COMPOUNDED rather than subtracted —
+    // (1+wk)/(1+day)-1, not wk-day. The subtraction overstated the drift by up to 0.69pp on the
+    // 2026-08-05 movers, and the error grew with today's move, so it inflated exactly the big
+    // reactions whose drift any magnitude threshold would be calibrated from. `driftSource` is
+    // recorded on the row because a threshold must never be fitted across two different measures.
+    const _sym=normSym(raw[symbolI]);
+    let _drift=(_driftInfo.map&&_sym in _driftInfo.map)?_driftInfo.map[_sym]:null;
+    let _driftSource=_drift!=null?`${_driftInfo.sessionsUsed}-session close-to-close (${_driftInfo.from} to ${_driftInfo.to})`:null;
+    if(_drift==null&&_weekChg!=null&&Number.isFinite(_dayPct)&&(1+_dayPct/100)!==0){
+      _drift=+(((1+_weekChg/100)/(1+_dayPct/100)-1)*100).toFixed(2);
+      _driftSource='1-week column, compounded (approximate — ~5 sessions, not 3)';
+    }
+    const _quietRise=_drift!=null&&_drift>0&&_dayPct>0&&!_partReady;
     const _preResults={
       resultsDate:_resDate,
       resultsSource:_bmDate?'NSE board meeting':(_resDate?'TradingView upcoming earnings':null),
       daysToResults:_daysToRes,
       weekChangePct:_weekChg,
+      driftPct:_drift,
+      driftSource:_driftSource,
       quietRise:_quietRise,
       // The owner's window is 2-3 days out; 1 day is included because a T-1 print is the same setup one
       // session later, and it is the exact case R10 was opened on.
@@ -7288,7 +7373,7 @@ function renderTable(){
       chk:`<td style="text-align:center"><input type="checkbox" ${isSelected?'checked':''} ${canBuy?'':'disabled'} style="width:14px;height:14px;accent-color:var(--amber);cursor:${canBuy?'pointer':'not-allowed'}" onclick="event.stopPropagation()" onchange="toggleStock('${s.symbol}',this.checked)" title="${canBuy?'Include in the Zerodha basket export':'Ineligible for the basket'}"></td>`,
       rank:`<td style="font-family:'DM Mono',monospace;font-weight:800;color:var(--t1);text-align:right">${s.rank??'—'}</td>`,
       score:`<td>${radarScoreCell(s.score,'Relative same-day composite score (0-100 percentile, top-weighted). It is a ranking, not a probability.')}</td>`,
-      symbol:`<td style="font-family:'Plus Jakarta Sans',sans-serif"><button type="button" onclick='event.stopPropagation();openTradingViewChart(${JSON.stringify(String(s.symbol))})' style="padding:0;border:0;background:transparent;color:inherit;text-align:left;cursor:pointer" title="Open TradingView chart"><div style="font-weight:700;font-size:13px;color:var(--t1)">${escHtml(s.symbol)}${(()=>{const flags=s.meta?.flags||[];if(!flags.length)return '';return `<span style="font-size:8px;background:rgba(239,68,68,.15);color:var(--red);border-radius:4px;padding:1px 5px;margin-left:5px;font-weight:700;vertical-align:middle" title="NSE surveillance flags: ${escHtml(flags.join(' · '))}">⚠ ${flags.length}</span>`;})()}${s._held?`<span style="font-size:8px;background:rgba(244,114,182,.15);color:#f472b6;border-radius:4px;padding:1px 5px;margin-left:5px;font-weight:700;vertical-align:middle" title="You already hold this. Held stocks stay in the ranking (v1070) and can be recommended again — buying here ADDS to the existing position.">📌 held</span>`:''}${s.entryReady===false?`<span style="font-size:8px;background:rgba(245,158,11,.15);color:var(--amber);border-radius:4px;padding:1px 5px;margin-left:5px;font-weight:700;vertical-align:middle" title="${escHtml('Extended: '+(s.entryTiming?.reason||'upper-range entry')+'. Shown for context only — since v1075 this no longer withholds the stock. A forward test (28-Jul close to 29-Jul, n=1618) found extension predicted CONTINUATION: the 100-150% range-used bucket returned +1.40% next day against +0.75% for unblocked stocks.')}">⚡ extended</span>`:''}${s.preResults?.drift?`<span style="font-size:8px;background:rgba(34,197,94,.15);color:var(--green);border-radius:4px;padding:1px 5px;margin-left:5px;font-weight:700;vertical-align:middle" title="${escHtml(`Results in ${s.preResults.daysToResults} trading session(s) (${s.preResults.resultsDate}, source: ${s.preResults.resultsSource}) and the stock is drifting up quietly — ${s.preResults.weekChangePct>0?'+':''}${Number(s.preResults.weekChangePct).toFixed(1)}% on the week, up today, with no volume ignition. Owner observation, 2026-08-05. REPORTED ONLY: this sets no score term. It is the bullish direction of RULES.md R10, which stands at one observation in the opposite direction, and it needs 3 confirms across 2 sessions to graduate.`)}">📅 pre-results</span>`:''}</div><div style="font-size:9px;color:var(--t3);max-width:220px;overflow:hidden;text-overflow:ellipsis">${escHtml(s.name||'')}</div></button></td>`,
+      symbol:`<td style="font-family:'Plus Jakarta Sans',sans-serif"><button type="button" onclick='event.stopPropagation();openTradingViewChart(${JSON.stringify(String(s.symbol))})' style="padding:0;border:0;background:transparent;color:inherit;text-align:left;cursor:pointer" title="Open TradingView chart"><div style="font-weight:700;font-size:13px;color:var(--t1)">${escHtml(s.symbol)}${(()=>{const flags=s.meta?.flags||[];if(!flags.length)return '';return `<span style="font-size:8px;background:rgba(239,68,68,.15);color:var(--red);border-radius:4px;padding:1px 5px;margin-left:5px;font-weight:700;vertical-align:middle" title="NSE surveillance flags: ${escHtml(flags.join(' · '))}">⚠ ${flags.length}</span>`;})()}${s._held?`<span style="font-size:8px;background:rgba(244,114,182,.15);color:#f472b6;border-radius:4px;padding:1px 5px;margin-left:5px;font-weight:700;vertical-align:middle" title="You already hold this. Held stocks stay in the ranking (v1070) and can be recommended again — buying here ADDS to the existing position.">📌 held</span>`:''}${s.entryReady===false?`<span style="font-size:8px;background:rgba(245,158,11,.15);color:var(--amber);border-radius:4px;padding:1px 5px;margin-left:5px;font-weight:700;vertical-align:middle" title="${escHtml('Extended: '+(s.entryTiming?.reason||'upper-range entry')+'. Shown for context only — since v1075 this no longer withholds the stock. A forward test (28-Jul close to 29-Jul, n=1618) found extension predicted CONTINUATION: the 100-150% range-used bucket returned +1.40% next day against +0.75% for unblocked stocks.')}">⚡ extended</span>`:''}${s.preResults?.drift?`<span style="font-size:8px;background:rgba(34,197,94,.15);color:var(--green);border-radius:4px;padding:1px 5px;margin-left:5px;font-weight:700;vertical-align:middle" title="${escHtml(`Results in ${s.preResults.daysToResults} trading session(s) (${s.preResults.resultsDate}, source: ${s.preResults.resultsSource}) and the stock drifted up quietly into it — ${s.preResults.driftPct>0?'+':''}${Number(s.preResults.driftPct).toFixed(2)}% over the ${s.preResults.driftSource||'prior sessions'}, up today, with no volume ignition. Measured 2026-08-05 (RULES.md R15): of stocks reporting within 2 days, those drifting UP hit +5% at 12.3% against a 4.9% market rate, while 0 of 30 drifting DOWN did. REPORTED ONLY — this sets no score term until R15 clears 3 confirms across 2 sessions. NB magnitude is not yet thresholded: PROTEAN and KSB both drifted marginally up and still fell ~8%.`)}">📅 pre-results</span>`:''}</div><div style="font-size:9px;color:var(--t3);max-width:220px;overflow:hidden;text-overflow:ellipsis">${escHtml(s.name||'')}</div></button></td>`,
       setup:`<td style="font-size:11px;color:var(--t2)">${escHtml(s.setup||'—')}${s.stage?' '+radarStagePill(s):''}</td>`,
       series:`<td>${radarSeriesBandPill(s)}</td>`,
       stretch:`<td style="color:${stretchColor};font-weight:700" title="A 10% move is this many multiples of the strongest daily-range estimate. Lower is more feasible.">${s.stretch!=null&&isFinite(s.stretch)?Number(s.stretch).toFixed(1)+'×':'—'}</td>`,
@@ -8925,6 +9010,7 @@ function compactRankingRows(rows){
     entryReady:s.entryReady!==false,entryTiming:s.entryTiming||null,
     preResults:s.preResults?{resultsDate:s.preResults.resultsDate,resultsSource:s.preResults.resultsSource,
       daysToResults:s.preResults.daysToResults,weekChangePct:s.preResults.weekChangePct,
+      driftPct:s.preResults.driftPct??null,driftSource:s.preResults.driftSource??null,
       quietRise:!!s.preResults.quietRise,inWindow:!!s.preResults.inWindow,drift:!!s.preResults.drift}:null,
     rocketReady:!!s.rocketReady,gateReasons:(s.gateReasons||[]).slice(0,9),_held:!!s._held,
     meta:{delivery:s.meta?.delivery??null,trades:s.meta?.trades??null,flags:(s.meta?.flags||[]).slice(0,12),band:s.meta?.band??null}
@@ -9098,6 +9184,9 @@ async function processFiles(files,sourceLabel,opts={}){
       }
       await processZipEntries(outerZip);
       updateFileLoadStatus('Reports-Daily-Multiple.zip','loaded');
+      // v1098: fold this session's official closes into the dated price history BEFORE the scanner
+      // file is scored, so the drift map the scorer reads already includes today's bhav.
+      try{ recordPriceHistoryFromBhav(); }catch(e){ console.error('price history:',e); }
     }catch(e){console.error('ZIP error:',e);}
   }
 
