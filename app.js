@@ -1,5 +1,5 @@
-const BUILD_TS='2026-08-03 17:20 IST'; // release build time (IST)
-const APP_VERSION=1096; // v1096: executed buys get the same attribution rule as recommendation picks - the day extremes AS AT THE BUY are recorded from the orders.csv fill timestamp, so a low that printed before the fill is no longer charged to the trade as adverse excursion, and a pre-buy high no longer seeds the trailing stop.
+const BUILD_TS='2026-08-05 16:02 IST'; // release build time (IST)
+const APP_VERSION=1097; // v1097: the goal-required base target now carries a per-stock nudge - the money left on the table, measured across sessions and distributed by Radar score - while every eligibility test stays pinned to the base rate; and the dead `Upcoming earnings date` column finally drives a reported pre-results quiet-drift flag.
 // v1093: a baseline reward:risk MEASURED on the cross-section (last completed bhav session) instead of learned from the owner's own fills - reported on every row, deliberately not enforced. Includes v1092: position size split by Radar score / stop distance, so equally-scored names carry equal RUPEE risk, plus an opt-in Risk /trade cap.
 // v556: parse the NSE Market Activity Report (MA<date>.csv) — official Nifty %, advances/declines and sector index moves shown as market CONTEXT in the status bar (EOD data, display only, never fed into per-row scoring); MA added to the ℹ️ file manifest.
 // v555 market-cycle stage awareness (stateless, self-calibrating): per-row stage label (1 accumulation · 2 breakout · 3 event · 4 profit-booking · 5 re-accumulation · 6 second-leg); a quiet-accumulation signal (conjunction-of-percentiles) injected via the rocket-diagnostic weighting; sell-the-news decay off Recent earnings date (horizon = review days). v1065 makes the market-breadth gauge an entry-eligibility input while still never changing ranking.
@@ -117,7 +117,7 @@ const SHARED_FILTER_STORE='rs_filters_shared';
 const TRADE_INPUTS_STORE='rs_trade_inputs_v1';
 let _lastTradeInputSig=''; // gate brain writes to genuine trade-input changes, not every keystroke
 const ALL_STORE='rs_data';
-const ALL_STORE_SCHEMA='radar_composite_v8'; // v1088 caches marketCap for the live Nifty proxy.
+const ALL_STORE_SCHEMA='radar_composite_v9'; // v1097 caches the pre-results drift signal.
 const HOLD_STORE='rs_holdings';
 const ORDERS_STORE='rs_orders';
 const POS_STORE='rs_positions';
@@ -130,6 +130,13 @@ const SURV_CORR_STORE='rs_surv_corr';
 const SAME_DAY_EXIT_OPPORTUNITY_STORE='rs_same_day_exit_opportunity_v3';
 const RECOMMEND_OUTCOME_STORE='rs_recommend_outcomes_delta_v1';
 const RECOMMEND_MIN_PROGRESS_FRACTION=0.25;
+// v1097 (owner): the daily record of money left on the table. Latest Session computes the figure for
+// ONE session only; the target nudge needs it across sessions, so each session's proceeds-weighted
+// figure is persisted here as it is rendered. Bounded window — the pool must track the current
+// regime, not average away a month of it.
+const LEFT_ON_TABLE_STORE='rs_left_on_table_v1';
+const LEFT_ON_TABLE_KEEP_SESSIONS=30;   // how much history is retained
+const LEFT_ON_TABLE_POOL_SESSIONS=10;   // how much of it the pool actually reads
 const ENTRY_OUTCOME_STORE='rs_entry_outcomes_delta_v1';
 const OUTCOME_HORIZON_FALLBACK_DAYS=5;
 const OUTCOME_HORIZON_MAX_DAYS=20;
@@ -2835,6 +2842,7 @@ function radarAnalyze(headers,rawRows,supplements={},heldSymbols=new Set()){
   const dayVolI=radarIdx(headers,'Volume, 1 day'),avgVol60I=radarIdx(headers,'Average volume, 60 days');
   // v555 market-cycle inputs: earnings dates (stateless days-since/days-to), 50-day MA (holding-above check).
   const recentEarnI=radarIdx(headers,'Recent earnings date'),upcomingEarnI=radarIdx(headers,'Upcoming earnings date'),sma50I=radarIdx(headers,'Simple moving average, 50, 1 day');
+  const weekChgI=radarIdx(headers,'Price change %, 1 week'); // v1097 pre-results drift
   const sessionDate=getSessionDate(),reviewDays=getEffectiveReviewDays(); // reviewDays null ⇒ post-event stages/decay don't fire (graceful, no constant)
   // R5 (v552, WS3): neutralise mechanical ex-date moves so they neither score the row nor
   // pollute the day-move percentiles. For a structural corp action (demerger/split/bonus/rights)
@@ -3111,6 +3119,56 @@ function radarAnalyze(headers,rawRows,supplements={},heldSymbols=new Set()){
       parts.momentum+=sig*w;weights.momentum+=w;
       contrib.push({name:'Accumulation (quiet strength)',group:'momentum',p,sig,impact:sig*w});
     }
+    // ── v1097 PRE-RESULTS QUIET DRIFT (owner, 2026-08-05) ────────────────────────────────────
+    // Owner's observation: "a stock which starts rising slowly 2-3 days before its results are almost
+    // sure to rocket on or after the results date."
+    //
+    // This is the BULLISH direction of R10 (RULES.md), which was logged from E32 — SKMEGGPROD falling
+    // -15.2% the day before its board meeting — and whose own status note says it "must be checked in
+    // BOTH directions: a pre-results drift UP would falsify the 'de-risking' reading." So the two are
+    // the same pending question with opposite signs, and this flag is what lets the app finally see
+    // either one. R10 also recorded the code gap being closed here: `upcomingEarnI` was extracted and
+    // NEVER READ — a dead variable since v555, with the column exported and doing nothing.
+    //
+    // DATE SOURCE, in R10's stated order of reliability: the NSE board-meeting feed FIRST (it carried
+    // the 29-Jul date for SKMEGGPROD, whose TradingView earnings cell was empty), TradingView's
+    // `Upcoming earnings date` as the fallback. Populated on 1,037 of 2,967 rows on 2026-08-05, so
+    // neither source alone is enough and a missing date must mean "no signal", never "no event".
+    //
+    // "RISING SLOWLY" is the discriminator and it is deliberately the QUIET shape, not the loud one:
+    // up over the week AND up today, but WITHOUT the ignition that the v1068 track already rewards.
+    // A stock that has already exploded into its print is not what the owner described, and it is what
+    // R4d says gets sold afterwards. There is no new constant here — the participation test reuses
+    // `participationReady`, which is the model's existing definition of ignition.
+    //
+    // REPORTED, NOT SCORED. RULES.md's own graduation bar (>=3 confirms across >=2 sessions) is not met
+    // — R10 stands at ONE observation, in the opposite direction — so this sets no score term. It is a
+    // visible flag that starts accumulating the evidence from this session on.
+    const _upEarn=upcomingEarnI>=0?String(raw[upcomingEarnI]||'').trim():'';
+    const _bmDate=(_m.boardMeeting&&_m.boardMeeting.isResults)?_m.boardMeeting.date:null;
+    const _resDate=/^\d{4}-\d{2}-\d{2}$/.test(_bmDate||'')?_bmDate
+      :(/^\d{4}-\d{2}-\d{2}$/.test(_upEarn)?_upEarn:null);
+    const _daysToRes=_resDate?tradingDaysBetween(sessionDate,_resDate):null;
+    const _weekChg=weekChgI>=0?radarNum(raw[weekChgI]):null;
+    // `day` and `participationReady` are declared LATER in this loop, so both are recomputed here from
+    // the same columns rather than referenced early. The ignition test is the model's existing
+    // definition (RelVol >= 1.2 OR RelVol-at-time >= 1.5 OR volume change >= 30%), not a new one.
+    const _dayPct=radarNum(raw[targetI])||0;
+    const _partReady=(relI>=0&&radarNum(raw[relI])>=1.2)
+      ||(relAtI>=0&&radarNum(raw[relAtI])>=1.5)
+      ||(volChgI>=0&&radarNum(raw[volChgI])>=30);
+    const _quietRise=_weekChg!=null&&_weekChg>0&&_dayPct>0&&!_partReady;
+    const _preResults={
+      resultsDate:_resDate,
+      resultsSource:_bmDate?'NSE board meeting':(_resDate?'TradingView upcoming earnings':null),
+      daysToResults:_daysToRes,
+      weekChangePct:_weekChg,
+      quietRise:_quietRise,
+      // The owner's window is 2-3 days out; 1 day is included because a T-1 print is the same setup one
+      // session later, and it is the exact case R10 was opened on.
+      inWindow:_daysToRes!=null&&_daysToRes>=1&&_daysToRes<=3,
+      drift:!!(_quietRise&&_daysToRes!=null&&_daysToRes>=1&&_daysToRes<=3)
+    };
     // WS-A stage (percentile bands + event/earnings flags). Stages 4/5/6 need reviewDays + earnings date.
     const _P=stagePct[ri],_chgOpen=chgOpenArr[ri],_sma50=sma50I>=0?radarNum(raw[sma50I]):null,_priceMA=radarNum(raw[priceI]),_aboveMA=_sma50!=null&&_priceMA!=null&&_priceMA>_sma50;
     let _stage=null;
@@ -3212,7 +3270,7 @@ function radarAnalyze(headers,rawRows,supplements={},heldSymbols=new Set()){
       price5m:price5I>=0?radarNum(raw[price5I]):null,
       corpAction:meta._corpNeutralised?(meta.corpToday?.purpose||'corporate action'):null,
       stage:_stage,stageLabel:_stage?STAGE_LABEL[_stage]:null,legTrendPct:_P.tPct,legHighPct:_P.bPct,
-      inDigestion:_inDigestion,daysSinceEarnings:_daysSince,
+      inDigestion:_inDigestion,daysSinceEarnings:_daysSince,preResults:_preResults,
       rocketReady,gateReasons,series,band:band??null,status,eqEligible,basketEligible,meta,
       igniteReady:igniteArr[ri]!==null,
       igniteStrength:igniteArr[ri]===null?null:+igniteArr[ri].toFixed(4),
@@ -3267,6 +3325,14 @@ function radarAnalyze(headers,rawRows,supplements={},heldSymbols=new Set()){
     // the non-causal cross-stock coupling v1066 removed and v1080 explicitly refused. They remain
     // post-filters. The target anchor IS admitted because it is one scalar applied identically to
     // every row: it cannot reorder stocks relative to each other, it only sets the bar they clear.
+    //
+    // v1097 INVARIANT — DO NOT REPLACE THIS WITH getRowExitPolicy().targetPct. Since v1097 the exit
+    // target carries a per-stock nudge derived from the row's own SCORE. Feeding that back in here
+    // would close a loop: score -> nudge -> target -> feasibility -> score, whose result depends on
+    // evaluation order and which penalises exactly the high-scoring stocks it just raised the target
+    // on (measured: top-decile capacity feasibility 1.000 -> 0.938, and the 4th power turns that into
+    // a 23% score haircut). Feasibility uses the SESSION ANCHOR — one scalar, identical for every row,
+    // which is the whole reason v1086 was allowed to admit the target into the score at all.
     const _tgt=Number(_radarSessionTargetPct)>0?Number(_radarSessionTargetPct):null;
     const _buy=r.price>0?r.price*(1+BASKET_MARKET_BUDGET_BUFFER_PCT/100):null;
     let _feas=1;
@@ -3654,7 +3720,64 @@ function summarizeExitPnlRows(rows){
   const leftProceeds=leftRows.reduce((s,r)=>s+(Number(r.sellPrice)||0)*(Number(r.qty)||0),0);
   const leftPct=leftProceeds>0?+((leftRs/leftProceeds)*100).toFixed(2):null;
   return {known,capital,net,gross,charges,pct:capital>0?+(net/capital*100).toFixed(2):null,
-          leftRs,leftPct,leftCount:leftRows.length};
+          leftRs,leftPct,leftCount:leftRows.length,leftProceeds};
+}
+
+// ── v1097 money-left-on-the-table, carried ACROSS sessions ────────────────────
+// Latest Session answers "how much did today's exits leave behind". The target nudge needs that
+// figure over time, so every session that renders a trustworthy number persists it here.
+//
+// WHAT IS AND IS NOT STORED. Only sessions whose left-on-table figure passed enrichExitPnlRow's
+// PROVENANCE GUARD contribute — the guard already withholds the number when the booking session and
+// the scanner session disagree, and a withheld number must not silently become a zero. The write is
+// keyed by session date and idempotent, so re-uploading a session overwrites rather than accumulates.
+// It is always taken from the UNFILTERED row set: the Rankings search box narrows the table, and a
+// search must never be able to move a persisted figure.
+function getLeftOnTableStore(){
+  const raw=FS.get(LEFT_ON_TABLE_STORE);
+  return (raw&&typeof raw==='object'&&raw.sessions&&typeof raw.sessions==='object')?raw:{version:1,sessions:{}};
+}
+function recordLeftOnTableSession(date,summary){
+  if(!date||!summary) return null;
+  // leftCount 0 means the guard withheld every row — that is "unknown", not "nothing left behind".
+  if(!(summary.leftCount>0)||!(summary.leftProceeds>0)||summary.leftPct==null) return null;
+  const store=getLeftOnTableStore();
+  const next={leftPct:+Number(summary.leftPct).toFixed(2),
+              leftRs:Math.round(Number(summary.leftRs)||0),
+              proceeds:Math.round(summary.leftProceeds),
+              rows:summary.leftCount,
+              updatedAt:new Date().toISOString()};
+  const prev=store.sessions[date];
+  if(prev&&prev.leftPct===next.leftPct&&prev.proceeds===next.proceeds&&prev.rows===next.rows) return store;
+  const sessions={...store.sessions,[date]:next};
+  for(const d of Object.keys(sessions).sort().slice(0,Math.max(0,Object.keys(sessions).length-LEFT_ON_TABLE_KEEP_SESSIONS))) delete sessions[d];
+  const out={version:1,sessions};
+  FS.set(LEFT_ON_TABLE_STORE,out);
+  return out;
+}
+// The pool the target nudge distributes. PROCEEDS-WEIGHTED across the most recent sessions so one
+// small position cannot swing it, and FLOORED AT ZERO by owner rule: a negative figure means the
+// exits were already landing above where the stock went afterwards, which calls for no nudge at all
+// rather than for pulling the target back below the goal rate.
+let _leftPoolMemo=null;
+function getLeftOnTablePool(){
+  const store=getLeftOnTableStore();
+  const dates=Object.keys(store.sessions||{}).sort().slice(-LEFT_ON_TABLE_POOL_SESSIONS);
+  const sig=dates.map(d=>d+':'+store.sessions[d].leftPct+':'+store.sessions[d].proceeds).join('|');
+  if(_leftPoolMemo&&_leftPoolMemo.sig===sig) return _leftPoolMemo.val;
+  let num=0,den=0;
+  for(const d of dates){
+    const s=store.sessions[d];
+    if(!(s&&s.proceeds>0&&Number.isFinite(s.leftPct))) continue;
+    num+=s.leftPct*s.proceeds; den+=s.proceeds;
+  }
+  const raw=den>0?num/den:null;
+  const val={poolPct:raw==null?0:Math.max(0,+raw.toFixed(2)),
+             rawPct:raw==null?null:+raw.toFixed(2),
+             sessions:dates.length,proceeds:Math.round(den),
+             source:raw==null?'no recorded sessions yet':(raw<=0?'exits already at or above the post-sell price — no nudge':`${dates.length} session${dates.length===1?'':'s'}, proceeds-weighted`)};
+  _leftPoolMemo={sig,val};
+  return val;
 }
 
 function computeLatestOrderBooked(){
@@ -5038,6 +5161,8 @@ function buildLatestSessionPanel(query=''){
     const latestUnknownWarning=latestUnknownRows>0?` <span style="font-size:10px;color:var(--amber);font-weight:700">&#9888; excludes ${latestUnknownRows} row${latestUnknownRows===1?'':'s'} with unknown cost</span>`:'';
     const rows=withRadar(filterPanelRows(allRows,query,r=>[r.sym]));
     const shownSummary=summarizeExitPnlRows(rows);
+    // v1097: persist from the UNFILTERED set — the search box must never move the stored figure.
+    recordLeftOnTableSession(latestDate,summarizeExitPnlRows(allRows));
     const shownTotal=rows.reduce((s,r)=>s+(r.netPnl||0),0);
     const _chFmt=v=>fmtNegINR(v);const _chClr=()=>'var(--red)';
     // Totals ride the component's totalsRow (keyed by column) so they follow any
@@ -5100,6 +5225,8 @@ function buildLatestSessionPanel(query=''){
     const tbTotal=+(allRows.reduce((s,r)=>s+r.netPnl,0)).toFixed(0);
     const rows=withRadar(filterPanelRows(allRows,query,r=>[r.sym]));
     const tbSummary=summarizeExitPnlRows(rows);
+    // v1097: same rule as the Orders branch — store the whole session, never the search match.
+    if(tbDate) recordLeftOnTableSession(tbDate,summarizeExitPnlRows(allRows));
     const shownTotal=+(rows.reduce((s,r)=>s+r.netPnl,0)).toFixed(0);
     const _dash={totFmt:()=>'—',totClrFn:()=>'var(--t3)'};
     const _signTot={totFmt:v=>v!=null?fmtPerfRs(v):'—',totClrFn:v=>v!=null?(v>=0?'var(--green)':'var(--red)'):'var(--t3)'};
@@ -6446,7 +6573,51 @@ function getBaselineRewardRisk(){
   const c=buildAchievabilityCurve();
   return c&&c.rr>0?c.rr:null;
 }
-function getRowExitPolicy(row,buyPrice=null,activeInfo=null){
+// ── v1097 TARGET NUDGE (owner) ───────────────────────────────────────────────
+// "We have a base target based on my goal. We have money left on the table. Just distribute that
+// percentage to my stocks based on the radar score."
+//
+// The base rate answers a question about the OWNER (what must I earn per day). The money left on the
+// table answers a question about the STOCKS (how much further did they go after we sold). Adding the
+// second to the first is what makes the exit stock-aware without abandoning the goal contract, and
+// re-solving both continuously keeps it honest as either side moves.
+//
+//   nudge_i  = pool x score_i / meanScore     -> the mean nudge across the cohort IS the pool
+//   target_i = min(base + nudge_i, capacity_i)
+//
+// NO NEW CONSTANT. `pool` is measured (getLeftOnTablePool), `meanScore` is the day's own cross-section,
+// `capacity` is the sqrt(ATR x range) unit that has been on the row since v1060.
+//
+// CAPPED AT CAPACITY, NOT AT THE SESSION CEILING — measured and deliberate. Capping the nudged target
+// at the v1083 same-day runway collapses every row back to 2.5-3.5% (checked on the 2026-08-05 14:37
+// file: all ten of the top ten, several landing BELOW the base rate) and the nudge vanishes entirely.
+// The session ceiling answers "can I BUY this today"; it has no business setting where the position is
+// SOLD, which under the v1085 two-day label may well be tomorrow. Viability still uses it; the exit
+// price no longer does.
+//
+// FLOORED AT THE BASE RATE, by owner rule: "some day money left on the table would be negative, that
+// means we're doing well and don't need to add anything to our base target rate." A negative pool is
+// floored to zero in getLeftOnTablePool, so every target falls back to exactly the goal rate.
+let _nudgeMemo=null;
+function getTargetNudgeContext(){
+  const pool=getLeftOnTablePool();
+  // Normalise against the cohort the recommendations are actually drawn from, so the mean nudge equals
+  // the pool over the stocks being bought. One session-level scalar shared by every caller — the same
+  // number for the rankings table, the Open Positions panel and the sell basket, so a stock's target
+  // cannot depend on which surface is asking.
+  const cohort=(Array.isArray(ALL)?ALL:[])
+    .filter(r=>r&&r.basketEligible&&Number.isFinite(Number(r.score))&&Number(r.score)>0)
+    .sort((a,b)=>(a.rank||1e9)-(b.rank||1e9))
+    .slice(0,typeof RECOMMEND_MAX_RANK==='number'?RECOMMEND_MAX_RANK:10);
+  const meanScore=cohort.length?cohort.reduce((s,r)=>s+Number(r.score),0)/cohort.length:null;
+  const sig=`${pool.poolPct}|${meanScore==null?'-':meanScore.toFixed(3)}|${cohort.length}`;
+  if(_nudgeMemo&&_nudgeMemo.sig===sig) return _nudgeMemo.val;
+  const val={poolPct:pool.poolPct,rawPoolPct:pool.rawPct,meanScore,cohort:cohort.length,
+             sessions:pool.sessions,poolSource:pool.source};
+  _nudgeMemo={sig,val};
+  return val;
+}
+function getRowExitPolicy(row,buyPrice=null,activeInfo=null,nudgeInfo=null){
   const active=activeInfo||getActiveTargetInfo();
   const anchor=Number(active.tgtPct)>0?Number(active.tgtPct):Math.abs(Number(TRADEBOOK_STATS?.adaptiveTGT))||null;
   const atr=Number(row?.atr);
@@ -6479,6 +6650,24 @@ function getRowExitPolicy(row,buyPrice=null,activeInfo=null){
     targetPct=toStep(capacity);
     targetSource='stock capacity fallback (no goal rate available)';
   }
+  // v1097: the base rate is the contract floor and is retained separately — feasibility, viability and
+  // the recommendation gates all keep using it (see radarAnalyze). Only the EXIT PRICE gets the nudge.
+  const basePct=targetPct;
+  let nudgePct=0;
+  const nudge=nudgeInfo||getTargetNudgeContext();
+  // A manual anchor is the owner overriding outright (v1077 precedent) — never nudged.
+  if(targetPct>0&&active.source!=='manual'&&nudge&&nudge.poolPct>0&&nudge.meanScore>0){
+    const sc=Number(row?.score);
+    if(Number.isFinite(sc)&&sc>0){
+      nudgePct=nudge.poolPct*sc/nudge.meanScore;
+      const lifted=basePct+nudgePct;
+      // Capacity is the only cap. A stock cannot be asked for more than it typically travels.
+      const capped=capacity>0?Math.min(lifted,capacity):lifted;
+      targetPct=toStep(Math.max(basePct,capped));
+      nudgePct=+(targetPct-basePct).toFixed(2);
+      if(nudgePct>0) targetSource+=' + left-on-table nudge';
+    }
+  }
   const stopPct=getRowStopDistancePct(row);
   // v1093 (owner): "R:R is not to be learnt from past and applied to future if it's bad. If it's
   // good, that should be the baseline, but if it's bad, there should be a good default baseline
@@ -6500,8 +6689,8 @@ function getRowExitPolicy(row,buyPrice=null,activeInfo=null){
   const baseRR=getBaselineRewardRisk();
   const rrFloorPct=(baseRR>0&&stopPct>0)?toStep(stopPct*baseRR):null;
   let minGrossPct=null;
-  if(targetPct>0){
-    minGrossPct=Math.ceil((HARVEST_DESIRED_NET_PCT+estimateRoundTripCostPct(targetPct))*20)/20;
+  if(basePct>0){
+    minGrossPct=Math.ceil((HARVEST_DESIRED_NET_PCT+estimateRoundTripCostPct(basePct))*20)/20;
     minGrossPct=Math.ceil((HARVEST_DESIRED_NET_PCT+estimateRoundTripCostPct(minGrossPct))*20)/20;
   }
   // v1081 (owner): PRICE-BAND HEADROOM IS A HARD CONSTRAINT, not a capacity opinion.
@@ -6519,13 +6708,17 @@ function getRowExitPolicy(row,buyPrice=null,activeInfo=null){
   // slippage cushion. Fails OPEN when the band or day% is unknown.
   const bandRef=Number(buyPrice)>0?Number(buyPrice):getBuyPrice(row||{});
   const uc=getUpperCircuitInfo(row,bandRef);
-  const bandLimited=!!(uc&&targetPct>0&&uc.runwayPct<targetPct);
+  // v1097: every ELIGIBILITY test below is measured against the BASE rate, never the nudged target.
+  // The base is what the position must achieve; the nudge is upside we are willing to wait for. If
+  // viability used the nudged number, raising a stock's target would delete that same stock from the
+  // recommendations — the nudge would remove its own candidates.
+  const bandLimited=!!(uc&&basePct>0&&uc.runwayPct<basePct);
   // v1083: the same test against the STATISTICAL ceiling (day's low + one typical day's range).
   // The circuit is what the stock may LEGALLY reach; this is what it may PLAUSIBLY reach. A row
   // needs the target to fit under both. Reported separately so the two causes stay distinguishable.
   const sc=getSessionCeilingInfo(row,bandRef);
-  const rangeExhausted=!!(sc&&targetPct>0&&sc.runwayPct<targetPct);
-  const viable=targetPct>0&&!bandLimited&&!rangeExhausted&&(capacity==null||targetPct+1e-9>=minGrossPct);
+  const rangeExhausted=!!(sc&&basePct>0&&sc.runwayPct<basePct);
+  const viable=basePct>0&&!bandLimited&&!rangeExhausted&&(capacity==null||basePct+1e-9>=minGrossPct);
   const stopSource=(Math.abs(Number(row?.slPct))>0)?'explicit stock stop'
     :hasAtr?'ATR stock stop'
     :(Number(TRADEBOOK_STATS?.adaptiveSL)>0?'learned portfolio fallback':'minimum-risk fallback');
@@ -6538,6 +6731,10 @@ function getRowExitPolicy(row,buyPrice=null,activeInfo=null){
   const reachable=(capacity>0&&targetPct>0)?(capacity+1e-9>=targetPct):null;
   return {
     targetPct:targetPct>0?+targetPct.toFixed(2):null,
+    // v1097, all REPORTED so the nudge is auditable on every row:
+    basePct:basePct>0?+basePct.toFixed(2):null,   // the goal rate alone — what eligibility is judged on
+    nudgePct:+Number(nudgePct||0).toFixed(2),      // what the left-on-table pool added
+    nudgePoolPct:nudge?nudge.poolPct:null,
     stopPct:+stopPct.toFixed(2),
     rewardRisk,
     reachable,
@@ -7091,7 +7288,7 @@ function renderTable(){
       chk:`<td style="text-align:center"><input type="checkbox" ${isSelected?'checked':''} ${canBuy?'':'disabled'} style="width:14px;height:14px;accent-color:var(--amber);cursor:${canBuy?'pointer':'not-allowed'}" onclick="event.stopPropagation()" onchange="toggleStock('${s.symbol}',this.checked)" title="${canBuy?'Include in the Zerodha basket export':'Ineligible for the basket'}"></td>`,
       rank:`<td style="font-family:'DM Mono',monospace;font-weight:800;color:var(--t1);text-align:right">${s.rank??'—'}</td>`,
       score:`<td>${radarScoreCell(s.score,'Relative same-day composite score (0-100 percentile, top-weighted). It is a ranking, not a probability.')}</td>`,
-      symbol:`<td style="font-family:'Plus Jakarta Sans',sans-serif"><button type="button" onclick='event.stopPropagation();openTradingViewChart(${JSON.stringify(String(s.symbol))})' style="padding:0;border:0;background:transparent;color:inherit;text-align:left;cursor:pointer" title="Open TradingView chart"><div style="font-weight:700;font-size:13px;color:var(--t1)">${escHtml(s.symbol)}${(()=>{const flags=s.meta?.flags||[];if(!flags.length)return '';return `<span style="font-size:8px;background:rgba(239,68,68,.15);color:var(--red);border-radius:4px;padding:1px 5px;margin-left:5px;font-weight:700;vertical-align:middle" title="NSE surveillance flags: ${escHtml(flags.join(' · '))}">⚠ ${flags.length}</span>`;})()}${s._held?`<span style="font-size:8px;background:rgba(244,114,182,.15);color:#f472b6;border-radius:4px;padding:1px 5px;margin-left:5px;font-weight:700;vertical-align:middle" title="You already hold this. Held stocks stay in the ranking (v1070) and can be recommended again — buying here ADDS to the existing position.">📌 held</span>`:''}${s.entryReady===false?`<span style="font-size:8px;background:rgba(245,158,11,.15);color:var(--amber);border-radius:4px;padding:1px 5px;margin-left:5px;font-weight:700;vertical-align:middle" title="${escHtml('Extended: '+(s.entryTiming?.reason||'upper-range entry')+'. Shown for context only — since v1075 this no longer withholds the stock. A forward test (28-Jul close to 29-Jul, n=1618) found extension predicted CONTINUATION: the 100-150% range-used bucket returned +1.40% next day against +0.75% for unblocked stocks.')}">⚡ extended</span>`:''}</div><div style="font-size:9px;color:var(--t3);max-width:220px;overflow:hidden;text-overflow:ellipsis">${escHtml(s.name||'')}</div></button></td>`,
+      symbol:`<td style="font-family:'Plus Jakarta Sans',sans-serif"><button type="button" onclick='event.stopPropagation();openTradingViewChart(${JSON.stringify(String(s.symbol))})' style="padding:0;border:0;background:transparent;color:inherit;text-align:left;cursor:pointer" title="Open TradingView chart"><div style="font-weight:700;font-size:13px;color:var(--t1)">${escHtml(s.symbol)}${(()=>{const flags=s.meta?.flags||[];if(!flags.length)return '';return `<span style="font-size:8px;background:rgba(239,68,68,.15);color:var(--red);border-radius:4px;padding:1px 5px;margin-left:5px;font-weight:700;vertical-align:middle" title="NSE surveillance flags: ${escHtml(flags.join(' · '))}">⚠ ${flags.length}</span>`;})()}${s._held?`<span style="font-size:8px;background:rgba(244,114,182,.15);color:#f472b6;border-radius:4px;padding:1px 5px;margin-left:5px;font-weight:700;vertical-align:middle" title="You already hold this. Held stocks stay in the ranking (v1070) and can be recommended again — buying here ADDS to the existing position.">📌 held</span>`:''}${s.entryReady===false?`<span style="font-size:8px;background:rgba(245,158,11,.15);color:var(--amber);border-radius:4px;padding:1px 5px;margin-left:5px;font-weight:700;vertical-align:middle" title="${escHtml('Extended: '+(s.entryTiming?.reason||'upper-range entry')+'. Shown for context only — since v1075 this no longer withholds the stock. A forward test (28-Jul close to 29-Jul, n=1618) found extension predicted CONTINUATION: the 100-150% range-used bucket returned +1.40% next day against +0.75% for unblocked stocks.')}">⚡ extended</span>`:''}${s.preResults?.drift?`<span style="font-size:8px;background:rgba(34,197,94,.15);color:var(--green);border-radius:4px;padding:1px 5px;margin-left:5px;font-weight:700;vertical-align:middle" title="${escHtml(`Results in ${s.preResults.daysToResults} trading session(s) (${s.preResults.resultsDate}, source: ${s.preResults.resultsSource}) and the stock is drifting up quietly — ${s.preResults.weekChangePct>0?'+':''}${Number(s.preResults.weekChangePct).toFixed(1)}% on the week, up today, with no volume ignition. Owner observation, 2026-08-05. REPORTED ONLY: this sets no score term. It is the bullish direction of RULES.md R10, which stands at one observation in the opposite direction, and it needs 3 confirms across 2 sessions to graduate.`)}">📅 pre-results</span>`:''}</div><div style="font-size:9px;color:var(--t3);max-width:220px;overflow:hidden;text-overflow:ellipsis">${escHtml(s.name||'')}</div></button></td>`,
       setup:`<td style="font-size:11px;color:var(--t2)">${escHtml(s.setup||'—')}${s.stage?' '+radarStagePill(s):''}</td>`,
       series:`<td>${radarSeriesBandPill(s)}</td>`,
       stretch:`<td style="color:${stretchColor};font-weight:700" title="A 10% move is this many multiples of the strongest daily-range estimate. Lower is more feasible.">${s.stretch!=null&&isFinite(s.stretch)?Number(s.stretch).toFixed(1)+'×':'—'}</td>`,
@@ -8726,6 +8923,9 @@ function compactRankingRows(rows){
     stage:s.stage??null,stageLabel:s.stageLabel??null,legTrendPct:s.legTrendPct??null,legHighPct:s.legHighPct??null,
     igniteReady:!!s.igniteReady,igniteStrength:s.igniteStrength??null,ignitePct:s.ignitePct??0,compositePct:s.compositePct??null,setupPct:s.setupPct??null,feasibility:s.feasibility??null,directionConfirmed:!!s.directionConfirmed,marketCap:s.marketCap??null,
     entryReady:s.entryReady!==false,entryTiming:s.entryTiming||null,
+    preResults:s.preResults?{resultsDate:s.preResults.resultsDate,resultsSource:s.preResults.resultsSource,
+      daysToResults:s.preResults.daysToResults,weekChangePct:s.preResults.weekChangePct,
+      quietRise:!!s.preResults.quietRise,inWindow:!!s.preResults.inWindow,drift:!!s.preResults.drift}:null,
     rocketReady:!!s.rocketReady,gateReasons:(s.gateReasons||[]).slice(0,9),_held:!!s._held,
     meta:{delivery:s.meta?.delivery??null,trades:s.meta?.trades??null,flags:(s.meta?.flags||[]).slice(0,12),band:s.meta?.band??null}
   }));
