@@ -1,5 +1,5 @@
-const BUILD_TS='2026-08-06 14:11 IST'; // release build time (IST)
-const APP_VERSION=1099; // v1099: money left on the table is measured from the post-sell HIGH or LOW - the extreme after the exit, across stored daily bars - instead of wherever the price happens to sit now; and every font is scaled about 20% for readability.
+const BUILD_TS='2026-08-06 19:58 IST'; // release build time (IST)
+const APP_VERSION=1100; // v1100: R4d post-results digestion is implemented - a stock that rocketed on its own results day is withheld from entry until it re-accumulates, judged against that session's own top-decile move rather than a typed threshold.
 // v1093: a baseline reward:risk MEASURED on the cross-section (last completed bhav session) instead of learned from the owner's own fills - reported on every row, deliberately not enforced. Includes v1092: position size split by Radar score / stop distance, so equally-scored names carry equal RUPEE risk, plus an opt-in Risk /trade cap.
 // v556: parse the NSE Market Activity Report (MA<date>.csv) — official Nifty %, advances/declines and sector index moves shown as market CONTEXT in the status bar (EOD data, display only, never fed into per-row scoring); MA added to the ℹ️ file manifest.
 // v555 market-cycle stage awareness (stateless, self-calibrating): per-row stage label (1 accumulation · 2 breakout · 3 event · 4 profit-booking · 5 re-accumulation · 6 second-leg); a quiet-accumulation signal (conjunction-of-percentiles) injected via the rocket-diagnostic weighting; sell-the-news decay off Recent earnings date (horizon = review days). v1065 makes the market-breadth gauge an entry-eligibility input while still never changing ranking.
@@ -1444,6 +1444,50 @@ function recordPriceHistoryFromBhav(){
   FS.set(PRICE_HISTORY_STORE,out);
   return out;
 }
+// ── R4d POST-RESULTS DIGESTION (RULES.md, graduated 2026-07-30: 5 confirms / 3 sessions / 0
+// contradictions — E26 GANDHAR, E27 TIPSFILMS, E34 D+1 PCBL, E40 SERVOTECH, E42 XPROINDIA) ────
+//
+// The rule: a results-driven ROCKET gives back sharply on the following session even when the
+// reported numbers were good. E42 is the cleanest instance — XPROINDIA's Q1 PAT more than DOUBLED and
+// the first full session after the print sold off 13.2% on 11.5x volume. So the durable action is
+// temporal, not fundamental: do not chase yesterday's results rocket unless it is re-accumulating now.
+//
+// WHAT COUNTS AS A "RESULTS ROCKET" IS SELF-CALIBRATING, not a typed threshold. The stock's move on
+// its own results day is compared against the CROSS-SECTION of every stock's move that same day; a
+// top-decile move is the rocket. That adapts to the tape automatically — on a violent day the bar
+// rises with it — and introduces no constant.
+//
+// FAILS OPEN. Without stored closes for the results day and the session before it, the move is
+// unknown and the rule does nothing. A missed upload yields no signal, never a wrong one.
+function resultsDayMoveContext(resultsDate){
+  const raw=FS.get(PRICE_HISTORY_STORE);
+  const store=(raw&&typeof raw==='object'&&raw.sessions)?raw.sessions:null;
+  if(!store||!resultsDate) return null;
+  const dates=Object.keys(store).sort();
+  const i=dates.indexOf(resultsDate);
+  if(i<1) return null;                       // need the results day AND the close before it
+  const prev=store[dates[i-1]]||{}, cur=store[resultsDate]||{};
+  const moves={},all=[];
+  for(const sym of Object.keys(cur)){
+    const p0=phClose(prev[sym]),p1=phClose(cur[sym]);
+    if(!(p0>0)||!(p1>0)) continue;
+    const m=(p1/p0-1)*100;
+    moves[sym]=+m.toFixed(2); all.push(m);
+  }
+  if(all.length<50) return null;             // too thin a cross-section to take a percentile from
+  all.sort((a,b)=>a-b);
+  return {moves,cut:all[Math.floor(all.length*0.9)],n:all.length,date:resultsDate};
+}
+let _r4dMemo=null;
+function getResultsDayMove(sym,resultsDate){
+  if(!sym||!resultsDate) return null;
+  if(!_r4dMemo||_r4dMemo.date!==resultsDate) _r4dMemo={date:resultsDate,ctx:resultsDayMoveContext(resultsDate)};
+  const c=_r4dMemo.ctx;
+  if(!c) return null;
+  const m=c.moves[normSym(sym)];
+  return m===undefined?null:{movePct:m,topDecileCut:+c.cut.toFixed(2),wasRocket:m>=c.cut,universe:c.n};
+}
+
 // The move over the N sessions ENDING AT THE LAST CLOSE BEFORE `beforeDate` — i.e. the drift INTO
 // today, with today's own reaction excluded outright rather than subtracted back out.
 //
@@ -3309,6 +3353,33 @@ function radarAnalyze(headers,rawRows,supplements={},heldSymbols=new Set()){
       inWindow:_daysToRes!=null&&_daysToRes>=1&&_daysToRes<=3,
       drift:!!(_quietRise&&_daysToRes!=null&&_daysToRes>=1&&_daysToRes<=3)
     };
+    // ── R4d POST-RESULTS DIGESTION (graduated rule, implemented 2026-08-06) ──────────────────
+    // Withholds the ENTRY, never the score. R4d's claim is temporal — "do not chase it TODAY" — not
+    // that the stock is bad, so it belongs with entry timing, where v1070/v1075 established that an
+    // honest rank is preserved while the execution decision is withheld separately. It is also a pure
+    // boolean, so unlike a score penalty it needs no magnitude and invents no constant.
+    //
+    // FRESH RE-ACCUMULATION is the release valve the rule itself names. It reuses the codebase's ONE
+    // definition of confirmed direction (v1069: at or above VWAP and up from the open) plus the
+    // existing participation test — a stock genuinely being bought again is not the falling knife R4d
+    // describes, and E27/E34 both broke down precisely when that stopped being true.
+    const _r4d=(_inDigestion&&/^\d{4}-\d{2}-\d{2}$/.test(_recEarn))?getResultsDayMove(_sym,_recEarn):null;
+    const _vwapR4d=vwapI>=0?radarNum(raw[vwapI]):null;
+    const _priceR4d=radarNum(raw[priceI]);
+    const _reaccum=!!(_vwapR4d>0&&_priceR4d>=_vwapR4d&&chgOpenArr[ri]>0&&_partReady);
+    const _digestionRisk=!!(_r4d&&_r4d.wasRocket&&!_reaccum);
+    const _r4dRecord={
+      inDigestion:_inDigestion,
+      daysSinceResults:_daysSince,
+      resultsDayMovePct:_r4d?_r4d.movePct:null,
+      topDecileCut:_r4d?_r4d.topDecileCut:null,
+      wasResultsRocket:_r4d?_r4d.wasRocket:null,
+      reaccumulating:_reaccum,
+      blocked:_digestionRisk,
+      reason:_digestionRisk
+        ? `Rocketed ${_r4d.movePct}% on its results day (${_recEarn}), above that session's top-decile cut of ${_r4d.topDecileCut}%, and is not re-accumulating now. RULES.md R4d: a results rocket gives back sharply on the following sessions even when the numbers were good.`
+        : (_r4d?null:(_inDigestion?'results-day move unknown - no stored closes for that session, so R4d does not apply':null))
+    };
     // WS-A stage (percentile bands + event/earnings flags). Stages 4/5/6 need reviewDays + earnings date.
     const _P=stagePct[ri],_chgOpen=chgOpenArr[ri],_sma50=sma50I>=0?radarNum(raw[sma50I]):null,_priceMA=radarNum(raw[priceI]),_aboveMA=_sma50!=null&&_priceMA!=null&&_priceMA>_sma50;
     let _stage=null;
@@ -3410,7 +3481,7 @@ function radarAnalyze(headers,rawRows,supplements={},heldSymbols=new Set()){
       price5m:price5I>=0?radarNum(raw[price5I]):null,
       corpAction:meta._corpNeutralised?(meta.corpToday?.purpose||'corporate action'):null,
       stage:_stage,stageLabel:_stage?STAGE_LABEL[_stage]:null,legTrendPct:_P.tPct,legHighPct:_P.bPct,
-      inDigestion:_inDigestion,daysSinceEarnings:_daysSince,preResults:_preResults,
+      inDigestion:_inDigestion,daysSinceEarnings:_daysSince,preResults:_preResults,r4d:_r4dRecord,
       rocketReady,gateReasons,series,band:band??null,status,eqEligible,basketEligible,meta,
       igniteReady:igniteArr[ri]!==null,
       igniteStrength:igniteArr[ri]===null?null:+igniteArr[ri].toFixed(4),
@@ -3523,6 +3594,14 @@ function radarAnalyze(headers,rawRows,supplements={},heldSymbols=new Set()){
   // the current market. Breadth is known only after the whole cross-section has been measured.
   rows.forEach(r=>{
     r.entryTiming=getMarketAlignedEntryTiming(r,marketIntraday);
+    // R4d is applied HERE, after the market-aligned pass, because that pass REPLACES entryTiming
+    // wholesale — merging R4d any earlier silently lost it. Entry timing has exactly one final
+    // author, and this is it.
+    if(r.r4d&&r.r4d.blocked){
+      r.entryTiming={...r.entryTiming,blocked:true,digestionRisk:true,
+        reason:r.entryTiming.reason?r.entryTiming.reason+'; '+r.r4d.reason:r.r4d.reason,
+        action:r.entryTiming.action||'Wait for re-accumulation'};
+    } else r.entryTiming.digestionRisk=false;
     r.entryReady=!r.entryTiming.blocked;
   });
   return {rows,features,rockets:rocketRows.length,rocketTargetPct:_radarSessionTargetPct,continuationCount:continuationRows.length,suppressedHeld,marketIntraday,ids:{priceI,targetI,sectorI,symbolI,descI}};
@@ -9093,6 +9172,7 @@ function compactRankingRows(rows){
       daysToResults:s.preResults.daysToResults,weekChangePct:s.preResults.weekChangePct,
       driftPct:s.preResults.driftPct??null,driftSource:s.preResults.driftSource??null,
       quietRise:!!s.preResults.quietRise,inWindow:!!s.preResults.inWindow,drift:!!s.preResults.drift}:null,
+    r4d:s.r4d?{inDigestion:!!s.r4d.inDigestion,daysSinceResults:s.r4d.daysSinceResults??null,resultsDayMovePct:s.r4d.resultsDayMovePct??null,topDecileCut:s.r4d.topDecileCut??null,wasResultsRocket:s.r4d.wasResultsRocket??null,reaccumulating:!!s.r4d.reaccumulating,blocked:!!s.r4d.blocked,reason:s.r4d.reason||null}:null,
     rocketReady:!!s.rocketReady,gateReasons:(s.gateReasons||[]).slice(0,9),_held:!!s._held,
     meta:{delivery:s.meta?.delivery??null,trades:s.meta?.trades??null,flags:(s.meta?.flags||[]).slice(0,12),band:s.meta?.band??null}
   }));
