@@ -1,5 +1,5 @@
-const BUILD_TS='2026-08-05 16:44 IST'; // release build time (IST)
-const APP_VERSION=1098; // v1098: the drift into a results date is measured from dated official closes over 3 sessions instead of being subtracted out of a 1-week column - percentage changes compound, and the old subtraction overstated the drift by up to 0.69pp on exactly the biggest movers.
+const BUILD_TS='2026-08-06 14:11 IST'; // release build time (IST)
+const APP_VERSION=1099; // v1099: money left on the table is measured from the post-sell HIGH or LOW - the extreme after the exit, across stored daily bars - instead of wherever the price happens to sit now; and every font is scaled about 20% for readability.
 // v1093: a baseline reward:risk MEASURED on the cross-section (last completed bhav session) instead of learned from the owner's own fills - reported on every row, deliberately not enforced. Includes v1092: position size split by Radar score / stop distance, so equally-scored names carry equal RUPEE risk, plus an opt-in Risk /trade cap.
 // v556: parse the NSE Market Activity Report (MA<date>.csv) — official Nifty %, advances/declines and sector index moves shown as market CONTEXT in the status bar (EOD data, display only, never fed into per-row scoring); MA added to the ℹ️ file manifest.
 // v555 market-cycle stage awareness (stateless, self-calibrating): per-row stage label (1 accumulation · 2 breakout · 3 event · 4 profit-booking · 5 re-accumulation · 6 second-leg); a quiet-accumulation signal (conjunction-of-percentiles) injected via the rocket-diagnostic weighting; sell-the-news decay off Recent earnings date (horizon = review days). v1065 makes the market-breadth gauge an entry-eligibility input while still never changing ranking.
@@ -1411,13 +1411,21 @@ function nseDateToISO(s){
   const mo=PR_MONTHS[m[2].toLowerCase()];
   return mo?`${m[3]}-${mo}-${m[1].padStart(2,'0')}`:null;
 }
+// v1099: each stored value is [close, high, low]. The extremes are what "where did it go AFTER I
+// sold" needs — a close cannot answer it. Legacy entries written by v1098 are bare close numbers and
+// are read through these accessors, so an older brain degrades to close-only rather than breaking.
+const phClose=v=>Array.isArray(v)?(Number(v[0])>0?Number(v[0]):null):(Number(v)>0?Number(v):null);
+const phHigh =v=>Array.isArray(v)&&Number(v[1])>0?Number(v[1]):null;
+const phLow  =v=>Array.isArray(v)&&Number(v[2])>0?Number(v[2]):null;
 function recordPriceHistoryFromBhav(){
   const byDate={};
   for(const sym of Object.keys(NSE_BHAV||{})){
     const b=NSE_BHAV[sym];
     const iso=nseDateToISO(b?.dateStr);
     if(!iso||!(Number(b?.officialClose)>0)) continue;
-    (byDate[iso]=byDate[iso]||{})[sym]=+Number(b.officialClose).toFixed(2);
+    const hi=Number(b?.high)>0?+Number(b.high).toFixed(2):null;
+    const lo=Number(b?.low)>0?+Number(b.low).toFixed(2):null;
+    (byDate[iso]=byDate[iso]||{})[sym]=[+Number(b.officialClose).toFixed(2),hi,lo];
   }
   const dates=Object.keys(byDate);
   if(!dates.length) return null;
@@ -1454,11 +1462,58 @@ function buildDriftIntoEventMap(beforeDate,sessions=PRE_RESULTS_DRIFT_SESSIONS){
   const a=store[from]||{}, b=store[to]||{};
   const map={};
   for(const sym of Object.keys(b)){
-    const p0=a[sym], p1=b[sym];
+    const p0=phClose(a[sym]), p1=phClose(b[sym]);
     if(!(p0>0)||!(p1>0)) continue;          // a symbol missing either end gets no drift, not a zero
     map[sym]=+((p1/p0-1)*100).toFixed(2);
   }
   return {map,sessionsUsed:sessions,from,to};
+}
+
+// ── v1099 POST-SELL EXTREME (owner) ──────────────────────────────────────────
+// "It should see if and how much the stock moved and in what direction after I sold it. The
+// highest/lowest point post-sell is what drives the number."
+//
+// v1095 answered this with the CURRENT price, so a stock that ran 8% past the exit and faded back
+// reported nothing left on the table. The peak was never looked at. This walks the stored daily bars
+// strictly AFTER the sell date, then folds in today's live extremes from the scanner row.
+//
+// RESOLUTION IS HONEST AND LABELLED. Later sessions are exact — a full daily bar is entirely
+// post-sell. The SELL DAY itself is an upper bound, because no input carries an intraday series and
+// the day's high may have printed before the fill. Note this is exact rather than approximate for a
+// LIMIT sell (the basket's own exits): price can only reach the limit once, so anything above it
+// occurred at or after the fill. `resolution` says which case a row is in; nothing is blurred.
+function getPostSellExtremes(sym,sellDate){
+  const s=normSym(sym);
+  const out={high:null,low:null,sessions:0,includesSellDay:false,exact:true,from:null,to:null};
+  if(!s||!sellDate) return out;
+  const raw=FS.get(PRICE_HISTORY_STORE);
+  const store=(raw&&typeof raw==='object'&&raw.sessions)?raw.sessions:{};
+  for(const d of Object.keys(store).sort()){
+    if(d<=sellDate) continue;               // strictly AFTER the sell — the sell day is handled below
+    const v=store[d]?.[s];
+    if(v===undefined) continue;
+    const hi=phHigh(v)??phClose(v), lo=phLow(v)??phClose(v);
+    if(hi>0) out.high=out.high==null?hi:Math.max(out.high,hi);
+    if(lo>0) out.low =out.low ==null?lo:Math.min(out.low ,lo);
+    out.sessions++;
+    if(!out.from) out.from=d;
+    out.to=d;
+  }
+  // Today's bar is still forming and is not in the bhav copy yet, so take it from the live row.
+  const scanDate=(typeof getSessionDate==='function')?getSessionDate():null;
+  const row=(Array.isArray(ALL)?ALL:[]).find(r=>r.symbol===s);
+  if(row&&scanDate&&scanDate>=sellDate){
+    const hi=Number(row.high1d), lo=Number(row.low1d), px=Number(row.price);
+    const useHi=hi>0?hi:(px>0?px:null), useLo=lo>0?lo:(px>0?px:null);
+    if(useHi>0) out.high=out.high==null?useHi:Math.max(out.high,useHi);
+    if(useLo>0) out.low =out.low ==null?useLo:Math.min(out.low ,useLo);
+    if(scanDate===sellDate){
+      // The sell-day bar contains action from BEFORE the exit — same attribution problem v1085 and
+      // v1096 solve for picks and fills. Owner's call (2026-08-05): use it, labelled as an upper bound.
+      out.includesSellDay=true; out.exact=false;
+    } else { out.sessions++; out.to=scanDate; if(!out.from) out.from=scanDate; }
+  }
+  return out;
 }
 function parsePriceBand(text){
   parseCSV(text).forEach(r=>{
@@ -3766,27 +3821,53 @@ function enrichExitPnlRow(row,bookedDate=null){
   out.currentPrice=current!=null?+current.toFixed(2):null;
   const dayHigh=dayHighForSymbol(row?.sym);
   const scanDate=(typeof getSessionDate==='function')?getSessionDate():null;
-  const sessionMatch=bookedDate?(scanDate?bookedDate===scanDate:null):null;
+  // v1099: `sessionMatch` is gone. It gated the figure on the booking session equalling the scanner
+  // session, which was correct only while the current snapshot was the sole comparison price. Dated
+  // daily bars now cover older sells exactly, so gating on it would withhold the BEST data available.
+  // ── v1099 (owner correction to v1095): the EXTREME after the sell drives the number ──────────
+  // v1095 used the CURRENT price, so a stock that ran 8% past the exit and faded back to flat
+  // reported nothing left on the table — the peak was never looked at. The owner's rule is "how much
+  // did it move and in what direction after I sold it; the highest/lowest point post-sell drives it".
+  //
+  // DIRECTION FOLLOWS THE MOVE. If it traded ABOVE the sell afterwards, the number is the HIGH
+  // (money forgone, positive). If it never did, the number is the LOW (the exit saved money,
+  // negative). Both extremes are reported either way so the row can be read in full.
+  //
+  // The v1094 session guard is RELAXED here, deliberately: it existed because the only comparison
+  // price was the current snapshot, so an older sell could only be measured against the wrong day.
+  // Since v1098 stores dated daily bars, sessions AFTER an older sell are exactly attributable and
+  // there is no longer any reason to withhold them. What is withheld now is only genuine absence.
   out.leftOnTableRs=null; out.leftOnTablePct=null;
-  if(sessionMatch===false){
-    out.leftOnTableNote=`The scanner file is session ${scanDate}, but this was booked on ${bookedDate} — a price from a different session cannot say what happened after that exit.`;
-  }else if(!(qty>0)||!(sell>0)){
+  const ext=getPostSellExtremes(row?.sym,bookedDate);
+  out.postSellHigh=ext.high!=null?+ext.high.toFixed(2):null;
+  out.postSellLow=ext.low!=null?+ext.low.toFixed(2):null;
+  out.leftOnTableExact=ext.exact;
+  out.leftOnTableSessions=ext.sessions;
+  if(dayHigh!=null) out.dayHigh=+dayHigh.toFixed(2);
+  if(!(qty>0)||!(sell>0)){
     out.leftOnTableNote='No sell price or quantity on this row.';
-  }else if(current==null){
-    out.leftOnTableNote='This symbol is not in the current scanner file, so there is no post-sell price to compare against.';
+  }else if(!bookedDate){
+    out.leftOnTableNote='No booking date on this row, so the post-sell window cannot be bounded.';
+  }else if(ext.high==null&&ext.low==null){
+    out.leftOnTableNote=`No price data covering any session at or after ${bookedDate} — the symbol is absent from both the stored daily history and the current scanner file, so what happened after the exit is unknown.`;
   }else{
-    out.leftOnTableRs=+((current-sell)*qty).toFixed(0);
-    out.leftOnTablePct=+(((current-sell)/sell)*100).toFixed(2);
-    if(dayHigh!=null) out.dayHigh=+dayHigh.toFixed(2);
-    const unverified=sessionMatch===null?' Booking date unknown, so the session match is unverified.':'';
+    const hi=ext.high, lo=ext.low;
+    const wentUp=hi!=null&&hi>sell;
+    const ref=wentUp?hi:(lo!=null?lo:hi);
+    out.leftOnTableRs=+((ref-sell)*qty).toFixed(0);
+    out.leftOnTablePct=+(((ref-sell)/sell)*100).toFixed(2);
+    // Resolution is stated per row, never blurred. Later sessions are whole bars and fully
+    // attributable; the sell day itself may contain pre-exit action.
+    const res=ext.exact
+      ? `Measured across ${ext.sessions} full session${ext.sessions===1?'':'s'} after the sell${ext.from?` (${ext.from} to ${ext.to})`:''} — fully attributable.`
+      : `UPPER BOUND: the window includes the sell day itself, and the app has no intraday series, so part of that day's range may predate the exit. For a LIMIT sell it is exact — price can only reach the limit once, so anything above it came at or after the fill.`;
     const live=(typeof isMarketHours==='function'&&isMarketHours())?' The market is still open, so this is still moving.':'';
-    // The day's high is CONTEXT ONLY - it may have printed before the exit, so it is never the number.
-    const hiCtx=dayHigh!=null?` The day's high was ₹${dayHigh.toFixed(2)}, but the app has no intraday series, so whether that came before or after the exit is unknown.`:'';
+    const both=`Post-sell high ₹${hi!=null?hi.toFixed(2):'—'}, low ₹${lo!=null?lo.toFixed(2):'—'}.`;
     out.leftOnTableNote=out.leftOnTableRs>0
-      ? `Sold at ₹${sell.toFixed(2)}; it is now ₹${current.toFixed(2)} — it kept rising after the exit, leaving ${fmtINR(out.leftOnTableRs)} (${out.leftOnTablePct.toFixed(2)}%) on the table across ${qty} shares.${live}${hiCtx}${unverified}`
+      ? `Sold at ₹${sell.toFixed(2)}; it went on to ₹${hi.toFixed(2)} — ${fmtINR(out.leftOnTableRs)} (${out.leftOnTablePct.toFixed(2)}%) left on the table across ${qty} shares. ${both} ${res}${live}`
       : out.leftOnTableRs===0
-        ? `Sold at ₹${sell.toFixed(2)} and it has not moved since — nothing left on the table.${hiCtx}${unverified}`
-        : `Sold at ₹${sell.toFixed(2)}; it is now ₹${current.toFixed(2)} — it FELL after the exit, so the sell saved ${fmtINR(Math.abs(out.leftOnTableRs))} (${Math.abs(out.leftOnTablePct).toFixed(2)}%).${live}${hiCtx}${unverified}`;
+        ? `Sold at ₹${sell.toFixed(2)} and it never traded away from that price afterwards. ${both} ${res}${live}`
+        : `Sold at ₹${sell.toFixed(2)}; it never traded above that and fell to ₹${lo.toFixed(2)} — the exit SAVED ${fmtINR(Math.abs(out.leftOnTableRs))} (${Math.abs(out.leftOnTablePct).toFixed(2)}%). ${both} ${res}${live}`;
   }
   return out;
 }
@@ -4417,14 +4498,14 @@ function goalFmtRs(v){
 // Celebration/punishment reps (v482): profit ₹ = steps to walk; |loss| ÷ 100 = pushups.
 function goalRepsHTML(v){
   const n=Number(v)||0;
-  if(n>0) return `<div style="font-size:9px;color:var(--green)">🎉 ${Math.round(n).toLocaleString('en-IN')} steps</div>`;
-  if(n<0) return `<div style="font-size:9px;color:var(--red)">💪 ${Math.max(1,Math.ceil(Math.abs(n)/100))} pushups</div>`;
+  if(n>0) return `<div style="font-size:11px;color:var(--green)">🎉 ${Math.round(n).toLocaleString('en-IN')} steps</div>`;
+  if(n<0) return `<div style="font-size:11px;color:var(--red)">💪 ${Math.max(1,Math.ceil(Math.abs(n)/100))} pushups</div>`;
   return '';
 }
 function buildGoalPopoverContent(){
   const g=getGoalConfig();
-  const _in='background:transparent;border:1px solid var(--border-hi);border-radius:5px;color:var(--t1);font-size:10.5px;padding:2px 6px;font-family:inherit';
-  const _lbl='font-size:8.5px;color:var(--t3);text-transform:uppercase;letter-spacing:.4px;display:block;margin-bottom:1px';
+  const _in='background:transparent;border:1px solid var(--border-hi);border-radius:5px;color:var(--t1);font-size:12.5px;padding:2px 6px;font-family:inherit';
+  const _lbl='font-size:12.5px;color:var(--t3);text-transform:uppercase;letter-spacing:.4px;display:block;margin-bottom:1px';
   const remaining=goalRemainingDays(g);
   const wdDaily=g.withdrawMonthly*12/365;
   const basis=getGoalPortfolioBasis();
@@ -4436,14 +4517,14 @@ function buildGoalPopoverContent(){
         :`<span style="color:var(--red);font-weight:700">Not reachable</span> — earning ₹${goalFmtRs(g.target)} in ${remaining} sessions needs more than 50%/day from total ₹${goalFmtRs(basis)}`)
       :`<span style="color:var(--amber);font-weight:700">Deadline reached</span> — pick a later date`)
     :`Enter Capital ₹ in the filter bar (or load holdings) to compute the required %/day.`;
-  return `<div style="font-size:12px;color:var(--t1);margin-bottom:10px;font-weight:700">Goal</div>
+  return `<div style="font-size:14px;color:var(--t1);margin-bottom:10px;font-weight:700">Goal</div>
   <div style="display:flex;gap:8px;align-items:flex-end;flex-wrap:wrap">
     <span><span style="${_lbl}">Earn ₹ (profit)</span><input id="goalTarget" type="number" value="${g.target}" style="width:92px;${_in}" onchange="onGoalChange()" title="Trading profit to generate from current total capital within the horizon — not a balance to reach."></span>
     <span><span style="${_lbl}">By (deadline)</span><input id="goalEnd" type="date" min="${getSessionDate()}" value="${g.endDate}" style="width:126px;${_in}" onchange="onGoalChange()" title="Deadline for the earnings target. Trading days left are counted from today to this date, skipping weekends and NSE holidays."></span>
     <span style="display:none"><input id="goalWd" type="hidden" value="0"></span>
-    <span><span style="${_lbl}">Reinvest %/day</span><input id="goalReinvest" type="number" min="0" max="100" placeholder="all" value="${g.reinvestPct==null?'':g.reinvestPct}" title="Share of each day's gain that stays invested and compounds; the rest is taken out as cash. Leave blank to use the fixed monthly withdrawal instead." style="width:70px;background:var(--bg-input);border:1px solid var(--border);border-radius:6px;color:var(--t1);padding:4px 6px;font-size:12px"></span>
+    <span><span style="${_lbl}">Reinvest %/day</span><input id="goalReinvest" type="number" min="0" max="100" placeholder="all" value="${g.reinvestPct==null?'':g.reinvestPct}" title="Share of each day's gain that stays invested and compounds; the rest is taken out as cash. Leave blank to use the fixed monthly withdrawal instead." style="width:70px;background:var(--bg-input);border:1px solid var(--border);border-radius:6px;color:var(--t1);padding:4px 6px;font-size:14px"></span>
   </div>
-  <div style="font-size:11px;line-height:1.6;color:var(--t2);margin-top:10px">${reqLine}</div>
+  <div style="font-size:13px;line-height:1.6;color:var(--t2);margin-top:10px">${reqLine}</div>
   ${(()=>{
     // Projected finish date. PRIMARY = your REALISTIC pace from the tradebook (what you
     // actually earn per day, 30d) — the honest picture the owner asked for (v544).
@@ -4491,10 +4572,10 @@ function buildGoalPopoverContent(){
       }
     }catch(e){}
 
-    return `<div style="font-size:11px;line-height:1.6;margin-top:6px;color:var(--t2)">${realHtml}</div>`
-      +(bestHtml?`<div style="font-size:10px;line-height:1.5;margin-top:3px;color:var(--t3)">${bestHtml}</div>`:'');
+    return `<div style="font-size:13px;line-height:1.6;margin-top:6px;color:var(--t2)">${realHtml}</div>`
+      +(bestHtml?`<div style="font-size:12px;line-height:1.5;margin-top:3px;color:var(--t3)">${bestHtml}</div>`:'');
   })()}
-  <div style="font-size:10px;line-height:1.5;color:var(--t3);margin-top:6px">${remaining} trading day${remaining===1?'':'s'} left until ${g.endDate} (weekends and NSE holidays excluded) · ${g.reinvestPct}% of each day's gain is reinvested and compounds, the remaining ${(100-g.reinvestPct).toFixed(0)}% is taken out as cash (v1077 — there is no separate monthly withdrawal). This drives the required rate, which now DOES set the per-stock target.</div>`;
+  <div style="font-size:12px;line-height:1.5;color:var(--t3);margin-top:6px">${remaining} trading day${remaining===1?'':'s'} left until ${g.endDate} (weekends and NSE holidays excluded) · ${g.reinvestPct}% of each day's gain is reinvested and compounds, the remaining ${(100-g.reinvestPct).toFixed(0)}% is taken out as cash (v1077 — there is no separate monthly withdrawal). This drives the required rate, which now DOES set the per-stock target.</div>`;
 }
 function renderGoalPopover(){
   const content=document.getElementById('goalPopoverContent');
@@ -4517,7 +4598,7 @@ function buildGoalCard(){
   const needRs=req!=null?basis*req:null;
   const onTrack=req!=null&&ach!=null&&ach>=req;
   const col=req==null?'var(--red)':(onTrack?'var(--green)':'var(--amber)');
-  const badge=ach!=null?(onTrack?'<span style="color:var(--green);font-size:11px">✓ on track</span>':'<span style="color:var(--amber);font-size:11px">behind</span>'):'<span style="color:var(--t3);font-size:11px">no 30d trades</span>';
+  const badge=ach!=null?(onTrack?'<span style="color:var(--green);font-size:13px">✓ on track</span>':'<span style="color:var(--amber);font-size:13px">behind</span>'):'<span style="color:var(--t3);font-size:13px">no 30d trades</span>';
   const freeStr=parts.overridden
     ?`capital ₹${goalFmtRs(basis)} (your Capital ₹ override · computed book ₹${goalFmtRs(parts.computed)})`
     :`capital ₹${goalFmtRs(basis)} (delivery ${goalFmtRs(parts.holdings)}${parts.positions?` + today's buys ${goalFmtRs(parts.positions)}`:''}${parts.idleCash?` + freed cash ${goalFmtRs(parts.idleCash)}`:''}${parts.posStale?' · positions file is a prior session, its buys already settled into delivery':''})`;
@@ -4534,7 +4615,7 @@ function buildGoalCard(){
     : `need <b>₹${goalFmtRs(_needToday)}</b> today` + (_doneToday != null
       ? ` · booked <b style="color:${_todayTone}">₹${goalFmtRs(_doneToday)}</b>${_pctToday != null ? ` (${_pctToday.toFixed(0)}%)` : ''}`
       : '');
-  return `<div class="st" title="${title}"><div class="st-l">Goal · today &amp; remaining</div><div class="st-v" style="color:${_todayTone};font-size:15px">${_needToday!=null?'₹'+goalFmtRs(_needToday):reqStr+'%/day'} ${badge}</div><div class="st-d">${[_todayLine,`remaining <b>₹${goalFmtRs(g.target)}</b> over ${days} td · ${reqStr}%/day needed`,freeStr].filter(Boolean).join('<br>')}</div></div>`;
+  return `<div class="st" title="${title}"><div class="st-l">Goal · today &amp; remaining</div><div class="st-v" style="color:${_todayTone};font-size:17px">${_needToday!=null?'₹'+goalFmtRs(_needToday):reqStr+'%/day'} ${badge}</div><div class="st-d">${[_todayLine,`remaining <b>₹${goalFmtRs(g.target)}</b> over ${days} td · ${reqStr}%/day needed`,freeStr].filter(Boolean).join('<br>')}</div></div>`;
 }
 function renderStats(){
   const t=ALL.length;
@@ -4601,7 +4682,7 @@ function renderStats(){
     const confStr=harvestPlan.confidence!=null?` · hit ${(harvestPlan.confidence*100).toFixed(0)}% hist`:'';
     const srcLabel=active.source==='manual'?'manual':active.source==='goal'?'goal-led':'Harvest';
     const fallbackStr=summary.fallbacks?` · ${summary.fallbacks} target fallback${summary.fallbacks===1?'':'s'}`:'';
-    return `<div class="st"><div class="st-l">Per-Stock Exit Policies</div><div class="st-v" style="font-size:15px"><span style="color:var(--red)">${pctRange(summary.stopMin,summary.stopMax,'−')}</span><span style="color:var(--t3);font-size:12px"> / </span><span style="color:var(--green)">${pctRange(summary.targetMin,summary.targetMax,'+')}</span></div><div class="st-d">${summary.count} stock${summary.count===1?'':'s'} · ${srcLabel} ${active.tgtPct.toFixed(2)}% anchor${fallbackStr}${confStr}${learnedStr}${holdStr}${opportunityStr}</div></div>`;
+    return `<div class="st"><div class="st-l">Per-Stock Exit Policies</div><div class="st-v" style="font-size:17px"><span style="color:var(--red)">${pctRange(summary.stopMin,summary.stopMax,'−')}</span><span style="color:var(--t3);font-size:14px"> / </span><span style="color:var(--green)">${pctRange(summary.targetMin,summary.targetMax,'+')}</span></div><div class="st-d">${summary.count} stock${summary.count===1?'':'s'} · ${srcLabel} ${active.tgtPct.toFixed(2)}% anchor${fallbackStr}${confStr}${learnedStr}${holdStr}${opportunityStr}</div></div>`;
   })();
 
   const topScore=top&&isFinite(top.score)?Number(top.score).toFixed(1):'—';
@@ -4636,7 +4717,7 @@ function renderStats(){
   const niftyTone = nifty == null ? 'var(--t2)' : nifty >= 0 ? 'var(--green)' : 'var(--red)';
   const marketCard = `<div class="st" title="NIFTY 50 rebuilt LIVE from its ${live ? live.members : 50} constituents in this scan, market-cap weighted — the index row in the daily NSE zip is end-of-day, so mid-session it is yesterday's close. Breadth is the share of the scanned universe trading above its open (live). VIX has no live source in any input: it is the previous close, shown as a percentile of its OWN 52-week range so no volatility level is hard-coded. Regime is recorded on every outcome so results can be read within a regime rather than pooled — it never scores a stock.">
     <div class="st-l">Market${live ? '' : ' · EOD'}</div>
-    <div class="st-v" style="font-size:15px;color:${niftyTone}">${nifty != null ? `NIFTY ${nifty >= 0 ? '+' : ''}${nifty.toFixed(2)}%` : (breadthPct != null ? breadthPct.toFixed(0) + '% breadth' : '—')}</div>
+    <div class="st-v" style="font-size:17px;color:${niftyTone}">${nifty != null ? `NIFTY ${nifty >= 0 ? '+' : ''}${nifty.toFixed(2)}%` : (breadthPct != null ? breadthPct.toFixed(0) + '% breadth' : '—')}</div>
     <div class="st-d">${[
       live ? `${live.advancing}/${live.members} Nifty up · live` : (reg && reg.niftyPct != null ? 'prev close' : ''),
       breadthPct != null ? `breadth ${breadthPct.toFixed(0)}%` : '',
@@ -4675,7 +4756,7 @@ function renderStats(){
       : `No tradebook loaded, so the allocator falls back to a hardcoded ${hurdle.toFixed(2)}% when testing whether a stock's target clears costs.`;
     return `<div class="st" title="${escHtml(tip)}">
       <div class="st-l">Avg Cost</div>
-      <div class="st-v" style="font-size:15px;color:${costPct == null ? 'var(--t3)' : costPct >= 0.30 ? 'var(--amber)' : 'var(--cyan)'}">${costPct != null ? costPct.toFixed(2) + '%' : '—'}</div>
+      <div class="st-v" style="font-size:17px;color:${costPct == null ? 'var(--t3)' : costPct >= 0.30 ? 'var(--amber)' : 'var(--cyan)'}">${costPct != null ? costPct.toFixed(2) + '%' : '—'}</div>
       <div class="st-d">${costPct != null ? 'per round trip, all-in' : 'no tradebook loaded'}</div></div>`;
   })();
 
@@ -4805,7 +4886,7 @@ function makeSortableTable(id, cols, rows, defaultSortKey, defaultDir=-1, rowSty
       };
     });
   }
-  return {render,getHtml:()=>`<table id="${id}" style="width:100%;border-collapse:collapse;font-size:12px;font-family:'DM Mono',monospace"></table>`};
+  return {render,getHtml:()=>`<table id="${id}" style="width:100%;border-collapse:collapse;font-size:14px;font-family:'DM Mono',monospace"></table>`};
 }
 
 function computePerfStats(trips){
@@ -5195,7 +5276,7 @@ function panelFilterTag(all,shown,query){
   return ` <span style="font-weight:500;text-transform:none;letter-spacing:0;color:var(--t3)">· ${shown.length} of ${all.length} matching "${escHtml(q)}"</span>`;
 }
 function panelNoMatchHtml(query,noun){
-  return `<div style="padding:14px 16px;color:var(--t3);font-size:12px">No ${noun} matches "${escHtml(String(query||'').trim())}".</div>`;
+  return `<div style="padding:14px 16px;color:var(--t3);font-size:14px">No ${noun} matches "${escHtml(String(query||'').trim())}".</div>`;
 }
 
 // Latest Session — whichever source (Orders.csv or Tradebook) has the newer date.
@@ -5243,7 +5324,7 @@ function buildLatestSessionPanel(query=''){
     const latestDate=orderBooked.date||getSessionDate();
     const latestTotal=orderBooked.total;
     const latestUnknownRows=orderBooked.unknownRows||0;
-    const latestUnknownWarning=latestUnknownRows>0?` <span style="font-size:10px;color:var(--amber);font-weight:700">&#9888; excludes ${latestUnknownRows} row${latestUnknownRows===1?'':'s'} with unknown cost</span>`:'';
+    const latestUnknownWarning=latestUnknownRows>0?` <span style="font-size:12px;color:var(--amber);font-weight:700">&#9888; excludes ${latestUnknownRows} row${latestUnknownRows===1?'':'s'} with unknown cost</span>`:'';
     const rows=withRadar(filterPanelRows(allRows,query,r=>[r.sym]));
     const shownSummary=summarizeExitPnlRows(rows);
     // v1097: persist from the UNFILTERED set — the search box must never move the stored figure.
@@ -5258,7 +5339,7 @@ function buildLatestSessionPanel(query=''){
     const latestCols=[
       {key:'sym',label:'Symbol',align:'left',fmt:v=>symbolChartButton(v),clrFn:()=>'var(--t1)',bold:true,totFmt:v=>v??'',totClrFn:()=>'var(--t2)'},
       ...radarCols(_dash),
-      {key:'buyPrice',label:'Buy ₹',align:'right',fmt:(v,r)=>v!=null?Number(v).toLocaleString('en-IN',INR_2):`<span style="color:var(--amber);font-size:10px" title="Load Holdings.csv to see avg cost">avg cost?</span>`,clrFn:()=>'var(--t2)',..._dash},
+      {key:'buyPrice',label:'Buy ₹',align:'right',fmt:(v,r)=>v!=null?Number(v).toLocaleString('en-IN',INR_2):`<span style="color:var(--amber);font-size:12px" title="Load Holdings.csv to see avg cost">avg cost?</span>`,clrFn:()=>'var(--t2)',..._dash},
       {key:'sellPrice',label:'Sell ₹',align:'right',fmt:v=>Number(v).toLocaleString('en-IN',INR_2),clrFn:()=>'var(--t2)',..._dash},
       {key:'priceDiff',label:'Diff ₹',align:'right',fmt:v=>v!=null?fmtSignedINR(v).replace('₹','₹/sh '):'—',clrFn:v=>v!=null?clr(v):'var(--t3)',..._dash},
       {key:'currentPrice',label:'Now ₹',align:'right',fmt:v=>v!=null?Number(v).toLocaleString('en-IN',INR_2):'—',clrFn:()=>'var(--t2)',..._dash},
@@ -5272,8 +5353,8 @@ function buildLatestSessionPanel(query=''){
       {key:'_dp',label:'DP',align:'right',fmt:_chFmt,clrFn:_chClr,..._chTot},
       {key:'charges',label:'Total Charges',align:'right',bold:true,fmt:fmtNegINR,clrFn:()=>'var(--red)',..._chTot},
       {key:'grossPnl',label:'Gross P&L',align:'right',bold:true,fmt:v=>v!=null?fmtPerfRs(v):'—',clrFn:v=>v!=null?clr(v):'var(--t3)',..._signTot},
-      {key:'netPnl',label:'Net P&L',align:'right',bold:true,fmt:(v,r)=>v!=null?fmtPerfRs(v):`<span style="color:var(--amber);font-size:10px">unknown</span>`,clrFn:(v)=>v!=null?clr(v):'var(--amber)',..._signTot},
-      {key:'netPnlPct',label:'P&L %',align:'right',bold:true,fmt:v=>v!=null?fmtPct(v):`<span style="color:var(--amber);font-size:10px">unknown</span>`,clrFn:v=>v!=null?clr(v):'var(--amber)',totFmt:v=>v==null?'--':fmtPct(v),totClrFn:v=>v==null?'var(--t3)':v>=0?'var(--green)':'var(--red)'},
+      {key:'netPnl',label:'Net P&L',align:'right',bold:true,fmt:(v,r)=>v!=null?fmtPerfRs(v):`<span style="color:var(--amber);font-size:12px">unknown</span>`,clrFn:(v)=>v!=null?clr(v):'var(--amber)',..._signTot},
+      {key:'netPnlPct',label:'P&L %',align:'right',bold:true,fmt:v=>v!=null?fmtPct(v):`<span style="color:var(--amber);font-size:12px">unknown</span>`,clrFn:v=>v!=null?clr(v):'var(--amber)',totFmt:v=>v==null?'--':fmtPct(v),totClrFn:v=>v==null?'var(--t3)':v>=0?'var(--green)':'var(--red)'},
     ];
     const _sum=k=>rows.reduce((s,r)=>s+(r[k]||0),0);
     const latestTotals=(rows.length>1||latestUnknownRows>0)?{
@@ -5289,11 +5370,11 @@ function buildLatestSessionPanel(query=''){
     const latestTbl=makeSortableTable('rank-latest-session',latestCols,rows,'_sort',-1,null,latestTotals,'sym');
     const emptyNote=String(query||'').trim()
       ?panelNoMatchHtml(query,'booked trade')
-      :`<div style="padding:12px 16px;color:var(--t3);font-size:12px">No sell orders found in Orders.csv — only sell orders generate P&L rows.</div>`;
+      :`<div style="padding:12px 16px;color:var(--t3);font-size:14px">No sell orders found in Orders.csv — only sell orders generate P&L rows.</div>`;
     const html=card(`
       <div style="padding:10px 16px;display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:6px;border-bottom:1px solid var(--border)">
-        <span style="font-size:10px;font-weight:700;color:var(--t2);text-transform:uppercase;letter-spacing:.1em">Latest Session — ${latestDate} <span style="font-weight:400;color:var(--t3)">(Orders.csv · holdings/same-day buys)</span>${panelFilterTag(allRows,rows,query)}</span>
-        <span style="font-size:15px;font-weight:800;color:${clr(latestTotal)};font-family:'DM Mono',monospace">${allRows.length?fmtPerfRs(latestTotal):''} <span style="font-size:10px;color:var(--t3);font-weight:400">${allRows.length?'net of charges':''}</span>${latestUnknownWarning}</span>
+        <span style="font-size:12px;font-weight:700;color:var(--t2);text-transform:uppercase;letter-spacing:.1em">Latest Session — ${latestDate} <span style="font-weight:400;color:var(--t3)">(Orders.csv · holdings/same-day buys)</span>${panelFilterTag(allRows,rows,query)}</span>
+        <span style="font-size:17px;font-weight:800;color:${clr(latestTotal)};font-family:'DM Mono',monospace">${allRows.length?fmtPerfRs(latestTotal):''} <span style="font-size:12px;color:var(--t3);font-weight:400">${allRows.length?'net of charges':''}</span>${latestUnknownWarning}</span>
       </div>
       ${rows.length?`<div style="overflow-x:auto">${latestTbl.getHtml()}</div>`:emptyNote}`);
     const render=()=>{if(rows.length)latestTbl.render();};
@@ -5316,7 +5397,7 @@ function buildLatestSessionPanel(query=''){
     const _dash={totFmt:()=>'—',totClrFn:()=>'var(--t3)'};
     const _signTot={totFmt:v=>v!=null?fmtPerfRs(v):'—',totClrFn:v=>v!=null?(v>=0?'var(--green)':'var(--red)'):'var(--t3)'};
     const tbCols=[
-      {key:'sym',label:'Symbol',align:'left',fmt:v=>symbolChartButton(v,`<span style="font-weight:700;font-size:12px">${escHtml(v)}</span>`),totFmt:v=>v??'',totClrFn:()=>'var(--t2)'},
+      {key:'sym',label:'Symbol',align:'left',fmt:v=>symbolChartButton(v,`<span style="font-weight:700;font-size:14px">${escHtml(v)}</span>`),totFmt:v=>v??'',totClrFn:()=>'var(--t2)'},
       ...radarCols(_dash),
       {key:'buyPrice',label:'Buy ₹',align:'right',fmt:v=>`<span style="font-family:'DM Mono',monospace">${Number(v).toLocaleString('en-IN',INR_2)}</span>`,..._dash},
       {key:'sellPrice',label:'Sell ₹',align:'right',fmt:v=>`<span style="font-family:'DM Mono',monospace">${Number(v).toLocaleString('en-IN',INR_2)}</span>`,..._dash},
@@ -5340,15 +5421,15 @@ function buildLatestSessionPanel(query=''){
     const tbTbl=makeSortableTable('rank-latest-session',tbCols,rows,'_sort',-1,null,tbTotals,'sym');
     const html=card(`
       <div style="padding:10px 16px;display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:6px;border-bottom:1px solid var(--border)">
-        <span style="font-size:10px;font-weight:700;color:var(--t2);text-transform:uppercase;letter-spacing:.1em">Latest Session — ${tbDate} <span style="font-weight:400;color:var(--t3)">(Tradebook · charges included)</span>${panelFilterTag(allRows,rows,query)}</span>
-        <span style="font-size:15px;font-weight:800;color:${clr(tbTotal)};font-family:'DM Mono',monospace">${fmtPerfRs(tbTotal)} <span style="font-size:10px;color:var(--t3);font-weight:400">net of charges</span></span>
+        <span style="font-size:12px;font-weight:700;color:var(--t2);text-transform:uppercase;letter-spacing:.1em">Latest Session — ${tbDate} <span style="font-weight:400;color:var(--t3)">(Tradebook · charges included)</span>${panelFilterTag(allRows,rows,query)}</span>
+        <span style="font-size:17px;font-weight:800;color:${clr(tbTotal)};font-family:'DM Mono',monospace">${fmtPerfRs(tbTotal)} <span style="font-size:12px;color:var(--t3);font-weight:400">net of charges</span></span>
       </div>
       ${rows.length?`<div style="overflow-x:auto">${tbTbl.getHtml()}</div>`:panelNoMatchHtml(query,'booked trade')}`);
     const render=()=>{if(rows.length)tbTbl.render();};
     return {html,render};
   }
 
-  return {html:card(`<div style="padding:14px 16px;color:var(--t3);font-size:12px">
+  return {html:card(`<div style="padding:14px 16px;color:var(--t3);font-size:14px">
       <span style="font-weight:600;color:var(--t2)">Latest Session</span> — Upload <strong>Tradebook.csv</strong> or <strong>Orders.csv</strong> to see session P&amp;L.
     </div>`),render:()=>{}};
 }
@@ -5436,17 +5517,17 @@ function buildOpenPositionsPanel(query=''){
     {key:'daysHeld',label:'Days Held',align:'right',fmt:daysFmt,clrFn:()=>'var(--t1)'},
     // v1073: the day-1 time exit, shown next to Days Held so the two read together.
     {key:'timeExit',label:'Action',align:'left',fmt:(v,row)=>row.hitTarget
-      ? `<span style="font-size:9px;background:rgba(34,197,94,.14);color:var(--green);border-radius:5px;padding:1px 7px;white-space:nowrap" title="Trading at or above its target — the exit policy has done its job.">at target</span>`
+      ? `<span style="font-size:11px;background:rgba(34,197,94,.14);color:var(--green);border-radius:5px;padding:1px 7px;white-space:nowrap" title="Trading at or above its target — the exit policy has done its job.">at target</span>`
       : v
-        ? `<span style="font-size:9px;background:rgba(245,158,11,.14);color:var(--amber);border:1px solid rgba(245,158,11,.3);border-radius:5px;padding:1px 7px;white-space:nowrap" title="Held past its first day without reaching target. Measured on the fresh cohort: same-day resolutions made +Rs 11,743 while the 131 trips that survived past day 1 lost -Rs 6,220 between them, and picks give back 84% of their peak on average. Displayed decision only — no order is placed.">time exit</span>`
-        : `<span style="font-size:9px;color:var(--t3)">holding</span>`,
+        ? `<span style="font-size:11px;background:rgba(245,158,11,.14);color:var(--amber);border:1px solid rgba(245,158,11,.3);border-radius:5px;padding:1px 7px;white-space:nowrap" title="Held past its first day without reaching target. Measured on the fresh cohort: same-day resolutions made +Rs 11,743 while the 131 trips that survived past day 1 lost -Rs 6,220 between them, and picks give back 84% of their peak on average. Displayed decision only — no order is placed.">time exit</span>`
+        : `<span style="font-size:11px;color:var(--t3)">holding</span>`,
       clrFn:()=>''},
-    {key:'targetPrice',label:'Target ₹',align:'right',fmt:(v,row)=>v!=null?fmtINR(v)+`<span style="font-size:10px;color:var(--t3);margin-left:4px">+${Number(row.targetPct).toFixed(2)}%</span>`:'—',clrFn:()=>'var(--green)'},
-    {key:'stopPrice',label:'SL ₹',align:'right',fmt:(v,row)=>v!=null?fmtINR(v)+`<span style="font-size:10px;color:var(--t3);margin-left:4px">-${Number(row.exitPolicy?.stopPct).toFixed(2)}%</span>`:'—',clrFn:()=>'var(--red)'},
+    {key:'targetPrice',label:'Target ₹',align:'right',fmt:(v,row)=>v!=null?fmtINR(v)+`<span style="font-size:12px;color:var(--t3);margin-left:4px">+${Number(row.targetPct).toFixed(2)}%</span>`:'—',clrFn:()=>'var(--green)'},
+    {key:'stopPrice',label:'SL ₹',align:'right',fmt:(v,row)=>v!=null?fmtINR(v)+`<span style="font-size:12px;color:var(--t3);margin-left:4px">-${Number(row.exitPolicy?.stopPct).toFixed(2)}%</span>`:'—',clrFn:()=>'var(--red)'},
     {key:'tslPoints',label:'TSL pts',align:'right',bold:true,fmt:v=>v!=null?Number(v).toFixed(2):'—',clrFn:v=>v==null?'var(--t3)':'var(--amber)'},
     {key:'score',label:'Radar Score',align:'right',bold:true,fmt:v=>radarScoreCell(v),clrFn:()=>'var(--t1)'},
     {key:'rank',label:'Rank',align:'right',fmt:v=>v??'—',clrFn:()=>'var(--t2)'},
-    {key:'setup',label:'Setup',align:'left',fmt:v=>v?`<span style="font-size:11px;color:var(--t2)">${escHtml(v)}</span>`:'<span style="color:var(--t3)">not in this upload</span>'},
+    {key:'setup',label:'Setup',align:'left',fmt:v=>v?`<span style="font-size:13px;color:var(--t2)">${escHtml(v)}</span>`:'<span style="color:var(--t3)">not in this upload</span>'},
     {key:'dayPct',label:'Day %',align:'right',fmt:fPerf,clrFn:()=>'var(--t2)'},
     {key:'risk',label:'Risk',align:'left',fmt:v=>v?radarRiskPill(v):'—'}
   ];
@@ -5462,10 +5543,10 @@ function buildOpenPositionsPanel(query=''){
   const html=`<div id="rank-open-positions-card" style="background:var(--bg-card);border:1px solid var(--border);border-radius:10px;overflow:hidden">
     <div style="padding:12px 16px;border-bottom:1px solid var(--border)">
       <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:8px;margin-bottom:6px">
-        <span style="font-size:11px;font-weight:800;color:var(--t1);text-transform:uppercase;letter-spacing:.08em">Open Positions${panelFilterTag(rows,shown,query)}</span>
-        <span style="font-size:12px;font-weight:700;color:${pnlColor}">${rows.length} live position${rows.length===1?'':'s'} · ${fmtINR(totalCapital)} deployed · ${fmtSignedINR(totalPnl)}</span>
+        <span style="font-size:13px;font-weight:800;color:var(--t1);text-transform:uppercase;letter-spacing:.08em">Open Positions${panelFilterTag(rows,shown,query)}</span>
+        <span style="font-size:14px;font-weight:700;color:${pnlColor}">${rows.length} live position${rows.length===1?'':'s'} · ${fmtINR(totalCapital)} deployed · ${fmtSignedINR(totalPnl)}</span>
       </div>
-      <div style="font-size:12px;color:var(--t2);line-height:1.5">Live merge of Holdings, Positions, and today's net buys. Held stocks stay excluded from new recommendations; Target, SL, and TSL use the existing exit policy. ${radarNote}</div>
+      <div style="font-size:14px;color:var(--t2);line-height:1.5">Live merge of Holdings, Positions, and today's net buys. Held stocks stay excluded from new recommendations; Target, SL, and TSL use the existing exit policy. ${radarNote}</div>
     </div>
     ${shown.length?`<div style="overflow-x:auto">${table.getHtml()}</div>`:panelNoMatchHtml(query,'open position')}
   </div>`;
@@ -5502,7 +5583,7 @@ function buildRecommendationTrackingHTML(){
   const heatRows=Object.values(bySym).sort((a,b)=>b.n-a.n||a.bestRank-b.bestRank||(a.last<b.last?1:-1));
   const rankAlpha=r=>!r?0.22:r<=5?0.85:r<=10?0.58:r<=15?0.38:0.22;
   const CELL='width:20px;height:14px;border-radius:2px;flex:0 0 20px;';
-  const headHtml=`<div style="display:flex;gap:2px;align-items:flex-end;margin-left:96px">${issues.map(i=>`<span style="${CELL}font-size:8.5px;color:var(--t3);text-align:center;font-family:'DM Mono',monospace;height:auto" title="${i.date}">${dd(i.date)}</span>`).join('')}</div>`;
+  const headHtml=`<div style="display:flex;gap:2px;align-items:flex-end;margin-left:96px">${issues.map(i=>`<span style="${CELL}font-size:12.5px;color:var(--t3);text-align:center;font-family:'DM Mono',monospace;height:auto" title="${i.date}">${dd(i.date)}</span>`).join('')}</div>`;
   const rowsHtml=heatRows.map(row=>{
     const cells=issues.map(issue=>{
       const p=row.cells[issue.date];
@@ -5512,14 +5593,14 @@ function buildRecommendationTrackingHTML(){
       const tip=`${row.symbol} · ${issue.date} · rank ${p.rank??'—'} · score ${p.score!=null?Number(p.score).toFixed(1):'—'} · ${outcome}${p.bestHighProfitPct!=null?` · best ${pct(p.bestHighProfitPct)}`:''}`;
       return `<span style="${CELL}background:rgba(6,182,212,${rankAlpha(p.rank)});${failed?'box-shadow:inset 0 -2px 0 var(--red);':''}" title="${escHtml(tip)}"></span>`;
     }).join('');
-    return `<div style="display:flex;gap:2px;align-items:center;margin-top:2px"><span style="width:92px;flex:0 0 92px;font-size:10px;color:var(--t2);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;padding-right:4px" title="${escHtml(row.symbol)} · shortlisted ${row.n}× · best rank ${row.bestRank}">${escHtml(row.symbol)}</span>${cells}</div>`;
+    return `<div style="display:flex;gap:2px;align-items:center;margin-top:2px"><span style="width:92px;flex:0 0 92px;font-size:12px;color:var(--t2);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;padding-right:4px" title="${escHtml(row.symbol)} · shortlisted ${row.n}× · best rank ${row.bestRank}">${escHtml(row.symbol)}</span>${cells}</div>`;
   }).join('');
   const heatHtml=`
-    <div style="font-size:11px;font-weight:700;color:var(--t1);margin-bottom:2px">Shortlist tracking — rank per session</div>
-    <div style="font-size:10px;color:var(--t3);margin-bottom:8px">${heatRows.length} symbols × ${issues.length} sessions · one cell per trading day (intraday refreshes are deduped at record time) · deeper cyan = better rank</div>
+    <div style="font-size:13px;font-weight:700;color:var(--t1);margin-bottom:2px">Shortlist tracking — rank per session</div>
+    <div style="font-size:12px;color:var(--t3);margin-bottom:8px">${heatRows.length} symbols × ${issues.length} sessions · one cell per trading day (intraday refreshes are deduped at record time) · deeper cyan = better rank</div>
     ${headHtml}
     <div style="max-height:300px;overflow:auto;overflow-x:visible">${rowsHtml}</div>
-    <div style="display:flex;gap:14px;flex-wrap:wrap;align-items:center;margin-top:8px;font-size:10px;color:var(--t3)">
+    <div style="display:flex;gap:14px;flex-wrap:wrap;align-items:center;margin-top:8px;font-size:12px;color:var(--t3)">
       ${[['1–5',0.85],['6–10',0.58],['11–15',0.38],['16+',0.22]].map(([l,a])=>`<span style="display:inline-flex;align-items:center;gap:4px"><span style="width:12px;height:10px;border-radius:2px;background:rgba(6,182,212,${a})"></span>rank ${l}</span>`).join('')}
       <span style="display:inline-flex;align-items:center;gap:4px"><span style="width:12px;height:10px;border-radius:2px;background:rgba(6,182,212,.4);box-shadow:inset 0 -2px 0 var(--red)"></span>completed without a +10% move</span>
       <span style="display:inline-flex;align-items:center;gap:4px"><span style="width:12px;height:10px;border-radius:2px;background:rgba(148,163,184,.06)"></span>not shortlisted</span>
@@ -5547,7 +5628,7 @@ function buildRecommendationTrackingHTML(){
     const outcome=p.rocketDate?`rocketed d${p.rocketDays}`:p.complete?'no +10% within window':'pending';
     const tip=`${p.symbol} · rank ${p.rank??'—'} · best high ${pct(p.bestHighProfitPct)} (d${p.bestDays??'—'}) · worst ${p.worstLowProfitPct!=null?pct(p.worstLowProfitPct):'—'} · final close ${fc!=null?pct(fc):'—'} · ${outcome}`;
     return `<div style="display:flex;align-items:center;gap:8px;margin-top:3px;${p.complete?'':'opacity:.55'}" title="${escHtml(tip)}">
-      <span style="width:92px;flex:0 0 92px;font-size:10px;color:var(--t2);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;text-align:right">${escHtml(p.symbol)}</span>
+      <span style="width:92px;flex:0 0 92px;font-size:12px;color:var(--t2);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;text-align:right">${escHtml(p.symbol)}</span>
       <span style="position:relative;flex:1;height:16px">
         <span style="position:absolute;left:${X(0)};top:0;bottom:0;width:1px;background:var(--border-hi)"></span>
         <span style="position:absolute;left:${X(10)};top:0;bottom:0;width:1px;background:rgba(251,191,36,.45)"></span>
@@ -5555,18 +5636,18 @@ function buildRecommendationTrackingHTML(){
         ${bh>0?`<span style="position:absolute;left:${X(0)};width:calc(${X(bh)} - ${X(0)});top:4px;height:8px;background:var(--green);border-radius:0 4px 4px 0"></span>`:''}
         ${fc!=null?`<span style="position:absolute;left:${X(fc)};top:50%;width:8px;height:8px;margin:-4px 0 0 -4px;border-radius:50%;background:var(--t1);box-shadow:0 0 0 2px var(--bg-card)"></span>`:''}
       </span>
-      <span style="width:84px;flex:0 0 84px;font-size:10px;color:var(--t3);font-family:'DM Mono',monospace">${pct(p.bestHighProfitPct)}${p.bestDays!=null?` d${p.bestDays}`:''}</span>
+      <span style="width:84px;flex:0 0 84px;font-size:12px;color:var(--t3);font-family:'DM Mono',monospace">${pct(p.bestHighProfitPct)}${p.bestDays!=null?` d${p.bestDays}`:''}</span>
     </div>`;
   }).join('');
   const dumbHtml=`
     <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin:18px 0 2px">
-      <span style="font-size:11px;font-weight:700;color:var(--t1)">Pick outcomes after recommendation</span>
-      <select onchange="PERF_TRACK_ISSUE=this.value;renderPerformance()" style="padding:3px 8px;background:var(--bg-card);border:1px solid var(--border);border-radius:6px;color:var(--t1);font-size:11px;font-family:'DM Mono',monospace">${optHtml}</select>
-      <span style="font-size:10px;color:var(--t3)">${observed.length} observed picks · ${rocketed} rocketed${unobserved?` · ${unobserved} awaiting first next-session observation`:''}</span>
+      <span style="font-size:13px;font-weight:700;color:var(--t1)">Pick outcomes after recommendation</span>
+      <select onchange="PERF_TRACK_ISSUE=this.value;renderPerformance()" style="padding:3px 8px;background:var(--bg-card);border:1px solid var(--border);border-radius:6px;color:var(--t1);font-size:13px;font-family:'DM Mono',monospace">${optHtml}</select>
+      <span style="font-size:12px;color:var(--t3)">${observed.length} observed picks · ${rocketed} rocketed${unobserved?` · ${unobserved} awaiting first next-session observation`:''}</span>
     </div>
-    <div style="font-size:10px;color:var(--t3);margin-bottom:8px">Bar spans worst low → best high vs entry price · dot = latest close · amber line = the +10% rocket bar · dimmed rows still in their window</div>
-    ${observed.length?trackRows:`<div style="font-size:11px;color:var(--t3);padding:8px 0">No observations yet for this date — picks are first measured on the next session's upload.</div>`}
-    <div style="display:flex;gap:14px;flex-wrap:wrap;align-items:center;margin-top:8px;font-size:10px;color:var(--t3)">
+    <div style="font-size:12px;color:var(--t3);margin-bottom:8px">Bar spans worst low → best high vs entry price · dot = latest close · amber line = the +10% rocket bar · dimmed rows still in their window</div>
+    ${observed.length?trackRows:`<div style="font-size:13px;color:var(--t3);padding:8px 0">No observations yet for this date — picks are first measured on the next session's upload.</div>`}
+    <div style="display:flex;gap:14px;flex-wrap:wrap;align-items:center;margin-top:8px;font-size:12px;color:var(--t3)">
       <span style="display:inline-flex;align-items:center;gap:4px"><span style="width:12px;height:8px;border-radius:0 4px 4px 0;background:var(--green)"></span>above entry (best high)</span>
       <span style="display:inline-flex;align-items:center;gap:4px"><span style="width:12px;height:8px;border-radius:4px 0 0 4px;background:var(--red)"></span>below entry (worst low)</span>
       <span style="display:inline-flex;align-items:center;gap:4px"><span style="width:8px;height:8px;border-radius:50%;background:var(--t1);box-shadow:0 0 0 2px var(--bg-card)"></span>latest close</span>
@@ -5591,7 +5672,7 @@ function renderPerformance(){
   }
   // Latest Session and Open Positions now live on the Rankings tab (v530).
   if(!tb){
-    el.innerHTML=`<div style="padding:12px 16px"><div style="text-align:center;padding:60px 40px;color:var(--t2)"><div style="font-size:16px;font-weight:700;color:var(--t1);margin-bottom:8px">No Tradebook Loaded</div><div>Upload TRADEBOOK.csv to see performance analytics. Open Positions and Latest Session are on the Rankings tab.</div></div></div>`;
+    el.innerHTML=`<div style="padding:12px 16px"><div style="text-align:center;padding:60px 40px;color:var(--t2)"><div style="font-size:18px;font-weight:700;color:var(--t1);margin-bottom:8px">No Tradebook Loaded</div><div>Upload TRADEBOOK.csv to see performance analytics. Open Positions and Latest Session are on the Rankings tab.</div></div></div>`;
     return;
   }
 
@@ -5601,7 +5682,7 @@ function renderPerformance(){
 
   const allTripsRaw=tb.tripsData||[];
   if(!allTripsRaw.length&&tb.roundTrips>0){
-    el.innerHTML=`<div style="padding:12px 16px"><div style="text-align:center;padding:60px 40px;color:var(--t2)"><div style="font-size:16px;font-weight:700;color:var(--t1);margin-bottom:8px">Re-upload TRADEBOOK.csv</div><div>Brain has ${tb.roundTrips} trades stored in the old format. Re-upload TRADEBOOK.csv once to rebuild with full trip data.</div></div></div>`;
+    el.innerHTML=`<div style="padding:12px 16px"><div style="text-align:center;padding:60px 40px;color:var(--t2)"><div style="font-size:18px;font-weight:700;color:var(--t1);margin-bottom:8px">Re-upload TRADEBOOK.csv</div><div>Brain has ${tb.roundTrips} trades stored in the old format. Re-upload TRADEBOOK.csv once to rebuild with full trip data.</div></div></div>`;
     return;
   }
 
@@ -5801,20 +5882,20 @@ function renderPerformance(){
   const periodPills=['all','1m','3m','6m','1y'].map(p=>{
     const active=PERF_PERIOD_FILTER===p;
     const label=p==='all'?'All':p==='1m'?'1M':p==='3m'?'3M':p==='6m'?'6M':'1Y';
-    return `<button onclick="PERF_PERIOD_FILTER='${p}';renderPerformance()" style="padding:5px 14px;border-radius:20px;border:1px solid ${active?'var(--amber)':'var(--border)'};background:${active?'rgba(251,191,36,.15)':'transparent'};color:${active?'var(--amber)':'var(--t3)'};font-size:12px;font-weight:${active?700:500};cursor:pointer">${label}</button>`;
+    return `<button onclick="PERF_PERIOD_FILTER='${p}';renderPerformance()" style="padding:5px 14px;border-radius:20px;border:1px solid ${active?'var(--amber)':'var(--border)'};background:${active?'rgba(251,191,36,.15)':'transparent'};color:${active?'var(--amber)':'var(--t3)'};font-size:14px;font-weight:${active?700:500};cursor:pointer">${label}</button>`;
   }).join('');
   const periodPillsHtml=`<div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:16px">
-    <span style="font-size:11px;color:var(--t3);font-weight:600;text-transform:uppercase;letter-spacing:.06em">Period</span>
+    <span style="font-size:13px;color:var(--t3);font-weight:600;text-transform:uppercase;letter-spacing:.06em">Period</span>
     ${periodPills}
   </div>`;
 
   const perfCard=(title,content,maxH,id)=>`
     <div ${id?`id="${id}" `:''}style="background:var(--bg-card);border:1px solid var(--border);border-radius:10px;margin-top:12px;overflow:hidden">
-      <div style="padding:10px 16px;font-size:10px;font-weight:700;color:var(--t2);text-transform:uppercase;letter-spacing:.1em;border-bottom:1px solid var(--border)">${title}</div>
+      <div style="padding:10px 16px;font-size:12px;font-weight:700;color:var(--t2);text-transform:uppercase;letter-spacing:.1em;border-bottom:1px solid var(--border)">${title}</div>
       <div style="overflow:auto${maxH?';max-height:'+maxH:''}">${content}</div>
     </div>`;
 
-  const _navLink=(id,label,show)=>show?`<a href="#${id}" onclick="event.preventDefault();scrollToSection('${id}')" style="padding:4px 12px;border-radius:6px;background:var(--bg-card);border:1px solid var(--border);color:var(--t2);font-size:11px;font-weight:600;text-decoration:none;cursor:pointer;white-space:nowrap">${label}</a>`:'';
+  const _navLink=(id,label,show)=>show?`<a href="#${id}" onclick="event.preventDefault();scrollToSection('${id}')" style="padding:4px 12px;border-radius:6px;background:var(--bg-card);border:1px solid var(--border);color:var(--t2);font-size:13px;font-weight:600;text-decoration:none;cursor:pointer;white-space:nowrap">${label}</a>`:'';
   const perfNav=`<nav style="position:sticky;top:var(--hdr-h,72px);z-index:50;background:var(--bg);padding:8px 0 10px;margin-bottom:8px;display:flex;gap:6px;flex-wrap:wrap;border-bottom:1px solid var(--border);box-shadow:0 2px 8px rgba(0,0,0,0.3);overflow-x:auto;-webkit-overflow-scrolling:touch">
     ${_navLink('perf-kpi','📊 KPIs',true)}
     ${_navLink('perf-monthly','📅 Monthly',monthRows.length>0)}
@@ -5838,16 +5919,16 @@ function renderPerformance(){
   try{trackingHtml=buildRecommendationTrackingHTML();}catch(e){console.warn('Recommendation tracking viz failed',e);}
   const outcomeHtml=perfCard('Recommendation Outcome Feedback',
     trackingHtml
-    +`<div style="padding:14px 16px;color:var(--t2);font-size:12px;line-height:1.7"><div><strong style="color:var(--t1)">Actual entries:</strong> ${entryOutcomeText}</div><div style="margin-top:8px"><strong style="color:var(--t1)">Eligible shortlist:</strong> ${outcomeText}</div><div style="margin-top:8px"><strong style="color:var(--t1)">Same-day exit opportunity:</strong> ${escapeText}</div><div style="margin-top:8px;color:var(--t3)">Earlier trading-day feature states versus the later current 1D top-1% outcome train raw rocket relevance. Completed shortlist and executed-entry outcomes are shown as confidence context only, while tradebook costs plus hard high-move outcomes refine sizing, review timing, and the single Harvest target.</div></div>`,'','perf-outcomes');
+    +`<div style="padding:14px 16px;color:var(--t2);font-size:14px;line-height:1.7"><div><strong style="color:var(--t1)">Actual entries:</strong> ${entryOutcomeText}</div><div style="margin-top:8px"><strong style="color:var(--t1)">Eligible shortlist:</strong> ${outcomeText}</div><div style="margin-top:8px"><strong style="color:var(--t1)">Same-day exit opportunity:</strong> ${escapeText}</div><div style="margin-top:8px;color:var(--t3)">Earlier trading-day feature states versus the later current 1D top-1% outcome train raw rocket relevance. Completed shortlist and executed-entry outcomes are shown as confidence context only, while tradebook costs plus hard high-move outcomes refine sizing, review timing, and the single Harvest target.</div></div>`,'','perf-outcomes');
 
   el.innerHTML=`
     <div style="padding:12px 16px">
       ${perfNav}
       ${periodPillsHtml}
-      <div style="font-size:10px;color:var(--t3);margin-bottom:12px">${periodLabel} · ${p.roundTrips} lots</div>
+      <div style="font-size:12px;color:var(--t3);margin-bottom:12px">${periodLabel} · ${p.roundTrips} lots</div>
       <div id="perf-kpi">${kpiHtml}</div>
       ${monthRows.length?perfCard('Monthly Breakdown',monthTbl.getHtml(),'','perf-monthly'):''}
-      ${hasTradeWindows?perfCard(`Time-of-day Outcomes — Diagnostic Only <span style="font-size:10px;color:var(--t3);font-weight:400">${timingModel.episodeCount} distinct entries · ${timingModel.entryDays} entry days · clock windows only · descriptive, never a recommendation rule</span>`,timingTbl.getHtml(),'','perf-trade-windows'):''}
+      ${hasTradeWindows?perfCard(`Time-of-day Outcomes — Diagnostic Only <span style="font-size:12px;color:var(--t3);font-weight:400">${timingModel.episodeCount} distinct entries · ${timingModel.entryDays} entry days · clock windows only · descriptive, never a recommendation rule</span>`,timingTbl.getHtml(),'','perf-trade-windows'):''}
       ${p.symBreakdown.length?perfCard('Stocks',symTbl.getHtml(),'360px','perf-stocks'):''}
       ${outcomeHtml}
     </div>`;
@@ -5863,7 +5944,7 @@ function schedulePerformanceRender(){
   if(PERF_RENDER_QUEUED) return;
   PERF_RENDER_QUEUED=true;
   const el=document.getElementById('perfContent');
-  if(el&&!PERF_RENDERED) el.innerHTML=`<div style="text-align:center;padding:60px 40px;color:var(--t2)"><div style="font-size:34px;margin-bottom:14px">📈</div><div style="font-size:15px;font-weight:700;color:var(--t1);margin-bottom:8px">Calculating performance</div><div>Rankings are ready while trade analytics finish in the background.</div></div>`;
+  if(el&&!PERF_RENDERED) el.innerHTML=`<div style="text-align:center;padding:60px 40px;color:var(--t2)"><div style="font-size:38px;margin-bottom:14px">📈</div><div style="font-size:17px;font-weight:700;color:var(--t1);margin-bottom:8px">Calculating performance</div><div>Rankings are ready while trade analytics finish in the background.</div></div>`;
   idleTask(()=>{
     PERF_RENDER_QUEUED=false;
     if(document.visibilityState==='hidden'){
@@ -6044,8 +6125,8 @@ function buildHardFilterMethodologyHTML(E){
   });
   const hfCols=[
     {key:'criteria',label:'REG1 Column',align:'left',
-      fmt:(v,r)=>`<span style="font-size:11px;color:${r.active?'var(--t1)':'var(--t3)'}">${escHtml(v)}${r.inactiveNote?`<div style="font-size:10px;color:var(--red);margin-top:2px">${r.inactiveNote}</div>`:''}</span>`,
-      totFmt:()=>`<span style="font-size:11px;color:var(--t2);font-weight:700">Total</span>`},
+      fmt:(v,r)=>`<span style="font-size:13px;color:${r.active?'var(--t1)':'var(--t3)'}">${escHtml(v)}${r.inactiveNote?`<div style="font-size:12px;color:var(--red);margin-top:2px">${r.inactiveNote}</div>`:''}</span>`,
+      totFmt:()=>`<span style="font-size:13px;color:var(--t2);font-weight:700">Total</span>`},
     {key:'flagged',label:'Flagged',align:'right',
       fmt:(v,r)=>r.active?`<span style="color:${v>0?'var(--amber)':'var(--t3)'};font-weight:700;font-family:'DM Mono',monospace">${(v||0).toLocaleString()}</span>`:'&mdash;',
       totFmt:(v)=>`<span style="color:var(--amber);font-weight:700;font-family:'DM Mono',monospace">${(v||0).toLocaleString()}</span>`},
@@ -6056,7 +6137,7 @@ function buildHardFilterMethodologyHTML(E){
       fmt:(v,r)=>v==null?'&mdash;':`<span style="color:${v<0?'var(--red)':v>0?'var(--green)':'var(--t3)'};font-weight:700;font-family:'DM Mono',monospace" title="Current unrealised P&L as a capital-weighted percentage across ${r.heldCount||0} held stock${(r.heldCount||0)===1?'':'s'} currently flagged by this REG1 column">${v>=0?'+':''}${v.toFixed(2)}%</span>`,
       totFmt:()=>`<span title="Rule-level P&L overlaps when a holding has multiple REG1 flags, so there is no P&L total.">&mdash;</span>`},
     {key:'ruleKey',label:'',align:'right',
-      fmt:(v,r)=>`<button onclick="removeSurvRule('${v}')" style="padding:4px 8px;border-radius:6px;border:1px solid rgba(239,68,68,.3);background:rgba(239,68,68,.08);color:var(--red);font-size:10px;font-weight:700;cursor:pointer">Remove</button>`,
+      fmt:(v,r)=>`<button onclick="removeSurvRule('${v}')" style="padding:4px 8px;border-radius:6px;border:1px solid rgba(239,68,68,.3);background:rgba(239,68,68,.08);color:var(--red);font-size:12px;font-weight:700;cursor:pointer">Remove</button>`,
       totFmt:()=>''},
   ];
   const hfTotalsFlagged=hfRows.reduce((s,r)=>s+(r.active?(r.flagged||0):0),0);
@@ -6066,21 +6147,21 @@ function buildHardFilterMethodologyHTML(E){
 
   const survActiveThisSession=SURV_HEADERS.length>0;
   const survMeta=survActiveThisSession
-    ? `<div style="font-size:11px;color:var(--t3);margin-top:8px">REG1 file active this session. Configured rules above are a hard filter — flagged stocks are removed from Rankings entirely. Every other flagged REG1 column still subtracts up to 12 points from the Radar composite score and appears on the stock's ⚠ badge.</div>`
-    : `<div style="margin-top:8px;padding:8px 10px;background:rgba(239,68,68,.08);border:1px solid rgba(239,68,68,.25);border-radius:8px;font-size:11px;color:var(--red)">NSE REG1 data not active — surveillance rules cannot filter until a REG1 file is loaded.</div>`;
+    ? `<div style="font-size:13px;color:var(--t3);margin-top:8px">REG1 file active this session. Configured rules above are a hard filter — flagged stocks are removed from Rankings entirely. Every other flagged REG1 column still subtracts up to 12 points from the Radar composite score and appears on the stock's ⚠ badge.</div>`
+    : `<div style="margin-top:8px;padding:8px 10px;background:rgba(239,68,68,.08);border:1px solid rgba(239,68,68,.25);border-radius:8px;font-size:13px;color:var(--red)">NSE REG1 data not active — surveillance rules cannot filter until a REG1 file is loaded.</div>`;
 
   return `
     <h3 id="meth-filters" style="margin-top:28px">Surveillance Hard Filters (NSE REG1)</h3>
-    <p style="color:var(--t3);font-size:11px;margin-bottom:10px">Each row is an exact REG1 column. Any stock flagged under a configured column is weeded out of Rankings, basket selection, and outcome tracking. Exchange series, status and price band separately govern basket eligibility.</p>
+    <p style="color:var(--t3);font-size:13px;margin-bottom:10px">Each row is an exact REG1 column. Any stock flagged under a configured column is weeded out of Rankings, basket selection, and outcome tracking. Exchange series, status and price band separately govern basket eligibility.</p>
     <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:8px">
-      <input id="survRuleInput" type="text" placeholder="${SURV_HEADERS.length?'Type to search REG1 columns…':'Load NSE ZIP to enable suggestions'}" list="survRuleDatalist" onkeydown="if(event.key==='Enter'){event.preventDefault();addSurvRule();}" style="flex:1;min-width:260px;padding:9px 12px;background:var(--bg-card);border:1px solid var(--border);border-radius:8px;color:var(--t1);font-size:12px;outline:none">
+      <input id="survRuleInput" type="text" placeholder="${SURV_HEADERS.length?'Type to search REG1 columns…':'Load NSE ZIP to enable suggestions'}" list="survRuleDatalist" onkeydown="if(event.key==='Enter'){event.preventDefault();addSurvRule();}" style="flex:1;min-width:260px;padding:9px 12px;background:var(--bg-card);border:1px solid var(--border);border-radius:8px;color:var(--t1);font-size:14px;outline:none">
       <datalist id="survRuleDatalist">${datalistHtml}</datalist>
       <button class="btn" onclick="addSurvRule()" style="font-weight:700">+ Add Rule</button>
     </div>
     <div style="background:var(--bg-card);border:1px solid var(--border);border-radius:10px;overflow:hidden">
       <div style="overflow-x:auto">${_methTbls.hf.getHtml()}</div>
     </div>
-    <div style="font-size:10px;color:var(--t3);margin-top:7px">Held P&L is live, unrealised P&L for your currently held stocks flagged by that exact REG1 column. A stock with multiple flags appears in each relevant row, so rule-level P&L is not totalled.</div>
+    <div style="font-size:12px;color:var(--t3);margin-top:7px">Held P&L is live, unrealised P&L for your currently held stocks flagged by that exact REG1 column. A stock with multiple flags appears in each relevant row, so rule-level P&L is not totalled.</div>
     ${survMeta}
     ${buildSurvCorrHTML()}
   `;
@@ -6167,7 +6248,7 @@ function buildSurvCorrHTML(){
     else if(!hasHoldings) msg='Load <strong>Holdings.csv</strong> to start accumulating surveillance P&amp;L correlation.';
     else if(!hasSurv) msg='Load <strong>NSE ZIP</strong> this session to start accumulating — REG1 surveillance file needed.';
     else msg='None of your held stocks are currently flagged in surveillance — accumulator activates when a held position appears on the REG1 list.';
-    return `<div style="padding:12px 14px;background:rgba(148,163,184,.06);border:1px solid var(--border);border-radius:8px;font-size:12px;color:var(--t3);margin-top:12px">${msg}</div>`;
+    return `<div style="padding:12px 14px;background:rgba(148,163,184,.06);border:1px solid var(--border);border-radius:8px;font-size:14px;color:var(--t3);margin-top:12px">${msg}</div>`;
   }
   const staleNote='';
   // Build held-position pills per surveillance column (col name → pills HTML)
@@ -6208,26 +6289,26 @@ function buildSurvCorrHTML(){
     const heldPills=stocks.map(({sym,pnlPct})=>{
       const pnlColor=pnlPct>=0?'var(--green)':'var(--red)';
       const pnlStr=pnlPct!=null?(pnlPct>=0?'+':'')+pnlPct.toFixed(1)+'%':'—';
-      return `<span style="display:inline-flex;align-items:center;gap:4px;background:rgba(239,68,68,.1);border:1px solid rgba(239,68,68,.2);border-radius:4px;padding:2px 6px;margin:2px 3px 2px 0;white-space:nowrap;font-family:'DM Mono',monospace"><span style="font-weight:700;color:var(--amber);font-size:11px">${escHtml(sym)}</span><span style="color:${pnlColor};font-size:10px">${pnlStr}</span></span>`;
+      return `<span style="display:inline-flex;align-items:center;gap:4px;background:rgba(239,68,68,.1);border:1px solid rgba(239,68,68,.2);border-radius:4px;padding:2px 6px;margin:2px 3px 2px 0;white-space:nowrap;font-family:'DM Mono',monospace"><span style="font-weight:700;color:var(--amber);font-size:13px">${escHtml(sym)}</span><span style="color:${pnlColor};font-size:12px">${pnlStr}</span></span>`;
     }).join('');
     return {col:r.col,sessions:r.sessions,lastCount:r.lastCount,winRate:r.winRate,avgPnl:r.avgPnl,pnlRs:r.pnlRs,pnlPct:r.pnlPct,
       verdict,_conf:conf,_maxSess:maxSess,heldPills,_heldCount:stocks.length,_addBtn:0};
   });
   const scCols=[
-    {key:'col',label:'Surveillance Column',align:'left',fmt:(v)=>`<span style="font-size:11px" title="${escHtml(v)}">${escHtml(v)}</span>`},
+    {key:'col',label:'Surveillance Column',align:'left',fmt:(v)=>`<span style="font-size:13px" title="${escHtml(v)}">${escHtml(v)}</span>`},
     {key:'lastCount',label:'Holdings Flagged',align:'right',fmt:(v)=>`<span style="color:var(--t3);font-family:'DM Mono',monospace">${v}</span>`},
     {key:'pnlRs',label:'Unrealised P&L ₹',align:'right',fmt:(v)=>`<span style="color:${v<0?'var(--red)':v>0?'var(--green)':'var(--t3)'};font-weight:700;font-family:'DM Mono',monospace" title="Total current unrealised P&L in rupees across holdings currently flagged by this column">${fmtSignedINR(v)}</span>`},
     {key:'pnlPct',label:'Unrealised P&L %',align:'right',fmt:(v)=>`<span style="color:${v<0?'var(--red)':v>0?'var(--green)':'var(--t3)'};font-weight:700;font-family:'DM Mono',monospace" title="Capital-weighted current unrealised P&L percentage across holdings currently flagged by this column">${v>=0?'+':''}${v.toFixed(2)}%</span>`},
     {key:'verdict',label:'Signal',align:'left',fmt:(v)=>`<span style="color:${v.startsWith('🚫')?'var(--red)':v.startsWith('✅')?'var(--green)':'var(--amber)'};font-weight:700">${v}</span>`},
-    {key:'heldPills',label:'Held Positions',align:'left',fmt:(v,row)=>v||`<span style="color:var(--t3);font-size:11px">—</span>`},
-    {key:'_addBtn',label:'',align:'right',fmt:(v,row)=>`<button onclick="addSurvRule(${escHtml(JSON.stringify(row.col))})" style="padding:4px 8px;border-radius:6px;border:1px solid rgba(34,197,94,.3);background:rgba(34,197,94,.08);color:var(--green);font-size:10px;font-weight:700;cursor:pointer">Add</button>`},
+    {key:'heldPills',label:'Held Positions',align:'left',fmt:(v,row)=>v||`<span style="color:var(--t3);font-size:13px">—</span>`},
+    {key:'_addBtn',label:'',align:'right',fmt:(v,row)=>`<button onclick="addSurvRule(${escHtml(JSON.stringify(row.col))})" style="padding:4px 8px;border-radius:6px;border:1px solid rgba(34,197,94,.3);background:rgba(34,197,94,.08);color:var(--green);font-size:12px;font-weight:700;cursor:pointer">Add</button>`},
   ];
   _methTbls.sc=makeSortableTable('tbl-sc',scCols,scRows,'pnlPct',1); // worst weighted P&L% first
   return `
-    <h4 id="meth-surv-corr" style="margin:16px 0 6px;font-size:13px;color:var(--t2)">📊 Surveillance P&L Correlation
-      <button onclick="if(confirm('Reset surveillance correlation accumulator?')){SURV_CORR_ACC={};SURV_CORR_LAST_TAG=null;FS.set(SURV_CORR_STORE,{});_refreshHFSection();}" style="margin-left:12px;padding:3px 8px;border-radius:6px;border:1px solid var(--border);background:none;color:var(--t3);font-size:10px;cursor:pointer">Reset</button>
+    <h4 id="meth-surv-corr" style="margin:16px 0 6px;font-size:15px;color:var(--t2)">📊 Surveillance P&L Correlation
+      <button onclick="if(confirm('Reset surveillance correlation accumulator?')){SURV_CORR_ACC={};SURV_CORR_LAST_TAG=null;FS.set(SURV_CORR_STORE,{});_refreshHFSection();}" style="margin-left:12px;padding:3px 8px;border-radius:6px;border:1px solid var(--border);background:none;color:var(--t3);font-size:12px;cursor:pointer">Reset</button>
     </h4>
-    <p style="font-size:11px;color:var(--t3);margin-bottom:8px">For each surveillance column, shows the total current unrealised P&L in ₹ and the capital-weighted unrealised P&L% of your <em>currently held stocks</em> flagged by that column. A deep negative P&L% means those flagged holdings are underwater. Signal = 🚫 Filter when weighted P&L% &lt; −0.5%. A stock with several flags appears in each relevant rule row, so rows are not totalled.</p>
+    <p style="font-size:13px;color:var(--t3);margin-bottom:8px">For each surveillance column, shows the total current unrealised P&L in ₹ and the capital-weighted unrealised P&L% of your <em>currently held stocks</em> flagged by that column. A deep negative P&L% means those flagged holdings are underwater. Signal = 🚫 Filter when weighted P&L% &lt; −0.5%. A stock with several flags appears in each relevant rule row, so rows are not totalled.</p>
     ${staleNote}
     <div style="background:var(--bg-card);border:1px solid var(--border);border-radius:10px;overflow:hidden">
       <div style="overflow-x:auto">${_methTbls.sc.getHtml()}</div>
@@ -6239,11 +6320,11 @@ function renderMethodology(){
   catch(err){
     console.error('renderMethodology error:',err);
     const mc=document.getElementById('methContent');
-    if(mc) mc.innerHTML=`<div style="padding:20px;background:rgba(239,68,68,.08);border:1px solid rgba(239,68,68,.3);border-radius:10px;color:var(--red);font-family:'DM Mono',monospace;font-size:12px"><strong>Methodology render error</strong><pre style="margin-top:10px;white-space:pre-wrap;font-size:11px;color:var(--t2)">${escHtml(err&&err.stack||String(err))}</pre></div>`;
+    if(mc) mc.innerHTML=`<div style="padding:20px;background:rgba(239,68,68,.08);border:1px solid rgba(239,68,68,.3);border-radius:10px;color:var(--red);font-family:'DM Mono',monospace;font-size:14px"><strong>Methodology render error</strong><pre style="margin-top:10px;white-space:pre-wrap;font-size:13px;color:var(--t2)">${escHtml(err&&err.stack||String(err))}</pre></div>`;
   }
 }
 function buildRadarLedgerHTML(){
-  if(!RADAR.headers.length) return '<p style="color:var(--t3);font-size:12px">Load files to audit every screener column. The ledger is rebuilt from each fresh upload.</p>';
+  if(!RADAR.headers.length) return '<p style="color:var(--t3);font-size:14px">Load files to audit every screener column. The ledger is rebuilt from each fresh upload.</p>';
   const byIndex=new Map(RADAR.features.map(f=>[f.i,f]));
   const rowsCount=RADAR.matrix.length||1;
   const ledgerRows=RADAR.headers.map((h,i)=>{
@@ -6256,7 +6337,7 @@ function buildRadarLedgerHTML(){
     else if(/ - Currency$/.test(h))use='Unit metadata; zero weight when constant';
     else if(f){use=radarIsPriceLevel(h)?'Converted to % distance from current price, then ranked':'Winsorized and cross-sectionally percentile-ranked';group=RADAR_GROUPS[f.group].label;w=f.weight;sep=f.diagnosticEffect??f.effect;}
     else use=cov===0?'Empty in this snapshot; retained in audit':'Constant, sparse, or non-numeric; retained in audit';
-    return `<tr><td style="font-family:'Plus Jakarta Sans',sans-serif;font-weight:600;color:var(--t1);white-space:normal;min-width:230px">${escHtml(h)}</td><td style="font-size:11px;color:var(--t2)">${escHtml(use)}</td><td style="font-size:10px;color:var(--cyan);text-transform:uppercase;font-weight:700">${group}</td><td style="font-weight:700">${w?w.toFixed(3):'0'}</td><td><span style="display:inline-block;width:7px;height:7px;border-radius:50%;margin-right:5px;background:${cov>.9?'var(--green)':cov>.5?'var(--amber)':'var(--red)'}"></span>${(cov*100).toFixed(0)}%</td><td>${sep===null?'—':`<span class="${sep>=0?'pos':'neg'}">${sep>=0?'+':''}${(sep*100).toFixed(1)} pp</span>`}</td></tr>`;
+    return `<tr><td style="font-family:'Plus Jakarta Sans',sans-serif;font-weight:600;color:var(--t1);white-space:normal;min-width:230px">${escHtml(h)}</td><td style="font-size:13px;color:var(--t2)">${escHtml(use)}</td><td style="font-size:12px;color:var(--cyan);text-transform:uppercase;font-weight:700">${group}</td><td style="font-weight:700">${w?w.toFixed(3):'0'}</td><td><span style="display:inline-block;width:7px;height:7px;border-radius:50%;margin-right:5px;background:${cov>.9?'var(--green)':cov>.5?'var(--amber)':'var(--red)'}"></span>${(cov*100).toFixed(0)}%</td><td>${sep===null?'—':`<span class="${sep>=0?'pos':'neg'}">${sep>=0?'+':''}${(sep*100).toFixed(1)} pp</span>`}</td></tr>`;
   }).join('');
   return `<div class="corr-wrap"><table class="ct"><thead><tr><th>Column / Feature</th><th>Use</th><th>Group</th><th>Model Weight</th><th>Coverage</th><th>Today-Rocket Separation</th></tr></thead><tbody>${ledgerRows}</tbody></table></div>`;
 }
@@ -6264,25 +6345,25 @@ function buildIndicatorWatchHTML(){
   let w;try{w=evaluateIndicatorWatch();}catch(e){return '';}
   const resolved=w.resolvedSessions||0;
   const collecting=resolved<IW_MIN_SESSIONS;
-  const head=`<h3 id="meth-watch" style="margin-top:28px">Indicator Watch <span style="font-size:12px;color:var(--t3);font-weight:400">automatic orientation guardrail</span></h3>`;
-  const intro=`<p style="color:var(--t2);font-size:12.5px;line-height:1.7">Each accepted session the system records where every liquid stock (turnover ≥ ₹25L) sits on every direction-testable indicator, then ${IW_WINDOW} sessions later checks whether the end the model <em>rewards</em> actually held more of the movers — or fewer. It keeps a rolling ${IW_LOG_MAX}-session tally per indicator and flags one only when it looks backwards on <strong>both</strong> a +5% and a +10% forward move, past a strict bar corrected for watching so many at once. Nothing changes automatically — a flag is a note to bring to review before inverting anything.</p>`;
+  const head=`<h3 id="meth-watch" style="margin-top:28px">Indicator Watch <span style="font-size:14px;color:var(--t3);font-weight:400">automatic orientation guardrail</span></h3>`;
+  const intro=`<p style="color:var(--t2);font-size:14.5px;line-height:1.7">Each accepted session the system records where every liquid stock (turnover ≥ ₹25L) sits on every direction-testable indicator, then ${IW_WINDOW} sessions later checks whether the end the model <em>rewards</em> actually held more of the movers — or fewer. It keeps a rolling ${IW_LOG_MAX}-session tally per indicator and flags one only when it looks backwards on <strong>both</strong> a +5% and a +10% forward move, past a strict bar corrected for watching so many at once. Nothing changes automatically — a flag is a note to bring to review before inverting anything.</p>`;
   if(collecting){
-    return `${head}${intro}<div style="background:var(--bg-card);border:1px solid var(--border);border-radius:10px;padding:14px 18px;font-size:12px;color:var(--t2)">⏳ Collecting evidence — <strong>${resolved}/${IW_MIN_SESSIONS}</strong> resolved sessions (need ${IW_MIN_SESSIONS} before any warning; ${w.pending} snapshot${w.pending===1?'':'s'} awaiting their ${IW_WINDOW}-session resolution). No orientation warnings until enough forward data exists.</div>`;
+    return `${head}${intro}<div style="background:var(--bg-card);border:1px solid var(--border);border-radius:10px;padding:14px 18px;font-size:14px;color:var(--t2)">⏳ Collecting evidence — <strong>${resolved}/${IW_MIN_SESSIONS}</strong> resolved sessions (need ${IW_MIN_SESSIONS} before any warning; ${w.pending} snapshot${w.pending===1?'':'s'} awaiting their ${IW_WINDOW}-session resolution). No orientation warnings until enough forward data exists.</div>`;
   }
   if(!w.flags.length){
-    return `${head}${intro}<div style="background:var(--bg-card);border:1px solid rgba(34,197,94,.25);border-radius:10px;padding:14px 18px;font-size:12px;color:var(--t2)">✓ No indicator is backwards on both outcomes over the last ${resolved} resolved sessions (${w.testable} indicators have enough samples to test). Every direction-testable prior is oriented consistently with the forward evidence.</div>`;
+    return `${head}${intro}<div style="background:var(--bg-card);border:1px solid rgba(34,197,94,.25);border-radius:10px;padding:14px 18px;font-size:14px;color:var(--t2)">✓ No indicator is backwards on both outcomes over the last ${resolved} resolved sessions (${w.testable} indicators have enough samples to test). Every direction-testable prior is oriented consistently with the forward evidence.</div>`;
   }
   const rows=w.flags.map(f=>{
     const dir=f.sign>0?'rewards its HIGH end':'rewards its LOW end';
     return `<tr>
       <td style="font-weight:700;color:var(--t1)">${escHtml(f.name)}</td>
-      <td style="font-size:11px;color:var(--t2)">prior ${dir}</td>
+      <td style="font-size:13px;color:var(--t2)">prior ${dir}</td>
       <td style="color:var(--red);font-weight:700;font-family:'DM Mono',monospace">${f.e5.mean>0?'+':''}${f.e5.mean} (n${f.e5.n})</td>
       <td style="color:var(--red);font-weight:700;font-family:'DM Mono',monospace">${f.e10.mean>0?'+':''}${f.e10.mean} (n${f.e10.n})</td>
     </tr>`;
   }).join('');
   return `${head}${intro}
-    <div style="background:rgba(239,68,68,.06);border:1px solid rgba(239,68,68,.3);border-radius:10px;padding:12px 16px;margin-bottom:10px;font-size:12px;color:var(--t1)"><strong>⚠ ${w.flags.length} indicator${w.flags.length===1?'':'s'} looks backwards over the last ${resolved} sessions.</strong> The rewarded end held <em>fewer</em> movers on both +5% and +10%. Bring these to review — inverting a prior is a deliberate, logged code change, never automatic.</div>
+    <div style="background:rgba(239,68,68,.06);border:1px solid rgba(239,68,68,.3);border-radius:10px;padding:12px 16px;margin-bottom:10px;font-size:14px;color:var(--t1)"><strong>⚠ ${w.flags.length} indicator${w.flags.length===1?'':'s'} looks backwards over the last ${resolved} sessions.</strong> The rewarded end held <em>fewer</em> movers on both +5% and +10%. Bring these to review — inverting a prior is a deliberate, logged code change, never automatic.</div>
     <div style="overflow-x:auto"><table class="ct" style="min-width:620px"><thead><tr><th>Indicator</th><th>Prior orientation</th><th title="Mean forward decile gap (mover minus non-mover), normalized; negative vs the rewarded end = backwards">+5% forward gap</th><th>+10% forward gap</th></tr></thead><tbody>${rows}</tbody></table></div>`;
 }
 function _renderMethodologyInner(){
@@ -6299,17 +6380,17 @@ function _renderMethodologyInner(){
   const hardFiltersHTML=buildHardFilterMethodologyHTML(ENGINE_DATA);
   mc.innerHTML=`
     <nav style="position:sticky;top:var(--hdr-h,72px);z-index:50;background:var(--bg);padding:8px 0 10px;margin-bottom:8px;display:flex;gap:6px;flex-wrap:wrap;border-bottom:1px solid var(--border);box-shadow:0 2px 8px rgba(0,0,0,0.3);overflow-x:auto;-webkit-overflow-scrolling:touch">
-      <a href="#meth-scoring" onclick="event.preventDefault();scrollToSection('meth-scoring')" style="padding:4px 12px;border-radius:6px;background:var(--bg-card);border:1px solid var(--border);color:var(--t2);font-size:11px;font-weight:600;text-decoration:none;cursor:pointer">⚙ Scoring System</a>
-      <a href="#meth-ledger" onclick="event.preventDefault();scrollToSection('meth-ledger')" style="padding:4px 12px;border-radius:6px;background:var(--bg-card);border:1px solid var(--border);color:var(--t2);font-size:11px;font-weight:600;text-decoration:none;cursor:pointer">📒 Feature Ledger</a>
-      <a href="#meth-watch" onclick="event.preventDefault();scrollToSection('meth-watch')" style="padding:4px 12px;border-radius:6px;background:var(--bg-card);border:1px solid var(--border);color:var(--t2);font-size:11px;font-weight:600;text-decoration:none;cursor:pointer">🧭 Indicator Watch</a>
-      <a href="#meth-filters" onclick="event.preventDefault();scrollToSection('meth-filters')" style="padding:4px 12px;border-radius:6px;background:var(--bg-card);border:1px solid var(--border);color:var(--t2);font-size:11px;font-weight:600;text-decoration:none;cursor:pointer">🛡 Surveillance</a>
-      <a href="#meth-guide" onclick="event.preventDefault();scrollToSection('meth-guide')" style="padding:4px 12px;border-radius:6px;background:var(--bg-card);border:1px solid var(--border);color:var(--t2);font-size:11px;font-weight:600;text-decoration:none;cursor:pointer">📖 Use & Risk</a>
+      <a href="#meth-scoring" onclick="event.preventDefault();scrollToSection('meth-scoring')" style="padding:4px 12px;border-radius:6px;background:var(--bg-card);border:1px solid var(--border);color:var(--t2);font-size:13px;font-weight:600;text-decoration:none;cursor:pointer">⚙ Scoring System</a>
+      <a href="#meth-ledger" onclick="event.preventDefault();scrollToSection('meth-ledger')" style="padding:4px 12px;border-radius:6px;background:var(--bg-card);border:1px solid var(--border);color:var(--t2);font-size:13px;font-weight:600;text-decoration:none;cursor:pointer">📒 Feature Ledger</a>
+      <a href="#meth-watch" onclick="event.preventDefault();scrollToSection('meth-watch')" style="padding:4px 12px;border-radius:6px;background:var(--bg-card);border:1px solid var(--border);color:var(--t2);font-size:13px;font-weight:600;text-decoration:none;cursor:pointer">🧭 Indicator Watch</a>
+      <a href="#meth-filters" onclick="event.preventDefault();scrollToSection('meth-filters')" style="padding:4px 12px;border-radius:6px;background:var(--bg-card);border:1px solid var(--border);color:var(--t2);font-size:13px;font-weight:600;text-decoration:none;cursor:pointer">🛡 Surveillance</a>
+      <a href="#meth-guide" onclick="event.preventDefault();scrollToSection('meth-guide')" style="padding:4px 12px;border-radius:6px;background:var(--bg-card);border:1px solid var(--border);color:var(--t2);font-size:13px;font-weight:600;text-decoration:none;cursor:pointer">📖 Use & Risk</a>
     </nav>
     <h3 id="meth-scoring">Radar Composite — Same-Day Transparent Scoring</h3>
     <p><strong>Evidence boundary:</strong> one day's cross-section cannot train or validate a forward outcome. A <strong>rocket</strong> means a stock that reached its own target before its own stop within ${ROCKET_HORIZON_DAYS} trading days — a FORWARD, path-dependent label that does not exist at scan time, so it never sets a feature's direction or weight. The score is a transparent relative ranking built from robust market-wide normalization and engineered priors; the rocket separation is measured for audit only. It is a research screener, not investment advice.</p>
     <div class="m-grid">
       <div class="m-card"><h4>Composite Architecture</h4><p>Every informative screener column enters through a typed transformation, a robust percentile, and a budgeted feature group. Exchange reports add authoritative series, price band, status, delivery, trades, 52-week range, surveillance and deal context.</p><div class="rr-groups" style="margin-top:10px">${groupsHTML}</div></div>
-      <div class="m-card"><h4>What the Score Does</h4><ol style="padding-left:18px;color:var(--t2);font-size:12px;line-height:1.7">
+      <div class="m-card"><h4>What the Score Does</h4><ol style="padding-left:18px;color:var(--t2);font-size:14px;line-height:1.7">
         <li>Winsorizes transformed numeric inputs at the 2nd and 98th percentiles.</li>
         <li>Converts values to ranks across the uploaded universe, preventing unit scale from dominating.</li>
         <li>Reports each feature’s separation between today’s day-1 rockets (reached target before stop) and the rest for audit, but never feeds that same-session label back into the score.</li>
@@ -6321,20 +6402,20 @@ function _renderMethodologyInner(){
       <div class="m-card"><h4>Held Suppression & Basket</h4><p>Held positions (Holdings + Positions + today's net Orders buys) never re-enter the buy ranking. Quantities come from the charge-aware score-weighted allocator and can never exceed 0.10% of that stock's daily rupee turnover; missing turnover blocks a market order. Every exported order gets its own target from that stock's ATR/range capacity blended with the portfolio target anchor, plus its own ATR-scaled stop inside the existing ${SL_MIN_PCT.toFixed(1)}%–${SL_MAX_PCT.toFixed(1)}% risk rails.</p></div>
       <div class="m-card"><h4>What Still Learns</h4><p>The scorer itself is stateless by design. The execution layer keeps learning portfolio context from your results: the target anchor from later attainable highs, the fallback stop and review horizon from realised outcomes, and the same-day exit diagnostic from your sells against that day's highs. Max Allocation is arithmetic, not learned risk sizing: Capital divided by average positions entered per day.</p></div>
     </div>
-    <h3 id="meth-ledger" style="margin-top:28px">Feature Ledger <span style="font-size:12px;color:var(--t3);font-weight:400">(${RADAR.features.length||0} modeled of ${RADAR.headers.length||0} columns)</span></h3>
+    <h3 id="meth-ledger" style="margin-top:28px">Feature Ledger <span style="font-size:14px;color:var(--t3);font-weight:400">(${RADAR.features.length||0} modeled of ${RADAR.headers.length||0} columns)</span></h3>
     ${buildRadarLedgerHTML()}
     ${buildIndicatorWatchHTML()}
     <div id="meth-hf-wrap">${hardFiltersHTML}</div>
     <h3 id="meth-guide" style="margin-top:28px">Use & Risk</h3>
     <div class="m-grid">
-      <div class="m-card"><h4>Entry Workflow</h4><ol style="padding-left:18px;color:var(--t2);font-size:12px;line-height:1.7">
+      <div class="m-card"><h4>Entry Workflow</h4><ol style="padding-left:18px;color:var(--t2);font-size:14px;line-height:1.7">
         <li>Upload a screener snapshot at a consistent time.</li>
         <li>Start with liquid, low- or medium-risk names whose top contributions span several groups.</li>
         <li>Reject candidates driven by one heroic feature, corporate-action distortions, circuits, stale prints, surveillance restrictions, or news you have not checked.</li>
         <li>Demand confirmation: hold above VWAP/opening range, participation that persists, and a pre-defined invalidation price.</li>
         <li>Cap position size from account risk, not from enthusiasm. Enthusiasm has never met a denominator it respected.</li>
       </ol></div>
-      <div class="m-card"><h4>Interpretation</h4><ul style="padding-left:18px;color:var(--t2);font-size:12px;line-height:1.7">
+      <div class="m-card"><h4>Interpretation</h4><ul style="padding-left:18px;color:var(--t2);font-size:14px;line-height:1.7">
         ${RADAR_SCORE_BANDS.map(b=>`<li><b style="color:${b.color}">${b.range}:</b> ${b.note}</li>`).join('')}
         <li>The score is ordinal and cross-sectional. A score of 90 does not mean a 90% chance.</li>
         <li>A real probability model needs many dated snapshots and their next-day outcomes; the surviving outcome stores collect exactly that execution evidence.</li>
@@ -7234,34 +7315,34 @@ function allocationSubline(am,unitLabel='shares'){
     ? ` Risks ${fmtINR(am.riskRs)} if its ${Number(am.stopDistancePct).toFixed(2)}% stop is hit.`
     : '';
   if(am?.limitReason==='risk cap'){
-    return `<div style="font-size:9px;color:var(--cyan);margin-top:1px" title="Sized down to fit the Risk ₹/trade budget at this stock's own ${Number(am.stopDistancePct).toFixed(2)}% stop.${riskTip}">risk cap · ${am.qty} ${unitLabel} · risk ${fmtINR(am.riskRs)}</div>`;
+    return `<div style="font-size:11px;color:var(--cyan);margin-top:1px" title="Sized down to fit the Risk ₹/trade budget at this stock's own ${Number(am.stopDistancePct).toFixed(2)}% stop.${riskTip}">risk cap · ${am.qty} ${unitLabel} · risk ${fmtINR(am.riskRs)}</div>`;
   }
   if(am?.limitReason==='top-up average cost'){
     // v1070: an add to a stock already in profit, sized so the blended average stays below the
     // new entry's own stop. A zero here means the existing average has no cushion left.
-    return `<div style="font-size:9px;color:#f472b6;margin-top:1px" title="You already hold this at a profit. The add is sized so the blended average cost stays below this entry's own stop price — if the stop is hit, the combined position is still not at a loss.${riskTip}">📌 top-up capped · ${am.qty} ${unitLabel}</div>`;
+    return `<div style="font-size:11px;color:#f472b6;margin-top:1px" title="You already hold this at a profit. The add is sized so the blended average cost stays below this entry's own stop price — if the stop is hit, the combined position is still not at a loss.${riskTip}">📌 top-up capped · ${am.qty} ${unitLabel}</div>`;
   }
   if(am?.limitReason==='turnover'){
-    return `<div style="font-size:9px;color:var(--amber);margin-top:1px" title="Market-impact rail: allocation is capped at 0.10% of daily turnover (${fmtINR(am.liquidityCap)}), then rounded down to whole ${unitLabel}.${riskTip}">turnover cap · ${am.qty} ${unitLabel}</div>`;
+    return `<div style="font-size:11px;color:var(--amber);margin-top:1px" title="Market-impact rail: allocation is capped at 0.10% of daily turnover (${fmtINR(am.liquidityCap)}), then rounded down to whole ${unitLabel}.${riskTip}">turnover cap · ${am.qty} ${unitLabel}</div>`;
   }
   const sizedBy=am?.limitReason==='risk weight'
     ? `Sized by Radar score ÷ this stock's ${Number(am.stopDistancePct).toFixed(2)}% stop, so equally-scored names carry equal rupee risk.`
     : 'Capped by the Max Allocation rail.';
-  return `<div style="font-size:9px;color:var(--t3);margin-top:1px" title="${sizedBy}${riskTip}">${am.qty} ${unitLabel}${am?.riskRs>0?` · risk ${fmtINR(am.riskRs)}`:''}</div>`;
+  return `<div style="font-size:11px;color:var(--t3);margin-top:1px" title="${sizedBy}${riskTip}">${am.qty} ${unitLabel}${am?.riskRs>0?` · risk ${fmtINR(am.riskRs)}`:''}</div>`;
 }
 function recomputeAlloc(){
   const capital=getEffectiveCapital();
-  if(!capital){document.querySelectorAll('.alloc-cell').forEach(el=>el.innerHTML='<span style="color:var(--t3);font-size:11px">—</span>');return;}
+  if(!capital){document.querySelectorAll('.alloc-cell').forEach(el=>el.innerHTML='<span style="color:var(--t3);font-size:13px">—</span>');return;}
   const selList=FILT.filter(s=>SELECTED.has(s.symbol));
   const allocMap=computeAlloc(capital, selList);
   const unitLabel='shares';
   document.querySelectorAll('.alloc-cell').forEach(el=>{
     const sym=el.dataset.sym;
-    if(!SELECTED.has(sym)){el.innerHTML='<span style="color:var(--t3);font-size:11px">—</span>';return;}
+    if(!SELECTED.has(sym)){el.innerHTML='<span style="color:var(--t3);font-size:13px">—</span>';return;}
     const am=allocMap[sym];
-    if(!am){el.innerHTML='<span style="color:var(--red);font-size:10px" title="The score, Max Allocation, or 0.10% turnover cap is below one share.">cap below 1 share</span>';return;}
-    if(am.rejected){el.innerHTML=`<span style="color:var(--red);font-size:10px" title="${escHtml(am.reason||'Stock-specific target cannot clear costs and desired net.')}">no viable target</span>`;return;}
-    el.innerHTML=`<span style="color:var(--amber);font-weight:700;font-family:'DM Mono',monospace;font-size:12px">${fmtINR(am.alloc)}</span>${allocationSubline(am,unitLabel)}`;
+    if(!am){el.innerHTML='<span style="color:var(--red);font-size:12px" title="The score, Max Allocation, or 0.10% turnover cap is below one share.">cap below 1 share</span>';return;}
+    if(am.rejected){el.innerHTML=`<span style="color:var(--red);font-size:12px" title="${escHtml(am.reason||'Stock-specific target cannot clear costs and desired net.')}">no viable target</span>`;return;}
+    el.innerHTML=`<span style="color:var(--amber);font-weight:700;font-family:'DM Mono',monospace;font-size:14px">${fmtINR(am.alloc)}</span>${allocationSubline(am,unitLabel)}`;
   });
   renderBasketSummary();
 }
@@ -7297,7 +7378,7 @@ function renderHead(){
           <input type="checkbox" id="chk-all" ${allChecked?'checked':''} ${timingBlocked?'disabled':''} title="${timingBlocked?escHtml(CURRENT_TRADE_TIMING.reason):'Select / deselect all for the basket export'}"
             style="width:14px;height:14px;accent-color:var(--amber);cursor:${timingBlocked?'not-allowed':'pointer'}"
             onchange="toggleSelectAll(this.checked)">
-          <span style="font-size:7px;color:var(--t3);letter-spacing:.3px;font-weight:700;text-transform:uppercase">Export</span>
+          <span style="font-size:11px;color:var(--t3);letter-spacing:.3px;font-weight:700;text-transform:uppercase">Export</span>
         </div>
       </th>`;
     }
@@ -7335,7 +7416,7 @@ function fPerf(v){
 
 function radarRiskPill(risk){
   const cls=risk==='Low'?'pill-green':risk==='Medium'?'pill-amber':'pill-red';
-  return `<span class="info-pill ${cls}" style="padding:2px 8px;font-size:10px">${escHtml(risk||'—')}</span>`;
+  return `<span class="info-pill ${cls}" style="padding:2px 8px;font-size:12px">${escHtml(risk||'—')}</span>`;
 }
 // v555 market-cycle stage pill. Colour = quality of the stage: accumulation/re-accumulation green,
 // breakout/second-leg cyan, event/profit-booking amber.
@@ -7343,13 +7424,13 @@ function radarStagePill(r){
   if(!r||!r.stage) return '';
   const c={1:'var(--green)',5:'var(--green)',2:'var(--cyan)',6:'var(--cyan)',3:'var(--amber)',4:'var(--amber)'}[r.stage]||'var(--t3)';
   const t={1:'Silent accumulation — quiet strength before a move (a higher-quality candidate)',5:'Re-accumulation — quiet, holding above its 50-day MA after digesting a result',2:'Initial breakout — fresh high-volume move through resistance',6:'Second leg — breakout with an already-established trend, the event behind it',3:'Event day — today’s move may be event-driven and less pattern-reliable',4:'Profit-booking — digesting a recent result'+(r.daysSinceEarnings!=null?` (${r.daysSinceEarnings}d since results)`:'')}[r.stage]||'';
-  return `<span style="font-size:8px;font-weight:700;border-radius:4px;padding:1px 5px;color:${c};border:1px solid ${c};white-space:nowrap;cursor:help" title="${escHtml(t)}">${escHtml(r.stageLabel||'')}</span>`;
+  return `<span style="font-size:12px;font-weight:700;border-radius:4px;padding:1px 5px;color:${c};border:1px solid ${c};white-space:nowrap;cursor:help" title="${escHtml(t)}">${escHtml(r.stageLabel||'')}</span>`;
 }
 function radarSeriesBandPill(s){
   const ok=s.basketEligible!==false;
   const band=s.band!=null?s.band+'%':'No band';
   const title=ok?'Active EQ security; eligible for the Zerodha basket.':'Ineligible for the basket: '+escHtml((s.gateReasons||[]).slice(0,3).join(', ')||'exchange eligibility');
-  return `<span class="info-pill ${ok?'pill-green':'pill-red'}" style="padding:2px 8px;font-size:10px" title="${title}">${escHtml(s.series||'—')} · ${band}</span>`;
+  return `<span class="info-pill ${ok?'pill-green':'pill-red'}" style="padding:2px 8px;font-size:12px" title="${title}">${escHtml(s.series||'—')} · ${band}</span>`;
 }
 function renderTable(){
   const capital=getEffectiveCapital();
@@ -7373,20 +7454,20 @@ function renderTable(){
       chk:`<td style="text-align:center"><input type="checkbox" ${isSelected?'checked':''} ${canBuy?'':'disabled'} style="width:14px;height:14px;accent-color:var(--amber);cursor:${canBuy?'pointer':'not-allowed'}" onclick="event.stopPropagation()" onchange="toggleStock('${s.symbol}',this.checked)" title="${canBuy?'Include in the Zerodha basket export':'Ineligible for the basket'}"></td>`,
       rank:`<td style="font-family:'DM Mono',monospace;font-weight:800;color:var(--t1);text-align:right">${s.rank??'—'}</td>`,
       score:`<td>${radarScoreCell(s.score,'Relative same-day composite score (0-100 percentile, top-weighted). It is a ranking, not a probability.')}</td>`,
-      symbol:`<td style="font-family:'Plus Jakarta Sans',sans-serif"><button type="button" onclick='event.stopPropagation();openTradingViewChart(${JSON.stringify(String(s.symbol))})' style="padding:0;border:0;background:transparent;color:inherit;text-align:left;cursor:pointer" title="Open TradingView chart"><div style="font-weight:700;font-size:13px;color:var(--t1)">${escHtml(s.symbol)}${(()=>{const flags=s.meta?.flags||[];if(!flags.length)return '';return `<span style="font-size:8px;background:rgba(239,68,68,.15);color:var(--red);border-radius:4px;padding:1px 5px;margin-left:5px;font-weight:700;vertical-align:middle" title="NSE surveillance flags: ${escHtml(flags.join(' · '))}">⚠ ${flags.length}</span>`;})()}${s._held?`<span style="font-size:8px;background:rgba(244,114,182,.15);color:#f472b6;border-radius:4px;padding:1px 5px;margin-left:5px;font-weight:700;vertical-align:middle" title="You already hold this. Held stocks stay in the ranking (v1070) and can be recommended again — buying here ADDS to the existing position.">📌 held</span>`:''}${s.entryReady===false?`<span style="font-size:8px;background:rgba(245,158,11,.15);color:var(--amber);border-radius:4px;padding:1px 5px;margin-left:5px;font-weight:700;vertical-align:middle" title="${escHtml('Extended: '+(s.entryTiming?.reason||'upper-range entry')+'. Shown for context only — since v1075 this no longer withholds the stock. A forward test (28-Jul close to 29-Jul, n=1618) found extension predicted CONTINUATION: the 100-150% range-used bucket returned +1.40% next day against +0.75% for unblocked stocks.')}">⚡ extended</span>`:''}${s.preResults?.drift?`<span style="font-size:8px;background:rgba(34,197,94,.15);color:var(--green);border-radius:4px;padding:1px 5px;margin-left:5px;font-weight:700;vertical-align:middle" title="${escHtml(`Results in ${s.preResults.daysToResults} trading session(s) (${s.preResults.resultsDate}, source: ${s.preResults.resultsSource}) and the stock drifted up quietly into it — ${s.preResults.driftPct>0?'+':''}${Number(s.preResults.driftPct).toFixed(2)}% over the ${s.preResults.driftSource||'prior sessions'}, up today, with no volume ignition. Measured 2026-08-05 (RULES.md R15): of stocks reporting within 2 days, those drifting UP hit +5% at 12.3% against a 4.9% market rate, while 0 of 30 drifting DOWN did. REPORTED ONLY — this sets no score term until R15 clears 3 confirms across 2 sessions. NB magnitude is not yet thresholded: PROTEAN and KSB both drifted marginally up and still fell ~8%.`)}">📅 pre-results</span>`:''}</div><div style="font-size:9px;color:var(--t3);max-width:220px;overflow:hidden;text-overflow:ellipsis">${escHtml(s.name||'')}</div></button></td>`,
-      setup:`<td style="font-size:11px;color:var(--t2)">${escHtml(s.setup||'—')}${s.stage?' '+radarStagePill(s):''}</td>`,
+      symbol:`<td style="font-family:'Plus Jakarta Sans',sans-serif"><button type="button" onclick='event.stopPropagation();openTradingViewChart(${JSON.stringify(String(s.symbol))})' style="padding:0;border:0;background:transparent;color:inherit;text-align:left;cursor:pointer" title="Open TradingView chart"><div style="font-weight:700;font-size:15px;color:var(--t1)">${escHtml(s.symbol)}${(()=>{const flags=s.meta?.flags||[];if(!flags.length)return '';return `<span style="font-size:12px;background:rgba(239,68,68,.15);color:var(--red);border-radius:4px;padding:1px 5px;margin-left:5px;font-weight:700;vertical-align:middle" title="NSE surveillance flags: ${escHtml(flags.join(' · '))}">⚠ ${flags.length}</span>`;})()}${s._held?`<span style="font-size:12px;background:rgba(244,114,182,.15);color:#f472b6;border-radius:4px;padding:1px 5px;margin-left:5px;font-weight:700;vertical-align:middle" title="You already hold this. Held stocks stay in the ranking (v1070) and can be recommended again — buying here ADDS to the existing position.">📌 held</span>`:''}${s.entryReady===false?`<span style="font-size:12px;background:rgba(245,158,11,.15);color:var(--amber);border-radius:4px;padding:1px 5px;margin-left:5px;font-weight:700;vertical-align:middle" title="${escHtml('Extended: '+(s.entryTiming?.reason||'upper-range entry')+'. Shown for context only — since v1075 this no longer withholds the stock. A forward test (28-Jul close to 29-Jul, n=1618) found extension predicted CONTINUATION: the 100-150% range-used bucket returned +1.40% next day against +0.75% for unblocked stocks.')}">⚡ extended</span>`:''}${s.preResults?.drift?`<span style="font-size:12px;background:rgba(34,197,94,.15);color:var(--green);border-radius:4px;padding:1px 5px;margin-left:5px;font-weight:700;vertical-align:middle" title="${escHtml(`Results in ${s.preResults.daysToResults} trading session(s) (${s.preResults.resultsDate}, source: ${s.preResults.resultsSource}) and the stock drifted up quietly into it — ${s.preResults.driftPct>0?'+':''}${Number(s.preResults.driftPct).toFixed(2)}% over the ${s.preResults.driftSource||'prior sessions'}, up today, with no volume ignition. Measured 2026-08-05 (RULES.md R15): of stocks reporting within 2 days, those drifting UP hit +5% at 12.3% against a 4.9% market rate, while 0 of 30 drifting DOWN did. REPORTED ONLY — this sets no score term until R15 clears 3 confirms across 2 sessions. NB magnitude is not yet thresholded: PROTEAN and KSB both drifted marginally up and still fell ~8%.`)}">📅 pre-results</span>`:''}</div><div style="font-size:11px;color:var(--t3);max-width:220px;overflow:hidden;text-overflow:ellipsis">${escHtml(s.name||'')}</div></button></td>`,
+      setup:`<td style="font-size:13px;color:var(--t2)">${escHtml(s.setup||'—')}${s.stage?' '+radarStagePill(s):''}</td>`,
       series:`<td>${radarSeriesBandPill(s)}</td>`,
       stretch:`<td style="color:${stretchColor};font-weight:700" title="A 10% move is this many multiples of the strongest daily-range estimate. Lower is more feasible.">${s.stretch!=null&&isFinite(s.stretch)?Number(s.stretch).toFixed(1)+'×':'—'}</td>`,
       price:`<td>${fmtINR(s.price)}</td>`,
-      day:`<td>${fPerf(s.day??s.priceChange)}${s.corpAction?`<span title="Corporate action (${escHtml(s.corpAction)}) — mechanical ex-date move, neutralised in scoring" style="font-size:9px;color:var(--amber);margin-left:4px;cursor:help">⚑</span>`:''}</td>`,
+      day:`<td>${fPerf(s.day??s.priceChange)}${s.corpAction?`<span title="Corporate action (${escHtml(s.corpAction)}) — mechanical ex-date move, neutralised in scoring" style="font-size:11px;color:var(--amber);margin-left:4px;cursor:help">⚑</span>`:''}</td>`,
       relvol:`<td>${s.relvol!=null&&isFinite(s.relvol)?Number(s.relvol).toFixed(2)+'×':'—'}</td>`,
       turnover:`<td>${fV(s.turnover)}</td>`,
       tgt:`<td style="color:${exitPolicy.viable?'var(--green)':'var(--red)'};font-weight:700" title="${escHtml(exitPolicy.viable?`${exitPolicy.targetSource}; portfolio anchor ${exitPolicy.anchorPct?.toFixed(2)??'—'}%`:`Stock capacity ${exitPolicy.capacityPct?.toFixed(2)??'—'}% cannot clear the ${exitPolicy.minGrossPct?.toFixed(2)??'—'}% cost + net hurdle`)}">${exitPolicy.viable&&exitPolicy.targetPct!=null?'+'+exitPolicy.targetPct.toFixed(2)+'%':'—'}</td>`,
       sl:`<td style="color:var(--red);font-weight:700" title="${escHtml(exitPolicy.stopSource+(exitPolicy.rewardRisk!=null?` · reward:risk ${exitPolicy.rewardRisk.toFixed(2)} (target ${exitPolicy.targetPct}% vs stop ${exitPolicy.stopPct.toFixed(2)}%)`+(exitPolicy.rewardRisk<1?' — BELOW 1.0: this stock risks more than it aims to make':''):''))}">−${exitPolicy.stopPct.toFixed(2)}%</td>`,
       alloc:`<td class="alloc-cell" data-sym="${s.symbol}">${(()=>{
-        if(!am) return '<span style="color:var(--t3);font-size:11px">—</span>';
-        if(am.rejected) return `<span style="color:var(--red);font-size:10px" title="${escHtml(am.reason||'Stock-specific target cannot clear costs and desired net.')}">no viable target</span>`;
-        return `<span style="color:var(--amber);font-weight:700;font-family:'DM Mono',monospace;font-size:12px">${fmtINR(am.alloc)}</span>${allocationSubline(am,unitLabel)}`;
+        if(!am) return '<span style="color:var(--t3);font-size:13px">—</span>';
+        if(am.rejected) return `<span style="color:var(--red);font-size:12px" title="${escHtml(am.reason||'Stock-specific target cannot clear costs and desired net.')}">no viable target</span>`;
+        return `<span style="color:var(--amber);font-weight:700;font-family:'DM Mono',monospace;font-size:14px">${fmtINR(am.alloc)}</span>${allocationSubline(am,unitLabel)}`;
       })()}</td>`,
       risk:`<td>${radarRiskPill(s.risk)}</td>`
     };
@@ -7611,44 +7692,44 @@ function buildRemovedPanel(query=''){
   const rowsHtml=view.map(r=>{
     const s=r.s;
     const reason=r.reason==='direction'
-      ?`<span style="font-size:9px;background:rgba(239,68,68,.12);color:var(--red);border:1px solid rgba(239,68,68,.25);border-radius:5px;padding:1px 7px;white-space:nowrap" title="${escHtml(r.detail||'')}">📉 Not lifting off</span>`
+      ?`<span style="font-size:11px;background:rgba(239,68,68,.12);color:var(--red);border:1px solid rgba(239,68,68,.25);border-radius:5px;padding:1px 7px;white-space:nowrap" title="${escHtml(r.detail||'')}">📉 Not lifting off</span>`
       :r.reason==='filter'
-      ?`<span style="font-size:9px;background:rgba(148,163,184,.10);color:var(--t2);border:1px solid rgba(148,163,184,.22);border-radius:5px;padding:1px 7px;white-space:nowrap" title="${escHtml(r.detail||'')}">⚙ Your filter</span>`
+      ?`<span style="font-size:11px;background:rgba(148,163,184,.10);color:var(--t2);border:1px solid rgba(148,163,184,.22);border-radius:5px;padding:1px 7px;white-space:nowrap" title="${escHtml(r.detail||'')}">⚙ Your filter</span>`
       :r.reason==='held'
-      ?`<span style="font-size:9px;background:rgba(244,114,182,.12);color:#f472b6;border:1px solid rgba(244,114,182,.25);border-radius:5px;padding:1px 7px;white-space:nowrap">📌 Held · in Open Positions</span>`
+      ?`<span style="font-size:11px;background:rgba(244,114,182,.12);color:#f472b6;border:1px solid rgba(244,114,182,.25);border-radius:5px;padding:1px 7px;white-space:nowrap">📌 Held · in Open Positions</span>`
       :r.reason==='alloc'
-        ?`<span style="font-size:9px;background:rgba(148,163,184,.12);color:var(--t2);border:1px solid rgba(148,163,184,.28);border-radius:5px;padding:1px 7px;white-space:nowrap" title="${escHtml(r.detail||'')}">🚫 Cannot allocate</span>`
+        ?`<span style="font-size:11px;background:rgba(148,163,184,.12);color:var(--t2);border:1px solid rgba(148,163,184,.28);border-radius:5px;padding:1px 7px;white-space:nowrap" title="${escHtml(r.detail||'')}">🚫 Cannot allocate</span>`
       :r.reason==='peak'
-        ?`<span style="font-size:9px;background:rgba(245,158,11,.12);color:var(--amber);border:1px solid rgba(245,158,11,.3);border-radius:5px;padding:1px 7px;white-space:nowrap" title="${escHtml(r.s.entryTiming?.reason||'Entry timing is not confirmed')} · range location ${fmt(r.s.entryTiming?.rangeLocation,0)}% · expected range used ${fmt(r.s.entryTiming?.rangeUsed,0)}%${r.s.entryTiming?.pullbackPrice?` · wait near/below ${fmtINR(r.s.entryTiming.pullbackPrice)}`:''}">⏳ ${escHtml(r.s.entryTiming?.action||'Wait for confirmation')}</span>`
-        :(()=>{const labels=survRuleLabels(r.rules);return `<span style="font-size:9px;background:rgba(239,68,68,.12);color:var(--red);border:1px solid rgba(239,68,68,.25);border-radius:5px;padding:1px 7px;white-space:nowrap" title="Configured surveillance rule(s): ${escHtml(labels.join(' · '))}">⚠ ${escHtml(labels[0]||'surveillance')}${labels.length>1?` +${labels.length-1}`:''}</span>`;})();
+        ?`<span style="font-size:11px;background:rgba(245,158,11,.12);color:var(--amber);border:1px solid rgba(245,158,11,.3);border-radius:5px;padding:1px 7px;white-space:nowrap" title="${escHtml(r.s.entryTiming?.reason||'Entry timing is not confirmed')} · range location ${fmt(r.s.entryTiming?.rangeLocation,0)}% · expected range used ${fmt(r.s.entryTiming?.rangeUsed,0)}%${r.s.entryTiming?.pullbackPrice?` · wait near/below ${fmtINR(r.s.entryTiming.pullbackPrice)}`:''}">⏳ ${escHtml(r.s.entryTiming?.action||'Wait for confirmation')}</span>`
+        :(()=>{const labels=survRuleLabels(r.rules);return `<span style="font-size:11px;background:rgba(239,68,68,.12);color:var(--red);border:1px solid rgba(239,68,68,.25);border-radius:5px;padding:1px 7px;white-space:nowrap" title="Configured surveillance rule(s): ${escHtml(labels.join(' · '))}">⚠ ${escHtml(labels[0]||'surveillance')}${labels.length>1?` +${labels.length-1}`:''}</span>`;})();
     // Same interaction as every other stock table (owner, v1070): the NAME opens the
     // TradingView chart, the ROW opens the Radar scoring breakdown.
     return `<tr onclick="showRadarDetail('${s.symbol}')" title="Click for the full scoring breakdown" style="border-bottom:1px solid var(--border);cursor:pointer">
       <td style="padding:6px 10px;text-align:right;font-family:'DM Mono',monospace;color:var(--t2)">#${s.rank??'—'}</td>
-      <td style="padding:6px 10px">${symbolChartButton(s.symbol,`<span style="font-weight:700;color:var(--t1);font-size:12px">${escHtml(s.symbol)}</span> <span style="color:var(--t3);font-size:10px">${escHtml((s.name||'').slice(0,28))}</span>`)}</td>
+      <td style="padding:6px 10px">${symbolChartButton(s.symbol,`<span style="font-weight:700;color:var(--t1);font-size:14px">${escHtml(s.symbol)}</span> <span style="color:var(--t3);font-size:12px">${escHtml((s.name||'').slice(0,28))}</span>`)}</td>
       <td style="padding:6px 10px;text-align:right">${radarScoreCell(s.score)}</td>
       <td style="padding:6px 10px;text-align:right">${fPerf(s.day??s.priceChange)}</td>
       <td style="padding:6px 10px">${reason}</td>
     </tr>`;
   }).join('');
   const tag=query&&shown.length!==all.length?` <span style="font-weight:500;text-transform:none;letter-spacing:0;color:var(--t3)">· ${shown.length} of ${all.length} matching "${escHtml(query)}"</span>`:'';
-  const capNote=shown.length>CAP?`<div style="padding:6px 10px;font-size:10px;color:var(--t3)">Showing the top ${CAP} by rank · ${shown.length-CAP} more removed further down the ranking.</div>`:'';
+  const capNote=shown.length>CAP?`<div style="padding:6px 10px;font-size:12px;color:var(--t3)">Showing the top ${CAP} by rank · ${shown.length-CAP} more removed further down the ranking.</div>`:'';
   // Always visible, no collapse, no internal scroll (owner v547) — the page scrolls. Capped
   // at the top 100 by rank so the DOM stays bounded; it sits last on the Rankings tab.
   const body=shown.length
-    ?`<div><table style="width:100%;border-collapse:collapse;font-size:12px">
+    ?`<div><table style="width:100%;border-collapse:collapse;font-size:14px">
         <thead><tr style="color:var(--t3);border-bottom:1px solid var(--border)">
-          <th style="padding:6px 10px;text-align:right;font-size:10px;text-transform:uppercase">Rank</th>
-          <th style="padding:6px 10px;text-align:left;font-size:10px;text-transform:uppercase">Symbol</th>
-          <th style="padding:6px 10px;text-align:right;font-size:10px;text-transform:uppercase">Score</th>
-          <th style="padding:6px 10px;text-align:right;font-size:10px;text-transform:uppercase">Day %</th>
-          <th style="padding:6px 10px;text-align:left;font-size:10px;text-transform:uppercase">Reason removed</th>
+          <th style="padding:6px 10px;text-align:right;font-size:12px;text-transform:uppercase">Rank</th>
+          <th style="padding:6px 10px;text-align:left;font-size:12px;text-transform:uppercase">Symbol</th>
+          <th style="padding:6px 10px;text-align:right;font-size:12px;text-transform:uppercase">Score</th>
+          <th style="padding:6px 10px;text-align:right;font-size:12px;text-transform:uppercase">Day %</th>
+          <th style="padding:6px 10px;text-align:left;font-size:12px;text-transform:uppercase">Reason removed</th>
         </tr></thead><tbody>${rowsHtml}</tbody></table></div>${capNote}`
     :panelNoMatchHtml(query,'removed stock');
   return `<div id="rank-removed-card" style="background:var(--bg-card);border:1px solid var(--border);border-radius:10px;overflow:hidden">
     <div style="padding:10px 16px;border-bottom:1px solid var(--border)">
-      <span style="font-size:10px;font-weight:700;color:var(--t2);text-transform:uppercase;letter-spacing:.1em">Removed from rankings — ${all.length}${tag}</span>
-      <span style="font-size:11px;color:var(--t3);font-weight:400;margin-left:8px">${[dirN?`📉 ${dirN} not lifting off`:'',heldN?`📌 ${heldN} held`:'',survN?`⚠ ${survN} surveillance`:'',peakN?`⏳ ${peakN} waiting for entry confirmation`:'',allocN?`🚫 ${allocN} not allocatable`:'',filtN?`⚙ ${filtN} by your filters`:''].filter(Boolean).join(' · ')}${(heldN||survN||peakN||allocN||dirN||filtN)?' · ':''}why the ranks skip</span>
+      <span style="font-size:12px;font-weight:700;color:var(--t2);text-transform:uppercase;letter-spacing:.1em">Removed from rankings — ${all.length}${tag}</span>
+      <span style="font-size:13px;color:var(--t3);font-weight:400;margin-left:8px">${[dirN?`📉 ${dirN} not lifting off`:'',heldN?`📌 ${heldN} held`:'',survN?`⚠ ${survN} surveillance`:'',peakN?`⏳ ${peakN} waiting for entry confirmation`:'',allocN?`🚫 ${allocN} not allocatable`:'',filtN?`⚙ ${filtN} by your filters`:''].filter(Boolean).join(' · ')}${(heldN||survN||peakN||allocN||dirN||filtN)?' · ':''}why the ranks skip</span>
     </div>
     ${body}
   </div>`;
@@ -7673,13 +7754,13 @@ function showRadarDetail(sym){
   if(bm)eventBits.push(`board meeting ${escHtml(bm.date)}${bm.isResults?' — results':''}${bm.date===getSessionDate()?' <b>(today)</b>':''}`);
   if(r.meta?.announceToday)eventBits.push(`announcement filed today: ${escHtml(String(r.meta.announceToday))}`);
   const corpNote=eventBits.length?` <b style="color:var(--amber)">Events:</b> ${eventBits.join('; ')}.`:'';
-  const detailNote=(r.contrib||[]).length?'':'<div style="color:var(--amber);font-size:11px;margin-bottom:8px">Restored compact ranking — load files again for the full per-feature breakdown.</div>';
+  const detailNote=(r.contrib||[]).length?'':'<div style="color:var(--amber);font-size:13px;margin-bottom:8px">Restored compact ranking — load files again for the full per-feature breakdown.</div>';
   document.getElementById('radarDetailBody').innerHTML=`${detailNote}<div class="rr-groups">${groups}</div>
     <div class="rr-read"><b>Exchange check:</b> Series ${escHtml(r.series||'—')}, price band ${r.band??'not supplied'}, status ${escHtml(r.status||'—')}; basket ${r.basketEligible!==false?'eligible':'ineligible'}. Official delivery ${r.meta?.delivery==null?'unavailable':fmt(r.meta.delivery,1)+'%'}, trades ${r.meta?.trades==null?'unavailable':fmt(r.meta.trades,0)}, surveillance flags: ${flags}.${corpNote}<br>
     <b>Feasibility:</b> ${gate} Strongest daily range estimate ${fmt(r.rangePct,2)}%; a 10% move is ${fmt(r.stretch,2)}× that range. The stock remains ranked either way.${entryNote}<br>
     ${r.stage?`<b>Market-cycle stage:</b> ${radarStagePill(r)} — ${escHtml({1:'silent accumulation (quiet strength before a move)',2:'initial breakout',3:'event day (move may be event-driven)',4:'profit-booking (digesting a recent result)',5:'re-accumulation',6:'second leg'}[r.stage]||'')}.<br>`:''}
     <b>Read:</b> ${escHtml(r.setup||'—')}. Data coverage ${r.quality!=null?fmt(r.quality*100,0)+'%':'—'}, day move ${(r.day??0)>=0?'+':''}${fmt(r.day,2)}%, relative volume ${r.relvol==null?'unavailable':fmt(r.relvol,2)+'×'}, turnover ${fV(r.turnover)}. Rank is relative, not a literal probability.</div>
-    ${contribs?`<h3 style="font-size:14px;margin:12px 0 8px">Largest feature contributions</h3><div class="rr-contribs">${contribs}</div>`:''}`;
+    ${contribs?`<h3 style="font-size:16px;margin:12px 0 8px">Largest feature contributions</h3><div class="rr-contribs">${contribs}</div>`:''}`;
   dlg.showModal();
 }
 function closeRadarDetail(){document.getElementById('radarDetail')?.close();}
@@ -7713,7 +7794,7 @@ function renderStatusBar(){
     const actualDeployed=Object.values(am2).reduce((s,a)=>s+(a.debit??a.alloc),0);
     const activeAlloc=Object.values(am2).filter(a=>!a.rejected&&a.qty>0);
     const stockCount=activeAlloc.length;
-    html+=` <span style="color:var(--amber);font-size:11px;font-family:'DM Mono',monospace;font-weight:700;margin-left:8px" title="All-in estimated buy debit: limit-price notional plus CNC buy-side charges.">· ${stockCount} ${allocatedLabel} · ${fmtINR(actualDeployed)} of ${fmtINR(capital)} all-in</span>`;
+    html+=` <span style="color:var(--amber);font-size:13px;font-family:'DM Mono',monospace;font-weight:700;margin-left:8px" title="All-in estimated buy debit: limit-price notional plus CNC buy-side charges.">· ${stockCount} ${allocatedLabel} · ${fmtINR(actualDeployed)} of ${fmtINR(capital)} all-in</span>`;
     // v1092: what the basket RISKS, alongside what it costs. Sum of each position's own
     // stop loss, plus the spread — a tight spread is the visible proof that the score÷stop
     // weight is equalising risk; a wide one means the caps (turnover, top-up, Max Alloc) are
@@ -7725,7 +7806,7 @@ function renderStatusBar(){
       const spread=risks.length>1?`${fmtINR(risks[0])}–${fmtINR(risks.at(-1))}`:fmtINR(risks[0]);
       const budget=getEffectiveRiskPerTrade();
       const budgetLbl=budget>0?` Risk ₹/trade budget: ${fmtINR(budget)} per position.`:'';
-      html+=` <span style="color:var(--cyan);font-size:11px;font-family:'DM Mono',monospace;font-weight:700;margin-left:8px" title="Total rupees at risk if every position in this basket hits its own stop — ${spread} per position across ${risks.length}. Positions are sized by Radar score ÷ stop distance, so equally-scored names carry equal rupee risk; a wide spread here means a cap (turnover, Max Allocation, top-up cushion) is binding instead of the weight.${budgetLbl}">· 🛡 ${fmtINR(totalRisk)} at risk (${riskPct.toFixed(1)}% of capital) · ${spread}/trade</span>`;
+      html+=` <span style="color:var(--cyan);font-size:13px;font-family:'DM Mono',monospace;font-weight:700;margin-left:8px" title="Total rupees at risk if every position in this basket hits its own stop — ${spread} per position across ${risks.length}. Positions are sized by Radar score ÷ stop distance, so equally-scored names carry equal rupee risk; a wide spread here means a cap (turnover, Max Allocation, top-up cushion) is binding instead of the weight.${budgetLbl}">· 🛡 ${fmtINR(totalRisk)} at risk (${riskPct.toFixed(1)}% of capital) · ${spread}/trade</span>`;
     }
     // Expected net uses each stock's own capacity-aware target. The Harvest/goal/manual
     // value is an anchor only; it is never pasted uniformly onto every selected row.
@@ -7750,9 +7831,9 @@ function renderStatusBar(){
       const warn=harvestPlan.warning?` Warning: ${harvestPlan.warning}`:'';
       const tip=`Per-stock targets ${targetRange} and ATR stops ${stopRange}; ${srcLbl} ${active.tgtPct.toFixed(2)}% supplies portfolio context only. Expected net is charge-aware.${needed}${warn}`;
       const color=totalNet>=0?'var(--green)':'var(--red)';
-      html+=` <span style="color:${color};font-size:11px;font-family:'DM Mono',monospace;font-weight:700;margin-left:8px" title="${tip}">· 🎯 ${fmtINR(totalNet)} net @ stock targets ${targetRange} · ${(goalCoverage*100).toFixed(0)}% of ${fmtINR(harvestPlan.dailyGoal)}</span>`;
+      html+=` <span style="color:${color};font-size:13px;font-family:'DM Mono',monospace;font-weight:700;margin-left:8px" title="${tip}">· 🎯 ${fmtINR(totalNet)} net @ stock targets ${targetRange} · ${(goalCoverage*100).toFixed(0)}% of ${fmtINR(harvestPlan.dailyGoal)}</span>`;
       if(harvestPlan.warning){
-        html+=` <span style="color:var(--amber);font-size:11px;font-family:'DM Mono',monospace;font-weight:700;margin-left:8px" title="${harvestPlan.warning}">· target floor active</span>`;
+        html+=` <span style="color:var(--amber);font-size:13px;font-family:'DM Mono',monospace;font-weight:700;margin-left:8px" title="${harvestPlan.warning}">· target floor active</span>`;
       }
       // v1093: the measured baseline reward:risk, and where this basket sits against it.
       // Reported only — see the horizon-contradiction note in getRowExitPolicy.
@@ -7763,11 +7844,11 @@ function renderStatusBar(){
         const short=rr<curve.rr;
         const col=short?'var(--amber)':'var(--green)';
         const tip=`Measured on the last COMPLETED session (${escHtml(curve.dateStr||'—')}, ${curve.n.toLocaleString()} tradeable stocks): sweeping every candidate target against each stock's own ATR stop, expectancy peaks at a ${curve.bestT}% target against a ${curve.medStop.toFixed(2)}% median stop — a baseline of ${curve.rr}x risk, reached by ${(curve.hitRate*100).toFixed(1)}% of the market. This basket's median target ${medT.toFixed(2)}% against its ${medS.toFixed(2)}% median stop is ${rr.toFixed(2)}x. Measured on the CROSS-SECTION, never on your own fills, so a bad realised ratio cannot justify itself. REPORTED ONLY: it does not move any target — enforcing it was built and backed out because the curve is a full-day measure while row viability is still same-day (see CLAUDE.md v1093).`;
-        html+=` <span style="color:${col};font-size:11px;font-family:'DM Mono',monospace;font-weight:700;margin-left:8px" title="${tip}">· ⚖ R:R ${rr.toFixed(2)}x vs ${curve.rr}x baseline${short?' — short':''}</span>`;
+        html+=` <span style="color:${col};font-size:13px;font-family:'DM Mono',monospace;font-weight:700;margin-left:8px" title="${tip}">· ⚖ R:R ${rr.toFixed(2)}x vs ${curve.rr}x baseline${short?' — short':''}</span>`;
       }
     }
   } else if(capital>0){
-    html+=` <span style="color:var(--t3);font-size:11px;margin-left:8px">· select ${instrumentLabel} to allocate ${fmtINR(capital)}</span>`;
+    html+=` <span style="color:var(--t3);font-size:13px;margin-left:8px">· select ${instrumentLabel} to allocate ${fmtINR(capital)}</span>`;
   }
   // v555 WS-D: market intraday breadth gauge (entry timing). Market-wide, so it never changes the ranking.
   // v556: enrich with the official Market Activity Report context (Nifty %, adv/dec, strongest/weakest sector).
@@ -7787,7 +7868,7 @@ function renderStatusBar(){
       const stale=NSE_MARKET.dateISO&&NSE_MARKET.dateISO!==getSessionDate()?' (prior session — EOD)':' (EOD)';
       officialTip=` — Official Market Activity ${NSE_MARKET.date||''}${stale}: Nifty ${sgn(NSE_MARKET.niftyPct)}${ad}${strong}${weak}. Context only, not in scoring.`;
     }
-    html+=` <span style="color:${c};font-size:11px;font-family:'DM Mono',monospace;font-weight:700;margin-left:8px" title="Market intraday breadth: ${MARKET_INTRADAY.adv} of ${MARKET_INTRADAY.adv+MARKET_INTRADAY.dec} stocks are trading above their open. Below 50% = broad intraday weakness: new entries must independently confirm above VWAP/open with completed positive 5m/15m tape. This changes entry eligibility, never Radar score/rank.${officialTip}">· Market ${up?'▲':'▼'} ${pct}% up-from-open${officialInline}</span>`;
+    html+=` <span style="color:${c};font-size:13px;font-family:'DM Mono',monospace;font-weight:700;margin-left:8px" title="Market intraday breadth: ${MARKET_INTRADAY.adv} of ${MARKET_INTRADAY.adv+MARKET_INTRADAY.dec} stocks are trading above their open. Below 50% = broad intraday weakness: new entries must independently confirm above VWAP/open with completed positive 5m/15m tape. This changes entry eligibility, never Radar score/rank.${officialTip}">· Market ${up?'▲':'▼'} ${pct}% up-from-open${officialInline}</span>`;
   }
   // v557: say it out loud when Positions/Orders are a prior session's snapshot. Zerodha only rewrites
   // them on a new trade, so the morning after a no-trade day they still hold yesterday's rows — they
@@ -7862,7 +7943,7 @@ function toggleRequiredFilesPopover(){
     const content=document.getElementById('requiredFilesPopoverContent');
     if(FILE_LOAD_STATUS.files?.length){
       const src=FILE_LOAD_STATUS.source==='Drive'?'☁ Drive · restored':'📁 "'+escHtml(FILE_LOAD_STATUS.source||'Scanner Uploads')+'" ·';
-      content.innerHTML=`<div style="font-size:12px;color:var(--t1);margin-bottom:8px;font-weight:700">${src} ${escHtml(FILE_LOAD_STATUS.when||'')}</div>${renderFileStatusList()}`;
+      content.innerHTML=`<div style="font-size:14px;color:var(--t1);margin-bottom:8px;font-weight:700">${src} ${escHtml(FILE_LOAD_STATUS.when||'')}</div>${renderFileStatusList()}`;
     }else if(!content.innerHTML){
       const grid=document.getElementById('requiredFilesGrid');
       if(grid) content.innerHTML=grid.innerHTML;
@@ -7925,7 +8006,7 @@ function showAutoRefreshIndicator(state){
   if(!el){
     el=document.createElement('div');
     el.id='autoRefreshPill';
-    el.style.cssText="position:fixed;bottom:16px;left:16px;z-index:998;padding:6px 12px;border-radius:20px;background:var(--bg-raised);border:1px solid var(--border-hi);color:var(--t2);font-size:11px;font-family:'DM Mono',monospace;box-shadow:0 4px 16px rgba(0,0,0,.35);display:none;align-items:center;gap:6px";
+    el.style.cssText="position:fixed;bottom:16px;left:16px;z-index:998;padding:6px 12px;border-radius:20px;background:var(--bg-raised);border:1px solid var(--border-hi);color:var(--t2);font-size:13px;font-family:'DM Mono',monospace;box-shadow:0 4px 16px rgba(0,0,0,.35);display:none;align-items:center;gap:6px";
     document.body.appendChild(el);
   }
   clearTimeout(el._hideTimer);
@@ -8974,7 +9055,7 @@ function renderFileStatusList(){
   if(!FILE_LOAD_STATUS.files?.length) return '';
   const icon={pending:'…',loaded:'✓',stale:'⚠',missing:'—'};
   const color={pending:'var(--t2)',loaded:'var(--green)',stale:'var(--amber)',missing:'var(--t3)'};
-  return `<div style="display:grid;grid-template-columns:1fr;gap:2px">${FILE_LOAD_STATUS.files.map(f=>`<div style="display:flex;gap:7px;align-items:flex-start;color:${color[f.state]||'var(--t2)'};${f.parent?'padding-left:18px;font-size:10.5px':''}"><span style="width:12px;text-align:center;font-weight:800">${icon[f.state]||'…'}</span><span style="flex:1;color:var(--t2)">${escHtml(f.label)}${f.note?` <span style="color:${color[f.state]||'var(--t3)'}">(${escHtml(f.note)})</span>`:''}</span></div>`).join('')}</div>`;
+  return `<div style="display:grid;grid-template-columns:1fr;gap:2px">${FILE_LOAD_STATUS.files.map(f=>`<div style="display:flex;gap:7px;align-items:flex-start;color:${color[f.state]||'var(--t2)'};${f.parent?'padding-left:18px;font-size:12.5px':''}"><span style="width:12px;text-align:center;font-weight:800">${icon[f.state]||'…'}</span><span style="flex:1;color:var(--t2)">${escHtml(f.label)}${f.note?` <span style="color:${color[f.state]||'var(--t3)'}">(${escHtml(f.note)})</span>`:''}</span></div>`).join('')}</div>`;
 }
 function renderFileLoadStatus(){
   const el=document.getElementById('fileLoadChecklist');
@@ -9357,7 +9438,7 @@ async function initApp(){
   try{await hydrateSessionCSVsFromPreferredInputs('INIT');}catch(e){console.warn('INIT: input hydration failed',e);}
 
   // Rankings render first; performance analytics are scheduled below as an idle task.
-  try{const pe=document.getElementById('perfContent');if(pe&&!PERF_RENDERED)pe.innerHTML=`<div style="text-align:center;padding:60px 40px;color:var(--t2)"><div style="font-size:34px;margin-bottom:14px">📈</div><div style="font-size:15px;font-weight:700;color:var(--t1);margin-bottom:8px">Calculating performance</div><div>Rankings load first; trade analytics continue automatically.</div></div>`;}catch(e){}
+  try{const pe=document.getElementById('perfContent');if(pe&&!PERF_RENDERED)pe.innerHTML=`<div style="text-align:center;padding:60px 40px;color:var(--t2)"><div style="font-size:38px;margin-bottom:14px">📈</div><div style="font-size:17px;font-weight:700;color:var(--t1);margin-bottom:8px">Calculating performance</div><div>Rankings load first; trade analytics continue automatically.</div></div>`;}catch(e){}
 
   // Step 3: Render stats without blocking on Performance analytics.
   try{if(ALL.length) renderStats();}catch(e){console.error('INIT step3 renderStats failed:',e);}
