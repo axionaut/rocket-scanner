@@ -1,5 +1,5 @@
-const BUILD_TS='2026-08-07 09:09 IST'; // release build time (IST)
-const APP_VERSION=1101; // v1101: card rows are balanced instead of stranding a stub row, horizontal scrollbars are hidden while the content stays scrollable, and Rocket Conversion stops counting the legacy cohort that can never resolve.
+const BUILD_TS='2026-08-07 09:26 IST'; // release build time (IST)
+const APP_VERSION=1102; // v1102: readability pass - the muted text token failed contrast at 2.65:1 and is lifted to 5.40:1, the Goal and exit cards say what they mean in one line instead of a paragraph, and the false claim that a Zerodha GTT cannot be modified is corrected.
 // v1093: a baseline reward:risk MEASURED on the cross-section (last completed bhav session) instead of learned from the owner's own fills - reported on every row, deliberately not enforced. Includes v1092: position size split by Radar score / stop distance, so equally-scored names carry equal RUPEE risk, plus an opt-in Risk /trade cap.
 // v556: parse the NSE Market Activity Report (MA<date>.csv) — official Nifty %, advances/declines and sector index moves shown as market CONTEXT in the status bar (EOD data, display only, never fed into per-row scoring); MA added to the ℹ️ file manifest.
 // v555 market-cycle stage awareness (stateless, self-calibrating): per-row stage label (1 accumulation · 2 breakout · 3 event · 4 profit-booking · 5 re-accumulation · 6 second-leg); a quiet-accumulation signal (conjunction-of-percentiles) injected via the rocket-diagnostic weighting; sell-the-news decay off Recent earnings date (horizon = review days). v1065 makes the market-breadth gauge an entry-eligibility input while still never changing ranking.
@@ -4608,10 +4608,10 @@ function buildGoalPopoverContent(){
   const reqLine=basis>0
     ?(remaining>0
       ?(req!=null
-        ?`<span style="color:var(--amber);font-weight:700">Required now: +${req.toFixed(2)}%/trading day</span> · ≈ ₹${goalFmtRs(basis*req/100)}/day earnings on book ₹${goalFmtRs(basis)}`
-        :`<span style="color:var(--red);font-weight:700">Not reachable</span> — earning ₹${goalFmtRs(g.target)} in ${remaining} sessions needs more than 50%/day from total ₹${goalFmtRs(basis)}`)
+        ?`<span style="color:var(--amber);font-weight:700">Need +${req.toFixed(2)}%/day</span> <span style="color:var(--t2)">· ≈ ₹${goalFmtRs(basis*req/100)}/day on ₹${goalFmtRs(basis)}</span>`
+        :`<span style="color:var(--red);font-weight:700">Not reachable</span> <span style="color:var(--t2)">— needs over 50%/day</span>`)
       :`<span style="color:var(--amber);font-weight:700">Deadline reached</span> — pick a later date`)
-    :`Enter Capital ₹ in the filter bar (or load holdings) to compute the required %/day.`;
+    :`<span style="color:var(--t2)">Enter Capital ₹ to compute the required rate</span>`;
   return `<div style="font-size:14px;color:var(--t1);margin-bottom:10px;font-weight:700">Goal</div>
   <div style="display:flex;gap:8px;align-items:flex-end;flex-wrap:wrap">
     <span><span style="${_lbl}">Earn ₹ (profit)</span><input id="goalTarget" type="number" value="${g.target}" style="width:92px;${_in}" onchange="onGoalChange()" title="Trading profit to generate from current total capital within the horizon — not a balance to reach."></span>
@@ -4641,14 +4641,14 @@ function buildGoalPopoverContent(){
     const ach=getGoalAchievedDailyRate(basis);
     let realHtml;
     if(ach==null){
-      realHtml=`<span style="color:var(--t3)">Realized pace: not enough recent tradebook history to project a date yet.</span>`;
+      realHtml=`<span style="color:var(--t2)">Not enough tradebook history to project a date</span>`;
     }else if(ach<=0){
-      realHtml=`<span style="color:var(--red)">At your realized pace (${(ach*100).toFixed(2)}%/day, 30d tradebook) you are not gaining — no finish date until that turns positive.</span>`;
+      realHtml=`<span style="color:var(--red);font-weight:700">Losing ${Math.abs(ach*100).toFixed(2)}%/day</span> <span style="color:var(--t2)">— no finish date until this turns positive</span>`;
     }else{
       const rp=projectGoalCompletionDate(basis,g.target,ach*100,0,g.reinvestPct);
       realHtml=rp
-        ? `At your <b>realized pace</b> (${(ach*100).toFixed(2)}% net/day, 30d tradebook): ${dateSpan(rp)} — ${gapTxt(rp).t}.`
-        : `At your realized pace (${(ach*100).toFixed(2)}%/day, 30d) the goal is not reached within 8 years — raise the pace, the target, or extend the deadline.`;
+        ? `<span style="color:var(--t2)">At your pace ${(ach*100).toFixed(2)}%/day:</span> ${dateSpan(rp)} · ${gapTxt(rp).t}`
+        : `<span style="color:var(--t2)">At ${(ach*100).toFixed(2)}%/day the goal is 8+ years away</span>`;
     }
 
     // SECONDARY — portfolio-anchor context, not a claim that every stock has this target.
@@ -4661,8 +4661,8 @@ function buildGoalPopoverContent(){
           const bp=projectGoalCompletionDate(basis,g.target,netPct,0,g.reinvestPct);
           const srcLbl=at.source==='manual'?'manual':at.source==='goal'?'goal-led':'Harvest';
           bestHtml=bp
-            ? `Portfolio context, if the ${srcLbl} anchor (${at.tgtPct.toFixed(1)}% ≈ ${netPct.toFixed(2)}% net/day) were realised every session: ${dateSpan(bp)}.`
-            : `Portfolio context at the ${srcLbl} anchor: not within 8 years.`;
+            ? `<span style="color:var(--t2)">If every session hit ${at.tgtPct.toFixed(1)}% (${srcLbl}):</span> ${dateSpan(bp)}`
+            : `<span style="color:var(--t2)">At the ${srcLbl} anchor: 8+ years</span>`;
         }
       }
     }catch(e){}
@@ -4670,7 +4670,7 @@ function buildGoalPopoverContent(){
     return `<div style="font-size:13px;line-height:1.6;margin-top:6px;color:var(--t2)">${realHtml}</div>`
       +(bestHtml?`<div style="font-size:12px;line-height:1.5;margin-top:3px;color:var(--t3)">${bestHtml}</div>`:'');
   })()}
-  <div style="font-size:12px;line-height:1.5;color:var(--t3);margin-top:6px">${remaining} trading day${remaining===1?'':'s'} left until ${g.endDate} (weekends and NSE holidays excluded) · ${g.reinvestPct}% of each day's gain is reinvested and compounds, the remaining ${(100-g.reinvestPct).toFixed(0)}% is taken out as cash (v1077 — there is no separate monthly withdrawal). This drives the required rate, which now DOES set the per-stock target.</div>`;
+  <div style="font-size:13px;color:var(--t2);margin-top:6px">${remaining} trading day${remaining===1?'':'s'} left · ${g.reinvestPct}% of each day's gain compounds, ${(100-g.reinvestPct).toFixed(0)}% taken as cash</div>`;
 }
 function renderGoalPopover(){
   const content=document.getElementById('goalPopoverContent');
@@ -4710,7 +4710,7 @@ function buildGoalCard(){
     : `need <b>₹${goalFmtRs(_needToday)}</b> today` + (_doneToday != null
       ? ` · booked <b style="color:${_todayTone}">₹${goalFmtRs(_doneToday)}</b>${_pctToday != null ? ` (${_pctToday.toFixed(0)}%)` : ''}`
       : '');
-  return `<div class="st" title="${title}"><div class="st-l">Goal · today &amp; remaining</div><div class="st-v" style="color:${_todayTone};font-size:17px">${_needToday!=null?'₹'+goalFmtRs(_needToday):reqStr+'%/day'} ${badge}</div><div class="st-d">${[_todayLine,`remaining <b>₹${goalFmtRs(g.target)}</b> over ${days} td · ${reqStr}%/day needed`,freeStr].filter(Boolean).join('<br>')}</div></div>`;
+  return `<div class="st" title="${title}"><div class="st-l">Goal · today &amp; remaining</div><div class="st-v" style="color:${_todayTone};font-size:17px">${_needToday!=null?'₹'+goalFmtRs(_needToday):reqStr+'%/day'} ${badge}</div><div class="st-d">${[_todayLine,`₹${goalFmtRs(g.target)} left · ${days} td · ${reqStr}%/day`].filter(Boolean).join('<br>')}</div></div>`;
 }
 // ── v1101 BALANCED CARD ROWS (owner) ─────────────────────────────────────────
 // `repeat(auto-fit, minmax(N,1fr))` packs as many cards per row as fit and dumps the remainder into a
@@ -4809,7 +4809,17 @@ function renderStats(){
     const confStr=harvestPlan.confidence!=null?` · hit ${(harvestPlan.confidence*100).toFixed(0)}% hist`:'';
     const srcLabel=active.source==='manual'?'manual':active.source==='goal'?'goal-led':'Harvest';
     const fallbackStr=summary.fallbacks?` · ${summary.fallbacks} target fallback${summary.fallbacks===1?'':'s'}`:'';
-    return `<div class="st"><div class="st-l">Per-Stock Exit Policies</div><div class="st-v" style="font-size:17px"><span style="color:var(--red)">${pctRange(summary.stopMin,summary.stopMax,'−')}</span><span style="color:var(--t3);font-size:14px"> / </span><span style="color:var(--green)">${pctRange(summary.targetMin,summary.targetMax,'+')}</span></div><div class="st-d">${summary.count} stock${summary.count===1?'':'s'} · ${srcLabel} ${active.tgtPct.toFixed(2)}% anchor${fallbackStr}${confStr}${learnedStr}${holdStr}${opportunityStr}</div></div>`;
+    // v1102: the face of this card states ONE thing - these are RANGES across the list, not one
+    // stock's policy. Every diagnostic fragment (hit rate, sample count, review horizon, same-day
+    // upside) moved into the tooltip: they are audit detail, not something to read at a glance.
+    const _tip=[`Lowest to highest stop and target across ${summary.count} stock${summary.count===1?'':'s'}.`,
+      `Base rate ${active.tgtPct.toFixed(2)}% (${srcLabel}); each stock is nudged above it by Radar score.`,
+      summary.fallbacks?`${summary.fallbacks} row${summary.fallbacks===1?'':'s'} fell back to a portfolio target.`:'',
+      harvestPlan.confidence!=null?`Historic hit rate ${(harvestPlan.confidence*100).toFixed(0)}%${harvestPlan.sampleCount?` over ${harvestPlan.sampleCount} samples`:''}.`:'',
+      reviewDays?`Review after ${reviewDays} days.`:'',
+      opportunity.exits?`${opportunity.exits} past exits had further upside the same day.`:''
+    ].filter(Boolean).join(' ');
+    return `<div class="st" title="${escHtml(_tip)}"><div class="st-l">Stop / Target Range</div><div class="st-v" style="font-size:17px"><span style="color:var(--red)">${pctRange(summary.stopMin,summary.stopMax,'−')}</span><span style="color:var(--t2);font-size:14px"> / </span><span style="color:var(--green)">${pctRange(summary.targetMin,summary.targetMax,'+')}</span></div><div class="st-d">across ${summary.count} stock${summary.count===1?'':'s'} · base ${active.tgtPct.toFixed(2)}%</div></div>`;
   })();
 
   const topScore=top&&isFinite(top.score)?Number(top.score).toFixed(1):'—';
@@ -4846,10 +4856,8 @@ function renderStats(){
     <div class="st-l">Market${live ? '' : ' · EOD'}</div>
     <div class="st-v" style="font-size:17px;color:${niftyTone}">${nifty != null ? `NIFTY ${nifty >= 0 ? '+' : ''}${nifty.toFixed(2)}%` : (breadthPct != null ? breadthPct.toFixed(0) + '% breadth' : '—')}</div>
     <div class="st-d">${[
-      live ? `${live.advancing}/${live.members} Nifty up · live` : (reg && reg.niftyPct != null ? 'prev close' : ''),
-      breadthPct != null ? `breadth ${breadthPct.toFixed(0)}%` : '',
-      reg && reg.advances != null && reg.declines != null ? `A/D ${reg.advances.toLocaleString()}:${reg.declines.toLocaleString()}` : '',
-      reg && reg.vix != null ? `VIX ${reg.vix.toFixed(2)} <span style="color:${regTone}">${reg.vixRangePos != null ? `${reg.vixRangePos.toFixed(0)}th pct` : ''}${reg.label && reg.label !== 'unknown' ? ` ${escHtml(reg.label)}` : ''}</span> <span style="color:var(--t3)">prev close</span>` : '',
+      breadthPct != null ? `${breadthPct.toFixed(0)}% advancing` : '',
+      reg && reg.vix != null ? `VIX ${reg.vix.toFixed(2)}${reg.label && reg.label !== 'unknown' ? ` <span style="color:${regTone}">${escHtml(reg.label)}</span>` : ''}` : '',
       topSec && topSec !== '—' ? `${escHtml(topSec)} leading` : ''
     ].filter(Boolean).join(' · ')}</div></div>`;
 
@@ -5873,8 +5881,8 @@ function renderPerformance(){
       value:_hasConv?_conv+'%':'—',
       color:!_hasConv?'var(--t3)':_conv>=20?'var(--green)':_conv>=10?'var(--amber)':'var(--red)',
       sub:_hasConv
-        ?`Hit target before stop within ${ROCKET_HORIZON_DAYS} trading days · ${recSummary.rockets}/${recSummary.resolvedRockets} resolved`+(recSummary.stoppedOut?` · ${recSummary.stoppedOut} stopped first`:'')+(recSummary.expiredRockets?` · ${recSummary.expiredRockets} never travelled`:'')+(recSummary.pendingRockets-recSummary.unresolvableRockets>0?` · ${recSummary.pendingRockets-recSummary.unresolvableRockets} still open`:'')+(recSummary.unresolvableRockets?` · ${recSummary.unresolvableRockets} legacy picks carry no barriers and can never resolve, excluded`:'')
-        :`No pick has resolved yet under the v1085 definition (target before stop within ${ROCKET_HORIZON_DAYS} trading days). ${recSummary.pendingRockets||0} awaiting resolution — picks recorded before the definition changed carry no target/stop and can never resolve. Needs a post-close upload to close each issue day.`});
+        ?`${recSummary.rockets} of ${recSummary.resolvedRockets} picks hit target before stop`+(recSummary.stoppedOut?` · ${recSummary.stoppedOut} stopped first`:'')+(recSummary.pendingRockets-recSummary.unresolvableRockets>0?` · ${recSummary.pendingRockets-recSummary.unresolvableRockets} open`:'')
+        :`Nothing resolved yet · ${recSummary.pendingRockets||0} open`});
   }
   // Same-day exit headroom (owner insight 2026-07-21): on the days you sold, how much
   // higher did the stock trade AFTER your exit that same day? This is the measured cost
@@ -8920,10 +8928,15 @@ async function exportBasket(){
 }
 
 // v1080 (owner): EXPORT FRESH SELL ORDERS AT THE REVISED TARGETS.
-// Why this exists: targets move during the session (the goal-driven rate re-solves as capital and
-// remaining days change), and a Zerodha GTT CANNOT be modified. The only way to act on a revised
-// target is to place a new order. This emits one LIMIT SELL per open position at its CURRENT target
-// price, as a basket, so the whole book can be re-armed in one action.
+//
+// CORRECTED 2026-08-07 (owner): the original note here claimed "a Zerodha GTT CANNOT be modified".
+// THAT IS FALSE — a GTT has a Modify action and the trigger and limit price can both be edited.
+// The claim was wrong when written and was repeated in CLAUDE.md; do not restate it.
+//
+// The real reason this export exists is simpler: targets move during the session (the goal-driven
+// rate re-solves as capital and remaining days change), and re-editing a GTT per position by hand is
+// slow. This emits one LIMIT SELL per open position at its CURRENT target price, as a basket, so the
+// whole book can be re-armed in one action. Modifying the existing GTTs instead is equally valid.
 //
 // Scope: everything currently open - settled holdings AND today's unsettled position buys - via
 // getCombinedOpenPositionMap(), which is the same source the Open Positions panel uses, so the
