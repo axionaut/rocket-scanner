@@ -1,5 +1,5 @@
-const BUILD_TS='2026-08-07 16:13 IST'; // release build time (IST)
-const APP_VERSION=1106; // v1106: the trading surface carries maths and action only - the Action and Still Bought columns, the extended and pre-results badges, and the Recommendation Outcome Feedback panel are removed. Every store behind them is untouched.
+const BUILD_TS='2026-08-07 16:25 IST'; // release build time (IST)
+const APP_VERSION=1107; // v1107: drops the four Performance diagnostics whose own captions said they feed nothing, and cuts the KPI sub-lines to a line each.
 // v1093: a baseline reward:risk MEASURED on the cross-section (last completed bhav session) instead of learned from the owner's own fills - reported on every row, deliberately not enforced. Includes v1092: position size split by Radar score / stop distance, so equally-scored names carry equal RUPEE risk, plus an opt-in Risk /trade cap.
 // v556: parse the NSE Market Activity Report (MA<date>.csv) — official Nifty %, advances/declines and sector index moves shown as market CONTEXT in the status bar (EOD data, display only, never fed into per-row scoring); MA added to the ℹ️ file manifest.
 // v555 market-cycle stage awareness (stateless, self-calibrating): per-row stage label (1 accumulation · 2 breakout · 3 event · 4 profit-booking · 5 re-accumulation · 6 second-leg); a quiet-accumulation signal (conjunction-of-percentiles) injected via the rocket-diagnostic weighting; sell-the-news decay off Recent earnings date (horizon = review days). v1065 makes the market-breadth gauge an entry-eligibility input while still never changing ranking.
@@ -5798,14 +5798,10 @@ function renderPerformance(){
   if(recSummary.evaluated){
     const bestUpside=recSummary.avgBestHighPct;
     detailKpis.push(
-      {label:'Shortlist Best High (mean)',value:bestUpside!=null?(bestUpside>=0?'+':'')+bestUpside.toFixed(2)+'%':'—',color:bestUpside!=null?(bestUpside>=0?'var(--green)':'var(--red)'):'var(--t3)',sub:'Avg best GROSS high a shortlisted pick reached · pre-cost, not the target'},
-      {label:'Time to Rocket (mean)',value:recSummary.avgRocketDays!=null?recSummary.avgRocketDays+'d':'—',color:recSummary.avgRocketDays!=null?'var(--amber)':'var(--t3)',sub:`Mean days to convert · the ${recSummary.horizonDays}d window comes from the 75th percentile, not this mean`}
     );
   }
   if(entrySummary.completed){
     detailKpis.push(
-      {label:'Entry Best Net (mean)',value:(entrySummary.avgBestNet>=0?'+':'')+entrySummary.avgBestNet.toFixed(2)+'%',color:entrySummary.avgBestNet>=0?'var(--green)':'var(--red)',sub:`Avg best NET high after entry · Harvest uses a percentile of this pool, not the mean`},
-      {label:'Entry Peak Velocity',value:(entrySummary.avgVelocity>=0?'+':'')+entrySummary.avgVelocity.toFixed(3)+'%/d',color:entrySummary.avgVelocity>=0?'var(--green)':'var(--red)',sub:`Speed to peak · ${entrySummary.positive}/${entrySummary.completed} positive · display only, feeds nothing`}
     );
   }
 
