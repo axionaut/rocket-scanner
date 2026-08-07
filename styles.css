@@ -22,7 +22,13 @@ body::before{content:'';position:fixed;inset:0;background:radial-gradient(ellips
 .sp{width:36px;height:36px;border:3px solid var(--border);border-top-color:var(--fire);border-radius:50%;animation:sp .7s linear infinite;margin:0 auto 14px}
 @keyframes sp{to{transform:rotate(360deg)}}
 .ld-msg{color:var(--t2);font-size:15px;margin-top:8px}
-.stats{display:grid;grid-template-columns:repeat(auto-fit,minmax(175px,1fr));gap:10px;margin:18px 0}
+/* v1101: --card-min is the SINGLE source of truth for how narrow a card may get. CSS uses it for the
+   auto-fit fallback and balanceGrids() reads the same property, so the two can never disagree. */
+.stats{--card-min:175px;display:grid;grid-template-columns:repeat(auto-fit,minmax(var(--card-min),1fr));gap:10px;margin:18px 0}
+/* Horizontal scrolling stays POSSIBLE (a 20-column table must not lose columns) but the scrollbar is
+   not drawn. Same treatment .tbl-w already had; the inline overflow wrappers never got it. */
+.scroll-x{overflow-x:auto;-ms-overflow-style:none;scrollbar-width:none}
+.scroll-x::-webkit-scrollbar{display:none}
 .st{background:var(--bg-card);border:1px solid var(--border);border-radius:10px;padding:14px 18px;position:relative;overflow:hidden}
 .st::after{content:'';position:absolute;top:0;left:0;right:0;height:2px}
 .st:nth-child(1)::after{background:linear-gradient(90deg,var(--fire),var(--fire2))}.st:nth-child(2)::after{background:linear-gradient(90deg,var(--green),var(--cyan))}.st:nth-child(3)::after{background:linear-gradient(90deg,var(--blue),var(--purple))}.st:nth-child(4)::after{background:linear-gradient(90deg,var(--orange),var(--fire))}.st:nth-child(5)::after{background:linear-gradient(90deg,var(--cyan),var(--green))}.st:nth-child(6)::after{background:linear-gradient(90deg,var(--purple),var(--blue))}
@@ -69,7 +75,8 @@ body::before{content:'';position:fixed;inset:0;background:radial-gradient(ellips
 .hm th{font-size:11px;color:var(--t3);background:var(--bg-raised);writing-mode:vertical-rl;height:80px}
 .hm .rh{writing-mode:horizontal-tb;text-align:right;padding-right:8px;font-weight:600;color:var(--t2);min-width:100px}
 .hm-cell{border-radius:3px;font-family:'DM Mono',monospace;font-weight:500}
-.ctrls{display:flex;gap:8px;align-items:flex-end;flex-wrap:nowrap;overflow-x:auto;margin:16px 0;padding-bottom:4px}
+.ctrls{display:flex;gap:8px;align-items:flex-end;flex-wrap:nowrap;overflow-x:auto;-ms-overflow-style:none;scrollbar-width:none;margin:16px 0;padding-bottom:4px}
+.ctrls::-webkit-scrollbar{display:none}
 .ctrls-toggle{display:none;width:100%;padding:9px 14px;background:var(--bg-card);border:1px solid var(--border);border-radius:8px;color:var(--t2);font-size:14px;font-weight:600;cursor:pointer;margin:10px 0 0;text-align:left;transition:all .2s}
 .ctrls-toggle:hover{border-color:var(--blue);color:var(--t1)}
 @media(max-width:768px){.ctrls-toggle{display:block}.ctrls.collapsed{display:none}}
@@ -102,7 +109,7 @@ table.main tbody td{padding:9px 11px;font-family:'DM Mono',monospace;font-size:1
 .rk-1{color:#fbbf24}.rk-2{color:#d1d5db}.rk-3{color:#d97706}
 .sc-m{font-weight:800;font-size:16px;font-family:'DM Mono',monospace}
 .pill-rose{background:rgba(244,63,94,.1);color:#f43f5e;border:1px solid rgba(244,63,94,.2)}
-.kpi-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:10px;margin:12px 0}
+.kpi-grid{--card-min:160px;display:grid;grid-template-columns:repeat(auto-fit,minmax(var(--card-min),1fr));gap:10px;margin:12px 0}
 .kpi-card{background:var(--bg-card);border:1px solid var(--border);border-radius:10px;padding:14px 18px}
 .kpi-lbl{font-size:12px;text-transform:uppercase;letter-spacing:1.1px;color:var(--t3);font-weight:600}
 .kpi-val{font-size:24px;font-weight:800;margin-top:4px;font-family:'DM Mono',monospace}

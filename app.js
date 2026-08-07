@@ -1,5 +1,5 @@
-const BUILD_TS='2026-08-06 19:58 IST'; // release build time (IST)
-const APP_VERSION=1100; // v1100: R4d post-results digestion is implemented - a stock that rocketed on its own results day is withheld from entry until it re-accumulates, judged against that session's own top-decile move rather than a typed threshold.
+const BUILD_TS='2026-08-07 09:09 IST'; // release build time (IST)
+const APP_VERSION=1101; // v1101: card rows are balanced instead of stranding a stub row, horizontal scrollbars are hidden while the content stays scrollable, and Rocket Conversion stops counting the legacy cohort that can never resolve.
 // v1093: a baseline reward:risk MEASURED on the cross-section (last completed bhav session) instead of learned from the owner's own fills - reported on every row, deliberately not enforced. Includes v1092: position size split by Radar score / stop distance, so equally-scored names carry equal RUPEE risk, plus an opt-in Risk /trade cap.
 // v556: parse the NSE Market Activity Report (MA<date>.csv) — official Nifty %, advances/declines and sector index moves shown as market CONTEXT in the status bar (EOD data, display only, never fed into per-row scoring); MA added to the ℹ️ file manifest.
 // v555 market-cycle stage awareness (stateless, self-calibrating): per-row stage label (1 accumulation · 2 breakout · 3 event · 4 profit-booking · 5 re-accumulation · 6 second-leg); a quiet-accumulation signal (conjunction-of-percentiles) injected via the rocket-diagnostic weighting; sell-the-news decay off Recent earnings date (horizon = review days). v1065 makes the market-breadth gauge an entry-eligibility input while still never changing ranking.
@@ -2329,11 +2329,26 @@ function getRecommendationOutcomeSummary(){
   // different things: `stopped` is the owner's actual complaint (it dipped first), `expired` simply
   // never travelled, and `ambiguous` touched both barriers inside one daily bar so the order is
   // unknowable — counted as NOT a rocket, and surfaced so that assumption stays visible.
-  const rockets=picks.filter(p=>isRocketOutcome(p));
-  const stoppedOut=picks.filter(p=>p.rocketOutcome===ROCKET_OUTCOME.STOPPED);
-  const ambiguous=picks.filter(p=>p.rocketOutcome===ROCKET_OUTCOME.AMBIGUOUS);
-  const expired=picks.filter(p=>p.rocketOutcome===ROCKET_OUTCOME.EXPIRED);
-  const pendingRocket=picks.filter(p=>!p.rocketOutcome||p.rocketOutcome===ROCKET_OUTCOME.PENDING);
+  //
+  // v1101 BUG FIX — THE ROCKET COUNTERS MUST NOT RIDE ON THE LEGACY `complete` FLAG.
+  // `picks` above is gated on `p.complete`, which belongs to the PRE-v1085 horizon model and only
+  // flips after that longer window elapses. A v1085 outcome resolves on FIRST PASSAGE within
+  // ROCKET_HORIZON_DAYS, which happens long before `complete` ever turns true — so gating these
+  // counters on it selected exactly the wrong cohort. Measured on the live brain 2026-08-06:
+  // 530 picks, 46 genuinely resolved (9 rocket / 37 expired) and `complete` was FALSE on all 46,
+  // while the 450 picks the KPI did count were the legacy barrier-less ones that can never resolve.
+  // Rocket Conversion therefore rendered "no pick has resolved yet" while the true figure was 9/46.
+  // The rocket cohort is its own thing: every observed pick, regardless of the legacy flag.
+  const rocketPool=observedPicks;
+  const rockets=rocketPool.filter(p=>isRocketOutcome(p));
+  const stoppedOut=rocketPool.filter(p=>p.rocketOutcome===ROCKET_OUTCOME.STOPPED);
+  const ambiguous=rocketPool.filter(p=>p.rocketOutcome===ROCKET_OUTCOME.AMBIGUOUS);
+  const expired=rocketPool.filter(p=>p.rocketOutcome===ROCKET_OUTCOME.EXPIRED);
+  const pendingRocket=rocketPool.filter(p=>!p.rocketOutcome||p.rocketOutcome===ROCKET_OUTCOME.PENDING);
+  // Legacy picks carry no target/stop and can NEVER resolve, so they are excluded from the
+  // denominator rather than counted as failures — and reported separately so the gap stays visible.
+  const unresolvable=pendingRocket.filter(p=>!(p.targetPct>0)||!(p.stopPct>0));
+  const resolvedRocketCount=rockets.length+stoppedOut.length+ambiguous.length+expired.length;
   const currentHorizon=getAdaptiveOutcomeHorizonDays();
   const fastRockets=rockets.filter(p=>(p.rocketDays??currentHorizon)<=getOutcomeCheckpointDays(p.horizonDays||currentHorizon));
   const delayedRockets=rockets.length-fastRockets.length;
@@ -2345,10 +2360,11 @@ function getRecommendationOutcomeSummary(){
     evaluated:picks.length,rockets:rockets.length,
     stoppedOut:stoppedOut.length,ambiguousRockets:ambiguous.length,
     expiredRockets:expired.length,pendingRockets:pendingRocket.length,
-    resolvedRockets:picks.length-pendingRocket.length,
+    resolvedRockets:resolvedRocketCount,
+    unresolvableRockets:unresolvable.length,
     fastRockets:fastRockets.length,delayedRockets,earlyFailures:earlyFailures.length,
     failures:failures.length,
-    conversionPct:(picks.length-pendingRocket.length)?+(rockets.length/(picks.length-pendingRocket.length)*100).toFixed(1):null,
+    conversionPct:resolvedRocketCount?+(rockets.length/resolvedRocketCount*100).toFixed(1):null,
     rocketArrivalCount:observedRockets.length,
     avgRocketDays:observedRockets.length?+(meanArr(observedRockets.map(p=>p.rocketDays)).toFixed(1)):null,
     avgBestHighPct:upsides.length?+meanArr(upsides).toFixed(2):null,
@@ -4696,6 +4712,38 @@ function buildGoalCard(){
       : '');
   return `<div class="st" title="${title}"><div class="st-l">Goal · today &amp; remaining</div><div class="st-v" style="color:${_todayTone};font-size:17px">${_needToday!=null?'₹'+goalFmtRs(_needToday):reqStr+'%/day'} ${badge}</div><div class="st-d">${[_todayLine,`remaining <b>₹${goalFmtRs(g.target)}</b> over ${days} td · ${reqStr}%/day needed`,freeStr].filter(Boolean).join('<br>')}</div></div>`;
 }
+// ── v1101 BALANCED CARD ROWS (owner) ─────────────────────────────────────────
+// `repeat(auto-fit, minmax(N,1fr))` packs as many cards per row as fit and dumps the remainder into a
+// stub row — 14 diagnostics rendered as 10 + 4, and an 11-card KPI grid as 10 + 1 with a single card
+// stranded on its own line. Owner: if it wraps anyway, spread it evenly.
+//
+// Pure CSS cannot do this: `auto-fit` has no idea how many children exist. So the column count is
+// computed from the SAME `--card-min` the stylesheet uses (one source of truth — the CSS keeps that
+// value as its own fallback), and only ever set when the cards genuinely wrap. A grid that fits on one
+// row is left completely alone.
+function balanceGrid(el){
+  if(!el||!el.children.length) return;
+  const n=el.children.length;
+  const cs=getComputedStyle(el);
+  const min=parseFloat(cs.getPropertyValue('--card-min'))||160;
+  const gap=parseFloat(cs.columnGap||cs.gap)||10;
+  const w=el.clientWidth;
+  if(!(w>0)) return;
+  const maxPerRow=Math.max(1,Math.floor((w+gap)/(min+gap)));
+  if(n<=maxPerRow){ el.style.gridTemplateColumns=''; return; }   // fits on one row: leave CSS in charge
+  const rows=Math.ceil(n/maxPerRow);
+  const perRow=Math.ceil(n/rows);                                 // 14 over 2 rows -> 7+7, 11 -> 6+5
+  el.style.gridTemplateColumns=`repeat(${perRow},minmax(0,1fr))`;
+}
+function balanceGrids(){
+  document.querySelectorAll('.stats,.kpi-grid').forEach(balanceGrid);
+}
+let _balanceTimer=null;
+function scheduleBalanceGrids(){
+  clearTimeout(_balanceTimer);
+  _balanceTimer=setTimeout(balanceGrids,60);   // debounced: resize fires continuously while dragging
+}
+if(typeof window!=='undefined') window.addEventListener('resize',scheduleBalanceGrids,{passive:true});
 function renderStats(){
   const t=ALL.length;
   const bull=ALL.filter(s=>(s.priceChange||0)>0).length;
@@ -4850,6 +4898,7 @@ function renderStats(){
 
   document.getElementById('statsBar').innerHTML =
     marketCard + universeCard + costCard + rocketsCard + slTgtCard + bookedCard + buildGoalCard();
+  balanceGrids();   // v1101: spread the cards evenly instead of stranding a stub row
 
   const filterPills=[];
   if(SUPPRESSED_HELD>0)filterPills.push(`<span class="info-pill pill-rose" title="Stocks you already hold (Holdings + Positions + today's net Orders buys). Since v1070 these stay in the ranking and can be recommended again — the badge is a duplicate-buy warning, not a filter.">📌 ${SUPPRESSED_HELD} already held</span>`);
@@ -5455,7 +5504,7 @@ function buildLatestSessionPanel(query=''){
         <span style="font-size:12px;font-weight:700;color:var(--t2);text-transform:uppercase;letter-spacing:.1em">Latest Session — ${latestDate} <span style="font-weight:400;color:var(--t3)">(Orders.csv · holdings/same-day buys)</span>${panelFilterTag(allRows,rows,query)}</span>
         <span style="font-size:17px;font-weight:800;color:${clr(latestTotal)};font-family:'DM Mono',monospace">${allRows.length?fmtPerfRs(latestTotal):''} <span style="font-size:12px;color:var(--t3);font-weight:400">${allRows.length?'net of charges':''}</span>${latestUnknownWarning}</span>
       </div>
-      ${rows.length?`<div style="overflow-x:auto">${latestTbl.getHtml()}</div>`:emptyNote}`);
+      ${rows.length?`<div class="scroll-x">${latestTbl.getHtml()}</div>`:emptyNote}`);
     const render=()=>{if(rows.length)latestTbl.render();};
     return {html,render};
   }
@@ -5503,7 +5552,7 @@ function buildLatestSessionPanel(query=''){
         <span style="font-size:12px;font-weight:700;color:var(--t2);text-transform:uppercase;letter-spacing:.1em">Latest Session — ${tbDate} <span style="font-weight:400;color:var(--t3)">(Tradebook · charges included)</span>${panelFilterTag(allRows,rows,query)}</span>
         <span style="font-size:17px;font-weight:800;color:${clr(tbTotal)};font-family:'DM Mono',monospace">${fmtPerfRs(tbTotal)} <span style="font-size:12px;color:var(--t3);font-weight:400">net of charges</span></span>
       </div>
-      ${rows.length?`<div style="overflow-x:auto">${tbTbl.getHtml()}</div>`:panelNoMatchHtml(query,'booked trade')}`);
+      ${rows.length?`<div class="scroll-x">${tbTbl.getHtml()}</div>`:panelNoMatchHtml(query,'booked trade')}`);
     const render=()=>{if(rows.length)tbTbl.render();};
     return {html,render};
   }
@@ -5627,7 +5676,7 @@ function buildOpenPositionsPanel(query=''){
       </div>
       <div style="font-size:14px;color:var(--t2);line-height:1.5">Live merge of Holdings, Positions, and today's net buys. Held stocks stay excluded from new recommendations; Target, SL, and TSL use the existing exit policy. ${radarNote}</div>
     </div>
-    ${shown.length?`<div style="overflow-x:auto">${table.getHtml()}</div>`:panelNoMatchHtml(query,'open position')}
+    ${shown.length?`<div class="scroll-x">${table.getHtml()}</div>`:panelNoMatchHtml(query,'open position')}
   </div>`;
   return {html,table:shown.length?table:null};
 }
@@ -5824,7 +5873,7 @@ function renderPerformance(){
       value:_hasConv?_conv+'%':'—',
       color:!_hasConv?'var(--t3)':_conv>=20?'var(--green)':_conv>=10?'var(--amber)':'var(--red)',
       sub:_hasConv
-        ?`Hit target before stop within ${ROCKET_HORIZON_DAYS} trading days · ${recSummary.rockets}/${recSummary.resolvedRockets} resolved`+(recSummary.stoppedOut?` · ${recSummary.stoppedOut} stopped first`:'')+(recSummary.pendingRockets?` · ${recSummary.pendingRockets} still open`:'')
+        ?`Hit target before stop within ${ROCKET_HORIZON_DAYS} trading days · ${recSummary.rockets}/${recSummary.resolvedRockets} resolved`+(recSummary.stoppedOut?` · ${recSummary.stoppedOut} stopped first`:'')+(recSummary.expiredRockets?` · ${recSummary.expiredRockets} never travelled`:'')+(recSummary.pendingRockets-recSummary.unresolvableRockets>0?` · ${recSummary.pendingRockets-recSummary.unresolvableRockets} still open`:'')+(recSummary.unresolvableRockets?` · ${recSummary.unresolvableRockets} legacy picks carry no barriers and can never resolve, excluded`:'')
         :`No pick has resolved yet under the v1085 definition (target before stop within ${ROCKET_HORIZON_DAYS} trading days). ${recSummary.pendingRockets||0} awaiting resolution — picks recorded before the definition changed carry no target/stop and can never resolve. Needs a post-close upload to close each issue day.`});
   }
   // Same-day exit headroom (owner insight 2026-07-21): on the days you sold, how much
@@ -6238,7 +6287,7 @@ function buildHardFilterMethodologyHTML(E){
       <button class="btn" onclick="addSurvRule()" style="font-weight:700">+ Add Rule</button>
     </div>
     <div style="background:var(--bg-card);border:1px solid var(--border);border-radius:10px;overflow:hidden">
-      <div style="overflow-x:auto">${_methTbls.hf.getHtml()}</div>
+      <div class="scroll-x">${_methTbls.hf.getHtml()}</div>
     </div>
     <div style="font-size:12px;color:var(--t3);margin-top:7px">Held P&L is live, unrealised P&L for your currently held stocks flagged by that exact REG1 column. A stock with multiple flags appears in each relevant row, so rule-level P&L is not totalled.</div>
     ${survMeta}
@@ -6390,7 +6439,7 @@ function buildSurvCorrHTML(){
     <p style="font-size:13px;color:var(--t3);margin-bottom:8px">For each surveillance column, shows the total current unrealised P&L in ₹ and the capital-weighted unrealised P&L% of your <em>currently held stocks</em> flagged by that column. A deep negative P&L% means those flagged holdings are underwater. Signal = 🚫 Filter when weighted P&L% &lt; −0.5%. A stock with several flags appears in each relevant rule row, so rows are not totalled.</p>
     ${staleNote}
     <div style="background:var(--bg-card);border:1px solid var(--border);border-radius:10px;overflow:hidden">
-      <div style="overflow-x:auto">${_methTbls.sc.getHtml()}</div>
+      <div class="scroll-x">${_methTbls.sc.getHtml()}</div>
     </div>`;
 }
 
@@ -6443,7 +6492,7 @@ function buildIndicatorWatchHTML(){
   }).join('');
   return `${head}${intro}
     <div style="background:rgba(239,68,68,.06);border:1px solid rgba(239,68,68,.3);border-radius:10px;padding:12px 16px;margin-bottom:10px;font-size:14px;color:var(--t1)"><strong>⚠ ${w.flags.length} indicator${w.flags.length===1?'':'s'} looks backwards over the last ${resolved} sessions.</strong> The rewarded end held <em>fewer</em> movers on both +5% and +10%. Bring these to review — inverting a prior is a deliberate, logged code change, never automatic.</div>
-    <div style="overflow-x:auto"><table class="ct" style="min-width:620px"><thead><tr><th>Indicator</th><th>Prior orientation</th><th title="Mean forward decile gap (mover minus non-mover), normalized; negative vs the rewarded end = backwards">+5% forward gap</th><th>+10% forward gap</th></tr></thead><tbody>${rows}</tbody></table></div>`;
+    <div class="scroll-x"><table class="ct" style="min-width:620px"><thead><tr><th>Indicator</th><th>Prior orientation</th><th title="Mean forward decile gap (mover minus non-mover), normalized; negative vs the rewarded end = backwards">+5% forward gap</th><th>+10% forward gap</th></tr></thead><tbody>${rows}</tbody></table></div>`;
 }
 function _renderMethodologyInner(){
   const mc=document.getElementById('methContent');
@@ -9023,6 +9072,9 @@ function switchTab(n){
   updateTabCounts();
   if(n===1) renderMethodology();
   if(n===2) renderPerformance();
+  // v1101: a hidden grid has clientWidth 0, so balancing on the tab it lives in is the only moment
+  // the column count can actually be computed. rAF lets the tab paint first.
+  requestAnimationFrame(balanceGrids);
 }
 function updateTabCounts(){
   const c0=document.getElementById('tabCount0');
