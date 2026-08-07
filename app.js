@@ -1,5 +1,5 @@
-const BUILD_TS='2026-08-07 16:43 IST'; // release build time (IST)
-const APP_VERSION=1108; // v1108: the Same-Day Exit Headroom card named the portfolio anchor as the target, which v1105 retired to a floor - it now names the live per-stock target range.
+const BUILD_TS='2026-08-07 17:13 IST'; // release build time (IST)
+const APP_VERSION=1109; // v1109: feasibility no longer multiplies the score - it anti-correlates with momentum at -0.588 and the 4th power was deleting the very stocks that go on to reach target.
 // v1093: a baseline reward:risk MEASURED on the cross-section (last completed bhav session) instead of learned from the owner's own fills - reported on every row, deliberately not enforced. Includes v1092: position size split by Radar score / stop distance, so equally-scored names carry equal RUPEE risk, plus an opt-in Risk /trade cap.
 // v556: parse the NSE Market Activity Report (MA<date>.csv) — official Nifty %, advances/declines and sector index moves shown as market CONTEXT in the status bar (EOD data, display only, never fed into per-row scoring); MA added to the ℹ️ file manifest.
 // v555 market-cycle stage awareness (stateless, self-calibrating): per-row stage label (1 accumulation · 2 breakout · 3 event · 4 profit-booking · 5 re-accumulation · 6 second-leg); a quiet-accumulation signal (conjunction-of-percentiles) injected via the rocket-diagnostic weighting; sell-the-news decay off Recent earnings date (horizon = review days). v1065 makes the market-breadth gauge an entry-eligibility input while still never changing ranking.
@@ -3595,7 +3595,34 @@ function radarAnalyze(headers,rawRows,supplements={},heldSymbols=new Set()){
       &&Number(r.changeOpen)>0&&Number(r.day)>0;
     r.directionConfirmed=!!_dirOk;
     r.feasibility=+_feas.toFixed(4);
-    r.score=+(100*Math.pow(r.setupPct*_feas*(_dirOk?1:0),4)).toFixed(1);
+    // ── v1109: FEASIBILITY NO LONGER MULTIPLIES THE SCORE ────────────────────────────────
+    // MEASURED 2026-08-07, entry at the 08-05 close, outcome = reached +2.6% on 08-06, n=2,391,
+    // base rate 27.1%:
+    //     rank by yesterday's gain, top 20  -> 17/20 = 85%
+    //     rank by distance off the low      -> 16/20 = 80%
+    //     rank by the RADAR score           ->  8/20 = 40%
+    // A single sorted column beat the whole scorer by more than 2x. The mechanism is this line.
+    //
+    // `feasibility` = min(session-ceiling runway, circuit runway) / target. A stock that has ALREADY
+    // moved up has less runway left, so feasibility falls as momentum rises — measured correlation
+    // with today's move is **-0.588** — and the 4th power then annihilates it: feasibility 0.044
+    // raised to the 4th is 0.0000037. On the 2026-08-07 board, 74 stocks were up >=5% and ZERO
+    // appeared in the Radar top 20; their mean feasibility was 0.044 against 0.736 for the rest,
+    // and their mean score 0.4 against 1.9.
+    //
+    // So v1086 built feasibility to stop the app recommending stocks that could not reach target,
+    // and it instead deleted the ones most likely to. This is also the single mechanism behind three
+    // separate findings that were logged as unrelated: entry-blocked picks converting at 50% vs 25%
+    // over three sessions, RULES.md D4 / v1075 measuring that extension predicted CONTINUATION, and
+    // DCI (top score, blocked by three gates) rocketing on day 0.
+    //
+    // WHAT IS KEPT. The two ARITHMETIC ceilings still remove a row, through the v1080 allocation gate
+    // and `getRowExitPolicy`: a stock at its upper circuit legally cannot trade higher today (v1081),
+    // and one with no session runway cannot be allocated (v1083). Those are facts about the day, not
+    // opinions about momentum. What is removed is the STATISTICAL ceiling acting as a 4th-power
+    // multiplier on RANK. `feasibility` is still computed and still stored on the row so the
+    // before/after remains auditable and so the exit policy is untouched.
+    r.score=+(100*Math.pow(r.setupPct*(_dirOk?1:0),4)).toFixed(1);
     r.rocketScore=r.score; // allocation/export alias
     r.risk=!r.basketEligible||r.meta.flags?.length>=3||r.turnover<25e5||r.price<10?'High':(r.gap>6||r.day>6||r.parts.volatility<38?'Medium':'Low');
     // Event Risk (idea #1, v554 + v555): an event-day (Stage 3) or a name still digesting its results
