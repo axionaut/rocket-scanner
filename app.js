@@ -1,5 +1,5 @@
-const BUILD_TS='2026-08-07 15:54 IST'; // release build time (IST)
-const APP_VERSION=1105; // v1105: the exit layer - the target scales with the stock's own ATR instead of its score, measured on 214 of the owner's own sells, and a reported exit signal finally asks whether a position is still being bought.
+const BUILD_TS='2026-08-07 16:13 IST'; // release build time (IST)
+const APP_VERSION=1106; // v1106: the trading surface carries maths and action only - the Action and Still Bought columns, the extended and pre-results badges, and the Recommendation Outcome Feedback panel are removed. Every store behind them is untouched.
 // v1093: a baseline reward:risk MEASURED on the cross-section (last completed bhav session) instead of learned from the owner's own fills - reported on every row, deliberately not enforced. Includes v1092: position size split by Radar score / stop distance, so equally-scored names carry equal RUPEE risk, plus an opt-in Risk /trade cap.
 // v556: parse the NSE Market Activity Report (MA<date>.csv) — official Nifty %, advances/declines and sector index moves shown as market CONTEXT in the status bar (EOD data, display only, never fed into per-row scoring); MA added to the ℹ️ file manifest.
 // v555 market-cycle stage awareness (stateless, self-calibrating): per-row stage label (1 accumulation · 2 breakout · 3 event · 4 profit-booking · 5 re-accumulation · 6 second-leg); a quiet-accumulation signal (conjunction-of-percentiles) injected via the rocket-diagnostic weighting; sell-the-news decay off Recent earnings date (horizon = review days). v1065 makes the market-breadth gauge an entry-eligibility input while still never changing ranking.
@@ -5610,20 +5610,10 @@ function buildOpenPositionsPanel(query=''){
       tslNext[pos.symbol]=tslInfo;
       if(JSON.stringify(tslStore[pos.symbol]||{})!==JSON.stringify(tslInfo)) tslChanged=true;
     }
-    // v1073 DAY-1 TIME EXIT. Measured on the fresh tradebook cohort (bought 2026-07-13+, n=320):
-    // 0-day holds made +Rs 11,743, 1-day +Rs 54, 2-3 day -Rs 3,600, 4-7 day -Rs 2,620. Every rupee of
-    // profit came from positions that resolved the same day; the 131 trips that survived past day 1
-    // cost -Rs 6,220 between them. Separately, 310 graded picks reached a mean peak of +5.13% but
-    // closed at +0.80% - an 84% give-back. A position that has NOT hit its target by the end of its
-    // first day is, on this evidence, no longer working; holding it is what fills the book with the
-    // permanently-red residue the owner sees. Flag it for exit. This is a DISPLAYED decision, never
-    // an automatic order - execution stays manual, and it never touches score or rank.
-    const exitSignal=getPositionExitSignal(scannerRow);
-    const hitTarget=(avg&&ltp&&targetPct)?(ltp>=avg*(1+targetPct/100)):false;
-    const timeExit=daysHeld!=null&&daysHeld>=1&&!hitTarget;
+    // v1106 (owner): the day-1 time-exit ADVICE went with the Action column - the trading surface
+    // carries no instructions. The evidence behind it is unchanged and lives in Methodology.
     rows.push({
-      sym:pos.symbol,qty,avg,ltp,pnlPct,pnlRs,capital,daysHeld,targetPrice,stopPrice,targetPct,exitPolicy,exitSignal,
-      timeExit,hitTarget,
+      sym:pos.symbol,qty,avg,ltp,pnlPct,pnlRs,capital,daysHeld,targetPrice,stopPrice,targetPct,exitPolicy,
       tslPoints:tslInfo?.trailStepPoints??tslInfo?.trailPoints??null,
       score:isFinite(Number(scannerRow?.score))?Number(scannerRow.score):null,
       rank:scannerRow?.rank??null,setup:scannerRow?.setup||'',
@@ -5656,13 +5646,6 @@ function buildOpenPositionsPanel(query=''){
     {key:'capital',label:'Capital ₹',align:'right',fmt:v=>v!=null?fmtINR(v):'—',clrFn:()=>'var(--t2)'},
     {key:'daysHeld',label:'Days Held',align:'right',fmt:daysFmt,clrFn:()=>'var(--t1)'},
     // v1073: the day-1 time exit, shown next to Days Held so the two read together.
-    {key:'timeExit',label:'Action',align:'left',fmt:(v,row)=>row.hitTarget
-      ? `<span style="font-size:11px;background:rgba(34,197,94,.14);color:var(--green);border-radius:5px;padding:1px 7px;white-space:nowrap" title="Trading at or above its target — the exit policy has done its job.">at target</span>`
-      : v
-        ? `<span style="font-size:11px;background:rgba(245,158,11,.14);color:var(--amber);border:1px solid rgba(245,158,11,.3);border-radius:5px;padding:1px 7px;white-space:nowrap" title="Held past its first day without reaching target. Measured on the fresh cohort: same-day resolutions made +Rs 11,743 while the 131 trips that survived past day 1 lost -Rs 6,220 between them, and picks give back 84% of their peak on average. Displayed decision only — no order is placed.">time exit</span>`
-        : `<span style="font-size:11px;color:var(--t3)">holding</span>`,
-      clrFn:()=>''},
-    {key:'exitSignal',label:'Still Bought?',align:'left',fmt:v=>{if(!v||v.state==='unknown')return '<span style=\"color:var(--t3)\" title=\"'+escHtml(v?v.note:'no data')+'\">—</span>';const c=v.state==='holding'?'var(--green)':v.state==='mixed'?'var(--amber)':'var(--red)';const t=escHtml(v.note+'  '+v.parts.join('  '));return '<span style=\"font-size:11px;color:'+c+';font-weight:700\" title=\"'+t+'\">'+v.state+' '+v.held+'/'+v.of+'</span>';},clrFn:()=>''},
     {key:'targetPrice',label:'Target ₹',align:'right',fmt:(v,row)=>v!=null?fmtINR(v)+`<span style="font-size:12px;color:var(--t3);margin-left:4px">+${Number(row.targetPct).toFixed(2)}%</span>`:'—',clrFn:()=>'var(--green)'},
     {key:'stopPrice',label:'SL ₹',align:'right',fmt:(v,row)=>v!=null?fmtINR(v)+`<span style="font-size:12px;color:var(--t3);margin-left:4px">-${Number(row.exitPolicy?.stopPct).toFixed(2)}%</span>`:'—',clrFn:()=>'var(--red)'},
     {key:'tslPoints',label:'TSL pts',align:'right',bold:true,fmt:v=>v!=null?Number(v).toFixed(2):'—',clrFn:v=>v==null?'var(--t3)':'var(--amber)'},
@@ -5694,109 +5677,6 @@ function buildOpenPositionsPanel(query=''){
   return {html,table:shown.length?table:null};
 }
 
-// ── Recommendation tracking visualization (v535) ──────────────────────────────
-// Built ONLY from data the app already records (owner constraint): the shortlist
-// outcome store keeps, per issue date, each pick's rank/score plus running outcome
-// aggregates (best high + day, worst low, final close, rocket day). Granularity is
-// one point per TRADING DAY — intraday refreshes are deliberately deduped at record
-// time — and per-pick history is aggregate, not a day-by-day polyline. The two
-// panels below draw exactly what exists and nothing more.
-function buildRecommendationTrackingHTML(){
-  const issues=Object.values((FS.get(RECOMMEND_OUTCOME_STORE)||{}).issues||{})
-    .filter(i=>i?.date&&Array.isArray(i.picks)&&i.picks.length)
-    .sort((a,b)=>a.date<b.date?-1:1);
-  if(!issues.length) return '';
-  const pct=v=>(v>=0?'+':'')+Number(v).toFixed(1)+'%';
-  const dd=d=>d.slice(8); // day-of-month column label; full date rides the tooltip
-
-  // ── Panel A — shortlist rank heatmap: one column per session, one row per symbol.
-  // Sequential single-hue ramp (cyan, deeper = better rank). The exception gets the
-  // ink: 84.7% of completed picks rocket, so ONLY the failures are marked (red
-  // underline). Rockets are the quiet norm.
-  const bySym={};
-  issues.forEach(issue=>(issue.picks||[]).forEach(p=>{
-    if(!p?.symbol) return;
-    const e=bySym[p.symbol]??={symbol:p.symbol,cells:{},n:0,bestRank:Infinity,last:''};
-    e.cells[issue.date]=p; e.n++;
-    if(p.rank&&p.rank<e.bestRank) e.bestRank=p.rank;
-    if(issue.date>e.last) e.last=issue.date;
-  }));
-  const heatRows=Object.values(bySym).sort((a,b)=>b.n-a.n||a.bestRank-b.bestRank||(a.last<b.last?1:-1));
-  const rankAlpha=r=>!r?0.22:r<=5?0.85:r<=10?0.58:r<=15?0.38:0.22;
-  const CELL='width:20px;height:14px;border-radius:2px;flex:0 0 20px;';
-  const headHtml=`<div style="display:flex;gap:2px;align-items:flex-end;margin-left:96px">${issues.map(i=>`<span style="${CELL}font-size:12.5px;color:var(--t3);text-align:center;font-family:'DM Mono',monospace;height:auto" title="${i.date}">${dd(i.date)}</span>`).join('')}</div>`;
-  const rowsHtml=heatRows.map(row=>{
-    const cells=issues.map(issue=>{
-      const p=row.cells[issue.date];
-      if(!p) return `<span style="${CELL}background:rgba(148,163,184,.06)"></span>`;
-      const failed=p.complete&&!p.rocketDate;
-      const outcome=p.rocketDate?`rocketed d${p.rocketDays}`:p.complete?`no +10% within ${p.horizonDays||''}d`:`pending · ${p.observations||0} obs`;
-      const tip=`${row.symbol} · ${issue.date} · rank ${p.rank??'—'} · score ${p.score!=null?Number(p.score).toFixed(1):'—'} · ${outcome}${p.bestHighProfitPct!=null?` · best ${pct(p.bestHighProfitPct)}`:''}`;
-      return `<span style="${CELL}background:rgba(6,182,212,${rankAlpha(p.rank)});${failed?'box-shadow:inset 0 -2px 0 var(--red);':''}" title="${escHtml(tip)}"></span>`;
-    }).join('');
-    return `<div style="display:flex;gap:2px;align-items:center;margin-top:2px"><span style="width:92px;flex:0 0 92px;font-size:12px;color:var(--t2);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;padding-right:4px" title="${escHtml(row.symbol)} · shortlisted ${row.n}× · best rank ${row.bestRank}">${escHtml(row.symbol)}</span>${cells}</div>`;
-  }).join('');
-  const heatHtml=`
-    <div style="font-size:13px;font-weight:700;color:var(--t1);margin-bottom:2px">Shortlist tracking — rank per session</div>
-    <div style="font-size:12px;color:var(--t3);margin-bottom:8px">${heatRows.length} symbols × ${issues.length} sessions · one cell per trading day (intraday refreshes are deduped at record time) · deeper cyan = better rank</div>
-    ${headHtml}
-    <div style="max-height:300px;overflow:auto;overflow-x:visible">${rowsHtml}</div>
-    <div style="display:flex;gap:14px;flex-wrap:wrap;align-items:center;margin-top:8px;font-size:12px;color:var(--t3)">
-      ${[['1–5',0.85],['6–10',0.58],['11–15',0.38],['16+',0.22]].map(([l,a])=>`<span style="display:inline-flex;align-items:center;gap:4px"><span style="width:12px;height:10px;border-radius:2px;background:rgba(6,182,212,${a})"></span>rank ${l}</span>`).join('')}
-      <span style="display:inline-flex;align-items:center;gap:4px"><span style="width:12px;height:10px;border-radius:2px;background:rgba(6,182,212,.4);box-shadow:inset 0 -2px 0 var(--red)"></span>completed without a +10% move</span>
-      <span style="display:inline-flex;align-items:center;gap:4px"><span style="width:12px;height:10px;border-radius:2px;background:rgba(148,163,184,.06)"></span>not shortlisted</span>
-    </div>`;
-
-  // ── Panel B — outcome ranges for one issue date: what each pick did after being
-  // recommended. Position carries the story (bar above/below the entry baseline);
-  // green/red is redundant with position, so the deutan 6–8 ΔE band is covered by
-  // secondary encoding per the palette validator's own rule.
-  const desc=[...issues].reverse();
-  const defaultIssue=(desc.find(i=>(i.picks||[]).some(p=>p.observations>0))||desc[0]).date;
-  if(!PERF_TRACK_ISSUE||!issues.some(i=>i.date===PERF_TRACK_ISSUE)) PERF_TRACK_ISSUE=defaultIssue;
-  const sel=issues.find(i=>i.date===PERF_TRACK_ISSUE);
-  const picks=[...(sel.picks||[])].sort((a,b)=>(a.rank||99)-(b.rank||99));
-  const observed=picks.filter(p=>p.observations>0&&p.bestHighProfitPct!=null);
-  const unobserved=picks.length-observed.length;
-  const lo=Math.min(-2,...observed.map(p=>p.worstLowProfitPct??0))-1;
-  const hi=Math.max(12,...observed.map(p=>p.bestHighProfitPct??0))+1;
-  const X=v=>((v-lo)/(hi-lo)*100).toFixed(2)+'%';
-  const rocketed=observed.filter(p=>p.rocketDate).length;
-  const optHtml=desc.map(i=>`<option value="${i.date}" ${i.date===PERF_TRACK_ISSUE?'selected':''}>${i.date}</option>`).join('');
-  const trackRows=observed.map(p=>{
-    const wl=Math.min(0,p.worstLowProfitPct??0),bh=Math.max(0,p.bestHighProfitPct??0);
-    const fc=p.finalCloseProfitPct;
-    const outcome=p.rocketDate?`rocketed d${p.rocketDays}`:p.complete?'no +10% within window':'pending';
-    const tip=`${p.symbol} · rank ${p.rank??'—'} · best high ${pct(p.bestHighProfitPct)} (d${p.bestDays??'—'}) · worst ${p.worstLowProfitPct!=null?pct(p.worstLowProfitPct):'—'} · final close ${fc!=null?pct(fc):'—'} · ${outcome}`;
-    return `<div style="display:flex;align-items:center;gap:8px;margin-top:3px;${p.complete?'':'opacity:.55'}" title="${escHtml(tip)}">
-      <span style="width:92px;flex:0 0 92px;font-size:12px;color:var(--t2);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;text-align:right">${escHtml(p.symbol)}</span>
-      <span style="position:relative;flex:1;height:16px">
-        <span style="position:absolute;left:${X(0)};top:0;bottom:0;width:1px;background:var(--border-hi)"></span>
-        <span style="position:absolute;left:${X(10)};top:0;bottom:0;width:1px;background:rgba(251,191,36,.45)"></span>
-        ${wl<0?`<span style="position:absolute;left:${X(wl)};width:calc(${X(0)} - ${X(wl)});top:4px;height:8px;background:var(--red);border-radius:4px 0 0 4px"></span>`:''}
-        ${bh>0?`<span style="position:absolute;left:${X(0)};width:calc(${X(bh)} - ${X(0)});top:4px;height:8px;background:var(--green);border-radius:0 4px 4px 0"></span>`:''}
-        ${fc!=null?`<span style="position:absolute;left:${X(fc)};top:50%;width:8px;height:8px;margin:-4px 0 0 -4px;border-radius:50%;background:var(--t1);box-shadow:0 0 0 2px var(--bg-card)"></span>`:''}
-      </span>
-      <span style="width:84px;flex:0 0 84px;font-size:12px;color:var(--t3);font-family:'DM Mono',monospace">${pct(p.bestHighProfitPct)}${p.bestDays!=null?` d${p.bestDays}`:''}</span>
-    </div>`;
-  }).join('');
-  const dumbHtml=`
-    <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin:18px 0 2px">
-      <span style="font-size:13px;font-weight:700;color:var(--t1)">Pick outcomes after recommendation</span>
-      <select onchange="PERF_TRACK_ISSUE=this.value;renderPerformance()" style="padding:3px 8px;background:var(--bg-card);border:1px solid var(--border);border-radius:6px;color:var(--t1);font-size:13px;font-family:'DM Mono',monospace">${optHtml}</select>
-      <span style="font-size:12px;color:var(--t3)">${observed.length} observed picks · ${rocketed} rocketed${unobserved?` · ${unobserved} awaiting first next-session observation`:''}</span>
-    </div>
-    <div style="font-size:12px;color:var(--t3);margin-bottom:8px">Bar spans worst low → best high vs entry price · dot = latest close · amber line = the +10% rocket bar · dimmed rows still in their window</div>
-    ${observed.length?trackRows:`<div style="font-size:13px;color:var(--t3);padding:8px 0">No observations yet for this date — picks are first measured on the next session's upload.</div>`}
-    <div style="display:flex;gap:14px;flex-wrap:wrap;align-items:center;margin-top:8px;font-size:12px;color:var(--t3)">
-      <span style="display:inline-flex;align-items:center;gap:4px"><span style="width:12px;height:8px;border-radius:0 4px 4px 0;background:var(--green)"></span>above entry (best high)</span>
-      <span style="display:inline-flex;align-items:center;gap:4px"><span style="width:12px;height:8px;border-radius:4px 0 0 4px;background:var(--red)"></span>below entry (worst low)</span>
-      <span style="display:inline-flex;align-items:center;gap:4px"><span style="width:8px;height:8px;border-radius:50%;background:var(--t1);box-shadow:0 0 0 2px var(--bg-card)"></span>latest close</span>
-      <span style="display:inline-flex;align-items:center;gap:4px"><span style="width:1px;height:10px;background:rgba(251,191,36,.65)"></span>+10% target</span>
-    </div>`;
-
-  return `<div style="padding:14px 16px;border-bottom:1px solid var(--border)">${heatHtml}${dumbHtml}</div>`;
-}
 
 function renderPerformance(){
   PERF_RENDERED=true;
@@ -6042,7 +5922,6 @@ function renderPerformance(){
     ${_navLink('perf-monthly','📅 Monthly',monthRows.length>0)}
     ${_navLink('perf-trade-windows','🕐 Time-of-day Outcomes',hasTradeWindows)}
     ${_navLink('perf-stocks','📈 Stocks',p.symBreakdown.length>0)}
-    ${_navLink('perf-outcomes','Outcome Feedback',true)}
   </nav>`;
   const entryOutcomeText=entrySummary.completed
     ? `${entrySummary.completed} actual recommended buys assessed over their adaptive outcome windows (${entrySummary.topups} top-ups). Their average best net opportunity is ${entrySummary.avgBestNet>=0?'+':''}${entrySummary.avgBestNet.toFixed(2)}%; their best observed peak velocity averages ${entrySummary.avgVelocity>=0?'+':''}${entrySummary.avgVelocity.toFixed(3)}%/day. These outcomes provide confidence context only and refine the single target policy with sample-size confidence.`
@@ -6056,11 +5935,10 @@ function renderPerformance(){
   const escapeText=exitOpportunity.exits
     ? `${exitOpportunity.exits} symbol/date exits have same-day ALL NSE highs recorded. ${exitOpportunity.upsideExits} highs exceeded the quantity-weighted average sell price; sold-value-weighted missed upside averages ${exitOpportunity.avgMissed.toFixed(2)}% (${fmtINR(exitOpportunity.missedValue)}).`
     : `No same-day exit opportunities have been recorded yet. Load Orders, Tradebook, and ALL NSE for the sell day.`;
-  let trackingHtml='';
-  try{trackingHtml=buildRecommendationTrackingHTML();}catch(e){console.warn('Recommendation tracking viz failed',e);}
-  const outcomeHtml=perfCard('Recommendation Outcome Feedback',
-    trackingHtml
-    +`<div style="padding:14px 16px;color:var(--t2);font-size:14px;line-height:1.7"><div><strong style="color:var(--t1)">Actual entries:</strong> ${entryOutcomeText}</div><div style="margin-top:8px"><strong style="color:var(--t1)">Eligible shortlist:</strong> ${outcomeText}</div><div style="margin-top:8px"><strong style="color:var(--t1)">Same-day exit opportunity:</strong> ${escapeText}</div><div style="margin-top:8px;color:var(--t3)">Earlier trading-day feature states versus the later current 1D top-1% outcome train raw rocket relevance. Completed shortlist and executed-entry outcomes are shown as confidence context only, while tradebook costs plus hard high-move outcomes refine sizing, review timing, and the single Harvest target.</div></div>`,'','perf-outcomes');
+  // v1106 (owner): the Recommendation Outcome Feedback panel is gone from Performance. The
+  // RECORDING is untouched - rs_recommend_outcomes_delta_v1 still carries every pick's v1085
+  // rocket label and is what Leg 2 of the post-close routine grades. Only the readout is removed.
+  const outcomeHtml='';
 
   el.innerHTML=`
     <div style="padding:12px 16px">
@@ -6071,7 +5949,6 @@ function renderPerformance(){
       ${monthRows.length?perfCard('Monthly Breakdown',monthTbl.getHtml(),'','perf-monthly'):''}
       ${hasTradeWindows?perfCard(`Time-of-day Outcomes — Diagnostic Only <span style="font-size:12px;color:var(--t3);font-weight:400">${timingModel.episodeCount} distinct entries · ${timingModel.entryDays} entry days · clock windows only · descriptive, never a recommendation rule</span>`,timingTbl.getHtml(),'','perf-trade-windows'):''}
       ${p.symBreakdown.length?perfCard('Stocks',symTbl.getHtml(),'360px','perf-stocks'):''}
-      ${outcomeHtml}
     </div>`;
 
   setTimeout(()=>{monthTbl.render();symTbl.render();timingTbl.render();},0);
@@ -7662,7 +7539,7 @@ function renderTable(){
       chk:`<td style="text-align:center"><input type="checkbox" ${isSelected?'checked':''} ${canBuy?'':'disabled'} style="width:14px;height:14px;accent-color:var(--amber);cursor:${canBuy?'pointer':'not-allowed'}" onclick="event.stopPropagation()" onchange="toggleStock('${s.symbol}',this.checked)" title="${canBuy?'Include in the Zerodha basket export':'Ineligible for the basket'}"></td>`,
       rank:`<td style="font-family:'DM Mono',monospace;font-weight:800;color:var(--t1);text-align:right">${s.rank??'—'}</td>`,
       score:`<td>${radarScoreCell(s.score,'Relative same-day composite score (0-100 percentile, top-weighted). It is a ranking, not a probability.')}</td>`,
-      symbol:`<td style="font-family:'Plus Jakarta Sans',sans-serif"><button type="button" onclick='event.stopPropagation();openTradingViewChart(${JSON.stringify(String(s.symbol))})' style="padding:0;border:0;background:transparent;color:inherit;text-align:left;cursor:pointer" title="Open TradingView chart"><div style="font-weight:700;font-size:15px;color:var(--t1)">${escHtml(s.symbol)}${(()=>{const flags=s.meta?.flags||[];if(!flags.length)return '';return `<span style="font-size:12px;background:rgba(239,68,68,.15);color:var(--red);border-radius:4px;padding:1px 5px;margin-left:5px;font-weight:700;vertical-align:middle" title="NSE surveillance flags: ${escHtml(flags.join(' · '))}">⚠ ${flags.length}</span>`;})()}${s._held?`<span style="font-size:12px;background:rgba(244,114,182,.15);color:#f472b6;border-radius:4px;padding:1px 5px;margin-left:5px;font-weight:700;vertical-align:middle" title="You already hold this. Held stocks stay in the ranking (v1070) and can be recommended again — buying here ADDS to the existing position.">📌 held</span>`:''}${s.entryReady===false?`<span style="font-size:12px;background:rgba(245,158,11,.15);color:var(--amber);border-radius:4px;padding:1px 5px;margin-left:5px;font-weight:700;vertical-align:middle" title="${escHtml('Extended: '+(s.entryTiming?.reason||'upper-range entry')+'. Shown for context only — since v1075 this no longer withholds the stock. A forward test (28-Jul close to 29-Jul, n=1618) found extension predicted CONTINUATION: the 100-150% range-used bucket returned +1.40% next day against +0.75% for unblocked stocks.')}">⚡ extended</span>`:''}${s.preResults?.drift?`<span style="font-size:12px;background:rgba(34,197,94,.15);color:var(--green);border-radius:4px;padding:1px 5px;margin-left:5px;font-weight:700;vertical-align:middle" title="${escHtml(`Results in ${s.preResults.daysToResults} trading session(s) (${s.preResults.resultsDate}, source: ${s.preResults.resultsSource}) and the stock drifted up quietly into it — ${s.preResults.driftPct>0?'+':''}${Number(s.preResults.driftPct).toFixed(2)}% over the ${s.preResults.driftSource||'prior sessions'}, up today, with no volume ignition. Measured 2026-08-05 (RULES.md R15): of stocks reporting within 2 days, those drifting UP hit +5% at 12.3% against a 4.9% market rate, while 0 of 30 drifting DOWN did. REPORTED ONLY — this sets no score term until R15 clears 3 confirms across 2 sessions. NB magnitude is not yet thresholded: PROTEAN and KSB both drifted marginally up and still fell ~8%.`)}">📅 pre-results</span>`:''}</div><div style="font-size:11px;color:var(--t3);max-width:220px;overflow:hidden;text-overflow:ellipsis">${escHtml(s.name||'')}</div></button></td>`,
+      symbol:`<td style="font-family:'Plus Jakarta Sans',sans-serif"><button type="button" onclick='event.stopPropagation();openTradingViewChart(${JSON.stringify(String(s.symbol))})' style="padding:0;border:0;background:transparent;color:inherit;text-align:left;cursor:pointer" title="Open TradingView chart"><div style="font-weight:700;font-size:15px;color:var(--t1)">${escHtml(s.symbol)}${(()=>{const flags=s.meta?.flags||[];if(!flags.length)return '';return `<span style="font-size:12px;background:rgba(239,68,68,.15);color:var(--red);border-radius:4px;padding:1px 5px;margin-left:5px;font-weight:700;vertical-align:middle" title="NSE surveillance flags: ${escHtml(flags.join(' · '))}">⚠ ${flags.length}</span>`;})()}${s._held?`<span style="font-size:12px;background:rgba(244,114,182,.15);color:#f472b6;border-radius:4px;padding:1px 5px;margin-left:5px;font-weight:700;vertical-align:middle" title="You already hold this. Held stocks stay in the ranking (v1070) and can be recommended again — buying here ADDS to the existing position.">📌 held</span>`:''}</div><div style="font-size:11px;color:var(--t3);max-width:220px;overflow:hidden;text-overflow:ellipsis">${escHtml(s.name||'')}</div></button></td>`,
       setup:`<td style="font-size:13px;color:var(--t2)">${escHtml(s.setup||'—')}${s.stage?' '+radarStagePill(s):''}</td>`,
       series:`<td>${radarSeriesBandPill(s)}</td>`,
       stretch:`<td style="color:${stretchColor};font-weight:700" title="A 10% move is this many multiples of the strongest daily-range estimate. Lower is more feasible.">${s.stretch!=null&&isFinite(s.stretch)?Number(s.stretch).toFixed(1)+'×':'—'}</td>`,
