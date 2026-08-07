@@ -1,5 +1,5 @@
-const BUILD_TS='2026-08-07 12:05 IST'; // release build time (IST)
-const APP_VERSION=1104; // v1104: removes the v1103 target-anchor ceiling - a stray paste is not worth a guard, and the wrong value was already visible on the Stop/Target card.
+const BUILD_TS='2026-08-07 15:54 IST'; // release build time (IST)
+const APP_VERSION=1105; // v1105: the exit layer - the target scales with the stock's own ATR instead of its score, measured on 214 of the owner's own sells, and a reported exit signal finally asks whether a position is still being bought.
 // v1093: a baseline reward:risk MEASURED on the cross-section (last completed bhav session) instead of learned from the owner's own fills - reported on every row, deliberately not enforced. Includes v1092: position size split by Radar score / stop distance, so equally-scored names carry equal RUPEE risk, plus an opt-in Risk /trade cap.
 // v556: parse the NSE Market Activity Report (MA<date>.csv) — official Nifty %, advances/declines and sector index moves shown as market CONTEXT in the status bar (EOD data, display only, never fed into per-row scoring); MA added to the ℹ️ file manifest.
 // v555 market-cycle stage awareness (stateless, self-calibrating): per-row stage label (1 accumulation · 2 breakout · 3 event · 4 profit-booking · 5 re-accumulation · 6 second-leg); a quiet-accumulation signal (conjunction-of-percentiles) injected via the rocket-diagnostic weighting; sell-the-news decay off Recent earnings date (horizon = review days). v1065 makes the market-breadth gauge an entry-eligibility input while still never changing ranking.
@@ -3024,6 +3024,8 @@ function radarAnalyze(headers,rawRows,supplements={},heldSymbols=new Set()){
   // v555 market-cycle inputs: earnings dates (stateless days-since/days-to), 50-day MA (holding-above check).
   const recentEarnI=radarIdx(headers,'Recent earnings date'),upcomingEarnI=radarIdx(headers,'Upcoming earnings date'),sma50I=radarIdx(headers,'Simple moving average, 50, 1 day');
   const weekChgI=radarIdx(headers,'Price change %, 1 week'); // v1097 pre-results drift
+  // v1105 exit signal inputs - the two money-flow measures that are NOT circular with price position
+  const cmfI=radarIdx(headers,'Chaikin money flow, 20, 1 day'), mfi15I=radarIdx(headers,'Money flow index, 14, 15 minutes');
   const sessionDate=getSessionDate(),reviewDays=getEffectiveReviewDays(); // reviewDays null ⇒ post-event stages/decay don't fire (graceful, no constant)
   // R5 (v552, WS3): neutralise mechanical ex-date moves so they neither score the row nor
   // pollute the day-move percentiles. For a structural corp action (demerger/split/bonus/rights)
@@ -3490,6 +3492,7 @@ function radarAnalyze(headers,rawRows,supplements={},heldSymbols=new Set()){
       price,day:dispDay,priceChange:dispDay,turnover:turn,relvol,gap,gapSigned,changeOpen,rangePct,sessionVolatilityPct,stretch,atr:atrPct,
       high1d:highI>=0?radarNum(raw[highI]):null,low1d:lowI>=0?radarNum(raw[lowI]):null,open1d:openI>=0?radarNum(raw[openI]):null,marketCap:mcapI>=0?radarNum(raw[mcapI]):null,rocketToday:rset.has(ri),
       vwap:vwapI>=0?radarNum(raw[vwapI]):null,
+      chaikinMF:cmfI>=0?radarNum(raw[cmfI]):null, mfi15m:mfi15I>=0?radarNum(raw[mfi15I]):null,
       bollUpper:bollUpperI>=0?radarNum(raw[bollUpperI]):null,
       keltUpper:keltUpperI>=0?radarNum(raw[keltUpperI]):null,
       price1h:priceHourI>=0?radarNum(raw[priceHourI]):null,
@@ -5615,10 +5618,11 @@ function buildOpenPositionsPanel(query=''){
     // first day is, on this evidence, no longer working; holding it is what fills the book with the
     // permanently-red residue the owner sees. Flag it for exit. This is a DISPLAYED decision, never
     // an automatic order - execution stays manual, and it never touches score or rank.
+    const exitSignal=getPositionExitSignal(scannerRow);
     const hitTarget=(avg&&ltp&&targetPct)?(ltp>=avg*(1+targetPct/100)):false;
     const timeExit=daysHeld!=null&&daysHeld>=1&&!hitTarget;
     rows.push({
-      sym:pos.symbol,qty,avg,ltp,pnlPct,pnlRs,capital,daysHeld,targetPrice,stopPrice,targetPct,exitPolicy,
+      sym:pos.symbol,qty,avg,ltp,pnlPct,pnlRs,capital,daysHeld,targetPrice,stopPrice,targetPct,exitPolicy,exitSignal,
       timeExit,hitTarget,
       tslPoints:tslInfo?.trailStepPoints??tslInfo?.trailPoints??null,
       score:isFinite(Number(scannerRow?.score))?Number(scannerRow.score):null,
@@ -5658,6 +5662,7 @@ function buildOpenPositionsPanel(query=''){
         ? `<span style="font-size:11px;background:rgba(245,158,11,.14);color:var(--amber);border:1px solid rgba(245,158,11,.3);border-radius:5px;padding:1px 7px;white-space:nowrap" title="Held past its first day without reaching target. Measured on the fresh cohort: same-day resolutions made +Rs 11,743 while the 131 trips that survived past day 1 lost -Rs 6,220 between them, and picks give back 84% of their peak on average. Displayed decision only — no order is placed.">time exit</span>`
         : `<span style="font-size:11px;color:var(--t3)">holding</span>`,
       clrFn:()=>''},
+    {key:'exitSignal',label:'Still Bought?',align:'left',fmt:v=>{if(!v||v.state==='unknown')return '<span style=\"color:var(--t3)\" title=\"'+escHtml(v?v.note:'no data')+'\">—</span>';const c=v.state==='holding'?'var(--green)':v.state==='mixed'?'var(--amber)':'var(--red)';const t=escHtml(v.note+'  '+v.parts.join('  '));return '<span style=\"font-size:11px;color:'+c+';font-weight:700\" title=\"'+t+'\">'+v.state+' '+v.held+'/'+v.of+'</span>';},clrFn:()=>''},
     {key:'targetPrice',label:'Target ₹',align:'right',fmt:(v,row)=>v!=null?fmtINR(v)+`<span style="font-size:12px;color:var(--t3);margin-left:4px">+${Number(row.targetPct).toFixed(2)}%</span>`:'—',clrFn:()=>'var(--green)'},
     {key:'stopPrice',label:'SL ₹',align:'right',fmt:(v,row)=>v!=null?fmtINR(v)+`<span style="font-size:12px;color:var(--t3);margin-left:4px">-${Number(row.exitPolicy?.stopPct).toFixed(2)}%</span>`:'—',clrFn:()=>'var(--red)'},
     {key:'tslPoints',label:'TSL pts',align:'right',bold:true,fmt:v=>v!=null?Number(v).toFixed(2):'—',clrFn:v=>v==null?'var(--t3)':'var(--amber)'},
@@ -6960,19 +6965,35 @@ function getRowExitPolicy(row,buyPrice=null,activeInfo=null,nudgeInfo=null){
   // the recommendation gates all keep using it (see radarAnalyze). Only the EXIT PRICE gets the nudge.
   const basePct=targetPct;
   let nudgePct=0;
-  const nudge=nudgeInfo||getTargetNudgeContext();
-  // A manual anchor is the owner overriding outright (v1077 precedent) — never nudged.
-  if(targetPct>0&&active.source!=='manual'&&nudge&&nudge.poolPct>0&&nudge.meanScore>0){
-    const sc=Number(row?.score);
-    if(Number.isFinite(sc)&&sc>0){
-      nudgePct=nudge.poolPct*sc/nudge.meanScore;
-      const lifted=basePct+nudgePct;
-      // Capacity is the only cap. A stock cannot be asked for more than it typically travels.
-      const capped=capacity>0?Math.min(lifted,capacity):lifted;
-      targetPct=toStep(Math.max(basePct,capped));
-      nudgePct=+(targetPct-basePct).toFixed(2);
-      if(nudgePct>0) targetSource+=' + left-on-table nudge';
-    }
+  // ── v1105 THE EXIT TARGET SCALES WITH THE STOCK, NOT WITH ITS SCORE ─────────────────────────
+  // Measured on the owner's own 214 completed sells (2026-08-07), taking the move available from HIS
+  // buy price to that day's high:
+  //
+  //     available   median 3.36%  = 0.78 ATR        he captured  median 2.13% = 0.44 ATR
+  //
+  // Sweeping target = k x ATR over those same trades, filling at the target where the day's high
+  // reached it and otherwise leaving his actual exit in place:
+  //
+  //     k=0.50 -> +Rs 2,453    k=0.75 -> +Rs 27,449    k=1.00 -> +Rs 41,069
+  //     k=1.25 -> +Rs 42,397   k=1.50 -> +Rs 40,471    (his actual realised: -Rs 45,397)
+  //
+  // The optimum is a BROAD plateau at 1.0-1.25 ATR, not a spike, which is what makes it credible
+  // rather than fitted. And `capacity` = sqrt(ATR x range) already equals 1.00 ATR at the universe
+  // median (3.71% against a 3.69% median ATR) — the v1073 rule that v1077 removed lands exactly on
+  // the measured optimum. So this restores capacity as the target and keeps the goal rate as a FLOOR.
+  //
+  // WHY A FLAT RATE WAS WRONG. The same 2.75% is 0.83 ATR on a quiet name and 0.47 ATR on a fast one
+  // — less than half a normal day's travel. That asymmetry is the mechanism behind the leak: 13 of
+  // the 22 sells that ran 7%+ past him were top-ATR-quartile names.
+  //
+  // THIS REPLACES THE v1097 SCORE NUDGE. Score answers "how good is the setup", which is an ENTRY
+  // question; how far a stock can travel is a property of the stock. Owner, 2026-08-07: "tying to
+  // ATR instead of score is a good start." The left-on-table pool is still measured and still shown,
+  // it simply no longer sets the price. A MANUAL anchor still wins outright (v1077 precedent).
+  if(targetPct>0&&active.source!=='manual'&&capacity>0){
+    targetPct=toStep(Math.max(basePct,capacity));
+    nudgePct=+(targetPct-basePct).toFixed(2);
+    if(nudgePct>0) targetSource+=' + stock capacity (ATR)';
   }
   const stopPct=getRowStopDistancePct(row);
   // v1093 (owner): "R:R is not to be learnt from past and applied to future if it's bad. If it's
@@ -7040,7 +7061,7 @@ function getRowExitPolicy(row,buyPrice=null,activeInfo=null,nudgeInfo=null){
     // v1097, all REPORTED so the nudge is auditable on every row:
     basePct:basePct>0?+basePct.toFixed(2):null,   // the goal rate alone — what eligibility is judged on
     nudgePct:+Number(nudgePct||0).toFixed(2),      // what the left-on-table pool added
-    nudgePoolPct:nudge?nudge.poolPct:null,
+    nudgePoolPct:(()=>{try{return getLeftOnTablePool().poolPct;}catch(e){return null;}})(),
     stopPct:+stopPct.toFixed(2),
     rewardRisk,
     reachable,
@@ -7065,6 +7086,53 @@ function getRowExitPolicy(row,buyPrice=null,activeInfo=null,nudgeInfo=null){
     fallback:capacity==null,
     buyPrice:Number(buyPrice)>0?Number(buyPrice):null
   };
+}
+// ── v1105 EXIT SIGNAL (REPORTED ONLY) ────────────────────────────────────────
+// The app has always had an exit PRICE and never an exit SIGNAL — nothing ever asked whether a
+// position is still being bought. This reads that from columns already exported, and it is DISPLAY
+// ONLY: it moves no score, no target and no order.
+//
+// MEASURED 2026-08-07 on the live cross-section (n=1,877) against "retention" — where price sits in
+// the day's range, 1.0 meaning it is sitting on its high:
+//
+//   price > VWAP (1d)  0.747 vs 0.234  +0.514   |  Chaikin money flow > 0  0.514 vs 0.390  +0.124
+//   RSI 15m > 55       0.790 vs 0.322  +0.468   |  Bull bear power > 0     0.467 vs 0.400  +0.068
+//   MFI 15m > 60       0.644 vs 0.349  +0.294   |  Parabolic SAR           0.465 vs 0.402  +0.063
+//   RoC 5m > 0         0.564 vs 0.336  +0.229   |  MFI 1d > 60             0.460 vs 0.423  +0.038
+//
+// TWO HONEST NOTES ON THAT TABLE. VWAP and 15m RSI are PARTLY CIRCULAR — VWAP is an average of the
+// day's own prices, so a stock on its high is mechanically above it, and a short-window RSI behaves
+// the same way. They measure "is it high now", not "will it stay high". The volume-based measures
+// (Chaikin money flow, 15m MFI) are NOT explained by that mechanism, which is why they are kept even
+// though they separate less. SAR, Bull Bear Power and daily MFI were measured and DISCARDED — SAR is
+// nominally a trailing-exit indicator and is among the weakest of the set here.
+//
+// Because the strongest inputs are partly circular this cannot become an exit RULE on today's
+// evidence; the RULES.md bar wants >=3 confirms across >=2 sessions. Getting them needs no new store:
+// compare this reading against the CLOSE already kept in rs_price_history_v1 the following day.
+function getPositionExitSignal(row){
+  if(!row) return null;
+  const price=Number(row.price), vwap=Number(row.vwap);
+  const hi=Number(row.high1d), lo=Number(row.low1d);
+  const cmf=Number(row.chaikinMF), mfi15=Number(row.mfi15m);
+  const parts=[], missing=[];
+  const push=(ok,label)=>{ if(ok===null){missing.push(label);return;} parts.push({ok,label}); };
+  push((vwap>0&&price>0)?price>=vwap:null,'above VWAP');
+  push(Number.isFinite(cmf)?cmf>0:null,'money flowing in');
+  push(Number.isFinite(mfi15)?mfi15>60:null,'15m money flow strong');
+  if(!parts.length) return {state:'unknown',score:null,parts:[],missing,
+    note:'No VWAP or money-flow data on this row, so whether it is still being bought is unknown.'};
+  const held=parts.filter(x=>x.ok).length;
+  const frac=held/parts.length;
+  // Retention is CONTEXT, never an input — it is the thing these signals are judged against, so
+  // feeding it back in would be exactly the circularity the note above warns about.
+  const retention=(hi>lo&&price>0)?+((price-lo)/(hi-lo)).toFixed(2):null;
+  const state=frac>=0.99?'holding':frac>=0.5?'mixed':'fading';
+  const retTxt=retention!=null?('; price sits at '+Math.round(retention*100)+'% of today’s range'):'';
+  return {state,score:+frac.toFixed(2),held,of:parts.length,retention,
+    parts:parts.map(x=>(x.ok?'✓ ':'✗ ')+x.label),missing,
+    note:held+' of '+parts.length+' buying signals still on'+retTxt
+      +'. Reported only — this moves no target and places no order.'};
 }
 function summarizeRowExitPolicies(rows){
   const policies=(rows||[]).map(r=>getRowExitPolicy(r,r?.price)).filter(p=>p.targetPct>0&&p.stopPct>0&&p.viable);
