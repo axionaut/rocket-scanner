@@ -1,5 +1,5 @@
-const BUILD_TS='2026-08-07 11:48 IST'; // release build time (IST)
-const APP_VERSION=1103; // v1103: a Target Anchor no stock on the board could reach is now rejected and named in the status bar instead of being applied in silence and collapsing the whole ranking.
+const BUILD_TS='2026-08-07 12:05 IST'; // release build time (IST)
+const APP_VERSION=1104; // v1104: removes the v1103 target-anchor ceiling - a stray paste is not worth a guard, and the wrong value was already visible on the Stop/Target card.
 // v1093: a baseline reward:risk MEASURED on the cross-section (last completed bhav session) instead of learned from the owner's own fills - reported on every row, deliberately not enforced. Includes v1092: position size split by Radar score / stop distance, so equally-scored names carry equal RUPEE risk, plus an opt-in Risk /trade cap.
 // v556: parse the NSE Market Activity Report (MA<date>.csv) — official Nifty %, advances/declines and sector index moves shown as market CONTEXT in the status bar (EOD data, display only, never fed into per-row scoring); MA added to the ℹ️ file manifest.
 // v555 market-cycle stage awareness (stateless, self-calibrating): per-row stage label (1 accumulation · 2 breakout · 3 event · 4 profit-booking · 5 re-accumulation · 6 second-leg); a quiet-accumulation signal (conjunction-of-percentiles) injected via the rocket-diagnostic weighting; sell-the-news decay off Recent earnings date (horizon = review days). v1065 makes the market-breadth gauge an entry-eligibility input while still never changing ranking.
@@ -6789,40 +6789,12 @@ function getActiveTargetInfo(){
   const goal=getGoalLedTargetPct();
   const auto=(goal!=null&&goal<harvest)?{tgtPct:goal,source:'goal'}:{tgtPct:harvest,source:'harvest'};
   const manual=parseFloat(document.getElementById('fTgtOverride')?.value);
-  // v1103 SANITY BOUND. On 2026-08-07 this field held 45975.39 — the Max Alloc RUPEE value, not a
-  // percentage — and it was accepted in silence. Every target became 45975%, every row turned
-  // non-viable, and the whole ranking collapsed to one stock with no indication why.
-  //
-  // The bound is SELF-CALIBRATING, not a typed ceiling: an anchor is unusable if NO stock in today's
-  // cross-section could travel that far, so the limit is the largest per-stock capacity on the board
-  // (sqrt(ATR x range), the unit already used for capacity everywhere). A wild value is ignored and
-  // REPORTED via `manualRejected` rather than silently applied or silently dropped.
-  if(Number.isFinite(manual)&&manual>0){
-    const cap=getMaxUniverseCapacityPct();
-    if(cap==null||manual<=cap) return {tgtPct:manual,source:'manual',harvestPct:harvest,goalPct:goal,autoPct:auto.tgtPct};
-    return {tgtPct:auto.tgtPct,source:auto.source,harvestPct:harvest,goalPct:goal,autoPct:auto.tgtPct,
-      manualRejected:{value:manual,maxCapacityPct:+cap.toFixed(2),
-        reason:`Target Anchor ${manual} % ignored — no stock on today's board can travel further than ${cap.toFixed(1)}%. Clear the field to use the automatic anchor.`}};
-  }
+  // A typed anchor is taken at face value. v1103 added a ceiling here after a stray paste put a rupee
+  // amount in this percentage field; it was removed the same day as over-engineering (owner). The
+  // wrong value was already visible on the Stop/Target card, which read "base 45975.39%" — a guard
+  // added nothing that the screen was not already showing.
+  if(Number.isFinite(manual)&&manual>0) return {tgtPct:manual,source:'manual',harvestPct:harvest,goalPct:goal,autoPct:auto.tgtPct};
   return {tgtPct:auto.tgtPct,source:auto.source,harvestPct:harvest,goalPct:goal,autoPct:auto.tgtPct};
-}
-// The largest distance any stock on today's board can plausibly travel — the ceiling a manual target
-// anchor is sanity-checked against. Reuses the sqrt(ATR x range) capacity unit, so it moves with the
-// tape and invents nothing. Returns null when the universe cannot supply one (then no bound applies).
-let _maxCapMemo=null;
-function getMaxUniverseCapacityPct(){
-  const rows=Array.isArray(ALL)?ALL:[];
-  const sig=rows.length+':'+(RADAR&&RADAR.scoredAt||'');
-  if(_maxCapMemo&&_maxCapMemo.sig===sig) return _maxCapMemo.val;
-  let mx=0;
-  for(const r of rows){
-    const a=Number(r?.atr),g=Number(r?.rangePct);
-    const cap=(a>0&&g>0)?Math.sqrt(a*g):(a>0?a:(g>0?g:0));
-    if(cap>mx) mx=cap;
-  }
-  const val=mx>0?mx:null;
-  _maxCapMemo={sig,val};
-  return val;
 }
 function getDefaultTgtPct(){
   const harvest=computeHarvestPlan().targetPct;
@@ -8046,9 +8018,6 @@ function renderStatusBar(){
   }
   if(SUPPRESSED_HELD>0)html+=` <span class="sb-tag" style="margin-left:8px" title="Stocks you already hold (Holdings + Positions + today's net Orders buys). Since v1070 they remain in the ranking and can be recommended again — buying adds to the existing position. See Open Positions below.">📌 ${SUPPRESSED_HELD} already held</span>`;
   if(SURV_HARD_REMOVED>0)html+=` <span class="sb-tag sb-tag-red" style="margin-left:4px" title="Weeded out by the configured surveillance rules in the Methodology table (hard filter).">⚠ ${SURV_HARD_REMOVED} surveillance removed</span>`;
-  try{const _mr=getActiveTargetInfo().manualRejected;
-    if(_mr) html+=` <span class="sb-tag sb-tag-red" style="margin-left:4px" title="${escHtml(_mr.reason)}">\u26a0 Target Anchor ${_mr.value} ignored</span>`;
-  }catch(e){}
   if(ALLOC_BLOCKED>0)html+=` <span class="sb-tag" style="margin-left:4px" title="Removed because no share can be allocated to them: no daily turnover, allocation rails below one share, no viable target after costs, or already held at a profit with no cushion for an add. Listed with the reason in Removed from rankings.">🚫 ${ALLOC_BLOCKED} not allocatable</span>`;
   if(tags.length){html+=`<span class="sb-sep">|</span>`;html+=tags.map(t=>`<span class="sb-tag">${t}</span>`).join('');}
   if(isFiltered)html+=`<button class="sb-clear" onclick="clearFilters()">✕ Clear filters</button>`;
