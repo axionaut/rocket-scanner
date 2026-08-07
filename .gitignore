@@ -1,8 +1,10 @@
-# Only the web app and Rocket Brain are tracked.
+# Only the web app is tracked. The brain is NEVER committed: it holds ~3,000 rows of NSE prices,
+# highs and VWAPs, and this repo is PUBLIC. NSE market-data terms forbid furnishing that data to
+# anyone, and derived values count. The git brain-backup layer was retired 2026-07-02, so the old
+# !rocket_brain.json exception protected nothing and only risked an accidental publish.
 *
 !.gitignore
 !index.html
 !app.js
 !styles.css
-!rocket_brain.json
 dev/
