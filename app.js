@@ -1,5 +1,5 @@
-const BUILD_TS='2026-08-07 16:25 IST'; // release build time (IST)
-const APP_VERSION=1107; // v1107: drops the four Performance diagnostics whose own captions said they feed nothing, and cuts the KPI sub-lines to a line each.
+const BUILD_TS='2026-08-07 16:43 IST'; // release build time (IST)
+const APP_VERSION=1108; // v1108: the Same-Day Exit Headroom card named the portfolio anchor as the target, which v1105 retired to a floor - it now names the live per-stock target range.
 // v1093: a baseline reward:risk MEASURED on the cross-section (last completed bhav session) instead of learned from the owner's own fills - reported on every row, deliberately not enforced. Includes v1092: position size split by Radar score / stop distance, so equally-scored names carry equal RUPEE risk, plus an opt-in Risk /trade cap.
 // v556: parse the NSE Market Activity Report (MA<date>.csv) — official Nifty %, advances/declines and sector index moves shown as market CONTEXT in the status bar (EOD data, display only, never fed into per-row scoring); MA added to the ℹ️ file manifest.
 // v555 market-cycle stage awareness (stateless, self-calibrating): per-row stage label (1 accumulation · 2 breakout · 3 event · 4 profit-booking · 5 re-accumulation · 6 second-leg); a quiet-accumulation signal (conjunction-of-percentiles) injected via the rocket-diagnostic weighting; sell-the-news decay off Recent earnings date (horizon = review days). v1065 makes the market-breadth gauge an entry-eligibility input while still never changing ranking.
@@ -5678,6 +5678,13 @@ function buildOpenPositionsPanel(query=''){
 }
 
 
+// v1108: the live per-stock target range, for surfaces that used to quote the portfolio anchor.
+// Since v1105 the anchor is only the floor; the target is each stock's own capacity.
+function _tgtRangeTxt(){
+  try{ const r=summarizeRowExitPolicies(ALL);
+    return r? ` · targets ${r.targetMin.toFixed(2)}-${r.targetMax.toFixed(2)}%` : '';
+  }catch(e){ return ''; }
+}
 function renderPerformance(){
   PERF_RENDERED=true;
   const el=document.getElementById('perfContent');
@@ -5777,7 +5784,7 @@ function renderPerformance(){
   if(exitOpp.exits>=5){
     const activeTgt=(typeof getEffectiveTgtPct==='function')?getEffectiveTgtPct():null;
     const missColor=activeTgt!=null&&exitOpp.avgMissed>=activeTgt?'var(--red)':exitOpp.avgMissed>=1?'var(--amber)':'var(--green)';
-    kpis.push({label:'Same-Day Exit Headroom',value:'+'+exitOpp.avgMissed.toFixed(2)+'%',color:missColor,sub:`Stock kept rising past your exit on ${exitOpp.upsideExits}/${exitOpp.exits} sell days · ${fmtINR(exitOpp.missedValue)} left same-day${activeTgt!=null?` · target anchor is ${activeTgt.toFixed(1)}%`:''}`});
+    kpis.push({label:'Same-Day Exit Headroom',value:'+'+exitOpp.avgMissed.toFixed(2)+'%',color:missColor,sub:`Stock kept rising past your exit on ${exitOpp.upsideExits}/${exitOpp.exits} sell days · ${fmtINR(exitOpp.missedValue)} left same-day${_tgtRangeTxt()}`});
   }
 
   // Diagnostics. Labels here state honestly what each number IS and whether the exit
