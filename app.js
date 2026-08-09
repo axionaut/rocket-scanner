@@ -1,5 +1,5 @@
-const BUILD_TS='2026-08-07 17:13 IST'; // release build time (IST)
-const APP_VERSION=1109; // v1109: feasibility no longer multiplies the score - it anti-correlates with momentum at -0.588 and the 4th power was deleting the very stocks that go on to reach target.
+const BUILD_TS='2026-08-09 09:14 IST'; // release build time (IST)
+const APP_VERSION=1110; // v1110: the Reinvest %/day field had no change handler, so it never saved and every re-render restored 55.
 // v1093: a baseline reward:risk MEASURED on the cross-section (last completed bhav session) instead of learned from the owner's own fills - reported on every row, deliberately not enforced. Includes v1092: position size split by Radar score / stop distance, so equally-scored names carry equal RUPEE risk, plus an opt-in Risk /trade cap.
 // v556: parse the NSE Market Activity Report (MA<date>.csv) — official Nifty %, advances/declines and sector index moves shown as market CONTEXT in the status bar (EOD data, display only, never fed into per-row scoring); MA added to the ℹ️ file manifest.
 // v555 market-cycle stage awareness (stateless, self-calibrating): per-row stage label (1 accumulation · 2 breakout · 3 event · 4 profit-booking · 5 re-accumulation · 6 second-leg); a quiet-accumulation signal (conjunction-of-percentiles) injected via the rocket-diagnostic weighting; sell-the-news decay off Recent earnings date (horizon = review days). v1065 makes the market-breadth gauge an entry-eligibility input while still never changing ranking.
@@ -4647,7 +4647,7 @@ function buildGoalPopoverContent(){
     <span><span style="${_lbl}">Earn ₹ (profit)</span><input id="goalTarget" type="number" value="${g.target}" style="width:92px;${_in}" onchange="onGoalChange()" title="Trading profit to generate from current total capital within the horizon — not a balance to reach."></span>
     <span><span style="${_lbl}">By (deadline)</span><input id="goalEnd" type="date" min="${getSessionDate()}" value="${g.endDate}" style="width:126px;${_in}" onchange="onGoalChange()" title="Deadline for the earnings target. Trading days left are counted from today to this date, skipping weekends and NSE holidays."></span>
     <span style="display:none"><input id="goalWd" type="hidden" value="0"></span>
-    <span><span style="${_lbl}">Reinvest %/day</span><input id="goalReinvest" type="number" min="0" max="100" placeholder="all" value="${g.reinvestPct==null?'':g.reinvestPct}" title="Share of each day's gain that stays invested and compounds; the rest is taken out as cash. Leave blank to use the fixed monthly withdrawal instead." style="width:70px;background:var(--bg-input);border:1px solid var(--border);border-radius:6px;color:var(--t1);padding:4px 6px;font-size:14px"></span>
+    <span><span style="${_lbl}">Reinvest %/day</span><input id="goalReinvest" type="number" min="0" max="100" step="1" placeholder="55" value="${g.reinvestPct==null?'':g.reinvestPct}" onchange="onGoalChange()" oninput="onGoalChange()" title="Share of each day's gain that stays invested and compounds; the rest is taken out as cash. Blank uses 55%." style="width:70px;background:var(--bg-input);border:1px solid var(--border);border-radius:6px;color:var(--t1);padding:4px 6px;font-size:14px"></span>
   </div>
   <div style="font-size:13px;line-height:1.6;color:var(--t2);margin-top:10px">${reqLine}</div>
   ${(()=>{
@@ -4704,7 +4704,13 @@ function buildGoalPopoverContent(){
 }
 function renderGoalPopover(){
   const content=document.getElementById('goalPopoverContent');
-  if(content) content.innerHTML=buildGoalPopoverContent();
+  if(!content) return;
+  // v1110: never rebuild the popover while one of its inputs has focus — a re-render mid-edit
+  // replaces the element and throws away what is being typed, which is how the reinvest field
+  // appeared to "revert". renderStats() calls this on every scan and filter change.
+  const a=document.activeElement;
+  if(a&&content.contains(a)&&/^(INPUT|SELECT)$/.test(a.tagName)) return;
+  content.innerHTML=buildGoalPopoverContent();
 }
 function buildGoalCard(){
   const g=getGoalConfig();
