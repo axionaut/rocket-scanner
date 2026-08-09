@@ -1,5 +1,5 @@
-const BUILD_TS='2026-08-09 09:14 IST'; // release build time (IST)
-const APP_VERSION=1110; // v1110: the Reinvest %/day field had no change handler, so it never saved and every re-render restored 55.
+const BUILD_TS='2026-08-09 14:36 IST'; // release build time (IST)
+const APP_VERSION=1111; // v1111: a target anchor no stock could legally reach in a day is a mis-paste, not a preference - it is ignored so the board keeps working.
 // v1093: a baseline reward:risk MEASURED on the cross-section (last completed bhav session) instead of learned from the owner's own fills - reported on every row, deliberately not enforced. Includes v1092: position size split by Radar score / stop distance, so equally-scored names carry equal RUPEE risk, plus an opt-in Risk /trade cap.
 // v556: parse the NSE Market Activity Report (MA<date>.csv) — official Nifty %, advances/declines and sector index moves shown as market CONTEXT in the status bar (EOD data, display only, never fed into per-row scoring); MA added to the ℹ️ file manifest.
 // v555 market-cycle stage awareness (stateless, self-calibrating): per-row stage label (1 accumulation · 2 breakout · 3 event · 4 profit-booking · 5 re-accumulation · 6 second-leg); a quiet-accumulation signal (conjunction-of-percentiles) injected via the rocket-diagnostic weighting; sell-the-news decay off Recent earnings date (horizon = review days). v1065 makes the market-breadth gauge an entry-eligibility input while still never changing ranking.
@@ -6702,16 +6702,36 @@ function getGoalLedTargetPct(){
 // Portfolio target anchor: lower of learned Harvest gross and goal-led gross, unless the
 // owner supplies a manual anchor. getRowExitPolicy() blends this context with each stock's
 // own ATR/range capacity; this value is no longer pasted onto every order.
+// The widest daily move any stock on file could legally make. Used to reject a target anchor that
+// no stock in the universe could ever reach (v1111). 20% is the NSE regulatory maximum band and is
+// the fail-open default when no sec_list has been parsed yet.
+function maxReachableAnchorPct(){
+  let m=0;
+  try{ for(const k in NSE_PRICE_BAND){ const b=NSE_PRICE_BAND[k]?.bandPct; if(b>m) m=b; } }catch(e){}
+  return m>0?m:20;
+}
 function getActiveTargetInfo(){
   const harvest=computeHarvestPlan().targetPct;
   const goal=getGoalLedTargetPct();
   const auto=(goal!=null&&goal<harvest)?{tgtPct:goal,source:'goal'}:{tgtPct:harvest,source:'harvest'};
   const manual=parseFloat(document.getElementById('fTgtOverride')?.value);
-  // A typed anchor is taken at face value. v1103 added a ceiling here after a stray paste put a rupee
-  // amount in this percentage field; it was removed the same day as over-engineering (owner). The
-  // wrong value was already visible on the Stop/Target card, which read "base 45975.39%" — a guard
-  // added nothing that the screen was not already showing.
-  if(Number.isFinite(manual)&&manual>0) return {tgtPct:manual,source:'manual',harvestPct:harvest,goalPct:goal,autoPct:auto.tgtPct};
+  // v1111: a typed anchor is honoured up to what the exchange physically allows.
+  //
+  // v1103 put a ceiling here after a stray paste landed a rupee amount in this percentage field;
+  // v1104 removed it as over-engineering because the bad value was already on screen, reading
+  // "base 45975.39%". That reasoning did not survive contact. It has now happened a second time
+  // (tgtOverride "100000") and this time it silently made **0 of 1902 rows viable** — every
+  // eligibility test compares against the anchor, so the app recommended NOTHING for a day with
+  // the number visible the whole time. Visibility is not a control.
+  //
+  // The bound is exchange truth, NOT a tunable: a stock cannot travel further in one day than its
+  // own price band, so an anchor above the widest band on file is unreachable by every stock in
+  // the universe and can only be a mis-paste — both observed cases were rupee amounts. Such a
+  // value is treated as ABSENT so the auto anchor resumes; it is deliberately NOT clamped to the
+  // edge, which would substitute a target the owner never chose. Fails OPEN when no band data is
+  // loaded (the 20% regulatory maximum is used), so a missing zip can never reject a real anchor.
+  if(Number.isFinite(manual)&&manual>0&&manual<=maxReachableAnchorPct())
+    return {tgtPct:manual,source:'manual',harvestPct:harvest,goalPct:goal,autoPct:auto.tgtPct};
   return {tgtPct:auto.tgtPct,source:auto.source,harvestPct:harvest,goalPct:goal,autoPct:auto.tgtPct};
 }
 function getDefaultTgtPct(){
