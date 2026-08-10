@@ -1,5 +1,5 @@
-const BUILD_TS='2026-08-09 14:36 IST'; // release build time (IST)
-const APP_VERSION=1111; // v1111: a target anchor no stock could legally reach in a day is a mis-paste, not a preference - it is ignored so the board keeps working.
+const BUILD_TS='2026-08-10 12:36 IST'; // release build time (IST)
+const APP_VERSION=1112; // v1112: the board was recommending nothing but the stocks it had no data for - a 0.05 rounding step made every stock fail the cost hurdle, and a statistical ceiling removed the rest. Selection is score >= 90 AND rank <= 10 again.
 // v1093: a baseline reward:risk MEASURED on the cross-section (last completed bhav session) instead of learned from the owner's own fills - reported on every row, deliberately not enforced. Includes v1092: position size split by Radar score / stop distance, so equally-scored names carry equal RUPEE risk, plus an opt-in Risk /trade cap.
 // v556: parse the NSE Market Activity Report (MA<date>.csv) — official Nifty %, advances/declines and sector index moves shown as market CONTEXT in the status bar (EOD data, display only, never fed into per-row scoring); MA added to the ℹ️ file manifest.
 // v555 market-cycle stage awareness (stateless, self-calibrating): per-row stage label (1 accumulation · 2 breakout · 3 event · 4 profit-booking · 5 re-accumulation · 6 second-leg); a quiet-accumulation signal (conjunction-of-percentiles) injected via the rocket-diagnostic weighting; sell-the-news decay off Recent earnings date (horizon = review days). v1065 makes the market-breadth gauge an entry-eligibility input while still never changing ranking.
@@ -2956,11 +2956,29 @@ function radarScoreColor(score){
   if(score===null||score===undefined||!isFinite(s)) return 'var(--t3)';
   return RADAR_SCORE_BANDS.find(b=>s>=b.min).color;
 }
-// v1091 (owner): only GREEN-scored rows may be recommended or exported. The threshold is READ FROM
-// the band table rather than written as a literal, so the rule and the colour on screen can never
-// disagree — if a band edge moves, this follows it. Green is the top band by construction.
-const RECOMMEND_MIN_SCORE=RADAR_SCORE_BANDS.reduce((hi,b)=>Math.max(hi,isFinite(b.min)?b.min:-Infinity),-Infinity);
+// ── THE RECOMMENDATION BAR (owner-set, v1112) ────────────────────────────────
+// "No stock below score 90 and above rank 10 to be selected." BOTH conditions, not either:
+// a stock must be in the top ten of the cross-section AND score at least 90.
+//
+// These are RISK PREFERENCES, not calibrated model outputs — the same category as Zerodha's
+// 20-order basket cap — and they are flagged as such here rather than dressed up as self-calibrating.
+// History, so neither is re-litigated: v1086 set the rank cap at 10; v1091 replaced it with the
+// GREEN band (80) read off RADAR_SCORE_BANDS, on the argument that quality should decide the count
+// instead of a fixed slot budget. That let the basket reach as deep as rank 137 on a day like
+// 2026-08-09, when 137 rows scored >= 80 — the owner wants the top of the board, not everything
+// that clears a colour. Score >= 90 is stricter than green and rank <= 10 bounds the depth, so the
+// basket buys FEWER names on a weak day rather than reaching down for filler.
+const RECOMMEND_MIN_SCORE=90;   // owner-set quality bar (stricter than the >=80 green band)
+const RECOMMEND_MAX_RANK=10;    // owner-set depth bar: the top ten of the cross-section, by rank
 function isGreenScore(score){const s=Number(score);return isFinite(s)&&s>=RECOMMEND_MIN_SCORE;}
+// The one test for "may this row be recommended and exported". Rank is the stock's own Radar rank,
+// never its position in the filtered list, so a row can never be promoted into the basket merely
+// because the rows above it were removed for some unrelated reason.
+function meetsRecommendationBar(s){
+  if(!s) return false;
+  const rank=Number(s.rank);
+  return isGreenScore(s.score)&&Number.isFinite(rank)&&rank<=RECOMMEND_MAX_RANK;
+}
 // Score number + proportional bar, both tinted by the band.
 function radarScoreCell(score,title=''){
   const s=Number(score);
@@ -4627,29 +4645,69 @@ function goalRepsHTML(v){
   if(n<0) return `<div style="font-size:11px;color:var(--red)">💪 ${Math.max(1,Math.ceil(Math.abs(n)/100))} pushups</div>`;
   return '';
 }
+// ── v1112 GOAL PANEL (owner: "clunky and doesn't feel well tied into the rest of the system") ──────
+// The content was a flex row of bare inputs followed by four prose lines in four different greys and
+// sizes — its own visual language, shared with nothing else in the app. It now uses the two idioms
+// the rest of the app already speaks: the FILTER-BAR field (.fg label above a bordered input, same
+// padding, same focus tint) and the STAT CARD (.st-l / .st-v / .st-d — uppercase label, DM Mono
+// number, one explanatory line). Nothing is computed differently; the same four numbers are read from
+// the same functions. Structure is the change: ask (inputs) -> demand (need/day) -> reality (your
+// pace) -> consequence (projected finish) -> the compounding mechanics.
+function goalFieldStyle(accent){
+  return `width:100%;padding:7px 9px;background:var(--bg-card);border:1px solid var(--border);border-radius:8px;`
+    +`color:var(--t1);font-family:'DM Mono',monospace;font-size:14px;outline:none;transition:border .2s`;
+}
+// A stat tile that matches the dashboard cards, at popover scale.
+function goalTile(label,value,valueColor,detail,title){
+  return `<div style="background:var(--bg-card);border:1px solid var(--border);border-radius:10px;padding:10px 12px"${title?` title="${escHtml(title)}"`:''}>`
+    +`<div style="font-size:12px;text-transform:uppercase;letter-spacing:1.1px;color:var(--t3);font-weight:600">${label}</div>`
+    +`<div style="font-size:20px;font-weight:800;margin-top:3px;font-family:'DM Mono',monospace;color:${valueColor}">${value}</div>`
+    +(detail?`<div style="font-size:12px;color:var(--t2);margin-top:2px;line-height:1.45">${detail}</div>`:'')
+    +`</div>`;
+}
 function buildGoalPopoverContent(){
   const g=getGoalConfig();
-  const _in='background:transparent;border:1px solid var(--border-hi);border-radius:5px;color:var(--t1);font-size:12.5px;padding:2px 6px;font-family:inherit';
-  const _lbl='font-size:12.5px;color:var(--t3);text-transform:uppercase;letter-spacing:.4px;display:block;margin-bottom:1px';
+  const _lbl='font-size:12px;font-weight:600;color:var(--t2);padding-left:2px;display:block;margin-bottom:3px';
   const remaining=goalRemainingDays(g);
-  const wdDaily=g.withdrawMonthly*12/365;
   const basis=getGoalPortfolioBasis();
   const req=getGoalRequiredNetPct();
-  const reqLine=basis>0
-    ?(remaining>0
-      ?(req!=null
-        ?`<span style="color:var(--amber);font-weight:700">Need +${req.toFixed(2)}%/day</span> <span style="color:var(--t2)">· ≈ ₹${goalFmtRs(basis*req/100)}/day on ₹${goalFmtRs(basis)}</span>`
-        :`<span style="color:var(--red);font-weight:700">Not reachable</span> <span style="color:var(--t2)">— needs over 50%/day</span>`)
-      :`<span style="color:var(--amber);font-weight:700">Deadline reached</span> — pick a later date`)
-    :`<span style="color:var(--t2)">Enter Capital ₹ to compute the required rate</span>`;
-  return `<div style="font-size:14px;color:var(--t1);margin-bottom:10px;font-weight:700">Goal</div>
-  <div style="display:flex;gap:8px;align-items:flex-end;flex-wrap:wrap">
-    <span><span style="${_lbl}">Earn ₹ (profit)</span><input id="goalTarget" type="number" value="${g.target}" style="width:92px;${_in}" onchange="onGoalChange()" title="Trading profit to generate from current total capital within the horizon — not a balance to reach."></span>
-    <span><span style="${_lbl}">By (deadline)</span><input id="goalEnd" type="date" min="${getSessionDate()}" value="${g.endDate}" style="width:126px;${_in}" onchange="onGoalChange()" title="Deadline for the earnings target. Trading days left are counted from today to this date, skipping weekends and NSE holidays."></span>
-    <span style="display:none"><input id="goalWd" type="hidden" value="0"></span>
-    <span><span style="${_lbl}">Reinvest %/day</span><input id="goalReinvest" type="number" min="0" max="100" step="1" placeholder="55" value="${g.reinvestPct==null?'':g.reinvestPct}" onchange="onGoalChange()" oninput="onGoalChange()" title="Share of each day's gain that stays invested and compounds; the rest is taken out as cash. Blank uses 55%." style="width:70px;background:var(--bg-input);border:1px solid var(--border);border-radius:6px;color:var(--t1);padding:4px 6px;font-size:14px"></span>
+  const ach=basis>0?getGoalAchievedDailyRate(basis):null;
+
+  // DEMAND — what the goal asks of every trading day, in both % and rupees.
+  const needTile=(()=>{
+    if(!(basis>0)) return goalTile('Need per day','—','var(--t3)',
+      'Load Holdings/Positions, or type a Capital ₹, to compute the required rate');
+    if(!(remaining>0)) return goalTile('Need per day','deadline reached','var(--amber)',
+      'Pick a later date above');
+    if(req==null) return goalTile('Need per day','not reachable','var(--red)',
+      'This target and deadline would need over 50% a day');
+    return goalTile('Need per day','+'+req.toFixed(2)+'%','var(--amber)',
+      `≈ ₹${goalFmtRs(basis*req/100)} net on ₹${goalFmtRs(basis)} capital`,
+      'Required NET earnings per NSE trading day, as % of capital. Capital defaults to your computed deployed book and is overridden by the Capital ₹ filter field.');
+  })();
+
+  // REALITY — what the tradebook says is actually happening, over the last 30 days.
+  const paceTile=(()=>{
+    if(ach==null) return goalTile('Your pace (30d)','—','var(--t3)','Not enough tradebook history yet');
+    const pct=ach*100;
+    const onTrack=req!=null&&pct>=req;
+    return goalTile('Your pace (30d)',(pct>=0?'+':'')+pct.toFixed(2)+'%',
+      pct<=0?'var(--red)':onTrack?'var(--green)':'var(--amber)',
+      `≈ ₹${goalFmtRs(basis*pct/100)} a day realised${req!=null?(onTrack?' · ahead of the rate':' · short of the rate'):''}`,
+      'Realised net P&L per trading day over the last 30 days, divided by capital.');
+  })();
+
+  return `<div style="display:flex;align-items:baseline;justify-content:space-between;gap:10px;margin-bottom:10px">
+    <div style="font-size:15px;color:var(--t1);font-weight:800">Goal</div>
+    <div style="font-size:12px;color:var(--t3)">${remaining} trading day${remaining===1?'':'s'} left</div>
   </div>
-  <div style="font-size:13px;line-height:1.6;color:var(--t2);margin-top:10px">${reqLine}</div>
+  <div style="display:grid;grid-template-columns:1.15fr 1.35fr .8fr;gap:8px">
+    <label><span style="${_lbl}">Earn ₹</span><input id="goalTarget" type="number" value="${g.target}" style="${goalFieldStyle()}" onchange="onGoalChange()" onfocus="this.style.borderColor='var(--amber)'" onblur="this.style.borderColor='var(--border)'" title="Trading profit to generate from current total capital within the horizon — not a balance to reach."></label>
+    <label><span style="${_lbl}">By</span><input id="goalEnd" type="date" min="${getSessionDate()}" value="${g.endDate}" style="${goalFieldStyle()}" onchange="onGoalChange()" onfocus="this.style.borderColor='var(--amber)'" onblur="this.style.borderColor='var(--border)'" title="Deadline for the earnings target. Trading days left are counted from today to this date, skipping weekends and NSE holidays."></label>
+    <label><span style="${_lbl}">Reinvest %</span><input id="goalReinvest" type="number" min="0" max="100" step="1" placeholder="55" value="${g.reinvestPct==null?'':g.reinvestPct}" onchange="onGoalChange()" oninput="onGoalChange()" title="Share of each day's gain that stays invested and compounds; the rest is taken out as cash. Blank uses 55%." style="${goalFieldStyle()}" onfocus="this.style.borderColor='var(--amber)'" onblur="this.style.borderColor='var(--border)'"></label>
+    <span style="display:none"><input id="goalWd" type="hidden" value="0"></span>
+  </div>
+  <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-top:10px">${needTile}${paceTile}</div>
   ${(()=>{
     // Projected finish date. PRIMARY = your REALISTIC pace from the tradebook (what you
     // actually earn per day, 30d) — the honest picture the owner asked for (v544).
@@ -4668,17 +4726,23 @@ function buildGoalPopoverContent(){
     const dateSpan=proj=>{const{late}=gapTxt(proj);return `<b style="color:${late?'var(--amber)':'var(--green)'}">${readable(proj)}</b>`;};
 
     // PRIMARY — realized pace from the tradebook (getGoalAchievedDailyRate = net/day ÷ basis, 30d).
-    const ach=getGoalAchievedDailyRate(basis);
-    let realHtml;
+    let finishVal,finishColor,finishDetail;
     if(ach==null){
-      realHtml=`<span style="color:var(--t2)">Not enough tradebook history to project a date</span>`;
+      finishVal='—';finishColor='var(--t3)';
+      finishDetail='Not enough tradebook history to project a date';
     }else if(ach<=0){
-      realHtml=`<span style="color:var(--red);font-weight:700">Losing ${Math.abs(ach*100).toFixed(2)}%/day</span> <span style="color:var(--t2)">— no finish date until this turns positive</span>`;
+      finishVal='no date';finishColor='var(--red)';
+      finishDetail=`Losing ${Math.abs(ach*100).toFixed(2)}% a day — there is no finish date until this turns positive`;
     }else{
       const rp=projectGoalCompletionDate(basis,g.target,ach*100,0,g.reinvestPct);
-      realHtml=rp
-        ? `<span style="color:var(--t2)">At your pace ${(ach*100).toFixed(2)}%/day:</span> ${dateSpan(rp)} · ${gapTxt(rp).t}`
-        : `<span style="color:var(--t2)">At ${(ach*100).toFixed(2)}%/day the goal is 8+ years away</span>`;
+      if(rp){
+        const gap=gapTxt(rp);
+        finishVal=readable(rp);finishColor=gap.late?'var(--amber)':'var(--green)';
+        finishDetail=`${gap.t}, holding your ${(ach*100).toFixed(2)}%/day pace`;
+      }else{
+        finishVal='8+ years';finishColor='var(--red)';
+        finishDetail=`At ${(ach*100).toFixed(2)}% a day this deadline is out of reach`;
+      }
     }
 
     // SECONDARY — portfolio-anchor context, not a claim that every stock has this target.
@@ -4691,16 +4755,19 @@ function buildGoalPopoverContent(){
           const bp=projectGoalCompletionDate(basis,g.target,netPct,0,g.reinvestPct);
           const srcLbl=at.source==='manual'?'manual':at.source==='goal'?'goal-led':'Harvest';
           bestHtml=bp
-            ? `<span style="color:var(--t2)">If every session hit ${at.tgtPct.toFixed(1)}% (${srcLbl}):</span> ${dateSpan(bp)}`
-            : `<span style="color:var(--t2)">At the ${srcLbl} anchor: 8+ years</span>`;
+            ? `If every session hit its ${at.tgtPct.toFixed(1)}% ${srcLbl} target: ${dateSpan(bp)}`
+            : `At the ${srcLbl} anchor: 8+ years`;
         }
       }
     }catch(e){}
 
-    return `<div style="font-size:13px;line-height:1.6;margin-top:6px;color:var(--t2)">${realHtml}</div>`
-      +(bestHtml?`<div style="font-size:12px;line-height:1.5;margin-top:3px;color:var(--t3)">${bestHtml}</div>`:'');
+    return `<div style="margin-top:8px">`
+      +goalTile('Projected finish',finishVal,finishColor,
+        finishDetail+(bestHtml?`<br><span style="color:var(--t3)">${bestHtml}</span>`:''),
+        'Projected from your realised 30-day pace, walking the real NSE calendar — the same arithmetic that solves the required rate, run forwards.')
+      +`</div>`;
   })()}
-  <div style="font-size:13px;color:var(--t2);margin-top:6px">${remaining} trading day${remaining===1?'':'s'} left · ${g.reinvestPct}% of each day's gain compounds, ${(100-g.reinvestPct).toFixed(0)}% taken as cash</div>`;
+  <div style="font-size:12px;color:var(--t3);margin-top:8px;line-height:1.5">${g.reinvestPct}% of each day's gain compounds · ${(100-g.reinvestPct).toFixed(0)}% taken out as cash</div>`;
 }
 function renderGoalPopover(){
   const content=document.getElementById('goalPopoverContent');
@@ -5851,9 +5918,33 @@ function renderPerformance(){
       <div class="kpi-val" style="color:${k.color}">${k.value}</div>
       <div class="kpi-sub">${k.sub}</div>
     </div>`;
-  const kpiHtml=`<div class="kpi-grid">`+kpis.map(kpiCard).join('')+'</div>'
-    +`<details class="perf-more"><summary>More detail (${detailKpis.length} diagnostics)</summary>`
-    +`<div class="kpi-grid" style="margin-top:10px">`+detailKpis.map(kpiCard).join('')+'</div></details>';
+  // ── v1112 (owner): ONE grid. Nothing is hidden behind a disclosure. ─────────────────────────────
+  // v534 split these into a headline tier and a collapsed "More detail" tier to avoid a 24-card wall.
+  // The wall was never the problem — the ORDER was: the two tiers interleaved the same subjects, so
+  // Largest Loss sat up top while Largest Win sat behind a click, and Avg Position was separated from
+  // Max Allocation, which is computed from it. Sequenced by the question each card answers, the whole
+  // set reads in one pass and `balanceGrid` (v1101) already spreads it over even rows.
+  //
+  //   RESULT     did it make money, and how reliably
+  //   PACE       what a typical day looks like, and the best and worst ones
+  //   EXTREMES   the tails and the runs — what a bad patch actually costs
+  //   BEHAVIOUR  how the positions are held and exited
+  //   SIZING     how big the next one should be
+  //
+  // Order is declared by LABEL and applied as a lookup, so a card added later still renders (it
+  // appends) rather than silently vanishing because this list was not updated.
+  const KPI_ORDER=[
+    'Net P&L','Win Rate','Expectancy','Profit Factor',
+    'Avg P&L/Trading Day','Avg P&L/Cal Day','Profitable Days','Best Day','Worst Day',
+    'Largest Win','Largest Loss','Max Drawdown','Max Win Streak','Max Loss Streak',
+    'Avg Hold','Review After','Rocket Conversion','Same-Day Exit Headroom',
+    'Avg Position','Avg Positions/Entry Day','Max Allocation'
+  ];
+  const allKpis=[...kpis,...detailKpis];
+  const byLabel=new Map(allKpis.map(k=>[k.label,k]));
+  const orderedKpis=KPI_ORDER.map(l=>byLabel.get(l)).filter(Boolean)
+    .concat(allKpis.filter(k=>!KPI_ORDER.includes(k.label)));
+  const kpiHtml=`<div class="kpi-grid">`+orderedKpis.map(kpiCard).join('')+'</div>';
 
   const monthCols=[
     {key:'month',label:'Month',align:'left',fmt:v=>v,clrFn:()=>'var(--t1)'},
@@ -6950,8 +7041,19 @@ function getRowExitPolicy(row,buyPrice=null,activeInfo=null,nudgeInfo=null){
   const rrFloorPct=(baseRR>0&&stopPct>0)?toStep(stopPct*baseRR):null;
   let minGrossPct=null;
   if(basePct>0){
-    minGrossPct=Math.ceil((HARVEST_DESIRED_NET_PCT+estimateRoundTripCostPct(basePct))*20)/20;
-    minGrossPct=Math.ceil((HARVEST_DESIRED_NET_PCT+estimateRoundTripCostPct(minGrossPct))*20)/20;
+    // v1112: ROUNDED THE SAME WAY THE ANCHOR ITSELF IS, which is the whole point of this line.
+    // getGoalLedTargetPct BUILDS the goal anchor as `roundPct05(max(goalNet, HARVEST_DESIRED_NET_PCT)
+    // + round-trip cost)` — the identical two ingredients this hurdle re-derives. It used to CEIL to
+    // the next 0.05 while the anchor ROUNDS to the nearest, so the two disagreed by one rounding step
+    // and the anchor failed the test it was constructed to pass. Measured 2026-08-09: cost 0.503% +
+    // the 0.60% net floor = 1.1030%, which the anchor rounds to 1.10 and the hurdle ceiled to 1.15 —
+    // so `basePct >= minGrossPct` was FALSE for the entire market. 542 of 900 basket-eligible rows
+    // were struck out on that 0.05, and the only rows left standing were the two with no ATR/range at
+    // all, because a null capacity skips this test: the app could recommend nothing except the stocks
+    // it knew least about. Sharing one rounding rule makes that class of contradiction impossible.
+    // The hurdle still bites where it should — a manual anchor set below costs still fails.
+    minGrossPct=roundPct05(HARVEST_DESIRED_NET_PCT+estimateRoundTripCostPct(basePct));
+    minGrossPct=roundPct05(HARVEST_DESIRED_NET_PCT+estimateRoundTripCostPct(minGrossPct));
   }
   // v1081 (owner): PRICE-BAND HEADROOM IS A HARD CONSTRAINT, not a capacity opinion.
   // Measured 2026-07-30 on SMLMAH: the basket exported it at 11:09:24 at Rs 5,435 — already +19.0%
@@ -6978,7 +7080,28 @@ function getRowExitPolicy(row,buyPrice=null,activeInfo=null,nudgeInfo=null){
   // needs the target to fit under both. Reported separately so the two causes stay distinguishable.
   const sc=getSessionCeilingInfo(row,bandRef);
   const rangeExhausted=!!(sc&&basePct>0&&sc.runwayPct<basePct);
-  const viable=basePct>0&&!bandLimited&&!rangeExhausted&&(capacity==null||basePct+1e-9>=minGrossPct);
+  // ── v1112: THE SESSION CEILING IS REPORTED, NOT ENFORCED (owner) ───────────────────────────────
+  // The CIRCUIT ceiling above stays a removal: it is exchange arithmetic — a stock at its upper band
+  // may not legally trade higher today, so the target cannot be reached, full stop (7 rows of 900).
+  // This one is a STATISTICAL estimate of the same idea (day's low + one typical day's range) and it
+  // removed 349 of 900, including most of the top ten, on the release snapshot.
+  //
+  // It is removing the wrong cohort, and the app has now measured that twice. v1075: the blocked
+  // 100-150% rangeUsed bucket returned the BEST next-day mean in the sample (+1.40%, 23.1% gaining
+  // >= 2%) — extension predicted CONTINUATION. v1109: ranking by yesterday's gain put 17 of 20 stocks
+  // into target the next session against a 27% base rate while the Radar's own top twenty managed 8,
+  // and feasibility (the same runway/target ratio) was pulled OUT of the score for exactly that
+  // reason. Leaving it alive as a hard veto kept deleting the same stocks the score had just stopped
+  // deleting — a stock that has moved has less room LEFT today, which is precisely the signal that it
+  // is moving. The owner's own report closes it: "it almost takes every good stock out."
+  //
+  // Also note the horizon mismatch recorded under v1093: this test asks what is reachable in the rest
+  // of TODAY, while v1085 grades success as target-before-stop within TWO trading days. A same-day
+  // veto cannot be correct for a two-day objective.
+  //
+  // `rangeExhausted` and `sessionRunwayPct` are still computed and still returned on every row, so
+  // the evidence keeps accumulating and restoring the block is a one-word change if it reverses.
+  const viable=basePct>0&&!bandLimited&&(capacity==null||basePct+1e-9>=minGrossPct);
   const stopSource=(Math.abs(Number(row?.slPct))>0)?'explicit stock stop'
     :hasAtr?'ATR stock stop'
     :(Number(TRADEBOOK_STATS?.adaptiveSL)>0?'learned portfolio fallback':'minimum-risk fallback');
@@ -7315,8 +7438,11 @@ function getAllocationBlockReason(s,ctx=null){
   const rail=Math.min(c.maxAlloc>0?c.maxAlloc:c.capital,turnoverCap,topUpCap,riskCap);
   if(rail<buyP) return `allocation rails (${fmtINR(rail)}) are below one share at ${fmtINR(buyP)}`;
   const policy=getRowExitPolicy(s,buyP,c.active);
-  if(policy&&policy.bandLimited) return `only ${policy.bandRunwayPct}% left to the ${policy.bandPct}% upper circuit (₹${policy.ucPrice}) — the ${policy.targetPct}% target cannot be reached inside today's band`;
-  if(policy&&policy.rangeExhausted) return `only ${policy.sessionRunwayPct}% left of today's expected ${policy.capacityPct??'—'}% range (ceiling ₹${policy.sessionCeiling}) — the move is spent and the ${policy.targetPct}% target is out of reach today`;
+  if(policy&&policy.bandLimited) return `only ${policy.bandRunwayPct}% left to the ${policy.bandPct}% upper circuit (₹${policy.ucPrice}) — the ${policy.basePct}% target cannot be reached inside today's band`;
+  // v1112: the SESSION-ceiling clause that used to sit here is gone — see getRowExitPolicy. It is a
+  // statistical estimate, it removed 349 of 900 rows including most of the top ten, and both v1075
+  // and v1109 measured that the cohort it removes is the one that goes on to reach target. The
+  // circuit clause above stays: that one is exchange arithmetic, not an opinion about momentum.
   if(policy&&policy.viable===false) return policy.capacityPct!=null
     ? `stock capacity ${policy.capacityPct.toFixed(2)}% cannot clear the ${policy.minGrossPct?.toFixed(2)??'—'}% cost + net hurdle`
     : 'no viable target after costs';
@@ -7771,18 +7897,11 @@ function applyFilters(){
   // (CLAUDE.md: "selection still caps at 20"), but FILT is truncated by it, so setting Rows=5 was
   // silently limiting the basket to 5 names. Display and selection are separate concerns.
   //
-  // v1091 (owner) REPLACES v1086's `rank <= 10` cap with a QUALITY bar: only GREEN-scored rows may
-  // be recommended or exported. A rank cap says "the best ten, whatever they are" — on a poor day
-  // that still hands over ten mediocre names, and on a strong day it refuses the eleventh good one.
-  // The green band asks the question that matters: is this setup actually strong? The count then
-  // follows the market instead of a fixed slot budget — fewer names on a weak tape, more on a
-  // strong one, still capped at Zerodha's 20-order basket limit. It also retires a constant that
-  // had to be flagged as owner-set rather than calibrated: the threshold now comes from
-  // RADAR_SCORE_BANDS, the same table that colours the score on screen, so the rule and the colour
-  // can never disagree. Non-green rows remain VISIBLE and ranked — they are simply not bought.
+  // v1112 (owner) restores BOTH bars: score >= 90 AND Radar rank <= 10 — see meetsRecommendationBar.
+  // Rows that miss either remain VISIBLE and ranked; they are simply not bought.
   const selectionRows=[...rows].sort((a,b)=>(a.rank??Infinity)-(b.rank??Infinity));
   SELECTED=new Set(selectionRows
-    .filter(s=>s.basketEligible!==false&&!EXPORT_EXCLUDED.has(s.symbol)&&isGreenScore(s.score))
+    .filter(s=>s.basketEligible!==false&&!EXPORT_EXCLUDED.has(s.symbol)&&meetsRecommendationBar(s))
     .slice(0,20).map(s=>s.symbol));
 
   PG=1;renderHead();renderTable();renderStatusBar();saveFilterState();updateTabCounts();
@@ -8809,11 +8928,12 @@ function planBasketExport(capital, selected){
   // upstream by each row's own evidence (entryReady, price band, basket eligibility); the wall
   // clock has no authority here. Never reintroduce a clock gate on this path.
   // v1075: entryReady is no longer an export veto (see applyFilters for the forward evidence).
-  // v1091: the export path re-verifies the GREEN bar itself rather than trusting its caller, the
-  // same way it already re-verifies price band, capital and turnover participation. `applyFilters`
-  // is the normal source of `selected`, but a stale selection restored from cache, a hand-built
-  // list, or a future caller must never be able to slip a sub-green row into a real order.
-  let exportList=(selected||[]).filter(s=>!getPriceBandBlockReason(s)&&isGreenScore(s.score));
+  // v1091/v1112: the export path re-verifies the recommendation bar itself rather than trusting its
+  // caller, the same way it already re-verifies price band, capital and turnover participation.
+  // `applyFilters` is the normal source of `selected`, but a stale selection restored from cache, a
+  // hand-built list, or a future caller must never slip a row past score >= 90 / rank <= 10 into a
+  // real order.
+  let exportList=(selected||[]).filter(s=>!getPriceBandBlockReason(s)&&meetsRecommendationBar(s));
   let basketAlloc=computeAlloc(capital,exportList);
   const orderCount=()=>exportList.reduce((count,s)=>{
     const qty=capital>0?(basketAlloc[s.symbol]?.qty||0):1;
