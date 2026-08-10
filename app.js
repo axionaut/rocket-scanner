@@ -1,5 +1,5 @@
-const BUILD_TS='2026-08-10 13:43 IST'; // release build time (IST)
-const APP_VERSION=1114; // v1114: the portfolio is parsed BEFORE the scanner is scored, so the target anchor the scorer uses is the finished one and not a pre-portfolio placeholder - the v1085 ordering trap, closed.
+const BUILD_TS='2026-08-10 14:38 IST'; // release build time (IST)
+const APP_VERSION=1115; // v1115: the split exit moves onto the BUY basket as two GTT-carrying orders, armed at entry - the separate Sell Targets export is removed.
 // v1093: a baseline reward:risk MEASURED on the cross-section (last completed bhav session) instead of learned from the owner's own fills - reported on every row, deliberately not enforced. Includes v1092: position size split by Radar score / stop distance, so equally-scored names carry equal RUPEE risk, plus an opt-in Risk /trade cap.
 // v556: parse the NSE Market Activity Report (MA<date>.csv) — official Nifty %, advances/declines and sector index moves shown as market CONTEXT in the status bar (EOD data, display only, never fed into per-row scoring); MA added to the ℹ️ file manifest.
 // v555 market-cycle stage awareness (stateless, self-calibrating): per-row stage label (1 accumulation · 2 breakout · 3 event · 4 profit-booking · 5 re-accumulation · 6 second-leg); a quiet-accumulation signal (conjunction-of-percentiles) injected via the rocket-diagnostic weighting; sell-the-news decay off Recent earnings date (horizon = review days). v1065 makes the market-breadth gauge an entry-eligibility input while still never changing ranking.
@@ -8984,10 +8984,19 @@ function planBasketExport(capital, selected){
   // real order.
   let exportList=(selected||[]).filter(s=>!getPriceBandBlockReason(s)&&meetsRecommendationBar(s));
   let basketAlloc=computeAlloc(capital,exportList);
-  const orderCount=()=>exportList.reduce((count,s)=>{
+  // v1115: a stock now costs TWO orders when its quantity can be split and its runner target sits
+  // above its base — so the 20-order limit must be counted in LEGS, not in names, or the export would
+  // plan 20 stocks and emit 40 orders. With the recommendation bar at rank <= 10 this rarely binds,
+  // but it must be right when it does. Trimming drops the LOWEST-ranked stock whole, never a leg.
+  const legsFor=s=>{
     const qty=capital>0?(basketAlloc[s.symbol]?.qty||0):1;
-    return count+(qty>0?1:0);
-  },0);
+    if(!(qty>0)) return 0;
+    const policy=basketAlloc[s.symbol]?.exitPolicy||getRowExitPolicy(s,basketAlloc[s.symbol]?.buyPrice||s.price);
+    const split=splitQty(qty);
+    const runnerPct=getRunnerTargetPct(policy);
+    return (split.runner>0&&runnerPct>policy.targetPct)?2:1;
+  };
+  const orderCount=()=>exportList.reduce((count,s)=>count+legsFor(s),0);
   while(exportList.length&&orderCount()>20){
     exportList=exportList.slice(0,-1);
     basketAlloc=computeAlloc(capital,exportList);
@@ -9011,11 +9020,13 @@ async function exportBasket(){
   const orders=[];
   let rejectedCount=bandRejected;
   let orderSeq=0;
-  const pushBuyOrder=(s,qty,policy)=>{
-    if(qty<=0) return;
+  // One buy LEG. v1115: a stock now emits up to two of these — a BASE leg whose GTT sells at the
+  // row's own target, and a RUNNER leg whose GTT sells further out. Each leg carries its own GTT, so
+  // the split exit is armed the moment the buys fill and never needs re-arming by hand.
+  const pushBuyOrder=(s,qty,targetPct,leg)=>{
+    if(qty<=0||!(targetPct>0)) return;
     const sym=s.symbol;
     const name=s.name||sym;
-    const targetPct=policy.targetPct;
     orders.push({
       id:Date.now()+orderSeq++,
       instrument:{
@@ -9038,10 +9049,12 @@ async function exportBasket(){
         // manually. The stop is still computed and shown (SL % column, Open Positions, allocation
         // sizing all keep using getRowStopDistancePct); it simply never leaves the app as an order.
         gtt:{target:targetPct},
-        tags:['TGT']
-      }
+        tags:[leg==='runner'?'RUN':'TGT']
+      },
+      _meta:{leg:leg||'base',sym,targetPct,fullQty:null}
     });
   };
+  let splitCount=0;
   exportList.forEach(s=>{
     const am = basketAlloc[s.symbol];
     if(am?.rejected){rejectedCount++;return;} // skip cost-floor rejections
@@ -9049,7 +9062,22 @@ async function exportBasket(){
     if(qty===0) return;
     const policy=am?.exitPolicy||getRowExitPolicy(s,am?.buyPrice||s.price);
     if(!policy.viable){rejectedCount++;return;}
-    pushBuyOrder(s,qty,policy);
+    const split=splitQty(qty);
+    const runnerPct=getRunnerTargetPct(policy);
+    // A runner is only worth a second order when there are shares for it AND its target is genuinely
+    // further out than the base. Otherwise the whole position rides the base leg — never left
+    // unallocated, and never two orders that would fill at the same level.
+    if(split.runner>0&&runnerPct>policy.targetPct){
+      pushBuyOrder(s,split.base,policy.targetPct,'base');
+      pushBuyOrder(s,split.runner,runnerPct,'runner');
+      splitCount++;
+    } else {
+      pushBuyOrder(s,qty,policy.targetPct,'base');
+    }
+  });
+  orders.forEach(o=>{
+    const total=orders.filter(x=>x._meta.sym===o._meta.sym).reduce((n,x)=>n+x.params.quantity,0);
+    o._meta.fullQty=total;
   });
 
   if(!orders.length){showToast('Capital too low to buy even 1 share of any selected stock.',4000,true);return;}
@@ -9083,12 +9111,14 @@ async function exportBasket(){
       return;
     }
   }
-  const saved=await saveBasketToScannerUploads(orders,'Zerodha_Basket_Buy');
+  // _meta is internal bookkeeping (which leg, which symbol) — it must never reach the saved file.
+  const payload=orders.map(o=>{const c={...o};delete c._meta;return c;});
+  const saved=await saveBasketToScannerUploads(payload,'Zerodha_Basket_Buy');
   if(!saved) return;
   const rejNote = rejectedCount>0
     ? ` · ${rejectedCount} skipped (eligibility/allocation)`
     : '';
-  const targetNote=` · target + SL GTT per stock · ≤0.10% daily turnover`;
+  const targetNote=` · GTT target attached per leg · ≤0.10% daily turnover`;
   const srcLabel=active.source==='manual'?'manual':active.source==='goal'?'goal-led':'Harvest';
   const policySummary=summarizeRowExitPolicies(exportList.filter(s=>basketAlloc[s.symbol]?.qty>0));
   const targetRange=policySummary
@@ -9098,222 +9128,48 @@ async function exportBasket(){
   const floorNote=harvestPlan.warning?` · target floor active`:``;
   const limitNote=limitOmitted>0?` · ${limitOmitted} lower-priority stock${limitOmitted===1?'':'s'} omitted to keep the basket within Zerodha's 20-order limit`:'';
   const marketNote=(MARKET_INTRADAY&&MARKET_INTRADAY.advPct!=null&&MARKET_INTRADAY.advPct<0.5)?` · market confirmation enforced at ${(MARKET_INTRADAY.advPct*100).toFixed(0)}% breadth`:'';
-  showToast(`<strong>Saved ${orders.length} CNC MARKET BUY orders</strong> in Scanner Uploads as Zerodha_Basket_Buy JSON${targetNote}${planNote}${floorNote}${rejNote}${limitNote}${marketNote}`);
+  const splitNote=splitCount>0
+    ? ` · ${splitCount} split into a base leg at target and a runner leg further out`
+    : ` · no position large enough to split`;
+  showToast(`<strong>Saved ${orders.length} CNC MARKET BUY orders</strong> for ${new Set(orders.map(o=>o._meta.sym)).size} stocks in Scanner Uploads as Zerodha_Basket_Buy JSON${splitNote}${targetNote}${planNote}${floorNote}${rejNote}${limitNote}${marketNote}`);
 }
 
-// v1080 (owner): EXPORT FRESH SELL ORDERS AT THE REVISED TARGETS.
+// ── v1115 THE SPLIT MOVES ONTO THE BUY BASKET (owner) ────────────────────────────────────────────
+// The exit is now armed at ENTRY, as two buy orders each carrying its own GTT target, so there is no
+// second basket to run and nothing to re-arm by hand. Sell Targets is gone.
 //
-// CORRECTED 2026-08-07 (owner): the original note here claimed "a Zerodha GTT CANNOT be modified".
-// THAT IS FALSE — a GTT has a Modify action and the trigger and limit price can both be edited.
-// The claim was wrong when written and was repeated in CLAUDE.md; do not restate it.
+// WHAT THE SPLIT IS WORTH HERE, measured on the owner's 217 closed sell cohorts (probe-gttladder):
+//   one GTT at 4%                     Rs 32,715      <- what a single target per stock captured
+//   50% at 4% + 50% at 6%, both GTT   Rs 37,936      <- this release, +Rs 5,221 on the same base
+//   one GTT at 6% (whole position)    Rs 43,158      <- better here, but fills on only 25% of days
+//   50% at 4% + 50% TRAILED 1%        Rs 60,347      <- best, and NOT expressible as a GTT
 //
-// The real reason this export exists is simpler: targets move during the session (the goal-driven
-// rate re-solves as capital and remaining days change), and re-editing a GTT per position by hand is
-// slow. This emits one LIMIT SELL per open position at its CURRENT target price, as a basket, so the
-// whole book can be re-armed in one action. Modifying the existing GTTs instead is equally valid.
+// THE HONEST COST IS STATED RATHER THAN BURIED: a GTT is a STATIC trigger. v1113's runner exited at
+// the peak minus a learned gap, which adapts; a second fixed target cannot. Moving the split onto the
+// buy basket therefore trades roughly Rs 22k of measured upside on that sample for a workflow with no
+// daily re-arming, no second export, and no double-sell hazard. That was the owner's call, made with
+// these numbers in front of him. calcPositionTSL still computes the trail and still displays it in
+// Open Positions; it simply no longer reaches an order.
 //
-// Scope: everything currently open - settled holdings AND today's unsettled position buys - via
-// getCombinedOpenPositionMap(), which is the same source the Open Positions panel uses, so the
-// exported prices always match what that table is showing.
-//
-// Target price is derived from the position's own AVERAGE COST (avg x (1 + targetPct/100)), not from
-// the last price: the exit answers "what do I need out of this position", and basing it on the live
-// price would silently move the goalposts every time the stock ticks. This is exactly the
-// targetPrice the Open Positions panel already displays.
-//
-// NO GTT block is attached. Zerodha sell baskets do not support GTT (a long-standing app limitation
-// recorded in CLAUDE.md), which is the whole reason this button is needed.
-//
-// DOUBLE-SELL HAZARD - surfaced to the user, not silently handled: if an OLD GTT is still live on a
-// position and one of these limit orders also fills, the position can be sold twice, leaving a
-// short. The app cannot see resting GTTs (no input file exposes them), so it cannot dedupe them. The
-// toast and the saved file both say so.
-// ── v1113 SPLIT EXIT: A TARGET LEG AND A RUNNER LEG (owner) ───────────────────────────────────────
-// One limit order cannot answer the shape of the leak. Measured 2026-08-10 on the owner's own 217
-// closed sell cohorts, filling at the candidate target where that day's high reached it and keeping
-// his actual exit otherwise:
-//
-//   realised median +2.12% against an available median +3.46%  ->  61% of the move captured
-//   best FLAT target (6.00%)                                    ->  +Rs 43,158 vs his actual exits
-//   50% at 4% + 50% trailed 1% off the day's high               ->  +Rs 60,347   (+40% on the best flat)
-//   70/30 at the same levels                                    ->  +Rs 49,294
-//
-// The distribution has a BODY and a TAIL: the median exit leaves 1.96% behind while the top 10% of
-// cohorts carry 41% of the money. A single price serves one of those, never both. So the base leg
-// harvests the body at the target and the runner rides the tail behind a trailing stop.
-//
-// THE SPLIT IS EVEN, and that is a structural choice rather than a tuned one: half and half is the
-// no-information point, and any other ratio claims knowledge about how heavy the tail is. The sweep
-// agrees (50/50 beat 70/30 in every cell tested), so the evidence points at the neutral split rather
-// than away from it. The odd share goes to the BASE leg — the reliable half — so a 1-share position
-// stays a single target order and nothing is ever left un-armed.
-//
-// THE TRAIL MAGNITUDE IS NOT TYPED. It comes from calcPositionTSL, which learns the gap from observed
-// rocket retracements (TSL_GAP_PERCENTILE over the gap model) and falls back to ATR. That engine has
-// been computed and displayed since v1060 and drove NOTHING; this is the first output it reaches.
-//
-// WHY SL-M AND NOT GTT. Sell baskets carry no `gtt` block, which is the whole reason this button
-// exists. An SL-M sell IS a plain basket order type, so the runner arms as a day order and is
-// re-armed by the same button next session — which is exactly the workflow the trail wants, since the
-// trail ratchets up daily. A sell trigger must sit BELOW the last price or it fires instantly at
-// market, so a trail that has already been overtaken emits no runner and its quantity falls back to
-// the base leg rather than becoming a silent market sell (the v1082 rule, applied to the stop side).
-//
-// DOUBLE-SELL HAZARD IS NOW LARGER, and is surfaced rather than handled: two legs per position means
-// a stale GTT can collide with either one. The toast says to cancel existing GTTs first.
-function sellSplitQty(qty){
+// The even split is unchanged from v1113 and structural rather than tuned: half and half is the
+// no-information point, the odd share goes to the BASE leg, and a 1-share position is never split.
+function splitQty(qty){
   const q=Math.floor(Number(qty)||0);
   if(q<=0) return {base:0,runner:0};
-  if(q<2) return {base:q,runner:0};              // a single share cannot be split
-  const base=Math.ceil(q/2);                     // odd share to the reliable leg
+  if(q<2) return {base:q,runner:0};
+  const base=Math.ceil(q/2);
   return {base,runner:q-base};
 }
-function buildSellTargetOrders(){
-  const map=getCombinedOpenPositionMap();
-  const live=new Map((typeof ALL!=='undefined'?ALL:[]).map(r=>[r.symbol,r]));
-  const tslStore=(typeof getPositionTslStore==='function')?getPositionTslStore():{};
-  const orders=[],skipped=[],noRunner=[],groups=[];
-  let seq=0, positions=0;
-  Object.values(map).forEach(pos=>{
-    const sym=pos&&pos.symbol, qty=Math.floor(Number(pos&&pos.qty)||0);
-    if(!sym||qty<=0) return;                       // long positions only; shorts are not ours to exit
-    const avg=Number(pos.avg)||0;
-    const row=live.get(sym)||null;
-    const ltp=Number(pos.ltp)||Number(row&&row.price)||0;
-    if(!(avg>0)){ skipped.push(sym+' (no cost basis)'); return; }
-    const policy=getRowExitPolicy(row||{symbol:sym,price:ltp},avg);
-    const tgtPct=Number(policy&&policy.targetPct);
-    if(!(tgtPct>0)){ skipped.push(sym+' (no target)'); return; }
-    // v1081: a LIMIT price above the day's upper circuit is REJECTED by the exchange — the order
-    // simply never reaches the book. Observed 2026-07-30: SMLMAH's goal target of Rs 5,540.45 sat
-    // above its Rs 5,479.20 circuit. Clamp to the highest tick still inside the band so the order is
-    // at least placeable; it then fills only if the stock locks at the circuit, which is the best
-    // available outcome for that position today. Floor (not round) to the tick so the clamp can
-    // never round back above the limit. Unlike the BUY side this never drops the row — an open
-    // position still needs an exit order.
-    let price=tickPrice(avg*(1+tgtPct/100));
-    const uc=row?getUpperCircuitInfo(row,ltp):null;
-    let bandClamped=false;
-    if(uc&&price>uc.ucPrice){ price=Math.floor(uc.ucPrice/0.05)*0.05; bandClamped=true; }
-    if(!(price>0)){ skipped.push(sym+' (bad price)'); return; }
-    // v1082 (owner): only export a sell whose target is ABOVE the last price. A LIMIT SELL at or
-    // below LTP crosses the spread and fills immediately — that is a liquidation at the market, not
-    // a target order, and exporting one would silently dump a position the moment the basket runs.
-    // Two ways a row lands here: the position is already trading past its target (nothing to wait
-    // for — that is an exit decision for the Open Positions panel, not a resting order), or the
-    // v1081 band clamp pulled the limit under the LTP because the target sits outside today's band
-    // (observed 2026-07-30: SMLMAH clamped to Rs 5,479.15 against an LTP of Rs 5,479.20). In both
-    // cases the honest action is to omit the order and say so, not to place an instant sell.
-    // Guarded on ltp>0 so an unknown last price never suppresses a legitimate target.
-    if(ltp>0&&!(price>ltp)){
-      skipped.push(sym+(bandClamped?' (target outside the price band)':' (already at or above target)'));
-      return;
-    }
-    const instrument=()=>({
-      tradingsymbol:sym,scripCode:'',type:'EQ',symbol:sym,
-      segment:'NSE',exchange:'NSE',tickSize:0.01,lotSize:1,
-      company:(row&&row.name)||sym,tradable:true,precision:2,
-      fullName:sym,niceName:sym,niceNameHTML:sym,stockWidget:true,
-      exchangeToken:0,instrumentToken:0,isin:'',
-      related:[],underlying:null,auctionNumber:null,
-      isEquity:true,isWeekly:false
-    });
-    // The runner's trail comes from the SAME calcPositionTSL the Open Positions panel shows, seeded
-    // with the persisted peak so the trail keeps ratcheting across sessions. Read-only here: the
-    // panel owns persistence, and exporting a basket must never advance the trail by itself.
-    let split=sellSplitQty(qty), trail=null;
-    if(split.runner>0){
-      const tsl=calcPositionTSL({sym,qty,avgCost:avg,ltp,scannerRow:row,
-        adaptiveSL:policy.stopPct,adaptiveTGT:tgtPct,prev:tslStore[sym]});
-      const trig=Number(tsl&&tsl.tsl);
-      // A SELL trigger at or above the last price fires instantly at market — the v1082 rule applied
-      // to the stop side. If the trail has already been overtaken, arm nothing and give the runner's
-      // quantity back to the target leg, so the position is never left partly un-armed.
-      if(trig>0&&ltp>0&&trig<ltp) trail={trigger:+tickPrice(trig).toFixed(2),gapPct:tsl.gapPct,mode:tsl.mode};
-      else { noRunner.push(sym); split={base:qty,runner:0}; }
-    }
-    positions++;
-    const legs=[];
-    legs.push({
-      id:Date.now()+seq++, instrument:instrument(), weight:0,
-      params:{
-        transactionType:'SELL',product:'CNC',orderType:'LIMIT',
-        validity:'DAY',validityTTL:1,
-        quantity:split.base,price:+price.toFixed(2),
-        triggerPrice:0,disclosedQuantity:0,lastPrice:ltp,
-        variety:'regular',
-        tags:['TGT']
-      },
-      _meta:{leg:'target',sym,avg:+avg.toFixed(2),targetPct:tgtPct,stopPct:policy.stopPct,
-             ltp:+Number(ltp||0).toFixed(2),bandClamped,fullQty:qty,
-             ucPrice:uc?+uc.ucPrice.toFixed(2):null,
-             gainPctFromLtp:ltp>0?+(((price-ltp)/ltp)*100).toFixed(2):null}
-    });
-    if(trail&&split.runner>0){
-      legs.push({
-        id:Date.now()+seq++, instrument:instrument(), weight:0,
-        params:{
-          transactionType:'SELL',product:'CNC',orderType:'SL-M',
-          validity:'DAY',validityTTL:1,
-          quantity:split.runner,price:0,
-          triggerPrice:trail.trigger,disclosedQuantity:0,lastPrice:ltp,
-          variety:'regular',
-          tags:['TRAIL']
-        },
-        _meta:{leg:'runner',sym,avg:+avg.toFixed(2),targetPct:tgtPct,stopPct:policy.stopPct,
-               ltp:+Number(ltp||0).toFixed(2),bandClamped:false,fullQty:qty,
-               trailGapPct:trail.gapPct,trailMode:trail.mode,
-               gainPctFromLtp:ltp>0?+(((price-ltp)/ltp)*100).toFixed(2):null}
-      });
-    }
-    groups.push({sym,legs,sortKey:ltp>0?((price-ltp)/ltp)*100:1e9});
-  });
-  // Sorted nearest-to-filling first, as before. Legs stay together: trimming to the basket limit must
-  // never arm a runner whose target leg was dropped, or the position exits only on a retrace.
-  groups.sort((a,b)=>a.sortKey-b.sortKey);
-  groups.forEach(g=>orders.push(...g.legs));
-  return {orders,skipped,groups,positions,noRunner};
-}
-// Zerodha's basket limit is the same 20 as the buy path. v1113: trim by POSITION, never by order — a
-// position now contributes two legs, and cutting mid-pair would arm a runner with no target above it
-// (the position would then exit only on a retrace) or a target with no protection beneath it. A
-// position too large to fit whole is skipped and the next one is still considered, so one fat group
-// does not truncate the tail of the book.
-function trimSellGroupsToBasket(groups,limit=20){
-  const take=[]; let legs=0, dropped=0;
-  for(const g of groups||[]){
-    if(legs+g.legs.length>limit){ dropped++; continue; }
-    take.push(g); legs+=g.legs.length;
-  }
-  return {take,orders:take.flatMap(g=>g.legs),dropped};
-}
-async function exportSellTargets(){
-  const {skipped,groups,noRunner}=buildSellTargetOrders();
-  if(!groups.length){
-    showToast('No sell order to export — every open position is either already at/above its target or has no usable cost basis.'
-      +(skipped.length?` (${skipped.join(', ')})`:''),7000,true);
-    return;
-  }
-  const {take,orders,dropped:droppedPositions}=trimSellGroupsToBasket(groups);
-  if(droppedPositions){
-    showToast(`${groups.length} open positions need ${groups.reduce((n,g)=>n+g.legs.length,0)} orders,`
-      +` over Zerodha's 20-order basket limit — exporting the ${take.length} closest to target.`,6000,true);
-  }
-  const payload=orders.map(o=>{const c={...o};delete c._meta;return c;});
-  const saved=await saveBasketToScannerUploads(payload,'Zerodha_Basket_Sell');
-  if(!saved) return;
-  const targets=orders.filter(o=>o._meta.leg==='target');
-  const runners=orders.filter(o=>o._meta.leg==='runner');
-  const nearest=targets[0];
-  const clamped=targets.filter(o=>o._meta.bandClamped);
-  showToast(`Sell basket saved: ${take.length} positions · ${targets.length} LIMIT target legs`
-    +(runners.length?` + ${runners.length} SL-M runner legs trailing the peak`:'')
-    +(nearest&&nearest._meta.gainPctFromLtp!=null?` · nearest ${nearest.instrument.symbol} +${nearest._meta.gainPctFromLtp}% from LTP`:'')
-    +(clamped.length?` · ${clamped.length} capped at the upper circuit (${clamped.map(o=>o.instrument.symbol).join(', ')}) — the goal target is outside today's band`:'')
-    +(noRunner.length?` · no runner for ${noRunner.length} (trail already above the last price, full size left on the target): ${noRunner.join(', ')}`:'')
-    +(skipped.length?` · no order for ${skipped.length}: ${skipped.join(', ')}`:'')
-    +' · the runner legs are DAY orders — re-export tomorrow to re-arm them at the new trail.'
-    +' · WARNING: cancel any existing GTTs on these first, or a fill on both will short you.',15000);
+// The runner's target. Anchored on the stock's OWN capacity (sqrt(ATR x range), the unit on the row
+// since v1060) rather than on a typed percentage: the sweep's optimum sat at ~6% against a median
+// capacity of 3.87%, and it stayed within a broad plateau from 5% to 8%, so the multiple is measured
+// and not fitted. Floored at the base so a runner can never sit below the leg it is riding behind.
+function getRunnerTargetPct(policy){
+  const base=Number(policy&&policy.targetPct);
+  if(!(base>0)) return null;
+  const cap=Number(policy&&policy.capacityPct);
+  const want=cap>0?cap*1.5:base;
+  return Math.max(base,Math.floor(want*20)/20);
 }
 async function saveBasketToScannerUploads(orders, filename){
   if(orders.length>20) throw new Error(`Refusing to truncate basket with ${orders.length} orders`);
