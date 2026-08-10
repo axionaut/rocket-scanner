@@ -1,5 +1,5 @@
-const BUILD_TS='2026-08-10 13:13 IST'; // release build time (IST)
-const APP_VERSION=1113; // v1113: the exit splits into a target leg and a trailing runner leg - one limit price cannot serve both the body and the tail of the move. The stretch penalty now measures the target we need, not the 10% rocket bar retired in v1085.
+const BUILD_TS='2026-08-10 13:43 IST'; // release build time (IST)
+const APP_VERSION=1114; // v1114: the portfolio is parsed BEFORE the scanner is scored, so the target anchor the scorer uses is the finished one and not a pre-portfolio placeholder - the v1085 ordering trap, closed.
 // v1093: a baseline reward:risk MEASURED on the cross-section (last completed bhav session) instead of learned from the owner's own fills - reported on every row, deliberately not enforced. Includes v1092: position size split by Radar score / stop distance, so equally-scored names carry equal RUPEE risk, plus an opt-in Risk /trade cap.
 // v556: parse the NSE Market Activity Report (MA<date>.csv) — official Nifty %, advances/declines and sector index moves shown as market CONTEXT in the status bar (EOD data, display only, never fed into per-row scoring); MA added to the ℹ️ file manifest.
 // v555 market-cycle stage awareness (stateless, self-calibrating): per-row stage label (1 accumulation · 2 breakout · 3 event · 4 profit-booking · 5 re-accumulation · 6 second-leg); a quiet-accumulation signal (conjunction-of-percentiles) injected via the rocket-diagnostic weighting; sell-the-news decay off Recent earnings date (horizon = review days). v1065 makes the market-breadth gauge an entry-eligibility input while still never changing ranking.
@@ -6769,6 +6769,26 @@ function computeHarvestPlan(){
   _harvestPlanMemo={t:Date.now(),v};
   return v;
 }
+// ── v1114 ────────────────────────────────────────────────────────────────────
+// Drop every cache the session target anchor is built from. Called once per load, after the
+// portfolio files are parsed and before the scorer reads the anchor.
+//
+// The two that MUST be here are the harvest plan (a 1.5s TTL, which is happy to serve a value
+// computed moments earlier with no tradebook loaded) and the goal rate (keyed on inputs that a
+// portfolio parse changes). The rest are keyed on capital or the tradebook and would self-invalidate
+// anyway; they are cleared together so there is ONE place that answers "what does the anchor depend
+// on", rather than a rule spread across six declarations. Cheap — each is a single object drop, and
+// this runs once per file load, never on the typing path.
+function invalidateTargetAnchorCaches(){
+  _harvestPlanMemo=null;   // TTL-based: the one that can genuinely serve a pre-portfolio value
+  _goalRateCache=null;     // goal-required net %/day — keyed on capital, which just changed
+  _achieveMemo=null;       // measured achievability curve (bhav-derived, tradebook-cost dependent)
+  _nudgeMemo=null;         // left-on-table pool cohort
+  _avgTradesMemo=null;     // trade cadence -> Max Alloc default
+  _defMaxAllocMemo=null;
+  _defRiskMemo=null;
+  _allocMemo=null;
+}
 function _computeHarvestPlanUncached(){
   const samples=getHarvestOutcomeSamples();
   const netSamples=samples.map(s=>s.net).filter(v=>isFinite(v)).sort((a,b)=>a-b);
@@ -9665,15 +9685,7 @@ async function processFiles(files,sourceLabel,opts={}){
     }catch(e){console.error('ZIP error:',e);}
   }
 
-  const scannerJobs=[];
-  if(tvFile)scannerJobs.push({mode:'stock',file:tvFile});
-  for(const job of scannerJobs){
-    const ok=await processScannerUpload(job.file,job.mode);
-    if(ok&&job.mode==='stock') updateFileLoadStatus('ALL NSE.csv','loaded');
-  }
-  const stockScannerProcessed=scannerJobs.some(j=>j.mode==='stock');
-
-  if(!scannerJobs.length&&!nseZip&&!holdFile&&!posFile&&!ordFile&&!tbFile&&!holidayFile){
+  if(!tvFile&&!nseZip&&!holdFile&&!posFile&&!ordFile&&!tbFile&&!holidayFile){
     if(!silent){
       setLoading(false);
       showToast('TradingView CSV not found in the selected Scanner Uploads folder.',4000,true);
@@ -9681,6 +9693,23 @@ async function processFiles(files,sourceLabel,opts={}){
     return false;
   }
 
+  // ── v1114: THE PORTFOLIO IS PARSED BEFORE THE SCANNER IS SCORED ────────────────────────────────
+  // The scanner file used to be scored FIRST, and the portfolio files a moment later. But the
+  // session target anchor is built FROM the portfolio: the goal-led rate needs capital (holdings +
+  // positions) and the harvest rate needs the tradebook's own charge history. So the scorer resolved
+  // `getEffectiveTgtPct()` against a half-loaded app and got a fallback — measured 2026-08-10 at
+  // 2.60% while the finished value on screen was 1.80%.
+  //
+  // This was TOLERATED for four releases because the anchor only reached a display-only cohort
+  // (v1085 recorded it as the "ORDERING TRAP" and stored `RADAR.rocketTargetPct` so the number was at
+  // least auditable). v1113 changed that: the stretch penalty reads the same anchor and FEEDS THE
+  // SCORE, so a placeholder was reordering the board — 196 rows marked down instead of 38. It is also
+  // the cause of the suite flakiness recorded under v1093, where identical consecutive runs landed
+  // either side of a 0.05 rounding step and a dozen target-dependent assertions flipped with it.
+  //
+  // Parsing the portfolio first is the fix CLAUDE.md has named since v1093. Nothing in these parsers
+  // reads `ALL`, so the move is safe in that direction, and it makes the held map correct AT SCORING
+  // TIME rather than patched afterwards in applyFilters.
   // Holdings / Positions / Orders / Tradebook — processed regardless of TV CSV
   // All files are loaded before rendering so Latest Session always has fresh data
   if(holdFile){
@@ -9726,6 +9755,21 @@ async function processFiles(files,sourceLabel,opts={}){
     }
     updateFileLoadStatus('TRADEBOOK.csv','loaded');
   }
+
+  // Every input the target anchor is built from has now been parsed. Values memoised earlier in this
+  // page load were computed against the PREVIOUS portfolio state, and the harvest plan's memo is a
+  // 1.5s TTL that would happily serve one — so the anchor's caches are dropped here, deliberately
+  // AFTER the portfolio and BEFORE the scorer reads it. Without this the reorder would fix the
+  // sequence and still hand the scorer a stale number.
+  invalidateTargetAnchorCaches();
+  const scannerJobs=[];
+  if(tvFile)scannerJobs.push({mode:'stock',file:tvFile});
+  for(const job of scannerJobs){
+    const ok=await processScannerUpload(job.file,job.mode);
+    if(ok&&job.mode==='stock') updateFileLoadStatus('ALL NSE.csv','loaded');
+  }
+  const stockScannerProcessed=scannerJobs.some(j=>j.mode==='stock');
+
   syncExecutedRecommendedEntries();
   // Final render after all files are processed — ensures Latest Session uses fresh orders.
   // applyFilters() re-runs held-stock suppression with fresh holdings data only when
