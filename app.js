@@ -1,5 +1,5 @@
-const BUILD_TS='2026-08-10 14:38 IST'; // release build time (IST)
-const APP_VERSION=1115; // v1115: the split exit moves onto the BUY basket as two GTT-carrying orders, armed at entry - the separate Sell Targets export is removed.
+const BUILD_TS='2026-08-10 19:27 IST'; // release build time (IST)
+const APP_VERSION=1116; // v1116: the trailing stop is removed - at a stop 1.5x ATR below cost a Zerodha rupee-step trail can never reach breakeven before the target fills, so it was never executable.
 // v1093: a baseline reward:risk MEASURED on the cross-section (last completed bhav session) instead of learned from the owner's own fills - reported on every row, deliberately not enforced. Includes v1092: position size split by Radar score / stop distance, so equally-scored names carry equal RUPEE risk, plus an opt-in Risk /trade cap.
 // v556: parse the NSE Market Activity Report (MA<date>.csv) — official Nifty %, advances/declines and sector index moves shown as market CONTEXT in the status bar (EOD data, display only, never fed into per-row scoring); MA added to the ℹ️ file manifest.
 // v555 market-cycle stage awareness (stateless, self-calibrating): per-row stage label (1 accumulation · 2 breakout · 3 event · 4 profit-booking · 5 re-accumulation · 6 second-leg); a quiet-accumulation signal (conjunction-of-percentiles) injected via the rocket-diagnostic weighting; sell-the-news decay off Recent earnings date (horizon = review days). v1065 makes the market-breadth gauge an entry-eligibility input while still never changing ranking.
@@ -20,11 +20,6 @@ let RADAR_STRETCH_USE_TARGET=true;
 const SYSTEM_TRADE_START_DATE='2026-04-01'; // Adaptive stats use trades closed from this date onward.
 const HARVEST_DAILY_NET_GOAL_RS=15000; // North-star daily pure-profit goal, never a forced capital assumption.
 const HARVEST_DESIRED_NET_PCT=0.60; // Minimum useful net profit after charges for capital rotation.
-const TSL_GAP_PERCENTILE=0.75;
-const TSL_GAP_RETENTION_FLOOR=70;
-const TSL_GAP_MIN_SAMPLES=8;
-const TSL_GAP_MIN_PCT=1.5;
-const TSL_GAP_MAX_PCT=6.0;
 const HARVEST_TRIGGER_CONFIDENCE=0.60; // Prefer a target that prior picks commonly reached.
 const HARVEST_MIN_SAMPLES=8;
 const SL_ATR_MULT=1.5;
@@ -126,7 +121,6 @@ const ALL_STORE_SCHEMA='radar_composite_v10'; // v1098 caches the true multi-ses
 const HOLD_STORE='rs_holdings';
 const ORDERS_STORE='rs_orders';
 const POS_STORE='rs_positions';
-const POS_TSL_STORE='rs_position_tsl';
 const TRADEBOOK_STORE='rs_tradebook';
 const TRADEBOOK_META_STORE='rs_tradebook_meta_v1';
 const TRADE_TIMING_CONTEXT_STORE='rs_trade_timing_context_v1';
@@ -164,6 +158,7 @@ const SOURCE_DERIVED_BRAIN_KEYS=new Set([
   TRADEBOOK_STORE,
 ]);
 const DEPRECATED_BRAIN_KEYS=new Set([
+  'rs_position_tsl',   // v1116: the trailing stop was removed - it was never executable
   'rs_corr_bull',
   'rs_corr_bear',
   'rs_corr_neutral',
@@ -1249,27 +1244,6 @@ function getRowStopDistancePct(s){
   if(Number.isFinite(atr)&&atr>0) return getActiveStopDistancePct(atr);
   const learned=Math.abs(Number(TRADEBOOK_STATS?.adaptiveSL));
   return capSLDistancePct(learned>0?learned:SL_MIN_PCT);
-}
-function getTslMomentumTightenPct(row,peakProfitPct=0){
-  const speed=Math.max(0,Number(row?.priceChange)||0,Number(row?.snapshotChange)||0,Number(row?.rocketMove)||0);
-  const room=Math.max(0,Number(row?.velocityPotential)||0);
-  const pullback=Math.max(0,Number(row?.pullbackFromHighPct)||0);
-  const retention=Number(row?.peakRetention);
-  let tighten=Math.min(2.5,speed/10);
-  tighten+=Math.min(0.5,room/40);
-  tighten+=Math.min(0.5,pullback/30);
-  if(Number.isFinite(retention)&&retention>=80) tighten+=0.25;
-  else if(Number.isFinite(retention)&&retention>=70) tighten+=0.15;
-  if(peakProfitPct>0) tighten+=Math.min(0.75,peakProfitPct/20);
-  return Math.max(0,Math.min(2.5,tighten));
-}
-function getRecommendedTslPoints(row,opts={}){
-  const price=Number(opts.price??row?.price);
-  if(!(price>0)) return null;
-  const tighten=getTslMomentumTightenPct(row,Number(opts.peakProfitPct)||0);
-  const basePoints=getZerodhaMinTrailPoints(price);
-  if(!(basePoints>0)) return null;
-  return +Math.max(0.05,basePoints*(1-Math.min(0.35,tighten/10))).toFixed(2);
 }
 function weightedPercentile(rows,valueFn,weightFn,pct){
   const vals=rows.map(r=>({v:valueFn(r),w:Math.max(0,weightFn(r))}))
@@ -5707,14 +5681,10 @@ function buildLatestSessionPanel(query=''){
 
 // One current-position view: the live portfolio merge plus the existing Radar context.
 // It reads the exit-policy helpers but never feeds anything back into scoring.
-// `query` filters only what is DISPLAYED — TSL state is always computed and persisted
-// from the full position set, so searching can never prune the TSL store.
+// `query` filters only what is DISPLAYED; the panel always computes from the full position set.
 function buildOpenPositionsPanel(query=''){
   const reviewDays=getEffectiveReviewDays()||5;
   const scannerBySymbol=new Map(ALL.map(row=>[row.symbol,row]));
-  const tslStore=getPositionTslStore();
-  const tslNext=tslStore.gapModel?{gapModel:tslStore.gapModel}:{};
-  let tslChanged=false;
   const rows=[];
 
   Object.values(getCombinedOpenPositionMap()).forEach(pos=>{
@@ -5734,19 +5704,10 @@ function buildOpenPositionsPanel(query=''){
     const targetPct=exitPolicy.targetPct;
     const targetPrice=avg&&targetPct?tickPrice(avg*(1+targetPct/100)):null;
     const stopPrice=avg?tickPrice(avg*(1-stopPct/100)):null;
-    const tslInfo=calcPositionTSL({
-      sym:pos.symbol,qty,avgCost:avg,ltp,scannerRow,adaptiveSL:stopPct,
-      adaptiveTGT:targetPct,prev:tslStore[pos.symbol]
-    });
-    if(tslInfo){
-      tslNext[pos.symbol]=tslInfo;
-      if(JSON.stringify(tslStore[pos.symbol]||{})!==JSON.stringify(tslInfo)) tslChanged=true;
-    }
     // v1106 (owner): the day-1 time-exit ADVICE went with the Action column - the trading surface
     // carries no instructions. The evidence behind it is unchanged and lives in Methodology.
     rows.push({
       sym:pos.symbol,qty,avg,ltp,pnlPct,pnlRs,capital,daysHeld,targetPrice,stopPrice,targetPct,exitPolicy,
-      tslPoints:tslInfo?.trailStepPoints??tslInfo?.trailPoints??null,
       score:isFinite(Number(scannerRow?.score))?Number(scannerRow.score):null,
       rank:scannerRow?.rank??null,setup:scannerRow?.setup||'',
       dayPct:scannerRow?.day??scannerRow?.priceChange??null,risk:scannerRow?.risk||'',
@@ -5755,11 +5716,8 @@ function buildOpenPositionsPanel(query=''){
   });
 
   if(!rows.length){
-    if(Object.keys(tslStore).some(isPositionTslSymbolKey)) FS.set(POS_TSL_STORE,tslStore.gapModel?{gapModel:tslStore.gapModel}:{});
     return {html:'',table:null};
   }
-  if(Object.keys(tslStore).some(sym=>isPositionTslSymbolKey(sym)&&!tslNext[sym])) tslChanged=true;
-  if(tslChanged) FS.set(POS_TSL_STORE,tslNext);
 
   const daysFmt=(v)=>{
     if(v==null) return '<span style="color:var(--t3)">—</span>';
@@ -5780,7 +5738,6 @@ function buildOpenPositionsPanel(query=''){
     // v1073: the day-1 time exit, shown next to Days Held so the two read together.
     {key:'targetPrice',label:'Target ₹',align:'right',fmt:(v,row)=>v!=null?fmtINR(v)+`<span style="font-size:12px;color:var(--t3);margin-left:4px">+${Number(row.targetPct).toFixed(2)}%</span>`:'—',clrFn:()=>'var(--green)'},
     {key:'stopPrice',label:'SL ₹',align:'right',fmt:(v,row)=>v!=null?fmtINR(v)+`<span style="font-size:12px;color:var(--t3);margin-left:4px">-${Number(row.exitPolicy?.stopPct).toFixed(2)}%</span>`:'—',clrFn:()=>'var(--red)'},
-    {key:'tslPoints',label:'TSL pts',align:'right',bold:true,fmt:v=>v!=null?Number(v).toFixed(2):'—',clrFn:v=>v==null?'var(--t3)':'var(--amber)'},
     {key:'score',label:'Radar Score',align:'right',bold:true,fmt:v=>radarScoreCell(v),clrFn:()=>'var(--t1)'},
     {key:'rank',label:'Rank',align:'right',fmt:v=>v??'—',clrFn:()=>'var(--t2)'},
     {key:'setup',label:'Setup',align:'left',fmt:v=>v?`<span style="font-size:13px;color:var(--t2)">${escHtml(v)}</span>`:'<span style="color:var(--t3)">not in this upload</span>'},
@@ -5802,7 +5759,7 @@ function buildOpenPositionsPanel(query=''){
         <span style="font-size:13px;font-weight:800;color:var(--t1);text-transform:uppercase;letter-spacing:.08em">Open Positions${panelFilterTag(rows,shown,query)}</span>
         <span style="font-size:14px;font-weight:700;color:${pnlColor}">${rows.length} live position${rows.length===1?'':'s'} · ${fmtINR(totalCapital)} deployed · ${fmtSignedINR(totalPnl)}</span>
       </div>
-      <div style="font-size:14px;color:var(--t2);line-height:1.5">Live merge of Holdings, Positions, and today's net buys. Held stocks stay excluded from new recommendations; Target, SL, and TSL use the existing exit policy. ${radarNote}</div>
+      <div style="font-size:14px;color:var(--t2);line-height:1.5">Live merge of Holdings, Positions, and today's net buys. Held stocks stay excluded from new recommendations; Target and SL come from the row’s exit policy. ${radarNote}</div>
     </div>
     ${shown.length?`<div class="scroll-x">${table.getHtml()}</div>`:panelNoMatchHtml(query,'open position')}
   </div>`;
@@ -7288,137 +7245,6 @@ function getOpenPositionDaysHeld(sym,liveQty){
   return denominator>0?Math.round(weightedDays/denominator):null;
 }
 
-function getZerodhaMinTrailPoints(price){
-  if(!(price>0)) return 0.05;
-  if(price<50) return 0.05;
-  if(price<100) return 0.10;
-  if(price<250) return 0.25;
-  if(price<500) return 0.50;
-  if(price<1000) return 1;
-  if(price<2500) return 2;
-  if(price<10000) return 5;
-  if(price<20000) return 25;
-  return 50;
-}
-
-function getPositionTslStore(){
-  const store=FS.get(POS_TSL_STORE)||{};
-  return store&&typeof store==='object'?store:{};
-}
-function isPositionTslSymbolKey(key){
-  return key&&key!=='gapModel';
-}
-function clampTslGapPct(value){
-  const n=Number(value);
-  if(!Number.isFinite(n)) return null;
-  return +clampNum(n,TSL_GAP_MIN_PCT,TSL_GAP_MAX_PCT).toFixed(2);
-}
-function buildPositionTslGapModel(rows, sessionDate){
-  const survivors=(rows||[])
-    .filter(s=>s?.rocketToday&&s._hardFiltered!==true)
-    .map(s=>({
-      pullback:Number(s.pullbackFromHighPct),
-      retention:Number(s.peakRetention)
-    }))
-    .filter(s=>Number.isFinite(s.pullback)&&Number.isFinite(s.retention)&&s.retention>=TSL_GAP_RETENTION_FLOOR);
-  if(survivors.length<TSL_GAP_MIN_SAMPLES) return null;
-  const raw=percentileValue(survivors.map(s=>s.pullback),TSL_GAP_PERCENTILE);
-  const gapPct=clampTslGapPct(raw);
-  if(gapPct==null) return null;
-  return {gapPct,samples:survivors.length,date:sessionDate||getSessionDate(),updatedAt:new Date().toISOString()};
-}
-function persistPositionTslGapModel(rows, sessionDate){
-  const model=buildPositionTslGapModel(rows,sessionDate);
-  if(!model) return null;
-  const store=getPositionTslStore();
-  const next={...store,gapModel:model};
-  if(JSON.stringify(store.gapModel||{})!==JSON.stringify(model)) FS.set(POS_TSL_STORE,next);
-  return model;
-}
-function resolvePositionTslGap({scannerRow, adaptiveTGT, gapModel, sessionDate}){
-  const model=(gapModel&&typeof gapModel==='object')?gapModel:null;
-  const modelSamples=Number(model?.samples)||0;
-  const modelGap=clampTslGapPct(model?.gapPct);
-  const today=sessionDate||getSessionDate();
-  if(model&&model.date===today&&modelSamples>=TSL_GAP_MIN_SAMPLES&&modelGap!=null){
-    return {gapPct:modelGap,basis:`learned from ${modelSamples} rockets`,source:'learned',samples:modelSamples,date:model.date};
-  }
-  const age=model?.date?tradingDaysBetween(model.date,today):null;
-  if(model&&modelGap!=null&&modelSamples>=TSL_GAP_MIN_SAMPLES&&age!=null&&age<=5){
-    return {gapPct:modelGap,basis:`recent (${String(model.date).slice(5)})`,source:'recent',samples:modelSamples,date:model.date};
-  }
-  const targetPct=(adaptiveTGT&&isFinite(adaptiveTGT)&&adaptiveTGT>0)?adaptiveTGT:4.2;
-  const atrPct=(scannerRow?.atr!=null&&isFinite(scannerRow.atr)&&scannerRow.atr>0)?scannerRow.atr:null;
-  const fallback=clampTslGapPct(Math.max(targetPct/2,atrPct||0));
-  return {gapPct:fallback??TSL_GAP_MIN_PCT,basis:'ATR fallback',source:'atr',samples:0,date:null};
-}
-
-function calcPositionTSL({sym, qty, avgCost, ltp, scannerRow, adaptiveSL, adaptiveTGT, prev}){
-  if(!sym||!(qty>0)||!(avgCost>0)||!(ltp>0)||!(adaptiveSL>0)) return null;
-  const store=getPositionTslStore();
-  const gapModel=store.gapModel||null;
-  const prevPosition=(prev&&typeof prev==='object')?prev:{};
-  const targetPct=(adaptiveTGT&&isFinite(adaptiveTGT)&&adaptiveTGT>0)?adaptiveTGT:4.2;
-  // v1096: on the day the position was opened, the day's high may have printed BEFORE the buy. Using
-  // it seeds the trail from a peak the position never held, which sets the stop higher than the
-  // position ever justified and can exit on a move that was never participated in. If a buy context
-  // was captured today, only the part of the high made AFTER the buy is usable; with no baseline the
-  // day high is left out and the trail seeds from the live price, which is always attributable.
-  let dayHigh=(scannerRow?.high1d!=null&&isFinite(scannerRow.high1d))?Number(scannerRow.high1d):null;
-  const _openedToday=(ORDERS_TODAY||[]).some(o=>o.type==='BUY'&&normSym(o.symbol)===normSym(sym)
-    &&normOrderDate(o.time)===getSessionDate());
-  if(_openedToday&&dayHigh!=null){
-    const base=getBuyContextBaseline(sym,getSessionDate());
-    dayHigh=(base&&base.high>0&&dayHigh>base.high+1e-9)?dayHigh:null;
-  }
-  const avgChanged=prevPosition?.avg!=null&&Math.abs(prevPosition.avg-avgCost)/avgCost>0.01;
-  const qtyIncreased=prevPosition?.qty!=null&&qty>prevPosition.qty;
-  const reset=!!(avgChanged||qtyIncreased);
-  const storedPeak=(!reset&&prevPosition?.peak!=null&&isFinite(prevPosition.peak))?Number(prevPosition.peak):0;
-  const peak=+Math.max(storedPeak,ltp,dayHigh||0).toFixed(2);
-  const peakProfitPct=+(((peak-avgCost)/avgCost)*100).toFixed(2);
-  const rocketToday=!!scannerRow?.rocketToday;
-  const storedMode=!reset&&prevPosition?.mode==='trail'?'trail':null;
-  const mode=(storedMode==='trail'||peakProfitPct>=targetPct||rocketToday)?'trail':'protect';
-  const gap=resolvePositionTslGap({scannerRow,adaptiveTGT:targetPct,gapModel,sessionDate:getSessionDate()});
-  const gapPct=gap.gapPct;
-  const tightenPct=getTslMomentumTightenPct(scannerRow,peakProfitPct);
-  const effectiveGapPct=clampTslGapPct(Math.max(TSL_GAP_MIN_PCT,gapPct-tightenPct));
-  const minStep=getZerodhaMinTrailPoints(avgCost);
-  const candidate=+tickPrice(Math.max(0,peak*(1-effectiveGapPct/100))).toFixed(2);
-  const fixedStop=+tickPrice(Math.max(0,avgCost*(1-adaptiveSL/100))).toFixed(2);
-  const storedTsl=(!reset&&prevPosition?.tsl!=null&&isFinite(prevPosition.tsl))?Number(prevPosition.tsl):null;
-  const activeTsl=mode==='trail'?+Math.max(storedTsl||0,candidate).toFixed(2):fixedStop;
-  const lockPct=activeTsl!=null?+(((activeTsl-avgCost)/avgCost)*100).toFixed(2):null;
-  const distancePoints=activeTsl!=null?+Math.max(0,ltp-activeTsl).toFixed(2):null;
-  return {
-    tsl:activeTsl,
-    rawTsl:activeTsl,
-    candidateTsl:candidate,
-    trailPoints:+minStep.toFixed(2),
-    trailStepPoints:+minStep.toFixed(2),
-    minTrailPoints:minStep,
-    distancePoints,
-    rawDistancePoints:distancePoints,
-    gapPct:effectiveGapPct,
-    gapBasePct:gapPct,
-    gapTightenPct:+tightenPct.toFixed(2),
-    lockPct,
-    targetPct:+targetPct.toFixed(2),
-    basis:gap.basis,
-    gapSource:gap.source,
-    gapSamples:gap.samples,
-    gapDate:gap.date,
-    peak,
-    peakProfitPct,
-    mode,
-    atrPct:(scannerRow?.atr!=null&&isFinite(scannerRow.atr))?+Number(scannerRow.atr).toFixed(2):null,
-    avg:+avgCost.toFixed(2),
-    qty,
-    reset,
-    updatedAt:new Date().toISOString()
-  };
-}
 
 let _allocMemo=null; // single-entry memo: renderTable and renderStatusBar share one pass
 function getTurnoverAllocationCap(row){
@@ -8534,7 +8360,7 @@ function resetBrain(btn){
 }
 
 
-// ── Holdings & Trailing SL ──
+// ── Holdings ──
 let HOLD_COST_MAP={}; // {symbol: avgCost} — ALL rows including qty=0 for position cross-ref
 function parseHoldings(text){
   const rows=parseCSV(text);
@@ -9148,8 +8974,10 @@ async function exportBasket(){
 // the peak minus a learned gap, which adapts; a second fixed target cannot. Moving the split onto the
 // buy basket therefore trades roughly Rs 22k of measured upside on that sample for a workflow with no
 // daily re-arming, no second export, and no double-sell hazard. That was the owner's call, made with
-// these numbers in front of him. calcPositionTSL still computes the trail and still displays it in
-// Open Positions; it simply no longer reaches an order.
+// these numbers in front of him. v1116 then removed the trailing stop outright: at a stop placed
+// 1.5x ATR below cost, a Zerodha trail (which ratchets in fixed rupee steps from where the stop
+// sits) has further to travel to reach breakeven than the stock moves in a normal day, so the
+// target always resolves the position first. It was never executable.
 //
 // The even split is unchanged from v1113 and structural rather than tuned: half and half is the
 // no-information point, the odd share goes to the BASE leg, and a 1-share position is never split.
