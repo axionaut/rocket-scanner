@@ -1,5 +1,5 @@
-const BUILD_TS='2026-08-10 12:36 IST'; // release build time (IST)
-const APP_VERSION=1112; // v1112: the board was recommending nothing but the stocks it had no data for - a 0.05 rounding step made every stock fail the cost hurdle, and a statistical ceiling removed the rest. Selection is score >= 90 AND rank <= 10 again.
+const BUILD_TS='2026-08-10 13:13 IST'; // release build time (IST)
+const APP_VERSION=1113; // v1113: the exit splits into a target leg and a trailing runner leg - one limit price cannot serve both the body and the tail of the move. The stretch penalty now measures the target we need, not the 10% rocket bar retired in v1085.
 // v1093: a baseline reward:risk MEASURED on the cross-section (last completed bhav session) instead of learned from the owner's own fills - reported on every row, deliberately not enforced. Includes v1092: position size split by Radar score / stop distance, so equally-scored names carry equal RUPEE risk, plus an opt-in Risk /trade cap.
 // v556: parse the NSE Market Activity Report (MA<date>.csv) — official Nifty %, advances/declines and sector index moves shown as market CONTEXT in the status bar (EOD data, display only, never fed into per-row scoring); MA added to the ℹ️ file manifest.
 // v555 market-cycle stage awareness (stateless, self-calibrating): per-row stage label (1 accumulation · 2 breakout · 3 event · 4 profit-booking · 5 re-accumulation · 6 second-leg); a quiet-accumulation signal (conjunction-of-percentiles) injected via the rocket-diagnostic weighting; sell-the-news decay off Recent earnings date (horizon = review days). v1065 makes the market-breadth gauge an entry-eligibility input while still never changing ranking.
@@ -12,6 +12,11 @@ const BASKET_MARKET_BUDGET_BUFFER_PCT=0.25; // Sizing cushion only; exported buy
 // score QUALITY, not rank position — see RECOMMEND_MIN_SCORE, derived from RADAR_SCORE_BANDS.
 // A rank cap hands over ten names regardless of how good they are; the green band lets the count
 // follow the market. Do not reintroduce a positional cap.
+// v1113: the stretch penalty measures the target against a typical day's range instead of the
+// retired 10% same-day rocket bar (see radarAnalyze). Switchable ONLY so the two arms can be scored
+// against byte-identical input inside one page load — the live scanner file changes between harness
+// runs, so a before/after diff across runs cannot separate the change from the tape. Never ship false.
+let RADAR_STRETCH_USE_TARGET=true;
 const SYSTEM_TRADE_START_DATE='2026-04-01'; // Adaptive stats use trades closed from this date onward.
 const HARVEST_DAILY_NET_GOAL_RS=15000; // North-star daily pure-profit goal, never a forced capital assumption.
 const HARVEST_DESIRED_NET_PCT=0.60; // Minimum useful net profit after charges for capital rotation.
@@ -3091,6 +3096,7 @@ function radarAnalyze(headers,rawRows,supplements={},heldSymbols=new Set()){
   // That is tolerable because the cohort is display-only, but the value used is RECORDED on RADAR
   // so the label stays reproducible instead of silently drifting from the displayed target.
   let _radarSessionTargetPct=null;
+  let _radarStretchBarUsed=null;   // v1113: the stretch bar actually used, recorded for audit
   try{const t=Number(getEffectiveTgtPct());if(t>0)_radarSessionTargetPct=t;}catch(e){}
   // v1098: resolved ONCE per scoring pass, not per row — it is a store read plus a full-universe walk.
   let _driftInfo={map:{},sessionsUsed:0,from:null,to:null};
@@ -3447,7 +3453,33 @@ function radarAnalyze(headers,rawRows,supplements={},heldSymbols=new Set()){
     // reachability and the v1083 session ceiling — all of which must not widen as a stock runs.
     const sessionVolatilityPct=radarNum(raw[volI]);
     const rangePct=Math.max(radarNum(raw[adrI])||0,atrPct||0,(radarNum(raw[atrWeekI])||0)/Math.sqrt(5));
-    const stretch=rangePct?10/rangePct:99;
+    // ── v1113: THE STRETCH BAR IS THE TARGET WE ACTUALLY NEED, NOT A RETIRED 10% ──────────────────
+    // This asked "how many typical days' range would a 10% move take", and penalised -7/-14/-22 above
+    // 2.5x/3x/4x. The 10 was the OLD ROCKET DEFINITION (same-day move >= 10%), which v1085 replaced
+    // outright with "reaches its OWN target before its OWN stop within 2 trading days". Nothing in the
+    // app has wanted a 10% move since. Measured 2026-08-10: the retired bar penalised 1,178 of 2,973
+    // rows (39.6%, -14,031 points in total) including 14 of the top 50 — it had quietly become a
+    // blanket volatility floor demanding a move nobody was asking for. Penalised rows had a median
+    // daily range of 3.28% against 5.07% for the rest; a 3.3% mover was being marked down for failing
+    // a 10% test while its actual target was 1.8%.
+    // Re-anchored to the SESSION target anchor, the question becomes the one that matters: how much of
+    // a typical day's range does the bar consume? Tiers move with it — over 1x, 1.5x and 2x a typical
+    // day's range. NO NEW CONSTANT: the numerator is `_radarSessionTargetPct`, the same single session
+    // scalar feasibility used (v1086), so it cannot reorder stocks against each other by itself, and
+    // the three tier multiples replace the old three one-for-one.
+    // Deliberately the SESSION anchor and not the row's own target: `targetPct` is max(anchor,
+    // capacity) and capacity is sqrt(ATR x range), so target/range would collapse to sqrt(ATR/range)
+    // — about 1.0 for every row — and the penalty would fire on noise.
+    // ORDERING TRAP (v1085, and it bites here too): processFiles scores the scanner file BEFORE the
+    // portfolio files parse, so `_radarSessionTargetPct` can be a fallback anchor rather than the one
+    // the UI shows later — measured 2.60% at scoring time against 1.80% on screen. Unlike the rocket
+    // cohort, which is display-only, this bar FEEDS THE SCORE, so the value actually used is recorded
+    // on RADAR and on every row. Do not audit this against getActiveTargetInfo() after the fact.
+    const _stretchBar=(RADAR_STRETCH_USE_TARGET&&Number(_radarSessionTargetPct)>0)
+      ? Number(_radarSessionTargetPct) : 10;
+    const stretch=rangePct?_stretchBar/rangePct:99;
+    _radarStretchBarUsed=_stretchBar;
+    const _stretchTiers=RADAR_STRETCH_USE_TARGET?[2,1.5,1]:[4,3,2.5];
     const participationReady=(relvol||0)>=1.2||(relAt||0)>=1.5||(volChg||0)>=20;
     const impulseReady=(day>=.5&&day<8)||parts.momentum>=62||parts.trend>=65;
     const continuationScore=continuationSignals[ri]||0;
@@ -3481,7 +3513,7 @@ function radarAnalyze(headers,rawRows,supplements={},heldSymbols=new Set()){
     // micro-cap (AASTHA) is not the institutional conviction the flat ±1.5 assumes. The ₹25L line
     // is the model's existing tradeability threshold (rocketReady/risk/Indicator Watch), not a new knob.
     if(meta.bulkNet){const dw=clamp01(turn/25e5,0,1);rawScore+=(meta.bulkNet>0?1.5:-1.5)*dw;}
-    if(stretch>4)rawScore-=22;else if(stretch>3)rawScore-=14;else if(stretch>2.5)rawScore-=7;
+    if(stretch>_stretchTiers[0])rawScore-=22;else if(stretch>_stretchTiers[1])rawScore-=14;else if(stretch>_stretchTiers[2])rawScore-=7;
     if(!participationReady)rawScore-=7;
     if(!impulseReady)rawScore-=5;
     rawScore+=followThroughBonus+fallingKnifePenalty;
@@ -3507,7 +3539,7 @@ function radarAnalyze(headers,rawRows,supplements={},heldSymbols=new Set()){
     // Display the REAL day move for a neutralised corp-action row (scoring already used the blanked 0).
     const dispDay=meta._corpNeutralised&&meta._realDay!=null?meta._realDay:day;
     const out={symbol,name:String(raw[descI]||symbol),sector:raw[sectorI]||'',rawScore,parts,contrib,quality,
-      price,day:dispDay,priceChange:dispDay,turnover:turn,relvol,gap,gapSigned,changeOpen,rangePct,sessionVolatilityPct,stretch,atr:atrPct,
+      price,day:dispDay,priceChange:dispDay,turnover:turn,relvol,gap,gapSigned,changeOpen,rangePct,sessionVolatilityPct,stretch,stretchBarPct:_stretchBar,atr:atrPct,
       high1d:highI>=0?radarNum(raw[highI]):null,low1d:lowI>=0?radarNum(raw[lowI]):null,open1d:openI>=0?radarNum(raw[openI]):null,marketCap:mcapI>=0?radarNum(raw[mcapI]):null,rocketToday:rset.has(ri),
       vwap:vwapI>=0?radarNum(raw[vwapI]):null,
       chaikinMF:cmfI>=0?radarNum(raw[cmfI]):null, mfi15m:mfi15I>=0?radarNum(raw[mfi15I]):null,
@@ -3668,7 +3700,7 @@ function radarAnalyze(headers,rawRows,supplements={},heldSymbols=new Set()){
     } else r.entryTiming.digestionRisk=false;
     r.entryReady=!r.entryTiming.blocked;
   });
-  return {rows,features,rockets:rocketRows.length,rocketTargetPct:_radarSessionTargetPct,continuationCount:continuationRows.length,suppressedHeld,marketIntraday,ids:{priceI,targetI,sectorI,symbolI,descI}};
+  return {rows,features,rockets:rocketRows.length,rocketTargetPct:_radarSessionTargetPct,stretchBarPct:_radarStretchBarUsed,continuationCount:continuationRows.length,suppressedHeld,marketIntraday,ids:{priceI,targetI,sectorI,symbolI,descI}};
 }
 // Score the current upload (object rows from parseCSV) through the Radar composite.
 function radarScoreRows(objRows){
@@ -3678,7 +3710,7 @@ function radarScoreRows(objRows){
   const held=new Set(Object.keys(heldPos).map(normSym));
   const t0=performance.now();
   const result=radarAnalyze(headers,matrix,buildRadarSupplements(),held);
-  RADAR={headers,matrix,features:result.features,ids:result.ids,rockets:result.rockets,rocketTargetPct:result.rocketTargetPct??null,continuationCount:result.continuationCount,ms:performance.now()-t0,sourceNote:'',scoredAt:Date.now()};
+  RADAR={headers,matrix,features:result.features,ids:result.ids,rockets:result.rockets,rocketTargetPct:result.rocketTargetPct??null,stretchBarPct:result.stretchBarPct??null,continuationCount:result.continuationCount,ms:performance.now()-t0,sourceNote:'',scoredAt:Date.now()};
   SUPPRESSED_HELD=result.suppressedHeld;
   MARKET_INTRADAY=result.marketIntraday; // v555 WS-D: market breadth for the status bar + basket export
   return result.rows;
@@ -6542,7 +6574,7 @@ function _renderMethodologyInner(){
         <li>Blends that diagnostic with finance-aware priors for momentum, participation, breakout structure, liquidity, volatility and trend.</li>
         <li>Cross-checks official delivery, close versus average price, 52-week position, deal activity and surveillance flags.</li>
         <li>Strongly penalizes non-EQ, inactive and sub-10% price-band securities while retaining them in the visible ranking for audit. Only eligible securities enter the basket.</li>
-        <li>Penalizes a required 10% move above 2.5 normal daily ranges; moves above three ranges receive a severe penalty.</li>
+        <li>Penalizes a stock whose typical daily range cannot comfortably cover the session's target: above one normal daily range the target starts costing points, above two the penalty is severe. The bar is the target you actually need, not a fixed percentage — before v1113 it asked for a 10% move, the rocket definition retired in v1085.</li>
       </ol>${diagHTML}</div>
       <div class="m-card"><h4>Held Suppression & Basket</h4><p>Held positions (Holdings + Positions + today's net Orders buys) never re-enter the buy ranking. Quantities come from the charge-aware score-weighted allocator and can never exceed 0.10% of that stock's daily rupee turnover; missing turnover blocks a market order. Every exported order gets its own target from that stock's ATR/range capacity blended with the portfolio target anchor, plus its own ATR-scaled stop inside the existing ${SL_MIN_PCT.toFixed(1)}%–${SL_MAX_PCT.toFixed(1)}% risk rails.</p></div>
       <div class="m-card"><h4>What Still Learns</h4><p>The scorer itself is stateless by design. The execution layer keeps learning portfolio context from your results: the target anchor from later attainable highs, the fallback stop and review horizon from realised outcomes, and the same-day exit diagnostic from your sells against that day's highs. Max Allocation is arithmetic, not learned risk sizing: Capital divided by average positions entered per day.</p></div>
@@ -6580,7 +6612,6 @@ function getCols(){
     {key:'symbol',label:'Symbol',s:1},
     {key:'setup',label:'Setup',s:1},
     {key:'series',label:'Series / Band',s:1},
-    {key:'stretch',label:'10% Stretch',s:1},
     {key:'price',label:'Price ₹',s:1},
     {key:'day',label:'Day %',s:1},
     {key:'relvol',label:'Rel Vol',s:1},
@@ -7714,7 +7745,6 @@ function renderTable(){
     const am=allocMap[s.symbol];
     const exitPolicy=getRowExitPolicy(s,getBuyPrice(s));
     const canBuy=s.basketEligible!==false;
-    const stretchColor=s.stretch<=2.5?'var(--green)':s.stretch>3?'var(--red)':'var(--amber)';
     // Cells are keyed and joined in COLS order so they always match the (possibly
     // user-reordered) header (v536).
     const cellH={
@@ -7724,7 +7754,6 @@ function renderTable(){
       symbol:`<td style="font-family:'Plus Jakarta Sans',sans-serif"><button type="button" onclick='event.stopPropagation();openTradingViewChart(${JSON.stringify(String(s.symbol))})' style="padding:0;border:0;background:transparent;color:inherit;text-align:left;cursor:pointer" title="Open TradingView chart"><div style="font-weight:700;font-size:15px;color:var(--t1)">${escHtml(s.symbol)}${(()=>{const flags=s.meta?.flags||[];if(!flags.length)return '';return `<span style="font-size:12px;background:rgba(239,68,68,.15);color:var(--red);border-radius:4px;padding:1px 5px;margin-left:5px;font-weight:700;vertical-align:middle" title="NSE surveillance flags: ${escHtml(flags.join(' · '))}">⚠ ${flags.length}</span>`;})()}${s._held?`<span style="font-size:12px;background:rgba(244,114,182,.15);color:#f472b6;border-radius:4px;padding:1px 5px;margin-left:5px;font-weight:700;vertical-align:middle" title="You already hold this. Held stocks stay in the ranking (v1070) and can be recommended again — buying here ADDS to the existing position.">📌 held</span>`:''}</div><div style="font-size:11px;color:var(--t3);max-width:220px;overflow:hidden;text-overflow:ellipsis">${escHtml(s.name||'')}</div></button></td>`,
       setup:`<td style="font-size:13px;color:var(--t2)">${escHtml(s.setup||'—')}${s.stage?' '+radarStagePill(s):''}</td>`,
       series:`<td>${radarSeriesBandPill(s)}</td>`,
-      stretch:`<td style="color:${stretchColor};font-weight:700" title="A 10% move is this many multiples of the strongest daily-range estimate. Lower is more feasible.">${s.stretch!=null&&isFinite(s.stretch)?Number(s.stretch).toFixed(1)+'×':'—'}</td>`,
       price:`<td>${fmtINR(s.price)}</td>`,
       day:`<td>${fPerf(s.day??s.priceChange)}${s.corpAction?`<span title="Corporate action (${escHtml(s.corpAction)}) — mechanical ex-date move, neutralised in scoring" style="font-size:11px;color:var(--amber);margin-left:4px;cursor:help">⚑</span>`:''}</td>`,
       relvol:`<td>${s.relvol!=null&&isFinite(s.relvol)?Number(s.relvol).toFixed(2)+'×':'—'}</td>`,
@@ -8017,7 +8046,7 @@ function showRadarDetail(sym){
   const detailNote=(r.contrib||[]).length?'':'<div style="color:var(--amber);font-size:13px;margin-bottom:8px">Restored compact ranking — load files again for the full per-feature breakdown.</div>';
   document.getElementById('radarDetailBody').innerHTML=`${detailNote}<div class="rr-groups">${groups}</div>
     <div class="rr-read"><b>Exchange check:</b> Series ${escHtml(r.series||'—')}, price band ${r.band??'not supplied'}, status ${escHtml(r.status||'—')}; basket ${r.basketEligible!==false?'eligible':'ineligible'}. Official delivery ${r.meta?.delivery==null?'unavailable':fmt(r.meta.delivery,1)+'%'}, trades ${r.meta?.trades==null?'unavailable':fmt(r.meta.trades,0)}, surveillance flags: ${flags}.${corpNote}<br>
-    <b>Feasibility:</b> ${gate} Strongest daily range estimate ${fmt(r.rangePct,2)}%; a 10% move is ${fmt(r.stretch,2)}× that range. The stock remains ranked either way.${entryNote}<br>
+    <b>Feasibility:</b> ${gate} Strongest daily range estimate ${fmt(r.rangePct,2)}%; the session target takes ${fmt(r.stretch,2)}× that range. The stock remains ranked either way.${entryNote}<br>
     ${r.stage?`<b>Market-cycle stage:</b> ${radarStagePill(r)} — ${escHtml({1:'silent accumulation (quiet strength before a move)',2:'initial breakout',3:'event day (move may be event-driven)',4:'profit-booking (digesting a recent result)',5:'re-accumulation',6:'second leg'}[r.stage]||'')}.<br>`:''}
     <b>Read:</b> ${escHtml(r.setup||'—')}. Data coverage ${r.quality!=null?fmt(r.quality*100,0)+'%':'—'}, day move ${(r.day??0)>=0?'+':''}${fmt(r.day,2)}%, relative volume ${r.relvol==null?'unavailable':fmt(r.relvol,2)+'×'}, turnover ${fV(r.turnover)}. Rank is relative, not a literal probability.</div>
     ${contribs?`<h3 style="font-size:16px;margin:12px 0 8px">Largest feature contributions</h3><div class="rr-contribs">${contribs}</div>`:''}`;
@@ -9079,11 +9108,52 @@ async function exportBasket(){
 // position and one of these limit orders also fills, the position can be sold twice, leaving a
 // short. The app cannot see resting GTTs (no input file exposes them), so it cannot dedupe them. The
 // toast and the saved file both say so.
+// ── v1113 SPLIT EXIT: A TARGET LEG AND A RUNNER LEG (owner) ───────────────────────────────────────
+// One limit order cannot answer the shape of the leak. Measured 2026-08-10 on the owner's own 217
+// closed sell cohorts, filling at the candidate target where that day's high reached it and keeping
+// his actual exit otherwise:
+//
+//   realised median +2.12% against an available median +3.46%  ->  61% of the move captured
+//   best FLAT target (6.00%)                                    ->  +Rs 43,158 vs his actual exits
+//   50% at 4% + 50% trailed 1% off the day's high               ->  +Rs 60,347   (+40% on the best flat)
+//   70/30 at the same levels                                    ->  +Rs 49,294
+//
+// The distribution has a BODY and a TAIL: the median exit leaves 1.96% behind while the top 10% of
+// cohorts carry 41% of the money. A single price serves one of those, never both. So the base leg
+// harvests the body at the target and the runner rides the tail behind a trailing stop.
+//
+// THE SPLIT IS EVEN, and that is a structural choice rather than a tuned one: half and half is the
+// no-information point, and any other ratio claims knowledge about how heavy the tail is. The sweep
+// agrees (50/50 beat 70/30 in every cell tested), so the evidence points at the neutral split rather
+// than away from it. The odd share goes to the BASE leg — the reliable half — so a 1-share position
+// stays a single target order and nothing is ever left un-armed.
+//
+// THE TRAIL MAGNITUDE IS NOT TYPED. It comes from calcPositionTSL, which learns the gap from observed
+// rocket retracements (TSL_GAP_PERCENTILE over the gap model) and falls back to ATR. That engine has
+// been computed and displayed since v1060 and drove NOTHING; this is the first output it reaches.
+//
+// WHY SL-M AND NOT GTT. Sell baskets carry no `gtt` block, which is the whole reason this button
+// exists. An SL-M sell IS a plain basket order type, so the runner arms as a day order and is
+// re-armed by the same button next session — which is exactly the workflow the trail wants, since the
+// trail ratchets up daily. A sell trigger must sit BELOW the last price or it fires instantly at
+// market, so a trail that has already been overtaken emits no runner and its quantity falls back to
+// the base leg rather than becoming a silent market sell (the v1082 rule, applied to the stop side).
+//
+// DOUBLE-SELL HAZARD IS NOW LARGER, and is surfaced rather than handled: two legs per position means
+// a stale GTT can collide with either one. The toast says to cancel existing GTTs first.
+function sellSplitQty(qty){
+  const q=Math.floor(Number(qty)||0);
+  if(q<=0) return {base:0,runner:0};
+  if(q<2) return {base:q,runner:0};              // a single share cannot be split
+  const base=Math.ceil(q/2);                     // odd share to the reliable leg
+  return {base,runner:q-base};
+}
 function buildSellTargetOrders(){
   const map=getCombinedOpenPositionMap();
   const live=new Map((typeof ALL!=='undefined'?ALL:[]).map(r=>[r.symbol,r]));
-  const orders=[],skipped=[];
-  let seq=0;
+  const tslStore=(typeof getPositionTslStore==='function')?getPositionTslStore():{};
+  const orders=[],skipped=[],noRunner=[],groups=[];
+  let seq=0, positions=0;
   Object.values(map).forEach(pos=>{
     const sym=pos&&pos.symbol, qty=Math.floor(Number(pos&&pos.qty)||0);
     if(!sym||qty<=0) return;                       // long positions only; shorts are not ours to exit
@@ -9119,57 +9189,111 @@ function buildSellTargetOrders(){
       skipped.push(sym+(bandClamped?' (target outside the price band)':' (already at or above target)'));
       return;
     }
-    orders.push({
-      id:Date.now()+seq++,
-      instrument:{
-        tradingsymbol:sym,scripCode:'',type:'EQ',symbol:sym,
-        segment:'NSE',exchange:'NSE',tickSize:0.01,lotSize:1,
-        company:(row&&row.name)||sym,tradable:true,precision:2,
-        fullName:sym,niceName:sym,niceNameHTML:sym,stockWidget:true,
-        exchangeToken:0,instrumentToken:0,isin:'',
-        related:[],underlying:null,auctionNumber:null,
-        isEquity:true,isWeekly:false
-      },
-      weight:0,
+    const instrument=()=>({
+      tradingsymbol:sym,scripCode:'',type:'EQ',symbol:sym,
+      segment:'NSE',exchange:'NSE',tickSize:0.01,lotSize:1,
+      company:(row&&row.name)||sym,tradable:true,precision:2,
+      fullName:sym,niceName:sym,niceNameHTML:sym,stockWidget:true,
+      exchangeToken:0,instrumentToken:0,isin:'',
+      related:[],underlying:null,auctionNumber:null,
+      isEquity:true,isWeekly:false
+    });
+    // The runner's trail comes from the SAME calcPositionTSL the Open Positions panel shows, seeded
+    // with the persisted peak so the trail keeps ratcheting across sessions. Read-only here: the
+    // panel owns persistence, and exporting a basket must never advance the trail by itself.
+    let split=sellSplitQty(qty), trail=null;
+    if(split.runner>0){
+      const tsl=calcPositionTSL({sym,qty,avgCost:avg,ltp,scannerRow:row,
+        adaptiveSL:policy.stopPct,adaptiveTGT:tgtPct,prev:tslStore[sym]});
+      const trig=Number(tsl&&tsl.tsl);
+      // A SELL trigger at or above the last price fires instantly at market — the v1082 rule applied
+      // to the stop side. If the trail has already been overtaken, arm nothing and give the runner's
+      // quantity back to the target leg, so the position is never left partly un-armed.
+      if(trig>0&&ltp>0&&trig<ltp) trail={trigger:+tickPrice(trig).toFixed(2),gapPct:tsl.gapPct,mode:tsl.mode};
+      else { noRunner.push(sym); split={base:qty,runner:0}; }
+    }
+    positions++;
+    const legs=[];
+    legs.push({
+      id:Date.now()+seq++, instrument:instrument(), weight:0,
       params:{
         transactionType:'SELL',product:'CNC',orderType:'LIMIT',
         validity:'DAY',validityTTL:1,
-        quantity:qty,price:+price.toFixed(2),
+        quantity:split.base,price:+price.toFixed(2),
         triggerPrice:0,disclosedQuantity:0,lastPrice:ltp,
         variety:'regular',
         tags:['TGT']
       },
-      _meta:{avg:+avg.toFixed(2),targetPct:tgtPct,stopPct:policy.stopPct,
-             ltp:+Number(ltp||0).toFixed(2),bandClamped,
+      _meta:{leg:'target',sym,avg:+avg.toFixed(2),targetPct:tgtPct,stopPct:policy.stopPct,
+             ltp:+Number(ltp||0).toFixed(2),bandClamped,fullQty:qty,
              ucPrice:uc?+uc.ucPrice.toFixed(2):null,
              gainPctFromLtp:ltp>0?+(((price-ltp)/ltp)*100).toFixed(2):null}
     });
+    if(trail&&split.runner>0){
+      legs.push({
+        id:Date.now()+seq++, instrument:instrument(), weight:0,
+        params:{
+          transactionType:'SELL',product:'CNC',orderType:'SL-M',
+          validity:'DAY',validityTTL:1,
+          quantity:split.runner,price:0,
+          triggerPrice:trail.trigger,disclosedQuantity:0,lastPrice:ltp,
+          variety:'regular',
+          tags:['TRAIL']
+        },
+        _meta:{leg:'runner',sym,avg:+avg.toFixed(2),targetPct:tgtPct,stopPct:policy.stopPct,
+               ltp:+Number(ltp||0).toFixed(2),bandClamped:false,fullQty:qty,
+               trailGapPct:trail.gapPct,trailMode:trail.mode,
+               gainPctFromLtp:ltp>0?+(((price-ltp)/ltp)*100).toFixed(2):null}
+      });
+    }
+    groups.push({sym,legs,sortKey:ltp>0?((price-ltp)/ltp)*100:1e9});
   });
-  orders.sort((a,b)=>(a._meta.gainPctFromLtp??1e9)-(b._meta.gainPctFromLtp??1e9));
-  return {orders,skipped};
+  // Sorted nearest-to-filling first, as before. Legs stay together: trimming to the basket limit must
+  // never arm a runner whose target leg was dropped, or the position exits only on a retrace.
+  groups.sort((a,b)=>a.sortKey-b.sortKey);
+  groups.forEach(g=>orders.push(...g.legs));
+  return {orders,skipped,groups,positions,noRunner};
+}
+// Zerodha's basket limit is the same 20 as the buy path. v1113: trim by POSITION, never by order — a
+// position now contributes two legs, and cutting mid-pair would arm a runner with no target above it
+// (the position would then exit only on a retrace) or a target with no protection beneath it. A
+// position too large to fit whole is skipped and the next one is still considered, so one fat group
+// does not truncate the tail of the book.
+function trimSellGroupsToBasket(groups,limit=20){
+  const take=[]; let legs=0, dropped=0;
+  for(const g of groups||[]){
+    if(legs+g.legs.length>limit){ dropped++; continue; }
+    take.push(g); legs+=g.legs.length;
+  }
+  return {take,orders:take.flatMap(g=>g.legs),dropped};
 }
 async function exportSellTargets(){
-  const {orders,skipped}=buildSellTargetOrders();
-  if(!orders.length){
+  const {skipped,groups,noRunner}=buildSellTargetOrders();
+  if(!groups.length){
     showToast('No sell order to export — every open position is either already at/above its target or has no usable cost basis.'
       +(skipped.length?` (${skipped.join(', ')})`:''),7000,true);
     return;
   }
-  // Zerodha's basket limit is the same 20 as the buy path.
-  if(orders.length>20){
-    showToast(`${orders.length} open positions exceed Zerodha's 20-order basket limit — exporting the 20 closest to target.`,6000,true);
-    orders.length=20;
+  const {take,orders,dropped:droppedPositions}=trimSellGroupsToBasket(groups);
+  if(droppedPositions){
+    showToast(`${groups.length} open positions need ${groups.reduce((n,g)=>n+g.legs.length,0)} orders,`
+      +` over Zerodha's 20-order basket limit — exporting the ${take.length} closest to target.`,6000,true);
   }
   const payload=orders.map(o=>{const c={...o};delete c._meta;return c;});
   const saved=await saveBasketToScannerUploads(payload,'Zerodha_Basket_Sell');
   if(!saved) return;
-  const nearest=orders[0];
-  const clamped=orders.filter(o=>o._meta.bandClamped);
-  showToast(`Sell basket saved: ${orders.length} LIMIT sells at revised targets`
+  const targets=orders.filter(o=>o._meta.leg==='target');
+  const runners=orders.filter(o=>o._meta.leg==='runner');
+  const nearest=targets[0];
+  const clamped=targets.filter(o=>o._meta.bandClamped);
+  showToast(`Sell basket saved: ${take.length} positions · ${targets.length} LIMIT target legs`
+    +(runners.length?` + ${runners.length} SL-M runner legs trailing the peak`:'')
     +(nearest&&nearest._meta.gainPctFromLtp!=null?` · nearest ${nearest.instrument.symbol} +${nearest._meta.gainPctFromLtp}% from LTP`:'')
     +(clamped.length?` · ${clamped.length} capped at the upper circuit (${clamped.map(o=>o.instrument.symbol).join(', ')}) — the goal target is outside today's band`:'')
+    +(noRunner.length?` · no runner for ${noRunner.length} (trail already above the last price, full size left on the target): ${noRunner.join(', ')}`:'')
     +(skipped.length?` · no order for ${skipped.length}: ${skipped.join(', ')}`:'')
-    +' · WARNING: cancel any existing GTTs on these first, or a fill on both will short you.',13000);
+    +' · the runner legs are DAY orders — re-export tomorrow to re-arm them at the new trail.'
+    +' · WARNING: cancel any existing GTTs on these first, or a fill on both will short you.',15000);
 }
 async function saveBasketToScannerUploads(orders, filename){
   if(orders.length>20) throw new Error(`Refusing to truncate basket with ${orders.length} orders`);
