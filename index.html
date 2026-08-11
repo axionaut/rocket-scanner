@@ -36,11 +36,11 @@
     </div>
     <button class="btn" id="driveBtn" onclick="connectCloudStorage()" title="Connect or reconnect Google Drive">Drive</button>
     <button class="btn btn-fire" id="loadFilesBtn" onclick="handleCloudLoadAction()">Load Files</button>
-    <button class="btn" onclick="toggleGoalPopover()" title="Goal settings" style="font-size:16px;padding:8px 12px;margin-left:4px">⚙ Goal</button>
+    <button class="btn" id="goalBtn" onclick="toggleGoalPopover()" title="Goal settings" style="font-size:16px;padding:8px 12px;margin-left:4px">⚙ Goal</button>
     <div id="goalPopover" style="display:none;position:absolute;top:100%;right:0;margin-top:8px;background:var(--bg-raised);border:1px solid var(--border-hi);border-radius:12px;padding:14px 16px;z-index:1000;box-shadow:0 8px 32px rgba(0,0,0,.35);min-width:360px;max-width:460px">
       <div id="goalPopoverContent" style="font-size:13px;line-height:1.6;color:var(--t2)"></div>
     </div>
-    <button class="btn" onclick="toggleRequiredFilesPopover()" title="Required input files" style="font-size:16px;padding:8px 12px;margin-left:4px">ℹ️</button>
+    <button class="btn" id="filesBtn" onclick="toggleRequiredFilesPopover()" title="Required input files" style="font-size:16px;padding:8px 12px;margin-left:4px">ℹ️</button>
     <div id="requiredFilesPopover" style="display:none;position:absolute;top:100%;right:0;margin-top:8px;background:var(--bg-raised);border:1px solid var(--border-hi);border-radius:10px;padding:14px 16px;z-index:1000;box-shadow:0 8px 32px rgba(0,0,0,.35);min-width:280px;max-width:380px">
       <div style="font-size:14px;color:var(--t1);margin-bottom:10px;font-weight:600">📁 Required files:</div>
       <div id="requiredFilesPopoverContent" style="font-size:13px;line-height:1.6;color:var(--t2)"></div>

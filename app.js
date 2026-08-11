@@ -1,5 +1,5 @@
-const BUILD_TS='2026-08-11 14:35 IST'; // release build time (IST)
-const APP_VERSION=1121; // v1121: the session average exit-to-high gap in the totals row, the same figure across all watched history as a card, and Review After moved to a pill on the board.
+const BUILD_TS='2026-08-11 14:58 IST'; // release build time (IST)
+const APP_VERSION=1122; // v1122: the Latest Session table fits on screen (charge components collapse into Total Charges, breakdown on hover), and the Goal module is reachable on a phone again.
 // v1093: a baseline reward:risk MEASURED on the cross-section (last completed bhav session) instead of learned from the owner's own fills - reported on every row, deliberately not enforced. Includes v1092: position size split by Radar score / stop distance, so equally-scored names carry equal RUPEE risk, plus an opt-in Risk /trade cap.
 // v556: parse the NSE Market Activity Report (MA<date>.csv) — official Nifty %, advances/declines and sector index moves shown as market CONTEXT in the status bar (EOD data, display only, never fed into per-row scoring); MA added to the ℹ️ file manifest.
 // v555 market-cycle stage awareness (stateless, self-calibrating): per-row stage label (1 accumulation · 2 breakout · 3 event · 4 profit-booking · 5 re-accumulation · 6 second-leg); a quiet-accumulation signal (conjunction-of-percentiles) injected via the rocket-diagnostic weighting; sell-the-news decay off Recent earnings date (horizon = review days). v1065 makes the market-breadth gauge an entry-eligibility input while still never changing ranking.
@@ -5989,14 +5989,20 @@ function buildLatestSessionPanel(query=''){
       {key:'priceDiff',label:'Diff ₹',align:'right',fmt:v=>v!=null?fmtSignedINR(v).replace('₹','₹/sh '):'—',clrFn:v=>v!=null?clr(v):'var(--t3)',..._dash},
       {key:'currentPrice',label:'Now ₹',align:'right',fmt:v=>v!=null?Number(v).toLocaleString('en-IN',INR_2):'—',clrFn:()=>'var(--t2)',..._dash},
       ..._leftCols(_leftTot,_leftPctTot),
-      {key:'_brok',label:'Brokerage',align:'right',fmt:_chFmt,clrFn:_chClr,..._chTot},
-      {key:'_stt',label:'STT/CTT',align:'right',fmt:_chFmt,clrFn:_chClr,..._chTot},
-      {key:'_txn',label:'Txn',align:'right',fmt:_chFmt,clrFn:_chClr,..._chTot},
-      {key:'_gst',label:'GST',align:'right',fmt:_chFmt,clrFn:_chClr,..._chTot},
-      {key:'_sebi',label:'SEBI',align:'right',fmt:_chFmt,clrFn:_chClr,..._chTot},
-      {key:'_stamp',label:'Stamp',align:'right',fmt:_chFmt,clrFn:_chClr,..._chTot},
-      {key:'_dp',label:'DP',align:'right',fmt:_chFmt,clrFn:_chClr,..._chTot},
-      {key:'charges',label:'Total Charges',align:'right',bold:true,fmt:fmtNegINR,clrFn:()=>'var(--red)',..._chTot},
+      // v1122 (owner: the table is cropped): the seven charge components are COLLAPSED into Total
+      // Charges, which is their sum, with the full breakdown on hover. Nothing is lost — it is the
+      // one block of columns that is pure detail, it took a third of the table's width, and it is
+      // the reason 21 columns would not fit a screen. 21 -> 14.
+      {key:'charges',label:'Total Charges',align:'right',bold:true,
+       fmt:(v,r)=>{
+         if(v==null) return '—';
+         const parts=[['Brokerage',r._brok],['STT/CTT',r._stt],['Txn',r._txn],['GST',r._gst],
+                      ['SEBI',r._sebi],['Stamp',r._stamp],['DP',r._dp]]
+           .filter(([,x])=>Number(x))
+           .map(([k,x])=>`${k} ${fmtNegINR(x)}`).join(' · ');
+         return `<span title="${escHtml(parts||'no component breakdown on this row')}">${fmtNegINR(v)}</span>`;
+       },
+       clrFn:()=>'var(--red)',..._chTot},
       {key:'grossPnl',label:'Gross P&L',align:'right',bold:true,fmt:v=>v!=null?fmtPerfRs(v):'—',clrFn:v=>v!=null?clr(v):'var(--t3)',..._signTot},
       {key:'netPnl',label:'Net P&L',align:'right',bold:true,fmt:(v,r)=>v!=null?fmtPerfRs(v):`<span style="color:var(--amber);font-size:12px">unknown</span>`,clrFn:(v)=>v!=null?clr(v):'var(--amber)',..._signTot},
       {key:'netPnlPct',label:'P&L %',align:'right',bold:true,fmt:v=>v!=null?fmtPct(v):`<span style="color:var(--amber);font-size:12px">unknown</span>`,clrFn:v=>v!=null?clr(v):'var(--amber)',totFmt:v=>v==null?'--':fmtPct(v),totClrFn:v=>v==null?'var(--t3)':v>=0?'var(--green)':'var(--red)'},

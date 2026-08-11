@@ -178,7 +178,13 @@ table.main tbody td{padding:9px 11px;font-family:'DM Mono',monospace;font-size:1
 @media(max-width:480px){
   .stats{grid-template-columns:repeat(2,1fr)}
   .fg{min-width:calc(50% - 6px)}
-  .hdr-r .btn:not(#driveBtn):not(#loadFilesBtn):not(#menuBtn){display:none}
+  /* v1122: Goal was collateral damage here - the rule kept Drive, Load Files and the menu and hid
+     everything else, which took the whole Goal module off the phone. It is now named and kept. */
+  .hdr-r .btn:not(#driveBtn):not(#loadFilesBtn):not(#menuBtn):not(#goalBtn){display:none}
+  /* And the popover itself: a 360px min-width panel anchored right:0 cannot fit a phone. On a
+     narrow screen it becomes a bottom sheet, which is reachable and scrollable at any height. */
+  #goalPopover{position:fixed;left:10px;right:10px;top:auto;bottom:10px;min-width:0;max-width:none;
+    max-height:78vh;overflow-y:auto}
   #mobileMenuBtn{display:flex}
 }
 @media(max-width:768px){.hdr{padding:16px 0}.app{padding:0 12px}}
