@@ -1,5 +1,5 @@
-const BUILD_TS='2026-08-11 14:20 IST'; // release build time (IST)
-const APP_VERSION=1120; // v1120: money left on the table is measured from the sell forward - a high that printed BEFORE the exit no longer counts.
+const BUILD_TS='2026-08-11 14:35 IST'; // release build time (IST)
+const APP_VERSION=1121; // v1121: the session average exit-to-high gap in the totals row, the same figure across all watched history as a card, and Review After moved to a pill on the board.
 // v1093: a baseline reward:risk MEASURED on the cross-section (last completed bhav session) instead of learned from the owner's own fills - reported on every row, deliberately not enforced. Includes v1092: position size split by Radar score / stop distance, so equally-scored names carry equal RUPEE risk, plus an opt-in Risk /trade cap.
 // v556: parse the NSE Market Activity Report (MA<date>.csv) — official Nifty %, advances/declines and sector index moves shown as market CONTEXT in the status bar (EOD data, display only, never fed into per-row scoring); MA added to the ℹ️ file manifest.
 // v555 market-cycle stage awareness (stateless, self-calibrating): per-row stage label (1 accumulation · 2 breakout · 3 event · 4 profit-booking · 5 re-accumulation · 6 second-leg); a quiet-accumulation signal (conjunction-of-percentiles) injected via the rocket-diagnostic weighting; sell-the-news decay off Recent earnings date (horizon = review days). v1065 makes the market-breadth gauge an entry-eligibility input while still never changing ranking.
@@ -3962,6 +3962,58 @@ function getHighTimeInfo(sym,sessionDate){
   const e=d&&d[normSym(sym)];
   return e?{high:e.h,at:e.at,firstSeen:e.first,observations:e.n||0}:null;
 }
+// ── v1121: HOW LONG AFTER AN EXIT THE HIGH ARRIVES, ACROSS ALL RECORDED HISTORY ──────────────────
+// The Latest Session table answers this for today. This answers it for everything the watch has
+// seen, by pairing each recorded high-time with the tradebook's own sell time for that symbol and
+// session — the tradebook carries `sellDate` and `sellTime` on every trip, so history is pairable
+// as soon as the watch has a session for it.
+//
+// It can only cover sessions the recorder actually watched, which began 2026-08-11. The sample size
+// and the session count ride on the result so the card can never imply more history than exists.
+let _gapStatsMemo=null;
+function getHighGapStats(){
+  const store=getSessionWatchStore();
+  const trips=TRADEBOOK_STATS?.tripsData;
+  const sig=Object.keys(store.highs||{}).join(',')+'|'+(Array.isArray(trips)?trips.length:0);
+  if(_gapStatsMemo&&_gapStatsMemo.sig===sig) return _gapStatsMemo.val;
+  const gaps=[];const sessions=new Set();
+  (Array.isArray(trips)?trips:[]).forEach(t=>{
+    const d=t&&t.sellDate; if(!d) return;
+    const day=store.highs[d]; if(!day) return;
+    const e=day[normSym(t.sym)]; if(!e||!e.at) return;
+    const hi=clockMinutes(e.at), se=clockMinutes(t.sellTime);
+    if(hi==null||se==null) return;
+    gaps.push(hi-se); sessions.add(d);
+  });
+  // Today's exits are in orders.csv, not yet in the tradebook, so fold them in from the same source
+  // the Latest Session panel uses — otherwise the card reads empty on the day it matters most.
+  try{
+    const s=getLatestBookedSummary();
+    if(s&&s.source==='Orders.csv'&&Array.isArray(s.rows)){
+      const day=store.highs[s.date];
+      if(day) s.rows.forEach(r=>{
+        const e=day[normSym(r.sym)]; if(!e||!e.at) return;
+        const hi=clockMinutes(e.at), se=clockMinutes(r.sellTime);
+        if(hi==null||se==null) return;
+        gaps.push(hi-se); sessions.add(s.date);
+      });
+    }
+  }catch(err){}
+  let val;
+  if(!gaps.length){
+    val={n:0,sessions:0,meanMin:null,medianMin:null,afterCount:0,
+         source:'no watched session has a matching exit yet'};
+  } else {
+    const sorted=[...gaps].sort((a,b)=>a-b);
+    val={n:gaps.length,sessions:sessions.size,
+         meanMin:Math.round(gaps.reduce((a,b)=>a+b,0)/gaps.length),
+         medianMin:Math.round(sorted[Math.floor(sorted.length/2)]),
+         afterCount:gaps.filter(g=>g>0).length,
+         source:`${gaps.length} exit${gaps.length===1?'':'s'} across ${sessions.size} watched session${sessions.size===1?'':'s'}`};
+  }
+  _gapStatsMemo={sig,val};
+  return val;
+}
 // R3's signal: the sign of the TTM operating-margin move across the stock's last filing.
 function getMarginDirection(sym){
   const e=getSessionWatchStore().opm[normSym(sym)];
@@ -5903,7 +5955,9 @@ function buildLatestSessionPanel(query=''){
      },
      // Red when the high came AFTER the exit (money was still on the table), green when it came
      // before (the exit was not early). Same inverted polarity as the Left on Table columns.
-     clrFn:v=>v==null?'var(--t3)':v>0?'var(--red)':'var(--green)'},
+     clrFn:v=>v==null?'var(--t3)':v>0?'var(--red)':'var(--green)',
+     totFmt:v=>v==null?'—':(v>0?`+${v}m avg`:`${v}m avg`),
+     totClrFn:v=>v==null?'var(--t3)':v>0?'var(--red)':'var(--green)'},
   ];
   const card=inner=>`<div id="rank-latest-session-card" style="background:var(--bg-card);border:1px solid var(--border);border-radius:10px;overflow:hidden">${inner}</div>`;
   const summary=getLatestBookedSummary();
@@ -5956,7 +6010,12 @@ function buildLatestSessionPanel(query=''){
       charges:_sum('charges'),
       grossPnl:shownSummary.known.length?shownSummary.gross:null,
       netPnl:shownTotal,
-      netPnlPct:shownSummary.pct
+      netPnlPct:shownSummary.pct,
+      // v1121: the session's AVERAGE gap between the exit and the day's high. Straight mean over the
+      // rows that have one — negatives included, because a negative is the informative case (the
+      // high was already in, so the exit was late rather than early).
+      highGapMin:(()=>{const g=rows.map(r=>r.highGapMin).filter(v=>Number.isFinite(v));
+        return g.length?Math.round(g.reduce((a,b)=>a+b,0)/g.length):null;})()
     }:null;
     const latestTbl=makeSortableTable('rank-latest-session',latestCols,rows,'_sort',-1,null,latestTotals,'sym');
     const emptyNote=String(query||'').trim()
@@ -6226,7 +6285,17 @@ function renderPerformance(){
     {label:'Expectancy',value:fmtPerfRs(p.expectancy),color:clr(p.expectancy),sub:'Net ₹ you make per lot, on average'},
     {label:'Profit Factor',value:p.profitFactor!=null?p.profitFactor:'—',color:p.profitFactor>=1.5?'var(--green)':p.profitFactor>=1?'var(--amber)':'var(--red)',sub:'Gross wins ÷ gross losses · above 1 = profitable'},
     {label:'Max Allocation',value:autoMaxAlloc?fmtINR(autoMaxAlloc):'—',color:autoMaxAlloc?'var(--amber)':'var(--t3)',sub:autoMaxAlloc?`${fmtINR(allocationCapital)} capital ÷ ${allocationCadence.toFixed(2)} avg positions/entry day${maxAllocOverride?` · typed override ${fmtINR(typedMaxAlloc)} active`:''}`:'Load trade history to calculate trading cadence'},
-    {label:'Review After',value:effectiveReviewDays?effectiveReviewDays+'d':'—',color:effectiveReviewDays?'var(--amber)':'var(--t3)',sub:exitPolicy&&exitPolicy.velocityPctPerDay!=null?`Exit review horizon · realised baseline ${exitPolicy.holdDays}d`:'Re-upload tradebook to learn'},
+    // v1121 (owner): "Review After" moved to a pill on Rankings — it is a single number that belongs
+    // next to the board, not a card. In its place, the question the exit work has been circling:
+    // across every watched session, how long after an exit does the day's high actually arrive?
+    // NEGATIVE means the high was typically already in when you sold — the exit was late, not early.
+    (()=>{const g=getHighGapStats();
+      return {label:'High vs Exit',
+        value:g.meanMin==null?'—':(g.meanMin>0?`+${g.meanMin}m`:`${g.meanMin}m`),
+        color:g.meanMin==null?'var(--t3)':g.meanMin>0?'var(--red)':'var(--green)',
+        sub:g.meanMin==null
+          ? `Recording since 2026-08-11 · ${g.source}`
+          : `Mean minutes from your exit to the day's high · median ${g.medianMin>0?'+':''}${g.medianMin}m · high came AFTER the exit on ${g.afterCount} of ${g.n} · ${g.source}`};})(),
     {label:'Max Drawdown',value:p.maxDrawdown>0?fmtSignedINR(-p.maxDrawdown):'—',color:'var(--red)',sub:'Worst peak-to-trough fall in this period'},
     {label:'Largest Loss',value:fmtSignedINR(p.largestLossRs),color:'var(--red)',sub:'Worst single lot, net of charges'},
     {label:'Avg Hold',value:p.avgHoldDays+'d',color:'var(--t1)',sub:'How long a position actually lasts'},
@@ -6305,7 +6374,7 @@ function renderPerformance(){
     'Net P&L','Win Rate','Expectancy','Profit Factor',
     'Avg P&L/Trading Day','Avg P&L/Cal Day','Profitable Days','Best Day','Worst Day',
     'Largest Win','Largest Loss','Max Drawdown','Max Win Streak','Max Loss Streak',
-    'Avg Hold','Review After','Rocket Conversion','Same-Day Exit Headroom',
+    'Avg Hold','High vs Exit','Rocket Conversion','Same-Day Exit Headroom',
     'Avg Position','Avg Positions/Entry Day','Max Allocation'
   ];
   const allKpis=[...kpis,...detailKpis];
@@ -8397,6 +8466,15 @@ function renderStatusBar(){
   // are EXCLUDED from today's numbers rather than silently counted.
   if(PORTFOLIO_STALE?.stale){
     html+=` <span class="sb-tag sb-tag-red" style="margin-left:8px" title="Positions.csv and Orders.csv still hold the ${escHtml(PORTFOLIO_STALE.portfolioDate||'prior')} session (Zerodha only rewrites them when you place a new trade). They are EXCLUDED from today's booked P&L, held-suppression and open positions — Holdings.csv is used instead. Re-export them after your first trade today to bring them current.">⏳ Positions/Orders from ${escHtml(PORTFOLIO_STALE.portfolioDate||'prior session')} — excluded from today</span>`;
+  }
+  // v1121 (owner): Review After moved off the Performance grid and onto the board, where the
+  // decision it informs actually happens. It is one number, so it is a pill, not a card.
+  {
+    const _rev=getEffectiveReviewDays();
+    if(_rev>0){
+      const _xp=TRADEBOOK_STATS?.exitPolicy||null;
+      html+=` <span class="sb-tag" style="margin-left:8px" title="Exit review horizon: how long a position should be given before it is reconsidered, learned from your realised holds${_xp&&_xp.holdDays?` (realised baseline ${_xp.holdDays}d)`:''}. Informational — it changes no target, stop or allocation.">⏳ review after ${_rev}d</span>`;
+    }
   }
   if(SUPPRESSED_HELD>0)html+=` <span class="sb-tag" style="margin-left:8px" title="Stocks you already hold (Holdings + Positions + today's net Orders buys). Since v1070 they remain in the ranking and can be recommended again — buying adds to the existing position. See Open Positions below.">📌 ${SUPPRESSED_HELD} already held</span>`;
   if(SURV_HARD_REMOVED>0)html+=` <span class="sb-tag sb-tag-red" style="margin-left:4px" title="Weeded out by the configured surveillance rules in the Methodology table (hard filter).">⚠ ${SURV_HARD_REMOVED} surveillance removed</span>`;
