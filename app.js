@@ -1,5 +1,5 @@
-const BUILD_TS='2026-08-11 11:40 IST'; // release build time (IST)
-const APP_VERSION=1118; // v1118: Open Positions shows BOTH target legs, the way the buy basket arms them, and defaults to sorting by rank.
+const BUILD_TS='2026-08-11 13:54 IST'; // release build time (IST)
+const APP_VERSION=1119; // v1119: the target is the MEASURED reachable move from your own exits, not ATR capacity - and Latest Session shows how long after each sell the day high arrived.
 // v1093: a baseline reward:risk MEASURED on the cross-section (last completed bhav session) instead of learned from the owner's own fills - reported on every row, deliberately not enforced. Includes v1092: position size split by Radar score / stop distance, so equally-scored names carry equal RUPEE risk, plus an opt-in Risk /trade cap.
 // v556: parse the NSE Market Activity Report (MA<date>.csv) — official Nifty %, advances/declines and sector index moves shown as market CONTEXT in the status bar (EOD data, display only, never fed into per-row scoring); MA added to the ℹ️ file manifest.
 // v555 market-cycle stage awareness (stateless, self-calibrating): per-row stage label (1 accumulation · 2 breakout · 3 event · 4 profit-booking · 5 re-accumulation · 6 second-leg); a quiet-accumulation signal (conjunction-of-percentiles) injected via the rocket-diagnostic weighting; sell-the-news decay off Recent earnings date (horizon = review days). v1065 makes the market-breadth gauge an entry-eligibility input while still never changing ranking.
@@ -4069,12 +4069,52 @@ function dayHighForSymbol(sym){
 // describes the booking session when the two dates agree — otherwise it would measure a sell from
 // one day against another day's price, and it is withheld with a stated reason instead. While the
 // market is open the figure is still moving, and the tooltip says so.
+// Minutes between two "HH:MM" / "YYYY-MM-DD HH:MM:SS" clock strings, or null.
+function clockMinutes(v){
+  const m=String(v||'').match(/(\d{1,2}):(\d{2})/);
+  return m?(+m[1])*60+(+m[2]):null;
+}
 function enrichExitPnlRow(row,bookedDate=null){
   const qty=Number(row?.qty)||0;
   const buy=Number(row?.buyPrice);
   const sell=Number(row?.sellPrice);
   const current=currentPriceForSymbol(row?.sym);
   const out={...row};
+  // ── v1119: HOW LONG AFTER YOUR EXIT DID THE DAY'S HIGH ARRIVE? ────────────────────────────────
+  // Owner: "selling early, manually, is one of the main problems in all this money left on table."
+  // The sell side has always been answerable (orders.csv carries fill times to the second, v1096);
+  // the high side arrived with the v1117 session watch, which stamps the receipt time whenever
+  // `high1d` ADVANCES. This is the first thing that consumes it — it was written yesterday and wired
+  // to nothing, the fourth orphaned output found this week.
+  //
+  // POSITIVE minutes = the high came AFTER you sold: waiting would have paid.
+  // NEGATIVE = the high was already in before you sold: the exit was late, not early.
+  //
+  // Two limits carried onto the row rather than hidden. RESOLUTION IS THE EXPORT CADENCE, not the
+  // 3-second poll — the file only changes when TradingView re-exports — so `highObs` (how many
+  // observations that session produced) rides along and the tooltip states it. And the recorder
+  // CANNOT be backfilled: it began on 2026-08-11, so every earlier session reads "not watched".
+  out.highAt=null; out.highGapMin=null; out.highObs=null; out.highNote='';
+  try{
+    const info=getHighTimeInfo(row?.sym,bookedDate||getSessionDate());
+    if(!info){
+      out.highNote='Not watched that session. The high-time recorder began 2026-08-11 and covers open positions plus the top of the ranking.';
+    } else {
+      out.highAt=info.at; out.highObs=info.observations;
+      // If the high was already in at the FIRST observation, the recorder never saw it advance, so
+      // the stamp is an UPPER BOUND ("at or before"), not a time. Saying otherwise would invent
+      // precision the recorder cannot have — the high may have printed before watching began.
+      out.highAtIsBound=(info.at===info.firstSeen);
+      const hi=clockMinutes(info.at), se=clockMinutes(row?.sellTime);
+      if(hi!=null&&se!=null) out.highGapMin=hi-se;
+      out.highNote=(out.highAtIsBound
+        ? `Day high ${info.high} was ALREADY IN at the first observation (${info.at} IST), so this is "at or before", not the time of the high.`
+        : `Day high ${info.high} last advanced at ${info.at} IST.`)
+        +` ${info.observations} observation${info.observations===1?'':'s'} that session`
+        +(row?.sellTime?` · you sold at ${String(row.sellTime).match(/\d{1,2}:\d{2}/)?.[0]||'?'}`:'')
+        +`. Resolution is your export cadence, not seconds.`;
+    }
+  }catch(e){}
   if(qty>0&&isFinite(buy)&&buy>0&&isFinite(sell)&&sell>0){
     out.priceDiff=+(sell-buy).toFixed(2);
     out.grossPnl=+((sell-buy)*qty).toFixed(0);
@@ -4190,6 +4230,62 @@ function recordLeftOnTableSession(date,summary){
 // exits were already landing above where the stock went afterwards, which calls for no nudge at all
 // rather than for pulling the target back below the goal rate.
 let _leftPoolMemo=null;
+// ── v1119 THE TARGET COMES FROM WHAT THE STOCK ACTUALLY OFFERED, NOT FROM ATR ────────────────────
+// Owner, 2026-08-11: "your ATR based targets are never reached. The stock starts falling before
+// reaching there... I'm losing money selling too early when the price shoots up the same day."
+//
+// MEASURED ON HIS OWN 223 CLOSED COHORTS, taking the move from HIS buy price to that day's high:
+//
+//   available   p25 1.21%   p50 3.46%   p75 6.02%   p90 9.05%
+//   the target the ATR policy sets   p25 3.90%   p50 4.40%   p75 5.40%
+//
+// The median target sat ABOVE the median available move, and the base leg filled on 79 of 223 — 35%.
+// Two positions in three could not reach their target on the day, which is why they had to be sold by
+// hand. That is not indiscipline; it is a target that cannot fill.
+//
+// WHY THE ATR NUMBER LOOKED RIGHT AND WAS NOT. The v1105 sweep filled at the target where the day's
+// high reached it and KEPT HIS ACTUAL MANUAL EXIT otherwise — so it credited a too-high target with
+// his own exit skill on every trade where the target failed. Judged without that credit (a target
+// that does not fill captures nothing), the optimum drops to ~3.5% and the fill rate doubles.
+//
+// WHAT THE CHANGE IS WORTH, stated honestly: on RUPEES it is a wash — ₹88,691 at p50 against ₹88,901
+// for the ATR policy, because a higher target earns more per fill and fills less often and the two
+// almost exactly cancel. What it buys is FILL RATE: 50% against 35%, i.e. 33 fewer positions a month
+// that the GTT cannot resolve. That is the owner's actual complaint.
+//
+// LIMIT, recorded rather than buried: the store holds the high on the day the position was SOLD, not
+// the running high across the hold, so for multi-day holds it understates what was available and the
+// true reachable level sits somewhat above 3.46%. The rupee curve is flat across p45-p55 (₹88.2k to
+// ₹88.7k), so this sits inside a plateau rather than on a fitted peak.
+//
+// The percentiles are not tuned magnitudes: the BASE is the median — the level half your positions
+// reach — and the RUNNER is the upper quartile, the level a quarter of them reach. Same family as
+// HARVEST_TRIGGER_CONFIDENCE, which already takes a percentile of a measured pool rather than a mean.
+const REACHABLE_MIN_SAMPLES=40;         // below this the distribution is not worth trusting
+let _reachMemo=null;
+function getReachableTargets(){
+  const store=FS.get(SAME_DAY_EXIT_OPPORTUNITY_STORE);
+  const rows=Object.values(store?.entries||{})
+    .filter(e=>Number(e.avgBuy)>0&&Number(e.dayHigh)>0)
+    .map(e=>(Number(e.dayHigh)/Number(e.avgBuy)-1)*100)
+    .filter(v=>Number.isFinite(v))
+    .sort((a,b)=>a-b);
+  const sig=rows.length+':'+(rows[0]??'')+':'+(rows.at(-1)??'');
+  if(_reachMemo&&_reachMemo.sig===sig) return _reachMemo.val;
+  let val;
+  if(rows.length<REACHABLE_MIN_SAMPLES){
+    val={basePct:null,runnerPct:null,samples:rows.length,
+         source:`only ${rows.length} exits on file, needs ${REACHABLE_MIN_SAMPLES}`};
+  } else {
+    const at=p=>rows[Math.min(rows.length-1,Math.floor(p*rows.length))];
+    val={basePct:+Math.max(0,at(0.50)).toFixed(2),
+         runnerPct:+Math.max(0,at(0.75)).toFixed(2),
+         samples:rows.length,
+         source:`${rows.length} closed exits, buy to that day's high`};
+  }
+  _reachMemo={sig,val};
+  return val;
+}
 function getLeftOnTablePool(){
   const store=getLeftOnTableStore();
   const dates=Object.keys(store.sessions||{}).sort().slice(-LEFT_ON_TABLE_POOL_SESSIONS);
@@ -4227,6 +4323,9 @@ function computeLatestOrderBooked(){
   Object.entries(bySym).forEach(([sym,{buys,sells}])=>{
     if(!sells.length) return;
     const totalSellQty=sells.reduce((s,o)=>s+o.qty,0);
+    // v1119: the time of the LAST sell for this symbol, so the panel can say how long after the
+    // exit the day high arrived. orders.csv carries fill times to the second (v1096).
+    const _sellTime=sells.map(o=>String(o.time||'')).filter(Boolean).sort().pop()||null;
     const avgSell=sells.reduce((s,o)=>s+o.price*o.qty,0)/totalSellQty;
     const holdingAvg=getHoldingAvgCost(sym);
     const totalBuyQty=buys.reduce((s,o)=>s+o.qty,0);
@@ -4274,7 +4373,7 @@ function computeLatestOrderBooked(){
       const _brok=+scS.brokerage.toFixed(2),_stt=+scS.stt.toFixed(2),_txn=+scS.txn.toFixed(2);
       const _sebi=+scS.sebi.toFixed(2),_gst=+scS.gst.toFixed(2),_stamp=+scS.stamp.toFixed(2),_dp=+scS.dp.toFixed(2);
       const charges=+sumChargeParts({_brok,_stt,_txn,_sebi,_gst,_stamp,_dp}).toFixed(0);
-      rows.push(enrichExitPnlRow({sym,lots:sells.length,qty:deliveryQty,capital:null,buyPrice:null,sellPrice:+avgSell.toFixed(2),_brok,_stt,_txn,_sebi,_gst,_stamp,_dp,charges,winRate:null,netPnl:null,netPnlPct:null,_sort:-Infinity,_noAvgCost:true},session.date));
+      rows.push(enrichExitPnlRow({sym,sellTime:_sellTime,lots:sells.length,qty:deliveryQty,capital:null,buyPrice:null,sellPrice:+avgSell.toFixed(2),_brok,_stt,_txn,_sebi,_gst,_stamp,_dp,charges,winRate:null,netPnl:null,netPnlPct:null,_sort:-Infinity,_noAvgCost:true},session.date));
     }
     if(!components.length) return;
     const matchedQty=components.reduce((sum,c)=>sum+c.qty,0);
@@ -4290,7 +4389,7 @@ function computeLatestOrderBooked(){
     const charges=+components.reduce((sum,c)=>sum+c.charges,0).toFixed(0);
     const netPnl=+components.reduce((sum,c)=>sum+c.netPnl,0).toFixed(0);
     const netPnlPct=capital>0?+(netPnl/capital*100).toFixed(2):null;
-    rows.push(enrichExitPnlRow({sym,lots:sells.length,qty:matchedQty,capital,buyPrice:+avgBuy.toFixed(2),sellPrice:+avgSell.toFixed(2),_brok,_stt,_txn,_sebi,_gst,_stamp,_dp,charges,winRate:netPnl>0?100:0,netPnl,netPnlPct,_sort:netPnl},session.date));
+    rows.push(enrichExitPnlRow({sym,sellTime:_sellTime,lots:sells.length,qty:matchedQty,capital,buyPrice:+avgBuy.toFixed(2),sellPrice:+avgSell.toFixed(2),_brok,_stt,_txn,_sebi,_gst,_stamp,_dp,charges,winRate:netPnl>0?100:0,netPnl,netPnlPct,_sort:netPnl},session.date));
   });
   const total=rows.reduce((s,r)=>s+(r.netPnl||0),0);
   const unknownRows=rows.filter(r=>r.netPnl==null).length;
@@ -5682,6 +5781,19 @@ function buildLatestSessionPanel(query=''){
        ?`<span title="${escHtml(r.leftOnTableNote||'')}">${v.toFixed(2)}%</span>`
        :`<span style="color:var(--t3)">—</span>`,
      clrFn:leftClr,...pctTot},
+    // v1119: how long after the exit the day's high arrived. Positive = waiting would have paid.
+    {key:'highGapMin',label:'High after sell',align:'right',
+     fmt:(v,r)=>{
+       if(r.highAt==null) return `<span style="color:var(--t3)" title="${escHtml(r.highNote||'')}">—</span>`;
+       const gap=v==null?'':(v>0?`+${v}m`:v<0?`${v}m`:'0m');
+       // "≤" marks a stamp that is an upper bound: the high was already in when watching began.
+       const pre=r.highAtIsBound?'≤':'';
+       return `<span title="${escHtml(r.highNote||'')}">${pre}${r.highAt}`
+         +(gap?`<span style="font-size:12px;color:var(--t3);margin-left:4px">${r.highAtIsBound?'≤':''}${gap}</span>`:'')+`</span>`;
+     },
+     // Red when the high came AFTER the exit (money was still on the table), green when it came
+     // before (the exit was not early). Same inverted polarity as the Left on Table columns.
+     clrFn:v=>v==null?'var(--t3)':v>0?'var(--red)':'var(--green)'},
   ];
   const card=inner=>`<div id="rank-latest-session-card" style="background:var(--bg-card);border:1px solid var(--border);border-radius:10px;overflow:hidden">${inner}</div>`;
   const summary=getLatestBookedSummary();
@@ -6902,6 +7014,7 @@ function invalidateTargetAnchorCaches(){
   _defMaxAllocMemo=null;
   _defRiskMemo=null;
   _allocMemo=null;
+  _reachMemo=null;         // v1119: the reachable level is read from the exit store, which a load refreshes
 }
 function _computeHarvestPlanUncached(){
   const samples=getHarvestOutcomeSamples();
@@ -7179,10 +7292,17 @@ function getRowExitPolicy(row,buyPrice=null,activeInfo=null,nudgeInfo=null){
   // question; how far a stock can travel is a property of the stock. Owner, 2026-08-07: "tying to
   // ATR instead of score is a good start." The left-on-table pool is still measured and still shown,
   // it simply no longer sets the price. A MANUAL anchor still wins outright (v1077 precedent).
-  if(targetPct>0&&active.source!=='manual'&&capacity>0){
-    targetPct=toStep(Math.max(basePct,capacity));
+  // v1119: the aspiration above the goal rate is now the MEASURED reachable level from the owner's
+  // own exits, not the stock's ATR capacity. Capacity remains the FALLBACK for when too few exits
+  // have been recorded to trust a distribution (and is still reported on every row).
+  const reach=getReachableTargets();
+  const aspire=reach.basePct>0?reach.basePct:capacity;
+  if(targetPct>0&&active.source!=='manual'&&aspire>0){
+    targetPct=toStep(Math.max(basePct,aspire));
     nudgePct=+(targetPct-basePct).toFixed(2);
-    if(nudgePct>0) targetSource+=' + stock capacity (ATR)';
+    if(nudgePct>0) targetSource+=reach.basePct>0
+      ? ' + reachable level ('+reach.samples+' exits)'
+      : ' + stock capacity (ATR fallback)';
   }
   const stopPct=getRowStopDistancePct(row);
   // v1093 (owner): "R:R is not to be learnt from past and applied to future if it's bad. If it's
@@ -9152,8 +9272,13 @@ function splitQty(qty){
 function getRunnerTargetPct(policy){
   const base=Number(policy&&policy.targetPct);
   if(!(base>0)) return null;
+  // v1119: the runner is the UPPER QUARTILE of the measured available move — the level a quarter of
+  // the owner's positions actually reached — rather than 1.5x the stock's ATR capacity. This is the
+  // leg meant to catch the same-day shoot-up, so it should be set by how far those days actually
+  // went. Falls back to the ATR multiple only when too few exits have been recorded.
+  const reach=getReachableTargets();
   const cap=Number(policy&&policy.capacityPct);
-  const want=cap>0?cap*1.5:base;
+  const want=reach.runnerPct>0?reach.runnerPct:(cap>0?cap*1.5:base);
   return Math.max(base,Math.floor(want*20)/20);
 }
 async function saveBasketToScannerUploads(orders, filename){
