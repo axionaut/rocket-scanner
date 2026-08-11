@@ -1,5 +1,5 @@
-const BUILD_TS='2026-08-11 13:54 IST'; // release build time (IST)
-const APP_VERSION=1119; // v1119: the target is the MEASURED reachable move from your own exits, not ATR capacity - and Latest Session shows how long after each sell the day high arrived.
+const BUILD_TS='2026-08-11 14:20 IST'; // release build time (IST)
+const APP_VERSION=1120; // v1120: money left on the table is measured from the sell forward - a high that printed BEFORE the exit no longer counts.
 // v1093: a baseline reward:risk MEASURED on the cross-section (last completed bhav session) instead of learned from the owner's own fills - reported on every row, deliberately not enforced. Includes v1092: position size split by Radar score / stop distance, so equally-scored names carry equal RUPEE risk, plus an opt-in Risk /trade cap.
 // v556: parse the NSE Market Activity Report (MA<date>.csv) — official Nifty %, advances/declines and sector index moves shown as market CONTEXT in the status bar (EOD data, display only, never fed into per-row scoring); MA added to the ℹ️ file manifest.
 // v555 market-cycle stage awareness (stateless, self-calibrating): per-row stage label (1 accumulation · 2 breakout · 3 event · 4 profit-booking · 5 re-accumulation · 6 second-leg); a quiet-accumulation signal (conjunction-of-percentiles) injected via the rocket-diagnostic weighting; sell-the-news decay off Recent earnings date (horizon = review days). v1065 makes the market-breadth gauge an entry-eligibility input while still never changing ranking.
@@ -1505,7 +1505,7 @@ function buildDriftIntoEventMap(beforeDate,sessions=PRE_RESULTS_DRIFT_SESSIONS){
 // the day's high may have printed before the fill. Note this is exact rather than approximate for a
 // LIMIT sell (the basket's own exits): price can only reach the limit once, so anything above it
 // occurred at or after the fill. `resolution` says which case a row is in; nothing is blurred.
-function getPostSellExtremes(sym,sellDate){
+function getPostSellExtremes(sym,sellDate,sellTime=null){
   const s=normSym(sym);
   const out={high:null,low:null,sessions:0,includesSellDay:false,exact:true,from:null,to:null};
   if(!s||!sellDate) return out;
@@ -1528,12 +1528,40 @@ function getPostSellExtremes(sym,sellDate){
   if(row&&scanDate&&scanDate>=sellDate){
     const hi=Number(row.high1d), lo=Number(row.low1d), px=Number(row.price);
     const useHi=hi>0?hi:(px>0?px:null), useLo=lo>0?lo:(px>0?px:null);
-    if(useHi>0) out.high=out.high==null?useHi:Math.max(out.high,useHi);
-    if(useLo>0) out.low =out.low ==null?useLo:Math.min(out.low ,useLo);
+    // v1120: on a LATER session the whole bar is attributable and folds in as before. On the SELL
+    // DAY it must NOT — the fold now happens inside the branch below, and only for the part of the
+    // day that came after the exit. Folding first and correcting after is what left GNA at ₹592.
+    if(scanDate>sellDate){
+      if(useHi>0) out.high=out.high==null?useHi:Math.max(out.high,useHi);
+      if(useLo>0) out.low =out.low ==null?useLo:Math.min(out.low ,useLo);
+    }
     if(scanDate===sellDate){
-      // The sell-day bar contains action from BEFORE the exit — same attribution problem v1085 and
-      // v1096 solve for picks and fills. Owner's call (2026-08-05): use it, labelled as an upper bound.
-      out.includesSellDay=true; out.exact=false;
+      // ── v1120: the sell day is now SPLIT at the exit instead of folded in whole ────────────────
+      // v1099 took the entire sell-day bar and labelled it an upper bound. That reported money left
+      // on the table for highs that printed BEFORE the exit — GNA at Rs 592 with its high 48 minutes
+      // earlier. The high-water path (v1120) resolves it: only a NEW high after the sell counts.
+      const w=getPostSellHighFromWatch(s,sellDate,sellTime);
+      if(w){
+        if(w.advanced&&w.postSellHigh>0){
+          out.high=out.high==null?w.postSellHigh:Math.max(out.high,w.postSellHigh);
+          out.includesSellDay=true;
+          out.exact=!w.straddles;                 // clean unless the advance interval straddles the sell
+          out.sellDayNote=w.straddles
+            ? `new high after the exit, but the observation interval straddles your sell`
+            : `new high at ${w.advancedAt} IST, after your ${String(sellTime).match(/\d{1,2}:\d{2}/)?.[0]||'exit'}`;
+        } else {
+          // No new high after the exit. The sell day contributes NOTHING — it cannot be claimed.
+          out.includesSellDay=false; out.exact=true;
+          out.sellDayNote=`no new high after your exit${w.preSellHigh?` — the day's high (${w.preSellHigh}) was already in`:''}`;
+        }
+      } else {
+        // Not watched (recorder began 2026-08-11, scope is the book plus the top of the ranking).
+        // Fall back to the v1099 behaviour — fold the whole bar in — and keep saying it is an upper bound.
+        if(useHi>0) out.high=out.high==null?useHi:Math.max(out.high,useHi);
+        if(useLo>0) out.low =out.low ==null?useLo:Math.min(out.low ,useLo);
+        out.includesSellDay=true; out.exact=false;
+        out.sellDayNote='sell day not watched — the whole-day high is an upper bound';
+      }
     } else { out.sessions++; out.to=scanDate; if(!out.from) out.from=scanDate; }
   }
   return out;
@@ -3812,6 +3840,7 @@ function getIndicatorWatchStore(){
 //     the rule that actually trades this. Recorded only; nothing scores it yet.
 const SESSION_WATCH_STORE='rs_session_watch_v1';
 const SESSION_WATCH_KEEP=30;              // sessions of high-time history to retain
+const SESSION_WATCH_PATH_MAX=60;          // high-water points kept per symbol per session
 function getSessionWatchStore(){
   const s=FS.get(SESSION_WATCH_STORE);
   return (s&&typeof s==='object')?{version:1,highs:s.highs||{},opm:s.opm||{}}:{version:1,highs:{},opm:{}};
@@ -3834,9 +3863,23 @@ function recordSessionWatch(sessionDate,receivedAt,objRows){
     const best=hi>0?hi:(px>0?px:null);
     if(!(best>0)) return;
     const cur=day[r.symbol];
-    if(!cur){ day[r.symbol]={h:+best.toFixed(2),at:hhmm,first:hhmm,n:1}; return; }
+    // v1120: keep the HIGH-WATER PATH, not just the final high. Without it the sell day cannot be
+    // split into before and after the exit — which is the whole question ("how much higher did it go
+    // AFTER I sold"). Each entry is [HH:MM, running max at that moment], appended only when the high
+    // advances, so it stays short: a handful of points per symbol per session.
+    if(!cur){ day[r.symbol]={h:+best.toFixed(2),at:hhmm,first:hhmm,n:1,path:[[hhmm,+best.toFixed(2)]]}; return; }
+    // An entry written before v1120 has no path. Seed it from what IS known — the high and the time
+    // it last advanced — rather than leaving it permanently unsplittable. One honest point, not a
+    // fabricated series: it says "the running max was this, at that time", which is exactly the
+    // information the old shape carried.
+    if(!Array.isArray(cur.path)||!cur.path.length) cur.path=[[cur.at||cur.first||hhmm,+Number(cur.h).toFixed(2)]];
     cur.n=(cur.n||0)+1;
-    if(best>cur.h+1e-9){ cur.h=+best.toFixed(2); cur.at=hhmm; }   // stamp ONLY on a new high
+    if(best>cur.h+1e-9){
+      cur.h=+best.toFixed(2); cur.at=hhmm;                        // stamp ONLY on a new high
+      if(!Array.isArray(cur.path)) cur.path=[];
+      cur.path.push([hhmm,cur.h]);
+      if(cur.path.length>SESSION_WATCH_PATH_MAX) cur.path.splice(1,cur.path.length-SESSION_WATCH_PATH_MAX);
+    }
   });
   // TTM operating margin, recorded per symbol with the date it last moved.
   const rows=Array.isArray(objRows)?objRows:[];
@@ -3859,6 +3902,61 @@ function recordSessionWatch(sessionDate,receivedAt,objRows){
 }
 // What the recorder can answer once it has data: for a symbol and session, the time of the high and
 // how coarse the observation was. Returns null rather than guessing when the session was not watched.
+// ── v1120: HOW MUCH HIGHER DID IT GO **AFTER** THE SELL? ─────────────────────────────────────────
+// Owner: "I don't want day high, I want how higher it went AFTER I sold." Correct, and everything
+// before this release answered the wrong question — v1099 folded the WHOLE sell-day bar in and
+// labelled it an upper bound, which is how GNA reported Rs 592 left on the table when its high was
+// already in 48 minutes BEFORE the exit.
+//
+// `high1d` is a running maximum, so a single reading cannot be split around the sell. The HIGH-WATER
+// PATH can: take the running max at the last observation AT OR BEFORE the sell, and compare it with
+// the final one. If the high never advanced after the sell, the stock did not make a new high while
+// you were out and there is NO money attributable to waiting.
+//
+// WHAT THIS CANNOT SEE, stated rather than glossed: we observe the running MAX, never the path
+// between observations. If the day's high printed at 09:31 and you sold at 10:19, the stock could
+// have rallied to just under that high at 11:00 and nothing would record it. So a "no advance"
+// answer means "it set no NEW high after you sold", not "it never rose". The measure is exact for
+// the case that matters — a new high after the exit — and silent otherwise, which is the honest way
+// round: it can no longer INVENT money left on the table, only miss some.
+//
+// Resolution is the export cadence. An advance seen at 10:30 against a sell at 10:19 happened
+// somewhere in (last observation, 10:30]; when that interval straddles the sell it is reported as
+// straddling rather than counted as clean.
+// The split itself, as a PURE function of the path and the sell clock — no store, so it can be
+// asserted as arithmetic rather than through whatever the live data happens to contain.
+function splitPathAtSell(path,sellTime,finalHigh){
+  const sellMin=clockMinutes(sellTime);
+  if(sellMin==null||!Array.isArray(path)||!path.length) return null;
+  let preHigh=null,preAt=null,advAt=null;
+  for(const [t,h] of path){
+    const m=clockMinutes(t);
+    if(m==null) continue;
+    if(m<=sellMin){ preHigh=h; preAt=t; }
+    else if(advAt==null) advAt=t;
+  }
+  const fin=Number(finalHigh!=null?finalHigh:path[path.length-1][1]);
+  // "Advanced" means a NEW high was set after the exit. With no pre-sell observation at all we only
+  // know the first point came later, so it is flagged as straddling rather than claimed as clean.
+  const advanced=preHigh==null?fin>0:(fin>preHigh+1e-9);
+  return {advanced,preSellHigh:preHigh,postSellHigh:advanced?fin:null,
+          advancedAt:advanced?advAt:null,straddles:advanced&&preAt==null};
+}
+function getPostSellHighFromWatch(sym,sessionDate,sellTime){
+  const day=getSessionWatchStore().highs[sessionDate||getSessionDate()];
+  const e=day&&day[normSym(sym)];
+  if(!e) return null;
+  // Entries written before v1120 carry no path, and a symbol already sold out of is no longer in the
+  // recorder's scope so it will never be revisited to gain one. Synthesise the single point we DO
+  // know — the running max and the time it last advanced — on READ. Same information the old shape
+  // carried, no write, and it makes every historical entry splittable immediately.
+  const path=(Array.isArray(e.path)&&e.path.length)?e.path:[[e.at||e.first,+Number(e.h).toFixed(2)]];
+  if(!path[0]||!path[0][0]) return null;
+  const r=splitPathAtSell(path,sellTime,e.h);
+  if(!r) return null;
+  return {...r,advancedAt:r.advancedAt||(r.advanced?e.at:null),
+          observations:e.n||0,points:path.length};
+}
 function getHighTimeInfo(sym,sessionDate){
   const d=getSessionWatchStore().highs[sessionDate||getSessionDate()];
   const e=d&&d[normSym(sym)];
@@ -4142,16 +4240,26 @@ function enrichExitPnlRow(row,bookedDate=null){
   // Since v1098 stores dated daily bars, sessions AFTER an older sell are exactly attributable and
   // there is no longer any reason to withhold them. What is withheld now is only genuine absence.
   out.leftOnTableRs=null; out.leftOnTablePct=null;
-  const ext=getPostSellExtremes(row?.sym,bookedDate);
+  // v1120: the sell time is passed so the sell day can be split at the exit instead of folded in whole.
+  const ext=getPostSellExtremes(row?.sym,bookedDate,row?.sellTime);
   out.postSellHigh=ext.high!=null?+ext.high.toFixed(2):null;
   out.postSellLow=ext.low!=null?+ext.low.toFixed(2):null;
   out.leftOnTableExact=ext.exact;
   out.leftOnTableSessions=ext.sessions;
+  out.sellDayNote=ext.sellDayNote||null;
   if(dayHigh!=null) out.dayHigh=+dayHigh.toFixed(2);
   if(!(qty>0)||!(sell>0)){
     out.leftOnTableNote='No sell price or quantity on this row.';
   }else if(!bookedDate){
     out.leftOnTableNote='No booking date on this row, so the post-sell window cannot be bounded.';
+  }else if(ext.high==null&&ext.low==null&&/no new high after your exit/.test(ext.sellDayNote||'')){
+    // v1120: the watch established that no NEW high came after the exit, so nothing is attributable —
+    // report ZERO left on the table rather than a figure derived from action that predates the sell.
+    // It is not "unknown": we know it set no new high. We simply cannot see whether it rose to just
+    // under the earlier high, because only the running MAX is observable.
+    out.leftOnTableRs=0; out.leftOnTablePct=0;
+    out.leftOnTableExact=true;
+    out.leftOnTableNote=`Sold at ₹${sell.toFixed(2)}. ${ext.sellDayNote}. Nothing is attributable to waiting — the app sees the running high only, so a rise that stopped short of the earlier high would be invisible.`;
   }else if(ext.high==null&&ext.low==null){
     out.leftOnTableNote=`No price data covering any session at or after ${bookedDate} — the symbol is absent from both the stored daily history and the current scanner file, so what happened after the exit is unknown.`;
   }else{
@@ -4162,9 +4270,11 @@ function enrichExitPnlRow(row,bookedDate=null){
     out.leftOnTablePct=+(((ref-sell)/sell)*100).toFixed(2);
     // Resolution is stated per row, never blurred. Later sessions are whole bars and fully
     // attributable; the sell day itself may contain pre-exit action.
+    // v1120: the sell day is now split at the exit by the high-water path, so it is only an upper
+    // bound when that session was NOT watched. When it was, the note says what the path established.
     const res=ext.exact
-      ? `Measured across ${ext.sessions} full session${ext.sessions===1?'':'s'} after the sell${ext.from?` (${ext.from} to ${ext.to})`:''} — fully attributable.`
-      : `UPPER BOUND: the window includes the sell day itself, and the app has no intraday series, so part of that day's range may predate the exit. For a LIMIT sell it is exact — price can only reach the limit once, so anything above it came at or after the fill.`;
+      ? `Measured across ${ext.sessions} full session${ext.sessions===1?'':'s'} after the sell${ext.from?` (${ext.from} to ${ext.to})`:''}${ext.sellDayNote?`, plus the sell day: ${ext.sellDayNote}`:''} — fully attributable.`
+      : `UPPER BOUND${ext.sellDayNote?` (${ext.sellDayNote})`:''}: part of that day's range may predate the exit. For a LIMIT sell it is exact — price can only reach the limit once, so anything above it came at or after the fill.`;
     const live=(typeof isMarketHours==='function'&&isMarketHours())?' The market is still open, so this is still moving.':'';
     const both=`Post-sell high ₹${hi!=null?hi.toFixed(2):'—'}, low ₹${lo!=null?lo.toFixed(2):'—'}.`;
     out.leftOnTableNote=out.leftOnTableRs>0
