@@ -1,5 +1,5 @@
-const BUILD_TS='2026-08-11 09:23 IST'; // release build time (IST)
-const APP_VERSION=1117; // v1117: R11 graduates - the 52-week high is resistance until it is cleared, a two-state term replacing a monotone ramp. Plus a session watch recording WHEN the day high printed and WHEN the TTM margin moved.
+const BUILD_TS='2026-08-11 11:40 IST'; // release build time (IST)
+const APP_VERSION=1118; // v1118: Open Positions shows BOTH target legs, the way the buy basket arms them, and defaults to sorting by rank.
 // v1093: a baseline reward:risk MEASURED on the cross-section (last completed bhav session) instead of learned from the owner's own fills - reported on every row, deliberately not enforced. Includes v1092: position size split by Radar score / stop distance, so equally-scored names carry equal RUPEE risk, plus an opt-in Risk /trade cap.
 // v556: parse the NSE Market Activity Report (MA<date>.csv) — official Nifty %, advances/declines and sector index moves shown as market CONTEXT in the status bar (EOD data, display only, never fed into per-row scoring); MA added to the ℹ️ file manifest.
 // v555 market-cycle stage awareness (stateless, self-calibrating): per-row stage label (1 accumulation · 2 breakout · 3 event · 4 profit-booking · 5 re-accumulation · 6 second-leg); a quiet-accumulation signal (conjunction-of-percentiles) injected via the rocket-diagnostic weighting; sell-the-news decay off Recent earnings date (horizon = review days). v1065 makes the market-breadth gauge an entry-eligibility input while still never changing ranking.
@@ -5203,6 +5203,15 @@ function makeSortableTable(id, cols, rows, defaultSortKey, defaultDir=-1, rowSty
   function render(){
     const sorted=[...rows].sort((a,b)=>{
       const av=a[sortKey],bv=b[sortKey];
+      // v1118: MISSING VALUES SORT LAST, in both directions. They used to coerce to 0 via `av||0`,
+      // which buried them in the middle of any range spanning negatives (P&L) and — the case that
+      // surfaced it — floated unranked rows to the TOP of an ascending Rank sort, so a held stock
+      // absent from today's upload outranked rank 1.
+      const an=av==null||av===''||(typeof av==='number'&&!isFinite(av));
+      const bn=bv==null||bv===''||(typeof bv==='number'&&!isFinite(bv));
+      if(an&&bn) return 0;
+      if(an) return 1;
+      if(bn) return -1;
       if(typeof av==='string') return sortDir*av.localeCompare(bv);
       return sortDir*((av||0)-(bv||0));
     });
@@ -5819,10 +5828,29 @@ function buildOpenPositionsPanel(query=''){
     const targetPct=exitPolicy.targetPct;
     const targetPrice=avg&&targetPct?tickPrice(avg*(1+targetPct/100)):null;
     const stopPrice=avg?tickPrice(avg*(1-stopPct/100)):null;
+    // ── v1118 (owner): the exit is TWO legs now, so show both ─────────────────────────────────────
+    // v1115 splits every buy into a base leg at the row's target and a runner leg further out, each
+    // carrying its own GTT. A single Target column therefore described an exit that is no longer the
+    // one being armed. Same split arithmetic as the export (`splitQty` + `getRunnerTargetPct`), so
+    // the two panels cannot disagree.
+    //
+    // WHAT THIS IS AND IS NOT: like the existing Target column, these are the CURRENT POLICY levels,
+    // not a read of what is actually resting in Zerodha. No input exposes live GTTs (the same gap
+    // behind the double-sell warning), and positions bought before v1115 have one leg, not two. The
+    // panel has always shown policy rather than armed state; this keeps that one meaning rather than
+    // mixing two.
+    const _split=splitQty(qty);
+    const _runnerPct=getRunnerTargetPct(exitPolicy);
+    const _hasRunner=_split.runner>0&&_runnerPct>targetPct;
+    const baseQty=_hasRunner?_split.base:qty;
+    const runnerQty=_hasRunner?_split.runner:0;
+    const runnerPct=_hasRunner?_runnerPct:null;
+    const runnerPrice=(_hasRunner&&avg)?tickPrice(avg*(1+_runnerPct/100)):null;
     // v1106 (owner): the day-1 time-exit ADVICE went with the Action column - the trading surface
     // carries no instructions. The evidence behind it is unchanged and lives in Methodology.
     rows.push({
       sym:pos.symbol,qty,avg,ltp,pnlPct,pnlRs,capital,daysHeld,targetPrice,stopPrice,targetPct,exitPolicy,
+      baseQty,runnerQty,runnerPrice,runnerPct,
       score:isFinite(Number(scannerRow?.score))?Number(scannerRow.score):null,
       rank:scannerRow?.rank??null,setup:scannerRow?.setup||'',
       dayPct:scannerRow?.day??scannerRow?.priceChange??null,risk:scannerRow?.risk||'',
@@ -5851,7 +5879,17 @@ function buildOpenPositionsPanel(query=''){
     {key:'capital',label:'Capital ₹',align:'right',fmt:v=>v!=null?fmtINR(v):'—',clrFn:()=>'var(--t2)'},
     {key:'daysHeld',label:'Days Held',align:'right',fmt:daysFmt,clrFn:()=>'var(--t1)'},
     // v1073: the day-1 time exit, shown next to Days Held so the two read together.
-    {key:'targetPrice',label:'Target ₹',align:'right',fmt:(v,row)=>v!=null?fmtINR(v)+`<span style="font-size:12px;color:var(--t3);margin-left:4px">+${Number(row.targetPct).toFixed(2)}%</span>`:'—',clrFn:()=>'var(--green)'},
+    {key:'targetPrice',label:'Target ₹',align:'right',
+      fmt:(v,row)=>v==null?'—':fmtINR(v)
+        +`<span style="font-size:12px;color:var(--t3);margin-left:4px">+${Number(row.targetPct).toFixed(2)}%</span>`
+        +(row.runnerQty>0?`<span style="font-size:12px;color:var(--t3);margin-left:4px">×${row.baseQty}</span>`:''),
+      clrFn:()=>'var(--green)'},
+    {key:'runnerPrice',label:'Runner ₹',align:'right',
+      fmt:(v,row)=>v==null?'<span style="color:var(--t3)" title="No runner leg: a single share cannot be split, or this stock has no capacity estimate to place a second target beyond the first.">—</span>'
+        :fmtINR(v)
+        +`<span style="font-size:12px;color:var(--t3);margin-left:4px">+${Number(row.runnerPct).toFixed(2)}%</span>`
+        +`<span style="font-size:12px;color:var(--t3);margin-left:4px">×${row.runnerQty}</span>`,
+      clrFn:v=>v==null?'var(--t3)':'var(--green)'},
     {key:'stopPrice',label:'SL ₹',align:'right',fmt:(v,row)=>v!=null?fmtINR(v)+`<span style="font-size:12px;color:var(--t3);margin-left:4px">-${Number(row.exitPolicy?.stopPct).toFixed(2)}%</span>`:'—',clrFn:()=>'var(--red)'},
     {key:'score',label:'Radar Score',align:'right',bold:true,fmt:v=>radarScoreCell(v),clrFn:()=>'var(--t1)'},
     {key:'rank',label:'Rank',align:'right',fmt:v=>v??'—',clrFn:()=>'var(--t2)'},
@@ -5864,7 +5902,11 @@ function buildOpenPositionsPanel(query=''){
   const totalPnl=rows.reduce((sum,row)=>sum+(row.pnlRs||0),0);
   const pnlColor=totalPnl>0?'var(--green)':totalPnl<0?'var(--red)':'var(--t3)';
   const shown=filterPanelRows(rows,query,row=>[row.sym,row.scannerRow?.name,row.scannerRow?.sector]);
-  const table=makeSortableTable('rank-open-positions',cols,shown,'score',-1,null,null,'sym');
+  // v1118 (owner): default sort is RANK ASCENDING, not score descending. Rank is the stock's own
+  // standing in today's cross-section and reads 1, 2, 3; score is the same ordering expressed as a
+  // number that has to be read backwards. Rows with no rank (not in today's upload) sort last —
+  // makeSortableTable puts null/undefined at the end on an ascending sort.
+  const table=makeSortableTable('rank-open-positions',cols,shown,'rank',1,null,null,'sym');
   const radarNote=ALL.length
     ?'Radar context is from the current ALL NSE upload. Click a symbol for its scoring breakdown.'
     :'Load ALL NSE.csv to add Radar score, rank, setup, day change, and risk.';
@@ -5874,7 +5916,7 @@ function buildOpenPositionsPanel(query=''){
         <span style="font-size:13px;font-weight:800;color:var(--t1);text-transform:uppercase;letter-spacing:.08em">Open Positions${panelFilterTag(rows,shown,query)}</span>
         <span style="font-size:14px;font-weight:700;color:${pnlColor}">${rows.length} live position${rows.length===1?'':'s'} · ${fmtINR(totalCapital)} deployed · ${fmtSignedINR(totalPnl)}</span>
       </div>
-      <div style="font-size:14px;color:var(--t2);line-height:1.5">Live merge of Holdings, Positions, and today's net buys. Held stocks stay excluded from new recommendations; Target and SL come from the row’s exit policy. ${radarNote}</div>
+      <div style="font-size:14px;color:var(--t2);line-height:1.5">Live merge of Holdings, Positions, and today's net buys. Held stocks stay excluded from new recommendations; Target, Runner and SL are the row’s CURRENT exit policy — the two target legs the buy basket arms — not a read of the GTTs resting in Zerodha. ${radarNote}</div>
     </div>
     ${shown.length?`<div class="scroll-x">${table.getHtml()}</div>`:panelNoMatchHtml(query,'open position')}
   </div>`;
