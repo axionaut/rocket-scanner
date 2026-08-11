@@ -1,5 +1,5 @@
-const BUILD_TS='2026-08-11 14:58 IST'; // release build time (IST)
-const APP_VERSION=1122; // v1122: the Latest Session table fits on screen (charge components collapse into Total Charges, breakdown on hover), and the Goal module is reachable on a phone again.
+const BUILD_TS='2026-08-11 15:17 IST'; // release build time (IST)
+const APP_VERSION=1123; // v1123: the High vs Exit card memo was keyed on session dates, so it froze at the mornings answer while the highs kept advancing. It now invalidates when a stamp moves.
 // v1093: a baseline reward:risk MEASURED on the cross-section (last completed bhav session) instead of learned from the owner's own fills - reported on every row, deliberately not enforced. Includes v1092: position size split by Radar score / stop distance, so equally-scored names carry equal RUPEE risk, plus an opt-in Risk /trade cap.
 // v556: parse the NSE Market Activity Report (MA<date>.csv) — official Nifty %, advances/declines and sector index moves shown as market CONTEXT in the status bar (EOD data, display only, never fed into per-row scoring); MA added to the ℹ️ file manifest.
 // v555 market-cycle stage awareness (stateless, self-calibrating): per-row stage label (1 accumulation · 2 breakout · 3 event · 4 profit-booking · 5 re-accumulation · 6 second-leg); a quiet-accumulation signal (conjunction-of-percentiles) injected via the rocket-diagnostic weighting; sell-the-news decay off Recent earnings date (horizon = review days). v1065 makes the market-breadth gauge an entry-eligibility input while still never changing ranking.
@@ -3974,7 +3974,13 @@ let _gapStatsMemo=null;
 function getHighGapStats(){
   const store=getSessionWatchStore();
   const trips=TRADEBOOK_STATS?.tripsData;
-  const sig=Object.keys(store.highs||{}).join(',')+'|'+(Array.isArray(trips)?trips.length:0);
+  // v1123: the signature must change when a HIGH ADVANCES, not only when a new session or trip
+  // appears. Keyed on dates alone it went stale the moment the market moved: the stamps kept
+  // advancing through the afternoon while the card kept serving the morning's answer, so the card
+  // and the Latest Session totals — the same measure, the same code path — disagreed on screen.
+  const sig=Object.entries(store.highs||{})
+    .map(([d,day])=>d+':'+Object.entries(day||{}).map(([s,e])=>s+e.at+e.h).join(''))
+    .join('|')+'|'+(Array.isArray(trips)?trips.length:0);
   if(_gapStatsMemo&&_gapStatsMemo.sig===sig) return _gapStatsMemo.val;
   const gaps=[];const sessions=new Set();
   (Array.isArray(trips)?trips:[]).forEach(t=>{
