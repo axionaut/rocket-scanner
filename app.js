@@ -1,5 +1,5 @@
-const BUILD_TS='2026-08-11 15:17 IST'; // release build time (IST)
-const APP_VERSION=1123; // v1123: the High vs Exit card memo was keyed on session dates, so it froze at the mornings answer while the highs kept advancing. It now invalidates when a stamp moves.
+const BUILD_TS='2026-08-11 15:34 IST'; // release build time (IST)
+const APP_VERSION=1124; // v1124: systematic audit - a stale target memo, the same memo doing full work per row, a dead store read on the hot path, and one field written by two retired-and-current definitions at once.
 // v1093: a baseline reward:risk MEASURED on the cross-section (last completed bhav session) instead of learned from the owner's own fills - reported on every row, deliberately not enforced. Includes v1092: position size split by Radar score / stop distance, so equally-scored names carry equal RUPEE risk, plus an opt-in Risk /trade cap.
 // v556: parse the NSE Market Activity Report (MA<date>.csv) — official Nifty %, advances/declines and sector index moves shown as market CONTEXT in the status bar (EOD data, display only, never fed into per-row scoring); MA added to the ℹ️ file manifest.
 // v555 market-cycle stage awareness (stateless, self-calibrating): per-row stage label (1 accumulation · 2 breakout · 3 event · 4 profit-booking · 5 re-accumulation · 6 second-leg); a quiet-accumulation signal (conjunction-of-percentiles) injected via the rocket-diagnostic weighting; sell-the-news decay off Recent earnings date (horizon = review days). v1065 makes the market-breadth gauge an entry-eligibility input while still never changing ranking.
@@ -2084,7 +2084,15 @@ function resolveRocketForPick(p,bar,gap,scanDate){
 }
 function getRocketArrivalStats(){
   const issues=Object.values((FS.get(RECOMMEND_OUTCOME_STORE)||{}).issues||{});
-  const days=issues.flatMap(issue=>(issue.picks||[]).map(p=>p.rocketDays)).filter(v=>v!=null&&isFinite(v)&&v>0);
+  // v1124: count ONLY picks resolved under the current definition. 302 picks issued between
+  // 2026-06-25 and 2026-07-31 carry a `rocketDate` written by the retired same-day >=10% bar while
+  // sitting at `pending` under the v1085 barrier label — both true in their own era, contradictory on
+  // one record. Averaging them together made the review horizon a blend of two definitions. Requiring
+  // the current outcome excludes the legacy rows without destroying them.
+  const days=issues.flatMap(issue=>(issue.picks||[])
+      .filter(p=>String(p.rocketOutcome)===String(ROCKET_OUTCOME.ROCKET))
+      .map(p=>p.rocketDays))
+    .filter(v=>v!=null&&isFinite(v)&&v>0);
   return {
     count:days.length,
     avg:days.length?+meanArr(days).toFixed(1):null,
@@ -2221,9 +2229,13 @@ function recordRecommendationOutcomeScan(scan){
       } else if(!p.conversionAssessed&&(p.conversionHighProfitPct!=null||p.conversionCloseProfitPct!=null||p.conversionWorstLowProfitPct!=null)){
         p.conversionAssessed=true;
       }
-      if(!p.rocketDate&&(row.rocketMove??row.priceChange)!=null&&(row.rocketMove??row.priceChange)>=issue.threshold){
-        p.rocketDate=scan.date;p.rocketDays=gap;
-      }
+      // v1124: the LEGACY writer is removed. `rocketDate`/`rocketDays` had TWO writers with two
+      // different definitions — resolveRocketForPick (the v1085 barrier label: target before stop
+      // within the horizon) and this one, the retired "same-day move >= threshold" bar. One field
+      // meaning two things is how getRocketArrivalStats came to average them together, and that stat
+      // drives getEffectiveReviewDays and therefore the Review After pill on the board. v1085
+      // believed the arrival stats "follow automatically"; they did not, because this writer survived.
+      // The field now has exactly one author.
       p.outcomeScore=calcRecommendationOutcomeScore(p,issue.threshold);
       p.complete=gap>=horizon;
     });
@@ -4432,14 +4444,28 @@ let _leftPoolMemo=null;
 const REACHABLE_MIN_SAMPLES=40;         // below this the distribution is not worth trusting
 let _reachMemo=null;
 function getReachableTargets(){
+  // v1124 — TWO defects fixed here, both found by audit and both real.
+  //
+  // (1) STALENESS. The signature was `rows.length + first + last`, and `recordSameDayExitOpportunity`
+  //     keeps dayHigh as a RUNNING MAX, so an existing cohort's high advancing during the session
+  //     moves a MIDDLE value and leaves all three signature terms unchanged. The p50 that sets every
+  //     target could then be frozen at the morning's value for the rest of the day — the same class
+  //     of bug as the v1123 card, but this one moves money. The store stamps `lastUpdated` on every
+  //     write, so that plus the entry count is both cheap and genuinely sensitive.
+  //
+  // (2) COST ON THE HOT PATH. The full read/map/sort ran BEFORE the memo check, so the memo saved
+  //     only the percentile step. Measured 0.13ms per call against 227 entries — and this is called
+  //     once per row by getRowExitPolicy, i.e. ~400ms of pure overhead across the universe. The
+  //     signature is now computed from metadata and the scan only runs on a genuine miss.
   const store=FS.get(SAME_DAY_EXIT_OPPORTUNITY_STORE);
-  const rows=Object.values(store?.entries||{})
+  const entries=store?.entries||{};
+  const sig=(store?.lastUpdated||'')+'|'+Object.keys(entries).length;
+  if(_reachMemo&&_reachMemo.sig===sig) return _reachMemo.val;
+  const rows=Object.values(entries)
     .filter(e=>Number(e.avgBuy)>0&&Number(e.dayHigh)>0)
     .map(e=>(Number(e.dayHigh)/Number(e.avgBuy)-1)*100)
     .filter(v=>Number.isFinite(v))
     .sort((a,b)=>a-b);
-  const sig=rows.length+':'+(rows[0]??'')+':'+(rows.at(-1)??'');
-  if(_reachMemo&&_reachMemo.sig===sig) return _reachMemo.val;
   let val;
   if(rows.length<REACHABLE_MIN_SAMPLES){
     val={basePct:null,runnerPct:null,samples:rows.length,
@@ -7593,7 +7619,10 @@ function getRowExitPolicy(row,buyPrice=null,activeInfo=null,nudgeInfo=null){
     // v1097, all REPORTED so the nudge is auditable on every row:
     basePct:basePct>0?+basePct.toFixed(2):null,   // the goal rate alone — what eligibility is judged on
     nudgePct:+Number(nudgePct||0).toFixed(2),      // what the left-on-table pool added
-    nudgePoolPct:(()=>{try{return getLeftOnTablePool().poolPct;}catch(e){return null;}})(),
+    // v1124: `nudgePoolPct` removed. It had exactly one reference — its own assignment — and it called
+    // getLeftOnTablePool(), a STORE READ, once per row on a function the universe scan calls for every
+    // row. A field nothing consumes has no business on the hot path. The pool is still measured and
+    // still shown in Latest Session; it simply is not re-read per stock to be discarded.
     stopPct:+stopPct.toFixed(2),
     rewardRisk,
     reachable,
