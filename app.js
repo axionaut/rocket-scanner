@@ -1,5 +1,5 @@
-const BUILD_TS='2026-08-10 19:27 IST'; // release build time (IST)
-const APP_VERSION=1116; // v1116: the trailing stop is removed - at a stop 1.5x ATR below cost a Zerodha rupee-step trail can never reach breakeven before the target fills, so it was never executable.
+const BUILD_TS='2026-08-11 09:23 IST'; // release build time (IST)
+const APP_VERSION=1117; // v1117: R11 graduates - the 52-week high is resistance until it is cleared, a two-state term replacing a monotone ramp. Plus a session watch recording WHEN the day high printed and WHEN the TTM margin moved.
 // v1093: a baseline reward:risk MEASURED on the cross-section (last completed bhav session) instead of learned from the owner's own fills - reported on every row, deliberately not enforced. Includes v1092: position size split by Radar score / stop distance, so equally-scored names carry equal RUPEE risk, plus an opt-in Risk /trade cap.
 // v556: parse the NSE Market Activity Report (MA<date>.csv) — official Nifty %, advances/declines and sector index moves shown as market CONTEXT in the status bar (EOD data, display only, never fed into per-row scoring); MA added to the ℹ️ file manifest.
 // v555 market-cycle stage awareness (stateless, self-calibrating): per-row stage label (1 accumulation · 2 breakout · 3 event · 4 profit-booking · 5 re-accumulation · 6 second-leg); a quiet-accumulation signal (conjunction-of-percentiles) injected via the rocket-diagnostic weighting; sell-the-news decay off Recent earnings date (horizon = review days). v1065 makes the market-breadth gauge an entry-eligibility input while still never changing ranking.
@@ -2988,6 +2988,10 @@ function buildRadarSupplements(){
   Object.entries(NSE_SERIES).forEach(([sym,ser])=>{const m=get(sym);if(ser)m.series=ser;});
   Object.entries(NSE_STATUS).forEach(([sym,st])=>{get(sym).status=st;});
   Object.entries(NSE_52W).forEach(([sym,w])=>{const m=get(sym);m.high52=w.high52w;m.low52=w.low52w;});
+  // v1117 (R11): the hl file's NEW 52-week high/low list. v1076 parsed it specifically to supply
+  // "the cleared-the-high half of R11 that had n=2" and then nothing ever read it — the same
+  // dead-output pattern the TSL gap model had. R11 graduated on 2026-08-10 and this is its input.
+  Object.entries(getNewHighLowMap()).forEach(([sym,v])=>{const m=get(sym);m.newHL=v?.status||null;});
   // Signed net deal quantity (BUY − SELL) across bulk + block files, matching the Radar:
   // net buying earns +1.5, net selling −1.5 in the penalty layer.
   Object.entries(NSE_DEAL_NET).forEach(([sym,net])=>{get(sym).bulkNet=Number(net)||0;});
@@ -3482,7 +3486,31 @@ function radarAnalyze(headers,rawRows,supplements={},heldSymbols=new Set()){
     if(meta.flags?.length)rawScore-=Math.min(12,meta.flags.length*2);
     if(meta.delivery!==null&&meta.delivery!==undefined)rawScore+=clamp01(1-Math.abs(meta.delivery-55)/55,0,1)*3-1;
     if(meta.officialClose&&meta.officialAvg)rawScore+=meta.officialClose>=meta.officialAvg?1:-1;
-    if(meta.high52&&meta.low52&&meta.high52>meta.low52)rawScore+=(clamp01((price-meta.low52)/(meta.high52-meta.low52))-.5)*4;
+    // ── v1117 R11: THE 52-WEEK HIGH IS RESISTANCE UNTIL IT IS CLEARED ────────────────────────────
+    // Graduated 2026-08-10 at 3 confirms across 2 sessions, 0 contradictions (RULES.md Appendix C):
+    //   E33  RATNAVEER bought at 98.8% of its 52w high -> -14.3%; and the cross-section that session
+    //        put the 98-100% bucket at mean -0.28% with 0 of 35 up >= 2%.
+    //   E49  UNIVCABLES CLEARED to an all-time high -> +20.00%.
+    //   E52  COMSYN CLEARED to a fresh 52-week high -> +19.66%.
+    // The two halves point OPPOSITE ways, which is why this cannot be expressed by nudging the old
+    // term: it was a single monotone high-good ramp, so it paid MOST at exactly the price where the
+    // approach half is worst. R11 is a TWO-STATE rule and the term is now two-state.
+    //
+    // "At the high" is measured in the stock's OWN typical daily range (`rangePct`, the unit already
+    // on the row since v1060) rather than as a typed percentage band — a stock one normal day's move
+    // below its 52-week high is AT it; one ten days below is not. No new constant, and the test
+    // scales with volatility instead of imposing one width on the whole market.
+    //
+    // The magnitude budget is UNCHANGED: the term still lands in [-2, +2]. Approaching-but-not-
+    // cleared simply takes the negative end of the range it used to take the positive end of.
+    if(meta.high52&&meta.low52&&meta.high52>meta.low52){
+      const pos52=clamp01((price-meta.low52)/(meta.high52-meta.low52));
+      const bonus52=(pos52-.5)*4;
+      const cleared52=price>meta.high52||meta.newHL==='H';
+      const nearUncleared=!cleared52&&rangePct>0&&(meta.high52-price)<=price*rangePct/100;
+      rawScore+=nearUncleared?-Math.abs(bonus52):bonus52;
+      if(nearUncleared)gateReasons.push('at the 52-week high but not cleared');
+    }
     // WS5/R8 (v552): weight the signed bulk/block deal-net by liquidity — churn in an illiquid
     // micro-cap (AASTHA) is not the institutional conviction the flat ±1.5 assumes. The ₹25L line
     // is the model's existing tradeability threshold (rocketReady/risk/Indicator Watch), not a new knob.
@@ -3756,6 +3784,93 @@ function getIndicatorWatchStore(){
 }
 // Record the current session and resolve any anchors that have matured. Fire-and-forget
 // from the upload path so it never delays rankings.
+// ── v1117 SESSION WATCH: WHEN did the day's high print, and WHEN did the TTM margin move ─────────
+// Two questions the app could not answer, both blocked on the same absence: no input carries an
+// INTRADAY series. We hold daily OHLC and one live snapshot, so we have always known the day's high
+// and never known what time it printed (recorded as a known limitation in v1095 and again in v1099).
+//
+// (1) TIME OF HIGH. The owner's question: how long after a sell — or after price crosses target —
+//     does the high arrive? The sell side is already answerable, because orders.csv carries fill
+//     times to the second ("2026-08-10 14:16:51", established in v1096). Only the high side was
+//     missing. Every re-ingest of the scanner file is an observation of `high1d`, so stamping the
+//     receipt time whenever that value ADVANCES reconstructs the time of the high directly.
+//     RESOLUTION IS THE EXPORT CADENCE, NOT THE POLL. The folder watch checks every 3 seconds but
+//     the file only changes when TradingView re-exports, so the answer is +/- one export interval,
+//     and `n` (observation count) is stored so any later read can see how coarse it was.
+//     IT CANNOT BE BACKFILLED. This is a live recorder: it answers from the day it ships forward and
+//     says nothing about the 217 historical exit cohorts.
+//
+// (2) TTM OPERATING MARGIN, and WHEN IT LAST CHANGED. R3 (27 confirms, the best-evidenced rule we
+//     have) needs the QUARTER's operating-margin direction against the year-ago quarter, and the
+//     owner confirmed TradingView exports no quarterly margin field. The growth-difference proxy
+//     was measured and REJECTED (see RULES.md 2026-08-11). What does work is arithmetic: a trailing
+//     twelve-month window drops the year-ago quarter as it adds the new one, so
+//         sign(TTM_after - TTM_before) === sign(Q_new margin - Q_year-ago margin)
+//     exactly. Storing the TTM margin and the date it last MOVED therefore recovers R3's signal
+//     without a new column. It arrives 1-3 days late, because the vendor refreshes fundamentals
+//     after the filing — too late for the print-day move, but in time for R4d's D+1 window, which is
+//     the rule that actually trades this. Recorded only; nothing scores it yet.
+const SESSION_WATCH_STORE='rs_session_watch_v1';
+const SESSION_WATCH_KEEP=30;              // sessions of high-time history to retain
+function getSessionWatchStore(){
+  const s=FS.get(SESSION_WATCH_STORE);
+  return (s&&typeof s==='object')?{version:1,highs:s.highs||{},opm:s.opm||{}}:{version:1,highs:{},opm:{}};
+}
+function recordSessionWatch(sessionDate,receivedAt,objRows){
+  if(!sessionDate||!Array.isArray(ALL)||!ALL.length) return null;
+  const store=getSessionWatchStore();
+  const hhmm=new Date(receivedAt||Date.now()).toLocaleTimeString('en-GB',
+    {timeZone:'Asia/Kolkata',hour:'2-digit',minute:'2-digit'});
+  // SCOPE: the book plus the top of the ranking. The question is about positions we hold and picks
+  // we made, so recording the whole 2,900-row universe every refresh would be storage for nothing.
+  const held=getHeldPositionMap()||{};
+  const watch=new Set(Object.keys(held));
+  ALL.slice(0,(typeof RECOMMEND_MAX_RANK==='number'?RECOMMEND_MAX_RANK:10)*2)
+     .forEach(r=>{if(r&&r.symbol)watch.add(r.symbol);});
+  const day=store.highs[sessionDate]||(store.highs[sessionDate]={});
+  ALL.forEach(r=>{
+    if(!r||!watch.has(r.symbol)) return;
+    const hi=Number(r.high1d), px=Number(r.price);
+    const best=hi>0?hi:(px>0?px:null);
+    if(!(best>0)) return;
+    const cur=day[r.symbol];
+    if(!cur){ day[r.symbol]={h:+best.toFixed(2),at:hhmm,first:hhmm,n:1}; return; }
+    cur.n=(cur.n||0)+1;
+    if(best>cur.h+1e-9){ cur.h=+best.toFixed(2); cur.at=hhmm; }   // stamp ONLY on a new high
+  });
+  // TTM operating margin, recorded per symbol with the date it last moved.
+  const rows=Array.isArray(objRows)?objRows:[];
+  const COL='Operating margin %, Trailing 12 months';
+  rows.forEach(r=>{
+    const sym=normSym(r&&r['Symbol']); if(!sym) return;
+    const v=Number(String(r[COL]??'').replace(/,/g,''));
+    if(!Number.isFinite(v)) return;
+    const prev=store.opm[sym];
+    if(!prev){ store.opm[sym]={v:+v.toFixed(2),on:sessionDate}; return; }
+    if(Math.abs(prev.v-v)>0.005){
+      store.opm[sym]={v:+v.toFixed(2),on:sessionDate,prev:prev.v,prevOn:prev.on};
+    }
+  });
+  // Bounded: keep the most recent sessions of high-time history, drop the rest.
+  const dates=Object.keys(store.highs).sort();
+  while(dates.length>SESSION_WATCH_KEEP){ delete store.highs[dates.shift()]; }
+  FS.set(SESSION_WATCH_STORE,store);
+  return store;
+}
+// What the recorder can answer once it has data: for a symbol and session, the time of the high and
+// how coarse the observation was. Returns null rather than guessing when the session was not watched.
+function getHighTimeInfo(sym,sessionDate){
+  const d=getSessionWatchStore().highs[sessionDate||getSessionDate()];
+  const e=d&&d[normSym(sym)];
+  return e?{high:e.h,at:e.at,firstSeen:e.first,observations:e.n||0}:null;
+}
+// R3's signal: the sign of the TTM operating-margin move across the stock's last filing.
+function getMarginDirection(sym){
+  const e=getSessionWatchStore().opm[normSym(sym)];
+  if(!e||e.prev==null) return null;                       // never seen it move: no signal, not "flat"
+  return {delta:+(e.v-e.prev).toFixed(2),from:e.prev,to:e.v,on:e.on,prevOn:e.prevOn,
+          direction:e.v>e.prev?'expanding':e.v<e.prev?'contracting':'flat'};
+}
 async function recordIndicatorWatch(sessionDate){
   try{
     if(!Array.isArray(ALL)||!ALL.length||!RADAR.features?.length) return;
@@ -9279,6 +9394,7 @@ function applySavedFiltersForMode(mode){
       recordDisplayedEntryCohort({date:uploadSession,candidates:eligibleCandidates});
       // Indicator-orientation watch: fire-and-forget so compression never delays rankings.
       recordIndicatorWatch(uploadSession).catch(e=>console.warn('indicator watch record failed',e));
+      try{recordSessionWatch(uploadSession,receivedAt,raw);}catch(e){console.warn('session watch failed',e);}
       syncExecutedRecommendedEntries();
     }
     FILT=[...ALL];_tvLoadedThisSession=true;
