@@ -1,5 +1,5 @@
-const BUILD_TS='2026-08-12 15:17 IST'; // release build time (IST)
-const APP_VERSION=1127; // v1127: recommendation bar raised to score 95 on the app's own resolved picks, the score's components are recorded, and the ranking gets a concordance scoreboard.
+const BUILD_TS='2026-08-12 15:36 IST'; // release build time (IST)
+const APP_VERSION=1128; // v1128: a stratified control sample keeps the score bands the app no longer buys under observation, so a band that recovers can still be seen.
 // v1093: a baseline reward:risk MEASURED on the cross-section (last completed bhav session) instead of learned from the owner's own fills - reported on every row, deliberately not enforced. Includes v1092: position size split by Radar score / stop distance, so equally-scored names carry equal RUPEE risk, plus an opt-in Risk /trade cap.
 // v556: parse the NSE Market Activity Report (MA<date>.csv) — official Nifty %, advances/declines and sector index moves shown as market CONTEXT in the status bar (EOD data, display only, never fed into per-row scoring); MA added to the ℹ️ file manifest.
 // v555 market-cycle stage awareness (stateless, self-calibrating): per-row stage label (1 accumulation · 2 breakout · 3 event · 4 profit-booking · 5 re-accumulation · 6 second-leg); a quiet-accumulation signal (conjunction-of-percentiles) injected via the rocket-diagnostic weighting; sell-the-news decay off Recent earnings date (horizon = review days). v1065 makes the market-breadth gauge an entry-eligibility input while still never changing ranking.
@@ -2308,6 +2308,7 @@ function recordRecommendationOutcomeScan(scan){
         rangeLocationAtIssue:p.entryTiming?.rangeLocation??null,
         rangeUsedAtIssue:p.entryTiming?.rangeUsed??null,
         radarRank:p.radarRank??null,
+        control:p.control?true:undefined,          // v1128: evidence-only row, never a recommendation
         // v1127: carried through the whitelist deliberately — v1085 added barrier fields to the
         // caller and NOT here, and every pick silently lost them for 9 releases. Same trap.
         compositePct:p.compositePct??null,
@@ -2343,7 +2344,9 @@ function recordRecommendationOutcomeScan(scan){
 }
 function getRecommendationOutcomeSummary(){
   const issues=Object.values((FS.get(RECOMMEND_OUTCOME_STORE)||{}).issues||{});
-  const observedPicks=issues.flatMap(i=>(i.picks||[]).filter(p=>p.observations>0));
+  // v1128: control rows never enter a RECOMMENDATION metric — the app must not report converting
+  // stocks it did not pick. They are graded all the same, and read by the band breakdown.
+  const observedPicks=issues.flatMap(i=>(i.picks||[]).filter(p=>p.observations>0&&!p.control));
   const observedRockets=observedPicks.filter(p=>p.rocketDate&&p.rocketDays!=null);
   const assessed=issues.flatMap(issue=>(issue.picks||[])
     .filter(p=>p.complete&&p.observations>0)
@@ -2414,8 +2417,10 @@ function buildSystemScorecard(){
   Object.keys(issues).sort().forEach(date=>{
     const issue=issues[date]||{};
     const picks=issue.picks||[];
-    const resolvable=picks.filter(p=>Number(p.targetPct)>0&&Number(p.stopPct)>0);
-    const legacy=picks.length-resolvable.length;
+    // v1128: control rows are graded but are NOT recommendations — excluded here so the scorecard
+    // reports what the app actually picked. They are used by the band breakdown below.
+    const resolvable=picks.filter(p=>Number(p.targetPct)>0&&Number(p.stopPct)>0&&!p.control);
+    const legacy=picks.filter(p=>!p.control).length-resolvable.length;
     const target=resolvable.filter(p=>isRocketOutcome(p));
     const stopped=resolvable.filter(p=>p.rocketOutcome===ROCKET_OUTCOME.STOPPED);
     const expired=resolvable.filter(p=>p.rocketOutcome===ROCKET_OUTCOME.EXPIRED);
@@ -2423,7 +2428,7 @@ function buildSystemScorecard(){
     const settled=target.length+stopped.length+expired.length+ambiguous.length;
     const pending=resolvable.length-settled;
     target.forEach(p=>{if(p.rocketDays!=null)daysToTarget.push(Number(p.rocketDays));});
-    tot.picks+=picks.length; tot.resolvable+=resolvable.length; tot.legacy+=legacy;
+    tot.picks+=picks.filter(p=>!p.control).length; tot.resolvable+=resolvable.length; tot.legacy+=legacy;
     tot.target+=target.length; tot.stopped+=stopped.length; tot.expired+=expired.length;
     tot.ambiguous+=ambiguous.length; tot.pending+=pending;
     if(!resolvable.length) return;                        // a wholly legacy cohort says nothing
@@ -2443,7 +2448,7 @@ function buildSystemScorecard(){
   let cBetter=0,cWorse=0,cPairs=0;
   Object.keys(issues).forEach(date=>{
     const day=(issues[date]||{}).picks||[];
-    const g=day.filter(p=>Number(p.targetPct)>0&&Number(p.stopPct)>0
+    const g=day.filter(p=>Number(p.targetPct)>0&&Number(p.stopPct)>0&&!p.control
       &&Number.isFinite(+p.radarRank)
       &&['rocket','stopped','expired','ambiguous'].includes(String(p.rocketOutcome)));
     for(let i=0;i<g.length;i++) for(let j=i+1;j<g.length;j++){
@@ -2455,6 +2460,25 @@ function buildSystemScorecard(){
       if(+winner.radarRank<+loser.radarRank) cBetter++; else if(+winner.radarRank>+loser.radarRank) cWorse++;
     }
   });
+  // ── v1128 SCORE-BAND BREAKDOWN — picks AND control rows together ───────────────────────────
+  // This is the table that answers "is the 80-95 band still bad, or did it recover?" It pools
+  // recommendations with the stratified control sample, because the question is about the SCORE,
+  // not about what was bought — and the bar means the band below it is now control-only.
+  const bandDefs=[[95,101,'95–100'],[80,95,'80–95'],[65,80,'65–80'],[0,65,'under 65']];
+  const bands=bandDefs.map(([lo,hi,label])=>({label,lo,hi,n:0,target:0,settled:0,control:0}));
+  Object.keys(issues).forEach(date=>{
+    ((issues[date]||{}).picks||[]).forEach(p=>{
+      if(!(Number(p.targetPct)>0&&Number(p.stopPct)>0))return;
+      const sc=Number(p.score); if(!Number.isFinite(sc))return;
+      const b=bands.find(x=>sc>=x.lo&&sc<x.hi); if(!b)return;
+      b.n++; if(p.control)b.control++;
+      const st=String(p.rocketOutcome);
+      if(['rocket','stopped','expired','ambiguous'].includes(st)){
+        b.settled++; if(isRocketOutcome(p))b.target++;
+      }
+    });
+  });
+  bands.forEach(b=>{b.hitPct=b.settled?+(b.target/b.settled*100).toFixed(0):null;});
   const settled=tot.target+tot.stopped+tot.expired+tot.ambiguous;
   daysToTarget.sort((a,b)=>a-b);
   return {rows:rows.reverse(),                            // newest cohort first
@@ -2464,6 +2488,7 @@ function buildSystemScorecard(){
     expiredPct:settled?+(tot.expired/settled*100).toFixed(1):null,
     medDaysToTarget:daysToTarget.length?median(daysToTarget):null,
     concordancePct:cPairs?+(cBetter/cPairs*100).toFixed(1):null, concordancePairs:cPairs,
+    bands,
     sameDay:daysToTarget.filter(v=>v===0).length,
     nextDay:daysToTarget.filter(v=>v===1).length,
     cohorts:rows.length};
@@ -2496,6 +2521,36 @@ function getDisplayedEntryCandidates(rows){
     .filter(s=>s.symbol&&Number(s.price)>0&&s.basketEligible!==false&&!NSE_SURV[s.symbol]?.length)
     .sort((a,b)=>(Number(b.score)||0)-(Number(a.score)||0)||a.symbol.localeCompare(b.symbol))
     .slice(0,20);
+}
+// ── v1128 STRATIFIED CONTROL SAMPLE (owner, 2026-08-12) ────────────────────────────────────────
+// "If you remove the 80-90 band, it may get fixed and removing it will never tell us."
+//
+// The recommendation cohort is the TOP 20 BY SCORE. It is correctly ungated (v1074) — it records
+// rows the app would never buy — but the top-20 cut means a band is only observed on days when it
+// happens to reach the top 20. Measured 2026-08-12: history had 110 of 160 graded picks below the
+// current bar, yet on that day's board ALL 20 scored >= 95, so the 80-90 band got ZERO observations.
+// A band that is only sampled on weak days cannot be shown to have recovered.
+//
+// So a small sample is drawn from each band BELOW the bar and graded alongside, flagged `control`.
+// It is EVIDENCE ONLY: excluded from every recommendation metric (conversion, the scorecard headline,
+// concordance), because these are rows the app did not pick and counting them would misreport what
+// it recommended. Deliberately small — this buys band coverage, not a second basket.
+const CONTROL_BANDS=[[80,95],[65,80],[50,65]];   // below the bar; the bands the scorecard reports
+const CONTROL_PER_BAND=3;
+function getScoreBandControlSample(rows,exclude){
+  if(!Array.isArray(rows)||!rows.length) return [];
+  const taken=exclude instanceof Set?exclude:new Set((exclude||[]).map(s=>s.symbol));
+  const out=[];
+  CONTROL_BANDS.forEach(([lo,hi])=>{
+    const band=rows.filter(s=>s.symbol&&Number(s.price)>0&&s.basketEligible!==false
+      &&!NSE_SURV[s.symbol]?.length&&!taken.has(s.symbol)
+      &&Number(s.score)>=lo&&Number(s.score)<hi);
+    // Take the TOP of each band by score: the same selection rule the cohort itself uses, so a
+    // control row differs from a recommended row only in which band it fell into.
+    band.sort((a,b)=>(Number(b.score)||0)-(Number(a.score)||0)||a.symbol.localeCompare(b.symbol));
+    band.slice(0,CONTROL_PER_BAND).forEach(s=>{out.push(s);taken.add(s.symbol);});
+  });
+  return out;
 }
 function recordDisplayedEntryCohort(scan){
   if(!scan?.date||!scan.candidates?.length) return;
@@ -6778,6 +6833,23 @@ function renderPerformance(){
         <div><div class="st-l">Time to target</div><div class="st-v" style="font-size:19px">${sc.medDaysToTarget==null?'—':(sc.medDaysToTarget===0?'same day':sc.medDaysToTarget+'d')}</div><div class="st-d">${sc.sameDay} same day · ${sc.nextDay} next day</div></div>
       </div>`
     : `<div style="padding:16px;color:var(--t2);font-size:13px">No cohort has resolved yet. A pick resolves once a post-close ALL NSE.csv closes its issue day and the following session's bar is read.</div>`;
+  const bandRows=sc.bands.filter(b=>b.n>0).map(b=>
+    `<tr><td style="padding:4px 10px">${b.label}</td>`
+    +`<td style="padding:4px 10px;text-align:right">${b.n}</td>`
+    +`<td style="padding:4px 10px;text-align:right;color:var(--t3)">${b.control}</td>`
+    +`<td style="padding:4px 10px;text-align:right">${b.settled}</td>`
+    +`<td style="padding:4px 10px;text-align:right;font-weight:700;color:${b.hitPct==null?'var(--t3)':b.hitPct>=30?'var(--green)':b.hitPct>=18?'var(--amber)':'var(--red)'}">${b.hitPct==null?'—':b.hitPct+'%'}</td></tr>`).join('');
+  const bandTable=bandRows?`<div style="padding:10px 16px;border-top:1px solid var(--border)">
+      <div class="st-l" style="margin-bottom:6px">Hit rate by score band — is the ordering monotonic?</div>
+      <table style="width:100%;font-size:13px;border-collapse:collapse">
+        <tr style="color:var(--t3);font-size:11px;text-transform:uppercase;letter-spacing:.06em">
+          <td style="padding:4px 10px">Score</td><td style="padding:4px 10px;text-align:right">Graded</td>
+          <td style="padding:4px 10px;text-align:right">of which control</td>
+          <td style="padding:4px 10px;text-align:right">Resolved</td><td style="padding:4px 10px;text-align:right">Hit %</td></tr>
+        ${bandRows}
+      </table>
+      <div style="font-size:12px;color:var(--t3);margin-top:6px;line-height:1.5">A ranking that orders correctly is MONOTONIC down this table. Bands below the ${RECOMMEND_MIN_SCORE} bar are observed through a small stratified <b>control sample</b> (${CONTROL_PER_BAND} per band per session) that is graded but never bought — so a band the app no longer buys can still be shown to have recovered.</div>
+    </div>`:'';
   const scNote=`<div style="padding:10px 16px;font-size:12px;color:var(--t3);line-height:1.55">
     A pick counts as a WIN only if it reached <b>its own target</b> before <b>its own stop</b>, within ${ROCKET_HORIZON_DAYS} trading days of being recommended (v1085). Cohorts are the picks as ISSUED — a later scan on the same day never rewrites them.
     ${sc.legacy?`<br>${sc.legacy} older picks carry no recorded target/stop (they predate v1094) and can never resolve, so they are excluded from every percentage above rather than counted as failures.`:''}
@@ -6789,7 +6861,7 @@ function renderPerformance(){
       ${periodPillsHtml}
       <div style="font-size:12px;color:var(--t3);margin-bottom:12px">${periodLabel} · ${p.roundTrips} lots</div>
       <div id="perf-kpi">${kpiHtml}</div>
-      ${perfCard('System Scorecard — did the picks reach target? <span style="font-size:12px;color:var(--t3);font-weight:400">'+sc.cohorts+' cohorts · target-before-stop within '+ROCKET_HORIZON_DAYS+' trading days</span>',scHeadline+scTbl.getHtml()+scNote,'','perf-scorecard')}
+      ${perfCard('System Scorecard — did the picks reach target? <span style="font-size:12px;color:var(--t3);font-weight:400">'+sc.cohorts+' cohorts · target-before-stop within '+ROCKET_HORIZON_DAYS+' trading days</span>',scHeadline+scTbl.getHtml()+bandTable+scNote,'','perf-scorecard')}
       ${monthRows.length?perfCard('Monthly Breakdown',monthTbl.getHtml(),'','perf-monthly'):''}
       ${hasTradeWindows?perfCard(`Time-of-day Outcomes — Diagnostic Only <span style="font-size:12px;color:var(--t3);font-weight:400">${timingModel.episodeCount} distinct entries · ${timingModel.entryDays} entry days · clock windows only · descriptive, never a recommendation rule</span>`,timingTbl.getHtml(),'','perf-trade-windows'):''}
       ${p.symBreakdown.length?perfCard('Stocks',symTbl.getHtml(),'360px','perf-stocks'):''}
@@ -10096,6 +10168,10 @@ function applySavedFiltersForMode(mode){
       // candidates' later attainable highs; the scorer itself stays stateless.
       const threshold=getEffectiveTgtPct()||TRADEBOOK_STATS?.adaptiveTGT||4;
       const eligibleCandidates=getDisplayedEntryCandidates(ALL).filter(s=>s.price>0);
+      // v1128: plus a stratified control sample from the bands BELOW the bar, so those bands are
+      // observed on every session rather than only on the days they reach the top 20.
+      const controlRows=getScoreBandControlSample(ALL,new Set(eligibleCandidates.map(s=>s.symbol)));
+      const controlSet=new Set(controlRows.map(s=>s.symbol));
       // v1073: carry the entry-gate state and the TRUE Radar rank into the outcome record.
       // `rank:i+1` alone was the position within this cohort, not the stock's rank in the full
       // cross-section — so every historical rank-bucket analysis was really bucketing cohort index.
@@ -10107,7 +10183,7 @@ function applySavedFiltersForMode(mode){
       // issue-level threshold cannot express it; and without high/low AT ISSUE the issue day's
       // bar cannot be split into pre- and post-recommendation action. See resolveRocketDay.
       const allocCtx=getAllocationPassContext();
-      const recommendations=eligibleCandidates
+      const recommendations=eligibleCandidates.concat(controlRows)
         .map((s,i)=>{
           let targetPct=null,stopPct=null;
           try{
@@ -10116,6 +10192,9 @@ function applySavedFiltersForMode(mode){
             stopPct=Number(pol?.stopPct)>0?Number(pol.stopPct):null;
           }catch(e){}
           return {symbol:s.symbol,entryPrice:s.price,score:s.score,rank:i+1,
+            // v1128: a control row is graded exactly like a pick but is NOT one — it is excluded
+            // from every recommendation metric so the app never reports buying what it did not.
+            control:controlSet.has(s.symbol)||undefined,
             // v1127: the score's COMPONENTS, not just its total. `score = 100 x (setupPct x
             // direction)^4` and `setupPct = max(compositePct, ignitePct)` — a MAX of two different
             // rankers. Measured on 125 resolved picks, the ordering is non-monotonic and its
