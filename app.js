@@ -1,5 +1,5 @@
-const BUILD_TS='2026-08-11 15:34 IST'; // release build time (IST)
-const APP_VERSION=1124; // v1124: systematic audit - a stale target memo, the same memo doing full work per row, a dead store read on the hot path, and one field written by two retired-and-current definitions at once.
+const BUILD_TS='2026-08-12 13:19 IST'; // release build time (IST)
+const APP_VERSION=1125; // v1125: rupees are the unit - the money a position actually makes, not the percentage, decides viability, sizing feedback and whether the basket meets the day's goal.
 // v1093: a baseline reward:risk MEASURED on the cross-section (last completed bhav session) instead of learned from the owner's own fills - reported on every row, deliberately not enforced. Includes v1092: position size split by Radar score / stop distance, so equally-scored names carry equal RUPEE risk, plus an opt-in Risk /trade cap.
 // v556: parse the NSE Market Activity Report (MA<date>.csv) — official Nifty %, advances/declines and sector index moves shown as market CONTEXT in the status bar (EOD data, display only, never fed into per-row scoring); MA added to the ℹ️ file manifest.
 // v555 market-cycle stage awareness (stateless, self-calibrating): per-row stage label (1 accumulation · 2 breakout · 3 event · 4 profit-booking · 5 re-accumulation · 6 second-leg); a quiet-accumulation signal (conjunction-of-percentiles) injected via the rocket-diagnostic weighting; sell-the-news decay off Recent earnings date (horizon = review days). v1065 makes the market-breadth gauge an entry-eligibility input while still never changing ranking.
@@ -4986,6 +4986,98 @@ function allocLimitReason(caps){
   if(risk<=lo+e) return 'risk cap';
   return 'risk weight';
 }
+// ── v1125 RUPEES ARE THE UNIT (owner, 2026-08-12) ──────────────────────────────────────────────
+// "It's not the 1% that is important, it's the 500 rupees (of course after costs)."
+//
+// Percent and rupees are linked by position size: Rs = % x notional. The app has always taken the
+// PERCENT as the input and let the rupees fall out at the very end (riskRs = alloc x stop%). That is
+// exact only when every position is the same size and every rupee of capital is deployed. Neither
+// holds, in three separate ways:
+//
+//   1. POSITIONS ARE NOT THE SAME SIZE. computeAlloc weights by score/stop and then caps each row by
+//      Max Alloc AND by 0.10% of that stock's own turnover. On the v1092 snapshot every selected row
+//      was bound by the turnover rail and the rupees at risk spanned Rs 12 to Rs 4,578 - a 393x
+//      spread on IDENTICAL percentage bars. Two rows both "clearing 1.8%" can be Rs 790 and Rs 40.
+//   2. CHARGES ARE NOT PROPORTIONAL. DP is a FLAT Rs 15.34 per ISIN per sell day - 0.03% of a
+//      Rs 50,000 position and 0.38% of a Rs 4,000 one. A single percentage hurdle over-charges the
+//      big position and under-charges the small one, so small lots pass a test they fail in rupees.
+//   3. THE GOAL IS A RUPEE TOTAL THAT IS DIVIDED AWAY. "Earn Rs X" becomes a required %/day ONCE, at
+//      the top, and is then applied per stock. That conversion assumes full deployment; whole shares,
+//      the turnover rail and the 20-order cap all leak capital. Nothing ever adds the rupees back up,
+//      so every row can "pass" while the basket earns a fraction of what the day needs.
+//
+// So the rupee figure is computed from each row's OWN achievable notional using the REAL charge
+// model, and the percentage becomes a display unit derived from it rather than the source of truth.
+
+// The notional a row can actually reach. Uses only ROW-INTRINSIC and SESSION-WIDE rails; the
+// score-weight share is deliberately EXCLUDED (v1080/v1086), because that one depends on which OTHER
+// stocks were selected and admitting it would make a stock's rank depend on its neighbours.
+function rowAchievableNotional(s,ctx=null){
+  const c=ctx||getAllocationPassContext();
+  const buyP=getBuyPrice(s);
+  if(!(buyP>0)) return 0;
+  const turnoverCap=getTurnoverAllocationCap(s);
+  if(!(turnoverCap>0)) return 0;
+  const topUpCap=getHeldTopUpNotionalCap(s,buyP,c.heldMap);
+  const riskCap=riskNotionalCap(s,c.riskPerTrade);
+  const maxCap=c.maxAlloc>0?c.maxAlloc:c.capital;
+  const v=Math.min(maxCap,turnoverCap,topUpCap,riskCap);
+  return Number.isFinite(v)&&v>0?v:0;
+}
+// What ONE position in this stock is actually worth, in rupees, at a given notional: whole shares and
+// the full Zerodha charge model on both legs. This is the number the owner trades on.
+function getRowRupeeEconomics(s,notional,policy=null,ctx=null){
+  const buyP=getBuyPrice(s);
+  const pol=policy||getRowExitPolicy(s,buyP,(ctx||getAllocationPassContext()).active);
+  const out={qty:0,notional:0,grossRs:0,chargesRs:0,netRs:0,riskRs:0,
+             tgtPct:pol?.targetPct??null,stopPct:pol?.stopPct??null};
+  if(!(buyP>0)||!(notional>0)||!(pol?.targetPct>0)) return out;
+  const qty=Math.floor(notional/buyP);
+  if(qty<=0) return out;
+  const sellP=buyP*(1+pol.targetPct/100);
+  out.qty=qty;
+  out.notional=qty*buyP;
+  out.grossRs=qty*buyP*(pol.targetPct/100);
+  out.chargesRs=calcZerodhaCharges(buyP,qty,false)+calcZerodhaCharges(sellP,qty,true);
+  out.netRs=out.grossRs-out.chargesRs;
+  out.riskRs=pol.stopPct>0?qty*buyP*(pol.stopPct/100):0;
+  return out;
+}
+// The SAME economic floor as HARVEST_DESIRED_NET_PCT, expressed in rupees at the reference notional.
+// NOT a new constant - a conversion of the existing one - but applied against each row's ACTUAL
+// rupees, which is what makes it discriminate where the percentage never could.
+function getDesiredNetRupees(){
+  const ref=getEffectiveMaxAlloc();
+  return ref>0?ref*(HARVEST_DESIRED_NET_PCT/100):0;
+}
+// Rupees the goal needs TODAY, and what is still outstanding after what is already booked. Extracted
+// from buildGoalCard (v1078), which computed it inline and so could not share it with the basket.
+function getTodayRupeeNeed(){
+  const g=getGoalConfig();
+  const basis=getGoalPortfolioBasis();
+  const days=goalRemainingDays(g);
+  if(!(basis>0)||!(days>0)) return null;
+  const r=solveGoalDailyRate(basis,g.target,days,g.withdrawMonthly,g.reinvestPct);
+  if(!(r>0)) return null;
+  const need=basis*r;                                  // r is a FRACTION, not a percent
+  let booked=null;
+  try{const b=getLatestBookedSummary(); if(b&&Number.isFinite(Number(b.total))) booked=Number(b.total);}catch(e){}
+  return {need,booked,outstanding:Math.max(0,need-(booked||0))};
+}
+// Does the basket ADD UP? The question the app has never asked. Every row was judged against a
+// percentage bar and nobody summed the rupees. REPORTED, never enforced: a shortfall is information
+// about the day, not a reason to delete stocks. v1093 is the precedent - enforcing an unmeasured
+// floor stranded 1,491 of 1,498 rows and emptied the basket outright.
+function getBasketRupeeProjection(allocMap){
+  const rows=Object.values(allocMap||{}).filter(a=>a&&!a.rejected&&a.qty>0);
+  const expectedNet=rows.reduce((sum,a)=>sum+(Number(a.expectedNet)||0),0);
+  const riskRs=rows.reduce((sum,a)=>sum+(Number(a.riskRs)||0),0);
+  const deployed=rows.reduce((sum,a)=>sum+(Number(a.debit)||0),0);
+  const t=getTodayRupeeNeed();
+  return {positions:rows.length,deployed,expectedNet,riskRs,
+          need:t?t.need:null,booked:t?t.booked:null,outstanding:t?t.outstanding:null,
+          coverPct:(t&&t.outstanding>0)?(expectedNet/t.outstanding*100):null};
+}
 // Show each default in its field's placeholder so an empty field visibly reflects what the
 // calculation will use (grey = default in effect; a typed value = your override).
 function updateFilterPlaceholders(){
@@ -7820,6 +7912,26 @@ function getAllocationBlockReason(s,ctx=null){
   if(policy&&policy.viable===false) return policy.capacityPct!=null
     ? `stock capacity ${policy.capacityPct.toFixed(2)}% cannot clear the ${policy.minGrossPct?.toFixed(2)??'—'}% cost + net hurdle`
     : 'no viable target after costs';
+  // ── v1125 THE RUPEE FLOOR (owner) ────────────────────────────────────────────────────────────
+  // Every test above this line is a PERCENTAGE test, and a percentage cannot see the money. Measured
+  // on the release board: all 60 top rows carried the IDENTICAL 3.45% target while netting between
+  // Rs 91.59 and Rs 2,365 — a 26x spread, because the 0.10% turnover rail caps an illiquid name at a
+  // few thousand rupees while a liquid one gets the full Max Alloc. The percentage bar rated both the
+  // same. This asks the only question that matters: at the largest position this stock will actually
+  // let me take, does hitting its own target leave enough money to be worth the trade, after the real
+  // charges (including the FLAT Rs 15.34 DP fee, which is 0.38% of a Rs 4,000 lot and 0.03% of a
+  // Rs 50,000 one)?
+  //
+  // NO NEW CONSTANT: the floor is HARVEST_DESIRED_NET_PCT — the same 0.60% "minimum useful net for
+  // capital rotation" that has governed since v1060 — converted to rupees at the reference notional.
+  // Measured scope: 66 of the top 340 rows, 19.4%. Targeted rather than blanket, and every casualty
+  // is a row the turnover rail had already reduced to pocket change.
+  const floorRs=getDesiredNetRupees();
+  if(floorRs>0){
+    const ec=getRowRupeeEconomics(s,rowAchievableNotional(s,c),policy,c);
+    if(ec.qty>0&&ec.netRs<floorRs)
+      return `nets only ${fmtINR(ec.netRs)} on the ${fmtINR(ec.notional)} this stock allows — below the ${fmtINR(floorRs)} minimum for a trade worth taking`;
+  }
   return null;
 }
 function computeAlloc(capital, selList){
@@ -7877,7 +7989,7 @@ function computeAlloc(capital, selList){
   // Residual redistribution (pass 2) still walks by CONVICTION, not by weight: the spare rupee
   // should go to the best setup. Risk normalisation governs the size of the slice, not its priority.
   const sortedSel=[...selList].sort((a,b)=>rawScore(b)-rawScore(a));
-  const allocMap={},limits={},limitReasons={};
+  const allocMap={},limits={},railLimits={},limitReasons={};
 
   for(const s of sortedSel){
     const buyP=getBuyPrice(s);
@@ -7891,8 +8003,10 @@ function computeAlloc(capital, selList){
     const scoreLimit=spendableCapital*(riskWeight(s)/totalRiskWeight);
     const topUpCap=getHeldTopUpNotionalCap(s,buyP,heldMap); // Infinity unless held and in profit
     const riskCap=riskNotionalCap(s,riskPerTrade);          // Infinity when no risk budget is set
-    const rowLimit=Math.min(scoreLimit,cap,turnoverCap,topUpCap,riskCap);
+    const railLimit=Math.min(cap,turnoverCap,topUpCap,riskCap);   // every rail EXCEPT the score share
+    const rowLimit=Math.min(scoreLimit,railLimit);
     const limitReason=allocLimitReason({score:scoreLimit,max:cap,turnover:turnoverCap,topUp:topUpCap,risk:riskCap});
+    railLimits[s.symbol]=railLimit;
     limits[s.symbol]=rowLimit;
     limitReasons[s.symbol]=limitReason;
     const qty=affordableQty(rowLimit,buyP,rowLimit);
@@ -7918,7 +8032,28 @@ function computeAlloc(capital, selList){
       if(am?.rejected) continue;
       if(!am){
         const buyP=getBuyPrice(s);
-        if(!(buyP>0)||rowLimit<buyP||buyDebit(buyP,1)>residual+0.001) continue;
+        // ── v1125: NEVER ROUND A SELECTED STOCK TO ZERO SHARES WHILE CAPITAL REMAINS ───────────
+        // rowLimit is the score-weight SHARE, and it was also being used as the ceiling, so a stock
+        // priced above its own slice could never be bought — not in pass 1 (floor(share/price) = 0)
+        // and not here either, because the same slice gated the rescue. It is purely a whole-share
+        // rounding artefact and it hits EXPENSIVE stocks: measured on the release board, TCPLPACK at
+        // ₹4,285.70 was offered ₹2,921 and KINGFA at ₹5,866.65 was offered ₹4,674 — both cleared
+        // every gate (net ₹1,366 and ₹1,309 against a ₹270 floor) and both silently received nothing,
+        // while the basket button still counted them. A percentage view cannot see this at all; it is
+        // visible only once you ask how many rupees one share actually costs.
+        //
+        // The rescue is exactly ONE share and no more: the ceiling below becomes max(share, price),
+        // so proportional splitting is untouched for every row that could already afford one. It is
+        // still bounded by the row's real rails (Max Alloc, the 0.10% turnover rail, the top-up
+        // cushion, the risk budget) and by residual capital, and pass 2 walks by CONVICTION, so a
+        // better-scored name always gets first refusal on the spare rupees.
+        const railCeil=railLimits[s.symbol]||0;
+        if(!(buyP>0)) continue;
+        if(rowLimit<buyP){
+          if(railCeil<buyP) continue;                 // a real rail, not rounding — leave it alone
+          limits[s.symbol]=Math.max(rowLimit,buyP);   // one share, then the normal growth check binds
+        }
+        if(buyDebit(buyP,1)>residual+0.001) continue;
         const qty=1,ev=evalNet(s,buyP,qty);
         if(ev.rejected){
           allocMap[s.symbol]={alloc:0,debit:0,qty:0,buyPrice:buyP,rejected:true,reason:ev.reason,
@@ -7928,10 +8063,17 @@ function computeAlloc(capital, selList){
         allocMap[s.symbol]={alloc:qty*buyP,debit:buyDebit(buyP,qty),buyCharges:calcZerodhaCharges(buyP,qty,false,false,false),qty,buyPrice:buyP,
           limit:rowLimit,stopDistancePct:ev.policy.stopPct,expectedNet:ev.expectedNet,charges:ev.charges,tgtPct:ev.tgtPct,exitPolicy:ev.policy,liquidityCap:getTurnoverAllocationCap(s),limitReason:limitReasons[s.symbol]};
         am=allocMap[s.symbol];
+        // The first share must be PAID FOR out of the residual. This branch was unreachable before
+        // v1125 — pass 1 already bought a share whenever rowLimit >= price, and pass 2's old guard
+        // `rowLimit < buyP -> continue` rejected every other case — so the missing decrement never
+        // showed. Making the rescue live exposed it as a real overspend (deployed ₹21,300 against
+        // ₹19,696 of capital). Growth below is charged incrementally, so only this opening lot is
+        // accounted here.
+        residual-=am.debit; deployed+=am.debit; progress=true;
       }
       const buyP=am.buyPrice;
       const nextDebit=buyDebit(buyP,am.qty+1),incremental=nextDebit-am.debit;
-      if(incremental>residual+0.001||am.alloc+buyP>am.limit+0.5) continue;
+      if(incremental>residual+0.001||am.alloc+buyP>(limits[s.symbol]??am.limit)+0.5) continue;
       am.qty++; am.alloc+=buyP; am.debit=nextDebit; am.buyCharges=calcZerodhaCharges(buyP,am.qty,false,false,false);
       const ev=evalNet(s,buyP,am.qty);
       if(!ev.skip){am.expectedNet=ev.expectedNet;am.charges=ev.charges;am.tgtPct=ev.tgtPct;}
@@ -7945,6 +8087,21 @@ function computeAlloc(capital, selList){
     delete am.limit;
     am.riskRs=rowRiskRupees(am.alloc,am.stopDistancePct);
   });
+  // v1125: NOTHING IS DROPPED SILENTLY. A selected row that finished with no position used to be
+  // simply ABSENT from the map, so its Alloc cell rendered a bare em dash and the basket count still
+  // included it. After the one-share rescue above, the only way to arrive here is that capital
+  // genuinely ran out before this row's turn — a real portfolio fact, and one worth stating in
+  // rupees rather than leaving blank. Same principle as the sell-basket skip list (v1082): every
+  // candidate is either acted on or named with a reason.
+  for(const s of sortedSel){
+    if(allocMap[s.symbol]) continue;
+    const buyP=getBuyPrice(s);
+    const railCeil=railLimits[s.symbol]||0;
+    allocMap[s.symbol]={alloc:0,debit:0,qty:0,buyPrice:buyP,rejected:true,liquidityCap:getTurnoverAllocationCap(s),
+      reason:railCeil>0&&buyP>0&&railCeil<buyP
+        ? `one share costs ${fmtINR(buyP)} but this stock's rails allow only ${fmtINR(railCeil)}`
+        : `capital exhausted before this row — one share costs ${fmtINR(buyP)} and the basket was already fully deployed`};
+  }
   _allocMemo={key:memoKey,val:allocMap};
   return allocMap;
 }
@@ -7955,21 +8112,30 @@ function allocationSubline(am,unitLabel='shares'){
   const riskTip=am?.riskRs>0
     ? ` Risks ${fmtINR(am.riskRs)} if its ${Number(am.stopDistancePct).toFixed(2)}% stop is hit.`
     : '';
+  // v1125: and what it MAKES. Two rows can carry the identical target percentage and return 26x
+  // different money once the turnover rail and whole-share rounding have had their say — measured on
+  // the release board, where every top-60 row showed 3.45% and netted between ₹91 and ₹2,365.
+  const netTip=Number.isFinite(am?.expectedNet)
+    ? ` Nets ${fmtINR(am.expectedNet)} after all charges if its ${Number(am.tgtPct).toFixed(2)}% target fills.`
+    : '';
+  const netStr=Number.isFinite(am?.expectedNet)
+    ? ` · <b style="color:var(--green)">+${fmtINR(am.expectedNet)}</b>`
+    : '';
   if(am?.limitReason==='risk cap'){
-    return `<div style="font-size:11px;color:var(--cyan);margin-top:1px" title="Sized down to fit the Risk ₹/trade budget at this stock's own ${Number(am.stopDistancePct).toFixed(2)}% stop.${riskTip}">risk cap · ${am.qty} ${unitLabel} · risk ${fmtINR(am.riskRs)}</div>`;
+    return `<div style="font-size:11px;color:var(--cyan);margin-top:1px" title="Sized down to fit the Risk ₹/trade budget at this stock's own ${Number(am.stopDistancePct).toFixed(2)}% stop.${riskTip}${netTip}">risk cap · ${am.qty} ${unitLabel} · risk ${fmtINR(am.riskRs)}${netStr}</div>`;
   }
   if(am?.limitReason==='top-up average cost'){
     // v1070: an add to a stock already in profit, sized so the blended average stays below the
     // new entry's own stop. A zero here means the existing average has no cushion left.
-    return `<div style="font-size:11px;color:#f472b6;margin-top:1px" title="You already hold this at a profit. The add is sized so the blended average cost stays below this entry's own stop price — if the stop is hit, the combined position is still not at a loss.${riskTip}">📌 top-up capped · ${am.qty} ${unitLabel}</div>`;
+    return `<div style="font-size:11px;color:#f472b6;margin-top:1px" title="You already hold this at a profit. The add is sized so the blended average cost stays below this entry's own stop price — if the stop is hit, the combined position is still not at a loss.${riskTip}${netTip}">📌 top-up capped · ${am.qty} ${unitLabel}${netStr}</div>`;
   }
   if(am?.limitReason==='turnover'){
-    return `<div style="font-size:11px;color:var(--amber);margin-top:1px" title="Market-impact rail: allocation is capped at 0.10% of daily turnover (${fmtINR(am.liquidityCap)}), then rounded down to whole ${unitLabel}.${riskTip}">turnover cap · ${am.qty} ${unitLabel}</div>`;
+    return `<div style="font-size:11px;color:var(--amber);margin-top:1px" title="Market-impact rail: allocation is capped at 0.10% of daily turnover (${fmtINR(am.liquidityCap)}), then rounded down to whole ${unitLabel}.${riskTip}${netTip}">turnover cap · ${am.qty} ${unitLabel}${netStr}</div>`;
   }
   const sizedBy=am?.limitReason==='risk weight'
     ? `Sized by Radar score ÷ this stock's ${Number(am.stopDistancePct).toFixed(2)}% stop, so equally-scored names carry equal rupee risk.`
     : 'Capped by the Max Allocation rail.';
-  return `<div style="font-size:11px;color:var(--t3);margin-top:1px" title="${sizedBy}${riskTip}">${am.qty} ${unitLabel}${am?.riskRs>0?` · risk ${fmtINR(am.riskRs)}`:''}</div>`;
+  return `<div style="font-size:11px;color:var(--t3);margin-top:1px" title="${sizedBy}${riskTip}${netTip}">${am.qty} ${unitLabel}${am?.riskRs>0?` · risk ${fmtINR(am.riskRs)}`:''}${netStr}</div>`;
 }
 function recomputeAlloc(){
   const capital=getEffectiveCapital();
@@ -7982,7 +8148,15 @@ function recomputeAlloc(){
     if(!SELECTED.has(sym)){el.innerHTML='<span style="color:var(--t3);font-size:13px">—</span>';return;}
     const am=allocMap[sym];
     if(!am){el.innerHTML='<span style="color:var(--red);font-size:12px" title="The score, Max Allocation, or 0.10% turnover cap is below one share.">cap below 1 share</span>';return;}
-    if(am.rejected){el.innerHTML=`<span style="color:var(--red);font-size:12px" title="${escHtml(am.reason||'Stock-specific target cannot clear costs and desired net.')}">no viable target</span>`;return;}
+    if(am.rejected){
+      // v1125: the label must match the CAUSE. "no viable target" was printed for every rejection,
+      // including a row that simply ran out of capital — a different fact with a different remedy.
+      const why=String(am.reason||'');
+      const lbl=/capital exhausted/.test(why)?'capital exhausted'
+        :/rails allow only|one share costs/.test(why)?'cap below 1 share'
+        :/minimum for a trade worth taking/.test(why)?'too little money in it'
+        :'no viable target';
+      el.innerHTML=`<span style="color:var(--red);font-size:12px" title="${escHtml(why||'Stock-specific target cannot clear costs and desired net.')}">${lbl}</span>`;return;}
     el.innerHTML=`<span style="color:var(--amber);font-weight:700;font-family:'DM Mono',monospace;font-size:14px">${fmtINR(am.alloc)}</span>${allocationSubline(am,unitLabel)}`;
   });
   renderBasketSummary();
@@ -8455,7 +8629,15 @@ function renderStatusBar(){
           totalNet+=a.expectedNet;
         }
       }
-      const goalCoverage=harvestPlan.dailyGoal>0?Math.max(0,totalNet)/harvestPlan.dailyGoal:0;
+      // v1125 (owner): the basket is measured against the rupees TODAY still needs, not against the
+      // harvest plan's own daily figure — and net of what is already booked. This is the question
+      // nothing in the app has ever asked: each row was judged against a percentage bar and nobody
+      // added the rupees back up, so a basket whose rails bind hard could have every row "pass" while
+      // earning a fraction of the day's requirement. Falls back to the harvest goal when no dated
+      // goal is configured, so the line never disappears.
+      const _todayRs=getTodayRupeeNeed();
+      const goalTargetRs=(_todayRs&&_todayRs.outstanding>0)?_todayRs.outstanding:harvestPlan.dailyGoal;
+      const goalCoverage=goalTargetRs>0?Math.max(0,totalNet)/goalTargetRs:0;
       const srcLbl=active.source==='manual'?'✎ manual anchor':active.source==='goal'?'goal-led anchor':'Harvest anchor';
       const targetRange=Math.abs(targets.at(-1)-targets[0])<0.001?targets[0].toFixed(2)+'%':`${targets[0].toFixed(2)}–${targets.at(-1).toFixed(2)}%`;
       const stopRange=stops.length?(Math.abs(stops.at(-1)-stops[0])<0.001?stops[0].toFixed(2)+'%':`${stops[0].toFixed(2)}–${stops.at(-1).toFixed(2)}%`):'—';
@@ -8463,7 +8645,13 @@ function renderStatusBar(){
       const warn=harvestPlan.warning?` Warning: ${harvestPlan.warning}`:'';
       const tip=`Per-stock targets ${targetRange} and ATR stops ${stopRange}; ${srcLbl} ${active.tgtPct.toFixed(2)}% supplies portfolio context only. Expected net is charge-aware.${needed}${warn}`;
       const color=totalNet>=0?'var(--green)':'var(--red)';
-      html+=` <span style="color:${color};font-size:13px;font-family:'DM Mono',monospace;font-weight:700;margin-left:8px" title="${tip}">· 🎯 ${fmtINR(totalNet)} net @ stock targets ${targetRange} · ${(goalCoverage*100).toFixed(0)}% of ${fmtINR(harvestPlan.dailyGoal)}</span>`;
+      const goalLbl=(_todayRs&&_todayRs.outstanding>0)
+        ? `${(goalCoverage*100).toFixed(0)}% of the ${fmtINR(goalTargetRs)} today still needs`
+        : `${(goalCoverage*100).toFixed(0)}% of ${fmtINR(goalTargetRs)}`;
+      const goalTip=(_todayRs&&_todayRs.need>0)
+        ? ` Today needs ${fmtINR(_todayRs.need)}${_todayRs.booked!=null?`, of which ${fmtINR(_todayRs.booked)} is already booked, leaving ${fmtINR(_todayRs.outstanding)}`:''}. This basket covers ${(goalCoverage*100).toFixed(0)}% of that IF every target fills — the whole basket's rupees, added up, which is the only form of the goal that can actually be checked.`
+        : '';
+      html+=` <span style="color:${color};font-size:13px;font-family:'DM Mono',monospace;font-weight:700;margin-left:8px" title="${tip}${goalTip}">· 🎯 ${fmtINR(totalNet)} net @ stock targets ${targetRange} · ${goalLbl}</span>`;
       if(harvestPlan.warning){
         html+=` <span style="color:var(--amber);font-size:13px;font-family:'DM Mono',monospace;font-weight:700;margin-left:8px" title="${harvestPlan.warning}">· target floor active</span>`;
       }
