@@ -1,5 +1,5 @@
-const BUILD_TS='2026-08-12 13:19 IST'; // release build time (IST)
-const APP_VERSION=1125; // v1125: rupees are the unit - the money a position actually makes, not the percentage, decides viability, sizing feedback and whether the basket meets the day's goal.
+const BUILD_TS='2026-08-12 14:09 IST'; // release build time (IST)
+const APP_VERSION=1126; // v1126: the Performance tab opens in 41ms instead of 2.9s (three memo keys cost more than the work they cached), and a System Scorecard says whether the picks reach target.
 // v1093: a baseline reward:risk MEASURED on the cross-section (last completed bhav session) instead of learned from the owner's own fills - reported on every row, deliberately not enforced. Includes v1092: position size split by Radar score / stop distance, so equally-scored names carry equal RUPEE risk, plus an opt-in Risk /trade cap.
 // v556: parse the NSE Market Activity Report (MA<date>.csv) — official Nifty %, advances/declines and sector index moves shown as market CONTEXT in the status bar (EOD data, display only, never fed into per-row scoring); MA added to the ℹ️ file manifest.
 // v555 market-cycle stage awareness (stateless, self-calibrating): per-row stage label (1 accumulation · 2 breakout · 3 event · 4 profit-booking · 5 re-accumulation · 6 second-leg); a quiet-accumulation signal (conjunction-of-percentiles) injected via the rocket-diagnostic weighting; sell-the-news decay off Recent earnings date (horizon = review days). v1065 makes the market-breadth gauge an entry-eligibility input while still never changing ranking.
@@ -2391,6 +2391,60 @@ function getRecommendationOutcomeSummary(){
     issueDays:issues.length,horizonDays:currentHorizon
   };
 }
+// ── v1126 SYSTEM SCORECARD (owner: "is there a way to tell how our system is faring?") ──────────
+// Everything below already existed in the store; nothing new is recorded. Leg 2 of the post-close
+// routine has been computing this by hand every day — this is that table, in the app.
+//
+// ONE COHORT PER ISSUE DATE, graded on the v1085 definition: did the pick reach ITS OWN target
+// before ITS OWN stop, within ROCKET_HORIZON_DAYS. Only picks carrying both barriers can resolve,
+// so legacy picks (pre-v1094, when the barriers were dropped at write time) are excluded from every
+// denominator and counted separately rather than scored as failures.
+function buildSystemScorecard(){
+  const store=FS.get(RECOMMEND_OUTCOME_STORE)||{};
+  const issues=store.issues||{};
+  const rows=[];
+  let tot={picks:0,resolvable:0,target:0,stopped:0,expired:0,ambiguous:0,pending:0,legacy:0};
+  const daysToTarget=[];
+  Object.keys(issues).sort().forEach(date=>{
+    const issue=issues[date]||{};
+    const picks=issue.picks||[];
+    const resolvable=picks.filter(p=>Number(p.targetPct)>0&&Number(p.stopPct)>0);
+    const legacy=picks.length-resolvable.length;
+    const target=resolvable.filter(p=>isRocketOutcome(p));
+    const stopped=resolvable.filter(p=>p.rocketOutcome===ROCKET_OUTCOME.STOPPED);
+    const expired=resolvable.filter(p=>p.rocketOutcome===ROCKET_OUTCOME.EXPIRED);
+    const ambiguous=resolvable.filter(p=>p.rocketOutcome===ROCKET_OUTCOME.AMBIGUOUS);
+    const settled=target.length+stopped.length+expired.length+ambiguous.length;
+    const pending=resolvable.length-settled;
+    target.forEach(p=>{if(p.rocketDays!=null)daysToTarget.push(Number(p.rocketDays));});
+    tot.picks+=picks.length; tot.resolvable+=resolvable.length; tot.legacy+=legacy;
+    tot.target+=target.length; tot.stopped+=stopped.length; tot.expired+=expired.length;
+    tot.ambiguous+=ambiguous.length; tot.pending+=pending;
+    if(!resolvable.length) return;                        // a wholly legacy cohort says nothing
+    rows.push({date,
+      regime:String(issue.regime?.label||issue.regime||'—'),
+      picks:resolvable.length, target:target.length, stopped:stopped.length,
+      expired:expired.length, pending,
+      hitPct:settled?+(target.length/settled*100).toFixed(0):null,
+      medDays:target.length?median(target.map(p=>Number(p.rocketDays)).filter(v=>Number.isFinite(v))):null});
+  });
+  const settled=tot.target+tot.stopped+tot.expired+tot.ambiguous;
+  daysToTarget.sort((a,b)=>a-b);
+  return {rows:rows.reverse(),                            // newest cohort first
+    settled, ...tot,
+    hitPct:settled?+(tot.target/settled*100).toFixed(1):null,
+    stopPct:settled?+(tot.stopped/settled*100).toFixed(1):null,
+    expiredPct:settled?+(tot.expired/settled*100).toFixed(1):null,
+    medDaysToTarget:daysToTarget.length?median(daysToTarget):null,
+    sameDay:daysToTarget.filter(v=>v===0).length,
+    nextDay:daysToTarget.filter(v=>v===1).length,
+    cohorts:rows.length};
+}
+function median(a){
+  const v=(a||[]).filter(x=>Number.isFinite(x)).sort((x,y)=>x-y);
+  if(!v.length) return null;
+  return v.length%2?v[(v.length-1)/2]:+(((v[v.length/2-1]+v[v.length/2])/2).toFixed(1));
+}
 function getDisplayedEntryCandidates(rows){
   // Top-20 Radar candidates: basket-eligible, valid price, not surveillance-flagged.
   //
@@ -4669,8 +4723,21 @@ let _repsState=null; // {date,lastTotal,lastDelta} — session-only reps trigger
 // The horizon is a DEADLINE DATE (owner, v532 — reverses the v522 day-count shape).
 // Remaining trading days are derived from it every render, so the countdown stays
 // correct on its own and there is no anchor to drift.
+// v1126: memoised on the STORED OBJECT's identity plus the session date. The cost is not the read
+// — it is goalTradingDaysUntil(), which walks the NSE calendar day by day and ran 2,977 times for
+// 1,462ms during a single Performance render. FS.get returns the same object until the config is
+// written, and the trading-day count can only change when the session date rolls.
+let _goalCfgMemo=null;
 function getGoalConfig(){
-  const g=FS.get(GOAL_STORE)||{};
+  const raw=FS.get(GOAL_STORE)||{};
+  const day=getSessionDate();
+  if(_goalCfgMemo&&_goalCfgMemo.raw===raw&&_goalCfgMemo.day===day) return _goalCfgMemo.v;
+  const v=_computeGoalConfig(raw);
+  _goalCfgMemo={raw,day,v};
+  return v;
+}
+function _computeGoalConfig(rawCfg){
+  const g=rawCfg||{};
   const target=(Number(g.target)>0)?Number(g.target):10000000;
   const withdrawMonthly=Math.max(0,Number(g.withdrawMonthly)||0);
   // v1077: daily reinvest split (owner, from the daily-compounding model). When set, each
@@ -4711,7 +4778,7 @@ function onGoalChange(){
   const e=String(document.getElementById('goalEnd')?.value||'').trim();
   const w=parseFloat(document.getElementById('goalWd')?.value);
   const cur=getGoalConfig();
-  FS.set(GOAL_STORE,{
+  _goalCfgMemo=null;FS.set(GOAL_STORE,{
     target:t>0?t:cur.target,
     endDate:/^\d{4}-\d{2}-\d{2}$/.test(e)?e:cur.endDate,
     withdrawMonthly:w>=0?w:cur.withdrawMonthly,
@@ -4880,7 +4947,26 @@ function getCapitalBuckets(){
           invested:delivery+todayBuys,
           total:Math.max(0,delivery+todayBuys+idleCash)};
 }
+// ── v1126 THE MEMO KEY COST MORE THAN THE THING IT MEMOISED ───────────────────────────────────
+// `getGoalRequiredNetPct` caches on a key that includes the capital basis — and computing that basis
+// IS the expensive half, so the cache could never pay for itself. Measured: opening the Performance
+// tab called getComputedCapital 2,984 times for 1,398ms, inside a getActiveTargetInfo cascade that
+// accounted for 2,927ms of a 3,486ms render. The click blocked for ~2.9 SECONDS before the tab could
+// even paint.
+//
+// Keyed on OBJECT IDENTITY of the four inputs it reads. Every one of them is REPLACED wholesale
+// rather than mutated (a scan rebuilds ALL, a portfolio parse rebuilds HOLDINGS/POSITIONS/
+// ORDERS_TODAY), so reference equality is exact here — it cannot serve a value computed from data
+// that has since changed. Also cleared explicitly by invalidateTargetAnchorCaches().
+let _capitalMemo=null;
 function getComputedCapital(){
+  if(_capitalMemo&&_capitalMemo.h===HOLDINGS&&_capitalMemo.p===POSITIONS
+     &&_capitalMemo.o===ORDERS_TODAY&&_capitalMemo.a===ALL) return _capitalMemo.v;
+  const v=_computeCapitalUncached();
+  _capitalMemo={h:HOLDINGS,p:POSITIONS,o:ORDERS_TODAY,a:ALL,v};
+  return v;
+}
+function _computeCapitalUncached(){
   const b=getCapitalBuckets();
   // `positions` is kept as a reported field for the existing sub-lines; it is today's un-settled
   // buys only, never a second copy of the holdings.
@@ -6613,6 +6699,7 @@ function renderPerformance(){
   const _navLink=(id,label,show)=>show?`<a href="#${id}" onclick="event.preventDefault();scrollToSection('${id}')" style="padding:4px 12px;border-radius:6px;background:var(--bg-card);border:1px solid var(--border);color:var(--t2);font-size:13px;font-weight:600;text-decoration:none;cursor:pointer;white-space:nowrap">${label}</a>`:'';
   const perfNav=`<nav style="position:sticky;top:var(--hdr-h,72px);z-index:50;background:var(--bg);padding:8px 0 10px;margin-bottom:8px;display:flex;gap:6px;flex-wrap:wrap;border-bottom:1px solid var(--border);box-shadow:0 2px 8px rgba(0,0,0,0.3);overflow-x:auto;-webkit-overflow-scrolling:touch">
     ${_navLink('perf-kpi','📊 KPIs',true)}
+    ${_navLink('perf-scorecard','🎯 System Scorecard',true)}
     ${_navLink('perf-monthly','📅 Monthly',monthRows.length>0)}
     ${_navLink('perf-trade-windows','🕐 Time-of-day Outcomes',hasTradeWindows)}
     ${_navLink('perf-stocks','📈 Stocks',p.symBreakdown.length>0)}
@@ -6634,18 +6721,47 @@ function renderPerformance(){
   // rocket label and is what Leg 2 of the post-close routine grades. Only the readout is removed.
   const outcomeHtml='';
 
+  // ── v1126 SYSTEM SCORECARD (owner) ────────────────────────────────────────────────────────────
+  const sc=buildSystemScorecard();
+  const scCols=[
+    {key:'date',label:'Issue date',s:true},
+    {key:'regime',label:'Market',s:true},
+    {key:'picks',label:'Picks',s:true,fmt:v=>String(v)},
+    {key:'target',label:'Hit target',s:true,fmt:v=>String(v),clrFn:r=>(r&&r.target>0)?'var(--green)':'var(--t3)'},
+    {key:'stopped',label:'Stopped first',s:true,fmt:v=>String(v),clrFn:r=>(r&&r.stopped>0)?'var(--red)':'var(--t3)'},
+    {key:'expired',label:'Never moved',s:true,fmt:v=>String(v),clrFn:r=>(r&&r.expired>0)?'var(--amber)':'var(--t3)'},
+    {key:'pending',label:'Still open',s:true,fmt:v=>v?String(v):'—'},
+    {key:'hitPct',label:'Hit %',s:true,fmt:v=>v==null?'—':v+'%',clrFn:r=>(!r||r.hitPct==null)?'var(--t3)':r.hitPct>=40?'var(--green)':r.hitPct>=20?'var(--amber)':'var(--red)'},
+    {key:'medDays',label:'Days to target',s:true,fmt:v=>v==null?'—':(v===0?'same day':v+'d')}
+  ];
+  const scTbl=makeSortableTable('perf-scorecard-tbl',scCols,sc.rows,'date',-1);
+  const scHeadline=sc.settled
+    ? `<div style="display:flex;gap:22px;flex-wrap:wrap;padding:12px 16px;border-bottom:1px solid var(--border)">
+        <div><div class="st-l">Resolved</div><div class="st-v" style="font-size:19px">${sc.settled}</div><div class="st-d">of ${sc.resolvable} with barriers${sc.pending?` · ${sc.pending} still open`:''}</div></div>
+        <div><div class="st-l">Reached target</div><div class="st-v" style="font-size:19px;color:${sc.hitPct>=40?'var(--green)':sc.hitPct>=20?'var(--amber)':'var(--red)'}">${sc.hitPct}%</div><div class="st-d">${sc.target} picks</div></div>
+        <div><div class="st-l">Stopped first</div><div class="st-v" style="font-size:19px;color:${sc.stopped?'var(--red)':'var(--green)'}">${sc.stopPct}%</div><div class="st-d">${sc.stopped} picks — dipped to stop before target</div></div>
+        <div><div class="st-l">Never moved</div><div class="st-v" style="font-size:19px;color:var(--amber)">${sc.expiredPct}%</div><div class="st-d">${sc.expired} picks — neither barrier in ${ROCKET_HORIZON_DAYS} days</div></div>
+        <div><div class="st-l">Time to target</div><div class="st-v" style="font-size:19px">${sc.medDaysToTarget==null?'—':(sc.medDaysToTarget===0?'same day':sc.medDaysToTarget+'d')}</div><div class="st-d">${sc.sameDay} same day · ${sc.nextDay} next day</div></div>
+      </div>`
+    : `<div style="padding:16px;color:var(--t2);font-size:13px">No cohort has resolved yet. A pick resolves once a post-close ALL NSE.csv closes its issue day and the following session's bar is read.</div>`;
+  const scNote=`<div style="padding:10px 16px;font-size:12px;color:var(--t3);line-height:1.55">
+    A pick counts as a WIN only if it reached <b>its own target</b> before <b>its own stop</b>, within ${ROCKET_HORIZON_DAYS} trading days of being recommended (v1085). Cohorts are the picks as ISSUED — a later scan on the same day never rewrites them.
+    ${sc.legacy?`<br>${sc.legacy} older picks carry no recorded target/stop (they predate v1094) and can never resolve, so they are excluded from every percentage above rather than counted as failures.`:''}
+  </div>`;
+
   el.innerHTML=`
     <div style="padding:12px 16px">
       ${perfNav}
       ${periodPillsHtml}
       <div style="font-size:12px;color:var(--t3);margin-bottom:12px">${periodLabel} · ${p.roundTrips} lots</div>
       <div id="perf-kpi">${kpiHtml}</div>
+      ${perfCard('System Scorecard — did the picks reach target? <span style="font-size:12px;color:var(--t3);font-weight:400">'+sc.cohorts+' cohorts · target-before-stop within '+ROCKET_HORIZON_DAYS+' trading days</span>',scHeadline+scTbl.getHtml()+scNote,'','perf-scorecard')}
       ${monthRows.length?perfCard('Monthly Breakdown',monthTbl.getHtml(),'','perf-monthly'):''}
       ${hasTradeWindows?perfCard(`Time-of-day Outcomes — Diagnostic Only <span style="font-size:12px;color:var(--t3);font-weight:400">${timingModel.episodeCount} distinct entries · ${timingModel.entryDays} entry days · clock windows only · descriptive, never a recommendation rule</span>`,timingTbl.getHtml(),'','perf-trade-windows'):''}
       ${p.symBreakdown.length?perfCard('Stocks',symTbl.getHtml(),'360px','perf-stocks'):''}
     </div>`;
 
-  setTimeout(()=>{monthTbl.render();symTbl.render();timingTbl.render();},0);
+  setTimeout(()=>{monthTbl.render();symTbl.render();timingTbl.render();scTbl.render();},0);
 }
 
 function schedulePerformanceRender(){
@@ -7324,6 +7440,8 @@ function invalidateTargetAnchorCaches(){
   _defRiskMemo=null;
   _allocMemo=null;
   _reachMemo=null;         // v1119: the reachable level is read from the exit store, which a load refreshes
+  _capitalMemo=null;       // v1126: capital buckets — identity-keyed, but a load replaces the inputs
+  _goalCfgMemo=null;       // v1126: goal config + its trading-day countdown
 }
 function _computeHarvestPlanUncached(){
   const samples=getHarvestOutcomeSamples();
@@ -7445,9 +7563,12 @@ function getEffectiveTgtPct(){
 const ACHIEVE_MIN_ROWS=200;         // below this the curve is not trusted and nothing is floored
 let _achieveMemo=null;
 function buildAchievabilityCurve(){
-  const bhavN=Object.keys(NSE_BHAV||{}).length;
-  const sig=bhavN+'|'+(ALL?.length||0)+'|'+(TRADEBOOK_STATS?.adaptiveSL??'');
-  if(_achieveMemo&&_achieveMemo.sig===sig) return _achieveMemo.val;
+  // v1126: the key used to run Object.keys(NSE_BHAV).length on EVERY call — walking a ~3,000-entry
+  // map to read a number — which cost 514ms across 2,974 calls during one Performance render. The
+  // map is REPLACED on each ZIP parse, so identity answers the same question in O(1).
+  if(_achieveMemo&&_achieveMemo.bhav===NSE_BHAV&&_achieveMemo.all===ALL
+     &&_achieveMemo.sl===(TRADEBOOK_STATS?.adaptiveSL??'')) return _achieveMemo.val;
+  const sig={bhav:NSE_BHAV,all:ALL,sl:TRADEBOOK_STATS?.adaptiveSL??''};
   let val=null;
   try{
     const rows=[];
@@ -7487,7 +7608,7 @@ function buildAchievabilityCurve(){
            medStop,n:rows.length,dateStr:NSE_BHAV[Object.keys(NSE_BHAV)[0]]?.dateStr||null,curve};
     }
   }catch(e){ val=null; }   // fails OPEN: no curve means no floor, never a broken target
-  _achieveMemo={sig,val};
+  _achieveMemo={...sig,val};
   return val;
 }
 // The baseline multiple of risk worth aiming for. null when the curve cannot be trusted.
