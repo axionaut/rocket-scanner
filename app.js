@@ -1,5 +1,5 @@
-const BUILD_TS='2026-08-12 14:09 IST'; // release build time (IST)
-const APP_VERSION=1126; // v1126: the Performance tab opens in 41ms instead of 2.9s (three memo keys cost more than the work they cached), and a System Scorecard says whether the picks reach target.
+const BUILD_TS='2026-08-12 15:17 IST'; // release build time (IST)
+const APP_VERSION=1127; // v1127: recommendation bar raised to score 95 on the app's own resolved picks, the score's components are recorded, and the ranking gets a concordance scoreboard.
 // v1093: a baseline reward:risk MEASURED on the cross-section (last completed bhav session) instead of learned from the owner's own fills - reported on every row, deliberately not enforced. Includes v1092: position size split by Radar score / stop distance, so equally-scored names carry equal RUPEE risk, plus an opt-in Risk /trade cap.
 // v556: parse the NSE Market Activity Report (MA<date>.csv) — official Nifty %, advances/declines and sector index moves shown as market CONTEXT in the status bar (EOD data, display only, never fed into per-row scoring); MA added to the ℹ️ file manifest.
 // v555 market-cycle stage awareness (stateless, self-calibrating): per-row stage label (1 accumulation · 2 breakout · 3 event · 4 profit-booking · 5 re-accumulation · 6 second-leg); a quiet-accumulation signal (conjunction-of-percentiles) injected via the rocket-diagnostic weighting; sell-the-news decay off Recent earnings date (horizon = review days). v1065 makes the market-breadth gauge an entry-eligibility input while still never changing ranking.
@@ -2308,6 +2308,12 @@ function recordRecommendationOutcomeScan(scan){
         rangeLocationAtIssue:p.entryTiming?.rangeLocation??null,
         rangeUsedAtIssue:p.entryTiming?.rangeUsed??null,
         radarRank:p.radarRank??null,
+        // v1127: carried through the whitelist deliberately — v1085 added barrier fields to the
+        // caller and NOT here, and every pick silently lost them for 9 releases. Same trap.
+        compositePct:p.compositePct??null,
+        ignitePct:p.ignitePct??null,
+        setupPct:p.setupPct??null,
+        directionConfirmed:!!p.directionConfirmed,
         // v1094 BUG FIX: these five were computed by the caller and then SILENTLY DROPPED here.
         // This mapper rebuilds every pick from an explicit whitelist, and v1085 added the barrier
         // fields to the caller (processScannerUpload) without adding them to the whitelist — so no
@@ -2428,6 +2434,27 @@ function buildSystemScorecard(){
       hitPct:settled?+(target.length/settled*100).toFixed(0):null,
       medDays:target.length?median(target.map(p=>Number(p.rocketDays)).filter(v=>Number.isFinite(v))):null});
   });
+  // ── v1127 WITHIN-DAY CONCORDANCE — the ranking's own scoreboard ────────────────────────────
+  // The only fair test of an ORDERING: on the same session, was the winner ranked above the loser?
+  // Comparing across days is confounded, because rank is a within-day relative measure while score
+  // is an absolute one — a rank 1 on a weak day and a rank 1 on a strong day are not the same claim,
+  // and conflating them is how "the score works but the rank doesn't" got asserted from the same
+  // ordering. 50% = the ranking carries NO information. Measured 2026-08-12 over 270 pairs: 43%.
+  let cBetter=0,cWorse=0,cPairs=0;
+  Object.keys(issues).forEach(date=>{
+    const day=(issues[date]||{}).picks||[];
+    const g=day.filter(p=>Number(p.targetPct)>0&&Number(p.stopPct)>0
+      &&Number.isFinite(+p.radarRank)
+      &&['rocket','stopped','expired','ambiguous'].includes(String(p.rocketOutcome)));
+    for(let i=0;i<g.length;i++) for(let j=i+1;j<g.length;j++){
+      const a=g[i],b2=g[j];
+      const wa=isRocketOutcome(a), wb=isRocketOutcome(b2);
+      if(wa===wb) continue;                       // only winner/loser pairs discriminate
+      const winner=wa?a:b2, loser=wa?b2:a;
+      cPairs++;
+      if(+winner.radarRank<+loser.radarRank) cBetter++; else if(+winner.radarRank>+loser.radarRank) cWorse++;
+    }
+  });
   const settled=tot.target+tot.stopped+tot.expired+tot.ambiguous;
   daysToTarget.sort((a,b)=>a-b);
   return {rows:rows.reverse(),                            // newest cohort first
@@ -2436,6 +2463,7 @@ function buildSystemScorecard(){
     stopPct:settled?+(tot.stopped/settled*100).toFixed(1):null,
     expiredPct:settled?+(tot.expired/settled*100).toFixed(1):null,
     medDaysToTarget:daysToTarget.length?median(daysToTarget):null,
+    concordancePct:cPairs?+(cBetter/cPairs*100).toFixed(1):null, concordancePairs:cPairs,
     sameDay:daysToTarget.filter(v=>v===0).length,
     nextDay:daysToTarget.filter(v=>v===1).length,
     cohorts:rows.length};
@@ -3041,7 +3069,12 @@ function radarScoreColor(score){
 // 2026-08-09, when 137 rows scored >= 80 — the owner wants the top of the board, not everything
 // that clears a colour. Score >= 90 is stricter than green and rank <= 10 bounds the depth, so the
 // basket buys FEWER names on a weak day rather than reaching down for filler.
-const RECOMMEND_MIN_SCORE=90;   // owner-set quality bar (stricter than the >=80 green band)
+// v1127 (owner, 2026-08-12): 90 -> 95, on the app's own resolved picks. Measured over 125 resolved
+// picks: score 95-100 hit target 34% of the time, 90-95 hit 29% (n=7), and the 80-90 band hit just
+// 9% — WORSE than the sub-80 band's 13%. The score is non-monotonic through its middle, so the 80-90
+// band is the one region actively costing money; this bar removes it from selection. Still an
+// OWNER-SET RISK PREFERENCE, the same category as Zerodha's 20-order cap, not a calibrated output.
+const RECOMMEND_MIN_SCORE=95;
 const RECOMMEND_MAX_RANK=10;    // owner-set depth bar: the top ten of the cross-section, by rank
 function isGreenScore(score){const s=Number(score);return isFinite(s)&&s>=RECOMMEND_MIN_SCORE;}
 // The one test for "may this row be recommended and exported". Rank is the stock's own Radar rank,
@@ -6741,6 +6774,7 @@ function renderPerformance(){
         <div><div class="st-l">Reached target</div><div class="st-v" style="font-size:19px;color:${sc.hitPct>=40?'var(--green)':sc.hitPct>=20?'var(--amber)':'var(--red)'}">${sc.hitPct}%</div><div class="st-d">${sc.target} picks</div></div>
         <div><div class="st-l">Stopped first</div><div class="st-v" style="font-size:19px;color:${sc.stopped?'var(--red)':'var(--green)'}">${sc.stopPct}%</div><div class="st-d">${sc.stopped} picks — dipped to stop before target</div></div>
         <div><div class="st-l">Never moved</div><div class="st-v" style="font-size:19px;color:var(--amber)">${sc.expiredPct}%</div><div class="st-d">${sc.expired} picks — neither barrier in ${ROCKET_HORIZON_DAYS} days</div></div>
+        <div title="The only fair test of an ORDERING: on the SAME session, was the winner ranked above the loser? 50% means the ranking carries no information at all; below 50% means it is mildly inverted. Comparing ranks ACROSS days is confounded — rank is a within-day relative measure, so a rank 1 on a weak day and a rank 1 on a strong day are not the same claim."><div class="st-l">Ranking concordance</div><div class="st-v" style="font-size:19px;color:${sc.concordancePct==null?'var(--t3)':sc.concordancePct>=60?'var(--green)':sc.concordancePct>=52?'var(--amber)':'var(--red)'}">${sc.concordancePct==null?'—':sc.concordancePct+'%'}</div><div class="st-d">${sc.concordancePairs} same-day winner/loser pairs · 50% = no information</div></div>
         <div><div class="st-l">Time to target</div><div class="st-v" style="font-size:19px">${sc.medDaysToTarget==null?'—':(sc.medDaysToTarget===0?'same day':sc.medDaysToTarget+'d')}</div><div class="st-d">${sc.sameDay} same day · ${sc.nextDay} next day</div></div>
       </div>`
     : `<div style="padding:16px;color:var(--t2);font-size:13px">No cohort has resolved yet. A pick resolves once a post-close ALL NSE.csv closes its issue day and the following session's bar is read.</div>`;
@@ -10082,6 +10116,16 @@ function applySavedFiltersForMode(mode){
             stopPct=Number(pol?.stopPct)>0?Number(pol.stopPct):null;
           }catch(e){}
           return {symbol:s.symbol,entryPrice:s.price,score:s.score,rank:i+1,
+            // v1127: the score's COMPONENTS, not just its total. `score = 100 x (setupPct x
+            // direction)^4` and `setupPct = max(compositePct, ignitePct)` — a MAX of two different
+            // rankers. Measured on 125 resolved picks, the ordering is non-monotonic and its
+            // within-day concordance is 43% (50% = no information), which is the signature of one
+            // of those two rankers being inverted through the mid-range. Which one was
+            // UNANSWERABLE from 34 issue dates of history, because only the total was ever stored.
+            compositePct:Number.isFinite(+s.compositePct)?+s.compositePct:null,
+            ignitePct:Number.isFinite(+s.ignitePct)?+s.ignitePct:null,
+            setupPct:Number.isFinite(+s.setupPct)?+s.setupPct:null,
+            directionConfirmed:!!s.directionConfirmed,
             radarRank:s.rank??null,entryReady:s.entryReady!==false,entryTiming:s.entryTiming||null,
             targetPct,stopPct,
             high1dAtIssue:Number(s.high1d)>0?Number(s.high1d):null,
