@@ -1,5 +1,5 @@
-const BUILD_TS='2026-08-14 15:10 IST'; // release build time (IST)
-const APP_VERSION=1134; // v1134: unfunded top-up rows sort last instead of first, and the audit finds the win metric itself is confounded.
+const BUILD_TS='2026-08-14 15:42 IST'; // release build time (IST)
+const APP_VERSION=1135; // v1135: forward-measured indicator effects (5-session-resolved, non-circular) finally drive the feature weights.
 // v1093: a baseline reward:risk MEASURED on the cross-section (last completed bhav session) instead of learned from the owner's own fills - reported on every row, deliberately not enforced. Includes v1092: position size split by Radar score / stop distance, so equally-scored names carry equal RUPEE risk, plus an opt-in Risk /trade cap.
 // v556: parse the NSE Market Activity Report (MA<date>.csv) — official Nifty %, advances/declines and sector index moves shown as market CONTEXT in the status bar (EOD data, display only, never fed into per-row scoring); MA added to the ℹ️ file manifest.
 // v555 market-cycle stage awareness (stateless, self-calibrating): per-row stage label (1 accumulation · 2 breakout · 3 event · 4 profit-booking · 5 re-accumulation · 6 second-leg); a quiet-accumulation signal (conjunction-of-percentiles) injected via the rocket-diagnostic weighting; sell-the-news decay off Recent earnings date (horizon = review days). v1065 makes the market-breadth gauge an entry-eligibility input while still never changing ranking.
@@ -3191,6 +3191,44 @@ function buildRadarSupplements(){
   Object.values(meta).forEach(m=>{m.eventToday=!!m.corpToday||!!(m.boardMeeting&&m.boardMeeting.date===today&&m.boardMeeting.isResults);});
   return meta;
 }
+// ── v1135 FORWARD EFFECTS DRIVE THE WEIGHTS (owner, 2026-08-14) ───────────────────────────────
+// THE UNLOCK: `f.effect` has been pinned to 0 since v1083/v1085 because the only separation the
+// scorer could measure came from a SAME-DAY label — stocks already up today — which leaks straight
+// into the features and makes the ranking ask "what resembles what has already moved".
+//
+// The Indicator Watch (v526) does not have that problem. It records each stock's DECILE on every
+// monotonic indicator, waits IW_WINDOW=5 trading sessions, and only then measures the gap between
+// the stocks that went on to move and those that did not. That label is FORWARD and resolved after
+// the fact, so an effect taken from it cannot leak. This is the one measured, non-circular effect
+// the app has ever had, and it is what now sets the weights.
+//
+// SELF-CALIBRATING, no new magnitude: each feature's effect is its own mean forward gap divided by
+// the LARGEST gap measured this session, so the strongest indicator lands near 1 and the rest scale
+// beneath it. Nothing is typed. The admission bar reuses the existing IW constants — IW_MIN_SESSIONS
+// resolved samples and |t| >= IW_T_CRIT — so a noisy indicator contributes exactly what it did
+// before: nothing.
+let _fwdEffMemo=null;
+function getForwardIndicatorEffects(){
+  const iw=FS.get(INDICATOR_WATCH_STORE)||{};
+  const log=iw.log||{};
+  if(_fwdEffMemo&&_fwdEffMemo.src===log) return _fwdEffMemo.map;
+  const raw=[];
+  Object.keys(log).forEach(name=>{
+    const e=log[name];
+    const arr=Array.isArray(e?.e5)?e.e5.map(Number).filter(Number.isFinite):[];
+    if(arr.length<IW_MIN_SESSIONS) return;
+    const n=arr.length, mean=arr.reduce((a,b)=>a+b,0)/n;
+    const sd=Math.sqrt(arr.reduce((a,b)=>a+(b-mean)*(b-mean),0)/(n-1));
+    const t=sd>0?mean/(sd/Math.sqrt(n)):null;
+    if(!(t!=null&&Math.abs(t)>=IW_T_CRIT)) return;          // not distinguishable from noise
+    raw.push({name,mean,n,t});
+  });
+  const peak=raw.reduce((m,r)=>Math.max(m,Math.abs(r.mean)),0);
+  const map=new Map();
+  if(peak>0) raw.forEach(r=>map.set(r.name,{effect:clamp01(r.mean/peak,-1,1),gap:r.mean,n:r.n,t:r.t}));
+  _fwdEffMemo={src:log,map};
+  return map;
+}
 function radarAnalyze(headers,rawRows,supplements={},heldSymbols=new Set()){
   const priceI=radarIdx(headers,'Price'),targetI=radarIdx(headers,'Price change %, 1 day'),sectorI=radarIdx(headers,'Sector'),symbolI=radarIdx(headers,'Symbol'),descI=radarIdx(headers,'Description');
   if(symbolI<0||priceI<0||targetI<0)throw Error('Expected Symbol, Price, and Price change %, 1 day columns.');
@@ -3329,6 +3367,8 @@ function radarAnalyze(headers,rawRows,supplements={},heldSymbols=new Set()){
   // 09:15, at every hour of the day. Cross-day learning from the RESOLVED labels is a separate
   // decision that needs accumulated evidence; nothing here consumes them.
   const rocketCohortTrusted=false;
+  // v1135: forward-measured effects, resolved once per pass (see getForwardIndicatorEffects).
+  const fwdEffects=(typeof getForwardIndicatorEffects==='function')?getForwardIndicatorEffects():new Map();
   const features=[];
   for(let i=0;i<headers.length;i++){
     const name=headers[i],rating=/rating/i.test(name);
@@ -3363,7 +3403,12 @@ function radarAnalyze(headers,rawRows,supplements={},heldSymbols=new Set()){
     // before it is modeled at all. See rocketCohortTrusted above for the full reasoning.
     // v1085: the separation is still MEASURED (the ledger shows it) but never APPLIED.
     f.diagnosticEffect=clamp01((mr-mo)*2,-1,1);
-    f.effect=rocketCohortTrusted?f.diagnosticEffect:0;
+    // v1135: the SAME-DAY separation stays diagnostic-only, exactly as v1085 requires. The effect
+    // that now drives the weight is the FORWARD one, measured 5 sessions after the fact.
+    const _fwd=fwdEffects.get(f.name);
+    f.forwardEffect=_fwd?_fwd.effect:null;
+    f.forwardSessions=_fwd?_fwd.n:0;
+    f.effect=_fwd?_fwd.effect:(rocketCohortTrusted?f.diagnosticEffect:0);
     f.reliability=Math.sqrt(f.coverage)*(rocketRows.length/(rocketRows.length+12));
     f.weight=(.07+Math.abs(f.effect))*.6+.4*Math.sqrt(f.coverage);
     features.push(f);
@@ -3930,7 +3975,10 @@ const INDICATOR_WATCH_STORE='rs_indicator_watch_v1';
 const IW_SCHEMA='indicator_watch_v1';
 const IW_WINDOW=5;            // forward trading sessions
 const IW_LOG_MAX=30;         // rolling evaluated-session tally per indicator/outcome
-const IW_MIN_SESSIONS=20;    // need this many resolved samples before any evaluation
+const IW_MIN_SESSIONS=5;     // v1135 (OWNER): 20 -> 5. An owner-set evidence preference, the same
+                             // category as the 20-order cap — not a calibrated output. It is the
+                             // gate on BOTH the backwards-indicator warning and, from v1135, on
+                             // whether a measured FORWARD effect may weight a feature.
 const IW_MIN_MOVERS=5;       // a session contributes to an outcome only with >= this many movers
 const IW_MIN_EFFECT=0.08;    // |mean forward effect| must clear this (not just be significant)
 const IW_SIGN_FRACTION=0.70; // >= this fraction of samples must share the backwards sign
