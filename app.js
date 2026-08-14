@@ -1,5 +1,5 @@
-const BUILD_TS='2026-08-14 10:01 IST'; // release build time (IST)
-const APP_VERSION=1131; // v1131: a top-up must pay for its own costs before it is funded, it reports what the whole position is worth at target, it defaults to the allocation capital, and it exports buy-only.
+const BUILD_TS='2026-08-14 12:10 IST'; // release build time (IST)
+const APP_VERSION=1132; // v1132: the top-up amount field no longer resets the caret on every keystroke, and its table is sortable like every other table in the app.
 // v1093: a baseline reward:risk MEASURED on the cross-section (last completed bhav session) instead of learned from the owner's own fills - reported on every row, deliberately not enforced. Includes v1092: position size split by Radar score / stop distance, so equally-scored names carry equal RUPEE risk, plus an opt-in Risk /trade cap.
 // v556: parse the NSE Market Activity Report (MA<date>.csv) — official Nifty %, advances/declines and sector index moves shown as market CONTEXT in the status bar (EOD data, display only, never fed into per-row scoring); MA added to the ℹ️ file manifest.
 // v555 market-cycle stage awareness (stateless, self-calibrating): per-row stage label (1 accumulation · 2 breakout · 3 event · 4 profit-booking · 5 re-accumulation · 6 second-leg); a quiet-accumulation signal (conjunction-of-percentiles) injected via the rocket-diagnostic weighting; sell-the-news decay off Recent earnings date (horizon = review days). v1065 makes the market-breadth gauge an entry-eligibility input while still never changing ranking.
@@ -6920,11 +6920,11 @@ function renderPerformance(){
     {key:'date',label:'Issue date',s:true},
     {key:'regime',label:'Market',s:true},
     {key:'picks',label:'Picks',s:true,fmt:v=>String(v)},
-    {key:'target',label:'Hit target',s:true,fmt:v=>String(v),clrFn:r=>(r&&r.target>0)?'var(--green)':'var(--t3)'},
-    {key:'stopped',label:'Stopped first',s:true,fmt:v=>String(v),clrFn:r=>(r&&r.stopped>0)?'var(--red)':'var(--t3)'},
-    {key:'expired',label:'Never moved',s:true,fmt:v=>String(v),clrFn:r=>(r&&r.expired>0)?'var(--amber)':'var(--t3)'},
+    {key:'target',label:'Hit target',s:true,fmt:v=>String(v),clrFn:v=>v>0?'var(--green)':'var(--t3)'},
+    {key:'stopped',label:'Stopped first',s:true,fmt:v=>String(v),clrFn:v=>v>0?'var(--red)':'var(--t3)'},
+    {key:'expired',label:'Never moved',s:true,fmt:v=>String(v),clrFn:v=>v>0?'var(--amber)':'var(--t3)'},
     {key:'pending',label:'Still open',s:true,fmt:v=>v?String(v):'—'},
-    {key:'hitPct',label:'Hit %',s:true,fmt:v=>v==null?'—':v+'%',clrFn:r=>(!r||r.hitPct==null)?'var(--t3)':r.hitPct>=40?'var(--green)':r.hitPct>=20?'var(--amber)':'var(--red)'},
+    {key:'hitPct',label:'Hit %',s:true,fmt:v=>v==null?'—':v+'%',clrFn:v=>v==null?'var(--t3)':v>=40?'var(--green)':v>=20?'var(--amber)':'var(--red)'},
     {key:'medDays',label:'Days to target',s:true,fmt:v=>v==null?'—':(v===0?'same day':v+'d')}
   ];
   const scTbl=makeSortableTable('perf-scorecard-tbl',scCols,sc.rows,'date',-1);
@@ -8966,11 +8966,20 @@ function applyFilters(){
 // Both are rendered synchronously after their markup is in the DOM.
 // ── v1130 the Top-up panel, rendered under Open Positions where the book already is ───────────
 let TOPUP_AMOUNT='';
+let _topUpTimer=null;
+// v1131 FIX: this used to rebuild the WHOLE panel on every keystroke, which destroyed and recreated
+// the input. Restoring the caret afterwards is impossible on `<input type="number">` — setSelectionRange
+// throws/no-ops on numeric inputs — so the caret fell back to position 0 and every new digit was
+// inserted at the FRONT: typing 2000 produced "0002". Same lesson as the Goal popover: re-render the
+// RESULTS, never the field. Debounced too, because a plan walks every holding's exit policy.
 function onTopUpAmountChange(v){
   TOPUP_AMOUNT=String(v??'').trim();
-  const el=document.getElementById('rankTopUp');
-  if(el){ el.innerHTML=buildTopUpPanel(); const inp=document.getElementById('topUpAmt');
-    if(inp){ inp.value=TOPUP_AMOUNT; inp.focus(); inp.setSelectionRange(inp.value.length,inp.value.length); } }
+  clearTimeout(_topUpTimer);
+  _topUpTimer=setTimeout(refreshTopUpBody,180);
+}
+function refreshTopUpBody(){
+  const body=document.getElementById('topUpBody');
+  if(body){ body.innerHTML=buildTopUpBody(); _topUpTbl?.render(); }
 }
 // v1131 (owner): "I don't want to enter capital in the top-up plan again when there's already a
 // field above used for allocation." So this follows the SAME convention as Capital Rs and Max Alloc
@@ -9024,7 +9033,6 @@ async function exportTopUpBasket(){
   }
 }
 function buildTopUpPanel(){
-  const plan=buildTopUpPlan(getEffectiveTopUpAmount());
   const money=v=>fmtINR(v||0);
   const head=`<div style="display:flex;gap:14px;align-items:flex-end;flex-wrap:wrap;padding:10px 16px;border-bottom:1px solid var(--border)">
       <label style="display:flex;flex-direction:column;gap:3px"><span style="font-size:11px;color:var(--t3);text-transform:uppercase;letter-spacing:.06em">Distribute ₹</span>
@@ -9032,57 +9040,63 @@ function buildTopUpPanel(){
           oninput="onTopUpAmountChange(this.value)"
           title="How much to spread across the stocks you already hold. BLANK uses the same Capital ₹ the buy basket allocates from (shown greyed) — type a value only when you want to put just part of it to work. Note the app cannot see your free cash: no input file carries it, so this is capital, not cash-in-hand."
           style="${goalFieldStyle?goalFieldStyle():'padding:6px 8px'}"></label>
-      <div><div class="st-l">Deployed</div><div class="st-v" style="font-size:17px">${money(plan.deployed)}</div>
-        <div class="st-d">of ${money(plan.budget)}${TOPUP_AMOUNT===''?' (Capital ₹)':''} · ${plan.leftover>0?money(plan.leftover)+' left over':'fully deployed'}</div></div>
-      <div style="align-self:center"><button onclick="exportTopUpBasket()" class="btn"
+      <button onclick="exportTopUpBasket()" class="btn"
         title="Save these top-ups as a Zerodha basket — BUY orders only, no GTT. A top-up merges into a holding whose exit is already armed, so attaching a second GTT here would risk selling the same shares twice."
-        style="padding:7px 14px;font-weight:700">🧺 Export Top-ups</button></div>
-      <div><div class="st-l">Eligible holdings</div><div class="st-v" style="font-size:17px">${plan.eligible} / ${plan.positions}</div>
-        <div class="st-d">the rest state why below</div></div>
+        style="padding:7px 14px;font-weight:700;align-self:flex-end">🧺 Export Top-ups</button>
     </div>`;
-  const rows=plan.rows.map(r=>{
-    const add=r.addQty>0
-      ? `<b style="color:var(--green)">+${r.addQty}</b> <span style="color:var(--t3)">sh</span> · ${money(r.addRs)}`
-      : `<span style="color:var(--t3);font-size:12px">—</span>`;
-    const avgCell=r.newAvg!=null
-      ? `${money(r.avg)} → <b>${money(r.newAvg)}</b> <span style="color:${r.avgShiftPct<0?'var(--green)':'var(--amber)'};font-size:12px">(${r.avgShiftPct>0?'+':''}${r.avgShiftPct}%)</span>`
-      : `${r.avg>0?money(r.avg):'—'}`;
-    return `<tr>
-      <td style="padding:5px 10px">${symbolChartButton?symbolChartButton(r.symbol):escHtml(r.symbol)}</td>
-      <td style="padding:5px 10px;text-align:right">${r.heldQty}</td>
-      <td style="padding:5px 10px;text-align:right">${r.price>0?money(r.price):'—'}</td>
-      <td style="padding:5px 10px;text-align:right">${r.score>0?radarScoreCell(r.score):'<span style="color:var(--t3)">—</span>'}</td>
-      <td style="padding:5px 10px;text-align:right">${add}</td>
-      <td style="padding:5px 10px;text-align:right;white-space:nowrap">${avgCell}</td>
-      <td style="padding:5px 10px;text-align:right;white-space:nowrap">${r.pnlPctNow!=null
-        ? `<span style="color:${r.pnlPctNow>=0?'var(--green)':'var(--red)'}">${r.pnlPctNow>0?'+':''}${r.pnlPctNow}%</span>`
-        : '<span style="color:var(--t3)">—</span>'}</td>
-      <td style="padding:5px 10px;text-align:right;white-space:nowrap">${r.blendedPnlAtTargetRs!=null
-        ? `<span style="color:${r.blendedPnlAtTargetRs>=0?'var(--green)':'var(--red)'}">${r.blendedPnlAtTargetRs>0?'+':''}${money(r.blendedPnlAtTargetRs)}</span>`
-        : '<span style="color:var(--t3)">—</span>'}</td>
-      <td style="padding:5px 10px;text-align:right;white-space:nowrap">${r.addNetRs!=null
-        ? `<b style="color:${r.addNetRs>0?'var(--green)':'var(--red)'}">${r.addNetRs>0?'+':''}${money(r.addNetRs)}</b> <span style="color:var(--t3);font-size:11px">@${r.tgtPct}%</span>`
-        : '<span style="color:var(--t3);font-size:12px">—</span>'}</td>
-      <td style="padding:5px 10px;color:var(--t3);font-size:12px">${escHtml(r.reason||'')}</td></tr>`;
-  }).join('');
   return `<div style="background:var(--bg-card);border:1px solid var(--border);border-radius:10px;margin-top:12px;overflow:hidden">
     <div style="padding:10px 16px;font-size:12px;font-weight:700;color:var(--t2);text-transform:uppercase;letter-spacing:.1em;border-bottom:1px solid var(--border)">Top-up plan — spreading capital across what you already hold</div>
     ${head}
-    <div style="overflow:auto"><table style="width:100%;font-size:13px;border-collapse:collapse">
-      <tr style="color:var(--t3);font-size:11px;text-transform:uppercase;letter-spacing:.06em">
-        <td style="padding:5px 10px">Stock</td><td style="padding:5px 10px;text-align:right">Held</td>
-        <td style="padding:5px 10px;text-align:right">Price</td><td style="padding:5px 10px;text-align:right">Score</td>
-        <td style="padding:5px 10px;text-align:right">Add</td><td style="padding:5px 10px;text-align:right">Avg cost</td>
-        <td style="padding:5px 10px;text-align:right">P&amp;L now</td>
-        <td style="padding:5px 10px;text-align:right">Position @ tgt</td>
-        <td style="padding:5px 10px;text-align:right">Add earns</td>
-        <td style="padding:5px 10px">Why not</td></tr>
-      ${rows}
-    </table></div>
-    <div style="padding:10px 16px;font-size:12px;color:var(--t3);line-height:1.55">
-      Sized by the SAME rules as a fresh buy: conviction (Radar score ÷ this stock's own stop), the 0.10% turnover rail, Max Allocation headroom against the position you ALREADY hold, and the v1070 cushion — an add to a stock in profit is bounded so that if the new entry's stop is hit, the blended position is still not at a loss. Money follows conviction, never the size of the loss: this deliberately does not average down by how far a holding has fallen. <b>Avg cost</b> shows what each add does to your blended average, which is the number that decides where the position breaks even. <b>Add earns</b> is what the extra shares alone net at the row's target — and topping up does NOT pay costs twice: under CNC the buy side is fully proportional (two 100-share orders cost exactly what one 200-share order costs), and the flat ₹15.34 DP fee is charged once per stock per sell day, which the shares you already hold are paying anyway. Only the incremental sell charge is counted against the add. A holding is offered <b>nothing</b> unless its largest permitted add clears that same minimum — a token top-up that nets less than the fees is worse than no top-up. <b>Position @ tgt</b> is what the WHOLE holding is worth if that target prints: the target lifts the shares you add, but on a position far underwater it need not lift the position, and that is the number to decide on.
-    </div></div>`;
+    <div id="topUpBody">${buildTopUpBody()}</div>
+  </div>`;
 }
+// The COMPUTED half. Re-rendered on every keystroke; the input above is never touched.
+let _topUpTbl=null;
+// The COMPUTED half. Re-rendered on every keystroke; the input above is never touched.
+// v1131: built with makeSortableTable like every other table in the app, so it sorts on any column
+// and remembers a dragged column order (v536). It was hand-built raw HTML, which is why it did not.
+function buildTopUpBody(){
+  const plan=buildTopUpPlan(getEffectiveTopUpAmount());
+  const money=v=>fmtINR(v||0);
+  const dash='<span style="color:var(--t3)">—</span>';
+  const cols=[
+    {key:'symbol',label:'Stock',align:'left',fmt:(v)=>symbolChartButton?symbolChartButton(v):escHtml(v)},
+    {key:'heldQty',label:'Held',fmt:v=>v>0?String(v):dash},
+    {key:'price',label:'Price',fmt:v=>v>0?money(v):dash},
+    {key:'score',label:'Score',fmt:v=>Number.isFinite(v)&&v>0?radarScoreCell(v):dash},
+    {key:'addQty',label:'Add sh',bold:true,fmt:(v)=>v>0?'+'+v:dash,
+      clrFn:v=>v>0?'var(--green)':'var(--t3)'},
+    {key:'addRs',label:'Add ₹',fmt:v=>v>0?money(v):dash},
+    {key:'newAvg',label:'New avg',fmt:(v,r)=>v>0
+      ? `${money(r.avg)} → <b>${money(v)}</b> <span style="font-size:11px;color:${r.avgShiftPct<0?'var(--green)':'var(--amber)'}">(${r.avgShiftPct>0?'+':''}${r.avgShiftPct}%)</span>`
+      : (r.avg>0?money(r.avg):dash)},
+    {key:'pnlPctNow',label:'P&L now',fmt:v=>Number.isFinite(v)?(v>0?'+':'')+v+'%':dash,
+      clrFn:v=>!Number.isFinite(v)?'var(--t3)':v>=0?'var(--green)':'var(--red)'},
+    {key:'blendedPnlAtTargetRs',label:'Position @ tgt',fmt:v=>Number.isFinite(v)?(v>0?'+':'')+money(v):dash,
+      clrFn:v=>!Number.isFinite(v)?'var(--t3)':v>=0?'var(--green)':'var(--red)'},
+    {key:'addNetRs',label:'Add earns',bold:true,
+      fmt:(v,r)=>Number.isFinite(v)?`${v>0?'+':''}${money(v)} <span style="font-size:11px;color:var(--t3)">@${r.tgtPct}%</span>`:dash,
+      clrFn:v=>!Number.isFinite(v)?'var(--t3)':v>0?'var(--green)':'var(--red)'},
+    {key:'reason',label:'Why not',align:'left',fmt:v=>v?`<span style="color:var(--t3);font-size:12px">${escHtml(v)}</span>`:''}
+  ];
+  const totals={symbol:'TOTAL',heldQty:null,price:null,score:null,
+    addQty:plan.rows.reduce((n,r)=>n+(r.addQty||0),0),
+    addRs:plan.deployed,newAvg:null,pnlPctNow:null,
+    blendedPnlAtTargetRs:plan.rows.reduce((n,r)=>n+(Number(r.blendedPnlAtTargetRs)||0),0),
+    addNetRs:plan.rows.reduce((n,r)=>n+(Number(r.addNetRs)||0),0),reason:''};
+  _topUpTbl=makeSortableTable('top-up-plan',cols,plan.rows,'addRs',-1,null,totals);
+  return `<div style="display:flex;gap:14px;align-items:flex-end;flex-wrap:wrap;padding:10px 16px;border-bottom:1px solid var(--border)">
+      <div><div class="st-l">Deployed</div><div class="st-v" style="font-size:17px">${money(plan.deployed)}</div>
+        <div class="st-d">of ${money(plan.budget)}${TOPUP_AMOUNT===''?' (Capital ₹)':''} · ${plan.leftover>0?money(plan.leftover)+' left over':'fully deployed'}</div></div>
+      <div><div class="st-l">Eligible holdings</div><div class="st-v" style="font-size:17px">${plan.eligible} / ${plan.positions}</div>
+        <div class="st-d">the rest state why below</div></div>
+    </div>
+    <div style="overflow:auto">${_topUpTbl.getHtml()}</div>
+    <div style="padding:10px 16px;font-size:12px;color:var(--t3);line-height:1.55">
+      Sized by the SAME rules as a fresh buy: conviction (Radar score ÷ this stock's own stop), the 0.10% turnover rail, Max Allocation headroom against the position you ALREADY hold, and the v1070 cushion — an add to a stock in profit is bounded so that if the new entry's stop is hit, the blended position is still not at a loss. Money follows conviction, never the size of the loss: this deliberately does not average down by how far a holding has fallen. Topping up does NOT pay costs twice — under CNC the buy side is fully proportional (two 100-share orders cost exactly what one 200-share order costs), and the flat ₹15.34 DP fee is charged once per stock per sell day, which the shares you already hold are paying anyway; only the incremental sell charge is counted against the add. A holding is offered <b>nothing</b> unless its largest permitted add clears the minimum net — a token top-up that nets less than the fees is worse than no top-up. <b>Position @ tgt</b> is what the WHOLE holding is worth if that target prints.
+    </div>`;
+}
+
 function renderRankingsPanels(){
   const q=rankingsSearchQuery();
   const remEl=document.getElementById('rankRemoved');
@@ -9104,7 +9118,12 @@ function renderRankingsPanels(){
   const topEl=document.getElementById('rankTopUp');
   if(topEl){
     const a=document.activeElement;
-    if(!(a&&topEl.contains(a)&&/^(INPUT|SELECT)$/.test(a.tagName))) topEl.innerHTML=buildTopUpPanel();
+    if(a&&topEl.contains(a)&&/^(INPUT|SELECT)$/.test(a.tagName)){
+      refreshTopUpBody();                 // typing: refresh the RESULTS only, never the field
+    } else {
+      topEl.innerHTML=buildTopUpPanel();
+      _topUpTbl?.render();
+    }
   }
 }
 // Map configured-surveillance rule keys → their human labels.
