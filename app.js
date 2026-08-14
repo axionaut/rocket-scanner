@@ -1,5 +1,5 @@
-const BUILD_TS='2026-08-14 09:19 IST'; // release build time (IST)
-const APP_VERSION=1129; // v1129: scheduled withdrawals (amount + daily/weekly/monthly) return to the goal arithmetic, separate from the reinvest split, and raise the required daily rate accordingly.
+const BUILD_TS='2026-08-14 09:43 IST'; // release build time (IST)
+const APP_VERSION=1130; // v1130: a top-up planner for existing holdings, the Goal module recalculating live like the filter bar, and the market-cycle stage recorded so it can finally be graded.
 // v1093: a baseline reward:risk MEASURED on the cross-section (last completed bhav session) instead of learned from the owner's own fills - reported on every row, deliberately not enforced. Includes v1092: position size split by Radar score / stop distance, so equally-scored names carry equal RUPEE risk, plus an opt-in Risk /trade cap.
 // v556: parse the NSE Market Activity Report (MA<date>.csv) — official Nifty %, advances/declines and sector index moves shown as market CONTEXT in the status bar (EOD data, display only, never fed into per-row scoring); MA added to the ℹ️ file manifest.
 // v555 market-cycle stage awareness (stateless, self-calibrating): per-row stage label (1 accumulation · 2 breakout · 3 event · 4 profit-booking · 5 re-accumulation · 6 second-leg); a quiet-accumulation signal (conjunction-of-percentiles) injected via the rocket-diagnostic weighting; sell-the-news decay off Recent earnings date (horizon = review days). v1065 makes the market-breadth gauge an entry-eligibility input while still never changing ranking.
@@ -2311,6 +2311,7 @@ function recordRecommendationOutcomeScan(scan){
         control:p.control?true:undefined,          // v1128: evidence-only row, never a recommendation
         // v1127: carried through the whitelist deliberately — v1085 added barrier fields to the
         // caller and NOT here, and every pick silently lost them for 9 releases. Same trap.
+        stage:p.stage??null,
         compositePct:p.compositePct??null,
         ignitePct:p.ignitePct??null,
         setupPct:p.setupPct??null,
@@ -4867,7 +4868,24 @@ function goalImpliedEndDate(remainingDays){
   }
   return cur.toISOString().slice(0,10);
 }
-function onGoalChange(){
+// ── v1130 (owner): "the goal module behaves differently than the filters elsewhere" ───────────
+// The filter bar recalculates as you type (debounced) and persists as it goes. The goal module used
+// `onchange`, which for a number/date input fires only on BLUR, so nothing moved until you clicked
+// away — and v1110's focus guard then blocked the popover rebuild anyway, freezing the numbers.
+// Now: every field is `oninput` on a 180ms debounce (the same shape as scheduleApplyFilters), the
+// READOUT alone is re-rendered so the element under the cursor is never replaced, and `onchange`
+// fires the same handler immediately so committing a value (blur, Enter, picking a date) is instant.
+let _goalChangeTimer=null;
+function onGoalChange(immediate){
+  clearTimeout(_goalChangeTimer);
+  if(immediate===true) return _applyGoalChange();
+  _goalChangeTimer=setTimeout(_applyGoalChange,180);
+}
+function refreshGoalReadout(){
+  const el=document.getElementById('goalReadout');
+  if(el) el.innerHTML=buildGoalReadout();
+}
+function _applyGoalChange(){
   const t=parseFloat(document.getElementById('goalTarget')?.value);
   const e=String(document.getElementById('goalEnd')?.value||'').trim();
   const w=parseFloat(document.getElementById('goalWd')?.value);
@@ -4883,8 +4901,10 @@ function onGoalChange(){
       const t=String(v.value||'').trim();if(t==='')return null;
       const n=Number(t);return isFinite(n)?Math.min(100,Math.max(0,n)):cur.reinvestPct;})()
   });
+  invalidateTargetAnchorCaches();   // capital/goal feed the anchor; a stale memo would show old maths
   renderStats();
-  renderGoalPopover();
+  refreshGoalReadout();             // NOT renderGoalPopover(): that would replace the live field
+  scheduleApplyFilters();           // the required rate moves targets, which moves the board
 }
 function goalTradingDaysUntil(dateStr){
   const end=new Date(dateStr+'T12:00:00Z');
@@ -5405,6 +5425,33 @@ function buildGoalPopoverContent(){
   const req=getGoalRequiredNetPct();
   const ach=basis>0?getGoalAchievedDailyRate(basis):null;
 
+  return `<div style="display:flex;align-items:baseline;justify-content:space-between;gap:10px;margin-bottom:10px">
+    <div style="font-size:15px;color:var(--t1);font-weight:800">Goal</div>
+    <div style="font-size:12px;color:var(--t3)">${remaining} trading day${remaining===1?'':'s'} left</div>
+  </div>
+  <div style="display:grid;grid-template-columns:1.15fr 1.35fr .8fr;gap:8px">
+    <label><span style="${_lbl}">Earn ₹</span><input id="goalTarget" type="number" value="${g.target}" style="${goalFieldStyle()}" oninput="onGoalChange()" onchange="onGoalChange(true)" onfocus="this.style.borderColor='var(--amber)'" onblur="this.style.borderColor='var(--border)'" title="Trading profit to generate from current total capital within the horizon — not a balance to reach."></label>
+    <label><span style="${_lbl}">By</span><input id="goalEnd" type="date" min="${getSessionDate()}" value="${g.endDate}" style="${goalFieldStyle()}" oninput="onGoalChange()" onchange="onGoalChange(true)" onfocus="this.style.borderColor='var(--amber)'" onblur="this.style.borderColor='var(--border)'" title="Deadline for the earnings target. Trading days left are counted from today to this date, skipping weekends and NSE holidays."></label>
+    <label><span style="${_lbl}">Withdraw ₹</span><input id="goalWd" type="number" min="0" step="100" placeholder="0" value="${g.withdrawAmount?g.withdrawAmount:''}" oninput="onGoalChange()" onchange="onGoalChange(true)" title="A FIXED rupee amount you take out of the account on the schedule beside this — rent, salary, expenses. It leaves whether or not the day earned, so it shrinks the compounding base and RAISES the daily rate the goal needs. Separate from Reinvest %, which only splits the days that do earn. Blank or 0 = no scheduled withdrawal." style="${goalFieldStyle()}" onfocus="this.style.borderColor='var(--amber)'" onblur="this.style.borderColor='var(--border)'"></label>
+    <label><span style="${_lbl}">Every</span><select id="goalWdFreq" onchange="onGoalChange(true)" title="How often the Withdraw ₹ amount leaves the account. Daily = every trading day; Weekly = the first trading day of each new week; Monthly = the first trading day of each new month." style="${goalFieldStyle()}" onfocus="this.style.borderColor='var(--amber)'" onblur="this.style.borderColor='var(--border)'">
+      <option value="daily"${g.withdrawFreq==='daily'?' selected':''}>Day</option>
+      <option value="weekly"${g.withdrawFreq==='weekly'?' selected':''}>Week</option>
+      <option value="monthly"${g.withdrawFreq==='monthly'?' selected':''}>Month</option>
+    </select></label>
+    <label><span style="${_lbl}">Reinvest %</span><input id="goalReinvest" type="number" min="0" max="100" step="1" placeholder="55" value="${g.reinvestPct==null?'':g.reinvestPct}" oninput="onGoalChange()" onchange="onGoalChange(true)" title="Share of each day's gain that stays invested and compounds; the rest is taken out as cash. Blank uses 55%." style="${goalFieldStyle()}" onfocus="this.style.borderColor='var(--amber)'" onblur="this.style.borderColor='var(--border)'"></label>
+  </div>
+  <div id="goalReadout">${buildGoalReadout()}</div>`;
+}
+// ── v1130: the READOUT is a separate builder so it can refresh on every keystroke WITHOUT
+// replacing the input being typed into. v1110's focus guard protects the fields but also froze these
+// numbers, which is what made the module feel unlike the rest of the page: you changed a value and
+// nothing moved until you clicked away.
+function buildGoalReadout(){
+  const g=getGoalConfig();
+  const remaining=goalRemainingDays(g);
+  const basis=getGoalPortfolioBasis();
+  const req=getGoalRequiredNetPct();
+  const ach=basis>0?getGoalAchievedDailyRate(basis):null;
   // DEMAND — what the goal asks of every trading day, in both % and rupees.
   const needTile=(()=>{
     if(!(basis>0)) return goalTile('Need per day','—','var(--t3)',
@@ -5413,8 +5460,23 @@ function buildGoalPopoverContent(){
       'Pick a later date above');
     if(req==null) return goalTile('Need per day','not reachable','var(--red)',
       'This target and deadline would need over 50% a day');
+    // v1130: when a withdrawal is set, say how much of the required rate IS the withdrawal. Measured
+    // 2026-08-14: Rs 1.54L/month on a Rs 4.52L book (34% of capital) took the rate 1.301% -> 2.570%
+    // — 98% harder — and blocked 59.5% of the board through the target anchor. That is the arithmetic
+    // working, but it is invisible unless the two halves are separated.
+    const _wdAmt=Number(g.withdrawAmount)||0;
+    let _wdNote='';
+    if(_wdAmt>0){
+      const _bare=solveGoalDailyRate(basis,g.target,remaining,{withdrawAmount:0,withdrawFreq:g.withdrawFreq},g.reinvestPct);
+      if(_bare!=null){
+        const _bp=_bare*100, _add=req-_bp;
+        const _perMonth=g.withdrawFreq==='daily'?_wdAmt*21:g.withdrawFreq==='weekly'?_wdAmt*4.33:_wdAmt;
+        const _share=basis>0?(_perMonth/basis*100):0;
+        _wdNote=` · of which <b style="color:${_add>_bp?'var(--red)':'var(--amber)'}">${_add>0?'+':''}${_add.toFixed(2)}%</b> is your ${fmtINR(_wdAmt)} ${g.withdrawFreq} withdrawal (${_share.toFixed(0)}% of capital a month); without it ${_bp.toFixed(2)}%`;
+      }
+    }
     return goalTile('Need per day','+'+req.toFixed(2)+'%','var(--amber)',
-      `≈ ₹${goalFmtRs(basis*req/100)} net on ₹${goalFmtRs(basis)} capital`,
+      `≈ ₹${goalFmtRs(basis*req/100)} net on ₹${goalFmtRs(basis)} capital${_wdNote}`,
       'Required NET earnings per NSE trading day, as % of capital. Capital defaults to your computed deployed book and is overridden by the Capital ₹ filter field.');
   })();
 
@@ -5429,23 +5491,7 @@ function buildGoalPopoverContent(){
       'Realised net P&L per trading day over the last 30 days, divided by capital.');
   })();
 
-  return `<div style="display:flex;align-items:baseline;justify-content:space-between;gap:10px;margin-bottom:10px">
-    <div style="font-size:15px;color:var(--t1);font-weight:800">Goal</div>
-    <div style="font-size:12px;color:var(--t3)">${remaining} trading day${remaining===1?'':'s'} left</div>
-  </div>
-  <div style="display:grid;grid-template-columns:1.15fr 1.35fr .8fr;gap:8px">
-    <label><span style="${_lbl}">Earn ₹</span><input id="goalTarget" type="number" value="${g.target}" style="${goalFieldStyle()}" onchange="onGoalChange()" onfocus="this.style.borderColor='var(--amber)'" onblur="this.style.borderColor='var(--border)'" title="Trading profit to generate from current total capital within the horizon — not a balance to reach."></label>
-    <label><span style="${_lbl}">By</span><input id="goalEnd" type="date" min="${getSessionDate()}" value="${g.endDate}" style="${goalFieldStyle()}" onchange="onGoalChange()" onfocus="this.style.borderColor='var(--amber)'" onblur="this.style.borderColor='var(--border)'" title="Deadline for the earnings target. Trading days left are counted from today to this date, skipping weekends and NSE holidays."></label>
-    <label><span style="${_lbl}">Withdraw ₹</span><input id="goalWd" type="number" min="0" step="100" placeholder="0" value="${g.withdrawAmount?g.withdrawAmount:''}" onchange="onGoalChange()" title="A FIXED rupee amount you take out of the account on the schedule beside this — rent, salary, expenses. It leaves whether or not the day earned, so it shrinks the compounding base and RAISES the daily rate the goal needs. Separate from Reinvest %, which only splits the days that do earn. Blank or 0 = no scheduled withdrawal." style="${goalFieldStyle()}" onfocus="this.style.borderColor='var(--amber)'" onblur="this.style.borderColor='var(--border)'"></label>
-    <label><span style="${_lbl}">Every</span><select id="goalWdFreq" onchange="onGoalChange()" title="How often the Withdraw ₹ amount leaves the account. Daily = every trading day; Weekly = the first trading day of each new week; Monthly = the first trading day of each new month." style="${goalFieldStyle()}" onfocus="this.style.borderColor='var(--amber)'" onblur="this.style.borderColor='var(--border)'">
-      <option value="daily"${g.withdrawFreq==='daily'?' selected':''}>Day</option>
-      <option value="weekly"${g.withdrawFreq==='weekly'?' selected':''}>Week</option>
-      <option value="monthly"${g.withdrawFreq==='monthly'?' selected':''}>Month</option>
-    </select></label>
-    <label><span style="${_lbl}">Reinvest %</span><input id="goalReinvest" type="number" min="0" max="100" step="1" placeholder="55" value="${g.reinvestPct==null?'':g.reinvestPct}" onchange="onGoalChange()" oninput="onGoalChange()" title="Share of each day's gain that stays invested and compounds; the rest is taken out as cash. Blank uses 55%." style="${goalFieldStyle()}" onfocus="this.style.borderColor='var(--amber)'" onblur="this.style.borderColor='var(--border)'"></label>
-    <span style="display:none"><input id="goalWd" type="hidden" value="0"></span>
-  </div>
-  <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-top:10px">${needTile}${paceTile}</div>
+  return `  <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-top:10px">${needTile}${paceTile}</div>
   ${(()=>{
     // Projected finish date. PRIMARY = your REALISTIC pace from the tradebook (what you
     // actually earn per day, 30d) — the honest picture the owner asked for (v544).
@@ -5507,6 +5553,7 @@ function buildGoalPopoverContent(){
   })()}
   <div style="font-size:12px;color:var(--t3);margin-top:8px;line-height:1.5">${g.reinvestPct}% of each day's gain compounds · ${(100-g.reinvestPct).toFixed(0)}% taken out as cash</div>`;
 }
+
 function renderGoalPopover(){
   const content=document.getElementById('goalPopoverContent');
   if(!content) return;
@@ -8219,6 +8266,95 @@ function getAllocationBlockReason(s,ctx=null){
   }
   return null;
 }
+// ── v1130 TOP-UP PLANNER (owner, 2026-08-14) ──────────────────────────────────────────────────
+// "Tell me how much to top up, if I want to distribute my capital to my existing holdings."
+//
+// This is the BUY allocator pointed at the book instead of at the ranking, and it reuses the same
+// three rules rather than inventing a second sizing model:
+//   * the v1070 CUSHION — an add to a position already in PROFIT is bounded so that if the new
+//     entry's own stop is hit, the blended position is still not at a loss. Underwater, the add
+//     pulls the average down, which is the point, so only the normal rails apply.
+//   * the 0.10% TURNOVER rail and Max Alloc, both measured against the position's CURRENT size, so
+//     a name already at its ceiling is offered nothing rather than pushed past it.
+//   * conviction weighting (score / stop), identical to computeAlloc, so the money goes where the
+//     scorer still likes the setup — not to whichever holding is furthest underwater. Averaging down
+//     by size of loss is the one rule this deliberately does NOT implement.
+//
+// A holding absent from today's scan (delisted from the EQ universe, moved to BE, or simply not in
+// the export) gets NOTHING, with a stated reason: there is no current evidence to size it on.
+function getTopUpCeiling(pos,row,ctx){
+  const c=ctx||getAllocationPassContext();
+  const price=Number(row?.price)>0?Number(row.price):Number(pos?.ltp)||0;
+  if(!(price>0)) return {ceiling:0,reason:'no live price'};
+  const heldQty=Number(pos?.qty)||0, avg=Number(pos?.avg)||0;
+  const cushion=getHeldTopUpNotionalCap(row,price,c.heldMap);
+  if(!(cushion>0)) return {ceiling:0,reason:'already in profit with no cushion — an add would put the blended position at a loss on its own stop'};
+  const turnover=getTurnoverAllocationCap(row);
+  if(!(turnover>0)) return {ceiling:0,reason:'no daily turnover — market-impact safety cannot be verified'};
+  // Max Alloc governs the FINAL position, so the headroom is what the rail allows minus what is held.
+  const maxAlloc=c.maxAlloc>0?c.maxAlloc:c.capital;
+  const headroom=Math.max(0,maxAlloc-heldQty*price);
+  if(!(headroom>=price)) return {ceiling:0,reason:'already at the Max Allocation rail for this stock'};
+  const ceiling=Math.min(cushion,turnover,headroom);
+  if(!(ceiling>=price)) return {ceiling:0,reason:'ceiling '+fmtINR(ceiling)+' is below one share at '+fmtINR(price)};
+  return {ceiling,reason:null,price,heldQty,avg,cushion,turnover,headroom};
+}
+function buildTopUpPlan(amount){
+  const ctx=getAllocationPassContext();
+  const budget=Number(amount)>0?Number(amount):0;
+  const byScan=new Map(ALL.map(r=>[r.symbol,r]));
+  const rows=[];
+  Object.values(getCombinedOpenPositionMap()).forEach(pos=>{
+    if(!pos?.symbol||!(Number(pos.qty)>0)) return;
+    const row=byScan.get(pos.symbol)||null;
+    const base={symbol:pos.symbol,heldQty:Number(pos.qty)||0,avg:Number(pos.avg)||0,
+      score:Number(row?.rocketScore),rank:row?.rank??null,addQty:0,addRs:0,newAvg:null,reason:null};
+    if(!row){rows.push({...base,price:Number(pos.ltp)||0,
+      reason:'not in today’s scan — no current evidence to size an add on'});return;}
+    const cap=getTopUpCeiling(pos,row,ctx);
+    rows.push({...base,price:(cap.price??(Number(row.price)||0)),ceiling:cap.ceiling,reason:cap.reason,
+      stopPct:getRowStopDistancePct(row)});
+  });
+  // Conviction weight, exactly as computeAlloc: score / stop distance.
+  const eligible=rows.filter(r=>!r.reason&&r.ceiling>0&&r.price>0);
+  const wt=r=>{const sc=Math.max(0,Number(r.score)||0),st=Number(r.stopPct)||0;return sc>0&&st>0?sc/st:0;};
+  const total=eligible.reduce((s,r)=>s+wt(r),0);
+  const debit=(px,q)=>q>0?px*q+calcZerodhaCharges(px,q,false,false,false):0;
+  let residual=budget;
+  if(total>0&&budget>0){
+    // Pass 1: proportional to conviction, floored to whole shares and bounded by the row's ceiling.
+    eligible.forEach(r=>{
+      const share=Math.min(budget*(wt(r)/total),r.ceiling);
+      let q=Math.floor(share/r.price);
+      while(q>0&&debit(r.price,q)>Math.min(residual,r.ceiling)+0.001) q--;
+      if(q>0){r.addQty=q;r.addRs=debit(r.price,q);residual-=r.addRs;}
+    });
+    // Pass 2: residual walks by CONVICTION, one share at a time — the spare rupee goes to the best
+    // setup, the same rule the buy basket uses.
+    let progress=true;
+    const byConv=[...eligible].sort((a,b)=>(Number(b.score)||0)-(Number(a.score)||0));
+    while(residual>0&&progress){
+      progress=false;
+      for(const r of byConv){
+        const next=debit(r.price,r.addQty+1)-r.addRs;
+        if(next>residual+0.001) continue;
+        if((r.addQty+1)*r.price>r.ceiling+0.5) continue;
+        r.addQty++; r.addRs+=next; residual-=next; progress=true;
+      }
+    }
+  }
+  rows.forEach(r=>{
+    if(r.addQty>0&&r.avg>0){
+      r.newAvg=+(((r.avg*r.heldQty)+(r.price*r.addQty))/(r.heldQty+r.addQty)).toFixed(2);
+      r.avgShiftPct=+(((r.newAvg-r.avg)/r.avg)*100).toFixed(2);
+    }
+    if(!r.reason&&r.addQty===0) r.reason=budget>0?'budget exhausted before this holding':'enter an amount to distribute';
+  });
+  const deployed=rows.reduce((s,r)=>s+(r.addRs||0),0);
+  return {rows:rows.sort((a,b)=>(b.addRs||0)-(a.addRs||0)||(Number(b.score)||0)-(Number(a.score)||0)),
+          budget,deployed,leftover:Math.max(0,budget-deployed),
+          eligible:eligible.length,positions:rows.length};
+}
 function computeAlloc(capital, selList){
   if(!capital||!selList.length) return {};
   const maxAllocV=getEffectiveMaxAlloc(); // typed value, else capital ÷ average entry-day positions
@@ -8742,6 +8878,60 @@ function applyFilters(){
 // Latest Session and Open Positions sit under the recommendations table on Rankings and
 // answer the same search box, so a symbol is found wherever it currently lives (v530).
 // Both are rendered synchronously after their markup is in the DOM.
+// ── v1130 the Top-up panel, rendered under Open Positions where the book already is ───────────
+let TOPUP_AMOUNT='';
+function onTopUpAmountChange(v){
+  TOPUP_AMOUNT=String(v??'').trim();
+  const el=document.getElementById('rankTopUp');
+  if(el){ el.innerHTML=buildTopUpPanel(); const inp=document.getElementById('topUpAmt');
+    if(inp){ inp.value=TOPUP_AMOUNT; inp.focus(); inp.setSelectionRange(inp.value.length,inp.value.length); } }
+}
+function buildTopUpPanel(){
+  const amt=parseFloat(TOPUP_AMOUNT);
+  const plan=buildTopUpPlan(Number.isFinite(amt)&&amt>0?amt:0);
+  const money=v=>fmtINR(v||0);
+  const head=`<div style="display:flex;gap:14px;align-items:flex-end;flex-wrap:wrap;padding:10px 16px;border-bottom:1px solid var(--border)">
+      <label style="display:flex;flex-direction:column;gap:3px"><span style="font-size:11px;color:var(--t3);text-transform:uppercase;letter-spacing:.06em">Distribute ₹</span>
+        <input id="topUpAmt" type="number" min="0" step="1000" value="${escHtml(TOPUP_AMOUNT)}" placeholder="0"
+          oninput="onTopUpAmountChange(this.value)"
+          title="How much fresh capital to spread across the stocks you already hold. The app does NOT know your free cash — no input file carries it — so this is the one number you supply."
+          style="${goalFieldStyle?goalFieldStyle():'padding:6px 8px'}"></label>
+      <div><div class="st-l">Deployed</div><div class="st-v" style="font-size:17px">${money(plan.deployed)}</div>
+        <div class="st-d">${plan.leftover>0?money(plan.leftover)+' left over':'fully deployed'}</div></div>
+      <div><div class="st-l">Eligible holdings</div><div class="st-v" style="font-size:17px">${plan.eligible} / ${plan.positions}</div>
+        <div class="st-d">the rest state why below</div></div>
+    </div>`;
+  const rows=plan.rows.map(r=>{
+    const add=r.addQty>0
+      ? `<b style="color:var(--green)">+${r.addQty}</b> <span style="color:var(--t3)">sh</span> · ${money(r.addRs)}`
+      : `<span style="color:var(--t3);font-size:12px">—</span>`;
+    const avgCell=r.newAvg!=null
+      ? `${money(r.avg)} → <b>${money(r.newAvg)}</b> <span style="color:${r.avgShiftPct<0?'var(--green)':'var(--amber)'};font-size:12px">(${r.avgShiftPct>0?'+':''}${r.avgShiftPct}%)</span>`
+      : `${r.avg>0?money(r.avg):'—'}`;
+    return `<tr>
+      <td style="padding:5px 10px">${symbolChartButton?symbolChartButton(r.symbol):escHtml(r.symbol)}</td>
+      <td style="padding:5px 10px;text-align:right">${r.heldQty}</td>
+      <td style="padding:5px 10px;text-align:right">${r.price>0?money(r.price):'—'}</td>
+      <td style="padding:5px 10px;text-align:right">${r.score>0?radarScoreCell(r.score):'<span style="color:var(--t3)">—</span>'}</td>
+      <td style="padding:5px 10px;text-align:right">${add}</td>
+      <td style="padding:5px 10px;text-align:right;white-space:nowrap">${avgCell}</td>
+      <td style="padding:5px 10px;color:var(--t3);font-size:12px">${escHtml(r.reason||'')}</td></tr>`;
+  }).join('');
+  return `<div style="background:var(--bg-card);border:1px solid var(--border);border-radius:10px;margin-top:12px;overflow:hidden">
+    <div style="padding:10px 16px;font-size:12px;font-weight:700;color:var(--t2);text-transform:uppercase;letter-spacing:.1em;border-bottom:1px solid var(--border)">Top-up plan — spreading capital across what you already hold</div>
+    ${head}
+    <div style="overflow:auto"><table style="width:100%;font-size:13px;border-collapse:collapse">
+      <tr style="color:var(--t3);font-size:11px;text-transform:uppercase;letter-spacing:.06em">
+        <td style="padding:5px 10px">Stock</td><td style="padding:5px 10px;text-align:right">Held</td>
+        <td style="padding:5px 10px;text-align:right">Price</td><td style="padding:5px 10px;text-align:right">Score</td>
+        <td style="padding:5px 10px;text-align:right">Add</td><td style="padding:5px 10px;text-align:right">Avg cost</td>
+        <td style="padding:5px 10px">Why not</td></tr>
+      ${rows}
+    </table></div>
+    <div style="padding:10px 16px;font-size:12px;color:var(--t3);line-height:1.55">
+      Sized by the SAME rules as a fresh buy: conviction (Radar score ÷ this stock's own stop), the 0.10% turnover rail, Max Allocation headroom against the position you ALREADY hold, and the v1070 cushion — an add to a stock in profit is bounded so that if the new entry's stop is hit, the blended position is still not at a loss. Money follows conviction, never the size of the loss: this deliberately does not average down by how far a holding has fallen. <b>Avg cost</b> shows what each add does to your blended average, which is the number that decides where the position breaks even.
+    </div></div>`;
+}
 function renderRankingsPanels(){
   const q=rankingsSearchQuery();
   const remEl=document.getElementById('rankRemoved');
@@ -8757,6 +8947,13 @@ function renderRankingsPanels(){
     const positions=buildOpenPositionsPanel(q);
     posEl.innerHTML=positions.html;
     positions.table?.render();
+  }
+  // v1130: the top-up plan sits with the book. Focus-guarded like the goal popover (v1110) — a
+  // re-render mid-typing would otherwise swallow the amount being entered.
+  const topEl=document.getElementById('rankTopUp');
+  if(topEl){
+    const a=document.activeElement;
+    if(!(a&&topEl.contains(a)&&/^(INPUT|SELECT)$/.test(a.tagName))) topEl.innerHTML=buildTopUpPanel();
   }
 }
 // Map configured-surveillance rule keys → their human labels.
@@ -10259,6 +10456,10 @@ function applySavedFiltersForMode(mode){
             // within-day concordance is 43% (50% = no information), which is the signature of one
             // of those two rankers being inverted through the mid-range. Which one was
             // UNANSWERABLE from 34 issue dates of history, because only the total was ever stored.
+            // v1130: the market-cycle stage, recorded so the "Second leg" label can finally be
+            // GRADED. It drives no score, no selection, no sizing — and it has never been stored,
+            // so its value has never been measurable in either direction.
+            stage:Number.isFinite(+s.stage)?+s.stage:null,
             compositePct:Number.isFinite(+s.compositePct)?+s.compositePct:null,
             ignitePct:Number.isFinite(+s.ignitePct)?+s.ignitePct:null,
             setupPct:Number.isFinite(+s.setupPct)?+s.setupPct:null,
