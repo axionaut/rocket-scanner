@@ -1,5 +1,5 @@
-const BUILD_TS='2026-08-14 14:35 IST'; // release build time (IST)
-const APP_VERSION=1133; // v1133: the top-up table fits without a scrollbar, its totals are formatted, its reasons are short, and it sorts by new money ascending.
+const BUILD_TS='2026-08-14 15:10 IST'; // release build time (IST)
+const APP_VERSION=1134; // v1134: unfunded top-up rows sort last instead of first, and the audit finds the win metric itself is confounded.
 // v1093: a baseline reward:risk MEASURED on the cross-section (last completed bhav session) instead of learned from the owner's own fills - reported on every row, deliberately not enforced. Includes v1092: position size split by Radar score / stop distance, so equally-scored names carry equal RUPEE risk, plus an opt-in Risk /trade cap.
 // v556: parse the NSE Market Activity Report (MA<date>.csv) — official Nifty %, advances/declines and sector index moves shown as market CONTEXT in the status bar (EOD data, display only, never fed into per-row scoring); MA added to the ℹ️ file manifest.
 // v555 market-cycle stage awareness (stateless, self-calibrating): per-row stage label (1 accumulation · 2 breakout · 3 event · 4 profit-booking · 5 re-accumulation · 6 second-leg); a quiet-accumulation signal (conjunction-of-percentiles) injected via the rocket-diagnostic weighting; sell-the-news decay off Recent earnings date (horizon = review days). v1065 makes the market-breadth gauge an entry-eligibility input while still never changing ranking.
@@ -8438,6 +8438,11 @@ function buildTopUpPlan(amount){
     if(!r.reason&&r.addQty===0){ r.reason=budget>0?'budget spent':'enter an amount';
       r.reasonLong=budget>0?'The budget was fully deployed into higher-conviction holdings before this row.':'Enter an amount to distribute.'; }
   });
+  // v1133 FIX (owner): a row with NO add carried addRs=0, and zero is a legitimate number, so
+  // v1118's nulls-last rule never applied to it and every untouched holding sorted to the TOP of an
+  // ascending "Add" sort. Unfunded rows now carry null, which sorts last in BOTH directions —
+  // the arithmetic below is unaffected because it already coalesces with ||0.
+  rows.forEach(r=>{ if(!(r.addQty>0)){ r.addRs=null; r.addNetRs=null; r.blendedPnlAtTargetRs=null; } });
   const deployed=rows.reduce((s,r)=>s+(r.addRs||0),0);
   return {rows:rows.sort((a,b)=>(b.addRs||0)-(a.addRs||0)||(Number(b.score)||0)-(Number(a.score)||0)),
           budget,deployed,leftover:Math.max(0,budget-deployed),
