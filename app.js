@@ -1,5 +1,5 @@
-const BUILD_TS='2026-08-12 15:36 IST'; // release build time (IST)
-const APP_VERSION=1128; // v1128: a stratified control sample keeps the score bands the app no longer buys under observation, so a band that recovers can still be seen.
+const BUILD_TS='2026-08-14 09:19 IST'; // release build time (IST)
+const APP_VERSION=1129; // v1129: scheduled withdrawals (amount + daily/weekly/monthly) return to the goal arithmetic, separate from the reinvest split, and raise the required daily rate accordingly.
 // v1093: a baseline reward:risk MEASURED on the cross-section (last completed bhav session) instead of learned from the owner's own fills - reported on every row, deliberately not enforced. Includes v1092: position size split by Radar score / stop distance, so equally-scored names carry equal RUPEE risk, plus an opt-in Risk /trade cap.
 // v556: parse the NSE Market Activity Report (MA<date>.csv) — official Nifty %, advances/declines and sector index moves shown as market CONTEXT in the status bar (EOD data, display only, never fed into per-row scoring); MA added to the ℹ️ file manifest.
 // v555 market-cycle stage awareness (stateless, self-calibrating): per-row stage label (1 accumulation · 2 breakout · 3 event · 4 profit-booking · 5 re-accumulation · 6 second-leg); a quiet-accumulation signal (conjunction-of-percentiles) injected via the rocket-diagnostic weighting; sell-the-news decay off Recent earnings date (horizon = review days). v1065 makes the market-breadth gauge an entry-eligibility input while still never changing ranking.
@@ -4828,6 +4828,11 @@ function _computeGoalConfig(rawCfg){
   const g=rawCfg||{};
   const target=(Number(g.target)>0)?Number(g.target):10000000;
   const withdrawMonthly=Math.max(0,Number(g.withdrawMonthly)||0);
+  // v1129: withdrawals return as an AMOUNT + FREQUENCY. A legacy `withdrawMonthly` migrates to the
+  // equivalent monthly schedule, so an older brain keeps the number the owner last typed.
+  const withdrawAmount=Number.isFinite(Number(g.withdrawAmount))&&Number(g.withdrawAmount)>=0
+    ? Math.max(0,Number(g.withdrawAmount)) : withdrawMonthly;
+  const withdrawFreq=GOAL_WITHDRAW_FREQS.includes(g.withdrawFreq)?g.withdrawFreq:'monthly';
   // v1077: daily reinvest split (owner, from the daily-compounding model). When set, each
   // trading day's gain is split - this share compounds, the remainder is taken out as cash -
   // which is how a trading account actually drains, rather than a fixed monthly rupee amount
@@ -4847,7 +4852,8 @@ function _computeGoalConfig(rawCfg){
     endDate=goalImpliedEndDate(Math.max(0,Math.floor(Number(g.days))-elapsed));
   }
   if(!endDate) endDate=goalImpliedEndDate(250); // ~one trading year default
-  return {target,endDate,days:goalTradingDaysUntil(endDate),withdrawMonthly,reinvestPct};
+  return {target,endDate,days:goalTradingDaysUntil(endDate),withdrawMonthly,
+          withdrawAmount,withdrawFreq,reinvestPct};
 }
 function goalRemainingDays(g){return Math.max(0,Number(g.days)||0);}
 // Implied calendar end date: walk N trading days forward from today (display hint only).
@@ -4865,11 +4871,14 @@ function onGoalChange(){
   const t=parseFloat(document.getElementById('goalTarget')?.value);
   const e=String(document.getElementById('goalEnd')?.value||'').trim();
   const w=parseFloat(document.getElementById('goalWd')?.value);
+  const wf=String(document.getElementById('goalWdFreq')?.value||'').trim();
   const cur=getGoalConfig();
   _goalCfgMemo=null;FS.set(GOAL_STORE,{
     target:t>0?t:cur.target,
     endDate:/^\d{4}-\d{2}-\d{2}$/.test(e)?e:cur.endDate,
-    withdrawMonthly:w>=0?w:cur.withdrawMonthly,
+    withdrawMonthly:cur.withdrawMonthly,           // legacy field, kept so an older build still reads
+    withdrawAmount:Number.isFinite(w)&&w>=0?w:cur.withdrawAmount,
+    withdrawFreq:GOAL_WITHDRAW_FREQS.includes(wf)?wf:cur.withdrawFreq,
     reinvestPct:(()=>{const v=document.getElementById('goalReinvest');if(!v)return cur.reinvestPct;
       const t=String(v.value||'').trim();if(t==='')return null;
       const n=Number(t);return isFinite(n)?Math.min(100,Math.max(0,n)):cur.reinvestPct;})()
@@ -4895,21 +4904,58 @@ function goalTradingDaysUntil(dateStr){
 // the compounding base, but the earnings tally counts every rupee the capital makes.
 // Compounding happens only on trading days. The real calendar is walked once for the
 // day-gaps, then binary search finds the per-trading-day rate whose earnings hit target.
-function solveGoalDailyRate(start,target,days,wdMonthly,reinvestPct){
+// ── v1129 SCHEDULED WITHDRAWALS (owner, 2026-08-12) ────────────────────────────────────────────
+// "It's not that I keep investing all my money back. There's got to be daily, weekly, monthly
+// withdrawals too, which should be adjusted into the targets. This is separate from reinvestment %."
+//
+// TWO DIFFERENT DRAINS, deliberately kept apart:
+//   REINVEST %  — what share of each day's GAIN compounds. Proportional, and it only bites on days
+//                 that actually earn. This is v1077's model and it is unchanged.
+//   WITHDRAWAL  — a FIXED rupee amount leaving the account on a calendar cadence, earned or not.
+//                 v1077 deleted exactly this ("it kept subtracting on days that earned nothing"),
+//                 which is true of a trading account's P&L but NOT of a person's spending. The owner
+//                 withdraws on a schedule; the goal arithmetic has to know that or it solves for a
+//                 capital base that never actually exists.
+//
+// The tally `e` is GROSS earnings and is untouched by either drain — the goal target keeps meaning
+// "cumulative trading profit to generate". A withdrawal shrinks the COMPOUNDING BASE, which is what
+// makes the required daily rate go up.
+const GOAL_WITHDRAW_FREQS=['daily','weekly','monthly'];
+function goalWeekKey(iso){
+  const d=new Date(iso+'T12:00:00Z');
+  d.setUTCDate(d.getUTCDate()-((d.getUTCDay()+6)%7));   // back to Monday
+  return d.toISOString().slice(0,10);
+}
+// Incremental by design: the solver knows its horizon up front, the projector walks until the target
+// is met, so the only shape both can share is "given the previous trading day and this one, is a
+// withdrawal due now?". One definition, two callers, no chance of drift.
+function goalWithdrawalDue(prevIso,curIso,freq){
+  if(!prevIso||!curIso) return false;
+  if(freq==='daily') return true;
+  if(freq==='weekly') return goalWeekKey(curIso)!==goalWeekKey(prevIso);
+  if(freq==='monthly') return curIso.slice(0,7)!==prevIso.slice(0,7);
+  return false;
+}
+function normaliseGoalWithdrawal(g){
+  const amt=Math.max(0,Number(g&&g.withdrawAmount)||0);
+  const freq=GOAL_WITHDRAW_FREQS.includes(g&&g.withdrawFreq)?g.withdrawFreq:'monthly';
+  return {amt,freq};
+}
+function solveGoalDailyRate(start,target,days,wd,reinvestPct){
   if(!(start>0)||!(days>0)||!(target>0)) return null;
-  // wdDaily removed in v1077 - the reinvest split is the only drawdown model.
-  // gaps[i] = calendar days between trading step i-1 and i (1 = consecutive weekdays).
-  const gaps=[];
+  // v1129: the horizon is walked as DATED trading steps, not as calendar gaps, because a weekly or
+  // monthly withdrawal falls due on a calendar boundary that a gap count cannot see.
+  const steps=[];
   {
     const cur=new Date(getSessionDate()+'T12:00:00Z');
-    let n=0,guard=0,gap=0;
+    let n=0,guard=0;
     while(n<days&&guard++<2600){
       cur.setUTCDate(cur.getUTCDate()+1);
-      gap++;
-      const dow=cur.getUTCDay();
-      if(dow!==0&&dow!==6&&!NSE_HOLIDAYS.has(cur.toISOString().slice(0,10))){gaps.push(gap);gap=0;n++;}
+      const dow=cur.getUTCDay(), iso=cur.toISOString().slice(0,10);
+      if(dow!==0&&dow!==6&&!NSE_HOLIDAYS.has(iso)){steps.push(iso);n++;}
     }
   }
+  const W=normaliseGoalWithdrawal(typeof wd==='object'&&wd?wd:{withdrawAmount:wd,withdrawFreq:'monthly'});
   // v1077 (owner): the ONLY drawdown model is the daily reinvest split. Each trading day's gain is
   // split - `reinvest` compounds, the remainder is taken out as cash - exactly the daily-compounding
   // model the owner specified, where "additional contributions" is None and the cash-out IS the
@@ -4920,12 +4966,15 @@ function solveGoalDailyRate(start,target,days,wdMonthly,reinvestPct){
   // "cumulative trading profit to generate", unchanged.
   const reinvest=Math.min(1,Math.max(0,(reinvestPct==null||!isFinite(Number(reinvestPct)))?0.55:Number(reinvestPct)/100));
   const earned=r=>{
-    let c=start,e=0;
-    for(let i=0;i<gaps.length;i++){
-      if(c<=0){c=0;continue;}
+    let c=start,e=0,prev=null;
+    for(let i=0;i<steps.length;i++){
+      if(c<=0){c=0;prev=steps[i];continue;}
       const gain=c*r;
       e+=gain;                     // full gain is earned...
       c=c+gain*reinvest;           // ...but only the reinvested share compounds
+      // ...and the scheduled withdrawal leaves the account whether or not the day earned.
+      if(W.amt>0&&goalWithdrawalDue(prev,steps[i],W.freq)) c=Math.max(0,c-W.amt);
+      prev=steps[i];
     }
     return e;
   };
@@ -4939,7 +4988,7 @@ function solveGoalDailyRate(start,target,days,wdMonthly,reinvestPct){
 // withdrawals drain every calendar day, earnings compound only on trading days and
 // are tallied even while withdrawals shrink the base. Returns the date the earnings
 // tally reaches the target, or null if it never does within ~8 years at that pace.
-function projectGoalCompletionDate(start,target,netPctPerDay,wdMonthly,reinvestPct){
+function projectGoalCompletionDate(start,target,netPctPerDay,wd,reinvestPct){
   // v1077: must mirror solveGoalDailyRate EXACTLY or the two disagree — projecting at the required
   // rate would then miss the deadline. Same daily reinvest split, no fixed withdrawal: each trading
   // day's gain is earned in full and only the reinvested share compounds. `wdMonthly` is accepted
@@ -4947,17 +4996,20 @@ function projectGoalCompletionDate(start,target,netPctPerDay,wdMonthly,reinvestP
   if(!(start>0)||!(target>0)||!(netPctPerDay>0)) return null;
   const r=netPctPerDay/100;
   const reinvest=Math.min(1,Math.max(0,(reinvestPct==null||!isFinite(Number(reinvestPct)))?0.55:Number(reinvestPct)/100));
+  const W=normaliseGoalWithdrawal(typeof wd==='object'&&wd?wd:{withdrawAmount:wd,withdrawFreq:'monthly'});
   const cur=new Date(getSessionDate()+'T12:00:00Z');
-  let c=start,e=0,guard=0;
+  let c=start,e=0,guard=0,prev=null;
   while(guard++<2600){
     cur.setUTCDate(cur.getUTCDate()+1);
-    const dow=cur.getUTCDay();
-    if(dow===0||dow===6||NSE_HOLIDAYS.has(cur.toISOString().slice(0,10))) continue; // no earning, no drain
-    if(c<=0) continue;
+    const dow=cur.getUTCDay(), iso=cur.toISOString().slice(0,10);
+    if(dow===0||dow===6||NSE_HOLIDAYS.has(iso)) continue;   // not a trading day: no earning, no drain
+    if(c<=0){prev=iso;continue;}
     const gain=c*r;
     e+=gain;                 // full gain is earned...
     c=c+gain*reinvest;       // ...only the reinvested share compounds
-    if(e>=target) return cur.toISOString().slice(0,10);
+    if(W.amt>0&&goalWithdrawalDue(prev,iso,W.freq)) c=Math.max(0,c-W.amt);
+    prev=iso;
+    if(e>=target) return iso;
   }
   return null;
 }
@@ -5231,7 +5283,7 @@ function getTodayRupeeNeed(){
   const basis=getGoalPortfolioBasis();
   const days=goalRemainingDays(g);
   if(!(basis>0)||!(days>0)) return null;
-  const r=solveGoalDailyRate(basis,g.target,days,g.withdrawMonthly,g.reinvestPct);
+  const r=solveGoalDailyRate(basis,g.target,days,g,g.reinvestPct);
   if(!(r>0)) return null;
   const need=basis*r;                                  // r is a FRACTION, not a percent
   let booked=null;
@@ -5292,9 +5344,9 @@ function getGoalRequiredNetPct(){
   const g=getGoalConfig();
   const basis=getGoalPortfolioBasis();
   const days=goalRemainingDays(g);
-  const key=[g.target,g.endDate,days,g.withdrawMonthly,g.reinvestPct,Math.round(basis)].join('|');
+  const key=[g.target,g.endDate,days,g,g.reinvestPct,Math.round(basis)].join('|');
   if(_goalRateCache?.key===key) return _goalRateCache.v;
-  const r=solveGoalDailyRate(basis,g.target,days,g.withdrawMonthly,g.reinvestPct);
+  const r=solveGoalDailyRate(basis,g.target,days,g,g.reinvestPct);
   const v=(r!=null&&r>0)?+(r*100).toFixed(3):null;
   _goalRateCache={key,v};
   return v;
@@ -5384,6 +5436,12 @@ function buildGoalPopoverContent(){
   <div style="display:grid;grid-template-columns:1.15fr 1.35fr .8fr;gap:8px">
     <label><span style="${_lbl}">Earn ₹</span><input id="goalTarget" type="number" value="${g.target}" style="${goalFieldStyle()}" onchange="onGoalChange()" onfocus="this.style.borderColor='var(--amber)'" onblur="this.style.borderColor='var(--border)'" title="Trading profit to generate from current total capital within the horizon — not a balance to reach."></label>
     <label><span style="${_lbl}">By</span><input id="goalEnd" type="date" min="${getSessionDate()}" value="${g.endDate}" style="${goalFieldStyle()}" onchange="onGoalChange()" onfocus="this.style.borderColor='var(--amber)'" onblur="this.style.borderColor='var(--border)'" title="Deadline for the earnings target. Trading days left are counted from today to this date, skipping weekends and NSE holidays."></label>
+    <label><span style="${_lbl}">Withdraw ₹</span><input id="goalWd" type="number" min="0" step="100" placeholder="0" value="${g.withdrawAmount?g.withdrawAmount:''}" onchange="onGoalChange()" title="A FIXED rupee amount you take out of the account on the schedule beside this — rent, salary, expenses. It leaves whether or not the day earned, so it shrinks the compounding base and RAISES the daily rate the goal needs. Separate from Reinvest %, which only splits the days that do earn. Blank or 0 = no scheduled withdrawal." style="${goalFieldStyle()}" onfocus="this.style.borderColor='var(--amber)'" onblur="this.style.borderColor='var(--border)'"></label>
+    <label><span style="${_lbl}">Every</span><select id="goalWdFreq" onchange="onGoalChange()" title="How often the Withdraw ₹ amount leaves the account. Daily = every trading day; Weekly = the first trading day of each new week; Monthly = the first trading day of each new month." style="${goalFieldStyle()}" onfocus="this.style.borderColor='var(--amber)'" onblur="this.style.borderColor='var(--border)'">
+      <option value="daily"${g.withdrawFreq==='daily'?' selected':''}>Day</option>
+      <option value="weekly"${g.withdrawFreq==='weekly'?' selected':''}>Week</option>
+      <option value="monthly"${g.withdrawFreq==='monthly'?' selected':''}>Month</option>
+    </select></label>
     <label><span style="${_lbl}">Reinvest %</span><input id="goalReinvest" type="number" min="0" max="100" step="1" placeholder="55" value="${g.reinvestPct==null?'':g.reinvestPct}" onchange="onGoalChange()" oninput="onGoalChange()" title="Share of each day's gain that stays invested and compounds; the rest is taken out as cash. Blank uses 55%." style="${goalFieldStyle()}" onfocus="this.style.borderColor='var(--amber)'" onblur="this.style.borderColor='var(--border)'"></label>
     <span style="display:none"><input id="goalWd" type="hidden" value="0"></span>
   </div>
@@ -5414,7 +5472,7 @@ function buildGoalPopoverContent(){
       finishVal='no date';finishColor='var(--red)';
       finishDetail=`Losing ${Math.abs(ach*100).toFixed(2)}% a day — there is no finish date until this turns positive`;
     }else{
-      const rp=projectGoalCompletionDate(basis,g.target,ach*100,0,g.reinvestPct);
+      const rp=projectGoalCompletionDate(basis,g.target,ach*100,g,g.reinvestPct);
       if(rp){
         const gap=gapTxt(rp);
         finishVal=readable(rp);finishColor=gap.late?'var(--amber)':'var(--green)';
@@ -5432,7 +5490,7 @@ function buildGoalPopoverContent(){
       if(at?.tgtPct){
         const netPct=+(at.tgtPct-estimateRoundTripCostPct(at.tgtPct)).toFixed(3);
         if(netPct>0){
-          const bp=projectGoalCompletionDate(basis,g.target,netPct,0,g.reinvestPct);
+          const bp=projectGoalCompletionDate(basis,g.target,netPct,g,g.reinvestPct);
           const srcLbl=at.source==='manual'?'manual':at.source==='goal'?'goal-led':'Harvest';
           bestHtml=bp
             ? `If every session hit its ${at.tgtPct.toFixed(1)}% ${srcLbl} target: ${dateSpan(bp)}`
@@ -5464,7 +5522,7 @@ function buildGoalCard(){
   const parts=getGoalFreeCapitalParts();
   const basis=parts.total;
   const days=goalRemainingDays(g);
-  const req=days>0?solveGoalDailyRate(basis,g.target,days,g.withdrawMonthly,g.reinvestPct):null;
+  const req=days>0?solveGoalDailyRate(basis,g.target,days,g,g.reinvestPct):null;
   const ach=getGoalAchievedDailyRate(basis);
   if(!(basis>0)){
     return `<div class="st"><div class="st-l">Goal · earn ₹${goalFmtRs(g.target)} · ${days} td left</div><div class="st-v" style="color:var(--t3)">—</div><div class="st-d">basis ₹0 · load Holdings/Positions to value your book · need —/day · achieved —/day (30d)</div></div>`;
