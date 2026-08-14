@@ -1,5 +1,5 @@
-const BUILD_TS='2026-08-14 09:43 IST'; // release build time (IST)
-const APP_VERSION=1130; // v1130: a top-up planner for existing holdings, the Goal module recalculating live like the filter bar, and the market-cycle stage recorded so it can finally be graded.
+const BUILD_TS='2026-08-14 10:01 IST'; // release build time (IST)
+const APP_VERSION=1131; // v1131: a top-up must pay for its own costs before it is funded, it reports what the whole position is worth at target, it defaults to the allocation capital, and it exports buy-only.
 // v1093: a baseline reward:risk MEASURED on the cross-section (last completed bhav session) instead of learned from the owner's own fills - reported on every row, deliberately not enforced. Includes v1092: position size split by Radar score / stop distance, so equally-scored names carry equal RUPEE risk, plus an opt-in Risk /trade cap.
 // v556: parse the NSE Market Activity Report (MA<date>.csv) — official Nifty %, advances/declines and sector index moves shown as market CONTEXT in the status bar (EOD data, display only, never fed into per-row scoring); MA added to the ℹ️ file manifest.
 // v555 market-cycle stage awareness (stateless, self-calibrating): per-row stage label (1 accumulation · 2 breakout · 3 event · 4 profit-booking · 5 re-accumulation · 6 second-leg); a quiet-accumulation signal (conjunction-of-percentiles) injected via the rocket-diagnostic weighting; sell-the-news decay off Recent earnings date (horizon = review days). v1065 makes the market-breadth gauge an entry-eligibility input while still never changing ranking.
@@ -8299,6 +8299,44 @@ function getTopUpCeiling(pos,row,ctx){
   if(!(ceiling>=price)) return {ceiling:0,reason:'ceiling '+fmtINR(ceiling)+' is below one share at '+fmtINR(price)};
   return {ceiling,reason:null,price,heldQty,avg,cushion,turnover,headroom};
 }
+// ── v1131 (owner): "the top-up should not be a simple distribution. It should factor in the costs,
+// and whether it's even worth topping up given the costs and where we are in terms of P&L."
+//
+// Two separate questions, and they need separate answers:
+//   WORTH IT AT ALL?  — the add must clear the SAME rupee floor a fresh buy must clear
+//     (HARVEST_DESIRED_NET_PCT at the reference notional, v1125), measured on the ADD's own net after
+//     its buy charge and its INCREMENTAL sell charge. A two-share top-up that nets Rs 40 is not a
+//     trade, it is a fee donation.
+//   WHERE ARE WE IN P&L? — reported, not enforced. Hitting the row's target lifts the ADDED shares,
+//     but on a position 30% underwater it does not lift the POSITION. `blendedPnlAtTargetRs` says
+//     what the whole holding is worth if that target prints, so the decision is made on the real
+//     number rather than on the add's own arithmetic in isolation.
+function topUpAddEconomics(row,price,heldQty,addQty,tgtPct){
+  if(!(addQty>0)||!(price>0)||!(tgtPct>0)) return null;
+  const sellP=price*(1+tgtPct/100);
+  const buyChg=calcZerodhaCharges(price,addQty,false,false,false);
+  // Incremental only: the flat Rs 15.34 DP fee is already paid by the shares held, so it cancels.
+  const incSell=Math.max(0,calcZerodhaCharges(sellP,heldQty+addQty,true)-(heldQty>0?calcZerodhaCharges(sellP,heldQty,true):0));
+  const gross=addQty*price*(tgtPct/100);
+  return {gross,charges:buyChg+incSell,net:gross-(buyChg+incSell)};
+}
+// The smallest add that pays for itself. Charges are near-proportional on the buy side but the
+// incremental sell carries STT, so this is solved by walking up rather than assumed linear.
+function minViableTopUpQty(row,price,heldQty,tgtPct,floorRs){
+  if(!(price>0)||!(tgtPct>0)||!(floorRs>0)) return 1;
+  let lo=1,hi=Math.max(1,Math.ceil(floorRs/Math.max(1e-6,price*(tgtPct/100)))*3);
+  for(let i=0;i<40;i++){
+    const e=topUpAddEconomics(row,price,heldQty,hi,tgtPct);
+    if(e&&e.net>=floorRs) break;
+    hi*=2; if(hi>1e7) return Infinity;
+  }
+  while(lo<hi){
+    const mid=Math.floor((lo+hi)/2);
+    const e=topUpAddEconomics(row,price,heldQty,mid,tgtPct);
+    if(e&&e.net>=floorRs) hi=mid; else lo=mid+1;
+  }
+  return lo;
+}
 function buildTopUpPlan(amount){
   const ctx=getAllocationPassContext();
   const budget=Number(amount)>0?Number(amount):0;
@@ -8315,8 +8353,23 @@ function buildTopUpPlan(amount){
     rows.push({...base,price:(cap.price??(Number(row.price)||0)),ceiling:cap.ceiling,reason:cap.reason,
       stopPct:getRowStopDistancePct(row)});
   });
+  // v1131: a row must be able to reach an add that PAYS FOR ITSELF before it can share the money.
+  const floorRs=getDesiredNetRupees();
+  rows.forEach(r=>{
+    if(r.reason||!(r.ceiling>0)||!(r.price>0)) return;
+    const row=byScan.get(r.symbol); if(!row) return;
+    const tgt=Number(getRowExitPolicy(row,r.price,ctx.active)?.targetPct);
+    r.tgtPct=tgt>0?+tgt.toFixed(2):null;
+    if(!(tgt>0)){r.reason='no viable target to size an add against';return;}
+    r.minQty=minViableTopUpQty(row,r.price,r.heldQty,tgt,floorRs);
+    if(!(r.minQty>0)||r.minQty===Infinity||r.minQty*r.price>r.ceiling+0.5){
+      const best=topUpAddEconomics(row,r.price,r.heldQty,Math.max(1,Math.floor(r.ceiling/r.price)),tgt);
+      r.reason='not worth it — the most this stock allows ('+fmtINR(r.ceiling)+') nets only '
+        +fmtINR(best?best.net:0)+' at its '+r.tgtPct+'% target, under the '+fmtINR(floorRs)+' minimum';
+    }
+  });
   // Conviction weight, exactly as computeAlloc: score / stop distance.
-  const eligible=rows.filter(r=>!r.reason&&r.ceiling>0&&r.price>0);
+  const eligible=rows.filter(r=>!r.reason&&r.ceiling>0&&r.price>0&&r.minQty>0&&r.minQty!==Infinity);
   const wt=r=>{const sc=Math.max(0,Number(r.score)||0),st=Number(r.stopPct)||0;return sc>0&&st>0?sc/st:0;};
   const total=eligible.reduce((s,r)=>s+wt(r),0);
   const debit=(px,q)=>q>0?px*q+calcZerodhaCharges(px,q,false,false,false):0;
@@ -8327,6 +8380,9 @@ function buildTopUpPlan(amount){
       const share=Math.min(budget*(wt(r)/total),r.ceiling);
       let q=Math.floor(share/r.price);
       while(q>0&&debit(r.price,q)>Math.min(residual,r.ceiling)+0.001) q--;
+      // Below the minimum viable size the add does not pay for itself, so take NOTHING rather than
+      // a token position — a partial add here is strictly worse than no add.
+      if(q<r.minQty) q=0;
       if(q>0){r.addQty=q;r.addRs=debit(r.price,q);residual-=r.addRs;}
     });
     // Pass 2: residual walks by CONVICTION, one share at a time — the spare rupee goes to the best
@@ -8336,10 +8392,12 @@ function buildTopUpPlan(amount){
     while(residual>0&&progress){
       progress=false;
       for(const r of byConv){
-        const next=debit(r.price,r.addQty+1)-r.addRs;
+        const step=r.addQty===0?Math.max(1,r.minQty):1;      // open at a size that pays for itself
+        const want=r.addQty+step;
+        const next=debit(r.price,want)-r.addRs;
         if(next>residual+0.001) continue;
-        if((r.addQty+1)*r.price>r.ceiling+0.5) continue;
-        r.addQty++; r.addRs+=next; residual-=next; progress=true;
+        if(want*r.price>r.ceiling+0.5) continue;
+        r.addQty=want; r.addRs+=next; residual-=next; progress=true;
       }
     }
   }
@@ -8347,6 +8405,34 @@ function buildTopUpPlan(amount){
     if(r.addQty>0&&r.avg>0){
       r.newAvg=+(((r.avg*r.heldQty)+(r.price*r.addQty))/(r.heldQty+r.addQty)).toFixed(2);
       r.avgShiftPct=+(((r.newAvg-r.avg)/r.avg)*100).toFixed(2);
+    }
+    // ── v1131: what the ADD itself earns, charged CORRECTLY (owner asked whether topping up pays
+    // costs twice). Measured: the BUY side is fully proportional under CNC — two 100-share orders
+    // cost exactly the same as one 200-share order (Rs 118.74 either way), because brokerage is zero
+    // and STT/txn/SEBI/GST/stamp are all per-rupee. So a top-up carries NO buy-side penalty.
+    // The SELL side is different: DP is a FLAT Rs 15.34 per ISIN per SELL DAY, so two separate exits
+    // cost Rs 15.34 more than one. But a topped-up position is ONE holding sold ONCE — the DP fee is
+    // already being paid by the shares you hold. The add's true exit cost is therefore the
+    // INCREMENTAL sell charge only, which is what this subtraction isolates: the flat fee cancels.
+    if(r.addQty>0&&r.price>0){
+      const row=byScan.get(r.symbol);
+      const tgt=row?Number(getRowExitPolicy(row,r.price,ctx.active)?.targetPct):null;
+      if(tgt>0){
+        const sellP=r.price*(1+tgt/100);
+        const sellAll=calcZerodhaCharges(sellP,r.heldQty+r.addQty,true);
+        const sellHeld=r.heldQty>0?calcZerodhaCharges(sellP,r.heldQty,true):0;
+        const incSell=Math.max(0,sellAll-sellHeld);           // flat DP cancels — already paid
+        const buyChg=calcZerodhaCharges(r.price,r.addQty,false,false,false);
+        r.tgtPct=+tgt.toFixed(2);
+        r.addGrossRs=+(r.addQty*r.price*(tgt/100)).toFixed(0);
+        r.addChargesRs=+(buyChg+incSell).toFixed(0);
+        r.addNetRs=+(r.addGrossRs-r.addChargesRs).toFixed(0);
+        // WHERE WE ARE IN P&L — reported, never enforced. The target lifts the ADDED shares; on a
+        // position far underwater it need not lift the POSITION, and that is the number to decide on.
+        r.pnlPctNow=r.avg>0?+(((r.price-r.avg)/r.avg)*100).toFixed(2):null;
+        r.pnlRsNow=r.avg>0?Math.round((r.price-r.avg)*r.heldQty):null;
+        if(r.newAvg>0) r.blendedPnlAtTargetRs=Math.round((sellP-r.newAvg)*(r.heldQty+r.addQty));
+      }
     }
     if(!r.reason&&r.addQty===0) r.reason=budget>0?'budget exhausted before this holding':'enter an amount to distribute';
   });
@@ -8886,18 +8972,71 @@ function onTopUpAmountChange(v){
   if(el){ el.innerHTML=buildTopUpPanel(); const inp=document.getElementById('topUpAmt');
     if(inp){ inp.value=TOPUP_AMOUNT; inp.focus(); inp.setSelectionRange(inp.value.length,inp.value.length); } }
 }
+// v1131 (owner): "I don't want to enter capital in the top-up plan again when there's already a
+// field above used for allocation." So this follows the SAME convention as Capital Rs and Max Alloc
+// (v545): blank means USE THE DEFAULT — here the effective capital the buy basket already allocates
+// from — and it is shown in the placeholder so an empty box visibly reflects what will be used. A
+// typed value is an override for when you only want to put part of it to work.
+function getEffectiveTopUpAmount(){
+  const v=parseFloat(TOPUP_AMOUNT);
+  return (Number.isFinite(v)&&v>=0)?v:getEffectiveCapital();
+}
+// ── v1131 (owner): "there should be an export button on top-ups. No SL/TGT — just buy." ────────
+// A top-up is an ADD to a position that already has its own exit armed, so attaching a fresh GTT
+// here would arm a SECOND exit for shares that are about to be part of one blended holding — the
+// double-sell hazard the sell basket was removed for. Buy legs only, no `gtt` block at all.
+async function exportTopUpBasket(){
+  const plan=buildTopUpPlan(getEffectiveTopUpAmount());
+  const funded=plan.rows.filter(r=>r.addQty>0&&r.price>0);
+  if(!funded.length){ showToast('No top-up is worth taking right now — every holding is below the minimum net, at its rails, or out of scan.',5000,true); return; }
+  // Zerodha caps a basket at 20 orders; a top-up is one order per stock, so trim by CONVICTION.
+  const byConv=[...funded].sort((a,b)=>(Number(b.score)||0)-(Number(a.score)||0));
+  const trimmed=byConv.slice(0,20), dropped=byConv.slice(20);
+  let seq=0;
+  const orders=trimmed.map(r=>({
+    id:Date.now()+seq++,
+    instrument:{
+      tradingsymbol:r.symbol,scripCode:'',type:'EQ',symbol:r.symbol,
+      segment:'NSE',exchange:'NSE',tickSize:0.01,lotSize:1,
+      company:r.symbol,tradable:true,precision:2,
+      fullName:r.symbol,niceName:r.symbol,niceNameHTML:r.symbol,stockWidget:true,
+      exchangeToken:0,instrumentToken:0,isin:'',
+      related:[],underlying:null,auctionNumber:null,
+      isEquity:true,isWeekly:false
+    },
+    weight:0,
+    params:{
+      transactionType:'BUY',product:'CNC',orderType:'MARKET',
+      validity:'DAY',validityTTL:1,
+      quantity:r.addQty,price:0,
+      triggerPrice:0,disclosedQuantity:0,lastPrice:Number(r.price)||0,
+      variety:'regular',
+      tags:['TOPUP']
+      // NO gtt block, deliberately: these shares merge into a holding whose exit is already armed.
+    }
+  }));
+  const ok=await saveBasketToScannerUploads(orders,'Zerodha_Basket_TopUp.json');
+  if(ok){
+    const total=trimmed.reduce((n,r)=>n+r.addRs,0);
+    showToast(`Top-up basket saved · ${orders.length} buy order${orders.length===1?'':'s'} · ${fmtINR(total)}`
+      +(dropped.length?` · ${dropped.length} lowest-conviction name${dropped.length===1?'':'s'} dropped to fit Zerodha's 20-order cap`:'')
+      +' · no GTT attached — these merge into holdings that already have an exit.',7000);
+  }
+}
 function buildTopUpPanel(){
-  const amt=parseFloat(TOPUP_AMOUNT);
-  const plan=buildTopUpPlan(Number.isFinite(amt)&&amt>0?amt:0);
+  const plan=buildTopUpPlan(getEffectiveTopUpAmount());
   const money=v=>fmtINR(v||0);
   const head=`<div style="display:flex;gap:14px;align-items:flex-end;flex-wrap:wrap;padding:10px 16px;border-bottom:1px solid var(--border)">
       <label style="display:flex;flex-direction:column;gap:3px"><span style="font-size:11px;color:var(--t3);text-transform:uppercase;letter-spacing:.06em">Distribute ₹</span>
-        <input id="topUpAmt" type="number" min="0" step="1000" value="${escHtml(TOPUP_AMOUNT)}" placeholder="0"
+        <input id="topUpAmt" type="number" min="0" step="1000" value="${escHtml(TOPUP_AMOUNT)}" placeholder="${Math.round(getEffectiveCapital())}"
           oninput="onTopUpAmountChange(this.value)"
-          title="How much fresh capital to spread across the stocks you already hold. The app does NOT know your free cash — no input file carries it — so this is the one number you supply."
+          title="How much to spread across the stocks you already hold. BLANK uses the same Capital ₹ the buy basket allocates from (shown greyed) — type a value only when you want to put just part of it to work. Note the app cannot see your free cash: no input file carries it, so this is capital, not cash-in-hand."
           style="${goalFieldStyle?goalFieldStyle():'padding:6px 8px'}"></label>
       <div><div class="st-l">Deployed</div><div class="st-v" style="font-size:17px">${money(plan.deployed)}</div>
-        <div class="st-d">${plan.leftover>0?money(plan.leftover)+' left over':'fully deployed'}</div></div>
+        <div class="st-d">of ${money(plan.budget)}${TOPUP_AMOUNT===''?' (Capital ₹)':''} · ${plan.leftover>0?money(plan.leftover)+' left over':'fully deployed'}</div></div>
+      <div style="align-self:center"><button onclick="exportTopUpBasket()" class="btn"
+        title="Save these top-ups as a Zerodha basket — BUY orders only, no GTT. A top-up merges into a holding whose exit is already armed, so attaching a second GTT here would risk selling the same shares twice."
+        style="padding:7px 14px;font-weight:700">🧺 Export Top-ups</button></div>
       <div><div class="st-l">Eligible holdings</div><div class="st-v" style="font-size:17px">${plan.eligible} / ${plan.positions}</div>
         <div class="st-d">the rest state why below</div></div>
     </div>`;
@@ -8915,6 +9054,15 @@ function buildTopUpPanel(){
       <td style="padding:5px 10px;text-align:right">${r.score>0?radarScoreCell(r.score):'<span style="color:var(--t3)">—</span>'}</td>
       <td style="padding:5px 10px;text-align:right">${add}</td>
       <td style="padding:5px 10px;text-align:right;white-space:nowrap">${avgCell}</td>
+      <td style="padding:5px 10px;text-align:right;white-space:nowrap">${r.pnlPctNow!=null
+        ? `<span style="color:${r.pnlPctNow>=0?'var(--green)':'var(--red)'}">${r.pnlPctNow>0?'+':''}${r.pnlPctNow}%</span>`
+        : '<span style="color:var(--t3)">—</span>'}</td>
+      <td style="padding:5px 10px;text-align:right;white-space:nowrap">${r.blendedPnlAtTargetRs!=null
+        ? `<span style="color:${r.blendedPnlAtTargetRs>=0?'var(--green)':'var(--red)'}">${r.blendedPnlAtTargetRs>0?'+':''}${money(r.blendedPnlAtTargetRs)}</span>`
+        : '<span style="color:var(--t3)">—</span>'}</td>
+      <td style="padding:5px 10px;text-align:right;white-space:nowrap">${r.addNetRs!=null
+        ? `<b style="color:${r.addNetRs>0?'var(--green)':'var(--red)'}">${r.addNetRs>0?'+':''}${money(r.addNetRs)}</b> <span style="color:var(--t3);font-size:11px">@${r.tgtPct}%</span>`
+        : '<span style="color:var(--t3);font-size:12px">—</span>'}</td>
       <td style="padding:5px 10px;color:var(--t3);font-size:12px">${escHtml(r.reason||'')}</td></tr>`;
   }).join('');
   return `<div style="background:var(--bg-card);border:1px solid var(--border);border-radius:10px;margin-top:12px;overflow:hidden">
@@ -8925,11 +9073,14 @@ function buildTopUpPanel(){
         <td style="padding:5px 10px">Stock</td><td style="padding:5px 10px;text-align:right">Held</td>
         <td style="padding:5px 10px;text-align:right">Price</td><td style="padding:5px 10px;text-align:right">Score</td>
         <td style="padding:5px 10px;text-align:right">Add</td><td style="padding:5px 10px;text-align:right">Avg cost</td>
+        <td style="padding:5px 10px;text-align:right">P&amp;L now</td>
+        <td style="padding:5px 10px;text-align:right">Position @ tgt</td>
+        <td style="padding:5px 10px;text-align:right">Add earns</td>
         <td style="padding:5px 10px">Why not</td></tr>
       ${rows}
     </table></div>
     <div style="padding:10px 16px;font-size:12px;color:var(--t3);line-height:1.55">
-      Sized by the SAME rules as a fresh buy: conviction (Radar score ÷ this stock's own stop), the 0.10% turnover rail, Max Allocation headroom against the position you ALREADY hold, and the v1070 cushion — an add to a stock in profit is bounded so that if the new entry's stop is hit, the blended position is still not at a loss. Money follows conviction, never the size of the loss: this deliberately does not average down by how far a holding has fallen. <b>Avg cost</b> shows what each add does to your blended average, which is the number that decides where the position breaks even.
+      Sized by the SAME rules as a fresh buy: conviction (Radar score ÷ this stock's own stop), the 0.10% turnover rail, Max Allocation headroom against the position you ALREADY hold, and the v1070 cushion — an add to a stock in profit is bounded so that if the new entry's stop is hit, the blended position is still not at a loss. Money follows conviction, never the size of the loss: this deliberately does not average down by how far a holding has fallen. <b>Avg cost</b> shows what each add does to your blended average, which is the number that decides where the position breaks even. <b>Add earns</b> is what the extra shares alone net at the row's target — and topping up does NOT pay costs twice: under CNC the buy side is fully proportional (two 100-share orders cost exactly what one 200-share order costs), and the flat ₹15.34 DP fee is charged once per stock per sell day, which the shares you already hold are paying anyway. Only the incremental sell charge is counted against the add. A holding is offered <b>nothing</b> unless its largest permitted add clears that same minimum — a token top-up that nets less than the fees is worse than no top-up. <b>Position @ tgt</b> is what the WHOLE holding is worth if that target prints: the target lifts the shares you add, but on a position far underwater it need not lift the position, and that is the number to decide on.
     </div></div>`;
 }
 function renderRankingsPanels(){
