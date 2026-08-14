@@ -1,5 +1,5 @@
-const BUILD_TS='2026-08-14 12:10 IST'; // release build time (IST)
-const APP_VERSION=1132; // v1132: the top-up amount field no longer resets the caret on every keystroke, and its table is sortable like every other table in the app.
+const BUILD_TS='2026-08-14 14:35 IST'; // release build time (IST)
+const APP_VERSION=1133; // v1133: the top-up table fits without a scrollbar, its totals are formatted, its reasons are short, and it sorts by new money ascending.
 // v1093: a baseline reward:risk MEASURED on the cross-section (last completed bhav session) instead of learned from the owner's own fills - reported on every row, deliberately not enforced. Includes v1092: position size split by Radar score / stop distance, so equally-scored names carry equal RUPEE risk, plus an opt-in Risk /trade cap.
 // v556: parse the NSE Market Activity Report (MA<date>.csv) — official Nifty %, advances/declines and sector index moves shown as market CONTEXT in the status bar (EOD data, display only, never fed into per-row scoring); MA added to the ℹ️ file manifest.
 // v555 market-cycle stage awareness (stateless, self-calibrating): per-row stage label (1 accumulation · 2 breakout · 3 event · 4 profit-booking · 5 re-accumulation · 6 second-leg); a quiet-accumulation signal (conjunction-of-percentiles) injected via the rocket-diagnostic weighting; sell-the-news decay off Recent earnings date (horizon = review days). v1065 makes the market-breadth gauge an entry-eligibility input while still never changing ranking.
@@ -8285,18 +8285,18 @@ function getAllocationBlockReason(s,ctx=null){
 function getTopUpCeiling(pos,row,ctx){
   const c=ctx||getAllocationPassContext();
   const price=Number(row?.price)>0?Number(row.price):Number(pos?.ltp)||0;
-  if(!(price>0)) return {ceiling:0,reason:'no live price'};
+  if(!(price>0)) return {ceiling:0,reason:'no price',reasonLong:'No live price for this holding in today’s scan.'};
   const heldQty=Number(pos?.qty)||0, avg=Number(pos?.avg)||0;
   const cushion=getHeldTopUpNotionalCap(row,price,c.heldMap);
-  if(!(cushion>0)) return {ceiling:0,reason:'already in profit with no cushion — an add would put the blended position at a loss on its own stop'};
+  if(!(cushion>0)) return {ceiling:0,reason:'in profit, no cushion',reasonLong:'Already in profit, and the existing average sits at or above the new entry’s stop price — any add would leave the blended position at a loss if that stop is hit (v1070).'};
   const turnover=getTurnoverAllocationCap(row);
-  if(!(turnover>0)) return {ceiling:0,reason:'no daily turnover — market-impact safety cannot be verified'};
+  if(!(turnover>0)) return {ceiling:0,reason:'no turnover data',reasonLong:'No daily turnover on file, so the 0.10% market-impact rail cannot be verified.'};
   // Max Alloc governs the FINAL position, so the headroom is what the rail allows minus what is held.
   const maxAlloc=c.maxAlloc>0?c.maxAlloc:c.capital;
   const headroom=Math.max(0,maxAlloc-heldQty*price);
-  if(!(headroom>=price)) return {ceiling:0,reason:'already at the Max Allocation rail for this stock'};
+  if(!(headroom>=price)) return {ceiling:0,reason:'at Max Alloc',reasonLong:'The position already fills its Max Allocation rail, so there is no headroom to add.'};
   const ceiling=Math.min(cushion,turnover,headroom);
-  if(!(ceiling>=price)) return {ceiling:0,reason:'ceiling '+fmtINR(ceiling)+' is below one share at '+fmtINR(price)};
+  if(!(ceiling>=price)) return {ceiling:0,reason:'under 1 share',reasonLong:'The rails allow only '+fmtINR(ceiling)+', which is below one share at '+fmtINR(price)+'.'};
   return {ceiling,reason:null,price,heldQty,avg,cushion,turnover,headroom};
 }
 // ── v1131 (owner): "the top-up should not be a simple distribution. It should factor in the costs,
@@ -8348,9 +8348,9 @@ function buildTopUpPlan(amount){
     const base={symbol:pos.symbol,heldQty:Number(pos.qty)||0,avg:Number(pos.avg)||0,
       score:Number(row?.rocketScore),rank:row?.rank??null,addQty:0,addRs:0,newAvg:null,reason:null};
     if(!row){rows.push({...base,price:Number(pos.ltp)||0,
-      reason:'not in today’s scan — no current evidence to size an add on'});return;}
+      reason:'not in scan',reasonLong:'This holding is not in today’s scan, so there is no current evidence to size an add on.'});return;}
     const cap=getTopUpCeiling(pos,row,ctx);
-    rows.push({...base,price:(cap.price??(Number(row.price)||0)),ceiling:cap.ceiling,reason:cap.reason,
+    rows.push({...base,price:(cap.price??(Number(row.price)||0)),ceiling:cap.ceiling,reason:cap.reason,reasonLong:cap.reasonLong||cap.reason,
       stopPct:getRowStopDistancePct(row)});
   });
   // v1131: a row must be able to reach an add that PAYS FOR ITSELF before it can share the money.
@@ -8360,12 +8360,13 @@ function buildTopUpPlan(amount){
     const row=byScan.get(r.symbol); if(!row) return;
     const tgt=Number(getRowExitPolicy(row,r.price,ctx.active)?.targetPct);
     r.tgtPct=tgt>0?+tgt.toFixed(2):null;
-    if(!(tgt>0)){r.reason='no viable target to size an add against';return;}
+    if(!(tgt>0)){r.reason='no target';r.reasonLong='No viable target on this row to size an add against.';return;}
     r.minQty=minViableTopUpQty(row,r.price,r.heldQty,tgt,floorRs);
     if(!(r.minQty>0)||r.minQty===Infinity||r.minQty*r.price>r.ceiling+0.5){
       const best=topUpAddEconomics(row,r.price,r.heldQty,Math.max(1,Math.floor(r.ceiling/r.price)),tgt);
-      r.reason='not worth it — the most this stock allows ('+fmtINR(r.ceiling)+') nets only '
-        +fmtINR(best?best.net:0)+' at its '+r.tgtPct+'% target, under the '+fmtINR(floorRs)+' minimum';
+      r.reason='nets '+fmtINR(best?best.net:0)+' < '+fmtINR(floorRs);
+      r.reasonLong='Not worth it: the most this stock allows ('+fmtINR(r.ceiling)+') nets only '
+        +fmtINR(best?best.net:0)+' at its '+r.tgtPct+'% target, under the '+fmtINR(floorRs)+' minimum a trade must clear.';
     }
   });
   // Conviction weight, exactly as computeAlloc: score / stop distance.
@@ -8434,7 +8435,8 @@ function buildTopUpPlan(amount){
         if(r.newAvg>0) r.blendedPnlAtTargetRs=Math.round((sellP-r.newAvg)*(r.heldQty+r.addQty));
       }
     }
-    if(!r.reason&&r.addQty===0) r.reason=budget>0?'budget exhausted before this holding':'enter an amount to distribute';
+    if(!r.reason&&r.addQty===0){ r.reason=budget>0?'budget spent':'enter an amount';
+      r.reasonLong=budget>0?'The budget was fully deployed into higher-conviction holdings before this row.':'Enter an amount to distribute.'; }
   });
   const deployed=rows.reduce((s,r)=>s+(r.addRs||0),0);
   return {rows:rows.sort((a,b)=>(b.addRs||0)-(a.addRs||0)||(Number(b.score)||0)-(Number(a.score)||0)),
@@ -9064,34 +9066,42 @@ function buildTopUpBody(){
     {key:'heldQty',label:'Held',fmt:v=>v>0?String(v):dash},
     {key:'price',label:'Price',fmt:v=>v>0?money(v):dash},
     {key:'score',label:'Score',fmt:v=>Number.isFinite(v)&&v>0?radarScoreCell(v):dash},
-    {key:'addQty',label:'Add sh',bold:true,fmt:(v)=>v>0?'+'+v:dash,
-      clrFn:v=>v>0?'var(--green)':'var(--t3)'},
-    {key:'addRs',label:'Add ₹',fmt:v=>v>0?money(v):dash},
-    {key:'newAvg',label:'New avg',fmt:(v,r)=>v>0
-      ? `${money(r.avg)} → <b>${money(v)}</b> <span style="font-size:11px;color:${r.avgShiftPct<0?'var(--green)':'var(--amber)'}">(${r.avgShiftPct>0?'+':''}${r.avgShiftPct}%)</span>`
-      : (r.avg>0?money(r.avg):dash)},
+    // v1133: shares and rupees MERGED into one column. Eleven columns forced a horizontal scrollbar,
+    // and the two halves of an add are one fact. Sorts on the rupees, which is the money question.
+    {key:'addRs',label:'Add',bold:true,
+      fmt:(v,r)=>r.addQty>0?`${money(v)} <span style="font-size:11px;color:var(--t3)">+${r.addQty}sh</span>`:dash,
+      clrFn:v=>v>0?'var(--green)':'var(--t3)',
+      totFmt:v=>v>0?money(v):dash},
+    {key:'newAvg',label:'New avg',
+      fmt:(v,r)=>v>0?`${money(v)} <span style="font-size:11px;color:${r.avgShiftPct<0?'var(--green)':'var(--amber)'}">${r.avgShiftPct>0?'+':''}${r.avgShiftPct}%</span>`
+        :(r.avg>0?`<span style="color:var(--t3)">${money(r.avg)}</span>`:dash)},
     {key:'pnlPctNow',label:'P&L now',fmt:v=>Number.isFinite(v)?(v>0?'+':'')+v+'%':dash,
       clrFn:v=>!Number.isFinite(v)?'var(--t3)':v>=0?'var(--green)':'var(--red)'},
-    {key:'blendedPnlAtTargetRs',label:'Position @ tgt',fmt:v=>Number.isFinite(v)?(v>0?'+':'')+money(v):dash,
-      clrFn:v=>!Number.isFinite(v)?'var(--t3)':v>=0?'var(--green)':'var(--red)'},
+    {key:'blendedPnlAtTargetRs',label:'Posn @ tgt',fmt:v=>Number.isFinite(v)?(v>0?'+':'')+money(v):dash,
+      clrFn:v=>!Number.isFinite(v)?'var(--t3)':v>=0?'var(--green)':'var(--red)',
+      totFmt:v=>Number.isFinite(v)?(v>0?'+':'')+money(v):dash,
+      totClrFn:v=>!Number.isFinite(v)?'var(--t3)':v>=0?'var(--green)':'var(--red)'},
     {key:'addNetRs',label:'Add earns',bold:true,
-      fmt:(v,r)=>Number.isFinite(v)?`${v>0?'+':''}${money(v)} <span style="font-size:11px;color:var(--t3)">@${r.tgtPct}%</span>`:dash,
-      clrFn:v=>!Number.isFinite(v)?'var(--t3)':v>0?'var(--green)':'var(--red)'},
-    {key:'reason',label:'Why not',align:'left',fmt:v=>v?`<span style="color:var(--t3);font-size:12px">${escHtml(v)}</span>`:''}
+      fmt:v=>Number.isFinite(v)?(v>0?'+':'')+money(v):dash,
+      clrFn:v=>!Number.isFinite(v)?'var(--t3)':v>0?'var(--green)':'var(--red)',
+      totFmt:v=>Number.isFinite(v)?(v>0?'+':'')+money(v):dash,
+      totClrFn:v=>!Number.isFinite(v)?'var(--t3)':v>=0?'var(--green)':'var(--red)'},
+    // Short reason in the cell, the full sentence on hover — it was the widest column on the page.
+    {key:'reason',label:'Why not',align:'left',
+      fmt:(v,r)=>v?`<span style="color:var(--t3);font-size:12px" title="${escHtml(r.reasonLong||v)}">${escHtml(v)}</span>`:''}
   ];
   const totals={symbol:'TOTAL',heldQty:null,price:null,score:null,
-    addQty:plan.rows.reduce((n,r)=>n+(r.addQty||0),0),
     addRs:plan.deployed,newAvg:null,pnlPctNow:null,
     blendedPnlAtTargetRs:plan.rows.reduce((n,r)=>n+(Number(r.blendedPnlAtTargetRs)||0),0),
     addNetRs:plan.rows.reduce((n,r)=>n+(Number(r.addNetRs)||0),0),reason:''};
-  _topUpTbl=makeSortableTable('top-up-plan',cols,plan.rows,'addRs',-1,null,totals);
+  _topUpTbl=makeSortableTable('top-up-plan',cols,plan.rows,'addRs',1,null,totals);
   return `<div style="display:flex;gap:14px;align-items:flex-end;flex-wrap:wrap;padding:10px 16px;border-bottom:1px solid var(--border)">
       <div><div class="st-l">Deployed</div><div class="st-v" style="font-size:17px">${money(plan.deployed)}</div>
         <div class="st-d">of ${money(plan.budget)}${TOPUP_AMOUNT===''?' (Capital ₹)':''} · ${plan.leftover>0?money(plan.leftover)+' left over':'fully deployed'}</div></div>
       <div><div class="st-l">Eligible holdings</div><div class="st-v" style="font-size:17px">${plan.eligible} / ${plan.positions}</div>
         <div class="st-d">the rest state why below</div></div>
     </div>
-    <div style="overflow:auto">${_topUpTbl.getHtml()}</div>
+    <div>${_topUpTbl.getHtml()}</div>
     <div style="padding:10px 16px;font-size:12px;color:var(--t3);line-height:1.55">
       Sized by the SAME rules as a fresh buy: conviction (Radar score ÷ this stock's own stop), the 0.10% turnover rail, Max Allocation headroom against the position you ALREADY hold, and the v1070 cushion — an add to a stock in profit is bounded so that if the new entry's stop is hit, the blended position is still not at a loss. Money follows conviction, never the size of the loss: this deliberately does not average down by how far a holding has fallen. Topping up does NOT pay costs twice — under CNC the buy side is fully proportional (two 100-share orders cost exactly what one 200-share order costs), and the flat ₹15.34 DP fee is charged once per stock per sell day, which the shares you already hold are paying anyway; only the incremental sell charge is counted against the add. A holding is offered <b>nothing</b> unless its largest permitted add clears the minimum net — a token top-up that nets less than the fees is worse than no top-up. <b>Position @ tgt</b> is what the WHOLE holding is worth if that target prints.
     </div>`;
