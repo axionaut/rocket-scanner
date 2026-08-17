@@ -1,5 +1,5 @@
-const BUILD_TS='2026-08-17 16:53 IST'; // release build time (IST)
-const APP_VERSION=1151; // v1151: the Kite helper runs sandboxed, so its hooks go on the page window and the document, not on its own.
+const BUILD_TS='2026-08-17 17:02 IST'; // release build time (IST)
+const APP_VERSION=1152; // v1152: the scanner checks a Kite tab is actually listening before claiming it asked one.
 // v1093: a baseline reward:risk MEASURED on the cross-section (last completed bhav session) instead of learned from the owner's own fills - reported on every row, deliberately not enforced. Includes v1092: position size split by Radar score / stop distance, so equally-scored names carry equal RUPEE risk, plus an opt-in Risk /trade cap.
 // v556: parse the NSE Market Activity Report (MA<date>.csv) — official Nifty %, advances/declines and sector index moves shown as market CONTEXT in the status bar (EOD data, display only, never fed into per-row scoring); MA added to the ℹ️ file manifest.
 // v555 market-cycle stage awareness (stateless, self-calibrating): per-row stage label (1 accumulation · 2 breakout · 3 event · 4 profit-booking · 5 re-accumulation · 6 second-leg); a quiet-accumulation signal (conjunction-of-percentiles) injected via the rocket-diagnostic weighting; sell-the-news decay off Recent earnings date (horizon = review days). v1065 makes the market-breadth gauge an entry-eligibility input while still never changing ranking.
@@ -9653,8 +9653,23 @@ function bridgeInstalled(){
   if(typeof window.__rocketBridgeRequest==='function') return true;
   try{ return document.documentElement.getAttribute('data-rocket-bridge')==='1'; }catch(e){ return false; }
 }
+// Is a KITE TAB actually listening? The helper heartbeats every 15 seconds from that side. Without
+// this the app could only report that it had PUBLISHED a request - which it did, into silence, and
+// then told the owner "Asked Kite for INDOMIM, GALAPREC" as though something had happened.
+function bridgeKiteStatus(){
+  try{
+    if(typeof window.__rocketBridgeStatus!=='function') return {ok:false,why:'helper not on this page'};
+    const st=window.__rocketBridgeStatus()||{};
+    const ago=st.kiteSeenMsAgo;
+    if(ago==null) return {ok:false,why:'no Kite tab has ever checked in',lastLog:st.lastLog};
+    if(ago>60000) return {ok:false,why:'no Kite tab seen for '+Math.round(ago/1000)+'s',lastLog:st.lastLog};
+    return {ok:true,agoSec:Math.round(ago/1000),lastLog:st.lastLog};
+  }catch(e){ return {ok:false,why:String(e&&e.message||e)}; }
+}
 function bridgePublish(limit){
   if(!bridgeInstalled()) return {symbols:[],reason:'not installed'};
+  const k=bridgeKiteStatus();
+  if(!k.ok) return {symbols:[],reason:'no Kite tab listening — '+k.why};
   const req=bridgeRequest(limit);
   try{
     // localStorage is the fallback channel when only the DOM marker is present: the helper polls it.
@@ -9700,6 +9715,13 @@ function intradayPasteBarHtml(){
   return `<div style="margin:8px 0;padding:10px 14px;border:1px solid ${t?'var(--amber)':done?'var(--green)':'var(--border)'};border-radius:8px;background:var(--bg2)">
     <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-bottom:6px">
       <span class="st-l">Intraday check</span>
+      ${(()=>{
+        if(!bridgeInstalled()) return '';
+        const k=bridgeKiteStatus();
+        return `<span style="font-size:11px;color:${k.ok?'var(--green)':'var(--amber)'}"
+          title="${escHtml(k.lastLog?('Kite tab last said: '+k.lastLog):'')}">${
+          k.ok?('Kite tab live '+k.agoSec+'s ago'):('Kite tab: '+escHtml(k.why))}</span>`;
+      })()}
       ${st?`<span style="font-size:12px;color:${done?'var(--green)':'var(--t2)'}">
         ${done?`<b>settled</b> — the top ${st.of} were checked and held their place`
               :`checked <b>${st.checked}</b> of the top <b>${st.of}</b>`}
@@ -9713,7 +9735,7 @@ function intradayPasteBarHtml(){
       ${(()=>{
         const on=bridgeInstalled();
         return `<button onclick="${on
-          ? `const r=bridgePublish();showToast(r.symbols.length?('Asked Kite for '+r.symbols.join(', ')):('Nothing requested — '+r.reason),3000);`
+          ? `const r=bridgePublish();showToast(r.symbols.length?('Asked your Kite tab for '+r.symbols.join(', ')+' — watch the rows fill in'):('Nothing requested: '+r.reason),r.symbols.length?4000:7000,!r.symbols.length);`
           : `showToast('The Kite helper is not installed in this browser, so this button has nothing to talk to. Open dev/kite-bridge.user.js and follow the setup — until then, paste manually with the 5m buttons.',7000,true);`
         }" class="btn" style="font-size:11px;${on?'':'opacity:.55'}"
           title="${on

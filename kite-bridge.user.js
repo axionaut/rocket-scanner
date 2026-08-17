@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Rocket Scanner — Kite bridge
 // @namespace    rocket-scanner
-// @version      1.3
+// @version      1.4
 // @description  Serve the Rocket Scanner's requests for 5-minute chart data from your own logged-in Kite tab.
 // @match        https://kite.zerodha.com/*
 // @match        https://axionaut.github.io/rocket-scanner/*
@@ -53,6 +53,8 @@
   const PAGE = (typeof unsafeWindow !== 'undefined') ? unsafeWindow : window;
   const REQ='rocketScannerKiteBridge_req';
   const RES='rocketScannerKiteBridge_res';
+  const ALIVE='rocketScannerKiteBridge_alive';   // Kite tab heartbeat, so the scanner can tell
+  const LOG='rocketScannerKiteBridge_log';       // what the Kite tab is doing, shown in the scanner
   const PACE_MS = 4000; // gap between symbols. Deliberately slow: this is a person's pace.
 
   const onKite = location.hostname === 'kite.zerodha.com';
@@ -70,6 +72,14 @@
     // A DOM marker as well as the hook: the document is shared with the page in every sandbox
     // mode, so this is the one signal that cannot be isolated away.
     try{ document.documentElement.setAttribute('data-rocket-bridge','1'); }catch(e){}
+    // Let the app ask whether a KITE TAB is actually listening. Without this the scanner could only
+    // report that it had published a request - which it did, into silence.
+    PAGE.__rocketBridgeStatus = function(){
+      let alive=0,log='';
+      try{ alive=Number(GM_getValue(ALIVE,0))||0; }catch(e){}
+      try{ log=String(GM_getValue(LOG,'')||''); }catch(e){}
+      return {kiteSeenMsAgo: alive?Date.now()-alive:null, lastLog: log};
+    };
     console.log('[kite-bridge] connected to Rocket Scanner (hook on page window:',
                 typeof PAGE.__rocketBridgeRequest === 'function', ')');
     try{
@@ -146,23 +156,27 @@
     return !!$('.ciq-data-table-wrapper table');
   }
 
+  const beat = ()=>{ try{ GM_setValue(ALIVE, Date.now()); }catch(e){} };
+  const say  = m =>{ try{ GM_setValue(LOG, m); }catch(e){} console.log('[kite-bridge]', m); };
+  beat(); setInterval(beat, 15000);   // local heartbeat only - touches no network and no exchange
+
   let busy = false;
   async function serve(reqRaw){
     if(busy) return;
     let req; try{ req = typeof reqRaw==='string' ? JSON.parse(reqRaw) : reqRaw; }catch(e){ return; }
     if(!req || !Array.isArray(req.symbols) || !req.symbols.length) return;
     busy = true;
-    console.log('[kite-bridge] serving', req.symbols.join(', '));
+    say('serving '+req.symbols.join(', '));
     try{
       for(const sym of req.symbols){
         const ok = await selectSymbol(sym);
-        if(!ok){ console.warn('[kite-bridge] could not switch to', sym); continue; }
+        if(!ok){ say('could not switch the chart to '+sym+' - the symbol box selector needs fixing'); continue; }
         await openDataTable();
         let rows = null;
         for(let i=0;i<12 && !rows;i++){ await sleep(400); rows = readTable(); }
-        if(!rows){ console.warn('[kite-bridge] no table for', sym); continue; }
+        if(!rows){ say('no data table for '+sym+' - the table toggle selector needs fixing'); continue; }
         GM_setValue(RES, JSON.stringify({symbol: sym, rows, at: Date.now()}));
-        console.log('[kite-bridge] sent', sym, rows.length, 'rows');
+        say('sent '+sym+' ('+rows.length+' rows)');
         await sleep(PACE_MS);
       }
     } finally {
@@ -174,5 +188,5 @@
   try{ GM_addValueChangeListener(REQ, (_n,_o,val)=>serve(val)); }catch(e){}
   // Serve anything already waiting when the tab opens, then go quiet.
   try{ const pending = GM_getValue(REQ,''); if(pending) serve(pending); }catch(e){}
-  console.log('[kite-bridge] ready — waiting for a request from Rocket Scanner');
+  say('ready on '+(currentSymbol()||'(no symbol in the url - open a CHART page)'));
 })();
