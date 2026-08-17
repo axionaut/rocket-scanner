@@ -1,5 +1,5 @@
-const BUILD_TS='2026-08-17 17:02 IST'; // release build time (IST)
-const APP_VERSION=1152; // v1152: the scanner checks a Kite tab is actually listening before claiming it asked one.
+const BUILD_TS='2026-08-17 17:24 IST'; // release build time (IST)
+const APP_VERSION=1154; // v1154: the Kite helper is told the instrument token and navigates straight to the chart URL.
 // v1093: a baseline reward:risk MEASURED on the cross-section (last completed bhav session) instead of learned from the owner's own fills - reported on every row, deliberately not enforced. Includes v1092: position size split by Radar score / stop distance, so equally-scored names carry equal RUPEE risk, plus an opt-in Risk /trade cap.
 // v556: parse the NSE Market Activity Report (MA<date>.csv) — official Nifty %, advances/declines and sector index moves shown as market CONTEXT in the status bar (EOD data, display only, never fed into per-row scoring); MA added to the ℹ️ file manifest.
 // v555 market-cycle stage awareness (stateless, self-calibrating): per-row stage label (1 accumulation · 2 breakout · 3 event · 4 profit-booking · 5 re-accumulation · 6 second-leg); a quiet-accumulation signal (conjunction-of-percentiles) injected via the rocket-diagnostic weighting; sell-the-news decay off Recent earnings date (horizon = review days). v1065 makes the market-breadth gauge an entry-eligibility input while still never changing ranking.
@@ -9639,9 +9639,19 @@ function bridgeBudgetLeft(){
 function bridgeRequest(limit){
   const st=getIntradayLoopState(limit||INTRADAY_LOOP_N);
   const budget=bridgeBudgetLeft();
-  const want=st.need.slice(0,budget).map(r=>normSym(r.symbol));
-  if(!want.length) return {symbols:[],reason:budget?'nothing to check':'budget spent'};
-  return {symbols:want,at:Date.now()};
+  // Send the INSTRUMENT TOKEN with each symbol. Kite's chart URL is deterministic -
+  //   /markets/chart/web/ciq/NSE/<SYMBOL>/<TOKEN>
+  // - and the app already holds 10,197 NSE tokens from the public api.kite.trade dump. Navigating
+  // straight there is far more robust than driving a symbol-search box, which is what v1.5 tried
+  // and what left GALAPREC sitting in the search field with the chart still on MANCREDIT.
+  const want=st.need.slice(0,budget)
+    .map(r=>({sym:normSym(r.symbol),token:KITE_TOKEN[normSym(r.symbol)]||0}))
+    .filter(x=>x.token>0);
+  const noToken=st.need.slice(0,budget).filter(r=>!KITE_TOKEN[normSym(r.symbol)]).map(r=>r.symbol);
+  if(!want.length) return {symbols:[],jobs:[],
+    reason:budget?(noToken.length?('no Kite token for '+noToken.join(', ')+' — re-run dev/fetch-preopen.js'):'nothing to check')
+                 :'budget spent'};
+  return {symbols:want.map(x=>x.sym),jobs:want,at:Date.now()};
 }
 // Is the other half of the bridge actually present? The userscript defines this hook when it loads
 // on this page. Without it the button can publish a request that nobody will ever collect - which is
@@ -9733,15 +9743,14 @@ function intradayPasteBarHtml(){
         ${[2,3,5,10].map(k=>`<option value="${k}"${k===INTRADAY_LOOP_N?' selected':''}>top ${k}</option>`).join('')}
       </select>
       ${(()=>{
-        const on=bridgeInstalled();
-        return `<button onclick="${on
-          ? `const r=bridgePublish();showToast(r.symbols.length?('Asked your Kite tab for '+r.symbols.join(', ')+' — watch the rows fill in'):('Nothing requested: '+r.reason),r.symbols.length?4000:7000,!r.symbols.length);`
-          : `showToast('The Kite helper is not installed in this browser, so this button has nothing to talk to. Open dev/kite-bridge.user.js and follow the setup — until then, paste manually with the 5m buttons.',7000,true);`
-        }" class="btn" style="font-size:11px;${on?'':'opacity:.55'}"
-          title="${on
-            ? `Ask your open Kite tab for the unchecked names above. Capped at ${BRIDGE_MAX_PER_WINDOW} symbols per ${BRIDGE_WINDOW_MS/60000} minutes.`
-            : 'Needs the Tampermonkey helper installed and a Kite tab open. Click for setup instructions.'}"
-          >${on?'Fetch via Kite':'Fetch via Kite (helper not installed)'}</button>`;
+        // The optional helper. If it is not installed the button is not shown at all - the owner's
+        // verdict on it was "overdrawn", and a permanent "helper not installed" chip is nagging for
+        // a path he has chosen not to take. The one-click bookmarklet in
+        // dev/copy-table.bookmarklet.txt does the only part that was ever slow: the copying.
+        if(!bridgeInstalled()) return '';
+        return `<button onclick="const r=bridgePublish();showToast(r.symbols.length?('Asked your Kite tab for '+r.symbols.join(', ')+' — watch the rows fill in'):('Nothing requested: '+r.reason),r.symbols.length?4000:7000,!r.symbols.length);"
+          class="btn" style="font-size:11px"
+          title="Ask your open Kite tab for the unchecked names above. Capped at ${BRIDGE_MAX_PER_WINDOW} symbols per ${BRIDGE_WINDOW_MS/60000} minutes.">Fetch via Kite</button>`;
       })()}
       ${n?`<button onclick="clearIntraday()" class="btn" style="opacity:.75;font-size:11px"
         title="Throw away the chart data for all ${n} checked stock(s) and their BUY/SKIP verdicts, and re-rank without them. The recommendations themselves are untouched — it only undoes the checking.">Discard ${n} check${n===1?'':'s'}</button>`:''}

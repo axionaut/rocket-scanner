@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Rocket Scanner — Kite bridge
 // @namespace    rocket-scanner
-// @version      1.5
+// @version      2.0
 // @description  Serve the Rocket Scanner's requests for 5-minute chart data from your own logged-in Kite tab.
 // @match        https://kite.zerodha.com/*
 // @match        https://axionaut.github.io/rocket-scanner/*
@@ -32,6 +32,10 @@
 // exactly that list, then goes idle. The scanner also enforces its own cap (12 symbols per 15
 // minutes) before a request is ever published, so the ceiling is not a setting in here that could
 // drift. If you want fewer, lower PACE_MS.
+//
+// HOW IT DRIVES: it does NOT touch the symbol-search box. The scanner sends {sym, token} pairs and
+// this navigates straight to /markets/chart/web/ciq/NSE/<SYMBOL>/<TOKEN>. Staying LOGGED IN is the
+// only manual part - the session is what makes those URLs resolve.
 //
 // SETUP - install ONCE from the hosted copy so it can update itself:
 //   https://axionaut.github.io/rocket-scanner/kite-bridge.user.js
@@ -157,40 +161,6 @@
 
   // Switch symbol through the chart's own lookup box rather than reloading the page - a reload
   // re-authenticates and re-fetches everything, which is exactly the load we are trying not to add.
-  async function selectSymbol(sym){
-    if(currentSymbol() === sym) return true;
-    const input = $('cq-lookup input')
-      || $('input[placeholder*="earch" i]')
-      || $('.ciq-search input')
-      || [...document.querySelectorAll('input[type="text"], input:not([type])')]
-           .find(i => i.offsetParent && i.clientWidth > 60);
-    if(!input){ say('no symbol box found - send me the SELECTORS line above'); return false; }
-    input.focus();
-    input.click();
-    // Set through the NATIVE setter: a framework-controlled input ignores a plain `.value =`,
-    // which is why v1.4 typed the symbol into the box and the chart never moved.
-    const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
-    setter.call(input, '');
-    input.dispatchEvent(new Event('input', {bubbles: true}));
-    await sleep(200);
-    setter.call(input, sym);
-    input.dispatchEvent(new Event('input', {bubbles: true}));
-    input.dispatchEvent(new Event('keyup', {bubbles: true}));
-    await sleep(1200);
-    const hit = document.querySelector('cq-item[cq-focused], cq-item, .ciq-result, .results-item, .search-result');
-    if(hit){ hit.click(); }
-    else {
-      for(const type of ['keydown', 'keypress', 'keyup']){
-        input.dispatchEvent(new KeyboardEvent(type, {key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true}));
-      }
-    }
-    for(let i = 0; i < 24; i++){
-      await sleep(250);
-      if(currentSymbol() === sym) return true;
-    }
-    return false;
-  }
-
   // OWNER: "Zerodha always defaults to the chart view on every click. We then have to click on the
   // Table layout and then Additional Columns button to get all 8 columns in view." So this is TWO
   // clicks, and it has to run after EVERY symbol switch rather than once per session.
@@ -214,39 +184,60 @@
   const say  = m =>{ try{ GM_setValue(LOG, m); }catch(e){} console.log('[kite-bridge]', m); };
   beat(); setInterval(beat, 15000);   // local heartbeat only - touches no network and no exchange
 
-  let busy = false;
-  async function serve(reqRaw){
-    if(busy) return;
-    let req; try{ req = typeof reqRaw==='string' ? JSON.parse(reqRaw) : reqRaw; }catch(e){ return; }
-    if(!req || !Array.isArray(req.symbols) || !req.symbols.length) return;
-    busy = true;
-    say('serving '+req.symbols.join(', '));
-    try{
-      for(const sym of req.symbols){
-        const ok = await selectSymbol(sym);
-        if(!ok){ say('could not switch the chart to '+sym+' - the symbol box selector needs fixing'); continue; }
-        await openDataTable();
-        let rows = null;
-        for(let i = 0; i < 12; i++){
-          await sleep(400);
-          const r = readTable();
-          if(Array.isArray(r)){ rows = r; break; }
-          if(r && r.short){ await openDataTable(); }      // re-click "+ Additional columns"
-        }
-        if(!rows){ say('no 8-column table for ' + sym + ' - could not reach Additional columns'); continue; }
-        GM_setValue(RES, JSON.stringify({symbol: sym, rows, at: Date.now()}));
-        say('sent '+sym+' ('+rows.length+' rows)');
-        await sleep(PACE_MS);
-      }
-    } finally {
-      busy = false;
-      try{ GM_setValue(REQ, JSON.stringify({symbols:[],servedAt:Date.now()})); }catch(e){}
+  // ── THE QUEUE SURVIVES NAVIGATION ─────────────────────────────────────────────────────────
+  // Driving the symbol-search box was the wrong idea: it is a framework-controlled input, it needed
+  // native setters and synthesised Enter keys, and it still left the typed symbol sitting in the box
+  // with the chart unmoved. The chart URL is DETERMINISTIC and the scanner already knows every
+  // instrument token, so this simply NAVIGATES. Navigation destroys all script state, so the queue
+  // lives in GM storage and each page load resumes where the previous one stopped.
+  const QUEUE = 'rocketScannerKiteBridge_queue';
+  const getQ = () => { try{ return JSON.parse(GM_getValue(QUEUE, '[]')) || []; }catch(e){ return []; } };
+  const setQ = j => { try{ GM_setValue(QUEUE, JSON.stringify(j)); }catch(e){} };
+  const urlFor = job => '/markets/chart/web/ciq/NSE/' + encodeURIComponent(job.sym) + '/' + job.token;
+
+  async function step(){
+    const q = getQ();
+    if(!q.length) return;
+    const job = q[0];
+    // Not on the right chart yet: go there. The script re-runs on that page load and continues.
+    if(currentSymbol() !== String(job.sym).toUpperCase()){
+      say('navigating to ' + job.sym + ' (' + q.length + ' left)');
+      location.href = urlFor(job);
+      return;
     }
+    say('reading ' + job.sym);
+    let rows = null;
+    for(let i = 0; i < 15; i++){
+      await openDataTable();
+      await sleep(500);
+      const r = readTable();
+      if(Array.isArray(r)){ rows = r; break; }
+    }
+    if(rows){
+      try{ GM_setValue(RES, JSON.stringify({symbol: job.sym, rows: rows, at: Date.now()})); }catch(e){}
+      say('sent ' + job.sym + ' (' + rows.length + ' rows)');
+    }else{
+      say('no 8-column table for ' + job.sym + ' - skipping');
+    }
+    setQ(q.slice(1));
+    const rest = getQ();
+    if(rest.length){ await sleep(PACE_MS); location.href = urlFor(rest[0]); }
+    else { say('done - queue empty'); }
   }
 
-  try{ GM_addValueChangeListener(REQ, (_n,_o,val)=>serve(val)); }catch(e){}
-  // Serve anything already waiting when the tab opens, then go quiet.
-  try{ const pending = GM_getValue(REQ,''); if(pending) serve(pending); }catch(e){}
+  function accept(reqRaw){
+    let req; try{ req = typeof reqRaw === 'string' ? JSON.parse(reqRaw) : reqRaw; }catch(e){ return; }
+    const jobs = (req && Array.isArray(req.jobs)) ? req.jobs.filter(j => j && j.sym && j.token) : [];
+    if(!jobs.length) return;
+    say('queued ' + jobs.map(j => j.sym).join(', '));
+    setQ(jobs);
+    step();
+  }
+
+  try{ GM_addValueChangeListener(REQ, (_n,_o,val)=>accept(val)); }catch(e){}
+  // On EVERY page load: if a queue is outstanding, continue it. This is what makes navigation-based
+  // driving work - the script is re-created by each load and simply picks the queue back up.
+  try{ setTimeout(step, 1200); }catch(e){}
   say('ready on '+(currentSymbol()||'(no symbol in the url - open a CHART page)'));
   dumpSelectors();
 })();
