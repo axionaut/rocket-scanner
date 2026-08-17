@@ -1,5 +1,5 @@
-const BUILD_TS='2026-08-17 18:27 IST'; // release build time (IST)
-const APP_VERSION=1161; // v1161: every fetch also writes one appended CSV per stock, so the data can be opened and checked.
+const BUILD_TS='2026-08-17 18:37 IST'; // release build time (IST)
+const APP_VERSION=1162; // v1162: a 5-minute read from an earlier session is not evidence about today - it counts as unchecked.
 // v1093: a baseline reward:risk MEASURED on the cross-section (last completed bhav session) instead of learned from the owner's own fills - reported on every row, deliberately not enforced. Includes v1092: position size split by Radar score / stop distance, so equally-scored names carry equal RUPEE risk, plus an opt-in Risk /trade cap.
 // v556: parse the NSE Market Activity Report (MA<date>.csv) — official Nifty %, advances/declines and sector index moves shown as market CONTEXT in the status bar (EOD data, display only, never fed into per-row scoring); MA added to the ℹ️ file manifest.
 // v555 market-cycle stage awareness (stateless, self-calibrating): per-row stage label (1 accumulation · 2 breakout · 3 event · 4 profit-booking · 5 re-accumulation · 6 second-leg); a quiet-accumulation signal (conjunction-of-percentiles) injected via the rocket-diagnostic weighting; sell-the-news decay off Recent earnings date (horizon = review days). v1065 makes the market-breadth gauge an entry-eligibility input while still never changing ranking.
@@ -3588,7 +3588,28 @@ function getIntradayRead(sym){
   // the price-path standing. The owner's own 5-minute export sometimes omits volume, so the
   // price-path read remains the fallback rather than a second-class citizen.
   const traj=buildIntradayTrajectory(day);
+  // ── v1162: WHEN IS THIS FROM? (owner: "each stock wouldn't be updated daily so data might not be
+  // contiguous and you may make bad decisions based on it.") He is right, and the hole was not the
+  // trajectory - that already scopes itself to the LAST session above, so two sessions can never be
+  // blended into one flow read. The hole was that a read from ANY session was then fed into today's
+  // ranking as if it were current: a stock fetched last Wednesday and never again would still be
+  // multiplying today's score by last Wednesday's flow, and would still show CONFIRMED.
+  //
+  // So every read now states its own session and age, and the SESSION BOUNDARY is the veto - a hard,
+  // non-arbitrary line rather than an invented "N minutes old" constant. Within the session the age
+  // is DISPLAYED instead of judged, which is the same discipline the rest of this file uses for
+  // limits it cannot measure away.
+  //
+  // Holes INSIDE a session are counted, not vetoed: a thin stock genuinely prints no bar for five
+  // minutes, and the volume clock already weights those to nothing. A count that is large is visible
+  // to the eye; a threshold on it would be a tunable with no evidence behind it.
+  const nowKey=(typeof getSessionDate==='function')?getSessionDate():key;
+  const asOf=day[day.length-1].t;
+  const ageMin=Math.max(0,Math.round((Date.now()-asOf)/60000));
+  const spanBars=Math.round((asOf-day[0].t)/300000)+1;      // 5-minute bars the span should hold
+  const holes=Math.max(0,spanBars-day.length);
   return {sym:normSym(sym),bars:day.length,sessions:new Set(bars.map(b=>istDayKey(b.t))).size,
+          on:key,current:key===nowKey,asOf,ageMin,holes,
           open,close,hi,lo,dayPct:(close/open-1)*100,traj,
           regime:traj?traj.regime:null,cvdPct:traj?traj.cvdPct:null,
           avgMovePct:traj?traj.avgMovePct:null,
@@ -3616,12 +3637,15 @@ function applyIntradayReorder(rows){
   for(const r of rows){
     const read=getIntradayRead(r.symbol);
     r.intraday=read||null;
-    if(read) n++;
+    // Kept on the row so the table can SAY it is stale - but it must not move the ranking. Silently
+    // dropping it would be worse: the owner would see no badge and assume the stock was never
+    // checked, when in fact it was checked on a day that no longer describes it.
+    if(read&&read.current) n++;
   }
   if(!n) return 0;
   const NEUTRAL=0.5;                 // the midpoint of a [0,1] standing: "no information"
   rows.forEach(r=>{
-    const f=r.intraday?Math.max(0,Math.min(1,r.intraday.standing)):NEUTRAL;
+    const f=(r.intraday&&r.intraday.current)?Math.max(0,Math.min(1,r.intraday.standing)):NEUTRAL;
     r._iAdj=Math.max(0,(Number.isFinite(r.depthBlendPct)?r.depthBlendPct:r.setupPct))*f;
   });
   const ranked=rows.filter(r=>Number.isFinite(r._iAdj)).slice().sort((a,b)=>a._iAdj-b._iAdj);
@@ -3641,6 +3665,11 @@ function applyIntradayReorder(rows){
   // only if it still clears the SAME bar the basket uses - nothing softer, nothing bespoke.
   rows.forEach(r=>{
     if(!r.intraday){r.intradayVerdict=null;r.intradayWhy=null;return;}
+    if(!r.intraday.current){
+      r.intradayVerdict='stale';
+      r.intradayWhy='checked on '+r.intraday.on+', not today — refetch before acting on it';
+      return;
+    }
     const passes=(typeof meetsRecommendationBar==='function')?meetsRecommendationBar(r):(r.score>=RECOMMEND_MIN_SCORE);
     r.intradayVerdict=passes?'confirmed':'rejected';
     const t=r.intraday.traj;
@@ -3668,7 +3697,9 @@ function getIntradayLoopState(limit){
   // instead of going silent at the moment it has the most to say. The verdict is unaffected: those
   // rows are only CANDIDATES to check, and a candidate is confirmed only by clearing the real bar.
   const board=(passing.length?passing:pool).slice(0,N);
-  const need=board.filter(r=>!INTRADAY_BARS[normSym(r.symbol)]);
+  // A stale read does NOT count as checked - the loop must ask for it again, or it would report
+  // "settled" on a board validated last week.
+  const need=board.filter(r=>{const rd=getIntradayRead(r.symbol);return !rd||!rd.current;});
   const source=(Array.isArray(ALL)?ALL:[]).filter(r=>r.intraday);
   const confirmed=source.filter(r=>r.intradayVerdict==='confirmed');
   const rejected=source.filter(r=>r.intradayVerdict==='rejected');
@@ -9441,20 +9472,35 @@ function intradayRowButton(s){
   // table itself down the page, which is the same complaint as the horizontal scrollbar - the
   // recommendations are the thing, and nothing may crowd them out.
   const v=has?s.intradayVerdict:null;
-  const face=v==='confirmed'?'\u2713':v==='rejected'?'\u2717':'5m';
-  const col=sel?'var(--amber)':v==='confirmed'?'var(--green)':v==='rejected'?'var(--red)'
-           :has?'var(--cyan)':'var(--t3)';
   const rd=has?getIntradayRead(sym):null;
-  const tip=v
-    ? `${sym}: ${v==='confirmed'?'STILL CLEARS THE BAR — buy':'NO LONGER CLEARS THE BAR — skip'}`
-      +`\n${s.intradayWhy||''}\nClick to replace this data.`
-    : has
-      ? `${sym}: checked${rd&&rd.regime?' — '+rd.regime:''}. Click to replace.`
-      : `Check ${sym}: paste its 5-minute chart table and see whether it still clears the buy bar.`;
+  // v1162: a verdict from an earlier session gets its OWN face and colour. It must not read as
+  // unchecked (the owner would go and check it, only to find data already there) and it must not
+  // read as confirmed (it is not evidence about today). An hourglass says "this was answered, for a
+  // day that is over".
+  const face=v==='stale'?'⧖':v==='confirmed'?'✓':v==='rejected'?'✗':'5m';
+  const col=sel?'var(--amber)':v==='stale'?'var(--t3)':v==='confirmed'?'var(--green)'
+           :v==='rejected'?'var(--red)':has?'var(--cyan)':'var(--t3)';
+  const age=rd?(rd.ageMin<60?rd.ageMin+' min old':(rd.ageMin/60).toFixed(1)+' h old'):'';
+  const prov=rd?`
+${rd.bars} bars from ${rd.on}, latest ${new Date(rd.asOf).toLocaleTimeString('en-IN',{hour:'2-digit',minute:'2-digit'})} (${age})`
+    +`${rd.holes?` · ${rd.holes} five-minute bar${rd.holes>1?'s':''} missing inside the session`:''}`:'';
+  const tip=v==='stale'
+    ? `${sym}: CHECKED ON A PREVIOUS SESSION — not evidence about today.`
+      +`${prov}
+It counts as unchecked and does not move the ranking. Click to refetch.`
+    : v
+      ? `${sym}: ${v==='confirmed'?'STILL CLEARS THE BAR — buy':'NO LONGER CLEARS THE BAR — skip'}`
+        +`
+${s.intradayWhy||''}${prov}
+Click to replace this data.`
+      : has
+        ? `${sym}: checked${rd&&rd.regime?' — '+rd.regime:''}.${prov} Click to replace.`
+        : `Check ${sym}: paste its 5-minute chart table and see whether it still clears the buy bar.`;
   return `<button type="button" onclick='event.stopPropagation();setIntradayTarget(${JSON.stringify(sym)})'`
     +` style="margin-right:6px;padding:0 4px;border:1px solid ${col};border-radius:3px;`
     +`background:${sel?'rgba(245,158,11,.12)':v==='rejected'?'rgba(239,68,68,.10)':v==='confirmed'?'rgba(34,197,94,.10)':'transparent'};`
-    +`color:${col};font-size:10px;line-height:14px;cursor:pointer;vertical-align:middle;font-weight:${v?'700':'400'}"`
+    +`color:${col};font-size:10px;line-height:14px;cursor:pointer;vertical-align:middle;`
+    +`opacity:${v==='stale'?'.55':'1'};font-weight:${(v&&v!=='stale')?'700':'400'}"`
     +` title="${escHtml(tip)}">${face}</button>`;
 }
 
