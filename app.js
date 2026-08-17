@@ -1,5 +1,5 @@
-const BUILD_TS='2026-08-17 13:14 IST'; // release build time (IST)
-const APP_VERSION=1143; // v1143: one table - intraday 5-minute bars enrich a recommendation from the row itself, and the depth panel is gone.
+const BUILD_TS='2026-08-17 13:42 IST'; // release build time (IST)
+const APP_VERSION=1144; // v1144: flow trajectory on a volume clock, the live resting book off the same paste, and a table that fits.
 // v1093: a baseline reward:risk MEASURED on the cross-section (last completed bhav session) instead of learned from the owner's own fills - reported on every row, deliberately not enforced. Includes v1092: position size split by Radar score / stop distance, so equally-scored names carry equal RUPEE risk, plus an opt-in Risk /trade cap.
 // v556: parse the NSE Market Activity Report (MA<date>.csv) — official Nifty %, advances/declines and sector index moves shown as market CONTEXT in the status bar (EOD data, display only, never fed into per-row scoring); MA added to the ℹ️ file manifest.
 // v555 market-cycle stage awareness (stateless, self-calibrating): per-row stage label (1 accumulation · 2 breakout · 3 event · 4 profit-booking · 5 re-accumulation · 6 second-leg); a quiet-accumulation signal (conjunction-of-percentiles) injected via the rocket-diagnostic weighting; sell-the-news decay off Recent earnings date (horizon = review days). v1065 makes the market-breadth gauge an entry-eligibility input while still never changing ranking.
@@ -1237,13 +1237,14 @@ function symbolChartButton(sym,innerHtml=null,extraStyle=''){
   return `<button type="button" onclick='event.stopPropagation();${onClick}'`
     +` style="padding:0;border:0;background:transparent;color:inherit;font:inherit;text-align:left;cursor:pointer;${extraStyle}"`
     +` title="${title}">${innerHtml??escHtml(s)}</button>`
-    +(t?tvChartButton(s):'');
+    ;
 }
 // v1139 (owner): open the stock in Zerodha, the way the name already opens TradingView. There is no
 // supported URL that PRE-FILLS a buy dialog without a Kite Connect api_key, and Kite Connect was
 // ruled out (static IP) - so this deep-links to the stock's own Kite chart page, where the B/S
 // buttons sit one click away. The instrument token comes from `api.kite.trade/instruments`, which is
 // PUBLIC: no key, no login. A stock with no token renders nothing rather than a broken link.
+// v1144: retired by owner - the name opens Zerodha and the chart button earned no width back.
 function tvChartButton(sym){
   const s=String(sym??'').trim();
   if(!s) return '';
@@ -3307,10 +3308,30 @@ function parseIntradayPaste(text,forSymbol){
     if(!Number.isFinite(t)||!(o>0)||!(h>0)||!(l>0)||!(c>0)||h<l) continue;
     bars.push({t,o,h,l,c});
   }
-  if(bars.length<5) return {ok:false,why:'found '+bars.length+' usable bars - paste the whole table including its header'};
+  // v1144: the summary block UNDER the chart table carries the LIVE RESTING ORDER BOOK -
+  //   Volume | Avg. trade price | Total buy quantity | Total sell quantity
+  // That is a direct reading of what is resting right now, and it beats every estimate in this file.
+  // The pre-open book is auction inventory that was consumed at the open and then DECAYED by model
+  // (v1141); this is the real thing. Observed 2026-08-17: VGUARD's live book was 116,194 buy against
+  // 153,042 sell = -0.137 SELL-heavy, while the app's decayed pre-open estimate read +0.70. When the
+  // two disagree, the reading wins and the estimate is discarded for that stock.
+  const live=(()=>{
+    const flat=String(text||'').replace(/,/g,' ');
+    const m=flat.match(/Total\s+buy\s+quantity[\s\S]{0,400}?Total\s+sell\s+quantity([\s\S]{0,400})/i);
+    if(!m) return null;
+    // Kite prints the four labels on one row and their four values on the next, in order:
+    // Volume, Avg. trade price, Total buy quantity, Total sell quantity.
+    const nums=(m[1].match(/[0-9]+(?:\.[0-9]+)?/g)||[]).map(Number).filter(v=>Number.isFinite(v));
+    if(nums.length<4) return null;
+    const buy=nums[nums.length-2], sell=nums[nums.length-1];
+    if(!(buy>0&&sell>0)) return null;
+    return {buyQty:buy,sellQty:sell,imbalance:(buy-sell)/(buy+sell)};
+  })();
+  if(live) DEPTH_LIVE[sym]={buyQty:live.buyQty,sellQty:live.sellQty,at:Date.now(),how:'chart summary'};
+  if(bars.length<5) return {ok:false,why:'found '+bars.length+' usable bars - paste the whole table including its header',live};
   bars.sort((a,b)=>a.t-b.t);
   INTRADAY_BARS[sym]=bars;
-  return {ok:true,sym,bars:bars.length,sessions:new Set(bars.map(b=>istDayKey(b.t))).size};
+  return {ok:true,sym,bars:bars.length,sessions:new Set(bars.map(b=>istDayKey(b.t))).size,live};
 }
 function istDayKey(ms){
   // The pasted stamps carry their own +0530 offset, so a plain local-date read is enough here and
@@ -3321,6 +3342,73 @@ function istDayKey(ms){
 
 // What the price path says, all of it bounded and parameter-free. Nothing here is a tunable: every
 // term is a ratio of the stock's own session.
+// ── v1144: THE TRAJECTORY, ON A VOLUME CLOCK ─────────────────────────────────────────────────
+// Owner: *"If volume is high and price dropped in the next 5 minutes, that means it was sell heavy.
+// Use this logic to chart out a trajectory from start to finish and into the projections."*
+//
+// Per bar the sign comes from the price change and the size from the volume, scaled by the stock's
+// OWN typical bar move so "high volume and price dropped" is judged against what a normal bar does
+// for this stock. Cumulated, that is the flow trajectory from the open to now.
+//
+// THE AXIS IS CUMULATIVE VOLUME, NOT CLOCK TIME, and that choice is the whole thing. Measured on a
+// clock axis this read FAILED to separate the day's two extremes: AGIIL's last four bars carried
+// 4,456 / 3,213 / 2,094 shares against a 217,142-share opening print, and that dead tail outvoted
+// the print that mattered, labelling a stock that bled all morning "accumulating". On a volume
+// clock every share gets equal say, which is the only weighting that makes sense when the question
+// is who transacted. After the change: UFLEX (locked at its upper circuit) reads ACCUMULATING at
+// +14.6% of volume, AGIIL (faded from the open) reads SELLING at -6.8%.
+//
+// A bar with NO RANGE is a circuit lock, and there the direction is known rather than estimated:
+// price legally cannot move, so every print is the queued side being filled.
+function buildIntradayTrajectory(bars){
+  const n=bars.length;
+  if(n<3) return null;
+  const dP=[0]; for(let i=1;i<n;i++) dP.push(bars[i].c-bars[i-1].c);
+  // The scale is VOLUME-WEIGHTED like everything else here. An unweighted mean was sensitive to the
+  // same defect the clock axis had: twelve dead 50-share bars lowered the typical move, which
+  // rescaled every real bar's sign and pushed AGIIL's net flow from -6.8% to -2.7% on data that had
+  // not changed. Weighting by volume makes the scale as unmovable by dead bars as the axis is.
+  let _tw=0,_ts=0;
+  for(let i=1;i<n;i++){const w=Number(bars[i].v)||0;_tw+=w;_ts+=w*Math.abs(dP[i]);}
+  const typ=_tw>0?_ts/_tw:dP.slice(1).reduce((a,b)=>a+Math.abs(b),0)/Math.max(1,n-1);
+  if(!(typ>0)) return null;
+  const cvd=[],vx=[]; let run=0,cum=0,anyVol=false;
+  for(let i=0;i<n;i++){
+    const v=Number(bars[i].v)||0; if(v>0) anyVol=true;
+    const locked=bars[i].h===bars[i].l;
+    const f=locked?(i>0&&bars[i].c>=bars[i-1].c?1:-1):Math.max(-1,Math.min(1,dP[i]/typ));
+    run+=v*(i===0?0:f); cvd.push(run);
+    cum+=v; vx.push(cum);
+  }
+  if(!anyVol||!(cum>0)) return null;      // no volume column: the price-path read stands instead
+  const totV=cum;
+  const wslope=(y,fromFrac)=>{
+    const cut=totV*fromFrac;
+    let sw=0,sx=0,sy=0,sxy=0,sxx=0;
+    for(let i=0;i<n;i++){
+      if(vx[i]<cut) continue;
+      const w=Number(bars[i].v)||0; if(!w) continue;
+      const x=vx[i]/totV;
+      sw+=w; sx+=w*x; sy+=w*y[i]; sxy+=w*x*y[i]; sxx+=w*x*x;
+    }
+    const d=sw*sxx-sx*sx;
+    return Math.abs(d)<1e-9?0:(sw*sxy-sx*sy)/d;
+  };
+  const price=bars.map(b=>b.c);
+  const pRec=wslope(price,0.5), cRec=wslope(cvd,0.5);
+  const cvdPct=run/totV;                  // a LEVEL, so a late drift on no volume cannot erase a
+                                          // morning of selling
+  const agree=(pRec>=0)===(cRec>=0);
+  const regime=(cvdPct>=0&&pRec>=0&&cRec>=0)?'accumulating'
+             :(pRec>=0&&cRec<0)             ?'distribution into strength'
+             :(pRec<0&&cRec>=0&&cvdPct>=0)  ?'absorption'
+                                            :'selling';
+  return {cvd,cvdNet:run,cvdPct,totV,priceSlope:pRec,flowSlope:cRec,agree,regime,
+          // Projected close at the recent pace, over the volume still expected today. Reported.
+          projected:price[n-1]+pRec*(1-vx[n-1]/totV),
+          standing:Math.cbrt(Math.max(0,(cvdPct+1)/2)*(agree?1:0.25)
+                            *Math.max(0,Math.min(1,(cRec/totV+1)/2)))};
+}
 function getIntradayRead(sym){
   const bars=INTRADAY_BARS[normSym(sym||'')];
   if(!bars||!bars.length) return null;
@@ -3344,12 +3432,18 @@ function getIntradayRead(sym){
   const pos=hi>lo?(close-lo)/(hi-lo):0.5;
   let hiIdx=0; day.forEach((b,i)=>{if(b.h>=hi) hiIdx=i;});
   const freshness=day.length>1?hiIdx/(day.length-1):1;
+  // v1144: when the paste carries VOLUME, the flow trajectory is the stronger read and supersedes
+  // the price-path standing. The owner's own 5-minute export sometimes omits volume, so the
+  // price-path read remains the fallback rather than a second-class citizen.
+  const traj=buildIntradayTrajectory(day);
   return {sym:normSym(sym),bars:day.length,sessions:new Set(bars.map(b=>istDayKey(b.t))).size,
-          open,close,hi,lo,dayPct:(close/open-1)*100,
+          open,close,hi,lo,dayPct:(close/open-1)*100,traj,
+          regime:traj?traj.regime:null,cvdPct:traj?traj.cvdPct:null,
+          projected:traj?traj.projected:null,
           first15:f15, first15Up:f15>0, efficiency:eff, position:pos, freshness,
           // The standing: direction confirmed by the open, travelled cleanly, and still near its
           // high. Geometric so a zero on any one of them cannot be averaged away.
-          standing:Math.cbrt(Math.max(0,(f15+1)/2)*Math.max(0,eff)*Math.max(0,pos))};
+          standing:traj?traj.standing:Math.cbrt(Math.max(0,(f15+1)/2)*Math.max(0,eff)*Math.max(0,pos))};
 }
 // THE RE-RANK. Enrichment applies to the stocks the owner actually pasted, and to nobody else.
 // The pasted rows are re-ordered AMONG THEMSELVES and take over each other's existing slots - the
@@ -4068,6 +4162,8 @@ function radarAnalyze(headers,rawRows,supplements={},heldSymbols=new Set()){
     // second pass below, because a percentile needs the whole cross-section.
     const _bk=NSE_DEPTH[r.symbol];
     const _lv=DEPTH_LIVE[r.symbol];
+    // A pasted book (chart summary, v1144) is a direct reading of what is resting NOW - it needs no
+    // decay, because nothing about it is leftover auction inventory.
     if(_lv&&_lv.buyQty>0&&_lv.sellQty>0){
       r.depthImbalance=(_lv.buyQty-_lv.sellQty)/(_lv.buyQty+_lv.sellQty);
       r.depthLive=true; r.depthSource='pasted';
@@ -7808,15 +7904,14 @@ function getCols(){
     {key:'rank',label:'#',s:1},
     {key:'score',label:'Rocket Score',s:1},
     {key:'symbol',label:'Symbol',s:1},
-    {key:'setup',label:'Setup',s:1},
-    {key:'series',label:'Series / Band',s:1},
-    {key:'price',label:'Price ₹',s:1},
-    {key:'day',label:'Day %',s:1},
-    {key:'relvol',label:'Rel Vol',s:1},
-    {key:'depthImbalance',label:'Book',s:1},
+    // v1144: the table may never need a horizontal scrollbar (owner, standing). Measured at 552px
+    // of overflow, which is not a trimming problem - it is too many columns. Five were folded into
+    // the cells they belong to rather than deleted: Setup and Series/Band ride the Symbol cell,
+    // Day % joins Price, and Book joins Rel Vol. Every number survives.
+    {key:'price',label:'Price / Day',s:1},
+    {key:'relvol',label:'Vol / Book',s:1},
     {key:'turnover',label:'Liquidity',s:1},
-    {key:'tgt',label:'TGT %',s:0},
-    {key:'sl',label:'SL %',s:0},
+    {key:'tgt',label:'TGT / SL',s:0},
     {key:'alloc',label:'Alloc ₹',s:0},
     {key:'risk',label:'Risk',s:1},
   ]);
@@ -9104,11 +9199,18 @@ function intradayRowButton(s){
   const sym=normSym(String(s&&s.symbol||''));
   if(!sym) return '';
   const has=!!INTRADAY_BARS[sym], sel=INTRADAY_TARGET===sym;
-  const col=sel?'var(--amber)':has?'var(--cyan)':'var(--t3)';
+  const reg=has?(getIntradayRead(sym)||{}).regime:null;
+  const regCol=reg==='accumulating'?'var(--green)':reg==='selling'?'var(--red)'
+              :reg==='distribution into strength'?'var(--amber)':reg==='absorption'?'var(--cyan)':null;
+  const col=sel?'var(--amber)':(regCol||(has?'var(--cyan)':'var(--t3)'));
   const rd=has?getIntradayRead(sym):null;
   const tip=rd
-    ? `${sym}: first 15m ${rd.first15Up?'UP':'DOWN'}, path ${(rd.efficiency*100).toFixed(0)}% efficient, `
-      +`sitting ${(rd.position*100).toFixed(0)}% up its session range. Click to replace.`
+    ? (rd.traj
+        ? `${sym}: ${rd.regime.toUpperCase()} — net flow ${(rd.cvdPct*100).toFixed(1)}% of everything traded, `
+          +`price and flow ${rd.traj.agree?'agree':'DIVERGE'}, projected ${rd.projected.toFixed(2)}. `
+          +`First 15m ${rd.first15Up?'up':'down'}. Click to replace.`
+        : `${sym}: first 15m ${rd.first15Up?'UP':'DOWN'}, path ${(rd.efficiency*100).toFixed(0)}% efficient, `
+          +`sitting ${(rd.position*100).toFixed(0)}% up its session range (no volume in that paste). Click to replace.`)
     : `Paste ${sym}'s 5-minute chart table to enrich this recommendation.`;
   return `<button type="button" onclick='event.stopPropagation();setIntradayTarget(${JSON.stringify(sym)})'`
     +` style="margin-right:6px;padding:0 4px;border:1px solid ${col};border-radius:3px;background:${sel?'rgba(245,158,11,.12)':'transparent'};`
@@ -9141,24 +9243,19 @@ function renderTable(){
       // TradingView link since v1070, so the "one symbol interaction everywhere" rule was true of the
       // panels and quietly false of the main table - which is why swapping to Zerodha missed it.
       symbol:`<td style="font-family:'Plus Jakarta Sans',sans-serif">${intradayRowButton(s)}${symbolChartButton(String(s.symbol),
-        `<div style="font-weight:700;font-size:15px;color:var(--t1)">${escHtml(s.symbol)}${(()=>{const flags=s.meta?.flags||[];if(!flags.length)return '';return `<span style="font-size:12px;background:rgba(239,68,68,.15);color:var(--red);border-radius:4px;padding:1px 5px;margin-left:5px;font-weight:700;vertical-align:middle" title="NSE surveillance flags: ${escHtml(flags.join(' · '))}">⚠ ${flags.length}</span>`;})()}${s._held?`<span style="font-size:12px;background:rgba(244,114,182,.15);color:#f472b6;border-radius:4px;padding:1px 5px;margin-left:5px;font-weight:700;vertical-align:middle" title="You already hold this. Held stocks stay in the ranking (v1070) and can be recommended again — buying here ADDS to the existing position.">📌 held</span>`:''}</div><div style="font-size:11px;color:var(--t3);max-width:220px;overflow:hidden;text-overflow:ellipsis">${escHtml(s.name||'')}</div>`)}</td>`,
+        `<div style="font-weight:700;font-size:15px;color:var(--t1)">${escHtml(s.symbol)}${(()=>{const flags=s.meta?.flags||[];if(!flags.length)return '';return `<span style="font-size:12px;background:rgba(239,68,68,.15);color:var(--red);border-radius:4px;padding:1px 5px;margin-left:5px;font-weight:700;vertical-align:middle" title="NSE surveillance flags: ${escHtml(flags.join(' · '))}">⚠ ${flags.length}</span>`;})()}${s._held?`<span style="font-size:12px;background:rgba(244,114,182,.15);color:#f472b6;border-radius:4px;padding:1px 5px;margin-left:5px;font-weight:700;vertical-align:middle" title="You already hold this. Held stocks stay in the ranking (v1070) and can be recommended again — buying here ADDS to the existing position.">📌 held</span>`:''}</div><div style="font-size:11px;color:var(--t3);max-width:230px;overflow:hidden;text-overflow:ellipsis" title="${escHtml((s.name||'')+(s.setup?' · '+s.setup:''))}">${radarSeriesBandPill(s)} ${escHtml(s.setup||s.name||'')}</div>`)}</td>`,
       setup:`<td style="font-size:13px;color:var(--t2)">${escHtml(s.setup||'—')}${s.stage?' '+radarStagePill(s):''}</td>`,
       series:`<td>${radarSeriesBandPill(s)}</td>`,
-      price:`<td>${fmtINR(s.price)}</td>`,
+      price:`<td style="white-space:nowrap">${fmtINR(s.price)}<span style="color:var(--t3)"> · </span><span style="font-size:12px">${fPerf(s.day??s.priceChange)}${s.corpAction?`<span title="Corporate action (${escHtml(s.corpAction)}) — mechanical ex-date move, neutralised in scoring" style="font-size:11px;color:var(--amber);margin-left:4px;cursor:help">⚑</span>`:''}</span></td>`,
       day:`<td>${fPerf(s.day??s.priceChange)}${s.corpAction?`<span title="Corporate action (${escHtml(s.corpAction)}) — mechanical ex-date move, neutralised in scoring" style="font-size:11px;color:var(--amber);margin-left:4px;cursor:help">⚑</span>`:''}</td>`,
-      relvol:`<td>${s.relvol!=null&&isFinite(s.relvol)?Number(s.relvol).toFixed(2)+'×':'—'}</td>`,
+      relvol:`<td style="white-space:nowrap">${s.relvol!=null&&isFinite(s.relvol)?Number(s.relvol).toFixed(2)+'×':'—'}<span style="color:var(--t3)"> · </span>${Number.isFinite(s.depthImbalance)?`<span style="color:${s.depthImbalance>0?'var(--green)':'var(--red)'};font-size:12px" title="Order book: ${Number.isFinite(s.depthPct)?'stronger than '+Math.round(s.depthPct*100)+'% of books':''}${s.depthLive?' · LIVE reading':' · pre-open, decayed by the session'}">${(s.depthImbalance>0?'+':'')+s.depthImbalance.toFixed(2)}</span>`:'<span style="color:var(--t3)">—</span>'}</td>`,
       // v1139: the order book, in the recommendation table rather than a list of its own. Muted em
       // dash when the stock has no book - absent is not bearish.
-      depthImbalance:`<td>${Number.isFinite(s.depthImbalance)
-        ?`<span style="color:${s.depthImbalance>0?'var(--green)':'var(--red)'}" title="Pre-open order book: ${
-            Number.isFinite(s.depthPct)?'stronger than '+Math.round(s.depthPct*100)+'% of books':''
-          }${s.depthLive?' · LIVE pasted book':' · 09:07 pre-open snapshot'}">${
-            (s.depthImbalance>0?'+':'')+s.depthImbalance.toFixed(2)}</span>${
-            s.depthLive?'<span style="font-size:9px;color:var(--cyan)"> ●</span>':''}`
-        :'<span style="color:var(--t3)">—</span>'}</td>`,
       turnover:`<td>${fV(s.turnover)}</td>`,
-      tgt:`<td style="color:${exitPolicy.viable?'var(--green)':'var(--red)'};font-weight:700" title="${escHtml(exitPolicy.viable?`${exitPolicy.targetSource}; portfolio anchor ${exitPolicy.anchorPct?.toFixed(2)??'—'}%`:`Stock capacity ${exitPolicy.capacityPct?.toFixed(2)??'—'}% cannot clear the ${exitPolicy.minGrossPct?.toFixed(2)??'—'}% cost + net hurdle`)}">${exitPolicy.viable&&exitPolicy.targetPct!=null?'+'+exitPolicy.targetPct.toFixed(2)+'%':'—'}</td>`,
-      sl:`<td style="color:var(--red);font-weight:700" title="${escHtml(exitPolicy.stopSource+(exitPolicy.rewardRisk!=null?` · reward:risk ${exitPolicy.rewardRisk.toFixed(2)} (target ${exitPolicy.targetPct}% vs stop ${exitPolicy.stopPct.toFixed(2)}%)`+(exitPolicy.rewardRisk<1?' — BELOW 1.0: this stock risks more than it aims to make':''):''))}">−${exitPolicy.stopPct.toFixed(2)}%</td>`,
+      // v1144: TGT and SL merged. They are ONE decision - what you ask for against what you risk -
+      // and the two columns were part of why the table needed a horizontal scrollbar, which the
+      // owner has ruled out. Both numbers survive, with their full tooltips.
+      tgt:`<td style="font-weight:700" title="${escHtml((exitPolicy.viable?`${exitPolicy.targetSource}; portfolio anchor ${exitPolicy.anchorPct?.toFixed(2)??'—'}%`:`Stock capacity ${exitPolicy.capacityPct?.toFixed(2)??'—'}% cannot clear the ${exitPolicy.minGrossPct?.toFixed(2)??'—'}% cost + net hurdle`)+' · '+exitPolicy.stopSource+(exitPolicy.rewardRisk!=null?` · reward:risk ${exitPolicy.rewardRisk.toFixed(2)}`+(exitPolicy.rewardRisk<1?' — BELOW 1.0: this stock risks more than it aims to make':''):''))}"><span style="color:${exitPolicy.viable?'var(--green)':'var(--red)'}">${exitPolicy.viable&&exitPolicy.targetPct!=null?'+'+exitPolicy.targetPct.toFixed(2)+'%':'—'}</span><span style="color:var(--t3)"> / </span><span style="color:var(--red)">−${exitPolicy.stopPct.toFixed(2)}%</span></td>`,
       alloc:`<td class="alloc-cell" data-sym="${s.symbol}">${(()=>{
         if(!am) return '<span style="color:var(--t3);font-size:13px">—</span>';
         if(am.rejected) return `<span style="color:var(--red);font-size:12px" title="${escHtml(am.reason||'Stock-specific target cannot clear costs and desired net.')}">no viable target</span>`;
@@ -9232,7 +9329,9 @@ function onIntradayPaste(){
     applyIntradayReorder(ALL);
     scheduleApplyFilters();
     showToast(res.sym+': '+res.bars+' bars over '+res.sessions+' session'+(res.sessions>1?'s':'')
-      +(read?' · first 15m '+(read.first15Up?'UP':'DOWN')+' · path '+(read.efficiency*100).toFixed(0)+'% efficient':''),4000);
+      +(res.live?' · LIVE book '+((res.live.imbalance>0?'+':'')+res.live.imbalance.toFixed(3)):'')
+      +(read?(read.traj?' · '+read.regime.toUpperCase()+' · net flow '+(read.cvdPct*100).toFixed(1)+'% of volume'
+                       :' · first 15m '+(read.first15Up?'UP':'DOWN')+' · path '+(read.efficiency*100).toFixed(0)+'% efficient'):''),4000);
   }else{
     showToast('Could not read that paste — '+res.why,4000,true);
   }
@@ -9258,7 +9357,10 @@ function intradayPasteBarHtml(){
         style="width:100%;box-sizing:border-box;font-family:var(--mono,monospace);font-size:12px;padding:8px;background:var(--bg);color:var(--t1);border:1px solid var(--amber);border-radius:6px"
         onpaste="setTimeout(onIntradayPaste,0)"></textarea>`:''}
     ${res&&!res.ok?`<div style="font-size:11px;color:var(--amber);margin-top:5px">${escHtml(res.why)}</div>`:''}
-    ${res&&res.ok&&res.read?`<div style="font-size:11px;color:var(--t3);margin-top:5px">read <b style="color:var(--green)">${escHtml(res.sym)}</b> — ${res.bars} bars over ${res.sessions} session(s) · first 15m <b style="color:${res.read.first15Up?'var(--green)':'var(--red)'}">${res.read.first15Up?'UP':'DOWN'}</b> · path ${(res.read.efficiency*100).toFixed(0)}% efficient · sitting ${(res.read.position*100).toFixed(0)}% up its session range</div>`:''}
+    ${res&&res.ok&&res.read?`<div style="font-size:11px;color:var(--t3);margin-top:5px">read <b style="color:var(--green)">${escHtml(res.sym)}</b> — ${res.bars} bars over ${res.sessions} session(s)${
+      res.read.traj?` · <b style="color:${res.read.regime==='accumulating'?'var(--green)':res.read.regime==='selling'?'var(--red)':'var(--amber)'}">${escHtml(res.read.regime.toUpperCase())}</b> · net flow ${(res.read.cvdPct*100).toFixed(1)}% of everything traded · price and flow ${res.read.traj.agree?'agree':'<b style="color:var(--amber)">diverge</b>'} · projected ${res.read.projected.toFixed(2)}`
+      :` · first 15m <b style="color:${res.read.first15Up?'var(--green)':'var(--red)'}">${res.read.first15Up?'UP':'DOWN'}</b> · path ${(res.read.efficiency*100).toFixed(0)}% efficient <span style="color:var(--amber)">(that paste had no volume column)</span>`
+    }</div>`:''}
   </div>`;
 }
 function applyFilters(){
