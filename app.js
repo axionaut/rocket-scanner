@@ -1,5 +1,5 @@
-const BUILD_TS='2026-08-17 11:45 IST'; // release build time (IST)
-const APP_VERSION=1140; // v1140: the pre-open book is rolled forward through the session with signed volume - live depth without pasting.
+const BUILD_TS='2026-08-17 12:06 IST'; // release build time (IST)
+const APP_VERSION=1141; // v1141: the pre-open book decays as the session consumes it - a matched auction cannot keep voting all day.
 // v1093: a baseline reward:risk MEASURED on the cross-section (last completed bhav session) instead of learned from the owner's own fills - reported on every row, deliberately not enforced. Includes v1092: position size split by Radar score / stop distance, so equally-scored names carry equal RUPEE risk, plus an opt-in Risk /trade cap.
 // v556: parse the NSE Market Activity Report (MA<date>.csv) — official Nifty %, advances/declines and sector index moves shown as market CONTEXT in the status bar (EOD data, display only, never fed into per-row scoring); MA added to the ℹ️ file manifest.
 // v555 market-cycle stage awareness (stateless, self-calibrating): per-row stage label (1 accumulation · 2 breakout · 3 event · 4 profit-booking · 5 re-accumulation · 6 second-leg); a quiet-accumulation signal (conjunction-of-percentiles) injected via the rocket-diagnostic weighting; sell-the-news decay off Recent earnings date (horizon = review days). v1065 makes the market-breadth gauge an entry-eligibility input while still never changing ranking.
@@ -11273,10 +11273,25 @@ function deriveLiveBookImbalance(book,row){
   if(!(tot0>0)) return null;
   const H=+row.high1d, L=+row.low1d, P=+row.price, V=+row.dayVolume;
   // No usable range or volume yet: the book stands as it opened. Fail to the known quantity.
-  if(!(V>0)||!(H>L)||!(P>0)) return {imb:(B-S)/tot0,source:'pre-open',signedVol:0};
+  if(!(V>0)||!(H>L)||!(P>0)) return {imb:(B-S)/tot0,source:'pre-open',signedVol:0,bookWeight:1};
   const mult=((P-L)-(H-P))/(H-L);
   const signed=V*Math.max(-1,Math.min(1,mult));
-  return {imb:((B-S)+signed)/(tot0+V),source:'rolled',signedVol:signed,mult};
+  // THE PRE-OPEN BOOK DECAYS AS THE SESSION CONSUMES IT (owner's 15-minute bars, 2026-08-17).
+  // v1140 carried the resting book at FULL weight all day, and AGIIL showed why that is wrong: the
+  // day's #1 book (921,602 buy against 17,505 sell, 52.6:1) opened at its 305.00 IEP, printed its
+  // high in the FIRST 15-minute bar, then bled to ~300 on -48% net signed flow - and the app still
+  // read it +0.468, because the resting quantity dwarfed the 490,493 actually traded.
+  //
+  // A pre-open book is INVENTORY THAT GETS MATCHED AT THE OPENING AUCTION. Whatever survives is
+  // either filled, cancelled, or was never genuine demand at the equilibrium price. It cannot keep
+  // voting at full strength hours later. The weight is the share of that book the session has not
+  // yet turned over - `1 - V/(B+S)`, reaching zero once the day trades the book's own size. NO NEW
+  // CONSTANT: the scale is the book's own quantity, and at the open (V=0) the weight is exactly 1,
+  // so the pre-open ranking is unchanged at the moment it is actually actionable.
+  const w=Math.max(0,1-(V/tot0));
+  const num=(B-S)*w+signed, den=tot0*w+V;
+  if(!(den>0)) return {imb:0,source:'consumed',signedVol:signed,bookWeight:0};
+  return {imb:num/den,source:'rolled',signedVol:signed,mult,bookWeight:w};
 }
 function getDepthPctMap(){
   const src=[];
