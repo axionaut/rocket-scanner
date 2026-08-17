@@ -1,5 +1,5 @@
-const BUILD_TS='2026-08-17 14:58 IST'; // release build time (IST)
-const APP_VERSION=1146; // v1146: the BUY/SKIP verdict is marked on the row itself, so nothing pushes the recommendations down the page.
+const BUILD_TS='2026-08-17 15:25 IST'; // release build time (IST)
+const APP_VERSION=1147; // v1147: what a share buys - the cost of moving the stock each way, absorption bars, and unspent pressure.
 // v1093: a baseline reward:risk MEASURED on the cross-section (last completed bhav session) instead of learned from the owner's own fills - reported on every row, deliberately not enforced. Includes v1092: position size split by Radar score / stop distance, so equally-scored names carry equal RUPEE risk, plus an opt-in Risk /trade cap.
 // v556: parse the NSE Market Activity Report (MA<date>.csv) — official Nifty %, advances/declines and sector index moves shown as market CONTEXT in the status bar (EOD data, display only, never fed into per-row scoring); MA added to the ℹ️ file manifest.
 // v555 market-cycle stage awareness (stateless, self-calibrating): per-row stage label (1 accumulation · 2 breakout · 3 event · 4 profit-booking · 5 re-accumulation · 6 second-leg); a quiet-accumulation signal (conjunction-of-percentiles) injected via the rocket-diagnostic weighting; sell-the-news decay off Recent earnings date (horizon = review days). v1065 makes the market-breadth gauge an entry-eligibility input while still never changing ranking.
@@ -3398,6 +3398,65 @@ function buildIntradayTrajectory(bars){
   };
   const price=bars.map(b=>b.c);
   const pRec=wslope(price,0.5), cRec=wslope(cvd,0.5);
+
+  // ── v1147: WHAT A SHARE BUYS ────────────────────────────────────────────────────────────────
+  // Owner: *"The whole use case of this table could be price prediction based on change and volume
+  // action, no?"* Correct, and it is the only pair of columns that answers it. Price alone cannot
+  // say whether a move was EARNED; volume alone cannot say which WAY. Together they give the COST
+  // OF MOVING THE STOCK in each direction, and when that cost is asymmetric you know which side is
+  // thin before the price shows it.
+  //
+  // COST IS AGGREGATE, NOT A MEDIAN OF RATIOS. Measured on ELECTCAST 2026-08-17, a median put the
+  // afternoon at "sellers in control" while price rose and the largest buy of the day printed - the
+  // 101,269-share absorption bar has the lowest impact of any large bar, so it dragged the median
+  // and made BUYING look expensive precisely because a buyer was soaking up everything on offer.
+  // Summing volume over summed movement is immune to that.
+  // ABSORPTION FIRST, because it must be taken OUT of the cost calculation. A bar where 200,000
+  // shares moved price 0.05% is not a statement about liquidity - it is one participant working
+  // size, and leaving it in flips the cost ratio from 10.82 to 0.21 on its own (measured). The two
+  // things answer different questions: COST asks what a share buys in ordinary trade, ABSORPTION
+  // asks who was willing to spend size. Mixing them corrupts both.
+  //
+  // HIGH VOLUME WITH A SMALL MOVE IS AMBIGUOUS on its own - a big buyer taking offers, or heavy
+  // supply capping the price - so only the DIRECTION of the move breaks the tie, and it is signed
+  // rather than counted.
+  const vols=bars.slice(1).map(b=>Number(b.v)||0).sort((a,b)=>a-b);
+  const vHi=vols[Math.floor(vols.length*0.75)]||0;
+  const isAbsorb=new Array(n).fill(false);
+  let absNet=0,absCount=0;
+  for(let i=1;i<n;i++){
+    const v=Number(bars[i].v)||0; if(!(v>=vHi)||!vHi) continue;
+    const dpct=(bars[i].c-bars[i-1].c)/bars[i-1].c*100;
+    if(Math.abs(dpct)/(v/1000)>0.005) continue;      // it moved normally for its size
+    isAbsorb[i]=true; absNet+=v*Math.sign(dpct); absCount++;
+  }
+
+  // COST: what a share buys in ORDINARY trade, each way. Aggregate - volume summed over movement
+  // summed - never a median of per-bar ratios. A median put ELECTCAST's afternoon at "sellers in
+  // control" while price rose and the largest buy of the day printed, because the absorption bar
+  // dragged it. Absorption bars are excluded here and reported above instead.
+  const upV=[],dnV=[];
+  for(let i=1;i<n;i++){
+    if(isAbsorb[i]) continue;
+    const dpct=(bars[i].c-bars[i-1].c)/bars[i-1].c*100;
+    const v=Number(bars[i].v)||0; if(!v) continue;
+    if(dpct>0) upV.push([v,dpct]); else if(dpct<0) dnV.push([v,-dpct]);
+  }
+  const agg=a=>{const V=a.reduce((x,y)=>x+y[0],0),M=a.reduce((x,y)=>x+y[1],0);return M>0?V/M:null;};
+  const upCost=agg(upV), dnCost=agg(dnV);           // shares needed to move it 1%
+  // >1 means selling is dearer than buying: thin supply above, firm demand below.
+  const costRatio=(upCost&&dnCost)?dnCost/upCost:null;
+
+  // UNSPENT PRESSURE: net directional volume over the recent half, priced at what a share currently
+  // buys. Reported as a percentage of price - what the accumulated imbalance is WORTH if impact
+  // holds. It is arithmetic, not a forecast, and nothing scores it.
+  let netRecent=0;
+  for(let i=1;i<n;i++){
+    if(vx[i]<totV*0.5) continue;
+    const dpct=(bars[i].c-bars[i-1].c)/bars[i-1].c*100;
+    netRecent+=(Number(bars[i].v)||0)*Math.sign(dpct);
+  }
+  const pressurePct=upCost?(netRecent/upCost):null;
   const cvdPct=run/totV;                  // a LEVEL, so a late drift on no volume cannot erase a
                                           // morning of selling
   const agree=(pRec>=0)===(cRec>=0);
@@ -3415,8 +3474,14 @@ function buildIntradayTrajectory(bars){
           // Both surviving terms are flow and both are 0.5 at zero, so the mean is 0.5 at zero.
           // Divergence needs no separate term: price up on falling flow already drives both of
           // these down, which is what "distribution into strength" means.
-          standing:Math.sqrt(Math.max(0,Math.min(1,(cvdPct+1)/2))
-                            *Math.max(0,Math.min(1,(cRec/totV+1)/2)))};
+          upCost,dnCost,costRatio,absorptionNet:absNet,absorptionBars:absCount,
+          netRecent,pressurePct,
+          // THREE terms now, each 0.5 at "no information", so the geometric mean is 0.5 at no
+          // information: net flow, recent flow direction, and which side is cheaper to move.
+          // costRatio/(1+costRatio) is 0.5 at parity by construction - no constant decides it.
+          standing:Math.cbrt(Math.max(0,Math.min(1,(cvdPct+1)/2))
+                            *Math.max(0,Math.min(1,(cRec/totV+1)/2))
+                            *(costRatio?Math.max(0,Math.min(1,costRatio/(1+costRatio))):0.5))};
 }
 function getIntradayRead(sym){
   const bars=INTRADAY_BARS[normSym(sym||'')];
@@ -3505,6 +3570,10 @@ function applyIntradayReorder(rows){
     const t=r.intraday.traj;
     r.intradayWhy=t
       ?`${t.regime} · net flow ${(t.cvdPct*100).toFixed(1)}% of everything traded`
+      +`${t.costRatio?` · ${t.costRatio>=1?'selling':'buying'} costs ${(t.costRatio>=1?t.costRatio:1/t.costRatio).toFixed(2)}x more`
+         +` (up ${Math.round(t.upCost).toLocaleString('en-IN')} sh per 1%, down ${Math.round(t.dnCost).toLocaleString('en-IN')})`:''}`
+      +`${t.absorptionBars?` · ${t.absorptionBars} absorption bar${t.absorptionBars>1?'s':''}, net ${t.absorptionNet>=0?'+':''}${Math.round(t.absorptionNet).toLocaleString('en-IN')} sh`:''}`
+      +`${Number.isFinite(t.pressurePct)?` · unspent pressure ${t.pressurePct>=0?'+':''}${t.pressurePct.toFixed(2)}%`:''}`
       +`${t.agree?'':' · price and flow DIVERGE'}`
       :`first 15m ${r.intraday.first15Up?'up':'down'} · path ${(r.intraday.efficiency*100).toFixed(0)}% efficient`;
   });
