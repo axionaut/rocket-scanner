@@ -1,5 +1,5 @@
 const BUILD_TS='2026-08-17 17:30 IST'; // release build time (IST)
-const APP_VERSION=1155; // v1155: a console snippet fetches the candles Kite's own chart draws - no extension, no clicking, no navigation.
+const APP_VERSION=1156; // v1156: a Node fetcher pulls the candles and writes them into the watched folder - the app just reads a file.
 // v1093: a baseline reward:risk MEASURED on the cross-section (last completed bhav session) instead of learned from the owner's own fills - reported on every row, deliberately not enforced. Includes v1092: position size split by Radar score / stop distance, so equally-scored names carry equal RUPEE risk, plus an opt-in Risk /trade cap.
 // v556: parse the NSE Market Activity Report (MA<date>.csv) — official Nifty %, advances/declines and sector index moves shown as market CONTEXT in the status bar (EOD data, display only, never fed into per-row scoring); MA added to the ℹ️ file manifest.
 // v555 market-cycle stage awareness (stateless, self-calibrating): per-row stage label (1 accumulation · 2 breakout · 3 event · 4 profit-booking · 5 re-accumulation · 6 second-leg); a quiet-accumulation signal (conjunction-of-percentiles) injected via the rocket-diagnostic weighting; sell-the-news decay off Recent earnings date (horizon = review days). v1065 makes the market-breadth gauge an entry-eligibility input while still never changing ranking.
@@ -9814,6 +9814,53 @@ function copyKiteFetchScript(){
     t.remove(); done();
   }
 }
+// ── v1156: THE FETCHER WRITES, THE APP READS ────────────────────────────────────────────────
+// Owner: "You know the URL... you know the Xpath of the table. Just import the table data
+// yourself!" A browser page cannot read another origin's response - that is the browser's rule and
+// no amount of code in here gets around it, which is why every in-page attempt needed either an
+// extension or Kite's own console. NODE has no such rule. `dev/fetch-kite.js` runs outside the
+// browser, uses the session token, and writes `Intraday.csv` into the folder this app already
+// watches every three seconds. Nothing to click, nothing to paste.
+//
+// The file carries a SYMBOL column and many stocks at once. Each stock is split out and handed to
+// the same `parseIntradayPaste` a manual paste uses - one parser, as of the v1148 lesson where a
+// second reading path silently dropped VOLUME and made three releases inert.
+function parseIntradayFile(text){
+  const rows=parseCSV(text);
+  if(!rows||!rows.length) return 0;
+  const bySym={};
+  for(const r of rows){
+    const sym=normSym(r['Symbol']||'');
+    if(!sym) continue;
+    (bySym[sym]=bySym[sym]||[]).push(r);
+  }
+  let n=0;
+  for(const sym of Object.keys(bySym)){
+    const rs=bySym[sym];
+    if(rs.length<5) continue;
+    const csv=['"Date","Open","High","Low","Close","% Change","% Change vs Average","Volume"']
+      .concat(rs.map(r=>['Date','Open','High','Low','Close','% Change','% Change vs Average','Volume']
+        .map(k=>'"'+String(r[k]==null?'':r[k]).replace(/"/g,'')+'"').join(','))).join('\n');
+    const res=parseIntradayPaste(csv,sym);
+    if(res&&res.ok) n++;
+  }
+  if(n){ applyIntradayReorder(ALL); }
+  return n;
+}
+
+// What the fetcher should go and get. Written into the watched folder so the Node side can read it
+// without any channel between the two beyond the filesystem they already share.
+function writeIntradayRequest(limit){
+  const r=buildKiteFetchScript(limit);
+  if(!r.ok) return r;
+  const payload={at:new Date().toISOString(),jobs:r.jobs.map(j=>({sym:j.s,token:j.t}))};
+  try{
+    if(typeof saveBasketToScannerUploads==='function'){
+      saveBasketToScannerUploads(payload,'Intraday Request.json');
+    }
+  }catch(e){}
+  return {ok:true,symbols:r.symbols};
+}
 function intradayPasteBarHtml(){
   const n=Object.keys(INTRADAY_BARS).length;
   const t=INTRADAY_TARGET, res=INTRADAY_RESULT;
@@ -9850,8 +9897,11 @@ function intradayPasteBarHtml(){
       <select onchange="setIntradayLoopN(this.value)" style="background:var(--bg);color:var(--t2);border:1px solid var(--border);border-radius:4px;font-size:11px;padding:1px 4px">
         ${[2,3,5,10].map(k=>`<option value="${k}"${k===INTRADAY_LOOP_N?' selected':''}>top ${k}</option>`).join('')}
       </select>
-      <button onclick="copyKiteFetchScript()" class="btn" style="font-size:11px"
-        title="Copies a ready-made script with these stocks and their instrument tokens already in it. Open your Kite tab, press F12, click Console, paste, Enter. It asks Kite for the same candles the chart draws and puts the result on your clipboard — paste that back into the box below. Nothing to install.">Copy Kite script</button>
+      <button onclick="const r=writeIntradayRequest();showToast(r.ok?('Asked for '+r.symbols.join(', ')+' — run: node dev/fetch-kite.js  (or leave it on --watch and it fetches by itself)'):('Nothing to fetch: '+r.why),8000,!r.ok);"
+        class="btn" style="font-size:11px"
+        title="Writes Intraday Request.json into Scanner Uploads. dev/fetch-kite.js reads it, pulls the candles from Kite with your session token, and writes Intraday.csv back into the same folder — which this app is already watching. Run it once, or leave it running with --watch and this button is the only thing you ever press.">Fetch candles</button>
+      <button onclick="copyKiteFetchScript()" class="btn" style="font-size:11px;opacity:.7"
+        title="Fallback: copies a snippet to run in the Kite tab's console, for when you would rather not run the Node fetcher.">console snippet</button>
       ${(()=>{
         // The optional helper. If it is not installed the button is not shown at all - the owner's
         // verdict on it was "overdrawn", and a permanent "helper not installed" chip is nagging for
@@ -11893,7 +11943,7 @@ async function processFiles(files,sourceLabel,opts={}){
   // from the selected local files immediately, because the market does not wait for Drive.
   saveInputsInBackground(files,{silent});
   NSE_BHAV={};NSE_52W={};NSE_SURV={};NSE_BULK={};NSE_BLOCK={};NSE_PRICE_BAND={};NSE_DEAL_NET={};NSE_CORP_ACTION={};NSE_BOARD_MEETING={};NSE_ANNOUNCE={};NSE_MARKET=null;NSE_INDEX={};NSE_NAME_TO_SYM={};NSE_BAND_HIT={};NSE_NEW_HL_BYNAME={};NSE_INDEX_GROUP_BYNAME={};NSE_INDEX_GROUP_BYSYM={};MARKET_REGIME=null;NSE_STATUS={};NSE_SERIES={};NSE_DEPTH={};NSE_DEPTH_META=null;KITE_TOKEN={};
-  let tvFile=null,nseZip=null,holdFile=null,posFile=null,ordFile=null,tbFile=null,holidayFile=false,holidayFileName='',depthFile=null,kiteFile=null;
+  let tvFile=null,nseZip=null,holdFile=null,posFile=null,ordFile=null,tbFile=null,holidayFile=false,holidayFileName='',depthFile=null,kiteFile=null,intradayFile=null;
   for(const f of files){
     const name=inputNameLower(f.name);
     if(isReportsZipName(f.name)){nseZip=nseZip||f;continue;}
@@ -11901,6 +11951,7 @@ async function processFiles(files,sourceLabel,opts={}){
     if(isScannerCsvName(f.name)){tvFile=f;continue;}
     if(name==='market depth.csv'){depthFile=f;continue;}
     if(name==='kite instruments.csv'){kiteFile=f;continue;}
+    if(name==='intraday.csv'){intradayFile=f;continue;}
     if(name==='positions.csv'){posFile=f;continue;}
     if(name==='holdings.csv'){holdFile=f;continue;}
     if(name==='orders.csv'){ordFile=f;continue;}
@@ -11913,7 +11964,7 @@ async function processFiles(files,sourceLabel,opts={}){
       continue;
     }
   }
-  if(!tvFile&&!nseZip&&!holdFile&&!posFile&&!ordFile&&!tbFile&&!holidayFile&&!depthFile&&!kiteFile){
+  if(!tvFile&&!nseZip&&!holdFile&&!posFile&&!ordFile&&!tbFile&&!holidayFile&&!depthFile&&!kiteFile&&!intradayFile){
     if(!silent){
       setLoading(false);
       showToast('No files recognised. Upload the NSE scanner and/or Zerodha input files.',4000,true);
@@ -11929,6 +11980,12 @@ async function processFiles(files,sourceLabel,opts={}){
       }
       updateFileLoadStatus('Kite Instruments.csv',Object.keys(KITE_TOKEN).length?'loaded':'empty');
     }catch(e){console.warn('Could not parse Kite Instruments.csv:',e);}
+  }
+  if(intradayFile){
+    try{
+      const n=parseIntradayFile(await intradayFile.text());
+      updateFileLoadStatus('Intraday.csv',n?'loaded':'empty');
+    }catch(e){console.warn('Could not parse Intraday.csv:',e);}
   }
   if(depthFile){
     try{
