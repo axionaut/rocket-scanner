@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Rocket Scanner — Kite bridge
 // @namespace    rocket-scanner
-// @version      1.4
+// @version      1.5
 // @description  Serve the Rocket Scanner's requests for 5-minute chart data from your own logged-in Kite tab.
 // @match        https://kite.zerodha.com/*
 // @match        https://axionaut.github.io/rocket-scanner/*
@@ -115,44 +115,98 @@
     const rows = Array.from(tbl.querySelectorAll('tbody tr'))
       .map(tr => Array.from(tr.querySelectorAll('td')).map(td => td.innerText.trim()))
       .filter(r => r.length >= 5 && r[0]);
-    return rows.length >= 5 ? rows : null;
+    if(rows.length < 5) return null;
+    // Volume is the LAST of the eight columns. Five columns means "+ Additional columns" has not
+    // been applied, and a five-column read produces no flow at all - so report it and retry rather
+    // than ingest something inert.
+    if(rows[0].length < 8) return {short: true, rows: rows};
+    return rows;
   }
 
+  // Kite's chart URL is PATH-based: /markets/chart/web/ciq/NSE/MANCREDIT/6354689
+  // v1.4 read it from the HASH, so the confirmation after a switch could never succeed and every
+  // symbol reported "could not switch" even when the chart had actually moved.
   function currentSymbol(){
     try{
-      const h = new URLSearchParams(location.hash.replace(/^#/,''));
+      const m = location.pathname.match(/\/(?:ciq|tvc)\/[A-Z]+\/([A-Z0-9&_.\-]+)\//i);
+      if(m) return m[1].toUpperCase();
+      const h = new URLSearchParams(location.hash.replace(/^#/, ''));
       return (h.get('tradingsymbol') || '').toUpperCase();
     }catch(e){ return ''; }
+  }
+
+  // Report what this page actually offers, so a broken selector is fixed from one paste rather than
+  // another round of guessing.
+  function dumpSelectors(){
+    const probe = {
+      'cq-lookup input'           : document.querySelectorAll('cq-lookup input').length,
+      'input[placeholder*=earch]' : document.querySelectorAll('input[placeholder*="earch" i]').length,
+      '.ciq-search input'         : document.querySelectorAll('.ciq-search input').length,
+      'cq-item'                   : document.querySelectorAll('cq-item').length,
+      '.ciq-data-table-wrapper'   : document.querySelectorAll('.ciq-data-table-wrapper').length,
+      '.ciq-data-table-container' : document.querySelectorAll('.ciq-data-table-container').length
+    };
+    say('SELECTORS ' + JSON.stringify(probe) + ' | path ' + location.pathname);
+    console.log('[kite-bridge] inputs on page:',
+      [...document.querySelectorAll('input')].slice(0, 12)
+        .map(i => ({cls: i.className, ph: i.placeholder, id: i.id, val: i.value})));
+    console.log('[kite-bridge] labelled buttons:',
+      [...document.querySelectorAll('[title],[aria-label]')].slice(0, 40)
+        .map(x => x.getAttribute('title') || x.getAttribute('aria-label')).filter(Boolean));
   }
 
   // Switch symbol through the chart's own lookup box rather than reloading the page - a reload
   // re-authenticates and re-fetches everything, which is exactly the load we are trying not to add.
   async function selectSymbol(sym){
     if(currentSymbol() === sym) return true;
-    const input = $('cq-lookup input') || $('.ciq-search input') || $('input[cq-focus]');
-    if(!input) return false;
+    const input = $('cq-lookup input')
+      || $('input[placeholder*="earch" i]')
+      || $('.ciq-search input')
+      || [...document.querySelectorAll('input[type="text"], input:not([type])')]
+           .find(i => i.offsetParent && i.clientWidth > 60);
+    if(!input){ say('no symbol box found - send me the SELECTORS line above'); return false; }
     input.focus();
-    input.value = '';
-    input.dispatchEvent(new Event('input',{bubbles:true}));
-    await sleep(150);
-    input.value = sym;
-    input.dispatchEvent(new Event('input',{bubbles:true}));
-    await sleep(900); // let the lookup resolve
-    const hit = document.querySelector('cq-item, .ciq-result, .results-item');
+    input.click();
+    // Set through the NATIVE setter: a framework-controlled input ignores a plain `.value =`,
+    // which is why v1.4 typed the symbol into the box and the chart never moved.
+    const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
+    setter.call(input, '');
+    input.dispatchEvent(new Event('input', {bubbles: true}));
+    await sleep(200);
+    setter.call(input, sym);
+    input.dispatchEvent(new Event('input', {bubbles: true}));
+    input.dispatchEvent(new Event('keyup', {bubbles: true}));
+    await sleep(1200);
+    const hit = document.querySelector('cq-item[cq-focused], cq-item, .ciq-result, .results-item, .search-result');
     if(hit){ hit.click(); }
-    else { input.dispatchEvent(new KeyboardEvent('keydown',{key:'Enter',bubbles:true})); }
-    for(let i=0;i<20;i++){ // wait for the chart to actually be on that symbol
+    else {
+      for(const type of ['keydown', 'keypress', 'keyup']){
+        input.dispatchEvent(new KeyboardEvent(type, {key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true}));
+      }
+    }
+    for(let i = 0; i < 24; i++){
       await sleep(250);
       if(currentSymbol() === sym) return true;
     }
-    return currentSymbol() === sym;
+    return false;
   }
 
+  // OWNER: "Zerodha always defaults to the chart view on every click. We then have to click on the
+  // Table layout and then Additional Columns button to get all 8 columns in view." So this is TWO
+  // clicks, and it has to run after EVERY symbol switch rather than once per session.
   async function openDataTable(){
-    if($('.ciq-data-table-wrapper table')) return true;
-    // The table toggle is the one that reveals .ciq-data-table-container.
-    const btn = $('[cq-data-table]') || $('.ciq-data-table-toggle') || $('[title*="table" i]');
-    if(btn){ btn.click(); await sleep(600); }
+    if(!$('.ciq-data-table-wrapper table')){
+      const toggle = $('[cq-data-table]') || $('.ciq-data-table-toggle')
+        || [...document.querySelectorAll('[title],[aria-label]')]
+             .find(x => /table/i.test(x.getAttribute('title') || x.getAttribute('aria-label') || ''));
+      if(toggle){ toggle.click(); await sleep(700); }
+    }
+    if(!$('.ciq-data-table-wrapper table')) return false;
+    // "+ Additional columns" - without it the table is five columns and VOLUME is missing, which is
+    // the one column the whole flow read depends on. Only click it while it still reads "+".
+    const cols = [...document.querySelectorAll('button, a, div[role="button"]')]
+      .find(x => /additional columns/i.test(x.textContent || ''));
+    if(cols && /^\s*\+/.test(cols.textContent || '')){ cols.click(); await sleep(500); }
     return !!$('.ciq-data-table-wrapper table');
   }
 
@@ -173,8 +227,13 @@
         if(!ok){ say('could not switch the chart to '+sym+' - the symbol box selector needs fixing'); continue; }
         await openDataTable();
         let rows = null;
-        for(let i=0;i<12 && !rows;i++){ await sleep(400); rows = readTable(); }
-        if(!rows){ say('no data table for '+sym+' - the table toggle selector needs fixing'); continue; }
+        for(let i = 0; i < 12; i++){
+          await sleep(400);
+          const r = readTable();
+          if(Array.isArray(r)){ rows = r; break; }
+          if(r && r.short){ await openDataTable(); }      // re-click "+ Additional columns"
+        }
+        if(!rows){ say('no 8-column table for ' + sym + ' - could not reach Additional columns'); continue; }
         GM_setValue(RES, JSON.stringify({symbol: sym, rows, at: Date.now()}));
         say('sent '+sym+' ('+rows.length+' rows)');
         await sleep(PACE_MS);
@@ -189,4 +248,5 @@
   // Serve anything already waiting when the tab opens, then go quiet.
   try{ const pending = GM_getValue(REQ,''); if(pending) serve(pending); }catch(e){}
   say('ready on '+(currentSymbol()||'(no symbol in the url - open a CHART page)'));
+  dumpSelectors();
 })();
