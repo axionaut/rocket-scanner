@@ -1,5 +1,5 @@
-const BUILD_TS='2026-08-17 18:22 IST'; // release build time (IST)
-const APP_VERSION=1160; // v1160: a fetch shows what it brought back, and a second helper instance says so instead of crashing.
+const BUILD_TS='2026-08-17 18:27 IST'; // release build time (IST)
+const APP_VERSION=1161; // v1161: every fetch also writes one appended CSV per stock, so the data can be opened and checked.
 // v1093: a baseline reward:risk MEASURED on the cross-section (last completed bhav session) instead of learned from the owner's own fills - reported on every row, deliberately not enforced. Includes v1092: position size split by Radar score / stop distance, so equally-scored names carry equal RUPEE risk, plus an opt-in Risk /trade cap.
 // v556: parse the NSE Market Activity Report (MA<date>.csv) — official Nifty %, advances/declines and sector index moves shown as market CONTEXT in the status bar (EOD data, display only, never fed into per-row scoring); MA added to the ℹ️ file manifest.
 // v555 market-cycle stage awareness (stateless, self-calibrating): per-row stage label (1 accumulation · 2 breakout · 3 event · 4 profit-booking · 5 re-accumulation · 6 second-leg); a quiet-accumulation signal (conjunction-of-percentiles) injected via the rocket-diagnostic weighting; sell-the-news decay off Recent earnings date (horizon = review days). v1065 makes the market-breadth gauge an entry-eligibility input while still never changing ranking.
@@ -9754,7 +9754,8 @@ async function fetchCandlesInApp(limit){
       const f=bars[0]?new Date(bars[0].t):null, l=bars[bars.length-1]?new Date(bars[bars.length-1].t):null;
       const hhmm=d=>d?String(d.getHours()).padStart(2,'0')+':'+String(d.getMinutes()).padStart(2,'0'):'—';
       const ddmm=d=>d?String(d.getDate()).padStart(2,'0')+'/'+String(d.getMonth()+1).padStart(2,'0'):'';
-      return {sym,bars:bars.length,
+      const w=(j.files&&j.files[sym])||null;
+      return {sym,bars:bars.length,file:w?w.file:null,fileRows:w?w.rows:null,
         from:ddmm(f)+' '+hhmm(f),to:ddmm(l)+' '+hhmm(l),
         last:rd?rd.close:null,regime:rd&&rd.regime||null,
         flow:rd&&Number.isFinite(rd.cvdPct)?rd.cvdPct:null};
@@ -9816,6 +9817,7 @@ function intradayPasteBarHtml(){
       ${LAST_FETCH.map(x=>`<div><b>${escHtml(x.sym)}</b>
         <span style="color:var(--t3)">${x.bars} bars · ${escHtml(x.from)} → ${escHtml(x.to)} · last</span>
         <b>${x.last!=null?fmtINR(x.last):'—'}</b>
+        ${x.file?`<span style="color:var(--t3)" title="Open it to see every bar. Appended on each fetch, deduped by timestamp, oldest rows dropped past 1,000."> · Scanner Uploads/Intraday/${escHtml(x.file)} (${x.fileRows} rows)</span>`:''}
         ${x.regime?`<span style="color:${x.regime==='accumulating'?'var(--green)':x.regime==='selling'?'var(--red)':'var(--amber)'}"> · ${escHtml(x.regime)} ${x.flow!=null?((x.flow*100).toFixed(1)+'%'):''}</span>`:''}
       </div>`).join('')}
     </div>`:''}
