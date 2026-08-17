@@ -1,5 +1,5 @@
-const BUILD_TS='2026-08-17 10:49 IST'; // release build time (IST)
-const APP_VERSION=1138; // v1138: the aggregate pre-open book is kept as a market-direction read instead of being normalised away.
+const BUILD_TS='2026-08-17 11:28 IST'; // release build time (IST)
+const APP_VERSION=1139; // v1139: the order book enters the recommendation score and table, and a stock opens in Kite with its symbol copied.
 // v1093: a baseline reward:risk MEASURED on the cross-section (last completed bhav session) instead of learned from the owner's own fills - reported on every row, deliberately not enforced. Includes v1092: position size split by Radar score / stop distance, so equally-scored names carry equal RUPEE risk, plus an opt-in Risk /trade cap.
 // v556: parse the NSE Market Activity Report (MA<date>.csv) — official Nifty %, advances/declines and sector index moves shown as market CONTEXT in the status bar (EOD data, display only, never fed into per-row scoring); MA added to the ℹ️ file manifest.
 // v555 market-cycle stage awareness (stateless, self-calibrating): per-row stage label (1 accumulation · 2 breakout · 3 event · 4 profit-booking · 5 re-accumulation · 6 second-leg); a quiet-accumulation signal (conjunction-of-percentiles) injected via the rocket-diagnostic weighting; sell-the-news decay off Recent earnings date (horizon = review days). v1065 makes the market-breadth gauge an entry-eligibility input while still never changing ranking.
@@ -1022,6 +1022,7 @@ let NSE_MARKET=null; // v556: official Market Activity Report summary {date,date
 // v1076: PR-zip data surveyed in RULES.md Appendix E and previously never parsed.
 let NSE_INDEX={};        // {indexName -> {close,prev,pct,high52,low52,rangePos}} from pd IND_SEC='Y' rows; includes India VIX
 let NSE_NAME_TO_SYM={};  // {UPPERCASED security NAME -> symbol} from pd - the join key for the name-keyed files
+let KITE_TOKEN={};      // v1139: {symbol -> Kite instrument token} from the PUBLIC api.kite.trade dump
 let NSE_DEPTH={};       // v1137: {symbol -> pre-open order book} from Market Depth.csv (dev/fetch-preopen.js)
 let NSE_DEPTH_META=null; // {date, time, rows} - the book is a 09:07 snapshot and says so on screen
 let NSE_BAND_HIT={};     // {symbol -> 'H'|'L'} from bh: securities that HIT their price band (the upper-circuit list)
@@ -1222,7 +1223,35 @@ function symbolChartButton(sym,innerHtml=null,extraStyle=''){
   if(!s) return '';
   return `<button type="button" onclick='event.stopPropagation();openTradingViewChart(${JSON.stringify(s)})'`
     +` style="padding:0;border:0;background:transparent;color:inherit;font:inherit;text-align:left;cursor:pointer;${extraStyle}"`
-    +` title="Open the TradingView chart for ${escHtml(s)}">${innerHtml??escHtml(s)}</button>`;
+    +` title="Open the TradingView chart for ${escHtml(s)}">${innerHtml??escHtml(s)}</button>`
+    +kiteOrderButton(s);
+}
+// v1139 (owner): open the stock in Zerodha, the way the name already opens TradingView. There is no
+// supported URL that PRE-FILLS a buy dialog without a Kite Connect api_key, and Kite Connect was
+// ruled out (static IP) - so this deep-links to the stock's own Kite chart page, where the B/S
+// buttons sit one click away. The instrument token comes from `api.kite.trade/instruments`, which is
+// PUBLIC: no key, no login. A stock with no token renders nothing rather than a broken link.
+function kiteOrderButton(sym){
+  const s=normSym(sym||''); const t=KITE_TOKEN[s];
+  if(!s||!t) return '';
+  const url=`https://kite.zerodha.com/chart/web/ciq/NSE/${encodeURIComponent(s)}/${t}`;
+  return `<button type="button" onclick='event.stopPropagation();kiteOpen(${JSON.stringify(s)},${JSON.stringify(url)})'`
+    +` style="margin-left:5px;padding:0 4px;border:1px solid var(--border);border-radius:3px;background:transparent;`
+    +`color:var(--t3);font-size:10px;line-height:14px;cursor:pointer"`
+    +` title="Open ${escHtml(s)} in Zerodha Kite to buy">K</button>`;
+}
+// Owner: "If opening the zerodha dialog or anything is not possible, just copy the stock's name to
+// clipboard on its click so I could paste it in zerodha." Both, since the deep link works: the
+// symbol goes to the clipboard AND Kite opens on that stock. If the clipboard is blocked (it needs
+// a user gesture and a secure context) the link still opens, so the button never silently does
+// nothing - and the toast says which of the two actually happened.
+function kiteOpen(sym,url){
+  let copied=false;
+  try{
+    if(navigator.clipboard&&navigator.clipboard.writeText){navigator.clipboard.writeText(sym);copied=true;}
+  }catch(e){}
+  try{window.open(url,'_blank','noopener');}catch(e){}
+  showToast(copied?sym+' copied — opening Kite':'Opening '+sym+' in Kite',2000);
 }
 function findHeader(hdrs,patterns){return hdrs.find(h=>patterns.some(p=>p.test(h.trim())))||null;}
 function meanArr(arr){return arr.length?arr.reduce((s,v)=>s+v,0)/arr.length:0;}
@@ -3238,6 +3267,7 @@ function getForwardIndicatorEffects(){
   return map;
 }
 function radarAnalyze(headers,rawRows,supplements={},heldSymbols=new Set()){
+  const _depthPctMap=(typeof getDepthPctMap==='function')?getDepthPctMap():{};
   const priceI=radarIdx(headers,'Price'),targetI=radarIdx(headers,'Price change %, 1 day'),sectorI=radarIdx(headers,'Sector'),symbolI=radarIdx(headers,'Symbol'),descI=radarIdx(headers,'Description');
   if(symbolI<0||priceI<0||targetI<0)throw Error('Expected Symbol, Price, and Price change %, 1 day columns.');
   const turnI=radarIdx(headers,'Price × volume (turnover), 1 day'),relI=radarIdx(headers,'Relative volume, 1 day'),relAtI=radarIdx(headers,'Relative volume at time'),volChgI=radarIdx(headers,'Volume change %, 1 day'),gapI=radarIdx(headers,'Gap %, 1 day'),adrI=radarIdx(headers,'Average daily range %'),atrI=radarIdx(headers,'Average true range %, 14, 1 day'),atrWeekI=radarIdx(headers,'Average true range %, 14, 1 week'),volI=radarIdx(headers,'Volatility, 1 day'),highI=radarIdx(headers,'High, 1 day'),lowI=radarIdx(headers,'Low, 1 day'),openI=radarIdx(headers,'Open, 1 day'),mcapI=radarIdx(headers,'Market capitalization');
@@ -3910,13 +3940,55 @@ function radarAnalyze(headers,rawRows,supplements={},heldSymbols=new Set()){
     // opinions about momentum. What is removed is the STATISTICAL ceiling acting as a 4th-power
     // multiplier on RANK. `feasibility` is still computed and still stored on the row so the
     // before/after remains auditable and so the exit policy is untouched.
-    r.score=+(100*Math.pow(r.setupPct*(_dirOk?1:0),4)).toFixed(1);
+    // v1139 (owner): "This whole market depth thing should drive or at least be a part of the
+    // recommendation table. The info goes in the recommendations!" So the order book is no longer a
+    // separate list - it is a factor in THIS score.
+    //
+    // GEOMETRIC MEAN OF TWO PERCENTILES, which is why it needs no constant: both are cross-sectional
+    // percentiles on one scale, so the blend is symmetric and parameter-free - the same reasoning
+    // that made v1068 take a MAX of two percentiles rather than a weighted sum.
+    //
+    // A STOCK WITH NO BOOK TAKES THE MEDIAN (0.5), NOT ITS OWN setupPct. The first attempt used
+    // setupPct, reasoning that sqrt(setupPct^2) leaves that row untouched. Row-by-row that is true;
+    // IN A RANKING IT IS BACKWARDS. Leaving bookless rows alone while shrinking every row that has a
+    // book PROMOTES the bookless ones - measured on the release board, rows scoring >=95 collapsed
+    // from 33 to 4 and SEVEN OF THE TOP EIGHT had no book at all. Absence must mean "no information",
+    // which is the middle of the distribution, not a free pass.
+    const _dInfo=_depthPctMap[r.symbol];
+    if(_dInfo){r.depthPct=_dInfo.pct;r.depthImbalance=_dInfo.imb;r.depthLive=!!_dInfo.live;}
+    const _dPct=(RADAR_DEPTH_IN_SCORE&&Number.isFinite(r.depthPct))?r.depthPct:0.5;
+    r.depthBlendPct=Math.sqrt(Math.max(0,r.setupPct)*Math.max(0,_dPct));
+    // Provisional: re-percentiled across the universe in a second pass below, so the SCORE SCALE is
+    // preserved and only the ORDER moves. Without that pass the geometric mean shrinks almost every
+    // row and the whole distribution slides down - which would silently move what `RECOMMEND_MIN_SCORE`
+    // means, turning an ordering change into a de-facto raising of the bar.
+    r.score=+(100*Math.pow(r.depthBlendPct*(_dirOk?1:0),4)).toFixed(1);
     r.rocketScore=r.score; // allocation/export alias
     r.risk=!r.basketEligible||r.meta.flags?.length>=3||r.turnover<25e5||r.price<10?'High':(r.gap>6||r.day>6||r.parts.volatility<38?'Medium':'Low');
     // Event Risk (idea #1, v554 + v555): an event-day (Stage 3) or a name still digesting its results
     // (Stage 4 profit-booking) is less pattern-reliable, so never label it Low risk. Changes risk, not score.
     if(r.risk==='Low'&&(r.meta?.eventToday||r.stage===3||r.stage===4))r.risk='Medium';
     r.setup=r.series!=='EQ'?(r.series==='UNKNOWN'?'Series unverified':`Non-EQ · ${r.series}`):r.band!==null&&r.band<10?`${r.band}% price band`:radarSetupLabel(r);
+  }
+  // v1139 SECOND PASS: re-percentile the depth-blended standing across the universe, so the blend
+  // changes the ORDER without moving the SCALE. The geometric mean shrinks nearly every row, and
+  // scoring that directly slid the whole distribution down - measured on the release board, rows at
+  // or above 95 fell from 33 to 4. Since RECOMMEND_MIN_SCORE is an owner-set risk preference read
+  // against this scale, that would have quietly raised the bar under him while pretending to be a
+  // re-ordering. Re-percentiling keeps `score >= 95` meaning exactly what it meant in v1138: the top
+  // of the market. Skipped entirely when the depth term is off, so the flag is a true revert.
+  if(RADAR_DEPTH_IN_SCORE&&rows.some(r=>Number.isFinite(r.depthPct))){
+    const rank=rows.filter(r=>Number.isFinite(r.depthBlendPct)).slice()
+      .sort((a,b)=>a.depthBlendPct-b.depthBlendPct);
+    const n=rank.length;
+    rank.forEach((r,i)=>{r._blendPct=n>1?i/(n-1):1;});
+    rows.forEach(r=>{
+      if(!Number.isFinite(r._blendPct)) return;
+      r.depthBlendPct=r._blendPct;
+      r.score=+(100*Math.pow(r.depthBlendPct*(r.directionConfirmed?1:0),4)).toFixed(1);
+      r.rocketScore=r.score;
+      delete r._blendPct;
+    });
   }
   rows.sort((a,b)=>b.score-a.score||a.symbol.localeCompare(b.symbol));
   rows.forEach((r,i)=>{r.rank=i+1;});
@@ -7593,6 +7665,7 @@ function getCols(){
     {key:'price',label:'Price ₹',s:1},
     {key:'day',label:'Day %',s:1},
     {key:'relvol',label:'Rel Vol',s:1},
+    {key:'depthImbalance',label:'Book',s:1},
     {key:'turnover',label:'Liquidity',s:1},
     {key:'tgt',label:'TGT %',s:0},
     {key:'sl',label:'SL %',s:0},
@@ -8904,6 +8977,15 @@ function renderTable(){
       price:`<td>${fmtINR(s.price)}</td>`,
       day:`<td>${fPerf(s.day??s.priceChange)}${s.corpAction?`<span title="Corporate action (${escHtml(s.corpAction)}) — mechanical ex-date move, neutralised in scoring" style="font-size:11px;color:var(--amber);margin-left:4px;cursor:help">⚑</span>`:''}</td>`,
       relvol:`<td>${s.relvol!=null&&isFinite(s.relvol)?Number(s.relvol).toFixed(2)+'×':'—'}</td>`,
+      // v1139: the order book, in the recommendation table rather than a list of its own. Muted em
+      // dash when the stock has no book - absent is not bearish.
+      depthImbalance:`<td>${Number.isFinite(s.depthImbalance)
+        ?`<span style="color:${s.depthImbalance>0?'var(--green)':'var(--red)'}" title="Pre-open order book: ${
+            Number.isFinite(s.depthPct)?'stronger than '+Math.round(s.depthPct*100)+'% of books':''
+          }${s.depthLive?' · LIVE pasted book':' · 09:07 pre-open snapshot'}">${
+            (s.depthImbalance>0?'+':'')+s.depthImbalance.toFixed(2)}</span>${
+            s.depthLive?'<span style="font-size:9px;color:var(--cyan)"> ●</span>':''}`
+        :'<span style="color:var(--t3)">—</span>'}</td>`,
       turnover:`<td>${fV(s.turnover)}</td>`,
       tgt:`<td style="color:${exitPolicy.viable?'var(--green)':'var(--red)'};font-weight:700" title="${escHtml(exitPolicy.viable?`${exitPolicy.targetSource}; portfolio anchor ${exitPolicy.anchorPct?.toFixed(2)??'—'}%`:`Stock capacity ${exitPolicy.capacityPct?.toFixed(2)??'—'}% cannot clear the ${exitPolicy.minGrossPct?.toFixed(2)??'—'}% cost + net hurdle`)}">${exitPolicy.viable&&exitPolicy.targetPct!=null?'+'+exitPolicy.targetPct.toFixed(2)+'%':'—'}</td>`,
       sl:`<td style="color:var(--red);font-weight:700" title="${escHtml(exitPolicy.stopSource+(exitPolicy.rewardRisk!=null?` · reward:risk ${exitPolicy.rewardRisk.toFixed(2)} (target ${exitPolicy.targetPct}% vs stop ${exitPolicy.stopPct.toFixed(2)}%)`+(exitPolicy.rewardRisk<1?' — BELOW 1.0: this stock risks more than it aims to make':''):''))}">−${exitPolicy.stopPct.toFixed(2)}%</td>`,
@@ -9310,9 +9392,24 @@ function onDepthPaste(){
   if(!el) return;
   const res=parseDepthPaste(el.value,DEPTH_PASTE_TARGET);
   DEPTH_PASTE_RESULT=res;
-  renderRankingsPanels();
-  if(res.ok.length) showToast('Read live depth for '+res.ok.length+' stock'+(res.ok.length>1?'s':'')+'.',2500);
-  else showToast('Nothing readable in that paste - see the note under the box.',3500,true);
+  if(res.ok.length){
+    // BUG (owner, 2026-08-17): "when I pasted IPCALAB's depth it said read but keeps asking me
+    // again to paste the same stock's data." The read succeeded, but the selection stayed on that
+    // stock and the box was cleared, so the panel sat there apparently asking for it again. A read
+    // stock is DONE: advance to the next name that has no live book, or clear the selection when
+    // every one of them has been pasted.
+    const done=new Set(Object.keys(DEPTH_LIVE));
+    const next=buildDepthRanking().rows.slice(0,DEPTH_WATCH_N).find(r=>!done.has(r.sym));
+    DEPTH_PASTE_TARGET=next?next.sym:'';
+    el.value='';
+    // The score reads the book (v1139), so a new reading has to re-rank, not merely repaint.
+    if(typeof scheduleApplyFilters==='function') scheduleApplyFilters(); else renderRankingsPanels();
+    renderRankingsPanels();
+    showToast(res.ok[0].sym+' read — '+(next?'next: '+next.sym:'all '+done.size+' done'),2600);
+  }else{
+    renderRankingsPanels();
+    showToast('Nothing readable in that paste — see the note under the box.',3500,true);
+  }
 }
 function clearDepthPaste(){
   DEPTH_LIVE={};DEPTH_PASTE_RESULT=null;DEPTH_PASTE_TARGET='';
@@ -10928,7 +11025,7 @@ function compactRankingRows(rows){
     score:s.score,rocketScore:s.rocketScore,rank:s.rank,
     setup:s.setup,risk:s.risk,series:s.series,band:s.band??null,status:s.status,
     basketEligible:s.basketEligible!==false,eqEligible:s.eqEligible!==false,
-    stretch:s.stretch,rangePct:s.rangePct,sessionVolatilityPct:s.sessionVolatilityPct??null,open1d:s.open1d??null,relvol:s.relvol??null,gap:s.gap??null,
+    stretch:s.stretch,rangePct:s.rangePct,sessionVolatilityPct:s.sessionVolatilityPct??null,open1d:s.open1d??null,relvol:s.relvol??null,gap:s.gap??null,depthImbalance:s.depthImbalance??null,depthPct:s.depthPct??null,depthLive:!!s.depthLive,
     gapSigned:s.gapSigned??null,changeOpen:s.changeOpen??null,
     turnover:s.turnover,atr:s.atr??null,quality:s.quality??null,
     high1d:s.high1d??null,low1d:s.low1d??null,vwap:s.vwap??null,bollUpper:s.bollUpper??null,keltUpper:s.keltUpper??null,
@@ -11103,6 +11200,30 @@ function parseMarketDepth(text){
 
 // The depth-only ranking. Deliberately NOT blended into the Radar score (owner: "recommendations
 // based on this only") - it is its own list, and nothing here touches radarAnalyze.
+// The depth percentile used by the SCORE is computed over every stock with a two-sided book, not
+// over buildDepthRanking's pool: that pool is filtered for EXECUTABILITY (turnover, price, sellers)
+// which is a property of whether you can buy, not of what the book is saying. A live pasted book
+// supersedes the pre-open one here exactly as it does in the panel.
+function getDepthPctMap(){
+  const src=[];
+  for(const k in NSE_DEPTH){
+    const r=NSE_DEPTH[k];
+    if(r.series!=='EQ'||!(r.bookQty>=DEPTH_MIN_BOOK_QTY)) continue;
+    const lv=DEPTH_LIVE[k];
+    const b=lv&&lv.buyQty>0&&lv.sellQty>0?lv.buyQty:r.buyQty;
+    const sl=lv&&lv.buyQty>0&&lv.sellQty>0?lv.sellQty:r.sellQty;
+    const tot=b+sl;
+    if(!(tot>0)) continue;
+    src.push({sym:k,imb:(b-sl)/tot,live:!!lv});
+  }
+  const out={};
+  if(src.length<50) return out;                 // too thin to be a cross-section
+  src.sort((a,b)=>a.imb-b.imb);
+  const n=src.length;
+  src.forEach((r,i)=>{out[r.sym]={pct:n>1?i/(n-1):1,imb:r.imb,live:r.live};});
+  return out;
+}
+const RADAR_DEPTH_IN_SCORE=true;   // v1139: one word reverts the score to v1138
 const DEPTH_MIN_BOOK_QTY=1000;      // a book too small to mean anything
 const DEPTH_MIN_PREOPEN_TURNOVER=2e5;
 function buildDepthRanking(){
@@ -11167,14 +11288,15 @@ async function processFiles(files,sourceLabel,opts={}){
   // Upload CHANGED canonical input files to Drive in the background. Rankings are built
   // from the selected local files immediately, because the market does not wait for Drive.
   saveInputsInBackground(files,{silent});
-  NSE_BHAV={};NSE_52W={};NSE_SURV={};NSE_BULK={};NSE_BLOCK={};NSE_PRICE_BAND={};NSE_DEAL_NET={};NSE_CORP_ACTION={};NSE_BOARD_MEETING={};NSE_ANNOUNCE={};NSE_MARKET=null;NSE_INDEX={};NSE_NAME_TO_SYM={};NSE_BAND_HIT={};NSE_NEW_HL_BYNAME={};NSE_INDEX_GROUP_BYNAME={};NSE_INDEX_GROUP_BYSYM={};MARKET_REGIME=null;NSE_STATUS={};NSE_SERIES={};NSE_DEPTH={};NSE_DEPTH_META=null;
-  let tvFile=null,nseZip=null,holdFile=null,posFile=null,ordFile=null,tbFile=null,holidayFile=false,holidayFileName='',depthFile=null;
+  NSE_BHAV={};NSE_52W={};NSE_SURV={};NSE_BULK={};NSE_BLOCK={};NSE_PRICE_BAND={};NSE_DEAL_NET={};NSE_CORP_ACTION={};NSE_BOARD_MEETING={};NSE_ANNOUNCE={};NSE_MARKET=null;NSE_INDEX={};NSE_NAME_TO_SYM={};NSE_BAND_HIT={};NSE_NEW_HL_BYNAME={};NSE_INDEX_GROUP_BYNAME={};NSE_INDEX_GROUP_BYSYM={};MARKET_REGIME=null;NSE_STATUS={};NSE_SERIES={};NSE_DEPTH={};NSE_DEPTH_META=null;KITE_TOKEN={};
+  let tvFile=null,nseZip=null,holdFile=null,posFile=null,ordFile=null,tbFile=null,holidayFile=false,holidayFileName='',depthFile=null,kiteFile=null;
   for(const f of files){
     const name=inputNameLower(f.name);
     if(isReportsZipName(f.name)){nseZip=nseZip||f;continue;}
     if(!isCsvLikeFile(f))continue;
     if(isScannerCsvName(f.name)){tvFile=f;continue;}
     if(name==='market depth.csv'){depthFile=f;continue;}
+    if(name==='kite instruments.csv'){kiteFile=f;continue;}
     if(name==='positions.csv'){posFile=f;continue;}
     if(name==='holdings.csv'){holdFile=f;continue;}
     if(name==='orders.csv'){ordFile=f;continue;}
@@ -11187,7 +11309,7 @@ async function processFiles(files,sourceLabel,opts={}){
       continue;
     }
   }
-  if(!tvFile&&!nseZip&&!holdFile&&!posFile&&!ordFile&&!tbFile&&!holidayFile&&!depthFile){
+  if(!tvFile&&!nseZip&&!holdFile&&!posFile&&!ordFile&&!tbFile&&!holidayFile&&!depthFile&&!kiteFile){
     if(!silent){
       setLoading(false);
       showToast('No files recognised. Upload the NSE scanner and/or Zerodha input files.',4000,true);
@@ -11195,6 +11317,15 @@ async function processFiles(files,sourceLabel,opts={}){
     return false;
   }
 
+  if(kiteFile){
+    try{
+      for(const r of (parseCSV(await kiteFile.text())||[])){
+        const sy=normSym(r['Symbol']||''),t=Number(r['Token'])||0;
+        if(sy&&t) KITE_TOKEN[sy]=t;
+      }
+      updateFileLoadStatus('Kite Instruments.csv',Object.keys(KITE_TOKEN).length?'loaded':'empty');
+    }catch(e){console.warn('Could not parse Kite Instruments.csv:',e);}
+  }
   if(depthFile){
     try{
       const n=parseMarketDepth(await depthFile.text());
