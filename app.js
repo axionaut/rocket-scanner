@@ -1,5 +1,5 @@
-const BUILD_TS='2026-08-17 19:45 IST'; // release build time (IST)
-const APP_VERSION=1164; // v1164: the flow read spans every session in the file; only the gap between them is excluded.
+const BUILD_TS='2026-08-17 20:11 IST'; // release build time (IST)
+const APP_VERSION=1165; // v1165: a cached daily series per stock, one small request a day; recorded, with a trigger that fires when it can be graded.
 // v1093: a baseline reward:risk MEASURED on the cross-section (last completed bhav session) instead of learned from the owner's own fills - reported on every row, deliberately not enforced. Includes v1092: position size split by Radar score / stop distance, so equally-scored names carry equal RUPEE risk, plus an opt-in Risk /trade cap.
 // v556: parse the NSE Market Activity Report (MA<date>.csv) — official Nifty %, advances/declines and sector index moves shown as market CONTEXT in the status bar (EOD data, display only, never fed into per-row scoring); MA added to the ℹ️ file manifest.
 // v555 market-cycle stage awareness (stateless, self-calibrating): per-row stage label (1 accumulation · 2 breakout · 3 event · 4 profit-booking · 5 re-accumulation · 6 second-leg); a quiet-accumulation signal (conjunction-of-percentiles) injected via the rocket-diagnostic weighting; sell-the-news decay off Recent earnings date (horizon = review days). v1065 makes the market-breadth gauge an entry-eligibility input while still never changing ranking.
@@ -9854,7 +9854,7 @@ async function fetchCandlesInApp(limit){
   showToast('Fetching '+jobs.map(j=>j.s).join(', ')+'…',3000);
   try{
     const q=jobs.map(j=>j.s+':'+j.t).join(',');
-    const res=await fetch(KITE_HELPER+'/api/kite/candles?days='+INTRADAY_FETCH_DAYS+'&jobs='+encodeURIComponent(q),{cache:'no-store'});
+    const res=await fetch(KITE_HELPER+'/api/kite/candles?daily=1&days='+INTRADAY_FETCH_DAYS+'&jobs='+encodeURIComponent(q),{cache:'no-store'});
     const j=await res.json();
     if(!j.ok){ showToast(j.why,8000,true); return; }
     const out=ingestKiteCandlePayload(JSON.stringify({rocketScanner:'candles',data:j.data}));
@@ -9869,6 +9869,7 @@ async function fetchCandlesInApp(limit){
       const ddmm=d=>d?String(d.getDate()).padStart(2,'0')+'/'+String(d.getMonth()+1).padStart(2,'0'):'';
       const w=(j.files&&j.files[sym])||null;
       return {sym,bars:bars.length,file:w?w.file:null,fileRows:w?w.rows:null,
+              daily:(w&&w.daily)?w.daily.sessions:null,
         from:ddmm(f)+' '+hhmm(f),to:ddmm(l)+' '+hhmm(l),
         last:rd?rd.close:null,regime:rd&&rd.regime||null,
         flow:rd&&Number.isFinite(rd.cvdPct)?rd.cvdPct:null};
@@ -9930,7 +9931,8 @@ function intradayPasteBarHtml(){
       ${LAST_FETCH.map(x=>`<div><b>${escHtml(x.sym)}</b>
         <span style="color:var(--t3)">${x.bars} bars · ${escHtml(x.from)} → ${escHtml(x.to)} · last</span>
         <b>${x.last!=null?fmtINR(x.last):'—'}</b>
-        ${x.file?`<span style="color:var(--t3)" title="Open it to see every bar. Appended on each fetch, deduped by timestamp, oldest rows dropped past 1,000."> · Scanner Uploads/Intraday/${escHtml(x.file)} (${x.fileRows} rows)</span>`:''}
+        ${x.file?`<span style="color:var(--t3)" title="Open it to see every bar. Appended on each fetch, deduped by timestamp, and truncated at any break so the series is always contiguous."> · Scanner Uploads/Intraday/${escHtml(x.file)} (${x.fileRows} rows)</span>`:''}
+        ${x.daily?`<span style="color:var(--t3)" title="Daily candles, fetched once per session and cached. Recorded only - nothing scores them until the measurement in .claude/deferred.json says they separate."> · +${x.daily}d daily</span>`:''}
         ${x.regime?`<span style="color:${x.regime==='accumulating'?'var(--green)':x.regime==='selling'?'var(--red)':'var(--amber)'}"> · ${escHtml(x.regime)} ${x.flow!=null?((x.flow*100).toFixed(1)+'%'):''}</span>`:''}
       </div>`).join('')}
     </div>`:''}
