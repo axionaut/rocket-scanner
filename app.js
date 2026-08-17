@@ -1,5 +1,5 @@
-const BUILD_TS='2026-08-17 11:28 IST'; // release build time (IST)
-const APP_VERSION=1139; // v1139: the order book enters the recommendation score and table, and a stock opens in Kite with its symbol copied.
+const BUILD_TS='2026-08-17 11:45 IST'; // release build time (IST)
+const APP_VERSION=1140; // v1140: the pre-open book is rolled forward through the session with signed volume - live depth without pasting.
 // v1093: a baseline reward:risk MEASURED on the cross-section (last completed bhav session) instead of learned from the owner's own fills - reported on every row, deliberately not enforced. Includes v1092: position size split by Radar score / stop distance, so equally-scored names carry equal RUPEE risk, plus an opt-in Risk /trade cap.
 // v556: parse the NSE Market Activity Report (MA<date>.csv) — official Nifty %, advances/declines and sector index moves shown as market CONTEXT in the status bar (EOD data, display only, never fed into per-row scoring); MA added to the ℹ️ file manifest.
 // v555 market-cycle stage awareness (stateless, self-calibrating): per-row stage label (1 accumulation · 2 breakout · 3 event · 4 profit-booking · 5 re-accumulation · 6 second-leg); a quiet-accumulation signal (conjunction-of-percentiles) injected via the rocket-diagnostic weighting; sell-the-news decay off Recent earnings date (horizon = review days). v1065 makes the market-breadth gauge an entry-eligibility input while still never changing ranking.
@@ -3808,7 +3808,7 @@ function radarAnalyze(headers,rawRows,supplements={},heldSymbols=new Set()){
     const dispDay=meta._corpNeutralised&&meta._realDay!=null?meta._realDay:day;
     const out={symbol,name:String(raw[descI]||symbol),sector:raw[sectorI]||'',rawScore,parts,contrib,quality,
       price,day:dispDay,priceChange:dispDay,turnover:turn,relvol,gap,gapSigned,changeOpen,rangePct,sessionVolatilityPct,stretch,stretchBarPct:_stretchBar,atr:atrPct,
-      high1d:highI>=0?radarNum(raw[highI]):null,low1d:lowI>=0?radarNum(raw[lowI]):null,open1d:openI>=0?radarNum(raw[openI]):null,marketCap:mcapI>=0?radarNum(raw[mcapI]):null,rocketToday:rset.has(ri),
+      high1d:highI>=0?radarNum(raw[highI]):null,low1d:lowI>=0?radarNum(raw[lowI]):null,dayVolume:dayVolI>=0?radarNum(raw[dayVolI]):null,open1d:openI>=0?radarNum(raw[openI]):null,marketCap:mcapI>=0?radarNum(raw[mcapI]):null,rocketToday:rset.has(ri),
       vwap:vwapI>=0?radarNum(raw[vwapI]):null,
       chaikinMF:cmfI>=0?radarNum(raw[cmfI]):null, mfi15m:mfi15I>=0?radarNum(raw[mfi15I]):null,
       bollUpper:bollUpperI>=0?radarNum(raw[bollUpperI]):null,
@@ -3954,10 +3954,20 @@ function radarAnalyze(headers,rawRows,supplements={},heldSymbols=new Set()){
     // book PROMOTES the bookless ones - measured on the release board, rows scoring >=95 collapsed
     // from 33 to 4 and SEVEN OF THE TOP EIGHT had no book at all. Absence must mean "no information",
     // which is the middle of the distribution, not a free pass.
-    const _dInfo=_depthPctMap[r.symbol];
-    if(_dInfo){r.depthPct=_dInfo.pct;r.depthImbalance=_dInfo.imb;r.depthLive=!!_dInfo.live;}
-    const _dPct=(RADAR_DEPTH_IN_SCORE&&Number.isFinite(r.depthPct))?r.depthPct:0.5;
-    r.depthBlendPct=Math.sqrt(Math.max(0,r.setupPct)*Math.max(0,_dPct));
+    // v1140: the book is rolled forward with the session's own signed volume. A PASTED book is a
+    // real reading and always wins; otherwise the pre-open book plus flow. Percentiled in the
+    // second pass below, because a percentile needs the whole cross-section.
+    const _bk=NSE_DEPTH[r.symbol];
+    const _lv=DEPTH_LIVE[r.symbol];
+    if(_lv&&_lv.buyQty>0&&_lv.sellQty>0){
+      r.depthImbalance=(_lv.buyQty-_lv.sellQty)/(_lv.buyQty+_lv.sellQty);
+      r.depthLive=true; r.depthSource='pasted';
+    }else if(_bk&&_bk.series==='EQ'&&_bk.bookQty>=DEPTH_MIN_BOOK_QTY){
+      const d=deriveLiveBookImbalance(_bk,r);
+      if(d){r.depthImbalance=d.imb;r.depthLive=false;r.depthSource=d.source;
+            r.depthSignedVol=d.signedVol;r.depthPreOpenImb=_bk.imbalance;}
+    }
+    r.depthBlendPct=r.setupPct;   // provisional; replaced in the second pass
     // Provisional: re-percentiled across the universe in a second pass below, so the SCORE SCALE is
     // preserved and only the ORDER moves. Without that pass the geometric mean shrinks almost every
     // row and the whole distribution slides down - which would silently move what `RECOMMEND_MIN_SCORE`
@@ -3970,25 +3980,53 @@ function radarAnalyze(headers,rawRows,supplements={},heldSymbols=new Set()){
     if(r.risk==='Low'&&(r.meta?.eventToday||r.stage===3||r.stage===4))r.risk='Medium';
     r.setup=r.series!=='EQ'?(r.series==='UNKNOWN'?'Series unverified':`Non-EQ · ${r.series}`):r.band!==null&&r.band<10?`${r.band}% price band`:radarSetupLabel(r);
   }
-  // v1139 SECOND PASS: re-percentile the depth-blended standing across the universe, so the blend
-  // changes the ORDER without moving the SCALE. The geometric mean shrinks nearly every row, and
-  // scoring that directly slid the whole distribution down - measured on the release board, rows at
-  // or above 95 fell from 33 to 4. Since RECOMMEND_MIN_SCORE is an owner-set risk preference read
-  // against this scale, that would have quietly raised the bar under him while pretending to be a
-  // re-ordering. Re-percentiling keeps `score >= 95` meaning exactly what it meant in v1138: the top
-  // of the market. Skipped entirely when the depth term is off, so the flag is a true revert.
-  if(RADAR_DEPTH_IN_SCORE&&rows.some(r=>Number.isFinite(r.depthPct))){
-    const rank=rows.filter(r=>Number.isFinite(r.depthBlendPct)).slice()
-      .sort((a,b)=>a.depthBlendPct-b.depthBlendPct);
-    const n=rank.length;
-    rank.forEach((r,i)=>{r._blendPct=n>1?i/(n-1):1;});
-    rows.forEach(r=>{
-      if(!Number.isFinite(r._blendPct)) return;
-      r.depthBlendPct=r._blendPct;
-      r.score=+(100*Math.pow(r.depthBlendPct*(r.directionConfirmed?1:0),4)).toFixed(1);
-      r.rocketScore=r.score;
-      delete r._blendPct;
-    });
+  // v1139/v1140 SECOND PASS. Two percentiles are taken here, both needing the whole cross-section:
+  // first the BOOK (rolled forward by v1140), then the blended standing.
+  //
+  // Re-percentiling the blend is what keeps the SCALE. The raw geometric mean shrinks nearly every
+  // row, and scoring it directly slid the whole distribution down - measured, rows at or above 95
+  // fell 33 -> 4 - which would have quietly raised what RECOMMEND_MIN_SCORE means while presenting
+  // itself as a re-ordering. Re-percentiling is monotone: the order moves, the scale does not.
+  if(RADAR_DEPTH_IN_SCORE){
+    const booked=rows.filter(r=>Number.isFinite(r.depthImbalance));
+    if(booked.length>=50){
+      const byImb=booked.slice().sort((a,b)=>a.depthImbalance-b.depthImbalance);
+      const bn=byImb.length;
+      byImb.forEach((r,i)=>{r.depthPct=bn>1?i/(bn-1):1;});
+      // Absence is the MEDIAN, never the row's own standing: leaving bookless rows untouched while
+      // the geometric mean shrinks every booked row PROMOTES them - measured, seven of the top
+      // eight had no book at all. No information means the middle of the distribution.
+      rows.forEach(r=>{
+        const dp=Number.isFinite(r.depthPct)?r.depthPct:0.5;
+        // v1140 HEADROOM GUARD (owner, same session: "you just recommended it and it started
+        // falling. Need to be careful."). The roll-forward signs traded volume by where price sits
+        // in the day's range, so a stock PINNED AT ITS HIGH signs all of it to the buy side and
+        // scores ~+1.0 whatever its actual book says - measured: the same +0.20 book reads +0.999
+        // at the high and +0.011 mid-range. Left alone, the flow term would reward exactly the
+        // spent spike it should be avoiding, and TFCILTD was the live case: flagged correctly at
+        // its 116.80 pre-open IEP, still top-ranked at 124.21 having consumed 91% of the day's
+        // range and travelled 2.2x its own average daily range.
+        //
+        // `feasibility` is v1086's headroom - how far the stock can still travel toward its target
+        // against the session ceiling and the circuit, clamped to [0,1]. v1109 removed it from the
+        // score on a single day-pair; this restores it in a far softer form, INSIDE the blend and
+        // therefore before the re-percentile, so it changes the ORDER without touching the scale.
+        // Ample room earns full credit and no bonus (the v1086 clamp), so it only bites on a stock
+        // that has already spent its move. Missing feasibility is neutral, never a penalty.
+        const fz=Number.isFinite(r.feasibility)?Math.max(0,Math.min(1,r.feasibility)):1;
+        r.depthBlendPct=Math.sqrt(Math.max(0,r.setupPct)*Math.max(0,dp))*fz;
+      });
+      const byBlend=rows.filter(r=>Number.isFinite(r.depthBlendPct)).slice()
+        .sort((a,b)=>a.depthBlendPct-b.depthBlendPct);
+      const n=byBlend.length;
+      byBlend.forEach((r,i)=>{r._bp=n>1?i/(n-1):1;});
+      rows.forEach(r=>{
+        if(!Number.isFinite(r._bp)) return;
+        r.depthBlendPct=r._bp; delete r._bp;
+        r.score=+(100*Math.pow(r.depthBlendPct*(r.directionConfirmed?1:0),4)).toFixed(1);
+        r.rocketScore=r.score;
+      });
+    }
   }
   rows.sort((a,b)=>b.score-a.score||a.symbol.localeCompare(b.symbol));
   rows.forEach((r,i)=>{r.rank=i+1;});
@@ -11204,6 +11242,42 @@ function parseMarketDepth(text){
 // over buildDepthRanking's pool: that pool is filtered for EXECUTABILITY (turnover, price, sellers)
 // which is a property of whether you can buy, not of what the book is saying. A live pasted book
 // supersedes the pre-open one here exactly as it does in the panel.
+// ── v1140: THE BOOK, ROLLED FORWARD THROUGH THE SESSION ──────────────────────────────────────
+// Owner, 2026-08-17: *"now that you have the depth data... calculating live data based on it
+// shouldn't be so hard (without me pasting anything even). We have regular updation of ALL NSE csv
+// during the day. In it we have Gap, Volume, Volume change, RoC, direction indicators... to see
+// where it is sitting right now based on where it started."*
+//
+// THE MODEL, in one unit - SHARES. The pre-open book is the starting INVENTORY: `B` resting buy
+// quantity against `S` resting sell. Everything traded since the open is FLOW, and its sign is read
+// from where price sits inside the day's range:
+//
+//     mult      = ((P - L) - (H - P)) / (H - L)      in [-1,+1], the Chaikin position multiplier
+//     signedVol = Volume_1d x mult                    buy-initiated minus sell-initiated, in shares
+//     liveImb   = ((B - S) + signedVol) / ((B + S) + Volume_1d)
+//
+// A stock closing on its high has consumed the offers (mult -> +1); one on its low has consumed the
+// bids (mult -> -1); one mid-range nets out. **NO NEW CONSTANT** - the multiplier is a ratio of the
+// day's own range, and every input (`Volume, 1 day`, `High, 1 day`, `Low, 1 day`, `Price`) is
+// already in the export, so this needs nothing added to the scanner file and refreshes on every
+// upload through the day.
+//
+// WHAT IT IS AND IS NOT: it is an ESTIMATE of order-flow state, not a reconstruction of the live
+// book. Resting inventory and executed flow are different quantities and this deliberately adds
+// them in share units; a pasted book (v1137) is a real reading and therefore always wins. At the
+// open, before anything trades, `Volume_1d` is ~0 and the estimate reduces to the pre-open book
+// exactly - which is the property that makes it safe to roll forward.
+function deriveLiveBookImbalance(book,row){
+  if(!book) return null;
+  const B=+book.buyQty||0, S=+book.sellQty||0, tot0=B+S;
+  if(!(tot0>0)) return null;
+  const H=+row.high1d, L=+row.low1d, P=+row.price, V=+row.dayVolume;
+  // No usable range or volume yet: the book stands as it opened. Fail to the known quantity.
+  if(!(V>0)||!(H>L)||!(P>0)) return {imb:(B-S)/tot0,source:'pre-open',signedVol:0};
+  const mult=((P-L)-(H-P))/(H-L);
+  const signed=V*Math.max(-1,Math.min(1,mult));
+  return {imb:((B-S)+signed)/(tot0+V),source:'rolled',signedVol:signed,mult};
+}
 function getDepthPctMap(){
   const src=[];
   for(const k in NSE_DEPTH){
