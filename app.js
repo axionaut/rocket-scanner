@@ -1,5 +1,5 @@
-const BUILD_TS='2026-08-17 18:11 IST'; // release build time (IST)
-const APP_VERSION=1159; // v1159: the app stays on GitHub Pages; only a small local helper runs, and the page calls it on localhost.
+const BUILD_TS='2026-08-17 18:22 IST'; // release build time (IST)
+const APP_VERSION=1160; // v1160: a fetch shows what it brought back, and a second helper instance says so instead of crashing.
 // v1093: a baseline reward:risk MEASURED on the cross-section (last completed bhav session) instead of learned from the owner's own fills - reported on every row, deliberately not enforced. Includes v1092: position size split by Radar score / stop distance, so equally-scored names carry equal RUPEE risk, plus an opt-in Risk /trade cap.
 // v556: parse the NSE Market Activity Report (MA<date>.csv) — official Nifty %, advances/declines and sector index moves shown as market CONTEXT in the status bar (EOD data, display only, never fed into per-row scoring); MA added to the ℹ️ file manifest.
 // v555 market-cycle stage awareness (stateless, self-calibrating): per-row stage label (1 accumulation · 2 breakout · 3 event · 4 profit-booking · 5 re-accumulation · 6 second-leg); a quiet-accumulation signal (conjunction-of-percentiles) injected via the rocket-diagnostic weighting; sell-the-news decay off Recent earnings date (horizon = review days). v1065 makes the market-breadth gauge an entry-eligibility input while still never changing ranking.
@@ -9622,7 +9622,7 @@ function onIntradayPaste(){
   renderTable();
 }
 function clearIntraday(){
-  INTRADAY_BARS={};INTRADAY_TARGET='';INTRADAY_RESULT=null;
+  INTRADAY_BARS={};INTRADAY_TARGET='';INTRADAY_RESULT=null;LAST_FETCH=null;
   try{setTimeout(()=>{try{renderRankingsPanels();}catch(e){}},0);}catch(e){}
   ALL.forEach(r=>{r.intraday=null;r.intradayVerdict=null;r.intradayWhy=null;});
   scheduleApplyFilters();renderTable();
@@ -9696,6 +9696,7 @@ function ingestKiteCandlePayload(text){
 // Opened as a plain file it still works exactly as before - the in-app fetch simply hides itself,
 // the same rule v1153 established.
 let KITE_API=null;          // set when the local helper answers, wherever this page is hosted
+let LAST_FETCH=null;        // what the last fetch actually brought back, shown so it can be checked
 const KITE_HELPER='http://localhost:8787';
 // THE APP STAYS ON GITHUB PAGES. Earlier this served the app from localhost, which was wrong - the
 // app lives at https://axionaut.github.io/rocket-scanner/ and that must not change. Only the HELPER
@@ -9744,6 +9745,20 @@ async function fetchCandlesInApp(limit){
     const j=await res.json();
     if(!j.ok){ showToast(j.why,8000,true); return; }
     const out=ingestKiteCandlePayload(JSON.stringify({rocketScanner:'candles',data:j.data}));
+    // WHAT WAS ACTUALLY FETCHED, so it can be checked against the chart rather than trusted
+    // (owner: "where can I see the data it fetches to confirm if it is even fetching the correct
+    // data?"). Bars, the window they cover, and the last close - three numbers that either match
+    // Kite or do not.
+    LAST_FETCH=out.done.map(sym=>{
+      const rd=getIntradayRead(sym), bars=INTRADAY_BARS[normSym(sym)]||[];
+      const f=bars[0]?new Date(bars[0].t):null, l=bars[bars.length-1]?new Date(bars[bars.length-1].t):null;
+      const hhmm=d=>d?String(d.getHours()).padStart(2,'0')+':'+String(d.getMinutes()).padStart(2,'0'):'—';
+      const ddmm=d=>d?String(d.getDate()).padStart(2,'0')+'/'+String(d.getMonth()+1).padStart(2,'0'):'';
+      return {sym,bars:bars.length,
+        from:ddmm(f)+' '+hhmm(f),to:ddmm(l)+' '+hhmm(l),
+        last:rd?rd.close:null,regime:rd&&rd.regime||null,
+        flow:rd&&Number.isFinite(rd.cvdPct)?rd.cvdPct:null};
+    });
     const st=getIntradayLoopState(INTRADAY_LOOP_N);
     INTRADAY_TARGET='';
     renderTable();
@@ -9796,6 +9811,14 @@ function intradayPasteBarHtml(){
     ${t?`<textarea id="intradayBox" rows="4" placeholder="Paste ${escHtml(t)}'s 5-minute chart table \u2014 header, rows, and the summary block underneath if it is there."
         style="width:100%;box-sizing:border-box;font-family:var(--mono,monospace);font-size:12px;padding:8px;background:var(--bg);color:var(--t1);border:1px solid var(--amber);border-radius:6px"
         onpaste="setTimeout(onIntradayPaste,0)"></textarea>`:''}
+    ${LAST_FETCH&&LAST_FETCH.length?`<div style="margin-top:6px;font-size:11px;line-height:1.6">
+      <span style="color:var(--t3)">last fetch — check these against your chart:</span>
+      ${LAST_FETCH.map(x=>`<div><b>${escHtml(x.sym)}</b>
+        <span style="color:var(--t3)">${x.bars} bars · ${escHtml(x.from)} → ${escHtml(x.to)} · last</span>
+        <b>${x.last!=null?fmtINR(x.last):'—'}</b>
+        ${x.regime?`<span style="color:${x.regime==='accumulating'?'var(--green)':x.regime==='selling'?'var(--red)':'var(--amber)'}"> · ${escHtml(x.regime)} ${x.flow!=null?((x.flow*100).toFixed(1)+'%'):''}</span>`:''}
+      </div>`).join('')}
+    </div>`:''}
     ${res&&!res.ok?`<div style="font-size:11px;color:var(--amber);margin-top:5px">${escHtml(res.why)}</div>`:''}
     ${res&&res.ok&&res.read?`<div style="font-size:11px;color:var(--t3);margin-top:5px">read <b style="color:var(--green)">${escHtml(res.sym)}</b> \u2014 ${res.bars} bars over ${res.sessions} session(s)${
       res.live?` \u00b7 LIVE book <b style="color:${res.live.imbalance>0?'var(--green)':'var(--red)'}">${(res.live.imbalance>0?'+':'')+res.live.imbalance.toFixed(3)}</b>`:''}${
