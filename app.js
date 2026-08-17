@@ -1,5 +1,5 @@
-const BUILD_TS='2026-08-17 18:44 IST'; // release build time (IST)
-const APP_VERSION=1163; // v1163: open positions are fetched too - buying a stock used to stop its data the day it mattered most.
+const BUILD_TS='2026-08-17 19:45 IST'; // release build time (IST)
+const APP_VERSION=1164; // v1164: the flow read spans every session in the file; only the gap between them is excluded.
 // v1093: a baseline reward:risk MEASURED on the cross-section (last completed bhav session) instead of learned from the owner's own fills - reported on every row, deliberately not enforced. Includes v1092: position size split by Radar score / stop distance, so equally-scored names carry equal RUPEE risk, plus an opt-in Risk /trade cap.
 // v556: parse the NSE Market Activity Report (MA<date>.csv) — official Nifty %, advances/declines and sector index moves shown as market CONTEXT in the status bar (EOD data, display only, never fed into per-row scoring); MA added to the ℹ️ file manifest.
 // v555 market-cycle stage awareness (stateless, self-calibrating): per-row stage label (1 accumulation · 2 breakout · 3 event · 4 profit-booking · 5 re-accumulation · 6 second-leg); a quiet-accumulation signal (conjunction-of-percentiles) injected via the rocket-diagnostic weighting; sell-the-news decay off Recent earnings date (horizon = review days). v1065 makes the market-breadth gauge an entry-eligibility input while still never changing ranking.
@@ -3394,7 +3394,21 @@ function istDayKey(ms){
 function buildIntradayTrajectory(bars){
   const n=bars.length;
   if(n<3) return null;
-  const dP=[0]; for(let i=1;i<n;i++) dP.push(bars[i].c-bars[i-1].c);
+  // ── v1164: THE SERIES MAY SPAN SESSIONS, SO THE OVERNIGHT GAP MUST NOT COUNT AS FLOW ────────
+  // Owner: "use all data in the csv for a stock, not just today's. Since the data is contiguous and
+  // covers multiple days, it could give better signal than less data."
+  //
+  // He is right, and the file is contiguous by construction now. But bar-to-bar deltas across a
+  // session boundary include the OVERNIGHT GAP, which did not trade at those prices - attributing a
+  // 3% gap to the first bar's volume would invent flow that nobody transacted, and the opening bar
+  // is usually the heaviest of the day, so the error lands on the largest weight in the series.
+  //
+  // The first bar of each session is therefore measured against its OWN OPEN rather than yesterday's
+  // close. That keeps the bar's real intraday flow and drops the gap, needs no constant, and leaves
+  // SINGLE-DAY behaviour bit-identical (a one-session series has no boundary past bar 0).
+  const newSes=bars.map((b,i)=>i>0&&istDayKey(b.t)!==istDayKey(bars[i-1].t));
+  const prevC=i=>newSes[i]?bars[i].o:bars[i-1].c;
+  const dP=[0]; for(let i=1;i<n;i++) dP.push(bars[i].c-prevC(i));
   // The scale is VOLUME-WEIGHTED like everything else here. An unweighted mean was sensitive to the
   // same defect the clock axis had: twelve dead 50-share bars lowered the typical move, which
   // rescaled every real bar's sign and pushed AGIIL's net flow from -6.8% to -2.7% on data that had
@@ -3403,11 +3417,23 @@ function buildIntradayTrajectory(bars){
   for(let i=1;i<n;i++){const w=Number(bars[i].v)||0;_tw+=w;_ts+=w*Math.abs(dP[i]);}
   const typ=_tw>0?_ts/_tw:dP.slice(1).reduce((a,b)=>a+Math.abs(b),0)/Math.max(1,n-1);
   if(!(typ>0)) return null;
-  const cvd=[],vx=[]; let run=0,cum=0,anyVol=false;
+  const cvd=[],vx=[]; let run=0,cum=0,anyVol=false,lastF=0;
   for(let i=0;i<n;i++){
     const v=Number(bars[i].v)||0; if(v>0) anyVol=true;
     const locked=bars[i].h===bars[i].l;
-    const f=locked?(i>0&&bars[i].c>=bars[i-1].c?1:-1):Math.max(-1,Math.min(1,dP[i]/typ));
+    // A LOCK KEEPS THE SIGN THAT CREATED IT (fixed v1164, found by a restated v1144 assertion).
+    // The test was `c >= prev ? 1 : -1`, and a CONTINUING lock has c === prev, so `99 >= 99` signed
+    // +1: a stock pinned at its LOWER circuit read as buying from its second locked bar onward -
+    // exactly inverted, on the one bar type where the direction is supposed to be certain. It
+    // survived because the fixtures locked at the UPPER circuit, where the wrong branch happens to
+    // give the right answer. Only the bar that ENTERS the lock has a move to read; after that the
+    // queue has not changed sides, so the sign carries forward.
+    let f;
+    if(locked){
+      const d=i>0?bars[i].c-prevC(i):0;
+      f=d>0?1:d<0?-1:lastF;
+    }else f=Math.max(-1,Math.min(1,dP[i]/typ));
+    if(f>0) lastF=1; else if(f<0) lastF=-1;
     run+=v*(i===0?0:f); cvd.push(run);
     cum+=v; vx.push(cum);
   }
@@ -3455,7 +3481,7 @@ function buildIntradayTrajectory(bars){
   // percentile equals the median and everything qualified, and on a short series the 75th percentile
   // IS the one huge bar so nothing did. Ranks have neither failure.
   const idx=[]; for(let i=1;i<n;i++){ if(Number(bars[i].v)>0) idx.push(i); }
-  const impOf=i=>Math.abs((bars[i].c-bars[i-1].c)/bars[i-1].c*100)/((Number(bars[i].v)||1)/1000);
+  const impOf=i=>Math.abs((bars[i].c-prevC(i))/prevC(i)*100)/((Number(bars[i].v)||1)/1000);
   const byVol=idx.slice().sort((x,y)=>Number(bars[y].v)-Number(bars[x].v));
   const byImp=idx.slice().sort((x,y)=>impOf(x)-impOf(y));
   const cut=Math.max(1,Math.ceil(idx.length*0.25));
@@ -3464,7 +3490,7 @@ function buildIntradayTrajectory(bars){
   let absNet=0,absCount=0;
   for(const i of idx){
     if(!busySet.has(i)||!quietSet.has(i)) continue;   // must be BOTH
-    const dpct=(bars[i].c-bars[i-1].c)/bars[i-1].c*100;
+    const dpct=(bars[i].c-prevC(i))/prevC(i)*100;
     isAbsorb[i]=true; absNet+=(Number(bars[i].v)||0)*Math.sign(dpct); absCount++;
   }
 
@@ -3476,13 +3502,13 @@ function buildIntradayTrajectory(bars){
   // typically does in five minutes - its energy per bar. Signed it would net to nearly nothing;
   // magnitude is what tells you how many bars a target is away.
   let mvSum=0,mvN=0;
-  for(let i=1;i<n;i++){mvSum+=Math.abs((bars[i].c-bars[i-1].c)/bars[i-1].c*100);mvN++;}
+  for(let i=1;i<n;i++){mvSum+=Math.abs((bars[i].c-prevC(i))/prevC(i)*100);mvN++;}
   const avgMovePct=mvN?mvSum/mvN:null;
 
   const upV=[],dnV=[];
   for(let i=1;i<n;i++){
     if(isAbsorb[i]) continue;
-    const dpct=(bars[i].c-bars[i-1].c)/bars[i-1].c*100;
+    const dpct=(bars[i].c-prevC(i))/prevC(i)*100;
     const v=Number(bars[i].v)||0; if(!v) continue;
     if(dpct>0) upV.push([v,dpct]); else if(dpct<0) dnV.push([v,-dpct]);
   }
@@ -3494,7 +3520,7 @@ function buildIntradayTrajectory(bars){
   if(!(upCost>0)||!(dnCost>0)){
     const upAll=[],dnAll=[];
     for(let i=1;i<n;i++){
-      const dpct=(bars[i].c-bars[i-1].c)/bars[i-1].c*100;
+      const dpct=(bars[i].c-prevC(i))/prevC(i)*100;
       const v=Number(bars[i].v)||0; if(!v) continue;
       if(dpct>0) upAll.push([v,dpct]); else if(dpct<0) dnAll.push([v,-dpct]);
     }
@@ -3509,7 +3535,7 @@ function buildIntradayTrajectory(bars){
   let netRecent=0;
   for(let i=1;i<n;i++){
     if(vx[i]<totV*0.5) continue;
-    const dpct=(bars[i].c-bars[i-1].c)/bars[i-1].c*100;
+    const dpct=(bars[i].c-prevC(i))/prevC(i)*100;
     netRecent+=(Number(bars[i].v)||0)*Math.sign(dpct);
   }
   const pressurePct=upCost?(netRecent/upCost):null;
@@ -3587,7 +3613,14 @@ function getIntradayRead(sym){
   // v1144: when the paste carries VOLUME, the flow trajectory is the stronger read and supersedes
   // the price-path standing. The owner's own 5-minute export sometimes omits volume, so the
   // price-path read remains the fallback rather than a second-class citizen.
-  const traj=buildIntradayTrajectory(day);
+  // THE FLOW READ NOW SPANS EVERY SESSION IN THE FILE, the SESSION READ stays on today (v1164).
+  // They answer different questions and must not be merged. Accumulation is a multi-day idea - a
+  // stock quietly bought for three sessions is exactly what the owner is trying to see - so CVD,
+  // cost asymmetry, absorption and pressure take the whole contiguous run. But "where does price sit
+  // in the session's range", "did the first fifteen minutes confirm the open" and "how far can it
+  // still travel before the bell" are statements about TODAY and would be meaningless spread over
+  // four days. The overnight gap is excluded from flow by prevC() above.
+  const traj=buildIntradayTrajectory(bars.length>day.length?bars:day);
   // ── v1162: WHEN IS THIS FROM? (owner: "each stock wouldn't be updated daily so data might not be
   // contiguous and you may make bad decisions based on it.") He is right, and the hole was not the
   // trajectory - that already scopes itself to the LAST session above, so two sessions can never be
@@ -3608,7 +3641,9 @@ function getIntradayRead(sym){
   const ageMin=Math.max(0,Math.round((Date.now()-asOf)/60000));
   const spanBars=Math.round((asOf-day[0].t)/300000)+1;      // 5-minute bars the span should hold
   const holes=Math.max(0,spanBars-day.length);
-  return {sym:normSym(sym),bars:day.length,sessions:new Set(bars.map(b=>istDayKey(b.t))).size,
+  const allSessions=[...new Set(bars.map(b=>istDayKey(b.t)))].sort();
+  return {sym:normSym(sym),bars:day.length,flowBars:bars.length,sessions:allSessions.length,
+          sessionList:allSessions,
           on:key,current:key===nowKey,asOf,ageMin,holes,
           open,close,hi,lo,dayPct:(close/open-1)*100,traj,
           regime:traj?traj.regime:null,cvdPct:traj?traj.cvdPct:null,
