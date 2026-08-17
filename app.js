@@ -1,5 +1,5 @@
-const BUILD_TS='2026-08-14 15:42 IST'; // release build time (IST)
-const APP_VERSION=1135; // v1135: forward-measured indicator effects (5-session-resolved, non-circular) finally drive the feature weights.
+const BUILD_TS='2026-08-17 09:35 IST'; // release build time (IST)
+const APP_VERSION=1136; // v1136: the forward effect that sets the weights is measured at ROCKET_HORIZON_DAYS with direction held; volume is an amplifier, not a direction.
 // v1093: a baseline reward:risk MEASURED on the cross-section (last completed bhav session) instead of learned from the owner's own fills - reported on every row, deliberately not enforced. Includes v1092: position size split by Radar score / stop distance, so equally-scored names carry equal RUPEE risk, plus an opt-in Risk /trade cap.
 // v556: parse the NSE Market Activity Report (MA<date>.csv) — official Nifty %, advances/declines and sector index moves shown as market CONTEXT in the status bar (EOD data, display only, never fed into per-row scoring); MA added to the ℹ️ file manifest.
 // v555 market-cycle stage awareness (stateless, self-calibrating): per-row stage label (1 accumulation · 2 breakout · 3 event · 4 profit-booking · 5 re-accumulation · 6 second-leg); a quiet-accumulation signal (conjunction-of-percentiles) injected via the rocket-diagnostic weighting; sell-the-news decay off Recent earnings date (horizon = review days). v1065 makes the market-breadth gauge an entry-eligibility input while still never changing ranking.
@@ -3210,7 +3210,13 @@ function buildRadarSupplements(){
 let _fwdEffMemo=null;
 function getForwardIndicatorEffects(){
   const iw=FS.get(INDICATOR_WATCH_STORE)||{};
-  const log=iw.log||{};
+  // v1136: the SHORT log, not the guardrail log. v1135 read `iw.log`, which is resolved at
+  // IW_WINDOW=5 sessions and UNCONDITIONALLY - a horizon past which the effect has decayed and a
+  // framing in which any directionless amplifier reads ~0. See iwResolveShort for the measurement.
+  // Until the short log has IW_MIN_SESSIONS of its own this returns an EMPTY map, which reproduces
+  // the pre-v1135 scorer exactly (every effect 0). That is deliberate: a measurement now known to be
+  // taken at the wrong horizon should stop driving weights immediately, not linger until replaced.
+  const log=iw.logShort||{};
   if(_fwdEffMemo&&_fwdEffMemo.src===log) return _fwdEffMemo.map;
   const raw=[];
   Object.keys(log).forEach(name=>{
@@ -4281,6 +4287,9 @@ async function recordIndicatorWatch(sessionDate){
     const stillPending=[];
     for(const a of store.pending){
       const elapsed=Number(tradingDaysBetween(a.date,sessionDate));
+      // v1136: resolve a SECOND time, earlier and conditioned, into store.logShort. An anchor still
+      // matures at IW_WINDOW for the orientation guardrail; this extra pass is what feeds the SCORE.
+      if(elapsed>=ROCKET_HORIZON_DAYS&&!a.shortDone){a.shortDone=true;await iwResolveShort(store,a);}
       if(!(elapsed>=IW_WINDOW)){stillPending.push(a);continue;}
       await iwResolveAnchor(store,a);
     }
@@ -4288,6 +4297,63 @@ async function recordIndicatorWatch(sessionDate){
     store.updatedAt=new Date().toISOString();
     FS.set(INDICATOR_WATCH_STORE,store);
   }catch(e){console.warn('recordIndicatorWatch failed',e);}
+}
+// v1136: the forward effect that sets the WEIGHTS, measured where this app actually trades.
+//
+// The guardrail resolution (iwResolveAnchor) is UNCONDITIONAL and matures at IW_WINDOW=5 sessions.
+// Both choices are wrong for scoring, and the owner named the reason: "large volume doesn't just
+// mean they were bought - in this case they were definitely sold." Volume is an AMPLIFIER, not a
+// direction, so a monotonic mover-vs-non-mover gap cancels across the two halves BY CONSTRUCTION,
+// and the residual decays with horizon. Measured on the stored anchors (dev/probe-volsigned.js):
+// signed top-decile relative-volume lift is 2.78x at 1 session, 2.18x at 2, 1.80x at 3, while the
+// down half climbs 5.07% -> 8.03% -> 12.50% toward the up half. By session 5 there is nothing left.
+// The gap for `Relative volume, 1 day` goes +0.035 (5d, unconditional - BELOW the 0.08 floor, so
+// v1135 gave it no weight at all) -> +0.087 (2d) -> +0.132 (2d, direction-confirmed), which makes it
+// and `Relative volume at time` the TOP TWO of all 106 features rather than unmeasurable.
+//
+// Direction is taken from the snapshot's own decile for `Change from open %, 1 day` (top half = up
+// from the open). That is a PROXY for v1069's exact test (price >= VWAP and up from open) and is
+// stated as one - it needs no schema change, so existing pending anchors resolve too, and it is the
+// same proxy dev/probe-volsigned.js measured with, so the shipped number reproduces the probe.
+async function iwResolveShort(store,a){
+  try{
+    const H=ROCKET_HORIZON_DAYS;
+    const win=store.dailyMovers.filter(x=>String(x.date)>String(a.date)&&Number(tradingDaysBetween(a.date,x.date))<=H);
+    if(win.length<H) return;                        // window not actually covered by uploaded days
+    const dirIdx=a.featNames.indexOf('Change from open %, 1 day');
+    if(dirIdx<0) return;                            // no direction column: measure nothing, fail open
+    const set5=new Set();
+    win.forEach(x=>(x.m5||[]).forEach(s=>set5.add(s)));
+    const flat=await iwInflate(a.packed);
+    const nF=a.nF,syms=a.symbols;
+    const mSum=new Float64Array(nF),mCnt=new Uint32Array(nF);
+    const nSum=new Float64Array(nF),nCnt=new Uint32Array(nF);
+    let movers=0,rows=0;
+    for(let r=0;r<syms.length;r++){
+      const base=r*nF,dv=flat[base+dirIdx];
+      if(dv===255||dv<5) continue;                  // direction not confirmed: out of the sample
+      rows++;
+      const isM=set5.has(syms[r]);
+      if(isM) movers++;
+      for(let i=0;i<nF;i++){
+        const d=flat[base+i]; if(d===255) continue;
+        if(isM){mSum[i]+=d;mCnt[i]++;}else{nSum[i]+=d;nCnt[i]++;}
+      }
+    }
+    if(movers<IW_MIN_MOVERS) return;                // too few movers to trust a direction
+    store.logShort=store.logShort||{};
+    for(let i=0;i<nF;i++){
+      const mc=mCnt[i],nc=nCnt[i];
+      if(mc<3||nc<3) continue;
+      const e=((mSum[i]/mc)-(nSum[i]/nc))/9;        // same decile-mean gap, same normalisation
+      const name=a.featNames[i];
+      const rec=store.logShort[name]||(store.logShort[name]={sign:a.signs[i],e5:[]});
+      rec.sign=a.signs[i];
+      rec.e5.push(+e.toFixed(4));
+      if(rec.e5.length>IW_LOG_MAX) rec.e5.shift();
+    }
+    store.resolvedShortSessions=(store.resolvedShortSessions||0)+1;
+  }catch(e){console.warn('iwResolveShort failed',e);}
 }
 async function iwResolveAnchor(store,a){
   try{
