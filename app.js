@@ -1,5 +1,5 @@
 const BUILD_TS='2026-08-17 09:35 IST'; // release build time (IST)
-const APP_VERSION=1136; // v1136: the forward effect that sets the weights is measured at ROCKET_HORIZON_DAYS with direction held; volume is an amplifier, not a direction.
+const APP_VERSION=1137; // v1137: the pre-open order book ranks the whole market on depth imbalance, with an intraday paste path for the shortlist.
 // v1093: a baseline reward:risk MEASURED on the cross-section (last completed bhav session) instead of learned from the owner's own fills - reported on every row, deliberately not enforced. Includes v1092: position size split by Radar score / stop distance, so equally-scored names carry equal RUPEE risk, plus an opt-in Risk /trade cap.
 // v556: parse the NSE Market Activity Report (MA<date>.csv) — official Nifty %, advances/declines and sector index moves shown as market CONTEXT in the status bar (EOD data, display only, never fed into per-row scoring); MA added to the ℹ️ file manifest.
 // v555 market-cycle stage awareness (stateless, self-calibrating): per-row stage label (1 accumulation · 2 breakout · 3 event · 4 profit-booking · 5 re-accumulation · 6 second-leg); a quiet-accumulation signal (conjunction-of-percentiles) injected via the rocket-diagnostic weighting; sell-the-news decay off Recent earnings date (horizon = review days). v1065 makes the market-breadth gauge an entry-eligibility input while still never changing ranking.
@@ -1022,6 +1022,8 @@ let NSE_MARKET=null; // v556: official Market Activity Report summary {date,date
 // v1076: PR-zip data surveyed in RULES.md Appendix E and previously never parsed.
 let NSE_INDEX={};        // {indexName -> {close,prev,pct,high52,low52,rangePos}} from pd IND_SEC='Y' rows; includes India VIX
 let NSE_NAME_TO_SYM={};  // {UPPERCASED security NAME -> symbol} from pd - the join key for the name-keyed files
+let NSE_DEPTH={};       // v1137: {symbol -> pre-open order book} from Market Depth.csv (dev/fetch-preopen.js)
+let NSE_DEPTH_META=null; // {date, time, rows} - the book is a 09:07 snapshot and says so on screen
 let NSE_BAND_HIT={};     // {symbol -> 'H'|'L'} from bh: securities that HIT their price band (the upper-circuit list)
 let NSE_NEW_HL_BYNAME={};// {UPPERCASED name -> {status,now,prev}} from hl: NEW 52-week high/low (resolved lazily)
 let NSE_INDEX_GROUP_BYNAME={}; // {UPPERCASED name -> 'Nifty 50'|'Nifty Next 50'|'Other'} from gl (resolved lazily)
@@ -9226,6 +9228,175 @@ function buildTopUpBody(){
     </div>`;
 }
 
+// v1137: the depth-only recommendation list. Its own panel, its own ordering, sharing nothing with
+// the Radar score - which is the point: the owner asked for recommendations from the order book
+// ALONE, so blending it into the composite would answer a different question.
+// ── v1137: INTRADAY DEPTH BY PASTE ───────────────────────────────────────────────────────────
+// Owner, 2026-08-17: the pre-open book is one snapshot; during the session both sides keep moving
+// and that movement is the information. No public endpoint carries live per-stock depth, and Kite
+// Connect is out (static IP), so the remaining path is the terminal the owner already has open.
+//
+// THE WORKFLOW, and why it is now cheap: the pre-open book ranks ~2,300 stocks for free, so the
+// owner only has to paste the HANDFUL at the top of that list rather than hunt the market by hand.
+// The app names the shortlist; he pastes their depth; the ranking re-sorts on the live numbers and
+// falls back to the pre-open book for anything not pasted.
+//
+// The parser is deliberately TOLERANT rather than pinned to one clipboard layout - terminals differ
+// and a strict format would break silently. It reports exactly what it understood, per stock, so a
+// mis-parse is visible on screen instead of quietly scoring a wrong number.
+let DEPTH_LIVE={};              // {symbol -> {buyQty, sellQty, at, raw}}
+const DEPTH_WATCH_N=12;         // how many names the panel asks for
+
+function parseDepthPaste(text){
+  const out={ok:[],bad:[]};
+  if(!text||!String(text).trim()) return out;
+  const known=new Set([...Object.keys(NSE_DEPTH||{}),...(Array.isArray(ALL)?ALL.map(r=>normSym(r.symbol)):[])]);
+  const num=t=>{const v=Number(String(t).replace(/[,\s₹]/g,''));return Number.isFinite(v)?v:null;};
+  const lines=String(text).split(/\r?\n/);
+  // Split the blob into per-symbol blocks: a line that IS a known symbol starts a new block.
+  const blocks=[];let cur=null;
+  for(const ln of lines){
+    const t=ln.trim();
+    if(!t) continue;
+    // A header line names a stock and carries no data. The extra test is not fussiness: `TOTAL` is
+    // itself a listed NSE symbol, so "Total 5,00,000 1,00,000" was being read as a NEW stock and
+    // stealing the totals line from the stock above it - which failed silently, scoring nothing.
+    // Symbols may contain digits (3MINDIA, 5PAISA), so the test is on the REST of the line.
+    const parts=t.split(/[\s,|]+/).filter(Boolean);
+    const tok=normSym(parts[0]||'');
+    const restHasDigits=parts.slice(1).some(x=>/\d/.test(x));
+    if(tok&&known.has(tok)&&!restHasDigits&&t.length<40){cur={sym:tok,lines:[]};blocks.push(cur);continue;}
+    if(cur) cur.lines.push(t);
+  }
+  for(const b of blocks){
+    const body=b.lines.join('\n');
+    let buy=null,sell=null,how='';
+    // Rule 1 - the terminal prints both totals on one line. Most reliable when present.
+    for(const ln of b.lines){
+      if(!/total/i.test(ln)) continue;
+      const ns=(ln.match(/[\d,]+(?:\.\d+)?/g)||[]).map(num).filter(v=>v!=null&&v>0);
+      if(ns.length>=2){buy=ns[0];sell=ns[1];how='totals line';break;}
+    }
+    // Rule 2 - no totals line: sum the two quantity columns off the 5+5 ladder. A depth row carries
+    // both sides, so the per-row numbers alternate bid-side then offer-side.
+    if(buy==null){
+      const rows=b.lines.map(ln=>(ln.match(/[\d,]+(?:\.\d+)?/g)||[]).map(num).filter(v=>v!=null))
+                        .filter(a=>a.length>=6);
+      if(rows.length>=3){
+        buy=rows.reduce((n,a)=>n+(a[2]||0),0);
+        sell=rows.reduce((n,a)=>n+(a[5]||0),0);
+        how=rows.length+'-row ladder';
+      }
+    }
+    if(buy>0&&sell>0){
+      DEPTH_LIVE[b.sym]={buyQty:buy,sellQty:sell,at:Date.now(),how};
+      out.ok.push({sym:b.sym,buyQty:buy,sellQty:sell,how,
+                   imbalance:(buy-sell)/(buy+sell)});
+    }else{
+      out.bad.push({sym:b.sym,why:body?'could not find two quantity totals':'nothing under the symbol'});
+    }
+  }
+  if(!blocks.length) out.bad.push({sym:'(none)',why:'no known NSE symbol found - put the symbol on its own line above its depth'});
+  return out;
+}
+
+function onDepthPaste(){
+  const el=document.getElementById('depthPasteBox');
+  if(!el) return;
+  const res=parseDepthPaste(el.value);
+  DEPTH_PASTE_RESULT=res;
+  renderRankingsPanels();
+  if(res.ok.length) showToast('Read live depth for '+res.ok.length+' stock'+(res.ok.length>1?'s':'')+'.',2500);
+  else showToast('Nothing readable in that paste - see the note under the box.',3500,true);
+}
+function clearDepthPaste(){
+  DEPTH_LIVE={};DEPTH_PASTE_RESULT=null;
+  const el=document.getElementById('depthPasteBox');if(el) el.value='';
+  renderRankingsPanels();
+}
+let DEPTH_PASTE_RESULT=null;
+
+function buildDepthPanel(query){
+  const d=buildDepthRanking();
+  const dash='<span style="color:var(--t3)">—</span>';
+  if(!d.rows.length){
+    return `<div class="panel" style="margin-top:14px"><div class="panel-h">Order Book Imbalance</div>
+      <div style="padding:14px 16px;font-size:12px;color:var(--t3);line-height:1.6">
+        No pre-open book loaded. Run <code>node dev/fetch-preopen.js</code> to write
+        <b>Market Depth.csv</b> into this folder — one request, ~2,300 stocks, no login and no
+        subscription. The book is published around 09:07 IST and is fixed for the session.
+      </div></div>`;
+  }
+  const shown=filterPanelRows(d.rows,query,r=>[r.sym]);
+  const qty=v=>Number(v||0).toLocaleString('en-IN');
+  const cols=[
+    {key:'depthRank',label:'#'},
+    {key:'sym',label:'Stock',align:'left',fmt:v=>symbolChartButton?symbolChartButton(v):escHtml(v)},
+    {key:'imbalance',label:'Imbalance',bold:true,
+      fmt:(v,r)=>!Number.isFinite(v)?dash:((v>0?'+':'')+v.toFixed(3)
+        +(r.live?' <span style="font-size:10px;color:var(--cyan);border:1px solid var(--cyan);border-radius:3px;padding:0 3px">LIVE</span>':'')),
+      clrFn:v=>!Number.isFinite(v)?'var(--t3)':v>0?'var(--green)':'var(--red)'},
+    {key:'pressure',label:'Buy : sell',
+      fmt:v=>!Number.isFinite(v)?dash:(v>=100?'&gt;100':v.toFixed(1))+' : 1'},
+    {key:'buyQty',label:'Buy qty',fmt:v=>qty(v)},
+    {key:'sellQty',label:'Sell qty',fmt:v=>qty(v)},
+    {key:'iep',label:'IEP ₹',fmt:v=>v>0?fmtINR(v):dash},
+    {key:'gapPct',label:'Gap %',
+      fmt:v=>Number.isFinite(v)?(v>0?'+':'')+v.toFixed(2)+'%':dash,
+      clrFn:v=>!Number.isFinite(v)?'var(--t3)':v>=0?'var(--green)':'var(--red)'},
+    {key:'preOpenTurnover',label:'Pre-open ₹',fmt:v=>v>0?fmtINR(v):dash}
+  ];
+  const tbl=makeSortableTable('depth-imbalance',cols,shown,'imbalance',-1);
+  const m=d.meta||{};
+  const dropTxt=Object.keys(d.dropped||{}).sort((a,b)=>d.dropped[b]-d.dropped[a])
+    .map(k=>d.dropped[k]+' '+k).join(' · ');
+  return {
+    html:`<div class="panel" style="margin-top:14px">
+      <div class="panel-h">Order Book Imbalance ${panelFilterTag(query,shown.length,d.rows.length)}</div>
+      <div style="display:flex;gap:14px;align-items:flex-end;flex-wrap:wrap;padding:10px 16px;border-bottom:1px solid var(--border)">
+        <div><div class="st-l">Ranked</div><div class="st-v" style="font-size:17px">${d.pool}</div>
+          <div class="st-d">of ${d.universe} in the book</div></div>
+        <div><div class="st-l">Book taken</div><div class="st-v" style="font-size:17px">${escHtml(String(m.date||'—'))}</div>
+          <div class="st-d">${escHtml(String(m.time||''))} · pre-open, fixed for the session</div></div>
+      </div>
+      ${(()=>{
+        const watch=d.rows.slice(0,DEPTH_WATCH_N);
+        const res=DEPTH_PASTE_RESULT;
+        const chip=r=>`<span style="display:inline-block;border:1px solid ${DEPTH_LIVE[r.sym]?'var(--cyan)':'var(--border)'};border-radius:4px;padding:1px 6px;margin:2px 3px 0 0;font-size:11px;color:${DEPTH_LIVE[r.sym]?'var(--cyan)':'var(--t2)'}">${escHtml(r.sym)}</span>`;
+        return `<div style="padding:10px 16px;border-bottom:1px solid var(--border)">
+          <div class="st-l">Paste live depth for these ${watch.length}</div>
+          <div style="margin:4px 0 8px">${watch.map(chip).join('')}</div>
+          <textarea id="depthPasteBox" rows="4" placeholder="Symbol on its own line, then its depth pasted underneath. Repeat for as many as you like."
+            style="width:100%;box-sizing:border-box;font-family:var(--mono,monospace);font-size:12px;padding:8px;background:var(--bg2);color:var(--t1);border:1px solid var(--border);border-radius:6px"></textarea>
+          <div style="margin-top:6px;display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+            <button onclick="onDepthPaste()" class="btn">Read depth</button>
+            <button onclick="clearDepthPaste()" class="btn" style="opacity:.75">Clear live</button>
+            <span style="font-size:11px;color:var(--t3)">${Object.keys(DEPTH_LIVE).length} stock(s) on live depth${res&&res.bad.length?' · '+res.bad.length+' not read':''}</span>
+          </div>
+          ${res&&(res.ok.length||res.bad.length)?`<div style="margin-top:6px;font-size:11px;line-height:1.5">
+            ${res.ok.map(r=>`<div style="color:var(--green)">read ${escHtml(r.sym)} — buy ${r.buyQty.toLocaleString('en-IN')} vs sell ${r.sellQty.toLocaleString('en-IN')} → imbalance ${(r.imbalance>0?'+':'')+r.imbalance.toFixed(3)} <span style="color:var(--t3)">(${escHtml(r.how)})</span></div>`).join('')}
+            ${res.bad.map(r=>`<div style="color:var(--amber)">could not read ${escHtml(r.sym)} — ${escHtml(r.why)}</div>`).join('')}
+          </div>`:''}
+        </div>`;
+      })()}
+      ${shown.length?`<div>${tbl.getHtml()}</div>`:panelNoMatchHtml(query)}
+      <div style="padding:10px 16px;font-size:12px;color:var(--t3);line-height:1.55">
+        Ranked on <b>order-book imbalance alone</b> — (buy qty − sell qty) ÷ total — from NSE's
+        pre-open book, which publishes the AGGREGATE resting quantity per stock rather than only the
+        top five levels. Nothing from the Radar composite enters this ordering. The only rows removed
+        are ones that cannot be bought at all: ${escHtml(dropTxt||'none')}. Note a stock locked at its
+        band with <i>zero</i> sellers is the strongest reading the book can give and is also
+        unbuyable, so it is excluded rather than ranked first. Imbalance is scored
+        <b>cross-sectionally</b> because the book is structurally sell-skewed market-wide, so an
+        absolute cut-off would be an invented constant. <b>This is a 09:07 snapshot, not live
+        depth</b> — it is fixed once the session opens. Paste a stock's depth from your terminal and
+        that stock is ranked on the LIVE book instead, marked <b>LIVE</b>; everything unpasted keeps
+        its pre-open figure. The pre-open ranking exists to tell you WHICH names are worth pasting —
+        it reads all ~2,300 for free so you only hand-check the top of the list.
+      </div></div>`,
+    table:tbl,count:shown.length};
+}
+
 function renderRankingsPanels(){
   const q=rankingsSearchQuery();
   const remEl=document.getElementById('rankRemoved');
@@ -9235,6 +9406,12 @@ function renderRankingsPanels(){
     const latest=buildLatestSessionPanel(q);
     latestEl.innerHTML=latest.html;
     latest.render();
+  }
+  const depthEl=document.getElementById('rankDepth');
+  if(depthEl){
+    const depth=buildDepthPanel(q);
+    if(typeof depth==='string'){depthEl.innerHTML=depth;}
+    else{depthEl.innerHTML=depth.html;depth.table?.render();}
   }
   const posEl=document.getElementById('rankOpenPositions');
   if(posEl){
@@ -10792,6 +10969,93 @@ function applySavedFiltersForMode(mode){
   }
 }
 
+// ── v1137: PRE-OPEN ORDER BOOK ───────────────────────────────────────────────────────────────
+// Owner, 2026-08-17: rank stocks on order-book imbalance - more buy quantity than sell means the
+// price is about to go up - and do it WITHOUT Level 2, a static IP or a paid API. The source is
+// NSE's own pre-open endpoint (`api/market-data-pre-open?key=ALL`), captured by dev/fetch-preopen.js
+// into `Market Depth.csv`: ~2,300 stocks in ONE request, each carrying the AGGREGATE book
+// (totalBuyQuantity / totalSellQuantity), not merely the top five levels.
+//
+// PROVENANCE, shown on screen rather than buried: this is the pre-open book stamped ~09:07 IST and
+// it FREEZES for the session. It is a once-per-day signal available BEFORE the first tick, which is
+// the right shape for a BTST/at-open entry and the only aggregate order-book quantity NSE publishes
+// publicly. It is never presented as live intraday depth.
+function parseMarketDepth(text){
+  const rows=parseCSV(text);
+  if(!rows||!rows.length) return 0;
+  let n=0,date='',time='';
+  for(const r of rows){
+    const sym=normSym(r['Symbol']||'');
+    if(!sym) continue;
+    const b=Number(r['BuyQty'])||0, sl=Number(r['SellQty'])||0, tot=b+sl;
+    const imbRaw=r['Imbalance'];
+    NSE_DEPTH[sym]={
+      series:String(r['Series']||'').trim().toUpperCase(),
+      iep:Number(r['IEP'])||0, prevClose:Number(r['PrevClose'])||0,
+      gapPct:Number(r['GapPct']),
+      buyQty:b, sellQty:sl, bookQty:tot,
+      // Recomputed rather than trusted: a stored ratio and its own numerator must not disagree.
+      imbalance:tot>0?(b-sl)/tot:null,
+      atoBuyQty:Number(r['AtoBuyQty'])||0, atoSellQty:Number(r['AtoSellQty'])||0,
+      preOpenQty:Number(r['PreOpenQty'])||0, preOpenTurnover:Number(r['PreOpenTurnover'])||0,
+      bidTop:Number(r['BidTop'])||0, askTop:Number(r['AskTop'])||0
+    };
+    date=date||String(r['BookDate']||''); time=time||String(r['BookTime']||'');
+    n++;
+  }
+  NSE_DEPTH_META=n?{date,time,rows:n}:null;
+  return n;
+}
+
+// The depth-only ranking. Deliberately NOT blended into the Radar score (owner: "recommendations
+// based on this only") - it is its own list, and nothing here touches radarAnalyze.
+const DEPTH_MIN_BOOK_QTY=1000;      // a book too small to mean anything
+const DEPTH_MIN_PREOPEN_TURNOVER=2e5;
+function buildDepthRanking(){
+  const meta=NSE_DEPTH_META;
+  const all=Object.keys(NSE_DEPTH).map(sym=>({sym,...NSE_DEPTH[sym]}));
+  if(!all.length) return {rows:[],meta:null,pool:0,dropped:{}};
+  const drop={};
+  const bump=k=>{drop[k]=(drop[k]||0)+1;};
+  // EXECUTABILITY ONLY - exchange truth, never a view on the stock. Everything removed here is
+  // something that cannot be bought at all, which is the same class as the v1081 circuit gate.
+  const pool=all.filter(r=>{
+    if(r.series!=='EQ'){bump('non-EQ');return false;}
+    if(!(r.imbalance!=null)){bump('no two-sided book');return false;}
+    if(!(r.bookQty>=DEPTH_MIN_BOOK_QTY)){bump('book too small');return false;}
+    if(!(r.iep>=10)){bump('price under Rs 10');return false;}
+    if(!(r.preOpenTurnover>=DEPTH_MIN_PREOPEN_TURNOVER)){bump('pre-open turnover too thin');return false;}
+    // Locked at its band with nobody on the other side: real signal, and unbuyable at any price.
+    if(!(r.sellQty>0)){bump('no sellers - unbuyable');return false;}
+    if(NSE_SURV&&NSE_SURV[r.sym]){bump('surveillance');return false;}
+    return true;
+  });
+  // CROSS-SECTIONAL, because the book is structurally sell-skewed market-wide (observed median
+  // imbalance -0.38 on 2026-08-17), so an absolute threshold would be a fitted constant. Same
+  // reasoning as every other input in this app being ranked rather than thresholded.
+  pool.forEach(r=>{
+    // v1137: a pasted intraday book SUPERSEDES the pre-open one for that stock. The pre-open figure
+    // stays visible beside it so the two are never confused, and `live` says which is being ranked.
+    const lv=DEPTH_LIVE[r.sym];
+    if(lv&&lv.buyQty>0&&lv.sellQty>0){
+      r.preOpenImbalance=r.imbalance;r.preOpenBuyQty=r.buyQty;r.preOpenSellQty=r.sellQty;
+      r.buyQty=lv.buyQty;r.sellQty=lv.sellQty;r.bookQty=lv.buyQty+lv.sellQty;
+      r.imbalance=(lv.buyQty-lv.sellQty)/(lv.buyQty+lv.sellQty);
+      r.live=true;r.liveAt=lv.at;
+    }
+    r.pressure=r.sellQty>0?r.buyQty/r.sellQty:null;
+    // What the book has NOT yet been paid for: heavy buy pressure with the price still flat is the
+    // shape the owner is after. Reported, never blended into the ordering - the ordering is
+    // imbalance and nothing else, per the brief.
+    r.unpriced=Number.isFinite(r.gapPct)?(r.imbPct-Math.min(1,Math.abs(r.gapPct)/5)):null;
+  });
+  const byImb=[...pool].sort((a,b)=>a.imbalance-b.imbalance);
+  const n=byImb.length;
+  byImb.forEach((r,i)=>{r.imbPct=n>1?i/(n-1):1;});
+  const rows=[...pool].sort((a,b)=>b.imbalance-a.imbalance);
+  rows.forEach((r,i)=>{r.depthRank=i+1;});
+  return {rows,meta,pool:pool.length,dropped:drop,universe:all.length};
+}
 async function processFiles(files,sourceLabel,opts={}){
   const silent=!!opts.silent; // watcher refreshes: no overlay, no toasts, corner pill only
   if(!(await ensureDriveReadyForLoad())){
@@ -10809,13 +11073,14 @@ async function processFiles(files,sourceLabel,opts={}){
   // Upload CHANGED canonical input files to Drive in the background. Rankings are built
   // from the selected local files immediately, because the market does not wait for Drive.
   saveInputsInBackground(files,{silent});
-  NSE_BHAV={};NSE_52W={};NSE_SURV={};NSE_BULK={};NSE_BLOCK={};NSE_PRICE_BAND={};NSE_DEAL_NET={};NSE_CORP_ACTION={};NSE_BOARD_MEETING={};NSE_ANNOUNCE={};NSE_MARKET=null;NSE_INDEX={};NSE_NAME_TO_SYM={};NSE_BAND_HIT={};NSE_NEW_HL_BYNAME={};NSE_INDEX_GROUP_BYNAME={};NSE_INDEX_GROUP_BYSYM={};MARKET_REGIME=null;NSE_STATUS={};NSE_SERIES={};
-  let tvFile=null,nseZip=null,holdFile=null,posFile=null,ordFile=null,tbFile=null,holidayFile=false,holidayFileName='';
+  NSE_BHAV={};NSE_52W={};NSE_SURV={};NSE_BULK={};NSE_BLOCK={};NSE_PRICE_BAND={};NSE_DEAL_NET={};NSE_CORP_ACTION={};NSE_BOARD_MEETING={};NSE_ANNOUNCE={};NSE_MARKET=null;NSE_INDEX={};NSE_NAME_TO_SYM={};NSE_BAND_HIT={};NSE_NEW_HL_BYNAME={};NSE_INDEX_GROUP_BYNAME={};NSE_INDEX_GROUP_BYSYM={};MARKET_REGIME=null;NSE_STATUS={};NSE_SERIES={};NSE_DEPTH={};NSE_DEPTH_META=null;
+  let tvFile=null,nseZip=null,holdFile=null,posFile=null,ordFile=null,tbFile=null,holidayFile=false,holidayFileName='',depthFile=null;
   for(const f of files){
     const name=inputNameLower(f.name);
     if(isReportsZipName(f.name)){nseZip=nseZip||f;continue;}
     if(!isCsvLikeFile(f))continue;
     if(isScannerCsvName(f.name)){tvFile=f;continue;}
+    if(name==='market depth.csv'){depthFile=f;continue;}
     if(name==='positions.csv'){posFile=f;continue;}
     if(name==='holdings.csv'){holdFile=f;continue;}
     if(name==='orders.csv'){ordFile=f;continue;}
@@ -10828,7 +11093,7 @@ async function processFiles(files,sourceLabel,opts={}){
       continue;
     }
   }
-  if(!tvFile&&!nseZip&&!holdFile&&!posFile&&!ordFile&&!tbFile&&!holidayFile){
+  if(!tvFile&&!nseZip&&!holdFile&&!posFile&&!ordFile&&!tbFile&&!holidayFile&&!depthFile){
     if(!silent){
       setLoading(false);
       showToast('No files recognised. Upload the NSE scanner and/or Zerodha input files.',4000,true);
@@ -10836,6 +11101,12 @@ async function processFiles(files,sourceLabel,opts={}){
     return false;
   }
 
+  if(depthFile){
+    try{
+      const n=parseMarketDepth(await depthFile.text());
+      updateFileLoadStatus('Market Depth.csv',n?'loaded':'empty');
+    }catch(e){console.warn('Could not parse Market Depth.csv:',e);}
+  }
   if(nseZip){
     setLoadMsg('Unzipping NSE data...');
     try{
