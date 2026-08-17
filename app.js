@@ -1,5 +1,5 @@
-const BUILD_TS='2026-08-17 17:57 IST'; // release build time (IST)
-const APP_VERSION=1157; // v1157: served from localhost, the app fetches its own candles - no extension, no console, no command.
+const BUILD_TS='2026-08-17 18:02 IST'; // release build time (IST)
+const APP_VERSION=1158; // v1158: every workaround removed - extension, bookmarklet, console and command line. One button, inside the app.
 // v1093: a baseline reward:risk MEASURED on the cross-section (last completed bhav session) instead of learned from the owner's own fills - reported on every row, deliberately not enforced. Includes v1092: position size split by Radar score / stop distance, so equally-scored names carry equal RUPEE risk, plus an opt-in Risk /trade cap.
 // v556: parse the NSE Market Activity Report (MA<date>.csv) — official Nifty %, advances/declines and sector index moves shown as market CONTEXT in the status bar (EOD data, display only, never fed into per-row scoring); MA added to the ℹ️ file manifest.
 // v555 market-cycle stage awareness (stateless, self-calibrating): per-row stage label (1 accumulation · 2 breakout · 3 event · 4 profit-booking · 5 re-accumulation · 6 second-leg); a quiet-accumulation signal (conjunction-of-percentiles) injected via the rocket-diagnostic weighting; sell-the-news decay off Recent earnings date (horizon = review days). v1065 makes the market-breadth gauge an entry-eligibility input while still never changing ranking.
@@ -9586,7 +9586,7 @@ function setIntradayTarget(sym){
 function onIntradayPaste(){
   const el=document.getElementById('intradayBox');
   if(!el) return;
-  // A batch payload from the console snippet carries many stocks at once and names each one, so it
+  // A batch payload carries many stocks at once and names each one, so it
   // does not need a selected target. Try it first; fall back to the single-table paste.
   const batch=ingestKiteCandlePayload(el.value);
   if(batch){
@@ -9627,151 +9627,31 @@ function clearIntraday(){
   ALL.forEach(r=>{r.intraday=null;r.intradayVerdict=null;r.intradayWhy=null;});
   scheduleApplyFilters();renderTable();
 }
-// ── v1149: THE KITE BRIDGE ───────────────────────────────────────────────────────────────────
-// A Tampermonkey userscript running in the owner's OWN logged-in Kite tab reads the chart's data
-// table straight out of the DOM and hands it here. This is not the 2026-07-15 automation that was
-// retired: that one drove a SEPARATE headless browser with its own authentication. This runs inside
-// the session the owner already has open, reading a table already rendered on his screen, and it
-// only ever fetches what this app explicitly asks for.
-//
-// POLITENESS IS A HARD RULE, not a setting (owner: "I don't want to bombard zerodha with these
-// requests if they mind it"). The app publishes a REQUEST for a handful of symbols; the script
-// serves it and stops. Nothing is fetched on a timer, nothing is fetched speculatively, and the
-// budget below is enforced HERE rather than trusted to the script.
-const KITE_BRIDGE_KEY='rocketScannerKiteBridge';
-const BRIDGE_MAX_PER_WINDOW=12;     // symbols per window - the owner's manual pace, not a scrape
-const BRIDGE_WINDOW_MS=15*60*1000;
-let BRIDGE_LOG=[];                  // timestamps of symbols actually requested
-
-function bridgeBudgetLeft(){
+// ── WHAT TO FETCH, AND HOW OFTEN ────────────────────────────────────────────────────────────
+// The rate cap is enforced HERE, before anything is requested, so it cannot be edited around from
+// elsewhere (owner: "I don't want to bombard zerodha with these requests if they mind it"). Nothing
+// is ever fetched on a timer or speculatively - only the unchecked names at the top of the board,
+// and only when the button is pressed.
+const FETCH_MAX_PER_WINDOW=12;
+const FETCH_WINDOW_MS=15*60*1000;
+let FETCH_LOG=[];
+function fetchBudgetLeft(){
   const now=Date.now();
-  BRIDGE_LOG=BRIDGE_LOG.filter(t=>now-t<BRIDGE_WINDOW_MS);
-  return Math.max(0,BRIDGE_MAX_PER_WINDOW-BRIDGE_LOG.length);
+  FETCH_LOG=FETCH_LOG.filter(t=>now-t<FETCH_WINDOW_MS);
+  return Math.max(0,FETCH_MAX_PER_WINDOW-FETCH_LOG.length);
 }
-// What the app wants next: the top candidates that have not been checked, capped by the budget.
-function bridgeRequest(limit){
-  const st=getIntradayLoopState(limit||INTRADAY_LOOP_N);
-  const budget=bridgeBudgetLeft();
-  // Send the INSTRUMENT TOKEN with each symbol. Kite's chart URL is deterministic -
-  //   /markets/chart/web/ciq/NSE/<SYMBOL>/<TOKEN>
-  // - and the app already holds 10,197 NSE tokens from the public api.kite.trade dump. Navigating
-  // straight there is far more robust than driving a symbol-search box, which is what v1.5 tried
-  // and what left GALAPREC sitting in the search field with the chart still on MANCREDIT.
-  const want=st.need.slice(0,budget)
-    .map(r=>({sym:normSym(r.symbol),token:KITE_TOKEN[normSym(r.symbol)]||0}))
-    .filter(x=>x.token>0);
-  const noToken=st.need.slice(0,budget).filter(r=>!KITE_TOKEN[normSym(r.symbol)]).map(r=>r.symbol);
-  if(!want.length) return {symbols:[],jobs:[],
-    reason:budget?(noToken.length?('no Kite token for '+noToken.join(', ')+' — re-run dev/fetch-preopen.js'):'nothing to check')
-                 :'budget spent'};
-  return {symbols:want.map(x=>x.sym),jobs:want,at:Date.now()};
-}
-// Is the other half of the bridge actually present? The userscript defines this hook when it loads
-// on this page. Without it the button can publish a request that nobody will ever collect - which is
-// exactly what it did on first use, silently. A control that does nothing must SAY it did nothing.
-function bridgeInstalled(){
-  // TWO signals, because a userscript with any @grant runs SANDBOXED: its `window` is a copy and a
-  // hook set there is invisible here. The helper writes to the page window via `unsafeWindow`, and
-  // also stamps the document - which is shared in every sandbox mode and cannot be isolated away.
-  if(typeof window.__rocketBridgeRequest==='function') return true;
-  try{ return document.documentElement.getAttribute('data-rocket-bridge')==='1'; }catch(e){ return false; }
-}
-// Is a KITE TAB actually listening? The helper heartbeats every 15 seconds from that side. Without
-// this the app could only report that it had PUBLISHED a request - which it did, into silence, and
-// then told the owner "Asked Kite for INDOMIM, GALAPREC" as though something had happened.
-function bridgeKiteStatus(){
-  try{
-    if(typeof window.__rocketBridgeStatus!=='function') return {ok:false,why:'helper not on this page'};
-    const st=window.__rocketBridgeStatus()||{};
-    const ago=st.kiteSeenMsAgo;
-    if(ago==null) return {ok:false,why:'no Kite tab has ever checked in',lastLog:st.lastLog};
-    if(ago>60000) return {ok:false,why:'no Kite tab seen for '+Math.round(ago/1000)+'s',lastLog:st.lastLog};
-    return {ok:true,agoSec:Math.round(ago/1000),lastLog:st.lastLog};
-  }catch(e){ return {ok:false,why:String(e&&e.message||e)}; }
-}
-function bridgePublish(limit){
-  if(!bridgeInstalled()) return {symbols:[],reason:'not installed'};
-  const k=bridgeKiteStatus();
-  if(!k.ok) return {symbols:[],reason:'no Kite tab listening — '+k.why};
-  const req=bridgeRequest(limit);
-  try{
-    // localStorage is the fallback channel when only the DOM marker is present: the helper polls it.
-    localStorage.setItem(KITE_BRIDGE_KEY+'_req',JSON.stringify(req));
-    if(typeof window.__rocketBridgeRequest==='function') window.__rocketBridgeRequest(req);
-  }catch(e){}
-  req.symbols.forEach(()=>BRIDGE_LOG.push(Date.now()));
-  return req;
-}
-// The userscript calls this with rows exactly as the table renders them. It goes through the SAME
-// parser a paste does - there is no second ingestion path to drift out of sync.
-window.__rocketIntradayIngest=function(symbol,rows){
-  try{
-    const sym=normSym(symbol||'');
-    if(!sym||!Array.isArray(rows)||rows.length<5) return {ok:false,why:'no usable rows'};
-    const csv=['"Date","Open","High","Low","Close","% Change","% Change vs Average","Volume"']
-      .concat(rows.map(r=>r.map(c=>'"'+String(c==null?'':c).replace(/"/g,'')+'"').join(','))).join('\n');
-    const res=parseIntradayPaste(csv,sym);
-    if(res.ok){
-      applyIntradayReorder(ALL); applyFilters();
-      try{renderRankingsPanels();}catch(e){}
-      renderTable();
-    }
-    return res;
-  }catch(e){return {ok:false,why:String(e&&e.message||e)};}
-};
-// ── v1155: THE CONSOLE SNIPPET — no extension, no clicking, no navigation ────────────────────
-// Owner: "I said no tampermonkey." And earlier: "I'm not always going to open the pages and click
-// the fucking buttons. The whole point is that I only need to stay logged in so the URL works
-// because it's session linked."
-//
-// Both constraints are satisfied by running INSIDE the Kite tab's own console. Code pasted there is
-// SAME-ORIGIN, so Kite's own candle endpoint answers it with the session already attached - the
-// identical request the chart itself makes when it draws. Nothing is installed, nothing is clicked,
-// no page is navigated, and no DOM is scraped.
-//
-// The app builds the snippet with the symbols and instrument tokens ALREADY EMBEDDED, so there is
-// nothing to type. Two clipboard hops for the whole batch, however many stocks: copy the snippet ->
-// paste in the Kite console -> the result lands on the clipboard -> paste it back here.
-function buildKiteFetchScript(limit){
+// The unchecked names at the top of the board, paired with the instrument tokens the app has held
+// since v1139. A symbol with no token is excluded WITH a reason rather than silently dropped.
+function intradayFetchJobs(limit){
   const st=getIntradayLoopState(limit||INTRADAY_LOOP_N);
   const jobs=st.need
     .map(r=>({s:normSym(r.symbol),t:KITE_TOKEN[normSym(r.symbol)]||0}))
     .filter(j=>j.t>0);
-  if(!jobs.length) return {ok:false,why:st.need.length?'no Kite token for those names — re-run dev/fetch-preopen.js':'nothing left to check'};
-  const days=Math.max(1,Number(INTRADAY_FETCH_DAYS)||3);
-  const code=
-`/* Rocket Scanner — paste this into the Kite tab's console and press Enter.
-   It asks Kite for the same 5-minute candles the chart draws, for ${jobs.length} stock(s),
-   then puts the result on your clipboard. Paste that back into the scanner. */
-(async()=>{
-  const JOBS=${JSON.stringify(jobs)};
-  const DAYS=${days};
-  const tok=(document.cookie.match(/enctoken=([^;]+)/)||[])[1];
-  if(!tok){ alert('Not logged in to Kite in this tab.'); return; }
-  const pad=n=>String(n).padStart(2,'0');
-  const fmt=d=>d.getFullYear()+'-'+pad(d.getMonth()+1)+'-'+pad(d.getDate())+'+'+pad(d.getHours())+':'+pad(d.getMinutes())+':'+pad(d.getSeconds());
-  const to=new Date(), from=new Date(Date.now()-DAYS*24*3600*1000);
-  const out={};
-  for(const j of JOBS){
-    try{
-      const u='/oms/instruments/historical/'+j.t+'/5minute?user_id=&oi=0&from='+fmt(from)+'&to='+fmt(to);
-      const r=await fetch(u,{headers:{'authorization':'enctoken '+decodeURIComponent(tok),'x-kite-version':'3'},credentials:'include'});
-      const js=await r.json();
-      const c=(js&&js.data&&js.data.candles)||[];
-      if(!c.length){ console.warn('no candles for',j.s,js&&js.message); continue; }
-      out[j.s]=c;
-      console.log('fetched',j.s,c.length,'candles');
-    }catch(e){ console.warn('failed',j.s,e.message); }
-    await new Promise(r=>setTimeout(r,700));
-  }
-  const payload=JSON.stringify({rocketScanner:'candles',at:Date.now(),data:out});
-  try{ await navigator.clipboard.writeText(payload); }
-  catch(e){ const t=document.createElement('textarea'); t.value=payload; document.body.appendChild(t); t.select(); document.execCommand('copy'); t.remove(); }
-  console.log('%cCopied '+Object.keys(out).length+' stock(s). Paste into the scanner.','color:#0a0;font-weight:700');
-})();`;
-  return {ok:true,code,jobs,symbols:jobs.map(j=>j.s)};
+  if(jobs.length) return {ok:true,jobs,symbols:jobs.map(j=>j.s)};
+  const missing=st.need.filter(r=>!KITE_TOKEN[normSym(r.symbol)]).map(r=>r.symbol);
+  return {ok:false,why:missing.length?('no Kite instrument token for '+missing.join(', ')):'nothing left to check'};
 }
-const INTRADAY_FETCH_DAYS=3;   // how far back the snippet asks for; 3 sessions of 5-minute candles
+const INTRADAY_FETCH_DAYS=3;   // sessions of 5-minute candles to ask for
 
 // Kite returns candles as [isoTime, open, high, low, close, volume]. That is the SAME information
 // the pasted table carries, so it is converted into the identical CSV and handed to the ONE parser
@@ -9801,66 +9681,7 @@ function ingestKiteCandlePayload(text){
   }
   return {done,failed};
 }
-function copyKiteFetchScript(){
-  const r=buildKiteFetchScript();
-  if(!r.ok){ showToast('Nothing to fetch: '+r.why,5000,true); return; }
-  const done=()=>showToast('Script copied for '+r.symbols.join(', ')
-    +'. Open your Kite tab, press F12 → Console, paste, Enter. Then paste the result back here.',9000);
-  try{ navigator.clipboard.writeText(r.code).then(done,()=>{fallback();}); }catch(e){ fallback(); }
-  function fallback(){
-    const t=document.createElement('textarea');
-    t.value=r.code; document.body.appendChild(t); t.select();
-    try{document.execCommand('copy');}catch(e){}
-    t.remove(); done();
-  }
-}
-// ── v1156: THE FETCHER WRITES, THE APP READS ────────────────────────────────────────────────
-// Owner: "You know the URL... you know the Xpath of the table. Just import the table data
-// yourself!" A browser page cannot read another origin's response - that is the browser's rule and
-// no amount of code in here gets around it, which is why every in-page attempt needed either an
-// extension or Kite's own console. NODE has no such rule. `dev/fetch-kite.js` runs outside the
-// browser, uses the session token, and writes `Intraday.csv` into the folder this app already
-// watches every three seconds. Nothing to click, nothing to paste.
-//
-// The file carries a SYMBOL column and many stocks at once. Each stock is split out and handed to
-// the same `parseIntradayPaste` a manual paste uses - one parser, as of the v1148 lesson where a
-// second reading path silently dropped VOLUME and made three releases inert.
-function parseIntradayFile(text){
-  const rows=parseCSV(text);
-  if(!rows||!rows.length) return 0;
-  const bySym={};
-  for(const r of rows){
-    const sym=normSym(r['Symbol']||'');
-    if(!sym) continue;
-    (bySym[sym]=bySym[sym]||[]).push(r);
-  }
-  let n=0;
-  for(const sym of Object.keys(bySym)){
-    const rs=bySym[sym];
-    if(rs.length<5) continue;
-    const csv=['"Date","Open","High","Low","Close","% Change","% Change vs Average","Volume"']
-      .concat(rs.map(r=>['Date','Open','High','Low','Close','% Change','% Change vs Average','Volume']
-        .map(k=>'"'+String(r[k]==null?'':r[k]).replace(/"/g,'')+'"').join(','))).join('\n');
-    const res=parseIntradayPaste(csv,sym);
-    if(res&&res.ok) n++;
-  }
-  if(n){ applyIntradayReorder(ALL); }
-  return n;
-}
 
-// What the fetcher should go and get. Written into the watched folder so the Node side can read it
-// without any channel between the two beyond the filesystem they already share.
-function writeIntradayRequest(limit){
-  const r=buildKiteFetchScript(limit);
-  if(!r.ok) return r;
-  const payload={at:new Date().toISOString(),jobs:r.jobs.map(j=>({sym:j.s,token:j.t}))};
-  try{
-    if(typeof saveBasketToScannerUploads==='function'){
-      saveBasketToScannerUploads(payload,'Intraday Request.json');
-    }
-  }catch(e){}
-  return {ok:true,symbols:r.symbols};
-}
 // ── v1157: EVERYTHING FROM INSIDE THE APP ───────────────────────────────────────────────────
 // Owner, many times over: "I don't want this command line and console bullshit. Everything should
 // run from within the app." Every previous attempt failed on the same wall - a page served from
@@ -9873,7 +9694,7 @@ function writeIntradayRequest(limit){
 // no console, no command typed. Double-clicking the .bat is the only manual act, once per boot.
 //
 // Opened as a plain file it still works exactly as before - the in-app fetch simply hides itself,
-// the same rule as the Tampermonkey button in v1153.
+// the same rule v1153 established.
 let KITE_API=null;     // {hasToken} when this page is served by the local server, else null
 async function detectKiteApi(){
   if(!/^https?:$/.test(location.protocol)||!/^(localhost|127\.0\.0\.1)$/.test(location.hostname)){
@@ -9904,12 +9725,12 @@ async function saveKiteToken(){
 // a paste uses, re-rank, and point at whatever still needs checking.
 async function fetchCandlesInApp(limit){
   if(!KITE_API){ showToast('The in-app fetch needs the local server. Double-click "Start Rocket Scanner.bat".',7000,true); return; }
-  const r=buildKiteFetchScript(limit);
+  const r=intradayFetchJobs(limit);
   if(!r.ok){ showToast('Nothing to fetch: '+r.why,5000,true); return; }
-  const budget=bridgeBudgetLeft();
-  if(!budget){ showToast('Rate cap reached — '+BRIDGE_MAX_PER_WINDOW+' per '+(BRIDGE_WINDOW_MS/60000)+' minutes.',5000,true); return; }
+  const budget=fetchBudgetLeft();
+  if(!budget){ showToast('Rate cap reached — '+FETCH_MAX_PER_WINDOW+' per '+(FETCH_WINDOW_MS/60000)+' minutes.',5000,true); return; }
   const jobs=r.jobs.slice(0,budget);
-  jobs.forEach(()=>BRIDGE_LOG.push(Date.now()));
+  jobs.forEach(()=>FETCH_LOG.push(Date.now()));
   showToast('Fetching '+jobs.map(j=>j.s).join(', ')+'…',3000);
   try{
     const q=jobs.map(j=>j.s+':'+j.t).join(',');
@@ -9944,13 +9765,6 @@ function intradayPasteBarHtml(){
   return `<div style="margin:8px 0;padding:10px 14px;border:1px solid ${t?'var(--amber)':done?'var(--green)':'var(--border)'};border-radius:8px;background:var(--bg2)">
     <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-bottom:6px">
       <span class="st-l">Intraday check</span>
-      ${(()=>{
-        if(!bridgeInstalled()) return '';
-        const k=bridgeKiteStatus();
-        return `<span style="font-size:11px;color:${k.ok?'var(--green)':'var(--amber)'}"
-          title="${escHtml(k.lastLog?('Kite tab last said: '+k.lastLog):'')}">${
-          k.ok?('Kite tab live '+k.agoSec+'s ago'):('Kite tab: '+escHtml(k.why))}</span>`;
-      })()}
       ${st?`<span style="font-size:12px;color:${done?'var(--green)':'var(--t2)'}">
         ${done?`<b>settled</b> — the top ${st.of} were checked and held their place`
               :`checked <b>${st.checked}</b> of the top <b>${st.of}</b>`}
@@ -9968,16 +9782,6 @@ function intradayPasteBarHtml(){
             title="Kite tab → F12 → Application → Cookies → kite.zerodha.com → copy the value of enctoken. It rotates on every login.">
           <button onclick="saveKiteToken()" class="btn" style="font-size:11px">Save token</button>`}`
         :`<span style="font-size:11px;color:var(--t3)" title="Double-click &quot;Start Rocket Scanner.bat&quot; and the app fetches candles by itself. Opened as a plain file, the browser will not let it reach Kite.">open via Start Rocket Scanner.bat to fetch automatically</span>`}
-      ${(()=>{
-        // The optional helper. If it is not installed the button is not shown at all - the owner's
-        // verdict on it was "overdrawn", and a permanent "helper not installed" chip is nagging for
-        // a path he has chosen not to take. The one-click bookmarklet in
-        // dev/copy-table.bookmarklet.txt does the only part that was ever slow: the copying.
-        if(!bridgeInstalled()) return '';
-        return `<button onclick="const r=bridgePublish();showToast(r.symbols.length?('Asked your Kite tab for '+r.symbols.join(', ')+' — watch the rows fill in'):('Nothing requested: '+r.reason),r.symbols.length?4000:7000,!r.symbols.length);"
-          class="btn" style="font-size:11px"
-          title="Ask your open Kite tab for the unchecked names above. Capped at ${BRIDGE_MAX_PER_WINDOW} symbols per ${BRIDGE_WINDOW_MS/60000} minutes.">Fetch via Kite</button>`;
-      })()}
       ${n?`<button onclick="clearIntraday()" class="btn" style="opacity:.75;font-size:11px"
         title="Throw away the chart data for all ${n} checked stock(s) and their BUY/SKIP verdicts, and re-rank without them. The recommendations themselves are untouched — it only undoes the checking.">Discard ${n} check${n===1?'':'s'}</button>`:''}
     </div>
@@ -12009,7 +11813,7 @@ async function processFiles(files,sourceLabel,opts={}){
   // from the selected local files immediately, because the market does not wait for Drive.
   saveInputsInBackground(files,{silent});
   NSE_BHAV={};NSE_52W={};NSE_SURV={};NSE_BULK={};NSE_BLOCK={};NSE_PRICE_BAND={};NSE_DEAL_NET={};NSE_CORP_ACTION={};NSE_BOARD_MEETING={};NSE_ANNOUNCE={};NSE_MARKET=null;NSE_INDEX={};NSE_NAME_TO_SYM={};NSE_BAND_HIT={};NSE_NEW_HL_BYNAME={};NSE_INDEX_GROUP_BYNAME={};NSE_INDEX_GROUP_BYSYM={};MARKET_REGIME=null;NSE_STATUS={};NSE_SERIES={};NSE_DEPTH={};NSE_DEPTH_META=null;KITE_TOKEN={};
-  let tvFile=null,nseZip=null,holdFile=null,posFile=null,ordFile=null,tbFile=null,holidayFile=false,holidayFileName='',depthFile=null,kiteFile=null,intradayFile=null;
+  let tvFile=null,nseZip=null,holdFile=null,posFile=null,ordFile=null,tbFile=null,holidayFile=false,holidayFileName='',depthFile=null,kiteFile=null;
   for(const f of files){
     const name=inputNameLower(f.name);
     if(isReportsZipName(f.name)){nseZip=nseZip||f;continue;}
@@ -12017,7 +11821,6 @@ async function processFiles(files,sourceLabel,opts={}){
     if(isScannerCsvName(f.name)){tvFile=f;continue;}
     if(name==='market depth.csv'){depthFile=f;continue;}
     if(name==='kite instruments.csv'){kiteFile=f;continue;}
-    if(name==='intraday.csv'){intradayFile=f;continue;}
     if(name==='positions.csv'){posFile=f;continue;}
     if(name==='holdings.csv'){holdFile=f;continue;}
     if(name==='orders.csv'){ordFile=f;continue;}
@@ -12030,7 +11833,7 @@ async function processFiles(files,sourceLabel,opts={}){
       continue;
     }
   }
-  if(!tvFile&&!nseZip&&!holdFile&&!posFile&&!ordFile&&!tbFile&&!holidayFile&&!depthFile&&!kiteFile&&!intradayFile){
+  if(!tvFile&&!nseZip&&!holdFile&&!posFile&&!ordFile&&!tbFile&&!holidayFile&&!depthFile&&!kiteFile){
     if(!silent){
       setLoading(false);
       showToast('No files recognised. Upload the NSE scanner and/or Zerodha input files.',4000,true);
@@ -12046,12 +11849,6 @@ async function processFiles(files,sourceLabel,opts={}){
       }
       updateFileLoadStatus('Kite Instruments.csv',Object.keys(KITE_TOKEN).length?'loaded':'empty');
     }catch(e){console.warn('Could not parse Kite Instruments.csv:',e);}
-  }
-  if(intradayFile){
-    try{
-      const n=parseIntradayFile(await intradayFile.text());
-      updateFileLoadStatus('Intraday.csv',n?'loaded':'empty');
-    }catch(e){console.warn('Could not parse Intraday.csv:',e);}
   }
   if(depthFile){
     try{
