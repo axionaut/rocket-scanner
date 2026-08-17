@@ -1,5 +1,5 @@
-const BUILD_TS='2026-08-17 16:11 IST'; // release build time (IST)
-const APP_VERSION=1149; // v1149: all eight pasted columns are read, Pace and EoD join the table, the check reaches Open Positions, and a demand-driven Kite bridge.
+const BUILD_TS='2026-08-17 16:29 IST'; // release build time (IST)
+const APP_VERSION=1150; // v1150: the Fetch via Kite button reports when its helper is missing instead of doing nothing.
 // v1093: a baseline reward:risk MEASURED on the cross-section (last completed bhav session) instead of learned from the owner's own fills - reported on every row, deliberately not enforced. Includes v1092: position size split by Radar score / stop distance, so equally-scored names carry equal RUPEE risk, plus an opt-in Risk /trade cap.
 // v556: parse the NSE Market Activity Report (MA<date>.csv) — official Nifty %, advances/declines and sector index moves shown as market CONTEXT in the status bar (EOD data, display only, never fed into per-row scoring); MA added to the ℹ️ file manifest.
 // v555 market-cycle stage awareness (stateless, self-calibrating): per-row stage label (1 accumulation · 2 breakout · 3 event · 4 profit-booking · 5 re-accumulation · 6 second-leg); a quiet-accumulation signal (conjunction-of-percentiles) injected via the rocket-diagnostic weighting; sell-the-news decay off Recent earnings date (horizon = review days). v1065 makes the market-breadth gauge an entry-eligibility input while still never changing ranking.
@@ -9643,11 +9643,16 @@ function bridgeRequest(limit){
   if(!want.length) return {symbols:[],reason:budget?'nothing to check':'budget spent'};
   return {symbols:want,at:Date.now()};
 }
+// Is the other half of the bridge actually present? The userscript defines this hook when it loads
+// on this page. Without it the button can publish a request that nobody will ever collect - which is
+// exactly what it did on first use, silently. A control that does nothing must SAY it did nothing.
+function bridgeInstalled(){ return typeof window.__rocketBridgeRequest==='function'; }
 function bridgePublish(limit){
+  if(!bridgeInstalled()) return {symbols:[],reason:'not installed'};
   const req=bridgeRequest(limit);
   try{
     localStorage.setItem(KITE_BRIDGE_KEY+'_req',JSON.stringify(req));
-    if(window.__rocketBridgeRequest) window.__rocketBridgeRequest(req);   // userscript hook
+    window.__rocketBridgeRequest(req);
   }catch(e){}
   req.symbols.forEach(()=>BRIDGE_LOG.push(Date.now()));
   return req;
@@ -9698,8 +9703,17 @@ function intradayPasteBarHtml(){
       <select onchange="setIntradayLoopN(this.value)" style="background:var(--bg);color:var(--t2);border:1px solid var(--border);border-radius:4px;font-size:11px;padding:1px 4px">
         ${[2,3,5,10].map(k=>`<option value="${k}"${k===INTRADAY_LOOP_N?' selected':''}>top ${k}</option>`).join('')}
       </select>
-      <button onclick="const r=bridgePublish();showToast(r.symbols.length?('Asked Kite for '+r.symbols.join(', ')):('Nothing requested — '+r.reason),3000);" class="btn" style="font-size:11px"
-        title="Publish a request for the unchecked names above. A Tampermonkey userscript running in your own logged-in Kite tab serves it and stops — nothing is fetched on a timer, and the app caps it at ${BRIDGE_MAX_PER_WINDOW} symbols per ${BRIDGE_WINDOW_MS/60000} minutes.">Fetch via Kite</button>
+      ${(()=>{
+        const on=bridgeInstalled();
+        return `<button onclick="${on
+          ? `const r=bridgePublish();showToast(r.symbols.length?('Asked Kite for '+r.symbols.join(', ')):('Nothing requested — '+r.reason),3000);`
+          : `showToast('The Kite helper is not installed in this browser, so this button has nothing to talk to. Open dev/kite-bridge.user.js and follow the setup — until then, paste manually with the 5m buttons.',7000,true);`
+        }" class="btn" style="font-size:11px;${on?'':'opacity:.55'}"
+          title="${on
+            ? `Ask your open Kite tab for the unchecked names above. Capped at ${BRIDGE_MAX_PER_WINDOW} symbols per ${BRIDGE_WINDOW_MS/60000} minutes.`
+            : 'Needs the Tampermonkey helper installed and a Kite tab open. Click for setup instructions.'}"
+          >${on?'Fetch via Kite':'Fetch via Kite (helper not installed)'}</button>`;
+      })()}
       ${n?`<button onclick="clearIntraday()" class="btn" style="opacity:.75;font-size:11px"
         title="Throw away the chart data for all ${n} checked stock(s) and their BUY/SKIP verdicts, and re-rank without them. The recommendations themselves are untouched — it only undoes the checking.">Discard ${n} check${n===1?'':'s'}</button>`:''}
     </div>
