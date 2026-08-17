@@ -1,5 +1,5 @@
-const BUILD_TS='2026-08-17 17:30 IST'; // release build time (IST)
-const APP_VERSION=1156; // v1156: a Node fetcher pulls the candles and writes them into the watched folder - the app just reads a file.
+const BUILD_TS='2026-08-17 17:57 IST'; // release build time (IST)
+const APP_VERSION=1157; // v1157: served from localhost, the app fetches its own candles - no extension, no console, no command.
 // v1093: a baseline reward:risk MEASURED on the cross-section (last completed bhav session) instead of learned from the owner's own fills - reported on every row, deliberately not enforced. Includes v1092: position size split by Radar score / stop distance, so equally-scored names carry equal RUPEE risk, plus an opt-in Risk /trade cap.
 // v556: parse the NSE Market Activity Report (MA<date>.csv) — official Nifty %, advances/declines and sector index moves shown as market CONTEXT in the status bar (EOD data, display only, never fed into per-row scoring); MA added to the ℹ️ file manifest.
 // v555 market-cycle stage awareness (stateless, self-calibrating): per-row stage label (1 accumulation · 2 breakout · 3 event · 4 profit-booking · 5 re-accumulation · 6 second-leg); a quiet-accumulation signal (conjunction-of-percentiles) injected via the rocket-diagnostic weighting; sell-the-news decay off Recent earnings date (horizon = review days). v1065 makes the market-breadth gauge an entry-eligibility input while still never changing ranking.
@@ -9861,6 +9861,70 @@ function writeIntradayRequest(limit){
   }catch(e){}
   return {ok:true,symbols:r.symbols};
 }
+// ── v1157: EVERYTHING FROM INSIDE THE APP ───────────────────────────────────────────────────
+// Owner, many times over: "I don't want this command line and console bullshit. Everything should
+// run from within the app." Every previous attempt failed on the same wall - a page served from
+// file:// or github.io may not read a response from kite.zerodha.com - and each workaround pushed
+// the work back onto him: an extension, a console paste, a terminal command.
+//
+// The answer is to stop fighting the origin and BECOME one. "Start Rocket Scanner.bat" serves this
+// app from http://localhost and exposes /api/kite/* on that SAME origin. The browser is satisfied
+// because nothing is cross-origin any more, and the button below does the whole job: no extension,
+// no console, no command typed. Double-clicking the .bat is the only manual act, once per boot.
+//
+// Opened as a plain file it still works exactly as before - the in-app fetch simply hides itself,
+// the same rule as the Tampermonkey button in v1153.
+let KITE_API=null;     // {hasToken} when this page is served by the local server, else null
+async function detectKiteApi(){
+  if(!/^https?:$/.test(location.protocol)||!/^(localhost|127\.0\.0\.1)$/.test(location.hostname)){
+    KITE_API=null; return null;
+  }
+  try{
+    const r=await fetch('/api/kite/status',{cache:'no-store'});
+    KITE_API=r.ok?await r.json():null;
+  }catch(e){ KITE_API=null; }
+  try{ renderTable(); }catch(e){}
+  return KITE_API;
+}
+async function saveKiteToken(){
+  const el=document.getElementById('kiteTokenBox');
+  const t=(el&&el.value||'').trim();
+  if(t.length<20){ showToast('That does not look like an enctoken.',4000,true); return; }
+  try{
+    const r=await fetch('/api/kite/token',{method:'POST',headers:{'content-type':'application/json'},
+      body:JSON.stringify({token:t})});
+    const j=await r.json();
+    if(!j.ok){ showToast('Rejected: '+j.why,5000,true); return; }
+    if(el) el.value='';
+    await detectKiteApi();
+    showToast('Kite token saved. Press Fetch candles.',4000);
+  }catch(e){ showToast('Could not save the token: '+e.message,5000,true); }
+}
+// The whole loop, in one press: ask the local server for the candles, hand them to the SAME parser
+// a paste uses, re-rank, and point at whatever still needs checking.
+async function fetchCandlesInApp(limit){
+  if(!KITE_API){ showToast('The in-app fetch needs the local server. Double-click "Start Rocket Scanner.bat".',7000,true); return; }
+  const r=buildKiteFetchScript(limit);
+  if(!r.ok){ showToast('Nothing to fetch: '+r.why,5000,true); return; }
+  const budget=bridgeBudgetLeft();
+  if(!budget){ showToast('Rate cap reached — '+BRIDGE_MAX_PER_WINDOW+' per '+(BRIDGE_WINDOW_MS/60000)+' minutes.',5000,true); return; }
+  const jobs=r.jobs.slice(0,budget);
+  jobs.forEach(()=>BRIDGE_LOG.push(Date.now()));
+  showToast('Fetching '+jobs.map(j=>j.s).join(', ')+'…',3000);
+  try{
+    const q=jobs.map(j=>j.s+':'+j.t).join(',');
+    const res=await fetch('/api/kite/candles?days='+INTRADAY_FETCH_DAYS+'&jobs='+encodeURIComponent(q),{cache:'no-store'});
+    const j=await res.json();
+    if(!j.ok){ showToast(j.why,8000,true); return; }
+    const out=ingestKiteCandlePayload(JSON.stringify({rocketScanner:'candles',data:j.data}));
+    const st=getIntradayLoopState(INTRADAY_LOOP_N);
+    INTRADAY_TARGET='';
+    renderTable();
+    showToast('Read '+out.done.length+' stock(s): '+out.done.join(', ')
+      +((j.failed&&j.failed.length)?(' · no data for '+j.failed.join(', ')):'')
+      +(st.converged?' · settled':''),6000,!out.done.length);
+  }catch(e){ showToast('Fetch failed: '+e.message,6000,true); }
+}
 function intradayPasteBarHtml(){
   const n=Object.keys(INTRADAY_BARS).length;
   const t=INTRADAY_TARGET, res=INTRADAY_RESULT;
@@ -9897,11 +9961,13 @@ function intradayPasteBarHtml(){
       <select onchange="setIntradayLoopN(this.value)" style="background:var(--bg);color:var(--t2);border:1px solid var(--border);border-radius:4px;font-size:11px;padding:1px 4px">
         ${[2,3,5,10].map(k=>`<option value="${k}"${k===INTRADAY_LOOP_N?' selected':''}>top ${k}</option>`).join('')}
       </select>
-      <button onclick="const r=writeIntradayRequest();showToast(r.ok?('Asked for '+r.symbols.join(', ')+' — run: node dev/fetch-kite.js  (or leave it on --watch and it fetches by itself)'):('Nothing to fetch: '+r.why),8000,!r.ok);"
-        class="btn" style="font-size:11px"
-        title="Writes Intraday Request.json into Scanner Uploads. dev/fetch-kite.js reads it, pulls the candles from Kite with your session token, and writes Intraday.csv back into the same folder — which this app is already watching. Run it once, or leave it running with --watch and this button is the only thing you ever press.">Fetch candles</button>
-      <button onclick="copyKiteFetchScript()" class="btn" style="font-size:11px;opacity:.7"
-        title="Fallback: copies a snippet to run in the Kite tab's console, for when you would rather not run the Node fetcher.">console snippet</button>
+      ${KITE_API?`<button onclick="fetchCandlesInApp()" class="btn" style="font-size:11px;border-color:var(--green);color:var(--green)"
+          title="Fetches the 5-minute candles for the names above and reads them straight in. Nothing to paste, nothing to run.">Fetch candles</button>
+        ${KITE_API.hasToken?'':`<input id="kiteTokenBox" type="password" placeholder="paste Kite enctoken once"
+            style="font-size:11px;padding:2px 6px;background:var(--bg);color:var(--t1);border:1px solid var(--amber);border-radius:4px;width:190px"
+            title="Kite tab → F12 → Application → Cookies → kite.zerodha.com → copy the value of enctoken. It rotates on every login.">
+          <button onclick="saveKiteToken()" class="btn" style="font-size:11px">Save token</button>`}`
+        :`<span style="font-size:11px;color:var(--t3)" title="Double-click &quot;Start Rocket Scanner.bat&quot; and the app fetches candles by itself. Opened as a plain file, the browser will not let it reach Kite.">open via Start Rocket Scanner.bat to fetch automatically</span>`}
       ${(()=>{
         // The optional helper. If it is not installed the button is not shown at all - the owner's
         // verdict on it was "overdrawn", and a permanent "helper not installed" chip is nagging for
@@ -12156,6 +12222,7 @@ document.getElementById('fInDir').addEventListener('change',e=>{
 
 // ── Async app init: load brain file → hydrate all state → render ──
 async function initApp(){
+  try{ detectKiteApi(); }catch(e){}
   updateModeUI();
   setLoading(true,'Loading latest cloud data...');
   // Step 0: Restore an active Drive token for this browser session and load cloud brain data.
