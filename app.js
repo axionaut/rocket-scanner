@@ -1,5 +1,5 @@
-const BUILD_TS='2026-08-17 16:29 IST'; // release build time (IST)
-const APP_VERSION=1150; // v1150: the Fetch via Kite button reports when its helper is missing instead of doing nothing.
+const BUILD_TS='2026-08-17 16:53 IST'; // release build time (IST)
+const APP_VERSION=1151; // v1151: the Kite helper runs sandboxed, so its hooks go on the page window and the document, not on its own.
 // v1093: a baseline reward:risk MEASURED on the cross-section (last completed bhav session) instead of learned from the owner's own fills - reported on every row, deliberately not enforced. Includes v1092: position size split by Radar score / stop distance, so equally-scored names carry equal RUPEE risk, plus an opt-in Risk /trade cap.
 // v556: parse the NSE Market Activity Report (MA<date>.csv) — official Nifty %, advances/declines and sector index moves shown as market CONTEXT in the status bar (EOD data, display only, never fed into per-row scoring); MA added to the ℹ️ file manifest.
 // v555 market-cycle stage awareness (stateless, self-calibrating): per-row stage label (1 accumulation · 2 breakout · 3 event · 4 profit-booking · 5 re-accumulation · 6 second-leg); a quiet-accumulation signal (conjunction-of-percentiles) injected via the rocket-diagnostic weighting; sell-the-news decay off Recent earnings date (horizon = review days). v1065 makes the market-breadth gauge an entry-eligibility input while still never changing ranking.
@@ -9646,13 +9646,20 @@ function bridgeRequest(limit){
 // Is the other half of the bridge actually present? The userscript defines this hook when it loads
 // on this page. Without it the button can publish a request that nobody will ever collect - which is
 // exactly what it did on first use, silently. A control that does nothing must SAY it did nothing.
-function bridgeInstalled(){ return typeof window.__rocketBridgeRequest==='function'; }
+function bridgeInstalled(){
+  // TWO signals, because a userscript with any @grant runs SANDBOXED: its `window` is a copy and a
+  // hook set there is invisible here. The helper writes to the page window via `unsafeWindow`, and
+  // also stamps the document - which is shared in every sandbox mode and cannot be isolated away.
+  if(typeof window.__rocketBridgeRequest==='function') return true;
+  try{ return document.documentElement.getAttribute('data-rocket-bridge')==='1'; }catch(e){ return false; }
+}
 function bridgePublish(limit){
   if(!bridgeInstalled()) return {symbols:[],reason:'not installed'};
   const req=bridgeRequest(limit);
   try{
+    // localStorage is the fallback channel when only the DOM marker is present: the helper polls it.
     localStorage.setItem(KITE_BRIDGE_KEY+'_req',JSON.stringify(req));
-    window.__rocketBridgeRequest(req);
+    if(typeof window.__rocketBridgeRequest==='function') window.__rocketBridgeRequest(req);
   }catch(e){}
   req.symbols.forEach(()=>BRIDGE_LOG.push(Date.now()));
   return req;
