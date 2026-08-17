@@ -1,5 +1,5 @@
-const BUILD_TS='2026-08-17 12:06 IST'; // release build time (IST)
-const APP_VERSION=1141; // v1141: the pre-open book decays as the session consumes it - a matched auction cannot keep voting all day.
+const BUILD_TS='2026-08-17 12:17 IST'; // release build time (IST)
+const APP_VERSION=1142; // v1142: the stock name opens Zerodha (and copies the symbol); TradingView moves to the secondary button.
 // v1093: a baseline reward:risk MEASURED on the cross-section (last completed bhav session) instead of learned from the owner's own fills - reported on every row, deliberately not enforced. Includes v1092: position size split by Radar score / stop distance, so equally-scored names carry equal RUPEE risk, plus an opt-in Risk /trade cap.
 // v556: parse the NSE Market Activity Report (MA<date>.csv) — official Nifty %, advances/declines and sector index moves shown as market CONTEXT in the status bar (EOD data, display only, never fed into per-row scoring); MA added to the ℹ️ file manifest.
 // v555 market-cycle stage awareness (stateless, self-calibrating): per-row stage label (1 accumulation · 2 breakout · 3 event · 4 profit-booking · 5 re-accumulation · 6 second-leg); a quiet-accumulation signal (conjunction-of-percentiles) injected via the rocket-diagnostic weighting; sell-the-news decay off Recent earnings date (horizon = review days). v1065 makes the market-breadth gauge an entry-eligibility input while still never changing ranking.
@@ -1219,26 +1219,37 @@ function openTradingViewChart(sym){
 // Safe unconditionally: openTradingViewChart resolves by symbol, and showRadarDetail no-ops when
 // the symbol is not in the current scan.
 function symbolChartButton(sym,innerHtml=null,extraStyle=''){
-  const s=String(sym??'');
+  const s=String(sym??'').trim();
   if(!s) return '';
-  return `<button type="button" onclick='event.stopPropagation();openTradingViewChart(${JSON.stringify(s)})'`
+  // v1142 (owner): "now that we can open zerodha links, replace the tv link with zerodha because
+  // that makes sense." The stock NAME is the trading action, so it opens Kite on that stock and
+  // copies the symbol; TradingView keeps the small secondary button for chart reading. A stock with
+  // no Kite instrument token FALLS BACK to TradingView on the name rather than becoming a dead
+  // click - the token file is optional and the app must work without it.
+  const t=KITE_TOKEN[normSym(s)];
+  const url=t?`https://kite.zerodha.com/chart/web/ciq/NSE/${encodeURIComponent(normSym(s))}/${t}`:'';
+  const onClick=t
+    ?`kiteOpen(${JSON.stringify(normSym(s))},${JSON.stringify(url)})`
+    :`openTradingViewChart(${JSON.stringify(s)})`;
+  const title=t?`Open ${escHtml(s)} in Zerodha Kite (copies the symbol too)`
+              :`Open the TradingView chart for ${escHtml(s)} — no Kite token on file`;
+  return `<button type="button" onclick='event.stopPropagation();${onClick}'`
     +` style="padding:0;border:0;background:transparent;color:inherit;font:inherit;text-align:left;cursor:pointer;${extraStyle}"`
-    +` title="Open the TradingView chart for ${escHtml(s)}">${innerHtml??escHtml(s)}</button>`
-    +kiteOrderButton(s);
+    +` title="${title}">${innerHtml??escHtml(s)}</button>`
+    +(t?tvChartButton(s):'');
 }
 // v1139 (owner): open the stock in Zerodha, the way the name already opens TradingView. There is no
 // supported URL that PRE-FILLS a buy dialog without a Kite Connect api_key, and Kite Connect was
 // ruled out (static IP) - so this deep-links to the stock's own Kite chart page, where the B/S
 // buttons sit one click away. The instrument token comes from `api.kite.trade/instruments`, which is
 // PUBLIC: no key, no login. A stock with no token renders nothing rather than a broken link.
-function kiteOrderButton(sym){
-  const s=normSym(sym||''); const t=KITE_TOKEN[s];
-  if(!s||!t) return '';
-  const url=`https://kite.zerodha.com/chart/web/ciq/NSE/${encodeURIComponent(s)}/${t}`;
-  return `<button type="button" onclick='event.stopPropagation();kiteOpen(${JSON.stringify(s)},${JSON.stringify(url)})'`
+function tvChartButton(sym){
+  const s=String(sym??'').trim();
+  if(!s) return '';
+  return `<button type="button" onclick='event.stopPropagation();openTradingViewChart(${JSON.stringify(s)})'`
     +` style="margin-left:5px;padding:0 4px;border:1px solid var(--border);border-radius:3px;background:transparent;`
     +`color:var(--t3);font-size:10px;line-height:14px;cursor:pointer"`
-    +` title="Open ${escHtml(s)} in Zerodha Kite to buy">K</button>`;
+    +` title="Open the TradingView chart for ${escHtml(s)}">TV</button>`;
 }
 // Owner: "If opening the zerodha dialog or anything is not possible, just copy the stock's name to
 // clipboard on its click so I could paste it in zerodha." Both, since the deep link works: the
@@ -9009,7 +9020,11 @@ function renderTable(){
       chk:`<td style="text-align:center"><input type="checkbox" ${isSelected?'checked':''} ${canBuy?'':'disabled'} style="width:14px;height:14px;accent-color:var(--amber);cursor:${canBuy?'pointer':'not-allowed'}" onclick="event.stopPropagation()" onchange="toggleStock('${s.symbol}',this.checked)" title="${canBuy?'Include in the Zerodha basket export':'Ineligible for the basket'}"></td>`,
       rank:`<td style="font-family:'DM Mono',monospace;font-weight:800;color:var(--t1);text-align:right">${s.rank??'—'}</td>`,
       score:`<td>${radarScoreCell(s.score,'Relative same-day composite score (0-100 percentile, top-weighted). It is a ranking, not a probability.')}</td>`,
-      symbol:`<td style="font-family:'Plus Jakarta Sans',sans-serif"><button type="button" onclick='event.stopPropagation();openTradingViewChart(${JSON.stringify(String(s.symbol))})' style="padding:0;border:0;background:transparent;color:inherit;text-align:left;cursor:pointer" title="Open TradingView chart"><div style="font-weight:700;font-size:15px;color:var(--t1)">${escHtml(s.symbol)}${(()=>{const flags=s.meta?.flags||[];if(!flags.length)return '';return `<span style="font-size:12px;background:rgba(239,68,68,.15);color:var(--red);border-radius:4px;padding:1px 5px;margin-left:5px;font-weight:700;vertical-align:middle" title="NSE surveillance flags: ${escHtml(flags.join(' · '))}">⚠ ${flags.length}</span>`;})()}${s._held?`<span style="font-size:12px;background:rgba(244,114,182,.15);color:#f472b6;border-radius:4px;padding:1px 5px;margin-left:5px;font-weight:700;vertical-align:middle" title="You already hold this. Held stocks stay in the ranking (v1070) and can be recommended again — buying here ADDS to the existing position.">📌 held</span>`:''}</div><div style="font-size:11px;color:var(--t3);max-width:220px;overflow:hidden;text-overflow:ellipsis">${escHtml(s.name||'')}</div></button></td>`,
+      // v1142: routed through symbolChartButton like every other table. This cell had built its own
+      // TradingView link since v1070, so the "one symbol interaction everywhere" rule was true of the
+      // panels and quietly false of the main table - which is why swapping to Zerodha missed it.
+      symbol:`<td style="font-family:'Plus Jakarta Sans',sans-serif">${symbolChartButton(String(s.symbol),
+        `<div style="font-weight:700;font-size:15px;color:var(--t1)">${escHtml(s.symbol)}${(()=>{const flags=s.meta?.flags||[];if(!flags.length)return '';return `<span style="font-size:12px;background:rgba(239,68,68,.15);color:var(--red);border-radius:4px;padding:1px 5px;margin-left:5px;font-weight:700;vertical-align:middle" title="NSE surveillance flags: ${escHtml(flags.join(' · '))}">⚠ ${flags.length}</span>`;})()}${s._held?`<span style="font-size:12px;background:rgba(244,114,182,.15);color:#f472b6;border-radius:4px;padding:1px 5px;margin-left:5px;font-weight:700;vertical-align:middle" title="You already hold this. Held stocks stay in the ranking (v1070) and can be recommended again — buying here ADDS to the existing position.">📌 held</span>`:''}</div><div style="font-size:11px;color:var(--t3);max-width:220px;overflow:hidden;text-overflow:ellipsis">${escHtml(s.name||'')}</div>`)}</td>`,
       setup:`<td style="font-size:13px;color:var(--t2)">${escHtml(s.setup||'—')}${s.stage?' '+radarStagePill(s):''}</td>`,
       series:`<td>${radarSeriesBandPill(s)}</td>`,
       price:`<td>${fmtINR(s.price)}</td>`,
