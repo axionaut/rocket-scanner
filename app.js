@@ -1,5 +1,5 @@
-const BUILD_TS='2026-08-17 15:25 IST'; // release build time (IST)
-const APP_VERSION=1147; // v1147: what a share buys - the cost of moving the stock each way, absorption bars, and unspent pressure.
+const BUILD_TS='2026-08-17 16:11 IST'; // release build time (IST)
+const APP_VERSION=1149; // v1149: all eight pasted columns are read, Pace and EoD join the table, the check reaches Open Positions, and a demand-driven Kite bridge.
 // v1093: a baseline reward:risk MEASURED on the cross-section (last completed bhav session) instead of learned from the owner's own fills - reported on every row, deliberately not enforced. Includes v1092: position size split by Radar score / stop distance, so equally-scored names carry equal RUPEE risk, plus an opt-in Risk /trade cap.
 // v556: parse the NSE Market Activity Report (MA<date>.csv) — official Nifty %, advances/declines and sector index moves shown as market CONTEXT in the status bar (EOD data, display only, never fed into per-row scoring); MA added to the ℹ️ file manifest.
 // v555 market-cycle stage awareness (stateless, self-calibrating): per-row stage label (1 accumulation · 2 breakout · 3 event · 4 profit-booking · 5 re-accumulation · 6 second-leg); a quiet-accumulation signal (conjunction-of-percentiles) injected via the rocket-diagnostic weighting; sell-the-news decay off Recent earnings date (horizon = review days). v1065 makes the market-breadth gauge an entry-eligibility input while still never changing ranking.
@@ -3304,11 +3304,40 @@ function parseIntradayPaste(text,forSymbol){
     const cells=(ln.match(/"([^"]*)"/g)||[]).map(x=>x.slice(1,-1));
     const raw=cells.length?cells:ln.split(',').map(x=>x.trim());
     if(raw.length<5) continue;
-    const t=Date.parse(raw[0]);
+    // TWO DATE SHAPES, because the two sources differ. The CSV download carries a full timestamp
+    // ("Mon Aug 17 2026 13:10:00 GMT+0530 ..."); the on-screen ChartIQ table renders "17/08 13:10"
+    // with no year. Both must land, or the bridge silently delivers nothing that parses.
+    const t=(()=>{
+      const raw0=String(raw[0]||'').trim();
+      const dm=raw0.match(/^(\d{1,2})[\/\-](\d{1,2})(?:[\/\-](\d{2,4}))?\s+(\d{1,2}):(\d{2})/);
+      if(dm){
+        const d=+dm[1], mo=+dm[2]-1;
+        let y=dm[3]?+dm[3]:new Date().getFullYear();
+        if(y<100) y+=2000;
+        return new Date(y,mo,d,+dm[4],+dm[5],0,0).getTime();
+      }
+      return Date.parse(raw0);
+    })();
     const o=+String(raw[1]).replace(/,/g,''), h=+String(raw[2]).replace(/,/g,'');
     const l=+String(raw[3]).replace(/,/g,''), c=+String(raw[4]).replace(/,/g,'');
     if(!Number.isFinite(t)||!(o>0)||!(h>0)||!(l>0)||!(c>0)||h<l) continue;
-    bars.push({t,o,h,l,c});
+    // ALL EIGHT COLUMNS, BY NAME. The export is
+    //   Date, Open, High, Low, Close, % Change, % Change vs Average, Volume
+    // and this parser previously took the first five and dropped the rest - including VOLUME, which
+    // is the entire flow read. Every real paste silently fell back to the price-path measure and
+    // nobody noticed, because the tests built bar objects by hand instead of going through here.
+    // Read positionally from the END so a shorter export (no % columns) still lands its volume.
+    const num=x=>{const v=Number(String(x==null?'':x).replace(/[,\s%]/g,''));return Number.isFinite(v)?v:null;};
+    const bar={t,o,h,l,c};
+    if(raw.length>=8){
+      bar.chgPct=num(raw[5]);        // the bar's own % change, as the terminal computed it
+      bar.chgVsAvg=num(raw[6]);      // its move against this stock's own average - not derivable here
+      bar.v=num(raw[7]);
+    }else if(raw.length>=6){
+      bar.v=num(raw[raw.length-1]);  // shorter export: volume is still the last column
+    }
+    if(!(bar.v>=0)) delete bar.v;
+    bars.push(bar);
   }
   // v1144: the summary block UNDER the chart table carries the LIVE RESTING ORDER BOOK -
   //   Volume | Avg. trade price | Total buy quantity | Total sell quantity
@@ -3420,21 +3449,36 @@ function buildIntradayTrajectory(bars){
   // HIGH VOLUME WITH A SMALL MOVE IS AMBIGUOUS on its own - a big buyer taking offers, or heavy
   // supply capping the price - so only the DIRECTION of the move breaks the tie, and it is signed
   // rather than counted.
-  const vols=bars.slice(1).map(b=>Number(b.v)||0).sort((a,b)=>a-b);
-  const vHi=vols[Math.floor(vols.length*0.75)]||0;
+  // ABSORPTION BY RANK, not by percentile VALUE. A bar absorbs when its volume is in the busiest
+  // quarter of the session AND its impact is in the quietest quarter - big and quiet at once.
+  // Percentile values were tried twice and are brittle on ties: with uniform volumes the 75th
+  // percentile equals the median and everything qualified, and on a short series the 75th percentile
+  // IS the one huge bar so nothing did. Ranks have neither failure.
+  const idx=[]; for(let i=1;i<n;i++){ if(Number(bars[i].v)>0) idx.push(i); }
+  const impOf=i=>Math.abs((bars[i].c-bars[i-1].c)/bars[i-1].c*100)/((Number(bars[i].v)||1)/1000);
+  const byVol=idx.slice().sort((x,y)=>Number(bars[y].v)-Number(bars[x].v));
+  const byImp=idx.slice().sort((x,y)=>impOf(x)-impOf(y));
+  const cut=Math.max(1,Math.ceil(idx.length*0.25));
+  const busySet=new Set(byVol.slice(0,cut)), quietSet=new Set(byImp.slice(0,cut));
   const isAbsorb=new Array(n).fill(false);
   let absNet=0,absCount=0;
-  for(let i=1;i<n;i++){
-    const v=Number(bars[i].v)||0; if(!(v>=vHi)||!vHi) continue;
+  for(const i of idx){
+    if(!busySet.has(i)||!quietSet.has(i)) continue;   // must be BOTH
     const dpct=(bars[i].c-bars[i-1].c)/bars[i-1].c*100;
-    if(Math.abs(dpct)/(v/1000)>0.005) continue;      // it moved normally for its size
-    isAbsorb[i]=true; absNet+=v*Math.sign(dpct); absCount++;
+    isAbsorb[i]=true; absNet+=(Number(bars[i].v)||0)*Math.sign(dpct); absCount++;
   }
 
   // COST: what a share buys in ORDINARY trade, each way. Aggregate - volume summed over movement
   // summed - never a median of per-bar ratios. A median put ELECTCAST's afternoon at "sellers in
   // control" while price rose and the largest buy of the day printed, because the absorption bar
   // dragged it. Absorption bars are excluded here and reported above instead.
+  // AVERAGE MOVE (owner): the mean of every bar's own % change, magnitude only. What this stock
+  // typically does in five minutes - its energy per bar. Signed it would net to nearly nothing;
+  // magnitude is what tells you how many bars a target is away.
+  let mvSum=0,mvN=0;
+  for(let i=1;i<n;i++){mvSum+=Math.abs((bars[i].c-bars[i-1].c)/bars[i-1].c*100);mvN++;}
+  const avgMovePct=mvN?mvSum/mvN:null;
+
   const upV=[],dnV=[];
   for(let i=1;i<n;i++){
     if(isAbsorb[i]) continue;
@@ -3443,9 +3487,21 @@ function buildIntradayTrajectory(bars){
     if(dpct>0) upV.push([v,dpct]); else if(dpct<0) dnV.push([v,-dpct]);
   }
   const agg=a=>{const V=a.reduce((x,y)=>x+y[0],0),M=a.reduce((x,y)=>x+y[1],0);return M>0?V/M:null;};
-  const upCost=agg(upV), dnCost=agg(dnV);           // shares needed to move it 1%
+  let upCost=agg(upV), dnCost=agg(dnV);             // shares needed to move it 1%
+  // If pulling absorption out has emptied a side - which happens when the only bars going one way
+  // were themselves the absorbing ones - fall back to costing EVERY bar. A ratio computed from the
+  // whole session is worth more than no ratio at all, and the absorption is still reported on its own.
+  if(!(upCost>0)||!(dnCost>0)){
+    const upAll=[],dnAll=[];
+    for(let i=1;i<n;i++){
+      const dpct=(bars[i].c-bars[i-1].c)/bars[i-1].c*100;
+      const v=Number(bars[i].v)||0; if(!v) continue;
+      if(dpct>0) upAll.push([v,dpct]); else if(dpct<0) dnAll.push([v,-dpct]);
+    }
+    upCost=agg(upAll); dnCost=agg(dnAll);
+  }
   // >1 means selling is dearer than buying: thin supply above, firm demand below.
-  const costRatio=(upCost&&dnCost)?dnCost/upCost:null;
+  const costRatio=(upCost>0&&dnCost>0)?dnCost/upCost:null;   // one-sided session: no ratio to claim
 
   // UNSPENT PRESSURE: net directional volume over the recent half, priced at what a share currently
   // buys. Reported as a percentage of price - what the accumulated imbalance is WORTH if impact
@@ -3457,6 +3513,23 @@ function buildIntradayTrajectory(bars){
     netRecent+=(Number(bars[i].v)||0)*Math.sign(dpct);
   }
   const pressurePct=upCost?(netRecent/upCost):null;
+
+  // PROJECTED CLOSE. Two things decide it and both come out of the paste. PRESSURE says which way
+  // and how much the accumulated imbalance is worth; the stock's own PACE says how far it can
+  // physically travel in the bars that are left. The projection is the pressure, capped by the
+  // travel - a stock cannot deliver 3% of pent-up buying in the four bars before the bell.
+  // The bar interval is measured from the data rather than assumed, so a 1-minute or 15-minute
+  // paste projects correctly without being told which it is.
+  const gaps=[]; for(let i=1;i<n;i++){const g=bars[i].t-bars[i-1].t; if(g>0&&g<6*3600e3) gaps.push(g);}
+  gaps.sort((a,b)=>a-b);
+  const stepMs=gaps.length?gaps[Math.floor(gaps.length/2)]:300000;
+  const lastT=new Date(bars[n-1].t);
+  const closeT=new Date(lastT); closeT.setHours(15,30,0,0);
+  const barsLeft=Math.max(0,Math.floor((closeT-lastT)/stepMs));
+  const maxTravel=(avgMovePct!=null)?avgMovePct*barsLeft:null;
+  const predPct=(pressurePct==null)?null
+    :(maxTravel==null?pressurePct:Math.max(-maxTravel,Math.min(maxTravel,pressurePct)));
+  const predClose=(predPct==null)?null:bars[n-1].c*(1+predPct/100);
   const cvdPct=run/totV;                  // a LEVEL, so a late drift on no volume cannot erase a
                                           // morning of selling
   const agree=(pRec>=0)===(cRec>=0);
@@ -3474,6 +3547,7 @@ function buildIntradayTrajectory(bars){
           // Both surviving terms are flow and both are 0.5 at zero, so the mean is 0.5 at zero.
           // Divergence needs no separate term: price up on falling flow already drives both of
           // these down, which is what "distribution into strength" means.
+          avgMovePct,barsLeft,stepMin:Math.round(stepMs/60000),maxTravel,predPct,predClose,
           upCost,dnCost,costRatio,absorptionNet:absNet,absorptionBars:absCount,
           netRecent,pressurePct,
           // THREE terms now, each 0.5 at "no information", so the geometric mean is 0.5 at no
@@ -3517,6 +3591,8 @@ function getIntradayRead(sym){
   return {sym:normSym(sym),bars:day.length,sessions:new Set(bars.map(b=>istDayKey(b.t))).size,
           open,close,hi,lo,dayPct:(close/open-1)*100,traj,
           regime:traj?traj.regime:null,cvdPct:traj?traj.cvdPct:null,
+          avgMovePct:traj?traj.avgMovePct:null,
+          predClose:traj?traj.predClose:null,predPct:traj?traj.predPct:null,
           projected:traj?traj.projected:null,
           first15:f15, first15Up:f15>0, efficiency:eff, position:pos, freshness,
           // The standing: direction confirmed by the open, travelled cleanly, and still near its
@@ -7102,6 +7178,7 @@ function buildOpenPositionsPanel(query=''){
     // carries no instructions. The evidence behind it is unchanged and lives in Methodology.
     rows.push({
       sym:pos.symbol,qty,avg,ltp,pnlPct,pnlRs,capital,daysHeld,targetPrice,stopPrice,targetPct,exitPolicy,
+      flow:(()=>{const rd=getIntradayRead(pos.symbol);return rd&&rd.traj?+(rd.cvdPct*100).toFixed(2):null;})(),
       baseQty,runnerQty,runnerPrice,runnerPct,
       score:isFinite(Number(scannerRow?.score))?Number(scannerRow.score):null,
       rank:scannerRow?.rank??null,setup:scannerRow?.setup||'',
@@ -7122,30 +7199,57 @@ function buildOpenPositionsPanel(query=''){
   const cols=[
     // v1070: the chart link no longer depends on the stock being in the current scan —
     // TradingView resolves by symbol, so a held name absent from today's file still charts.
-    {key:'sym',label:'Symbol',align:'left',bold:true,fmt:v=>symbolChartButton(v)},
+    // v1148 (owner): "It's not in the recommendation table anymore if I have already bought it."
+    // Correct - v1070 keeps a held stock in the ranking, but the v1080 allocation gate drops a
+    // held-at-profit row with no top-up cushion, so in practice it vanishes from the board the
+    // moment it is bought. A POSITION is where the check belongs after that, and the question
+    // changes with it: not "should I buy this" but "is the flow that justified the buy still there".
+    {key:'sym',label:'Symbol',align:'left',bold:true,
+      // The flow reading rides the SYMBOL cell rather than a column of its own: one more column
+      // pushed this panel into a horizontal scrollbar, which the owner has ruled out everywhere.
+      fmt:(v,row)=>{
+        const rd=getIntradayRead(v);
+        let tag='';
+        if(rd&&rd.traj){
+          const col=rd.regime==='accumulating'?'var(--green)':rd.regime==='selling'?'var(--red)':'var(--amber)';
+          tag=`<div style="font-size:11px;color:${col};font-weight:700" title="${escHtml(
+            rd.regime.toUpperCase()+' — net flow '+(rd.cvdPct*100).toFixed(1)+'% of everything traded'
+            +(rd.traj.costRatio?'; 1% up costs '+Math.round(rd.traj.upCost).toLocaleString('en-IN')
+              +' shares against '+Math.round(rd.traj.dnCost).toLocaleString('en-IN')+' down':'')
+            +(Number.isFinite(rd.traj.pressurePct)?'; unspent pressure '
+              +(rd.traj.pressurePct>=0?'+':'')+rd.traj.pressurePct.toFixed(2)+'%':''))}">${
+            rd.regime==='accumulating'?'HOLDING UP':rd.regime==='selling'?'BEING SOLD':escHtml(rd.regime)
+          } <span style="color:var(--t3);font-weight:400">${(rd.cvdPct*100).toFixed(1)}%</span></div>`;
+        }else if(rd){
+          tag='<div style="font-size:11px;color:var(--t3)">no volume in that paste</div>';
+        }
+        return intradayRowButton({symbol:v})+symbolChartButton(v)+tag;
+      }},
+
     {key:'qty',label:'Qty',align:'right',fmt:v=>v,clrFn:()=>'var(--t2)'},
-    {key:'avg',label:'Avg ₹',align:'right',fmt:v=>v!=null?Number(v).toLocaleString('en-IN',INR_2):'—',clrFn:()=>'var(--t2)'},
-    {key:'ltp',label:'LTP ₹',align:'right',fmt:v=>v!=null?Number(v).toLocaleString('en-IN',INR_2):'—',clrFn:()=>'var(--t1)'},
-    {key:'pnlPct',label:'P&L %',align:'right',bold:true,fmt:v=>v!=null?(v>=0?'+':'')+v.toFixed(2)+'%':'—',clrFn:v=>v==null?'var(--t3)':v>0?'var(--green)':v<0?'var(--red)':'var(--t2)'},
-    {key:'pnlRs',label:'P&L ₹',align:'right',fmt:v=>v!=null?fmtSignedINR(v):'—',clrFn:v=>v==null?'var(--t3)':v>0?'var(--green)':v<0?'var(--red)':'var(--t2)'},
-    {key:'capital',label:'Capital ₹',align:'right',fmt:v=>v!=null?fmtINR(v):'—',clrFn:()=>'var(--t2)'},
+    {key:'ltp',label:'Avg / LTP',align:'right',
+      fmt:(v,row)=>`${row.avg!=null?Number(row.avg).toLocaleString('en-IN',INR_2):'—'}<span style="color:var(--t3)"> / </span>${v!=null?Number(v).toLocaleString('en-IN',INR_2):'—'}`,
+      clrFn:()=>'var(--t1)'},
+    {key:'pnlRs',label:'P&L',align:'right',bold:true,
+      fmt:(v,row)=>`${v!=null?fmtSignedINR(v):'—'}<span style="font-size:11px;color:var(--t3)"> ${row.pnlPct!=null?(row.pnlPct>=0?'+':'')+row.pnlPct.toFixed(2)+'%':''}</span>`,
+      clrFn:v=>v==null?'var(--t3)':v>0?'var(--green)':v<0?'var(--red)':'var(--t2)'},
     {key:'daysHeld',label:'Days Held',align:'right',fmt:daysFmt,clrFn:()=>'var(--t1)'},
     // v1073: the day-1 time exit, shown next to Days Held so the two read together.
-    {key:'targetPrice',label:'Target ₹',align:'right',
-      fmt:(v,row)=>v==null?'—':fmtINR(v)
-        +`<span style="font-size:12px;color:var(--t3);margin-left:4px">+${Number(row.targetPct).toFixed(2)}%</span>`
-        +(row.runnerQty>0?`<span style="font-size:12px;color:var(--t3);margin-left:4px">×${row.baseQty}</span>`:''),
+    {key:'targetPrice',label:'Target / Runner',align:'right',
+      // v1118 put both legs on the panel; v1148 puts them in ONE cell, because they are the two
+      // halves of a single exit and two columns pushed this panel into a horizontal scrollbar.
+      fmt:(v,row)=>{
+        const tgt=v!=null?fmtINR(v)+`<span style="font-size:11px;color:var(--t3)">×${row.baseQty??''}</span>`:'—';
+        const run=row.runnerPrice!=null
+          ? fmtINR(row.runnerPrice)+`<span style="font-size:11px;color:var(--t3)">×${row.runnerQty??''}</span>`
+          : `<span style="color:var(--t3)" title="No runner leg: a single share, or no capacity estimate for this stock.">—</span>`;
+        return tgt+'<span style="color:var(--t3)"> / </span>'+run;
+      },
       clrFn:()=>'var(--green)'},
-    {key:'runnerPrice',label:'Runner ₹',align:'right',
-      fmt:(v,row)=>v==null?'<span style="color:var(--t3)" title="No runner leg: a single share cannot be split, or this stock has no capacity estimate to place a second target beyond the first.">—</span>'
-        :fmtINR(v)
-        +`<span style="font-size:12px;color:var(--t3);margin-left:4px">+${Number(row.runnerPct).toFixed(2)}%</span>`
-        +`<span style="font-size:12px;color:var(--t3);margin-left:4px">×${row.runnerQty}</span>`,
-      clrFn:v=>v==null?'var(--t3)':'var(--green)'},
     {key:'stopPrice',label:'SL ₹',align:'right',fmt:(v,row)=>v!=null?fmtINR(v)+`<span style="font-size:12px;color:var(--t3);margin-left:4px">-${Number(row.exitPolicy?.stopPct).toFixed(2)}%</span>`:'—',clrFn:()=>'var(--red)'},
-    {key:'score',label:'Radar Score',align:'right',bold:true,fmt:v=>radarScoreCell(v),clrFn:()=>'var(--t1)'},
-    {key:'rank',label:'Rank',align:'right',fmt:v=>v??'—',clrFn:()=>'var(--t2)'},
-    {key:'setup',label:'Setup',align:'left',fmt:v=>v?`<span style="font-size:13px;color:var(--t2)">${escHtml(v)}</span>`:'<span style="color:var(--t3)">not in this upload</span>'},
+    {key:'score',label:'Score / Rank',align:'right',bold:true,
+      fmt:(v,row)=>radarScoreCell(v)+`<span style="font-size:11px;color:var(--t3)"> #${row.rank??'—'}</span>`,
+      clrFn:()=>'var(--t1)'},
     {key:'dayPct',label:'Day %',align:'right',fmt:fPerf,clrFn:()=>'var(--t2)'},
     {key:'risk',label:'Risk',align:'left',fmt:v=>v?radarRiskPill(v):'—'}
   ];
@@ -8032,17 +8136,19 @@ function getCols(){
   return applyColOrder('main-rankings',[
     {key:'chk',label:'',s:0},
     {key:'rank',label:'#',s:1},
-    {key:'score',label:'Rocket Score',s:1},
+    {key:'score',label:'Score',s:1},
     {key:'symbol',label:'Symbol',s:1},
     // v1144: the table may never need a horizontal scrollbar (owner, standing). Measured at 552px
     // of overflow, which is not a trimming problem - it is too many columns. Five were folded into
     // the cells they belong to rather than deleted: Setup and Series/Band ride the Symbol cell,
     // Day % joins Price, and Book joins Rel Vol. Every number survives.
-    {key:'price',label:'Price / Day',s:1},
-    {key:'relvol',label:'Vol / Book',s:1},
-    {key:'turnover',label:'Liquidity',s:1},
-    {key:'tgt',label:'TGT / SL',s:0},
-    {key:'alloc',label:'Alloc ₹',s:0},
+    {key:'price',label:'Price/Day',s:1},
+    {key:'relvol',label:'Vol/Bk',s:1},
+    {key:'turnover',label:'Liq',s:1},
+    {key:'avgMove',label:'Pace',s:1},
+    {key:'predEod',label:'EoD',s:1},
+    {key:'tgt',label:'TGT/SL',s:0},
+    {key:'alloc',label:'Alloc',s:0},
     {key:'risk',label:'Risk',s:1},
   ]);
 }
@@ -9182,6 +9288,7 @@ function computeAlloc(capital, selList){
   return allocMap;
 }
 function allocationSubline(am,unitLabel='shares'){
+  const unitShort=unitLabel==='shares'?'sh':(' '+unitLabel);
   // v1092: every allocation now states what it RISKS, not just what it costs. This number was
   // always determined (alloc × the row's own stop) — it was simply never shown, which is why the
   // Risk ₹/trade budget is an override on a visible default rather than a number typed into a vacuum.
@@ -9198,20 +9305,20 @@ function allocationSubline(am,unitLabel='shares'){
     ? ` · <b style="color:var(--green)">+${fmtINR(am.expectedNet)}</b>`
     : '';
   if(am?.limitReason==='risk cap'){
-    return `<div style="font-size:11px;color:var(--cyan);margin-top:1px" title="Sized down to fit the Risk ₹/trade budget at this stock's own ${Number(am.stopDistancePct).toFixed(2)}% stop.${riskTip}${netTip}">risk cap · ${am.qty} ${unitLabel} · risk ${fmtINR(am.riskRs)}${netStr}</div>`;
+    return `<div style="font-size:11px;color:var(--cyan);margin-top:1px" title="Sized down to fit the Risk ₹/trade budget at this stock's own ${Number(am.stopDistancePct).toFixed(2)}% stop.${riskTip}${netTip}">risk cap · ${am.qty}${unitShort} · r${fmtINR(am.riskRs)}${netStr}</div>`;
   }
   if(am?.limitReason==='top-up average cost'){
     // v1070: an add to a stock already in profit, sized so the blended average stays below the
     // new entry's own stop. A zero here means the existing average has no cushion left.
-    return `<div style="font-size:11px;color:#f472b6;margin-top:1px" title="You already hold this at a profit. The add is sized so the blended average cost stays below this entry's own stop price — if the stop is hit, the combined position is still not at a loss.${riskTip}${netTip}">📌 top-up capped · ${am.qty} ${unitLabel}${netStr}</div>`;
+    return `<div style="font-size:11px;color:#f472b6;margin-top:1px" title="You already hold this at a profit. The add is sized so the blended average cost stays below this entry's own stop price — if the stop is hit, the combined position is still not at a loss.${riskTip}${netTip}">📌 capped · ${am.qty}${unitShort}${netStr}</div>`;
   }
   if(am?.limitReason==='turnover'){
-    return `<div style="font-size:11px;color:var(--amber);margin-top:1px" title="Market-impact rail: allocation is capped at 0.10% of daily turnover (${fmtINR(am.liquidityCap)}), then rounded down to whole ${unitLabel}.${riskTip}${netTip}">turnover cap · ${am.qty} ${unitLabel}${netStr}</div>`;
+    return `<div style="font-size:11px;color:var(--amber);margin-top:1px" title="Market-impact rail: allocation is capped at 0.10% of daily turnover (${fmtINR(am.liquidityCap)}), then rounded down to whole ${unitLabel}.${riskTip}${netTip}">turnover · ${am.qty}${unitShort}${netStr}</div>`;
   }
   const sizedBy=am?.limitReason==='risk weight'
     ? `Sized by Radar score ÷ this stock's ${Number(am.stopDistancePct).toFixed(2)}% stop, so equally-scored names carry equal rupee risk.`
     : 'Capped by the Max Allocation rail.';
-  return `<div style="font-size:11px;color:var(--t3);margin-top:1px" title="${sizedBy}${riskTip}${netTip}">${am.qty} ${unitLabel}${am?.riskRs>0?` · risk ${fmtINR(am.riskRs)}`:''}${netStr}</div>`;
+  return `<div style="font-size:11px;color:var(--t3);margin-top:1px;max-width:190px;overflow:hidden;text-overflow:ellipsis" title="${sizedBy}${riskTip}${netTip}">${am.qty}${unitShort}${am?.riskRs>0?` · r${fmtINR(am.riskRs)}`:''}${netStr}</div>`;
 }
 function recomputeAlloc(){
   const capital=getEffectiveCapital();
@@ -9377,7 +9484,7 @@ function renderTable(){
       // TradingView link since v1070, so the "one symbol interaction everywhere" rule was true of the
       // panels and quietly false of the main table - which is why swapping to Zerodha missed it.
       symbol:`<td style="font-family:'Plus Jakarta Sans',sans-serif">${intradayRowButton(s)}${symbolChartButton(String(s.symbol),
-        `<div style="font-weight:700;font-size:15px;color:var(--t1)">${escHtml(s.symbol)}${(()=>{const flags=s.meta?.flags||[];if(!flags.length)return '';return `<span style="font-size:12px;background:rgba(239,68,68,.15);color:var(--red);border-radius:4px;padding:1px 5px;margin-left:5px;font-weight:700;vertical-align:middle" title="NSE surveillance flags: ${escHtml(flags.join(' · '))}">⚠ ${flags.length}</span>`;})()}${s._held?`<span style="font-size:12px;background:rgba(244,114,182,.15);color:#f472b6;border-radius:4px;padding:1px 5px;margin-left:5px;font-weight:700;vertical-align:middle" title="You already hold this. Held stocks stay in the ranking (v1070) and can be recommended again — buying here ADDS to the existing position.">📌 held</span>`:''}</div><div style="font-size:11px;color:var(--t3);max-width:230px;overflow:hidden;text-overflow:ellipsis" title="${escHtml((s.name||'')+(s.setup?' · '+s.setup:''))}">${radarSeriesBandPill(s)} ${escHtml(s.setup||s.name||'')}</div>`)}</td>`,
+        `<div style="font-weight:700;font-size:15px;color:var(--t1);max-width:170px;overflow:hidden;text-overflow:ellipsis">${escHtml(s.symbol)}${(()=>{const flags=s.meta?.flags||[];if(!flags.length)return '';return `<span style="font-size:12px;background:rgba(239,68,68,.15);color:var(--red);border-radius:4px;padding:1px 5px;margin-left:5px;font-weight:700;vertical-align:middle" title="NSE surveillance flags: ${escHtml(flags.join(' · '))}">⚠ ${flags.length}</span>`;})()}${s._held?`<span style="font-size:12px;background:rgba(244,114,182,.15);color:#f472b6;border-radius:4px;padding:1px 5px;margin-left:5px;font-weight:700;vertical-align:middle" title="You already hold this. Held stocks stay in the ranking (v1070) and can be recommended again — buying here ADDS to the existing position.">📌 held</span>`:''}</div><div style="font-size:11px;color:var(--t3);max-width:150px;overflow:hidden;text-overflow:ellipsis" title="${escHtml((s.name||'')+(s.setup?' · '+s.setup:''))}">${radarSeriesBandPill(s)} ${escHtml(s.setup||s.name||'')}</div>`)}</td>`,
       setup:`<td style="font-size:13px;color:var(--t2)">${escHtml(s.setup||'—')}${s.stage?' '+radarStagePill(s):''}</td>`,
       series:`<td>${radarSeriesBandPill(s)}</td>`,
       price:`<td style="white-space:nowrap">${fmtINR(s.price)}<span style="color:var(--t3)"> · </span><span style="font-size:12px">${fPerf(s.day??s.priceChange)}${s.corpAction?`<span title="Corporate action (${escHtml(s.corpAction)}) — mechanical ex-date move, neutralised in scoring" style="font-size:11px;color:var(--amber);margin-left:4px;cursor:help">⚑</span>`:''}</span></td>`,
@@ -9386,6 +9493,30 @@ function renderTable(){
       // v1139: the order book, in the recommendation table rather than a list of its own. Muted em
       // dash when the stock has no book - absent is not bearish.
       turnover:`<td>${fV(s.turnover)}</td>`,
+      // v1148 (owner): where the paste says it closes. Pressure decides the direction and size,
+      // the stock's own pace caps how far it can actually get in the bars that remain.
+      predEod:`<td style="white-space:nowrap">${(()=>{
+        const rd=getIntradayRead(s.symbol);
+        if(!rd||!Number.isFinite(rd.predClose)) return '<span style="color:var(--t3)">—</span>';
+        const up=rd.predPct>=0, t=rd.traj;
+        return `<span style="color:${up?'var(--green)':'var(--red)'};font-weight:700" title="${escHtml(
+          'Unspent pressure '+(t.pressurePct>=0?'+':'')+t.pressurePct.toFixed(2)+'%, capped by what this stock can travel in the '
+          +t.barsLeft+' bars left ('+t.avgMovePct.toFixed(3)+'% per '+t.stepMin+'-minute bar = '
+          +(t.maxTravel!=null?t.maxTravel.toFixed(2):'?')+'%). Arithmetic, not a forecast.')}">${
+          fmtINR(rd.predClose)}</span><span style="color:var(--t3);font-size:11px"> ${
+          (rd.predPct>=0?'+':'')+rd.predPct.toFixed(2)}%</span>`;
+      })()}</td>`,
+      // v1148 (owner): the average of every bar's own Change %, magnitude only. Shown only for a
+      // stock that has been checked - it comes from the pasted bars and nowhere else.
+      avgMove:`<td style="white-space:nowrap">${(()=>{
+        const rd=getIntradayRead(s.symbol);
+        if(!rd||!Number.isFinite(rd.avgMovePct)) return '<span style="color:var(--t3)">—</span>';
+        const tp=Number(exitPolicy&&exitPolicy.targetPct);
+        const bars=(tp>0&&rd.avgMovePct>0)?Math.ceil(tp/rd.avgMovePct):null;
+        return `<span title="Mean absolute move per 5-minute bar across the whole paste.${
+          bars?' At this pace a '+tp.toFixed(2)+'% target is about '+bars+' bars away.':''
+        }">${rd.avgMovePct.toFixed(3)}%</span>`;
+      })()}</td>`,
       // v1144: TGT and SL merged. They are ONE decision - what you ask for against what you risk -
       // and the two columns were part of why the table needed a horizontal scrollbar, which the
       // owner has ruled out. Both numbers survive, with their full tooltips.
@@ -9447,6 +9578,8 @@ function toggleFilters(){
 function setIntradayTarget(sym){
   INTRADAY_TARGET=normSym(sym||'');INTRADAY_RESULT=null;
   renderTable();
+  // The check now lives on Open Positions too (v1148), so the panels have to follow the selection.
+  try{renderRankingsPanels();}catch(e){}
   const el=document.getElementById('intradayBox');
   if(el){el.value='';el.focus();el.scrollIntoView({block:'nearest'});}
 }
@@ -9461,6 +9594,7 @@ function onIntradayPaste(){
     el.value='';
     applyIntradayReorder(ALL);
     applyFilters();
+    try{renderRankingsPanels();}catch(e){}
     // The loop: re-rank, then point at whatever is now in the top and still unchecked. When nothing
     // is left the list has SETTLED - every name at the top was checked and survived the check.
     const st=getIntradayLoopState(INTRADAY_LOOP_N);
@@ -9476,9 +9610,65 @@ function onIntradayPaste(){
 }
 function clearIntraday(){
   INTRADAY_BARS={};INTRADAY_TARGET='';INTRADAY_RESULT=null;
+  try{setTimeout(()=>{try{renderRankingsPanels();}catch(e){}},0);}catch(e){}
   ALL.forEach(r=>{r.intraday=null;r.intradayVerdict=null;r.intradayWhy=null;});
   scheduleApplyFilters();renderTable();
 }
+// ── v1149: THE KITE BRIDGE ───────────────────────────────────────────────────────────────────
+// A Tampermonkey userscript running in the owner's OWN logged-in Kite tab reads the chart's data
+// table straight out of the DOM and hands it here. This is not the 2026-07-15 automation that was
+// retired: that one drove a SEPARATE headless browser with its own authentication. This runs inside
+// the session the owner already has open, reading a table already rendered on his screen, and it
+// only ever fetches what this app explicitly asks for.
+//
+// POLITENESS IS A HARD RULE, not a setting (owner: "I don't want to bombard zerodha with these
+// requests if they mind it"). The app publishes a REQUEST for a handful of symbols; the script
+// serves it and stops. Nothing is fetched on a timer, nothing is fetched speculatively, and the
+// budget below is enforced HERE rather than trusted to the script.
+const KITE_BRIDGE_KEY='rocketScannerKiteBridge';
+const BRIDGE_MAX_PER_WINDOW=12;     // symbols per window - the owner's manual pace, not a scrape
+const BRIDGE_WINDOW_MS=15*60*1000;
+let BRIDGE_LOG=[];                  // timestamps of symbols actually requested
+
+function bridgeBudgetLeft(){
+  const now=Date.now();
+  BRIDGE_LOG=BRIDGE_LOG.filter(t=>now-t<BRIDGE_WINDOW_MS);
+  return Math.max(0,BRIDGE_MAX_PER_WINDOW-BRIDGE_LOG.length);
+}
+// What the app wants next: the top candidates that have not been checked, capped by the budget.
+function bridgeRequest(limit){
+  const st=getIntradayLoopState(limit||INTRADAY_LOOP_N);
+  const budget=bridgeBudgetLeft();
+  const want=st.need.slice(0,budget).map(r=>normSym(r.symbol));
+  if(!want.length) return {symbols:[],reason:budget?'nothing to check':'budget spent'};
+  return {symbols:want,at:Date.now()};
+}
+function bridgePublish(limit){
+  const req=bridgeRequest(limit);
+  try{
+    localStorage.setItem(KITE_BRIDGE_KEY+'_req',JSON.stringify(req));
+    if(window.__rocketBridgeRequest) window.__rocketBridgeRequest(req);   // userscript hook
+  }catch(e){}
+  req.symbols.forEach(()=>BRIDGE_LOG.push(Date.now()));
+  return req;
+}
+// The userscript calls this with rows exactly as the table renders them. It goes through the SAME
+// parser a paste does - there is no second ingestion path to drift out of sync.
+window.__rocketIntradayIngest=function(symbol,rows){
+  try{
+    const sym=normSym(symbol||'');
+    if(!sym||!Array.isArray(rows)||rows.length<5) return {ok:false,why:'no usable rows'};
+    const csv=['"Date","Open","High","Low","Close","% Change","% Change vs Average","Volume"']
+      .concat(rows.map(r=>r.map(c=>'"'+String(c==null?'':c).replace(/"/g,'')+'"').join(','))).join('\n');
+    const res=parseIntradayPaste(csv,sym);
+    if(res.ok){
+      applyIntradayReorder(ALL); applyFilters();
+      try{renderRankingsPanels();}catch(e){}
+      renderTable();
+    }
+    return res;
+  }catch(e){return {ok:false,why:String(e&&e.message||e)};}
+};
 function intradayPasteBarHtml(){
   const n=Object.keys(INTRADAY_BARS).length;
   const t=INTRADAY_TARGET, res=INTRADAY_RESULT;
@@ -9508,6 +9698,8 @@ function intradayPasteBarHtml(){
       <select onchange="setIntradayLoopN(this.value)" style="background:var(--bg);color:var(--t2);border:1px solid var(--border);border-radius:4px;font-size:11px;padding:1px 4px">
         ${[2,3,5,10].map(k=>`<option value="${k}"${k===INTRADAY_LOOP_N?' selected':''}>top ${k}</option>`).join('')}
       </select>
+      <button onclick="const r=bridgePublish();showToast(r.symbols.length?('Asked Kite for '+r.symbols.join(', ')):('Nothing requested — '+r.reason),3000);" class="btn" style="font-size:11px"
+        title="Publish a request for the unchecked names above. A Tampermonkey userscript running in your own logged-in Kite tab serves it and stops — nothing is fetched on a timer, and the app caps it at ${BRIDGE_MAX_PER_WINDOW} symbols per ${BRIDGE_WINDOW_MS/60000} minutes.">Fetch via Kite</button>
       ${n?`<button onclick="clearIntraday()" class="btn" style="opacity:.75;font-size:11px"
         title="Throw away the chart data for all ${n} checked stock(s) and their BUY/SKIP verdicts, and re-rank without them. The recommendations themselves are untouched — it only undoes the checking.">Discard ${n} check${n===1?'':'s'}</button>`:''}
     </div>

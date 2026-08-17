@@ -98,13 +98,13 @@ select option{background:var(--bg-card)}
 .fixed-hscroll{position:fixed;bottom:0;overflow-x:scroll;overflow-y:hidden;height:17px;z-index:999;background:var(--bg-card);border-top:1px solid var(--border);display:none}
 .fixed-hscroll-inner{height:1px;pointer-events:none}
 table.main{width:100%;border-collapse:separate;border-spacing:0;font-size:14.5px}
-table.main thead th{background:var(--bg-raised);border-bottom:2px solid var(--border-hi);padding:10px 7px;text-align:left;font-weight:600;font-size:12px;text-transform:uppercase;letter-spacing:.7px;color:var(--t3);cursor:pointer;user-select:none;white-space:nowrap;transition:color .15s}
+table.main thead th{background:var(--bg-raised);border-bottom:2px solid var(--border-hi);padding:10px 6px;text-align:left;font-weight:600;font-size:12px;text-transform:uppercase;letter-spacing:.7px;color:var(--t3);cursor:pointer;user-select:none;white-space:nowrap;transition:color .15s}
 table.main thead th:hover{color:var(--t1)}
 table.main thead th.sorted{color:var(--blue)}
 table.main thead th .sa{margin-left:3px;font-size:11px}
 table.main tbody tr{transition:background .12s}
 table.main tbody tr:hover{background:var(--bg-hover)}
-table.main tbody td{padding:9px 7px;font-family:'DM Mono',monospace;font-size:14px;white-space:nowrap;border-bottom:1px solid rgba(26,34,51,.5)}
+table.main tbody td{padding:9px 6px;font-family:'DM Mono',monospace;font-size:14px;white-space:nowrap;border-bottom:1px solid rgba(26,34,51,.5)}
 .rk{font-weight:800;font-size:15px;width:40px}
 .rk-1{color:#fbbf24}.rk-2{color:#d1d5db}.rk-3{color:#d97706}
 .sc-m{font-weight:800;font-size:16px;font-family:'DM Mono',monospace}
