@@ -1,5 +1,5 @@
-const BUILD_TS='2026-08-17 17:24 IST'; // release build time (IST)
-const APP_VERSION=1154; // v1154: the Kite helper is told the instrument token and navigates straight to the chart URL.
+const BUILD_TS='2026-08-17 17:30 IST'; // release build time (IST)
+const APP_VERSION=1155; // v1155: a console snippet fetches the candles Kite's own chart draws - no extension, no clicking, no navigation.
 // v1093: a baseline reward:risk MEASURED on the cross-section (last completed bhav session) instead of learned from the owner's own fills - reported on every row, deliberately not enforced. Includes v1092: position size split by Radar score / stop distance, so equally-scored names carry equal RUPEE risk, plus an opt-in Risk /trade cap.
 // v556: parse the NSE Market Activity Report (MA<date>.csv) — official Nifty %, advances/declines and sector index moves shown as market CONTEXT in the status bar (EOD data, display only, never fed into per-row scoring); MA added to the ℹ️ file manifest.
 // v555 market-cycle stage awareness (stateless, self-calibrating): per-row stage label (1 accumulation · 2 breakout · 3 event · 4 profit-booking · 5 re-accumulation · 6 second-leg); a quiet-accumulation signal (conjunction-of-percentiles) injected via the rocket-diagnostic weighting; sell-the-news decay off Recent earnings date (horizon = review days). v1065 makes the market-breadth gauge an entry-eligibility input while still never changing ranking.
@@ -9586,6 +9586,19 @@ function setIntradayTarget(sym){
 function onIntradayPaste(){
   const el=document.getElementById('intradayBox');
   if(!el) return;
+  // A batch payload from the console snippet carries many stocks at once and names each one, so it
+  // does not need a selected target. Try it first; fall back to the single-table paste.
+  const batch=ingestKiteCandlePayload(el.value);
+  if(batch){
+    el.value='';
+    INTRADAY_RESULT={ok:true,sym:batch.done.join(', '),bars:0,sessions:0,batch:batch};
+    const st=getIntradayLoopState(INTRADAY_LOOP_N);
+    INTRADAY_TARGET=st.need.length?normSym(st.need[0].symbol):'';
+    renderTable();
+    showToast('Read '+batch.done.length+' stock(s): '+batch.done.join(', ')
+      +(batch.failed.length?(' · could not read '+batch.failed.join(', ')):''),6000,!batch.done.length);
+    return;
+  }
   const res=parseIntradayPaste(el.value,INTRADAY_TARGET);
   INTRADAY_RESULT=res;
   if(res.ok){
@@ -9706,6 +9719,101 @@ window.__rocketIntradayIngest=function(symbol,rows){
     return res;
   }catch(e){return {ok:false,why:String(e&&e.message||e)};}
 };
+// ── v1155: THE CONSOLE SNIPPET — no extension, no clicking, no navigation ────────────────────
+// Owner: "I said no tampermonkey." And earlier: "I'm not always going to open the pages and click
+// the fucking buttons. The whole point is that I only need to stay logged in so the URL works
+// because it's session linked."
+//
+// Both constraints are satisfied by running INSIDE the Kite tab's own console. Code pasted there is
+// SAME-ORIGIN, so Kite's own candle endpoint answers it with the session already attached - the
+// identical request the chart itself makes when it draws. Nothing is installed, nothing is clicked,
+// no page is navigated, and no DOM is scraped.
+//
+// The app builds the snippet with the symbols and instrument tokens ALREADY EMBEDDED, so there is
+// nothing to type. Two clipboard hops for the whole batch, however many stocks: copy the snippet ->
+// paste in the Kite console -> the result lands on the clipboard -> paste it back here.
+function buildKiteFetchScript(limit){
+  const st=getIntradayLoopState(limit||INTRADAY_LOOP_N);
+  const jobs=st.need
+    .map(r=>({s:normSym(r.symbol),t:KITE_TOKEN[normSym(r.symbol)]||0}))
+    .filter(j=>j.t>0);
+  if(!jobs.length) return {ok:false,why:st.need.length?'no Kite token for those names — re-run dev/fetch-preopen.js':'nothing left to check'};
+  const days=Math.max(1,Number(INTRADAY_FETCH_DAYS)||3);
+  const code=
+`/* Rocket Scanner — paste this into the Kite tab's console and press Enter.
+   It asks Kite for the same 5-minute candles the chart draws, for ${jobs.length} stock(s),
+   then puts the result on your clipboard. Paste that back into the scanner. */
+(async()=>{
+  const JOBS=${JSON.stringify(jobs)};
+  const DAYS=${days};
+  const tok=(document.cookie.match(/enctoken=([^;]+)/)||[])[1];
+  if(!tok){ alert('Not logged in to Kite in this tab.'); return; }
+  const pad=n=>String(n).padStart(2,'0');
+  const fmt=d=>d.getFullYear()+'-'+pad(d.getMonth()+1)+'-'+pad(d.getDate())+'+'+pad(d.getHours())+':'+pad(d.getMinutes())+':'+pad(d.getSeconds());
+  const to=new Date(), from=new Date(Date.now()-DAYS*24*3600*1000);
+  const out={};
+  for(const j of JOBS){
+    try{
+      const u='/oms/instruments/historical/'+j.t+'/5minute?user_id=&oi=0&from='+fmt(from)+'&to='+fmt(to);
+      const r=await fetch(u,{headers:{'authorization':'enctoken '+decodeURIComponent(tok),'x-kite-version':'3'},credentials:'include'});
+      const js=await r.json();
+      const c=(js&&js.data&&js.data.candles)||[];
+      if(!c.length){ console.warn('no candles for',j.s,js&&js.message); continue; }
+      out[j.s]=c;
+      console.log('fetched',j.s,c.length,'candles');
+    }catch(e){ console.warn('failed',j.s,e.message); }
+    await new Promise(r=>setTimeout(r,700));
+  }
+  const payload=JSON.stringify({rocketScanner:'candles',at:Date.now(),data:out});
+  try{ await navigator.clipboard.writeText(payload); }
+  catch(e){ const t=document.createElement('textarea'); t.value=payload; document.body.appendChild(t); t.select(); document.execCommand('copy'); t.remove(); }
+  console.log('%cCopied '+Object.keys(out).length+' stock(s). Paste into the scanner.','color:#0a0;font-weight:700');
+})();`;
+  return {ok:true,code,jobs,symbols:jobs.map(j=>j.s)};
+}
+const INTRADAY_FETCH_DAYS=3;   // how far back the snippet asks for; 3 sessions of 5-minute candles
+
+// Kite returns candles as [isoTime, open, high, low, close, volume]. That is the SAME information
+// the pasted table carries, so it is converted into the identical CSV and handed to the ONE parser
+// rather than given a second ingestion path of its own.
+function ingestKiteCandlePayload(text){
+  let p=null;
+  try{ p=JSON.parse(String(text||'').trim()); }catch(e){ return null; }
+  if(!p||p.rocketScanner!=='candles'||!p.data||typeof p.data!=='object') return null;
+  const done=[],failed=[];
+  for(const sym of Object.keys(p.data)){
+    const rows=p.data[sym];
+    if(!Array.isArray(rows)||rows.length<5){ failed.push(sym); continue; }
+    const csv=['"Date","Open","High","Low","Close","% Change","% Change vs Average","Volume"']
+      .concat(rows.map(c=>{
+        const t=new Date(c[0]);
+        const d=String(t.getDate()).padStart(2,'0')+'/'+String(t.getMonth()+1).padStart(2,'0')
+              +' '+String(t.getHours()).padStart(2,'0')+':'+String(t.getMinutes()).padStart(2,'0');
+        return ['"'+d+'"','"'+c[1]+'"','"'+c[2]+'"','"'+c[3]+'"','"'+c[4]+'"','"0"','"0"','"'+(c[5]||0)+'"'].join(',');
+      })).join('\n');
+    const res=parseIntradayPaste(csv,sym);
+    (res&&res.ok?done:failed).push(sym);
+  }
+  if(done.length){
+    applyIntradayReorder(ALL); applyFilters();
+    try{renderRankingsPanels();}catch(e){}
+    renderTable();
+  }
+  return {done,failed};
+}
+function copyKiteFetchScript(){
+  const r=buildKiteFetchScript();
+  if(!r.ok){ showToast('Nothing to fetch: '+r.why,5000,true); return; }
+  const done=()=>showToast('Script copied for '+r.symbols.join(', ')
+    +'. Open your Kite tab, press F12 → Console, paste, Enter. Then paste the result back here.',9000);
+  try{ navigator.clipboard.writeText(r.code).then(done,()=>{fallback();}); }catch(e){ fallback(); }
+  function fallback(){
+    const t=document.createElement('textarea');
+    t.value=r.code; document.body.appendChild(t); t.select();
+    try{document.execCommand('copy');}catch(e){}
+    t.remove(); done();
+  }
+}
 function intradayPasteBarHtml(){
   const n=Object.keys(INTRADAY_BARS).length;
   const t=INTRADAY_TARGET, res=INTRADAY_RESULT;
@@ -9742,6 +9850,8 @@ function intradayPasteBarHtml(){
       <select onchange="setIntradayLoopN(this.value)" style="background:var(--bg);color:var(--t2);border:1px solid var(--border);border-radius:4px;font-size:11px;padding:1px 4px">
         ${[2,3,5,10].map(k=>`<option value="${k}"${k===INTRADAY_LOOP_N?' selected':''}>top ${k}</option>`).join('')}
       </select>
+      <button onclick="copyKiteFetchScript()" class="btn" style="font-size:11px"
+        title="Copies a ready-made script with these stocks and their instrument tokens already in it. Open your Kite tab, press F12, click Console, paste, Enter. It asks Kite for the same candles the chart draws and puts the result on your clipboard — paste that back into the box below. Nothing to install.">Copy Kite script</button>
       ${(()=>{
         // The optional helper. If it is not installed the button is not shown at all - the owner's
         // verdict on it was "overdrawn", and a permanent "helper not installed" chip is nagging for
