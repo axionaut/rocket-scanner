@@ -7,4 +7,7 @@
 !index.html
 !app.js
 !styles.css
+# The Kite helper is served from Pages purely so Tampermonkey can auto-update it - three manual
+# re-pastes in one day is what forced this. It carries no market data and no credentials.
+!kite-bridge.user.js
 dev/
