@@ -1,5 +1,5 @@
-const BUILD_TS='2026-08-17 18:37 IST'; // release build time (IST)
-const APP_VERSION=1162; // v1162: a 5-minute read from an earlier session is not evidence about today - it counts as unchecked.
+const BUILD_TS='2026-08-17 18:44 IST'; // release build time (IST)
+const APP_VERSION=1163; // v1163: open positions are fetched too - buying a stock used to stop its data the day it mattered most.
 // v1093: a baseline reward:risk MEASURED on the cross-section (last completed bhav session) instead of learned from the owner's own fills - reported on every row, deliberately not enforced. Includes v1092: position size split by Radar score / stop distance, so equally-scored names carry equal RUPEE risk, plus an opt-in Risk /trade cap.
 // v556: parse the NSE Market Activity Report (MA<date>.csv) — official Nifty %, advances/declines and sector index moves shown as market CONTEXT in the status bar (EOD data, display only, never fed into per-row scoring); MA added to the ℹ️ file manifest.
 // v555 market-cycle stage awareness (stateless, self-calibrating): per-row stage label (1 accumulation · 2 breakout · 3 event · 4 profit-booking · 5 re-accumulation · 6 second-leg); a quiet-accumulation signal (conjunction-of-percentiles) injected via the rocket-diagnostic weighting; sell-the-news decay off Recent earnings date (horizon = review days). v1065 makes the market-breadth gauge an entry-eligibility input while still never changing ranking.
@@ -9688,12 +9688,44 @@ function fetchBudgetLeft(){
 }
 // The unchecked names at the top of the board, paired with the instrument tokens the app has held
 // since v1139. A symbol with no token is excluded WITH a reason rather than silently dropped.
+// ── v1163: A STOCK YOU OWN IS STILL A STOCK YOU HAVE TO DECIDE ABOUT ────────────────────────
+// Owner: "any stock that I buy today but couldn't sell off intraday may get stuck in our portfolio.
+// So how should all this be handled?"
+//
+// The hole his question exposed was NOT the file. It was the coverage: jobs were drawn only from the
+// top of the RECOMMENDATION board, and buying a stock removes it from that board - so the day you
+// buy is the last day it is ever fetched, and its file stops growing exactly when the position
+// starts mattering. That is the same complaint as "it's not in the recommendation table anymore if
+// I have already bought it", one layer down.
+//
+// ORDER IS DELIBERATE: recommendations first, held positions with whatever budget is left. A buy
+// decision expires at the close; a held position can be read an hour later and still be read
+// correctly. Under a tight cap the time-critical question wins.
+//
+// Held names are fetched for OBSERVATION, not for a verdict. Nothing here recommends re-buying: the
+// v1070 rule that held is not a reason to refuse a stock is untouched, and so is the v1162 rule that
+// only a read from the CURRENT session may move anything.
 function intradayFetchJobs(limit){
+  const tok=r=>({s:normSym(r.symbol||r.sym||''),t:KITE_TOKEN[normSym(r.symbol||r.sym||'')]||0});
+  const stale=sym=>{const rd=getIntradayRead(sym);return !rd||!rd.current;};
   const st=getIntradayLoopState(limit||INTRADAY_LOOP_N);
-  const jobs=st.need
-    .map(r=>({s:normSym(r.symbol),t:KITE_TOKEN[normSym(r.symbol)]||0}))
-    .filter(j=>j.t>0);
-  if(jobs.length) return {ok:true,jobs,symbols:jobs.map(j=>j.s)};
+  const jobs=st.need.map(tok).filter(j=>j.t>0);
+  const seen=new Set(jobs.map(j=>j.s));
+
+  // Everything actually held, from the same source the Open Positions panel uses, so the two can
+  // never disagree about what is open.
+  let held=[];
+  try{
+    const m=(typeof getCombinedOpenPositionMap==='function')?getCombinedOpenPositionMap():{};
+    held=Object.keys(m).filter(k=>{const p=m[k];return p&&(p.qty>0);})
+      .map(k=>tok({symbol:k}))
+      .filter(j=>j.t>0&&!seen.has(j.s)&&stale(j.s));
+  }catch(e){ held=[]; }
+  held.forEach(j=>{j.held=true;});
+
+  const all=jobs.concat(held);
+  if(all.length) return {ok:true,jobs:all,symbols:all.map(j=>j.s),
+                         recs:jobs.length,held:held.length};
   const missing=st.need.filter(r=>!KITE_TOKEN[normSym(r.symbol)]).map(r=>r.symbol);
   return {ok:false,why:missing.length?('no Kite instrument token for '+missing.join(', ')):'nothing left to check'};
 }
