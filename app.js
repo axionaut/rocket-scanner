@@ -1,5 +1,5 @@
-const BUILD_TS='2026-08-17 18:02 IST'; // release build time (IST)
-const APP_VERSION=1158; // v1158: every workaround removed - extension, bookmarklet, console and command line. One button, inside the app.
+const BUILD_TS='2026-08-17 18:11 IST'; // release build time (IST)
+const APP_VERSION=1159; // v1159: the app stays on GitHub Pages; only a small local helper runs, and the page calls it on localhost.
 // v1093: a baseline reward:risk MEASURED on the cross-section (last completed bhav session) instead of learned from the owner's own fills - reported on every row, deliberately not enforced. Includes v1092: position size split by Radar score / stop distance, so equally-scored names carry equal RUPEE risk, plus an opt-in Risk /trade cap.
 // v556: parse the NSE Market Activity Report (MA<date>.csv) — official Nifty %, advances/declines and sector index moves shown as market CONTEXT in the status bar (EOD data, display only, never fed into per-row scoring); MA added to the ℹ️ file manifest.
 // v555 market-cycle stage awareness (stateless, self-calibrating): per-row stage label (1 accumulation · 2 breakout · 3 event · 4 profit-booking · 5 re-accumulation · 6 second-leg); a quiet-accumulation signal (conjunction-of-percentiles) injected via the rocket-diagnostic weighting; sell-the-news decay off Recent earnings date (horizon = review days). v1065 makes the market-breadth gauge an entry-eligibility input while still never changing ranking.
@@ -9695,13 +9695,19 @@ function ingestKiteCandlePayload(text){
 //
 // Opened as a plain file it still works exactly as before - the in-app fetch simply hides itself,
 // the same rule v1153 established.
-let KITE_API=null;     // {hasToken} when this page is served by the local server, else null
+let KITE_API=null;          // set when the local helper answers, wherever this page is hosted
+const KITE_HELPER='http://localhost:8787';
+// THE APP STAYS ON GITHUB PAGES. Earlier this served the app from localhost, which was wrong - the
+// app lives at https://axionaut.github.io/rocket-scanner/ and that must not change. Only the HELPER
+// is local. An HTTPS page may not normally call http://, but localhost and 127.0.0.1 are specified
+// as potentially trustworthy, so the Pages app is allowed to call this one; the helper answers only
+// the Pages origin and nothing else, because it holds a Kite token.
 async function detectKiteApi(){
-  if(!/^https?:$/.test(location.protocol)||!/^(localhost|127\.0\.0\.1)$/.test(location.hostname)){
-    KITE_API=null; return null;
-  }
   try{
-    const r=await fetch('/api/kite/status',{cache:'no-store'});
+    const c=new AbortController();
+    const t=setTimeout(()=>c.abort(),1500);      // it is either running locally or it is not
+    const r=await fetch(KITE_HELPER+'/api/kite/status',{cache:'no-store',signal:c.signal});
+    clearTimeout(t);
     KITE_API=r.ok?await r.json():null;
   }catch(e){ KITE_API=null; }
   try{ renderTable(); }catch(e){}
@@ -9712,7 +9718,7 @@ async function saveKiteToken(){
   const t=(el&&el.value||'').trim();
   if(t.length<20){ showToast('That does not look like an enctoken.',4000,true); return; }
   try{
-    const r=await fetch('/api/kite/token',{method:'POST',headers:{'content-type':'application/json'},
+    const r=await fetch(KITE_HELPER+'/api/kite/token',{method:'POST',headers:{'content-type':'application/json'},
       body:JSON.stringify({token:t})});
     const j=await r.json();
     if(!j.ok){ showToast('Rejected: '+j.why,5000,true); return; }
@@ -9724,7 +9730,7 @@ async function saveKiteToken(){
 // The whole loop, in one press: ask the local server for the candles, hand them to the SAME parser
 // a paste uses, re-rank, and point at whatever still needs checking.
 async function fetchCandlesInApp(limit){
-  if(!KITE_API){ showToast('The in-app fetch needs the local server. Double-click "Start Rocket Scanner.bat".',7000,true); return; }
+  if(!KITE_API){ showToast('The helper is not running. Double-click "Start Rocket Scanner.bat" and leave that window open — the app itself stays on GitHub Pages.',8000,true); return; }
   const r=intradayFetchJobs(limit);
   if(!r.ok){ showToast('Nothing to fetch: '+r.why,5000,true); return; }
   const budget=fetchBudgetLeft();
@@ -9734,7 +9740,7 @@ async function fetchCandlesInApp(limit){
   showToast('Fetching '+jobs.map(j=>j.s).join(', ')+'…',3000);
   try{
     const q=jobs.map(j=>j.s+':'+j.t).join(',');
-    const res=await fetch('/api/kite/candles?days='+INTRADAY_FETCH_DAYS+'&jobs='+encodeURIComponent(q),{cache:'no-store'});
+    const res=await fetch(KITE_HELPER+'/api/kite/candles?days='+INTRADAY_FETCH_DAYS+'&jobs='+encodeURIComponent(q),{cache:'no-store'});
     const j=await res.json();
     if(!j.ok){ showToast(j.why,8000,true); return; }
     const out=ingestKiteCandlePayload(JSON.stringify({rocketScanner:'candles',data:j.data}));
@@ -9781,7 +9787,7 @@ function intradayPasteBarHtml(){
             style="font-size:11px;padding:2px 6px;background:var(--bg);color:var(--t1);border:1px solid var(--amber);border-radius:4px;width:190px"
             title="Kite tab → F12 → Application → Cookies → kite.zerodha.com → copy the value of enctoken. It rotates on every login.">
           <button onclick="saveKiteToken()" class="btn" style="font-size:11px">Save token</button>`}`
-        :`<span style="font-size:11px;color:var(--t3)" title="Double-click &quot;Start Rocket Scanner.bat&quot; and the app fetches candles by itself. Opened as a plain file, the browser will not let it reach Kite.">open via Start Rocket Scanner.bat to fetch automatically</span>`}
+        :`<span style="font-size:11px;color:var(--t3)" title="Double-click &quot;Start Rocket Scanner.bat&quot; on your PC and leave that window open. The app stays right here on GitHub Pages; only the little helper runs locally, because a web page is not allowed to call Kite directly.">start the helper (Start Rocket Scanner.bat) to fetch automatically</span>`}
       ${n?`<button onclick="clearIntraday()" class="btn" style="opacity:.75;font-size:11px"
         title="Throw away the chart data for all ${n} checked stock(s) and their BUY/SKIP verdicts, and re-rank without them. The recommendations themselves are untouched — it only undoes the checking.">Discard ${n} check${n===1?'':'s'}</button>`:''}
     </div>
