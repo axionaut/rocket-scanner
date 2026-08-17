@@ -1,5 +1,5 @@
-const BUILD_TS='2026-08-17 14:23 IST'; // release build time (IST)
-const APP_VERSION=1145; // v1145: the intraday check is a loop - fetch the top few, re-rank, repeat until the list stops changing.
+const BUILD_TS='2026-08-17 14:58 IST'; // release build time (IST)
+const APP_VERSION=1146; // v1146: the BUY/SKIP verdict is marked on the row itself, so nothing pushes the recommendations down the page.
 // v1093: a baseline reward:risk MEASURED on the cross-section (last completed bhav session) instead of learned from the owner's own fills - reported on every row, deliberately not enforced. Includes v1092: position size split by Radar score / stop distance, so equally-scored names carry equal RUPEE risk, plus an opt-in Risk /trade cap.
 // v556: parse the NSE Market Activity Report (MA<date>.csv) — official Nifty %, advances/declines and sector index moves shown as market CONTEXT in the status bar (EOD data, display only, never fed into per-row scoring); MA added to the ℹ️ file manifest.
 // v555 market-cycle stage awareness (stateless, self-calibrating): per-row stage label (1 accumulation · 2 breakout · 3 event · 4 profit-booking · 5 re-accumulation · 6 second-leg); a quiet-accumulation signal (conjunction-of-percentiles) injected via the rocket-diagnostic weighting; sell-the-news decay off Recent earnings date (horizon = review days). v1065 makes the market-breadth gauge an entry-eligibility input while still never changing ranking.
@@ -3426,7 +3426,11 @@ function getIntradayRead(sym){
   if(day.length<3) return null;
   const open=day[0].o, close=day[day.length-1].c;
   const hi=Math.max(...day.map(b=>b.h)), lo=Math.min(...day.map(b=>b.l));
-  // (1) THE FIRST FIFTEEN MINUTES (owner's standing observation: the open sets the day's course).
+  // (1) THE FIRST FIFTEEN MINUTES. **AN OBSERVATION, NOT A RULE** (owner, 2026-08-17: "that first
+  // 15 minute thing was just a shared observation, not a hard rule by the way"). It is ONE of three
+  // equal terms in the fallback read and it gates nothing anywhere - a stock is never rejected for
+  // opening red. It also only applies when a paste carries no volume; when volume is present the
+  // flow trajectory supersedes this whole block. Do not promote it to a veto without evidence.
   // Three 5-minute bars. Measured against the OPEN, because a gap is already its own signal and
   // what is being asked is whether the session CONFIRMED the gap or sold it.
   const first=day.slice(0,3);
@@ -9255,25 +9259,29 @@ function radarSeriesBandPill(s){
 function intradayRowButton(s){
   const sym=normSym(String(s&&s.symbol||''));
   if(!sym) return '';
-  const has=!!INTRADAY_BARS[sym], sel=INTRADAY_TARGET===sym;
-  const reg=has?(getIntradayRead(sym)||{}).regime:null;
-  const regCol=reg==='accumulating'?'var(--green)':reg==='selling'?'var(--red)'
-              :reg==='distribution into strength'?'var(--amber)':reg==='absorption'?'var(--cyan)':null;
-  const col=sel?'var(--amber)':(regCol||(has?'var(--cyan)':'var(--t3)'));
+  const sel=INTRADAY_TARGET===sym;
+  const has=!!INTRADAY_BARS[sym];
+  // v1146 (owner): the verdict goes ON THE ROW. A growing BUY/SKIP list above the table pushed the
+  // table itself down the page, which is the same complaint as the horizontal scrollbar - the
+  // recommendations are the thing, and nothing may crowd them out.
+  const v=has?s.intradayVerdict:null;
+  const face=v==='confirmed'?'\u2713':v==='rejected'?'\u2717':'5m';
+  const col=sel?'var(--amber)':v==='confirmed'?'var(--green)':v==='rejected'?'var(--red)'
+           :has?'var(--cyan)':'var(--t3)';
   const rd=has?getIntradayRead(sym):null;
-  const tip=rd
-    ? (rd.traj
-        ? `${sym}: ${rd.regime.toUpperCase()} — net flow ${(rd.cvdPct*100).toFixed(1)}% of everything traded, `
-          +`price and flow ${rd.traj.agree?'agree':'DIVERGE'}, projected ${rd.projected.toFixed(2)}. `
-          +`First 15m ${rd.first15Up?'up':'down'}. Click to replace.`
-        : `${sym}: first 15m ${rd.first15Up?'UP':'DOWN'}, path ${(rd.efficiency*100).toFixed(0)}% efficient, `
-          +`sitting ${(rd.position*100).toFixed(0)}% up its session range (no volume in that paste). Click to replace.`)
-    : `Paste ${sym}'s 5-minute chart table to enrich this recommendation.`;
+  const tip=v
+    ? `${sym}: ${v==='confirmed'?'STILL CLEARS THE BAR — buy':'NO LONGER CLEARS THE BAR — skip'}`
+      +`\n${s.intradayWhy||''}\nClick to replace this data.`
+    : has
+      ? `${sym}: checked${rd&&rd.regime?' — '+rd.regime:''}. Click to replace.`
+      : `Check ${sym}: paste its 5-minute chart table and see whether it still clears the buy bar.`;
   return `<button type="button" onclick='event.stopPropagation();setIntradayTarget(${JSON.stringify(sym)})'`
-    +` style="margin-right:6px;padding:0 4px;border:1px solid ${col};border-radius:3px;background:${sel?'rgba(245,158,11,.12)':'transparent'};`
-    +`color:${col};font-size:10px;line-height:14px;cursor:pointer;vertical-align:middle"`
-    +` title="${escHtml(tip)}">5m${has?' ●':''}</button>`;
+    +` style="margin-right:6px;padding:0 4px;border:1px solid ${col};border-radius:3px;`
+    +`background:${sel?'rgba(245,158,11,.12)':v==='rejected'?'rgba(239,68,68,.10)':v==='confirmed'?'rgba(34,197,94,.10)':'transparent'};`
+    +`color:${col};font-size:10px;line-height:14px;cursor:pointer;vertical-align:middle;font-weight:${v?'700':'400'}"`
+    +` title="${escHtml(tip)}">${face}</button>`;
 }
+
 function renderTable(){
   { const _ib=document.getElementById('intradayBar'); if(_ib) _ib.innerHTML=intradayPasteBarHtml(); }
   const capital=getEffectiveCapital();
@@ -9399,7 +9407,7 @@ function onIntradayPaste(){
 }
 function clearIntraday(){
   INTRADAY_BARS={};INTRADAY_TARGET='';INTRADAY_RESULT=null;
-  ALL.forEach(r=>{r.intraday=null;});
+  ALL.forEach(r=>{r.intraday=null;r.intradayVerdict=null;r.intradayWhy=null;});
   scheduleApplyFilters();renderTable();
 }
 function intradayPasteBarHtml(){
@@ -9422,20 +9430,20 @@ function intradayPasteBarHtml(){
     <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-bottom:6px">
       <span class="st-l">Intraday check</span>
       ${st?`<span style="font-size:12px;color:${done?'var(--green)':'var(--t2)'}">
-        ${done?`<b>settled</b> — the top ${st.of} have all been checked and held their place`
-              :`checked <b>${st.checked}</b> of the top <b>${st.of}</b> — fetch the rest, then see if the list still says the same thing`}</span>`:''}
+        ${done?`<b>settled</b> — the top ${st.of} were checked and held their place`
+              :`checked <b>${st.checked}</b> of the top <b>${st.of}</b>`}
+        ${st.confirmed.length||st.rejected.length?`<span style="color:var(--t3)"> · </span>
+          <span style="color:var(--green)">${st.confirmed.length} buy</span><span style="color:var(--t3)"> / </span>
+          <span style="color:var(--red)">${st.rejected.length} skip</span>
+          <span style="color:var(--t3)"> — marked ✓ / ✗ on the rows</span>`:''}</span>`:''}
       <select onchange="setIntradayLoopN(this.value)" style="background:var(--bg);color:var(--t2);border:1px solid var(--border);border-radius:4px;font-size:11px;padding:1px 4px">
         ${[2,3,5,10].map(k=>`<option value="${k}"${k===INTRADAY_LOOP_N?' selected':''}>top ${k}</option>`).join('')}
       </select>
-      ${n?`<button onclick="clearIntraday()" class="btn" style="opacity:.75;font-size:11px">Clear (${n})</button>`:''}
+      ${n?`<button onclick="clearIntraday()" class="btn" style="opacity:.75;font-size:11px"
+        title="Throw away the chart data for all ${n} checked stock(s) and their BUY/SKIP verdicts, and re-rank without them. The recommendations themselves are untouched — it only undoes the checking.">Discard ${n} check${n===1?'':'s'}</button>`:''}
     </div>
     ${st&&st.top.length?`<div style="margin:2px 0 8px">${st.top.map(chip).join('')}</div>`:''}
-    ${st&&(st.confirmed.length||st.rejected.length)?`<div style="margin:0 0 8px;font-size:12px;line-height:1.7">
-      ${st.confirmed.map(r=>`<div><span style="color:var(--green);font-weight:700">✓ BUY</span>
-        <b>${escHtml(r.symbol)}</b> <span style="color:var(--t3)">still clears the bar — ${escHtml(r.intradayWhy||'')}</span></div>`).join('')}
-      ${st.rejected.map(r=>`<div><span style="color:var(--red);font-weight:700">✗ SKIP</span>
-        <b>${escHtml(r.symbol)}</b> <span style="color:var(--t3)">no longer clears the bar — ${escHtml(r.intradayWhy||'')}</span></div>`).join('')}
-    </div>`:''}
+
     ${t?`<textarea id="intradayBox" rows="4" placeholder="Paste ${escHtml(t)}'s 5-minute chart table \u2014 header, rows, and the summary block underneath if it is there."
         style="width:100%;box-sizing:border-box;font-family:var(--mono,monospace);font-size:12px;padding:8px;background:var(--bg);color:var(--t1);border:1px solid var(--amber);border-radius:6px"
         onpaste="setTimeout(onIntradayPaste,0)"></textarea>`:''}
