@@ -1,5 +1,5 @@
-const BUILD_TS='2026-08-17 13:42 IST'; // release build time (IST)
-const APP_VERSION=1144; // v1144: flow trajectory on a volume clock, the live resting book off the same paste, and a table that fits.
+const BUILD_TS='2026-08-17 14:23 IST'; // release build time (IST)
+const APP_VERSION=1145; // v1145: the intraday check is a loop - fetch the top few, re-rank, repeat until the list stops changing.
 // v1093: a baseline reward:risk MEASURED on the cross-section (last completed bhav session) instead of learned from the owner's own fills - reported on every row, deliberately not enforced. Includes v1092: position size split by Radar score / stop distance, so equally-scored names carry equal RUPEE risk, plus an opt-in Risk /trade cap.
 // v556: parse the NSE Market Activity Report (MA<date>.csv) — official Nifty %, advances/declines and sector index moves shown as market CONTEXT in the status bar (EOD data, display only, never fed into per-row scoring); MA added to the ℹ️ file manifest.
 // v555 market-cycle stage awareness (stateless, self-calibrating): per-row stage label (1 accumulation · 2 breakout · 3 event · 4 profit-booking · 5 re-accumulation · 6 second-leg); a quiet-accumulation signal (conjunction-of-percentiles) injected via the rocket-diagnostic weighting; sell-the-news decay off Recent earnings date (horizon = review days). v1065 makes the market-breadth gauge an entry-eligibility input while still never changing ranking.
@@ -3291,6 +3291,8 @@ function getForwardIndicatorEffects(){
 let INTRADAY_BARS={};        // symbol -> [{t,o,h,l,c}] most recent session last
 let INTRADAY_TARGET='';      // which row the next paste belongs to (the paste carries no symbol)
 let INTRADAY_RESULT=null;
+let INTRADAY_LOOP_N=3;      // how deep the check runs; owner-set, like Zerodha's 20-order cap
+function setIntradayLoopN(v){INTRADAY_LOOP_N=Math.max(1,Number(v)||3);renderTable();}
 
 function parseIntradayPaste(text,forSymbol){
   const sym=normSym(forSymbol||'');
@@ -3406,7 +3408,14 @@ function buildIntradayTrajectory(bars){
   return {cvd,cvdNet:run,cvdPct,totV,priceSlope:pRec,flowSlope:cRec,agree,regime,
           // Projected close at the recent pace, over the volume still expected today. Reported.
           projected:price[n-1]+pRec*(1-vx[n-1]/totV),
-          standing:Math.cbrt(Math.max(0,(cvdPct+1)/2)*(agree?1:0.25)
+          // THE STANDING MUST BE 0.5 AT "NO INFORMATION", because 0.5 is the neutral an unchecked
+          // row is given (v1145). The first version multiplied in an agreement term worth 1.0 when
+          // price and flow agreed, which inflated the geometric mean and put a SELLING stock at
+          // 0.615 - ABOVE neutral, so a stock the data condemned was still confirmed as a buy.
+          // Both surviving terms are flow and both are 0.5 at zero, so the mean is 0.5 at zero.
+          // Divergence needs no separate term: price up on falling flow already drives both of
+          // these down, which is what "distribution into strength" means.
+          standing:Math.sqrt(Math.max(0,Math.min(1,(cvdPct+1)/2))
                             *Math.max(0,Math.min(1,(cRec/totV+1)/2)))};
 }
 function getIntradayRead(sym){
@@ -3445,29 +3454,77 @@ function getIntradayRead(sym){
           // high. Geometric so a zero on any one of them cannot be averaged away.
           standing:traj?traj.standing:Math.cbrt(Math.max(0,(f15+1)/2)*Math.max(0,eff)*Math.max(0,pos))};
 }
-// THE RE-RANK. Enrichment applies to the stocks the owner actually pasted, and to nobody else.
-// The pasted rows are re-ordered AMONG THEMSELVES and take over each other's existing slots - the
-// same set of ranks and the same set of scores, permuted by what the intraday path says. That is
-// why this needs no new magnitude and cannot distort a row that has no data: the distribution is
-// untouched, only the occupancy changes. Applying it twice gives the same answer.
+// THE RE-RANK, v1145. Enrichment must be able to push a stock PAST rows that have no data, or the
+// loop the owner described cannot run: *"it gathers the data of our top 2-3 buyable recommendations,
+// adjusts the math based on this data, sees if they are still top buyable recommendations and if
+// not, repeats."* v1143 permuted the pasted rows among their OWN slots, which is safe and useless
+// here - three selling stocks could only shuffle within ranks 1-3 and rank 4 could never surface.
+//
+// So the intraday standing multiplies the row's standing percentile and everything is re-percentiled,
+// exactly as the order book does (v1139/v1141). A row with NO intraday data takes the neutral
+// midpoint - never its own standing, which is the v1139 trap that let unenriched rows sweep the top.
+// The 4th power in the score then does the amplifying: on the release-day fixtures AGIIL lands at
+// 0.93 of neutral and UFLEX at 1.15, which is a 2.3x swing once raised.
 function applyIntradayReorder(rows){
   if(!rows||!rows.length) return 0;
-  const enriched=[];
+  let n=0;
   for(const r of rows){
     const read=getIntradayRead(r.symbol);
-    if(!read) { r.intraday=null; continue; }
-    r.intraday=read;
-    enriched.push(r);
+    r.intraday=read||null;
+    if(read) n++;
   }
-  if(enriched.length<2) return enriched.length;
-  // The slots these rows collectively hold, best first.
-  const slots=enriched.map(r=>({rank:r.rank,score:r.score})).sort((a,b)=>a.rank-b.rank);
-  // Their order under the intraday read, best first. Ties fall back to the score they already had,
-  // so the enrichment can only REORDER on evidence and never shuffle on noise.
-  const order=[...enriched].sort((a,b)=>(b.intraday.standing-a.intraday.standing)||(b.score-a.score));
-  order.forEach((r,i)=>{r.rank=slots[i].rank;r.score=slots[i].score;r.rocketScore=slots[i].score;});
-  rows.sort((a,b)=>a.rank-b.rank);
-  return enriched.length;
+  if(!n) return 0;
+  const NEUTRAL=0.5;                 // the midpoint of a [0,1] standing: "no information"
+  rows.forEach(r=>{
+    const f=r.intraday?Math.max(0,Math.min(1,r.intraday.standing)):NEUTRAL;
+    r._iAdj=Math.max(0,(Number.isFinite(r.depthBlendPct)?r.depthBlendPct:r.setupPct))*f;
+  });
+  const ranked=rows.filter(r=>Number.isFinite(r._iAdj)).slice().sort((a,b)=>a._iAdj-b._iAdj);
+  const m=ranked.length;
+  ranked.forEach((r,i)=>{r._iPct=m>1?i/(m-1):1;});
+  rows.forEach(r=>{
+    if(!Number.isFinite(r._iPct)) return;
+    r.depthBlendPct=r._iPct;
+    r.score=+(100*Math.pow(r._iPct*(r.directionConfirmed?1:0),4)).toFixed(1);
+    r.rocketScore=r.score;
+    delete r._iAdj; delete r._iPct;
+  });
+  rows.sort((a,b)=>b.score-a.score||a.symbol.localeCompare(b.symbol));
+  rows.forEach((r,i)=>{r.rank=i+1;});
+  // THE VERDICT (owner: "it's a validation step. If it still passes our Buy thresholds, I'll buy,
+  // else not."). The re-rank is the mechanism; this is the product. A checked stock is CONFIRMED
+  // only if it still clears the SAME bar the basket uses - nothing softer, nothing bespoke.
+  rows.forEach(r=>{
+    if(!r.intraday){r.intradayVerdict=null;r.intradayWhy=null;return;}
+    const passes=(typeof meetsRecommendationBar==='function')?meetsRecommendationBar(r):(r.score>=RECOMMEND_MIN_SCORE);
+    r.intradayVerdict=passes?'confirmed':'rejected';
+    const t=r.intraday.traj;
+    r.intradayWhy=t
+      ?`${t.regime} · net flow ${(t.cvdPct*100).toFixed(1)}% of everything traded`
+      +`${t.agree?'':' · price and flow DIVERGE'}`
+      :`first 15m ${r.intraday.first15Up?'up':'down'} · path ${(r.intraday.efficiency*100).toFixed(0)}% efficient`;
+  });
+  return n;
+}
+
+// THE LOOP'S STATE. Which of the current top recommendations still lack intraday data, and has the
+// list stopped moving? Converged means every name at the top has been checked AND survived the
+// check - which is the only honest definition of "these are the recommendations".
+function getIntradayLoopState(limit){
+  const N=Math.max(1,limit||3);
+  const pool=(Array.isArray(FILT)&&FILT.length?FILT:ALL).slice().sort((a,b)=>a.rank-b.rank);
+  const passing=pool.filter(r=>typeof meetsRecommendationBar==='function'?meetsRecommendationBar(r):true);
+  // When a round REJECTS the whole top, nothing clears the bar any more - and that is exactly when
+  // the next candidates matter most. Falling back to the best remaining rows keeps the loop running
+  // instead of going silent at the moment it has the most to say. The verdict is unaffected: those
+  // rows are only CANDIDATES to check, and a candidate is confirmed only by clearing the real bar.
+  const board=(passing.length?passing:pool).slice(0,N);
+  const need=board.filter(r=>!INTRADAY_BARS[normSym(r.symbol)]);
+  const source=(Array.isArray(ALL)?ALL:[]).filter(r=>r.intraday);
+  const confirmed=source.filter(r=>r.intradayVerdict==='confirmed');
+  const rejected=source.filter(r=>r.intradayVerdict==='rejected');
+  return {top:board,need,converged:board.length>0&&need.length===0,
+          checked:board.length-need.length,of:board.length,confirmed,rejected};
 }
 function radarAnalyze(headers,rawRows,supplements={},heldSymbols=new Set()){
   const _depthPctMap=(typeof getDepthPctMap==='function')?getDepthPctMap():{};
@@ -9325,9 +9382,12 @@ function onIntradayPaste(){
     const read=getIntradayRead(res.sym);
     INTRADAY_RESULT=Object.assign({},res,{read});
     el.value='';
-    INTRADAY_TARGET='';
     applyIntradayReorder(ALL);
-    scheduleApplyFilters();
+    applyFilters();
+    // The loop: re-rank, then point at whatever is now in the top and still unchecked. When nothing
+    // is left the list has SETTLED - every name at the top was checked and survived the check.
+    const st=getIntradayLoopState(INTRADAY_LOOP_N);
+    INTRADAY_TARGET=st.need.length?normSym(st.need[0].symbol):'';
     showToast(res.sym+': '+res.bars+' bars over '+res.sessions+' session'+(res.sessions>1?'s':'')
       +(res.live?' · LIVE book '+((res.live.imbalance>0?'+':'')+res.live.imbalance.toFixed(3)):'')
       +(read?(read.traj?' · '+read.regime.toUpperCase()+' · net flow '+(read.cvdPct*100).toFixed(1)+'% of volume'
@@ -9345,21 +9405,45 @@ function clearIntraday(){
 function intradayPasteBarHtml(){
   const n=Object.keys(INTRADAY_BARS).length;
   const t=INTRADAY_TARGET, res=INTRADAY_RESULT;
-  if(!t&&!n&&!res) return '';
-  return `<div style="margin:8px 0;padding:10px 14px;border:1px solid ${t?'var(--amber)':'var(--border)'};border-radius:8px;background:var(--bg2)">
+  const st=(typeof getIntradayLoopState==='function')?getIntradayLoopState(INTRADAY_LOOP_N):null;
+  if(!t&&!n&&!(st&&(st.need.length||st.top.length))) return '';
+  const chip=r=>{
+    const sym=normSym(r.symbol), has=!!INTRADAY_BARS[sym], sel=t===sym;
+    const rd=has?getIntradayRead(sym):null;
+    const reg=rd&&rd.regime;
+    const col=sel?'var(--amber)':reg==='accumulating'?'var(--green)':reg==='selling'?'var(--red)'
+             :reg?'var(--amber)':has?'var(--cyan)':'var(--t3)';
+    return `<button onclick="setIntradayTarget('${escHtml(sym)}')" title="${escHtml(reg?sym+': '+reg.toUpperCase():'Fetch '+sym+'\u2019s 5-minute chart data')}"
+      style="border:1px solid ${col};background:${sel?'rgba(245,158,11,.10)':'transparent'};border-radius:4px;
+      padding:2px 7px;margin:2px 4px 0 0;font-size:11px;color:${col};cursor:pointer">${escHtml(sym)}${has?' \u2713':''}</button>`;
+  };
+  const done=st&&st.converged;
+  return `<div style="margin:8px 0;padding:10px 14px;border:1px solid ${t?'var(--amber)':done?'var(--green)':'var(--border)'};border-radius:8px;background:var(--bg2)">
     <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-bottom:6px">
-      <span class="st-l">Intraday enrichment</span>
-      ${t?`<b style="color:var(--amber)">pasting for ${escHtml(t)}</b>`:`<span style="font-size:11px;color:var(--t3)">click <b>5m</b> on a row to add its chart data</span>`}
-      <span style="font-size:11px;color:var(--t3)">${n} stock${n===1?'':'s'} enriched</span>
-      ${n?`<button onclick="clearIntraday()" class="btn" style="opacity:.75;font-size:11px">Clear</button>`:''}
+      <span class="st-l">Intraday check</span>
+      ${st?`<span style="font-size:12px;color:${done?'var(--green)':'var(--t2)'}">
+        ${done?`<b>settled</b> — the top ${st.of} have all been checked and held their place`
+              :`checked <b>${st.checked}</b> of the top <b>${st.of}</b> — fetch the rest, then see if the list still says the same thing`}</span>`:''}
+      <select onchange="setIntradayLoopN(this.value)" style="background:var(--bg);color:var(--t2);border:1px solid var(--border);border-radius:4px;font-size:11px;padding:1px 4px">
+        ${[2,3,5,10].map(k=>`<option value="${k}"${k===INTRADAY_LOOP_N?' selected':''}>top ${k}</option>`).join('')}
+      </select>
+      ${n?`<button onclick="clearIntraday()" class="btn" style="opacity:.75;font-size:11px">Clear (${n})</button>`:''}
     </div>
-    ${t?`<textarea id="intradayBox" rows="4" placeholder="Paste ${escHtml(t)}'s 5-minute chart table here — header row and all."
+    ${st&&st.top.length?`<div style="margin:2px 0 8px">${st.top.map(chip).join('')}</div>`:''}
+    ${st&&(st.confirmed.length||st.rejected.length)?`<div style="margin:0 0 8px;font-size:12px;line-height:1.7">
+      ${st.confirmed.map(r=>`<div><span style="color:var(--green);font-weight:700">✓ BUY</span>
+        <b>${escHtml(r.symbol)}</b> <span style="color:var(--t3)">still clears the bar — ${escHtml(r.intradayWhy||'')}</span></div>`).join('')}
+      ${st.rejected.map(r=>`<div><span style="color:var(--red);font-weight:700">✗ SKIP</span>
+        <b>${escHtml(r.symbol)}</b> <span style="color:var(--t3)">no longer clears the bar — ${escHtml(r.intradayWhy||'')}</span></div>`).join('')}
+    </div>`:''}
+    ${t?`<textarea id="intradayBox" rows="4" placeholder="Paste ${escHtml(t)}'s 5-minute chart table \u2014 header, rows, and the summary block underneath if it is there."
         style="width:100%;box-sizing:border-box;font-family:var(--mono,monospace);font-size:12px;padding:8px;background:var(--bg);color:var(--t1);border:1px solid var(--amber);border-radius:6px"
         onpaste="setTimeout(onIntradayPaste,0)"></textarea>`:''}
     ${res&&!res.ok?`<div style="font-size:11px;color:var(--amber);margin-top:5px">${escHtml(res.why)}</div>`:''}
-    ${res&&res.ok&&res.read?`<div style="font-size:11px;color:var(--t3);margin-top:5px">read <b style="color:var(--green)">${escHtml(res.sym)}</b> — ${res.bars} bars over ${res.sessions} session(s)${
-      res.read.traj?` · <b style="color:${res.read.regime==='accumulating'?'var(--green)':res.read.regime==='selling'?'var(--red)':'var(--amber)'}">${escHtml(res.read.regime.toUpperCase())}</b> · net flow ${(res.read.cvdPct*100).toFixed(1)}% of everything traded · price and flow ${res.read.traj.agree?'agree':'<b style="color:var(--amber)">diverge</b>'} · projected ${res.read.projected.toFixed(2)}`
-      :` · first 15m <b style="color:${res.read.first15Up?'var(--green)':'var(--red)'}">${res.read.first15Up?'UP':'DOWN'}</b> · path ${(res.read.efficiency*100).toFixed(0)}% efficient <span style="color:var(--amber)">(that paste had no volume column)</span>`
+    ${res&&res.ok&&res.read?`<div style="font-size:11px;color:var(--t3);margin-top:5px">read <b style="color:var(--green)">${escHtml(res.sym)}</b> \u2014 ${res.bars} bars over ${res.sessions} session(s)${
+      res.live?` \u00b7 LIVE book <b style="color:${res.live.imbalance>0?'var(--green)':'var(--red)'}">${(res.live.imbalance>0?'+':'')+res.live.imbalance.toFixed(3)}</b>`:''}${
+      res.read.traj?` \u00b7 <b style="color:${res.read.regime==='accumulating'?'var(--green)':res.read.regime==='selling'?'var(--red)':'var(--amber)'}">${escHtml(res.read.regime.toUpperCase())}</b> \u00b7 net flow ${(res.read.cvdPct*100).toFixed(1)}% of everything traded \u00b7 projected ${res.read.projected.toFixed(2)}`
+      :` \u00b7 first 15m <b style="color:${res.read.first15Up?'var(--green)':'var(--red)'}">${res.read.first15Up?'UP':'DOWN'}</b> <span style="color:var(--amber)">(no volume column in that paste)</span>`
     }</div>`:''}
   </div>`;
 }
