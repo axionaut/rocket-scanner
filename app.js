@@ -1,5 +1,5 @@
-const BUILD_TS='2026-08-17 20:11 IST'; // release build time (IST)
-const APP_VERSION=1165; // v1165: a cached daily series per stock, one small request a day; recorded, with a trigger that fires when it can be graded.
+const BUILD_TS='2026-08-18 09:21 IST'; // release build time (IST)
+const APP_VERSION=1166; // v1166: a pre-open book from an earlier session stops voting on today's score.
 // v1093: a baseline reward:risk MEASURED on the cross-section (last completed bhav session) instead of learned from the owner's own fills - reported on every row, deliberately not enforced. Includes v1092: position size split by Radar score / stop distance, so equally-scored names carry equal RUPEE risk, plus an opt-in Risk /trade cap.
 // v556: parse the NSE Market Activity Report (MA<date>.csv) — official Nifty %, advances/declines and sector index moves shown as market CONTEXT in the status bar (EOD data, display only, never fed into per-row scoring); MA added to the ℹ️ file manifest.
 // v555 market-cycle stage awareness (stateless, self-calibrating): per-row stage label (1 accumulation · 2 breakout · 3 event · 4 profit-booking · 5 re-accumulation · 6 second-leg); a quiet-accumulation signal (conjunction-of-percentiles) injected via the rocket-diagnostic weighting; sell-the-news decay off Recent earnings date (horizon = review days). v1065 makes the market-breadth gauge an entry-eligibility input while still never changing ranking.
@@ -9911,9 +9911,9 @@ function intradayPasteBarHtml(){
       <select onchange="setIntradayLoopN(this.value)" style="background:var(--bg);color:var(--t2);border:1px solid var(--border);border-radius:4px;font-size:11px;padding:1px 4px">
         ${[2,3,5,10].map(k=>`<option value="${k}"${k===INTRADAY_LOOP_N?' selected':''}>top ${k}</option>`).join('')}
       </select>
-      ${KITE_API?`<button onclick="fetchCandlesInApp()" class="btn" style="font-size:11px;border-color:var(--green);color:var(--green)"
+      ${KITE_API?`<button onclick="fetchCandlesInApp()" class="btn" style="font-size:11px;border-color:${KITE_API.tokenValid===false?'var(--red)':'var(--green)'};color:${KITE_API.tokenValid===false?'var(--red)':'var(--green)'}"
           title="Fetches the 5-minute candles for the names above and reads them straight in. Nothing to paste, nothing to run.">Fetch candles</button>
-        ${KITE_API.hasToken?'':`<input id="kiteTokenBox" type="password" placeholder="paste Kite enctoken once"
+        ${(KITE_API.hasToken&&KITE_API.tokenValid!==false)?'':`${KITE_API.hasToken?`<span style="font-size:11px;color:var(--red);font-weight:700" title="The helper used the stored token against Kite and it was rejected. It rotates on every login, so this happens the morning after you log in again.">token expired — paste a fresh one</span>`:''}<input id="kiteTokenBox" type="password" placeholder="paste Kite enctoken once"
             style="font-size:11px;padding:2px 6px;background:var(--bg);color:var(--t1);border:1px solid var(--amber);border-radius:4px;width:190px"
             title="Kite tab → F12 → Application → Cookies → kite.zerodha.com → copy the value of enctoken. It rotates on every login.">
           <button onclick="saveKiteToken()" class="btn" style="font-size:11px">Save token</button>`}`
@@ -11919,7 +11919,24 @@ function recordDepthMarketRead(){
     FS.set(DEPTH_MARKET_STORE,store);
   }catch(e){console.warn('recordDepthMarketRead failed',e);}
 }
+// v1166: A BOOK FROM AN EARLIER SESSION IS NOT EVIDENCE ABOUT TODAY.
+// The same defect v1162 fixed for the 5-minute read, found on the depth path a day later and worse:
+// the intraday read only touches stocks that were checked, while this one is blended into EVERY row
+// through depthBlendPct. `Market Depth.csv` is written by dev/fetch-preopen.js, which nothing invokes
+// automatically - so the file sits at whatever day it was last captured, and on 2026-08-18 the board
+// was being scored with the 17-Aug pre-open book.
+//
+// The file states its own session (BookDate) and parseMarketDepth has always recorded it; nothing
+// ever compared it to the session clock. Now a non-current book returns NO map, which makes every
+// row fall to the neutral median exactly as a bookless row does (the v1139 rule: absence takes the
+// middle of the distribution, never a free pass). The SESSION BOUNDARY is the veto, as in v1162.
+function depthBookIsCurrent(){
+  const d=NSE_DEPTH_META&&String(NSE_DEPTH_META.date||'').slice(0,10);
+  if(!/^\d{4}-\d{2}-\d{2}$/.test(d||'')) return null;   // no stamp: unknown, fail open as before
+  return d===getSessionDate();
+}
 function getDepthPctMap(){
+  if(depthBookIsCurrent()===false) return {};
   const src=[];
   for(const k in NSE_DEPTH){
     const r=NSE_DEPTH[k];
