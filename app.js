@@ -1,5 +1,5 @@
-const BUILD_TS='2026-08-18 18:34 IST'; // release build time (IST)
-const APP_VERSION=1186; // v1186: no fetch on the first page load; candle files written newest-first.
+const BUILD_TS='2026-08-18 18:59 IST'; // release build time (IST)
+const APP_VERSION=1187; // v1187: every deferred item built; terms weight themselves by measured edge.
 // v1093: a baseline reward:risk MEASURED on the cross-section (last completed bhav session) instead of learned from the owner's own fills - reported on every row, deliberately not enforced. Includes v1092: position size split by Radar score / stop distance, so equally-scored names carry equal RUPEE risk, plus an opt-in Risk /trade cap.
 // v556: parse the NSE Market Activity Report (MA<date>.csv) — official Nifty %, advances/declines and sector index moves shown as market CONTEXT in the status bar (EOD data, display only, never fed into per-row scoring); MA added to the ℹ️ file manifest.
 // v555 market-cycle stage awareness (stateless, self-calibrating): per-row stage label (1 accumulation · 2 breakout · 3 event · 4 profit-booking · 5 re-accumulation · 6 second-leg); a quiet-accumulation signal (conjunction-of-percentiles) injected via the rocket-diagnostic weighting; sell-the-news decay off Recent earnings date (horizon = review days). v1065 makes the market-breadth gauge an entry-eligibility input while still never changing ranking.
@@ -117,7 +117,7 @@ const SHARED_FILTER_STORE='rs_filters_shared';
 const TRADE_INPUTS_STORE='rs_trade_inputs_v1';
 let _lastTradeInputSig=''; // gate brain writes to genuine trade-input changes, not every keystroke
 const ALL_STORE='rs_data';
-const ALL_STORE_SCHEMA='radar_composite_v10'; // v1098 caches the true multi-session drift.
+const ALL_STORE_SCHEMA='radar_composite_v11'; // v1098 caches the true multi-session drift.
 const HOLD_STORE='rs_holdings';
 const ORDERS_STORE='rs_orders';
 const POS_STORE='rs_positions';
@@ -929,6 +929,7 @@ function renderTradingDashboardNow(){
   // applyFilters renders the Rankings panels; without scanner rows it never runs, so the
   // portfolio-only tables are rendered directly in that case.
   try{if(ALL.length) applyFilters(); else renderRankingsPanels();}catch(e){console.warn('Fast ranking render failed',e);}
+  try{ const _bf=backfillPickUpStreak(); if(_bf) console.log('upStreak backfilled onto '+_bf+' picks'); }catch(e){}
   schedulePerformanceRender();
 }
 
@@ -1551,6 +1552,145 @@ function resultsDayMoveContext(resultsDate){
   all.sort((a,b)=>a-b);
   return {moves,cut:all[Math.floor(all.length*0.9)],n:all.length,date:resultsDate};
 }
+// ── UP-STREAK: A MULTI-DAY TERM THAT ARMS ITSELF FROM THE DATA IT HAS ────────────────────────
+// Owner, 2026-08-18: *"Think properly of a solution once and implement it right there so that it
+// runs right now...not in 2 weeks, not after 20 sessions... With data growing daily, the program
+// should evolve naturally - not wait for 20 days and then fail because your first guess was wrong."*
+//
+// WHAT IT IS. Consecutive up closes ending at the newest stored session. Measured within cohort on
+// 183 resolved picks it separates at 64.7% (295 pairs, above 50% in 5 of 8 cohorts, leave-one-out
+// 61.2-70.5%), with a hit rate of 9 / 12 / 13 / 27% at 0 / 1 / 2 / 3+ days. For scale the app's own
+// score sat at 43% when v1127 measured it. `pathEff` - the feature reasoning favoured - measured
+// 49.3%, exactly nothing, which is why this is measured rather than argued.
+//
+// WHERE IT COMES FROM, AND WHY THAT MATTERS. NOT the per-stock daily files bought from Kite: those
+// exist only for stocks the app has already fetched, i.e. the ones already at the top of the board,
+// so using them would advantage exactly the rows that have them (the v1139 trap). `rs_price_history_v1`
+// is the free bhav-copy close for the WHOLE market - 2,624 symbols against 284 purchased files,
+// growing a session per upload at zero request cost. Verified before wiring: it reproduces the
+// Kite-derived streak at 95.0% exact / 97.9% within one day across 281 overlapping symbols.
+//
+// A short store CENSORS the streak - 8 stored sessions cannot show a 9-day run - which is harmless
+// because the signal is monotone and saturates by 3, and it un-censors itself as the store grows.
+function buildUpStreakMap(){
+  const raw=FS.get(PRICE_HISTORY_STORE);
+  const store=(raw&&typeof raw==='object'&&raw.sessions)?raw.sessions:null;
+  if(!store) return null;
+  const dates=Object.keys(store).sort();
+  if(dates.length<2) return null;                 // one session cannot show a streak
+  const out={};
+  const last=store[dates[dates.length-1]]||{};
+  for(const sym of Object.keys(last)){
+    if(!(phClose(last[sym])>0)) continue;
+    let n=0;
+    for(let i=dates.length-1;i>0;i--){
+      const a=phClose((store[dates[i]]||{})[sym]), b=phClose((store[dates[i-1]]||{})[sym]);
+      if(!(a>0)||!(b>0)) break;
+      if(a>b) n++; else break;
+    }
+    out[sym]=n;
+  }
+  return {map:out,sessions:dates.length,asOf:dates[dates.length-1]};
+}
+
+// HOW MUCH IT COUNTS IS MEASURED LIVE, EVERY SESSION, FROM THE APP'S OWN RESOLVED PICKS.
+// This is the whole point: there is no trigger to wait for and no threshold to cross. The weight IS
+// the measurement, so the term is inert on the day it ships if the data does not support it, arms
+// itself as picks resolve, strengthens if it keeps separating, and DISARMS ON ITS OWN if it stops.
+//
+//   w = clamp(2 x (concordance - 0.5), 0, 1) x pairs/(pairs + priorPairs)
+//
+// The first factor is 0 at 50% (no information) and 1 at 100%. The second is confidence by volume,
+// shrunk toward zero with the MEAN PAIRS PER COHORT as the prior weight - the same self-derived
+// shrinkage the timing windows use, so no constant is typed anywhere in this function.
+//
+// CONCORDANCE IS MEASURED WITHIN COHORT (v1127/v1134). A cohort is one snapshot, so comparing across
+// cohorts compares TIMES OF DAY - which is exactly how a 41pp "extension predicts continuation"
+// result turned out to be an artefact. Control rows (v1128) are excluded: they are evidence about
+// score bands, not recommendations.
+function measureFieldEdge(field,opts){
+  const st=FS.get(RECOMMEND_OUTCOME_STORE);
+  const issues=(st&&st.issues)?st.issues:null;
+  const higherIsBetter=!(opts&&opts.lowerIsBetter);
+  if(!issues) return {field,w:0,conc:null,pairs:0,cohorts:0,why:'no resolved picks yet'};
+  let hi=0,pairs=0,cohorts=0;
+  for(const d of Object.keys(issues)){
+    const picks=(issues[d].picks||[]).filter(p=>!p.control
+      &&['rocket','stopped','expired','ambiguous'].indexOf(String(p.rocketOutcome))>=0
+      &&Number.isFinite(p[field]));
+    const W=picks.filter(p=>String(p.rocketOutcome)==='rocket');
+    const L=picks.filter(p=>String(p.rocketOutcome)!=='rocket');
+    if(!W.length||!L.length) continue;
+    let n=0;
+    for(const a of W) for(const b of L){
+      if(a[field]===b[field]) continue;           // a tie discriminates nothing
+      n++;
+      if(higherIsBetter?(a[field]>b[field]):(a[field]<b[field])) hi++;
+    }
+    if(n){ pairs+=n; cohorts++; }
+  }
+  if(!pairs) return {field,w:0,conc:null,pairs:0,cohorts:0,why:'no discriminating pairs recorded yet'};
+  const conc=hi/pairs;
+  const prior=pairs/cohorts;                       // mean pairs per cohort - self-derived, not typed
+  const w=Math.max(0,Math.min(1,2*(conc-0.5)))*(pairs/(pairs+prior));
+  return {field,w,conc,pairs,cohorts,why:null};
+}
+function measureUpStreakEdge(){ return measureFieldEdge('upStreak'); }
+// BACKFILL: THE EVIDENCE ALREADY EXISTS, SO USE IT TODAY RATHER THAN WAITING TWO DAYS FOR IT.
+//
+// A term whose weight comes from resolved picks starts at zero weight on the day it ships, because
+// no pick carries the field yet - which is "wait for the data" wearing a different hat. It does not
+// have to be: `rs_price_history_v1` holds dated closes for the WHOLE market, so for any pick issued
+// inside the stored window the streak AS OF THE DAY BEFORE ISSUE is recoverable exactly.
+//
+// NO LOOKAHEAD. The streak is counted from closes STRICTLY BEFORE the issue date - at 11:00 on the
+// issue day the only completed daily bars are through yesterday. A pick whose issue date falls
+// outside the stored window is left alone rather than approximated.
+//
+// Idempotent: it only fills a pick that has no `upStreak`, so it cannot run twice, and it never
+// touches any other field on the pick. Runs once per load, off the render path.
+function backfillPickUpStreak(){
+  const raw=FS.get(PRICE_HISTORY_STORE);
+  const store=(raw&&typeof raw==='object'&&raw.sessions)?raw.sessions:null;
+  const st=FS.get(RECOMMEND_OUTCOME_STORE);
+  const issues=(st&&st.issues)?st.issues:null;
+  if(!store||!issues) return 0;
+  const dates=Object.keys(store).sort();
+  if(dates.length<2) return 0;
+  let filled=0;
+  for(const d of Object.keys(issues)){
+    const before=dates.filter(x=>x<d);              // STRICTLY before the issue date
+    if(before.length<2) continue;
+    for(const p of (issues[d].picks||[])){
+      if(p.upStreak!=null||!p.symbol) continue;
+      const sym=normSym(p.symbol);
+      let n=0,ok=false;
+      for(let i=before.length-1;i>0;i--){
+        const a=phClose((store[before[i]]||{})[sym]), b=phClose((store[before[i-1]]||{})[sym]);
+        if(!(a>0)||!(b>0)) break;
+        ok=true;
+        if(a>b) n++; else break;
+      }
+      if(ok){ p.upStreak=n; filled++; }
+    }
+  }
+  if(filled){ FS.set(RECOMMEND_OUTCOME_STORE,st); invalidateUpStreakCache(); }
+  return filled;
+}
+
+let _upStreakMemo=null;
+function getUpStreakContext(){
+  const raw=FS.get(PRICE_HISTORY_STORE);
+  const key=(raw&&raw.sessions)?Object.keys(raw.sessions).sort().join('|'):'';
+  if(_upStreakMemo&&_upStreakMemo.key===key) return _upStreakMemo.ctx;
+  const built=buildUpStreakMap();
+  const edge=measureUpStreakEdge();
+  const ctx=built?Object.assign({},built,{edge}):{map:null,sessions:0,asOf:null,edge};
+  _upStreakMemo={key,ctx};
+  return ctx;
+}
+function invalidateUpStreakCache(){ _upStreakMemo=null; }
+
 let _r4dMemo=null;
 function getResultsDayMove(sym,resultsDate){
   if(!sym||!resultsDate) return null;
@@ -2406,6 +2546,8 @@ function recordRecommendationOutcomeScan(scan){
         // v1127: carried through the whitelist deliberately — v1085 added barrier fields to the
         // caller and NOT here, and every pick silently lost them for 9 releases. Same trap.
         stage:p.stage??null,
+        upStreak:Number.isFinite(+p.upStreak)?+p.upStreak:null,
+        upStreakPct:Number.isFinite(+p.upStreakPct)?+p.upStreakPct:null,
         issueMinute:Number.isFinite(+p.issueMinute)?+p.issueMinute:null,
         issueClock:p.issueClock??null,
         compositePct:p.compositePct??null,
@@ -3304,8 +3446,26 @@ function buildMarketTimingWindows(){
   const k0=n/keys.length;                                  // the mean window size IS the prior weight
   keys.forEach(k=>{const g=W[k];
     g.rate=g.hit/g.n;
-    g.shrunk=(g.n*g.rate+k0*base)/(g.n+k0);
-    g.peerRank=base>0?Math.max(0,Math.min(1,g.shrunk/(2*base))):0.5;});
+    g.shrunk=(g.n*g.rate+k0*base)/(g.n+k0);});
+  // THE MAPPING SCALES ITSELF TO THE SPREAD IT ACTUALLY MEASURES.
+  //
+  // It was `shrunk/(2*base)`, which is anchored on the pooled rate and therefore compresses every
+  // real difference into almost nothing: measured 2026-08-18 on 4,394 graded bars the shrunk rates
+  // span 45.7%-53.3% against a 51.0% pool, and that mapping turned the whole 7.58pp range into a
+  // ONE-RANK move in depth. The windows genuinely separate now (at v1170 they did not, on 231 bars),
+  // and a mapping that cannot express the separation is the same as not measuring it.
+  //
+  // NB a Leg 3 note claimed the opposite - that the mapping amplified 7.58pp into a 1-to-19 swing.
+  // That was a RANK-based mapping invented by the probe, never the shipped code. Corrected here.
+  //
+  // Now: distance from the pooled rate, divided by the OBSERVED spread. Self-calibrating in both
+  // directions - when the windows are indistinguishable the spread collapses and every window lands
+  // on 0.5, which is exactly the default depth, so a thin or noisy inventory reproduces the old
+  // behaviour on its own. No constant, and nothing to re-tune as the inventory grows.
+  const shr=keys.map(k=>W[k].shrunk);
+  const spread=Math.max(...shr)-Math.min(...shr);
+  keys.forEach(k=>{const g=W[k];
+    g.peerRank=spread>0?Math.max(0,Math.min(1,0.5+(g.shrunk-base)/(2*spread))):0.5;});
   return {windows:keys.map(k=>W[k]),graded:n,base};
 }
 let _mktWinMemo=null;
@@ -3436,12 +3596,24 @@ function getForwardIndicatorEffects(){
   Object.keys(log).forEach(name=>{
     const e=log[name];
     const arr=Array.isArray(e?.e5)?e.e5.map(Number).filter(Number.isFinite):[];
-    if(arr.length<IW_MIN_SESSIONS) return;
+    if(arr.length<2) return;                                // a t-statistic needs at least two
     const n=arr.length, mean=arr.reduce((a,b)=>a+b,0)/n;
     const sd=Math.sqrt(arr.reduce((a,b)=>a+(b-mean)*(b-mean),0)/(n-1));
     const t=sd>0?mean/(sd/Math.sqrt(n)):null;
     if(!(t!=null&&Math.abs(t)>=IW_T_CRIT)) return;          // not distinguishable from noise
-    raw.push({name,mean,n,t});
+    // THE SESSION COUNT SHRINKS THE EFFECT, IT NO LONGER GATES IT.
+    //
+    // `arr.length < IW_MIN_SESSIONS` was a cliff: four sessions of evidence counted for exactly
+    // nothing and the fifth counted in full. That is a bet that the fifth session is where the
+    // measurement becomes true, and if the bet is wrong nobody finds out until it has already been
+    // driving the score. Owner, 2026-08-18: *"With data growing daily, the program should evolve
+    // naturally - not wait for 20 days and then fail because your first guess was wrong."*
+    //
+    // Shrunk by n/(n+IW_MIN_SESSIONS) the same effect ramps continuously - 1 session counts 17%,
+    // 5 count 50%, 20 count 80% - and IW_T_CRIT still refuses anything indistinguishable from
+    // noise, so a thin sample can only ever contribute a fraction of an already-significant
+    // measurement. The old behaviour is the limit of this one, not a special case of it.
+    raw.push({name,mean:mean*(n/(n+IW_MIN_SESSIONS)),n,t});
   });
   const peak=raw.reduce((m,r)=>Math.max(m,Math.abs(r.mean)),0);
   const map=new Map();
@@ -4460,7 +4632,25 @@ function radarAnalyze(headers,rawRows,supplements={},heldSymbols=new Set()){
     const _vwapR4d=vwapI>=0?radarNum(raw[vwapI]):null;
     const _priceR4d=radarNum(raw[priceI]);
     const _reaccum=!!(_vwapR4d>0&&_priceR4d>=_vwapR4d&&chgOpenArr[ri]>0&&_partReady);
-    const _digestionRisk=!!(_r4d&&_r4d.wasRocket&&!_reaccum);
+    // MARGIN DIRECTION IS THE SECOND RELEASE VALVE, AND THIS IS THE ONE PLACE IT CAN WORK.
+    //
+    // R3 wants the quarter's operating-margin direction AT THE PRINT and can never have it: the
+    // vendor refreshes `Operating margin %, Trailing 12 months` 1-3 days AFTER the filing. R4d's
+    // window is D+1 onward, so here the late arrival is IN TIME - the whole reason the deferral was
+    // scoped this narrowly rather than dropped. `getSessionWatchStore` has been recording the value
+    // and the date it last MOVED since v1117; nothing read it until now.
+    //
+    // A TTM window drops the year-ago quarter as it adds the new one, so the SIGN of the change is
+    // exactly the sign of the new quarter's margin against the year-ago quarter - arithmetic, not a
+    // proxy. A first observation returns null and releases nothing: silence is not a signal.
+    //
+    // It only ever RELEASES, never blocks. A results rocket that is digesting on EXPANDING margins
+    // is the case R4d's own evidence never covered (E42 XPROINDIA, E63 TCPLPACK and the rest were
+    // all read on the price tape alone), so widening the valve cannot make R4d fire on anything it
+    // was not already firing on.
+    const _mdir=(_r4d&&_r4d.wasRocket)?getMarginDirection(_sym):null;
+    const _marginRelease=!!(_mdir&&_mdir.direction==='expanding');
+    const _digestionRisk=!!(_r4d&&_r4d.wasRocket&&!_reaccum&&!_marginRelease);
     const _r4dRecord={
       inDigestion:_inDigestion,
       daysSinceResults:_daysSince,
@@ -4468,6 +4658,9 @@ function radarAnalyze(headers,rawRows,supplements={},heldSymbols=new Set()){
       topDecileCut:_r4d?_r4d.topDecileCut:null,
       wasResultsRocket:_r4d?_r4d.wasRocket:null,
       reaccumulating:_reaccum,
+      marginDirection:_mdir?_mdir.direction:null,
+      marginDelta:_mdir?_mdir.delta:null,
+      marginRelease:_marginRelease,
       blocked:_digestionRisk,
       reason:_digestionRisk
         ? `Rocketed ${_r4d.movePct}% on its results day (${_recEarn}), above that session's top-decile cut of ${_r4d.topDecileCut}%, and is not re-accumulating now. RULES.md R4d: a results rocket gives back sharply on the following sessions even when the numbers were good.`
@@ -4826,6 +5019,42 @@ function radarAnalyze(headers,rawRows,supplements={},heldSymbols=new Set()){
         const fz=Number.isFinite(r.feasibility)?Math.max(0,Math.min(1,r.feasibility)):1;
         r.depthBlendPct=Math.sqrt(Math.max(0,r.setupPct)*Math.max(0,dp))*fz;
       });
+      // ── THE MULTI-DAY TERM, WEIGHTED BY ITS OWN MEASURED EDGE ───────────────────────────────
+      // `w` comes from measureFieldEdge(), which grades this exact field against the app's own
+      // resolved picks every session. AT w = 0 THE LINE BELOW IS THE IDENTITY - Math.pow(base,1) x
+      // Math.pow(us,0) === base - so shipping this changes nothing until the data says otherwise,
+      // and it un-ships itself the same way. There is no flag and no trigger; the evidence IS the
+      // switch. Applied BEFORE the re-percentile, so it changes the ORDER and never the scale
+      // (the v1139 lesson: a blend that moves the distribution silently redefines what a score of
+      // 95 means).
+      const _us=getUpStreakContext();
+      const _uw=(_us&&_us.edge&&_us.edge.w>0)?_us.edge.w:0;
+      if(_uw>0&&_us.map){
+        const vals=[];
+        rows.forEach(r=>{const v=_us.map[normSym(r.symbol)]; if(Number.isFinite(v)){r.upStreak=v; vals.push(v);}});
+        if(vals.length>1){
+          const srt=vals.slice().sort((x,y)=>x-y);
+          // MIDRANK percentile. The distribution is heavily tied - most stocks are on a 0-day
+          // streak - and an upper-bound rank would hand every member of a tie block the top of it,
+          // which is the exact defect v1084 fixed in radarPct.
+          const pct=v=>{
+            let lo=0,hiI=0;
+            for(const x of srt){ if(x<v) lo++; if(x<=v) hiI++; }
+            return ((lo+hiI)/2)/srt.length;
+          };
+          const seen=rows.map(r=>Number.isFinite(r.upStreak)?pct(r.upStreak):null).filter(v=>v!=null).sort((x,y)=>x-y);
+          // ABSENCE TAKES THE MEDIAN OF WHAT WAS ACTUALLY OBSERVED, never a free pass (v1139/v1174).
+          const med=seen.length?seen[Math.floor(seen.length/2)]:0.5;
+          rows.forEach(r=>{
+            r.upStreakPct=Number.isFinite(r.upStreak)?pct(r.upStreak):med;
+            const base=Math.max(0,r.depthBlendPct);
+            r.depthBlendPct=Math.pow(base,1-_uw)*Math.pow(Math.max(1e-9,r.upStreakPct),_uw);
+          });
+        }
+      }else if(_us&&_us.map){
+        // still record it even when it counts for nothing, so the edge can be measured tomorrow
+        rows.forEach(r=>{const v=_us.map[normSym(r.symbol)]; if(Number.isFinite(v)) r.upStreak=v;});
+      }
       const byBlend=rows.filter(r=>Number.isFinite(r.depthBlendPct)).slice()
         .sort((a,b)=>a.depthBlendPct-b.depthBlendPct);
       const n=byBlend.length;
@@ -12370,7 +12599,7 @@ function compactRankingRows(rows){
     high1d:s.high1d??null,low1d:s.low1d??null,vwap:s.vwap??null,bollUpper:s.bollUpper??null,keltUpper:s.keltUpper??null,
     price1h:s.price1h??null,price15m:s.price15m??null,price5m:s.price5m??null,
     stage:s.stage??null,stageLabel:s.stageLabel??null,legTrendPct:s.legTrendPct??null,legHighPct:s.legHighPct??null,
-    igniteReady:!!s.igniteReady,igniteStrength:s.igniteStrength??null,ignitePct:s.ignitePct??0,compositePct:s.compositePct??null,setupPct:s.setupPct??null,feasibility:s.feasibility??null,directionConfirmed:!!s.directionConfirmed,marketCap:s.marketCap??null,
+    igniteReady:!!s.igniteReady,igniteStrength:s.igniteStrength??null,ignitePct:s.ignitePct??0,compositePct:s.compositePct??null,setupPct:s.setupPct??null,upStreak:s.upStreak??null,upStreakPct:s.upStreakPct??null,feasibility:s.feasibility??null,directionConfirmed:!!s.directionConfirmed,marketCap:s.marketCap??null,
     entryReady:s.entryReady!==false,entryTiming:s.entryTiming||null,
     preResults:s.preResults?{resultsDate:s.preResults.resultsDate,resultsSource:s.preResults.resultsSource,
       daysToResults:s.preResults.daysToResults,weekChangePct:s.preResults.weekChangePct,
@@ -12465,6 +12694,12 @@ function applySavedFiltersForMode(mode){
             // GRADED. It drives no score, no selection, no sizing — and it has never been stored,
             // so its value has never been measurable in either direction.
             stage:Number.isFinite(+s.stage)?+s.stage:null,
+            // The multi-day term. Recorded WHETHER OR NOT it currently counts for anything,
+            // because its weight is measured from these very records - a field that is not
+            // stored can never earn its way in, which is how upStreak sat unmeasurable while
+            // being the strongest separator in the data.
+            upStreak:Number.isFinite(+s.upStreak)?+s.upStreak:null,
+            upStreakPct:Number.isFinite(+s.upStreakPct)?+s.upStreakPct:null,
             compositePct:Number.isFinite(+s.compositePct)?+s.compositePct:null,
             ignitePct:Number.isFinite(+s.ignitePct)?+s.ignitePct:null,
             setupPct:Number.isFinite(+s.setupPct)?+s.setupPct:null,
