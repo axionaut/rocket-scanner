@@ -1,5 +1,5 @@
-const BUILD_TS='2026-08-18 10:51 IST'; // release build time (IST)
-const APP_VERSION=1172; // v1172: open positions say what to DO, and hiding the fetch list no longer throws the data away.
+const BUILD_TS='2026-08-18 10:59 IST'; // release build time (IST)
+const APP_VERSION=1173; // v1173: the position decision reads the tape only, and the fetched inventory survives a reload.
 // v1093: a baseline reward:risk MEASURED on the cross-section (last completed bhav session) instead of learned from the owner's own fills - reported on every row, deliberately not enforced. Includes v1092: position size split by Radar score / stop distance, so equally-scored names carry equal RUPEE risk, plus an opt-in Risk /trade cap.
 // v556: parse the NSE Market Activity Report (MA<date>.csv) — official Nifty %, advances/declines and sector index moves shown as market CONTEXT in the status bar (EOD data, display only, never fed into per-row scoring); MA added to the ℹ️ file manifest.
 // v555 market-cycle stage awareness (stateless, self-calibrating): per-row stage label (1 accumulation · 2 breakout · 3 event · 4 profit-booking · 5 re-accumulation · 6 second-leg); a quiet-accumulation signal (conjunction-of-percentiles) injected via the rocket-diagnostic weighting; sell-the-news decay off Recent earnings date (horizon = review days). v1065 makes the market-breadth gauge an entry-eligibility input while still never changing ranking.
@@ -9201,44 +9201,51 @@ function getTurnoverAllocationCap(row){
 //   5. otherwise                 -> HOLD, with the distance left to target.
 function getPositionAction(sym,pos){
   const s=(Array.isArray(ALL)?ALL:[]).find(r=>normSym(r.symbol)===normSym(sym))||null;
-  const qty=Number(pos&&pos.qty)||0, avg=Number(pos&&pos.avg)||0;
-  const ltp=Number(pos&&(pos.ltp??pos.last))||(s?Number(s.price):0);
-  if(!(qty>0)||!(ltp>0)) return null;
-  const pnlPct=avg>0?(ltp/avg-1)*100:null;
-  const pol=s?getRowExitPolicy(s,ltp):null;
-  const tgt=pol&&pol.targetPct>0?pol.targetPct:null;
-  const stop=pol&&pol.stopPct>0?pol.stopPct:null;
+  const qty=Number(pos&&pos.qty)||0;
+  if(!(qty>0)) return null;
   const rd=getIntradayRead(sym);
   const tt=rd&&rd.current?rd.todayTraj:null;
-  const thin=tt&&Number.isFinite(tt.costRatio)&&tt.costRatio>0&&tt.costRatio<1;
-  const sold=tt&&tt.cvdPct<0;
 
-  if(tgt!=null&&pnlPct!=null&&pnlPct>=tgt)
-    return {act:'EXIT ALL',qty,tone:'green',why:'target reached ('+pnlPct.toFixed(1)+'% against '+tgt.toFixed(2)+'%)'};
+  // NO READ IS NOT A HOLD. Saying "hold" on no evidence is the thing this panel was doing wrong in
+  // a different costume. v1171 fetches held names automatically, so this clears itself.
+  if(!tt) return {act:'NEEDS DATA',qty:0,tone:'grey',
+    why:rd&&!rd.current?('last read was '+rd.on+', not this session'):'no 5-minute read for this session yet'};
+
+  // TWO INDEPENDENT READINGS OF SUPPLY AND DEMAND, both at their own natural zero:
+  //   sold - more was sold than bought this session (net flow below zero)
+  //   thin - it now costs FEWER shares to push the price down 1% than up 1% (cost ratio below 1)
+  // Neither is a chosen threshold: zero and parity are where the quantities change meaning.
+  const sold=tt.cvdPct<0;
+  const thin=Number.isFinite(tt.costRatio)&&tt.costRatio>0&&tt.costRatio<1;
+  const shares=n=>Math.round(n).toLocaleString('en-IN');
+
+  // BOTH readings against it - supply is arriving AND nothing is holding it up.
+  if(sold&&thin) return {act:'EXIT ALL',qty,tone:'red',
+    why:'sold into all session (net '+(100*tt.cvdPct).toFixed(0)+'%) and 1% down costs only '
+      +shares(tt.dnCost)+' shares against '+shares(tt.upCost)+' up'};
+  // ONE against it - reduce, do not abandon.
   if(sold||thin){
     const half=Math.max(1,Math.floor(qty/2));
-    const inProfit=pnlPct!=null&&pnlPct>0;
-    return inProfit
-      ? {act:'EXIT ALL',qty,tone:'red',why:sold?('being sold today, net flow '+(100*tt.cvdPct).toFixed(0)+'% - bank it')
-          :('nothing holding it up - 1% down costs '+Math.round(tt.dnCost).toLocaleString('en-IN')
-            +' shares against '+Math.round(tt.upCost).toLocaleString('en-IN')+' up')}
-      : {act:'EXIT '+half,qty:half,tone:'red',why:(sold?'being sold today':'supply is cheaper than demand')
-          +', and it is underwater - cut half'};
+    return {act:'EXIT '+half,qty:half,tone:'red',
+      why:sold?('net selling this session ('+(100*tt.cvdPct).toFixed(0)+'% of everything traded), but demand still costs more to move')
+              :('nothing holding it up - 1% down costs '+shares(tt.dnCost)+' shares against '+shares(tt.upCost)+' up, though flow is still net positive')};
   }
-  if(stop!=null&&pnlPct!=null&&pnlPct<=-stop)
-    return {act:'EXIT ALL',qty,tone:'red',why:'past its stop ('+pnlPct.toFixed(1)+'% against -'+stop.toFixed(2)+'%)'};
-  if(s&&tt&&!sold&&!thin&&typeof meetsRecommendationBar==='function'&&meetsRecommendationBar(s)){
+  // BOTH readings for it, and the tape is still pushing - size the add from the cushion so a top-up
+  // can never turn a position in profit into a losing one (v1070).
+  const pressing=Number.isFinite(tt.pressurePct)&&tt.pressurePct>0;
+  if(pressing&&s){
     try{
       const buyP=getBuyPrice(s);
       const cap=getHeldTopUpNotionalCap(s,buyP);
       const add=(cap>0&&buyP>0)?Math.floor(cap/buyP):0;
       if(add>0) return {act:'ADD '+add,qty:add,tone:'green',
-        why:'still clears the buy bar and the blended cost stays safe (\u20b9'+Math.round(add*buyP).toLocaleString('en-IN')+')'};
+        why:'bought all session (net +'+(100*tt.cvdPct).toFixed(0)+'%), 1% up costs '+shares(tt.upCost)
+          +' shares against '+shares(tt.dnCost)+' down, and '+tt.pressurePct.toFixed(2)+'% of buying is still unspent'};
     }catch(e){}
   }
-  const away=(tgt!=null&&pnlPct!=null)?(tgt-pnlPct):null;
   return {act:'HOLD',qty:0,tone:'amber',
-    why:away!=null?(away.toFixed(1)+'% to target'):'no target on file yet'};
+    why:'demand still costs more to move than supply (net +'+(100*tt.cvdPct).toFixed(0)+'%'
+      +(Number.isFinite(tt.costRatio)?', ratio '+tt.costRatio.toFixed(2):'')+')'};
 }
 function getHeldTopUpNotionalCap(s,buyP,heldMap=null){
   const held=(heldMap||getHeldPositionMap())[s.symbol];
@@ -10216,6 +10223,7 @@ async function detectKiteApi(){
     KITE_API=r.ok?await r.json():null;
   }catch(e){ KITE_API=null; }
   try{ renderTable(); }catch(e){}
+  if(KITE_API) { try{ loadIntradayInventory(); }catch(e){} }
   return KITE_API;
 }
 async function saveKiteToken(){
@@ -10234,6 +10242,38 @@ async function saveKiteToken(){
 }
 // The whole loop, in one press: ask the local server for the candles, hand them to the SAME parser
 // a paste uses, re-rank, and point at whatever still needs checking.
+// v1172: RELOAD THE INVENTORY FROM DISK, NOT FROM KITE. INTRADAY_BARS is memory-only, so every
+// page reload used to lose every read and re-earn it out of the rate budget. The helper already
+// holds the files; this restores them in ONE local request that never touches Kite, and it runs
+// before the first render so a held position is not labelled NEEDS DATA for data we already have.
+async function loadIntradayInventory(){
+  if(!KITE_API) return 0;
+  try{
+    const r=await fetch(KITE_HELPER+'/api/kite/inventory',{cache:'no-store'});
+    const j=await r.json();
+    if(!j||!j.ok||!j.data) return 0;
+    let n=0;
+    for(const sym of Object.keys(j.data)){
+      const rows=j.data[sym];
+      if(!Array.isArray(rows)||rows.length<3) continue;
+      // Through the ONE parser, exactly as a fetch or a paste would be (the v1148 lesson).
+      const csv=['"Date","Open","High","Low","Close","% Change","% Change vs Average","Volume"']
+        .concat(rows.map(c=>{
+          const d=String(c[0]);
+          const dt=d.slice(8,10)+'/'+d.slice(5,7)+' '+d.slice(11,16);
+          return ['"'+dt+'"','"'+c[1]+'"','"'+c[2]+'"','"'+c[3]+'"','"'+c[4]+'"','"0"','"0"','"'+(c[5]||0)+'"'].join(',');
+        })).join('\n');
+      const res=parseIntradayPaste(csv,sym);
+      if(res&&res.ok) n++;
+    }
+    if(n){
+      try{ applyIntradayReorder(ALL); applyFilters(); }catch(e){}
+      try{ renderRankingsPanels(); }catch(e){}
+      try{ renderTable(); }catch(e){}
+    }
+    return n;
+  }catch(e){ return 0; }
+}
 async function fetchCandlesInApp(limit,opts){
   const auto=!!(opts&&opts.auto)||!!(limit&&limit.auto);
   if(limit&&typeof limit==='object') limit=null;
