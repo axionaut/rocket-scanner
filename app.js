@@ -1,5 +1,5 @@
-const BUILD_TS='2026-08-18 10:06 IST'; // release build time (IST)
-const APP_VERSION=1169; // v1169: surveillance removes a stock only when NSE actually restricted it, not for a high PE.
+const BUILD_TS='2026-08-18 10:28 IST'; // release build time (IST)
+const APP_VERSION=1170; // v1170: every pick records the time of day it was issued, so the question can finally be measured.
 // v1093: a baseline reward:risk MEASURED on the cross-section (last completed bhav session) instead of learned from the owner's own fills - reported on every row, deliberately not enforced. Includes v1092: position size split by Radar score / stop distance, so equally-scored names carry equal RUPEE risk, plus an opt-in Risk /trade cap.
 // v556: parse the NSE Market Activity Report (MA<date>.csv) — official Nifty %, advances/declines and sector index moves shown as market CONTEXT in the status bar (EOD data, display only, never fed into per-row scoring); MA added to the ℹ️ file manifest.
 // v555 market-cycle stage awareness (stateless, self-calibrating): per-row stage label (1 accumulation · 2 breakout · 3 event · 4 profit-booking · 5 re-accumulation · 6 second-leg); a quiet-accumulation signal (conjunction-of-percentiles) injected via the rocket-diagnostic weighting; sell-the-news decay off Recent earnings date (horizon = review days). v1065 makes the market-breadth gauge an entry-eligibility input while still never changing ranking.
@@ -2386,6 +2386,8 @@ function recordRecommendationOutcomeScan(scan){
         // v1127: carried through the whitelist deliberately — v1085 added barrier fields to the
         // caller and NOT here, and every pick silently lost them for 9 releases. Same trap.
         stage:p.stage??null,
+        issueMinute:Number.isFinite(+p.issueMinute)?+p.issueMinute:null,
+        issueClock:p.issueClock??null,
         compositePct:p.compositePct??null,
         ignitePct:p.ignitePct??null,
         setupPct:p.setupPct??null,
@@ -3210,15 +3212,128 @@ function isGreenScore(score){const s=Number(score);return isFinite(s)&&s>=RECOMM
 // The one test for "may this row be recommended and exported". Rank is the stock's own Radar rank,
 // never its position in the filtered list, so a row can never be promoted into the basket merely
 // because the rows above it were removed for some unrelated reason.
+// ── v1170: THE TIME OF DAY CONDITIONS HOW DEEP THE BOARD IS TRUSTED ─────────────────────────
+// Owner, 2026-08-18: "There should be recommendations at all times doesn't mean there should be
+// shit recommendations. It means recommendations should be based on the time of the day with all
+// the fucking data and diagnostics that you have!"
+//
+// He is right and v1068 was misread - by me, back at him. "Basket export is an OPERATIONAL action
+// that must always emit" is about AVAILABILITY. It never said the clock has no bearing on QUALITY,
+// and the two got conflated when the clock was stripped from selection along with the export path.
+//
+// The evidence has existed since v1064 and drives nothing: `buildTradeTimingModel` grades the
+// owner's OWN executed entries - 547 of them over 97 trading days as of 2026-08-18 - into 13
+// half-hour windows, each carrying a within-day peer rank (0.5 = an entry that ranked exactly
+// mid-pack against its same-day peers), already shrunk by median coverage and checked for
+// leave-one-day-out direction stability. Measured spread: 10:00 at 0.582 and 09:30 at 0.562 against
+// 13:00/13:30 at 0.374 and the 15:00 close at 0.339. It was rendered on the Performance tab under a
+// caption reading "descriptive, never a recommendation rule".
+//
+// WHAT MOVES IS DEPTH, NOT AVAILABILITY. The bar reaches deeper in a window where his entries have
+// historically ranked well and shallower where they have not, so the board is never empty - rank 1
+// always qualifies - but a weak hour has to clear a narrower gate. The scale is the model's own
+// peer rank against its own neutral point, so no magnitude is invented: 0.5 reproduces
+// RECOMMEND_MAX_RANK exactly, and the observed range moves it between roughly 7 and 12.
+// THE SOURCE IS THE MARKET, NOT THE OWNER'S FILLS (owner, 2026-08-18): *"That table is based on
+// previous logic... The new logic is that now you have 5-minute data for stocks. That table, across
+// all the stocks you have in your inventory till that point in time should be your source - not my
+// trades."* He is right on both counts. `buildTradeTimingModel` grades 547 of HIS entries over 97
+// days, executed under many different scorers - some of which changed what was recommendable BY HOUR
+// (v1065's pre-09:30 block, v1069's minute>=570 gate) - so it measures his execution inside old
+// logic, not the market's own shape. The accumulated 5-minute files measure the market and nothing
+// else.
+//
+// THE QUESTION, asked of every stock in the inventory: when a stock ignites in this half-hour - an
+// up bar on above-median volume for its own session - does the move still hold thirty minutes later,
+// inside the same session? That is the actionable time-of-day fact and it is free of what the app
+// recommended or what the owner bought.
+//
+// SHRUNK TOWARD THE POOLED RATE BY ITS OWN SAMPLE, with the prior weight set to the MEAN window
+// size, so nothing is typed: a window carrying its share of the data speaks at full strength, a thin
+// one is pulled back to the pooled base. Measured on the first day of inventory (14 stocks, 17
+// stock-sessions, 231 graded bars) the windows swing 25% to 76% on n<40 - noise - and shrinkage
+// correctly leaves the depth at its default. It sharpens by itself as files accumulate.
+function buildMarketTimingWindows(){
+  const W={};
+  let n=0;
+  for(const sym in INTRADAY_BARS){
+    const bars=INTRADAY_BARS[sym]; if(!bars||bars.length<12) continue;
+    const byDay={};
+    bars.forEach(b=>{const k=istDayKey(b.t);(byDay[k]??=[]).push(b);});
+    for(const day in byDay){
+      const b=byDay[day]; if(b.length<12) continue;
+      const vols=b.map(x=>Number(x.v)||0).slice().sort((x,y)=>x-y);
+      const medV=vols[Math.floor(vols.length/2)];
+      if(!(medV>0)) continue;
+      for(let i=0;i<b.length-6;i++){
+        const x=b[i];
+        if(!(x.c>x.o&&(Number(x.v)||0)>medV)) continue;   // an ignition bar, in its own session's terms
+        const fwd=b[i+6].c/x.c-1;
+        const dt=new Date(x.t);
+        const mins=dt.getHours()*60+dt.getMinutes();
+        const key=String(Math.floor(mins/30)*30);
+        const g=(W[key]??={key,n:0,hit:0});
+        g.n++; if(fwd>0) g.hit++; n++;
+      }
+    }
+  }
+  const keys=Object.keys(W);
+  if(!keys.length) return {windows:[],graded:0,base:null};
+  const hits=keys.reduce((t,k)=>t+W[k].hit,0);
+  const base=hits/n;
+  const k0=n/keys.length;                                  // the mean window size IS the prior weight
+  keys.forEach(k=>{const g=W[k];
+    g.rate=g.hit/g.n;
+    g.shrunk=(g.n*g.rate+k0*base)/(g.n+k0);
+    g.peerRank=base>0?Math.max(0,Math.min(1,g.shrunk/(2*base))):0.5;});
+  return {windows:keys.map(k=>W[k]),graded:n,base};
+}
+let _mktWinMemo=null;
+function getMarketTimingWindows(){
+  const sig=Object.keys(INTRADAY_BARS).length+'|'+
+    Object.keys(INTRADAY_BARS).reduce((t,k)=>t+(INTRADAY_BARS[k]?INTRADAY_BARS[k].length:0),0);
+  if(_mktWinMemo&&_mktWinMemo.sig===sig) return _mktWinMemo.v;
+  const v=buildMarketTimingWindows(); _mktWinMemo={sig,v}; return v;
+}
+function getTimingDepth(){
+  try{
+    const m=getMarketTimingWindows();
+    if(!m.windows.length) return {depth:RECOMMEND_MAX_RANK,peer:null,window:null,graded:0,
+      why:'no 5-minute inventory yet - depth is the default'};
+    const c=istClock();
+    if(!c||!Number.isFinite(c.mins)) return {depth:RECOMMEND_MAX_RANK,peer:null,window:null,why:'no clock'};
+    const key=String(Math.floor(c.mins/30)*30);
+    const g=m.windows.find(x=>x.key===key);
+    const hh=Math.floor(+key/60),mm=+key%60;
+    const label=String(hh).padStart(2,'0')+':'+String(mm).padStart(2,'0');
+    if(!g) return {depth:RECOMMEND_MAX_RANK,peer:null,window:label,graded:m.graded,
+      why:'this half-hour has no graded bars yet'};
+    const depth=Math.max(1,Math.min(RECOMMEND_MAX_RANK*2,Math.round(RECOMMEND_MAX_RANK*2*g.peerRank)));
+    return {depth,peer:g.peerRank,window:label,graded:m.graded,n:g.n,raw:g.rate,base:m.base,
+      why:'ignitions in this half-hour held 30 minutes later '+(100*g.rate).toFixed(0)+'% of the time over '
+        +g.n+' bars (pooled '+(100*m.base).toFixed(0)+'%), shrunk to '+g.peerRank.toFixed(3)};
+  }catch(e){ return {depth:RECOMMEND_MAX_RANK,peer:null,window:null,why:'timing model unavailable'}; }
+}
+let _timingDepthMemo=null;
+function timingDepth(){
+  const c=istClock(); const k=c&&Number.isFinite(c.mins)?Math.floor(c.mins/30):-1;
+  // The memo carries the EVIDENCE SIZE, not just the half-hour: the first call happens during the
+  // initial render before any inventory is loaded, and a bare clock key cached "no inventory" and
+  // served it for the rest of the half hour.
+  const n=(()=>{try{return getMarketTimingWindows().graded||0;}catch(e){return 0;}})();
+  if(_timingDepthMemo&&_timingDepthMemo.k===k&&_timingDepthMemo.n===n) return _timingDepthMemo.v;
+  const v=getTimingDepth(); _timingDepthMemo={k,n,v}; return v;
+}
 function meetsRecommendationBar(s){
   if(!s) return false;
   // v1168: a stock whose CURRENT session is net selling is not a buy, no matter what the score or
   // the multi-day flow says. This is a removal, not an annotation - it drops out of the list, out of
   // SELECTED and out of the basket. It only fires on a real current-session trajectory (three bars
   // with volume), so an empty opening print cannot reject anything.
+  if(s.noHistory===true) return false;   // v1170: no multi-day history, so nothing to rank it on
   if(s.intradaySellingToday===true) return false;
   const rank=Number(s.rank);
-  return isGreenScore(s.score)&&Number.isFinite(rank)&&rank<=RECOMMEND_MAX_RANK;
+  return isGreenScore(s.score)&&Number.isFinite(rank)&&rank<=timingDepth().depth;
 }
 // Score number + proportional bar, both tinted by the band.
 function radarScoreCell(score,title=''){
@@ -3862,7 +3977,7 @@ function radarAnalyze(headers,rawRows,supplements={},heldSymbols=new Set()){
   const turnI=radarIdx(headers,'Price × volume (turnover), 1 day'),relI=radarIdx(headers,'Relative volume, 1 day'),relAtI=radarIdx(headers,'Relative volume at time'),volChgI=radarIdx(headers,'Volume change %, 1 day'),gapI=radarIdx(headers,'Gap %, 1 day'),adrI=radarIdx(headers,'Average daily range %'),atrI=radarIdx(headers,'Average true range %, 14, 1 day'),atrWeekI=radarIdx(headers,'Average true range %, 14, 1 week'),volI=radarIdx(headers,'Volatility, 1 day'),highI=radarIdx(headers,'High, 1 day'),lowI=radarIdx(headers,'Low, 1 day'),openI=radarIdx(headers,'Open, 1 day'),mcapI=radarIdx(headers,'Market capitalization');
   const bollUpperI=radarIdx(headers,'Bollinger Bands, 20, 1 day, Upper'),keltUpperI=radarIdx(headers,'Keltner channels, 20, 1 day, Upper');
   const priceHourI=radarIdx(headers,'Price change %, 1 hour'),price15I=radarIdx(headers,'Price change %, 15 minutes'),price5I=radarIdx(headers,'Price change %, 5 minutes');
-  const changeOpenI=radarIdx(headers,'Change from open %, 1 day'),perf1mI=radarIdx(headers,'Performance %, 1 month'),perf3mI=radarIdx(headers,'Performance %, 3 months');
+  const changeOpenI=radarIdx(headers,'Change from open %, 1 day'),perf1mI=radarIdx(headers,'Performance %, 1 month'),perf3mI=radarIdx(headers,'Performance %, 3 months'),perf1yI=radarIdx(headers,'Performance %, 1 year');
   const vwapI=radarIdx(headers,'Volume-weighted average price, 1 day');
   // v1071 ignition denominator: today's volume against a 60-DAY baseline. 'Relative volume, 1 day'
   // uses a ~10-day baseline, so a stock that has been busy all fortnight already looks normal;
@@ -3949,6 +4064,31 @@ function radarAnalyze(headers,rawRows,supplements={},heldSymbols=new Set()){
   const sectorMedians=Object.fromEntries(Object.entries(sectorBuckets).map(([s,a])=>[s,radarQuant([...a].sort((x,y)=>x-y),.5)??0]));
   // WS1/R1: medium-term trend metric (1M+3M performance) and its cross-sectional distribution. Its
   // percentile self-calibrates the chase-penalty relief below — no fixed magic number.
+  // ── v1170: A STOCK WITH NO HISTORY HAS NO MULTI-DAY FEATURES, ONLY FICTION ────────────────
+  // Owner, 2026-08-18: "both DHOOTTRANS and MOLBIO seem to be new stocks. Can you check if that's
+  // something we should consider?" Both listed on 2026-08-17 - Kite returns TWO daily candles for
+  // each - and the scorer ranked them #2 and #3 of 2,983.
+  //
+  // Every multi-day feature is degenerate for such a row, and degenerate in a FLATTERING direction:
+  // the whole 52-week range was made today, so the stock sits at its 52-week high BY CONSTRUCTION
+  // and collects full credit on breakout proximity for free. SMA/Bollinger/Donchian/Ichimoku fall
+  // back, ATR-14 is BLANK (so the stop and target rest on a fallback), and the cross-sectional
+  // percentile ranks all of that against 2,983 rows of real history.
+  //
+  // THE DETECTOR IS EXACT AND NEEDS NO THRESHOLD. TradingView collapses every performance window to
+  // "since listing" when the history is shorter than the window, so a young stock reports the SAME
+  // number for 1 month, 3 months and 1 year. MOLBIO: 6.7908163 for all three. TCS: 42.92 / -1.47 /
+  // -24.84. Measured scope 2026-08-18: 24 rows of 2,983, 18 tradeable - and it catches LCL and
+  // MVELECTRO, the two rows that were "the only ones left standing in the whole market" during the
+  // v1112 incident and were never gated.
+  const _noHist={};
+  rawRows.forEach(raw=>{
+    const sym=normSym(raw[symbolI]||''); if(!sym) return;
+    const a1=perf1mI>=0?radarNum(raw[perf1mI]):null;
+    const a3=perf3mI>=0?radarNum(raw[perf3mI]):null;
+    const ay=perf1yI>=0?radarNum(raw[perf1yI]):null;
+    _noHist[sym]=(a1!=null&&a3!=null&&ay!=null&&a1===a3&&a3===ay);
+  });
   const trendArr=rawRows.map(raw=>{const a=perf1mI>=0?radarNum(raw[perf1mI]):null,b=perf3mI>=0?radarNum(raw[perf3mI]):null;return(a===null||b===null)?null:a+b;});
   const trendSorted=trendArr.filter(v=>v!==null).sort((x,y)=>x-y);
   // WS4/R6: sector-relative day move per row (post-neutralisation; blanked rows are null).
@@ -4438,6 +4578,7 @@ function radarAnalyze(headers,rawRows,supplements={},heldSymbols=new Set()){
     // alone. The ^4 top-weighting still crushes mid-percentiles, so a merely-median ignition
     // cannot lift a weak row into contention.
     r.compositePct=radarPct(rawScores,r.rawScore);
+    r.noHistory=!!_noHist[normSym(r.symbol)];
     r.setupPct=Math.max(r.compositePct,r.ignitePct||0);
     // ── v1086: FEASIBILITY IS PART OF THE RANK, NOT A FILTER AFTER IT ─────────────────────────
     // Owner, 2026-07-31: "Rank 1 should be the one stock which has the highest chance of achieving
@@ -10152,6 +10293,11 @@ function applyFilters(){
     // v1080 (owner): a row that can never be allocated a single share is not a recommendation.
     // Structural causes only (see getAllocationBlockReason) — never the capital split.
     const allocBlock=getAllocationBlockReason(s,allocCtx);
+    if(s.noHistory===true){
+      REMOVED_ROWS.push({s,reason:'nohistory',
+        detail:'listed too recently - 1-month, 3-month and 1-year performance are the same number, so every multi-day feature is fiction'});
+      return false;
+    }
     if(s.intradaySellingToday===true){
       REMOVED_ROWS.push({s,reason:'flow',detail:s.intradayWhy||'being sold in the current session'});
       return false;
@@ -11875,6 +12021,18 @@ function applySavedFiltersForMode(mode){
             targetPct,stopPct,
             high1dAtIssue:Number(s.high1d)>0?Number(s.high1d):null,
             low1dAtIssue:Number(s.low1d)>0?Number(s.low1d):null,
+            // v1170: WHAT TIME OF DAY WAS THIS ISSUED? Owner, 2026-08-18: "shouldn't you consider
+            // the time of the day also in your recommendation pipeline?" The clock has had no
+            // authority since v1068 by his own decision, and that stands - but v1134 concluded that
+            // comparing cohorts IS comparing times of day, i.e. the effect is large enough to swamp
+            // stock-level signal, and in 38 cohorts NOT ONE PICK EVER CARRIED ITS ISSUE TIME. So the
+            // question has been declared confounded and left unmeasurable at the same time.
+            // Recorded as MINUTES FROM THE OPEN, which is what a session cares about, plus the raw
+            // clock. It drives nothing; it makes the question answerable.
+            issueMinute:(()=>{const c=istClock();return Number.isFinite(c&&c.mins)?c.mins-DAY_START_MIN:null;})(),
+            issueClock:(()=>{const c=istClock();if(!c||!Number.isFinite(c.mins))return null;
+              const h=Math.floor(c.mins/60),m=c.mins%60;
+              return String(h).padStart(2,'0')+':'+String(m).padStart(2,'0');})(),
             rocketOutcome:ROCKET_OUTCOME.PENDING,rocketHorizonDays:ROCKET_HORIZON_DAYS,
             features:{}};
         });
