@@ -1,5 +1,5 @@
-const BUILD_TS='2026-08-18 15:06 IST'; // release build time (IST)
-const APP_VERSION=1182; // v1182: fetch the top 5 until they settle, then holdings, then today's real movers.
+const BUILD_TS='2026-08-18 15:25 IST'; // release build time (IST)
+const APP_VERSION=1183; // v1183: the fetch is a validator that walks down the ranking until something clears the bar.
 // v1093: a baseline reward:risk MEASURED on the cross-section (last completed bhav session) instead of learned from the owner's own fills - reported on every row, deliberately not enforced. Includes v1092: position size split by Radar score / stop distance, so equally-scored names carry equal RUPEE risk, plus an opt-in Risk /trade cap.
 // v556: parse the NSE Market Activity Report (MA<date>.csv) — official Nifty %, advances/declines and sector index moves shown as market CONTEXT in the status bar (EOD data, display only, never fed into per-row scoring); MA added to the ℹ️ file manifest.
 // v555 market-cycle stage awareness (stateless, self-calibrating): per-row stage label (1 accumulation · 2 breakout · 3 event · 4 profit-booking · 5 re-accumulation · 6 second-leg); a quiet-accumulation signal (conjunction-of-percentiles) injected via the rocket-diagnostic weighting; sell-the-news decay off Recent earnings date (horizon = review days). v1065 makes the market-breadth gauge an entry-eligibility input while still never changing ranking.
@@ -10233,18 +10233,28 @@ function fetchBudgetLeft(){
 // Held names are fetched for OBSERVATION, not for a verdict. Nothing here recommends re-buying: the
 // v1070 rule that held is not a reason to refuse a stock is untouched, and so is the v1162 rule that
 // only a read from the CURRENT session may move anything.
-// ── WHAT GETS FETCHED, IN WHAT ORDER (owner, 2026-08-18) ────────────────────────────────────
-// *"Fetch ranks <=5 (keep fetching these until the updated list is out of rank 5), then fetch open
-// positions and then top movers (>=10% which are not blocked by hard filters) today."*
+// ── WHAT GETS FETCHED, AND WHY IT IS ONLY A VALIDATOR (owner, 2026-08-18) ───────────────────
+// *"I meant it as a validator only, but that maybe it could keep validating until it finds
+// something to buy."*
 //
-// Both numbers are OWNER RISK PREFERENCES, flagged as such rather than dressed up as derived - the
-// same category as Zerodha's 20-order cap and RECOMMEND_MAX_RANK.
-const FETCH_TOP_RANK=5;      // owner: validate the top five, and keep at it until they settle
-const FETCH_MOVER_PCT=10;    // owner: a "top mover" is up 10% or more today
+// THE 5-MINUTE READ CANNOT DISCOVER ANYTHING, and that settles the whole design. It only moves the
+// standing of stocks that have been FETCHED, and 12 requests against 1,895 tradeable rows can only
+// ever touch names the composite already surfaced. It answers "is this specific pick still good
+// right now" and nothing else. Finding a pick is a different job, done on data that costs nothing:
+// `rs_price_history_v1` holds daily OHLC for the WHOLE market from the NSE bhav copy - 2,624 symbols
+// - and grows by a free session every upload.
+//
+// So the queue is exactly the validation set, and it EXTENDS DOWN THE RANKING UNTIL SOMETHING
+// PASSES. The top FETCH_TOP_RANK are the live candidates and are kept fresh; if none of them clears
+// the buy bar, rank 6, 7, 8 ... are pulled in until one does or the press is spent. That is the loop
+// v1145 described - *"when a round rejects the whole top, that is exactly when the next candidates
+// matter most"* - applied to the queue rather than only to the panel.
+//
+// The >=10% mover tier is GONE. Fetching a stock that has already run 16% cannot help buy it
+// earlier, and it was competing for slots with the names actually up for decision.
+const FETCH_TOP_RANK=5;      // owner: the live candidate set, kept fresh
 function intradayFetchJobs(limit){
   const tok=r=>({s:normSym(r.symbol||r.sym||''),t:KITE_TOKEN[normSym(r.symbol||r.sym||'')]||0});
-  // "Needs data" means it holds no read, a read from an earlier session, or a read whose newest bar
-  // predates the last COMPLETED 5-minute boundary (v1171).
   const lastBarBoundary=()=>{const c=istClock();if(!c||!Number.isFinite(c.mins))return null;
     return Math.floor((c.mins-5)/5)*5;};
   const stale=sym=>{
@@ -10257,17 +10267,23 @@ function intradayFetchJobs(limit){
   const seen=new Set();
   const take=arr=>arr.map(tok).filter(j=>j.t>0&&!seen.has(j.s)&&stale(j.s)&&(seen.add(j.s),true));
 
-  // TIER 1 - THE TOP FIVE BY RANK, and it re-arms itself: the read re-ranks the board, so whoever is
-  // in the top five AFTER a fetch is queued on the next one. That is the loop the owner described -
-  // keep going until the top five stop changing - and it needs no extra machinery, because a name
-  // that has just been read is no longer stale and a newcomer is.
   const board=(Array.isArray(FILT)&&FILT.length?FILT:ALL)
-    .filter(r=>Number.isFinite(r.rank)&&r.rank<=FETCH_TOP_RANK)
-    .slice().sort((a,b)=>a.rank-b.rank);
-  const jobs=take(board);
+    .filter(r=>Number.isFinite(r.rank)).slice().sort((a,b)=>a.rank-b.rank);
 
-  // TIER 2 - WHAT IS ALREADY OWNED (v1163). A stock leaves the board the day it is bought, so
-  // without this its file stops growing exactly when the position starts mattering.
+  // Has anything actually cleared the bar on a CURRENT read? If yes, the search is over and we only
+  // keep the live candidates fresh. If no, keep walking down the ranking.
+  // POSITION on the displayed board, not global rank. Ranks 1-6 are routinely removed by the
+  // filters - surveillance, no headroom, direction - so on the live board the first recommendable
+  // row was rank 7 and a `rank<=5` test queued nothing at all. "The top five" means the first five
+  // rows the owner can actually act on.
+  const haveBuy=board.some(r=>r.intradayVerdict==='confirmed'&&r.intraday&&r.intraday.current);
+  // Walk only as deep as this press could possibly spend: building 166 job objects and checking
+  // freshness on every one, to send 12, is wasted work on the render path.
+  const reach=haveBuy?FETCH_TOP_RANK:Math.max(FETCH_TOP_RANK,FETCH_MAX_PER_RUN*3);
+  const jobs=take(board.slice(0,reach));
+
+  // OPEN POSITIONS (v1163): a stock leaves the board the day it is bought, so without this its file
+  // stops growing exactly when the position starts mattering. Never a buy verdict - observation.
   let held=[];
   try{
     const m=(typeof getCombinedOpenPositionMap==='function')?getCombinedOpenPositionMap():{};
@@ -10275,32 +10291,13 @@ function intradayFetchJobs(limit){
   }catch(e){ held=[]; }
   held.forEach(j=>{j.held=true;});
 
-  // TIER 3 - TODAY'S REAL MOVERS, and only ones that could actually be BOUGHT. A name removed by a
-  // hard filter can never be recommended, so spending a request on it buys nothing: surveillance
-  // (v1169, genuine restrictions only), no multi-day history (v1170), non-EQ, or below the tradeable
-  // line. The >=10% bar replaces the old "top N by day %" pool, so there is no invented depth left -
-  // the owner's threshold IS the pool.
-  let movers=[];
-  try{
-    const blocked=s=>{
-      const f=NSE_SURV[s.symbol]; if(f&&f.length) return true;
-      if(s.noHistory===true) return true;
-      if(s.eqEligible===false||s.basketEligible===false) return true;
-      return false;
-    };
-    const pool=(Array.isArray(ALL)?ALL:[])
-      .filter(r=>Number.isFinite(r.priceChange)&&r.priceChange>=FETCH_MOVER_PCT
-                 &&(r.turnover||0)>=2500000&&(r.price||0)>=10&&!blocked(r))
-      .slice().sort((x,y)=>(y.priceChange||0)-(x.priceChange||0));
-    movers=take(pool);
-    movers.forEach(j=>{j.mover=true;});
-  }catch(e){ movers=[]; }
-
-  const all=jobs.concat(held,movers);
+  const all=jobs.concat(held);
   if(all.length) return {ok:true,jobs:all,symbols:all.map(j=>j.s),
-                         recs:jobs.length,held:held.length,movers:movers.length};
-  const missing=board.filter(r=>!KITE_TOKEN[normSym(r.symbol)]).map(r=>r.symbol);
-  return {ok:false,why:missing.length?('no Kite instrument token for '+missing.join(', ')):'nothing left to check'};
+                         recs:jobs.length,held:held.length,movers:0,
+                         searching:!haveBuy,depth:haveBuy?FETCH_TOP_RANK:null};
+  const missing=board.slice(0,FETCH_TOP_RANK).filter(r=>!KITE_TOKEN[normSym(r.symbol)]).map(r=>r.symbol);
+  return {ok:false,why:missing.length?('no Kite instrument token for '+missing.join(', '))
+    :(haveBuy?'the top of the board is validated and something clears the bar':'nothing left to check')};
 }
 const INTRADAY_FETCH_DAYS=3;   // sessions of 5-minute candles to ask for
 
@@ -10436,7 +10433,7 @@ async function fetchCandlesInApp(limit,opts){
   say('Fetching '+jobs.map(j=>j.s).join(', ')+'…',3000);
   try{
     const q=jobs.map(j=>j.s+':'+j.t).join(',');
-    const res=await fetch(KITE_HELPER+'/api/kite/candles?daily=1&days='+INTRADAY_FETCH_DAYS+'&jobs='+encodeURIComponent(q),{cache:'no-store'});
+    const res=await fetch(KITE_HELPER+'/api/kite/candles?days='+INTRADAY_FETCH_DAYS+'&jobs='+encodeURIComponent(q),{cache:'no-store'});
     const j=await res.json();
     if(!j.ok){ say(j.why,8000,true); return; }
     const out=ingestKiteCandlePayload(JSON.stringify({rocketScanner:'candles',data:j.data}));
