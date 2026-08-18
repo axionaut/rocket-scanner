@@ -1,5 +1,5 @@
-const BUILD_TS='2026-08-18 11:21 IST'; // release build time (IST)
-const APP_VERSION=1175; // v1175: a sell beyond the inventory opens a short instead of leaving phantom shares behind.
+const BUILD_TS='2026-08-18 11:31 IST'; // release build time (IST)
+const APP_VERSION=1176; // v1176: same-day buys pair with same-day sells before the carried holding, as Zerodha does.
 // v1093: a baseline reward:risk MEASURED on the cross-section (last completed bhav session) instead of learned from the owner's own fills - reported on every row, deliberately not enforced. Includes v1092: position size split by Radar score / stop distance, so equally-scored names carry equal RUPEE risk, plus an opt-in Risk /trade cap.
 // v556: parse the NSE Market Activity Report (MA<date>.csv) — official Nifty %, advances/declines and sector index moves shown as market CONTEXT in the status bar (EOD data, display only, never fed into per-row scoring); MA added to the ℹ️ file manifest.
 // v555 market-cycle stage awareness (stateless, self-calibrating): per-row stage label (1 accumulation · 2 breakout · 3 event · 4 profit-booking · 5 re-accumulation · 6 second-leg); a quiet-accumulation signal (conjunction-of-percentiles) injected via the rocket-diagnostic weighting; sell-the-news decay off Recent earnings date (horizon = review days). v1065 makes the market-breadth gauge an entry-eligibility input while still never changing ranking.
@@ -11550,18 +11550,18 @@ function parseTradebook(text){
   //
   // Fills are also time-sorted BEFORE grouping: file order is not guaranteed chronological, and a
   // mis-ordered pair would otherwise be merged into the wrong lot.
+  // v1176: FILLS ARE NO LONGER MERGED. v1073 collapsed consecutive same-type fills to stop lot
+  // fragmentation, and that averaging is precisely what the last mismatch against Zerodha was made
+  // of: on 10-Aug SPECTRUM bought 2@2491, 2@2510.50 and 5@2504.30, which merged to one lot of 9 at
+  // 2502.72, so six shares cost 15,016.32 instead of the 15,011.60 Zerodha reports for the first six
+  // INDIVIDUAL fills - Rs 4.85 of the Rs 4.87 that still separated the two ledgers. Zerodha matches
+  // per fill, so the app does too. Time-sorting is kept (file order is not guaranteed chronological)
+  // and the v1073 defect it fixed cannot return, because same-day pairing is now explicit rather
+  // than a side effect of how fills were grouped.
   Object.keys(bySymbol).forEach(sym=>{
-    const src=bySymbol[sym].slice().sort((a,b)=>String(a.time||'').localeCompare(String(b.time||'')));
-    const order=[];
-    src.forEach(t=>{
-      const last=order[order.length-1];
-      if(last&&last.type===t.type&&last.date===t.date){
-        last.qty+=t.qty; last.totalVal+=t.price*t.qty;
-      } else {
-        order.push({type:t.type,qty:t.qty,totalVal:t.price*t.qty,date:t.date,time:t.time});
-      }
-    });
-    bySymbol[sym]=order.map(g=>({...g,price:g.qty?g.totalVal/g.qty:0}));
+    bySymbol[sym]=bySymbol[sym].slice()
+      .sort((a,b)=>String(a.time||'').localeCompare(String(b.time||'')))
+      .map(t=>({type:t.type,qty:t.qty,price:t.price,date:t.date,time:t.time}));
   });
   TRADEBOOK_BUY_FILLS=Object.entries(bySymbol).flatMap(([symbol,trades])=>
     trades.filter(t=>t.type==='buy').map(t=>({symbol,date:t.date,time:t.time,qty:t.qty,price:t.price}))
@@ -11590,36 +11590,68 @@ function parseTradebook(text){
     // Signed FIFO: a buy covers open shorts before it queues as long, and a sell beyond the long
     // inventory opens a short. In cash equity a short cannot be carried overnight, so both legs of
     // one carry the same date and the trip books to the session it happened in.
+    // ── v1176: SAME-DAY BUYS PAIR WITH SAME-DAY SELLS FIRST, THEN FIFO AGAINST THE HOLDING ────
+    // Validated against the owner's own Zerodha P&L statement for 2026-07-19..2026-08-18 (128
+    // symbols): pure chronological FIFO agreed on 125 and disagreed on SGFIN, INDIAGLYCO and
+    // SPECTRUM, always reading LOW. SPECTRUM settles it - Zerodha's stated buy value of 20,144.40 is
+    // reproducible ONLY by matching the day's own buys to the day's own sells before touching the
+    // carried holding: on 10-Aug it bought 2@2491, 2@2510.50, 5@2504.30 and sold 6@2554, and taking
+    // the first six of THAT DAY'S buys gives 15,011.60 and +312.40, which with 06-Aug's +141.40
+    // against the carried 05-Aug lots totals exactly the +453.80 Zerodha reports. Chronological FIFO
+    // instead consumed the 05-Aug lot on the 10th and read +257.73.
+    //
+    // This is the v558 rule, which has existed on the ORDERS path since that release
+    // (computeLatestOrderBooked matches min(todayBuyQty, sellQty) before pricing the remainder at
+    // the settled holding cost) and was never applied to the tradebook.
     const buyQueue=[], shortQueue=[];
-    for(const t of trades){
-      if(t.type==='buy'){
-        let q=t.qty;
-        while(q>0&&shortQueue.length>0){
-          const sh=shortQueue[0];
-          const matched=Math.min(q,sh.qty);
-          const pnlPct=((sh.price-t.price)/t.price)*100;   // sold high, covered low = profit
-          const capital=t.price*matched;
-          roundTrips.push({sym,buyPrice:t.price,sellPrice:sh.price,qty:matched,pnlPct,holdDays:0,capital,
-            buyDate:t.date,sellDate:t.date,buyTime:t.time,sellTime:sh.time,shortTrip:true});
-          sh.qty-=matched; q-=matched;
-          if(sh.qty<=0) shortQueue.shift();
-        }
-        if(q>0) buyQueue.push({qty:q,price:t.price,date:t.date,time:t.time});
-      } else if(t.type==='sell'){
-        let sellQty=t.qty;
-        while(sellQty>0&&buyQueue.length>0){
+    const close=(b,t,qty,shortTrip)=>{
+      const buyPrice=shortTrip?t.price:b.price, sellPrice=shortTrip?b.price:t.price;
+      const holdDays=shortTrip?0:Math.round((new Date(t.date)-new Date(b.date))/86400000);
+      roundTrips.push({sym,buyPrice,sellPrice,qty,
+        pnlPct:((sellPrice-buyPrice)/buyPrice)*100,holdDays,capital:buyPrice*qty,
+        buyDate:shortTrip?t.date:b.date,sellDate:shortTrip?b.date:t.date,
+        buyTime:shortTrip?t.time:b.time,sellTime:shortTrip?b.time:t.time,
+        shortTrip:!!shortTrip});
+    };
+    const byDate={};
+    for(const t of trades) (byDate[t.date]??=[]).push(t);
+    for(const date of Object.keys(byDate).sort()){
+      const day=byDate[date];
+      const dayBuys=day.filter(x=>x.type==='buy').map(x=>({...x}));
+      const daySells=day.filter(x=>x.type==='sell').map(x=>({...x}));
+      // (1) INTRADAY: the day's own buys against the day's own sells, FIFO within the day.
+      let bi=0,si=0;
+      while(bi<dayBuys.length&&si<daySells.length){
+        const b=dayBuys[bi], sl=daySells[si];
+        const m=Math.min(b.qty,sl.qty);
+        if(m>0) close({price:b.price,date:b.date,time:b.time},{price:sl.price,date:sl.date,time:sl.time},m,false);
+        b.qty-=m; sl.qty-=m;
+        if(b.qty<=0) bi++;
+        if(sl.qty<=0) si++;
+      }
+      // (2) What the day could not pair with itself meets the carried position, oldest first.
+      for(const sl of daySells){
+        let q=sl.qty;
+        while(q>0&&buyQueue.length>0){
           const b=buyQueue[0];
-          const matched=Math.min(sellQty,b.qty);
-          const pnlPct=((t.price-b.price)/b.price)*100;
-          const holdDays=Math.round((new Date(t.date)-new Date(b.date))/86400000);
-          const capital=b.price*matched;
-          roundTrips.push({sym,buyPrice:b.price,sellPrice:t.price,qty:matched,pnlPct,holdDays,capital,buyDate:b.date,sellDate:t.date,buyTime:b.time,sellTime:t.time});
-          b.qty-=matched;
-          sellQty-=matched;
+          const m=Math.min(q,b.qty);
+          close(b,sl,m,false);
+          b.qty-=m; q-=m;
           if(b.qty<=0) buyQueue.shift();
         }
-        // Anything left is a SHORT, not a rounding error to be swallowed.
-        if(sellQty>0) shortQueue.push({qty:sellQty,price:t.price,date:t.date,time:t.time});
+        // A sell beyond the inventory opens a SHORT rather than being discarded (v1175).
+        if(q>0) shortQueue.push({qty:q,price:sl.price,date:sl.date,time:sl.time});
+      }
+      for(const b of dayBuys){
+        let q=b.qty;
+        while(q>0&&shortQueue.length>0){
+          const sh=shortQueue[0];
+          const m=Math.min(q,sh.qty);
+          close(sh,{price:b.price,date:b.date,time:b.time},m,true);
+          sh.qty-=m; q-=m;
+          if(sh.qty<=0) shortQueue.shift();
+        }
+        if(q>0) buyQueue.push({qty:q,price:b.price,date:b.date,time:b.time});
       }
     }
     // Remaining unmatched buys = open position; compute qty-weighted avg cost
