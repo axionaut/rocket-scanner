@@ -1,5 +1,5 @@
-const BUILD_TS='2026-08-18 11:31 IST'; // release build time (IST)
-const APP_VERSION=1176; // v1176: same-day buys pair with same-day sells before the carried holding, as Zerodha does.
+const BUILD_TS='2026-08-18 13:28 IST'; // release build time (IST)
+const APP_VERSION=1177; // v1177: a daily fetch budget, a visible fetch loader, one order per stock, and Pace/EoD on open positions.
 // v1093: a baseline reward:risk MEASURED on the cross-section (last completed bhav session) instead of learned from the owner's own fills - reported on every row, deliberately not enforced. Includes v1092: position size split by Radar score / stop distance, so equally-scored names carry equal RUPEE risk, plus an opt-in Risk /trade cap.
 // v556: parse the NSE Market Activity Report (MA<date>.csv) — official Nifty %, advances/declines and sector index moves shown as market CONTEXT in the status bar (EOD data, display only, never fed into per-row scoring); MA added to the ℹ️ file manifest.
 // v555 market-cycle stage awareness (stateless, self-calibrating): per-row stage label (1 accumulation · 2 breakout · 3 event · 4 profit-booking · 5 re-accumulation · 6 second-leg); a quiet-accumulation signal (conjunction-of-percentiles) injected via the rocket-diagnostic weighting; sell-the-news decay off Recent earnings date (horizon = review days). v1065 makes the market-breadth gauge an entry-eligibility input while still never changing ranking.
@@ -7533,6 +7533,9 @@ function buildOpenPositionsPanel(query=''){
       score:isFinite(Number(scannerRow?.score))?Number(scannerRow.score):null,
       rank:scannerRow?.rank??null,setup:scannerRow?.setup||'',
       dayPct:scannerRow?.day??scannerRow?.priceChange??null,risk:scannerRow?.risk||'',
+      // v1177: carried as numbers so the columns SORT; the cells re-read the live trajectory.
+      pace:(()=>{const r=getIntradayRead(pos.symbol);return r&&Number.isFinite(r.avgMovePct)?r.avgMovePct:null;})(),
+      predEod:(()=>{const r=getIntradayRead(pos.symbol);return r&&Number.isFinite(r.predPct)?r.predPct:null;})(),
       scannerRow
     });
   });
@@ -7609,6 +7612,36 @@ function buildOpenPositionsPanel(query=''){
       fmt:(v,row)=>radarScoreCell(v)+`<span style="font-size:11px;color:var(--t3)"> #${row.rank??'—'}</span>`,
       clrFn:()=>'var(--t1)'},
     {key:'dayPct',label:'Day %',align:'right',fmt:fPerf,clrFn:()=>'var(--t2)'},
+    // v1177 (owner): Pace and EoD belong here too. PACE is what the owner actually wants it for -
+    // *"my intention was to have a number which I can safely use as a trail stop if and when I
+    // wish to"* - so it is labelled and tooltipped as a trail distance, not as trivia: the mean
+    // absolute move of one bar is the smallest gap a trailing stop can sit at without the stock's
+    // ordinary breathing taking it out, and the tooltip gives that distance in RUPEES off the last
+    // price, which is what a Zerodha trailing SL is entered in.
+    {key:'pace',label:'Pace',align:'right',
+      fmt:(v,row)=>{
+        const rd=getIntradayRead(row.sym);
+        if(!rd||!Number.isFinite(rd.avgMovePct)) return '<span style="color:var(--t3)">—</span>';
+        const ltp=Number(row.ltp)||0;
+        const rs=ltp>0?ltp*rd.avgMovePct/100:null;
+        return `<span title="${escHtml('Mean absolute move of one '+(rd.traj?rd.traj.stepMin:5)
+          +'-minute bar. A trailing stop closer than this is inside the stock\u2019s ordinary breathing and '
+          +'will be taken out by noise'+(rs?'; here that is about \u20b9'+rs.toFixed(2)+' off the last price'
+          +(rs<0.05?' (below one tick)':'')+'.':'.'))}">${rd.avgMovePct.toFixed(3)}%${
+          rs?`<span style="color:var(--t3);font-size:11px"> ₹${rs.toFixed(2)}</span>`:''}</span>`;
+      },clrFn:()=>'var(--t2)'},
+    {key:'predEod',label:'EoD',align:'right',
+      fmt:(v,row)=>{
+        const rd=getIntradayRead(row.sym);
+        if(!rd||!Number.isFinite(rd.predClose)) return '<span style="color:var(--t3)">—</span>';
+        const t=rd.traj, up=rd.predPct>=0;
+        return `<span style="color:${up?'var(--green)':'var(--red)'};font-weight:700" title="${escHtml(
+          'Unspent pressure '+(t.pressurePct>=0?'+':'')+t.pressurePct.toFixed(2)
+          +'%, capped by what this stock can travel in the '+t.barsLeft+' bars left ('
+          +t.avgMovePct.toFixed(3)+'% per '+t.stepMin+'-minute bar). Arithmetic, not a forecast.')}">${
+          fmtINR(rd.predClose)}</span><span style="color:var(--t3);font-size:11px"> ${
+          (rd.predPct>=0?'+':'')+rd.predPct.toFixed(2)}%</span>`;
+      },clrFn:()=>'var(--t2)'},
     {key:'risk',label:'Risk',align:'left',fmt:v=>v?radarRiskPill(v):'—'}
   ];
   // Header totals always describe the WHOLE portfolio; the table shows the search match.
@@ -10091,13 +10124,24 @@ function forgetIntradayFor(sym){
 // elsewhere (owner: "I don't want to bombard zerodha with these requests if they mind it"). Nothing
 // is ever fetched on a timer or speculatively - only the unchecked names at the top of the board,
 // and only when the button is pressed.
-const FETCH_MAX_PER_WINDOW=12;
-const FETCH_WINDOW_MS=15*60*1000;
+// v1177: A DAILY CAP, NOT A ROLLING QUARTER-HOUR (owner, 2026-08-18): *"the rate cap of 12 per 15
+// minute can be removed because we don't update the ALL NSE that much anyway, only when I have
+// capital to invest... so instead of setting it per 15 minute, set it to per day to a safe number."*
+// The old window blocked a fetch mid-session for no reason the owner could see - it fired while he
+// was buying - and its 12-per-15-minutes worked out to a theoretical 288 a day that nothing was ever
+// going to reach, because the folder watch only re-ingests when ALL NSE actually changes. A daily
+// budget is the honest shape: 400 requests spread across a session is far below anything Kite would
+// notice (its documented historical limit is 3 PER SECOND) and still bounded, and the 700ms spacing
+// in the helper is untouched. The budget resets on the SESSION date, so an overnight run cannot
+// borrow from tomorrow.
+const FETCH_MAX_PER_DAY=400;
 let FETCH_LOG=[];
+let FETCH_LOG_DATE=null;
 function fetchBudgetLeft(){
   const now=Date.now();
-  FETCH_LOG=FETCH_LOG.filter(t=>now-t<FETCH_WINDOW_MS);
-  return Math.max(0,FETCH_MAX_PER_WINDOW-FETCH_LOG.length);
+  const day=getSessionDate();
+  if(FETCH_LOG_DATE!==day){ FETCH_LOG=[]; FETCH_LOG_DATE=day; }
+  return Math.max(0,FETCH_MAX_PER_DAY-FETCH_LOG.length);
 }
 // The unchecked names at the top of the board, paired with the instrument tokens the app has held
 // since v1139. A symbol with no token is excluded WITH a reason rather than silently dropped.
@@ -10168,7 +10212,7 @@ function intradayFetchJobs(limit){
   // 2026-08-18 four names ran 8-17% and the app held no history for any of them.
   //
   // Coverage is built GRADUALLY on purpose (owner: *"no ~18 minutes once hitting zerodha is not
-  // advisable. Do it gradually like we're doing now"*) - the same FETCH_MAX_PER_WINDOW cap applies,
+  // advisable. Do it gradually like we're doing now"*) - the same daily cap applies,
   // and a name already read this session is skipped, so each refresh reaches a little further down
   // the list instead of re-asking for what is already held.
   let movers=[];
@@ -10179,7 +10223,7 @@ function intradayFetchJobs(limit){
       .slice().sort((x,y)=>(y.priceChange||0)-(x.priceChange||0))
       // Only as deep as the budget could ever reach, so a fetch does not evaluate freshness for
       // 1,359 symbols to spend 12 requests. The depth is the cap itself, not a chosen number.
-      .slice(0,FETCH_MAX_PER_WINDOW*4);
+      .slice(0,120);
     movers=take(pool);
     movers.forEach(j=>{j.mover=true;});
   }catch(e){ movers=[]; }
@@ -10236,6 +10280,7 @@ function ingestKiteCandlePayload(text){
 // the same rule v1153 established.
 let KITE_API=null;          // set when the local helper answers, wherever this page is hosted
 let LAST_FETCH=null;        // what the last fetch actually brought back, shown so it can be checked
+let FETCH_BUSY=null;        // v1177: {n, syms, at} while a fetch is in flight - it must be VISIBLE
 let LAST_FETCH_HIDDEN=false; // v1172: the list is collapsed for space; the DATA is never discarded
 const KITE_HELPER='http://localhost:8787';
 // THE APP STAYS ON GITHUB PAGES. Earlier this served the app from localhost, which was wrong - the
@@ -10311,9 +10356,15 @@ async function fetchCandlesInApp(limit,opts){
   const r=intradayFetchJobs(limit);
   if(!r.ok){ say('Nothing to fetch: '+r.why,5000,true); return; }
   const budget=fetchBudgetLeft();
-  if(!budget){ say('Rate cap reached — '+FETCH_MAX_PER_WINDOW+' per '+(FETCH_WINDOW_MS/60000)+' minutes.',5000,true); return; }
+  if(!budget){ say('Daily fetch budget spent — '+FETCH_MAX_PER_DAY+' requests. It resets next session.',5000,true); return; }
   const jobs=r.jobs.slice(0,budget);
   jobs.forEach(()=>FETCH_LOG.push(Date.now()));
+  // v1177 (owner): *"When it's fetching there is no indicator that it's fetching. Add a loader.
+  // Because I just bought two stocks while it was trying to fetch."* A fetch takes ~0.7s per stock
+  // and can run automatically on any ALL NSE ingest, so it must never be invisible - a board that is
+  // about to re-rank looks identical to one that has finished.
+  FETCH_BUSY={n:jobs.length,syms:jobs.map(j=>j.s),at:Date.now()};
+  try{ renderTable(); }catch(e){}
   say('Fetching '+jobs.map(j=>j.s).join(', ')+'…',3000);
   try{
     const q=jobs.map(j=>j.s+':'+j.t).join(',');
@@ -10345,6 +10396,7 @@ async function fetchCandlesInApp(limit,opts){
       +((j.failed&&j.failed.length)?(' · no data for '+j.failed.join(', ')):'')
       +(st.converged?' · settled':''),6000,!out.done.length);
   }catch(e){ say('Fetch failed: '+e.message,6000,true); }
+  finally{ FETCH_BUSY=null; try{ renderTable(); }catch(e){} }
 }
 function intradayPasteBarHtml(){
   const n=Object.keys(INTRADAY_BARS).length;
@@ -10382,6 +10434,11 @@ function intradayPasteBarHtml(){
             title="Kite tab → F12 → Application → Cookies → kite.zerodha.com → copy the value of enctoken. It rotates on every login.">
           <button onclick="saveKiteToken()" class="btn" style="font-size:11px">Save token</button>`}`
         :`<span style="font-size:11px;color:var(--t3)" title="Double-click &quot;Start Rocket Scanner.bat&quot; on your PC and leave that window open. The app stays right here on GitHub Pages; only the little helper runs locally, because a web page is not allowed to call Kite directly.">start the helper (Start Rocket Scanner.bat) to fetch automatically</span>`}
+      ${FETCH_BUSY?`<span style="display:inline-flex;align-items:center;gap:6px;font-size:11px;color:var(--amber);font-weight:700"
+        title="${escHtml('Fetching '+FETCH_BUSY.syms.slice(0,12).join(', ')+(FETCH_BUSY.syms.length>12?' and '+(FETCH_BUSY.syms.length-12)+' more':'')
+          +'. The board re-ranks when this finishes, so wait for it before acting on the list.')}">
+        <span style="width:10px;height:10px;border:2px solid var(--amber);border-right-color:transparent;border-radius:50%;display:inline-block;animation:rsspin .7s linear infinite"></span>
+        fetching ${FETCH_BUSY.n} stock${FETCH_BUSY.n===1?'':'s'}…</span>`:''}
       ${(n&&!LAST_FETCH_HIDDEN)?`<button onclick="collapseFetchList()" class="btn" style="opacity:.75;font-size:11px"
         title="Collapse this list to free up the space. Nothing is thrown away — the ${n} stock(s) keep their bars, their verdicts and their place in the ranking, and the files stay in Scanner Uploads/Intraday.">Hide list</button>`:''}
     </div>
@@ -11897,7 +11954,6 @@ async function exportBasket(){
       _meta:{leg:leg||'base',sym,targetPct,fullQty:null}
     });
   };
-  let splitCount=0;
   exportList.forEach(s=>{
     const am = basketAlloc[s.symbol];
     if(am?.rejected){rejectedCount++;return;} // skip cost-floor rejections
@@ -11905,18 +11961,14 @@ async function exportBasket(){
     if(qty===0) return;
     const policy=am?.exitPolicy||getRowExitPolicy(s,am?.buyPrice||s.price);
     if(!policy.viable){rejectedCount++;return;}
-    const split=splitQty(qty);
-    const runnerPct=getRunnerTargetPct(policy);
-    // A runner is only worth a second order when there are shares for it AND its target is genuinely
-    // further out than the base. Otherwise the whole position rides the base leg — never left
-    // unallocated, and never two orders that would fill at the same level.
-    if(split.runner>0&&runnerPct>policy.targetPct){
-      pushBuyOrder(s,split.base,policy.targetPct,'base');
-      pushBuyOrder(s,split.runner,runnerPct,'runner');
-      splitCount++;
-    } else {
-      pushBuyOrder(s,qty,policy.targetPct,'base');
-    }
+    // v1177 (owner): *"Let's do away with split orders also. Just one per stock."* v1115 split each
+    // buy into a base leg at the row's target and a runner further out, on a measured 5,221-rupee
+    // edge over a single GTT across 217 closed cohorts. It is dropped by owner decision: two legs
+    // per name doubled the double-sell surface, halved every position into two GTTs to manage, and
+    // consumed two of Zerodha's twenty basket slots per stock. ONE order, at the row's own target.
+    // splitQty/getRunnerTargetPct survive for the Open Positions panel, which still reports what a
+    // runner leg WOULD be for positions opened while v1115-v1176 were live.
+    pushBuyOrder(s,qty,policy.targetPct,'base');
   });
   orders.forEach(o=>{
     const total=orders.filter(x=>x._meta.sym===o._meta.sym).reduce((n,x)=>n+x.params.quantity,0);
@@ -11971,9 +12023,7 @@ async function exportBasket(){
   const floorNote=harvestPlan.warning?` · target floor active`:``;
   const limitNote=limitOmitted>0?` · ${limitOmitted} lower-priority stock${limitOmitted===1?'':'s'} omitted to keep the basket within Zerodha's 20-order limit`:'';
   const marketNote=(MARKET_INTRADAY&&MARKET_INTRADAY.advPct!=null&&MARKET_INTRADAY.advPct<0.5)?` · market confirmation enforced at ${(MARKET_INTRADAY.advPct*100).toFixed(0)}% breadth`:'';
-  const splitNote=splitCount>0
-    ? ` · ${splitCount} split into a base leg at target and a runner leg further out`
-    : ` · no position large enough to split`;
+  const splitNote=` · one order per stock, each with its own target`;   // v1177: splits retired
   showToast(`<strong>Saved ${orders.length} CNC MARKET BUY orders</strong> for ${new Set(orders.map(o=>o._meta.sym)).size} stocks in Scanner Uploads as Zerodha_Basket_Buy JSON${splitNote}${targetNote}${planNote}${floorNote}${rejNote}${limitNote}${marketNote}`);
 }
 
@@ -12731,7 +12781,7 @@ async function processFiles(files,sourceLabel,opts={}){
   // Every ALL NSE ingest spends whatever is left of the rate budget on the names that need history:
   // recommendations first, then open positions, then TODAY'S TOP PERFORMERS descending. The folder
   // watch re-ingests only when the file's own timestamp changes (v519), so this fires a handful of
-  // times a day rather than on the 3-second poll, and FETCH_MAX_PER_WINDOW still caps it before a
+  // times a day rather than on the 3-second poll, and the daily budget still caps it before a
   // single request is made - coverage builds GRADUALLY across the session instead of in one burst
   // (owner: *"no ~18 minutes once hitting zerodha is not advisable. Do it gradually"*).
   //
