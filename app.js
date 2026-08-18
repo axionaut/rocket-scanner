@@ -1,5 +1,5 @@
-const BUILD_TS='2026-08-18 09:30 IST'; // release build time (IST)
-const APP_VERSION=1167; // v1167: the intraday read no longer needs three bars from TODAY - it needs three bars.
+const BUILD_TS='2026-08-18 09:53 IST'; // release build time (IST)
+const APP_VERSION=1168; // v1168: a stock being sold in the current session is removed from recommendations, not flagged.
 // v1093: a baseline reward:risk MEASURED on the cross-section (last completed bhav session) instead of learned from the owner's own fills - reported on every row, deliberately not enforced. Includes v1092: position size split by Radar score / stop distance, so equally-scored names carry equal RUPEE risk, plus an opt-in Risk /trade cap.
 // v556: parse the NSE Market Activity Report (MA<date>.csv) — official Nifty %, advances/declines and sector index moves shown as market CONTEXT in the status bar (EOD data, display only, never fed into per-row scoring); MA added to the ℹ️ file manifest.
 // v555 market-cycle stage awareness (stateless, self-calibrating): per-row stage label (1 accumulation · 2 breakout · 3 event · 4 profit-booking · 5 re-accumulation · 6 second-leg); a quiet-accumulation signal (conjunction-of-percentiles) injected via the rocket-diagnostic weighting; sell-the-news decay off Recent earnings date (horizon = review days). v1065 makes the market-breadth gauge an entry-eligibility input while still never changing ranking.
@@ -3182,6 +3182,11 @@ function isGreenScore(score){const s=Number(score);return isFinite(s)&&s>=RECOMM
 // because the rows above it were removed for some unrelated reason.
 function meetsRecommendationBar(s){
   if(!s) return false;
+  // v1168: a stock whose CURRENT session is net selling is not a buy, no matter what the score or
+  // the multi-day flow says. This is a removal, not an annotation - it drops out of the list, out of
+  // SELECTED and out of the basket. It only fires on a real current-session trajectory (three bars
+  // with volume), so an empty opening print cannot reject anything.
+  if(s.intradaySellingToday===true) return false;
   const rank=Number(s.rank);
   return isGreenScore(s.score)&&Number.isFinite(rank)&&rank<=RECOMMEND_MAX_RANK;
 }
@@ -3652,11 +3657,31 @@ function getIntradayRead(sym){
   const ageMin=Math.max(0,Math.round((Date.now()-asOf)/60000));
   const spanBars=Math.round((asOf-day[0].t)/300000)+1;      // 5-minute bars the span should hold
   const holes=Math.max(0,spanBars-day.length);
+  // ── v1168: THE CURRENT SESSION IS MEASURED SEPARATELY, AND IT CAN VETO ──────────────────────
+  // Owner, 2026-08-18: "If something is in the recommendation, it should be a definite buy, no ifs
+  // and buts." MOLBIO is the case: 66 bars yesterday carrying 13.41M shares against 6 bars today
+  // carrying 1.21M, so the merged read said ACCUMULATING (+34% net flow) while today's own tape had
+  // gone the other way - the up leg cost 297,683 shares per 1% and the fade cost 144,622, i.e. it had
+  // become twice as cheap to push DOWN as up. A multi-session flow is the right answer to "is this
+  // being accumulated" and the wrong answer to "should I buy it right now", because a COMPLETE prior
+  // session outweighs a young one on the volume clock purely by being finished.
+  const todayTraj=day.length>=3?buildIntradayTrajectory(day):null;
+  // How much of the clock today actually owns. No constant: it is the session's own share of the
+  // volume in the file, the same idiom v1141 used to decay the pre-open book by what the day has
+  // consumed. Early in the session today is a few percent and the multi-day read carries the row;
+  // by the afternoon today dominates, which is when a fade should be decisive.
+  const _tv=day.reduce((n,b)=>n+(Number(b.v)||0),0);
+  const _av=bars.reduce((n,b)=>n+(Number(b.v)||0),0);
+  const volShare=_av>0?_tv/_av:1;
   const allSessions=[...new Set(bars.map(b=>istDayKey(b.t)))].sort();
   return {sym:normSym(sym),bars:day.length,flowBars:bars.length,sessions:allSessions.length,
           sessionList:allSessions,
           on:key,current:key===nowKey,asOf,ageMin,holes,
           open,close,hi,lo,dayPct:(close/open-1)*100,traj,
+          todayTraj,volShare,
+          todayStanding:todayTraj?todayTraj.standing:null,
+          todayFlowPct:todayTraj?todayTraj.cvdPct:null,
+          todayRegime:todayTraj?todayTraj.regime:null,
           regime:traj?traj.regime:null,cvdPct:traj?traj.cvdPct:null,
           avgMovePct:traj?traj.avgMovePct:null,
           predClose:traj?traj.predClose:null,predPct:traj?traj.predPct:null,
@@ -3691,7 +3716,16 @@ function applyIntradayReorder(rows){
   if(!n) return 0;
   const NEUTRAL=0.5;                 // the midpoint of a [0,1] standing: "no information"
   rows.forEach(r=>{
-    const f=(r.intraday&&r.intraday.current)?Math.max(0,Math.min(1,r.intraday.standing)):NEUTRAL;
+    // v1168: the multi-session standing carries the row early, today's own standing carries it late,
+    // and the crossover is today's share of the volume clock rather than a typed hour. Geometric, so
+    // both being 0.5 at "no information" keeps the product 0.5 at no information (the v1145 rule).
+    let f=NEUTRAL;
+    if(r.intraday&&r.intraday.current){
+      const full=Math.max(0,Math.min(1,r.intraday.standing));
+      const td=Number.isFinite(r.intraday.todayStanding)?Math.max(0,Math.min(1,r.intraday.todayStanding)):null;
+      const w=(td!=null&&Number.isFinite(r.intraday.volShare))?Math.max(0,Math.min(1,r.intraday.volShare)):0;
+      f=(td==null||w<=0)?full:Math.pow(full,1-w)*Math.pow(td,w);
+    }
     r._iAdj=Math.max(0,(Number.isFinite(r.depthBlendPct)?r.depthBlendPct:r.setupPct))*f;
   });
   const ranked=rows.filter(r=>Number.isFinite(r._iAdj)).slice().sort((a,b)=>a._iAdj-b._iAdj);
@@ -3711,6 +3745,36 @@ function applyIntradayReorder(rows){
   // only if it still clears the SAME bar the basket uses - nothing softer, nothing bespoke.
   rows.forEach(r=>{
     if(!r.intraday){r.intradayVerdict=null;r.intradayWhy=null;return;}
+    // A CHECKED STOCK THAT IS BEING SOLD TODAY IS NOT A BUY, whatever the multi-day picture says.
+    // This REMOVES it rather than annotating it (owner, 2026-08-18: "I don't have time for your
+    // reports and flags... if something is in the recommendation, it should be a definite buy").
+    // Only fires when the current session has produced a real trajectory - three bars and volume -
+    // so it cannot reject on an empty opening print.
+    const _tt=r.intraday.current?r.intraday.todayTraj:null;
+    if(_tt){
+      // TWO WAYS THE CURRENT SESSION SAYS NO, and the second is the one that matters most.
+      //   (a) net flow negative - more was sold than bought today.
+      //   (b) COST INVERTED - it now takes fewer shares to move the stock DOWN 1% than UP 1%.
+      // MOLBIO on 2026-08-18 is case (b) and NOT case (a): its net flow stayed positive because the
+      // up leg carried 670k shares and the fade only 292k, so nobody was dumping - the bid simply
+      // thinned. By cost it had become twice as cheap to push down (297,683 up vs 144,622 down per
+      // 1%), which is the honest reading of "there is no longer anything holding this up".
+      // PARITY IS THE LINE - costRatio is dnCost/upCost and 1.0 is "both sides cost the same", so
+      // no constant is chosen here.
+      const cr=_tt.costRatio;
+      const sold=_tt.cvdPct<0;
+      const thin=Number.isFinite(cr)&&cr>0&&cr<1;
+      if(sold||thin){
+        r.intradayVerdict='rejected';
+        r.intradayWhy=(sold?('being sold today - net flow '+(100*_tt.cvdPct).toFixed(1)+'% of this session')
+                           :('nothing holding it up - 1% down costs '+Math.round(_tt.dnCost).toLocaleString('en-IN')
+                             +' shares against '+Math.round(_tt.upCost).toLocaleString('en-IN')+' to go up'))
+          +(r.intraday.traj?' (multi-day: '+r.intraday.traj.regime+')':'');
+        r.intradaySellingToday=true;
+        return;
+      }
+    }
+    r.intradaySellingToday=false;
     if(!r.intraday.current){
       r.intradayVerdict='stale';
       r.intradayWhy='checked on '+r.intraday.on+', not today — refetch before acting on it';
@@ -10058,6 +10122,10 @@ function applyFilters(){
     // v1080 (owner): a row that can never be allocated a single share is not a recommendation.
     // Structural causes only (see getAllocationBlockReason) — never the capital split.
     const allocBlock=getAllocationBlockReason(s,allocCtx);
+    if(s.intradaySellingToday===true){
+      REMOVED_ROWS.push({s,reason:'flow',detail:s.intradayWhy||'being sold in the current session'});
+      return false;
+    }
     if(allocBlock){ALLOC_BLOCKED++;REMOVED_ROWS.push({s,reason:'alloc',detail:allocBlock});return false;}
     return true;
   });
