@@ -1,5 +1,5 @@
-const BUILD_TS='2026-08-18 14:26 IST'; // release build time (IST)
-const APP_VERSION=1180; // v1180: Pace is volume-weighted, so a run of dead bars cannot tighten a trailing stop.
+const BUILD_TS='2026-08-18 14:36 IST'; // release build time (IST)
+const APP_VERSION=1181; // v1181: Hide list toggles, and the batch file frees a stuck port instead of reporting it.
 // v1093: a baseline reward:risk MEASURED on the cross-section (last completed bhav session) instead of learned from the owner's own fills - reported on every row, deliberately not enforced. Includes v1092: position size split by Radar score / stop distance, so equally-scored names carry equal RUPEE risk, plus an opt-in Risk /trade cap.
 // v556: parse the NSE Market Activity Report (MA<date>.csv) — official Nifty %, advances/declines and sector index moves shown as market CONTEXT in the status bar (EOD data, display only, never fed into per-row scoring); MA added to the ℹ️ file manifest.
 // v555 market-cycle stage awareness (stateless, self-calibrating): per-row stage label (1 accumulation · 2 breakout · 3 event · 4 profit-booking · 5 re-accumulation · 6 second-leg); a quiet-accumulation signal (conjunction-of-percentiles) injected via the rocket-diagnostic weighting; sell-the-news decay off Recent earnings date (horizon = review days). v1065 makes the market-breadth gauge an entry-eligibility input while still never changing ranking.
@@ -10165,8 +10165,11 @@ function onIntradayPaste(){
 // existed from v1146, when a "check" was a hand-paste that cost nothing but a clipboard.
 //
 // It now collapses the fetch LIST and nothing else. Bars, verdicts and the re-rank all stand.
+// v1181 (owner): *"if there's a Hide list, should it also unhide list?"* Yes - it was a one-way
+// door: once collapsed the only way back was to spend another fetch, which is the same waste the
+// Hide button existed to stop. It toggles.
 function collapseFetchList(){
-  LAST_FETCH_HIDDEN=true;
+  LAST_FETCH_HIDDEN=!LAST_FETCH_HIDDEN;
   renderTable();
 }
 // Kept for the case the owner actually asked for at v1146 - throwing away a stock's data on purpose
@@ -10507,8 +10510,11 @@ function intradayPasteBarHtml(){
           +'. The board re-ranks when this finishes, so wait for it before acting on the list.')}">
         <span style="width:10px;height:10px;border:2px solid var(--amber);border-right-color:transparent;border-radius:50%;display:inline-block;animation:rsspin .7s linear infinite"></span>
         fetching ${FETCH_BUSY.n} stock${FETCH_BUSY.n===1?'':'s'}…</span>`:''}
-      ${(n&&!LAST_FETCH_HIDDEN)?`<button onclick="collapseFetchList()" class="btn" style="opacity:.75;font-size:11px"
-        title="Collapse this list to free up the space. Nothing is thrown away — the ${n} stock(s) keep their bars, their verdicts and their place in the ranking, and the files stay in Scanner Uploads/Intraday.">Hide list</button>`:''}
+      ${(LAST_FETCH&&LAST_FETCH.length)?`<button onclick="collapseFetchList()" class="btn" style="opacity:.75;font-size:11px"
+        title="${LAST_FETCH_HIDDEN
+          ? `Show the ${LAST_FETCH.length} stock(s) from the last fetch again — bars, verdicts and files were never touched.`
+          : `Collapse this list to free up the space. Nothing is thrown away — the ${LAST_FETCH.length} stock(s) keep their bars, their verdicts and their place in the ranking, and the files stay in Scanner Uploads/Intraday.`
+        }">${LAST_FETCH_HIDDEN?`Show list (${LAST_FETCH.length})`:'Hide list'}</button>`:''}
     </div>
     ${st&&st.top.length?`<div style="margin:2px 0 8px">${st.top.map(chip).join('')}</div>`:''}
 
