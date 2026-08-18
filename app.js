@@ -1,5 +1,5 @@
-const BUILD_TS='2026-08-18 13:45 IST'; // release build time (IST)
-const APP_VERSION=1178; // v1178: a single press fetches at most 12 again - the daily budget bounds the day, not the press.
+const BUILD_TS='2026-08-18 14:06 IST'; // release build time (IST)
+const APP_VERSION=1179; // v1179: the runner column is retired, and the depth governing the board is visible.
 // v1093: a baseline reward:risk MEASURED on the cross-section (last completed bhav session) instead of learned from the owner's own fills - reported on every row, deliberately not enforced. Includes v1092: position size split by Radar score / stop distance, so equally-scored names carry equal RUPEE risk, plus an opt-in Risk /trade cap.
 // v556: parse the NSE Market Activity Report (MA<date>.csv) — official Nifty %, advances/declines and sector index moves shown as market CONTEXT in the status bar (EOD data, display only, never fed into per-row scoring); MA added to the ℹ️ file manifest.
 // v555 market-cycle stage awareness (stateless, self-calibrating): per-row stage label (1 accumulation · 2 breakout · 3 event · 4 profit-booking · 5 re-accumulation · 6 second-leg); a quiet-accumulation signal (conjunction-of-percentiles) injected via the rocket-diagnostic weighting; sell-the-news decay off Recent earnings date (horizon = review days). v1065 makes the market-breadth gauge an entry-eligibility input while still never changing ranking.
@@ -6785,6 +6785,21 @@ function renderStats(){
   balanceGrids();   // v1101: spread the cards evenly instead of stranding a stub row
 
   const filterPills=[];
+  // v1179: THE DEPTH THAT GOVERNS THE BOARD MUST BE VISIBLE. v1170 made the recommendation depth
+  // move with the market's own time-of-day evidence, and nothing on any tab said so - the board
+  // silently reached deeper or shallower than RECOMMEND_MAX_RANK with no way to see it or check it.
+  (()=>{
+    try{
+      const d=timingDepth();
+      if(!d||!Number.isFinite(d.depth)) return;
+      const off=d.depth!==RECOMMEND_MAX_RANK;
+      filterPills.push(`<span class="info-pill ${off?'pill-amber':''}" title="${escHtml(
+        'Recommendations are drawn from the top '+d.depth+' by rank. The default is '+RECOMMEND_MAX_RANK
+        +' and it moves with the time of day: '+(d.why||'no evidence yet')
+        +'. Measured from the accumulated 5-minute files, never from a typed hour.')}">\u23f1 top ${d.depth}${
+        off?` (of ${RECOMMEND_MAX_RANK})`:''}</span>`);
+    }catch(e){}
+  })();
   if(SUPPRESSED_HELD>0)filterPills.push(`<span class="info-pill pill-rose" title="Stocks you already hold (Holdings + Positions + today's net Orders buys). Since v1070 these stay in the ranking and can be recommended again — the badge is a duplicate-buy warning, not a filter.">📌 ${SUPPRESSED_HELD} already held</span>`);
   if(PEAK_TIMING_REMOVED>0)filterPills.push(`<span class="info-pill pill-amber" title="Ranked stocks flagged as extended by the entry-timing evidence. Since v1075 this is a LABEL, not a filter — they remain recommendable and exportable. A forward test (2026-07-28 close to 2026-07-29, n=1618) found extension predicted continuation, not reversal.">⚡ ${PEAK_TIMING_REMOVED} extended</span>`);
   const inelig=ALL.filter(s=>s.basketEligible===false).length;
@@ -7596,15 +7611,19 @@ function buildOpenPositionsPanel(query=''){
       clrFn:v=>v==null?'var(--t3)':v>0?'var(--green)':v<0?'var(--red)':'var(--t2)'},
     {key:'daysHeld',label:'Days Held',align:'right',fmt:daysFmt,clrFn:()=>'var(--t1)'},
     // v1073: the day-1 time exit, shown next to Days Held so the two read together.
-    {key:'targetPrice',label:'Target / Runner',align:'right',
-      // v1118 put both legs on the panel; v1148 puts them in ONE cell, because they are the two
-      // halves of a single exit and two columns pushed this panel into a horizontal scrollbar.
+    // v1179: ONE TARGET, because the basket now exports one order per stock (v1177). This showed
+    // "Target / Runner" for four releases after the runner leg stopped being exported - the panel
+    // was describing an exit the app no longer arms. A position opened while v1115-v1176 were live
+    // may still have TWO GTTs resting in Zerodha, so the runner it WOULD have had is kept in the
+    // tooltip rather than deleted outright.
+    {key:'targetPrice',label:'Target ₹',align:'right',
       fmt:(v,row)=>{
-        const tgt=v!=null?fmtINR(v)+`<span style="font-size:11px;color:var(--t3)">×${row.baseQty??''}</span>`:'—';
-        const run=row.runnerPrice!=null
-          ? fmtINR(row.runnerPrice)+`<span style="font-size:11px;color:var(--t3)">×${row.runnerQty??''}</span>`
-          : `<span style="color:var(--t3)" title="No runner leg: a single share, or no capacity estimate for this stock.">—</span>`;
-        return tgt+'<span style="color:var(--t3)"> / </span>'+run;
+        if(v==null) return '<span style="color:var(--t3)">—</span>';
+        const legacy=row.runnerPrice!=null
+          ? ` A position opened before v1177 may still have a second GTT resting at ${fmtINR(row.runnerPrice)} for ${row.runnerQty} share(s) — check Zerodha before re-arming.`
+          : '';
+        return fmtINR(v)+`<span style="font-size:11px;color:var(--t3)">×${row.qty??''}</span>`
+          +`<span title="${escHtml('The whole position exits here: '+(row.targetPct!=null?('+'+Number(row.targetPct).toFixed(2)+'%'):'')+' on its own exit policy.'+legacy)}"></span>`;
       },
       clrFn:()=>'var(--green)'},
     {key:'stopPrice',label:'SL ₹',align:'right',fmt:(v,row)=>v!=null?fmtINR(v)+`<span style="font-size:12px;color:var(--t3);margin-left:4px">-${Number(row.exitPolicy?.stopPct).toFixed(2)}%</span>`:'—',clrFn:()=>'var(--red)'},
@@ -8442,7 +8461,7 @@ function buildIndicatorWatchHTML(){
   const resolved=w.resolvedSessions||0;
   const collecting=resolved<IW_MIN_SESSIONS;
   const head=`<h3 id="meth-watch" style="margin-top:28px">Indicator Watch <span style="font-size:14px;color:var(--t3);font-weight:400">automatic orientation guardrail</span></h3>`;
-  const intro=`<p style="color:var(--t2);font-size:14.5px;line-height:1.7">Each accepted session the system records where every liquid stock (turnover ≥ ₹25L) sits on every direction-testable indicator, then ${IW_WINDOW} sessions later checks whether the end the model <em>rewards</em> actually held more of the movers — or fewer. It keeps a rolling ${IW_LOG_MAX}-session tally per indicator and flags one only when it looks backwards on <strong>both</strong> a +5% and a +10% forward move, past a strict bar corrected for watching so many at once. Nothing changes automatically — a flag is a note to bring to review before inverting anything.</p>`;
+  const intro=`<p style="color:var(--t2);font-size:14.5px;line-height:1.7">Each accepted session the system records where every liquid stock (turnover ≥ ₹25L) sits on every direction-testable indicator, then ${IW_WINDOW} sessions later checks whether the end the model <em>rewards</em> actually held more of the movers — or fewer. It keeps a rolling ${IW_LOG_MAX}-session tally per indicator and flags one only when it looks backwards on <strong>both</strong> a +5% and a +10% forward move, past a strict bar corrected for watching so many at once. Nothing changes automatically — a flag is a note to bring to review before inverting anything. Its job has narrowed since the forward-effect log re-armed: a feature carrying a measured effect already overrides its own prior, so the priors that still run <em>unopposed</em> are what this watches.</p>`;
   if(collecting){
     return `${head}${intro}<div style="background:var(--bg-card);border:1px solid var(--border);border-radius:10px;padding:14px 18px;font-size:14px;color:var(--t2)">⏳ Collecting evidence — <strong>${resolved}/${IW_MIN_SESSIONS}</strong> resolved sessions (need ${IW_MIN_SESSIONS} before any warning; ${w.pending} snapshot${w.pending===1?'':'s'} awaiting their ${IW_WINDOW}-session resolution). No orientation warnings until enough forward data exists.</div>`;
   }
@@ -8459,7 +8478,23 @@ function buildIndicatorWatchHTML(){
     </tr>`;
   }).join('');
   return `${head}${intro}
-    <div style="background:rgba(239,68,68,.06);border:1px solid rgba(239,68,68,.3);border-radius:10px;padding:12px 16px;margin-bottom:10px;font-size:14px;color:var(--t1)"><strong>⚠ ${w.flags.length} indicator${w.flags.length===1?'':'s'} looks backwards over the last ${resolved} sessions.</strong> The rewarded end held <em>fewer</em> movers on both +5% and +10%. Bring these to review — inverting a prior is a deliberate, logged code change, never automatic.</div>
+    <div style="background:rgba(239,68,68,.06);border:1px solid rgba(239,68,68,.3);border-radius:10px;padding:12px 16px;margin-bottom:10px;font-size:14px;color:var(--t1)"><strong>⚠ ${w.flags.length} indicator${w.flags.length===1?'':'s'} looks backwards over the last ${resolved} sessions.</strong> The rewarded end held <em>fewer</em> movers on both +5% and +10%. Bring these to review — inverting a prior is a deliberate, logged code change, never automatic.${(()=>{
+      // v1179: A FLAG ON A FEATURE THAT ALREADY CARRIES A MEASURED EFFECT IS NOISE. When this panel
+      // was built (v526) every effect was pinned to 0, so a prior ran unopposed and a backwards one
+      // was invisible. Since the v1136 forward log re-armed, some features carry a measured forward
+      // effect that OVERRIDES their prior at up to 58% of the signal - and where that effect already
+      // points the way this panel is warning about, the scorer has corrected itself and there is
+      // nothing to bring to review. Only the unopposed ones need a human.
+      try{
+        const F=RADAR.features||[];
+        const over=w.flags.filter(f=>{
+          const g=F.find(x=>(x.name||'')===(f.indicator||f.name));
+          return g&&Math.abs(g.effect||0)>0.0001;
+        }).length;
+        if(!over) return '';
+        return ` <span style="color:var(--t3)">${over} of these already carry a measured forward effect that overrides the prior, so the scorer has corrected itself there — the remaining ${w.flags.length-over} run unopposed and are the ones worth reading.</span>`;
+      }catch(e){ return ''; }
+    })()}</div>
     <div class="scroll-x"><table class="ct" style="min-width:620px"><thead><tr><th>Indicator</th><th>Prior orientation</th><th title="Mean forward decile gap (mover minus non-mover), normalized; negative vs the rewarded end = backwards">+5% forward gap</th><th>+10% forward gap</th></tr></thead><tbody>${rows}</tbody></table></div>`;
 }
 function _renderMethodologyInner(){
@@ -9297,9 +9332,18 @@ function getPositionAction(sym,pos){
   const pressing=Number.isFinite(tt.pressurePct)&&tt.pressurePct>0;
   if(pressing&&s){
     try{
+      // v1179: getHeldTopUpNotionalCap returns Infinity for a position UNDERWATER - the v1070
+      // cushion only binds in profit, where an add could drag the blended cost above the new stop.
+      // Dividing that by a price printed "ADD Infinity" on the panel. Infinity means "the cushion
+      // does not bind", not "buy without limit", so the size then comes from the ordinary allocation
+      // rails - Max Alloc, the 0.10% turnover rail, the rupee floor - via rowAchievableNotional.
       const buyP=getBuyPrice(s);
-      const cap=getHeldTopUpNotionalCap(s,buyP);
-      const add=(cap>0&&buyP>0)?Math.floor(cap/buyP):0;
+      const cushion=getHeldTopUpNotionalCap(s,buyP);
+      let cap=cushion;
+      if(!Number.isFinite(cap)){
+        cap=(typeof rowAchievableNotional==='function')?rowAchievableNotional(s):0;
+      }
+      const add=(Number.isFinite(cap)&&cap>0&&buyP>0)?Math.floor(cap/buyP):0;
       if(add>0) return {act:'ADD '+add,qty:add,tone:'green',
         why:'bought all session (net +'+(100*tt.cvdPct).toFixed(0)+'%), 1% up costs '+shares(tt.upCost)
           +' shares against '+shares(tt.dnCost)+' down, and '+tt.pressurePct.toFixed(2)+'% of buying is still unspent'};
