@@ -1,5 +1,5 @@
-const BUILD_TS='2026-08-18 14:36 IST'; // release build time (IST)
-const APP_VERSION=1181; // v1181: Hide list toggles, and the batch file frees a stuck port instead of reporting it.
+const BUILD_TS='2026-08-18 15:06 IST'; // release build time (IST)
+const APP_VERSION=1182; // v1182: fetch the top 5 until they settle, then holdings, then today's real movers.
 // v1093: a baseline reward:risk MEASURED on the cross-section (last completed bhav session) instead of learned from the owner's own fills - reported on every row, deliberately not enforced. Includes v1092: position size split by Radar score / stop distance, so equally-scored names carry equal RUPEE risk, plus an opt-in Risk /trade cap.
 // v556: parse the NSE Market Activity Report (MA<date>.csv) — official Nifty %, advances/declines and sector index moves shown as market CONTEXT in the status bar (EOD data, display only, never fed into per-row scoring); MA added to the ℹ️ file manifest.
 // v555 market-cycle stage awareness (stateless, self-calibrating): per-row stage label (1 accumulation · 2 breakout · 3 event · 4 profit-booking · 5 re-accumulation · 6 second-leg); a quiet-accumulation signal (conjunction-of-percentiles) injected via the rocket-diagnostic weighting; sell-the-news decay off Recent earnings date (horizon = review days). v1065 makes the market-breadth gauge an entry-eligibility input while still never changing ranking.
@@ -10233,16 +10233,18 @@ function fetchBudgetLeft(){
 // Held names are fetched for OBSERVATION, not for a verdict. Nothing here recommends re-buying: the
 // v1070 rule that held is not a reason to refuse a stock is untouched, and so is the v1162 rule that
 // only a read from the CURRENT session may move anything.
+// ── WHAT GETS FETCHED, IN WHAT ORDER (owner, 2026-08-18) ────────────────────────────────────
+// *"Fetch ranks <=5 (keep fetching these until the updated list is out of rank 5), then fetch open
+// positions and then top movers (>=10% which are not blocked by hard filters) today."*
+//
+// Both numbers are OWNER RISK PREFERENCES, flagged as such rather than dressed up as derived - the
+// same category as Zerodha's 20-order cap and RECOMMEND_MAX_RANK.
+const FETCH_TOP_RANK=5;      // owner: validate the top five, and keep at it until they settle
+const FETCH_MOVER_PCT=10;    // owner: a "top mover" is up 10% or more today
 function intradayFetchJobs(limit){
   const tok=r=>({s:normSym(r.symbol||r.sym||''),t:KITE_TOKEN[normSym(r.symbol||r.sym||'')]||0});
-  // "ALREADY FETCHED" MEANS "HOLDS EVERY BAR THAT EXISTS", NOT "HOLDS SOME BARS" (owner,
-  // 2026-08-18): *"On each refresh it fetches the top 10 which are not already fetched AND refreshes
-  // the top ones which were already fetched."* A read taken at 09:20 is out of date at 09:30 because
-  // two more bars have printed since. So a name needs fetching when it has NO read, when its read is
-  // from an earlier session, OR when its newest bar is older than the last COMPLETED 5-minute
-  // boundary. That last test is exact and needs no constant: immediately after a fetch nothing
-  // qualifies, and the moment a new bar closes the top names do - so the budget is never spent
-  // re-asking for data we already hold.
+  // "Needs data" means it holds no read, a read from an earlier session, or a read whose newest bar
+  // predates the last COMPLETED 5-minute boundary (v1171).
   const lastBarBoundary=()=>{const c=istClock();if(!c||!Number.isFinite(c.mins))return null;
     return Math.floor((c.mins-5)/5)*5;};
   const stale=sym=>{
@@ -10255,17 +10257,17 @@ function intradayFetchJobs(limit){
   const seen=new Set();
   const take=arr=>arr.map(tok).filter(j=>j.t>0&&!seen.has(j.s)&&stale(j.s)&&(seen.add(j.s),true));
 
-  // TIER 1 - THE RECOMMENDATIONS. A buy decision expires at the close, so it goes first.
-  const st=getIntradayLoopState(limit||INTRADAY_LOOP_N);
-  // Drawn from the whole board, not from st.need. `need` answers "does this row still lack a
-  // VERDICT", which stays true for the session once a stock is checked - the right question for the
-  // tally and the wrong one for fetching, because a verdict formed at 09:20 rests on data that is
-  // two bars old by 09:30. Freshness is judged by stale() above.
-  const jobs=take(st.top&&st.top.length?st.top:st.need);
+  // TIER 1 - THE TOP FIVE BY RANK, and it re-arms itself: the read re-ranks the board, so whoever is
+  // in the top five AFTER a fetch is queued on the next one. That is the loop the owner described -
+  // keep going until the top five stop changing - and it needs no extra machinery, because a name
+  // that has just been read is no longer stale and a newcomer is.
+  const board=(Array.isArray(FILT)&&FILT.length?FILT:ALL)
+    .filter(r=>Number.isFinite(r.rank)&&r.rank<=FETCH_TOP_RANK)
+    .slice().sort((a,b)=>a.rank-b.rank);
+  const jobs=take(board);
 
   // TIER 2 - WHAT IS ALREADY OWNED (v1163). A stock leaves the board the day it is bought, so
-  // without this its file stops growing exactly when the position starts mattering. These are few
-  // and they persist, so they are covered early and then stop consuming budget.
+  // without this its file stops growing exactly when the position starts mattering.
   let held=[];
   try{
     const m=(typeof getCombinedOpenPositionMap==='function')?getCombinedOpenPositionMap():{};
@@ -10273,28 +10275,23 @@ function intradayFetchJobs(limit){
   }catch(e){ held=[]; }
   held.forEach(j=>{j.held=true;});
 
-  // TIER 3 - TODAY'S TOP PERFORMERS, DESCENDING (owner, 2026-08-18): *"apart from the
-  // recommendations, you should fetch in descending order of today's top performers. In fact this
-  // should be a step in the recommendation pipeline."*
-  //
-  // This is the DISCOVERY leg and it is the answer to "why can't we ever catch these stocks". The
-  // inventory only ever held names the board had already surfaced, so the daily and 5-minute history
-  // that would let a stock be caught EARLY was never collected for the stocks doing the moving. On
-  // 2026-08-18 four names ran 8-17% and the app held no history for any of them.
-  //
-  // Coverage is built GRADUALLY on purpose (owner: *"no ~18 minutes once hitting zerodha is not
-  // advisable. Do it gradually like we're doing now"*) - the same daily cap applies,
-  // and a name already read this session is skipped, so each refresh reaches a little further down
-  // the list instead of re-asking for what is already held.
+  // TIER 3 - TODAY'S REAL MOVERS, and only ones that could actually be BOUGHT. A name removed by a
+  // hard filter can never be recommended, so spending a request on it buys nothing: surveillance
+  // (v1169, genuine restrictions only), no multi-day history (v1170), non-EQ, or below the tradeable
+  // line. The >=10% bar replaces the old "top N by day %" pool, so there is no invented depth left -
+  // the owner's threshold IS the pool.
   let movers=[];
   try{
+    const blocked=s=>{
+      const f=NSE_SURV[s.symbol]; if(f&&f.length) return true;
+      if(s.noHistory===true) return true;
+      if(s.eqEligible===false||s.basketEligible===false) return true;
+      return false;
+    };
     const pool=(Array.isArray(ALL)?ALL:[])
-      .filter(r=>r.eqEligible!==false&&(r.turnover||0)>=2500000&&(r.price||0)>=10
-                 &&Number.isFinite(r.priceChange))
-      .slice().sort((x,y)=>(y.priceChange||0)-(x.priceChange||0))
-      // Only as deep as the budget could ever reach, so a fetch does not evaluate freshness for
-      // 1,359 symbols to spend 12 requests. The depth is the cap itself, not a chosen number.
-      .slice(0,FETCH_MAX_PER_RUN*4);
+      .filter(r=>Number.isFinite(r.priceChange)&&r.priceChange>=FETCH_MOVER_PCT
+                 &&(r.turnover||0)>=2500000&&(r.price||0)>=10&&!blocked(r))
+      .slice().sort((x,y)=>(y.priceChange||0)-(x.priceChange||0));
     movers=take(pool);
     movers.forEach(j=>{j.mover=true;});
   }catch(e){ movers=[]; }
@@ -10302,7 +10299,7 @@ function intradayFetchJobs(limit){
   const all=jobs.concat(held,movers);
   if(all.length) return {ok:true,jobs:all,symbols:all.map(j=>j.s),
                          recs:jobs.length,held:held.length,movers:movers.length};
-  const missing=st.need.filter(r=>!KITE_TOKEN[normSym(r.symbol)]).map(r=>r.symbol);
+  const missing=board.filter(r=>!KITE_TOKEN[normSym(r.symbol)]).map(r=>r.symbol);
   return {ok:false,why:missing.length?('no Kite instrument token for '+missing.join(', ')):'nothing left to check'};
 }
 const INTRADAY_FETCH_DAYS=3;   // sessions of 5-minute candles to ask for
