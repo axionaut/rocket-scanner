@@ -1,5 +1,5 @@
-const BUILD_TS='2026-08-18 13:28 IST'; // release build time (IST)
-const APP_VERSION=1177; // v1177: a daily fetch budget, a visible fetch loader, one order per stock, and Pace/EoD on open positions.
+const BUILD_TS='2026-08-18 13:45 IST'; // release build time (IST)
+const APP_VERSION=1178; // v1178: a single press fetches at most 12 again - the daily budget bounds the day, not the press.
 // v1093: a baseline reward:risk MEASURED on the cross-section (last completed bhav session) instead of learned from the owner's own fills - reported on every row, deliberately not enforced. Includes v1092: position size split by Radar score / stop distance, so equally-scored names carry equal RUPEE risk, plus an opt-in Risk /trade cap.
 // v556: parse the NSE Market Activity Report (MA<date>.csv) — official Nifty %, advances/declines and sector index moves shown as market CONTEXT in the status bar (EOD data, display only, never fed into per-row scoring); MA added to the ℹ️ file manifest.
 // v555 market-cycle stage awareness (stateless, self-calibrating): per-row stage label (1 accumulation · 2 breakout · 3 event · 4 profit-booking · 5 re-accumulation · 6 second-leg); a quiet-accumulation signal (conjunction-of-percentiles) injected via the rocket-diagnostic weighting; sell-the-news decay off Recent earnings date (horizon = review days). v1065 makes the market-breadth gauge an entry-eligibility input while still never changing ranking.
@@ -10135,6 +10135,13 @@ function forgetIntradayFor(sym){
 // in the helper is untouched. The budget resets on the SESSION date, so an overnight run cannot
 // borrow from tomorrow.
 const FETCH_MAX_PER_DAY=400;
+// v1178: AND A BOUND ON A SINGLE PRESS, which v1177 removed by accident. The old 12-per-15-minutes
+// was doing two jobs at once - a daily ceiling AND the thing that made coverage build GRADUALLY -
+// and replacing it with a daily budget alone let one press queue every job it could find: the owner
+// saw "fetching 135 stocks", about 95 seconds of continuous requests, which is precisely what he
+// asked to avoid ("do it gradually like we're doing now"). The two limits are now separate and
+// explicit: this is how many go out at once, FETCH_MAX_PER_DAY is how many go out in a day.
+const FETCH_MAX_PER_RUN=12;
 let FETCH_LOG=[];
 let FETCH_LOG_DATE=null;
 function fetchBudgetLeft(){
@@ -10223,7 +10230,7 @@ function intradayFetchJobs(limit){
       .slice().sort((x,y)=>(y.priceChange||0)-(x.priceChange||0))
       // Only as deep as the budget could ever reach, so a fetch does not evaluate freshness for
       // 1,359 symbols to spend 12 requests. The depth is the cap itself, not a chosen number.
-      .slice(0,120);
+      .slice(0,FETCH_MAX_PER_RUN*4);
     movers=take(pool);
     movers.forEach(j=>{j.mover=true;});
   }catch(e){ movers=[]; }
@@ -10357,7 +10364,7 @@ async function fetchCandlesInApp(limit,opts){
   if(!r.ok){ say('Nothing to fetch: '+r.why,5000,true); return; }
   const budget=fetchBudgetLeft();
   if(!budget){ say('Daily fetch budget spent — '+FETCH_MAX_PER_DAY+' requests. It resets next session.',5000,true); return; }
-  const jobs=r.jobs.slice(0,budget);
+  const jobs=r.jobs.slice(0,Math.min(budget,FETCH_MAX_PER_RUN));
   jobs.forEach(()=>FETCH_LOG.push(Date.now()));
   // v1177 (owner): *"When it's fetching there is no indicator that it's fetching. Add a loader.
   // Because I just bought two stocks while it was trying to fetch."* A fetch takes ~0.7s per stock
