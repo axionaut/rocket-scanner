@@ -1,5 +1,5 @@
-const BUILD_TS='2026-08-18 09:53 IST'; // release build time (IST)
-const APP_VERSION=1168; // v1168: a stock being sold in the current session is removed from recommendations, not flagged.
+const BUILD_TS='2026-08-18 10:06 IST'; // release build time (IST)
+const APP_VERSION=1169; // v1169: surveillance removes a stock only when NSE actually restricted it, not for a high PE.
 // v1093: a baseline reward:risk MEASURED on the cross-section (last completed bhav session) instead of learned from the owner's own fills - reported on every row, deliberately not enforced. Includes v1092: position size split by Radar score / stop distance, so equally-scored names carry equal RUPEE risk, plus an opt-in Risk /trade cap.
 // v556: parse the NSE Market Activity Report (MA<date>.csv) — official Nifty %, advances/declines and sector index moves shown as market CONTEXT in the status bar (EOD data, display only, never fed into per-row scoring); MA added to the ℹ️ file manifest.
 // v555 market-cycle stage awareness (stateless, self-calibrating): per-row stage label (1 accumulation · 2 breakout · 3 event · 4 profit-booking · 5 re-accumulation · 6 second-leg); a quiet-accumulation signal (conjunction-of-percentiles) injected via the rocket-diagnostic weighting; sell-the-news decay off Recent earnings date (horizon = review days). v1065 makes the market-breadth gauge an entry-eligibility input while still never changing ranking.
@@ -1344,28 +1344,58 @@ function isSurvFlag(v){
   return s!==''&&s!=='100';
 }
 // Seed rules — used only when brain has no saved rules yet (first-time setup)
+// ── v1169: THE HARD FILTER IS RESTRICTIONS ONLY ─────────────────────────────────────────────
+// The configured set is a HARD REMOVAL, and it had been seeded with NSE's whole REG1 column list -
+// which mixes two different things. Some columns mean NSE has RESTRICTED trading in the scrip
+// (trade-to-trade settlement, 100% margin, periodic call auction, a tightened band). Others are
+// CRITERIA it publishes about a company: its PE, whether it made a loss, how far the price has
+// travelled in six months.
+//
+// Measured 2026-08-18 on a 1,506-stock tradeable universe: surveillance removed 669, and only 175
+// carried a genuine restriction. **494 stocks were deleted purely on criteria columns** - including
+// the board's own ranks 7, 8, 9, 18, 19, 22, 26, 27, 36 and 38. The two largest removers were
+// "Scrip PE is greater than 50" (525 stocks) and "High low price variation greater than 100perc in
+// previous 6 months" (220) - and the second of those is THE PROFILE OF A ROCKET: it deletes a stock
+// for having doubled. Eight of the freed stocks were up 5%+ that morning.
+//
+// The owner's report was "there are shares which are rising by much, why did our system not pick
+// those and pick these" - and the answer was that it HAD ranked them and surveillance deleted them,
+// leaving whatever survived to be recommended.
+//
+// The criteria columns are NOT discarded: every flagged REG1 column, configured or not, still costs
+// -2 on the score capped at -12 and still shows on the warning badge (SURV_ALL_HITS). They stop
+// being a death sentence and go back to being a penalty, which is what CLAUDE.md always described.
 const SURV_SEED_RULES=[
   {column:'Default',label:'Default'},
   {column:'Insolvency_Resolution_Process(IRP)',label:'Insolvency Resolution Process (IRP)'},
   {column:'ICA',label:'ICA'},
   {column:'Under BZ/SZ Series',label:'Under BZ/SZ Series'},
   {column:'Company has failed to pay Annual listing fee',label:'Listing fee unpaid'},
-  {column:'Derivative contracts in the scrip to be moved out of F and O',label:'F&O removal'},
-  {column:'The Overall encumbered share in the scrip is more than 50 Percent.',label:'Encumbered share > 50%'},
   {column:'ESM',label:'ESM'},
   {column:'GSM',label:'GSM'},
   {column:'Long_Term_Additional_Surveillance_Measure (Long Term ASM)',label:'Long Term ASM'},
   {column:'Short_Term_Additional_Surveillance_Measure (Short Term ASM)',label:'Short Term ASM'},
+  {column:'Add-on_PB',label:'Add-on price band'},
   {column:'Unsolicited_SMS',label:'Unsolicited SMS'},
   {column:'Social Media Platforms',label:'Social Media Platforms'},
-  {column:'Pledge',label:'Pledge'},
-  {column:'Loss making',label:'Loss making'},
-  {column:'EPS in the scrip is zero (4 trailing quarters)',label:'EPS = 0 (4 trailing quarters)'},
-  {column:'Scrip PE is greater than 50 (4 trailing quarters)',label:'PE > 50 (4 trailing quarters)'},
-  {column:'Less than 100 unique PAN traded in previous 30 days',label:'PAN < 100 (30d)'},
-  {column:'Mandatory Market making period in SME scrip is over',label:'SME market making over'},
-  {column:'SME scrip is not regularly traded',label:'SME not regularly traded'},
 ];
+// The seed only applies to a FRESH brain, and this owner's brain already holds all 22. These keys
+// are therefore retired explicitly on load: a criterion must never remove a stock outright. Adding
+// one back by hand in the Methodology table still works and is still respected - this only undoes
+// the seeding, it does not police the owner.
+const SURV_RETIRED_KEYS=[
+  'scrip_pe_is_greater_than_50_4_trailing_quarters',
+  'eps_in_the_scrip_is_zero_4_trailing_quarters',
+  'loss_making',
+  'high_low_price_variation_greater_than_100perc_in_previous_6_months',
+  'pledge','total_pledge',
+  'the_overall_encumbered_share_in_the_scrip_is_more_than_50_percent',
+  'less_than_100_unique_pan_traded_in_previous_30_days',
+  'sme_scrip_is_not_regularly_traded',
+  'mandatory_market_making_period_in_sme_scrip_is_over',
+  'derivative_contracts_in_the_scrip_to_be_moved_out_of_f_and_o',
+];
+
 function getSurvRules(){
   const seen=new Set();
   return SURV_CUSTOM_RULES.map(rule=>{
@@ -1389,7 +1419,7 @@ function loadSurvRules(){
       SURV_CUSTOM_RULES=raw.map(rule=>{
         const column=String(rule.column||rule.label||'').trim();
         return column?{key:survRuleKey(column),column,label:String(rule.label||column).trim()}:null;
-      }).filter(Boolean);
+      }).filter(Boolean).filter(r=>SURV_RETIRED_KEYS.indexOf(r.key)<0);
     } else {
       // First-time: seed with default rules
       SURV_CUSTOM_RULES=SURV_SEED_RULES.map(r=>({key:survRuleKey(r.column),column:r.column,label:r.label}));
