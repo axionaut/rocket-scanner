@@ -1,5 +1,5 @@
-const BUILD_TS='2026-08-18 09:21 IST'; // release build time (IST)
-const APP_VERSION=1166; // v1166: a pre-open book from an earlier session stops voting on today's score.
+const BUILD_TS='2026-08-18 09:30 IST'; // release build time (IST)
+const APP_VERSION=1167; // v1167: the intraday read no longer needs three bars from TODAY - it needs three bars.
 // v1093: a baseline reward:risk MEASURED on the cross-section (last completed bhav session) instead of learned from the owner's own fills - reported on every row, deliberately not enforced. Includes v1092: position size split by Radar score / stop distance, so equally-scored names carry equal RUPEE risk, plus an opt-in Risk /trade cap.
 // v556: parse the NSE Market Activity Report (MA<date>.csv) — official Nifty %, advances/declines and sector index moves shown as market CONTEXT in the status bar (EOD data, display only, never fed into per-row scoring); MA added to the ℹ️ file manifest.
 // v555 market-cycle stage awareness (stateless, self-calibrating): per-row stage label (1 accumulation · 2 breakout · 3 event · 4 profit-booking · 5 re-accumulation · 6 second-leg); a quiet-accumulation signal (conjunction-of-percentiles) injected via the rocket-diagnostic weighting; sell-the-news decay off Recent earnings date (horizon = review days). v1065 makes the market-breadth gauge an entry-eligibility input while still never changing ranking.
@@ -3588,7 +3588,18 @@ function getIntradayRead(sym){
   if(!bars||!bars.length) return null;
   const key=istDayKey(bars[bars.length-1].t);
   const day=bars.filter(b=>istDayKey(b.t)===key);
-  if(day.length<3) return null;
+  // v1167: THE GUARD MUST COUNT WHAT THE READ ACTUALLY USES. This was `day.length<3`, and before
+  // v1164 that was the whole series, so it honestly meant "too little data". v1164 made the FLOW
+  // span every session while session terms stayed on today - and left the guard demanding three bars
+  // from TODAY. So every morning until 09:25 a stock with 77 bars across two sessions returned
+  // NOTHING: no verdict, no re-rank, a plain grey button, and a tally reading "checked 0 of 3".
+  // Reported from the live screen at 09:2x, where the only two names that read were the two whose
+  // fetch had landed a 09:25 bar.
+  //
+  // The flow needs bars, not bars TODAY. Session terms (range position, first-15, day %) degrade
+  // gracefully on one or two bars and are superseded by the trajectory whenever volume is present,
+  // which it always is on a Kite fetch.
+  if(bars.length<3) return null;
   const open=day[0].o, close=day[day.length-1].c;
   const hi=Math.max(...day.map(b=>b.h)), lo=Math.min(...day.map(b=>b.l));
   // (1) THE FIRST FIFTEEN MINUTES. **AN OBSERVATION, NOT A RULE** (owner, 2026-08-17: "that first
@@ -3734,8 +3745,17 @@ function getIntradayLoopState(limit){
   const board=(passing.length?passing:pool).slice(0,N);
   // A stale read does NOT count as checked - the loop must ask for it again, or it would report
   // "settled" on a board validated last week.
-  const need=board.filter(r=>{const rd=getIntradayRead(r.symbol);return !rd||!rd.current;});
-  const source=(Array.isArray(ALL)?ALL:[]).filter(r=>r.intraday);
+  // ONE source for both halves of the sentence. `need` read live from getIntradayRead while the
+  // tally read the copy cached on the row, so the two could disagree and the header could claim more
+  // verdicts than checks.
+  const liveRead=r=>{const x=getIntradayRead(r.symbol);return (x&&x.current)?x:null;};
+  const need=board.filter(r=>!liveRead(r));
+  // v1167: the tally must describe ONE population. This drew from the whole universe while the
+  // "checked N of M" beside it counted the top-N board, so the header could read "checked 0 of 3 ·
+  // 1 buy / 1 skip" - and both verdicts belonged to OPEN POSITIONS, which per v1148 answer a
+  // different question entirely (is the flow that justified the buy still there) and are labelled
+  // HOLDING UP / BEING SOLD in their own panel, not BUY / SKIP.
+  const source=board.filter(r=>liveRead(r)&&r.intradayVerdict);
   const confirmed=source.filter(r=>r.intradayVerdict==='confirmed');
   const rejected=source.filter(r=>r.intradayVerdict==='rejected');
   return {top:board,need,converged:board.length>0&&need.length===0,
