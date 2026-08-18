@@ -1,5 +1,5 @@
-const BUILD_TS='2026-08-18 16:01 IST'; // release build time (IST)
-const APP_VERSION=1185; // v1185: the continuous close is derived per stock, not assumed to be 15:30 (CAS).
+const BUILD_TS='2026-08-18 18:34 IST'; // release build time (IST)
+const APP_VERSION=1186; // v1186: no fetch on the first page load; candle files written newest-first.
 // v1093: a baseline reward:risk MEASURED on the cross-section (last completed bhav session) instead of learned from the owner's own fills - reported on every row, deliberately not enforced. Includes v1092: position size split by Radar score / stop distance, so equally-scored names carry equal RUPEE risk, plus an opt-in Risk /trade cap.
 // v556: parse the NSE Market Activity Report (MA<date>.csv) — official Nifty %, advances/declines and sector index moves shown as market CONTEXT in the status bar (EOD data, display only, never fed into per-row scoring); MA added to the ℹ️ file manifest.
 // v555 market-cycle stage awareness (stateless, self-calibrating): per-row stage label (1 accumulation · 2 breakout · 3 event · 4 profit-booking · 5 re-accumulation · 6 second-leg); a quiet-accumulation signal (conjunction-of-percentiles) injected via the rocket-diagnostic weighting; sell-the-news decay off Recent earnings date (horizon = review days). v1065 makes the market-breadth gauge an entry-eligibility input while still never changing ranking.
@@ -10294,6 +10294,10 @@ function fetchBudgetLeft(){
 //
 // The >=10% mover tier is GONE. Fetching a stock that has already run 16% cannot help buy it
 // earlier, and it was competing for slots with the names actually up for decision.
+// The first ingest of a page load is the file that was already on disk when the tab opened,
+// so it must not spend a Zerodha request (owner, 2026-08-18). Reset per page load by being a
+// plain module-level let - a reload starts false again, which is exactly the intent.
+let FIRST_INGEST_DONE=false;
 const FETCH_TOP_RANK=5;      // owner: the live candidate set, kept fresh
 function intradayFetchJobs(limit){
   const tok=r=>({s:normSym(r.symbol||r.sym||''),t:KITE_TOKEN[normSym(r.symbol||r.sym||'')]||0});
@@ -12896,10 +12900,20 @@ async function processFiles(files,sourceLabel,opts={}){
   // (owner: *"no ~18 minutes once hitting zerodha is not advisable. Do it gradually"*).
   //
   // Fire-and-forget: it must never block the render or fail the load.
-  try{
-    if(KITE_API&&fetchBudgetLeft()>0)
-      setTimeout(()=>{ try{ fetchCandlesInApp({auto:true}); }catch(e){} },1200);
-  }catch(e){}
+  //
+  // BUT NOT ON THE FIRST INGEST OF A PAGE LOAD (owner, 2026-08-18: *"Don't fetch from zerodha on
+  // first page load. On first load, it's the same ALL NSE that was there when the page was closed
+  // last"*). Startup hydration re-ingests the file already on disk, so an automatic fetch there
+  // spends the daily budget re-reading a session the inventory usually already covers - and it
+  // fires before the owner has even looked at the board. Only a SUBSEQUENT ingest means the file
+  // genuinely changed. The manual button is unaffected and still works on the first load.
+  if(FIRST_INGEST_DONE){
+    try{
+      if(KITE_API&&fetchBudgetLeft()>0)
+        setTimeout(()=>{ try{ fetchCandlesInApp({auto:true}); }catch(e){} },1200);
+    }catch(e){}
+  }
+  FIRST_INGEST_DONE=true;
   return true;
 }
 
