@@ -1,5 +1,5 @@
-const BUILD_TS='2026-08-18 15:25 IST'; // release build time (IST)
-const APP_VERSION=1183; // v1183: the fetch is a validator that walks down the ranking until something clears the bar.
+const BUILD_TS='2026-08-18 15:47 IST'; // release build time (IST)
+const APP_VERSION=1184; // v1184: the free daily history is kept for 40 sessions, not trimmed back to 8.
 // v1093: a baseline reward:risk MEASURED on the cross-section (last completed bhav session) instead of learned from the owner's own fills - reported on every row, deliberately not enforced. Includes v1092: position size split by Radar score / stop distance, so equally-scored names carry equal RUPEE risk, plus an opt-in Risk /trade cap.
 // v556: parse the NSE Market Activity Report (MA<date>.csv) — official Nifty %, advances/declines and sector index moves shown as market CONTEXT in the status bar (EOD data, display only, never fed into per-row scoring); MA added to the ℹ️ file manifest.
 // v555 market-cycle stage awareness (stateless, self-calibrating): per-row stage label (1 accumulation · 2 breakout · 3 event · 4 profit-booking · 5 re-accumulation · 6 second-leg); a quiet-accumulation signal (conjunction-of-percentiles) injected via the rocket-diagnostic weighting; sell-the-news decay off Recent earnings date (horizon = review days). v1065 makes the market-breadth gauge an entry-eligibility input while still never changing ranking.
@@ -140,7 +140,18 @@ const LEFT_ON_TABLE_POOL_SESSIONS=10;   // how much of it the pool actually read
 // retained any price history — NSE_BHAV is rebuilt from the current zip on every load — which is why
 // v1097 had to approximate "the drift into the results" from a 1-week column.
 const PRICE_HISTORY_STORE='rs_price_history_v1';
-const PRICE_HISTORY_KEEP_SESSIONS=8;    // enough for a 3-session drift plus slack for missed uploads
+// v1184: RETENTION WAS THE REASON THE HISTORY NEVER GREW (owner, 2026-08-18: *"why does
+// nse_price_history have only 8 sessions? Didn't we implement this so many days ago? Please check if
+// it's skipping days"*). It was NOT skipping - every trading session since v1098 shipped was
+// present, 08-06 through 08-17 with nothing missing. It was being TRIMMED to 8 on every save, a cap
+// sized in v1098 for a 3-session drift measure and never revisited when this store became the
+// intended source for multi-day features. **The `discovery-from-bhav-history` trigger registered an
+// hour before this was found asks for 20 sessions and could never have fired.**
+//
+// 40 sessions is two trading months: enough for the 20-day features the upStreak work needs, with
+// room for a longer window later. Measured cost: 73 KB per session, so 40 sessions is 2.85 MB
+// against a 9.5 MB brain - the store grows, but by a knowable amount rather than an open-ended one.
+const PRICE_HISTORY_KEEP_SESSIONS=40;
 const PRE_RESULTS_DRIFT_SESSIONS=3;     // the owner's 2-3 day window, measured to the last close before today
 const ENTRY_OUTCOME_STORE='rs_entry_outcomes_delta_v1';
 const OUTCOME_HORIZON_FALLBACK_DAYS=5;
