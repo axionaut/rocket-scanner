@@ -1,5 +1,5 @@
-const BUILD_TS='2026-08-18 10:59 IST'; // release build time (IST)
-const APP_VERSION=1173; // v1173: the position decision reads the tape only, and the fetched inventory survives a reload.
+const BUILD_TS='2026-08-18 11:08 IST'; // release build time (IST)
+const APP_VERSION=1174; // v1174: being measured is worth nothing by itself, and the session P&L reconciles.
 // v1093: a baseline reward:risk MEASURED on the cross-section (last completed bhav session) instead of learned from the owner's own fills - reported on every row, deliberately not enforced. Includes v1092: position size split by Radar score / stop distance, so equally-scored names carry equal RUPEE risk, plus an opt-in Risk /trade cap.
 // v556: parse the NSE Market Activity Report (MA<date>.csv) — official Nifty %, advances/declines and sector index moves shown as market CONTEXT in the status bar (EOD data, display only, never fed into per-row scoring); MA added to the ℹ️ file manifest.
 // v555 market-cycle stage awareness (stateless, self-calibrating): per-row stage label (1 accumulation · 2 breakout · 3 event · 4 profit-booking · 5 re-accumulation · 6 second-leg); a quiet-accumulation signal (conjunction-of-percentiles) injected via the rocket-diagnostic weighting; sell-the-news decay off Recent earnings date (horizon = review days). v1065 makes the market-breadth gauge an entry-eligibility input while still never changing ranking.
@@ -3859,7 +3859,26 @@ function applyIntradayReorder(rows){
     if(read&&read.current) n++;
   }
   if(!n) return 0;
-  const NEUTRAL=0.5;                 // the midpoint of a [0,1] standing: "no information"
+  // ── v1174: "NO INFORMATION" IS THE MIDDLE OF THE OBSERVED DISTRIBUTION, NOT OF THE SCALE ────
+  // Owner, 2026-08-18: *"stock X and Y are #1 and #2... then I do another refresh and the same X and
+  // Y stay at top. I'm just asking to check if the logic behind is correct or there's something
+  // flawed."* It was flawed, and this is v1139's own rule not applied here: **absence must take the
+  // MEDIAN, so that having been measured is worth nothing by itself.**
+  //
+  // For the order book that rule was satisfied by 0.5, because those values are percentiles and 0.5
+  // IS their median. The flow standing is a geometric mean, and across the stocks the app chooses to
+  // fetch - the top of the board and the day's biggest movers - its median sits ABOVE 0.5. Measured
+  // 2026-08-18 on 17 fetched names: median 0.535, above neutral in 12 of 17, and checked rows rose a
+  // mean of 13.9 places against -0.08 for everything else. So an unchecked row was pinned at 0.500
+  // and could never show better flow, while any checked row above 0.5 gained on it automatically -
+  // the top stayed on top partly BECAUSE it had been measured.
+  //
+  // The neutral is now the median of the standings actually observed this pass, so a checked stock
+  // gains only by beating the typical checked stock. It falls back to 0.5 when nothing is checked,
+  // which reproduces the old behaviour exactly on an empty inventory.
+  const _obs=rows.map(r=>(r.intraday&&r.intraday.current&&Number.isFinite(r.intraday.standing))
+      ?Math.max(0,Math.min(1,r.intraday.standing)):null).filter(v=>v!=null).sort((a,b)=>a-b);
+  const NEUTRAL=_obs.length?_obs[Math.floor(_obs.length/2)]:0.5;
   rows.forEach(r=>{
     // v1168: the multi-session standing carries the row early, today's own standing carries it late,
     // and the crossover is today's share of the volume clock rather than a typed hour. Geometric, so
@@ -5387,7 +5406,17 @@ function enrichExitPnlRow(row,bookedDate=null){
   }catch(e){}
   if(qty>0&&isFinite(buy)&&buy>0&&isFinite(sell)&&sell>0){
     out.priceDiff=+(sell-buy).toFixed(2);
-    out.grossPnl=+((sell-buy)*qty).toFixed(0);
+    // v1174: GROSS IS NET PLUS CHARGES, not a recomputation from the row's ROUNDED average prices
+    // (owner, 2026-08-18: "the latest session P/L calculation is wrong"). Net and charges are exact
+    // sums over the FIFO lots; gross was rebuilt from the 2-decimal weighted averages shown in the
+    // row, so the three numbers on the card could not reconcile. Measured on 2026-08-17: the card
+    // read "gross -539 / cost 224" against a total of -768, and -539 - 224 is -763. Per lot the true
+    // gross is -544.0 (ELECTCAST -787.4, ANANTRAJ +243.4); the rounded averages gave -539.2 -
+    // ELECTCAST (72.07-73.27)x652 = -782.4 against a true -787.4. The TOTAL was right all along.
+    const _net=Number(out.netPnl), _chg=Number(out.charges);
+    out.grossPnl=(Number.isFinite(_net)&&Number.isFinite(_chg))
+      ? +(_net+_chg).toFixed(0)
+      : +((sell-buy)*qty).toFixed(0);
   }else{
     out.priceDiff=null;
     out.grossPnl=null;
