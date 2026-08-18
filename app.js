@@ -1,5 +1,5 @@
-const BUILD_TS='2026-08-18 15:47 IST'; // release build time (IST)
-const APP_VERSION=1184; // v1184: the free daily history is kept for 40 sessions, not trimmed back to 8.
+const BUILD_TS='2026-08-18 16:01 IST'; // release build time (IST)
+const APP_VERSION=1185; // v1185: the continuous close is derived per stock, not assumed to be 15:30 (CAS).
 // v1093: a baseline reward:risk MEASURED on the cross-section (last completed bhav session) instead of learned from the owner's own fills - reported on every row, deliberately not enforced. Includes v1092: position size split by Radar score / stop distance, so equally-scored names carry equal RUPEE risk, plus an opt-in Risk /trade cap.
 // v556: parse the NSE Market Activity Report (MA<date>.csv) — official Nifty %, advances/declines and sector index moves shown as market CONTEXT in the status bar (EOD data, display only, never fed into per-row scoring); MA added to the ℹ️ file manifest.
 // v555 market-cycle stage awareness (stateless, self-calibrating): per-row stage label (1 accumulation · 2 breakout · 3 event · 4 profit-booking · 5 re-accumulation · 6 second-leg); a quiet-accumulation signal (conjunction-of-percentiles) injected via the rocket-diagnostic weighting; sell-the-news decay off Recent earnings date (horizon = review days). v1065 makes the market-breadth gauge an entry-eligibility input while still never changing ranking.
@@ -1130,6 +1130,15 @@ function showToast(msg, duration=4000, isError=false){
 const DAY_START_MIN = 9*60;   // 9:00 AM IST = 540
 const DAY_END_MIN   = 16*60;  // 4:00 PM IST = 960
 const DAY_LENGTH_MIN= DAY_END_MIN - DAY_START_MIN; // 420
+
+// CONTINUOUS TRADING does not end at the same minute for every stock any more. SEBI's Closing
+// Auction Session went live 2026-08-03: a stock with F&O contracts stops trading continuously at
+// 15:15 and its close is set by an auction that prints no 5-minute candle. Everything else still
+// trades to 15:30. These are exchange facts, not tunables - the same category as Zerodha's
+// 20-order cap. Which of the two applies to a given stock is DERIVED from its own bar file, never
+// from a list (see buildIntradayTrajectory); no input carries F&O membership.
+const SESSION_CLOSE_MIN      = 15*60+30;  // 15:30 - continuous close outside the F&O segment
+const CAS_CONTINUOUS_END_MIN = 15*60+15;  // 15:15 - earliest close the auction regime can produce
 
 function istClock(timestamp=Date.now()){
   const ts=Number(timestamp)||Date.now();
@@ -3728,7 +3737,28 @@ function buildIntradayTrajectory(bars){
   gaps.sort((a,b)=>a-b);
   const stepMs=gaps.length?gaps[Math.floor(gaps.length/2)]:300000;
   const lastT=new Date(bars[n-1].t);
-  const closeT=new Date(lastT); closeT.setHours(15,30,0,0);
+  // ── v1185: THE SESSION DOES NOT END AT 15:30 FOR EVERY STOCK ────────────────────────────────
+  // Measured in our own files on 2026-08-17: TCS, JIOFIN, MCX and TIINDIA all end at the 15:10 bar
+  // while every one of the other 145 stocks ends at 15:25. That is the Closing Auction Session -
+  // continuous trading stops at 15:15 for F&O names. Against a hardcoded 15:30 such a stock is
+  // credited with three bars that cannot exist, so the projected close keeps promising travel after
+  // its continuous session has already ended.
+  //
+  // MEMBERSHIP IS READ OFF THE STOCK'S OWN FILE. No input carries an F&O list, and the multi-day
+  // contiguous series (v1164) already answers it: the LATEST bar ever seen on an EARLIER session is
+  // one bar short of that stock's close. Taking the MAXIMUM makes it robust to our own fetch timing
+  // - a day we stopped fetching at 11:00 can only understate it, and one late fetch on any session
+  // settles it for good. With no late observation at all it fails open to 15:30, which is both the
+  // pre-CAS behaviour and the answer for the ~93% of the market the auction does not touch.
+  const _todayKey=istDayKey(bars[n-1].t);
+  let _seenMin=0;
+  for(let i=0;i<n;i++){
+    if(istDayKey(bars[i].t)===_todayKey) continue;
+    const _d=new Date(bars[i].t), _m=_d.getHours()*60+_d.getMinutes();
+    if(_m>_seenMin) _seenMin=_m;
+  }
+  const _endMin=(_seenMin+stepMs/60000>=CAS_CONTINUOUS_END_MIN)?_seenMin+stepMs/60000:SESSION_CLOSE_MIN;
+  const closeT=new Date(lastT); closeT.setHours(Math.floor(_endMin/60),_endMin%60,0,0);
   const barsLeft=Math.max(0,Math.floor((closeT-lastT)/stepMs));
   const maxTravel=(avgMovePct!=null)?avgMovePct*barsLeft:null;
   const predPct=(pressurePct==null)?null
@@ -3752,6 +3782,7 @@ function buildIntradayTrajectory(bars){
           // Divergence needs no separate term: price up on falling flow already drives both of
           // these down, which is what "distribution into strength" means.
           avgMovePct,barsLeft,stepMin:Math.round(stepMs/60000),maxTravel,predPct,predClose,
+          sessionEndMin:_endMin,
           upCost,dnCost,costRatio,absorptionNet:absNet,absorptionBars:absCount,
           netRecent,pressurePct,
           // THREE terms now, each 0.5 at "no information", so the geometric mean is 0.5 at no
