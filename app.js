@@ -1,5 +1,5 @@
-const BUILD_TS='2026-08-18 10:28 IST'; // release build time (IST)
-const APP_VERSION=1170; // v1170: every pick records the time of day it was issued, so the question can finally be measured.
+const BUILD_TS='2026-08-18 10:41 IST'; // release build time (IST)
+const APP_VERSION=1171; // v1171: fetching runs on every ALL NSE ingest and hunts today's top performers, descending.
 // v1093: a baseline reward:risk MEASURED on the cross-section (last completed bhav session) instead of learned from the owner's own fills - reported on every row, deliberately not enforced. Includes v1092: position size split by Radar score / stop distance, so equally-scored names carry equal RUPEE risk, plus an opt-in Risk /trade cap.
 // v556: parse the NSE Market Activity Report (MA<date>.csv) — official Nifty %, advances/declines and sector index moves shown as market CONTEXT in the status bar (EOD data, display only, never fed into per-row scoring); MA added to the ℹ️ file manifest.
 // v555 market-cycle stage awareness (stateless, self-calibrating): per-row stage label (1 accumulation · 2 breakout · 3 event · 4 profit-booking · 5 re-accumulation · 6 second-leg); a quiet-accumulation signal (conjunction-of-percentiles) injected via the rocket-diagnostic weighting; sell-the-news decay off Recent earnings date (horizon = review days). v1065 makes the market-breadth gauge an entry-eligibility input while still never changing ranking.
@@ -9997,25 +9997,73 @@ function fetchBudgetLeft(){
 // only a read from the CURRENT session may move anything.
 function intradayFetchJobs(limit){
   const tok=r=>({s:normSym(r.symbol||r.sym||''),t:KITE_TOKEN[normSym(r.symbol||r.sym||'')]||0});
-  const stale=sym=>{const rd=getIntradayRead(sym);return !rd||!rd.current;};
-  const st=getIntradayLoopState(limit||INTRADAY_LOOP_N);
-  const jobs=st.need.map(tok).filter(j=>j.t>0);
-  const seen=new Set(jobs.map(j=>j.s));
+  // "ALREADY FETCHED" MEANS "HOLDS EVERY BAR THAT EXISTS", NOT "HOLDS SOME BARS" (owner,
+  // 2026-08-18): *"On each refresh it fetches the top 10 which are not already fetched AND refreshes
+  // the top ones which were already fetched."* A read taken at 09:20 is out of date at 09:30 because
+  // two more bars have printed since. So a name needs fetching when it has NO read, when its read is
+  // from an earlier session, OR when its newest bar is older than the last COMPLETED 5-minute
+  // boundary. That last test is exact and needs no constant: immediately after a fetch nothing
+  // qualifies, and the moment a new bar closes the top names do - so the budget is never spent
+  // re-asking for data we already hold.
+  const lastBarBoundary=()=>{const c=istClock();if(!c||!Number.isFinite(c.mins))return null;
+    return Math.floor((c.mins-5)/5)*5;};
+  const stale=sym=>{
+    const rd=getIntradayRead(sym);
+    if(!rd||!rd.current) return true;
+    const b=lastBarBoundary(); if(b===null) return false;
+    const t=new Date(rd.asOf);
+    return (t.getHours()*60+t.getMinutes())<b;
+  };
+  const seen=new Set();
+  const take=arr=>arr.map(tok).filter(j=>j.t>0&&!seen.has(j.s)&&stale(j.s)&&(seen.add(j.s),true));
 
-  // Everything actually held, from the same source the Open Positions panel uses, so the two can
-  // never disagree about what is open.
+  // TIER 1 - THE RECOMMENDATIONS. A buy decision expires at the close, so it goes first.
+  const st=getIntradayLoopState(limit||INTRADAY_LOOP_N);
+  // Drawn from the whole board, not from st.need. `need` answers "does this row still lack a
+  // VERDICT", which stays true for the session once a stock is checked - the right question for the
+  // tally and the wrong one for fetching, because a verdict formed at 09:20 rests on data that is
+  // two bars old by 09:30. Freshness is judged by stale() above.
+  const jobs=take(st.top&&st.top.length?st.top:st.need);
+
+  // TIER 2 - WHAT IS ALREADY OWNED (v1163). A stock leaves the board the day it is bought, so
+  // without this its file stops growing exactly when the position starts mattering. These are few
+  // and they persist, so they are covered early and then stop consuming budget.
   let held=[];
   try{
     const m=(typeof getCombinedOpenPositionMap==='function')?getCombinedOpenPositionMap():{};
-    held=Object.keys(m).filter(k=>{const p=m[k];return p&&(p.qty>0);})
-      .map(k=>tok({symbol:k}))
-      .filter(j=>j.t>0&&!seen.has(j.s)&&stale(j.s));
+    held=take(Object.keys(m).filter(k=>m[k]&&m[k].qty>0).map(k=>({symbol:k})));
   }catch(e){ held=[]; }
   held.forEach(j=>{j.held=true;});
 
-  const all=jobs.concat(held);
+  // TIER 3 - TODAY'S TOP PERFORMERS, DESCENDING (owner, 2026-08-18): *"apart from the
+  // recommendations, you should fetch in descending order of today's top performers. In fact this
+  // should be a step in the recommendation pipeline."*
+  //
+  // This is the DISCOVERY leg and it is the answer to "why can't we ever catch these stocks". The
+  // inventory only ever held names the board had already surfaced, so the daily and 5-minute history
+  // that would let a stock be caught EARLY was never collected for the stocks doing the moving. On
+  // 2026-08-18 four names ran 8-17% and the app held no history for any of them.
+  //
+  // Coverage is built GRADUALLY on purpose (owner: *"no ~18 minutes once hitting zerodha is not
+  // advisable. Do it gradually like we're doing now"*) - the same FETCH_MAX_PER_WINDOW cap applies,
+  // and a name already read this session is skipped, so each refresh reaches a little further down
+  // the list instead of re-asking for what is already held.
+  let movers=[];
+  try{
+    const pool=(Array.isArray(ALL)?ALL:[])
+      .filter(r=>r.eqEligible!==false&&(r.turnover||0)>=2500000&&(r.price||0)>=10
+                 &&Number.isFinite(r.priceChange))
+      .slice().sort((x,y)=>(y.priceChange||0)-(x.priceChange||0))
+      // Only as deep as the budget could ever reach, so a fetch does not evaluate freshness for
+      // 1,359 symbols to spend 12 requests. The depth is the cap itself, not a chosen number.
+      .slice(0,FETCH_MAX_PER_WINDOW*4);
+    movers=take(pool);
+    movers.forEach(j=>{j.mover=true;});
+  }catch(e){ movers=[]; }
+
+  const all=jobs.concat(held,movers);
   if(all.length) return {ok:true,jobs:all,symbols:all.map(j=>j.s),
-                         recs:jobs.length,held:held.length};
+                         recs:jobs.length,held:held.length,movers:movers.length};
   const missing=st.need.filter(r=>!KITE_TOKEN[normSym(r.symbol)]).map(r=>r.symbol);
   return {ok:false,why:missing.length?('no Kite instrument token for '+missing.join(', ')):'nothing left to check'};
 }
@@ -10098,20 +10146,23 @@ async function saveKiteToken(){
 }
 // The whole loop, in one press: ask the local server for the candles, hand them to the SAME parser
 // a paste uses, re-rank, and point at whatever still needs checking.
-async function fetchCandlesInApp(limit){
-  if(!KITE_API){ showToast('The helper is not running. Double-click "Start Rocket Scanner.bat" and leave that window open — the app itself stays on GitHub Pages.',8000,true); return; }
+async function fetchCandlesInApp(limit,opts){
+  const auto=!!(opts&&opts.auto)||!!(limit&&limit.auto);
+  if(limit&&typeof limit==='object') limit=null;
+  const say=(m,ms,bad)=>{ if(!auto) showToast(m,ms,bad); };   // silent on the automatic path
+  if(!KITE_API){ say('The helper is not running. Double-click "Start Rocket Scanner.bat" and leave that window open — the app itself stays on GitHub Pages.',8000,true); return; }
   const r=intradayFetchJobs(limit);
-  if(!r.ok){ showToast('Nothing to fetch: '+r.why,5000,true); return; }
+  if(!r.ok){ say('Nothing to fetch: '+r.why,5000,true); return; }
   const budget=fetchBudgetLeft();
-  if(!budget){ showToast('Rate cap reached — '+FETCH_MAX_PER_WINDOW+' per '+(FETCH_WINDOW_MS/60000)+' minutes.',5000,true); return; }
+  if(!budget){ say('Rate cap reached — '+FETCH_MAX_PER_WINDOW+' per '+(FETCH_WINDOW_MS/60000)+' minutes.',5000,true); return; }
   const jobs=r.jobs.slice(0,budget);
   jobs.forEach(()=>FETCH_LOG.push(Date.now()));
-  showToast('Fetching '+jobs.map(j=>j.s).join(', ')+'…',3000);
+  say('Fetching '+jobs.map(j=>j.s).join(', ')+'…',3000);
   try{
     const q=jobs.map(j=>j.s+':'+j.t).join(',');
     const res=await fetch(KITE_HELPER+'/api/kite/candles?daily=1&days='+INTRADAY_FETCH_DAYS+'&jobs='+encodeURIComponent(q),{cache:'no-store'});
     const j=await res.json();
-    if(!j.ok){ showToast(j.why,8000,true); return; }
+    if(!j.ok){ say(j.why,8000,true); return; }
     const out=ingestKiteCandlePayload(JSON.stringify({rocketScanner:'candles',data:j.data}));
     // WHAT WAS ACTUALLY FETCHED, so it can be checked against the chart rather than trusted
     // (owner: "where can I see the data it fetches to confirm if it is even fetching the correct
@@ -10132,10 +10183,10 @@ async function fetchCandlesInApp(limit){
     const st=getIntradayLoopState(INTRADAY_LOOP_N);
     INTRADAY_TARGET='';
     renderTable();
-    showToast('Read '+out.done.length+' stock(s): '+out.done.join(', ')
+    say('Read '+out.done.length+' stock(s): '+out.done.join(', ')
       +((j.failed&&j.failed.length)?(' · no data for '+j.failed.join(', ')):'')
       +(st.converged?' · settled':''),6000,!out.done.length);
-  }catch(e){ showToast('Fetch failed: '+e.message,6000,true); }
+  }catch(e){ say('Fetch failed: '+e.message,6000,true); }
 }
 function intradayPasteBarHtml(){
   const n=Object.keys(INTRADAY_BARS).length;
@@ -12436,6 +12487,22 @@ async function processFiles(files,sourceLabel,opts={}){
   renderTradingDashboardNow();
   if(!silent) setLoading(false);
   saveBrainInBackground('Brain saved after file processing');
+  // ── v1171: FETCHING IS A STEP IN THE PIPELINE, NOT A BUTTON ─────────────────────────────────
+  // Owner, 2026-08-18: *"Fetched on ALL NSE refresh automatically, not just when I click the fetch
+  // button... In fact this should be a step in the recommendation pipeline."*
+  //
+  // Every ALL NSE ingest spends whatever is left of the rate budget on the names that need history:
+  // recommendations first, then open positions, then TODAY'S TOP PERFORMERS descending. The folder
+  // watch re-ingests only when the file's own timestamp changes (v519), so this fires a handful of
+  // times a day rather than on the 3-second poll, and FETCH_MAX_PER_WINDOW still caps it before a
+  // single request is made - coverage builds GRADUALLY across the session instead of in one burst
+  // (owner: *"no ~18 minutes once hitting zerodha is not advisable. Do it gradually"*).
+  //
+  // Fire-and-forget: it must never block the render or fail the load.
+  try{
+    if(KITE_API&&fetchBudgetLeft()>0)
+      setTimeout(()=>{ try{ fetchCandlesInApp({auto:true}); }catch(e){} },1200);
+  }catch(e){}
   return true;
 }
 
