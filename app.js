@@ -1,5 +1,5 @@
-const BUILD_TS='2026-08-18 10:41 IST'; // release build time (IST)
-const APP_VERSION=1171; // v1171: fetching runs on every ALL NSE ingest and hunts today's top performers, descending.
+const BUILD_TS='2026-08-18 10:51 IST'; // release build time (IST)
+const APP_VERSION=1172; // v1172: open positions say what to DO, and hiding the fetch list no longer throws the data away.
 // v1093: a baseline reward:risk MEASURED on the cross-section (last completed bhav session) instead of learned from the owner's own fills - reported on every row, deliberately not enforced. Includes v1092: position size split by Radar score / stop distance, so equally-scored names carry equal RUPEE risk, plus an opt-in Risk /trade cap.
 // v556: parse the NSE Market Activity Report (MA<date>.csv) — official Nifty %, advances/declines and sector index moves shown as market CONTEXT in the status bar (EOD data, display only, never fed into per-row scoring); MA added to the ℹ️ file manifest.
 // v555 market-cycle stage awareness (stateless, self-calibrating): per-row stage label (1 accumulation · 2 breakout · 3 event · 4 profit-booking · 5 re-accumulation · 6 second-leg); a quiet-accumulation signal (conjunction-of-percentiles) injected via the rocket-diagnostic weighting; sell-the-news decay off Recent earnings date (horizon = review days). v1065 makes the market-breadth gauge an entry-eligibility input while still never changing ranking.
@@ -7533,16 +7533,24 @@ function buildOpenPositionsPanel(query=''){
         let tag='';
         if(rd&&rd.traj){
           const col=rd.regime==='accumulating'?'var(--green)':rd.regime==='selling'?'var(--red)':'var(--amber)';
-          tag=`<div style="font-size:11px;color:${col};font-weight:700" title="${escHtml(
-            rd.regime.toUpperCase()+' — net flow '+(rd.cvdPct*100).toFixed(1)+'% of everything traded'
+          // v1172: the ACTION, not the weather. The regime and the flow numbers move to the tooltip.
+          const a=getPositionAction(v,row);
+          const ac=a?(a.tone==='green'?'var(--green)':a.tone==='red'?'var(--red)':'var(--amber)'):col;
+          tag=`<div style="font-size:11px;color:${ac};font-weight:700" title="${escHtml(
+            (a?a.act+' — '+a.why+String.fromCharCode(10):'')
+            +rd.regime.toUpperCase()+' — net flow '+(rd.cvdPct*100).toFixed(1)+'% of everything traded'
             +(rd.traj.costRatio?'; 1% up costs '+Math.round(rd.traj.upCost).toLocaleString('en-IN')
               +' shares against '+Math.round(rd.traj.dnCost).toLocaleString('en-IN')+' down':'')
             +(Number.isFinite(rd.traj.pressurePct)?'; unspent pressure '
               +(rd.traj.pressurePct>=0?'+':'')+rd.traj.pressurePct.toFixed(2)+'%':''))}">${
-            rd.regime==='accumulating'?'HOLDING UP':rd.regime==='selling'?'BEING SOLD':escHtml(rd.regime)
-          } <span style="color:var(--t3);font-weight:400">${(rd.cvdPct*100).toFixed(1)}%</span></div>`;
-        }else if(rd){
-          tag='<div style="font-size:11px;color:var(--t3)">no volume in that paste</div>';
+            a?escHtml(a.act):(rd.regime==='accumulating'?'HOLDING UP':rd.regime==='selling'?'BEING SOLD':escHtml(rd.regime))
+          }</div>`;
+        }else{
+          const a=getPositionAction(v,row);
+          if(a){
+            const ac=a.tone==='green'?'var(--green)':a.tone==='red'?'var(--red)':'var(--amber)';
+            tag=`<div style="font-size:11px;color:${ac};font-weight:700" title="${escHtml(a.act+' — '+a.why)}">${escHtml(a.act)}</div>`;
+          }
         }
         return intradayRowButton({symbol:v})+symbolChartButton(v)+tag;
       }},
@@ -9173,6 +9181,65 @@ function getTurnoverAllocationCap(row){
 //     If the existing average is already above that stop level there is no cushion left and no
 //     add is allowed — buying more would create a position that loses money on its own stop.
 // Uses getRowStopDistancePct, an existing per-stock model unit, so no new tunable constant.
+// ── v1172: AN OPEN POSITION IS TOLD WHAT TO DO, NOT WHAT IS HAPPENING ───────────────────────
+// Owner, 2026-08-18: *"this doesn't help me... Holding up, being sold, distribution into strength
+// etc. It should tell me what I should do, not what's happening in the market. Things like Buy X
+// more, Hold, Exit X/All."* The v1106 rule, applied to the panel that had escaped it: a finding must
+// change a target, a stop, an allocation or a decision - describing the tape is not a decision.
+//
+// Every input already exists and nothing new is invented: the position's own exit policy supplies
+// the target, the current-session flow supplies supply/demand (v1168), and v1070's top-up cushion
+// supplies how much may safely be added to a position already in profit.
+//
+// THE ORDER OF THE TESTS IS THE POLICY, and it runs worst-case first:
+//   1. target reached            -> EXIT ALL. The trade did what it was bought to do.
+//   2. current session selling   -> EXIT ALL, in profit, or EXIT HALF while underwater. The v1168
+//                                   condition: net selling, or cheaper to push down than up.
+//   3. below stop                -> EXIT ALL. It has already given up what the plan allowed.
+//   4. flow strong + room to add -> ADD n shares, capped by the cushion so a top-up cannot turn a
+//                                   profitable position into a losing one.
+//   5. otherwise                 -> HOLD, with the distance left to target.
+function getPositionAction(sym,pos){
+  const s=(Array.isArray(ALL)?ALL:[]).find(r=>normSym(r.symbol)===normSym(sym))||null;
+  const qty=Number(pos&&pos.qty)||0, avg=Number(pos&&pos.avg)||0;
+  const ltp=Number(pos&&(pos.ltp??pos.last))||(s?Number(s.price):0);
+  if(!(qty>0)||!(ltp>0)) return null;
+  const pnlPct=avg>0?(ltp/avg-1)*100:null;
+  const pol=s?getRowExitPolicy(s,ltp):null;
+  const tgt=pol&&pol.targetPct>0?pol.targetPct:null;
+  const stop=pol&&pol.stopPct>0?pol.stopPct:null;
+  const rd=getIntradayRead(sym);
+  const tt=rd&&rd.current?rd.todayTraj:null;
+  const thin=tt&&Number.isFinite(tt.costRatio)&&tt.costRatio>0&&tt.costRatio<1;
+  const sold=tt&&tt.cvdPct<0;
+
+  if(tgt!=null&&pnlPct!=null&&pnlPct>=tgt)
+    return {act:'EXIT ALL',qty,tone:'green',why:'target reached ('+pnlPct.toFixed(1)+'% against '+tgt.toFixed(2)+'%)'};
+  if(sold||thin){
+    const half=Math.max(1,Math.floor(qty/2));
+    const inProfit=pnlPct!=null&&pnlPct>0;
+    return inProfit
+      ? {act:'EXIT ALL',qty,tone:'red',why:sold?('being sold today, net flow '+(100*tt.cvdPct).toFixed(0)+'% - bank it')
+          :('nothing holding it up - 1% down costs '+Math.round(tt.dnCost).toLocaleString('en-IN')
+            +' shares against '+Math.round(tt.upCost).toLocaleString('en-IN')+' up')}
+      : {act:'EXIT '+half,qty:half,tone:'red',why:(sold?'being sold today':'supply is cheaper than demand')
+          +', and it is underwater - cut half'};
+  }
+  if(stop!=null&&pnlPct!=null&&pnlPct<=-stop)
+    return {act:'EXIT ALL',qty,tone:'red',why:'past its stop ('+pnlPct.toFixed(1)+'% against -'+stop.toFixed(2)+'%)'};
+  if(s&&tt&&!sold&&!thin&&typeof meetsRecommendationBar==='function'&&meetsRecommendationBar(s)){
+    try{
+      const buyP=getBuyPrice(s);
+      const cap=getHeldTopUpNotionalCap(s,buyP);
+      const add=(cap>0&&buyP>0)?Math.floor(cap/buyP):0;
+      if(add>0) return {act:'ADD '+add,qty:add,tone:'green',
+        why:'still clears the buy bar and the blended cost stays safe (\u20b9'+Math.round(add*buyP).toLocaleString('en-IN')+')'};
+    }catch(e){}
+  }
+  const away=(tgt!=null&&pnlPct!=null)?(tgt-pnlPct):null;
+  return {act:'HOLD',qty:0,tone:'amber',
+    why:away!=null?(away.toFixed(1)+'% to target'):'no target on file yet'};
+}
 function getHeldTopUpNotionalCap(s,buyP,heldMap=null){
   const held=(heldMap||getHeldPositionMap())[s.symbol];
   if(!held||!(held.qty>0)) return Infinity;      // not held: normal rails only
@@ -9957,10 +10024,30 @@ function onIntradayPaste(){
   }
   renderTable();
 }
-function clearIntraday(){
-  INTRADAY_BARS={};INTRADAY_TARGET='';INTRADAY_RESULT=null;LAST_FETCH=null;
-  try{setTimeout(()=>{try{renderRankingsPanels();}catch(e){}},0);}catch(e){}
-  ALL.forEach(r=>{r.intraday=null;r.intradayVerdict=null;r.intradayWhy=null;});
+// ── v1172: HIDING THE LIST IS NOT THROWING AWAY THE DATA (owner, 2026-08-18) ────────────────
+// *"Discard says it throws all the data... it should not! Why the fuck would we throw all our
+// painstakingly gathered data. The button should just clear the UI space it filled with the list it
+// just checked."*
+//
+// He is right, and the old behaviour was indefensible once fetching became rate-capped: this wiped
+// INTRADAY_BARS for every stock, so getting it back cost real requests out of a 12-per-15-minutes
+// budget - and since v1171 that budget is also what builds coverage of the day's movers. The button
+// existed from v1146, when a "check" was a hand-paste that cost nothing but a clipboard.
+//
+// It now collapses the fetch LIST and nothing else. Bars, verdicts and the re-rank all stand.
+function collapseFetchList(){
+  LAST_FETCH_HIDDEN=true;
+  renderTable();
+}
+// Kept for the case the owner actually asked for at v1146 - throwing away a stock's data on purpose
+// - but reachable only per stock, never as a wipe of everything gathered.
+function forgetIntradayFor(sym){
+  const k=normSym(sym||''); if(!k) return;
+  delete INTRADAY_BARS[k];
+  if(INTRADAY_TARGET===k) INTRADAY_TARGET='';
+  const r=(Array.isArray(ALL)?ALL:[]).find(x=>normSym(x.symbol)===k);
+  if(r){ r.intraday=null;r.intradayVerdict=null;r.intradayWhy=null;r.intradaySellingToday=false; }
+  try{ applyIntradayReorder(ALL); }catch(e){}
   scheduleApplyFilters();renderTable();
 }
 // ── WHAT TO FETCH, AND HOW OFTEN ────────────────────────────────────────────────────────────
@@ -10113,6 +10200,7 @@ function ingestKiteCandlePayload(text){
 // the same rule v1153 established.
 let KITE_API=null;          // set when the local helper answers, wherever this page is hosted
 let LAST_FETCH=null;        // what the last fetch actually brought back, shown so it can be checked
+let LAST_FETCH_HIDDEN=false; // v1172: the list is collapsed for space; the DATA is never discarded
 const KITE_HELPER='http://localhost:8787';
 // THE APP STAYS ON GITHUB PAGES. Earlier this served the app from localhost, which was wrong - the
 // app lives at https://axionaut.github.io/rocket-scanner/ and that must not change. Only the HELPER
@@ -10168,6 +10256,7 @@ async function fetchCandlesInApp(limit,opts){
     // (owner: "where can I see the data it fetches to confirm if it is even fetching the correct
     // data?"). Bars, the window they cover, and the last close - three numbers that either match
     // Kite or do not.
+    LAST_FETCH_HIDDEN=false;
     LAST_FETCH=out.done.map(sym=>{
       const rd=getIntradayRead(sym), bars=INTRADAY_BARS[normSym(sym)]||[];
       const f=bars[0]?new Date(bars[0].t):null, l=bars[bars.length-1]?new Date(bars[bars.length-1].t):null;
@@ -10224,15 +10313,15 @@ function intradayPasteBarHtml(){
             title="Kite tab → F12 → Application → Cookies → kite.zerodha.com → copy the value of enctoken. It rotates on every login.">
           <button onclick="saveKiteToken()" class="btn" style="font-size:11px">Save token</button>`}`
         :`<span style="font-size:11px;color:var(--t3)" title="Double-click &quot;Start Rocket Scanner.bat&quot; on your PC and leave that window open. The app stays right here on GitHub Pages; only the little helper runs locally, because a web page is not allowed to call Kite directly.">start the helper (Start Rocket Scanner.bat) to fetch automatically</span>`}
-      ${n?`<button onclick="clearIntraday()" class="btn" style="opacity:.75;font-size:11px"
-        title="Throw away the chart data for all ${n} checked stock(s) and their BUY/SKIP verdicts, and re-rank without them. The recommendations themselves are untouched — it only undoes the checking.">Discard ${n} check${n===1?'':'s'}</button>`:''}
+      ${(n&&!LAST_FETCH_HIDDEN)?`<button onclick="collapseFetchList()" class="btn" style="opacity:.75;font-size:11px"
+        title="Collapse this list to free up the space. Nothing is thrown away — the ${n} stock(s) keep their bars, their verdicts and their place in the ranking, and the files stay in Scanner Uploads/Intraday.">Hide list</button>`:''}
     </div>
     ${st&&st.top.length?`<div style="margin:2px 0 8px">${st.top.map(chip).join('')}</div>`:''}
 
     ${t?`<textarea id="intradayBox" rows="4" placeholder="Paste ${escHtml(t)}'s 5-minute chart table \u2014 header, rows, and the summary block underneath if it is there."
         style="width:100%;box-sizing:border-box;font-family:var(--mono,monospace);font-size:12px;padding:8px;background:var(--bg);color:var(--t1);border:1px solid var(--amber);border-radius:6px"
         onpaste="setTimeout(onIntradayPaste,0)"></textarea>`:''}
-    ${LAST_FETCH&&LAST_FETCH.length?`<div style="margin-top:6px;font-size:11px;line-height:1.6">
+    ${(LAST_FETCH&&LAST_FETCH.length&&!LAST_FETCH_HIDDEN)?`<div style="margin-top:6px;font-size:11px;line-height:1.6">
       <span style="color:var(--t3)">last fetch — check these against your chart:</span>
       ${LAST_FETCH.map(x=>`<div><b>${escHtml(x.sym)}</b>
         <span style="color:var(--t3)">${x.bars} bars · ${escHtml(x.from)} → ${escHtml(x.to)} · last</span>
