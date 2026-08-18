@@ -1,5 +1,5 @@
-const BUILD_TS='2026-08-18 14:06 IST'; // release build time (IST)
-const APP_VERSION=1179; // v1179: the runner column is retired, and the depth governing the board is visible.
+const BUILD_TS='2026-08-18 14:26 IST'; // release build time (IST)
+const APP_VERSION=1180; // v1180: Pace is volume-weighted, so a run of dead bars cannot tighten a trailing stop.
 // v1093: a baseline reward:risk MEASURED on the cross-section (last completed bhav session) instead of learned from the owner's own fills - reported on every row, deliberately not enforced. Includes v1092: position size split by Radar score / stop distance, so equally-scored names carry equal RUPEE risk, plus an opt-in Risk /trade cap.
 // v556: parse the NSE Market Activity Report (MA<date>.csv) — official Nifty %, advances/declines and sector index moves shown as market CONTEXT in the status bar (EOD data, display only, never fed into per-row scoring); MA added to the ℹ️ file manifest.
 // v555 market-cycle stage awareness (stateless, self-calibrating): per-row stage label (1 accumulation · 2 breakout · 3 event · 4 profit-booking · 5 re-accumulation · 6 second-leg); a quiet-accumulation signal (conjunction-of-percentiles) injected via the rocket-diagnostic weighting; sell-the-news decay off Recent earnings date (horizon = review days). v1065 makes the market-breadth gauge an entry-eligibility input while still never changing ranking.
@@ -3651,9 +3651,26 @@ function buildIntradayTrajectory(bars){
   // AVERAGE MOVE (owner): the mean of every bar's own % change, magnitude only. What this stock
   // typically does in five minutes - its energy per bar. Signed it would net to nearly nothing;
   // magnitude is what tells you how many bars a target is away.
-  let mvSum=0,mvN=0;
-  for(let i=1;i<n;i++){mvSum+=Math.abs((bars[i].c-prevC(i))/prevC(i)*100);mvN++;}
-  const avgMovePct=mvN?mvSum/mvN:null;
+  // v1180: PACE IS VOLUME-WEIGHTED (owner). It was the last plain mean left in this file, and v1144
+  // already settled the principle after an unweighted scale let twelve dead 50-share bars move
+  // AGIIL's net flow from -6.8% to -2.7% on data that had not changed: **anything averaged across
+  // bars here must be volume-weighted - a bar is not an event, a share is.**
+  //
+  // It matters most for what the owner actually wants this number for - a trailing stop. A plain
+  // mean lets a run of thin, motionless bars pull the pace DOWN and produce a trail so tight that
+  // the next real, heavily-traded bar takes the position out. Weighting by volume asks the honest
+  // question: how far does price move in the bars where shares are actually changing hands.
+  //
+  // Falls back to the unweighted mean when a paste carries no volume at all, so a volumeless export
+  // still produces a pace rather than nothing.
+  let mvSum=0,mvN=0,mvW=0,mvWV=0;
+  for(let i=1;i<n;i++){
+    const mv=Math.abs((bars[i].c-prevC(i))/prevC(i)*100);
+    const v=Number(bars[i].v)||0;
+    mvSum+=mv; mvN++;
+    mvW+=mv*v; mvWV+=v;
+  }
+  const avgMovePct=mvWV>0?(mvW/mvWV):(mvN?mvSum/mvN:null);
 
   const upV=[],dnV=[];
   for(let i=1;i<n;i++){
@@ -7609,7 +7626,7 @@ function buildOpenPositionsPanel(query=''){
     {key:'pnlRs',label:'P&L',align:'right',bold:true,
       fmt:(v,row)=>`${v!=null?fmtSignedINR(v):'—'}<span style="font-size:11px;color:var(--t3)"> ${row.pnlPct!=null?(row.pnlPct>=0?'+':'')+row.pnlPct.toFixed(2)+'%':''}</span>`,
       clrFn:v=>v==null?'var(--t3)':v>0?'var(--green)':v<0?'var(--red)':'var(--t2)'},
-    {key:'daysHeld',label:'Days Held',align:'right',fmt:daysFmt,clrFn:()=>'var(--t1)'},
+    {key:'daysHeld',label:'Held',align:'right',fmt:daysFmt,clrFn:()=>'var(--t1)'},
     // v1073: the day-1 time exit, shown next to Days Held so the two read together.
     // v1179: ONE TARGET, because the basket now exports one order per stock (v1177). This showed
     // "Target / Runner" for four releases after the runner leg stopped being exported - the panel
@@ -7627,7 +7644,7 @@ function buildOpenPositionsPanel(query=''){
       },
       clrFn:()=>'var(--green)'},
     {key:'stopPrice',label:'SL ₹',align:'right',fmt:(v,row)=>v!=null?fmtINR(v)+`<span style="font-size:12px;color:var(--t3);margin-left:4px">-${Number(row.exitPolicy?.stopPct).toFixed(2)}%</span>`:'—',clrFn:()=>'var(--red)'},
-    {key:'score',label:'Score / Rank',align:'right',bold:true,
+    {key:'score',label:'Score/#',align:'right',bold:true,
       fmt:(v,row)=>radarScoreCell(v)+`<span style="font-size:11px;color:var(--t3)"> #${row.rank??'—'}</span>`,
       clrFn:()=>'var(--t1)'},
     {key:'dayPct',label:'Day %',align:'right',fmt:fPerf,clrFn:()=>'var(--t2)'},
@@ -7637,29 +7654,29 @@ function buildOpenPositionsPanel(query=''){
     // absolute move of one bar is the smallest gap a trailing stop can sit at without the stock's
     // ordinary breathing taking it out, and the tooltip gives that distance in RUPEES off the last
     // price, which is what a Zerodha trailing SL is entered in.
-    {key:'pace',label:'Pace',align:'right',
+    // v1180: PACE AND EoD IN ONE CELL. Two columns pushed this panel into a horizontal scrollbar,
+    // which the owner has ruled out everywhere - and they are two readings of the same trajectory,
+    // so they belong together exactly as TGT/SL do. PACE is what he wants it for: *"a number which
+    // I can safely use as a trail stop"* - the volume-weighted mean move of ONE bar is the tightest
+    // a trail can sit without ordinary breathing taking it out, shown in RUPEES because that is what
+    // a Zerodha trailing SL is entered in.
+    {key:'pace',label:'Pace / EoD',align:'right',
       fmt:(v,row)=>{
         const rd=getIntradayRead(row.sym);
         if(!rd||!Number.isFinite(rd.avgMovePct)) return '<span style="color:var(--t3)">—</span>';
-        const ltp=Number(row.ltp)||0;
-        const rs=ltp>0?ltp*rd.avgMovePct/100:null;
-        return `<span title="${escHtml('Mean absolute move of one '+(rd.traj?rd.traj.stepMin:5)
-          +'-minute bar. A trailing stop closer than this is inside the stock\u2019s ordinary breathing and '
-          +'will be taken out by noise'+(rs?'; here that is about \u20b9'+rs.toFixed(2)+' off the last price'
-          +(rs<0.05?' (below one tick)':'')+'.':'.'))}">${rd.avgMovePct.toFixed(3)}%${
+        const ltp=Number(row.ltp)||0, rs=ltp>0?ltp*rd.avgMovePct/100:null;
+        const pace=`<span title="${escHtml('Volume-weighted mean move of one '+(rd.traj?rd.traj.stepMin:5)
+          +'-minute bar. A trailing stop closer than this sits inside the stock\u2019s ordinary breathing and will be '
+          +'taken out by noise'+(rs?'; here that is about \u20b9'+rs.toFixed(2)+' off the last price'
+          +(rs<0.05?' (below one tick)':''):'')+'.')}">${rd.avgMovePct.toFixed(2)}%${
           rs?`<span style="color:var(--t3);font-size:11px"> ₹${rs.toFixed(2)}</span>`:''}</span>`;
-      },clrFn:()=>'var(--t2)'},
-    {key:'predEod',label:'EoD',align:'right',
-      fmt:(v,row)=>{
-        const rd=getIntradayRead(row.sym);
-        if(!rd||!Number.isFinite(rd.predClose)) return '<span style="color:var(--t3)">—</span>';
+        if(!Number.isFinite(rd.predClose)) return pace+'<span style="color:var(--t3)"> / —</span>';
         const t=rd.traj, up=rd.predPct>=0;
-        return `<span style="color:${up?'var(--green)':'var(--red)'};font-weight:700" title="${escHtml(
-          'Unspent pressure '+(t.pressurePct>=0?'+':'')+t.pressurePct.toFixed(2)
-          +'%, capped by what this stock can travel in the '+t.barsLeft+' bars left ('
-          +t.avgMovePct.toFixed(3)+'% per '+t.stepMin+'-minute bar). Arithmetic, not a forecast.')}">${
-          fmtINR(rd.predClose)}</span><span style="color:var(--t3);font-size:11px"> ${
+        const eod=`<span style="color:${up?'var(--green)':'var(--red)'};font-weight:700" title="${escHtml(
+          'Unspent pressure '+(t.pressurePct>=0?'+':'')+t.pressurePct.toFixed(2)+'%, capped by what this stock can '
+          +'travel in the '+t.barsLeft+' bars left. Arithmetic, not a forecast.')}">${
           (rd.predPct>=0?'+':'')+rd.predPct.toFixed(2)}%</span>`;
+        return pace+'<span style="color:var(--t3)"> / </span>'+eod;
       },clrFn:()=>'var(--t2)'},
     {key:'risk',label:'Risk',align:'left',fmt:v=>v?radarRiskPill(v):'—'}
   ];
