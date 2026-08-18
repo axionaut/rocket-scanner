@@ -1,5 +1,5 @@
-const BUILD_TS='2026-08-18 11:08 IST'; // release build time (IST)
-const APP_VERSION=1174; // v1174: being measured is worth nothing by itself, and the session P&L reconciles.
+const BUILD_TS='2026-08-18 11:21 IST'; // release build time (IST)
+const APP_VERSION=1175; // v1175: a sell beyond the inventory opens a short instead of leaving phantom shares behind.
 // v1093: a baseline reward:risk MEASURED on the cross-section (last completed bhav session) instead of learned from the owner's own fills - reported on every row, deliberately not enforced. Includes v1092: position size split by Radar score / stop distance, so equally-scored names carry equal RUPEE risk, plus an opt-in Risk /trade cap.
 // v556: parse the NSE Market Activity Report (MA<date>.csv) — official Nifty %, advances/declines and sector index moves shown as market CONTEXT in the status bar (EOD data, display only, never fed into per-row scoring); MA added to the ℹ️ file manifest.
 // v555 market-cycle stage awareness (stateless, self-calibrating): per-row stage label (1 accumulation · 2 breakout · 3 event · 4 profit-booking · 5 re-accumulation · 6 second-leg); a quiet-accumulation signal (conjunction-of-percentiles) injected via the rocket-diagnostic weighting; sell-the-news decay off Recent earnings date (horizon = review days). v1065 makes the market-breadth gauge an entry-eligibility input while still never changing ranking.
@@ -11573,10 +11573,38 @@ function parseTradebook(text){
   const openPositionLotsMap={}; // {symbol:[{qty,date}]} — remaining FIFO lots for age calculations
   Object.entries(bySymbol).forEach(([sym,trades])=>{
     trades.sort((a,b)=>a.time.localeCompare(b.time));
-    const buyQueue=[];
+    // ── v1175: A SELL THAT EXCEEDS THE INVENTORY OPENS A SHORT; IT IS NOT DISCARDED ───────────
+    // Owner, 2026-08-18: *"P&L is not right."* It was not, and the cause outlived the v1073 FIFO fix.
+    // The loop below stopped at `buyQueue.length>0`, so any sell quantity beyond the long inventory
+    // was DROPPED - and with it the obligation to consume a later buy. The covering buy then sat in
+    // the queue as PHANTOM INVENTORY and was handed to the next sale, and the one after that.
+    //
+    // ELECTCAST is the case. Running balance from the tradebook: 09-Feb sells take it to **-338**, an
+    // intraday short, covered by a 372-share buy at 13:10; 10-Feb closes to 0; 25-Mar closes to 0
+    // again; 17-Aug is a clean intraday round trip, 652 bought at 14:43 and 652 sold at 15:28. The
+    // balance is ZERO before 17-Aug, so that day can only match against its own buys - **+Rs 241**.
+    // Instead the discarded short left 372 phantom shares alive, of which 203 @ 74.25 (Feb) and 135
+    // @ 75.47 (Mar) survived to be matched against the August sells **six months later**, turning a
+    // +Rs 241 intraday trade into a reported **-Rs 881** and the session into -Rs 768.
+    //
+    // Signed FIFO: a buy covers open shorts before it queues as long, and a sell beyond the long
+    // inventory opens a short. In cash equity a short cannot be carried overnight, so both legs of
+    // one carry the same date and the trip books to the session it happened in.
+    const buyQueue=[], shortQueue=[];
     for(const t of trades){
       if(t.type==='buy'){
-        buyQueue.push({qty:t.qty,price:t.price,date:t.date,time:t.time});
+        let q=t.qty;
+        while(q>0&&shortQueue.length>0){
+          const sh=shortQueue[0];
+          const matched=Math.min(q,sh.qty);
+          const pnlPct=((sh.price-t.price)/t.price)*100;   // sold high, covered low = profit
+          const capital=t.price*matched;
+          roundTrips.push({sym,buyPrice:t.price,sellPrice:sh.price,qty:matched,pnlPct,holdDays:0,capital,
+            buyDate:t.date,sellDate:t.date,buyTime:t.time,sellTime:sh.time,shortTrip:true});
+          sh.qty-=matched; q-=matched;
+          if(sh.qty<=0) shortQueue.shift();
+        }
+        if(q>0) buyQueue.push({qty:q,price:t.price,date:t.date,time:t.time});
       } else if(t.type==='sell'){
         let sellQty=t.qty;
         while(sellQty>0&&buyQueue.length>0){
@@ -11590,6 +11618,8 @@ function parseTradebook(text){
           sellQty-=matched;
           if(b.qty<=0) buyQueue.shift();
         }
+        // Anything left is a SHORT, not a rounding error to be swallowed.
+        if(sellQty>0) shortQueue.push({qty:sellQty,price:t.price,date:t.date,time:t.time});
       }
     }
     // Remaining unmatched buys = open position; compute qty-weighted avg cost
@@ -11651,9 +11681,16 @@ function parseTradebook(text){
     const bc=calcZerodhaCharges(r.buyPrice,r.qty,false,intra,false);
     const sc=calcZerodhaCharges(r.sellPrice,r.qty,true,intra,skipDp);
     const charges=+(bc+sc).toFixed(0);
+    // v1175: the two legs are kept apart, because "what did this round trip cost me" and "what did
+    // I pay on THIS day" are different questions and the session card was answering the first while
+    // being read as the second. ANANTRAJ was bought across 5-14 Aug and sold on the 17th; its BUY
+    // charges were paid on those earlier days, so Zerodha's 17-Aug P&L counts only the sell side.
+    // Measured against the owner's own Zerodha P&L for 2026-08-17: charges 103.63 + DP 15.34, where
+    // the app was reporting 180 by charging both legs of every trip to the closing session.
+    const buyCharges=+bc.toFixed(2), sellCharges=+sc.toFixed(2);
     const netPnl=+((r.sellPrice-r.buyPrice)*r.qty-charges).toFixed(0);
     const netPnlPct=r.capital>0?+(netPnl/r.capital*100).toFixed(2):r.pnlPct;
-    return{...r,charges,netPnl,netPnlPct};
+    return{...r,charges,buyCharges,sellCharges,netPnl,netPnlPct};
   });
   stats.tripsData=tripsData;
   refreshExitPolicyFromFeedback(stats);
@@ -11681,9 +11718,18 @@ function parseTradebook(text){
   const lastDate=dates.length?dates[0]:null;
   const lastDayBySym={};
   tripsData.filter(r=>r.sellDate===lastDate).forEach(r=>{
-    if(!lastDayBySym[r.sym]) lastDayBySym[r.sym]={sym:r.sym,lots:0,buyVal:0,sellVal:0,qty:0,netPnl:0,charges:0};
+    if(!lastDayBySym[r.sym]) lastDayBySym[r.sym]={sym:r.sym,lots:0,buyVal:0,sellVal:0,qty:0,gross:0,charges:0};
     const e=lastDayBySym[r.sym];
-    e.lots++;e.buyVal+=r.buyPrice*r.qty;e.sellVal+=r.sellPrice*r.qty;e.qty+=r.qty;e.netPnl+=r.netPnl;e.charges+=r.charges;
+    // v1175: the SESSION pays only what was incurred IN the session. A trip's `charges` is the
+    // all-in cost of the whole round trip, which is the right number for expectancy and win/loss
+    // across history - and the wrong one here, because the buy leg of a delivery trip was paid on
+    // the day the shares were bought. ANANTRAJ was accumulated 5-14 Aug and sold on the 17th, so
+    // Zerodha's 17-Aug P&L counts its SELL side only. An intraday trip pays both legs that day.
+    const sameDay=r.holdDays===0;
+    const sessionCost=(Number(r.sellCharges)||0)+(sameDay?(Number(r.buyCharges)||0):0);
+    e.lots++;e.buyVal+=r.buyPrice*r.qty;e.sellVal+=r.sellPrice*r.qty;e.qty+=r.qty;
+    e.gross+=(r.sellPrice-r.buyPrice)*r.qty;
+    e.charges+=sessionCost;
   });
   const lastDayRows=Object.values(lastDayBySym).map(e=>({
     sym:e.sym,lots:e.lots,
@@ -11692,8 +11738,9 @@ function parseTradebook(text){
     buyPrice:e.qty>0?+(e.buyVal/e.qty).toFixed(2):0,
     sellPrice:e.qty>0?+(e.sellVal/e.qty).toFixed(2):0,
     charges:+e.charges.toFixed(0),
-    netPnl:+e.netPnl.toFixed(0),
-    netPnlPct:e.buyVal>0?+(e.netPnl/e.buyVal*100).toFixed(2):null
+    grossPnl:+e.gross.toFixed(0),
+    netPnl:+(e.gross-e.charges).toFixed(0),
+    netPnlPct:e.buyVal>0?+((e.gross-e.charges)/e.buyVal*100).toFixed(2):null
   }));
   stats.lastDate=lastDate;
   stats.lastDayRows=lastDayRows;
