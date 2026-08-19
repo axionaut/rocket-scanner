@@ -1,5 +1,5 @@
-const BUILD_TS='2026-08-19 10:20 IST'; // release build time (IST)
-const APP_VERSION=1193; // v1193: the helper downloads holdings, positions and orders itself.
+const BUILD_TS='2026-08-19 11:27 IST'; // release build time (IST)
+const APP_VERSION=1194; // v1194: the three Zerodha files refresh themselves whenever ALL NSE lands.
 // v1093: a baseline reward:risk MEASURED on the cross-section (last completed bhav session) instead of learned from the owner's own fills - reported on every row, deliberately not enforced. Includes v1092: position size split by Radar score / stop distance, so equally-scored names carry equal RUPEE risk, plus an opt-in Risk /trade cap.
 // v556: parse the NSE Market Activity Report (MA<date>.csv) — official Nifty %, advances/declines and sector index moves shown as market CONTEXT in the status bar (EOD data, display only, never fed into per-row scoring); MA added to the ℹ️ file manifest.
 // v555 market-cycle stage awareness (stateless, self-calibrating): per-row stage label (1 accumulation · 2 breakout · 3 event · 4 profit-booking · 5 re-accumulation · 6 second-leg); a quiet-accumulation signal (conjunction-of-percentiles) injected via the rocket-diagnostic weighting; sell-the-news decay off Recent earnings date (horizon = review days). v1065 makes the market-breadth gauge an entry-eligibility input while still never changing ranking.
@@ -10822,6 +10822,34 @@ function maybePromptKiteToken(){
   openKiteTokenDialog();
 }
 
+// ── THE THREE ZERODHA FILES REFRESH THEMSELVES ───────────────────────────────────────────────
+// Owner, 2026-08-19: *"I download the ALL NSE, the three-second check senses it, downloads the
+// zerodha files and there!"*
+//
+// ALL NSE stays MANUAL and the folder watch stays exactly as it was - its job is unchanged, it
+// senses that he has re-exported. What changes is that the ingest no longer reads whatever stale
+// Holdings/Positions/Orders happen to be on disk: the helper refreshes them from Kite first, so the
+// portfolio the engine scores against is from the same moment as the universe.
+//
+// ALL OR NOTHING, on the helper's side: it fetches and verifies every file in memory and only then
+// writes. A half-refresh would score today's market against yesterday's book and say nothing.
+//
+// It NEVER blocks the load. No helper, no token, or a refusal - the ingest proceeds on the files
+// already there, exactly as it did before, and the reason is logged.
+async function refreshBrokerInputs(){
+  if(!KITE_API) return {ok:false,why:'helper not running'};
+  try{
+    const c=new AbortController();
+    const t=setTimeout(()=>c.abort(),25000);
+    const r=await fetch(KITE_HELPER+'/api/inputs/refresh',{cache:'no-store',signal:c.signal});
+    clearTimeout(t);
+    if(!r.ok) return {ok:false,why:'helper HTTP '+r.status};
+    const j=await r.json();
+    if(!j.ok) console.warn('broker refresh skipped:',j.why);
+    return j;
+  }catch(e){ return {ok:false,why:e.message}; }
+}
+
 async function saveKiteToken(){
   const el=document.getElementById('kiteTokenBox');
   const t=(el&&el.value||'').trim();
@@ -11700,7 +11728,13 @@ async function folderWatchTick(){
     _folderWatchAllNseLastModified=lastModified;
     _folderWatchBusy=true;
     showAutoRefreshIndicator('refreshing');
-    const ok=await processFiles(local.files,local.sourceLabel+' · auto-refresh',{silent:true});
+    // A NEW ALL NSE MEANS A NEW DECISION, so the book it is scored against must be current too.
+    // This runs BEFORE the ingest and writes into the same folder, so processFiles picks the fresh
+    // files up in the same pass. It cannot block: a failure just leaves the existing files in place.
+    try{ await refreshBrokerInputs(); }catch(e){}
+    const fresh=await getLocalUploadFolderFiles();
+    const use=(fresh&&fresh.files&&fresh.files.length)?fresh.files:local.files;
+    const ok=await processFiles(use,local.sourceLabel+' · auto-refresh',{silent:true});
     showAutoRefreshIndicator(ok?'done':'hide');
   }catch(e){
     console.warn('Folder watch tick failed',e);
@@ -11732,6 +11766,8 @@ async function openUploadFolderPicker(){
         try{uploadHandle=await stored.getDirectoryHandle('Scanner Uploads');}catch(e){}
         const files=await filesFromDirectoryHandle(uploadHandle);
         if(files.length){
+          try{ await refreshBrokerInputs(); }catch(e){}
+          { const _f=await getLocalUploadFolderFiles(); if(_f&&_f.files&&_f.files.length) files=_f.files; }
           await processFiles(files,uploadHandle.name);
           return true;
         }
@@ -11753,7 +11789,9 @@ async function openUploadFolderPicker(){
         showToast('No files found in the selected folder.',4000,true);
         return false;
       }
-      await processFiles(files,uploadHandle.name);
+      try{ await refreshBrokerInputs(); }catch(e){}
+          { const _f=await getLocalUploadFolderFiles(); if(_f&&_f.files&&_f.files.length) files=_f.files; }
+          await processFiles(files,uploadHandle.name);
       return true;
     }catch(e){
       if(e?.name!=='AbortError'){
