@@ -1,5 +1,5 @@
-const BUILD_TS='2026-08-19 11:27 IST'; // release build time (IST)
-const APP_VERSION=1194; // v1194: the three Zerodha files refresh themselves whenever ALL NSE lands.
+const BUILD_TS='2026-08-19 11:55 IST'; // release build time (IST)
+const APP_VERSION=1195; // v1195: current Holdings is not reduced twice by today's CNC sell leg.
 // v1093: a baseline reward:risk MEASURED on the cross-section (last completed bhav session) instead of learned from the owner's own fills - reported on every row, deliberately not enforced. Includes v1092: position size split by Radar score / stop distance, so equally-scored names carry equal RUPEE risk, plus an opt-in Risk /trade cap.
 // v556: parse the NSE Market Activity Report (MA<date>.csv) — official Nifty %, advances/declines and sector index moves shown as market CONTEXT in the status bar (EOD data, display only, never fed into per-row scoring); MA added to the ℹ️ file manifest.
 // v555 market-cycle stage awareness (stateless, self-calibrating): per-row stage label (1 accumulation · 2 breakout · 3 event · 4 profit-booking · 5 re-accumulation · 6 second-leg); a quiet-accumulation signal (conjunction-of-percentiles) injected via the rocket-diagnostic weighting; sell-the-news decay off Recent earnings date (horizon = review days). v1065 makes the market-breadth gauge an entry-eligibility input while still never changing ranking.
@@ -8975,8 +8975,15 @@ function getCombinedOpenPositionMap(){
       pos.qty+=liveQty;
       pos.avg=pos.qty>0?(settledValue+liveValue)/pos.qty:0;
     }else if(liveQty<0){
-      pos.qty+=liveQty;
-      if(pos.qty<=0) pos.avg=liveAvg||pos.avg||0;
+      // Holdings is the broker's CURRENT post-sale quantity. A CNC sell is also repeated in
+      // Positions as today's negative leg, so subtracting it here double-counts the sale
+      // (CASTROLIND: Holdings 93 plus Positions -92 incorrectly became 1). Keep a remaining
+      // holding authoritative; retain the negative leg only when no long holding remains so a
+      // sold-out/short symbol cannot be mistaken for a held position.
+      if(!(pos.qty>0)){
+        pos.qty+=liveQty;
+        if(pos.qty<=0) pos.avg=liveAvg||pos.avg||0;
+      }
     }
   });
   if(ORDERS_TODAY?.length){
@@ -9008,7 +9015,9 @@ function getCombinedOpenPositionMap(){
       const bQty=ordBuys[sym]||0;
       if(!combined[sym]?.hasLivePosition&&sQty>bQty){
         const pos=ensure(sym);
-        pos.qty-=sQty-bQty;
+        // Same rule as Positions: a current positive Holdings quantity is already post-sale.
+        // Orders is only a fallback for representing a net sell when no holding remains.
+        if(!(pos.qty>0)) pos.qty-=sQty-bQty;
       }
     });
   }
