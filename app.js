@@ -1,5 +1,5 @@
-const BUILD_TS='2026-08-19 08:39 IST'; // release build time (IST)
-const APP_VERSION=1188; // v1188: the Kite token asks for itself in a pasteable popup.
+const BUILD_TS='2026-08-19 08:49 IST'; // release build time (IST)
+const APP_VERSION=1189; // v1189: a pasted token takes effect immediately - no helper restart.
 // v1093: a baseline reward:risk MEASURED on the cross-section (last completed bhav session) instead of learned from the owner's own fills - reported on every row, deliberately not enforced. Includes v1092: position size split by Radar score / stop distance, so equally-scored names carry equal RUPEE risk, plus an opt-in Risk /trade cap.
 // v556: parse the NSE Market Activity Report (MA<date>.csv) — official Nifty %, advances/declines and sector index moves shown as market CONTEXT in the status bar (EOD data, display only, never fed into per-row scoring); MA added to the ℹ️ file manifest.
 // v555 market-cycle stage awareness (stateless, self-calibrating): per-row stage label (1 accumulation · 2 breakout · 3 event · 4 profit-booking · 5 re-accumulation · 6 second-leg); a quiet-accumulation signal (conjunction-of-percentiles) injected via the rocket-diagnostic weighting; sell-the-news decay off Recent earnings date (horizon = review days). v1065 makes the market-breadth gauge an entry-eligibility input while still never changing ranking.
@@ -10628,11 +10628,17 @@ const KITE_HELPER='http://localhost:8787';
 // is local. An HTTPS page may not normally call http://, but localhost and 127.0.0.1 are specified
 // as potentially trustworthy, so the Pages app is allowed to call this one; the helper answers only
 // the Pages origin and nothing else, because it holds a Kite token.
-async function detectKiteApi(){
+// `force` re-checks the token against Kite instead of trusting the helper's 5-minute cache.
+// REQUIRED AFTER SAVING A TOKEN, and this is the half that works WITHOUT restarting the helper:
+// the server-side cache-clear added alongside it only takes effect once the .bat is re-run, whereas
+// `?force=1` has been understood by the running helper since v1166. Without it, pasting a good token
+// the morning after a rotation returned the STALE `tokenValid:false` and the app said "Kite rejected
+// that token" about a perfectly good one.
+async function detectKiteApi(force){
   try{
     const c=new AbortController();
     const t=setTimeout(()=>c.abort(),1500);      // it is either running locally or it is not
-    const r=await fetch(KITE_HELPER+'/api/kite/status',{cache:'no-store',signal:c.signal});
+    const r=await fetch(KITE_HELPER+'/api/kite/status'+(force?'?force=1':''),{cache:'no-store',signal:c.signal});
     clearTimeout(t);
     KITE_API=r.ok?await r.json():null;
   }catch(e){ KITE_API=null; }
@@ -10729,7 +10735,7 @@ async function saveKiteTokenFromDialog(){
   if(box) box.value='';
   // Report what the HELPER now says, not what we just sent. v1152's rule: a control may not report
   // intent - it must verify the far side answered. A token can be stored and still be rejected.
-  await detectKiteApi();
+  await detectKiteApi(true);   // force: the helper's cached answer describes the OLD token
   if(KITE_API&&KITE_API.tokenValid===false){ say('Kite rejected that token. Copy it again.',true); return; }
   say('Saved. Fetching is enabled.');
   setTimeout(closeKiteTokenDialog,700);
@@ -10763,7 +10769,7 @@ async function saveKiteToken(){
   const ok=await postKiteToken(t,(m,bad)=>showToast(m,5000,!!bad));
   if(!ok) return;
   if(el) el.value='';
-  await detectKiteApi();
+  await detectKiteApi(true);   // force: the helper's cached answer describes the OLD token
   if(KITE_API&&KITE_API.tokenValid===false){ showToast('Kite rejected that token. Copy it again.',5000,true); return; }
   showToast('Kite token saved. Press Fetch candles.',4000);
 }
