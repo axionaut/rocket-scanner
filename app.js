@@ -1,5 +1,5 @@
-const BUILD_TS='2026-08-19 17:05 IST'; // release build time (IST)
-const APP_VERSION=1201; // v1201: complete 11-report NSE ingest plus official RSS fundamental context.
+const BUILD_TS='2026-08-19 17:29 IST'; // release build time (IST)
+const APP_VERSION=1202; // v1202: passive findings become automatic evidence-gated model triggers.
 // v1093: a baseline reward:risk MEASURED on the cross-section (last completed bhav session) instead of learned from the owner's own fills - reported on every row, deliberately not enforced. Includes v1092: position size split by Radar score / stop distance, so equally-scored names carry equal RUPEE risk, plus an opt-in Risk /trade cap.
 // v556: parse the NSE Market Activity Report (MA<date>.csv) — official Nifty %, advances/declines and sector index moves shown as market CONTEXT in the status bar (EOD data, display only, never fed into per-row scoring); MA added to the ℹ️ file manifest.
 // v555 market-cycle stage awareness (stateless, self-calibrating): per-row stage label (1 accumulation · 2 breakout · 3 event · 4 profit-booking · 5 re-accumulation · 6 second-leg); a quiet-accumulation signal (conjunction-of-percentiles) injected via the rocket-diagnostic weighting; sell-the-news decay off Recent earnings date (horizon = review days). v1065 makes the market-breadth gauge an entry-eligibility input while still never changing ranking.
@@ -117,7 +117,7 @@ const SHARED_FILTER_STORE='rs_filters_shared';
 const TRADE_INPUTS_STORE='rs_trade_inputs_v1';
 let _lastTradeInputSig=''; // gate brain writes to genuine trade-input changes, not every keystroke
 const ALL_STORE='rs_data';
-const ALL_STORE_SCHEMA='radar_composite_v11'; // v1098 caches the true multi-session drift.
+const ALL_STORE_SCHEMA='radar_composite_v12'; // v1202 adds persisted causal trigger state.
 const HOLD_STORE='rs_holdings';
 const ORDERS_STORE='rs_orders';
 const POS_STORE='rs_positions';
@@ -1024,7 +1024,7 @@ let NSE_VAR={}; // {symbol -> {securityVarPct,elmPct,additionalMarginPct,totalMa
 let NSE_NEXT_BAND={}; // {symbol -> {fromPct,toPct,reportDate}} effective for the next trading session
 let NSE_SECURITY_MASTER={}; // {symbol -> exchange identity/eligibility metadata} from NSE-listed CM MII .csv.gz
 let NSE_FUNDAMENTALS={}; // {symbol -> [{source,subject,title,description,pubDate,link,...}]} from official NSE RSS indexes
-let NSE_FUNDAMENTAL_META=null; // fetch/snapshot status; context only, never a scoring input
+let NSE_FUNDAMENTAL_META=null; // fetch/snapshot and XBRL extraction status for causal result triggers
 let NSE_STATUS={}; // {symbol -> exchange status letter from REG1 (A = active)}
 let NSE_SERIES={}; // {symbol -> exchange series letters from REG1 (EQ, BE, BZ, SM, ST, SZ)}
 let NSE_DEAL_NET={}; // {symbol -> signed net deal quantity (BUY − SELL) across bulk + block files}
@@ -2627,6 +2627,9 @@ function recordRecommendationOutcomeScan(scan){
         ignitePct:p.ignitePct??null,
         setupPct:p.setupPct??null,
         directionConfirmed:!!p.directionConfirmed,
+        rocketReady:p.rocketReady===true,
+        targetReachable:p.targetReachable===true,
+        fundamentalTrigger:Number.isFinite(Number(p.fundamentalTrigger))?Number(p.fundamentalTrigger):0,
         // v1094 BUG FIX: these five were computed by the caller and then SILENTLY DROPPED here.
         // This mapper rebuilds every pick from an explicit whitelist, and v1085 added the barrier
         // fields to the caller (processScannerUpload) without adding them to the whitelist — so no
@@ -2655,16 +2658,24 @@ function recordRecommendationOutcomeScan(scan){
   FS.set(RECOMMEND_OUTCOME_STORE,store);
 }
 const POST_CLOSE_CONDITIONS=[
-  {key:'entry-ready',label:'Entry gate approved',test:p=>p.entryReady!==false},
-  {key:'top-5',label:'Issued rank 1-5',test:p=>Number(p.rank)<=5},
-  {key:'top-10',label:'Issued rank 1-10',test:p=>Number(p.rank)<=10},
-  {key:'score-99',label:'Issue score at least 99',test:p=>Number(p.score)>=99},
-  {key:'setup-p95',label:'Setup percentile at least 95%',test:p=>Number(p.setupPct)>=.95},
-  {key:'ignite-p95',label:'Ignition percentile at least 95%',test:p=>Number(p.ignitePct)>=.95},
-  {key:'direction-confirmed',label:'Direction confirmed at issue',test:p=>p.directionConfirmed===true},
-  {key:'range-location-75',label:'Range location at most 75%',test:p=>Number.isFinite(Number(p.rangeLocationAtIssue))&&Number(p.rangeLocationAtIssue)<=75},
-  {key:'range-used-75',label:'Expected range used below 75%',test:p=>Number.isFinite(Number(p.rangeUsedAtIssue))&&Number(p.rangeUsedAtIssue)<75},
-  {key:'ready-top-10',label:'Entry approved and issued rank 1-10',test:p=>p.entryReady!==false&&Number(p.rank)<=10},
+  {key:'entry-ready',label:'Entry gate approved',mode:'gate',test:p=>p.entryReady!==false,rowTest:r=>r.entryReady!==false},
+  {key:'top-5',label:'Issued rank 1-5',mode:'gate',test:p=>Number(p.radarRank??p.rank)<=5,rowTest:r=>Number(r.rank)<=5},
+  {key:'top-10',label:'Issued rank 1-10',mode:'gate',test:p=>Number(p.radarRank??p.rank)<=10,rowTest:r=>Number(r.rank)<=10},
+  {key:'score-99',label:'Issue score at least 99',mode:'gate',test:p=>Number(p.score)>=99,rowTest:r=>Number(r.score)>=99},
+  {key:'setup-p95',label:'Setup percentile at least 95%',mode:'gate',test:p=>Number(p.setupPct)>=.95,rowTest:r=>Number(r.setupPct)>=.95},
+  {key:'ignite-p95',label:'Ignition percentile at least 95%',mode:'gate',test:p=>Number(p.ignitePct)>=.95,rowTest:r=>Number(r.ignitePct)>=.95},
+  {key:'direction-confirmed',label:'Direction confirmed at issue',mode:'gate',test:p=>p.directionConfirmed===true,rowTest:r=>r.directionConfirmed===true},
+  {key:'range-location-75',label:'Range location at most 75%',mode:'gate',test:p=>Number.isFinite(Number(p.rangeLocationAtIssue))&&Number(p.rangeLocationAtIssue)<=75,rowTest:r=>Number.isFinite(Number(r.entryTiming?.rangeLocation))&&Number(r.entryTiming.rangeLocation)<=75},
+  {key:'range-used-75',label:'Expected range used below 75%',mode:'gate',test:p=>Number.isFinite(Number(p.rangeUsedAtIssue))&&Number(p.rangeUsedAtIssue)<75,rowTest:r=>Number.isFinite(Number(r.entryTiming?.rangeUsed))&&Number(r.entryTiming.rangeUsed)<75},
+  {key:'ready-top-10',label:'Entry approved and issued rank 1-10',mode:'gate',test:p=>p.entryReady!==false&&Number(p.radarRank??p.rank)<=10,rowTest:r=>r.entryReady!==false&&Number(r.rank)<=10},
+  {key:'rocket-ready',label:'All feasibility tests passed',mode:'gate',test:p=>p.rocketReady===true,rowTest:r=>r.rocketReady===true},
+  {key:'target-reachable',label:'Target fits the stock range estimate',mode:'gate',test:p=>p.targetReachable===true,rowTest:r=>{try{return getRowExitPolicy(r).reachable===true;}catch(e){return false;}}},
+  {key:'stage-accumulation',label:'Accumulation or re-accumulation stage',mode:'boost',test:p=>[1,5].includes(Number(p.stage)),rowTest:r=>[1,5].includes(Number(r.stage))},
+  {key:'stage-breakout',label:'Initial or second-leg breakout stage',mode:'boost',test:p=>[2,6].includes(Number(p.stage)),rowTest:r=>[2,6].includes(Number(r.stage))},
+  {key:'stage-event',label:'Unresolved event-day stage',mode:'veto-on-retired',test:p=>Number(p.stage)===3,rowTest:r=>Number(r.stage)===3},
+  {key:'stage-digestion',label:'Post-result profit-booking stage',mode:'veto-on-retired',test:p=>Number(p.stage)===4,rowTest:r=>Number(r.stage)===4},
+  {key:'fundamental-positive',label:'Profitable results plus price confirmation',mode:'boost',test:p=>Number(p.fundamentalTrigger)>0,rowTest:r=>Number(r.fundamentalTrigger)>0},
+  {key:'fundamental-negative',label:'Loss, negative operations, or qualified audit',mode:'veto-on-retired',test:p=>Number(p.fundamentalTrigger)<0,rowTest:r=>Number(r.fundamentalTrigger)<0},
 ];
 function buildPostCloseIssueAudit(issue,asOf){
   const picks=(issue?.picks||[]).filter(p=>!p.control);
@@ -2683,7 +2694,7 @@ function getPostCloseRuleScorecard(audits){
     const rows=Object.values(audits||{}).map(a=>(a.conditions||[]).find(x=>x.key===c.key)).filter(x=>x&&x.n>0);
     const wins=rows.reduce((s,x)=>s+x.wins,0),losses=rows.reduce((s,x)=>s+x.losses,0),sessions=rows.length,total=wins+losses;
     const precision=total?+(100*wins/total).toFixed(1):null;
-    const status=wins>=3&&sessions>=2&&losses<=1&&precision>=95?'ELIGIBLE':wins===0&&sessions>=10?'RETIRED':'COLLECTING';
+    const status=wins>=3&&sessions>=2&&losses<=1&&precision>=95?'ARMED':wins===0&&sessions>=10?'RETIRED':'COLLECTING';
     return {key:c.key,label:c.label,wins,losses,sessions,total,precision,status};
   });
 }
@@ -2706,6 +2717,48 @@ function runPostCloseAudit(force=false){
 function postCloseAuditStatus(){
   const today=getSessionDate(),store=FS.get(POST_CLOSE_AUDIT_STORE)||{};
   return {today,audit:store.audits?.[today]||null,store};
+}
+function activePostCloseTriggerRules(mode){
+  const store=FS.get(POST_CLOSE_AUDIT_STORE)||{};
+  const scorecard=store.scorecard||getPostCloseRuleScorecard(store.audits||{});
+  return scorecard.map(s=>({score:s,definition:POST_CLOSE_CONDITIONS.find(c=>c.key===s.key)}))
+    .filter(x=>x.definition&&x.definition.mode===mode&&(
+      mode==='veto-on-retired'?x.score.status==='RETIRED':['ARMED','ELIGIBLE'].includes(x.score.status)));
+}
+function applyLearnedTriggerRanking(rows){
+  const active=activePostCloseTriggerRules('boost');
+  rows.forEach(r=>{r.modelTriggers=[];});
+  if(!active.length||!rows.length)return 0;
+  let matched=0;
+  rows.forEach(r=>{
+    const hits=active.filter(x=>x.definition.rowTest(r));
+    r.modelTriggers=hits.map(x=>({key:x.definition.key,label:x.definition.label,action:'rank boost',evidence:x.score}));
+    if(hits.length)matched++;
+    const triggerPct=hits.length?1:.5;
+    r._triggerBlend=Math.sqrt(Math.max(0,Number(r.depthBlendPct)||0)*triggerPct);
+  });
+  if(!matched){rows.forEach(r=>delete r._triggerBlend);return 0;}
+  const ranked=rows.slice().sort((a,b)=>a._triggerBlend-b._triggerBlend),n=ranked.length;
+  ranked.forEach((r,i)=>{r.depthBlendPct=n>1?i/(n-1):1;});
+  rows.forEach(r=>{
+    delete r._triggerBlend;
+    r.score=+(100*Math.pow(r.depthBlendPct*(r.directionConfirmed?1:0),4)).toFixed(1);
+    r.rocketScore=r.score;
+  });
+  rows.sort((a,b)=>b.score-a.score||a.symbol.localeCompare(b.symbol));
+  rows.forEach((r,i)=>{r.rank=i+1;});
+  return matched;
+}
+function applyLearnedRecommendationGates(rows){
+  const active=[...activePostCloseTriggerRules('gate'),...activePostCloseTriggerRules('veto-on-retired')];
+  rows.forEach(r=>{
+    const failed=active.filter(x=>x.definition.mode==='gate'?!x.definition.rowTest(r):x.definition.rowTest(r));
+    r.recommendationTriggerBlocked=failed.length>0;
+    r.recommendationTriggerReasons=failed.map(x=>x.definition.label);
+    r.modelTriggers=[...(r.modelTriggers||[]).filter(t=>t.action==='rank boost'),...active.filter(x=>!failed.includes(x)&&x.definition.rowTest(r))
+      .map(x=>({key:x.definition.key,label:x.definition.label,action:x.definition.mode==='gate'?'recommendation gate':'veto',evidence:x.score}))];
+  });
+  return active.length;
 }
 function getRecommendationOutcomeSummary(){
   const issues=Object.values((FS.get(RECOMMEND_OUTCOME_STORE)||{}).issues||{});
@@ -2883,7 +2936,7 @@ function getDisplayedEntryCandidates(rows){
   if(!Array.isArray(rows)||!rows.length) return [];
   return rows
     // v1070: held no longer excludes a candidate.
-    .filter(s=>s.symbol&&Number(s.price)>0&&s.basketEligible!==false&&!NSE_SURV[s.symbol]?.length)
+    .filter(s=>s.symbol&&Number(s.price)>0&&s.basketEligible!==false&&!NSE_SURV[s.symbol]?.length&&s.recommendationTriggerBlocked!==true)
     .sort((a,b)=>(Number(b.score)||0)-(Number(a.score)||0)||a.symbol.localeCompare(b.symbol))
     .slice(0,20);
 }
@@ -3642,6 +3695,7 @@ function timingDepth(){
 }
 function meetsRecommendationBar(s){
   if(!s) return false;
+  if(s.recommendationTriggerBlocked===true)return false;
   // v1168: a stock whose CURRENT session is net selling is not a buy, no matter what the score or
   // the multi-day flow says. This is a removal, not an annotation - it drops out of the list, out of
   // SELECTED and out of the basket. It only fires on a real current-session trajectory (three bars
@@ -3727,6 +3781,31 @@ function buildRadarSupplements(){
   });
   return meta;
 }
+function deriveFundamentalTrigger(row){
+  const today=getSessionDate();
+  const events=(row?.meta?.fundamentalEvents||[]).filter(e=>e?.isResults&&e.financial&&e.dateISO)
+    .map(e=>({event:e,age:Number(tradingDaysBetween(e.dateISO,today))}))
+    .filter(x=>{
+      const periodEnd=String(x.event.financial?.periodEnd||'');
+      const periodAge=/^\d{4}-\d{2}-\d{2}$/.test(periodEnd)?Math.floor((new Date(today+'T12:00:00Z')-new Date(periodEnd+'T12:00:00Z'))/86400000):null;
+      return Number.isFinite(x.age)&&x.age>=0&&x.age<=1&&periodAge!=null&&periodAge>=0&&periodAge<=120;
+    })
+    .sort((a,b)=>a.age-b.age);
+  if(!events.length)return {value:0,label:null,event:null,why:'no fresh parsed financial result'};
+  const event=events[0].event,f=event.financial||{};
+  const nonPositive=v=>v!=null&&Number.isFinite(Number(v))&&Number(v)<=0;
+  const negative=f.auditQualified===true||nonPositive(f.pat)||nonPositive(f.pbt)||nonPositive(f.operatingProfit);
+  if(negative){
+    const why=f.auditQualified?'qualified/adverse audit':nonPositive(f.pat)?'non-positive period profit':nonPositive(f.pbt)?'non-positive profit before tax':'non-positive operating profit';
+    return {value:-1,label:'Fundamental veto candidate',event,why};
+  }
+  const profitable=Number(f.revenue)>0&&Number(f.pat)>0&&Number(f.pbt)>0&&Number(f.operatingProfit)>0
+    &&(f.eps==null||Number(f.eps)>0);
+  if(!profitable)return {value:0,label:null,event,why:'financial filing lacks a complete positive earnings set'};
+  if(!row.directionConfirmed)return {value:0,label:null,event,why:'positive accounts without bullish price confirmation'};
+  return {value:1,label:'Earnings + price trigger',event,
+    why:`PAT ${fmtINR(f.pat)}; operating margin ${Number.isFinite(Number(f.operatingMarginPct))?Number(f.operatingMarginPct).toFixed(2)+'%':'positive'}; price above VWAP and open`};
+}
 // ── v1135 FORWARD EFFECTS DRIVE THE WEIGHTS (owner, 2026-08-14) ───────────────────────────────
 // THE UNLOCK: `f.effect` has been pinned to 0 since v1083/v1085 because the only separation the
 // scorer could measure came from a SAME-DAY label — stocks already up today — which leaks straight
@@ -3752,8 +3831,8 @@ function getForwardIndicatorEffects(){
   // Until the short log has IW_MIN_SESSIONS of its own this returns an EMPTY map, which reproduces
   // the pre-v1135 scorer exactly (every effect 0). That is deliberate: a measurement now known to be
   // taken at the wrong horizon should stop driving weights immediately, not linger until replaced.
-  const log=iw.logShort||{};
-  if(_fwdEffMemo&&_fwdEffMemo.src===log) return _fwdEffMemo.map;
+  const log=iw.logShort||{},longLog=iw.log||{};
+  if(_fwdEffMemo&&_fwdEffMemo.src===log&&_fwdEffMemo.longSrc===longLog) return _fwdEffMemo.map;
   const raw=[];
   Object.keys(log).forEach(name=>{
     const e=log[name];
@@ -3777,10 +3856,22 @@ function getForwardIndicatorEffects(){
     // measurement. The old behaviour is the limit of this one, not a special case of it.
     raw.push({name,mean:mean*(n/(n+IW_MIN_SESSIONS)),n,t});
   });
+  // A mature long-horizon backwards result is no longer a note. If the short-horizon model has no
+  // measured answer for that feature, the strict two-outcome guardrail supplies the opposite effect.
+  // Its magnitude is the mean of its own +5% and +10% forward gaps, then normalized with every other
+  // measured effect below. A short-horizon effect wins when present because it matches the trade horizon.
+  const shortNames=new Set(raw.map(r=>r.name));
+  let guardrail;
+  try{guardrail=evaluateIndicatorWatch();}catch(e){guardrail=null;}
+  (guardrail?.flags||[]).forEach(f=>{
+    if(shortNames.has(f.name))return;
+    const mean=(Number(f.e5?.mean)+Number(f.e10?.mean))/2;
+    if(Number.isFinite(mean))raw.push({name:f.name,mean,n:Math.min(Number(f.e5?.n)||0,Number(f.e10?.n)||0),t:Math.min(Math.abs(Number(f.e5?.t)||0),Math.abs(Number(f.e10?.t)||0)),guardrail:true});
+  });
   const peak=raw.reduce((m,r)=>Math.max(m,Math.abs(r.mean)),0);
   const map=new Map();
   if(peak>0) raw.forEach(r=>map.set(r.name,{effect:clamp01(r.mean/peak,-1,1),gap:r.mean,n:r.n,t:r.t}));
-  _fwdEffMemo={src:log,map};
+  _fwdEffMemo={src:log,longSrc:longLog,map};
   return map;
 }
 // ── v1143: INTRADAY BARS AS ENRICHMENT ON AN EXISTING RECOMMENDATION ─────────────────────────
@@ -5203,10 +5294,9 @@ function radarAnalyze(headers,rawRows,supplements={},heldSymbols=new Set()){
     // means, turning an ordering change into a de-facto raising of the bar.
     r.score=+(100*Math.pow(r.depthBlendPct*(_dirOk?1:0),4)).toFixed(1);
     r.rocketScore=r.score; // allocation/export alias
+    r.fundamental=deriveFundamentalTrigger(r);
+    r.fundamentalTrigger=Number(r.fundamental?.value)||0;
     r.risk=!r.basketEligible||r.meta.flags?.length>=3||r.turnover<25e5||r.price<10?'High':(r.gap>6||r.day>6||r.parts.volatility<38?'Medium':'Low');
-    // Event Risk (idea #1, v554 + v555): an event-day (Stage 3) or a name still digesting its results
-    // (Stage 4 profit-booking) is less pattern-reliable, so never label it Low risk. Changes risk, not score.
-    if(r.risk==='Low'&&(r.meta?.eventToday||r.stage===3||r.stage===4))r.risk='Medium';
     r.setup=r.series!=='EQ'?(r.series==='UNKNOWN'?'Series unverified':`Non-EQ · ${r.series}`):r.band!==null&&r.band<10?`${r.band}% price band`:radarSetupLabel(r);
   }
   // v1139/v1140 SECOND PASS. Two percentiles are taken here, both needing the whole cross-section:
@@ -5295,6 +5385,7 @@ function radarAnalyze(headers,rawRows,supplements={},heldSymbols=new Set()){
   }
   rows.sort((a,b)=>b.score-a.score||a.symbol.localeCompare(b.symbol));
   rows.forEach((r,i)=>{r.rank=i+1;});
+  applyLearnedTriggerRanking(rows);
   applyIntradayReorder(rows);
   // WS-D: stateless market intraday breadth (share of the universe up from open). Market-wide ⇒ it
   // does NOT change the ranking; surfaced in the status bar + basket export as an entry-timing gauge.
@@ -5314,6 +5405,7 @@ function radarAnalyze(headers,rawRows,supplements={},heldSymbols=new Set()){
     } else r.entryTiming.digestionRisk=false;
     r.entryReady=!r.entryTiming.blocked;
   });
+  applyLearnedRecommendationGates(rows);
   return {rows,features,rockets:rocketRows.length,rocketTargetPct:_radarSessionTargetPct,stretchBarPct:_radarStretchBarUsed,continuationCount:continuationRows.length,suppressedHeld,marketIntraday,ids:{priceI,targetI,sectorI,symbolI,descI}};
 }
 // Score the current upload (object rows from parseCSV) through the Radar composite.
@@ -5342,16 +5434,16 @@ function buildObservedDailyMoves(objRows){
   }).filter(Boolean);
 }
 // ══════════════════════════════════════════════════
-// INDICATOR WATCH (v526) — display-only orientation guardrail.
+// INDICATOR WATCH (v526/v1202) — automatic orientation trigger.
 // Automated forward measurement replacing manual eyeballing of ~170 indicators.
 // For every MONOTONIC-prior indicator it records, each accepted session, where each
 // stock sat (decile). Five trading sessions later it asks: did the end the prior
 // REWARDS actually hold more of the movers, or fewer? It keeps a rolling 30-session
 // tally per indicator, for BOTH forward outcomes (a stock posting a >=5% day-move and a
-// >=10% day-move within the window). An indicator is flagged only when it is "backwards"
-// on BOTH outcomes past a Bonferroni-corrected bar (owner choice: strictest). It NEVER
-// changes scoring — a flag is a note to review; inverting a prior stays a deliberate code
-// change. State is bounded (<=window snapshots + a 30-long log), append-only, and gap-
+// >=10% day-move within the window). An indicator triggers only when it is "backwards"
+// on BOTH outcomes past a Bonferroni-corrected bar. If the trade-horizon model has no
+// measured answer, that trigger reverses the unopposed prior inside scoring. State is
+// bounded (<=window snapshots + a 30-long log), append-only, and gap-
 // robust: a missed upload just yields fewer samples, never corrupt rolling state (the
 // v1 failure mode cannot recur here).
 // ══════════════════════════════════════════════════
@@ -7315,7 +7407,7 @@ function renderStats(){
     }catch(e){}
   })();
   if(SUPPRESSED_HELD>0)filterPills.push(`<span class="info-pill pill-rose" title="Stocks you already hold (Holdings + Positions + today's net Orders buys). Since v1070 these stay in the ranking and can be recommended again — the badge is a duplicate-buy warning, not a filter.">📌 ${SUPPRESSED_HELD} already held</span>`);
-  if(PEAK_TIMING_REMOVED>0)filterPills.push(`<span class="info-pill pill-amber" title="Ranked stocks flagged as extended by the entry-timing evidence. Since v1075 this is a LABEL, not a filter — they remain recommendable and exportable. A forward test (2026-07-28 close to 2026-07-29, n=1618) found extension predicted continuation, not reversal.">⚡ ${PEAK_TIMING_REMOVED} extended</span>`);
+  if(PEAK_TIMING_REMOVED>0)filterPills.push(`<span class="info-pill pill-amber" title="Automatic trigger input: these stocks fail the entry-timing condition. They remain eligible while the condition is collecting; if its forward precision arms in Post-close, failures are removed automatically.">⚡ ${PEAK_TIMING_REMOVED} timing-trigger misses</span>`);
   const inelig=ALL.filter(s=>s.basketEligible===false).length;
   if(inelig>0)filterPills.push(`<span class="info-pill pill-orange" title="Non-EQ series, inactive status, or a price band below 10% — visible in the ranking with penalties, but never exported to the basket.">⚠ ${inelig} basket-ineligible (ranked with penalties)</span>`);
 
@@ -8971,13 +9063,13 @@ function buildIndicatorWatchHTML(){
   let w;try{w=evaluateIndicatorWatch();}catch(e){return '';}
   const resolved=w.resolvedSessions||0;
   const collecting=resolved<IW_MIN_SESSIONS;
-  const head=`<h3 id="meth-watch" style="margin-top:28px">Indicator Watch <span style="font-size:14px;color:var(--t3);font-weight:400">automatic orientation guardrail</span></h3>`;
-  const intro=`<p style="color:var(--t2);font-size:14.5px;line-height:1.7">Each accepted session the system records where every liquid stock (turnover ≥ ₹25L) sits on every direction-testable indicator, then ${IW_WINDOW} sessions later checks whether the end the model <em>rewards</em> actually held more of the movers — or fewer. It keeps a rolling ${IW_LOG_MAX}-session tally per indicator and flags one only when it looks backwards on <strong>both</strong> a +5% and a +10% forward move, past a strict bar corrected for watching so many at once. Nothing changes automatically — a flag is a note to bring to review before inverting anything. Its job has narrowed since the forward-effect log re-armed: a feature carrying a measured effect already overrides its own prior, so the priors that still run <em>unopposed</em> are what this watches.</p>`;
+  const head=`<h3 id="meth-watch" style="margin-top:28px">Indicator Triggers <span style="font-size:14px;color:var(--t3);font-weight:400">automatic orientation correction</span></h3>`;
+  const intro=`<p style="color:var(--t2);font-size:14.5px;line-height:1.7">Each accepted session records where every liquid stock (turnover ≥ ₹25L) sits on every direction-testable indicator. After ${IW_WINDOW} sessions, a trigger fires only when the rewarded end produced fewer movers on <strong>both</strong> the +5% and +10% outcomes past the strict multiple-testing bar. A measured trade-horizon effect has first authority; otherwise the mature trigger reverses the unopposed prior inside the score automatically.</p>`;
   if(collecting){
     return `${head}${intro}<div style="background:var(--bg-card);border:1px solid var(--border);border-radius:10px;padding:14px 18px;font-size:14px;color:var(--t2)">⏳ Collecting evidence — <strong>${resolved}/${IW_MIN_SESSIONS}</strong> resolved sessions (need ${IW_MIN_SESSIONS} before any warning; ${w.pending} snapshot${w.pending===1?'':'s'} awaiting their ${IW_WINDOW}-session resolution). No orientation warnings until enough forward data exists.</div>`;
   }
   if(!w.flags.length){
-    return `${head}${intro}<div style="background:var(--bg-card);border:1px solid rgba(34,197,94,.25);border-radius:10px;padding:14px 18px;font-size:14px;color:var(--t2)">✓ No indicator is backwards on both outcomes over the last ${resolved} resolved sessions (${w.testable} indicators have enough samples to test). Every direction-testable prior is oriented consistently with the forward evidence.</div>`;
+    return `${head}${intro}<div style="background:var(--bg-card);border:1px solid rgba(34,197,94,.25);border-radius:10px;padding:14px 18px;font-size:14px;color:var(--t2)">✓ No orientation trigger is active over the last ${resolved} resolved sessions (${w.testable} indicators have enough samples to test).</div>`;
   }
   const rows=w.flags.map(f=>{
     const dir=f.sign>0?'rewards its HIGH end':'rewards its LOW end';
@@ -8989,8 +9081,8 @@ function buildIndicatorWatchHTML(){
     </tr>`;
   }).join('');
   return `${head}${intro}
-    <div style="background:rgba(239,68,68,.06);border:1px solid rgba(239,68,68,.3);border-radius:10px;padding:12px 16px;margin-bottom:10px;font-size:14px;color:var(--t1)"><strong>⚠ ${w.flags.length} indicator${w.flags.length===1?'':'s'} looks backwards over the last ${resolved} sessions.</strong> The rewarded end held <em>fewer</em> movers on both +5% and +10%. Bring these to review — inverting a prior is a deliberate, logged code change, never automatic.${(()=>{
-      // v1179: A FLAG ON A FEATURE THAT ALREADY CARRIES A MEASURED EFFECT IS NOISE. When this panel
+    <div style="background:rgba(239,68,68,.06);border:1px solid rgba(239,68,68,.3);border-radius:10px;padding:12px 16px;margin-bottom:10px;font-size:14px;color:var(--t1)"><strong>⚡ ${w.flags.length} orientation trigger${w.flags.length===1?' is':'s are'} active over the last ${resolved} sessions.</strong> The rewarded end held <em>fewer</em> movers on both +5% and +10%. Each unopposed prior is automatically reversed in scoring; a measured trade-horizon effect keeps first authority.${(()=>{
+      // A TRIGGER ON A FEATURE THAT ALREADY CARRIES A MEASURED EFFECT DEFERS TO THE CLOSER HORIZON.
       // was built (v526) every effect was pinned to 0, so a prior ran unopposed and a backwards one
       // was invisible. Since the v1136 forward log re-armed, some features carry a measured forward
       // effect that OVERRIDES their prior at up to 58% of the signal - and where that effect already
@@ -9003,7 +9095,7 @@ function buildIndicatorWatchHTML(){
           return g&&Math.abs(g.effect||0)>0.0001;
         }).length;
         if(!over) return '';
-        return ` <span style="color:var(--t3)">${over} of these already carry a measured forward effect that overrides the prior, so the scorer has corrected itself there — the remaining ${w.flags.length-over} run unopposed and are the ones worth reading.</span>`;
+        return ` <span style="color:var(--t3)">${over} already carry a measured trade-horizon effect; the remaining ${w.flags.length-over} are being corrected by this trigger.</span>`;
       }catch(e){ return ''; }
     })()}</div>
     <div class="scroll-x"><table class="ct" style="min-width:620px"><thead><tr><th>Indicator</th><th>Prior orientation</th><th title="Mean forward decile gap (mover minus non-mover), normalized; negative vs the rewarded end = backwards">+5% forward gap</th><th>+10% forward gap</th></tr></thead><tbody>${rows}</tbody></table></div>`;
@@ -9823,6 +9915,13 @@ function getPositionAction(sym,pos){
   const s=(Array.isArray(ALL)?ALL:[]).find(r=>normSym(r.symbol)===normSym(sym))||null;
   const qty=Number(pos&&pos.qty)||0;
   if(!(qty>0)) return null;
+  const avg=Number(pos?.avg),ltp=Number(pos?.ltp);
+  if(s&&avg>0&&ltp>0){
+    const policy=getRowExitPolicy(s,avg);
+    const target=avg*(1+Number(policy.targetPct||0)/100),stop=avg*(1-Number(policy.stopPct||0)/100);
+    if(target>avg&&ltp>=target)return {act:'EXIT ALL',qty,tone:'green',why:`target reached at ${fmtINR(target)}`};
+    if(stop>0&&ltp<=stop)return {act:'EXIT ALL',qty,tone:'red',why:`stop breached at ${fmtINR(stop)}`};
+  }
   const rd=getIntradayRead(sym);
   const tt=rd&&rd.current?rd.todayTraj:null;
 
@@ -9853,6 +9952,10 @@ function getPositionAction(sym,pos){
   // BOTH readings for it, and the tape is still pushing - size the add from the cushion so a top-up
   // can never turn a position in profit into a losing one (v1070).
   const pressing=Number.isFinite(tt.pressurePct)&&tt.pressurePct>0;
+  const reviewDays=getEffectiveReviewDays(),daysHeld=getOpenPositionDaysHeld(sym,qty);
+  if(reviewDays>0&&daysHeld!=null&&daysHeld>=reviewDays&&!pressing){
+    return {act:'EXIT ALL',qty,tone:'red',why:`held ${daysHeld}d against the learned ${reviewDays}d review horizon, with no unspent buying pressure`};
+  }
   if(pressing&&s){
     try{
       // v1179: getHeldTopUpNotionalCap returns Infinity for a position UNDERWATER - the v1070
@@ -10267,6 +10370,12 @@ function radarStagePill(r){
   const t={1:'Silent accumulation — quiet strength before a move (a higher-quality candidate)',5:'Re-accumulation — quiet, holding above its 50-day MA after digesting a result',2:'Initial breakout — fresh high-volume move through resistance',6:'Second leg — breakout with an already-established trend, the event behind it',3:'Event day — today’s move may be event-driven and less pattern-reliable',4:'Profit-booking — digesting a recent result'+(r.daysSinceEarnings!=null?` (${r.daysSinceEarnings}d since results)`:'')}[r.stage]||'';
   return `<span style="font-size:12px;font-weight:700;border-radius:4px;padding:1px 5px;color:${c};border:1px solid ${c};white-space:nowrap;cursor:help" title="${escHtml(t)}">${escHtml(r.stageLabel||'')}</span>`;
 }
+function radarTriggerPill(r){
+  const n=(r?.modelTriggers||[]).length;
+  if(!n)return '';
+  const title=(r.modelTriggers||[]).map(t=>`${t.label} → ${t.action}`).join(' · ');
+  return `<span style="font-size:12px;font-weight:800;border-radius:4px;padding:1px 5px;color:var(--green);border:1px solid var(--green);white-space:nowrap;cursor:help" title="${escHtml(title)}">⚡ ${n}</span>`;
+}
 function radarSeriesBandPill(s){
   const ok=s.basketEligible!==false;
   const band=s.band!=null?s.band+'%':'No band';
@@ -10372,7 +10481,7 @@ function renderTable(){
       // panels and quietly false of the main table - which is why swapping to Zerodha missed it.
       symbol:`<td style="font-family:'Plus Jakarta Sans',sans-serif">${intradayRowButton(s)}${symbolChartButton(String(s.symbol),
         `<div style="font-weight:700;font-size:15px;color:var(--t1);max-width:170px;overflow:hidden;text-overflow:ellipsis">${escHtml(s.symbol)}${(()=>{const flags=s.meta?.flags||[];if(!flags.length)return '';return `<span style="font-size:12px;background:rgba(239,68,68,.15);color:var(--red);border-radius:4px;padding:1px 5px;margin-left:5px;font-weight:700;vertical-align:middle" title="NSE surveillance flags: ${escHtml(flags.join(' · '))}">⚠ ${flags.length}</span>`;})()}${s._held?`<span style="font-size:12px;background:rgba(244,114,182,.15);color:#f472b6;border-radius:4px;padding:1px 5px;margin-left:5px;font-weight:700;vertical-align:middle" title="You already hold this. Held stocks stay in the ranking (v1070) and can be recommended again — buying here ADDS to the existing position.">📌 held</span>`:''}</div><div style="font-size:11px;color:var(--t3);max-width:150px;overflow:hidden;text-overflow:ellipsis" title="${escHtml((s.name||'')+(s.setup?' · '+s.setup:''))}">${radarSeriesBandPill(s)} ${escHtml(s.setup||s.name||'')}</div>`)}</td>`,
-      setup:`<td style="font-size:13px;color:var(--t2)">${escHtml(s.setup||'—')}${s.stage?' '+radarStagePill(s):''}</td>`,
+      setup:`<td style="font-size:13px;color:var(--t2)">${escHtml(s.setup||'—')}${s.stage?' '+radarStagePill(s):''}${(s.modelTriggers||[]).length?' '+radarTriggerPill(s):''}</td>`,
       series:`<td>${radarSeriesBandPill(s)}</td>`,
       price:`<td style="white-space:nowrap">${fmtINR(s.price)}<span style="color:var(--t3)"> · </span><span style="font-size:12px">${fPerf(s.day??s.priceChange)}${s.corpAction?`<span title="Corporate action (${escHtml(s.corpAction)}) — mechanical ex-date move, neutralised in scoring" style="font-size:11px;color:var(--amber);margin-left:4px;cursor:help">⚑</span>`:''}</span></td>`,
       day:`<td>${fPerf(s.day??s.priceChange)}${s.corpAction?`<span title="Corporate action (${escHtml(s.corpAction)}) — mechanical ex-date move, neutralised in scoring" style="font-size:11px;color:var(--amber);margin-left:4px;cursor:help">⚑</span>`:''}</td>`,
@@ -10750,14 +10859,14 @@ async function refreshNseFundamentals(){
     for(const item of data.items||[]){
       const symbol=resolveRssSymbol(item);if(!symbol)continue;
       const text=`${item.subject||''} ${item.description||''}`;
-      const event={source:item.source,title:item.title,subject:item.subject||'',description:item.description||'',pubDate:item.pubDate||'',dateISO:rssEventDateISO(item.pubDate),link:item.link||'',
+      const event={source:item.source,title:item.title,subject:item.subject||'',description:item.description||'',pubDate:item.pubDate||'',dateISO:rssEventDateISO(item.pubDate),link:item.link||'',financial:item.financial||null,
         isResults:/financialResults|integratedFinancials/.test(item.source)||/financial results?|quarterly results?|annual results?/i.test(text),
         isBoard:item.source==='boardMeetings'||/board meeting/i.test(text)};
       (bySymbol[symbol]??=[]).push(event);
     }
     Object.values(bySymbol).forEach(events=>events.sort((a,b)=>String(b.pubDate).localeCompare(String(a.pubDate))));
     NSE_FUNDAMENTALS=bySymbol;
-    NSE_FUNDAMENTAL_META={ok:true,fetchedAt:data.fetchedAt,feeds:data.feeds,feedCounts:data.feedCounts,snapshot:data.snapshot,symbols:Object.keys(bySymbol).length,items:(data.items||[]).length};
+    NSE_FUNDAMENTAL_META={ok:true,fetchedAt:data.fetchedAt,feeds:data.feeds,feedCounts:data.feedCounts,financials:data.financials||null,snapshot:data.snapshot,symbols:Object.keys(bySymbol).length,items:(data.items||[]).length};
     FS.set(NSE_FUNDAMENTAL_STORE,{version:1,bySymbol,meta:NSE_FUNDAMENTAL_META});
     return true;
   }catch(e){
@@ -11153,6 +11262,10 @@ function applyFilters(){
     // flagged under a rule in the Methodology table is weeded out of recommendations.
     // Non-configured REG1 flags remain a score penalty + badge only.
     if(NSE_SURV[s.symbol]?.length){SURV_HARD_REMOVED++;REMOVED_ROWS.push({s,reason:'surv',rules:NSE_SURV[s.symbol]});return false;}
+    if(s.recommendationTriggerBlocked){
+      REMOVED_ROWS.push({s,reason:'trigger',detail:'automatic evidence trigger: '+(s.recommendationTriggerReasons||[]).join(', ')});
+      return false;
+    }
     // v1075: entry timing is a LABEL, not a filter. It shipped in v559/v560 on assertion and was
     // never evidenced. First forward test (2026-07-28 close -> 2026-07-29, EQ + turnover >= Rs 25L,
     // n=1618, non-circular because the state is taken at the PRIOR close):
@@ -11288,6 +11401,7 @@ function buildRemovedPanel(query=''){
   const filtN=all.filter(r=>r.reason==='filter').length;
   const peakN=all.filter(r=>r.reason==='peak').length;
   const allocN=all.filter(r=>r.reason==='alloc').length;
+  const triggerN=all.filter(r=>r.reason==='trigger').length;
   const shown=filterPanelRows(all,query,r=>[r.s.symbol,r.s.name,r.s.sector]);
   const CAP=100;
   const view=shown.slice(0,CAP);
@@ -11297,6 +11411,8 @@ function buildRemovedPanel(query=''){
       ?`<span style="font-size:11px;background:rgba(239,68,68,.12);color:var(--red);border:1px solid rgba(239,68,68,.25);border-radius:5px;padding:1px 7px;white-space:nowrap" title="${escHtml(r.detail||'')}">📉 Not lifting off</span>`
       :r.reason==='filter'
       ?`<span style="font-size:11px;background:rgba(148,163,184,.10);color:var(--t2);border:1px solid rgba(148,163,184,.22);border-radius:5px;padding:1px 7px;white-space:nowrap" title="${escHtml(r.detail||'')}">⚙ Your filter</span>`
+      :r.reason==='trigger'
+      ?`<span style="font-size:11px;background:rgba(239,68,68,.12);color:var(--red);border:1px solid rgba(239,68,68,.25);border-radius:5px;padding:1px 7px;white-space:nowrap" title="${escHtml(r.detail||'')}">Automatic trigger veto</span>`
       :r.reason==='held'
       ?`<span style="font-size:11px;background:rgba(244,114,182,.12);color:#f472b6;border:1px solid rgba(244,114,182,.25);border-radius:5px;padding:1px 7px;white-space:nowrap">📌 Held · in Open Positions</span>`
       :r.reason==='alloc'
@@ -11331,7 +11447,7 @@ function buildRemovedPanel(query=''){
   return `<div id="rank-removed-card" style="background:var(--bg-card);border:1px solid var(--border);border-radius:10px;overflow:hidden">
     <div style="padding:10px 16px;border-bottom:1px solid var(--border)">
       <span style="font-size:12px;font-weight:700;color:var(--t2);text-transform:uppercase;letter-spacing:.1em">Removed from rankings — ${all.length}${tag}</span>
-      <span style="font-size:13px;color:var(--t3);font-weight:400;margin-left:8px">${[dirN?`📉 ${dirN} not lifting off`:'',heldN?`📌 ${heldN} held`:'',survN?`⚠ ${survN} surveillance`:'',peakN?`⏳ ${peakN} waiting for entry confirmation`:'',allocN?`🚫 ${allocN} not allocatable`:'',filtN?`⚙ ${filtN} by your filters`:''].filter(Boolean).join(' · ')}${(heldN||survN||peakN||allocN||dirN||filtN)?' · ':''}why the ranks skip</span>
+      <span style="font-size:13px;color:var(--t3);font-weight:400;margin-left:8px">${[dirN?`📉 ${dirN} not lifting off`:'',heldN?`📌 ${heldN} held`:'',survN?`⚠ ${survN} surveillance`:'',triggerN?`${triggerN} automatic trigger veto`:'',peakN?`⏳ ${peakN} waiting for entry confirmation`:'',allocN?`🚫 ${allocN} not allocatable`:'',filtN?`⚙ ${filtN} by your filters`:''].filter(Boolean).join(' · ')}${(heldN||survN||triggerN||peakN||allocN||dirN||filtN)?' · ':''}why the ranks skip</span>
     </div>
     ${body}
   </div>`;
@@ -11357,12 +11473,15 @@ function showRadarDetail(sym){
   if(r.meta?.announceToday)eventBits.push(`announcement filed today: ${escHtml(String(r.meta.announceToday))}`);
   (r.meta?.fundamentalEvents||[]).slice(0,3).forEach(e=>eventBits.push(`${escHtml(e.subject||e.source||'official filing')} ${escHtml(e.pubDate||'')}${e.link?` <a href="${escHtml(e.link)}" target="_blank" rel="noopener">official filing</a>`:''}`));
   const corpNote=eventBits.length?` <b style="color:var(--amber)">Events:</b> ${eventBits.join('; ')}.`:'';
-  const varNote=r.meta?.nseVar?.totalMarginPct!=null?` NSE EOD margin ${fmt(r.meta.nseVar.totalMarginPct,2)}% (security VaR ${fmt(r.meta.nseVar.securityVarPct,2)}% + ELM ${fmt(r.meta.nseVar.elmPct,2)}%; risk context only).`:'';
+  const triggerBits=(r.modelTriggers||[]).map(t=>`${escHtml(t.label)} → ${escHtml(t.action)}`);
+  if(r.fundamental?.label)triggerBits.unshift(`${escHtml(r.fundamental.label)}: ${escHtml(r.fundamental.why||'')}`);
+  const triggerNote=triggerBits.length?` <b style="color:var(--green)">Automatic triggers:</b> ${triggerBits.join('; ')}.`:'';
+  const varNote=r.meta?.nseVar?.totalMarginPct!=null?` NSE EOD margin ${fmt(r.meta.nseVar.totalMarginPct,2)}% (security VaR ${fmt(r.meta.nseVar.securityVarPct,2)}% + ELM ${fmt(r.meta.nseVar.elmPct,2)}%).`:'';
   const bandNote=r.meta?.bandNote?` ${escHtml(r.meta.bandNote)}.`:'';
   const masterNote=r.meta?.securityMaster?` ISIN ${escHtml(r.meta.securityMaster.isin||'—')}${r.meta.securityMaster.listingDate?`, listed ${escHtml(r.meta.securityMaster.listingDate)}`:''}.`:'';
   const detailNote=(r.contrib||[]).length?'':'<div style="color:var(--amber);font-size:13px;margin-bottom:8px">Restored compact ranking — load files again for the full per-feature breakdown.</div>';
   document.getElementById('radarDetailBody').innerHTML=`${detailNote}<div class="rr-groups">${groups}</div>
-    <div class="rr-read"><b>Exchange check:</b> Series ${escHtml(r.series||'—')}, price band ${r.band??'not supplied'}, status ${escHtml(r.status||'—')}; basket ${r.basketEligible!==false?'eligible':'ineligible'}. Official delivery ${r.meta?.delivery==null?'unavailable':fmt(r.meta.delivery,1)+'%'}, trades ${r.meta?.trades==null?'unavailable':fmt(r.meta.trades,0)}, surveillance flags: ${flags}.${bandNote}${varNote}${masterNote}${corpNote}<br>
+    <div class="rr-read"><b>Exchange check:</b> Series ${escHtml(r.series||'—')}, price band ${r.band??'not supplied'}, status ${escHtml(r.status||'—')}; basket ${r.basketEligible!==false?'eligible':'ineligible'}. Official delivery ${r.meta?.delivery==null?'unavailable':fmt(r.meta.delivery,1)+'%'}, trades ${r.meta?.trades==null?'unavailable':fmt(r.meta.trades,0)}, surveillance triggers: ${flags}.${bandNote}${varNote}${masterNote}${corpNote}${triggerNote}<br>
     <b>Feasibility:</b> ${gate} Strongest daily range estimate ${fmt(r.rangePct,2)}%; the session target takes ${fmt(r.stretch,2)}× that range. The stock remains ranked either way.${entryNote}<br>
     ${r.stage?`<b>Market-cycle stage:</b> ${radarStagePill(r)} — ${escHtml({1:'silent accumulation (quiet strength before a move)',2:'initial breakout',3:'event day (move may be event-driven)',4:'profit-booking (digesting a recent result)',5:'re-accumulation',6:'second leg'}[r.stage]||'')}.<br>`:''}
     <b>Read:</b> ${escHtml(r.setup||'—')}. Data coverage ${r.quality!=null?fmt(r.quality*100,0)+'%':'—'}, day move ${(r.day??0)>=0?'+':''}${fmt(r.day,2)}%, relative volume ${r.relvol==null?'unavailable':fmt(r.relvol,2)+'×'}, turnover ${fV(r.turnover)}. Rank is relative, not a literal probability.</div>
@@ -11381,9 +11500,9 @@ function renderPostClose(){
   const scorecard=store.scorecard||getPostCloseRuleScorecard(store.audits||{});
   const stateColor=complete?'var(--green)':afterClose?'var(--amber)':'var(--t3)';
   const stateText=complete?'Complete for '+today:afterClose?'Waiting for a refreshed post-close ALL NSE.csv':'Arms automatically at 16:00 IST';
-  const candidateRows=candidates.length?candidates.map(c=>`<tr><td>${escHtml(c.label)}</td><td>${c.wins}/${c.n}</td><td style="color:${c.precision>=95?'var(--green)':'var(--t2)'}">${c.precision}%</td><td style="color:var(--amber)">Candidate only</td></tr>`).join('')
+  const candidateRows=candidates.length?candidates.map(c=>`<tr><td>${escHtml(c.label)}</td><td>${c.wins}/${c.n}</td><td style="color:${c.precision>=95?'var(--green)':'var(--t2)'}">${c.precision}%</td><td style="color:var(--amber)">Collecting for trigger</td></tr>`).join('')
     :`<tr><td colspan="4" style="color:var(--t3)">No predeclared condition currently reaches 95% among resolved picks. That is a valid result; the system does not tune a condition after seeing the answers.</td></tr>`;
-  const ruleRows=scorecard.map(r=>`<tr><td>${escHtml(r.label)}</td><td>${r.sessions}</td><td>${r.wins}</td><td>${r.losses}</td><td>${r.precision==null?'—':r.precision+'%'}</td><td style="font-weight:800;color:${r.status==='ELIGIBLE'?'var(--green)':r.status==='RETIRED'?'var(--red)':'var(--t3)'}">${r.status}</td></tr>`).join('');
+  const ruleRows=scorecard.map(r=>`<tr><td>${escHtml(r.label)}</td><td>${r.sessions}</td><td>${r.wins}</td><td>${r.losses}</td><td>${r.precision==null?'—':r.precision+'%'}</td><td style="font-weight:800;color:${['ARMED','ELIGIBLE'].includes(r.status)?'var(--green)':r.status==='RETIRED'?'var(--red)':'var(--t3)'}">${r.status==='ELIGIBLE'?'ARMED':r.status}</td></tr>`).join('');
   const rss=NSE_FUNDAMENTAL_META,events=Object.values(NSE_FUNDAMENTALS).reduce((n,a)=>n+(a?.length||0),0);
   el.innerHTML=`<div style="padding:18px 16px 40px">
     <div class="m-card" style="margin-bottom:14px"><div style="display:flex;justify-content:space-between;align-items:flex-start;gap:14px;flex-wrap:wrap">
@@ -11398,8 +11517,8 @@ function renderPostClose(){
       </div>
     </div>
     <div class="m-card" style="margin-bottom:14px"><h3>Today’s ≥95% candidates</h3><p style="color:var(--t3);font-size:13px">Denominator is resolved non-control recommendations only. One session never graduates a rule.</p><div class="scroll-x"><table class="method-table"><thead><tr><th>Condition fixed before grading</th><th>Wins / n</th><th>Precision</th><th>Verdict</th></tr></thead><tbody>${candidateRows}</tbody></table></div></div>
-    <div class="m-card" style="margin-bottom:14px"><h3>Cumulative graduation tracker</h3><p style="color:var(--t3);font-size:13px">Eligible requires at least 3 wins across at least 2 audited sessions, no more than 1 contradiction, and at least 95% aggregate precision. Eligibility is a build-review flag—not automatic scoring authority.</p><div class="scroll-x"><table class="method-table"><thead><tr><th>Condition</th><th>Sessions</th><th>Confirms</th><th>Contradictions</th><th>Precision</th><th>Status</th></tr></thead><tbody>${ruleRows}</tbody></table></div></div>
-    <div class="m-card"><h3>Official NSE fundamental context</h3><p style="color:var(--t2);font-size:14px">${rss?.ok?`${events} symbol-linked filing events loaded from ${rss.feeds||0} official RSS indexes; snapshot ${escHtml(rss.snapshot||'saved locally')}.`:`${rss?.why?`RSS unavailable: ${escHtml(rss.why)}.`:'The local helper will fetch and snapshot the official indexes on the next load.'}`} Filings remain context and event-risk evidence; they do not change rank or score without forward validation.</p></div>
+    <div class="m-card" style="margin-bottom:14px"><h3>Automatic trigger tracker</h3><p style="color:var(--t3);font-size:13px">A condition arms itself after at least 3 wins across at least 2 audited sessions, no more than 1 contradiction, and at least 95% aggregate precision. ARMED gates or re-ranks recommendations automatically; RETIRED negative conditions become automatic vetoes after ten winless sessions.</p><div class="scroll-x"><table class="method-table"><thead><tr><th>Condition</th><th>Sessions</th><th>Confirms</th><th>Contradictions</th><th>Precision</th><th>Status</th></tr></thead><tbody>${ruleRows}</tbody></table></div></div>
+    <div class="m-card"><h3>Official NSE fundamental triggers</h3><p style="color:var(--t2);font-size:14px">${rss?.ok?`${events} symbol-linked filing events loaded from ${rss.feeds||0} official RSS indexes; ${rss.financials?.parsed||0} of ${rss.financials?.attempted||0} result XBRLs parsed; snapshot ${escHtml(rss.snapshot||'saved locally')}.`:`${rss?.why?`RSS unavailable: ${escHtml(rss.why)}.`:'The local helper will fetch and snapshot the official indexes on the next load.'}`} A fresh result becomes a positive trigger only when revenue, profit, operating profit and audit quality pass and price confirms above VWAP and the open. Its rank authority arms automatically after the same forward evidence bar; a persistently losing negative-result cohort becomes an automatic veto.</p></div>
   </div>`;
 }
 
@@ -11503,24 +11622,9 @@ function renderStatusBar(){
     html+=` <span style="color:var(--t3);font-size:13px;margin-left:8px">· select ${instrumentLabel} to allocate ${fmtINR(capital)}</span>`;
   }
   // v555 WS-D: market intraday breadth gauge (entry timing). Market-wide, so it never changes the ranking.
-  // v556: enrich with the official Market Activity Report context (Nifty %, adv/dec, strongest/weakest sector).
   if(MARKET_INTRADAY&&MARKET_INTRADAY.advPct!=null){
     const up=MARKET_INTRADAY.advPct>=0.5,c=up?'var(--green)':'var(--red)',pct=(MARKET_INTRADAY.advPct*100).toFixed(0);
-    let officialInline='',officialTip='';
-    if(NSE_MARKET&&NSE_MARKET.niftyPct!=null){
-      const sgn=v=>(v>=0?'+':'')+v.toFixed(2)+'%';
-      officialInline=` · Nifty ${sgn(NSE_MARKET.niftyPct)}`;
-      // v1076: regime label + India VIX percentile of its own 52-week range.
-      if(MARKET_REGIME&&MARKET_REGIME.vix!=null){
-        officialInline+=` · VIX ${MARKET_REGIME.vix.toFixed(2)}${MARKET_REGIME.vixRangePos!=null?` (${MARKET_REGIME.vixRangePos.toFixed(0)}th pct → ${MARKET_REGIME.label})`:''}`;
-      }
-      const sect=Object.entries(NSE_MARKET.indices||{}).filter(([n])=>/^Nifty (Auto|Bank|IT|Pharma|FMCG|Metal|Realty|Energy|Media|Infra|PSU Bank|Fin Service|Healthcare|Consumption|Commodities|Serv Sector)$/.test(n)).sort((a,b)=>(b[1]||0)-(a[1]||0));
-      const ad=(NSE_MARKET.advances!=null&&NSE_MARKET.declines!=null)?` · Adv/Dec ${NSE_MARKET.advances}/${NSE_MARKET.declines}`:'';
-      const strong=sect[0]?` · strongest ${sect[0][0]} ${sgn(sect[0][1])}`:'',weak=sect.length>1?` · weakest ${sect[sect.length-1][0]} ${sgn(sect[sect.length-1][1])}`:'';
-      const stale=NSE_MARKET.dateISO&&NSE_MARKET.dateISO!==getSessionDate()?' (prior session — EOD)':' (EOD)';
-      officialTip=` — Official Market Activity ${NSE_MARKET.date||''}${stale}: Nifty ${sgn(NSE_MARKET.niftyPct)}${ad}${strong}${weak}. Context only, not in scoring.`;
-    }
-    html+=` <span style="color:${c};font-size:13px;font-family:'DM Mono',monospace;font-weight:700;margin-left:8px" title="Market intraday breadth: ${MARKET_INTRADAY.adv} of ${MARKET_INTRADAY.adv+MARKET_INTRADAY.dec} stocks are trading above their open. Below 50% = broad intraday weakness: new entries must independently confirm above VWAP/open with completed positive 5m/15m tape. This changes entry eligibility, never Radar score/rank.${officialTip}">· Market ${up?'▲':'▼'} ${pct}% up-from-open${officialInline}</span>`;
+    html+=` <span style="color:${c};font-size:13px;font-family:'DM Mono',monospace;font-weight:700;margin-left:8px" title="Automatic breadth trigger: ${MARKET_INTRADAY.adv} of ${MARKET_INTRADAY.adv+MARKET_INTRADAY.dec} stocks are trading above their open. In broad weakness, an entry is blocked unless that stock independently confirms above VWAP and its open on positive completed tape.">· ⚡ Market ${up?'▲':'▼'} ${pct}% up-from-open</span>`;
   }
   // v557: say it out loud when Positions/Orders are a prior session's snapshot. Zerodha only rewrites
   // them on a new trade, so the morning after a no-trade day they still hold yesterday's rows — they
@@ -11534,7 +11638,7 @@ function renderStatusBar(){
     const _rev=getEffectiveReviewDays();
     if(_rev>0){
       const _xp=TRADEBOOK_STATS?.exitPolicy||null;
-      html+=` <span class="sb-tag" style="margin-left:8px" title="Exit review horizon: how long a position should be given before it is reconsidered, learned from your realised holds${_xp&&_xp.holdDays?` (realised baseline ${_xp.holdDays}d)`:''}. Informational — it changes no target, stop or allocation.">⏳ review after ${_rev}d</span>`;
+      html+=` <span class="sb-tag" style="margin-left:8px" title="Automatic exit trigger learned from realised holds${_xp&&_xp.holdDays?` (realised baseline ${_xp.holdDays}d)`:''}: at ${_rev} days, a position with no unspent buying pressure becomes EXIT ALL. Target, stop and active selling still take precedence.">⚡ exit review ${_rev}d</span>`;
     }
   }
   if(SUPPRESSED_HELD>0)html+=` <span class="sb-tag" style="margin-left:8px" title="Stocks you already hold (Holdings + Positions + today's net Orders buys). Since v1070 they remain in the ranking and can be recommended again — buying adds to the existing position. See Open Positions below.">📌 ${SUPPRESSED_HELD} already held</span>`;
@@ -12820,6 +12924,8 @@ function compactRankingRows(rows){
     high1d:s.high1d??null,low1d:s.low1d??null,vwap:s.vwap??null,bollUpper:s.bollUpper??null,keltUpper:s.keltUpper??null,
     price1h:s.price1h??null,price15m:s.price15m??null,price5m:s.price5m??null,
     stage:s.stage??null,stageLabel:s.stageLabel??null,legTrendPct:s.legTrendPct??null,legHighPct:s.legHighPct??null,
+    fundamentalTrigger:Number(s.fundamentalTrigger)||0,fundamental:s.fundamental||null,
+    modelTriggers:(s.modelTriggers||[]).slice(0,12),recommendationTriggerBlocked:!!s.recommendationTriggerBlocked,recommendationTriggerReasons:(s.recommendationTriggerReasons||[]).slice(0,12),
     igniteReady:!!s.igniteReady,igniteStrength:s.igniteStrength??null,ignitePct:s.ignitePct??0,compositePct:s.compositePct??null,setupPct:s.setupPct??null,upStreak:s.upStreak??null,upStreakPct:s.upStreakPct??null,feasibility:s.feasibility??null,directionConfirmed:!!s.directionConfirmed,marketCap:s.marketCap??null,
     entryReady:s.entryReady!==false,entryTiming:s.entryTiming||null,
     preResults:s.preResults?{resultsDate:s.preResults.resultsDate,resultsSource:s.preResults.resultsSource,
@@ -12895,11 +13001,12 @@ function applySavedFiltersForMode(mode){
       const allocCtx=getAllocationPassContext();
       const recommendations=eligibleCandidates.concat(controlRows)
         .map((s,i)=>{
-          let targetPct=null,stopPct=null;
+          let targetPct=null,stopPct=null,targetReachable=null;
           try{
             const pol=getRowExitPolicy(s,getBuyPrice(s),allocCtx?.active);
             targetPct=Number(pol?.targetPct)>0?Number(pol.targetPct):null;
             stopPct=Number(pol?.stopPct)>0?Number(pol.stopPct):null;
+            targetReachable=pol?.reachable===true;
           }catch(e){}
           return {symbol:s.symbol,entryPrice:s.price,score:s.score,rank:i+1,
             // v1128: a control row is graded exactly like a pick but is NOT one — it is excluded
@@ -12925,6 +13032,9 @@ function applySavedFiltersForMode(mode){
             ignitePct:Number.isFinite(+s.ignitePct)?+s.ignitePct:null,
             setupPct:Number.isFinite(+s.setupPct)?+s.setupPct:null,
             directionConfirmed:!!s.directionConfirmed,
+            rocketReady:s.rocketReady===true,
+            targetReachable,
+            fundamentalTrigger:Number.isFinite(Number(s.fundamentalTrigger))?Number(s.fundamentalTrigger):0,
             radarRank:s.rank??null,entryReady:s.entryReady!==false,entryTiming:s.entryTiming||null,
             targetPct,stopPct,
             high1dAtIssue:Number(s.high1d)>0?Number(s.high1d):null,
@@ -12951,7 +13061,8 @@ function applySavedFiltersForMode(mode){
         recommendations
       };
       recordRecommendationOutcomeScan(window._lastStockOutcomeScan);
-      runPostCloseAudit(); // inert before 16:00; after close the refreshed tape completes today's native audit
+      const completedAudit=runPostCloseAudit(); // inert before 16:00; refreshed close can arm gates for the next issue
+      if(completedAudit)applyLearnedRecommendationGates(ALL);
       recordDisplayedEntryCohort({date:uploadSession,candidates:eligibleCandidates});
       // Indicator-orientation watch: fire-and-forget so compression never delays rankings.
       recordIndicatorWatch(uploadSession).catch(e=>console.warn('indicator watch record failed',e));
