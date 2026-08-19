@@ -1,5 +1,5 @@
-const BUILD_TS='2026-08-19 09:37 IST'; // release build time (IST)
-const APP_VERSION=1191; // v1191: EoD is scaled by the share of the session actually seen.
+const BUILD_TS='2026-08-19 09:53 IST'; // release build time (IST)
+const APP_VERSION=1192; // v1192: one verdict, one face - the chip shows the decision, not a description.
 // v1093: a baseline reward:risk MEASURED on the cross-section (last completed bhav session) instead of learned from the owner's own fills - reported on every row, deliberately not enforced. Includes v1092: position size split by Radar score / stop distance, so equally-scored names carry equal RUPEE risk, plus an opt-in Risk /trade cap.
 // v556: parse the NSE Market Activity Report (MA<date>.csv) — official Nifty %, advances/declines and sector index moves shown as market CONTEXT in the status bar (EOD data, display only, never fed into per-row scoring); MA added to the ℹ️ file manifest.
 // v555 market-cycle stage awareness (stateless, self-calibrating): per-row stage label (1 accumulation · 2 breakout · 3 event · 4 profit-booking · 5 re-accumulation · 6 second-leg); a quiet-accumulation signal (conjunction-of-percentiles) injected via the rocket-diagnostic weighting; sell-the-news decay off Recent earnings date (horizon = review days). v1065 makes the market-breadth gauge an entry-eligibility input while still never changing ranking.
@@ -10257,6 +10257,31 @@ function radarSeriesBandPill(s){
 }
 // v1143: the enrichment affordance sits on the ROW, because the enrichment is about that stock.
 // Filled when its bars are loaded, so the table shows at a glance which names have been enriched.
+// ── ONE FACE FOR ONE VERDICT ─────────────────────────────────────────────────────────────────
+// Owner, 2026-08-19: *"I don't want this loosey-goosey 'worth a look' shit. Recommendations should
+// be solid - buy or not buy... I shouldn't have to manually look before pressing anything."*
+//
+// He is right and the board was contradicting itself. CHENNPETRO sat at rank 1, score 99.9, checked
+// for export and allocated Rs 7,310 - with a RED chip beside it. The two came from DIFFERENT
+// QUANTITIES: the row's buyability is `intradayVerdict` (v1168 - today's net flow and cost
+// asymmetry), while the chip was coloured by `regime`, which is a DESCRIPTION of the multi-day
+// series and whose 'selling' value is the FALL-THROUGH of a 2x2. Measured on that stock: full
+// series net flow +22.7% - it lands in 'selling' only because both recent slopes are negative,
+// while TODAY reads +100% net flow with no down bars at all, so the veto correctly does not fire.
+// Neither number was wrong; painting them in the same vocabulary was.
+//
+// A verdict now has exactly one face and one colour wherever it appears. `regime` is context in the
+// tooltip and never colours anything, because it does not decide anything.
+function intradayVerdictFace(v,has){
+  return v==='stale'?'\u29d6':v==='confirmed'?'\u2713':v==='rejected'?'\u2717':(has?'\u2022':'5m');
+}
+function intradayVerdictColor(v,has,sel){
+  return sel?'var(--amber)'
+    :v==='stale'?'var(--t3)'
+    :v==='confirmed'?'var(--green)'
+    :v==='rejected'?'var(--red)'
+    :has?'var(--cyan)':'var(--t3)';
+}
 function intradayRowButton(s){
   const sym=normSym(String(s&&s.symbol||''));
   if(!sym) return '';
@@ -10271,9 +10296,8 @@ function intradayRowButton(s){
   // unchecked (the owner would go and check it, only to find data already there) and it must not
   // read as confirmed (it is not evidence about today). An hourglass says "this was answered, for a
   // day that is over".
-  const face=v==='stale'?'⧖':v==='confirmed'?'✓':v==='rejected'?'✗':'5m';
-  const col=sel?'var(--amber)':v==='stale'?'var(--t3)':v==='confirmed'?'var(--green)'
-           :v==='rejected'?'var(--red)':has?'var(--cyan)':'var(--t3)';
+  const face=v==='stale'?intradayVerdictFace(v,has):(v?intradayVerdictFace(v,has):'5m');
+  const col=intradayVerdictColor(v,has,sel);
   const age=rd?(rd.ageMin<60?rd.ageMin+' min old':(rd.ageMin/60).toFixed(1)+' h old'):'';
   const prov=rd?`
 ${rd.bars} bars from ${rd.on}, latest ${new Date(rd.asOf).toLocaleTimeString('en-IN',{hour:'2-digit',minute:'2-digit'})} (${age})`
@@ -10899,25 +10923,24 @@ function intradayPasteBarHtml(){
   const st=(typeof getIntradayLoopState==='function')?getIntradayLoopState(INTRADAY_LOOP_N):null;
   if(!t&&!n&&!(st&&(st.need.length||st.top.length))) return '';
   const chip=r=>{
-    // ONE VOCABULARY ACROSS THE THREE SURFACES. The tick used to mean `INTRADAY_BARS[sym]` exists -
-    // bars from ANY session, however old - while the header beside it counts CURRENT-session reads
-    // and the row badge shows an hourglass for a stale one. Observed 2026-08-19 09:10: the chips
-    // ticked REMSONSIND and BUILDPRO off yesterday's bars while the header read "checked 0 of the
-    // top 2" and both row badges were grey. That is the v1167 defect in a third place, and v1167's
-    // own comment says the tally must describe ONE population.
-    //
-    // A tick now means what it means everywhere else: a read for THIS session. A stale read gets
-    // the same hourglass and the same muted colour the row badge uses, so the two cannot disagree.
+    // THE CHIP SHOWS THE VERDICT, and the verdict is the only thing that decides buyability.
+    // It used to be coloured by `regime` - a DESCRIPTION of the multi-day series whose 'selling'
+    // value is the fall-through of a 2x2 - so a rank-1 row that was checked, allocated and about to
+    // be bought could carry a red chip. Two quantities, one vocabulary, and the owner left to
+    // adjudicate. Now it is `intradayVerdict` through the SAME helper the row badge uses, so red
+    // means rejected and nothing else. Regime survives in the tooltip, where it explains rather
+    // than decides.
     const sym=normSym(r.symbol), sel=t===sym;
-    const rd=INTRADAY_BARS[sym]?getIntradayRead(sym):null;
-    const cur=!!(rd&&rd.current);
-    const reg=cur?rd.regime:null;
-    const col=sel?'var(--amber)':reg==='accumulating'?'var(--green)':reg==='selling'?'var(--red)'
-             :reg?'var(--amber)':cur?'var(--cyan)':'var(--t3)';
-    const mark=cur?' \u2713':(rd?' \u29d6':'');
-    const tip=reg?(sym+': '+reg.toUpperCase())
-      :(rd?(sym+': last read was '+rd.on+', not this session - it counts as unchecked')
-          :('Fetch '+sym+'\u2019s 5-minute chart data'));
+    const has=!!INTRADAY_BARS[sym];
+    const rd=has?getIntradayRead(sym):null;
+    const v=has?r.intradayVerdict:null;
+    const col=intradayVerdictColor(v,has,sel);
+    const mark=v?(' '+intradayVerdictFace(v,has)):'';
+    const tip=v==='rejected'?(sym+': NO LONGER CLEARS THE BAR - skip. '+(r.intradayWhy||''))
+      :v==='confirmed'?(sym+': STILL CLEARS THE BAR - buy. '+(r.intradayWhy||''))
+      :v==='stale'?(sym+': last read was '+(rd?rd.on:'an earlier session')+', not this session - it counts as unchecked')
+      :(has?(sym+': checked'+(rd&&rd.regime?' - multi-day tape reads '+rd.regime:'')+'.')
+           :('Fetch '+sym+'\u2019s 5-minute chart data'));
     return `<button onclick="setIntradayTarget('${escHtml(sym)}')" title="${escHtml(tip)}"
       style="border:1px solid ${col};background:${sel?'rgba(245,158,11,.10)':'transparent'};border-radius:4px;
       padding:2px 7px;margin:2px 4px 0 0;font-size:11px;color:${col};cursor:pointer">${escHtml(sym)}${mark}</button>`;
