@@ -1,5 +1,5 @@
-const BUILD_TS='2026-08-19 09:21 IST'; // release build time (IST)
-const APP_VERSION=1190; // v1190: the chips and the score bar stop contradicting the board.
+const BUILD_TS='2026-08-19 09:37 IST'; // release build time (IST)
+const APP_VERSION=1191; // v1191: EoD is scaled by the share of the session actually seen.
 // v1093: a baseline reward:risk MEASURED on the cross-section (last completed bhav session) instead of learned from the owner's own fills - reported on every row, deliberately not enforced. Includes v1092: position size split by Radar score / stop distance, so equally-scored names carry equal RUPEE risk, plus an opt-in Risk /trade cap.
 // v556: parse the NSE Market Activity Report (MA<date>.csv) — official Nifty %, advances/declines and sector index moves shown as market CONTEXT in the status bar (EOD data, display only, never fed into per-row scoring); MA added to the ℹ️ file manifest.
 // v555 market-cycle stage awareness (stateless, self-calibrating): per-row stage label (1 accumulation · 2 breakout · 3 event · 4 profit-booking · 5 re-accumulation · 6 second-leg); a quiet-accumulation signal (conjunction-of-percentiles) injected via the rocket-diagnostic weighting; sell-the-news decay off Recent earnings date (horizon = review days). v1065 makes the market-breadth gauge an entry-eligibility input while still never changing ranking.
@@ -3951,8 +3951,25 @@ function buildIntradayTrajectory(bars){
   const closeT=new Date(lastT); closeT.setHours(Math.floor(_endMin/60),_endMin%60,0,0);
   const barsLeft=Math.max(0,Math.floor((closeT-lastT)/stepMs));
   const maxTravel=(avgMovePct!=null)?avgMovePct*barsLeft:null;
-  const predPct=(pressurePct==null)?null
+  // THE PROJECTION IS SHRUNK BY HOW MUCH OF THE SESSION IT HAS ACTUALLY SEEN.
+  //
+  // Observed live 2026-08-19 09:31: every open position was being given an instruction off THREE
+  // bars, and NAHARSPING's newest bar was FIVE SHARES. The travel cap does nothing at that hour -
+  // barsLeft is 73, so maxTravel is 35% for a 0.48% pace and 76% for a 1.04% one - so `predPct` was
+  // the raw pressure reading extrapolated across the whole day, and the panel printed EoD -12.76%.
+  // The cap only begins to bite in the afternoon, i.e. the projection was LEAST constrained exactly
+  // when the evidence was thinnest, which is backwards.
+  //
+  // `seen/(seen+left)` is the session's own elapsed share, so at the third bar of the day the
+  // projection is scaled to ~4% of its raw value and grows to its full value by the close. Nothing
+  // is typed: the weight is the clock the bars themselves define, and it is the same shrink-by-
+  // sample idiom used for the timing windows and for measureFieldEdge. A complete session (barsLeft
+  // 0) leaves the projection untouched, so late-day behaviour is unchanged.
+  const seenBars=Math.max(1,n-1);
+  const evid=seenBars/(seenBars+barsLeft);
+  const predRaw=(pressurePct==null)?null
     :(maxTravel==null?pressurePct:Math.max(-maxTravel,Math.min(maxTravel,pressurePct)));
+  const predPct=(predRaw==null)?null:predRaw*evid;
   const predClose=(predPct==null)?null:bars[n-1].c*(1+predPct/100);
   const cvdPct=run/totV;                  // a LEVEL, so a late drift on no volume cannot erase a
                                           // morning of selling
@@ -3972,6 +3989,7 @@ function buildIntradayTrajectory(bars){
           // Divergence needs no separate term: price up on falling flow already drives both of
           // these down, which is what "distribution into strength" means.
           avgMovePct,barsLeft,stepMin:Math.round(stepMs/60000),maxTravel,predPct,predClose,
+          predRaw,sessionSeen:evid,
           sessionEndMin:_endMin,
           upCost,dnCost,costRatio,absorptionNet:absNet,absorptionBars:absCount,
           netRecent,pressurePct,
