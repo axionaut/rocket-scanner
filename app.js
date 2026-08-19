@@ -1,5 +1,5 @@
-const BUILD_TS='2026-08-19 12:51 IST'; // release build time (IST)
-const APP_VERSION=1197; // v1197: refreshed inputs self-recover a missed helper probe.
+const BUILD_TS='2026-08-19 14:37 IST'; // release build time (IST)
+const APP_VERSION=1198; // v1198: Pace is the deepest pullback taken today, not the mean bar move.
 // v1093: a baseline reward:risk MEASURED on the cross-section (last completed bhav session) instead of learned from the owner's own fills - reported on every row, deliberately not enforced. Includes v1092: position size split by Radar score / stop distance, so equally-scored names carry equal RUPEE risk, plus an opt-in Risk /trade cap.
 // v556: parse the NSE Market Activity Report (MA<date>.csv) — official Nifty %, advances/declines and sector index moves shown as market CONTEXT in the status bar (EOD data, display only, never fed into per-row scoring); MA added to the ℹ️ file manifest.
 // v555 market-cycle stage awareness (stateless, self-calibrating): per-row stage label (1 accumulation · 2 breakout · 3 event · 4 profit-booking · 5 re-accumulation · 6 second-leg); a quiet-accumulation signal (conjunction-of-percentiles) injected via the rocket-diagnostic weighting; sell-the-news decay off Recent earnings date (horizon = review days). v1065 makes the market-breadth gauge an entry-eligibility input while still never changing ranking.
@@ -3888,6 +3888,28 @@ function buildIntradayTrajectory(bars){
     mvW+=mv*v; mvWV+=v;
   }
   const avgMovePct=mvWV>0?(mvW/mvWV):(mvN?mvSum/mvN:null);
+  // ── PACE IS THE DEEPEST PULLBACK THE STOCK HAS TAKEN TODAY ──────────────────────────────────
+  // Owner, 2026-08-19: *"give me the max pullback the stock has experienced during the day... that's
+  // exactly what I meant Pace to be from the start."*
+  //
+  // The mean absolute bar move was the wrong quantity for a trailing stop and the gap is not
+  // marginal - measured on today's own winners it is 3x to 10x too tight: MEESHO's mean-move Pace
+  // read Rs 0.31 against an actual pullback of Rs 2.04, SGFIN 0.53% against 1.71%, NAHARSPING 0.38%
+  // against 3.82%. A stop at the mean bar move is inside the noise by construction, because roughly
+  // half of all bars move more than the mean.
+  //
+  // The right number is the drawdown the stock has actually imposed on a holder: running peak to
+  // subsequent trough, over THIS SESSION only. The series can span sessions (v1164) but an overnight
+  // gap is not a pullback anyone could have been stopped out by intraday.
+  let _pbPeak=null,_maxPullPct=null,_pullAt=null;
+  for(let i=0;i<n;i++){
+    if(istDayKey(bars[i].t)!==istDayKey(bars[n-1].t)) continue;   // current session only
+    if(_pbPeak==null||bars[i].h>_pbPeak){ _pbPeak=bars[i].h; continue; }
+    if(!(_pbPeak>0)) continue;
+    const dd=100*(_pbPeak-bars[i].l)/_pbPeak;
+    if(dd>0&&(_maxPullPct==null||dd>_maxPullPct)){ _maxPullPct=dd; _pullAt=bars[i].t; }
+  }
+  const maxPullbackPct=_maxPullPct;
 
   const upV=[],dnV=[];
   for(let i=1;i<n;i++){
@@ -3995,7 +4017,7 @@ function buildIntradayTrajectory(bars){
           // Both surviving terms are flow and both are 0.5 at zero, so the mean is 0.5 at zero.
           // Divergence needs no separate term: price up on falling flow already drives both of
           // these down, which is what "distribution into strength" means.
-          avgMovePct,barsLeft,stepMin:Math.round(stepMs/60000),maxTravel,predPct,predClose,
+          avgMovePct,maxPullbackPct,maxPullbackAt:_pullAt,barsLeft,stepMin:Math.round(stepMs/60000),maxTravel,predPct,predClose,
           predRaw,sessionSeen:evid,
           sessionEndMin:_endMin,
           upCost,dnCost,costRatio,absorptionNet:absNet,absorptionBars:absCount,
@@ -4103,6 +4125,7 @@ function getIntradayRead(sym){
           todayRegime:todayTraj?todayTraj.regime:null,
           regime:traj?traj.regime:null,cvdPct:traj?traj.cvdPct:null,
           avgMovePct:traj?traj.avgMovePct:null,
+          maxPullbackPct:traj?traj.maxPullbackPct:null,
           predClose:traj?traj.predClose:null,predPct:traj?traj.predPct:null,
           projected:traj?traj.projected:null,
           first15:f15, first15Up:f15>0, efficiency:eff, position:pos, freshness,
@@ -7979,12 +8002,12 @@ function buildOpenPositionsPanel(query=''){
     {key:'pace',label:'Pace / EoD',align:'right',
       fmt:(v,row)=>{
         const rd=getIntradayRead(row.sym);
-        if(!rd||!Number.isFinite(rd.avgMovePct)) return '<span style="color:var(--t3)">—</span>';
-        const ltp=Number(row.ltp)||0, rs=ltp>0?ltp*rd.avgMovePct/100:null;
-        const pace=`<span title="${escHtml('Volume-weighted mean move of one '+(rd.traj?rd.traj.stepMin:5)
-          +'-minute bar. A trailing stop closer than this sits inside the stock\u2019s ordinary breathing and will be '
-          +'taken out by noise'+(rs?'; here that is about \u20b9'+rs.toFixed(2)+' off the last price'
-          +(rs<0.05?' (below one tick)':''):'')+'.')}">${rd.avgMovePct.toFixed(2)}%${
+        if(!rd||!Number.isFinite(rd.maxPullbackPct)) return '<span style="color:var(--t3)">—</span>';
+        const ltp=Number(row.ltp)||0, rs=ltp>0?ltp*rd.maxPullbackPct/100:null;
+        const pace=`<span title="${escHtml('The DEEPEST pullback this stock has taken today - running high to the '
+          +'low that followed. A trailing stop inside this distance would already have been hit at least once during '
+          +'the session'+(rs?'; here that is ₹'+rs.toFixed(2)+' off the last price':'')+'. It replaced the mean bar '
+          +'move, which measured 3x to 10x too tight on the day’s own winners.')}">${rd.maxPullbackPct.toFixed(2)}%${
           rs?`<span style="color:var(--t3);font-size:11px"> ₹${rs.toFixed(2)}</span>`:''}</span>`;
         if(!Number.isFinite(rd.predClose)) return pace+'<span style="color:var(--t3)"> / —</span>';
         const t=rd.traj, up=rd.predPct>=0;
@@ -10401,12 +10424,11 @@ function renderTable(){
       // stock that has been checked - it comes from the pasted bars and nowhere else.
       avgMove:`<td style="white-space:nowrap">${(()=>{
         const rd=getIntradayRead(s.symbol);
-        if(!rd||!Number.isFinite(rd.avgMovePct)) return '<span style="color:var(--t3)">—</span>';
+        if(!rd||!Number.isFinite(rd.maxPullbackPct)) return '<span style="color:var(--t3)">—</span>';
         const tp=Number(exitPolicy&&exitPolicy.targetPct);
-        const bars=(tp>0&&rd.avgMovePct>0)?Math.ceil(tp/rd.avgMovePct):null;
-        return `<span title="Mean absolute move per 5-minute bar across the whole paste.${
-          bars?' At this pace a '+tp.toFixed(2)+'% target is about '+bars+' bars away.':''
-        }">${rd.avgMovePct.toFixed(3)}%</span>`;
+        return `<span title="Deepest pullback today - running high to the low that followed. A trail inside this has already been hit once.${
+          tp>0?' Target is '+tp.toFixed(2)+'%.':''
+        }">${rd.maxPullbackPct.toFixed(2)}%</span>`;
       })()}</td>`,
       // v1144: TGT and SL merged. They are ONE decision - what you ask for against what you risk -
       // and the two columns were part of why the table needed a horizontal scrollbar, which the
