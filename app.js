@@ -1,5 +1,5 @@
-const BUILD_TS='2026-08-19 08:49 IST'; // release build time (IST)
-const APP_VERSION=1189; // v1189: a pasted token takes effect immediately - no helper restart.
+const BUILD_TS='2026-08-19 09:21 IST'; // release build time (IST)
+const APP_VERSION=1190; // v1190: the chips and the score bar stop contradicting the board.
 // v1093: a baseline reward:risk MEASURED on the cross-section (last completed bhav session) instead of learned from the owner's own fills - reported on every row, deliberately not enforced. Includes v1092: position size split by Radar score / stop distance, so equally-scored names carry equal RUPEE risk, plus an opt-in Risk /trade cap.
 // v556: parse the NSE Market Activity Report (MA<date>.csv) — official Nifty %, advances/declines and sector index moves shown as market CONTEXT in the status bar (EOD data, display only, never fed into per-row scoring); MA added to the ℹ️ file manifest.
 // v555 market-cycle stage awareness (stateless, self-calibrating): per-row stage label (1 accumulation · 2 breakout · 3 event · 4 profit-booking · 5 re-accumulation · 6 second-leg); a quiet-accumulation signal (conjunction-of-percentiles) injected via the rocket-diagnostic weighting; sell-the-news decay off Recent earnings date (horizon = review days). v1065 makes the market-breadth gauge an entry-eligibility input while still never changing ranking.
@@ -3370,7 +3370,14 @@ function radarScoreColor(score){
 // OWNER-SET RISK PREFERENCE, the same category as Zerodha's 20-order cap, not a calibrated output.
 const RECOMMEND_MIN_SCORE=95;
 const RECOMMEND_MAX_RANK=10;    // owner-set depth bar: the top ten of the cross-section, by rank
-function isGreenScore(score){const s=Number(score);return isFinite(s)&&s>=RECOMMEND_MIN_SCORE;}
+// NAMED FOR WHAT IT TESTS. It was `isGreenScore`, which is actively misleading: the score BANDS
+// paint green from 80 (RADAR_SCORE_BANDS) while this bar is RECOMMEND_MIN_SCORE = 95, so a row
+// can be green on screen and 15 points below the buy bar. Observed 2026-08-19: REMSONSIND 91.4
+// at rank 1 and BUILDPRO 84.3 both rendered green with an empty basket, and the owner reasonably
+// read that as the board contradicting itself. The old name is kept as an alias because older
+// assertion suites reference it.
+function meetsScoreBar(score){const s=Number(score);return isFinite(s)&&s>=RECOMMEND_MIN_SCORE;}
+const isGreenScore=meetsScoreBar;   // legacy alias - do not use in new code
 // The one test for "may this row be recommended and exported". Rank is the stock's own Radar rank,
 // never its position in the filtered list, so a row can never be promoted into the basket merely
 // because the rows above it were removed for some unrelated reason.
@@ -3520,8 +3527,19 @@ function radarScoreCell(score,title=''){
   const s=Number(score);
   if(score===null||score===undefined||!isFinite(s)) return '<span class="sc-m" style="color:var(--t3)">—</span>';
   const c=radarScoreColor(s);
-  return `<span class="sc-m" style="color:${c}"${title?` title="${escHtml(title)}"`:''}>${s.toFixed(1)}</span>`
-    +`<span class="score-bar"><i style="width:${Math.max(0,Math.min(100,s))}%;background:${c}"></i></span>`;
+  // THE BUY BAR IS DRAWN ON THE BAR. The band colour and the recommendation threshold are different
+  // numbers - green starts at 80, a row is only buyable at RECOMMEND_MIN_SCORE (95) - so a green row
+  // can sit well below the bar with nothing on screen saying so. A hairline at the threshold makes
+  // the gap visible at a glance, and a row under it renders the fill hollow rather than solid.
+  // This changes NOTHING about what is recommended; it stops the colour implying otherwise.
+  const ok=meetsScoreBar(s);
+  const tip=title||(ok?`Clears the buy bar (${RECOMMEND_MIN_SCORE}).`
+    :`Below the buy bar — scores ${s.toFixed(1)} against ${RECOMMEND_MIN_SCORE} needed to be recommended. Green starts at 80, which is the band, not the bar.`);
+  return `<span class="sc-m" style="color:${c}" title="${escHtml(tip)}">${s.toFixed(1)}${ok?'':'<sub style="font-size:9px;color:var(--t3)">\u25be</sub>'}</span>`
+    +`<span class="score-bar" style="position:relative">`
+    +`<i style="width:${Math.max(0,Math.min(100,s))}%;background:${c};opacity:${ok?1:.42}"></i>`
+    +`<em style="position:absolute;left:${RECOMMEND_MIN_SCORE}%;top:0;bottom:0;width:1px;background:var(--t3);opacity:.75"></em>`
+    +`</span>`;
 }
 function radarSetupLabel(r){
   const b=[];
@@ -10863,14 +10881,28 @@ function intradayPasteBarHtml(){
   const st=(typeof getIntradayLoopState==='function')?getIntradayLoopState(INTRADAY_LOOP_N):null;
   if(!t&&!n&&!(st&&(st.need.length||st.top.length))) return '';
   const chip=r=>{
-    const sym=normSym(r.symbol), has=!!INTRADAY_BARS[sym], sel=t===sym;
-    const rd=has?getIntradayRead(sym):null;
-    const reg=rd&&rd.regime;
+    // ONE VOCABULARY ACROSS THE THREE SURFACES. The tick used to mean `INTRADAY_BARS[sym]` exists -
+    // bars from ANY session, however old - while the header beside it counts CURRENT-session reads
+    // and the row badge shows an hourglass for a stale one. Observed 2026-08-19 09:10: the chips
+    // ticked REMSONSIND and BUILDPRO off yesterday's bars while the header read "checked 0 of the
+    // top 2" and both row badges were grey. That is the v1167 defect in a third place, and v1167's
+    // own comment says the tally must describe ONE population.
+    //
+    // A tick now means what it means everywhere else: a read for THIS session. A stale read gets
+    // the same hourglass and the same muted colour the row badge uses, so the two cannot disagree.
+    const sym=normSym(r.symbol), sel=t===sym;
+    const rd=INTRADAY_BARS[sym]?getIntradayRead(sym):null;
+    const cur=!!(rd&&rd.current);
+    const reg=cur?rd.regime:null;
     const col=sel?'var(--amber)':reg==='accumulating'?'var(--green)':reg==='selling'?'var(--red)'
-             :reg?'var(--amber)':has?'var(--cyan)':'var(--t3)';
-    return `<button onclick="setIntradayTarget('${escHtml(sym)}')" title="${escHtml(reg?sym+': '+reg.toUpperCase():'Fetch '+sym+'\u2019s 5-minute chart data')}"
+             :reg?'var(--amber)':cur?'var(--cyan)':'var(--t3)';
+    const mark=cur?' \u2713':(rd?' \u29d6':'');
+    const tip=reg?(sym+': '+reg.toUpperCase())
+      :(rd?(sym+': last read was '+rd.on+', not this session - it counts as unchecked')
+          :('Fetch '+sym+'\u2019s 5-minute chart data'));
+    return `<button onclick="setIntradayTarget('${escHtml(sym)}')" title="${escHtml(tip)}"
       style="border:1px solid ${col};background:${sel?'rgba(245,158,11,.10)':'transparent'};border-radius:4px;
-      padding:2px 7px;margin:2px 4px 0 0;font-size:11px;color:${col};cursor:pointer">${escHtml(sym)}${has?' \u2713':''}</button>`;
+      padding:2px 7px;margin:2px 4px 0 0;font-size:11px;color:${col};cursor:pointer">${escHtml(sym)}${mark}</button>`;
   };
   const done=st&&st.converged;
   return `<div style="margin:8px 0;padding:10px 14px;border:1px solid ${t?'var(--amber)':done?'var(--green)':'var(--border)'};border-radius:8px;background:var(--bg2)">
