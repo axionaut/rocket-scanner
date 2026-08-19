@@ -1,5 +1,5 @@
-const BUILD_TS='2026-08-19 14:52 IST'; // release build time (IST)
-const APP_VERSION=1199; // v1199: the Top-up plan table is removed.
+const BUILD_TS='2026-08-19 15:30 IST'; // release build time (IST)
+const APP_VERSION=1200; // v1200: Pace learns only from pullbacks buyers subsequently recover.
 // v1093: a baseline reward:risk MEASURED on the cross-section (last completed bhav session) instead of learned from the owner's own fills - reported on every row, deliberately not enforced. Includes v1092: position size split by Radar score / stop distance, so equally-scored names carry equal RUPEE risk, plus an opt-in Risk /trade cap.
 // v556: parse the NSE Market Activity Report (MA<date>.csv) — official Nifty %, advances/declines and sector index moves shown as market CONTEXT in the status bar (EOD data, display only, never fed into per-row scoring); MA added to the ℹ️ file manifest.
 // v555 market-cycle stage awareness (stateless, self-calibrating): per-row stage label (1 accumulation · 2 breakout · 3 event · 4 profit-booking · 5 re-accumulation · 6 second-leg); a quiet-accumulation signal (conjunction-of-percentiles) injected via the rocket-diagnostic weighting; sell-the-news decay off Recent earnings date (horizon = review days). v1065 makes the market-breadth gauge an entry-eligibility input while still never changing ranking.
@@ -3888,28 +3888,45 @@ function buildIntradayTrajectory(bars){
     mvW+=mv*v; mvWV+=v;
   }
   const avgMovePct=mvWV>0?(mvW/mvWV):(mvN?mvSum/mvN:null);
-  // ── PACE IS THE DEEPEST PULLBACK THE STOCK HAS TAKEN TODAY ──────────────────────────────────
-  // Owner, 2026-08-19: *"give me the max pullback the stock has experienced during the day... that's
-  // exactly what I meant Pace to be from the start."*
+  // ── v1200: PACE IS A RECOVERED SELLER PULLBACK, NOT EVERY DRAWDOWN ───────────────────────────
+  // A trailing stop exists to stay aboard while buyers remain in control. A retreat only proves it
+  // was normal breathing after buyers subsequently establish a NEW high above the anchor that
+  // preceded it. The last, still-open retreat is therefore reported separately and can never widen
+  // the learned trail while price is falling.
   //
-  // The mean absolute bar move was the wrong quantity for a trailing stop and the gap is not
-  // marginal - measured on today's own winners it is 3x to 10x too tight: MEESHO's mean-move Pace
-  // read Rs 0.31 against an actual pullback of Rs 2.04, SGFIN 0.53% against 1.71%, NAHARSPING 0.38%
-  // against 3.82%. A stop at the mean bar move is inside the noise by construction, because roughly
-  // half of all bars move more than the mean.
-  //
-  // The right number is the drawdown the stock has actually imposed on a holder: running peak to
-  // subsequent trough, over THIS SESSION only. The series can span sessions (v1164) but an overnight
-  // gap is not a pullback anyone could have been stopped out by intraday.
-  let _pbPeak=null,_maxPullPct=null,_pullAt=null;
+  // ORDER MATTERS. OHLC does not say whether a breakout candle printed its low before or after its
+  // new high, so that candle may CONFIRM a trough from earlier completed candles but its own low is
+  // never inserted retrospectively into the confirmed episode. The next candle starts measuring
+  // against the new anchor. This is deliberately current-session only: an overnight gap is not a
+  // pullback a live intraday trail could have ridden.
+  const _paceDay=istDayKey(bars[n-1].t);
+  let _pacePeak=null,_episodeLow=null,_episodeLowAt=null;
+  let _confirmedPacePct=null,_confirmedPaceAt=null,_confirmedPullbackCount=0;
   for(let i=0;i<n;i++){
-    if(istDayKey(bars[i].t)!==istDayKey(bars[n-1].t)) continue;   // current session only
-    if(_pbPeak==null||bars[i].h>_pbPeak){ _pbPeak=bars[i].h; continue; }
-    if(!(_pbPeak>0)) continue;
-    const dd=100*(_pbPeak-bars[i].l)/_pbPeak;
-    if(dd>0&&(_maxPullPct==null||dd>_maxPullPct)){ _maxPullPct=dd; _pullAt=bars[i].t; }
+    const b=bars[i];
+    if(istDayKey(b.t)!==_paceDay) continue;
+    if(_pacePeak==null){ _pacePeak=b.h; continue; }
+    if(b.h>_pacePeak){
+      if(_episodeLow!=null&&_episodeLow<_pacePeak){
+        const dd=100*(_pacePeak-_episodeLow)/_pacePeak;
+        _confirmedPullbackCount++;
+        if(_confirmedPacePct==null||dd>_confirmedPacePct){
+          _confirmedPacePct=dd; _confirmedPaceAt=_episodeLowAt;
+        }
+      }
+      _pacePeak=b.h; _episodeLow=null; _episodeLowAt=null;
+      continue;
+    }
+    if(b.l<_pacePeak&&(_episodeLow==null||b.l<_episodeLow)){
+      _episodeLow=b.l; _episodeLowAt=b.t;
+    }
   }
-  const maxPullbackPct=_maxPullPct;
+  const confirmedPacePct=_confirmedPacePct;
+  const currentPullbackPct=(_pacePeak>0&&_episodeLow!=null)
+    ?100*(_pacePeak-_episodeLow)/_pacePeak:null;
+  // Compatibility alias for older diagnostics. All live Pace surfaces use the explicit confirmed
+  // name below so an unresolved decline cannot accidentally regain the old meaning.
+  const maxPullbackPct=confirmedPacePct;
 
   const upV=[],dnV=[];
   for(let i=1;i<n;i++){
@@ -4017,7 +4034,9 @@ function buildIntradayTrajectory(bars){
           // Both surviving terms are flow and both are 0.5 at zero, so the mean is 0.5 at zero.
           // Divergence needs no separate term: price up on falling flow already drives both of
           // these down, which is what "distribution into strength" means.
-          avgMovePct,maxPullbackPct,maxPullbackAt:_pullAt,barsLeft,stepMin:Math.round(stepMs/60000),maxTravel,predPct,predClose,
+          avgMovePct,confirmedPacePct,confirmedPaceAt:_confirmedPaceAt,
+          confirmedPullbackCount:_confirmedPullbackCount,currentPullbackPct,
+          maxPullbackPct,maxPullbackAt:_confirmedPaceAt,barsLeft,stepMin:Math.round(stepMs/60000),maxTravel,predPct,predClose,
           predRaw,sessionSeen:evid,
           sessionEndMin:_endMin,
           upCost,dnCost,costRatio,absorptionNet:absNet,absorptionBars:absCount,
@@ -4125,6 +4144,10 @@ function getIntradayRead(sym){
           todayRegime:todayTraj?todayTraj.regime:null,
           regime:traj?traj.regime:null,cvdPct:traj?traj.cvdPct:null,
           avgMovePct:traj?traj.avgMovePct:null,
+          confirmedPacePct:traj?traj.confirmedPacePct:null,
+          confirmedPaceAt:traj?traj.confirmedPaceAt:null,
+          confirmedPullbackCount:traj?traj.confirmedPullbackCount:0,
+          currentPullbackPct:traj?traj.currentPullbackPct:null,
           maxPullbackPct:traj?traj.maxPullbackPct:null,
           predClose:traj?traj.predClose:null,predPct:traj?traj.predPct:null,
           projected:traj?traj.projected:null,
@@ -7904,8 +7927,9 @@ function buildOpenPositionsPanel(query=''){
       score:isFinite(Number(scannerRow?.score))?Number(scannerRow.score):null,
       rank:scannerRow?.rank??null,setup:scannerRow?.setup||'',
       dayPct:scannerRow?.day??scannerRow?.priceChange??null,risk:scannerRow?.risk||'',
-      // v1177: carried as numbers so the columns SORT; the cells re-read the live trajectory.
-      pace:(()=>{const r=getIntradayRead(pos.symbol);return r&&Number.isFinite(r.avgMovePct)?r.avgMovePct:null;})(),
+      // Carried as numbers so the columns SORT; the cells re-read the live trajectory. v1200 fixes
+      // the old split meaning where this sort key was avgMovePct while the cell displayed pullback.
+      pace:(()=>{const r=getIntradayRead(pos.symbol);return r&&Number.isFinite(r.confirmedPacePct)?r.confirmedPacePct:null;})(),
       predEod:(()=>{const r=getIntradayRead(pos.symbol);return r&&Number.isFinite(r.predPct)?r.predPct:null;})(),
       scannerRow
     });
@@ -7987,27 +8011,23 @@ function buildOpenPositionsPanel(query=''){
       fmt:(v,row)=>radarScoreCell(v)+`<span style="font-size:11px;color:var(--t3)"> #${row.rank??'—'}</span>`,
       clrFn:()=>'var(--t1)'},
     {key:'dayPct',label:'Day %',align:'right',fmt:fPerf,clrFn:()=>'var(--t2)'},
-    // v1177 (owner): Pace and EoD belong here too. PACE is what the owner actually wants it for -
-    // *"my intention was to have a number which I can safely use as a trail stop if and when I
-    // wish to"* - so it is labelled and tooltipped as a trail distance, not as trivia: the mean
-    // absolute move of one bar is the smallest gap a trailing stop can sit at without the stock's
-    // ordinary breathing taking it out, and the tooltip gives that distance in RUPEES off the last
-    // price, which is what a Zerodha trailing SL is entered in.
-    // v1180: PACE AND EoD IN ONE CELL. Two columns pushed this panel into a horizontal scrollbar,
-    // which the owner has ruled out everywhere - and they are two readings of the same trajectory,
-    // so they belong together exactly as TGT/SL do. PACE is what he wants it for: *"a number which
-    // I can safely use as a trail stop"* - the volume-weighted mean move of ONE bar is the tightest
-    // a trail can sit without ordinary breathing taking it out, shown in RUPEES because that is what
-    // a Zerodha trailing SL is entered in.
+    // Pace and EoD share one cell so the panel does not gain a horizontal scrollbar. Pace is the
+    // suggested Zerodha trigger GAP: the deepest seller retreat buyers proved survivable by making
+    // a later high. EoD keeps its separate volume-weighted per-bar speed model.
     {key:'pace',label:'Pace / EoD',align:'right',
       fmt:(v,row)=>{
         const rd=getIntradayRead(row.sym);
-        if(!rd||!Number.isFinite(rd.maxPullbackPct)) return '<span style="color:var(--t3)">—</span>';
-        const ltp=Number(row.ltp)||0, rs=ltp>0?ltp*rd.maxPullbackPct/100:null;
-        const pace=`<span title="${escHtml('The DEEPEST pullback this stock has taken today - running high to the '
-          +'low that followed. A trailing stop inside this distance would already have been hit at least once during '
-          +'the session'+(rs?'; here that is ₹'+rs.toFixed(2)+' off the last price':'')+'. It replaced the mean bar '
-          +'move, which measured 3x to 10x too tight on the day’s own winners.')}">${rd.maxPullbackPct.toFixed(2)}%${
+        if(!rd||!Number.isFinite(rd.confirmedPacePct)){
+          const open=rd&&Number.isFinite(rd.currentPullbackPct)
+            ?` Current unresolved pullback: ${rd.currentPullbackPct.toFixed(2)}%.`:'';
+          return `<span style="color:var(--t3)" title="No seller pullback has yet been followed by a new high today.${open}">—</span>`;
+        }
+        const ltp=Number(row.ltp)||0, rs=ltp>0?ltp*rd.confirmedPacePct/100:null;
+        const open=Number.isFinite(rd.currentPullbackPct)
+          ?` Current unresolved pullback: ${rd.currentPullbackPct.toFixed(2)}%; it does not widen Pace unless buyers make another high.`:'';
+        const pace=`<span title="${escHtml('Deepest seller pullback today that buyers subsequently recovered by establishing a new high. '
+          +rd.confirmedPullbackCount+' recovered episode'+(rd.confirmedPullbackCount===1?'':'s')
+          +(rs?'; suggested Zerodha trigger gap at this LTP is ₹'+rs.toFixed(2):'')+'.'+open)}">${rd.confirmedPacePct.toFixed(2)}%${
           rs?`<span style="color:var(--t3);font-size:11px"> ₹${rs.toFixed(2)}</span>`:''}</span>`;
         if(!Number.isFinite(rd.predClose)) return pace+'<span style="color:var(--t3)"> / —</span>';
         const t=rd.traj, up=rd.predPct>=0;
@@ -10238,15 +10258,18 @@ function renderTable(){
           fmtINR(rd.predClose)}</span><span style="color:var(--t3);font-size:11px"> ${
           (rd.predPct>=0?'+':'')+rd.predPct.toFixed(2)}%</span>`;
       })()}</td>`,
-      // v1148 (owner): the average of every bar's own Change %, magnitude only. Shown only for a
-      // stock that has been checked - it comes from the pasted bars and nowhere else.
+      // Pace is available only after the checked tape contains a completed recovery episode.
       avgMove:`<td style="white-space:nowrap">${(()=>{
         const rd=getIntradayRead(s.symbol);
-        if(!rd||!Number.isFinite(rd.maxPullbackPct)) return '<span style="color:var(--t3)">—</span>';
+        if(!rd||!Number.isFinite(rd.confirmedPacePct)){
+          const open=rd&&Number.isFinite(rd.currentPullbackPct)
+            ?` Current unresolved pullback: ${rd.currentPullbackPct.toFixed(2)}%.`:'';
+          return `<span style="color:var(--t3)" title="No pullback has yet been recovered with a new high today.${open}">—</span>`;
+        }
         const tp=Number(exitPolicy&&exitPolicy.targetPct);
-        return `<span title="Deepest pullback today - running high to the low that followed. A trail inside this has already been hit once.${
-          tp>0?' Target is '+tp.toFixed(2)+'%.':''
-        }">${rd.maxPullbackPct.toFixed(2)}%</span>`;
+        return `<span title="Deepest of ${rd.confirmedPullbackCount} seller pullback${rd.confirmedPullbackCount===1?'':'s'} that buyers recovered with a new high today.${
+          Number.isFinite(rd.currentPullbackPct)?' Current unresolved pullback is '+rd.currentPullbackPct.toFixed(2)+'% and cannot widen Pace.':''
+        }${tp>0?' Target is '+tp.toFixed(2)+'%.':''}">${rd.confirmedPacePct.toFixed(2)}%</span>`;
       })()}</td>`,
       // v1144: TGT and SL merged. They are ONE decision - what you ask for against what you risk -
       // and the two columns were part of why the table needed a horizontal scrollbar, which the
