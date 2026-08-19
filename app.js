@@ -1,5 +1,5 @@
-const BUILD_TS='2026-08-18 18:59 IST'; // release build time (IST)
-const APP_VERSION=1187; // v1187: every deferred item built; terms weight themselves by measured edge.
+const BUILD_TS='2026-08-19 08:39 IST'; // release build time (IST)
+const APP_VERSION=1188; // v1188: the Kite token asks for itself in a pasteable popup.
 // v1093: a baseline reward:risk MEASURED on the cross-section (last completed bhav session) instead of learned from the owner's own fills - reported on every row, deliberately not enforced. Includes v1092: position size split by Radar score / stop distance, so equally-scored names carry equal RUPEE risk, plus an opt-in Risk /trade cap.
 // v556: parse the NSE Market Activity Report (MA<date>.csv) — official Nifty %, advances/declines and sector index moves shown as market CONTEXT in the status bar (EOD data, display only, never fed into per-row scoring); MA added to the ℹ️ file manifest.
 // v555 market-cycle stage awareness (stateless, self-calibrating): per-row stage label (1 accumulation · 2 breakout · 3 event · 4 profit-booking · 5 re-accumulation · 6 second-leg); a quiet-accumulation signal (conjunction-of-percentiles) injected via the rocket-diagnostic weighting; sell-the-news decay off Recent earnings date (horizon = review days). v1065 makes the market-breadth gauge an entry-eligibility input while still never changing ranking.
@@ -10638,21 +10638,134 @@ async function detectKiteApi(){
   }catch(e){ KITE_API=null; }
   try{ renderTable(); }catch(e){}
   if(KITE_API) { try{ loadIntradayInventory(); }catch(e){} }
+  try{ maybePromptKiteToken(); }catch(e){}
   return KITE_API;
 }
+// ── THE TOKEN ASKS FOR ITSELF ────────────────────────────────────────────────────────────────
+// Owner, 2026-08-19: *"Can you add a pasteable popup for kite token please? It should popup in the
+// morning and save to the kite-token text file that we use."*
+//
+// The enctoken ROTATES ON EVERY KITE LOGIN, so the first load after logging in again always has a
+// dead token. Until now that surfaced as a small red line inside the intraday bar, which is exactly
+// the kind of thing you only notice after pressing Fetch and getting nothing - the v1150 rule (a
+// control that cannot work must say so) applied one level up: the app should ask, not wait.
+//
+// NO HOUR IS HARDCODED, deliberately (owner, 2026-08-18: *"don't hardcode time to 9:19"*). The
+// trigger is the state that actually matters - the helper is running and its token is missing or
+// REJECTED BY KITE (v1166 validates it against a real call rather than checking it is a non-empty
+// string). That fires on the first load after a rotation, which is the morning, without the app
+// having to know what time it is or which days are trading days.
+let KITE_TOKEN_PROMPTED=false;   // once per page load; dismissing must not re-prompt on every render
+
+function kiteTokenDialogState(){
+  if(!KITE_API) return null;                       // no helper: nothing to save into, so do not ask
+  if(!KITE_API.hasToken) return 'missing';
+  if(KITE_API.tokenValid===false) return 'expired';
+  return null;                                     // valid, or the helper could not check - stay quiet
+}
+
+function openKiteTokenDialog(force){
+  const dlg=document.getElementById('kiteTokenDlg');
+  if(!dlg) return;
+  const st=kiteTokenDialogState();
+  if(!st&&!force) return;
+  if(dlg.open) return;
+  const expired=st==='expired';
+  document.getElementById('kiteTokenTitle').textContent=
+    expired?'Kite token expired':(st==='missing'?'Kite token needed':'Kite token');
+  document.getElementById('kiteTokenBody').innerHTML=`
+    <div style="padding:16px 18px;display:flex;flex-direction:column;gap:12px">
+      <div style="font-size:13px;color:var(--t2);line-height:1.5">
+        ${expired
+          ? 'The helper tried the stored token against Kite and it was <b style="color:var(--red)">rejected</b>. It rotates on every login, so this is normal the morning after you log in again.'
+          : (st==='missing'
+             ? 'No token is stored yet, so candles cannot be fetched.'
+             : 'Paste a fresh token to replace the stored one.')}
+      </div>
+      <ol style="font-size:12px;color:var(--t2);line-height:1.7;margin:0;padding-left:18px">
+        <li>Open your logged-in <b>kite.zerodha.com</b> tab</li>
+        <li><b>F12</b> → Application → Cookies → <b>kite.zerodha.com</b></li>
+        <li>Copy the value of <b>enctoken</b> and paste it below</li>
+      </ol>
+      <input id="kiteTokenDlgBox" type="password" autocomplete="off" spellcheck="false"
+             placeholder="paste enctoken here, then press Enter">
+      <div id="kiteTokenDlgMsg" style="font-size:12px;min-height:16px;color:var(--t3)"></div>
+      <div style="display:flex;gap:8px;justify-content:flex-end">
+        <button class="btn" style="font-size:12px" onclick="closeKiteTokenDialog()">Later</button>
+        <button class="btn" style="font-size:12px;border-color:var(--green);color:var(--green)"
+                onclick="saveKiteTokenFromDialog()">Save token</button>
+      </div>
+      <div style="font-size:11px;color:var(--t3);border-top:1px solid var(--border);padding-top:9px">
+        Saved to <code>dev/kite-token.txt</code> by the local helper. It never leaves this machine and
+        is never sent to the hosted page.
+      </div>
+    </div>`;
+  try{ dlg.showModal(); }catch(e){ dlg.setAttribute('open','open'); }
+  const box=document.getElementById('kiteTokenDlgBox');
+  if(box){
+    box.focus();
+    // one paste and Enter is the whole interaction - it should not require finding a button
+    box.onkeydown=e=>{ if(e.key==='Enter'){ e.preventDefault(); saveKiteTokenFromDialog(); } };
+  }
+}
+
+function closeKiteTokenDialog(){
+  const dlg=document.getElementById('kiteTokenDlg');
+  if(!dlg) return;
+  // clear the field before closing: the token is a secret and must not sit in a detached DOM node
+  const box=document.getElementById('kiteTokenDlgBox'); if(box) box.value='';
+  try{ dlg.close(); }catch(e){ dlg.removeAttribute('open'); }
+}
+
+async function saveKiteTokenFromDialog(){
+  const box=document.getElementById('kiteTokenDlgBox');
+  const msg=document.getElementById('kiteTokenDlgMsg');
+  const say=(t,bad)=>{ if(msg){ msg.textContent=t; msg.style.color=bad?'var(--red)':'var(--green)'; } };
+  const t=(box&&box.value||'').trim();
+  if(t.length<20){ say('That does not look like an enctoken.',true); return; }
+  say('Saving…');
+  const ok=await postKiteToken(t,say);
+  if(!ok) return;
+  if(box) box.value='';
+  // Report what the HELPER now says, not what we just sent. v1152's rule: a control may not report
+  // intent - it must verify the far side answered. A token can be stored and still be rejected.
+  await detectKiteApi();
+  if(KITE_API&&KITE_API.tokenValid===false){ say('Kite rejected that token. Copy it again.',true); return; }
+  say('Saved. Fetching is enabled.');
+  setTimeout(closeKiteTokenDialog,700);
+  try{ renderTable(); }catch(e){}
+}
+
+// ONE POST PATH, shared by the dialog and the inline box, so the two cannot drift apart.
+async function postKiteToken(token,say){
+  try{
+    const r=await fetch(KITE_HELPER+'/api/kite/token',{method:'POST',
+      headers:{'content-type':'application/json'},body:JSON.stringify({token})});
+    const j=await r.json();
+    if(!j.ok){ say('Rejected: '+j.why,true); return false; }
+    return true;
+  }catch(e){ say('Could not reach the helper: '+e.message,true); return false; }
+}
+
+// Called wherever the helper's status is (re)established. Asks at most ONCE per page load, so
+// dismissing it is respected; the bar keeps its inline box and the ☰ menu can reopen it on demand.
+function maybePromptKiteToken(){
+  if(KITE_TOKEN_PROMPTED) return;
+  if(!kiteTokenDialogState()) return;
+  KITE_TOKEN_PROMPTED=true;
+  openKiteTokenDialog();
+}
+
 async function saveKiteToken(){
   const el=document.getElementById('kiteTokenBox');
   const t=(el&&el.value||'').trim();
   if(t.length<20){ showToast('That does not look like an enctoken.',4000,true); return; }
-  try{
-    const r=await fetch(KITE_HELPER+'/api/kite/token',{method:'POST',headers:{'content-type':'application/json'},
-      body:JSON.stringify({token:t})});
-    const j=await r.json();
-    if(!j.ok){ showToast('Rejected: '+j.why,5000,true); return; }
-    if(el) el.value='';
-    await detectKiteApi();
-    showToast('Kite token saved. Press Fetch candles.',4000);
-  }catch(e){ showToast('Could not save the token: '+e.message,5000,true); }
+  const ok=await postKiteToken(t,(m,bad)=>showToast(m,5000,!!bad));
+  if(!ok) return;
+  if(el) el.value='';
+  await detectKiteApi();
+  if(KITE_API&&KITE_API.tokenValid===false){ showToast('Kite rejected that token. Copy it again.',5000,true); return; }
+  showToast('Kite token saved. Press Fetch candles.',4000);
 }
 // The whole loop, in one press: ask the local server for the candles, hand them to the SAME parser
 // a paste uses, re-rank, and point at whatever still needs checking.
@@ -10769,7 +10882,7 @@ function intradayPasteBarHtml(){
       </select>
       ${KITE_API?`<button onclick="fetchCandlesInApp()" class="btn" style="font-size:11px;border-color:${KITE_API.tokenValid===false?'var(--red)':'var(--green)'};color:${KITE_API.tokenValid===false?'var(--red)':'var(--green)'}"
           title="Fetches the 5-minute candles for the names above and reads them straight in. Nothing to paste, nothing to run.">Fetch candles</button>
-        ${(KITE_API.hasToken&&KITE_API.tokenValid!==false)?'':`${KITE_API.hasToken?`<span style="font-size:11px;color:var(--red);font-weight:700" title="The helper used the stored token against Kite and it was rejected. It rotates on every login, so this happens the morning after you log in again.">token expired — paste a fresh one</span>`:''}<input id="kiteTokenBox" type="password" placeholder="paste Kite enctoken once"
+        ${(KITE_API.hasToken&&KITE_API.tokenValid!==false)?'':`${KITE_API.hasToken?`<span onclick="openKiteTokenDialog(true)" style="font-size:11px;color:var(--red);font-weight:700;cursor:pointer;text-decoration:underline" title="The helper used the stored token against Kite and it was rejected. It rotates on every login, so this happens the morning after you log in again. Click to paste a fresh one.">token expired — paste a fresh one</span>`:''}<input id="kiteTokenBox" type="password" placeholder="paste Kite enctoken once"
             style="font-size:11px;padding:2px 6px;background:var(--bg);color:var(--t1);border:1px solid var(--amber);border-radius:4px;width:190px"
             title="Kite tab → F12 → Application → Cookies → kite.zerodha.com → copy the value of enctoken. It rotates on every login.">
           <button onclick="saveKiteToken()" class="btn" style="font-size:11px">Save token</button>`}`

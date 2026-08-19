@@ -240,6 +240,10 @@ table.main tbody td{padding:9px 6px;font-family:'DM Mono',monospace;font-size:14
 .rr-read{margin:12px 0;border-left:3px solid var(--cyan);background:var(--bg-raised);padding:12px;font-size:13px;line-height:1.55;color:var(--t2);border-radius:0 8px 8px 0}
 .rr-read b{color:var(--t1)}
 dialog#radarDetail{width:min(980px,95vw);max-height:90vh;padding:0;background:var(--bg);color:var(--t1);border:1px solid var(--border-hi);border-radius:10px;box-shadow:0 30px 120px rgba(0,0,0,.9);margin:auto}
+dialog#kiteTokenDlg{width:min(560px,94vw);padding:0;background:var(--bg);color:var(--t1);border:1px solid var(--border-hi);border-radius:10px;box-shadow:0 30px 120px rgba(0,0,0,.9);margin:auto}
+dialog#kiteTokenDlg::backdrop{background:rgba(0,0,0,.72)}
+#kiteTokenBody input{width:100%;box-sizing:border-box;font-family:inherit;font-size:14px;padding:9px 10px;background:var(--bg2,#111);color:var(--t1);border:1px solid var(--border);border-radius:6px}
+#kiteTokenBody input:focus{outline:none;border-color:var(--green)}
 dialog#radarDetail::backdrop{background:rgba(2,5,7,.87)}
 .rr-contrib b.pos{color:var(--green)}
 .rr-contrib b.neg{color:var(--red)}
