@@ -1,5 +1,5 @@
-const BUILD_TS='2026-08-19 11:55 IST'; // release build time (IST)
-const APP_VERSION=1195; // v1195: current Holdings is not reduced twice by today's CNC sell leg.
+const BUILD_TS='2026-08-19 12:32 IST'; // release build time (IST)
+const APP_VERSION=1196; // v1196: export checkboxes require current 5-minute confirmation.
 // v1093: a baseline reward:risk MEASURED on the cross-section (last completed bhav session) instead of learned from the owner's own fills - reported on every row, deliberately not enforced. Includes v1092: position size split by Radar score / stop distance, so equally-scored names carry equal RUPEE risk, plus an opt-in Risk /trade cap.
 // v556: parse the NSE Market Activity Report (MA<date>.csv) — official Nifty %, advances/declines and sector index moves shown as market CONTEXT in the status bar (EOD data, display only, never fed into per-row scoring); MA added to the ℹ️ file manifest.
 // v555 market-cycle stage awareness (stateless, self-calibrating): per-row stage label (1 accumulation · 2 breakout · 3 event · 4 profit-booking · 5 re-accumulation · 6 second-leg); a quiet-accumulation signal (conjunction-of-percentiles) injected via the rocket-diagnostic weighting; sell-the-news decay off Recent earnings date (horizon = review days). v1065 makes the market-breadth gauge an entry-eligibility input while still never changing ranking.
@@ -3522,6 +3522,15 @@ function meetsRecommendationBar(s){
   const rank=Number(s.rank);
   return isGreenScore(s.score)&&Number.isFinite(rank)&&rank<=timingDepth().depth;
 }
+// A recommendation is export-ready only after today's 5-minute check confirms it. Keep this
+// separate from meetsRecommendationBar(): the validation loop needs score/rank candidates to stay
+// visible and fetchable before they have a verdict. Every path that can arm a checkbox or order
+// uses this predicate, so an unchecked/stale row cannot look ready or slip through a manual toggle.
+function passesIntradayValidation(s){
+  if(!s?.symbol||s.intradayVerdict!=='confirmed') return false;
+  const read=getIntradayRead(s.symbol);
+  return !!(read&&read.current);
+}
 // Score number + proportional bar, both tinted by the band.
 function radarScoreCell(score,title=''){
   const s=Number(score);
@@ -3651,8 +3660,6 @@ function getForwardIndicatorEffects(){
 let INTRADAY_BARS={};        // symbol -> [{t,o,h,l,c}] most recent session last
 let INTRADAY_TARGET='';      // which row the next paste belongs to (the paste carries no symbol)
 let INTRADAY_RESULT=null;
-let INTRADAY_LOOP_N=3;      // how deep the check runs; owner-set, like Zerodha's 20-order cap
-function setIntradayLoopN(v){INTRADAY_LOOP_N=Math.max(1,Number(v)||3);renderTable();}
 
 function parseIntradayPaste(text,forSymbol){
   const sym=normSym(forSymbol||'');
@@ -4229,15 +4236,17 @@ function applyIntradayReorder(rows){
 // THE LOOP'S STATE. Which of the current top recommendations still lack intraday data, and has the
 // list stopped moving? Converged means every name at the top has been checked AND survived the
 // check - which is the only honest definition of "these are the recommendations".
-function getIntradayLoopState(limit){
-  const N=Math.max(1,limit||3);
+function getIntradayLoopState(){
   const pool=(Array.isArray(FILT)&&FILT.length?FILT:ALL).slice().sort((a,b)=>a.rank-b.rank);
   const passing=pool.filter(r=>typeof meetsRecommendationBar==='function'?meetsRecommendationBar(r):true);
   // When a round REJECTS the whole top, nothing clears the bar any more - and that is exactly when
   // the next candidates matter most. Falling back to the best remaining rows keeps the loop running
   // instead of going silent at the moment it has the most to say. The verdict is unaffected: those
   // rows are only CANDIDATES to check, and a candidate is confirmed only by clearing the real bar.
-  const board=(passing.length?passing:pool).slice(0,N);
+  // The board is the threshold, not an owner-selected top-N. Every row that clears rank + score
+  // needs the same current 5-minute verdict before its checkbox can arm. If none clears after a
+  // validation round, keep the first live-candidate set visible so the search can walk deeper.
+  const board=passing.length?passing:pool.slice(0,typeof FETCH_TOP_RANK==='number'?FETCH_TOP_RANK:5);
   // A stale read does NOT count as checked - the loop must ask for it again, or it would report
   // "settled" on a board validated last week.
   // ONE source for both halves of the sentence. `need` read live from getIntradayRead while the
@@ -8905,7 +8914,7 @@ function getCols(){
 let COLS=getCols();
 
 function updateSelectAll(){
-  const allSyms=FILT.map(s=>s.symbol);
+  const allSyms=FILT.filter(s=>s.basketEligible!==false&&passesIntradayValidation(s)).map(s=>s.symbol);
   const allChecked=allSyms.length>0&&allSyms.every(sym=>SELECTED.has(sym));
   const sa=document.getElementById('chk-all');
   if(sa){sa.indeterminate=!allChecked&&SELECTED.size>0&&allSyms.some(sym=>SELECTED.has(sym));sa.checked=allChecked;}
@@ -8914,7 +8923,8 @@ function updateSelectAll(){
 function toggleSelectAll(checked){
   if(checked){
     FILT.forEach(s=>EXPORT_EXCLUDED.delete(s.symbol));
-    SELECTED=new Set(FILT.filter(s=>s.basketEligible!==false).slice(0,20).map(s=>s.symbol));
+    SELECTED=new Set(FILT.filter(s=>s.basketEligible!==false&&passesIntradayValidation(s))
+      .slice(0,20).map(s=>s.symbol));
   } else {
     FILT.forEach(s=>{if(s.basketEligible!==false)EXPORT_EXCLUDED.add(s.symbol);});
     SELECTED.clear();
@@ -8924,7 +8934,9 @@ function toggleSelectAll(checked){
   renderBasketBtn();
 }
 function toggleStock(sym,checked){
-  if(checked){EXPORT_EXCLUDED.delete(sym);SELECTED.add(sym);}
+  const row=FILT.find(s=>s.symbol===sym);
+  if(checked&&row&&passesIntradayValidation(row)){EXPORT_EXCLUDED.delete(sym);SELECTED.add(sym);}
+  else if(checked){SELECTED.delete(sym);}
   else{EXPORT_EXCLUDED.add(sym);SELECTED.delete(sym);}
   saveFilterState();
   updateSelectAll();
@@ -10200,8 +10212,9 @@ function renderBasketSummary(){
 
 function renderHead(){
   COLS=getCols(); // refresh in case ENGINE_DATA changed
-  const allChecked=FILT.length>0&&FILT.every(s=>SELECTED.has(s.symbol));
-  const someChecked=FILT.some(s=>SELECTED.has(s.symbol));
+  const exportable=FILT.filter(s=>s.basketEligible!==false&&passesIntradayValidation(s));
+  const allChecked=exportable.length>0&&exportable.every(s=>SELECTED.has(s.symbol));
+  const someChecked=exportable.some(s=>SELECTED.has(s.symbol));
   const timingBlocked=false; // the clock never disables selection (owner, v1068)
   document.getElementById('tHead').innerHTML='<tr>'+COLS.map(c=>{
     if(c.key==='chk'){
@@ -10346,11 +10359,16 @@ function renderTable(){
     const isSelected=SELECTED.has(s.symbol);
     const am=allocMap[s.symbol];
     const exitPolicy=getRowExitPolicy(s,getBuyPrice(s));
-    const canBuy=s.basketEligible!==false;
+    const exchangeEligible=s.basketEligible!==false;
+    const validated=passesIntradayValidation(s);
+    const canBuy=exchangeEligible&&validated;
+    const checkTitle=!exchangeEligible?'Ineligible for the basket'
+      :!validated?'Awaiting current 5-minute validation'
+      :'Include in the Zerodha basket export';
     // Cells are keyed and joined in COLS order so they always match the (possibly
     // user-reordered) header (v536).
     const cellH={
-      chk:`<td style="text-align:center"><input type="checkbox" ${isSelected?'checked':''} ${canBuy?'':'disabled'} style="width:14px;height:14px;accent-color:var(--amber);cursor:${canBuy?'pointer':'not-allowed'}" onclick="event.stopPropagation()" onchange="toggleStock('${s.symbol}',this.checked)" title="${canBuy?'Include in the Zerodha basket export':'Ineligible for the basket'}"></td>`,
+      chk:`<td style="text-align:center"><input type="checkbox" ${isSelected?'checked':''} ${canBuy?'':'disabled'} style="width:14px;height:14px;accent-color:var(--amber);cursor:${canBuy?'pointer':'not-allowed'}" onclick="event.stopPropagation()" onchange="toggleStock('${s.symbol}',this.checked)" title="${checkTitle}"></td>`,
       rank:`<td style="font-family:'DM Mono',monospace;font-weight:800;color:var(--t1);text-align:right">${s.rank??'—'}</td>`,
       score:`<td>${radarScoreCell(s.score,'Relative same-day composite score (0-100 percentile, top-weighted). It is a ranking, not a probability.')}</td>`,
       // v1142: routed through symbolChartButton like every other table. This cell had built its own
@@ -10465,7 +10483,7 @@ function onIntradayPaste(){
   if(batch){
     el.value='';
     INTRADAY_RESULT={ok:true,sym:batch.done.join(', '),bars:0,sessions:0,batch:batch};
-    const st=getIntradayLoopState(INTRADAY_LOOP_N);
+    const st=getIntradayLoopState();
     INTRADAY_TARGET=st.need.length?normSym(st.need[0].symbol):'';
     renderTable();
     showToast('Read '+batch.done.length+' stock(s): '+batch.done.join(', ')
@@ -10483,7 +10501,7 @@ function onIntradayPaste(){
     try{renderRankingsPanels();}catch(e){}
     // The loop: re-rank, then point at whatever is now in the top and still unchecked. When nothing
     // is left the list has SETTLED - every name at the top was checked and survived the check.
-    const st=getIntradayLoopState(INTRADAY_LOOP_N);
+    const st=getIntradayLoopState();
     INTRADAY_TARGET=st.need.length?normSym(st.need[0].symbol):'';
     showToast(res.sym+': '+res.bars+' bars over '+res.sessions+' session'+(res.sessions>1?'s':'')
       +(res.live?' · LIVE book '+((res.live.imbalance>0?'+':'')+res.live.imbalance.toFixed(3)):'')
@@ -10620,11 +10638,19 @@ function intradayFetchJobs(limit){
   // filters - surveillance, no headroom, direction - so on the live board the first recommendable
   // row was rank 7 and a `rank<=5` test queued nothing at all. "The top five" means the first five
   // rows the owner can actually act on.
-  const haveBuy=board.some(r=>r.intradayVerdict==='confirmed'&&r.intraday&&r.intraday.current);
+  // Qualification belongs to the scored universe, not the current display slice. A Rows cap,
+  // presentation filter, or re-render timing must not prevent a genuine rank/score candidate from
+  // receiving the validation that is now required to arm its checkbox.
+  const threshold=(Array.isArray(ALL)?ALL:[]).filter(r=>meetsRecommendationBar(r))
+    .slice().sort((a,b)=>a.rank-b.rank);
+  const haveBuy=threshold.some(r=>passesIntradayValidation(r));
   // Walk only as deep as this press could possibly spend: building 166 job objects and checking
   // freshness on every one, to send 12, is wasted work on the render path.
   const reach=haveBuy?FETCH_TOP_RANK:Math.max(FETCH_TOP_RANK,FETCH_MAX_PER_RUN*3);
-  const jobs=take(board.slice(0,reach));
+  // Threshold-qualified rows are always first. Previously a confirmed row stopped the walk at a
+  // positional top-five slice, so another genuine rank/score candidate could remain unchecked yet
+  // look recommended (TALBROAUTO). Validation eligibility must come from the same bar as selection.
+  const jobs=take(threshold.concat(board.slice(0,reach)));
 
   // OPEN POSITIONS (v1163): a stock leaves the board the day it is bought, so without this its file
   // stops growing exactly when the position starts mattering. Never a buy verdict - observation.
@@ -10945,7 +10971,7 @@ async function fetchCandlesInApp(limit,opts){
         last:rd?rd.close:null,regime:rd&&rd.regime||null,
         flow:rd&&Number.isFinite(rd.cvdPct)?rd.cvdPct:null};
     });
-    const st=getIntradayLoopState(INTRADAY_LOOP_N);
+    const st=getIntradayLoopState();
     INTRADAY_TARGET='';
     renderTable();
     say('Read '+out.done.length+' stock(s): '+out.done.join(', ')
@@ -10957,7 +10983,7 @@ async function fetchCandlesInApp(limit,opts){
 function intradayPasteBarHtml(){
   const n=Object.keys(INTRADAY_BARS).length;
   const t=INTRADAY_TARGET, res=INTRADAY_RESULT;
-  const st=(typeof getIntradayLoopState==='function')?getIntradayLoopState(INTRADAY_LOOP_N):null;
+  const st=(typeof getIntradayLoopState==='function')?getIntradayLoopState():null;
   if(!t&&!n&&!(st&&(st.need.length||st.top.length))) return '';
   const chip=r=>{
     // THE CHIP SHOWS THE VERDICT, and the verdict is the only thing that decides buyability.
@@ -10993,9 +11019,6 @@ function intradayPasteBarHtml(){
           <span style="color:var(--green)">${st.confirmed.length} buy</span><span style="color:var(--t3)"> / </span>
           <span style="color:var(--red)">${st.rejected.length} skip</span>
           <span style="color:var(--t3)"> — marked ✓ / ✗ on the rows</span>`:''}</span>`:''}
-      <select onchange="setIntradayLoopN(this.value)" style="background:var(--bg);color:var(--t2);border:1px solid var(--border);border-radius:4px;font-size:11px;padding:1px 4px">
-        ${[2,3,5,10].map(k=>`<option value="${k}"${k===INTRADAY_LOOP_N?' selected':''}>top ${k}</option>`).join('')}
-      </select>
       ${KITE_API?`<button onclick="fetchCandlesInApp()" class="btn" style="font-size:11px;border-color:${KITE_API.tokenValid===false?'var(--red)':'var(--green)'};color:${KITE_API.tokenValid===false?'var(--red)':'var(--green)'}"
           title="Fetches the 5-minute candles for the names above and reads them straight in. Nothing to paste, nothing to run.">Fetch candles</button>
         ${(KITE_API.hasToken&&KITE_API.tokenValid!==false)?'':`${KITE_API.hasToken?`<span onclick="openKiteTokenDialog(true)" style="font-size:11px;color:var(--red);font-weight:700;cursor:pointer;text-decoration:underline" title="The helper used the stored token against Kite and it was rejected. It rotates on every login, so this happens the morning after you log in again. Click to paste a fresh one.">token expired — paste a fresh one</span>`:''}<input id="kiteTokenBox" type="password" placeholder="paste Kite enctoken once"
@@ -11164,7 +11187,8 @@ function applyFilters(){
   // Rows that miss either remain VISIBLE and ranked; they are simply not bought.
   const selectionRows=[...rows].sort((a,b)=>(a.rank??Infinity)-(b.rank??Infinity));
   SELECTED=new Set(selectionRows
-    .filter(s=>s.basketEligible!==false&&!EXPORT_EXCLUDED.has(s.symbol)&&meetsRecommendationBar(s))
+    .filter(s=>s.basketEligible!==false&&!EXPORT_EXCLUDED.has(s.symbol)
+      &&meetsRecommendationBar(s)&&passesIntradayValidation(s))
     .slice(0,20).map(s=>s.symbol));
 
   PG=1;renderHead();renderTable();renderStatusBar();saveFilterState();updateTabCounts();
@@ -12464,7 +12488,8 @@ function planBasketExport(capital, selected){
   // `applyFilters` is the normal source of `selected`, but a stale selection restored from cache, a
   // hand-built list, or a future caller must never slip a row past score >= 90 / rank <= 10 into a
   // real order.
-  let exportList=(selected||[]).filter(s=>!getPriceBandBlockReason(s)&&meetsRecommendationBar(s));
+  let exportList=(selected||[]).filter(s=>!getPriceBandBlockReason(s)
+    &&meetsRecommendationBar(s)&&passesIntradayValidation(s));
   let basketAlloc=computeAlloc(capital,exportList);
   // v1115: a stock now costs TWO orders when its quantity can be split and its runner target sits
   // above its base — so the 20-order limit must be counted in LEGS, not in names, or the export would
