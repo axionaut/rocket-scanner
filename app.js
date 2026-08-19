@@ -1,5 +1,5 @@
-const BUILD_TS='2026-08-19 12:32 IST'; // release build time (IST)
-const APP_VERSION=1196; // v1196: export checkboxes require current 5-minute confirmation.
+const BUILD_TS='2026-08-19 12:51 IST'; // release build time (IST)
+const APP_VERSION=1197; // v1197: refreshed inputs self-recover a missed helper probe.
 // v1093: a baseline reward:risk MEASURED on the cross-section (last completed bhav session) instead of learned from the owner's own fills - reported on every row, deliberately not enforced. Includes v1092: position size split by Radar score / stop distance, so equally-scored names carry equal RUPEE risk, plus an opt-in Risk /trade cap.
 // v556: parse the NSE Market Activity Report (MA<date>.csv) — official Nifty %, advances/declines and sector index moves shown as market CONTEXT in the status bar (EOD data, display only, never fed into per-row scoring); MA added to the ℹ️ file manifest.
 // v555 market-cycle stage awareness (stateless, self-calibrating): per-row stage label (1 accumulation · 2 breakout · 3 event · 4 profit-booking · 5 re-accumulation · 6 second-leg); a quiet-accumulation signal (conjunction-of-percentiles) injected via the rocket-diagnostic weighting; sell-the-news decay off Recent earnings date (horizon = review days). v1065 makes the market-breadth gauge an entry-eligibility input while still never changing ranking.
@@ -10872,6 +10872,11 @@ function maybePromptKiteToken(){
 // It NEVER blocks the load. No helper, no token, or a refusal - the ingest proceeds on the files
 // already there, exactly as it did before, and the reason is logged.
 async function refreshBrokerInputs(){
+  // Startup detection is a network probe and may lose a race with initial hydration, or the helper
+  // may be started after the page. Every ALL NSE refresh is therefore also a recovery point: retry
+  // status once before deciding the helper is absent. Failure still falls through to stale local
+  // files exactly as before and can never block the ingest.
+  if(!KITE_API) await detectKiteApi();
   if(!KITE_API) return {ok:false,why:'helper not running'};
   try{
     const c=new AbortController();
@@ -13435,7 +13440,9 @@ document.getElementById('fInDir').addEventListener('change',e=>{
 
 // ── Async app init: load brain file → hydrate all state → render ──
 async function initApp(){
-  try{ detectKiteApi(); }catch(e){}
+  // Establish helper state before any hydrated/folder input can start the refresh pipeline. This
+  // is a localhost probe capped at 1.5s; failure is explicitly tolerated by detectKiteApi().
+  try{ await detectKiteApi(); }catch(e){}
   updateModeUI();
   setLoading(true,'Loading latest cloud data...');
   // Step 0: Restore an active Drive token for this browser session and load cloud brain data.
