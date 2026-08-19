@@ -1,5 +1,5 @@
-const BUILD_TS='2026-08-19 15:30 IST'; // release build time (IST)
-const APP_VERSION=1200; // v1200: Pace learns only from pullbacks buyers subsequently recover.
+const BUILD_TS='2026-08-19 17:05 IST'; // release build time (IST)
+const APP_VERSION=1201; // v1201: complete 11-report NSE ingest plus official RSS fundamental context.
 // v1093: a baseline reward:risk MEASURED on the cross-section (last completed bhav session) instead of learned from the owner's own fills - reported on every row, deliberately not enforced. Includes v1092: position size split by Radar score / stop distance, so equally-scored names carry equal RUPEE risk, plus an opt-in Risk /trade cap.
 // v556: parse the NSE Market Activity Report (MA<date>.csv) — official Nifty %, advances/declines and sector index moves shown as market CONTEXT in the status bar (EOD data, display only, never fed into per-row scoring); MA added to the ℹ️ file manifest.
 // v555 market-cycle stage awareness (stateless, self-calibrating): per-row stage label (1 accumulation · 2 breakout · 3 event · 4 profit-booking · 5 re-accumulation · 6 second-leg); a quiet-accumulation signal (conjunction-of-percentiles) injected via the rocket-diagnostic weighting; sell-the-news decay off Recent earnings date (horizon = review days). v1065 makes the market-breadth gauge an entry-eligibility input while still never changing ranking.
@@ -128,6 +128,8 @@ const SURV_RULE_STORE='rs_surv_rules';
 const SURV_CORR_STORE='rs_surv_corr';
 const SAME_DAY_EXIT_OPPORTUNITY_STORE='rs_same_day_exit_opportunity_v3';
 const RECOMMEND_OUTCOME_STORE='rs_recommend_outcomes_delta_v1';
+const POST_CLOSE_AUDIT_STORE='rs_post_close_audit_v1';
+const NSE_FUNDAMENTAL_STORE='rs_nse_fundamentals_v1';
 const RECOMMEND_MIN_PROGRESS_FRACTION=0.25;
 // v1097 (owner): the daily record of money left on the table. Latest Session computes the figure for
 // ONE session only; the target nudge needs it across sessions, so each session's proceeds-weighted
@@ -1018,6 +1020,11 @@ async function connectCloudStorage(opts={}){
   }catch(e){console.warn('Key migration:',e);}
 })();
 let NSE_BHAV={},NSE_52W={},NSE_SURV={},NSE_BULK={},NSE_BLOCK={},NSE_PRICE_BAND={};
+let NSE_VAR={}; // {symbol -> {securityVarPct,elmPct,additionalMarginPct,totalMarginPct}} from the EOD _6 DAT only
+let NSE_NEXT_BAND={}; // {symbol -> {fromPct,toPct,reportDate}} effective for the next trading session
+let NSE_SECURITY_MASTER={}; // {symbol -> exchange identity/eligibility metadata} from NSE-listed CM MII .csv.gz
+let NSE_FUNDAMENTALS={}; // {symbol -> [{source,subject,title,description,pubDate,link,...}]} from official NSE RSS indexes
+let NSE_FUNDAMENTAL_META=null; // fetch/snapshot status; context only, never a scoring input
 let NSE_STATUS={}; // {symbol -> exchange status letter from REG1 (A = active)}
 let NSE_SERIES={}; // {symbol -> exchange series letters from REG1 (EQ, BE, BZ, SM, ST, SZ)}
 let NSE_DEAL_NET={}; // {symbol -> signed net deal quantity (BUY − SELL) across bulk + block files}
@@ -1810,11 +1817,77 @@ function parsePriceBand(text){
     if(band!==null&&band>0)NSE_PRICE_BAND[sym]={bandPct:band,remarks:String(r['Remarks']||r['REMARKS']||'').trim()};
   });
 }
+function reportDateFromFilename(filename){
+  const m=String(filename||'').match(/(\d{2})(\d{2})(\d{4})/);
+  return m?`${m[3]}-${m[2]}-${m[1]}`:null;
+}
+function parseVarEod(text){
+  // NSE publishes six snapshots. Only _6 is the completed-session rate; detectNSE deliberately
+  // refuses snapshots 1-5 so an intraday margin estimate can never masquerade as the EOD risk read.
+  const next={};
+  for(const line of parseCSVRaw(text)){
+    if(!line.startsWith('20,')) continue;
+    const p=splitLine(line),series=String(p[2]||'').trim().toUpperCase();
+    const sym=normSym(p[1]);
+    if(!sym||series!=='EQ') continue;
+    const securityVarPct=num(p[4]),varMarginPct=num(p[6]),elmPct=num(p[7]),additionalMarginPct=num(p[8]),totalMarginPct=num(p[9]);
+    next[sym]={securityVarPct,varMarginPct,elmPct,additionalMarginPct,totalMarginPct};
+  }
+  NSE_VAR=next;
+}
+function parseNextBandChanges(text,filename=''){
+  const reportDate=reportDateFromFilename(filename);
+  parseCSV(text).forEach(r=>{
+    const sym=normSym(r['Symbol']||r['SYMBOL']);
+    const series=String(r['Series']||r['SERIES']||'').trim().toUpperCase();
+    const fromPct=num(r['From']||r['FROM']),toPct=num(r['To']||r['TO']);
+    if(sym&&(!series||series==='EQ')&&fromPct>0&&toPct>0) NSE_NEXT_BAND[sym]={fromPct,toPct,reportDate};
+  });
+}
+function epochDateISO(value){
+  const n=Number(value);
+  if(!(n>0)) return null;
+  const d=new Date(n*1000);
+  return Number.isNaN(d.getTime())?null:d.toISOString().slice(0,10);
+}
+function parseSecurityMaster(text){
+  const next={};
+  parseCSV(text).forEach(r=>{
+    const sym=normSym(r['TckrSymb']),series=String(r['SctySrs']||'').trim().toUpperCase();
+    if(!sym||!series) return;
+    const item={series,isin:String(r['ISIN']||'').trim(),name:String(r['FinInstrmNm']||'').trim(),
+      instrumentId:num(r['FinInstrmId']),normalMarketEligible:String(r['ElgbltyNrmlMkt']||'').trim()==='1',
+      normalMarketStatus:num(r['SctyStsNrmlMkt']),deleted:String(r['DelFlg']||'').trim().toUpperCase()==='Y',
+      listingDate:epochDateISO(r['ListgDt']),priceRange:String(r['PricRg']||'').trim(),
+      tickSize:num(r['TickSz']),tradeToTrade:String(r['TradToTradInd']||'').trim().toUpperCase()==='Y',
+      slbmEligible:String(r['SLBMElgblty']||'').trim().toUpperCase()==='Y'};
+    // The file contains multiple series and instruments under a ticker. The cash EQ row is the
+    // relevant identity and always wins; non-EQ is retained only as a fallback audit record.
+    if(!next[sym]||series==='EQ') next[sym]=item;
+  });
+  NSE_SECURITY_MASTER=next;
+  // REG1 remains the authority for A/inactive status. The master safely fills only a missing series;
+  // its numeric normal-market status codes are retained for audit, not guessed into A/I semantics.
+  Object.entries(next).forEach(([sym,m])=>{if(!NSE_SERIES[sym]&&m.series)NSE_SERIES[sym]=m.series;});
+}
+function useNextSessionBand(change){
+  if(!change?.reportDate) return false;
+  const c=istClock(),today=`${c.year}-${String(c.month).padStart(2,'0')}-${String(c.day).padStart(2,'0')}`;
+  return today>change.reportDate||(today===change.reportDate&&c.mins>=DAY_END_MIN);
+}
+function getNSEBandRecord(symbol){
+  const sym=normSym(symbol),base=NSE_PRICE_BAND[sym],change=NSE_NEXT_BAND[sym];
+  if(change){
+    const next=useNextSessionBand(change);
+    return {bandPct:next?change.toPct:change.fromPct,remarks:next?`Next-session band changed ${change.fromPct}% to ${change.toPct}%`:`Band changes to ${change.toPct}% next session`,change};
+  }
+  return base||null;
+}
 function enrichRowsWithNSEData(rows){
   (rows||[]).forEach(s=>{
     const sym=normSym(s.symbol);
     if(sym&&sym!==s.symbol) s.symbol=sym;
-    const pb=NSE_PRICE_BAND[s.symbol];
+    const pb=getNSEBandRecord(s.symbol);
     if(pb?.bandPct!=null){
       s.price_band_pct=pb.bandPct;
       s.pct_to_upper_band=(s.priceChange!=null&&isFinite(s.priceChange))?pb.bandPct-s.priceChange:null;
@@ -1827,7 +1900,7 @@ function enrichRowsWithNSEData(rows){
   return rows;
 }
 function getNSEPriceBandPct(symbol){
-  const pb=NSE_PRICE_BAND[normSym(symbol)];
+  const pb=getNSEBandRecord(symbol);
   const band=pb?.bandPct;
   return band!=null&&isFinite(band)&&band>0?band:null;
 }
@@ -2581,6 +2654,59 @@ function recordRecommendationOutcomeScan(scan){
   Object.keys(store.issues).forEach(date=>{if(date<cutoff.toISOString().slice(0,10)) delete store.issues[date];});
   FS.set(RECOMMEND_OUTCOME_STORE,store);
 }
+const POST_CLOSE_CONDITIONS=[
+  {key:'entry-ready',label:'Entry gate approved',test:p=>p.entryReady!==false},
+  {key:'top-5',label:'Issued rank 1-5',test:p=>Number(p.rank)<=5},
+  {key:'top-10',label:'Issued rank 1-10',test:p=>Number(p.rank)<=10},
+  {key:'score-99',label:'Issue score at least 99',test:p=>Number(p.score)>=99},
+  {key:'setup-p95',label:'Setup percentile at least 95%',test:p=>Number(p.setupPct)>=.95},
+  {key:'ignite-p95',label:'Ignition percentile at least 95%',test:p=>Number(p.ignitePct)>=.95},
+  {key:'direction-confirmed',label:'Direction confirmed at issue',test:p=>p.directionConfirmed===true},
+  {key:'range-location-75',label:'Range location at most 75%',test:p=>Number.isFinite(Number(p.rangeLocationAtIssue))&&Number(p.rangeLocationAtIssue)<=75},
+  {key:'range-used-75',label:'Expected range used below 75%',test:p=>Number.isFinite(Number(p.rangeUsedAtIssue))&&Number(p.rangeUsedAtIssue)<75},
+  {key:'ready-top-10',label:'Entry approved and issued rank 1-10',test:p=>p.entryReady!==false&&Number(p.rank)<=10},
+];
+function buildPostCloseIssueAudit(issue,asOf){
+  const picks=(issue?.picks||[]).filter(p=>!p.control);
+  const resolved=picks.filter(p=>p.rocketOutcome&&p.rocketOutcome!==ROCKET_OUTCOME.PENDING);
+  const rockets=resolved.filter(isRocketOutcome);
+  const conditions=POST_CLOSE_CONDITIONS.map(c=>{
+    const matched=resolved.filter(c.test),wins=matched.filter(isRocketOutcome).length,losses=matched.length-wins;
+    return {key:c.key,label:c.label,n:matched.length,wins,losses,precision:matched.length?+(100*wins/matched.length).toFixed(1):null};
+  });
+  return {issueDate:issue.date,asOf,issued:picks.length,resolved:resolved.length,rockets:rockets.length,
+    pending:picks.length-resolved.length,precision:resolved.length?+(100*rockets.length/resolved.length).toFixed(1):null,
+    conditions,candidates:conditions.filter(c=>c.n>0&&c.precision>=95)};
+}
+function getPostCloseRuleScorecard(audits){
+  return POST_CLOSE_CONDITIONS.map(c=>{
+    const rows=Object.values(audits||{}).map(a=>(a.conditions||[]).find(x=>x.key===c.key)).filter(x=>x&&x.n>0);
+    const wins=rows.reduce((s,x)=>s+x.wins,0),losses=rows.reduce((s,x)=>s+x.losses,0),sessions=rows.length,total=wins+losses;
+    const precision=total?+(100*wins/total).toFixed(1):null;
+    const status=wins>=3&&sessions>=2&&losses<=1&&precision>=95?'ELIGIBLE':wins===0&&sessions>=10?'RETIRED':'COLLECTING';
+    return {key:c.key,label:c.label,wins,losses,sessions,total,precision,status};
+  });
+}
+function runPostCloseAudit(force=false){
+  const clock=istClock(),today=getSessionDate();
+  if(!force&&clock.mins<DAY_END_MIN) return null;
+  const issues=(FS.get(RECOMMEND_OUTCOME_STORE)||{}).issues||{};
+  const prior=FS.get(POST_CLOSE_AUDIT_STORE)||{version:1,audits:{}};
+  const audits={...(prior.audits||{})};
+  Object.values(issues).forEach(issue=>{
+    const picks=(issue?.picks||[]).filter(p=>!p.control);
+    const observed=picks.some(p=>(p.rocketDaysSeen||[]).length||p.evaluatedThrough);
+    if(observed) audits[issue.date]=buildPostCloseIssueAudit(issue,today);
+  });
+  const out={version:1,updatedAt:new Date().toISOString(),latestSession:today,audits,
+    scorecard:getPostCloseRuleScorecard(audits)};
+  FS.set(POST_CLOSE_AUDIT_STORE,out);
+  return out;
+}
+function postCloseAuditStatus(){
+  const today=getSessionDate(),store=FS.get(POST_CLOSE_AUDIT_STORE)||{};
+  return {today,audit:store.audits?.[today]||null,store};
+}
 function getRecommendationOutcomeSummary(){
   const issues=Object.values((FS.get(RECOMMEND_OUTCOME_STORE)||{}).issues||{});
   // v1128: control rows never enter a RECOMMENDATION metric — the app must not report converting
@@ -3058,6 +3184,9 @@ function refreshExitPolicyFromFeedback(stats){
 function detectNSE(filename,content){
   const raw=String(filename||'').toLowerCase();
   const fn=normaliseInputFilename(filename);
+  if(/^c_var1_\d{8}_6\.dat$/i.test(raw)){parseVarEod(content);return'var_eod';}
+  if(raw.includes('eq_band_changes')){parseNextBandChanges(content,raw);return'band_change';}
+  if(/^nse_cm_security_\d{8}\.csv\.gz$/i.test(raw)){parseSecurityMaster(content);return'security_master';}
   if(fn.includes('bhavdata')||raw.includes('sec_bhav')){parseBhavdata(content);return'bhav';}
   if(fn.includes('sec list')||fn.includes('price band')||fn.includes('priceband')||raw.includes('sec_list')||raw.includes('price_band')){parsePriceBand(content);return'price_band';}
   if(fn.includes('52 wk')||fn.includes('high low')||raw.includes('52_wk')||raw.includes('high_low')){parse52W(content);return'52w';}
@@ -3567,8 +3696,11 @@ function radarSetupLabel(r){
 function buildRadarSupplements(){
   const meta={};
   const get=sym=>meta[sym]??={symbol:sym,flags:[],bulkNet:0};
-  Object.entries(NSE_PRICE_BAND).forEach(([sym,pb])=>{const m=get(sym);m.band=pb?.bandPct??null;m.series=m.series||'EQ';});
+  new Set([...Object.keys(NSE_PRICE_BAND),...Object.keys(NSE_NEXT_BAND)]).forEach(sym=>{const pb=getNSEBandRecord(sym),m=get(sym);m.band=pb?.bandPct??null;m.bandChange=pb?.change||null;m.bandNote=pb?.remarks||'';m.series=m.series||'EQ';});
   Object.entries(NSE_BHAV).forEach(([sym,b])=>{const m=get(sym);m.series=m.series||'EQ';m.delivery=b.delivPct;m.trades=b.trades;m.officialClose=b.officialClose;m.officialAvg=b.officialAvg;});
+  Object.entries(NSE_VAR).forEach(([sym,v])=>{get(sym).nseVar=v;});
+  Object.entries(NSE_SECURITY_MASTER).forEach(([sym,v])=>{const m=get(sym);m.securityMaster=v;if(!m.series&&v.series)m.series=v.series;});
+  Object.entries(NSE_FUNDAMENTALS).forEach(([sym,events])=>{get(sym).fundamentalEvents=events;});
   Object.entries(NSE_SERIES).forEach(([sym,ser])=>{const m=get(sym);if(ser)m.series=ser;});
   Object.entries(NSE_STATUS).forEach(([sym,st])=>{get(sym).status=st;});
   Object.entries(NSE_52W).forEach(([sym,w])=>{const m=get(sym);m.high52=w.high52w;m.low52=w.low52w;});
@@ -3589,7 +3721,10 @@ function buildRadarSupplements(){
   // pattern-reliable, so it floors risk at Medium and annotates the detail modal.
   Object.entries(NSE_BOARD_MEETING).forEach(([sym,bm])=>{get(sym).boardMeeting=bm;});
   Object.entries(NSE_ANNOUNCE).forEach(([sym,a])=>{get(sym).announceToday=a;});
-  Object.values(meta).forEach(m=>{m.eventToday=!!m.corpToday||!!(m.boardMeeting&&m.boardMeeting.date===today&&m.boardMeeting.isResults);});
+  Object.values(meta).forEach(m=>{
+    const rssToday=(m.fundamentalEvents||[]).some(e=>e.dateISO===today&&e.isResults);
+    m.eventToday=!!m.corpToday||!!(m.boardMeeting&&m.boardMeeting.date===today&&m.boardMeeting.isResults)||rssToday;
+  });
   return meta;
 }
 // ── v1135 FORWARD EFFECTS DRIVE THE WEIGHTS (owner, 2026-08-14) ───────────────────────────────
@@ -10581,6 +10716,55 @@ let LAST_FETCH=null;        // what the last fetch actually brought back, shown 
 let FETCH_BUSY=null;        // v1177: {n, syms, at} while a fetch is in flight - it must be VISIBLE
 let LAST_FETCH_HIDDEN=false; // v1172: the list is collapsed for space; the DATA is never discarded
 const KITE_HELPER='http://localhost:8787';
+function rssCompanyKey(value){
+  return String(value||'').toUpperCase().replace(/&AMP;/g,' AND ').replace(/\b(LIMITED|LTD|PRIVATE|PVT|INDIA)\b/g,' ')
+    .replace(/[^A-Z0-9]+/g,' ').trim().replace(/\s+/g,' ');
+}
+function rssEventDateISO(value){
+  const m=String(value||'').match(/(\d{1,2})-([A-Za-z]{3})-(\d{4})/);
+  return m?nseDateToISO(`${m[1]}-${m[2]}-${m[3]}`):null;
+}
+function resolveRssSymbol(item){
+  const known=new Set([...Object.keys(NSE_BHAV),...Object.keys(NSE_SERIES),...Object.keys(NSE_PRICE_BAND),...Object.keys(NSE_SECURITY_MASTER),...(ALL||[]).map(r=>normSym(r.symbol))]);
+  const link=String(item?.link||''),file=decodeURIComponent(link.split('/').pop()||'');
+  const prefix=normSym((file.match(/^([A-Z0-9&.-]+)_/i)||[])[1]||'');
+  if(prefix&&known.has(prefix)) return prefix;
+  const title=String(item?.title||'').replace(/\s+-\s+Ex-Date:[\s\S]*$/i,'').trim();
+  const exact=NSE_NAME_TO_SYM[title.toUpperCase()];if(exact)return normSym(exact);
+  const key=rssCompanyKey(title);
+  for(const [name,sym] of Object.entries(NSE_NAME_TO_SYM||{})) if(rssCompanyKey(name)===key)return normSym(sym);
+  const row=(ALL||[]).find(r=>rssCompanyKey(r.name)===key);return row?normSym(row.symbol):null;
+}
+function restoreNseFundamentals(){
+  const saved=FS.get(NSE_FUNDAMENTAL_STORE);
+  if(saved?.bySymbol)NSE_FUNDAMENTALS=saved.bySymbol;
+  if(saved?.meta)NSE_FUNDAMENTAL_META=saved.meta;
+}
+async function refreshNseFundamentals(){
+  restoreNseFundamentals();
+  const c=new AbortController(),timer=setTimeout(()=>c.abort(),10000);
+  try{
+    const res=await fetch(KITE_HELPER+'/api/nse/rss',{cache:'no-store',signal:c.signal});
+    const data=await res.json();if(!data?.ok)throw new Error(data?.why||'helper returned no RSS data');
+    const bySymbol={};
+    for(const item of data.items||[]){
+      const symbol=resolveRssSymbol(item);if(!symbol)continue;
+      const text=`${item.subject||''} ${item.description||''}`;
+      const event={source:item.source,title:item.title,subject:item.subject||'',description:item.description||'',pubDate:item.pubDate||'',dateISO:rssEventDateISO(item.pubDate),link:item.link||'',
+        isResults:/financialResults|integratedFinancials/.test(item.source)||/financial results?|quarterly results?|annual results?/i.test(text),
+        isBoard:item.source==='boardMeetings'||/board meeting/i.test(text)};
+      (bySymbol[symbol]??=[]).push(event);
+    }
+    Object.values(bySymbol).forEach(events=>events.sort((a,b)=>String(b.pubDate).localeCompare(String(a.pubDate))));
+    NSE_FUNDAMENTALS=bySymbol;
+    NSE_FUNDAMENTAL_META={ok:true,fetchedAt:data.fetchedAt,feeds:data.feeds,feedCounts:data.feedCounts,snapshot:data.snapshot,symbols:Object.keys(bySymbol).length,items:(data.items||[]).length};
+    FS.set(NSE_FUNDAMENTAL_STORE,{version:1,bySymbol,meta:NSE_FUNDAMENTAL_META});
+    return true;
+  }catch(e){
+    NSE_FUNDAMENTAL_META={...(NSE_FUNDAMENTAL_META||{}),ok:false,why:e?.name==='AbortError'?'local helper RSS request timed out':String(e?.message||e)};
+    return false;
+  }finally{clearTimeout(timer);}
+}
 // THE APP STAYS ON GITHUB PAGES. Earlier this served the app from localhost, which was wrong - the
 // app lives at https://axionaut.github.io/rocket-scanner/ and that must not change. Only the HELPER
 // is local. An HTTPS page may not normally call http://, but localhost and 127.0.0.1 are specified
@@ -11171,10 +11355,14 @@ function showRadarDetail(sym){
   if(corp)eventBits.push(`corp action <b>${escHtml(corp.purpose||corp.kind)}</b> ex-date this session${r.meta?._corpNeutralised?' (mechanical move neutralised, not scored)':corp.kind==='buyback'?' (buyback conviction applied)':''}`);
   if(bm)eventBits.push(`board meeting ${escHtml(bm.date)}${bm.isResults?' — results':''}${bm.date===getSessionDate()?' <b>(today)</b>':''}`);
   if(r.meta?.announceToday)eventBits.push(`announcement filed today: ${escHtml(String(r.meta.announceToday))}`);
+  (r.meta?.fundamentalEvents||[]).slice(0,3).forEach(e=>eventBits.push(`${escHtml(e.subject||e.source||'official filing')} ${escHtml(e.pubDate||'')}${e.link?` <a href="${escHtml(e.link)}" target="_blank" rel="noopener">official filing</a>`:''}`));
   const corpNote=eventBits.length?` <b style="color:var(--amber)">Events:</b> ${eventBits.join('; ')}.`:'';
+  const varNote=r.meta?.nseVar?.totalMarginPct!=null?` NSE EOD margin ${fmt(r.meta.nseVar.totalMarginPct,2)}% (security VaR ${fmt(r.meta.nseVar.securityVarPct,2)}% + ELM ${fmt(r.meta.nseVar.elmPct,2)}%; risk context only).`:'';
+  const bandNote=r.meta?.bandNote?` ${escHtml(r.meta.bandNote)}.`:'';
+  const masterNote=r.meta?.securityMaster?` ISIN ${escHtml(r.meta.securityMaster.isin||'—')}${r.meta.securityMaster.listingDate?`, listed ${escHtml(r.meta.securityMaster.listingDate)}`:''}.`:'';
   const detailNote=(r.contrib||[]).length?'':'<div style="color:var(--amber);font-size:13px;margin-bottom:8px">Restored compact ranking — load files again for the full per-feature breakdown.</div>';
   document.getElementById('radarDetailBody').innerHTML=`${detailNote}<div class="rr-groups">${groups}</div>
-    <div class="rr-read"><b>Exchange check:</b> Series ${escHtml(r.series||'—')}, price band ${r.band??'not supplied'}, status ${escHtml(r.status||'—')}; basket ${r.basketEligible!==false?'eligible':'ineligible'}. Official delivery ${r.meta?.delivery==null?'unavailable':fmt(r.meta.delivery,1)+'%'}, trades ${r.meta?.trades==null?'unavailable':fmt(r.meta.trades,0)}, surveillance flags: ${flags}.${corpNote}<br>
+    <div class="rr-read"><b>Exchange check:</b> Series ${escHtml(r.series||'—')}, price band ${r.band??'not supplied'}, status ${escHtml(r.status||'—')}; basket ${r.basketEligible!==false?'eligible':'ineligible'}. Official delivery ${r.meta?.delivery==null?'unavailable':fmt(r.meta.delivery,1)+'%'}, trades ${r.meta?.trades==null?'unavailable':fmt(r.meta.trades,0)}, surveillance flags: ${flags}.${bandNote}${varNote}${masterNote}${corpNote}<br>
     <b>Feasibility:</b> ${gate} Strongest daily range estimate ${fmt(r.rangePct,2)}%; the session target takes ${fmt(r.stretch,2)}× that range. The stock remains ranked either way.${entryNote}<br>
     ${r.stage?`<b>Market-cycle stage:</b> ${radarStagePill(r)} — ${escHtml({1:'silent accumulation (quiet strength before a move)',2:'initial breakout',3:'event day (move may be event-driven)',4:'profit-booking (digesting a recent result)',5:'re-accumulation',6:'second leg'}[r.stage]||'')}.<br>`:''}
     <b>Read:</b> ${escHtml(r.setup||'—')}. Data coverage ${r.quality!=null?fmt(r.quality*100,0)+'%':'—'}, day move ${(r.day??0)>=0?'+':''}${fmt(r.day,2)}%, relative volume ${r.relvol==null?'unavailable':fmt(r.relvol,2)+'×'}, turnover ${fV(r.turnover)}. Rank is relative, not a literal probability.</div>
@@ -11182,6 +11370,38 @@ function showRadarDetail(sym){
   dlg.showModal();
 }
 function closeRadarDetail(){document.getElementById('radarDetail')?.close();}
+
+function renderPostClose(){
+  const el=document.getElementById('postCloseContent');if(!el)return;
+  const clock=istClock();
+  if(clock.mins>=DAY_END_MIN) runPostCloseAudit();
+  const {today,audit,store}=postCloseAuditStatus();
+  const complete=!!audit,afterClose=clock.mins>=DAY_END_MIN;
+  const candidates=(audit?.candidates||[]);
+  const scorecard=store.scorecard||getPostCloseRuleScorecard(store.audits||{});
+  const stateColor=complete?'var(--green)':afterClose?'var(--amber)':'var(--t3)';
+  const stateText=complete?'Complete for '+today:afterClose?'Waiting for a refreshed post-close ALL NSE.csv':'Arms automatically at 16:00 IST';
+  const candidateRows=candidates.length?candidates.map(c=>`<tr><td>${escHtml(c.label)}</td><td>${c.wins}/${c.n}</td><td style="color:${c.precision>=95?'var(--green)':'var(--t2)'}">${c.precision}%</td><td style="color:var(--amber)">Candidate only</td></tr>`).join('')
+    :`<tr><td colspan="4" style="color:var(--t3)">No predeclared condition currently reaches 95% among resolved picks. That is a valid result; the system does not tune a condition after seeing the answers.</td></tr>`;
+  const ruleRows=scorecard.map(r=>`<tr><td>${escHtml(r.label)}</td><td>${r.sessions}</td><td>${r.wins}</td><td>${r.losses}</td><td>${r.precision==null?'—':r.precision+'%'}</td><td style="font-weight:800;color:${r.status==='ELIGIBLE'?'var(--green)':r.status==='RETIRED'?'var(--red)':'var(--t3)'}">${r.status}</td></tr>`).join('');
+  const rss=NSE_FUNDAMENTAL_META,events=Object.values(NSE_FUNDAMENTALS).reduce((n,a)=>n+(a?.length||0),0);
+  el.innerHTML=`<div style="padding:18px 16px 40px">
+    <div class="m-card" style="margin-bottom:14px"><div style="display:flex;justify-content:space-between;align-items:flex-start;gap:14px;flex-wrap:wrap">
+      <div><h3 style="margin:0 0 6px">Post-close model audit</h3><div style="font-size:14px;color:var(--t2);max-width:850px">Runs inside the app after 16:00 when the refreshed closing tape is ingested. It grades the cohort exactly as issued, keeps unresolved two-day picks pending, and accumulates the evidence bar without relying on RULES.md or an assistant remembering a routine.</div></div>
+      <div style="font-weight:800;color:${stateColor}">${escHtml(stateText)}</div></div>
+      <div class="kpi-grid" style="margin-top:14px">
+        <div class="kpi-card"><div class="kpi-lbl">Issued</div><div class="kpi-val">${audit?.issued??'—'}</div></div>
+        <div class="kpi-card"><div class="kpi-lbl">Resolved</div><div class="kpi-val">${audit?.resolved??'—'}</div></div>
+        <div class="kpi-card"><div class="kpi-lbl">Rockets</div><div class="kpi-val" style="color:var(--green)">${audit?.rockets??'—'}</div></div>
+        <div class="kpi-card"><div class="kpi-lbl">Pending</div><div class="kpi-val" style="color:var(--amber)">${audit?.pending??'—'}</div></div>
+        <div class="kpi-card"><div class="kpi-lbl">Resolved precision</div><div class="kpi-val">${audit?.precision==null?'—':audit.precision+'%'}</div></div>
+      </div>
+    </div>
+    <div class="m-card" style="margin-bottom:14px"><h3>Today’s ≥95% candidates</h3><p style="color:var(--t3);font-size:13px">Denominator is resolved non-control recommendations only. One session never graduates a rule.</p><div class="scroll-x"><table class="method-table"><thead><tr><th>Condition fixed before grading</th><th>Wins / n</th><th>Precision</th><th>Verdict</th></tr></thead><tbody>${candidateRows}</tbody></table></div></div>
+    <div class="m-card" style="margin-bottom:14px"><h3>Cumulative graduation tracker</h3><p style="color:var(--t3);font-size:13px">Eligible requires at least 3 wins across at least 2 audited sessions, no more than 1 contradiction, and at least 95% aggregate precision. Eligibility is a build-review flag—not automatic scoring authority.</p><div class="scroll-x"><table class="method-table"><thead><tr><th>Condition</th><th>Sessions</th><th>Confirms</th><th>Contradictions</th><th>Precision</th><th>Status</th></tr></thead><tbody>${ruleRows}</tbody></table></div></div>
+    <div class="m-card"><h3>Official NSE fundamental context</h3><p style="color:var(--t2);font-size:14px">${rss?.ok?`${events} symbol-linked filing events loaded from ${rss.feeds||0} official RSS indexes; snapshot ${escHtml(rss.snapshot||'saved locally')}.`:`${rss?.why?`RSS unavailable: ${escHtml(rss.why)}.`:'The local helper will fetch and snapshot the official indexes on the next load.'}`} Filings remain context and event-risk evidence; they do not change rank or score without forward validation.</p></div>
+  </div>`;
+}
 
 let APPLY_FILTERS_TIMER=null;
 function scheduleApplyFilters(){
@@ -11788,6 +12008,19 @@ function keepFullerTradebookHistory(candidate,sourcePath,lastModified){
   return {stats,persist:{...candidate,sourcePath,lastModified},meta,ignored:false};
 }
 
+async function readNseArchiveEntryText(filename,entry){
+  const fn=String(filename||'').toLowerCase();
+  if(fn.endsWith('.gz')){
+    if(typeof DecompressionStream==='undefined') throw new Error('This browser cannot decompress the NSE .gz security master.');
+    const bytes=await entry.async('uint8array');
+    const stream=new Blob([bytes]).stream().pipeThrough(new DecompressionStream('gzip'));
+    return new TextDecoder('utf-8').decode(await new Response(stream).arrayBuffer());
+  }
+  return entry.async('string');
+}
+function isNseTextReport(filename){
+  return /\.(?:csv|txt|dat)$/i.test(filename)||/\.csv\.gz$/i.test(filename);
+}
 async function hydrateSessionCSVsFromWorkspace(){
   if(!FS.hasFolder()||!FS.readUploadText) return 0;
   const [csvFiles,zipEntry,scannerEntry]=await Promise.all([
@@ -11821,8 +12054,8 @@ async function hydrateSessionCSVsFromWorkspace(){
             try{const buf=await entry.async('arraybuffer');await _hydrateZipEntries(await JSZip.loadAsync(buf));}catch(e){console.warn('Nested zip error:',fn,e);}
             continue;
           }
-          if(fn.endsWith('.csv')||fn.endsWith('.txt')){ // .txt covers the PR-zip bm/an event files (v554)
-            const text=await entry.async('string');
+          if(isNseTextReport(fn)){
+            const text=await readNseArchiveEntryText(fn,entry);
             const type=detectNSE(fn,text);
             if(type) updateFileLoadStatusByNseType(type,'loaded');
           }
@@ -11832,6 +12065,7 @@ async function hydrateSessionCSVsFromWorkspace(){
       updateFileLoadStatus('Reports-Daily-Multiple.zip','loaded');
     }catch(e){console.warn('hydrateSessionCSVsFromWorkspace: ZIP parse failed',e);}
   }
+  await refreshNseFundamentals();
   let scannerHydrated=false;
   if(scannerEntry?.file){
     try{scannerHydrated=await processScannerUpload(scannerEntry.file,'stock',{restoreOnly:true});}
@@ -12432,6 +12666,7 @@ function switchTab(n){
   updateTabCounts();
   if(n===1) renderMethodology();
   if(n===2) renderPerformance();
+  if(n===3) renderPostClose();
   // v1101: a hidden grid has clientWidth 0, so balancing on the tab it lives in is the only moment
   // the column count can actually be computed. rAF lets the tab paint first.
   requestAnimationFrame(balanceGrids);
@@ -12439,8 +12674,10 @@ function switchTab(n){
 function updateTabCounts(){
   const c0=document.getElementById('tabCount0');
   const c1=document.getElementById('tabCount1');
+  const c3=document.getElementById('tabCount3');
   if(c0) c0.textContent=FILT.length?'('+FILT.length+')':'';
   if(c1) c1.textContent=RADAR.features.length?'('+RADAR.features.length+')':'';
+  if(c3){const s=postCloseAuditStatus();c3.textContent=s.audit?'(✓)':'';}
 }
 
 // ── NSE Direct Fetch ──
@@ -12473,6 +12710,8 @@ function setLoading(on,msg){
 }
 function getExpectedInputFiles(){
   const nd=nseDate();
+  const c=istClock(),todayDd=String(c.day).padStart(2,'0')+String(c.month).padStart(2,'0')+String(c.year);
+  const currentReportDate=c.mins>=DAY_END_MIN?todayDd:nd.ddmmyyyy;
   const zipKey='Reports-Daily-Multiple.zip';
   const canonical=[
     {key:'ALL NSE.csv',label:'📈 ALL NSE.csv',match:name=>isScannerCsvName(name)},
@@ -12491,6 +12730,9 @@ function getExpectedInputFiles(){
     {key:'sec_bhavdata_full_'+nd.ddmmyyyy+'.csv',label:'sec_bhavdata_full_'+nd.ddmmyyyy+'.csv',parent:zipKey,nseType:'bhav'},
     {key:'sec_list_'+nd.ddmmyyyy+'.csv',label:'sec_list_'+nd.ddmmyyyy+'.csv',parent:zipKey,nseType:'price_band'},
     {key:'MA'+nd.ddmmyy+'.csv',label:'MA'+nd.ddmmyy+'.csv (Market Activity)',parent:zipKey,nseType:'market'},
+    {key:'C_VAR1_'+currentReportDate+'_6.DAT',label:'C_VAR1_'+currentReportDate+'_6.DAT (VaR EOD)',parent:zipKey,nseType:'var_eod'},
+    {key:'eq_band_changes_'+currentReportDate+'.csv',label:'eq_band_changes_'+currentReportDate+'.csv',parent:zipKey,nseType:'band_change'},
+    {key:'NSE_CM_security_'+nd.ddmmyyyy+'.csv.gz',label:'NSE_CM_security_'+nd.ddmmyyyy+'.csv.gz',parent:zipKey,nseType:'security_master'},
   ];
   return {canonical,nse,all:[...canonical,...nse]};
 }
@@ -12709,6 +12951,7 @@ function applySavedFiltersForMode(mode){
         recommendations
       };
       recordRecommendationOutcomeScan(window._lastStockOutcomeScan);
+      runPostCloseAudit(); // inert before 16:00; after close the refreshed tape completes today's native audit
       recordDisplayedEntryCohort({date:uploadSession,candidates:eligibleCandidates});
       // Indicator-orientation watch: fire-and-forget so compression never delays rankings.
       recordIndicatorWatch(uploadSession).catch(e=>console.warn('indicator watch record failed',e));
@@ -12917,7 +13160,7 @@ async function processFiles(files,sourceLabel,opts={}){
   // Upload CHANGED canonical input files to Drive in the background. Rankings are built
   // from the selected local files immediately, because the market does not wait for Drive.
   saveInputsInBackground(files,{silent});
-  NSE_BHAV={};NSE_52W={};NSE_SURV={};NSE_BULK={};NSE_BLOCK={};NSE_PRICE_BAND={};NSE_DEAL_NET={};NSE_CORP_ACTION={};NSE_BOARD_MEETING={};NSE_ANNOUNCE={};NSE_MARKET=null;NSE_INDEX={};NSE_NAME_TO_SYM={};NSE_BAND_HIT={};NSE_NEW_HL_BYNAME={};NSE_INDEX_GROUP_BYNAME={};NSE_INDEX_GROUP_BYSYM={};MARKET_REGIME=null;NSE_STATUS={};NSE_SERIES={};NSE_DEPTH={};NSE_DEPTH_META=null;KITE_TOKEN={};
+  NSE_BHAV={};NSE_52W={};NSE_SURV={};NSE_BULK={};NSE_BLOCK={};NSE_PRICE_BAND={};NSE_VAR={};NSE_NEXT_BAND={};NSE_SECURITY_MASTER={};NSE_DEAL_NET={};NSE_CORP_ACTION={};NSE_BOARD_MEETING={};NSE_ANNOUNCE={};NSE_MARKET=null;NSE_INDEX={};NSE_NAME_TO_SYM={};NSE_BAND_HIT={};NSE_NEW_HL_BYNAME={};NSE_INDEX_GROUP_BYNAME={};NSE_INDEX_GROUP_BYSYM={};MARKET_REGIME=null;NSE_STATUS={};NSE_SERIES={};NSE_DEPTH={};NSE_DEPTH_META=null;KITE_TOKEN={};
   let tvFile=null,nseZip=null,holdFile=null,posFile=null,ordFile=null,tbFile=null,holidayFile=false,holidayFileName='',depthFile=null,kiteFile=null;
   for(const f of files){
     const name=inputNameLower(f.name);
@@ -12981,9 +13224,9 @@ async function processFiles(files,sourceLabel,opts={}){
             continue;
           }
           // CSV inside the NSE reports ZIP — names inside this ZIP contain dates.
-          if(fn.endsWith('.csv')||fn.endsWith('.txt')){ // .txt covers the PR-zip bm/an event files (v554)
+          if(isNseTextReport(fn)){
             setLoadMsg('Parsing '+fn+'...');
-            const text=await entry.async('string');
+            const text=await readNseArchiveEntryText(fn,entry);
             const type=detectNSE(fn,text);
             if(type) updateFileLoadStatusByNseType(type,'loaded');
           }
@@ -12996,6 +13239,7 @@ async function processFiles(files,sourceLabel,opts={}){
       try{ recordPriceHistoryFromBhav(); }catch(e){ console.error('price history:',e); }
     }catch(e){console.error('ZIP error:',e);}
   }
+  await refreshNseFundamentals();
 
   if(!tvFile&&!nseZip&&!holdFile&&!posFile&&!ordFile&&!tbFile&&!holidayFile){
     if(!silent){

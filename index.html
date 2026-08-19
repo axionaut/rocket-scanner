@@ -24,6 +24,7 @@
    <div class="tab act" onclick="switchTab(0)">📋 Rankings <span id="tabCount0" style="font-size:12px;opacity:.7"></span></div>
    <div class="tab" onclick="switchTab(1)">🔬 Methodology <span id="tabCount1" style="font-size:12px;opacity:.7"></span></div>
    <div class="tab" onclick="switchTab(2)">📈 Performance</div>
+   <div class="tab" onclick="switchTab(3)">🌙 Post-close <span id="tabCount3" style="font-size:12px;opacity:.7"></span></div>
   </div>
   <input type="file" id="brainIn" accept=".json" style="display:none" onchange="importBrain(event)">
   <div style="position:relative;display:flex;align-items:center">
@@ -92,6 +93,7 @@
  </div>
  <div class="tp" id="tab1"><div class="meth" id="methContent"></div></div>
  <div class="tp" id="tab2"><div class="meth" id="perfContent"></div></div>
+ <div class="tp" id="tab3"><div class="meth" id="postCloseContent"></div></div>
 </div><!-- /dash -->
 <button class="go-top" id="goTop" onclick="window.scrollTo({top:0,behavior:'smooth'})" title="Go to top">▲</button>
 </div><!-- /app -->
