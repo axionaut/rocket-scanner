@@ -1,5 +1,5 @@
-const BUILD_TS='2026-08-20 14:35 IST'; // release build time (IST)
-const APP_VERSION=1207; // v1207: a veto that cannot fire is not a pass, and the unfilled half of a working order is not nothing.
+const BUILD_TS='2026-08-20 15:31 IST'; // release build time (IST)
+const APP_VERSION=1208; // v1208: the score stops burying the movers, the post-close routine learns from the day's winners, and app.js loses 2,945 lines of narrative comment.
 // v1093: a baseline reward:risk MEASURED on the cross-section (last completed bhav session) instead of learned from the owner's own fills - reported on every row, deliberately not enforced. Includes v1092: position size split by Radar score / stop distance, so equally-scored names carry equal RUPEE risk, plus an opt-in Risk /trade cap.
 // v556: parse the NSE Market Activity Report (MA<date>.csv) — official Nifty %, advances/declines and sector index moves shown as market CONTEXT in the status bar (EOD data, display only, never fed into per-row scoring); MA added to the ℹ️ file manifest.
 // v555 market-cycle stage awareness (stateless, self-calibrating): per-row stage label (1 accumulation · 2 breakout · 3 event · 4 profit-booking · 5 re-accumulation · 6 second-leg); a quiet-accumulation signal (conjunction-of-percentiles) injected via the rocket-diagnostic weighting; sell-the-news decay off Recent earnings date (horizon = review days). v1065 makes the market-breadth gauge an entry-eligibility input while still never changing ranking.
@@ -8,14 +8,6 @@ const PRICE_BAND_BLOCK_BUFFER_PCT=0.15; // Treat rounded 4.9/9.9/19.9 rows as ef
 const BASKET_CASH_RESERVE_RS=1; // Leave a rupee for broker-side tax/rounding differences.
 const MAX_TURNOVER_PARTICIPATION=0.001; // Market-impact rail: never exceed 0.10% of a stock's daily rupee turnover.
 const BASKET_MARKET_BUDGET_BUFFER_PCT=0.25; // Sizing cushion only; exported buys remain MARKET orders.
-// v1086's `RECOMMEND_MAX_RANK = 10` was RETIRED in v1091 (owner): the recommendation bar is now
-// score QUALITY, not rank position — see RECOMMEND_MIN_SCORE, derived from RADAR_SCORE_BANDS.
-// A rank cap hands over ten names regardless of how good they are; the green band lets the count
-// follow the market. Do not reintroduce a positional cap.
-// v1113: the stretch penalty measures the target against a typical day's range instead of the
-// retired 10% same-day rocket bar (see radarAnalyze). Switchable ONLY so the two arms can be scored
-// against byte-identical input inside one page load — the live scanner file changes between harness
-// runs, so a before/after diff across runs cannot separate the change from the tape. Never ship false.
 let RADAR_STRETCH_USE_TARGET=true;
 const SYSTEM_TRADE_START_DATE='2026-04-01'; // Adaptive stats use trades closed from this date onward.
 const HARVEST_DAILY_NET_GOAL_RS=15000; // North-star daily pure-profit goal, never a forced capital assumption.
@@ -110,10 +102,6 @@ let FILE_LOAD_STATUS={source:null,when:null,files:[]};
 let RADAR={headers:[],matrix:[],features:[],ids:{},rockets:0,continuationCount:0,ms:0,sourceNote:'',scoredAt:null};
 const SCANNER_STORE='rs_filters';
 const SHARED_FILTER_STORE='rs_filters_shared';
-// The account-level trading inputs (Capital ₹, Max Alloc ₹, manual Target anchor %) affect execution
-// and must be identical on every device, so they ride the Drive-synced brain — NOT only
-// per-device localStorage (v549 fix: a manual target set on one device now reaches the
-// others). localStorage stays as the offline mirror.
 const TRADE_INPUTS_STORE='rs_trade_inputs_v1';
 let _lastTradeInputSig=''; // gate brain writes to genuine trade-input changes, not every keystroke
 const ALL_STORE='rs_data';
@@ -131,10 +119,6 @@ const RECOMMEND_OUTCOME_STORE='rs_recommend_outcomes_delta_v1';
 const POST_CLOSE_AUDIT_STORE='rs_post_close_audit_v1';
 const NSE_FUNDAMENTAL_STORE='rs_nse_fundamentals_v1';
 const RECOMMEND_MIN_PROGRESS_FRACTION=0.25;
-// v1097 (owner): the daily record of money left on the table. Latest Session computes the figure for
-// ONE session only; the target nudge needs it across sessions, so each session's proceeds-weighted
-// figure is persisted here as it is rendered. Bounded window — the pool must track the current
-// regime, not average away a month of it.
 const LEFT_ON_TABLE_STORE='rs_left_on_table_v1';
 const LEFT_ON_TABLE_KEEP_SESSIONS=30;   // how much history is retained
 const LEFT_ON_TABLE_POOL_SESSIONS=10;   // how much of it the pool actually reads
@@ -142,17 +126,6 @@ const LEFT_ON_TABLE_POOL_SESSIONS=10;   // how much of it the pool actually read
 // retained any price history — NSE_BHAV is rebuilt from the current zip on every load — which is why
 // v1097 had to approximate "the drift into the results" from a 1-week column.
 const PRICE_HISTORY_STORE='rs_price_history_v1';
-// v1184: RETENTION WAS THE REASON THE HISTORY NEVER GREW (owner, 2026-08-18: *"why does
-// nse_price_history have only 8 sessions? Didn't we implement this so many days ago? Please check if
-// it's skipping days"*). It was NOT skipping - every trading session since v1098 shipped was
-// present, 08-06 through 08-17 with nothing missing. It was being TRIMMED to 8 on every save, a cap
-// sized in v1098 for a 3-session drift measure and never revisited when this store became the
-// intended source for multi-day features. **The `discovery-from-bhav-history` trigger registered an
-// hour before this was found asks for 20 sessions and could never have fired.**
-//
-// 40 sessions is two trading months: enough for the 20-day features the upStreak work needs, with
-// room for a longer window later. Measured cost: 73 KB per session, so 40 sessions is 2.85 MB
-// against a 9.5 MB brain - the store grows, but by a knowable amount rather than an open-ended one.
 const PRICE_HISTORY_KEEP_SESSIONS=40;
 const PRE_RESULTS_DRIFT_SESSIONS=3;     // the owner's 2-3 day window, measured to the last close before today
 const ENTRY_OUTCOME_STORE='rs_entry_outcomes_delta_v1';
@@ -295,12 +268,6 @@ let ORDERS_TODAY=null; // [{symbol,type,qty,price,time,product,status,totalQty,p
                        // order still working in the market (v1207).
 let TRADEBOOK_BUY_FILLS=[]; // Consolidated BUY fills available for executed-entry feedback matching.
 
-// ══════════════════════════════════════════════════
-// CLOUD STORAGE (Google Drive appDataFolder)
-// Brain and canonical input files are kept in the
-// user's private per-app Drive storage. The engine
-// continues to persist through the same FS contract.
-// ══════════════════════════════════════════════════
 const FS = (() => {
   const BRAIN_FILE = 'rocket_brain.json';
   const CLIENT_ID_STORE = 'rs_google_client_id';
@@ -1242,21 +1209,9 @@ function openTradingViewChart(sym){
   const url=`https://www.tradingview.com/chart/?symbol=NSE:${encodeURIComponent(symbol)}`;
   window.open(url,'_blank','noopener,noreferrer');
 }
-// ONE symbol cell for every table that names a stock (owner, v1070): the stock NAME opens the
-// TradingView chart in a new tab, the ROW opens the Radar scoring modal. stopPropagation is what
-// keeps the two apart. Used by the rankings table, Removed from rankings, Latest Session, Open
-// Positions and Performance Stocks so the interaction is identical wherever a symbol appears —
-// add new symbol surfaces through this helper rather than hand-rolling another cell.
-// Safe unconditionally: openTradingViewChart resolves by symbol, and showRadarDetail no-ops when
-// the symbol is not in the current scan.
 function symbolChartButton(sym,innerHtml=null,extraStyle=''){
   const s=String(sym??'').trim();
   if(!s) return '';
-  // v1142 (owner): "now that we can open zerodha links, replace the tv link with zerodha because
-  // that makes sense." The stock NAME is the trading action, so it opens Kite on that stock and
-  // copies the symbol; TradingView keeps the small secondary button for chart reading. A stock with
-  // no Kite instrument token FALLS BACK to TradingView on the name rather than becoming a dead
-  // click - the token file is optional and the app must work without it.
   const t=KITE_TOKEN[normSym(s)];
   const url=t?`https://kite.zerodha.com/chart/web/ciq/NSE/${encodeURIComponent(normSym(s))}/${t}`:'';
   const onClick=t
@@ -1269,12 +1224,6 @@ function symbolChartButton(sym,innerHtml=null,extraStyle=''){
     +` title="${title}">${innerHtml??escHtml(s)}</button>`
     ;
 }
-// v1139 (owner): open the stock in Zerodha, the way the name already opens TradingView. There is no
-// supported URL that PRE-FILLS a buy dialog without a Kite Connect api_key, and Kite Connect was
-// ruled out (static IP) - so this deep-links to the stock's own Kite chart page, where the B/S
-// buttons sit one click away. The instrument token comes from `api.kite.trade/instruments`, which is
-// PUBLIC: no key, no login. A stock with no token renders nothing rather than a broken link.
-// v1144: retired by owner - the name opens Zerodha and the chart button earned no width back.
 function tvChartButton(sym){
   const s=String(sym??'').trim();
   if(!s) return '';
@@ -1283,11 +1232,6 @@ function tvChartButton(sym){
     +`color:var(--t3);font-size:10px;line-height:14px;cursor:pointer"`
     +` title="Open the TradingView chart for ${escHtml(s)}">TV</button>`;
 }
-// Owner: "If opening the zerodha dialog or anything is not possible, just copy the stock's name to
-// clipboard on its click so I could paste it in zerodha." Both, since the deep link works: the
-// symbol goes to the clipboard AND Kite opens on that stock. If the clipboard is blocked (it needs
-// a user gesture and a secure context) the link still opens, so the button never silently does
-// nothing - and the toast says which of the two actually happened.
 function kiteOpen(sym,url){
   let copied=false;
   try{
@@ -1373,28 +1317,6 @@ function isSurvFlag(v){
   const s=String(v||'').trim();
   return s!==''&&s!=='100';
 }
-// Seed rules — used only when brain has no saved rules yet (first-time setup)
-// ── v1169: THE HARD FILTER IS RESTRICTIONS ONLY ─────────────────────────────────────────────
-// The configured set is a HARD REMOVAL, and it had been seeded with NSE's whole REG1 column list -
-// which mixes two different things. Some columns mean NSE has RESTRICTED trading in the scrip
-// (trade-to-trade settlement, 100% margin, periodic call auction, a tightened band). Others are
-// CRITERIA it publishes about a company: its PE, whether it made a loss, how far the price has
-// travelled in six months.
-//
-// Measured 2026-08-18 on a 1,506-stock tradeable universe: surveillance removed 669, and only 175
-// carried a genuine restriction. **494 stocks were deleted purely on criteria columns** - including
-// the board's own ranks 7, 8, 9, 18, 19, 22, 26, 27, 36 and 38. The two largest removers were
-// "Scrip PE is greater than 50" (525 stocks) and "High low price variation greater than 100perc in
-// previous 6 months" (220) - and the second of those is THE PROFILE OF A ROCKET: it deletes a stock
-// for having doubled. Eight of the freed stocks were up 5%+ that morning.
-//
-// The owner's report was "there are shares which are rising by much, why did our system not pick
-// those and pick these" - and the answer was that it HAD ranked them and surveillance deleted them,
-// leaving whatever survived to be recommended.
-//
-// The criteria columns are NOT discarded: every flagged REG1 column, configured or not, still costs
-// -2 on the score capped at -12 and still shows on the warning badge (SURV_ALL_HITS). They stop
-// being a death sentence and go back to being a penalty, which is what CLAUDE.md always described.
 const SURV_SEED_RULES=[
   {column:'Default',label:'Default'},
   {column:'Insolvency_Resolution_Process(IRP)',label:'Insolvency Resolution Process (IRP)'},
@@ -1409,10 +1331,6 @@ const SURV_SEED_RULES=[
   {column:'Unsolicited_SMS',label:'Unsolicited SMS'},
   {column:'Social Media Platforms',label:'Social Media Platforms'},
 ];
-// The seed only applies to a FRESH brain, and this owner's brain already holds all 22. These keys
-// are therefore retired explicitly on load: a criterion must never remove a stock outright. Adding
-// one back by hand in the Methodology table still works and is still respected - this only undoes
-// the seeding, it does not police the owner.
 const SURV_RETIRED_KEYS=[
   'scrip_pe_is_greater_than_50_4_trailing_quarters',
   'eps_in_the_scrip_is_zero_4_trailing_quarters',
@@ -1473,21 +1391,12 @@ function parseBhavdata(text){
   parseCSV(text).forEach(r=>{
     const sym=normSym(r['SYMBOL']);
     if(!sym||(r['SERIES']||'').trim()!=='EQ')return;
-    // v1093: OPEN/HIGH/LOW are kept as well. They are the LAST COMPLETED session's full bar —
-    // the only complete bar the app has — and the achievability sweep needs a complete bar to ask
-    // "at target T against stop S, what fraction of the market reached T first?". Measuring that on
-    // the live intraday file would understate every hit rate by however much of the day is left.
     NSE_BHAV[sym]={delivPct:num(r['DELIV_PER']),nseVol:num(r['TTL_TRD_QNTY']),
       officialClose:num(r['CLOSE_PRICE']),officialAvg:num(r['AVG_PRICE']),trades:num(r['NO_OF_TRADES']),
       open:num(r['OPEN_PRICE']),high:num(r['HIGH_PRICE']),low:num(r['LOW_PRICE']),
       prevClose:num(r['PREV_CLOSE']),dateStr:(r['DATE1']||'').trim()};
   });
 }
-// ── v1098 dated price history ────────────────────────────────────────────────
-// GAP-ROBUST BY CONSTRUCTION, because this is the same class of multi-day state whose corruption was
-// the v1 failure. Closes are stored under their OWN session date from the bhav copy's DATE1 — never
-// under "today" and never carried forward — and every read demands the exact dates it needs and
-// returns null otherwise. A missed upload therefore yields NO SIGNAL, never a wrong one.
 function nseDateToISO(s){
   const m=String(s||'').trim().match(/^(\d{1,2})-([A-Za-z]{3})-(\d{4})$/);
   if(!m) return null;
@@ -1527,21 +1436,6 @@ function recordPriceHistoryFromBhav(){
   FS.set(PRICE_HISTORY_STORE,out);
   return out;
 }
-// ── R4d POST-RESULTS DIGESTION (RULES.md, graduated 2026-07-30: 5 confirms / 3 sessions / 0
-// contradictions — E26 GANDHAR, E27 TIPSFILMS, E34 D+1 PCBL, E40 SERVOTECH, E42 XPROINDIA) ────
-//
-// The rule: a results-driven ROCKET gives back sharply on the following session even when the
-// reported numbers were good. E42 is the cleanest instance — XPROINDIA's Q1 PAT more than DOUBLED and
-// the first full session after the print sold off 13.2% on 11.5x volume. So the durable action is
-// temporal, not fundamental: do not chase yesterday's results rocket unless it is re-accumulating now.
-//
-// WHAT COUNTS AS A "RESULTS ROCKET" IS SELF-CALIBRATING, not a typed threshold. The stock's move on
-// its own results day is compared against the CROSS-SECTION of every stock's move that same day; a
-// top-decile move is the rocket. That adapts to the tape automatically — on a violent day the bar
-// rises with it — and introduces no constant.
-//
-// FAILS OPEN. Without stored closes for the results day and the session before it, the move is
-// unknown and the rule does nothing. A missed upload yields no signal, never a wrong one.
 function resultsDayMoveContext(resultsDate){
   const raw=FS.get(PRICE_HISTORY_STORE);
   const store=(raw&&typeof raw==='object'&&raw.sessions)?raw.sessions:null;
@@ -1561,26 +1455,6 @@ function resultsDayMoveContext(resultsDate){
   all.sort((a,b)=>a-b);
   return {moves,cut:all[Math.floor(all.length*0.9)],n:all.length,date:resultsDate};
 }
-// ── UP-STREAK: A MULTI-DAY TERM THAT ARMS ITSELF FROM THE DATA IT HAS ────────────────────────
-// Owner, 2026-08-18: *"Think properly of a solution once and implement it right there so that it
-// runs right now...not in 2 weeks, not after 20 sessions... With data growing daily, the program
-// should evolve naturally - not wait for 20 days and then fail because your first guess was wrong."*
-//
-// WHAT IT IS. Consecutive up closes ending at the newest stored session. Measured within cohort on
-// 183 resolved picks it separates at 64.7% (295 pairs, above 50% in 5 of 8 cohorts, leave-one-out
-// 61.2-70.5%), with a hit rate of 9 / 12 / 13 / 27% at 0 / 1 / 2 / 3+ days. For scale the app's own
-// score sat at 43% when v1127 measured it. `pathEff` - the feature reasoning favoured - measured
-// 49.3%, exactly nothing, which is why this is measured rather than argued.
-//
-// WHERE IT COMES FROM, AND WHY THAT MATTERS. NOT the per-stock daily files bought from Kite: those
-// exist only for stocks the app has already fetched, i.e. the ones already at the top of the board,
-// so using them would advantage exactly the rows that have them (the v1139 trap). `rs_price_history_v1`
-// is the free bhav-copy close for the WHOLE market - 2,624 symbols against 284 purchased files,
-// growing a session per upload at zero request cost. Verified before wiring: it reproduces the
-// Kite-derived streak at 95.0% exact / 97.9% within one day across 281 overlapping symbols.
-//
-// A short store CENSORS the streak - 8 stored sessions cannot show a 9-day run - which is harmless
-// because the signal is monotone and saturates by 3, and it un-censors itself as the store grows.
 function buildUpStreakMap(){
   const raw=FS.get(PRICE_HISTORY_STORE);
   const store=(raw&&typeof raw==='object'&&raw.sessions)?raw.sessions:null;
@@ -1602,21 +1476,6 @@ function buildUpStreakMap(){
   return {map:out,sessions:dates.length,asOf:dates[dates.length-1]};
 }
 
-// HOW MUCH IT COUNTS IS MEASURED LIVE, EVERY SESSION, FROM THE APP'S OWN RESOLVED PICKS.
-// This is the whole point: there is no trigger to wait for and no threshold to cross. The weight IS
-// the measurement, so the term is inert on the day it ships if the data does not support it, arms
-// itself as picks resolve, strengthens if it keeps separating, and DISARMS ON ITS OWN if it stops.
-//
-//   w = clamp(2 x (concordance - 0.5), 0, 1) x pairs/(pairs + priorPairs)
-//
-// The first factor is 0 at 50% (no information) and 1 at 100%. The second is confidence by volume,
-// shrunk toward zero with the MEAN PAIRS PER COHORT as the prior weight - the same self-derived
-// shrinkage the timing windows use, so no constant is typed anywhere in this function.
-//
-// CONCORDANCE IS MEASURED WITHIN COHORT (v1127/v1134). A cohort is one snapshot, so comparing across
-// cohorts compares TIMES OF DAY - which is exactly how a 41pp "extension predicts continuation"
-// result turned out to be an artefact. Control rows (v1128) are excluded: they are evidence about
-// score bands, not recommendations.
 function measureFieldEdge(field,opts){
   const st=FS.get(RECOMMEND_OUTCOME_STORE);
   const issues=(st&&st.issues)?st.issues:null;
@@ -1645,19 +1504,6 @@ function measureFieldEdge(field,opts){
   return {field,w,conc,pairs,cohorts,why:null};
 }
 function measureUpStreakEdge(){ return measureFieldEdge('upStreak'); }
-// BACKFILL: THE EVIDENCE ALREADY EXISTS, SO USE IT TODAY RATHER THAN WAITING TWO DAYS FOR IT.
-//
-// A term whose weight comes from resolved picks starts at zero weight on the day it ships, because
-// no pick carries the field yet - which is "wait for the data" wearing a different hat. It does not
-// have to be: `rs_price_history_v1` holds dated closes for the WHOLE market, so for any pick issued
-// inside the stored window the streak AS OF THE DAY BEFORE ISSUE is recoverable exactly.
-//
-// NO LOOKAHEAD. The streak is counted from closes STRICTLY BEFORE the issue date - at 11:00 on the
-// issue day the only completed daily bars are through yesterday. A pick whose issue date falls
-// outside the stored window is left alone rather than approximated.
-//
-// Idempotent: it only fills a pick that has no `upStreak`, so it cannot run twice, and it never
-// touches any other field on the pick. Runs once per load, off the render path.
 function backfillPickUpStreak(){
   const raw=FS.get(PRICE_HISTORY_STORE);
   const store=(raw&&typeof raw==='object'&&raw.sessions)?raw.sessions:null;
@@ -1710,14 +1556,6 @@ function getResultsDayMove(sym,resultsDate){
   return m===undefined?null:{movePct:m,topDecileCut:+c.cut.toFixed(2),wasRocket:m>=c.cut,universe:c.n};
 }
 
-// The move over the N sessions ENDING AT THE LAST CLOSE BEFORE `beforeDate` — i.e. the drift INTO
-// today, with today's own reaction excluded outright rather than subtracted back out.
-//
-// v1097 approximated this as (week% - day%). That was wrong twice: percentage changes COMPOUND so the
-// subtraction overstated the drift by up to 0.69pp, and the error scaled with today's move, meaning it
-// inflated precisely the big movers whose drift the threshold is measured from; and TradingView's
-// "1 week" is ~5 sessions, so a stock that jumped once five days ago and then went flat was
-// indistinguishable from one that rose steadily for three. Both are fixed here.
 function buildDriftIntoEventMap(beforeDate,sessions=PRE_RESULTS_DRIFT_SESSIONS){
   const raw=FS.get(PRICE_HISTORY_STORE);
   const store=(raw&&typeof raw==='object'&&raw.sessions)?raw.sessions:null;
@@ -1735,19 +1573,6 @@ function buildDriftIntoEventMap(beforeDate,sessions=PRE_RESULTS_DRIFT_SESSIONS){
   return {map,sessionsUsed:sessions,from,to};
 }
 
-// ── v1099 POST-SELL EXTREME (owner) ──────────────────────────────────────────
-// "It should see if and how much the stock moved and in what direction after I sold it. The
-// highest/lowest point post-sell is what drives the number."
-//
-// v1095 answered this with the CURRENT price, so a stock that ran 8% past the exit and faded back
-// reported nothing left on the table. The peak was never looked at. This walks the stored daily bars
-// strictly AFTER the sell date, then folds in today's live extremes from the scanner row.
-//
-// RESOLUTION IS HONEST AND LABELLED. Later sessions are exact — a full daily bar is entirely
-// post-sell. The SELL DAY itself is an upper bound, because no input carries an intraday series and
-// the day's high may have printed before the fill. Note this is exact rather than approximate for a
-// LIMIT sell (the basket's own exits): price can only reach the limit once, so anything above it
-// occurred at or after the fill. `resolution` says which case a row is in; nothing is blurred.
 function getPostSellExtremes(sym,sellDate,sellTime=null){
   const s=normSym(sym);
   const out={high:null,low:null,sessions:0,includesSellDay:false,exact:true,from:null,to:null};
@@ -1779,10 +1604,6 @@ function getPostSellExtremes(sym,sellDate,sellTime=null){
       if(useLo>0) out.low =out.low ==null?useLo:Math.min(out.low ,useLo);
     }
     if(scanDate===sellDate){
-      // ── v1120: the sell day is now SPLIT at the exit instead of folded in whole ────────────────
-      // v1099 took the entire sell-day bar and labelled it an upper bound. That reported money left
-      // on the table for highs that printed BEFORE the exit — GNA at Rs 592 with its high 48 minutes
-      // earlier. The high-water path (v1120) resolves it: only a NEW high after the sell counts.
       const w=getPostSellHighFromWatch(s,sellDate,sellTime);
       if(w){
         if(w.advanced&&w.postSellHigh>0){
@@ -1913,19 +1734,6 @@ function getPriceBandBlockReason(s){
   if(pc!=null&&isFinite(pc)&&pc>=band-PRICE_BAND_BLOCK_BUFFER_PCT) return `Near ${band}% NSE price band`;
   return '';
 }
-// v1081 (owner): how much room is left before the stock locks at its upper circuit.
-//
-// The previous close is DERIVED from the scanner's own price and day% rather than read from the
-// bhav copy, deliberately: the band is judged against the same two numbers the rest of the row is
-// scored on, so the arithmetic cannot disagree with itself if the zip is a session behind. Verified
-// 2026-07-30 on SMLMAH — derived prev close Rs 4,566.00 on a 20% band gives an upper circuit of
-// Rs 5,479.20, which is EXACTLY the day's observed high, to the paisa.
-//
-// `refPrice` should be the BUY price (LTP + BASKET_MARKET_BUDGET_BUFFER_PCT), not the last price, so
-// the runway is measured from where the order would actually fill. That is what supplies the
-// slippage cushion the owner asked for, using the buffer the app already owns rather than a new
-// constant. Measured the same day: SMLMAH exported at Rs 5,435 and filled at Rs 5,439.82 — 0.09%,
-// comfortably inside the 0.25% buffer.
 function getUpperCircuitInfo(row,refPrice=null){
   const band=row?.price_band_pct??getNSEPriceBandPct(row?.symbol);
   if(!(band!=null&&isFinite(band)&&band>0)) return null;   // no band on file: fail open
@@ -1937,26 +1745,6 @@ function getUpperCircuitInfo(row,refPrice=null){
   const ref=Number(refPrice)>0?Number(refPrice):px;
   return {band,prevClose,ucPrice,refPrice:ref,runwayPct:(ucPrice/ref-1)*100};
 }
-// v1083 (owner): the STATISTICAL ceiling, the sibling of getUpperCircuitInfo's regulatory one.
-//
-// How much higher can this stock plausibly trade today? A stock's typical daily travel is
-// `rangePct` (the strongest of ADR / ATR-1d / volatility-1d / weekly-ATR÷√5 — the same estimate the
-// 10%-stretch penalty uses), so the plausible session ceiling is the day's LOW plus one typical
-// day's range. Runway is then measured from the buy price exactly as it is for the circuit.
-//
-// Measured from the LOW, not from the realised high−low span, and that choice matters: a stock that
-// ran up, faded back and is now sitting near its low has "spent" its range under a high−low measure
-// while still having room to travel upward, and blocking it would be wrong. Anchoring on the low
-// asks the only question a long entry cares about — how much further UP can it go — and a stock
-// grinding steadily upward all session correctly runs out of ceiling while a whipsawed one does not.
-//
-// Measured 2026-07-30 midday: the top 20 had consumed 86% of expected range (8.37% used of 9.78%),
-// and 14 of 20 could not travel the 1.9% target with what remained (ASIANENE 0.11% left, UNIPARTS
-// 0.11%, SONACOMS 0.28%). The scorer picks the most volatile names in the market — rank 1-20 median
-// range 9.78% vs 4.06% deep in the list — and then recommends them once the move is spent.
-//
-// Fails OPEN when the low or the range estimate is missing. At 09:15 the low sits at ~price, so the
-// ceiling is a full range above and nothing is blocked — the morning path is untouched by design.
 function getSessionCeilingInfo(row,refPrice=null){
   const low=Number(row?.low1d), rangePct=Number(row?.rangePct);
   if(!(low>0)||!(rangePct>0)) return null;
@@ -2050,11 +1838,6 @@ function parseDeal(text,map){
     else if(side==='SELL'){NSE_DEAL_NET[sym]=(NSE_DEAL_NET[sym]||0)-qty;}
   });
 }
-// PR-zip corporate-action file bc<ddmmyyyy>.csv (v552, WS3). Columns:
-// SERIES,SYMBOL,SECURITY,RECORD_DT,BC_STRT_DT,BC_END_DT,EX_DT,ND_STRT_DT,ND_END_DT,PURPOSE
-// (EX_DT is already YYYY-MM-DD). Equities only. Classifies each action so the scorer can
-// (R5) neutralise a mechanical ex-date move (demerger/split/bonus/rights/material dividend)
-// and (R2) reward a buyback — both statelessly, from the same-day event, no rolling state.
 function parseCorpActions(text){
   parseCSV(text).forEach(r=>{
     const series=String(r['SERIES']||'').trim().toUpperCase();
@@ -2097,12 +1880,6 @@ function parseAnnouncements(text){
     if(!NSE_ANNOUNCE[sym])NSE_ANNOUNCE[sym]=parts.slice(1).join(' : ').replace(new RegExp('^'+sym+'\\b\\s*','i'),'').trim().slice(0,120);
   });
 }
-// PR/daily-zip Market Activity Report MA<ddmmyyyy>.csv (v556). NSE end-of-day market summary:
-// date, index table (name + prev-close/open/high/low/close/gain-loss), ADVANCES/DECLINES, market
-// totals. Parsed for DISPLAY CONTEXT only (it is EOD data, so during a live intraday scan it is the
-// prior session) — never fed into the same-day per-row scoring, to avoid a timeframe mismatch.
-// -- v1076 PR-zip parsers (surveyed 2026-07-29, RULES.md Appendix E) ----------
-// These NSE files contain no quoted commas, so a plain split is safe and much cheaper.
 function _nseCells(line){return String(line||'').split(',').map(c=>c.trim());}
 // pd<ddmmyyyy>.csv - the same payload as pr but WITH a SYMBOL column, so it serves two purposes:
 // IND_SEC='Y' rows give index OHLC + 52-week range (Nifty 50, Midcap, Bank, and INDIA VIX), and the
@@ -2121,11 +1898,6 @@ function parsePdIndexAndNames(text){
     const name=(f[iSec]||'').trim(); if(!name) continue;
     const sym0=iSym>=0?normSym(f[iSym]):'';
     const isConstituent=iInd>=0&&(f[iInd]||'').toUpperCase()==='Y';
-    // CRITICAL: IND_SEC='Y' does NOT mark an index row — it marks an index CONSTITUENT.
-    // In pd, 139 rows are true indices (IND_SEC=Y, blank SERIES, NO SYMBOL) and a further 50 are
-    // Nifty 50 member EQUITIES (IND_SEC=Y, SERIES=EQ, WITH a symbol). Keying on IND_SEC alone
-    // classified TCS and 49 other large caps as indices and dropped them from the name map, which
-    // is why Nifty 50 membership resolved to zero. An index row is one with NO SYMBOL.
     if(!sym0){
       if(!isConstituent) continue;
       const close=num(f[iClose]),prev=num(f[iPrev]),hi=num(f[iHi]),lo=num(f[iLo]);
@@ -2155,10 +1927,6 @@ function parseBandHits(text){
     if(sym&&(hl==='H'||hl==='L')) NSE_BAND_HIT[sym]=hl;
   }
 }
-// hl<ddmmyyyy>.csv - securities that made a NEW 52-week high or low. Keyed on the padded security
-// NAME, so it is stored BY NAME and resolved through NSE_NAME_TO_SYM at read time: zip members
-// arrive in arbitrary order, and resolving eagerly here would silently drop every row when hl
-// happens to parse before pd.
 function parseNewHighLow(text){
   const lines=String(text||'').split(/\r?\n/).filter(Boolean);
   const head=_nseCells(lines[0]||'').map(h=>h.toUpperCase());
@@ -2210,22 +1978,6 @@ function getIndexGroupMap(){
   Object.entries(NSE_INDEX_GROUP_BYSYM).forEach(([sym,g])=>{out[sym]=g;});
   return out;
 }
-// v1076 MARKET REGIME. Assembled from the index rows (Nifty and India VIX with their own 52-week
-// ranges), the official Market Activity advances/declines, and live intraday breadth.
-// It is deliberately NOT a scoring input. It is stamped onto every recorded outcome so that D1
-// (ignition vs composite) and D4 (extension predicts continuation) can be evaluated WITHIN a regime
-// instead of pooled: D4 was measured on a tape where India VIX sat at the 19th percentile of its own
-// 52-week range, which is exactly the condition that flatters momentum continuation. Averaging that
-// with a stressed tape produces a number describing neither.
-// The label is a percentile of VIX's OWN 52-week range, so no fixed VIX level is hard-coded.
-// ── v1088: LIVE Nifty 50, computed from its own constituents ──────────────────────────────────
-// The index rows in the daily NSE zip are END-OF-DAY, so during a live session `Nifty 50` is
-// YESTERDAY'S close — a static number presented as market status (owner, 2026-07-31). The scanner
-// file, by contrast, is a live export, and `NSE_INDEX_GROUP_BYSYM` identifies the 50 constituents
-// by SYMBOL (v1076). So the index move is reconstructed here from the live rows: a
-// FREE-FLOAT-UNAWARE but market-cap-weighted mean of constituent day moves, which is how the index
-// itself is built and tracks it closely. Reported with its constituent count so partial coverage
-// is visible rather than silently wrong; falls back to the EOD value when membership is unknown.
 function buildLiveNiftyProxy(rows){
   // Only an OMITTED argument falls back to the global universe. An explicitly empty array must
   // yield null — otherwise "compute this for no rows" silently returns the whole market.
@@ -2317,39 +2069,8 @@ function percentileValue(values,pct){
   if(!sorted.length) return null;
   return sorted[Math.min(sorted.length-1,Math.max(0,Math.floor((sorted.length-1)*pct)))];
 }
-// ── v1085: THE ROCKET DEFINITION ───────────────────────────────────────────────────────────────
-// Owner, 2026-07-31, replacing "same-day move >= 10%" outright and knowingly departing from the
-// same-day core philosophy:
-//
-//     A rocket is a stock that rises to ITS OWN TARGET within 2 trading days (the issue day and
-//     the next, skipping weekends and NSE holidays) WITHOUT first falling to ITS OWN STOP.
-//
-// The stop clause is the point of the change. The owner's complaint is that picks dip through the
-// stop and only then run to target, which books a loss and forfeits the move — which is also why
-// v1083 stopped exporting a stoploss leg. Under the old bar that pick scored as a success; under
-// this one it does not, so the measurement finally agrees with the P&L.
-//
-// THIS LABEL IS FORWARD-LOOKING AND PATH-DEPENDENT, WITH TWO HARD CONSEQUENCES.
-// (1) It cannot exist at scan time, so it can never set a feature's direction or weight in a
-//     same-day scorer. Any same-day cohort that stood in for it would be a restatement of today's
-//     move — the v1083 label leak — and it would be far worse now, because this label is ~51x
-//     denser (measured on the 2026-07-30 tradeable universe, n=1418: day-1 target-before-stop
-//     fires on 25.2% of rows against 0.49% for the >=10% bar), so it would clear `minObs` easily
-//     and re-arm every effect. `radarAnalyze` therefore holds all feature effects at 0; see there.
-// (2) It is resolved from daily bars, so within ONE day the ORDER of the two barrier touches is
-//     unknowable. Measured: only 2 of 1418 rows (0.14%) touch both in a day, because the stop
-//     (median 5.24%) sits far outside the target (~1.9%). Those are recorded as 'ambiguous' and
-//     counted as NOT rockets — conservative in the direction of the owner's complaint — and the
-//     count is kept so the assumption stays auditable rather than silent.
 const ROCKET_HORIZON_DAYS=2; // the issue day + the next trading day
 const ROCKET_OUTCOME={ROCKET:'rocket',STOPPED:'stopped',AMBIGUOUS:'ambiguous',PENDING:'pending',EXPIRED:'expired'};
-// Resolve ONE day's bar against a pick's two barriers.
-//
-// `prevHigh`/`prevLow` are the day's extremes AS THEY STOOD WHEN THE PICK WAS ISSUED, and they
-// matter only on the issue day itself: that bar already contains price action from BEFORE the
-// recommendation existed, and a stop "breach" that happened at 09:20 cannot be charged to a pick
-// made at 14:00. A barrier therefore counts on the issue day only when the bar made a NEW extreme
-// past it after issue. On later days the whole bar is attributable and prevHigh/prevLow are null.
 function resolveRocketDay(bar,entryPrice,targetPct,stopPct,prevHigh=null,prevLow=null){
   if(!(entryPrice>0)||!(targetPct>0)||!(stopPct>0)) return null;
   const up=entryPrice*(1+targetPct/100), dn=entryPrice*(1-stopPct/100);
@@ -2365,10 +2086,6 @@ function resolveRocketDay(bar,entryPrice,targetPct,stopPct,prevHigh=null,prevLow
 }
 // Did this pick's resolved state count as a rocket? Ambiguity is deliberately NOT a rocket.
 function isRocketOutcome(p){return p?.rocketOutcome===ROCKET_OUTCOME.ROCKET;}
-// Advance ONE pick's rocket state using the bar observed on the scan `gap` trading days after
-// issue. First passage wins: once a pick resolves it is never revisited, so a stock that stops out
-// on day 1 and rallies on day 2 stays STOPPED — which is the whole point of the definition.
-// Each (pick, day) is applied at most once, so re-uploading the same session cannot double-count.
 function resolveRocketForPick(p,bar,gap,scanDate){
   if(!p||!bar) return;
   if(p.rocketOutcome&&p.rocketOutcome!==ROCKET_OUTCOME.PENDING) return; // already resolved
@@ -2393,11 +2110,6 @@ function resolveRocketForPick(p,bar,gap,scanDate){
 }
 function getRocketArrivalStats(){
   const issues=Object.values((FS.get(RECOMMEND_OUTCOME_STORE)||{}).issues||{});
-  // v1124: count ONLY picks resolved under the current definition. 302 picks issued between
-  // 2026-06-25 and 2026-07-31 carry a `rocketDate` written by the retired same-day >=10% bar while
-  // sitting at `pending` under the v1085 barrier label — both true in their own era, contradictory on
-  // one record. Averaging them together made the review horizon a blend of two definitions. Requiring
-  // the current outcome excludes the legacy rows without destroying them.
   const days=issues.flatMap(issue=>(issue.picks||[])
       .filter(p=>String(p.rocketOutcome)===String(ROCKET_OUTCOME.ROCKET))
       .map(p=>p.rocketDays))
@@ -2485,11 +2197,6 @@ function recordRecommendationOutcomeScan(scan){
     issue.horizonDays=horizon;
     const gap=tradingDaysBetween(issue.date,scan.date);
     if(gap==null||gap<0) return;
-    // v1085: the ROCKET window runs over gap 0..ROCKET_HORIZON_DAYS-1 (the issue day and the next),
-    // which is resolved on its own schedule below and independently of the legacy profit horizon.
-    // gap===0 is a LATER SCAN ON THE ISSUE DAY — the post-close export is what finally closes the
-    // issue day's bar — so it is no longer skipped outright. It still contributes nothing to the
-    // legacy running high/low stats, which are defined over subsequent days.
     if(gap===0){
       (issue.picks||[]).forEach(p=>{
         const row=rowMap[p.symbol];
@@ -2538,40 +2245,11 @@ function recordRecommendationOutcomeScan(scan){
       } else if(!p.conversionAssessed&&(p.conversionHighProfitPct!=null||p.conversionCloseProfitPct!=null||p.conversionWorstLowProfitPct!=null)){
         p.conversionAssessed=true;
       }
-      // v1124: the LEGACY writer is removed. `rocketDate`/`rocketDays` had TWO writers with two
-      // different definitions — resolveRocketForPick (the v1085 barrier label: target before stop
-      // within the horizon) and this one, the retired "same-day move >= threshold" bar. One field
-      // meaning two things is how getRocketArrivalStats came to average them together, and that stat
-      // drives getEffectiveReviewDays and therefore the Review After pill on the board. v1085
-      // believed the arrival stats "follow automatically"; they did not, because this writer survived.
-      // The field now has exactly one author.
       p.outcomeScore=calcRecommendationOutcomeScore(p,issue.threshold);
       p.complete=gap>=horizon;
     });
   });
   const currentIssue=store.issues[scan.date];
-  // v1094: THE FIRST COHORT OF THE DAY WINS. The old guard replaced the day's picks whenever every
-  // existing pick still had `observations === 0`, which is true for EVERY same-day re-scan — so the
-  // stored cohort was always the LAST scan of the day, not the list that was actually on screen when
-  // the owner acted. The post-close upload (the one that closes the issue day's bar) therefore
-  // overwrote the morning's recommendations with a post-close re-score: observed 2026-08-03, where a
-  // basket was exported at 11:09 but the store held a 15:46 cohort ranking CENTENKA first.
-  //
-  // That silently defeats the whole point of the store. Grading a list rebuilt from closing data is
-  // measuring a list nobody ever saw - the v1074 circularity trap - and it is exactly what Leg 2 of
-  // the post-close routine is contractually forbidden from doing. Later scans still EVALUATE the
-  // cohort (the loop above), they just cannot REPLACE it.
-  // v1094 REPAIR PATH. The two changes above collide on one case: a cohort recorded by an EARLIER
-  // build carries no barriers (the mapper dropped them), and "first cohort wins" would now protect
-  // that useless record forever — today's 20 picks would stay unresolvable exactly like the 450
-  // before them. So a barrier-less pick is BACKFILLED rather than replaced: the cohort's identity
-  // (which stocks, at what rank, at what entry price) is left exactly as issued, and only the
-  // missing target/stop are filled in from the current policy.
-  //
-  // Those barriers are NOT the ones that existed at issue time — the anchor moves during the day —
-  // so each repaired pick is stamped `barriersBackfilledOn`. Any analysis that needs strict
-  // as-issued barriers must exclude them; without the stamp the approximation would be invisible.
-  // Picks that already have barriers are never touched, so this cannot run twice on one pick.
   if(currentIssue&&scan.recommendations?.length){
     const fresh=Object.fromEntries(scan.recommendations.map(r=>[r.symbol,r]));
     (currentIssue.picks||[]).forEach(p=>{
@@ -2592,19 +2270,9 @@ function recordRecommendationOutcomeScan(scan){
   if(scan.recommendations?.length&&isNewIssueDate){
     store.issues[scan.date]={
       date:scan.date,threshold:scan.threshold,horizonDays:adaptiveHorizon,
-      // v1076: the market REGIME this cohort was issued into. Every forward conclusion drawn from
-      // this store (RULES.md D1, D4) is conditional on the tape it was measured in, and pooling a
-      // calm trending market with a stressed one averages two different markets into nothing. D4
-      // was measured at a 19th-percentile VIX; nothing recorded that until now.
       regime:(typeof MARKET_REGIME!=='undefined'&&MARKET_REGIME)?MARKET_REGIME:null,
       picks:scan.recommendations.map(p=>({symbol:p.symbol,entryPrice:p.entryPrice,score:p.score,rank:p.rank,
         features:compactOutcomeFeatures(p.features,outcomeFeatureOrder),
-        // v1073: the entry-gate state AT ISSUE TIME. Without this the store cannot say whether a
-        // graded pick was one the gate approved or one it withheld, so "is wait-for-pullback worth
-        // it?" is unanswerable — which is exactly the state it was in. entryReady false means the
-        // gate said wait; blockReason names which sub-condition fired, because they are different
-        // claims: rangeConsumed/bandExtended are structural, while cooling is a 5m/15m tick that was
-        // measured at v1069 to be microstructure noise (median +0.01%, non-positive 45% of the time).
         entryReady:p.entryReady!==false,
         blockReason:p.entryReady===false?[
           (p.entryTiming?.rangeUsed>=75?'rangeConsumed':''),
@@ -2632,16 +2300,6 @@ function recordRecommendationOutcomeScan(scan){
         rocketReady:p.rocketReady===true,
         targetReachable:p.targetReachable===true,
         fundamentalTrigger:Number.isFinite(Number(p.fundamentalTrigger))?Number(p.fundamentalTrigger):0,
-        // v1094 BUG FIX: these five were computed by the caller and then SILENTLY DROPPED here.
-        // This mapper rebuilds every pick from an explicit whitelist, and v1085 added the barrier
-        // fields to the caller (processScannerUpload) without adding them to the whitelist — so no
-        // pick has EVER carried them. Verified in the live brain 2026-08-03: 470 picks across 27
-        // issue dates, ZERO with targetPct/stopPct, including picks written by v1093. Every one hit
-        // the `!(p.targetPct>0)` branch in resolveRocketForPick and parked at PENDING, which is why
-        // Rocket Conversion has never rendered a number and why the 450 pending picks were being
-        // explained away as "legacy picks predating the definition" — they are not, the field was
-        // dropped at write time. Without high1d/low1dAtIssue the issue day's bar also cannot be
-        // split into pre- and post-recommendation action (see resolveRocketDay's prevHigh/prevLow).
         targetPct:Number(p.targetPct)>0?Number(p.targetPct):null,
         stopPct:Number(p.stopPct)>0?Number(p.stopPct):null,
         high1dAtIssue:Number(p.high1dAtIssue)>0?Number(p.high1dAtIssue):null,
@@ -2700,6 +2358,72 @@ function getPostCloseRuleScorecard(audits){
     return {key:c.key,label:c.label,wins,losses,sessions,total,precision,status};
   });
 }
+const GAINER_COHORT_N=20;
+// v1208: the existing audit grades the app's OWN picks, so it can only ever learn from what it
+// already recommends. This grades the day's ACTUAL winners against the same conditions, whether or
+// not the app picked them, which is the only way a miss becomes evidence.
+function getGainerCohort(rows){
+  const pool=(Array.isArray(rows)?rows:ALL).filter(r=>r&&r.eqEligible!==false
+    &&Number(r.turnover)>=25e5&&Number(r.price)>=10&&Number.isFinite(Number(r.day)));
+  return pool.slice().sort((a,b)=>Number(b.day)-Number(a.day)).slice(0,GAINER_COHORT_N);
+}
+function buildGainerAudit(asOf){
+  const rows=Array.isArray(ALL)?ALL:[];
+  if(rows.length<200) return null;
+  const cohort=getGainerCohort(rows);
+  if(cohort.length<5) return null;
+  const win=new Set(cohort.map(r=>r.symbol));
+  const control=rows.filter(r=>!win.has(r.symbol)&&r.eqEligible!==false
+    &&Number(r.turnover)>=25e5&&Number(r.price)>=10);
+  if(control.length<200) return null;
+  const safe=(fn,r)=>{try{return !!fn(r);}catch(e){return false;}};
+  const conditions=POST_CLOSE_CONDITIONS.map(c=>{
+    const hit=cohort.filter(r=>safe(c.rowTest,r)).length;
+    const base=control.filter(r=>safe(c.rowTest,r)).length;
+    const hp=hit/cohort.length, bp=base/control.length;
+    return {key:c.key,label:c.label,mode:c.mode,hit,of:cohort.length,
+      hitPct:+(100*hp).toFixed(1),basePct:+(100*bp).toFixed(1),lift:+((hp-bp)*100).toFixed(1)};
+  });
+  const num=(f)=>{
+    const a=cohort.map(f).filter(Number.isFinite).sort((x,y)=>x-y);
+    const b=control.map(f).filter(Number.isFinite).sort((x,y)=>x-y);
+    const med=v=>v.length?v[Math.floor(v.length/2)]:null;
+    return {cohort:med(a),control:med(b)};
+  };
+  const fields={
+    rank:num(r=>Number(r.rank)), score:num(r=>Number(r.score)),
+    setupPct:num(r=>Number(r.setupPct)), ignitePct:num(r=>Number(r.ignitePct)),
+    compositePct:num(r=>Number(r.compositePct)), feasibility:num(r=>Number(r.feasibility)),
+    circuitFeasibility:num(r=>Number(r.circuitFeasibility)),
+    relvol:num(r=>Number(r.relvol)), day:num(r=>Number(r.day))};
+  const onBoard=cohort.filter(r=>Number(r.rank)<=RECOMMEND_MAX_RANK).length;
+  const scored=cohort.filter(r=>Number(r.score)>=RECOMMEND_MIN_SCORE).length;
+  return {date:asOf,n:cohort.length,controlN:control.length,
+    symbols:cohort.map(r=>({s:r.symbol,day:+Number(r.day).toFixed(2),rank:Number(r.rank)||null,
+      score:Number(r.score)||0,setupPct:Number(r.setupPct)||null,
+      feasibility:Number.isFinite(r.feasibility)?+r.feasibility.toFixed(3):null,
+      circuitFeasibility:Number.isFinite(r.circuitFeasibility)?+r.circuitFeasibility.toFixed(3):null,
+      relvol:Number.isFinite(r.relvol)?+r.relvol.toFixed(2):null,
+      dirOk:!!r.directionConfirmed})),
+    caught:{onBoard,scored},fields,conditions};
+}
+// A condition ARMS on the same shape of bar the pick audit uses: it has to hold, with the same sign,
+// across sessions rather than once. LIFT_MIN is the cohort/control gap in percentage points; a
+// condition present in the winners at the market's own base rate says nothing.
+const GAINER_LIFT_MIN=25;
+function getGainerScorecard(gainers){
+  const days=Object.values(gainers||{});
+  return POST_CLOSE_CONDITIONS.map(c=>{
+    const rows=days.map(d=>(d.conditions||[]).find(x=>x.key===c.key)).filter(Boolean);
+    const confirms=rows.filter(x=>x.lift>=GAINER_LIFT_MIN).length;
+    const contradictions=rows.filter(x=>x.lift<=-GAINER_LIFT_MIN).length;
+    const sessions=rows.length;
+    const meanLift=sessions?+(rows.reduce((s,x)=>s+x.lift,0)/sessions).toFixed(1):null;
+    const status=confirms>=3&&sessions>=2&&contradictions<=1?'ARMED'
+      :(sessions>=10&&confirms===0&&contradictions>=3)?'RETIRED':'COLLECTING';
+    return {key:c.key,label:c.label,mode:c.mode,sessions,confirms,contradictions,meanLift,status};
+  });
+}
 function runPostCloseAudit(force=false){
   const clock=istClock(),today=getSessionDate();
   if(!force&&clock.mins<DAY_END_MIN) return null;
@@ -2711,8 +2435,11 @@ function runPostCloseAudit(force=false){
     const observed=picks.some(p=>(p.rocketDaysSeen||[]).length||p.evaluatedThrough);
     if(observed) audits[issue.date]=buildPostCloseIssueAudit(issue,today);
   });
-  const out={version:1,updatedAt:new Date().toISOString(),latestSession:today,audits,
-    scorecard:getPostCloseRuleScorecard(audits)};
+  const gainers={...(prior.gainers||{})};
+  const g=buildGainerAudit(today);
+  if(g) gainers[today]=g;
+  const out={version:1,updatedAt:new Date().toISOString(),latestSession:today,audits,gainers,
+    scorecard:getPostCloseRuleScorecard(audits),gainerScorecard:getGainerScorecard(gainers)};
   FS.set(POST_CLOSE_AUDIT_STORE,out);
   return out;
 }
@@ -2751,20 +2478,6 @@ function applyLearnedTriggerRanking(rows){
   rows.forEach((r,i)=>{r.rank=i+1;});
   return matched;
 }
-// ── v1206: A RANK IS A STANDING, SO IT MAY NOT BE THE ALPHABET ──────────────────────────────
-// `score = 100 x (blend x (directionConfirmed?1:0))^4` is deliberate and measured (v1069/v1109): an
-// unconfirmed row scores exactly 0 and sinks, and `setupPct`/`depthBlendPct` are kept on the row
-// precisely so its standing stays auditable. What was NOT intended is what happened next - three
-// separate sorts broke the resulting mass tie with `a.symbol.localeCompare(b.symbol)`, so every one
-// of the ~2,800 rows at score 0 was ordered ALPHABETICALLY and that position was then rendered as
-// its rank. Observed on the owner's own Open Positions panel, 2026-08-20: APCOTEXIND #910,
-// CASTROLIND #1147, IFGLEXPOR #1647, OAL #2154, RISHABH #2390, SOUTHBANK #2619, SPECIALITY #2625,
-// SPECTRUM #2626, URBANCO #2848 - strictly alphabetical, under a column headed Score/#, and the
-// panel's default sort is that rank.
-//
-// The retained standing breaks the tie instead. Nothing about which rows are RECOMMENDED changes:
-// every confirmed row scores above zero and therefore still sorts above every unconfirmed one, so
-// the top of the board and the rank-based depth gates are untouched.
 function radarRankTieBreak(a,b){
   const st=r=>{
     const d=Number(r&&r.depthBlendPct); if(Number.isFinite(d)) return d;
@@ -2793,21 +2506,6 @@ function getRecommendationOutcomeSummary(){
     .filter(p=>p.complete&&p.observations>0)
     .map(p=>({p,threshold:issue.threshold})));
   const picks=assessed.map(x=>x.p);
-  // v1085: a rocket is a RESOLVED forward outcome (target before stop within ROCKET_HORIZON_DAYS),
-  // not a same-day threshold crossing. The three failure modes are kept apart because they mean
-  // different things: `stopped` is the owner's actual complaint (it dipped first), `expired` simply
-  // never travelled, and `ambiguous` touched both barriers inside one daily bar so the order is
-  // unknowable — counted as NOT a rocket, and surfaced so that assumption stays visible.
-  //
-  // v1101 BUG FIX — THE ROCKET COUNTERS MUST NOT RIDE ON THE LEGACY `complete` FLAG.
-  // `picks` above is gated on `p.complete`, which belongs to the PRE-v1085 horizon model and only
-  // flips after that longer window elapses. A v1085 outcome resolves on FIRST PASSAGE within
-  // ROCKET_HORIZON_DAYS, which happens long before `complete` ever turns true — so gating these
-  // counters on it selected exactly the wrong cohort. Measured on the live brain 2026-08-06:
-  // 530 picks, 46 genuinely resolved (9 rocket / 37 expired) and `complete` was FALSE on all 46,
-  // while the 450 picks the KPI did count were the legacy barrier-less ones that can never resolve.
-  // Rocket Conversion therefore rendered "no pick has resolved yet" while the true figure was 9/46.
-  // The rocket cohort is its own thing: every observed pick, regardless of the legacy flag.
   const rocketPool=observedPicks;
   const rockets=rocketPool.filter(p=>isRocketOutcome(p));
   const stoppedOut=rocketPool.filter(p=>p.rocketOutcome===ROCKET_OUTCOME.STOPPED);
@@ -2841,14 +2539,6 @@ function getRecommendationOutcomeSummary(){
     issueDays:issues.length,horizonDays:currentHorizon
   };
 }
-// ── v1126 SYSTEM SCORECARD (owner: "is there a way to tell how our system is faring?") ──────────
-// Everything below already existed in the store; nothing new is recorded. Leg 2 of the post-close
-// routine has been computing this by hand every day — this is that table, in the app.
-//
-// ONE COHORT PER ISSUE DATE, graded on the v1085 definition: did the pick reach ITS OWN target
-// before ITS OWN stop, within ROCKET_HORIZON_DAYS. Only picks carrying both barriers can resolve,
-// so legacy picks (pre-v1094, when the barriers were dropped at write time) are excluded from every
-// denominator and counted separately rather than scored as failures.
 function buildSystemScorecard(){
   const store=FS.get(RECOMMEND_OUTCOME_STORE)||{};
   const issues=store.issues||{};
@@ -2880,12 +2570,6 @@ function buildSystemScorecard(){
       hitPct:settled?+(target.length/settled*100).toFixed(0):null,
       medDays:target.length?median(target.map(p=>Number(p.rocketDays)).filter(v=>Number.isFinite(v))):null});
   });
-  // ── v1127 WITHIN-DAY CONCORDANCE — the ranking's own scoreboard ────────────────────────────
-  // The only fair test of an ORDERING: on the same session, was the winner ranked above the loser?
-  // Comparing across days is confounded, because rank is a within-day relative measure while score
-  // is an absolute one — a rank 1 on a weak day and a rank 1 on a strong day are not the same claim,
-  // and conflating them is how "the score works but the rank doesn't" got asserted from the same
-  // ordering. 50% = the ranking carries NO information. Measured 2026-08-12 over 270 pairs: 43%.
   let cBetter=0,cWorse=0,cPairs=0;
   Object.keys(issues).forEach(date=>{
     const day=(issues[date]||{}).picks||[];
@@ -2901,10 +2585,6 @@ function buildSystemScorecard(){
       if(+winner.radarRank<+loser.radarRank) cBetter++; else if(+winner.radarRank>+loser.radarRank) cWorse++;
     }
   });
-  // ── v1128 SCORE-BAND BREAKDOWN — picks AND control rows together ───────────────────────────
-  // This is the table that answers "is the 80-95 band still bad, or did it recover?" It pools
-  // recommendations with the stratified control sample, because the question is about the SCORE,
-  // not about what was bought — and the bar means the band below it is now control-only.
   const bandDefs=[[95,101,'95–100'],[80,95,'80–95'],[65,80,'65–80'],[0,65,'under 65']];
   const bands=bandDefs.map(([lo,hi,label])=>({label,lo,hi,n:0,target:0,settled:0,control:0}));
   Object.keys(issues).forEach(date=>{
@@ -2940,22 +2620,6 @@ function median(a){
   return v.length%2?v[(v.length-1)/2]:+(((v[v.length/2-1]+v[v.length/2])/2).toFixed(1));
 }
 function getDisplayedEntryCandidates(rows){
-  // Top-20 Radar candidates: basket-eligible, valid price, not surveillance-flagged.
-  //
-  // DELIBERATELY DOES NOT FILTER `entryReady` (v1073 — do not "fix" this to match applyFilters).
-  // applyFilters removes entry-blocked rows from the DISPLAY; this cohort keeps them, so the outcome
-  // store grades blocked and ready picks side by side. That mismatch is the ONLY control group the
-  // app has for answering whether the "wait for pullback" gate earns its place: without it, every
-  // graded pick would be one the gate already approved and the gate could never be falsified.
-  // Each pick now carries its entryReady state and block reason (see recordRecommendationOutcomeScan),
-  // so the two cohorts can be compared on forward outcomes rather than on same-day circular evidence.
-  //
-  // ALSO DELIBERATELY DOES NOT FILTER the v1080 allocation gate. That gate is correct for the
-  // DISPLAY and the basket — an unbuyable row is not a recommendation — but allocation capacity is a
-  // property of the OWNER'S PORTFOLIO on the day (what is already held, at what average, with how
-  // much cash), not of the scorer's pick. Filtering the outcome cohort by it would make the
-  // accumulating forward-outcome evidence depend on the account balance, so RULES.md D1/D4 would be
-  // measuring the book instead of the model. Same reasoning as the entryReady divergence above.
   if(!Array.isArray(rows)||!rows.length) return [];
   return rows
     // v1070: held no longer excludes a candidate.
@@ -2963,19 +2627,6 @@ function getDisplayedEntryCandidates(rows){
     .sort((a,b)=>(Number(b.score)||0)-(Number(a.score)||0)||a.symbol.localeCompare(b.symbol))
     .slice(0,20);
 }
-// ── v1128 STRATIFIED CONTROL SAMPLE (owner, 2026-08-12) ────────────────────────────────────────
-// "If you remove the 80-90 band, it may get fixed and removing it will never tell us."
-//
-// The recommendation cohort is the TOP 20 BY SCORE. It is correctly ungated (v1074) — it records
-// rows the app would never buy — but the top-20 cut means a band is only observed on days when it
-// happens to reach the top 20. Measured 2026-08-12: history had 110 of 160 graded picks below the
-// current bar, yet on that day's board ALL 20 scored >= 95, so the 80-90 band got ZERO observations.
-// A band that is only sampled on weak days cannot be shown to have recovered.
-//
-// So a small sample is drawn from each band BELOW the bar and graded alongside, flagged `control`.
-// It is EVIDENCE ONLY: excluded from every recommendation metric (conversion, the scorecard headline,
-// concordance), because these are rows the app did not pick and counting them would misreport what
-// it recommended. Deliberately small — this buys band coverage, not a second basket.
 const CONTROL_BANDS=[[80,95],[65,80],[50,65]];   // below the bar; the bands the scorecard reports
 const CONTROL_PER_BAND=3;
 function getScoreBandControlSample(rows,exclude){
@@ -3084,20 +2735,6 @@ function assessExecutedEntryOutcomeScan(scan){
     const row=rowMap[entry.symbol];
     if(!row) return;
     const entryRef=Number(entry.referencePrice||entry.buyPrice);
-    // v1096: ATTRIBUTION. On the ENTRY DAY the bar contains action from before the trade existed, so
-    // a low that printed at 09:30 cannot be charged to a 14:00 buy — the same rule v1085 applies to
-    // recommendation picks, which was never applied here. Previously this ran at `gap>=0` and took
-    // the entry day's ENTIRE low, while the HIGH side four lines below excluded the entry day
-    // outright (`gap<=0` returns). That asymmetry inflated every adverse figure.
-    //
-    // On the entry day a drawdown now counts only if it made a NEW low past the extreme observed at
-    // the buy (getBuyContextBaseline). With no baseline the entry day is skipped and counted as
-    // UNATTRIBUTABLE rather than guessed at. On later days the whole bar is attributable, unchanged.
-    //
-    // The high side stays entry-day-EXCLUDED, and that is now a deliberate choice rather than an
-    // accident: `bestNetHighPct` feeds computeHarvestPlan's target anchor, so admitting entry-day
-    // highs would raise the learned target on a data change alone. Fixing the over-count and leaving
-    // the conservative side conservative is the honest asymmetry; revisit it with its own measurement.
     if(entryRef>0&&row.low1d>0){
       let lowForEntry=null;
       if(gap>0){
@@ -3295,13 +2932,6 @@ function previousTradingSessionDate(dateText){
   }while(true);
 }
 
-// ══════════════════════════════════════════════════
-// RADAR COMPOSITE SCORER (v517)
-// One same-day transparent cross-sectional model: typed transformations, robust
-// winsorized percentiles, a same-day rocket diagnostic measured but NOT applied (v1085), blended
-// with finance priors across seven budgeted groups, then NSE-report penalties.
-// It learns nothing across days and stores no rolling state.
-// ══════════════════════════════════════════════════
 const RADAR_GROUPS={
   participation:{label:'Participation',budget:20,desc:'Relative volume, money flow and turnover impulse'},
   momentum:{label:'Momentum',budget:20,desc:'ROC, oscillators and multi-timeframe thrust'},
@@ -3319,24 +2949,8 @@ const RADAR_EXCLUDED_FEATURES=new Set([
   // Static share count is only a size proxy (already covered by Market cap); R2's real signal is a
   // buyback event, which arrives statelessly via the bc corporate action, not a share-count delta.
   'Total common shares outstanding',
-  // v1084: `Open, 1 day` is a price-level column, so radarTransformed turns it into
-  // `100 × (price/open − 1)` — which IS change-from-open. Verified against the dedicated
-  // `Change from open %, 1 day` column on the 2026-07-30 14:16 file: max absolute difference
-  // 0.000000 across 2,963 rows, i.e. bit-identical. Structure was counting change-from-open
-  // TWICE under two names. The column stays exported and is still read as the numerator anchor
-  // for every multi-day price-level feature (see radarIsSessionLevel); it simply earns no
-  // feature weight of its own.
   'Open, 1 day',
-  // v1071: absolute average-volume levels match /volume/, so they are signed-log compressed and
-  // routed to Liquidity with a high-good prior — which makes them pure LARGE-CAP SIZE proxies
-  // (big companies trade big volume). Three of them would tilt a 12-point budget toward mega-caps,
-  // the exact failure the v1068 ignition track exists to counter. They are still used, but as the
-  // DENOMINATOR of the ignition ratio below, never as standalone features.
   'Average volume, 30 days','Average volume, 60 days','Average volume, 90 days',
-  // v1071: Beta has no radarGroupFor match, so it lands in Context with a LINEAR HIGH-GOOD prior —
-  // the model would score high beta well on every day, including red ones. That is precisely the
-  // green-day/red-day asymmetry under investigation. Kept in the export so the data accumulates;
-  // re-enable only together with breadth-conditional handling.
   'Beta, 1 year'
 ]);
 const RADAR_LIQ_STEPS=[0,5e5,25e5,1e7,5e7,1e8,1e9,1e10];
@@ -3344,12 +2958,6 @@ const RADAR_LIQ_LABELS=['Any','₹5L','₹25L','₹1Cr','₹5Cr','₹10Cr','₹1
 const radarNum=v=>{if(v===null||v===undefined||v==='')return null;const x=Number(String(v).replace(/[,%₹\s]/g,''));return Number.isFinite(x)?x:null;};
 const clamp01=(x,a=0,b=1)=>Math.max(a,Math.min(b,x));
 function radarIdx(headers,name){return headers.indexOf(name);}
-// v1084: TRUE TIE MIDRANKS. The former upper-bound-only search handed every member of a tie block
-// the TOP of that block. Measured on the 2026-07-30 14:16 file: 448 rows print an exact 0.00% five-
-// minute change, and they were all scored at the 54.5th percentile instead of their true 46.9th
-// midrank. That matters because the `/gap|price change/` prior PEAKS at p=.72 — the mispricing
-// pushes a stock that has not moved at all toward the most-rewarded point of the curve. The defect
-// scales with tie density, so it is worst exactly where the data is flattest.
 function radarPct(sorted,x){
   if(x===null||!sorted.length)return null;
   let lo=0,hi=sorted.length;
@@ -3377,34 +2985,6 @@ function radarGroupFor(h){
 function radarIsPriceLevel(h){
   return /moving average|bollinger|donchian|keltner|pivot points|ichimoku|parabolic sar|volume-weighted average price|volume-weighted moving average|hull moving average|high,|low,|open,/.test(h.toLowerCase())&&!/percentage|%/.test(h);
 }
-// ── v1084: PRICE-LEVEL NUMERATOR VINTAGE ───────────────────────────────────────────────────────
-// A price-level feature is `100 × (numerator / level − 1)`. The numerator was ALWAYS the live
-// price. The denominators are MULTI-DAY aggregates — SMA-50, EMA-200, Bollinger/Keltner/Donchian,
-// Ichimoku, Hull-9, SAR — which absorb today's move at 1/50, 1/200, 1/20, or (Classic pivots,
-// computed from yesterday's HLC) not at all. So through the session:
-//
-//     feature(t)  ≈  feature(previous close)  +  today's move %
-//
-// an ADDITIVE COMMON-MODE SHIFT applied to all ~34 of them at once, in the same direction. At
-// 09:20 the shift is ~0 and each feature measures what it was designed to measure: multi-day
-// position. By 14:00 it is the full day move, and they have quietly become restatements of it.
-// Measured on the 2026-07-30 14:16 file, swapping the numerator to the day's OPEN: mean |Spearman|
-// against today's move falls 0.205 → 0.091 across 34 features; Hull-9 collapses 0.652 → 0.111,
-// Ichimoku conversion 0.325 → 0.078, Keltner basis 0.261 → 0.058, VWMA-20 0.220 → 0.045.
-//
-// Why this biases rather than merely blurs: almost every one of these falls through to the DEFAULT
-// prior `2p − 1` — linear, monotone, high-is-good, UNDAMPED. The only family built to damp an
-// extreme day move is `/gap|price change/`, which peaks at .72. So today's move entered the score
-// through ~34 undamped channels spanning Trend, Structure and Participation, against ONE damped
-// one. That is why the top of the ranking filled with names that had already run.
-//
-// OPEN, not previous close, deliberately: the gap is already its own feature with a damped prior,
-// so an open-anchored numerator avoids counting the gap twice. Fails open to the live price when
-// the open is missing, so a thin row is never dropped for want of it.
-//
-// Levels that are INTRINSICALLY today-measures keep the live price — asking "where is price now
-// relative to today's VWAP / today's high / today's low" is the whole point of those, and the data
-// agrees: swapping VWAP moved it only 0.523 → 0.469, and `High, 1 day` moved the WRONG way.
 function radarIsSessionLevel(h){
   const s=String(h||'').trim().toLowerCase();
   return /volume-weighted average price/.test(s)||/^(high|low|open), 1 day$/.test(s);
@@ -3467,10 +3047,6 @@ function getPeakEntryTiming(row){
   const changeOpenKnown=row?.changeOpen!=null&&isFinite(Number(row.changeOpen));
   const gapSigned=gapKnown?Number(row.gapSigned):null;
   const changeOpen=changeOpenKnown?Number(row.changeOpen):null;
-  // R4b execution form: a positive opening gap is not follow-through when the gap still
-  // contributes more than the post-open drift, the short tape is cooling, and price remains
-  // outside both envelopes. Unlike the upper-quarter gate, this remains blocked after the
-  // opening spike has fallen toward the session low. No tunable magnitude is introduced.
   const gapLedFade=gapSigned>0&&changeOpenKnown&&gapSigned>Math.max(0,changeOpen)&&cooling&&(bandExtended||belowVwap);
   // A breakout does not become safe merely because it has already fallen away from its peak.
   // Once the session high cleared an upper envelope, cooling below VWAP is rejection/distribution,
@@ -3503,19 +3079,6 @@ function getMarketAlignedEntryTiming(row,marketIntraday=MARKET_INTRADAY){
   const local=row?.entryTiming&&row.entryTiming._local===true?row.entryTiming:getPeakEntryTiming(row);
   const marketWeak=marketIntraday?.advPct!=null&&Number(marketIntraday.advPct)<.5;
   const vwap=Number(row?.vwap),price=Number(row?.price),changeOpen=Number(row?.changeOpen);
-  // v1069: confirmation is STRUCTURAL (holding above VWAP and above its own open), never a tick.
-  // The v1065 form also required price5m>0 && price15m>0 and minute>=570. Measured on the
-  // 2026-07-28 file: that rule blocked 92% of the whole eligible universe (the peak gate blocked
-  // 1%), and the 5m change it keyed on has median +0.01% with a p10-p90 of -0.12%..+0.23% in the
-  // top 100 — microstructure noise, non-positive for 45% of rows at any instant. Because a stock
-  // that has already run is likelier to be mid-pause, it removed the LEADERS: passed rows averaged
-  // +2.85% on the day vs +3.92% for blocked ones, and the surviving top 20 shifted from ranks
-  // 1-30 to ranks 10-143 (mean day 5.42% -> 2.45%, 9/20 above +5% -> 0/20, one rocket -> none).
-  // Structural-only also beats no gate at all (5.42% vs 4.89%), so the VWAP/open condition is
-  // kept and only the tick coin-flip is dropped. This is now the SAME definition the v1068
-  // ignition gate uses — one meaning of "confirmed direction" in the codebase, not two.
-  // The minute>=570 term is also gone: it was surviving clock authority (v1068 owner rule) and
-  // would have blocked every stock in a weak market before 09:30, when the day legitimately starts.
   const stockConfirmed=vwap>0&&price>=vwap&&changeOpen>0;
   const weakMarketBlocked=marketWeak&&!stockConfirmed;
   const blocked=!!local.blocked||weakMarketBlocked;
@@ -3539,12 +3102,6 @@ function radarPrior(feature,p){
   if(s==='price to earnings ratio')return 0;
   return 2*p-1;
 }
-// Traffic-light bands for the composite score. Single source of truth: the Methodology
-// Interpretation list, the rankings table, the open-positions table and the detail modal
-// all read these, so a colour can never mean two different things (owner, v533).
-// Four DISTINCT hues, not a gradient: amber vs orange were indistinguishable on the
-// owner's monitor, so the third band is light blue on purpose (owner, v534). Do not
-// "restore" the hot-to-cold ordering — separability is the requirement here.
 const RADAR_SCORE_BANDS=[
   {min:80,color:'var(--green)',range:'80–100',note:'strongest relative continuation setup.'},
   {min:65,color:'var(--amber)',range:'65–79.9',note:'watchlist; confirmation required.'},
@@ -3556,77 +3113,10 @@ function radarScoreColor(score){
   if(score===null||score===undefined||!isFinite(s)) return 'var(--t3)';
   return RADAR_SCORE_BANDS.find(b=>s>=b.min).color;
 }
-// ── THE RECOMMENDATION BAR (owner-set, v1112) ────────────────────────────────
-// "No stock below score 90 and above rank 10 to be selected." BOTH conditions, not either:
-// a stock must be in the top ten of the cross-section AND score at least 90.
-//
-// These are RISK PREFERENCES, not calibrated model outputs — the same category as Zerodha's
-// 20-order basket cap — and they are flagged as such here rather than dressed up as self-calibrating.
-// History, so neither is re-litigated: v1086 set the rank cap at 10; v1091 replaced it with the
-// GREEN band (80) read off RADAR_SCORE_BANDS, on the argument that quality should decide the count
-// instead of a fixed slot budget. That let the basket reach as deep as rank 137 on a day like
-// 2026-08-09, when 137 rows scored >= 80 — the owner wants the top of the board, not everything
-// that clears a colour. Score >= 90 is stricter than green and rank <= 10 bounds the depth, so the
-// basket buys FEWER names on a weak day rather than reaching down for filler.
-// v1127 (owner, 2026-08-12): 90 -> 95, on the app's own resolved picks. Measured over 125 resolved
-// picks: score 95-100 hit target 34% of the time, 90-95 hit 29% (n=7), and the 80-90 band hit just
-// 9% — WORSE than the sub-80 band's 13%. The score is non-monotonic through its middle, so the 80-90
-// band is the one region actively costing money; this bar removes it from selection. Still an
-// OWNER-SET RISK PREFERENCE, the same category as Zerodha's 20-order cap, not a calibrated output.
 const RECOMMEND_MIN_SCORE=95;
 const RECOMMEND_MAX_RANK=10;    // owner-set depth bar: the top ten of the cross-section, by rank
-// NAMED FOR WHAT IT TESTS. It was `isGreenScore`, which is actively misleading: the score BANDS
-// paint green from 80 (RADAR_SCORE_BANDS) while this bar is RECOMMEND_MIN_SCORE = 95, so a row
-// can be green on screen and 15 points below the buy bar. Observed 2026-08-19: REMSONSIND 91.4
-// at rank 1 and BUILDPRO 84.3 both rendered green with an empty basket, and the owner reasonably
-// read that as the board contradicting itself. The old name is kept as an alias because older
-// assertion suites reference it.
 function meetsScoreBar(score){const s=Number(score);return isFinite(s)&&s>=RECOMMEND_MIN_SCORE;}
 const isGreenScore=meetsScoreBar;   // legacy alias - do not use in new code
-// The one test for "may this row be recommended and exported". Rank is the stock's own Radar rank,
-// never its position in the filtered list, so a row can never be promoted into the basket merely
-// because the rows above it were removed for some unrelated reason.
-// ── v1170: THE TIME OF DAY CONDITIONS HOW DEEP THE BOARD IS TRUSTED ─────────────────────────
-// Owner, 2026-08-18: "There should be recommendations at all times doesn't mean there should be
-// shit recommendations. It means recommendations should be based on the time of the day with all
-// the fucking data and diagnostics that you have!"
-//
-// He is right and v1068 was misread - by me, back at him. "Basket export is an OPERATIONAL action
-// that must always emit" is about AVAILABILITY. It never said the clock has no bearing on QUALITY,
-// and the two got conflated when the clock was stripped from selection along with the export path.
-//
-// The evidence has existed since v1064 and drives nothing: `buildTradeTimingModel` grades the
-// owner's OWN executed entries - 547 of them over 97 trading days as of 2026-08-18 - into 13
-// half-hour windows, each carrying a within-day peer rank (0.5 = an entry that ranked exactly
-// mid-pack against its same-day peers), already shrunk by median coverage and checked for
-// leave-one-day-out direction stability. Measured spread: 10:00 at 0.582 and 09:30 at 0.562 against
-// 13:00/13:30 at 0.374 and the 15:00 close at 0.339. It was rendered on the Performance tab under a
-// caption reading "descriptive, never a recommendation rule".
-//
-// WHAT MOVES IS DEPTH, NOT AVAILABILITY. The bar reaches deeper in a window where his entries have
-// historically ranked well and shallower where they have not, so the board is never empty - rank 1
-// always qualifies - but a weak hour has to clear a narrower gate. The scale is the model's own
-// peer rank against its own neutral point, so no magnitude is invented: 0.5 reproduces
-// RECOMMEND_MAX_RANK exactly, and the observed range moves it between roughly 7 and 12.
-// THE SOURCE IS THE MARKET, NOT THE OWNER'S FILLS (owner, 2026-08-18): *"That table is based on
-// previous logic... The new logic is that now you have 5-minute data for stocks. That table, across
-// all the stocks you have in your inventory till that point in time should be your source - not my
-// trades."* He is right on both counts. `buildTradeTimingModel` grades 547 of HIS entries over 97
-// days, executed under many different scorers - some of which changed what was recommendable BY HOUR
-// (v1065's pre-09:30 block, v1069's minute>=570 gate) - so it measures his execution inside old
-// logic, not the market's own shape. The accumulated 5-minute files measure the market and nothing
-// else.
-//
-// THE QUESTION, asked of every stock in the inventory: when a stock ignites in this half-hour - an
-// up bar on above-median volume for its own session - does the move still hold thirty minutes later,
-// inside the same session? That is the actionable time-of-day fact and it is free of what the app
-// recommended or what the owner bought.
-//
-// SHRUNK TOWARD THE POOLED RATE BY ITS OWN SAMPLE, with the prior weight set to the MEAN window
-// size, so nothing is typed: a window carrying its share of the data speaks at full strength, a thin
-// one is pulled back to the pooled base. Measured on the first day of inventory (14 stocks, 17
-// stock-sessions, 231 graded bars) the windows swing 25% to 76% on n<40 - noise - and shrinkage
-// correctly leaves the depth at its default. It sharpens by itself as files accumulate.
 function buildMarketTimingWindows(){
   const W={};
   let n=0;
@@ -3659,21 +3149,6 @@ function buildMarketTimingWindows(){
   keys.forEach(k=>{const g=W[k];
     g.rate=g.hit/g.n;
     g.shrunk=(g.n*g.rate+k0*base)/(g.n+k0);});
-  // THE MAPPING SCALES ITSELF TO THE SPREAD IT ACTUALLY MEASURES.
-  //
-  // It was `shrunk/(2*base)`, which is anchored on the pooled rate and therefore compresses every
-  // real difference into almost nothing: measured 2026-08-18 on 4,394 graded bars the shrunk rates
-  // span 45.7%-53.3% against a 51.0% pool, and that mapping turned the whole 7.58pp range into a
-  // ONE-RANK move in depth. The windows genuinely separate now (at v1170 they did not, on 231 bars),
-  // and a mapping that cannot express the separation is the same as not measuring it.
-  //
-  // NB a Leg 3 note claimed the opposite - that the mapping amplified 7.58pp into a 1-to-19 swing.
-  // That was a RANK-based mapping invented by the probe, never the shipped code. Corrected here.
-  //
-  // Now: distance from the pooled rate, divided by the OBSERVED spread. Self-calibrating in both
-  // directions - when the windows are indistinguishable the spread collapses and every window lands
-  // on 0.5, which is exactly the default depth, so a thin or noisy inventory reproduces the old
-  // behaviour on its own. No constant, and nothing to re-tune as the inventory grows.
   const shr=keys.map(k=>W[k].shrunk);
   const spread=Math.max(...shr)-Math.min(...shr);
   keys.forEach(k=>{const g=W[k];
@@ -3719,19 +3194,11 @@ function timingDepth(){
 function meetsRecommendationBar(s){
   if(!s) return false;
   if(s.recommendationTriggerBlocked===true)return false;
-  // v1168: a stock whose CURRENT session is net selling is not a buy, no matter what the score or
-  // the multi-day flow says. This is a removal, not an annotation - it drops out of the list, out of
-  // SELECTED and out of the basket. It only fires on a real current-session trajectory (three bars
-  // with volume), so an empty opening print cannot reject anything.
   if(s.noHistory===true) return false;   // v1170: no multi-day history, so nothing to rank it on
   if(s.intradaySellingToday===true) return false;
   const rank=Number(s.rank);
   return isGreenScore(s.score)&&Number.isFinite(rank)&&rank<=timingDepth().depth;
 }
-// A recommendation is export-ready only after today's 5-minute check confirms it. Keep this
-// separate from meetsRecommendationBar(): the validation loop needs score/rank candidates to stay
-// visible and fetchable before they have a verdict. Every path that can arm a checkbox or order
-// uses this predicate, so an unchecked/stale row cannot look ready or slip through a manual toggle.
 function passesIntradayValidation(s){
   if(!s?.symbol||s.intradayVerdict!=='confirmed') return false;
   const read=getIntradayRead(s.symbol);
@@ -3742,11 +3209,6 @@ function radarScoreCell(score,title=''){
   const s=Number(score);
   if(score===null||score===undefined||!isFinite(s)) return '<span class="sc-m" style="color:var(--t3)">—</span>';
   const c=radarScoreColor(s);
-  // THE BUY BAR IS DRAWN ON THE BAR. The band colour and the recommendation threshold are different
-  // numbers - green starts at 80, a row is only buyable at RECOMMEND_MIN_SCORE (95) - so a green row
-  // can sit well below the bar with nothing on screen saying so. A hairline at the threshold makes
-  // the gap visible at a glance, and a row under it renders the fill hollow rather than solid.
-  // This changes NOTHING about what is recommended; it stops the colour implying otherwise.
   const ok=meetsScoreBar(s);
   const tip=title||(ok?`Clears the buy bar (${RECOMMEND_MIN_SCORE}).`
     :`Below the buy bar — scores ${s.toFixed(1)} against ${RECOMMEND_MIN_SCORE} needed to be recommended. Green starts at 80, which is the band, not the bar.`);
@@ -3829,31 +3291,9 @@ function deriveFundamentalTrigger(row){
   return {value:1,label:'Earnings + price trigger',event,
     why:`PAT ${fmtINR(f.pat)}; operating margin ${Number.isFinite(Number(f.operatingMarginPct))?Number(f.operatingMarginPct).toFixed(2)+'%':'positive'}; price above VWAP and open`};
 }
-// ── v1135 FORWARD EFFECTS DRIVE THE WEIGHTS (owner, 2026-08-14) ───────────────────────────────
-// THE UNLOCK: `f.effect` has been pinned to 0 since v1083/v1085 because the only separation the
-// scorer could measure came from a SAME-DAY label — stocks already up today — which leaks straight
-// into the features and makes the ranking ask "what resembles what has already moved".
-//
-// The Indicator Watch (v526) does not have that problem. It records each stock's DECILE on every
-// monotonic indicator, waits IW_WINDOW=5 trading sessions, and only then measures the gap between
-// the stocks that went on to move and those that did not. That label is FORWARD and resolved after
-// the fact, so an effect taken from it cannot leak. This is the one measured, non-circular effect
-// the app has ever had, and it is what now sets the weights.
-//
-// SELF-CALIBRATING, no new magnitude: each feature's effect is its own mean forward gap divided by
-// the LARGEST gap measured this session, so the strongest indicator lands near 1 and the rest scale
-// beneath it. Nothing is typed. The admission bar reuses the existing IW constants — IW_MIN_SESSIONS
-// resolved samples and |t| >= IW_T_CRIT — so a noisy indicator contributes exactly what it did
-// before: nothing.
 let _fwdEffMemo=null;
 function getForwardIndicatorEffects(){
   const iw=FS.get(INDICATOR_WATCH_STORE)||{};
-  // v1136: the SHORT log, not the guardrail log. v1135 read `iw.log`, which is resolved at
-  // IW_WINDOW=5 sessions and UNCONDITIONALLY - a horizon past which the effect has decayed and a
-  // framing in which any directionless amplifier reads ~0. See iwResolveShort for the measurement.
-  // Until the short log has IW_MIN_SESSIONS of its own this returns an EMPTY map, which reproduces
-  // the pre-v1135 scorer exactly (every effect 0). That is deliberate: a measurement now known to be
-  // taken at the wrong horizon should stop driving weights immediately, not linger until replaced.
   const log=iw.logShort||{},longLog=iw.log||{};
   if(_fwdEffMemo&&_fwdEffMemo.src===log&&_fwdEffMemo.longSrc===longLog) return _fwdEffMemo.map;
   const raw=[];
@@ -3865,24 +3305,8 @@ function getForwardIndicatorEffects(){
     const sd=Math.sqrt(arr.reduce((a,b)=>a+(b-mean)*(b-mean),0)/(n-1));
     const t=sd>0?mean/(sd/Math.sqrt(n)):null;
     if(!(t!=null&&Math.abs(t)>=IW_T_CRIT)) return;          // not distinguishable from noise
-    // THE SESSION COUNT SHRINKS THE EFFECT, IT NO LONGER GATES IT.
-    //
-    // `arr.length < IW_MIN_SESSIONS` was a cliff: four sessions of evidence counted for exactly
-    // nothing and the fifth counted in full. That is a bet that the fifth session is where the
-    // measurement becomes true, and if the bet is wrong nobody finds out until it has already been
-    // driving the score. Owner, 2026-08-18: *"With data growing daily, the program should evolve
-    // naturally - not wait for 20 days and then fail because your first guess was wrong."*
-    //
-    // Shrunk by n/(n+IW_MIN_SESSIONS) the same effect ramps continuously - 1 session counts 17%,
-    // 5 count 50%, 20 count 80% - and IW_T_CRIT still refuses anything indistinguishable from
-    // noise, so a thin sample can only ever contribute a fraction of an already-significant
-    // measurement. The old behaviour is the limit of this one, not a special case of it.
     raw.push({name,mean:mean*(n/(n+IW_MIN_SESSIONS)),n,t});
   });
-  // A mature long-horizon backwards result is no longer a note. If the short-horizon model has no
-  // measured answer for that feature, the strict two-outcome guardrail supplies the opposite effect.
-  // Its magnitude is the mean of its own +5% and +10% forward gaps, then normalized with every other
-  // measured effect below. A short-horizon effect wins when present because it matches the trade horizon.
   const shortNames=new Set(raw.map(r=>r.name));
   let guardrail;
   try{guardrail=evaluateIndicatorWatch();}catch(e){guardrail=null;}
@@ -3897,15 +3321,6 @@ function getForwardIndicatorEffects(){
   _fwdEffMemo={src:log,longSrc:longLog,map};
   return map;
 }
-// ── v1143: INTRADAY BARS AS ENRICHMENT ON AN EXISTING RECOMMENDATION ─────────────────────────
-// Owner, 2026-08-17: *"This data is basically a further enrichment data on top of ALL NSE based on
-// which you make your recommendations. So if your top recommendation without this new data was X,
-// there should be a way to add this data to it by clicking on somewhere in the recommendation table
-// and using it again to rank the recommendation."*
-//
-// The paste is Kite's chart table: `Date,Open,High,Low,Close[,% Change,% Change vs Average,Volume]`,
-// one stock, 5-minute bars, spanning several sessions. VOLUME IS OPTIONAL and the owner's own sample
-// omits it, so nothing here may depend on it - this is a PRICE-PATH enrichment, not a flow one.
 let INTRADAY_BARS={};        // symbol -> [{t,o,h,l,c}] most recent session last
 let INTRADAY_TARGET='';      // which row the next paste belongs to (the paste carries no symbol)
 let INTRADAY_RESULT=null;
@@ -3991,48 +3406,12 @@ function istDayKey(ms){
 // term is a ratio of the stock's own session.
 // ── v1144: THE TRAJECTORY, ON A VOLUME CLOCK ─────────────────────────────────────────────────
 // Owner: *"If volume is high and price dropped in the next 5 minutes, that means it was sell heavy.
-// Use this logic to chart out a trajectory from start to finish and into the projections."*
-//
-// Per bar the sign comes from the price change and the size from the volume, scaled by the stock's
-// OWN typical bar move so "high volume and price dropped" is judged against what a normal bar does
-// for this stock. Cumulated, that is the flow trajectory from the open to now.
-//
-// THE AXIS IS CUMULATIVE VOLUME, NOT CLOCK TIME, and that choice is the whole thing. Measured on a
-// clock axis this read FAILED to separate the day's two extremes: AGIIL's last four bars carried
-// 4,456 / 3,213 / 2,094 shares against a 217,142-share opening print, and that dead tail outvoted
-// the print that mattered, labelling a stock that bled all morning "accumulating". On a volume
-// clock every share gets equal say, which is the only weighting that makes sense when the question
-// is who transacted. After the change: UFLEX (locked at its upper circuit) reads ACCUMULATING at
-// +14.6% of volume, AGIIL (faded from the open) reads SELLING at -6.8%.
-//
-// A bar with NO RANGE is a circuit lock, and there the direction is known rather than estimated:
-// price legally cannot move, so every print is the queued side being filled.
-// `history` is the FULL contiguous series when `bars` has been narrowed to one session. It is read
-// for one thing only - the v1185 close-time derivation, which needs a late bar from an EARLIER
-// session and cannot get one from a today-only slice. Nothing else may consult it, or the caller's
-// choice of window stops meaning anything (v1206).
 function buildIntradayTrajectory(bars,history){
   const n=bars.length;
   if(n<3) return null;
-  // ── v1164: THE SERIES MAY SPAN SESSIONS, SO THE OVERNIGHT GAP MUST NOT COUNT AS FLOW ────────
-  // Owner: "use all data in the csv for a stock, not just today's. Since the data is contiguous and
-  // covers multiple days, it could give better signal than less data."
-  //
-  // He is right, and the file is contiguous by construction now. But bar-to-bar deltas across a
-  // session boundary include the OVERNIGHT GAP, which did not trade at those prices - attributing a
-  // 3% gap to the first bar's volume would invent flow that nobody transacted, and the opening bar
-  // is usually the heaviest of the day, so the error lands on the largest weight in the series.
-  //
-  // The first bar of each session is therefore measured against its OWN OPEN rather than yesterday's
-  // close. That keeps the bar's real intraday flow and drops the gap, needs no constant, and leaves
-  // SINGLE-DAY behaviour bit-identical (a one-session series has no boundary past bar 0).
   const newSes=bars.map((b,i)=>i>0&&istDayKey(b.t)!==istDayKey(bars[i-1].t));
   const prevC=i=>newSes[i]?bars[i].o:bars[i-1].c;
   const dP=[0]; for(let i=1;i<n;i++) dP.push(bars[i].c-prevC(i));
-  // The scale is VOLUME-WEIGHTED like everything else here. An unweighted mean was sensitive to the
-  // same defect the clock axis had: twelve dead 50-share bars lowered the typical move, which
-  // rescaled every real bar's sign and pushed AGIIL's net flow from -6.8% to -2.7% on data that had
-  // not changed. Weighting by volume makes the scale as unmovable by dead bars as the axis is.
   let _tw=0,_ts=0;
   for(let i=1;i<n;i++){const w=Number(bars[i].v)||0;_tw+=w;_ts+=w*Math.abs(dP[i]);}
   const typ=_tw>0?_ts/_tw:dP.slice(1).reduce((a,b)=>a+Math.abs(b),0)/Math.max(1,n-1);
@@ -4041,13 +3420,6 @@ function buildIntradayTrajectory(bars,history){
   for(let i=0;i<n;i++){
     const v=Number(bars[i].v)||0; if(v>0) anyVol=true;
     const locked=bars[i].h===bars[i].l;
-    // A LOCK KEEPS THE SIGN THAT CREATED IT (fixed v1164, found by a restated v1144 assertion).
-    // The test was `c >= prev ? 1 : -1`, and a CONTINUING lock has c === prev, so `99 >= 99` signed
-    // +1: a stock pinned at its LOWER circuit read as buying from its second locked bar onward -
-    // exactly inverted, on the one bar type where the direction is supposed to be certain. It
-    // survived because the fixtures locked at the UPPER circuit, where the wrong branch happens to
-    // give the right answer. Only the bar that ENTERS the lock has a move to read; after that the
-    // queue has not changed sides, so the sign carries forward.
     let f;
     if(locked){
       const d=i>0?bars[i].c-prevC(i):0;
@@ -4074,32 +3446,6 @@ function buildIntradayTrajectory(bars,history){
   const price=bars.map(b=>b.c);
   const pRec=wslope(price,0.5), cRec=wslope(cvd,0.5);
 
-  // ── v1147: WHAT A SHARE BUYS ────────────────────────────────────────────────────────────────
-  // Owner: *"The whole use case of this table could be price prediction based on change and volume
-  // action, no?"* Correct, and it is the only pair of columns that answers it. Price alone cannot
-  // say whether a move was EARNED; volume alone cannot say which WAY. Together they give the COST
-  // OF MOVING THE STOCK in each direction, and when that cost is asymmetric you know which side is
-  // thin before the price shows it.
-  //
-  // COST IS AGGREGATE, NOT A MEDIAN OF RATIOS. Measured on ELECTCAST 2026-08-17, a median put the
-  // afternoon at "sellers in control" while price rose and the largest buy of the day printed - the
-  // 101,269-share absorption bar has the lowest impact of any large bar, so it dragged the median
-  // and made BUYING look expensive precisely because a buyer was soaking up everything on offer.
-  // Summing volume over summed movement is immune to that.
-  // ABSORPTION FIRST, because it must be taken OUT of the cost calculation. A bar where 200,000
-  // shares moved price 0.05% is not a statement about liquidity - it is one participant working
-  // size, and leaving it in flips the cost ratio from 10.82 to 0.21 on its own (measured). The two
-  // things answer different questions: COST asks what a share buys in ordinary trade, ABSORPTION
-  // asks who was willing to spend size. Mixing them corrupts both.
-  //
-  // HIGH VOLUME WITH A SMALL MOVE IS AMBIGUOUS on its own - a big buyer taking offers, or heavy
-  // supply capping the price - so only the DIRECTION of the move breaks the tie, and it is signed
-  // rather than counted.
-  // ABSORPTION BY RANK, not by percentile VALUE. A bar absorbs when its volume is in the busiest
-  // quarter of the session AND its impact is in the quietest quarter - big and quiet at once.
-  // Percentile values were tried twice and are brittle on ties: with uniform volumes the 75th
-  // percentile equals the median and everything qualified, and on a short series the 75th percentile
-  // IS the one huge bar so nothing did. Ranks have neither failure.
   const idx=[]; for(let i=1;i<n;i++){ if(Number(bars[i].v)>0) idx.push(i); }
   const impOf=i=>Math.abs((bars[i].c-prevC(i))/prevC(i)*100)/((Number(bars[i].v)||1)/1000);
   const byVol=idx.slice().sort((x,y)=>Number(bars[y].v)-Number(bars[x].v));
@@ -4114,25 +3460,6 @@ function buildIntradayTrajectory(bars,history){
     isAbsorb[i]=true; absNet+=(Number(bars[i].v)||0)*Math.sign(dpct); absCount++;
   }
 
-  // COST: what a share buys in ORDINARY trade, each way. Aggregate - volume summed over movement
-  // summed - never a median of per-bar ratios. A median put ELECTCAST's afternoon at "sellers in
-  // control" while price rose and the largest buy of the day printed, because the absorption bar
-  // dragged it. Absorption bars are excluded here and reported above instead.
-  // AVERAGE MOVE (owner): the mean of every bar's own % change, magnitude only. What this stock
-  // typically does in five minutes - its energy per bar. Signed it would net to nearly nothing;
-  // magnitude is what tells you how many bars a target is away.
-  // v1180: PACE IS VOLUME-WEIGHTED (owner). It was the last plain mean left in this file, and v1144
-  // already settled the principle after an unweighted scale let twelve dead 50-share bars move
-  // AGIIL's net flow from -6.8% to -2.7% on data that had not changed: **anything averaged across
-  // bars here must be volume-weighted - a bar is not an event, a share is.**
-  //
-  // It matters most for what the owner actually wants this number for - a trailing stop. A plain
-  // mean lets a run of thin, motionless bars pull the pace DOWN and produce a trail so tight that
-  // the next real, heavily-traded bar takes the position out. Weighting by volume asks the honest
-  // question: how far does price move in the bars where shares are actually changing hands.
-  //
-  // Falls back to the unweighted mean when a paste carries no volume at all, so a volumeless export
-  // still produces a pace rather than nothing.
   let mvSum=0,mvN=0,mvW=0,mvWV=0;
   for(let i=1;i<n;i++){
     const mv=Math.abs((bars[i].c-prevC(i))/prevC(i)*100);
@@ -4141,17 +3468,6 @@ function buildIntradayTrajectory(bars,history){
     mvW+=mv*v; mvWV+=v;
   }
   const avgMovePct=mvWV>0?(mvW/mvWV):(mvN?mvSum/mvN:null);
-  // ── v1200: PACE IS A RECOVERED SELLER PULLBACK, NOT EVERY DRAWDOWN ───────────────────────────
-  // A trailing stop exists to stay aboard while buyers remain in control. A retreat only proves it
-  // was normal breathing after buyers subsequently establish a NEW high above the anchor that
-  // preceded it. The last, still-open retreat is therefore reported separately and can never widen
-  // the learned trail while price is falling.
-  //
-  // ORDER MATTERS. OHLC does not say whether a breakout candle printed its low before or after its
-  // new high, so that candle may CONFIRM a trough from earlier completed candles but its own low is
-  // never inserted retrospectively into the confirmed episode. The next candle starts measuring
-  // against the new anchor. This is deliberately current-session only: an overnight gap is not a
-  // pullback a live intraday trail could have ridden.
   const _paceDay=istDayKey(bars[n-1].t);
   let _pacePeak=null,_episodeLow=null,_episodeLowAt=null;
   let _confirmedPacePct=null,_confirmedPaceAt=null,_confirmedPullbackCount=0;
@@ -4216,32 +3532,10 @@ function buildIntradayTrajectory(bars,history){
   }
   const pressurePct=upCost?(netRecent/upCost):null;
 
-  // PROJECTED CLOSE. Two things decide it and both come out of the paste. PRESSURE says which way
-  // and how much the accumulated imbalance is worth; the stock's own PACE says how far it can
-  // physically travel in the bars that are left. The projection is the pressure, capped by the
-  // travel - a stock cannot deliver 3% of pent-up buying in the four bars before the bell.
-  // The bar interval is measured from the data rather than assumed, so a 1-minute or 15-minute
-  // paste projects correctly without being told which it is.
   const gaps=[]; for(let i=1;i<n;i++){const g=bars[i].t-bars[i-1].t; if(g>0&&g<6*3600e3) gaps.push(g);}
   gaps.sort((a,b)=>a-b);
   const stepMs=gaps.length?gaps[Math.floor(gaps.length/2)]:300000;
   const lastT=new Date(bars[n-1].t);
-  // ── v1185: THE SESSION DOES NOT END AT 15:30 FOR EVERY STOCK ────────────────────────────────
-  // Measured in our own files on 2026-08-17: TCS, JIOFIN, MCX and TIINDIA all end at the 15:10 bar
-  // while every one of the other 145 stocks ends at 15:25. That is the Closing Auction Session -
-  // continuous trading stops at 15:15 for F&O names. Against a hardcoded 15:30 such a stock is
-  // credited with three bars that cannot exist, so the projected close keeps promising travel after
-  // its continuous session has already ended.
-  //
-  // MEMBERSHIP IS READ OFF THE STOCK'S OWN FILE. No input carries an F&O list, and the multi-day
-  // contiguous series (v1164) already answers it: the LATEST bar ever seen on an EARLIER session is
-  // one bar short of that stock's close. Taking the MAXIMUM makes it robust to our own fetch timing
-  // - a day we stopped fetching at 11:00 can only understate it, and one late fetch on any session
-  // settles it for good. With no late observation at all it fails open to 15:30, which is both the
-  // pre-CAS behaviour and the answer for the ~93% of the market the auction does not touch.
-  // v1206: read off `history` when the caller narrowed `bars` to one session - a today-only slice
-  // contains no earlier session at all, so the loop below would find nothing and every F&O name
-  // would silently fail open to 15:30 again.
   const _todayKey=istDayKey(bars[n-1].t);
   const _hist=(Array.isArray(history)&&history.length>n)?history:bars;
   let _seenMin=0;
@@ -4254,20 +3548,6 @@ function buildIntradayTrajectory(bars,history){
   const closeT=new Date(lastT); closeT.setHours(Math.floor(_endMin/60),_endMin%60,0,0);
   const barsLeft=Math.max(0,Math.floor((closeT-lastT)/stepMs));
   const maxTravel=(avgMovePct!=null)?avgMovePct*barsLeft:null;
-  // THE PROJECTION IS SHRUNK BY HOW MUCH OF THE SESSION IT HAS ACTUALLY SEEN.
-  //
-  // Observed live 2026-08-19 09:31: every open position was being given an instruction off THREE
-  // bars, and NAHARSPING's newest bar was FIVE SHARES. The travel cap does nothing at that hour -
-  // barsLeft is 73, so maxTravel is 35% for a 0.48% pace and 76% for a 1.04% one - so `predPct` was
-  // the raw pressure reading extrapolated across the whole day, and the panel printed EoD -12.76%.
-  // The cap only begins to bite in the afternoon, i.e. the projection was LEAST constrained exactly
-  // when the evidence was thinnest, which is backwards.
-  //
-  // `seen/(seen+left)` is the session's own elapsed share, so at the third bar of the day the
-  // projection is scaled to ~4% of its raw value and grows to its full value by the close. Nothing
-  // is typed: the weight is the clock the bars themselves define, and it is the same shrink-by-
-  // sample idiom used for the timing windows and for measureFieldEdge. A complete session (barsLeft
-  // 0) leaves the projection untouched, so late-day behaviour is unchanged.
   const seenBars=Math.max(1,n-1);
   const evid=seenBars/(seenBars+barsLeft);
   const predRaw=(pressurePct==null)?null
@@ -4284,13 +3564,6 @@ function buildIntradayTrajectory(bars,history){
   return {cvd,cvdNet:run,cvdPct,totV,priceSlope:pRec,flowSlope:cRec,agree,regime,
           // Projected close at the recent pace, over the volume still expected today. Reported.
           projected:price[n-1]+pRec*(1-vx[n-1]/totV),
-          // THE STANDING MUST BE 0.5 AT "NO INFORMATION", because 0.5 is the neutral an unchecked
-          // row is given (v1145). The first version multiplied in an agreement term worth 1.0 when
-          // price and flow agreed, which inflated the geometric mean and put a SELLING stock at
-          // 0.615 - ABOVE neutral, so a stock the data condemned was still confirmed as a buy.
-          // Both surviving terms are flow and both are 0.5 at zero, so the mean is 0.5 at zero.
-          // Divergence needs no separate term: price up on falling flow already drives both of
-          // these down, which is what "distribution into strength" means.
           avgMovePct,confirmedPacePct,confirmedPaceAt:_confirmedPaceAt,
           confirmedPullbackCount:_confirmedPullbackCount,currentPullbackPct,
           maxPullbackPct,maxPullbackAt:_confirmedPaceAt,barsLeft,stepMin:Math.round(stepMs/60000),maxTravel,predPct,predClose,
@@ -4310,27 +3583,9 @@ function getIntradayRead(sym){
   if(!bars||!bars.length) return null;
   const key=istDayKey(bars[bars.length-1].t);
   const day=bars.filter(b=>istDayKey(b.t)===key);
-  // v1167: THE GUARD MUST COUNT WHAT THE READ ACTUALLY USES. This was `day.length<3`, and before
-  // v1164 that was the whole series, so it honestly meant "too little data". v1164 made the FLOW
-  // span every session while session terms stayed on today - and left the guard demanding three bars
-  // from TODAY. So every morning until 09:25 a stock with 77 bars across two sessions returned
-  // NOTHING: no verdict, no re-rank, a plain grey button, and a tally reading "checked 0 of 3".
-  // Reported from the live screen at 09:2x, where the only two names that read were the two whose
-  // fetch had landed a 09:25 bar.
-  //
-  // The flow needs bars, not bars TODAY. Session terms (range position, first-15, day %) degrade
-  // gracefully on one or two bars and are superseded by the trajectory whenever volume is present,
-  // which it always is on a Kite fetch.
   if(bars.length<3) return null;
   const open=day[0].o, close=day[day.length-1].c;
   const hi=Math.max(...day.map(b=>b.h)), lo=Math.min(...day.map(b=>b.l));
-  // (1) THE FIRST FIFTEEN MINUTES. **AN OBSERVATION, NOT A RULE** (owner, 2026-08-17: "that first
-  // 15 minute thing was just a shared observation, not a hard rule by the way"). It is ONE of three
-  // equal terms in the fallback read and it gates nothing anywhere - a stock is never rejected for
-  // opening red. It also only applies when a paste carries no volume; when volume is present the
-  // flow trajectory supersedes this whole block. Do not promote it to a veto without evidence.
-  // Three 5-minute bars. Measured against the OPEN, because a gap is already its own signal and
-  // what is being asked is whether the session CONFIRMED the gap or sold it.
   const first=day.slice(0,3);
   const fHi=Math.max(...first.map(b=>b.h)), fLo=Math.min(...first.map(b=>b.l));
   const f15=fHi>fLo?((first[first.length-1].c-fLo)-(fHi-first[first.length-1].c))/(fHi-fLo):0;
@@ -4343,50 +3598,13 @@ function getIntradayRead(sym){
   const pos=hi>lo?(close-lo)/(hi-lo):0.5;
   let hiIdx=0; day.forEach((b,i)=>{if(b.h>=hi) hiIdx=i;});
   const freshness=day.length>1?hiIdx/(day.length-1):1;
-  // v1144: when the paste carries VOLUME, the flow trajectory is the stronger read and supersedes
-  // the price-path standing. The owner's own 5-minute export sometimes omits volume, so the
-  // price-path read remains the fallback rather than a second-class citizen.
-  // THE FLOW READ NOW SPANS EVERY SESSION IN THE FILE, the SESSION READ stays on today (v1164).
-  // They answer different questions and must not be merged. Accumulation is a multi-day idea - a
-  // stock quietly bought for three sessions is exactly what the owner is trying to see - so CVD,
-  // cost asymmetry, absorption and pressure take the whole contiguous run. But "where does price sit
-  // in the session's range", "did the first fifteen minutes confirm the open" and "how far can it
-  // still travel before the bell" are statements about TODAY and would be meaningless spread over
-  // four days. The overnight gap is excluded from flow by prevC() above.
   const traj=buildIntradayTrajectory(bars.length>day.length?bars:day);
-  // ── v1162: WHEN IS THIS FROM? (owner: "each stock wouldn't be updated daily so data might not be
-  // contiguous and you may make bad decisions based on it.") He is right, and the hole was not the
-  // trajectory - that already scopes itself to the LAST session above, so two sessions can never be
-  // blended into one flow read. The hole was that a read from ANY session was then fed into today's
-  // ranking as if it were current: a stock fetched last Wednesday and never again would still be
-  // multiplying today's score by last Wednesday's flow, and would still show CONFIRMED.
-  //
-  // So every read now states its own session and age, and the SESSION BOUNDARY is the veto - a hard,
-  // non-arbitrary line rather than an invented "N minutes old" constant. Within the session the age
-  // is DISPLAYED instead of judged, which is the same discipline the rest of this file uses for
-  // limits it cannot measure away.
-  //
-  // Holes INSIDE a session are counted, not vetoed: a thin stock genuinely prints no bar for five
-  // minutes, and the volume clock already weights those to nothing. A count that is large is visible
-  // to the eye; a threshold on it would be a tunable with no evidence behind it.
   const nowKey=(typeof getSessionDate==='function')?getSessionDate():key;
   const asOf=day[day.length-1].t;
   const ageMin=Math.max(0,Math.round((Date.now()-asOf)/60000));
   const spanBars=Math.round((asOf-day[0].t)/300000)+1;      // 5-minute bars the span should hold
   const holes=Math.max(0,spanBars-day.length);
-  // ── v1168: THE CURRENT SESSION IS MEASURED SEPARATELY, AND IT CAN VETO ──────────────────────
-  // Owner, 2026-08-18: "If something is in the recommendation, it should be a definite buy, no ifs
-  // and buts." MOLBIO is the case: 66 bars yesterday carrying 13.41M shares against 6 bars today
-  // carrying 1.21M, so the merged read said ACCUMULATING (+34% net flow) while today's own tape had
-  // gone the other way - the up leg cost 297,683 shares per 1% and the fade cost 144,622, i.e. it had
-  // become twice as cheap to push DOWN as up. A multi-session flow is the right answer to "is this
-  // being accumulated" and the wrong answer to "should I buy it right now", because a COMPLETE prior
-  // session outweighs a young one on the volume clock purely by being finished.
   const todayTraj=day.length>=3?buildIntradayTrajectory(day,bars):null;
-  // How much of the clock today actually owns. No constant: it is the session's own share of the
-  // volume in the file, the same idiom v1141 used to decay the pre-open book by what the day has
-  // consumed. Early in the session today is a few percent and the multi-day read carries the row;
-  // by the afternoon today dominates, which is when a fade should be decisive.
   const _tv=day.reduce((n,b)=>n+(Number(b.v)||0),0);
   const _av=bars.reduce((n,b)=>n+(Number(b.v)||0),0);
   const volShare=_av>0?_tv/_av:1;
@@ -4406,27 +3624,6 @@ function getIntradayRead(sym){
           confirmedPullbackCount:traj?traj.confirmedPullbackCount:0,
           currentPullbackPct:traj?traj.currentPullbackPct:null,
           maxPullbackPct:traj?traj.maxPullbackPct:null,
-          // ── v1206: A PROJECTION OF TODAY'S CLOSE IS MEASURED ON TODAY ─────────────────────
-          // Owner, 2026-08-20, on the Open Positions panel: *"Why does it say Exit all when EoD
-          // suggests the price is going higher?! All columns seem to be talking in different
-          // directions."* They were, and it was this line. `predPct` was taken from `traj`, which
-          // v1164 widened to the WHOLE contiguous file, while every other term in its own formula
-          // is about today: the bars left to today's close, today's remaining travel, and v1191's
-          // elapsed-share shrink. So the numerator was ~two sessions of net imbalance and the
-          // denominator was this afternoon.
-          //
-          // Measured on the live files at 11:15 on 2026-08-20, against the panel in the owner's
-          // screenshot: SPECIALITY printed EoD +22.95% while its OWN session was 46.9% net sold
-          // and projected -9.31% - the sign was inverted, next to an EXIT ALL that was right.
-          // URBANCO +13.11% against -0.21%, RISHABH +9.70% against +0.02%, JAGSNPHARM -8.65%
-          // against -0.85%. v1191's shrink was inert too: `seenBars` counted all 250 bars in the
-          // file against today's remaining bars, so the weight was 0.83 where today's own clock
-          // says 0.32.
-          //
-          // THERE IS NO FALLBACK TO THE MULTI-SESSION READ. For the VERDICT a multi-day flow is a
-          // legitimate second-best answer and v1203 falls back to it by name; for a projection of
-          // THIS session's close it is the defect itself. Under three bars today, EoD is absent.
-          // `traj` is untouched and still answers "is this being accumulated" across the file.
           predClose:todayTraj?todayTraj.predClose:null,predPct:todayTraj?todayTraj.predPct:null,
           // One object, so a surface cannot pair the projection with another window's pressure.
           eod:todayTraj&&Number.isFinite(todayTraj.predPct)?{
@@ -4440,17 +3637,6 @@ function getIntradayRead(sym){
           // high. Geometric so a zero on any one of them cannot be averaged away.
           standing:traj?traj.standing:Math.cbrt(Math.max(0,(f15+1)/2)*Math.max(0,eff)*Math.max(0,pos))};
 }
-// THE RE-RANK, v1145. Enrichment must be able to push a stock PAST rows that have no data, or the
-// loop the owner described cannot run: *"it gathers the data of our top 2-3 buyable recommendations,
-// adjusts the math based on this data, sees if they are still top buyable recommendations and if
-// not, repeats."* v1143 permuted the pasted rows among their OWN slots, which is safe and useless
-// here - three selling stocks could only shuffle within ranks 1-3 and rank 4 could never surface.
-//
-// So the intraday standing multiplies the row's standing percentile and everything is re-percentiled,
-// exactly as the order book does (v1139/v1141). A row with NO intraday data takes the neutral
-// midpoint - never its own standing, which is the v1139 trap that let unenriched rows sweep the top.
-// The 4th power in the score then does the amplifying: on the release-day fixtures AGIIL lands at
-// 0.93 of neutral and UFLEX at 1.15, which is a 2.3x swing once raised.
 function applyIntradayReorder(rows){
   if(!rows||!rows.length) return 0;
   let n=0;
@@ -4463,23 +3649,6 @@ function applyIntradayReorder(rows){
     if(read&&read.current) n++;
   }
   if(!n) return 0;
-  // ── v1174: "NO INFORMATION" IS THE MIDDLE OF THE OBSERVED DISTRIBUTION, NOT OF THE SCALE ────
-  // Owner, 2026-08-18: *"stock X and Y are #1 and #2... then I do another refresh and the same X and
-  // Y stay at top. I'm just asking to check if the logic behind is correct or there's something
-  // flawed."* It was flawed, and this is v1139's own rule not applied here: **absence must take the
-  // MEDIAN, so that having been measured is worth nothing by itself.**
-  //
-  // For the order book that rule was satisfied by 0.5, because those values are percentiles and 0.5
-  // IS their median. The flow standing is a geometric mean, and across the stocks the app chooses to
-  // fetch - the top of the board and the day's biggest movers - its median sits ABOVE 0.5. Measured
-  // 2026-08-18 on 17 fetched names: median 0.535, above neutral in 12 of 17, and checked rows rose a
-  // mean of 13.9 places against -0.08 for everything else. So an unchecked row was pinned at 0.500
-  // and could never show better flow, while any checked row above 0.5 gained on it automatically -
-  // the top stayed on top partly BECAUSE it had been measured.
-  //
-  // The neutral is now the median of the standings actually observed this pass, so a checked stock
-  // gains only by beating the typical checked stock. It falls back to 0.5 when nothing is checked,
-  // which reproduces the old behaviour exactly on an empty inventory.
   const _obs=rows.map(r=>(r.intraday&&r.intraday.current&&Number.isFinite(r.intraday.standing))
       ?Math.max(0,Math.min(1,r.intraday.standing)):null).filter(v=>v!=null).sort((a,b)=>a-b);
   const NEUTRAL=_obs.length?_obs[Math.floor(_obs.length/2)]:0.5;
@@ -4513,22 +3682,8 @@ function applyIntradayReorder(rows){
   // only if it still clears the SAME bar the basket uses - nothing softer, nothing bespoke.
   rows.forEach(r=>{
     if(!r.intraday){r.intradayVerdict=null;r.intradayWhy=null;return;}
-    // A CHECKED STOCK THAT IS BEING SOLD TODAY IS NOT A BUY, whatever the multi-day picture says.
-    // This REMOVES it rather than annotating it (owner, 2026-08-18: "I don't have time for your
-    // reports and flags... if something is in the recommendation, it should be a definite buy").
-    // Only fires when the current session has produced a real trajectory - three bars and volume -
-    // so it cannot reject on an empty opening print.
     const _tt=r.intraday.current?r.intraday.todayTraj:null;
     if(_tt){
-      // TWO WAYS THE CURRENT SESSION SAYS NO, and the second is the one that matters most.
-      //   (a) net flow negative - more was sold than bought today.
-      //   (b) COST INVERTED - it now takes fewer shares to move the stock DOWN 1% than UP 1%.
-      // MOLBIO on 2026-08-18 is case (b) and NOT case (a): its net flow stayed positive because the
-      // up leg carried 670k shares and the fade only 292k, so nobody was dumping - the bid simply
-      // thinned. By cost it had become twice as cheap to push down (297,683 up vs 144,622 down per
-      // 1%), which is the honest reading of "there is no longer anything holding this up".
-      // PARITY IS THE LINE - costRatio is dnCost/upCost and 1.0 is "both sides cost the same", so
-      // no constant is chosen here.
       const cr=_tt.costRatio;
       const sold=_tt.cvdPct<0;
       const thin=Number.isFinite(cr)&&cr>0&&cr<1;
@@ -4548,31 +3703,6 @@ function applyIntradayReorder(rows){
       r.intradayWhy='checked on '+r.intraday.on+', not today — refetch before acting on it';
       return;
     }
-    // ── v1207: A VETO THAT CANNOT FIRE MUST NOT READ AS CONFIRMED ──────────────────────
-    // The reject test above is `if(_tt){...}`, and `_tt` is null until the CURRENT session has three
-    // bars, because buildIntradayTrajectory needs three. So between 09:15 and 09:25 the v1168
-    // current-session veto is structurally inert - and the row fell straight through to the score
-    // bar and rendered CONFIRMED, with its `why` describing the MULTI-DAY read.
-    //
-    // Measured on the owner's own 2026-08-20 fills, both placed at 09:23:47/48 with two bars of
-    // today on file:
-    //     RISHABH  09:20  2 bars  veto CANNOT FIRE  - multi-day said accumulating +9.4%
-    //              09:25  3 bars  veto ARMED        - REJECT (thin), costRatio 0.04
-    //     URBANCO  09:20  2 bars  veto CANNOT FIRE  - multi-day said accumulating +42.9%
-    //              09:25  3 bars  veto ARMED        - REJECT (sold), today -27.3%
-    // Both were bought 120 seconds before the app would have thrown them out, and both rejected at
-    // every checkpoint for the rest of the session.
-    //
-    // This is the standing rule - A CONTROL THAT CANNOT WORK MUST SAY SO, AND MUST NEVER FAIL
-    // SILENTLY - and the owner's own bar: "if something is in the recommendation, it should be a
-    // definite buy, no ifs and buts". A row nothing can veto is not a definite buy; it is
-    // UNVERIFIABLE, which is a third state and not the same as rejected.
-    //
-    // NO CONSTANT IS INTRODUCED. The gate opens on the third bar of the session because that is the
-    // minimum the trajectory maths needs - the same three the read itself requires - never a chosen
-    // time of day. The multi-day flow is deliberately NOT accepted as a substitute: v1168 exists
-    // precisely because a complete prior session outweighs a young one on the volume clock, and it
-    // said "accumulating" for both of the names above.
     if(!_tt){
       r.intradayVerdict='unverified';
       r.intradayWhy='the current session has only '+r.intraday.bars+' bar'+(r.intraday.bars===1?'':'s')
@@ -4601,26 +3731,9 @@ function applyIntradayReorder(rows){
 function getIntradayLoopState(){
   const pool=(Array.isArray(FILT)&&FILT.length?FILT:ALL).slice().sort((a,b)=>a.rank-b.rank);
   const passing=pool.filter(r=>typeof meetsRecommendationBar==='function'?meetsRecommendationBar(r):true);
-  // When a round REJECTS the whole top, nothing clears the bar any more - and that is exactly when
-  // the next candidates matter most. Falling back to the best remaining rows keeps the loop running
-  // instead of going silent at the moment it has the most to say. The verdict is unaffected: those
-  // rows are only CANDIDATES to check, and a candidate is confirmed only by clearing the real bar.
-  // The board is the threshold, not an owner-selected top-N. Every row that clears rank + score
-  // needs the same current 5-minute verdict before its checkbox can arm. If none clears after a
-  // validation round, keep the first live-candidate set visible so the search can walk deeper.
   const board=passing.length?passing:pool.slice(0,typeof FETCH_TOP_RANK==='number'?FETCH_TOP_RANK:5);
-  // A stale read does NOT count as checked - the loop must ask for it again, or it would report
-  // "settled" on a board validated last week.
-  // ONE source for both halves of the sentence. `need` read live from getIntradayRead while the
-  // tally read the copy cached on the row, so the two could disagree and the header could claim more
-  // verdicts than checks.
   const liveRead=r=>{const x=getIntradayRead(r.symbol);return (x&&x.current)?x:null;};
   const need=board.filter(r=>!liveRead(r));
-  // v1167: the tally must describe ONE population. This drew from the whole universe while the
-  // "checked N of M" beside it counted the top-N board, so the header could read "checked 0 of 3 ·
-  // 1 buy / 1 skip" - and both verdicts belonged to OPEN POSITIONS, which per v1148 answer a
-  // different question entirely (is the flow that justified the buy still there) and are labelled
-  // HOLDING UP / BEING SOLD in their own panel, not BUY / SKIP.
   const source=board.filter(r=>liveRead(r)&&r.intradayVerdict);
   const confirmed=source.filter(r=>r.intradayVerdict==='confirmed');
   const rejected=source.filter(r=>r.intradayVerdict==='rejected');
@@ -4636,11 +3749,6 @@ function radarAnalyze(headers,rawRows,supplements={},heldSymbols=new Set()){
   const priceHourI=radarIdx(headers,'Price change %, 1 hour'),price15I=radarIdx(headers,'Price change %, 15 minutes'),price5I=radarIdx(headers,'Price change %, 5 minutes');
   const changeOpenI=radarIdx(headers,'Change from open %, 1 day'),perf1mI=radarIdx(headers,'Performance %, 1 month'),perf3mI=radarIdx(headers,'Performance %, 3 months'),perf1yI=radarIdx(headers,'Performance %, 1 year');
   const vwapI=radarIdx(headers,'Volume-weighted average price, 1 day');
-  // v1071 ignition denominator: today's volume against a 60-DAY baseline. 'Relative volume, 1 day'
-  // uses a ~10-day baseline, so a stock that has been busy all fortnight already looks normal;
-  // a 60-day reference catches a name waking up after months of neglect. 60 is the anchor: 30 is
-  // noisy after one busy fortnight, 90 drifts across regime changes. Both remain exported.
-  // NB: `volI` is already taken by 'Volatility, 1 day' — this is share VOLUME, hence dayVolI.
   const dayVolI=radarIdx(headers,'Volume, 1 day'),avgVol60I=radarIdx(headers,'Average volume, 60 days');
   // v555 market-cycle inputs: earnings dates (stateless days-since/days-to), 50-day MA (holding-above check).
   const recentEarnI=radarIdx(headers,'Recent earnings date'),upcomingEarnI=radarIdx(headers,'Upcoming earnings date'),sma50I=radarIdx(headers,'Simple moving average, 50, 1 day');
@@ -4648,11 +3756,6 @@ function radarAnalyze(headers,rawRows,supplements={},heldSymbols=new Set()){
   // v1105 exit signal inputs - the two money-flow measures that are NOT circular with price position
   const cmfI=radarIdx(headers,'Chaikin money flow, 20, 1 day'), mfi15I=radarIdx(headers,'Money flow index, 14, 15 minutes');
   const sessionDate=getSessionDate(),reviewDays=getEffectiveReviewDays(); // reviewDays null ⇒ post-event stages/decay don't fire (graceful, no constant)
-  // R5 (v552, WS3): neutralise mechanical ex-date moves so they neither score the row nor
-  // pollute the day-move percentiles. For a structural corp action (demerger/split/bonus/rights)
-  // OR a material dividend (amount/price >= MATERIAL_DIV_PCT) whose ex-date is THIS session, blank
-  // the day-move cells (day change / change-from-open / gap). Buybacks are NOT neutralised — they
-  // don't mechanically drop price and earn the R2 bonus in the penalty layer instead.
   for(let ri=0;ri<rawRows.length;ri++){
     const meta=supplements[normSym(rawRows[ri][symbolI])],ca=meta&&meta.corpToday;
     if(!ca)continue;
@@ -4671,28 +3774,6 @@ function radarAnalyze(headers,rawRows,supplements={},heldSymbols=new Set()){
     if(gapI>=0)rawRows[ri][gapI]='';
     meta._corpNeutralised=true;
   }
-  // Keep the two concepts separate. True rockets (post corp-action neutralisation) are the
-  // positive cohort for same-day archetype measurement. The broader v550 continuation signal
-  // is only a per-row follow-through/falling-knife input; using its ~half-universe cohort here
-  // caused the Rockets Today card and every diagnostic effect orientation to become misleading.
-  // v1085: DAY 1 of the owner's rocket definition, as a DISPLAY DIAGNOSTIC ONLY.
-  // The real label is forward (target before stop across 2 trading days) and is resolved in the
-  // outcome store, not here. What can be seen from one snapshot is the issue day's leg: did the
-  // bar reach the stock's target above its OPEN without first reaching its stop below it. That is
-  // strictly closer to the owner's definition than the retired ">= 10% today" bar, and it is what
-  // the "Rockets Today" card now counts.
-  //
-  // IT MUST NEVER SET A FEATURE EFFECT. It is a restatement of today's move, so it separates any
-  // same-day-move feature perfectly by construction — the v1083 label leak — and it is now ~51x
-  // denser than the old bar (25.2% of the tradeable universe vs 0.49%, measured 2026-07-30), so
-  // it would sail past `minObs` and re-arm every effect at full strength. See the effect line.
-  // The session's portfolio target anchor, resolved ONCE. Only the day-1 rocket diagnostic below
-  // uses it; it never enters a feature, a percentile or the composite. Wrapped because it walks
-  // the goal solve and the harvest pool, and a scoring pass must not die if either is unavailable.
-  // NB ORDERING: processFiles scores the scanner file BEFORE the portfolio files parse, so this
-  // can resolve to a fallback anchor rather than the fully-informed one shown later in the UI.
-  // That is tolerable because the cohort is display-only, but the value used is RECORDED on RADAR
-  // so the label stays reproducible instead of silently drifting from the displayed target.
   let _radarSessionTargetPct=null;
   let _radarStretchBarUsed=null;   // v1113: the stretch bar actually used, recorded for audit
   try{const t=Number(getEffectiveTgtPct());if(t>0)_radarSessionTargetPct=t;}catch(e){}
@@ -4719,25 +3800,6 @@ function radarAnalyze(headers,rawRows,supplements={},heldSymbols=new Set()){
   // Sector MEDIAN of the day move (v552, WS4/R6): the sector-relative signal below rewards a name
   // out-performing its own sector (idiosyncratic strength), damping pure sector drift.
   const sectorMedians=Object.fromEntries(Object.entries(sectorBuckets).map(([s,a])=>[s,radarQuant([...a].sort((x,y)=>x-y),.5)??0]));
-  // WS1/R1: medium-term trend metric (1M+3M performance) and its cross-sectional distribution. Its
-  // percentile self-calibrates the chase-penalty relief below — no fixed magic number.
-  // ── v1170: A STOCK WITH NO HISTORY HAS NO MULTI-DAY FEATURES, ONLY FICTION ────────────────
-  // Owner, 2026-08-18: "both DHOOTTRANS and MOLBIO seem to be new stocks. Can you check if that's
-  // something we should consider?" Both listed on 2026-08-17 - Kite returns TWO daily candles for
-  // each - and the scorer ranked them #2 and #3 of 2,983.
-  //
-  // Every multi-day feature is degenerate for such a row, and degenerate in a FLATTERING direction:
-  // the whole 52-week range was made today, so the stock sits at its 52-week high BY CONSTRUCTION
-  // and collects full credit on breakout proximity for free. SMA/Bollinger/Donchian/Ichimoku fall
-  // back, ATR-14 is BLANK (so the stop and target rest on a fallback), and the cross-sectional
-  // percentile ranks all of that against 2,983 rows of real history.
-  //
-  // THE DETECTOR IS EXACT AND NEEDS NO THRESHOLD. TradingView collapses every performance window to
-  // "since listing" when the history is shorter than the window, so a young stock reports the SAME
-  // number for 1 month, 3 months and 1 year. MOLBIO: 6.7908163 for all three. TCS: 42.92 / -1.47 /
-  // -24.84. Measured scope 2026-08-18: 24 rows of 2,983, 18 tradeable - and it catches LCL and
-  // MVELECTRO, the two rows that were "the only ones left standing in the whole market" during the
-  // v1112 incident and were never gated.
   const _noHist={};
   rawRows.forEach(raw=>{
     const sym=normSym(raw[symbolI]||''); if(!sym) return;
@@ -4751,45 +3813,6 @@ function radarAnalyze(headers,rawRows,supplements={},heldSymbols=new Set()){
   // WS4/R6: sector-relative day move per row (post-neutralisation; blanked rows are null).
   const srArr=rawRows.map(raw=>{const d=radarNum(raw[targetI]);return d===null?null:clamp01(d,-10,10)-(sectorMedians[raw[sectorI]||'Unknown']??0);});
   const minObs=Math.max(25,Math.floor(rawRows.length*.08));
-  // ── v1083: THE ROCKET COHORT MUST CLEAR THE SAME BAR EVERY FEATURE MUST CLEAR ──────────────
-  // A feature is only modeled when it has >= minObs finite values. The rocket cohort that sets
-  // EVERY feature's `effect` faced no such bar, so a handful of rows could set 108 weights.
-  //
-  // Measured 2026-07-30 midday: 1,749 tradeable rows, rocket cohort = 5. Dozens of features
-  // saturated at the |effect| = 1.0 CLAMP - Hull MA 1.000, Volatility-1d 1.000, Open-1d 0.993,
-  // Change-from-open 0.993, VWAP-1d 0.982, Low-1d 0.981. That is not signal, it is the LABEL
-  // LEAKING INTO THE FEATURES: price-level columns are transformed to 100x(price/level - 1), so for
-  // a stock up 12% today `price/open - 1` IS +12%. The rocket label is "up >= 10% today". Those
-  // columns therefore separate the cohort perfectly by construction, and 73% of total feature
-  // weight landed on same-session-move features (mean weight .82 vs .72 for everything else).
-  // Since alpha = clamp(|effect| x 1.35, .12, .58), a saturated effect also pushes the per-row
-  // signal to the .58 CEILING - 58% driven by the leaked percentile instead of the prior.
-  //
-  // The consequence is a circular ranking: it stops asking "what is about to move" and starts
-  // asking "which stocks most resemble the few that already moved today" - i.e. it ranks completed
-  // moves to the top, which is exactly where a same-day target cannot be reached.
-  //
-  // At 09:15 this cannot happen: no stock is at +10% yet, the cohort is EMPTY, mr falls back to .5,
-  // every effect is ~0, alpha sits at its .12 FLOOR and the score is ~88% prior-driven - a broad
-  // structural blend of yesterday's setup plus the opening gap. That is the configuration the owner
-  // reports as reliable. Applying the existing minObs bar keeps the scorer in that configuration
-  // until the cohort is genuinely large enough to estimate an effect from.
-  //
-  // Reuses minObs rather than introducing a threshold, so there is no new tunable constant.
-  //
-  // ── v1085 CLOSES THIS PERMANENTLY ──────────────────────────────────────────────────────────
-  // v1083's minObs gate worked only because the ">= 10% today" cohort was tiny (6 rows against a
-  // minObs of 237) and so never armed. The owner's new rocket definition is FORWARD-LOOKING —
-  // target before stop across 2 trading days — and cannot be evaluated at scan time at all. The
-  // only same-day stand-in is `rocketRows` above, which fires on 25.2% of the tradeable universe;
-  // that clears minObs comfortably and would re-arm every effect with a label made of today's move.
-  //
-  // So the size test is no longer sufficient and is no longer used for this: NO same-day cohort may
-  // set a feature's direction or weight, at any density. `diagnosticEffect` keeps the separation
-  // for the audit ledger, `effect` is held at 0, and the weight reduces to coverage alone. The
-  // scorer therefore stays in the prior-driven configuration the owner reports as reliable at
-  // 09:15, at every hour of the day. Cross-day learning from the RESOLVED labels is a separate
-  // decision that needs accumulated evidence; nothing here consumes them.
   const rocketCohortTrusted=false;
   // v1135: forward-measured effects, resolved once per pass (see getForwardIndicatorEffects).
   const fwdEffects=(typeof getForwardIndicatorEffects==='function')?getForwardIndicatorEffects():new Map();
@@ -4805,12 +3828,6 @@ function radarAnalyze(headers,rawRows,supplements={},heldSymbols=new Set()){
     for(let ri=0;ri<rawRows.length;ri++){const v=radarTransformed(rawRows[ri],f,priceI,openI);if(v!==null)vals.push(v);}
     vals.sort((a,b)=>a-b);
     if(vals.length<minObs||vals[0]===vals[vals.length-1])continue;
-    // v1068 DE-CLIPPING. Winsorising the UPPER tail at the 98th percentile is correct when
-    // outliers are noise. For the Participation group the outliers ARE the target: measured on
-    // 2026-07-28, `Relative volume at time` had median 0.67, q98 8.68 and max 122.58 — the top
-    // 60 stocks all collapsed onto 8.68, so a 122x ignition scored identically to an 8.7x one,
-    // and 3 of that day's 6 rockets sat inside that flattened blob. Participation keeps its
-    // lower clip (junk protection) and keeps its full upper tail. Every other group is unchanged.
     const tailFeature=f.group==='participation';
     const q02=radarQuant(vals,.02),q98=tailFeature?vals[vals.length-1]:radarQuant(vals,.98);
     const wins=vals.map(v=>clamp01(v,q02,q98)).sort((a,b)=>a-b);
@@ -4837,10 +3854,6 @@ function radarAnalyze(headers,rawRows,supplements={},heldSymbols=new Set()){
     f.weight=(.07+Math.abs(f.effect))*.6+.4*Math.sqrt(f.coverage);
     features.push(f);
   }
-  // WS4/R6 (v552): the sector-relative day move is scored as a synthetic Momentum signal through
-  // the SAME self-calibrating machinery as every feature — its weight comes from the same-day
-  // rocket diagnostic (effect) × coverage, so there is no hand-set magnitude. It is kept out of
-  // `features` (whose entries are real columns read via radarTransformed) and injected per row below.
   let srFeat=null;
   {
     const vals=srArr.filter(v=>v!==null).sort((a,b)=>a-b);
@@ -4858,11 +3871,6 @@ function radarAnalyze(headers,rawRows,supplements={},heldSymbols=new Set()){
   // Cross-sectional distributions for the stage inputs. Percentiles (not fixed thresholds) define
   // low/high, so the classifier recalibrates to each day's universe.
   const _sortF=a=>a.filter(v=>v!==null&&isFinite(v)).sort((x,y)=>x-y);
-  // v1084: HISTORICAL movement capacity only — `Volatility, 1 day` is deliberately NOT in this max.
-  // It expands with the CURRENT session's realised move, so it lets an already-spent spike widen its
-  // own capacity estimate. Measured on the 2026-07-30 14:16 file it EXCEEDED daily ATR on 793 of
-  // 2,965 rows (26.8%), i.e. for a quarter of the universe today's own move was setting the range.
-  // It is still scored as a Volatility feature and still reported; it just cannot manufacture runway.
   const volArr=rawRows.map(raw=>{const a=radarNum(raw[adrI]),b=radarNum(raw[atrI]),d=radarNum(raw[atrWeekI]);const m=Math.max(a||0,b||0,(d||0)/Math.sqrt(5));return m>0?m:null;});
   const dayAbsArr=rawRows.map(raw=>{const d=radarNum(raw[targetI]);return d===null?null:Math.abs(d);});
   const relvolArr=rawRows.map(raw=>radarNum(raw[relI]));
@@ -4894,18 +3902,6 @@ function radarAnalyze(headers,rawRows,supplements={},heldSymbols=new Set()){
       accFeat={sorted:wins,q02,q98,effect,diagnosticEffect,weight:(.07+Math.abs(effect))*.6+.4*Math.sqrt(coverage)};
     }
   }
-  // ── v1068 IGNITION TRACK (finds the tail the composite averages away) ─────────────────
-  // Measured on the 2026-07-28 tradeable universe (EQ + basket-eligible + turnover >= 25L,
-  // n=1373, 20 names >= +5%, base rate 1.46%):
-  //   * direction gate alone (above VWAP AND above open): base rate 1.46% -> 6.40%  (4.4x)
-  //   * within the gated pool, volume extremity is cleanly MONOTONIC by decile:
-  //       deciles 1-5 -> 0.0% hit, d8 3.4%, d9 6.9%, d10 (relAt 4.57-104.69) -> 38.9%
-  //   * gated + extremity, top 20 -> 12/20 = 60% hit (9.4x over the gated pool, 41x overall)
-  //     vs the composite's 6/20 on the same universe and day.
-  // UNGATED extremity is NOT a buy signal: the top relative-volume decile of the whole universe
-  // is 12.1% up >= 5% but also 6.4% DOWN >= 5%. Heavy volume means something is happening, not
-  // that it is happening upward — the direction gate is what turns it into a signal, and it must
-  // never be dropped. Strength is log-summed and never upper-clipped (see the de-clipping note).
   const igniteArr=rawRows.map((raw,ri)=>{
     const p=radarNum(raw[priceI]),vw=vwapI>=0?radarNum(raw[vwapI]):null,co=chgOpenArr[ri];
     // Direction gate. `p>=vw` (not `p>vw`) to match getMarketAlignedEntryTiming's long-standing
@@ -4913,10 +3909,6 @@ function radarAnalyze(headers,rawRows,supplements={},heldSymbols=new Set()){
     // VWAP and disagreed. This is the ONE definition of "confirmed direction" in the codebase.
     if(!(p>0)||!(vw>0)||co===null||!(p>=vw)||!(co>0))return null;
     const ra=relAtI>=0?radarNum(raw[relAtI]):null,r1=relI>=0?radarNum(raw[relI]):null;
-    // v1071 third term: volume vs its own 60-day norm. ADDITIVE, not a replacement — `relAt` is
-    // what surfaced AGARIND at 104x on 2026-07-28 and must not be diluted away. A genuine ignition
-    // is extreme on all three at once, and because the terms are log-summed and the upper tail is
-    // never clipped (v1068 de-clipping), the extremity that makes this track work is preserved.
     const vol=dayVolI>=0?radarNum(raw[dayVolI]):null,av60=avgVol60I>=0?radarNum(raw[avgVol60I]):null;
     const r60=(vol!==null&&av60!==null&&av60>0)?vol/av60:null;
     if(ra===null&&r1===null&&r60===null)return null;
@@ -4959,31 +3951,6 @@ function radarAnalyze(headers,rawRows,supplements={},heldSymbols=new Set()){
       parts.momentum+=sig*w;weights.momentum+=w;
       contrib.push({name:'Accumulation (quiet strength)',group:'momentum',p,sig,impact:sig*w});
     }
-    // ── v1097 PRE-RESULTS QUIET DRIFT (owner, 2026-08-05) ────────────────────────────────────
-    // Owner's observation: "a stock which starts rising slowly 2-3 days before its results are almost
-    // sure to rocket on or after the results date."
-    //
-    // This is the BULLISH direction of R10 (RULES.md), which was logged from E32 — SKMEGGPROD falling
-    // -15.2% the day before its board meeting — and whose own status note says it "must be checked in
-    // BOTH directions: a pre-results drift UP would falsify the 'de-risking' reading." So the two are
-    // the same pending question with opposite signs, and this flag is what lets the app finally see
-    // either one. R10 also recorded the code gap being closed here: `upcomingEarnI` was extracted and
-    // NEVER READ — a dead variable since v555, with the column exported and doing nothing.
-    //
-    // DATE SOURCE, in R10's stated order of reliability: the NSE board-meeting feed FIRST (it carried
-    // the 29-Jul date for SKMEGGPROD, whose TradingView earnings cell was empty), TradingView's
-    // `Upcoming earnings date` as the fallback. Populated on 1,037 of 2,967 rows on 2026-08-05, so
-    // neither source alone is enough and a missing date must mean "no signal", never "no event".
-    //
-    // "RISING SLOWLY" is the discriminator and it is deliberately the QUIET shape, not the loud one:
-    // up over the week AND up today, but WITHOUT the ignition that the v1068 track already rewards.
-    // A stock that has already exploded into its print is not what the owner described, and it is what
-    // R4d says gets sold afterwards. There is no new constant here — the participation test reuses
-    // `participationReady`, which is the model's existing definition of ignition.
-    //
-    // REPORTED, NOT SCORED. RULES.md's own graduation bar (>=3 confirms across >=2 sessions) is not met
-    // — R10 stands at ONE observation, in the opposite direction — so this sets no score term. It is a
-    // visible flag that starts accumulating the evidence from this session on.
     const _upEarn=upcomingEarnI>=0?String(raw[upcomingEarnI]||'').trim():'';
     const _bmDate=(_m.boardMeeting&&_m.boardMeeting.isResults)?_m.boardMeeting.date:null;
     const _resDate=/^\d{4}-\d{2}-\d{2}$/.test(_bmDate||'')?_bmDate
@@ -4997,13 +3964,6 @@ function radarAnalyze(headers,rawRows,supplements={},heldSymbols=new Set()){
     const _partReady=(relI>=0&&radarNum(raw[relI])>=1.2)
       ||(relAtI>=0&&radarNum(raw[relAtI])>=1.5)
       ||(volChgI>=0&&radarNum(raw[volChgI])>=30);
-    // v1098: the drift INTO today, measured properly. Preferred source is the dated price history
-    // (a true 3-session close-to-close move with today excluded outright). The week column is the
-    // fallback while the history fills, and it is now COMPOUNDED rather than subtracted —
-    // (1+wk)/(1+day)-1, not wk-day. The subtraction overstated the drift by up to 0.69pp on the
-    // 2026-08-05 movers, and the error grew with today's move, so it inflated exactly the big
-    // reactions whose drift any magnitude threshold would be calibrated from. `driftSource` is
-    // recorded on the row because a threshold must never be fitted across two different measures.
     const _sym=normSym(raw[symbolI]);
     let _drift=(_driftInfo.map&&_sym in _driftInfo.map)?_driftInfo.map[_sym]:null;
     let _driftSource=_drift!=null?`${_driftInfo.sessionsUsed}-session close-to-close (${_driftInfo.from} to ${_driftInfo.to})`:null;
@@ -5025,36 +3985,10 @@ function radarAnalyze(headers,rawRows,supplements={},heldSymbols=new Set()){
       inWindow:_daysToRes!=null&&_daysToRes>=1&&_daysToRes<=3,
       drift:!!(_quietRise&&_daysToRes!=null&&_daysToRes>=1&&_daysToRes<=3)
     };
-    // ── R4d POST-RESULTS DIGESTION (graduated rule, implemented 2026-08-06) ──────────────────
-    // Withholds the ENTRY, never the score. R4d's claim is temporal — "do not chase it TODAY" — not
-    // that the stock is bad, so it belongs with entry timing, where v1070/v1075 established that an
-    // honest rank is preserved while the execution decision is withheld separately. It is also a pure
-    // boolean, so unlike a score penalty it needs no magnitude and invents no constant.
-    //
-    // FRESH RE-ACCUMULATION is the release valve the rule itself names. It reuses the codebase's ONE
-    // definition of confirmed direction (v1069: at or above VWAP and up from the open) plus the
-    // existing participation test — a stock genuinely being bought again is not the falling knife R4d
-    // describes, and E27/E34 both broke down precisely when that stopped being true.
     const _r4d=(_inDigestion&&/^\d{4}-\d{2}-\d{2}$/.test(_recEarn))?getResultsDayMove(_sym,_recEarn):null;
     const _vwapR4d=vwapI>=0?radarNum(raw[vwapI]):null;
     const _priceR4d=radarNum(raw[priceI]);
     const _reaccum=!!(_vwapR4d>0&&_priceR4d>=_vwapR4d&&chgOpenArr[ri]>0&&_partReady);
-    // MARGIN DIRECTION IS THE SECOND RELEASE VALVE, AND THIS IS THE ONE PLACE IT CAN WORK.
-    //
-    // R3 wants the quarter's operating-margin direction AT THE PRINT and can never have it: the
-    // vendor refreshes `Operating margin %, Trailing 12 months` 1-3 days AFTER the filing. R4d's
-    // window is D+1 onward, so here the late arrival is IN TIME - the whole reason the deferral was
-    // scoped this narrowly rather than dropped. `getSessionWatchStore` has been recording the value
-    // and the date it last MOVED since v1117; nothing read it until now.
-    //
-    // A TTM window drops the year-ago quarter as it adds the new one, so the SIGN of the change is
-    // exactly the sign of the new quarter's margin against the year-ago quarter - arithmetic, not a
-    // proxy. A first observation returns null and releases nothing: silence is not a signal.
-    //
-    // It only ever RELEASES, never blocks. A results rocket that is digesting on EXPANDING margins
-    // is the case R4d's own evidence never covered (E42 XPROINDIA, E63 TCPLPACK and the rest were
-    // all read on the price tape alone), so widening the valve cannot make R4d fire on anything it
-    // was not already firing on.
     const _mdir=(_r4d&&_r4d.wasRocket)?getMarginDirection(_sym):null;
     const _marginRelease=!!(_mdir&&_mdir.direction==='expanding');
     const _digestionRisk=!!(_r4d&&_r4d.wasRocket&&!_reaccum&&!_marginRelease);
@@ -5104,28 +4038,6 @@ function radarAnalyze(headers,rawRows,supplements={},heldSymbols=new Set()){
     // reachability and the v1083 session ceiling — all of which must not widen as a stock runs.
     const sessionVolatilityPct=radarNum(raw[volI]);
     const rangePct=Math.max(radarNum(raw[adrI])||0,atrPct||0,(radarNum(raw[atrWeekI])||0)/Math.sqrt(5));
-    // ── v1113: THE STRETCH BAR IS THE TARGET WE ACTUALLY NEED, NOT A RETIRED 10% ──────────────────
-    // This asked "how many typical days' range would a 10% move take", and penalised -7/-14/-22 above
-    // 2.5x/3x/4x. The 10 was the OLD ROCKET DEFINITION (same-day move >= 10%), which v1085 replaced
-    // outright with "reaches its OWN target before its OWN stop within 2 trading days". Nothing in the
-    // app has wanted a 10% move since. Measured 2026-08-10: the retired bar penalised 1,178 of 2,973
-    // rows (39.6%, -14,031 points in total) including 14 of the top 50 — it had quietly become a
-    // blanket volatility floor demanding a move nobody was asking for. Penalised rows had a median
-    // daily range of 3.28% against 5.07% for the rest; a 3.3% mover was being marked down for failing
-    // a 10% test while its actual target was 1.8%.
-    // Re-anchored to the SESSION target anchor, the question becomes the one that matters: how much of
-    // a typical day's range does the bar consume? Tiers move with it — over 1x, 1.5x and 2x a typical
-    // day's range. NO NEW CONSTANT: the numerator is `_radarSessionTargetPct`, the same single session
-    // scalar feasibility used (v1086), so it cannot reorder stocks against each other by itself, and
-    // the three tier multiples replace the old three one-for-one.
-    // Deliberately the SESSION anchor and not the row's own target: `targetPct` is max(anchor,
-    // capacity) and capacity is sqrt(ATR x range), so target/range would collapse to sqrt(ATR/range)
-    // — about 1.0 for every row — and the penalty would fire on noise.
-    // ORDERING TRAP (v1085, and it bites here too): processFiles scores the scanner file BEFORE the
-    // portfolio files parse, so `_radarSessionTargetPct` can be a fallback anchor rather than the one
-    // the UI shows later — measured 2.60% at scoring time against 1.80% on screen. Unlike the rocket
-    // cohort, which is display-only, this bar FEEDS THE SCORE, so the value actually used is recorded
-    // on RADAR and on every row. Do not audit this against getActiveTargetInfo() after the fact.
     const _stretchBar=(RADAR_STRETCH_USE_TARGET&&Number(_radarSessionTargetPct)>0)
       ? Number(_radarSessionTargetPct) : 10;
     const stretch=rangePct?_stretchBar/rangePct:99;
@@ -5148,34 +4060,12 @@ function radarAnalyze(headers,rawRows,supplements={},heldSymbols=new Set()){
     if(turn<25e5)gateReasons.push('turnover below ₹25L');
     if(price<10)gateReasons.push('price below ₹10');
     rawScore*=.88+.12*quality;
-    // Reference-exact: the standalone Radar tests series==='Unknown' AFTER uppercasing,
-    // so its −8 unknown-series branch is dead code and unverified series falls through
-    // to the −50 non-EQ penalty. Reproduced deliberately for bit-parity with the
-    // reference scorer (dev/assert-fidelity.js); switching to the author-intended −8
-    // would be an owner decision.
     if(series!=='EQ')rawScore-=50;
     if(status!=='A')rawScore-=50;
     if(band!==null&&band!==undefined&&band<10)rawScore-=35;else if(band===10)rawScore-=3;
     if(meta.flags?.length)rawScore-=Math.min(12,meta.flags.length*2);
     if(meta.delivery!==null&&meta.delivery!==undefined)rawScore+=clamp01(1-Math.abs(meta.delivery-55)/55,0,1)*3-1;
     if(meta.officialClose&&meta.officialAvg)rawScore+=meta.officialClose>=meta.officialAvg?1:-1;
-    // ── v1117 R11: THE 52-WEEK HIGH IS RESISTANCE UNTIL IT IS CLEARED ────────────────────────────
-    // Graduated 2026-08-10 at 3 confirms across 2 sessions, 0 contradictions (RULES.md Appendix C):
-    //   E33  RATNAVEER bought at 98.8% of its 52w high -> -14.3%; and the cross-section that session
-    //        put the 98-100% bucket at mean -0.28% with 0 of 35 up >= 2%.
-    //   E49  UNIVCABLES CLEARED to an all-time high -> +20.00%.
-    //   E52  COMSYN CLEARED to a fresh 52-week high -> +19.66%.
-    // The two halves point OPPOSITE ways, which is why this cannot be expressed by nudging the old
-    // term: it was a single monotone high-good ramp, so it paid MOST at exactly the price where the
-    // approach half is worst. R11 is a TWO-STATE rule and the term is now two-state.
-    //
-    // "At the high" is measured in the stock's OWN typical daily range (`rangePct`, the unit already
-    // on the row since v1060) rather than as a typed percentage band — a stock one normal day's move
-    // below its 52-week high is AT it; one ten days below is not. No new constant, and the test
-    // scales with volatility instead of imposing one width on the whole market.
-    //
-    // The magnitude budget is UNCHANGED: the term still lands in [-2, +2]. Approaching-but-not-
-    // cleared simply takes the negative end of the range it used to take the positive end of.
     if(meta.high52&&meta.low52&&meta.high52>meta.low52){
       const pos52=clamp01((price-meta.low52)/(meta.high52-meta.low52));
       const bonus52=(pos52-.5)*4;
@@ -5192,26 +4082,10 @@ function radarAnalyze(headers,rawRows,supplements={},heldSymbols=new Set()){
     if(!participationReady)rawScore-=7;
     if(!impulseReady)rawScore-=5;
     rawScore+=followThroughBonus+fallingKnifePenalty;
-    // WS1/R1 (v552): trend-aware chase penalty. The relief is SELF-CALIBRATING — the fraction of the
-    // chase that is waived is the row's cross-sectional percentile of medium-term trend (1M+3M). A
-    // strong established uptrend (high percentile) is a genuine continuation and keeps almost none of
-    // the chase; a trendless one-day spike (low percentile, the "hot-shot → next-day fade") keeps it
-    // all. No magic constant. Missing performance data → full chase (unchanged prior behaviour).
     if(day>8){const chase=Math.min(13,(day-8)*1.7);const tPct=trendArr[ri]===null?null:radarPct(trendSorted,trendArr[ri]);rawScore-=chase*(tPct===null?1:1-tPct);}
     if(gap>7)rawScore-=Math.min(6,(gap-7)*.8);
     if(turn<5e5)rawScore-=7;
     if(price<5)rawScore-=5;
-    // R2 (buyback bonus) RETIRED in v1072. It was introduced in v552 as a +1.5 "treasury conviction"
-    // term, but its ONLY supporting event (E2) was a CRYPTO token buyback-and-burn logged from a
-    // crypto calendar under the ticker RAIN — which on NSE is Rain Industries Limited, an unrelated
-    // Process-industries company that had no buyback at all (trading window closed 1-Jul..10-Aug-2026;
-    // the company publicly stated there was no unpublished price-sensitive information). Verified and
-    // voided 2026-07-29. The rule therefore had ZERO evidence in this market and is removed rather
-    // than left scoring live positions. The `kind==='buyback'` CLASSIFICATION is deliberately kept
-    // (see parseCorpActions): R5 relies on it to NOT neutralise a buyback the way it neutralises a
-    // mechanical split/bonus/demerger ex-date move. Re-introduce only if a real NSE buyback event
-    // earns confirmations under the graduation bar in RULES.md.
-    // Display the REAL day move for a neutralised corp-action row (scoring already used the blanked 0).
     const dispDay=meta._corpNeutralised&&meta._realDay!=null?meta._realDay:day;
     const out={symbol,name:String(raw[descI]||symbol),sector:raw[sectorI]||'',rawScore,parts,contrib,quality,
       price,day:dispDay,priceChange:dispDay,turnover:turn,relvol,gap,gapSigned,changeOpen,rangePct,sessionVolatilityPct,stretch,stretchBarPct:_stretchBar,atr:atrPct,
@@ -5234,61 +4108,14 @@ function radarAnalyze(headers,rawRows,supplements={},heldSymbols=new Set()){
     out.entryReady=!out.entryTiming.blocked;
     return out;
   });
-  // Held positions never re-enter the buy ranking, but they DO stay in the scored
-  // universe (marked _held) so the Performance Open Positions table can show Radar context.
-  // Display/selection/outcome paths suppress _held rows; with ~1-2% of rows held
-  // the percentile shift vs the standalone Radar (which dropped them pre-percentile)
-  // is negligible, and this visibility was owner-requested.
   allRows.forEach(r=>{r._held=heldSymbols.has(r.symbol);});
   const rows=allRows;
   const suppressedHeld=allRows.filter(r=>r._held).length;
   const rawScores=rows.map(r=>r.rawScore).sort((a,b)=>a-b);
   for(const r of rows){
-    // v1068: EXTREMITY, NOT BALANCE. rawScore is a budget-weighted MEAN across seven groups, and a
-    // mean structurally prefers the well-rounded to the extreme — on 2026-07-28 its top 20 was IT
-    // large caps in a sector move (COFORGE, TCS, NAUKRI...), names that cannot physically move 10%,
-    // while the day's two tradeable rockets sat at rank 36 and 56. A rocket is extreme in ONE
-    // dimension (participation) and ordinary elsewhere, so it can only ever lose an average.
-    // Taking the MAX of the two percentiles lets either kind of evidence carry a stock on its own
-    // merit: balanced names keep their composite standing, igniting names are no longer averaged
-    // out. It is parameter-free — both inputs are cross-sectional percentiles on the same scale —
-    // and ignitePct is 0 for anything failing the direction gate, so nothing is promoted on volume
-    // alone. The ^4 top-weighting still crushes mid-percentiles, so a merely-median ignition
-    // cannot lift a weak row into contention.
     r.compositePct=radarPct(rawScores,r.rawScore);
     r.noHistory=!!_noHist[normSym(r.symbol)];
     r.setupPct=Math.max(r.compositePct,r.ignitePct||0);
-    // ── v1086: FEASIBILITY IS PART OF THE RANK, NOT A FILTER AFTER IT ─────────────────────────
-    // Owner, 2026-07-31: "Rank 1 should be the one stock which has the highest chance of achieving
-    // our target from the recommended price point." The ranking used to answer a different
-    // question — "which stock has the best setup" — and a separate gate then deleted the rows that
-    // could not actually be bought. Measured on the 11:09 live file: of the top 400 basket-eligible
-    // rows, 207 were blocked for STOCK-INTRINSIC reasons (204 move-spent, 3 no circuit headroom)
-    // against 3 for portfolio reasons, and only ONE of the top 10 was recommendable. Rank 1
-    // (DEEPINDS) had -0.75% of runway against a 1.85% target; rank 6 (UEL) had -9% and was sitting
-    // on its circuit at +20%. Those are not near-misses, they are arithmetic impossibilities.
-    //
-    // So the two headroom facts — how far to the session ceiling, how far to the upper circuit —
-    // now SCALE the score instead of vetoing it afterwards. Both are already computed here, both
-    // are properties of the STOCK, and both are measured from the same buffered buy price the
-    // sizing uses. `headroom / target` is a pure ratio of two existing quantities: at or below 1
-    // the stock cannot reach target from here and the score goes to 0, so it sinks to the bottom
-    // of the ranking on its own instead of occupying rank 1 with a "cannot allocate" tag.
-    //
-    // WHAT IS DELIBERATELY EXCLUDED: capital, Max Alloc, the 0.10%-of-turnover rail, the held
-    // top-up cushion and the 20-order cap. Those depend on the owner's book and on which OTHER
-    // stocks were selected, so admitting them would make a stock's rank depend on its neighbours —
-    // the non-causal cross-stock coupling v1066 removed and v1080 explicitly refused. They remain
-    // post-filters. The target anchor IS admitted because it is one scalar applied identically to
-    // every row: it cannot reorder stocks relative to each other, it only sets the bar they clear.
-    //
-    // v1097 INVARIANT — DO NOT REPLACE THIS WITH getRowExitPolicy().targetPct. Since v1097 the exit
-    // target carries a per-stock nudge derived from the row's own SCORE. Feeding that back in here
-    // would close a loop: score -> nudge -> target -> feasibility -> score, whose result depends on
-    // evaluation order and which penalises exactly the high-scoring stocks it just raised the target
-    // on (measured: top-decile capacity feasibility 1.000 -> 0.938, and the 4th power turns that into
-    // a 23% score haircut). Feasibility uses the SESSION ANCHOR — one scalar, identical for every row,
-    // which is the whole reason v1086 was allowed to admit the target into the score at all.
     const _tgt=Number(_radarSessionTargetPct)>0?Number(_radarSessionTargetPct):null;
     const _buy=r.price>0?r.price*(1+BASKET_MARKET_BUDGET_BUFFER_PCT/100):null;
     let _feas=1;
@@ -5296,7 +4123,11 @@ function radarAnalyze(headers,rawRows,supplements={},heldSymbols=new Set()){
       const runways=[];
       if(r.low1d>0&&r.rangePct>0) runways.push((r.low1d*(1+r.rangePct/100)/_buy-1)*100);
       const _uc=getUpperCircuitInfo(r,_buy);
-      if(_uc&&isFinite(_uc.runwayPct)) runways.push(_uc.runwayPct);
+      if(_uc&&isFinite(_uc.runwayPct)){
+        runways.push(_uc.runwayPct);
+        r.circuitRunwayPct=+_uc.runwayPct.toFixed(3);
+        r.circuitFeasibility=clamp01(_uc.runwayPct/_tgt,0,1);
+      }
       if(runways.length){
         // The binding constraint is the tightest ceiling, and it must cover the target with the
         // same slippage cushion the order already budgets for (v1081's rule, reused not re-tuned).
@@ -5304,67 +4135,10 @@ function radarAnalyze(headers,rawRows,supplements={},heldSymbols=new Set()){
         _feas=clamp01(_room/_tgt,0,1);
       }
     }
-    // ── v1087: DIRECTION IS PART OF THE SCORE, NOT A FILTER AFTER IT ─────────────────────────
-    // Owner: the engine must catch a stock at LIFTOFF — about to reach target in the next ~15
-    // minutes — not one that merely looks good on yesterday's structure. `setupPct` is
-    // `max(compositePct, ignitePct)`, and ignitePct is 0 whenever the direction gate fails, so a
-    // falling stock could rank #1 on setup ALONE. Measured on the 11:09 file: all five
-    // recommendations were BELOW VWAP, four of five BELOW their own open, and only 8 of the top 30
-    // were confirmed in either sense — which is exactly why they fell the moment they were bought.
-    //
-    // Filtering them out afterwards is not enough: the ranking still ordered by setup, so the top
-    // 10 emptied entirely and the basket came out with ZERO names. Direction has to move the rank.
-    // The test is the codebase's ONE definition of confirmed direction (v1069, above VWAP and
-    // above the open) plus the owner's rule that a stock red on the day is weak or confused.
-    // A non-confirmed row scores 0 and sinks; `setupPct` is retained so its standing stays auditable.
     const _dirOk=(Number(r.vwap)>0&&Number(r.price)>=Number(r.vwap))
       &&Number(r.changeOpen)>0&&Number(r.day)>0;
     r.directionConfirmed=!!_dirOk;
     r.feasibility=+_feas.toFixed(4);
-    // ── v1109: FEASIBILITY NO LONGER MULTIPLIES THE SCORE ────────────────────────────────
-    // MEASURED 2026-08-07, entry at the 08-05 close, outcome = reached +2.6% on 08-06, n=2,391,
-    // base rate 27.1%:
-    //     rank by yesterday's gain, top 20  -> 17/20 = 85%
-    //     rank by distance off the low      -> 16/20 = 80%
-    //     rank by the RADAR score           ->  8/20 = 40%
-    // A single sorted column beat the whole scorer by more than 2x. The mechanism is this line.
-    //
-    // `feasibility` = min(session-ceiling runway, circuit runway) / target. A stock that has ALREADY
-    // moved up has less runway left, so feasibility falls as momentum rises — measured correlation
-    // with today's move is **-0.588** — and the 4th power then annihilates it: feasibility 0.044
-    // raised to the 4th is 0.0000037. On the 2026-08-07 board, 74 stocks were up >=5% and ZERO
-    // appeared in the Radar top 20; their mean feasibility was 0.044 against 0.736 for the rest,
-    // and their mean score 0.4 against 1.9.
-    //
-    // So v1086 built feasibility to stop the app recommending stocks that could not reach target,
-    // and it instead deleted the ones most likely to. This is also the single mechanism behind three
-    // separate findings that were logged as unrelated: entry-blocked picks converting at 50% vs 25%
-    // over three sessions, RULES.md D4 / v1075 measuring that extension predicted CONTINUATION, and
-    // DCI (top score, blocked by three gates) rocketing on day 0.
-    //
-    // WHAT IS KEPT. The two ARITHMETIC ceilings still remove a row, through the v1080 allocation gate
-    // and `getRowExitPolicy`: a stock at its upper circuit legally cannot trade higher today (v1081),
-    // and one with no session runway cannot be allocated (v1083). Those are facts about the day, not
-    // opinions about momentum. What is removed is the STATISTICAL ceiling acting as a 4th-power
-    // multiplier on RANK. `feasibility` is still computed and still stored on the row so the
-    // before/after remains auditable and so the exit policy is untouched.
-    // v1139 (owner): "This whole market depth thing should drive or at least be a part of the
-    // recommendation table. The info goes in the recommendations!" So the order book is no longer a
-    // separate list - it is a factor in THIS score.
-    //
-    // GEOMETRIC MEAN OF TWO PERCENTILES, which is why it needs no constant: both are cross-sectional
-    // percentiles on one scale, so the blend is symmetric and parameter-free - the same reasoning
-    // that made v1068 take a MAX of two percentiles rather than a weighted sum.
-    //
-    // A STOCK WITH NO BOOK TAKES THE MEDIAN (0.5), NOT ITS OWN setupPct. The first attempt used
-    // setupPct, reasoning that sqrt(setupPct^2) leaves that row untouched. Row-by-row that is true;
-    // IN A RANKING IT IS BACKWARDS. Leaving bookless rows alone while shrinking every row that has a
-    // book PROMOTES the bookless ones - measured on the release board, rows scoring >=95 collapsed
-    // from 33 to 4 and SEVEN OF THE TOP EIGHT had no book at all. Absence must mean "no information",
-    // which is the middle of the distribution, not a free pass.
-    // v1140: the book is rolled forward with the session's own signed volume. A PASTED book is a
-    // real reading and always wins; otherwise the pre-open book plus flow. Percentiled in the
-    // second pass below, because a percentile needs the whole cross-section.
     const _bk=NSE_DEPTH[r.symbol];
     const _lv=DEPTH_LIVE[r.symbol];
     // A pasted book (chart summary, v1144) is a direct reading of what is resting NOW - it needs no
@@ -5378,10 +4152,6 @@ function radarAnalyze(headers,rawRows,supplements={},heldSymbols=new Set()){
             r.depthSignedVol=d.signedVol;r.depthPreOpenImb=_bk.imbalance;}
     }
     r.depthBlendPct=r.setupPct;   // provisional; replaced in the second pass
-    // Provisional: re-percentiled across the universe in a second pass below, so the SCORE SCALE is
-    // preserved and only the ORDER moves. Without that pass the geometric mean shrinks almost every
-    // row and the whole distribution slides down - which would silently move what `RECOMMEND_MIN_SCORE`
-    // means, turning an ordering change into a de-facto raising of the bar.
     r.score=+(100*Math.pow(r.depthBlendPct*(_dirOk?1:0),4)).toFixed(1);
     r.rocketScore=r.score; // allocation/export alias
     r.fundamental=deriveFundamentalTrigger(r);
@@ -5389,13 +4159,6 @@ function radarAnalyze(headers,rawRows,supplements={},heldSymbols=new Set()){
     r.risk=!r.basketEligible||r.meta.flags?.length>=3||r.turnover<25e5||r.price<10?'High':(r.gap>6||r.day>6||r.parts.volatility<38?'Medium':'Low');
     r.setup=r.series!=='EQ'?(r.series==='UNKNOWN'?'Series unverified':`Non-EQ · ${r.series}`):r.band!==null&&r.band<10?`${r.band}% price band`:radarSetupLabel(r);
   }
-  // v1139/v1140 SECOND PASS. Two percentiles are taken here, both needing the whole cross-section:
-  // first the BOOK (rolled forward by v1140), then the blended standing.
-  //
-  // Re-percentiling the blend is what keeps the SCALE. The raw geometric mean shrinks nearly every
-  // row, and scoring it directly slid the whole distribution down - measured, rows at or above 95
-  // fell 33 -> 4 - which would have quietly raised what RECOMMEND_MIN_SCORE means while presenting
-  // itself as a re-ordering. Re-percentiling is monotone: the order moves, the scale does not.
   if(RADAR_DEPTH_IN_SCORE){
     const booked=rows.filter(r=>Number.isFinite(r.depthImbalance));
     if(booked.length>=50){
@@ -5407,32 +4170,11 @@ function radarAnalyze(headers,rawRows,supplements={},heldSymbols=new Set()){
       // eight had no book at all. No information means the middle of the distribution.
       rows.forEach(r=>{
         const dp=Number.isFinite(r.depthPct)?r.depthPct:0.5;
-        // v1140 HEADROOM GUARD (owner, same session: "you just recommended it and it started
-        // falling. Need to be careful."). The roll-forward signs traded volume by where price sits
-        // in the day's range, so a stock PINNED AT ITS HIGH signs all of it to the buy side and
-        // scores ~+1.0 whatever its actual book says - measured: the same +0.20 book reads +0.999
-        // at the high and +0.011 mid-range. Left alone, the flow term would reward exactly the
-        // spent spike it should be avoiding, and TFCILTD was the live case: flagged correctly at
-        // its 116.80 pre-open IEP, still top-ranked at 124.21 having consumed 91% of the day's
-        // range and travelled 2.2x its own average daily range.
-        //
-        // `feasibility` is v1086's headroom - how far the stock can still travel toward its target
-        // against the session ceiling and the circuit, clamped to [0,1]. v1109 removed it from the
-        // score on a single day-pair; this restores it in a far softer form, INSIDE the blend and
-        // therefore before the re-percentile, so it changes the ORDER without touching the scale.
-        // Ample room earns full credit and no bonus (the v1086 clamp), so it only bites on a stock
-        // that has already spent its move. Missing feasibility is neutral, never a penalty.
-        const fz=Number.isFinite(r.feasibility)?Math.max(0,Math.min(1,r.feasibility)):1;
+        // v1208: the CIRCUIT only. feasibility fuses it with the statistical session ceiling that
+        // v1112 retired, and min() let the retired half back in as a rank multiplier.
+        const fz=Number.isFinite(r.circuitFeasibility)?r.circuitFeasibility:1;
         r.depthBlendPct=Math.sqrt(Math.max(0,r.setupPct)*Math.max(0,dp))*fz;
       });
-      // ── THE MULTI-DAY TERM, WEIGHTED BY ITS OWN MEASURED EDGE ───────────────────────────────
-      // `w` comes from measureFieldEdge(), which grades this exact field against the app's own
-      // resolved picks every session. AT w = 0 THE LINE BELOW IS THE IDENTITY - Math.pow(base,1) x
-      // Math.pow(us,0) === base - so shipping this changes nothing until the data says otherwise,
-      // and it un-ships itself the same way. There is no flag and no trigger; the evidence IS the
-      // switch. Applied BEFORE the re-percentile, so it changes the ORDER and never the scale
-      // (the v1139 lesson: a blend that moves the distribution silently redefines what a score of
-      // 95 means).
       const _us=getUpStreakContext();
       const _uw=(_us&&_us.edge&&_us.edge.w>0)?_us.edge.w:0;
       if(_uw>0&&_us.map){
@@ -5523,20 +4265,6 @@ function buildObservedDailyMoves(objRows){
     return {symbol,price:num(r['Price']),high1d:highCol?num(r[highCol]):null,low1d:lowCol?num(r[lowCol]):null,priceChange:changeCol?num(r[changeCol]):null};
   }).filter(Boolean);
 }
-// ══════════════════════════════════════════════════
-// INDICATOR WATCH (v526/v1202) — automatic orientation trigger.
-// Automated forward measurement replacing manual eyeballing of ~170 indicators.
-// For every MONOTONIC-prior indicator it records, each accepted session, where each
-// stock sat (decile). Five trading sessions later it asks: did the end the prior
-// REWARDS actually hold more of the movers, or fewer? It keeps a rolling 30-session
-// tally per indicator, for BOTH forward outcomes (a stock posting a >=5% day-move and a
-// >=10% day-move within the window). An indicator triggers only when it is "backwards"
-// on BOTH outcomes past a Bonferroni-corrected bar. If the trade-horizon model has no
-// measured answer, that trigger reverses the unopposed prior inside scoring. State is
-// bounded (<=window snapshots + a 30-long log), append-only, and gap-
-// robust: a missed upload just yields fewer samples, never corrupt rolling state (the
-// v1 failure mode cannot recur here).
-// ══════════════════════════════════════════════════
 const INDICATOR_WATCH_STORE='rs_indicator_watch_v1';
 const IW_SCHEMA='indicator_watch_v1';
 const IW_WINDOW=5;            // forward trading sessions
@@ -5579,34 +4307,6 @@ function getIndicatorWatchStore(){
   if(raw?.schema===IW_SCHEMA) return raw;
   return {schema:IW_SCHEMA,window:IW_WINDOW,pending:[],dailyMovers:[],log:{},resolvedSessions:0,updatedAt:null};
 }
-// Record the current session and resolve any anchors that have matured. Fire-and-forget
-// from the upload path so it never delays rankings.
-// ── v1117 SESSION WATCH: WHEN did the day's high print, and WHEN did the TTM margin move ─────────
-// Two questions the app could not answer, both blocked on the same absence: no input carries an
-// INTRADAY series. We hold daily OHLC and one live snapshot, so we have always known the day's high
-// and never known what time it printed (recorded as a known limitation in v1095 and again in v1099).
-//
-// (1) TIME OF HIGH. The owner's question: how long after a sell — or after price crosses target —
-//     does the high arrive? The sell side is already answerable, because orders.csv carries fill
-//     times to the second ("2026-08-10 14:16:51", established in v1096). Only the high side was
-//     missing. Every re-ingest of the scanner file is an observation of `high1d`, so stamping the
-//     receipt time whenever that value ADVANCES reconstructs the time of the high directly.
-//     RESOLUTION IS THE EXPORT CADENCE, NOT THE POLL. The folder watch checks every 3 seconds but
-//     the file only changes when TradingView re-exports, so the answer is +/- one export interval,
-//     and `n` (observation count) is stored so any later read can see how coarse it was.
-//     IT CANNOT BE BACKFILLED. This is a live recorder: it answers from the day it ships forward and
-//     says nothing about the 217 historical exit cohorts.
-//
-// (2) TTM OPERATING MARGIN, and WHEN IT LAST CHANGED. R3 (27 confirms, the best-evidenced rule we
-//     have) needs the QUARTER's operating-margin direction against the year-ago quarter, and the
-//     owner confirmed TradingView exports no quarterly margin field. The growth-difference proxy
-//     was measured and REJECTED (see RULES.md 2026-08-11). What does work is arithmetic: a trailing
-//     twelve-month window drops the year-ago quarter as it adds the new one, so
-//         sign(TTM_after - TTM_before) === sign(Q_new margin - Q_year-ago margin)
-//     exactly. Storing the TTM margin and the date it last MOVED therefore recovers R3's signal
-//     without a new column. It arrives 1-3 days late, because the vendor refreshes fundamentals
-//     after the filing — too late for the print-day move, but in time for R4d's D+1 window, which is
-//     the rule that actually trades this. Recorded only; nothing scores it yet.
 const SESSION_WATCH_STORE='rs_session_watch_v1';
 const SESSION_WATCH_KEEP=30;              // sessions of high-time history to retain
 const SESSION_WATCH_PATH_MAX=60;          // high-water points kept per symbol per session
@@ -5632,15 +4332,7 @@ function recordSessionWatch(sessionDate,receivedAt,objRows){
     const best=hi>0?hi:(px>0?px:null);
     if(!(best>0)) return;
     const cur=day[r.symbol];
-    // v1120: keep the HIGH-WATER PATH, not just the final high. Without it the sell day cannot be
-    // split into before and after the exit — which is the whole question ("how much higher did it go
-    // AFTER I sold"). Each entry is [HH:MM, running max at that moment], appended only when the high
-    // advances, so it stays short: a handful of points per symbol per session.
     if(!cur){ day[r.symbol]={h:+best.toFixed(2),at:hhmm,first:hhmm,n:1,path:[[hhmm,+best.toFixed(2)]]}; return; }
-    // An entry written before v1120 has no path. Seed it from what IS known — the high and the time
-    // it last advanced — rather than leaving it permanently unsplittable. One honest point, not a
-    // fabricated series: it says "the running max was this, at that time", which is exactly the
-    // information the old shape carried.
     if(!Array.isArray(cur.path)||!cur.path.length) cur.path=[[cur.at||cur.first||hhmm,+Number(cur.h).toFixed(2)]];
     cur.n=(cur.n||0)+1;
     if(best>cur.h+1e-9){
@@ -5669,31 +4361,6 @@ function recordSessionWatch(sessionDate,receivedAt,objRows){
   FS.set(SESSION_WATCH_STORE,store);
   return store;
 }
-// What the recorder can answer once it has data: for a symbol and session, the time of the high and
-// how coarse the observation was. Returns null rather than guessing when the session was not watched.
-// ── v1120: HOW MUCH HIGHER DID IT GO **AFTER** THE SELL? ─────────────────────────────────────────
-// Owner: "I don't want day high, I want how higher it went AFTER I sold." Correct, and everything
-// before this release answered the wrong question — v1099 folded the WHOLE sell-day bar in and
-// labelled it an upper bound, which is how GNA reported Rs 592 left on the table when its high was
-// already in 48 minutes BEFORE the exit.
-//
-// `high1d` is a running maximum, so a single reading cannot be split around the sell. The HIGH-WATER
-// PATH can: take the running max at the last observation AT OR BEFORE the sell, and compare it with
-// the final one. If the high never advanced after the sell, the stock did not make a new high while
-// you were out and there is NO money attributable to waiting.
-//
-// WHAT THIS CANNOT SEE, stated rather than glossed: we observe the running MAX, never the path
-// between observations. If the day's high printed at 09:31 and you sold at 10:19, the stock could
-// have rallied to just under that high at 11:00 and nothing would record it. So a "no advance"
-// answer means "it set no NEW high after you sold", not "it never rose". The measure is exact for
-// the case that matters — a new high after the exit — and silent otherwise, which is the honest way
-// round: it can no longer INVENT money left on the table, only miss some.
-//
-// Resolution is the export cadence. An advance seen at 10:30 against a sell at 10:19 happened
-// somewhere in (last observation, 10:30]; when that interval straddles the sell it is reported as
-// straddling rather than counted as clean.
-// The split itself, as a PURE function of the path and the sell clock — no store, so it can be
-// asserted as arithmetic rather than through whatever the live data happens to contain.
 function splitPathAtSell(path,sellTime,finalHigh){
   const sellMin=clockMinutes(sellTime);
   if(sellMin==null||!Array.isArray(path)||!path.length) return null;
@@ -5715,10 +4382,6 @@ function getPostSellHighFromWatch(sym,sessionDate,sellTime){
   const day=getSessionWatchStore().highs[sessionDate||getSessionDate()];
   const e=day&&day[normSym(sym)];
   if(!e) return null;
-  // Entries written before v1120 carry no path, and a symbol already sold out of is no longer in the
-  // recorder's scope so it will never be revisited to gain one. Synthesise the single point we DO
-  // know — the running max and the time it last advanced — on READ. Same information the old shape
-  // carried, no write, and it makes every historical entry splittable immediately.
   const path=(Array.isArray(e.path)&&e.path.length)?e.path:[[e.at||e.first,+Number(e.h).toFixed(2)]];
   if(!path[0]||!path[0][0]) return null;
   const r=splitPathAtSell(path,sellTime,e.h);
@@ -5731,22 +4394,10 @@ function getHighTimeInfo(sym,sessionDate){
   const e=d&&d[normSym(sym)];
   return e?{high:e.h,at:e.at,firstSeen:e.first,observations:e.n||0}:null;
 }
-// ── v1121: HOW LONG AFTER AN EXIT THE HIGH ARRIVES, ACROSS ALL RECORDED HISTORY ──────────────────
-// The Latest Session table answers this for today. This answers it for everything the watch has
-// seen, by pairing each recorded high-time with the tradebook's own sell time for that symbol and
-// session — the tradebook carries `sellDate` and `sellTime` on every trip, so history is pairable
-// as soon as the watch has a session for it.
-//
-// It can only cover sessions the recorder actually watched, which began 2026-08-11. The sample size
-// and the session count ride on the result so the card can never imply more history than exists.
 let _gapStatsMemo=null;
 function getHighGapStats(){
   const store=getSessionWatchStore();
   const trips=TRADEBOOK_STATS?.tripsData;
-  // v1123: the signature must change when a HIGH ADVANCES, not only when a new session or trip
-  // appears. Keyed on dates alone it went stale the moment the market moved: the stamps kept
-  // advancing through the afternoon while the card kept serving the morning's answer, so the card
-  // and the Latest Session totals — the same measure, the same code path — disagreed on screen.
   const sig=Object.entries(store.highs||{})
     .map(([d,day])=>d+':'+Object.entries(day||{}).map(([s,e])=>s+e.at+e.h).join(''))
     .join('|')+'|'+(Array.isArray(trips)?trips.length:0);
@@ -5858,23 +4509,6 @@ async function recordIndicatorWatch(sessionDate){
     FS.set(INDICATOR_WATCH_STORE,store);
   }catch(e){console.warn('recordIndicatorWatch failed',e);}
 }
-// v1136: the forward effect that sets the WEIGHTS, measured where this app actually trades.
-//
-// The guardrail resolution (iwResolveAnchor) is UNCONDITIONAL and matures at IW_WINDOW=5 sessions.
-// Both choices are wrong for scoring, and the owner named the reason: "large volume doesn't just
-// mean they were bought - in this case they were definitely sold." Volume is an AMPLIFIER, not a
-// direction, so a monotonic mover-vs-non-mover gap cancels across the two halves BY CONSTRUCTION,
-// and the residual decays with horizon. Measured on the stored anchors (dev/probe-volsigned.js):
-// signed top-decile relative-volume lift is 2.78x at 1 session, 2.18x at 2, 1.80x at 3, while the
-// down half climbs 5.07% -> 8.03% -> 12.50% toward the up half. By session 5 there is nothing left.
-// The gap for `Relative volume, 1 day` goes +0.035 (5d, unconditional - BELOW the 0.08 floor, so
-// v1135 gave it no weight at all) -> +0.087 (2d) -> +0.132 (2d, direction-confirmed), which makes it
-// and `Relative volume at time` the TOP TWO of all 106 features rather than unmeasurable.
-//
-// Direction is taken from the snapshot's own decile for `Change from open %, 1 day` (top half = up
-// from the open). That is a PROXY for v1069's exact test (price >= VWAP and up from open) and is
-// stated as one - it needs no schema change, so existing pending anchors resolve too, and it is the
-// same proxy dev/probe-volsigned.js measured with, so the shipped number reproduces the probe.
 async function iwResolveShort(store,a){
   try{
     const H=ROCKET_HORIZON_DAYS;
@@ -6027,34 +4661,6 @@ function dayHighForSymbol(sym){
   const hi=Number(row?.high1d);
   return hi>0?hi:null;
 }
-// v1095 (owner correction to v1094): LEFT ON THE TABLE MEASURES WHAT HAPPENED **AFTER** THE SELL.
-//
-// v1094 shipped this as `(day's high − sell price) × qty`, which is WRONG for the question being
-// asked. The day's high is not attributable to the post-sell window: if a stock peaked at 10:15 and
-// the exit was at 14:00, that high was never available to hold out for, and the column charged the
-// exit for a move it could not have captured. The owner's definition is "the stock went higher
-// after we sold" — a forward measure from the exit, not a best-of-day one.
-//
-//   leftOnTableRs  = (price now − sell price) × qty
-//   leftOnTablePct = (price now − sell price) / sell × 100
-//
-// POSITIVE = it kept going up after the exit; that is money left on the table (red — a large
-// number is a bad outcome). NEGATIVE = it fell after the exit, so the sell was well timed and the
-// number is a saving (green). This is the "or the opposite, whatever applies" case, and unlike
-// v1094's version it is a real, common outcome rather than a data-mismatch artefact.
-//
-// KNOWN LIMITATION, stated rather than papered over: the app has NO intraday series — only OHLC and
-// the current price — so a spike after the exit that faded back before the close is invisible here,
-// and the true post-sell peak cannot be recovered from any input the app reads. The day's high is
-// therefore reported in the TOOLTIP as unattributed context (it may pre- or post-date the exit) and
-// never in the number. Reconstructing the real post-sell peak would need intraday bars keyed to the
-// fill time, which no current input supplies.
-//
-// PROVENANCE GUARD: the comparison price comes from the CURRENT scanner snapshot, so it only
-// describes the booking session when the two dates agree — otherwise it would measure a sell from
-// one day against another day's price, and it is withheld with a stated reason instead. While the
-// market is open the figure is still moving, and the tooltip says so.
-// Minutes between two "HH:MM" / "YYYY-MM-DD HH:MM:SS" clock strings, or null.
 function clockMinutes(v){
   const m=String(v||'').match(/(\d{1,2}):(\d{2})/);
   return m?(+m[1])*60+(+m[2]):null;
@@ -6065,20 +4671,6 @@ function enrichExitPnlRow(row,bookedDate=null){
   const sell=Number(row?.sellPrice);
   const current=currentPriceForSymbol(row?.sym);
   const out={...row};
-  // ── v1119: HOW LONG AFTER YOUR EXIT DID THE DAY'S HIGH ARRIVE? ────────────────────────────────
-  // Owner: "selling early, manually, is one of the main problems in all this money left on table."
-  // The sell side has always been answerable (orders.csv carries fill times to the second, v1096);
-  // the high side arrived with the v1117 session watch, which stamps the receipt time whenever
-  // `high1d` ADVANCES. This is the first thing that consumes it — it was written yesterday and wired
-  // to nothing, the fourth orphaned output found this week.
-  //
-  // POSITIVE minutes = the high came AFTER you sold: waiting would have paid.
-  // NEGATIVE = the high was already in before you sold: the exit was late, not early.
-  //
-  // Two limits carried onto the row rather than hidden. RESOLUTION IS THE EXPORT CADENCE, not the
-  // 3-second poll — the file only changes when TradingView re-exports — so `highObs` (how many
-  // observations that session produced) rides along and the tooltip states it. And the recorder
-  // CANNOT be backfilled: it began on 2026-08-11, so every earlier session reads "not watched".
   out.highAt=null; out.highGapMin=null; out.highObs=null; out.highNote='';
   try{
     const info=getHighTimeInfo(row?.sym,bookedDate||getSessionDate());
@@ -6102,13 +4694,6 @@ function enrichExitPnlRow(row,bookedDate=null){
   }catch(e){}
   if(qty>0&&isFinite(buy)&&buy>0&&isFinite(sell)&&sell>0){
     out.priceDiff=+(sell-buy).toFixed(2);
-    // v1174: GROSS IS NET PLUS CHARGES, not a recomputation from the row's ROUNDED average prices
-    // (owner, 2026-08-18: "the latest session P/L calculation is wrong"). Net and charges are exact
-    // sums over the FIFO lots; gross was rebuilt from the 2-decimal weighted averages shown in the
-    // row, so the three numbers on the card could not reconcile. Measured on 2026-08-17: the card
-    // read "gross -539 / cost 224" against a total of -768, and -539 - 224 is -763. Per lot the true
-    // gross is -544.0 (ELECTCAST -787.4, ANANTRAJ +243.4); the rounded averages gave -539.2 -
-    // ELECTCAST (72.07-73.27)x652 = -782.4 against a true -787.4. The TOTAL was right all along.
     const _net=Number(out.netPnl), _chg=Number(out.charges);
     out.grossPnl=(Number.isFinite(_net)&&Number.isFinite(_chg))
       ? +(_net+_chg).toFixed(0)
@@ -6120,22 +4705,6 @@ function enrichExitPnlRow(row,bookedDate=null){
   out.currentPrice=current!=null?+current.toFixed(2):null;
   const dayHigh=dayHighForSymbol(row?.sym);
   const scanDate=(typeof getSessionDate==='function')?getSessionDate():null;
-  // v1099: `sessionMatch` is gone. It gated the figure on the booking session equalling the scanner
-  // session, which was correct only while the current snapshot was the sole comparison price. Dated
-  // daily bars now cover older sells exactly, so gating on it would withhold the BEST data available.
-  // ── v1099 (owner correction to v1095): the EXTREME after the sell drives the number ──────────
-  // v1095 used the CURRENT price, so a stock that ran 8% past the exit and faded back to flat
-  // reported nothing left on the table — the peak was never looked at. The owner's rule is "how much
-  // did it move and in what direction after I sold it; the highest/lowest point post-sell drives it".
-  //
-  // DIRECTION FOLLOWS THE MOVE. If it traded ABOVE the sell afterwards, the number is the HIGH
-  // (money forgone, positive). If it never did, the number is the LOW (the exit saved money,
-  // negative). Both extremes are reported either way so the row can be read in full.
-  //
-  // The v1094 session guard is RELAXED here, deliberately: it existed because the only comparison
-  // price was the current snapshot, so an older sell could only be measured against the wrong day.
-  // Since v1098 stores dated daily bars, sessions AFTER an older sell are exactly attributable and
-  // there is no longer any reason to withhold them. What is withheld now is only genuine absence.
   out.leftOnTableRs=null; out.leftOnTablePct=null;
   // v1120: the sell time is passed so the sell day can be split at the exit instead of folded in whole.
   const ext=getPostSellExtremes(row?.sym,bookedDate,row?.sellTime);
@@ -6150,10 +4719,6 @@ function enrichExitPnlRow(row,bookedDate=null){
   }else if(!bookedDate){
     out.leftOnTableNote='No booking date on this row, so the post-sell window cannot be bounded.';
   }else if(ext.high==null&&ext.low==null&&/no new high after your exit/.test(ext.sellDayNote||'')){
-    // v1120: the watch established that no NEW high came after the exit, so nothing is attributable —
-    // report ZERO left on the table rather than a figure derived from action that predates the sell.
-    // It is not "unknown": we know it set no new high. We simply cannot see whether it rose to just
-    // under the earlier high, because only the running MAX is observable.
     out.leftOnTableRs=0; out.leftOnTablePct=0;
     out.leftOnTableExact=true;
     out.leftOnTableNote=`Sold at ₹${sell.toFixed(2)}. ${ext.sellDayNote}. Nothing is attributable to waiting — the app sees the running high only, so a rise that stopped short of the earlier high would be invisible.`;
@@ -6165,10 +4730,6 @@ function enrichExitPnlRow(row,bookedDate=null){
     const ref=wentUp?hi:(lo!=null?lo:hi);
     out.leftOnTableRs=+((ref-sell)*qty).toFixed(0);
     out.leftOnTablePct=+(((ref-sell)/sell)*100).toFixed(2);
-    // Resolution is stated per row, never blurred. Later sessions are whole bars and fully
-    // attributable; the sell day itself may contain pre-exit action.
-    // v1120: the sell day is now split at the exit by the high-water path, so it is only an upper
-    // bound when that session was NOT watched. When it was, the note says what the path established.
     const res=ext.exact
       ? `Measured across ${ext.sessions} full session${ext.sessions===1?'':'s'} after the sell${ext.from?` (${ext.from} to ${ext.to})`:''}${ext.sellDayNote?`, plus the sell day: ${ext.sellDayNote}`:''} — fully attributable.`
       : `UPPER BOUND${ext.sellDayNote?` (${ext.sellDayNote})`:''}: part of that day's range may predate the exit. For a LIMIT sell it is exact — price can only reach the limit once, so anything above it came at or after the fill.`;
@@ -6200,16 +4761,6 @@ function summarizeExitPnlRows(rows){
           leftRs,leftPct,leftCount:leftRows.length,leftProceeds};
 }
 
-// ── v1097 money-left-on-the-table, carried ACROSS sessions ────────────────────
-// Latest Session answers "how much did today's exits leave behind". The target nudge needs that
-// figure over time, so every session that renders a trustworthy number persists it here.
-//
-// WHAT IS AND IS NOT STORED. Only sessions whose left-on-table figure passed enrichExitPnlRow's
-// PROVENANCE GUARD contribute — the guard already withholds the number when the booking session and
-// the scanner session disagree, and a withheld number must not silently become a zero. The write is
-// keyed by session date and idempotent, so re-uploading a session overwrites rather than accumulates.
-// It is always taken from the UNFILTERED row set: the Rankings search box narrows the table, and a
-// search must never be able to move a persisted figure.
 function getLeftOnTableStore(){
   const raw=FS.get(LEFT_ON_TABLE_STORE);
   return (raw&&typeof raw==='object'&&raw.sessions&&typeof raw.sessions==='object')?raw:{version:1,sessions:{}};
@@ -6232,58 +4783,10 @@ function recordLeftOnTableSession(date,summary){
   FS.set(LEFT_ON_TABLE_STORE,out);
   return out;
 }
-// The pool the target nudge distributes. PROCEEDS-WEIGHTED across the most recent sessions so one
-// small position cannot swing it, and FLOORED AT ZERO by owner rule: a negative figure means the
-// exits were already landing above where the stock went afterwards, which calls for no nudge at all
-// rather than for pulling the target back below the goal rate.
 let _leftPoolMemo=null;
-// ── v1119 THE TARGET COMES FROM WHAT THE STOCK ACTUALLY OFFERED, NOT FROM ATR ────────────────────
-// Owner, 2026-08-11: "your ATR based targets are never reached. The stock starts falling before
-// reaching there... I'm losing money selling too early when the price shoots up the same day."
-//
-// MEASURED ON HIS OWN 223 CLOSED COHORTS, taking the move from HIS buy price to that day's high:
-//
-//   available   p25 1.21%   p50 3.46%   p75 6.02%   p90 9.05%
-//   the target the ATR policy sets   p25 3.90%   p50 4.40%   p75 5.40%
-//
-// The median target sat ABOVE the median available move, and the base leg filled on 79 of 223 — 35%.
-// Two positions in three could not reach their target on the day, which is why they had to be sold by
-// hand. That is not indiscipline; it is a target that cannot fill.
-//
-// WHY THE ATR NUMBER LOOKED RIGHT AND WAS NOT. The v1105 sweep filled at the target where the day's
-// high reached it and KEPT HIS ACTUAL MANUAL EXIT otherwise — so it credited a too-high target with
-// his own exit skill on every trade where the target failed. Judged without that credit (a target
-// that does not fill captures nothing), the optimum drops to ~3.5% and the fill rate doubles.
-//
-// WHAT THE CHANGE IS WORTH, stated honestly: on RUPEES it is a wash — ₹88,691 at p50 against ₹88,901
-// for the ATR policy, because a higher target earns more per fill and fills less often and the two
-// almost exactly cancel. What it buys is FILL RATE: 50% against 35%, i.e. 33 fewer positions a month
-// that the GTT cannot resolve. That is the owner's actual complaint.
-//
-// LIMIT, recorded rather than buried: the store holds the high on the day the position was SOLD, not
-// the running high across the hold, so for multi-day holds it understates what was available and the
-// true reachable level sits somewhat above 3.46%. The rupee curve is flat across p45-p55 (₹88.2k to
-// ₹88.7k), so this sits inside a plateau rather than on a fitted peak.
-//
-// The percentiles are not tuned magnitudes: the BASE is the median — the level half your positions
-// reach — and the RUNNER is the upper quartile, the level a quarter of them reach. Same family as
-// HARVEST_TRIGGER_CONFIDENCE, which already takes a percentile of a measured pool rather than a mean.
 const REACHABLE_MIN_SAMPLES=40;         // below this the distribution is not worth trusting
 let _reachMemo=null;
 function getReachableTargets(){
-  // v1124 — TWO defects fixed here, both found by audit and both real.
-  //
-  // (1) STALENESS. The signature was `rows.length + first + last`, and `recordSameDayExitOpportunity`
-  //     keeps dayHigh as a RUNNING MAX, so an existing cohort's high advancing during the session
-  //     moves a MIDDLE value and leaves all three signature terms unchanged. The p50 that sets every
-  //     target could then be frozen at the morning's value for the rest of the day — the same class
-  //     of bug as the v1123 card, but this one moves money. The store stamps `lastUpdated` on every
-  //     write, so that plus the entry count is both cheap and genuinely sensitive.
-  //
-  // (2) COST ON THE HOT PATH. The full read/map/sort ran BEFORE the memo check, so the memo saved
-  //     only the percentile step. Measured 0.13ms per call against 227 entries — and this is called
-  //     once per row by getRowExitPolicy, i.e. ~400ms of pure overhead across the universe. The
-  //     signature is now computed from metadata and the scan only runs on a genuine miss.
   const store=FS.get(SAME_DAY_EXIT_OPPORTUNITY_STORE);
   const entries=store?.entries||{};
   const sig=(store?.lastUpdated||'')+'|'+Object.keys(entries).length;
@@ -6420,12 +4923,6 @@ function computeLatestOrderBooked(){
   return {source:'Orders.csv',date:session.date,total,rows,unknownRows,hasOrders:session.orders.length>0};
 }
 
-// Zerodha exports the tradebook end-of-day, so P&L booked TODAY is absent from every
-// tradebook-derived stat until the next export (observed 2026-07-20: tradebook ended
-// 07-17 while ₹1,253 was already booked today). Orders.csv carries it, so surface it as
-// an explicit addendum to the money totals. Deliberately NOT merged into `trips`: the
-// learned exit policy and position sizing must keep running on settled tradebook data,
-// and same-day order rows have no buy date or hold days to model with (v532).
 function getTodayBookedAddendum(){
   const booked=computeLatestOrderBooked();
   if(!booked?.rows?.length) return null;
@@ -6493,13 +4990,6 @@ function getSameDayExitOpportunitySummary(){
 // scoring, or allocation. Config persists in brain (GOAL_STORE) for cross-device sync.
 const GOAL_STORE='rs_goal_v1';
 let _repsState=null; // {date,lastTotal,lastDelta} — session-only reps trigger state (v483)
-// The horizon is a DEADLINE DATE (owner, v532 — reverses the v522 day-count shape).
-// Remaining trading days are derived from it every render, so the countdown stays
-// correct on its own and there is no anchor to drift.
-// v1126: memoised on the STORED OBJECT's identity plus the session date. The cost is not the read
-// — it is goalTradingDaysUntil(), which walks the NSE calendar day by day and ran 2,977 times for
-// 1,462ms during a single Performance render. FS.get returns the same object until the config is
-// written, and the trading-day count can only change when the session date rolls.
 let _goalCfgMemo=null;
 function getGoalConfig(){
   const raw=FS.get(GOAL_STORE)||{};
@@ -6518,13 +5008,6 @@ function _computeGoalConfig(rawCfg){
   const withdrawAmount=Number.isFinite(Number(g.withdrawAmount))&&Number(g.withdrawAmount)>=0
     ? Math.max(0,Number(g.withdrawAmount)) : withdrawMonthly;
   const withdrawFreq=GOAL_WITHDRAW_FREQS.includes(g.withdrawFreq)?g.withdrawFreq:'monthly';
-  // v1077: daily reinvest split (owner, from the daily-compounding model). When set, each
-  // trading day's gain is split - this share compounds, the remainder is taken out as cash -
-  // which is how a trading account actually drains, rather than a fixed monthly rupee amount
-  // that keeps draining on days you earn nothing. null keeps the legacy withdrawMonthly model.
-  // Default 55%: the owner's daily-compounding model. There is no separate monthly withdrawal -
-  // the 45% that is NOT reinvested IS the cash taken out, which is how a trading account actually
-  // drains. A fixed monthly rupee drain kept subtracting on days that earned nothing.
   const reinvestPct=(g.reinvestPct===''||g.reinvestPct==null||!isFinite(Number(g.reinvestPct)))
     ?55:Math.min(100,Math.max(0,Number(g.reinvestPct)));
   const isDate=v=>typeof v==='string'&&/^\d{4}-\d{2}-\d{2}$/.test(v);
@@ -6552,13 +5035,6 @@ function goalImpliedEndDate(remainingDays){
   }
   return cur.toISOString().slice(0,10);
 }
-// ── v1130 (owner): "the goal module behaves differently than the filters elsewhere" ───────────
-// The filter bar recalculates as you type (debounced) and persists as it goes. The goal module used
-// `onchange`, which for a number/date input fires only on BLUR, so nothing moved until you clicked
-// away — and v1110's focus guard then blocked the popover rebuild anyway, freezing the numbers.
-// Now: every field is `oninput` on a 180ms debounce (the same shape as scheduleApplyFilters), the
-// READOUT alone is re-rendered so the element under the cursor is never replaced, and `onchange`
-// fires the same handler immediately so committing a value (blur, Enter, picking a date) is instant.
 let _goalChangeTimer=null;
 function onGoalChange(immediate){
   clearTimeout(_goalChangeTimer);
@@ -6602,28 +5078,6 @@ function goalTradingDaysUntil(dateStr){
   }
   return n;
 }
-// The target is EARNINGS: cumulative trading profit generated from current total
-// capital within the horizon (owner definition, 2026-07-18). Withdrawals drain every
-// CALENDAR day (₹/month × 12 ÷ 365 — weekends and holidays spend money too) and shrink
-// the compounding base, but the earnings tally counts every rupee the capital makes.
-// Compounding happens only on trading days. The real calendar is walked once for the
-// day-gaps, then binary search finds the per-trading-day rate whose earnings hit target.
-// ── v1129 SCHEDULED WITHDRAWALS (owner, 2026-08-12) ────────────────────────────────────────────
-// "It's not that I keep investing all my money back. There's got to be daily, weekly, monthly
-// withdrawals too, which should be adjusted into the targets. This is separate from reinvestment %."
-//
-// TWO DIFFERENT DRAINS, deliberately kept apart:
-//   REINVEST %  — what share of each day's GAIN compounds. Proportional, and it only bites on days
-//                 that actually earn. This is v1077's model and it is unchanged.
-//   WITHDRAWAL  — a FIXED rupee amount leaving the account on a calendar cadence, earned or not.
-//                 v1077 deleted exactly this ("it kept subtracting on days that earned nothing"),
-//                 which is true of a trading account's P&L but NOT of a person's spending. The owner
-//                 withdraws on a schedule; the goal arithmetic has to know that or it solves for a
-//                 capital base that never actually exists.
-//
-// The tally `e` is GROSS earnings and is untouched by either drain — the goal target keeps meaning
-// "cumulative trading profit to generate". A withdrawal shrinks the COMPOUNDING BASE, which is what
-// makes the required daily rate go up.
 const GOAL_WITHDRAW_FREQS=['daily','weekly','monthly'];
 function goalWeekKey(iso){
   const d=new Date(iso+'T12:00:00Z');
@@ -6660,14 +5114,6 @@ function solveGoalDailyRate(start,target,days,wd,reinvestPct){
     }
   }
   const W=normaliseGoalWithdrawal(typeof wd==='object'&&wd?wd:{withdrawAmount:wd,withdrawFreq:'monthly'});
-  // v1077 (owner): the ONLY drawdown model is the daily reinvest split. Each trading day's gain is
-  // split - `reinvest` compounds, the remainder is taken out as cash - exactly the daily-compounding
-  // model the owner specified, where "additional contributions" is None and the cash-out IS the
-  // withdrawal. The legacy fixed monthly rupee drain is gone: it kept subtracting on days that
-  // earned nothing, which is not how a trading account behaves. `wdMonthly` is still accepted so
-  // older callers do not break, but it is deliberately unused.
-  // `e` tallies GROSS earnings - cash taken out is still earned - so the goal target keeps meaning
-  // "cumulative trading profit to generate", unchanged.
   const reinvest=Math.min(1,Math.max(0,(reinvestPct==null||!isFinite(Number(reinvestPct)))?0.55:Number(reinvestPct)/100));
   const earned=r=>{
     let c=start,e=0,prev=null;
@@ -6687,16 +5133,7 @@ function solveGoalDailyRate(start,target,days,wd,reinvestPct){
   for(let i=0;i<60;i++){const mid=(lo+hi)/2;if(earned(mid)>=target)hi=mid;else lo=mid;}
   return hi;
 }
-// Projected completion date at a given NET %/trading day (v538, informational).
-// The inverse of solveGoalDailyRate, walking the SAME calendar semantics forward:
-// withdrawals drain every calendar day, earnings compound only on trading days and
-// are tallied even while withdrawals shrink the base. Returns the date the earnings
-// tally reaches the target, or null if it never does within ~8 years at that pace.
 function projectGoalCompletionDate(start,target,netPctPerDay,wd,reinvestPct){
-  // v1077: must mirror solveGoalDailyRate EXACTLY or the two disagree — projecting at the required
-  // rate would then miss the deadline. Same daily reinvest split, no fixed withdrawal: each trading
-  // day's gain is earned in full and only the reinvested share compounds. `wdMonthly` is accepted
-  // for signature compatibility and deliberately unused, exactly as in the solver.
   if(!(start>0)||!(target>0)||!(netPctPerDay>0)) return null;
   const r=netPctPerDay/100;
   const reinvest=Math.min(1,Math.max(0,(reinvestPct==null||!isFinite(Number(reinvestPct)))?0.55:Number(reinvestPct)/100));
@@ -6717,41 +5154,6 @@ function projectGoalCompletionDate(start,target,netPctPerDay,wd,reinvestPct){
   }
   return null;
 }
-// Computed total deployed capital, from the CSVs only (v543): your full deployed book =
-// holdings + every open position (including today's BTST buys), via the combined map over
-// Holdings + Positions + today's net Orders buys. `holdings` = Σ(qty × LTP) over
-// Holdings.csv (matches Zerodha "Holdings · Current value"); `total` is the combined book,
-// and the BTST-locked delivery margin is the margin behind those positions, already
-// represented by them, so it is not added again. This is the DEFAULT for the Capital ₹
-// field — one value drives the goal basis and allocation, and the owner can override it.
-// v1079 (owner) CAPITAL. Three buckets, from the owner's own description of how Zerodha reports:
-//   DELIVERY  - holdings.csv, qty>0, at live price. Settled capital.
-//   TODAY'S BUYS - positions.csv, qty>0. A buy reaches HOLDINGS only on T+1, so while positions.csv
-//                  is the CURRENT session these are capital that holdings does not yet know about.
-//   FREED CASH - positions.csv, qty<0. Sell legs are capital released today, whether the stock came
-//                  from holdings or from an intraday buy. Some of it may already have been spent on
-//                  today's buys (which are counted in the bucket above); only the unspent remainder
-//                  is idle cash.
-//
-// THE BUG THIS FIXES: capital was built from getCombinedOpenPositionMap(), which does `pos.qty +=
-// liveQty` - it ADDS a live position on top of the settled holding. That is right while the
-// positions file is current, but once it is a PRIOR session those same buys have already settled
-// into holdings and get counted twice. Measured 2026-07-30 (holdings.csv 07:35 vs positions.csv from
-// 07-29 16:07): APCOTEXIND 44, GHCLTEXTIL 278, M&MFIN 60 and RATNAVEER 75 appeared in BOTH, and
-// capital was overstated by exactly the Rs 1,00,795 it was reporting as "positions".
-//
-// Idle cash is FLOORED at zero, deliberately: spending more than the day's sale proceeds means the
-// excess came from cash that is already represented inside the holdings/positions value, so
-// subtracting it would double-remove. (A signed version was tried in v1078 and was wrong for exactly
-// this case.)
-// True when holdings.csv was exported on a LATER calendar day than positions.csv, i.e. the T+1
-// settlement has happened and the position buy legs are already inside the holdings figure.
-// Uses the files' own dates, not the model session clock: getSessionDate() rolls back to the prior
-// trading day before 09:00, so on any pre-open morning it reports the SAME date as yesterday's
-// positions file and cannot distinguish the two (measured 2026-07-30 08:21 - PORTFOLIO_STALE said
-// stale:false while holdings was 07-30 and positions 07-29).
-// lastModified (epoch ms) -> IST calendar date. IST because the trading day and the export both
-// happen in IST; using UTC would roll the date at 05:30 local and mis-order morning exports.
 function fileDateISO(ms){
   const n=Number(ms);
   if(!Number.isFinite(n)||n<=0) return null;
@@ -6791,17 +5193,6 @@ function getCapitalBuckets(){
           invested:delivery+todayBuys,
           total:Math.max(0,delivery+todayBuys+idleCash)};
 }
-// ── v1126 THE MEMO KEY COST MORE THAN THE THING IT MEMOISED ───────────────────────────────────
-// `getGoalRequiredNetPct` caches on a key that includes the capital basis — and computing that basis
-// IS the expensive half, so the cache could never pay for itself. Measured: opening the Performance
-// tab called getComputedCapital 2,984 times for 1,398ms, inside a getActiveTargetInfo cascade that
-// accounted for 2,927ms of a 3,486ms render. The click blocked for ~2.9 SECONDS before the tab could
-// even paint.
-//
-// Keyed on OBJECT IDENTITY of the four inputs it reads. Every one of them is REPLACED wholesale
-// rather than mutated (a scan rebuilds ALL, a portfolio parse rebuilds HOLDINGS/POSITIONS/
-// ORDERS_TODAY), so reference equality is exact here — it cannot serve a value computed from data
-// that has since changed. Also cleared explicitly by invalidateTargetAnchorCaches().
 let _capitalMemo=null;
 function getComputedCapital(){
   if(_capitalMemo&&_capitalMemo.h===HOLDINGS&&_capitalMemo.p===POSITIONS
@@ -6818,12 +5209,6 @@ function _computeCapitalUncached(){
           sells:b.sellProceeds,buys:b.buyCost,idleCash:b.idleCash,posStale:b.posStale,
           total:b.total};
 }
-// ── Filter defaults live in the PLACEHOLDER; calculations fall back to them when the field
-// is empty (owner, v545). Deleting your value returns to the default — never to empty
-// (which for Capital meant 0 and for Max Alloc meant no cap → full allocation). The field
-// holds ONLY a manual override; an empty field means "use the default", shown greyed in the
-// placeholder. Capital default = computed deployed book; Max Alloc default = capital
-// divided by average positions per entry day. There is no auto-fill or `autoDefault` flag.
 function getDefaultCapital(){ return getComputedCapital().total; }
 let _defMaxAllocMemo=null;
 let _avgTradesMemo=null;
@@ -6854,17 +5239,6 @@ function getEffectiveMaxAlloc(){
   const v=parseFloat(document.getElementById('fMaxAlloc')?.value);
   return (Number.isFinite(v)&&v>0)?v:getDefaultMaxAlloc();
 }
-// ── Risk per trade (v1092) ───────────────────────────────────────────────────────────────────
-// Two DIFFERENT quantities, deliberately kept apart:
-//   RELATIVE risk — is every position risking the same rupees as every other? Fixed by the
-//     score÷stop weight inside computeAlloc. Needs no field: it is a ratio, and the stop supplies it.
-//   ABSOLUTE risk — how many rupees does ONE trade risk? This already had an answer (alloc × stop%);
-//     it was simply never displayed. The field below OVERRIDES that computed number, it does not
-//     create it — the same pattern as Capital and Max Alloc, whose defaults sit in the placeholder.
-//
-// It is a CAP, never a target: it can only reduce a position, never grow one past Max Alloc or the
-// 0.10% turnover rail. Making it a third competing budget would leave "why was this capped"
-// ambiguous, and a risk budget that INCREASES size is how a wide-stop name eats the book.
 function rowRiskRupees(notional,stopPct){
   const n=Number(notional),s=Number(stopPct);
   return (n>0&&s>0)?n*(s/100):0;
@@ -6876,10 +5250,6 @@ function riskNotionalCap(s,riskRs){
   return stop>0?riskRs/(stop/100):Infinity;
 }
 let _defRiskMemo=null;
-// Default = the risk the EXISTING rails already imply: a full Max Alloc position at the median stop
-// of the current candidate pool. Non-circular by construction — Max Alloc depends on capital and
-// trade cadence, never on the risk budget — so this reports what you have been risking all along
-// rather than inventing a number. An empty field therefore changes nothing about total deployment.
 function getDefaultRiskPerTrade(){
   const maxAlloc=getEffectiveMaxAlloc();
   if(!(maxAlloc>0)) return 0;
@@ -6893,20 +5263,10 @@ function getDefaultRiskPerTrade(){
   _defRiskMemo={sig,v,medianStopPct:mid};
   return v;
 }
-// DELIBERATELY unlike Capital and Max Alloc: an empty field means NO CAP, not "use the default".
-// getDefaultRiskPerTrade is a DISPLAY default — it reports the risk the existing rails already
-// imply so the placeholder is a real number rather than a guess — but applying it would silently
-// bind on every above-median-stop row and change sizing the moment this release shipped. The
-// behavioural change in v1092 is the score÷stop REDISTRIBUTION, which needs no budget; the cap is
-// opt-in, so an untouched filter bar deploys exactly the same total as before.
 function getEffectiveRiskPerTrade(){
   const v=parseFloat(document.getElementById('fRiskPerTrade')?.value);
   return (Number.isFinite(v)&&v>0)?v:0;
 }
-// Which cap actually bound this row. Ordered most-specific first so the label names the real
-// constraint rather than whichever happened to tie; 'risk cap' and 'max allocation' can coincide
-// exactly at the default (a full Max Alloc position at the median stop IS the default budget),
-// in which case Max Alloc is reported since it is the older, more familiar rail.
 function allocLimitReason(caps){
   const {score,max,turnover,topUp,risk}=caps;
   const lo=Math.min(score,max,turnover,topUp,risk),e=0.01;
@@ -6916,28 +5276,6 @@ function allocLimitReason(caps){
   if(risk<=lo+e) return 'risk cap';
   return 'risk weight';
 }
-// ── v1125 RUPEES ARE THE UNIT (owner, 2026-08-12) ──────────────────────────────────────────────
-// "It's not the 1% that is important, it's the 500 rupees (of course after costs)."
-//
-// Percent and rupees are linked by position size: Rs = % x notional. The app has always taken the
-// PERCENT as the input and let the rupees fall out at the very end (riskRs = alloc x stop%). That is
-// exact only when every position is the same size and every rupee of capital is deployed. Neither
-// holds, in three separate ways:
-//
-//   1. POSITIONS ARE NOT THE SAME SIZE. computeAlloc weights by score/stop and then caps each row by
-//      Max Alloc AND by 0.10% of that stock's own turnover. On the v1092 snapshot every selected row
-//      was bound by the turnover rail and the rupees at risk spanned Rs 12 to Rs 4,578 - a 393x
-//      spread on IDENTICAL percentage bars. Two rows both "clearing 1.8%" can be Rs 790 and Rs 40.
-//   2. CHARGES ARE NOT PROPORTIONAL. DP is a FLAT Rs 15.34 per ISIN per sell day - 0.03% of a
-//      Rs 50,000 position and 0.38% of a Rs 4,000 one. A single percentage hurdle over-charges the
-//      big position and under-charges the small one, so small lots pass a test they fail in rupees.
-//   3. THE GOAL IS A RUPEE TOTAL THAT IS DIVIDED AWAY. "Earn Rs X" becomes a required %/day ONCE, at
-//      the top, and is then applied per stock. That conversion assumes full deployment; whole shares,
-//      the turnover rail and the 20-order cap all leak capital. Nothing ever adds the rupees back up,
-//      so every row can "pass" while the basket earns a fraction of what the day needs.
-//
-// So the rupee figure is computed from each row's OWN achievable notional using the REAL charge
-// model, and the percentage becomes a display unit derived from it rather than the source of truth.
 
 // The notional a row can actually reach. Uses only ROW-INTRINSIC and SESSION-WIDE rails; the
 // score-weight share is deliberately EXCLUDED (v1080/v1086), because that one depends on which OTHER
@@ -6994,10 +5332,6 @@ function getTodayRupeeNeed(){
   try{const b=getLatestBookedSummary(); if(b&&Number.isFinite(Number(b.total))) booked=Number(b.total);}catch(e){}
   return {need,booked,outstanding:Math.max(0,need-(booked||0))};
 }
-// Does the basket ADD UP? The question the app has never asked. Every row was judged against a
-// percentage bar and nobody summed the rupees. REPORTED, never enforced: a shortfall is information
-// about the day, not a reason to delete stocks. v1093 is the precedent - enforcing an unmeasured
-// floor stranded 1,491 of 1,498 rows and emptied the basket outright.
 function getBasketRupeeProjection(allocMap){
   const rows=Object.values(allocMap||{}).filter(a=>a&&!a.rejected&&a.qty>0);
   const expectedNet=rows.reduce((sum,a)=>sum+(Number(a.expectedNet)||0),0);
@@ -7081,14 +5415,6 @@ function goalRepsHTML(v){
   if(n<0) return `<div style="font-size:11px;color:var(--red)">💪 ${Math.max(1,Math.ceil(Math.abs(n)/100))} pushups</div>`;
   return '';
 }
-// ── v1112 GOAL PANEL (owner: "clunky and doesn't feel well tied into the rest of the system") ──────
-// The content was a flex row of bare inputs followed by four prose lines in four different greys and
-// sizes — its own visual language, shared with nothing else in the app. It now uses the two idioms
-// the rest of the app already speaks: the FILTER-BAR field (.fg label above a bordered input, same
-// padding, same focus tint) and the STAT CARD (.st-l / .st-v / .st-d — uppercase label, DM Mono
-// number, one explanatory line). Nothing is computed differently; the same four numbers are read from
-// the same functions. Structure is the change: ask (inputs) -> demand (need/day) -> reality (your
-// pace) -> consequence (projected finish) -> the compounding mechanics.
 function goalFieldStyle(accent){
   return `width:100%;padding:7px 9px;background:var(--bg-card);border:1px solid var(--border);border-radius:8px;`
     +`color:var(--t1);font-family:'DM Mono',monospace;font-size:14px;outline:none;transition:border .2s`;
@@ -7126,10 +5452,6 @@ function buildGoalPopoverContent(){
   </div>
   <div id="goalReadout">${buildGoalReadout()}</div>`;
 }
-// ── v1130: the READOUT is a separate builder so it can refresh on every keystroke WITHOUT
-// replacing the input being typed into. v1110's focus guard protects the fields but also froze these
-// numbers, which is what made the module feel unlike the rest of the page: you changed a value and
-// nothing moved until you clicked away.
 function buildGoalReadout(){
   const g=getGoalConfig();
   const remaining=goalRemainingDays(g);
@@ -7144,10 +5466,6 @@ function buildGoalReadout(){
       'Pick a later date above');
     if(req==null) return goalTile('Need per day','not reachable','var(--red)',
       'This target and deadline would need over 50% a day');
-    // v1130: when a withdrawal is set, say how much of the required rate IS the withdrawal. Measured
-    // 2026-08-14: Rs 1.54L/month on a Rs 4.52L book (34% of capital) took the rate 1.301% -> 2.570%
-    // — 98% harder — and blocked 59.5% of the board through the target anchor. That is the arithmetic
-    // working, but it is invisible unless the two halves are separated.
     const _wdAmt=Number(g.withdrawAmount)||0;
     let _wdNote='';
     if(_wdAmt>0){
@@ -7284,15 +5602,6 @@ function buildGoalCard(){
       : '');
   return `<div class="st" title="${title}"><div class="st-l">Goal · today &amp; remaining</div><div class="st-v" style="color:${_todayTone};font-size:17px">${_needToday!=null?'₹'+goalFmtRs(_needToday):reqStr+'%/day'} ${badge}</div><div class="st-d">${[_todayLine,`₹${goalFmtRs(g.target)} left · ${days} td · ${reqStr}%/day`].filter(Boolean).join('<br>')}</div></div>`;
 }
-// ── v1101 BALANCED CARD ROWS (owner) ─────────────────────────────────────────
-// `repeat(auto-fit, minmax(N,1fr))` packs as many cards per row as fit and dumps the remainder into a
-// stub row — 14 diagnostics rendered as 10 + 4, and an 11-card KPI grid as 10 + 1 with a single card
-// stranded on its own line. Owner: if it wraps anyway, spread it evenly.
-//
-// Pure CSS cannot do this: `auto-fit` has no idea how many children exist. So the column count is
-// computed from the SAME `--card-min` the stylesheet uses (one source of truth — the CSS keeps that
-// value as its own fallback), and only ever set when the cards genuinely wrap. A grid that fits on one
-// row is left completely alone.
 function balanceGrid(el){
   if(!el||!el.children.length) return;
   const n=el.children.length;
@@ -7402,25 +5711,12 @@ function renderStats(){
   const rocketsCard=`<div class="st"><div class="st-l">Rockets Today</div><div class="st-v" style="color:var(--fire)">${(RADAR.rockets||0).toLocaleString()}</div><div class="st-d" title="v1085 definition: reached its own target before its own stop. This card shows DAY 1 only — the full label runs over 2 trading days and is resolved in the outcome store after the next session. Diagnostic; it sets no feature weight.">reached target before stop today · day 1 of 2 · diagnostic${RADAR.continuationCount?` · ${RADAR.continuationCount.toLocaleString()} broader continuation signals scored separately`:''}</div></div>`;
   const scoreCard=`<div class="st"><div class="st-l">Top Score</div><div class="st-v" style="color:${radarScoreColor(top?.score)}">${topScore}</div><div class="st-d">${FILT.length.toLocaleString()} displayed · ${selCount} selected for export · median risk ${medianRisk} · ${RADAR.features.length||0} modeled features</div></div>`;
 
-  // v1078 (owner): SEVEN cards, no more. Consolidated rather than appended -
-  //  * MARKET absorbs the breadth line that was buried in Scanned Universe, the "% advancing" that
-  //    was the whole sub-line of Top Sector, and the v1076 regime (VIX percentile + Nifty) which
-  //    until now was computed and shown nowhere but the status bar.
-  //  * UNIVERSE keeps the scan count and folds in the displayed/selected/feature meta that was
-  //    crammed under Top Score.
-  //  * TOP SCORE is left to do one job.
-  //  * GOAL now answers "how am I doing TODAY" and "how much is LEFT", which it could not before.
   const breadthPct = t ? (bull / t * 100) : null;
   const reg = (typeof MARKET_REGIME !== 'undefined' && MARKET_REGIME) ? MARKET_REGIME : null;
   const regTone = reg && reg.label === 'calm' ? 'var(--green)'
     : reg && reg.label === 'normal' ? 'var(--cyan)'
     : reg && reg.label === 'elevated' ? 'var(--amber)'
     : reg && reg.label === 'stressed' ? 'var(--red)' : 'var(--t2)';
-  // v1088 (owner): the headline is the LIVE Nifty 50 move rebuilt from its own constituents in the
-  // live scanner export, not the EOD index row from the daily zip — that row is yesterday's close
-  // during a session, and showing a stale number as market status is worse than showing none.
-  // The regime word ("CALM") is demoted to a tone and a tooltip; VIX keeps its actual number and is
-  // explicitly marked prev-close, because no input carries a live VIX.
   const live = (typeof buildLiveNiftyProxy === 'function') ? buildLiveNiftyProxy(ALL) : null;
   const nifty = live ? live.pct : (reg && reg.niftyPct != null ? reg.niftyPct : null);
   const niftyTone = nifty == null ? 'var(--t2)' : nifty >= 0 ? 'var(--green)' : 'var(--red)';
@@ -7433,24 +5729,8 @@ function renderStats(){
       topSec && topSec !== '—' ? `${escHtml(topSec)} leading` : ''
     ].filter(Boolean).join(' · ')}</div></div>`;
 
-  // v1088 (owner): average round-trip COST as a percentage, on a card. This number already gated
-  // allocation via estimateRoundTripCostPct() — a target that cannot clear it is refused — but it
-  // was computed and never shown, so the hurdle was invisible. Mean AND median are both given
-  // because the flat ₹15.34 DP fee per sell day makes the mean lot-size dependent and skewed.
-  // ONE NUMBER (owner, 2026-07-31): what a round trip costs, full stop. It is VALUE-WEIGHTED —
-  // total charges over total value traded — not a mean of per-trip percentages. That distinction
-  // matters: the flat ₹15.34 DP fee per sell day dominates a small lot, so averaging the per-trip
-  // ratios over-weights tiny trades and overstates the cost (0.258% vs the 0.13% actually paid).
-  // Value weighting answers the question asked: of everything I traded, what share went to charges.
-  // The breakdown, and the hurdle this feeds, live in the tooltip so the card stays one number.
   const costCard = (() => {
     const trips = (TRADEBOOK_STATS && TRADEBOOK_STATS.tripsData) || [];
-    // EVERYTHING (owner, 2026-07-31), including charges that attach to a DAY rather than a trade.
-    // DP is ₹15.34 per ISIN per sell day and is booked once on that day's first trip (see
-    // dpCharged/skipDp), so it is already inside these totals — but the previous filter required a
-    // clean buy AND sell price, which silently dropped the charges on any trip lacking a cost
-    // basis. Nothing is dropped now: every recorded charge counts, and each leg contributes to the
-    // traded value only when its price is known, so a partial trip understates neither side.
     const valid = trips.filter(r => r.qty > 0 && r.charges >= 0);
     const totCharges = valid.reduce((a, r) => a + r.charges, 0);
     const totValue = valid.reduce((a, r) =>
@@ -7518,10 +5798,6 @@ function renderStats(){
   void infoBarEl.offsetHeight;
 }
 
-// ── Movable table columns (v536, owner) ───────────────────────────────────────
-// Every data table's column order is user-draggable (HTML5 drag on the header) and
-// persists in localStorage per table key, so a reorder survives refresh. Saved order
-// lists existing keys first; columns added in later versions append at the end.
 const COL_ORDER_LS='rs_col_order_v1';
 function loadColOrders(){try{return JSON.parse(localStorage.getItem(COL_ORDER_LS)||'{}')||{};}catch(e){return {};}}
 function saveColOrder(tableKey,keys){try{const all=loadColOrders();all[tableKey]=keys;localStorage.setItem(COL_ORDER_LS,JSON.stringify(all));}catch(e){}}
@@ -7566,10 +5842,6 @@ function makeSortableTable(id, cols, rows, defaultSortKey, defaultDir=-1, rowSty
   function render(){
     const sorted=[...rows].sort((a,b)=>{
       const av=a[sortKey],bv=b[sortKey];
-      // v1118: MISSING VALUES SORT LAST, in both directions. They used to coerce to 0 via `av||0`,
-      // which buried them in the middle of any range spanning negatives (P&L) and — the case that
-      // surfaced it — floated unranked rows to the TOP of an ascending Rank sort, so a held stock
-      // absent from today's upload outranked rank 1.
       const an=av==null||av===''||(typeof av==='number'&&!isFinite(av));
       const bn=bv==null||bv===''||(typeof bv==='number'&&!isFinite(bv));
       if(an&&bn) return 0;
@@ -7897,11 +6169,6 @@ function getTodayTradeTimingContext(){
 }
 function getCurrentTradeTimingDecision(contextOverride=null){
   const model=getTradeTimingModel(),context=contextOverride||getTodayTradeTimingContext();
-  // Indian continuous trading starts at 09:15. Until 09:30 there is no completed 15-minute
-  // candle, so 5m/15m/1h readings can be the same unfinished opening impulse rather than
-  // independent confirmation. That is worth SAYING, and nothing more (owner, v1068): the clock
-  // never withholds a recommendation, empties the selection, or refuses an export. The trading
-  // day starts at 09:15 and the app must be usable from 09:15. Diagnostic state only.
   if(context.nowMinute<570){
     return {
       state:'Neutral',diagnosticState:'Opening discovery',
@@ -7920,17 +6187,6 @@ function getCurrentTradeTimingDecision(contextOverride=null){
     evidence,context,model
   };
 }
-// v1096: the extremes observed at a buy, used as the attribution baseline on the ENTRY DAY.
-// Returns null when no context was captured for that (date, symbol) — in which case the entry day
-// is UNATTRIBUTABLE and must be skipped rather than measured against the whole day's bar.
-//
-// HONEST BOUND ON PRECISION: the snapshot is the first one taken after the buy was DETECTED, and
-// detection depends on when orders.csv is re-exported and re-ingested — it is not the fill instant
-// (v1064 already refused to claim that). So `low1dAtBuy` is at or below the true low-at-fill, which
-// makes this test CONSERVATIVE: it can miss some genuine post-fill drawdown, but it can no longer
-// invent drawdown that happened before the trade existed. Under-counting a real adverse move is the
-// safe direction here — the previous behaviour over-counted it, and MAE is the number cited for NOT
-// tightening the stop, so an inflated figure argued for a looser stop than the evidence supports.
 function getBuyContextBaseline(symbol,date){
   const e=FS.get(TRADE_TIMING_CONTEXT_STORE)?.entries?.[date+'|'+normSym(symbol)];
   if(!e) return null;
@@ -7958,14 +6214,6 @@ function recordTradeTimingEntryContext(){
       id:key,date:today,symbol,orderTime:order.time,orderMinute:minute,
       ordinal:index+1,spacingMinutes:prior===null?null:Math.max(0,minute-prior),
       price:Number(order.price)||null,
-      // v1096: the day's extremes AS THEY STOOD when this buy was first observed — the executed-trade
-      // equivalent of v1085's high1dAtIssue/low1dAtIssue. Without them nothing downstream can tell a
-      // low that printed BEFORE the fill from one that came after, and `syncExecutedRecommendedEntries`
-      // was charging the entry day's ENTIRE low to the entry as adverse excursion.
-      // ctxVersion 2 = this entry carries the extremes. Entries written before v1096 stay at
-      // version 1 and are DELIBERATELY NOT backfilled: the extremes must be the ones observed at
-      // the buy, and a later snapshot's high is exactly the contamination this release removes.
-      // A version-1 entry simply means the entry day is unattributable, which is the honest state.
       ctxVersion:2,
       high1dAtBuy:Number(row.high1d)>0?Number(row.high1d):null,
       low1dAtBuy:Number(row.low1d)>0?Number(row.low1d):null,
@@ -7990,10 +6238,6 @@ function recordTradeTimingEntryContext(){
   return added;
 }
 
-// ── Shared search plumbing for the three Rankings tables ──────────────────────
-// The Rankings search box narrows the recommendations table, the Latest Session
-// table and the Open Positions table together, so a symbol can be found wherever
-// it currently lives (owner, v530).
 function rankingsSearchQuery(){
   return String(document.getElementById('fSearch')?.value||'').trim().toLowerCase();
 }
@@ -8011,10 +6255,6 @@ function panelNoMatchHtml(query,noun){
   return `<div style="padding:14px 16px;color:var(--t3);font-size:14px">No ${noun} matches "${escHtml(String(query||'').trim())}".</div>`;
 }
 
-// Latest Session — whichever source (Orders.csv or Tradebook) has the newer date.
-// Extracted from renderPerformance so the Rankings tab can host it next to the
-// recommendations and open-position tables under one shared search box (v530).
-// Header totals stay whole-session; the table and its footer follow the search.
 function buildLatestSessionPanel(query=''){
   const clr=(v)=>v===0?'var(--t2)':v>0?'var(--green)':'var(--red)';
   const fmtPerfRs=(v)=>fmtSignedINR(v);
@@ -8027,10 +6267,6 @@ function buildLatestSessionPanel(query=''){
     {key:'_score',label:'Radar Score',align:'right',bold:true,fmt:v=>radarScoreCell(v),clrFn:()=>'var(--t1)',...dash},
     {key:'_rank',label:'Rank',align:'right',fmt:v=>v??'—',clrFn:()=>'var(--t2)',...dash},
   ];
-  // v1094/v1095: Left on Table replaces Reverse ₹ — see enrichExitPnlRow. It measures what the stock
-  // did AFTER the exit. The colour scale is DELIBERATELY inverted against every other money column
-  // here: positive means it kept running without you (bad, red), negative means it fell after you
-  // sold (the exit saved money, green).
   const leftClr=v=>v==null?'var(--t3)':v>0?'var(--red)':v===0?'var(--green)':'var(--amber)';
   const _leftTot={totFmt:v=>v!=null?fmtINR(v):'—',totClrFn:leftClr};
   const _leftPctTot={totFmt:v=>v!=null?v.toFixed(2)+'%':'—',totClrFn:leftClr};
@@ -8091,10 +6327,6 @@ function buildLatestSessionPanel(query=''){
       {key:'priceDiff',label:'Diff ₹',align:'right',fmt:v=>v!=null?fmtSignedINR(v).replace('₹','₹/sh '):'—',clrFn:v=>v!=null?clr(v):'var(--t3)',..._dash},
       {key:'currentPrice',label:'Now ₹',align:'right',fmt:v=>v!=null?Number(v).toLocaleString('en-IN',INR_2):'—',clrFn:()=>'var(--t2)',..._dash},
       ..._leftCols(_leftTot,_leftPctTot),
-      // v1122 (owner: the table is cropped): the seven charge components are COLLAPSED into Total
-      // Charges, which is their sum, with the full breakdown on hover. Nothing is lost — it is the
-      // one block of columns that is pure detail, it took a third of the table's width, and it is
-      // the reason 21 columns would not fit a screen. 21 -> 14.
       {key:'charges',label:'Total Charges',align:'right',bold:true,
        fmt:(v,r)=>{
          if(v==null) return '—';
@@ -8217,17 +6449,6 @@ function buildOpenPositionsPanel(query=''){
     const targetPct=exitPolicy.targetPct;
     const targetPrice=avg&&targetPct?tickPrice(avg*(1+targetPct/100)):null;
     const stopPrice=avg?tickPrice(avg*(1-stopPct/100)):null;
-    // ── v1118 (owner): the exit is TWO legs now, so show both ─────────────────────────────────────
-    // v1115 splits every buy into a base leg at the row's target and a runner leg further out, each
-    // carrying its own GTT. A single Target column therefore described an exit that is no longer the
-    // one being armed. Same split arithmetic as the export (`splitQty` + `getRunnerTargetPct`), so
-    // the two panels cannot disagree.
-    //
-    // WHAT THIS IS AND IS NOT: like the existing Target column, these are the CURRENT POLICY levels,
-    // not a read of what is actually resting in Zerodha. No input exposes live GTTs (the same gap
-    // behind the double-sell warning), and positions bought before v1115 have one leg, not two. The
-    // panel has always shown policy rather than armed state; this keeps that one meaning rather than
-    // mixing two.
     const _split=splitQty(qty);
     const _runnerPct=getRunnerTargetPct(exitPolicy);
     const _hasRunner=_split.runner>0&&_runnerPct>targetPct;
@@ -8244,11 +6465,6 @@ function buildOpenPositionsPanel(query=''){
       score:isFinite(Number(scannerRow?.score))?Number(scannerRow.score):null,
       rank:scannerRow?.rank??null,setup:scannerRow?.setup||'',
       dayPct:scannerRow?.day??scannerRow?.priceChange??null,risk:scannerRow?.risk||'',
-      // Carried as numbers so the columns SORT; the cells re-read the live trajectory. v1200 fixes
-      // the old split meaning where this sort key was avgMovePct while the cell displayed pullback.
-      // v1205: `r.current` on both - these are the SORT keys for the Pace/EoD cell, and a read from
-      // a previous session must not order today's rows by yesterday's numbers any more than it may
-      // print them. Null sorts last, which is the honest place for "no current read".
       pace:(()=>{const r=getIntradayRead(pos.symbol);return r&&r.current&&Number.isFinite(r.confirmedPacePct)?r.confirmedPacePct:null;})(),
       predEod:(()=>{const r=getIntradayRead(pos.symbol);return r&&r.current&&Number.isFinite(r.predPct)?r.predPct:null;})(),
       scannerRow
@@ -8265,13 +6481,6 @@ function buildOpenPositionsPanel(query=''){
     return `<span title="Quantity-weighted age of remaining FIFO buy lots" style="color:${color};font-weight:${v>reviewDays?700:500}">${v}d</span>`;
   };
   const cols=[
-    // v1070: the chart link no longer depends on the stock being in the current scan —
-    // TradingView resolves by symbol, so a held name absent from today's file still charts.
-    // v1148 (owner): "It's not in the recommendation table anymore if I have already bought it."
-    // Correct - v1070 keeps a held stock in the ranking, but the v1080 allocation gate drops a
-    // held-at-profit row with no top-up cushion, so in practice it vanishes from the board the
-    // moment it is bought. A POSITION is where the check belongs after that, and the question
-    // changes with it: not "should I buy this" but "is the flow that justified the buy still there".
     {key:'sym',label:'Symbol',align:'left',bold:true,
       // The flow reading rides the SYMBOL cell rather than a column of its own: one more column
       // pushed this panel into a horizontal scrollbar, which the owner has ruled out everywhere.
@@ -8317,12 +6526,6 @@ function buildOpenPositionsPanel(query=''){
       fmt:(v,row)=>`${v!=null?fmtSignedINR(v):'—'}<span style="font-size:11px;color:var(--t3)"> ${row.pnlPct!=null?(row.pnlPct>=0?'+':'')+row.pnlPct.toFixed(2)+'%':''}</span>`,
       clrFn:v=>v==null?'var(--t3)':v>0?'var(--green)':v<0?'var(--red)':'var(--t2)'},
     {key:'daysHeld',label:'Held',align:'right',fmt:daysFmt,clrFn:()=>'var(--t1)'},
-    // v1073: the day-1 time exit, shown next to Days Held so the two read together.
-    // v1179: ONE TARGET, because the basket now exports one order per stock (v1177). This showed
-    // "Target / Runner" for four releases after the runner leg stopped being exported - the panel
-    // was describing an exit the app no longer arms. A position opened while v1115-v1176 were live
-    // may still have TWO GTTs resting in Zerodha, so the runner it WOULD have had is kept in the
-    // tooltip rather than deleted outright.
     {key:'targetPrice',label:'Target ₹',align:'right',
       fmt:(v,row)=>{
         if(v==null) return '<span style="color:var(--t3)">—</span>';
@@ -8342,25 +6545,6 @@ function buildOpenPositionsPanel(query=''){
     // suggested Zerodha trigger GAP: the deepest seller retreat buyers proved survivable by making
     // a later high. EoD keeps its separate volume-weighted per-bar speed model.
     {key:'pace',label:'Pace / EoD',align:'right',
-      // ── v1205: THE TWO HALVES BLANK INDEPENDENTLY, AND A DECLINE IS NOT SILENCE ─────────────
-      // Measured 2026-08-20: 7 of 11 open positions printed a bare "—" here on 15-16 bars each.
-      // Two separate faults, and they were hiding each other.
-      //
-      // (1) ONE EARLY RETURN BLANKED BOTH HALVES. `predPct` is unspent pressure capped by remaining
-      // travel; it has nothing to do with whether buyers made a new high. A null Pace was throwing
-      // away a live EoD projection on exactly the rows that were falling - SPECTRUM was -2.5% with
-      // a perfectly good number that never reached the screen.
-      //
-      // (2) THE CELL NEVER CHECKED `current`, and `confirmedPacePct` is scoped to the LAST session
-      // in the file - so a file that stopped yesterday would print yesterday under a column that
-      // says today. That was latent only because fault (1) suppressed it: measured on a stale
-      // fixture, pace was null (blanking everything) while predPct was a finite -0.16. Fixing (1)
-      // alone would therefore have SHIPPED (2). Both are fixed here, together.
-      //
-      // (3) An unrecovered decline is now SHOWN, dimmed and marked with a down arrow, instead of
-      // living in a tooltip on the rows that most need it. v1200 is untouched: this may never widen
-      // Pace, never becomes the sort key, and is never offered as a trail distance - a trail exists
-      // to ride a pullback buyers RECOVERED from, and this is one they have not.
       fmt:(v,row)=>{
         const dim=(txt,title)=>`<span style="color:var(--t3)"${title?` title="${escHtml(title)}"`:''}>${txt}</span>`;
         const rd=getIntradayRead(row.sym);
@@ -8413,10 +6597,6 @@ function buildOpenPositionsPanel(query=''){
   const totalPnl=rows.reduce((sum,row)=>sum+(row.pnlRs||0),0);
   const pnlColor=totalPnl>0?'var(--green)':totalPnl<0?'var(--red)':'var(--t3)';
   const shown=filterPanelRows(rows,query,row=>[row.sym,row.scannerRow?.name,row.scannerRow?.sector]);
-  // v1118 (owner): default sort is RANK ASCENDING, not score descending. Rank is the stock's own
-  // standing in today's cross-section and reads 1, 2, 3; score is the same ordering expressed as a
-  // number that has to be read backwards. Rows with no rank (not in today's upload) sort last —
-  // makeSortableTable puts null/undefined at the end on an ascending sort.
   const table=makeSortableTable('rank-open-positions',cols,shown,'rank',1,null,null,'sym');
   const radarNote=ALL.length
     ?'Radar context is from the current ALL NSE upload. Click a symbol for its scoring breakdown.'
@@ -8505,20 +6685,12 @@ function renderPerformance(){
   const todayAdd=getTodayBookedAddendum();
   const netWithToday=p.totalNetPnlRs+(todayAdd?.amount||0);
   const todayNote=todayAdd?` · incl. ${fmtPerfRs(todayAdd.amount)} booked ${todayAdd.date} from Orders (tradebook ends ${todayAdd.tradebookDate||'—'})`:'';
-  // Two tiers (owner, v534). PRIMARY answers the only questions that change a decision:
-  // am I making money, what is the risk, how big should the next position be, and when
-  // do I review it. Everything else is real but diagnostic, so it sits behind a native
-  // <details> instead of forming a 24-card wall.
   const kpis=[
     {label:'Net P&L',value:fmtPerfRs(netWithToday),color:clr(netWithToday),sub:`${p.roundTrips}${todayAdd?`+${todayAdd.lots}`:''} lots · ${spanTradingDays||p.totalTradingDays} trading days${todayNote}${preSystemLots?` · ${preSystemLots} pre-system ignored`:''}`},
     {label:'Win Rate',value:p.winRate+'%',color:p.winRate>=55?'var(--green)':p.winRate>=45?'var(--amber)':'var(--red)',sub:`${p.winners}W · ${p.losers}L lots`},
     {label:'Expectancy',value:fmtPerfRs(p.expectancy),color:clr(p.expectancy),sub:'Net ₹ you make per lot, on average'},
     {label:'Profit Factor',value:p.profitFactor!=null?p.profitFactor:'—',color:p.profitFactor>=1.5?'var(--green)':p.profitFactor>=1?'var(--amber)':'var(--red)',sub:'Gross wins ÷ gross losses · above 1 = profitable'},
     {label:'Max Allocation',value:autoMaxAlloc?fmtINR(autoMaxAlloc):'—',color:autoMaxAlloc?'var(--amber)':'var(--t3)',sub:autoMaxAlloc?`${fmtINR(allocationCapital)} capital ÷ ${allocationCadence.toFixed(2)} avg positions/entry day${maxAllocOverride?` · typed override ${fmtINR(typedMaxAlloc)} active`:''}`:'Load trade history to calculate trading cadence'},
-    // v1121 (owner): "Review After" moved to a pill on Rankings — it is a single number that belongs
-    // next to the board, not a card. In its place, the question the exit work has been circling:
-    // across every watched session, how long after an exit does the day's high actually arrive?
-    // NEGATIVE means the high was typically already in when you sold — the exit was late, not early.
     (()=>{const g=getHighGapStats();
       return {label:'High vs Exit',
         value:g.meanMin==null?'—':(g.meanMin>0?`+${g.meanMin}m`:`${g.meanMin}m`),
@@ -8543,10 +6715,6 @@ function renderPerformance(){
         ?`${recSummary.rockets} of ${recSummary.resolvedRockets} picks hit target before stop`+(recSummary.stoppedOut?` · ${recSummary.stoppedOut} stopped first`:'')+(recSummary.pendingRockets-recSummary.unresolvableRockets>0?` · ${recSummary.pendingRockets-recSummary.unresolvableRockets} open`:'')
         :`Nothing resolved yet · ${recSummary.pendingRockets||0} open`});
   }
-  // Same-day exit headroom (owner insight 2026-07-21): on the days you sold, how much
-  // higher did the stock trade AFTER your exit that same day? This is the measured cost
-  // of overriding the GTT manually — the decision it changes is "hold to the target".
-  // Diagnostic store only; it feeds no policy.
   const exitOpp=getSameDayExitOpportunitySummary();
   if(exitOpp.exits>=5){
     const activeTgt=(typeof getEffectiveTgtPct==='function')?getEffectiveTgtPct():null;
@@ -8585,21 +6753,6 @@ function renderPerformance(){
       <div class="kpi-val" style="color:${k.color}">${k.value}</div>
       <div class="kpi-sub">${k.sub}</div>
     </div>`;
-  // ── v1112 (owner): ONE grid. Nothing is hidden behind a disclosure. ─────────────────────────────
-  // v534 split these into a headline tier and a collapsed "More detail" tier to avoid a 24-card wall.
-  // The wall was never the problem — the ORDER was: the two tiers interleaved the same subjects, so
-  // Largest Loss sat up top while Largest Win sat behind a click, and Avg Position was separated from
-  // Max Allocation, which is computed from it. Sequenced by the question each card answers, the whole
-  // set reads in one pass and `balanceGrid` (v1101) already spreads it over even rows.
-  //
-  //   RESULT     did it make money, and how reliably
-  //   PACE       what a typical day looks like, and the best and worst ones
-  //   EXTREMES   the tails and the runs — what a bad patch actually costs
-  //   BEHAVIOUR  how the positions are held and exited
-  //   SIZING     how big the next one should be
-  //
-  // Order is declared by LABEL and applied as a lookup, so a card added later still renders (it
-  // appends) rather than silently vanishing because this list was not updated.
   const KPI_ORDER=[
     'Net P&L','Win Rate','Expectancy','Profit Factor',
     'Avg P&L/Trading Day','Avg P&L/Cal Day','Profitable Days','Best Day','Worst Day',
@@ -8867,10 +7020,6 @@ function isCurrentSessionFile(file){
   const d=inputFileSessionDate(file);
   return d?d===getSessionDate():false; // unknown timestamp ⇒ treat as NOT current (fail-safe)
 }
-// v557: the portfolio session date derived from the DATA (Orders.csv row timestamps), not from file
-// metadata. Zerodha only rewrites Positions/Orders when a new trade happens, so the morning after a
-// no-trade day both files still hold yesterday's rows — and a file mtime can read "today" for
-// yesterday's CONTENT (re-save, folder copy, Drive re-upload). The row dates cannot lie.
 function getPortfolioSessionDate(orders){
   const list=orders||ORDERS_TODAY;
   if(!list?.length) return null;
@@ -9027,10 +7176,6 @@ function buildHardFilterMethodologyHTML(E){
   `;
 }
 
-// ── Surveillance P&L Correlation ──
-// For each surveillance column, checks which currently-held stocks are flagged and
-// computes their current P&L%. Historical accumulation is maintained internally,
-// but the visible table must never show stale rows as current holdings.
 function getCurrentSurvHoldingRows(){
   if(!Object.keys(SURV_ALL_HITS||{}).length) return [];
   const heldPos=getHeldPositionMap();
@@ -9309,10 +7454,6 @@ function getCols(){
     {key:'rank',label:'#',s:1},
     {key:'score',label:'Score',s:1},
     {key:'symbol',label:'Symbol',s:1},
-    // v1144: the table may never need a horizontal scrollbar (owner, standing). Measured at 552px
-    // of overflow, which is not a trimming problem - it is too many columns. Five were folded into
-    // the cells they belong to rather than deleted: Setup and Series/Band ride the Symbol cell,
-    // Day % joins Price, and Book joins Rel Vol. Every number survives.
     {key:'price',label:'Price/Day',s:1},
     {key:'relvol',label:'Vol/Bk',s:1},
     {key:'turnover',label:'Liq',s:1},
@@ -9362,12 +7503,6 @@ function getBuyPrice(s){
 }
 function getHeldPositionMap(){
   const heldPos={};
-  // Held-suppression keys on NET-LONG exposure only (v1062). A stock SOLD today nets to qty<=0 in the
-  // combined map (a POSITIONS short leg, or an orders net-sell); it is no longer held, so a FRESH buy
-  // of it must NOT be discouraged — it stays eligible for recommendations. Only actual holdings
-  // (net qty>0) are suppressed. Today's BUY orders still net positive, so they remain suppressed;
-  // a partial sell that leaves qty>0 stays held. (Open Positions still shows shorts via
-  // getCombinedOpenPositionMap, which is unchanged.)
   Object.values(getCombinedOpenPositionMap()).forEach(pos=>{
     if(pos.qty>0) heldPos[pos.symbol]={qty:pos.qty,avg:pos.avg};
   });
@@ -9399,11 +7534,6 @@ function getCombinedOpenPositionMap(){
       pos.qty+=liveQty;
       pos.avg=pos.qty>0?(settledValue+liveValue)/pos.qty:0;
     }else if(liveQty<0){
-      // Holdings is the broker's CURRENT post-sale quantity. A CNC sell is also repeated in
-      // Positions as today's negative leg, so subtracting it here double-counts the sale
-      // (CASTROLIND: Holdings 93 plus Positions -92 incorrectly became 1). Keep a remaining
-      // holding authoritative; retain the negative leg only when no long holding remains so a
-      // sold-out/short symbol cannot be mistaken for a held position.
       if(!(pos.qty>0)){
         pos.qty+=liveQty;
         if(pos.qty<=0) pos.avg=liveAvg||pos.avg||0;
@@ -9482,16 +7612,6 @@ function computeHarvestPlan(){
   _harvestPlanMemo={t:Date.now(),v};
   return v;
 }
-// ── v1114 ────────────────────────────────────────────────────────────────────
-// Drop every cache the session target anchor is built from. Called once per load, after the
-// portfolio files are parsed and before the scorer reads the anchor.
-//
-// The two that MUST be here are the harvest plan (a 1.5s TTL, which is happy to serve a value
-// computed moments earlier with no tradebook loaded) and the goal rate (keyed on inputs that a
-// portfolio parse changes). The rest are keyed on capital or the tradebook and would self-invalidate
-// anyway; they are cleared together so there is ONE place that answers "what does the anchor depend
-// on", rather than a rule spread across six declarations. Cheap — each is a single object drop, and
-// this runs once per file load, never on the typing path.
 function invalidateTargetAnchorCaches(){
   _harvestPlanMemo=null;   // TTL-based: the one that can genuinely serve a pre-portfolio value
   _goalRateCache=null;     // goal-required net %/day — keyed on capital, which just changed
@@ -9545,10 +7665,6 @@ function _computeHarvestPlanUncached(){
     warning:belowFloor?'Recent reachable moves are below the desired net floor.':null
   };
 }
-// Goal-led target (owner decision 2026-07-18, reversing the informational-only rule):
-// the goal's required NET %/day converts to a gross GTT by adding real round-trip
-// charges, floored at the minimum useful net (HARVEST_DESIRED_NET_PCT) so a tiny goal
-// can never set a target where charges eat the edge.
 function getGoalLedTargetPct(){
   const goalNet=getGoalRequiredNetPct(); // required NET %/trading day on total capital
   if(goalNet==null||!isFinite(goalNet)||goalNet<=0) return null;
@@ -9557,12 +7673,6 @@ function getGoalLedTargetPct(){
   gross=roundPct05(netEff+estimateRoundTripCostPct(gross));
   return gross;
 }
-// Portfolio target anchor: lower of learned Harvest gross and goal-led gross, unless the
-// owner supplies a manual anchor. getRowExitPolicy() blends this context with each stock's
-// own ATR/range capacity; this value is no longer pasted onto every order.
-// The widest daily move any stock on file could legally make. Used to reject a target anchor that
-// no stock in the universe could ever reach (v1111). 20% is the NSE regulatory maximum band and is
-// the fail-open default when no sec_list has been parsed yet.
 function maxReachableAnchorPct(){
   let m=0;
   try{ for(const k in NSE_PRICE_BAND){ const b=NSE_PRICE_BAND[k]?.bandPct; if(b>m) m=b; } }catch(e){}
@@ -9573,21 +7683,6 @@ function getActiveTargetInfo(){
   const goal=getGoalLedTargetPct();
   const auto=(goal!=null&&goal<harvest)?{tgtPct:goal,source:'goal'}:{tgtPct:harvest,source:'harvest'};
   const manual=parseFloat(document.getElementById('fTgtOverride')?.value);
-  // v1111: a typed anchor is honoured up to what the exchange physically allows.
-  //
-  // v1103 put a ceiling here after a stray paste landed a rupee amount in this percentage field;
-  // v1104 removed it as over-engineering because the bad value was already on screen, reading
-  // "base 45975.39%". That reasoning did not survive contact. It has now happened a second time
-  // (tgtOverride "100000") and this time it silently made **0 of 1902 rows viable** — every
-  // eligibility test compares against the anchor, so the app recommended NOTHING for a day with
-  // the number visible the whole time. Visibility is not a control.
-  //
-  // The bound is exchange truth, NOT a tunable: a stock cannot travel further in one day than its
-  // own price band, so an anchor above the widest band on file is unreachable by every stock in
-  // the universe and can only be a mis-paste — both observed cases were rupee amounts. Such a
-  // value is treated as ABSENT so the auto anchor resumes; it is deliberately NOT clamped to the
-  // edge, which would substitute a target the owner never chose. Fails OPEN when no band data is
-  // loaded (the 20% regulatory maximum is used), so a missing zip can never reject a real anchor.
   if(Number.isFinite(manual)&&manual>0&&manual<=maxReachableAnchorPct())
     return {tgtPct:manual,source:'manual',harvestPct:harvest,goalPct:goal,autoPct:auto.tgtPct};
   return {tgtPct:auto.tgtPct,source:auto.source,harvestPct:harvest,goalPct:goal,autoPct:auto.tgtPct};
@@ -9601,27 +7696,6 @@ function getEffectiveTgtPct(){
   return getActiveTargetInfo().tgtPct;
 }
 
-// One execution policy per stock. The portfolio target remains an evidence anchor,
-// while the stock's ATR/range determine what that particular name can reasonably reach.
-// `activeInfo` lets a caller that evaluates MANY rows in one pass resolve the portfolio target
-// anchor once and hand it in. getActiveTargetInfo() costs ~2.3ms (it walks the goal solve and the
-// harvest outcome pool), which is invisible for one row and fatal across the universe — the v1080
-// allocation gate ran 7s on 2,962 rows before this. Omit it and the behaviour is unchanged.
-// ── v1093: the ACHIEVABILITY CURVE — a baseline reward:risk that is not learned from results ──
-//
-// Owner rule (2026-08-03): "R:R is not to be learnt from past and applied to future if it's bad.
-// If it's good, that should be the baseline, but if it's bad, there should be a good default
-// baseline based on data."
-//
-// The trap this avoids: the tradebook's 76% win rate was PRODUCED BY harvesting at ~1.9%. Using
-// it to justify ~1.9% is a closed loop — the same circularity v1074 named, one level up. So the
-// baseline is measured on the CROSS-SECTION instead: over the last COMPLETED session, at each
-// candidate target T against each stock's OWN ATR stop, what fraction of the tradeable market
-// reached T before its stop? That is a fact about the market, not about the owner's fills.
-//
-// The bar MUST be complete, so it comes from the bhav copy (last completed session), never the
-// live intraday file — with part of the day still to run every hit rate would be understated.
-// Stateless in the app's sense: one session, recomputed daily, nothing accumulated.
 const ACHIEVE_MIN_ROWS=200;         // below this the curve is not trusted and nothing is floored
 let _achieveMemo=null;
 function buildAchievabilityCurve(){
@@ -9678,38 +7752,9 @@ function getBaselineRewardRisk(){
   const c=buildAchievabilityCurve();
   return c&&c.rr>0?c.rr:null;
 }
-// ── v1097 TARGET NUDGE (owner) ───────────────────────────────────────────────
-// "We have a base target based on my goal. We have money left on the table. Just distribute that
-// percentage to my stocks based on the radar score."
-//
-// The base rate answers a question about the OWNER (what must I earn per day). The money left on the
-// table answers a question about the STOCKS (how much further did they go after we sold). Adding the
-// second to the first is what makes the exit stock-aware without abandoning the goal contract, and
-// re-solving both continuously keeps it honest as either side moves.
-//
-//   nudge_i  = pool x score_i / meanScore     -> the mean nudge across the cohort IS the pool
-//   target_i = min(base + nudge_i, capacity_i)
-//
-// NO NEW CONSTANT. `pool` is measured (getLeftOnTablePool), `meanScore` is the day's own cross-section,
-// `capacity` is the sqrt(ATR x range) unit that has been on the row since v1060.
-//
-// CAPPED AT CAPACITY, NOT AT THE SESSION CEILING — measured and deliberate. Capping the nudged target
-// at the v1083 same-day runway collapses every row back to 2.5-3.5% (checked on the 2026-08-05 14:37
-// file: all ten of the top ten, several landing BELOW the base rate) and the nudge vanishes entirely.
-// The session ceiling answers "can I BUY this today"; it has no business setting where the position is
-// SOLD, which under the v1085 two-day label may well be tomorrow. Viability still uses it; the exit
-// price no longer does.
-//
-// FLOORED AT THE BASE RATE, by owner rule: "some day money left on the table would be negative, that
-// means we're doing well and don't need to add anything to our base target rate." A negative pool is
-// floored to zero in getLeftOnTablePool, so every target falls back to exactly the goal rate.
 let _nudgeMemo=null;
 function getTargetNudgeContext(){
   const pool=getLeftOnTablePool();
-  // Normalise against the cohort the recommendations are actually drawn from, so the mean nudge equals
-  // the pool over the stocks being bought. One session-level scalar shared by every caller — the same
-  // number for the rankings table, the Open Positions panel and the sell basket, so a stock's target
-  // cannot depend on which surface is asking.
   const cohort=(Array.isArray(ALL)?ALL:[])
     .filter(r=>r&&r.basketEligible&&Number.isFinite(Number(r.score))&&Number(r.score)>0)
     .sort((a,b)=>(a.rank||1e9)-(b.rank||1e9))
@@ -9722,44 +7767,11 @@ function getTargetNudgeContext(){
   _nudgeMemo={sig,val};
   return val;
 }
-// ── v1206: THE MEASURED LEVEL, IN THE STOCK'S OWN UNITS ─────────────────────────────────────
-// v1105 established the exit target must scale with the stock and measured the optimum on the
-// owner's own 214 completed sells: a broad plateau at 1.0-1.25 ATR, with sqrt(ATR x range) landing
-// on 1.00 ATR at the universe median. v1119 then replaced that capacity with `getReachableTargets`
-// - the p50 of the move actually available from his buy price - which is the better MAGNITUDE and
-// is measured rather than modelled. But it is ONE portfolio number, so every row got the same
-// target, which is precisely the flat rate v1105 measured and rejected.
-//
-// Measured on the live 1,650-row tradeable universe, 2026-08-20, at the 3.45% the board was
-// printing on all ten recommendations:
-//
-//     decile     capacity   ATR     stop     flat target      scaled target
-//     p10         2.41%    2.35%   3.53%    1.47 ATR (R:R .98)   0.93 ATR (R:R .62)
-//     p50         3.78%    3.23%   4.85%    1.07 ATR (R:R .71)   1.07 ATR (R:R .71)
-//     p90         5.42%    5.42%   8.00%    0.64 ATR (R:R .43)   0.91 ATR (R:R .62)
-//
-// A flat 3.45% asks for 1.47 ATR from the quietest decile and 0.64 ATR from the fastest - a 2.3x
-// swing in what is being demanded, decided by nothing but which stock it is, and it lands the fast
-// names well below the measured plateau. That asymmetry is the mechanism v1105 named behind the
-// leak: 13 of the 22 sells that ran 7%+ past the owner were top-ATR-quartile names.
-//
-// So the measured p50 is kept and expressed as a multiple of the CROSS-SECTION'S OWN median
-// capacity. The median row is unchanged by construction, so nothing is inflated in aggregate; the
-// spread is what moves, and every decile lands inside the 0.9-1.1 ATR plateau. No constant is
-// introduced - it is the ratio of two measured quantities. The FLOOR is still the goal rate and
-// every eligibility test still reads `basePct` (v1105), so a raised target can never delete its
-// own candidate.
 let _capMedMemo=null;
 function getUniverseMedianCapacity(){
   if(_capMedMemo&&_capMedMemo.all===ALL) return _capMedMemo.val;
   const caps=[];
   for(const r of (Array.isArray(ALL)?ALL:[])){
-    // THE SAME POPULATION THE REACHABLE LEVEL CAME FROM. `reach.basePct` is the p50 of moves the
-    // owner actually captured, i.e. on tradeable, basket-eligible names; dividing it by a median
-    // taken over the WHOLE file - illiquid sub-Rs-10 names included, which carry the largest ATRs -
-    // shrinks every target by the ratio of two different populations. Caught by this release's own
-    // assertion: the median-capacity row priced 3.00% against the 3.46% it was supposed to be left
-    // at. The filter is buildAchievabilityCurve's tradeable universe, reused rather than re-derived.
     if(r&&r.basketEligible===false) continue;
     if(!(Number(r&&r.turnover)>=2500000)||!(Number(r&&r.price)>=10)) continue;
     const atr=Number(r&&r.atr), range=Number(r&&r.rangePct);
@@ -9784,18 +7796,6 @@ function getRowExitPolicy(row,buyPrice=null,activeInfo=null,nudgeInfo=null){
   const capacity=hasAtr&&hasRange?Math.sqrt(atr*range):hasAtr?atr:hasRange?range:null;
   let targetPct=anchor;
   let targetSource='portfolio fallback';
-  // v1077 (owner, 2026-07-29): the target is GOAL-DRIVEN, not derived from the stock's ATR/range.
-  // The exit exists to compound capital toward a dated goal, so the rate comes from the goal
-  // arithmetic - capital, earnings target, deadline, withdrawal/reinvest split - not from whatever
-  // a particular stock happens to be capable of moving. Measured on 2026-07-29: the goal
-  // (Rs 1.3 Cr by 2027-12-31, Rs 6.12L basis, 366 trading days) requires 1.453% NET per trading day,
-  // which grosses to 2.00% after costs, while the v1073 capacity rule was setting a median 4.55%
-  // target. The owner's realised wins cluster at +2.62% mean with 215 of 320 exits in the +2-3%
-  // bucket, so the goal rate is the one that actually FILLS; the capacity target was aspirational
-  // and simply held positions open. Smaller, more frequent, higher-probability exits are also what
-  // compounding needs - the whole point is turnover, not a single large move.
-  // ATR/range is NOT deleted: it is retained below as a REACHABILITY check (can this stock plausibly
-  // travel that far in a day?) and reported, but it no longer sets or caps the number.
   const toStep=v=>Math.floor(v*20)/20;
   if(anchor>0){
     targetPct=toStep(anchor);
@@ -9811,34 +7811,6 @@ function getRowExitPolicy(row,buyPrice=null,activeInfo=null,nudgeInfo=null){
   // the recommendation gates all keep using it (see radarAnalyze). Only the EXIT PRICE gets the nudge.
   const basePct=targetPct;
   let nudgePct=0;
-  // ── v1105 THE EXIT TARGET SCALES WITH THE STOCK, NOT WITH ITS SCORE ─────────────────────────
-  // Measured on the owner's own 214 completed sells (2026-08-07), taking the move available from HIS
-  // buy price to that day's high:
-  //
-  //     available   median 3.36%  = 0.78 ATR        he captured  median 2.13% = 0.44 ATR
-  //
-  // Sweeping target = k x ATR over those same trades, filling at the target where the day's high
-  // reached it and otherwise leaving his actual exit in place:
-  //
-  //     k=0.50 -> +Rs 2,453    k=0.75 -> +Rs 27,449    k=1.00 -> +Rs 41,069
-  //     k=1.25 -> +Rs 42,397   k=1.50 -> +Rs 40,471    (his actual realised: -Rs 45,397)
-  //
-  // The optimum is a BROAD plateau at 1.0-1.25 ATR, not a spike, which is what makes it credible
-  // rather than fitted. And `capacity` = sqrt(ATR x range) already equals 1.00 ATR at the universe
-  // median (3.71% against a 3.69% median ATR) — the v1073 rule that v1077 removed lands exactly on
-  // the measured optimum. So this restores capacity as the target and keeps the goal rate as a FLOOR.
-  //
-  // WHY A FLAT RATE WAS WRONG. The same 2.75% is 0.83 ATR on a quiet name and 0.47 ATR on a fast one
-  // — less than half a normal day's travel. That asymmetry is the mechanism behind the leak: 13 of
-  // the 22 sells that ran 7%+ past him were top-ATR-quartile names.
-  //
-  // THIS REPLACES THE v1097 SCORE NUDGE. Score answers "how good is the setup", which is an ENTRY
-  // question; how far a stock can travel is a property of the stock. Owner, 2026-08-07: "tying to
-  // ATR instead of score is a good start." The left-on-table pool is still measured and still shown,
-  // it simply no longer sets the price. A MANUAL anchor still wins outright (v1077 precedent).
-  // v1119: the aspiration above the goal rate is now the MEASURED reachable level from the owner's
-  // own exits, not the stock's ATR capacity. Capacity remains the FALLBACK for when too few exits
-  // have been recorded to trust a distribution (and is still reported on every row).
   const reach=getReachableTargets();
   // v1206: the measured level, scaled into this stock's own capacity. Inert (and identical to
   // v1119) when the row has no capacity or the cross-section is too small to have a median.
@@ -9855,87 +7827,21 @@ function getRowExitPolicy(row,buyPrice=null,activeInfo=null,nudgeInfo=null){
       : ' + stock capacity (ATR fallback)';
   }
   const stopPct=getRowStopDistancePct(row);
-  // v1093 (owner): "R:R is not to be learnt from past and applied to future if it's bad. If it's
-  // good, that should be the baseline, but if it's bad, there should be a good default baseline
-  // based on data." The baseline is now MEASURED (buildAchievabilityCurve) — and it is REPORTED,
-  // not enforced, for a reason established by measurement rather than caution.
-  //
-  // ENFORCING IT WAS BUILT, MEASURED AND BACKED OUT. Flooring the target at baselineRR x stop on
-  // the 2026-07-31 curve (baseline 1.28x, median stop 5.14%) moved the median target 1.90% -> 6.55%
-  // and made 1,491 of 1,498 tradeable rows NON-VIABLE through the v1083 session ceiling: the
-  // displayed list collapsed to 2 rows and the basket to ZERO. That is not a tuning problem, it is
-  // a HORIZON CONTRADICTION and it is pre-existing. The curve is measured open-to-close over a
-  // COMPLETE day, and v1085 already defines success as target-before-stop within TWO trading days,
-  // but getRowExitPolicy's viability test is still same-day: the session ceiling asks what is
-  // reachable FROM NOW, and by mid-session most of a day's range is already spent. So the app is
-  // currently asking for a same-day move while grading itself on a two-day outcome. Reconciling
-  // those is the next change; forcing the target first would simply have stopped recommending.
-  //
-  // Precedent for reporting rather than capping: v1077 kept ATR as the `reachable` FLAG.
   const baseRR=getBaselineRewardRisk();
   const rrFloorPct=(baseRR>0&&stopPct>0)?toStep(stopPct*baseRR):null;
   let minGrossPct=null;
   if(basePct>0){
-    // v1112: ROUNDED THE SAME WAY THE ANCHOR ITSELF IS, which is the whole point of this line.
-    // getGoalLedTargetPct BUILDS the goal anchor as `roundPct05(max(goalNet, HARVEST_DESIRED_NET_PCT)
-    // + round-trip cost)` — the identical two ingredients this hurdle re-derives. It used to CEIL to
-    // the next 0.05 while the anchor ROUNDS to the nearest, so the two disagreed by one rounding step
-    // and the anchor failed the test it was constructed to pass. Measured 2026-08-09: cost 0.503% +
-    // the 0.60% net floor = 1.1030%, which the anchor rounds to 1.10 and the hurdle ceiled to 1.15 —
-    // so `basePct >= minGrossPct` was FALSE for the entire market. 542 of 900 basket-eligible rows
-    // were struck out on that 0.05, and the only rows left standing were the two with no ATR/range at
-    // all, because a null capacity skips this test: the app could recommend nothing except the stocks
-    // it knew least about. Sharing one rounding rule makes that class of contradiction impossible.
-    // The hurdle still bites where it should — a manual anchor set below costs still fails.
     minGrossPct=roundPct05(HARVEST_DESIRED_NET_PCT+estimateRoundTripCostPct(basePct));
     minGrossPct=roundPct05(HARVEST_DESIRED_NET_PCT+estimateRoundTripCostPct(minGrossPct));
   }
-  // v1081 (owner): PRICE-BAND HEADROOM IS A HARD CONSTRAINT, not a capacity opinion.
-  // Measured 2026-07-30 on SMLMAH: the basket exported it at 11:09:24 at Rs 5,435 — already +19.0%
-  // on a 20% band, with the upper circuit at Rs 5,479.20, i.e. 0.81% of runway against a 1.85%
-  // target. It filled 13 seconds later at Rs 5,439.82 (0.09% slippage, so this was NOT slippage),
-  // and the attached GTT target of Rs 5,540.45 sat Rs 61 ABOVE the maximum price the stock is
-  // permitted to trade at that day. The stock then ran to Rs 5,479.20 — exactly the circuit, as far
-  // as it could legally go — and the target was still unreachable.
-  //
-  // This is arithmetic, not a judgement about whether momentum continues: continuation DID happen
-  // and the trade still could not make target. So unlike `reachable` (ATR, a reported flag only),
-  // insufficient band headroom makes the row NOT VIABLE, which drops it out through the v1080
-  // allocation gate. Runway is measured from the BUY price, so the 0.25% market-order buffer is the
-  // slippage cushion. Fails OPEN when the band or day% is unknown.
   const bandRef=Number(buyPrice)>0?Number(buyPrice):getBuyPrice(row||{});
   const uc=getUpperCircuitInfo(row,bandRef);
-  // v1097: every ELIGIBILITY test below is measured against the BASE rate, never the nudged target.
-  // The base is what the position must achieve; the nudge is upside we are willing to wait for. If
-  // viability used the nudged number, raising a stock's target would delete that same stock from the
-  // recommendations — the nudge would remove its own candidates.
   const bandLimited=!!(uc&&basePct>0&&uc.runwayPct<basePct);
   // v1083: the same test against the STATISTICAL ceiling (day's low + one typical day's range).
   // The circuit is what the stock may LEGALLY reach; this is what it may PLAUSIBLY reach. A row
   // needs the target to fit under both. Reported separately so the two causes stay distinguishable.
   const sc=getSessionCeilingInfo(row,bandRef);
   const rangeExhausted=!!(sc&&basePct>0&&sc.runwayPct<basePct);
-  // ── v1112: THE SESSION CEILING IS REPORTED, NOT ENFORCED (owner) ───────────────────────────────
-  // The CIRCUIT ceiling above stays a removal: it is exchange arithmetic — a stock at its upper band
-  // may not legally trade higher today, so the target cannot be reached, full stop (7 rows of 900).
-  // This one is a STATISTICAL estimate of the same idea (day's low + one typical day's range) and it
-  // removed 349 of 900, including most of the top ten, on the release snapshot.
-  //
-  // It is removing the wrong cohort, and the app has now measured that twice. v1075: the blocked
-  // 100-150% rangeUsed bucket returned the BEST next-day mean in the sample (+1.40%, 23.1% gaining
-  // >= 2%) — extension predicted CONTINUATION. v1109: ranking by yesterday's gain put 17 of 20 stocks
-  // into target the next session against a 27% base rate while the Radar's own top twenty managed 8,
-  // and feasibility (the same runway/target ratio) was pulled OUT of the score for exactly that
-  // reason. Leaving it alive as a hard veto kept deleting the same stocks the score had just stopped
-  // deleting — a stock that has moved has less room LEFT today, which is precisely the signal that it
-  // is moving. The owner's own report closes it: "it almost takes every good stock out."
-  //
-  // Also note the horizon mismatch recorded under v1093: this test asks what is reachable in the rest
-  // of TODAY, while v1085 grades success as target-before-stop within TWO trading days. A same-day
-  // veto cannot be correct for a two-day objective.
-  //
-  // `rangeExhausted` and `sessionRunwayPct` are still computed and still returned on every row, so
-  // the evidence keeps accumulating and restoring the block is a one-word change if it reverses.
   const viable=basePct>0&&!bandLimited&&(capacity==null||basePct+1e-9>=minGrossPct);
   const stopSource=(Math.abs(Number(row?.slPct))>0)?'explicit stock stop'
     :hasAtr?'ATR stock stop'
@@ -9952,10 +7858,6 @@ function getRowExitPolicy(row,buyPrice=null,activeInfo=null,nudgeInfo=null){
     // v1097, all REPORTED so the nudge is auditable on every row:
     basePct:basePct>0?+basePct.toFixed(2):null,   // the goal rate alone — what eligibility is judged on
     nudgePct:+Number(nudgePct||0).toFixed(2),      // what the left-on-table pool added
-    // v1124: `nudgePoolPct` removed. It had exactly one reference — its own assignment — and it called
-    // getLeftOnTablePool(), a STORE READ, once per row on a function the universe scan calls for every
-    // row. A field nothing consumes has no business on the hot path. The pool is still measured and
-    // still shown in Latest Session; it simply is not re-read per stock to be discarded.
     stopPct:+stopPct.toFixed(2),
     rewardRisk,
     reachable,
@@ -9981,29 +7883,6 @@ function getRowExitPolicy(row,buyPrice=null,activeInfo=null,nudgeInfo=null){
     buyPrice:Number(buyPrice)>0?Number(buyPrice):null
   };
 }
-// ── v1105 EXIT SIGNAL (REPORTED ONLY) ────────────────────────────────────────
-// The app has always had an exit PRICE and never an exit SIGNAL — nothing ever asked whether a
-// position is still being bought. This reads that from columns already exported, and it is DISPLAY
-// ONLY: it moves no score, no target and no order.
-//
-// MEASURED 2026-08-07 on the live cross-section (n=1,877) against "retention" — where price sits in
-// the day's range, 1.0 meaning it is sitting on its high:
-//
-//   price > VWAP (1d)  0.747 vs 0.234  +0.514   |  Chaikin money flow > 0  0.514 vs 0.390  +0.124
-//   RSI 15m > 55       0.790 vs 0.322  +0.468   |  Bull bear power > 0     0.467 vs 0.400  +0.068
-//   MFI 15m > 60       0.644 vs 0.349  +0.294   |  Parabolic SAR           0.465 vs 0.402  +0.063
-//   RoC 5m > 0         0.564 vs 0.336  +0.229   |  MFI 1d > 60             0.460 vs 0.423  +0.038
-//
-// TWO HONEST NOTES ON THAT TABLE. VWAP and 15m RSI are PARTLY CIRCULAR — VWAP is an average of the
-// day's own prices, so a stock on its high is mechanically above it, and a short-window RSI behaves
-// the same way. They measure "is it high now", not "will it stay high". The volume-based measures
-// (Chaikin money flow, 15m MFI) are NOT explained by that mechanism, which is why they are kept even
-// though they separate less. SAR, Bull Bear Power and daily MFI were measured and DISCARDED — SAR is
-// nominally a trailing-exit indicator and is among the weakest of the set here.
-//
-// Because the strongest inputs are partly circular this cannot become an exit RULE on today's
-// evidence; the RULES.md bar wants >=3 confirms across >=2 sessions. Getting them needs no new store:
-// compare this reading against the CLOSE already kept in rs_price_history_v1 the following day.
 function getPositionExitSignal(row){
   if(!row) return null;
   const price=Number(row.price), vwap=Number(row.vwap);
@@ -10081,42 +7960,6 @@ function getTurnoverAllocationCap(row){
   const turnover=Number(row?.turnover);
   return Number.isFinite(turnover)&&turnover>0?turnover*MAX_TURNOVER_PARTICIPATION:0;
 }
-// v1070 TOP-UP SIZING (owner). Since held stocks can be recommended again, the size of an ADD must
-// be governed by what it does to the blended average cost — the position, not just the new order.
-//   UNDERWATER (price < avg): the add pulls the average DOWN toward the current price, which is
-//     what the owner wants, so it is capped only by the normal rails (max-alloc / turnover /
-//     risk weight / risk budget). "Give it the max" — nothing extra is imposed here.
-//   IN PROFIT (price > avg): the add pushes the average UP. Bound it so that if the NEW entry's
-//     own stop is hit, the BLENDED position is still not at a loss:
-//         newAvg <= price x (1 - stop%/100)
-//     Solving (Q*A + q*P)/(Q+q) <= P*(1-s) for q gives  q <= Q * (P*(1-s) - A) / (P*s).
-//     If the existing average is already above that stop level there is no cushion left and no
-//     add is allowed — buying more would create a position that loses money on its own stop.
-// Uses getRowStopDistancePct, an existing per-stock model unit, so no new tunable constant.
-// ── v1172: AN OPEN POSITION IS TOLD WHAT TO DO, NOT WHAT IS HAPPENING ───────────────────────
-// Owner, 2026-08-18: *"this doesn't help me... Holding up, being sold, distribution into strength
-// etc. It should tell me what I should do, not what's happening in the market. Things like Buy X
-// more, Hold, Exit X/All."* The v1106 rule, applied to the panel that had escaped it: a finding must
-// change a target, a stop, an allocation or a decision - describing the tape is not a decision.
-//
-// Every input already exists and nothing new is invented: the position's own exit policy supplies
-// the target, the current-session flow supplies supply/demand (v1168), and v1070's top-up cushion
-// supplies how much may safely be added to a position already in profit.
-//
-// THE ORDER OF THE TESTS IS THE POLICY, and it runs worst-case first:
-//   1. target reached            -> EXIT ALL. The trade did what it was bought to do.
-//   2. current session selling   -> EXIT ALL, in profit, or EXIT HALF while underwater. The v1168
-//                                   condition: net selling, or cheaper to push down than up.
-//   3. below stop                -> EXIT ALL. It has already given up what the plan allowed.
-//   4. flow strong + room to add -> ADD n shares, capped by the cushion so a top-up cannot turn a
-//                                   profitable position into a losing one.
-//   5. otherwise                 -> HOLD, with the distance left to target.
-// ── v1207: WHAT IS ALREADY WORKING IN THE MARKET ────────────────────────────────────────────
-// An instruction to EXIT is a different instruction when most of the position is already sitting on
-// the offer. Built from today's Orders.csv rows that are still OPEN, so it says nothing about GTTs -
-// those remain unknowable (see Known Issues) and this deliberately does not pretend otherwise.
-// `price` is the AVERAGE FILL of the part that did trade, which for a partially filled sell is at or
-// above the limit, so it is reported as the level the order worked at rather than as the limit.
 function getRestingOrderMap(){
   const out={};
   if(!ORDERS_TODAY||!ORDERS_TODAY.length) return out;
@@ -10131,18 +7974,6 @@ function getRestingOrderMap(){
   }
   return out;
 }
-// ── v1206: ONE FLOW WINDOW PER ROW ───────────────────────────────────────────────────────────
-// The instruction was computed on the current session while the tooltip hanging off the same cell
-// quoted the whole-file trajectory, so the two could - and did - state opposite things about the
-// same stock. Measured 2026-08-20 11:15 across the 11 open positions: URBANCO's tooltip said
-// ACCUMULATING at +39.2% of volume with the row reading against it on today's -0.2%; JIOFIN said
-// SELLING at -6.1% with today at +24.4%; SPECTRUM said ACCUMULATING at +4.0% with today at -37.2%;
-// CASTROLIND said ABSORPTION with today SELLING. Four rows out of eleven, and on four of them the
-// tooltip's own sold/thin reading contradicted the instruction printed directly above it.
-//
-// Selecting the window is now done ONCE, here, and both surfaces read the result. The v1203
-// fallback and its "across N sessions" label are preserved exactly - this only removes the second,
-// unlabelled copy of the choice.
 function getPositionFlowRead(rd){
   const tt=rd&&rd.current?(rd.todayTraj||rd.traj):null;
   return {tt,span:(rd&&tt&&!rd.todayTraj&&rd.sessions>0)?(' across '+rd.sessions+' sessions'):''};
@@ -10151,10 +7982,6 @@ function getPositionAction(sym,pos){
   const s=(Array.isArray(ALL)?ALL:[]).find(r=>normSym(r.symbol)===normSym(sym))||null;
   const qty=Number(pos&&pos.qty)||0;
   if(!(qty>0)) return null;
-  // v1207: an EXIT is a different instruction when the shares are already on the offer. Applied to
-  // the finished verdict rather than woven into the ladder, so the DECISION is unchanged - only the
-  // statement of what remains to be done, plus a warning when the resting level is one this
-  // session's own projection does not reach.
   const _rest=(typeof getRestingOrderMap==='function')?getRestingOrderMap()[normSym(sym)]:null;
   const _withResting=(a)=>{
     if(!a||!/^EXIT/.test(a.act)||!_rest||!(_rest.sellQty>0)) return a;
@@ -10167,11 +7994,6 @@ function getPositionAction(sym,pos){
       +(_rest.sellPrice>0?' worked at '+fmtINR(_rest.sellPrice):'')
       +(unreachable?', which this session projects to '+fmtINR(proj)+' and will not reach'
                    :', still live');
-    // THE DECISION IS NOT RESTATED. An earlier pass escalated the verb to EXIT ALL NOW when the
-    // whole position was resting at an unreachable level; that is the SAME decision wearing a fourth
-    // name, which is exactly what "one meaning per quantity, one surface per verdict" forbids - and
-    // the standing suite caught it as "not an instruction". The fact rides the reason; the verb does
-    // not move.
     return a;
   };
   const avg=Number(pos?.avg),ltp=Number(pos?.ltp);
@@ -10182,22 +8004,6 @@ function getPositionAction(sym,pos){
     if(stop>0&&ltp<=stop)return _withResting({act:'EXIT ALL',qty,tone:'red',why:`stop breached at ${fmtINR(stop)}`});
   }
   const rd=getIntradayRead(sym);
-  // ── v1203: TODAY'S TRAJECTORY IS THE PREFERRED READ, NOT THE ONLY ONE ───────────────────────
-  // v1168 was right to measure the current session separately - a complete prior session outweighs
-  // a young one on the volume clock, so a merged read can say ACCUMULATING while today's own tape
-  // has turned. But it left this panel reading `todayTraj` ALONE, and buildIntradayTrajectory
-  // refuses to build one under three bars. So between 09:15 and 09:25 every single position - each
-  // holding a current, contiguous, multi-hundred-bar file - produced no verdict at all. Measured
-  // 2026-08-20 at 09:20: four positions freshly fetched, 227 bars each, all four NEEDS DATA.
-  //
-  // The v1167 fix, one level down. A wanted veto turned into a blackout because the guard counted
-  // bars TODAY when what it needed was bars AT ALL. v1168's intent survives intact: whenever today
-  // can speak it still speaks first and can still overrule the multi-day read. This only decides
-  // what happens when today CANNOT yet be computed, and there the honest answer is the flow that
-  // does exist, labelled with the span it came from - not silence.
-  // Named on every verdict built from the fallback, so a multi-day read can never be mistaken for
-  // a statement about this morning. v1206 moved the choice into getPositionFlowRead so the panel's
-  // own tooltip resolves the SAME window instead of quoting the whole file beside this verdict.
   const {tt,span}=getPositionFlowRead(rd);
 
   // NO READ IS NOT A HOLD. Saying "hold" on no evidence is the thing this panel was doing wrong in
@@ -10205,10 +8011,6 @@ function getPositionAction(sym,pos){
   if(!tt) return {act:'NEEDS DATA',qty:0,tone:'grey',
     why:rd&&!rd.current?('last read was '+rd.on+', not this session'):'no 5-minute read for this session yet'};
 
-  // TWO INDEPENDENT READINGS OF SUPPLY AND DEMAND, both at their own natural zero:
-  //   sold - more was sold than bought this session (net flow below zero)
-  //   thin - it now costs FEWER shares to push the price down 1% than up 1% (cost ratio below 1)
-  // Neither is a chosen threshold: zero and parity are where the quantities change meaning.
   const sold=tt.cvdPct<0;
   const thin=Number.isFinite(tt.costRatio)&&tt.costRatio>0&&tt.costRatio<1;
   const shares=n=>Math.round(n).toLocaleString('en-IN');
@@ -10233,11 +8035,6 @@ function getPositionAction(sym,pos){
   }
   if(pressing&&s){
     try{
-      // v1179: getHeldTopUpNotionalCap returns Infinity for a position UNDERWATER - the v1070
-      // cushion only binds in profit, where an add could drag the blended cost above the new stop.
-      // Dividing that by a price printed "ADD Infinity" on the panel. Infinity means "the cushion
-      // does not bind", not "buy without limit", so the size then comes from the ordinary allocation
-      // rails - Max Alloc, the 0.10% turnover rail, the rupee floor - via rowAchievableNotional.
       const buyP=getBuyPrice(s);
       const cushion=getHeldTopUpNotionalCap(s,buyP);
       let cap=cushion;
@@ -10266,21 +8063,6 @@ function getHeldTopUpNotionalCap(s,buyP,heldMap=null){
   if(avg>=stopPrice) return 0;                   // no cushion left
   return Math.max(0,held.qty*(stopPrice-avg)/(price*stopFrac)*price);
 }
-// v1080 (owner): "If it doesn't qualify for allocation, it should not be in recommendations."
-// A row that can never receive a single share was still rendering at rank 1-3, still sitting checked,
-// still counting toward "Buy Basket (N)" and still consuming one of the 20 selection slots — while
-// being unbuyable. Observed 2026-07-30: JAGSNBHARM held 120 @ Rs 255.30, last Rs 256.30, so it is in
-// profit; its own stop is 6.28%, putting the new entry's stop price at Rs 240.20, BELOW the existing
-// average — getHeldTopUpNotionalCap correctly returns 0 (any add makes a blended position that loses
-// on its own stop), but nothing acted on that zero.
-//
-// This returns a reason ONLY for causes that are independent of how capital is split across the
-// basket. A row that misses out purely because 20 names shared the money is a CAPITAL problem, not a
-// disqualification — pass 2 of computeAlloc usually gives it a share — so the score-weight limit is
-// deliberately NOT consulted here. Blocking on it would make a stock's eligibility depend on how many
-// other stocks happen to rank near it, which is the same non-causal cross-stock coupling v1066 removed.
-//
-// Returns null when the row is allocatable, else a short human reason.
 function getAllocationPassContext(){
   return {capital:getEffectiveCapital(),maxAlloc:getEffectiveMaxAlloc(),
           riskPerTrade:getEffectiveRiskPerTrade(),
@@ -10298,36 +8080,14 @@ function getAllocationBlockReason(s,ctx=null){
   if(!(turnoverCap>0)) return 'no daily turnover — market-impact safety cannot be verified';
   const topUpCap=getHeldTopUpNotionalCap(s,buyP,c.heldMap);
   if(!(topUpCap>0)) return 'already held at a profit with no cushion — an add would put the blended position at a loss on its own stop';
-  // v1092: the risk budget joins the rails here for the same reason Max Alloc is already here —
-  // both are portfolio-level caps that can leave a row unable to hold a single share, and a row
-  // that cannot be bought should not be recommended. The score-weight share is still deliberately
-  // excluded (v1080): that one depends on which OTHER stocks were selected.
   const riskCap=riskNotionalCap(s,c.riskPerTrade);
   const rail=Math.min(c.maxAlloc>0?c.maxAlloc:c.capital,turnoverCap,topUpCap,riskCap);
   if(rail<buyP) return `allocation rails (${fmtINR(rail)}) are below one share at ${fmtINR(buyP)}`;
   const policy=getRowExitPolicy(s,buyP,c.active);
   if(policy&&policy.bandLimited) return `only ${policy.bandRunwayPct}% left to the ${policy.bandPct}% upper circuit (₹${policy.ucPrice}) — the ${policy.basePct}% target cannot be reached inside today's band`;
-  // v1112: the SESSION-ceiling clause that used to sit here is gone — see getRowExitPolicy. It is a
-  // statistical estimate, it removed 349 of 900 rows including most of the top ten, and both v1075
-  // and v1109 measured that the cohort it removes is the one that goes on to reach target. The
-  // circuit clause above stays: that one is exchange arithmetic, not an opinion about momentum.
   if(policy&&policy.viable===false) return policy.capacityPct!=null
     ? `stock capacity ${policy.capacityPct.toFixed(2)}% cannot clear the ${policy.minGrossPct?.toFixed(2)??'—'}% cost + net hurdle`
     : 'no viable target after costs';
-  // ── v1125 THE RUPEE FLOOR (owner) ────────────────────────────────────────────────────────────
-  // Every test above this line is a PERCENTAGE test, and a percentage cannot see the money. Measured
-  // on the release board: all 60 top rows carried the IDENTICAL 3.45% target while netting between
-  // Rs 91.59 and Rs 2,365 — a 26x spread, because the 0.10% turnover rail caps an illiquid name at a
-  // few thousand rupees while a liquid one gets the full Max Alloc. The percentage bar rated both the
-  // same. This asks the only question that matters: at the largest position this stock will actually
-  // let me take, does hitting its own target leave enough money to be worth the trade, after the real
-  // charges (including the FLAT Rs 15.34 DP fee, which is 0.38% of a Rs 4,000 lot and 0.03% of a
-  // Rs 50,000 one)?
-  //
-  // NO NEW CONSTANT: the floor is HARVEST_DESIRED_NET_PCT — the same 0.60% "minimum useful net for
-  // capital rotation" that has governed since v1060 — converted to rupees at the reference notional.
-  // Measured scope: 66 of the top 340 rows, 19.4%. Targeted rather than blanket, and every casualty
-  // is a row the turnover rail had already reduced to pocket change.
   const floorRs=getDesiredNetRupees();
   if(floorRs>0){
     const ec=getRowRupeeEconomics(s,rowAchievableNotional(s,c),policy,c);
@@ -10373,14 +8133,6 @@ function computeAlloc(capital, selList){
   }
 
   const rawScore=s=>Math.max(0,Number(s.rocketScore)||0);
-  // v1092: the pot is split by score ÷ stop distance, not by score alone. Same total deployment —
-  // this is a REDISTRIBUTION, not a new budget — but two equally-scored names no longer draw the
-  // same rupees when one stops out at 3% and the other at 8%. Before this, that pair carried 2.7x
-  // different rupee risk for identical conviction, purely because nothing normalised for the stop.
-  // Because alloc ∝ 1/stop, alloc × stop is constant across equally-scored rows: equal risk per
-  // trade falls out of the arithmetic with no new field and no new constant (getRowStopDistancePct
-  // is an existing per-row unit). The caps (Max Alloc, the 0.10% turnover rail, the held top-up
-  // cushion) are untouched and still apply after this weight — only the pre-cap share changed.
   const riskWeight=s=>{
     const sc=rawScore(s);
     if(!(sc>0)) return 0;
@@ -10434,21 +8186,6 @@ function computeAlloc(capital, selList){
       if(am?.rejected) continue;
       if(!am){
         const buyP=getBuyPrice(s);
-        // ── v1125: NEVER ROUND A SELECTED STOCK TO ZERO SHARES WHILE CAPITAL REMAINS ───────────
-        // rowLimit is the score-weight SHARE, and it was also being used as the ceiling, so a stock
-        // priced above its own slice could never be bought — not in pass 1 (floor(share/price) = 0)
-        // and not here either, because the same slice gated the rescue. It is purely a whole-share
-        // rounding artefact and it hits EXPENSIVE stocks: measured on the release board, TCPLPACK at
-        // ₹4,285.70 was offered ₹2,921 and KINGFA at ₹5,866.65 was offered ₹4,674 — both cleared
-        // every gate (net ₹1,366 and ₹1,309 against a ₹270 floor) and both silently received nothing,
-        // while the basket button still counted them. A percentage view cannot see this at all; it is
-        // visible only once you ask how many rupees one share actually costs.
-        //
-        // The rescue is exactly ONE share and no more: the ceiling below becomes max(share, price),
-        // so proportional splitting is untouched for every row that could already afford one. It is
-        // still bounded by the row's real rails (Max Alloc, the 0.10% turnover rail, the top-up
-        // cushion, the risk budget) and by residual capital, and pass 2 walks by CONVICTION, so a
-        // better-scored name always gets first refusal on the spare rupees.
         const railCeil=railLimits[s.symbol]||0;
         if(!(buyP>0)) continue;
         if(rowLimit<buyP){
@@ -10465,12 +8202,6 @@ function computeAlloc(capital, selList){
         allocMap[s.symbol]={alloc:qty*buyP,debit:buyDebit(buyP,qty),buyCharges:calcZerodhaCharges(buyP,qty,false,false,false),qty,buyPrice:buyP,
           limit:rowLimit,stopDistancePct:ev.policy.stopPct,expectedNet:ev.expectedNet,charges:ev.charges,tgtPct:ev.tgtPct,exitPolicy:ev.policy,liquidityCap:getTurnoverAllocationCap(s),limitReason:limitReasons[s.symbol]};
         am=allocMap[s.symbol];
-        // The first share must be PAID FOR out of the residual. This branch was unreachable before
-        // v1125 — pass 1 already bought a share whenever rowLimit >= price, and pass 2's old guard
-        // `rowLimit < buyP -> continue` rejected every other case — so the missing decrement never
-        // showed. Making the rescue live exposed it as a real overspend (deployed ₹21,300 against
-        // ₹19,696 of capital). Growth below is charged incrementally, so only this opening lot is
-        // accounted here.
         residual-=am.debit; deployed+=am.debit; progress=true;
       }
       const buyP=am.buyPrice;
@@ -10489,12 +8220,6 @@ function computeAlloc(capital, selList){
     delete am.limit;
     am.riskRs=rowRiskRupees(am.alloc,am.stopDistancePct);
   });
-  // v1125: NOTHING IS DROPPED SILENTLY. A selected row that finished with no position used to be
-  // simply ABSENT from the map, so its Alloc cell rendered a bare em dash and the basket count still
-  // included it. After the one-share rescue above, the only way to arrive here is that capital
-  // genuinely ran out before this row's turn — a real portfolio fact, and one worth stating in
-  // rupees rather than leaving blank. Same principle as the sell-basket skip list (v1082): every
-  // candidate is either acted on or named with a reason.
   for(const s of sortedSel){
     if(allocMap[s.symbol]) continue;
     const buyP=getBuyPrice(s);
@@ -10657,23 +8382,6 @@ function radarSeriesBandPill(s){
   const title=ok?'Active EQ security; eligible for the Zerodha basket.':'Ineligible for the basket: '+escHtml((s.gateReasons||[]).slice(0,3).join(', ')||'exchange eligibility');
   return `<span class="info-pill ${ok?'pill-green':'pill-red'}" style="padding:2px 8px;font-size:12px" title="${title}">${escHtml(s.series||'—')} · ${band}</span>`;
 }
-// v1143: the enrichment affordance sits on the ROW, because the enrichment is about that stock.
-// Filled when its bars are loaded, so the table shows at a glance which names have been enriched.
-// ── ONE FACE FOR ONE VERDICT ─────────────────────────────────────────────────────────────────
-// Owner, 2026-08-19: *"I don't want this loosey-goosey 'worth a look' shit. Recommendations should
-// be solid - buy or not buy... I shouldn't have to manually look before pressing anything."*
-//
-// He is right and the board was contradicting itself. CHENNPETRO sat at rank 1, score 99.9, checked
-// for export and allocated Rs 7,310 - with a RED chip beside it. The two came from DIFFERENT
-// QUANTITIES: the row's buyability is `intradayVerdict` (v1168 - today's net flow and cost
-// asymmetry), while the chip was coloured by `regime`, which is a DESCRIPTION of the multi-day
-// series and whose 'selling' value is the FALL-THROUGH of a 2x2. Measured on that stock: full
-// series net flow +22.7% - it lands in 'selling' only because both recent slopes are negative,
-// while TODAY reads +100% net flow with no down bars at all, so the veto correctly does not fire.
-// Neither number was wrong; painting them in the same vocabulary was.
-//
-// A verdict now has exactly one face and one colour wherever it appears. `regime` is context in the
-// tooltip and never colours anything, because it does not decide anything.
 function intradayVerdictFace(v,has){
   // v1207: `unverified` is its own face. It must not read as confirmed (nothing has checked it) and
   // must not read as rejected (nothing has condemned it) - the current session cannot speak yet.
@@ -10698,10 +8406,6 @@ function intradayRowButton(s){
   // recommendations are the thing, and nothing may crowd them out.
   const v=has?s.intradayVerdict:null;
   const rd=has?getIntradayRead(sym):null;
-  // v1162: a verdict from an earlier session gets its OWN face and colour. It must not read as
-  // unchecked (the owner would go and check it, only to find data already there) and it must not
-  // read as confirmed (it is not evidence about today). An hourglass says "this was answered, for a
-  // day that is over".
   const face=v==='stale'?intradayVerdictFace(v,has):(v?intradayVerdictFace(v,has):'5m');
   const col=intradayVerdictColor(v,has,sel);
   const age=rd?(rd.ageMin<60?rd.ageMin+' min old':(rd.ageMin/60).toFixed(1)+' h old'):'';
@@ -10768,12 +8472,6 @@ function renderTable(){
       // v1139: the order book, in the recommendation table rather than a list of its own. Muted em
       // dash when the stock has no book - absent is not bearish.
       turnover:`<td>${fV(s.turnover)}</td>`,
-      // v1148 (owner): where the paste says it closes. Pressure decides the direction and size,
-      // the stock's own pace caps how far it can actually get in the bars that remain.
-      // v1206: `rd.eod` is the CURRENT session's projection, and this cell - unlike the positions
-      // panel, which v1205 fixed - never tested `current` at all, so a file that stopped yesterday
-      // printed yesterday's projected close under a column that says today. Same defect, same fix,
-      // both surfaces now read the one object.
       predEod:`<td style="white-space:nowrap">${(()=>{
         const rd=getIntradayRead(s.symbol);
         if(!rd||!rd.current) return `<span style="color:var(--t3)" title="${escHtml(rd?('Last read was '+rd.on+', not this session.'):'Not checked on the 5-minute tape yet.')}">—</span>`;
@@ -10783,8 +8481,7 @@ function renderTable(){
           'Unspent pressure '+(t.pressurePct>=0?'+':'')+t.pressurePct.toFixed(2)+'% THIS SESSION, capped by what this stock can travel in the '
           +t.barsLeft+' bars left ('+t.avgMovePct.toFixed(3)+'% per '+t.stepMin+'-minute bar = '
           +(t.maxTravel!=null?t.maxTravel.toFixed(2):'?')+'%) and scaled to the '+Math.round(t.sessionSeen*100)
-          +'% of the session already seen. Arithmetic, not a forecast.')}">${
-          fmtINR(t.close)}</span><span style="color:var(--t3);font-size:11px"> ${
+          +'% of the session already seen. Projected close '+fmtINR(t.close)+'. Arithmetic, not a forecast.')}">${
           (t.pct>=0?'+':'')+t.pct.toFixed(2)}%</span>`;
       })()}</td>`,
       // Pace is available only after the checked tape contains a completed recovery episode.
@@ -10907,20 +8604,6 @@ function onIntradayPaste(){
   }
   renderTable();
 }
-// ── v1172: HIDING THE LIST IS NOT THROWING AWAY THE DATA (owner, 2026-08-18) ────────────────
-// *"Discard says it throws all the data... it should not! Why the fuck would we throw all our
-// painstakingly gathered data. The button should just clear the UI space it filled with the list it
-// just checked."*
-//
-// He is right, and the old behaviour was indefensible once fetching became rate-capped: this wiped
-// INTRADAY_BARS for every stock, so getting it back cost real requests out of a 12-per-15-minutes
-// budget - and since v1171 that budget is also what builds coverage of the day's movers. The button
-// existed from v1146, when a "check" was a hand-paste that cost nothing but a clipboard.
-//
-// It now collapses the fetch LIST and nothing else. Bars, verdicts and the re-rank all stand.
-// v1181 (owner): *"if there's a Hide list, should it also unhide list?"* Yes - it was a one-way
-// door: once collapsed the only way back was to spend another fetch, which is the same waste the
-// Hide button existed to stop. It toggles.
 function collapseFetchList(){
   LAST_FETCH_HIDDEN=!LAST_FETCH_HIDDEN;
   renderTable();
@@ -10936,36 +8619,7 @@ function forgetIntradayFor(sym){
   try{ applyIntradayReorder(ALL); }catch(e){}
   scheduleApplyFilters();renderTable();
 }
-// ── WHAT TO FETCH, AND HOW OFTEN ────────────────────────────────────────────────────────────
-// The rate cap is enforced HERE, before anything is requested, so it cannot be edited around from
-// elsewhere (owner: "I don't want to bombard zerodha with these requests if they mind it"). Nothing
-// is ever fetched on a timer or speculatively - only the unchecked names at the top of the board,
-// and only when the button is pressed.
-// v1177: A DAILY CAP, NOT A ROLLING QUARTER-HOUR (owner, 2026-08-18): *"the rate cap of 12 per 15
-// minute can be removed because we don't update the ALL NSE that much anyway, only when I have
-// capital to invest... so instead of setting it per 15 minute, set it to per day to a safe number."*
-// The old window blocked a fetch mid-session for no reason the owner could see - it fired while he
-// was buying - and its 12-per-15-minutes worked out to a theoretical 288 a day that nothing was ever
-// going to reach, because the folder watch only re-ingests when ALL NSE actually changes. A daily
-// budget is the honest shape: 400 requests spread across a session is far below anything Kite would
-// notice (its documented historical limit is 3 PER SECOND) and still bounded, and the 700ms spacing
-// in the helper is untouched. The budget resets on the SESSION date, so an overnight run cannot
-// borrow from tomorrow.
 const FETCH_MAX_PER_DAY=400;
-// ── v1203: THE PER-PRESS CONSTANT IS GONE, BECAUSE IT WAS NEVER DERIVED ─────────────────────
-// v1178 added FETCH_MAX_PER_RUN=12 to stop one press queuing 135 stocks. The BOUND was right; the
-// NUMBER was inherited. 12 was born as FETCH_MAX_PER_WINDOW - 12 requests per 15 minutes, a
-// politeness rate against a broker whose documented limit is 3 PER SECOND. When v1178 split that
-// constant in two, FETCH_MAX_PER_DAY took over the politeness job and 12 was carried across into a
-// different job - press duration - without being re-derived for it. It then quietly acquired a
-// THIRD job, `FETCH_MAX_PER_RUN*3`, as the depth of the candidate walk, so tuning how long a press
-// took also moved how far down the ranking the app looked.
-//
-// A press is now bounded by the DECISION SET: every open position, plus every row clearing the
-// recommendation bar. That bar is already capped at RECOMMEND_MAX_RANK*2 by timingDepth(), so the
-// ceiling is an owner risk preference that already exists plus however many positions are actually
-// held - a quantity that MOVES when the book moves, which is the whole point. Nothing here is
-// chosen: the 135-stock press cannot recur because 135 names never had a live decision attached.
 let FETCH_LOG=[];
 let FETCH_LOG_DATE=null;
 function fetchBudgetLeft(){
@@ -10974,84 +8628,8 @@ function fetchBudgetLeft(){
   if(FETCH_LOG_DATE!==day){ FETCH_LOG=[]; FETCH_LOG_DATE=day; }
   return Math.max(0,FETCH_MAX_PER_DAY-FETCH_LOG.length);
 }
-// The unchecked names at the top of the board, paired with the instrument tokens the app has held
-// since v1139. A symbol with no token is excluded WITH a reason rather than silently dropped.
-// ── v1163: A STOCK YOU OWN IS STILL A STOCK YOU HAVE TO DECIDE ABOUT ────────────────────────
-// Owner: "any stock that I buy today but couldn't sell off intraday may get stuck in our portfolio.
-// So how should all this be handled?"
-//
-// The hole his question exposed was NOT the file. It was the coverage: jobs were drawn only from the
-// top of the RECOMMENDATION board, and buying a stock removes it from that board - so the day you
-// buy is the last day it is ever fetched, and its file stops growing exactly when the position
-// starts mattering. That is the same complaint as "it's not in the recommendation table anymore if
-// I have already bought it", one layer down.
-//
-// ORDER IS DELIBERATE: recommendations first, held positions with whatever budget is left. A buy
-// decision expires at the close; a held position can be read an hour later and still be read
-// correctly. Under a tight cap the time-critical question wins.
-//
-// Held names are fetched for OBSERVATION, not for a verdict. Nothing here recommends re-buying: the
-// v1070 rule that held is not a reason to refuse a stock is untouched, and so is the v1162 rule that
-// only a read from the CURRENT session may move anything.
-// ── WHAT GETS FETCHED, AND WHY IT IS ONLY A VALIDATOR (owner, 2026-08-18) ───────────────────
-// *"I meant it as a validator only, but that maybe it could keep validating until it finds
-// something to buy."*
-//
-// THE 5-MINUTE READ CANNOT DISCOVER ANYTHING, and that settles the whole design. It only moves the
-// standing of stocks that have been FETCHED, and 12 requests against 1,895 tradeable rows can only
-// ever touch names the composite already surfaced. It answers "is this specific pick still good
-// right now" and nothing else. Finding a pick is a different job, done on data that costs nothing:
-// `rs_price_history_v1` holds daily OHLC for the WHOLE market from the NSE bhav copy - 2,624 symbols
-// - and grows by a free session every upload.
-//
-// So the queue is exactly the validation set, and it EXTENDS DOWN THE RANKING UNTIL SOMETHING
-// PASSES. The top FETCH_TOP_RANK are the live candidates and are kept fresh; if none of them clears
-// the buy bar, rank 6, 7, 8 ... are pulled in until one does or the press is spent. That is the loop
-// v1145 described - *"when a round rejects the whole top, that is exactly when the next candidates
-// matter most"* - applied to the queue rather than only to the panel.
-//
-// The >=10% mover tier is GONE. Fetching a stock that has already run 16% cannot help buy it
-// earlier, and it was competing for slots with the names actually up for decision.
-// The first ingest of a page load is the file that was already on disk when the tab opened,
-// so it must not spend a Zerodha request (owner, 2026-08-18). Reset per page load by being a
-// plain module-level let - a reload starts false again, which is exactly the intent.
 let FIRST_INGEST_DONE=false;
 const FETCH_TOP_RANK=5;      // owner: the live candidate set, kept fresh
-// ── v1203: WHAT A READ WOULD CHANGE, IN RUPEES - NOT WHICH LIST THE NAME CAME FROM ──────────
-// The v1163 queue ranked by CATEGORY: candidates first, open positions appended after, the whole
-// thing truncated to a fixed press size. That ordering starves the second tier by construction.
-// Measured 2026-08-20: 10 open positions, 8 slots spent on the board walk, 4 left for positions -
-// and because every board row goes stale again at each 5-minute boundary and reclaims its place at
-// the front, positions only ever receive leftovers. The owner's objection to the obvious patch is
-// the correct one: a reserved floor or a fixed split is the same constant wearing a disguise, and
-// it breaks the moment the book holds 3 positions instead of 30.
-//
-// So nothing is reserved and nothing is tiered. A read is worth what it can change, both sides of
-// the question express that in RUPEES, and the composition of a press is an OUTPUT.
-//
-// THREE TERMS, each in a unit that already exists here:
-//   gap      how far behind the read is, in 5-minute bars. Replaces a BOOLEAN stale() under which
-//            "five minutes behind" and "last seen yesterday" were the same thing and the tie was
-//            broken by list order. A name with no current read at all sorts strictly worse than
-//            any partial one - it is the state that produces NEEDS DATA.
-//   stake    rupees. A position is qty x LTP; a candidate is rowAchievableNotional - what it would
-//            actually be allocated, not what its rank implies.
-//   urgency  distance to the nearer decision edge, measured in the row's OWN stop width. Both
-//            edges come from getRowExitPolicy and the distance is read off the LIVE LTP, so it
-//            needs no candles - a position that drifted onto its stop overnight is visibly urgent
-//            BEFORE it is ever fetched, which is what stops this from being circular.
-//
-// A candidate's distance to ITS boundary is passesIntradayValidation, which is exactly what the
-// fetch would answer, so it is unknowable here and takes the MEDIAN of the positions' distances -
-// the standing absence rule. That single choice is what balances the queue: candidates sit
-// mid-pack, a position at its stop outranks all of them, a comfortable position ranks below them,
-// and the mix re-derives itself every press as the book changes. With no positions held the median
-// is undefined, every candidate takes the same value, and the term correctly falls out.
-//
-// Blended geometrically over MIDRANK percentiles, so no term's scale can dominate and a zero gap
-// kills the entry outright - a name already current to the last bar is worth nothing to re-fetch
-// however large or however urgent it is. (`limit` is accepted and ignored: the queue is derived
-// from the decision set, and a caller may not widen or narrow it.)
 function intradayFetchJobs(limit){
   const budget=fetchBudgetLeft();
   if(!(budget>0)) return {ok:false,why:'daily fetch budget spent'};
@@ -11061,10 +8639,6 @@ function intradayFetchJobs(limit){
   }catch(e){ return {}; }})();
   const rowOf=s=>(Array.isArray(ALL)?ALL:[]).find(r=>normSym(r.symbol)===normSym(s))||null;
 
-  // MEMBERSHIP: a name belongs here only if a read could change a decision. Open positions carry a
-  // live EXIT/ADD/HOLD for as long as they are held; rows clearing the recommendation bar carry a
-  // buy decision that expires at the close. There is no walk depth and no top-N - meetsRecommendationBar
-  // is already bounded by timingDepth(), so the ceiling is that existing bar plus the book itself.
   const members=[],seen=new Set();
   const add=(sym,held,pos,row)=>{
     const s=normSym(sym||''); if(!s||seen.has(s)) return;
@@ -11075,6 +8649,12 @@ function intradayFetchJobs(limit){
   (Array.isArray(ALL)?ALL:[]).filter(r=>meetsRecommendationBar(r))
     .slice().sort((a,b)=>(a.rank??Infinity)-(b.rank??Infinity))
     .forEach(r=>add(r.symbol,false,null,r));
+  // v1208: after the close the decision set is empty, and that is exactly when the day's winners
+  // are worth their candles. The supreme objective is to find them BEFORE they are winners, and the
+  // only way to learn that is from the ones that were.
+  if(istClock().mins>=DAY_END_MIN&&typeof getGainerCohort==="function"){
+    try{ getGainerCohort().forEach(r=>add(r.symbol,false,null,r)); }catch(e){}
+  }
   if(!members.length){
     const untokened=(Array.isArray(ALL)?ALL:[]).filter(r=>meetsRecommendationBar(r))
       .filter(r=>!KITE_TOKEN[normSym(r.symbol)]).map(r=>r.symbol).slice(0,5);
@@ -11171,19 +8751,6 @@ function ingestKiteCandlePayload(text){
   return {done,failed};
 }
 
-// ── v1157: EVERYTHING FROM INSIDE THE APP ───────────────────────────────────────────────────
-// Owner, many times over: "I don't want this command line and console bullshit. Everything should
-// run from within the app." Every previous attempt failed on the same wall - a page served from
-// file:// or github.io may not read a response from kite.zerodha.com - and each workaround pushed
-// the work back onto him: an extension, a console paste, a terminal command.
-//
-// The answer is to stop fighting the origin and BECOME one. "Start Rocket Scanner.bat" serves this
-// app from http://localhost and exposes /api/kite/* on that SAME origin. The browser is satisfied
-// because nothing is cross-origin any more, and the button below does the whole job: no extension,
-// no console, no command typed. Double-clicking the .bat is the only manual act, once per boot.
-//
-// Opened as a plain file it still works exactly as before - the in-app fetch simply hides itself,
-// the same rule v1153 established.
 let KITE_API=null;          // set when the local helper answers, wherever this page is hosted
 let LAST_FETCH=null;        // what the last fetch actually brought back, shown so it can be checked
 let FETCH_BUSY=null;        // v1177: {n, syms, at} while a fetch is in flight - it must be VISIBLE
@@ -11238,17 +8805,6 @@ async function refreshNseFundamentals(){
     return false;
   }finally{clearTimeout(timer);}
 }
-// THE APP STAYS ON GITHUB PAGES. Earlier this served the app from localhost, which was wrong - the
-// app lives at https://axionaut.github.io/rocket-scanner/ and that must not change. Only the HELPER
-// is local. An HTTPS page may not normally call http://, but localhost and 127.0.0.1 are specified
-// as potentially trustworthy, so the Pages app is allowed to call this one; the helper answers only
-// the Pages origin and nothing else, because it holds a Kite token.
-// `force` re-checks the token against Kite instead of trusting the helper's 5-minute cache.
-// REQUIRED AFTER SAVING A TOKEN, and this is the half that works WITHOUT restarting the helper:
-// the server-side cache-clear added alongside it only takes effect once the .bat is re-run, whereas
-// `?force=1` has been understood by the running helper since v1166. Without it, pasting a good token
-// the morning after a rotation returned the STALE `tokenValid:false` and the app said "Kite rejected
-// that token" about a perfectly good one.
 async function detectKiteApi(force){
   try{
     const c=new AbortController();
@@ -11262,20 +8818,6 @@ async function detectKiteApi(force){
   try{ maybePromptKiteToken(); }catch(e){}
   return KITE_API;
 }
-// ── THE TOKEN ASKS FOR ITSELF ────────────────────────────────────────────────────────────────
-// Owner, 2026-08-19: *"Can you add a pasteable popup for kite token please? It should popup in the
-// morning and save to the kite-token text file that we use."*
-//
-// The enctoken ROTATES ON EVERY KITE LOGIN, so the first load after logging in again always has a
-// dead token. Until now that surfaced as a small red line inside the intraday bar, which is exactly
-// the kind of thing you only notice after pressing Fetch and getting nothing - the v1150 rule (a
-// control that cannot work must say so) applied one level up: the app should ask, not wait.
-//
-// NO HOUR IS HARDCODED, deliberately (owner, 2026-08-18: *"don't hardcode time to 9:19"*). The
-// trigger is the state that actually matters - the helper is running and its token is missing or
-// REJECTED BY KITE (v1166 validates it against a real call rather than checking it is a non-empty
-// string). That fires on the first load after a rotation, which is the morning, without the app
-// having to know what time it is or which days are trading days.
 let KITE_TOKEN_PROMPTED=false;   // once per page load; dismissing must not re-prompt on every render
 
 function kiteTokenDialogState(){
@@ -11377,25 +8919,7 @@ function maybePromptKiteToken(){
   openKiteTokenDialog();
 }
 
-// ── THE THREE ZERODHA FILES REFRESH THEMSELVES ───────────────────────────────────────────────
-// Owner, 2026-08-19: *"I download the ALL NSE, the three-second check senses it, downloads the
-// zerodha files and there!"*
-//
-// ALL NSE stays MANUAL and the folder watch stays exactly as it was - its job is unchanged, it
-// senses that he has re-exported. What changes is that the ingest no longer reads whatever stale
-// Holdings/Positions/Orders happen to be on disk: the helper refreshes them from Kite first, so the
-// portfolio the engine scores against is from the same moment as the universe.
-//
-// ALL OR NOTHING, on the helper's side: it fetches and verifies every file in memory and only then
-// writes. A half-refresh would score today's market against yesterday's book and say nothing.
-//
-// It NEVER blocks the load. No helper, no token, or a refusal - the ingest proceeds on the files
-// already there, exactly as it did before, and the reason is logged.
 async function refreshBrokerInputs(){
-  // Startup detection is a network probe and may lose a race with initial hydration, or the helper
-  // may be started after the page. Every ALL NSE refresh is therefore also a recovery point: retry
-  // status once before deciding the helper is absent. Failure still falls through to stale local
-  // files exactly as before and can never block the ingest.
   if(!KITE_API) await detectKiteApi();
   if(!KITE_API) return {ok:false,why:'helper not running'};
   try{
@@ -11421,12 +8945,6 @@ async function saveKiteToken(){
   if(KITE_API&&KITE_API.tokenValid===false){ showToast('Kite rejected that token. Copy it again.',5000,true); return; }
   showToast('Kite token saved. Press Fetch candles.',4000);
 }
-// The whole loop, in one press: ask the local server for the candles, hand them to the SAME parser
-// a paste uses, re-rank, and point at whatever still needs checking.
-// v1172: RELOAD THE INVENTORY FROM DISK, NOT FROM KITE. INTRADAY_BARS is memory-only, so every
-// page reload used to lose every read and re-earn it out of the rate budget. The helper already
-// holds the files; this restores them in ONE local request that never touches Kite, and it runs
-// before the first render so a held position is not labelled NEEDS DATA for data we already have.
 async function loadIntradayInventory(){
   if(!KITE_API) return 0;
   try{
@@ -11468,10 +8986,6 @@ async function fetchCandlesInApp(limit,opts){
   // here is what silently dropped open positions off the end of a press.
   const jobs=r.jobs;
   jobs.forEach(()=>FETCH_LOG.push(Date.now()));
-  // v1177 (owner): *"When it's fetching there is no indicator that it's fetching. Add a loader.
-  // Because I just bought two stocks while it was trying to fetch."* A fetch takes ~0.7s per stock
-  // and can run automatically on any ALL NSE ingest, so it must never be invisible - a board that is
-  // about to re-rank looks identical to one that has finished.
   FETCH_BUSY={n:jobs.length,syms:jobs.map(j=>j.s),at:Date.now()};
   try{ renderTable(); }catch(e){}
   say('Fetching '+jobs.map(j=>j.s).join(', ')+'…',3000);
@@ -11481,10 +8995,6 @@ async function fetchCandlesInApp(limit,opts){
     const j=await res.json();
     if(!j.ok){ say(j.why,8000,true); return; }
     const out=ingestKiteCandlePayload(JSON.stringify({rocketScanner:'candles',data:j.data}));
-    // WHAT WAS ACTUALLY FETCHED, so it can be checked against the chart rather than trusted
-    // (owner: "where can I see the data it fetches to confirm if it is even fetching the correct
-    // data?"). Bars, the window they cover, and the last close - three numbers that either match
-    // Kite or do not.
     LAST_FETCH_HIDDEN=false;
     LAST_FETCH=out.done.map(sym=>{
       const rd=getIntradayRead(sym), bars=INTRADAY_BARS[normSym(sym)]||[];
@@ -11513,13 +9023,6 @@ function intradayPasteBarHtml(){
   const st=(typeof getIntradayLoopState==='function')?getIntradayLoopState():null;
   if(!t&&!n&&!(st&&(st.need.length||st.top.length))) return '';
   const chip=r=>{
-    // THE CHIP SHOWS THE VERDICT, and the verdict is the only thing that decides buyability.
-    // It used to be coloured by `regime` - a DESCRIPTION of the multi-day series whose 'selling'
-    // value is the fall-through of a 2x2 - so a rank-1 row that was checked, allocated and about to
-    // be bought could carry a red chip. Two quantities, one vocabulary, and the owner left to
-    // adjudicate. Now it is `intradayVerdict` through the SAME helper the row badge uses, so red
-    // means rejected and nothing else. Regime survives in the tooltip, where it explains rather
-    // than decides.
     const sym=normSym(r.symbol), sel=t===sym;
     const has=!!INTRADAY_BARS[sym];
     const rd=has?getIntradayRead(sym):null;
@@ -11588,10 +9091,6 @@ function intradayPasteBarHtml(){
   </div>`;
 }
 function applyFilters(){
-  // The Radar composite pre-ranks every uploaded row; the filter bar only narrows
-  // what is displayed. Held positions were already suppressed at scoring time.
-  // Capital/Max-Alloc show their computed defaults in the placeholder; the calculation
-  // falls back to those defaults whenever the field is empty.
   updateFilterPlaceholders();
   const q=(document.getElementById('fSearch')?.value||'').trim().toLowerCase();
   // Risk filter now supports multiple levels (v554): the dropdown value is a comma-joined set
@@ -11618,11 +9117,6 @@ function applyFilters(){
   // (capital, max allocation, held map, portfolio target anchor) are constant for the pass.
   const allocCtx=getAllocationPassContext();
   let rows=ALL.filter(s=>{
-    // v1070 (owner): holding a stock NO LONGER blocks it. If it is still the best name in the
-    // cross-section, already owning some of it is not a reason to refuse it — the ranking answers
-    // "what is the strongest setup", not "what do I not own yet". `_held` is still tracked and
-    // shown as a badge so a repeat buy is never accidental, and it still drives the Open Positions
-    // panel, but it removes nothing. Every OTHER removal rule below is deliberately untouched.
     if(s._held)SUPPRESSED_HELD++;
     // Configured surveillance rules are a HARD filter (owner 2026-07-17): any stock
     // flagged under a rule in the Methodology table is weeded out of recommendations.
@@ -11632,35 +9126,7 @@ function applyFilters(){
       REMOVED_ROWS.push({s,reason:'trigger',detail:'automatic evidence trigger: '+(s.recommendationTriggerReasons||[]).join(', ')});
       return false;
     }
-    // v1075: entry timing is a LABEL, not a filter. It shipped in v559/v560 on assertion and was
-    // never evidenced. First forward test (2026-07-28 close -> 2026-07-29, EQ + turnover >= Rs 25L,
-    // n=1618, non-circular because the state is taken at the PRIOR close):
-    //   rangeUsed <25% (not blocked)   mean next +0.75%   12.8% next-day >= +2%
-    //   rangeUsed 75-100%  BLOCKED     mean next +0.75%   19.4%
-    //   rangeUsed 100-150% BLOCKED     mean next +1.40%   23.1%   <- the BEST bucket
-    //   rangeLocation top quarter (atPeak, the AND-gate)  +0.73%  18.1%  <- highest hit rate
-    // Extension predicted CONTINUATION, not reversal, so the gate was removing the best cohort —
-    // 9 of 9 in the top 10 on 2026-07-29. The `cooling` sub-term is separately a proven coin flip
-    // (v1069: price5m median +0.01%, non-positive 45% of the time) and drove 107 of 177 blocks.
-    // The state is still computed, still recorded per-pick for grading, and still shown as a badge
-    // and in the Removed panel — it simply no longer removes a stock from recommendation or export.
-    // CAVEAT recorded in RULES.md D4: this is ONE day pair on a green tape. If the accumulating
-    // per-pick evidence reverses it, restore the block here.
     if(s.entryReady===false)PEAK_TIMING_REMOVED++;
-    // ── v1087: THE STOCK MUST BE GOING UP RIGHT NOW ────────────────────────────────────────────
-    // Owner, 2026-07-31: the system must recommend stocks about to reach target in the NEXT ~15
-    // MINUTES — caught at LIFTOFF — not names that merely look good on yesterday's structure.
-    // Measured on the 11:09 file, this was THE defect: `setupPct = max(compositePct, ignitePct)`
-    // lets a stock rank #1 on setup ALONE, because ignitePct is 0 whenever the direction gate
-    // fails. Every one of the five recommendations was BELOW VWAP and four of five were BELOW
-    // their own open at issue — they were already falling when they were recommended, and they
-    // kept falling. Only 8 of the top 30 were above both VWAP and open.
-    //
-    // The test is the codebase's ONE definition of confirmed direction (v1069): above VWAP and
-    // above the day's open. v1069 measured the structural form FAVOURABLY (top-20 mean day 5.42%
-    // with it vs 4.89% with no gate), and deliberately dropped the 5m/15m tick terms as
-    // microstructure coin flips — that finding is preserved here, so this adds no new magnitude.
-    // Plus the owner's explicit rule: a stock red on the day is weak or confused, so it is out.
     const _vw=Number(s.vwap), _px=Number(s.price), _co=Number(s.changeOpen), _day=Number(s.day);
     const _aboveVwap=_vw>0&&_px>=_vw;
     const _aboveOpen=Number.isFinite(_co)&&_co>0;
@@ -11674,11 +9140,6 @@ function applyFilters(){
       REMOVED_ROWS.push({s,reason:'direction',detail:'not lifting off: '+why.join(', ')});
       return false;
     }
-    // Cheap display filters run FIRST so the allocation gate below only evaluates rows that would
-    // actually be shown — it is the most expensive test in this predicate.
-    // v1087: these are the USER'S OWN filter settings, but they were returning false SILENTLY, so
-    // a rank dropped by the Risk or Min-Turnover selector vanished from the table AND from the
-    // "why the ranks skip" panel. The owner hit exactly this: ranks #1 and #3 appeared in neither.
     if((s.turnover||0)<minTurn){REMOVED_ROWS.push({s,reason:'filter',detail:'below the Min Turnover filter ('+fmtINR(minTurn)+')'});return false;}
     if(riskSel.length&&!riskSel.includes(s.risk)){REMOVED_ROWS.push({s,reason:'filter',detail:s.risk+' risk — excluded by your Risk filter'});return false;}
     if(q&&![s.symbol,s.name,s.sector].join(' ').toLowerCase().includes(q)) return false;
@@ -11702,20 +9163,6 @@ function applyFilters(){
   applySort();
 
   CURRENT_TRADE_TIMING=getCurrentTradeTimingDecision();
-  // SELECTED is auto-derived from FILT every filter pass: basket-eligible rows minus the
-  // user's persisted exclusions, capped at Zerodha's 20-order limit.
-  // Trade-timing state is DIAGNOSTIC ONLY and never empties the selection (owner, v1068):
-  // what is recommended is decided by the row's own evidence, not by the wall clock.
-  // v1084: take the 20 by RADAR RANK, not by the table's current presentation order. `applySort()`
-  // above reorders FILT in place for display, so before this the basket silently changed whenever a
-  // column header was clicked — sorting by Day % handed the export the 20 biggest movers instead of
-  // the 20 best-scoring rows. Presentation must never decide what gets bought.
-  // v1087: build the basket from the FULL filtered set, not from FILT — `Rows` is a DISPLAY cap
-  // (CLAUDE.md: "selection still caps at 20"), but FILT is truncated by it, so setting Rows=5 was
-  // silently limiting the basket to 5 names. Display and selection are separate concerns.
-  //
-  // v1112 (owner) restores BOTH bars: score >= 90 AND Radar rank <= 10 — see meetsRecommendationBar.
-  // Rows that miss either remain VISIBLE and ranked; they are simply not bought.
   const selectionRows=[...rows].sort((a,b)=>(a.rank??Infinity)-(b.rank??Infinity));
   SELECTED=new Set(selectionRows
     .filter(s=>s.basketEligible!==false&&!EXPORT_EXCLUDED.has(s.symbol)
@@ -11726,12 +9173,6 @@ function applyFilters(){
   try{renderRankingsPanels();}catch(e){console.warn('Rankings panels render failed',e);}
   if(ALL.length) try{renderStats();}catch(e){}
 }
-// Latest Session and Open Positions sit under the recommendations table on Rankings and
-// answer the same search box, so a symbol is found wherever it currently lives (v530).
-// Both are rendered synchronously after their markup is in the DOM.
-// v1137: the depth-only recommendation list. Its own panel, its own ordering, sharing nothing with
-// the Radar score - which is the point: the owner asked for recommendations from the order book
-// ALONE, so blending it into the composite would answer a different question.
 function renderRankingsPanels(){
   const q=rankingsSearchQuery();
   const remEl=document.getElementById('rankRemoved');
@@ -11754,10 +9195,6 @@ function survRuleLabels(keys){
   const map=new Map((SURV_CUSTOM_RULES||[]).map(r=>[r.key,r.label]));
   return (keys||[]).map(k=>map.get(k)||k);
 }
-// "Removed from rankings" audit (v546, owner): every stock kept out of the recommendations
-// list, with WHY — held (already in your book, see Open Positions) or a configured
-// surveillance rule. Sorted by rank so it explains the gaps at the top of the list first;
-// answers the same Rankings search box; capped to the top 100 by rank for a bounded DOM.
 function buildRemovedPanel(query=''){
   const all=[...REMOVED_ROWS].sort((a,b)=>(a.s.rank??1e9)-(b.s.rank??1e9));
   if(!all.length) return '';
@@ -11869,6 +9306,34 @@ function renderPostClose(){
   const candidateRows=candidates.length?candidates.map(c=>`<tr><td>${escHtml(c.label)}</td><td>${c.wins}/${c.n}</td><td style="color:${c.precision>=95?'var(--green)':'var(--t2)'}">${c.precision}%</td><td style="color:var(--amber)">Collecting for trigger</td></tr>`).join('')
     :`<tr><td colspan="4" style="color:var(--t3)">No predeclared condition currently reaches 95% among resolved picks. That is a valid result; the system does not tune a condition after seeing the answers.</td></tr>`;
   const ruleRows=scorecard.map(r=>`<tr><td>${escHtml(r.label)}</td><td>${r.sessions}</td><td>${r.wins}</td><td>${r.losses}</td><td>${r.precision==null?'—':r.precision+'%'}</td><td style="font-weight:800;color:${['ARMED','ELIGIBLE'].includes(r.status)?'var(--green)':r.status==='RETIRED'?'var(--red)':'var(--t3)'}">${r.status==='ELIGIBLE'?'ARMED':r.status}</td></tr>`).join('');
+  const gToday=store.gainers?.[today]||null;
+  const gCard=(()=>{
+    const gs=store.gainerScorecard||getGainerScorecard(store.gainers||{});
+    if(!gToday) return `<div class="m-card" style="margin-bottom:14px"><h3>Top-gainer reverse audit</h3><p style="color:var(--t3);font-size:13px">Runs after 16:00 on the refreshed closing tape. It takes the day's ${GAINER_COHORT_N} biggest EQ gainers and grades every predeclared condition against them and against the rest of the tradeable market, so a stock the board MISSED becomes evidence rather than nothing.</p></div>`;
+    const f=gToday.fields||{};
+    const n2=(v,d=2)=>v==null||!Number.isFinite(v)?'—':Number(v).toFixed(d);
+    const rows=gToday.symbols.map(x=>`<tr><td style="font-weight:700">${escHtml(x.s)}</td><td style="color:var(--green)">+${n2(x.day)}%</td><td>${x.rank??'—'}</td><td>${n2(x.score,1)}</td><td>${n2(x.setupPct,3)}</td><td>${n2(x.feasibility,3)}</td><td>${n2(x.circuitFeasibility,3)}</td><td>${x.relvol==null?'—':n2(x.relvol)+'×'}</td><td style="color:${x.dirOk?'var(--green)':'var(--red)'}">${x.dirOk?'Y':'N'}</td></tr>`).join('');
+    const cond=(gToday.conditions||[]).slice().sort((a,b)=>b.lift-a.lift).map(c=>`<tr><td>${escHtml(c.label)}</td><td>${c.hit}/${c.of}</td><td>${c.hitPct}%</td><td>${c.basePct}%</td><td style="font-weight:800;color:${c.lift>=GAINER_LIFT_MIN?'var(--green)':c.lift<=-GAINER_LIFT_MIN?'var(--red)':'var(--t3)'}">${c.lift>=0?'+':''}${c.lift}pp</td></tr>`).join('');
+    const gRows=gs.map(r=>`<tr><td>${escHtml(r.label)}</td><td>${r.sessions}</td><td>${r.confirms}</td><td>${r.contradictions}</td><td>${r.meanLift==null?'—':(r.meanLift>=0?'+':'')+r.meanLift+'pp'}</td><td style="font-weight:800;color:${r.status==='ARMED'?'var(--green)':r.status==='RETIRED'?'var(--red)':'var(--t3)'}">${r.status}</td></tr>`).join('');
+    return `<div class="m-card" style="margin-bottom:14px">
+      <h3>Top-gainer reverse audit</h3>
+      <p style="color:var(--t2);font-size:14px">The day's ${gToday.n} biggest EQ gainers, graded against the same predeclared conditions as the picks — and against the ${gToday.controlN} tradeable rows that were not gainers. <b>${gToday.caught.onBoard}</b> of them were inside the board's top ${RECOMMEND_MAX_RANK}; <b>${gToday.caught.scored}</b> cleared the ${RECOMMEND_MIN_SCORE} score bar.</p>
+      <div class="kpi-grid" style="margin:12px 0">
+        <div class="kpi-card"><div class="kpi-lbl">Median rank — gainers</div><div class="kpi-val">${f.rank?.cohort??'—'}</div><div class="kpi-sub">rest of market ${f.rank?.control??'—'}</div></div>
+        <div class="kpi-card"><div class="kpi-lbl">Median score — gainers</div><div class="kpi-val">${n2(f.score?.cohort,1)}</div><div class="kpi-sub">rest ${n2(f.score?.control,1)}</div></div>
+        <div class="kpi-card"><div class="kpi-lbl">Median setup pct</div><div class="kpi-val">${n2(f.setupPct?.cohort,3)}</div><div class="kpi-sub">rest ${n2(f.setupPct?.control,3)}</div></div>
+        <div class="kpi-card"><div class="kpi-lbl">Median relative volume</div><div class="kpi-val">${n2(f.relvol?.cohort)}×</div><div class="kpi-sub">rest ${n2(f.relvol?.control)}×</div></div>
+        <div class="kpi-card"><div class="kpi-lbl">Median circuit feasibility</div><div class="kpi-val">${n2(f.circuitFeasibility?.cohort,3)}</div><div class="kpi-sub">rest ${n2(f.circuitFeasibility?.control,3)}</div></div>
+      </div>
+      <div class="scroll-x"><table class="method-table"><thead><tr><th>Symbol</th><th>Day</th><th>Rank</th><th>Score</th><th>Setup</th><th>Feas</th><th>Circuit feas</th><th>RelVol</th><th>Dir</th></tr></thead><tbody>${rows}</tbody></table></div>
+      <h3 style="margin-top:16px">Which conditions separated the winners today</h3>
+      <p style="color:var(--t3);font-size:13px">Lift is the gap in percentage points between how often the winners satisfied a condition and how often the rest of the market did. A condition present in the winners at the market's own base rate says nothing about winning.</p>
+      <div class="scroll-x"><table class="method-table"><thead><tr><th>Condition</th><th>Winners</th><th>Winner rate</th><th>Market rate</th><th>Lift</th></tr></thead><tbody>${cond}</tbody></table></div>
+      <h3 style="margin-top:16px">Gainer-side trigger tracker</h3>
+      <p style="color:var(--t3);font-size:13px">A condition arms after at least 3 sessions where its lift held at ${GAINER_LIFT_MIN}pp or better, across at least 2 sessions, with no more than 1 contradiction. One day never graduates a rule, and a condition that keeps failing retires on its own.</p>
+      <div class="scroll-x"><table class="method-table"><thead><tr><th>Condition</th><th>Sessions</th><th>Confirms</th><th>Contradictions</th><th>Mean lift</th><th>Status</th></tr></thead><tbody>${gRows}</tbody></table></div>
+    </div>`;
+  })();
   const rss=NSE_FUNDAMENTAL_META,events=Object.values(NSE_FUNDAMENTALS).reduce((n,a)=>n+(a?.length||0),0);
   el.innerHTML=`<div style="padding:18px 16px 40px">
     <div class="m-card" style="margin-bottom:14px"><div style="display:flex;justify-content:space-between;align-items:flex-start;gap:14px;flex-wrap:wrap">
@@ -11884,6 +9349,7 @@ function renderPostClose(){
     </div>
     <div class="m-card" style="margin-bottom:14px"><h3>Today’s ≥95% candidates</h3><p style="color:var(--t3);font-size:13px">Denominator is resolved non-control recommendations only. One session never graduates a rule.</p><div class="scroll-x"><table class="method-table"><thead><tr><th>Condition fixed before grading</th><th>Wins / n</th><th>Precision</th><th>Verdict</th></tr></thead><tbody>${candidateRows}</tbody></table></div></div>
     <div class="m-card" style="margin-bottom:14px"><h3>Automatic trigger tracker</h3><p style="color:var(--t3);font-size:13px">A condition arms itself after at least 3 wins across at least 2 audited sessions, no more than 1 contradiction, and at least 95% aggregate precision. ARMED gates or re-ranks recommendations automatically; RETIRED negative conditions become automatic vetoes after ten winless sessions.</p><div class="scroll-x"><table class="method-table"><thead><tr><th>Condition</th><th>Sessions</th><th>Confirms</th><th>Contradictions</th><th>Precision</th><th>Status</th></tr></thead><tbody>${ruleRows}</tbody></table></div></div>
+    ${gCard}
     <div class="m-card"><h3>Official NSE fundamental triggers</h3><p style="color:var(--t2);font-size:14px">${rss?.ok?`${events} symbol-linked filing events loaded from ${rss.feeds||0} official RSS indexes; ${rss.financials?.parsed||0} of ${rss.financials?.attempted||0} result XBRLs parsed; snapshot ${escHtml(rss.snapshot||'saved locally')}.`:`${rss?.why?`RSS unavailable: ${escHtml(rss.why)}.`:'The local helper will fetch and snapshot the official indexes on the next load.'}`} A fresh result becomes a positive trigger only when revenue, profit, operating profit and audit quality pass and price confirms above VWAP and the open. Its rank authority arms automatically after the same forward evidence bar; a persistently losing negative-result cohort becomes an automatic veto.</p></div>
   </div>`;
 }
@@ -11918,10 +9384,6 @@ function renderStatusBar(){
     const activeAlloc=Object.values(am2).filter(a=>!a.rejected&&a.qty>0);
     const stockCount=activeAlloc.length;
     html+=` <span style="color:var(--amber);font-size:13px;font-family:'DM Mono',monospace;font-weight:700;margin-left:8px" title="All-in estimated buy debit: limit-price notional plus CNC buy-side charges.">· ${stockCount} ${allocatedLabel(stockCount)} · ${fmtINR(actualDeployed)} of ${fmtINR(capital)} all-in</span>`;
-    // v1092: what the basket RISKS, alongside what it costs. Sum of each position's own
-    // stop loss, plus the spread — a tight spread is the visible proof that the score÷stop
-    // weight is equalising risk; a wide one means the caps (turnover, top-up, Max Alloc) are
-    // binding and overriding the weight, which is correct but worth seeing.
     const risks=activeAlloc.map(a=>a.riskRs).filter(v=>Number.isFinite(v)&&v>0).sort((a,b)=>a-b);
     if(risks.length){
       const totalRisk=risks.reduce((x,y)=>x+y,0);
@@ -11946,12 +9408,6 @@ function renderStatusBar(){
           totalNet+=a.expectedNet;
         }
       }
-      // v1125 (owner): the basket is measured against the rupees TODAY still needs, not against the
-      // harvest plan's own daily figure — and net of what is already booked. This is the question
-      // nothing in the app has ever asked: each row was judged against a percentage bar and nobody
-      // added the rupees back up, so a basket whose rails bind hard could have every row "pass" while
-      // earning a fraction of the day's requirement. Falls back to the harvest goal when no dated
-      // goal is configured, so the line never disappears.
       const _todayRs=getTodayRupeeNeed();
       const goalTargetRs=(_todayRs&&_todayRs.outstanding>0)?_todayRs.outstanding:harvestPlan.dailyGoal;
       const goalCoverage=goalTargetRs>0?Math.max(0,totalNet)/goalTargetRs:0;
@@ -12122,10 +9578,6 @@ async function getLocalUploadFolderFiles(){
   }
 }
 
-// ── Folder auto-refresh (owner-approved 2026-07-17, ported from the standalone Radar) ──
-// Watches the granted local upload folder every 3 seconds; only a change to the ALL NSE
-// file's lastModified triggers a refresh. Silent when no folder grant exists, permission
-// was revoked, the tab is hidden, or a load is already running.
 let _folderWatchTimer=null,_folderWatchBusy=false,_folderWatchAllNseLastModified=null;
 function getAllNseLastModified(files){
   const allNse=(files||[]).find(f=>isScannerCsvName(f?.name));
@@ -12202,11 +9654,6 @@ async function openUploadFolderPicker(){
       try{
         let uploadHandle=stored;
         try{uploadHandle=await stored.getDirectoryHandle('Scanner Uploads');}catch(e){}
-        // v1203: `let`, not `const` - the re-read two lines down reassigns it, and as a const that
-        // threw a TypeError straight into the catch below, which reported "Stored upload folder
-        // could not be reused" and fell through to the folder picker EVERY time. Harmless-looking
-        // while the 3-second watch was still re-ingesting on its own; with the watch removed this
-        // path is the only one left.
         let files=await filesFromDirectoryHandle(uploadHandle);
         if(files.length){
           try{ await refreshBrokerInputs(); }catch(e){}
@@ -12438,21 +9885,6 @@ function parseOrders(text){
     const sym=normSym(r[symCol]);
     const type=String(r[typeCol]||'').trim().toUpperCase();
     if(!sym||!(type==='BUY'||type==='SELL')) return null;
-    // ── v1207: THE UNFILLED HALF OF "7/64" IS NOT NOTHING ──────────────────────────────────
-    // Zerodha writes Qty. as filled/total. This took the left number and threw the rest away, so an
-    // order still WORKING in the market was recorded as a completed trade of its filled part and
-    // the resting remainder vanished. Measured on the owner's 2026-08-20 book: `SELL RISHABH 7/64
-    // OPEN @ 723` - 7 filled, and **57 shares resting on the offer** - while the Open Positions
-    // panel told him to EXIT ALL 57, with no idea they were already spoken for at a price its own
-    // projection (-4.08%, close Rs 651) said would never print.
-    //
-    // Unlike resting GTTs, which no input carries and which CLAUDE.md records as unknowable, this
-    // is sitting in a file the app already parses.
-    //
-    // `qty` KEEPS ITS MEANING - the filled quantity - because every consumer sums it into booked
-    // P&L and the held merge. The pending half rides alongside, and a row is now kept when it has
-    // EITHER. A cancelled order has no pending quantity by definition, so 0/47 CANCELLED still
-    // drops out exactly as before.
     const qtyRaw=String(r[qtyCol]||'').trim();
     const qtyParts=qtyRaw.split('/');
     const qty=num(qtyParts[0]);
@@ -12611,10 +10043,6 @@ async function hydrateSessionCSVsFromWorkspace(){
   return updateCount;
 }
 
-// ── Tradebook Parser & Adaptive Stats ──
-// Parses Zerodha tradebook CSV, reconstructs FIFO round-trip trades,
-// computes adaptive SL/TGT from actual trading history.
-// Open positions (unmatched buys) are excluded from all stats.
 function parseTradebook(text){
   const rows=parseCSV(text);
   if(!rows.length) return null;
@@ -12641,29 +10069,6 @@ function parseTradebook(text){
     bySymbol[sym].push({type,qty:Math.abs(qty),price,date,time});
   });
 
-  // Consolidate multiple fills of the same stock/day/type into one entry (qty-weighted avg price)
-  // to prevent fill fragmentation — but ONLY across CONSECUTIVE same-type fills.
-  //
-  // v1073 FIX. This previously keyed on `type|date`, which merged EVERY buy on a date into one lot
-  // stamped at the first fill's time. On a day that went buy -> sell -> buy, that handed the later
-  // buy's shares to the earlier sell and blended their prices, so FIFO matched a sell against stock
-  // not yet owned. Measured on RICOAUTO (12 buys / 15 sells, 998 qty each way, heavily round-tripped):
-  // the 2026-07-28 exit was reported at buy 119.75 / gross +Rs 6,788, when true per-fill FIFO gives
-  // 143.30 / +Rs 1,325 — a Rs 5,463 overstatement that inflated the whole Latest Session panel to
-  // +Rs 5,745 gross against an actual +Rs 281. Zerodha's own holdings average for RICOAUTO was
-  // 141.15, corroborating the per-fill figure over the consolidated one. Symbols that are not
-  // round-tripped intraday (GANESHBE, MONARCH, INDOFARM, UFLEX) were unaffected either way.
-  //
-  // Fills are also time-sorted BEFORE grouping: file order is not guaranteed chronological, and a
-  // mis-ordered pair would otherwise be merged into the wrong lot.
-  // v1176: FILLS ARE NO LONGER MERGED. v1073 collapsed consecutive same-type fills to stop lot
-  // fragmentation, and that averaging is precisely what the last mismatch against Zerodha was made
-  // of: on 10-Aug SPECTRUM bought 2@2491, 2@2510.50 and 5@2504.30, which merged to one lot of 9 at
-  // 2502.72, so six shares cost 15,016.32 instead of the 15,011.60 Zerodha reports for the first six
-  // INDIVIDUAL fills - Rs 4.85 of the Rs 4.87 that still separated the two ledgers. Zerodha matches
-  // per fill, so the app does too. Time-sorting is kept (file order is not guaranteed chronological)
-  // and the v1073 defect it fixed cannot return, because same-day pairing is now explicit rather
-  // than a side effect of how fills were grouped.
   Object.keys(bySymbol).forEach(sym=>{
     bySymbol[sym]=bySymbol[sym].slice()
       .sort((a,b)=>String(a.time||'').localeCompare(String(b.time||'')))
@@ -12679,36 +10084,6 @@ function parseTradebook(text){
   const openPositionLotsMap={}; // {symbol:[{qty,date}]} — remaining FIFO lots for age calculations
   Object.entries(bySymbol).forEach(([sym,trades])=>{
     trades.sort((a,b)=>a.time.localeCompare(b.time));
-    // ── v1175: A SELL THAT EXCEEDS THE INVENTORY OPENS A SHORT; IT IS NOT DISCARDED ───────────
-    // Owner, 2026-08-18: *"P&L is not right."* It was not, and the cause outlived the v1073 FIFO fix.
-    // The loop below stopped at `buyQueue.length>0`, so any sell quantity beyond the long inventory
-    // was DROPPED - and with it the obligation to consume a later buy. The covering buy then sat in
-    // the queue as PHANTOM INVENTORY and was handed to the next sale, and the one after that.
-    //
-    // ELECTCAST is the case. Running balance from the tradebook: 09-Feb sells take it to **-338**, an
-    // intraday short, covered by a 372-share buy at 13:10; 10-Feb closes to 0; 25-Mar closes to 0
-    // again; 17-Aug is a clean intraday round trip, 652 bought at 14:43 and 652 sold at 15:28. The
-    // balance is ZERO before 17-Aug, so that day can only match against its own buys - **+Rs 241**.
-    // Instead the discarded short left 372 phantom shares alive, of which 203 @ 74.25 (Feb) and 135
-    // @ 75.47 (Mar) survived to be matched against the August sells **six months later**, turning a
-    // +Rs 241 intraday trade into a reported **-Rs 881** and the session into -Rs 768.
-    //
-    // Signed FIFO: a buy covers open shorts before it queues as long, and a sell beyond the long
-    // inventory opens a short. In cash equity a short cannot be carried overnight, so both legs of
-    // one carry the same date and the trip books to the session it happened in.
-    // ── v1176: SAME-DAY BUYS PAIR WITH SAME-DAY SELLS FIRST, THEN FIFO AGAINST THE HOLDING ────
-    // Validated against the owner's own Zerodha P&L statement for 2026-07-19..2026-08-18 (128
-    // symbols): pure chronological FIFO agreed on 125 and disagreed on SGFIN, INDIAGLYCO and
-    // SPECTRUM, always reading LOW. SPECTRUM settles it - Zerodha's stated buy value of 20,144.40 is
-    // reproducible ONLY by matching the day's own buys to the day's own sells before touching the
-    // carried holding: on 10-Aug it bought 2@2491, 2@2510.50, 5@2504.30 and sold 6@2554, and taking
-    // the first six of THAT DAY'S buys gives 15,011.60 and +312.40, which with 06-Aug's +141.40
-    // against the carried 05-Aug lots totals exactly the +453.80 Zerodha reports. Chronological FIFO
-    // instead consumed the 05-Aug lot on the 10th and read +257.73.
-    //
-    // This is the v558 rule, which has existed on the ORDERS path since that release
-    // (computeLatestOrderBooked matches min(todayBuyQty, sellQty) before pricing the remainder at
-    // the settled holding cost) and was never applied to the tradebook.
     const buyQueue=[], shortQueue=[];
     const close=(b,t,qty,shortTrip)=>{
       const buyPrice=shortTrip?t.price:b.price, sellPrice=shortTrip?b.price:t.price;
@@ -12819,12 +10194,6 @@ function parseTradebook(text){
     const bc=calcZerodhaCharges(r.buyPrice,r.qty,false,intra,false);
     const sc=calcZerodhaCharges(r.sellPrice,r.qty,true,intra,skipDp);
     const charges=+(bc+sc).toFixed(0);
-    // v1175: the two legs are kept apart, because "what did this round trip cost me" and "what did
-    // I pay on THIS day" are different questions and the session card was answering the first while
-    // being read as the second. ANANTRAJ was bought across 5-14 Aug and sold on the 17th; its BUY
-    // charges were paid on those earlier days, so Zerodha's 17-Aug P&L counts only the sell side.
-    // Measured against the owner's own Zerodha P&L for 2026-08-17: charges 103.63 + DP 15.34, where
-    // the app was reporting 180 by charging both legs of every trip to the closing session.
     const buyCharges=+bc.toFixed(2), sellCharges=+sc.toFixed(2);
     const netPnl=+((r.sellPrice-r.buyPrice)*r.qty-charges).toFixed(0);
     const netPnlPct=r.capital>0?+(netPnl/r.capital*100).toFixed(2):r.pnlPct;
@@ -12858,11 +10227,6 @@ function parseTradebook(text){
   tripsData.filter(r=>r.sellDate===lastDate).forEach(r=>{
     if(!lastDayBySym[r.sym]) lastDayBySym[r.sym]={sym:r.sym,lots:0,buyVal:0,sellVal:0,qty:0,gross:0,charges:0};
     const e=lastDayBySym[r.sym];
-    // v1175: the SESSION pays only what was incurred IN the session. A trip's `charges` is the
-    // all-in cost of the whole round trip, which is the right number for expectancy and win/loss
-    // across history - and the wrong one here, because the buy leg of a delivery trip was paid on
-    // the day the shares were bought. ANANTRAJ was accumulated 5-14 Aug and sold on the 17th, so
-    // Zerodha's 17-Aug P&L counts its SELL side only. An intraday trip pays both legs that day.
     const sameDay=r.holdDays===0;
     const sessionCost=(Number(r.sellCharges)||0)+(sameDay?(Number(r.buyCharges)||0):0);
     e.lots++;e.buyVal+=r.buyPrice*r.qty;e.sellVal+=r.sellPrice*r.qty;e.qty+=r.qty;
@@ -12921,23 +10285,9 @@ function calcZerodhaChargesSplit(price, qty, isSell, isIntraday, skipDp){
 function planBasketExport(capital, selected){
   const baseContext=getTodayTradeTimingContext();
   const timing=getCurrentTradeTimingDecision(baseContext);
-  // Export is an OPERATIONAL action, never a judgement (owner, v1068). It must always emit the
-  // current recommendations — at 09:15, at midnight, on a holiday. Selection quality is decided
-  // upstream by each row's own evidence (entryReady, price band, basket eligibility); the wall
-  // clock has no authority here. Never reintroduce a clock gate on this path.
-  // v1075: entryReady is no longer an export veto (see applyFilters for the forward evidence).
-  // v1091/v1112: the export path re-verifies the recommendation bar itself rather than trusting its
-  // caller, the same way it already re-verifies price band, capital and turnover participation.
-  // `applyFilters` is the normal source of `selected`, but a stale selection restored from cache, a
-  // hand-built list, or a future caller must never slip a row past score >= 90 / rank <= 10 into a
-  // real order.
   let exportList=(selected||[]).filter(s=>!getPriceBandBlockReason(s)
     &&meetsRecommendationBar(s)&&passesIntradayValidation(s));
   let basketAlloc=computeAlloc(capital,exportList);
-  // v1115: a stock now costs TWO orders when its quantity can be split and its runner target sits
-  // above its base — so the 20-order limit must be counted in LEGS, not in names, or the export would
-  // plan 20 stocks and emit 40 orders. With the recommendation bar at rank <= 10 this rarely binds,
-  // but it must be right when it does. Trimming drops the LOWEST-ranked stock whole, never a leg.
   const legsFor=s=>{
     const qty=capital>0?(basketAlloc[s.symbol]?.qty||0):1;
     if(!(qty>0)) return 0;
@@ -13011,13 +10361,6 @@ async function exportBasket(){
     if(qty===0) return;
     const policy=am?.exitPolicy||getRowExitPolicy(s,am?.buyPrice||s.price);
     if(!policy.viable){rejectedCount++;return;}
-    // v1177 (owner): *"Let's do away with split orders also. Just one per stock."* v1115 split each
-    // buy into a base leg at the row's target and a runner further out, on a measured 5,221-rupee
-    // edge over a single GTT across 217 closed cohorts. It is dropped by owner decision: two legs
-    // per name doubled the double-sell surface, halved every position into two GTTs to manage, and
-    // consumed two of Zerodha's twenty basket slots per stock. ONE order, at the row's own target.
-    // splitQty/getRunnerTargetPct survive for the Open Positions panel, which still reports what a
-    // runner leg WOULD be for positions opened while v1115-v1176 were live.
     pushBuyOrder(s,qty,policy.targetPct,'base');
   });
   orders.forEach(o=>{
@@ -13077,27 +10420,6 @@ async function exportBasket(){
   showToast(`<strong>Saved ${orders.length} CNC MARKET BUY orders</strong> for ${new Set(orders.map(o=>o._meta.sym)).size} stocks in Scanner Uploads as Zerodha_Basket_Buy JSON${splitNote}${targetNote}${planNote}${floorNote}${rejNote}${limitNote}${marketNote}`);
 }
 
-// ── v1115 THE SPLIT MOVES ONTO THE BUY BASKET (owner) ────────────────────────────────────────────
-// The exit is now armed at ENTRY, as two buy orders each carrying its own GTT target, so there is no
-// second basket to run and nothing to re-arm by hand. Sell Targets is gone.
-//
-// WHAT THE SPLIT IS WORTH HERE, measured on the owner's 217 closed sell cohorts (probe-gttladder):
-//   one GTT at 4%                     Rs 32,715      <- what a single target per stock captured
-//   50% at 4% + 50% at 6%, both GTT   Rs 37,936      <- this release, +Rs 5,221 on the same base
-//   one GTT at 6% (whole position)    Rs 43,158      <- better here, but fills on only 25% of days
-//   50% at 4% + 50% TRAILED 1%        Rs 60,347      <- best, and NOT expressible as a GTT
-//
-// THE HONEST COST IS STATED RATHER THAN BURIED: a GTT is a STATIC trigger. v1113's runner exited at
-// the peak minus a learned gap, which adapts; a second fixed target cannot. Moving the split onto the
-// buy basket therefore trades roughly Rs 22k of measured upside on that sample for a workflow with no
-// daily re-arming, no second export, and no double-sell hazard. That was the owner's call, made with
-// these numbers in front of him. v1116 then removed the trailing stop outright: at a stop placed
-// 1.5x ATR below cost, a Zerodha trail (which ratchets in fixed rupee steps from where the stop
-// sits) has further to travel to reach breakeven than the stock moves in a normal day, so the
-// target always resolves the position first. It was never executable.
-//
-// The even split is unchanged from v1113 and structural rather than tuned: half and half is the
-// no-information point, the odd share goes to the BASE leg, and a 1-share position is never split.
 function splitQty(qty){
   const q=Math.floor(Number(qty)||0);
   if(q<=0) return {base:0,runner:0};
@@ -13105,24 +10427,11 @@ function splitQty(qty){
   const base=Math.ceil(q/2);
   return {base,runner:q-base};
 }
-// The runner's target. Anchored on the stock's OWN capacity (sqrt(ATR x range), the unit on the row
-// since v1060) rather than on a typed percentage: the sweep's optimum sat at ~6% against a median
-// capacity of 3.87%, and it stayed within a broad plateau from 5% to 8%, so the multiple is measured
-// and not fitted. Floored at the base so a runner can never sit below the leg it is riding behind.
 function getRunnerTargetPct(policy){
   const base=Number(policy&&policy.targetPct);
   if(!(base>0)) return null;
-  // v1119: the runner is the UPPER QUARTILE of the measured available move — the level a quarter of
-  // the owner's positions actually reached — rather than 1.5x the stock's ATR capacity. This is the
-  // leg meant to catch the same-day shoot-up, so it should be set by how far those days actually
-  // went. Falls back to the ATR multiple only when too few exits have been recorded.
   const reach=getReachableTargets();
   const cap=Number(policy&&policy.capacityPct);
-  // v1206 DELIBERATELY LEAVES THIS UNSCALED. The base leg is scaled into the stock's own capacity
-  // because it is the target the app arms today. The runner is not armed by anything since v1177 -
-  // it survives only to describe a SECOND GTT that a position opened under v1115-v1176 may still
-  // have resting in Zerodha. Rescaling it would restate history, which is the opposite of what that
-  // tooltip is for.
   const want=reach.runnerPct>0?reach.runnerPct:(cap>0?cap*1.5:base);
   return Math.max(base,Math.floor(want*20)/20);
 }
@@ -13383,16 +10692,6 @@ function applySavedFiltersForMode(mode){
       // observed on every session rather than only on the days they reach the top 20.
       const controlRows=getScoreBandControlSample(ALL,new Set(eligibleCandidates.map(s=>s.symbol)));
       const controlSet=new Set(controlRows.map(s=>s.symbol));
-      // v1073: carry the entry-gate state and the TRUE Radar rank into the outcome record.
-      // `rank:i+1` alone was the position within this cohort, not the stock's rank in the full
-      // cross-section — so every historical rank-bucket analysis was really bucketing cohort index.
-      // Both are kept: `rank` stays the cohort slot for continuity with existing records, and
-      // `radarRank` is the real one. entryReady/entryTiming let the store separate picks the
-      // "wait for pullback" gate approved from the ones it withheld.
-      // v1085: every pick carries its OWN two barriers and the bar as it stood at issue. The
-      // rocket label is per-stock (target and stop are both stock-specific), so a single
-      // issue-level threshold cannot express it; and without high/low AT ISSUE the issue day's
-      // bar cannot be split into pre- and post-recommendation action. See resolveRocketDay.
       const allocCtx=getAllocationPassContext();
       const recommendations=eligibleCandidates.concat(controlRows)
         .map((s,i)=>{
@@ -13407,20 +10706,7 @@ function applySavedFiltersForMode(mode){
             // v1128: a control row is graded exactly like a pick but is NOT one — it is excluded
             // from every recommendation metric so the app never reports buying what it did not.
             control:controlSet.has(s.symbol)||undefined,
-            // v1127: the score's COMPONENTS, not just its total. `score = 100 x (setupPct x
-            // direction)^4` and `setupPct = max(compositePct, ignitePct)` — a MAX of two different
-            // rankers. Measured on 125 resolved picks, the ordering is non-monotonic and its
-            // within-day concordance is 43% (50% = no information), which is the signature of one
-            // of those two rankers being inverted through the mid-range. Which one was
-            // UNANSWERABLE from 34 issue dates of history, because only the total was ever stored.
-            // v1130: the market-cycle stage, recorded so the "Second leg" label can finally be
-            // GRADED. It drives no score, no selection, no sizing — and it has never been stored,
-            // so its value has never been measurable in either direction.
             stage:Number.isFinite(+s.stage)?+s.stage:null,
-            // The multi-day term. Recorded WHETHER OR NOT it currently counts for anything,
-            // because its weight is measured from these very records - a field that is not
-            // stored can never earn its way in, which is how upStreak sat unmeasurable while
-            // being the strongest separator in the data.
             upStreak:Number.isFinite(+s.upStreak)?+s.upStreak:null,
             upStreakPct:Number.isFinite(+s.upStreakPct)?+s.upStreakPct:null,
             compositePct:Number.isFinite(+s.compositePct)?+s.compositePct:null,
@@ -13434,14 +10720,6 @@ function applySavedFiltersForMode(mode){
             targetPct,stopPct,
             high1dAtIssue:Number(s.high1d)>0?Number(s.high1d):null,
             low1dAtIssue:Number(s.low1d)>0?Number(s.low1d):null,
-            // v1170: WHAT TIME OF DAY WAS THIS ISSUED? Owner, 2026-08-18: "shouldn't you consider
-            // the time of the day also in your recommendation pipeline?" The clock has had no
-            // authority since v1068 by his own decision, and that stands - but v1134 concluded that
-            // comparing cohorts IS comparing times of day, i.e. the effect is large enough to swamp
-            // stock-level signal, and in 38 cohorts NOT ONE PICK EVER CARRIED ITS ISSUE TIME. So the
-            // question has been declared confounded and left unmeasurable at the same time.
-            // Recorded as MINUTES FROM THE OPEN, which is what a session cares about, plus the raw
-            // clock. It drives nothing; it makes the question answerable.
             issueMinute:(()=>{const c=istClock();return Number.isFinite(c&&c.mins)?c.mins-DAY_START_MIN:null;})(),
             issueClock:(()=>{const c=istClock();if(!c||!Number.isFinite(c.mins))return null;
               const h=Math.floor(c.mins/60),m=c.mins%60;
@@ -13473,17 +10751,6 @@ function applySavedFiltersForMode(mode){
   }
 }
 
-// ── v1137: PRE-OPEN ORDER BOOK ───────────────────────────────────────────────────────────────
-// Owner, 2026-08-17: rank stocks on order-book imbalance - more buy quantity than sell means the
-// price is about to go up - and do it WITHOUT Level 2, a static IP or a paid API. The source is
-// NSE's own pre-open endpoint (`api/market-data-pre-open?key=ALL`), captured by dev/fetch-preopen.js
-// into `Market Depth.csv`: ~2,300 stocks in ONE request, each carrying the AGGREGATE book
-// (totalBuyQuantity / totalSellQuantity), not merely the top five levels.
-//
-// PROVENANCE, shown on screen rather than buried: this is the pre-open book stamped ~09:07 IST and
-// it FREEZES for the session. It is a once-per-day signal available BEFORE the first tick, which is
-// the right shape for a BTST/at-open entry and the only aggregate order-book quantity NSE publishes
-// publicly. It is never presented as live intraday depth.
 function parseMarketDepth(text){
   const rows=parseCSV(text);
   if(!rows||!rows.length) return 0;
@@ -13512,37 +10779,6 @@ function parseMarketDepth(text){
   return n;
 }
 
-// The depth-only ranking. Deliberately NOT blended into the Radar score (owner: "recommendations
-// based on this only") - it is its own list, and nothing here touches radarAnalyze.
-// The depth percentile used by the SCORE is computed over every stock with a two-sided book, not
-// over buildDepthRanking's pool: that pool is filtered for EXECUTABILITY (turnover, price, sellers)
-// which is a property of whether you can buy, not of what the book is saying. A live pasted book
-// supersedes the pre-open one here exactly as it does in the panel.
-// ── v1140: THE BOOK, ROLLED FORWARD THROUGH THE SESSION ──────────────────────────────────────
-// Owner, 2026-08-17: *"now that you have the depth data... calculating live data based on it
-// shouldn't be so hard (without me pasting anything even). We have regular updation of ALL NSE csv
-// during the day. In it we have Gap, Volume, Volume change, RoC, direction indicators... to see
-// where it is sitting right now based on where it started."*
-//
-// THE MODEL, in one unit - SHARES. The pre-open book is the starting INVENTORY: `B` resting buy
-// quantity against `S` resting sell. Everything traded since the open is FLOW, and its sign is read
-// from where price sits inside the day's range:
-//
-//     mult      = ((P - L) - (H - P)) / (H - L)      in [-1,+1], the Chaikin position multiplier
-//     signedVol = Volume_1d x mult                    buy-initiated minus sell-initiated, in shares
-//     liveImb   = ((B - S) + signedVol) / ((B + S) + Volume_1d)
-//
-// A stock closing on its high has consumed the offers (mult -> +1); one on its low has consumed the
-// bids (mult -> -1); one mid-range nets out. **NO NEW CONSTANT** - the multiplier is a ratio of the
-// day's own range, and every input (`Volume, 1 day`, `High, 1 day`, `Low, 1 day`, `Price`) is
-// already in the export, so this needs nothing added to the scanner file and refreshes on every
-// upload through the day.
-//
-// WHAT IT IS AND IS NOT: it is an ESTIMATE of order-flow state, not a reconstruction of the live
-// book. Resting inventory and executed flow are different quantities and this deliberately adds
-// them in share units; a pasted book (v1137) is a real reading and therefore always wins. At the
-// open, before anything trades, `Volume_1d` is ~0 and the estimate reduces to the pre-open book
-// exactly - which is the property that makes it safe to roll forward.
 function deriveLiveBookImbalance(book,row){
   if(!book) return null;
   const B=+book.buyQty||0, S=+book.sellQty||0, tot0=B+S;
@@ -13552,29 +10788,11 @@ function deriveLiveBookImbalance(book,row){
   if(!(V>0)||!(H>L)||!(P>0)) return {imb:(B-S)/tot0,source:'pre-open',signedVol:0,bookWeight:1};
   const mult=((P-L)-(H-P))/(H-L);
   const signed=V*Math.max(-1,Math.min(1,mult));
-  // THE PRE-OPEN BOOK DECAYS AS THE SESSION CONSUMES IT (owner's 15-minute bars, 2026-08-17).
-  // v1140 carried the resting book at FULL weight all day, and AGIIL showed why that is wrong: the
-  // day's #1 book (921,602 buy against 17,505 sell, 52.6:1) opened at its 305.00 IEP, printed its
-  // high in the FIRST 15-minute bar, then bled to ~300 on -48% net signed flow - and the app still
-  // read it +0.468, because the resting quantity dwarfed the 490,493 actually traded.
-  //
-  // A pre-open book is INVENTORY THAT GETS MATCHED AT THE OPENING AUCTION. Whatever survives is
-  // either filled, cancelled, or was never genuine demand at the equilibrium price. It cannot keep
-  // voting at full strength hours later. The weight is the share of that book the session has not
-  // yet turned over - `1 - V/(B+S)`, reaching zero once the day trades the book's own size. NO NEW
-  // CONSTANT: the scale is the book's own quantity, and at the open (V=0) the weight is exactly 1,
-  // so the pre-open ranking is unchanged at the moment it is actually actionable.
   const w=Math.max(0,1-(V/tot0));
   const num=(B-S)*w+signed, den=tot0*w+V;
   if(!(den>0)) return {imb:0,source:'consumed',signedVol:signed,bookWeight:0};
   return {imb:num/den,source:'rolled',signedVol:signed,mult,bookWeight:w};
 }
-// ── THE AGGREGATE BOOK IS A MARKET READ (v1138), KEPT THROUGH v1143's PANEL REMOVAL ──────────
-// The panel that displayed this was removed with the second table; the RECORDING was not, and must
-// not be - it is the only forward record of whether the whole-market book calls the day. On
-// 2026-08-17 NSE's own PRICE breadth read green (1,197 advances to 795) while the median book sat
-// at -0.382, and the market went red (NIFTY 50 -0.45%, 177/323). It cannot be backtested - the
-// endpoint serves only the current session - so it accumulates forward or not at all.
 const DEPTH_MARKET_STORE='rs_depth_market_v1';
 function buildDepthMarketRead(){
   const meta=NSE_DEPTH_META;
@@ -13610,17 +10828,6 @@ function recordDepthMarketRead(){
     FS.set(DEPTH_MARKET_STORE,store);
   }catch(e){console.warn('recordDepthMarketRead failed',e);}
 }
-// v1166: A BOOK FROM AN EARLIER SESSION IS NOT EVIDENCE ABOUT TODAY.
-// The same defect v1162 fixed for the 5-minute read, found on the depth path a day later and worse:
-// the intraday read only touches stocks that were checked, while this one is blended into EVERY row
-// through depthBlendPct. `Market Depth.csv` is written by dev/fetch-preopen.js, which nothing invokes
-// automatically - so the file sits at whatever day it was last captured, and on 2026-08-18 the board
-// was being scored with the 17-Aug pre-open book.
-//
-// The file states its own session (BookDate) and parseMarketDepth has always recorded it; nothing
-// ever compared it to the session clock. Now a non-current book returns NO map, which makes every
-// row fall to the neutral median exactly as a bookless row does (the v1139 rule: absence takes the
-// middle of the distribution, never a free pass). The SESSION BOUNDARY is the veto, as in v1162.
 function depthBookIsCurrent(){
   const d=NSE_DEPTH_META&&String(NSE_DEPTH_META.date||'').slice(0,10);
   if(!/^\d{4}-\d{2}-\d{2}$/.test(d||'')) return null;   // no stamp: unknown, fail open as before
@@ -13755,25 +10962,6 @@ async function processFiles(files,sourceLabel,opts={}){
     return false;
   }
 
-  // ── v1114: THE PORTFOLIO IS PARSED BEFORE THE SCANNER IS SCORED ────────────────────────────────
-  // The scanner file used to be scored FIRST, and the portfolio files a moment later. But the
-  // session target anchor is built FROM the portfolio: the goal-led rate needs capital (holdings +
-  // positions) and the harvest rate needs the tradebook's own charge history. So the scorer resolved
-  // `getEffectiveTgtPct()` against a half-loaded app and got a fallback — measured 2026-08-10 at
-  // 2.60% while the finished value on screen was 1.80%.
-  //
-  // This was TOLERATED for four releases because the anchor only reached a display-only cohort
-  // (v1085 recorded it as the "ORDERING TRAP" and stored `RADAR.rocketTargetPct` so the number was at
-  // least auditable). v1113 changed that: the stretch penalty reads the same anchor and FEEDS THE
-  // SCORE, so a placeholder was reordering the board — 196 rows marked down instead of 38. It is also
-  // the cause of the suite flakiness recorded under v1093, where identical consecutive runs landed
-  // either side of a 0.05 rounding step and a dozen target-dependent assertions flipped with it.
-  //
-  // Parsing the portfolio first is the fix CLAUDE.md has named since v1093. Nothing in these parsers
-  // reads `ALL`, so the move is safe in that direction, and it makes the held map correct AT SCORING
-  // TIME rather than patched afterwards in applyFilters.
-  // Holdings / Positions / Orders / Tradebook — processed regardless of TV CSV
-  // All files are loaded before rendering so Latest Session always has fresh data
   if(holdFile){
     setLoadMsg('Processing holdings...');
     const holdText=await holdFile.text();
@@ -13818,11 +11006,6 @@ async function processFiles(files,sourceLabel,opts={}){
     updateFileLoadStatus('TRADEBOOK.csv','loaded');
   }
 
-  // Every input the target anchor is built from has now been parsed. Values memoised earlier in this
-  // page load were computed against the PREVIOUS portfolio state, and the harvest plan's memo is a
-  // 1.5s TTL that would happily serve one — so the anchor's caches are dropped here, deliberately
-  // AFTER the portfolio and BEFORE the scorer reads it. Without this the reorder would fix the
-  // sequence and still hand the scorer a stale number.
   invalidateTargetAnchorCaches();
   const scannerJobs=[];
   if(tvFile)scannerJobs.push({mode:'stock',file:tvFile});
@@ -13852,25 +11035,6 @@ async function processFiles(files,sourceLabel,opts={}){
   renderTradingDashboardNow();
   if(!silent) setLoading(false);
   saveBrainInBackground('Brain saved after file processing');
-  // ── v1171: FETCHING IS A STEP IN THE PIPELINE, NOT A BUTTON ─────────────────────────────────
-  // Owner, 2026-08-18: *"Fetched on ALL NSE refresh automatically, not just when I click the fetch
-  // button... In fact this should be a step in the recommendation pipeline."*
-  //
-  // Every ALL NSE ingest spends whatever is left of the rate budget on the names carrying a live
-  // decision - open positions and rows clearing the recommendation bar - in the value order v1203
-  // derives. The folder watch re-ingests only when ALL NSE's own timestamp changes (v519), so this
-  // fires a handful of times a day rather than on the 3-second poll, and the daily budget still
-  // caps it before a single request is made (owner: *"no ~18 minutes once hitting zerodha is not
-  // advisable. Do it gradually"*). The old mover tier is gone - see intradayFetchJobs.
-  //
-  // Fire-and-forget: it must never block the render or fail the load.
-  //
-  // BUT NOT ON THE FIRST INGEST OF A PAGE LOAD (owner, 2026-08-18: *"Don't fetch from zerodha on
-  // first page load. On first load, it's the same ALL NSE that was there when the page was closed
-  // last"*). Startup hydration re-ingests the file already on disk, so an automatic fetch there
-  // spends the daily budget re-reading a session the inventory usually already covers - and it
-  // fires before the owner has even looked at the board. Only a SUBSEQUENT ingest means the file
-  // genuinely changed. The manual button is unaffected and still works on the first load.
   if(FIRST_INGEST_DONE){
     try{
       if(KITE_API&&fetchBudgetLeft()>0)
