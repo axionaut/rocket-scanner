@@ -1,5 +1,5 @@
-const BUILD_TS='2026-08-20 10:20 IST'; // release build time (IST)
-const APP_VERSION=1204; // v1204: TradingView auto-fetch scaffolding removed; folder watch restored.
+const BUILD_TS='2026-08-20 10:55 IST'; // release build time (IST)
+const APP_VERSION=1205; // v1205: Pace and EoD blank independently; an unrecovered decline is shown, not hidden.
 // v1093: a baseline reward:risk MEASURED on the cross-section (last completed bhav session) instead of learned from the owner's own fills - reported on every row, deliberately not enforced. Includes v1092: position size split by Radar score / stop distance, so equally-scored names carry equal RUPEE risk, plus an opt-in Risk /trade cap.
 // v556: parse the NSE Market Activity Report (MA<date>.csv) — official Nifty %, advances/declines and sector index moves shown as market CONTEXT in the status bar (EOD data, display only, never fed into per-row scoring); MA added to the ℹ️ file manifest.
 // v555 market-cycle stage awareness (stateless, self-calibrating): per-row stage label (1 accumulation · 2 breakout · 3 event · 4 profit-booking · 5 re-accumulation · 6 second-leg); a quiet-accumulation signal (conjunction-of-percentiles) injected via the rocket-diagnostic weighting; sell-the-news decay off Recent earnings date (horizon = review days). v1065 makes the market-breadth gauge an entry-eligibility input while still never changing ranking.
@@ -8156,8 +8156,11 @@ function buildOpenPositionsPanel(query=''){
       dayPct:scannerRow?.day??scannerRow?.priceChange??null,risk:scannerRow?.risk||'',
       // Carried as numbers so the columns SORT; the cells re-read the live trajectory. v1200 fixes
       // the old split meaning where this sort key was avgMovePct while the cell displayed pullback.
-      pace:(()=>{const r=getIntradayRead(pos.symbol);return r&&Number.isFinite(r.confirmedPacePct)?r.confirmedPacePct:null;})(),
-      predEod:(()=>{const r=getIntradayRead(pos.symbol);return r&&Number.isFinite(r.predPct)?r.predPct:null;})(),
+      // v1205: `r.current` on both - these are the SORT keys for the Pace/EoD cell, and a read from
+      // a previous session must not order today's rows by yesterday's numbers any more than it may
+      // print them. Null sorts last, which is the honest place for "no current read".
+      pace:(()=>{const r=getIntradayRead(pos.symbol);return r&&r.current&&Number.isFinite(r.confirmedPacePct)?r.confirmedPacePct:null;})(),
+      predEod:(()=>{const r=getIntradayRead(pos.symbol);return r&&r.current&&Number.isFinite(r.predPct)?r.predPct:null;})(),
       scannerRow
     });
   });
@@ -8242,26 +8245,57 @@ function buildOpenPositionsPanel(query=''){
     // suggested Zerodha trigger GAP: the deepest seller retreat buyers proved survivable by making
     // a later high. EoD keeps its separate volume-weighted per-bar speed model.
     {key:'pace',label:'Pace / EoD',align:'right',
+      // ── v1205: THE TWO HALVES BLANK INDEPENDENTLY, AND A DECLINE IS NOT SILENCE ─────────────
+      // Measured 2026-08-20: 7 of 11 open positions printed a bare "—" here on 15-16 bars each.
+      // Two separate faults, and they were hiding each other.
+      //
+      // (1) ONE EARLY RETURN BLANKED BOTH HALVES. `predPct` is unspent pressure capped by remaining
+      // travel; it has nothing to do with whether buyers made a new high. A null Pace was throwing
+      // away a live EoD projection on exactly the rows that were falling - SPECTRUM was -2.5% with
+      // a perfectly good number that never reached the screen.
+      //
+      // (2) THE CELL NEVER CHECKED `current`, and `confirmedPacePct` is scoped to the LAST session
+      // in the file - so a file that stopped yesterday would print yesterday under a column that
+      // says today. That was latent only because fault (1) suppressed it: measured on a stale
+      // fixture, pace was null (blanking everything) while predPct was a finite -0.16. Fixing (1)
+      // alone would therefore have SHIPPED (2). Both are fixed here, together.
+      //
+      // (3) An unrecovered decline is now SHOWN, dimmed and marked with a down arrow, instead of
+      // living in a tooltip on the rows that most need it. v1200 is untouched: this may never widen
+      // Pace, never becomes the sort key, and is never offered as a trail distance - a trail exists
+      // to ride a pullback buyers RECOVERED from, and this is one they have not.
       fmt:(v,row)=>{
+        const dim=(txt,title)=>`<span style="color:var(--t3)"${title?` title="${escHtml(title)}"`:''}>${txt}</span>`;
         const rd=getIntradayRead(row.sym);
-        if(!rd||!Number.isFinite(rd.confirmedPacePct)){
-          const open=rd&&Number.isFinite(rd.currentPullbackPct)
-            ?` Current unresolved pullback: ${rd.currentPullbackPct.toFixed(2)}%.`:'';
-          return `<span style="color:var(--t3)" title="No seller pullback has yet been followed by a new high today.${open}">—</span>`;
+        if(!rd) return dim('—','No 5-minute read for this stock yet.');
+        if(!rd.current) return dim('—',`Last read was ${rd.on}, not this session — nothing here can describe today.`);
+
+        const ltp=Number(row.ltp)||0;
+        let pace;
+        if(Number.isFinite(rd.confirmedPacePct)){
+          const rs=ltp>0?ltp*rd.confirmedPacePct/100:null;
+          const open=Number.isFinite(rd.currentPullbackPct)
+            ?` Current unresolved pullback: ${rd.currentPullbackPct.toFixed(2)}%; it does not widen Pace unless buyers make another high.`:'';
+          pace=`<span title="${escHtml('Deepest seller pullback today that buyers subsequently recovered by establishing a new high. '
+            +rd.confirmedPullbackCount+' recovered episode'+(rd.confirmedPullbackCount===1?'':'s')
+            +(rs?'; suggested Zerodha trigger gap at this LTP is ₹'+rs.toFixed(2):'')+'.'+open)}">${rd.confirmedPacePct.toFixed(2)}%${
+            rs?`<span style="color:var(--t3);font-size:11px"> ₹${rs.toFixed(2)}</span>`:''}</span>`;
+        } else if(Number.isFinite(rd.currentPullbackPct)){
+          // Down and NOT back. No trail distance is quoted, deliberately.
+          pace=dim(`↓${rd.currentPullbackPct.toFixed(2)}%`,
+            `Down ${rd.currentPullbackPct.toFixed(2)}% from today's high and not recovered — buyers have made no new high since. `
+            +`This is NOT Pace and is not a trail distance: a trailing stop exists to ride a pullback that was recovered, and this one has not been.`);
+        } else {
+          pace=dim('—','No seller pullback has yet been followed by a new high today.');
         }
-        const ltp=Number(row.ltp)||0, rs=ltp>0?ltp*rd.confirmedPacePct/100:null;
-        const open=Number.isFinite(rd.currentPullbackPct)
-          ?` Current unresolved pullback: ${rd.currentPullbackPct.toFixed(2)}%; it does not widen Pace unless buyers make another high.`:'';
-        const pace=`<span title="${escHtml('Deepest seller pullback today that buyers subsequently recovered by establishing a new high. '
-          +rd.confirmedPullbackCount+' recovered episode'+(rd.confirmedPullbackCount===1?'':'s')
-          +(rs?'; suggested Zerodha trigger gap at this LTP is ₹'+rs.toFixed(2):'')+'.'+open)}">${rd.confirmedPacePct.toFixed(2)}%${
-          rs?`<span style="color:var(--t3);font-size:11px"> ₹${rs.toFixed(2)}</span>`:''}</span>`;
-        if(!Number.isFinite(rd.predClose)) return pace+'<span style="color:var(--t3)"> / —</span>';
-        const t=rd.traj, up=rd.predPct>=0;
-        const eod=`<span style="color:${up?'var(--green)':'var(--red)'};font-weight:700" title="${escHtml(
-          'Unspent pressure '+(t.pressurePct>=0?'+':'')+t.pressurePct.toFixed(2)+'%, capped by what this stock can '
-          +'travel in the '+t.barsLeft+' bars left. Arithmetic, not a forecast.')}">${
-          (rd.predPct>=0?'+':'')+rd.predPct.toFixed(2)}%</span>`;
+
+        const t=rd.traj;
+        const eod=(Number.isFinite(rd.predClose)&&t)
+          ?`<span style="color:${rd.predPct>=0?'var(--green)':'var(--red)'};font-weight:700" title="${escHtml(
+              'Unspent pressure '+(t.pressurePct>=0?'+':'')+t.pressurePct.toFixed(2)+'%, capped by what this stock can '
+              +'travel in the '+t.barsLeft+' bars left. Arithmetic, not a forecast.')}">${
+              (rd.predPct>=0?'+':'')+rd.predPct.toFixed(2)}%</span>`
+          :dim('—','No projection: this session carries no measurable unspent pressure yet.');
         return pace+'<span style="color:var(--t3)"> / </span>'+eod;
       },clrFn:()=>'var(--t2)'},
     {key:'risk',label:'Risk',align:'left',fmt:v=>v?radarRiskPill(v):'—'}
