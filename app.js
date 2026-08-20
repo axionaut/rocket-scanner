@@ -1,5 +1,5 @@
-const BUILD_TS='2026-08-19 17:29 IST'; // release build time (IST)
-const APP_VERSION=1202; // v1202: passive findings become automatic evidence-gated model triggers.
+const BUILD_TS='2026-08-20 10:07 IST'; // release build time (IST)
+const APP_VERSION=1203; // v1203: fetch queue ordered by decision value; ALL NSE auto-refresh removed.
 // v1093: a baseline reward:risk MEASURED on the cross-section (last completed bhav session) instead of learned from the owner's own fills - reported on every row, deliberately not enforced. Includes v1092: position size split by Radar score / stop distance, so equally-scored names carry equal RUPEE risk, plus an opt-in Risk /trade cap.
 // v556: parse the NSE Market Activity Report (MA<date>.csv) — official Nifty %, advances/declines and sector index moves shown as market CONTEXT in the status bar (EOD data, display only, never fed into per-row scoring); MA added to the ℹ️ file manifest.
 // v555 market-cycle stage awareness (stateless, self-calibrating): per-row stage label (1 accumulation · 2 breakout · 3 event · 4 profit-booking · 5 re-accumulation · 6 second-leg); a quiet-accumulation signal (conjunction-of-percentiles) injected via the rocket-diagnostic weighting; sell-the-news decay off Recent earnings date (horizon = review days). v1065 makes the market-breadth gauge an entry-eligibility input while still never changing ranking.
@@ -9923,7 +9923,23 @@ function getPositionAction(sym,pos){
     if(stop>0&&ltp<=stop)return {act:'EXIT ALL',qty,tone:'red',why:`stop breached at ${fmtINR(stop)}`};
   }
   const rd=getIntradayRead(sym);
-  const tt=rd&&rd.current?rd.todayTraj:null;
+  // ── v1203: TODAY'S TRAJECTORY IS THE PREFERRED READ, NOT THE ONLY ONE ───────────────────────
+  // v1168 was right to measure the current session separately - a complete prior session outweighs
+  // a young one on the volume clock, so a merged read can say ACCUMULATING while today's own tape
+  // has turned. But it left this panel reading `todayTraj` ALONE, and buildIntradayTrajectory
+  // refuses to build one under three bars. So between 09:15 and 09:25 every single position - each
+  // holding a current, contiguous, multi-hundred-bar file - produced no verdict at all. Measured
+  // 2026-08-20 at 09:20: four positions freshly fetched, 227 bars each, all four NEEDS DATA.
+  //
+  // The v1167 fix, one level down. A wanted veto turned into a blackout because the guard counted
+  // bars TODAY when what it needed was bars AT ALL. v1168's intent survives intact: whenever today
+  // can speak it still speaks first and can still overrule the multi-day read. This only decides
+  // what happens when today CANNOT yet be computed, and there the honest answer is the flow that
+  // does exist, labelled with the span it came from - not silence.
+  const tt=rd&&rd.current?(rd.todayTraj||rd.traj):null;
+  // Named on every verdict built from the fallback, so a multi-day read can never be mistaken for
+  // a statement about this morning.
+  const span=(rd&&tt&&!rd.todayTraj&&rd.sessions>0)?(' across '+rd.sessions+' sessions'):'';
 
   // NO READ IS NOT A HOLD. Saying "hold" on no evidence is the thing this panel was doing wrong in
   // a different costume. v1171 fetches held names automatically, so this clears itself.
@@ -9941,13 +9957,13 @@ function getPositionAction(sym,pos){
   // BOTH readings against it - supply is arriving AND nothing is holding it up.
   if(sold&&thin) return {act:'EXIT ALL',qty,tone:'red',
     why:'sold into all session (net '+(100*tt.cvdPct).toFixed(0)+'%) and 1% down costs only '
-      +shares(tt.dnCost)+' shares against '+shares(tt.upCost)+' up'};
+      +shares(tt.dnCost)+' shares against '+shares(tt.upCost)+' up'+span};
   // ONE against it - reduce, do not abandon.
   if(sold||thin){
     const half=Math.max(1,Math.floor(qty/2));
     return {act:'EXIT '+half,qty:half,tone:'red',
-      why:sold?('net selling this session ('+(100*tt.cvdPct).toFixed(0)+'% of everything traded), but demand still costs more to move')
-              :('nothing holding it up - 1% down costs '+shares(tt.dnCost)+' shares against '+shares(tt.upCost)+' up, though flow is still net positive')};
+      why:(sold?('net selling this session ('+(100*tt.cvdPct).toFixed(0)+'% of everything traded), but demand still costs more to move')
+              :('nothing holding it up - 1% down costs '+shares(tt.dnCost)+' shares against '+shares(tt.upCost)+' up, though flow is still net positive'))+span};
   }
   // BOTH readings for it, and the tape is still pushing - size the add from the cushion so a top-up
   // can never turn a position in profit into a losing one (v1070).
@@ -9972,12 +9988,12 @@ function getPositionAction(sym,pos){
       const add=(Number.isFinite(cap)&&cap>0&&buyP>0)?Math.floor(cap/buyP):0;
       if(add>0) return {act:'ADD '+add,qty:add,tone:'green',
         why:'bought all session (net +'+(100*tt.cvdPct).toFixed(0)+'%), 1% up costs '+shares(tt.upCost)
-          +' shares against '+shares(tt.dnCost)+' down, and '+tt.pressurePct.toFixed(2)+'% of buying is still unspent'};
+          +' shares against '+shares(tt.dnCost)+' down, and '+tt.pressurePct.toFixed(2)+'% of buying is still unspent'+span};
     }catch(e){}
   }
   return {act:'HOLD',qty:0,tone:'amber',
     why:'demand still costs more to move than supply (net +'+(100*tt.cvdPct).toFixed(0)+'%'
-      +(Number.isFinite(tt.costRatio)?', ratio '+tt.costRatio.toFixed(2):'')+')'};
+      +(Number.isFinite(tt.costRatio)?', ratio '+tt.costRatio.toFixed(2):'')+')'+span};
 }
 function getHeldTopUpNotionalCap(s,buyP,heldMap=null){
   const held=(heldMap||getHeldPositionMap())[s.symbol];
@@ -10664,13 +10680,20 @@ function forgetIntradayFor(sym){
 // in the helper is untouched. The budget resets on the SESSION date, so an overnight run cannot
 // borrow from tomorrow.
 const FETCH_MAX_PER_DAY=400;
-// v1178: AND A BOUND ON A SINGLE PRESS, which v1177 removed by accident. The old 12-per-15-minutes
-// was doing two jobs at once - a daily ceiling AND the thing that made coverage build GRADUALLY -
-// and replacing it with a daily budget alone let one press queue every job it could find: the owner
-// saw "fetching 135 stocks", about 95 seconds of continuous requests, which is precisely what he
-// asked to avoid ("do it gradually like we're doing now"). The two limits are now separate and
-// explicit: this is how many go out at once, FETCH_MAX_PER_DAY is how many go out in a day.
-const FETCH_MAX_PER_RUN=12;
+// ── v1203: THE PER-PRESS CONSTANT IS GONE, BECAUSE IT WAS NEVER DERIVED ─────────────────────
+// v1178 added FETCH_MAX_PER_RUN=12 to stop one press queuing 135 stocks. The BOUND was right; the
+// NUMBER was inherited. 12 was born as FETCH_MAX_PER_WINDOW - 12 requests per 15 minutes, a
+// politeness rate against a broker whose documented limit is 3 PER SECOND. When v1178 split that
+// constant in two, FETCH_MAX_PER_DAY took over the politeness job and 12 was carried across into a
+// different job - press duration - without being re-derived for it. It then quietly acquired a
+// THIRD job, `FETCH_MAX_PER_RUN*3`, as the depth of the candidate walk, so tuning how long a press
+// took also moved how far down the ranking the app looked.
+//
+// A press is now bounded by the DECISION SET: every open position, plus every row clearing the
+// recommendation bar. That bar is already capped at RECOMMEND_MAX_RANK*2 by timingDepth(), so the
+// ceiling is an owner risk preference that already exists plus however many positions are actually
+// held - a quantity that MOVES when the book moves, which is the whole point. Nothing here is
+// chosen: the 135-stock press cannot recur because 135 names never had a live decision attached.
 let FETCH_LOG=[];
 let FETCH_LOG_DATE=null;
 function fetchBudgetLeft(){
@@ -10722,59 +10745,128 @@ function fetchBudgetLeft(){
 // plain module-level let - a reload starts false again, which is exactly the intent.
 let FIRST_INGEST_DONE=false;
 const FETCH_TOP_RANK=5;      // owner: the live candidate set, kept fresh
+// ── v1203: WHAT A READ WOULD CHANGE, IN RUPEES - NOT WHICH LIST THE NAME CAME FROM ──────────
+// The v1163 queue ranked by CATEGORY: candidates first, open positions appended after, the whole
+// thing truncated to a fixed press size. That ordering starves the second tier by construction.
+// Measured 2026-08-20: 10 open positions, 8 slots spent on the board walk, 4 left for positions -
+// and because every board row goes stale again at each 5-minute boundary and reclaims its place at
+// the front, positions only ever receive leftovers. The owner's objection to the obvious patch is
+// the correct one: a reserved floor or a fixed split is the same constant wearing a disguise, and
+// it breaks the moment the book holds 3 positions instead of 30.
+//
+// So nothing is reserved and nothing is tiered. A read is worth what it can change, both sides of
+// the question express that in RUPEES, and the composition of a press is an OUTPUT.
+//
+// THREE TERMS, each in a unit that already exists here:
+//   gap      how far behind the read is, in 5-minute bars. Replaces a BOOLEAN stale() under which
+//            "five minutes behind" and "last seen yesterday" were the same thing and the tie was
+//            broken by list order. A name with no current read at all sorts strictly worse than
+//            any partial one - it is the state that produces NEEDS DATA.
+//   stake    rupees. A position is qty x LTP; a candidate is rowAchievableNotional - what it would
+//            actually be allocated, not what its rank implies.
+//   urgency  distance to the nearer decision edge, measured in the row's OWN stop width. Both
+//            edges come from getRowExitPolicy and the distance is read off the LIVE LTP, so it
+//            needs no candles - a position that drifted onto its stop overnight is visibly urgent
+//            BEFORE it is ever fetched, which is what stops this from being circular.
+//
+// A candidate's distance to ITS boundary is passesIntradayValidation, which is exactly what the
+// fetch would answer, so it is unknowable here and takes the MEDIAN of the positions' distances -
+// the standing absence rule. That single choice is what balances the queue: candidates sit
+// mid-pack, a position at its stop outranks all of them, a comfortable position ranks below them,
+// and the mix re-derives itself every press as the book changes. With no positions held the median
+// is undefined, every candidate takes the same value, and the term correctly falls out.
+//
+// Blended geometrically over MIDRANK percentiles, so no term's scale can dominate and a zero gap
+// kills the entry outright - a name already current to the last bar is worth nothing to re-fetch
+// however large or however urgent it is. (`limit` is accepted and ignored: the queue is derived
+// from the decision set, and a caller may not widen or narrow it.)
 function intradayFetchJobs(limit){
-  const tok=r=>({s:normSym(r.symbol||r.sym||''),t:KITE_TOKEN[normSym(r.symbol||r.sym||'')]||0});
-  const lastBarBoundary=()=>{const c=istClock();if(!c||!Number.isFinite(c.mins))return null;
-    return Math.floor((c.mins-5)/5)*5;};
-  const stale=sym=>{
-    const rd=getIntradayRead(sym);
-    if(!rd||!rd.current) return true;
-    const b=lastBarBoundary(); if(b===null) return false;
-    const t=new Date(rd.asOf);
-    return (t.getHours()*60+t.getMinutes())<b;
+  const budget=fetchBudgetLeft();
+  if(!(budget>0)) return {ok:false,why:'daily fetch budget spent'};
+
+  const posMap=(()=>{try{
+    return (typeof getCombinedOpenPositionMap==='function')?getCombinedOpenPositionMap():{};
+  }catch(e){ return {}; }})();
+  const rowOf=s=>(Array.isArray(ALL)?ALL:[]).find(r=>normSym(r.symbol)===normSym(s))||null;
+
+  // MEMBERSHIP: a name belongs here only if a read could change a decision. Open positions carry a
+  // live EXIT/ADD/HOLD for as long as they are held; rows clearing the recommendation bar carry a
+  // buy decision that expires at the close. There is no walk depth and no top-N - meetsRecommendationBar
+  // is already bounded by timingDepth(), so the ceiling is that existing bar plus the book itself.
+  const members=[],seen=new Set();
+  const add=(sym,held,pos,row)=>{
+    const s=normSym(sym||''); if(!s||seen.has(s)) return;
+    const t=KITE_TOKEN[s]||0; if(!(t>0)) return;
+    seen.add(s); members.push({s,t,held:!!held,_pos:pos||null,_row:row||null});
   };
-  const seen=new Set();
-  const take=arr=>arr.map(tok).filter(j=>j.t>0&&!seen.has(j.s)&&stale(j.s)&&(seen.add(j.s),true));
+  Object.keys(posMap).forEach(k=>{ if(posMap[k]&&posMap[k].qty>0) add(k,true,posMap[k],rowOf(k)); });
+  (Array.isArray(ALL)?ALL:[]).filter(r=>meetsRecommendationBar(r))
+    .slice().sort((a,b)=>(a.rank??Infinity)-(b.rank??Infinity))
+    .forEach(r=>add(r.symbol,false,null,r));
+  if(!members.length){
+    const untokened=(Array.isArray(ALL)?ALL:[]).filter(r=>meetsRecommendationBar(r))
+      .filter(r=>!KITE_TOKEN[normSym(r.symbol)]).map(r=>r.symbol).slice(0,5);
+    return {ok:false,why:untokened.length?('no Kite instrument token for '+untokened.join(', '))
+      :'nothing with a live decision to check'};
+  }
 
-  const board=(Array.isArray(FILT)&&FILT.length?FILT:ALL)
-    .filter(r=>Number.isFinite(r.rank)).slice().sort((a,b)=>a.rank-b.rank);
+  const boundary=(()=>{const c=istClock();
+    return (c&&Number.isFinite(c.mins))?Math.floor((c.mins-5)/5)*5:null;})();
+  const gapOf=m=>{
+    const rd=getIntradayRead(m.s);
+    if(!rd||!rd.current) return null;          // no current read: the blocked state
+    if(boundary===null) return 0;
+    const t=new Date(rd.asOf);
+    return Math.max(0,Math.round((boundary-(t.getHours()*60+t.getMinutes()))/5));
+  };
+  const allocCtx=(()=>{try{return getAllocationPassContext();}catch(e){return null;}})();
+  const stakeOf=m=>{
+    if(m.held){
+      const q=Number(m._pos&&m._pos.qty)||0;
+      const p=Number(m._pos&&m._pos.ltp)||Number(m._pos&&m._pos.avg)||0;
+      return (q>0&&p>0)?q*p:null;
+    }
+    if(!m._row) return null;
+    try{ const v=rowAchievableNotional(m._row,allocCtx); return v>0?v:null; }catch(e){ return null; }
+  };
+  // Stop widths from the decision edge. SMALLER is more urgent, so the percentile is inverted below.
+  const edgeOf=m=>{
+    if(!m.held||!m._row||!m._pos) return null;
+    const avg=Number(m._pos.avg),ltp=Number(m._pos.ltp);
+    if(!(avg>0)||!(ltp>0)) return null;
+    let pol=null; try{ pol=getRowExitPolicy(m._row,avg); }catch(e){ return null; }
+    const tgt=Number(pol&&pol.targetPct),stp=Number(pol&&pol.stopPct);
+    if(!(tgt>0)||!(stp>0)) return null;
+    const width=avg*stp/100; if(!(width>0)) return null;
+    return Math.min(Math.abs(ltp-avg*(1+tgt/100)),Math.abs(ltp-avg*(1-stp/100)))/width;
+  };
 
-  // Has anything actually cleared the bar on a CURRENT read? If yes, the search is over and we only
-  // keep the live candidates fresh. If no, keep walking down the ranking.
-  // POSITION on the displayed board, not global rank. Ranks 1-6 are routinely removed by the
-  // filters - surveillance, no headroom, direction - so on the live board the first recommendable
-  // row was rank 7 and a `rank<=5` test queued nothing at all. "The top five" means the first five
-  // rows the owner can actually act on.
-  // Qualification belongs to the scored universe, not the current display slice. A Rows cap,
-  // presentation filter, or re-render timing must not prevent a genuine rank/score candidate from
-  // receiving the validation that is now required to arm its checkbox.
-  const threshold=(Array.isArray(ALL)?ALL:[]).filter(r=>meetsRecommendationBar(r))
-    .slice().sort((a,b)=>a.rank-b.rank);
-  const haveBuy=threshold.some(r=>passesIntradayValidation(r));
-  // Walk only as deep as this press could possibly spend: building 166 job objects and checking
-  // freshness on every one, to send 12, is wasted work on the render path.
-  const reach=haveBuy?FETCH_TOP_RANK:Math.max(FETCH_TOP_RANK,FETCH_MAX_PER_RUN*3);
-  // Threshold-qualified rows are always first. Previously a confirmed row stopped the walk at a
-  // positional top-five slice, so another genuine rank/score candidate could remain unchecked yet
-  // look recommended (TALBROAUTO). Validation eligibility must come from the same bar as selection.
-  const jobs=take(threshold.concat(board.slice(0,reach)));
+  const sortFinite=a=>a.filter(v=>Number.isFinite(v)).sort((x,y)=>x-y);
+  const median=a=>{const f=sortFinite(a); return f.length?radarQuant(f,0.5):null;};
 
-  // OPEN POSITIONS (v1163): a stock leaves the board the day it is bought, so without this its file
-  // stops growing exactly when the position starts mattering. Never a buy verdict - observation.
-  let held=[];
-  try{
-    const m=(typeof getCombinedOpenPositionMap==='function')?getCombinedOpenPositionMap():{};
-    held=take(Object.keys(m).filter(k=>m[k]&&m[k].qty>0).map(k=>({symbol:k})));
-  }catch(e){ held=[]; }
-  held.forEach(j=>{j.held=true;});
+  const rawGap=members.map(gapOf),gapFin=sortFinite(rawGap);
+  // Strictly worse than any partial read, derived from the queue rather than chosen.
+  const blockedGap=gapFin.length?gapFin[gapFin.length-1]+1:1;
+  const gap=rawGap.map(v=>Number.isFinite(v)?v:blockedGap);
+  const rawStake=members.map(stakeOf),stakeMed=median(rawStake);
+  const stake=rawStake.map(v=>Number.isFinite(v)?v:(Number.isFinite(stakeMed)?stakeMed:1));
+  const rawEdge=members.map(edgeOf),edgeMed=median(rawEdge);
+  const edge=rawEdge.map(v=>Number.isFinite(v)?v:(Number.isFinite(edgeMed)?edgeMed:1));
 
-  const all=jobs.concat(held);
-  if(all.length) return {ok:true,jobs:all,symbols:all.map(j=>j.s),
-                         recs:jobs.length,held:held.length,movers:0,
-                         searching:!haveBuy,depth:haveBuy?FETCH_TOP_RANK:null};
-  const missing=board.slice(0,FETCH_TOP_RANK).filter(r=>!KITE_TOKEN[normSym(r.symbol)]).map(r=>r.symbol);
-  return {ok:false,why:missing.length?('no Kite instrument token for '+missing.join(', '))
-    :(haveBuy?'the top of the board is validated and something clears the bar':'nothing left to check')};
+  const pctOf=arr=>{const s=arr.slice().sort((a,b)=>a-b); return arr.map(v=>radarPct(s,v));};
+  const gP=pctOf(gap),sP=pctOf(stake),eP=pctOf(edge);
+  const queue=members.map((m,i)=>({s:m.s,t:m.t,held:m.held,gapBars:gap[i],
+      blocked:!Number.isFinite(rawGap[i]),
+      priority:Math.cbrt(gP[i]*sP[i]*(1-eP[i]))}))
+    .filter(m=>m.gapBars>0)                                   // already current to the last bar
+    .sort((a,b)=>b.priority-a.priority)
+    .slice(0,budget);
+
+  if(!queue.length) return {ok:false,
+    why:'every open position and live candidate is current to the last 5-minute bar'};
+  return {ok:true,jobs:queue,symbols:queue.map(j=>j.s),
+          recs:queue.filter(j=>!j.held).length,held:queue.filter(j=>j.held).length,
+          blocked:queue.filter(j=>j.blocked).length,movers:0};
 }
 const INTRADAY_FETCH_DAYS=3;   // sessions of 5-minute candles to ask for
 
@@ -11100,7 +11192,9 @@ async function fetchCandlesInApp(limit,opts){
   if(!r.ok){ say('Nothing to fetch: '+r.why,5000,true); return; }
   const budget=fetchBudgetLeft();
   if(!budget){ say('Daily fetch budget spent — '+FETCH_MAX_PER_DAY+' requests. It resets next session.',5000,true); return; }
-  const jobs=r.jobs.slice(0,Math.min(budget,FETCH_MAX_PER_RUN));
+  // v1203: the queue already bounded itself by the day budget and by the decision set. A second cap
+  // here is what silently dropped open positions off the end of a press.
+  const jobs=r.jobs;
   jobs.forEach(()=>FETCH_LOG.push(Date.now()));
   // v1177 (owner): *"When it's fetching there is no indicator that it's fetching. Add a loader.
   // Because I just bought two stocks while it was trying to fetch."* A fetch takes ~0.7s per stock
@@ -11756,68 +11850,12 @@ async function getLocalUploadFolderFiles(){
   }
 }
 
-// ── Folder auto-refresh (owner-approved 2026-07-17, ported from the standalone Radar) ──
-// Watches the granted local upload folder every 3 seconds; only a change to the ALL NSE
-// file's lastModified triggers a refresh. Silent when no folder grant exists, permission
-// was revoked, the tab is hidden, or a load is already running.
-let _folderWatchTimer=null,_folderWatchBusy=false,_folderWatchAllNseLastModified=null;
-function getAllNseLastModified(files){
-  const allNse=(files||[]).find(f=>isScannerCsvName(f?.name));
-  return allNse?.lastModified ?? null;
-}
-// Small corner pill instead of the full loader/toast: auto-refresh must never interrupt.
-function showAutoRefreshIndicator(state){
-  let el=document.getElementById('autoRefreshPill');
-  if(!el){
-    el=document.createElement('div');
-    el.id='autoRefreshPill';
-    el.style.cssText="position:fixed;bottom:16px;left:16px;z-index:998;padding:6px 12px;border-radius:20px;background:var(--bg-raised);border:1px solid var(--border-hi);color:var(--t2);font-size:13px;font-family:'DM Mono',monospace;box-shadow:0 4px 16px rgba(0,0,0,.35);display:none;align-items:center;gap:6px";
-    document.body.appendChild(el);
-  }
-  clearTimeout(el._hideTimer);
-  if(state==='refreshing'){
-    el.style.color='var(--t2)';
-    el.innerHTML='<span style="display:inline-block;animation:sp 1s linear infinite">⟳</span> auto-refresh';
-    el.style.display='flex';
-  } else if(state==='done'){
-    el.style.color='var(--green)';
-    el.innerHTML='✓ updated '+fileStatusClock();
-    el.style.display='flex';
-    el._hideTimer=setTimeout(()=>{el.style.display='none';el.style.color='var(--t2)';},4000);
-  } else {
-    el.style.display='none';
-  }
-}
-async function folderWatchTick(){
-  if(_folderWatchBusy||document.hidden) return;
-  try{
-    const local=await getLocalUploadFolderFiles();
-    if(!local?.files?.length) return;
-    const lastModified=getAllNseLastModified(local.files);
-    if(lastModified===null) return;
-    if(_folderWatchAllNseLastModified===null){_folderWatchAllNseLastModified=lastModified;return;} // baseline, no re-run
-    if(lastModified===_folderWatchAllNseLastModified)return; // unchanged since last ingest
-    _folderWatchAllNseLastModified=lastModified;
-    _folderWatchBusy=true;
-    showAutoRefreshIndicator('refreshing');
-    // A NEW ALL NSE MEANS A NEW DECISION, so the book it is scored against must be current too.
-    // This runs BEFORE the ingest and writes into the same folder, so processFiles picks the fresh
-    // files up in the same pass. It cannot block: a failure just leaves the existing files in place.
-    try{ await refreshBrokerInputs(); }catch(e){}
-    const fresh=await getLocalUploadFolderFiles();
-    const use=(fresh&&fresh.files&&fresh.files.length)?fresh.files:local.files;
-    const ok=await processFiles(use,local.sourceLabel+' · auto-refresh',{silent:true});
-    showAutoRefreshIndicator(ok?'done':'hide');
-  }catch(e){
-    console.warn('Folder watch tick failed',e);
-    showAutoRefreshIndicator('hide');
-  }
-  finally{_folderWatchBusy=false;}
-}
-function startFolderWatch(){
-  if(_folderWatchTimer) return;
-  _folderWatchTimer=setInterval(folderWatchTick,3000);
-}
+// ── v1203: THE ALL NSE FOLDER AUTO-REFRESH IS REMOVED (owner) ──────────────────────────────
+// Owner, 2026-08-20: *"The auto fetching of ALL NSE ... We don't need it. I have decided that
+// I'll keep it manual."* The 3-second folder poll, its ALL NSE lastModified baseline, the
+// corner auto-refresh pill and the silent re-ingest behind them are gone. `Load Files` is the
+// only ingestion path, which is also what the standing no-polling rule always said for every
+// source except this one owner-approved exception - the exception is now withdrawn.
 
 async function hydrateSessionCSVsFromPreferredInputs(reason='startup'){
   const local=await getLocalUploadFolderFiles();
@@ -11836,7 +11874,12 @@ async function openUploadFolderPicker(){
       try{
         let uploadHandle=stored;
         try{uploadHandle=await stored.getDirectoryHandle('Scanner Uploads');}catch(e){}
-        const files=await filesFromDirectoryHandle(uploadHandle);
+        // v1203: `let`, not `const` - the re-read two lines down reassigns it, and as a const that
+        // threw a TypeError straight into the catch below, which reported "Stored upload folder
+        // could not be reused" and fell through to the folder picker EVERY time. Harmless-looking
+        // while the 3-second watch was still re-ingesting on its own; with the watch removed this
+        // path is the only one left.
+        let files=await filesFromDirectoryHandle(uploadHandle);
         if(files.length){
           try{ await refreshBrokerInputs(); }catch(e){}
           { const _f=await getLocalUploadFolderFiles(); if(_f&&_f.files&&_f.files.length) files=_f.files; }
@@ -11856,7 +11899,7 @@ async function openUploadFolderPicker(){
         localBrainHandle=picked;
       }catch(e){}
       await FS.setLocalDirectoryHandle(localBrainHandle);
-      const files=await filesFromDirectoryHandle(uploadHandle);
+      let files=await filesFromDirectoryHandle(uploadHandle);   // v1203: reassigned below
       if(!files.length){
         showToast('No files found in the selected folder.',4000,true);
         return false;
@@ -13264,9 +13307,6 @@ async function processFiles(files,sourceLabel,opts={}){
   // Surveillance rules must exist before REG1 parsing; the unauthorized-boot path can
   // reach here without initApp having seeded them.
   if(!SURV_CUSTOM_RULES.length){try{loadSurvRules();}catch(e){}}
-  // Any deliberate or automatic load resets the folder-watch baseline so the watcher
-  // does not immediately re-process the files it (or the user) just loaded.
-  try{_folderWatchAllNseLastModified=getAllNseLastModified([...files]);}catch(e){}
   if(!silent) setLoading(true,String(FILE_LOAD_STATUS.source?`Processing selected files... · ${FILE_LOAD_STATUS.source}`:'Processing selected files...'));
   // Upload CHANGED canonical input files to Drive in the background. Rankings are built
   // from the selected local files immediately, because the market does not wait for Drive.
@@ -13461,12 +13501,13 @@ async function processFiles(files,sourceLabel,opts={}){
   // Owner, 2026-08-18: *"Fetched on ALL NSE refresh automatically, not just when I click the fetch
   // button... In fact this should be a step in the recommendation pipeline."*
   //
-  // Every ALL NSE ingest spends whatever is left of the rate budget on the names that need history:
-  // recommendations first, then open positions, then TODAY'S TOP PERFORMERS descending. The folder
-  // watch re-ingests only when the file's own timestamp changes (v519), so this fires a handful of
-  // times a day rather than on the 3-second poll, and the daily budget still caps it before a
-  // single request is made - coverage builds GRADUALLY across the session instead of in one burst
-  // (owner: *"no ~18 minutes once hitting zerodha is not advisable. Do it gradually"*).
+  // Every ALL NSE ingest spends whatever is left of the rate budget on the names carrying a live
+  // decision - open positions and rows clearing the recommendation bar - in the value order v1203
+  // derives. v1203 also removed the 3-second folder watch (owner), so an ingest is now always a
+  // deliberate Load Files press: this fires a handful of times a day by construction rather than
+  // because a poll interval throttles it, and the daily budget still caps it before a single
+  // request is made (owner: *"no ~18 minutes once hitting zerodha is not advisable. Do it
+  // gradually"*). The old mover tier is gone - see intradayFetchJobs.
   //
   // Fire-and-forget: it must never block the render or fail the load.
   //
@@ -13594,8 +13635,6 @@ async function initApp(){
   try{applyFilters();}catch(e){console.error('INIT step7 applyFilters failed:',e);}
   setLoading(false);
   schedulePerformanceRender();
-  // Radar-style auto-refresh: watch the granted local folder for new/changed files.
-  startFolderWatch();
 }
 initApp();
 
