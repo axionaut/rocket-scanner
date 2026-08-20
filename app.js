@@ -1,5 +1,5 @@
-const BUILD_TS='2026-08-20 10:55 IST'; // release build time (IST)
-const APP_VERSION=1205; // v1205: Pace and EoD blank independently; an unrecovered decline is shown, not hidden.
+const BUILD_TS='2026-08-20 13:47 IST'; // release build time (IST)
+const APP_VERSION=1206; // v1206: one window per row - EoD is measured on the session it projects; the rank is a standing, not the alphabet; the exit target scales with the stock again.
 // v1093: a baseline reward:risk MEASURED on the cross-section (last completed bhav session) instead of learned from the owner's own fills - reported on every row, deliberately not enforced. Includes v1092: position size split by Radar score / stop distance, so equally-scored names carry equal RUPEE risk, plus an opt-in Risk /trade cap.
 // v556: parse the NSE Market Activity Report (MA<date>.csv) — official Nifty %, advances/declines and sector index moves shown as market CONTEXT in the status bar (EOD data, display only, never fed into per-row scoring); MA added to the ℹ️ file manifest.
 // v555 market-cycle stage awareness (stateless, self-calibrating): per-row stage label (1 accumulation · 2 breakout · 3 event · 4 profit-booking · 5 re-accumulation · 6 second-leg); a quiet-accumulation signal (conjunction-of-percentiles) injected via the rocket-diagnostic weighting; sell-the-news decay off Recent earnings date (horizon = review days). v1065 makes the market-breadth gauge an entry-eligibility input while still never changing ranking.
@@ -2745,9 +2745,30 @@ function applyLearnedTriggerRanking(rows){
     r.score=+(100*Math.pow(r.depthBlendPct*(r.directionConfirmed?1:0),4)).toFixed(1);
     r.rocketScore=r.score;
   });
-  rows.sort((a,b)=>b.score-a.score||a.symbol.localeCompare(b.symbol));
+  rows.sort((a,b)=>b.score-a.score||radarRankTieBreak(a,b));
   rows.forEach((r,i)=>{r.rank=i+1;});
   return matched;
+}
+// ── v1206: A RANK IS A STANDING, SO IT MAY NOT BE THE ALPHABET ──────────────────────────────
+// `score = 100 x (blend x (directionConfirmed?1:0))^4` is deliberate and measured (v1069/v1109): an
+// unconfirmed row scores exactly 0 and sinks, and `setupPct`/`depthBlendPct` are kept on the row
+// precisely so its standing stays auditable. What was NOT intended is what happened next - three
+// separate sorts broke the resulting mass tie with `a.symbol.localeCompare(b.symbol)`, so every one
+// of the ~2,800 rows at score 0 was ordered ALPHABETICALLY and that position was then rendered as
+// its rank. Observed on the owner's own Open Positions panel, 2026-08-20: APCOTEXIND #910,
+// CASTROLIND #1147, IFGLEXPOR #1647, OAL #2154, RISHABH #2390, SOUTHBANK #2619, SPECIALITY #2625,
+// SPECTRUM #2626, URBANCO #2848 - strictly alphabetical, under a column headed Score/#, and the
+// panel's default sort is that rank.
+//
+// The retained standing breaks the tie instead. Nothing about which rows are RECOMMENDED changes:
+// every confirmed row scores above zero and therefore still sorts above every unconfirmed one, so
+// the top of the board and the rank-based depth gates are untouched.
+function radarRankTieBreak(a,b){
+  const st=r=>{
+    const d=Number(r&&r.depthBlendPct); if(Number.isFinite(d)) return d;
+    const p=Number(r&&r.setupPct); return Number.isFinite(p)?p:-1;
+  };
+  return (st(b)-st(a))||String(a.symbol||'').localeCompare(String(b.symbol||''));
 }
 function applyLearnedRecommendationGates(rows){
   const active=[...activePostCloseTriggerRules('gate'),...activePostCloseTriggerRules('veto-on-retired')];
@@ -3984,7 +4005,11 @@ function istDayKey(ms){
 //
 // A bar with NO RANGE is a circuit lock, and there the direction is known rather than estimated:
 // price legally cannot move, so every print is the queued side being filled.
-function buildIntradayTrajectory(bars){
+// `history` is the FULL contiguous series when `bars` has been narrowed to one session. It is read
+// for one thing only - the v1185 close-time derivation, which needs a late bar from an EARLIER
+// session and cannot get one from a today-only slice. Nothing else may consult it, or the caller's
+// choice of window stops meaning anything (v1206).
+function buildIntradayTrajectory(bars,history){
   const n=bars.length;
   if(n<3) return null;
   // ── v1164: THE SERIES MAY SPAN SESSIONS, SO THE OVERNIGHT GAP MUST NOT COUNT AS FLOW ────────
@@ -4212,11 +4237,15 @@ function buildIntradayTrajectory(bars){
   // - a day we stopped fetching at 11:00 can only understate it, and one late fetch on any session
   // settles it for good. With no late observation at all it fails open to 15:30, which is both the
   // pre-CAS behaviour and the answer for the ~93% of the market the auction does not touch.
+  // v1206: read off `history` when the caller narrowed `bars` to one session - a today-only slice
+  // contains no earlier session at all, so the loop below would find nothing and every F&O name
+  // would silently fail open to 15:30 again.
   const _todayKey=istDayKey(bars[n-1].t);
+  const _hist=(Array.isArray(history)&&history.length>n)?history:bars;
   let _seenMin=0;
-  for(let i=0;i<n;i++){
-    if(istDayKey(bars[i].t)===_todayKey) continue;
-    const _d=new Date(bars[i].t), _m=_d.getHours()*60+_d.getMinutes();
+  for(let i=0;i<_hist.length;i++){
+    if(istDayKey(_hist[i].t)===_todayKey) continue;
+    const _d=new Date(_hist[i].t), _m=_d.getHours()*60+_d.getMinutes();
     if(_m>_seenMin) _seenMin=_m;
   }
   const _endMin=(_seenMin+stepMs/60000>=CAS_CONTINUOUS_END_MIN)?_seenMin+stepMs/60000:SESSION_CLOSE_MIN;
@@ -4351,7 +4380,7 @@ function getIntradayRead(sym){
   // become twice as cheap to push DOWN as up. A multi-session flow is the right answer to "is this
   // being accumulated" and the wrong answer to "should I buy it right now", because a COMPLETE prior
   // session outweighs a young one on the volume clock purely by being finished.
-  const todayTraj=day.length>=3?buildIntradayTrajectory(day):null;
+  const todayTraj=day.length>=3?buildIntradayTrajectory(day,bars):null;
   // How much of the clock today actually owns. No constant: it is the session's own share of the
   // volume in the file, the same idiom v1141 used to decay the pre-open book by what the day has
   // consumed. Early in the session today is a few percent and the multi-day read carries the row;
@@ -4375,7 +4404,34 @@ function getIntradayRead(sym){
           confirmedPullbackCount:traj?traj.confirmedPullbackCount:0,
           currentPullbackPct:traj?traj.currentPullbackPct:null,
           maxPullbackPct:traj?traj.maxPullbackPct:null,
-          predClose:traj?traj.predClose:null,predPct:traj?traj.predPct:null,
+          // ── v1206: A PROJECTION OF TODAY'S CLOSE IS MEASURED ON TODAY ─────────────────────
+          // Owner, 2026-08-20, on the Open Positions panel: *"Why does it say Exit all when EoD
+          // suggests the price is going higher?! All columns seem to be talking in different
+          // directions."* They were, and it was this line. `predPct` was taken from `traj`, which
+          // v1164 widened to the WHOLE contiguous file, while every other term in its own formula
+          // is about today: the bars left to today's close, today's remaining travel, and v1191's
+          // elapsed-share shrink. So the numerator was ~two sessions of net imbalance and the
+          // denominator was this afternoon.
+          //
+          // Measured on the live files at 11:15 on 2026-08-20, against the panel in the owner's
+          // screenshot: SPECIALITY printed EoD +22.95% while its OWN session was 46.9% net sold
+          // and projected -9.31% - the sign was inverted, next to an EXIT ALL that was right.
+          // URBANCO +13.11% against -0.21%, RISHABH +9.70% against +0.02%, JAGSNPHARM -8.65%
+          // against -0.85%. v1191's shrink was inert too: `seenBars` counted all 250 bars in the
+          // file against today's remaining bars, so the weight was 0.83 where today's own clock
+          // says 0.32.
+          //
+          // THERE IS NO FALLBACK TO THE MULTI-SESSION READ. For the VERDICT a multi-day flow is a
+          // legitimate second-best answer and v1203 falls back to it by name; for a projection of
+          // THIS session's close it is the defect itself. Under three bars today, EoD is absent.
+          // `traj` is untouched and still answers "is this being accumulated" across the file.
+          predClose:todayTraj?todayTraj.predClose:null,predPct:todayTraj?todayTraj.predPct:null,
+          // One object, so a surface cannot pair the projection with another window's pressure.
+          eod:todayTraj&&Number.isFinite(todayTraj.predPct)?{
+            pct:todayTraj.predPct,close:todayTraj.predClose,pressurePct:todayTraj.pressurePct,
+            barsLeft:todayTraj.barsLeft,maxTravel:todayTraj.maxTravel,
+            avgMovePct:todayTraj.avgMovePct,stepMin:todayTraj.stepMin,
+            sessionSeen:todayTraj.sessionSeen}:null,
           projected:traj?traj.projected:null,
           first15:f15, first15Up:f15>0, efficiency:eff, position:pos, freshness,
           // The standing: direction confirmed by the open, travelled cleanly, and still near its
@@ -4448,7 +4504,7 @@ function applyIntradayReorder(rows){
     r.rocketScore=r.score;
     delete r._iAdj; delete r._iPct;
   });
-  rows.sort((a,b)=>b.score-a.score||a.symbol.localeCompare(b.symbol));
+  rows.sort((a,b)=>b.score-a.score||radarRankTieBreak(a,b));
   rows.forEach((r,i)=>{r.rank=i+1;});
   // THE VERDICT (owner: "it's a validation step. If it still passes our Buy thresholds, I'll buy,
   // else not."). The re-rank is the mechanism; this is the product. A checked stock is CONFIRMED
@@ -5383,7 +5439,7 @@ function radarAnalyze(headers,rawRows,supplements={},heldSymbols=new Set()){
       });
     }
   }
-  rows.sort((a,b)=>b.score-a.score||a.symbol.localeCompare(b.symbol));
+  rows.sort((a,b)=>b.score-a.score||radarRankTieBreak(a,b));
   rows.forEach((r,i)=>{r.rank=i+1;});
   applyLearnedTriggerRanking(rows);
   applyIntradayReorder(rows);
@@ -8189,18 +8245,25 @@ function buildOpenPositionsPanel(query=''){
         const rd=getIntradayRead(v);
         let tag='';
         if(rd&&rd.traj){
-          const col=rd.regime==='accumulating'?'var(--green)':rd.regime==='selling'?'var(--red)':'var(--amber)';
+          // v1206: the tooltip reads the SAME trajectory the instruction was computed on, and says
+          // which session that is. It used to quote the whole-file read beside a verdict built on
+          // today, which is how a row could carry EXIT ALL over the word ACCUMULATING.
+          const {tt:_ft,span:_fs}=getPositionFlowRead(rd);
+          const _fr=_ft?_ft.regime:rd.regime;
+          const col=_fr==='accumulating'?'var(--green)':_fr==='selling'?'var(--red)':'var(--amber)';
           // v1172: the ACTION, not the weather. The regime and the flow numbers move to the tooltip.
           const a=getPositionAction(v,row);
           const ac=a?(a.tone==='green'?'var(--green)':a.tone==='red'?'var(--red)':'var(--amber)'):col;
           tag=`<div style="font-size:11px;color:${ac};font-weight:700" title="${escHtml(
             (a?a.act+' — '+a.why+String.fromCharCode(10):'')
-            +rd.regime.toUpperCase()+' — net flow '+(rd.cvdPct*100).toFixed(1)+'% of everything traded'
-            +(rd.traj.costRatio?'; 1% up costs '+Math.round(rd.traj.upCost).toLocaleString('en-IN')
-              +' shares against '+Math.round(rd.traj.dnCost).toLocaleString('en-IN')+' down':'')
-            +(Number.isFinite(rd.traj.pressurePct)?'; unspent pressure '
-              +(rd.traj.pressurePct>=0?'+':'')+rd.traj.pressurePct.toFixed(2)+'%':''))}">${
-            a?escHtml(a.act):(rd.regime==='accumulating'?'HOLDING UP':rd.regime==='selling'?'BEING SOLD':escHtml(rd.regime))
+            +(_ft?(_fr.toUpperCase()+' — net flow '+(_ft.cvdPct*100).toFixed(1)+'% of everything traded'
+              +(_ft.costRatio?'; 1% up costs '+Math.round(_ft.upCost).toLocaleString('en-IN')
+                +' shares against '+Math.round(_ft.dnCost).toLocaleString('en-IN')+' down':'')
+              +(Number.isFinite(_ft.pressurePct)?'; unspent pressure '
+                +(_ft.pressurePct>=0?'+':'')+_ft.pressurePct.toFixed(2)+'%':'')
+              +(_fs?_fs:' this session'))
+              :('last read was '+rd.on+', not this session')))}">${
+            a?escHtml(a.act):(_fr==='accumulating'?'HOLDING UP':_fr==='selling'?'BEING SOLD':escHtml(_fr))
           }</div>`;
         }else{
           const a=getPositionAction(v,row);
@@ -8289,13 +8352,24 @@ function buildOpenPositionsPanel(query=''){
           pace=dim('—','No seller pullback has yet been followed by a new high today.');
         }
 
-        const t=rd.traj;
-        const eod=(Number.isFinite(rd.predClose)&&t)
-          ?`<span style="color:${rd.predPct>=0?'var(--green)':'var(--red)'};font-weight:700" title="${escHtml(
-              'Unspent pressure '+(t.pressurePct>=0?'+':'')+t.pressurePct.toFixed(2)+'%, capped by what this stock can '
-              +'travel in the '+t.barsLeft+' bars left. Arithmetic, not a forecast.')}">${
-              (rd.predPct>=0?'+':'')+rd.predPct.toFixed(2)}%</span>`
-          :dim('—','No projection: this session carries no measurable unspent pressure yet.');
+        // v1206: ONE OBJECT, so the number and the pressure that explains it cannot come from
+        // different windows. `rd.eod` is the CURRENT session's projection or nothing.
+        const t=rd.eod;
+        // ...and when the instruction on this row runs the other way, the cell says WHICH reading
+        // overruled which, instead of leaving two numbers arguing. That is the owner's question of
+        // 2026-08-20 answered where he asked it, not in a methodology page.
+        const _act=getPositionAction(row.sym,row);
+        const _clash=(t&&_act&&/^EXIT/.test(_act.act)&&t.pct>0)
+          ?' This row still says '+_act.act+': unspent pressure only sizes an ADD once the session'
+           +' is neither net sold nor cheaper to push down, and here it is one of those - '+_act.why+'.'
+          :'';
+        const eod=t
+          ?`<span style="color:${t.pct>=0?'var(--green)':'var(--red)'};font-weight:700" title="${escHtml(
+              'Unspent pressure '+(t.pressurePct>=0?'+':'')+t.pressurePct.toFixed(2)+'% THIS SESSION, capped by what '
+              +'this stock can travel in the '+t.barsLeft+' bars left and scaled to the '
+              +Math.round(t.sessionSeen*100)+'% of the session already seen. Arithmetic, not a forecast.'+_clash)}">${
+              (t.pct>=0?'+':'')+t.pct.toFixed(2)}%</span>`
+          :dim('—','No projection: the current session has under three bars, or carries no measurable unspent pressure yet.');
         return pace+'<span style="color:var(--t3)"> / </span>'+eod;
       },clrFn:()=>'var(--t2)'},
     {key:'risk',label:'Risk',align:'left',fmt:v=>v?radarRiskPill(v):'—'}
@@ -9614,6 +9688,58 @@ function getTargetNudgeContext(){
   _nudgeMemo={sig,val};
   return val;
 }
+// ── v1206: THE MEASURED LEVEL, IN THE STOCK'S OWN UNITS ─────────────────────────────────────
+// v1105 established the exit target must scale with the stock and measured the optimum on the
+// owner's own 214 completed sells: a broad plateau at 1.0-1.25 ATR, with sqrt(ATR x range) landing
+// on 1.00 ATR at the universe median. v1119 then replaced that capacity with `getReachableTargets`
+// - the p50 of the move actually available from his buy price - which is the better MAGNITUDE and
+// is measured rather than modelled. But it is ONE portfolio number, so every row got the same
+// target, which is precisely the flat rate v1105 measured and rejected.
+//
+// Measured on the live 1,650-row tradeable universe, 2026-08-20, at the 3.45% the board was
+// printing on all ten recommendations:
+//
+//     decile     capacity   ATR     stop     flat target      scaled target
+//     p10         2.41%    2.35%   3.53%    1.47 ATR (R:R .98)   0.93 ATR (R:R .62)
+//     p50         3.78%    3.23%   4.85%    1.07 ATR (R:R .71)   1.07 ATR (R:R .71)
+//     p90         5.42%    5.42%   8.00%    0.64 ATR (R:R .43)   0.91 ATR (R:R .62)
+//
+// A flat 3.45% asks for 1.47 ATR from the quietest decile and 0.64 ATR from the fastest - a 2.3x
+// swing in what is being demanded, decided by nothing but which stock it is, and it lands the fast
+// names well below the measured plateau. That asymmetry is the mechanism v1105 named behind the
+// leak: 13 of the 22 sells that ran 7%+ past the owner were top-ATR-quartile names.
+//
+// So the measured p50 is kept and expressed as a multiple of the CROSS-SECTION'S OWN median
+// capacity. The median row is unchanged by construction, so nothing is inflated in aggregate; the
+// spread is what moves, and every decile lands inside the 0.9-1.1 ATR plateau. No constant is
+// introduced - it is the ratio of two measured quantities. The FLOOR is still the goal rate and
+// every eligibility test still reads `basePct` (v1105), so a raised target can never delete its
+// own candidate.
+let _capMedMemo=null;
+function getUniverseMedianCapacity(){
+  if(_capMedMemo&&_capMedMemo.all===ALL) return _capMedMemo.val;
+  const caps=[];
+  for(const r of (Array.isArray(ALL)?ALL:[])){
+    // THE SAME POPULATION THE REACHABLE LEVEL CAME FROM. `reach.basePct` is the p50 of moves the
+    // owner actually captured, i.e. on tradeable, basket-eligible names; dividing it by a median
+    // taken over the WHOLE file - illiquid sub-Rs-10 names included, which carry the largest ATRs -
+    // shrinks every target by the ratio of two different populations. Caught by this release's own
+    // assertion: the median-capacity row priced 3.00% against the 3.46% it was supposed to be left
+    // at. The filter is buildAchievabilityCurve's tradeable universe, reused rather than re-derived.
+    if(r&&r.basketEligible===false) continue;
+    if(!(Number(r&&r.turnover)>=2500000)||!(Number(r&&r.price)>=10)) continue;
+    const atr=Number(r&&r.atr), range=Number(r&&r.rangePct);
+    const hasA=Number.isFinite(atr)&&atr>0, hasR=Number.isFinite(range)&&range>0;
+    const c=hasA&&hasR?Math.sqrt(atr*range):hasA?atr:hasR?range:null;
+    if(c>0) caps.push(c);
+  }
+  // Below a real cross-section the median is not a median. Null makes the scaling inert and the
+  // portfolio number is used exactly as v1119 left it.
+  const val=caps.length>=ACHIEVE_MIN_ROWS
+    ?caps.sort((a,b)=>a-b)[Math.floor(caps.length/2)]:null;
+  _capMedMemo={all:ALL,val};
+  return val;
+}
 function getRowExitPolicy(row,buyPrice=null,activeInfo=null,nudgeInfo=null){
   const active=activeInfo||getActiveTargetInfo();
   const anchor=Number(active.tgtPct)>0?Number(active.tgtPct):Math.abs(Number(TRADEBOOK_STATS?.adaptiveTGT))||null;
@@ -9680,11 +9806,17 @@ function getRowExitPolicy(row,buyPrice=null,activeInfo=null,nudgeInfo=null){
   // own exits, not the stock's ATR capacity. Capacity remains the FALLBACK for when too few exits
   // have been recorded to trust a distribution (and is still reported on every row).
   const reach=getReachableTargets();
-  const aspire=reach.basePct>0?reach.basePct:capacity;
+  // v1206: the measured level, scaled into this stock's own capacity. Inert (and identical to
+  // v1119) when the row has no capacity or the cross-section is too small to have a median.
+  const capMed=getUniverseMedianCapacity();
+  const scaled=(reach.basePct>0&&capacity>0&&capMed>0)?reach.basePct*(capacity/capMed):null;
+  const aspire=scaled!=null?scaled:(reach.basePct>0?reach.basePct:capacity);
   if(targetPct>0&&active.source!=='manual'&&aspire>0){
     targetPct=toStep(Math.max(basePct,aspire));
     nudgePct=+(targetPct-basePct).toFixed(2);
-    if(nudgePct>0) targetSource+=reach.basePct>0
+    if(nudgePct>0) targetSource+=scaled!=null
+      ? ' + reachable level ('+reach.samples+' exits) at '+(capacity/capMed).toFixed(2)+'x the median stock capacity'
+      : reach.basePct>0
       ? ' + reachable level ('+reach.samples+' exits)'
       : ' + stock capacity (ATR fallback)';
   }
@@ -9945,6 +10077,22 @@ function getTurnoverAllocationCap(row){
 //   4. flow strong + room to add -> ADD n shares, capped by the cushion so a top-up cannot turn a
 //                                   profitable position into a losing one.
 //   5. otherwise                 -> HOLD, with the distance left to target.
+// ── v1206: ONE FLOW WINDOW PER ROW ───────────────────────────────────────────────────────────
+// The instruction was computed on the current session while the tooltip hanging off the same cell
+// quoted the whole-file trajectory, so the two could - and did - state opposite things about the
+// same stock. Measured 2026-08-20 11:15 across the 11 open positions: URBANCO's tooltip said
+// ACCUMULATING at +39.2% of volume with the row reading against it on today's -0.2%; JIOFIN said
+// SELLING at -6.1% with today at +24.4%; SPECTRUM said ACCUMULATING at +4.0% with today at -37.2%;
+// CASTROLIND said ABSORPTION with today SELLING. Four rows out of eleven, and on four of them the
+// tooltip's own sold/thin reading contradicted the instruction printed directly above it.
+//
+// Selecting the window is now done ONCE, here, and both surfaces read the result. The v1203
+// fallback and its "across N sessions" label are preserved exactly - this only removes the second,
+// unlabelled copy of the choice.
+function getPositionFlowRead(rd){
+  const tt=rd&&rd.current?(rd.todayTraj||rd.traj):null;
+  return {tt,span:(rd&&tt&&!rd.todayTraj&&rd.sessions>0)?(' across '+rd.sessions+' sessions'):''};
+}
 function getPositionAction(sym,pos){
   const s=(Array.isArray(ALL)?ALL:[]).find(r=>normSym(r.symbol)===normSym(sym))||null;
   const qty=Number(pos&&pos.qty)||0;
@@ -9970,10 +10118,10 @@ function getPositionAction(sym,pos){
   // can speak it still speaks first and can still overrule the multi-day read. This only decides
   // what happens when today CANNOT yet be computed, and there the honest answer is the flow that
   // does exist, labelled with the span it came from - not silence.
-  const tt=rd&&rd.current?(rd.todayTraj||rd.traj):null;
   // Named on every verdict built from the fallback, so a multi-day read can never be mistaken for
-  // a statement about this morning.
-  const span=(rd&&tt&&!rd.todayTraj&&rd.sessions>0)?(' across '+rd.sessions+' sessions'):'';
+  // a statement about this morning. v1206 moved the choice into getPositionFlowRead so the panel's
+  // own tooltip resolves the SAME window instead of quoting the whole file beside this verdict.
+  const {tt,span}=getPositionFlowRead(rd);
 
   // NO READ IS NOT A HOLD. Saying "hold" on no evidence is the thing this panel was doing wrong in
   // a different costume. v1171 fetches held names automatically, so this clears itself.
@@ -10541,20 +10689,29 @@ function renderTable(){
       turnover:`<td>${fV(s.turnover)}</td>`,
       // v1148 (owner): where the paste says it closes. Pressure decides the direction and size,
       // the stock's own pace caps how far it can actually get in the bars that remain.
+      // v1206: `rd.eod` is the CURRENT session's projection, and this cell - unlike the positions
+      // panel, which v1205 fixed - never tested `current` at all, so a file that stopped yesterday
+      // printed yesterday's projected close under a column that says today. Same defect, same fix,
+      // both surfaces now read the one object.
       predEod:`<td style="white-space:nowrap">${(()=>{
         const rd=getIntradayRead(s.symbol);
-        if(!rd||!Number.isFinite(rd.predClose)) return '<span style="color:var(--t3)">—</span>';
-        const up=rd.predPct>=0, t=rd.traj;
-        return `<span style="color:${up?'var(--green)':'var(--red)'};font-weight:700" title="${escHtml(
-          'Unspent pressure '+(t.pressurePct>=0?'+':'')+t.pressurePct.toFixed(2)+'%, capped by what this stock can travel in the '
+        if(!rd||!rd.current) return `<span style="color:var(--t3)" title="${escHtml(rd?('Last read was '+rd.on+', not this session.'):'Not checked on the 5-minute tape yet.')}">—</span>`;
+        const t=rd.eod;
+        if(!t) return '<span style="color:var(--t3)" title="No projection: the current session has under three bars, or carries no measurable unspent pressure yet.">—</span>';
+        return `<span style="color:${t.pct>=0?'var(--green)':'var(--red)'};font-weight:700" title="${escHtml(
+          'Unspent pressure '+(t.pressurePct>=0?'+':'')+t.pressurePct.toFixed(2)+'% THIS SESSION, capped by what this stock can travel in the '
           +t.barsLeft+' bars left ('+t.avgMovePct.toFixed(3)+'% per '+t.stepMin+'-minute bar = '
-          +(t.maxTravel!=null?t.maxTravel.toFixed(2):'?')+'%). Arithmetic, not a forecast.')}">${
-          fmtINR(rd.predClose)}</span><span style="color:var(--t3);font-size:11px"> ${
-          (rd.predPct>=0?'+':'')+rd.predPct.toFixed(2)}%</span>`;
+          +(t.maxTravel!=null?t.maxTravel.toFixed(2):'?')+'%) and scaled to the '+Math.round(t.sessionSeen*100)
+          +'% of the session already seen. Arithmetic, not a forecast.')}">${
+          fmtINR(t.close)}</span><span style="color:var(--t3);font-size:11px"> ${
+          (t.pct>=0?'+':'')+t.pct.toFixed(2)}%</span>`;
       })()}</td>`,
       // Pace is available only after the checked tape contains a completed recovery episode.
       avgMove:`<td style="white-space:nowrap">${(()=>{
         const rd=getIntradayRead(s.symbol);
+        // v1206: confirmedPacePct is scoped to the LAST session in the file, so without this a
+        // stale read prints yesterday's pace here - the exact fault v1205 fixed one panel down.
+        if(rd&&!rd.current) return `<span style="color:var(--t3)" title="${escHtml('Last read was '+rd.on+', not this session.')}">—</span>`;
         if(!rd||!Number.isFinite(rd.confirmedPacePct)){
           const open=rd&&Number.isFinite(rd.currentPullbackPct)
             ?` Current unresolved pullback: ${rd.currentPullbackPct.toFixed(2)}%.`:'';
@@ -11670,7 +11827,7 @@ function renderStatusBar(){
   const isFiltered=tags.length>0||shown<total;
   const countColor=shown<total?'var(--fire)':'var(--green)';
   const instrumentLabel='stocks';
-  const allocatedLabel='stocks';
+  const allocatedLabel=n=>n===1?'stock':'stocks';   // v1206: it printed "1 stocks".
   let html=`<span class="sb-count" style="color:${countColor}">${shown.toLocaleString()}</span><span class="sb-total">of ${total.toLocaleString()} ${instrumentLabel}</span>`;
   const selCount=FILT.filter(s=>SELECTED.has(s.symbol)).length;
   if(capital>0&&selCount>0){
@@ -11679,7 +11836,7 @@ function renderStatusBar(){
     const actualDeployed=Object.values(am2).reduce((s,a)=>s+(a.debit??a.alloc),0);
     const activeAlloc=Object.values(am2).filter(a=>!a.rejected&&a.qty>0);
     const stockCount=activeAlloc.length;
-    html+=` <span style="color:var(--amber);font-size:13px;font-family:'DM Mono',monospace;font-weight:700;margin-left:8px" title="All-in estimated buy debit: limit-price notional plus CNC buy-side charges.">· ${stockCount} ${allocatedLabel} · ${fmtINR(actualDeployed)} of ${fmtINR(capital)} all-in</span>`;
+    html+=` <span style="color:var(--amber);font-size:13px;font-family:'DM Mono',monospace;font-weight:700;margin-left:8px" title="All-in estimated buy debit: limit-price notional plus CNC buy-side charges.">· ${stockCount} ${allocatedLabel(stockCount)} · ${fmtINR(actualDeployed)} of ${fmtINR(capital)} all-in</span>`;
     // v1092: what the basket RISKS, alongside what it costs. Sum of each position's own
     // stop loss, plus the spread — a tight spread is the visible proof that the score÷stop
     // weight is equalising risk; a wide one means the caps (turnover, top-up, Max Alloc) are
@@ -12861,6 +13018,11 @@ function getRunnerTargetPct(policy){
   // went. Falls back to the ATR multiple only when too few exits have been recorded.
   const reach=getReachableTargets();
   const cap=Number(policy&&policy.capacityPct);
+  // v1206 DELIBERATELY LEAVES THIS UNSCALED. The base leg is scaled into the stock's own capacity
+  // because it is the target the app arms today. The runner is not armed by anything since v1177 -
+  // it survives only to describe a SECOND GTT that a position opened under v1115-v1176 may still
+  // have resting in Zerodha. Rescaling it would restate history, which is the opposite of what that
+  // tooltip is for.
   const want=reach.runnerPct>0?reach.runnerPct:(cap>0?cap*1.5:base);
   return Math.max(base,Math.floor(want*20)/20);
 }
