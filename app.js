@@ -1,5 +1,5 @@
-const BUILD_TS='2026-08-20 13:47 IST'; // release build time (IST)
-const APP_VERSION=1206; // v1206: one window per row - EoD is measured on the session it projects; the rank is a standing, not the alphabet; the exit target scales with the stock again.
+const BUILD_TS='2026-08-20 14:35 IST'; // release build time (IST)
+const APP_VERSION=1207; // v1207: a veto that cannot fire is not a pass, and the unfilled half of a working order is not nothing.
 // v1093: a baseline reward:risk MEASURED on the cross-section (last completed bhav session) instead of learned from the owner's own fills - reported on every row, deliberately not enforced. Includes v1092: position size split by Radar score / stop distance, so equally-scored names carry equal RUPEE risk, plus an opt-in Risk /trade cap.
 // v556: parse the NSE Market Activity Report (MA<date>.csv) — official Nifty %, advances/declines and sector index moves shown as market CONTEXT in the status bar (EOD data, display only, never fed into per-row scoring); MA added to the ℹ️ file manifest.
 // v555 market-cycle stage awareness (stateless, self-calibrating): per-row stage label (1 accumulation · 2 breakout · 3 event · 4 profit-booking · 5 re-accumulation · 6 second-leg); a quiet-accumulation signal (conjunction-of-percentiles) injected via the rocket-diagnostic weighting; sell-the-news decay off Recent earnings date (horizon = review days). v1065 makes the market-breadth gauge an entry-eligibility input while still never changing ranking.
@@ -290,7 +290,9 @@ function mergeCumulativeBrain(first,second){
 }
 let TRADEBOOK_STATS=null; // Includes the realised exit-policy baseline, later refined by outcome learning.
 let LAST_BUY_DATE_MAP={}; // Legacy latest-buy map retained for stored-brain compatibility.
-let ORDERS_TODAY=null; // [{symbol, type, qty, price, time}] — filled order rows, including partial-cancel fills
+let ORDERS_TODAY=null; // [{symbol,type,qty,price,time,product,status,totalQty,pending}] — `qty` is the
+                       // FILLED quantity (every consumer sums it); `pending` is the unfilled half of an
+                       // order still working in the market (v1207).
 let TRADEBOOK_BUY_FILLS=[]; // Consolidated BUY fills available for executed-entry feedback matching.
 
 // ══════════════════════════════════════════════════
@@ -4544,6 +4546,38 @@ function applyIntradayReorder(rows){
     if(!r.intraday.current){
       r.intradayVerdict='stale';
       r.intradayWhy='checked on '+r.intraday.on+', not today — refetch before acting on it';
+      return;
+    }
+    // ── v1207: A VETO THAT CANNOT FIRE MUST NOT READ AS CONFIRMED ──────────────────────
+    // The reject test above is `if(_tt){...}`, and `_tt` is null until the CURRENT session has three
+    // bars, because buildIntradayTrajectory needs three. So between 09:15 and 09:25 the v1168
+    // current-session veto is structurally inert - and the row fell straight through to the score
+    // bar and rendered CONFIRMED, with its `why` describing the MULTI-DAY read.
+    //
+    // Measured on the owner's own 2026-08-20 fills, both placed at 09:23:47/48 with two bars of
+    // today on file:
+    //     RISHABH  09:20  2 bars  veto CANNOT FIRE  - multi-day said accumulating +9.4%
+    //              09:25  3 bars  veto ARMED        - REJECT (thin), costRatio 0.04
+    //     URBANCO  09:20  2 bars  veto CANNOT FIRE  - multi-day said accumulating +42.9%
+    //              09:25  3 bars  veto ARMED        - REJECT (sold), today -27.3%
+    // Both were bought 120 seconds before the app would have thrown them out, and both rejected at
+    // every checkpoint for the rest of the session.
+    //
+    // This is the standing rule - A CONTROL THAT CANNOT WORK MUST SAY SO, AND MUST NEVER FAIL
+    // SILENTLY - and the owner's own bar: "if something is in the recommendation, it should be a
+    // definite buy, no ifs and buts". A row nothing can veto is not a definite buy; it is
+    // UNVERIFIABLE, which is a third state and not the same as rejected.
+    //
+    // NO CONSTANT IS INTRODUCED. The gate opens on the third bar of the session because that is the
+    // minimum the trajectory maths needs - the same three the read itself requires - never a chosen
+    // time of day. The multi-day flow is deliberately NOT accepted as a substitute: v1168 exists
+    // precisely because a complete prior session outweighs a young one on the volume clock, and it
+    // said "accumulating" for both of the names above.
+    if(!_tt){
+      r.intradayVerdict='unverified';
+      r.intradayWhy='the current session has only '+r.intraday.bars+' bar'+(r.intraday.bars===1?'':'s')
+        +' — under three the today-only flow cannot be computed, so nothing can veto this row yet'
+        +(r.intraday.traj?' (multi-day: '+r.intraday.traj.regime+', which is NOT evidence about today)':'');
       return;
     }
     const passes=(typeof meetsRecommendationBar==='function')?meetsRecommendationBar(r):(r.score>=RECOMMEND_MIN_SCORE);
@@ -10077,6 +10111,26 @@ function getTurnoverAllocationCap(row){
 //   4. flow strong + room to add -> ADD n shares, capped by the cushion so a top-up cannot turn a
 //                                   profitable position into a losing one.
 //   5. otherwise                 -> HOLD, with the distance left to target.
+// ── v1207: WHAT IS ALREADY WORKING IN THE MARKET ────────────────────────────────────────────
+// An instruction to EXIT is a different instruction when most of the position is already sitting on
+// the offer. Built from today's Orders.csv rows that are still OPEN, so it says nothing about GTTs -
+// those remain unknowable (see Known Issues) and this deliberately does not pretend otherwise.
+// `price` is the AVERAGE FILL of the part that did trade, which for a partially filled sell is at or
+// above the limit, so it is reported as the level the order worked at rather than as the limit.
+function getRestingOrderMap(){
+  const out={};
+  if(!ORDERS_TODAY||!ORDERS_TODAY.length) return out;
+  const today=(typeof getSessionDate==='function')?getSessionDate():null;
+  for(const o of ORDERS_TODAY){
+    if(!o||!o.symbol||!(o.pending>0)) continue;
+    if(today&&normOrderDate(o.time)!==today) continue;
+    const key=o.symbol, side=(o.type||'').toUpperCase()==='SELL'?'sell':'buy';
+    const e=out[key]||(out[key]={sellQty:0,sellPrice:null,buyQty:0,buyPrice:null});
+    if(side==='sell'){ e.sellQty+=o.pending; if(o.qty>0&&o.price>0) e.sellPrice=o.price; }
+    else { e.buyQty+=o.pending; if(o.qty>0&&o.price>0) e.buyPrice=o.price; }
+  }
+  return out;
+}
 // ── v1206: ONE FLOW WINDOW PER ROW ───────────────────────────────────────────────────────────
 // The instruction was computed on the current session while the tooltip hanging off the same cell
 // quoted the whole-file trajectory, so the two could - and did - state opposite things about the
@@ -10097,12 +10151,35 @@ function getPositionAction(sym,pos){
   const s=(Array.isArray(ALL)?ALL:[]).find(r=>normSym(r.symbol)===normSym(sym))||null;
   const qty=Number(pos&&pos.qty)||0;
   if(!(qty>0)) return null;
+  // v1207: an EXIT is a different instruction when the shares are already on the offer. Applied to
+  // the finished verdict rather than woven into the ladder, so the DECISION is unchanged - only the
+  // statement of what remains to be done, plus a warning when the resting level is one this
+  // session's own projection does not reach.
+  const _rest=(typeof getRestingOrderMap==='function')?getRestingOrderMap()[normSym(sym)]:null;
+  const _withResting=(a)=>{
+    if(!a||!/^EXIT/.test(a.act)||!_rest||!(_rest.sellQty>0)) return a;
+    const rq=Math.min(qty,_rest.sellQty);
+    const rd2=getIntradayRead(sym);
+    const proj=(rd2&&rd2.eod&&Number.isFinite(rd2.eod.close))?rd2.eod.close:null;
+    const unreachable=(proj!=null&&_rest.sellPrice>0&&proj<_rest.sellPrice);
+    a.resting={qty:rq,price:_rest.sellPrice,unreachable};
+    a.why=a.why+' — '+rq+' of '+qty+' already resting on a sell'
+      +(_rest.sellPrice>0?' worked at '+fmtINR(_rest.sellPrice):'')
+      +(unreachable?', which this session projects to '+fmtINR(proj)+' and will not reach'
+                   :', still live');
+    // THE DECISION IS NOT RESTATED. An earlier pass escalated the verb to EXIT ALL NOW when the
+    // whole position was resting at an unreachable level; that is the SAME decision wearing a fourth
+    // name, which is exactly what "one meaning per quantity, one surface per verdict" forbids - and
+    // the standing suite caught it as "not an instruction". The fact rides the reason; the verb does
+    // not move.
+    return a;
+  };
   const avg=Number(pos?.avg),ltp=Number(pos?.ltp);
   if(s&&avg>0&&ltp>0){
     const policy=getRowExitPolicy(s,avg);
     const target=avg*(1+Number(policy.targetPct||0)/100),stop=avg*(1-Number(policy.stopPct||0)/100);
-    if(target>avg&&ltp>=target)return {act:'EXIT ALL',qty,tone:'green',why:`target reached at ${fmtINR(target)}`};
-    if(stop>0&&ltp<=stop)return {act:'EXIT ALL',qty,tone:'red',why:`stop breached at ${fmtINR(stop)}`};
+    if(target>avg&&ltp>=target)return _withResting({act:'EXIT ALL',qty,tone:'green',why:`target reached at ${fmtINR(target)}`});
+    if(stop>0&&ltp<=stop)return _withResting({act:'EXIT ALL',qty,tone:'red',why:`stop breached at ${fmtINR(stop)}`});
   }
   const rd=getIntradayRead(sym);
   // ── v1203: TODAY'S TRAJECTORY IS THE PREFERRED READ, NOT THE ONLY ONE ───────────────────────
@@ -10137,22 +10214,22 @@ function getPositionAction(sym,pos){
   const shares=n=>Math.round(n).toLocaleString('en-IN');
 
   // BOTH readings against it - supply is arriving AND nothing is holding it up.
-  if(sold&&thin) return {act:'EXIT ALL',qty,tone:'red',
+  if(sold&&thin) return _withResting({act:'EXIT ALL',qty,tone:'red',
     why:'sold into all session (net '+(100*tt.cvdPct).toFixed(0)+'%) and 1% down costs only '
-      +shares(tt.dnCost)+' shares against '+shares(tt.upCost)+' up'+span};
+      +shares(tt.dnCost)+' shares against '+shares(tt.upCost)+' up'+span});
   // ONE against it - reduce, do not abandon.
   if(sold||thin){
     const half=Math.max(1,Math.floor(qty/2));
-    return {act:'EXIT '+half,qty:half,tone:'red',
+    return _withResting({act:'EXIT '+half,qty:half,tone:'red',
       why:(sold?('net selling this session ('+(100*tt.cvdPct).toFixed(0)+'% of everything traded), but demand still costs more to move')
-              :('nothing holding it up - 1% down costs '+shares(tt.dnCost)+' shares against '+shares(tt.upCost)+' up, though flow is still net positive'))+span};
+              :('nothing holding it up - 1% down costs '+shares(tt.dnCost)+' shares against '+shares(tt.upCost)+' up, though flow is still net positive'))+span});
   }
   // BOTH readings for it, and the tape is still pushing - size the add from the cushion so a top-up
   // can never turn a position in profit into a losing one (v1070).
   const pressing=Number.isFinite(tt.pressurePct)&&tt.pressurePct>0;
   const reviewDays=getEffectiveReviewDays(),daysHeld=getOpenPositionDaysHeld(sym,qty);
   if(reviewDays>0&&daysHeld!=null&&daysHeld>=reviewDays&&!pressing){
-    return {act:'EXIT ALL',qty,tone:'red',why:`held ${daysHeld}d against the learned ${reviewDays}d review horizon, with no unspent buying pressure`};
+    return _withResting({act:'EXIT ALL',qty,tone:'red',why:`held ${daysHeld}d against the learned ${reviewDays}d review horizon, with no unspent buying pressure`});
   }
   if(pressing&&s){
     try{
@@ -10598,13 +10675,17 @@ function radarSeriesBandPill(s){
 // A verdict now has exactly one face and one colour wherever it appears. `regime` is context in the
 // tooltip and never colours anything, because it does not decide anything.
 function intradayVerdictFace(v,has){
-  return v==='stale'?'\u29d6':v==='confirmed'?'\u2713':v==='rejected'?'\u2717':(has?'\u2022':'5m');
+  // v1207: `unverified` is its own face. It must not read as confirmed (nothing has checked it) and
+  // must not read as rejected (nothing has condemned it) - the current session cannot speak yet.
+  return v==='stale'?'\u29d6':v==='confirmed'?'\u2713':v==='rejected'?'\u2717'
+    :v==='unverified'?'\u25f4':(has?'\u2022':'5m');
 }
 function intradayVerdictColor(v,has,sel){
   return sel?'var(--amber)'
     :v==='stale'?'var(--t3)'
     :v==='confirmed'?'var(--green)'
     :v==='rejected'?'var(--red)'
+    :v==='unverified'?'var(--amber)'
     :has?'var(--cyan)':'var(--t3)';
 }
 function intradayRowButton(s){
@@ -12357,17 +12438,36 @@ function parseOrders(text){
     const sym=normSym(r[symCol]);
     const type=String(r[typeCol]||'').trim().toUpperCase();
     if(!sym||!(type==='BUY'||type==='SELL')) return null;
-    let qtyRaw=String(r[qtyCol]||'').trim();
-    if(qtyRaw.includes('/')) qtyRaw=qtyRaw.split('/')[0];
-    const qty=num(qtyRaw);
+    // ── v1207: THE UNFILLED HALF OF "7/64" IS NOT NOTHING ──────────────────────────────────
+    // Zerodha writes Qty. as filled/total. This took the left number and threw the rest away, so an
+    // order still WORKING in the market was recorded as a completed trade of its filled part and
+    // the resting remainder vanished. Measured on the owner's 2026-08-20 book: `SELL RISHABH 7/64
+    // OPEN @ 723` - 7 filled, and **57 shares resting on the offer** - while the Open Positions
+    // panel told him to EXIT ALL 57, with no idea they were already spoken for at a price its own
+    // projection (-4.08%, close Rs 651) said would never print.
+    //
+    // Unlike resting GTTs, which no input carries and which CLAUDE.md records as unknowable, this
+    // is sitting in a file the app already parses.
+    //
+    // `qty` KEEPS ITS MEANING - the filled quantity - because every consumer sums it into booked
+    // P&L and the held merge. The pending half rides alongside, and a row is now kept when it has
+    // EITHER. A cancelled order has no pending quantity by definition, so 0/47 CANCELLED still
+    // drops out exactly as before.
+    const qtyRaw=String(r[qtyCol]||'').trim();
+    const qtyParts=qtyRaw.split('/');
+    const qty=num(qtyParts[0]);
+    const totalQty=qtyParts.length>1?num(qtyParts[1]):qty;
+    const working=(status==='OPEN'||status==='TRIGGER PENDING'||status==='PENDING');
+    const pending=(working&&totalQty!==null&&qty!==null)?Math.max(0,totalQty-qty):0;
     const price=num(r[priceCol]);
-    if(qty===null||qty===0||price===null) return null;
+    if(qty===null||price===null) return null;
+    if(qty===0&&!(pending>0)) return null;
     // v557: an undateable row must NOT be stamped with today's session date — that made a stale
     // Orders.csv (or one whose Time column failed to parse) masquerade as this session's trades.
     // Left empty, it simply never matches a "today" filter.
     const time=String(r[timeCol]||'').trim();
     const product=productCol?String(r[productCol]||'').trim().toUpperCase():'CNC';
-    return {symbol:sym,type,qty,price,time,product};
+    return {symbol:sym,type,qty,price,time,product,status,totalQty,pending};
   }).filter(Boolean);
 }
 
