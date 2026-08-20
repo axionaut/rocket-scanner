@@ -1,5 +1,5 @@
-const BUILD_TS='2026-08-20 10:07 IST'; // release build time (IST)
-const APP_VERSION=1203; // v1203: fetch queue ordered by decision value; ALL NSE auto-refresh removed.
+const BUILD_TS='2026-08-20 10:20 IST'; // release build time (IST)
+const APP_VERSION=1204; // v1204: TradingView auto-fetch scaffolding removed; folder watch restored.
 // v1093: a baseline reward:risk MEASURED on the cross-section (last completed bhav session) instead of learned from the owner's own fills - reported on every row, deliberately not enforced. Includes v1092: position size split by Radar score / stop distance, so equally-scored names carry equal RUPEE risk, plus an opt-in Risk /trade cap.
 // v556: parse the NSE Market Activity Report (MA<date>.csv) — official Nifty %, advances/declines and sector index moves shown as market CONTEXT in the status bar (EOD data, display only, never fed into per-row scoring); MA added to the ℹ️ file manifest.
 // v555 market-cycle stage awareness (stateless, self-calibrating): per-row stage label (1 accumulation · 2 breakout · 3 event · 4 profit-booking · 5 re-accumulation · 6 second-leg); a quiet-accumulation signal (conjunction-of-percentiles) injected via the rocket-diagnostic weighting; sell-the-news decay off Recent earnings date (horizon = review days). v1065 makes the market-breadth gauge an entry-eligibility input while still never changing ranking.
@@ -11850,12 +11850,68 @@ async function getLocalUploadFolderFiles(){
   }
 }
 
-// ── v1203: THE ALL NSE FOLDER AUTO-REFRESH IS REMOVED (owner) ──────────────────────────────
-// Owner, 2026-08-20: *"The auto fetching of ALL NSE ... We don't need it. I have decided that
-// I'll keep it manual."* The 3-second folder poll, its ALL NSE lastModified baseline, the
-// corner auto-refresh pill and the silent re-ingest behind them are gone. `Load Files` is the
-// only ingestion path, which is also what the standing no-polling rule always said for every
-// source except this one owner-approved exception - the exception is now withdrawn.
+// ── Folder auto-refresh (owner-approved 2026-07-17, ported from the standalone Radar) ──
+// Watches the granted local upload folder every 3 seconds; only a change to the ALL NSE
+// file's lastModified triggers a refresh. Silent when no folder grant exists, permission
+// was revoked, the tab is hidden, or a load is already running.
+let _folderWatchTimer=null,_folderWatchBusy=false,_folderWatchAllNseLastModified=null;
+function getAllNseLastModified(files){
+  const allNse=(files||[]).find(f=>isScannerCsvName(f?.name));
+  return allNse?.lastModified ?? null;
+}
+// Small corner pill instead of the full loader/toast: auto-refresh must never interrupt.
+function showAutoRefreshIndicator(state){
+  let el=document.getElementById('autoRefreshPill');
+  if(!el){
+    el=document.createElement('div');
+    el.id='autoRefreshPill';
+    el.style.cssText="position:fixed;bottom:16px;left:16px;z-index:998;padding:6px 12px;border-radius:20px;background:var(--bg-raised);border:1px solid var(--border-hi);color:var(--t2);font-size:13px;font-family:'DM Mono',monospace;box-shadow:0 4px 16px rgba(0,0,0,.35);display:none;align-items:center;gap:6px";
+    document.body.appendChild(el);
+  }
+  clearTimeout(el._hideTimer);
+  if(state==='refreshing'){
+    el.style.color='var(--t2)';
+    el.innerHTML='<span style="display:inline-block;animation:sp 1s linear infinite">⟳</span> auto-refresh';
+    el.style.display='flex';
+  } else if(state==='done'){
+    el.style.color='var(--green)';
+    el.innerHTML='✓ updated '+fileStatusClock();
+    el.style.display='flex';
+    el._hideTimer=setTimeout(()=>{el.style.display='none';el.style.color='var(--t2)';},4000);
+  } else {
+    el.style.display='none';
+  }
+}
+async function folderWatchTick(){
+  if(_folderWatchBusy||document.hidden) return;
+  try{
+    const local=await getLocalUploadFolderFiles();
+    if(!local?.files?.length) return;
+    const lastModified=getAllNseLastModified(local.files);
+    if(lastModified===null) return;
+    if(_folderWatchAllNseLastModified===null){_folderWatchAllNseLastModified=lastModified;return;} // baseline, no re-run
+    if(lastModified===_folderWatchAllNseLastModified)return; // unchanged since last ingest
+    _folderWatchAllNseLastModified=lastModified;
+    _folderWatchBusy=true;
+    showAutoRefreshIndicator('refreshing');
+    // A NEW ALL NSE MEANS A NEW DECISION, so the book it is scored against must be current too.
+    // This runs BEFORE the ingest and writes into the same folder, so processFiles picks the fresh
+    // files up in the same pass. It cannot block: a failure just leaves the existing files in place.
+    try{ await refreshBrokerInputs(); }catch(e){}
+    const fresh=await getLocalUploadFolderFiles();
+    const use=(fresh&&fresh.files&&fresh.files.length)?fresh.files:local.files;
+    const ok=await processFiles(use,local.sourceLabel+' · auto-refresh',{silent:true});
+    showAutoRefreshIndicator(ok?'done':'hide');
+  }catch(e){
+    console.warn('Folder watch tick failed',e);
+    showAutoRefreshIndicator('hide');
+  }
+  finally{_folderWatchBusy=false;}
+}
+function startFolderWatch(){
+  if(_folderWatchTimer) return;
+  _folderWatchTimer=setInterval(folderWatchTick,3000);
+}
 
 async function hydrateSessionCSVsFromPreferredInputs(reason='startup'){
   const local=await getLocalUploadFolderFiles();
@@ -13307,6 +13363,9 @@ async function processFiles(files,sourceLabel,opts={}){
   // Surveillance rules must exist before REG1 parsing; the unauthorized-boot path can
   // reach here without initApp having seeded them.
   if(!SURV_CUSTOM_RULES.length){try{loadSurvRules();}catch(e){}}
+  // Any deliberate or automatic load resets the folder-watch baseline so the watcher
+  // does not immediately re-process the files it (or the user) just loaded.
+  try{_folderWatchAllNseLastModified=getAllNseLastModified([...files]);}catch(e){}
   if(!silent) setLoading(true,String(FILE_LOAD_STATUS.source?`Processing selected files... · ${FILE_LOAD_STATUS.source}`:'Processing selected files...'));
   // Upload CHANGED canonical input files to Drive in the background. Rankings are built
   // from the selected local files immediately, because the market does not wait for Drive.
@@ -13503,11 +13562,10 @@ async function processFiles(files,sourceLabel,opts={}){
   //
   // Every ALL NSE ingest spends whatever is left of the rate budget on the names carrying a live
   // decision - open positions and rows clearing the recommendation bar - in the value order v1203
-  // derives. v1203 also removed the 3-second folder watch (owner), so an ingest is now always a
-  // deliberate Load Files press: this fires a handful of times a day by construction rather than
-  // because a poll interval throttles it, and the daily budget still caps it before a single
-  // request is made (owner: *"no ~18 minutes once hitting zerodha is not advisable. Do it
-  // gradually"*). The old mover tier is gone - see intradayFetchJobs.
+  // derives. The folder watch re-ingests only when ALL NSE's own timestamp changes (v519), so this
+  // fires a handful of times a day rather than on the 3-second poll, and the daily budget still
+  // caps it before a single request is made (owner: *"no ~18 minutes once hitting zerodha is not
+  // advisable. Do it gradually"*). The old mover tier is gone - see intradayFetchJobs.
   //
   // Fire-and-forget: it must never block the render or fail the load.
   //
@@ -13635,6 +13693,8 @@ async function initApp(){
   try{applyFilters();}catch(e){console.error('INIT step7 applyFilters failed:',e);}
   setLoading(false);
   schedulePerformanceRender();
+  // Radar-style auto-refresh: watch the granted local folder for new/changed files.
+  startFolderWatch();
 }
 initApp();
 
