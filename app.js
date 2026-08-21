@@ -1,5 +1,5 @@
-const BUILD_TS='2026-08-21 12:24 IST'; // release build time (IST)
-const APP_VERSION=1209; // v1209: the fetch list quotes the window the verdict reads, and "thin" is decided by the day's own cross-section instead of a bare 1.0.
+const BUILD_TS='2026-08-21 13:02 IST'; // release build time (IST)
+const APP_VERSION=1210; // v1210: a projection may not fight its own tape, and the exit instruction owns the price it is worked at.
 // v1093: a baseline reward:risk MEASURED on the cross-section (last completed bhav session) instead of learned from the owner's own fills - reported on every row, deliberately not enforced. Includes v1092: position size split by Radar score / stop distance, so equally-scored names carry equal RUPEE risk, plus an opt-in Risk /trade cap.
 // v556: parse the NSE Market Activity Report (MA<date>.csv) — official Nifty %, advances/declines and sector index moves shown as market CONTEXT in the status bar (EOD data, display only, never fed into per-row scoring); MA added to the ℹ️ file manifest.
 // v555 market-cycle stage awareness (stateless, self-calibrating): per-row stage label (1 accumulation · 2 breakout · 3 event · 4 profit-booking · 5 re-accumulation · 6 second-leg); a quiet-accumulation signal (conjunction-of-percentiles) injected via the rocket-diagnostic weighting; sell-the-news decay off Recent earnings date (horizon = review days). v1065 makes the market-breadth gauge an entry-eligibility input while still never changing ranking.
@@ -3552,7 +3552,16 @@ function buildIntradayTrajectory(bars,history){
   const evid=seenBars/(seenBars+barsLeft);
   const predRaw=(pressurePct==null)?null
     :(maxTravel==null?pressurePct:Math.max(-maxTravel,Math.min(maxTravel,pressurePct)));
-  const predPct=(predRaw==null)?null:predRaw*evid;
+  // A PROJECTION MAY NOT FIGHT THE TAPE. pressurePct measures an IMBALANCE; pRec measures whether
+  // the market is CONVERTING it. When the two disagree in sign the imbalance is by definition being
+  // absorbed, and an extrapolation of it points where the tape is refusing to go. Measured
+  // 2026-08-21 on the owner's book: SPECTRUM carried netRecent +4,154 shares against an upCost of
+  // ~154 shares - pressure +27.00%, clamped by travel to +20.44%, shrunk to EoD +10.63% - while its
+  // own priceSlope was -191.1, its regime was 'absorption', it was down 5.0% on the day and 5.10%
+  // off its high unrecovered. There is no honest close projection there, and a ZERO would be a
+  // claim of its own, so the projection is ABSENT and the reason is reportable.
+  const pressureConverting=!(predRaw!=null&&predRaw!==0&&pRec!==0&&(predRaw>0)!==(pRec>0));
+  const predPct=(predRaw==null||!pressureConverting)?null:predRaw*evid;
   const predClose=(predPct==null)?null:bars[n-1].c*(1+predPct/100);
   const cvdPct=run/totV;                  // a LEVEL, so a late drift on no volume cannot erase a
                                           // morning of selling
@@ -3562,6 +3571,7 @@ function buildIntradayTrajectory(bars,history){
              :(pRec<0&&cRec>=0&&cvdPct>=0)  ?'absorption'
                                             :'selling';
   return {cvd,cvdNet:run,cvdPct,totV,priceSlope:pRec,flowSlope:cRec,agree,regime,
+          pressureConverting,
           // Projected close at the recent pace, over the volume still expected today. Reported.
           projected:price[n-1]+pRec*(1-vx[n-1]/totV),
           avgMovePct,confirmedPacePct,confirmedPaceAt:_confirmedPaceAt,
@@ -6506,13 +6516,16 @@ function buildOpenPositionsPanel(query=''){
     // carries no instructions. The evidence behind it is unchanged and lives in Methodology.
     rows.push({
       sym:pos.symbol,qty,avg,ltp,pnlPct,pnlRs,capital,daysHeld,targetPrice,stopPrice,targetPct,exitPolicy,
-      flow:(()=>{const rd=getIntradayRead(pos.symbol);return rd&&rd.traj?+(rd.cvdPct*100).toFixed(2):null;})(),
+      // v1210: today, through the same window the verdict reads. This field was the last survivor
+      // of the multi-session leak v1209 closed everywhere else.
+      flow:(()=>{const {tt}=getPositionFlowRead(getIntradayRead(pos.symbol));
+        return tt&&Number.isFinite(tt.cvdPct)?+(tt.cvdPct*100).toFixed(2):null;})(),
       baseQty,runnerQty,runnerPrice,runnerPct,
       score:isFinite(Number(scannerRow?.score))?Number(scannerRow.score):null,
       rank:scannerRow?.rank??null,setup:scannerRow?.setup||'',
       dayPct:scannerRow?.day??scannerRow?.priceChange??null,risk:scannerRow?.risk||'',
       pace:(()=>{const r=getIntradayRead(pos.symbol);return r&&r.current&&Number.isFinite(r.confirmedPacePct)?r.confirmedPacePct:null;})(),
-      predEod:(()=>{const r=getIntradayRead(pos.symbol);return r&&r.current&&Number.isFinite(r.predPct)?r.predPct:null;})(),
+      predEod:(()=>{const r=getIntradayRead(pos.symbol);return r&&r.current&&r.eod&&Number.isFinite(r.eod.pct)?r.eod.pct:null;})(),
       scannerRow
     });
   });
@@ -6543,6 +6556,9 @@ function buildOpenPositionsPanel(query=''){
           // v1172: the ACTION, not the weather. The regime and the flow numbers move to the tooltip.
           const a=getPositionAction(v,row);
           const ac=a?(a.tone==='green'?'var(--green)':a.tone==='red'?'var(--red)':'var(--amber)'):col;
+          const _lvl=(a&&a.execution&&Number.isFinite(a.execution.level))
+            ? `<span style="color:var(--t3);font-weight:600"> @ ${escHtml(fmtINR(a.execution.level))}</span>`
+            : (a&&a.covered?'<span style="color:var(--t3);font-weight:600"> already worked</span>':'');
           tag=`<div style="font-size:11px;color:${ac};font-weight:700" title="${escHtml(
             (a?a.act+' — '+a.why+String.fromCharCode(10):'')
             +(_ft?(_fr.toUpperCase()+' — net flow '+(_ft.cvdPct*100).toFixed(1)+'% of everything traded'
@@ -6552,13 +6568,16 @@ function buildOpenPositionsPanel(query=''){
                 +(_ft.pressurePct>=0?'+':'')+_ft.pressurePct.toFixed(2)+'%':'')
               +(_fs?_fs:' this session'))
               :('last read was '+rd.on+', not this session')))}">${
-            a?escHtml(a.act):(_fr==='accumulating'?'HOLDING UP':_fr==='selling'?'BEING SOLD':escHtml(_fr))
+            a?escHtml(a.act)+_lvl:(_fr==='accumulating'?'HOLDING UP':_fr==='selling'?'BEING SOLD':escHtml(_fr))
           }</div>`;
         }else{
           const a=getPositionAction(v,row);
           if(a){
             const ac=a.tone==='green'?'var(--green)':a.tone==='red'?'var(--red)':'var(--amber)';
-            tag=`<div style="font-size:11px;color:${ac};font-weight:700" title="${escHtml(a.act+' — '+a.why)}">${escHtml(a.act)}</div>`;
+            const _lvl2=(a.execution&&Number.isFinite(a.execution.level))
+              ? `<span style="color:var(--t3);font-weight:600"> @ ${escHtml(fmtINR(a.execution.level))}</span>`
+              : (a.covered?'<span style="color:var(--t3);font-weight:600"> already worked</span>':'');
+            tag=`<div style="font-size:11px;color:${ac};font-weight:700" title="${escHtml(a.act+' — '+a.why)}">${escHtml(a.act)+_lvl2}</div>`;
           }
         }
         return intradayRowButton({symbol:v})+symbolChartButton(v)+tag;
@@ -6622,10 +6641,12 @@ function buildOpenPositionsPanel(query=''){
         // ...and when the instruction on this row runs the other way, the cell says WHICH reading
         // overruled which, instead of leaving two numbers arguing. That is the owner's question of
         // 2026-08-20 answered where he asked it, not in a methodology page.
+        // v1210: it quotes the INSTRUCTION'S OWN reconciliation rather than guessing at one. The
+        // old text asserted the clash was always the flow test; on a stop-driven exit that was
+        // simply untrue, and the row then carried a third story.
         const _act=getPositionAction(row.sym,row);
         const _clash=(t&&_act&&/^EXIT/.test(_act.act)&&t.pct>0)
-          ?' This row still says '+_act.act+': unspent pressure only sizes an ADD once the session'
-           +' is neither net sold nor cheaper to push down, and here it is one of those - '+_act.why+'.'
+          ?' This row still says '+_act.act+' — '+_act.why
           :'';
         const eod=t
           ?`<span style="color:${t.pct>=0?'var(--green)':'var(--red)'};font-weight:700" title="${escHtml(
@@ -6633,7 +6654,10 @@ function buildOpenPositionsPanel(query=''){
               +'this stock can travel in the '+t.barsLeft+' bars left and scaled to the '
               +Math.round(t.sessionSeen*100)+'% of the session already seen. Arithmetic, not a forecast.'+_clash)}">${
               (t.pct>=0?'+':'')+t.pct.toFixed(2)}%</span>`
-          :dim('—','No projection: the current session has under three bars, or carries no measurable unspent pressure yet.');
+          :dim('—',rd.todayTraj&&rd.todayTraj.pressureConverting===false
+            ?'No projection: this session\u2019s imbalance is being ABSORBED, not converted — its unspent '
+             +'pressure points one way and its own price slope the other, so there is no honest close to quote.'
+            :'No projection: the current session has under three bars, or carries no measurable unspent pressure yet.');
         return pace+'<span style="color:var(--t3)"> / </span>'+eod;
       },clrFn:()=>'var(--t2)'},
     {key:'risk',label:'Risk',align:'left',fmt:v=>v?radarRiskPill(v):'—'}
@@ -8029,28 +8053,95 @@ function getPositionAction(sym,pos){
   const qty=Number(pos&&pos.qty)||0;
   if(!(qty>0)) return null;
   const _rest=(typeof getRestingOrderMap==='function')?getRestingOrderMap()[normSym(sym)]:null;
+  // v1210: the working order is NETTED OUT of the instruction, not merely mentioned in it. Telling
+  // the owner to sell 92 when 57 are already on the offer asks for a double sale of 57 shares. The
+  // recorded quantity keeps its v1207 meaning everywhere else; it is the ASK that shrinks.
   const _withResting=(a)=>{
     if(!a||!/^EXIT/.test(a.act)||!_rest||!(_rest.sellQty>0)) return a;
     const rq=Math.min(qty,_rest.sellQty);
     const rd2=getIntradayRead(sym);
     const proj=(rd2&&rd2.eod&&Number.isFinite(rd2.eod.close))?rd2.eod.close:null;
     const unreachable=(proj!=null&&_rest.sellPrice>0&&proj<_rest.sellPrice);
+    const remain=Math.max(0,(Number(a.qty)||0)-rq);
     a.resting={qty:rq,price:_rest.sellPrice,unreachable};
+    a.covered=!(remain>0);
+    if(!a.covered&&a.act!=='EXIT ALL') a.act='EXIT '+remain;
+    a.qty=a.covered?0:remain;
     a.why=a.why+' — '+rq+' of '+qty+' already resting on a sell'
       +(_rest.sellPrice>0?' worked at '+fmtINR(_rest.sellPrice):'')
       +(unreachable?', which this session projects to '+fmtINR(proj)+' and will not reach'
-                   :', still live');
+                   :', still live')
+      +(a.covered?'; the whole ask is already on the offer, so there is nothing further to place'
+                 :'; '+remain+' still to place');
     return a;
   };
-  const avg=Number(pos?.avg),ltp=Number(pos?.ltp);
+  // EXECUTION, NOT DECISION. The projection may never decide WHETHER to exit - v1191 stands - but
+  // the owner's question of 2026-08-21 (SPECTRUM reading EXIT ALL beside EoD +10.63%) is about the
+  // PRICE, and leaving that to a column which argues with the instruction next to it IS the
+  // contradiction. When this session's own projection sits above the live price the exit is WORKED
+  // at that level instead of hit at market. Bounded by the row's own target, so a stop-out can
+  // never be talked into a moonshot, and it expires with the session it was projected for.
+  const _withExecution=(a)=>{
+    if(!a||!/^EXIT/.test(a.act)||a.covered) return a;
+    const rd2=getIntradayRead(sym);
+    const t=(rd2&&rd2.current)?rd2.eod:null;   // resolved again: _withExecution is declared above rd
+    const px=ltp;
+    if(!t||!Number.isFinite(t.pct)||!(t.pct>0)||!Number.isFinite(t.close)||!(px>0)) return a;
+    let level=tickPrice(t.close),capped=false;
+    const av=Number(pos&&pos.avg)||0;
+    if(s&&av>0){
+      const pol=getRowExitPolicy(s,av);
+      const tgt=av*(1+Number(pol.targetPct||0)/100);
+      if(Number.isFinite(tgt)&&tgt>0&&level>tgt){ level=tgt; capped=true; }
+    }
+    if(!(level>px)) return a;
+    a.execution={level,projPct:t.pct,barsLeft:t.barsLeft,capped,
+      note:'Work this exit at '+fmtINR(level)+(capped?' (its own target)':'')
+        +' rather than hitting the bid at '+fmtINR(px)+': this session projects +'+t.pct.toFixed(2)
+        +'% over its remaining '+t.barsLeft+' bars. The projection expires with this session — '
+        +'unfilled at the close, exit at market.'};
+    a.why=a.why+' — but this session projects +'+t.pct.toFixed(2)+'% over its remaining '
+      +t.barsLeft+' bars, so work the exit at '+fmtINR(level)
+      +(capped?' (its own target, which the projection overshoots)':'')
+      +' rather than hitting the bid at '+fmtINR(px)
+      +'. The projection expires with this session: unfilled at the close, exit at market.';
+    return a;
+  };
+  const _exit=(a)=>_withExecution(_withResting(a));
+  const avg=Number(pos?.avg);
+  const ltp=(()=>{
+    const scan=Number(s&&s.price);
+    if(scan>0) return scan;
+    const p2=Number(pos&&pos.ltp);
+    return p2>0?p2:0;
+  })();
+  // THE TAPE IS READ FIRST, WHATEVER DECIDES. A stop-driven exit used to say only "stop breached"
+  // and the tape lived in a tooltip built from another window - which is how one row could carry
+  // three stories. The boundary check still has FIRST authority (a blown stop is not a matter of
+  // opinion); it simply no longer speaks alone.
+  const rd=getIntradayRead(sym);
+  const {tt,span}=getPositionFlowRead(rd);
+  const _proj=(rd&&rd.current)?rd.eod:null;
+  const _projNote=(!_proj||!Number.isFinite(_proj.pct))
+    ?((rd&&rd.current&&rd.todayTraj&&rd.todayTraj.pressureConverting===false)
+        ?'; this session has no close projection - its imbalance is being absorbed rather than converted'
+        :'')
+    :('; this session projects '+(_proj.pct>=0?'+':'')+_proj.pct.toFixed(2)+'% into the close'
+       +(Number.isFinite(_proj.close)?' ('+fmtINR(_proj.close)+')':''));
+  const _tapeNote=tt
+    ?('; today\u2019s tape is net '+(tt.cvdPct>=0?'+':'')+(100*tt.cvdPct).toFixed(0)+'% of everything traded'
+      +(Number.isFinite(tt.costRatio)?' at a cost ratio of '+tt.costRatio.toFixed(2)
+        +' against the day\u2019s median '+getIntradayThinCut().toFixed(2):'')+span+_projNote)
+    :'; no 5-minute read for this session yet';
+
   if(s&&avg>0&&ltp>0){
     const policy=getRowExitPolicy(s,avg);
     const target=avg*(1+Number(policy.targetPct||0)/100),stop=avg*(1-Number(policy.stopPct||0)/100);
-    if(target>avg&&ltp>=target)return _withResting({act:'EXIT ALL',qty,tone:'green',why:`target reached at ${fmtINR(target)}`});
-    if(stop>0&&ltp<=stop)return _withResting({act:'EXIT ALL',qty,tone:'red',why:`stop breached at ${fmtINR(stop)}`});
+    if(target>avg&&ltp>=target)return _exit({act:'EXIT ALL',qty,tone:'green',
+      why:`target reached at ${fmtINR(target)}`+_tapeNote});
+    if(stop>0&&ltp<=stop)return _exit({act:'EXIT ALL',qty,tone:'red',
+      why:`stop breached at ${fmtINR(stop)}`+_tapeNote});
   }
-  const rd=getIntradayRead(sym);
-  const {tt,span}=getPositionFlowRead(rd);
 
   // NO READ IS NOT A HOLD. Saying "hold" on no evidence is the thing this panel was doing wrong in
   // a different costume. v1171 fetches held names automatically, so this clears itself.
@@ -8063,13 +8154,13 @@ function getPositionAction(sym,pos){
   const shares=n=>Math.round(n).toLocaleString('en-IN');
 
   // BOTH readings against it - supply is arriving AND nothing is holding it up.
-  if(sold&&thin) return _withResting({act:'EXIT ALL',qty,tone:'red',
+  if(sold&&thin) return _exit({act:'EXIT ALL',qty,tone:'red',
     why:'sold into all session (net '+(100*tt.cvdPct).toFixed(0)+'%) and 1% down costs only '
       +shares(tt.dnCost)+' shares against '+shares(tt.upCost)+' up'+span});
   // ONE against it - reduce, do not abandon.
   if(sold||thin){
     const half=Math.max(1,Math.floor(qty/2));
-    return _withResting({act:'EXIT '+half,qty:half,tone:'red',
+    return _exit({act:'EXIT '+half,qty:half,tone:'red',
       why:(sold?('net selling this session ('+(100*tt.cvdPct).toFixed(0)+'% of everything traded), but demand still costs more to move')
               :('nothing holding it up - 1% down costs '+shares(tt.dnCost)+' shares against '+shares(tt.upCost)
                  +' up (ratio '+tt.costRatio.toFixed(2)+' against the day’s own median '+thinCut.toFixed(2)
@@ -8080,7 +8171,8 @@ function getPositionAction(sym,pos){
   const pressing=Number.isFinite(tt.pressurePct)&&tt.pressurePct>0;
   const reviewDays=getEffectiveReviewDays(),daysHeld=getOpenPositionDaysHeld(sym,qty);
   if(reviewDays>0&&daysHeld!=null&&daysHeld>=reviewDays&&!pressing){
-    return _withResting({act:'EXIT ALL',qty,tone:'red',why:`held ${daysHeld}d against the learned ${reviewDays}d review horizon, with no unspent buying pressure`});
+    return _exit({act:'EXIT ALL',qty,tone:'red',
+      why:`held ${daysHeld}d against the learned ${reviewDays}d review horizon, with no unspent buying pressure`+_projNote});
   }
   if(pressing&&s){
     try{
@@ -8093,12 +8185,12 @@ function getPositionAction(sym,pos){
       const add=(Number.isFinite(cap)&&cap>0&&buyP>0)?Math.floor(cap/buyP):0;
       if(add>0) return {act:'ADD '+add,qty:add,tone:'green',
         why:'bought all session (net +'+(100*tt.cvdPct).toFixed(0)+'%), 1% up costs '+shares(tt.upCost)
-          +' shares against '+shares(tt.dnCost)+' down, and '+tt.pressurePct.toFixed(2)+'% of buying is still unspent'+span};
+          +' shares against '+shares(tt.dnCost)+' down, and '+tt.pressurePct.toFixed(2)+'% of buying is still unspent'+span+_projNote};
     }catch(e){}
   }
   return {act:'HOLD',qty:0,tone:'amber',
     why:'demand still costs more to move than supply (net +'+(100*tt.cvdPct).toFixed(0)+'%'
-      +(Number.isFinite(tt.costRatio)?', ratio '+tt.costRatio.toFixed(2):'')+')'+span};
+      +(Number.isFinite(tt.costRatio)?', ratio '+tt.costRatio.toFixed(2):'')+')'+span+_projNote};
 }
 function getHeldTopUpNotionalCap(s,buyP,heldMap=null){
   const held=(heldMap||getHeldPositionMap())[s.symbol];
@@ -8525,7 +8617,11 @@ function renderTable(){
         const rd=getIntradayRead(s.symbol);
         if(!rd||!rd.current) return `<span style="color:var(--t3)" title="${escHtml(rd?('Last read was '+rd.on+', not this session.'):'Not checked on the 5-minute tape yet.')}">—</span>`;
         const t=rd.eod;
-        if(!t) return '<span style="color:var(--t3)" title="No projection: the current session has under three bars, or carries no measurable unspent pressure yet.">—</span>';
+        if(!t) return `<span style="color:var(--t3)" title="${escHtml(
+          rd.todayTraj&&rd.todayTraj.pressureConverting===false
+          ?'No projection: this session\u2019s imbalance is being ABSORBED, not converted — its unspent pressure '
+           +'points one way and its own price slope the other, so there is no honest close to quote.'
+          :'No projection: the current session has under three bars, or carries no measurable unspent pressure yet.')}">—</span>`;
         return `<span style="color:${t.pct>=0?'var(--green)':'var(--red)'};font-weight:700" title="${escHtml(
           'Unspent pressure '+(t.pressurePct>=0?'+':'')+t.pressurePct.toFixed(2)+'% THIS SESSION, capped by what this stock can travel in the '
           +t.barsLeft+' bars left ('+t.avgMovePct.toFixed(3)+'% per '+t.stepMin+'-minute bar = '
