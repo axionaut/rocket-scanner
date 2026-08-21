@@ -1,5 +1,5 @@
-const BUILD_TS='2026-08-21 16:59 IST'; // release build time (IST)
-const APP_VERSION=1214; // v1214: Methodology and Performance now map the live decision and learning paths.
+const BUILD_TS='2026-08-21 17:17 IST'; // release build time (IST)
+const APP_VERSION=1215; // v1215: user settings are authoritative; recommendation rows name surveillance risks.
 // v1093: a baseline reward:risk MEASURED on the cross-section (last completed bhav session) instead of learned from the owner's own fills - reported on every row, deliberately not enforced. Includes v1092: position size split by Radar score / stop distance, so equally-scored names carry equal RUPEE risk, plus an opt-in Risk /trade cap.
 // v556: parse the NSE Market Activity Report (MA<date>.csv) — official Nifty %, advances/declines and sector index moves shown as market CONTEXT in the status bar (EOD data, display only, never fed into per-row scoring); MA added to the ℹ️ file manifest.
 // v555 market-cycle stage awareness (stateless, self-calibrating): per-row stage label (1 accumulation · 2 breakout · 3 event · 4 profit-booking · 5 re-accumulation · 6 second-leg); a quiet-accumulation signal (conjunction-of-percentiles) injected via the rocket-diagnostic weighting; sell-the-news decay off Recent earnings date (horizon = review days). v1065 makes the market-breadth gauge an entry-eligibility input while still never changing ranking.
@@ -113,8 +113,8 @@ const TRADEBOOK_STORE='rs_tradebook';
 const TRADEBOOK_META_STORE='rs_tradebook_meta_v1';
 const TRADE_TIMING_CONTEXT_STORE='rs_trade_timing_context_v1';
 const SURV_RULE_STORE='rs_surv_rules';
-// v1211: set once, the first time v1169's retirement is applied to an existing brain. After that
-// the owner's saved set is authoritative and nothing strips it again - see loadSurvRules.
+const USER_SETTINGS_META_STORE='rs_user_settings_meta_v1';
+// Legacy provenance only. v1215 never strips saved rules, even when this old marker is absent.
 const SURV_RETIRE_MARK='rs_surv_retired_v1169';
 const SURV_CORR_STORE='rs_surv_corr';
 const SAME_DAY_EXIT_OPPORTUNITY_STORE='rs_same_day_exit_opportunity_v3';
@@ -252,6 +252,23 @@ function mergeCumulativeBrain(first,second){
   const base=(first&&typeof first==='object')?first:{};
   const incoming=(second&&typeof second==='object')?second:{};
   const merged={...base,...incoming};
+  // User settings are not cumulative evidence. Resolve them by their own write clock; when two
+  // legacy copies disagree without clocks, preserve the local/base copy instead of letting an
+  // arbitrarily older cloud file reset this browser. Every current settings write stamps its key.
+  const protectedSettings=[SURV_RULE_STORE,'rs_goal_v1',TRADE_INPUTS_STORE];
+  const baseMeta=(base[USER_SETTINGS_META_STORE]&&typeof base[USER_SETTINGS_META_STORE]==='object')?base[USER_SETTINGS_META_STORE]:{};
+  const incomingMeta=(incoming[USER_SETTINGS_META_STORE]&&typeof incoming[USER_SETTINGS_META_STORE]==='object')?incoming[USER_SETTINGS_META_STORE]:{};
+  const mergedMeta={...baseMeta};
+  protectedSettings.forEach(key=>{
+    const hasBase=Object.prototype.hasOwnProperty.call(base,key);
+    const hasIncoming=Object.prototype.hasOwnProperty.call(incoming,key);
+    const bt=Number(baseMeta[key])||0,it=Number(incomingMeta[key])||0;
+    if(hasBase&&hasIncoming) merged[key]=it>bt?incoming[key]:base[key];
+    else if(hasBase) merged[key]=base[key];
+    else if(hasIncoming) merged[key]=incoming[key];
+    if(Math.max(bt,it)>0) mergedMeta[key]=Math.max(bt,it);
+  });
+  if(Object.keys(mergedMeta).length) merged[USER_SETTINGS_META_STORE]=mergedMeta;
   const a=base[TRADE_TIMING_CONTEXT_STORE],b=incoming[TRADE_TIMING_CONTEXT_STORE];
   if(a?.entries||b?.entries){
     const entries={...(a?.entries||{}),...(b?.entries||{})};
@@ -739,6 +756,12 @@ const FS = (() => {
     }
   }
 
+  function setUserSetting(key,value){
+    const meta={...((_brain[USER_SETTINGS_META_STORE]&&typeof _brain[USER_SETTINGS_META_STORE]==='object')?_brain[USER_SETTINGS_META_STORE]:{})};
+    meta[key]=Date.now();
+    setMultiple({[key]:value,[USER_SETTINGS_META_STORE]:meta});
+  }
+
   function get(key){ return _brain[key]??null; }
   function load(brain){
     const raw=(brain&&typeof brain==='object')?brain:{};
@@ -788,7 +811,7 @@ const FS = (() => {
   function hasLocalBrainFolder(){ return !!_localDirHandle; }
   function getActiveLocalDirectoryHandle(){ return _localDirHandle; }
 
-  return {init,connect,needsReconnect,isConfigured,setClientId,isConnected,read,readJsonFile,writeJsonFile,readUploadText,readUploadFile,saveUploadedInputs,write,set,setMultiple,get,load,loadFromDisk,ensureLoaded,refreshCloudIndex,verifyConnection,getBrain,reset,folderName,hasFolder,setLocalDirectoryHandle,getStoredUploadDirHandle,hasLocalBrainFolder,getActiveLocalDirectoryHandle};
+  return {init,connect,needsReconnect,isConfigured,setClientId,isConnected,read,readJsonFile,writeJsonFile,readUploadText,readUploadFile,saveUploadedInputs,write,set,setMultiple,setUserSetting,get,load,loadFromDisk,ensureLoaded,refreshCloudIndex,verifyConnection,getBrain,reset,folderName,hasFolder,setLocalDirectoryHandle,getStoredUploadDirHandle,hasLocalBrainFolder,getActiveLocalDirectoryHandle};
 })();
 
 function updateFolderUI(){
@@ -961,7 +984,7 @@ async function connectCloudStorage(opts={}){
 }
 
 // ── One-time key migration: move old versioned keys → clean names ──
-// Deletes old key FIRST to free space, then writes new. Safe to run repeatedly.
+// Copies first and deletes the old key only after the replacement write succeeds.
 (function migrateKeys(){
   const OLD_TO_NEW={
     'rscanner_v4_filters':SCANNER_STORE,'rscanner_v5_filters':SCANNER_STORE,
@@ -981,12 +1004,11 @@ async function connectCloudStorage(opts={}){
       }
       const val=localStorage.getItem(oldKey);
       if(val){
-        // Delete old first to free space, then write new
-        try{localStorage.removeItem(oldKey);}catch(e){}
         try{localStorage.setItem(newKey,val);}catch(e){
-          // If write fails, snapshot rebuilds on next upload, others are small
-          console.warn('Migration write failed for',newKey,'— will rebuild on next scan');
+          console.warn('Migration write failed for',newKey,'— preserving the old setting');
+          continue;
         }
+        try{localStorage.removeItem(oldKey);}catch(e){}
       }
     }
   }catch(e){console.warn('Key migration:',e);}
@@ -1025,6 +1047,7 @@ let MARKET_REGIME=null;  // v1076: market regime stamped onto recorded outcomes;
 let NSE_NON_EQ=new Set(); // symbols in non-EQ series (BE,BZ,SZ,SM,ST) — excluded from display, kept in learning
 let NSE_HOLIDAYS=new Set(); // Set of 'YYYY-MM-DD' strings for NSE trading holidays
 let SURV_CUSTOM_RULES=[]; // [{key,column,label}] all surveillance rules — user-managed, persisted in brain
+let SURV_RULES_RESTORE_STATE='unloaded'; // unloaded | loaded | seeded | error; empty is a valid loaded table
 let SURV_FILE_RULES=[]; // [{key,column,label,manual:false}] — populated from actual REG1 file in parseSurv; replaces SURV_DEFAULT_RULES
 let SURV_MISSING_RULES=new Set(); // keys of custom rules whose column was not found in the last REG1 file — all stocks blocked as precaution
 let SURV_HEADERS=[]; // exact REG1 headers loaded this session
@@ -1334,19 +1357,6 @@ const SURV_SEED_RULES=[
   {column:'Unsolicited_SMS',label:'Unsolicited SMS'},
   {column:'Social Media Platforms',label:'Social Media Platforms'},
 ];
-const SURV_RETIRED_KEYS=[
-  'scrip_pe_is_greater_than_50_4_trailing_quarters',
-  'eps_in_the_scrip_is_zero_4_trailing_quarters',
-  'loss_making',
-  'high_low_price_variation_greater_than_100perc_in_previous_6_months',
-  'pledge','total_pledge',
-  'the_overall_encumbered_share_in_the_scrip_is_more_than_50_percent',
-  'less_than_100_unique_pan_traded_in_previous_30_days',
-  'sme_scrip_is_not_regularly_traded',
-  'mandatory_market_making_period_in_sme_scrip_is_over',
-  'derivative_contracts_in_the_scrip_to_be_moved_out_of_f_and_o',
-];
-
 function getSurvRules(){
   const seen=new Set();
   return SURV_CUSTOM_RULES.map(rule=>{
@@ -1361,43 +1371,37 @@ function getSurvRules(){
   });
 }
 function saveSurvRules(){
-  try{FS.set(SURV_RULE_STORE,SURV_CUSTOM_RULES);}catch(e){console.warn('Could not save surveillance rules',e);}
+  try{SURV_RULES_RESTORE_STATE='loaded';FS.setUserSetting(SURV_RULE_STORE,SURV_CUSTOM_RULES);}catch(e){console.warn('Could not save surveillance rules',e);}
 }
 function loadSurvRules(){
   try{
-    const raw=FS.get(SURV_RULE_STORE);
-    if(raw&&Array.isArray(raw)&&raw.length>0){
+    const brain=FS.getBrain()||{};
+    const exists=Object.prototype.hasOwnProperty.call(brain,SURV_RULE_STORE);
+    const raw=exists?brain[SURV_RULE_STORE]:null;
+    if(exists){
+      if(!Array.isArray(raw)) throw new Error('Saved surveillance rules are not an array; preserving the current table.');
       const parsed=raw.map(rule=>{
         const column=String(rule.column||rule.label||'').trim();
         return column?{key:survRuleKey(column),column,label:String(rule.label||column).trim()}:null;
       }).filter(Boolean);
-      // v1211: v1169 retired eleven CRITERIA columns because seeding them made a hard removal out of
-      // "this company has a high PE". Its own note promised "adding one back by hand still works and
-      // is still respected - this only undoes the seeding, it does not police the owner". It did not:
-      // the filter sat in loadSurvRules, which reads the SAVED set on EVERY load, so a rule the owner
-      // re-added was stripped again on the next boot and silently saved back without it. The
-      // retirement is a ONE-TIME migration of an existing brain, applied once and then recorded.
-      let retired=false;
-      if(!FS.get(SURV_RETIRE_MARK)){
-        SURV_CUSTOM_RULES=parsed.filter(r=>SURV_RETIRED_KEYS.indexOf(r.key)<0);
-        retired=SURV_CUSTOM_RULES.length!==parsed.length;
-      } else {
-        SURV_CUSTOM_RULES=parsed;
-      }
+      // v1215: the migration is retired. A missing marker is not evidence that a saved rule was
+      // seeded rather than deliberately re-added by the owner, so no saved rule is ever stripped.
+      SURV_CUSTOM_RULES=parsed; // including [] — an empty table is a valid user setting
+      SURV_RULES_RESTORE_STATE='loaded';
       try{ FS.set(SURV_RETIRE_MARK,1); }catch(e){}
-      if(retired) saveSurvRules();
     } else {
-      // First-time: seed with default rules
+      // True absence only: seed once and persist the provenance immediately.
       SURV_CUSTOM_RULES=SURV_SEED_RULES.map(r=>({key:survRuleKey(r.column),column:r.column,label:r.label}));
+      SURV_RULES_RESTORE_STATE='seeded';
+      FS.setUserSetting(SURV_RULE_STORE,SURV_CUSTOM_RULES);
+      FS.set(SURV_RETIRE_MARK,1);
     }
+    return true;
   }catch(e){
-    // A read failure is not a licence to replace the owner's table. Seed ONLY when nothing was
-    // stored; if something was stored and could not be understood, leave whatever is already in
-    // memory alone rather than overwriting a saved set with defaults.
     console.warn('Could not load surveillance rules',e);
-    if(!Array.isArray(SURV_CUSTOM_RULES)||!SURV_CUSTOM_RULES.length){
-      SURV_CUSTOM_RULES=SURV_SEED_RULES.map(r=>({key:survRuleKey(r.column),column:r.column,label:r.label}));
-    }
+    SURV_RULES_RESTORE_STATE='error';
+    showToast('Saved surveillance rules could not be read. The app preserved the current table and will not overwrite the saved setting.',7000,true);
+    return false;
   }
 }
 function syncSurvRuleRows(savedRows){
@@ -5212,7 +5216,7 @@ function _applyGoalChange(){
   const w=parseFloat(document.getElementById('goalWd')?.value);
   const wf=String(document.getElementById('goalWdFreq')?.value||'').trim();
   const cur=getGoalConfig();
-  _goalCfgMemo=null;FS.set(GOAL_STORE,{
+  _goalCfgMemo=null;FS.setUserSetting(GOAL_STORE,{
     target:t>0?t:cur.target,
     endDate:/^\d{4}-\d{2}-\d{2}$/.test(e)?e:cur.endDate,
     withdrawMonthly:cur.withdrawMonthly,           // legacy field, kept so an older build still reads
@@ -5960,10 +5964,19 @@ function renderStats(){
 }
 
 const COL_ORDER_LS='rs_col_order_v1';
-function loadColOrders(){try{return JSON.parse(localStorage.getItem(COL_ORDER_LS)||'{}')||{};}catch(e){return {};}}
-function saveColOrder(tableKey,keys){try{const all=loadColOrders();all[tableKey]=keys;localStorage.setItem(COL_ORDER_LS,JSON.stringify(all));}catch(e){}}
+function loadColOrders(){
+  try{return JSON.parse(localStorage.getItem(COL_ORDER_LS)||'{}')||{};}
+  catch(e){console.warn('Could not load saved column order; preserving the unreadable setting.',e);return null;}
+}
+function saveColOrder(tableKey,keys){
+  try{
+    const all=loadColOrders();
+    if(all===null){showToast('Saved column order is unreadable and was not overwritten.',5000,true);return false;}
+    all[tableKey]=keys;localStorage.setItem(COL_ORDER_LS,JSON.stringify(all));return true;
+  }catch(e){console.warn('Could not save column order',e);return false;}
+}
 function applyColOrder(tableKey,cols){
-  const saved=loadColOrders()[tableKey];
+  const saved=(loadColOrders()||{})[tableKey];
   if(!Array.isArray(saved)||!saved.length) return cols;
   const byKey=new Map(cols.map(c=>[c.key,c]));
   const ordered=saved.map(k=>byKey.get(k)).filter(Boolean);
@@ -8979,6 +8992,12 @@ function radarSeriesBandPill(s){
   const title=ok?'Active EQ security; eligible for the Zerodha basket.':'Ineligible for the basket: '+escHtml((s.gateReasons||[]).slice(0,3).join(', ')||'exchange eligibility');
   return `<span class="info-pill ${ok?'pill-green':'pill-red'}" style="padding:2px 8px;font-size:12px" title="${title}">${escHtml(s.series||'—')} · ${band}</span>`;
 }
+function radarSurveillanceNames(s){
+  const flags=(s?.meta?.flags||[]).map(x=>String(x||'').trim()).filter(Boolean);
+  if(!flags.length)return '';
+  const names=flags.join(' · ');
+  return `<div class="radar-surveillance-names" style="font-size:10px;color:var(--red);max-width:170px;line-height:1.25;margin-top:2px;white-space:normal;overflow-wrap:anywhere" title="NSE REG1 surveillance: ${escHtml(names)}">⚠ ${escHtml(names)}</div>`;
+}
 function intradayVerdictFace(v,has){
   // v1207: `unverified` is its own face. It must not read as confirmed (nothing has checked it) and
   // must not read as rejected (nothing has condemned it) - the current session cannot speak yet.
@@ -9060,7 +9079,7 @@ function renderTable(){
       // TradingView link since v1070, so the "one symbol interaction everywhere" rule was true of the
       // panels and quietly false of the main table - which is why swapping to Zerodha missed it.
       symbol:`<td style="font-family:'Plus Jakarta Sans',sans-serif">${intradayRowButton(s)}${symbolChartButton(String(s.symbol),
-        `<div style="font-weight:700;font-size:15px;color:var(--t1);max-width:170px;overflow:hidden;text-overflow:ellipsis">${escHtml(s.symbol)}${(()=>{const flags=s.meta?.flags||[];if(!flags.length)return '';return `<span style="font-size:12px;background:rgba(239,68,68,.15);color:var(--red);border-radius:4px;padding:1px 5px;margin-left:5px;font-weight:700;vertical-align:middle" title="NSE surveillance flags: ${escHtml(flags.join(' · '))}">⚠ ${flags.length}</span>`;})()}${s._held?`<span style="font-size:12px;background:rgba(244,114,182,.15);color:#f472b6;border-radius:4px;padding:1px 5px;margin-left:5px;font-weight:700;vertical-align:middle" title="You already hold this. Held stocks stay in the ranking (v1070) and can be recommended again — buying here ADDS to the existing position.">📌 held</span>`:''}</div><div style="font-size:11px;color:var(--t3);max-width:150px;overflow:hidden;text-overflow:ellipsis" title="${escHtml((s.name||'')+(s.setup?' · '+s.setup:''))}">${radarSeriesBandPill(s)} ${escHtml(s.setup||s.name||'')}</div>`)}</td>`,
+        `<div style="font-weight:700;font-size:15px;color:var(--t1);max-width:170px;overflow:hidden;text-overflow:ellipsis">${escHtml(s.symbol)}${(()=>{const flags=s.meta?.flags||[];if(!flags.length)return '';return `<span style="font-size:12px;background:rgba(239,68,68,.15);color:var(--red);border-radius:4px;padding:1px 5px;margin-left:5px;font-weight:700;vertical-align:middle" title="NSE surveillance flags: ${escHtml(flags.join(' · '))}">⚠ ${flags.length}</span>`;})()}${s._held?`<span style="font-size:12px;background:rgba(244,114,182,.15);color:#f472b6;border-radius:4px;padding:1px 5px;margin-left:5px;font-weight:700;vertical-align:middle" title="You already hold this. Held stocks stay in the ranking (v1070) and can be recommended again — buying here ADDS to the existing position.">📌 held</span>`:''}</div>${radarSurveillanceNames(s)}<div style="font-size:11px;color:var(--t3);max-width:150px;overflow:hidden;text-overflow:ellipsis" title="${escHtml((s.name||'')+(s.setup?' · '+s.setup:''))}">${radarSeriesBandPill(s)} ${escHtml(s.setup||s.name||'')}</div>`)}</td>`,
       setup:`<td style="font-size:13px;color:var(--t2)">${escHtml(s.setup||'—')}${s.stage?' '+radarStagePill(s):''}${(s.modelTriggers||[]).length?' '+radarTriggerPill(s):''}</td>`,
       series:`<td>${radarSeriesBandPill(s)}</td>`,
       price:`<td style="white-space:nowrap">${fmtINR(s.price)}<span style="color:var(--t3)"> · </span><span style="font-size:12px">${fPerf(s.day??s.priceChange)}${s.corpAction?`<span title="Corporate action (${escHtml(s.corpAction)}) — mechanical ex-date move, neutralised in scoring" style="font-size:11px;color:var(--amber);margin-left:4px;cursor:help">⚑</span>`:''}</span></td>`,
@@ -11534,7 +11553,7 @@ async function processFiles(files,sourceLabel,opts={}){
   setFileLoadStatus(sourceLabel||'Scanner Uploads',files,'not in folder');
   // Surveillance rules must exist before REG1 parsing; the unauthorized-boot path can
   // reach here without initApp having seeded them.
-  if(!SURV_CUSTOM_RULES.length){try{loadSurvRules();}catch(e){}}
+  if(SURV_RULES_RESTORE_STATE==='unloaded') loadSurvRules();
   // Any deliberate or automatic load resets the folder-watch baseline so the watcher
   // does not immediately re-process the files it (or the user) just loaded.
   try{_folderWatchAllNseLastModified=getAllNseLastModified([...files]);}catch(e){}
@@ -11790,7 +11809,7 @@ async function initApp(){
 
   // Restore configured surveillance rules, or seed the defaults for a fresh/reset brain,
   // before REG1 ZIP hydration so surveillance monitoring is active on the first new scan.
-  try{loadSurvRules();}catch(e){SURV_CUSTOM_RULES=SURV_SEED_RULES.map(r=>({key:survRuleKey(r.column),column:r.column,label:r.label}));}
+  loadSurvRules();
 
   // Restore saved filters BEFORE hydration: hydration renders, and rendering saves filter
   // state, so reading them back afterwards would persist blank inputs over the real ones.
@@ -11856,7 +11875,7 @@ function saveFilterState(){
     const sig=JSON.stringify(tradeInputs);
     if(sig!==_lastTradeInputSig){
       _lastTradeInputSig=sig;
-      FS.set(TRADE_INPUTS_STORE,tradeInputs);
+      FS.setUserSetting(TRADE_INPUTS_STORE,tradeInputs);
       saveBrainInBackground();
     }
   }catch(e){}
@@ -11888,8 +11907,14 @@ function loadFilterState(){
     const legacy=new Set(['_rank','rocketScore','snapshotChange','tslRefPoints','velocityPotential','delivPct','volume']);
     if(state.sortCol&&!legacy.has(state.sortCol))SCOL=state.sortCol;
     if(state.sortDir&&!legacy.has(state.sortCol||''))SDIR=state.sortDir;
-  }catch(e){console.warn('Could not load filter state',e);}
-  FILTERS_RESTORED=true;
+    FILTERS_RESTORED=true;
+    return true;
+  }catch(e){
+    console.warn('Could not load filter state; persistence remains locked so defaults cannot overwrite it.',e);
+    FILTERS_RESTORED=false;
+    showToast('Saved filters could not be read. Defaults are visible, but saving is locked so the stored settings are not overwritten.',7000,true);
+    return false;
+  }
 }
 // ── Fixed horizontal scrollbar always at viewport bottom ──
 function initFixedScroll(){
