@@ -1,5 +1,5 @@
-const BUILD_TS='2026-08-21 15:23 IST'; // release build time (IST)
-const APP_VERSION=1211; // v1211: a same-day target may not outrun its session, and a release may not edit the owner's table.
+const BUILD_TS='2026-08-21 16:05 IST'; // release build time (IST)
+const APP_VERSION=1212; // v1212: targets come from the market - its own tape, the session, the circuit - never from his trade history.
 // v1093: a baseline reward:risk MEASURED on the cross-section (last completed bhav session) instead of learned from the owner's own fills - reported on every row, deliberately not enforced. Includes v1092: position size split by Radar score / stop distance, so equally-scored names carry equal RUPEE risk, plus an opt-in Risk /trade cap.
 // v556: parse the NSE Market Activity Report (MA<date>.csv) — official Nifty %, advances/declines and sector index moves shown as market CONTEXT in the status bar (EOD data, display only, never fed into per-row scoring); MA added to the ℹ️ file manifest.
 // v555 market-cycle stage awareness (stateless, self-calibrating): per-row stage label (1 accumulation · 2 breakout · 3 event · 4 profit-booking · 5 re-accumulation · 6 second-leg); a quiet-accumulation signal (conjunction-of-percentiles) injected via the rocket-diagnostic weighting; sell-the-news decay off Recent earnings date (horizon = review days). v1065 makes the market-breadth gauge an entry-eligibility input while still never changing ranking.
@@ -8149,6 +8149,59 @@ function getUniverseMedianCapacity(){
   _capMedMemo={all:ALL,val};
   return val;
 }
+// v1212 (owner, standing rule): TARGETS COME FROM THE MARKET, NOT FROM HIS TRADE HISTORY.
+// "The app needs to evolve, not build on past mistakes... the trade history tells you previous
+// logics/versions did not work and that's why we are here." v1105/v1206 priced the target from
+// getReachableTargets().basePct - the p50 of buy -> that-day's-high on his own closed exits - and
+// the "measured optimum of 1.0-1.25 ATR" came from the same pool. Both are records of what earlier
+// versions of THIS APP told him to do. They are removed from the target path.
+//
+// What replaces them is what the market says is still available, most specific source first:
+//   1. the stock's OWN 5-minute tape (Zerodha) - from where we are in the session right now, how
+//      much further did this stock travel to its high on its own prior sessions, median;
+//   2. the session ceiling (ALL NSE) - low1d + one typical day's range, against the live price;
+//   3. its range capacity (ALL NSE) - sqrt(ATR% x rangePct), when there is no session read.
+// All three are bounded by the NSE circuit, which is what it may LEGALLY reach.
+let _tapeRunwayMemo=null;
+function getTapeRunwayPct(sym){
+  const keys=Object.keys(INTRADAY_BARS||{});
+  const sig=keys.length+':'+keys.reduce((t,k)=>t+(INTRADAY_BARS[k]?INTRADAY_BARS[k].length:0),0);
+  if(!_tapeRunwayMemo||_tapeRunwayMemo.sig!==sig) _tapeRunwayMemo={sig,map:new Map()};
+  const s=normSym(sym||'');
+  if(_tapeRunwayMemo.map.has(s)) return _tapeRunwayMemo.map.get(s);
+  let out=null;
+  const bars=INTRADAY_BARS[s];
+  if(Array.isArray(bars)&&bars.length){
+    const byDay={};
+    bars.forEach(b=>{const d=istDayKey(b.t); if(d)(byDay[d]??=[]).push(b);});
+    const days=Object.keys(byDay).sort();
+    if(days.length>=2){
+      const today=byDay[days[days.length-1]].slice().sort((a,b)=>a.t-b.t);
+      const i=today.length-1;
+      const travels=[];
+      days.slice(0,-1).forEach(d=>{
+        const bs=byDay[d].slice().sort((a,b)=>a.t-b.t);
+        if(i>=bs.length) return;               // that session was shorter; no comparable point
+        const ref=Number(bs[i].c);
+        if(!(ref>0)) return;
+        let hi=-Infinity;
+        for(let k=i;k<bs.length;k++){ const h=Number(bs[k].h); if(h>hi) hi=h; }
+        if(hi>0&&isFinite(hi)) travels.push(100*(hi-ref)/ref);
+      });
+      // Two comparable sessions is the minimum that can carry a median at all. Below that the
+      // tape says nothing and the session ceiling answers instead - absence takes the fallback,
+      // never a free pass.
+      if(travels.length>=2){
+        travels.sort((a,b)=>a-b);
+        const n=travels.length;
+        out=n%2?travels[(n-1)/2]:(travels[n/2-1]+travels[n/2])/2;
+        out=Math.max(0,+out.toFixed(2));
+      }
+    }
+  }
+  _tapeRunwayMemo.map.set(s,out);
+  return out;
+}
 function getRowExitPolicy(row,buyPrice=null,activeInfo=null,nudgeInfo=null){
   const active=activeInfo||getActiveTargetInfo();
   const anchor=Number(active.tgtPct)>0?Number(active.tgtPct):Math.abs(Number(TRADEBOOK_STATS?.adaptiveTGT))||null;
@@ -8178,40 +8231,32 @@ function getRowExitPolicy(row,buyPrice=null,activeInfo=null,nudgeInfo=null){
   // v1083: what the stock may PLAUSIBLY reach this session - the day's low plus one typical day's
   // range. Resolved HERE, above the nudge, because v1211 bounds the target with it.
   const sc=getSessionCeilingInfo(row,bandRef);
-  const reach=getReachableTargets();
-  // v1206: the measured level, scaled into this stock's own capacity. Inert (and identical to
-  // v1119) when the row has no capacity or the cross-section is too small to have a median.
-  const capMed=getUniverseMedianCapacity();
-  const scaled=(reach.basePct>0&&capacity>0&&capMed>0)?reach.basePct*(capacity/capMed):null;
-  const aspireFull=scaled!=null?scaled:(reach.basePct>0?reach.basePct:capacity);
-  // v1211: reach.basePct is measured buy -> THAT DAY'S high and capacity is a WHOLE-session
-  // magnitude, so the aspiration is same-day by construction. Applied at an arbitrary point inside
-  // the session it double-counts the travel already spent, and a row entered after the move has
-  // happened is handed a target its own session cannot reach. Bound it by what is actually left
-  // from the reference price. basePct stays the floor, so this only ever lowers the EXIT PRICE:
-  // every eligibility test still reads basePct (v1206), so no row can be removed by the cap.
+  // v1212: the aspiration is MARKET-DERIVED. getReachableTargets() is deliberately NOT consulted
+  // here any more - it is a percentile of his own closed exits, i.e. of the old logic's decisions.
+  const tapeRunwayPct=getTapeRunwayPct(row?.symbol);
   const sessionRunwayPct=(sc&&Number.isFinite(sc.runwayPct))?Math.max(0,sc.runwayPct):null;
-  // v1211 HELD, NOT ENFORCED. Bounding the aspiration by sessionRunwayPct is measured-correct on
-  // the arming defect (63% of rows armed above their own runway; HINDZINC 2.85% against 1.02%
-  // left, and the session in fact topped 0.08% from the ceiling estimate) but it CONTRADICTS the
-  // v1105/v1206 measurement that put the optimum at 1.00-1.25 ATR on 214 closed sells: the cap
-  // pulls the median to 0.90 ATR. reach.basePct is already measured buy -> THAT DAY'S high from
-  // real entry times, so it embeds typical entry timing and capping again may double-correct.
-  // That is an evidence question, not a reasoning one. The runway is REPORTED on every row
-  // (sessionRunwayPct/sessionCeiling, and rangeExhausted flags the impossible ones) and the cap
-  // stays off until forward outcomes say it helps. Owner decision - see CHANGELOG v1211.
-  const aspire=aspireFull;
-  const sessionCapped=false;
-  if(targetPct>0&&active.source!=='manual'&&aspire>0){
-    targetPct=toStep(Math.max(basePct,aspire));
+  const ucEarly=getUpperCircuitInfo(row,bandRef);
+  const circuitRunwayPct=(ucEarly&&Number.isFinite(ucEarly.runwayPct))?Math.max(0,ucEarly.runwayPct):null;
+  let available=null, availableSource='';
+  if(tapeRunwayPct!=null){ available=tapeRunwayPct; availableSource='its own 5-minute tape'; }
+  else if(sessionRunwayPct!=null){ available=sessionRunwayPct; availableSource='the session ceiling'; }
+  else if(capacity>0){ available=capacity; availableSource='its range capacity'; }
+  // The circuit is what it may LEGALLY reach and bounds every estimate.
+  if(available!=null&&circuitRunwayPct!=null) available=Math.min(available,circuitRunwayPct);
+  // ...and so does the stock's own range capacity. A session ceiling measured from a low the stock
+  // has already left can exceed what the stock actually does in a day (DHARIWAL priced 22.35% on a
+  // 17.67% capacity, UHTL 3.80% on 3.63%), and a target the stock has never travelled is the same
+  // defect as one the session cannot deliver, pointing the other way.
+  if(available!=null&&capacity>0) available=Math.min(available,capacity);
+  // A MANUAL Target Anchor is an owner input and outranks every measurement, exactly as before.
+  if(available!=null&&targetPct>0&&active.source!=='manual'){
+    // The goal/harvest anchor no longer RAISES the target to a level the session cannot deliver -
+    // that is exactly how HINDZINC was armed at 2.85% with 0.13% of tape left. It survives as the
+    // viability floor below, which is where an unaffordable trade belongs.
+    targetPct=toStep(available);
     nudgePct=+(targetPct-basePct).toFixed(2);
-    if(nudgePct>0) targetSource+=scaled!=null
-      ? ' + reachable level ('+reach.samples+' exits) at '+(capacity/capMed).toFixed(2)+'x the median stock capacity'
-      : reach.basePct>0
-      ? ' + reachable level ('+reach.samples+' exits)'
-      : ' + stock capacity (ATR fallback)';
-    if(nudgePct>0&&sessionCapped)
-      targetSource+=', capped at the '+sessionRunwayPct.toFixed(2)+'% this session has left';
+    targetSource='what the market has left, read from '+availableSource
+      +(circuitRunwayPct!=null&&Math.abs(available-circuitRunwayPct)<1e-9?' (bounded by the NSE circuit)':'');
   }
   const stopPct=getRowStopDistancePct(row);
   const baseRR=getBaselineRewardRisk();
@@ -8224,7 +8269,17 @@ function getRowExitPolicy(row,buyPrice=null,activeInfo=null,nudgeInfo=null){
   const uc=getUpperCircuitInfo(row,bandRef);
   const bandLimited=!!(uc&&basePct>0&&uc.runwayPct<basePct);
   const rangeExhausted=!!(sc&&basePct>0&&sc.runwayPct<basePct);
-  const viable=basePct>0&&!bandLimited&&(capacity==null||basePct+1e-9>=minGrossPct);
+  // v1212: viability is decided on the target the row will ACTUALLY be given - but only where the
+  // number that set it is HARD. v1112 (owner) removed the statistical session ceiling from this
+  // decision after measuring twice that the cohort it deletes is the cohort that reaches target
+  // (349 of 900 rows, most of the top ten), and that stands: a low session ceiling may lower the
+  // PRICE printed on a row, it may never be the reason the row is withheld.
+  // The stock's OWN 5-minute tape is not a statistical ceiling - it is what this stock actually did
+  // from this point in the session, on its own sessions. Where that exists it decides affordability,
+  // and the row is withheld when it cannot clear costs plus the desired net. Where it does not, the
+  // basis falls back to the stock's own range capacity, exactly as before v1212.
+  const viabilityBasis=(tapeRunwayPct!=null)?targetPct:(capacity>0?capacity:basePct);
+  const viable=viabilityBasis>0&&!bandLimited&&(minGrossPct==null||viabilityBasis+1e-9>=minGrossPct);
   const stopSource=(Math.abs(Number(row?.slPct))>0)?'explicit stock stop'
     :hasAtr?'ATR stock stop'
     :(Number(TRADEBOOK_STATS?.adaptiveSL)>0?'learned portfolio fallback':'minimum-risk fallback');
@@ -8253,7 +8308,8 @@ function getRowExitPolicy(row,buyPrice=null,activeInfo=null,nudgeInfo=null){
     rangeExhausted,
     sessionCeiling:sc?+sc.ceiling.toFixed(2):null,
     sessionRunwayPct:sc?+sc.runwayPct.toFixed(2):null,
-    sessionCapped,
+    tapeRunwayPct,circuitRunwayPct,marketAvailablePct:available!=null?+available.toFixed(2):null,
+    viabilityBasisPct:viabilityBasis>0?+viabilityBasis.toFixed(2):null,
     targetSource,
     stopSource,
     anchorPct:anchor>0?+anchor.toFixed(2):null,
