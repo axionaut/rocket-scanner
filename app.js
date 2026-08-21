@@ -1,5 +1,5 @@
-const BUILD_TS='2026-08-21 16:36 IST'; // release build time (IST)
-const APP_VERSION=1213; // v1213: the trigger tracker could never fire, and said COLLECTING about it.
+const BUILD_TS='2026-08-21 16:59 IST'; // release build time (IST)
+const APP_VERSION=1214; // v1214: Methodology and Performance now map the live decision and learning paths.
 // v1093: a baseline reward:risk MEASURED on the cross-section (last completed bhav session) instead of learned from the owner's own fills - reported on every row, deliberately not enforced. Includes v1092: position size split by Radar score / stop distance, so equally-scored names carry equal RUPEE risk, plus an opt-in Risk /trade cap.
 // v556: parse the NSE Market Activity Report (MA<date>.csv) — official Nifty %, advances/declines and sector index moves shown as market CONTEXT in the status bar (EOD data, display only, never fed into per-row scoring); MA added to the ℹ️ file manifest.
 // v555 market-cycle stage awareness (stateless, self-calibrating): per-row stage label (1 accumulation · 2 breakout · 3 event · 4 profit-booking · 5 re-accumulation · 6 second-leg); a quiet-accumulation signal (conjunction-of-percentiles) injected via the rocket-diagnostic weighting; sell-the-news decay off Recent earnings date (horizon = review days). v1065 makes the market-breadth gauge an entry-eligibility input while still never changing ranking.
@@ -6991,7 +6991,7 @@ function buildOpenPositionsPanel(query=''){
         <span style="font-size:13px;font-weight:800;color:var(--t1);text-transform:uppercase;letter-spacing:.08em">Open Positions${panelFilterTag(rows,shown,query)}</span>
         <span style="font-size:14px;font-weight:700;color:${pnlColor}">${rows.length} live position${rows.length===1?'':'s'} · ${fmtINR(totalCapital)} deployed · ${fmtSignedINR(totalPnl)}</span>
       </div>
-      <div style="font-size:14px;color:var(--t2);line-height:1.5">Live merge of Holdings, Positions, and today's net buys. Held stocks stay excluded from new recommendations; Target, Runner and SL are the row’s CURRENT exit policy — the two target legs the buy basket arms — not a read of the GTTs resting in Zerodha. ${radarNote}</div>
+      <div style="font-size:14px;color:var(--t2);line-height:1.5">Live merge of Holdings, Positions, and today's net buys. Held stocks stay ranked and can be recommended again as bounded ADDs; Target, Runner and SL are the row’s CURRENT exit policy — the two target legs the buy basket arms — not a read of the GTTs resting in Zerodha. ${radarNote}</div>
     </div>
     ${shown.length?`<div class="scroll-x">${table.getHtml()}</div>`:panelNoMatchHtml(query,'open position')}
   </div>`;
@@ -7304,6 +7304,7 @@ function renderPerformance(){
 
   const _navLink=(id,label,show)=>show?`<a href="#${id}" onclick="event.preventDefault();scrollToSection('${id}')" style="padding:4px 12px;border-radius:6px;background:var(--bg-card);border:1px solid var(--border);color:var(--t2);font-size:13px;font-weight:600;text-decoration:none;cursor:pointer;white-space:nowrap">${label}</a>`:'';
   const perfNav=`<nav style="position:sticky;top:var(--hdr-h,72px);z-index:50;background:var(--bg);padding:8px 0 10px;margin-bottom:8px;display:flex;gap:6px;flex-wrap:wrap;border-bottom:1px solid var(--border);box-shadow:0 2px 8px rgba(0,0,0,0.3);overflow-x:auto;-webkit-overflow-scrolling:touch">
+    ${_navLink('perf-guide','🧭 How It Connects',true)}
     ${_navLink('perf-kpi','📊 KPIs',true)}
     ${_navLink('perf-scorecard','🎯 System Scorecard',true)}
     ${_navLink('perf-monthly','📅 Monthly',monthRows.length>0)}
@@ -7312,18 +7313,6 @@ function renderPerformance(){
     ${_navLink('perf-exit-windows','🚪 Exit-time Give-back',hasExitWindows)}
     ${_navLink('perf-stocks','📈 Stocks',p.symBreakdown.length>0)}
   </nav>`;
-  const entryOutcomeText=entrySummary.completed
-    ? `${entrySummary.completed} actual recommended buys assessed over their adaptive outcome windows (${entrySummary.topups} top-ups). Their average best net opportunity is ${entrySummary.avgBestNet>=0?'+':''}${entrySummary.avgBestNet.toFixed(2)}%; their best observed peak velocity averages ${entrySummary.avgVelocity>=0?'+':''}${entrySummary.avgVelocity.toFixed(3)}%/day. These outcomes provide confidence context only and refine the single target policy with sample-size confidence.`
-    : entrySummary.tracked
-      ? `${entrySummary.tracked} actual recommended buys are being tracked across the current ${entrySummary.horizonDays}-trading-day adaptive window. Fresh buys and top-ups are assessed separately; completed outcomes update confidence context and targets.`
-      : `Executed-entry learning is ready. Future completed BUY executions that came from displayed recommendations will be assessed over the adaptive outcome window and fed into confidence context and targets.`;
-  const outcomeText=recSummary.evaluated
-    ? `${recSummary.evaluated} completed engine-shortlist picks assessed across ${recSummary.issueDays} scan days using the adaptive ${recSummary.horizonDays}-day window. ${recSummary.rockets} became rockets (${recSummary.conversionPct}%); observed conversions took ${recSummary.avgRocketDays!=null?recSummary.avgRocketDays+' trading days on average':'an unavailable average time'}. Faster conversions receive more reward, while failures and adverse moves penalise their feature patterns. Average outcome score is ${recSummary.avgOutcomeScore!=null?(recSummary.avgOutcomeScore>=0?'+':'')+recSummary.avgOutcomeScore.toFixed(3):'not available'}; average attainable high move is ${recSummary.avgBestHighPct!=null?(recSummary.avgBestHighPct>=0?'+':'')+recSummary.avgBestHighPct.toFixed(2)+'%':'not available'}.`
-    : `Outcome learning has started. The assessment window is currently ${recSummary.horizonDays} trading days, derived from observed holding duration and rocket-arrival timing.`;
-  const exitOpportunity=getSameDayExitOpportunitySummary();
-  const escapeText=exitOpportunity.exits
-    ? `${exitOpportunity.exits} symbol/date exits have same-day ALL NSE highs recorded. ${exitOpportunity.upsideExits} highs exceeded the quantity-weighted average sell price; sold-value-weighted missed upside averages ${exitOpportunity.avgMissed.toFixed(2)}% (${fmtINR(exitOpportunity.missedValue)}).`
-    : `No same-day exit opportunities have been recorded yet. Load Orders, Tradebook, and ALL NSE for the sell day.`;
   // v1106 (owner): the Recommendation Outcome Feedback panel is gone from Performance. The
   // RECORDING is untouched - rs_recommend_outcomes_delta_v1 still carries every pick's v1085
   // rocket label and is what Leg 2 of the post-close routine grades. Only the readout is removed.
@@ -7375,11 +7364,26 @@ function renderPerformance(){
     ${sc.legacy?`<br>${sc.legacy} older picks carry no recorded target/stop (they predate v1094) and can never resolve, so they are excluded from every percentage above rather than counted as failures.`:''}
   </div>`;
 
+  const activeBoosts=activePostCloseTriggerRules('boost').length;
+  const activeGates=activePostCloseTriggerRules('gate').length;
+  const activeVetos=activePostCloseTriggerRules('veto-on-retired').length;
+  const decidedTriggers=activeBoosts+activeGates+activeVetos;
+  const performanceGuide=`<section id="perf-guide" style="margin:0 0 16px;padding:14px 16px;border-top:1px solid var(--border);border-bottom:1px solid var(--border);background:linear-gradient(90deg,rgba(99,102,241,.08),transparent)">
+    <div style="font-size:13px;font-weight:800;color:var(--t1);text-transform:uppercase;letter-spacing:.08em;margin-bottom:8px">How Performance Connects — What Changes Live Decisions</div>
+    <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(230px,1fr));gap:14px;font-size:13px;line-height:1.55;color:var(--t2)">
+      <div><b style="color:var(--t1)">Realized trades are descriptive.</b><br>The KPI, monthly, stock, holding-time and exit-time sections explain execution results from ${p.roundTrips} closed lots. Trade history may calibrate charges, fallback stop, review horizon and entry cadence; it does not set automatic target magnitude.</div>
+      <div><b style="color:var(--t1)">Forward recommendation cohorts can change ranking, gates, and vetoes.</b><br>The System Scorecard grades picks exactly as issued, target-before-stop within ${ROCKET_HORIZON_DAYS} sessions. Mature feature effects, Indicator Watch corrections and the post-close tracker are the learning path; ${decidedTriggers} post-close trigger${decidedTriggers===1?' is':'s are'} active now (${activeBoosts} boost · ${activeGates} gate · ${activeVetos} veto).</div>
+      <div><b style="color:var(--t1)">Automatic target magnitude comes from market data.</b><br>Each row reads its own 5-minute tape where available, otherwise its session ceiling, otherwise its range capacity, bounded by its NSE circuit and capacity. The portfolio goal/harvest rate is an economic hurdle; a typed manual anchor remains the explicit override.</div>
+      <div><b style="color:var(--t1)">Diagnostics do not become advice by themselves.</b><br>Time-of-day, holding-duration and exit-give-back tables expose patterns and confounding. They change no order directly. Current recommendations still require the Methodology funnel: direction, eligibility, viability, score/rank, and a current confirmed 5-minute read.</div>
+    </div>
+  </section>`;
+
   el.innerHTML=`
     <div style="padding:12px 16px">
       ${perfNav}
       ${periodPillsHtml}
       <div style="font-size:12px;color:var(--t3);margin-bottom:12px">${periodLabel} · ${p.roundTrips} lots</div>
+      ${performanceGuide}
       <div id="perf-kpi">${kpiHtml}</div>
       ${perfCard('System Scorecard — did the picks reach target? <span style="font-size:12px;color:var(--t3);font-weight:400">'+sc.cohorts+' cohorts · target-before-stop within '+ROCKET_HORIZON_DAYS+' trading days</span>',scHeadline+scTbl.getHtml()+bandTable+scNote,'','perf-scorecard')}
       ${monthRows.length?perfCard('Monthly Breakdown',monthTbl.getHtml(),'','perf-monthly'):''}
@@ -7859,14 +7863,16 @@ function _renderMethodologyInner(){
         <li>Winsorizes transformed numeric inputs at the 2nd and 98th percentiles.</li>
         <li>Converts values to ranks across the uploaded universe, preventing unit scale from dominating.</li>
         <li>Reports each feature’s separation between today’s day-1 rockets (reached target before stop) and the rest for audit, but never feeds that same-session label back into the score.</li>
-        <li>Blends that diagnostic with finance-aware priors for momentum, participation, breakout structure, liquidity, volatility and trend.</li>
+        <li>Blends finance-aware priors with mature forward effects measured from previously issued cohorts. Same-session rocket separation is audit-only and never changes a feature direction or weight.</li>
         <li>Cross-checks official delivery, close versus average price, 52-week position, deal activity and surveillance flags.</li>
         <li>Strongly penalizes non-EQ, inactive and sub-10% price-band securities while retaining them in the visible ranking for audit. Only eligible securities enter the basket.</li>
         <li>Penalizes a stock whose typical daily range cannot comfortably cover the session's target: above one normal daily range the target starts costing points, above two the penalty is severe. The bar is the target you actually need, not a fixed percentage — before v1113 it asked for a 10% move, the rocket definition retired in v1085.</li>
       </ol>${diagHTML}</div>
-      <div class="m-card"><h4>Held Suppression & Basket</h4><p>Held positions (Holdings + Positions + today's net Orders buys) never re-enter the buy ranking. Quantities come from the charge-aware score-weighted allocator and can never exceed 0.10% of that stock's daily rupee turnover; missing turnover blocks a market order. Every exported order gets its own target from that stock's ATR/range capacity blended with the portfolio target anchor, plus its own ATR-scaled stop inside the existing ${SL_MIN_PCT.toFixed(1)}%–${SL_MAX_PCT.toFixed(1)}% risk rails.</p></div>
-      <div class="m-card"><h4>What Still Learns</h4><p>The scorer itself is stateless by design. The execution layer keeps learning portfolio context from your results: the target anchor from later attainable highs, the fallback stop and review horizon from realised outcomes, and the same-day exit diagnostic from your sells against that day's highs. Max Allocation is arithmetic, not learned risk sizing: Capital divided by average positions entered per day.</p></div>
+      <div class="m-card"><h4>Held Positions & Basket</h4><p>Held positions stay ranked and may be recommended again as ADDs. The add is bounded by the same allocation rails plus a cushion that prevents the blended position from crossing its own stop into a loss. Quantities come from the charge-aware score/stop-weighted allocator and can never exceed 0.10% of that stock's daily rupee turnover; missing turnover blocks a market order. Automatic target magnitude comes from the stock's own 5-minute tape where available, otherwise its session ceiling, otherwise its ATR/range capacity; the NSE circuit and the stock's capacity bound it. Stops remain stock-specific inside the ${SL_MIN_PCT.toFixed(1)}%–${SL_MAX_PCT.toFixed(1)}% risk rails.</p></div>
+      <div class="m-card"><h4>What Learns — and What Does Not</h4><p>The same-session cross-section supplies relative ranks and diagnostic separation, not training labels. Mature forward evidence can change feature effects, ranking, gates, and vetoes; Indicator Watch and the post-close condition tracker apply those changes automatically when their evidence bars are met. Realised trades may calibrate execution facts such as the fallback stop, review horizon, charges and entry cadence, but they never set automatic target magnitude. Max Allocation is arithmetic: Capital divided by average positions entered per entry day.</p></div>
     </div>
+    <h3 style="margin-top:28px">Live Recommendation Funnel</h3>
+    <p style="color:var(--t2);font-size:14.5px;line-height:1.7">A high score alone is not a recommendation. A row must pass, in order: exchange eligibility and configured surveillance/evidence vetoes; positive day direction above VWAP and above its open; enough multi-day history; no current-session selling veto; an allocatable and economically viable order; <strong>Score at least ${RECOMMEND_MIN_SCORE}</strong> and rank inside the <strong>dynamic timing depth</strong>; then <strong>current-session 5-minute confirmation</strong>. Only a row with a current <code>confirmed</code> intraday verdict can be selected or exported.</p>
     <h3 id="meth-ledger" style="margin-top:28px">Feature Ledger <span style="font-size:14px;color:var(--t3);font-weight:400">(${RADAR.features.length||0} modeled of ${RADAR.headers.length||0} columns)</span></h3>
     ${buildRadarLedgerHTML()}
     ${buildIndicatorWatchHTML()}
@@ -7875,10 +7881,10 @@ function _renderMethodologyInner(){
     <div class="m-grid">
       <div class="m-card"><h4>Entry Workflow</h4><ol style="padding-left:18px;color:var(--t2);font-size:14px;line-height:1.7">
         <li>Upload a screener snapshot at a consistent time.</li>
-        <li>Start with liquid, low- or medium-risk names whose top contributions span several groups.</li>
-        <li>Reject candidates driven by one heroic feature, corporate-action distortions, circuits, stale prints, surveillance restrictions, or news you have not checked.</li>
-        <li>Demand confirmation: hold above VWAP/opening range, participation that persists, and a pre-defined invalidation price.</li>
-        <li>Cap position size from account risk, not from enthusiasm. Enthusiasm has never met a denominator it respected.</li>
+        <li>Use the recommendation set, not the colour band: green begins at 80, while the live buy bar is ${RECOMMEND_MIN_SCORE} plus the dynamic rank-depth limit.</li>
+        <li>Direction, exchange restrictions, evidence triggers, listing history, current-session selling and allocation viability are enforced before a row can be recommended.</li>
+        <li>Wait for the current-session 5-minute verdict. Unchecked, stale, rejected or unverified rows cannot be selected or exported.</li>
+        <li>Review the row's market-derived target, stock-specific stop, expected net after charges and the rail that limits allocation before placing the basket.</li>
       </ol></div>
       <div class="m-card"><h4>Interpretation</h4><ul style="padding-left:18px;color:var(--t2);font-size:14px;line-height:1.7">
         ${RADAR_SCORE_BANDS.map(b=>`<li><b style="color:${b.color}">${b.range}:</b> ${b.note}</li>`).join('')}
