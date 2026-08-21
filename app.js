@@ -1,5 +1,5 @@
-const BUILD_TS='2026-08-20 15:31 IST'; // release build time (IST)
-const APP_VERSION=1208; // v1208: the score stops burying the movers, the post-close routine learns from the day's winners, and app.js loses 2,945 lines of narrative comment.
+const BUILD_TS='2026-08-21 12:24 IST'; // release build time (IST)
+const APP_VERSION=1209; // v1209: the fetch list quotes the window the verdict reads, and "thin" is decided by the day's own cross-section instead of a bare 1.0.
 // v1093: a baseline reward:risk MEASURED on the cross-section (last completed bhav session) instead of learned from the owner's own fills - reported on every row, deliberately not enforced. Includes v1092: position size split by Radar score / stop distance, so equally-scored names carry equal RUPEE risk, plus an opt-in Risk /trade cap.
 // v556: parse the NSE Market Activity Report (MA<date>.csv) — official Nifty %, advances/declines and sector index moves shown as market CONTEXT in the status bar (EOD data, display only, never fed into per-row scoring); MA added to the ℹ️ file manifest.
 // v555 market-cycle stage awareness (stateless, self-calibrating): per-row stage label (1 accumulation · 2 breakout · 3 event · 4 profit-booking · 5 re-accumulation · 6 second-leg); a quiet-accumulation signal (conjunction-of-percentiles) injected via the rocket-diagnostic weighting; sell-the-news decay off Recent earnings date (horizon = review days). v1065 makes the market-breadth gauge an entry-eligibility input while still never changing ranking.
@@ -3578,6 +3578,51 @@ function buildIntradayTrajectory(bars,history){
                             *Math.max(0,Math.min(1,(cRec/totV+1)/2))
                             *(costRatio?Math.max(0,Math.min(1,costRatio/(1+costRatio))):0.5))};
 }
+let _thinCutMemo=null;
+// costRatio is dnCost/upCost - shares to move it 1% down against 1% up - so 1.0 is parity only if
+// the MARKET is at parity. Measured 2026-08-21 over 273 fetched stocks: today's median was 0.93 and
+// 59% sat below 1.0, so the bare threshold called the MEDIAN stock "nothing holding it up" and
+// reduced 7 of 8 open positions on it while their own net flow was positive. The cut is the day's
+// own median - a cross-sectional midrank like every other magnitude in this app, not a chosen
+// number. Below the scorer's own modeled-feature density floor there is no cross-section to read
+// and parity is the only defensible neutral.
+function getIntradayThinCut(){
+  const keys=Object.keys(INTRADAY_BARS||{});
+  const sig=keys.length+':'+keys.reduce((t,k)=>t+(INTRADAY_BARS[k]?INTRADAY_BARS[k].length:0),0);
+  if(_thinCutMemo&&_thinCutMemo.sig===sig) return _thinCutMemo.val;
+  const rs=[];
+  for(const k of keys){
+    let rd=null; try{ rd=getIntradayRead(k); }catch(e){}
+    const t=(rd&&rd.current)?rd.todayTraj:null;
+    if(t&&Number.isFinite(t.costRatio)&&t.costRatio>0) rs.push(t.costRatio);
+  }
+  let val=1;
+  if(rs.length>=25){
+    rs.sort((a,b)=>a-b);
+    val=rs.length%2?rs[(rs.length-1)/2]:(rs[rs.length/2-1]+rs[rs.length/2])/2;
+  }
+  _thinCutMemo={sig,val,n:rs.length};
+  return val;
+}
+// ONE WINDOW PER ROW (v1206), extended to the fetch list. Named and exported so the window it
+// resolves is assertable rather than inlined in the fetch handler.
+function intradayFetchListRow(sym,w){
+  const rd=getIntradayRead(sym), bars=INTRADAY_BARS[normSym(sym)]||[];
+  const f=bars[0]?new Date(bars[0].t):null, l=bars[bars.length-1]?new Date(bars[bars.length-1].t):null;
+  const hhmm=d=>d?String(d.getHours()).padStart(2,'0')+':'+String(d.getMinutes()).padStart(2,'0'):'—';
+  const ddmm=d=>d?String(d.getDate()).padStart(2,'0')+'/'+String(d.getMonth()+1).padStart(2,'0'):'';
+  const today=(rd&&rd.current)?rd.todayTraj:null;
+  return {sym,bars:bars.length,file:w?w.file:null,fileRows:w?w.rows:null,
+    daily:(w&&w.daily)?w.daily.sessions:null,
+    from:ddmm(f)+' '+hhmm(f),to:ddmm(l)+' '+hhmm(l),
+    last:rd?rd.close:null,
+    regime:today?today.regime:(rd&&rd.regime||null),
+    flow:today&&Number.isFinite(today.cvdPct)?today.cvdPct
+        :(rd&&Number.isFinite(rd.cvdPct)?rd.cvdPct:null),
+    // When today cannot be read the label is the multi-session tape, and it must SAY so rather
+    // than sit under the same word beside a verdict computed on today.
+    spanSessions:(!today&&rd&&rd.sessions>0)?rd.sessions:null};
+}
 function getIntradayRead(sym){
   const bars=INTRADAY_BARS[normSym(sym||'')];
   if(!bars||!bars.length) return null;
@@ -3686,12 +3731,13 @@ function applyIntradayReorder(rows){
     if(_tt){
       const cr=_tt.costRatio;
       const sold=_tt.cvdPct<0;
-      const thin=Number.isFinite(cr)&&cr>0&&cr<1;
+      const thin=Number.isFinite(cr)&&cr>0&&cr<getIntradayThinCut();
       if(sold||thin){
         r.intradayVerdict='rejected';
         r.intradayWhy=(sold?('being sold today - net flow '+(100*_tt.cvdPct).toFixed(1)+'% of this session')
                            :('nothing holding it up - 1% down costs '+Math.round(_tt.dnCost).toLocaleString('en-IN')
-                             +' shares against '+Math.round(_tt.upCost).toLocaleString('en-IN')+' to go up'))
+                             +' shares against '+Math.round(_tt.upCost).toLocaleString('en-IN')+' to go up (ratio '
+                             +cr.toFixed(2)+' against the day’s own median '+getIntradayThinCut().toFixed(2)+')'))
           +(r.intraday.traj?' (multi-day: '+r.intraday.traj.regime+')':'');
         r.intradaySellingToday=true;
         return;
@@ -8012,7 +8058,8 @@ function getPositionAction(sym,pos){
     why:rd&&!rd.current?('last read was '+rd.on+', not this session'):'no 5-minute read for this session yet'};
 
   const sold=tt.cvdPct<0;
-  const thin=Number.isFinite(tt.costRatio)&&tt.costRatio>0&&tt.costRatio<1;
+  const thinCut=getIntradayThinCut();
+  const thin=Number.isFinite(tt.costRatio)&&tt.costRatio>0&&tt.costRatio<thinCut;
   const shares=n=>Math.round(n).toLocaleString('en-IN');
 
   // BOTH readings against it - supply is arriving AND nothing is holding it up.
@@ -8024,7 +8071,9 @@ function getPositionAction(sym,pos){
     const half=Math.max(1,Math.floor(qty/2));
     return _withResting({act:'EXIT '+half,qty:half,tone:'red',
       why:(sold?('net selling this session ('+(100*tt.cvdPct).toFixed(0)+'% of everything traded), but demand still costs more to move')
-              :('nothing holding it up - 1% down costs '+shares(tt.dnCost)+' shares against '+shares(tt.upCost)+' up, though flow is still net positive'))+span});
+              :('nothing holding it up - 1% down costs '+shares(tt.dnCost)+' shares against '+shares(tt.upCost)
+                 +' up (ratio '+tt.costRatio.toFixed(2)+' against the day’s own median '+thinCut.toFixed(2)
+                 +'), though flow is still net positive'))+span});
   }
   // BOTH readings for it, and the tape is still pushing - size the add from the cushion so a top-up
   // can never turn a position in profit into a losing one (v1070).
@@ -8996,18 +9045,7 @@ async function fetchCandlesInApp(limit,opts){
     if(!j.ok){ say(j.why,8000,true); return; }
     const out=ingestKiteCandlePayload(JSON.stringify({rocketScanner:'candles',data:j.data}));
     LAST_FETCH_HIDDEN=false;
-    LAST_FETCH=out.done.map(sym=>{
-      const rd=getIntradayRead(sym), bars=INTRADAY_BARS[normSym(sym)]||[];
-      const f=bars[0]?new Date(bars[0].t):null, l=bars[bars.length-1]?new Date(bars[bars.length-1].t):null;
-      const hhmm=d=>d?String(d.getHours()).padStart(2,'0')+':'+String(d.getMinutes()).padStart(2,'0'):'—';
-      const ddmm=d=>d?String(d.getDate()).padStart(2,'0')+'/'+String(d.getMonth()+1).padStart(2,'0'):'';
-      const w=(j.files&&j.files[sym])||null;
-      return {sym,bars:bars.length,file:w?w.file:null,fileRows:w?w.rows:null,
-              daily:(w&&w.daily)?w.daily.sessions:null,
-        from:ddmm(f)+' '+hhmm(f),to:ddmm(l)+' '+hhmm(l),
-        last:rd?rd.close:null,regime:rd&&rd.regime||null,
-        flow:rd&&Number.isFinite(rd.cvdPct)?rd.cvdPct:null};
-    });
+    LAST_FETCH=out.done.map(sym=>intradayFetchListRow(sym,(j.files&&j.files[sym])||null));
     const st=getIntradayLoopState();
     INTRADAY_TARGET='';
     renderTable();
@@ -9079,7 +9117,8 @@ function intradayPasteBarHtml(){
         <b>${x.last!=null?fmtINR(x.last):'—'}</b>
         ${x.file?`<span style="color:var(--t3)" title="Open it to see every bar. Appended on each fetch, deduped by timestamp, and truncated at any break so the series is always contiguous."> · Scanner Uploads/Intraday/${escHtml(x.file)} (${x.fileRows} rows)</span>`:''}
         ${x.daily?`<span style="color:var(--t3)" title="Daily candles, fetched once per session and cached. Recorded only - nothing scores them until the measurement in .claude/deferred.json says they separate."> · +${x.daily}d daily</span>`:''}
-        ${x.regime?`<span style="color:${x.regime==='accumulating'?'var(--green)':x.regime==='selling'?'var(--red)':'var(--amber)'}"> · ${escHtml(x.regime)} ${x.flow!=null?((x.flow*100).toFixed(1)+'%'):''}</span>`:''}
+        ${x.regime?`<span style="color:${x.regime==='accumulating'?'var(--green)':x.regime==='selling'?'var(--red)':'var(--amber)'}"
+          title="${x.spanSessions?'This session could not be read (under three bars), so this is the '+x.spanSessions+'-session tape. The row verdict does not use it.':'This session only — the same window the row verdict reads.'}"> · ${escHtml(x.regime)} ${x.flow!=null?((x.flow*100).toFixed(1)+'%'):''}${x.spanSessions?` <span style="color:var(--t3)">across ${x.spanSessions} sessions</span>`:''}</span>`:''}
       </div>`).join('')}
     </div>`:''}
     ${res&&!res.ok?`<div style="font-size:11px;color:var(--amber);margin-top:5px">${escHtml(res.why)}</div>`:''}
