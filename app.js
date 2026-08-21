@@ -1,5 +1,5 @@
-const BUILD_TS='2026-08-21 13:02 IST'; // release build time (IST)
-const APP_VERSION=1210; // v1210: a projection may not fight its own tape, and the exit instruction owns the price it is worked at.
+const BUILD_TS='2026-08-21 15:23 IST'; // release build time (IST)
+const APP_VERSION=1211; // v1211: a same-day target may not outrun its session, and a release may not edit the owner's table.
 // v1093: a baseline reward:risk MEASURED on the cross-section (last completed bhav session) instead of learned from the owner's own fills - reported on every row, deliberately not enforced. Includes v1092: position size split by Radar score / stop distance, so equally-scored names carry equal RUPEE risk, plus an opt-in Risk /trade cap.
 // v556: parse the NSE Market Activity Report (MA<date>.csv) — official Nifty %, advances/declines and sector index moves shown as market CONTEXT in the status bar (EOD data, display only, never fed into per-row scoring); MA added to the ℹ️ file manifest.
 // v555 market-cycle stage awareness (stateless, self-calibrating): per-row stage label (1 accumulation · 2 breakout · 3 event · 4 profit-booking · 5 re-accumulation · 6 second-leg); a quiet-accumulation signal (conjunction-of-percentiles) injected via the rocket-diagnostic weighting; sell-the-news decay off Recent earnings date (horizon = review days). v1065 makes the market-breadth gauge an entry-eligibility input while still never changing ranking.
@@ -113,6 +113,9 @@ const TRADEBOOK_STORE='rs_tradebook';
 const TRADEBOOK_META_STORE='rs_tradebook_meta_v1';
 const TRADE_TIMING_CONTEXT_STORE='rs_trade_timing_context_v1';
 const SURV_RULE_STORE='rs_surv_rules';
+// v1211: set once, the first time v1169's retirement is applied to an existing brain. After that
+// the owner's saved set is authoritative and nothing strips it again - see loadSurvRules.
+const SURV_RETIRE_MARK='rs_surv_retired_v1169';
 const SURV_CORR_STORE='rs_surv_corr';
 const SAME_DAY_EXIT_OPPORTUNITY_STORE='rs_same_day_exit_opportunity_v3';
 const RECOMMEND_OUTCOME_STORE='rs_recommend_outcomes_delta_v1';
@@ -1364,16 +1367,37 @@ function loadSurvRules(){
   try{
     const raw=FS.get(SURV_RULE_STORE);
     if(raw&&Array.isArray(raw)&&raw.length>0){
-      SURV_CUSTOM_RULES=raw.map(rule=>{
+      const parsed=raw.map(rule=>{
         const column=String(rule.column||rule.label||'').trim();
         return column?{key:survRuleKey(column),column,label:String(rule.label||column).trim()}:null;
-      }).filter(Boolean).filter(r=>SURV_RETIRED_KEYS.indexOf(r.key)<0);
+      }).filter(Boolean);
+      // v1211: v1169 retired eleven CRITERIA columns because seeding them made a hard removal out of
+      // "this company has a high PE". Its own note promised "adding one back by hand still works and
+      // is still respected - this only undoes the seeding, it does not police the owner". It did not:
+      // the filter sat in loadSurvRules, which reads the SAVED set on EVERY load, so a rule the owner
+      // re-added was stripped again on the next boot and silently saved back without it. The
+      // retirement is a ONE-TIME migration of an existing brain, applied once and then recorded.
+      let retired=false;
+      if(!FS.get(SURV_RETIRE_MARK)){
+        SURV_CUSTOM_RULES=parsed.filter(r=>SURV_RETIRED_KEYS.indexOf(r.key)<0);
+        retired=SURV_CUSTOM_RULES.length!==parsed.length;
+      } else {
+        SURV_CUSTOM_RULES=parsed;
+      }
+      try{ FS.set(SURV_RETIRE_MARK,1); }catch(e){}
+      if(retired) saveSurvRules();
     } else {
       // First-time: seed with default rules
       SURV_CUSTOM_RULES=SURV_SEED_RULES.map(r=>({key:survRuleKey(r.column),column:r.column,label:r.label}));
     }
   }catch(e){
-    SURV_CUSTOM_RULES=SURV_SEED_RULES.map(r=>({key:survRuleKey(r.column),column:r.column,label:r.label}));
+    // A read failure is not a licence to replace the owner's table. Seed ONLY when nothing was
+    // stored; if something was stored and could not be understood, leave whatever is already in
+    // memory alone rather than overwriting a saved set with defaults.
+    console.warn('Could not load surveillance rules',e);
+    if(!Array.isArray(SURV_CUSTOM_RULES)||!SURV_CUSTOM_RULES.length){
+      SURV_CUSTOM_RULES=SURV_SEED_RULES.map(r=>({key:survRuleKey(r.column),column:r.column,label:r.label}));
+    }
   }
 }
 function syncSurvRuleRows(savedRows){
@@ -6207,6 +6231,215 @@ function buildTradeTimingModel(trips){
   return model;
 }
 function getTradeTimingModel(){return buildTradeTimingModel(TRADEBOOK_STATS?.tripsData||[]);}
+
+// v1211 (owner): the Time-of-day table answers ENTRY timing only. This is its exit-side sibling -
+// "how much do I give up by selling at this hour". It deliberately reuses getPostSellExtremes, the
+// SAME measurement the per-row left-on-table note is built from, rather than inventing a second
+// definition of give-back: one meaning per quantity. What is new is the aggregation - by SELL clock
+// window, in the identical 30-minute unit the entry table uses, so the two can be read together.
+// Coverage is reported, never assumed: getPostSellExtremes needs stored price history at or after
+// the sell date, so older trips can carry a realised return with no measurable give-back.
+// v1211 (owner): keyed off the SELL time - how high did it go after the exit, the same day, and
+// how high within a bounded forward window. Two separate answers because they decide two different
+// things: the same-day figure says whether to have held longer INTRADAY, the horizon figure whether
+// to have held overnight at all.
+//
+// The horizon ceiling is not a chosen number - it is getEffectiveReviewDays(), the app's own learned
+// window for how long a pick stays live. It exists to make the buckets COMPARABLE: measured to the
+// end of stored history the windows differed by 78 days in median exit age, so an older window
+// looked worse purely for having had more sessions in which to rise.
+//
+// Not folded into getPostSellExtremes: that function backs the per-row note and is deliberately
+// unbounded. One meaning per quantity - this is a different quantity, so it gets its own name.
+function getPostSellHorizonHigh(sym,sellDate,sellTime,horizonSessions){
+  const s=normSym(sym);
+  const out={sameDayHigh:null,sameDayKnown:false,horizonHigh:null,sessions:0};
+  if(!s||!sellDate) return out;
+  // (a) the sell day, AFTER the exit only. Only the watch recorder can split the day at the sell;
+  // without it the sell day is unknown rather than assumed.
+  try{
+    const w=getPostSellHighFromWatch(s,sellDate,sellTime);
+    if(w){
+      out.sameDayKnown=true;
+      out.sameDayHigh=(w.advanced&&w.postSellHigh>0)?w.postSellHigh:null;
+    }
+  }catch(e){}
+  // (b) the next N sessions, strictly after the sell day, N fixed for every row.
+  const raw=FS.get(PRICE_HISTORY_STORE);
+  const store=(raw&&typeof raw==='object'&&raw.sessions)?raw.sessions:{};
+  const horizon=Math.max(1,Number(horizonSessions)||1);
+  for(const d of Object.keys(store).sort()){
+    if(d<=sellDate) continue;
+    const v=store[d]?.[s];
+    if(v===undefined) continue;
+    const hi=phHigh(v)??phClose(v);
+    if(hi>0) out.horizonHigh=out.horizonHigh==null?hi:Math.max(out.horizonHigh,hi);
+    if(++out.sessions>=horizon) break;
+  }
+  return out;
+}
+function buildExitTimingModel(trips){
+  // The ceiling must be at least as long as he ACTUALLY holds, or "afterwards" is answered over a
+  // window shorter than the decision it informs: getEffectiveReviewDays() resolved to 1 session on
+  // this book. Both inputs are existing learned quantities - the later of the review window and the
+  // 75th percentile of observed overnight holds. No chosen number.
+  const heldDays=(trips||[]).map(t=>Number(t?.holdDays)).filter(v=>Number.isFinite(v)&&v>0).sort((a,b)=>a-b);
+  const p75Hold=heldDays.length?heldDays[Math.min(heldDays.length-1,Math.floor(heldDays.length*0.75))]:0;
+  const reviewDays=Number((typeof getEffectiveReviewDays==='function')?getEffectiveReviewDays():0)||0;
+  const horizon=Math.max(1,Math.round(Math.max(reviewDays,p75Hold))||2);
+  const rows=[];
+  (trips||[]).forEach(t=>{
+    if(!t||!t.sym||!t.sellDate||!t.sellTime) return;
+    const minute=clockMinutes(t.sellTime);
+    if(minute==null) return;
+    const sell=Number(t.sellPrice), qty=Number(t.qty)||0;
+    if(!(sell>0)||!(qty>0)) return;
+    let sameDayPct=null, horizonPct=null, horizonRs=null, sameDayKnown=false, horizonKnown=false;
+    try{
+      const e=getPostSellHorizonHigh(t.sym,t.sellDate,t.sellTime,horizon);
+      sameDayKnown=e.sameDayKnown;
+      // A watched sell day with no new high is a REAL zero, not a gap: the stock did not go higher.
+      if(e.sameDayKnown) sameDayPct=e.sameDayHigh!=null?+(((e.sameDayHigh-sell)/sell)*100).toFixed(2):0;
+      if(e.sessions>0){
+        horizonKnown=true;
+        const ref=e.horizonHigh!=null?e.horizonHigh:sell;
+        horizonPct=+(((ref-sell)/sell)*100).toFixed(2);
+        horizonRs=Math.round((ref-sell)*qty);
+      }
+    }catch(e){}
+    rows.push({minute,windowMinute:Math.floor(minute/30)*30,date:t.sellDate,
+      netPct:Number(t.netPnlPct),sameDayPct,horizonPct,horizonRs,sameDayKnown,horizonKnown});
+  });
+  if(!rows.length) return {exits:0,rows:[],horizon,totalHorizonRs:0};
+  const buckets={};
+  rows.forEach(r=>(buckets[r.windowMinute]??=[]).push(r));
+  const pad=x=>String(Math.floor(x/60)).padStart(2,'0')+':'+String(x%60).padStart(2,'0');
+  const out=Object.keys(buckets).map(k=>+k).sort((a,b)=>a-b).map(m=>{
+    const list=buckets[m];
+    const nets=list.map(r=>r.netPct).filter(v=>Number.isFinite(v));
+    const sd=list.filter(r=>r.sameDayKnown).map(r=>r.sameDayPct);
+    const hz=list.filter(r=>r.horizonKnown).map(r=>r.horizonPct);
+    const hzRs=list.filter(r=>r.horizonKnown);
+    return {
+      key:String(m), slice:pad(m)+'-'+pad(m+30), exits:list.length,
+      days:new Set(list.map(r=>r.date)).size,
+      medianNetPct:nets.length?+tradeMedian(nets).toFixed(2):null,
+      sameDayPct:sd.length?+tradeMedian(sd).toFixed(2):null,
+      sameDayN:sd.length,
+      horizonPct:hz.length?+tradeMedian(hz).toFixed(2):null,
+      horizonRs:hzRs.reduce((a,r)=>a+r.horizonRs,0),
+      wentHigherPct:hz.length?+(100*hz.filter(v=>v>0).length/hz.length).toFixed(0):null
+    };
+  });
+  return {exits:rows.length,rows:out,horizon,
+    sameDayCoverage:rows.filter(r=>r.sameDayKnown).length,
+    horizonCoverage:rows.filter(r=>r.horizonKnown).length,
+    totalHorizonRs:out.reduce((a,r)=>a+r.horizonRs,0)};
+}
+
+// v1211 (owner): "how long should I hold a stock, both intraday and long term". Two cohorts,
+// because they are different questions: a position closed the same session is bucketed by ELAPSED
+// MINUTES, one carried overnight by DAYS HELD. Per bucket the decisive column is not the median
+// return but the return PER DAY OF CAPITAL TIED UP - a 4% gain over 12 days and a 1.5% gain over
+// one are not the same trade, and only the second scales.
+//
+// STATED ONCE, because it decides how the table may be read: HOLD LENGTH IS CHOSEN, NOT ASSIGNED.
+// A trip held ten days was held because of how it behaved, so a slow bucket is partly "trades that
+// needed longer" and not only "what waiting earns". This is descriptive of what happened. The
+// unconfounded companion is time-to-peak, which the app already measures forward from issue
+// (getRocketArrivalStats), and it is reported beside the table rather than mixed into it.
+function buildHoldDurationModel(trips){
+  const INTRA=[[0,15,'<15m'],[15,30,'15-29m'],[30,60,'30-59m'],[60,120,'1-2h'],[120,240,'2-4h'],[240,1e9,'4h+']];
+  const DAYS=[[1,2,'1d'],[2,3,'2d'],[3,6,'3-5d'],[6,11,'6-10d'],[11,21,'11-20d'],[21,1e9,'21d+']];
+  const rows=[];
+  (trips||[]).forEach(t=>{
+    const pct=Number(t?.netPnlPct), rs=Number(t?.netPnl), cost=Number(t?.capital);
+    if(!Number.isFinite(pct)||!Number.isFinite(rs)) return;
+    const hd=Number(t?.holdDays);
+    if(!Number.isFinite(hd)) return;
+    if(hd===0){
+      const b=clockMinutes(t?.buyTime), sl=clockMinutes(t?.sellTime);
+      if(b==null||sl==null||sl<b) return;
+      const mins=sl-b;
+      const band=INTRA.find(x=>mins>=x[0]&&mins<x[1]);
+      if(!band) return;
+      // An intraday position occupies that session's SLOT, not a fraction of it - you cannot run
+      // 125 sequential three-minute trades. Dividing by elapsed minutes made a 3-minute +1.8% read
+      // as 226% per session and named it the best bucket, which is a normalisation artefact and not
+      // advice. Intraday therefore costs one session of capital, which is also what makes it
+      // directly comparable with the overnight cohort's per-session figure.
+      rows.push({cohort:'Intraday',key:'i'+band[0],label:band[2],pct,rs,cost,
+        perDay:pct,unit:mins});
+    } else {
+      const band=DAYS.find(x=>hd>=x[0]&&hd<x[1]);
+      if(!band) return;
+      rows.push({cohort:'Overnight',key:'d'+band[0],label:band[2],pct,rs,cost,
+        perDay:pct/hd,unit:hd});
+    }
+  });
+  if(!rows.length) return {trips:0,rows:[],best:null};
+  const buckets={};
+  rows.forEach(r=>(buckets[r.cohort+'|'+r.key]??=[]).push(r));
+  const order=['Intraday','Overnight'];
+  const out=Object.keys(buckets).map(k=>{
+    const list=buckets[k];
+    const pcts=list.map(r=>r.pct);
+    const wins=list.filter(r=>r.rs>0).length;
+    return {
+      cohort:list[0].cohort, slice:list[0].label, sortKey:list[0].unit,
+      trips:list.length,
+      winPct:+(100*wins/list.length).toFixed(0),
+      medianPct:+tradeMedian(pcts).toFixed(2),
+      medianPerDay:+tradeMedian(list.map(r=>r.perDay)).toFixed(2),
+      totalRs:Math.round(list.reduce((a,r)=>a+r.rs,0))
+    };
+  }).sort((a,b)=>order.indexOf(a.cohort)-order.indexOf(b.cohort)||a.sortKey-b.sortKey);
+  // The decision the table exists to make: the bucket with the best return per day of capital,
+  // within each cohort, and only where the sample can carry it.
+  const pick=c=>{
+    const c2=out.filter(r=>r.cohort===c&&r.trips>=10);
+    if(!c2.length) return null;
+    return c2.reduce((a,b)=>b.medianPerDay>a.medianPerDay?b:a);
+  };
+  return {trips:rows.length,rows:out,best:{intraday:pick('Intraday'),overnight:pick('Overnight')}};
+}
+
+// v1211 (owner): money-weighted return on CLOSED round trips. Each trip is two dated cash flows -
+// the cost out on the buy date, the proceeds back (net of charges) on the sell date - so a run of
+// small fast gains and one large slow gain are no longer read as the same performance. Open
+// positions are deliberately excluded: marking them would mix a realised series with a live quote
+// and the number would move every time the scanner refreshed. Bisection, not Newton: the sign change
+// is bracketed so it cannot diverge on a pathological series, and it returns null rather than a
+// number when the flows never change sign (all wins or all losses in one direction).
+function computePortfolioXirr(trips){
+  const flows=[];
+  (trips||[]).forEach(t=>{
+    const cost=Number(t?.capital), net=Number(t?.netPnl);
+    if(!(cost>0)||!Number.isFinite(net)||!t.buyDate||!t.sellDate) return;
+    flows.push({d:t.buyDate,v:-cost});
+    flows.push({d:t.sellDate,v:cost+net});
+  });
+  if(flows.length<2) return {rate:null,trips:0,why:'no closed round trips with a cost basis'};
+  flows.sort((a,b)=>String(a.d).localeCompare(String(b.d)));
+  const t0=new Date(flows[0].d).getTime();
+  const yrs=f=>((new Date(f.d).getTime()-t0)/86400000)/365;
+  const npv=r=>flows.reduce((s,f)=>s+f.v/Math.pow(1+r,yrs(f)),0);
+  const hasIn=flows.some(f=>f.v<0), hasOut=flows.some(f=>f.v>0);
+  if(!hasIn||!hasOut) return {rate:null,trips:flows.length/2,why:'cash flows never change sign'};
+  let lo=-0.9999, hi=1e3, flo=npv(lo), fhi=npv(hi);
+  if(!Number.isFinite(flo)||!Number.isFinite(fhi)||flo*fhi>0)
+    return {rate:null,trips:flows.length/2,why:'no rate brackets these cash flows'};
+  for(let i=0;i<200;i++){
+    const mid=(lo+hi)/2, f=npv(mid);
+    if(!Number.isFinite(f)) break;
+    if(flo*f<=0){ hi=mid; fhi=f; } else { lo=mid; flo=f; }
+    if(Math.abs(hi-lo)<1e-9) break;
+  }
+  const rate=(lo+hi)/2;
+  const spanDays=Math.round((new Date(flows.at(-1).d).getTime()-t0)/86400000);
+  return {rate,trips:flows.length/2,spanDays,
+    why:spanDays<30?'span is under 30 days, so the annualised figure is an extrapolation':''};
+}
 function getTodayTradeTimingContext(){
   const today=getSessionDate();
   const buys=(ORDERS_TODAY||[]).filter(o=>o.type==='BUY'&&normOrderDate(o.time)===today&&tradeClockMinute(o.time)!==null);
@@ -6807,6 +7040,18 @@ function renderPerformance(){
     {label:'Avg Position',value:fmtINR(p.avgCapital||0),color:'var(--t1)',sub:'Observed avg capital per position'},
     {label:'Avg Positions/Entry Day',value:allocationCadence!=null?allocationCadence.toFixed(2):'—',color:'var(--t1)',sub:'Distinct symbol + buy-date positions ÷ entry days · Max Allocation input'},
   ];
+  // v1211 (owner): money-weighted, so hold time counts. Net P&L says how much was made; this says
+  // how hard the money worked to make it.
+  const xirr=computePortfolioXirr(adaptiveAllTrips);
+  detailKpis.push({
+    label:'XIRR',
+    value:xirr.rate!=null?(xirr.rate*100).toFixed(1)+'%':'—',
+    color:xirr.rate==null?'var(--t3)':xirr.rate>0?'var(--green)':'var(--red)',
+    sub:xirr.rate!=null
+      ? `Annualised money-weighted return · ${xirr.trips} closed round trips over ${xirr.spanDays} days`
+        +(xirr.why?` · ${xirr.why}`:'')
+      : (xirr.why||'Not computable')
+  });
   if(recSummary.evaluated){
     const bestUpside=recSummary.avgBestHighPct;
     detailKpis.push(
@@ -6824,7 +7069,7 @@ function renderPerformance(){
       <div class="kpi-sub">${k.sub}</div>
     </div>`;
   const KPI_ORDER=[
-    'Net P&L','Win Rate','Expectancy','Profit Factor',
+    'Net P&L','Win Rate','Expectancy','Profit Factor','XIRR',
     'Avg P&L/Trading Day','Avg P&L/Cal Day','Profitable Days','Best Day','Worst Day',
     'Largest Win','Largest Loss','Max Drawdown','Max Win Streak','Max Loss Streak',
     'Avg Hold','High vs Exit','Rocket Conversion','Same-Day Exit Headroom',
@@ -6917,6 +7162,49 @@ function renderPerformance(){
   });
   const hasTradeWindows=timingRows.length>0;
 
+  // v1211 (owner): the exit-side sibling of the table above - what selling at this hour gives up.
+  const exitModel=buildExitTimingModel(adaptiveAllTrips);
+  const exitCols=[
+    {key:'slice',label:'Sell window',align:'left',fmt:v=>escHtml(v),clrFn:()=>'var(--t1)',bold:true},
+    {key:'exits',label:'Exits',align:'right',fmt:v=>v,clrFn:()=>'var(--t2)'},
+    {key:'medianNetPct',label:'Median net',align:'right',fmt:v=>v==null?'—':fmtPct(v),clrFn:v=>v==null?'var(--t3)':clr(v)},
+    {key:'sameDayPct',label:'Rose after exit, same day',align:'right',bold:true,
+      fmt:v=>v==null?'—':fmtPct(v),clrFn:v=>v==null?'var(--t3)':v>0?'var(--red)':'var(--green)'},
+    {key:'sameDayN',label:'watched',align:'right',fmt:v=>v,clrFn:()=>'var(--t3)'},
+    {key:'horizonPct',label:`Rose within ${exitModel.horizon}d`,align:'right',bold:true,
+      fmt:v=>v==null?'—':fmtPct(v),clrFn:v=>v==null?'var(--t3)':v>0?'var(--red)':'var(--green)'},
+    {key:'horizonRs',label:'₹ forgone',align:'right',
+      fmt:v=>v==null?'—':fmtSignedINR(v),clrFn:v=>v==null?'var(--t3)':v>0?'var(--red)':'var(--green)'},
+    {key:'wentHigherPct',label:'Went higher',align:'right',
+      fmt:v=>v==null?'—':v+'%',clrFn:v=>v==null?'var(--t3)':v>=60?'var(--red)':v<=40?'var(--green)':'var(--amber)'},
+  ];
+  const exitTbl=makeSortableTable('tbl-exit-timing',exitCols,exitModel.rows,'slice',1);
+  const hasExitWindows=exitModel.rows.length>0;
+
+  // v1211 (owner): how long to hold, intraday and overnight.
+  const holdModel=buildHoldDurationModel(adaptiveAllTrips);
+  const holdCols=[
+    {key:'cohort',label:'Cohort',align:'left',fmt:v=>escHtml(v),clrFn:v=>v==='Intraday'?'var(--cyan)':'var(--t2)'},
+    {key:'slice',label:'Held for',align:'left',bold:true,fmt:v=>escHtml(v),clrFn:()=>'var(--t1)'},
+    {key:'trips',label:'Lots',align:'right',fmt:v=>v,clrFn:()=>'var(--t2)'},
+    {key:'winPct',label:'Win%',align:'right',fmt:v=>v+'%',clrFn:v=>v>=60?'var(--green)':v>=40?'var(--amber)':'var(--red)'},
+    {key:'medianPct',label:'Median net',align:'right',fmt:v=>fmtPct(v),clrFn:clr},
+    {key:'medianPerDay',label:'Net per session held',align:'right',bold:true,fmt:v=>fmtPct(v),clrFn:clr},
+    {key:'totalRs',label:'Total net',align:'right',fmt:fmtSignedINR,clrFn:clr},
+  ];
+  const holdTbl=makeSortableTable('tbl-hold-duration',holdCols,holdModel.rows,'cohort',1);
+  const hasHold=holdModel.rows.length>0;
+  const arrival=(typeof getRocketArrivalStats==='function')?getRocketArrivalStats():null;
+  const holdVerdict=(()=>{
+    const bi=holdModel.best?.intraday, bo=holdModel.best?.overnight;
+    if(!bi&&!bo) return 'Not enough closed lots in any bucket yet.';
+    const parts=[];
+    if(bi) parts.push(`intraday, the best return per session is <b>${escHtml(bi.slice)}</b> at ${fmtPct(bi.medianPerDay)}/session on ${bi.trips} lots`);
+    if(bo) parts.push(`held overnight, <b>${escHtml(bo.slice)}</b> at ${fmtPct(bo.medianPerDay)}/session on ${bo.trips} lots`);
+    const arr=(arrival&&arrival.p75!=null)?` Forward, unconfounded by choice: 75% of picks that reach their target do so within <b>${arrival.p75}</b> session${arrival.p75===1?'':'s'} of issue.`:'';
+    return `On capital-efficiency: ${parts.join('; ')}.${arr}`;
+  })();
+
   const periodPills=['all','1m','3m','6m','1y'].map(p=>{
     const active=PERF_PERIOD_FILTER===p;
     const label=p==='all'?'All':p==='1m'?'1M':p==='3m'?'3M':p==='6m'?'6M':'1Y';
@@ -6939,6 +7227,8 @@ function renderPerformance(){
     ${_navLink('perf-scorecard','🎯 System Scorecard',true)}
     ${_navLink('perf-monthly','📅 Monthly',monthRows.length>0)}
     ${_navLink('perf-trade-windows','🕐 Time-of-day Outcomes',hasTradeWindows)}
+    ${_navLink('perf-hold-duration','⏳ How Long to Hold',hasHold)}
+    ${_navLink('perf-exit-windows','🚪 Exit-time Give-back',hasExitWindows)}
     ${_navLink('perf-stocks','📈 Stocks',p.symBreakdown.length>0)}
   </nav>`;
   const entryOutcomeText=entrySummary.completed
@@ -7012,11 +7302,14 @@ function renderPerformance(){
       <div id="perf-kpi">${kpiHtml}</div>
       ${perfCard('System Scorecard — did the picks reach target? <span style="font-size:12px;color:var(--t3);font-weight:400">'+sc.cohorts+' cohorts · target-before-stop within '+ROCKET_HORIZON_DAYS+' trading days</span>',scHeadline+scTbl.getHtml()+bandTable+scNote,'','perf-scorecard')}
       ${monthRows.length?perfCard('Monthly Breakdown',monthTbl.getHtml(),'','perf-monthly'):''}
+      ${hasHold?perfCard(`How Long to Hold — Diagnostic Only <span style="font-size:12px;color:var(--t3);font-weight:400">${holdModel.trips} closed lots · hold length is CHOSEN, not assigned, so a slow bucket is partly "trades that needed longer" — descriptive, never a recommendation rule</span>`,
+        `<div style="padding:10px 16px;font-size:13px;color:var(--t2);border-bottom:1px solid var(--border);line-height:1.5">${holdVerdict}</div>`+holdTbl.getHtml(),'','perf-hold-duration'):''}
+      ${hasExitWindows?perfCard(`Exit-time Give-back — Diagnostic Only <span style="font-size:12px;color:var(--t3);font-weight:400">${exitModel.exits} exits · same-day figure needs the watch recorder (${exitModel.sameDayCoverage} covered), forward figure needs stored price history (${exitModel.horizonCoverage} covered) · forward window fixed at ${exitModel.horizon} session${exitModel.horizon===1?'':'s'} (the learned review horizon) so every window is comparable · a positive figure is money the stock went on to make without you · descriptive, never a recommendation rule</span>`,exitTbl.getHtml(),'','perf-exit-windows'):''}
       ${hasTradeWindows?perfCard(`Time-of-day Outcomes — Diagnostic Only <span style="font-size:12px;color:var(--t3);font-weight:400">${timingModel.episodeCount} distinct entries · ${timingModel.entryDays} entry days · clock windows only · descriptive, never a recommendation rule</span>`,timingTbl.getHtml(),'','perf-trade-windows'):''}
       ${p.symBreakdown.length?perfCard('Stocks',symTbl.getHtml(),'360px','perf-stocks'):''}
     </div>`;
 
-  setTimeout(()=>{monthTbl.render();symTbl.render();timingTbl.render();scTbl.render();},0);
+  setTimeout(()=>{monthTbl.render();symTbl.render();timingTbl.render();exitTbl.render();holdTbl.render();scTbl.render();},0);
 }
 
 function schedulePerformanceRender(){
@@ -7881,12 +8174,34 @@ function getRowExitPolicy(row,buyPrice=null,activeInfo=null,nudgeInfo=null){
   // the recommendation gates all keep using it (see radarAnalyze). Only the EXIT PRICE gets the nudge.
   const basePct=targetPct;
   let nudgePct=0;
+  const bandRef=Number(buyPrice)>0?Number(buyPrice):getBuyPrice(row||{});
+  // v1083: what the stock may PLAUSIBLY reach this session - the day's low plus one typical day's
+  // range. Resolved HERE, above the nudge, because v1211 bounds the target with it.
+  const sc=getSessionCeilingInfo(row,bandRef);
   const reach=getReachableTargets();
   // v1206: the measured level, scaled into this stock's own capacity. Inert (and identical to
   // v1119) when the row has no capacity or the cross-section is too small to have a median.
   const capMed=getUniverseMedianCapacity();
   const scaled=(reach.basePct>0&&capacity>0&&capMed>0)?reach.basePct*(capacity/capMed):null;
-  const aspire=scaled!=null?scaled:(reach.basePct>0?reach.basePct:capacity);
+  const aspireFull=scaled!=null?scaled:(reach.basePct>0?reach.basePct:capacity);
+  // v1211: reach.basePct is measured buy -> THAT DAY'S high and capacity is a WHOLE-session
+  // magnitude, so the aspiration is same-day by construction. Applied at an arbitrary point inside
+  // the session it double-counts the travel already spent, and a row entered after the move has
+  // happened is handed a target its own session cannot reach. Bound it by what is actually left
+  // from the reference price. basePct stays the floor, so this only ever lowers the EXIT PRICE:
+  // every eligibility test still reads basePct (v1206), so no row can be removed by the cap.
+  const sessionRunwayPct=(sc&&Number.isFinite(sc.runwayPct))?Math.max(0,sc.runwayPct):null;
+  // v1211 HELD, NOT ENFORCED. Bounding the aspiration by sessionRunwayPct is measured-correct on
+  // the arming defect (63% of rows armed above their own runway; HINDZINC 2.85% against 1.02%
+  // left, and the session in fact topped 0.08% from the ceiling estimate) but it CONTRADICTS the
+  // v1105/v1206 measurement that put the optimum at 1.00-1.25 ATR on 214 closed sells: the cap
+  // pulls the median to 0.90 ATR. reach.basePct is already measured buy -> THAT DAY'S high from
+  // real entry times, so it embeds typical entry timing and capping again may double-correct.
+  // That is an evidence question, not a reasoning one. The runway is REPORTED on every row
+  // (sessionRunwayPct/sessionCeiling, and rangeExhausted flags the impossible ones) and the cap
+  // stays off until forward outcomes say it helps. Owner decision - see CHANGELOG v1211.
+  const aspire=aspireFull;
+  const sessionCapped=false;
   if(targetPct>0&&active.source!=='manual'&&aspire>0){
     targetPct=toStep(Math.max(basePct,aspire));
     nudgePct=+(targetPct-basePct).toFixed(2);
@@ -7895,6 +8210,8 @@ function getRowExitPolicy(row,buyPrice=null,activeInfo=null,nudgeInfo=null){
       : reach.basePct>0
       ? ' + reachable level ('+reach.samples+' exits)'
       : ' + stock capacity (ATR fallback)';
+    if(nudgePct>0&&sessionCapped)
+      targetSource+=', capped at the '+sessionRunwayPct.toFixed(2)+'% this session has left';
   }
   const stopPct=getRowStopDistancePct(row);
   const baseRR=getBaselineRewardRisk();
@@ -7904,13 +8221,8 @@ function getRowExitPolicy(row,buyPrice=null,activeInfo=null,nudgeInfo=null){
     minGrossPct=roundPct05(HARVEST_DESIRED_NET_PCT+estimateRoundTripCostPct(basePct));
     minGrossPct=roundPct05(HARVEST_DESIRED_NET_PCT+estimateRoundTripCostPct(minGrossPct));
   }
-  const bandRef=Number(buyPrice)>0?Number(buyPrice):getBuyPrice(row||{});
   const uc=getUpperCircuitInfo(row,bandRef);
   const bandLimited=!!(uc&&basePct>0&&uc.runwayPct<basePct);
-  // v1083: the same test against the STATISTICAL ceiling (day's low + one typical day's range).
-  // The circuit is what the stock may LEGALLY reach; this is what it may PLAUSIBLY reach. A row
-  // needs the target to fit under both. Reported separately so the two causes stay distinguishable.
-  const sc=getSessionCeilingInfo(row,bandRef);
   const rangeExhausted=!!(sc&&basePct>0&&sc.runwayPct<basePct);
   const viable=basePct>0&&!bandLimited&&(capacity==null||basePct+1e-9>=minGrossPct);
   const stopSource=(Math.abs(Number(row?.slPct))>0)?'explicit stock stop'
@@ -7941,6 +8253,7 @@ function getRowExitPolicy(row,buyPrice=null,activeInfo=null,nudgeInfo=null){
     rangeExhausted,
     sessionCeiling:sc?+sc.ceiling.toFixed(2):null,
     sessionRunwayPct:sc?+sc.runwayPct.toFixed(2):null,
+    sessionCapped,
     targetSource,
     stopSource,
     anchorPct:anchor>0?+anchor.toFixed(2):null,
