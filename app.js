@@ -1,5 +1,5 @@
-const BUILD_TS='2026-08-21 16:05 IST'; // release build time (IST)
-const APP_VERSION=1212; // v1212: targets come from the market - its own tape, the session, the circuit - never from his trade history.
+const BUILD_TS='2026-08-21 16:36 IST'; // release build time (IST)
+const APP_VERSION=1213; // v1213: the trigger tracker could never fire, and said COLLECTING about it.
 // v1093: a baseline reward:risk MEASURED on the cross-section (last completed bhav session) instead of learned from the owner's own fills - reported on every row, deliberately not enforced. Includes v1092: position size split by Radar score / stop distance, so equally-scored names carry equal RUPEE risk, plus an opt-in Risk /trade cap.
 // v556: parse the NSE Market Activity Report (MA<date>.csv) — official Nifty %, advances/declines and sector index moves shown as market CONTEXT in the status bar (EOD data, display only, never fed into per-row scoring); MA added to the ℹ️ file manifest.
 // v555 market-cycle stage awareness (stateless, self-calibrating): per-row stage label (1 accumulation · 2 breakout · 3 event · 4 profit-booking · 5 re-accumulation · 6 second-leg); a quiet-accumulation signal (conjunction-of-percentiles) injected via the rocket-diagnostic weighting; sell-the-news decay off Recent earnings date (horizon = review days). v1065 makes the market-breadth gauge an entry-eligibility input while still never changing ranking.
@@ -2373,13 +2373,78 @@ function buildPostCloseIssueAudit(issue,asOf){
     pending:picks.length-resolved.length,precision:resolved.length?+(100*rockets.length/resolved.length).toFixed(1):null,
     conditions,candidates:conditions.filter(c=>c.n>0&&c.precision>=95)};
 }
+// v1213: the previous rule was `wins>=3 && sessions>=2 && losses<=1 && precision>=95`, and it was
+// UNREACHABLE BY CONSTRUCTION. `losses` is a cumulative count over every audited session and only
+// grows, so one condition's second contradiction disabled it permanently: measured 2026-08-21,
+// 11 of the 14 conditions carrying data could never arm again, and the 3 that could were only
+// still alive for having almost no data. The 95% precision bar compounded it - the cohort's own
+// base rate is 23.5%, so the bar sat 71.5pp above the process being measured and nothing on a
+// 2-day rocket definition was ever going to reach it. Every row read COLLECTING forever, which is
+// a control that cannot work and does not say so.
+//
+// A condition is now judged against THE COHORT'S OWN BASE RATE, per session, which is the only
+// honest comparison: "did rows satisfying this condition beat the day's own hit rate". The bar is
+// statistical rather than absolute, so it needs no chosen precision level, and the critical value
+// is DERIVED from how many conditions are being tested at once (Bonferroni over the declared list)
+// rather than picked - add a condition and the bar tightens on its own.
+function postCloseTCrit(){
+  const n=Math.max(1,(POST_CLOSE_CONDITIONS||[]).length);
+  // two-sided 5% family-wise, normal approximation: the z that leaves 0.05/(2n) in the tail.
+  const p=0.05/(2*n);
+  // Acklam-style inverse normal, adequate at these tail sizes.
+  const t=Math.sqrt(-2*Math.log(p));
+  return +(t-(2.30753+0.27061*t)/(1+0.99229*t+0.04481*t*t)).toFixed(3);
+}
+function postCloseConditionStats(audits,key){
+  const lifts=[],ses=[];let wins=0,losses=0,picks=0;
+  Object.values(audits||{}).forEach(a=>{
+    if(!(a&&a.resolved>0)) return;
+    const c=(a.conditions||[]).find(x=>x.key===key);
+    if(!c||!c.n) return;
+    const p=c.wins/c.n, b=a.rockets/a.resolved;
+    lifts.push(p-b);
+    // Each session's lift is a difference of two proportions and carries its OWN sampling error.
+    // The variance is computed on LAPLACE-SMOOTHED rates (+1 success, +1 failure) purely for the
+    // error term, never for the lift itself: a clean 1-of-1 has a raw variance of exactly zero and
+    // scored MORE certain than a 10-pick sample on the first cut of this release. Smoothing is the
+    // standard correction for that and is not a tuned number - it is one observation of each kind.
+    const ps=(c.wins+1)/(c.n+2), bs=(a.rockets+1)/(a.resolved+2);
+    ses.push(Math.sqrt(ps*(1-ps)/c.n+bs*(1-bs)/a.resolved));
+    wins+=c.wins;losses+=c.losses;picks+=c.n;
+  });
+  const n=lifts.length;
+  if(!n) return {sessions:0,wins,losses,picks,meanLift:null,t:null,agreement:null};
+  const m=lifts.reduce((x,y)=>x+y,0)/n;
+  const sd=n>1?Math.sqrt(lifts.reduce((x,y)=>x+(y-m)*(y-m),0)/(n-1)):0;
+  // A near-constant series has a variance of ~1e-17 and would produce a t of ~1e16 - certainty
+  // manufactured out of a rounding error. The denominator is floored by the mean sampling error the
+  // counts themselves imply, which is DERIVED from the data and not a chosen epsilon: a condition
+  // measured on ten picks can never look more certain than ten picks allow.
+  const seFloor=ses.length?ses.reduce((x,y)=>x+y,0)/ses.length:0;
+  const spread=Math.max(sd,seFloor);
+  const t=(n>1&&spread>0)?m/(spread/Math.sqrt(n)):0;
+  const agreement=n?lifts.filter(x=>Math.sign(x)===Math.sign(m)).length/n:0;
+  return {sessions:n,wins,losses,picks,meanLift:+(100*m).toFixed(1),t:+t.toFixed(2),
+          agreement:+(100*agreement).toFixed(0)};
+}
 function getPostCloseRuleScorecard(audits){
+  const tCrit=postCloseTCrit();
   return POST_CLOSE_CONDITIONS.map(c=>{
-    const rows=Object.values(audits||{}).map(a=>(a.conditions||[]).find(x=>x.key===c.key)).filter(x=>x&&x.n>0);
-    const wins=rows.reduce((s,x)=>s+x.wins,0),losses=rows.reduce((s,x)=>s+x.losses,0),sessions=rows.length,total=wins+losses;
-    const precision=total?+(100*wins/total).toFixed(1):null;
-    const status=wins>=3&&sessions>=2&&losses<=1&&precision>=95?'ARMED':wins===0&&sessions>=10?'RETIRED':'COLLECTING';
-    return {key:c.key,label:c.label,wins,losses,sessions,total,precision,status};
+    const st=postCloseConditionStats(audits,c.key);
+    const total=st.wins+st.losses;
+    const precision=total?+(100*st.wins/total).toFixed(1):null;
+    // POST_CLOSE_MIN_SESSIONS is the existing v1202 bar (>=3 confirming sessions), reused so no
+    // new sample-size number is introduced.
+    const enough=st.sessions>=3&&st.agreement>=70;
+    let status='COLLECTING',why='';
+    if(enough&&st.t>=tCrit&&st.meanLift>0) status='ARMED';
+    else if(enough&&st.t<=-tCrit&&st.meanLift<0) status='RETIRED';
+    else if(st.sessions===0) why='no audited session has scored it yet';
+    else if(st.sessions<3) why='needs '+(3-st.sessions)+' more audited session'+(3-st.sessions===1?'':'s');
+    else if(st.agreement<70) why='its sign flips too often ('+st.agreement+'% agreement, needs 70%)';
+    else why='|t| '+Math.abs(st.t).toFixed(2)+' of the '+tCrit+' its own family size requires';
+    return {key:c.key,label:c.label,wins:st.wins,losses:st.losses,sessions:st.sessions,total,
+            precision,meanLift:st.meanLift,t:st.t,agreement:st.agreement,tCrit,status,why};
   });
 }
 const GAINER_COHORT_N=20;
@@ -2435,17 +2500,33 @@ function buildGainerAudit(asOf){
 // across sessions rather than once. LIFT_MIN is the cohort/control gap in percentage points; a
 // condition present in the winners at the market's own base rate says nothing.
 const GAINER_LIFT_MIN=25;
+// v1213: same defect as the pick tracker - `contradictions<=1` is cumulative and only grows, so a
+// condition was disabled permanently by its second bad day and then reported COLLECTING. The lift
+// is already measured per session against the market's own base rate, so the honest test is
+// whether that lift is reliably non-zero, on the same derived critical value the pick side uses.
 function getGainerScorecard(gainers){
   const days=Object.values(gainers||{});
+  const tCrit=postCloseTCrit();
   return POST_CLOSE_CONDITIONS.map(c=>{
     const rows=days.map(d=>(d.conditions||[]).find(x=>x.key===c.key)).filter(Boolean);
+    const lifts=rows.map(x=>Number(x.lift)).filter(v=>Number.isFinite(v));
+    const sessions=lifts.length;
     const confirms=rows.filter(x=>x.lift>=GAINER_LIFT_MIN).length;
     const contradictions=rows.filter(x=>x.lift<=-GAINER_LIFT_MIN).length;
-    const sessions=rows.length;
-    const meanLift=sessions?+(rows.reduce((s,x)=>s+x.lift,0)/sessions).toFixed(1):null;
-    const status=confirms>=3&&sessions>=2&&contradictions<=1?'ARMED'
-      :(sessions>=10&&confirms===0&&contradictions>=3)?'RETIRED':'COLLECTING';
-    return {key:c.key,label:c.label,mode:c.mode,sessions,confirms,contradictions,meanLift,status};
+    const m=sessions?lifts.reduce((a,b)=>a+b,0)/sessions:null;
+    const sd=sessions>1?Math.sqrt(lifts.reduce((a,b)=>a+(b-m)*(b-m),0)/(sessions-1)):0;
+    const t=(sessions>1&&sd>0)?+(m/(sd/Math.sqrt(sessions))).toFixed(2):0;
+    const agreement=sessions?+(100*lifts.filter(v=>Math.sign(v)===Math.sign(m)).length/sessions).toFixed(0):null;
+    const enough=sessions>=3&&agreement>=70;
+    let status='COLLECTING',why='';
+    if(enough&&t>=tCrit&&m>0) status='ARMED';
+    else if(enough&&t<=-tCrit&&m<0) status='RETIRED';
+    else if(!sessions) why='no gainer cohort has scored it yet';
+    else if(sessions<3) why='needs '+(3-sessions)+' more session'+(3-sessions===1?'':'s');
+    else if(agreement<70) why='its sign flips too often ('+agreement+'% agreement)';
+    else why='|t| '+Math.abs(t).toFixed(2)+' of the '+tCrit+' required';
+    return {key:c.key,label:c.label,mode:c.mode,sessions,confirms,contradictions,
+            meanLift:sessions?+m.toFixed(1):null,t,agreement,tCrit,status,why};
   });
 }
 function runPostCloseAudit(force=false){
@@ -9802,60 +9883,138 @@ function renderPostClose(){
   const clock=istClock();
   if(clock.mins>=DAY_END_MIN) runPostCloseAudit();
   const {today,audit,store}=postCloseAuditStatus();
-  const complete=!!audit,afterClose=clock.mins>=DAY_END_MIN;
-  const candidates=(audit?.candidates||[]);
+  const afterClose=clock.mins>=DAY_END_MIN;
   const scorecard=store.scorecard||getPostCloseRuleScorecard(store.audits||{});
-  const stateColor=complete?'var(--green)':afterClose?'var(--amber)':'var(--t3)';
-  const stateText=complete?'Complete for '+today:afterClose?'Waiting for a refreshed post-close ALL NSE.csv':'Arms automatically at 16:00 IST';
-  const candidateRows=candidates.length?candidates.map(c=>`<tr><td>${escHtml(c.label)}</td><td>${c.wins}/${c.n}</td><td style="color:${c.precision>=95?'var(--green)':'var(--t2)'}">${c.precision}%</td><td style="color:var(--amber)">Collecting for trigger</td></tr>`).join('')
-    :`<tr><td colspan="4" style="color:var(--t3)">No predeclared condition currently reaches 95% among resolved picks. That is a valid result; the system does not tune a condition after seeing the answers.</td></tr>`;
-  const ruleRows=scorecard.map(r=>`<tr><td>${escHtml(r.label)}</td><td>${r.sessions}</td><td>${r.wins}</td><td>${r.losses}</td><td>${r.precision==null?'—':r.precision+'%'}</td><td style="font-weight:800;color:${['ARMED','ELIGIBLE'].includes(r.status)?'var(--green)':r.status==='RETIRED'?'var(--red)':'var(--t3)'}">${r.status==='ELIGIBLE'?'ARMED':r.status}</td></tr>`).join('');
+  const gs=store.gainerScorecard||getGainerScorecard(store.gainers||{});
   const gToday=store.gainers?.[today]||null;
+  const n2=(v,d=2)=>v==null||!Number.isFinite(v)?'—':Number(v).toFixed(d);
+  const pp=v=>v==null?'—':(v>=0?'+':'')+v+'pp';
+
+  // v1213: "Complete" used to mean only that an audit OBJECT existed for today, so the header read
+  // "Complete for 2026-08-21" beside Resolved 0 / Pending 20. A cohort with nothing resolved is not
+  // a completed audit; it is an issued one still inside its two-session window.
+  const issued=audit?.issued??0, resolved=audit?.resolved??0, pending=audit?.pending??0;
+  const state=!audit?(afterClose?{t:'Waiting for a refreshed post-close ALL NSE.csv',c:'var(--amber)'}
+                                :{t:'Arms automatically at 16:00 IST',c:'var(--t3)'})
+    :resolved===0?{t:'Issued for '+today+' — nothing resolved yet, '+pending+' still inside their window',c:'var(--amber)'}
+    :pending>0?{t:'Partly graded for '+today+' — '+resolved+' of '+issued+' resolved, '+pending+' pending',c:'var(--amber)'}
+    :{t:'Fully graded for '+today,c:'var(--green)'};
+
+  // ONE tracker, not three. The tab carried three tables over the SAME condition list: a >=95%
+  // candidate list, a pick-side tracker and a gainer-side tracker. They are one question - does this
+  // condition separate winners - asked of two evidence streams, so they become one table with a
+  // column for each stream.
+  const gsBy=Object.fromEntries(gs.map(r=>[r.key,r]));
+  const merged=scorecard.map(r=>({p:r,g:gsBy[r.key]||{}}))
+    .filter(x=>x.p.sessions>0||x.g.sessions>0);
+  const dormant=scorecard.length-merged.length;
+  const rank=x=>(x.p.status==='ARMED'||x.g.status==='ARMED')?0
+    :(x.p.status==='RETIRED'||x.g.status==='RETIRED')?1:2;
+  merged.sort((a,b)=>rank(a)-rank(b)||Math.abs(b.p.t||0)-Math.abs(a.p.t||0));
+  const badge=(st,why)=>{
+    const c=st==='ARMED'?'var(--green)':st==='RETIRED'?'var(--red)':'var(--t3)';
+    return '<span style="font-weight:800;color:'+c+'">'+st+'</span>'
+      +(why?'<div style="font-size:11px;color:var(--t3);margin-top:2px">'+escHtml(why)+'</div>':'');
+  };
+  const liftCell=(v,t)=>{
+    if(v==null) return '<span style="color:var(--t3)">—</span>';
+    const c=v>0?'var(--green)':v<0?'var(--red)':'var(--t3)';
+    return '<span style="color:'+c+';font-weight:700">'+pp(v)+'</span>'
+      +(t!=null&&t!==0?'<div style="font-size:11px;color:var(--t3)">t '+Number(t).toFixed(2)+'</div>':'');
+  };
+  const trackerRows=merged.map(x=>{
+    const p=x.p,g=x.g;
+    const shown=(p.status==='COLLECTING'&&g.status&&g.status!=='COLLECTING')?g.status:p.status;
+    return '<tr>'
+      +'<td style="font-weight:600">'+escHtml(p.label)+'</td>'
+      +'<td style="text-align:right">'+(p.sessions||'—')
+        +'<div style="font-size:11px;color:var(--t3)">'+(p.total||0)+' picks</div></td>'
+      +'<td style="text-align:right">'+liftCell(p.meanLift,p.t)+'</td>'
+      +'<td style="text-align:right">'+(g.sessions||'—')+'</td>'
+      +'<td style="text-align:right">'+liftCell(g.meanLift,g.t)+'</td>'
+      +'<td>'+badge(shown,shown==='COLLECTING'?(p.why||g.why||''):'')+'</td>'
+      +'</tr>';
+  }).join('');
+
   const gCard=(()=>{
-    const gs=store.gainerScorecard||getGainerScorecard(store.gainers||{});
-    if(!gToday) return `<div class="m-card" style="margin-bottom:14px"><h3>Top-gainer reverse audit</h3><p style="color:var(--t3);font-size:13px">Runs after 16:00 on the refreshed closing tape. It takes the day's ${GAINER_COHORT_N} biggest EQ gainers and grades every predeclared condition against them and against the rest of the tradeable market, so a stock the board MISSED becomes evidence rather than nothing.</p></div>`;
+    if(!gToday) return '<div class="m-card" style="margin-bottom:14px"><h3>Today’s winners, graded</h3>'
+      +'<p style="color:var(--t3);font-size:13px">Runs after 16:00 on the refreshed closing tape: the day’s '
+      +GAINER_COHORT_N+' biggest EQ gainers scored against the same conditions as the picks and against the rest of the tradeable market, so a stock the board MISSED becomes evidence rather than nothing.</p></div>';
     const f=gToday.fields||{};
-    const n2=(v,d=2)=>v==null||!Number.isFinite(v)?'—':Number(v).toFixed(d);
-    const rows=gToday.symbols.map(x=>`<tr><td style="font-weight:700">${escHtml(x.s)}</td><td style="color:var(--green)">+${n2(x.day)}%</td><td>${x.rank??'—'}</td><td>${n2(x.score,1)}</td><td>${n2(x.setupPct,3)}</td><td>${n2(x.feasibility,3)}</td><td>${n2(x.circuitFeasibility,3)}</td><td>${x.relvol==null?'—':n2(x.relvol)+'×'}</td><td style="color:${x.dirOk?'var(--green)':'var(--red)'}">${x.dirOk?'Y':'N'}</td></tr>`).join('');
-    const cond=(gToday.conditions||[]).slice().sort((a,b)=>b.lift-a.lift).map(c=>`<tr><td>${escHtml(c.label)}</td><td>${c.hit}/${c.of}</td><td>${c.hitPct}%</td><td>${c.basePct}%</td><td style="font-weight:800;color:${c.lift>=GAINER_LIFT_MIN?'var(--green)':c.lift<=-GAINER_LIFT_MIN?'var(--red)':'var(--t3)'}">${c.lift>=0?'+':''}${c.lift}pp</td></tr>`).join('');
-    const gRows=gs.map(r=>`<tr><td>${escHtml(r.label)}</td><td>${r.sessions}</td><td>${r.confirms}</td><td>${r.contradictions}</td><td>${r.meanLift==null?'—':(r.meanLift>=0?'+':'')+r.meanLift+'pp'}</td><td style="font-weight:800;color:${r.status==='ARMED'?'var(--green)':r.status==='RETIRED'?'var(--red)':'var(--t3)'}">${r.status}</td></tr>`).join('');
-    return `<div class="m-card" style="margin-bottom:14px">
-      <h3>Top-gainer reverse audit</h3>
-      <p style="color:var(--t2);font-size:14px">The day's ${gToday.n} biggest EQ gainers, graded against the same predeclared conditions as the picks — and against the ${gToday.controlN} tradeable rows that were not gainers. <b>${gToday.caught.onBoard}</b> of them were inside the board's top ${RECOMMEND_MAX_RANK}; <b>${gToday.caught.scored}</b> cleared the ${RECOMMEND_MIN_SCORE} score bar.</p>
-      <div class="kpi-grid" style="margin:12px 0">
-        <div class="kpi-card"><div class="kpi-lbl">Median rank — gainers</div><div class="kpi-val">${f.rank?.cohort??'—'}</div><div class="kpi-sub">rest of market ${f.rank?.control??'—'}</div></div>
-        <div class="kpi-card"><div class="kpi-lbl">Median score — gainers</div><div class="kpi-val">${n2(f.score?.cohort,1)}</div><div class="kpi-sub">rest ${n2(f.score?.control,1)}</div></div>
-        <div class="kpi-card"><div class="kpi-lbl">Median setup pct</div><div class="kpi-val">${n2(f.setupPct?.cohort,3)}</div><div class="kpi-sub">rest ${n2(f.setupPct?.control,3)}</div></div>
-        <div class="kpi-card"><div class="kpi-lbl">Median relative volume</div><div class="kpi-val">${n2(f.relvol?.cohort)}×</div><div class="kpi-sub">rest ${n2(f.relvol?.control)}×</div></div>
-        <div class="kpi-card"><div class="kpi-lbl">Median circuit feasibility</div><div class="kpi-val">${n2(f.circuitFeasibility?.cohort,3)}</div><div class="kpi-sub">rest ${n2(f.circuitFeasibility?.control,3)}</div></div>
-      </div>
-      <div class="scroll-x"><table class="method-table"><thead><tr><th>Symbol</th><th>Day</th><th>Rank</th><th>Score</th><th>Setup</th><th>Feas</th><th>Circuit feas</th><th>RelVol</th><th>Dir</th></tr></thead><tbody>${rows}</tbody></table></div>
-      <h3 style="margin-top:16px">Which conditions separated the winners today</h3>
-      <p style="color:var(--t3);font-size:13px">Lift is the gap in percentage points between how often the winners satisfied a condition and how often the rest of the market did. A condition present in the winners at the market's own base rate says nothing about winning.</p>
-      <div class="scroll-x"><table class="method-table"><thead><tr><th>Condition</th><th>Winners</th><th>Winner rate</th><th>Market rate</th><th>Lift</th></tr></thead><tbody>${cond}</tbody></table></div>
-      <h3 style="margin-top:16px">Gainer-side trigger tracker</h3>
-      <p style="color:var(--t3);font-size:13px">A condition arms after at least 3 sessions where its lift held at ${GAINER_LIFT_MIN}pp or better, across at least 2 sessions, with no more than 1 contradiction. One day never graduates a rule, and a condition that keeps failing retires on its own.</p>
-      <div class="scroll-x"><table class="method-table"><thead><tr><th>Condition</th><th>Sessions</th><th>Confirms</th><th>Contradictions</th><th>Mean lift</th><th>Status</th></tr></thead><tbody>${gRows}</tbody></table></div>
-    </div>`;
+    // v1213: the `feasibility` column is dropped. It is the STATISTICAL session-ceiling term v1208
+    // removed from the score, it printed 0.000 on every row of this table, and it sat beside scores
+    // of 91.7 that plainly did not use it. `circuitFeasibility` is what the score actually reads.
+    const rows=gToday.symbols.map(x=>'<tr>'
+      +'<td style="font-weight:700">'+escHtml(x.s)+'</td>'
+      +'<td style="color:var(--green);text-align:right">+'+n2(x.day)+'%</td>'
+      +'<td style="text-align:right">'+(x.rank??'—')+'</td>'
+      +'<td style="text-align:right">'+n2(x.score,1)+'</td>'
+      +'<td style="text-align:right">'+n2(x.setupPct,3)+'</td>'
+      +'<td style="text-align:right">'+n2(x.circuitFeasibility,3)+'</td>'
+      +'<td style="text-align:right">'+(x.relvol==null?'—':n2(x.relvol)+'×')+'</td>'
+      +'<td style="text-align:center;color:'+(x.dirOk?'var(--green)':'var(--red)')+'">'+(x.dirOk?'Y':'N')+'</td></tr>').join('');
+    const cond=(gToday.conditions||[]).slice().sort((a,b)=>b.lift-a.lift).map(c=>'<tr>'
+      +'<td>'+escHtml(c.label)+'</td><td style="text-align:right">'+c.hit+'/'+c.of+'</td>'
+      +'<td style="text-align:right">'+c.hitPct+'%</td><td style="text-align:right">'+c.basePct+'%</td>'
+      +'<td style="text-align:right;font-weight:800;color:'
+      +(c.lift>=GAINER_LIFT_MIN?'var(--green)':c.lift<=-GAINER_LIFT_MIN?'var(--red)':'var(--t3)')+'">'+pp(c.lift)+'</td></tr>').join('');
+    // v1213: "median circuit feasibility 1.000 / rest 1.000" was a card that could not discriminate
+    // between the two cohorts. The cards kept are the ones where they actually differ.
+    const card=(lbl,val,sub)=>'<div class="kpi-card"><div class="kpi-lbl">'+lbl+'</div><div class="kpi-val">'+val+'</div><div class="kpi-sub">'+sub+'</div></div>';
+    const H=(t)=>'<h4 style="margin:16px 0 6px;font-size:13px;color:var(--t2);text-transform:uppercase;letter-spacing:.08em">'+t+'</h4>';
+    return '<div class="m-card" style="margin-bottom:14px">'
+      +'<h3>Today’s winners, graded</h3>'
+      +'<p style="color:var(--t2);font-size:14px">The day’s '+gToday.n+' biggest EQ gainers against the '+gToday.controlN
+      +' tradeable rows that were not. <b>'+gToday.caught.onBoard+'</b> were inside the board’s top '+RECOMMEND_MAX_RANK
+      +'; <b>'+gToday.caught.scored+'</b> cleared the '+RECOMMEND_MIN_SCORE+' score bar.</p>'
+      +'<div class="kpi-grid" style="margin:12px 0">'
+      +card('Median rank',f.rank?.cohort??'—','rest of market '+(f.rank?.control??'—'))
+      +card('Median score',n2(f.score?.cohort,1),'rest '+n2(f.score?.control,1))
+      +card('Median setup pct',n2(f.setupPct?.cohort,3),'rest '+n2(f.setupPct?.control,3))
+      +card('Median relative volume',n2(f.relvol?.cohort)+'×','rest '+n2(f.relvol?.control)+'×')
+      +'</div>'
+      +H('What separated them')
+      +'<div class="scroll-x"><table class="method-table"><thead><tr><th>Condition</th><th style="text-align:right">Winners</th><th style="text-align:right">Winner rate</th><th style="text-align:right">Market rate</th><th style="text-align:right">Lift</th></tr></thead><tbody>'+cond+'</tbody></table></div>'
+      +H('The cohort')
+      +'<div class="scroll-x"><table class="method-table"><thead><tr><th>Symbol</th><th style="text-align:right">Day</th><th style="text-align:right">Rank</th><th style="text-align:right">Score</th><th style="text-align:right">Setup</th><th style="text-align:right">Circuit feas</th><th style="text-align:right">RelVol</th><th style="text-align:center">Dir</th></tr></thead><tbody>'+rows+'</tbody></table></div>'
+      +'</div>';
   })();
+
   const rss=NSE_FUNDAMENTAL_META,events=Object.values(NSE_FUNDAMENTALS).reduce((n,a)=>n+(a?.length||0),0);
-  el.innerHTML=`<div style="padding:18px 16px 40px">
-    <div class="m-card" style="margin-bottom:14px"><div style="display:flex;justify-content:space-between;align-items:flex-start;gap:14px;flex-wrap:wrap">
-      <div><h3 style="margin:0 0 6px">Post-close model audit</h3><div style="font-size:14px;color:var(--t2);max-width:850px">Runs inside the app after 16:00 when the refreshed closing tape is ingested. It grades the cohort exactly as issued, keeps unresolved two-day picks pending, and accumulates the evidence bar without relying on RULES.md or an assistant remembering a routine.</div></div>
-      <div style="font-weight:800;color:${stateColor}">${escHtml(stateText)}</div></div>
-      <div class="kpi-grid" style="margin-top:14px">
-        <div class="kpi-card"><div class="kpi-lbl">Issued</div><div class="kpi-val">${audit?.issued??'—'}</div></div>
-        <div class="kpi-card"><div class="kpi-lbl">Resolved</div><div class="kpi-val">${audit?.resolved??'—'}</div></div>
-        <div class="kpi-card"><div class="kpi-lbl">Rockets</div><div class="kpi-val" style="color:var(--green)">${audit?.rockets??'—'}</div></div>
-        <div class="kpi-card"><div class="kpi-lbl">Pending</div><div class="kpi-val" style="color:var(--amber)">${audit?.pending??'—'}</div></div>
-        <div class="kpi-card"><div class="kpi-lbl">Resolved precision</div><div class="kpi-val">${audit?.precision==null?'—':audit.precision+'%'}</div></div>
-      </div>
-    </div>
-    <div class="m-card" style="margin-bottom:14px"><h3>Today’s ≥95% candidates</h3><p style="color:var(--t3);font-size:13px">Denominator is resolved non-control recommendations only. One session never graduates a rule.</p><div class="scroll-x"><table class="method-table"><thead><tr><th>Condition fixed before grading</th><th>Wins / n</th><th>Precision</th><th>Verdict</th></tr></thead><tbody>${candidateRows}</tbody></table></div></div>
-    <div class="m-card" style="margin-bottom:14px"><h3>Automatic trigger tracker</h3><p style="color:var(--t3);font-size:13px">A condition arms itself after at least 3 wins across at least 2 audited sessions, no more than 1 contradiction, and at least 95% aggregate precision. ARMED gates or re-ranks recommendations automatically; RETIRED negative conditions become automatic vetoes after ten winless sessions.</p><div class="scroll-x"><table class="method-table"><thead><tr><th>Condition</th><th>Sessions</th><th>Confirms</th><th>Contradictions</th><th>Precision</th><th>Status</th></tr></thead><tbody>${ruleRows}</tbody></table></div></div>
-    ${gCard}
-    <div class="m-card"><h3>Official NSE fundamental triggers</h3><p style="color:var(--t2);font-size:14px">${rss?.ok?`${events} symbol-linked filing events loaded from ${rss.feeds||0} official RSS indexes; ${rss.financials?.parsed||0} of ${rss.financials?.attempted||0} result XBRLs parsed; snapshot ${escHtml(rss.snapshot||'saved locally')}.`:`${rss?.why?`RSS unavailable: ${escHtml(rss.why)}.`:'The local helper will fetch and snapshot the official indexes on the next load.'}`} A fresh result becomes a positive trigger only when revenue, profit, operating profit and audit quality pass and price confirms above VWAP and the open. Its rank authority arms automatically after the same forward evidence bar; a persistently losing negative-result cohort becomes an automatic veto.</p></div>
-  </div>`;
+  const armed=merged.filter(x=>x.p.status==='ARMED'||x.g.status==='ARMED').length;
+  const retired=merged.filter(x=>x.p.status==='RETIRED'||x.g.status==='RETIRED').length;
+  const rssText=rss?.ok
+    ? events+' symbol-linked filing events from '+(rss.feeds||0)+' official RSS indexes; '
+      +(rss.financials?.parsed||0)+' of '+(rss.financials?.attempted||0)+' result XBRLs parsed; snapshot '
+      +escHtml(rss.snapshot||'saved locally')+'.'
+    : (rss?.why?'RSS unavailable: '+escHtml(rss.why)+'.':'The local helper will fetch and snapshot the official indexes on the next load.');
+
+  el.innerHTML='<div style="padding:18px 16px 40px">'
+    +'<div class="m-card" style="margin-bottom:14px"><div style="display:flex;justify-content:space-between;align-items:flex-start;gap:14px;flex-wrap:wrap">'
+    +'<div><h3 style="margin:0 0 6px">Post-close model audit</h3><div style="font-size:14px;color:var(--t2);max-width:850px">Runs inside the app after 16:00 on the refreshed closing tape. It grades the cohort exactly as issued and keeps unresolved two-day picks pending.</div></div>'
+    +'<div style="font-weight:800;color:'+state.c+';text-align:right;max-width:340px">'+escHtml(state.t)+'</div></div>'
+    +'<div class="kpi-grid" style="margin-top:14px">'
+    +'<div class="kpi-card"><div class="kpi-lbl">Issued</div><div class="kpi-val">'+(audit?issued:'—')+'</div></div>'
+    +'<div class="kpi-card"><div class="kpi-lbl">Resolved</div><div class="kpi-val">'+(audit?resolved:'—')+'</div></div>'
+    +'<div class="kpi-card"><div class="kpi-lbl">Rockets</div><div class="kpi-val" style="color:var(--green)">'+(audit?.rockets??'—')+'</div></div>'
+    +'<div class="kpi-card"><div class="kpi-lbl">Pending</div><div class="kpi-val" style="color:var(--amber)">'+(audit?pending:'—')+'</div></div>'
+    +'<div class="kpi-card"><div class="kpi-lbl">Resolved precision</div><div class="kpi-val">'+(audit?.precision==null?'—':audit.precision+'%')+'</div></div>'
+    +'</div></div>'
+    +'<div class="m-card" style="margin-bottom:14px">'
+    +'<div style="display:flex;justify-content:space-between;align-items:baseline;gap:12px;flex-wrap:wrap">'
+    +'<h3 style="margin:0">Condition tracker</h3>'
+    +'<div style="font-size:13px;color:var(--t2)"><b style="color:var(--green)">'+armed+'</b> armed · <b style="color:var(--red)">'+retired
+    +'</b> retired · '+(merged.length-armed-retired)+' collecting'+(dormant?' · '+dormant+' not yet scored':'')+'</div></div>'
+    +'<p style="color:var(--t3);font-size:13px;margin:6px 0 0;max-width:980px">Each condition is measured against <b>the cohort’s own base rate for that session</b>, on two independent streams: the app’s resolved picks, and the day’s biggest gainers whether or not the board held them. Lift is the gap in percentage points. A condition ARMS when that lift is reliably positive — |t| past '
+    +postCloseTCrit()+', the value its own family size requires — and RETIRES into an automatic veto when it is reliably negative. Where it is neither, the row states what is still missing instead of repeating a status.</p>'
+    +'<div class="scroll-x" style="margin-top:10px"><table class="method-table"><thead><tr>'
+    +'<th>Condition</th><th style="text-align:right">Pick sessions</th><th style="text-align:right">Lift vs base</th>'
+    +'<th style="text-align:right">Gainer sessions</th><th style="text-align:right">Lift vs market</th><th>Status</th>'
+    +'</tr></thead><tbody>'+(trackerRows||'<tr><td colspan="6" style="color:var(--t3)">No condition has been scored by an audited session yet.</td></tr>')+'</tbody></table></div></div>'
+    +gCard
+    +'<div class="m-card"><h3>Official NSE fundamental triggers</h3><p style="color:var(--t2);font-size:14px">'+rssText
+    +' A fresh result becomes a positive trigger only when revenue, profit, operating profit and audit quality pass and price confirms above VWAP and the open. Its rank authority arms on the same evidence bar above; a persistently losing negative-result cohort becomes an automatic veto.</p></div>'
+    +'</div>';
 }
 
 let APPLY_FILTERS_TIMER=null;
