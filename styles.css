@@ -62,6 +62,55 @@ body::before{content:'';position:fixed;inset:0;background:radial-gradient(ellips
 .m-card{background:var(--bg-card);border:1px solid var(--border);border-radius:10px;padding:18px 22px}
 .m-card h4{font-size:15px;font-weight:700;margin-bottom:8px;display:flex;align-items:center;gap:8px}
 .m-card p{font-size:14px;margin-bottom:0}
+/* Post-close is a dense audit surface, not prose pasted into generic cards. Its tables had no CSS
+   at all through v1218, so they collapsed to intrinsic width at the left of a 1900px card. */
+.pc-shell{padding:18px 0 44px;display:grid;gap:16px}
+.pc-card{padding:22px 24px;overflow:hidden}
+.pc-hero{background:linear-gradient(125deg,rgba(249,115,22,.075),transparent 34%),var(--bg-card);border-color:var(--border-hi)}
+.pc-head{display:flex;align-items:flex-start;justify-content:space-between;gap:22px}
+.pc-eyebrow{color:var(--fire);font-size:11px;font-weight:800;text-transform:uppercase;letter-spacing:.13em;margin-bottom:6px}
+.pc-title{font-size:21px!important;line-height:1.25;margin:0 0 7px!important;letter-spacing:-.02em}
+.pc-copy{max-width:1000px;color:var(--t2);font-size:13px;line-height:1.65;margin:0}
+.pc-state{flex:0 0 auto;max-width:390px;padding:9px 13px;border-radius:9px;background:rgba(251,191,36,.08);border:1px solid rgba(251,191,36,.2);font-size:12px;font-weight:800;line-height:1.45;text-align:right}
+.pc-kpis{display:grid;grid-template-columns:repeat(5,minmax(130px,1fr));gap:10px;margin-top:18px}
+.pc-kpi{min-width:0;padding:13px 15px;border:1px solid var(--border);border-radius:9px;background:rgba(7,9,14,.32)}
+.pc-kpi-label{color:var(--t3);font-size:10px;font-weight:800;text-transform:uppercase;letter-spacing:.12em}
+.pc-kpi-value{margin-top:5px;color:var(--t1);font:800 23px 'DM Mono',monospace;line-height:1.15}
+.pc-kpi-sub{margin-top:4px;color:var(--t3);font-size:11px;line-height:1.35}
+.pc-section-head{display:flex;align-items:center;justify-content:space-between;gap:18px;margin-bottom:7px}
+.pc-section-title{font-size:17px!important;margin:0!important;letter-spacing:-.01em}
+.pc-counts{flex:0 0 auto;color:var(--t2);font:600 12px 'DM Mono',monospace;white-space:nowrap}
+.pc-table-wrap{width:100%;overflow:auto;margin-top:14px;border:1px solid var(--border);border-radius:9px;background:rgba(7,9,14,.25);scrollbar-width:thin;scrollbar-color:var(--border-hi) transparent}
+.pc-table{width:100%;border-collapse:separate;border-spacing:0;color:var(--t2);font:500 12px 'DM Mono',monospace;line-height:1.35}
+.pc-table th{position:sticky;top:0;z-index:1;padding:9px 12px;background:var(--bg-raised);border-bottom:1px solid var(--border-hi);color:var(--t3);font:800 10px 'Plus Jakarta Sans',sans-serif;text-transform:uppercase;letter-spacing:.08em;text-align:left;white-space:nowrap}
+.pc-table td{padding:9px 12px;border-bottom:1px solid rgba(36,48,68,.58);vertical-align:middle}
+.pc-table tbody tr:last-child td{border-bottom:0}
+.pc-table tbody tr:hover td{background:rgba(59,130,246,.035);color:var(--t1)}
+.pc-table td:first-child{color:var(--t1);font-family:'Plus Jakarta Sans',sans-serif;font-weight:650}
+.pc-table .num{text-align:right;font-variant-numeric:tabular-nums}
+.pc-table .center{text-align:center}
+.pc-table--tracker{min-width:930px;table-layout:fixed}
+.pc-table--tracker th:nth-child(1){width:30%}.pc-table--tracker th:nth-child(2){width:11%}.pc-table--tracker th:nth-child(3){width:12%}.pc-table--tracker th:nth-child(4){width:11%}.pc-table--tracker th:nth-child(5){width:12%}.pc-table--tracker th:nth-child(6){width:24%}
+.pc-table--conditions{min-width:610px}.pc-table--cohort{min-width:760px}
+.pc-cell-main{color:var(--t1);font-weight:700}.pc-cell-sub{color:var(--t3);font-size:10px;margin-top:2px}
+.pc-lift{font-weight:800}.pc-lift--up{color:var(--green)}.pc-lift--down{color:var(--red)}.pc-lift--flat{color:var(--t3)}
+.pc-status{display:inline-flex;align-items:center;gap:6px;padding:4px 8px;border-radius:999px;border:1px solid var(--border);font:800 10px 'Plus Jakarta Sans',sans-serif;letter-spacing:.05em}
+.pc-status::before{content:'';width:6px;height:6px;border-radius:50%;background:currentColor;box-shadow:0 0 8px currentColor}
+.pc-status--armed{color:var(--green);background:rgba(34,197,94,.08);border-color:rgba(34,197,94,.2)}
+.pc-status--retired{color:var(--red);background:rgba(239,68,68,.08);border-color:rgba(239,68,68,.2)}
+.pc-status--collecting{color:var(--amber);background:rgba(251,191,36,.07);border-color:rgba(251,191,36,.18)}
+.pc-status-why{max-width:320px;color:var(--t3);font:500 10px/1.4 'Plus Jakarta Sans',sans-serif;margin-top:5px}
+.pc-winner-kpis{display:grid;grid-template-columns:repeat(4,minmax(150px,1fr));gap:10px;margin:15px 0 18px}
+.pc-data-grid{display:grid;grid-template-columns:minmax(500px,.82fr) minmax(720px,1.18fr);gap:16px;align-items:start}
+.pc-subsection{min-width:0}.pc-subsection-title{margin:0 0 8px;color:var(--t2);font-size:11px;font-weight:800;text-transform:uppercase;letter-spacing:.11em}
+.pc-subsection .pc-table-wrap{margin-top:0}
+.pc-empty{padding:30px 24px;text-align:center;color:var(--t3);font-size:13px;line-height:1.65;border:1px dashed var(--border-hi);border-radius:9px;margin-top:14px}
+.pc-fundamental{display:grid;grid-template-columns:auto 1fr;gap:14px;align-items:start;background:linear-gradient(120deg,rgba(6,182,212,.055),transparent 32%),var(--bg-card)}
+.pc-fundamental-icon{display:grid;place-items:center;width:38px;height:38px;border-radius:9px;color:var(--cyan);background:rgba(6,182,212,.09);border:1px solid rgba(6,182,212,.18);font-size:18px}
+.pc-fundamental h3{font-size:15px!important;margin:0 0 5px!important}.pc-fundamental p{font-size:12px!important;line-height:1.65;color:var(--t2)}
+@media(max-width:1450px){.pc-data-grid{grid-template-columns:1fr}.pc-table--conditions,.pc-table--cohort{min-width:760px}}
+@media(max-width:900px){.pc-card{padding:18px}.pc-head{flex-direction:column}.pc-state{max-width:none;text-align:left}.pc-kpis{grid-template-columns:repeat(2,minmax(0,1fr))}.pc-winner-kpis{grid-template-columns:repeat(2,minmax(0,1fr))}.pc-section-head{align-items:flex-start;flex-direction:column;gap:7px}.pc-counts{white-space:normal}.pc-copy{font-size:12px}}
+@media(max-width:520px){.pc-shell{gap:12px}.pc-card{padding:15px}.pc-title{font-size:18px!important}.pc-kpis,.pc-winner-kpis{grid-template-columns:1fr 1fr;gap:7px}.pc-kpi{padding:11px}.pc-kpi-value{font-size:19px}.pc-fundamental{grid-template-columns:1fr}.pc-table td{padding:8px 10px}}
 .corr-wrap{overflow-x:auto;margin:16px 0}
 .ct{border-collapse:collapse;font-size:13px;font-family:'DM Mono',monospace;width:100%}
 .ct th{text-align:left;padding:7px 10px;border-bottom:1px solid var(--border-hi);color:var(--t3);font-size:12px;text-transform:uppercase;letter-spacing:.7px;background:var(--bg-raised);cursor:pointer;user-select:none;transition:color .15s}

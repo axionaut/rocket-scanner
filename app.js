@@ -1,5 +1,5 @@
-const BUILD_TS='2026-08-24 16:18 IST'; // release build time (IST)
-const APP_VERSION=1218; // v1218: Open Positions numbers come from 5-minute tape, not ALL NSE.
+const BUILD_TS='2026-08-24 16:48 IST'; // release build time (IST)
+const APP_VERSION=1219; // v1219: Post-close audit is a full-width responsive dashboard.
 // v1093: a baseline reward:risk MEASURED on the cross-section (last completed bhav session) instead of learned from the owner's own fills - reported on every row, deliberately not enforced. Includes v1092: position size split by Radar score / stop distance, so equally-scored names carry equal RUPEE risk, plus an opt-in Risk /trade cap.
 // v556: parse the NSE Market Activity Report (MA<date>.csv) — official Nifty %, advances/declines and sector index moves shown as market CONTEXT in the status bar (EOD data, display only, never fed into per-row scoring); MA added to the ℹ️ file manifest.
 // v555 market-cycle stage awareness (stateless, self-calibrating): per-row stage label (1 accumulation · 2 breakout · 3 event · 4 profit-booking · 5 re-accumulation · 6 second-leg); a quiet-accumulation signal (conjunction-of-percentiles) injected via the rocket-diagnostic weighting; sell-the-news decay off Recent earnings date (horizon = review days). v1065 makes the market-breadth gauge an entry-eligibility input while still never changing ranking.
@@ -10337,72 +10337,69 @@ function renderPostClose(){
     :(x.p.status==='RETIRED'||x.g.status==='RETIRED')?1:2;
   merged.sort((a,b)=>rank(a)-rank(b)||Math.abs(b.p.t||0)-Math.abs(a.p.t||0));
   const badge=(st,why)=>{
-    const c=st==='ARMED'?'var(--green)':st==='RETIRED'?'var(--red)':'var(--t3)';
-    return '<span style="font-weight:800;color:'+c+'">'+st+'</span>'
-      +(why?'<div style="font-size:11px;color:var(--t3);margin-top:2px">'+escHtml(why)+'</div>':'');
+    const k=st==='ARMED'?'armed':st==='RETIRED'?'retired':'collecting';
+    return '<span class="pc-status pc-status--'+k+'">'+st+'</span>'
+      +(why?'<div class="pc-status-why">'+escHtml(why)+'</div>':'');
   };
   const liftCell=(v,t)=>{
     if(v==null) return '<span style="color:var(--t3)">—</span>';
-    const c=v>0?'var(--green)':v<0?'var(--red)':'var(--t3)';
-    return '<span style="color:'+c+';font-weight:700">'+pp(v)+'</span>'
-      +(t!=null&&t!==0?'<div style="font-size:11px;color:var(--t3)">t '+Number(t).toFixed(2)+'</div>':'');
+    const k=v>0?'up':v<0?'down':'flat';
+    return '<span class="pc-lift pc-lift--'+k+'">'+pp(v)+'</span>'
+      +(t!=null&&t!==0?'<div class="pc-cell-sub">t '+Number(t).toFixed(2)+'</div>':'');
   };
   const trackerRows=merged.map(x=>{
     const p=x.p,g=x.g;
     const shown=(p.status==='COLLECTING'&&g.status&&g.status!=='COLLECTING')?g.status:p.status;
     return '<tr>'
-      +'<td style="font-weight:600">'+escHtml(p.label)+'</td>'
-      +'<td style="text-align:right">'+(p.sessions||'—')
-        +'<div style="font-size:11px;color:var(--t3)">'+(p.total||0)+' picks</div></td>'
-      +'<td style="text-align:right">'+liftCell(p.meanLift,p.t)+'</td>'
-      +'<td style="text-align:right">'+(g.sessions||'—')+'</td>'
-      +'<td style="text-align:right">'+liftCell(g.meanLift,g.t)+'</td>'
+      +'<td>'+escHtml(p.label)+'</td>'
+      +'<td class="num"><span class="pc-cell-main">'+(p.sessions||'—')+'</span>'
+        +'<div class="pc-cell-sub">'+(p.total||0)+' picks</div></td>'
+      +'<td class="num">'+liftCell(p.meanLift,p.t)+'</td>'
+      +'<td class="num"><span class="pc-cell-main">'+(g.sessions||'—')+'</span></td>'
+      +'<td class="num">'+liftCell(g.meanLift,g.t)+'</td>'
       +'<td>'+badge(shown,shown==='COLLECTING'?(p.why||g.why||''):'')+'</td>'
       +'</tr>';
   }).join('');
 
   const gCard=(()=>{
-    if(!gToday) return '<div class="m-card" style="margin-bottom:14px"><h3>Today’s winners, graded</h3>'
-      +'<p style="color:var(--t3);font-size:13px">Runs after 16:00 on the refreshed closing tape: the day’s '
-      +GAINER_COHORT_N+' biggest EQ gainers scored against the same conditions as the picks and against the rest of the tradeable market, so a stock the board MISSED becomes evidence rather than nothing.</p></div>';
+    if(!gToday) return '<section class="m-card pc-card"><div class="pc-section-head"><h3 class="pc-section-title">Today’s winners, graded</h3></div>'
+      +'<div class="pc-empty">Runs after 16:00 on the refreshed closing tape. The day’s '
+      +GAINER_COHORT_N+' biggest EQ gainers are scored against the picks and the rest of the tradeable market, so a stock the board missed becomes evidence.</div></section>';
     const f=gToday.fields||{};
     // v1213: the `feasibility` column is dropped. It is the STATISTICAL session-ceiling term v1208
     // removed from the score, it printed 0.000 on every row of this table, and it sat beside scores
     // of 91.7 that plainly did not use it. `circuitFeasibility` is what the score actually reads.
     const rows=gToday.symbols.map(x=>'<tr>'
-      +'<td style="font-weight:700">'+escHtml(x.s)+'</td>'
-      +'<td style="color:var(--green);text-align:right">+'+n2(x.day)+'%</td>'
-      +'<td style="text-align:right">'+(x.rank??'—')+'</td>'
-      +'<td style="text-align:right">'+n2(x.score,1)+'</td>'
-      +'<td style="text-align:right">'+n2(x.setupPct,3)+'</td>'
-      +'<td style="text-align:right">'+n2(x.circuitFeasibility,3)+'</td>'
-      +'<td style="text-align:right">'+(x.relvol==null?'—':n2(x.relvol)+'×')+'</td>'
-      +'<td style="text-align:center;color:'+(x.dirOk?'var(--green)':'var(--red)')+'">'+(x.dirOk?'Y':'N')+'</td></tr>').join('');
+      +'<td>'+escHtml(x.s)+'</td>'
+      +'<td class="num pc-lift--up">+'+n2(x.day)+'%</td>'
+      +'<td class="num">'+(x.rank??'—')+'</td>'
+      +'<td class="num">'+n2(x.score,1)+'</td>'
+      +'<td class="num">'+n2(x.setupPct,3)+'</td>'
+      +'<td class="num">'+n2(x.circuitFeasibility,3)+'</td>'
+      +'<td class="num">'+(x.relvol==null?'—':n2(x.relvol)+'×')+'</td>'
+      +'<td class="center" style="color:'+(x.dirOk?'var(--green)':'var(--red)')+'">'+(x.dirOk?'Y':'N')+'</td></tr>').join('');
     const cond=(gToday.conditions||[]).slice().sort((a,b)=>b.lift-a.lift).map(c=>'<tr>'
-      +'<td>'+escHtml(c.label)+'</td><td style="text-align:right">'+c.hit+'/'+c.of+'</td>'
-      +'<td style="text-align:right">'+c.hitPct+'%</td><td style="text-align:right">'+c.basePct+'%</td>'
-      +'<td style="text-align:right;font-weight:800;color:'
-      +(c.lift>=GAINER_LIFT_MIN?'var(--green)':c.lift<=-GAINER_LIFT_MIN?'var(--red)':'var(--t3)')+'">'+pp(c.lift)+'</td></tr>').join('');
+      +'<td>'+escHtml(c.label)+'</td><td class="num">'+c.hit+'/'+c.of+'</td>'
+      +'<td class="num">'+c.hitPct+'%</td><td class="num">'+c.basePct+'%</td>'
+      +'<td class="num pc-lift '+(c.lift>=GAINER_LIFT_MIN?'pc-lift--up':c.lift<=-GAINER_LIFT_MIN?'pc-lift--down':'pc-lift--flat')+'">'+pp(c.lift)+'</td></tr>').join('');
     // v1213: "median circuit feasibility 1.000 / rest 1.000" was a card that could not discriminate
     // between the two cohorts. The cards kept are the ones where they actually differ.
-    const card=(lbl,val,sub)=>'<div class="kpi-card"><div class="kpi-lbl">'+lbl+'</div><div class="kpi-val">'+val+'</div><div class="kpi-sub">'+sub+'</div></div>';
-    const H=(t)=>'<h4 style="margin:16px 0 6px;font-size:13px;color:var(--t2);text-transform:uppercase;letter-spacing:.08em">'+t+'</h4>';
-    return '<div class="m-card" style="margin-bottom:14px">'
-      +'<h3>Today’s winners, graded</h3>'
-      +'<p style="color:var(--t2);font-size:14px">The day’s '+gToday.n+' biggest EQ gainers against the '+gToday.controlN
+    const card=(lbl,val,sub)=>'<div class="pc-kpi"><div class="pc-kpi-label">'+lbl+'</div><div class="pc-kpi-value">'+val+'</div><div class="pc-kpi-sub">'+sub+'</div></div>';
+    return '<section class="m-card pc-card">'
+      +'<div class="pc-section-head"><h3 class="pc-section-title">Today’s winners, graded</h3></div>'
+      +'<p class="pc-copy">The day’s '+gToday.n+' biggest EQ gainers against the '+gToday.controlN
       +' tradeable rows that were not. <b>'+gToday.caught.onBoard+'</b> were inside the board’s top '+RECOMMEND_MAX_RANK
       +'; <b>'+gToday.caught.scored+'</b> cleared the '+RECOMMEND_MIN_SCORE+' score bar.</p>'
-      +'<div class="kpi-grid" style="margin:12px 0">'
+      +'<div class="pc-winner-kpis">'
       +card('Median rank',f.rank?.cohort??'—','rest of market '+(f.rank?.control??'—'))
       +card('Median score',n2(f.score?.cohort,1),'rest '+n2(f.score?.control,1))
       +card('Median setup pct',n2(f.setupPct?.cohort,3),'rest '+n2(f.setupPct?.control,3))
       +card('Median relative volume',n2(f.relvol?.cohort)+'×','rest '+n2(f.relvol?.control)+'×')
       +'</div>'
-      +H('What separated them')
-      +'<div class="scroll-x"><table class="method-table"><thead><tr><th>Condition</th><th style="text-align:right">Winners</th><th style="text-align:right">Winner rate</th><th style="text-align:right">Market rate</th><th style="text-align:right">Lift</th></tr></thead><tbody>'+cond+'</tbody></table></div>'
-      +H('The cohort')
-      +'<div class="scroll-x"><table class="method-table"><thead><tr><th>Symbol</th><th style="text-align:right">Day</th><th style="text-align:right">Rank</th><th style="text-align:right">Score</th><th style="text-align:right">Setup</th><th style="text-align:right">Circuit feas</th><th style="text-align:right">RelVol</th><th style="text-align:center">Dir</th></tr></thead><tbody>'+rows+'</tbody></table></div>'
-      +'</div>';
+      +'<div class="pc-data-grid">'
+      +'<div class="pc-subsection"><h4 class="pc-subsection-title">What separated them</h4><div class="pc-table-wrap"><table class="pc-table pc-table--conditions"><thead><tr><th>Condition</th><th class="num">Winners</th><th class="num">Winner rate</th><th class="num">Market rate</th><th class="num">Lift</th></tr></thead><tbody>'+cond+'</tbody></table></div></div>'
+      +'<div class="pc-subsection"><h4 class="pc-subsection-title">The cohort</h4><div class="pc-table-wrap"><table class="pc-table pc-table--cohort"><thead><tr><th>Symbol</th><th class="num">Day</th><th class="num">Rank</th><th class="num">Score</th><th class="num">Setup</th><th class="num">Circuit feas</th><th class="num">RelVol</th><th class="center">Dir</th></tr></thead><tbody>'+rows+'</tbody></table></div></div>'
+      +'</div></section>';
   })();
 
   const rss=NSE_FUNDAMENTAL_META,events=Object.values(NSE_FUNDAMENTALS).reduce((n,a)=>n+(a?.length||0),0);
@@ -10414,31 +10411,30 @@ function renderPostClose(){
       +escHtml(rss.snapshot||'saved locally')+'.'
     : (rss?.why?'RSS unavailable: '+escHtml(rss.why)+'.':'The local helper will fetch and snapshot the official indexes on the next load.');
 
-  el.innerHTML='<div style="padding:18px 16px 40px">'
-    +'<div class="m-card" style="margin-bottom:14px"><div style="display:flex;justify-content:space-between;align-items:flex-start;gap:14px;flex-wrap:wrap">'
-    +'<div><h3 style="margin:0 0 6px">Post-close model audit</h3><div style="font-size:14px;color:var(--t2);max-width:850px">Runs inside the app after 16:00 on the refreshed closing tape. It grades the cohort exactly as issued and keeps unresolved two-day picks pending.</div></div>'
-    +'<div style="font-weight:800;color:'+state.c+';text-align:right;max-width:340px">'+escHtml(state.t)+'</div></div>'
-    +'<div class="kpi-grid" style="margin-top:14px">'
-    +'<div class="kpi-card"><div class="kpi-lbl">Issued</div><div class="kpi-val">'+(audit?issued:'—')+'</div></div>'
-    +'<div class="kpi-card"><div class="kpi-lbl">Resolved</div><div class="kpi-val">'+(audit?resolved:'—')+'</div></div>'
-    +'<div class="kpi-card"><div class="kpi-lbl">Rockets</div><div class="kpi-val" style="color:var(--green)">'+(audit?.rockets??'—')+'</div></div>'
-    +'<div class="kpi-card"><div class="kpi-lbl">Pending</div><div class="kpi-val" style="color:var(--amber)">'+(audit?pending:'—')+'</div></div>'
-    +'<div class="kpi-card"><div class="kpi-lbl">Resolved precision</div><div class="kpi-val">'+(audit?.precision==null?'—':audit.precision+'%')+'</div></div>'
-    +'</div></div>'
-    +'<div class="m-card" style="margin-bottom:14px">'
-    +'<div style="display:flex;justify-content:space-between;align-items:baseline;gap:12px;flex-wrap:wrap">'
-    +'<h3 style="margin:0">Condition tracker</h3>'
-    +'<div style="font-size:13px;color:var(--t2)"><b style="color:var(--green)">'+armed+'</b> armed · <b style="color:var(--red)">'+retired
+  el.innerHTML='<div class="pc-shell">'
+    +'<section class="m-card pc-card pc-hero"><div class="pc-head"><div><div class="pc-eyebrow">Automatic learning audit</div>'
+    +'<h3 class="pc-title">Post-close model audit</h3><p class="pc-copy">Runs after 16:00 on the refreshed closing tape. It grades the cohort exactly as issued and keeps unresolved two-day picks pending.</p></div>'
+    +'<div class="pc-state" style="color:'+state.c+'">'+escHtml(state.t)+'</div></div>'
+    +'<div class="pc-kpis">'
+    +'<div class="pc-kpi"><div class="pc-kpi-label">Issued</div><div class="pc-kpi-value">'+(audit?issued:'—')+'</div></div>'
+    +'<div class="pc-kpi"><div class="pc-kpi-label">Resolved</div><div class="pc-kpi-value">'+(audit?resolved:'—')+'</div></div>'
+    +'<div class="pc-kpi"><div class="pc-kpi-label">Rockets</div><div class="pc-kpi-value" style="color:var(--green)">'+(audit?.rockets??'—')+'</div></div>'
+    +'<div class="pc-kpi"><div class="pc-kpi-label">Pending</div><div class="pc-kpi-value" style="color:var(--amber)">'+(audit?pending:'—')+'</div></div>'
+    +'<div class="pc-kpi"><div class="pc-kpi-label">Resolved precision</div><div class="pc-kpi-value">'+(audit?.precision==null?'—':audit.precision+'%')+'</div></div>'
+    +'</div></section>'
+    +'<section class="m-card pc-card">'
+    +'<div class="pc-section-head"><h3 class="pc-section-title">Condition tracker</h3>'
+    +'<div class="pc-counts"><b style="color:var(--green)">'+armed+'</b> armed · <b style="color:var(--red)">'+retired
     +'</b> retired · '+(merged.length-armed-retired)+' collecting'+(dormant?' · '+dormant+' not yet scored':'')+'</div></div>'
-    +'<p style="color:var(--t3);font-size:13px;margin:6px 0 0;max-width:980px">Each condition is measured against <b>the cohort’s own base rate for that session</b>, on two independent streams: the app’s resolved picks, and the day’s biggest gainers whether or not the board held them. Lift is the gap in percentage points. A condition ARMS when that lift is reliably positive — |t| past '
-    +postCloseTCrit()+', the value its own family size requires — and RETIRES into an automatic veto when it is reliably negative. Where it is neither, the row states what is still missing instead of repeating a status.</p>'
-    +'<div class="scroll-x" style="margin-top:10px"><table class="method-table"><thead><tr>'
-    +'<th>Condition</th><th style="text-align:right">Pick sessions</th><th style="text-align:right">Lift vs base</th>'
-    +'<th style="text-align:right">Gainer sessions</th><th style="text-align:right">Lift vs market</th><th>Status</th>'
-    +'</tr></thead><tbody>'+(trackerRows||'<tr><td colspan="6" style="color:var(--t3)">No condition has been scored by an audited session yet.</td></tr>')+'</tbody></table></div></div>'
+    +'<p class="pc-copy">Each condition is measured against <b>the cohort’s own base rate for that session</b> on two independent streams: resolved picks and the day’s biggest gainers, whether or not the board held them. Lift is the gap in percentage points. A condition arms when lift is reliably positive — |t| past '
+    +postCloseTCrit()+' — and retires into an automatic veto when reliably negative.</p>'
+    +'<div class="pc-table-wrap"><table class="pc-table pc-table--tracker"><thead><tr>'
+    +'<th>Condition</th><th class="num">Pick sessions</th><th class="num">Lift vs base</th>'
+    +'<th class="num">Gainer sessions</th><th class="num">Lift vs market</th><th>Status</th>'
+    +'</tr></thead><tbody>'+(trackerRows||'<tr><td colspan="6" style="color:var(--t3)">No condition has been scored by an audited session yet.</td></tr>')+'</tbody></table></div></section>'
     +gCard
-    +'<div class="m-card"><h3>Official NSE fundamental triggers</h3><p style="color:var(--t2);font-size:14px">'+rssText
-    +' A fresh result becomes a positive trigger only when revenue, profit, operating profit and audit quality pass and price confirms above VWAP and the open. Its rank authority arms on the same evidence bar above; a persistently losing negative-result cohort becomes an automatic veto.</p></div>'
+    +'<section class="m-card pc-card pc-fundamental"><div class="pc-fundamental-icon">▦</div><div><h3>Official NSE fundamental triggers</h3><p>'+rssText
+    +' A fresh result becomes positive only when revenue, profit, operating profit and audit quality pass and price confirms above VWAP and the open. Rank authority arms on the evidence bar above; a persistently losing negative-result cohort becomes an automatic veto.</p></div></section>'
     +'</div>';
 }
 
