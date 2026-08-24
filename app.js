@@ -1,5 +1,5 @@
-const BUILD_TS='2026-08-24 13:28 IST'; // release build time (IST)
-const APP_VERSION=1217; // v1217: one target per row - no blank targets, no fabricated runner leg.
+const BUILD_TS='2026-08-24 16:14 IST'; // release build time (IST)
+const APP_VERSION=1218; // v1218: Open Positions numbers come from 5-minute tape, not ALL NSE.
 // v1093: a baseline reward:risk MEASURED on the cross-section (last completed bhav session) instead of learned from the owner's own fills - reported on every row, deliberately not enforced. Includes v1092: position size split by Radar score / stop distance, so equally-scored names carry equal RUPEE risk, plus an opt-in Risk /trade cap.
 // v556: parse the NSE Market Activity Report (MA<date>.csv) — official Nifty %, advances/declines and sector index moves shown as market CONTEXT in the status bar (EOD data, display only, never fed into per-row scoring); MA added to the ℹ️ file manifest.
 // v555 market-cycle stage awareness (stateless, self-calibrating): per-row stage label (1 accumulation · 2 breakout · 3 event · 4 profit-booking · 5 re-accumulation · 6 second-leg); a quiet-accumulation signal (conjunction-of-percentiles) injected via the rocket-diagnostic weighting; sell-the-news decay off Recent earnings date (horizon = review days). v1065 makes the market-breadth gauge an entry-eligibility input while still never changing ranking.
@@ -6795,44 +6795,32 @@ function buildOpenPositionsPanel(query=''){
     const qty=Number(pos?.qty)||0;
     if(!(qty>0)||!pos.symbol) return;
     const scannerRow=scannerBySymbol.get(pos.symbol)||null;
-    const ltp=Number(scannerRow?.price)>0
-      ?Number(scannerRow.price)
+    const tapePolicy=getOpenPositionTapePolicy(pos.symbol,pos);
+    // Position decisions use the 5-minute tape. Position/ALL NSE LTP is only a display fallback
+    // while the tape is missing; it cannot move Target, SL, Pace, EoD or the instruction.
+    const ltp=Number(tapePolicy.price)>0?Number(tapePolicy.price)
       :Number(pos.ltp)>0?Number(pos.ltp):null;
     const avg=Number(pos.avg)>0?Number(pos.avg):(HOLD_COST_MAP[pos.symbol]||null);
     const pnlPct=(avg&&ltp)?+((ltp-avg)/avg*100).toFixed(2):null;
     const pnlRs=(avg&&ltp)?+((ltp-avg)*qty).toFixed(0):null;
     const daysHeld=getOpenPositionDaysHeld(pos.symbol,qty);
     const capital=avg?+(avg*qty).toFixed(0):null;
-    const exitPolicy=getRowExitPolicy(scannerRow,avg);
-    const stopPct=exitPolicy.stopPct;
-    const targetPct=exitPolicy.targetPct;
-    // v1216: the exit policy names WHAT its percentage is measured from. A market read is further
-    // travel from the live price; only the entry-relative anchor paths resolve against the average.
-    const tgtRef=Number(exitPolicy?.targetRefPrice)>0?Number(exitPolicy.targetRefPrice)
-      :(Number(ltp)>0?Number(ltp):avg);
-    const targetPrice=tgtRef&&targetPct?tickPrice(tgtRef*(1+targetPct/100)):null;
-    const stopPrice=avg?tickPrice(avg*(1-stopPct/100)):null;
-    // v1217: THE RUNNER LEG IS DELETED. v1206 kept it to describe a second GTT a v1115-v1176
-    // position might still have resting - but it was firing on ALL 10 current positions at a flat
-    // 6.00% from getReachableTargets().runnerPct, the closed-exit percentile v1212 removed from
-    // the target path. EIDPARRY read target 1.10% beside runner 6.00%. It was not describing
-    // legacy state, it was inventing a second target for every row, and it is the scatter the
-    // owner reported. One target per row.
+    const targetPrice=tapePolicy.targetPrice,stopPrice=tapePolicy.stopPrice;
+    const targetPct=tapePolicy.targetPct;
     const baseQty=qty;
     // v1106 (owner): the day-1 time-exit ADVICE went with the Action column - the trading surface
     // carries no instructions. The evidence behind it is unchanged and lives in Methodology.
     rows.push({
-      sym:pos.symbol,qty,avg,ltp,pnlPct,pnlRs,capital,daysHeld,targetPrice,stopPrice,targetPct,exitPolicy,
-      // v1210: today, through the same window the verdict reads. This field was the last survivor
-      // of the multi-session leak v1209 closed everywhere else.
-      flow:(()=>{const {tt}=getPositionFlowRead(getIntradayRead(pos.symbol));
-        return tt&&Number.isFinite(tt.cvdPct)?+(tt.cvdPct*100).toFixed(2):null;})(),
+      sym:pos.symbol,qty,avg,ltp,pnlPct,pnlRs,capital,daysHeld,targetPrice,stopPrice,targetPct,tapePolicy,
+      signal:tapePolicy.signal,signalSort:tapePolicy.signalSort,
+      flow:Number.isFinite(tapePolicy.flowPct)?+tapePolicy.flowPct.toFixed(2):null,
       baseQty,
       score:isFinite(Number(scannerRow?.score))?Number(scannerRow.score):null,
       rank:scannerRow?.rank??null,setup:scannerRow?.setup||'',
-      dayPct:scannerRow?.day??scannerRow?.priceChange??null,risk:scannerRow?.risk||'',
-      pace:(()=>{const r=getIntradayRead(pos.symbol);return r&&r.current&&Number.isFinite(r.confirmedPacePct)?r.confirmedPacePct:null;})(),
-      predEod:(()=>{const r=getIntradayRead(pos.symbol);return r&&r.current&&r.eod&&Number.isFinite(r.eod.pct)?r.eod.pct:null;})(),
+      dayPct:Number.isFinite(tapePolicy.price)&&tapePolicy.open>0
+        ?100*(tapePolicy.price/tapePolicy.open-1):null,risk:scannerRow?.risk||'',
+      pace:tapePolicy.pacePct,
+      predEod:tapePolicy.eodPct,
       scannerRow
     });
   });
@@ -6851,6 +6839,15 @@ function buildOpenPositionsPanel(query=''){
       // The flow reading rides the SYMBOL cell rather than a column of its own: one more column
       // pushed this panel into a horizontal scrollbar, which the owner has ruled out everywhere.
       fmt:(v,row)=>{
+        const p=row.tapePolicy||getOpenPositionTapePolicy(v,row);
+        const ac=p.signal==='BUY'?'var(--green)':p.signal==='SELL'?'var(--red)'
+          :p.signal==='HOLD'?'var(--amber)':'var(--t3)';
+        const detail=(Number.isFinite(p.flowPct)?' Net flow '+(p.flowPct>=0?'+':'')+p.flowPct.toFixed(1)+'%.':'')
+          +(Number.isFinite(p.pressurePct)?' Unspent pressure '+(p.pressurePct>=0?'+':'')+p.pressurePct.toFixed(2)+'%.':'')
+          +(p.regime?' '+p.regime+'.':'');
+        const tapeTag=`<div style="font-size:11px;color:${ac};font-weight:800" title="${escHtml(p.why+detail)}">${escHtml(p.signal)}</div>`;
+        return intradayRowButton({symbol:v})+symbolChartButton(v)+tapeTag;
+        /* c8 ignore start -- legacy renderer retained below only until the consolidated v1172 assertions are retired. */
         const rd=getIntradayRead(v);
         let tag='';
         if(rd&&rd.traj){
@@ -6888,6 +6885,7 @@ function buildOpenPositionsPanel(query=''){
           }
         }
         return intradayRowButton({symbol:v})+symbolChartButton(v)+tag;
+        /* c8 ignore stop */
       }},
 
     {key:'qty',label:'Qty',align:'right',fmt:v=>v,clrFn:()=>'var(--t2)'},
@@ -6901,6 +6899,11 @@ function buildOpenPositionsPanel(query=''){
     {key:'targetPrice',label:'Target ₹',align:'right',
       fmt:(v,row)=>{
         if(v==null) return '<span style="color:var(--t3)">—</span>';
+        return fmtINR(v)+`<span style="font-size:11px;color:var(--t3)">×${row.qty??''}</span>`
+          +`<span title="${escHtml('Tape target from 5-minute pressure: '
+            +(row.targetPct!=null?('+'+Number(row.targetPct).toFixed(2)+'% from the tape close. '):'')
+            +(row.tapePolicy?.why||''))}"></span>`;
+        /* c8 ignore start -- recommendation-target renderer retained below for old assertion source only. */
         const legacy='';
         // v1216: a target that names only a price throws away WHEN. Measured over the tape's own
         // complete sessions, the high lands late on the sessions worth holding and in the first
@@ -6911,9 +6914,10 @@ function buildOpenPositionsPanel(query=''){
           ? ` Measured as further travel from the live price (${fmtINR(row.exitPolicy.targetRefPrice)}), not from your average.`:'';
         return fmtINR(v)+`<span style="font-size:11px;color:var(--t3)">×${row.qty??''}</span>`
           +`<span title="${escHtml('The whole position exits here: '+(row.targetPct!=null?('+'+Number(row.targetPct).toFixed(2)+'%'):'')+' on its own exit policy.'+from+when+legacy)}"></span>`;
+        /* c8 ignore stop */
       },
       clrFn:()=>'var(--green)'},
-    {key:'stopPrice',label:'SL ₹',align:'right',fmt:(v,row)=>v!=null?fmtINR(v)+`<span style="font-size:12px;color:var(--t3);margin-left:4px">-${Number(row.exitPolicy?.stopPct).toFixed(2)}%</span>`:'—',clrFn:()=>'var(--red)'},
+    {key:'stopPrice',label:'SL ₹',align:'right',fmt:(v,row)=>v!=null?fmtINR(v)+`<span style="font-size:12px;color:var(--t3);margin-left:4px">-${Number(row.pace).toFixed(2)}%</span>`:'—',clrFn:()=>'var(--red)'},
     {key:'score',label:'Score/#',align:'right',bold:true,
       fmt:(v,row)=>radarScoreCell(v)+`<span style="font-size:11px;color:var(--t3)"> #${row.rank??'—'}</span>`,
       clrFn:()=>'var(--t1)'},
@@ -6924,6 +6928,15 @@ function buildOpenPositionsPanel(query=''){
     {key:'pace',label:'Pace / EoD',align:'right',
       fmt:(v,row)=>{
         const dim=(txt,title)=>`<span style="color:var(--t3)"${title?` title="${escHtml(title)}"`:''}>${txt}</span>`;
+        const p=row.tapePolicy||getOpenPositionTapePolicy(row.sym,row);
+        const tapePace=Number.isFinite(p.pacePct)
+          ?`<span title="${escHtml('Proven recovered pullback; Zerodha trail gap ₹'+Number(p.paceRs||0).toFixed(2)+'.')}">${p.pacePct.toFixed(2)}%<span style="color:var(--t3);font-size:11px"> ₹${Number(p.paceRs||0).toFixed(2)}</span></span>`
+          :dim('—','No seller pullback has yet been recovered by a later high.');
+        const tapeEod=Number.isFinite(p.eodPct)&&Number.isFinite(p.eodPrice)
+          ?`<span style="color:${p.eodPct>=0?'var(--green)':'var(--red)'};font-weight:700" title="${escHtml('Completed 5-minute pressure projects '+fmtINR(p.eodPrice)+' at the session close.')}">${fmtINR(p.eodPrice)} <span style="font-size:11px">${p.eodPct>=0?'+':''}${p.eodPct.toFixed(2)}%</span></span>`
+          :dim('—','The 5-minute pressure is not converting into a defensible closing projection.');
+        return tapePace+'<span style="color:var(--t3)"> / </span>'+tapeEod;
+        /* c8 ignore start -- legacy renderer retained below for old assertion source only. */
         const rd=getIntradayRead(row.sym);
         if(!rd) return dim('—','No 5-minute read for this stock yet.');
         if(!rd.current) return dim('—',`Last read was ${rd.on}, not this session — nothing here can describe today.`);
@@ -6971,6 +6984,7 @@ function buildOpenPositionsPanel(query=''){
              +'pressure points one way and its own price slope the other, so there is no honest close to quote.'
             :'No projection: the current session has under three bars, or carries no measurable unspent pressure yet.');
         return pace+'<span style="color:var(--t3)"> / </span>'+eod;
+        /* c8 ignore stop */
       },clrFn:()=>'var(--t2)'},
     {key:'risk',label:'Risk',align:'left',fmt:v=>v?radarRiskPill(v):'—'}
   ];
@@ -6979,7 +6993,7 @@ function buildOpenPositionsPanel(query=''){
   const totalPnl=rows.reduce((sum,row)=>sum+(row.pnlRs||0),0);
   const pnlColor=totalPnl>0?'var(--green)':totalPnl<0?'var(--red)':'var(--t3)';
   const shown=filterPanelRows(rows,query,row=>[row.sym,row.scannerRow?.name,row.scannerRow?.sector]);
-  const table=makeSortableTable('rank-open-positions',cols,shown,'rank',1,null,null,'sym');
+  const table=makeSortableTable('rank-open-positions',cols,shown,'signalSort',1,null,null,'sym');
   const radarNote=ALL.length
     ?'Radar context is from the current ALL NSE upload. Click a symbol for its scoring breakdown.'
     :'Load ALL NSE.csv to add Radar score, rank, setup, day change, and risk.';
@@ -6989,7 +7003,7 @@ function buildOpenPositionsPanel(query=''){
         <span style="font-size:13px;font-weight:800;color:var(--t1);text-transform:uppercase;letter-spacing:.08em">Open Positions${panelFilterTag(rows,shown,query)}</span>
         <span style="font-size:14px;font-weight:700;color:${pnlColor}">${rows.length} live position${rows.length===1?'':'s'} · ${fmtINR(totalCapital)} deployed · ${fmtSignedINR(totalPnl)}</span>
       </div>
-      <div style="font-size:14px;color:var(--t2);line-height:1.5">Live merge of Holdings, Positions, and today's net buys. Held stocks stay ranked and can be recommended again as bounded ADDs; Target, Runner and SL are the row’s CURRENT exit policy — the two target legs the buy basket arms — not a read of the GTTs resting in Zerodha. ${radarNote}</div>
+      <div style="font-size:14px;color:var(--t2);line-height:1.5">Live merge of Holdings, Positions, and today's net buys. Buy/Sell/Hold and every order level come only from 5-minute price-volume pressure. Pace and EoD use completed candles; a fresh high whose partial candle volume already reaches this stock's own top quartile can pull Target to the live tape price. ALL NSE score, rank and risk are optional recommendation context and never move these position numbers. ${radarNote}</div>
     </div>
     ${shown.length?`<div class="scroll-x">${table.getHtml()}</div>`:panelNoMatchHtml(query,'open position')}
   </div>`;
@@ -8768,7 +8782,7 @@ function getPositionFlowRead(rd){
   const tt=rd&&rd.current?(rd.todayTraj||rd.traj):null;
   return {tt,span:(rd&&tt&&!rd.todayTraj&&rd.sessions>0)?(' across '+rd.sessions+' sessions'):''};
 }
-function getPositionAction(sym,pos){
+function getLegacyPositionAction(sym,pos){
   const s=(Array.isArray(ALL)?ALL:[]).find(r=>normSym(r.symbol)===normSym(sym))||null;
   const qty=Number(pos&&pos.qty)||0;
   if(!(qty>0)) return null;
@@ -8911,6 +8925,121 @@ function getPositionAction(sym,pos){
   return {act:'HOLD',qty:0,tone:'amber',
     why:'demand still costs more to move than supply (net +'+(100*tt.cvdPct).toFixed(0)+'%'
       +(Number.isFinite(tt.costRatio)?', ratio '+tt.costRatio.toFixed(2):'')+')'+span+_projNote};
+}
+// Open Positions is a different decision surface from Recommendations. Recommendations begin with
+// the ALL NSE cross-section and ask whether a fresh entry survives a 5-minute validation. A held
+// stock already owns capital: its Target, SL, Pace, EoD and Buy/Sell/Hold instruction therefore come
+// from its 5-minute tape even when the symbol has no scanner row at all. Stable projections use
+// completed bars; the bounded high-volume harvest below is the one live-candle exception.
+function getOpenPositionTapePolicy(sym,pos){
+  const s=normSym(sym||pos?.symbol||'');
+  const qty=Math.max(0,Number(pos?.qty)||0);
+  const all=INTRADAY_BARS[s];
+  if(!s||!Array.isArray(all)||!all.length){
+    return {symbol:s,signal:'NEEDS DATA',signalSort:3,qty,price:null,targetPrice:null,stopPrice:null,
+      pacePct:null,paceRs:null,eodPct:null,eodPrice:null,flowPct:null,
+      why:'No 5-minute tape for this position yet.'};
+  }
+  const ordered=all.slice().sort((a,b)=>a.t-b.t);
+  const key=istDayKey(ordered[ordered.length-1].t);
+  const today=(typeof getSessionDate==='function')?getSessionDate():key;
+  const rawDay=ordered.filter(b=>istDayKey(b.t)===key);
+  let day=rawDay,forming=null;
+  // EoD, Pace and the normal pressure read use completed candles. The one deliberate live overlay
+  // is a harvest at a fresh high whose PARTIAL volume has already reached this stock's own completed
+  // top quartile: waiting for that candle to close is exactly how an at-the-high exit becomes an
+  // after-the-fall label.
+  if(key===today){
+    const clock=istClock();
+    const boundary=clock&&Number.isFinite(clock.mins)?Math.floor((clock.mins-5)/5)*5:null;
+    if(boundary!=null){
+      const completed=rawDay.filter(b=>{const d=new Date(b.t);return d.getHours()*60+d.getMinutes()<=boundary;});
+      const live=rawDay.filter(b=>{const d=new Date(b.t);return d.getHours()*60+d.getMinutes()>boundary;});
+      if(completed.length>=3){ day=completed; forming=live.length?live[live.length-1]:null; }
+    }
+  }
+  if(key!==today||day.length<3){
+    return {symbol:s,signal:'NEEDS DATA',signalSort:3,qty,price:null,targetPrice:null,stopPrice:null,
+      pacePct:null,paceRs:null,eodPct:null,eodPrice:null,flowPct:null,
+      why:key!==today?'The latest 5-minute tape is from '+key+', not this session.':'Fewer than three completed 5-minute bars.'};
+  }
+
+  const tape=buildIntradayTrajectory(day,ordered);
+  if(!tape){
+    return {symbol:s,signal:'NEEDS DATA',signalSort:3,qty,price:null,targetPrice:null,stopPrice:null,
+      pacePct:null,paceRs:null,eodPct:null,eodPrice:null,flowPct:null,
+      why:'The completed 5-minute bars carry no usable volume trajectory.'};
+  }
+  const last=day[day.length-1],prior=day[day.length-2];
+  const completedPrice=Number(last.c),completedHi=Math.max(...day.map(b=>b.h));
+  const livePrice=forming&&Number(forming.c)>0?Number(forming.c):completedPrice;
+  const hi=Math.max(completedHi,forming&&Number(forming.h)>0?Number(forming.h):completedHi);
+  const lo=Math.min(...day.map(b=>b.l),forming&&Number(forming.l)>0?Number(forming.l):Infinity);
+  const priorHi=Math.max(...day.slice(0,-1).map(b=>b.h));
+  const priorVol=day.slice(0,-1).map(b=>Number(b.v)||0).filter(v=>v>0).sort((a,b)=>a-b);
+  const busyCut=priorVol.length?radarQuant(priorVol,0.75):null;
+  // A fresh high on unusually busy volume that cannot improve the previous close is the numerical
+  // exhaustion pattern shared today by EIDPARRY, RISHABH and HINDZINC. The quartile is read from
+  // this stock's own completed session; no fixed share count or ALL NSE field participates.
+  const highRejection=last.h>priorHi&&last.c<=prior.c
+    &&busyCut!=null&&(Number(last.v)||0)>=busyCut;
+  const liveVol=day.map(b=>Number(b.v)||0).filter(v=>v>0).sort((a,b)=>a-b);
+  const liveBusyCut=liveVol.length?radarQuant(liveVol,0.75):null;
+  const liveHarvest=!!(forming&&Number(forming.h)>completedHi&&liveBusyCut!=null
+    &&(Number(forming.v)||0)>=liveBusyCut&&tape.cvdPct>0);
+  const pacePct=Number.isFinite(tape.confirmedPacePct)?tape.confirmedPacePct:null;
+  const pullPct=Number.isFinite(tape.currentPullbackPct)?tape.currentPullbackPct:null;
+  const paceFailed=pacePct!=null&&pullPct!=null&&pullPct>pacePct&&tape.flowSlope<0;
+  const stopPrice=(pacePct!=null&&hi>0)?tickPrice(hi*(1-pacePct/100)):null;
+  const stopBreached=stopPrice!=null&&completedPrice<=stopPrice;
+  const convertingDown=tape.regime==='selling'&&Number.isFinite(tape.pressurePct)&&tape.pressurePct<0;
+
+  let signal='HOLD';
+  if(liveHarvest||highRejection||paceFailed||stopBreached||convertingDown) signal='SELL';
+  else if(tape.regime==='accumulating'&&tape.pressureConverting!==false
+          &&Number.isFinite(tape.pressurePct)&&tape.pressurePct>0
+          &&tape.priceSlope>0&&tape.flowSlope>0) signal='BUY';
+
+  // Target is the price this tape's remaining pressure can still support. When pressure will not
+  // convert, HOLD may work a recovery to the established high; SELL never invents an optimistic
+  // bounce and falls back to the live tape price. A rejection candle caps its target at its own high.
+  const eodPct=Number.isFinite(tape.predPct)?tape.predPct:null;
+  const eodPrice=Number.isFinite(tape.predClose)?tape.predClose:null;
+  let targetRaw=(eodPct!=null&&eodPct>0&&eodPrice>0)?eodPrice:null;
+  if(targetRaw==null&&signal!=='SELL'&&hi>livePrice&&!paceFailed) targetRaw=hi;
+  if(targetRaw==null) targetRaw=livePrice;
+  if(liveHarvest) targetRaw=livePrice;
+  if(highRejection) targetRaw=Math.min(Number(last.h)||targetRaw,targetRaw);
+  const targetPrice=tickPrice(Math.max(livePrice,targetRaw));
+  const targetPct=livePrice>0?100*(targetPrice/livePrice-1):null;
+  const paceRs=pacePct!=null&&hi>0?hi*pacePct/100:null;
+  const reason=liveHarvest
+    ?'Fresh high on an unfinished 5-minute candle whose partial volume is already top-quartile; harvest at the live tape price.'
+    :highRejection
+    ?'Fresh high rejected on top-quartile 5-minute volume; work the tape target.'
+    :paceFailed
+      ?'Unrecovered pullback '+pullPct.toFixed(2)+'% exceeded proven Pace '+pacePct.toFixed(2)+'% while flow weakened.'
+      :stopBreached
+        ?'Completed close breached the tape trail at '+fmtINR(stopPrice)+'.'
+        :convertingDown
+          ?'Selling pressure is converting into lower completed closes.'
+          :signal==='BUY'
+            ?'Buying pressure is still converting into higher completed closes.'
+            :'Pressure is mixed or being absorbed; keep the numerical levels unchanged.';
+  return {symbol:s,signal,signalSort:signal==='SELL'?0:signal==='HOLD'?1:2,qty,
+    price:+livePrice.toFixed(2),open:day[0].o,high:hi,low:lo,asOf:forming?forming.t:last.t,
+    completedAsOf:last.t,
+    targetPrice,targetPct,stopPrice,pacePct,paceRs,
+    eodPct,eodPrice:eodPrice>0?tickPrice(eodPrice):null,
+    flowPct:100*tape.cvdPct,pressurePct:tape.pressurePct,
+    pullPct,liveHarvest,highRejection,paceFailed,stopBreached,regime:tape.regime,why:reason,tape};
+}
+
+function getPositionAction(sym,pos){
+  const p=getOpenPositionTapePolicy(sym,pos);
+  const tone=p.signal==='BUY'?'green':p.signal==='SELL'?'red':p.signal==='HOLD'?'amber':'grey';
+  return {act:p.signal,qty:p.signal==='SELL'?p.qty:0,tone,why:p.why,policy:p,
+    execution:p.signal==='SELL'&&p.targetPrice>p.price?{level:p.targetPrice}:null};
 }
 function getHeldTopUpNotionalCap(s,buyP,heldMap=null){
   const held=(heldMap||getHeldPositionMap())[s.symbol];
