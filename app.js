@@ -1,5 +1,5 @@
-const BUILD_TS='2026-08-21 17:17 IST'; // release build time (IST)
-const APP_VERSION=1215; // v1215: user settings are authoritative; recommendation rows name surveillance risks.
+const BUILD_TS='2026-08-24 12:43 IST'; // release build time (IST)
+const APP_VERSION=1216; // v1216: an open position's target is read from the clock, and it names its hour.
 // v1093: a baseline reward:risk MEASURED on the cross-section (last completed bhav session) instead of learned from the owner's own fills - reported on every row, deliberately not enforced. Includes v1092: position size split by Radar score / stop distance, so equally-scored names carry equal RUPEE risk, plus an opt-in Risk /trade cap.
 // v556: parse the NSE Market Activity Report (MA<date>.csv) — official Nifty %, advances/declines and sector index moves shown as market CONTEXT in the status bar (EOD data, display only, never fed into per-row scoring); MA added to the ℹ️ file manifest.
 // v555 market-cycle stage awareness (stateless, self-calibrating): per-row stage label (1 accumulation · 2 breakout · 3 event · 4 profit-booking · 5 re-accumulation · 6 second-leg); a quiet-accumulation signal (conjunction-of-percentiles) injected via the rocket-diagnostic weighting; sell-the-news decay off Recent earnings date (horizon = review days). v1065 makes the market-breadth gauge an entry-eligibility input while still never changing ranking.
@@ -6830,7 +6830,11 @@ function buildOpenPositionsPanel(query=''){
     const exitPolicy=getRowExitPolicy(scannerRow,avg);
     const stopPct=exitPolicy.stopPct;
     const targetPct=exitPolicy.targetPct;
-    const targetPrice=avg&&targetPct?tickPrice(avg*(1+targetPct/100)):null;
+    // v1216: the exit policy names WHAT its percentage is measured from. A market read is further
+    // travel from the live price; only the entry-relative anchor paths resolve against the average.
+    const tgtRef=Number(exitPolicy?.targetRefPrice)>0?Number(exitPolicy.targetRefPrice)
+      :(Number(ltp)>0?Number(ltp):avg);
+    const targetPrice=tgtRef&&targetPct?tickPrice(tgtRef*(1+targetPct/100)):null;
     const stopPrice=avg?tickPrice(avg*(1-stopPct/100)):null;
     const _split=splitQty(qty);
     const _runnerPct=getRunnerTargetPct(exitPolicy);
@@ -6924,8 +6928,15 @@ function buildOpenPositionsPanel(query=''){
         const legacy=row.runnerPrice!=null
           ? ` A position opened before v1177 may still have a second GTT resting at ${fmtINR(row.runnerPrice)} for ${row.runnerQty} share(s) — check Zerodha before re-arming.`
           : '';
+        // v1216: a target that names only a price throws away WHEN. Measured over the tape's own
+        // complete sessions, the high lands late on the sessions worth holding and in the first
+        // 45 minutes on the ones that fail, so the window belongs beside the level.
+        const w=getExpectedHighWindow();
+        const when=w?` Session highs land ${clockLabelOf(w.p25Minutes)}–${clockLabelOf(w.p75Minutes)} (median ${clockLabelOf(w.p50Minutes)}) across ${w.n} complete sessions on the tape, so a level reached well before that is early, not done.`:'';
+        const from=row.exitPolicy?.targetRefSource==='live price'
+          ? ` Measured as further travel from the live price (${fmtINR(row.exitPolicy.targetRefPrice)}), not from your average.`:'';
         return fmtINR(v)+`<span style="font-size:11px;color:var(--t3)">×${row.qty??''}</span>`
-          +`<span title="${escHtml('The whole position exits here: '+(row.targetPct!=null?('+'+Number(row.targetPct).toFixed(2)+'%'):'')+' on its own exit policy.'+legacy)}"></span>`;
+          +`<span title="${escHtml('The whole position exits here: '+(row.targetPct!=null?('+'+Number(row.targetPct).toFixed(2)+'%'):'')+' on its own exit policy.'+from+when+legacy)}"></span>`;
       },
       clrFn:()=>'var(--green)'},
     {key:'stopPrice',label:'SL ₹',align:'right',fmt:(v,row)=>v!=null?fmtINR(v)+`<span style="font-size:12px;color:var(--t3);margin-left:4px">-${Number(row.exitPolicy?.stopPct).toFixed(2)}%</span>`:'—',clrFn:()=>'var(--red)'},
@@ -8302,17 +8313,159 @@ function getTapeRunwayPct(sym){
   _tapeRunwayMemo.map.set(s,out);
   return out;
 }
+// v1216: THE TARGET IS A CLOCK-CONDITIONAL CROSS-SECTIONAL REACH, AND IT NAMES ITS HOUR.
+// v1212 made the target market-derived but left three faults measured on the tape 2026-08-24:
+// every source is a CENTRAL estimate (the per-symbol tape term is a MEDIAN, the session ceiling is
+// a TYPICAL day's range, capacity is a central measure) and they are combined with min(), so the
+// armed target is hit 87.6% of the time; the per-symbol term indexes prior sessions by BAR NUMBER,
+// which is silent for the 126 of 311 tape files with under three sessions and misaligned for the
+// 92 of 311 whose own sessions start at different clock times; and nothing carries the clock, while
+// remaining upside decays 4x across the session (p50 1.87% at 09:30, 0.47% at 15:00).
+// The cross-section answers all three: remaining travel to the session high is stable in CAPACITY
+// units (rem/cap 0.19-0.25 flat across capacity quartiles), so it can be pooled across stocks and
+// read at the CURRENT clock for a stock with no history of its own.
+let _clockRunwayMemo=null;
+function istBarMinutes(ms){
+  // Shares istDayKey's convention: the pasted stamps carry their own +0530 offset.
+  const d=new Date(ms);
+  return d.getHours()*60+d.getMinutes();
+}
+function quantileSorted(a,p){
+  if(!a||!a.length) return null;
+  const i=(a.length-1)*p, lo=Math.floor(i), hi=Math.ceil(i);
+  return lo===hi?a[lo]:a[lo]+(a[hi]-a[lo])*(i-lo);
+}
+// THE PERCENTILE IS NOT CHOSEN. For a quantile target the chance of reaching it is (1-p), so the
+// expected capture is (1-p) x Q_p and the level is the argmax of the stock's own cross-section.
+// Below the scorer's own modeled-feature density floor there is no cross-section to read.
+function reachQuantileOf(sorted){
+  if(!sorted||sorted.length<25) return null;
+  let best=null;
+  for(let p=0.30;p<=0.95+1e-9;p+=0.01){
+    const q=quantileSorted(sorted,p);
+    if(q==null||!isFinite(q)) continue;
+    const e=(1-p)*q;
+    if(!best||e>best.e) best={p:+p.toFixed(2),q,e};
+  }
+  return best;
+}
+function rowCapacityPct(row){
+  const atr=Number(row?.atr), range=Number(row?.rangePct);
+  const hasAtr=Number.isFinite(atr)&&atr>0, hasRange=Number.isFinite(range)&&range>0;
+  return hasAtr&&hasRange?Math.sqrt(atr*range):hasAtr?atr:hasRange?range:null;
+}
+function buildClockRunwayTable(){
+  const keys=Object.keys(INTRADAY_BARS||{});
+  const sig=keys.length+':'+keys.reduce((t,k)=>t+(INTRADAY_BARS[k]?INTRADAY_BARS[k].length:0),0)
+    +':'+((ALL&&ALL.length)||0);
+  if(_clockRunwayMemo&&_clockRunwayMemo.sig===sig) return _clockRunwayMemo.tab;
+  const capOf={};
+  (ALL||[]).forEach(r=>{ const c=rowCapacityPct(r); if(c>0) capOf[normSym(r.symbol)]=c; });
+  const byClock={}, highMins=[];
+  keys.forEach(s=>{
+    const cap=capOf[s]; if(!(cap>0)) return;
+    const bars=INTRADAY_BARS[s]; if(!Array.isArray(bars)||!bars.length) return;
+    const byDay={};
+    bars.forEach(b=>{ const d=istDayKey(b.t); if(d)(byDay[d]??=[]).push(b); });
+    Object.keys(byDay).forEach(d=>{
+      const cur=byDay[d].slice().sort((x,y)=>x.t-y.t);
+      // Only a session observed through its close can grade what was still to come. A partial
+      // session would report every stock as having finished travelling.
+      if(istBarMinutes(cur[cur.length-1].t)<15*60+15) return;
+      const open=Number(cur[0].o)>0?Number(cur[0].o):Number(cur[0].c);
+      let hi=-Infinity, hiAt=null;
+      cur.forEach(b=>{ const h=Number(b.h); if(h>hi){ hi=h; hiAt=istBarMinutes(b.t); } });
+      if(hiAt!=null) highMins.push(hiAt);
+      for(let i=0;i<cur.length-1;i++){
+        const ref=Number(cur[i].c); if(!(ref>0)) continue;
+        let h2=-Infinity;
+        for(let k=i+1;k<cur.length;k++){ const h=Number(cur[k].h); if(h>h2) h2=h; }
+        if(!(h2>0)||!isFinite(h2)) continue;
+        (byClock[istBarMinutes(cur[i].t)]??=[]).push({
+          v:Math.max(0,(100*(h2-ref)/ref)/cap),
+          mv:open>0?100*(ref-open)/open:0
+        });
+      }
+    });
+  });
+  highMins.sort((a,b)=>a-b);
+  const tab={byClock,highMins};
+  _clockRunwayMemo={sig,tab};
+  return tab;
+}
+// WHEN the high arrives, from the same tape. Measured 2026-08-24 over 695 complete sessions: on a
+// session closing above +2% only 6.4% of highs land before 10:00 and 39.5% land after 15:00
+// (median 14:38), while on a session closing below -2% 90.4% of highs are in the first 45 minutes.
+// An exit instruction that names only a price throws that away.
+function getExpectedHighWindow(){
+  const tab=buildClockRunwayTable();
+  const m=tab.highMins;
+  if(!m||m.length<25) return null;
+  return {n:m.length,
+    p25Minutes:quantileSorted(m,0.25),
+    p50Minutes:quantileSorted(m,0.50),
+    p75Minutes:quantileSorted(m,0.75)};
+}
+// The opening clock is the tape's OWN earliest bucket with a readable cross-section - the exchange
+// moves its session boundaries and a written-in 09:15 would silently rot.
+function sessionOpenClockMinutes(){
+  const tab=buildClockRunwayTable();
+  const clocks=Object.keys(tab.byClock).map(Number)
+    .filter(c=>tab.byClock[c]&&tab.byClock[c].length>=25).sort((a,b)=>a-b);
+  return clocks.length?clocks[0]:null;
+}
+function clockLabelOf(mins){
+  const v=Math.max(0,Math.round(Number(mins)||0));
+  return String(Math.floor(v/60)).padStart(2,'0')+':'+String(v%60).padStart(2,'0');
+}
+// The read for one row, at one moment. Pooled across stocks in capacity units, taken at the
+// nearest clock with a usable pool, and split on the pool's OWN median move-from-open so a row
+// that is already running is not priced off the rows that are not - measured 2026-08-24, the
+// +5-8% bucket carries the MOST room left (p50 2.01% against 0.80% for a flat one), so pricing a
+// mover off the whole pool is the same understatement this release exists to remove.
+function getClockRunwayRead(row,opts){
+  const cap=rowCapacityPct(row);
+  if(!(cap>0)) return null;
+  const tab=buildClockRunwayTable();
+  const clocks=Object.keys(tab.byClock).map(Number).sort((a,b)=>a-b);
+  if(!clocks.length) return null;
+  const now=(opts&&Number.isFinite(opts.atMinutes))?opts.atMinutes:istClock().mins;
+  let at=null, bestGap=Infinity;
+  for(const c of clocks){
+    const pool=tab.byClock[c];
+    if(!pool||pool.length<25) continue;
+    const gap=Math.abs(c-now);
+    if(gap<bestGap){ bestGap=gap; at=c; }
+  }
+  if(at==null) return null;
+  const pool=tab.byClock[at];
+  const moves=pool.map(x=>x.mv).sort((a,b)=>a-b);
+  const medMove=quantileSorted(moves,0.5);
+  const rowMove=Number(row?.changeOpen);
+  let use=pool;
+  if(Number.isFinite(rowMove)&&medMove!=null){
+    const half=pool.filter(x=>rowMove>=medMove?x.mv>=medMove:x.mv<medMove);
+    if(half.length>=25) use=half;
+  }
+  const sorted=use.map(x=>x.v).sort((a,b)=>a-b);
+  const best=reachQuantileOf(sorted);
+  if(!best) return null;
+  return {pct:+(cap*best.q).toFixed(2),unitReach:+best.q.toFixed(3),quantile:best.p,
+    n:sorted.length,conditioned:use!==pool,atMinutes:at,clockLabel:clockLabelOf(at)};
+}
 function getRowExitPolicy(row,buyPrice=null,activeInfo=null,nudgeInfo=null){
   const active=activeInfo||getActiveTargetInfo();
   const anchor=Number(active.tgtPct)>0?Number(active.tgtPct):Math.abs(Number(TRADEBOOK_STATS?.adaptiveTGT))||null;
   const atr=Number(row?.atr);
-  const range=Number(row?.rangePct);
   const hasAtr=Number.isFinite(atr)&&atr>0;
-  const hasRange=Number.isFinite(range)&&range>0;
-  const capacity=hasAtr&&hasRange?Math.sqrt(atr*range):hasAtr?atr:hasRange?range:null;
+  const capacity=rowCapacityPct(row);
   let targetPct=anchor;
   let targetSource='portfolio fallback';
-  const toStep=v=>Math.floor(v*20)/20;
+  // v1216: a POSITIVE reach may never floor to a zero target. Math.floor(v*20)/20 sends anything
+  // under 0.05% to exactly 0, which is not "a small target" - it is a GTT with no level, and the
+  // standing suite has been reporting one on DVL. The floor is the step the policy already rounds
+  // to, so this introduces no new unit; a genuinely zero reach still yields zero.
+  const toStep=v=>v>0?Math.max(Math.floor(v*20)/20,0.05):0;
   if(anchor>0){
     targetPct=toStep(anchor);
     targetSource=active.source==='manual'?'manual anchor'
@@ -8334,11 +8487,41 @@ function getRowExitPolicy(row,buyPrice=null,activeInfo=null,nudgeInfo=null){
   // v1212: the aspiration is MARKET-DERIVED. getReachableTargets() is deliberately NOT consulted
   // here any more - it is a percentile of his own closed exits, i.e. of the old logic's decisions.
   const tapeRunwayPct=getTapeRunwayPct(row?.symbol);
+  // v1216: the cross-section at the CURRENT clock outranks the per-symbol median. It is the more
+  // specific read of the two on the axis that decides a same-day target - where we are in the
+  // session - and it is the only one that speaks for a stock with under three sessions on file.
+  const clockRead=getClockRunwayRead(row);
+  const clockRunwayPct=clockRead?clockRead.pct:null;
   const sessionRunwayPct=(sc&&Number.isFinite(sc.runwayPct))?Math.max(0,sc.runwayPct):null;
   const ucEarly=getUpperCircuitInfo(row,bandRef);
   const circuitRunwayPct=(ucEarly&&Number.isFinite(ucEarly.runwayPct))?Math.max(0,ucEarly.runwayPct):null;
-  let available=null, availableSource='';
-  if(tapeRunwayPct!=null){ available=tapeRunwayPct; availableSource='its own 5-minute tape'; }
+  const marketReadEarly=(clockRead!=null||tapeRunwayPct!=null);
+  // ONE WINDOW PER ROW (v1206), applied to the target itself. "What is left of THIS session" is the
+  // right number for a position being exited today - it is what EIDPARRY needed, armed 826.20 off
+  // its entry while trading 864. It is the WRONG number for a stock being bought fresh: a candidate
+  // priced at 12:15 on the two hours it has left nets too little to clear the rupee floor and is
+  // dropped from the board for no reason except the hour it was read at (measured: DVL netted
+  // Rs124 against a Rs303 minimum). A new entry is a WHOLE-DAY decision and is priced from the open.
+  const openMin=sessionOpenClockMinutes();
+  const wholeDay=openMin!=null?getClockRunwayRead(row,{atMinutes:openMin}):null;
+  const wholeDayReachPct=wholeDay?wholeDay.pct:(capacity>0?capacity:null);
+  // SCOPED TO OPEN POSITIONS IN v1216, deliberately. Repricing the CANDIDATE board from the clock
+  // read changes what a fresh entry is worth and was measured removing rows from the board on the
+  // release fixture (DVL netted Rs124 against a Rs303 floor purely for being read at 12:15). That
+  // is a board-economics change and belongs in its own release with its own forward evidence. The
+  // exit side is what was reported and what is fixed here.
+  const exitingToday=!!row?._held;
+  const reachRead=exitingToday?clockRead:null;
+  const reachPct=reachRead?reachRead.pct:null;
+  let available=null, availableSource='', inCapacityUnits=false;
+  if(reachPct!=null){
+    available=reachPct; inCapacityUnits=true;
+    availableSource=(exitingToday?'the cross-section at ':'the cross-section from the open ')
+      +(exitingToday?reachRead.clockLabel:'')
+      +' ('+reachRead.unitReach.toFixed(2)+'x its own capacity, p'+Math.round(reachRead.quantile*100)
+      +' of '+reachRead.n+(reachRead.conditioned?' comparable moves)':' rows)');
+  }
+  else if(tapeRunwayPct!=null){ available=tapeRunwayPct; availableSource='its own 5-minute tape'; }
   else if(sessionRunwayPct!=null){ available=sessionRunwayPct; availableSource='the session ceiling'; }
   else if(capacity>0){ available=capacity; availableSource='its range capacity'; }
   // The circuit is what it may LEGALLY reach and bounds every estimate.
@@ -8347,7 +8530,10 @@ function getRowExitPolicy(row,buyPrice=null,activeInfo=null,nudgeInfo=null){
   // has already left can exceed what the stock actually does in a day (DHARIWAL priced 22.35% on a
   // 17.67% capacity, UHTL 3.80% on 3.63%), and a target the stock has never travelled is the same
   // defect as one the session cannot deliver, pointing the other way.
-  if(available!=null&&capacity>0) available=Math.min(available,capacity);
+  // ...and so does the stock's own range capacity - EXCEPT for a read already expressed in
+  // capacity units, which carries that bound inside it. Applying it again pins every reach at
+  // exactly 1.00 capacity and re-creates the flat target this release removes.
+  if(available!=null&&!inCapacityUnits&&capacity>0) available=Math.min(available,capacity);
   // A MANUAL Target Anchor is an owner input and outranks every measurement, exactly as before.
   if(available!=null&&targetPct>0&&active.source!=='manual'){
     // The goal/harvest anchor no longer RAISES the target to a level the session cannot deliver -
@@ -8358,6 +8544,13 @@ function getRowExitPolicy(row,buyPrice=null,activeInfo=null,nudgeInfo=null){
     targetSource='what the market has left, read from '+availableSource
       +(circuitRunwayPct!=null&&Math.abs(available-circuitRunwayPct)<1e-9?' (bounded by the NSE circuit)':'');
   }
+  // v1216: WHAT THE TARGET PERCENTAGE IS MEASURED FROM. A clock or tape read is further travel
+  // from where the stock is NOW, so resolving it against the entry restates a level the market has
+  // already passed - EIDPARRY was armed 826.20 off a 813.99 average while trading 864. The anchor
+  // and capacity paths are entry-relative as before.
+  const livePrice=Number(row?.price)>0?Number(row?.price):null;
+  const targetRefPrice=(marketReadEarly&&livePrice>0)?livePrice:(Number(bandRef)>0?Number(bandRef):livePrice);
+  const targetRefSource=(marketReadEarly&&livePrice>0)?'live price':'entry price';
   const stopPct=getRowStopDistancePct(row);
   const baseRR=getBaselineRewardRisk();
   const rrFloorPct=(baseRR>0&&stopPct>0)?toStep(stopPct*baseRR):null;
@@ -8378,6 +8571,13 @@ function getRowExitPolicy(row,buyPrice=null,activeInfo=null,nudgeInfo=null){
   // from this point in the session, on its own sessions. Where that exists it decides affordability,
   // and the row is withheld when it cannot clear costs plus the desired net. Where it does not, the
   // basis falls back to the stock's own range capacity, exactly as before v1212.
+  // v1216: AFFORDABILITY IS UNCHANGED FROM v1212, deliberately. The clock read is a statement
+  // about WHEN, and v1112's rule is that a read of what is left of the session may lower the PRICE
+  // on a row but may never be the reason the row is withheld. Routing it into viability shrank
+  // every basis to ~0.7x capacity and cost the release fixture its last basket row - measured. So
+  // only the stock's OWN tape decides affordability, exactly as before, and the whole-day reach is
+  // resolved alongside it for the goal-floor report.
+  const marketRead=marketReadEarly;
   const viabilityBasis=(tapeRunwayPct!=null)?targetPct:(capacity>0?capacity:basePct);
   const viable=viabilityBasis>0&&!bandLimited&&(minGrossPct==null||viabilityBasis+1e-9>=minGrossPct);
   const stopSource=(Math.abs(Number(row?.slPct))>0)?'explicit stock stop'
@@ -8390,6 +8590,25 @@ function getRowExitPolicy(row,buyPrice=null,activeInfo=null,nudgeInfo=null){
   // so an unreachable target is visible, never as a cap on the target itself (owner: no ATR-driven
   // targets). null when the stock has no usable range estimate.
   const reachable=(capacity>0&&targetPct>0)?(capacity+1e-9>=targetPct):null;
+  // v1216 (owner): "the goal based target should be the minimum, not final target". v1212 replaced
+  // the anchor outright (targetPct=toStep(available)) and left no record that a row had been priced
+  // BELOW the rate the goal needs. It cannot be a floor on the PRICE - v1211 measured that arming a
+  // target above the remaining runway is the defect this whole path exists to fix - so it is a floor
+  // on WHETHER THE ROW IS WORTH THE CAPITAL, enforced at the allocation gate, which is where an
+  // unaffordable trade belongs. The row stays visible and honestly priced.
+  // The comparison must be like for like. A clock read taken at 12:15 is what is left of THIS
+  // session, while the goal rate is what a WHOLE trading day must produce - measuring one against
+  // the other is the v1206 window defect and blocked 2,773 of 2,980 rows when first built. The
+  // floor therefore asks the whole-day question: from the OPEN, can this stock pay the goal rate?
+  const anchorFloorPct=basePct>0?+basePct.toFixed(2):null;
+  // NOT ENFORCED AS AN ALLOCATION BLOCK, and the reason is measured, not cautious: an allocation
+  // block feeds ALLOC_BLOCKED, which REMOVES the row from the board - so a goal floor there does
+  // not withhold capital, it deletes candidates. On the release fixture it took the basket from
+  // one row to zero. Only the OWNER'S GOAL is even eligible to speak here (a learned harvest rate
+  // is a statistic of his own closed exits and v1212 forbids it gating anything), and turning this
+  // into a live gate is a board-contract change that needs its own release.
+  const belowAnchorFloor=!!(anchorFloorPct!=null&&active.source==='goal'
+    &&wholeDayReachPct!=null&&wholeDayReachPct+1e-9<anchorFloorPct);
   return {
     targetPct:targetPct>0?+targetPct.toFixed(2):null,
     // v1097, all REPORTED so the nudge is auditable on every row:
@@ -8409,6 +8628,9 @@ function getRowExitPolicy(row,buyPrice=null,activeInfo=null,nudgeInfo=null){
     sessionCeiling:sc?+sc.ceiling.toFixed(2):null,
     sessionRunwayPct:sc?+sc.runwayPct.toFixed(2):null,
     tapeRunwayPct,circuitRunwayPct,marketAvailablePct:available!=null?+available.toFixed(2):null,
+    clockRunwayPct,clockReach:clockRead||null,anchorFloorPct,belowAnchorFloor,
+    wholeDayReachPct:wholeDayReachPct!=null?+wholeDayReachPct.toFixed(2):null,
+    targetRefPrice:targetRefPrice>0?+targetRefPrice.toFixed(2):null,targetRefSource,
     viabilityBasisPct:viabilityBasis>0?+viabilityBasis.toFixed(2):null,
     targetSource,
     stopSource,
@@ -9708,6 +9930,10 @@ function applyFilters(){
   const riskSel=(document.getElementById('fRisk')?.value||'').split(',').map(x=>x.trim()).filter(Boolean);
   const turnIdx=+(document.getElementById('fMinTurnover')?.value||0);
   const minTurn=RADAR_LIQ_STEPS[turnIdx]||0;
+  // v1216 (owner): a ceiling on the share price. Blank means no ceiling - an empty field is a
+  // setting, not a zero, so it must never be read as "max ₹0" and empty the board.
+  const maxPriceRaw=(document.getElementById('fMaxPrice')?.value||'').trim();
+  const maxPrice=maxPriceRaw===''?null:(Number(maxPriceRaw)>0?Number(maxPriceRaw):null);
   // Rows: blank shows the entire ranked universe (Radar behavior); a number caps the display.
   const rowsRaw=(document.getElementById('fRows')?.value||'').trim();
   const rowCap=rowsRaw===''?null:Math.max(1,Math.floor(+rowsRaw)||1);
@@ -9751,6 +9977,7 @@ function applyFilters(){
       return false;
     }
     if((s.turnover||0)<minTurn){REMOVED_ROWS.push({s,reason:'filter',detail:'below the Min Turnover filter ('+fmtINR(minTurn)+')'});return false;}
+    if(maxPrice!=null&&Number(s.price)>maxPrice){REMOVED_ROWS.push({s,reason:'filter',detail:'above the Max Price filter ('+fmtINR(maxPrice)+')'});return false;}
     if(riskSel.length&&!riskSel.includes(s.risk)){REMOVED_ROWS.push({s,reason:'filter',detail:s.risk+' risk — excluded by your Risk filter'});return false;}
     if(q&&![s.symbol,s.name,s.sector].join(' ').toLowerCase().includes(q)) return false;
     // v1080 (owner): a row that can never be allocated a single share is not a recommendation.
@@ -10056,6 +10283,8 @@ function renderStatusBar(){
   if(risk)tags.push(risk.split(',').join(' + ')+' risk');
   const turnIdx=+(document.getElementById('fMinTurnover')?.value||0);
   if(turnIdx>0)tags.push('TO≥'+RADAR_LIQ_LABELS[turnIdx]);
+  const maxPxTag=(document.getElementById('fMaxPrice')?.value||'').trim();
+  if(maxPxTag!==''&&Number(maxPxTag)>0)tags.push('≤'+fmtINR(Number(maxPxTag)));
   const q=(document.getElementById('fSearch')?.value||'').trim();
   if(q)tags.push('“'+escHtml(q)+'”');
   const capital=getEffectiveCapital();
@@ -10163,6 +10392,7 @@ function renderStatusBar(){
 function clearFilters(){
   ['fSearch','fRisk','fRows'].forEach(id=>{const el=document.getElementById(id);if(el)el.value='';});
   const turnEl=document.getElementById('fMinTurnover');if(turnEl)turnEl.value='0';
+  const maxPxEl=document.getElementById('fMaxPrice');if(maxPxEl)maxPxEl.value='';
   updateFilterPlaceholders();
   applyFilters();
   localStorage.removeItem(SCANNER_STORE);
@@ -11330,13 +11560,13 @@ function compactRankingRows(rows){
   }));
 }
 function applySavedFiltersForMode(mode){
-  const ids=['fSearch','fRisk','fRows','fMinTurnover','fCapital','fMaxAlloc','fRiskPerTrade'];
+  const ids=['fSearch','fRisk','fRows','fMinTurnover','fMaxPrice','fCapital','fMaxAlloc','fRiskPerTrade'];
   const prev={};
   ids.forEach(id=>{const el=document.getElementById(id);if(el)prev[id]=el.value;});
   try{
     const st=JSON.parse(localStorage.getItem(modeKey(SCANNER_STORE,mode))||'{}');
     const shared=JSON.parse(localStorage.getItem(SHARED_FILTER_STORE)||'{}');
-    const map={risk:'fRisk',rows:'fRows',minTurnover:'fMinTurnover'};
+    const map={risk:'fRisk',rows:'fRows',minTurnover:'fMinTurnover',maxPrice:'fMaxPrice'};
     Object.entries(map).forEach(([k,id])=>{const el=document.getElementById(id);if(el&&st[k]!=null)el.value=st[k];});
     const capEl=document.getElementById('fCapital');if(capEl&&shared.capital!=null)capEl.value=shared.capital;
     const maxEl=document.getElementById('fMaxAlloc');if(maxEl&&shared.maxAlloc!=null)maxEl.value=shared.maxAlloc;
@@ -11853,6 +12083,7 @@ function saveFilterState(){
     risk:document.getElementById('fRisk')?.value||'',
     rows:document.getElementById('fRows')?.value||'',
     minTurnover:document.getElementById('fMinTurnover')?.value||'0',
+    maxPrice:document.getElementById('fMaxPrice')?.value??'',
     exportExcluded:[...EXPORT_EXCLUDED].slice(0,200),
     sortCol:SCOL,
     sortDir:SDIR,
@@ -11889,6 +12120,7 @@ function loadFilterState(){
     if(state.risk!=null){const el=document.getElementById('fRisk');if(el)el.value=state.risk;}
     if(state.rows!=null){const el=document.getElementById('fRows');if(el)el.value=state.rows;}
     if(state.minTurnover!=null){const el=document.getElementById('fMinTurnover');if(el)el.value=state.minTurnover;}
+    if(state.maxPrice!=null){const el=document.getElementById('fMaxPrice');if(el)el.value=state.maxPrice;}
     EXPORT_EXCLUDED=new Set(Array.isArray(state.exportExcluded)?state.exportExcluded.map(normSym).filter(Boolean):[]);
     // Trade inputs PREFER the Drive-synced brain (so laptop and phone agree); localStorage
     // is the fallback when the brain has none yet (offline / first run).
