@@ -1,4 +1,4 @@
-const BUILD_TS='2026-08-24 16:14 IST'; // release build time (IST)
+const BUILD_TS='2026-08-24 16:18 IST'; // release build time (IST)
 const APP_VERSION=1218; // v1218: Open Positions numbers come from 5-minute tape, not ALL NSE.
 // v1093: a baseline reward:risk MEASURED on the cross-section (last completed bhav session) instead of learned from the owner's own fills - reported on every row, deliberately not enforced. Includes v1092: position size split by Radar score / stop distance, so equally-scored names carry equal RUPEE risk, plus an opt-in Risk /trade cap.
 // v556: parse the NSE Market Activity Report (MA<date>.csv) — official Nifty %, advances/declines and sector index moves shown as market CONTEXT in the status bar (EOD data, display only, never fed into per-row scoring); MA added to the ℹ️ file manifest.
@@ -9662,14 +9662,29 @@ function intradayFetchJobs(limit){
       :'nothing with a live decision to check'};
   }
 
-  const boundary=(()=>{const c=istClock();
-    return (c&&Number.isFinite(c.mins))?Math.floor((c.mins-5)/5)*5:null;})();
+  const fetchClock=istClock();
+  const boundary=(fetchClock&&Number.isFinite(fetchClock.mins))
+    ?Math.floor((fetchClock.mins-5)/5)*5:null;
+  // A recommendation only needs the last COMPLETED bar. An open position also needs the live
+  // forming bar so its top-quartile-volume harvest can act before the close. Even when the stored
+  // bar already has the current bucket's timestamp, re-fetch it on the next refresh because its
+  // OHLC and cumulative volume are still changing. The stock's own first bar starts the window;
+  // CAS_CONTINUOUS_END_MIN is the earliest exchange-defined continuous close.
+  const liveHeldBoundary=(fetchClock&&Number.isFinite(fetchClock.mins)
+    &&fetchClock.mins<CAS_CONTINUOUS_END_MIN)?Math.floor(fetchClock.mins/5)*5:null;
   const gapOf=m=>{
     const rd=getIntradayRead(m.s);
     if(!rd||!rd.current) return null;          // no current read: the blocked state
-    if(boundary===null) return 0;
     const t=new Date(rd.asOf);
-    return Math.max(0,Math.round((boundary-(t.getHours()*60+t.getMinutes()))/5));
+    const lastMin=t.getHours()*60+t.getMinutes();
+    const own=INTRADAY_BARS[m.s]||[];
+    const ownDay=own.filter(b=>istDayKey(b.t)===getSessionDate());
+    const firstMin=ownDay.length?Math.min(...ownDay.map(b=>{const d=new Date(b.t);return d.getHours()*60+d.getMinutes();})):null;
+    const useLive=m.held&&liveHeldBoundary!==null&&firstMin!==null&&fetchClock.mins>=firstMin;
+    const wanted=useLive?liveHeldBoundary:boundary;
+    if(wanted===null) return 0;
+    const gap=Math.max(0,Math.round((wanted-lastMin)/5));
+    return useLive&&lastMin===wanted?1:gap;
   };
   const allocCtx=(()=>{try{return getAllocationPassContext();}catch(e){return null;}})();
   const stakeOf=m=>{
