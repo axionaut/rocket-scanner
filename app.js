@@ -1,5 +1,5 @@
-const BUILD_TS='2026-08-24 12:43 IST'; // release build time (IST)
-const APP_VERSION=1216; // v1216: an open position's target is read from the clock, and it names its hour.
+const BUILD_TS='2026-08-24 13:28 IST'; // release build time (IST)
+const APP_VERSION=1217; // v1217: one target per row - no blank targets, no fabricated runner leg.
 // v1093: a baseline reward:risk MEASURED on the cross-section (last completed bhav session) instead of learned from the owner's own fills - reported on every row, deliberately not enforced. Includes v1092: position size split by Radar score / stop distance, so equally-scored names carry equal RUPEE risk, plus an opt-in Risk /trade cap.
 // v556: parse the NSE Market Activity Report (MA<date>.csv) — official Nifty %, advances/declines and sector index moves shown as market CONTEXT in the status bar (EOD data, display only, never fed into per-row scoring); MA added to the ℹ️ file manifest.
 // v555 market-cycle stage awareness (stateless, self-calibrating): per-row stage label (1 accumulation · 2 breakout · 3 event · 4 profit-booking · 5 re-accumulation · 6 second-leg); a quiet-accumulation signal (conjunction-of-percentiles) injected via the rocket-diagnostic weighting; sell-the-news decay off Recent earnings date (horizon = review days). v1065 makes the market-breadth gauge an entry-eligibility input while still never changing ranking.
@@ -4951,30 +4951,6 @@ function recordLeftOnTableSession(date,summary){
 let _leftPoolMemo=null;
 const REACHABLE_MIN_SAMPLES=40;         // below this the distribution is not worth trusting
 let _reachMemo=null;
-function getReachableTargets(){
-  const store=FS.get(SAME_DAY_EXIT_OPPORTUNITY_STORE);
-  const entries=store?.entries||{};
-  const sig=(store?.lastUpdated||'')+'|'+Object.keys(entries).length;
-  if(_reachMemo&&_reachMemo.sig===sig) return _reachMemo.val;
-  const rows=Object.values(entries)
-    .filter(e=>Number(e.avgBuy)>0&&Number(e.dayHigh)>0)
-    .map(e=>(Number(e.dayHigh)/Number(e.avgBuy)-1)*100)
-    .filter(v=>Number.isFinite(v))
-    .sort((a,b)=>a-b);
-  let val;
-  if(rows.length<REACHABLE_MIN_SAMPLES){
-    val={basePct:null,runnerPct:null,samples:rows.length,
-         source:`only ${rows.length} exits on file, needs ${REACHABLE_MIN_SAMPLES}`};
-  } else {
-    const at=p=>rows[Math.min(rows.length-1,Math.floor(p*rows.length))];
-    val={basePct:+Math.max(0,at(0.50)).toFixed(2),
-         runnerPct:+Math.max(0,at(0.75)).toFixed(2),
-         samples:rows.length,
-         source:`${rows.length} closed exits, buy to that day's high`};
-  }
-  _reachMemo={sig,val};
-  return val;
-}
 function getLeftOnTablePool(){
   const store=getLeftOnTableStore();
   const dates=Object.keys(store.sessions||{}).sort().slice(-LEFT_ON_TABLE_POOL_SESSIONS);
@@ -6836,13 +6812,13 @@ function buildOpenPositionsPanel(query=''){
       :(Number(ltp)>0?Number(ltp):avg);
     const targetPrice=tgtRef&&targetPct?tickPrice(tgtRef*(1+targetPct/100)):null;
     const stopPrice=avg?tickPrice(avg*(1-stopPct/100)):null;
-    const _split=splitQty(qty);
-    const _runnerPct=getRunnerTargetPct(exitPolicy);
-    const _hasRunner=_split.runner>0&&_runnerPct>targetPct;
-    const baseQty=_hasRunner?_split.base:qty;
-    const runnerQty=_hasRunner?_split.runner:0;
-    const runnerPct=_hasRunner?_runnerPct:null;
-    const runnerPrice=(_hasRunner&&avg)?tickPrice(avg*(1+_runnerPct/100)):null;
+    // v1217: THE RUNNER LEG IS DELETED. v1206 kept it to describe a second GTT a v1115-v1176
+    // position might still have resting - but it was firing on ALL 10 current positions at a flat
+    // 6.00% from getReachableTargets().runnerPct, the closed-exit percentile v1212 removed from
+    // the target path. EIDPARRY read target 1.10% beside runner 6.00%. It was not describing
+    // legacy state, it was inventing a second target for every row, and it is the scatter the
+    // owner reported. One target per row.
+    const baseQty=qty;
     // v1106 (owner): the day-1 time-exit ADVICE went with the Action column - the trading surface
     // carries no instructions. The evidence behind it is unchanged and lives in Methodology.
     rows.push({
@@ -6851,7 +6827,7 @@ function buildOpenPositionsPanel(query=''){
       // of the multi-session leak v1209 closed everywhere else.
       flow:(()=>{const {tt}=getPositionFlowRead(getIntradayRead(pos.symbol));
         return tt&&Number.isFinite(tt.cvdPct)?+(tt.cvdPct*100).toFixed(2):null;})(),
-      baseQty,runnerQty,runnerPrice,runnerPct,
+      baseQty,
       score:isFinite(Number(scannerRow?.score))?Number(scannerRow.score):null,
       rank:scannerRow?.rank??null,setup:scannerRow?.setup||'',
       dayPct:scannerRow?.day??scannerRow?.priceChange??null,risk:scannerRow?.risk||'',
@@ -6925,9 +6901,7 @@ function buildOpenPositionsPanel(query=''){
     {key:'targetPrice',label:'Target ₹',align:'right',
       fmt:(v,row)=>{
         if(v==null) return '<span style="color:var(--t3)">—</span>';
-        const legacy=row.runnerPrice!=null
-          ? ` A position opened before v1177 may still have a second GTT resting at ${fmtINR(row.runnerPrice)} for ${row.runnerQty} share(s) — check Zerodha before re-arming.`
-          : '';
+        const legacy='';
         // v1216: a target that names only a price throws away WHEN. Measured over the tape's own
         // complete sessions, the high lands late on the sessions worth holding and in the first
         // 45 minutes on the ones that fail, so the window belongs beside the level.
@@ -8453,6 +8427,56 @@ function getClockRunwayRead(row,opts){
   return {pct:+(cap*best.q).toFixed(2),unitReach:+best.q.toFixed(3),quantile:best.p,
     n:sorted.length,conditioned:use!==pool,atMinutes:at,clockLabel:clockLabelOf(at)};
 }
+// v1217: RETAINED WITH NO APP CONSUMER, and that is the whole point of the entry.
+// getReachableTargets is the p50/p75 of buy -> that-day's-high on the owner's own CLOSED EXITS.
+// v1212 removed it from the target path; v1217 removed its last consumer, the fabricated runner
+// leg. It is kept in the tree ONLY because eight historical suite blocks reference it and deleting
+// it aborted them at their first line, costing ~176 still-valid assertions of unrelated coverage.
+// THE CONTRACT IS ENFORCED BEHAVIOURALLY, NOT BY ABSENCE: assert-v1217 stubs it with a nonsense
+// percentile and requires that no target anywhere moves, and separately requires that no call site
+// survives outside a comment. Do not wire either function back into a decision.
+function getReachableTargets(){
+  const store=FS.get(SAME_DAY_EXIT_OPPORTUNITY_STORE);
+  const entries=store?.entries||{};
+  const sig=(store?.lastUpdated||'')+'|'+Object.keys(entries).length;
+  if(_reachMemo&&_reachMemo.sig===sig) return _reachMemo.val;
+  const rows=Object.values(entries)
+    .filter(e=>Number(e.avgBuy)>0&&Number(e.dayHigh)>0)
+    .map(e=>(Number(e.dayHigh)/Number(e.avgBuy)-1)*100)
+    .filter(v=>Number.isFinite(v))
+    .sort((a,b)=>a-b);
+  let val;
+  if(rows.length<REACHABLE_MIN_SAMPLES){
+    val={basePct:null,runnerPct:null,samples:rows.length,
+         source:`only ${rows.length} exits on file, needs ${REACHABLE_MIN_SAMPLES}`};
+  } else {
+    const at=p=>rows[Math.min(rows.length-1,Math.floor(p*rows.length))];
+    val={basePct:+Math.max(0,at(0.50)).toFixed(2),
+         runnerPct:+Math.max(0,at(0.75)).toFixed(2),
+         samples:rows.length,
+         source:`${rows.length} closed exits, buy to that day's high`};
+  }
+  _reachMemo={sig,val};
+  return val;
+}
+
+function splitQty(qty){
+  const q=Math.floor(Number(qty)||0);
+  if(q<=0) return {base:0,runner:0};
+  if(q<2) return {base:q,runner:0};
+  const base=Math.ceil(q/2);
+  return {base,runner:q-base};
+}
+
+function getRunnerTargetPct(policy){
+  const base=Number(policy&&policy.targetPct);
+  if(!(base>0)) return null;
+  const reach=getReachableTargets();
+  const cap=Number(policy&&policy.capacityPct);
+  const want=reach.runnerPct>0?reach.runnerPct:(cap>0?cap*1.5:base);
+  return Math.max(base,Math.floor(want*20)/20);
+}
+
 function getRowExitPolicy(row,buyPrice=null,activeInfo=null,nudgeInfo=null){
   const active=activeInfo||getActiveTargetInfo();
   const anchor=Number(active.tgtPct)>0?Number(active.tgtPct):Math.abs(Number(TRADEBOOK_STATS?.adaptiveTGT))||null;
@@ -8492,7 +8516,14 @@ function getRowExitPolicy(row,buyPrice=null,activeInfo=null,nudgeInfo=null){
   // session - and it is the only one that speaks for a stock with under three sessions on file.
   const clockRead=getClockRunwayRead(row);
   const clockRunwayPct=clockRead?clockRead.pct:null;
+  // v1217: REPORTED raw, but only USABLE while positive. Math.max(0,...) turned "the stock is
+  // already above its statistical ceiling" into an available of 0, and a target of 0 is not a low
+  // target - it is NO target: 222 rows resolved null and 65 of 166 displayed rows printed "—" in
+  // TGT/SL while still being recommended. v1112's rule is that this ceiling may lower the price on
+  // a row and may never withhold it; erasing the number outright is the strongest form of
+  // withholding there is.
   const sessionRunwayPct=(sc&&Number.isFinite(sc.runwayPct))?Math.max(0,sc.runwayPct):null;
+  const sessionRunwayUsable=(sc&&Number.isFinite(sc.runwayPct)&&sc.runwayPct>0)?sc.runwayPct:null;
   const ucEarly=getUpperCircuitInfo(row,bandRef);
   const circuitRunwayPct=(ucEarly&&Number.isFinite(ucEarly.runwayPct))?Math.max(0,ucEarly.runwayPct):null;
   const marketReadEarly=(clockRead!=null||tapeRunwayPct!=null);
@@ -8522,7 +8553,7 @@ function getRowExitPolicy(row,buyPrice=null,activeInfo=null,nudgeInfo=null){
       +' of '+reachRead.n+(reachRead.conditioned?' comparable moves)':' rows)');
   }
   else if(tapeRunwayPct!=null){ available=tapeRunwayPct; availableSource='its own 5-minute tape'; }
-  else if(sessionRunwayPct!=null){ available=sessionRunwayPct; availableSource='the session ceiling'; }
+  else if(sessionRunwayUsable!=null){ available=sessionRunwayUsable; availableSource='the session ceiling'; }
   else if(capacity>0){ available=capacity; availableSource='its range capacity'; }
   // The circuit is what it may LEGALLY reach and bounds every estimate.
   if(available!=null&&circuitRunwayPct!=null) available=Math.min(available,circuitRunwayPct);
@@ -8552,8 +8583,6 @@ function getRowExitPolicy(row,buyPrice=null,activeInfo=null,nudgeInfo=null){
   const targetRefPrice=(marketReadEarly&&livePrice>0)?livePrice:(Number(bandRef)>0?Number(bandRef):livePrice);
   const targetRefSource=(marketReadEarly&&livePrice>0)?'live price':'entry price';
   const stopPct=getRowStopDistancePct(row);
-  const baseRR=getBaselineRewardRisk();
-  const rrFloorPct=(baseRR>0&&stopPct>0)?toStep(stopPct*baseRR):null;
   let minGrossPct=null;
   if(basePct>0){
     minGrossPct=roundPct05(HARVEST_DESIRED_NET_PCT+estimateRoundTripCostPct(basePct));
@@ -8636,10 +8665,10 @@ function getRowExitPolicy(row,buyPrice=null,activeInfo=null,nudgeInfo=null){
     stopSource,
     anchorPct:anchor>0?+anchor.toFixed(2):null,
     anchorSource:active.source,
-    // v1093, all REPORTED (see the note above — measured, deliberately not enforced):
-    rrFloorPct,                                  // the target the measured baseline would ask for
-    baselineRR:baseRR??null,                     // market-measured multiple of risk worth aiming at
-    meetsBaselineRR:(baseRR>0&&targetPct>0&&stopPct>0)?(targetPct/stopPct)+1e-9>=baseRR:null,
+    // v1217: rrFloorPct/baselineRR/meetsBaselineRR removed. They were computed on every row and
+    // rendered nowhere, and asked for 7.45-12.80% targets on stocks with 3-6% whole-day capacity -
+    // v1206 had already recorded that getBaselineRewardRisk() returns a BOUNDARY solution, not a
+    // measured optimum. The status bar's R:R pill reads buildAchievabilityCurve() directly.
     fallback:capacity==null,
     buyPrice:Number(buyPrice)>0?Number(buyPrice):null
   };
@@ -9345,7 +9374,7 @@ function renderTable(){
       // v1144: TGT and SL merged. They are ONE decision - what you ask for against what you risk -
       // and the two columns were part of why the table needed a horizontal scrollbar, which the
       // owner has ruled out. Both numbers survive, with their full tooltips.
-      tgt:`<td style="font-weight:700" title="${escHtml((exitPolicy.viable?`${exitPolicy.targetSource}; portfolio anchor ${exitPolicy.anchorPct?.toFixed(2)??'—'}%`:`Stock capacity ${exitPolicy.capacityPct?.toFixed(2)??'—'}% cannot clear the ${exitPolicy.minGrossPct?.toFixed(2)??'—'}% cost + net hurdle`)+' · '+exitPolicy.stopSource+(exitPolicy.rewardRisk!=null?` · reward:risk ${exitPolicy.rewardRisk.toFixed(2)}`+(exitPolicy.rewardRisk<1?' — BELOW 1.0: this stock risks more than it aims to make':''):''))}"><span style="color:${exitPolicy.viable?'var(--green)':'var(--red)'}">${exitPolicy.viable&&exitPolicy.targetPct!=null?'+'+exitPolicy.targetPct.toFixed(2)+'%':'—'}</span><span style="color:var(--t3)"> / </span><span style="color:var(--red)">−${exitPolicy.stopPct.toFixed(2)}%</span></td>`,
+      tgt:`<td style="font-weight:700" title="${escHtml((exitPolicy.viable?`${exitPolicy.targetSource}. You need ${exitPolicy.anchorPct?.toFixed(2)??'—'}% per trade to hold pace; this row offers ${exitPolicy.targetPct?.toFixed(2)??'—'}%${(exitPolicy.anchorPct>0&&exitPolicy.targetPct>0&&exitPolicy.targetPct<exitPolicy.anchorPct)?' — short of it':''}`:`Stock capacity ${exitPolicy.capacityPct?.toFixed(2)??'—'}% cannot clear the ${exitPolicy.minGrossPct?.toFixed(2)??'—'}% cost + net hurdle`)+' · '+exitPolicy.stopSource+(exitPolicy.rewardRisk!=null?` · reward:risk ${exitPolicy.rewardRisk.toFixed(2)}`+(exitPolicy.rewardRisk<1?' — BELOW 1.0: this stock risks more than it aims to make':''):''))}"><span style="color:${exitPolicy.viable?'var(--green)':'var(--red)'}">${exitPolicy.viable&&exitPolicy.targetPct!=null?'+'+exitPolicy.targetPct.toFixed(2)+'%':'—'}</span><span style="color:var(--t3)"> / </span><span style="color:var(--red)">−${exitPolicy.stopPct.toFixed(2)}%</span></td>`,
       alloc:`<td class="alloc-cell" data-sym="${s.symbol}">${(()=>{
         if(!am) return '<span style="color:var(--t3);font-size:13px">—</span>';
         if(am.rejected) return `<span style="color:var(--red);font-size:12px" title="${escHtml(am.reason||'Stock-specific target cannot clear costs and desired net.')}">no viable target</span>`;
@@ -11210,9 +11239,8 @@ function planBasketExport(capital, selected){
     const qty=capital>0?(basketAlloc[s.symbol]?.qty||0):1;
     if(!(qty>0)) return 0;
     const policy=basketAlloc[s.symbol]?.exitPolicy||getRowExitPolicy(s,basketAlloc[s.symbol]?.buyPrice||s.price);
-    const split=splitQty(qty);
-    const runnerPct=getRunnerTargetPct(policy);
-    return (split.runner>0&&runnerPct>policy.targetPct)?2:1;
+    // v1217: one leg per row. The phantom runner was counting 2 against the 20-order cap.
+    return 1;
   };
   const orderCount=()=>exportList.reduce((count,s)=>count+legsFor(s),0);
   while(exportList.length&&orderCount()>20){
@@ -11338,21 +11366,6 @@ async function exportBasket(){
   showToast(`<strong>Saved ${orders.length} CNC MARKET BUY orders</strong> for ${new Set(orders.map(o=>o._meta.sym)).size} stocks in Scanner Uploads as Zerodha_Basket_Buy JSON${splitNote}${targetNote}${planNote}${floorNote}${rejNote}${limitNote}${marketNote}`);
 }
 
-function splitQty(qty){
-  const q=Math.floor(Number(qty)||0);
-  if(q<=0) return {base:0,runner:0};
-  if(q<2) return {base:q,runner:0};
-  const base=Math.ceil(q/2);
-  return {base,runner:q-base};
-}
-function getRunnerTargetPct(policy){
-  const base=Number(policy&&policy.targetPct);
-  if(!(base>0)) return null;
-  const reach=getReachableTargets();
-  const cap=Number(policy&&policy.capacityPct);
-  const want=reach.runnerPct>0?reach.runnerPct:(cap>0?cap*1.5:base);
-  return Math.max(base,Math.floor(want*20)/20);
-}
 async function saveBasketToScannerUploads(orders, filename){
   if(orders.length>20) throw new Error(`Refusing to truncate basket with ${orders.length} orders`);
   const root=await FS.getStoredUploadDirHandle?.().catch(()=>null);
