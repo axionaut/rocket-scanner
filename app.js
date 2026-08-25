@@ -1,5 +1,5 @@
-const BUILD_TS='2026-08-24 16:48 IST'; // release build time (IST)
-const APP_VERSION=1219; // v1219: Post-close audit is a full-width responsive dashboard.
+const BUILD_TS='2026-08-25 08:48 IST'; // release build time (IST)
+const APP_VERSION=1220; // v1220: input persistence is part of the load gate before recommendations.
 // v1093: a baseline reward:risk MEASURED on the cross-section (last completed bhav session) instead of learned from the owner's own fills - reported on every row, deliberately not enforced. Includes v1092: position size split by Radar score / stop distance, so equally-scored names carry equal RUPEE risk, plus an opt-in Risk /trade cap.
 // v556: parse the NSE Market Activity Report (MA<date>.csv) — official Nifty %, advances/declines and sector index moves shown as market CONTEXT in the status bar (EOD data, display only, never fed into per-row scoring); MA added to the ℹ️ file manifest.
 // v555 market-cycle stage awareness (stateless, self-calibrating): per-row stage label (1 accumulation · 2 breakout · 3 event · 4 profit-booking · 5 re-accumulation · 6 second-leg); a quiet-accumulation signal (conjunction-of-percentiles) injected via the rocket-diagnostic weighting; sell-the-news decay off Recent earnings date (horizon = review days). v1065 makes the market-breadth gauge an entry-eligibility input while still never changing ranking.
@@ -885,29 +885,22 @@ function idleTask(fn,timeout=1200){
   if('requestIdleCallback' in window) requestIdleCallback(run,{timeout});
   else setTimeout(run,60);
 }
-// Drive copies of the canonical inputs are what hydrate a second device, so this stays —
-// but only for files that actually CHANGED. Before v533 every processFiles() call, including
-// each 15-second auto-refresh tick, re-uploaded all seven inputs (multi-MB CSV + ZIP) and
-// toasted about it; the encode/upload work landed inside the scoring window and competed
-// with the render. Now unchanged files are skipped, the work is deferred further, and a
-// silent auto-refresh never toasts.
+// Drive copies of the canonical inputs hydrate a second device. Saving is one awaited stage of
+// processFiles(): only changed files upload, and scoring/recommendation cannot begin until that
+// stage succeeds. The page-local signatures still keep watcher refreshes from re-uploading the
+// same multi-MB inputs on every pass.
 const _driveInputSigs=new Map(); // lowercased file name -> "size:lastModified"
 const driveInputKey=f=>String(f?.name||'').toLowerCase();
 const driveInputSig=f=>`${f?.size}:${f?.lastModified}`;
 const driveInputNeedsPush=f=>_driveInputSigs.get(driveInputKey(f))!==driveInputSig(f);
 const markDriveInputPushed=f=>_driveInputSigs.set(driveInputKey(f),driveInputSig(f));
-function saveInputsInBackground(files,{silent=false}={}){
-  if(!files?.length||!FS.hasFolder()) return;
+async function saveInputsToDrive(files){
+  if(!files?.length||!FS.hasFolder()) return 0;
   const pending=files.filter(driveInputNeedsPush);
-  if(!pending.length) return; // nothing changed since the last push — no upload, no toast
-  idleTask(()=>{
-    FS.saveUploadedInputs(pending)
-      .then(n=>{
-        pending.forEach(markDriveInputPushed);
-        if(n&&!silent) showToast(`Saved ${n} input file${n!==1?'s':''} to Drive in background.`,2500);
-      })
-      .catch(e=>showToast('Background Drive input save failed: '+(e.message||e),5000,true));
-  },6000);
+  if(!pending.length) return 0;
+  const saved=await FS.saveUploadedInputs(pending);
+  pending.forEach(markDriveInputPushed);
+  return saved;
 }
 function saveBrainInBackground(label='Brain saved'){
   idleTask(()=>{
@@ -11941,10 +11934,6 @@ async function processFiles(files,sourceLabel,opts={}){
   // does not immediately re-process the files it (or the user) just loaded.
   try{_folderWatchAllNseLastModified=getAllNseLastModified([...files]);}catch(e){}
   if(!silent) setLoading(true,String(FILE_LOAD_STATUS.source?`Processing selected files... · ${FILE_LOAD_STATUS.source}`:'Processing selected files...'));
-  // Upload CHANGED canonical input files to Drive in the background. Rankings are built
-  // from the selected local files immediately, because the market does not wait for Drive.
-  saveInputsInBackground(files,{silent});
-  NSE_BHAV={};NSE_52W={};NSE_SURV={};NSE_BULK={};NSE_BLOCK={};NSE_PRICE_BAND={};NSE_VAR={};NSE_NEXT_BAND={};NSE_SECURITY_MASTER={};NSE_DEAL_NET={};NSE_CORP_ACTION={};NSE_BOARD_MEETING={};NSE_ANNOUNCE={};NSE_MARKET=null;NSE_INDEX={};NSE_NAME_TO_SYM={};NSE_BAND_HIT={};NSE_NEW_HL_BYNAME={};NSE_INDEX_GROUP_BYNAME={};NSE_INDEX_GROUP_BYSYM={};MARKET_REGIME=null;NSE_STATUS={};NSE_SERIES={};NSE_DEPTH={};NSE_DEPTH_META=null;KITE_TOKEN={};
   let tvFile=null,nseZip=null,holdFile=null,posFile=null,ordFile=null,tbFile=null,holidayFile=false,holidayFileName='',depthFile=null,kiteFile=null;
   for(const f of files){
     const name=inputNameLower(f.name);
@@ -11972,6 +11961,20 @@ async function processFiles(files,sourceLabel,opts={}){
     }
     return false;
   }
+
+  // Persist the complete recognised input snapshot before scoring can create or display a new
+  // recommendation cohort. A partial/failed Drive sweep is not a completed load.
+  try{
+    if(!silent) setLoadMsg('Saving changed input files to Drive...');
+    await saveInputsToDrive(files);
+  }catch(e){
+    console.error('Drive input save failed',e);
+    if(!silent) setLoading(false);
+    showToast('Could not save input files to Drive. Rankings were not updated: '+(e?.message||e),6000,true);
+    return false;
+  }
+
+  NSE_BHAV={};NSE_52W={};NSE_SURV={};NSE_BULK={};NSE_BLOCK={};NSE_PRICE_BAND={};NSE_VAR={};NSE_NEXT_BAND={};NSE_SECURITY_MASTER={};NSE_DEAL_NET={};NSE_CORP_ACTION={};NSE_BOARD_MEETING={};NSE_ANNOUNCE={};NSE_MARKET=null;NSE_INDEX={};NSE_NAME_TO_SYM={};NSE_BAND_HIT={};NSE_NEW_HL_BYNAME={};NSE_INDEX_GROUP_BYNAME={};NSE_INDEX_GROUP_BYSYM={};MARKET_REGIME=null;NSE_STATUS={};NSE_SERIES={};NSE_DEPTH={};NSE_DEPTH_META=null;KITE_TOKEN={};
 
   if(kiteFile){
     try{
