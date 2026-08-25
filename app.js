@@ -1,5 +1,5 @@
-const BUILD_TS='2026-08-25 08:48 IST'; // release build time (IST)
-const APP_VERSION=1220; // v1220: input persistence is part of the load gate before recommendations.
+const BUILD_TS='2026-08-25 09:52 IST'; // release build time (IST)
+const APP_VERSION=1221; // v1221: joined ALL NSE/Zerodha refresh; checkbox overrides reset per board.
 // v1093: a baseline reward:risk MEASURED on the cross-section (last completed bhav session) instead of learned from the owner's own fills - reported on every row, deliberately not enforced. Includes v1092: position size split by Radar score / stop distance, so equally-scored names carry equal RUPEE risk, plus an opt-in Risk /trade cap.
 // v556: parse the NSE Market Activity Report (MA<date>.csv) — official Nifty %, advances/declines and sector index moves shown as market CONTEXT in the status bar (EOD data, display only, never fed into per-row scoring); MA added to the ℹ️ file manifest.
 // v555 market-cycle stage awareness (stateless, self-calibrating): per-row stage label (1 accumulation · 2 breakout · 3 event · 4 profit-booking · 5 re-accumulation · 6 second-leg); a quiet-accumulation signal (conjunction-of-percentiles) injected via the rocket-diagnostic weighting; sell-the-news decay off Recent earnings date (horizon = review days). v1065 makes the market-breadth gauge an entry-eligibility input while still never changing ranking.
@@ -92,7 +92,7 @@ let DIRECTION_REMOVED=0; // v1087: ranked rows removed for not currently going U
 let REMOVED_ROWS=[]; // [{s, reason:'held'|'surv'|'peak'|'alloc', rules?, detail?}] captured each applyFilters pass so the
                      // "Removed from rankings" table can explain every gap in the rank sequence (v546)
 let SELECTED=new Set(); // symbols selected for basket — recomputed from FILT each applyFilters
-let EXPORT_EXCLUDED=new Set(); // symbols the user unchecked from export — persisted in rs_filters
+let EXPORT_EXCLUDED=new Set(); // transient manual overrides for this recommendation snapshot only
 // Startup hydration renders (and therefore calls applyFilters → saveFilterState) before
 // the saved filters have been read back into the DOM. Without this latch those empty
 // inputs overwrite the stored state, so every refresh reset the user's filters.
@@ -3305,6 +3305,9 @@ function passesIntradayValidation(s){
   if(!s?.symbol||s.intradayVerdict!=='confirmed') return false;
   const read=getIntradayRead(s.symbol);
   return !!(read&&read.current);
+}
+function isSelectableRecommendation(s){
+  return !!s&&s.basketEligible!==false&&meetsRecommendationBar(s)&&passesIntradayValidation(s);
 }
 // Score number + proportional bar, both tinted by the band.
 function radarScoreCell(score,title=''){
@@ -7922,16 +7925,20 @@ function getCols(){
 let COLS=getCols();
 
 function updateSelectAll(){
-  const allSyms=FILT.filter(s=>s.basketEligible!==false&&passesIntradayValidation(s)).map(s=>s.symbol);
+  const allSyms=FILT.filter(isSelectableRecommendation).map(s=>s.symbol);
   const allChecked=allSyms.length>0&&allSyms.every(sym=>SELECTED.has(sym));
   const sa=document.getElementById('chk-all');
   if(sa){sa.indeterminate=!allChecked&&SELECTED.size>0&&allSyms.some(sym=>SELECTED.has(sym));sa.checked=allChecked;}
   renderBasketBtn();
 }
+function resetRecommendationSelectionForRefresh(){
+  EXPORT_EXCLUDED.clear();
+  SELECTED.clear();
+}
 function toggleSelectAll(checked){
   if(checked){
     FILT.forEach(s=>EXPORT_EXCLUDED.delete(s.symbol));
-    SELECTED=new Set(FILT.filter(s=>s.basketEligible!==false&&passesIntradayValidation(s))
+    SELECTED=new Set(FILT.filter(isSelectableRecommendation)
       .slice(0,20).map(s=>s.symbol));
   } else {
     FILT.forEach(s=>{if(s.basketEligible!==false)EXPORT_EXCLUDED.add(s.symbol);});
@@ -7943,7 +7950,7 @@ function toggleSelectAll(checked){
 }
 function toggleStock(sym,checked){
   const row=FILT.find(s=>s.symbol===sym);
-  if(checked&&row&&passesIntradayValidation(row)){EXPORT_EXCLUDED.delete(sym);SELECTED.add(sym);}
+  if(checked&&isSelectableRecommendation(row)){EXPORT_EXCLUDED.delete(sym);SELECTED.add(sym);}
   else if(checked){SELECTED.delete(sym);}
   else{EXPORT_EXCLUDED.add(sym);SELECTED.delete(sym);}
   saveFilterState();
@@ -9294,7 +9301,7 @@ function renderBasketSummary(){
 
 function renderHead(){
   COLS=getCols(); // refresh in case ENGINE_DATA changed
-  const exportable=FILT.filter(s=>s.basketEligible!==false&&passesIntradayValidation(s));
+  const exportable=FILT.filter(isSelectableRecommendation);
   const allChecked=exportable.length>0&&exportable.every(s=>SELECTED.has(s.symbol));
   const someChecked=exportable.some(s=>SELECTED.has(s.symbol));
   const timingBlocked=false; // the clock never disables selection (owner, v1068)
@@ -9437,9 +9444,11 @@ function renderTable(){
     const am=allocMap[s.symbol];
     const exitPolicy=getRowExitPolicy(s,getBuyPrice(s));
     const exchangeEligible=s.basketEligible!==false;
+    const recommendationGo=meetsRecommendationBar(s);
     const validated=passesIntradayValidation(s);
-    const canBuy=exchangeEligible&&validated;
+    const canBuy=isSelectableRecommendation(s);
     const checkTitle=!exchangeEligible?'Ineligible for the basket'
+      :!recommendationGo?'Not a current go recommendation'
       :!validated?'Awaiting current 5-minute validation'
       :'Include in the Zerodha basket export';
     // Cells are keyed and joined in COLS order so they always match the (possibly
@@ -10168,8 +10177,7 @@ function applyFilters(){
   CURRENT_TRADE_TIMING=getCurrentTradeTimingDecision();
   const selectionRows=[...rows].sort((a,b)=>(a.rank??Infinity)-(b.rank??Infinity));
   SELECTED=new Set(selectionRows
-    .filter(s=>s.basketEligible!==false&&!EXPORT_EXCLUDED.has(s.symbol)
-      &&meetsRecommendationBar(s)&&passesIntradayValidation(s))
+    .filter(s=>!EXPORT_EXCLUDED.has(s.symbol)&&isSelectableRecommendation(s))
     .slice(0,20).map(s=>s.symbol));
 
   PG=1;renderHead();renderTable();renderStatusBar();saveFilterState();updateTabCounts();
@@ -11807,6 +11815,7 @@ function applySavedFiltersForMode(mode){
       syncExecutedRecommendedEntries();
     }
     FILT=[...ALL];_tvLoadedThisSession=true;
+    if(mode==='stock') resetRecommendationSelectionForRefresh();
     completed=true;
     return true;
   }finally{
@@ -12107,15 +12116,17 @@ async function processFiles(files,sourceLabel,opts={}){
   }
   if(!silent) setLoadMsg('Rendering rankings...');
   renderTradingDashboardNow();
-  if(!silent) setLoading(false);
   saveBrainInBackground('Brain saved after file processing');
   if(FIRST_INGEST_DONE){
     try{
-      if(KITE_API&&fetchBudgetLeft()>0)
-        setTimeout(()=>{ try{ fetchCandlesInApp({auto:true}); }catch(e){} },1200);
-    }catch(e){}
+      if(KITE_API&&fetchBudgetLeft()>0){
+        if(!silent) setLoadMsg('Refreshing Zerodha 5-minute data...');
+        await fetchCandlesInApp({auto:true});
+      }
+    }catch(e){console.warn('Automatic Zerodha candle refresh failed',e);}
   }
   FIRST_INGEST_DONE=true;
+  if(!silent) setLoading(false);
   return true;
 }
 
@@ -12240,7 +12251,6 @@ function saveFilterState(){
     rows:document.getElementById('fRows')?.value||'',
     minTurnover:document.getElementById('fMinTurnover')?.value||'0',
     maxPrice:document.getElementById('fMaxPrice')?.value??'',
-    exportExcluded:[...EXPORT_EXCLUDED].slice(0,200),
     sortCol:SCOL,
     sortDir:SDIR,
   };
@@ -12277,7 +12287,7 @@ function loadFilterState(){
     if(state.rows!=null){const el=document.getElementById('fRows');if(el)el.value=state.rows;}
     if(state.minTurnover!=null){const el=document.getElementById('fMinTurnover');if(el)el.value=state.minTurnover;}
     if(state.maxPrice!=null){const el=document.getElementById('fMaxPrice');if(el)el.value=state.maxPrice;}
-    EXPORT_EXCLUDED=new Set(Array.isArray(state.exportExcluded)?state.exportExcluded.map(normSym).filter(Boolean):[]);
+    resetRecommendationSelectionForRefresh(); // legacy persisted exclusions are deliberately ignored
     // Trade inputs PREFER the Drive-synced brain (so laptop and phone agree); localStorage
     // is the fallback when the brain has none yet (offline / first run).
     let ti=null; try{ti=FS.get(TRADE_INPUTS_STORE);}catch(e){}
