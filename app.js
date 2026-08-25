@@ -1,5 +1,5 @@
-const BUILD_TS='2026-08-25 09:52 IST'; // release build time (IST)
-const APP_VERSION=1221; // v1221: joined ALL NSE/Zerodha refresh; checkbox overrides reset per board.
+const BUILD_TS='2026-08-25 10:27 IST'; // release build time (IST)
+const APP_VERSION=1222; // v1222: Open Position Target stays above buy average; SL owns downside.
 // v1093: a baseline reward:risk MEASURED on the cross-section (last completed bhav session) instead of learned from the owner's own fills - reported on every row, deliberately not enforced. Includes v1092: position size split by Radar score / stop distance, so equally-scored names carry equal RUPEE risk, plus an opt-in Risk /trade cap.
 // v556: parse the NSE Market Activity Report (MA<date>.csv) — official Nifty %, advances/declines and sector index moves shown as market CONTEXT in the status bar (EOD data, display only, never fed into per-row scoring); MA added to the ℹ️ file manifest.
 // v555 market-cycle stage awareness (stateless, self-calibrating): per-row stage label (1 accumulation · 2 breakout · 3 event · 4 profit-booking · 5 re-accumulation · 6 second-leg); a quiet-accumulation signal (conjunction-of-percentiles) injected via the rocket-diagnostic weighting; sell-the-news decay off Recent earnings date (horizon = review days). v1065 makes the market-breadth gauge an entry-eligibility input while still never changing ranking.
@@ -6791,12 +6791,12 @@ function buildOpenPositionsPanel(query=''){
     const qty=Number(pos?.qty)||0;
     if(!(qty>0)||!pos.symbol) return;
     const scannerRow=scannerBySymbol.get(pos.symbol)||null;
-    const tapePolicy=getOpenPositionTapePolicy(pos.symbol,pos);
+    const avg=Number(pos.avg)>0?Number(pos.avg):(HOLD_COST_MAP[pos.symbol]||null);
+    const tapePolicy=getOpenPositionTapePolicy(pos.symbol,avg>0?Object.assign({},pos,{avg}):pos);
     // Position decisions use the 5-minute tape. Position/ALL NSE LTP is only a display fallback
     // while the tape is missing; it cannot move Target, SL, Pace, EoD or the instruction.
     const ltp=Number(tapePolicy.price)>0?Number(tapePolicy.price)
       :Number(pos.ltp)>0?Number(pos.ltp):null;
-    const avg=Number(pos.avg)>0?Number(pos.avg):(HOLD_COST_MAP[pos.symbol]||null);
     const pnlPct=(avg&&ltp)?+((ltp-avg)/avg*100).toFixed(2):null;
     const pnlRs=(avg&&ltp)?+((ltp-avg)*qty).toFixed(0):null;
     const daysHeld=getOpenPositionDaysHeld(pos.symbol,qty);
@@ -6896,9 +6896,10 @@ function buildOpenPositionsPanel(query=''){
       fmt:(v,row)=>{
         if(v==null) return '<span style="color:var(--t3)">—</span>';
         return fmtINR(v)+`<span style="font-size:11px;color:var(--t3)">×${row.qty??''}</span>`
-          +`<span title="${escHtml('Tape target from 5-minute pressure: '
-            +(row.targetPct!=null?('+'+Number(row.targetPct).toFixed(2)+'% from the tape close. '):'')
-            +(row.tapePolicy?.why||''))}"></span>`;
+          +`<span title="${escHtml('Profit target: '
+            +(row.targetPct!=null?('+'+Number(row.targetPct).toFixed(2)+'% from average buy. '):'')
+            +(row.tapePolicy?.targetWhy||'')
+            +' The 5-minute Buy/Sell/Hold instruction is separate; downside belongs only in SL.')}"></span>`;
         /* c8 ignore start -- recommendation-target renderer retained below for old assertion source only. */
         const legacy='';
         // v1216: a target that names only a price throws away WHEN. Measured over the tape's own
@@ -8928,9 +8929,26 @@ function getLegacyPositionAction(sym,pos){
 }
 // Open Positions is a different decision surface from Recommendations. Recommendations begin with
 // the ALL NSE cross-section and ask whether a fresh entry survives a 5-minute validation. A held
-// stock already owns capital: its Target, SL, Pace, EoD and Buy/Sell/Hold instruction therefore come
-// from its 5-minute tape even when the symbol has no scanner row at all. Stable projections use
-// completed bars; the bounded high-volume harvest below is the one live-candle exception.
+// stock already owns capital: its SL, Pace, EoD and Buy/Sell/Hold instruction therefore come from
+// its 5-minute tape even when the symbol has no scanner row at all. Target combines the tape's
+// upside level with a profit floor above average buy; downside belongs only in the dedicated SL.
+// Stable projections use completed bars; the bounded high-volume harvest below is the one
+// live-candle exception.
+function getOpenPositionTargetFloor(sym,pos){
+  const avgFromPos=Number(pos?.avg);
+  const avgPrice=avgFromPos>0?avgFromPos:Number(getHoldingAvgCost(sym));
+  if(!(avgPrice>0)) return null;
+  let active=null;
+  try{ active=getActiveTargetInfo(); }catch(e){}
+  const anchorPct=Number(active?.tgtPct)>0?Number(active.tgtPct):null;
+  const raw=anchorPct!=null?avgPrice*(1+anchorPct/100):avgPrice+0.05;
+  const nextTick=+((Math.floor((avgPrice+1e-9)/0.05)+1)*0.05).toFixed(2);
+  const price=Math.max(nextTick,tickPrice(raw));
+  const source=active?.source==='manual'?'manual Target Anchor'
+    :active?.source==='goal'?'goal-led Target Anchor'
+    :active?.source==='harvest'?'Harvest Target Anchor':'minimum profit tick';
+  return {avgPrice,price:+price.toFixed(2),anchorPct,source};
+}
 function getOpenPositionTapePolicy(sym,pos){
   const s=normSym(sym||pos?.symbol||'');
   const qty=Math.max(0,Number(pos?.qty)||0);
@@ -9000,9 +9018,9 @@ function getOpenPositionTapePolicy(sym,pos){
           &&Number.isFinite(tape.pressurePct)&&tape.pressurePct>0
           &&tape.priceSlope>0&&tape.flowSlope>0) signal='BUY';
 
-  // Target is the price this tape's remaining pressure can still support. When pressure will not
-  // convert, HOLD may work a recovery to the established high; SELL never invents an optimistic
-  // bounce and falls back to the live tape price. A rejection candle caps its target at its own high.
+  // The tape contributes an upside LEVEL, but never decides whether Target becomes a loss exit.
+  // Target is a profit objective, floored above average buy by the active Target Anchor. SELL can
+  // still mean act at the live tape price and SL can remain below cost; neither may overwrite Target.
   const eodPct=Number.isFinite(tape.predPct)?tape.predPct:null;
   const eodPrice=Number.isFinite(tape.predClose)?tape.predClose:null;
   let targetRaw=(eodPct!=null&&eodPct>0&&eodPrice>0)?eodPrice:null;
@@ -9010,8 +9028,21 @@ function getOpenPositionTapePolicy(sym,pos){
   if(targetRaw==null) targetRaw=livePrice;
   if(liveHarvest) targetRaw=livePrice;
   if(highRejection) targetRaw=Math.min(Number(last.h)||targetRaw,targetRaw);
-  const targetPrice=tickPrice(Math.max(livePrice,targetRaw));
-  const targetPct=livePrice>0?100*(targetPrice/livePrice-1):null;
+  const tapeTargetPrice=tickPrice(Math.max(livePrice,targetRaw));
+  const targetFloor=getOpenPositionTargetFloor(s,pos);
+  const targetPrice=tickPrice(Math.max(tapeTargetPrice,targetFloor?.price||0));
+  const targetPct=targetFloor?.avgPrice>0
+    ?100*(targetPrice/targetFloor.avgPrice-1)
+    :livePrice>0?100*(targetPrice/livePrice-1):null;
+  const floorBound=!!(targetFloor&&targetFloor.price>tapeTargetPrice);
+  const targetWhy=targetFloor
+    ?(floorBound
+      ?'The 5-minute tape level '+fmtINR(tapeTargetPrice)+' was below average buy '+fmtINR(targetFloor.avgPrice)
+        +'; Target is held at '+targetFloor.source
+        +(targetFloor.anchorPct!=null?' (+'+targetFloor.anchorPct.toFixed(2)+'%)':'')+'.'
+      :'The 5-minute tape supports '+fmtINR(tapeTargetPrice)+', at or above the '+targetFloor.source
+        +' profit floor from average buy '+fmtINR(targetFloor.avgPrice)+'.')
+    :'Average buy is unavailable, so the displayed level comes only from the 5-minute tape.';
   const paceRs=pacePct!=null&&hi>0?hi*pacePct/100:null;
   const reason=liveHarvest
     ?'Fresh high on an unfinished 5-minute candle whose partial volume is already top-quartile; harvest at the live tape price.'
@@ -9029,7 +9060,10 @@ function getOpenPositionTapePolicy(sym,pos){
   return {symbol:s,signal,signalSort:signal==='SELL'?0:signal==='HOLD'?1:2,qty,
     price:+livePrice.toFixed(2),open:day[0].o,high:hi,low:lo,asOf:forming?forming.t:last.t,
     completedAsOf:last.t,
-    targetPrice,targetPct,stopPrice,pacePct,paceRs,
+    targetPrice,targetPct,tapeTargetPrice,
+    targetFloorPrice:targetFloor?.price||null,targetFloorPct:targetFloor?.anchorPct??null,
+    targetAvgPrice:targetFloor?.avgPrice||null,targetFloorSource:targetFloor?.source||null,targetWhy,
+    stopPrice,pacePct,paceRs,
     eodPct,eodPrice:eodPrice>0?tickPrice(eodPrice):null,
     flowPct:100*tape.cvdPct,pressurePct:tape.pressurePct,
     pullPct,liveHarvest,highRejection,paceFailed,stopBreached,regime:tape.regime,why:reason,tape};
@@ -9039,7 +9073,7 @@ function getPositionAction(sym,pos){
   const p=getOpenPositionTapePolicy(sym,pos);
   const tone=p.signal==='BUY'?'green':p.signal==='SELL'?'red':p.signal==='HOLD'?'amber':'grey';
   return {act:p.signal,qty:p.signal==='SELL'?p.qty:0,tone,why:p.why,policy:p,
-    execution:p.signal==='SELL'&&p.targetPrice>p.price?{level:p.targetPrice}:null};
+    execution:p.signal==='SELL'&&p.price>0?{level:p.price,source:'live tape'}:null};
 }
 function getHeldTopUpNotionalCap(s,buyP,heldMap=null){
   const held=(heldMap||getHeldPositionMap())[s.symbol];
