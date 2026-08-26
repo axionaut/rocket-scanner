@@ -1,5 +1,5 @@
-const BUILD_TS='2026-08-26 15:33 IST'; // release build time (IST)
-const APP_VERSION=1223; // v1223: wait through falling/extended tape; held ADD requires a live BUY.
+const BUILD_TS='2026-08-26 16:06 IST'; // release build time (IST)
+const APP_VERSION=1224; // v1224: Goal owns the auto Target Anchor; profitable SL display; simpler Performance.
 // v1093: a baseline reward:risk MEASURED on the cross-section (last completed bhav session) instead of learned from the owner's own fills - reported on every row, deliberately not enforced. Includes v1092: position size split by Radar score / stop distance, so equally-scored names carry equal RUPEE risk, plus an opt-in Risk /trade cap.
 // v556: parse the NSE Market Activity Report (MA<date>.csv) — official Nifty %, advances/declines and sector index moves shown as market CONTEXT in the status bar (EOD data, display only, never fed into per-row scoring); MA added to the ℹ️ file manifest.
 // v555 market-cycle stage awareness (stateless, self-calibrating): per-row stage label (1 accumulation · 2 breakout · 3 event · 4 profit-booking · 5 re-accumulation · 6 second-leg); a quiet-accumulation signal (conjunction-of-percentiles) injected via the rocket-diagnostic weighting; sell-the-news decay off Recent earnings date (horizon = review days). v1065 makes the market-breadth gauge an entry-eligibility input while still never changing ranking.
@@ -5509,7 +5509,7 @@ function updateFilterPlaceholders(){
       riskEl.title=`Empty = NO cap; sizing follows Radar score ÷ stop distance and the existing rails, which today imply about ₹${d.toLocaleString('en-IN')} at risk for a full Max Alloc ₹${Math.round(ma).toLocaleString('en-IN')} position at the ${med.toFixed(2)}% median stop. Type a value to cap what any one position may lose — it can only shrink a position, never grow one.`; }
     else { riskEl.placeholder='auto'; } }
   const tgtEl=document.getElementById('fTgtOverride');
-  if(tgtEl){ let d=0; try{d=getDefaultTgtPct();}catch(e){} if(d>0){ tgtEl.placeholder=d.toFixed(1); tgtEl.title=`Empty = the auto portfolio target anchor ${d.toFixed(1)}% (lower of learned Harvest / goal-led). A typed value replaces the anchor; each stock still gets its own capacity-aware target.`; } }
+  if(tgtEl){ let d=0; try{d=getDefaultTgtPct();}catch(e){} if(d>0){ tgtEl.placeholder=d.toFixed(1); tgtEl.title=`Empty = the Goal-led portfolio target anchor ${d.toFixed(1)}% (required net return plus estimated costs). Harvest is used only if Goal cannot resolve. A typed value replaces the anchor; each stock still gets its own capacity-aware target.`; } }
 }
 // Goal capital basis = effective capital (the field if the owner typed one, else the
 // computed deployed book). An empty field means the default, never zero.
@@ -5997,21 +5997,26 @@ function attachColDrag(tableEl,tableKey,onReorder){
     });
   });
 }
-function makeSortableTable(id, cols, rows, defaultSortKey, defaultDir=-1, rowStyleFn=null, totalsRow=null, rowClickKey=null){
+function makeSortableTable(id, cols, rows, defaultSortKey, defaultDir=-1, rowStyleFn=null, totalsRow=null, rowClickKey=null, secondarySortKey=null, secondaryDir=1){
   cols=applyColOrder(id,cols.slice());
   const thStyle=(align)=>`padding:6px 10px;text-align:${align};cursor:pointer;user-select:none;white-space:nowrap`;
   const tdStyle=(align,extra='')=>`padding:7px 10px;text-align:${align};white-space:nowrap${extra?';'+extra:''}`;
   let sortKey=defaultSortKey, sortDir=defaultDir;
+  const compareValues=(av,bv,dir)=>{
+    const an=av==null||av===''||(typeof av==='number'&&!isFinite(av));
+    const bn=bv==null||bv===''||(typeof bv==='number'&&!isFinite(bv));
+    if(an&&bn) return 0;
+    if(an) return 1;
+    if(bn) return -1;
+    if(typeof av==='string') return dir*av.localeCompare(bv);
+    return dir*((av||0)-(bv||0));
+  };
   function render(){
     const sorted=[...rows].sort((a,b)=>{
       const av=a[sortKey],bv=b[sortKey];
-      const an=av==null||av===''||(typeof av==='number'&&!isFinite(av));
-      const bn=bv==null||bv===''||(typeof bv==='number'&&!isFinite(bv));
-      if(an&&bn) return 0;
-      if(an) return 1;
-      if(bn) return -1;
-      if(typeof av==='string') return sortDir*av.localeCompare(bv);
-      return sortDir*((av||0)-(bv||0));
+      const primary=compareValues(av,bv,sortDir);
+      if(primary!==0||sortKey!==defaultSortKey||!secondarySortKey) return primary;
+      return compareValues(a[secondarySortKey],b[secondarySortKey],secondaryDir);
     });
     const thead=`<thead><tr style="color:var(--t3);border-bottom:1px solid var(--border)">${
       cols.map(c=>`<th data-key="${c.key}" style="${thStyle(c.align||'right')}">${c.label}${sortKey===c.key?(sortDir>0?' ▲':' ▼'):''}</th>`).join('')
@@ -6818,18 +6823,28 @@ function buildOpenPositionsPanel(query=''){
     const pnlRs=(avg&&ltp)?+((ltp-avg)*qty).toFixed(0):null;
     const daysHeld=getOpenPositionDaysHeld(pos.symbol,qty);
     const capital=avg?+(avg*qty).toFixed(0):null;
-    const targetPrice=tapePolicy.targetPrice,stopPrice=tapePolicy.stopPrice;
+    const targetPrice=tapePolicy.targetPrice;
+    const tapeStopPrice=tapePolicy.stopPrice;
+    const afterCostFloor=getPositionAfterCostFloor(avg,qty);
+    // The tape stop still protects the policy internally. On this manual-action surface, however,
+    // SL is specifically the point at which the owner can switch to TSL without locking a loss.
+    // Hide it until the stop is above buy AND a sale there pays both CNC legs and the DP charge.
+    const stopPrice=tapeStopPrice!=null&&afterCostFloor!=null
+      &&tapeStopPrice>avg&&tapeStopPrice>=afterCostFloor?tapeStopPrice:null;
     const targetPct=tapePolicy.targetPct;
     const baseQty=qty;
     // v1106 (owner): the day-1 time-exit ADVICE went with the Action column - the trading surface
     // carries no instructions. The evidence behind it is unchanged and lives in Methodology.
+    const radarScore=isFinite(Number(scannerRow?.score))?Number(scannerRow.score):null;
+    const radarRank=Number.isFinite(Number(scannerRow?.rank))?Number(scannerRow.rank):null;
     rows.push({
-      sym:pos.symbol,qty,avg,ltp,pnlPct,pnlRs,capital,daysHeld,targetPrice,stopPrice,targetPct,tapePolicy,
+      sym:pos.symbol,qty,avg,ltp,pnlPct,pnlRs,capital,daysHeld,targetPrice,stopPrice,tapeStopPrice,
+      afterCostFloor,targetPct,tapePolicy,
       signal:tapePolicy.signal,signalSort:tapePolicy.signalSort,
       flow:Number.isFinite(tapePolicy.flowPct)?+tapePolicy.flowPct.toFixed(2):null,
       baseQty,
-      score:isFinite(Number(scannerRow?.score))?Number(scannerRow.score):null,
-      rank:scannerRow?.rank??null,setup:scannerRow?.setup||'',
+      score:radarScore,rank:radarRank,
+      setup:scannerRow?.setup||'',
       dayPct:Number.isFinite(tapePolicy.price)&&tapePolicy.open>0
         ?100*(tapePolicy.price/tapePolicy.open-1):null,risk:scannerRow?.risk||'',
       pace:tapePolicy.pacePct,
@@ -6931,7 +6946,10 @@ function buildOpenPositionsPanel(query=''){
         /* c8 ignore stop */
       },
       clrFn:()=>'var(--green)'},
-    {key:'stopPrice',label:'SL ₹',align:'right',fmt:(v,row)=>v!=null?fmtINR(v)+`<span style="font-size:12px;color:var(--t3);margin-left:4px">-${Number(row.pace).toFixed(2)}%</span>`:'—',clrFn:()=>'var(--red)'},
+    {key:'stopPrice',label:'SL ₹',align:'right',fmt:(v,row)=>v!=null
+      ?`<span title="${escHtml('Manual TSL switch trigger. A sale at this tape stop is above average buy and covers estimated Zerodha CNC charges, including the DP charge. No trailing mode is changed automatically.')}">${fmtINR(v)}<span style="font-size:12px;color:var(--t3);margin-left:4px">-${Number(row.pace).toFixed(2)}%</span></span>`
+      :`<span style="color:var(--t3)" title="${escHtml('Hidden until the tape stop is above average buy and covers estimated Zerodha CNC charges. Nothing switches to TSL automatically.')}">—</span>`,
+      clrFn:v=>v==null?'var(--t3)':'var(--green)'},
     {key:'score',label:'Score/#',align:'right',bold:true,
       fmt:(v,row)=>radarScoreCell(v)+`<span style="font-size:11px;color:var(--t3)"> #${row.rank??'—'}</span>`,
       clrFn:()=>'var(--t1)'},
@@ -7007,7 +7025,9 @@ function buildOpenPositionsPanel(query=''){
   const totalPnl=rows.reduce((sum,row)=>sum+(row.pnlRs||0),0);
   const pnlColor=totalPnl>0?'var(--green)':totalPnl<0?'var(--red)':'var(--t3)';
   const shown=filterPanelRows(rows,query,row=>[row.sym,row.scannerRow?.name,row.scannerRow?.sector]);
-  const table=makeSortableTable('rank-open-positions',cols,shown,'signalSort',1,null,null,'sym');
+  // Default order is numerical confidence: higher Radar score first, then the better (lower) rank.
+  // The composite only sorts; the cell continues to display the unmodified Score/# values.
+  const table=makeSortableTable('rank-open-positions',cols,shown,'score',-1,null,null,'sym','rank',1);
   const radarNote=ALL.length
     ?'Radar context is from the current ALL NSE upload. Click a symbol for its scoring breakdown.'
     :'Load ALL NSE.csv to add Radar score, rank, setup, day change, and risk.';
@@ -7017,7 +7037,7 @@ function buildOpenPositionsPanel(query=''){
         <span style="font-size:13px;font-weight:800;color:var(--t1);text-transform:uppercase;letter-spacing:.08em">Open Positions${panelFilterTag(rows,shown,query)}</span>
         <span style="font-size:14px;font-weight:700;color:${pnlColor}">${rows.length} live position${rows.length===1?'':'s'} · ${fmtINR(totalCapital)} deployed · ${fmtSignedINR(totalPnl)}</span>
       </div>
-      <div style="font-size:14px;color:var(--t2);line-height:1.5">Live merge of Holdings, Positions, and today's net buys. Buy/Sell/Hold and every order level come only from 5-minute price-volume pressure. Pace and EoD use completed candles; a fresh high whose partial candle volume already reaches this stock's own top quartile can pull Target to the live tape price. ALL NSE score, rank and risk are optional recommendation context and never move these position numbers. ${radarNote}</div>
+      <div style="font-size:14px;color:var(--t2);line-height:1.5">Live merge of Holdings, Positions, and today's net buys. Rows default to highest numerical Radar confidence (Score, then better Rank). Buy/Sell/Hold and every order level come only from 5-minute price-volume pressure. Pace and EoD use completed candles; a fresh high whose partial candle volume already reaches this stock's own top quartile can pull Target to the live tape price. ALL NSE score, rank and risk are optional recommendation context and never move these position numbers. ${radarNote}</div>
     </div>
     ${shown.length?`<div class="scroll-x">${table.getHtml()}</div>`:panelNoMatchHtml(query,'open position')}
   </div>`;
@@ -7328,17 +7348,6 @@ function renderPerformance(){
       <div style="overflow:auto${maxH?';max-height:'+maxH:''}">${content}</div>
     </div>`;
 
-  const _navLink=(id,label,show)=>show?`<a href="#${id}" onclick="event.preventDefault();scrollToSection('${id}')" style="padding:4px 12px;border-radius:6px;background:var(--bg-card);border:1px solid var(--border);color:var(--t2);font-size:13px;font-weight:600;text-decoration:none;cursor:pointer;white-space:nowrap">${label}</a>`:'';
-  const perfNav=`<nav style="position:sticky;top:var(--hdr-h,72px);z-index:50;background:var(--bg);padding:8px 0 10px;margin-bottom:8px;display:flex;gap:6px;flex-wrap:wrap;border-bottom:1px solid var(--border);box-shadow:0 2px 8px rgba(0,0,0,0.3);overflow-x:auto;-webkit-overflow-scrolling:touch">
-    ${_navLink('perf-guide','🧭 How It Connects',true)}
-    ${_navLink('perf-kpi','📊 KPIs',true)}
-    ${_navLink('perf-scorecard','🎯 System Scorecard',true)}
-    ${_navLink('perf-monthly','📅 Monthly',monthRows.length>0)}
-    ${_navLink('perf-trade-windows','🕐 Time-of-day Outcomes',hasTradeWindows)}
-    ${_navLink('perf-hold-duration','⏳ How Long to Hold',hasHold)}
-    ${_navLink('perf-exit-windows','🚪 Exit-time Give-back',hasExitWindows)}
-    ${_navLink('perf-stocks','📈 Stocks',p.symBreakdown.length>0)}
-  </nav>`;
   // v1106 (owner): the Recommendation Outcome Feedback panel is gone from Performance. The
   // RECORDING is untouched - rs_recommend_outcomes_delta_v1 still carries every pick's v1085
   // rocket label and is what Leg 2 of the post-close routine grades. Only the readout is removed.
@@ -7390,37 +7399,17 @@ function renderPerformance(){
     ${sc.legacy?`<br>${sc.legacy} older picks carry no recorded target/stop (they predate v1094) and can never resolve, so they are excluded from every percentage above rather than counted as failures.`:''}
   </div>`;
 
-  const activeBoosts=activePostCloseTriggerRules('boost').length;
-  const activeGates=activePostCloseTriggerRules('gate').length;
-  const activeVetos=activePostCloseTriggerRules('veto-on-retired').length;
-  const decidedTriggers=activeBoosts+activeGates+activeVetos;
-  const performanceGuide=`<section id="perf-guide" style="margin:0 0 16px;padding:14px 16px;border-top:1px solid var(--border);border-bottom:1px solid var(--border);background:linear-gradient(90deg,rgba(99,102,241,.08),transparent)">
-    <div style="font-size:13px;font-weight:800;color:var(--t1);text-transform:uppercase;letter-spacing:.08em;margin-bottom:8px">How Performance Connects — What Changes Live Decisions</div>
-    <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(230px,1fr));gap:14px;font-size:13px;line-height:1.55;color:var(--t2)">
-      <div><b style="color:var(--t1)">Realized trades are descriptive.</b><br>The KPI, monthly, stock, holding-time and exit-time sections explain execution results from ${p.roundTrips} closed lots. Trade history may calibrate charges, fallback stop, review horizon and entry cadence; it does not set automatic target magnitude.</div>
-      <div><b style="color:var(--t1)">Forward recommendation cohorts can change ranking, gates, and vetoes.</b><br>The System Scorecard grades picks exactly as issued, target-before-stop within ${ROCKET_HORIZON_DAYS} sessions. Mature feature effects, Indicator Watch corrections and the post-close tracker are the learning path; ${decidedTriggers} post-close trigger${decidedTriggers===1?' is':'s are'} active now (${activeBoosts} boost · ${activeGates} gate · ${activeVetos} veto).</div>
-      <div><b style="color:var(--t1)">Automatic target magnitude comes from market data.</b><br>Each row reads its own 5-minute tape where available, otherwise its session ceiling, otherwise its range capacity, bounded by its NSE circuit and capacity. The portfolio goal/harvest rate is an economic hurdle; a typed manual anchor remains the explicit override.</div>
-      <div><b style="color:var(--t1)">Diagnostics do not become advice by themselves.</b><br>Time-of-day, holding-duration and exit-give-back tables expose patterns and confounding. They change no order directly. Current recommendations still require the Methodology funnel: direction, eligibility, viability, score/rank, and a current confirmed 5-minute read.</div>
-    </div>
-  </section>`;
-
   el.innerHTML=`
     <div style="padding:12px 16px">
-      ${perfNav}
       ${periodPillsHtml}
       <div style="font-size:12px;color:var(--t3);margin-bottom:12px">${periodLabel} · ${p.roundTrips} lots</div>
-      ${performanceGuide}
       <div id="perf-kpi">${kpiHtml}</div>
       ${perfCard('System Scorecard — did the picks reach target? <span style="font-size:12px;color:var(--t3);font-weight:400">'+sc.cohorts+' cohorts · target-before-stop within '+ROCKET_HORIZON_DAYS+' trading days</span>',scHeadline+scTbl.getHtml()+bandTable+scNote,'','perf-scorecard')}
       ${monthRows.length?perfCard('Monthly Breakdown',monthTbl.getHtml(),'','perf-monthly'):''}
-      ${hasHold?perfCard(`How Long to Hold — Diagnostic Only <span style="font-size:12px;color:var(--t3);font-weight:400">${holdModel.trips} closed lots · hold length is CHOSEN, not assigned, so a slow bucket is partly "trades that needed longer" — descriptive, never a recommendation rule</span>`,
-        `<div style="padding:10px 16px;font-size:13px;color:var(--t2);border-bottom:1px solid var(--border);line-height:1.5">${holdVerdict}</div>`+holdTbl.getHtml(),'','perf-hold-duration'):''}
-      ${hasExitWindows?perfCard(`Exit-time Give-back — Diagnostic Only <span style="font-size:12px;color:var(--t3);font-weight:400">${exitModel.exits} exits · same-day figure needs the watch recorder (${exitModel.sameDayCoverage} covered), forward figure needs stored price history (${exitModel.horizonCoverage} covered) · forward window fixed at ${exitModel.horizon} session${exitModel.horizon===1?'':'s'} (the learned review horizon) so every window is comparable · a positive figure is money the stock went on to make without you · descriptive, never a recommendation rule</span>`,exitTbl.getHtml(),'','perf-exit-windows'):''}
-      ${hasTradeWindows?perfCard(`Time-of-day Outcomes — Diagnostic Only <span style="font-size:12px;color:var(--t3);font-weight:400">${timingModel.episodeCount} distinct entries · ${timingModel.entryDays} entry days · clock windows only · descriptive, never a recommendation rule</span>`,timingTbl.getHtml(),'','perf-trade-windows'):''}
       ${p.symBreakdown.length?perfCard('Stocks',symTbl.getHtml(),'360px','perf-stocks'):''}
     </div>`;
 
-  setTimeout(()=>{monthTbl.render();symTbl.render();timingTbl.render();exitTbl.render();holdTbl.render();scTbl.render();},0);
+  setTimeout(()=>{monthTbl.render();symTbl.render();scTbl.render();},0);
 }
 
 function schedulePerformanceRender(){
@@ -8161,7 +8150,10 @@ function maxReachableAnchorPct(){
 function getActiveTargetInfo(){
   const harvest=computeHarvestPlan().targetPct;
   const goal=getGoalLedTargetPct();
-  const auto=(goal!=null&&goal<harvest)?{tgtPct:goal,source:'goal'}:{tgtPct:harvest,source:'harvest'};
+  // Goal is the user's declared economic requirement, so it owns the automatic anchor whenever
+  // it can resolve. Harvest is evidence about reachable moves and remains the fallback, not a
+  // competing 2.5% cap that can silently mask a changing Goal.
+  const auto=goal!=null?{tgtPct:goal,source:'goal'}:{tgtPct:harvest,source:'harvest'};
   const manual=parseFloat(document.getElementById('fTgtOverride')?.value);
   if(Number.isFinite(manual)&&manual>0&&manual<=maxReachableAnchorPct())
     return {tgtPct:manual,source:'manual',harvestPct:harvest,goalPct:goal,autoPct:auto.tgtPct};
@@ -8170,7 +8162,7 @@ function getActiveTargetInfo(){
 function getDefaultTgtPct(){
   const harvest=computeHarvestPlan().targetPct;
   const goal=getGoalLedTargetPct();
-  return (goal!=null&&goal<harvest)?goal:harvest;
+  return goal!=null?goal:harvest;
 }
 function getEffectiveTgtPct(){
   return getActiveTargetInfo().tgtPct;
@@ -8800,6 +8792,26 @@ function getPositionFlowRead(rd){
   const tt=rd&&rd.current?(rd.todayTraj||rd.traj):null;
   return {tt,span:(rd&&tt&&!rd.todayTraj&&rd.sessions>0)?(' across '+rd.sessions+' sessions'):''};
 }
+
+// First valid NSE tick whose eventual CNC sale leaves a positive result after both Zerodha legs.
+// This is position-specific because the fixed DP charge matters much more on a small holding.
+function getPositionAfterCostFloor(avgPrice,qty){
+  avgPrice=Number(avgPrice);qty=Math.abs(Number(qty)||0);
+  if(!(avgPrice>0)||!(qty>0)) return null;
+  const buyDebit=avgPrice*qty+calcZerodhaCharges(avgPrice,qty,false,false,false);
+  const netAt=price=>price*qty-calcZerodhaCharges(price,qty,true,false,false)-buyDebit;
+  let hi=avgPrice+Math.max(0.05,avgPrice*0.01);
+  for(let i=0;i<24&&netAt(hi)<=0;i++) hi=avgPrice+(hi-avgPrice)*2;
+  if(netAt(hi)<=0) return null;
+  let lo=avgPrice;
+  for(let i=0;i<48;i++){
+    const mid=(lo+hi)/2;
+    if(netAt(mid)>0) hi=mid; else lo=mid;
+  }
+  let tick=+(Math.ceil((hi-1e-9)/0.05)*0.05).toFixed(2);
+  while(netAt(tick)<=0) tick=+(tick+0.05).toFixed(2);
+  return tick;
+}
 function getLegacyPositionAction(sym,pos){
   const s=(Array.isArray(ALL)?ALL:[]).find(r=>normSym(r.symbol)===normSym(sym))||null;
   const qty=Number(pos&&pos.qty)||0;
@@ -8960,11 +8972,14 @@ function getOpenPositionTargetFloor(sym,pos){
   const anchorPct=Number(active?.tgtPct)>0?Number(active.tgtPct):null;
   const raw=anchorPct!=null?avgPrice*(1+anchorPct/100):avgPrice+0.05;
   const nextTick=+((Math.floor((avgPrice+1e-9)/0.05)+1)*0.05).toFixed(2);
-  const price=Math.max(nextTick,tickPrice(raw));
+  const anchorPrice=Math.max(nextTick,tickPrice(raw));
+  const costFloorPrice=getPositionAfterCostFloor(avgPrice,Number(pos?.qty));
+  const price=Math.max(anchorPrice,costFloorPrice||0);
   const source=active?.source==='manual'?'manual Target Anchor'
     :active?.source==='goal'?'goal-led Target Anchor'
     :active?.source==='harvest'?'Harvest Target Anchor':'minimum profit tick';
-  return {avgPrice,price:+price.toFixed(2),anchorPct,source};
+  return {avgPrice,price:+price.toFixed(2),anchorPrice:+anchorPrice.toFixed(2),
+    costFloorPrice,anchorPct,source};
 }
 function getOpenPositionTapePolicy(sym,pos){
   const s=normSym(sym||pos?.symbol||'');
@@ -9054,11 +9069,13 @@ function getOpenPositionTapePolicy(sym,pos){
   const floorBound=!!(targetFloor&&targetFloor.price>tapeTargetPrice);
   const targetWhy=targetFloor
     ?(floorBound
-      ?'The 5-minute tape level '+fmtINR(tapeTargetPrice)+' was below average buy '+fmtINR(targetFloor.avgPrice)
+      ?'The 5-minute tape level '+fmtINR(tapeTargetPrice)+' was below the required profit floor from average buy '+fmtINR(targetFloor.avgPrice)
         +'; Target is held at '+targetFloor.source
-        +(targetFloor.anchorPct!=null?' (+'+targetFloor.anchorPct.toFixed(2)+'%)':'')+'.'
+        +(targetFloor.anchorPct!=null?' (+'+targetFloor.anchorPct.toFixed(2)+'%)':'')
+        +(targetFloor.costFloorPrice!=null?'; the after-cost profit floor is '+fmtINR(targetFloor.costFloorPrice):'')+'.'
       :'The 5-minute tape supports '+fmtINR(tapeTargetPrice)+', at or above the '+targetFloor.source
-        +' profit floor from average buy '+fmtINR(targetFloor.avgPrice)+'.')
+        +' profit floor from average buy '+fmtINR(targetFloor.avgPrice)
+        +(targetFloor.costFloorPrice!=null?'; the after-cost minimum is '+fmtINR(targetFloor.costFloorPrice):'')+'.')
     :'Average buy is unavailable, so the displayed level comes only from the 5-minute tape.';
   const paceRs=pacePct!=null&&hi>0?hi*pacePct/100:null;
   const reason=liveHarvest
@@ -9079,6 +9096,7 @@ function getOpenPositionTapePolicy(sym,pos){
     completedAsOf:last.t,
     targetPrice,targetPct,tapeTargetPrice,
     targetFloorPrice:targetFloor?.price||null,targetFloorPct:targetFloor?.anchorPct??null,
+    targetCostFloorPrice:targetFloor?.costFloorPrice||null,
     targetAvgPrice:targetFloor?.avgPrice||null,targetFloorSource:targetFloor?.source||null,targetWhy,
     stopPrice,pacePct,paceRs,
     eodPct,eodPrice:eodPrice>0?tickPrice(eodPrice):null,
