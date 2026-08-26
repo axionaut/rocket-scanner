@@ -1,5 +1,5 @@
-const BUILD_TS='2026-08-26 16:06 IST'; // release build time (IST)
-const APP_VERSION=1224; // v1224: Goal owns the auto Target Anchor; profitable SL display; simpler Performance.
+const BUILD_TS='2026-08-26 16:27 IST'; // release build time (IST)
+const APP_VERSION=1225; // v1225: honest Post-close authority; recover configured surveillance labels.
 // v1093: a baseline reward:risk MEASURED on the cross-section (last completed bhav session) instead of learned from the owner's own fills - reported on every row, deliberately not enforced. Includes v1092: position size split by Radar score / stop distance, so equally-scored names carry equal RUPEE risk, plus an opt-in Risk /trade cap.
 // v556: parse the NSE Market Activity Report (MA<date>.csv) — official Nifty %, advances/declines and sector index moves shown as market CONTEXT in the status bar (EOD data, display only, never fed into per-row scoring); MA added to the ℹ️ file manifest.
 // v555 market-cycle stage awareness (stateless, self-calibrating): per-row stage label (1 accumulation · 2 breakout · 3 event · 4 profit-booking · 5 re-accumulation · 6 second-leg); a quiet-accumulation signal (conjunction-of-percentiles) injected via the rocket-diagnostic weighting; sell-the-news decay off Recent earnings date (horizon = review days). v1065 makes the market-breadth gauge an entry-eligibility input while still never changing ranking.
@@ -10274,10 +10274,25 @@ function renderRankingsPanels(){
     positions.table?.render();
   }
 }
-// Map configured-surveillance rule keys → their human labels.
-function survRuleLabels(keys){
-  const map=new Map((SURV_CUSTOM_RULES||[]).map(r=>[r.key,r.label]));
-  return (keys||[]).map(k=>map.get(k)||k);
+// Map configured-surveillance rule keys → their human labels. A removed row can outlive the exact
+// in-memory key array that created it (Drive/settings refresh), so recover through the stock's raw
+// REG1 columns before ever falling back to a generic reason.
+function survRuleLabels(keys,symbol=''){
+  const rules=getSurvRules();
+  const byKey=new Map(rules.map(r=>[r.key,r.label||r.column]));
+  const labels=[];
+  const add=v=>{v=String(v||'').trim();if(v&&!labels.includes(v))labels.push(v);};
+  (keys||[]).forEach(k=>{
+    const raw=String(k||'').trim(),key=survRuleKey(raw);
+    add(byKey.get(raw)||byKey.get(key)||raw);
+  });
+  if(!labels.length&&symbol){
+    const hitCols=Object.keys(SURV_ALL_HITS[normSym(symbol)]||{});
+    rules.forEach(rule=>{
+      if(hitCols.some(col=>survRuleKey(col)===rule.key)) add(rule.label||rule.column);
+    });
+  }
+  return labels;
 }
 function buildRemovedPanel(query=''){
   const all=[...REMOVED_ROWS].sort((a,b)=>(a.s.rank??1e9)-(b.s.rank??1e9));
@@ -10306,7 +10321,7 @@ function buildRemovedPanel(query=''){
         ?`<span style="font-size:11px;background:rgba(148,163,184,.12);color:var(--t2);border:1px solid rgba(148,163,184,.28);border-radius:5px;padding:1px 7px;white-space:nowrap" title="${escHtml(r.detail||'')}">🚫 Cannot allocate</span>`
       :r.reason==='peak'
         ?`<span style="font-size:11px;background:rgba(245,158,11,.12);color:var(--amber);border:1px solid rgba(245,158,11,.3);border-radius:5px;padding:1px 7px;white-space:nowrap" title="${escHtml(r.s.entryTiming?.reason||'Entry timing is not confirmed')} · range location ${fmt(r.s.entryTiming?.rangeLocation,0)}% · expected range used ${fmt(r.s.entryTiming?.rangeUsed,0)}%${r.s.entryTiming?.pullbackPrice?` · wait near/below ${fmtINR(r.s.entryTiming.pullbackPrice)}`:''}">⏳ ${escHtml(r.s.entryTiming?.action||'Wait for confirmation')}</span>`
-        :(()=>{const labels=survRuleLabels(r.rules);return `<span style="font-size:11px;background:rgba(239,68,68,.12);color:var(--red);border:1px solid rgba(239,68,68,.25);border-radius:5px;padding:1px 7px;white-space:nowrap" title="Configured surveillance rule(s): ${escHtml(labels.join(' · '))}">⚠ ${escHtml(labels[0]||'surveillance')}${labels.length>1?` +${labels.length-1}`:''}</span>`;})();
+        :(()=>{const labels=survRuleLabels(r.rules,s.symbol);const shown=labels.length?labels:['Configured REG1 surveillance flag'];return `<span style="font-size:11px;background:rgba(239,68,68,.12);color:var(--red);border:1px solid rgba(239,68,68,.25);border-radius:5px;padding:1px 7px;white-space:nowrap" title="Configured surveillance rule(s): ${escHtml(shown.join(' · '))}">⚠ ${escHtml(shown[0])}${shown.length>1?` +${shown.length-1}`:''}</span>`;})();
     // Same interaction as every other stock table (owner, v1070): the NAME opens the
     // TradingView chart, the ROW opens the Radar scoring breakdown.
     return `<tr onclick="showRadarDetail('${s.symbol}')" title="Click for the full scoring breakdown" style="border-bottom:1px solid var(--border);cursor:pointer">
@@ -10385,6 +10400,16 @@ function renderPostClose(){
   const afterClose=clock.mins>=DAY_END_MIN;
   const scorecard=store.scorecard||getPostCloseRuleScorecard(store.audits||{});
   const gs=store.gainerScorecard||getGainerScorecard(store.gainers||{});
+  // Live authority reads ONLY the pick scorecard. The independent gainer stream is discovery
+  // evidence: useful, visible, and explicitly diagnostic until it is deliberately promoted.
+  const liveBoosts=activePostCloseTriggerRules('boost');
+  const liveGates=activePostCloseTriggerRules('gate');
+  const liveVetos=activePostCloseTriggerRules('veto-on-retired');
+  const liveByKey=new Map([
+    ...liveBoosts.map(x=>[x.definition.key,{label:'RANK BOOST',kind:'armed'}]),
+    ...liveGates.map(x=>[x.definition.key,{label:'REQUIRED GATE',kind:'armed'}]),
+    ...liveVetos.map(x=>[x.definition.key,{label:'VETO',kind:'retired'}]),
+  ]);
   const gToday=store.gainers?.[today]||null;
   const n2=(v,d=2)=>v==null||!Number.isFinite(v)?'—':Number(v).toFixed(d);
   const pp=v=>v==null?'—':(v>=0?'+':'')+v+'pp';
@@ -10394,7 +10419,7 @@ function renderPostClose(){
   // a completed audit; it is an issued one still inside its two-session window.
   const issued=audit?.issued??0, resolved=audit?.resolved??0, pending=audit?.pending??0;
   const state=!audit?(afterClose?{t:'Waiting for a refreshed post-close ALL NSE.csv',c:'var(--amber)'}
-                                :{t:'Arms automatically at 16:00 IST',c:'var(--t3)'})
+                                :{t:'Audit runs automatically at 16:00 IST',c:'var(--t3)'})
     :resolved===0?{t:'Issued for '+today+' — nothing resolved yet, '+pending+' still inside their window',c:'var(--amber)'}
     :pending>0?{t:'Partly graded for '+today+' — '+resolved+' of '+issued+' resolved, '+pending+' pending',c:'var(--amber)'}
     :{t:'Fully graded for '+today,c:'var(--green)'};
@@ -10407,12 +10432,12 @@ function renderPostClose(){
   const merged=scorecard.map(r=>({p:r,g:gsBy[r.key]||{}}))
     .filter(x=>x.p.sessions>0||x.g.sessions>0);
   const dormant=scorecard.length-merged.length;
-  const rank=x=>(x.p.status==='ARMED'||x.g.status==='ARMED')?0
-    :(x.p.status==='RETIRED'||x.g.status==='RETIRED')?1:2;
+  const rank=x=>liveByKey.has(x.p.key)?0
+    :(x.g.status==='ARMED'||x.g.status==='RETIRED')?1:2;
   merged.sort((a,b)=>rank(a)-rank(b)||Math.abs(b.p.t||0)-Math.abs(a.p.t||0));
-  const badge=(st,why)=>{
+  const badge=(st,why,label=st)=>{
     const k=st==='ARMED'?'armed':st==='RETIRED'?'retired':'collecting';
-    return '<span class="pc-status pc-status--'+k+'">'+st+'</span>'
+    return '<span class="pc-status pc-status--'+k+'">'+escHtml(label)+'</span>'
       +(why?'<div class="pc-status-why">'+escHtml(why)+'</div>':'');
   };
   const liftCell=(v,t)=>{
@@ -10423,15 +10448,23 @@ function renderPostClose(){
   };
   const trackerRows=merged.map(x=>{
     const p=x.p,g=x.g;
-    const shown=(p.status==='COLLECTING'&&g.status&&g.status!=='COLLECTING')?g.status:p.status;
+    const effect=liveByKey.get(p.key)||null;
+    const effectHtml=effect
+      ?badge(effect.kind==='retired'?'RETIRED':'ARMED','',effect.label)
+        +'<div class="pc-status-why">pick evidence '+escHtml(p.status.toLowerCase())+'</div>'
+      :badge('COLLECTING',p.why||'', 'NO LIVE EFFECT')
+        +'<div class="pc-status-why">pick evidence '+escHtml((p.status||'COLLECTING').toLowerCase())+'</div>';
+    const gStatus=g.status||'COLLECTING';
+    const gHtml=badge(gStatus,gStatus==='COLLECTING'?(g.why||''):'' ,'DIAGNOSTIC '+gStatus);
     return '<tr>'
       +'<td>'+escHtml(p.label)+'</td>'
       +'<td class="num"><span class="pc-cell-main">'+(p.sessions||'—')+'</span>'
         +'<div class="pc-cell-sub">'+(p.total||0)+' picks</div></td>'
       +'<td class="num">'+liftCell(p.meanLift,p.t)+'</td>'
+      +'<td>'+effectHtml+'</td>'
       +'<td class="num"><span class="pc-cell-main">'+(g.sessions||'—')+'</span></td>'
       +'<td class="num">'+liftCell(g.meanLift,g.t)+'</td>'
-      +'<td>'+badge(shown,shown==='COLLECTING'?(p.why||g.why||''):'')+'</td>'
+      +'<td>'+gHtml+'</td>'
       +'</tr>';
   }).join('');
 
@@ -10477,8 +10510,8 @@ function renderPostClose(){
   })();
 
   const rss=NSE_FUNDAMENTAL_META,events=Object.values(NSE_FUNDAMENTALS).reduce((n,a)=>n+(a?.length||0),0);
-  const armed=merged.filter(x=>x.p.status==='ARMED'||x.g.status==='ARMED').length;
-  const retired=merged.filter(x=>x.p.status==='RETIRED'||x.g.status==='RETIRED').length;
+  const gArmed=merged.filter(x=>x.g.status==='ARMED').length;
+  const gRetired=merged.filter(x=>x.g.status==='RETIRED').length;
   const rssText=rss?.ok
     ? events+' symbol-linked filing events from '+(rss.feeds||0)+' official RSS indexes; '
       +(rss.financials?.parsed||0)+' of '+(rss.financials?.attempted||0)+' result XBRLs parsed; snapshot '
@@ -10498,17 +10531,17 @@ function renderPostClose(){
     +'</div></section>'
     +'<section class="m-card pc-card">'
     +'<div class="pc-section-head"><h3 class="pc-section-title">Condition tracker</h3>'
-    +'<div class="pc-counts"><b style="color:var(--green)">'+armed+'</b> armed · <b style="color:var(--red)">'+retired
-    +'</b> retired · '+(merged.length-armed-retired)+' collecting'+(dormant?' · '+dormant+' not yet scored':'')+'</div></div>'
-    +'<p class="pc-copy">Each condition is measured against <b>the cohort’s own base rate for that session</b> on two independent streams: resolved picks and the day’s biggest gainers, whether or not the board held them. Lift is the gap in percentage points. A condition arms when lift is reliably positive — |t| past '
-    +postCloseTCrit()+' — and retires into an automatic veto when reliably negative.</p>'
+    +'<div class="pc-counts"><b style="color:var(--t1)">LIVE NOW:</b> <b style="color:var(--green)">'+liveBoosts.length+'</b> rank boosts · <b style="color:var(--green)">'+liveGates.length+'</b> gates · <b style="color:var(--red)">'+liveVetos.length+'</b> vetoes<br>'
+    +'<span style="color:var(--t3)">Gainer evidence only: '+gArmed+' armed · '+gRetired+' retired · '+(merged.length-gArmed-gRetired)+' collecting'+(dormant?' · '+dormant+' not yet scored':'')+'</span></div></div>'
+    +'<p class="pc-copy">Each condition is measured against <b>the cohort’s own base rate for that session</b> on two independent streams. <b>Only resolved-pick evidence can change live ranking, gates, or vetoes.</b> The day’s biggest-gainer stream discovers patterns the board may have missed, but its ARMED/RETIRED labels are diagnostic and have no live authority. Lift is the gap in percentage points; the evidence bar is |t| past '
+    +postCloseTCrit()+'.</p>'
     +'<div class="pc-table-wrap"><table class="pc-table pc-table--tracker"><thead><tr>'
     +'<th>Condition</th><th class="num">Pick sessions</th><th class="num">Lift vs base</th>'
-    +'<th class="num">Gainer sessions</th><th class="num">Lift vs market</th><th>Status</th>'
-    +'</tr></thead><tbody>'+(trackerRows||'<tr><td colspan="6" style="color:var(--t3)">No condition has been scored by an audited session yet.</td></tr>')+'</tbody></table></div></section>'
+    +'<th>Live effect</th><th class="num">Gainer sessions</th><th class="num">Lift vs market</th><th>Gainer evidence</th>'
+    +'</tr></thead><tbody>'+(trackerRows||'<tr><td colspan="7" style="color:var(--t3)">No condition has been scored by an audited session yet.</td></tr>')+'</tbody></table></div></section>'
     +gCard
     +'<section class="m-card pc-card pc-fundamental"><div class="pc-fundamental-icon">▦</div><div><h3>Official NSE fundamental triggers</h3><p>'+rssText
-    +' A fresh result becomes positive only when revenue, profit, operating profit and audit quality pass and price confirms above VWAP and the open. Rank authority arms on the evidence bar above; a persistently losing negative-result cohort becomes an automatic veto.</p></div></section>'
+    +' A fresh result becomes positive only when revenue, profit, operating profit and audit quality pass and price confirms above VWAP and the open. Only the resolved-pick stream can grant this condition live rank authority or turn a persistently losing negative-result condition into a veto; gainer evidence remains diagnostic.</p></div></section>'
     +'</div>';
 }
 
