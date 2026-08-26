@@ -1,5 +1,5 @@
-const BUILD_TS='2026-08-25 10:27 IST'; // release build time (IST)
-const APP_VERSION=1222; // v1222: Open Position Target stays above buy average; SL owns downside.
+const BUILD_TS='2026-08-26 15:33 IST'; // release build time (IST)
+const APP_VERSION=1223; // v1223: wait through falling/extended tape; held ADD requires a live BUY.
 // v1093: a baseline reward:risk MEASURED on the cross-section (last completed bhav session) instead of learned from the owner's own fills - reported on every row, deliberately not enforced. Includes v1092: position size split by Radar score / stop distance, so equally-scored names carry equal RUPEE risk, plus an opt-in Risk /trade cap.
 // v556: parse the NSE Market Activity Report (MA<date>.csv) — official Nifty %, advances/declines and sector index moves shown as market CONTEXT in the status bar (EOD data, display only, never fed into per-row scoring); MA added to the ℹ️ file manifest.
 // v555 market-cycle stage awareness (stateless, self-calibrating): per-row stage label (1 accumulation · 2 breakout · 3 event · 4 profit-booking · 5 re-accumulation · 6 second-leg); a quiet-accumulation signal (conjunction-of-percentiles) injected via the rocket-diagnostic weighting; sell-the-news decay off Recent earnings date (horizon = review days). v1065 makes the market-breadth gauge an entry-eligibility input while still never changing ranking.
@@ -3297,6 +3297,7 @@ function meetsRecommendationBar(s){
   if(!s) return false;
   if(s.recommendationTriggerBlocked===true)return false;
   if(s.noHistory===true) return false;   // v1170: no multi-day history, so nothing to rank it on
+  if(s.entryReady===false) return false; // a consumed/failed move is not made buyable by a strong setup
   if(s.intradaySellingToday===true) return false;
   const rank=Number(s.rank);
   return isGreenScore(s.score)&&Number.isFinite(rank)&&rank<=timingDepth().depth;
@@ -3847,6 +3848,22 @@ function applyIntradayReorder(rows){
       const cr=_tt.costRatio;
       const sold=_tt.cvdPct<0;
       const thin=Number.isFinite(cr)&&cr>0&&cr<getIntradayThinCut();
+      // Positive whole-session CVD can outlive the move that created it. A fresh entry waits until
+      // recent price and flow are rising together and pressure is actually converting. This is an
+      // entry veto, not an exit: distribution/absorption may still be HOLD for capital already in.
+      const converting=_tt.pressureConverting!==false;
+      const accumulating=_tt.regime==='accumulating'&&converting
+        &&Number.isFinite(_tt.pressurePct)&&_tt.pressurePct>0
+        &&_tt.priceSlope>0&&_tt.flowSlope>0;
+      if(!sold&&!thin&&!accumulating){
+        r.intradayVerdict='rejected';
+        r.intradayWhy='wait - recent tape is '+_tt.regime
+          +(!converting?', and pressure is not converting into price':'')
+          +(r._held?'; existing position is not a BUY, so do not ADD':'')
+          +'; re-check after price and flow turn together';
+        r.intradaySellingToday=true;
+        return;
+      }
       if(sold||thin){
         r.intradayVerdict='rejected';
         r.intradayWhy=(sold?('being sold today - net flow '+(100*_tt.cvdPct).toFixed(1)+'% of this session')
@@ -10171,7 +10188,11 @@ function applyFilters(){
       REMOVED_ROWS.push({s,reason:'trigger',detail:'automatic evidence trigger: '+(s.recommendationTriggerReasons||[]).join(', ')});
       return false;
     }
-    if(s.entryReady===false)PEAK_TIMING_REMOVED++;
+    if(s.entryReady===false){
+      PEAK_TIMING_REMOVED++;
+      REMOVED_ROWS.push({s,reason:'peak',detail:s.entryTiming?.reason||'move is extended or has not re-armed'});
+      return false;
+    }
     const _vw=Number(s.vwap), _px=Number(s.price), _co=Number(s.changeOpen), _day=Number(s.day);
     const _aboveVwap=_vw>0&&_px>=_vw;
     const _aboveOpen=Number.isFinite(_co)&&_co>0;
