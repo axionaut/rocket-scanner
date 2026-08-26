@@ -1,5 +1,5 @@
-const BUILD_TS='2026-08-26 16:27 IST'; // release build time (IST)
-const APP_VERSION=1225; // v1225: honest Post-close authority; recover configured surveillance labels.
+const BUILD_TS='2026-08-26 16:40 IST'; // release build time (IST)
+const APP_VERSION=1226; // v1226: every removal is described by the mechanism that actually made it.
 // v1093: a baseline reward:risk MEASURED on the cross-section (last completed bhav session) instead of learned from the owner's own fills - reported on every row, deliberately not enforced. Includes v1092: position size split by Radar score / stop distance, so equally-scored names carry equal RUPEE risk, plus an opt-in Risk /trade cap.
 // v556: parse the NSE Market Activity Report (MA<date>.csv) — official Nifty %, advances/declines and sector index moves shown as market CONTEXT in the status bar (EOD data, display only, never fed into per-row scoring); MA added to the ℹ️ file manifest.
 // v555 market-cycle stage awareness (stateless, self-calibrating): per-row stage label (1 accumulation · 2 breakout · 3 event · 4 profit-booking · 5 re-accumulation · 6 second-leg); a quiet-accumulation signal (conjunction-of-percentiles) injected via the rocket-diagnostic weighting; sell-the-news decay off Recent earnings date (horizon = review days). v1065 makes the market-breadth gauge an entry-eligibility input while still never changing ranking.
@@ -10304,6 +10304,8 @@ function buildRemovedPanel(query=''){
   const peakN=all.filter(r=>r.reason==='peak').length;
   const allocN=all.filter(r=>r.reason==='alloc').length;
   const triggerN=all.filter(r=>r.reason==='trigger').length;
+  const flowN=all.filter(r=>r.reason==='flow').length;
+  const nohistN=all.filter(r=>r.reason==='nohistory').length;
   const shown=filterPanelRows(all,query,r=>[r.s.symbol,r.s.name,r.s.sector]);
   const CAP=100;
   const view=shown.slice(0,CAP);
@@ -10319,9 +10321,15 @@ function buildRemovedPanel(query=''){
       ?`<span style="font-size:11px;background:rgba(244,114,182,.12);color:#f472b6;border:1px solid rgba(244,114,182,.25);border-radius:5px;padding:1px 7px;white-space:nowrap">📌 Held · in Open Positions</span>`
       :r.reason==='alloc'
         ?`<span style="font-size:11px;background:rgba(148,163,184,.12);color:var(--t2);border:1px solid rgba(148,163,184,.28);border-radius:5px;padding:1px 7px;white-space:nowrap" title="${escHtml(r.detail||'')}">🚫 Cannot allocate</span>`
+      :r.reason==='flow'
+        ?`<span style="font-size:11px;background:rgba(239,68,68,.12);color:var(--red);border:1px solid rgba(239,68,68,.25);border-radius:5px;padding:1px 7px;white-space:nowrap" title="${escHtml(r.detail||'')}">📊 Current tape rejects it</span>`
+      :r.reason==='nohistory'
+        ?`<span style="font-size:11px;background:rgba(148,163,184,.10);color:var(--t2);border:1px solid rgba(148,163,184,.22);border-radius:5px;padding:1px 7px;white-space:nowrap" title="${escHtml(r.detail||'')}">🆕 No price history to rank it on</span>`
       :r.reason==='peak'
         ?`<span style="font-size:11px;background:rgba(245,158,11,.12);color:var(--amber);border:1px solid rgba(245,158,11,.3);border-radius:5px;padding:1px 7px;white-space:nowrap" title="${escHtml(r.s.entryTiming?.reason||'Entry timing is not confirmed')} · range location ${fmt(r.s.entryTiming?.rangeLocation,0)}% · expected range used ${fmt(r.s.entryTiming?.rangeUsed,0)}%${r.s.entryTiming?.pullbackPrice?` · wait near/below ${fmtINR(r.s.entryTiming.pullbackPrice)}`:''}">⏳ ${escHtml(r.s.entryTiming?.action||'Wait for confirmation')}</span>`
-        :(()=>{const labels=survRuleLabels(r.rules,s.symbol);const shown=labels.length?labels:['Configured REG1 surveillance flag'];return `<span style="font-size:11px;background:rgba(239,68,68,.12);color:var(--red);border:1px solid rgba(239,68,68,.25);border-radius:5px;padding:1px 7px;white-space:nowrap" title="Configured surveillance rule(s): ${escHtml(shown.join(' · '))}">⚠ ${escHtml(shown[0])}${shown.length>1?` +${shown.length-1}`:''}</span>`;})();
+        :r.reason==='surv'
+        ?(()=>{const labels=survRuleLabels(r.rules,s.symbol);const shown=labels.length?labels:['Configured REG1 surveillance flag'];return `<span style="font-size:11px;background:rgba(239,68,68,.12);color:var(--red);border:1px solid rgba(239,68,68,.25);border-radius:5px;padding:1px 7px;white-space:nowrap" title="Configured surveillance rule(s): ${escHtml(shown.join(' · '))}">⚠ ${escHtml(shown[0])}${shown.length>1?` +${shown.length-1}`:''}</span>`;})()
+        :`<span style="font-size:11px;background:rgba(148,163,184,.12);color:var(--t2);border:1px solid rgba(148,163,184,.28);border-radius:5px;padding:1px 7px;white-space:nowrap" title="${escHtml(r.detail||'No detail was recorded with this removal.')}">Removed · ${escHtml(String(r.reason||'reason not recorded'))}</span>`;
     // Same interaction as every other stock table (owner, v1070): the NAME opens the
     // TradingView chart, the ROW opens the Radar scoring breakdown.
     return `<tr onclick="showRadarDetail('${s.symbol}')" title="Click for the full scoring breakdown" style="border-bottom:1px solid var(--border);cursor:pointer">
@@ -10349,7 +10357,7 @@ function buildRemovedPanel(query=''){
   return `<div id="rank-removed-card" style="background:var(--bg-card);border:1px solid var(--border);border-radius:10px;overflow:hidden">
     <div style="padding:10px 16px;border-bottom:1px solid var(--border)">
       <span style="font-size:12px;font-weight:700;color:var(--t2);text-transform:uppercase;letter-spacing:.1em">Removed from rankings — ${all.length}${tag}</span>
-      <span style="font-size:13px;color:var(--t3);font-weight:400;margin-left:8px">${[dirN?`📉 ${dirN} not lifting off`:'',heldN?`📌 ${heldN} held`:'',survN?`⚠ ${survN} surveillance`:'',triggerN?`${triggerN} automatic trigger veto`:'',peakN?`⏳ ${peakN} waiting for entry confirmation`:'',allocN?`🚫 ${allocN} not allocatable`:'',filtN?`⚙ ${filtN} by your filters`:''].filter(Boolean).join(' · ')}${(heldN||survN||triggerN||peakN||allocN||dirN||filtN)?' · ':''}why the ranks skip</span>
+      <span style="font-size:13px;color:var(--t3);font-weight:400;margin-left:8px">${[dirN?`📉 ${dirN} not lifting off`:'',heldN?`📌 ${heldN} held`:'',survN?`⚠ ${survN} surveillance`:'',triggerN?`${triggerN} automatic trigger veto`:'',peakN?`⏳ ${peakN} waiting for entry confirmation`:'',flowN?`📊 ${flowN} rejected by the current tape`:'',nohistN?`🆕 ${nohistN} without price history`:'',allocN?`🚫 ${allocN} not allocatable`:'',filtN?`⚙ ${filtN} by your filters`:''].filter(Boolean).join(' · ')}${all.length?' · ':''}why the ranks skip</span>
     </div>
     ${body}
   </div>`;
