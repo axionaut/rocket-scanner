@@ -1,5 +1,5 @@
-const BUILD_TS='2026-08-26 16:40 IST'; // release build time (IST)
-const APP_VERSION=1226; // v1226: every removal is described by the mechanism that actually made it.
+const BUILD_TS='2026-08-26 17:12 IST'; // release build time (IST)
+const APP_VERSION=1227; // v1227: the evidence bar follows its family; the tape sees what the score did not choose.
 // v1093: a baseline reward:risk MEASURED on the cross-section (last completed bhav session) instead of learned from the owner's own fills - reported on every row, deliberately not enforced. Includes v1092: position size split by Radar score / stop distance, so equally-scored names carry equal RUPEE risk, plus an opt-in Risk /trade cap.
 // v556: parse the NSE Market Activity Report (MA<date>.csv) — official Nifty %, advances/declines and sector index moves shown as market CONTEXT in the status bar (EOD data, display only, never fed into per-row scoring); MA added to the ℹ️ file manifest.
 // v555 market-cycle stage awareness (stateless, self-calibrating): per-row stage label (1 accumulation · 2 breakout · 3 event · 4 profit-booking · 5 re-accumulation · 6 second-leg); a quiet-accumulation signal (conjunction-of-percentiles) injected via the rocket-diagnostic weighting; sell-the-news decay off Recent earnings date (horizon = review days). v1065 makes the market-breadth gauge an entry-eligibility input while still never changing ranking.
@@ -2384,14 +2384,21 @@ function buildPostCloseIssueAudit(issue,asOf){
 // statistical rather than absolute, so it needs no chosen precision level, and the critical value
 // is DERIVED from how many conditions are being tested at once (Bonferroni over the declared list)
 // rather than picked - add a condition and the bar tightens on its own.
-function postCloseTCrit(){
-  const n=Math.max(1,(POST_CLOSE_CONDITIONS||[]).length);
-  // two-sided 5% family-wise, normal approximation: the z that leaves 0.05/(2n) in the tail.
-  const p=0.05/(2*n);
-  // Acklam-style inverse normal, adequate at these tail sizes.
+// The two-sided 5% family-wise critical value for a family of n simultaneous tests: the z that
+// leaves 0.05/(2n) in the tail (Acklam-style inverse normal, adequate at these tail sizes). ONE
+// implementation, because a written-in bar decides which measured evidence is allowed to exist.
+// MEASURED IN v1227: the indicator family is 106, which asks for 3.499 - so the written-in 3.5 was
+// CORRECT and this admits exactly zero new indicators today. It is derived anyway because nobody
+// re-derives a constant when the family changes, and the log grows to IW_LOG_MAX=30 sessions.
+function familyTCrit(n){
+  const p=0.05/(2*Math.max(1,Number(n)||1));
   const t=Math.sqrt(-2*Math.log(p));
   return +(t-(2.30753+0.27061*t)/(1+0.99229*t+0.04481*t*t)).toFixed(3);
 }
+function postCloseTCrit(){ return familyTCrit((POST_CLOSE_CONDITIONS||[]).length); }
+// The indicator family is whatever is actually being tested this pass, so the bar moves with the
+// evidence instead of standing at a number derived from a feature count that no longer holds.
+function indicatorWatchTCrit(n){ return familyTCrit(n); }
 function postCloseConditionStats(audits,key){
   const lifts=[],ses=[];let wins=0,losses=0,picks=0;
   Object.values(audits||{}).forEach(a=>{
@@ -3403,6 +3410,10 @@ function getForwardIndicatorEffects(){
   const log=iw.logShort||{},longLog=iw.log||{};
   if(_fwdEffMemo&&_fwdEffMemo.src===log&&_fwdEffMemo.longSrc===longLog) return _fwdEffMemo.map;
   const raw=[];
+  // The family is the set of indicators this pass can actually test - not a count written down
+  // when the feature list looked different.
+  const _tcrit=indicatorWatchTCrit(Object.keys(log)
+    .filter(n=>(Array.isArray(log[n]?.e5)?log[n].e5.map(Number).filter(Number.isFinite):[]).length>=2).length);
   Object.keys(log).forEach(name=>{
     const e=log[name];
     const arr=Array.isArray(e?.e5)?e.e5.map(Number).filter(Number.isFinite):[];
@@ -3410,7 +3421,7 @@ function getForwardIndicatorEffects(){
     const n=arr.length, mean=arr.reduce((a,b)=>a+b,0)/n;
     const sd=Math.sqrt(arr.reduce((a,b)=>a+(b-mean)*(b-mean),0)/(n-1));
     const t=sd>0?mean/(sd/Math.sqrt(n)):null;
-    if(!(t!=null&&Math.abs(t)>=IW_T_CRIT)) return;          // not distinguishable from noise
+    if(!(t!=null&&Math.abs(t)>=_tcrit)) return;             // not distinguishable from noise
     raw.push({name,mean:mean*(n/(n+IW_MIN_SESSIONS)),n,t});
   });
   const shortNames=new Set(raw.map(r=>r.name));
@@ -4454,7 +4465,6 @@ const IW_MIN_SESSIONS=5;     // v1135 (OWNER): 20 -> 5. An owner-set evidence pr
 const IW_MIN_MOVERS=5;       // a session contributes to an outcome only with >= this many movers
 const IW_MIN_EFFECT=0.08;    // |mean forward effect| must clear this (not just be significant)
 const IW_SIGN_FRACTION=0.70; // >= this fraction of samples must share the backwards sign
-const IW_T_CRIT=3.5;         // ~Bonferroni two-sided z across ~120 monotonic features
 const IW_MIN_TURNOVER=25e5;  // watch only tradeable stocks (turnover >= ₹25L); keeps signal + storage honest
 async function iwDeflateB64(u8){
   try{
@@ -4767,7 +4777,7 @@ async function iwResolveAnchor(store,a){
 // Evaluate the rolling log: which indicators are backwards on BOTH outcomes, strictly.
 function evaluateIndicatorWatch(){
   const store=getIndicatorWatchStore();
-  const backwardsOn=(arr,sign)=>{
+  const backwardsOn=(arr,sign,tc)=>{
     const n=arr.length;
     if(n<IW_MIN_SESSIONS) return null;
     const mean=arr.reduce((s,v)=>s+v,0)/n;
@@ -4776,15 +4786,16 @@ function evaluateIndicatorWatch(){
     const t=mean/se;
     const backSign=-sign; // rewarded end holds FEWER movers => effect sign opposite to prior
     const sameSignFrac=arr.filter(v=>Math.sign(v)===backSign).length/n;
-    const ok=Math.sign(mean)===backSign&&Math.abs(t)>=IW_T_CRIT&&Math.abs(mean)>=IW_MIN_EFFECT&&sameSignFrac>=IW_SIGN_FRACTION;
+    const ok=Math.sign(mean)===backSign&&Math.abs(t)>=tc&&Math.abs(mean)>=IW_MIN_EFFECT&&sameSignFrac>=IW_SIGN_FRACTION;
     return {ok,mean:+mean.toFixed(3),n,t:+t.toFixed(2)};
   };
   const flags=[];
   const tested=Object.keys(store.log).filter(name=>{
     const r=store.log[name];return (r.e5?.length||0)>=IW_MIN_SESSIONS&&(r.e10?.length||0)>=IW_MIN_SESSIONS;
   });
+  const _tc=indicatorWatchTCrit(tested.length);
   Object.entries(store.log).forEach(([name,r])=>{
-    const b5=backwardsOn(r.e5||[],r.sign),b10=backwardsOn(r.e10||[],r.sign);
+    const b5=backwardsOn(r.e5||[],r.sign,_tc),b10=backwardsOn(r.e10||[],r.sign,_tc);
     if(b5?.ok&&b10?.ok) flags.push({name,sign:r.sign,e5:b5,e10:b10});
   });
   return {resolvedSessions:store.resolvedSessions||0,pending:store.pending?.length||0,
@@ -9720,10 +9731,14 @@ function intradayFetchJobs(limit){
   (Array.isArray(ALL)?ALL:[]).filter(r=>meetsRecommendationBar(r))
     .slice().sort((a,b)=>(a.rank??Infinity)-(b.rank??Infinity))
     .forEach(r=>add(r.symbol,false,null,r));
-  // v1208: after the close the decision set is empty, and that is exactly when the day's winners
-  // are worth their candles. The supreme objective is to find them BEFORE they are winners, and the
-  // only way to learn that is from the ones that were.
-  if(istClock().mins>=DAY_END_MIN&&typeof getGainerCohort==="function"){
+  // v1208 admitted the day's winners AFTER the close. v1227 admits them ALL SESSION, because
+  // membership was otherwise the decision set and the decision set is chosen by the score: the tape
+  // could only ever confirm what the daily columns already ranked (measured: 51 of 3,138 rows, and
+  // all 20 of the day's biggest movers failing the recommendation bar and never fetched). The
+  // cohort definition contains NO score term - tradeable rows sorted by their own day move. They
+  // then compete for the same slots on the same measured priority; a reserved share or fixed split
+  // is deliberately NOT introduced, per v1203.
+  if(typeof getGainerCohort==="function"){
     try{ getGainerCohort().forEach(r=>add(r.symbol,false,null,r)); }catch(e){}
   }
   if(!members.length){
