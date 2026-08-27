@@ -1,5 +1,6 @@
-const BUILD_TS='2026-08-26 17:33 IST'; // release build time (IST)
-const APP_VERSION=1228; // v1228: one absolute score - evidence accumulates, permission multiplies, rank is gone.
+const BUILD_TS='2026-08-27 10:08 IST'; // release build time (IST)
+const APP_VERSION=1229; // v1229: one rank-free decision score, versioned outcomes, and matching UI/audit bands.
+const RADAR_SCORE_VERSION='decision-readiness-v1';
 // v1093: a baseline reward:risk MEASURED on the cross-section (last completed bhav session) instead of learned from the owner's own fills - reported on every row, deliberately not enforced. Includes v1092: position size split by Radar score / stop distance, so equally-scored names carry equal RUPEE risk, plus an opt-in Risk /trade cap.
 // v556: parse the NSE Market Activity Report (MA<date>.csv) — official Nifty %, advances/declines and sector index moves shown as market CONTEXT in the status bar (EOD data, display only, never fed into per-row scoring); MA added to the ℹ️ file manifest.
 // v555 market-cycle stage awareness (stateless, self-calibrating): per-row stage label (1 accumulation · 2 breakout · 3 event · 4 profit-booking · 5 re-accumulation · 6 second-leg); a quiet-accumulation signal (conjunction-of-percentiles) injected via the rocket-diagnostic weighting; sell-the-news decay off Recent earnings date (horizon = review days). v1065 makes the market-breadth gauge an entry-eligibility input while still never changing ranking.
@@ -105,7 +106,7 @@ const SHARED_FILTER_STORE='rs_filters_shared';
 const TRADE_INPUTS_STORE='rs_trade_inputs_v1';
 let _lastTradeInputSig=''; // gate brain writes to genuine trade-input changes, not every keystroke
 const ALL_STORE='rs_data';
-const ALL_STORE_SCHEMA='radar_composite_v12'; // v1202 adds persisted causal trigger state.
+const ALL_STORE_SCHEMA='radar_composite_v13'; // v1229 invalidates cached rows from incompatible score scales.
 const HOLD_STORE='rs_holdings';
 const ORDERS_STORE='rs_orders';
 const POS_STORE='rs_positions';
@@ -2270,7 +2271,12 @@ function recordRecommendationOutcomeScan(scan){
       p.complete=gap>=horizon;
     });
   });
-  const currentIssue=store.issues[scan.date];
+  const scanScoreVersion=scan.scoreVersion||RADAR_SCORE_VERSION;
+  const currentIssueKey=Object.keys(store.issues||{}).find(key=>{
+    const issue=store.issues[key]||{};
+    return issue.date===scan.date&&(issue.scoreVersion||'legacy-pre-v1229')===scanScoreVersion;
+  });
+  const currentIssue=currentIssueKey?store.issues[currentIssueKey]:null;
   if(currentIssue&&scan.recommendations?.length){
     const fresh=Object.fromEntries(scan.recommendations.map(r=>[r.symbol,r]));
     (currentIssue.picks||[]).forEach(p=>{
@@ -2289,10 +2295,11 @@ function recordRecommendationOutcomeScan(scan){
   }
   const isNewIssueDate=!currentIssue||!(currentIssue.picks||[]).length;
   if(scan.recommendations?.length&&isNewIssueDate){
-    store.issues[scan.date]={
-      date:scan.date,threshold:scan.threshold,horizonDays:adaptiveHorizon,
+    const issueKey=store.issues[scan.date]?scan.date+'|'+scanScoreVersion:scan.date;
+    store.issues[issueKey]={
+      date:scan.date,threshold:scan.threshold,scoreVersion:scan.scoreVersion||RADAR_SCORE_VERSION,horizonDays:adaptiveHorizon,
       regime:(typeof MARKET_REGIME!=='undefined'&&MARKET_REGIME)?MARKET_REGIME:null,
-      picks:scan.recommendations.map(p=>({symbol:p.symbol,entryPrice:p.entryPrice,score:p.score,rank:p.rank,
+      picks:scan.recommendations.map(p=>({symbol:p.symbol,entryPrice:p.entryPrice,score:p.score,scoreVersion:p.scoreVersion||scan.scoreVersion||RADAR_SCORE_VERSION,rank:p.rank,
         features:compactOutcomeFeatures(p.features,outcomeFeatureOrder),
         entryReady:p.entryReady!==false,
         blockReason:p.entryReady===false?[
@@ -2335,20 +2342,22 @@ function recordRecommendationOutcomeScan(scan){
   }
   const cutoff=new Date(scan.date+'T12:00:00Z');
   cutoff.setUTCDate(cutoff.getUTCDate()-180);
-  Object.keys(store.issues).forEach(date=>{if(date<cutoff.toISOString().slice(0,10)) delete store.issues[date];});
+  Object.keys(store.issues).forEach(key=>{
+    const issueDate=String(store.issues[key]?.date||key).slice(0,10);
+    if(issueDate<cutoff.toISOString().slice(0,10)) delete store.issues[key];
+  });
   FS.set(RECOMMEND_OUTCOME_STORE,store);
 }
 const POST_CLOSE_CONDITIONS=[
   {key:'entry-ready',label:'Entry gate approved',mode:'gate',test:p=>p.entryReady!==false,rowTest:r=>r.entryReady!==false},
-  {key:'top-5',label:'Issued rank 1-5',mode:'gate',test:p=>Number(p.radarRank??p.rank)<=5,rowTest:r=>Number(r.rank)<=5},
-  {key:'top-10',label:'Issued rank 1-10',mode:'gate',test:p=>Number(p.radarRank??p.rank)<=10,rowTest:r=>Number(r.rank)<=10},
-  {key:'score-99',label:'Issue score at least 99',mode:'gate',test:p=>Number(p.score)>=99,rowTest:r=>Number(r.score)>=99},
+  {key:'score-bar',label:'Decision score cleared its policy bar',mode:'gate',
+    test:p=>(p.scoreVersion||'legacy-pre-v1229')===RADAR_SCORE_VERSION&&Number(p.score)>=RECOMMEND_MIN_SCORE,
+    rowTest:r=>r.scoreVersion===RADAR_SCORE_VERSION&&Number(r.score)>=RECOMMEND_MIN_SCORE},
   {key:'setup-p95',label:'Setup percentile at least 95%',mode:'gate',test:p=>Number(p.setupPct)>=.95,rowTest:r=>Number(r.setupPct)>=.95},
   {key:'ignite-p95',label:'Ignition percentile at least 95%',mode:'gate',test:p=>Number(p.ignitePct)>=.95,rowTest:r=>Number(r.ignitePct)>=.95},
   {key:'direction-confirmed',label:'Direction confirmed at issue',mode:'gate',test:p=>p.directionConfirmed===true,rowTest:r=>r.directionConfirmed===true},
   {key:'range-location-75',label:'Range location at most 75%',mode:'gate',test:p=>Number.isFinite(Number(p.rangeLocationAtIssue))&&Number(p.rangeLocationAtIssue)<=75,rowTest:r=>Number.isFinite(Number(r.entryTiming?.rangeLocation))&&Number(r.entryTiming.rangeLocation)<=75},
   {key:'range-used-75',label:'Expected range used below 75%',mode:'gate',test:p=>Number.isFinite(Number(p.rangeUsedAtIssue))&&Number(p.rangeUsedAtIssue)<75,rowTest:r=>Number.isFinite(Number(r.entryTiming?.rangeUsed))&&Number(r.entryTiming.rangeUsed)<75},
-  {key:'ready-top-10',label:'Entry approved and issued rank 1-10',mode:'gate',test:p=>p.entryReady!==false&&Number(p.radarRank??p.rank)<=10,rowTest:r=>r.entryReady!==false&&Number(r.rank)<=10},
   {key:'rocket-ready',label:'All feasibility tests passed',mode:'gate',test:p=>p.rocketReady===true,rowTest:r=>r.rocketReady===true},
   {key:'target-reachable',label:'Target fits the stock range estimate',mode:'gate',test:p=>p.targetReachable===true,rowTest:r=>{try{return getRowExitPolicy(r).reachable===true;}catch(e){return false;}}},
   {key:'stage-accumulation',label:'Accumulation or re-accumulation stage',mode:'boost',test:p=>[1,5].includes(Number(p.stage)),rowTest:r=>[1,5].includes(Number(r.stage))},
@@ -2584,8 +2593,7 @@ function applyLearnedTriggerRanking(rows){
     const b=Number(r._triggerBlend);
     delete r._triggerBlend;
     r.triggerFactor=(Number.isFinite(b)&&mid>0)?Math.max(0.5,Math.min(1.5,b/mid)):1;
-    r.score=radarEvidenceScore(r);
-    r.rocketScore=r.score;
+    setRadarEvidenceScore(r);
   });
   rows.sort((a,b)=>b.score-a.score||radarRankTieBreak(a,b));
   rows.forEach((r,i)=>{r.rank=i+1;});
@@ -2676,7 +2684,7 @@ function buildSystemScorecard(){
     tot.target+=target.length; tot.stopped+=stopped.length; tot.expired+=expired.length;
     tot.ambiguous+=ambiguous.length; tot.pending+=pending;
     if(!resolvable.length) return;                        // a wholly legacy cohort says nothing
-    rows.push({date,
+    rows.push({date:issue.date||date,
       regime:String(issue.regime?.label||issue.regime||'—'),
       picks:resolvable.length, target:target.length, stopped:stopped.length,
       expired:expired.length, pending,
@@ -2685,9 +2693,11 @@ function buildSystemScorecard(){
   });
   let cBetter=0,cWorse=0,cPairs=0;
   Object.keys(issues).forEach(date=>{
-    const day=(issues[date]||{}).picks||[];
+    const issue=issues[date]||{};
+    const day=issue.picks||[];
     const g=day.filter(p=>Number(p.targetPct)>0&&Number(p.stopPct)>0&&!p.control
-      &&Number.isFinite(+p.radarRank)
+      &&(p.scoreVersion||issue.scoreVersion||'legacy-pre-v1229')===RADAR_SCORE_VERSION
+      &&Number.isFinite(+p.score)
       &&['rocket','stopped','expired','ambiguous'].includes(String(p.rocketOutcome)));
     for(let i=0;i<g.length;i++) for(let j=i+1;j<g.length;j++){
       const a=g[i],b2=g[j];
@@ -2695,14 +2705,21 @@ function buildSystemScorecard(){
       if(wa===wb) continue;                       // only winner/loser pairs discriminate
       const winner=wa?a:b2, loser=wa?b2:a;
       cPairs++;
-      if(+winner.radarRank<+loser.radarRank) cBetter++; else if(+winner.radarRank>+loser.radarRank) cWorse++;
+      if(+winner.score>+loser.score) cBetter++; else if(+winner.score<+loser.score) cWorse++;
     }
   });
-  const bandDefs=[[95,101,'95–100'],[80,95,'80–95'],[65,80,'65–80'],[0,65,'under 65']];
+  const bandDefs=RADAR_SCORE_BANDS.map((b,i)=>[
+    Number.isFinite(b.min)?Math.max(0,b.min):0,
+    i?RADAR_SCORE_BANDS[i-1].min:101,
+    b.range
+  ]);
   const bands=bandDefs.map(([lo,hi,label])=>({label,lo,hi,n:0,target:0,settled:0,control:0}));
+  let legacyScorePicks=0;
   Object.keys(issues).forEach(date=>{
-    ((issues[date]||{}).picks||[]).forEach(p=>{
+    const issue=issues[date]||{};
+    (issue.picks||[]).forEach(p=>{
       if(!(Number(p.targetPct)>0&&Number(p.stopPct)>0))return;
+      if((p.scoreVersion||issue.scoreVersion||'legacy-pre-v1229')!==RADAR_SCORE_VERSION){legacyScorePicks++;return;}
       const sc=Number(p.score); if(!Number.isFinite(sc))return;
       const b=bands.find(x=>sc>=x.lo&&sc<x.hi); if(!b)return;
       b.n++; if(p.control)b.control++;
@@ -2722,6 +2739,7 @@ function buildSystemScorecard(){
     expiredPct:settled?+(tot.expired/settled*100).toFixed(1):null,
     medDaysToTarget:daysToTarget.length?median(daysToTarget):null,
     concordancePct:cPairs?+(cBetter/cPairs*100).toFixed(1):null, concordancePairs:cPairs,
+    legacyScorePicks,
     bands,
     sameDay:daysToTarget.filter(v=>v===0).length,
     nextDay:daysToTarget.filter(v=>v===1).length,
@@ -2736,17 +2754,21 @@ function getDisplayedEntryCandidates(rows){
   if(!Array.isArray(rows)||!rows.length) return [];
   return rows
     // v1070: held no longer excludes a candidate.
-    .filter(s=>s.symbol&&Number(s.price)>0&&s.basketEligible!==false&&!NSE_SURV[s.symbol]?.length&&s.recommendationTriggerBlocked!==true)
+    .filter(s=>s.symbol&&Number(s.price)>0&&s.basketEligible!==false&&!NSE_SURV[s.symbol]?.length&&meetsRecommendationBar(s))
     .sort((a,b)=>(Number(b.score)||0)-(Number(a.score)||0)||a.symbol.localeCompare(b.symbol))
     .slice(0,20);
 }
-const CONTROL_BANDS=[[80,95],[65,80],[50,65]];   // below the bar; the bands the scorecard reports
+function getControlBands(){return [
+  [RADAR_SCORE_BANDS[1].min,RECOMMEND_MIN_SCORE],
+  [RADAR_SCORE_BANDS[2].min,RADAR_SCORE_BANDS[1].min],
+  [0,RADAR_SCORE_BANDS[2].min]
+];} // every below-bar band on the current score scale; resolved after score constants initialise
 const CONTROL_PER_BAND=3;
 function getScoreBandControlSample(rows,exclude){
   if(!Array.isArray(rows)||!rows.length) return [];
   const taken=exclude instanceof Set?exclude:new Set((exclude||[]).map(s=>s.symbol));
   const out=[];
-  CONTROL_BANDS.forEach(([lo,hi])=>{
+  getControlBands().forEach(([lo,hi])=>{
     const band=rows.filter(s=>s.symbol&&Number(s.price)>0&&s.basketEligible!==false
       &&!NSE_SURV[s.symbol]?.length&&!taken.has(s.symbol)
       &&Number(s.score)>=lo&&Number(s.score)<hi);
@@ -2764,11 +2786,11 @@ function recordDisplayedEntryCohort(scan){
   const outcomeFeatureOrder=getOutcomeFeatureOrderFromEngine();
   migrateOutcomeFeatureStore(store,outcomeFeatureOrder);
   store.horizonDays=adaptiveHorizon;
-  const cohort=store.cohorts[scan.date]||{date:scan.date,horizonDays:adaptiveHorizon,candidates:{}};
+  const cohort=store.cohorts[scan.date]||{date:scan.date,scoreVersion:RADAR_SCORE_VERSION,horizonDays:adaptiveHorizon,candidates:{}};
   scan.candidates.forEach((s,i)=>{
     if(cohort.candidates[s.symbol]) return;
     cohort.candidates[s.symbol]={
-      symbol:s.symbol,referencePrice:s.price,score:s.rocketScore,rank:i+1,
+      symbol:s.symbol,referencePrice:s.price,score:s.rocketScore,scoreVersion:s.scoreVersion||RADAR_SCORE_VERSION,rank:i+1,
       kind:s._isTopUp?'topup':'fresh',heldAvg:s._heldAvg??null,heldQty:s._heldQty??null,
       features:compactOutcomeFeatures(s._features,outcomeFeatureOrder)
     };
@@ -3055,26 +3077,14 @@ const RADAR_GROUPS={
   context:{label:'Context',budget:5,desc:'Sector-relative regime and fundamentals'}
 };
 const RADAR_RATING={'strong sell':-2,'sell':-1,'neutral':0,'buy':1,'strong buy':2};
-// THE SCORE. Evidence accumulates; permission multiplies; nothing is percentiled.
+// THE DECISION SCORE. One number, but not a disguised rank and not a probability.
 //
-// Averaging the seven group parts made "good at everything" score like "extreme at one thing",
-// which is backwards for what this app hunts: a stock about to run is extreme in participation and
-// ordinary elsewhere, so a mean can only ever dilute it. Percentiling the result then destroyed the
-// absolute level, which is why the score and the rank were the same fact under two names and why a
-// threshold could only ever mean "the top of today, however bad today was".
-//
-// EVIDENCE: each group part is 0-100 with 50 = neutral on that axis, so e=(part-50)/50 is how much
-// positive evidence that axis carries. Independent evidence is combined by noisy-OR - 1-PROD(1-e*w)
-// - so a single extreme axis carries a row on its own and the axes it is ordinary on cost it
-// nothing. Ignition enters as one more evidence source on its own absolute zero point: all three
-// participation ratios at 1.0 is 3*ln2, which maps to exactly the neutral 0.5.
-//
-// PERMISSION: direction confirmed, exchange eligibility, circuit headroom against its own target,
-// and the 5-minute tape's standing when there is one. Multiplicative because any single one of
-// these at zero genuinely ends the trade, and an absent tape must not promote - it stays neutral.
-//
-// The result is comparable across days: on a weak session the whole board falls, instead of
-// re-normalising itself so that something always sits at 100.
+// The model component below is explicitly SAME-SESSION evidence: its feature inputs are
+// cross-sectional percentiles. It is useful context, but cannot honestly be called absolute or
+// comparable across sessions. The rest of the score uses fixed, inspectable meanings: volume
+// against its own normal level, post-open travel against the stock's own expected range, remaining
+// range runway, target/circuit feasibility, and current 5-minute standing. The six components add
+// to 100 points. Hard permissions still zero the score; final recommendation gates remain separate.
 function radarEvidenceLevel(r){
   let miss=1;
   const parts=(r&&r.parts)||{};
@@ -3084,29 +3094,53 @@ function radarEvidenceLevel(r){
     const e=clamp01((p-50)/50,0,1);
     miss*=(1-e*(RADAR_GROUPS[g].budget/100));
   }
-  const ig=Number(r&&r.igniteStrength);
-  if(Number.isFinite(ig)&&ig>0){
-    const e=ig/(ig+3*Math.LN2);                 // 0.5 at ordinary participation
-    miss*=(1-clamp01((e-0.5)*2,0,1));
-  }
   return 1-miss;
 }
-function radarPermissionLevel(r,tapeStanding){
-  if(!r||!r.directionConfirmed) return 0;
-  if(r.eqEligible===false||r.basketEligible===false) return 0;
-  const fz=Number.isFinite(Number(r.circuitFeasibility))?clamp01(Number(r.circuitFeasibility),0,1):1;
-  // The tape MODULATES around a structural midpoint rather than scaling everything down. A
-  // standing of 0.5 - the midpoint of a measure that is itself a 0-1 geometric mean - leaves the
-  // row where its daily evidence put it; a strong tape lifts it, a weak one cuts it. An ABSENT
-  // tape is exactly that midpoint, so it is neither promoted nor punished, and the scale does not
-  // move with how many stocks happened to get candles today.
-  const t=Number.isFinite(Number(tapeStanding))?clamp01(Number(tapeStanding),0,1):null;
-  return fz*(t==null?1:clamp01(0.5+t,0.5,1.5));
+function radarParticipationLevel(r){
+  const values=[];
+  const rv=Number(r&&r.relvol),rat=Number(r&&r.relAt),vc=Number(r&&r.volChg);
+  if(Number.isFinite(rv)) values.push(clamp01((rv-1)/1,0,1));       // normal 1x -> strong 2x
+  if(Number.isFinite(rat)) values.push(clamp01((rat-1)/1,0,1));    // same fixed ratio scale
+  if(Number.isFinite(vc)) values.push(clamp01(vc/100,0,1));        // +100% volume -> strong
+  if(values.length) return Math.max(...values);                    // the engine's ignition is OR
+  const ig=Number(r&&r.igniteStrength);
+  if(!Number.isFinite(ig)) return 0;
+  const ordinary=3*Math.LN2,strong=3*Math.LN3;
+  return clamp01((ig-ordinary)/(strong-ordinary),0,1);
 }
-function radarEvidenceScore(r,tapeStanding){
-  const v=100*radarEvidenceLevel(r)*radarPermissionLevel(r,tapeStanding)
-    *(Number.isFinite(Number(r&&r.triggerFactor))?clamp01(Number(r.triggerFactor),0,2):1);
-  return +Math.max(0,Math.min(100,v)).toFixed(1);
+function radarScoreComponents(r,tapeStanding){
+  const hasNumber=v=>v!==null&&v!==undefined&&v!==''&&Number.isFinite(Number(v));
+  const circuitKnown=!!r&&hasNumber(r.circuitFeasibility);
+  const hardBlocked=!r||!r.directionConfirmed||r.eqEligible===false||r.basketEligible===false
+    ||(circuitKnown&&Number(r.circuitFeasibility)<=0);
+  if(hardBlocked) return {model:0,participation:0,direction:0,runway:0,feasibility:0,tape:0,total:0};
+  const trigger=Number.isFinite(Number(r.triggerFactor))?clamp01(Number(r.triggerFactor),0.5,1.5):1;
+  const model=25*clamp01(radarEvidenceLevel(r)*trigger,0,1);
+  const participation=25*radarParticipationLevel(r);
+  const range=Number(r.rangePct),fromOpen=Number(r.changeOpen);
+  const direction=20*((range>0&&fromOpen>0)?clamp01(fromOpen/(range*0.5),0,1):0);
+  const usedRaw=r.entryTiming&&r.entryTiming.rangeUsed,used=Number(usedRaw);
+  const runway=10*(hasNumber(usedRaw)?clamp01(1-used/75,0,1):0.5);
+  const f=hasNumber(r.feasibility)?clamp01(Number(r.feasibility),0,1):1;
+  const cf=circuitKnown?clamp01(Number(r.circuitFeasibility),0,1):1;
+  const feasibility=10*Math.min(f,cf);
+  const ts=hasNumber(tapeStanding)?clamp01(Number(tapeStanding),0,1):0.5;
+  const tape=10*ts;                                                 // absent tape is neutral, never positive proof
+  const rounded=Object.fromEntries(Object.entries({model,participation,direction,runway,feasibility,tape})
+    .map(([k,v])=>[k,+Math.max(0,Math.min(25,v)).toFixed(1)]));
+  rounded.total=+Math.max(0,Math.min(100,Object.values(rounded).reduce((n,v)=>n+v,0))).toFixed(1);
+  return rounded;
+}
+function radarEvidenceScore(r,tapeStanding){return radarScoreComponents(r,tapeStanding).total;}
+function setRadarEvidenceScore(r,tapeStanding){
+  const c=radarScoreComponents(r,tapeStanding);
+  r.score=c.total;r.rocketScore=r.score;r.scoreVersion=RADAR_SCORE_VERSION;r.scoreComponents=c;
+  return r.score;
+}
+function radarScoreTitle(r){
+  const c=r&&r.scoreComponents;
+  if(!c) return `Decision-readiness score. ${RECOMMEND_MIN_SCORE} is the policy bar; this is not a probability.`;
+  return `Decision readiness ${Number(c.total).toFixed(1)}/100: model ${Number(c.model).toFixed(1)}/25 · participation ${Number(c.participation).toFixed(1)}/25 · direction ${Number(c.direction).toFixed(1)}/20 · runway ${Number(c.runway).toFixed(1)}/10 · feasibility ${Number(c.feasibility).toFixed(1)}/10 · tape ${Number(c.tape).toFixed(1)}/10. Policy bar ${RECOMMEND_MIN_SCORE}; not a profit probability.`;
 }
 // Columns that are EXPORTED but deliberately NOT modelled as features. Exporting and scoring are
 // separate decisions: the data stays available for derived signals and future use, it simply does
@@ -3274,15 +3308,12 @@ function radarScoreColor(score){
   if(score===null||score===undefined||!isFinite(s)) return 'var(--t3)';
   return RADAR_SCORE_BANDS.find(b=>s>=b.min).color;
 }
-const RECOMMEND_MAX_RANK=10;    // SEARCH DEPTH ONLY since v1228: how deep the app looks for
-// candles and how deep the audits report. It is NOT a recommendation gate - the score decides that
-// on its own, so a thin day yields few candidates instead of always yielding this many.
-const RECOMMEND_MIN_SCORE=60;   // owner risk preference, in evidence units (0-100, absolute).
-// On the release board: 106 rows clear 40, 57 clear 50, 19 clear 60, 3 clear 70, none clear 80.
-// It is a level of EVIDENCE, not a position in a queue, so on a weak session it selects fewer.
-// The bands are anchored to the BAR, not to fixed numbers, because the score is now an absolute
-// evidence level rather than a percentile: green means "clears the bar", and the steps below it are
-// halves of that level. Anchoring keeps the legend true if the owner moves his own risk preference.
+const RECOMMEND_MAX_RANK=10;    // SEARCH DEPTH ONLY: candle collection and diagnostic coverage.
+// It never gates a recommendation and never appears beside Score in the recommendation table.
+const RECOMMEND_MIN_SCORE=60;   // explicit policy bar on the six-component 0-100 readiness scale.
+// This means "60 readiness points plus every independent gate", not "60% likely to profit".
+// Forward target-before-stop results for this exact score version are shown separately and must earn
+// any predictive interpretation; old score versions are never pooled into those bands.
 const RADAR_SCORE_BANDS=(()=>{
   const bar=RECOMMEND_MIN_SCORE, mid=+(bar*0.66).toFixed(1), low=+(bar*0.33).toFixed(1);
   return [
@@ -3370,13 +3401,13 @@ function timingDepth(){
 }
 function meetsRecommendationBar(s){
   if(!s) return false;
+  if(s.scoreVersion!==RADAR_SCORE_VERSION) return false; // never apply today's policy bar to an old scale
   if(s.recommendationTriggerBlocked===true)return false;
   if(s.noHistory===true) return false;   // v1170: no multi-day history, so nothing to rank it on
   if(s.entryReady===false) return false; // a consumed/failed move is not made buyable by a strong setup
   if(s.intradaySellingToday===true) return false;
-  // The score is absolute now, so the bar is the whole test: on a weak session fewer rows clear it
-  // instead of the top of a queue always being "the top". A depth cap on rank would only re-impose
-  // a fixed candidate count on a measure built to vary with the day.
+  // Score is the one numeric policy bar. Rank remains internal row order only; all other safety and
+  // current-tape checks stay independent so a large number cannot average away a veto.
   return meetsScoreBar(s.score);
 }
 function passesIntradayValidation(s){
@@ -3393,8 +3424,8 @@ function radarScoreCell(score,title=''){
   if(score===null||score===undefined||!isFinite(s)) return '<span class="sc-m" style="color:var(--t3)">—</span>';
   const c=radarScoreColor(s);
   const ok=meetsScoreBar(s);
-  const tip=title||(ok?`Clears the buy bar (${RECOMMEND_MIN_SCORE}).`
-    :`Below the buy bar — scores ${s.toFixed(1)} against ${RECOMMEND_MIN_SCORE} needed to be recommended. Green starts at 80, which is the band, not the bar.`);
+  const tip=title||(ok?`Clears the decision-score policy bar (${RECOMMEND_MIN_SCORE}); all independent gates must still pass.`
+    :`Below the decision-score policy bar — ${s.toFixed(1)} against ${RECOMMEND_MIN_SCORE}. This score is readiness evidence, not a profit probability.`);
   return `<span class="sc-m" style="color:${c}" title="${escHtml(tip)}">${s.toFixed(1)}${ok?'':'<sub style="font-size:9px;color:var(--t3)">\u25be</sub>'}</span>`
     +`<span class="score-bar" style="position:relative">`
     +`<i style="width:${Math.max(0,Math.min(100,s))}%;background:${c};opacity:${ok?1:.42}"></i>`
@@ -3908,8 +3939,7 @@ function applyIntradayReorder(rows){
     r._tapeStanding=f;
   });
   rows.forEach(r=>{
-    r.score=radarEvidenceScore(r,r._tapeStanding);
-    r.rocketScore=r.score;
+    setRadarEvidenceScore(r,r._tapeStanding);
     delete r._iAdj;
   });
   rows.sort((a,b)=>b.score-a.score||radarRankTieBreak(a,b));
@@ -4342,7 +4372,7 @@ function radarAnalyze(headers,rawRows,supplements={},heldSymbols=new Set()){
     if(price<5)rawScore-=5;
     const dispDay=meta._corpNeutralised&&meta._realDay!=null?meta._realDay:day;
     const out={symbol,name:String(raw[descI]||symbol),sector:raw[sectorI]||'',rawScore,parts,contrib,quality,
-      price,day:dispDay,priceChange:dispDay,turnover:turn,relvol,gap,gapSigned,changeOpen,rangePct,sessionVolatilityPct,stretch,stretchBarPct:_stretchBar,atr:atrPct,
+      price,day:dispDay,priceChange:dispDay,turnover:turn,relvol,relAt,volChg,gap,gapSigned,changeOpen,rangePct,sessionVolatilityPct,stretch,stretchBarPct:_stretchBar,atr:atrPct,
       high1d:highI>=0?radarNum(raw[highI]):null,low1d:lowI>=0?radarNum(raw[lowI]):null,dayVolume:dayVolI>=0?radarNum(raw[dayVolI]):null,open1d:openI>=0?radarNum(raw[openI]):null,marketCap:mcapI>=0?radarNum(raw[mcapI]):null,rocketToday:rset.has(ri),
       vwap:vwapI>=0?radarNum(raw[vwapI]):null,
       chaikinMF:cmfI>=0?radarNum(raw[cmfI]):null, mfi15m:mfi15I>=0?radarNum(raw[mfi15I]):null,
@@ -4406,8 +4436,7 @@ function radarAnalyze(headers,rawRows,supplements={},heldSymbols=new Set()){
             r.depthSignedVol=d.signedVol;r.depthPreOpenImb=_bk.imbalance;}
     }
     r.depthBlendPct=r.setupPct;   // provisional; replaced in the second pass
-    r.score=+(100*Math.pow(r.depthBlendPct*(_dirOk?1:0),4)).toFixed(1);
-    r.rocketScore=r.score; // allocation/export alias
+    setRadarEvidenceScore(r); // provisional pre-tape value; refreshed after live intraday reads
     r.fundamental=deriveFundamentalTrigger(r);
     r.fundamentalTrigger=Number(r.fundamental?.value)||0;
     r.risk=!r.basketEligible||r.meta.flags?.length>=3||r.turnover<25e5||r.price<10?'High':(r.gap>6||r.day>6||r.parts.volatility<38?'Medium':'Low');
@@ -4467,8 +4496,8 @@ function radarAnalyze(headers,rawRows,supplements={},heldSymbols=new Set()){
       });
     }
   }
-  // The score is the evidence, not a position in today's queue.
-  rows.forEach(r=>{r.score=radarEvidenceScore(r);r.rocketScore=r.score;});
+  // The score is readiness evidence, not a position in today's queue.
+  rows.forEach(r=>setRadarEvidenceScore(r));
   rows.sort((a,b)=>b.score-a.score||radarRankTieBreak(a,b));
   rows.forEach((r,i)=>{r.rank=i+1;});          // row ORDER only - never a gate, never a column
   applyLearnedTriggerRanking(rows);
@@ -4477,8 +4506,8 @@ function radarAnalyze(headers,rawRows,supplements={},heldSymbols=new Set()){
   // does NOT change the ranking; surfaced in the status bar + basket export as an entry-timing gauge.
   const _open=chgOpenArr.filter(v=>v!==null&&isFinite(v)),_adv=_open.filter(v=>v>0).length,_dec=_open.filter(v=>v<0).length;
   const marketIntraday=_open.length?{adv:_adv,dec:_dec,advPct:_adv/_open.length,median:radarQuant([..._open].sort((a,b)=>a-b),.5)}:null;
-  // Rank answers what is moving; this second pass answers whether the move is executable in
-  // the current market. Breadth is known only after the whole cross-section has been measured.
+  // Internal order answers what is strongest; this second pass answers whether the move is
+  // executable in the current market. Breadth is known only after the cross-section is measured.
   rows.forEach(r=>{
     r.entryTiming=getMarketAlignedEntryTiming(r,marketIntraday);
     // R4d is applied HERE, after the market-aligned pass, because that pass REPLACES entryTiming
@@ -5991,18 +6020,16 @@ function renderStats(){
   balanceGrids();   // v1101: spread the cards evenly instead of stranding a stub row
 
   const filterPills=[];
-  // v1179: THE DEPTH THAT GOVERNS THE BOARD MUST BE VISIBLE. v1170 made the recommendation depth
-  // move with the market's own time-of-day evidence, and nothing on any tab said so - the board
-  // silently reached deeper or shallower than RECOMMEND_MAX_RANK with no way to see it or check it.
+  // Candle search depth is visible because it controls which rows receive a live tape read. It is
+  // diagnostic coverage only and never limits which score can become a recommendation.
   (()=>{
     try{
       const d=timingDepth();
       if(!d||!Number.isFinite(d.depth)) return;
       const n=(Array.isArray(ALL)?ALL:[]).filter(r=>meetsScoreBar(r.score)).length;
       filterPills.push('<span class="info-pill '+(n?'':'pill-amber')+'" title="'+escHtml(
-        'Recommendations are whatever clears '+RECOMMEND_MIN_SCORE+' evidence - not a fixed number of '
-        +'rows. The score is absolute, so a session with nothing in it returns nothing. Search depth '
-        +'for 5-minute candles is the top '+d.depth+', which moves with the time of day: '
+        'Recommendations are whatever clears the '+RECOMMEND_MIN_SCORE+' decision-score policy bar and every independent gate. '
+        +'Rank never gates them. Five-minute candle search depth is the top '+d.depth+', which moves with the time of day: '
         +(d.why||'no evidence yet')+'.')+'">⏱ '+n+' over the bar</span>');
     }catch(e){}
   })();
@@ -7449,7 +7476,7 @@ function renderPerformance(){
         <div><div class="st-l">Reached target</div><div class="st-v" style="font-size:19px;color:${sc.hitPct>=40?'var(--green)':sc.hitPct>=20?'var(--amber)':'var(--red)'}">${sc.hitPct}%</div><div class="st-d">${sc.target} picks</div></div>
         <div><div class="st-l">Stopped first</div><div class="st-v" style="font-size:19px;color:${sc.stopped?'var(--red)':'var(--green)'}">${sc.stopPct}%</div><div class="st-d">${sc.stopped} picks — dipped to stop before target</div></div>
         <div><div class="st-l">Never moved</div><div class="st-v" style="font-size:19px;color:var(--amber)">${sc.expiredPct}%</div><div class="st-d">${sc.expired} picks — neither barrier in ${ROCKET_HORIZON_DAYS} days</div></div>
-        <div title="The only fair test of an ORDERING: on the SAME session, was the winner ranked above the loser? 50% means the ranking carries no information at all; below 50% means it is mildly inverted. Comparing ranks ACROSS days is confounded — rank is a within-day relative measure, so a rank 1 on a weak day and a rank 1 on a strong day are not the same claim."><div class="st-l">Ranking concordance</div><div class="st-v" style="font-size:19px;color:${sc.concordancePct==null?'var(--t3)':sc.concordancePct>=60?'var(--green)':sc.concordancePct>=52?'var(--amber)':'var(--red)'}">${sc.concordancePct==null?'—':sc.concordancePct+'%'}</div><div class="st-d">${sc.concordancePairs} same-day winner/loser pairs · 50% = no information</div></div>
+        <div title="For the current score version only: on the SAME issue session, did a target-hitter have a higher Decision Score than a non-winner? 50% means the score ordering carries no information."><div class="st-l">Score concordance</div><div class="st-v" style="font-size:19px;color:${sc.concordancePct==null?'var(--t3)':sc.concordancePct>=60?'var(--green)':sc.concordancePct>=52?'var(--amber)':'var(--red)'}">${sc.concordancePct==null?'—':sc.concordancePct+'%'}</div><div class="st-d">${sc.concordancePairs} current-version winner/loser pairs · 50% = no information</div></div>
         <div><div class="st-l">Time to target</div><div class="st-v" style="font-size:19px">${sc.medDaysToTarget==null?'—':(sc.medDaysToTarget===0?'same day':sc.medDaysToTarget+'d')}</div><div class="st-d">${sc.sameDay} same day · ${sc.nextDay} next day</div></div>
       </div>`
     : `<div style="padding:16px;color:var(--t2);font-size:13px">No cohort has resolved yet. A pick resolves once a post-close ALL NSE.csv closes its issue day and the following session's bar is read.</div>`;
@@ -7460,7 +7487,7 @@ function renderPerformance(){
     +`<td style="padding:4px 10px;text-align:right">${b.settled}</td>`
     +`<td style="padding:4px 10px;text-align:right;font-weight:700;color:${b.hitPct==null?'var(--t3)':b.hitPct>=30?'var(--green)':b.hitPct>=18?'var(--amber)':'var(--red)'}">${b.hitPct==null?'—':b.hitPct+'%'}</td></tr>`).join('');
   const bandTable=bandRows?`<div style="padding:10px 16px;border-top:1px solid var(--border)">
-      <div class="st-l" style="margin-bottom:6px">Hit rate by score band — is the ordering monotonic?</div>
+      <div class="st-l" style="margin-bottom:6px">Hit rate by current Decision Score band</div>
       <table style="width:100%;font-size:13px;border-collapse:collapse">
         <tr style="color:var(--t3);font-size:11px;text-transform:uppercase;letter-spacing:.06em">
           <td style="padding:4px 10px">Score</td><td style="padding:4px 10px;text-align:right">Graded</td>
@@ -7468,10 +7495,10 @@ function renderPerformance(){
           <td style="padding:4px 10px;text-align:right">Resolved</td><td style="padding:4px 10px;text-align:right">Hit %</td></tr>
         ${bandRows}
       </table>
-      <div style="font-size:12px;color:var(--t3);margin-top:6px;line-height:1.5">A ranking that orders correctly is MONOTONIC down this table. Bands below the ${RECOMMEND_MIN_SCORE} bar are observed through a small stratified <b>control sample</b> (${CONTROL_PER_BAND} per band per session) that is graded but never bought — so a band the app no longer buys can still be shown to have recovered.</div>
+      <div style="font-size:12px;color:var(--t3);margin-top:6px;line-height:1.5">Only <b>${escHtml(RADAR_SCORE_VERSION)}</b> observations enter these bands; ${sc.legacyScorePicks} older-scale observations are excluded. Below-bar bands use a small stratified <b>control sample</b> (${CONTROL_PER_BAND} per band per session), graded but never presented as recommendations.</div>
     </div>`:'';
   const scNote=`<div style="padding:10px 16px;font-size:12px;color:var(--t3);line-height:1.55">
-    A pick counts as a WIN only if it reached <b>its own target</b> before <b>its own stop</b>, within ${ROCKET_HORIZON_DAYS} trading days of being recommended (v1085). Cohorts are the picks as ISSUED — a later scan on the same day never rewrites them.
+    A pick counts as a WIN only if it reached <b>its own target</b> before <b>its own stop</b>, within ${ROCKET_HORIZON_DAYS} trading days of being recommended. Score-band claims are version-isolated; the ${RECOMMEND_MIN_SCORE} policy bar is not described as a profit probability.
     ${sc.legacy?`<br>${sc.legacy} older picks carry no recorded target/stop (they predate v1094) and can never resolve, so they are excluded from every percentage above rather than counted as failures.`:''}
   </div>`;
 
@@ -7960,10 +7987,10 @@ function _renderMethodologyInner(){
         <li>Penalizes a stock whose typical daily range cannot comfortably cover the session's target: above one normal daily range the target starts costing points, above two the penalty is severe. The bar is the target you actually need, not a fixed percentage — before v1113 it asked for a 10% move, the rocket definition retired in v1085.</li>
       </ol>${diagHTML}</div>
       <div class="m-card"><h4>Held Positions & Basket</h4><p>Held positions stay ranked and may be recommended again as ADDs. The add is bounded by the same allocation rails plus a cushion that prevents the blended position from crossing its own stop into a loss. Quantities come from the charge-aware score/stop-weighted allocator and can never exceed 0.10% of that stock's daily rupee turnover; missing turnover blocks a market order. Automatic target magnitude comes from the stock's own 5-minute tape where available, otherwise its session ceiling, otherwise its ATR/range capacity; the NSE circuit and the stock's capacity bound it. Stops remain stock-specific inside the ${SL_MIN_PCT.toFixed(1)}%–${SL_MAX_PCT.toFixed(1)}% risk rails.</p></div>
-      <div class="m-card"><h4>What Learns — and What Does Not</h4><p>The same-session cross-section supplies relative ranks and diagnostic separation, not training labels. Mature forward evidence can change feature effects, ranking, gates, and vetoes; Indicator Watch and the post-close condition tracker apply those changes automatically when their evidence bars are met. Realised trades may calibrate execution facts such as the fallback stop, review horizon, charges and entry cadence, but they never set automatic target magnitude. Max Allocation is arithmetic: Capital divided by average positions entered per entry day.</p></div>
+      <div class="m-card"><h4>What Learns — and What Does Not</h4><p>The same-session cross-section supplies the relative model component and diagnostic separation, not training labels. Mature forward evidence can change feature effects, the internal row order, gates, and vetoes; Indicator Watch and the post-close condition tracker apply those changes automatically when their evidence bars are met. Rank itself is never a live gate. Realised trades may calibrate execution facts such as the fallback stop, review horizon, charges and entry cadence, but they never set automatic target magnitude. Max Allocation is arithmetic: Capital divided by average positions entered per entry day.</p></div>
     </div>
     <h3 style="margin-top:28px">Live Recommendation Funnel</h3>
-    <p style="color:var(--t2);font-size:14.5px;line-height:1.7">A high score alone is not a recommendation. A row must pass, in order: exchange eligibility and configured surveillance/evidence vetoes; positive day direction above VWAP and above its open; enough multi-day history; no current-session selling veto; an allocatable and economically viable order; <strong>Score at least ${RECOMMEND_MIN_SCORE}</strong> and rank inside the <strong>dynamic timing depth</strong>; then <strong>current-session 5-minute confirmation</strong>. Only a row with a current <code>confirmed</code> intraday verdict can be selected or exported.</p>
+    <p style="color:var(--t2);font-size:14.5px;line-height:1.7">A high score alone is not a recommendation. A row must pass, in order: exchange eligibility and configured surveillance/evidence vetoes; positive day direction above VWAP and above its open; enough multi-day history; no current-session selling veto; an allocatable and economically viable order; <strong>Decision Score at least ${RECOMMEND_MIN_SCORE}</strong>; then <strong>current-session 5-minute confirmation</strong>. Rank never gates the result. Only a row with a current <code>confirmed</code> intraday verdict can be selected or exported.</p>
     <h3 id="meth-ledger" style="margin-top:28px">Feature Ledger <span style="font-size:14px;color:var(--t3);font-weight:400">(${RADAR.features.length||0} modeled of ${RADAR.headers.length||0} columns)</span></h3>
     ${buildRadarLedgerHTML()}
     ${buildIndicatorWatchHTML()}
@@ -7972,15 +7999,15 @@ function _renderMethodologyInner(){
     <div class="m-grid">
       <div class="m-card"><h4>Entry Workflow</h4><ol style="padding-left:18px;color:var(--t2);font-size:14px;line-height:1.7">
         <li>Upload a screener snapshot at a consistent time.</li>
-        <li>Use the recommendation set, not the colour band: green begins at 80, while the live buy bar is ${RECOMMEND_MIN_SCORE} plus the dynamic rank-depth limit.</li>
+        <li>Use the recommendation state, not Score alone: ${RECOMMEND_MIN_SCORE} is the visible numeric policy bar, while the independent direction, entry, allocation, surveillance and current-tape gates must also pass.</li>
         <li>Direction, exchange restrictions, evidence triggers, listing history, current-session selling and allocation viability are enforced before a row can be recommended.</li>
         <li>Wait for the current-session 5-minute verdict. Unchecked, stale, rejected or unverified rows cannot be selected or exported.</li>
         <li>Review the row's market-derived target, stock-specific stop, expected net after charges and the rail that limits allocation before placing the basket.</li>
       </ol></div>
       <div class="m-card"><h4>Interpretation</h4><ul style="padding-left:18px;color:var(--t2);font-size:14px;line-height:1.7">
         ${RADAR_SCORE_BANDS.map(b=>`<li><b style="color:${b.color}">${b.range}:</b> ${b.note}</li>`).join('')}
-        <li>The score is ordinal and cross-sectional. A score of 90 does not mean a 90% chance.</li>
-        <li>A real probability model needs many dated snapshots and their next-day outcomes; the surviving outcome stores collect exactly that execution evidence.</li>
+        <li>Decision Score adds six visible components: relative model evidence (25), absolute participation (25), post-open direction versus the stock's own expected range (20), remaining runway (10), target/circuit feasibility (10), and current 5-minute tape standing (10).</li>
+        <li>A score of 90 does not mean a 90% chance. Forward target-before-stop results are isolated by score version before the app reports band performance.</li>
       </ul></div>
     </div>
     <p style="color:var(--t3);font-style:italic;margin-top:4px">⚠ Quantitative screening only. Not financial advice. Past momentum ≠ future returns.</p>`;
@@ -9600,7 +9627,7 @@ function renderTable(){
     const cellH={
       chk:`<td style="text-align:center"><input type="checkbox" ${isSelected?'checked':''} ${canBuy?'':'disabled'} style="width:14px;height:14px;accent-color:var(--amber);cursor:${canBuy?'pointer':'not-allowed'}" onclick="event.stopPropagation()" onchange="toggleStock('${s.symbol}',this.checked)" title="${checkTitle}"></td>`,
       rank:`<td style="font-family:'DM Mono',monospace;font-weight:800;color:var(--t1);text-align:right">${s.rank??'—'}</td>`,
-      score:`<td>${radarScoreCell(s.score,'Relative same-day composite score (0-100 percentile, top-weighted). It is a ranking, not a probability.')}</td>`,
+      score:`<td>${radarScoreCell(s.score,radarScoreTitle(s))}</td>`,
       // v1142: routed through symbolChartButton like every other table. This cell had built its own
       // TradingView link since v1070, so the "one symbol interaction everywhere" rule was true of the
       // panels and quietly false of the main table - which is why swapping to Zerodha missed it.
@@ -10447,6 +10474,24 @@ function showRadarDetail(sym){
   if(!r||!dlg) return;
   // innerHTML (not textContent) so the score carries its band colour; both interpolations are escaped.
   document.getElementById('radarDetailTitle').innerHTML=`${escHtml(r.symbol)} · <span style="color:${radarScoreColor(r.score)}">${isFinite(r.score)?Number(r.score).toFixed(1):'—'}</span> · ${escHtml(r.risk||'—')} risk`;
+  const decisionAction=isSelectableRecommendation(r)
+    ?'<b style="color:var(--green)">GO:</b> every recommendation gate and the current 5-minute validation pass; the row can be selected/exported.'
+    :r.scoreVersion!==RADAR_SCORE_VERSION
+      ?'<b style="color:var(--amber)">RELOAD:</b> this row belongs to an older score scale and cannot be recommended.'
+    :!meetsScoreBar(r.score)
+      ?`<b style="color:var(--amber)">WAIT:</b> Decision Score ${fmt(r.score,1)} is below the ${RECOMMEND_MIN_SCORE} policy bar.`
+    :r.recommendationTriggerBlocked
+      ?'<b style="color:var(--red)">BLOCKED:</b> '+escHtml((r.recommendationTriggerReasons||[]).join(', ')||'an automatic evidence gate failed')+'.'
+    :r.entryReady===false
+      ?'<b style="color:var(--amber)">WAIT:</b> '+escHtml(r.entryTiming?.reason||'the move has not re-armed')+'.'
+    :r.intradaySellingToday===true
+      ?'<b style="color:var(--red)">BLOCKED:</b> '+escHtml(r.intradayWhy||'the current tape shows selling')+'.'
+    :r.noHistory===true
+      ?'<b style="color:var(--red)">BLOCKED:</b> insufficient multi-day price history.'
+    :r.basketEligible===false
+      ?'<b style="color:var(--red)">BLOCKED:</b> exchange or circuit eligibility failed.'
+    :'<b style="color:var(--amber)">WAIT:</b> Score clears, but a fresh current-session 5-minute verdict has not confirmed the entry.';
+  const decisionRead=`<div class="rr-read" style="margin-bottom:10px"><b>What to do now:</b> ${decisionAction}<br><b>Decision Score:</b> ${escHtml(radarScoreTitle(r))}</div>`;
   const groups=Object.entries(RADAR_GROUPS).map(([k,g])=>`<div class="rr-group"><b>${g.label}<i>${r.parts?fmt(r.parts[k],0):'—'}/100</i></b><meter min="0" max="100" value="${r.parts?.[k]??0}"></meter></div>`).join('');
   const contribs=[...(r.contrib||[])].sort((a,b)=>Math.abs(b.impact)-Math.abs(a.impact)).slice(0,36).map(x=>`<div class="rr-contrib"><div><b>${escHtml(x.name)}</b><small>${RADAR_GROUPS[x.group]?.label||x.group} · percentile ${fmt(x.p*100,0)}</small></div><b class="${x.impact>=0?'pos':'neg'}">${x.impact>=0?'+':''}${fmt(x.impact,3)}</b></div>`).join('');
   const gate=r.rocketReady?'Meets the model’s high-feasibility criteria.':'Feasibility cautions: '+escHtml((r.gateReasons||[]).join(', ')||'not evaluated')+'.';
@@ -10469,11 +10514,11 @@ function showRadarDetail(sym){
   const bandNote=r.meta?.bandNote?` ${escHtml(r.meta.bandNote)}.`:'';
   const masterNote=r.meta?.securityMaster?` ISIN ${escHtml(r.meta.securityMaster.isin||'—')}${r.meta.securityMaster.listingDate?`, listed ${escHtml(r.meta.securityMaster.listingDate)}`:''}.`:'';
   const detailNote=(r.contrib||[]).length?'':'<div style="color:var(--amber);font-size:13px;margin-bottom:8px">Restored compact ranking — load files again for the full per-feature breakdown.</div>';
-  document.getElementById('radarDetailBody').innerHTML=`${detailNote}<div class="rr-groups">${groups}</div>
+  document.getElementById('radarDetailBody').innerHTML=`${detailNote}${decisionRead}<div class="rr-groups">${groups}</div>
     <div class="rr-read"><b>Exchange check:</b> Series ${escHtml(r.series||'—')}, price band ${r.band??'not supplied'}, status ${escHtml(r.status||'—')}; basket ${r.basketEligible!==false?'eligible':'ineligible'}. Official delivery ${r.meta?.delivery==null?'unavailable':fmt(r.meta.delivery,1)+'%'}, trades ${r.meta?.trades==null?'unavailable':fmt(r.meta.trades,0)}, surveillance triggers: ${flags}.${bandNote}${varNote}${masterNote}${corpNote}${triggerNote}<br>
     <b>Feasibility:</b> ${gate} Strongest daily range estimate ${fmt(r.rangePct,2)}%; the session target takes ${fmt(r.stretch,2)}× that range. The stock remains ranked either way.${entryNote}<br>
     ${r.stage?`<b>Market-cycle stage:</b> ${radarStagePill(r)} — ${escHtml({1:'silent accumulation (quiet strength before a move)',2:'initial breakout',3:'event day (move may be event-driven)',4:'profit-booking (digesting a recent result)',5:'re-accumulation',6:'second leg'}[r.stage]||'')}.<br>`:''}
-    <b>Read:</b> ${escHtml(r.setup||'—')}. Data coverage ${r.quality!=null?fmt(r.quality*100,0)+'%':'—'}, day move ${(r.day??0)>=0?'+':''}${fmt(r.day,2)}%, relative volume ${r.relvol==null?'unavailable':fmt(r.relvol,2)+'×'}, turnover ${fV(r.turnover)}. Rank is relative, not a literal probability.</div>
+    <b>Read:</b> ${escHtml(r.setup||'—')}. Data coverage ${r.quality!=null?fmt(r.quality*100,0)+'%':'—'}, day move ${(r.day??0)>=0?'+':''}${fmt(r.day,2)}%, relative volume ${r.relvol==null?'unavailable':fmt(r.relvol,2)+'×'}, turnover ${fV(r.turnover)}. Decision Score is readiness evidence, not a literal profit probability.</div>
     ${contribs?`<h3 style="font-size:16px;margin:12px 0 8px">Largest feature contributions</h3><div class="rr-contribs">${contribs}</div>`:''}`;
   dlg.showModal();
 }
@@ -11884,10 +11929,10 @@ function compactRankingRows(rows){
   return (rows||[]).map(s=>({
     symbol:s.symbol,name:s.name,sector:s.sector,
     price:s.price,day:s.day,priceChange:s.priceChange,
-    score:s.score,rocketScore:s.rocketScore,rank:s.rank,
+    score:s.score,scoreVersion:s.scoreVersion||RADAR_SCORE_VERSION,scoreComponents:s.scoreComponents||null,rocketScore:s.rocketScore,rank:s.rank,
     setup:s.setup,risk:s.risk,series:s.series,band:s.band??null,status:s.status,
     basketEligible:s.basketEligible!==false,eqEligible:s.eqEligible!==false,
-    stretch:s.stretch,rangePct:s.rangePct,sessionVolatilityPct:s.sessionVolatilityPct??null,open1d:s.open1d??null,relvol:s.relvol??null,gap:s.gap??null,depthImbalance:s.depthImbalance??null,depthPct:s.depthPct??null,depthLive:!!s.depthLive,
+    stretch:s.stretch,rangePct:s.rangePct,sessionVolatilityPct:s.sessionVolatilityPct??null,open1d:s.open1d??null,relvol:s.relvol??null,relAt:s.relAt??null,volChg:s.volChg??null,gap:s.gap??null,depthImbalance:s.depthImbalance??null,depthPct:s.depthPct??null,depthLive:!!s.depthLive,
     gapSigned:s.gapSigned??null,changeOpen:s.changeOpen??null,
     turnover:s.turnover,atr:s.atr??null,quality:s.quality??null,
     high1d:s.high1d??null,low1d:s.low1d??null,vwap:s.vwap??null,bollUpper:s.bollUpper??null,keltUpper:s.keltUpper??null,
@@ -11967,7 +12012,7 @@ function applySavedFiltersForMode(mode){
             stopPct=Number(pol?.stopPct)>0?Number(pol.stopPct):null;
             targetReachable=pol?.reachable===true;
           }catch(e){}
-          return {symbol:s.symbol,entryPrice:s.price,score:s.score,rank:i+1,
+          return {symbol:s.symbol,entryPrice:s.price,score:s.score,scoreVersion:s.scoreVersion||RADAR_SCORE_VERSION,rank:i+1,
             // v1128: a control row is graded exactly like a pick but is NOT one — it is excluded
             // from every recommendation metric so the app never reports buying what it did not.
             control:controlSet.has(s.symbol)||undefined,
@@ -11994,7 +12039,7 @@ function applySavedFiltersForMode(mode){
         });
       window._lastObservedDailyMoves=buildObservedDailyMoves(raw);
       window._lastStockOutcomeScan={
-        date:uploadSession,sourceDate:uploadSession,ts:receivedAt,threshold,
+        date:uploadSession,sourceDate:uploadSession,ts:receivedAt,threshold,scoreVersion:RADAR_SCORE_VERSION,
         rows:window._lastObservedDailyMoves||[],
         recommendations
       };
@@ -12573,3 +12618,4 @@ function initNSELinks(){
   }
 }
 initNSELinks();
+window.ROCKET_APP_READY=true; // full script evaluated; automation may now call processFiles safely
