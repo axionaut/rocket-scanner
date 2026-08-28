@@ -1,5 +1,5 @@
-const BUILD_TS='2026-08-28 11:15 IST'; // release build time (IST)
-const APP_VERSION=1231; // v1231: depth over frequency, an archive decisions cannot read, stratified corpus rotation.
+const BUILD_TS='2026-08-28 12:22 IST'; // release build time (IST)
+const APP_VERSION=1232; // v1232: the score is recommendation strength again; deep pulls are rare and the press is capped.
 const RADAR_SCORE_VERSION='decision-readiness-v2';
 // v1093: a baseline reward:risk MEASURED on the cross-section (last completed bhav session) instead of learned from the owner's own fills - reported on every row, deliberately not enforced. Includes v1092: position size split by Radar score / stop distance, so equally-scored names carry equal RUPEE risk, plus an opt-in Risk /trade cap.
 // v556: parse the NSE Market Activity Report (MA<date>.csv) — official Nifty %, advances/declines and sector index moves shown as market CONTEXT in the status bar (EOD data, display only, never fed into per-row scoring); MA added to the ℹ️ file manifest.
@@ -3099,33 +3099,112 @@ function radarParticipationLevel(r){
   const ordinary=3*Math.LN2,strong=3*Math.LN3;
   return clamp01((ig-ordinary)/(strong-ordinary),0,1);
 }
+// v1232: THE SCORE IS RECOMMENDATION STRENGTH AGAIN. Owner, on the v1231 board: 74.8 and 73.1 were
+// not buyable while the one green row was 70.2.
+//
+// MEASURED on that board: 310 rows cleared the 60 bar and 3 were selectable; the 3 sat at score-rank
+// 49, 86 and 91 of 3,129; NONE of the top ten was buyable. Mean score of a selectable row 68.83
+// against 65.71 for the 307 over-bar rows that could not be bought - 3.1 points of separation. A
+// confirmed current tape, without which nothing can be bought at all, was worth 1.68 points of 100.
+//
+// The cause was v1230 making permissions small ADDITIVE components. v1228 had them multiplicative,
+// where each vetoes alone. That is restored here: the bar is the whole test again, so clearing 60
+// means buyable and row order IS recommendation order.
+//
+// PERMISSION IS NOT ALLOWED TO STARVE THE FETCH QUEUE. An absent tape scores 0.6, not 0: the queue
+// selects what to fetch through meetsRecommendationBar, so zeroing every row without candles would
+// stop candles ever being fetched (the v1203/v1227 starvation). Absent means "cannot act yet";
+// only a REJECTED tape is a veto. Nothing here consults meetsRecommendationBar - it reads the row's
+// own facts - so the score cannot recurse into the gate that reads the score.
+const RADAR_PERMISSION_TAPE_ABSENT=0.6;
+function radarPermissionLevel(r,tapeStanding){
+  const has=v=>v!==null&&v!==undefined&&v!==''&&Number.isFinite(Number(v));
+  if(!r) return {p:0,why:'no row'};
+  const veto=[];
+  // exchange truth
+  if(r.eqEligible===false||r.basketEligible===false) veto.push('not basket-eligible');
+  // the hard gates meetsRecommendationBar applies, priced into the number instead of hidden from it
+  if(r.recommendationTriggerBlocked===true) veto.push('trigger veto');
+  if(r.noHistory===true) veto.push('no multi-day history');
+  if(r.entryReady===false) veto.push('move already consumed');
+  if(r.intradaySellingToday===true) veto.push('selling today');
+  if(r.directionConfirmed!==true) veto.push('direction not confirmed');
+  const hasPred=has(r.predictiveLevel)&&Number(r.predictiveSessions)>=3;
+  if(!hasPred) veto.push('no qualified predictor');
+  if(veto.length) return {p:0,why:veto[0],vetoes:veto};
+  // continuous permissions
+  const f=has(r.feasibility)?clamp01(Number(r.feasibility),0,1):1;
+  const cf=has(r.circuitFeasibility)?clamp01(Number(r.circuitFeasibility),0,1):1;
+  const room=Math.min(f,cf);
+  if(!(room>0)) return {p:0,why:'no headroom to target',vetoes:['no headroom to target']};
+  // tape: confirmed proves it, absent defers it, rejected condemns it
+  let tape=RADAR_PERMISSION_TAPE_ABSENT,tapeWhy='no current tape';
+  if(has(tapeStanding)){
+    const ts=clamp01(Number(tapeStanding),0,1);
+    if(ts<=0) return {p:0,why:'tape rejected',vetoes:['tape rejected']};
+    tape=clamp01(0.6+0.4*ts,0,1); tapeWhy='tape '+(ts>=0.5?'confirming':'weak');
+  }
+  return {p:clamp01(room*tape,0,1),why:tapeWhy,room,tape};
+}
+// THE QUEUE MAY NOT ASK THE BAR'S QUESTION. The bar asks “can I buy this now?”, and since v1232
+// permission multiplies, so no row without a tape can clear it. If the fetch queue used that, no
+// row would ever be fetched, so no row would ever get a tape, so no row could ever clear it - the
+// v1203/v1227 starvation, and this release's own suite caught it before release.
+// The queue asks instead: IF the tape confirmed, would this be a recommendation? That is the row
+// scored with a confirmed tape - exactly the value a request could unlock.
+function radarPotentialScore(r){
+  try{ return Number(radarScoreComponents(r,1).total)||0; }catch(e){ return 0; }
+}
+function worthFetchingTape(r){
+  if(!r||r._held) return false;
+  if(r.scoreVersion&&r.scoreVersion!==RADAR_SCORE_VERSION) return false;
+  return radarPotentialScore(r)>=RECOMMEND_MIN_SCORE;
+}
 function radarScoreComponents(r,tapeStanding){
   const hasNumber=v=>v!==null&&v!==undefined&&v!==''&&Number.isFinite(Number(v));
-  const circuitKnown=!!r&&hasNumber(r.circuitFeasibility);
-  const hardBlocked=!r||r.eqEligible===false||r.basketEligible===false
-    ||(circuitKnown&&Number(r.circuitFeasibility)<=0);
-  if(hardBlocked) return {predictor:0,participation:0,direction:0,runway:0,feasibility:0,tape:0,total:0};
+  const zero={predictor:0,participation:0,direction:0,runway:0,feasibility:0,tape:0,
+              evidence:0,permission:0,total:0,block:'no row'};
+  if(!r) return zero;
+  const perm=radarPermissionLevel(r,tapeStanding);
   const trigger=Number.isFinite(Number(r.triggerFactor))?clamp01(Number(r.triggerFactor),0.5,1.5):1;
-  // Largest component: feature deciles recorded before the next session, learned only after it.
-  // Same-session motion confirms execution, but no longer dominates the score.
-  const hasPredictor=r.predictiveLevel!==null&&r.predictiveLevel!==undefined&&Number.isFinite(Number(r.predictiveLevel));
-  const predictorBase=hasPredictor?Number(r.predictiveLevel):0; // no qualified model means no predictor credit
-  const predictor=RADAR_SCORE_BUDGETS.predictor*clamp01(predictorBase*trigger,0,1);
-  const participation=RADAR_SCORE_BUDGETS.participation*radarParticipationLevel(r);
-  const range=Number(r.rangePct),fromOpen=Number(r.changeOpen);
-  const direction=RADAR_SCORE_BUDGETS.direction*((range>0&&fromOpen>0)?clamp01(fromOpen/(range*0.5),0,1):0);
+  const hasPredictor=hasNumber(r.predictiveLevel);
+  const predictorBase=hasPredictor?Number(r.predictiveLevel):0;   // no qualified model, no credit
+  const eP=clamp01(predictorBase*trigger,0,1);
+  const eA=radarParticipationLevel(r);
   const usedRaw=r.entryTiming&&r.entryTiming.rangeUsed,used=Number(usedRaw);
-  const runway=RADAR_SCORE_BUDGETS.runway*(hasNumber(usedRaw)?clamp01(1-used/75,0,1):0.5);
-  const f=hasNumber(r.feasibility)?clamp01(Number(r.feasibility),0,1):1;
-  const cf=circuitKnown?clamp01(Number(r.circuitFeasibility),0,1):1;
-  const feasibility=RADAR_SCORE_BUDGETS.feasibility*Math.min(f,cf);
-  const ts=hasNumber(tapeStanding)?clamp01(Number(tapeStanding),0,1):0.5;
-  const tape=RADAR_SCORE_BUDGETS.tape*ts;                                                 // absent tape is neutral, never positive proof
-  const rounded=Object.fromEntries(Object.entries({predictor,participation,direction,runway,feasibility,tape})
-    .map(([k,v])=>[k,+Math.max(0,Math.min(RADAR_SCORE_BUDGETS[k],v)).toFixed(1)]));
-  rounded.total=+Math.max(0,Math.min(100,Object.values(rounded).reduce((n,v)=>n+v,0))).toFixed(1);
-  return rounded;
+  const eR=hasNumber(usedRaw)?clamp01(1-used/75,0,1):0.5;
+  // EVIDENCE ACCUMULATES, IT DOES NOT AVERAGE. v1228 measured that a budget-weighted MEAN makes
+  // “good at everything” score like “extreme at one thing”, which is backwards for a stock about
+  // to run - it is extreme in one axis and ordinary elsewhere. My first v1232 form used a mean and
+  // the board collapsed to ZERO rows over the bar, because participation reads 0 on most rows at
+  // this hour and dragged every one of them down. Noisy-OR restored: one extreme axis carries a
+  // row on its own, and the axes it is ordinary on cost it nothing.
+  const wP=RADAR_SCORE_BUDGETS.predictor,wA=RADAR_SCORE_BUDGETS.participation,wR=RADAR_SCORE_BUDGETS.runway;
+  // Normalised by the noisy-OR of a PERFECT row, so evidence genuinely spans 0..1 and the owner's
+  // 60 bar keeps its meaning. Without this the accumulator tops out at 0.727 and the bar becomes
+  // unreachable - the board went to zero rows over it, which this release's own probe caught. The
+  // normaliser is a constant of the weights, not of the day, so the scale cannot drift.
+  const tot=wP+wA+wR,aP=wP/tot,aA=wA/tot,aR=wR/tot;
+  const nor=(x,y,z)=>1-(1-x*aP)*(1-y*aA)*(1-z*aR);
+  const evidence=clamp01(nor(eP,eA,eR)/nor(1,1,1),0,1);
+  const range=Number(r.rangePct),fromOpen=Number(r.changeOpen);
+  const dirLevel=(range>0&&fromOpen>0)?clamp01(fromOpen/(range*0.5),0,1):0;
+  const out={
+    // reported on the same scales as before so the tooltip still itemises the evidence
+    predictor:+(wP*eP).toFixed(1),
+    participation:+(wA*eA).toFixed(1),
+    runway:+(wR*eR).toFixed(1),
+    direction:+(RADAR_SCORE_BUDGETS.direction*dirLevel).toFixed(1),
+    feasibility:+(RADAR_SCORE_BUDGETS.feasibility*(perm.room??0)).toFixed(1),
+    tape:+(RADAR_SCORE_BUDGETS.tape*(perm.tape??0)).toFixed(1),
+    evidence:+evidence.toFixed(3),
+    permission:+(perm.p||0).toFixed(3),
+    block:perm.p>0?null:(perm.why||null)
+  };
+  out.total=+Math.max(0,Math.min(100,100*evidence*(perm.p||0))).toFixed(1);
+  return out;
 }
+
 function radarEvidenceScore(r,tapeStanding){return radarScoreComponents(r,tapeStanding).total;}
 function setRadarEvidenceScore(r,tapeStanding){
   const c=radarScoreComponents(r,tapeStanding);
@@ -3134,8 +3213,10 @@ function setRadarEvidenceScore(r,tapeStanding){
 }
 function radarScoreTitle(r){
   const c=r&&r.scoreComponents;
-  if(!c) return `Decision-readiness score. ${RECOMMEND_MIN_SCORE} is the policy bar; this is not a probability.`;
-  return `Decision readiness ${Number(c.total).toFixed(1)}/100: pre-move predictor ${Number(c.predictor).toFixed(1)}/${RADAR_SCORE_BUDGETS.predictor} (${r.predictiveModel||'warming up'}, ${Number(r.predictiveSessions)||0} resolved sessions) · participation ${Number(c.participation).toFixed(1)}/${RADAR_SCORE_BUDGETS.participation} · direction ${Number(c.direction).toFixed(1)}/${RADAR_SCORE_BUDGETS.direction} · runway ${Number(c.runway).toFixed(1)}/${RADAR_SCORE_BUDGETS.runway} · feasibility ${Number(c.feasibility).toFixed(1)}/${RADAR_SCORE_BUDGETS.feasibility} · tape ${Number(c.tape).toFixed(1)}/${RADAR_SCORE_BUDGETS.tape}. Policy bar ${RECOMMEND_MIN_SCORE}; not a profit probability.`;
+  if(!c) return `Recommendation strength. ${RECOMMEND_MIN_SCORE} is the policy bar.`;
+  const ev=`pre-move predictor ${Number(c.predictor).toFixed(1)}/${RADAR_SCORE_BUDGETS.predictor} · participation ${Number(c.participation).toFixed(1)}/${RADAR_SCORE_BUDGETS.participation} · runway ${Number(c.runway).toFixed(1)}/${RADAR_SCORE_BUDGETS.runway}`;
+  if(c.block) return `NOT ACTIONABLE - ${c.block}. Setup evidence ${(Number(c.evidence)*100).toFixed(0)}/100 (${ev}), but permission is zero so the score is zero. The score is what you can act on, not what looks interesting.`;
+  return `Recommendation strength ${Number(c.total).toFixed(1)} = evidence ${(Number(c.evidence)*100).toFixed(0)} × permission ${(Number(c.permission)*100).toFixed(0)}%. Evidence: ${ev}. Permission: headroom ${Number(c.feasibility).toFixed(1)}/${RADAR_SCORE_BUDGETS.feasibility} · tape ${Number(c.tape).toFixed(1)}/${RADAR_SCORE_BUDGETS.tape}${Number(c.permission)<1?' (an absent tape caps permission until candles confirm it)':''}. Policy bar ${RECOMMEND_MIN_SCORE}; not a profit probability.`;
 }
 // Columns that are EXPORTED but deliberately NOT modelled as features. Exporting and scoring are
 // separate decisions: the data stays available for derived signals and future use, it simply does
@@ -4039,6 +4120,14 @@ function applyIntradayReorder(rows){
       +`${t.agree?'':' · price and flow DIVERGE'}`
       :`first 15m ${r.intraday.first15Up?'up':'down'} · path ${(r.intraday.efficiency*100).toFixed(0)}% efficient`;
   });
+  // v1232: THE VETO FLAGS ARE SET ABOVE, AFTER THE SCORE WAS COMPUTED. Since permission now
+  // multiplies, a vetoed row would otherwise keep the score it was given before the veto existed -
+  // measured on the release board: SUBEXLTD, KOHINOOR and PKTEA each carried
+  // intradaySellingToday=true beside scores of 67.9 / 67.8 / 60.9, clearing a bar they could never
+  // pass. Rescore and re-rank once the flags are known, so the number and the verdict agree.
+  rows.forEach(r=>setRadarEvidenceScore(r,r._tapeStanding));
+  rows.sort((a,b)=>b.score-a.score||radarRankTieBreak(a,b));
+  rows.forEach((r,i)=>{r.rank=i+1;});
   return n;
 }
 
@@ -9965,7 +10054,14 @@ const FETCH_MAX_PER_DAY=400;
 // Owner risk preference, not a derived magnitude: how many of the day's leftover requests may go
 // to building measurement history rather than to a live decision. Small on purpose - the point is
 // that it disappears into the existing request pattern rather than adding a recognisable one.
-const CORPUS_MAX_PER_RUN=12;
+const CORPUS_MAX_PER_RUN=6;
+// OWNER RISK PREFERENCE, 2026-08-28, after a manual press fetched 128 symbols in one go.
+// This is NOT v1203's deleted cap coming back. That one ordered by CATEGORY and truncated, which
+// starved the second tier by construction (8 of 12 slots to the board, 6 of 10 open positions never
+// fetched). This cap is applied AFTER the measured gap/stake/urgency priority, so what it drops is
+// the least urgent tail rather than a whole class of row. Open positions sort to the front on stake
+// and urgency and cannot be cut by it.
+const FETCH_MAX_PER_RUN=40;
 let FETCH_LOG=[];
 let FETCH_LOG_DATE=null;
 function fetchBudgetLeft(){
@@ -10091,8 +10187,8 @@ function intradayFetchJobs(limit){
     seen.add(s); members.push({s,t,held:!!held,_pos:pos||null,_row:row||null});
   };
   Object.keys(posMap).forEach(k=>{ if(posMap[k]&&posMap[k].qty>0) add(k,true,posMap[k],rowOf(k)); });
-  (Array.isArray(ALL)?ALL:[]).filter(r=>meetsRecommendationBar(r))
-    .slice().sort((a,b)=>(a.rank??Infinity)-(b.rank??Infinity))
+  (Array.isArray(ALL)?ALL:[]).filter(r=>worthFetchingTape(r))
+    .slice().sort((a,b)=>radarPotentialScore(b)-radarPotentialScore(a))
     .forEach(r=>add(r.symbol,false,null,r));
   // v1208 admitted the day's winners AFTER the close. v1227 admits them ALL SESSION, because
   // membership was otherwise the decision set and the decision set is chosen by the score: the tape
@@ -10105,7 +10201,7 @@ function intradayFetchJobs(limit){
     try{ getGainerCohort().forEach(r=>add(r.symbol,false,null,r)); }catch(e){}
   }
   if(!members.length){
-    const untokened=(Array.isArray(ALL)?ALL:[]).filter(r=>meetsRecommendationBar(r))
+    const untokened=(Array.isArray(ALL)?ALL:[]).filter(r=>worthFetchingTape(r))
       .filter(r=>!KITE_TOKEN[normSym(r.symbol)]).map(r=>r.symbol).slice(0,5);
     return {ok:false,why:untokened.length?('no Kite instrument token for '+untokened.join(', '))
       :'nothing with a live decision to check'};
@@ -10184,12 +10280,25 @@ function intradayFetchJobs(limit){
           recs:queue.filter(j=>!j.held).length,held:queue.filter(j=>j.held).length,
           blocked:queue.filter(j=>j.blocked).length,movers:0};
 }
-// DEPTH IS FREE; REQUEST COUNT IS NOT. Measured 2026-08-28 on the live endpoint: one call with
-// days=60 returned 3,243 five-minute candles for ABB - about 43 sessions - against 3 sessions at
-// the old value, for the SAME single request. The corpus was never request-limited; it was limited
-// by what we asked for and by the trim that then discarded 69% of it (dev/server.js archives the
-// full pull before trimming). Raising this changes no request count, cadence or timing.
-const INTRADAY_FETCH_DAYS=60;  // calendar days of 5-minute candles per request (~43 sessions)
+// DEPTH IS PER SYMBOL AND RARE. A deep pull is worth ~43 sessions (measured: days=60 returned
+// 3,243 candles for ABB against 225 at days=3) - but a stock only needs that ONCE. Asking for it
+// on every press multiplied the DATA of a 128-stock press about 14x, which is a real change in
+// footprint even though the request COUNT and cadence are identical. It was wrong to call that
+// free. So: the routine press stays light, and at most BACKFILL_MAX_PER_RUN symbols that have no
+// stored history get the deep pull, in a separate small batch.
+const INTRADAY_FETCH_DAYS=3;        // routine press: today plus enough to bridge a weekend
+const INTRADAY_BACKFILL_DAYS=60;    // one-time per symbol (~43 sessions)
+const BACKFILL_MAX_PER_RUN=3;       // owner risk preference: deep pulls allowed per press
+const BACKFILL_MIN_SESSIONS=20;     // below this a symbol is considered un-backfilled
+// How many distinct sessions of tape we already hold for this symbol.
+function storedSessionCount(sym){
+  const bars=INTRADAY_BARS[normSym(sym)];
+  if(!bars||!bars.length) return 0;
+  const d=new Set();
+  for(const b of bars){ const k=istDayKey(b.t); if(k) d.add(k); }
+  return d.size;
+}
+function needsBackfill(sym){ return storedSessionCount(sym)<BACKFILL_MIN_SESSIONS; }
 
 // Kite returns candles as [isoTime, open, high, low, close, volume]. That is the SAME information
 // the pasted table carries, so it is converted into the identical CSV and handed to the ONE parser
@@ -10463,14 +10572,30 @@ async function fetchCandlesInApp(limit,opts){
       for(const c of corpusRotationJobs(spare)) if(!seen.has(c.s)){ seen.add(c.s); jobs.push(c); }
     }
   }catch(e){ console.warn('corpus rotation skipped',e); }
+  if(jobs.length>FETCH_MAX_PER_RUN) jobs.length=FETCH_MAX_PER_RUN;   // least-urgent tail only
   jobs.forEach(()=>FETCH_LOG.push(Date.now()));
   FETCH_BUSY={n:jobs.length,syms:jobs.map(j=>j.s),at:Date.now()};
   try{ renderTable(); }catch(e){}
   say('Fetching '+jobs.map(j=>j.s).join(', ')+'…',3000);
   try{
-    const q=jobs.map(j=>j.s+':'+j.t).join(',');
-    const res=await fetch(KITE_HELPER+'/api/kite/candles?days='+INTRADAY_FETCH_DAYS+'&jobs='+encodeURIComponent(q),{cache:'no-store'});
-    const j=await res.json();
+    // Deep pulls are rare by construction: only symbols with no stored history, and never more
+    // than BACKFILL_MAX_PER_RUN of them. Every other symbol is a light request exactly as before,
+    // so a routine press carries the same payload it always did.
+    const deep=jobs.filter(x=>needsBackfill(x.s)).slice(0,BACKFILL_MAX_PER_RUN);
+    const deepSet=new Set(deep.map(x=>x.s));
+    const light=jobs.filter(x=>!deepSet.has(x.s));
+    const callFor=async(list,days)=>{
+      if(!list.length) return {ok:true,data:{},files:{}};
+      const qq=list.map(x=>x.s+':'+x.t).join(',');
+      const rr=await fetch(KITE_HELPER+'/api/kite/candles?days='+days+'&jobs='+encodeURIComponent(qq),{cache:'no-store'});
+      return await rr.json();
+    };
+    const jLight=await callFor(light,INTRADAY_FETCH_DAYS);
+    const jDeep=await callFor(deep,INTRADAY_BACKFILL_DAYS);
+    const j={ok:(jLight.ok!==false)||(jDeep.ok!==false),
+             why:jLight.why||jDeep.why,
+             data:Object.assign({},jLight.data||{},jDeep.data||{}),
+             files:Object.assign({},jLight.files||{},jDeep.files||{})};
     if(!j.ok){ say(j.why,8000,true); return; }
     const out=ingestKiteCandlePayload(JSON.stringify({rocketScanner:'candles',data:j.data}));
     LAST_FETCH_HIDDEN=false;
