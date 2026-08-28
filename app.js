@@ -1,6 +1,6 @@
-const BUILD_TS='2026-08-27 10:08 IST'; // release build time (IST)
-const APP_VERSION=1229; // v1229: one rank-free decision score, versioned outcomes, and matching UI/audit bands.
-const RADAR_SCORE_VERSION='decision-readiness-v1';
+const BUILD_TS='2026-08-28 10:00 IST'; // release build time (IST)
+const APP_VERSION=1230; // v1230: causal next-session predictor replaces same-session chase dominance.
+const RADAR_SCORE_VERSION='decision-readiness-v2';
 // v1093: a baseline reward:risk MEASURED on the cross-section (last completed bhav session) instead of learned from the owner's own fills - reported on every row, deliberately not enforced. Includes v1092: position size split by Radar score / stop distance, so equally-scored names carry equal RUPEE risk, plus an opt-in Risk /trade cap.
 // v556: parse the NSE Market Activity Report (MA<date>.csv) — official Nifty %, advances/declines and sector index moves shown as market CONTEXT in the status bar (EOD data, display only, never fed into per-row scoring); MA added to the ℹ️ file manifest.
 // v555 market-cycle stage awareness (stateless, self-calibrating): per-row stage label (1 accumulation · 2 breakout · 3 event · 4 profit-booking · 5 re-accumulation · 6 second-leg); a quiet-accumulation signal (conjunction-of-percentiles) injected via the rocket-diagnostic weighting; sell-the-news decay off Recent earnings date (horizon = review days). v1065 makes the market-breadth gauge an entry-eligibility input while still never changing ranking.
@@ -106,7 +106,7 @@ const SHARED_FILTER_STORE='rs_filters_shared';
 const TRADE_INPUTS_STORE='rs_trade_inputs_v1';
 let _lastTradeInputSig=''; // gate brain writes to genuine trade-input changes, not every keystroke
 const ALL_STORE='rs_data';
-const ALL_STORE_SCHEMA='radar_composite_v13'; // v1229 invalidates cached rows from incompatible score scales.
+const ALL_STORE_SCHEMA='radar_composite_v14'; // v1230 invalidates cached rows from the pre-predictor score scale.
 const HOLD_STORE='rs_holdings';
 const ORDERS_STORE='rs_orders';
 const POS_STORE='rs_positions';
@@ -3076,26 +3076,17 @@ const RADAR_GROUPS={
   volatility:{label:'Volatility',budget:8,desc:'ATR and range expansion without chaos'},
   context:{label:'Context',budget:5,desc:'Sector-relative regime and fundamentals'}
 };
+// One source for the six component budgets: the multiplier that fills a slot and the cap that
+// bounds it must never be two separate numbers.
+const RADAR_SCORE_BUDGETS={predictor:35,participation:15,direction:15,runway:15,feasibility:10,tape:10};
 const RADAR_RATING={'strong sell':-2,'sell':-1,'neutral':0,'buy':1,'strong buy':2};
 // THE DECISION SCORE. One number, but not a disguised rank and not a probability.
 //
-// The model component below is explicitly SAME-SESSION evidence: its feature inputs are
-// cross-sectional percentiles. It is useful context, but cannot honestly be called absolute or
-// comparable across sessions. The rest of the score uses fixed, inspectable meanings: volume
-// against its own normal level, post-open travel against the stock's own expected range, remaining
-// range runway, target/circuit feasibility, and current 5-minute standing. The six components add
-// to 100 points. Hard permissions still zero the score; final recommendation gates remain separate.
-function radarEvidenceLevel(r){
-  let miss=1;
-  const parts=(r&&r.parts)||{};
-  for(const g in RADAR_GROUPS){
-    const p=Number(parts[g]);
-    if(!Number.isFinite(p)) continue;
-    const e=clamp01((p-50)/50,0,1);
-    miss*=(1-e*(RADAR_GROUPS[g].budget/100));
-  }
-  return 1-miss;
-}
+// The leading component is a causal next-session model: feature deciles are frozen on session D,
+// the D+1 mover set is attached only later, and direct descriptions of D's move are excluded. The
+// rest uses fixed meanings: participation, post-open travel, remaining runway, target/circuit
+// feasibility and current 5-minute standing. The six components add to 100; permissions remain
+// separate recommendation gates.
 function radarParticipationLevel(r){
   const values=[];
   const rv=Number(r&&r.relvol),rat=Number(r&&r.relAt),vc=Number(r&&r.volChg);
@@ -3111,23 +3102,27 @@ function radarParticipationLevel(r){
 function radarScoreComponents(r,tapeStanding){
   const hasNumber=v=>v!==null&&v!==undefined&&v!==''&&Number.isFinite(Number(v));
   const circuitKnown=!!r&&hasNumber(r.circuitFeasibility);
-  const hardBlocked=!r||!r.directionConfirmed||r.eqEligible===false||r.basketEligible===false
+  const hardBlocked=!r||r.eqEligible===false||r.basketEligible===false
     ||(circuitKnown&&Number(r.circuitFeasibility)<=0);
-  if(hardBlocked) return {model:0,participation:0,direction:0,runway:0,feasibility:0,tape:0,total:0};
+  if(hardBlocked) return {predictor:0,participation:0,direction:0,runway:0,feasibility:0,tape:0,total:0};
   const trigger=Number.isFinite(Number(r.triggerFactor))?clamp01(Number(r.triggerFactor),0.5,1.5):1;
-  const model=25*clamp01(radarEvidenceLevel(r)*trigger,0,1);
-  const participation=25*radarParticipationLevel(r);
+  // Largest component: feature deciles recorded before the next session, learned only after it.
+  // Same-session motion confirms execution, but no longer dominates the score.
+  const hasPredictor=r.predictiveLevel!==null&&r.predictiveLevel!==undefined&&Number.isFinite(Number(r.predictiveLevel));
+  const predictorBase=hasPredictor?Number(r.predictiveLevel):0; // no qualified model means no predictor credit
+  const predictor=RADAR_SCORE_BUDGETS.predictor*clamp01(predictorBase*trigger,0,1);
+  const participation=RADAR_SCORE_BUDGETS.participation*radarParticipationLevel(r);
   const range=Number(r.rangePct),fromOpen=Number(r.changeOpen);
-  const direction=20*((range>0&&fromOpen>0)?clamp01(fromOpen/(range*0.5),0,1):0);
+  const direction=RADAR_SCORE_BUDGETS.direction*((range>0&&fromOpen>0)?clamp01(fromOpen/(range*0.5),0,1):0);
   const usedRaw=r.entryTiming&&r.entryTiming.rangeUsed,used=Number(usedRaw);
-  const runway=10*(hasNumber(usedRaw)?clamp01(1-used/75,0,1):0.5);
+  const runway=RADAR_SCORE_BUDGETS.runway*(hasNumber(usedRaw)?clamp01(1-used/75,0,1):0.5);
   const f=hasNumber(r.feasibility)?clamp01(Number(r.feasibility),0,1):1;
   const cf=circuitKnown?clamp01(Number(r.circuitFeasibility),0,1):1;
-  const feasibility=10*Math.min(f,cf);
+  const feasibility=RADAR_SCORE_BUDGETS.feasibility*Math.min(f,cf);
   const ts=hasNumber(tapeStanding)?clamp01(Number(tapeStanding),0,1):0.5;
-  const tape=10*ts;                                                 // absent tape is neutral, never positive proof
-  const rounded=Object.fromEntries(Object.entries({model,participation,direction,runway,feasibility,tape})
-    .map(([k,v])=>[k,+Math.max(0,Math.min(25,v)).toFixed(1)]));
+  const tape=RADAR_SCORE_BUDGETS.tape*ts;                                                 // absent tape is neutral, never positive proof
+  const rounded=Object.fromEntries(Object.entries({predictor,participation,direction,runway,feasibility,tape})
+    .map(([k,v])=>[k,+Math.max(0,Math.min(RADAR_SCORE_BUDGETS[k],v)).toFixed(1)]));
   rounded.total=+Math.max(0,Math.min(100,Object.values(rounded).reduce((n,v)=>n+v,0))).toFixed(1);
   return rounded;
 }
@@ -3140,7 +3135,7 @@ function setRadarEvidenceScore(r,tapeStanding){
 function radarScoreTitle(r){
   const c=r&&r.scoreComponents;
   if(!c) return `Decision-readiness score. ${RECOMMEND_MIN_SCORE} is the policy bar; this is not a probability.`;
-  return `Decision readiness ${Number(c.total).toFixed(1)}/100: model ${Number(c.model).toFixed(1)}/25 · participation ${Number(c.participation).toFixed(1)}/25 · direction ${Number(c.direction).toFixed(1)}/20 · runway ${Number(c.runway).toFixed(1)}/10 · feasibility ${Number(c.feasibility).toFixed(1)}/10 · tape ${Number(c.tape).toFixed(1)}/10. Policy bar ${RECOMMEND_MIN_SCORE}; not a profit probability.`;
+  return `Decision readiness ${Number(c.total).toFixed(1)}/100: pre-move predictor ${Number(c.predictor).toFixed(1)}/${RADAR_SCORE_BUDGETS.predictor} (${r.predictiveModel||'warming up'}, ${Number(r.predictiveSessions)||0} resolved sessions) · participation ${Number(c.participation).toFixed(1)}/${RADAR_SCORE_BUDGETS.participation} · direction ${Number(c.direction).toFixed(1)}/${RADAR_SCORE_BUDGETS.direction} · runway ${Number(c.runway).toFixed(1)}/${RADAR_SCORE_BUDGETS.runway} · feasibility ${Number(c.feasibility).toFixed(1)}/${RADAR_SCORE_BUDGETS.feasibility} · tape ${Number(c.tape).toFixed(1)}/${RADAR_SCORE_BUDGETS.tape}. Policy bar ${RECOMMEND_MIN_SCORE}; not a profit probability.`;
 }
 // Columns that are EXPORTED but deliberately NOT modelled as features. Exporting and scoring are
 // separate decisions: the data stays available for derived signals and future use, it simply does
@@ -3404,6 +3399,8 @@ function meetsRecommendationBar(s){
   if(s.scoreVersion!==RADAR_SCORE_VERSION) return false; // never apply today's policy bar to an old scale
   if(s.recommendationTriggerBlocked===true)return false;
   if(s.noHistory===true) return false;   // v1170: no multi-day history, so nothing to rank it on
+  if(s.predictiveLevel===null||s.predictiveLevel===undefined||!Number.isFinite(Number(s.predictiveLevel))||Number(s.predictiveSessions)<3) return false;
+  if(s.directionConfirmed!==true) return false; // prediction may score early; execution still needs a live bullish turn
   if(s.entryReady===false) return false; // a consumed/failed move is not made buyable by a strong setup
   if(s.intradaySellingToday===true) return false;
   // Score is the one numeric policy bar. Rank remains internal row order only; all other safety and
@@ -3419,11 +3416,13 @@ function isSelectableRecommendation(s){
   return !!s&&s.basketEligible!==false&&meetsRecommendationBar(s)&&passesIntradayValidation(s);
 }
 // Score number + proportional bar, both tinted by the band.
-function radarScoreCell(score,title=''){
+function radarScoreCell(score,title='',recommendationState=null){
   const s=Number(score);
   if(score===null||score===undefined||!isFinite(s)) return '<span class="sc-m" style="color:var(--t3)">—</span>';
-  const c=radarScoreColor(s);
   const ok=meetsScoreBar(s);
+  // In the recommendation table green means actionable. A score above the numeric bar while an
+  // independent gate is pending is amber, matching the disabled checkbox beside it.
+  const c=ok&&recommendationState===false?'var(--amber)':radarScoreColor(s);
   const tip=title||(ok?`Clears the decision-score policy bar (${RECOMMEND_MIN_SCORE}); all independent gates must still pass.`
     :`Below the decision-score policy bar — ${s.toFixed(1)} against ${RECOMMEND_MIN_SCORE}. This score is readiness evidence, not a profit probability.`);
   return `<span class="sc-m" style="color:${c}" title="${escHtml(tip)}">${s.toFixed(1)}${ok?'':'<sub style="font-size:9px;color:var(--t3)">\u25be</sub>'}</span>`
@@ -3538,6 +3537,40 @@ function getForwardIndicatorEffects(){
   if(peak>0) raw.forEach(r=>map.set(r.name,{effect:clamp01(r.mean/peak,-1,1),gap:r.mean,n:r.n,t:r.t}));
   _fwdEffMemo={src:log,longSrc:longLog,map};
   return map;
+}
+let _nextEffectMemo=null;
+const NEXT_PREDICTOR_PROFILES=['preMove','setupOnly','all'];
+function isNextPredictorFeature(name,profile='preMove'){
+  // These fields describe the move already happening in the anchor session. They remain valid
+  // confirmation evidence elsewhere, but cannot earn pre-move prediction points.
+  const s=String(name||'');
+  if(profile==='all') return true;
+  if(/(change from open|change %, 1 day|relative volume|volume change|volume, 1 day|price,?\s*(5 minutes|15 minutes|1 hour)|vwap|gap %, 1 day)/i.test(s)) return false;
+  if(profile==='setupOnly'&&/(volume|rating)/i.test(s)) return false;
+  return true;
+}
+function buildNextEffectMap(log,profile='preMove'){
+  const usable=[];
+  Object.entries(log||{}).forEach(([name,e])=>{
+    if(!isNextPredictorFeature(name,profile)) return;
+    const a=Array.isArray(e?.e5)?e.e5.map(Number).filter(Number.isFinite):[];
+    if(a.length<3) return; // no prediction from a one- or two-session coincidence
+    const mean=a.reduce((x,y)=>x+y,0)/a.length;
+    const agree=a.filter(x=>Math.sign(x)===Math.sign(mean)).length/a.length;
+    if(agree<2/3||Math.abs(mean)<0.035) return;
+    usable.push({name,gap:mean*(a.length/(a.length+5)),n:a.length,agree});
+  });
+  const peak=usable.reduce((m,x)=>Math.max(m,Math.abs(x.gap)),0),map=new Map();
+  if(peak>0) usable.forEach(x=>map.set(x.name,{effect:clamp01(x.gap/peak,-1,1),gap:x.gap,n:x.n,agree:x.agree}));
+  return map;
+}
+function getNextSessionIndicatorEffects(){
+  const iw=FS.get(INDICATOR_WATCH_STORE)||{},log=iw.logNext||{};
+  if(_nextEffectMemo&&_nextEffectMemo.src===log&&_nextEffectMemo.champion===iw.nextChampion) return _nextEffectMemo;
+  const champion=iw.nextChampion==='none'?'none':(NEXT_PREDICTOR_PROFILES.includes(iw.nextChampion)?iw.nextChampion:'preMove');
+  const map=champion==='none'?new Map():buildNextEffectMap(log,champion);
+  _nextEffectMemo={src:log,map,sessions:Number(iw.resolvedNextSessions)||0,champion};
+  return _nextEffectMemo;
 }
 let INTRADAY_BARS={};        // symbol -> [{t,o,h,l,c}] most recent session last
 let INTRADAY_TARGET='';      // which row the next paste belongs to (the paste carries no symbol)
@@ -4100,6 +4133,8 @@ function radarAnalyze(headers,rawRows,supplements={},heldSymbols=new Set()){
   const rocketCohortTrusted=false;
   // v1135: forward-measured effects, resolved once per pass (see getForwardIndicatorEffects).
   const fwdEffects=(typeof getForwardIndicatorEffects==='function')?getForwardIndicatorEffects():new Map();
+  const nextPrediction=(typeof getNextSessionIndicatorEffects==='function')?getNextSessionIndicatorEffects():{map:new Map(),sessions:0};
+  const nextEffects=nextPrediction.map||new Map();
   const features=[];
   for(let i=0;i<headers.length;i++){
     const name=headers[i],rating=/rating/i.test(name);
@@ -4131,8 +4166,11 @@ function radarAnalyze(headers,rawRows,supplements={},heldSymbols=new Set()){
     // v1135: the SAME-DAY separation stays diagnostic-only, exactly as v1085 requires. The effect
     // that now drives the weight is the FORWARD one, measured 5 sessions after the fact.
     const _fwd=fwdEffects.get(f.name);
+    const _next=nextEffects.get(f.name);
     f.forwardEffect=_fwd?_fwd.effect:null;
     f.forwardSessions=_fwd?_fwd.n:0;
+    f.nextEffect=_next?_next.effect:null;
+    f.nextSessions=_next?_next.n:0;
     f.effect=_fwd?_fwd.effect:(rocketCohortTrusted?f.diagnosticEffect:0);
     f.reliability=Math.sqrt(f.coverage)*(rocketRows.length/(rocketRows.length+12));
     f.weight=(.07+Math.abs(f.effect))*.6+.4*Math.sqrt(f.coverage);
@@ -4202,6 +4240,7 @@ function radarAnalyze(headers,rawRows,supplements={},heldSymbols=new Set()){
   const STAGE_LABEL={1:'Accumulation',2:'Breakout',3:'Event day',4:'Profit-booking',5:'Re-accumulation',6:'Second leg'};
   const allRows=rawRows.map((raw,ri)=>{
     const parts={},weights={},contrib=[];
+    let predictiveSum=0,predictiveWeight=0;
     for(const g in RADAR_GROUPS){parts[g]=0;weights[g]=0;}
     let observed=0;
     for(const f of features){
@@ -4213,6 +4252,11 @@ function radarAnalyze(headers,rawRows,supplements={},heldSymbols=new Set()){
       v=clamp01(v,f.lo,f.hi);
       const p=radarPct(f.sorted,v),learn=Math.sign(f.effect||1)*(2*p-1),alpha=clamp01(Math.abs(f.effect)*1.35,.12,.58),sig=alpha*learn+(1-alpha)*radarPrior(f,p),w=f.weight;
       parts[f.group]+=sig*w;weights[f.group]+=w;observed++;
+      if(Number.isFinite(f.nextEffect)){
+        const pw=Math.abs(f.nextEffect);
+        predictiveSum+=pw*Math.sign(f.nextEffect)*(2*p-1);
+        predictiveWeight+=pw;
+      }
       contrib.push({name:f.name,group:f.group,p,sig,impact:sig*w});
     }
     // WS4/R6: sector-relative day signal into Momentum, using the identical signal formula and a
@@ -4372,6 +4416,8 @@ function radarAnalyze(headers,rawRows,supplements={},heldSymbols=new Set()){
     if(price<5)rawScore-=5;
     const dispDay=meta._corpNeutralised&&meta._realDay!=null?meta._realDay:day;
     const out={symbol,name:String(raw[descI]||symbol),sector:raw[sectorI]||'',rawScore,parts,contrib,quality,
+      predictiveRaw:predictiveWeight?predictiveSum/predictiveWeight:null,predictiveSessions:nextPrediction.sessions||0,
+      predictiveModel:nextPrediction.champion||'preMove',
       price,day:dispDay,priceChange:dispDay,turnover:turn,relvol,relAt,volChg,gap,gapSigned,changeOpen,rangePct,sessionVolatilityPct,stretch,stretchBarPct:_stretchBar,atr:atrPct,
       high1d:highI>=0?radarNum(raw[highI]):null,low1d:lowI>=0?radarNum(raw[lowI]):null,dayVolume:dayVolI>=0?radarNum(raw[dayVolI]):null,open1d:openI>=0?radarNum(raw[openI]):null,marketCap:mcapI>=0?radarNum(raw[mcapI]):null,rocketToday:rset.has(ri),
       vwap:vwapI>=0?radarNum(raw[vwapI]):null,
@@ -4391,6 +4437,11 @@ function radarAnalyze(headers,rawRows,supplements={},heldSymbols=new Set()){
     out.entryTiming=getPeakEntryTiming(out);
     out.entryReady=!out.entryTiming.blocked;
     return out;
+  });
+  const predictiveSorted=allRows.map(r=>r.predictiveRaw).filter(Number.isFinite).sort((a,b)=>a-b);
+  allRows.forEach(r=>{
+    r.predictiveLevel=Number.isFinite(r.predictiveRaw)&&predictiveSorted.length
+      ?radarPct(predictiveSorted,r.predictiveRaw):null;
   });
   allRows.forEach(r=>{r._held=heldSymbols.has(r.symbol);});
   const rows=allRows;
@@ -4729,6 +4780,105 @@ function getMarginDirection(sym){
   return {delta:+(e.v-e.prev).toFixed(2),from:e.prev,to:e.v,on:e.on,prevOn:e.prevOn,
           direction:e.v>e.prev?'expanding':e.v<e.prev?'contracting':'flat'};
 }
+function scoreIwAnchor(a,flat,effectMap){
+  const weights=a.featNames.map(n=>effectMap.get(n)?.effect||0);
+  const denom=weights.reduce((n,x)=>n+Math.abs(x),0);
+  if(!(denom>0)) return [];
+  const rows=[];
+  for(let r=0;r<a.ns;r++){
+    let sum=0,seen=0;
+    for(let i=0;i<a.nF;i++){
+      const w=weights[i],d=flat[r*a.nF+i]; if(!w||d===255) continue;
+      sum+=Math.abs(w)*Math.sign(w)*((d-4.5)/4.5); seen+=Math.abs(w);
+    }
+    if(seen) rows.push({symbol:a.symbols[r],score:sum/seen});
+  }
+  return rows.sort((x,y)=>y.score-x.score);
+}
+function updateNextModelChampion(store){
+  const summaries=[];
+  for(const profile of NEXT_PREDICTOR_PROFILES){
+    const rows=(store.nextModelAudit||[]).filter(x=>x.profile===profile&&Number.isFinite(x.netMean)).slice(-5);
+    if(rows.length<5) continue;
+    const mean=rows.reduce((n,x)=>n+x.netMean,0)/rows.length;
+    const consistent=rows.filter(x=>x.netMean>0).length/rows.length;
+    summaries.push({profile,mean,consistent,n:rows.length});
+  }
+  if(!summaries.length) return store.nextChampion||'preMove';
+  const working=summaries.filter(x=>x.mean>0&&x.consistent>=0.6)
+    .sort((a,b)=>b.mean-a.mean||b.consistent-a.consistent);
+  store.nextChampion=working[0]?.profile||'none';
+  store.nextChampionStats=working[0]||{profile:'none',mean:null,consistent:0,n:5};
+  return store.nextChampion;
+}
+function auditNextModelProfiles(store,a,flat,next,moverSet){
+  const history=FS.get(PRICE_HISTORY_STORE)?.sessions||{},from=history[a.date]||{},to=history[next.date]||{};
+  store.nextModelAudit=store.nextModelAudit||[];
+  for(const profile of NEXT_PREDICTOR_PROFILES){
+    const map=buildNextEffectMap(store.logNext||{},profile),top=scoreIwAnchor(a,flat,map).slice(0,20);
+    if(!top.length) continue;
+    const gross=top.map(x=>{
+      const p0=phClose(from[x.symbol]),p1=phClose(to[x.symbol]);
+      return p0>0&&p1>0?(p1/p0-1)*100:null;
+    }).filter(Number.isFinite);
+    const grossMean=gross.length>=5?gross.reduce((n,x)=>n+x,0)/gross.length:null;
+    const cost=grossMean===null?null:estimateRoundTripCostPct(Math.max(0.5,Math.abs(grossMean)));
+    const rec={anchor:a.date,next:next.date,profile,n:top.length,
+      hits:top.filter(x=>moverSet.has(x.symbol)).length,
+      grossN:gross.length,grossMean:grossMean===null?null:+grossMean.toFixed(3),
+      netMean:grossMean===null?null:+(grossMean-cost).toFixed(3),
+      positive:gross.length?gross.filter(x=>x>0).length/gross.length:null};
+    store.nextModelAudit=store.nextModelAudit.filter(x=>!(x.anchor===a.date&&x.profile===profile));
+    store.nextModelAudit.push(rec);
+  }
+  store.nextModelAudit.sort((x,y)=>String(x.anchor).localeCompare(String(y.anchor))||String(x.profile).localeCompare(String(y.profile)));
+  store.nextModelAudit=store.nextModelAudit.slice(-90);
+  updateNextModelChampion(store);
+}
+async function iwResolveNext(store,a,cutoffDate=null){
+  try{
+    const next=(store.dailyMovers||[]).filter(x=>String(x.date)>String(a.date))
+      .sort((x,y)=>String(x.date).localeCompare(String(y.date)))[0];
+    if(!next||Number(tradingDaysBetween(a.date,next.date))!==1) return false;
+    // Never let a still-forming session teach a score produced in that same session. Its last
+    // snapshot becomes an outcome only when a later trading session is being processed.
+    if(cutoffDate&&String(next.date)>=String(cutoffDate)) return false;
+    const moverSet=new Set(next.m5||[]);
+    const flat=await iwInflate(a.packed),nF=a.nF,syms=a.symbols;
+    if(moverSet.size<IW_MIN_MOVERS) return false;
+    store.logNext=store.logNext||{};
+    // Grade the model that existed BEFORE this outcome, then append the outcome to training.
+    // This ordering is the anti-leakage boundary for champion/challenger selection.
+    auditNextModelProfiles(store,a,flat,next,moverSet);
+    for(let i=0;i<nF;i++){
+      let ms=0,mc=0,ns=0,nc=0;
+      for(let r=0;r<syms.length;r++){
+        const d=flat[r*nF+i]; if(d===255) continue;
+        if(moverSet.has(syms[r])){ms+=d;mc++;}else{ns+=d;nc++;}
+      }
+      if(mc<5||nc<20) continue;
+      const effect=((ms/mc)-(ns/nc))/9;
+      const name=a.featNames[i],rec=store.logNext[name]||(store.logNext[name]={e5:[]});
+      rec.e5.push(+effect.toFixed(4));
+      if(rec.e5.length>IW_LOG_MAX) rec.e5.shift();
+    }
+    store.resolvedNextSessions=(store.resolvedNextSessions||0)+1;
+    return true;
+  }catch(e){console.warn('iwResolveNext failed',e);return false;}
+}
+async function resolveIndicatorWatchNextBacklog(cutoffDate){
+  const store=getIndicatorWatchStore(); let changed=false;
+  for(const a of store.pending||[]){
+    if(a.nextDone) continue;
+    if(await iwResolveNext(store,a,cutoffDate)){a.nextDone=true;changed=true;}
+  }
+  if(changed){
+    store.updatedAt=new Date().toISOString();
+    _nextEffectMemo=null;
+    FS.set(INDICATOR_WATCH_STORE,store);
+  }
+  return changed;
+}
 async function recordIndicatorWatch(sessionDate){
   try{
     if(!Array.isArray(ALL)||!ALL.length||!RADAR.features?.length) return;
@@ -4780,6 +4930,7 @@ async function recordIndicatorWatch(sessionDate){
     const stillPending=[];
     for(const a of store.pending){
       const elapsed=Number(tradingDaysBetween(a.date,sessionDate));
+      if(elapsed>=1&&!a.nextDone&&await iwResolveNext(store,a,sessionDate)) a.nextDone=true;
       // v1136: resolve a SECOND time, earlier and conditioned, into store.logShort. An anchor still
       // matures at IW_WINDOW for the orientation guardrail; this extra pass is what feeds the SCORE.
       if(elapsed>=ROCKET_HORIZON_DAYS&&!a.shortDone){a.shortDone=true;await iwResolveShort(store,a);}
@@ -4787,6 +4938,7 @@ async function recordIndicatorWatch(sessionDate){
       await iwResolveAnchor(store,a);
     }
     store.pending=stillPending;
+    _nextEffectMemo=null;
     store.updatedAt=new Date().toISOString();
     FS.set(INDICATOR_WATCH_STORE,store);
   }catch(e){console.warn('recordIndicatorWatch failed',e);}
@@ -7973,8 +8125,8 @@ function _renderMethodologyInner(){
       <a href="#meth-filters" onclick="event.preventDefault();scrollToSection('meth-filters')" style="padding:4px 12px;border-radius:6px;background:var(--bg-card);border:1px solid var(--border);color:var(--t2);font-size:13px;font-weight:600;text-decoration:none;cursor:pointer">🛡 Surveillance</a>
       <a href="#meth-guide" onclick="event.preventDefault();scrollToSection('meth-guide')" style="padding:4px 12px;border-radius:6px;background:var(--bg-card);border:1px solid var(--border);color:var(--t2);font-size:13px;font-weight:600;text-decoration:none;cursor:pointer">📖 Use & Risk</a>
     </nav>
-    <h3 id="meth-scoring">Radar Composite — Same-Day Transparent Scoring</h3>
-    <p><strong>Evidence boundary:</strong> one day's cross-section cannot train or validate a forward outcome. A <strong>rocket</strong> means a stock that reached its own target before its own stop within ${ROCKET_HORIZON_DAYS} trading days — a FORWARD, path-dependent label that does not exist at scan time, so it never sets a feature's direction or weight. The score is a transparent relative ranking built from robust market-wide normalization and engineered priors; the rocket separation is measured for audit only. It is a research screener, not investment advice.</p>
+    <h3 id="meth-scoring">Radar Composite — Causal Prediction + Live Confirmation</h3>
+    <p><strong>Evidence boundary:</strong> the predictor freezes a liquid-universe feature snapshot on session D and learns only after session D+1 is observed. It cannot use D+1 while scoring D, and it excludes direct descriptions of D's already-completed move. Current participation, direction and 5-minute tape then answer whether a predicted setup is becoming executable now. A <strong>rocket</strong> remains the separate target-before-stop outcome audit. It is a research screener, not investment advice.</p>
     <div class="m-grid">
       <div class="m-card"><h4>Composite Architecture</h4><p>Every informative screener column enters through a typed transformation, a robust percentile, and a budgeted feature group. Exchange reports add authoritative series, price band, status, delivery, trades, 52-week range, surveillance and deal context.</p><div class="rr-groups" style="margin-top:10px">${groupsHTML}</div></div>
       <div class="m-card"><h4>What the Score Does</h4><ol style="padding-left:18px;color:var(--t2);font-size:14px;line-height:1.7">
@@ -7987,7 +8139,7 @@ function _renderMethodologyInner(){
         <li>Penalizes a stock whose typical daily range cannot comfortably cover the session's target: above one normal daily range the target starts costing points, above two the penalty is severe. The bar is the target you actually need, not a fixed percentage — before v1113 it asked for a 10% move, the rocket definition retired in v1085.</li>
       </ol>${diagHTML}</div>
       <div class="m-card"><h4>Held Positions & Basket</h4><p>Held positions stay ranked and may be recommended again as ADDs. The add is bounded by the same allocation rails plus a cushion that prevents the blended position from crossing its own stop into a loss. Quantities come from the charge-aware score/stop-weighted allocator and can never exceed 0.10% of that stock's daily rupee turnover; missing turnover blocks a market order. Automatic target magnitude comes from the stock's own 5-minute tape where available, otherwise its session ceiling, otherwise its ATR/range capacity; the NSE circuit and the stock's capacity bound it. Stops remain stock-specific inside the ${SL_MIN_PCT.toFixed(1)}%–${SL_MAX_PCT.toFixed(1)}% risk rails.</p></div>
-      <div class="m-card"><h4>What Learns — and What Does Not</h4><p>The same-session cross-section supplies the relative model component and diagnostic separation, not training labels. Mature forward evidence can change feature effects, the internal row order, gates, and vetoes; Indicator Watch and the post-close condition tracker apply those changes automatically when their evidence bars are met. Rank itself is never a live gate. Realised trades may calibrate execution facts such as the fallback stop, review horizon, charges and entry cadence, but they never set automatic target magnitude. Max Allocation is arithmetic: Capital divided by average positions entered per entry day.</p></div>
+      <div class="m-card"><h4>What Learns — and What Does Not</h4><p>The next-session predictor is rebuilt as each later session resolves, using only features captured before its outcome. It needs at least three resolved sessions, sign agreement in at least two-thirds of them, and a minimum mover/non-mover decile gap. Three causal challengers are graded before each new outcome is added. After five graded sessions, the champion must have positive cost-adjusted mean return and positive results in at least three of five sessions; the best qualifying mean return wins, with consistency as the tie-break. If none qualifies, prediction recommendations stand down instead of preserving a losing model. Same-session rocket separation remains audit-only. Rank itself is never a live gate. Realised trades may calibrate execution facts such as the fallback stop, review horizon, charges and entry cadence, but they never set automatic target magnitude.</p></div>
     </div>
     <h3 style="margin-top:28px">Live Recommendation Funnel</h3>
     <p style="color:var(--t2);font-size:14.5px;line-height:1.7">A high score alone is not a recommendation. A row must pass, in order: exchange eligibility and configured surveillance/evidence vetoes; positive day direction above VWAP and above its open; enough multi-day history; no current-session selling veto; an allocatable and economically viable order; <strong>Decision Score at least ${RECOMMEND_MIN_SCORE}</strong>; then <strong>current-session 5-minute confirmation</strong>. Rank never gates the result. Only a row with a current <code>confirmed</code> intraday verdict can be selected or exported.</p>
@@ -8006,7 +8158,7 @@ function _renderMethodologyInner(){
       </ol></div>
       <div class="m-card"><h4>Interpretation</h4><ul style="padding-left:18px;color:var(--t2);font-size:14px;line-height:1.7">
         ${RADAR_SCORE_BANDS.map(b=>`<li><b style="color:${b.color}">${b.range}:</b> ${b.note}</li>`).join('')}
-        <li>Decision Score adds six visible components: relative model evidence (25), absolute participation (25), post-open direction versus the stock's own expected range (20), remaining runway (10), target/circuit feasibility (10), and current 5-minute tape standing (10).</li>
+        <li>Decision Score adds six visible components: causal next-session predictor (${RADAR_SCORE_BUDGETS.predictor}), absolute participation (${RADAR_SCORE_BUDGETS.participation}), post-open direction versus the stock's own expected range (${RADAR_SCORE_BUDGETS.direction}), remaining runway (${RADAR_SCORE_BUDGETS.runway}), target/circuit feasibility (${RADAR_SCORE_BUDGETS.feasibility}), and current 5-minute tape standing (${RADAR_SCORE_BUDGETS.tape}). The predictor excludes the anchor session's day move, relative volume, volume change, short-interval prices, VWAP and gap so it cannot earn points by merely describing a move already underway.</li>
         <li>A score of 90 does not mean a 90% chance. Forward target-before-stop results are isolated by score version before the app reports band performance.</li>
       </ul></div>
     </div>
@@ -9627,7 +9779,7 @@ function renderTable(){
     const cellH={
       chk:`<td style="text-align:center"><input type="checkbox" ${isSelected?'checked':''} ${canBuy?'':'disabled'} style="width:14px;height:14px;accent-color:var(--amber);cursor:${canBuy?'pointer':'not-allowed'}" onclick="event.stopPropagation()" onchange="toggleStock('${s.symbol}',this.checked)" title="${checkTitle}"></td>`,
       rank:`<td style="font-family:'DM Mono',monospace;font-weight:800;color:var(--t1);text-align:right">${s.rank??'—'}</td>`,
-      score:`<td>${radarScoreCell(s.score,radarScoreTitle(s))}</td>`,
+      score:`<td>${radarScoreCell(s.score,radarScoreTitle(s)+(canBuy?'':` Not selectable: ${checkTitle}.`),canBuy)}</td>`,
       // v1142: routed through symbolChartButton like every other table. This cell had built its own
       // TradingView link since v1070, so the "one symbol interaction everywhere" rule was true of the
       // panels and quietly false of the main table - which is why swapping to Zerodha missed it.
@@ -11930,6 +12082,7 @@ function compactRankingRows(rows){
     symbol:s.symbol,name:s.name,sector:s.sector,
     price:s.price,day:s.day,priceChange:s.priceChange,
     score:s.score,scoreVersion:s.scoreVersion||RADAR_SCORE_VERSION,scoreComponents:s.scoreComponents||null,rocketScore:s.rocketScore,rank:s.rank,
+    predictiveLevel:s.predictiveLevel??null,predictiveRaw:s.predictiveRaw??null,predictiveSessions:s.predictiveSessions??0,predictiveModel:s.predictiveModel||null,
     setup:s.setup,risk:s.risk,series:s.series,band:s.band??null,status:s.status,
     basketEligible:s.basketEligible!==false,eqEligible:s.eqEligible!==false,
     stretch:s.stretch,rangePct:s.rangePct,sessionVolatilityPct:s.sessionVolatilityPct??null,open1d:s.open1d??null,relvol:s.relvol??null,relAt:s.relAt??null,volChg:s.volChg??null,gap:s.gap??null,depthImbalance:s.depthImbalance??null,depthPct:s.depthPct??null,depthLive:!!s.depthLive,
@@ -11986,6 +12139,9 @@ function applySavedFiltersForMode(mode){
     const sessionTag=scannerSessionTag(scannerFile.name,raw,text);
     const uploadSession=getModelTradingDate(receivedAt);
     window._lastScannerSessionTag=sessionTag;
+    // Resolve already-observed next sessions before scoring this upload. This keeps the predictor
+    // causal (anchor first, outcome later) and lets today's score use all evidence available now.
+    await resolveIndicatorWatchNextBacklog(uploadSession);
     ALL=radarScoreRows(raw);
     // v1076: build the regime AFTER scoring — it needs the zip's index rows plus the live intraday
     // breadth that radarScoreRows computes. Display + outcome stamping only; never a scoring input.
