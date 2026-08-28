@@ -1,6 +1,6 @@
-const BUILD_TS='2026-08-28 12:22 IST'; // release build time (IST)
-const APP_VERSION=1232; // v1232: the score is recommendation strength again; deep pulls are rare and the press is capped.
-const RADAR_SCORE_VERSION='decision-readiness-v2';
+const BUILD_TS='2026-08-28 13:22 IST'; // release build time (IST)
+const APP_VERSION=1233; // v1233: ALL NSE selects who is analysed; the 5-minute tape decides.
+const RADAR_SCORE_VERSION='tape-decision-v3';
 // v1093: a baseline reward:risk MEASURED on the cross-section (last completed bhav session) instead of learned from the owner's own fills - reported on every row, deliberately not enforced. Includes v1092: position size split by Radar score / stop distance, so equally-scored names carry equal RUPEE risk, plus an opt-in Risk /trade cap.
 // v556: parse the NSE Market Activity Report (MA<date>.csv) — official Nifty %, advances/declines and sector index moves shown as market CONTEXT in the status bar (EOD data, display only, never fed into per-row scoring); MA added to the ℹ️ file manifest.
 // v555 market-cycle stage awareness (stateless, self-calibrating): per-row stage label (1 accumulation · 2 breakout · 3 event · 4 profit-booking · 5 re-accumulation · 6 second-leg); a quiet-accumulation signal (conjunction-of-percentiles) injected via the rocket-diagnostic weighting; sell-the-news decay off Recent earnings date (horizon = review days). v1065 makes the market-breadth gauge an entry-eligibility input while still never changing ranking.
@@ -106,7 +106,7 @@ const SHARED_FILTER_STORE='rs_filters_shared';
 const TRADE_INPUTS_STORE='rs_trade_inputs_v1';
 let _lastTradeInputSig=''; // gate brain writes to genuine trade-input changes, not every keystroke
 const ALL_STORE='rs_data';
-const ALL_STORE_SCHEMA='radar_composite_v14'; // v1230 invalidates cached rows from the pre-predictor score scale.
+const ALL_STORE_SCHEMA='radar_composite_v15'; // v1230 invalidates cached rows from the pre-predictor score scale.
 const HOLD_STORE='rs_holdings';
 const ORDERS_STORE='rs_orders';
 const POS_STORE='rs_positions';
@@ -3146,6 +3146,98 @@ function radarPermissionLevel(r,tapeStanding){
   }
   return {p:clamp01(room*tape,0,1),why:tapeWhy,room,tape};
 }
+// ── EVIDENCE COMES FROM THE TAPE (v1233) ──────────────────────────────────────────────────────
+// Owner: "ALL NSE's role is only that" - a pool of stocks on which to do 5-minute analysis - and
+// "only do 5-minute analysis then, on stocks available to you in the new filtered ALL NSE."
+//
+// The measurements support it. Over 13 months of daily bars the ALL NSE-shaped features had
+// essentially NO next-session rank correlation (netVolPct -0.037 to -0.014, bigCvd/cvd/pvCorr all
+// within +/-0.02 across 5d to 60d lookbacks). The 5-minute tape did: netVolPct at a 15-minute
+// aggregation reached rho +0.141 against the reachable forward high, price-vs-VWAP +0.105 to +0.120,
+// and a QUIET crossover of cumulative buy over sell volume returned +1.47% to the session close
+// against +0.49% for the average candle, with a smaller drawdown (-1.02% vs -1.09%).
+//
+// What blocked this before was coverage: you cannot tape 3,139 stocks. A pre-filtered pool of a few
+// dozen can be taped completely - measured 2026-08-28, the owner's 8-filter set left 19 rows of which
+// only 4 lacked a current tape. The pre-filter is what makes tape-only decisions possible at all.
+//
+// HORIZONS ARE THE MEASURED ONES, NOT THE DEFAULT ONE. 5-minute is the building block; the readings
+// that worked sit at 15 and 25 minutes, and 5-minute was the WORST cell for netVolPct (+0.070
+// against +0.100 at 15m). Nothing here reads a single 5-minute bar as a signal.
+const TAPE_NETVOL_BARS=3;     // 15 minutes: the best measured cell (rho +0.141 vs forward high)
+const TAPE_VWAP_BARS=5;       // 25 minutes: best for price-vs-VWAP (rho +0.105 to close)
+function tapeAggregate(bars,k){
+  if(k<=1) return bars.slice();
+  const out=[];
+  for(let i=0;i+k<=bars.length;i+=k){
+    const s=bars.slice(i,i+k);
+    out.push({t:s[0].t,o:s[0].o,c:s[s.length-1].c,
+      h:Math.max(...s.map(b=>b.h)),l:Math.min(...s.map(b=>b.l)),
+      v:s.reduce((n,b)=>n+(Number(b.v)||0),0)});
+  }
+  return out;
+}
+// Signed volume for one candle: buyers minus sellers, by where it closed inside its own range.
+const tapeDelta=b=>(b.h>b.l?(Number(b.v)||0)*(2*(b.c-b.l)/(b.h-b.l)-1):0);
+function radarTapeEvidence(sym){
+  const all=INTRADAY_BARS[normSym(sym||'')];
+  if(!all||all.length<6) return null;
+  const key=istDayKey(all[all.length-1].t);
+  if(typeof getSessionDate==='function'&&key!==getSessionDate()) return null;  // today only
+  const day=all.filter(b=>istDayKey(b.t)===key);
+  if(day.length<6) return null;
+  const totV=day.reduce((n,b)=>n+(Number(b.v)||0),0);
+  if(!(totV>0)) return null;
+
+  // 1. NET BUY vs SELL VOLUME at 15 minutes - the strongest measured single reading.
+  const agg=tapeAggregate(day,TAPE_NETVOL_BARS);
+  let up=0,dn=0;
+  for(let i=1;i<agg.length;i++){ const d=agg[i].c-agg[i-1].c;
+    if(d>0) up+=agg[i].v; else if(d<0) dn+=agg[i].v; }
+  const netVol=(up+dn)>0?(up-dn)/(up+dn):null;
+
+  // 2. PRICE vs the session's own VWAP, read on 25-minute candles.
+  const a5=tapeAggregate(day,TAPE_VWAP_BARS);
+  const vTot=a5.reduce((n,b)=>n+b.v,0);
+  const vwap=vTot>0?a5.reduce((n,b)=>n+((b.h+b.l+b.c)/3)*b.v,0)/vTot:null;
+  const last=day[day.length-1].c;
+  const vwapDist=(vwap>0&&last>0)?(last/vwap-1)*100:null;
+
+  // 3. THE CROSSOVER, AND WHETHER IT WAS QUIET. Cumulative signed volume from the open; a cross
+  //    from net-sell to net-buy on BELOW-average volume was the best event measured. A loud cross
+  //    held more often but paid nothing (+1.47% quiet against +0.07% at the highest volume decile),
+  //    so quietness is the term, not the crossing alone.
+  let cum=0,crossed=false,quietCross=false;
+  const avgV=totV/day.length;
+  let prev=0;
+  for(const b of day){
+    cum+=tapeDelta(b);
+    if(prev<=0&&cum>0){ crossed=true; quietCross=(Number(b.v)||0)<avgV; }
+    prev=cum;
+  }
+  const netPositive=cum>0;
+
+  // 4. PARTICIPATION - predicts the SIZE of the next move, not its direction (measured: the >=+1%
+  //    tail ran 1.1% in the quietest quintile against 3.2% in the busiest).
+  const recent=day.slice(-TAPE_NETVOL_BARS).reduce((n,b)=>n+(Number(b.v)||0),0)/TAPE_NETVOL_BARS;
+  const relVol=avgV>0?recent/avgV:null;
+
+  // map each to 0..1 on fixed, inspectable scales
+  const eFlow=Number.isFinite(netVol)?clamp01((netVol+1)/2,0,1):0.5;
+  const eVwap=Number.isFinite(vwapDist)?clamp01(0.5+vwapDist/2,0,1):0.5;   // +1% over VWAP -> 1.0
+  const eCross=netPositive?(quietCross?1:0.7):(crossed?0.4:0.15);
+  const eSize=Number.isFinite(relVol)?clamp01(relVol/2,0,1):0.5;           // 2x recent volume -> 1.0
+
+  // Weights follow the measured strength: flow 0.35, VWAP 0.30, crossover 0.20, participation 0.15.
+  // Accumulated by noisy-OR, normalised by a perfect row, so one strong axis carries a stock and the
+  // axes it is ordinary on cost it nothing (v1228's rule, which a mean violates).
+  const W={flow:.35,vwap:.30,cross:.20,size:.15};
+  const nor=(f,v,c,s)=>1-(1-f*W.flow)*(1-v*W.vwap)*(1-c*W.cross)*(1-s*W.size);
+  const level=clamp01(nor(eFlow,eVwap,eCross,eSize)/nor(1,1,1,1),0,1);
+  return {level,bars:day.length,netVol,vwapDist,crossed,quietCross,netPositive,relVol,
+          parts:{flow:eFlow,vwap:eVwap,cross:eCross,size:eSize}};
+}
+
 // THE QUEUE MAY NOT ASK THE BAR'S QUESTION. The bar asks “can I buy this now?”, and since v1232
 // permission multiplies, so no row without a tape can clear it. If the fetch queue used that, no
 // row would ever be fetched, so no row would ever get a tape, so no row could ever clear it - the
@@ -3155,10 +3247,23 @@ function radarPermissionLevel(r,tapeStanding){
 function radarPotentialScore(r){
   try{ return Number(radarScoreComponents(r,1).total)||0; }catch(e){ return 0; }
 }
+// THE POOL IS THE FETCH LIST (v1233). Owner: the filtered ALL NSE always holds a low number of
+// stocks, so all of them can be fetched on every refresh - which is what makes tape-only decisions
+// possible. Membership is therefore the eligible pool itself, NOT a score-chosen subset (the v1227
+// circularity), and NOT the recommendation bar (which now needs a tape, so using it would fetch
+// nothing forever).
+//
+// It stays safe on an UNFILTERED file: rows are ordered by what ALL NSE can actually say about
+// them - the columns that validated against the tape (price vs 5-minute VWAP at rho 0.86, the
+// 15-minute change at 0.55, the 5-minute DMI spread at 0.54) - and the press is capped by
+// FETCH_MAX_PER_RUN. A pre-filtered file of 19 rows fetches all 19; the full 3,139-row file fetches
+// the most interesting FETCH_MAX_PER_RUN of them instead of all of them.
 function worthFetchingTape(r){
   if(!r||r._held) return false;
-  if(r.scoreVersion&&r.scoreVersion!==RADAR_SCORE_VERSION) return false;
-  return radarPotentialScore(r)>=RECOMMEND_MIN_SCORE;
+  if(r.eqEligible===false||r.basketEligible===false) return false;
+  if(r.recommendationTriggerBlocked===true) return false;
+  const p=Number(r.price),t=Number(r.turnover);
+  return p>=10&&t>=2500000;
 }
 function radarScoreComponents(r,tapeStanding){
   const hasNumber=v=>v!==null&&v!==undefined&&v!==''&&Number.isFinite(Number(v));
@@ -3184,16 +3289,22 @@ function radarScoreComponents(r,tapeStanding){
   // 60 bar keeps its meaning. Without this the accumulator tops out at 0.727 and the bar becomes
   // unreachable - the board went to zero rows over it, which this release's own probe caught. The
   // normaliser is a constant of the weights, not of the day, so the scale cannot drift.
-  const tot=wP+wA+wR,aP=wP/tot,aA=wA/tot,aR=wR/tot;
-  const nor=(x,y,z)=>1-(1-x*aP)*(1-y*aA)*(1-z*aR);
-  const evidence=clamp01(nor(eP,eA,eR)/nor(1,1,1),0,1);
+  const tev=(typeof radarTapeEvidence==='function')?radarTapeEvidence(r.symbol):null;
+  if(!tev) return {flow:0,vwapPos:0,crossover:0,participation:0,predictor:0,runway:0,tapeBars:0,
+                   direction:0,feasibility:0,tape:0,evidence:0,permission:0,total:0,
+                   block:'no current 5-minute tape'};
+  const evidence=tev.level;
   const range=Number(r.rangePct),fromOpen=Number(r.changeOpen);
   const dirLevel=(range>0&&fromOpen>0)?clamp01(fromOpen/(range*0.5),0,1):0;
   const out={
     // reported on the same scales as before so the tooltip still itemises the evidence
+    flow:+(100*tev.parts.flow).toFixed(0),
+    vwapPos:+(100*tev.parts.vwap).toFixed(0),
+    crossover:+(100*tev.parts.cross).toFixed(0),
+    participation:+(100*tev.parts.size).toFixed(0),
     predictor:+(wP*eP).toFixed(1),
-    participation:+(wA*eA).toFixed(1),
     runway:+(wR*eR).toFixed(1),
+    tapeBars:tev.bars,
     direction:+(RADAR_SCORE_BUDGETS.direction*dirLevel).toFixed(1),
     feasibility:+(RADAR_SCORE_BUDGETS.feasibility*(perm.room??0)).toFixed(1),
     tape:+(RADAR_SCORE_BUDGETS.tape*(perm.tape??0)).toFixed(1),
@@ -10188,7 +10299,7 @@ function intradayFetchJobs(limit){
   };
   Object.keys(posMap).forEach(k=>{ if(posMap[k]&&posMap[k].qty>0) add(k,true,posMap[k],rowOf(k)); });
   (Array.isArray(ALL)?ALL:[]).filter(r=>worthFetchingTape(r))
-    .slice().sort((a,b)=>radarPotentialScore(b)-radarPotentialScore(a))
+    .slice().sort((a,b)=>corpusInterest(b)-corpusInterest(a))   // what ALL NSE can honestly say
     .forEach(r=>add(r.symbol,false,null,r));
   // v1208 admitted the day's winners AFTER the close. v1227 admits them ALL SESSION, because
   // membership was otherwise the decision set and the decision set is chosen by the score: the tape
