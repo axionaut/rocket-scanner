@@ -1,5 +1,5 @@
-const BUILD_TS='2026-08-28 10:00 IST'; // release build time (IST)
-const APP_VERSION=1230; // v1230: causal next-session predictor replaces same-session chase dominance.
+const BUILD_TS='2026-08-28 11:15 IST'; // release build time (IST)
+const APP_VERSION=1231; // v1231: depth over frequency, an archive decisions cannot read, stratified corpus rotation.
 const RADAR_SCORE_VERSION='decision-readiness-v2';
 // v1093: a baseline reward:risk MEASURED on the cross-section (last completed bhav session) instead of learned from the owner's own fills - reported on every row, deliberately not enforced. Includes v1092: position size split by Radar score / stop distance, so equally-scored names carry equal RUPEE risk, plus an opt-in Risk /trade cap.
 // v556: parse the NSE Market Activity Report (MA<date>.csv) — official Nifty %, advances/declines and sector index moves shown as market CONTEXT in the status bar (EOD data, display only, never fed into per-row scoring); MA added to the ℹ️ file manifest.
@@ -4066,6 +4066,18 @@ function radarAnalyze(headers,rawRows,supplements={},heldSymbols=new Set()){
   const priceHourI=radarIdx(headers,'Price change %, 1 hour'),price15I=radarIdx(headers,'Price change %, 15 minutes'),price5I=radarIdx(headers,'Price change %, 5 minutes');
   const changeOpenI=radarIdx(headers,'Change from open %, 1 day'),perf1mI=radarIdx(headers,'Performance %, 1 month'),perf3mI=radarIdx(headers,'Performance %, 3 months'),perf1yI=radarIdx(headers,'Performance %, 1 year');
   const vwapI=radarIdx(headers,'Volume-weighted average price, 1 day');
+  // v1231: ALL NSE already carries short-interval readings for the WHOLE universe at no request
+  // cost. Measured against the Zerodha tape on 2026-08-28 (n=52 overlapping symbols): price-vs-5m-
+  // VWAP agrees at rho 0.86, the 15-minute change at 0.55 and the 5m DMI spread at 0.54, while the
+  // flow proxies (MFI 0.36, 5m relative volume 0.39) do NOT survive the snapshot and the 5-minute
+  // change does not transfer at all (0.09). So POSITION is usable universe-wide and FLOW is not -
+  // the tape is still the only source for cumulative delta, crossings and any path event.
+  const vwap5I=radarIdx(headers,'Volume-weighted average price, 5 minutes');
+  const chg15I=radarIdx(headers,'Price change %, 15 minutes');
+  const dmiPI=radarIdx(headers,'Directional movement index, 14, 5 minutes, Positive');
+  const dmiNI=radarIdx(headers,'Directional movement index, 14, 5 minutes, Negative');
+  const relvol15I=radarIdx(headers,'Relative volume, 15 minutes');
+  const atr5I=radarIdx(headers,'Average true range %, 14, 5 minutes');
   const dayVolI=radarIdx(headers,'Volume, 1 day'),avgVol60I=radarIdx(headers,'Average volume, 60 days');
   // v555 market-cycle inputs: earnings dates (stateless days-since/days-to), 50-day MA (holding-above check).
   const recentEarnI=radarIdx(headers,'Recent earnings date'),upcomingEarnI=radarIdx(headers,'Upcoming earnings date'),sma50I=radarIdx(headers,'Simple moving average, 50, 1 day');
@@ -4421,6 +4433,11 @@ function radarAnalyze(headers,rawRows,supplements={},heldSymbols=new Set()){
       price,day:dispDay,priceChange:dispDay,turnover:turn,relvol,relAt,volChg,gap,gapSigned,changeOpen,rangePct,sessionVolatilityPct,stretch,stretchBarPct:_stretchBar,atr:atrPct,
       high1d:highI>=0?radarNum(raw[highI]):null,low1d:lowI>=0?radarNum(raw[lowI]):null,dayVolume:dayVolI>=0?radarNum(raw[dayVolI]):null,open1d:openI>=0?radarNum(raw[openI]):null,marketCap:mcapI>=0?radarNum(raw[mcapI]):null,rocketToday:rset.has(ri),
       vwap:vwapI>=0?radarNum(raw[vwapI]):null,
+      vwap5:vwap5I>=0?radarNum(raw[vwap5I]):null,
+      chg15m:chg15I>=0?radarNum(raw[chg15I]):null,
+      dmiSpread:(dmiPI>=0&&dmiNI>=0)?((radarNum(raw[dmiPI])??0)-(radarNum(raw[dmiNI])??0)):null,
+      relvol15:relvol15I>=0?radarNum(raw[relvol15I]):null,
+      atr5m:atr5I>=0?radarNum(raw[atr5I]):null,
       chaikinMF:cmfI>=0?radarNum(raw[cmfI]):null, mfi15m:mfi15I>=0?radarNum(raw[mfi15I]):null,
       bollUpper:bollUpperI>=0?radarNum(raw[bollUpperI]):null,
       keltUpper:keltUpperI>=0?radarNum(raw[keltUpperI]):null,
@@ -9945,6 +9962,10 @@ function forgetIntradayFor(sym){
   scheduleApplyFilters();renderTable();
 }
 const FETCH_MAX_PER_DAY=400;
+// Owner risk preference, not a derived magnitude: how many of the day's leftover requests may go
+// to building measurement history rather than to a live decision. Small on purpose - the point is
+// that it disappears into the existing request pattern rather than adding a recognisable one.
+const CORPUS_MAX_PER_RUN=12;
 let FETCH_LOG=[];
 let FETCH_LOG_DATE=null;
 function fetchBudgetLeft(){
@@ -9955,6 +9976,105 @@ function fetchBudgetLeft(){
 }
 let FIRST_INGEST_DONE=false;
 const FETCH_TOP_RANK=5;      // owner: the live candidate set, kept fresh
+// ── THE CORPUS ROTATION (v1231) ───────────────────────────────────────────────────────────────
+// A rule can only be MEASURED against history, and the app was starving that measurement: it
+// fetched whatever topped the board, so the tape covered ~150 names a session and the same names
+// repeatedly. Every backtest run on it reported "only 9 usable sessions".
+//
+// This does NOT touch the decision queue. `intradayFetchJobs` keeps its v1203 membership and its
+// measured gap/stake/urgency priority exactly as they are - a reserved share inside that queue is
+// still refused. The rotation runs only on LEFTOVER capacity, after the decision set is satisfied.
+//
+// Selection uses the ALL NSE columns that were VALIDATED against the tape (rho 0.86 for price-vs-5m
+// -VWAP, 0.55 for the 15-minute change, 0.54 for the DMI spread) and deliberately NOT the app's own
+// score: ranking the corpus by the score is the v1227 circularity - the tape could then only ever
+// confirm what the daily columns already decided.
+//
+// Coverage comes from STRATIFIED ROTATION, not from a top-N. Measured on the release snapshot the
+// eligible set splits 9 ways by turnover tercile x participation tercile (179/136/90 · 142/140/123
+// · 84/129/192), and every cell is sampled proportionally, least-recently-fetched first. That is
+// what makes each session's lot different, and what keeps QUIET states in the corpus - which
+// matters, because the quiet states are the ones that measured well (a quiet crossover returned
+// +1.47% to the close against +0.49% for the average candle, while the loud ones paid nothing).
+function corpusEligibleRows(){
+  return (Array.isArray(ALL)?ALL:[]).filter(r=>{
+    if(!r||r._held) return false;
+    if(r.eqEligible===false||r.basketEligible===false) return false;
+    const p=Number(r.price),t=Number(r.turnover);
+    return p>=10&&t>=2500000;
+  });
+}
+// How long since this symbol's tape was last refreshed, in sessions. Never fetched sorts first.
+function corpusStaleness(sym){
+  const bars=INTRADAY_BARS[normSym(sym)];
+  if(!bars||!bars.length) return Infinity;
+  let latest=0;
+  for(const b of bars){ const t=+new Date(b.t); if(t>latest) latest=t; }
+  if(!latest) return Infinity;
+  return Math.max(0,(Date.now()-latest)/86400000);
+}
+// Interest = what the validated columns say is worth looking at, on their own scales.
+// |vwapDist| because BOTH sides measured well - a stock stretched from its own 5-minute VWAP is
+// informative whichever way it is stretched.
+function corpusInterest(r){
+  const px=Number(r.price),vw=Number(r.vwap5);
+  const vwapDist=(px>0&&vw>0)?Math.abs(px/vw-1)*100:0;
+  const dmi=Math.abs(Number(r.dmiSpread)||0)/25;
+  const chg=Math.abs(Number(r.chg15m)||0);
+  const rv=Number(r.relvol15);
+  const partic=Number.isFinite(rv)?Math.min(3,Math.max(0,rv))/3:0;
+  const atr=Number(r.atr5m);
+  const capable=Number.isFinite(atr)?Math.min(1,atr/0.6):0.5;   // can it move enough to matter
+  return (vwapDist*1.0+dmi*0.6+chg*0.5+partic*0.5)*(0.5+0.5*capable);
+}
+function corpusRotationJobs(spare){
+  if(!(spare>0)) return [];
+  const rows=corpusEligibleRows().filter(r=>KITE_TOKEN[normSym(r.symbol)]>0);
+  if(rows.length<20) return [];
+  const q=(a,p)=>{const x=a.slice().sort((m,n)=>m-n);return x.length?x[Math.floor(x.length*p)]:null;};
+  const tv=rows.map(r=>Number(r.turnover)).filter(Number.isFinite);
+  const av=rows.map(r=>Number(r.relAt)).filter(Number.isFinite);
+  const t1=q(tv,1/3),t2=q(tv,2/3),a1=q(av,1/3),a2=q(av,2/3);
+  const cellOf=r=>{
+    const t=Number(r.turnover),a=Number(r.relAt);
+    const ti=!Number.isFinite(t)?1:(t<t1?0:t<t2?1:2);
+    const ai=!Number.isFinite(a)?1:(a<a1?0:a<a2?1:2);
+    return ti*3+ai;
+  };
+  const cells=Array.from({length:9},()=>[]);
+  for(const r of rows) cells[cellOf(r)].push(r);
+  // within a cell: never-fetched first, then stalest, and interest breaks ties among equals
+  for(const c of cells) c.sort((x,y)=>{
+    const sx=corpusStaleness(x.symbol),sy=corpusStaleness(y.symbol);
+    if(sx!==sy) return sy-sx;
+    return corpusInterest(y)-corpusInterest(x);
+  });
+  const out=[],taken=new Set();
+  const total=rows.length;
+  // proportional allocation, then a round-robin sweep for whatever rounding left over
+  const want=cells.map(c=>Math.floor(spare*(c.length/total)));
+  for(let i=0;i<9;i++){
+    for(let k=0;k<want[i]&&k<cells[i].length;k++){
+      const r=cells[i][k],sym=normSym(r.symbol);
+      if(taken.has(sym)) continue;
+      taken.add(sym); out.push({s:sym,t:KITE_TOKEN[sym],held:false,_row:r,_corpus:true});
+    }
+  }
+  for(let k=0;out.length<spare;k++){
+    let progressed=false;
+    for(let i=0;i<9&&out.length<spare;i++){
+      const c=cells[i],at=want[i]+k;
+      if(at>=c.length) continue;
+      const r=c[at],sym=normSym(r.symbol);
+      progressed=true;
+      if(taken.has(sym)) continue;
+      taken.add(sym); out.push({s:sym,t:KITE_TOKEN[sym],held:false,_row:r,_corpus:true});
+    }
+    if(!progressed) break;
+  }
+  return out;
+}
+
 function intradayFetchJobs(limit){
   const budget=fetchBudgetLeft();
   if(!(budget>0)) return {ok:false,why:'daily fetch budget spent'};
@@ -10064,7 +10184,12 @@ function intradayFetchJobs(limit){
           recs:queue.filter(j=>!j.held).length,held:queue.filter(j=>j.held).length,
           blocked:queue.filter(j=>j.blocked).length,movers:0};
 }
-const INTRADAY_FETCH_DAYS=3;   // sessions of 5-minute candles to ask for
+// DEPTH IS FREE; REQUEST COUNT IS NOT. Measured 2026-08-28 on the live endpoint: one call with
+// days=60 returned 3,243 five-minute candles for ABB - about 43 sessions - against 3 sessions at
+// the old value, for the SAME single request. The corpus was never request-limited; it was limited
+// by what we asked for and by the trim that then discarded 69% of it (dev/server.js archives the
+// full pull before trimming). Raising this changes no request count, cadence or timing.
+const INTRADAY_FETCH_DAYS=60;  // calendar days of 5-minute candles per request (~43 sessions)
 
 // Kite returns candles as [isoTime, open, high, low, close, volume]. That is the SAME information
 // the pasted table carries, so it is converted into the identical CSV and handed to the ONE parser
@@ -10328,7 +10453,16 @@ async function fetchCandlesInApp(limit,opts){
   if(!budget){ say('Daily fetch budget spent — '+FETCH_MAX_PER_DAY+' requests. It resets next session.',5000,true); return; }
   // v1203: the queue already bounded itself by the day budget and by the decision set. A second cap
   // here is what silently dropped open positions off the end of a press.
-  const jobs=r.jobs;
+  // v1231: the decision set is served FIRST and in full. Only what the day budget has left over
+  // goes to the corpus rotation, so this can never delay or displace a live decision.
+  const jobs=r.jobs.slice();
+  try{
+    const spare=Math.max(0,Math.min(budget-jobs.length,CORPUS_MAX_PER_RUN));
+    if(spare>0){
+      const seen=new Set(jobs.map(j=>j.s));
+      for(const c of corpusRotationJobs(spare)) if(!seen.has(c.s)){ seen.add(c.s); jobs.push(c); }
+    }
+  }catch(e){ console.warn('corpus rotation skipped',e); }
   jobs.forEach(()=>FETCH_LOG.push(Date.now()));
   FETCH_BUSY={n:jobs.length,syms:jobs.map(j=>j.s),at:Date.now()};
   try{ renderTable(); }catch(e){}
