@@ -1,5 +1,5 @@
-const BUILD_TS='2026-09-01 12:17 IST'; // release build time (IST)
-const APP_VERSION=1240; // v1240: a Connect helper asks for a login, never for an enctoken.
+const BUILD_TS='2026-09-01 12:30 IST'; // release build time (IST)
+const APP_VERSION=1241; // v1241: the caps are a press duration, and Connect halves the spacing.
 const RADAR_SCORE_VERSION='tape-decision-v3';
 // v1093: a baseline reward:risk MEASURED on the cross-section (last completed bhav session) instead of learned from the owner's own fills - reported on every row, deliberately not enforced. Includes v1092: position size split by Radar score / stop distance, so equally-scored names carry equal RUPEE risk, plus an opt-in Risk /trade cap.
 // v556: parse the NSE Market Activity Report (MA<date>.csv) — official Nifty %, advances/declines and sector index moves shown as market CONTEXT in the status bar (EOD data, display only, never fed into per-row scoring); MA added to the ℹ️ file manifest.
@@ -10296,13 +10296,28 @@ const CORPUS_MAX_PER_RUN=6;
 // the least urgent tail rather than a whole class of row. Open positions sort to the front on stake
 // and urgency and cannot be cut by it.
 const FETCH_MAX_PER_RUN=40;
+// ---- THE CAPS ARE A PRESS DURATION, NOT A COUNT (v1241) --------------------------------------
+// v1227 recorded that NOTHING publishes a rate limit for the enctoken endpoint, which is the whole
+// reason these numbers were conservative. Kite Connect publishes 3 req/s for historical candle data
+// (kite.trade/docs/connect/v3/exceptions, read 2026-09-01) and caps only ORDERS per day, not data.
+// So the helper paces at 350ms on Connect against 700ms on the fallback - exactly half - and every
+// cap below doubles at IDENTICAL wall-clock time. 40 x 700ms and 80 x 350ms are both 28 seconds.
+// The owner approved a press of that length; this does not lengthen it, it fills it.
+//
+// THE ENCTOKEN NUMBERS ARE UNCHANGED, deliberately: the reason for caution on that path is
+// unchanged, and a fallback press must not inherit limits that were never measured for it.
+function onKiteConnect(){ return !!(KITE_API&&KITE_API.mode==='connect'&&KITE_API.tokenValid!==false); }
+function fetchMaxPerRun(){ return onKiteConnect()?FETCH_MAX_PER_RUN*2:FETCH_MAX_PER_RUN; }
+function fetchMaxPerDay(){ return onKiteConnect()?FETCH_MAX_PER_DAY*2:FETCH_MAX_PER_DAY; }
+function corpusMaxPerRun(){ return onKiteConnect()?CORPUS_MAX_PER_RUN*2:CORPUS_MAX_PER_RUN; }
+function backfillMaxPerSweep(){ return onKiteConnect()?BACKFILL_MAX_PER_SWEEP*2:BACKFILL_MAX_PER_SWEEP; }
 let FETCH_LOG=[];
 let FETCH_LOG_DATE=null;
 function fetchBudgetLeft(){
   const now=Date.now();
   const day=getSessionDate();
   if(FETCH_LOG_DATE!==day){ FETCH_LOG=[]; FETCH_LOG_DATE=day; }
-  return Math.max(0,FETCH_MAX_PER_DAY-FETCH_LOG.length);
+  return Math.max(0,fetchMaxPerDay()-FETCH_LOG.length);
 }
 let FIRST_INGEST_DONE=false;
 const FETCH_TOP_RANK=5;      // owner: the live candidate set, kept fresh
@@ -11008,7 +11023,7 @@ async function fetchCandlesInApp(limit,opts){
   try{ await postCorpusPool(); }catch(e){}
   const r=intradayFetchJobs(limit);
   const budget=fetchBudgetLeft();
-  if(!budget){ say('Daily fetch budget spent — '+FETCH_MAX_PER_DAY+' requests. It resets next session.',5000,true); return; }
+  if(!budget){ say('Daily fetch budget spent — '+fetchMaxPerDay()+' requests. It resets next session.',5000,true); return; }
   // v1234: an empty decision queue is not an empty press once the session is over. With the
   // boundary fixed above, every current row correctly drops out after the close - and the old early
   // return would then have killed the sweep exactly when the whole budget is free for it. Inside a
@@ -11020,13 +11035,14 @@ async function fetchCandlesInApp(limit,opts){
   // goes to the corpus rotation, so this can never delay or displace a live decision.
   const jobs=r.ok?r.jobs.slice():[];
   try{
-    const spare=Math.max(0,Math.min(budget-jobs.length,CORPUS_MAX_PER_RUN));
+    const spare=Math.max(0,Math.min(budget-jobs.length,corpusMaxPerRun()));
     if(spare>0){
       const seen=new Set(jobs.map(j=>j.s));
       for(const c of corpusRotationJobs(spare)) if(!seen.has(c.s)){ seen.add(c.s); jobs.push(c); }
     }
   }catch(e){ console.warn('corpus rotation skipped',e); }
-  if(jobs.length>FETCH_MAX_PER_RUN) jobs.length=FETCH_MAX_PER_RUN;   // least-urgent tail only
+  const _cap=fetchMaxPerRun();
+  if(jobs.length>_cap) jobs.length=_cap;   // least-urgent tail only
   // v1234: the sweep is added AFTER the press cap deliberately. FETCH_MAX_PER_RUN bounds a LIVE
   // press so a long queue cannot sit between the owner and a decision; the sweep only runs when
   // there is no live session, so that cap is not the bound that applies to it. Its own cap and the
@@ -11034,7 +11050,7 @@ async function fetchCandlesInApp(limit,opts){
   try{
     if(outsideLiveSession()){
       await loadCorpusCoverage();
-      const left=Math.max(0,Math.min(budget-jobs.length,BACKFILL_MAX_PER_SWEEP));
+      const left=Math.max(0,Math.min(budget-jobs.length,backfillMaxPerSweep()));
       if(left>0){
         const seen=new Set(jobs.map(j=>j.s));
         for(const c of corpusBackfillJobs(left)) if(!seen.has(c.s)){ seen.add(c.s); jobs.push(c); }
