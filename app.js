@@ -1,5 +1,5 @@
-const BUILD_TS='2026-09-01 10:59 IST'; // release build time (IST)
-const APP_VERSION=1236; // v1236: absence takes the median, and an open position is never cut.
+const BUILD_TS='2026-09-01 11:24 IST'; // release build time (IST)
+const APP_VERSION=1237; // v1237: a consumed move is a limit price, not an erasure.
 const RADAR_SCORE_VERSION='tape-decision-v3';
 // v1093: a baseline reward:risk MEASURED on the cross-section (last completed bhav session) instead of learned from the owner's own fills - reported on every row, deliberately not enforced. Includes v1092: position size split by Radar score / stop distance, so equally-scored names carry equal RUPEE risk, plus an opt-in Risk /trade cap.
 // v556: parse the NSE Market Activity Report (MA<date>.csv) — official Nifty %, advances/declines and sector index moves shown as market CONTEXT in the status bar (EOD data, display only, never fed into per-row scoring); MA added to the ℹ️ file manifest.
@@ -3126,17 +3126,25 @@ function radarPermissionLevel(r,tapeStanding){
   // the hard gates meetsRecommendationBar applies, priced into the number instead of hidden from it
   if(r.recommendationTriggerBlocked===true) veto.push('trigger veto');
   if(r.noHistory===true) veto.push('no multi-day history');
-  if(r.entryReady===false) veto.push('move already consumed');
+  if(r.entryReady===false&&r.entryAtLimit!==true) veto.push('move already consumed');
   if(r.intradaySellingToday===true) veto.push('selling today');
   if(r.directionConfirmed!==true) veto.push('direction not confirmed');
   const hasPred=has(r.predictiveLevel)&&Number(r.predictiveSessions)>=3;
   if(!hasPred) veto.push('no qualified predictor');
   if(veto.length) return {p:0,why:veto[0],vetoes:veto};
   // continuous permissions
-  const f=has(r.feasibility)?clamp01(Number(r.feasibility),0,1):1;
+  // HEADROOM IS THE EXCHANGE CIRCUIT, NOT THE STATISTICAL CEILING (v1237). This was min(f,cf), which
+  // is the exact shape v1208 removed from the score: `feasibility` carries the v1083 session-ceiling
+  // estimate, measured at correlation -0.579 with the day's move, i.e. a monotone anti-momentum
+  // multiplier, and v1112 removed it from withholding twice because "it almost takes every good
+  // stock out". Taking the min let it back in as a VETO, which is the strongest withholding there
+  // is. Measured on the release board: 18 of the 120 taped rows were zeroed by it, CAPLIPOINT and
+  // ENGINERSIN among them, both with tape evidence above 0.95. A stock at its exchange band truly
+  // has no room; one that has merely spent its statistical range does not. `feasibility` is still
+  // reported on the row and still prices the target - it just cannot delete the row any more.
   const cf=has(r.circuitFeasibility)?clamp01(Number(r.circuitFeasibility),0,1):1;
-  const room=Math.min(f,cf);
-  if(!(room>0)) return {p:0,why:'no headroom to target',vetoes:['no headroom to target']};
+  const room=cf;
+  if(!(room>0)) return {p:0,why:'at the exchange circuit limit',vetoes:['at the exchange circuit limit']};
   // tape: confirmed proves it, absent defers it, rejected condemns it
   let tape=RADAR_PERMISSION_TAPE_ABSENT,tapeWhy='no current tape';
   if(has(tapeStanding)){
@@ -3491,8 +3499,20 @@ function getMarketAlignedEntryTiming(row,marketIntraday=MARKET_INTRADAY){
   const reason=local.reason||(weakMarketBlocked
     ?`broad market is weak (${(Number(marketIntraday.advPct)*100).toFixed(0)}% above open); this stock has not confirmed above VWAP, above its open, and on completed positive 5m/15m tape${stageNote}`
     :'');
+  // A PEAK BLOCK IS A PRICE, NOT A REFUSAL (v1237). `pullbackPrice` exists ONLY for the
+  // upper-quarter peak case - "the move is consumed, wait for a pullback" - which names a level you
+  // can actually rest an order at. gapLedFade and failedBreakout are the setup FAILING, and a weak
+  // broad market is a condition with no level to name; all three stay vetoes. Measured on the
+  // release board: of 2,530 entry-blocked rows, 347 are peak blocks carrying a usable price, 594
+  // are gap-led fades, 56 are failed breakouts and 1,533 are the weak-market overlay.
+  // The level must be STRICTLY below the last price. pullbackPrice is low+0.75*(high-low) and the
+  // peak block needs rangeLocation>=0.75, so they meet exactly at the boundary and tick-rounding can
+  // put the level a hair above the market - where a LIMIT buy is just a market order with extra
+  // steps and no pullback to wait for.
+  const limitEntry=!!local.blocked&&!local.gapLedFade&&!local.failedBreakout
+    &&!weakMarketBlocked&&Number(local.pullbackPrice)>0&&Number(local.pullbackPrice)<Number(price);
   return {
-    ...local,_local:false,blocked,marketWeak,stockConfirmed,weakMarketBlocked,
+    ...local,_local:false,blocked,marketWeak,stockConfirmed,weakMarketBlocked,limitEntry,
     action:local.action||(weakMarketBlocked?'wait for stock + market confirmation':''),
     reason
   };
@@ -3611,7 +3631,9 @@ function meetsRecommendationBar(s){
   if(s.noHistory===true) return false;   // v1170: no multi-day history, so nothing to rank it on
   if(s.predictiveLevel===null||s.predictiveLevel===undefined||!Number.isFinite(Number(s.predictiveLevel))||Number(s.predictiveSessions)<3) return false;
   if(s.directionConfirmed!==true) return false; // prediction may score early; execution still needs a live bullish turn
-  if(s.entryReady===false) return false; // a consumed/failed move is not made buyable by a strong setup
+  // v1237: a consumed/failed move is still not buyable at market. A peak block that names a
+  // pullback level is buyable AT THAT LEVEL, and exports as a LIMIT order rather than being erased.
+  if(s.entryReady===false&&s.entryAtLimit!==true) return false;
   if(s.intradaySellingToday===true) return false;
   // Score is the one numeric policy bar. Rank remains internal row order only; all other safety and
   // current-tape checks stay independent so a large number cannot average away a veto.
@@ -4255,6 +4277,19 @@ function applyIntradayReorder(rows){
   // intradaySellingToday=true beside scores of 67.9 / 67.8 / 60.9, clearing a bar they could never
   // pass. Rescore and re-rank once the flags are known, so the number and the verdict agree.
   rows.forEach(r=>setRadarEvidenceScore(r,r._tapeStanding));
+  // v1237: THE VERDICT IS DERIVED FROM THE SCORE, SO IT MUST BE DERIVED FROM THE FINAL ONE. v1232
+  // moved the rescore after the veto flags but left confirmed/rejected computed from the score as it
+  // stood BEFORE that rescore, so a row the rescore promoted kept the verdict its old score earned -
+  // and since passesIntradayValidation reads the verdict, it stayed unselectable at any score.
+  // Measured: 18 limit rows cleared the full recommendation bar while every one read 'rejected'.
+  // Only the confirmed/rejected pair is recomputed; 'stale' and 'unverified' describe the DATA, not
+  // the score, and v1207 requires that a row nothing could check never reads as either.
+  rows.forEach(r=>{
+    if(r.intradayVerdict!=='confirmed'&&r.intradayVerdict!=='rejected') return;
+    const passes=(typeof meetsRecommendationBar==='function')
+      ?meetsRecommendationBar(r):(r.score>=RECOMMEND_MIN_SCORE);
+    r.intradayVerdict=passes?'confirmed':'rejected';
+  });
   rows.sort((a,b)=>b.score-a.score||radarRankTieBreak(a,b));
   rows.forEach((r,i)=>{r.rank=i+1;});
   recordScoreDistribution(rows);
@@ -4814,7 +4849,6 @@ function radarAnalyze(headers,rawRows,supplements={},heldSymbols=new Set()){
   rows.sort((a,b)=>b.score-a.score||radarRankTieBreak(a,b));
   rows.forEach((r,i)=>{r.rank=i+1;});          // row ORDER only - never a gate, never a column
   applyLearnedTriggerRanking(rows);
-  applyIntradayReorder(rows);
   // WS-D: stateless market intraday breadth (share of the universe up from open). Market-wide ⇒ it
   // does NOT change the ranking; surfaced in the status bar + basket export as an entry-timing gauge.
   const _open=chgOpenArr.filter(v=>v!==null&&isFinite(v)),_adv=_open.filter(v=>v>0).length,_dec=_open.filter(v=>v<0).length;
@@ -4827,13 +4861,30 @@ function radarAnalyze(headers,rawRows,supplements={},heldSymbols=new Set()){
     // wholesale — merging R4d any earlier silently lost it. Entry timing has exactly one final
     // author, and this is it.
     if(r.r4d&&r.r4d.blocked){
-      r.entryTiming={...r.entryTiming,blocked:true,digestionRisk:true,
+      r.entryTiming={...r.entryTiming,blocked:true,digestionRisk:true,limitEntry:false,
         reason:r.entryTiming.reason?r.entryTiming.reason+'; '+r.r4d.reason:r.r4d.reason,
         action:r.entryTiming.action||'Wait for re-accumulation'};
     } else r.entryTiming.digestionRisk=false;
     r.entryReady=!r.entryTiming.blocked;
+    // entryReady stays FALSE - the row is still not buyable AT MARKET. What changes is that it is
+    // buyable at a named level instead of being erased.
+    r.entryAtLimit=r.entryTiming.limitEntry===true;
+    r.entryLimitPrice=r.entryAtLimit?Number(r.entryTiming.pullbackPrice):null;
   });
+  // THE v1232 DEFECT CLASS AGAIN: this pass is the FINAL author of entryReady/entryAtLimit, and the
+  // score was computed before it ran, so a row the entry pass had just made buyable-at-a-limit kept
+  // the zero it was given while the veto still applied. Measured: CAPLIPOINT computed 88.2 on demand
+  // while carrying r.score 0, and the board went from 10 selectable to 28 on a plain rescore.
+  // Rescore once the flags are known - the same rule v1232 wrote for intradaySellingToday.
+  rows.forEach(r=>setRadarEvidenceScore(r,r._tapeStanding));
   applyLearnedRecommendationGates(rows);
+  // THE TAPE REORDER MOVED HERE, AND THIS IS THE REAL v1237 ORDERING FIX. It used to run BEFORE the
+  // market-aligned entry pass above - the pass this file already calls "exactly one final author" of
+  // entry timing - so it set verdicts, rescored and recorded the distribution from entryReady and
+  // entryAtLimit that DID NOT EXIST YET. Measured: CAPLIPOINT computed 88.2 on demand while carrying
+  // score 0 and verdict 'rejected', and 18 rows cleared the full recommendation bar while every one
+  // of them read rejected and none could be selected.
+  applyIntradayReorder(rows);
   return {rows,features,rockets:rocketRows.length,rocketTargetPct:_radarSessionTargetPct,stretchBarPct:_radarStretchBarUsed,continuationCount:continuationRows.length,suppressedHeld,marketIntraday,ids:{priceI,targetI,sectorI,symbolI,descI}};
 }
 // Score the current upload (object rows from parseCSV) through the Radar composite.
@@ -8481,6 +8532,10 @@ function toggleStock(sym,checked){
   recomputeAlloc();
 }
 function getBuyPrice(s){
+  // A limit row is bought AT its level, so it needs no slippage cushion - the buffer exists only
+  // because a MARKET order can fill above the last price.
+  if(s&&s.entryAtLimit===true&&Number(s.entryLimitPrice)>0)
+    return parseFloat(tickPrice(Number(s.entryLimitPrice)).toFixed(2));
   const ltp=s.price>0?s.price:0;
   if(!(ltp>0)) return 0;
   const budgetReference=ltp*(1+BASKET_MARKET_BUDGET_BUFFER_PCT/100);
@@ -11040,7 +11095,7 @@ function applyFilters(){
       REMOVED_ROWS.push({s,reason:'trigger',detail:'automatic evidence trigger: '+(s.recommendationTriggerReasons||[]).join(', ')});
       return false;
     }
-    if(s.entryReady===false){
+    if(s.entryReady===false&&s.entryAtLimit!==true){
       PEAK_TIMING_REMOVED++;
       REMOVED_ROWS.push({s,reason:'peak',detail:s.entryTiming?.reason||'move is extended or has not re-armed'});
       return false;
@@ -11210,6 +11265,10 @@ function showRadarDetail(sym){
       ?`<b style="color:var(--amber)">WAIT:</b> Decision Score ${fmt(r.score,1)} is below the ${RECOMMEND_MIN_SCORE} policy bar.`
     :r.recommendationTriggerBlocked
       ?'<b style="color:var(--red)">BLOCKED:</b> '+escHtml((r.recommendationTriggerReasons||[]).join(', ')||'an automatic evidence gate failed')+'.'
+    :(r.entryReady===false&&r.entryAtLimit===true)
+      ?'<b style="color:var(--green)">GO, AT A PRICE:</b> the move is extended, so this is a LIMIT buy at '
+        +escHtml(fmtINR(r.entryLimitPrice))+' ('+escHtml(fmt(((Number(r.entryLimitPrice)/Number(r.price))-1)*100,1))
+        +'% from the last price), not a market order. It fills only on the pullback.'
     :r.entryReady===false
       ?'<b style="color:var(--amber)">WAIT:</b> '+escHtml(r.entryTiming?.reason||'the move has not re-armed')+'.'
     :r.intradaySellingToday===true
@@ -11223,7 +11282,9 @@ function showRadarDetail(sym){
   const groups=Object.entries(RADAR_GROUPS).map(([k,g])=>`<div class="rr-group"><b>${g.label}<i>${r.parts?fmt(r.parts[k],0):'—'}/100</i></b><meter min="0" max="100" value="${r.parts?.[k]??0}"></meter></div>`).join('');
   const contribs=[...(r.contrib||[])].sort((a,b)=>Math.abs(b.impact)-Math.abs(a.impact)).slice(0,36).map(x=>`<div class="rr-contrib"><div><b>${escHtml(x.name)}</b><small>${RADAR_GROUPS[x.group]?.label||x.group} · percentile ${fmt(x.p*100,0)}</small></div><b class="${x.impact>=0?'pos':'neg'}">${x.impact>=0?'+':''}${fmt(x.impact,3)}</b></div>`).join('');
   const gate=r.rocketReady?'Meets the model’s high-feasibility criteria.':'Feasibility cautions: '+escHtml((r.gateReasons||[]).join(', ')||'not evaluated')+'.';
-  const entryNote=r.entryReady===false
+  const entryNote=(r.entryReady===false&&r.entryAtLimit===true)
+    ?`<br><b style="color:var(--green)">Entry timing:</b> the move is extended — buy this one on the pullback with a LIMIT order at ${fmtINR(r.entryLimitPrice)}, not at market. Range location ${fmt(r.entryTiming?.rangeLocation,0)}%, expected range used ${fmt(r.entryTiming?.rangeUsed,0)}%. ${escHtml(r.entryTiming?.reason||'')} The basket exports it as a LIMIT order at that level.`
+    :r.entryReady===false
     ?`<br><b style="color:var(--amber)">Entry timing:</b> ${escHtml(r.entryTiming?.action||'Wait for confirmation')} — ${escHtml(r.entryTiming?.reason||'insufficient confirmation')}. Range location ${fmt(r.entryTiming?.rangeLocation,0)}%, expected range used ${fmt(r.entryTiming?.rangeUsed,0)}%${r.entryTiming?.pullbackPrice?`, reconsider near/below ${fmtINR(r.entryTiming.pullbackPrice)}`:''}. The breakout rank is preserved, but recommendation and basket export are blocked.`
     :'';
   const flags=(r.meta?.flags||[]).length?escHtml(r.meta.flags.join(', ')):'none';
@@ -12393,9 +12454,11 @@ async function exportBasket(){
       },
       weight:0,
       params:{
-        transactionType:'BUY',product:'CNC',orderType:'MARKET',
+        transactionType:'BUY',product:'CNC',
+        orderType:(s.entryAtLimit===true&&Number(s.entryLimitPrice)>0)?'LIMIT':'MARKET',
         validity:'DAY',validityTTL:1,
-        quantity:qty,price:0,
+        quantity:qty,
+        price:(s.entryAtLimit===true&&Number(s.entryLimitPrice)>0)?Number(s.entryLimitPrice):0,
         triggerPrice:0,disclosedQuantity:0,lastPrice:Number(s.price)||0,
         variety:'regular',
         // v1083 (owner): TARGET ONLY. The stop leg is no longer exported — the owner manages losses
