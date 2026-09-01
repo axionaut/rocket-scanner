@@ -1,5 +1,5 @@
-const BUILD_TS='2026-09-01 12:05 IST'; // release build time (IST)
-const APP_VERSION=1239; // v1239: the official Kite Connect API, with the enctoken path as fallback.
+const BUILD_TS='2026-09-01 12:17 IST'; // release build time (IST)
+const APP_VERSION=1240; // v1240: a Connect helper asks for a login, never for an enctoken.
 const RADAR_SCORE_VERSION='tape-decision-v3';
 // v1093: a baseline reward:risk MEASURED on the cross-section (last completed bhav session) instead of learned from the owner's own fills - reported on every row, deliberately not enforced. Includes v1092: position size split by Radar score / stop distance, so equally-scored names carry equal RUPEE risk, plus an opt-in Risk /trade cap.
 // v556: parse the NSE Market Activity Report (MA<date>.csv) — official Nifty %, advances/declines and sector index moves shown as market CONTEXT in the status bar (EOD data, display only, never fed into per-row scoring); MA added to the ℹ️ file manifest.
@@ -10733,6 +10733,12 @@ let KITE_TOKEN_PROMPTED=false;   // once per page load; dismissing must not re-p
 
 function kiteTokenDialogState(){
   if(!KITE_API) return null;                       // no helper: nothing to save into, so do not ask
+  // A CONTROL THAT CANNOT WORK MUST SAY SO - AND MUST BE THE RIGHT CONTROL (v1240). v1239 reused
+  // `hasToken` to mean "can I fetch right now", which is true for the fetch button and WRONG for
+  // this dialog: a Connect helper waiting on its daily login was asking the owner to paste an
+  // enctoken, a credential Connect never uses. Pasting one would have silently reverted him to the
+  // unofficial transport he had just moved off.
+  if(KITE_API.mode==='connect') return (KITE_API.needsLogin||!KITE_API.hasToken)?'connect-login':null;
   if(!KITE_API.hasToken) return 'missing';
   if(KITE_API.tokenValid===false) return 'expired';
   return null;                                     // valid, or the helper could not check - stay quiet
@@ -10745,6 +10751,34 @@ function openKiteTokenDialog(force){
   if(!st&&!force) return;
   if(dlg.open) return;
   const expired=st==='expired';
+  if(st==='connect-login'){
+    document.getElementById('kiteTokenTitle').textContent='Log in to Kite';
+    document.getElementById('kiteTokenBody').innerHTML=`
+      <div style="padding:16px 18px;display:flex;flex-direction:column;gap:12px">
+        <div style="font-size:13px;color:var(--t2);line-height:1.5">
+          You are on the <b style="color:var(--green)">official Kite Connect API</b>. Its access token
+          expires around <b>06:00 IST</b>, so this is once a day.
+          <b>No enctoken is needed any more</b> — do not paste one.
+        </div>
+        <ol style="font-size:12px;color:var(--t2);line-height:1.7;margin:0;padding-left:18px">
+          <li>Press <b>Log in to Kite</b> below — it opens Kite's own login page</li>
+          <li>Log in there; it redirects back and says <b>Kite Connect is live</b></li>
+          <li>Come back here and press <b>Fetch candles</b></li>
+        </ol>
+        <div id="kiteTokenDlgMsg" style="font-size:12px;min-height:16px;color:var(--t3)"></div>
+        <div style="display:flex;gap:8px;justify-content:flex-end">
+          <button class="btn" style="font-size:12px" onclick="closeKiteTokenDialog()">Later</button>
+          <button class="btn" style="font-size:12px;border-color:var(--green);color:var(--green)"
+                  onclick="openKiteConnectLogin();closeKiteTokenDialog()">Log in to Kite</button>
+        </div>
+        <div style="font-size:11px;color:var(--t3);border-top:1px solid var(--border);padding-top:9px">
+          Your password is entered on Kite's page, never here. The app secret stays on this machine in
+          <code>dev/kite-connect.json</code>.
+        </div>
+      </div>`;
+    try{ dlg.showModal(); }catch(e){ dlg.setAttribute('open','open'); }
+    return;
+  }
   document.getElementById('kiteTokenTitle').textContent=
     expired?'Kite token expired':(st==='missing'?'Kite token needed':'Kite token');
   document.getElementById('kiteTokenBody').innerHTML=`
