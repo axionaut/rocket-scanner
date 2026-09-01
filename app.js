@@ -1,5 +1,5 @@
-const BUILD_TS='2026-09-01 11:39 IST'; // release build time (IST)
-const APP_VERSION=1238; // v1238: the app refreshes what it recommends, and will not recommend stale tape.
+const BUILD_TS='2026-09-01 12:05 IST'; // release build time (IST)
+const APP_VERSION=1239; // v1239: the official Kite Connect API, with the enctoken path as fallback.
 const RADAR_SCORE_VERSION='tape-decision-v3';
 // v1093: a baseline reward:risk MEASURED on the cross-section (last completed bhav session) instead of learned from the owner's own fills - reported on every row, deliberately not enforced. Includes v1092: position size split by Radar score / stop distance, so equally-scored names carry equal RUPEE risk, plus an opt-in Risk /trade cap.
 // v556: parse the NSE Market Activity Report (MA<date>.csv) — official Nifty %, advances/declines and sector index moves shown as market CONTEXT in the status bar (EOD data, display only, never fed into per-row scoring); MA added to the ℹ️ file manifest.
@@ -10845,6 +10845,35 @@ async function refreshBrokerInputs(){
   }catch(e){ return {ok:false,why:e.message}; }
 }
 
+// ---- KITE CONNECT (v1239) --------------------------------------------------------------------
+// The official API. One-time: the app key and secret go to the LOCAL helper, which stores them on
+// this machine; the secret is never held in the page and never leaves the PC. Daily: one click to
+// Kite's own login, which redirects to the helper's callback. The app never sees the password.
+async function saveKiteConnectKeys(){
+  const k=(document.getElementById('kiteApiKeyBox')?.value||'').trim();
+  const sec=(document.getElementById('kiteApiSecretBox')?.value||'').trim();
+  if(!k||!sec){ showToast('Both api_key and api_secret are needed.',4000,true); return; }
+  if(!KITE_API){ showToast('The helper is not running. Start Rocket Scanner.bat first.',6000,true); return; }
+  try{
+    const r=await fetch(KITE_HELPER+'/api/kite/connect/keys',{method:'POST',
+      headers:{'Content-Type':'application/json'},body:JSON.stringify({api_key:k,api_secret:sec})});
+    const j=await r.json();
+    if(!j||!j.ok){ showToast('Kite Connect setup failed: '+((j&&j.why)||'no answer'),6000,true); return; }
+    const sb=document.getElementById('kiteApiSecretBox'); if(sb) sb.value='';
+    showToast('Stored. Opening Kite login…',3000);
+    if(j.login) window.open(j.login,'_blank','noopener');
+    await detectKiteApi(true);
+  }catch(e){ showToast('Kite Connect setup failed: '+e.message,6000,true); }
+}
+async function openKiteConnectLogin(){
+  try{
+    const r=await fetch(KITE_HELPER+'/api/kite/connect/login',{cache:'no-store'});
+    const j=await r.json();
+    if(j&&j.ok&&j.url){ window.open(j.url,'_blank','noopener');
+      showToast('Log in on the Kite tab. Come back and press Fetch candles.',6000); }
+    else showToast('No Kite Connect app key stored yet.',5000,true);
+  }catch(e){ showToast('Could not reach the helper: '+e.message,5000,true); }
+}
 async function saveKiteToken(){
   const el=document.getElementById('kiteTokenBox');
   const t=(el&&el.value||'').trim();
@@ -11058,10 +11087,19 @@ function intradayPasteBarHtml(){
           <span style="color:var(--t3)"> — marked ✓ / ✗ on the rows</span>`:''}</span>`:''}
       ${KITE_API?`<button onclick="fetchCandlesInApp()" class="btn" style="font-size:11px;border-color:${KITE_API.tokenValid===false?'var(--red)':'var(--green)'};color:${KITE_API.tokenValid===false?'var(--red)':'var(--green)'}"
           title="Fetches the 5-minute candles for the names above and reads them straight in. Nothing to paste, nothing to run.">Fetch candles</button>
-        ${(KITE_API.hasToken&&KITE_API.tokenValid!==false)?'':`${KITE_API.hasToken?`<span onclick="openKiteTokenDialog(true)" style="font-size:11px;color:var(--red);font-weight:700;cursor:pointer;text-decoration:underline" title="The helper used the stored token against Kite and it was rejected. It rotates on every login, so this happens the morning after you log in again. Click to paste a fresh one.">token expired — paste a fresh one</span>`:''}<input id="kiteTokenBox" type="password" placeholder="paste Kite enctoken once"
+        ${KITE_API.mode==='connect'
+          ? ((KITE_API.hasToken&&KITE_API.tokenValid!==false)?'':`<button onclick="openKiteConnectLogin()" class="btn" style="font-size:11px;border-color:var(--amber);color:var(--amber);font-weight:700"
+              title="Kite Connect access tokens expire around 06:00 IST. One click opens Kite's own login page; it redirects back to the helper and the scanner is live again. Your password never touches this app.">Log in to Kite</button>`)
+          : `${KITE_API.hasToken?`<span onclick="openKiteTokenDialog(true)" style="font-size:11px;color:var(--red);font-weight:700;cursor:pointer;text-decoration:underline" title="The helper used the stored token against Kite and it was rejected. It rotates on every login, so this happens the morning after you log in again. Click to paste a fresh one.">token expired — paste a fresh one</span>`:''}${(KITE_API.hasToken&&KITE_API.tokenValid!==false)?'':`<input id="kiteTokenBox" type="password" placeholder="paste Kite enctoken once"
             style="font-size:11px;padding:2px 6px;background:var(--bg);color:var(--t1);border:1px solid var(--amber);border-radius:4px;width:190px"
             title="Kite tab → F12 → Application → Cookies → kite.zerodha.com → copy the value of enctoken. It rotates on every login.">
-          <button onclick="saveKiteToken()" class="btn" style="font-size:11px">Save token</button>`}`
+          <button onclick="saveKiteToken()" class="btn" style="font-size:11px">Save token</button>`}
+          <input id="kiteApiKeyBox" placeholder="Kite Connect api_key"
+            style="font-size:11px;padding:2px 6px;background:var(--bg);color:var(--t1);border:1px solid var(--border);border-radius:4px;width:130px"
+            title="From kite.trade → My apps → your app. Entered once; the secret is stored on your PC by the helper and is never sent to this page again.">
+          <input id="kiteApiSecretBox" type="password" placeholder="api_secret"
+            style="font-size:11px;padding:2px 6px;background:var(--bg);color:var(--t1);border:1px solid var(--border);border-radius:4px;width:130px">
+          <button onclick="saveKiteConnectKeys()" class="btn" style="font-size:11px" title="Switches the helper to the official Kite Connect API. The enctoken path stays as a fallback until Connect answers.">Use Kite Connect</button>`}`
         :`<span style="font-size:11px;color:var(--t3)" title="Double-click &quot;Start Rocket Scanner.bat&quot; on your PC and leave that window open. The app stays right here on GitHub Pages; only the little helper runs locally, because a web page is not allowed to call Kite directly.">start the helper (Start Rocket Scanner.bat) to fetch automatically</span>`}
       ${FETCH_BUSY?`<span style="display:inline-flex;align-items:center;gap:6px;font-size:11px;color:var(--amber);font-weight:700"
         title="${escHtml('Fetching '+FETCH_BUSY.syms.slice(0,12).join(', ')+(FETCH_BUSY.syms.length>12?' and '+(FETCH_BUSY.syms.length-12)+' more':'')
