@@ -1,5 +1,5 @@
-const BUILD_TS='2026-09-01 16:07 IST'; // release build time (IST)
-const APP_VERSION=1245; // v1245: the universe is built from Kite, not downloaded.
+const BUILD_TS='2026-09-01 16:20 IST'; // release build time (IST)
+const APP_VERSION=1246; // v1246: the explanation names what actually made the score.
 const RADAR_SCORE_VERSION='tape-decision-v3';
 // v1093: a baseline reward:risk MEASURED on the cross-section (last completed bhav session) instead of learned from the owner's own fills - reported on every row, deliberately not enforced. Includes v1092: position size split by Radar score / stop distance, so equally-scored names carry equal RUPEE risk, plus an opt-in Risk /trade cap.
 // v556: parse the NSE Market Activity Report (MA<date>.csv) — official Nifty %, advances/declines and sector index moves shown as market CONTEXT in the status bar (EOD data, display only, never fed into per-row scoring); MA added to the ℹ️ file manifest.
@@ -3326,7 +3326,7 @@ function radarScoreComponents(r,tapeStanding){
   // unreachable - the board went to zero rows over it, which this release's own probe caught. The
   // normaliser is a constant of the weights, not of the day, so the scale cannot drift.
   const tev=(typeof radarTapeEvidence==='function')?radarTapeEvidence(r.symbol):null;
-  if(!tev) return {flow:0,vwapPos:0,crossover:0,participation:0,predictor:0,runway:0,tapeBars:0,
+  if(!tev) return {flow:0,vwapPos:0,crossover:0,participation:0,impact:null,predictor:0,runway:0,tapeBars:0,
                    direction:0,feasibility:0,tape:0,evidence:0,permission:0,total:0,
                    block:'no current 5-minute tape'};
   const evidence=tev.level;
@@ -3338,6 +3338,7 @@ function radarScoreComponents(r,tapeStanding){
     vwapPos:+(100*tev.parts.vwap).toFixed(0),
     crossover:+(100*tev.parts.cross).toFixed(0),
     participation:+(100*tev.parts.size).toFixed(0),
+    impact:Number.isFinite(Number(tev.parts.impact))?+(100*tev.parts.impact).toFixed(0):null,
     predictor:+(wP*eP).toFixed(1),
     runway:+(wR*eR).toFixed(1),
     tapeBars:tev.bars,
@@ -3361,9 +3362,20 @@ function setRadarEvidenceScore(r,tapeStanding){
 function radarScoreTitle(r){
   const c=r&&r.scoreComponents;
   if(!c) return `Recommendation strength. ${RECOMMEND_MIN_SCORE} is the policy bar.`;
-  const ev=`pre-move predictor ${Number(c.predictor).toFixed(1)}/${RADAR_SCORE_BUDGETS.predictor} · participation ${Number(c.participation).toFixed(1)}/${RADAR_SCORE_BUDGETS.participation} · runway ${Number(c.runway).toFixed(1)}/${RADAR_SCORE_BUDGETS.runway}`;
-  if(c.block) return `NOT ACTIONABLE - ${c.block}. Setup evidence ${(Number(c.evidence)*100).toFixed(0)}/100 (${ev}), but permission is zero so the score is zero. The score is what you can act on, not what looks interesting.`;
-  return `Recommendation strength ${Number(c.total).toFixed(1)} = evidence ${(Number(c.evidence)*100).toFixed(0)} × permission ${(Number(c.permission)*100).toFixed(0)}%. Evidence: ${ev}. Permission: headroom ${Number(c.feasibility).toFixed(1)}/${RADAR_SCORE_BUDGETS.feasibility} · tape ${Number(c.tape).toFixed(1)}/${RADAR_SCORE_BUDGETS.tape}${Number(c.permission)<1?' (an absent tape caps permission until candles confirm it)':''}. Policy bar ${RECOMMEND_MIN_SCORE}; not a profit probability.`;
+  // EVIDENCE IS THE TAPE, SO THE TOOLTIP MUST ITEMISE THE TAPE (v1246). This listed
+  // `predictor · participation · runway` - the v1230 budget components, which v1232 REPLACED when
+  // evidence became the tape noisy-OR. The three do not compose evidence and never summed to it, and
+  // `participation` was printed as a 0-100 tape value over a budget of 15, so the board showed
+  // `participation 100.0/15`. These four ARE evidence, on the scale evidence is actually built from.
+  const ev=`flow ${Number(c.flow).toFixed(0)}/100 · vs VWAP ${Number(c.vwapPos).toFixed(0)}/100`
+    +` · crossover ${Number(c.crossover).toFixed(0)}/100 · participation ${Number(c.participation).toFixed(0)}/100`
+    +(Number.isFinite(Number(c.impact))?` · impact ${Number(c.impact).toFixed(0)}/100`:'')
+    +` over ${Number(c.tapeBars)||0} bars`;
+  if(c.block) return `NOT ACTIONABLE - ${c.block}. Tape evidence ${(Number(c.evidence)*100).toFixed(0)}/100 (${ev}), but permission is zero so the score is zero. The score is what you can act on, not what looks interesting.`;
+  return `Recommendation strength ${Number(c.total).toFixed(1)} = tape evidence ${(Number(c.evidence)*100).toFixed(0)}/100 × permission ${(Number(c.permission)*100).toFixed(0)}%.`
+    +` Evidence, from this session's 5-minute tape only: ${ev}.`
+    +` Permission: headroom ${Number(c.feasibility).toFixed(1)}/${RADAR_SCORE_BUDGETS.feasibility} · tape standing ${Number(c.tape).toFixed(1)}/${RADAR_SCORE_BUDGETS.tape}${Number(c.permission)<1?' (an absent tape caps permission until candles confirm it)':''}.`
+    +` Policy bar ${RECOMMEND_MIN_SCORE}; not a profit probability.`;
 }
 // Columns that are EXPORTED but deliberately NOT modelled as features. Exporting and scoring are
 // separate decisions: the data stays available for derived signals and future use, it simply does
@@ -11492,12 +11504,34 @@ function showRadarDetail(sym){
   const bandNote=r.meta?.bandNote?` ${escHtml(r.meta.bandNote)}.`:'';
   const masterNote=r.meta?.securityMaster?` ISIN ${escHtml(r.meta.securityMaster.isin||'—')}${r.meta.securityMaster.listingDate?`, listed ${escHtml(r.meta.securityMaster.listingDate)}`:''}.`:'';
   const detailNote=(r.contrib||[]).length?'':'<div style="color:var(--amber);font-size:13px;margin-bottom:8px">Restored compact ranking — load files again for the full per-feature breakdown.</div>';
-  document.getElementById('radarDetailBody').innerHTML=`${detailNote}${decisionRead}<div class="rr-groups">${groups}</div>
+  // WHAT MADE THE SCORE COMES FIRST, AND WHAT DID NOT SAYS SO (v1246). The seven group meters and
+  // the feature contributions are the daily-column composite. Since v1233 they DO NOT set the score
+  // - it is tape evidence x permission - yet they had the whole page under a headline they did not
+  // produce, which is the coherence defect v1227 recorded. They are NOT deleted: `r.parts` still
+  // drives the setup labels and the Risk classification the filter bar uses, so removing them would
+  // break a live control. They are labelled for what they actually do, and demoted below the tape.
+  const tc=r.scoreComponents;
+  const tapeRead=tc&&!tc.block?`<div class="rr-read" style="margin-bottom:10px">
+      <b>What made this score — this session's 5-minute tape:</b>
+      net flow ${fmt(tc.flow,0)}/100 · price vs VWAP ${fmt(tc.vwapPos,0)}/100 · crossover ${fmt(tc.crossover,0)}/100
+      · participation ${fmt(tc.participation,0)}/100${Number.isFinite(Number(tc.impact))?` · impact ${fmt(tc.impact,0)}/100`:''}
+      &nbsp;over ${fmt(tc.tapeBars,0)} bars.<br>
+      <b>Permission:</b> headroom ${fmt(tc.feasibility,1)}/${RADAR_SCORE_BUDGETS.feasibility}
+      · tape standing ${fmt(tc.tape,1)}/${RADAR_SCORE_BUDGETS.tape}.
+      </div>`:'';
+  document.getElementById('radarDetailBody').innerHTML=`${detailNote}${decisionRead}${tapeRead}
+    <h3 style="font-size:15px;margin:14px 0 4px">Setup &amp; risk classification</h3>
+    <div style="font-size:12px;color:var(--t3);margin-bottom:8px">From the daily columns. These set the
+      Setup label and the Risk pill the filter bar uses — they do <b>not</b> set the Decision Score above.</div>
+    <div class="rr-groups">${groups}</div>
     <div class="rr-read"><b>Exchange check:</b> Series ${escHtml(r.series||'—')}, price band ${r.band??'not supplied'}, status ${escHtml(r.status||'—')}; basket ${r.basketEligible!==false?'eligible':'ineligible'}. Official delivery ${r.meta?.delivery==null?'unavailable':fmt(r.meta.delivery,1)+'%'}, trades ${r.meta?.trades==null?'unavailable':fmt(r.meta.trades,0)}, surveillance triggers: ${flags}.${bandNote}${varNote}${masterNote}${corpNote}${triggerNote}<br>
     <b>Feasibility:</b> ${gate} Strongest daily range estimate ${fmt(r.rangePct,2)}%; the session target takes ${fmt(r.stretch,2)}× that range. The stock remains ranked either way.${entryNote}<br>
     ${r.stage?`<b>Market-cycle stage:</b> ${radarStagePill(r)} — ${escHtml({1:'silent accumulation (quiet strength before a move)',2:'initial breakout',3:'event day (move may be event-driven)',4:'profit-booking (digesting a recent result)',5:'re-accumulation',6:'second leg'}[r.stage]||'')}.<br>`:''}
     <b>Read:</b> ${escHtml(r.setup||'—')}. Data coverage ${r.quality!=null?fmt(r.quality*100,0)+'%':'—'}, day move ${(r.day??0)>=0?'+':''}${fmt(r.day,2)}%, relative volume ${r.relvol==null?'unavailable':fmt(r.relvol,2)+'×'}, turnover ${fV(r.turnover)}. Decision Score is readiness evidence, not a literal profit probability.</div>
-    ${contribs?`<h3 style="font-size:16px;margin:12px 0 8px">Largest feature contributions</h3><div class="rr-contribs">${contribs}</div>`:''}`;
+    ${contribs?`<h3 style="font-size:16px;margin:12px 0 4px">Largest feature contributions</h3>
+      <div style="font-size:12px;color:var(--t3);margin-bottom:8px">Diagnostic only — these explain the
+        setup and risk classification above, not the Decision Score.</div>
+      <div class="rr-contribs">${contribs}</div>`:''}`;
   dlg.showModal();
 }
 function closeRadarDetail(){document.getElementById('radarDetail')?.close();}
