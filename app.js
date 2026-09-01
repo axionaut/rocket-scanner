@@ -1,5 +1,5 @@
-const BUILD_TS='2026-09-01 15:09 IST'; // release build time (IST)
-const APP_VERSION=1243; // v1243: the stream carries the money, not just the candidates.
+const BUILD_TS='2026-09-01 15:22 IST'; // release build time (IST)
+const APP_VERSION=1244; // v1244: read only what changed, and merge it.
 const RADAR_SCORE_VERSION='tape-decision-v3';
 // v1093: a baseline reward:risk MEASURED on the cross-section (last completed bhav session) instead of learned from the owner's own fills - reported on every row, deliberately not enforced. Includes v1092: position size split by Radar score / stop distance, so equally-scored names carry equal RUPEE risk, plus an opt-in Risk /trade cap.
 // v556: parse the NSE Market Activity Report (MA<date>.csv) — official Nifty %, advances/declines and sector index moves shown as market CONTEXT in the status bar (EOD data, display only, never fed into per-row scoring); MA added to the ℹ️ file manifest.
@@ -3172,6 +3172,7 @@ function radarPermissionLevel(r,tapeStanding){
 // HORIZONS ARE THE MEASURED ONES, NOT THE DEFAULT ONE. 5-minute is the building block; the readings
 // that worked sit at 15 and 25 minutes, and 5-minute was the WORST cell for netVolPct (+0.070
 // against +0.100 at 15m). Nothing here reads a single 5-minute bar as a signal.
+const INTRADAY_STORE_MAX=1000;   // = the helper's MAX_ROWS file trim; not a second number
 const TAPE_NETVOL_BARS=3;     // 15 minutes: the best measured cell (rho +0.141 vs forward high)
 const TAPE_VWAP_BARS=5;       // 25 minutes: best for price-vs-VWAP (rho +0.105 to close)
 function tapeAggregate(bars,k){
@@ -3831,7 +3832,10 @@ let INTRADAY_BARS={};        // symbol -> [{t,o,h,l,c}] most recent session last
 let INTRADAY_TARGET='';      // which row the next paste belongs to (the paste carries no symbol)
 let INTRADAY_RESULT=null;
 
-function parseIntradayPaste(text,forSymbol){
+// `merge` accepts a PARTIAL update: the same parser, the same bars, only the store write differs.
+// This is not a second ingestion path - the standing rule is one PARSER per input, and this is it.
+function parseIntradayPaste(text,forSymbol,opts){
+  const _merge=!!(opts&&opts.merge);
   const sym=normSym(forSymbol||'');
   if(!sym) return {ok:false,why:'pick a stock in the table first'};
   const lines=String(text||'').split(/\r?\n/).map(l=>l.trim()).filter(Boolean);
@@ -3896,9 +3900,22 @@ function parseIntradayPaste(text,forSymbol){
     return {buyQty:buy,sellQty:sell,imbalance:(buy-sell)/(buy+sell)};
   })();
   if(live) DEPTH_LIVE[sym]={buyQty:live.buyQty,sellQty:live.sellQty,at:Date.now(),how:'chart summary'};
-  if(bars.length<5) return {ok:false,why:'found '+bars.length+' usable bars - paste the whole table including its header',live};
+  // A PASTE of four bars is a mistake; an INCREMENTAL update of one bar is the normal case. The
+  // five-bar floor exists to catch a half-copied table and must not reject a legitimate delta.
+  if(bars.length<(_merge?1:5)) return {ok:false,why:'found '+bars.length+' usable bars - paste the whole table including its header',live};
   bars.sort((a,b)=>a.t-b.t);
-  INTRADAY_BARS[sym]=bars;
+  // MERGE, NEVER REPLACE, ON A PARTIAL UPDATE. A plain assignment here would overwrite a symbol's
+  // whole history with the one new bar an incremental read returns - which is why v1243's
+  // `?since=` read was reverted rather than shipped. Keyed on the bar timestamp so a re-sent bar
+  // updates in place (the forming candle changes until it closes) and can never duplicate.
+  if(_merge&&Array.isArray(INTRADAY_BARS[sym])&&INTRADAY_BARS[sym].length){
+    const byT=new Map();
+    for(const b of INTRADAY_BARS[sym]) byT.set(b.t,b);
+    for(const b of bars) byT.set(b.t,b);
+    const all=[...byT.values()].sort((a,b)=>a.t-b.t);
+    // Bounded by the helper's own file trim, not a new number of ours.
+    INTRADAY_BARS[sym]=all.length>INTRADAY_STORE_MAX?all.slice(-INTRADAY_STORE_MAX):all;
+  } else INTRADAY_BARS[sym]=bars;
   return {ok:true,sym,bars:bars.length,sessions:new Set(bars.map(b=>istDayKey(b.t))).size,live};
 }
 function istDayKey(ms){
@@ -11001,13 +11018,25 @@ async function loadCorpusCoverage(){
 async function loadIntradayInventory(){
   if(!KITE_API) return 0;
   try{
-    const r=await fetch(KITE_HELPER+'/api/kite/inventory',{cache:'no-store'});
+    // ASK ONLY FOR WHAT WE DO NOT HAVE. The full answer is 5.1 MB across 1,554 symbols and this
+    // runs every 30 seconds; `since` is the newest bar already held, formatted exactly as the
+    // helper writes its rows. Safe only because the parse below MERGES - see v1243, where the same
+    // query was written and reverted because a partial answer would have replaced a symbol's
+    // history. An empty `since` (nothing held yet) still asks for everything.
+    const since=(()=>{
+      const ms=newestTapeBucketMs();
+      if(!(ms>0)) return '';
+      const d=new Date(ms),z=n=>String(n).padStart(2,'0');
+      return d.getFullYear()+'-'+z(d.getMonth()+1)+'-'+z(d.getDate())+' '+z(d.getHours())+':'+z(d.getMinutes());
+    })();
+    const r=await fetch(KITE_HELPER+'/api/kite/inventory'+(since?('?since='+encodeURIComponent(since)):''),{cache:'no-store'});
     const j=await r.json();
     if(!j||!j.ok||!j.data) return 0;
     let n=0;
     for(const sym of Object.keys(j.data)){
       const rows=j.data[sym];
-      if(!Array.isArray(rows)||rows.length<3) continue;
+      // An incremental answer is legitimately one bar; only a FULL answer needs the sanity floor.
+      if(!Array.isArray(rows)||rows.length<(since?1:3)) continue;
       // Through the ONE parser, exactly as a fetch or a paste would be (the v1148 lesson).
       const csv=['"Date","Open","High","Low","Close","% Change","% Change vs Average","Volume"']
         .concat(rows.map(c=>{
@@ -11015,7 +11044,7 @@ async function loadIntradayInventory(){
           const dt=d.slice(8,10)+'/'+d.slice(5,7)+' '+d.slice(11,16);
           return ['"'+dt+'"','"'+c[1]+'"','"'+c[2]+'"','"'+c[3]+'"','"'+c[4]+'"','"0"','"0"','"'+(c[5]||0)+'"'].join(',');
         })).join('\n');
-      const res=parseIntradayPaste(csv,sym);
+      const res=parseIntradayPaste(csv,sym,{merge:!!since});
       if(res&&res.ok) n++;
     }
     if(n){
