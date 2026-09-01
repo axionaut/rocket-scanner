@@ -1,5 +1,5 @@
-const BUILD_TS='2026-09-01 12:30 IST'; // release build time (IST)
-const APP_VERSION=1241; // v1241: the caps are a press duration, and Connect halves the spacing.
+const BUILD_TS='2026-09-01 14:36 IST'; // release build time (IST)
+const APP_VERSION=1242; // v1242: the board follows the live stream, continuously.
 const RADAR_SCORE_VERSION='tape-decision-v3';
 // v1093: a baseline reward:risk MEASURED on the cross-section (last completed bhav session) instead of learned from the owner's own fills - reported on every row, deliberately not enforced. Includes v1092: position size split by Radar score / stop distance, so equally-scored names carry equal RUPEE risk, plus an opt-in Risk /trade cap.
 // v556: parse the NSE Market Activity Report (MA<date>.csv) — official Nifty %, advances/declines and sector index moves shown as market CONTEXT in the status bar (EOD data, display only, never fed into per-row scoring); MA added to the ℹ️ file manifest.
@@ -11151,6 +11151,14 @@ function intradayPasteBarHtml(){
             style="font-size:11px;padding:2px 6px;background:var(--bg);color:var(--t1);border:1px solid var(--border);border-radius:4px;width:130px">
           <button onclick="saveKiteConnectKeys()" class="btn" style="font-size:11px" title="Switches the helper to the official Kite Connect API. The enctoken path stays as a fallback until Connect answers.">Use Kite Connect</button>`}`
         :`<span style="font-size:11px;color:var(--t3)" title="Double-click &quot;Start Rocket Scanner.bat&quot; on your PC and leave that window open. The app stays right here on GitHub Pages; only the little helper runs locally, because a web page is not allowed to call Kite directly.">start the helper (Start Rocket Scanner.bat) to fetch automatically</span>`}
+      ${STREAM_STATUS?`<span style="font-size:11px;font-weight:700;color:${STREAM_STATUS.connected?'var(--green)':'var(--red)'}"
+        title="${escHtml(STREAM_STATUS.connected
+          ? 'The Kite Connect WebSocket is live: '+STREAM_STATUS.subscribed+' instruments in quote mode, '
+            +(STREAM_STATUS.ticks||0).toLocaleString('en-IN')+' ticks received, '+(STREAM_STATUS.bars||0)
+            +' five-minute bars written. This is a push feed - it costs no requests and has no rate limit. The board re-reads it every 30 seconds.'
+          : 'The live stream is DOWN'+(STREAM_STATUS.why?': '+STREAM_STATUS.why:'')
+            +'. The board is running on whatever bars were already stored, and the freshness rule will stop recommending them as they age.')}">
+        ${STREAM_STATUS.connected?'● live '+STREAM_STATUS.subscribed:'○ stream down'}</span>`:''}
       ${FETCH_BUSY?`<span style="display:inline-flex;align-items:center;gap:6px;font-size:11px;color:var(--amber);font-weight:700"
         title="${escHtml('Fetching '+FETCH_BUSY.syms.slice(0,12).join(', ')+(FETCH_BUSY.syms.length>12?' and '+(FETCH_BUSY.syms.length-12)+' more':'')
           +'. The board re-ranks when this finishes, so wait for it before acting on the list.')}">
@@ -11878,9 +11886,60 @@ async function folderWatchTick(){
   }
   finally{_folderWatchBusy=false;}
 }
+// ---- THE BOARD FOLLOWS THE STREAM (v1242) -----------------------------------------------------
+// The helper now holds a Kite Connect WebSocket carrying the whole eligible pool in quote mode and
+// folds ticks into 5-minute bars (measured on the live feed: 1,543 instruments, 3,654 ticks in six
+// seconds, one connection, zero requests). The bars land in the same Intraday CSVs the app has
+// always read - so the DATA is continuous. This makes the BOARD continuous too.
+//
+// THIS IS NOT A SECOND EXCEPTION TO "NEVER POLL A NETWORK". It reads 127.0.0.1 only - the same local
+// process the folder watch already reads from - and issues no broker request of any kind. The
+// network cost of this loop is exactly zero; the stream that feeds it is push, not poll.
+//
+// The cadence is the HELPER'S OWN FLUSH INTERVAL, not a chosen number: the helper writes completed
+// bars every 30 seconds, so re-reading on the same beat means the board is never more than one
+// flush behind, and reading faster could only re-read bytes that had not changed.
+let _streamRefreshTimer=null,_streamRefreshBusy=false;
+const STREAM_REFRESH_MS=30000;   // = the helper's flush interval
+async function streamRefreshTick(){
+  if(_streamRefreshBusy||document.hidden) return;
+  if(_folderWatchBusy) return;              // an ingest is authoritative; do not race it
+  if(!KITE_API) return;                     // no helper, nothing local to read
+  const c=istClock();
+  if(c.mins<DAY_START_MIN||c.mins>=DAY_END_MIN) return;   // the stream is closed outside hours
+  _streamRefreshBusy=true;
+  try{
+    // loadIntradayInventory re-reads the stored bars through the ONE parser and, when anything
+    // changed, re-runs applyIntradayReorder + applyFilters + renderRankingsPanels itself. The
+    // v1238 freshness rule then decides what may still be recommended, so a stalled stream empties
+    // the board honestly rather than leaving yesterday's picks sitting there looking actionable.
+    await loadStreamStatus();
+    await loadIntradayInventory();
+  }catch(e){ }
+  finally{ _streamRefreshBusy=false; }
+}
+function startStreamRefresh(){
+  if(_streamRefreshTimer) return;
+  _streamRefreshTimer=setInterval(streamRefreshTick,STREAM_REFRESH_MS);
+  streamRefreshTick();
+}
+// Is the stream actually up? A control that cannot work must say so - a silent dead stream would
+// look exactly like a quiet market.
+let STREAM_STATUS=null;
+async function loadStreamStatus(){
+  if(!KITE_API) { STREAM_STATUS=null; return null; }
+  try{
+    const ctl=new AbortController(); const t=setTimeout(()=>ctl.abort(),3000);
+    const r=await fetch(KITE_HELPER+'/api/kite/stream',{cache:'no-store',signal:ctl.signal});
+    clearTimeout(t);
+    STREAM_STATUS=r.ok?await r.json():null;
+  }catch(e){ STREAM_STATUS=null; }
+  return STREAM_STATUS;
+}
 function startFolderWatch(){
   if(_folderWatchTimer) return;
   _folderWatchTimer=setInterval(folderWatchTick,3000);
+  startStreamRefresh();
 }
 
 async function hydrateSessionCSVsFromPreferredInputs(reason='startup'){
