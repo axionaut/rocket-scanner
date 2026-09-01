@@ -1,5 +1,5 @@
-const BUILD_TS='2026-09-01 14:36 IST'; // release build time (IST)
-const APP_VERSION=1242; // v1242: the board follows the live stream, continuously.
+const BUILD_TS='2026-09-01 15:09 IST'; // release build time (IST)
+const APP_VERSION=1243; // v1243: the stream carries the money, not just the candidates.
 const RADAR_SCORE_VERSION='tape-decision-v3';
 // v1093: a baseline reward:risk MEASURED on the cross-section (last completed bhav session) instead of learned from the owner's own fills - reported on every row, deliberately not enforced. Includes v1092: position size split by Radar score / stop distance, so equally-scored names carry equal RUPEE risk, plus an opt-in Risk /trade cap.
 // v556: parse the NSE Market Activity Report (MA<date>.csv) — official Nifty %, advances/declines and sector index moves shown as market CONTEXT in the status bar (EOD data, display only, never fed into per-row scoring); MA added to the ℹ️ file manifest.
@@ -10962,9 +10962,21 @@ async function loadTapeEdge(){
 async function postCorpusPool(){
   if(!KITE_API) return false;
   try{
-    const syms=(Array.isArray(ALL)?ALL:[]).filter(r=>{
+    // OPEN POSITIONS MUST BE IN THE STREAM (v1243). `worthFetchingTape` excludes `_held` rows - it
+    // answers "is this a CANDIDATE worth looking at", and a stock you already own is not a
+    // candidate. Sending that set alone meant the subscription carried every row the owner might
+    // buy and NOT ONE of the rows his money is actually in: the Open Positions panel redrew on the
+    // 30-second beat while its bars aged, which is the worst of both - a surface that looks live
+    // and is not. The pool is the union, and held symbols go FIRST so a pool larger than the
+    // per-connection cap can never drop them.
+    const held=(()=>{ try{
+      const m=(typeof getCombinedOpenPositionMap==='function')?getCombinedOpenPositionMap():{};
+      return Object.keys(m).filter(k=>m[k]&&m[k].qty>0).map(normSym).filter(Boolean);
+    }catch(e){ return []; } })();
+    const cand=(Array.isArray(ALL)?ALL:[]).filter(r=>{
       try{ return worthFetchingTape(r); }catch(e){ return false; }
     }).map(r=>normSym(r.symbol)).filter(Boolean);
+    const syms=[...new Set(held.concat(cand))];
     if(!syms.length) return false;
     const c=new AbortController();
     const t=setTimeout(()=>c.abort(),6000);
