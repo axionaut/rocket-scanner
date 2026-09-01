@@ -1,5 +1,5 @@
-const BUILD_TS='2026-09-01 10:33 IST'; // release build time (IST)
-const APP_VERSION=1235; // v1235: the impact term ships measured, and a score scale must report itself.
+const BUILD_TS='2026-09-01 10:59 IST'; // release build time (IST)
+const APP_VERSION=1236; // v1236: absence takes the median, and an open position is never cut.
 const RADAR_SCORE_VERSION='tape-decision-v3';
 // v1093: a baseline reward:risk MEASURED on the cross-section (last completed bhav session) instead of learned from the owner's own fills - reported on every row, deliberately not enforced. Includes v1092: position size split by Radar score / stop distance, so equally-scored names carry equal RUPEE risk, plus an opt-in Risk /trade cap.
 // v556: parse the NSE Market Activity Report (MA<date>.csv) — official Nifty %, advances/declines and sector index moves shown as market CONTEXT in the status bar (EOD data, display only, never fed into per-row scoring); MA added to the ℹ️ file manifest.
@@ -10461,8 +10461,14 @@ function intradayFetchJobs(limit){
   const median=a=>{const f=sortFinite(a); return f.length?radarQuant(f,0.5):null;};
 
   const rawGap=members.map(gapOf),gapFin=sortFinite(rawGap);
-  // Strictly worse than any partial read, derived from the queue rather than chosen.
-  const blockedGap=gapFin.length?gapFin[gapFin.length-1]+1:1;
+  // ABSENCE TAKES THE MEDIAN, NEVER A FREE PASS (v1236). This was max+1 - "strictly worse than any
+  // partial read" - which is not a free pass but a PROMOTION above every row that has data. Measured
+  // 2026-09-01 at 10:53 IST: 1,169 rows with no tape all sat at gap 21 against a real 19 for the
+  // open positions, they filled the entire 400 budget at an identical priority of 0.5953, and ALL
+  // EIGHT open positions were absent from the queue. It was latent until v1233 made membership the
+  // whole eligible pool instead of the decision set, which put more blocked rows in it than the
+  // budget could hold. The standing rule is the median, and it is the median.
+  const blockedGap=gapFin.length?radarQuant(gapFin,0.5):1;
   const gap=rawGap.map(v=>Number.isFinite(v)?v:blockedGap);
   const rawStake=members.map(stakeOf),stakeMed=median(rawStake);
   const stake=rawStake.map(v=>Number.isFinite(v)?v:(Number.isFinite(stakeMed)?stakeMed:1));
@@ -10471,11 +10477,18 @@ function intradayFetchJobs(limit){
 
   const pctOf=arr=>{const s=arr.slice().sort((a,b)=>a-b); return arr.map(v=>radarPct(s,v));};
   const gP=pctOf(gap),sP=pctOf(stake),eP=pctOf(edge);
-  const queue=members.map((m,i)=>({s:m.s,t:m.t,held:m.held,gapBars:gap[i],
+  const scored=members.map((m,i)=>({s:m.s,t:m.t,held:m.held,gapBars:gap[i],
       blocked:!Number.isFinite(rawGap[i]),
       priority:Math.cbrt(gP[i]*sP[i]*(1-eP[i]))}))
-    .filter(m=>m.gapBars>0)                                   // already current to the last bar
-    .sort((a,b)=>b.priority-a.priority)
+    .filter(m=>m.gapBars>0);                                  // already current to the last bar
+  // A HELD ROW IS THE DECISION SET; A POOL ROW IS A CANDIDATE FOR ONE. v1232 already states that
+  // open positions "sort to the front on stake and urgency and cannot be cut" - measured above, that
+  // claim was false, and money in the market was going unread while never-fetched pool rows spent
+  // the budget. Priority still orders WITHIN each group, so this is not v1203's rejected reserved
+  // share: nothing is set aside for candidates, and a position earns no rank it did not measure.
+  const byPriority=(a,b)=>b.priority-a.priority;
+  const queue=scored.filter(m=>m.held).sort(byPriority)
+    .concat(scored.filter(m=>!m.held).sort(byPriority))
     .slice(0,budget);
 
   if(!queue.length) return {ok:false,
