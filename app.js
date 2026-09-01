@@ -1,5 +1,5 @@
-const BUILD_TS='2026-09-01 11:24 IST'; // release build time (IST)
-const APP_VERSION=1237; // v1237: a consumed move is a limit price, not an erasure.
+const BUILD_TS='2026-09-01 11:39 IST'; // release build time (IST)
+const APP_VERSION=1238; // v1238: the app refreshes what it recommends, and will not recommend stale tape.
 const RADAR_SCORE_VERSION='tape-decision-v3';
 // v1093: a baseline reward:risk MEASURED on the cross-section (last completed bhav session) instead of learned from the owner's own fills - reported on every row, deliberately not enforced. Includes v1092: position size split by Radar score / stop distance, so equally-scored names carry equal RUPEE risk, plus an opt-in Risk /trade cap.
 // v556: parse the NSE Market Activity Report (MA<date>.csv) — official Nifty %, advances/declines and sector index moves shown as market CONTEXT in the status bar (EOD data, display only, never fed into per-row scoring); MA added to the ℹ️ file manifest.
@@ -3639,10 +3639,33 @@ function meetsRecommendationBar(s){
   // current-tape checks stay independent so a large number cannot average away a veto.
   return meetsScoreBar(s.score);
 }
+// The freshest completed bar the app holds ANYWHERE - the market's own clock as this app knows it.
+// Not a wall-clock read: if nothing has been fetched for an hour, every row is equally behind and
+// none is penalised for the app's own idleness.
+function newestTapeBucketMs(){
+  let newest=0;
+  try{
+    for(const sym of Object.keys(INTRADAY_BARS)){
+      const b=INTRADAY_BARS[sym];
+      if(!b||!b.length) continue;
+      const t=+new Date(b[b.length-1].t);
+      if(t>newest) newest=t;
+    }
+  }catch(e){}
+  return newest;
+}
 function passesIntradayValidation(s){
   if(!s?.symbol||s.intradayVerdict!=='confirmed') return false;
   const read=getIntradayRead(s.symbol);
-  return !!(read&&read.current);
+  if(!(read&&read.current)) return false;
+  // v1238: "current session" is not "checked now". Measured, the board was recommending rows whose
+  // last bar was 40 to 100 minutes old while fresher bars sat in the store. The tolerance is ONE
+  // BAR - the tape's own resolution, the smallest representable gap, not a tuned number - measured
+  // against the freshest bar the app holds rather than against the clock.
+  const newest=newestTapeBucketMs();
+  const at=+new Date(read.asOf);
+  if(newest>0&&Number.isFinite(at)&&(newest-at)>5*60*1000) return false;
+  return true;
 }
 function isSelectableRecommendation(s){
   return !!s&&s.basketEligible!==false&&meetsRecommendationBar(s)&&passesIntradayValidation(s);
@@ -10542,8 +10565,28 @@ function intradayFetchJobs(limit){
   // the budget. Priority still orders WITHIN each group, so this is not v1203's rejected reserved
   // share: nothing is set aside for candidates, and a position earns no rank it did not measure.
   const byPriority=(a,b)=>b.priority-a.priority;
+  // THE DECISION SET IS POSITIONS PLUS THE CURRENT BOARD (v1238). v1203's contract was "every open
+  // position, plus every row clearing the bar"; v1233 kept the first half and replaced the second
+  // with a discovery pool ordered by ALL NSE proxies, which has no relationship to which rows the
+  // tape will actually promote. Measured 2026-09-01 11:30: the two rows the app was RECOMMENDING -
+  // CAPLIPOINT and INTELLECT - were 40 minutes behind the newest bar the app held, BAJAJ-AUTO and
+  // HEG were 100 minutes behind, 14 of 17 recommendations were absent from the next press's top 40,
+  // and the press spent its remaining slots on EPL, RBA, GAJA and ATALREAL - rows it would not
+  // recommend. The app was deciding on tape it had declined to refresh.
+  //
+  // This is NOT the v1227 circularity. Discovery is untouched: the pool still contributes rows by
+  // corpusInterest with no score term, so the tape can still promote something the columns did not
+  // rank. What is added is VERIFICATION - a row the app is already recommending gets re-read before
+  // it is recommended again.
+  const onBoard=new Set();
+  try{
+    (Array.isArray(ALL)?ALL:[]).forEach(r=>{
+      if(r&&meetsRecommendationBar(r)) onBoard.add(normSym(r.symbol));
+    });
+  }catch(e){}
   const queue=scored.filter(m=>m.held).sort(byPriority)
-    .concat(scored.filter(m=>!m.held).sort(byPriority))
+    .concat(scored.filter(m=>!m.held&&onBoard.has(m.s)).sort(byPriority))
+    .concat(scored.filter(m=>!m.held&&!onBoard.has(m.s)).sort(byPriority))
     .slice(0,budget);
 
   if(!queue.length) return {ok:false,
