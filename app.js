@@ -1,5 +1,5 @@
-const BUILD_TS='2026-09-01 09:17 IST'; // release build time (IST)
-const APP_VERSION=1234; // v1234: the out-of-session backfill sweep, and the coverage reader it needed.
+const BUILD_TS='2026-09-01 10:33 IST'; // release build time (IST)
+const APP_VERSION=1235; // v1235: the impact term ships measured, and a score scale must report itself.
 const RADAR_SCORE_VERSION='tape-decision-v3';
 // v1093: a baseline reward:risk MEASURED on the cross-section (last completed bhav session) instead of learned from the owner's own fills - reported on every row, deliberately not enforced. Includes v1092: position size split by Radar score / stop distance, so equally-scored names carry equal RUPEE risk, plus an opt-in Risk /trade cap.
 // v556: parse the NSE Market Activity Report (MA<date>.csv) — official Nifty %, advances/declines and sector index moves shown as market CONTEXT in the status bar (EOD data, display only, never fed into per-row scoring); MA added to the ℹ️ file manifest.
@@ -3223,19 +3223,37 @@ function radarTapeEvidence(sym){
   const relVol=avgV>0?recent/avgV:null;
 
   // map each to 0..1 on fixed, inspectable scales
+  // 5. IMPACT - %change per unit of net flow (owner's thesis, 2026-09-01). Measured head-to-head on
+  //    the archive it was the best of six candidates (AUC 0.531 overall, 0.558 on big movers),
+  //    beating the v1233 blend and beating the inverse absorption form. It is also WEAK, so its
+  //    weight is NOT asserted here - the helper grades it against forward outcomes and returns a
+  //    weight already shrunk by its own error bar. At zero weight this term is bit-for-bit inert.
+  //    atan2 keeps it monotone in move/share (so the graded edge is preserved exactly) and bounded
+  //    with no chosen scale constant; both arguments are percentages, so the ratio is dimensionless.
+  const openC=day[0].c,sharePct=totV>0?(cum/totV)*100:0;
+  const movePct=(openC>0&&last>0)?(last/openC-1)*100:null;
+  const impact=Number.isFinite(movePct)
+    ?0.5+Math.atan2(movePct,Math.max(Math.abs(sharePct),1e-6))/Math.PI:null;
+
   const eFlow=Number.isFinite(netVol)?clamp01((netVol+1)/2,0,1):0.5;
   const eVwap=Number.isFinite(vwapDist)?clamp01(0.5+vwapDist/2,0,1):0.5;   // +1% over VWAP -> 1.0
   const eCross=netPositive?(quietCross?1:0.7):(crossed?0.4:0.15);
   const eSize=Number.isFinite(relVol)?clamp01(relVol/2,0,1):0.5;           // 2x recent volume -> 1.0
+  const eImpact=Number.isFinite(impact)?clamp01(impact,0,1):0.5;
 
   // Weights follow the measured strength: flow 0.35, VWAP 0.30, crossover 0.20, participation 0.15.
   // Accumulated by noisy-OR, normalised by a perfect row, so one strong axis carries a stock and the
   // axes it is ordinary on cost it nothing (v1228's rule, which a mean violates).
   const W={flow:.35,vwap:.30,cross:.20,size:.15};
-  const nor=(f,v,c,s)=>1-(1-f*W.flow)*(1-v*W.vwap)*(1-c*W.cross)*(1-s*W.size);
-  const level=clamp01(nor(eFlow,eVwap,eCross,eSize)/nor(1,1,1,1),0,1);
-  return {level,bars:day.length,netVol,vwapDist,crossed,quietCross,netPositive,relVol,
-          parts:{flow:eFlow,vwap:eVwap,cross:eCross,size:eSize}};
+  // The impact weight is MEASURED, never asserted: 0 until the edge survives its own sampling error,
+  // rising as the corpus grows. At 0 every factor below collapses to 1 and both the blend and its
+  // normaliser are identical to v1233's, so an unmeasured term cannot move a single score.
+  const wImp=Number.isFinite(TAPE_IMPACT_W)?clamp01(TAPE_IMPACT_W,0,0.35):0;
+  const nor=(f,v,c,s,i)=>1-(1-f*W.flow)*(1-v*W.vwap)*(1-c*W.cross)*(1-s*W.size)*(1-i*wImp);
+  const level=clamp01(nor(eFlow,eVwap,eCross,eSize,eImpact)/nor(1,1,1,1,1),0,1);
+  return {level,bars:day.length,netVol,vwapDist,crossed,quietCross,netPositive,relVol,impact,
+          impactWeight:wImp,
+          parts:{flow:eFlow,vwap:eVwap,cross:eCross,size:eSize,impact:eImpact}};
 }
 
 // THE QUEUE MAY NOT ASK THE BAR'S QUESTION. The bar asks “can I buy this now?”, and since v1232
@@ -4239,7 +4257,34 @@ function applyIntradayReorder(rows){
   rows.forEach(r=>setRadarEvidenceScore(r,r._tapeStanding));
   rows.sort((a,b)=>b.score-a.score||radarRankTieBreak(a,b));
   rows.forEach((r,i)=>{r.rank=i+1;});
+  recordScoreDistribution(rows);
   return n;
+}
+// THE INVARIANT v1233 WAS MISSING (v1235). v1232 reported its score distribution - 310 rows over the
+// bar. v1233 replaced the engine that produced that distribution and reported none, so a board that
+// could no longer reach the bar shipped unnoticed and was found on screen instead of in a test.
+// The distribution is now RECORDED on every scoring pass. It is deliberately not an assertion that
+// the board is non-empty: forcing rows over the bar is exactly the dishonesty this exists to catch.
+// An empty board is a legitimate answer; an empty board nobody measured is not.
+let RADAR_SCORE_DIST=null;
+function recordScoreDistribution(rows){
+  try{
+    const sc=(Array.isArray(rows)?rows:[]).map(r=>Number(r&&r.score))
+      .filter(Number.isFinite).sort((a,b)=>a-b);
+    const q=p=>sc.length?sc[Math.min(sc.length-1,Math.floor(sc.length*p))]:null;
+    const bar=(typeof RECOMMEND_MIN_SCORE==='number')?RECOMMEND_MIN_SCORE:null;
+    RADAR_SCORE_DIST={
+      at:Date.now(),n:sc.length,
+      max:sc.length?sc[sc.length-1]:null,
+      p50:q(0.5),p90:q(0.9),p99:q(0.99),
+      nonZero:sc.filter(v=>v>0).length,
+      overBar:(bar!==null)?sc.filter(v=>v>=bar).length:null,
+      bar,
+      tapeImpactWeight:(typeof TAPE_IMPACT_W==='number')?TAPE_IMPACT_W:0,
+      scoreVersion:(typeof RADAR_SCORE_VERSION==='string')?RADAR_SCORE_VERSION:null
+    };
+  }catch(e){ RADAR_SCORE_DIST=null; }
+  return RADAR_SCORE_DIST;
 }
 
 // THE LOOP'S STATE. Which of the current top recommendations still lack intraday data, and has the
@@ -10705,6 +10750,41 @@ async function saveKiteToken(){
 // score, target, stop, allocation or recommendation reads this. Null when the helper is old or
 // stopped, and every reader falls back to the live file's own depth.
 let CORPUS_COVERAGE=null;
+// The impact term's weight, GRADED by the helper against forward outcomes on the archive and already
+// shrunk by its own error bar. Null/absent helper leaves it 0, which makes the term inert.
+let TAPE_IMPACT_W=0;
+let TAPE_IMPACT_EDGE=null;
+async function loadTapeEdge(){
+  if(!KITE_API) return null;
+  try{
+    const c=new AbortController();
+    const t=setTimeout(()=>c.abort(),8000);
+    const r=await fetch(KITE_HELPER+'/api/kite/edge',{cache:'no-store',signal:c.signal});
+    clearTimeout(t);
+    const j=r.ok?await r.json():null;
+    TAPE_IMPACT_EDGE=(j&&j.ok)?j:null;
+    TAPE_IMPACT_W=(TAPE_IMPACT_EDGE&&Number.isFinite(Number(TAPE_IMPACT_EDGE.weight)))
+      ?Math.max(0,Math.min(0.35,Number(TAPE_IMPACT_EDGE.weight))):0;
+  }catch(e){ TAPE_IMPACT_EDGE=null; TAPE_IMPACT_W=0; }
+  return TAPE_IMPACT_EDGE;
+}
+// The helper does the fetching but the app knows which rows are eligible. Symbols only - the helper
+// resolves tokens from its own daily dump, which is fresher than anything this page holds.
+async function postCorpusPool(){
+  if(!KITE_API) return false;
+  try{
+    const syms=(Array.isArray(ALL)?ALL:[]).filter(r=>{
+      try{ return worthFetchingTape(r); }catch(e){ return false; }
+    }).map(r=>normSym(r.symbol)).filter(Boolean);
+    if(!syms.length) return false;
+    const c=new AbortController();
+    const t=setTimeout(()=>c.abort(),6000);
+    const r=await fetch(KITE_HELPER+'/api/kite/pool',{method:'POST',signal:c.signal,
+      headers:{'Content-Type':'application/json'},body:JSON.stringify({symbols:syms})});
+    clearTimeout(t);
+    return !!r.ok;
+  }catch(e){ return false; }
+}
 async function loadCorpusCoverage(){
   if(!KITE_API) return null;
   try{
@@ -10750,6 +10830,8 @@ async function fetchCandlesInApp(limit,opts){
   if(limit&&typeof limit==='object') limit=null;
   const say=(m,ms,bad)=>{ if(!auto) showToast(m,ms,bad); };   // silent on the automatic path
   if(!KITE_API){ say('The helper is not running. Double-click "Start Rocket Scanner.bat" and leave that window open — the app itself stays on GitHub Pages.',8000,true); return; }
+  try{ await loadTapeEdge(); }catch(e){}
+  try{ await postCorpusPool(); }catch(e){}
   const r=intradayFetchJobs(limit);
   const budget=fetchBudgetLeft();
   if(!budget){ say('Daily fetch budget spent — '+FETCH_MAX_PER_DAY+' requests. It resets next session.',5000,true); return; }
