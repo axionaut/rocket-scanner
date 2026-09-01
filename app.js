@@ -1,5 +1,5 @@
-const BUILD_TS='2026-08-28 13:22 IST'; // release build time (IST)
-const APP_VERSION=1233; // v1233: ALL NSE selects who is analysed; the 5-minute tape decides.
+const BUILD_TS='2026-09-01 09:17 IST'; // release build time (IST)
+const APP_VERSION=1234; // v1234: the out-of-session backfill sweep, and the coverage reader it needed.
 const RADAR_SCORE_VERSION='tape-decision-v3';
 // v1093: a baseline reward:risk MEASURED on the cross-section (last completed bhav session) instead of learned from the owner's own fills - reported on every row, deliberately not enforced. Includes v1092: position size split by Radar score / stop distance, so equally-scored names carry equal RUPEE risk, plus an opt-in Risk /trade cap.
 // v556: parse the NSE Market Activity Report (MA<date>.csv) — official Nifty %, advances/declines and sector index moves shown as market CONTEXT in the status bar (EOD data, display only, never fed into per-row scoring); MA added to the ℹ️ file manifest.
@@ -10282,6 +10282,49 @@ function corpusRotationJobs(spare){
   return out;
 }
 
+// ---- THE OUT-OF-SESSION BACKFILL SWEEP (v1234) ----------------------------------------------
+// The corpus rotation adds CORPUS_MAX_PER_RUN=6 names to a live press, which is right for a press
+// that must not delay a decision - and far too slow to build a measurable corpus: 46 sessions of it
+// reached 242 symbols. The sweep is the other half, and it is a SEPARATE JOB on purpose.
+//
+// WHY OUT OF SESSION, AND WHY NOT ALPHABETICAL. A stock fetched at 09:30 carries fifteen minutes of
+// session in its file; one fetched at 15:00 carries six hours. Walk a list in NAME order across the
+// day and every cross-sectional reading is confounded with time of day - the standing "compare
+// WITHIN cohort, never across" rule, whose artefact CLAUDE.md records producing a 41pp finding that
+// evaporated, and which v1216 measured as a 4x decay in remaining travel from 09:30 to 15:00. Run
+// outside the session and every symbol is fetched against the same closed set of complete sessions,
+// so fetch order carries no signal at all. It also means the sweep can never compete with a live
+// decision, because there is no live decision to compete with.
+//
+// Order is EMPTIEST FIRST, which is what makes coverage converge instead of oscillating: the symbol
+// that would most improve the corpus goes first, and a symbol that reaches BACKFILL_MIN_SESSIONS
+// leaves the queue permanently instead of being re-pulled forever.
+function outsideLiveSession(ts){
+  const c=istClock(ts);
+  return c.mins<DAY_START_MIN||c.mins>=DAY_END_MIN;
+}
+function corpusBackfillJobs(spare){
+  if(!(spare>0)) return [];
+  if(!outsideLiveSession()) return [];
+  const rows=corpusEligibleRows()
+    .filter(r=>KITE_TOKEN[normSym(r.symbol)]>0&&needsBackfill(r.symbol));
+  if(!rows.length) return [];
+  rows.sort((a,b)=>{
+    const ca=corpusSessionCount(a.symbol),cb=corpusSessionCount(b.symbol);
+    if(ca!==cb) return ca-cb;                                        // emptiest first
+    return corpusStaleness(b.symbol)-corpusStaleness(a.symbol);      // then longest unseen
+  });
+  const out=[],taken=new Set();
+  for(const r of rows){
+    if(out.length>=spare) break;
+    const sym=normSym(r.symbol);
+    if(taken.has(sym)) continue;
+    taken.add(sym);
+    out.push({s:sym,t:KITE_TOKEN[sym],held:false,_row:r,_corpus:true,_backfill:true});
+  }
+  return out;
+}
+
 function intradayFetchJobs(limit){
   const budget=fetchBudgetLeft();
   if(!(budget>0)) return {ok:false,why:'daily fetch budget spent'};
@@ -10319,8 +10362,13 @@ function intradayFetchJobs(limit){
   }
 
   const fetchClock=istClock();
+  // THE BOUNDARY MAY NOT OUTRUN THE SESSION (v1234). This followed the wall clock with no ceiling,
+  // so at 17:00 it wanted a 16:55 bar that can never exist: post-close EVERY row reported a growing
+  // gap, never went current, and each press re-bought the identical 40 rows. SESSION_CLOSE_MIN-5 is
+  // the last 5-minute bar the continuous session can open, so a row holding it is genuinely done
+  // and drops out - which is what frees the whole post-close budget for corpus breadth.
   const boundary=(fetchClock&&Number.isFinite(fetchClock.mins))
-    ?Math.floor((fetchClock.mins-5)/5)*5:null;
+    ?Math.min(Math.floor((fetchClock.mins-5)/5)*5,SESSION_CLOSE_MIN-5):null;
   // A recommendation only needs the last COMPLETED bar. An open position also needs the live
   // forming bar so its top-quartile-volume harvest can act before the close. Even when the stored
   // bar already has the current bucket's timestamp, re-fetch it on the next refresh because its
@@ -10399,9 +10447,14 @@ function intradayFetchJobs(limit){
 // stored history get the deep pull, in a separate small batch.
 const INTRADAY_FETCH_DAYS=3;        // routine press: today plus enough to bridge a weekend
 const INTRADAY_BACKFILL_DAYS=60;    // one-time per symbol (~43 sessions)
-const BACKFILL_MAX_PER_RUN=3;       // owner risk preference: deep pulls allowed per press
+const BACKFILL_MAX_PER_RUN=3;       // owner risk preference: deep pulls allowed per LIVE press
 const BACKFILL_MIN_SESSIONS=20;     // below this a symbol is considered un-backfilled
-// How many distinct sessions of tape we already hold for this symbol.
+// OWNER RISK PREFERENCE, 2026-09-01: how many deep pulls one out-of-session sweep may make. It runs
+// when the market is shut and the decision queue is idle, so it competes with nothing; the day
+// budget still bounds it, and at ~700ms pacing this is well under a minute of helper activity.
+const BACKFILL_MAX_PER_SWEEP=60;
+// How many distinct sessions of tape the LIVE decision file holds. This is deliberately short - the
+// helper trims it to MAX_ROWS - so it is a floor on coverage, never the measure of it.
 function storedSessionCount(sym){
   const bars=INTRADAY_BARS[normSym(sym)];
   if(!bars||!bars.length) return 0;
@@ -10409,7 +10462,20 @@ function storedSessionCount(sym){
   for(const b of bars){ const k=istDayKey(b.t); if(k) d.add(k); }
   return d.size;
 }
-function needsBackfill(sym){ return storedSessionCount(sym)<BACKFILL_MIN_SESSIONS; }
+// THE LIVE FILE CANNOT ANSWER "HAVE I BACKFILLED THIS". Measured 2026-09-01: the helper trims it to
+// 1,000 bars (~15 sessions - ABB held 1,001 rows and 15 sessions), so a symbol pulled ten times
+// still read 15 against a bar of 20 and `needsBackfill` was TRUE FOREVER for every symbol. Of the
+// 242 symbols in the archive, 149 already held >=20 sessions while every one of them was still
+// being re-deep-pulled, three per press, with the archive deduping the result to nothing.
+// The archive knows, and the helper reports it. Absent coverage falls back to the live floor, so an
+// old or stopped helper degrades to the previous behaviour rather than blocking the sweep.
+function corpusSessionCount(sym){
+  const s=normSym(sym);
+  const live=storedSessionCount(s);
+  const a=CORPUS_COVERAGE?Number(CORPUS_COVERAGE[s]):NaN;
+  return Number.isFinite(a)?Math.max(a,live):live;
+}
+function needsBackfill(sym){ return corpusSessionCount(sym)<BACKFILL_MIN_SESSIONS; }
 
 // Kite returns candles as [isoTime, open, high, low, close, volume]. That is the SAME information
 // the pasted table carries, so it is converted into the identical CSV and handed to the ONE parser
@@ -10634,6 +10700,23 @@ async function saveKiteToken(){
   if(KITE_API&&KITE_API.tokenValid===false){ showToast('Kite rejected that token. Copy it again.',5000,true); return; }
   showToast('Kite token saved. Press Fetch candles.',4000);
 }
+// Archive session counts from the helper. SCHEDULING ONLY - it answers "what should I fetch next",
+// never what a stock is worth, so the v1231 rule that no DECISION may read Archive/ still holds: no
+// score, target, stop, allocation or recommendation reads this. Null when the helper is old or
+// stopped, and every reader falls back to the live file's own depth.
+let CORPUS_COVERAGE=null;
+async function loadCorpusCoverage(){
+  if(!KITE_API) return null;
+  try{
+    const c=new AbortController();
+    const t=setTimeout(()=>c.abort(),4000);
+    const r=await fetch(KITE_HELPER+'/api/kite/coverage',{cache:'no-store',signal:c.signal});
+    clearTimeout(t);
+    const j=r.ok?await r.json():null;
+    CORPUS_COVERAGE=(j&&j.ok&&j.sessions&&typeof j.sessions==='object')?j.sessions:null;
+  }catch(e){ CORPUS_COVERAGE=null; }
+  return CORPUS_COVERAGE;
+}
 async function loadIntradayInventory(){
   if(!KITE_API) return 0;
   try{
@@ -10668,14 +10751,18 @@ async function fetchCandlesInApp(limit,opts){
   const say=(m,ms,bad)=>{ if(!auto) showToast(m,ms,bad); };   // silent on the automatic path
   if(!KITE_API){ say('The helper is not running. Double-click "Start Rocket Scanner.bat" and leave that window open — the app itself stays on GitHub Pages.',8000,true); return; }
   const r=intradayFetchJobs(limit);
-  if(!r.ok){ say('Nothing to fetch: '+r.why,5000,true); return; }
   const budget=fetchBudgetLeft();
   if(!budget){ say('Daily fetch budget spent — '+FETCH_MAX_PER_DAY+' requests. It resets next session.',5000,true); return; }
+  // v1234: an empty decision queue is not an empty press once the session is over. With the
+  // boundary fixed above, every current row correctly drops out after the close - and the old early
+  // return would then have killed the sweep exactly when the whole budget is free for it. Inside a
+  // session an empty queue still means there is nothing to do.
+  if(!r.ok&&!outsideLiveSession()){ say('Nothing to fetch: '+r.why,5000,true); return; }
   // v1203: the queue already bounded itself by the day budget and by the decision set. A second cap
   // here is what silently dropped open positions off the end of a press.
   // v1231: the decision set is served FIRST and in full. Only what the day budget has left over
   // goes to the corpus rotation, so this can never delay or displace a live decision.
-  const jobs=r.jobs.slice();
+  const jobs=r.ok?r.jobs.slice():[];
   try{
     const spare=Math.max(0,Math.min(budget-jobs.length,CORPUS_MAX_PER_RUN));
     if(spare>0){
@@ -10684,15 +10771,39 @@ async function fetchCandlesInApp(limit,opts){
     }
   }catch(e){ console.warn('corpus rotation skipped',e); }
   if(jobs.length>FETCH_MAX_PER_RUN) jobs.length=FETCH_MAX_PER_RUN;   // least-urgent tail only
+  // v1234: the sweep is added AFTER the press cap deliberately. FETCH_MAX_PER_RUN bounds a LIVE
+  // press so a long queue cannot sit between the owner and a decision; the sweep only runs when
+  // there is no live session, so that cap is not the bound that applies to it. Its own cap and the
+  // day budget are. Coverage is refreshed first, or the sweep would re-pull complete symbols.
+  try{
+    if(outsideLiveSession()){
+      await loadCorpusCoverage();
+      const left=Math.max(0,Math.min(budget-jobs.length,BACKFILL_MAX_PER_SWEEP));
+      if(left>0){
+        const seen=new Set(jobs.map(j=>j.s));
+        for(const c of corpusBackfillJobs(left)) if(!seen.has(c.s)){ seen.add(c.s); jobs.push(c); }
+      }
+    }
+  }catch(e){ console.warn('backfill sweep skipped',e); }
+  if(!jobs.length){ say('Nothing to fetch: '+(r.why||'nothing outstanding'),5000,true); return; }
   jobs.forEach(()=>FETCH_LOG.push(Date.now()));
   FETCH_BUSY={n:jobs.length,syms:jobs.map(j=>j.s),at:Date.now()};
   try{ renderTable(); }catch(e){}
-  say('Fetching '+jobs.map(j=>j.s).join(', ')+'…',3000);
+  const nSweep=jobs.filter(j=>j._backfill===true).length;
+  say(nSweep
+    ? 'Fetching '+(jobs.length-nSweep)+' for the board, and backfilling '+nSweep+' for the corpus…'
+    : 'Fetching '+jobs.map(j=>j.s).join(', ')+'…',3000);
   try{
     // Deep pulls are rare by construction: only symbols with no stored history, and never more
     // than BACKFILL_MAX_PER_RUN of them. Every other symbol is a light request exactly as before,
     // so a routine press carries the same payload it always did.
-    const deep=jobs.filter(x=>needsBackfill(x.s)).slice(0,BACKFILL_MAX_PER_RUN);
+    // A SWEPT job IS the deep pull - capping it at BACKFILL_MAX_PER_RUN would queue 60 symbols and
+    // then hand 57 of them a 3-day request, which is the shape of the v1203 truncation bug. That cap
+    // exists to keep a LIVE press light and still governs the incidental deep pulls inside one.
+    const swept=jobs.filter(x=>x._backfill===true);
+    const sweptSet=new Set(swept.map(x=>x.s));
+    const incidental=jobs.filter(x=>!sweptSet.has(x.s)&&needsBackfill(x.s)).slice(0,BACKFILL_MAX_PER_RUN);
+    const deep=swept.concat(incidental);
     const deepSet=new Set(deep.map(x=>x.s));
     const light=jobs.filter(x=>!deepSet.has(x.s));
     const callFor=async(list,days)=>{
