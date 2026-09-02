@@ -1,5 +1,5 @@
-const BUILD_TS='2026-09-02 09:40 IST'; // release build time (IST)
-const APP_VERSION=1249; // v1249: liquidity is judged on the stock, not on the clock.
+const BUILD_TS='2026-09-02 10:02 IST'; // release build time (IST)
+const APP_VERSION=1250; // v1250: the threshold governs recommendation, not visibility.
 const RADAR_SCORE_VERSION='tape-decision-v3';
 // v1093: a baseline reward:risk MEASURED on the cross-section (last completed bhav session) instead of learned from the owner's own fills - reported on every row, deliberately not enforced. Includes v1092: position size split by Radar score / stop distance, so equally-scored names carry equal RUPEE risk, plus an opt-in Risk /trade cap.
 // v556: parse the NSE Market Activity Report (MA<date>.csv) — official Nifty %, advances/declines and sector index moves shown as market CONTEXT in the status bar (EOD data, display only, never fed into per-row scoring); MA added to the ℹ️ file manifest.
@@ -3129,18 +3129,32 @@ const RADAR_PERMISSION_TAPE_ABSENT=0.6;
 function radarPermissionLevel(r,tapeStanding){
   const has=v=>v!==null&&v!==undefined&&v!==''&&Number.isFinite(Number(v));
   if(!r) return {p:0,why:'no row'};
-  const veto=[];
-  // exchange truth
+  // A TIMING VETO AND A STRUCTURAL VETO ARE NOT THE SAME THING (v1250). Owner: "the recommendation
+  // is score threshold based, but that doesn't mean stocks are not shown there with whatever score
+  // they have." Every gate here used to return p=0, so on a weak session the ENTIRE board scored
+  // exactly 0.0 and carried no ranking information at all - measured 2026-09-02 at 09:40: breadth
+  // 33%, 1,543 rows, every one of them 0.0 while showing +3.9% to +6.5% day moves.
+  //
+  // STRUCTURAL means the row cannot be traded at all today: not EQ-eligible, no history, at the
+  // circuit, condemned by the tape, blocked by an armed trigger. Those stay hard zeros - a zero is
+  // the honest score for something that is not a trade.
+  //
+  // TIMING means it is not buyable RIGHT NOW and may be in ten minutes: the move is extended, the
+  // broad market has not confirmed, the turn has not shown yet. Those SCALE the score down instead,
+  // so the row keeps its ordering and the owner can see what is building. It is not loosened:
+  // `meetsRecommendationBar` still refuses `entryReady===false` and `directionConfirmed!==true`
+  // independently, so a scaled row can never be selected or exported, and radarScoreCell renders an
+  // above-bar score amber when the row is not selectable.
+  const veto=[],timing=[];
   if(r.eqEligible===false||r.basketEligible===false) veto.push('not basket-eligible');
-  // the hard gates meetsRecommendationBar applies, priced into the number instead of hidden from it
   if(r.recommendationTriggerBlocked===true) veto.push('trigger veto');
   if(r.noHistory===true) veto.push('no multi-day history');
-  if(r.entryReady===false&&r.entryAtLimit!==true) veto.push('move already consumed');
   if(r.intradaySellingToday===true) veto.push('selling today');
-  if(r.directionConfirmed!==true) veto.push('direction not confirmed');
   const hasPred=has(r.predictiveLevel)&&Number(r.predictiveSessions)>=3;
   if(!hasPred) veto.push('no qualified predictor');
   if(veto.length) return {p:0,why:veto[0],vetoes:veto};
+  if(r.entryReady===false&&r.entryAtLimit!==true) timing.push('move already consumed');
+  if(r.directionConfirmed!==true) timing.push('direction not confirmed');
   // continuous permissions
   // HEADROOM IS THE EXCHANGE CIRCUIT, NOT THE STATISTICAL CEILING (v1237). This was min(f,cf), which
   // is the exact shape v1208 removed from the score: `feasibility` carries the v1083 session-ceiling
@@ -3161,7 +3175,12 @@ function radarPermissionLevel(r,tapeStanding){
     if(ts<=0) return {p:0,why:'tape rejected',vetoes:['tape rejected']};
     tape=clamp01(0.6+0.4*ts,0,1); tapeWhy='tape '+(ts>=0.5?'confirming':'weak');
   }
-  return {p:clamp01(room*tape,0,1),why:tapeWhy,room,tape};
+  // Each unmet timing condition halves what is left. Halving is the same "one more thing has to go
+  // right" step applied twice, not a tuned weight, and two of them still leave a quarter - enough
+  // to rank a strong setup well below a buyable one without erasing it.
+  const timingFactor=Math.pow(0.5,timing.length);
+  return {p:clamp01(room*tape*timingFactor,0,1),
+          why:timing.length?timing[0]:tapeWhy,room,tape,timing,timingFactor};
 }
 // ── EVIDENCE COMES FROM THE TAPE (v1233) ──────────────────────────────────────────────────────
 // Owner: "ALL NSE's role is only that" - a pool of stocks on which to do 5-minute analysis - and
@@ -4783,7 +4802,7 @@ function radarAnalyze(headers,rawRows,supplements={},heldSymbols=new Set()){
     const out={symbol,name:String(raw[descI]||symbol),sector:raw[sectorI]||'',rawScore,parts,contrib,quality,
       predictiveRaw:predictiveWeight?predictiveSum/predictiveWeight:null,predictiveSessions:nextPrediction.sessions||0,
       predictiveModel:nextPrediction.champion||'preMove',
-      price,day:dispDay,priceChange:dispDay,turnover:turn,avgVol10:(avgVolI>=0?num(row[avgVolI]):null),relvol,relAt,volChg,gap,gapSigned,changeOpen,rangePct,sessionVolatilityPct,stretch,stretchBarPct:_stretchBar,atr:atrPct,
+      price,day:dispDay,priceChange:dispDay,turnover:turn,avgVol10:(avgVolI>=0?radarNum(raw[avgVolI]):null),relvol,relAt,volChg,gap,gapSigned,changeOpen,rangePct,sessionVolatilityPct,stretch,stretchBarPct:_stretchBar,atr:atrPct,
       high1d:highI>=0?radarNum(raw[highI]):null,low1d:lowI>=0?radarNum(raw[lowI]):null,dayVolume:dayVolI>=0?radarNum(raw[dayVolI]):null,open1d:openI>=0?radarNum(raw[openI]):null,marketCap:mcapI>=0?radarNum(raw[mcapI]):null,rocketToday:rset.has(ri),
       vwap:vwapI>=0?radarNum(raw[vwapI]):null,
       vwap5:vwap5I>=0?radarNum(raw[vwap5I]):null,
@@ -11328,11 +11347,20 @@ function applyFilters(){
       REMOVED_ROWS.push({s,reason:'trigger',detail:'automatic evidence trigger: '+(s.recommendationTriggerReasons||[]).join(', ')});
       return false;
     }
-    if(s.entryReady===false&&s.entryAtLimit!==true){
-      PEAK_TIMING_REMOVED++;
-      REMOVED_ROWS.push({s,reason:'peak',detail:s.entryTiming?.reason||'move is extended or has not re-armed'});
-      return false;
-    }
+    // THE THRESHOLD GOVERNS RECOMMENDATION, NOT VISIBILITY (v1250). Owner: "The recommendation is
+    // score threshold based, but that doesn't mean stocks are not shown there with whatever score
+    // they have." This REMOVED every entry-blocked row from the table, which is survivable on a
+    // strong day and empties the board completely on a weak one: measured 2026-09-02 at 09:40,
+    // breadth was 33% so `marketWeak` was true, only 406 of 1,669 rows were confirmed above VWAP
+    // and up from open, and between the weak-market overlay and the peak guard ALL 1,543 displayed
+    // rows were removed - "1543 timing-trigger misses" and an empty table with a 1,543-row universe.
+    // The row stays, carrying its score and its reason. It is still NOT BUYABLE: entryReady===false
+    // remains in meetsRecommendationBar, so it cannot be selected or exported, and radarScoreCell
+    // renders an above-bar score amber when the row is not selectable. Nothing is loosened; the
+    // stock is simply visible, which is what a ranking table is for.
+    // Counted so the status bar can say how many are waiting, but NOT pushed into REMOVED_ROWS -
+    // the row is on the board, and listing it as removed would contradict the table beside it.
+    if(s.entryReady===false&&s.entryAtLimit!==true) PEAK_TIMING_REMOVED++;
     const _vw=Number(s.vwap), _px=Number(s.price), _co=Number(s.changeOpen), _day=Number(s.day);
     const _aboveVwap=_vw>0&&_px>=_vw;
     const _aboveOpen=Number.isFinite(_co)&&_co>0;
