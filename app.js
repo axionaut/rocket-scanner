@@ -1,5 +1,5 @@
-const BUILD_TS='2026-09-02 16:43 IST'; // release build time (IST)
-const APP_VERSION=1257; // v1257: the retirement swept through the files it left behind.
+const BUILD_TS='2026-09-02 16:58 IST'; // release build time (IST)
+const APP_VERSION=1258; // v1258: market-closed state must not present as a stream outage.
 const RADAR_SCORE_VERSION='tape-decision-v3';
 // v1093: a baseline reward:risk MEASURED on the cross-section (last completed bhav session) instead of learned from the owner's own fills - reported on every row, deliberately not enforced. Includes v1092: position size split by Radar score / stop distance, so equally-scored names carry equal RUPEE risk, plus an opt-in Risk /trade cap.
 // v556: parse the NSE Market Activity Report (MA<date>.csv) — official Nifty %, advances/declines and sector index moves shown as market CONTEXT in the status bar (EOD data, display only, never fed into per-row scoring); MA added to the ℹ️ file manifest.
@@ -11234,11 +11234,11 @@ function intradayPasteBarHtml(){
   const connected=!!(st&&st.connected);
   const live=inSession&&connected;
   const bars=Object.keys(INTRADAY_BARS||{}).length;
-  const dot=live?'var(--green)':(!inSession&&connected?'var(--border-hi)':(needsLogin?'var(--amber)':'var(--red)'));
+  const dot=!inSession?'var(--border-hi)':(live?'var(--green)':(needsLogin?'var(--amber)':'var(--red)'));
   const head=live
     ? `<b style="color:var(--green)">\u25cf live</b> \u00b7 ${st.subscribed||0} instruments \u00b7 `
       +`${(st.ticks||0).toLocaleString('en-IN')} ticks \u00b7 ${bars} symbols with a tape`
-    : !inSession&&connected
+    : !inSession
       ? `<b style="color:var(--t2)">\u25cb market closed</b> · helper connected · ${bars} symbols stored`
     : needsLogin
       ? `<b style="color:var(--amber)">\u25cb Kite login expired</b> \u2014 one click, once a day`
