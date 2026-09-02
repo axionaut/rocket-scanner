@@ -1,5 +1,5 @@
-const BUILD_TS='2026-09-02 11:14 IST'; // release build time (IST)
-const APP_VERSION=1255; // v1255: Drive is a backup, not a gate, and the folder watch is retired.
+const BUILD_TS='2026-09-02 11:29 IST'; // release build time (IST)
+const APP_VERSION=1256; // v1256: one slow probe must not convince the app the helper is gone.
 const RADAR_SCORE_VERSION='tape-decision-v3';
 // v1093: a baseline reward:risk MEASURED on the cross-section (last completed bhav session) instead of learned from the owner's own fills - reported on every row, deliberately not enforced. Includes v1092: position size split by Radar score / stop distance, so equally-scored names carry equal RUPEE risk, plus an opt-in Risk /trade cap.
 // v556: parse the NSE Market Activity Report (MA<date>.csv) — official Nifty %, advances/declines and sector index moves shown as market CONTEXT in the status bar (EOD data, display only, never fed into per-row scoring); MA added to the ℹ️ file manifest.
@@ -11963,7 +11963,17 @@ const STREAM_REFRESH_MS=30000;   // = the helper's flush interval
 async function streamRefreshTick(){
   if(_streamRefreshBusy||document.hidden) return;
   if(_folderWatchBusy) return;              // an ingest is authoritative; do not race it
-  if(!KITE_API) return;                     // no helper, nothing local to read
+  if(!KITE_API){
+    // SELF-HEAL, DO NOT GIVE UP (v1256). detectKiteApi runs ONCE at startup behind a 1.5s timeout,
+    // and a helper busy answering a 5 MB inventory can miss it. Before v1255 the folder watch would
+    // eventually cause a re-probe; deleting it left nothing that ever asked again, so a single slow
+    // probe convinced the app permanently that the helper was not running - measured with the
+    // helper healthy and answering on 8787. The refresh beat is exactly the right place to retry:
+    // it costs one localhost request every 30 seconds and it repairs itself the moment the helper
+    // answers, because detectKiteApi re-renders and reloads the inventory on success.
+    try{ await detectKiteApi(); }catch(e){}
+    if(!KITE_API) return;
+  }
   const c=istClock();
   if(c.mins<DAY_START_MIN||c.mins>=DAY_END_MIN) return;   // the stream is closed outside hours
   _streamRefreshBusy=true;
