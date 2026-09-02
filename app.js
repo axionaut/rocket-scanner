@@ -1,5 +1,5 @@
-const BUILD_TS='2026-09-02 16:58 IST'; // release build time (IST)
-const APP_VERSION=1258; // v1258: market-closed state must not present as a stream outage.
+const BUILD_TS='2026-09-02 17:15 IST'; // release build time (IST)
+const APP_VERSION=1259; // v1259: money left on the table is read off the 5-minute tape, not sampled.
 const RADAR_SCORE_VERSION='tape-decision-v3';
 // v1093: a baseline reward:risk MEASURED on the cross-section (last completed bhav session) instead of learned from the owner's own fills - reported on every row, deliberately not enforced. Includes v1092: position size split by Radar score / stop distance, so equally-scored names carry equal RUPEE risk, plus an opt-in Risk /trade cap.
 // v556: parse the NSE Market Activity Report (MA<date>.csv) — official Nifty %, advances/declines and sector index moves shown as market CONTEXT in the status bar (EOD data, display only, never fed into per-row scoring); MA added to the ℹ️ file manifest.
@@ -1589,6 +1589,26 @@ function getPostSellExtremes(sym,sellDate,sellTime=null){
   // Today's bar is still forming and is not in the bhav copy yet, so take it from the live row.
   const scanDate=(typeof getSessionDate==='function')?getSessionDate():null;
   const row=(Array.isArray(ALL)?ALL:[]).find(r=>r.symbol===s);
+  // v1259: the sell day comes from the 5-minute tape whenever the tape covers it. It is exact, it
+  // needs neither a scanner row nor the sampled watch, and unlike the watch it does not require the
+  // DAY high to advance - only that price traded above the fill after the fill.
+  const tape=getPostSellTapeExtremes(s,sellDate,sellTime);
+  if(tape){
+    const sold=String(sellTime||'').match(/\d{1,2}:\d{2}/)?.[0]||'exit';
+    if(tape.bars>0&&tape.high>0){
+      out.high=out.high==null?tape.high:Math.max(out.high,tape.high);
+      if(tape.low>0) out.low=out.low==null?tape.low:Math.min(out.low,tape.low);
+      out.includesSellDay=true; out.exact=true;
+      out.sellDayNote=`sell-day tape: high \u20b9${tape.high.toFixed(2)} at ${tape.at} IST across `
+        +`${tape.bars} five-minute bar${tape.bars===1?'':'s'} after your ${sold}`
+        +(tape.straddleHigh>tape.high
+          ? ` (the bar straddling your ${sold} touched \u20b9${tape.straddleHigh.toFixed(2)}, which cannot be split and is not counted)`
+          : '');
+    } else {
+      out.includesSellDay=false; out.exact=true;
+      out.sellDayNote=`sell-day tape: no five-minute bar printed after your ${sold}`;
+    }
+  }
   if(row&&scanDate&&scanDate>=sellDate){
     const hi=Number(row.high1d), lo=Number(row.low1d), px=Number(row.price);
     const useHi=hi>0?hi:(px>0?px:null), useLo=lo>0?lo:(px>0?px:null);
@@ -1599,7 +1619,7 @@ function getPostSellExtremes(sym,sellDate,sellTime=null){
       if(useHi>0) out.high=out.high==null?useHi:Math.max(out.high,useHi);
       if(useLo>0) out.low =out.low ==null?useLo:Math.min(out.low ,useLo);
     }
-    if(scanDate===sellDate){
+    if(scanDate===sellDate&&!tape){
       const w=getPostSellHighFromWatch(s,sellDate,sellTime);
       if(w){
         if(w.advanced&&w.postSellHigh>0){
@@ -1622,7 +1642,7 @@ function getPostSellExtremes(sym,sellDate,sellTime=null){
         out.includesSellDay=true; out.exact=false;
         out.sellDayNote='sell day not watched — the whole-day high is an upper bound';
       }
-    } else { out.sessions++; out.to=scanDate; if(!out.from) out.from=scanDate; }
+    } else if(scanDate>sellDate){ out.sessions++; out.to=scanDate; if(!out.from) out.from=scanDate; }
   }
   return out;
 }
@@ -5116,6 +5136,50 @@ function splitPathAtSell(path,sellTime,finalHigh){
   return {advanced,preSellHigh:preHigh,postSellHigh:advanced?fin:null,
           advancedAt:advanced?advAt:null,straddles:advanced&&preAt==null};
 }
+// v1259: THE SELL DAY IS READ OFF THE TAPE, NOT SAMPLED. The watch recorder above samples
+// r.high1d at each scanner refresh, so it can only ever answer "did the RUNNING DAY HIGH advance
+// after the exit?". Two consequences, both measured on the owner's 2026-09-02 book: the level it
+// reports is whatever a refresh happened to catch (RISHABH 748.00 "at 11:48" against a true 752.00
+// at 14:45), and a rise that stops short of a high already set BEFORE the exit is invisible
+// entirely - GOODLUCK traded 477.45 two minutes after a 14:28:03 sell at 475.35 and the panel
+// reported nothing left on the table. The 5-minute tape answers both exactly and is already held.
+// A bar is claimable only when it STARTS at or after the fill: the one bar straddling the sell
+// cannot be split, so its high is reported separately and never counted as attributable.
+function tapeBarsForSession(sym,sessionDate){
+  const bars=INTRADAY_BARS[normSym(sym)];
+  if(!Array.isArray(bars)||!bars.length||!sessionDate) return null;
+  const day=bars.filter(b=>istDayKey(b.t)===sessionDate);
+  return day.length?day:null;
+}
+function barClockHHMM(t){
+  const d=new Date(t);
+  return String(d.getHours()).padStart(2,'0')+':'+String(d.getMinutes()).padStart(2,'0');
+}
+function getPostSellTapeExtremes(sym,sellDate,sellTime){
+  const day=tapeBarsForSession(sym,sellDate);
+  const sellMin=clockMinutes(sellTime);
+  if(!day||sellMin==null) return null;
+  let high=null,low=null,at=null,n=0,straddleHigh=null;
+  for(const b of day){
+    const d=new Date(b.t);
+    if(d.getHours()*60+d.getMinutes()<sellMin){
+      // Bars are ascending, so the last one before the fill is the bar that straddles it.
+      if(b.h>0) straddleHigh=b.h;
+      continue;
+    }
+    n++;
+    if(b.h>0&&(high==null||b.h>high)){ high=b.h; at=barClockHHMM(b.t); }
+    if(b.l>0&&(low==null||b.l<low)) low=b.l;
+  }
+  return {high,low,at,bars:n,straddleHigh};
+}
+function getTapeDayHigh(sym,sessionDate){
+  const day=tapeBarsForSession(sym,sessionDate);
+  if(!day) return null;
+  let high=null,at=null;
+  for(const b of day) if(b.h>0&&(high==null||b.h>high)){ high=b.h; at=barClockHHMM(b.t); }
+  return high==null?null:{high,at,bars:day.length,firstAt:barClockHHMM(day[0].t)};
+}
 function getPostSellHighFromWatch(sym,sessionDate,sellTime){
   const day=getSessionWatchStore().highs[sessionDate||getSessionDate()];
   const e=day&&day[normSym(sym)];
@@ -5128,23 +5192,34 @@ function getPostSellHighFromWatch(sym,sessionDate,sellTime){
           observations:e.n||0,points:path.length};
 }
 function getHighTimeInfo(sym,sessionDate){
-  const d=getSessionWatchStore().highs[sessionDate||getSessionDate()];
+  const date=sessionDate||getSessionDate();
+  // v1259: the tape carries the exact time the session high printed. The sampled watch below can
+  // only report when a refresh first SAW it, which is why RISHABH read 11:48 against a true 14:45.
+  const t=getTapeDayHigh(sym,date);
+  if(t) return {high:t.high,at:t.at,firstSeen:t.firstAt,observations:t.bars,exact:true};
+  const d=getSessionWatchStore().highs[date];
   const e=d&&d[normSym(sym)];
-  return e?{high:e.h,at:e.at,firstSeen:e.first,observations:e.n||0}:null;
+  return e?{high:e.h,at:e.at,firstSeen:e.first,observations:e.n||0,exact:false}:null;
 }
 let _gapStatsMemo=null;
 function getHighGapStats(){
   const store=getSessionWatchStore();
   const trips=TRADEBOOK_STATS?.tripsData;
+  // v1259: the tape now feeds getHighTimeInfo, so it must ride the signature too or a fresh bar
+  // would be served a stale aggregate.
+  let tapeSig=0,tapeLast=0;
+  for(const k in INTRADAY_BARS){
+    const b=INTRADAY_BARS[k];
+    if(Array.isArray(b)&&b.length){ tapeSig++; tapeLast=Math.max(tapeLast,b[b.length-1].t||0); }
+  }
   const sig=Object.entries(store.highs||{})
     .map(([d,day])=>d+':'+Object.entries(day||{}).map(([s,e])=>s+e.at+e.h).join(''))
-    .join('|')+'|'+(Array.isArray(trips)?trips.length:0);
+    .join('|')+'|'+(Array.isArray(trips)?trips.length:0)+'|'+tapeSig+':'+tapeLast;
   if(_gapStatsMemo&&_gapStatsMemo.sig===sig) return _gapStatsMemo.val;
   const gaps=[];const sessions=new Set();
   (Array.isArray(trips)?trips:[]).forEach(t=>{
     const d=t&&t.sellDate; if(!d) return;
-    const day=store.highs[d]; if(!day) return;
-    const e=day[normSym(t.sym)]; if(!e||!e.at) return;
+    const e=getHighTimeInfo(t.sym,d); if(!e||!e.at) return;
     const hi=clockMinutes(e.at), se=clockMinutes(t.sellTime);
     if(hi==null||se==null) return;
     gaps.push(hi-se); sessions.add(d);
@@ -5154,9 +5229,8 @@ function getHighGapStats(){
   try{
     const s=getLatestBookedSummary();
     if(s&&s.source==='Orders.csv'&&Array.isArray(s.rows)){
-      const day=store.highs[s.date];
-      if(day) s.rows.forEach(r=>{
-        const e=day[normSym(r.sym)]; if(!e||!e.at) return;
+      s.rows.forEach(r=>{
+        const e=getHighTimeInfo(r.sym,s.date); if(!e||!e.at) return;
         const hi=clockMinutes(e.at), se=clockMinutes(r.sellTime);
         if(hi==null||se==null) return;
         gaps.push(hi-se); sessions.add(s.date);
@@ -5166,14 +5240,14 @@ function getHighGapStats(){
   let val;
   if(!gaps.length){
     val={n:0,sessions:0,meanMin:null,medianMin:null,afterCount:0,
-         source:'no watched session has a matching exit yet'};
+         source:'no session with a tape or watch record has a matching exit yet'};
   } else {
     const sorted=[...gaps].sort((a,b)=>a-b);
     val={n:gaps.length,sessions:sessions.size,
          meanMin:Math.round(gaps.reduce((a,b)=>a+b,0)/gaps.length),
          medianMin:Math.round(sorted[Math.floor(sorted.length/2)]),
          afterCount:gaps.filter(g=>g>0).length,
-         source:`${gaps.length} exit${gaps.length===1?'':'s'} across ${sessions.size} watched session${sessions.size===1?'':'s'}`};
+         source:`${gaps.length} exit${gaps.length===1?'':'s'} across ${sessions.size} session${sessions.size===1?'':'s'}`};
   }
   _gapStatsMemo={sig,val};
   return val;
@@ -5515,21 +5589,25 @@ function enrichExitPnlRow(row,bookedDate=null){
   try{
     const info=getHighTimeInfo(row?.sym,bookedDate||getSessionDate());
     if(!info){
-      out.highNote='Not watched that session. The high-time recorder began 2026-08-11 and covers open positions plus the top of the ranking.';
+      out.highNote='No 5-minute tape and no watch record for that session. The tape reaches back about 13 sessions per symbol; the sampled watch recorder began 2026-08-11 and covers open positions plus the top of the ranking.';
     } else {
       out.highAt=info.at; out.highObs=info.observations;
       // If the high was already in at the FIRST observation, the recorder never saw it advance, so
       // the stamp is an UPPER BOUND ("at or before"), not a time. Saying otherwise would invent
       // precision the recorder cannot have — the high may have printed before watching began.
-      out.highAtIsBound=(info.at===info.firstSeen);
+      // v1259: a tape stamp is the real time of the high, so it is never an "at or before" bound.
+      out.highAtIsBound=!info.exact&&(info.at===info.firstSeen);
       const hi=clockMinutes(info.at), se=clockMinutes(row?.sellTime);
       if(hi!=null&&se!=null) out.highGapMin=hi-se;
-      out.highNote=(out.highAtIsBound
-        ? `Day high ${info.high} was ALREADY IN at the first observation (${info.at} IST), so this is "at or before", not the time of the high.`
-        : `Day high ${info.high} last advanced at ${info.at} IST.`)
-        +` ${info.observations} observation${info.observations===1?'':'s'} that session`
-        +(row?.sellTime?` · you sold at ${String(row.sellTime).match(/\d{1,2}:\d{2}/)?.[0]||'?'}`:'')
-        +`. Resolution is your export cadence, not seconds.`;
+      const sold=row?.sellTime?` · you sold at ${String(row.sellTime).match(/\d{1,2}:\d{2}/)?.[0]||'?'}`:'';
+      out.highNote=info.exact
+        ? `Day high ${info.high} printed at ${info.at} IST, read off the 5-minute tape`
+          +` (${info.observations} bar${info.observations===1?'':'s'} that session)${sold}. Resolution is 5 minutes.`
+        : (out.highAtIsBound
+            ? `Day high ${info.high} was ALREADY IN at the first observation (${info.at} IST), so this is "at or before", not the time of the high.`
+            : `Day high ${info.high} last advanced at ${info.at} IST.`)
+          +` ${info.observations} observation${info.observations===1?'':'s'} that session${sold}`
+          +`. Sampled from your refresh cadence, not the tape.`;
     }
   }catch(e){}
   if(qty>0&&isFinite(buy)&&buy>0&&isFinite(sell)&&sell>0){
@@ -5558,7 +5636,7 @@ function enrichExitPnlRow(row,bookedDate=null){
     out.leftOnTableNote='No sell price or quantity on this row.';
   }else if(!bookedDate){
     out.leftOnTableNote='No booking date on this row, so the post-sell window cannot be bounded.';
-  }else if(ext.high==null&&ext.low==null&&/no new high after your exit/.test(ext.sellDayNote||'')){
+  }else if(ext.high==null&&ext.low==null&&/no new high after your exit|no five-minute bar printed after your/.test(ext.sellDayNote||'')){
     out.leftOnTableRs=0; out.leftOnTablePct=0;
     out.leftOnTableExact=true;
     out.leftOnTableNote=`Sold at ₹${sell.toFixed(2)}. ${ext.sellDayNote}. Nothing is attributable to waiting — the app sees the running high only, so a rise that stopped short of the earlier high would be invisible.`;
@@ -7005,13 +7083,20 @@ function getPostSellHorizonHigh(sym,sellDate,sellTime,horizonSessions){
   const s=normSym(sym);
   const out={sameDayHigh:null,sameDayKnown:false,horizonHigh:null,sessions:0};
   if(!s||!sellDate) return out;
-  // (a) the sell day, AFTER the exit only. Only the watch recorder can split the day at the sell;
-  // without it the sell day is unknown rather than assumed.
+  // (a) the sell day, AFTER the exit only. v1259: the 5-minute tape splits the day at the fill
+  // exactly; the sampled watch is the fallback for a session the tape no longer reaches. Without
+  // either, the sell day is unknown rather than assumed.
   try{
-    const w=getPostSellHighFromWatch(s,sellDate,sellTime);
-    if(w){
+    const tp=getPostSellTapeExtremes(s,sellDate,sellTime);
+    if(tp){
       out.sameDayKnown=true;
-      out.sameDayHigh=(w.advanced&&w.postSellHigh>0)?w.postSellHigh:null;
+      out.sameDayHigh=(tp.bars>0&&tp.high>0)?tp.high:null;
+    } else {
+      const w=getPostSellHighFromWatch(s,sellDate,sellTime);
+      if(w){
+        out.sameDayKnown=true;
+        out.sameDayHigh=(w.advanced&&w.postSellHigh>0)?w.postSellHigh:null;
+      }
     }
   }catch(e){}
   // (b) the next N sessions, strictly after the sell day, N fixed for every row.
@@ -11344,6 +11429,14 @@ function applyFilters(){
     }
     if((s.turnover||0)<minTurn){REMOVED_ROWS.push({s,reason:'filter',detail:'below the Min Turnover filter ('+fmtINR(minTurn)+')'});return false;}
     if(maxPrice!=null&&Number(s.price)>maxPrice){REMOVED_ROWS.push({s,reason:'filter',detail:'above the Max Price filter ('+fmtINR(maxPrice)+')'});return false;}
+    // v1259: Min Score is a FILTER, which is what its label promises - the owner set 79 and was
+    // shown 66.8. v1250 is untouched: that rule forbade DELETING a row for a TIMING veto it had no
+    // say in, not for a floor the owner typed himself, and the row still appears in the removed
+    // audit with its score. An absent score is not a low score (RADAR_SCORE_BANDS) and is left be.
+    if(Number.isFinite(Number(s.score))&&Number(s.score)<RECOMMEND_MIN_SCORE){
+      REMOVED_ROWS.push({s,reason:'filter',detail:'score '+Number(s.score).toFixed(1)+' is below your Min Score of '+RECOMMEND_MIN_SCORE});
+      return false;
+    }
     if(riskSel.length&&!riskSel.includes(s.risk)){REMOVED_ROWS.push({s,reason:'filter',detail:s.risk+' risk — excluded by your Risk filter'});return false;}
     if(q&&![s.symbol,s.name,s.sector].join(' ').toLowerCase().includes(q)) return false;
     // v1080 (owner): a row that can never be allocated a single share is not a recommendation.
