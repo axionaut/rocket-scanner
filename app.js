@@ -1,5 +1,5 @@
-const BUILD_TS='2026-09-02 10:45 IST'; // release build time (IST)
-const APP_VERSION=1253; // v1253: the fetch console is replaced by the live tape, and an empty board says why.
+const BUILD_TS='2026-09-02 11:00 IST'; // release build time (IST)
+const APP_VERSION=1254; // v1254: a universe refresh scores, it does not re-ingest the world.
 const RADAR_SCORE_VERSION='tape-decision-v3';
 // v1093: a baseline reward:risk MEASURED on the cross-section (last completed bhav session) instead of learned from the owner's own fills - reported on every row, deliberately not enforced. Includes v1092: position size split by Radar score / stop distance, so equally-scored names carry equal RUPEE risk, plus an opt-in Risk /trade cap.
 // v556: parse the NSE Market Activity Report (MA<date>.csv) — official Nifty %, advances/declines and sector index moves shown as market CONTEXT in the status bar (EOD data, display only, never fed into per-row scoring); MA added to the ℹ️ file manifest.
@@ -3206,7 +3206,27 @@ function tapeAggregate(bars,k){
 }
 // Signed volume for one candle: buyers minus sellers, by where it closed inside its own range.
 const tapeDelta=b=>(b.h>b.l?(Number(b.v)||0)*(2*(b.c-b.l)/(b.h-b.l)-1):0);
+// MEMOIZED ON THE BAR SIGNATURE (v1254). This re-aggregates a symbol's whole session - 15-minute
+// and 25-minute rollups, a VWAP pass, a cumulative-delta walk - and it is called once per row by
+// setRadarEvidenceScore, again by applyIntradayReorder, and again by every consumer that asks for a
+// standing. Measured on a 1,669-row board: radarScoreRows 1,915ms, applyFilters 1,298ms,
+// applyIntradayReorder 1,129ms - about 4.6 SECONDS of main-thread work every 30 seconds, which is
+// what made the filters and tabs unusable. The answer only changes when a bar arrives, so the
+// signature is the bar count plus the last bar's timestamp - the same memo shape getIntradayThinCut
+// already uses. A new bar invalidates it by construction; nothing else can.
+const _tapeEvidenceMemo=new Map();
 function radarTapeEvidence(sym){
+  const key=normSym(sym||'');
+  const bars=INTRADAY_BARS[key];
+  if(!bars||bars.length<6) return null;
+  const stamp=bars.length+':'+bars[bars.length-1].t;
+  const hit=_tapeEvidenceMemo.get(key);
+  if(hit&&hit.stamp===stamp) return hit.val;
+  const val=_radarTapeEvidenceUncached(key);
+  _tapeEvidenceMemo.set(key,{stamp,val});
+  return val;
+}
+function _radarTapeEvidenceUncached(sym){
   const all=INTRADAY_BARS[normSym(sym||'')];
   if(!all||all.length<6) return null;
   const key=istDayKey(all[all.length-1].t);
@@ -10987,21 +11007,45 @@ async function hydrateFromHelper(reason){
       ||isExactCsvName(n,'NSE Holidays.csv');
   });
   if(!wanted.length) return false;
-  const changed=wanted.filter(f=>_helperInputSigs[f.name]!==(f.size+':'+f.lastModified));
+  const sig=f=>f.size+':'+f.lastModified;
+  const changed=wanted.filter(f=>_helperInputSigs[f.name]!==sig(f));
   if(!changed.length) return false;
-  const files=[];
-  for(const f of wanted){
+
+  // THE UNIVERSE CHANGES EVERY 30 SECONDS; NOTHING ELSE DOES (v1254). Routing that through the full
+  // processFiles made every beat re-upload the canonical inputs to Drive, WIPE and rebuild every NSE
+  // map (KITE_TOKEN included), and re-parse the multi-megabyte reports ZIP through JSZip - all to
+  // pick up one regenerated CSV. That is what made the filters and tabs lag: a multi-hundred-
+  // millisecond synchronous block twice a minute. When the ONLY thing that changed is the scanner
+  // file, take the scoring path directly. The ZIP, the portfolio files and the Drive push still get
+  // the full treatment on the passes where they actually changed.
+  const onlyScanner=changed.every(f=>isScannerCsvName(f.name));
+  const fetchOne=async f=>{
     try{
       const r=await fetch(KITE_HELPER+'/api/inputs/file?name='+encodeURIComponent(f.name),{cache:'no-store'});
-      if(!r.ok) continue;
-      const blob=await r.blob();
-      files.push(new File([blob],f.name,{lastModified:f.lastModified}));
-    }catch(e){}
+      if(!r.ok) return null;
+      return new File([await r.blob()],f.name,{lastModified:f.lastModified});
+    }catch(e){ return null; }
+  };
+
+  if(onlyScanner){
+    const f=changed.find(x=>isScannerCsvName(x.name));
+    const file=f&&await fetchOne(f);
+    if(!file) return false;
+    const ok=await processScannerUpload(file,'stock');
+    if(ok){
+      _helperInputSigs[f.name]=sig(f);
+      try{ renderTradingDashboardNow(); }catch(e){}
+    }
+    return !!ok;
   }
+
+  // Something structural changed - fetch the whole set so processFiles sees a coherent picture.
+  const files=[];
+  for(const f of wanted){ const file=await fetchOne(f); if(file) files.push(file); }
   if(!files.length) return false;
   const ok=await processFiles(files,reason||'helper',{silent:true});
   // Marked seen only once the load SUCCEEDED, so a failed pass retries rather than going quiet.
-  if(ok) for(const f of wanted) _helperInputSigs[f.name]=f.size+':'+f.lastModified;
+  if(ok) for(const f of wanted) _helperInputSigs[f.name]=sig(f);
   return ok;
 }
 async function loadIntradayInventory(){
@@ -13210,6 +13254,7 @@ function getDepthPctMap(){
 const RADAR_DEPTH_IN_SCORE=true;   // v1139: one word reverts the score to v1138
 const DEPTH_MIN_BOOK_QTY=1000;      // a book too small to mean anything
 const DEPTH_MIN_PREOPEN_TURNOVER=2e5;
+let _lastNseZipSig='';   // v1254: size:lastModified of the zip whose parse produced the live NSE maps
 async function processFiles(files,sourceLabel,opts={}){
   const silent=!!opts.silent; // watcher refreshes: no overlay, no toasts, corner pill only
   if(!(await ensureDriveReadyForLoad())){
@@ -13270,7 +13315,16 @@ async function processFiles(files,sourceLabel,opts={}){
     return false;
   }
 
+  // THE ZIP IS DOWNLOADED ONCE A DAY (owner, 2026-09-02): "it should just check a timestamp or
+  // something and use it." Every load reset all of this and re-parsed several megabytes through
+  // JSZip - fine when a load meant a manual button press, ruinous now that the helper hydrates on a
+  // 30-second beat. The zip's own size:lastModified is the timestamp: unchanged means the maps it
+  // produced are still exactly right, so the reset and the parse are both skipped.
+  const _zipSig=nseZip?(nseZip.size+':'+nseZip.lastModified):'';
+  const _zipUnchanged=!!nseZip&&_zipSig===_lastNseZipSig&&Object.keys(NSE_BHAV||{}).length>0;
+  if(!_zipUnchanged){
   NSE_BHAV={};NSE_52W={};NSE_SURV={};NSE_BULK={};NSE_BLOCK={};NSE_PRICE_BAND={};NSE_VAR={};NSE_NEXT_BAND={};NSE_SECURITY_MASTER={};NSE_DEAL_NET={};NSE_CORP_ACTION={};NSE_BOARD_MEETING={};NSE_ANNOUNCE={};NSE_MARKET=null;NSE_INDEX={};NSE_NAME_TO_SYM={};NSE_BAND_HIT={};NSE_NEW_HL_BYNAME={};NSE_INDEX_GROUP_BYNAME={};NSE_INDEX_GROUP_BYSYM={};MARKET_REGIME=null;NSE_STATUS={};NSE_SERIES={};NSE_DEPTH={};NSE_DEPTH_META=null;KITE_TOKEN={};
+  }
 
   if(kiteFile){
     try{
@@ -13288,7 +13342,12 @@ async function processFiles(files,sourceLabel,opts={}){
       if(n) recordDepthMarketRead();
     }catch(e){console.warn('Could not parse Market Depth.csv:',e);}
   }
-  if(nseZip){
+  if(nseZip&&_zipUnchanged){
+    // Same bytes as the last parse; the maps are already populated and re-deriving them would
+    // produce the identical result at the cost of the whole beat.
+    updateFileLoadStatus('Reports-Daily-Multiple.zip','loaded');
+  }
+  if(nseZip&&!_zipUnchanged){
     setLoadMsg('Unzipping NSE data...');
     try{
       const outerZip=await JSZip.loadAsync(nseZip);
@@ -13321,6 +13380,7 @@ async function processFiles(files,sourceLabel,opts={}){
       // file is scored, so the drift map the scorer reads already includes today's bhav.
       try{ recordPriceHistoryFromBhav(); }catch(e){ console.error('price history:',e); }
     }catch(e){console.error('ZIP error:',e);}
+    _lastNseZipSig=_zipSig;
   }
   await refreshNseFundamentals();
 
