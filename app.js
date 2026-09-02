@@ -1,5 +1,5 @@
-const BUILD_TS='2026-09-02 09:07 IST'; // release build time (IST)
-const APP_VERSION=1247; // v1247: a Connect install never asks for an enctoken.
+const BUILD_TS='2026-09-02 09:40 IST'; // release build time (IST)
+const APP_VERSION=1249; // v1249: liquidity is judged on the stock, not on the clock.
 const RADAR_SCORE_VERSION='tape-decision-v3';
 // v1093: a baseline reward:risk MEASURED on the cross-section (last completed bhav session) instead of learned from the owner's own fills - reported on every row, deliberately not enforced. Includes v1092: position size split by Radar score / stop distance, so equally-scored names carry equal RUPEE risk, plus an opt-in Risk /trade cap.
 // v556: parse the NSE Market Activity Report (MA<date>.csv) — official Nifty %, advances/declines and sector index moves shown as market CONTEXT in the status bar (EOD data, display only, never fed into per-row scoring); MA added to the ℹ️ file manifest.
@@ -3294,12 +3294,24 @@ function radarPotentialScore(r){
 // 15-minute change at 0.55, the 5-minute DMI spread at 0.54) - and the press is capped by
 // FETCH_MAX_PER_RUN. A pre-filtered file of 19 rows fetches all 19; the full 3,139-row file fetches
 // the most interesting FETCH_MAX_PER_RUN of them instead of all of them.
+// TODAY'S TURNOVER IS CUMULATIVE FROM THE OPEN, so a Rs25L floor is unreachable at 09:20 and every
+// candidate fails it - measured 2026-09-02: the eligible pool collapsed to the 8 open positions and
+// the board had nothing on it at 09:35. The floor is asking "does this stock trade enough to be
+// worth trading", which is a property of the STOCK. A row is judged on the larger of what it has
+// traded today and what it normally trades (price x 10-day average volume), so it qualifies from
+// the first bar and a genuinely illiquid name still cannot.
+function rowLiquidityRupees(r){
+  const t=Number(r&&r.turnover)||0;
+  const px=Number(r&&r.price)||0,av=Number(r&&r.avgVol10)||0;
+  const usual=(px>0&&av>0)?px*av:0;
+  return Math.max(t,usual);
+}
 function worthFetchingTape(r){
   if(!r||r._held) return false;
   if(r.eqEligible===false||r.basketEligible===false) return false;
   if(r.recommendationTriggerBlocked===true) return false;
-  const p=Number(r.price),t=Number(r.turnover);
-  return p>=10&&t>=2500000;
+  const p=Number(r.price);
+  return p>=10&&rowLiquidityRupees(r)>=2500000;
 }
 function radarScoreComponents(r,tapeStanding){
   const hasNumber=v=>v!==null&&v!==undefined&&v!==''&&Number.isFinite(Number(v));
@@ -4402,7 +4414,7 @@ function radarAnalyze(headers,rawRows,supplements={},heldSymbols=new Set()){
   const _depthPctMap=(typeof getDepthPctMap==='function')?getDepthPctMap():{};
   const priceI=radarIdx(headers,'Price'),targetI=radarIdx(headers,'Price change %, 1 day'),sectorI=radarIdx(headers,'Sector'),symbolI=radarIdx(headers,'Symbol'),descI=radarIdx(headers,'Description');
   if(symbolI<0||priceI<0||targetI<0)throw Error('Expected Symbol, Price, and Price change %, 1 day columns.');
-  const turnI=radarIdx(headers,'Price × volume (turnover), 1 day'),relI=radarIdx(headers,'Relative volume, 1 day'),relAtI=radarIdx(headers,'Relative volume at time'),volChgI=radarIdx(headers,'Volume change %, 1 day'),gapI=radarIdx(headers,'Gap %, 1 day'),adrI=radarIdx(headers,'Average daily range %'),atrI=radarIdx(headers,'Average true range %, 14, 1 day'),atrWeekI=radarIdx(headers,'Average true range %, 14, 1 week'),volI=radarIdx(headers,'Volatility, 1 day'),highI=radarIdx(headers,'High, 1 day'),lowI=radarIdx(headers,'Low, 1 day'),openI=radarIdx(headers,'Open, 1 day'),mcapI=radarIdx(headers,'Market capitalization');
+  const turnI=radarIdx(headers,'Price × volume (turnover), 1 day'),avgVolI=radarIdx(headers,'Average volume, 10 days'),relI=radarIdx(headers,'Relative volume, 1 day'),relAtI=radarIdx(headers,'Relative volume at time'),volChgI=radarIdx(headers,'Volume change %, 1 day'),gapI=radarIdx(headers,'Gap %, 1 day'),adrI=radarIdx(headers,'Average daily range %'),atrI=radarIdx(headers,'Average true range %, 14, 1 day'),atrWeekI=radarIdx(headers,'Average true range %, 14, 1 week'),volI=radarIdx(headers,'Volatility, 1 day'),highI=radarIdx(headers,'High, 1 day'),lowI=radarIdx(headers,'Low, 1 day'),openI=radarIdx(headers,'Open, 1 day'),mcapI=radarIdx(headers,'Market capitalization');
   const bollUpperI=radarIdx(headers,'Bollinger Bands, 20, 1 day, Upper'),keltUpperI=radarIdx(headers,'Keltner channels, 20, 1 day, Upper');
   const priceHourI=radarIdx(headers,'Price change %, 1 hour'),price15I=radarIdx(headers,'Price change %, 15 minutes'),price5I=radarIdx(headers,'Price change %, 5 minutes');
   const changeOpenI=radarIdx(headers,'Change from open %, 1 day'),perf1mI=radarIdx(headers,'Performance %, 1 month'),perf3mI=radarIdx(headers,'Performance %, 3 months'),perf1yI=radarIdx(headers,'Performance %, 1 year');
@@ -4771,7 +4783,7 @@ function radarAnalyze(headers,rawRows,supplements={},heldSymbols=new Set()){
     const out={symbol,name:String(raw[descI]||symbol),sector:raw[sectorI]||'',rawScore,parts,contrib,quality,
       predictiveRaw:predictiveWeight?predictiveSum/predictiveWeight:null,predictiveSessions:nextPrediction.sessions||0,
       predictiveModel:nextPrediction.champion||'preMove',
-      price,day:dispDay,priceChange:dispDay,turnover:turn,relvol,relAt,volChg,gap,gapSigned,changeOpen,rangePct,sessionVolatilityPct,stretch,stretchBarPct:_stretchBar,atr:atrPct,
+      price,day:dispDay,priceChange:dispDay,turnover:turn,avgVol10:(avgVolI>=0?num(row[avgVolI]):null),relvol,relAt,volChg,gap,gapSigned,changeOpen,rangePct,sessionVolatilityPct,stretch,stretchBarPct:_stretchBar,atr:atrPct,
       high1d:highI>=0?radarNum(raw[highI]):null,low1d:lowI>=0?radarNum(raw[lowI]):null,dayVolume:dayVolI>=0?radarNum(raw[dayVolI]):null,open1d:openI>=0?radarNum(raw[openI]):null,marketCap:mcapI>=0?radarNum(raw[mcapI]):null,rocketToday:rset.has(ri),
       vwap:vwapI>=0?radarNum(raw[vwapI]):null,
       vwap5:vwap5I>=0?radarNum(raw[vwap5I]):null,
@@ -10383,8 +10395,8 @@ function corpusEligibleRows(){
   return (Array.isArray(ALL)?ALL:[]).filter(r=>{
     if(!r||r._held) return false;
     if(r.eqEligible===false||r.basketEligible===false) return false;
-    const p=Number(r.price),t=Number(r.turnover);
-    return p>=10&&t>=2500000;
+    const p=Number(r.price);
+    return p>=10&&rowLiquidityRupees(r)>=2500000;
   });
 }
 // How long since this symbol's tape was last refreshed, in sessions. Never fetched sorts first.
@@ -11938,8 +11950,18 @@ async function getLocalUploadFolderFiles(){
 
 let _folderWatchTimer=null,_folderWatchBusy=false,_folderWatchAllNseLastModified=null;
 function getAllNseLastModified(files){
-  const allNse=(files||[]).find(f=>isScannerCsvName(f?.name));
-  return allNse?.lastModified ?? null;
+  const list=(files||[]).filter(f=>isScannerCsvName(f?.name));
+  if(!list.length) return null;
+  // WATCH THE FILE THAT WILL ACTUALLY BE INGESTED (v1249). v1245 widened `isScannerCsvName` to
+  // accept the generated universe, and this took the FIRST match - which is whichever the directory
+  // happens to list first. With both present that is `ALL NSE.csv`, whose timestamp stopped changing
+  // the moment the owner stopped downloading it, so the watch compared a frozen number and never
+  // fired. Measured 2026-09-02: the helper rewrote `Kite Universe.csv` every 30 seconds from 09:15
+  // and the board still showed its 09:07 PRE-OPEN scoring at 09:35 - every score 0, "0% up-from-open",
+  // no recommendations, while the stream was healthy at 1,542 subscriptions. `processFiles` prefers
+  // the generated universe, so the watch must key on the same file or it watches the wrong clock.
+  const gen=list.find(f=>isGeneratedUniverseName(f?.name));
+  return (gen||list[0])?.lastModified ?? null;
 }
 // Small corner pill instead of the full loader/toast: auto-refresh must never interrupt.
 function showAutoRefreshIndicator(state){
