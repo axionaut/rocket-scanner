@@ -1,5 +1,5 @@
-const BUILD_TS='2026-09-02 11:00 IST'; // release build time (IST)
-const APP_VERSION=1254; // v1254: a universe refresh scores, it does not re-ingest the world.
+const BUILD_TS='2026-09-02 11:14 IST'; // release build time (IST)
+const APP_VERSION=1255; // v1255: Drive is a backup, not a gate, and the folder watch is retired.
 const RADAR_SCORE_VERSION='tape-decision-v3';
 // v1093: a baseline reward:risk MEASURED on the cross-section (last completed bhav session) instead of learned from the owner's own fills - reported on every row, deliberately not enforced. Includes v1092: position size split by Radar score / stop distance, so equally-scored names carry equal RUPEE risk, plus an opt-in Risk /trade cap.
 // v556: parse the NSE Market Activity Report (MA<date>.csv) — official Nifty %, advances/declines and sector index moves shown as market CONTEXT in the status bar (EOD data, display only, never fed into per-row scoring); MA added to the ℹ️ file manifest.
@@ -896,7 +896,11 @@ const driveInputNeedsPush=f=>_driveInputSigs.get(driveInputKey(f))!==driveInputS
 const markDriveInputPushed=f=>_driveInputSigs.set(driveInputKey(f),driveInputSig(f));
 async function saveInputsToDrive(files){
   if(!files?.length||!FS.hasFolder()) return 0;
-  const pending=files.filter(driveInputNeedsPush);
+  // THE GENERATED UNIVERSE IS NEVER BACKED UP (v1255). Drive exists so a second device can hydrate
+  // inputs the owner cannot otherwise reproduce. `Kite Universe.csv` is rebuilt from the live tick
+  // stream every thirty seconds, so there is nothing in it to preserve - pushing 650 KB on every
+  // regeneration is pure cost and one more thing that can fail.
+  const pending=files.filter(f=>!isGeneratedUniverseName(f?.name)).filter(driveInputNeedsPush);
   if(!pending.length) return 0;
   const saved=await FS.saveUploadedInputs(pending);
   pending.forEach(markDriveInputPushed);
@@ -11930,70 +11934,17 @@ async function getLocalUploadFolderFiles(){
   }
 }
 
-let _folderWatchTimer=null,_folderWatchBusy=false,_folderWatchAllNseLastModified=null;
-function getAllNseLastModified(files){
-  const list=(files||[]).filter(f=>isScannerCsvName(f?.name));
-  if(!list.length) return null;
-  // WATCH THE FILE THAT WILL ACTUALLY BE INGESTED (v1249). v1245 widened `isScannerCsvName` to
-  // accept the generated universe, and this took the FIRST match - which is whichever the directory
-  // happens to list first. With both present that is `ALL NSE.csv`, whose timestamp stopped changing
-  // the moment the owner stopped downloading it, so the watch compared a frozen number and never
-  // fired. Measured 2026-09-02: the helper rewrote `Kite Universe.csv` every 30 seconds from 09:15
-  // and the board still showed its 09:07 PRE-OPEN scoring at 09:35 - every score 0, "0% up-from-open",
-  // no recommendations, while the stream was healthy at 1,542 subscriptions. `processFiles` prefers
-  // the generated universe, so the watch must key on the same file or it watches the wrong clock.
-  const gen=list.find(f=>isGeneratedUniverseName(f?.name));
-  return (gen||list[0])?.lastModified ?? null;
-}
+// _folderWatchBusy survives as the one-ingest-at-a-time latch that streamRefreshTick honours;
+// the timer and the ALL NSE timestamp it compared are gone with the watch.
+let _folderWatchBusy=false;
+// getAllNseLastModified is deleted with the folder watch it served (v1255). Its job was to tell the
+// watcher which scanner file to compare timestamps on; there is no watcher. The surviving claim -
+// that ingestion PREFERS the generated universe over a hand-downloaded export - lives in
+// processFiles and is asserted by dev/assert-v1245.js.
 // Small corner pill instead of the full loader/toast: auto-refresh must never interrupt.
-function showAutoRefreshIndicator(state){
-  let el=document.getElementById('autoRefreshPill');
-  if(!el){
-    el=document.createElement('div');
-    el.id='autoRefreshPill';
-    el.style.cssText="position:fixed;bottom:16px;left:16px;z-index:998;padding:6px 12px;border-radius:20px;background:var(--bg-raised);border:1px solid var(--border-hi);color:var(--t2);font-size:13px;font-family:'DM Mono',monospace;box-shadow:0 4px 16px rgba(0,0,0,.35);display:none;align-items:center;gap:6px";
-    document.body.appendChild(el);
-  }
-  clearTimeout(el._hideTimer);
-  if(state==='refreshing'){
-    el.style.color='var(--t2)';
-    el.innerHTML='<span style="display:inline-block;animation:sp 1s linear infinite">⟳</span> auto-refresh';
-    el.style.display='flex';
-  } else if(state==='done'){
-    el.style.color='var(--green)';
-    el.innerHTML='✓ updated '+fileStatusClock();
-    el.style.display='flex';
-    el._hideTimer=setTimeout(()=>{el.style.display='none';el.style.color='var(--t2)';},4000);
-  } else {
-    el.style.display='none';
-  }
-}
-async function folderWatchTick(){
-  if(_folderWatchBusy||document.hidden) return;
-  try{
-    const local=await getLocalUploadFolderFiles();
-    if(!local?.files?.length) return;
-    const lastModified=getAllNseLastModified(local.files);
-    if(lastModified===null) return;
-    if(_folderWatchAllNseLastModified===null){_folderWatchAllNseLastModified=lastModified;return;} // baseline, no re-run
-    if(lastModified===_folderWatchAllNseLastModified)return; // unchanged since last ingest
-    _folderWatchAllNseLastModified=lastModified;
-    _folderWatchBusy=true;
-    showAutoRefreshIndicator('refreshing');
-    // A NEW ALL NSE MEANS A NEW DECISION, so the book it is scored against must be current too.
-    // This runs BEFORE the ingest and writes into the same folder, so processFiles picks the fresh
-    // files up in the same pass. It cannot block: a failure just leaves the existing files in place.
-    try{ await refreshBrokerInputs(); }catch(e){}
-    const fresh=await getLocalUploadFolderFiles();
-    const use=(fresh&&fresh.files&&fresh.files.length)?fresh.files:local.files;
-    const ok=await processFiles(use,local.sourceLabel+' · auto-refresh',{silent:true});
-    showAutoRefreshIndicator(ok?'done':'hide');
-  }catch(e){
-    console.warn('Folder watch tick failed',e);
-    showAutoRefreshIndicator('hide');
-  }
-  finally{_folderWatchBusy=false;}
-}
+// folderWatchTick and its "auto refresh" pill are deleted with the watch that called them (v1255).
+// Nothing polls a directory handle any more; hydrateFromHelper notices every input change on the
+// refresh beat, with no grant to lapse.
 // ---- THE BOARD FOLLOWS THE STREAM (v1242) -----------------------------------------------------
 // The helper now holds a Kite Connect WebSocket carrying the whole eligible pool in quote mode and
 // folds ticks into 5-minute bars (measured on the live feed: 1,543 instruments, 3,654 ticks in six
@@ -12047,9 +11998,13 @@ async function loadStreamStatus(){
   }catch(e){ STREAM_STATUS=null; }
   return STREAM_STATUS;
 }
+// THE FOLDER WATCH IS RETIRED (v1255). It polled a granted directory handle every 3 seconds to spot
+// a hand-downloaded ALL NSE. There is no hand-downloaded file any more, the grant lapses silently
+// (which is how the board once sat frozen for half a session), and hydrateFromHelper already notices
+// every input change on the refresh beat without needing any grant at all. Its "auto refresh" pill
+// went with it: what refreshes now is the helper - portfolio from Kite every ten minutes, the
+// universe every thirty seconds - and the Live tape panel says so directly.
 function startFolderWatch(){
-  if(_folderWatchTimer) return;
-  _folderWatchTimer=setInterval(folderWatchTick,3000);
   startStreamRefresh();
 }
 
@@ -13267,7 +13222,7 @@ async function processFiles(files,sourceLabel,opts={}){
   if(SURV_RULES_RESTORE_STATE==='unloaded') loadSurvRules();
   // Any deliberate or automatic load resets the folder-watch baseline so the watcher
   // does not immediately re-process the files it (or the user) just loaded.
-  try{_folderWatchAllNseLastModified=getAllNseLastModified([...files]);}catch(e){}
+  // (the watch baseline this used to set is gone with the watch itself, v1255)
   if(!silent) setLoading(true,String(FILE_LOAD_STATUS.source?`Processing selected files... · ${FILE_LOAD_STATUS.source}`:'Processing selected files...'));
   let tvFile=null,nseZip=null,holdFile=null,posFile=null,ordFile=null,tbFile=null,holidayFile=false,holidayFileName='',depthFile=null,kiteFile=null;
   for(const f of files){
@@ -13309,10 +13264,16 @@ async function processFiles(files,sourceLabel,opts={}){
     if(!silent) setLoadMsg('Saving changed input files to Drive...');
     await saveInputsToDrive(files);
   }catch(e){
+    // DRIVE IS A BACKUP NOW, NOT THE SOURCE (v1255). v1220 made a failed push ABORT the load, and
+    // that was right when Drive held the canonical inputs: a partially persisted sweep must not
+    // advance into a new decision. The helper owns those files today - it fetches the portfolio
+    // from Kite every ten minutes and regenerates the universe every thirty seconds - so Drive is a
+    // convenience for a second device. Blocking the board on it inverted the priority: measured on
+    // the owner's screen, "Could not save input files to Drive. Rankings were not updated: Failed
+    // to fetch" while the tape was live at 1,657 instruments and the data on disk was current. A
+    // backup failing must never stop the primary.
     console.error('Drive input save failed',e);
-    if(!silent) setLoading(false);
-    showToast('Could not save input files to Drive. Rankings were not updated: '+(e?.message||e),6000,true);
-    return false;
+    if(!silent) showToast('Drive backup failed ('+(e?.message||e)+'). Rankings updated from the local helper.',5000,true);
   }
 
   // THE ZIP IS DOWNLOADED ONCE A DAY (owner, 2026-09-02): "it should just check a timestamp or
@@ -13585,7 +13546,7 @@ async function initApp(){
   try{applyFilters();}catch(e){console.error('INIT step7 applyFilters failed:',e);}
   setLoading(false);
   schedulePerformanceRender();
-  // Radar-style auto-refresh: watch the granted local folder for new/changed files.
+  // The helper hydrates on the refresh beat; nothing watches a folder handle any more.
   startFolderWatch();
 }
 initApp();
