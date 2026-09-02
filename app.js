@@ -1,5 +1,5 @@
-const BUILD_TS='2026-09-01 16:20 IST'; // release build time (IST)
-const APP_VERSION=1246; // v1246: the explanation names what actually made the score.
+const BUILD_TS='2026-09-02 09:07 IST'; // release build time (IST)
+const APP_VERSION=1247; // v1247: a Connect install never asks for an enctoken.
 const RADAR_SCORE_VERSION='tape-decision-v3';
 // v1093: a baseline reward:risk MEASURED on the cross-section (last completed bhav session) instead of learned from the owner's own fills - reported on every row, deliberately not enforced. Includes v1092: position size split by Radar score / stop distance, so equally-scored names carry equal RUPEE risk, plus an opt-in Risk /trade cap.
 // v556: parse the NSE Market Activity Report (MA<date>.csv) — official Nifty %, advances/declines and sector index moves shown as market CONTEXT in the status bar (EOD data, display only, never fed into per-row scoring); MA added to the ℹ️ file manifest.
@@ -10716,6 +10716,13 @@ function ingestKiteCandlePayload(text){
 }
 
 let KITE_API=null;          // set when the local helper answers, wherever this page is hosted
+// ONCE CONNECT, ALWAYS CONNECT, FOR THE UI (v1247). `KITE_API` goes null on any transient status
+// failure - a slow helper, an aborted probe - and `kiteTokenDialogState` then returns null, which
+// let a FORCED dialog fall through to the enctoken body. Measured on the owner's screen the morning
+// after his access token expired: the app asked him to paste an enctoken, a credential Connect
+// never uses, and reported "Kite rejected that token" when he did. Transport is a property of the
+// INSTALLATION, not of whether the last probe answered, so it latches.
+let KITE_CONNECT_SEEN=false;
 let LAST_FETCH=null;        // what the last fetch actually brought back, shown so it can be checked
 let FETCH_BUSY=null;        // v1177: {n, syms, at} while a fetch is in flight - it must be VISIBLE
 let LAST_FETCH_HIDDEN=false; // v1172: the list is collapsed for space; the DATA is never discarded
@@ -10776,6 +10783,7 @@ async function detectKiteApi(force){
     const r=await fetch(KITE_HELPER+'/api/kite/status'+(force?'?force=1':''),{cache:'no-store',signal:c.signal});
     clearTimeout(t);
     KITE_API=r.ok?await r.json():null;
+    if(KITE_API&&KITE_API.mode==='connect') KITE_CONNECT_SEEN=true;
   }catch(e){ KITE_API=null; }
   try{ renderTable(); }catch(e){}
   if(KITE_API) { try{ loadIntradayInventory(); }catch(e){} }
@@ -10785,13 +10793,15 @@ async function detectKiteApi(force){
 let KITE_TOKEN_PROMPTED=false;   // once per page load; dismissing must not re-prompt on every render
 
 function kiteTokenDialogState(){
-  if(!KITE_API) return null;                       // no helper: nothing to save into, so do not ask
+  // A blip in the probe must not change which credential the app asks for.
+  if(!KITE_API) return KITE_CONNECT_SEEN?'connect-login':null;
   // A CONTROL THAT CANNOT WORK MUST SAY SO - AND MUST BE THE RIGHT CONTROL (v1240). v1239 reused
   // `hasToken` to mean "can I fetch right now", which is true for the fetch button and WRONG for
   // this dialog: a Connect helper waiting on its daily login was asking the owner to paste an
   // enctoken, a credential Connect never uses. Pasting one would have silently reverted him to the
   // unofficial transport he had just moved off.
-  if(KITE_API.mode==='connect') return (KITE_API.needsLogin||!KITE_API.hasToken)?'connect-login':null;
+  if(KITE_API.mode==='connect'||KITE_CONNECT_SEEN)
+    return (KITE_API.needsLogin||!KITE_API.hasToken||KITE_API.tokenValid===false)?'connect-login':null;
   if(!KITE_API.hasToken) return 'missing';
   if(KITE_API.tokenValid===false) return 'expired';
   return null;                                     // valid, or the helper could not check - stay quiet
@@ -10804,7 +10814,10 @@ function openKiteTokenDialog(force){
   if(!st&&!force) return;
   if(dlg.open) return;
   const expired=st==='expired';
-  if(st==='connect-login'){
+  // FORCE MAY CHOOSE TO OPEN IT; IT MAY NOT CHOOSE WHICH CREDENTIAL TO ASK FOR. `force` skipped the
+  // state check entirely, so a forced call with a null state rendered the enctoken body even on a
+  // Connect install. The transport decides the body, always.
+  if(st==='connect-login'||KITE_CONNECT_SEEN){
     document.getElementById('kiteTokenTitle').textContent='Log in to Kite';
     document.getElementById('kiteTokenBody').innerHTML=`
       <div style="padding:16px 18px;display:flex;flex-direction:column;gap:12px">
@@ -10879,6 +10892,13 @@ function closeKiteTokenDialog(){
 }
 
 async function saveKiteTokenFromDialog(){
+  // Storing an enctoken on a Connect install cannot help and would look like a fix that failed.
+  if(KITE_CONNECT_SEEN){
+    const m=document.getElementById('kiteTokenDlgMsg');
+    if(m){ m.style.color='var(--amber)';
+      m.textContent='This install uses Kite Connect - an enctoken is not used. Press Log in to Kite.'; }
+    return;
+  }
   const box=document.getElementById('kiteTokenDlgBox');
   const msg=document.getElementById('kiteTokenDlgMsg');
   const say=(t,bad)=>{ if(msg){ msg.textContent=t; msg.style.color=bad?'var(--red)':'var(--green)'; } };
