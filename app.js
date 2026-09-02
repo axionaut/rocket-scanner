@@ -1,5 +1,5 @@
-const BUILD_TS='2026-09-02 18:00 IST'; // release build time (IST)
-const APP_VERSION=1260; // v1260: Methodology and Performance describe the live decision surfaces.
+const BUILD_TS='2026-09-02 18:20 IST'; // release build time (IST)
+const APP_VERSION=1261; // v1261: Performance is fast, period-consistent and auditable.
 const RADAR_SCORE_VERSION='tape-decision-v3';
 // v1093: a baseline reward:risk MEASURED on the cross-section (last completed bhav session) instead of learned from the owner's own fills - reported on every row, deliberately not enforced. Includes v1092: position size split by Radar score / stop distance, so equally-scored names carry equal RUPEE risk, plus an opt-in Risk /trade cap.
 // v556: parse the NSE Market Activity Report (MA<date>.csv) — official Nifty %, advances/declines and sector index moves shown as market CONTEXT in the status bar (EOD data, display only, never fed into per-row scoring); MA added to the ℹ️ file manifest.
@@ -2678,9 +2678,17 @@ function buildSystemScorecard(){
     tot.target+=target.length; tot.stopped+=stopped.length; tot.expired+=expired.length;
     tot.ambiguous+=ambiguous.length; tot.pending+=pending;
     if(!resolvable.length) return;                        // a wholly legacy cohort says nothing
+    const regimeData=issue.regime;
+    const regimeLabel=String(regimeData?.label||regimeData||'—');
+     const regimeDetail=regimeData&&typeof regimeData==='object'
+      ? [`VIX range ${regimeData.vixRangePos==null?'—':Number(regimeData.vixRangePos).toFixed(0)+'th'}`,
+        `breadth ${regimeData.breadthPct==null?'—':Number(regimeData.breadthPct).toFixed(0)+'%'}`,
+        `Nifty ${regimeData.niftyPct==null?'—':(Number(regimeData.niftyPct)>=0?'+':'')+Number(regimeData.niftyPct).toFixed(2)+'%'}`].join(' · ')
+      : 'detail unavailable in stored cohort';
     rows.push({date:issue.date||date,
-      regime:String(issue.regime?.label||issue.regime||'—'),
+      regime:regimeDetail?regimeLabel+' · '+regimeDetail:regimeLabel,
       picks:resolvable.length, target:target.length, stopped:stopped.length,
+      ambiguous:ambiguous.length,
       expired:expired.length, pending,
       hitPct:settled?+(target.length/settled*100).toFixed(0):null,
       medDays:target.length?median(target.map(p=>Number(p.rocketDays)).filter(v=>Number.isFinite(v))):null});
@@ -7806,12 +7814,6 @@ function renderPerformance(){
   const hdrEl=document.querySelector('.hdr');
   if(hdrEl) document.documentElement.style.setProperty('--hdr-h',hdrEl.offsetHeight+'px');
   const tb=TRADEBOOK_STATS;
-  // Re-apply the realised tradebook exit policy BEFORE the panel is built: it reads
-  // getEffectiveTgtPct/getEffectiveReviewDays, which this refresh is what feeds.
-  if(tb?.tripsData?.length){
-    refreshExitPolicyFromFeedback(tb);
-    try{FS.set(TRADEBOOK_STORE,tb);}catch(e){}
-  }
   // Latest Session and Open Positions now live on the Rankings tab (v530).
   if(!tb){
     el.innerHTML=`<div style="padding:12px 16px"><div style="text-align:center;padding:60px 40px;color:var(--t2)"><div style="font-size:18px;font-weight:700;color:var(--t1);margin-bottom:8px">No Tradebook Loaded</div><div>Upload TRADEBOOK.csv to see performance analytics. Open Positions and Latest Session are on the Rankings tab.</div></div></div>`;
@@ -7839,8 +7841,9 @@ function renderPerformance(){
     :PERF_PERIOD_FILTER==='6m'?new Date(_now.getFullYear(),_now.getMonth()-6,_now.getDate()).toISOString().slice(0,10)
     :new Date(_now.getFullYear()-1,_now.getMonth(),_now.getDate()).toISOString().slice(0,10);
   const recentTrips=_cutoff?adaptiveAllTrips.filter(r=>r.sellDate>=_cutoff):adaptiveAllTrips;
-  const p=computePerfStats(recentTrips.length?recentTrips:adaptiveAllTrips);
-  const allSellDates=[...new Set(recentTrips.map(r=>r.sellDate))].sort();
+  const perfTrips=recentTrips.length?recentTrips:adaptiveAllTrips;
+  const p=computePerfStats(perfTrips);
+  const allSellDates=[...new Set(perfTrips.map(r=>r.sellDate))].sort();
   const dfrom=allSellDates[0], dto=allSellDates.at(-1);
   const calDayCount=(dfrom&&dto)?Math.round((new Date(dto)-new Date(dfrom))/86400000)+1:null;
   const avgCalDayPnl=(calDayCount&&calDayCount>0)?Math.round(p.totalNetPnlRs/calDayCount):null;
@@ -7972,9 +7975,9 @@ function renderPerformance(){
     if(sellDate<monthMap[ym]._minDate) monthMap[ym]._minDate=sellDate;
     if(sellDate>monthMap[ym]._maxDate) monthMap[ym]._maxDate=sellDate;
   };
-  adaptiveAllTrips.forEach(r=>addToMonth(r.sellDate,r.netPnl,1));
+  perfTrips.forEach(r=>addToMonth(r.sellDate,r.netPnl,1));
   // Same reason as the Net P&L KPI: today is booked but not yet in the tradebook.
-  if(todayAdd) addToMonth(todayAdd.date,todayAdd.amount,todayAdd.lots);
+  if(todayAdd&&(!_cutoff||todayAdd.date>=_cutoff)) addToMonth(todayAdd.date,todayAdd.amount,todayAdd.lots);
   const _allMonths=Object.keys(monthMap).sort();
   const _firstMonth=_allMonths[0], _lastMonth=_allMonths.at(-1);
   const _todayYM=getSessionDate().substring(0,7);
@@ -8009,76 +8012,6 @@ function renderPerformance(){
   ];
   const symTbl=makeSortableTable('perf-sym',symCols,symRows,'edge',-1,null,null,'sym');
 
-  const timingModel=buildTradeTimingModel(adaptiveAllTrips);
-  const timingRows=timingModel.groups.window.map(r=>({
-    ...r,
-    slice:r.label,
-    peerPct:+(r.peerShrunk*100).toFixed(1),
-    holdPct:+(r.holdShrunk*100).toFixed(1),
-    robustPct:+Number(r.robustReturnPct||0).toFixed(2)
-  }));
-  const stateColor=s=>s==='Prefer'?'var(--green)':s==='Avoid'?'var(--red)':'var(--t3)';
-  const timingCols=[
-    {key:'slice',label:'Clock window',align:'left',fmt:v=>escHtml(v),clrFn:()=>'var(--t1)',bold:true},
-    {key:'episodes',label:'Entries',align:'right',fmt:v=>v,clrFn:()=>'var(--t2)'},
-    {key:'days',label:'Days',align:'right',fmt:v=>v,clrFn:()=>'var(--t2)'},
-    {key:'peerPct',label:'Same-day peer rank',align:'right',fmt:v=>v.toFixed(1)+'%',clrFn:v=>v>50?'var(--green)':v<50?'var(--red)':'var(--t3)'},
-    {key:'holdPct',label:'Hold-adjusted rank',align:'right',fmt:v=>v.toFixed(1)+'%',clrFn:v=>v>50?'var(--green)':v<50?'var(--red)':'var(--t3)'},
-    {key:'robustPct',label:'Median day return',align:'right',fmt:v=>fmtPct(v),clrFn:clr},
-    {key:'holdMix',label:'Hold mix',align:'left',fmt:v=>escHtml(v),clrFn:()=>'var(--t3)'},
-    {key:'stability',label:'Stability',align:'left',fmt:v=>escHtml(v),clrFn:()=>'var(--t2)'},
-    {key:'state',label:'Diagnostic state',align:'left',bold:true,fmt:v=>`<span style="color:${stateColor(v)}">${escHtml(v)}</span>`,clrFn:()=>''},
-  ];
-  const currentTiming=getCurrentTradeTimingDecision();
-  const timingTbl=makeSortableTable('tbl-trade-timing',timingCols,timingRows,'slice',1,row=>{
-    const isCurrent=row.dimension==='window'&&row.key===currentTiming.context.windowKey;
-    return isCurrent?'background:rgba(99,102,241,.12);outline:1px solid rgba(99,102,241,.3);outline-offset:-1px':'';
-  });
-  const hasTradeWindows=timingRows.length>0;
-
-  // v1211 (owner): the exit-side sibling of the table above - what selling at this hour gives up.
-  const exitModel=buildExitTimingModel(adaptiveAllTrips);
-  const exitCols=[
-    {key:'slice',label:'Sell window',align:'left',fmt:v=>escHtml(v),clrFn:()=>'var(--t1)',bold:true},
-    {key:'exits',label:'Exits',align:'right',fmt:v=>v,clrFn:()=>'var(--t2)'},
-    {key:'medianNetPct',label:'Median net',align:'right',fmt:v=>v==null?'—':fmtPct(v),clrFn:v=>v==null?'var(--t3)':clr(v)},
-    {key:'sameDayPct',label:'Rose after exit, same day',align:'right',bold:true,
-      fmt:v=>v==null?'—':fmtPct(v),clrFn:v=>v==null?'var(--t3)':v>0?'var(--red)':'var(--green)'},
-    {key:'sameDayN',label:'watched',align:'right',fmt:v=>v,clrFn:()=>'var(--t3)'},
-    {key:'horizonPct',label:`Rose within ${exitModel.horizon}d`,align:'right',bold:true,
-      fmt:v=>v==null?'—':fmtPct(v),clrFn:v=>v==null?'var(--t3)':v>0?'var(--red)':'var(--green)'},
-    {key:'horizonRs',label:'₹ forgone',align:'right',
-      fmt:v=>v==null?'—':fmtSignedINR(v),clrFn:v=>v==null?'var(--t3)':v>0?'var(--red)':'var(--green)'},
-    {key:'wentHigherPct',label:'Went higher',align:'right',
-      fmt:v=>v==null?'—':v+'%',clrFn:v=>v==null?'var(--t3)':v>=60?'var(--red)':v<=40?'var(--green)':'var(--amber)'},
-  ];
-  const exitTbl=makeSortableTable('tbl-exit-timing',exitCols,exitModel.rows,'slice',1);
-  const hasExitWindows=exitModel.rows.length>0;
-
-  // v1211 (owner): how long to hold, intraday and overnight.
-  const holdModel=buildHoldDurationModel(adaptiveAllTrips);
-  const holdCols=[
-    {key:'cohort',label:'Cohort',align:'left',fmt:v=>escHtml(v),clrFn:v=>v==='Intraday'?'var(--cyan)':'var(--t2)'},
-    {key:'slice',label:'Held for',align:'left',bold:true,fmt:v=>escHtml(v),clrFn:()=>'var(--t1)'},
-    {key:'trips',label:'Lots',align:'right',fmt:v=>v,clrFn:()=>'var(--t2)'},
-    {key:'winPct',label:'Win%',align:'right',fmt:v=>v+'%',clrFn:v=>v>=60?'var(--green)':v>=40?'var(--amber)':'var(--red)'},
-    {key:'medianPct',label:'Median net',align:'right',fmt:v=>fmtPct(v),clrFn:clr},
-    {key:'medianPerDay',label:'Net per session held',align:'right',bold:true,fmt:v=>fmtPct(v),clrFn:clr},
-    {key:'totalRs',label:'Total net',align:'right',fmt:fmtSignedINR,clrFn:clr},
-  ];
-  const holdTbl=makeSortableTable('tbl-hold-duration',holdCols,holdModel.rows,'cohort',1);
-  const hasHold=holdModel.rows.length>0;
-  const arrival=(typeof getRocketArrivalStats==='function')?getRocketArrivalStats():null;
-  const holdVerdict=(()=>{
-    const bi=holdModel.best?.intraday, bo=holdModel.best?.overnight;
-    if(!bi&&!bo) return 'Not enough closed lots in any bucket yet.';
-    const parts=[];
-    if(bi) parts.push(`intraday, the best return per session is <b>${escHtml(bi.slice)}</b> at ${fmtPct(bi.medianPerDay)}/session on ${bi.trips} lots`);
-    if(bo) parts.push(`held overnight, <b>${escHtml(bo.slice)}</b> at ${fmtPct(bo.medianPerDay)}/session on ${bo.trips} lots`);
-    const arr=(arrival&&arrival.p75!=null)?` Forward, unconfounded by choice: 75% of picks that reach their target do so within <b>${arrival.p75}</b> session${arrival.p75===1?'':'s'} of issue.`:'';
-    return `On capital-efficiency: ${parts.join('; ')}.${arr}`;
-  })();
-
   const periodPills=['all','1m','3m','6m','1y'].map(p=>{
     const active=PERF_PERIOD_FILTER===p;
     const label=p==='all'?'All':p==='1m'?'1M':p==='3m'?'3M':p==='6m'?'6M':'1Y';
@@ -8104,10 +8037,11 @@ function renderPerformance(){
   const sc=buildSystemScorecard();
   const scCols=[
     {key:'date',label:'Issue date',s:true},
-    {key:'regime',label:'Market',s:true},
+    {key:'regime',label:'Market context',s:true,fmt:v=>`<span title="VIX range percentile, live breadth and Nifty move where recorded">${escHtml(v)}</span>`},
     {key:'picks',label:'Picks',s:true,fmt:v=>String(v)},
     {key:'target',label:'Hit target',s:true,fmt:v=>String(v),clrFn:v=>v>0?'var(--green)':'var(--t3)'},
     {key:'stopped',label:'Stopped first',s:true,fmt:v=>String(v),clrFn:v=>v>0?'var(--red)':'var(--t3)'},
+    {key:'ambiguous',label:'Ambiguous',s:true,fmt:v=>String(v),clrFn:v=>v>0?'var(--amber)':'var(--t3)'},
     {key:'expired',label:'Never moved',s:true,fmt:v=>String(v),clrFn:v=>v>0?'var(--amber)':'var(--t3)'},
     {key:'pending',label:'Still open',s:true,fmt:v=>v?String(v):'—'},
     {key:'hitPct',label:'Hit %',s:true,fmt:v=>v==null?'—':v+'%',clrFn:v=>v==null?'var(--t3)':v>=40?'var(--green)':v>=20?'var(--amber)':'var(--red)'},
