@@ -1,5 +1,5 @@
-const BUILD_TS='2026-09-02 18:20 IST'; // release build time (IST)
-const APP_VERSION=1261; // v1261: Performance is fast, period-consistent and auditable.
+const BUILD_TS='2026-09-02 18:35 IST'; // release build time (IST)
+const APP_VERSION=1262; // v1262: Performance reports one booked truth, removes scorecard noise, and totals tables.
 const RADAR_SCORE_VERSION='tape-decision-v3';
 // v1093: a baseline reward:risk MEASURED on the cross-section (last completed bhav session) instead of learned from the owner's own fills - reported on every row, deliberately not enforced. Includes v1092: position size split by Radar score / stop distance, so equally-scored names carry equal RUPEE risk, plus an opt-in Risk /trade cap.
 // v556: parse the NSE Market Activity Report (MA<date>.csv) — official Nifty %, advances/declines and sector index moves shown as market CONTEXT in the status bar (EOD data, display only, never fed into per-row scoring); MA added to the ℹ️ file manifest.
@@ -7618,7 +7618,7 @@ function buildOpenPositionsPanel(query=''){
     return `<span title="Quantity-weighted age of remaining FIFO buy lots" style="color:${color};font-weight:${v>reviewDays?700:500}">${v}d</span>`;
   };
   const cols=[
-    {key:'sym',label:'Symbol',align:'left',bold:true,
+    {key:'sym',label:'Symbol',align:'left',bold:true,totFmt:()=>'<b>TOTAL</b>',
       // The flow reading rides the SYMBOL cell rather than a column of its own: one more column
       // pushed this panel into a horizontal scrollbar, which the owner has ruled out everywhere.
       fmt:(v,row)=>{
@@ -7671,13 +7671,13 @@ function buildOpenPositionsPanel(query=''){
         /* c8 ignore stop */
       }},
 
-    {key:'qty',label:'Qty',align:'right',fmt:v=>v,clrFn:()=>'var(--t2)'},
+    {key:'qty',label:'Qty',align:'right',fmt:v=>v,clrFn:()=>'var(--t2)',totFmt:v=>v??'—'},
     {key:'ltp',label:'Avg / LTP',align:'right',
       fmt:(v,row)=>`${row.avg!=null?Number(row.avg).toLocaleString('en-IN',INR_2):'—'}<span style="color:var(--t3)"> / </span>${v!=null?Number(v).toLocaleString('en-IN',INR_2):'—'}`,
       clrFn:()=>'var(--t1)'},
     {key:'pnlRs',label:'P&L',align:'right',bold:true,
       fmt:(v,row)=>`${v!=null?fmtSignedINR(v):'—'}<span style="font-size:11px;color:var(--t3)"> ${row.pnlPct!=null?(row.pnlPct>=0?'+':'')+row.pnlPct.toFixed(2)+'%':''}</span>`,
-      clrFn:v=>v==null?'var(--t3)':v>0?'var(--green)':v<0?'var(--red)':'var(--t2)'},
+      clrFn:v=>v==null?'var(--t3)':v>0?'var(--green)':v<0?'var(--red)':'var(--t2)',totFmt:v=>v!=null?fmtSignedINR(v):'—',totClrFn:v=>v>0?'var(--green)':v<0?'var(--red)':'var(--t3)'},
     {key:'daysHeld',label:'Held',align:'right',fmt:daysFmt,clrFn:()=>'var(--t1)'},
     {key:'targetPrice',label:'Target ₹',align:'right',
       fmt:(v,row)=>{
@@ -7780,9 +7780,10 @@ function buildOpenPositionsPanel(query=''){
   const totalPnl=rows.reduce((sum,row)=>sum+(row.pnlRs||0),0);
   const pnlColor=totalPnl>0?'var(--green)':totalPnl<0?'var(--red)':'var(--t3)';
   const shown=filterPanelRows(rows,query,row=>[row.sym,row.scannerRow?.name,row.scannerRow?.sector]);
+  const openTotals={sym:'TOTAL',qty:shown.reduce((sum,row)=>sum+(row.qty||0),0),pnlRs:shown.reduce((sum,row)=>sum+(row.pnlRs||0),0)};
   // Default order is numerical confidence: higher Radar score first, then the better (lower) rank.
   // The composite only sorts; the cell continues to display the unmodified Score/# values.
-  const table=makeSortableTable('rank-open-positions',cols,shown,'score',-1,null,null,'sym','rank',1);
+  const table=makeSortableTable('rank-open-positions',cols,shown,'score',-1,null,openTotals,'sym','rank',1);
   const radarNote=ALL.length
     ?'Radar context is built from the live Kite tape. Click a symbol for its scoring breakdown.'
     :'Start the helper and log in to Kite to add Radar score, rank, setup, day change, and risk.';
@@ -7840,8 +7841,7 @@ function renderPerformance(){
     :PERF_PERIOD_FILTER==='3m'?new Date(_now.getFullYear(),_now.getMonth()-3,_now.getDate()).toISOString().slice(0,10)
     :PERF_PERIOD_FILTER==='6m'?new Date(_now.getFullYear(),_now.getMonth()-6,_now.getDate()).toISOString().slice(0,10)
     :new Date(_now.getFullYear()-1,_now.getMonth(),_now.getDate()).toISOString().slice(0,10);
-  const recentTrips=_cutoff?adaptiveAllTrips.filter(r=>r.sellDate>=_cutoff):adaptiveAllTrips;
-  const perfTrips=recentTrips.length?recentTrips:adaptiveAllTrips;
+  const perfTrips=_cutoff?adaptiveAllTrips.filter(r=>r.sellDate>=_cutoff):adaptiveAllTrips;
   const p=computePerfStats(perfTrips);
   const allSellDates=[...new Set(perfTrips.map(r=>r.sellDate))].sort();
   const dfrom=allSellDates[0], dto=allSellDates.at(-1);
@@ -7863,8 +7863,9 @@ function renderPerformance(){
   // Today's booked P&L is not in the tradebook yet — add it to the money total so the
   // headline matches reality, and say so explicitly rather than silently blending it.
   const todayAdd=getTodayBookedAddendum();
-  const netWithToday=p.totalNetPnlRs+(todayAdd?.amount||0);
-  const todayNote=todayAdd?` · incl. ${fmtPerfRs(todayAdd.amount)} booked ${todayAdd.date} from Orders (tradebook ends ${todayAdd.tradebookDate||'—'})`:'';
+  const todayInPeriod=!!todayAdd&&(!_cutoff||todayAdd.date>=_cutoff);
+  const netWithToday=p.totalNetPnlRs+(todayInPeriod?todayAdd.amount:0);
+  const todayNote=todayInPeriod?` · incl. ${fmtPerfRs(todayAdd.amount)} booked ${todayAdd.date} from Orders (tradebook ends ${todayAdd.tradebookDate||'—'})`:'';
   const kpis=[
     {label:'Net P&L',value:fmtPerfRs(netWithToday),color:clr(netWithToday),sub:`${p.roundTrips}${todayAdd?`+${todayAdd.lots}`:''} lots · ${spanTradingDays||p.totalTradingDays} trading days${todayNote}${preSystemLots?` · ${preSystemLots} pre-system ignored`:''}`},
     {label:'Win Rate',value:p.winRate+'%',color:p.winRate>=55?'var(--green)':p.winRate>=45?'var(--amber)':'var(--red)',sub:`${p.winners}W · ${p.losers}L lots`},
@@ -7959,13 +7960,13 @@ function renderPerformance(){
   const kpiHtml=`<div class="kpi-grid">`+orderedKpis.map(kpiCard).join('')+'</div>';
 
   const monthCols=[
-    {key:'month',label:'Month',align:'left',fmt:v=>v,clrFn:()=>'var(--t1)'},
-    {key:'pnl',label:'Net P&L',align:'right',bold:true,fmt:fmtPerfRs,clrFn:clr},
-    {key:'trades',label:'Lots',align:'right',fmt:v=>v,clrFn:()=>'var(--t2)'},
-    {key:'days',label:'Trading Days',align:'right',fmt:v=>v,clrFn:()=>'var(--t2)'},
-    {key:'avgDay',label:'Avg/Trading Day',align:'right',fmt:fmtPerfRs,clrFn:clr},
-    {key:'calDays',label:'Cal Days',align:'right',fmt:v=>v,clrFn:()=>'var(--t2)'},
-    {key:'avgCalDay',label:'Avg/Cal Day',align:'right',fmt:fmtPerfRs,clrFn:clr},
+    {key:'month',label:'Month',align:'left',fmt:v=>v,clrFn:()=>'var(--t1)',totFmt:()=>'<b>TOTAL</b>'},
+    {key:'pnl',label:'Net P&L',align:'right',bold:true,fmt:fmtPerfRs,clrFn:clr,totFmt:fmtPerfRs,totClrFn:clr},
+    {key:'trades',label:'Lots',align:'right',fmt:v=>v,clrFn:()=>'var(--t2)',totFmt:v=>v},
+    {key:'days',label:'Trading Days',align:'right',fmt:v=>v,clrFn:()=>'var(--t2)',totFmt:v=>v},
+    {key:'avgDay',label:'Avg/Trading Day',align:'right',fmt:fmtPerfRs,clrFn:clr,totFmt:fmtPerfRs,totClrFn:clr},
+    {key:'calDays',label:'Cal Days',align:'right',fmt:v=>v,clrFn:()=>'var(--t2)',totFmt:v=>v},
+    {key:'avgCalDay',label:'Avg/Cal Day',align:'right',fmt:fmtPerfRs,clrFn:clr,totFmt:fmtPerfRs,totClrFn:clr},
   ];
   const monthMap={};
   const addToMonth=(sellDate,pnl,trades)=>{
@@ -7975,9 +7976,12 @@ function renderPerformance(){
     if(sellDate<monthMap[ym]._minDate) monthMap[ym]._minDate=sellDate;
     if(sellDate>monthMap[ym]._maxDate) monthMap[ym]._maxDate=sellDate;
   };
-  perfTrips.forEach(r=>addToMonth(r.sellDate,r.netPnl,1));
-  // Same reason as the Net P&L KPI: today is booked but not yet in the tradebook.
-  if(todayAdd&&(!_cutoff||todayAdd.date>=_cutoff)) addToMonth(todayAdd.date,todayAdd.amount,todayAdd.lots);
+  const latestBooked=getLatestBookedSummary();
+  const replaceDate=latestBooked?.source==='Orders.csv'&&latestBooked.date&&(!_cutoff||latestBooked.date>=_cutoff)
+    ?latestBooked.date:null;
+  perfTrips.forEach(r=>{if(r.sellDate!==replaceDate)addToMonth(r.sellDate,r.netPnl,1);});
+  if(replaceDate) addToMonth(latestBooked.date,latestBooked.total,latestBooked.rows?.length||0);
+  else if(todayInPeriod) addToMonth(todayAdd.date,todayAdd.amount,todayAdd.lots);
   const _allMonths=Object.keys(monthMap).sort();
   const _firstMonth=_allMonths[0], _lastMonth=_allMonths.at(-1);
   const _todayYM=getSessionDate().substring(0,7);
@@ -7999,18 +8003,26 @@ function renderPerformance(){
       avgDay:m._dates.size?Math.round(m.pnl/m._dates.size):0,
       calDays,avgCalDay:calDays>0?Math.round(m.pnl/calDays):0};
   });
-  const monthTbl=makeSortableTable('perf-month',monthCols,monthRows,'month',-1);
+  const monthTotalPnl=monthRows.reduce((sum,row)=>sum+row.pnl,0);
+  const monthTotalLots=monthRows.reduce((sum,row)=>sum+row.trades,0);
+  const monthTotals={month:'TOTAL',pnl:monthTotalPnl,trades:monthTotalLots,days:monthRows.reduce((sum,row)=>sum+row.days,0),avgDay:monthRows.reduce((sum,row)=>sum+row.pnl,0),calDays:monthRows.reduce((sum,row)=>sum+row.calDays,0),avgCalDay:monthTotalPnl};
+  monthTotals.avgDay=monthRows.length?Math.round(monthTotalPnl/monthRows.length):0;
+  monthTotals.avgCalDay=monthTotals.calDays?Math.round(monthTotalPnl/monthTotals.calDays):0;
+  const monthTbl=makeSortableTable('perf-month',monthCols,monthRows,'month',-1,null,monthTotals);
 
   const symRows=(p.symBreakdown||[]).map(r=>({...r,edge:+((r.winRate*r.avgPct)*Math.min(1,r.trades/5)).toFixed(2)}));
   const symCols=[
-    {key:'sym',label:'Symbol',align:'left',fmt:v=>symbolChartButton(v),clrFn:()=>'var(--t1)',bold:true},
-    {key:'netPnl',label:'Net P&L',align:'right',bold:true,fmt:fmtPerfRs,clrFn:clr},
-    {key:'trades',label:'Lots',align:'right',fmt:v=>v,clrFn:()=>'var(--t2)'},
-    {key:'winRate',label:'Win%',align:'right',fmt:v=>v+'%',clrFn:v=>v>=60?'var(--green)':v>=40?'var(--amber)':'var(--red)'},
-    {key:'avgPct',label:'Avg%',align:'right',fmt:fmtPct,clrFn:clr},
-    {key:'edge',label:'Edge',align:'right',bold:true,fmt:v=>v.toFixed(2),clrFn:v=>v>100?'var(--green)':v>0?'var(--amber)':'var(--red)'},
+    {key:'sym',label:'Symbol',align:'left',fmt:v=>symbolChartButton(v),clrFn:()=>'var(--t1)',bold:true,totFmt:()=>'<b>TOTAL</b>'},
+    {key:'netPnl',label:'Net P&L',align:'right',bold:true,fmt:fmtPerfRs,clrFn:clr,totFmt:fmtPerfRs,totClrFn:clr},
+    {key:'trades',label:'Lots',align:'right',fmt:v=>v,clrFn:()=>'var(--t2)',totFmt:v=>v},
+    {key:'winRate',label:'Win%',align:'right',fmt:v=>v+'%',clrFn:v=>v>=60?'var(--green)':v>=40?'var(--amber)':'var(--red)',totFmt:v=>v==null?'—':v+'%'},
+    {key:'avgPct',label:'Avg%',align:'right',fmt:fmtPct,clrFn:clr,totFmt:v=>v==null?'—':fmtPct(v),totClrFn:clr},
+    {key:'edge',label:'Edge',align:'right',bold:true,fmt:v=>v.toFixed(2),clrFn:v=>v>100?'var(--green)':v>0?'var(--amber)':'var(--red)',totFmt:()=>''},
   ];
-  const symTbl=makeSortableTable('perf-sym',symCols,symRows,'edge',-1,null,null,'sym');
+  const symTotals={sym:'TOTAL',netPnl:symRows.reduce((sum,row)=>sum+row.netPnl,0),trades:symRows.reduce((sum,row)=>sum+row.trades,0),winRate:null,avgPct:null,edge:null};
+  symTotals.winRate=symTotals.trades?Math.round(symRows.reduce((sum,row)=>sum+row.winRate*row.trades,0)/symTotals.trades):null;
+  symTotals.avgPct=symTotals.trades?+(symRows.reduce((sum,row)=>sum+row.avgPct*row.trades,0)/symTotals.trades).toFixed(2):null;
+  const symTbl=makeSortableTable('perf-sym',symCols,symRows,'edge',-1,null,symTotals,'sym');
 
   const periodPills=['all','1m','3m','6m','1y'].map(p=>{
     const active=PERF_PERIOD_FILTER===p;
@@ -8034,7 +8046,7 @@ function renderPerformance(){
   const outcomeHtml='';
 
   // ── v1126 SYSTEM SCORECARD (owner) ────────────────────────────────────────────────────────────
-  const sc=buildSystemScorecard();
+  const sc={rows:[],bands:[],settled:0,resolvable:0,pending:0,legacyScorePicks:0,cohorts:0};
   const scCols=[
     {key:'date',label:'Issue date',s:true},
     {key:'regime',label:'Market context',s:true,fmt:v=>`<span title="VIX range percentile, live breadth and Nifty move where recorded">${escHtml(v)}</span>`},
@@ -8085,7 +8097,6 @@ function renderPerformance(){
       ${periodPillsHtml}
       <div style="font-size:12px;color:var(--t3);margin-bottom:12px">${periodLabel} · ${p.roundTrips} lots</div>
       <div id="perf-kpi">${kpiHtml}</div>
-      ${perfCard('System Scorecard — did the picks reach target? <span style="font-size:12px;color:var(--t3);font-weight:400">'+sc.cohorts+' cohorts · target-before-stop within '+ROCKET_HORIZON_DAYS+' trading days</span>',scHeadline+scTbl.getHtml()+bandTable+scNote,'','perf-scorecard')}
       ${monthRows.length?perfCard('Monthly Breakdown',monthTbl.getHtml(),'','perf-monthly'):''}
       ${p.symBreakdown.length?perfCard('Stocks',symTbl.getHtml(),'360px','perf-stocks'):''}
     </div>`;
