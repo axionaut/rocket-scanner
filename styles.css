@@ -200,6 +200,10 @@ table.main tbody td{padding:9px 6px;font-family:'DM Mono',monospace;font-size:14
 .sb-tag-red{background:rgba(239,68,68,.08);color:var(--red);border-color:rgba(239,68,68,.15)}
 .sb-clear{margin-left:auto;padding:2px 10px;border-radius:4px;font-size:12px;font-weight:700;background:rgba(74,85,104,.1);color:var(--t3);border:1px solid var(--border);cursor:pointer;transition:all .2s}
 .sb-clear:hover{border-color:var(--blue);color:var(--t1)}
+.live-tape-activity{margin-left:auto;font:500 11px 'DM Mono',monospace;color:var(--t3);white-space:nowrap}
+.goal-form-primary{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1.25fr);gap:8px}
+.goal-form-secondary{display:grid;grid-template-columns:minmax(0,1.2fr) minmax(82px,.72fr) minmax(0,1fr);gap:8px;margin-top:8px}
+.goal-readout-grid{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:8px;margin-top:10px}
 @media(max-width:768px){
   .hdr{padding:16px 0;gap:8px}
   .app{padding:0 10px}
@@ -227,13 +231,14 @@ table.main tbody td{padding:9px 6px;font-family:'DM Mono',monospace;font-size:14
 @media(max-width:480px){
   .stats{grid-template-columns:repeat(2,1fr)}
   .fg{min-width:calc(50% - 6px)}
-  /* v1122: Goal was collateral damage here - the rule kept Drive, Load Files and the menu and hid
-     everything else, which took the whole Goal module off the phone. It is now named and kept. */
-  .hdr-r .btn:not(#driveBtn):not(#loadFilesBtn):not(#menuBtn):not(#goalBtn){display:none}
+  /* Keep the compact header controls that remain part of the Kite-only flow. */
+  .hdr-r .btn:not(#driveBtn):not(#menuBtn):not(#goalBtn){display:none}
   /* And the popover itself: a 360px min-width panel anchored right:0 cannot fit a phone. On a
      narrow screen it becomes a bottom sheet, which is reachable and scrollable at any height. */
   #goalPopover{position:fixed;left:10px;right:10px;top:auto;bottom:10px;min-width:0;max-width:none;
     max-height:78vh;overflow-y:auto}
+  .goal-form-primary,.goal-form-secondary,.goal-readout-grid{grid-template-columns:1fr}
+  .live-tape-activity{margin-left:0;width:100%;white-space:normal;line-height:1.45}
   #mobileMenuBtn{display:flex}
 }
 @media(max-width:768px){.hdr{padding:16px 0}.app{padding:0 12px}}
@@ -291,10 +296,6 @@ table.main tbody td{padding:9px 6px;font-family:'DM Mono',monospace;font-size:14
 .rr-read{margin:12px 0;border-left:3px solid var(--cyan);background:var(--bg-raised);padding:12px;font-size:13px;line-height:1.55;color:var(--t2);border-radius:0 8px 8px 0}
 .rr-read b{color:var(--t1)}
 dialog#radarDetail{width:min(980px,95vw);max-height:90vh;padding:0;background:var(--bg);color:var(--t1);border:1px solid var(--border-hi);border-radius:10px;box-shadow:0 30px 120px rgba(0,0,0,.9);margin:auto}
-dialog#kiteTokenDlg{width:min(560px,94vw);padding:0;background:var(--bg);color:var(--t1);border:1px solid var(--border-hi);border-radius:10px;box-shadow:0 30px 120px rgba(0,0,0,.9);margin:auto}
-dialog#kiteTokenDlg::backdrop{background:rgba(0,0,0,.72)}
-#kiteTokenBody input{width:100%;box-sizing:border-box;font-family:inherit;font-size:14px;padding:9px 10px;background:var(--bg2,#111);color:var(--t1);border:1px solid var(--border);border-radius:6px}
-#kiteTokenBody input:focus{outline:none;border-color:var(--green)}
 dialog#radarDetail::backdrop{background:rgba(2,5,7,.87)}
 .rr-contrib b.pos{color:var(--green)}
 .rr-contrib b.neg{color:var(--red)}

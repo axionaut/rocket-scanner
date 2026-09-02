@@ -1,5 +1,5 @@
-const BUILD_TS='2026-09-02 11:29 IST'; // release build time (IST)
-const APP_VERSION=1256; // v1256: one slow probe must not convince the app the helper is gone.
+const BUILD_TS='2026-09-02 16:43 IST'; // release build time (IST)
+const APP_VERSION=1257; // v1257: the retirement swept through the files it left behind.
 const RADAR_SCORE_VERSION='tape-decision-v3';
 // v1093: a baseline reward:risk MEASURED on the cross-section (last completed bhav session) instead of learned from the owner's own fills - reported on every row, deliberately not enforced. Includes v1092: position size split by Radar score / stop distance, so equally-scored names carry equal RUPEE risk, plus an opt-in Risk /trade cap.
 // v556: parse the NSE Market Activity Report (MA<date>.csv) — official Nifty %, advances/declines and sector index moves shown as market CONTEXT in the status bar (EOD data, display only, never fed into per-row scoring); MA added to the ℹ️ file manifest.
@@ -537,7 +537,7 @@ const FS = (() => {
 
   function canonicalInputName(name){
     if(isGeneratedUniverseName(name)) return 'Kite Universe.csv';
-    if(isScannerCsvName(name)) return 'ALL NSE.csv';
+    if(isScannerCsvName(name)) return 'ALL NSE.csv';   // legacy export keeps its own Drive slot
     if(isExactCsvName(name,'Holdings.csv')) return 'Holdings.csv';
     if(isExactCsvName(name,'Positions.csv')) return 'Positions.csv';
     if(isExactCsvName(name,'Orders.csv')) return 'Orders.csv';
@@ -865,20 +865,6 @@ async function maintainDriveSession(){
 }
 setInterval(()=>{maintainDriveSession().catch(()=>null);},60000);
 
-function showDriveAuthRequiredState(){
-  const msg=FS.needsReconnect()
-    ? 'Google Drive needs authorization. Press Drive to reconnect and load latest saved data.'
-    : 'Press Drive to connect Google Drive and load latest saved data.';
-  try{
-    const bar=document.getElementById('infoBar');
-    if(bar) bar.innerHTML=`<span class="info-pill pill-amber" title="${escHtml(msg)}">⚠ ${escHtml(msg)}</span>`;
-    document.getElementById('hdrR').style.display='flex';
-    document.getElementById('dash').style.display='block';
-    document.getElementById('noDataBanner').style.display='flex';
-    const nd=document.querySelector('#noDataBanner div:nth-child(2)');
-    if(nd) nd.innerHTML=`Cloud data is private. Press <strong style="color:var(--fire)">Drive</strong> to reconnect and restore the latest saved dashboard.`;
-  }catch(e){}
-}
 
 function idleTask(fn,timeout=1200){
   const run=()=>{try{fn();}catch(e){console.warn('Background task failed',e);}};
@@ -925,21 +911,6 @@ function renderTradingDashboardNow(){
   try{if(ALL.length) applyFilters(); else renderRankingsPanels();}catch(e){console.warn('Fast ranking render failed',e);}
   try{ const _bf=backfillPickUpStreak(); if(_bf) console.log('upStreak backfilled onto '+_bf+' picks'); }catch(e){}
   schedulePerformanceRender();
-}
-
-async function ensureDriveReadyForLoad(){
-  updateFolderUI();
-  if(!FS.hasFolder()){
-    showDriveAuthRequiredState();
-    showToast('Connect Google Drive first, then press Load Files.',4000,true);
-    return false;
-  }
-  const ok=await FS.verifyConnection();
-  updateFolderUI();
-  if(ok) return true;
-  showDriveAuthRequiredState();
-  showToast('Google Drive is disconnected. Press Drive to reconnect before loading files.',5000,true);
-  return false;
 }
 
 async function connectCloudStorage(opts={}){
@@ -3433,8 +3404,8 @@ const RADAR_EXCLUDED_FEATURES=new Set([
   'Average volume, 30 days','Average volume, 60 days','Average volume, 90 days',
   'Beta, 1 year'
 ]);
-const RADAR_LIQ_STEPS=[0,5e5,25e5,1e7,5e7,1e8,1e9,1e10];
-const RADAR_LIQ_LABELS=['Any','₹5L','₹25L','₹1Cr','₹5Cr','₹10Cr','₹100Cr','₹1000Cr'];
+const RADAR_LIQ_STEPS=[0,5e5,25e5,5e6,1e7,5e7,1e8,1e9,1e10];
+const RADAR_LIQ_LABELS=['Any','₹5L','₹25L','₹50L','₹1Cr','₹5Cr','₹10Cr','₹100Cr','₹1000Cr'];
 const radarNum=v=>{if(v===null||v===undefined||v==='')return null;const x=Number(String(v).replace(/[,%₹\s]/g,''));return Number.isFinite(x)?x:null;};
 const clamp01=(x,a=0,b=1)=>Math.max(a,Math.min(b,x));
 function radarIdx(headers,name){return headers.indexOf(name);}
@@ -3602,11 +3573,11 @@ function radarScoreColor(score){
 }
 const RECOMMEND_MAX_RANK=10;    // SEARCH DEPTH ONLY: candle collection and diagnostic coverage.
 // It never gates a recommendation and never appears beside Score in the recommendation table.
-const RECOMMEND_MIN_SCORE=60;   // explicit policy bar on the six-component 0-100 readiness scale.
+let RECOMMEND_MIN_SCORE=60;   // explicit policy bar on the six-component 0-100 readiness scale; user-adjustable.
 // This means "60 readiness points plus every independent gate", not "60% likely to profit".
 // Forward target-before-stop results for this exact score version are shown separately and must earn
 // any predictive interpretation; old score versions are never pooled into those bands.
-const RADAR_SCORE_BANDS=(()=>{
+let RADAR_SCORE_BANDS=(()=>{
   const bar=RECOMMEND_MIN_SCORE, mid=+(bar*0.66).toFixed(1), low=+(bar*0.33).toFixed(1);
   return [
     {min:bar,color:'var(--green)',range:bar+'–100',note:'clears the recommendation bar on its own evidence.'},
@@ -3615,6 +3586,21 @@ const RADAR_SCORE_BANDS=(()=>{
     {min:-Infinity,color:'var(--red)',range:'Below '+low,note:'little or no evidence, or a permission veto.'}
   ];
 })();
+function syncRecommendationThreshold(){
+  const el=document.getElementById('fMinScore');
+  const raw=el?.value?.trim()||'';
+  const n=raw===''?60:Number(raw);
+  const next=Number.isFinite(n)?Math.max(0,Math.min(100,Math.round(n*2)/2)):60;
+  RECOMMEND_MIN_SCORE=next;
+  if(el&&raw!==''&&Number(el.value)!==next) el.value=String(next);
+  const bar=next, mid=+(bar*0.66).toFixed(1), low=+(bar*0.33).toFixed(1);
+  RADAR_SCORE_BANDS=[
+    {min:bar,color:'var(--green)',range:bar+'–100',note:'clears the recommendation bar on its own evidence.'},
+    {min:mid,color:'var(--amber)',range:mid+'–'+(bar-0.1).toFixed(1),note:'real evidence, short of the bar.'},
+    {min:low,color:'var(--cyan)',range:low+'–'+(mid-0.1).toFixed(1),note:'some evidence on one or two axes.'},
+    {min:-Infinity,color:'var(--red)',range:'Below '+low,note:'little or no evidence, or a permission veto.'}
+  ];
+}
 function meetsScoreBar(score){const s=Number(score);return isFinite(s)&&s>=RECOMMEND_MIN_SCORE;}
 const isGreenScore=meetsScoreBar;   // legacy alias - do not use in new code
 function buildMarketTimingWindows(){
@@ -6269,9 +6255,11 @@ function buildGoalPopoverContent(){
     <div style="font-size:15px;color:var(--t1);font-weight:800">Goal</div>
     <div style="font-size:12px;color:var(--t3)">${remaining} trading day${remaining===1?'':'s'} left</div>
   </div>
-  <div style="display:grid;grid-template-columns:1.15fr 1.35fr .8fr;gap:8px">
+  <div class="goal-form-primary">
     <label><span style="${_lbl}">Earn ₹</span><input id="goalTarget" type="number" value="${g.target}" style="${goalFieldStyle()}" oninput="onGoalChange()" onchange="onGoalChange(true)" onfocus="this.style.borderColor='var(--amber)'" onblur="this.style.borderColor='var(--border)'" title="Trading profit to generate from current total capital within the horizon — not a balance to reach."></label>
     <label><span style="${_lbl}">By</span><input id="goalEnd" type="date" min="${getSessionDate()}" value="${g.endDate}" style="${goalFieldStyle()}" oninput="onGoalChange()" onchange="onGoalChange(true)" onfocus="this.style.borderColor='var(--amber)'" onblur="this.style.borderColor='var(--border)'" title="Deadline for the earnings target. Trading days left are counted from today to this date, skipping weekends and NSE holidays."></label>
+  </div>
+  <div class="goal-form-secondary">
     <label><span style="${_lbl}">Withdraw ₹</span><input id="goalWd" type="number" min="0" step="100" placeholder="0" value="${g.withdrawAmount?g.withdrawAmount:''}" oninput="onGoalChange()" onchange="onGoalChange(true)" title="A FIXED rupee amount you take out of the account on the schedule beside this — rent, salary, expenses. It leaves whether or not the day earned, so it shrinks the compounding base and RAISES the daily rate the goal needs. Separate from Reinvest %, which only splits the days that do earn. Blank or 0 = no scheduled withdrawal." style="${goalFieldStyle()}" onfocus="this.style.borderColor='var(--amber)'" onblur="this.style.borderColor='var(--border)'"></label>
     <label><span style="${_lbl}">Every</span><select id="goalWdFreq" onchange="onGoalChange(true)" title="How often the Withdraw ₹ amount leaves the account. Daily = every trading day; Weekly = the first trading day of each new week; Monthly = the first trading day of each new month." style="${goalFieldStyle()}" onfocus="this.style.borderColor='var(--amber)'" onblur="this.style.borderColor='var(--border)'">
       <option value="daily"${g.withdrawFreq==='daily'?' selected':''}>Day</option>
@@ -6323,7 +6311,7 @@ function buildGoalReadout(){
       'Realised net P&L per trading day over the last 30 days, divided by capital.');
   })();
 
-  return `  <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-top:10px">${needTile}${paceTile}</div>
+  return `  <div class="goal-readout-grid">${needTile}${paceTile}</div>
   ${(()=>{
     // Projected finish date. PRIMARY = your REALISTIC pace from the tradebook (what you
     // actually earn per day, 30d) — the honest picture the owner asked for (v544).
@@ -6516,7 +6504,7 @@ function renderStats(){
     const holdStr=reviewDays?` · review &gt;${reviewDays}d`:'';
     const learnedStr=harvestPlan.sampleCount?` · ${harvestPlan.sampleCount} move samples`:'';
     const opportunity=getSameDayExitOpportunitySummary();
-    const opportunityStr=opportunity.exits?` · <span style="color:var(--amber)" title="${opportunity.exits} symbol/date exit${opportunity.exits===1?'':'s'} compared with the same day's ALL NSE high; ${opportunity.upsideExits} day high${opportunity.upsideExits===1?'':'s'} exceeded your quantity-weighted average sell price.">${opportunity.upsideExits}/${opportunity.exits} exit${opportunity.exits===1?'':'s'} left upside</span>`:'';
+    const opportunityStr=opportunity.exits?` · <span style="color:var(--amber)" title="${opportunity.exits} symbol/date exit${opportunity.exits===1?'':'s'} compared with the same day's session high; ${opportunity.upsideExits} day high${opportunity.upsideExits===1?'':'s'} exceeded your quantity-weighted average sell price.">${opportunity.upsideExits}/${opportunity.exits} exit${opportunity.exits===1?'':'s'} left upside</span>`:'';
     const confStr=harvestPlan.confidence!=null?` · hit ${(harvestPlan.confidence*100).toFixed(0)}% hist`:'';
     const srcLabel=active.source==='manual'?'manual':active.source==='goal'?'goal-led':'Harvest';
     const fallbackStr=summary.fallbacks?` · ${summary.fallbacks} target fallback${summary.fallbacks===1?'':'s'}`:'';
@@ -6615,7 +6603,7 @@ function renderStats(){
     const opportunity=getSameDayExitOpportunitySummary();
     if(opportunity.exits){
       const realisedText=opportunity.avgRealised==null?'':` · realised ${opportunity.avgRealised>=0?'+':''}${opportunity.avgRealised.toFixed(2)}%`;
-      infoPills.push(`<span class="info-pill pill-amber" title="One exit means one symbol on one sell date. Sell fills are quantity-weighted; ALL NSE supplies that day's high. The average is weighted by sold value and includes 0% when the high did not exceed your average sell price. Diagnostic only; it does not change the portfolio target anchor or any stock exit policy.">🎯 ${opportunity.exits} exit${opportunity.exits===1?'':'s'}${realisedText} · ${opportunity.upsideExits} left upside · missed +${opportunity.avgMissed.toFixed(2)}% (${fmtINR(opportunity.missedValue)}) · diagnostic</span>`);
+      infoPills.push(`<span class="info-pill pill-amber" title="One exit means one symbol on one sell date. Sell fills are quantity-weighted; the session's own high is the reference. The average is weighted by sold value and includes 0% when the high did not exceed your average sell price. Diagnostic only; it does not change the portfolio target anchor or any stock exit policy.">🎯 ${opportunity.exits} exit${opportunity.exits===1?'':'s'}${realisedText} · ${opportunity.upsideExits} left upside · missed +${opportunity.avgMissed.toFixed(2)}% (${fmtINR(opportunity.missedValue)}) · diagnostic</span>`);
     }
   }catch(e){}
 
@@ -7703,15 +7691,15 @@ function buildOpenPositionsPanel(query=''){
   // The composite only sorts; the cell continues to display the unmodified Score/# values.
   const table=makeSortableTable('rank-open-positions',cols,shown,'score',-1,null,null,'sym','rank',1);
   const radarNote=ALL.length
-    ?'Radar context is from the current ALL NSE upload. Click a symbol for its scoring breakdown.'
-    :'Load ALL NSE.csv to add Radar score, rank, setup, day change, and risk.';
+    ?'Radar context is built from the live Kite tape. Click a symbol for its scoring breakdown.'
+    :'Start the helper and log in to Kite to add Radar score, rank, setup, day change, and risk.';
   const html=`<div id="rank-open-positions-card" style="background:var(--bg-card);border:1px solid var(--border);border-radius:10px;overflow:hidden">
     <div style="padding:12px 16px;border-bottom:1px solid var(--border)">
       <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:8px;margin-bottom:6px">
         <span style="font-size:13px;font-weight:800;color:var(--t1);text-transform:uppercase;letter-spacing:.08em">Open Positions${panelFilterTag(rows,shown,query)}</span>
         <span style="font-size:14px;font-weight:700;color:${pnlColor}">${rows.length} live position${rows.length===1?'':'s'} · ${fmtINR(totalCapital)} deployed · ${fmtSignedINR(totalPnl)}</span>
       </div>
-      <div style="font-size:14px;color:var(--t2);line-height:1.5">Live merge of Holdings, Positions, and today's net buys. Rows default to highest numerical Radar confidence (Score, then better Rank). Buy/Sell/Hold and every order level come only from 5-minute price-volume pressure. Pace and EoD use completed candles; a fresh high whose partial candle volume already reaches this stock's own top quartile can pull Target to the live tape price. ALL NSE score, rank and risk are optional recommendation context and never move these position numbers. ${radarNote}</div>
+      <div style="font-size:14px;color:var(--t2);line-height:1.5">Live merge of Holdings, Positions, and today's net buys. Rows default to highest numerical Radar confidence (Score, then better Rank). Buy/Sell/Hold and every order level come only from 5-minute price-volume pressure. Pace and EoD use completed candles; a fresh high whose partial candle volume already reaches this stock's own top quartile can pull Target to the live tape price. Radar score, rank and risk are optional recommendation context and never move these position numbers. ${radarNote}</div>
     </div>
     ${shown.length?`<div class="scroll-x">${table.getHtml()}</div>`:panelNoMatchHtml(query,'open position')}
   </div>`;
@@ -8050,7 +8038,7 @@ function renderPerformance(){
         <div title="For the current score version only: on the SAME issue session, did a target-hitter have a higher Decision Score than a non-winner? 50% means the score ordering carries no information."><div class="st-l">Score concordance</div><div class="st-v" style="font-size:19px;color:${sc.concordancePct==null?'var(--t3)':sc.concordancePct>=60?'var(--green)':sc.concordancePct>=52?'var(--amber)':'var(--red)'}">${sc.concordancePct==null?'—':sc.concordancePct+'%'}</div><div class="st-d">${sc.concordancePairs} current-version winner/loser pairs · 50% = no information</div></div>
         <div><div class="st-l">Time to target</div><div class="st-v" style="font-size:19px">${sc.medDaysToTarget==null?'—':(sc.medDaysToTarget===0?'same day':sc.medDaysToTarget+'d')}</div><div class="st-d">${sc.sameDay} same day · ${sc.nextDay} next day</div></div>
       </div>`
-    : `<div style="padding:16px;color:var(--t2);font-size:13px">No cohort has resolved yet. A pick resolves once a post-close ALL NSE.csv closes its issue day and the following session's bar is read.</div>`;
+    : `<div style="padding:16px;color:var(--t2);font-size:13px">No cohort has resolved yet. A pick resolves once the post-close universe closes its issue day and the following session's bar is read.</div>`;
   const bandRows=sc.bands.filter(b=>b.n>0).map(b=>
     `<tr><td style="padding:4px 10px">${b.label}</td>`
     +`<td style="padding:4px 10px;text-align:right">${b.n}</td>`
@@ -8189,17 +8177,24 @@ async function refreshRankingsAfterSurvRuleChange(){
     try{await hydrateSessionCSVsFromWorkspace();rebuildActiveSurveillanceHits();}catch(e){console.warn('Could not hydrate surveillance data for live refresh',e);}
   }
   let raw=Array.isArray(window._lastRawTV)?window._lastRawTV:null;
-  let fileName='ALL NSE.csv';
+  // THE GENERATED UNIVERSE IS THE SCANNER FILE NOW (v1257). This reloaded 'ALL NSE.csv' by name, so
+  // after the retirement a surveillance rule edit had nothing to re-score against and silently did
+  // nothing. It tries the generated universe first and keeps the export as a fallback, matching what
+  // processFiles already prefers.
+  let fileName='Kite Universe.csv';
   const looksStockRaw=rows=>rows?.length&&Object.prototype.hasOwnProperty.call(rows[0],'Symbol');
   if(!looksStockRaw(raw)&&FS.hasFolder()&&FS.readUploadText){
-    try{
-      const f=await FS.readUploadText('ALL NSE.csv');
-      if(f?.text){raw=parseCSV(f.text);fileName=f.path||fileName;window._lastRawTV=raw;}
-    }catch(e){console.warn('Could not reload ALL NSE.csv for surveillance refresh',e);}
+    for(const name of ['Kite Universe.csv','ALL NSE.csv']){
+      try{
+        const f=await FS.readUploadText(name);
+        if(f?.text){raw=parseCSV(f.text);fileName=f.path||name;window._lastRawTV=raw;break;}
+      }catch(e){}
+    }
+    if(!looksStockRaw(raw)) console.warn('Could not reload a scanner file for surveillance refresh');
   }
   if(!looksStockRaw(raw)){
     applyFilters();
-    showToast('Rule saved. Re-upload ALL NSE.csv to fully refresh Rankings.',3500,true);
+    showToast('Rule saved. Rankings refresh on the next universe rebuild.',3500,true);
     return;
   }
   try{
@@ -8213,7 +8208,7 @@ async function refreshRankingsAfterSurvRuleChange(){
     try{await FS.write(FS.getBrain());}catch(e){console.warn('Brain flush failed after surveillance refresh',e);}
   }catch(e){
     console.error('Surveillance ranking refresh failed',e);
-    showToast('Rule saved, but Rankings refresh failed. Re-upload ALL NSE.csv.',4000,true);
+    showToast('Rule saved, but the re-score failed. It will retry on the next universe rebuild.',4000,true);
   }
 }
 async function addSurvRule(colArg){
@@ -10175,7 +10170,7 @@ Click to replace this data.`
 }
 
 function renderTable(){
-  { const _ib=document.getElementById('intradayBar'); if(_ib) _ib.innerHTML=intradayPasteBarHtml(); }
+  renderLiveTapeBar();
   const capital=getEffectiveCapital();
   // Allocation only across SELECTED instruments
   const selList=FILT.filter(s=>SELECTED.has(s.symbol));
@@ -10837,38 +10832,6 @@ async function detectKiteApi(force){
 }
 let KITE_TOKEN_PROMPTED=false;   // once per page load; dismissing must not re-prompt on every render
 
-
-
-
-// ONE POST PATH, shared by the dialog and the inline box, so the two cannot drift apart.
-async function postKiteToken(token,say){
-  try{
-    const r=await fetch(KITE_HELPER+'/api/kite/token',{method:'POST',
-      headers:{'content-type':'application/json'},body:JSON.stringify({token})});
-    const j=await r.json();
-    if(!j.ok){ say('Rejected: '+j.why,true); return false; }
-    return true;
-  }catch(e){ say('Could not reach the helper: '+e.message,true); return false; }
-}
-
-// Called wherever the helper's status is (re)established. Asks at most ONCE per page load, so
-// dismissing it is respected; the bar keeps its inline box and the ☰ menu can reopen it on demand.
-
-async function refreshBrokerInputs(){
-  if(!KITE_API) await detectKiteApi();
-  if(!KITE_API) return {ok:false,why:'helper not running'};
-  try{
-    const c=new AbortController();
-    const t=setTimeout(()=>c.abort(),25000);
-    const r=await fetch(KITE_HELPER+'/api/inputs/refresh',{cache:'no-store',signal:c.signal});
-    clearTimeout(t);
-    if(!r.ok) return {ok:false,why:'helper HTTP '+r.status};
-    const j=await r.json();
-    if(!j.ok) console.warn('broker refresh skipped:',j.why);
-    return j;
-  }catch(e){ return {ok:false,why:e.message}; }
-}
-
 // ---- KITE CONNECT (v1239) --------------------------------------------------------------------
 // The official API. One-time: the app key and secret go to the LOCAL helper, which stores them on
 // this machine; the secret is never held in the page and never leaves the PC. Daily: one click to
@@ -10912,12 +10875,8 @@ function maybePromptKiteToken(){
   KITE_TOKEN_PROMPTED=true;
   showToast('Kite login has expired - press "Log in to Kite" to resume streaming.',8000,true);
 }
-function openKiteTokenDialog(){ openKiteConnectLogin(); }
-function closeKiteTokenDialog(){}
-async function saveKiteTokenFromDialog(){}
-// The enctoken saver is gone with its dialog (v1251). A machine with no Connect app can still put
-// a token in dev/kite-token.txt by hand; the page no longer offers it, because on this install it
-// cannot work and offering it told the owner his correct answer was rejected.
+// The enctoken dialog, saver and compatibility stubs are gone. Kite Connect login is the only
+// credential action the page exposes.
 // Archive session counts from the helper. SCHEDULING ONLY - it answers "what should I fetch next",
 // never what a stock is worth, so the v1231 rule that no DECISION may read Archive/ still holds: no
 // score, target, stop, allocation or recommendation reads this. Null when the helper is old or
@@ -11015,14 +10974,13 @@ async function hydrateFromHelper(reason){
   const changed=wanted.filter(f=>_helperInputSigs[f.name]!==sig(f));
   if(!changed.length) return false;
 
-  // THE UNIVERSE CHANGES EVERY 30 SECONDS; NOTHING ELSE DOES (v1254). Routing that through the full
-  // processFiles made every beat re-upload the canonical inputs to Drive, WIPE and rebuild every NSE
-  // map (KITE_TOKEN included), and re-parse the multi-megabyte reports ZIP through JSZip - all to
-  // pick up one regenerated CSV. That is what made the filters and tabs lag: a multi-hundred-
-  // millisecond synchronous block twice a minute. When the ONLY thing that changed is the scanner
-  // file, take the scoring path directly. The ZIP, the portfolio files and the Drive push still get
-  // the full treatment on the passes where they actually changed.
-  const onlyScanner=changed.every(f=>isScannerCsvName(f.name));
+  // The universe and the live portfolio can both change on the 30-second beat. Neither belongs on
+  // the full structural path: that would reparse the reports ZIP and upload transient LTP changes
+  // to Drive twice a minute. Scanner and portfolio deltas therefore have their own fast paths; a
+  // holiday/report/tradebook change still takes the coherent full-input path.
+  const isPortfolioFile=f=>isExactCsvName(f?.name,'Holdings.csv')
+    ||isExactCsvName(f?.name,'Positions.csv')||isExactCsvName(f?.name,'Orders.csv');
+  const structuralChanged=changed.filter(f=>!isScannerCsvName(f.name)&&!isPortfolioFile(f));
   const fetchOne=async f=>{
     try{
       const r=await fetch(KITE_HELPER+'/api/inputs/file?name='+encodeURIComponent(f.name),{cache:'no-store'});
@@ -11031,16 +10989,31 @@ async function hydrateFromHelper(reason){
     }catch(e){ return null; }
   };
 
-  if(onlyScanner){
-    const f=changed.find(x=>isScannerCsvName(x.name));
+  if(!structuralChanged.length){
+    let any=false,allOk=true;
+    const scannerChanged=changed.filter(f=>isScannerCsvName(f.name));
+    const portfolioChanged=changed.filter(isPortfolioFile);
+    if(scannerChanged.length){
+      const f=scannerChanged.find(x=>isGeneratedUniverseName(x.name))||scannerChanged[0];
     const file=f&&await fetchOne(f);
-    if(!file) return false;
-    const ok=await processScannerUpload(file,'stock');
-    if(ok){
-      _helperInputSigs[f.name]=sig(f);
-      try{ renderTradingDashboardNow(); }catch(e){}
+      const ok=!!file&&await processScannerUpload(file,'stock');
+      if(ok){
+        for(const x of scannerChanged) _helperInputSigs[x.name]=sig(x);
+        try{renderTradingDashboardNow();}catch(e){}
+        any=true;
+      }else allOk=false;
     }
-    return !!ok;
+    if(portfolioChanged.length){
+      const files=[];
+      for(const f of portfolioChanged){const file=await fetchOne(f);if(file)files.push(file);}
+      const ok=files.length===portfolioChanged.length
+        &&await processFiles(files,reason||'portfolio',{silent:true,skipDriveBackup:true});
+      if(ok){
+        for(const f of portfolioChanged) _helperInputSigs[f.name]=sig(f);
+        any=true;
+      }else allOk=false;
+    }
+    return any&&allOk;
   }
 
   // Something structural changed - fetch the whole set so processFiles sees a coherent picture.
@@ -11216,8 +11189,8 @@ function emptyBoardReason(){
   if(q) bits.push('search \u201c'+escHtml(q)+'\u201d');
   const risk=document.getElementById('fRisk')?.value||'';
   if(risk&&risk!=='All') bits.push('risk '+escHtml(risk));
-  const rows=(document.getElementById('fRows')?.value||'').trim();
-  if(rows&&Number(rows)>0&&Number(rows)<total) bits.push('rows '+escHtml(rows));
+  const minScore=(document.getElementById('fMinScore')?.value||'').trim();
+  if(minScore&&Number(minScore)>0) bits.push('score ≥ '+escHtml(minScore));
   const to=document.getElementById('fMinTurnover')?.value||'';
   if(to&&Number(to)>0) bits.push('min turnover');
   const mp=(document.getElementById('fMaxPrice')?.value||'').trim();
@@ -11227,24 +11200,62 @@ function emptyBoardReason(){
     +'.<br><span style="font-size:12px">'+total.toLocaleString('en-IN')
     +' stocks are ranked \u2014 press <b>Clear filters</b> to see them.</span>';
 }
+const LIVE_TAPE_TIME_FMT=new Intl.DateTimeFormat('en-IN',{
+  timeZone:'Asia/Kolkata',hour:'2-digit',minute:'2-digit',second:'2-digit',hour12:false
+});
+function liveTapeTime(ts){
+  const n=Number(ts);
+  return n>0?LIVE_TAPE_TIME_FMT.format(new Date(n)):'';
+}
+function renderLiveTapeBar(){
+  const host=document.getElementById('intradayBar');
+  if(!host) return;
+  const active=document.activeElement;
+  if(active&&host.contains(active)&&/^(INPUT|SELECT)$/.test(active.tagName)) return;
+  host.innerHTML=intradayPasteBarHtml();
+}
 function intradayPasteBarHtml(){
+  const activity=STREAM_ACTIVITY||{};
+  const now=Date.now();
+  const clock=istClock();
+  const inSession=clock.mins>=DAY_START_MIN&&clock.mins<DAY_END_MIN;
+  const checked=liveTapeTime(activity.lastCompleteAt);
+  const nextSecs=activity.nextAt>now?Math.max(0,Math.ceil((activity.nextAt-now)/1000)):0;
+  const portfolioAt=liveTapeTime(activity.lastPortfolioAt);
   if(!KITE_API){
     return `<div style="margin:8px 0;padding:10px 14px;border:1px solid var(--border);border-radius:8px;background:var(--bg2);font-size:12px;color:var(--t3)"
       title="Double-click &quot;Start Rocket Scanner.bat&quot; on your PC and leave that window open. The app stays here; only the helper runs locally, because a web page cannot talk to Kite directly.">
-      <span class="st-l">Live tape</span> &nbsp; start the helper (Start Rocket Scanner.bat) to begin streaming</div>`;
+      <span class="st-l">Live tape</span> &nbsp; start the helper (Start Rocket Scanner.bat) to begin streaming
+      <span class="live-tape-activity">${checked?`last check ${checked} · `:''}${activity.phase==='checking'?'checking now…':`retry in ${nextSecs}s`}</span></div>`;
   }
   const needsSetup=KITE_API.mode!=='connect';
   const needsLogin=!needsSetup&&(KITE_API.needsLogin||!KITE_API.hasToken||KITE_API.tokenValid===false);
   const st=STREAM_STATUS;
-  const live=!!(st&&st.connected);
+  const connected=!!(st&&st.connected);
+  const live=inSession&&connected;
   const bars=Object.keys(INTRADAY_BARS||{}).length;
-  const dot=live?'var(--green)':(needsLogin?'var(--amber)':'var(--red)');
+  const dot=live?'var(--green)':(!inSession&&connected?'var(--border-hi)':(needsLogin?'var(--amber)':'var(--red)'));
   const head=live
     ? `<b style="color:var(--green)">\u25cf live</b> \u00b7 ${st.subscribed||0} instruments \u00b7 `
       +`${(st.ticks||0).toLocaleString('en-IN')} ticks \u00b7 ${bars} symbols with a tape`
+    : !inSession&&connected
+      ? `<b style="color:var(--t2)">\u25cb market closed</b> · helper connected · ${bars} symbols stored`
     : needsLogin
       ? `<b style="color:var(--amber)">\u25cb Kite login expired</b> \u2014 one click, once a day`
       : `<b style="color:var(--red)">\u25cb stream down</b>${st&&st.why?' \u2014 '+escHtml(st.why):''}`;
+  const latest=liveTapeTime(newestTapeBucketMs());
+  let activityText='first background check pending';
+  if(activity.phase==='checking') activityText='↻ checking helper, universe, positions and bars now…';
+  else {
+    const bits=[];
+    if(latest) bits.push('latest 5m bar '+latest);
+    if(checked) bits.push('checked '+checked);
+    if(portfolioAt) bits.push('positions '+portfolioAt);
+    if(activity.portfolioError) bits.push('positions refresh failed');
+    if(inSession&&activity.nextAt) bits.push('next check in '+nextSecs+'s');
+    if(!inSession) bits.push('background market refresh paused');
+    activityText=bits.join(' · ')||activityText;
+  }
   return `<div id="intradayBar-inner" style="margin:8px 0;padding:10px 14px;border:1px solid ${dot};border-radius:8px;background:var(--bg2)">
     <div style="display:flex;gap:12px;align-items:center;flex-wrap:wrap">
       <span class="st-l">Live tape</span>
@@ -11252,6 +11263,7 @@ function intradayPasteBarHtml(){
         title="${escHtml(live
           ? 'The Kite Connect WebSocket is carrying the whole eligible universe in quote mode. It is a push feed: no requests, no rate limit. Five-minute bars are folded from it and the board re-reads them every 30 seconds.'
           : 'No live tape. The board can only recommend on a current 5-minute read, so it will stop recommending as the stored bars age rather than act on stale data.')}">${head}</span>
+      <span class="live-tape-activity" title="The page checks the local helper every 30 seconds. Each pass refreshes broker positions, re-scores a changed Kite universe, merges new completed five-minute bars, and then records these timestamps.">${activityText}</span>
       ${needsLogin?`<button onclick="openKiteConnectLogin()" class="btn" style="font-size:11px;border-color:var(--amber);color:var(--amber);font-weight:700"
         title="Kite Connect access tokens expire around 06:00 IST. This opens Kite's own login page; it redirects back to the helper and streaming resumes. Your password never touches this app.">Log in to Kite</button>`:''}
       ${needsSetup?`<input id="kiteApiKeyBox" placeholder="Kite Connect api_key"
@@ -11266,6 +11278,7 @@ function intradayPasteBarHtml(){
 }
 
 function applyFilters(){
+  syncRecommendationThreshold();
   updateFilterPlaceholders();
   const q=(document.getElementById('fSearch')?.value||'').trim().toLowerCase();
   // Risk filter now supports multiple levels (v554): the dropdown value is a comma-joined set
@@ -11277,9 +11290,6 @@ function applyFilters(){
   // setting, not a zero, so it must never be read as "max ₹0" and empty the board.
   const maxPriceRaw=(document.getElementById('fMaxPrice')?.value||'').trim();
   const maxPrice=maxPriceRaw===''?null:(Number(maxPriceRaw)>0?Number(maxPriceRaw):null);
-  // Rows: blank shows the entire ranked universe (Radar behavior); a number caps the display.
-  const rowsRaw=(document.getElementById('fRows')?.value||'').trim();
-  const rowCap=rowsRaw===''?null:Math.max(1,Math.floor(+rowsRaw)||1);
   // Held suppression also applies here: portfolio files can parse after the scanner
   // file in the same load, so display time re-checks the full current held map.
   const heldPos=getHeldPositionMap();
@@ -11352,7 +11362,7 @@ function applyFilters(){
     return true;
   });
   rows.sort((a,b)=>(a.rank??Infinity)-(b.rank??Infinity));
-  FILT=rowCap!=null?rows.slice(0,rowCap):rows;
+  FILT=rows;
   applySort();
 
   CURRENT_TRADE_TIMING=getCurrentTradeTimingDecision();
@@ -11580,7 +11590,7 @@ function renderPostClose(){
   // "Complete for 2026-08-21" beside Resolved 0 / Pending 20. A cohort with nothing resolved is not
   // a completed audit; it is an issued one still inside its two-session window.
   const issued=audit?.issued??0, resolved=audit?.resolved??0, pending=audit?.pending??0;
-  const state=!audit?(afterClose?{t:'Waiting for a refreshed post-close ALL NSE.csv',c:'var(--amber)'}
+  const state=!audit?(afterClose?{t:'Waiting for the post-close universe rebuild',c:'var(--amber)'}
                                 :{t:'Audit runs automatically at 16:00 IST',c:'var(--t3)'})
     :resolved===0?{t:'Issued for '+today+' — nothing resolved yet, '+pending+' still inside their window',c:'var(--amber)'}
     :pending>0?{t:'Partly graded for '+today+' — '+resolved+' of '+issued+' resolved, '+pending+' pending',c:'var(--amber)'}
@@ -11828,7 +11838,7 @@ function renderStatusBar(){
 }
 
 function clearFilters(){
-  ['fSearch','fRisk','fRows'].forEach(id=>{const el=document.getElementById(id);if(el)el.value='';});
+  ['fSearch','fRisk','fMinScore'].forEach(id=>{const el=document.getElementById(id);if(el)el.value=id==='fMinScore'?'60':'';});
   const turnEl=document.getElementById('fMinTurnover');if(turnEl)turnEl.value='0';
   const maxPxEl=document.getElementById('fMaxPrice');if(maxPxEl)maxPxEl.value='';
   updateFilterPlaceholders();
@@ -11904,36 +11914,6 @@ function toggleRequiredFilesPopover(){
   }
 }
 
-async function filesFromDirectoryHandle(dirHandle){
-  const files=[];
-  async function walk(handle){
-    for await(const entry of handle.values()){
-      if(entry.kind==='file'){
-        files.push(await entry.getFile());
-      }else if(entry.kind==='directory'){
-        await walk(entry);
-      }
-    }
-  }
-  await walk(dirHandle);
-  return files;
-}
-
-async function getLocalUploadFolderFiles(){
-  const root=FS.getActiveLocalDirectoryHandle?.();
-  if(!root) return null;
-  try{
-    if(root.queryPermission&&await root.queryPermission({mode:'read'})!=='granted') return null;
-    let uploadHandle=root;
-    try{uploadHandle=await root.getDirectoryHandle('Scanner Uploads');}catch(e){}
-    const files=await filesFromDirectoryHandle(uploadHandle);
-    return files.length?{files,sourceLabel:uploadHandle.name||root.name||'Scanner Uploads'}:null;
-  }catch(e){
-    console.warn('Stored local upload folder could not be read',e);
-    return null;
-  }
-}
-
 // _folderWatchBusy survives as the one-ingest-at-a-time latch that streamRefreshTick honours;
 // the timer and the ALL NSE timestamp it compared are gone with the watch.
 let _folderWatchBusy=false;
@@ -11958,12 +11938,44 @@ let _folderWatchBusy=false;
 // The cadence is the HELPER'S OWN FLUSH INTERVAL, not a chosen number: the helper writes completed
 // bars every 30 seconds, so re-reading on the same beat means the board is never more than one
 // flush behind, and reading faster could only re-read bytes that had not changed.
-let _streamRefreshTimer=null,_streamRefreshBusy=false;
+let _streamRefreshTimer=null,_streamRefreshUiTimer=null,_streamRefreshBusy=false,_streamVisibilityBound=false;
+let STREAM_ACTIVITY={
+  phase:'starting',lastAttemptAt:0,lastCompleteAt:0,lastSuccessAt:0,lastDataAt:0,
+  lastPortfolioAt:0,nextAt:0,error:'',portfolioError:''
+};
 const STREAM_REFRESH_MS=30000;   // = the helper's flush interval
+function setStreamActivity(patch){
+  STREAM_ACTIVITY={...STREAM_ACTIVITY,...patch};
+  try{renderLiveTapeBar();}catch(e){}
+}
+async function refreshPortfolioFromHelper(){
+  if(!KITE_API||KITE_API.needsLogin||KITE_API.tokenValid===false)
+    return {ok:false,skipped:true,why:'Kite Connect is not ready'};
+  let timer=null;
+  try{
+    const ctl=new AbortController(); timer=setTimeout(()=>ctl.abort(),25000);
+    const r=await fetch(KITE_HELPER+'/api/kite/portfolio',{cache:'no-store',signal:ctl.signal});
+    const j=r.ok?await r.json():null;
+    if(j&&j.ok){
+      setStreamActivity({lastPortfolioAt:Number(j.atMs)||Date.now(),portfolioError:''});
+      return j;
+    }
+    const why=j?.why||('HTTP '+r.status);
+    setStreamActivity({portfolioError:why});
+    return {ok:false,why};
+  }catch(e){
+    const why=e?.name==='AbortError'?'portfolio refresh timed out':String(e?.message||e);
+    setStreamActivity({portfolioError:why});
+    return {ok:false,why};
+  }finally{if(timer)clearTimeout(timer);}
+}
 async function streamRefreshTick(){
   if(_streamRefreshBusy||document.hidden) return;
-  if(_folderWatchBusy) return;              // an ingest is authoritative; do not race it
-  if(!KITE_API){
+  if(_folderWatchBusy){setStreamActivity({phase:'ingesting'});return;} // do not race an authoritative ingest
+  _streamRefreshBusy=true;
+  setStreamActivity({phase:'checking',lastAttemptAt:Date.now(),nextAt:0,error:''});
+  try{
+    if(!KITE_API){
     // SELF-HEAL, DO NOT GIVE UP (v1256). detectKiteApi runs ONCE at startup behind a 1.5s timeout,
     // and a helper busy answering a 5 MB inventory can miss it. Before v1255 the folder watch would
     // eventually cause a re-probe; deleting it left nothing that ever asked again, so a single slow
@@ -11971,28 +11983,56 @@ async function streamRefreshTick(){
     // helper healthy and answering on 8787. The refresh beat is exactly the right place to retry:
     // it costs one localhost request every 30 seconds and it repairs itself the moment the helper
     // answers, because detectKiteApi re-renders and reloads the inventory on success.
-    try{ await detectKiteApi(); }catch(e){}
-    if(!KITE_API) return;
-  }
-  const c=istClock();
-  if(c.mins<DAY_START_MIN||c.mins>=DAY_END_MIN) return;   // the stream is closed outside hours
-  _streamRefreshBusy=true;
-  try{
+      try{ await detectKiteApi(); }catch(e){}
+      if(!KITE_API){
+        const done=Date.now();
+        setStreamActivity({phase:'waiting-helper',lastCompleteAt:done,nextAt:done+STREAM_REFRESH_MS});
+        return;
+      }
+    }
     // loadIntradayInventory re-reads the stored bars through the ONE parser and, when anything
     // changed, re-runs applyIntradayReorder + applyFilters + renderRankingsPanels itself. The
     // v1238 freshness rule then decides what may still be recommended, so a stalled stream empties
     // the board honestly rather than leaving yesterday's picks sitting there looking actionable.
     await loadStreamStatus();
+    const c=istClock();
+    if(c.mins<DAY_START_MIN||c.mins>=DAY_END_MIN){
+      const done=Date.now();
+      setStreamActivity({phase:'market-closed',lastCompleteAt:done,
+        lastSuccessAt:STREAM_STATUS?done:STREAM_ACTIVITY.lastSuccessAt,nextAt:done+STREAM_REFRESH_MS});
+      return;
+    }
     // The helper rewrites the universe every 30 seconds; this is what notices it. One small JSON
     // when nothing changed.
-    await hydrateFromHelper('live refresh');
-    await loadIntradayInventory();
-  }catch(e){ }
-  finally{ _streamRefreshBusy=false; }
+    const universeChanged=await hydrateFromHelper('live refresh');
+    // Holdings, positions and orders used to wait for the helper's ten-minute housekeeping tick.
+    // Ask on this same visible 30-second beat, then immediately hydrate whatever changed, so a new
+    // fill appears on Open Positions without a second timer or a manual action.
+    const portfolio=await refreshPortfolioFromHelper();
+    const portfolioChanged=portfolio.ok?await hydrateFromHelper('portfolio refresh'):false;
+    const barsRead=await loadIntradayInventory();
+    const done=Date.now();
+    setStreamActivity({phase:STREAM_STATUS?.connected?'live':'stream-down',lastCompleteAt:done,
+      lastSuccessAt:STREAM_STATUS?done:STREAM_ACTIVITY.lastSuccessAt,
+      lastDataAt:(universeChanged||portfolioChanged||barsRead)?done:STREAM_ACTIVITY.lastDataAt,
+      nextAt:done+STREAM_REFRESH_MS,error:''});
+  }catch(e){
+    const done=Date.now();
+    setStreamActivity({phase:'error',lastCompleteAt:done,nextAt:done+STREAM_REFRESH_MS,
+      error:String(e?.message||e)});
+  }finally{
+    _streamRefreshBusy=false;
+    try{renderLiveTapeBar();}catch(e){}
+  }
 }
 function startStreamRefresh(){
   if(_streamRefreshTimer) return;
   _streamRefreshTimer=setInterval(streamRefreshTick,STREAM_REFRESH_MS);
+  _streamRefreshUiTimer=setInterval(()=>{try{renderLiveTapeBar();}catch(e){}},1000);
+  if(!_streamVisibilityBound){
+    _streamVisibilityBound=true;
+    document.addEventListener('visibilitychange',()=>{if(!document.hidden)streamRefreshTick();});
+  }
   streamRefreshTick();
 }
 // Is the stream actually up? A control that cannot work must say so - a silent dead stream would
@@ -12008,80 +12048,24 @@ async function loadStreamStatus(){
   }catch(e){ STREAM_STATUS=null; }
   return STREAM_STATUS;
 }
-// THE FOLDER WATCH IS RETIRED (v1255). It polled a granted directory handle every 3 seconds to spot
-// a hand-downloaded ALL NSE. There is no hand-downloaded file any more, the grant lapses silently
-// (which is how the board once sat frozen for half a session), and hydrateFromHelper already notices
-// every input change on the refresh beat without needing any grant at all. Its "auto refresh" pill
-// went with it: what refreshes now is the helper - portfolio from Kite every ten minutes, the
-// universe every thirty seconds - and the Live tape panel says so directly.
-function startFolderWatch(){
-  startStreamRefresh();
-}
-
 async function hydrateSessionCSVsFromPreferredInputs(reason='startup'){
-  const local=await getLocalUploadFolderFiles();
-  if(local?.files?.length){
-    console.log(`${reason}: hydrating from local upload folder`,local.sourceLabel,local.files.length);
-    return await processFiles(local.files,local.sourceLabel)?local.files.length:0;
-  }
-  console.log(`${reason}: local upload folder unavailable; falling back to Drive inputs`);
-  return await hydrateSessionCSVsFromWorkspace();
-}
-
-async function openUploadFolderPicker(){
-  if(window.showDirectoryPicker){
-    const stored=await FS.getStoredUploadDirHandle();
-    if(stored){
-      try{
-        let uploadHandle=stored;
-        try{uploadHandle=await stored.getDirectoryHandle('Scanner Uploads');}catch(e){}
-        let files=await filesFromDirectoryHandle(uploadHandle);
-        if(files.length){
-          try{ await refreshBrokerInputs(); }catch(e){}
-          { const _f=await getLocalUploadFolderFiles(); if(_f&&_f.files&&_f.files.length) files=_f.files; }
-          await processFiles(files,uploadHandle.name);
-          return true;
-        }
-      }catch(e){
-        console.warn('Stored upload folder could not be reused',e);
-      }
-    }
-    try{
-      const picked=await window.showDirectoryPicker({id:'rocket-scanner-uploads',mode:'readwrite'});
-      let uploadHandle=picked;
-      let localBrainHandle=picked;
-      try{
-        uploadHandle=await picked.getDirectoryHandle('Scanner Uploads');
-        localBrainHandle=picked;
-      }catch(e){}
-      await FS.setLocalDirectoryHandle(localBrainHandle);
-      let files=await filesFromDirectoryHandle(uploadHandle);   // v1203: reassigned below
-      if(!files.length){
-        showToast('No files found in the selected folder.',4000,true);
-        return false;
-      }
-      try{ await refreshBrokerInputs(); }catch(e){}
-          { const _f=await getLocalUploadFolderFiles(); if(_f&&_f.files&&_f.files.length) files=_f.files; }
-          await processFiles(files,uploadHandle.name);
-      return true;
-    }catch(e){
-      if(e?.name!=='AbortError'){
-        console.error('Directory load failed',e);
-        showToast('Could not load the selected folder: '+(e?.message||e),6000,true);
-      }
-      return false;
+  if(KITE_API){
+    const helperLoaded=await hydrateFromHelper(reason);
+    if(helperLoaded){
+      console.log(`${reason}: hydrated current inputs from the local Kite helper`);
+      return 1;
     }
   }
-  const input=document.getElementById('fInDir');
-  input.value='';
-  input.click();
-  return true;
+  if(FS.hasFolder()){
+    console.log(`${reason}: helper inputs unavailable; falling back to Drive backup`);
+    return await hydrateSessionCSVsFromWorkspace();
+  }
+  console.log(`${reason}: no helper input and no Drive backup available`);
+  return 0;
 }
 
-// handleCloudLoadAction is deleted with the button it served (v1251). Ingestion is
-// hydrateFromHelper on the refresh beat; there is nothing left for a manual folder picker to do,
-// and section 6 says a path that has lost goes the same day rather than sitting there reading as a
-// live option.
+// The manual directory walk and hidden file input are gone with Load Files. The helper is primary;
+// Drive is a backup only when the helper cannot supply an input.
 
 // ── Brain Export / Import ──
 // Saves all accumulated knowledge (correlations, snapshot, methodology, filters, version)
@@ -12330,13 +12314,20 @@ async function hydrateSessionCSVsFromWorkspace(){
       FS.readUploadText('NSE Holidays.csv'),
     ]),
     FS.readUploadFile('Reports-Daily-Multiple.zip'),
-    FS.readUploadFile('ALL NSE.csv'),
+    // The generated universe is the scanner file; the export remains a fallback for a Drive that
+    // still holds one from before the retirement (v1257).
+    (async()=>{
+      for(const n of ['Kite Universe.csv','ALL NSE.csv']){
+        try{ const f=await FS.readUploadFile(n); if(f) return f; }catch(e){}
+      }
+      return null;
+    })(),
   ]);
   const [holdFile,posFile,ordFile,tbFile,holFile]=csvFiles;
   const driveFiles=[
     holdFile&&{name:'Holdings.csv'},posFile&&{name:'Positions.csv'},ordFile&&{name:'Orders.csv'},
     tbFile&&{name:'TRADEBOOK.csv'},holFile&&{name:'NSE Holidays.csv'},zipEntry?.file&&{name:'Reports-Daily-Multiple.zip'},
-    scannerEntry?.file&&{name:'ALL NSE.csv'}
+    scannerEntry?.file&&{name:scannerEntry.file.name||'Kite Universe.csv'}
   ].filter(Boolean);
   mergeFileLoadStatus('Drive',driveFiles,'not in Drive');
   if(holFile?.text){parseNSEHolidays(holFile.text);updateFileLoadStatus('NSE Holidays.csv','loaded');}
@@ -12368,10 +12359,10 @@ async function hydrateSessionCSVsFromWorkspace(){
   if(scannerEntry?.file){
     try{scannerHydrated=await processScannerUpload(scannerEntry.file,'stock',{restoreOnly:true});}
     catch(e){
-      console.error('hydrateSessionCSVsFromWorkspace: ALL NSE parse failed',e);
-      showToast('Stored ALL NSE.csv could not be loaded: '+(e?.message||e),6000,true);
+      console.error('hydrateSessionCSVsFromWorkspace: scanner parse failed',e);
+      showToast('The stored universe could not be loaded: '+(e?.message||e),6000,true);
     }
-    if(scannerHydrated) updateFileLoadStatus('ALL NSE.csv','loaded');
+    if(scannerHydrated) updateFileLoadStatus('Kite Universe.csv','loaded');
   }
   const updates={};
   if(holdFile?.text){
@@ -12795,35 +12786,24 @@ async function exportBasket(){
 
 async function saveBasketToScannerUploads(orders, filename){
   if(orders.length>20) throw new Error(`Refusing to truncate basket with ${orders.length} orders`);
-  const root=await FS.getStoredUploadDirHandle?.().catch(()=>null);
-  if(!root){
-    showToast('Open the Scanner Uploads folder first, then export the basket again.',5000,true);
+  if(!KITE_API){
+    showToast('Start Rocket Scanner.bat before exporting the basket.',5000,true);
     return false;
   }
-  let uploadHandle=root;
-  if(uploadHandle.name!=='Scanner Uploads'){
-    try{uploadHandle=await uploadHandle.getDirectoryHandle('Scanner Uploads');}
-    catch(e){uploadHandle=null;}
-  }
-  if(!uploadHandle){
-    showToast('Scanner Uploads folder was not found under the selected local folder.',5000,true);
-    return false;
-  }
+  let timer=null;
   try{
-    if(uploadHandle.queryPermission&&await uploadHandle.queryPermission({mode:'readwrite'})!=='granted'){
-      showToast('Write access to Scanner Uploads is not available. Re-open the folder and try again.',6000,true);
-      return false;
-    }
-    const fileHandle=await uploadHandle.getFileHandle(filename+'.json',{create:true});
-    const writable=await fileHandle.createWritable();
-    await writable.write(JSON.stringify(orders,null,2));
-    await writable.close();
+    const ctl=new AbortController();timer=setTimeout(()=>ctl.abort(),10000);
+    const r=await fetch(KITE_HELPER+'/api/inputs/basket',{method:'POST',signal:ctl.signal,
+      headers:{'content-type':'application/json'},
+      body:JSON.stringify({name:filename+'.json',orders})});
+    const j=r.ok?await r.json():null;
+    if(!j?.ok) throw new Error(j?.why||('helper HTTP '+r.status));
     return true;
   }catch(e){
     console.error('Basket save failed',e);
-    showToast('Could not save the basket into Scanner Uploads: '+(e?.message||e),6000,true);
+    showToast('Could not save the basket through the local helper: '+(e?.message||e),6000,true);
     return false;
-  }
+  }finally{if(timer)clearTimeout(timer);}
 }
 
 function switchTab(n){
@@ -12880,7 +12860,7 @@ function getExpectedInputFiles(){
   const currentReportDate=c.mins>=DAY_END_MIN?todayDd:nd.ddmmyyyy;
   const zipKey='Reports-Daily-Multiple.zip';
   const canonical=[
-    {key:'ALL NSE.csv',label:'📈 ALL NSE.csv',match:name=>isScannerCsvName(name)},
+    {key:'Kite Universe.csv',label:'📈 Kite Universe.csv (built from the live tape)',match:name=>isScannerCsvName(name)},
     {key:zipKey,label:'🏛 Reports-Daily-Multiple.zip',match:name=>isReportsZipName(name)},
     {key:'Holdings.csv',label:'🛡 Holdings.csv',match:name=>isExactCsvName(name,'Holdings.csv')},
     {key:'Positions.csv',label:'📊 Positions.csv',match:name=>isExactCsvName(name,'Positions.csv')},
@@ -13001,13 +12981,13 @@ function compactRankingRows(rows){
   }));
 }
 function applySavedFiltersForMode(mode){
-  const ids=['fSearch','fRisk','fRows','fMinTurnover','fMaxPrice','fCapital','fMaxAlloc','fRiskPerTrade'];
+  const ids=['fSearch','fRisk','fMinScore','fMinTurnover','fMaxPrice','fCapital','fMaxAlloc','fRiskPerTrade'];
   const prev={};
   ids.forEach(id=>{const el=document.getElementById(id);if(el)prev[id]=el.value;});
   try{
     const st=JSON.parse(localStorage.getItem(modeKey(SCANNER_STORE,mode))||'{}');
     const shared=JSON.parse(localStorage.getItem(SHARED_FILTER_STORE)||'{}');
-    const map={risk:'fRisk',rows:'fRows',minTurnover:'fMinTurnover',maxPrice:'fMaxPrice'};
+    const map={risk:'fRisk',minScore:'fMinScore',minTurnover:'fMinTurnover',maxPrice:'fMaxPrice'};
     Object.entries(map).forEach(([k,id])=>{const el=document.getElementById(id);if(el&&st[k]!=null)el.value=st[k];});
     const capEl=document.getElementById('fCapital');if(capEl&&shared.capital!=null)capEl.value=shared.capital;
     const maxEl=document.getElementById('fMaxAlloc');if(maxEl&&shared.maxAlloc!=null)maxEl.value=shared.maxAlloc;
@@ -13222,10 +13202,7 @@ const DEPTH_MIN_PREOPEN_TURNOVER=2e5;
 let _lastNseZipSig='';   // v1254: size:lastModified of the zip whose parse produced the live NSE maps
 async function processFiles(files,sourceLabel,opts={}){
   const silent=!!opts.silent; // watcher refreshes: no overlay, no toasts, corner pill only
-  if(!(await ensureDriveReadyForLoad())){
-    if(!silent) setLoading(false);
-    return false;
-  }
+  const skipDriveBackup=!!opts.skipDriveBackup;
   setFileLoadStatus(sourceLabel||'Scanner Uploads',files,'not in folder');
   // Surveillance rules must exist before REG1 parsing; the unauthorized-boot path can
   // reach here without initApp having seeded them.
@@ -13270,7 +13247,7 @@ async function processFiles(files,sourceLabel,opts={}){
 
   // Persist the complete recognised input snapshot before scoring can create or display a new
   // recommendation cohort. A partial/failed Drive sweep is not a completed load.
-  try{
+  if(!skipDriveBackup) try{
     if(!silent) setLoadMsg('Saving changed input files to Drive...');
     await saveInputsToDrive(files);
   }catch(e){
@@ -13293,7 +13270,7 @@ async function processFiles(files,sourceLabel,opts={}){
   // produced are still exactly right, so the reset and the parse are both skipped.
   const _zipSig=nseZip?(nseZip.size+':'+nseZip.lastModified):'';
   const _zipUnchanged=!!nseZip&&_zipSig===_lastNseZipSig&&Object.keys(NSE_BHAV||{}).length>0;
-  if(!_zipUnchanged){
+  if(nseZip&&!_zipUnchanged){
   NSE_BHAV={};NSE_52W={};NSE_SURV={};NSE_BULK={};NSE_BLOCK={};NSE_PRICE_BAND={};NSE_VAR={};NSE_NEXT_BAND={};NSE_SECURITY_MASTER={};NSE_DEAL_NET={};NSE_CORP_ACTION={};NSE_BOARD_MEETING={};NSE_ANNOUNCE={};NSE_MARKET=null;NSE_INDEX={};NSE_NAME_TO_SYM={};NSE_BAND_HIT={};NSE_NEW_HL_BYNAME={};NSE_INDEX_GROUP_BYNAME={};NSE_INDEX_GROUP_BYSYM={};MARKET_REGIME=null;NSE_STATUS={};NSE_SERIES={};NSE_DEPTH={};NSE_DEPTH_META=null;KITE_TOKEN={};
   }
 
@@ -13353,7 +13330,7 @@ async function processFiles(files,sourceLabel,opts={}){
     }catch(e){console.error('ZIP error:',e);}
     _lastNseZipSig=_zipSig;
   }
-  await refreshNseFundamentals();
+  if(nseZip||!NSE_FUNDAMENTAL_META) await refreshNseFundamentals();
 
   if(!tvFile&&!nseZip&&!holdFile&&!posFile&&!ordFile&&!tbFile&&!holidayFile){
     if(!silent){
@@ -13412,7 +13389,9 @@ async function processFiles(files,sourceLabel,opts={}){
   if(tvFile)scannerJobs.push({mode:'stock',file:tvFile});
   for(const job of scannerJobs){
     const ok=await processScannerUpload(job.file,job.mode);
-    if(ok&&job.mode==='stock') updateFileLoadStatus('ALL NSE.csv','loaded');
+    // The manifest key is the generated universe now; marking the retired name would leave the
+    // checklist permanently showing the scanner file as missing (v1257).
+    if(ok&&job.mode==='stock') updateFileLoadStatus('Kite Universe.csv','loaded');
   }
   const stockScannerProcessed=scannerJobs.some(j=>j.mode==='stock');
 
@@ -13448,18 +13427,6 @@ async function processFiles(files,sourceLabel,opts={}){
   return true;
 }
 
-document.getElementById('fInDir').addEventListener('change',e=>{
-  if(!e.target.files.length) return;
-  const files=Array.from(e.target.files);
-  const sourceLabel=files[0]?.webkitRelativePath?.split(/[\\/]/)[0]||undefined;
-  processFiles(files,sourceLabel).catch(error=>{
-    console.error('File input load failed',error);
-    setLoading(false);
-    showToast('Could not load the selected files: '+(error?.message||error),6000,true);
-  });
-});
-
-
 // ══════════════════════════════════════════════════
 // SCANNER FILTER PERSISTENCE
 // ══════════════════════════════════════════════════
@@ -13475,12 +13442,8 @@ async function initApp(){
   // Step 0: Restore an active Drive token for this browser session and load cloud brain data.
   const brain=await FS.init();
   if(!brain&&!FS.hasFolder()){
-    console.log('INIT: Google Drive is not authorized; skipping cloud hydration until user reconnects.');
-    try{loadFilterState();}catch(e){}
-    showDriveAuthRequiredState();
+    console.log('INIT: Google Drive is not authorized; continuing with the local Kite helper.');
     updateFolderUI();
-    setLoading(false);
-    return;
   }
   if(brain){
     FS.load(brain);
@@ -13530,7 +13493,7 @@ async function initApp(){
   // state, so reading them back afterwards would persist blank inputs over the real ones.
   try{loadFilterState();}catch(e){console.error('INIT loadFilterState failed:',e);}
 
-  // Prefer the same local upload folder used by Load Files; Drive copies are fallback.
+  // The local Kite helper owns current inputs; Drive is a backup only.
   try{await hydrateSessionCSVsFromPreferredInputs('INIT');}catch(e){console.warn('INIT: input hydration failed',e);}
 
   // Rankings render first; performance analytics are scheduled below as an idle task.
@@ -13557,7 +13520,7 @@ async function initApp(){
   setLoading(false);
   schedulePerformanceRender();
   // The helper hydrates on the refresh beat; nothing watches a folder handle any more.
-  startFolderWatch();
+  startStreamRefresh();
 }
 initApp();
 
@@ -13566,7 +13529,7 @@ function saveFilterState(){
   const state={
     search:document.getElementById('fSearch')?.value||'',
     risk:document.getElementById('fRisk')?.value||'',
-    rows:document.getElementById('fRows')?.value||'',
+    minScore:document.getElementById('fMinScore')?.value||'60',
     minTurnover:document.getElementById('fMinTurnover')?.value||'0',
     maxPrice:document.getElementById('fMaxPrice')?.value??'',
     sortCol:SCOL,
@@ -13602,7 +13565,7 @@ function loadFilterState(){
     const shared=JSON.parse(localStorage.getItem(SHARED_FILTER_STORE)||'{}');
     if(state.search!=null){const el=document.getElementById('fSearch');if(el)el.value=state.search;}
     if(state.risk!=null){const el=document.getElementById('fRisk');if(el)el.value=state.risk;}
-    if(state.rows!=null){const el=document.getElementById('fRows');if(el)el.value=state.rows;}
+    if(state.minScore!=null){const el=document.getElementById('fMinScore');if(el)el.value=state.minScore;}
     if(state.minTurnover!=null){const el=document.getElementById('fMinTurnover');if(el)el.value=state.minTurnover;}
     if(state.maxPrice!=null){const el=document.getElementById('fMaxPrice');if(el)el.value=state.maxPrice;}
     resetRecommendationSelectionForRefresh(); // legacy persisted exclusions are deliberately ignored
