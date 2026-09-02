@@ -1,5 +1,5 @@
-const BUILD_TS='2026-09-02 10:19 IST'; // release build time (IST)
-const APP_VERSION=1251; // v1251: Kite connected is the only dependency.
+const BUILD_TS='2026-09-02 10:33 IST'; // release build time (IST)
+const APP_VERSION=1252; // v1252: ask the stream before spending a request, and hide setup once it is done.
 const RADAR_SCORE_VERSION='tape-decision-v3';
 // v1093: a baseline reward:risk MEASURED on the cross-section (last completed bhav session) instead of learned from the owner's own fills - reported on every row, deliberately not enforced. Includes v1092: position size split by Radar score / stop distance, so equally-scored names carry equal RUPEE risk, plus an opt-in Risk /trade cap.
 // v556: parse the NSE Market Activity Report (MA<date>.csv) — official Nifty %, advances/declines and sector index moves shown as market CONTEXT in the status bar (EOD data, display only, never fed into per-row scoring); MA added to the ℹ️ file manifest.
@@ -11053,9 +11053,16 @@ async function fetchCandlesInApp(limit,opts){
   // every 30 seconds - for bars the WebSocket is already pushing for free and with no rate limit.
   // The helper's own catch-up covers anything the subscription does not carry, and a MANUAL press
   // still works, so nothing is lost but the duplication.
-  if(auto&&STREAM_STATUS&&STREAM_STATUS.connected){
-    LAST_FETCH_HIDDEN=false;
-    return;
+  if(auto){
+    // KNOWN CONNECTED: yield immediately, no call at all.
+    if(STREAM_STATUS&&STREAM_STATUS.connected){ LAST_FETCH_HIDDEN=false; return; }
+    // NOT KNOWN: ask, do not assume. STREAM_STATUS is only refreshed by streamRefreshTick, which is
+    // gated on market hours and a visible tab, so on the INGEST path it is routinely null and the
+    // guard could not fire - measured on the owner's screen at 10:19, "fetching 54 stocks" while the
+    // socket was already delivering those same bars. One call to 127.0.0.1 settles it before
+    // anything is spent on the network.
+    try{ await loadStreamStatus(); }catch(e){}
+    if(STREAM_STATUS&&STREAM_STATUS.connected){ LAST_FETCH_HIDDEN=false; return; }
   }
   if(!KITE_API){ say('The helper is not running. Double-click "Start Rocket Scanner.bat" and leave that window open — the app itself stays on GitHub Pages.',8000,true); return; }
   try{ await loadTapeEdge(); }catch(e){}
@@ -11178,12 +11185,12 @@ function intradayPasteBarHtml(){
           title="Fetches the 5-minute candles for the names above and reads them straight in. Nothing to paste, nothing to run.">Fetch candles</button>
         ${(KITE_API.hasToken&&KITE_API.tokenValid!==false)?'':`<button onclick="openKiteConnectLogin()" class="btn" style="font-size:11px;border-color:var(--amber);color:var(--amber);font-weight:700"
             title="Kite Connect access tokens expire around 06:00 IST. One click opens Kite's own login page; it redirects back to the helper and the scanner is live again. Your password never touches this app.">Log in to Kite</button>`}
-          <input id="kiteApiKeyBox" placeholder="Kite Connect api_key"
+        ${KITE_API.mode==='connect'?'':`<input id="kiteApiKeyBox" placeholder="Kite Connect api_key"
             style="font-size:11px;padding:2px 6px;background:var(--bg);color:var(--t1);border:1px solid var(--border);border-radius:4px;width:130px"
-            title="From kite.trade → My apps → your app. Entered once; the secret is stored on your PC by the helper and is never sent to this page again.">
+            title="From kite.trade → My apps → your app. Entered once; the secret is stored on your PC by the helper and never returns to this page.">
           <input id="kiteApiSecretBox" type="password" placeholder="api_secret"
             style="font-size:11px;padding:2px 6px;background:var(--bg);color:var(--t1);border:1px solid var(--border);border-radius:4px;width:130px">
-          <button onclick="saveKiteConnectKeys()" class="btn" style="font-size:11px" title="Stores your Kite Connect app credentials on this machine and opens the Kite login. Entered once.">Use Kite Connect</button>`
+          <button onclick="saveKiteConnectKeys()" class="btn" style="font-size:11px" title="Stores your Kite Connect app credentials on this machine and opens the Kite login. Entered once.">Use Kite Connect</button>`}`
         :`<span style="font-size:11px;color:var(--t3)" title="Double-click &quot;Start Rocket Scanner.bat&quot; on your PC and leave that window open. The app stays right here on GitHub Pages; only the little helper runs locally, because a web page is not allowed to call Kite directly.">start the helper (Start Rocket Scanner.bat) to fetch automatically</span>`}
       ${STREAM_STATUS?`<span style="font-size:11px;font-weight:700;color:${STREAM_STATUS.connected?'var(--green)':'var(--red)'}"
         title="${escHtml(STREAM_STATUS.connected
