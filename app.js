@@ -1,5 +1,5 @@
-const BUILD_TS='2026-09-02 10:33 IST'; // release build time (IST)
-const APP_VERSION=1252; // v1252: ask the stream before spending a request, and hide setup once it is done.
+const BUILD_TS='2026-09-02 10:45 IST'; // release build time (IST)
+const APP_VERSION=1253; // v1253: the fetch console is replaced by the live tape, and an empty board says why.
 const RADAR_SCORE_VERSION='tape-decision-v3';
 // v1093: a baseline reward:risk MEASURED on the cross-section (last completed bhav session) instead of learned from the owner's own fills - reported on every row, deliberately not enforced. Includes v1092: position size split by Radar score / stop distance, so equally-scored names carry equal RUPEE risk, plus an opt-in Risk /trade cap.
 // v556: parse the NSE Market Activity Report (MA<date>.csv) — official Nifty %, advances/declines and sector index moves shown as market CONTEXT in the status bar (EOD data, display only, never fed into per-row scoring); MA added to the ℹ️ file manifest.
@@ -10239,7 +10239,7 @@ function renderTable(){
     let _trStyle='cursor:pointer';
     if(isSelected) _trStyle+=';background:rgba(251,191,36,.04);outline:1px solid rgba(251,191,36,.12);outline-offset:-1px';
     return`<tr style="${_trStyle}" onclick="showRadarDetail('${s.symbol}')" title="Click for the full scoring breakdown">${cells}</tr>`;
-  }).join('')||`<tr><td colspan="${COLS.length}"><div style="padding:48px 20px;text-align:center;color:var(--t3)">No stocks match the filters you selected.</div></td></tr>`;
+  }).join('')||`<tr><td colspan="${COLS.length}"><div style="padding:48px 20px;text-align:center;color:var(--t3)">${emptyBoardReason()}</div></td></tr>`;
   renderPgn();
   updateSelectAll();
 }
@@ -11149,92 +11149,74 @@ async function fetchCandlesInApp(limit,opts){
   }catch(e){ say('Fetch failed: '+e.message,6000,true); }
   finally{ FETCH_BUSY=null; try{ renderTable(); }catch(e){} }
 }
+// ---- THE LIVE TAPE PANEL (v1253) --------------------------------------------------------------
+// This was the manual candle-fetch console: a Fetch button, a paste target, a textarea and a chip
+// list of everything just fetched. Every one of those exists because candles used to arrive one
+// REST press at a time. They arrive by push now - one WebSocket, the whole eligible universe, no
+// rate limit - so the console is answering a question nobody asks any more. Owner: "that whole
+// section of fetch candles, listing the fetched names etc should be redundant now, shouldn't it?"
+// It is. What replaces it is the one thing that IS worth seeing: whether the tape is actually live,
+// and the single control a configured install still needs once a day.
+// A GENERIC "no match" HIDES WHICH FILTER DID IT. Measured twice on the owner's screen: a board with
+// 141 and then 89 rows over the bar read "No stocks match the filters you selected" because his
+// search box still held "sahlo" and Rows was 1 - and nothing on the empty table said so. It names
+// the narrowing filters now, and how many rows there would be without them.
+function emptyBoardReason(){
+  const total=Array.isArray(ALL)?ALL.filter(r=>r&&!r._held).length:0;
+  const bits=[];
+  const q=(document.getElementById('fSearch')?.value||'').trim();
+  if(q) bits.push('search \u201c'+escHtml(q)+'\u201d');
+  const risk=document.getElementById('fRisk')?.value||'';
+  if(risk&&risk!=='All') bits.push('risk '+escHtml(risk));
+  const rows=(document.getElementById('fRows')?.value||'').trim();
+  if(rows&&Number(rows)>0&&Number(rows)<total) bits.push('rows '+escHtml(rows));
+  const to=document.getElementById('fMinTurnover')?.value||'';
+  if(to&&Number(to)>0) bits.push('min turnover');
+  const mp=(document.getElementById('fMaxPrice')?.value||'').trim();
+  if(mp) bits.push('max price '+escHtml(mp));
+  if(!bits.length) return 'Nothing is ranked yet \u2014 the live tape has not produced a current read.';
+  return 'No rows match your filters: '+bits.join(' \u00b7 ')
+    +'.<br><span style="font-size:12px">'+total.toLocaleString('en-IN')
+    +' stocks are ranked \u2014 press <b>Clear filters</b> to see them.</span>';
+}
 function intradayPasteBarHtml(){
-  const n=Object.keys(INTRADAY_BARS).length;
-  const t=INTRADAY_TARGET, res=INTRADAY_RESULT;
-  const st=(typeof getIntradayLoopState==='function')?getIntradayLoopState():null;
-  if(!t&&!n&&!(st&&(st.need.length||st.top.length))) return '';
-  const chip=r=>{
-    const sym=normSym(r.symbol), sel=t===sym;
-    const has=!!INTRADAY_BARS[sym];
-    const rd=has?getIntradayRead(sym):null;
-    const v=has?r.intradayVerdict:null;
-    const col=intradayVerdictColor(v,has,sel);
-    const mark=v?(' '+intradayVerdictFace(v,has)):'';
-    const tip=v==='rejected'?(sym+': NO LONGER CLEARS THE BAR - skip. '+(r.intradayWhy||''))
-      :v==='confirmed'?(sym+': STILL CLEARS THE BAR - buy. '+(r.intradayWhy||''))
-      :v==='stale'?(sym+': last read was '+(rd?rd.on:'an earlier session')+', not this session - it counts as unchecked')
-      :(has?(sym+': checked'+(rd&&rd.regime?' - multi-day tape reads '+rd.regime:'')+'.')
-           :('Fetch '+sym+'\u2019s 5-minute chart data'));
-    return `<button onclick="setIntradayTarget('${escHtml(sym)}')" title="${escHtml(tip)}"
-      style="border:1px solid ${col};background:${sel?'rgba(245,158,11,.10)':'transparent'};border-radius:4px;
-      padding:2px 7px;margin:2px 4px 0 0;font-size:11px;color:${col};cursor:pointer">${escHtml(sym)}${mark}</button>`;
-  };
-  const done=st&&st.converged;
-  return `<div style="margin:8px 0;padding:10px 14px;border:1px solid ${t?'var(--amber)':done?'var(--green)':'var(--border)'};border-radius:8px;background:var(--bg2)">
-    <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-bottom:6px">
-      <span class="st-l">Intraday check</span>
-      ${st?`<span style="font-size:12px;color:${done?'var(--green)':'var(--t2)'}">
-        ${done?`<b>settled</b> — the top ${st.of} were checked and held their place`
-              :`checked <b>${st.checked}</b> of the top <b>${st.of}</b>`}
-        ${st.confirmed.length||st.rejected.length?`<span style="color:var(--t3)"> · </span>
-          <span style="color:var(--green)">${st.confirmed.length} buy</span><span style="color:var(--t3)"> / </span>
-          <span style="color:var(--red)">${st.rejected.length} skip</span>
-          <span style="color:var(--t3)"> — marked ✓ / ✗ on the rows</span>`:''}</span>`:''}
-      ${KITE_API?`<button onclick="fetchCandlesInApp()" class="btn" style="font-size:11px;border-color:${KITE_API.tokenValid===false?'var(--red)':'var(--green)'};color:${KITE_API.tokenValid===false?'var(--red)':'var(--green)'}"
-          title="Fetches the 5-minute candles for the names above and reads them straight in. Nothing to paste, nothing to run.">Fetch candles</button>
-        ${(KITE_API.hasToken&&KITE_API.tokenValid!==false)?'':`<button onclick="openKiteConnectLogin()" class="btn" style="font-size:11px;border-color:var(--amber);color:var(--amber);font-weight:700"
-            title="Kite Connect access tokens expire around 06:00 IST. One click opens Kite's own login page; it redirects back to the helper and the scanner is live again. Your password never touches this app.">Log in to Kite</button>`}
-        ${KITE_API.mode==='connect'?'':`<input id="kiteApiKeyBox" placeholder="Kite Connect api_key"
-            style="font-size:11px;padding:2px 6px;background:var(--bg);color:var(--t1);border:1px solid var(--border);border-radius:4px;width:130px"
-            title="From kite.trade → My apps → your app. Entered once; the secret is stored on your PC by the helper and never returns to this page.">
-          <input id="kiteApiSecretBox" type="password" placeholder="api_secret"
-            style="font-size:11px;padding:2px 6px;background:var(--bg);color:var(--t1);border:1px solid var(--border);border-radius:4px;width:130px">
-          <button onclick="saveKiteConnectKeys()" class="btn" style="font-size:11px" title="Stores your Kite Connect app credentials on this machine and opens the Kite login. Entered once.">Use Kite Connect</button>`}`
-        :`<span style="font-size:11px;color:var(--t3)" title="Double-click &quot;Start Rocket Scanner.bat&quot; on your PC and leave that window open. The app stays right here on GitHub Pages; only the little helper runs locally, because a web page is not allowed to call Kite directly.">start the helper (Start Rocket Scanner.bat) to fetch automatically</span>`}
-      ${STREAM_STATUS?`<span style="font-size:11px;font-weight:700;color:${STREAM_STATUS.connected?'var(--green)':'var(--red)'}"
-        title="${escHtml(STREAM_STATUS.connected
-          ? 'The Kite Connect WebSocket is live: '+STREAM_STATUS.subscribed+' instruments in quote mode, '
-            +(STREAM_STATUS.ticks||0).toLocaleString('en-IN')+' ticks received, '+(STREAM_STATUS.bars||0)
-            +' five-minute bars written. This is a push feed - it costs no requests and has no rate limit. The board re-reads it every 30 seconds.'
-          : 'The live stream is DOWN'+(STREAM_STATUS.why?': '+STREAM_STATUS.why:'')
-            +'. The board is running on whatever bars were already stored, and the freshness rule will stop recommending them as they age.')}">
-        ${STREAM_STATUS.connected?'● live '+STREAM_STATUS.subscribed:'○ stream down'}</span>`:''}
-      ${FETCH_BUSY?`<span style="display:inline-flex;align-items:center;gap:6px;font-size:11px;color:var(--amber);font-weight:700"
-        title="${escHtml('Fetching '+FETCH_BUSY.syms.slice(0,12).join(', ')+(FETCH_BUSY.syms.length>12?' and '+(FETCH_BUSY.syms.length-12)+' more':'')
-          +'. The board re-ranks when this finishes, so wait for it before acting on the list.')}">
-        <span style="width:10px;height:10px;border:2px solid var(--amber);border-right-color:transparent;border-radius:50%;display:inline-block;animation:rsspin .7s linear infinite"></span>
-        fetching ${FETCH_BUSY.n} stock${FETCH_BUSY.n===1?'':'s'}…</span>`:''}
-      ${(LAST_FETCH&&LAST_FETCH.length)?`<button onclick="collapseFetchList()" class="btn" style="opacity:.75;font-size:11px"
-        title="${LAST_FETCH_HIDDEN
-          ? `Show the ${LAST_FETCH.length} stock(s) from the last fetch again — bars, verdicts and files were never touched.`
-          : `Collapse this list to free up the space. Nothing is thrown away — the ${LAST_FETCH.length} stock(s) keep their bars, their verdicts and their place in the ranking, and the files stay in Scanner Uploads/Intraday.`
-        }">${LAST_FETCH_HIDDEN?`Show list (${LAST_FETCH.length})`:'Hide list'}</button>`:''}
+  if(!KITE_API){
+    return `<div style="margin:8px 0;padding:10px 14px;border:1px solid var(--border);border-radius:8px;background:var(--bg2);font-size:12px;color:var(--t3)"
+      title="Double-click &quot;Start Rocket Scanner.bat&quot; on your PC and leave that window open. The app stays here; only the helper runs locally, because a web page cannot talk to Kite directly.">
+      <span class="st-l">Live tape</span> &nbsp; start the helper (Start Rocket Scanner.bat) to begin streaming</div>`;
+  }
+  const needsSetup=KITE_API.mode!=='connect';
+  const needsLogin=!needsSetup&&(KITE_API.needsLogin||!KITE_API.hasToken||KITE_API.tokenValid===false);
+  const st=STREAM_STATUS;
+  const live=!!(st&&st.connected);
+  const bars=Object.keys(INTRADAY_BARS||{}).length;
+  const dot=live?'var(--green)':(needsLogin?'var(--amber)':'var(--red)');
+  const head=live
+    ? `<b style="color:var(--green)">\u25cf live</b> \u00b7 ${st.subscribed||0} instruments \u00b7 `
+      +`${(st.ticks||0).toLocaleString('en-IN')} ticks \u00b7 ${bars} symbols with a tape`
+    : needsLogin
+      ? `<b style="color:var(--amber)">\u25cb Kite login expired</b> \u2014 one click, once a day`
+      : `<b style="color:var(--red)">\u25cb stream down</b>${st&&st.why?' \u2014 '+escHtml(st.why):''}`;
+  return `<div id="intradayBar-inner" style="margin:8px 0;padding:10px 14px;border:1px solid ${dot};border-radius:8px;background:var(--bg2)">
+    <div style="display:flex;gap:12px;align-items:center;flex-wrap:wrap">
+      <span class="st-l">Live tape</span>
+      <span style="font-size:12px;color:var(--t2)"
+        title="${escHtml(live
+          ? 'The Kite Connect WebSocket is carrying the whole eligible universe in quote mode. It is a push feed: no requests, no rate limit. Five-minute bars are folded from it and the board re-reads them every 30 seconds.'
+          : 'No live tape. The board can only recommend on a current 5-minute read, so it will stop recommending as the stored bars age rather than act on stale data.')}">${head}</span>
+      ${needsLogin?`<button onclick="openKiteConnectLogin()" class="btn" style="font-size:11px;border-color:var(--amber);color:var(--amber);font-weight:700"
+        title="Kite Connect access tokens expire around 06:00 IST. This opens Kite's own login page; it redirects back to the helper and streaming resumes. Your password never touches this app.">Log in to Kite</button>`:''}
+      ${needsSetup?`<input id="kiteApiKeyBox" placeholder="Kite Connect api_key"
+          style="font-size:11px;padding:2px 6px;background:var(--bg);color:var(--t1);border:1px solid var(--border);border-radius:4px;width:130px"
+          title="From kite.trade \u2192 My apps \u2192 your app. Entered once; the secret is stored on your PC by the helper and never returns to this page.">
+        <input id="kiteApiSecretBox" type="password" placeholder="api_secret"
+          style="font-size:11px;padding:2px 6px;background:var(--bg);color:var(--t1);border:1px solid var(--border);border-radius:4px;width:130px">
+        <button onclick="saveKiteConnectKeys()" class="btn" style="font-size:11px"
+          title="Stores your Kite Connect app credentials on this machine and opens the Kite login. Entered once.">Use Kite Connect</button>`:''}
     </div>
-    ${st&&st.top.length?`<div style="margin:2px 0 8px">${st.top.map(chip).join('')}</div>`:''}
-
-    ${t?`<textarea id="intradayBox" rows="4" placeholder="Paste ${escHtml(t)}'s 5-minute chart table \u2014 header, rows, and the summary block underneath if it is there."
-        style="width:100%;box-sizing:border-box;font-family:var(--mono,monospace);font-size:12px;padding:8px;background:var(--bg);color:var(--t1);border:1px solid var(--amber);border-radius:6px"
-        onpaste="setTimeout(onIntradayPaste,0)"></textarea>`:''}
-    ${(LAST_FETCH&&LAST_FETCH.length&&!LAST_FETCH_HIDDEN)?`<div style="margin-top:6px;font-size:11px;line-height:1.6">
-      <span style="color:var(--t3)">last fetch — check these against your chart:</span>
-      ${LAST_FETCH.map(x=>`<div><b>${escHtml(x.sym)}</b>
-        <span style="color:var(--t3)">${x.bars} bars · ${escHtml(x.from)} → ${escHtml(x.to)} · last</span>
-        <b>${x.last!=null?fmtINR(x.last):'—'}</b>
-        ${x.file?`<span style="color:var(--t3)" title="Open it to see every bar. Appended on each fetch, deduped by timestamp, and truncated at any break so the series is always contiguous."> · Scanner Uploads/Intraday/${escHtml(x.file)} (${x.fileRows} rows)</span>`:''}
-        ${x.daily?`<span style="color:var(--t3)" title="Daily candles, fetched once per session and cached. Recorded only - nothing scores them until the measurement in .claude/deferred.json says they separate."> · +${x.daily}d daily</span>`:''}
-        ${x.regime?`<span style="color:${x.regime==='accumulating'?'var(--green)':x.regime==='selling'?'var(--red)':'var(--amber)'}"
-          title="${x.spanSessions?'This session could not be read (under three bars), so this is the '+x.spanSessions+'-session tape. The row verdict does not use it.':'This session only — the same window the row verdict reads.'}"> · ${escHtml(x.regime)} ${x.flow!=null?((x.flow*100).toFixed(1)+'%'):''}${x.spanSessions?` <span style="color:var(--t3)">across ${x.spanSessions} sessions</span>`:''}</span>`:''}
-      </div>`).join('')}
-    </div>`:''}
-    ${res&&!res.ok?`<div style="font-size:11px;color:var(--amber);margin-top:5px">${escHtml(res.why)}</div>`:''}
-    ${res&&res.ok&&res.read?`<div style="font-size:11px;color:var(--t3);margin-top:5px">read <b style="color:var(--green)">${escHtml(res.sym)}</b> \u2014 ${res.bars} bars over ${res.sessions} session(s)${
-      res.live?` \u00b7 LIVE book <b style="color:${res.live.imbalance>0?'var(--green)':'var(--red)'}">${(res.live.imbalance>0?'+':'')+res.live.imbalance.toFixed(3)}</b>`:''}${
-      res.read.traj?` \u00b7 <b style="color:${res.read.regime==='accumulating'?'var(--green)':res.read.regime==='selling'?'var(--red)':'var(--amber)'}">${escHtml(res.read.regime.toUpperCase())}</b> \u00b7 net flow ${(res.read.cvdPct*100).toFixed(1)}% of everything traded \u00b7 projected ${res.read.projected.toFixed(2)}`
-      :` \u00b7 first 15m <b style="color:${res.read.first15Up?'var(--green)':'var(--red)'}">${res.read.first15Up?'UP':'DOWN'}</b> <span style="color:var(--amber)">(no volume column in that paste)</span>`
-    }</div>`:''}
   </div>`;
 }
+
 function applyFilters(){
   updateFilterPlaceholders();
   const q=(document.getElementById('fSearch')?.value||'').trim().toLowerCase();
