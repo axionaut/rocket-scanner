@@ -1,5 +1,5 @@
-const BUILD_TS='2026-09-02 10:02 IST'; // release build time (IST)
-const APP_VERSION=1250; // v1250: the threshold governs recommendation, not visibility.
+const BUILD_TS='2026-09-02 10:19 IST'; // release build time (IST)
+const APP_VERSION=1251; // v1251: Kite connected is the only dependency.
 const RADAR_SCORE_VERSION='tape-decision-v3';
 // v1093: a baseline reward:risk MEASURED on the cross-section (last completed bhav session) instead of learned from the owner's own fills - reported on every row, deliberately not enforced. Includes v1092: position size split by Radar score / stop distance, so equally-scored names carry equal RUPEE risk, plus an opt-in Risk /trade cap.
 // v556: parse the NSE Market Activity Report (MA<date>.csv) — official Nifty %, advances/declines and sector index moves shown as market CONTEXT in the status bar (EOD data, display only, never fed into per-row scoring); MA added to the ℹ️ file manifest.
@@ -825,17 +825,7 @@ const FS = (() => {
 })();
 
 function updateFolderUI(){
-  const loadBtn=document.getElementById('loadFilesBtn');
-  if(loadBtn){
-    const driveConnected=FS.isConnected();
-    loadBtn.disabled=!driveConnected;
-    loadBtn.textContent='Load Files';
-    loadBtn.title=driveConnected
-      ? 'Select the Rocket Scanner folder or Scanner Uploads folder.'
-      : 'Reconnect Google Drive before loading files.';
-    loadBtn.style.borderColor=driveConnected?'':'';
-    loadBtn.style.color=driveConnected?'':'';
-  }
+  // The Load Files button is gone (v1251); the helper hands the inputs over on its own beat.
   const driveBtn=document.getElementById('driveBtn');
   if(!driveBtn) return;
   if(FS.isConnected()){
@@ -10823,130 +10813,8 @@ async function detectKiteApi(force){
 }
 let KITE_TOKEN_PROMPTED=false;   // once per page load; dismissing must not re-prompt on every render
 
-function kiteTokenDialogState(){
-  // A blip in the probe must not change which credential the app asks for.
-  if(!KITE_API) return KITE_CONNECT_SEEN?'connect-login':null;
-  // A CONTROL THAT CANNOT WORK MUST SAY SO - AND MUST BE THE RIGHT CONTROL (v1240). v1239 reused
-  // `hasToken` to mean "can I fetch right now", which is true for the fetch button and WRONG for
-  // this dialog: a Connect helper waiting on its daily login was asking the owner to paste an
-  // enctoken, a credential Connect never uses. Pasting one would have silently reverted him to the
-  // unofficial transport he had just moved off.
-  if(KITE_API.mode==='connect'||KITE_CONNECT_SEEN)
-    return (KITE_API.needsLogin||!KITE_API.hasToken||KITE_API.tokenValid===false)?'connect-login':null;
-  if(!KITE_API.hasToken) return 'missing';
-  if(KITE_API.tokenValid===false) return 'expired';
-  return null;                                     // valid, or the helper could not check - stay quiet
-}
 
-function openKiteTokenDialog(force){
-  const dlg=document.getElementById('kiteTokenDlg');
-  if(!dlg) return;
-  const st=kiteTokenDialogState();
-  if(!st&&!force) return;
-  if(dlg.open) return;
-  const expired=st==='expired';
-  // FORCE MAY CHOOSE TO OPEN IT; IT MAY NOT CHOOSE WHICH CREDENTIAL TO ASK FOR. `force` skipped the
-  // state check entirely, so a forced call with a null state rendered the enctoken body even on a
-  // Connect install. The transport decides the body, always.
-  if(st==='connect-login'||KITE_CONNECT_SEEN){
-    document.getElementById('kiteTokenTitle').textContent='Log in to Kite';
-    document.getElementById('kiteTokenBody').innerHTML=`
-      <div style="padding:16px 18px;display:flex;flex-direction:column;gap:12px">
-        <div style="font-size:13px;color:var(--t2);line-height:1.5">
-          You are on the <b style="color:var(--green)">official Kite Connect API</b>. Its access token
-          expires around <b>06:00 IST</b>, so this is once a day.
-          <b>No enctoken is needed any more</b> — do not paste one.
-        </div>
-        <ol style="font-size:12px;color:var(--t2);line-height:1.7;margin:0;padding-left:18px">
-          <li>Press <b>Log in to Kite</b> below — it opens Kite's own login page</li>
-          <li>Log in there; it redirects back and says <b>Kite Connect is live</b></li>
-          <li>Come back here and press <b>Fetch candles</b></li>
-        </ol>
-        <div id="kiteTokenDlgMsg" style="font-size:12px;min-height:16px;color:var(--t3)"></div>
-        <div style="display:flex;gap:8px;justify-content:flex-end">
-          <button class="btn" style="font-size:12px" onclick="closeKiteTokenDialog()">Later</button>
-          <button class="btn" style="font-size:12px;border-color:var(--green);color:var(--green)"
-                  onclick="openKiteConnectLogin();closeKiteTokenDialog()">Log in to Kite</button>
-        </div>
-        <div style="font-size:11px;color:var(--t3);border-top:1px solid var(--border);padding-top:9px">
-          Your password is entered on Kite's page, never here. The app secret stays on this machine in
-          <code>dev/kite-connect.json</code>.
-        </div>
-      </div>`;
-    try{ dlg.showModal(); }catch(e){ dlg.setAttribute('open','open'); }
-    return;
-  }
-  document.getElementById('kiteTokenTitle').textContent=
-    expired?'Kite token expired':(st==='missing'?'Kite token needed':'Kite token');
-  document.getElementById('kiteTokenBody').innerHTML=`
-    <div style="padding:16px 18px;display:flex;flex-direction:column;gap:12px">
-      <div style="font-size:13px;color:var(--t2);line-height:1.5">
-        ${expired
-          ? 'The helper tried the stored token against Kite and it was <b style="color:var(--red)">rejected</b>. It rotates on every login, so this is normal the morning after you log in again.'
-          : (st==='missing'
-             ? 'No token is stored yet, so candles cannot be fetched.'
-             : 'Paste a fresh token to replace the stored one.')}
-      </div>
-      <ol style="font-size:12px;color:var(--t2);line-height:1.7;margin:0;padding-left:18px">
-        <li>Open your logged-in <b>kite.zerodha.com</b> tab</li>
-        <li><b>F12</b> → Application → Cookies → <b>kite.zerodha.com</b></li>
-        <li>Copy the value of <b>enctoken</b> and paste it below</li>
-      </ol>
-      <input id="kiteTokenDlgBox" type="password" autocomplete="off" spellcheck="false"
-             placeholder="paste enctoken here, then press Enter">
-      <div id="kiteTokenDlgMsg" style="font-size:12px;min-height:16px;color:var(--t3)"></div>
-      <div style="display:flex;gap:8px;justify-content:flex-end">
-        <button class="btn" style="font-size:12px" onclick="closeKiteTokenDialog()">Later</button>
-        <button class="btn" style="font-size:12px;border-color:var(--green);color:var(--green)"
-                onclick="saveKiteTokenFromDialog()">Save token</button>
-      </div>
-      <div style="font-size:11px;color:var(--t3);border-top:1px solid var(--border);padding-top:9px">
-        Saved to <code>dev/kite-token.txt</code> by the local helper. It never leaves this machine and
-        is never sent to the hosted page.
-      </div>
-    </div>`;
-  try{ dlg.showModal(); }catch(e){ dlg.setAttribute('open','open'); }
-  const box=document.getElementById('kiteTokenDlgBox');
-  if(box){
-    box.focus();
-    // one paste and Enter is the whole interaction - it should not require finding a button
-    box.onkeydown=e=>{ if(e.key==='Enter'){ e.preventDefault(); saveKiteTokenFromDialog(); } };
-  }
-}
 
-function closeKiteTokenDialog(){
-  const dlg=document.getElementById('kiteTokenDlg');
-  if(!dlg) return;
-  // clear the field before closing: the token is a secret and must not sit in a detached DOM node
-  const box=document.getElementById('kiteTokenDlgBox'); if(box) box.value='';
-  try{ dlg.close(); }catch(e){ dlg.removeAttribute('open'); }
-}
-
-async function saveKiteTokenFromDialog(){
-  // Storing an enctoken on a Connect install cannot help and would look like a fix that failed.
-  if(KITE_CONNECT_SEEN){
-    const m=document.getElementById('kiteTokenDlgMsg');
-    if(m){ m.style.color='var(--amber)';
-      m.textContent='This install uses Kite Connect - an enctoken is not used. Press Log in to Kite.'; }
-    return;
-  }
-  const box=document.getElementById('kiteTokenDlgBox');
-  const msg=document.getElementById('kiteTokenDlgMsg');
-  const say=(t,bad)=>{ if(msg){ msg.textContent=t; msg.style.color=bad?'var(--red)':'var(--green)'; } };
-  const t=(box&&box.value||'').trim();
-  if(t.length<20){ say('That does not look like an enctoken.',true); return; }
-  say('Saving…');
-  const ok=await postKiteToken(t,say);
-  if(!ok) return;
-  if(box) box.value='';
-  // Report what the HELPER now says, not what we just sent. v1152's rule: a control may not report
-  // intent - it must verify the far side answered. A token can be stored and still be rejected.
-  await detectKiteApi(true);   // force: the helper's cached answer describes the OLD token
-  if(KITE_API&&KITE_API.tokenValid===false){ say('Kite rejected that token. Copy it again.',true); return; }
-  say('Saved. Fetching is enabled.');
-  setTimeout(closeKiteTokenDialog,700);
-  try{ renderTable(); }catch(e){}
-}
 
 // ONE POST PATH, shared by the dialog and the inline box, so the two cannot drift apart.
 async function postKiteToken(token,say){
@@ -10961,12 +10829,6 @@ async function postKiteToken(token,say){
 
 // Called wherever the helper's status is (re)established. Asks at most ONCE per page load, so
 // dismissing it is respected; the bar keeps its inline box and the ☰ menu can reopen it on demand.
-function maybePromptKiteToken(){
-  if(KITE_TOKEN_PROMPTED) return;
-  if(!kiteTokenDialogState()) return;
-  KITE_TOKEN_PROMPTED=true;
-  openKiteTokenDialog();
-}
 
 async function refreshBrokerInputs(){
   if(!KITE_API) await detectKiteApi();
@@ -11012,17 +10874,26 @@ async function openKiteConnectLogin(){
     else showToast('No Kite Connect app key stored yet.',5000,true);
   }catch(e){ showToast('Could not reach the helper: '+e.message,5000,true); }
 }
-async function saveKiteToken(){
-  const el=document.getElementById('kiteTokenBox');
-  const t=(el&&el.value||'').trim();
-  if(t.length<20){ showToast('That does not look like an enctoken.',4000,true); return; }
-  const ok=await postKiteToken(t,(m,bad)=>showToast(m,5000,!!bad));
-  if(!ok) return;
-  if(el) el.value='';
-  await detectKiteApi(true);   // force: the helper's cached answer describes the OLD token
-  if(KITE_API&&KITE_API.tokenValid===false){ showToast('Kite rejected that token. Copy it again.',5000,true); return; }
-  showToast('Kite token saved. Press Fetch candles.',4000);
+// ---- THE ENCTOKEN PATH IS GONE (v1251) --------------------------------------------------------
+// v1239 kept it as a fallback "until Connect is proven in live use". It is proven: the stream has
+// carried 1,542 instruments and ~18,000 ticks a minute, the universe is generated from it, and the
+// board scores from it. Section 6 says delete a losing path the day it loses, and leaving a dialog
+// that asks for a credential the installation does not use is worse than dead code - it told the
+// owner his correct answer was rejected. The helper still accepts a token file for a machine that
+// has no Connect app; nothing in the page asks for one.
+function kiteTokenDialogState(){ return (KITE_API&&(KITE_API.needsLogin||KITE_API.tokenValid===false))?'connect-login':null; }
+function maybePromptKiteToken(){
+  if(KITE_TOKEN_PROMPTED) return;
+  if(kiteTokenDialogState()!=='connect-login') return;
+  KITE_TOKEN_PROMPTED=true;
+  showToast('Kite login has expired - press "Log in to Kite" to resume streaming.',8000,true);
 }
+function openKiteTokenDialog(){ openKiteConnectLogin(); }
+function closeKiteTokenDialog(){}
+async function saveKiteTokenFromDialog(){}
+// The enctoken saver is gone with its dialog (v1251). A machine with no Connect app can still put
+// a token in dev/kite-token.txt by hand; the page no longer offers it, because on this install it
+// cannot work and offering it told the owner his correct answer was rejected.
 // Archive session counts from the helper. SCHEDULING ONLY - it answers "what should I fetch next",
 // never what a stock is worth, so the v1231 rule that no DECISION may read Archive/ still holds: no
 // score, target, stop, allocation or recommendation reads this. Null when the helper is old or
@@ -11087,6 +10958,52 @@ async function loadCorpusCoverage(){
   }catch(e){ CORPUS_COVERAGE=null; }
   return CORPUS_COVERAGE;
 }
+// ---- INPUTS COME FROM THE HELPER (v1251) ------------------------------------------------------
+// Owner: "no ALL NSE, no load files, no dependencies except kite connection." Reaching the folder
+// from the page needs a File System Access grant that lapses silently - which is how the board sat
+// on its 09:07 scoring while the helper wrote fresh files every 30 seconds. The helper already owns
+// the folder, so it hands the files over. No grant, no button, no manual step.
+let _helperInputSigs={};
+async function fetchHelperInputList(){
+  if(!KITE_API) return null;
+  try{
+    const c=new AbortController(); const t=setTimeout(()=>c.abort(),5000);
+    const r=await fetch(KITE_HELPER+'/api/inputs/list',{cache:'no-store',signal:c.signal});
+    clearTimeout(t);
+    const j=r.ok?await r.json():null;
+    return (j&&j.ok&&Array.isArray(j.files))?j.files:null;
+  }catch(e){ return null; }
+}
+// Only the files the app consumes, and only when their size:lastModified changed - the same
+// signature the Drive push uses, so an unchanged folder costs one small JSON.
+async function hydrateFromHelper(reason){
+  const list=await fetchHelperInputList();
+  if(!list||!list.length) return false;
+  const wanted=list.filter(f=>{
+    const n=f&&f.name; if(!n) return false;
+    return isScannerCsvName(n)||isReportsZipName(n)
+      ||isExactCsvName(n,'Holdings.csv')||isExactCsvName(n,'Positions.csv')
+      ||isExactCsvName(n,'Orders.csv')||isExactCsvName(n,'TRADEBOOK.csv')
+      ||isExactCsvName(n,'NSE Holidays.csv');
+  });
+  if(!wanted.length) return false;
+  const changed=wanted.filter(f=>_helperInputSigs[f.name]!==(f.size+':'+f.lastModified));
+  if(!changed.length) return false;
+  const files=[];
+  for(const f of wanted){
+    try{
+      const r=await fetch(KITE_HELPER+'/api/inputs/file?name='+encodeURIComponent(f.name),{cache:'no-store'});
+      if(!r.ok) continue;
+      const blob=await r.blob();
+      files.push(new File([blob],f.name,{lastModified:f.lastModified}));
+    }catch(e){}
+  }
+  if(!files.length) return false;
+  const ok=await processFiles(files,reason||'helper',{silent:true});
+  // Marked seen only once the load SUCCEEDED, so a failed pass retries rather than going quiet.
+  if(ok) for(const f of wanted) _helperInputSigs[f.name]=f.size+':'+f.lastModified;
+  return ok;
+}
 async function loadIntradayInventory(){
   if(!KITE_API) return 0;
   try{
@@ -11131,6 +11048,15 @@ async function fetchCandlesInApp(limit,opts){
   const auto=!!(opts&&opts.auto)||!!(limit&&limit.auto);
   if(limit&&typeof limit==='object') limit=null;
   const say=(m,ms,bad)=>{ if(!auto) showToast(m,ms,bad); };   // silent on the automatic path
+  // THE STREAM IS THE CANDLE SOURCE (v1251). Every ingest fires this automatic press, and since
+  // hydration now re-ingests whenever the helper rewrites the universe, that is an 80-request press
+  // every 30 seconds - for bars the WebSocket is already pushing for free and with no rate limit.
+  // The helper's own catch-up covers anything the subscription does not carry, and a MANUAL press
+  // still works, so nothing is lost but the duplication.
+  if(auto&&STREAM_STATUS&&STREAM_STATUS.connected){
+    LAST_FETCH_HIDDEN=false;
+    return;
+  }
   if(!KITE_API){ say('The helper is not running. Double-click "Start Rocket Scanner.bat" and leave that window open — the app itself stays on GitHub Pages.',8000,true); return; }
   try{ await loadTapeEdge(); }catch(e){}
   try{ await postCorpusPool(); }catch(e){}
@@ -11250,19 +11176,14 @@ function intradayPasteBarHtml(){
           <span style="color:var(--t3)"> — marked ✓ / ✗ on the rows</span>`:''}</span>`:''}
       ${KITE_API?`<button onclick="fetchCandlesInApp()" class="btn" style="font-size:11px;border-color:${KITE_API.tokenValid===false?'var(--red)':'var(--green)'};color:${KITE_API.tokenValid===false?'var(--red)':'var(--green)'}"
           title="Fetches the 5-minute candles for the names above and reads them straight in. Nothing to paste, nothing to run.">Fetch candles</button>
-        ${KITE_API.mode==='connect'
-          ? ((KITE_API.hasToken&&KITE_API.tokenValid!==false)?'':`<button onclick="openKiteConnectLogin()" class="btn" style="font-size:11px;border-color:var(--amber);color:var(--amber);font-weight:700"
-              title="Kite Connect access tokens expire around 06:00 IST. One click opens Kite's own login page; it redirects back to the helper and the scanner is live again. Your password never touches this app.">Log in to Kite</button>`)
-          : `${KITE_API.hasToken?`<span onclick="openKiteTokenDialog(true)" style="font-size:11px;color:var(--red);font-weight:700;cursor:pointer;text-decoration:underline" title="The helper used the stored token against Kite and it was rejected. It rotates on every login, so this happens the morning after you log in again. Click to paste a fresh one.">token expired — paste a fresh one</span>`:''}${(KITE_API.hasToken&&KITE_API.tokenValid!==false)?'':`<input id="kiteTokenBox" type="password" placeholder="paste Kite enctoken once"
-            style="font-size:11px;padding:2px 6px;background:var(--bg);color:var(--t1);border:1px solid var(--amber);border-radius:4px;width:190px"
-            title="Kite tab → F12 → Application → Cookies → kite.zerodha.com → copy the value of enctoken. It rotates on every login.">
-          <button onclick="saveKiteToken()" class="btn" style="font-size:11px">Save token</button>`}
+        ${(KITE_API.hasToken&&KITE_API.tokenValid!==false)?'':`<button onclick="openKiteConnectLogin()" class="btn" style="font-size:11px;border-color:var(--amber);color:var(--amber);font-weight:700"
+            title="Kite Connect access tokens expire around 06:00 IST. One click opens Kite's own login page; it redirects back to the helper and the scanner is live again. Your password never touches this app.">Log in to Kite</button>`}
           <input id="kiteApiKeyBox" placeholder="Kite Connect api_key"
             style="font-size:11px;padding:2px 6px;background:var(--bg);color:var(--t1);border:1px solid var(--border);border-radius:4px;width:130px"
             title="From kite.trade → My apps → your app. Entered once; the secret is stored on your PC by the helper and is never sent to this page again.">
           <input id="kiteApiSecretBox" type="password" placeholder="api_secret"
             style="font-size:11px;padding:2px 6px;background:var(--bg);color:var(--t1);border:1px solid var(--border);border-radius:4px;width:130px">
-          <button onclick="saveKiteConnectKeys()" class="btn" style="font-size:11px" title="Switches the helper to the official Kite Connect API. The enctoken path stays as a fallback until Connect answers.">Use Kite Connect</button>`}`
+          <button onclick="saveKiteConnectKeys()" class="btn" style="font-size:11px" title="Stores your Kite Connect app credentials on this machine and opens the Kite login. Entered once.">Use Kite Connect</button>`
         :`<span style="font-size:11px;color:var(--t3)" title="Double-click &quot;Start Rocket Scanner.bat&quot; on your PC and leave that window open. The app stays right here on GitHub Pages; only the little helper runs locally, because a web page is not allowed to call Kite directly.">start the helper (Start Rocket Scanner.bat) to fetch automatically</span>`}
       ${STREAM_STATUS?`<span style="font-size:11px;font-weight:700;color:${STREAM_STATUS.connected?'var(--green)':'var(--red)'}"
         title="${escHtml(STREAM_STATUS.connected
@@ -12068,6 +11989,9 @@ async function streamRefreshTick(){
     // v1238 freshness rule then decides what may still be recommended, so a stalled stream empties
     // the board honestly rather than leaving yesterday's picks sitting there looking actionable.
     await loadStreamStatus();
+    // The helper rewrites the universe every 30 seconds; this is what notices it. One small JSON
+    // when nothing changed.
+    await hydrateFromHelper('live refresh');
     await loadIntradayInventory();
   }catch(e){ }
   finally{ _streamRefreshBusy=false; }
@@ -12156,19 +12080,10 @@ async function openUploadFolderPicker(){
   return true;
 }
 
-async function handleCloudLoadAction(){
-  // Keep the folder/file picker inside the original user click. Browser pickers need
-  // transient user activation; awaiting Drive reads first makes the picker silently fail.
-  updateFolderUI();
-  if(!FS.isConnected()){
-    showDriveAuthRequiredState();
-    showToast('Connect Google Drive first, then press Load Files.',4000,true);
-    return;
-  }
-  setMsg('Select the Rocket Scanner folder...');
-  const opened=await openUploadFolderPicker();
-  if(!opened) setLoading(false);
-}
+// handleCloudLoadAction is deleted with the button it served (v1251). Ingestion is
+// hydrateFromHelper on the refresh beat; there is nothing left for a manual folder picker to do,
+// and section 6 says a path that has lost goes the same day rather than sitting there reading as a
+// live option.
 
 // ── Brain Export / Import ──
 // Saves all accumulated knowledge (correlations, snapshot, methodology, filters, version)

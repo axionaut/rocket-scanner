@@ -30,14 +30,14 @@
   <div style="position:relative;display:flex;align-items:center">
     <button class="btn" id="menuBtn" onclick="toggleHeaderMenu()" title="Brain backup, restore and reset" style="font-size:16px;padding:8px 12px">☰</button>
     <div id="headerMenu" style="display:none;position:absolute;top:100%;left:0;margin-top:8px;background:var(--bg-raised);border:1px solid var(--border-hi);border-radius:10px;padding:8px;z-index:1000;box-shadow:0 8px 32px rgba(0,0,0,.35);min-width:190px">
-      <button onclick="openKiteTokenDialog(true);toggleHeaderMenu()" title="Paste a fresh Kite enctoken. It rotates on every Kite login, so this is normally needed once each morning." style="display:block;width:100%;text-align:left;padding:9px 12px;background:transparent;border:0;border-radius:7px;color:var(--t1);font-family:inherit;font-size:14px;font-weight:700;cursor:pointer" onmouseover="this.style.background='var(--bg-hover)'" onmouseout="this.style.background='transparent'">🔑 Kite token…</button>
+
       <button onclick="exportBasket();toggleHeaderMenu()" title="Export the selected stocks as a Zerodha basket order (same as the Buy Basket button)" style="display:block;width:100%;text-align:left;padding:9px 12px;background:transparent;border:0;border-radius:7px;color:var(--amber);font-family:inherit;font-size:14px;font-weight:700;cursor:pointer" onmouseover="this.style.background='var(--bg-hover)'" onmouseout="this.style.background='transparent'">🧺 Export Buy Basket</button>
       <button onclick="exportBrain();toggleHeaderMenu()" title="Export Brain — download a copy of the brain file" style="display:block;width:100%;text-align:left;padding:9px 12px;background:transparent;border:0;border-radius:7px;color:var(--t1);font-family:inherit;font-size:14px;cursor:pointer" onmouseover="this.style.background='var(--bg-hover)'" onmouseout="this.style.background='transparent'">💾 Export Brain</button>
       <button onclick="document.getElementById('brainIn').click();toggleHeaderMenu()" title="Import Brain — restore from a previously exported file" style="display:block;width:100%;text-align:left;padding:9px 12px;background:transparent;border:0;border-radius:7px;color:var(--t1);font-family:inherit;font-size:14px;cursor:pointer" onmouseover="this.style.background='var(--bg-hover)'" onmouseout="this.style.background='transparent'">🧠 Import Brain</button>
       <button onclick="resetBrain(this)" title="Reset Brain — clear saved app state and filters. Uploaded input files remain in Drive." style="display:block;width:100%;text-align:left;padding:9px 12px;background:transparent;border:0;border-radius:7px;color:var(--red);font-family:inherit;font-size:14px;cursor:pointer" onmouseover="this.style.background='var(--bg-hover)'" onmouseout="this.style.background='transparent'">🗑 Reset Brain</button>
     </div>
     <button class="btn" id="driveBtn" onclick="connectCloudStorage()" title="Connect or reconnect Google Drive">Drive</button>
-    <button class="btn btn-fire" id="loadFilesBtn" onclick="handleCloudLoadAction()">Load Files</button>
+
     <button class="btn" id="goalBtn" onclick="toggleGoalPopover()" title="Goal settings" style="font-size:16px;padding:8px 12px;margin-left:4px">⚙ Goal</button>
     <div id="goalPopover" style="display:none;position:absolute;top:100%;right:0;margin-top:8px;background:var(--bg-raised);border:1px solid var(--border-hi);border-radius:12px;padding:14px 16px;z-index:1000;box-shadow:0 8px 32px rgba(0,0,0,.35);min-width:360px;max-width:460px">
       <div id="goalPopoverContent" style="font-size:13px;line-height:1.6;color:var(--t2)"></div>
@@ -58,7 +58,7 @@
  <div id="noDataBanner" style="display:none;flex-direction:column;align-items:center;justify-content:center;padding:80px 40px;text-align:center">
   <div style="font-size:44px;margin-bottom:18px">📊</div>
   <div style="font-size:24px;font-weight:800;margin-bottom:8px;color:var(--t1)">No data loaded</div>
-  <div style="font-size:15px;color:var(--t2);margin-bottom:20px">Click <strong style="color:var(--fire)">Load Files</strong> in the top right to begin</div>
+  <div style="font-size:15px;color:var(--t2);margin-bottom:20px">Start <strong style="color:var(--fire)">Rocket Scanner.bat</strong> and log in to Kite — everything else is automatic</div>
  </div>
  <div class="stats" id="statsBar"></div>
  <div class="info-bar" id="infoBar"></div>
@@ -97,7 +97,7 @@
 </div><!-- /dash -->
 <button class="go-top" id="goTop" onclick="window.scrollTo({top:0,behavior:'smooth'})" title="Go to top">▲</button>
 </div><!-- /app -->
-<dialog id="kiteTokenDlg"><div class="rr-modalhead"><h2 id="kiteTokenTitle">Kite token</h2><button class="rr-close" onclick="closeKiteTokenDialog()">Later</button></div><div class="rr-modalbody" id="kiteTokenBody"></div></dialog>
+
 <dialog id="radarDetail"><div class="rr-modalhead"><h2 id="radarDetailTitle"></h2><button class="rr-close" onclick="closeRadarDetail()">Close</button></div><div class="rr-modalbody" id="radarDetailBody"></div></dialog>
 
 <!-- Cache-proof app loader. The visible version/timestamp comes from the loaded app.js. -->
