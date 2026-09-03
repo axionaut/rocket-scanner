@@ -1,5 +1,5 @@
-const BUILD_TS='2026-09-03 10:25 IST'; // release build time (IST)
-const APP_VERSION=1264; // v1264: a shared session gap is invisible to a pool-relative frontier.
+const BUILD_TS='2026-09-03 11:23 IST'; // release build time (IST)
+const APP_VERSION=1265; // v1265: a store memo may not walk the store it is memoizing.
 const RADAR_SCORE_VERSION='tape-decision-v3';
 // v1093: a baseline reward:risk MEASURED on the cross-section (last completed bhav session) instead of learned from the owner's own fills - reported on every row, deliberately not enforced. Includes v1092: position size split by Radar score / stop distance, so equally-scored names carry equal RUPEE risk, plus an opt-in Risk /trade cap.
 // v556: parse the NSE Market Activity Report (MA<date>.csv) — official Nifty %, advances/declines and sector index moves shown as market CONTEXT in the status bar (EOD data, display only, never fed into per-row scoring); MA added to the ℹ️ file manifest.
@@ -84,6 +84,13 @@ function updateModeUI(){
   document.querySelectorAll('.currency-lbl').forEach(el=>{el.textContent='₹';});
 }
 let ALL=[],FILT=[],PG=1,PGSZ=100,SCOL='rank',SDIR=1;
+// THE TAPE STORE'S OWN WRITE COUNTER. Every "has the tape changed" memo used to answer that
+// question by WALKING THE WHOLE STORE - newestTapeBucketMs scans every symbol, and three separate
+// memo signatures sum every symbol's bar count. That was affordable when ~120 symbols carried a
+// tape; the WebSocket took it to 1,650, and newestTapeBucketMs is called PER ROW by
+// passesIntradayValidation. Bumped at the two places the store is written, so a signature costs one
+// integer read instead of a full scan.
+let INTRADAY_STORE_V=0;
 let _tvLoadedThisSession=false; // true once a TV CSV has been processed this session
 let PERF_PERIOD_FILTER='all'; // 'all' | '1m' | '3m' | '6m' | '1y'
 let PERF_TRACK_ISSUE=null; // issue date selected in the recommendation-tracking outcome panel
@@ -3474,23 +3481,39 @@ function radarIsSessionLevel(h){
   const s=String(h||'').trim().toLowerCase();
   return /volume-weighted average price/.test(s)||/^(high|low|open), 1 day$/.test(s);
 }
+// A COLUMN'S CLASSIFICATION IS A PROPERTY OF THE COLUMN, NOT OF THE ROW. This ran
+// radarIsPriceLevel, radarIsSessionLevel, a third regex and a toLowerCase() allocation on the
+// header string ONCE PER CELL - 28 columns x 1,669 rows x two passes is ~93,000 regex evaluations
+// per scoring pass, and the pass runs every 30 seconds off the live universe. Cached on the feature
+// object, computed once. The classification is deterministic in f.name, so this is the SAME answer,
+// and the transform below is unchanged term for term.
+function radarFeatureClass(f){
+  if(f._cls) return f._cls;
+  const ln=String(f.name||'').toLowerCase();
+  return (f._cls={
+    price:radarIsPriceLevel(f.name),
+    session:radarIsSessionLevel(f.name),
+    logAbs:/volume|turnover|market capitalization|shareholder/.test(ln)||f.name==='Price to earnings ratio',
+    logPrice:f.name==='Price'
+  });
+}
 function radarTransformed(raw,f,priceI,openI=-1){
   const rv=raw[f.i];
   if(f.rating)return RADAR_RATING[String(rv).toLowerCase()]??null;
   let x=radarNum(rv);
   if(x===null)return null;
-  if(radarIsPriceLevel(f.name)){
+  const cls=radarFeatureClass(f);
+  if(cls.price){
     const p=radarNum(raw[priceI]);
-    if(radarIsSessionLevel(f.name)){if(p&&x)return 100*(p/x-1);}
+    if(cls.session){if(p&&x)return 100*(p/x-1);}
     else{
       const o=openI>=0?radarNum(raw[openI]):null;
       const ref=(o!==null&&o>0)?o:p;
       if(ref&&x)return 100*(ref/x-1);
     }
   }
-  if(/volume|turnover|market capitalization|shareholder/.test(f.name.toLowerCase()))return Math.sign(x)*Math.log1p(Math.abs(x));
-  if(f.name==='Price to earnings ratio')return Math.sign(x)*Math.log1p(Math.abs(x));
-  if(f.name==='Price')return Math.log1p(Math.max(0,x));
+  if(cls.logAbs)return Math.sign(x)*Math.log1p(Math.abs(x));
+  if(cls.logPrice)return Math.log1p(Math.max(0,x));
   return x;
 }
 function getContinuationSignal(raw,targetI,priceHourI,price15I,price5I,relI,relAtI,volChgI){
@@ -3729,16 +3752,23 @@ function meetsRecommendationBar(s){
 // The freshest completed bar the app holds ANYWHERE - the market's own clock as this app knows it.
 // Not a wall-clock read: if nothing has been fetched for an hour, every row is equally behind and
 // none is penalised for the app's own idleness.
+let _newestBucketMemo={v:-1,ms:0};
 function newestTapeBucketMs(){
+  if(_newestBucketMemo.v===INTRADAY_STORE_V) return _newestBucketMemo.ms;
   let newest=0;
   try{
     for(const sym of Object.keys(INTRADAY_BARS)){
       const b=INTRADAY_BARS[sym];
       if(!b||!b.length) continue;
-      const t=+new Date(b[b.length-1].t);
+      const last=b[b.length-1].t;
+      // `t` is already epoch ms out of parseIntradayPaste; `+new Date(number)` is the same number
+      // and allocated a Date object per symbol per call, which at 1,650 symbols x 1,669 rows was
+      // millions of allocations a pass.
+      const t=typeof last==='number'?last:+new Date(last);
       if(t>newest) newest=t;
     }
   }catch(e){}
+  _newestBucketMemo={v:INTRADAY_STORE_V,ms:newest};
   return newest;
 }
 // WHAT THE TAPE HOLDS OF THE CURRENT SESSION, so a dead board can say WHICH of the two tape
@@ -3757,7 +3787,7 @@ let _tapeDepthMemo=null;
 function tapeSessionDepth(){
   const key=(typeof getSessionDate==='function')?getSessionDate():'';
   const syms=Object.keys(INTRADAY_BARS||{});
-  const sig=newestTapeBucketMs()+':'+syms.length+':'+key;
+  const sig=INTRADAY_STORE_V+':'+key;
   if(_tapeDepthMemo&&_tapeDepthMemo.sig===sig) return _tapeDepthMemo.val;
   let deepest=0,ready=0,withToday=0,openMs=0;
   try{
@@ -3765,12 +3795,15 @@ function tapeSessionDepth(){
       const b=INTRADAY_BARS[sym];
       if(!b||!b.length) continue;
       let n=0;
-      for(let i=b.length-1;i>=0;i--){ if(istDayKey(+new Date(b[i].t))!==key) break; n++; }
+      for(let i=b.length-1;i>=0;i--){
+        const tv=b[i].t, ms=typeof tv==='number'?tv:+new Date(tv);
+        if(istDayKey(ms)!==key) break; n++;
+      }
       if(!n) continue;
       withToday++;
       if(n>deepest) deepest=n;
       if(n>=TAPE_MIN_SESSION_BARS) ready++;
-      const first=+new Date(b[b.length-n].t);
+      const ft=b[b.length-n].t, first=typeof ft==='number'?ft:+new Date(ft);
       if(first>0&&(!openMs||first<openMs)) openMs=first;
     }
   }catch(e){}
@@ -4050,6 +4083,7 @@ function parseIntradayPaste(text,forSymbol,opts){
     // Bounded by the helper's own file trim, not a new number of ours.
     INTRADAY_BARS[sym]=all.length>INTRADAY_STORE_MAX?all.slice(-INTRADAY_STORE_MAX):all;
   } else INTRADAY_BARS[sym]=bars;
+  INTRADAY_STORE_V++;   // the ONE place a tape write is announced; every store memo keys off it
   return {ok:true,sym,bars:bars.length,sessions:new Set(bars.map(b=>istDayKey(b.t))).size,live};
 }
 function istDayKey(ms){
@@ -4254,9 +4288,9 @@ let _thinCutMemo=null;
 // number. Below the scorer's own modeled-feature density floor there is no cross-section to read
 // and parity is the only defensible neutral.
 function getIntradayThinCut(){
+  const sig=INTRADAY_STORE_V+'';
+  if(_thinCutMemo&&_thinCutMemo.sig===sig) return _thinCutMemo.val;   // the memo hit costs nothing now
   const keys=Object.keys(INTRADAY_BARS||{});
-  const sig=keys.length+':'+keys.reduce((t,k)=>t+(INTRADAY_BARS[k]?INTRADAY_BARS[k].length:0),0);
-  if(_thinCutMemo&&_thinCutMemo.sig===sig) return _thinCutMemo.val;
   const rs=[];
   for(const k of keys){
     let rd=null; try{ rd=getIntradayRead(k); }catch(e){}
@@ -9032,8 +9066,7 @@ function getUniverseMedianCapacity(){
 // All three are bounded by the NSE circuit, which is what it may LEGALLY reach.
 let _tapeRunwayMemo=null;
 function getTapeRunwayPct(sym){
-  const keys=Object.keys(INTRADAY_BARS||{});
-  const sig=keys.length+':'+keys.reduce((t,k)=>t+(INTRADAY_BARS[k]?INTRADAY_BARS[k].length:0),0);
+  const sig=INTRADAY_STORE_V+'';
   if(!_tapeRunwayMemo||_tapeRunwayMemo.sig!==sig) _tapeRunwayMemo={sig,map:new Map()};
   const s=normSym(sym||'');
   if(_tapeRunwayMemo.map.has(s)) return _tapeRunwayMemo.map.get(s);
@@ -9112,10 +9145,9 @@ function rowCapacityPct(row){
   return hasAtr&&hasRange?Math.sqrt(atr*range):hasAtr?atr:hasRange?range:null;
 }
 function buildClockRunwayTable(){
-  const keys=Object.keys(INTRADAY_BARS||{});
-  const sig=keys.length+':'+keys.reduce((t,k)=>t+(INTRADAY_BARS[k]?INTRADAY_BARS[k].length:0),0)
-    +':'+((ALL&&ALL.length)||0);
+  const sig=INTRADAY_STORE_V+':'+((ALL&&ALL.length)||0);
   if(_clockRunwayMemo&&_clockRunwayMemo.sig===sig) return _clockRunwayMemo.tab;
+  const keys=Object.keys(INTRADAY_BARS||{});
   const capOf={};
   (ALL||[]).forEach(r=>{ const c=rowCapacityPct(r); if(c>0) capOf[normSym(r.symbol)]=c; });
   const byClock={}, highMins=[];
