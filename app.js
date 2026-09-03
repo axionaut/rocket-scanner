@@ -1,5 +1,5 @@
-const BUILD_TS='2026-09-03 09:48 IST'; // release build time (IST)
-const APP_VERSION=1263; // v1263: expired Connect auth cannot present a live tape.
+const BUILD_TS='2026-09-03 10:25 IST'; // release build time (IST)
+const APP_VERSION=1264; // v1264: a shared session gap is invisible to a pool-relative frontier.
 const RADAR_SCORE_VERSION='tape-decision-v3';
 // v1093: a baseline reward:risk MEASURED on the cross-section (last completed bhav session) instead of learned from the owner's own fills - reported on every row, deliberately not enforced. Includes v1092: position size split by Radar score / stop distance, so equally-scored names carry equal RUPEE risk, plus an opt-in Risk /trade cap.
 // v556: parse the NSE Market Activity Report (MA<date>.csv) — official Nifty %, advances/declines and sector index moves shown as market CONTEXT in the status bar (EOD data, display only, never fed into per-row scoring); MA added to the ℹ️ file manifest.
@@ -3196,6 +3196,12 @@ function radarPermissionLevel(r,tapeStanding){
 const INTRADAY_STORE_MAX=1000;   // = the helper's MAX_ROWS file trim; not a second number
 const TAPE_NETVOL_BARS=3;     // 15 minutes: the best measured cell (rho +0.141 vs forward high)
 const TAPE_VWAP_BARS=5;       // 25 minutes: best for price-vs-VWAP (rho +0.105 to close)
+// THE SCORING FLOOR, DERIVED FROM THE HORIZON RATHER THAN WRITTEN IN. Net flow is read on
+// 15-minute buckets and needs TWO of them before it has a comparison at all, so a session becomes
+// readable at exactly 2 x TAPE_NETVOL_BARS bars - 30 minutes of continuous trading. This is the
+// same 6 the three guards below have always used; naming it is what stops the empty-board message
+// drifting from the check that actually empties the board.
+const TAPE_MIN_SESSION_BARS=2*TAPE_NETVOL_BARS;
 function tapeAggregate(bars,k){
   if(k<=1) return bars.slice();
   const out=[];
@@ -3221,7 +3227,7 @@ const _tapeEvidenceMemo=new Map();
 function radarTapeEvidence(sym){
   const key=normSym(sym||'');
   const bars=INTRADAY_BARS[key];
-  if(!bars||bars.length<6) return null;
+  if(!bars||bars.length<TAPE_MIN_SESSION_BARS) return null;
   const stamp=bars.length+':'+bars[bars.length-1].t;
   const hit=_tapeEvidenceMemo.get(key);
   if(hit&&hit.stamp===stamp) return hit.val;
@@ -3231,11 +3237,11 @@ function radarTapeEvidence(sym){
 }
 function _radarTapeEvidenceUncached(sym){
   const all=INTRADAY_BARS[normSym(sym||'')];
-  if(!all||all.length<6) return null;
+  if(!all||all.length<TAPE_MIN_SESSION_BARS) return null;
   const key=istDayKey(all[all.length-1].t);
   if(typeof getSessionDate==='function'&&key!==getSessionDate()) return null;  // today only
   const day=all.filter(b=>istDayKey(b.t)===key);
-  if(day.length<6) return null;
+  if(day.length<TAPE_MIN_SESSION_BARS) return null;
   const totV=day.reduce((n,b)=>n+(Number(b.v)||0),0);
   if(!(totV>0)) return null;
 
@@ -3734,6 +3740,54 @@ function newestTapeBucketMs(){
     }
   }catch(e){}
   return newest;
+}
+// WHAT THE TAPE HOLDS OF THE CURRENT SESSION, so a dead board can say WHICH of the two tape
+// failures it is: no read at all, or a read too short to score. Measured 2026-09-03 at 10:05 - the
+// Connect token expires ~06:00 IST, the owner logged in at 09:38, the socket's first complete
+// bucket was 09:45, and 1,644 of 1,649 taped symbols therefore held 3 bars where scoring needs 6.
+// Not one row scored, and the board said "the live tape has not produced a current read" directly
+// beneath a Live tape row reporting 1,648 symbols with a tape. Both sentences were about the same
+// tape and they contradicted each other.
+//
+// Walks BACKWARD from each symbol's newest bar and stops at the first bar from an earlier session,
+// so it costs one session of bars per symbol rather than the whole 1,000-bar store. Memoized on the
+// freshest bar held plus the symbol count - the same signature shape radarTapeEvidence uses, so a
+// new bar invalidates it by construction and nothing else can.
+let _tapeDepthMemo=null;
+function tapeSessionDepth(){
+  const key=(typeof getSessionDate==='function')?getSessionDate():'';
+  const syms=Object.keys(INTRADAY_BARS||{});
+  const sig=newestTapeBucketMs()+':'+syms.length+':'+key;
+  if(_tapeDepthMemo&&_tapeDepthMemo.sig===sig) return _tapeDepthMemo.val;
+  let deepest=0,ready=0,withToday=0,openMs=0;
+  try{
+    for(const sym of syms){
+      const b=INTRADAY_BARS[sym];
+      if(!b||!b.length) continue;
+      let n=0;
+      for(let i=b.length-1;i>=0;i--){ if(istDayKey(+new Date(b[i].t))!==key) break; n++; }
+      if(!n) continue;
+      withToday++;
+      if(n>deepest) deepest=n;
+      if(n>=TAPE_MIN_SESSION_BARS) ready++;
+      const first=+new Date(b[b.length-n].t);
+      if(first>0&&(!openMs||first<openMs)) openMs=first;
+    }
+  }catch(e){}
+  const val={deepest,ready,withToday,openMs,need:TAPE_MIN_SESSION_BARS,
+             symbols:syms.length};
+  _tapeDepthMemo={sig,val};
+  return val;
+}
+// Kept a PURE function of the census so the claim is assertable without the wall clock: the live
+// tape row itself only renders its live branch between 09:00 and 16:00, and an assertion that can
+// only run in session is an assertion that passes vacuously the rest of the time.
+function tapeDepthNoteHtml(dep){
+  if(!dep||!dep.withToday) return '';
+  return dep.ready
+    ? ' \u00b7 '+dep.ready.toLocaleString('en-IN')+' deep enough to score'
+    : ' \u00b7 <b style="color:var(--amber)">'+dep.deepest+'/'+dep.need
+      +' bars of today \u2014 too short to score</b>';
 }
 function passesIntradayValidation(s){
   if(!s?.symbol||s.intradayVerdict!=='confirmed') return false;
@@ -11215,23 +11269,60 @@ async function fetchCandlesInApp(limit,opts){
 // 141 and then 89 rows over the bar read "No stocks match the filters you selected" because his
 // search box still held "sahlo" and Rows was 1 - and nothing on the empty table said so. It names
 // the narrowing filters now, and how many rows there would be without them.
+// AN EMPTY BOARD MUST NAME THE MECHANISM THAT EMPTIED IT (v1264). Two defects were measured on the
+// owner's 10:05 screen, and together they made a working system look broken:
+//
+// 1. THE SCORE BAR WAS INVISIBLE. This read the fMinScore INPUT and named a bar only when the field
+//    carried a value - but syncRecommendationThreshold resolves a BLANK field to 60. So on the
+//    default install the bar that removed every row was the one thing the message could not
+//    mention, and it fell through to the "no current read" sentence instead.
+// 2. THE TAPE SENTENCE CONTRADICTED THE TAPE. It printed "the live tape has not produced a current
+//    read" directly under a Live tape row reading `live - 1650 instruments - 1648 symbols with a
+//    tape`. Both sentences were about the same tape. The read existed; it was 3 bars deep against a
+//    6-bar floor - a different problem, with a different answer and a known end time.
+//
+// The tape answers FIRST when it is the binding cause: no filter is worth reporting while nothing
+// on the board can be scored at all.
 function emptyBoardReason(){
   const total=Array.isArray(ALL)?ALL.filter(r=>r&&!r._held).length:0;
+  if(!total) return 'Nothing is ranked yet \u2014 no universe has been scored.';
+  const dep=tapeSessionDepth();
+  const scored=ALL.filter(r=>r&&!r._held&&Number.isFinite(Number(r.score))&&Number(r.score)>0).length;
+  if(!scored&&!dep.ready){
+    if(dep.withToday&&dep.deepest>0){
+      const at=newestTapeBucketMs()+(dep.need-dep.deepest)*5*60000;
+      const from=liveTapeTime(dep.openMs);
+      return 'The live tape is running, but it is too <b>short</b> to score yet.'
+        +'<br><span style="font-size:12px">'
+        +dep.withToday.toLocaleString('en-IN')+' symbols carry a tape for this session, and the deepest holds <b>'
+        +dep.deepest+' of the '+dep.need+'</b> five-minute bars scoring needs '
+        +'(net flow is read on 15-minute buckets and needs two of them).'
+        +(from?' The tape starts at <b>'+escHtml(from)+'</b>, not 09:15 \u2014 the helper was not streaming before that, '
+              +'so the opening bars are missing and are being fetched back.':'')
+        +' Scoring starts around <b>'+escHtml(liveTapeTime(at))+'</b>.</span>';
+    }
+    return 'Nothing is ranked yet \u2014 the live tape has not produced a read for this session.'
+      +'<br><span style="font-size:12px">'+total.toLocaleString('en-IN')
+      +' stocks are ranked and none carries current 5-minute bars. Check the Live tape row above.</span>';
+  }
   const bits=[];
   const q=(document.getElementById('fSearch')?.value||'').trim();
   if(q) bits.push('search \u201c'+escHtml(q)+'\u201d');
   const risk=document.getElementById('fRisk')?.value||'';
   if(risk&&risk!=='All') bits.push('risk '+escHtml(risk));
-  const minScore=(document.getElementById('fMinScore')?.value||'').trim();
-  if(minScore&&Number(minScore)>0) bits.push('score ≥ '+escHtml(minScore));
+  // THE EFFECTIVE BAR, NOT THE FIELD: a blank Min Score is still a bar of 60.
+  if(RECOMMEND_MIN_SCORE>0) bits.push('score \u2265 '+RECOMMEND_MIN_SCORE
+    +(((document.getElementById('fMinScore')?.value||'').trim()==='')?' (default)':''));
   const to=document.getElementById('fMinTurnover')?.value||'';
   if(to&&Number(to)>0) bits.push('min turnover');
   const mp=(document.getElementById('fMaxPrice')?.value||'').trim();
   if(mp) bits.push('max price '+escHtml(mp));
   if(!bits.length) return 'Nothing is ranked yet \u2014 the live tape has not produced a current read.';
+  const best=ALL.reduce((m,r)=>(r&&!r._held&&Number.isFinite(Number(r.score))&&Number(r.score)>m)?Number(r.score):m,0);
   return 'No rows match your filters: '+bits.join(' \u00b7 ')
     +'.<br><span style="font-size:12px">'+total.toLocaleString('en-IN')
-    +' stocks are ranked \u2014 press <b>Clear filters</b> to see them.</span>';
+    +' stocks are ranked and the best scores '+best.toFixed(1)
+    +' \u2014 press <b>Clear filters</b>, or lower <b>Min Score</b>, to see them.</span>';
 }
 const LIVE_TAPE_TIME_FMT=new Intl.DateTimeFormat('en-IN',{
   timeZone:'Asia/Kolkata',hour:'2-digit',minute:'2-digit',second:'2-digit',hour12:false
@@ -11268,9 +11359,14 @@ function intradayPasteBarHtml(){
   const live=inSession&&connected&&!needsLogin;
   const bars=Object.keys(INTRADAY_BARS||{}).length;
   const dot=!inSession?'var(--border-hi)':(live?'var(--green)':(needsLogin?'var(--amber)':'var(--red)'));
+  // THE DEPTH OF THE SESSION, NOT ONLY THE BREADTH OF IT (v1264). `1648 symbols with a tape` was
+  // true and useless at 10:05: every one of those tapes was 3 bars deep against a 6-bar scoring
+  // floor, so this row read healthy while the board beneath it was empty. Breadth says the socket
+  // is working; DEPTH says whether anything can be scored, and only depth explains an empty board.
+  const depthTxt=tapeDepthNoteHtml(tapeSessionDepth());
   const head=live
     ? `<b style="color:var(--green)">\u25cf live</b> \u00b7 ${st.subscribed||0} instruments \u00b7 `
-      +`${(st.ticks||0).toLocaleString('en-IN')} ticks \u00b7 ${bars} symbols with a tape`
+      +`${(st.ticks||0).toLocaleString('en-IN')} ticks \u00b7 ${bars} symbols with a tape${depthTxt}`
     : !inSession
       ? `<b style="color:var(--t2)">\u25cb market closed</b> · helper connected · ${bars} symbols stored`
     : needsLogin
