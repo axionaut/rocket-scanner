@@ -1,5 +1,5 @@
-const BUILD_TS='2026-09-03 15:30 IST'; // release build time (IST)
-const APP_VERSION=1274; // v1274: expose empty-board rejection breakdown.
+const BUILD_TS='2026-09-03 15:45 IST'; // release build time (IST)
+const APP_VERSION=1275; // v1275: instant filters and score-only table presentation.
 const RADAR_SCORE_VERSION='tape-decision-v3';
 // v1093: a baseline reward:risk MEASURED on the cross-section (last completed bhav session) instead of learned from the owner's own fills - reported on every row, deliberately not enforced. Includes v1092: position size split by Radar score / stop distance, so equally-scored names carry equal RUPEE risk, plus an opt-in Risk /trade cap.
 // v556: parse the NSE Market Activity Report (MA<date>.csv) — official Nifty %, advances/declines and sector index moves shown as market CONTEXT in the status bar (EOD data, display only, never fed into per-row scoring); MA added to the ℹ️ file manifest.
@@ -8779,7 +8779,6 @@ function getCols(){
   // User-dragged column order (v536) applies here so header and cells always agree.
   return applyColOrder('main-rankings',[
     {key:'chk',label:'',s:0},
-    {key:'action',label:'Action',s:1},
     {key:'score',label:'Score',s:1},
     {key:'symbol',label:'Symbol',s:1},
     {key:'price',label:'Price/Day',s:1},
@@ -10403,7 +10402,7 @@ function renderTable(){
       chk:`<td style="text-align:center"><input type="checkbox" ${isSelected?'checked':''} ${canBuy?'':'disabled'} style="width:14px;height:14px;accent-color:var(--amber);cursor:${canBuy?'pointer':'not-allowed'}" onclick="event.stopPropagation()" onchange="toggleStock('${s.symbol}',this.checked)" title="${checkTitle}"></td>`,
       action:`<td style="white-space:nowrap">${actPill}</td>`,
       rank:`<td style="font-family:'DM Mono',monospace;font-weight:800;color:var(--t1);text-align:right">${s.rank??'—'}</td>`,
-      score:`<td>${radarScoreCell(s.score,radarScoreTitle(s)+(canBuy?'':` Not selectable: ${checkTitle}.`),canBuy)}</td>`,
+      score:`<td>${radarScoreCell(s.score,radarScoreTitle(s))}</td>`,
       // v1142: routed through symbolChartButton like every other table. This cell had built its own
       // TradingView link since v1070, so the "one symbol interaction everywhere" rule was true of the
       // panels and quietly false of the main table - which is why swapping to Zerodha missed it.
@@ -12139,10 +12138,10 @@ function renderPostClose(){
 
 let APPLY_FILTERS_TIMER=null;
 function scheduleApplyFilters(){
-  clearTimeout(APPLY_FILTERS_TIMER);
-  // Debounce text entry long enough for the browser to paint each keystroke. Filtering is a
-  // presentation operation; it must not synchronously compete with the live scoring pipeline.
-  APPLY_FILTERS_TIMER=setTimeout(()=>{APPLY_FILTERS_TIMER=null;applyFilters();},280);
+  if(APPLY_FILTERS_TIMER) cancelAnimationFrame(APPLY_FILTERS_TIMER);
+  // Apply on the next paint frame: select changes feel immediate and fast typing is coalesced only
+  // within the same frame, never delayed by an arbitrary debounce window.
+  APPLY_FILTERS_TIMER=requestAnimationFrame(()=>{APPLY_FILTERS_TIMER=null;applyFilters();});
 }
 
 
