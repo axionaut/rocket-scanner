@@ -1,5 +1,5 @@
-const BUILD_TS='2026-09-03 13:10 IST'; // release build time (IST)
-const APP_VERSION=1267; // v1267: delta transport, non-blocking scoring, recommendation contract repair.
+const BUILD_TS='2026-09-03 14:05 IST'; // release build time (IST)
+const APP_VERSION=1268; // v1268: responsive helper heartbeat and deferred Performance tab.
 const RADAR_SCORE_VERSION='tape-decision-v3';
 // v1093: a baseline reward:risk MEASURED on the cross-section (last completed bhav session) instead of learned from the owner's own fills - reported on every row, deliberately not enforced. Includes v1092: position size split by Radar score / stop distance, so equally-scored names carry equal RUPEE risk, plus an opt-in Risk /trade cap.
 // v556: parse the NSE Market Activity Report (MA<date>.csv) — official Nifty %, advances/declines and sector index moves shown as market CONTEXT in the status bar (EOD data, display only, never fed into per-row scoring); MA added to the ℹ️ file manifest.
@@ -13217,7 +13217,8 @@ function switchTab(n){
   document.querySelectorAll('.tp').forEach((t,i)=>t.classList.toggle('act',i===n));
   updateTabCounts();
   if(n===1) renderMethodology();
-  if(n===2) renderPerformance();
+  // Performance analytics are intentionally deferred so tab switching paints immediately.
+  if(n===2) schedulePerformanceRender();
   if(n===3) renderPostClose();
   // v1101: a hidden grid has clientWidth 0, so balancing on the tab it lives in is the only moment
   // the column count can actually be computed. rAF lets the tab paint first.
