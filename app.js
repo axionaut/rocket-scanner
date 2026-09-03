@@ -1,5 +1,5 @@
-const BUILD_TS='2026-09-03 14:35 IST'; // release build time (IST)
-const APP_VERSION=1270; // v1270: cached tick pipeline and bounded live refresh.
+const BUILD_TS='2026-09-03 14:45 IST'; // release build time (IST)
+const APP_VERSION=1271; // v1271: preserve hard removal reasons over user filters.
 const RADAR_SCORE_VERSION='tape-decision-v3';
 // v1093: a baseline reward:risk MEASURED on the cross-section (last completed bhav session) instead of learned from the owner's own fills - reported on every row, deliberately not enforced. Includes v1092: position size split by Radar score / stop distance, so equally-scored names carry equal RUPEE risk, plus an opt-in Risk /trade cap.
 // v556: parse the NSE Market Activity Report (MA<date>.csv) — official Nifty %, advances/declines and sector index moves shown as market CONTEXT in the status bar (EOD data, display only, never fed into per-row scoring); MA added to the ℹ️ file manifest.
@@ -11726,7 +11726,18 @@ function applyFilters(){
   const allocCtx=getAllocationPassContext();
   let rows=ALL.filter(s=>{
     if(s._held)SUPPRESSED_HELD++;
-    // Discovery filters ONLY: Min Turnover, Max Price, Min Score, Risk, Search
+    // Hard exclusions must win the explanation even when the same row also fails a user filter.
+    // Otherwise the audit misleadingly labels every row "Your Filter" and hides surveillance.
+    if(NSE_SURV[s.symbol]?.length){
+      SURV_HARD_REMOVED++;
+      REMOVED_ROWS.push({s,reason:'surv',rules:NSE_SURV[s.symbol],detail:'configured surveillance rule'});
+      return false;
+    }
+    if(s.recommendationTriggerBlocked){
+      REMOVED_ROWS.push({s,reason:'trigger',detail:'automatic evidence trigger: '+(s.recommendationTriggerReasons||[]).join(', ')});
+      return false;
+    }
+    // Discovery filters: Min Turnover, Max Price, Min Score, Risk, Search
     if((s.turnover||0)<minTurn){REMOVED_ROWS.push({s,reason:'filter',detail:'below the Min Turnover filter ('+fmtINR(minTurn)+')'});return false;}
     if(maxPrice!=null&&Number(s.price)>maxPrice){REMOVED_ROWS.push({s,reason:'filter',detail:'above the Max Price filter ('+fmtINR(maxPrice)+')'});return false;}
     if(Number.isFinite(Number(s.score))&&Number(s.score)<RECOMMEND_MIN_SCORE){
