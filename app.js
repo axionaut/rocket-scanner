@@ -1,5 +1,5 @@
-const BUILD_TS='2026-09-03 14:05 IST'; // release build time (IST)
-const APP_VERSION=1268; // v1268: responsive helper heartbeat and deferred Performance tab.
+const BUILD_TS='2026-09-03 14:20 IST'; // release build time (IST)
+const APP_VERSION=1269; // v1269: visibility-safe stream status and smooth filter interaction.
 const RADAR_SCORE_VERSION='tape-decision-v3';
 // v1093: a baseline reward:risk MEASURED on the cross-section (last completed bhav session) instead of learned from the owner's own fills - reported on every row, deliberately not enforced. Includes v1092: position size split by Radar score / stop distance, so equally-scored names carry equal RUPEE risk, plus an opt-in Risk /trade cap.
 // v556: parse the NSE Market Activity Report (MA<date>.csv) — official Nifty %, advances/declines and sector index moves shown as market CONTEXT in the status bar (EOD data, display only, never fed into per-row scoring); MA added to the ℹ️ file manifest.
@@ -11772,7 +11772,12 @@ function applyFilters(){
 
   PG=1;renderHead();renderTable();renderStatusBar();saveFilterState();updateTabCounts();
   try{renderRankingsPanels();}catch(e){console.warn('Rankings panels render failed',e);}
-  if(ALL.length) try{renderStats();}catch(e){}
+  if(ALL.length){
+    // Stats are secondary to the filter interaction. Let the table paint first and coalesce
+    // repeated filter changes into one calculation.
+    clearTimeout(window._filterStatsTimer);
+    window._filterStatsTimer=setTimeout(()=>{try{renderStats();}catch(e){}},0);
+  }
 }
 function renderRankingsPanels(){
   const q=rankingsSearchQuery();
@@ -12119,7 +12124,9 @@ function renderPostClose(){
 let APPLY_FILTERS_TIMER=null;
 function scheduleApplyFilters(){
   clearTimeout(APPLY_FILTERS_TIMER);
-  APPLY_FILTERS_TIMER=setTimeout(()=>{APPLY_FILTERS_TIMER=null;applyFilters();},120);
+  // Debounce text entry long enough for the browser to paint each keystroke. Filtering is a
+  // presentation operation; it must not synchronously compete with the live scoring pipeline.
+  APPLY_FILTERS_TIMER=setTimeout(()=>{APPLY_FILTERS_TIMER=null;applyFilters();},280);
 }
 
 
@@ -12437,7 +12444,12 @@ function startStreamRefresh(){
   _streamRefreshUiTimer=setInterval(()=>{try{renderLiveTapeBar();}catch(e){}},1000);
   if(!_streamVisibilityBound){
     _streamVisibilityBound=true;
-    document.addEventListener('visibilitychange',()=>{if(!document.hidden)streamRefreshTick();});
+    document.addEventListener('visibilitychange',()=>{
+      if(document.hidden) return;
+      // Returning to the tab is not a Kite reconnect event. Refresh the cheap status control first;
+      // the normal beat will hydrate data, avoiding a burst of portfolio/inventory work on focus.
+      loadStreamStatus().then(()=>{try{renderLiveTapeBar();}catch(e){};});
+    });
   }
   streamRefreshTick();
 }
@@ -12451,7 +12463,11 @@ async function loadStreamStatus(){
     const r=await fetch(KITE_HELPER+'/api/kite/stream',{cache:'no-store',signal:ctl.signal});
     clearTimeout(t);
     STREAM_STATUS=r.ok?await r.json():null;
-  }catch(e){ STREAM_STATUS=null; }
+  }catch(e){
+    // A background-tab timeout means status is unknown, not that the authenticated WebSocket died.
+    // Preserve the last confirmed state until the next successful control response.
+    if(STREAM_STATUS) STREAM_STATUS={...STREAM_STATUS,statusUnknown:true};
+  }
   return STREAM_STATUS;
 }
 async function hydrateSessionCSVsFromPreferredInputs(reason='startup'){
