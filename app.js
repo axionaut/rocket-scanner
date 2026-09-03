@@ -1,5 +1,5 @@
-const BUILD_TS='2026-09-03 14:20 IST'; // release build time (IST)
-const APP_VERSION=1269; // v1269: visibility-safe stream status and smooth filter interaction.
+const BUILD_TS='2026-09-03 14:35 IST'; // release build time (IST)
+const APP_VERSION=1270; // v1270: cached tick pipeline and bounded live refresh.
 const RADAR_SCORE_VERSION='tape-decision-v3';
 // v1093: a baseline reward:risk MEASURED on the cross-section (last completed bhav session) instead of learned from the owner's own fills - reported on every row, deliberately not enforced. Includes v1092: position size split by Radar score / stop distance, so equally-scored names carry equal RUPEE risk, plus an opt-in Risk /trade cap.
 // v556: parse the NSE Market Activity Report (MA<date>.csv) — official Nifty %, advances/declines and sector index moves shown as market CONTEXT in the status bar (EOD data, display only, never fed into per-row scoring); MA added to the ℹ️ file manifest.
