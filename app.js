@@ -1,5 +1,5 @@
-const BUILD_TS='2026-09-03 15:45 IST'; // release build time (IST)
-const APP_VERSION=1275; // v1275: instant filters and score-only table presentation.
+const BUILD_TS='2026-09-03 16:00 IST'; // release build time (IST)
+const APP_VERSION=1276; // v1276: score is the single eligibility contract.
 const RADAR_SCORE_VERSION='tape-decision-v3';
 // v1093: a baseline reward:risk MEASURED on the cross-section (last completed bhav session) instead of learned from the owner's own fills - reported on every row, deliberately not enforced. Includes v1092: position size split by Radar score / stop distance, so equally-scored names carry equal RUPEE risk, plus an opt-in Risk /trade cap.
 // v556: parse the NSE Market Activity Report (MA<date>.csv) — official Nifty %, advances/declines and sector index moves shown as market CONTEXT in the status bar (EOD data, display only, never fed into per-row scoring); MA added to the ℹ️ file manifest.
@@ -3879,7 +3879,9 @@ function getRowActionState(s){
   return {state:'GO', reason:'Actionable recommendation'};
 }
 function isSelectableRecommendation(s){
-  return !!s && getRowActionState(s).state === 'GO';
+  // The score is the single eligibility contract. All cautionary evidence belongs in the score;
+  // a second hidden WAIT/BLOCKED veto made checked rows, candidates, and the basket disagree.
+  return !!s && meetsScoreBar(s.score);
 }
 // Score number + proportional bar, both tinted by the band.
 function radarScoreCell(score,title='',recommendationState=null){
@@ -10045,7 +10047,9 @@ function computeAlloc(capital, selList){
   function evalNet(s,buyP,qty){
     const policy=getRowExitPolicy(s,buyP);
     const tgtPct=policy.targetPct;
-    if(!policy.viable) return {ok:false,rejected:true,reason:`stock capacity ${policy.capacityPct?.toFixed(2)??'—'}% is below the ${policy.minGrossPct?.toFixed(2)??'—'}% cost + net hurdle`,policy};
+    // Viability is descriptive context for the target display, not a second eligibility gate.
+    // Score eligibility is the single contract; a valid selected row may still be sized and
+    // exported even when its target is conservative or unavailable.
     if(tgtPct===null||tgtPct<=0) return {ok:true,skip:true,policy};
     const sellP=buyP*(1+tgtPct/100);
     const buyChg=calcZerodhaCharges(buyP,qty,false);
@@ -10217,7 +10221,7 @@ function recomputeAlloc(){
 }
 function renderBasketBtn(){
   const capital=getEffectiveCapital();
-  const selList=FILT.filter(s=>SELECTED.has(s.symbol)&&getRowActionState(s).state==='GO');
+  const selList=FILT.filter(s=>SELECTED.has(s.symbol)&&isSelectableRecommendation(s));
   const allocMap=computeAlloc(capital, selList);
   const buyList=capital>0?selList.filter(s=>allocMap[s.symbol]?.qty>0):selList;
   const buyCount=buyList.length;
@@ -10227,7 +10231,7 @@ function renderBasketBtn(){
     if(cntSpan)cntSpan.textContent=buyCount>0?`(${buyCount})`:'';
     buyBtn.disabled=buyCount===0;
     buyBtn.title=buyCount===0
-      ? 'No selected GO recommendation has an allocated quantity > 0.'
+      ? 'No selected score-eligible recommendation has an allocated quantity > 0.'
       : 'Export selected stocks as Zerodha basket order';
   }
 }
@@ -12162,15 +12166,14 @@ function renderStatusBar(){
   const instrumentLabel='stocks';
   const allocatedLabel=n=>n===1?'stock':'stocks';   // v1206: it printed "1 stocks".
   const candidateCount=shown;
-  const goCount=FILT.filter(s=>getRowActionState(s).state==='GO').length;
-  const waitBlockedCount=candidateCount-goCount;
-  const selList2=FILT.filter(s=>SELECTED.has(s.symbol)&&getRowActionState(s).state==='GO');
+  const goCount=FILT.filter(isSelectableRecommendation).length;
+  const selList2=FILT.filter(s=>SELECTED.has(s.symbol)&&isSelectableRecommendation(s));
   const am2=computeAlloc(capital,selList2);
   const activeAlloc=Object.values(am2).filter(a=>!a.rejected&&a.qty>0);
   const allocatedCount=activeAlloc.length;
   const candidateLabel=candidateCount===1?'candidate':'candidates';
 
-  let html=`<span class="sb-count" style="color:${countColor}">${candidateCount.toLocaleString()} ${candidateLabel}</span> · <span style="color:var(--green);font-weight:700">${goCount} GO</span> · <span style="color:var(--t3)">${waitBlockedCount} WAIT/BLOCKED</span> · <span style="color:var(--amber);font-weight:700">${allocatedCount} allocated</span> <span class="sb-total">(of ${total.toLocaleString()} ${instrumentLabel})</span>`;
+  let html=`<span class="sb-count" style="color:${countColor}">${candidateCount.toLocaleString()} ${candidateLabel}</span> · <span style="color:var(--green);font-weight:700">${goCount} eligible</span> · <span style="color:var(--amber);font-weight:700">${allocatedCount} allocated</span> <span class="sb-total">(of ${total.toLocaleString()} ${instrumentLabel})</span>`;
   const selCount=selList2.length;
   if(capital>0&&selCount>0){
     const actualDeployed=Object.values(am2).reduce((s,a)=>s+(a.debit??a.alloc),0);
