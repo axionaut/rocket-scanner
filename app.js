@@ -1,5 +1,5 @@
-const BUILD_TS='2026-09-03 15:15 IST'; // release build time (IST)
-const APP_VERSION=1273; // v1273: correct weighted performance totals.
+const BUILD_TS='2026-09-03 15:30 IST'; // release build time (IST)
+const APP_VERSION=1274; // v1274: expose empty-board rejection breakdown.
 const RADAR_SCORE_VERSION='tape-decision-v3';
 // v1093: a baseline reward:risk MEASURED on the cross-section (last completed bhav session) instead of learned from the owner's own fills - reported on every row, deliberately not enforced. Includes v1092: position size split by Radar score / stop distance, so equally-scored names carry equal RUPEE risk, plus an opt-in Risk /trade cap.
 // v556: parse the NSE Market Activity Report (MA<date>.csv) — official Nifty %, advances/declines and sector index moves shown as market CONTEXT in the status bar (EOD data, display only, never fed into per-row scoring); MA added to the ℹ️ file manifest.
@@ -11611,9 +11611,12 @@ function emptyBoardReason(){
   if(mp) bits.push('max price '+escHtml(mp));
   if(!bits.length) return 'Nothing is ranked yet \u2014 the live tape has not produced a current read.';
   const best=ALL.reduce((m,r)=>(r&&!r._held&&Number.isFinite(Number(r.score))&&Number(r.score)>m)?Number(r.score):m,0);
+  const removedSummary=Object.entries(REMOVED_ROWS.reduce((m,r)=>{m[r.reason]=(m[r.reason]||0)+1;return m},{}))
+    .map(([k,v])=>k==='surv'?v+' surveillance':k==='trigger'?v+' evidence vetoes':k==='filter'?v+' user-filter matches':v+' '+k).join(' · ');
   return 'No rows match your filters: '+bits.join(' \u00b7 ')
     +'.<br><span style="font-size:12px">'+total.toLocaleString('en-IN')
     +' stocks are ranked and the best scores '+best.toFixed(1)
+    +(removedSummary?' · removed breakdown: '+escHtml(removedSummary):'')
     +' \u2014 press <b>Clear filters</b>, or lower <b>Min Score</b>, to see them.</span>';
 }
 const LIVE_TAPE_TIME_FMT=new Intl.DateTimeFormat('en-IN',{
