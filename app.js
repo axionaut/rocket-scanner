@@ -1,5 +1,5 @@
-const BUILD_TS='2026-09-03 11:40 IST'; // release build time (IST)
-const APP_VERSION=1266; // v1266: incremental tape refreshes stay incremental.
+const BUILD_TS='2026-09-03 13:10 IST'; // release build time (IST)
+const APP_VERSION=1267; // v1267: delta transport, non-blocking scoring, recommendation contract repair.
 const RADAR_SCORE_VERSION='tape-decision-v3';
 // v1093: a baseline reward:risk MEASURED on the cross-section (last completed bhav session) instead of learned from the owner's own fills - reported on every row, deliberately not enforced. Includes v1092: position size split by Radar score / stop distance, so equally-scored names carry equal RUPEE risk, plus an opt-in Risk /trade cap.
 // v556: parse the NSE Market Activity Report (MA<date>.csv) — official Nifty %, advances/declines and sector index moves shown as market CONTEXT in the status bar (EOD data, display only, never fed into per-row scoring); MA added to the ℹ️ file manifest.
@@ -3835,8 +3835,51 @@ function passesIntradayValidation(s){
   if(newest>0&&Number.isFinite(at)&&(newest-at)>5*60*1000) return false;
   return true;
 }
+function getRowActionState(s){
+  if(!s) return {state:'BLOCKED', reason:'Invalid row'};
+  if(NSE_SURV[s.symbol]?.length) return {state:'BLOCKED', reason:'Surveillance flag ('+(NSE_SURV[s.symbol].join(' · '))+')'};
+  if(s.recommendationTriggerBlocked) return {state:'BLOCKED', reason:'Evidence trigger: '+(s.recommendationTriggerReasons||[]).join(', ')};
+  if(s.noHistory===true) return {state:'BLOCKED', reason:'Listed too recently (insufficient history)'};
+  if(s.basketEligible===false) return {state:'BLOCKED', reason:'Non-EQ series or price band < 10%'};
+
+  const _vw=Number(s.vwap), _px=Number(s.price), _co=Number(s.changeOpen), _day=Number(s.day);
+  const _aboveVwap=_vw>0&&_px>=_vw;
+  const _aboveOpen=Number.isFinite(_co)&&_co>0;
+  const _greenDay=Number.isFinite(_day)&&_day>0;
+  if(!(_aboveVwap&&_aboveOpen&&_greenDay)){
+    const why=[];
+    if(!_greenDay) why.push('red day ('+(Number.isFinite(_day)?_day.toFixed(2)+'%':'no day move')+')');
+    if(!_aboveVwap) why.push(_vw>0?'below VWAP ('+((_px/_vw-1)*100).toFixed(2)+'%)':'no VWAP');
+    if(!_aboveOpen) why.push(Number.isFinite(_co)?'below open ('+_co.toFixed(2)+'%)':'no open move');
+    return {state:'BLOCKED', reason:'Not lifting off: '+why.join(', ')};
+  }
+  if(s.directionConfirmed!==true) return {state:'BLOCKED', reason:'Direction not confirmed'};
+
+  if(s.predictiveLevel==null||!Number.isFinite(s.predictiveLevel)||Number(s.predictiveSessions)<3)
+    return {state:'WAIT', reason:'Awaiting predictive evidence (>=3 sessions)'};
+
+  if(s.entryReady===false&&s.entryAtLimit!==true)
+    return {state:'WAIT', reason:s.entryTiming||'Extended (upper-quarter peak timing)'};
+
+  if(s.intradaySellingToday===true)
+    return {state:'BLOCKED', reason:s.intradayWhy||'5-minute tape selling today'};
+
+  const val=passesIntradayValidation(s);
+  if(!val){
+    const rd=getIntradayRead(s.symbol);
+    if(!rd||!rd.current) return {state:'WAIT', reason:'Awaiting current 5-minute tape'};
+    if(s.intradayVerdict==='rejected') return {state:'BLOCKED', reason:'Tape rejected: '+(s.intradayWhy||'flow')};
+    if(s.intradayVerdict==='unverified') return {state:'WAIT', reason:'Tape unverified (under 3 bars)'};
+    return {state:'WAIT', reason:'Awaiting 5-minute validation'};
+  }
+
+  if(Number.isFinite(Number(s.score))&&Number(s.score)<RECOMMEND_MIN_SCORE)
+    return {state:'WAIT', reason:`Score ${Number(s.score).toFixed(1)} < ${RECOMMEND_MIN_SCORE}`};
+
+  return {state:'GO', reason:'Actionable recommendation'};
+}
 function isSelectableRecommendation(s){
-  return !!s&&s.basketEligible!==false&&meetsRecommendationBar(s)&&passesIntradayValidation(s);
+  return !!s && getRowActionState(s).state === 'GO';
 }
 // Score number + proportional bar, both tinted by the band.
 function radarScoreCell(score,title='',recommendationState=null){
@@ -5120,6 +5163,20 @@ function radarScoreRows(objRows){
   RADAR={headers,matrix,features:result.features,ids:result.ids,rockets:result.rockets,rocketTargetPct:result.rocketTargetPct??null,stretchBarPct:result.stretchBarPct??null,continuationCount:result.continuationCount,ms:performance.now()-t0,sourceNote:'',scoredAt:Date.now()};
   SUPPRESSED_HELD=result.suppressedHeld;
   MARKET_INTRADAY=result.marketIntraday; // v555 WS-D: market breadth for the status bar + basket export
+  return result.rows;
+}
+async function radarScoreRowsAsync(objRows){
+  const headers=objRows?._headers||Object.keys(objRows?.[0]||{});
+  const matrix=(objRows||[]).map(o=>headers.map(h=>o[h]??''));
+  const heldPos=getHeldPositionMap();
+  const held=new Set(Object.keys(heldPos).map(normSym));
+  const t0=performance.now();
+  await new Promise(r=>setTimeout(r,0));
+  const result=radarAnalyze(headers,matrix,buildRadarSupplements(),held);
+  await new Promise(r=>setTimeout(r,0));
+  RADAR={headers,matrix,features:result.features,ids:result.ids,rockets:result.rockets,rocketTargetPct:result.rocketTargetPct??null,stretchBarPct:result.stretchBarPct??null,continuationCount:result.continuationCount,ms:performance.now()-t0,sourceNote:'',scoredAt:Date.now()};
+  SUPPRESSED_HELD=result.suppressedHeld;
+  MARKET_INTRADAY=result.marketIntraday;
   return result.rows;
 }
 // Outcome-tracking rows for the surviving Harvest/entry outcome stores.
@@ -8720,6 +8777,7 @@ function getCols(){
   // User-dragged column order (v536) applies here so header and cells always agree.
   return applyColOrder('main-rankings',[
     {key:'chk',label:'',s:0},
+    {key:'action',label:'Action',s:1},
     {key:'score',label:'Score',s:1},
     {key:'symbol',label:'Symbol',s:1},
     {key:'price',label:'Price/Day',s:1},
@@ -8957,10 +9015,10 @@ function maxReachableAnchorPct(){
 function getActiveTargetInfo(){
   const harvest=computeHarvestPlan().targetPct;
   const goal=getGoalLedTargetPct();
-  // Goal is the user's declared economic requirement, so it owns the automatic anchor whenever
-  // it can resolve. Harvest is evidence about reachable moves and remains the fallback, not a
-  // competing 2.5% cap that can silently mask a changing Goal.
-  const auto=goal!=null?{tgtPct:goal,source:'goal'}:{tgtPct:harvest,source:'harvest'};
+  // v1267: Goal remains informational. With no manual Target Anchor, use the stable
+  // market/evidence-derived fallback independent of Capital. Typing Capital must never move
+  // the Target Anchor or make candidates fail viability.
+  const auto={tgtPct:harvest,source:'harvest'};
   const manual=parseFloat(document.getElementById('fTgtOverride')?.value);
   if(Number.isFinite(manual)&&manual>0&&manual<=maxReachableAnchorPct())
     return {tgtPct:manual,source:'manual',harvestPct:harvest,goalPct:goal,autoPct:auto.tgtPct};
@@ -8968,8 +9026,7 @@ function getActiveTargetInfo(){
 }
 function getDefaultTgtPct(){
   const harvest=computeHarvestPlan().targetPct;
-  const goal=getGoalLedTargetPct();
-  return goal!=null?goal:harvest;
+  return harvest;
 }
 function getEffectiveTgtPct(){
   return getActiveTargetInfo().tgtPct;
@@ -10139,30 +10196,37 @@ function recomputeAlloc(){
     const sym=el.dataset.sym;
     if(!SELECTED.has(sym)){el.innerHTML='<span style="color:var(--t3);font-size:13px">—</span>';return;}
     const am=allocMap[sym];
-    if(!am){el.innerHTML='<span style="color:var(--red);font-size:12px" title="The score, Max Allocation, or 0.10% turnover cap is below one share.">cap below 1 share</span>';return;}
-    if(am.rejected){
-      // v1125: the label must match the CAUSE. "no viable target" was printed for every rejection,
-      // including a row that simply ran out of capital — a different fact with a different remedy.
-      const why=String(am.reason||'');
-      const lbl=/capital exhausted/.test(why)?'capital exhausted'
-        :/rails allow only|one share costs/.test(why)?'cap below 1 share'
-        :/minimum for a trade worth taking/.test(why)?'too little money in it'
-        :'no viable target';
-      el.innerHTML=`<span style="color:var(--red);font-size:12px" title="${escHtml(why||'Stock-specific target cannot clear costs and desired net.')}">${lbl}</span>`;return;}
+    if(!am){
+      const allocCtx=getAllocationPassContext();
+      const s=FILT.find(x=>x.symbol===sym);
+      const railReason=s?getAllocationBlockReason(s,allocCtx):null;
+      el.innerHTML=railReason
+        ? `<span style="color:var(--amber);font-size:11px;line-height:1.2;display:block" title="${escHtml(railReason)}">${escHtml(railReason)}</span>`
+        : '<span style="color:var(--t3);font-size:13px">—</span>';
+      return;
+    }
+    if(am.rejected || am.qty === 0){
+      el.innerHTML=`<span style="color:var(--amber);font-size:11px;line-height:1.2;display:block" title="${escHtml(am.reason||'No whole share allocated')}">${escHtml(am.reason||'0 shares')}</span>`;
+      return;
+    }
     el.innerHTML=`<span style="color:var(--amber);font-weight:700;font-family:'DM Mono',monospace;font-size:14px">${fmtINR(am.alloc)}</span>${allocationSubline(am,unitLabel)}`;
   });
   renderBasketSummary();
+  renderBasketBtn();
 }
 function renderBasketBtn(){
-  const selList=FILT.filter(s=>SELECTED.has(s.symbol));
-  const buyCount=selList.length;
+  const capital=getEffectiveCapital();
+  const selList=FILT.filter(s=>SELECTED.has(s.symbol)&&getRowActionState(s).state==='GO');
+  const allocMap=computeAlloc(capital, selList);
+  const buyList=capital>0?selList.filter(s=>allocMap[s.symbol]?.qty>0):selList;
+  const buyCount=buyList.length;
   const buyBtn=document.getElementById('basketBtn');
   if(buyBtn){
     const cntSpan=document.getElementById('basketCount');
     if(cntSpan)cntSpan.textContent=buyCount>0?`(${buyCount})`:'';
     buyBtn.disabled=buyCount===0;
     buyBtn.title=buyCount===0
-      ? 'Select at least one stock to export a Zerodha basket order.'
+      ? 'No selected GO recommendation has an allocated quantity > 0.'
       : 'Export selected stocks as Zerodha basket order';
   }
 }
@@ -10318,17 +10382,24 @@ function renderTable(){
     const am=allocMap[s.symbol];
     const exitPolicy=getRowExitPolicy(s,getBuyPrice(s));
     const exchangeEligible=s.basketEligible!==false;
-    const recommendationGo=meetsRecommendationBar(s);
+    const act=getRowActionState(s);
+    const recommendationGo=act.state==='GO';
     const validated=passesIntradayValidation(s);
     const canBuy=isSelectableRecommendation(s);
     const checkTitle=!exchangeEligible?'Ineligible for the basket'
-      :!recommendationGo?'Not a current go recommendation'
+      :!recommendationGo?('Not selectable: '+act.reason)
       :!validated?'Awaiting current 5-minute validation'
       :'Include in the Zerodha basket export';
+    const actPill = act.state === 'GO'
+      ? `<span style="display:inline-block;padding:2px 7px;border-radius:4px;font-size:11px;font-weight:800;letter-spacing:.3px;background:rgba(34,197,94,.15);color:var(--green)" title="${escHtml(act.reason)}">GO</span>`
+      : act.state === 'WAIT'
+      ? `<span style="display:inline-block;padding:2px 6px;border-radius:4px;font-size:11px;font-weight:700;letter-spacing:.3px;background:rgba(251,191,36,.15);color:var(--amber)" title="${escHtml(act.reason)}">WAIT</span><div style="font-size:10px;color:var(--t3);max-width:130px;overflow:hidden;text-overflow:ellipsis;line-height:1.2;margin-top:2px" title="${escHtml(act.reason)}">${escHtml(act.reason)}</div>`
+      : `<span style="display:inline-block;padding:2px 6px;border-radius:4px;font-size:11px;font-weight:700;letter-spacing:.3px;background:rgba(239,68,68,.15);color:var(--red)" title="${escHtml(act.reason)}">BLOCKED</span><div style="font-size:10px;color:var(--t3);max-width:130px;overflow:hidden;text-overflow:ellipsis;line-height:1.2;margin-top:2px" title="${escHtml(act.reason)}">${escHtml(act.reason)}</div>`;
     // Cells are keyed and joined in COLS order so they always match the (possibly
     // user-reordered) header (v536).
     const cellH={
       chk:`<td style="text-align:center"><input type="checkbox" ${isSelected?'checked':''} ${canBuy?'':'disabled'} style="width:14px;height:14px;accent-color:var(--amber);cursor:${canBuy?'pointer':'not-allowed'}" onclick="event.stopPropagation()" onchange="toggleStock('${s.symbol}',this.checked)" title="${checkTitle}"></td>`,
+      action:`<td style="white-space:nowrap">${actPill}</td>`,
       rank:`<td style="font-family:'DM Mono',monospace;font-weight:800;color:var(--t1);text-align:right">${s.rank??'—'}</td>`,
       score:`<td>${radarScoreCell(s.score,radarScoreTitle(s)+(canBuy?'':` Not selectable: ${checkTitle}.`),canBuy)}</td>`,
       // v1142: routed through symbolChartButton like every other table. This cell had built its own
@@ -10381,8 +10452,15 @@ function renderTable(){
       // owner has ruled out. Both numbers survive, with their full tooltips.
       tgt:`<td style="font-weight:700" title="${escHtml((exitPolicy.viable?`${exitPolicy.targetSource}. You need ${exitPolicy.anchorPct?.toFixed(2)??'—'}% per trade to hold pace; this row offers ${exitPolicy.targetPct?.toFixed(2)??'—'}%${(exitPolicy.anchorPct>0&&exitPolicy.targetPct>0&&exitPolicy.targetPct<exitPolicy.anchorPct)?' — short of it':''}`:`Stock capacity ${exitPolicy.capacityPct?.toFixed(2)??'—'}% cannot clear the ${exitPolicy.minGrossPct?.toFixed(2)??'—'}% cost + net hurdle`)+' · '+exitPolicy.stopSource+(exitPolicy.rewardRisk!=null?` · reward:risk ${exitPolicy.rewardRisk.toFixed(2)}`+(exitPolicy.rewardRisk<1?' — BELOW 1.0: this stock risks more than it aims to make':''):''))}"><span style="color:${exitPolicy.viable?'var(--green)':'var(--red)'}">${exitPolicy.viable&&exitPolicy.targetPct!=null?'+'+exitPolicy.targetPct.toFixed(2)+'%':'—'}</span><span style="color:var(--t3)"> / </span><span style="color:var(--red)">−${exitPolicy.stopPct.toFixed(2)}%</span></td>`,
       alloc:`<td class="alloc-cell" data-sym="${s.symbol}">${(()=>{
-        if(!am) return '<span style="color:var(--t3);font-size:13px">—</span>';
-        if(am.rejected) return `<span style="color:var(--red);font-size:12px" title="${escHtml(am.reason||'Stock-specific target cannot clear costs and desired net.')}">no viable target</span>`;
+        if(!am){
+          if(canBuy && isSelected){
+            const allocCtx=getAllocationPassContext();
+            const railReason = getAllocationBlockReason(s, allocCtx);
+            if(railReason) return `<span style="color:var(--amber);font-size:11px;line-height:1.2;display:block" title="${escHtml(railReason)}">${escHtml(railReason)}</span>`;
+          }
+          return '<span style="color:var(--t3);font-size:13px">—</span>';
+        }
+        if(am.rejected || am.qty === 0) return `<span style="color:var(--amber);font-size:11px;line-height:1.2;display:block" title="${escHtml(am.reason||'Below 1 share')}">${escHtml(am.reason||'0 shares')}</span>`;
         return `<span style="color:var(--amber);font-weight:700;font-family:'DM Mono',monospace;font-size:14px">${fmtINR(am.alloc)}</span>${allocationSubline(am,unitLabel)}`;
       })()}</td>`,
       risk:`<td>${radarRiskPill(s.risk)}</td>`
@@ -10390,7 +10468,7 @@ function renderTable(){
     const cells=COLS.map(c=>cellH[c.key]||'<td></td>').join('');
     let _trStyle='cursor:pointer';
     if(isSelected) _trStyle+=';background:rgba(251,191,36,.04);outline:1px solid rgba(251,191,36,.12);outline-offset:-1px';
-    return`<tr style="${_trStyle}" onclick="showRadarDetail('${s.symbol}')" title="Click for the full scoring breakdown">${cells}</tr>`;
+    return`<tr data-sym="${s.symbol}" style="${_trStyle}" onclick="showRadarDetail('${s.symbol}')" title="Click for the full scoring breakdown">${cells}</tr>`;
   }).join('')||`<tr><td colspan="${COLS.length}"><div style="padding:48px 20px;text-align:center;color:var(--t3)">${emptyBoardReason()}</div></td></tr>`;
   renderPgn();
   updateSelectAll();
@@ -10416,9 +10494,18 @@ function scrollToSection(id){
   window.scrollTo({top:y,behavior:'smooth'});
 }
 function goP(p){PG=p;renderTable();scrollToSection('tHead');}
-function doSort(col){if(SCOL===col)SDIR*=-1;else{SCOL=col;SDIR=['symbol','setup','series','risk'].includes(col)?1:-1;}applySort();PG=1;renderHead();renderTable();saveFilterState();}
+function doSort(col){if(SCOL===col)SDIR*=-1;else{SCOL=col;SDIR=['symbol','setup','series','risk','action'].includes(col)?1:-1;}applySort();PG=1;renderHead();renderTable();saveFilterState();}
 function applySort(){
   const col=SCOL;
+  if(col==='action'){
+    const rankMap={GO:0,WAIT:1,BLOCKED:2};
+    FILT.sort((a,b)=>{
+      const sa=rankMap[getRowActionState(a).state]??9;
+      const sb=rankMap[getRowActionState(b).state]??9;
+      return (sa-sb)*SDIR;
+    });
+    return;
+  }
   FILT.sort((a,b)=>{
     const va=a[col],vb=b[col];
     if(va===null||va===undefined)return 1;if(vb===null||vb===undefined)return-1;
@@ -11127,14 +11214,19 @@ async function hydrateFromHelper(reason){
     const scannerChanged=changed.filter(f=>isScannerCsvName(f.name));
     const portfolioChanged=changed.filter(isPortfolioFile);
     if(scannerChanged.length){
-      const f=scannerChanged.find(x=>isGeneratedUniverseName(x.name))||scannerChanged[0];
-    const file=f&&await fetchOne(f);
-      const ok=!!file&&await processScannerUpload(file,'stock');
-      if(ok){
+      if(reason==='live refresh'){
+        // v1267: Delta transport owns live universe updates. Do not download full CSV on the live beat.
         for(const x of scannerChanged) _helperInputSigs[x.name]=sig(x);
-        try{renderTradingDashboardNow();}catch(e){}
-        any=true;
-      }else allOk=false;
+      } else {
+        const f=scannerChanged.find(x=>isGeneratedUniverseName(x.name))||scannerChanged[0];
+        const file=f&&await fetchOne(f);
+        const ok=!!file&&await processScannerUpload(file,'stock');
+        if(ok){
+          for(const x of scannerChanged) _helperInputSigs[x.name]=sig(x);
+          try{renderTradingDashboardNow();}catch(e){}
+          any=true;
+        }else allOk=false;
+      }
     }
     if(portfolioChanged.length){
       const files=[];
@@ -11157,6 +11249,159 @@ async function hydrateFromHelper(reason){
   // Marked seen only once the load SUCCEEDED, so a failed pass retries rather than going quiet.
   if(ok) for(const f of wanted) _helperInputSigs[f.name]=sig(f);
   return ok;
+}
+
+// ---- DELTA TRANSPORT & NON-BLOCKING SCORING (v1267) -------------------------------------------
+let _clientUniverseRev = 0;
+let _clientBarRev = 0;
+const _universeMap = new Map();
+let _scoreJobRunning = false;
+let _scoreJobPending = false;
+
+function universeFieldsToRow(sym, f){
+  return {
+    Symbol: sym,
+    Description: f.description || sym,
+    Sector: f.sector || '',
+    Price: f.price,
+    'Open, 1 day': f.open,
+    'High, 1 day': f.high,
+    'Low, 1 day': f.low,
+    'Volume, 1 day': f.volume,
+    'Price change %, 1 day': f.dayPct,
+    'Price change %, 1 week': f.weekPct,
+    'Price change %, 1 hour': f.hourPct,
+    'Price change %, 15 minutes': f.min15Pct,
+    'Price change %, 5 minutes': f.min5Pct,
+    'Change from open %, 1 day': f.changeOpenPct,
+    'Gap %, 1 day': f.gapPct,
+    'Relative volume at time': f.relVolAtTime,
+    'Relative volume, 1 day': f.relVol,
+    'Relative volume, 15 minutes': f.relVol15,
+    'Average volume, 10 days': f.avgVol10,
+    'Volume change %, 1 day': f.volChangePct,
+    'Price \u00d7 volume (turnover), 1 day': f.turnover,
+    'Average daily range %': f.adr,
+    'Average true range %, 14, 1 day': f.atr14d,
+    'Average true range %, 14, 1 week': f.atr14w,
+    'Average true range %, 14, 5 minutes': f.atr5m,
+    'Volatility, 1 day': f.volatility,
+    'Simple moving average, 50, 1 day': f.sma50,
+    'Volume-weighted average price, 1 day': f.vwap
+  };
+}
+
+function patchVisiblePrices(){
+  const rows = document.querySelectorAll('#tBody tr[data-sym]');
+  if(!rows.length) return;
+  const allMap = new Map(ALL.map(s => [s.symbol, s]));
+  rows.forEach(tr => {
+    const sym = tr.dataset.sym;
+    const s = allMap.get(sym);
+    if(s){
+      const pxCell = tr.querySelector('td[data-key="price"]');
+      if(pxCell){
+        pxCell.innerHTML = `${fmtINR(s.price)}<span style="color:var(--t3)"> · </span><span style="font-size:12px">${fPerf(s.day??s.priceChange)}${s.corpAction?`<span title="Corporate action (${escHtml(s.corpAction)}) — mechanical ex-date move, neutralised in scoring" style="font-size:11px;color:var(--amber);margin-left:4px;cursor:help">⚑</span>`:''}</span>`;
+      }
+    }
+  });
+}
+
+function patchUniverseDeltas(deltaRows){
+  if(!deltaRows || !ALL.length) return;
+  const symMap = new Map(ALL.map(s => [s.symbol, s]));
+  for(const sym in deltaRows){
+    const f = deltaRows[sym];
+    const s = symMap.get(sym);
+    if(s && f){
+      if(Number.isFinite(f.price)) s.price = f.price;
+      if(Number.isFinite(f.dayPct)) s.day = f.dayPct;
+      if(Number.isFinite(f.changeOpenPct)) s.changeOpen = f.changeOpenPct;
+      if(Number.isFinite(f.turnover)) s.turnover = f.turnover;
+      if(Number.isFinite(f.vwap)) s.vwap = f.vwap;
+      if(Number.isFinite(f.volume)) s.volume = f.volume;
+    }
+  }
+  patchVisiblePrices();
+}
+
+async function scheduleScoreJob(){
+  if(_scoreJobRunning){
+    _scoreJobPending = true;
+    return;
+  }
+  _scoreJobRunning = true;
+  _scoreJobPending = false;
+  try {
+    const raw = [];
+    for(const [sym, f] of _universeMap){
+      raw.push(universeFieldsToRow(sym, f));
+    }
+    if(raw.length < 20) return;
+    ALL = await radarScoreRowsAsync(raw);
+    applyFilters();
+    try { renderRankingsPanels(); } catch(e){}
+    try { renderStats(); } catch(e){}
+  } catch(e) {
+    console.warn('scheduleScoreJob error:', e);
+  } finally {
+    _scoreJobRunning = false;
+    if(_scoreJobPending){
+      _scoreJobPending = false;
+      setTimeout(scheduleScoreJob, 50);
+    }
+  }
+}
+
+async function pollUniverseDelta(){
+  if(!KITE_API) return { ok: false, changed: false };
+  try {
+    const r = await fetch(KITE_HELPER + '/api/kite/universe-delta?since=' + _clientUniverseRev, { cache: 'no-store' });
+    if(!r.ok) return { ok: false, changed: false };
+    const j = await r.json();
+    if(!j) return { ok: false, changed: false };
+
+    const newRev = Number(j.rev) || 0;
+    const newBarRev = Number(j.barRev) || 0;
+    const barCompleted = (_clientBarRev > 0 && newBarRev > _clientBarRev);
+    const isCold = (_clientUniverseRev === 0 || j.full);
+
+    _clientUniverseRev = newRev;
+    _clientBarRev = newBarRev;
+
+    const changedSyms = Object.keys(j.rows || {});
+    if(changedSyms.length === 0 && !isCold){
+      if(barCompleted){
+        scheduleScoreJob();
+      }
+      return { ok: true, changed: false, barCompleted };
+    }
+
+    for(const sym of changedSyms){
+      _universeMap.set(sym, j.rows[sym]);
+    }
+
+    if(isCold){
+      const raw = [];
+      for(const [sym, f] of _universeMap){
+        raw.push(universeFieldsToRow(sym, f));
+      }
+      if(raw.length >= 20){
+        ALL = radarScoreRows(raw);
+        FILT = [...ALL];
+        _tvLoadedThisSession = true;
+        applyFilters();
+      }
+    } else {
+      patchUniverseDeltas(j.rows);
+      if(barCompleted){
+        scheduleScoreJob();
+      }
+    }
+    return { ok: true, changed: changedSyms.length > 0, barCompleted };
+  } catch(e) {
+    return { ok: false, changed: false, error: e.message };
+  }
 }
 async function loadIntradayInventory(){
   if(!KITE_API) return 0;
@@ -11481,66 +11726,27 @@ function applyFilters(){
   const allocCtx=getAllocationPassContext();
   let rows=ALL.filter(s=>{
     if(s._held)SUPPRESSED_HELD++;
-    // Configured surveillance rules are a HARD filter (owner 2026-07-17): any stock
-    // flagged under a rule in the Methodology table is weeded out of recommendations.
-    // Non-configured REG1 flags remain a score penalty + badge only.
-    if(NSE_SURV[s.symbol]?.length){SURV_HARD_REMOVED++;REMOVED_ROWS.push({s,reason:'surv',rules:NSE_SURV[s.symbol]});return false;}
-    if(s.recommendationTriggerBlocked){
-      REMOVED_ROWS.push({s,reason:'trigger',detail:'automatic evidence trigger: '+(s.recommendationTriggerReasons||[]).join(', ')});
-      return false;
-    }
-    // THE THRESHOLD GOVERNS RECOMMENDATION, NOT VISIBILITY (v1250). Owner: "The recommendation is
-    // score threshold based, but that doesn't mean stocks are not shown there with whatever score
-    // they have." This REMOVED every entry-blocked row from the table, which is survivable on a
-    // strong day and empties the board completely on a weak one: measured 2026-09-02 at 09:40,
-    // breadth was 33% so `marketWeak` was true, only 406 of 1,669 rows were confirmed above VWAP
-    // and up from open, and between the weak-market overlay and the peak guard ALL 1,543 displayed
-    // rows were removed - "1543 timing-trigger misses" and an empty table with a 1,543-row universe.
-    // The row stays, carrying its score and its reason. It is still NOT BUYABLE: entryReady===false
-    // remains in meetsRecommendationBar, so it cannot be selected or exported, and radarScoreCell
-    // renders an above-bar score amber when the row is not selectable. Nothing is loosened; the
-    // stock is simply visible, which is what a ranking table is for.
-    // Counted so the status bar can say how many are waiting, but NOT pushed into REMOVED_ROWS -
-    // the row is on the board, and listing it as removed would contradict the table beside it.
-    if(s.entryReady===false&&s.entryAtLimit!==true) PEAK_TIMING_REMOVED++;
-    const _vw=Number(s.vwap), _px=Number(s.price), _co=Number(s.changeOpen), _day=Number(s.day);
-    const _aboveVwap=_vw>0&&_px>=_vw;
-    const _aboveOpen=Number.isFinite(_co)&&_co>0;
-    const _greenDay=Number.isFinite(_day)&&_day>0;
-    if(!(_aboveVwap&&_aboveOpen&&_greenDay)){
-      DIRECTION_REMOVED++;
-      const why=[];
-      if(!_greenDay)why.push('red on the day ('+(Number.isFinite(_day)?_day.toFixed(2)+'%':'no day move')+')');
-      if(!_aboveVwap)why.push(_vw>0?'below VWAP ('+((_px/_vw-1)*100).toFixed(2)+'%)':'no VWAP on file');
-      if(!_aboveOpen)why.push(Number.isFinite(_co)?'below its open ('+_co.toFixed(2)+'%)':'no change-from-open');
-      REMOVED_ROWS.push({s,reason:'direction',detail:'not lifting off: '+why.join(', ')});
-      return false;
-    }
+    // Discovery filters ONLY: Min Turnover, Max Price, Min Score, Risk, Search
     if((s.turnover||0)<minTurn){REMOVED_ROWS.push({s,reason:'filter',detail:'below the Min Turnover filter ('+fmtINR(minTurn)+')'});return false;}
     if(maxPrice!=null&&Number(s.price)>maxPrice){REMOVED_ROWS.push({s,reason:'filter',detail:'above the Max Price filter ('+fmtINR(maxPrice)+')'});return false;}
-    // v1259: Min Score is a FILTER, which is what its label promises - the owner set 79 and was
-    // shown 66.8. v1250 is untouched: that rule forbade DELETING a row for a TIMING veto it had no
-    // say in, not for a floor the owner typed himself, and the row still appears in the removed
-    // audit with its score. An absent score is not a low score (RADAR_SCORE_BANDS) and is left be.
     if(Number.isFinite(Number(s.score))&&Number(s.score)<RECOMMEND_MIN_SCORE){
       REMOVED_ROWS.push({s,reason:'filter',detail:'score '+Number(s.score).toFixed(1)+' is below your Min Score of '+RECOMMEND_MIN_SCORE});
       return false;
     }
     if(riskSel.length&&!riskSel.includes(s.risk)){REMOVED_ROWS.push({s,reason:'filter',detail:s.risk+' risk — excluded by your Risk filter'});return false;}
     if(q&&![s.symbol,s.name,s.sector].join(' ').toLowerCase().includes(q)) return false;
-    // v1080 (owner): a row that can never be allocated a single share is not a recommendation.
-    // Structural causes only (see getAllocationBlockReason) — never the capital split.
+
+    // Diagnostic counters based on row Action state
+    const act=getRowActionState(s);
+    if(act.state==='BLOCKED'){
+      if(act.reason.includes('Surveillance')) SURV_HARD_REMOVED++;
+      else if(act.reason.includes('lifting off')) DIRECTION_REMOVED++;
+    } else if(act.state==='WAIT'){
+      if(act.reason.includes('Extended')) PEAK_TIMING_REMOVED++;
+    }
     const allocBlock=getAllocationBlockReason(s,allocCtx);
-    if(s.noHistory===true){
-      REMOVED_ROWS.push({s,reason:'nohistory',
-        detail:'listed too recently - 1-month, 3-month and 1-year performance are the same number, so every multi-day feature is fiction'});
-      return false;
-    }
-    if(s.intradaySellingToday===true){
-      REMOVED_ROWS.push({s,reason:'flow',detail:s.intradayWhy||'being sold in the current session'});
-      return false;
-    }
-    if(allocBlock){ALLOC_BLOCKED++;REMOVED_ROWS.push({s,reason:'alloc',detail:allocBlock});return false;}
+    if(allocBlock) ALLOC_BLOCKED++;
+
     return true;
   });
   rows.sort((a,b)=>(a.rank??Infinity)-(b.rank??Infinity));
@@ -11549,9 +11755,20 @@ function applyFilters(){
 
   CURRENT_TRADE_TIMING=getCurrentTradeTimingDecision();
   const selectionRows=[...rows].sort((a,b)=>(a.rank??Infinity)-(b.rank??Infinity));
-  SELECTED=new Set(selectionRows
-    .filter(s=>!EXPORT_EXCLUDED.has(s.symbol)&&isSelectableRecommendation(s))
-    .slice(0,20).map(s=>s.symbol));
+  const newSelected=new Set();
+  for(const sym of SELECTED){
+    const s=rows.find(r=>r.symbol===sym);
+    if(s && isSelectableRecommendation(s) && !EXPORT_EXCLUDED.has(sym)){
+      newSelected.add(sym);
+    }
+  }
+  for(const s of selectionRows){
+    if(newSelected.size>=20) break;
+    if(isSelectableRecommendation(s) && !EXPORT_EXCLUDED.has(s.symbol)){
+      newSelected.add(s.symbol);
+    }
+  }
+  SELECTED=newSelected;
 
   PG=1;renderHead();renderTable();renderStatusBar();saveFilterState();updateTabCounts();
   try{renderRankingsPanels();}catch(e){console.warn('Rankings panels render failed',e);}
@@ -11922,13 +12139,19 @@ function renderStatusBar(){
   const countColor=shown<total?'var(--fire)':'var(--green)';
   const instrumentLabel='stocks';
   const allocatedLabel=n=>n===1?'stock':'stocks';   // v1206: it printed "1 stocks".
-  let html=`<span class="sb-count" style="color:${countColor}">${shown.toLocaleString()}</span><span class="sb-total">of ${total.toLocaleString()} ${instrumentLabel}</span>`;
-  const selCount=FILT.filter(s=>SELECTED.has(s.symbol)).length;
+  const candidateCount=shown;
+  const goCount=FILT.filter(s=>getRowActionState(s).state==='GO').length;
+  const waitBlockedCount=candidateCount-goCount;
+  const selList2=FILT.filter(s=>SELECTED.has(s.symbol)&&getRowActionState(s).state==='GO');
+  const am2=computeAlloc(capital,selList2);
+  const activeAlloc=Object.values(am2).filter(a=>!a.rejected&&a.qty>0);
+  const allocatedCount=activeAlloc.length;
+  const candidateLabel=candidateCount===1?'candidate':'candidates';
+
+  let html=`<span class="sb-count" style="color:${countColor}">${candidateCount.toLocaleString()} ${candidateLabel}</span> · <span style="color:var(--green);font-weight:700">${goCount} GO</span> · <span style="color:var(--t3)">${waitBlockedCount} WAIT/BLOCKED</span> · <span style="color:var(--amber);font-weight:700">${allocatedCount} allocated</span> <span class="sb-total">(of ${total.toLocaleString()} ${instrumentLabel})</span>`;
+  const selCount=selList2.length;
   if(capital>0&&selCount>0){
-    const selList2=FILT.filter(s=>SELECTED.has(s.symbol));
-    const am2=computeAlloc(capital,selList2);
     const actualDeployed=Object.values(am2).reduce((s,a)=>s+(a.debit??a.alloc),0);
-    const activeAlloc=Object.values(am2).filter(a=>!a.rejected&&a.qty>0);
     const stockCount=activeAlloc.length;
     html+=` <span style="color:var(--amber);font-size:13px;font-family:'DM Mono',monospace;font-weight:700;margin-left:8px" title="All-in estimated buy debit: limit-price notional plus CNC buy-side charges.">· ${stockCount} ${allocatedLabel(stockCount)} · ${fmtINR(actualDeployed)} of ${fmtINR(capital)} all-in</span>`;
     const risks=activeAlloc.map(a=>a.riskRs).filter(v=>Number.isFinite(v)&&v>0).sort((a,b)=>a-b);
@@ -11987,7 +12210,7 @@ function renderStatusBar(){
         html+=` <span style="color:${col};font-size:13px;font-family:'DM Mono',monospace;font-weight:700;margin-left:8px" title="${tip}">· ⚖ R:R ${rr.toFixed(2)}x vs ${curve.rr}x baseline${short?' — short':''}</span>`;
       }
     }
-  } else if(capital>0){
+  } else if(capital>0 && goCount>0){
     html+=` <span style="color:var(--t3);font-size:13px;margin-left:8px">· select ${instrumentLabel} to allocate ${fmtINR(capital)}</span>`;
   }
   // v555 WS-D: market intraday breadth gauge (entry timing). Market-wide, so it never changes the ranking.
@@ -12184,9 +12407,10 @@ async function streamRefreshTick(){
         lastSuccessAt:STREAM_STATUS?done:STREAM_ACTIVITY.lastSuccessAt,nextAt:done+STREAM_REFRESH_MS});
       return;
     }
-    // The helper rewrites the universe every 30 seconds; this is what notices it. One small JSON
-    // when nothing changed.
-    const universeChanged=await hydrateFromHelper('live refresh');
+    // v1267: Delta transport replaces 30-second full Kite Universe.csv download.
+    // The helper maintains live state in memory and sends only changed symbols/bars.
+    const deltaRes=await pollUniverseDelta();
+    const universeChanged=deltaRes&&deltaRes.changed;
     // Holdings, positions and orders used to wait for the helper's ten-minute housekeeping tick.
     // Ask on this same visible 30-second beat, then immediately hydrate whatever changed, so a new
     // fill appears on Open Positions without a second timer or a manual action.
@@ -13267,7 +13491,7 @@ function applySavedFiltersForMode(mode){
       syncExecutedRecommendedEntries();
     }
     FILT=[...ALL];_tvLoadedThisSession=true;
-    if(mode==='stock') resetRecommendationSelectionForRefresh();
+    if(mode==='stock' && !options.preserveSelection && !options.restoreOnly && !options.liveRefresh) resetRecommendationSelectionForRefresh();
     completed=true;
     return true;
   }finally{
