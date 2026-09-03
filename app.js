@@ -1,5 +1,5 @@
-const BUILD_TS='2026-09-03 11:23 IST'; // release build time (IST)
-const APP_VERSION=1265; // v1265: a store memo may not walk the store it is memoizing.
+const BUILD_TS='2026-09-03 11:40 IST'; // release build time (IST)
+const APP_VERSION=1266; // v1266: incremental tape refreshes stay incremental.
 const RADAR_SCORE_VERSION='tape-decision-v3';
 // v1093: a baseline reward:risk MEASURED on the cross-section (last completed bhav session) instead of learned from the owner's own fills - reported on every row, deliberately not enforced. Includes v1092: position size split by Radar score / stop distance, so equally-scored names carry equal RUPEE risk, plus an opt-in Risk /trade cap.
 // v556: parse the NSE Market Activity Report (MA<date>.csv) — official Nifty %, advances/declines and sector index moves shown as market CONTEXT in the status bar (EOD data, display only, never fed into per-row scoring); MA added to the ℹ️ file manifest.
@@ -4075,16 +4075,30 @@ function parseIntradayPaste(text,forSymbol,opts){
   // whole history with the one new bar an incremental read returns - which is why v1243's
   // `?since=` read was reverted rather than shipped. Keyed on the bar timestamp so a re-sent bar
   // updates in place (the forming candle changes until it closes) and can never duplicate.
+  let changed=true;
   if(_merge&&Array.isArray(INTRADAY_BARS[sym])&&INTRADAY_BARS[sym].length){
-    const byT=new Map();
-    for(const b of INTRADAY_BARS[sym]) byT.set(b.t,b);
-    for(const b of bars) byT.set(b.t,b);
-    const all=[...byT.values()].sort((a,b)=>a.t-b.t);
-    // Bounded by the helper's own file trim, not a new number of ours.
-    INTRADAY_BARS[sym]=all.length>INTRADAY_STORE_MAX?all.slice(-INTRADAY_STORE_MAX):all;
+    const prior=INTRADAY_BARS[sym], firstNew=bars[0].t, priorLast=prior[prior.length-1].t;
+    if(firstNew>=priorLast){
+      // Live refresh normally returns the forming candle already at the tail, or one new candle.
+      // Update that O(delta) tail instead of rebuilding/sorting ~1,000 bars for every symbol.
+      changed=false;
+      for(const b of bars){
+        const i=prior.length-1, old=prior[i];
+        if(old&&b.t===old.t){
+          if(old.o!==b.o||old.h!==b.h||old.l!==b.l||old.c!==b.c||old.v!==b.v){prior[i]=b;changed=true;}
+        }else if(!old||b.t>old.t){prior.push(b);changed=true;}
+      }
+      if(prior.length>INTRADAY_STORE_MAX) INTRADAY_BARS[sym]=prior.slice(-INTRADAY_STORE_MAX);
+    }else{
+      const byT=new Map();
+      for(const b of prior) byT.set(b.t,b);
+      for(const b of bars) byT.set(b.t,b);
+      const all=[...byT.values()].sort((a,b)=>a.t-b.t);
+      INTRADAY_BARS[sym]=all.length>INTRADAY_STORE_MAX?all.slice(-INTRADAY_STORE_MAX):all;
+    }
   } else INTRADAY_BARS[sym]=bars;
-  INTRADAY_STORE_V++;   // the ONE place a tape write is announced; every store memo keys off it
-  return {ok:true,sym,bars:bars.length,sessions:new Set(bars.map(b=>istDayKey(b.t))).size,live};
+  if(changed) INTRADAY_STORE_V++; // unchanged inclusive deltas must not invalidate every memo
+  return {ok:true,changed,sym,bars:bars.length,sessions:new Set(bars.map(b=>istDayKey(b.t))).size,live};
 }
 function istDayKey(ms){
   // The pasted stamps carry their own +0530 offset, so a plain local-date read is enough here and
@@ -11174,12 +11188,11 @@ async function loadIntradayInventory(){
           return ['"'+dt+'"','"'+c[1]+'"','"'+c[2]+'"','"'+c[3]+'"','"'+c[4]+'"','"0"','"0"','"'+(c[5]||0)+'"'].join(',');
         })).join('\n');
       const res=parseIntradayPaste(csv,sym,{merge:!!since});
-      if(res&&res.ok) n++;
+      if(res&&res.ok&&res.changed) n++;
     }
     if(n){
+      // applyFilters owns the table, status and rankings-panel render.
       try{ applyIntradayReorder(ALL); applyFilters(); }catch(e){}
-      try{ renderRankingsPanels(); }catch(e){}
-      try{ renderTable(); }catch(e){}
     }
     return n;
   }catch(e){ return 0; }
