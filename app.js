@@ -1,5 +1,5 @@
-const BUILD_TS='2026-09-03 15:00 IST'; // release build time (IST)
-const APP_VERSION=1272; // v1272: stop duplicate live inventory downloads.
+const BUILD_TS='2026-09-03 15:15 IST'; // release build time (IST)
+const APP_VERSION=1273; // v1273: correct weighted performance totals.
 const RADAR_SCORE_VERSION='tape-decision-v3';
 // v1093: a baseline reward:risk MEASURED on the cross-section (last completed bhav session) instead of learned from the owner's own fills - reported on every row, deliberately not enforced. Includes v1092: position size split by Radar score / stop distance, so equally-scored names carry equal RUPEE risk, plus an opt-in Risk /trade cap.
 // v556: parse the NSE Market Activity Report (MA<date>.csv) — official Nifty %, advances/declines and sector index moves shown as market CONTEXT in the status bar (EOD data, display only, never fed into per-row scoring); MA added to the ℹ️ file manifest.
@@ -8165,7 +8165,9 @@ function renderPerformance(){
   const monthTotalPnl=monthRows.reduce((sum,row)=>sum+row.pnl,0);
   const monthTotalLots=monthRows.reduce((sum,row)=>sum+row.trades,0);
   const monthTotals={month:'TOTAL',pnl:monthTotalPnl,trades:monthTotalLots,days:monthRows.reduce((sum,row)=>sum+row.days,0),avgDay:monthRows.reduce((sum,row)=>sum+row.pnl,0),calDays:monthRows.reduce((sum,row)=>sum+row.calDays,0),avgCalDay:monthTotalPnl};
-  monthTotals.avgDay=monthRows.length?Math.round(monthTotalPnl/monthRows.length):0;
+  // TOTAL Avg/Trading Day is weighted by actual traded days, not by month count.
+  // Dividing by monthRows made six months of P&L display as a fictitious ₹5,300/day.
+  monthTotals.avgDay=monthTotals.days?Math.round(monthTotalPnl/monthTotals.days):0;
   monthTotals.avgCalDay=monthTotals.calDays?Math.round(monthTotalPnl/monthTotals.calDays):0;
   const monthTbl=makeSortableTable('perf-month',monthCols,monthRows,'month',-1,null,monthTotals);
 
