@@ -1,5 +1,5 @@
-const BUILD_TS='2026-09-02 18:35 IST'; // release build time (IST)
-const APP_VERSION=1262; // v1262: Performance reports one booked truth, removes scorecard noise, and totals tables.
+const BUILD_TS='2026-09-03 09:48 IST'; // release build time (IST)
+const APP_VERSION=1263; // v1263: expired Connect auth cannot present a live tape.
 const RADAR_SCORE_VERSION='tape-decision-v3';
 // v1093: a baseline reward:risk MEASURED on the cross-section (last completed bhav session) instead of learned from the owner's own fills - reported on every row, deliberately not enforced. Includes v1092: position size split by Radar score / stop distance, so equally-scored names carry equal RUPEE risk, plus an opt-in Risk /trade cap.
 // v556: parse the NSE Market Activity Report (MA<date>.csv) — official Nifty %, advances/declines and sector index moves shown as market CONTEXT in the status bar (EOD data, display only, never fed into per-row scoring); MA added to the ℹ️ file manifest.
@@ -11265,7 +11265,7 @@ function intradayPasteBarHtml(){
   const needsLogin=!needsSetup&&(KITE_API.needsLogin||!KITE_API.hasToken||KITE_API.tokenValid===false);
   const st=STREAM_STATUS;
   const connected=!!(st&&st.connected);
-  const live=inSession&&connected;
+  const live=inSession&&connected&&!needsLogin;
   const bars=Object.keys(INTRADAY_BARS||{}).length;
   const dot=!inSession?'var(--border-hi)':(live?'var(--green)':(needsLogin?'var(--amber)':'var(--red)'));
   const head=live
