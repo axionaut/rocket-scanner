@@ -1,5 +1,5 @@
-const BUILD_TS='2026-09-03 14:45 IST'; // release build time (IST)
-const APP_VERSION=1271; // v1271: preserve hard removal reasons over user filters.
+const BUILD_TS='2026-09-03 15:00 IST'; // release build time (IST)
+const APP_VERSION=1272; // v1272: stop duplicate live inventory downloads.
 const RADAR_SCORE_VERSION='tape-decision-v3';
 // v1093: a baseline reward:risk MEASURED on the cross-section (last completed bhav session) instead of learned from the owner's own fills - reported on every row, deliberately not enforced. Includes v1092: position size split by Radar score / stop distance, so equally-scored names carry equal RUPEE risk, plus an opt-in Risk /trade cap.
 // v556: parse the NSE Market Activity Report (MA<date>.csv) — official Nifty %, advances/declines and sector index moves shown as market CONTEXT in the status bar (EOD data, display only, never fed into per-row scoring); MA added to the ℹ️ file manifest.
@@ -11671,7 +11671,7 @@ function intradayPasteBarHtml(){
     if(checked) bits.push('checked '+checked);
     if(portfolioAt) bits.push('positions '+portfolioAt);
     if(activity.portfolioError) bits.push('positions refresh failed');
-    if(inSession&&activity.nextAt) bits.push('next check in '+nextSecs+'s');
+    if(inSession&&activity.nextAt) bits.push('next reconcile in '+nextSecs+'s');
     if(!inSession) bits.push('background market refresh paused');
     activityText=bits.join(' · ')||activityText;
   }
@@ -12434,7 +12434,10 @@ async function streamRefreshTick(){
     // fill appears on Open Positions without a second timer or a manual action.
     const portfolio=await refreshPortfolioFromHelper();
     const portfolioChanged=portfolio.ok?await hydrateFromHelper('portfolio refresh'):false;
-    const barsRead=await loadIntradayInventory();
+    // While the WebSocket is healthy it is the authoritative bar source. Do not download and
+    // reparse the entire intraday inventory on the same beat; the universe delta already carries
+    // the changed live symbols. Inventory is a recovery path only when the stream is unavailable.
+    const barsRead=STREAM_STATUS?.connected ? 0 : await loadIntradayInventory();
     const done=Date.now();
     setStreamActivity({phase:STREAM_STATUS?.connected?'live':'stream-down',lastCompleteAt:done,
       lastSuccessAt:STREAM_STATUS?done:STREAM_ACTIVITY.lastSuccessAt,
