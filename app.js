@@ -1,5 +1,5 @@
-const BUILD_TS='2026-09-04 15:34 IST'; // release build time (IST)
-const APP_VERSION=1293; // v1293: trading continuity and bars-of-flow — is anyone trading this stock at all.
+const BUILD_TS='2026-09-04 15:46 IST'; // release build time (IST)
+const APP_VERSION=1294; // v1294: drop the thinnest X% of the market by shares traded per 5-minute bar.
 const RADAR_SCORE_VERSION='tape-decision-v3';
 // v1093: a baseline reward:risk MEASURED on the cross-section (last completed bhav session) instead of learned from the owner's own fills - reported on every row, deliberately not enforced. Includes v1092: position size split by Radar score / stop distance, so equally-scored names carry equal RUPEE risk, plus an opt-in Risk /trade cap.
 // v556: parse the NSE Market Activity Report (MA<date>.csv) — official Nifty %, advances/declines and sector index moves shown as market CONTEXT in the status bar (EOD data, display only, never fed into per-row scoring); MA added to the ℹ️ file manifest.
@@ -11605,6 +11605,35 @@ function getTapeFlowProfile(sym){
   _flowProfileMemo.map.set(s,out);
   return out;
 }
+// THE THIN-STOCK CUT (owner, v1294). "I do not want to get into stocks which deal in low volumes."
+// Rank every stock by the shares it trades in a typical five-minute bar, and drop the bottom X% of
+// the market. It is a RANKING against the rest of the board on the day, not a rupee line - which is
+// what Min Turnover was, and what a rupee-per-bar version would have been again in disguise.
+//
+// SHARES, DELIBERATELY, NOT RUPEES. Shares are not price-scaled, so this is the one cut turnover
+// cannot express - and the owner's own example is the case: Rs25L of a Rs5,000 stock is 500 shares a
+// DAY. The known consequence, agreed with him before building it, is that a share ranking also
+// sinks expensive stocks whatever their activity, so it doubles as the price ceiling he was
+// already running by hand at Rs800.
+let _volCutMemo={v:-1,pct:-1,cut:null,n:0};
+function getSharesPerBarCut(pct){
+  const p=Number(pct);
+  if(!(p>0)||p>=100) return null;
+  if(_volCutMemo.v===INTRADAY_STORE_V&&_volCutMemo.pct===p) return _volCutMemo;
+  const vals=[];
+  for(const r of (Array.isArray(ALL)?ALL:[])){
+    const f=getTapeFlowProfile(r&&r.symbol);
+    if(f&&f.medianShares>0) vals.push(f.medianShares);
+  }
+  vals.sort((a,b)=>a-b);
+  // A percentile needs a cross-section. Below the scorer's own density floor there is nothing to
+  // rank against, so it declines to cut rather than inventing a bar out of a handful of rows.
+  const out=(vals.length>=25)
+    ? {v:INTRADAY_STORE_V,pct:p,cut:radarQuant(vals,p/100),n:vals.length}
+    : {v:INTRADAY_STORE_V,pct:p,cut:null,n:vals.length};
+  _volCutMemo=out;
+  return out;
+}
 function getTradeFrictionPct(row,rupees){
   const sym=normSym(row&&row.symbol||'');
   const px=Number(row&&row.price)||0;
@@ -12293,6 +12322,8 @@ function emptyBoardReason(){
     +(((document.getElementById('fMinScore')?.value||'').trim()==='')?' (default)':''));
   const fr=(document.getElementById('fMaxFriction')?.value||'').trim();
   if(fr&&Number(fr)>0) bits.push('max friction '+escHtml(fr)+'%');
+  const dt=(document.getElementById('fDropThin')?.value||'').trim();
+  if(dt&&Number(dt)>0) bits.push('thinnest '+escHtml(dt)+'% dropped');
   if(!bits.length) return 'Nothing is ranked yet \u2014 the live tape has not produced a current read.';
   const best=ALL.reduce((m,r)=>(r&&!r._held&&Number.isFinite(Number(r.score))&&Number(r.score)>m)?Number(r.score):m,0);
   const removedSummary=Object.entries(REMOVED_ROWS.reduce((m,r)=>{m[r.reason]=(m[r.reason]||0)+1;return m},{}))
@@ -12428,6 +12459,8 @@ function applyFilters(){
   const q=(document.getElementById('fSearch')?.value||'').trim().toLowerCase();
   const turnIdx=+(document.getElementById('fMinTurnover')?.value||0);
   const minTurn=RADAR_LIQ_STEPS[turnIdx]||0;   // retained for the pool/fetch eligibility path only
+  const dropThinRaw=(document.getElementById('fDropThin')?.value||'').trim();
+  const dropThinPct=dropThinRaw===''?null:((Number(dropThinRaw)>0&&Number(dropThinRaw)<100)?Number(dropThinRaw):null);
   const maxFrictionRaw=(document.getElementById('fMaxFriction')?.value||'').trim();
   const maxFriction=maxFrictionRaw===''?null:(Number(maxFrictionRaw)>0?Number(maxFrictionRaw):null);
   // v1216 (owner): a ceiling on the share price. Blank means no ceiling - an empty field is a
@@ -12469,6 +12502,21 @@ function applyFilters(){
     // ones. Friction measures the thing itself, in the same percent unit as the target.
     // ABSENCE IS NOT A REMOVAL: a row with no live book has friction `null` and is left alone. The
     // book is only ten minutes old on a fresh helper, and an unmeasured row is not an expensive one.
+    // THE THIN CUT RUNS FIRST: it is a statement about the stock, so it should be the reason the
+    // row is gone. A row with no tape yet is NOT removed - unmeasured is not thin.
+    if(dropThinPct!=null){
+      const cutInfo=getSharesPerBarCut(dropThinPct);
+      const prof=getTapeFlowProfile(s.symbol);
+      if(cutInfo&&cutInfo.cut!==null&&prof&&prof.medianShares>0&&prof.medianShares<cutInfo.cut){
+        REMOVED_ROWS.push({s,reason:'filter',
+          chip:'Volume '+Math.round(prof.medianShares).toLocaleString('en-IN')+' sh/bar (bottom '+dropThinPct+'%)',
+          detail:'trades about '+Math.round(prof.medianShares).toLocaleString('en-IN')
+            +' shares in a typical 5-minute bar, below the cut of '+Math.round(cutInfo.cut).toLocaleString('en-IN')
+            +' that drops the thinnest '+dropThinPct+'% of the '+cutInfo.n.toLocaleString('en-IN')
+            +' stocks with a tape today'});
+        return false;
+      }
+    }
     if(maxFriction!=null){
       const fr=getTradeFrictionPct(s,frictionSizeBasis());
       if(fr&&fr.ladder&&Number.isFinite(fr.total)&&fr.total>maxFriction){
@@ -12908,6 +12956,8 @@ function renderStatusBar(){
   if(turnIdx>0)tags.push('TO≥'+RADAR_LIQ_LABELS[turnIdx]);
   const frTag=(document.getElementById('fMaxFriction')?.value||'').trim();
   if(frTag!==''&&Number(frTag)>0)tags.push('friction≤'+frTag+'%');
+  const dtTag=(document.getElementById('fDropThin')?.value||'').trim();
+  if(dtTag!==''&&Number(dtTag)>0)tags.push('−thinnest '+dtTag+'%');
   const q=(document.getElementById('fSearch')?.value||'').trim();
   if(q)tags.push('“'+escHtml(q)+'”');
   const capital=getEffectiveCapital();
@@ -13021,6 +13071,7 @@ function clearFilters(){
   ['fSearch','fMinScore'].forEach(id=>{const el=document.getElementById(id);if(el)el.value=id==='fMinScore'?'60':'';});
   const turnEl=document.getElementById('fMinTurnover');if(turnEl)turnEl.value='0';
   const frEl=document.getElementById('fMaxFriction');if(frEl)frEl.value='';
+  const dtEl=document.getElementById('fDropThin');if(dtEl)dtEl.value='';
   updateFilterPlaceholders();
   applyFilters();
   localStorage.removeItem(SCANNER_STORE);
@@ -14186,13 +14237,13 @@ function compactRankingRows(rows){
   }));
 }
 function applySavedFiltersForMode(mode){
-  const ids=['fSearch','fMinScore','fMaxFriction','fCapital','fMaxAlloc','fRiskPerTrade'];
+  const ids=['fSearch','fMinScore','fMaxFriction','fDropThin','fCapital','fMaxAlloc','fRiskPerTrade'];
   const prev={};
   ids.forEach(id=>{const el=document.getElementById(id);if(el)prev[id]=el.value;});
   try{
     const st=JSON.parse(localStorage.getItem(modeKey(SCANNER_STORE,mode))||'{}');
     const shared=JSON.parse(localStorage.getItem(SHARED_FILTER_STORE)||'{}');
-    const map={minScore:'fMinScore',maxFriction:'fMaxFriction'};
+    const map={minScore:'fMinScore',maxFriction:'fMaxFriction',dropThin:'fDropThin'};
     Object.entries(map).forEach(([k,id])=>{const el=document.getElementById(id);if(el&&st[k]!=null)el.value=st[k];});
     const capEl=document.getElementById('fCapital');if(capEl&&shared.capital!=null)capEl.value=shared.capital;
     const maxEl=document.getElementById('fMaxAlloc');if(maxEl&&shared.maxAlloc!=null)maxEl.value=shared.maxAlloc;
@@ -14736,6 +14787,7 @@ function saveFilterState(){
     minScore:document.getElementById('fMinScore')?.value||'60',
     minTurnover:document.getElementById('fMinTurnover')?.value||'0',
     maxFriction:document.getElementById('fMaxFriction')?.value??'',
+    dropThin:document.getElementById('fDropThin')?.value??'',
     sortCol:SCOL,
     sortDir:SDIR,
   };
@@ -14774,6 +14826,7 @@ function loadFilterState(){
     if(state.minScore!=null){const el=document.getElementById('fMinScore');if(el)el.value=state.minScore;}
     if(state.minTurnover!=null){const el=document.getElementById('fMinTurnover');if(el)el.value=state.minTurnover;}
     if(state.maxFriction!=null){const el=document.getElementById('fMaxFriction');if(el)el.value=state.maxFriction;}
+    if(state.dropThin!=null){const el=document.getElementById('fDropThin');if(el)el.value=state.dropThin;}
     resetRecommendationSelectionForRefresh(); // legacy persisted exclusions are deliberately ignored
     // Trade inputs PREFER the Drive-synced brain (so laptop and phone agree); localStorage
     // is the fallback when the brain has none yet (offline / first run).
