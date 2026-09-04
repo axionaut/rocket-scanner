@@ -1,5 +1,5 @@
-const BUILD_TS='2026-09-04 10:45 IST'; // release build time (IST)
-const APP_VERSION=1281; // v1281: acknowledge and synchronize Buy Basket export.
+const BUILD_TS='2026-09-04 11:12 IST'; // release build time (IST)
+const APP_VERSION=1282; // v1282: responsive filters and valid Zerodha basket serialization.
 const RADAR_SCORE_VERSION='tape-decision-v3';
 // v1093: a baseline reward:risk MEASURED on the cross-section (last completed bhav session) instead of learned from the owner's own fills - reported on every row, deliberately not enforced. Includes v1092: position size split by Radar score / stop distance, so equally-scored names carry equal RUPEE risk, plus an opt-in Risk /trade cap.
 // v556: parse the NSE Market Activity Report (MA<date>.csv) — official Nifty %, advances/declines and sector index moves shown as market CONTEXT in the status bar (EOD data, display only, never fed into per-row scoring); MA added to the ℹ️ file manifest.
@@ -1008,7 +1008,7 @@ let MARKET_INTRADAY=null; // v555 WS-D: {adv,dec,advPct,median} market breadth f
 let PORTFOLIO_FILE_DATES={holdings:null,positions:null,orders:null};
 let PORTFOLIO_STALE=null; // v557: {portfolioDate,stale,sessionDate} — Positions/Orders are from a prior session
 let NSE_MARKET=null; // v556: official Market Activity Report summary {date,dateISO,niftyPct,advances,declines,tradedValueCr,marketCapCr,indices} — EOD context, display only
-// v1076: PR-zip data surveyed in RULES.md Appendix E and previously never parsed.
+// v1076: PR-zip data surveyed in the historical evidence ledger and previously never parsed.
 let NSE_INDEX={};        // {indexName -> {close,prev,pct,high52,low52,rangePos}} from pd IND_SEC='Y' rows; includes India VIX
 let NSE_NAME_TO_SYM={};  // {UPPERCASED security NAME -> symbol} from pd - the join key for the name-keyed files
 let KITE_TOKEN={};      // v1139: {symbol -> Kite instrument token} from the PUBLIC api.kite.trade dump
@@ -3857,7 +3857,17 @@ function passesIntradayValidation(s){
   if(newest>0&&Number.isFinite(at)&&(newest-at)>5*60*1000) return false;
   return true;
 }
+const ROW_ACTION_MEMO=new WeakMap();
 function getRowActionState(s){
+  if(!s) return {state:'BLOCKED', reason:'Invalid row'};
+  const stamp=[RADAR.scoredAt||0,INTRADAY_STORE_V,RECOMMEND_MIN_SCORE].join('|');
+  const cached=ROW_ACTION_MEMO.get(s);
+  if(cached?.stamp===stamp) return cached.value;
+  const value=_getRowActionStateUncached(s);
+  ROW_ACTION_MEMO.set(s,{stamp,value});
+  return value;
+}
+function _getRowActionStateUncached(s){
   if(!s) return {state:'BLOCKED', reason:'Invalid row'};
   if(s.scoreVersion!==RADAR_SCORE_VERSION) return {state:'BLOCKED', reason:'Older score scale - rescore required'};
   if(NSE_SURV[s.symbol]?.length) return {state:'BLOCKED', reason:'Surveillance flag ('+(NSE_SURV[s.symbol].join(' · '))+')'};
@@ -4912,7 +4922,7 @@ function radarAnalyze(headers,rawRows,supplements={},heldSymbols=new Set()){
       marginRelease:_marginRelease,
       blocked:_digestionRisk,
       reason:_digestionRisk
-        ? `Rocketed ${_r4d.movePct}% on its results day (${_recEarn}), above that session's top-decile cut of ${_r4d.topDecileCut}%, and is not re-accumulating now. RULES.md R4d: a results rocket gives back sharply on the following sessions even when the numbers were good.`
+        ? `Rocketed ${_r4d.movePct}% on its results day (${_recEarn}), above that session's top-decile cut of ${_r4d.topDecileCut}%, and is not re-accumulating now. The results-rocket digestion rule blocks a fresh entry until the tape re-accumulates, even when the numbers were good.`
         : (_r4d?null:(_inDigestion?'results-day move unknown - no stored closes for that session, so R4d does not apply':null))
     };
     // WS-A stage (percentile bands + event/earnings flags). Stages 4/5/6 need reviewDays + earnings date.
@@ -11792,7 +11802,8 @@ function applyFilters(){
   applySort();
 
   CURRENT_TRADE_TIMING=getCurrentTradeTimingDecision();
-  const selectionRows=[...rows].sort((a,b)=>(a.rank??Infinity)-(b.rank??Infinity));
+  // `rows` has already been ordered by applySort(); do not clone and sort the whole universe again.
+  const selectionRows=rows;
   const newSelected=new Set();
   for(const sym of SELECTED){
     const s=rows.find(r=>r.symbol===sym);
@@ -13151,11 +13162,17 @@ async function exportBasket(){
     // A click can arrive while the 90ms filter debounce is pending. Flush it now so the export
     // is built from the values currently visible in the controls, never the previous board.
     if(APPLY_FILTERS_TIMER){
+      if(buyBtn) buyBtn.innerHTML='⏳ Syncing latest filters…';
       clearTimeout(APPLY_FILTERS_TIMER);
       APPLY_FILTERS_TIMER=null;
       applyFilters();
     }
     renderBasketBtn();
+    if(buyBtn){
+      buyBtn.disabled=true;
+      buyBtn.innerHTML='⏳ Planning basket…';
+      buyBtn.title='Building the latest Zerodha basket…';
+    }
   const capital=getEffectiveCapital();
   const selList=FILT.filter(s=>SELECTED.has(s.symbol));
   if(!selList.length){showToast('Select at least one stock first.',3000,true);return;}
@@ -13249,6 +13266,11 @@ async function exportBasket(){
       showToast(`Basket needs ${fmtINR(exportedDebit)} including estimated buy charges, above capital ${fmtINR(capital)}. Nothing exported.`,6000,true);
       return;
     }
+  }
+  if(buyBtn){
+    buyBtn.disabled=true;
+    buyBtn.innerHTML='⏳ Uploading basket…';
+    buyBtn.title='Writing the verified basket to Scanner Uploads…';
   }
   // _meta is internal bookkeeping (which leg, which symbol) — it must never reach the saved file.
   const payload=orders.map(o=>{const c={...o};delete c._meta;return c;});
