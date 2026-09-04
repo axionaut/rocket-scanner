@@ -1,5 +1,5 @@
-const BUILD_TS='2026-09-04 16:02 IST'; // release build time (IST)
-const APP_VERSION=1295; // v1295: remove the Max Friction filter — friction is still computed and shown, just not a filter gate.
+const BUILD_TS='2026-09-04 16:22 IST'; // release build time (IST)
+const APP_VERSION=1296; // v1296: remove separate intraday verdict buttons; score is the single recommendation verdict.
 const RADAR_SCORE_VERSION='tape-decision-v3';
 // v1093: a baseline reward:risk MEASURED on the cross-section (last completed bhav session) instead of learned from the owner's own fills - reported on every row, deliberately not enforced. Includes v1092: position size split by Radar score / stop distance, so equally-scored names carry equal RUPEE risk, plus an opt-in Risk /trade cap.
 // v556: parse the NSE Market Activity Report (MA<date>.csv) — official Nifty %, advances/declines and sector index moves shown as market CONTEXT in the status bar (EOD data, display only, never fed into per-row scoring); MA added to the ℹ️ file manifest.
@@ -3986,17 +3986,8 @@ function tapeDepthNoteHtml(dep){
       +' recent bars \u2014 too short to score</b>';
 }
 function passesIntradayValidation(s){
-  if(!s?.symbol||s.intradayVerdict!=='confirmed') return false;
-  const read=getIntradayRead(s.symbol);
-  if(!(read&&read.current)) return false;
-  // v1238: "current session" is not "checked now". Measured, the board was recommending rows whose
-  // last bar was 40 to 100 minutes old while fresher bars sat in the store. The tolerance is ONE
-  // BAR - the tape's own resolution, the smallest representable gap, not a tuned number - measured
-  // against the freshest bar the app holds rather than against the clock.
-  const newest=newestTapeBucketMs();
-  const at=+new Date(read.asOf);
-  if(newest>0&&Number.isFinite(at)&&(newest-at)>5*60*1000) return false;
-  return true;
+  if(!s?.symbol) return false;
+  return meetsScoreBar(s.score);
 }
 const ROW_ACTION_MEMO=new WeakMap();
 function getRowActionState(s){
@@ -4041,15 +4032,6 @@ function _getRowActionStateUncached(s){
 
   if(s.intradaySellingToday===true)
     return {state:'BLOCKED', reason:s.intradayWhy||'5-minute tape selling today'};
-
-  const val=passesIntradayValidation(s);
-  if(!val){
-    const rd=getIntradayRead(s.symbol);
-    if(!rd||!rd.current) return {state:'WAIT', reason:'Awaiting current 5-minute tape'};
-    if(s.intradayVerdict==='rejected') return {state:'BLOCKED', reason:'Tape rejected: '+(s.intradayWhy||'flow')};
-    if(s.intradayVerdict==='unverified') return {state:'WAIT', reason:'Tape unverified (under 3 bars)'};
-    return {state:'WAIT', reason:'Awaiting 5-minute validation'};
-  }
 
   if(Number.isFinite(Number(s.score))&&Number(s.score)<RECOMMEND_MIN_SCORE)
     return {state:'WAIT', reason:`Score ${Number(s.score).toFixed(1)} < ${RECOMMEND_MIN_SCORE}`};
@@ -8044,7 +8026,7 @@ function buildOpenPositionsPanel(query=''){
         const fr=p.exitFriction;
         const frTag=(fr&&fr.ladder&&Number.isFinite(fr.exitPct))
           ?`<div style="font-size:11px;color:${fr.covered?'var(--t3)':'var(--red)'}" title="${escHtml('Selling '+fr.shares+' shares into the live book costs '+Number(fr.exitPct).toFixed(2)+'% against the mid. '+fr.basis+'.')}">exit ${Number(fr.exitPct).toFixed(2)}%${fr.covered?'':' \u26a0'}</div>`:'';
-        return intradayRowButton({symbol:v})+symbolChartButton(v)+tapeTag+alert+frTag;
+        return symbolChartButton(v)+tapeTag+alert+frTag;
         /* c8 ignore start -- legacy renderer retained below only until the consolidated v1172 assertions are retired. */
         const rd=getIntradayRead(v);
         let tag='';
@@ -8082,7 +8064,7 @@ function buildOpenPositionsPanel(query=''){
             tag=`<div style="font-size:11px;color:${ac};font-weight:700" title="${escHtml(a.act+' — '+a.why)}">${escHtml(a.act)+_lvl2}</div>`;
           }
         }
-        return intradayRowButton({symbol:v})+symbolChartButton(v)+tag;
+        return symbolChartButton(v)+tag;
         /* c8 ignore stop */
       }},
 
@@ -10649,39 +10631,7 @@ function intradayVerdictColor(v,has,sel){
     :has?'var(--cyan)':'var(--t3)';
 }
 function intradayRowButton(s){
-  const sym=normSym(String(s&&s.symbol||''));
-  if(!sym) return '';
-  const sel=INTRADAY_TARGET===sym;
-  const has=!!INTRADAY_BARS[sym];
-  // v1146 (owner): the verdict goes ON THE ROW. A growing BUY/SKIP list above the table pushed the
-  // table itself down the page, which is the same complaint as the horizontal scrollbar - the
-  // recommendations are the thing, and nothing may crowd them out.
-  const v=has?s.intradayVerdict:null;
-  const rd=has?getIntradayRead(sym):null;
-  const face=v==='stale'?intradayVerdictFace(v,has):(v?intradayVerdictFace(v,has):'5m');
-  const col=intradayVerdictColor(v,has,sel);
-  const age=rd?(rd.ageMin<60?rd.ageMin+' min old':(rd.ageMin/60).toFixed(1)+' h old'):'';
-  const prov=rd?`
-${rd.bars} bars from ${rd.on}, latest ${new Date(rd.asOf).toLocaleTimeString('en-IN',{hour:'2-digit',minute:'2-digit'})} (${age})`
-    +`${rd.holes?` · ${rd.holes} five-minute bar${rd.holes>1?'s':''} missing inside the session`:''}`:'';
-  const tip=v==='stale'
-    ? `${sym}: CHECKED ON A PREVIOUS SESSION — not evidence about today.`
-      +`${prov}
-It counts as unchecked and does not move the ranking. Click to refetch.`
-    : v
-      ? `${sym}: ${v==='confirmed'?'STILL CLEARS THE BAR — buy':'NO LONGER CLEARS THE BAR — skip'}`
-        +`
-${s.intradayWhy||''}${prov}
-Click to replace this data.`
-      : has
-        ? `${sym}: checked${rd&&rd.regime?' — '+rd.regime:''}.${prov} Click to replace.`
-        : `Check ${sym}: paste its 5-minute chart table and see whether it still clears the buy bar.`;
-  return `<button type="button" onclick='event.stopPropagation();setIntradayTarget(${JSON.stringify(sym)})'`
-    +` style="margin-right:6px;padding:0 4px;border:1px solid ${col};border-radius:3px;`
-    +`background:${sel?'rgba(245,158,11,.12)':v==='rejected'?'rgba(239,68,68,.10)':v==='confirmed'?'rgba(34,197,94,.10)':'transparent'};`
-    +`color:${col};font-size:10px;line-height:14px;cursor:pointer;vertical-align:middle;`
-    +`opacity:${v==='stale'?'.55':'1'};font-weight:${(v&&v!=='stale')?'700':'400'}"`
-    +` title="${escHtml(tip)}">${face}</button>`;
+  return '';
 }
 
 function renderTable(){
@@ -10723,7 +10673,7 @@ function renderTable(){
       // v1142: routed through symbolChartButton like every other table. This cell had built its own
       // TradingView link since v1070, so the "one symbol interaction everywhere" rule was true of the
       // panels and quietly false of the main table - which is why swapping to Zerodha missed it.
-      symbol:`<td style="font-family:'Plus Jakarta Sans',sans-serif">${intradayRowButton(s)}${(
+      symbol:`<td style="font-family:'Plus Jakarta Sans',sans-serif">${(
         `<div style="font-weight:700;font-size:15px;color:var(--t1);max-width:230px;overflow:hidden;text-overflow:ellipsis">${escHtml(s.symbol)}${chartLinkButtons(s.symbol)}${(()=>{const bf=getBookFlag(s.symbol);if(!bf)return '';return `<span style="font-size:11px;background:rgba(245,158,11,.14);color:var(--amber);border-radius:4px;padding:1px 5px;margin-left:5px;font-weight:700;vertical-align:middle" title="Order book: ${escHtml(bf.text)}. Display only - it does not change the score unless the graded book weight says it should.">${bf.iceberg?'🧊':'⚑'}${bf.heavyCancel?' cx':''}</span>`;})()}${(()=>{const flags=s.meta?.flags||[];if(!flags.length)return '';return `<span style="font-size:12px;background:rgba(239,68,68,.15);color:var(--red);border-radius:4px;padding:1px 5px;margin-left:5px;font-weight:700;vertical-align:middle" title="NSE surveillance flags: ${escHtml(flags.join(' · '))}">⚠ ${flags.length}</span>`;})()}${s._held?`<span style="font-size:12px;background:rgba(244,114,182,.15);color:#f472b6;border-radius:4px;padding:1px 5px;margin-left:5px;font-weight:700;vertical-align:middle" title="You already hold this. Held stocks stay in the ranking (v1070) and can be recommended again — buying here ADDS to the existing position.">📌 held</span>`:''}</div>${radarSurveillanceNames(s)}<div style="font-size:11px;color:var(--t3);max-width:150px;overflow:hidden;text-overflow:ellipsis" title="${escHtml((s.name||'')+(s.setup?' · '+s.setup:''))}">${radarSeriesBandPill(s)} ${escHtml(s.setup||s.name||'')}</div>`)}</td>`,
       setup:`<td style="font-size:13px;color:var(--t2)">${escHtml(s.setup||'—')}${s.stage?' '+radarStagePill(s):''}${(s.modelTriggers||[]).length?' '+radarTriggerPill(s):''}</td>`,
       series:`<td>${radarSeriesBandPill(s)}</td>`,
