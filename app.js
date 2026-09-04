@@ -1,5 +1,5 @@
-const BUILD_TS='2026-09-04 10:06 IST'; // release build time (IST)
-const APP_VERSION=1279; // v1279: continuous tape scoring bridges session boundaries.
+const BUILD_TS='2026-09-04 10:45 IST'; // release build time (IST)
+const APP_VERSION=1281; // v1281: acknowledge and synchronize Buy Basket export.
 const RADAR_SCORE_VERSION='tape-decision-v3';
 // v1093: a baseline reward:risk MEASURED on the cross-section (last completed bhav session) instead of learned from the owner's own fills - reported on every row, deliberately not enforced. Includes v1092: position size split by Radar score / stop distance, so equally-scored names carry equal RUPEE risk, plus an opt-in Risk /trade cap.
 // v556: parse the NSE Market Activity Report (MA<date>.csv) — official Nifty %, advances/declines and sector index moves shown as market CONTEXT in the status bar (EOD data, display only, never fed into per-row scoring); MA added to the ℹ️ file manifest.
@@ -120,6 +120,7 @@ const SCANNER_STORE='rs_filters';
 const SHARED_FILTER_STORE='rs_filters_shared';
 const TRADE_INPUTS_STORE='rs_trade_inputs_v1';
 let _lastTradeInputSig=''; // gate brain writes to genuine trade-input changes, not every keystroke
+let _tradeInputPersistTimer=null;
 const ALL_STORE='rs_data';
 const ALL_STORE_SCHEMA='radar_composite_v15'; // v1230 invalidates cached rows from the pre-predictor score scale.
 const HOLD_STORE='rs_holdings';
@@ -10240,12 +10241,18 @@ function recomputeAlloc(){
   renderBasketBtn();
 }
 function renderBasketBtn(){
+  const buyBtn=document.getElementById('basketBtn');
+  if(buyBtn&&window.BASKET_EXPORT_BUSY){
+    buyBtn.disabled=true;
+    buyBtn.innerHTML='⏳ Preparing basket…';
+    buyBtn.title='Preparing the latest filtered basket…';
+    return;
+  }
   const capital=getEffectiveCapital();
   const selList=FILT.filter(s=>SELECTED.has(s.symbol)&&isSelectableRecommendation(s));
   const allocMap=computeAlloc(capital, selList);
   const buyList=capital>0?selList.filter(s=>allocMap[s.symbol]?.qty>0):selList;
   const buyCount=buyList.length;
-  const buyBtn=document.getElementById('basketBtn');
   if(buyBtn){
     const cntSpan=document.getElementById('basketCount');
     if(cntSpan)cntSpan.textContent=buyCount>0?`(${buyCount})`:'';
@@ -11729,7 +11736,6 @@ function intradayPasteBarHtml(){
 
 function applyFilters(){
   syncRecommendationThreshold();
-  updateFilterPlaceholders();
   const q=(document.getElementById('fSearch')?.value||'').trim().toLowerCase();
   const turnIdx=+(document.getElementById('fMinTurnover')?.value||0);
   const minTurn=RADAR_LIQ_STEPS[turnIdx]||0;
@@ -11749,9 +11755,6 @@ function applyFilters(){
   ALLOC_BLOCKED=0;
   DIRECTION_REMOVED=0;
   REMOVED_ROWS=[];
-  // Resolved ONCE: the allocation gate below runs per row over the full universe, and its inputs
-  // (capital, max allocation, held map, portfolio target anchor) are constant for the pass.
-  const allocCtx=getAllocationPassContext();
   let rows=ALL.filter(s=>{
     if(s._held)SUPPRESSED_HELD++;
     // Hard exclusions must win the explanation even when the same row also fails a user filter.
@@ -11782,9 +11785,6 @@ function applyFilters(){
     } else if(act.state==='WAIT'){
       if(act.reason.includes('Extended')) PEAK_TIMING_REMOVED++;
     }
-    const allocBlock=getAllocationBlockReason(s,allocCtx);
-    if(allocBlock) ALLOC_BLOCKED++;
-
     return true;
   });
   rows.sort((a,b)=>(a.rank??Infinity)-(b.rank??Infinity));
@@ -11809,12 +11809,15 @@ function applyFilters(){
   SELECTED=newSelected;
 
   PG=1;renderHead();renderTable();renderStatusBar();saveFilterState();updateTabCounts();
-  try{renderRankingsPanels();}catch(e){console.warn('Rankings panels render failed',e);}
+  // Portfolio panels are secondary and can build several large tables. Keep them off the
+  // wheel/typing critical path, then refresh once the user pauses.
+  clearTimeout(window._filterPanelsTimer);
+  window._filterPanelsTimer=setTimeout(()=>{try{renderRankingsPanels();}catch(e){console.warn('Rankings panels render failed',e);}},180);
   if(ALL.length){
     // Stats are secondary to the filter interaction. Let the table paint first and coalesce
     // repeated filter changes into one calculation.
     clearTimeout(window._filterStatsTimer);
-    window._filterStatsTimer=setTimeout(()=>{try{renderStats();}catch(e){}},0);
+    window._filterStatsTimer=setTimeout(()=>{try{renderStats();}catch(e){}},220);
   }
 }
 function renderRankingsPanels(){
@@ -12162,10 +12165,13 @@ function renderPostClose(){
 
 let APPLY_FILTERS_TIMER=null;
 function scheduleApplyFilters(){
-  if(APPLY_FILTERS_TIMER) cancelAnimationFrame(APPLY_FILTERS_TIMER);
-  // Apply on the next paint frame: select changes feel immediate and fast typing is coalesced only
-  // within the same frame, never delayed by an arbitrary debounce window.
-  APPLY_FILTERS_TIMER=requestAnimationFrame(()=>{APPLY_FILTERS_TIMER=null;applyFilters();});
+  // Wheel and typing events can arrive faster than a full board render. Coalesce a burst into
+  // one pass so the browser remains free to handle input and pointer movement.
+  if(APPLY_FILTERS_TIMER) clearTimeout(APPLY_FILTERS_TIMER);
+  APPLY_FILTERS_TIMER=setTimeout(()=>{
+    APPLY_FILTERS_TIMER=null;
+    requestAnimationFrame(()=>applyFilters());
+  },90);
 }
 
 
@@ -13129,7 +13135,27 @@ function planBasketExport(capital, selected){
 }
 
 
+window.BASKET_EXPORT_BUSY=false;
 async function exportBasket(){
+  if(window.BASKET_EXPORT_BUSY) return;
+  window.BASKET_EXPORT_BUSY=true;
+  const buyBtn=document.getElementById('basketBtn');
+  if(buyBtn){
+    buyBtn.disabled=true;
+    buyBtn.innerHTML='⏳ Preparing basket…';
+    buyBtn.title='Preparing the latest filtered basket…';
+  }
+  // Let the browser paint the acknowledgement before doing any synchronous allocation work.
+  await new Promise(resolve=>requestAnimationFrame(()=>setTimeout(resolve,0)));
+  try{
+    // A click can arrive while the 90ms filter debounce is pending. Flush it now so the export
+    // is built from the values currently visible in the controls, never the previous board.
+    if(APPLY_FILTERS_TIMER){
+      clearTimeout(APPLY_FILTERS_TIMER);
+      APPLY_FILTERS_TIMER=null;
+      applyFilters();
+    }
+    renderBasketBtn();
   const capital=getEffectiveCapital();
   const selList=FILT.filter(s=>SELECTED.has(s.symbol));
   if(!selList.length){showToast('Select at least one stock first.',3000,true);return;}
@@ -13243,6 +13269,13 @@ async function exportBasket(){
   const marketNote=(MARKET_INTRADAY&&MARKET_INTRADAY.advPct!=null&&MARKET_INTRADAY.advPct<0.5)?` · market confirmation enforced at ${(MARKET_INTRADAY.advPct*100).toFixed(0)}% breadth`:'';
   const splitNote=` · one order per stock, each with its own target`;   // v1177: splits retired
   showToast(`<strong>Saved ${orders.length} CNC MARKET BUY orders</strong> for ${new Set(orders.map(o=>o._meta.sym)).size} stocks in Scanner Uploads as Zerodha_Basket_Buy JSON${splitNote}${targetNote}${planNote}${floorNote}${rejNote}${limitNote}${marketNote}`);
+  }catch(e){
+    console.error('Basket export failed',e);
+    showToast('Basket export failed: '+(e?.message||e),6000,true);
+  }finally{
+    window.BASKET_EXPORT_BUSY=false;
+    renderBasketBtn();
+  }
 }
 
 async function saveBasketToScannerUploads(orders, filename){
@@ -14008,16 +14041,19 @@ function saveFilterState(){
     riskPerTrade:document.getElementById('fRiskPerTrade')?.value||''
   };
   localStorage.setItem(SHARED_FILTER_STORE, JSON.stringify(tradeInputs)); // offline mirror
-  // Sync the account-level trading inputs across devices via the brain, but only when they
-  // actually changed (not on search/risk/rows keystrokes) so we don't churn Drive writes.
-  try{
-    const sig=JSON.stringify(tradeInputs);
-    if(sig!==_lastTradeInputSig){
-      _lastTradeInputSig=sig;
-      FS.setUserSetting(TRADE_INPUTS_STORE,tradeInputs);
-      saveBrainInBackground();
-    }
-  }catch(e){}
+  // Sync the account-level trading inputs only after the user pauses. Capital and sizing fields
+  // fire on every keystroke; Drive/brain writes must never be part of that interaction path.
+  clearTimeout(_tradeInputPersistTimer);
+  _tradeInputPersistTimer=setTimeout(()=>{
+    try{
+      const sig=JSON.stringify(tradeInputs);
+      if(sig!==_lastTradeInputSig){
+        _lastTradeInputSig=sig;
+        FS.setUserSetting(TRADE_INPUTS_STORE,tradeInputs);
+        saveBrainInBackground();
+      }
+    }catch(e){}
+  },500);
 }
 
 function loadFilterState(){
