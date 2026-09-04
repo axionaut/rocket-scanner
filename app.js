@@ -1,5 +1,5 @@
-const BUILD_TS='2026-09-04 08:43 IST'; // release build time (IST)
-const APP_VERSION=1278; // v1278: risk is scored, not used as a row filter.
+const BUILD_TS='2026-09-04 10:06 IST'; // release build time (IST)
+const APP_VERSION=1279; // v1279: continuous tape scoring bridges session boundaries.
 const RADAR_SCORE_VERSION='tape-decision-v3';
 // v1093: a baseline reward:risk MEASURED on the cross-section (last completed bhav session) instead of learned from the owner's own fills - reported on every row, deliberately not enforced. Includes v1092: position size split by Radar score / stop distance, so equally-scored names carry equal RUPEE risk, plus an opt-in Risk /trade cap.
 // v556: parse the NSE Market Activity Report (MA<date>.csv) — official Nifty %, advances/declines and sector index moves shown as market CONTEXT in the status bar (EOD data, display only, never fed into per-row scoring); MA added to the ℹ️ file manifest.
@@ -3219,11 +3219,17 @@ const INTRADAY_STORE_MAX=1000;   // = the helper's MAX_ROWS file trim; not a sec
 const TAPE_NETVOL_BARS=3;     // 15 minutes: the best measured cell (rho +0.141 vs forward high)
 const TAPE_VWAP_BARS=5;       // 25 minutes: best for price-vs-VWAP (rho +0.105 to close)
 // THE SCORING FLOOR, DERIVED FROM THE HORIZON RATHER THAN WRITTEN IN. Net flow is read on
-// 15-minute buckets and needs TWO of them before it has a comparison at all, so a session becomes
-// readable at exactly 2 x TAPE_NETVOL_BARS bars - 30 minutes of continuous trading. This is the
-// same 6 the three guards below have always used; naming it is what stops the empty-board message
-// drifting from the check that actually empties the board.
+// 15-minute buckets and needs TWO of them before it has a comparison at all, so the continuous tape
+// becomes readable at exactly 2 x TAPE_NETVOL_BARS bars - 30 minutes of five-minute data. The window
+// is rolling across the session boundary; a missing early-today tick must not turn a live board off.
 const TAPE_MIN_SESSION_BARS=2*TAPE_NETVOL_BARS;
+function continuousTapeWindow(all){
+  if(!Array.isArray(all)||all.length<TAPE_MIN_SESSION_BARS) return null;
+  // INTRADAY_BARS is the merged, timestamp-ordered store. Keep the minimum measured horizon so
+  // yesterday's tape bridges startup/pre-open without allowing an old session to dominate today's
+  // live read. The exchange gap remains visible as a real time gap; it is not fabricated away.
+  return all.slice(-TAPE_MIN_SESSION_BARS);
+}
 function tapeAggregate(bars,k){
   if(k<=1) return bars.slice();
   const out=[];
@@ -3260,10 +3266,8 @@ function radarTapeEvidence(sym){
 function _radarTapeEvidenceUncached(sym){
   const all=INTRADAY_BARS[normSym(sym||'')];
   if(!all||all.length<TAPE_MIN_SESSION_BARS) return null;
-  const key=istDayKey(all[all.length-1].t);
-  if(typeof getSessionDate==='function'&&key!==getSessionDate()) return null;  // today only
-  const day=all.filter(b=>istDayKey(b.t)===key);
-  if(day.length<TAPE_MIN_SESSION_BARS) return null;
+  const day=continuousTapeWindow(all);
+  if(!day) return null;
   const totV=day.reduce((n,b)=>n+(Number(b.v)||0),0);
   if(!(totV>0)) return null;
 
@@ -3401,7 +3405,7 @@ function radarScoreComponents(r,tapeStanding){
   const tev=(typeof radarTapeEvidence==='function')?radarTapeEvidence(r.symbol):null;
   if(!tev) return {flow:0,vwapPos:0,crossover:0,participation:0,impact:null,predictor:0,runway:0,tapeBars:0,
                    direction:0,feasibility:0,tape:0,evidence:0,riskFactor:+riskFactor.toFixed(3),permission:0,total:0,
-                   block:'no current 5-minute tape'};
+                   block:'no usable recent 5-minute tape'};
   const evidence=tev.level;
   const range=Number(r.rangePct),fromOpen=Number(r.changeOpen);
   const dirLevel=(range>0&&fromOpen>0)?clamp01(fromOpen/(range*0.5),0,1):0;
@@ -3447,7 +3451,7 @@ function radarScoreTitle(r){
     +` over ${Number(c.tapeBars)||0} bars`;
   if(c.block) return `NOT ACTIONABLE - ${c.block}. Tape evidence ${(Number(c.evidence)*100).toFixed(0)}/100 (${ev}), but permission is zero so the score is zero. The score is what you can act on, not what looks interesting.`;
   return `Recommendation strength ${Number(c.total).toFixed(1)} = tape evidence ${(Number(c.evidence)*100).toFixed(0)}/100 × permission ${(Number(c.permission)*100).toFixed(0)}% × risk factor ${(Number(c.riskFactor)*100).toFixed(0)}%.`
-    +` Evidence, from this session's 5-minute tape only: ${ev}.`
+    +` Evidence, from the continuous merged 5-minute tape window: ${ev}.`
     +` Permission: headroom ${Number(c.feasibility).toFixed(1)}/${RADAR_SCORE_BUDGETS.feasibility} · tape standing ${Number(c.tape).toFixed(1)}/${RADAR_SCORE_BUDGETS.tape}${Number(c.permission)<1?' (an absent tape caps permission until candles confirm it)':''}.`
     +` Policy bar ${RECOMMEND_MIN_SCORE}; not a profit probability.`;
 }
@@ -3818,8 +3822,8 @@ function tapeSessionDepth(){
       }
       if(!n) continue;
       withToday++;
-      if(n>deepest) deepest=n;
-      if(n>=TAPE_MIN_SESSION_BARS) ready++;
+      if(Math.min(b.length,TAPE_MIN_SESSION_BARS)>deepest) deepest=Math.min(b.length,TAPE_MIN_SESSION_BARS);
+      if(b.length>=TAPE_MIN_SESSION_BARS) ready++;
       const ft=b[b.length-n].t, first=typeof ft==='number'?ft:+new Date(ft);
       if(first>0&&(!openMs||first<openMs)) openMs=first;
     }
@@ -3837,7 +3841,7 @@ function tapeDepthNoteHtml(dep){
   return dep.ready
     ? ' \u00b7 '+dep.ready.toLocaleString('en-IN')+' deep enough to score'
     : ' \u00b7 <b style="color:var(--amber)">'+dep.deepest+'/'+dep.need
-      +' bars of today \u2014 too short to score</b>';
+      +' recent bars \u2014 too short to score</b>';
 }
 function passesIntradayValidation(s){
   if(!s?.symbol||s.intradayVerdict!=='confirmed') return false;
@@ -8750,13 +8754,13 @@ function _renderMethodologyInner(){
       <a href="#meth-guide" onclick="event.preventDefault();scrollToSection('meth-guide')" style="padding:4px 12px;border-radius:6px;background:var(--bg-card);border:1px solid var(--border);color:var(--t2);font-size:13px;font-weight:600;text-decoration:none;cursor:pointer">📖 Use & Risk</a>
     </nav>
     <h3 id="meth-scoring">Decision Score — Live 5-Minute Tape</h3>
-    <p><strong>Evidence boundary:</strong> the predictor freezes a liquid-universe feature snapshot on session D and learns only after session D+1 is observed. It cannot use D+1 while scoring D, and it excludes direct descriptions of D's already-completed move. That causal predictor is a prerequisite gate for recommendations; the numeric Decision Score itself is built from the current session's 5-minute tape and its permission state. A <strong>rocket</strong> remains the separate target-before-stop outcome audit. It is a research screener, not investment advice.</p>
+    <p><strong>Evidence boundary:</strong> the predictor freezes a liquid-universe feature snapshot on session D and learns only after session D+1 is observed. It cannot use D+1 while scoring D, and it excludes direct descriptions of D's already-completed move. That causal predictor is a prerequisite gate for recommendations; the numeric Decision Score itself is built from the continuous merged 5-minute tape window and its permission state. A <strong>rocket</strong> remains the separate target-before-stop outcome audit. It is a research screener, not investment advice.</p>
     <div class="m-grid">
       <div class="m-card"><h4>Ranking Inputs</h4><p>Daily/Kite universe columns enter through typed transformations, robust percentiles and seven diagnostic groups. They set the Setup label, Risk classification, exchange context and entry/exit context; they do <strong>not</strong> make the numeric Decision Score. Exchange data adds authoritative series, price band, status, delivery, trades, 52-week range, surveillance and deal context.</p><div class="rr-groups" style="margin-top:10px">${groupsHTML}</div></div>
       <div class="m-card"><h4>What the Score Does</h4><ol style="padding-left:18px;color:var(--t2);font-size:14px;line-height:1.7">
-        <li>Builds the numeric score from current 5-minute tape evidence: net flow, price versus VWAP, crossover, participation and the measured impact term when its evidence-backed weight is non-zero.</li>
+        <li>Builds the numeric score from the continuous merged 5-minute tape window: net flow, price versus VWAP, crossover, participation and the measured impact term when its evidence-backed weight is non-zero.</li>
         <li>Combines those tape terms with noisy-OR, then multiplies by permission. Permission reflects circuit headroom and tape standing; timing conditions scale the score, while structural vetoes reduce it to zero.</li>
-        <li>Requires a current tape for a meaningful score. An absent tape is deliberately not treated as bearish, but it cannot produce a selectable recommendation.</li>
+        <li>Scores continuously from the merged tape. Current-session freshness remains a separate action-safety check; an absent tape is not treated as bearish, but it cannot produce a selectable recommendation.</li>
         <li>Uses the causal predictor, direction, listing history, selling state, entry timing, allocation viability and evidence-trigger checks as independent recommendation gates. A peak-timing block may supply a stock-specific LIMIT price; it is not silently treated as a market entry.</li>
         <li>Reports daily-column feature separation and same-session rocket separation for diagnostics. Neither same-session outcome labels nor the diagnostic composite feeds the Decision Score.</li>
         <li>Cross-checks official delivery, close versus average price, 52-week position, deal activity and surveillance flags. Configured surveillance rules remove rows; other flags remain score penalties and badges.</li>
@@ -11643,6 +11647,11 @@ function liveTapeTime(ts){
   const n=Number(ts);
   return n>0?LIVE_TAPE_TIME_FMT.format(new Date(n)):'';
 }
+function liveTapeInterval(ts){
+  const n=Number(ts);
+  if(!(n>0)) return '';
+  return liveTapeTime(n)+'\u2013'+liveTapeTime(n+5*60*1000);
+}
 function renderLiveTapeBar(){
   const host=document.getElementById('intradayBar');
   if(!host) return;
@@ -11689,7 +11698,7 @@ function intradayPasteBarHtml(){
   if(activity.phase==='checking') activityText='↻ checking helper, universe, positions and bars now…';
   else {
     const bits=[];
-    if(latest) bits.push('latest 5m bar '+latest);
+    if(latest) bits.push('latest completed 5m bar '+liveTapeInterval(newestTapeBucketMs()));
     if(checked) bits.push('checked '+checked);
     if(portfolioAt) bits.push('positions '+portfolioAt);
     if(activity.portfolioError) bits.push('positions refresh failed');
