@@ -1,5 +1,5 @@
 const BUILD_TS='2026-09-04 08:43 IST'; // release build time (IST)
-const APP_VERSION=1277; // v1277: modal, selection, and export share the final Action contract.
+const APP_VERSION=1278; // v1278: risk is scored, not used as a row filter.
 const RADAR_SCORE_VERSION='tape-decision-v3';
 // v1093: a baseline reward:risk MEASURED on the cross-section (last completed bhav session) instead of learned from the owner's own fills - reported on every row, deliberately not enforced. Includes v1092: position size split by Radar score / stop distance, so equally-scored names carry equal RUPEE risk, plus an opt-in Risk /trade cap.
 // v556: parse the NSE Market Activity Report (MA<date>.csv) — official Nifty %, advances/declines and sector index moves shown as market CONTEXT in the status bar (EOD data, display only, never fed into per-row scoring); MA added to the ℹ️ file manifest.
@@ -3108,6 +3108,21 @@ function radarParticipationLevel(r){
   const ordinary=3*Math.LN2,strong=3*Math.LN3;
   return clamp01((ig-ordinary)/(strong-ordinary),0,1);
 }
+function radarRiskFactor(r){
+  if(!r) return 0;
+  const price=Number(r.price)||0,turnover=rowLiquidityRupees(r);
+  const move=Math.max(Math.abs(Number(r.day)||0),Math.abs(Number(r.gap)||0));
+  const volatility=Number(r.parts?.volatility);
+  const flags=Array.isArray(r.meta?.flags)?r.meta.flags.length:0;
+  const dimensions=[
+    turnover>0?clamp01(turnover/2500000,0,1):0,
+    price>0?clamp01(price/10,0,1):0,
+    move>6?clamp01(6/move,0,1):1,
+    Number.isFinite(volatility)&&volatility<38?clamp01(volatility/38,0,1):1,
+    clamp01(1-flags/3,0,1)
+  ];
+  return Math.min(...dimensions);
+}
 // v1232: THE SCORE IS RECOMMENDATION STRENGTH AGAIN. Owner, on the v1231 board: 74.8 and 73.1 were
 // not buyable while the one green row was 70.2.
 //
@@ -3364,6 +3379,7 @@ function radarScoreComponents(r,tapeStanding){
               evidence:0,permission:0,total:0,block:'no row'};
   if(!r) return zero;
   const perm=radarPermissionLevel(r,tapeStanding);
+  const riskFactor=radarRiskFactor(r);
   const trigger=Number.isFinite(Number(r.triggerFactor))?clamp01(Number(r.triggerFactor),0.5,1.5):1;
   const hasPredictor=hasNumber(r.predictiveLevel);
   const predictorBase=hasPredictor?Number(r.predictiveLevel):0;   // no qualified model, no credit
@@ -3384,7 +3400,7 @@ function radarScoreComponents(r,tapeStanding){
   // normaliser is a constant of the weights, not of the day, so the scale cannot drift.
   const tev=(typeof radarTapeEvidence==='function')?radarTapeEvidence(r.symbol):null;
   if(!tev) return {flow:0,vwapPos:0,crossover:0,participation:0,impact:null,predictor:0,runway:0,tapeBars:0,
-                   direction:0,feasibility:0,tape:0,evidence:0,permission:0,total:0,
+                   direction:0,feasibility:0,tape:0,evidence:0,riskFactor:+riskFactor.toFixed(3),permission:0,total:0,
                    block:'no current 5-minute tape'};
   const evidence=tev.level;
   const range=Number(r.rangePct),fromOpen=Number(r.changeOpen);
@@ -3403,10 +3419,11 @@ function radarScoreComponents(r,tapeStanding){
     feasibility:+(RADAR_SCORE_BUDGETS.feasibility*(perm.room??0)).toFixed(1),
     tape:+(RADAR_SCORE_BUDGETS.tape*(perm.tape??0)).toFixed(1),
     evidence:+evidence.toFixed(3),
+    riskFactor:+riskFactor.toFixed(3),
     permission:+(perm.p||0).toFixed(3),
     block:perm.p>0?null:(perm.why||null)
   };
-  out.total=+Math.max(0,Math.min(100,100*evidence*(perm.p||0))).toFixed(1);
+  out.total=+Math.max(0,Math.min(100,100*evidence*(perm.p||0)*riskFactor)).toFixed(1);
   return out;
 }
 
@@ -3429,7 +3446,7 @@ function radarScoreTitle(r){
     +(Number.isFinite(Number(c.impact))?` · impact ${Number(c.impact).toFixed(0)}/100`:'')
     +` over ${Number(c.tapeBars)||0} bars`;
   if(c.block) return `NOT ACTIONABLE - ${c.block}. Tape evidence ${(Number(c.evidence)*100).toFixed(0)}/100 (${ev}), but permission is zero so the score is zero. The score is what you can act on, not what looks interesting.`;
-  return `Recommendation strength ${Number(c.total).toFixed(1)} = tape evidence ${(Number(c.evidence)*100).toFixed(0)}/100 × permission ${(Number(c.permission)*100).toFixed(0)}%.`
+  return `Recommendation strength ${Number(c.total).toFixed(1)} = tape evidence ${(Number(c.evidence)*100).toFixed(0)}/100 × permission ${(Number(c.permission)*100).toFixed(0)}% × risk factor ${(Number(c.riskFactor)*100).toFixed(0)}%.`
     +` Evidence, from this session's 5-minute tape only: ${ev}.`
     +` Permission: headroom ${Number(c.feasibility).toFixed(1)}/${RADAR_SCORE_BUDGETS.feasibility} · tape standing ${Number(c.tape).toFixed(1)}/${RADAR_SCORE_BUDGETS.tape}${Number(c.permission)<1?' (an absent tape caps permission until candles confirm it)':''}.`
     +` Policy bar ${RECOMMEND_MIN_SCORE}; not a profit probability.`;
@@ -11602,8 +11619,6 @@ function emptyBoardReason(){
   const bits=[];
   const q=(document.getElementById('fSearch')?.value||'').trim();
   if(q) bits.push('search \u201c'+escHtml(q)+'\u201d');
-  const risk=document.getElementById('fRisk')?.value||'';
-  if(risk&&risk!=='All') bits.push('risk '+escHtml(risk));
   // THE EFFECTIVE BAR, NOT THE FIELD: a blank Min Score is still a bar of 60.
   if(RECOMMEND_MIN_SCORE>0) bits.push('score \u2265 '+RECOMMEND_MIN_SCORE
     +(((document.getElementById('fMinScore')?.value||'').trim()==='')?' (default)':''));
@@ -11707,9 +11722,6 @@ function applyFilters(){
   syncRecommendationThreshold();
   updateFilterPlaceholders();
   const q=(document.getElementById('fSearch')?.value||'').trim().toLowerCase();
-  // Risk filter now supports multiple levels (v554): the dropdown value is a comma-joined set
-  // (e.g. "Low,Medium"); empty = All.
-  const riskSel=(document.getElementById('fRisk')?.value||'').split(',').map(x=>x.trim()).filter(Boolean);
   const turnIdx=+(document.getElementById('fMinTurnover')?.value||0);
   const minTurn=RADAR_LIQ_STEPS[turnIdx]||0;
   // v1216 (owner): a ceiling on the share price. Blank means no ceiling - an empty field is a
@@ -11744,14 +11756,13 @@ function applyFilters(){
       REMOVED_ROWS.push({s,reason:'trigger',detail:'automatic evidence trigger: '+(s.recommendationTriggerReasons||[]).join(', ')});
       return false;
     }
-    // Discovery filters: Min Turnover, Max Price, Min Score, Risk, Search
+    // Discovery filters: Min Turnover, Max Price, Min Score, Search. Risk is scored, not filtered.
     if((s.turnover||0)<minTurn){REMOVED_ROWS.push({s,reason:'filter',detail:'below the Min Turnover filter ('+fmtINR(minTurn)+')'});return false;}
     if(maxPrice!=null&&Number(s.price)>maxPrice){REMOVED_ROWS.push({s,reason:'filter',detail:'above the Max Price filter ('+fmtINR(maxPrice)+')'});return false;}
     if(Number.isFinite(Number(s.score))&&Number(s.score)<RECOMMEND_MIN_SCORE){
       REMOVED_ROWS.push({s,reason:'filter',detail:'score '+Number(s.score).toFixed(1)+' is below your Min Score of '+RECOMMEND_MIN_SCORE});
       return false;
     }
-    if(riskSel.length&&!riskSel.includes(s.risk)){REMOVED_ROWS.push({s,reason:'filter',detail:s.risk+' risk — excluded by your Risk filter'});return false;}
     if(q&&![s.symbol,s.name,s.sector].join(' ').toLowerCase().includes(q)) return false;
 
     // Diagnostic counters based on row Action state
@@ -11967,12 +11978,13 @@ function showRadarDetail(sym){
       · participation ${fmt(tc.participation,0)}/100${Number.isFinite(Number(tc.impact))?` · impact ${fmt(tc.impact,0)}/100`:''}
       &nbsp;over ${fmt(tc.tapeBars,0)} bars.<br>
       <b>Permission:</b> headroom ${fmt(tc.feasibility,1)}/${RADAR_SCORE_BUDGETS.feasibility}
-      · tape standing ${fmt(tc.tape,1)}/${RADAR_SCORE_BUDGETS.tape}.
+      · tape standing ${fmt(tc.tape,1)}/${RADAR_SCORE_BUDGETS.tape}
+      · risk factor ${fmt((tc.riskFactor??1)*100,0)}%.
       </div>`:'';
   document.getElementById('radarDetailBody').innerHTML=`${detailNote}${decisionRead}${tapeRead}
     <h3 style="font-size:15px;margin:14px 0 4px">Setup &amp; risk classification</h3>
     <div style="font-size:12px;color:var(--t3);margin-bottom:8px">From the daily columns. These set the
-      Setup label and the Risk pill the filter bar uses — they do <b>not</b> set the Decision Score above.</div>
+      Setup label and Risk pill; the same risk signals also reduce the Decision Score above.</div>
     <div class="rr-groups">${groups}</div>
     <div class="rr-read"><b>Exchange check:</b> Series ${escHtml(r.series||'—')}, price band ${r.band??'not supplied'}, status ${escHtml(r.status||'—')}; basket ${r.basketEligible!==false?'eligible':'ineligible'}. Official delivery ${r.meta?.delivery==null?'unavailable':fmt(r.meta.delivery,1)+'%'}, trades ${r.meta?.trades==null?'unavailable':fmt(r.meta.trades,0)}, surveillance triggers: ${flags}.${bandNote}${varNote}${masterNote}${corpNote}${triggerNote}<br>
     <b>Feasibility:</b> ${gate} Strongest daily range estimate ${fmt(r.rangePct,2)}%; the session target takes ${fmt(r.stretch,2)}× that range. The stock remains ranked either way.${entryNote}<br>
@@ -12151,8 +12163,6 @@ function scheduleApplyFilters(){
 function renderStatusBar(){
   const total=ALL.length,shown=FILT.length;
   const tags=[];
-  const risk=document.getElementById('fRisk')?.value||'';
-  if(risk)tags.push(risk.split(',').join(' + ')+' risk');
   const turnIdx=+(document.getElementById('fMinTurnover')?.value||0);
   if(turnIdx>0)tags.push('TO≥'+RADAR_LIQ_LABELS[turnIdx]);
   const maxPxTag=(document.getElementById('fMaxPrice')?.value||'').trim();
@@ -12267,7 +12277,7 @@ function renderStatusBar(){
 }
 
 function clearFilters(){
-  ['fSearch','fRisk','fMinScore'].forEach(id=>{const el=document.getElementById(id);if(el)el.value=id==='fMinScore'?'60':'';});
+  ['fSearch','fMinScore'].forEach(id=>{const el=document.getElementById(id);if(el)el.value=id==='fMinScore'?'60':'';});
   const turnEl=document.getElementById('fMinTurnover');if(turnEl)turnEl.value='0';
   const maxPxEl=document.getElementById('fMaxPrice');if(maxPxEl)maxPxEl.value='';
   updateFilterPlaceholders();
@@ -13424,13 +13434,13 @@ function compactRankingRows(rows){
   }));
 }
 function applySavedFiltersForMode(mode){
-  const ids=['fSearch','fRisk','fMinScore','fMinTurnover','fMaxPrice','fCapital','fMaxAlloc','fRiskPerTrade'];
+  const ids=['fSearch','fMinScore','fMinTurnover','fMaxPrice','fCapital','fMaxAlloc','fRiskPerTrade'];
   const prev={};
   ids.forEach(id=>{const el=document.getElementById(id);if(el)prev[id]=el.value;});
   try{
     const st=JSON.parse(localStorage.getItem(modeKey(SCANNER_STORE,mode))||'{}');
     const shared=JSON.parse(localStorage.getItem(SHARED_FILTER_STORE)||'{}');
-    const map={risk:'fRisk',minScore:'fMinScore',minTurnover:'fMinTurnover',maxPrice:'fMaxPrice'};
+    const map={minScore:'fMinScore',minTurnover:'fMinTurnover',maxPrice:'fMaxPrice'};
     Object.entries(map).forEach(([k,id])=>{const el=document.getElementById(id);if(el&&st[k]!=null)el.value=st[k];});
     const capEl=document.getElementById('fCapital');if(capEl&&shared.capital!=null)capEl.value=shared.capital;
     const maxEl=document.getElementById('fMaxAlloc');if(maxEl&&shared.maxAlloc!=null)maxEl.value=shared.maxAlloc;
@@ -13971,7 +13981,6 @@ function saveFilterState(){
   if(!FILTERS_RESTORED) return; // never persist the blank pre-restore inputs
   const state={
     search:document.getElementById('fSearch')?.value||'',
-    risk:document.getElementById('fRisk')?.value||'',
     minScore:document.getElementById('fMinScore')?.value||'60',
     minTurnover:document.getElementById('fMinTurnover')?.value||'0',
     maxPrice:document.getElementById('fMaxPrice')?.value??'',
@@ -14007,7 +14016,6 @@ function loadFilterState(){
     const state=JSON.parse(localStorage.getItem(modeKey(SCANNER_STORE))||'{}');
     const shared=JSON.parse(localStorage.getItem(SHARED_FILTER_STORE)||'{}');
     if(state.search!=null){const el=document.getElementById('fSearch');if(el)el.value=state.search;}
-    if(state.risk!=null){const el=document.getElementById('fRisk');if(el)el.value=state.risk;}
     if(state.minScore!=null){const el=document.getElementById('fMinScore');if(el)el.value=state.minScore;}
     if(state.minTurnover!=null){const el=document.getElementById('fMinTurnover');if(el)el.value=state.minTurnover;}
     if(state.maxPrice!=null){const el=document.getElementById('fMaxPrice');if(el)el.value=state.maxPrice;}
