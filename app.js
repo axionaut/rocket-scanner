@@ -1,5 +1,5 @@
-const BUILD_TS='2026-09-03 16:00 IST'; // release build time (IST)
-const APP_VERSION=1276; // v1276: score is the single eligibility contract.
+const BUILD_TS='2026-09-04 08:43 IST'; // release build time (IST)
+const APP_VERSION=1277; // v1277: modal, selection, and export share the final Action contract.
 const RADAR_SCORE_VERSION='tape-decision-v3';
 // v1093: a baseline reward:risk MEASURED on the cross-section (last completed bhav session) instead of learned from the owner's own fills - reported on every row, deliberately not enforced. Includes v1092: position size split by Radar score / stop distance, so equally-scored names carry equal RUPEE risk, plus an opt-in Risk /trade cap.
 // v556: parse the NSE Market Activity Report (MA<date>.csv) — official Nifty %, advances/declines and sector index moves shown as market CONTEXT in the status bar (EOD data, display only, never fed into per-row scoring); MA added to the ℹ️ file manifest.
@@ -3837,6 +3837,7 @@ function passesIntradayValidation(s){
 }
 function getRowActionState(s){
   if(!s) return {state:'BLOCKED', reason:'Invalid row'};
+  if(s.scoreVersion!==RADAR_SCORE_VERSION) return {state:'BLOCKED', reason:'Older score scale - rescore required'};
   if(NSE_SURV[s.symbol]?.length) return {state:'BLOCKED', reason:'Surveillance flag ('+(NSE_SURV[s.symbol].join(' · '))+')'};
   if(s.recommendationTriggerBlocked) return {state:'BLOCKED', reason:'Evidence trigger: '+(s.recommendationTriggerReasons||[]).join(', ')};
   if(s.noHistory===true) return {state:'BLOCKED', reason:'Listed too recently (insufficient history)'};
@@ -3879,9 +3880,7 @@ function getRowActionState(s){
   return {state:'GO', reason:'Actionable recommendation'};
 }
 function isSelectableRecommendation(s){
-  // The score is the single eligibility contract. All cautionary evidence belongs in the score;
-  // a second hidden WAIT/BLOCKED veto made checked rows, candidates, and the basket disagree.
-  return !!s && meetsScoreBar(s.score);
+  return !!s && getRowActionState(s).state === 'GO';
 }
 // Score number + proportional bar, both tinted by the band.
 function radarScoreCell(score,title='',recommendationState=null){
