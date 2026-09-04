@@ -1,5 +1,5 @@
-const BUILD_TS='2026-09-04 12:02 IST'; // release build time (IST)
-const APP_VERSION=1285; // v1285: cooperative live-tape hydration and memoized tape reads keep UI input responsive.
+const BUILD_TS='2026-09-04 12:00 IST'; // release build time (IST)
+const APP_VERSION=1286; // v1286: cooperative full-universe scoring and a cached helper inventory keep the UI responsive.
 const RADAR_SCORE_VERSION='tape-decision-v3';
 // v1093: a baseline reward:risk MEASURED on the cross-section (last completed bhav session) instead of learned from the owner's own fills - reported on every row, deliberately not enforced. Includes v1092: position size split by Radar score / stop distance, so equally-scored names carry equal RUPEE risk, plus an opt-in Risk /trade cap.
 // v556: parse the NSE Market Activity Report (MA<date>.csv) — official Nifty %, advances/declines and sector index moves shown as market CONTEXT in the status bar (EOD data, display only, never fed into per-row scoring); MA added to the ℹ️ file manifest.
@@ -3671,15 +3671,32 @@ function getMarketAlignedEntryTiming(row,marketIntraday=MARKET_INTRADAY){
     reason
   };
 }
+// A PRIOR'S SHAPE IS A PROPERTY OF THE COLUMN, NOT OF THE ROW (v1286) - the same reasoning
+// radarFeatureClass already applies one function up. Four regexes plus a toLowerCase() allocation
+// ran once per feature per row: ~130 features x 1,669 rows is ~870,000 regex evaluations on a pass
+// that repeats every 30 seconds. The branch is deterministic in feature.name, so it is resolved
+// once and cached on the feature object; every returned value is unchanged term for term.
+function radarPriorKind(feature){
+  if(feature._prior) return feature._prior;
+  const s=String(feature.name||'').toLowerCase();
+  let k='linear';
+  if(/negative|aroon.*down|free float/.test(s))k='inverted';
+  else if(/relative strength|stochastic|money flow|commodity channel|ultimate oscillator/.test(s))k='peak68';
+  else if(/volatility|true range|daily range/.test(s))k='peak64';
+  else if(/gap|price change/.test(s))k='peak72';
+  else if(s==='price to earnings ratio')k='neutral';
+  return (feature._prior=k);
+}
 function radarPrior(feature,p){
-  const s=feature.name.toLowerCase();
   if(p===null)return null;
-  if(/negative|aroon.*down|free float/.test(s))return 1-2*p;
-  if(/relative strength|stochastic|money flow|commodity channel|ultimate oscillator/.test(s))return clamp01(1-Math.abs(p-.68)/.68,0,1)*2-1;
-  if(/volatility|true range|daily range/.test(s))return clamp01(1-Math.abs(p-.64)/.64,0,1)*2-1;
-  if(/gap|price change/.test(s))return clamp01(1-Math.abs(p-.72)/.72,0,1)*2-1;
-  if(s==='price to earnings ratio')return 0;
-  return 2*p-1;
+  switch(radarPriorKind(feature)){
+    case 'inverted': return 1-2*p;
+    case 'peak68': return clamp01(1-Math.abs(p-.68)/.68,0,1)*2-1;
+    case 'peak64': return clamp01(1-Math.abs(p-.64)/.64,0,1)*2-1;
+    case 'peak72': return clamp01(1-Math.abs(p-.72)/.72,0,1)*2-1;
+    case 'neutral': return 0;
+    default: return 2*p-1;
+  }
 }
 
 function radarScoreColor(score){
@@ -4522,10 +4539,22 @@ function getIntradayRead(sym){
   INTRADAY_READ_MEMO.set(key,{sig:memoSig,value:result});
   return result;
 }
+// Cooperative for the same reason the scorer is (v1286): this walks the whole universe reading the
+// tape and rescoring, and it runs both at the end of a scoring pass and on every inventory merge.
+// The sync wrapper below drains it without pausing, so nothing that called it before behaves
+// differently; inside a scoring pass it is delegated with yield* and shares that pass's slices.
 function applyIntradayReorder(rows){
+  const it=applyIntradayReorderGen(rows);
+  let s=it.next();
+  while(!s.done) s=it.next();
+  return s.value;
+}
+function* applyIntradayReorderGen(rows){
   if(!rows||!rows.length) return 0;
-  let n=0;
+  let n=0,_ri=0;
   for(const r of rows){
+    if(_ri&&(_ri&31)===0) yield;
+    _ri++;
     const read=getIntradayRead(r.symbol);
     r.intraday=read||null;
     // Kept on the row so the table can SAY it is stale - but it must not move the ranking. Silently
@@ -4550,10 +4579,11 @@ function applyIntradayReorder(rows){
     }
     r._tapeStanding=f;
   });
-  rows.forEach(r=>{
-    setRadarEvidenceScore(r,r._tapeStanding);
-    delete r._iAdj;
-  });
+  for(let _si=0;_si<rows.length;_si++){
+    if(_si&&(_si&63)===0) yield;
+    setRadarEvidenceScore(rows[_si],rows[_si]._tapeStanding);
+    delete rows[_si]._iAdj;
+  }
   rows.sort((a,b)=>b.score-a.score||radarRankTieBreak(a,b));
   rows.forEach((r,i)=>{r.rank=i+1;});
   // THE VERDICT (owner: "it's a validation step. If it still passes our Buy thresholds, I'll buy,
@@ -4623,7 +4653,7 @@ function applyIntradayReorder(rows){
   // measured on the release board: SUBEXLTD, KOHINOOR and PKTEA each carried
   // intradaySellingToday=true beside scores of 67.9 / 67.8 / 60.9, clearing a bar they could never
   // pass. Rescore and re-rank once the flags are known, so the number and the verdict agree.
-  rows.forEach(r=>setRadarEvidenceScore(r,r._tapeStanding));
+  for(let _vi=0;_vi<rows.length;_vi++){ if(_vi&&(_vi&63)===0) yield; setRadarEvidenceScore(rows[_vi],rows[_vi]._tapeStanding); }
   // v1237: THE VERDICT IS DERIVED FROM THE SCORE, SO IT MUST BE DERIVED FROM THE FINAL ONE. v1232
   // moved the rescore after the veto flags but left confirmed/rejected computed from the score as it
   // stood BEFORE that rescore, so a row the rescore promoted kept the verdict its old score earned -
@@ -4684,7 +4714,13 @@ function getIntradayLoopState(){
   return {top:board,need,converged:board.length>0&&need.length===0,
           checked:board.length-need.length,of:board.length,confirmed,rejected};
 }
-function radarAnalyze(headers,rawRows,supplements={},heldSymbols=new Set()){
+// COOPERATIVE SCORING (v1286). The body below is UNCHANGED arithmetic; it is a generator only so
+// the pass can be interrupted between chunks. The sync driver `radarAnalyze` drains it without
+// pausing and is therefore bit-identical to the old function; the async driver `radarAnalyzeAsync`
+// hands the thread back whenever a slice has run long, which is what keeps typing, scrolling and
+// clicks alive while a 1,669-row universe is scored. A yield never appears mid-row: every yield
+// point sits on a row/column boundary, so no row can be published half-computed.
+function* radarAnalyzeGen(headers,rawRows,supplements={},heldSymbols=new Set()){
   const _depthPctMap=(typeof getDepthPctMap==='function')?getDepthPctMap():{};
   const priceI=radarIdx(headers,'Price'),targetI=radarIdx(headers,'Price change %, 1 day'),sectorI=radarIdx(headers,'Sector'),symbolI=radarIdx(headers,'Symbol'),descI=radarIdx(headers,'Description');
   if(symbolI<0||priceI<0||targetI<0)throw Error('Expected Symbol, Price, and Price change %, 1 day columns.');
@@ -4776,6 +4812,7 @@ function radarAnalyze(headers,rawRows,supplements={},heldSymbols=new Set()){
   const nextEffects=nextPrediction.map||new Map();
   const features=[];
   for(let i=0;i<headers.length;i++){
+    if(i&&(i%2===0)) yield;          // column boundary - the feature array is untouched by a pause
     const name=headers[i],rating=/rating/i.test(name);
     // v552: exclude the static share-count level from scoring — it is only a size proxy (already
     // in Market cap), and R2's real signal (a buyback) arrives statelessly via the bc event, not
@@ -4877,7 +4914,7 @@ function radarAnalyze(headers,rawRows,supplements={},heldSymbols=new Set()){
   });
   const igniteSorted=igniteArr.filter(v=>v!==null&&isFinite(v)).sort((a,b)=>a-b);
   const STAGE_LABEL={1:'Accumulation',2:'Breakout',3:'Event day',4:'Profit-booking',5:'Re-accumulation',6:'Second leg'};
-  const allRows=rawRows.map((raw,ri)=>{
+  const buildRadarRow=(raw,ri)=>{
     const parts={},weights={},contrib=[];
     let predictiveSum=0,predictiveWeight=0;
     for(const g in RADAR_GROUPS){parts[g]=0;weights[g]=0;}
@@ -5081,7 +5118,12 @@ function radarAnalyze(headers,rawRows,supplements={},heldSymbols=new Set()){
     out.entryTiming=getPeakEntryTiming(out);
     out.entryReady=!out.entryTiming.blocked;
     return out;
-  });
+  };
+  const allRows=new Array(rawRows.length);
+  for(let _ri=0;_ri<rawRows.length;_ri++){
+    if(_ri&&(_ri&15)===0) yield;     // row boundary: the row just built is complete before any pause
+    allRows[_ri]=buildRadarRow(rawRows[_ri],_ri);
+  }
   const predictiveSorted=allRows.map(r=>r.predictiveRaw).filter(Number.isFinite).sort((a,b)=>a-b);
   allRows.forEach(r=>{
     r.predictiveLevel=Number.isFinite(r.predictiveRaw)&&predictiveSorted.length
@@ -5091,7 +5133,10 @@ function radarAnalyze(headers,rawRows,supplements={},heldSymbols=new Set()){
   const rows=allRows;
   const suppressedHeld=allRows.filter(r=>r._held).length;
   const rawScores=rows.map(r=>r.rawScore).sort((a,b)=>a-b);
+  let _pi=0;
   for(const r of rows){
+    if(_pi&&(_pi&31)===0) yield;     // row boundary
+    _pi++;
     r.compositePct=radarPct(rawScores,r.rawScore);
     r.noHistory=!!_noHist[normSym(r.symbol)];
     r.setupPct=Math.max(r.compositePct,r.ignitePct||0);
@@ -5192,7 +5237,7 @@ function radarAnalyze(headers,rawRows,supplements={},heldSymbols=new Set()){
     }
   }
   // The score is readiness evidence, not a position in today's queue.
-  rows.forEach(r=>setRadarEvidenceScore(r));
+  for(let _si=0;_si<rows.length;_si++){ if(_si&&(_si&127)===0) yield; setRadarEvidenceScore(rows[_si]); }
   rows.sort((a,b)=>b.score-a.score||radarRankTieBreak(a,b));
   rows.forEach((r,i)=>{r.rank=i+1;});          // row ORDER only - never a gate, never a column
   applyLearnedTriggerRanking(rows);
@@ -5202,7 +5247,9 @@ function radarAnalyze(headers,rawRows,supplements={},heldSymbols=new Set()){
   const marketIntraday=_open.length?{adv:_adv,dec:_dec,advPct:_adv/_open.length,median:radarQuant([..._open].sort((a,b)=>a-b),.5)}:null;
   // Internal order answers what is strongest; this second pass answers whether the move is
   // executable in the current market. Breadth is known only after the cross-section is measured.
-  rows.forEach(r=>{
+  for(let _ei=0;_ei<rows.length;_ei++){
+    if(_ei&&(_ei&31)===0) yield;
+    const r=rows[_ei];
     r.entryTiming=getMarketAlignedEntryTiming(r,marketIntraday);
     // R4d is applied HERE, after the market-aligned pass, because that pass REPLACES entryTiming
     // wholesale — merging R4d any earlier silently lost it. Entry timing has exactly one final
@@ -5217,22 +5264,47 @@ function radarAnalyze(headers,rawRows,supplements={},heldSymbols=new Set()){
     // buyable at a named level instead of being erased.
     r.entryAtLimit=r.entryTiming.limitEntry===true;
     r.entryLimitPrice=r.entryAtLimit?Number(r.entryTiming.pullbackPrice):null;
-  });
+  }
   // THE v1232 DEFECT CLASS AGAIN: this pass is the FINAL author of entryReady/entryAtLimit, and the
   // score was computed before it ran, so a row the entry pass had just made buyable-at-a-limit kept
   // the zero it was given while the veto still applied. Measured: CAPLIPOINT computed 88.2 on demand
   // while carrying r.score 0, and the board went from 10 selectable to 28 on a plain rescore.
   // Rescore once the flags are known - the same rule v1232 wrote for intradaySellingToday.
-  rows.forEach(r=>setRadarEvidenceScore(r,r._tapeStanding));
+  for(let _fi=0;_fi<rows.length;_fi++){ if(_fi&&(_fi&127)===0) yield; setRadarEvidenceScore(rows[_fi],rows[_fi]._tapeStanding); }
   applyLearnedRecommendationGates(rows);
+  yield;                              // the tape reorder below is the last phase of the pass
   // THE TAPE REORDER MOVED HERE, AND THIS IS THE REAL v1237 ORDERING FIX. It used to run BEFORE the
   // market-aligned entry pass above - the pass this file already calls "exactly one final author" of
   // entry timing - so it set verdicts, rescored and recorded the distribution from entryReady and
   // entryAtLimit that DID NOT EXIST YET. Measured: CAPLIPOINT computed 88.2 on demand while carrying
   // score 0 and verdict 'rejected', and 18 rows cleared the full recommendation bar while every one
   // of them read rejected and none could be selected.
-  applyIntradayReorder(rows);
+  yield* applyIntradayReorderGen(rows);
   return {rows,features,rockets:rocketRows.length,rocketTargetPct:_radarSessionTargetPct,stretchBarPct:_radarStretchBarUsed,continuationCount:continuationRows.length,suppressedHeld,marketIntraday,ids:{priceI,targetI,sectorI,symbolI,descI}};
+}
+// THE TWO DRIVERS OF ONE PASS. Same generator, same order, same arithmetic - they differ only in
+// whether the thread is handed back between chunks. `radarAnalyze` drains without pausing, so every
+// existing synchronous caller behaves exactly as before.
+function radarAnalyze(headers,rawRows,supplements={},heldSymbols=new Set()){
+  const it=radarAnalyzeGen(headers,rawRows,supplements,heldSymbols);
+  let s=it.next();
+  while(!s.done) s=it.next();
+  return s.value;
+}
+const RADAR_SLICE_MS=12;   // one animation frame's worth of work before the thread goes back to the UI
+// Drains any of the cooperative passes, handing the thread back whenever a slice has run long. The
+// checkpoints inside each pass are fine-grained; this is what decides how much work rides on one
+// task, so there is exactly one place to reason about the longest blocking slice.
+async function drainCooperatively(it){
+  let s=it.next(),since=performance.now();
+  while(!s.done){
+    if(performance.now()-since>=RADAR_SLICE_MS){ await yieldToUi(); since=performance.now(); }
+    s=it.next();
+  }
+  return s.value;
+}
+function radarAnalyzeAsync(headers,rawRows,supplements={},heldSymbols=new Set()){
+  return drainCooperatively(radarAnalyzeGen(headers,rawRows,supplements,heldSymbols));
 }
 // Score the current upload (object rows from parseCSV) through the Radar composite.
 function radarScoreRows(objRows){
@@ -5253,9 +5325,13 @@ async function radarScoreRowsAsync(objRows){
   const heldPos=getHeldPositionMap();
   const held=new Set(Object.keys(heldPos).map(normSym));
   const t0=performance.now();
-  await new Promise(r=>setTimeout(r,0));
-  const result=radarAnalyze(headers,matrix,buildRadarSupplements(),held);
-  await new Promise(r=>setTimeout(r,0));
+  await yieldToUi();
+  // v1286: the pass itself is now interruptible. It used to yield ONCE on either side of a fully
+  // synchronous radarAnalyze, which is not a yield in any useful sense - the whole 1.6-5.8s pass
+  // still landed as one main-thread task. RADAR.ms below stays WALL CLOCK, so it now includes the
+  // time given back to the UI and is directly comparable to a stopwatch, not to the old figure.
+  const result=await radarAnalyzeAsync(headers,matrix,buildRadarSupplements(),held);
+  await yieldToUi();
   RADAR={headers,matrix,features:result.features,ids:result.ids,rockets:result.rockets,rocketTargetPct:result.rocketTargetPct??null,stretchBarPct:result.stretchBarPct??null,continuationCount:result.continuationCount,ms:performance.now()-t0,sourceNote:'',scoredAt:Date.now()};
   SUPPRESSED_HELD=result.suppressedHeld;
   MARKET_INTRADAY=result.marketIntraday;
@@ -8472,7 +8548,7 @@ async function refreshRankingsAfterSurvRuleChange(){
   }
   try{
     const tag=window._lastScannerSessionTag||scannerSessionTag(fileName,raw);
-    ALL=radarScoreRows(raw);
+    ALL=await runHeavyJob(()=>radarScoreRowsAsync(raw));
     const ft=document.getElementById('fileTag');if(ft)ft.textContent=fileName+' · '+raw.length+' stocks';
     window._lastScannerSessionTag=tag;
     FILT=[...ALL];
@@ -11417,6 +11493,18 @@ function patchUniverseDeltas(deltaRows){
   patchVisiblePrices();
 }
 
+// ONE HEAVY JOB AT A TIME (v1286). Scoring and the inventory merge both walk the whole universe and
+// both now yield mid-pass, so without this they interleave: a tape merge landing between two chunks
+// of a scoring pass would leave the earlier rows read against one store and the later rows against
+// another, and the published ranking would belong to no single revision. Queuing them costs nothing
+// - each is bounded and cooperative - and it is what makes "one coherent publication per revision"
+// true rather than merely intended.
+let _heavyChain=Promise.resolve();
+function runHeavyJob(fn){
+  const next=_heavyChain.then(fn,fn);
+  _heavyChain=next.then(()=>{},()=>{});
+  return next;
+}
 async function scheduleScoreJob(){
   if(_scoreJobRunning){
     _scoreJobPending = true;
@@ -11425,13 +11513,15 @@ async function scheduleScoreJob(){
   _scoreJobRunning = true;
   _scoreJobPending = false;
   try {
-    const raw = [];
-    for(const [sym, f] of _universeMap){
-      raw.push(universeFieldsToRow(sym, f));
-    }
-    if(raw.length < 20) return;
-    ALL = await radarScoreRowsAsync(raw);
-    applyFilters();
+    await runHeavyJob(async () => {
+      const raw = [];
+      for(const [sym, f] of _universeMap){
+        raw.push(universeFieldsToRow(sym, f));
+      }
+      if(raw.length < 20) return;
+      ALL = await radarScoreRowsAsync(raw);
+      applyFilters();
+    });
   } catch(e) {
     console.warn('scheduleScoreJob error:', e);
   } finally {
@@ -11472,16 +11562,22 @@ async function pollUniverseDelta(){
     }
 
     if(isCold){
-      const raw = [];
-      for(const [sym, f] of _universeMap){
-        raw.push(universeFieldsToRow(sym, f));
-      }
-      if(raw.length >= 20){
-        ALL = radarScoreRows(raw);
-        FILT = [...ALL];
-        _tvLoadedThisSession = true;
-        applyFilters();
-      }
+      // THE COLD SNAPSHOT IS THE STARTUP FREEZE. This ran the synchronous scorer on the full
+      // universe on the first poll after load - the single longest task on the page. Same result,
+      // same order, through the cooperative driver and the same one-at-a-time queue as every other
+      // full pass, so the first paint is not held hostage to it.
+      await runHeavyJob(async () => {
+        const raw = [];
+        for(const [sym, f] of _universeMap){
+          raw.push(universeFieldsToRow(sym, f));
+        }
+        if(raw.length >= 20){
+          ALL = await radarScoreRowsAsync(raw);
+          FILT = [...ALL];
+          _tvLoadedThisSession = true;
+          applyFilters();
+        }
+      });
     } else {
       patchUniverseDeltas(j.rows);
       if(barCompleted){
@@ -11510,14 +11606,28 @@ async function loadIntradayInventory(){
       const d=new Date(ms),z=n=>String(n).padStart(2,'0');
       return d.getFullYear()+'-'+z(d.getMonth()+1)+'-'+z(d.getDate())+' '+z(d.getHours())+':'+z(d.getMinutes());
     })();
+    const storeVAtRequest=INTRADAY_STORE_V;
     const r=await fetch(KITE_HELPER+'/api/kite/inventory'+(since?('?since='+encodeURIComponent(since)):''),{cache:'no-store'});
     const j=await r.json();
     if(!j||!j.ok||!j.data) return 0;
     let n=0,processed=0;
+    // A RESPONSE IN FLIGHT CAN BE OVERTAKEN. If the store advanced while this answer was on the
+    // wire, any symbol whose held tape already reaches at least as far as this answer does is being
+    // told something older than it knows, and merging it would rewrite a bar with a staler copy of
+    // itself. Those symbols are skipped; everything genuinely new still merges.
+    const storeMoved=INTRADAY_STORE_V!==storeVAtRequest;
+    const merge=async()=>{
     for(const sym of Object.keys(j.data)){
       const rows=j.data[sym];
       // An incremental answer is legitimately one bar; only a FULL answer needs the sanity floor.
       if(!Array.isArray(rows)||rows.length<(since?1:3)) continue;
+      if(storeMoved){
+        const held=INTRADAY_BARS[normSym(sym)];
+        const heldMs=(held&&held.length)?Number(held[held.length-1].t):0;
+        const rawStamp=String(rows[rows.length-1][0]||'');
+        const respMs=Date.parse(rawStamp.slice(0,10)+'T'+(rawStamp.slice(11,19)||'00:00:00')+'+05:30');
+        if(heldMs>0&&Number.isFinite(respMs)&&heldMs>=respMs) continue;
+      }
       // Through the ONE parser, exactly as a fetch or a paste would be (the v1148 lesson).
       const csv=['"Date","Open","High","Low","Close","% Change","% Change vs Average","Volume"']
         .concat(rows.map(c=>{
@@ -11534,11 +11644,15 @@ async function loadIntradayInventory(){
     }
     if(n){
       // applyFilters owns the table, status and rankings-panel render.
-      try{ applyIntradayReorder(ALL); }catch(e){}
+      try{ await drainCooperatively(applyIntradayReorderGen(ALL)); }catch(e){}
       await yieldToUi();
       try{ applyFilters(); }catch(e){}
     }
     return n;
+    };
+    // Behind the same one-at-a-time queue as scoring: a merge landing between two chunks of a
+    // scoring pass would split that pass across two versions of the tape.
+    return await runHeavyJob(merge);
   }catch(e){ return 0; }
   finally{ _inventoryLoadRunning=false; }
 }
@@ -13532,7 +13646,7 @@ function applySavedFiltersForMode(mode){
     // Resolve already-observed next sessions before scoring this upload. This keeps the predictor
     // causal (anchor first, outcome later) and lets today's score use all evidence available now.
     await resolveIndicatorWatchNextBacklog(uploadSession);
-    ALL=radarScoreRows(raw);
+    ALL=await runHeavyJob(()=>radarScoreRowsAsync(raw));
     // v1076: build the regime AFTER scoring — it needs the zip's index rows plus the live intraday
     // breadth that radarScoreRows computes. Display + outcome stamping only; never a scoring input.
     try{MARKET_REGIME=buildMarketRegime();}catch(e){console.warn('regime build failed',e);MARKET_REGIME=null;}
