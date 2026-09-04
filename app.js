@@ -1,5 +1,5 @@
-const BUILD_TS='2026-09-04 11:12 IST'; // release build time (IST)
-const APP_VERSION=1282; // v1282: responsive filters and valid Zerodha basket serialization.
+const BUILD_TS='2026-09-04 11:34 IST'; // release build time (IST)
+const APP_VERSION=1283; // v1283: export selected basket rows directly and use Zerodha charts.
 const RADAR_SCORE_VERSION='tape-decision-v3';
 // v1093: a baseline reward:risk MEASURED on the cross-section (last completed bhav session) instead of learned from the owner's own fills - reported on every row, deliberately not enforced. Includes v1092: position size split by Radar score / stop distance, so equally-scored names carry equal RUPEE risk, plus an opt-in Risk /trade cap.
 // v556: parse the NSE Market Activity Report (MA<date>.csv) — official Nifty %, advances/declines and sector index moves shown as market CONTEXT in the status bar (EOD data, display only, never fed into per-row scoring); MA added to the ℹ️ file manifest.
@@ -1205,34 +1205,20 @@ function num(v){
 }
 function normSym(s){return String(s||'').trim().replace(/^[A-Z]+:/,'').replace(/_/g,'-').toUpperCase().replace(/-(EQ|BE|BZ|SM|ST|SZ)$/,'');}
 function escHtml(s){return String(s??'').replace(/[&<>"]/g,ch=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[ch]));}
-function openTradingViewChart(sym){
-  const symbol=String(sym??'').trim();
-  if(!symbol) return;
-  const url=`https://www.tradingview.com/chart/?symbol=NSE:${encodeURIComponent(symbol)}`;
-  window.open(url,'_blank','noopener,noreferrer');
-}
 function symbolChartButton(sym,innerHtml=null,extraStyle=''){
   const s=String(sym??'').trim();
   if(!s) return '';
   const t=KITE_TOKEN[normSym(s)];
-  const url=t?`https://kite.zerodha.com/chart/web/ciq/NSE/${encodeURIComponent(normSym(s))}/${t}`:'';
-  const onClick=t
-    ?`kiteOpen(${JSON.stringify(normSym(s))},${JSON.stringify(url)})`
-    :`openTradingViewChart(${JSON.stringify(s)})`;
-  const title=t?`Open ${escHtml(s)} in Zerodha Kite (copies the symbol too)`
-              :`Open the TradingView chart for ${escHtml(s)} — no Kite token on file`;
+  const url=t
+    ?`https://kite.zerodha.com/chart/web/ciq/NSE/${encodeURIComponent(normSym(s))}/${t}`
+    :`https://kite.zerodha.com/markets/stocks/NSE/${encodeURIComponent(normSym(s))}`;
+  const onClick=`kiteOpen(${JSON.stringify(normSym(s))},${JSON.stringify(url)})`;
+  const title=t?`Open ${escHtml(s)} chart in Zerodha Kite (copies the symbol too)`
+              :`Open ${escHtml(s)} in Zerodha Kite; its chart token is not loaded yet`;
   return `<button type="button" onclick='event.stopPropagation();${onClick}'`
     +` style="padding:0;border:0;background:transparent;color:inherit;font:inherit;text-align:left;cursor:pointer;${extraStyle}"`
     +` title="${title}">${innerHtml??escHtml(s)}</button>`
     ;
-}
-function tvChartButton(sym){
-  const s=String(sym??'').trim();
-  if(!s) return '';
-  return `<button type="button" onclick='event.stopPropagation();openTradingViewChart(${JSON.stringify(s)})'`
-    +` style="margin-left:5px;padding:0 4px;border:1px solid var(--border);border-radius:3px;background:transparent;`
-    +`color:var(--t3);font-size:10px;line-height:14px;cursor:pointer"`
-    +` title="Open the TradingView chart for ${escHtml(s)}">TV</button>`;
 }
 function kiteOpen(sym,url){
   let copied=false;
@@ -10258,11 +10244,10 @@ function renderBasketBtn(){
     buyBtn.title='Preparing the latest filtered basket…';
     return;
   }
-  const capital=getEffectiveCapital();
   const selList=FILT.filter(s=>SELECTED.has(s.symbol)&&isSelectableRecommendation(s));
-  const allocMap=computeAlloc(capital, selList);
-  const buyList=capital>0?selList.filter(s=>allocMap[s.symbol]?.qty>0):selList;
-  const buyCount=buyList.length;
+  // Allocation is display/sizing context only. A selected recommendation remains exportable even
+  // when its calculated allocation is zero; the exporter supplies a one-share fallback.
+  const buyCount=selList.length;
   if(buyBtn){
     const cntSpan=document.getElementById('basketCount');
     if(cntSpan)cntSpan.textContent=buyCount>0?`(${buyCount})`:'';
@@ -13124,25 +13109,11 @@ function calcZerodhaChargesSplit(price, qty, isSell, isIntraday, skipDp){
 }
 
 function planBasketExport(capital, selected){
-  const baseContext=getTodayTradeTimingContext();
-  const timing=getCurrentTradeTimingDecision(baseContext);
-  let exportList=(selected||[]).filter(s=>!getPriceBandBlockReason(s)
-    &&meetsRecommendationBar(s)&&passesIntradayValidation(s));
-  let basketAlloc=computeAlloc(capital,exportList);
-  const legsFor=s=>{
-    const qty=capital>0?(basketAlloc[s.symbol]?.qty||0):1;
-    if(!(qty>0)) return 0;
-    const policy=basketAlloc[s.symbol]?.exitPolicy||getRowExitPolicy(s,basketAlloc[s.symbol]?.buyPrice||s.price);
-    // v1217: one leg per row. The phantom runner was counting 2 against the 20-order cap.
-    return 1;
-  };
-  const orderCount=()=>exportList.reduce((count,s)=>count+legsFor(s),0);
-  while(exportList.length&&orderCount()>20){
-    exportList=exportList.slice(0,-1);
-    basketAlloc=computeAlloc(capital,exportList);
-  }
-  // timingBlocked is retained as a permanently-false field so existing callers keep working.
-  return {exportList,basketAlloc,orderCount:orderCount(),timingBlocked:false,timing};
+  // Export is transport-only. The selection already happened on the board; do not re-apply
+  // capital, target, timing, turnover, or score gates while serializing that selection.
+  const exportList=(selected||[]).filter(s=>s&&s.symbol).slice(0,20);
+  const basketAlloc=computeAlloc(capital,exportList);
+  return {exportList,basketAlloc,orderCount:exportList.length,timingBlocked:false,timing:null};
 }
 
 
@@ -13153,8 +13124,8 @@ async function exportBasket(){
   const buyBtn=document.getElementById('basketBtn');
   if(buyBtn){
     buyBtn.disabled=true;
-    buyBtn.innerHTML='⏳ Preparing basket…';
-    buyBtn.title='Preparing the latest filtered basket…';
+    buyBtn.innerHTML='⏳ Exporting…';
+    buyBtn.title='Exporting the selected recommendations…';
   }
   // Let the browser paint the acknowledgement before doing any synchronous allocation work.
   await new Promise(resolve=>requestAnimationFrame(()=>setTimeout(resolve,0)));
@@ -13162,7 +13133,6 @@ async function exportBasket(){
     // A click can arrive while the 90ms filter debounce is pending. Flush it now so the export
     // is built from the values currently visible in the controls, never the previous board.
     if(APPLY_FILTERS_TIMER){
-      if(buyBtn) buyBtn.innerHTML='⏳ Syncing latest filters…';
       clearTimeout(APPLY_FILTERS_TIMER);
       APPLY_FILTERS_TIMER=null;
       applyFilters();
@@ -13170,27 +13140,21 @@ async function exportBasket(){
     renderBasketBtn();
     if(buyBtn){
       buyBtn.disabled=true;
-      buyBtn.innerHTML='⏳ Planning basket…';
-      buyBtn.title='Building the latest Zerodha basket…';
+      buyBtn.innerHTML='⏳ Exporting…';
+      buyBtn.title='Exporting the selected recommendations…';
     }
   const capital=getEffectiveCapital();
   const selList=FILT.filter(s=>SELECTED.has(s.symbol));
   if(!selList.length){showToast('Select at least one stock first.',3000,true);return;}
-  const bandRejected=selList.filter(s=>getPriceBandBlockReason(s)).length;
   const {exportList,basketAlloc}=planBasketExport(capital,selList);
-  const limitOmitted=Math.max(0,selList.length-bandRejected-exportList.length);
-
-  const harvestPlan=computeHarvestPlan();
-  const active=getActiveTargetInfo();
 
   const orders=[];
-  let rejectedCount=bandRejected;
   let orderSeq=0;
   // One buy LEG. v1115: a stock now emits up to two of these — a BASE leg whose GTT sells at the
   // row's own target, and a RUNNER leg whose GTT sells further out. Each leg carries its own GTT, so
   // the split exit is armed the moment the buys fill and never needs re-arming by hand.
-  const pushBuyOrder=(s,qty,targetPct,leg)=>{
-    if(qty<=0||!(targetPct>0)) return;
+  const pushBuyOrder=(s,qty,leg)=>{
+    if(!(qty>0)) return;
     const sym=s.symbol;
     const name=s.name||sym;
     orders.push({
@@ -13216,81 +13180,30 @@ async function exportBasket(){
         // v1083 (owner): TARGET ONLY. The stop leg is no longer exported — the owner manages losses
         // manually. The stop is still computed and shown (SL % column, Open Positions, allocation
         // sizing all keep using getRowStopDistancePct); it simply never leaves the app as an order.
-        gtt:{target:targetPct},
-        tags:[leg==='runner'?'RUN':'TGT']
+        tags:[]
       },
-      _meta:{leg:leg||'base',sym,targetPct,fullQty:null}
+      _meta:{leg:leg||'base',sym,fullQty:null}
     });
   };
   exportList.forEach(s=>{
     const am = basketAlloc[s.symbol];
-    if(am?.rejected){rejectedCount++;return;} // skip cost-floor rejections
-    const qty = capital > 0 ? (am?.qty || 0) : 1;
-    if(qty===0) return;
-    const policy=am?.exitPolicy||getRowExitPolicy(s,am?.buyPrice||s.price);
-    if(!policy.viable){rejectedCount++;return;}
-    pushBuyOrder(s,qty,policy.targetPct,'base');
+    // Export is a transport operation, not a capital or target-viability gate. If sizing has no
+    // quantity for a selected recommendation, retain that stock in the Zerodha basket at one share.
+    const qty = capital > 0 ? (am?.qty || 1) : 1;
+    pushBuyOrder(s,qty,'base');
   });
   orders.forEach(o=>{
     const total=orders.filter(x=>x._meta.sym===o._meta.sym).reduce((n,x)=>n+x.params.quantity,0);
     o._meta.fullQty=total;
   });
 
-  if(!orders.length){showToast('Capital too low to buy even 1 share of any selected stock.',4000,true);return;}
+  if(!orders.length){showToast('No selected recommendations to export.',4000,true);return;}
   if(orders.length>20) throw new Error(`Basket planning invariant failed: ${orders.length} orders`);
-  // Independent defense in depth: computeAlloc already applies this cap, but never save a
-  // market order unless its notional is still at or below 0.10% of the latest daily turnover.
-  const impactViolation=exportList.find(s=>{
-    const am=basketAlloc[s.symbol];
-    const qty=am?.qty||(capital>0?0:1);
-    if(!(qty>0)) return false;
-    const budgetPrice=am?.buyPrice||getBuyPrice(s);
-    const turnoverCap=getTurnoverAllocationCap(s);
-    return !(turnoverCap>0)||qty*budgetPrice>turnoverCap+0.01;
-  });
-  if(impactViolation){
-    showToast(`Basket stopped: ${impactViolation.symbol} exceeds the 0.10% daily-turnover market-impact rail. Nothing exported.`,6000,true);
-    return;
-  }
-  if(capital>0){
-    // MARKET orders export with price: 0. Validate affordability against the
-    // same buffered LTP references used by computeAlloc(), never against JSON price.
-    const exportedDebit=exportList.reduce((sum,s)=>{
-      const am=basketAlloc[s.symbol];
-      const qty=am?.qty||0;
-      const budgetPrice=am?.buyPrice||getBuyPrice(s);
-      return sum+(am?.debit??((qty*budgetPrice)+calcZerodhaCharges(budgetPrice,qty,false,false,false)));
-    },0);
-    if(exportedDebit>capital+0.001){
-      console.error('Basket exceeds capital',{capital,exportedDebit,orders});
-      showToast(`Basket needs ${fmtINR(exportedDebit)} including estimated buy charges, above capital ${fmtINR(capital)}. Nothing exported.`,6000,true);
-      return;
-    }
-  }
-  if(buyBtn){
-    buyBtn.disabled=true;
-    buyBtn.innerHTML='⏳ Uploading basket…';
-    buyBtn.title='Writing the verified basket to Scanner Uploads…';
-  }
   // _meta is internal bookkeeping (which leg, which symbol) — it must never reach the saved file.
   const payload=orders.map(o=>{const c={...o};delete c._meta;return c;});
   const saved=await saveBasketToScannerUploads(payload,'Zerodha_Basket_Buy');
   if(!saved) return;
-  const rejNote = rejectedCount>0
-    ? ` · ${rejectedCount} skipped (eligibility/allocation)`
-    : '';
-  const targetNote=` · GTT target attached per leg · ≤0.10% daily turnover`;
-  const srcLabel=active.source==='manual'?'manual':active.source==='goal'?'goal-led':'Harvest';
-  const policySummary=summarizeRowExitPolicies(exportList.filter(s=>basketAlloc[s.symbol]?.qty>0));
-  const targetRange=policySummary
-    ?(Math.abs(policySummary.targetMax-policySummary.targetMin)<0.001?`${policySummary.targetMin.toFixed(2)}%`:`${policySummary.targetMin.toFixed(2)}–${policySummary.targetMax.toFixed(2)}%`)
-    :'—';
-  const planNote=` · per-stock targets ${targetRange} (${srcLabel} ${active.tgtPct.toFixed(2)}% anchor)`;
-  const floorNote=harvestPlan.warning?` · target floor active`:``;
-  const limitNote=limitOmitted>0?` · ${limitOmitted} lower-priority stock${limitOmitted===1?'':'s'} omitted to keep the basket within Zerodha's 20-order limit`:'';
-  const marketNote=(MARKET_INTRADAY&&MARKET_INTRADAY.advPct!=null&&MARKET_INTRADAY.advPct<0.5)?` · market confirmation enforced at ${(MARKET_INTRADAY.advPct*100).toFixed(0)}% breadth`:'';
-  const splitNote=` · one order per stock, each with its own target`;   // v1177: splits retired
-  showToast(`<strong>Saved ${orders.length} CNC MARKET BUY orders</strong> for ${new Set(orders.map(o=>o._meta.sym)).size} stocks in Scanner Uploads as Zerodha_Basket_Buy JSON${splitNote}${targetNote}${planNote}${floorNote}${rejNote}${limitNote}${marketNote}`);
+  showToast(`<strong>Exported ${orders.length} CNC BUY orders</strong> for ${new Set(orders.map(o=>o._meta.sym)).size} selected stocks as Zerodha_Basket_Buy.json`);
   }catch(e){
     console.error('Basket export failed',e);
     showToast('Basket export failed: '+(e?.message||e),6000,true);
