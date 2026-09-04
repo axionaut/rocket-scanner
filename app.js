@@ -1,5 +1,5 @@
-const BUILD_TS='2026-09-04 15:46 IST'; // release build time (IST)
-const APP_VERSION=1294; // v1294: drop the thinnest X% of the market by shares traded per 5-minute bar.
+const BUILD_TS='2026-09-04 16:02 IST'; // release build time (IST)
+const APP_VERSION=1295; // v1295: remove the Max Friction filter — friction is still computed and shown, just not a filter gate.
 const RADAR_SCORE_VERSION='tape-decision-v3';
 // v1093: a baseline reward:risk MEASURED on the cross-section (last completed bhav session) instead of learned from the owner's own fills - reported on every row, deliberately not enforced. Includes v1092: position size split by Radar score / stop distance, so equally-scored names carry equal RUPEE risk, plus an opt-in Risk /trade cap.
 // v556: parse the NSE Market Activity Report (MA<date>.csv) — official Nifty %, advances/declines and sector index moves shown as market CONTEXT in the status bar (EOD data, display only, never fed into per-row scoring); MA added to the ℹ️ file manifest.
@@ -12320,8 +12320,6 @@ function emptyBoardReason(){
   // THE EFFECTIVE BAR, NOT THE FIELD: a blank Min Score is still a bar of 60.
   if(RECOMMEND_MIN_SCORE>0) bits.push('score \u2265 '+RECOMMEND_MIN_SCORE
     +(((document.getElementById('fMinScore')?.value||'').trim()==='')?' (default)':''));
-  const fr=(document.getElementById('fMaxFriction')?.value||'').trim();
-  if(fr&&Number(fr)>0) bits.push('max friction '+escHtml(fr)+'%');
   const dt=(document.getElementById('fDropThin')?.value||'').trim();
   if(dt&&Number(dt)>0) bits.push('thinnest '+escHtml(dt)+'% dropped');
   if(!bits.length) return 'Nothing is ranked yet \u2014 the live tape has not produced a current read.';
@@ -12461,8 +12459,6 @@ function applyFilters(){
   const minTurn=RADAR_LIQ_STEPS[turnIdx]||0;   // retained for the pool/fetch eligibility path only
   const dropThinRaw=(document.getElementById('fDropThin')?.value||'').trim();
   const dropThinPct=dropThinRaw===''?null:((Number(dropThinRaw)>0&&Number(dropThinRaw)<100)?Number(dropThinRaw):null);
-  const maxFrictionRaw=(document.getElementById('fMaxFriction')?.value||'').trim();
-  const maxFriction=maxFrictionRaw===''?null:(Number(maxFrictionRaw)>0?Number(maxFrictionRaw):null);
   // v1216 (owner): a ceiling on the share price. Blank means no ceiling - an empty field is a
   // setting, not a zero, so it must never be read as "max ₹0" and empty the board.
   // Held suppression also applies here: portfolio files can parse after the scanner
@@ -12514,17 +12510,6 @@ function applyFilters(){
             +' shares in a typical 5-minute bar, below the cut of '+Math.round(cutInfo.cut).toLocaleString('en-IN')
             +' that drops the thinnest '+dropThinPct+'% of the '+cutInfo.n.toLocaleString('en-IN')
             +' stocks with a tape today'});
-        return false;
-      }
-    }
-    if(maxFriction!=null){
-      const fr=getTradeFrictionPct(s,frictionSizeBasis());
-      if(fr&&fr.ladder&&Number.isFinite(fr.total)&&fr.total>maxFriction){
-        REMOVED_ROWS.push({s,reason:'filter',chip:'Friction '+fr.total.toFixed(2)+'% > max '+maxFriction+'%',
-          detail:'getting '+fmtINR(frictionSizeBasis())+' in and out of this book costs '
-            +fr.total.toFixed(2)+'% (entry '+Number(fr.entryPct||0).toFixed(2)+'% + exit '
-            +Number(fr.exitPct||0).toFixed(2)+'% + rounding '+Number(fr.granularity||0).toFixed(2)
-            +'%), above your Max Friction of '+maxFriction+'%'});
         return false;
       }
     }
@@ -12954,8 +12939,6 @@ function renderStatusBar(){
   const tags=[];
   const turnIdx=+(document.getElementById('fMinTurnover')?.value||0);
   if(turnIdx>0)tags.push('TO≥'+RADAR_LIQ_LABELS[turnIdx]);
-  const frTag=(document.getElementById('fMaxFriction')?.value||'').trim();
-  if(frTag!==''&&Number(frTag)>0)tags.push('friction≤'+frTag+'%');
   const dtTag=(document.getElementById('fDropThin')?.value||'').trim();
   if(dtTag!==''&&Number(dtTag)>0)tags.push('−thinnest '+dtTag+'%');
   const q=(document.getElementById('fSearch')?.value||'').trim();
@@ -13070,7 +13053,6 @@ function renderStatusBar(){
 function clearFilters(){
   ['fSearch','fMinScore'].forEach(id=>{const el=document.getElementById(id);if(el)el.value=id==='fMinScore'?'60':'';});
   const turnEl=document.getElementById('fMinTurnover');if(turnEl)turnEl.value='0';
-  const frEl=document.getElementById('fMaxFriction');if(frEl)frEl.value='';
   const dtEl=document.getElementById('fDropThin');if(dtEl)dtEl.value='';
   updateFilterPlaceholders();
   applyFilters();
@@ -14237,13 +14219,13 @@ function compactRankingRows(rows){
   }));
 }
 function applySavedFiltersForMode(mode){
-  const ids=['fSearch','fMinScore','fMaxFriction','fDropThin','fCapital','fMaxAlloc','fRiskPerTrade'];
+  const ids=['fSearch','fMinScore','fDropThin','fCapital','fMaxAlloc','fRiskPerTrade'];
   const prev={};
   ids.forEach(id=>{const el=document.getElementById(id);if(el)prev[id]=el.value;});
   try{
     const st=JSON.parse(localStorage.getItem(modeKey(SCANNER_STORE,mode))||'{}');
     const shared=JSON.parse(localStorage.getItem(SHARED_FILTER_STORE)||'{}');
-    const map={minScore:'fMinScore',maxFriction:'fMaxFriction',dropThin:'fDropThin'};
+    const map={minScore:'fMinScore',dropThin:'fDropThin'};
     Object.entries(map).forEach(([k,id])=>{const el=document.getElementById(id);if(el&&st[k]!=null)el.value=st[k];});
     const capEl=document.getElementById('fCapital');if(capEl&&shared.capital!=null)capEl.value=shared.capital;
     const maxEl=document.getElementById('fMaxAlloc');if(maxEl&&shared.maxAlloc!=null)maxEl.value=shared.maxAlloc;
@@ -14786,7 +14768,6 @@ function saveFilterState(){
     search:document.getElementById('fSearch')?.value||'',
     minScore:document.getElementById('fMinScore')?.value||'60',
     minTurnover:document.getElementById('fMinTurnover')?.value||'0',
-    maxFriction:document.getElementById('fMaxFriction')?.value??'',
     dropThin:document.getElementById('fDropThin')?.value??'',
     sortCol:SCOL,
     sortDir:SDIR,
@@ -14825,7 +14806,6 @@ function loadFilterState(){
     if(state.search!=null){const el=document.getElementById('fSearch');if(el)el.value=state.search;}
     if(state.minScore!=null){const el=document.getElementById('fMinScore');if(el)el.value=state.minScore;}
     if(state.minTurnover!=null){const el=document.getElementById('fMinTurnover');if(el)el.value=state.minTurnover;}
-    if(state.maxFriction!=null){const el=document.getElementById('fMaxFriction');if(el)el.value=state.maxFriction;}
     if(state.dropThin!=null){const el=document.getElementById('fDropThin');if(el)el.value=state.dropThin;}
     resetRecommendationSelectionForRefresh(); // legacy persisted exclusions are deliberately ignored
     // Trade inputs PREFER the Drive-synced brain (so laptop and phone agree); localStorage
