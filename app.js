@@ -1,5 +1,5 @@
 const BUILD_TS='2026-09-04 12:02 IST'; // release build time (IST)
-const APP_VERSION=1284; // v1284: restore the working Zerodha markets chart route.
+const APP_VERSION=1285; // v1285: cooperative live-tape hydration and memoized tape reads keep UI input responsive.
 const RADAR_SCORE_VERSION='tape-decision-v3';
 // v1093: a baseline reward:risk MEASURED on the cross-section (last completed bhav session) instead of learned from the owner's own fills - reported on every row, deliberately not enforced. Includes v1092: position size split by Radar score / stop distance, so equally-scored names carry equal RUPEE risk, plus an opt-in Risk /trade cap.
 // v556: parse the NSE Market Activity Report (MA<date>.csv) — official Nifty %, advances/declines and sector index moves shown as market CONTEXT in the status bar (EOD data, display only, never fed into per-row scoring); MA added to the ℹ️ file manifest.
@@ -88,9 +88,14 @@ let ALL=[],FILT=[],PG=1,PGSZ=100,SCOL='rank',SDIR=1;
 // question by WALKING THE WHOLE STORE - newestTapeBucketMs scans every symbol, and three separate
 // memo signatures sum every symbol's bar count. That was affordable when ~120 symbols carried a
 // tape; the WebSocket took it to 1,650, and newestTapeBucketMs is called PER ROW by
-// passesIntradayValidation. Bumped at the two places the store is written, so a signature costs one
-// integer read instead of a full scan.
+// passesIntradayValidation. Bumped at every store mutation, so a signature costs one integer read
+// instead of a full scan.
 let INTRADAY_STORE_V=0;
+// Derived tape reads are pure for one tape-store revision and session date. The same read was being
+// rebuilt repeatedly by scoring, filtering, row rendering and the basket summary; cache the result
+// without changing its inputs or output. `ageMin` is refreshed on cache hits so the displayed age stays
+// live even while the underlying bars are unchanged.
+const INTRADAY_READ_MEMO=new Map();
 let _tvLoadedThisSession=false; // true once a TV CSV has been processed this session
 let PERF_PERIOD_FILTER='all'; // 'all' | '1m' | '3m' | '6m' | '1y'
 let PERF_TRACK_ISSUE=null; // issue date selected in the recommendation-tracking outcome panel
@@ -114,6 +119,17 @@ let EXPORT_EXCLUDED=new Set(); // transient manual overrides for this recommenda
 // inputs overwrite the stored state, so every refresh reset the user's filters.
 let FILTERS_RESTORED=false;
 let FILE_LOAD_STATUS={source:null,when:null,files:[]};
+// Give the browser a chance to process input/paint between large, independent batches. This changes
+// scheduling only; it never changes the order or contents of a calculation.
+function yieldToUi(){
+  try{
+    if(globalThis.scheduler&&typeof globalThis.scheduler.yield==='function'){
+      const p=globalThis.scheduler.yield();
+      return p&&typeof p.catch==='function'?p.catch(()=>{}):Promise.resolve();
+    }
+  }catch(e){}
+  return new Promise(resolve=>setTimeout(resolve,0));
+}
 // Radar composite scorer state (v517): one same-day transparent cross-sectional model.
 let RADAR={headers:[],matrix:[],features:[],ids:{},rockets:0,continuationCount:0,ms:0,sourceNote:'',scoredAt:null};
 const SCANNER_STORE='rs_filters';
@@ -1209,23 +1225,58 @@ function symbolChartButton(sym,innerHtml=null,extraStyle=''){
   const s=String(sym??'').trim();
   if(!s) return '';
   const t=KITE_TOKEN[normSym(s)];
-  const url=t
-    ?`https://kite.zerodha.com/markets/chart/web/ciq/NSE/${encodeURIComponent(normSym(s))}/${t}`
-    :'https://kite.zerodha.com/';
-  const onClick=`kiteOpen(${JSON.stringify(normSym(s))},${JSON.stringify(url)})`;
+  const onClick=`kiteOpen(${JSON.stringify(normSym(s))})`;
   const title=t?`Open ${escHtml(s)} chart in Zerodha Kite (copies the symbol too)`
-              :`Open Zerodha Kite and paste ${escHtml(s)}; its chart token is not loaded yet`;
+              :`Open ${escHtml(s)} chart in Zerodha Kite after resolving its instrument token`;
   return `<button type="button" onclick='event.stopPropagation();${onClick}'`
     +` style="padding:0;border:0;background:transparent;color:inherit;font:inherit;text-align:left;cursor:pointer;${extraStyle}"`
     +` title="${title}">${innerHtml??escHtml(s)}</button>`
     ;
 }
-function kiteOpen(sym,url){
+let _kiteInstrumentLoadPromise=null;
+async function ensureKiteInstrumentToken(sym){
+  const key=normSym(sym||'');
+  if(KITE_TOKEN[key]>0) return KITE_TOKEN[key];
+  if(!_kiteInstrumentLoadPromise){
+    _kiteInstrumentLoadPromise=(async()=>{
+      try{
+        if(KITE_API){
+          const r=await fetch(KITE_HELPER+'/api/inputs/file?name='+encodeURIComponent('Kite Instruments.csv'),{cache:'no-store'});
+          if(r.ok){
+            const rows=parseCSV(await r.text())||[];
+            for(const row of rows){
+              const s=normSym(row['Symbol']||''),t=Number(row['Token'])||0;
+              if(s&&t)KITE_TOKEN[s]=t;
+            }
+          }
+        }
+      }catch(e){console.warn('Could not refresh Kite instrument tokens:',e);}
+    })().finally(()=>{_kiteInstrumentLoadPromise=null;});
+  }
+  await _kiteInstrumentLoadPromise;
+  return KITE_TOKEN[key]||0;
+}
+async function kiteOpen(sym){
+  sym=normSym(sym||'');
+  if(!sym) return;
+  // Preserve the browser's user-gesture permission when the token list needs a helper fetch.
+  // The tab is opened synchronously and navigated only after the token has been resolved.
+  const pendingTab=KITE_TOKEN[sym]>0?null:window.open('about:blank','_blank');
+  const t=await ensureKiteInstrumentToken(sym);
+  if(!(t>0)){
+    try{if(pendingTab&&!pendingTab.closed)pendingTab.close();}catch(e){}
+    showToast('Kite instrument token unavailable for '+escHtml(sym)+'; chart not opened.',4000,true);
+    return;
+  }
+  const url=`https://kite.zerodha.com/markets/chart/web/ciq/NSE/${encodeURIComponent(sym)}/${t}`;
   let copied=false;
   try{
     if(navigator.clipboard&&navigator.clipboard.writeText){navigator.clipboard.writeText(sym);copied=true;}
   }catch(e){}
-  try{window.open(url,'_blank','noopener');}catch(e){}
+  try{
+    if(pendingTab&&!pendingTab.closed) pendingTab.location.href=url;
+    else window.open(url,'_blank','noopener');
+  }catch(e){}
   showToast(copied?sym+' copied — opening Kite':'Opening '+sym+' in Kite',2000);
 }
 function findHeader(hdrs,patterns){return hdrs.find(h=>patterns.some(p=>p.test(h.trim())))||null;}
@@ -4401,11 +4452,21 @@ function intradayFetchListRow(sym,w){
     spanSessions:(!today&&rd&&rd.sessions>0)?rd.sessions:null};
 }
 function getIntradayRead(sym){
-  const bars=INTRADAY_BARS[normSym(sym||'')];
-  if(!bars||!bars.length) return null;
-  const key=istDayKey(bars[bars.length-1].t);
-  const day=bars.filter(b=>istDayKey(b.t)===key);
-  if(bars.length<3) return null;
+  const key=normSym(sym||'');
+  const sessionKey=(typeof getSessionDate==='function')?getSessionDate():'';
+  const memoSig=INTRADAY_STORE_V+'|'+sessionKey;
+  const cached=INTRADAY_READ_MEMO.get(key);
+  if(cached&&cached.sig===memoSig){
+    if(cached.value&&Number.isFinite(cached.value.asOf)){
+      cached.value.ageMin=Math.max(0,Math.round((Date.now()-cached.value.asOf)/60000));
+    }
+    return cached.value;
+  }
+  const bars=INTRADAY_BARS[key];
+  if(!bars||!bars.length){INTRADAY_READ_MEMO.set(key,{sig:memoSig,value:null});return null;}
+  const barSessionKey=istDayKey(bars[bars.length-1].t);
+  const day=bars.filter(b=>istDayKey(b.t)===barSessionKey);
+  if(bars.length<3){INTRADAY_READ_MEMO.set(key,{sig:memoSig,value:null});return null;}
   const open=day[0].o, close=day[day.length-1].c;
   const hi=Math.max(...day.map(b=>b.h)), lo=Math.min(...day.map(b=>b.l));
   const first=day.slice(0,3);
@@ -4421,7 +4482,7 @@ function getIntradayRead(sym){
   let hiIdx=0; day.forEach((b,i)=>{if(b.h>=hi) hiIdx=i;});
   const freshness=day.length>1?hiIdx/(day.length-1):1;
   const traj=buildIntradayTrajectory(bars.length>day.length?bars:day);
-  const nowKey=(typeof getSessionDate==='function')?getSessionDate():key;
+  const nowKey=sessionKey||barSessionKey;
   const asOf=day[day.length-1].t;
   const ageMin=Math.max(0,Math.round((Date.now()-asOf)/60000));
   const spanBars=Math.round((asOf-day[0].t)/300000)+1;      // 5-minute bars the span should hold
@@ -4431,9 +4492,9 @@ function getIntradayRead(sym){
   const _av=bars.reduce((n,b)=>n+(Number(b.v)||0),0);
   const volShare=_av>0?_tv/_av:1;
   const allSessions=[...new Set(bars.map(b=>istDayKey(b.t)))].sort();
-  return {sym:normSym(sym),bars:day.length,flowBars:bars.length,sessions:allSessions.length,
-          sessionList:allSessions,
-          on:key,current:key===nowKey,asOf,ageMin,holes,
+  const result={sym:key,bars:day.length,flowBars:bars.length,sessions:allSessions.length,
+           sessionList:allSessions,
+           on:barSessionKey,current:barSessionKey===nowKey,asOf,ageMin,holes,
           open,close,hi,lo,dayPct:(close/open-1)*100,traj,
           todayTraj,volShare,
           todayStanding:todayTraj?todayTraj.standing:null,
@@ -4457,7 +4518,9 @@ function getIntradayRead(sym){
           first15:f15, first15Up:f15>0, efficiency:eff, position:pos, freshness,
           // The standing: direction confirmed by the open, travelled cleanly, and still near its
           // high. Geometric so a zero on any one of them cannot be averaged away.
-          standing:traj?traj.standing:Math.cbrt(Math.max(0,(f15+1)/2)*Math.max(0,eff)*Math.max(0,pos))};
+           standing:traj?traj.standing:Math.cbrt(Math.max(0,(f15+1)/2)*Math.max(0,eff)*Math.max(0,pos))};
+  INTRADAY_READ_MEMO.set(key,{sig:memoSig,value:result});
+  return result;
 }
 function applyIntradayReorder(rows){
   if(!rows||!rows.length) return 0;
@@ -10603,6 +10666,7 @@ function collapseFetchList(){
 function forgetIntradayFor(sym){
   const k=normSym(sym||''); if(!k) return;
   delete INTRADAY_BARS[k];
+  INTRADAY_STORE_V++;
   if(INTRADAY_TARGET===k) INTRADAY_TARGET='';
   const r=(Array.isArray(ALL)?ALL:[]).find(x=>normSym(x.symbol)===k);
   if(r){ r.intraday=null;r.intradayVerdict=null;r.intradayWhy=null;r.intradaySellingToday=false; }
@@ -11212,6 +11276,7 @@ async function hydrateFromHelper(reason){
   const wanted=list.filter(f=>{
     const n=f&&f.name; if(!n) return false;
     return isScannerCsvName(n)||isReportsZipName(n)
+      ||isExactCsvName(n,'Kite Instruments.csv')
       ||isExactCsvName(n,'Holdings.csv')||isExactCsvName(n,'Positions.csv')
       ||isExactCsvName(n,'Orders.csv')||isExactCsvName(n,'TRADEBOOK.csv')
       ||isExactCsvName(n,'NSE Holidays.csv');
@@ -11367,8 +11432,6 @@ async function scheduleScoreJob(){
     if(raw.length < 20) return;
     ALL = await radarScoreRowsAsync(raw);
     applyFilters();
-    try { renderRankingsPanels(); } catch(e){}
-    try { renderStats(); } catch(e){}
   } catch(e) {
     console.warn('scheduleScoreJob error:', e);
   } finally {
@@ -11430,9 +11493,12 @@ async function pollUniverseDelta(){
     return { ok: false, changed: false, error: e.message };
   }
 }
+let _inventoryLoadRunning=false;
 async function loadIntradayInventory(){
-  if(!KITE_API) return 0;
+  if(_inventoryLoadRunning) return 0;
+  _inventoryLoadRunning=true;
   try{
+    if(!KITE_API) return 0;
     // ASK ONLY FOR WHAT WE DO NOT HAVE. The full answer is 5.1 MB across 1,554 symbols and this
     // runs every 30 seconds; `since` is the newest bar already held, formatted exactly as the
     // helper writes its rows. Safe only because the parse below MERGES - see v1243, where the same
@@ -11447,7 +11513,7 @@ async function loadIntradayInventory(){
     const r=await fetch(KITE_HELPER+'/api/kite/inventory'+(since?('?since='+encodeURIComponent(since)):''),{cache:'no-store'});
     const j=await r.json();
     if(!j||!j.ok||!j.data) return 0;
-    let n=0;
+    let n=0,processed=0;
     for(const sym of Object.keys(j.data)){
       const rows=j.data[sym];
       // An incremental answer is legitimately one bar; only a FULL answer needs the sanity floor.
@@ -11461,13 +11527,20 @@ async function loadIntradayInventory(){
         })).join('\n');
       const res=parseIntradayPaste(csv,sym,{merge:!!since});
       if(res&&res.ok&&res.changed) n++;
+      processed++;
+      // Keep the single parser and the same ordered merge, but let input and paint run between
+      // batches. This recovery path can contain the full universe and used to monopolise the UI.
+      if(processed%24===0) await yieldToUi();
     }
     if(n){
       // applyFilters owns the table, status and rankings-panel render.
-      try{ applyIntradayReorder(ALL); applyFilters(); }catch(e){}
+      try{ applyIntradayReorder(ALL); }catch(e){}
+      await yieldToUi();
+      try{ applyFilters(); }catch(e){}
     }
     return n;
   }catch(e){ return 0; }
+  finally{ _inventoryLoadRunning=false; }
 }
 async function fetchCandlesInApp(limit,opts){
   const auto=!!(opts&&opts.auto)||!!(limit&&limit.auto);
@@ -11729,6 +11802,17 @@ function intradayPasteBarHtml(){
   </div>`;
 }
 
+let _filterPaintQueued=false;
+function scheduleFilterPaint(){
+  if(_filterPaintQueued) return;
+  _filterPaintQueued=true;
+  const paint=()=>{
+    _filterPaintQueued=false;
+    renderHead();renderTable();renderStatusBar();
+  };
+  if(typeof requestAnimationFrame==='function') requestAnimationFrame(paint);
+  else setTimeout(paint,0);
+}
 function applyFilters(){
   syncRecommendationThreshold();
   const q=(document.getElementById('fSearch')?.value||'').trim().toLowerCase();
@@ -11804,7 +11888,7 @@ function applyFilters(){
   }
   SELECTED=newSelected;
 
-  PG=1;renderHead();renderTable();renderStatusBar();saveFilterState();updateTabCounts();
+  PG=1;scheduleFilterPaint();saveFilterState();updateTabCounts();
   // Portfolio panels are secondary and can build several large tables. Keep them off the
   // wheel/typing critical path, then refresh once the user pauses.
   clearTimeout(window._filterPanelsTimer);
