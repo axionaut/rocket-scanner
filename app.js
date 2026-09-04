@@ -1,5 +1,5 @@
-const BUILD_TS='2026-09-04 14:16 IST'; // release build time (IST)
-const APP_VERSION=1289; // v1289: tape lag is counted in completable bars, not from the bar stamp.
+const BUILD_TS='2026-09-04 14:27 IST'; // release build time (IST)
+const APP_VERSION=1290; // v1290: every symbol carries Z (Zerodha) and T (TradingView) chart buttons.
 const RADAR_SCORE_VERSION='tape-decision-v3';
 // v1093: a baseline reward:risk MEASURED on the cross-section (last completed bhav session) instead of learned from the owner's own fills - reported on every row, deliberately not enforced. Includes v1092: position size split by Radar score / stop distance, so equally-scored names carry equal RUPEE risk, plus an opt-in Risk /trade cap.
 // v556: parse the NSE Market Activity Report (MA<date>.csv) — official Nifty %, advances/declines and sector index moves shown as market CONTEXT in the status bar (EOD data, display only, never fed into per-row scoring); MA added to the ℹ️ file manifest.
@@ -1233,17 +1233,35 @@ function num(v){
 }
 function normSym(s){return String(s||'').trim().replace(/^[A-Z]+:/,'').replace(/_/g,'-').toUpperCase().replace(/-(EQ|BE|BZ|SM|ST|SZ)$/,'');}
 function escHtml(s){return String(s??'').replace(/[&<>"]/g,ch=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[ch]));}
+// TWO NAMED BUTTONS, EVERY SYMBOL, EVERY TABLE (owner, v1290). The stock name itself used to be the
+// Kite link, which is invisible until you hover it and offers no second destination. `Z` opens the
+// Zerodha Kite chart (resolving the instrument token, copying the symbol), `T` opens TradingView.
+// Both stop propagation, so a row that opens a detail modal still does that when the name is
+// clicked - the buttons are the only chart affordance and they say which chart they are.
+function chartLinkButtons(sym,extraStyle=''){
+  const s=String(sym??'').trim();
+  if(!s) return '';
+  const n=normSym(s);
+  const base='display:inline-flex;align-items:center;justify-content:center;width:18px;height:18px;'
+    +'margin-left:5px;padding:0;border-radius:4px;cursor:pointer;vertical-align:middle;'
+    +"font-family:'DM Mono',monospace;font-size:10px;font-weight:700;line-height:1;";
+  return `<button type="button" onclick='event.stopPropagation();kiteOpen(${JSON.stringify(n)})'`
+      +` title="Open ${escHtml(s)} on the Zerodha Kite chart"`
+      +` style="${base}border:1px solid rgba(56,189,248,.35);background:rgba(56,189,248,.10);color:var(--cyan);${extraStyle}">Z</button>`
+    +`<button type="button" onclick='event.stopPropagation();tradingViewOpen(${JSON.stringify(n)})'`
+      +` title="Open ${escHtml(s)} on TradingView"`
+      +` style="${base}border:1px solid rgba(148,163,184,.35);background:rgba(148,163,184,.12);color:var(--t2);${extraStyle}">T</button>`;
+}
+function tradingViewOpen(sym){
+  const s=normSym(sym||'');
+  if(!s) return;
+  try{ window.open('https://www.tradingview.com/chart/?symbol=NSE%3A'+encodeURIComponent(s),'_blank','noopener'); }catch(e){}
+}
 function symbolChartButton(sym,innerHtml=null,extraStyle=''){
   const s=String(sym??'').trim();
   if(!s) return '';
-  const t=KITE_TOKEN[normSym(s)];
-  const onClick=`kiteOpen(${JSON.stringify(normSym(s))})`;
-  const title=t?`Open ${escHtml(s)} chart in Zerodha Kite (copies the symbol too)`
-              :`Open ${escHtml(s)} chart in Zerodha Kite after resolving its instrument token`;
-  return `<button type="button" onclick='event.stopPropagation();${onClick}'`
-    +` style="padding:0;border:0;background:transparent;color:inherit;font:inherit;text-align:left;cursor:pointer;${extraStyle}"`
-    +` title="${title}">${innerHtml??escHtml(s)}</button>`
-    ;
+  return `<span style="display:inline-flex;align-items:center;gap:0;${extraStyle}">`
+    +`<span>${innerHtml??escHtml(s)}</span>${chartLinkButtons(s)}</span>`;
 }
 let _kiteInstrumentLoadPromise=null;
 async function ensureKiteInstrumentToken(sym){
@@ -10601,8 +10619,8 @@ function renderTable(){
       // v1142: routed through symbolChartButton like every other table. This cell had built its own
       // TradingView link since v1070, so the "one symbol interaction everywhere" rule was true of the
       // panels and quietly false of the main table - which is why swapping to Zerodha missed it.
-      symbol:`<td style="font-family:'Plus Jakarta Sans',sans-serif">${intradayRowButton(s)}${symbolChartButton(String(s.symbol),
-        `<div style="font-weight:700;font-size:15px;color:var(--t1);max-width:170px;overflow:hidden;text-overflow:ellipsis">${escHtml(s.symbol)}${(()=>{const flags=s.meta?.flags||[];if(!flags.length)return '';return `<span style="font-size:12px;background:rgba(239,68,68,.15);color:var(--red);border-radius:4px;padding:1px 5px;margin-left:5px;font-weight:700;vertical-align:middle" title="NSE surveillance flags: ${escHtml(flags.join(' · '))}">⚠ ${flags.length}</span>`;})()}${s._held?`<span style="font-size:12px;background:rgba(244,114,182,.15);color:#f472b6;border-radius:4px;padding:1px 5px;margin-left:5px;font-weight:700;vertical-align:middle" title="You already hold this. Held stocks stay in the ranking (v1070) and can be recommended again — buying here ADDS to the existing position.">📌 held</span>`:''}</div>${radarSurveillanceNames(s)}<div style="font-size:11px;color:var(--t3);max-width:150px;overflow:hidden;text-overflow:ellipsis" title="${escHtml((s.name||'')+(s.setup?' · '+s.setup:''))}">${radarSeriesBandPill(s)} ${escHtml(s.setup||s.name||'')}</div>`)}</td>`,
+      symbol:`<td style="font-family:'Plus Jakarta Sans',sans-serif">${intradayRowButton(s)}${(
+        `<div style="font-weight:700;font-size:15px;color:var(--t1);max-width:230px;overflow:hidden;text-overflow:ellipsis">${escHtml(s.symbol)}${chartLinkButtons(s.symbol)}${(()=>{const flags=s.meta?.flags||[];if(!flags.length)return '';return `<span style="font-size:12px;background:rgba(239,68,68,.15);color:var(--red);border-radius:4px;padding:1px 5px;margin-left:5px;font-weight:700;vertical-align:middle" title="NSE surveillance flags: ${escHtml(flags.join(' · '))}">⚠ ${flags.length}</span>`;})()}${s._held?`<span style="font-size:12px;background:rgba(244,114,182,.15);color:#f472b6;border-radius:4px;padding:1px 5px;margin-left:5px;font-weight:700;vertical-align:middle" title="You already hold this. Held stocks stay in the ranking (v1070) and can be recommended again — buying here ADDS to the existing position.">📌 held</span>`:''}</div>${radarSurveillanceNames(s)}<div style="font-size:11px;color:var(--t3);max-width:150px;overflow:hidden;text-overflow:ellipsis" title="${escHtml((s.name||'')+(s.setup?' · '+s.setup:''))}">${radarSeriesBandPill(s)} ${escHtml(s.setup||s.name||'')}</div>`)}</td>`,
       setup:`<td style="font-size:13px;color:var(--t2)">${escHtml(s.setup||'—')}${s.stage?' '+radarStagePill(s):''}${(s.modelTriggers||[]).length?' '+radarTriggerPill(s):''}</td>`,
       series:`<td>${radarSeriesBandPill(s)}</td>`,
       price:`<td style="white-space:nowrap">${fmtINR(s.price)}<span style="color:var(--t3)"> · </span><span style="font-size:12px">${fPerf(s.day??s.priceChange)}${s.corpAction?`<span title="Corporate action (${escHtml(s.corpAction)}) — mechanical ex-date move, neutralised in scoring" style="font-size:11px;color:var(--amber);margin-left:4px;cursor:help">⚑</span>`:''}</span></td>`,
@@ -12198,7 +12216,7 @@ function buildRemovedPanel(query=''){
     // TradingView chart, the ROW opens the Radar scoring breakdown.
     return `<tr onclick="showRadarDetail('${s.symbol}')" title="Click for the full scoring breakdown" style="border-bottom:1px solid var(--border);cursor:pointer">
       <td style="padding:6px 10px;text-align:right;font-family:'DM Mono',monospace;color:var(--t2)">#${s.rank??'—'}</td>
-      <td style="padding:6px 10px">${symbolChartButton(s.symbol,`<span style="font-weight:700;color:var(--t1);font-size:14px">${escHtml(s.symbol)}</span> <span style="color:var(--t3);font-size:12px">${escHtml((s.name||'').slice(0,28))}</span>`)}</td>
+      <td style="padding:6px 10px"><span style="font-weight:700;color:var(--t1);font-size:14px">${escHtml(s.symbol)}</span>${chartLinkButtons(s.symbol)} <span style="color:var(--t3);font-size:12px">${escHtml((s.name||'').slice(0,28))}</span></td>
       <td style="padding:6px 10px;text-align:right">${radarScoreCell(s.score)}</td>
       <td style="padding:6px 10px;text-align:right">${fPerf(s.day??s.priceChange)}</td>
       <td style="padding:6px 10px">${reason}</td>
@@ -12231,7 +12249,7 @@ function showRadarDetail(sym){
   const dlg=document.getElementById('radarDetail');
   if(!r||!dlg) return;
   // innerHTML (not textContent) so the score carries its band colour; both interpolations are escaped.
-  document.getElementById('radarDetailTitle').innerHTML=`${escHtml(r.symbol)} · <span style="color:${radarScoreColor(r.score)}">${isFinite(r.score)?Number(r.score).toFixed(1):'—'}</span> · ${escHtml(r.risk||'—')} risk`;
+  document.getElementById('radarDetailTitle').innerHTML=`${escHtml(r.symbol)}${chartLinkButtons(r.symbol)} · <span style="color:${radarScoreColor(r.score)}">${isFinite(r.score)?Number(r.score).toFixed(1):'—'}</span> · ${escHtml(r.risk||'—')} risk`;
   const decisionAction=isSelectableRecommendation(r)
     ?'<b style="color:var(--green)">GO:</b> every recommendation gate and the current 5-minute validation pass; the row can be selected/exported.'
     :r.scoreVersion!==RADAR_SCORE_VERSION
