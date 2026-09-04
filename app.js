@@ -1,5 +1,5 @@
-const BUILD_TS='2026-09-04 15:27 IST'; // release build time (IST)
-const APP_VERSION=1292; // v1292: trade friction from the live book replaces the turnover and price filters.
+const BUILD_TS='2026-09-04 15:34 IST'; // release build time (IST)
+const APP_VERSION=1293; // v1293: trading continuity and bars-of-flow — is anyone trading this stock at all.
 const RADAR_SCORE_VERSION='tape-decision-v3';
 // v1093: a baseline reward:risk MEASURED on the cross-section (last completed bhav session) instead of learned from the owner's own fills - reported on every row, deliberately not enforced. Includes v1092: position size split by Radar score / stop distance, so equally-scored names carry equal RUPEE risk, plus an opt-in Risk /trade cap.
 // v556: parse the NSE Market Activity Report (MA<date>.csv) — official Nifty %, advances/declines and sector index moves shown as market CONTEXT in the status bar (EOD data, display only, never fed into per-row scoring); MA added to the ℹ️ file manifest.
@@ -10741,8 +10741,16 @@ function renderTable(){
         // is precisely the shape that made this app unusable three releases ago.
         const size=frictionSizeBasis();
         const f=getTradeFrictionPct(s,size);
+        // "x bars" is the flow reading: how many of this stock's normal five minutes your order is.
+        const bof=f&&Number.isFinite(f.barsOfFlow)?f.barsOfFlow:null;
+        const bofCol=bof===null?'var(--t3)':bof>=1?'var(--red)':bof>=0.5?'var(--amber)':'var(--t3)';
+        const bofTxt=bof===null?'':`<div style="font-size:11px;color:${bofCol}" title="${escHtml(
+          'Your '+f.shares+' shares against a typical 5-minute bar of '+Math.round(f.medianSharesPerBar||0)
+          +' shares in this stock — '+bof.toFixed(2)+' bars of its normal trade. At 1.00 your order IS the bar. '
+          +'It traded in '+Math.round(f.continuityPct||0)+'% of this session\u2019s bars.')}">${bof.toFixed(2)} bars${
+            Number.isFinite(f.continuityPct)&&f.continuityPct<80?` · ${Math.round(f.continuityPct)}% live`:''}</div>`;
         const turnTxt=`<span style="font-size:11px;color:var(--t3)">${fV(s.turnover)}</span>`;
-        if(!f||!f.ladder) return `${turnTxt}<div style="font-size:11px;color:var(--t3)" title="${escHtml(f?f.basis:'no size to price')}">no live book</div>`;
+        if(!f||!f.ladder) return `${turnTxt}${bofTxt}<div style="font-size:11px;color:var(--t3)" title="${escHtml(f?f.basis:'no size to price')}">no live book</div>`;
         const t=Number(f.total);
         const col=!Number.isFinite(t)?'var(--t3)':t<0.25?'var(--green)':t<0.75?'var(--amber)':'var(--red)';
         const tip=`At ${fmtINR(size)} (${f.shares} shares): entry ${Number(f.entryPct||0).toFixed(2)}% + exit `
@@ -10752,7 +10760,7 @@ function renderTable(){
           +` clear before you make anything. Turnover ${fV(s.turnover)} is context only.`;
         return `<span style="color:${col};font-weight:700" title="${escHtml(tip)}">${Number.isFinite(t)?t.toFixed(2)+'%':'—'}</span>`
           +(f.covered?'':`<span style="color:var(--red);font-size:11px" title="${escHtml(f.basis)}"> \u26a0</span>`)
-          +`<div>${turnTxt}</div>`;
+          +bofTxt+`<div>${turnTxt}</div>`;
       })()}</td>`,
       predEod:`<td style="white-space:nowrap">${(()=>{
         const rd=getIntradayRead(s.symbol);
@@ -11568,6 +11576,35 @@ function walkLadder(levels,shares){
 // what the bid makes you give up to get out, and what whole-share rounding wastes. Every term is
 // derived from the row's own book and the owner's own size - there is no chosen constant anywhere
 // in it, and it is null rather than optimistic when the book is not there to answer.
+// HOW MUCH OF THIS STOCK'S NORMAL FIVE MINUTES AM I? (owner, v1293.) He asked what his capital has
+// to do with whether a stock trades in low volumes, and he was right that it has nothing to do with
+// it - the question "is anyone trading this" is about the STOCK. But the answer only becomes a
+// DECISION when it is put next to the order: a stock trading 214 shares in a typical bar is not
+// thin in the abstract, it is thin against the 297 shares you are about to hold. Turnover cannot
+// say this (it is a whole-day rupee figure) and neither can the five-level book (it is a snapshot
+// of resting intent, not of flow). This is the flow half, and it is the half that was missing.
+let _flowProfileMemo={v:-1,map:null};
+function getTapeFlowProfile(sym){
+  const s=normSym(sym||'');
+  const bars=INTRADAY_BARS[s];
+  if(!Array.isArray(bars)||!bars.length) return null;
+  if(_flowProfileMemo.v!==INTRADAY_STORE_V){ _flowProfileMemo={v:INTRADAY_STORE_V,map:new Map()}; }
+  const hit=_flowProfileMemo.map.get(s);
+  if(hit) return hit;
+  const key=istDayKey(bars[bars.length-1].t);
+  const day=bars.filter(b=>istDayKey(b.t)===key);
+  if(day.length<3){ _flowProfileMemo.map.set(s,null); return null; }
+  const traded=day.filter(b=>Number(b.v)>0);
+  const vols=traded.map(b=>Number(b.v)).sort((a,b)=>a-b);
+  const out={
+    bars:day.length,tradedBars:traded.length,
+    continuityPct:100*traded.length/day.length,
+    medianShares:vols.length?vols[Math.floor(vols.length/2)]:0,
+    session:key
+  };
+  _flowProfileMemo.map.set(s,out);
+  return out;
+}
 function getTradeFrictionPct(row,rupees){
   const sym=normSym(row&&row.symbol||'');
   const px=Number(row&&row.price)||0;
@@ -11585,9 +11622,20 @@ function getTradeFrictionPct(row,rupees){
     // is what happened. A missing book is not a cheap book.
     const turn=Number(row.turnover)||0;
     const part=turn>0?(size/turn)*100:null;
+    // The FLOW half needs no book at all - it comes from the 5-minute bars every scored row has -
+    // so it is reported even here, where the ladder cannot answer.
+    const fl=getTapeFlowProfile(sym);
+    const bof=(fl&&fl.medianShares>0)?shares/fl.medianShares:null;
     return {total:null,granularity,shares,participationPct:part,ladder:false,
+            barsOfFlow:bof,continuityPct:fl?fl.continuityPct:null,
+            medianSharesPerBar:fl?fl.medianShares:null,
             basis:turn>0?('no live book; '+part.toFixed(2)+'% of the day\u2019s turnover'):'no live book and no turnover'};
   }
+  const flow=getTapeFlowProfile(sym);
+  // ONE BAR IS THE LANDMARK, AND IT IS NOT A CHOSEN NUMBER. At barsOfFlow = 1 your order is the
+  // entire trade of a normal five minutes in this stock - you are not participating in the flow,
+  // you ARE the flow. Above that you are moving the price by definition, whatever the book showed.
+  const barsOfFlow=(flow&&flow.medianShares>0)?shares/flow.medianShares:null;
   const bestBid=l.bids[0]?.[0]||0, bestAsk=l.asks?.[0]?.[0]||0;
   const mid=(bestBid>0&&bestAsk>0)?(bestBid+bestAsk)/2:px;
   const buy=walkLadder(l.asks,shares), sell=walkLadder(l.bids,shares);
@@ -11598,6 +11646,8 @@ function getTradeFrictionPct(row,rupees){
   const parts=[entryPct,exitPct].filter(Number.isFinite);
   const total=parts.length?parts.reduce((a,b)=>a+b,0)+granularity:null;
   return {total,entryPct,exitPct,granularity,spreadPct,shares,
+          barsOfFlow,continuityPct:flow?flow.continuityPct:null,
+          medianSharesPerBar:flow?flow.medianShares:null,
           shortSell,visibleBid:l.bids.reduce((n,x)=>n+(x[1]||0),0),
           covered:shortSell<=0,ladder:true,at:l.at,
           basis:shortSell>0
