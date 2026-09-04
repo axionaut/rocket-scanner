@@ -1,5 +1,5 @@
-const BUILD_TS='2026-09-04 11:34 IST'; // release build time (IST)
-const APP_VERSION=1283; // v1283: export selected basket rows directly and use Zerodha charts.
+const BUILD_TS='2026-09-04 12:02 IST'; // release build time (IST)
+const APP_VERSION=1284; // v1284: restore the working Zerodha markets chart route.
 const RADAR_SCORE_VERSION='tape-decision-v3';
 // v1093: a baseline reward:risk MEASURED on the cross-section (last completed bhav session) instead of learned from the owner's own fills - reported on every row, deliberately not enforced. Includes v1092: position size split by Radar score / stop distance, so equally-scored names carry equal RUPEE risk, plus an opt-in Risk /trade cap.
 // v556: parse the NSE Market Activity Report (MA<date>.csv) — official Nifty %, advances/declines and sector index moves shown as market CONTEXT in the status bar (EOD data, display only, never fed into per-row scoring); MA added to the ℹ️ file manifest.
@@ -1210,11 +1210,11 @@ function symbolChartButton(sym,innerHtml=null,extraStyle=''){
   if(!s) return '';
   const t=KITE_TOKEN[normSym(s)];
   const url=t
-    ?`https://kite.zerodha.com/chart/web/ciq/NSE/${encodeURIComponent(normSym(s))}/${t}`
-    :`https://kite.zerodha.com/markets/stocks/NSE/${encodeURIComponent(normSym(s))}`;
+    ?`https://kite.zerodha.com/markets/chart/web/ciq/NSE/${encodeURIComponent(normSym(s))}/${t}`
+    :'https://kite.zerodha.com/';
   const onClick=`kiteOpen(${JSON.stringify(normSym(s))},${JSON.stringify(url)})`;
   const title=t?`Open ${escHtml(s)} chart in Zerodha Kite (copies the symbol too)`
-              :`Open ${escHtml(s)} in Zerodha Kite; its chart token is not loaded yet`;
+              :`Open Zerodha Kite and paste ${escHtml(s)}; its chart token is not loaded yet`;
   return `<button type="button" onclick='event.stopPropagation();${onClick}'`
     +` style="padding:0;border:0;background:transparent;color:inherit;font:inherit;text-align:left;cursor:pointer;${extraStyle}"`
     +` title="${title}">${innerHtml??escHtml(s)}</button>`
