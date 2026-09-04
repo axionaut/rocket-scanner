@@ -1,5 +1,5 @@
-const BUILD_TS='2026-09-04 15:02 IST'; // release build time (IST)
-const APP_VERSION=1291; // v1291: full-mode book, classified buy/sell split, cancel ratio and one-minute latency bars.
+const BUILD_TS='2026-09-04 15:27 IST'; // release build time (IST)
+const APP_VERSION=1292; // v1292: trade friction from the live book replaces the turnover and price filters.
 const RADAR_SCORE_VERSION='tape-decision-v3';
 // v1093: a baseline reward:risk MEASURED on the cross-section (last completed bhav session) instead of learned from the owner's own fills - reported on every row, deliberately not enforced. Includes v1092: position size split by Radar score / stop distance, so equally-scored names carry equal RUPEE risk, plus an opt-in Risk /trade cap.
 // v556: parse the NSE Market Activity Report (MA<date>.csv) — official Nifty %, advances/declines and sector index moves shown as market CONTEXT in the status bar (EOD data, display only, never fed into per-row scoring); MA added to the ℹ️ file manifest.
@@ -8037,7 +8037,14 @@ function buildOpenPositionsPanel(query=''){
           +(Number.isFinite(p.pressurePct)?' Unspent pressure '+(p.pressurePct>=0?'+':'')+p.pressurePct.toFixed(2)+'%.':'')
           +(p.regime?' '+p.regime+'.':'');
         const tapeTag=`<div style="font-size:11px;color:${ac};font-weight:800" title="${escHtml(p.why+detail)}">${escHtml(p.signal)}</div>`;
-        return intradayRowButton({symbol:v})+symbolChartButton(v)+tapeTag;
+        // Two things the panel could not say before v1292: that the series changed underneath the
+        // holding, and what it will cost to get this exact quantity out of the live book.
+        const alert=p.seriesAlert
+          ?`<div style="font-size:11px;color:var(--amber);font-weight:700" title="${escHtml(p.seriesAlert)}">\u26a0 ${escHtml(String(p.seriesAlert).split(',')[0])}</div>`:'';
+        const fr=p.exitFriction;
+        const frTag=(fr&&fr.ladder&&Number.isFinite(fr.exitPct))
+          ?`<div style="font-size:11px;color:${fr.covered?'var(--t3)':'var(--red)'}" title="${escHtml('Selling '+fr.shares+' shares into the live book costs '+Number(fr.exitPct).toFixed(2)+'% against the mid. '+fr.basis+'.')}">exit ${Number(fr.exitPct).toFixed(2)}%${fr.covered?'':' \u26a0'}</div>`:'';
+        return intradayRowButton({symbol:v})+symbolChartButton(v)+tapeTag+alert+frTag;
         /* c8 ignore start -- legacy renderer retained below only until the consolidated v1172 assertions are retired. */
         const rd=getIntradayRead(v);
         let tag='';
@@ -9884,9 +9891,26 @@ function getOpenPositionDaysHeld(sym,liveQty){
 
 
 let _allocMemo=null; // single-entry memo: renderTable and renderStatusBar share one pass
+// THE RAIL IS NOW THE BOOK WHERE THERE IS ONE (v1292). The 0.10%-of-turnover cap is a proxy for
+// "can I get out of this", and it is a poor one: it is a statistic of the whole day against a
+// position you have to exit in minutes. The live book answers the question directly - you may not
+// hold more than the visible bid can buy back. That is a physical constraint, not a threshold:
+// nothing is chosen, and on the owner's own book it is exactly the rule that would have refused
+// 245 of JAGSNPHARM's 304 shares. The turnover rail is kept as the FALLBACK for a row with no live
+// ladder, and when both exist the tighter one binds - a rail is a floor on caution, not a menu.
+function getBookAllocationCap(row){
+  const l=getBookLadder(row&&row.symbol);
+  const px=Number(row?.price)||0;
+  if(!l||!(px>0)) return 0;
+  const exitable=l.bids.reduce((n,x)=>n+(Number(x[1])||0),0);
+  return exitable>0?exitable*px:0;
+}
 function getTurnoverAllocationCap(row){
   const turnover=Number(row?.turnover);
-  return Number.isFinite(turnover)&&turnover>0?turnover*MAX_TURNOVER_PARTICIPATION:0;
+  const turnCap=Number.isFinite(turnover)&&turnover>0?turnover*MAX_TURNOVER_PARTICIPATION:0;
+  const bookCap=getBookAllocationCap(row);
+  if(bookCap>0&&turnCap>0) return Math.min(bookCap,turnCap);
+  return bookCap>0?bookCap:turnCap;
 }
 function getRestingOrderMap(){
   const out={};
@@ -10182,6 +10206,16 @@ function getOpenPositionTapePolicy(sym,pos){
   const stopBreached=stopPrice!=null&&completedPrice<=stopPrice;
   const convertingDown=tape.regime==='selling'&&Number.isFinite(tape.pressurePct)&&tape.pressurePct<0;
 
+  // A SERIES CHANGE ON SOMETHING YOU ALREADY OWN IS NEWS (owner, v1292: "SPECIALITY-BE turned BE
+  // after we bought, by the way"). `eqEligible` is tested when a row is SCORED, so it protects the
+  // entry and nothing else - a stock moved to trade-to-thing after purchase changed the terms of
+  // the holding and the panel said nothing. This does not force a sale: T2T is a settlement
+  // restriction, not a verdict on the stock. It is stated, because a control that cannot work must
+  // say so and the owner must know the exit is delivery-only now.
+  const heldSeries=String(NSE_SERIES&&NSE_SERIES[s]||'').toUpperCase();
+  const seriesAlert=(heldSeries&&heldSeries!=='EQ')
+    ?('now trading in the '+heldSeries+' series, not EQ - intraday exit is not available on this holding')
+    :null;
   let signal='HOLD';
   if(liveHarvest||highRejection||paceFailed||stopBreached||convertingDown) signal='SELL';
   else if(tape.regime==='accumulating'&&tape.pressureConverting!==false
@@ -10229,7 +10263,8 @@ function getOpenPositionTapePolicy(sym,pos){
           :signal==='BUY'
             ?'Buying pressure is still converting into higher completed closes.'
             :'Pressure is mixed or being absorbed; keep the numerical levels unchanged.';
-  return {symbol:s,signal,signalSort:signal==='SELL'?0:signal==='HOLD'?1:2,qty,
+  return {symbol:s,signal,signalSort:signal==='SELL'?0:signal==='HOLD'?1:2,qty,seriesAlert,
+    exitFriction:getTradeFrictionPct({symbol:s,price:livePrice,turnover:null},qty*livePrice),
     price:+livePrice.toFixed(2),open:day[0].o,high:hi,low:lo,asOf:forming?forming.t:last.t,
     completedAsOf:last.t,
     targetPrice,targetPct,tapeTargetPrice,
@@ -10697,7 +10732,28 @@ function renderTable(){
       relvol:`<td style="white-space:nowrap">${s.relvol!=null&&isFinite(s.relvol)?Number(s.relvol).toFixed(2)+'×':'—'}<span style="color:var(--t3)"> · </span>${Number.isFinite(s.depthImbalance)?`<span style="color:${s.depthImbalance>0?'var(--green)':'var(--red)'};font-size:12px" title="Order book: ${Number.isFinite(s.depthPct)?'stronger than '+Math.round(s.depthPct*100)+'% of books':''}${s.depthLive?' · LIVE reading':' · pre-open, decayed by the session'}">${(s.depthImbalance>0?'+':'')+s.depthImbalance.toFixed(2)}</span>`:'<span style="color:var(--t3)">—</span>'}</td>`,
       // v1139: the order book, in the recommendation table rather than a list of its own. Muted em
       // dash when the stock has no book - absent is not bearish.
-      turnover:`<td>${fV(s.turnover)}</td>`,
+      turnover:`<td>${(()=>{
+        // LIQ NOW ANSWERS THE QUESTION THAT MATTERS: what this row costs you to get in and back out
+        // at YOUR size, in the same percent unit as the target. Turnover stays underneath as the
+        // context line, because it is still what the fallback rail uses when there is no book.
+        // ONE sizing basis for the whole render, resolved once. Calling computeAlloc per row here
+        // would rebuild the selection list for every visible row - O(n^2) on the paint path, which
+        // is precisely the shape that made this app unusable three releases ago.
+        const size=frictionSizeBasis();
+        const f=getTradeFrictionPct(s,size);
+        const turnTxt=`<span style="font-size:11px;color:var(--t3)">${fV(s.turnover)}</span>`;
+        if(!f||!f.ladder) return `${turnTxt}<div style="font-size:11px;color:var(--t3)" title="${escHtml(f?f.basis:'no size to price')}">no live book</div>`;
+        const t=Number(f.total);
+        const col=!Number.isFinite(t)?'var(--t3)':t<0.25?'var(--green)':t<0.75?'var(--amber)':'var(--red)';
+        const tip=`At ${fmtINR(size)} (${f.shares} shares): entry ${Number(f.entryPct||0).toFixed(2)}% + exit `
+          +`${Number(f.exitPct||0).toFixed(2)}% + share rounding ${Number(f.granularity||0).toFixed(2)}%`
+          +(Number.isFinite(f.spreadPct)?` \u00b7 spread ${f.spreadPct.toFixed(2)}%`:'')
+          +` \u00b7 ${f.basis}. Compare it with this row's own target - friction is what the target has to`
+          +` clear before you make anything. Turnover ${fV(s.turnover)} is context only.`;
+        return `<span style="color:${col};font-weight:700" title="${escHtml(tip)}">${Number.isFinite(t)?t.toFixed(2)+'%':'—'}</span>`
+          +(f.covered?'':`<span style="color:var(--red);font-size:11px" title="${escHtml(f.basis)}"> \u26a0</span>`)
+          +`<div>${turnTxt}</div>`;
+      })()}</td>`,
       predEod:`<td style="white-space:nowrap">${(()=>{
         const rd=getIntradayRead(s.symbol);
         if(!rd||!rd.current) return `<span style="color:var(--t3)" title="${escHtml(rd?('Last read was '+rd.on+', not this session.'):'Not checked on the 5-minute tape yet.')}">—</span>`;
@@ -11439,6 +11495,13 @@ async function loadBookState(){
     clearTimeout(t);
     const j=r.ok?await r.json():null;
     if(!j||!j.ok||!j.rows) return 0;
+    if(j.ladder&&typeof j.ladder==='object'){
+      // The ladder is a full replacement each pass, never a merge: a level that is gone must
+      // disappear, and a stale rung would price an exit that is not there any more.
+      const next={};
+      for(const sym in j.ladder) next[normSym(sym)]=j.ladder[sym];
+      BOOK_LADDER=next;
+    }
     let n=0,newest=BOOK_AT;
     for(const sym in j.rows){
       const row=j.rows[sym];
@@ -11446,11 +11509,101 @@ async function loadBookState(){
       if(row&&row.t>newest) newest=row.t;
     }
     BOOK_AT=newest;
-    if(n) BOOK_V++;
+    BOOK_V++;      // the ladder moves every pass even when no bucket closed
     return n;
   }catch(e){ return 0; }
 }
+let BOOK_LADDER={};
 let BOOK_V=0;   // bumped on every book update, so the tape memo can key off it
+// ---- WHAT IT COSTS TO TRADE THIS ROW AT MY SIZE (v1292) ---------------------------------------
+// Owner, on four stuck positions: "The Min Turnover does try to handle the liquidity thing, but if
+// we set it at 25L and the stock's price is 5000, that just means a stock with only 500 volume
+// clears our filter."
+//
+// THE PRICE HALF OF THAT IS NOT WHAT BITES, AND SAYING SO MATTERS. Rupee turnover is already
+// price-neutral for participation: Rs25L of a Rs50 stock is 50,000 shares and a Rs60,647 position is
+// 1,213 of them; Rs25L of a Rs5,000 stock is 500 shares and the same position is 12 of them. Both
+// are 2.43% of the day. A rupee is a rupee.
+//
+// WHAT ACTUALLY BITES IS THE BOOK, AND TURNOVER CANNOT SEE IT. Measured on the owner's own four
+// order windows: JAGSNPHARM carried 23,828 shares of total bid and 59 across the top five levels,
+// so 245 of his 304 shares had no visible buyer at all; APCOTEXIND showed 34 against an order of
+// 100. Meanwhile SPECIALITY-BE, whose book DID cover the order, was quoted 137.05/138.66 - a 1.17%
+// spread, which is most of a target given away on the round trip. Neither fact is a function of
+// turnover or of price, and no threshold on either would have caught them.
+//
+// So the replacement for both filters is one number in the SAME UNIT AS THE TARGET: the percentage
+// this row takes from you just to get in and back out at your size. It is a COST, not a filter -
+// it joins charges in the net calculation the allocator already runs, so the existing viability
+// test does the removing and no new threshold is invented.
+function getBookLadder(sym){ const l=BOOK_LADDER[normSym(sym||'')]; return (l&&Array.isArray(l.bids)&&l.bids.length)?l:null; }
+// The rupee size friction is quoted at: the per-stock allocation cap the owner is actually working
+// to. Memoised per paint - it is a settings read, not a per-row computation.
+let _frictionSizeMemo={at:0,v:0};
+function frictionSizeBasis(){
+  const now=Date.now();
+  if(now-_frictionSizeMemo.at<1000&&_frictionSizeMemo.v>0) return _frictionSizeMemo.v;
+  let v=0;
+  try{ v=Number(getEffectiveMaxAlloc&&getEffectiveMaxAlloc())||0; }catch(e){}
+  if(!(v>0)){ try{ v=Number(getEffectiveCapital&&getEffectiveCapital())||0; }catch(e){} }
+  if(!(v>0)) v=60000;
+  _frictionSizeMemo={at:now,v};
+  return v;
+}
+// Walk one side of the ladder for `shares`. Returns the volume-weighted price actually achievable
+// and how many shares had no visible counterparty - absence is reported, never silently filled.
+function walkLadder(levels,shares){
+  if(!Array.isArray(levels)||!levels.length||!(shares>0)) return null;
+  let left=shares,val=0,got=0;
+  for(const [px,q] of levels){
+    if(!(px>0)||!(q>0)) continue;
+    const take=Math.min(left,q);
+    val+=take*px; got+=take; left-=take;
+    if(left<=0) break;
+  }
+  if(!got) return null;
+  return {vwap:val/got,filled:got,short:Math.max(0,shares-got)};
+}
+// The whole cost of a round trip at this size, in percent: what the offer makes you pay to get in,
+// what the bid makes you give up to get out, and what whole-share rounding wastes. Every term is
+// derived from the row's own book and the owner's own size - there is no chosen constant anywhere
+// in it, and it is null rather than optimistic when the book is not there to answer.
+function getTradeFrictionPct(row,rupees){
+  const sym=normSym(row&&row.symbol||'');
+  const px=Number(row&&row.price)||0;
+  const size=Number(rupees)||0;
+  if(!sym||!(px>0)||!(size>0)) return null;
+  const shares=Math.floor(size/px);
+  // A position of fewer than a handful of shares cannot be sized against a risk cap or a stop, and
+  // that is the honest reason a very expensive stock is awkward - not its price. The waste is the
+  // value of the share that rounding drops, as a share of the position.
+  const granularity=shares>0?(size-shares*px)/size*100:100;
+  if(!(shares>0)) return {total:null,granularity,shares:0,basis:'position is under one share',ladder:false};
+  const l=getBookLadder(sym);
+  if(!l){
+    // NO LADDER: fall back to the turnover participation proxy the app already used, and SAY that
+    // is what happened. A missing book is not a cheap book.
+    const turn=Number(row.turnover)||0;
+    const part=turn>0?(size/turn)*100:null;
+    return {total:null,granularity,shares,participationPct:part,ladder:false,
+            basis:turn>0?('no live book; '+part.toFixed(2)+'% of the day\u2019s turnover'):'no live book and no turnover'};
+  }
+  const bestBid=l.bids[0]?.[0]||0, bestAsk=l.asks?.[0]?.[0]||0;
+  const mid=(bestBid>0&&bestAsk>0)?(bestBid+bestAsk)/2:px;
+  const buy=walkLadder(l.asks,shares), sell=walkLadder(l.bids,shares);
+  const entryPct=(buy&&mid>0)?(buy.vwap-mid)/mid*100:null;
+  const exitPct=(sell&&mid>0)?(mid-sell.vwap)/mid*100:null;
+  const shortSell=sell?sell.short:shares;
+  const spreadPct=(bestBid>0&&bestAsk>0)?(bestAsk-bestBid)/mid*100:null;
+  const parts=[entryPct,exitPct].filter(Number.isFinite);
+  const total=parts.length?parts.reduce((a,b)=>a+b,0)+granularity:null;
+  return {total,entryPct,exitPct,granularity,spreadPct,shares,
+          shortSell,visibleBid:l.bids.reduce((n,x)=>n+(x[1]||0),0),
+          covered:shortSell<=0,ladder:true,at:l.at,
+          basis:shortSell>0
+            ?('the visible book buys only '+(shares-shortSell)+' of '+shares+' shares - the rest has no bid on screen')
+            :('walks '+shares+' shares through the live book')};
+}
 let _bookEdgeAt=0;
 // A ROW'S CANCEL RATIO IS ONLY MEANINGFUL AGAINST THE DAY'S OWN. Book behaviour differs by
 // liquidity, by sector and by session, so a fixed "suspicious" number would be a constant in
@@ -12088,10 +12241,8 @@ function emptyBoardReason(){
   // THE EFFECTIVE BAR, NOT THE FIELD: a blank Min Score is still a bar of 60.
   if(RECOMMEND_MIN_SCORE>0) bits.push('score \u2265 '+RECOMMEND_MIN_SCORE
     +(((document.getElementById('fMinScore')?.value||'').trim()==='')?' (default)':''));
-  const to=document.getElementById('fMinTurnover')?.value||'';
-  if(to&&Number(to)>0) bits.push('min turnover');
-  const mp=(document.getElementById('fMaxPrice')?.value||'').trim();
-  if(mp) bits.push('max price '+escHtml(mp));
+  const fr=(document.getElementById('fMaxFriction')?.value||'').trim();
+  if(fr&&Number(fr)>0) bits.push('max friction '+escHtml(fr)+'%');
   if(!bits.length) return 'Nothing is ranked yet \u2014 the live tape has not produced a current read.';
   const best=ALL.reduce((m,r)=>(r&&!r._held&&Number.isFinite(Number(r.score))&&Number(r.score)>m)?Number(r.score):m,0);
   const removedSummary=Object.entries(REMOVED_ROWS.reduce((m,r)=>{m[r.reason]=(m[r.reason]||0)+1;return m},{}))
@@ -12226,11 +12377,11 @@ function applyFilters(){
   syncRecommendationThreshold();
   const q=(document.getElementById('fSearch')?.value||'').trim().toLowerCase();
   const turnIdx=+(document.getElementById('fMinTurnover')?.value||0);
-  const minTurn=RADAR_LIQ_STEPS[turnIdx]||0;
+  const minTurn=RADAR_LIQ_STEPS[turnIdx]||0;   // retained for the pool/fetch eligibility path only
+  const maxFrictionRaw=(document.getElementById('fMaxFriction')?.value||'').trim();
+  const maxFriction=maxFrictionRaw===''?null:(Number(maxFrictionRaw)>0?Number(maxFrictionRaw):null);
   // v1216 (owner): a ceiling on the share price. Blank means no ceiling - an empty field is a
   // setting, not a zero, so it must never be read as "max ₹0" and empty the board.
-  const maxPriceRaw=(document.getElementById('fMaxPrice')?.value||'').trim();
-  const maxPrice=maxPriceRaw===''?null:(Number(maxPriceRaw)>0?Number(maxPriceRaw):null);
   // Held suppression also applies here: portfolio files can parse after the scanner
   // file in the same load, so display time re-checks the full current held map.
   const heldPos=getHeldPositionMap();
@@ -12261,15 +12412,23 @@ function applyFilters(){
     // `chip` is what the removed-audit PRINTS, `detail` is the sentence behind it. A chip that says
     // only "Your filter" answers nothing - which filter, and by how much, is the whole question when
     // 1,426 rows are removed at once (owner, v1287).
-    if((s.turnover||0)<minTurn){
-      REMOVED_ROWS.push({s,reason:'filter',chip:'Turnover '+fmtINR(s.turnover||0)+' < '+fmtINR(minTurn),
-        detail:'turnover '+fmtINR(s.turnover||0)+' is below your Min Turnover filter of '+fmtINR(minTurn)});
-      return false;
-    }
-    if(maxPrice!=null&&Number(s.price)>maxPrice){
-      REMOVED_ROWS.push({s,reason:'filter',chip:'Price '+fmtINR(s.price)+' > max '+fmtINR(maxPrice),
-        detail:'price '+fmtINR(s.price)+' is above your Max Price filter of '+fmtINR(maxPrice)});
-      return false;
+    // ONE CONTROL REPLACES MIN TURNOVER AND MAX PRICE (owner, v1292). Both were proxies for the
+    // same question - can I actually get in and out of this - and neither could answer it. Turnover
+    // is a whole-day statistic against a position you exit in minutes; a price ceiling is a proxy
+    // for share granularity that punishes every expensive liquid stock to catch a few illiquid
+    // ones. Friction measures the thing itself, in the same percent unit as the target.
+    // ABSENCE IS NOT A REMOVAL: a row with no live book has friction `null` and is left alone. The
+    // book is only ten minutes old on a fresh helper, and an unmeasured row is not an expensive one.
+    if(maxFriction!=null){
+      const fr=getTradeFrictionPct(s,frictionSizeBasis());
+      if(fr&&fr.ladder&&Number.isFinite(fr.total)&&fr.total>maxFriction){
+        REMOVED_ROWS.push({s,reason:'filter',chip:'Friction '+fr.total.toFixed(2)+'% > max '+maxFriction+'%',
+          detail:'getting '+fmtINR(frictionSizeBasis())+' in and out of this book costs '
+            +fr.total.toFixed(2)+'% (entry '+Number(fr.entryPct||0).toFixed(2)+'% + exit '
+            +Number(fr.exitPct||0).toFixed(2)+'% + rounding '+Number(fr.granularity||0).toFixed(2)
+            +'%), above your Max Friction of '+maxFriction+'%'});
+        return false;
+      }
     }
     if(Number.isFinite(Number(s.score))&&Number(s.score)<RECOMMEND_MIN_SCORE){
       REMOVED_ROWS.push({s,reason:'filter',chip:'Score '+Number(s.score).toFixed(1)+' < min '+RECOMMEND_MIN_SCORE,
@@ -12697,8 +12856,8 @@ function renderStatusBar(){
   const tags=[];
   const turnIdx=+(document.getElementById('fMinTurnover')?.value||0);
   if(turnIdx>0)tags.push('TO≥'+RADAR_LIQ_LABELS[turnIdx]);
-  const maxPxTag=(document.getElementById('fMaxPrice')?.value||'').trim();
-  if(maxPxTag!==''&&Number(maxPxTag)>0)tags.push('≤'+fmtINR(Number(maxPxTag)));
+  const frTag=(document.getElementById('fMaxFriction')?.value||'').trim();
+  if(frTag!==''&&Number(frTag)>0)tags.push('friction≤'+frTag+'%');
   const q=(document.getElementById('fSearch')?.value||'').trim();
   if(q)tags.push('“'+escHtml(q)+'”');
   const capital=getEffectiveCapital();
@@ -12811,7 +12970,7 @@ function renderStatusBar(){
 function clearFilters(){
   ['fSearch','fMinScore'].forEach(id=>{const el=document.getElementById(id);if(el)el.value=id==='fMinScore'?'60':'';});
   const turnEl=document.getElementById('fMinTurnover');if(turnEl)turnEl.value='0';
-  const maxPxEl=document.getElementById('fMaxPrice');if(maxPxEl)maxPxEl.value='';
+  const frEl=document.getElementById('fMaxFriction');if(frEl)frEl.value='';
   updateFilterPlaceholders();
   applyFilters();
   localStorage.removeItem(SCANNER_STORE);
@@ -13977,13 +14136,13 @@ function compactRankingRows(rows){
   }));
 }
 function applySavedFiltersForMode(mode){
-  const ids=['fSearch','fMinScore','fMinTurnover','fMaxPrice','fCapital','fMaxAlloc','fRiskPerTrade'];
+  const ids=['fSearch','fMinScore','fMaxFriction','fCapital','fMaxAlloc','fRiskPerTrade'];
   const prev={};
   ids.forEach(id=>{const el=document.getElementById(id);if(el)prev[id]=el.value;});
   try{
     const st=JSON.parse(localStorage.getItem(modeKey(SCANNER_STORE,mode))||'{}');
     const shared=JSON.parse(localStorage.getItem(SHARED_FILTER_STORE)||'{}');
-    const map={minScore:'fMinScore',minTurnover:'fMinTurnover',maxPrice:'fMaxPrice'};
+    const map={minScore:'fMinScore',maxFriction:'fMaxFriction'};
     Object.entries(map).forEach(([k,id])=>{const el=document.getElementById(id);if(el&&st[k]!=null)el.value=st[k];});
     const capEl=document.getElementById('fCapital');if(capEl&&shared.capital!=null)capEl.value=shared.capital;
     const maxEl=document.getElementById('fMaxAlloc');if(maxEl&&shared.maxAlloc!=null)maxEl.value=shared.maxAlloc;
@@ -14526,7 +14685,7 @@ function saveFilterState(){
     search:document.getElementById('fSearch')?.value||'',
     minScore:document.getElementById('fMinScore')?.value||'60',
     minTurnover:document.getElementById('fMinTurnover')?.value||'0',
-    maxPrice:document.getElementById('fMaxPrice')?.value??'',
+    maxFriction:document.getElementById('fMaxFriction')?.value??'',
     sortCol:SCOL,
     sortDir:SDIR,
   };
@@ -14564,7 +14723,7 @@ function loadFilterState(){
     if(state.search!=null){const el=document.getElementById('fSearch');if(el)el.value=state.search;}
     if(state.minScore!=null){const el=document.getElementById('fMinScore');if(el)el.value=state.minScore;}
     if(state.minTurnover!=null){const el=document.getElementById('fMinTurnover');if(el)el.value=state.minTurnover;}
-    if(state.maxPrice!=null){const el=document.getElementById('fMaxPrice');if(el)el.value=state.maxPrice;}
+    if(state.maxFriction!=null){const el=document.getElementById('fMaxFriction');if(el)el.value=state.maxFriction;}
     resetRecommendationSelectionForRefresh(); // legacy persisted exclusions are deliberately ignored
     // Trade inputs PREFER the Drive-synced brain (so laptop and phone agree); localStorage
     // is the fallback when the brain has none yet (offline / first run).
