@@ -1,5 +1,5 @@
-const BUILD_TS='2026-09-04 14:27 IST'; // release build time (IST)
-const APP_VERSION=1290; // v1290: every symbol carries Z (Zerodha) and T (TradingView) chart buttons.
+const BUILD_TS='2026-09-04 15:02 IST'; // release build time (IST)
+const APP_VERSION=1291; // v1291: full-mode book, classified buy/sell split, cancel ratio and one-minute latency bars.
 const RADAR_SCORE_VERSION='tape-decision-v3';
 // v1093: a baseline reward:risk MEASURED on the cross-section (last completed bhav session) instead of learned from the owner's own fills - reported on every row, deliberately not enforced. Includes v1092: position size split by Radar score / stop distance, so equally-scored names carry equal RUPEE risk, plus an opt-in Risk /trade cap.
 // v556: parse the NSE Market Activity Report (MA<date>.csv) — official Nifty %, advances/declines and sector index moves shown as market CONTEXT in the status bar (EOD data, display only, never fed into per-row scoring); MA added to the ℹ️ file manifest.
@@ -3324,7 +3324,7 @@ function radarTapeEvidence(sym){
   const key=normSym(sym||'');
   const bars=INTRADAY_BARS[key];
   if(!bars||bars.length<TAPE_MIN_SESSION_BARS) return null;
-  const stamp=bars.length+':'+bars[bars.length-1].t;
+  const stamp=bars.length+':'+bars[bars.length-1].t+':'+BOOK_V+':'+((BOOK_EDGES.book?.w||0)+(BOOK_EDGES.split?.w||0)+(BOOK_EDGES.spoof?.w||0));
   const hit=_tapeEvidenceMemo.get(key);
   if(hit&&hit.stamp===stamp) return hit.val;
   const val=_radarTapeEvidenceUncached(key);
@@ -3399,11 +3399,38 @@ function _radarTapeEvidenceUncached(sym){
   // rising as the corpus grows. At 0 every factor below collapses to 1 and both the blend and its
   // normaliser are identical to v1233's, so an unmeasured term cannot move a single score.
   const wImp=Number.isFinite(TAPE_IMPACT_W)?clamp01(TAPE_IMPACT_W,0,0.35):0;
-  const nor=(f,v,c,s,i)=>1-(1-f*W.flow)*(1-v*W.vwap)*(1-c*W.cross)*(1-s*W.size)*(1-i*wImp);
-  const level=clamp01(nor(eFlow,eVwap,eCross,eSize,eImpact)/nor(1,1,1,1,1),0,1);
+  // THE THREE ORDER-BOOK TERMS (v1291), on exactly the same footing as impact: each carries a
+  // weight the helper MEASURED against forward outcomes and shrank by its own error bar, so each is
+  // 0 - and therefore bit-for-bit inert - until it has earned otherwise. Nothing here asserts that
+  // the book predicts anything; it makes the claim testable and lets it arm itself.
+  const bk=getBookRead(sym);
+  const wBook=clamp01(BOOK_EDGES.book?.w||0,0,0.35);
+  const wSplit=clamp01(BOOK_EDGES.split?.w||0,0,0.35);
+  const wSpoof=clamp01(BOOK_EDGES.spoof?.w||0,0,0.35);
+  // Resting intent at the touch, -1..+1 -> 0..1. Absent book sits at the neutral midpoint, never at
+  // zero: absence takes the median, it is not evidence against the row.
+  const eBook=(bk&&Number.isFinite(bk.imbalance))?clamp01((bk.imbalance+1)/2,0,1):0.5;
+  // The CLASSIFIED buy share - executed volume tagged against the touch that stood before it, not
+  // inferred from where the candle closed. This is the first flow reading in this app that is not a
+  // guess about direction, and it still has to earn its weight like everything else.
+  const eSplit=(bk&&Number.isFinite(bk.buyShare))?clamp01(bk.buyShare,0,1):0.5;
+  // Quantity that left the book WITHOUT trading, against what actually traded. High is bad, so the
+  // term is inverted before it enters an evidence blend where 1 means good. The measured direction
+  // rides along: if the grader finds the opposite sign, `dir` flips it rather than us assuming.
+  const spoofDir=BOOK_EDGES.spoof?.dir===-1?-1:1;
+  const cancelRatio=(bk&&Number.isFinite(bk.cancelRatio))?bk.cancelRatio:null;
+  const eSpoofRaw=cancelRatio===null?0.5:clamp01(1-cancelRatio/2,0,1);   // 2x cancelled-to-traded -> 0
+  const eSpoof=spoofDir===1?eSpoofRaw:1-eSpoofRaw;
+  const nor=(f,v,c,s,i,b,sp,cx)=>1-(1-f*W.flow)*(1-v*W.vwap)*(1-c*W.cross)*(1-s*W.size)*(1-i*wImp)
+    *(1-b*wBook)*(1-sp*wSplit)*(1-cx*wSpoof);
+  const level=clamp01(nor(eFlow,eVwap,eCross,eSize,eImpact,eBook,eSplit,eSpoof)/nor(1,1,1,1,1,1,1,1),0,1);
   return {level,bars:day.length,netVol,vwapDist,crossed,quietCross,netPositive,relVol,impact,
           impactWeight:wImp,
-          parts:{flow:eFlow,vwap:eVwap,cross:eCross,size:eSize,impact:eImpact}};
+          book:bk?{imbalance:bk.imbalance,buyShare:bk.buyShare,cancelRatio:bk.cancelRatio,
+                   cancelSkew:bk.cancelSkew,replenish:bk.replenish,at:bk.t}:null,
+          bookWeights:{book:wBook,split:wSplit,spoof:wSpoof},
+          parts:{flow:eFlow,vwap:eVwap,cross:eCross,size:eSize,impact:eImpact,
+                 book:eBook,split:eSplit,spoof:eSpoof}};
 }
 
 // THE QUEUE MAY NOT ASK THE BAR'S QUESTION. The bar asks “can I buy this now?”, and since v1232
@@ -3484,6 +3511,12 @@ function radarScoreComponents(r,tapeStanding){
     crossover:+(100*tev.parts.cross).toFixed(0),
     participation:+(100*tev.parts.size).toFixed(0),
     impact:Number.isFinite(Number(tev.parts.impact))?+(100*tev.parts.impact).toFixed(0):null,
+    // The book terms, on the same 0-100 scale as the rest, plus the weights they actually carry so
+    // the tooltip can say "measured at 0" rather than implying they are doing work.
+    bookImb:tev.book&&Number.isFinite(tev.book.imbalance)?+(100*tev.parts.book).toFixed(0):null,
+    buySplit:tev.book&&Number.isFinite(tev.book.buyShare)?+(100*tev.parts.split).toFixed(0):null,
+    cancelRatio:tev.book&&Number.isFinite(tev.book.cancelRatio)?+Number(tev.book.cancelRatio).toFixed(2):null,
+    bookWeights:tev.bookWeights||{book:0,split:0,spoof:0},
     predictor:+(wP*eP).toFixed(1),
     runway:+(wR*eR).toFixed(1),
     tapeBars:tev.bars,
@@ -3516,6 +3549,18 @@ function radarScoreTitle(r){
   const ev=`flow ${Number(c.flow).toFixed(0)}/100 · vs VWAP ${Number(c.vwapPos).toFixed(0)}/100`
     +` · crossover ${Number(c.crossover).toFixed(0)}/100 · participation ${Number(c.participation).toFixed(0)}/100`
     +(Number.isFinite(Number(c.impact))?` · impact ${Number(c.impact).toFixed(0)}/100`:'')
+    +(()=>{
+      // The book reading is SHOWN whether or not it counts, and it says which. A term at weight 0
+      // is measured and inert; printing it as if it contributed would be the v1246 defect again.
+      const w=c.bookWeights||{book:0,split:0,spoof:0};
+      const bits=[];
+      if(Number.isFinite(Number(c.buySplit))) bits.push(`classified buy share ${Number(c.buySplit).toFixed(0)}/100`);
+      if(Number.isFinite(Number(c.bookImb))) bits.push(`book imbalance ${Number(c.bookImb).toFixed(0)}/100`);
+      if(Number.isFinite(Number(c.cancelRatio))) bits.push(`cancel ratio ${Number(c.cancelRatio).toFixed(2)}x`);
+      if(!bits.length) return '';
+      const armed=(w.book>0||w.split>0||w.spoof>0);
+      return ` · ${bits.join(' · ')} [${armed?`weights ${w.split.toFixed(2)}/${w.book.toFixed(2)}/${w.spoof.toFixed(2)}`:'measured at weight 0, not counted yet'}]`;
+    })()
     +` over ${Number(c.tapeBars)||0} bars`;
   if(c.block) return `NOT ACTIONABLE - ${c.block}. Tape evidence ${(Number(c.evidence)*100).toFixed(0)}/100 (${ev}), but permission is zero so the score is zero. The score is what you can act on, not what looks interesting.`;
   return `Recommendation strength ${Number(c.total).toFixed(1)} = tape evidence ${(Number(c.evidence)*100).toFixed(0)}/100 × permission ${(Number(c.permission)*100).toFixed(0)}% × risk factor ${(Number(c.riskFactor)*100).toFixed(0)}%.`
@@ -10091,9 +10136,27 @@ function getOpenPositionTapePolicy(sym,pos){
   }
   const last=day[day.length-1],prior=day[day.length-2];
   const completedPrice=Number(last.c),completedHi=Math.max(...day.map(b=>b.h));
-  const livePrice=forming&&Number(forming.c)>0?Number(forming.c):completedPrice;
-  const hi=Math.max(completedHi,forming&&Number(forming.h)>0?Number(forming.h):completedHi);
-  const lo=Math.min(...day.map(b=>b.l),forming&&Number(forming.l)>0?Number(forming.l):Infinity);
+  // ONE-MINUTE BARS ARE USED HERE AND NOWHERE ELSE THAT MATTERS (v1291): only to make the LIVE half
+  // of this read fresher. The forming 5-minute candle can be up to five minutes behind the market,
+  // and this is the one place the app acts on a price before its candle closes. Pace, EoD and the
+  // trajectory still end at the last COMPLETED five-minute bar - v1218's rule is untouched, and the
+  // measured flow horizons (15m/25m) are not re-read at one minute, where they scored worse.
+  const mins=MINUTE_BARS[s];
+  const liveMin=(()=>{
+    if(!Array.isArray(mins)||!mins.length) return null;
+    const cutoff=Number(last.t)+5*60*1000;          // strictly after the last completed 5m bar
+    const after=mins.filter(b=>Number(b.t)>=cutoff&&istDayKey(b.t)===key);
+    if(!after.length) return null;
+    return {c:after[after.length-1].c,h:Math.max(...after.map(b=>b.h)),
+            l:Math.min(...after.map(b=>b.l)),v:after.reduce((n,b)=>n+(Number(b.v)||0),0),
+            at:after[after.length-1].t,bars:after.length};
+  })();
+  const formC=liveMin?liveMin.c:(forming&&Number(forming.c)>0?Number(forming.c):null);
+  const formH=liveMin?liveMin.h:(forming&&Number(forming.h)>0?Number(forming.h):null);
+  const formL=liveMin?liveMin.l:(forming&&Number(forming.l)>0?Number(forming.l):null);
+  const livePrice=formC>0?formC:completedPrice;
+  const hi=Math.max(completedHi,formH>0?formH:completedHi);
+  const lo=Math.min(...day.map(b=>b.l),formL>0?formL:Infinity);
   const priorHi=Math.max(...day.slice(0,-1).map(b=>b.h));
   const priorVol=day.slice(0,-1).map(b=>Number(b.v)||0).filter(v=>v>0).sort((a,b)=>a-b);
   const busyCut=priorVol.length?radarQuant(priorVol,0.75):null;
@@ -10104,8 +10167,14 @@ function getOpenPositionTapePolicy(sym,pos){
     &&busyCut!=null&&(Number(last.v)||0)>=busyCut;
   const liveVol=day.map(b=>Number(b.v)||0).filter(v=>v>0).sort((a,b)=>a-b);
   const liveBusyCut=liveVol.length?radarQuant(liveVol,0.75):null;
-  const liveHarvest=!!(forming&&Number(forming.h)>completedHi&&liveBusyCut!=null
-    &&(Number(forming.v)||0)>=liveBusyCut&&tape.cvdPct>0);
+  // The harvest overlay reads the freshest live source available - one-minute bars when the helper
+  // has them, the forming five-minute candle otherwise. The TEST is unchanged: a fresh high whose
+  // live volume has already reached this stock's own completed top quartile, with positive net flow.
+  // One-minute bars only make it fire sooner, which is the entire point of having them.
+  const liveH=liveMin?liveMin.h:(forming?Number(forming.h):null);
+  const liveV=liveMin?liveMin.v:(forming?Number(forming.v):null);
+  const liveHarvest=!!(Number(liveH)>completedHi&&liveBusyCut!=null
+    &&(Number(liveV)||0)>=liveBusyCut&&tape.cvdPct>0);
   const pacePct=Number.isFinite(tape.confirmedPacePct)?tape.confirmedPacePct:null;
   const pullPct=Number.isFinite(tape.currentPullbackPct)?tape.currentPullbackPct:null;
   const paceFailed=pacePct!=null&&pullPct!=null&&pullPct>pacePct&&tape.flowSlope<0;
@@ -10620,7 +10689,7 @@ function renderTable(){
       // TradingView link since v1070, so the "one symbol interaction everywhere" rule was true of the
       // panels and quietly false of the main table - which is why swapping to Zerodha missed it.
       symbol:`<td style="font-family:'Plus Jakarta Sans',sans-serif">${intradayRowButton(s)}${(
-        `<div style="font-weight:700;font-size:15px;color:var(--t1);max-width:230px;overflow:hidden;text-overflow:ellipsis">${escHtml(s.symbol)}${chartLinkButtons(s.symbol)}${(()=>{const flags=s.meta?.flags||[];if(!flags.length)return '';return `<span style="font-size:12px;background:rgba(239,68,68,.15);color:var(--red);border-radius:4px;padding:1px 5px;margin-left:5px;font-weight:700;vertical-align:middle" title="NSE surveillance flags: ${escHtml(flags.join(' · '))}">⚠ ${flags.length}</span>`;})()}${s._held?`<span style="font-size:12px;background:rgba(244,114,182,.15);color:#f472b6;border-radius:4px;padding:1px 5px;margin-left:5px;font-weight:700;vertical-align:middle" title="You already hold this. Held stocks stay in the ranking (v1070) and can be recommended again — buying here ADDS to the existing position.">📌 held</span>`:''}</div>${radarSurveillanceNames(s)}<div style="font-size:11px;color:var(--t3);max-width:150px;overflow:hidden;text-overflow:ellipsis" title="${escHtml((s.name||'')+(s.setup?' · '+s.setup:''))}">${radarSeriesBandPill(s)} ${escHtml(s.setup||s.name||'')}</div>`)}</td>`,
+        `<div style="font-weight:700;font-size:15px;color:var(--t1);max-width:230px;overflow:hidden;text-overflow:ellipsis">${escHtml(s.symbol)}${chartLinkButtons(s.symbol)}${(()=>{const bf=getBookFlag(s.symbol);if(!bf)return '';return `<span style="font-size:11px;background:rgba(245,158,11,.14);color:var(--amber);border-radius:4px;padding:1px 5px;margin-left:5px;font-weight:700;vertical-align:middle" title="Order book: ${escHtml(bf.text)}. Display only - it does not change the score unless the graded book weight says it should.">${bf.iceberg?'🧊':'⚑'}${bf.heavyCancel?' cx':''}</span>`;})()}${(()=>{const flags=s.meta?.flags||[];if(!flags.length)return '';return `<span style="font-size:12px;background:rgba(239,68,68,.15);color:var(--red);border-radius:4px;padding:1px 5px;margin-left:5px;font-weight:700;vertical-align:middle" title="NSE surveillance flags: ${escHtml(flags.join(' · '))}">⚠ ${flags.length}</span>`;})()}${s._held?`<span style="font-size:12px;background:rgba(244,114,182,.15);color:#f472b6;border-radius:4px;padding:1px 5px;margin-left:5px;font-weight:700;vertical-align:middle" title="You already hold this. Held stocks stay in the ranking (v1070) and can be recommended again — buying here ADDS to the existing position.">📌 held</span>`:''}</div>${radarSurveillanceNames(s)}<div style="font-size:11px;color:var(--t3);max-width:150px;overflow:hidden;text-overflow:ellipsis" title="${escHtml((s.name||'')+(s.setup?' · '+s.setup:''))}">${radarSeriesBandPill(s)} ${escHtml(s.setup||s.name||'')}</div>`)}</td>`,
       setup:`<td style="font-size:13px;color:var(--t2)">${escHtml(s.setup||'—')}${s.stage?' '+radarStagePill(s):''}${(s.modelTriggers||[]).length?' '+radarTriggerPill(s):''}</td>`,
       series:`<td>${radarSeriesBandPill(s)}</td>`,
       price:`<td style="white-space:nowrap">${fmtINR(s.price)}<span style="color:var(--t3)"> · </span><span style="font-size:12px">${fPerf(s.day??s.priceChange)}${s.corpAction?`<span title="Corporate action (${escHtml(s.corpAction)}) — mechanical ex-date move, neutralised in scoring" style="font-size:11px;color:var(--amber);margin-left:4px;cursor:help">⚑</span>`:''}</span></td>`,
@@ -11335,6 +11404,124 @@ async function loadTapeEdge(){
   }catch(e){ TAPE_IMPACT_EDGE=null; TAPE_IMPACT_W=0; }
   return TAPE_IMPACT_EDGE;
 }
+// THE THREE ORDER-BOOK FIELDS, EACH ON ITS OWN MEASURED WEIGHT (v1291). Book imbalance, the
+// classified buy share and the cancel-to-execute ratio are all plausible and all unmeasured, so
+// none of them may assert a magnitude. Same grader as the impact term, same forward outcome, same
+// error-bar shrink - and 0 until the Book archive holds enough sessions, which makes each term
+// bit-for-bit inert in the scorer until it has earned otherwise. `dir` rides along because a
+// cancel ratio that predicts DOWN must subtract rather than add.
+let BOOK_EDGES={book:{w:0,dir:1},split:{w:0,dir:1},spoof:{w:0,dir:1}};
+async function loadBookEdges(){
+  if(!KITE_API) return BOOK_EDGES;
+  const one=async field=>{
+    try{
+      const c=new AbortController(); const t=setTimeout(()=>c.abort(),8000);
+      const r=await fetch(KITE_HELPER+'/api/kite/edge?field='+field,{cache:'no-store',signal:c.signal});
+      clearTimeout(t);
+      const j=r.ok?await r.json():null;
+      if(!j||!j.ok) return {w:0,dir:1,edge:null};
+      return {w:Math.max(0,Math.min(0.35,Number(j.weight)||0)),dir:Number(j.dir)===-1?-1:1,edge:j};
+    }catch(e){ return {w:0,dir:1,edge:null}; }
+  };
+  const [book,split,spoof]=await Promise.all([one('book'),one('split'),one('spoof')]);
+  BOOK_EDGES={book,split,spoof};
+  return BOOK_EDGES;
+}
+// The last completed 5-minute bucket's book metrics, per symbol. Served from the helper's memory,
+// so this is a small answer even on a full universe.
+let BOOK={},BOOK_AT='';
+async function loadBookState(){
+  if(!KITE_API) return 0;
+  try{
+    const c=new AbortController(); const t=setTimeout(()=>c.abort(),8000);
+    const r=await fetch(KITE_HELPER+'/api/kite/book'+(BOOK_AT?('?since='+encodeURIComponent(BOOK_AT)):''),
+      {cache:'no-store',signal:c.signal});
+    clearTimeout(t);
+    const j=r.ok?await r.json():null;
+    if(!j||!j.ok||!j.rows) return 0;
+    let n=0,newest=BOOK_AT;
+    for(const sym in j.rows){
+      const row=j.rows[sym];
+      BOOK[normSym(sym)]=row; n++;
+      if(row&&row.t>newest) newest=row.t;
+    }
+    BOOK_AT=newest;
+    if(n) BOOK_V++;
+    return n;
+  }catch(e){ return 0; }
+}
+let BOOK_V=0;   // bumped on every book update, so the tape memo can key off it
+let _bookEdgeAt=0;
+// A ROW'S CANCEL RATIO IS ONLY MEANINGFUL AGAINST THE DAY'S OWN. Book behaviour differs by
+// liquidity, by sector and by session, so a fixed "suspicious" number would be a constant in
+// disguise. The cut is this session's own upper decile among rows that HAVE a book - the same
+// cross-sectional shape getIntradayThinCut uses for the thin test - and it needs a real
+// cross-section (25 rows, the scorer's own density floor) or it declines to judge.
+let _spoofCutMemo={v:-1,cut:null};
+function getSpoofCut(){
+  if(_spoofCutMemo.v===BOOK_V) return _spoofCutMemo.cut;
+  const vals=Object.values(BOOK).map(r=>Number(r&&r.cancelRatio)).filter(Number.isFinite).sort((a,b)=>a-b);
+  const cut=vals.length>=25?radarQuant(vals,0.9):null;
+  _spoofCutMemo={v:BOOK_V,cut};
+  return cut;
+}
+// Display only. It says the book behaved unusually, never that the stock is bad - the score
+// influence, if any, comes from the graded `spoof` weight and nowhere else.
+function getBookFlag(sym){
+  const r=getBookRead(sym);
+  if(!r) return null;
+  const cut=getSpoofCut();
+  const heavyCancel=cut!==null&&Number.isFinite(r.cancelRatio)&&r.cancelRatio>=cut;
+  const iceberg=Number(r.replenish)>0;
+  if(!heavyCancel&&!iceberg) return null;
+  const bits=[];
+  if(heavyCancel) bits.push('cancelled '+(r.cancelRatio).toFixed(2)+'x what it traded (top decile today, cut '+cut.toFixed(2)+')');
+  if(iceberg) bits.push(r.replenish+' replenishment event'+(r.replenish>1?'s':'')+' - a level refilled while it was being hit');
+  return {heavyCancel,iceberg,text:bits.join(' · ')};
+}
+function getBookRead(sym){ const r=BOOK[normSym(sym||'')]; return r||null; }
+// ONE-MINUTE BARS ARE LATENCY, NOT SIGNAL. The measured flow edge is WORSE at finer resolution
+// (netVol rho +0.070 at 5 minutes against +0.141 at 15), so nothing here re-reads the flow. What a
+// one-minute bar buys is that a level or a fresh high is seen up to four minutes sooner, which is
+// an execution question. Bounded to the rows that can actually act on it: open positions and the
+// current board, at most 60 symbols, from the helper's memory.
+let MINUTE_BARS={},MINUTE_AT=0;
+async function loadMinuteBars(){
+  if(!KITE_API) return 0;
+  try{
+    const held=Object.keys(getHeldPositionMap()||{});
+    const board=(Array.isArray(FILT)?FILT:[]).slice(0,40).map(r=>r.symbol);
+    const want=[...new Set([...held,...board].map(normSym).filter(Boolean))].slice(0,60);
+    if(!want.length) return 0;
+    const c=new AbortController(); const t=setTimeout(()=>c.abort(),8000);
+    const r=await fetch(KITE_HELPER+'/api/kite/minute?syms='+encodeURIComponent(want.join(',')),
+      {cache:'no-store',signal:c.signal});
+    clearTimeout(t);
+    const j=r.ok?await r.json():null;
+    if(!j||!j.ok||!j.data) return 0;
+    let n=0;
+    for(const sym in j.data){
+      const rows=j.data[sym];
+      if(!Array.isArray(rows)||!rows.length) continue;
+      MINUTE_BARS[normSym(sym)]=rows.map(x=>({
+        t:Date.parse(String(x[0]).slice(0,10)+'T'+String(x[0]).slice(11,16)+':00+05:30'),
+        o:+x[1],h:+x[2],l:+x[3],c:+x[4],v:+x[5]}))
+        .filter(b=>Number.isFinite(b.t)&&b.c>0);
+      n++;
+    }
+    MINUTE_AT=Date.now();
+    return n;
+  }catch(e){ return 0; }
+}
+// The freshest price this app holds for a symbol, and how old it is. A one-minute bar beats a
+// five-minute one by up to four minutes; when there is none, the five-minute tape answers.
+function getFreshestTapePrice(sym){
+  const m=MINUTE_BARS[normSym(sym||'')];
+  if(m&&m.length){ const b=m[m.length-1]; return {price:b.c,at:b.t,source:'1m'}; }
+  const bars=INTRADAY_BARS[normSym(sym||'')];
+  if(bars&&bars.length){ const b=bars[bars.length-1]; return {price:b.c,at:b.t,source:'5m'}; }
+  return null;
+}
 // The helper does the fetching but the app knows which rows are eligible. Symbols only - the helper
 // resolves tokens from its own daily dump, which is fresher than anything this page holds.
 async function postCorpusPool(){
@@ -11763,6 +11950,7 @@ async function fetchCandlesInApp(limit,opts){
   }
   if(!KITE_API){ say('The helper is not running. Double-click "Start Rocket Scanner.bat" and leave that window open — the app itself stays on GitHub Pages.',8000,true); return; }
   try{ await loadTapeEdge(); }catch(e){}
+  try{ await loadBookEdges(); }catch(e){}
   try{ await postCorpusPool(); }catch(e){}
   const r=intradayFetchJobs(limit);
   const budget=fetchBudgetLeft();
@@ -11984,6 +12172,16 @@ function intradayPasteBarHtml(){
       bits.push(behind>=2
         ? `<b style="color:var(--amber)">tape ${behind} bars behind</b> (latest completed 5m bar `+liveTapeInterval(heldMs)+')'
         : 'latest completed 5m bar '+liveTapeInterval(heldMs));
+    }
+    // What the book feed is actually delivering, so a dead depth subscription cannot look like a
+    // quiet book. Weights are printed when any of the three has earned one.
+    const bookN=Object.keys(BOOK||{}).length;
+    if(bookN){
+      const w=BOOK_EDGES||{};
+      const armed=(w.book?.w||0)+(w.split?.w||0)+(w.spoof?.w||0);
+      bits.push('book '+bookN.toLocaleString('en-IN')
+        +(Object.keys(MINUTE_BARS||{}).length?' · 1m '+Object.keys(MINUTE_BARS).length:'')
+        +(armed>0?'':' (weights 0)'));
     }
     if(checked) bits.push('checked '+checked);
     if(portfolioAt) bits.push('positions '+portfolioAt);
@@ -12819,6 +13017,14 @@ async function streamRefreshTick(){
     const tapeStale=tapeBarsBehind(newestTapeBucketMs())>=1;
     const needBars=!STREAM_STATUS?.connected||!!(deltaRes&&deltaRes.barCompleted)||tapeStale;
     const barsRead=needBars?await loadIntradayInventory():0;
+    // The book metrics and the one-minute bars ride the same beat. Both are small in-memory reads
+    // on the helper - no file walk, no full-universe payload - and both are best-effort: a failure
+    // leaves the previous values in place and the score simply carries on without them.
+    try{ await loadBookState(); }catch(e){}
+    try{ await loadMinuteBars(); }catch(e){}
+    // The weights only move when the Book archive grows, which is once a session - so this is a
+    // ten-minute refresh, not a beat-by-beat one. It is the only call here that reads files.
+    if(Date.now()-_bookEdgeAt>600000){ _bookEdgeAt=Date.now(); try{ await loadBookEdges(); }catch(e){} }
     const done=Date.now();
     setStreamActivity({phase:STREAM_STATUS?.connected?'live':'stream-down',lastCompleteAt:done,
       lastSuccessAt:STREAM_STATUS?done:STREAM_ACTIVITY.lastSuccessAt,
