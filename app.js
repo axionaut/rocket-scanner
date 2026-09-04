@@ -1,5 +1,5 @@
-const BUILD_TS='2026-09-04 14:06 IST'; // release build time (IST)
-const APP_VERSION=1288; // v1288: the tape refreshes on the clock and a hidden tab keeps refreshing.
+const BUILD_TS='2026-09-04 14:16 IST'; // release build time (IST)
+const APP_VERSION=1289; // v1289: tape lag is counted in completable bars, not from the bar stamp.
 const RADAR_SCORE_VERSION='tape-decision-v3';
 // v1093: a baseline reward:risk MEASURED on the cross-section (last completed bhav session) instead of learned from the owner's own fills - reported on every row, deliberately not enforced. Includes v1092: position size split by Radar score / stop distance, so equally-scored names carry equal RUPEE risk, plus an opt-in Risk /trade cap.
 // v556: parse the NSE Market Activity Report (MA<date>.csv) — official Nifty %, advances/declines and sector index moves shown as market CONTEXT in the status bar (EOD data, display only, never fed into per-row scoring); MA added to the ℹ️ file manifest.
@@ -3841,6 +3841,18 @@ function meetsRecommendationBar(s){
 // Not a wall-clock read: if nothing has been fetched for an hour, every row is equally behind and
 // none is penalised for the app's own idleness.
 let _newestBucketMemo={v:-1,ms:0};
+// HOW MANY COMPLETABLE 5-MINUTE BARS ARE MISSING. A bucket stamped T covers T..T+5m and completes
+// at T+5m, so at any moment the newest bar the session CAN have finished is the bucket that started
+// a full bar ago - never the one now forming. Measuring the gap from the stamp instead (v1288)
+// overstates it by one bar plus however far into the current bar the clock has run. Five-minute
+// boundaries fall at the same instants in IST and UTC (the offset is a whole 30 minutes), so plain
+// epoch arithmetic is correct here.
+const TAPE_BAR_MS=5*60*1000;
+function tapeBarsBehind(heldMs){
+  if(!(heldMs>0)) return Infinity;
+  const newestCompletable=Math.floor((Date.now()-TAPE_BAR_MS)/TAPE_BAR_MS)*TAPE_BAR_MS;
+  return Math.max(0,Math.round((newestCompletable-heldMs)/TAPE_BAR_MS));
+}
 function newestTapeBucketMs(){
   if(_newestBucketMemo.v===INTRADAY_STORE_V) return _newestBucketMemo.ms;
   let newest=0;
@@ -11942,14 +11954,17 @@ function intradayPasteBarHtml(){
   if(activity.phase==='checking') activityText='↻ checking helper, universe, positions and bars now…';
   else {
     const bits=[];
-    // SAY IT WHEN THE TAPE IS BEHIND. The bar printed the newest stored candle beside the time of
-    // the last check and left the owner to spot that they were an hour apart - which is exactly
-    // what happened at 14:01 against a 12:55 bar. A stale tape is now named, in amber, with the gap.
+    // SAY IT WHEN THE TAPE IS BEHIND - AND MEASURE IT AGAINST WHAT THE SESSION CAN ACTUALLY HAVE
+    // PRODUCED. v1288 measured the gap from the bar's START stamp, so a bar stamped 14:00 read as
+    // "13 min behind" at 14:13 when it was one bar behind: that bar covers 14:00-14:05 and only
+    // completes at 14:05, and 14:10-14:15 is still forming. A perfectly current tape would have
+    // read 5-10 minutes behind, permanently. `tapeBarsBehind` counts COMPLETABLE bars missed, so a
+    // current tape reads 0 and the warning means something.
     if(latest){
       const heldMs=newestTapeBucketMs();
-      const behindMin=(inSession&&heldMs>0)?Math.floor((Date.now()-heldMs)/60000):0;
-      bits.push(behindMin>=10
-        ? `<b style="color:var(--amber)">tape ${behindMin} min behind</b> (latest completed 5m bar `+liveTapeInterval(heldMs)+')'
+      const behind=inSession?tapeBarsBehind(heldMs):0;
+      bits.push(behind>=2
+        ? `<b style="color:var(--amber)">tape ${behind} bars behind</b> (latest completed 5m bar `+liveTapeInterval(heldMs)+')'
         : 'latest completed 5m bar '+liveTapeInterval(heldMs));
     }
     if(checked) bits.push('checked '+checked);
@@ -12780,14 +12795,10 @@ async function streamRefreshTick(){
     // frontier was 13:55 and the board's newest bar was 12:55, an hour behind, with the beat
     // running normally the whole time. The honest question is "is what I hold older than the bar
     // the session should have produced by now", and it has an answer without the helper's help.
-    const tapeBehindMs=(()=>{
-      const held=newestTapeBucketMs();
-      if(!(held>0)) return Infinity;                 // nothing held at all - always ask
-      return Date.now()-held;
-    })();
-    const TAPE_BAR_MS=5*60*1000;
-    // One bar of slack: the current bar is still forming, so being inside it is not being behind.
-    const tapeStale=tapeBehindMs>2*TAPE_BAR_MS;
+    // Ask as soon as a bar the session could have completed is missing - that is the normal case
+    // once every five minutes, and the read is incremental, so it costs a request with a handful of
+    // bars in it. `tapeBarsBehind` already excludes the bar still forming.
+    const tapeStale=tapeBarsBehind(newestTapeBucketMs())>=1;
     const needBars=!STREAM_STATUS?.connected||!!(deltaRes&&deltaRes.barCompleted)||tapeStale;
     const barsRead=needBars?await loadIntradayInventory():0;
     const done=Date.now();
