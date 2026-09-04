@@ -1,5 +1,5 @@
-const BUILD_TS='2026-09-04 12:00 IST'; // release build time (IST)
-const APP_VERSION=1286; // v1286: cooperative full-universe scoring and a cached helper inventory keep the UI responsive.
+const BUILD_TS='2026-09-04 12:46 IST'; // release build time (IST)
+const APP_VERSION=1287; // v1287: the helper stops re-reading the archive per symbol, and only the visible tab is built.
 const RADAR_SCORE_VERSION='tape-decision-v3';
 // v1093: a baseline reward:risk MEASURED on the cross-section (last completed bhav session) instead of learned from the owner's own fills - reported on every row, deliberately not enforced. Includes v1092: position size split by Radar score / stop distance, so equally-scored names carry equal RUPEE risk, plus an opt-in Risk /trade cap.
 // v556: parse the NSE Market Activity Report (MA<date>.csv) — official Nifty %, advances/declines and sector index moves shown as market CONTEXT in the status bar (EOD data, display only, never fed into per-row scoring); MA added to the ℹ️ file manifest.
@@ -929,12 +929,24 @@ function renderTradingDashboardNow(){
     document.getElementById('dash').style.display='block';
     document.getElementById('noDataBanner').style.display=ALL.length?'none':'flex';
   }catch(e){}
-  try{renderMethodology();}catch(e){console.warn('Methodology render failed',e);}
+  // ONLY THE VISIBLE TAB IS BUILT (v1287). Methodology rebuilds the whole feature ledger and
+  // Performance recomputes the trade analytics; both ran on EVERY ingest - i.e. every completed
+  // bar - whether or not the owner was looking at them, and both are pure background work behind
+  // whatever he is actually doing. They are marked dirty instead and built when the tab is opened.
+  if(isMainTabActive(1)){ try{renderMethodology();}catch(e){console.warn('Methodology render failed',e);} }
+  else METHODOLOGY_DIRTY=true;
   // applyFilters renders the Rankings panels; without scanner rows it never runs, so the
   // portfolio-only tables are rendered directly in that case.
   try{if(ALL.length) applyFilters(); else renderRankingsPanels();}catch(e){console.warn('Fast ranking render failed',e);}
   try{ const _bf=backfillPickUpStreak(); if(_bf) console.log('upStreak backfilled onto '+_bf+' picks'); }catch(e){}
-  schedulePerformanceRender();
+  if(isMainTabActive(2)) schedulePerformanceRender();
+  else PERF_DIRTY=true;
+}
+// Which main tab is on screen. A tab nobody is looking at does not need its analytics rebuilt.
+let METHODOLOGY_DIRTY=true,METHODOLOGY_BUILT=false,PERF_DIRTY=true;
+function isMainTabActive(n){
+  const t=document.querySelectorAll('#mainTabs .tab')[n];
+  return !!t&&t.classList.contains('act');
 }
 
 async function connectCloudStorage(opts={}){
@@ -3914,11 +3926,15 @@ function passesIntradayValidation(s){
 const ROW_ACTION_MEMO=new WeakMap();
 function getRowActionState(s){
   if(!s) return {state:'BLOCKED', reason:'Invalid row'};
-  const stamp=[RADAR.scoredAt||0,INTRADAY_STORE_V,RECOMMEND_MIN_SCORE].join('|');
+  // The three stamp values are compared directly rather than joined into a string. MEASURED: one
+  // keystroke on a 1,669-row board calls this 6,876 times (applyFilters, the two status-bar scans,
+  // the selection rebuild and the table), so the cache HIT path was allocating an array and a
+  // string 6,876 times to answer "has anything changed". Same key, same answer, no allocation.
+  const a=RADAR.scoredAt||0,b=INTRADAY_STORE_V,c=RECOMMEND_MIN_SCORE;
   const cached=ROW_ACTION_MEMO.get(s);
-  if(cached?.stamp===stamp) return cached.value;
+  if(cached&&cached.a===a&&cached.b===b&&cached.c===c) return cached.value;
   const value=_getRowActionStateUncached(s);
-  ROW_ACTION_MEMO.set(s,{stamp,value});
+  ROW_ACTION_MEMO.set(s,{a,b,c,value});
   return value;
 }
 function _getRowActionStateUncached(s){
@@ -8438,6 +8454,7 @@ function schedulePerformanceRender(){
       PERF_RENDER_WAITING_FOR_VISIBLE=true;
       return;
     }
+    PERF_DIRTY=false;
     renderPerformance();
     try{if(ALL.length) renderStats();}catch(e){console.warn('Stats refresh after performance failed',e);}
   },900);
@@ -8802,6 +8819,7 @@ function buildSurvCorrHTML(){
 }
 
 function renderMethodology(){
+  METHODOLOGY_DIRTY=false; METHODOLOGY_BUILT=true;
   try{ return _renderMethodologyInner(); }
   catch(err){
     console.error('renderMethodology error:',err);
@@ -11371,7 +11389,9 @@ async function hydrateFromHelper(reason){
   const structuralChanged=changed.filter(f=>!isScannerCsvName(f.name)&&!isPortfolioFile(f));
   const fetchOne=async f=>{
     try{
-      const r=await fetch(KITE_HELPER+'/api/inputs/file?name='+encodeURIComponent(f.name),{cache:'no-store'});
+      const ctl=new AbortController(); const t=setTimeout(()=>ctl.abort(),15000);
+      const r=await fetch(KITE_HELPER+'/api/inputs/file?name='+encodeURIComponent(f.name),{cache:'no-store',signal:ctl.signal});
+      clearTimeout(t);
       if(!r.ok) return null;
       return new File([await r.blob()],f.name,{lastModified:f.lastModified});
     }catch(e){ return null; }
@@ -11536,7 +11556,14 @@ async function scheduleScoreJob(){
 async function pollUniverseDelta(){
   if(!KITE_API) return { ok: false, changed: false };
   try {
-    const r = await fetch(KITE_HELPER + '/api/kite/universe-delta?since=' + _clientUniverseRev, { cache: 'no-store' });
+    // EVERY HELPER CALL ON THE BEAT IS BOUNDED (v1287). This one was not, and `_streamRefreshBusy`
+    // is held for the whole beat - so one request that never came back (measured: this endpoint
+    // did not answer in 60 s while the helper was blocked in its bar flush) stopped the 30-second
+    // loop permanently, which reads on screen as the app going dead rather than as a slow helper.
+    // A timeout costs one skipped beat; no timeout costs the session.
+    const ctl=new AbortController(); const t=setTimeout(()=>ctl.abort(),8000);
+    const r = await fetch(KITE_HELPER + '/api/kite/universe-delta?since=' + _clientUniverseRev, { cache: 'no-store', signal: ctl.signal });
+    clearTimeout(t);
     if(!r.ok) return { ok: false, changed: false };
     const j = await r.json();
     if(!j) return { ok: false, changed: false };
@@ -11607,9 +11634,40 @@ async function loadIntradayInventory(){
       return d.getFullYear()+'-'+z(d.getMonth()+1)+'-'+z(d.getDate())+' '+z(d.getHours())+':'+z(d.getMinutes());
     })();
     const storeVAtRequest=INTRADAY_STORE_V;
-    const r=await fetch(KITE_HELPER+'/api/kite/inventory'+(since?('?since='+encodeURIComponent(since)):''),{cache:'no-store'});
-    const j=await r.json();
-    if(!j||!j.ok||!j.data) return 0;
+    // PAGED WHEN THERE IS NOTHING HELD (v1287). A cold read is ~40 MB across ~1,650 symbols and
+    // JSON.parse of one 40 MB body is a single unyieldable task before a bar is even merged -
+    // measured at 5.3 s on the wire alone. An INCREMENTAL read (`since` set) is a handful of bars
+    // and is fetched whole, exactly as before.
+    let n=0,processed=0,pageOff=0,pages=0;
+    const PAGE=since?0:200;
+    for(;;){
+      const q=[];
+      if(since) q.push('since='+encodeURIComponent(since));
+      if(PAGE){ q.push('limit='+PAGE); q.push('offset='+pageOff); }
+      const ctl=new AbortController(); const t=setTimeout(()=>ctl.abort(),20000);
+      const r=await fetch(KITE_HELPER+'/api/kite/inventory'+(q.length?('?'+q.join('&')):''),{cache:'no-store',signal:ctl.signal});
+      clearTimeout(t);
+      const j=await r.json();
+      if(!j||!j.ok||!j.data) break;
+      pages++;
+      const merged=await mergeInventoryPage(j,since,storeVAtRequest);
+      n+=merged;
+      processed+=Object.keys(j.data).length;
+      if(!PAGE||j.next==null) break;
+      pageOff=j.next;
+      await yieldToUi();
+    }
+    if(n){
+      try{ await drainCooperatively(applyIntradayReorderGen(ALL)); }catch(e){}
+      await yieldToUi();
+      try{ applyFilters(); }catch(e){}
+    }
+    return n;
+  }catch(e){ return 0; }
+  finally{ _inventoryLoadRunning=false; }
+}
+// One page of the inventory answer, through the ONE parser and the same ordered merge as before.
+async function mergeInventoryPage(j,since,storeVAtRequest){
     let n=0,processed=0;
     // A RESPONSE IN FLIGHT CAN BE OVERTAKEN. If the store advanced while this answer was on the
     // wire, any symbol whose held tape already reaches at least as far as this answer does is being
@@ -11642,19 +11700,12 @@ async function loadIntradayInventory(){
       // batches. This recovery path can contain the full universe and used to monopolise the UI.
       if(processed%24===0) await yieldToUi();
     }
-    if(n){
-      // applyFilters owns the table, status and rankings-panel render.
-      try{ await drainCooperatively(applyIntradayReorderGen(ALL)); }catch(e){}
-      await yieldToUi();
-      try{ applyFilters(); }catch(e){}
-    }
     return n;
     };
     // Behind the same one-at-a-time queue as scoring: a merge landing between two chunks of a
-    // scoring pass would split that pass across two versions of the tape.
+    // scoring pass would split that pass across two versions of the tape. The reorder and the
+    // render belong to the caller, so a paged read publishes ONE result, not one per page.
     return await runHeavyJob(merge);
-  }catch(e){ return 0; }
-  finally{ _inventoryLoadRunning=false; }
 }
 async function fetchCandlesInApp(limit,opts){
   const auto=!!(opts&&opts.auto)||!!(limit&&limit.auto);
@@ -11958,14 +12009,27 @@ function applyFilters(){
       return false;
     }
     if(s.recommendationTriggerBlocked){
-      REMOVED_ROWS.push({s,reason:'trigger',detail:'automatic evidence trigger: '+(s.recommendationTriggerReasons||[]).join(', ')});
+      REMOVED_ROWS.push({s,reason:'trigger',chip:(s.recommendationTriggerReasons||[])[0]||'evidence trigger veto',
+        detail:'automatic evidence trigger: '+(s.recommendationTriggerReasons||[]).join(', ')});
       return false;
     }
     // Discovery filters: Min Turnover, Max Price, Min Score, Search. Risk is scored, not filtered.
-    if((s.turnover||0)<minTurn){REMOVED_ROWS.push({s,reason:'filter',detail:'below the Min Turnover filter ('+fmtINR(minTurn)+')'});return false;}
-    if(maxPrice!=null&&Number(s.price)>maxPrice){REMOVED_ROWS.push({s,reason:'filter',detail:'above the Max Price filter ('+fmtINR(maxPrice)+')'});return false;}
+    // `chip` is what the removed-audit PRINTS, `detail` is the sentence behind it. A chip that says
+    // only "Your filter" answers nothing - which filter, and by how much, is the whole question when
+    // 1,426 rows are removed at once (owner, v1287).
+    if((s.turnover||0)<minTurn){
+      REMOVED_ROWS.push({s,reason:'filter',chip:'Turnover '+fmtINR(s.turnover||0)+' < '+fmtINR(minTurn),
+        detail:'turnover '+fmtINR(s.turnover||0)+' is below your Min Turnover filter of '+fmtINR(minTurn)});
+      return false;
+    }
+    if(maxPrice!=null&&Number(s.price)>maxPrice){
+      REMOVED_ROWS.push({s,reason:'filter',chip:'Price '+fmtINR(s.price)+' > max '+fmtINR(maxPrice),
+        detail:'price '+fmtINR(s.price)+' is above your Max Price filter of '+fmtINR(maxPrice)});
+      return false;
+    }
     if(Number.isFinite(Number(s.score))&&Number(s.score)<RECOMMEND_MIN_SCORE){
-      REMOVED_ROWS.push({s,reason:'filter',detail:'score '+Number(s.score).toFixed(1)+' is below your Min Score of '+RECOMMEND_MIN_SCORE});
+      REMOVED_ROWS.push({s,reason:'filter',chip:'Score '+Number(s.score).toFixed(1)+' < min '+RECOMMEND_MIN_SCORE,
+        detail:'score '+Number(s.score).toFixed(1)+' is below your Min Score of '+RECOMMEND_MIN_SCORE});
       return false;
     }
     if(q&&![s.symbol,s.name,s.sector].join(' ').toLowerCase().includes(q)) return false;
@@ -12057,7 +12121,22 @@ function buildRemovedPanel(query=''){
   const heldN=all.filter(r=>r.reason==='held').length;
   const survN=all.filter(r=>r.reason==='surv').length;
   const dirN=all.filter(r=>r.reason==='direction').length;
-  const filtN=all.filter(r=>r.reason==='filter').length;
+  const filtRows=all.filter(r=>r.reason==='filter');
+  const filtN=filtRows.length;
+  // WHICH filter, with its value - "1,426 by your filters" names nothing the owner can act on.
+  const filtBreak=(()=>{
+    const by={};
+    for(const r of filtRows){
+      const c=String(r.chip||'');
+      const k=c.split(' ')[0]||'Filter';
+      if(!by[k]) by[k]={n:0,cut:''};
+      by[k].n++;
+      if(!by[k].cut){ const m=c.match(/[<>]\s*(?:min |max )?(.+)$/i); if(m) by[k].cut=m[1]; }
+    }
+    const phrase={Score:'below Min Score',Turnover:'below Min Turnover',Price:'above Max Price'};
+    return Object.entries(by).sort((a,b)=>b[1].n-a[1].n)
+      .map(([k,v])=>`${v.n} ${phrase[k]||('by '+k.toLowerCase())}${v.cut?' '+v.cut:''}`).join(' · ');
+  })();
   const peakN=all.filter(r=>r.reason==='peak').length;
   const allocN=all.filter(r=>r.reason==='alloc').length;
   const triggerN=all.filter(r=>r.reason==='trigger').length;
@@ -12071,9 +12150,9 @@ function buildRemovedPanel(query=''){
     const reason=r.reason==='direction'
       ?`<span style="font-size:11px;background:rgba(239,68,68,.12);color:var(--red);border:1px solid rgba(239,68,68,.25);border-radius:5px;padding:1px 7px;white-space:nowrap" title="${escHtml(r.detail||'')}">📉 Not lifting off</span>`
       :r.reason==='filter'
-      ?`<span style="font-size:11px;background:rgba(148,163,184,.10);color:var(--t2);border:1px solid rgba(148,163,184,.22);border-radius:5px;padding:1px 7px;white-space:nowrap" title="${escHtml(r.detail||'')}">⚙ Your filter</span>`
+      ?`<span style="font-size:11px;background:rgba(148,163,184,.10);color:var(--t2);border:1px solid rgba(148,163,184,.22);border-radius:5px;padding:1px 7px;white-space:nowrap" title="${escHtml(r.detail||'')}">⚙ ${escHtml(r.chip||'Your filter')}</span>`
       :r.reason==='trigger'
-      ?`<span style="font-size:11px;background:rgba(239,68,68,.12);color:var(--red);border:1px solid rgba(239,68,68,.25);border-radius:5px;padding:1px 7px;white-space:nowrap" title="${escHtml(r.detail||'')}">Automatic trigger veto</span>`
+      ?`<span style="font-size:11px;background:rgba(239,68,68,.12);color:var(--red);border:1px solid rgba(239,68,68,.25);border-radius:5px;padding:1px 7px;white-space:nowrap" title="${escHtml(r.detail||'')}">⛔ ${escHtml(r.chip||'Automatic trigger veto')}</span>`
       :r.reason==='held'
       ?`<span style="font-size:11px;background:rgba(244,114,182,.12);color:#f472b6;border:1px solid rgba(244,114,182,.25);border-radius:5px;padding:1px 7px;white-space:nowrap">📌 Held · in Open Positions</span>`
       :r.reason==='alloc'
@@ -12114,7 +12193,7 @@ function buildRemovedPanel(query=''){
   return `<div id="rank-removed-card" style="background:var(--bg-card);border:1px solid var(--border);border-radius:10px;overflow:hidden">
     <div style="padding:10px 16px;border-bottom:1px solid var(--border)">
       <span style="font-size:12px;font-weight:700;color:var(--t2);text-transform:uppercase;letter-spacing:.1em">Removed from rankings — ${all.length}${tag}</span>
-      <span style="font-size:13px;color:var(--t3);font-weight:400;margin-left:8px">${[dirN?`📉 ${dirN} not lifting off`:'',heldN?`📌 ${heldN} held`:'',survN?`⚠ ${survN} surveillance`:'',triggerN?`${triggerN} automatic trigger veto`:'',peakN?`⏳ ${peakN} waiting for entry confirmation`:'',flowN?`📊 ${flowN} rejected by the current tape`:'',nohistN?`🆕 ${nohistN} without price history`:'',allocN?`🚫 ${allocN} not allocatable`:'',filtN?`⚙ ${filtN} by your filters`:''].filter(Boolean).join(' · ')}${all.length?' · ':''}why the ranks skip</span>
+      <span style="font-size:13px;color:var(--t3);font-weight:400;margin-left:8px">${[dirN?`📉 ${dirN} not lifting off`:'',heldN?`📌 ${heldN} held`:'',survN?`⚠ ${survN} surveillance`:'',triggerN?`${triggerN} automatic trigger veto`:'',peakN?`⏳ ${peakN} waiting for entry confirmation`:'',flowN?`📊 ${flowN} rejected by the current tape`:'',nohistN?`🆕 ${nohistN} without price history`:'',allocN?`🚫 ${allocN} not allocatable`:'',filtN?`⚙ ${filtBreak||(filtN+' by your filters')}`:''].filter(Boolean).join(' · ')}${all.length?' · ':''}why the ranks skip</span>
     </div>
     ${body}
   </div>`;
@@ -12659,10 +12738,16 @@ async function streamRefreshTick(){
     // fill appears on Open Positions without a second timer or a manual action.
     const portfolio=await refreshPortfolioFromHelper();
     const portfolioChanged=portfolio.ok?await hydrateFromHelper('portfolio refresh'):false;
-    // While the WebSocket is healthy it is the authoritative bar source. Do not download and
-    // reparse the entire intraday inventory on the same beat; the universe delta already carries
-    // the changed live symbols. Inventory is a recovery path only when the stream is unavailable.
-    const barsRead=STREAM_STATUS?.connected ? 0 : await loadIntradayInventory();
+    // THE DELTA CARRIES PRICES, NOT BARS (v1287). v1267 replaced the inventory read with the
+    // universe delta on the grounds that the delta "already carries the changed live symbols" - it
+    // carries live PRICE FIELDS, and nothing else in the page merges 5-minute bars while the socket
+    // is up. So INTRADAY_BARS froze at whatever the startup read loaded and every rescore since ran
+    // on a tape that could not move, for the whole session. The incremental read is what fixes it:
+    // `since` is the newest bar already held, so a beat with no new bar transfers nothing, and it
+    // is asked for only when the helper reports a COMPLETED bar revision. A stream that is down
+    // still takes the full recovery read, exactly as before.
+    const needBars=!STREAM_STATUS?.connected||!!(deltaRes&&deltaRes.barCompleted);
+    const barsRead=needBars?await loadIntradayInventory():0;
     const done=Date.now();
     setStreamActivity({phase:STREAM_STATUS?.connected?'live':'stream-down',lastCompleteAt:done,
       lastSuccessAt:STREAM_STATUS?done:STREAM_ACTIVITY.lastSuccessAt,
@@ -13437,9 +13522,11 @@ function switchTab(n){
   document.querySelectorAll('#mainTabs .tab').forEach((t,i)=>t.classList.toggle('act',i===n));
   document.querySelectorAll('.tp').forEach((t,i)=>t.classList.toggle('act',i===n));
   updateTabCounts();
-  if(n===1) renderMethodology();
+  // Rebuild on open only when the data behind it actually moved since the last build - switching
+  // tabs back and forth was rebuilding the full ledger and the trade analytics every time.
+  if(n===1&&(METHODOLOGY_DIRTY||!METHODOLOGY_BUILT)) renderMethodology();
   // Performance analytics are intentionally deferred so tab switching paints immediately.
-  if(n===2) schedulePerformanceRender();
+  if(n===2&&(PERF_DIRTY||!PERF_RENDERED)) schedulePerformanceRender();
   if(n===3) renderPostClose();
   // v1101: a hidden grid has clientWidth 0, so balancing on the tab it lives in is the only moment
   // the column count can actually be computed. rAF lets the tab paint first.
