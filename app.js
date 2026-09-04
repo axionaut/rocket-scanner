@@ -1,5 +1,5 @@
-const BUILD_TS='2026-09-04 12:46 IST'; // release build time (IST)
-const APP_VERSION=1287; // v1287: the helper stops re-reading the archive per symbol, and only the visible tab is built.
+const BUILD_TS='2026-09-04 14:06 IST'; // release build time (IST)
+const APP_VERSION=1288; // v1288: the tape refreshes on the clock and a hidden tab keeps refreshing.
 const RADAR_SCORE_VERSION='tape-decision-v3';
 // v1093: a baseline reward:risk MEASURED on the cross-section (last completed bhav session) instead of learned from the owner's own fills - reported on every row, deliberately not enforced. Includes v1092: position size split by Radar score / stop distance, so equally-scored names carry equal RUPEE risk, plus an opt-in Risk /trade cap.
 // v556: parse the NSE Market Activity Report (MA<date>.csv) — official Nifty %, advances/declines and sector index moves shown as market CONTEXT in the status bar (EOD data, display only, never fed into per-row scoring); MA added to the ℹ️ file manifest.
@@ -11639,7 +11639,11 @@ async function loadIntradayInventory(){
     // measured at 5.3 s on the wire alone. An INCREMENTAL read (`since` set) is a handful of bars
     // and is fetched whole, exactly as before.
     let n=0,processed=0,pageOff=0,pages=0;
-    const PAGE=since?0:200;
+    // PAGED EITHER WAY (v1288). A catch-up after the tape has fallen an hour behind is an
+    // incremental read carrying ~13 bars for ~1,650 symbols - not the single forming bar the
+    // `since` path was sized for - so it gets the same bounded pages as a cold read. A page that
+    // holds no new bars for any of its symbols simply comes back empty and costs nothing.
+    const PAGE=200;
     for(;;){
       const q=[];
       if(since) q.push('since='+encodeURIComponent(since));
@@ -11938,7 +11942,16 @@ function intradayPasteBarHtml(){
   if(activity.phase==='checking') activityText='↻ checking helper, universe, positions and bars now…';
   else {
     const bits=[];
-    if(latest) bits.push('latest completed 5m bar '+liveTapeInterval(newestTapeBucketMs()));
+    // SAY IT WHEN THE TAPE IS BEHIND. The bar printed the newest stored candle beside the time of
+    // the last check and left the owner to spot that they were an hour apart - which is exactly
+    // what happened at 14:01 against a 12:55 bar. A stale tape is now named, in amber, with the gap.
+    if(latest){
+      const heldMs=newestTapeBucketMs();
+      const behindMin=(inSession&&heldMs>0)?Math.floor((Date.now()-heldMs)/60000):0;
+      bits.push(behindMin>=10
+        ? `<b style="color:var(--amber)">tape ${behindMin} min behind</b> (latest completed 5m bar `+liveTapeInterval(heldMs)+')'
+        : 'latest completed 5m bar '+liveTapeInterval(heldMs));
+    }
     if(checked) bits.push('checked '+checked);
     if(portfolioAt) bits.push('positions '+portfolioAt);
     if(activity.portfolioError) bits.push('positions refresh failed');
@@ -12696,8 +12709,22 @@ async function refreshPortfolioFromHelper(){
     return {ok:false,why};
   }finally{if(timer)clearTimeout(timer);}
 }
+// A HIDDEN TAB IS NOT A STOPPED APP (owner, v1288: "Does it only work if the browser tab is in
+// foreground? That shouldn't happen."). The beat used to return immediately whenever the tab was
+// hidden, so a session spent on another tab came back to a board frozen at whatever it last saw.
+// It now keeps running in the background at a slower cadence - the browser throttles background
+// timers to roughly one a minute anyway, so this asks for nothing the browser was not already
+// willing to give - and a return to the tab runs a full beat at once instead of waiting up to 30
+// seconds for the next one. The work behind a beat is bounded and cooperative, so a background
+// refresh cannot cost the machine what the old full-universe passes did.
+const HIDDEN_REFRESH_MS=60000;
+let _lastHiddenBeatAt=0;
 async function streamRefreshTick(){
-  if(_streamRefreshBusy||document.hidden) return;
+  if(_streamRefreshBusy) return;
+  if(document.hidden){
+    if(Date.now()-_lastHiddenBeatAt<HIDDEN_REFRESH_MS) return;
+    _lastHiddenBeatAt=Date.now();
+  }
   if(_folderWatchBusy){setStreamActivity({phase:'ingesting'});return;} // do not race an authoritative ingest
   _streamRefreshBusy=true;
   setStreamActivity({phase:'checking',lastAttemptAt:Date.now(),nextAt:0,error:''});
@@ -12746,7 +12773,22 @@ async function streamRefreshTick(){
     // `since` is the newest bar already held, so a beat with no new bar transfers nothing, and it
     // is asked for only when the helper reports a COMPLETED bar revision. A stream that is down
     // still takes the full recovery read, exactly as before.
-    const needBars=!STREAM_STATUS?.connected||!!(deltaRes&&deltaRes.barCompleted);
+    // FRESHNESS IS DECIDED BY THE CLOCK, NEVER BY A SIGNAL THAT MIGHT NOT ARRIVE (v1288). Asking
+    // only on `barCompleted` makes the tape depend on the delta answer coming back - and when the
+    // helper is busy that request times out, no revision is ever seen, and the board sits on the
+    // bars it happened to load at startup. Measured on the owner's screen at 14:01: the helper's
+    // frontier was 13:55 and the board's newest bar was 12:55, an hour behind, with the beat
+    // running normally the whole time. The honest question is "is what I hold older than the bar
+    // the session should have produced by now", and it has an answer without the helper's help.
+    const tapeBehindMs=(()=>{
+      const held=newestTapeBucketMs();
+      if(!(held>0)) return Infinity;                 // nothing held at all - always ask
+      return Date.now()-held;
+    })();
+    const TAPE_BAR_MS=5*60*1000;
+    // One bar of slack: the current bar is still forming, so being inside it is not being behind.
+    const tapeStale=tapeBehindMs>2*TAPE_BAR_MS;
+    const needBars=!STREAM_STATUS?.connected||!!(deltaRes&&deltaRes.barCompleted)||tapeStale;
     const barsRead=needBars?await loadIntradayInventory():0;
     const done=Date.now();
     setStreamActivity({phase:STREAM_STATUS?.connected?'live':'stream-down',lastCompleteAt:done,
@@ -12770,9 +12812,13 @@ function startStreamRefresh(){
     _streamVisibilityBound=true;
     document.addEventListener('visibilitychange',()=>{
       if(document.hidden) return;
-      // Returning to the tab is not a Kite reconnect event. Refresh the cheap status control first;
-      // the normal beat will hydrate data, avoiding a burst of portfolio/inventory work on focus.
-      loadStreamStatus().then(()=>{try{renderLiveTapeBar();}catch(e){};});
+      // Status first so the tape bar is honest immediately, then a FULL beat - coming back to the
+      // tab is exactly the moment the board is most likely to be behind, and waiting up to 30
+      // seconds for the next tick to even ask is what made it look frozen.
+      loadStreamStatus().then(()=>{
+        try{renderLiveTapeBar();}catch(e){}
+        streamRefreshTick();
+      });
     });
   }
   streamRefreshTick();
