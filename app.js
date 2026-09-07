@@ -1,5 +1,5 @@
-const BUILD_TS='2026-09-07 09:26 IST'; // release build time (IST)
-const APP_VERSION=1301; // Held-tape recovery, explicit warm-up and unified scanner gates.
+const BUILD_TS='2026-09-07 10:29 IST'; // release build time (IST)
+const APP_VERSION=1302; // Clearing overrides persists immediately; explicit automatic input state.
 const RADAR_SCORE_VERSION='tape-decision-v4';
 const EQUITY_OPEN_MIN=9*60+15, EQUITY_CLOSE_MIN=15*60+30;
 // v1093: a baseline reward:risk MEASURED on the cross-section (last completed bhav session) instead of learned from the owner's own fills - reported on every row, deliberately not enforced. Includes v1092: position size split by Radar score / stop distance, so equally-scored names carry equal RUPEE risk, plus an opt-in Risk /trade cap.
@@ -6787,6 +6787,19 @@ function getBasketRupeeProjection(allocMap){
 }
 // Show each default in its field's placeholder so an empty field visibly reflects what the
 // calculation will use (grey = default in effect; a typed value = your override).
+function onTradeInputChange(){
+  // Persist the edit before the deferred filter pass or a refresh can restore old settings.
+  saveFilterState();
+  updateFilterPlaceholders();
+  scheduleApplyFilters();
+}
+function showTradeInputMode(el,automaticLabel='Auto'){
+  if(!el) return;
+  const label=el.closest('.fg')?.querySelector('.fg-lbl');
+  if(!label) return;
+  if(!label.dataset.baseLabel) label.dataset.baseLabel=label.textContent;
+  label.textContent=label.dataset.baseLabel+' / '+(Number(el.value)>0?'Manual':automaticLabel);
+}
 function updateFilterPlaceholders(){
   const capEl=document.getElementById('fCapital');
   if(capEl){ const d=getDefaultCapital(); if(d>0){ capEl.placeholder=String(Math.round(d)); capEl.title=`Empty = your computed capital ₹${Math.round(d).toLocaleString('en-IN')} (holdings + open positions). Type a value to override.`; } }
@@ -6798,7 +6811,9 @@ function updateFilterPlaceholders(){
       riskEl.title=`Empty = NO cap; sizing follows Radar score ÷ stop distance and the existing rails, which today imply about ₹${d.toLocaleString('en-IN')} at risk for a full Max Alloc ₹${Math.round(ma).toLocaleString('en-IN')} position at the ${med.toFixed(2)}% median stop. Type a value to cap what any one position may lose — it can only shrink a position, never grow one.`; }
     else { riskEl.placeholder='auto'; } }
   const tgtEl=document.getElementById('fTgtOverride');
-  if(tgtEl){ let d=0; try{d=getDefaultTgtPct();}catch(e){} if(d>0){ tgtEl.placeholder=d.toFixed(1); tgtEl.title=`Empty = the Goal-led portfolio target anchor ${d.toFixed(1)}% (required net return plus estimated costs). Harvest is used only if Goal cannot resolve. A typed value replaces the anchor; each stock still gets its own capacity-aware target.`; } }
+  if(tgtEl){ let d=0; try{d=getDefaultTgtPct();}catch(e){} tgtEl.placeholder=d>0?d.toFixed(1):'auto'; tgtEl.title='Empty = calculated harvest target, a price-move percentage before costs. A typed value overrides it; clearing restores automatic calculation.'; }
+  showTradeInputMode(capEl);showTradeInputMode(maxEl);
+  showTradeInputMode(riskEl,'No cap');showTradeInputMode(tgtEl);
 }
 // Goal capital basis = effective capital (the field if the owner typed one, else the
 // computed deployed book). An empty field means the default, never zero.
@@ -15005,20 +15020,18 @@ function saveFilterState(){
     tgtOverride:document.getElementById('fTgtOverride')?.value||'',
     riskPerTrade:document.getElementById('fRiskPerTrade')?.value||''
   };
-  localStorage.setItem(SHARED_FILTER_STORE, JSON.stringify(tradeInputs)); // offline mirror
-  // Sync the account-level trading inputs only after the user pauses. Capital and sizing fields
-  // fire on every keystroke; Drive/brain writes must never be part of that interaction path.
-  clearTimeout(_tradeInputPersistTimer);
-  _tradeInputPersistTimer=setTimeout(()=>{
-    try{
-      const sig=JSON.stringify(tradeInputs);
-      if(sig!==_lastTradeInputSig){
-        _lastTradeInputSig=sig;
-        FS.setUserSetting(TRADE_INPUTS_STORE,tradeInputs);
-        saveBrainInBackground();
-      }
-    }catch(e){}
-  },500);
+  const sig=JSON.stringify(tradeInputs);
+  const changed=sig!==_lastTradeInputSig;
+  const previous=JSON.parse(localStorage.getItem(SHARED_FILTER_STORE)||'{}');
+  const updatedAt=changed?Date.now():(Number(previous._updatedAt)||Number(FS.get(USER_SETTINGS_META_STORE)?.[TRADE_INPUTS_STORE])||0);
+  // A timestamped synchronous mirror survives reload before the debounced brain write finishes.
+  localStorage.setItem(SHARED_FILTER_STORE,JSON.stringify({...tradeInputs,_updatedAt:updatedAt}));
+  if(changed){
+    FS.setUserSetting(TRADE_INPUTS_STORE,tradeInputs);
+    _lastTradeInputSig=sig;
+    clearTimeout(_tradeInputPersistTimer);
+    _tradeInputPersistTimer=setTimeout(()=>{saveBrainInBackground();},500);
+  }
 }
 
 function loadFilterState(){
@@ -15033,7 +15046,10 @@ function loadFilterState(){
     // Trade inputs PREFER the Drive-synced brain (so laptop and phone agree); localStorage
     // is the fallback when the brain has none yet (offline / first run).
     let ti=null; try{ti=FS.get(TRADE_INPUTS_STORE);}catch(e){}
-    const pick=(k)=>(ti&&ti[k]!=null)?ti[k]:(shared[k]!=null?shared[k]:state[k]);
+    const brainAt=Number(FS.get(USER_SETTINGS_META_STORE)?.[TRADE_INPUTS_STORE])||0;
+    const localNewer=Number(shared._updatedAt)>brainAt;
+    const pick=(k)=>localNewer&&shared[k]!=null?shared[k]
+      :(ti&&ti[k]!=null)?ti[k]:(shared[k]!=null?shared[k]:state[k]);
     const sharedCapital=pick('capital'), sharedMaxAlloc=pick('maxAlloc'), sharedTgt=pick('tgtOverride');
     const sharedRisk=pick('riskPerTrade');
     if(sharedCapital!=null){const el=document.getElementById('fCapital');if(el)el.value=sharedCapital;}
@@ -15042,6 +15058,10 @@ function loadFilterState(){
     if(sharedRisk!=null){const el=document.getElementById('fRiskPerTrade');if(el)el.value=sharedRisk;}
     // Prime the change-gate so the first save after load doesn't needlessly rewrite the brain.
     _lastTradeInputSig=JSON.stringify({capital:sharedCapital??'',maxAlloc:sharedMaxAlloc??'',tgtOverride:sharedTgt??'',riskPerTrade:sharedRisk??''});
+    if(localNewer){
+      FS.setUserSetting(TRADE_INPUTS_STORE,JSON.parse(_lastTradeInputSig));
+      saveBrainInBackground();
+    }
     updateFilterPlaceholders(); // empty fields show + use the computed defaults
     // Legacy engine sort columns migrate to the Radar rank ordering once.
     const legacy=new Set(['_rank','rocketScore','snapshotChange','tslRefPoints','velocityPotential','delivPct','volume']);
