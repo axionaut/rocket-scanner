@@ -1,5 +1,5 @@
-const BUILD_TS='2026-09-07 09:13 IST'; // release build time (IST)
-const APP_VERSION=1300; // Scanner active window: 09:00-16:00 IST.
+const BUILD_TS='2026-09-07 09:26 IST'; // release build time (IST)
+const APP_VERSION=1301; // Held-tape recovery, explicit warm-up and unified scanner gates.
 const RADAR_SCORE_VERSION='tape-decision-v4';
 const EQUITY_OPEN_MIN=9*60+15, EQUITY_CLOSE_MIN=15*60+30;
 // v1093: a baseline reward:risk MEASURED on the cross-section (last completed bhav session) instead of learned from the owner's own fills - reported on every row, deliberately not enforced. Includes v1092: position size split by Radar score / stop distance, so equally-scored names carry equal RUPEE risk, plus an opt-in Risk /trade cap.
@@ -2332,7 +2332,7 @@ function calcRecommendationOutcomeScore(p,threshold){
 }
 function captureLiveRecommendationScan(){
   const c=istClock(),date=new Date(c.dateMs).toISOString().slice(0,10);
-  if(!isNseTradingDate(date)||c.mins<EQUITY_OPEN_MIN||c.mins>EQUITY_CLOSE_MIN) return;
+  if(!isMarketRefreshWindow()) return;
   const candidates=getDisplayedEntryCandidates(ALL).filter(r=>isSelectableRecommendation(r)&&r.price>0);
   const recommendations=candidates.map(r=>{
     const entryPrice=getBuyPrice(r),policy=getRowExitPolicy(r,entryPrice);
@@ -2342,7 +2342,7 @@ function captureLiveRecommendationScan(){
       auditQty,frictionPct:fr?.covered&&Number.isFinite(fr.entryPct)&&Number.isFinite(fr.exitPct)?Math.max(0,fr.entryPct+fr.exitPct):null,
       orderType:r.entryAtLimit?'LIMIT':'MARKET',limitPrice:r.entryLimitPrice||null,
       targetPct:policy.targetPct,stopPct:policy.stopPct,entryReady:r.entryReady,directionConfirmed:r.directionConfirmed,
-      high1dAtIssue:r.high1d,low1dAtIssue:r.low1d,issueMinute:c.mins-EQUITY_OPEN_MIN,
+      high1dAtIssue:r.high1d,low1dAtIssue:r.low1d,issueMinute:c.mins-DAY_START_MIN,
       issueClock:String(c.h).padStart(2,'0')+':'+String(c.m).padStart(2,'0'),features:{}};
   });
   recordRecommendationOutcomeScan({date,ts:Date.now(),scoreVersion:RADAR_SCORE_VERSION,threshold:RECOMMEND_MIN_SCORE,
@@ -4091,7 +4091,7 @@ function getRecommendationFreshness(sym){
   if(!bars?.length) return {ok:false,why:'Awaiting 5-minute tape'};
   const clock=istClock(),date=new Date(clock.dateMs).toISOString().slice(0,10);
   const last=Number(bars[bars.length-1].t);
-  if(!isNseTradingDate(date)||clock.mins<EQUITY_OPEN_MIN||clock.mins>=EQUITY_CLOSE_MIN)
+  if(!isMarketRefreshWindow())
     return {ok:false,why:'Market closed - waiting for the next session'};
   if(istDayKey(last)!==date) return {ok:false,why:'Awaiting this session?s 5-minute tape'};
   if(!Number.isFinite(last)||tapeBarsBehind(last)>1)
@@ -10275,15 +10275,31 @@ function getPositionEntryStop(sym,pos){
   if(old?.basis!==basis||old.stop!==stop) FS.set(POSITION_STOP_STORE,{...store,[sym]:{basis,stop}});
   return stop;
 }
+function getPositionTapeFallback(sym,pos,deadline,entryStop,bars,why){
+  const now=Date.now(),today=istDayKey(now),qty=Math.max(0,Number(pos?.qty)||0);
+  const recent=[...(bars||[]),...(MINUTE_BARS[sym]||[])]
+    .filter(b=>Number(b.c)>0&&istDayKey(b.t)===today&&Number(b.t)<=now&&now-Number(b.t)<=10*60000)
+    .sort((a,b)=>Number(a.t)-Number(b.t)).at(-1);
+  const price=recent?Number(recent.c):null;
+  const stopBreached=price>0&&entryStop>0&&price<=entryStop;
+  const sell=deadline.due||stopBreached;
+  const signal=sell?'SELL':recent?'WARMING UP':'REFRESHING';
+  const floor=getOpenPositionTargetFloor(sym,pos);
+  const ageWarning=deadline.date?'':' Buy date unavailable; BTST age cannot yet be verified.';
+  return {symbol:sym,signal,signalSort:sell?0:3,qty,price,asOf:recent?.t||null,
+    targetPrice:floor?.price||null,stopPrice:entryStop,pacePct:null,paceRs:null,
+    eodPct:null,eodPrice:null,flowPct:null,ageUnknown:!deadline.date,
+    why:(deadline.due?'BTST deadline reached; exit using a fresh broker quote.'
+      :stopBreached?'Fresh price breached the protective entry stop.'
+      :why+' Automatic refresh is running; the entry stop remains active.')+ageWarning};
+}
 function getOpenPositionTapePolicy(sym,pos){
   const s=normSym(sym||pos?.symbol||'');
   const qty=Math.max(0,Number(pos?.qty)||0);
   const deadline=getPositionDeadline(s,pos),entryStop=getPositionEntryStop(s,pos);
   const all=INTRADAY_BARS[s];
   if(!s||!Array.isArray(all)||!all.length){
-    return {symbol:s,signal:deadline.due?'SELL':'NEEDS DATA',signalSort:deadline.due?0:3,qty,price:null,targetPrice:null,stopPrice:entryStop,
-      pacePct:null,paceRs:null,eodPct:null,eodPrice:null,flowPct:null,
-      why:deadline.due?'BTST deadline reached; exit manually using a fresh broker quote.':'No 5-minute tape for this position yet.'};
+    return getPositionTapeFallback(s,pos,deadline,entryStop,[],'No current 5-minute candles loaded.');
   }
   const ordered=all.slice().sort((a,b)=>a.t-b.t);
   const key=istDayKey(ordered[ordered.length-1].t);
@@ -10300,20 +10316,19 @@ function getOpenPositionTapePolicy(sym,pos){
     if(boundary!=null){
       const completed=rawDay.filter(b=>{return istClock(b.t).mins<=boundary;});
       const live=rawDay.filter(b=>{return istClock(b.t).mins>boundary;});
-      if(completed.length>=3){ day=completed; forming=live.length?live[live.length-1]:null; }
+      day=completed; forming=live.length?live[live.length-1]:null;
     }
   }
   if(key!==today||day.length<3||(isMarketHours()&&tapeBarsBehind(Number(day.at(-1)?.t))>1)){
-    return {symbol:s,signal:deadline.due?'SELL':'NEEDS DATA',signalSort:deadline.due?0:3,qty,price:null,targetPrice:null,stopPrice:entryStop,
-      pacePct:null,paceRs:null,eodPct:null,eodPrice:null,flowPct:null,
-      why:deadline.due?'BTST deadline reached; exit manually using a fresh broker quote.':'Current completed tape is missing or stale; entry stop remains in force.'};
+    const why=key!==today?"Today's candles have not arrived."
+      :day.length<3?`Building the opening read: ${day.length}/3 completed 5-minute candles.`
+      :'Current 5-minute candles are stale.';
+    return getPositionTapeFallback(s,pos,deadline,entryStop,rawDay,why);
   }
 
   const tape=buildIntradayTrajectory(day,ordered);
   if(!tape){
-    return {symbol:s,signal:deadline.due?'SELL':'NEEDS DATA',signalSort:deadline.due?0:3,qty,price:null,targetPrice:null,stopPrice:entryStop,
-      pacePct:null,paceRs:null,eodPct:null,eodPrice:null,flowPct:null,
-      why:deadline.due?'BTST deadline reached; exit manually using a fresh broker quote.':'No usable trajectory; entry stop remains in force.'};
+    return getPositionTapeFallback(s,pos,deadline,entryStop,rawDay,'Building a usable trajectory from the received candles.');
   }
   const last=day[day.length-1],prior=day[day.length-2];
   const completedPrice=Number(last.c),completedHi=Math.max(...day.map(b=>b.h));
@@ -10380,7 +10395,7 @@ function getOpenPositionTapePolicy(sym,pos){
           &&Number.isFinite(tape.pressurePct)&&tape.pressurePct>0
           &&tape.priceSlope>0&&tape.flowSlope>0) signal='BUY';
 
-  if(!deadline.date&&signal!=='SELL') signal='NEEDS DATA';
+  const ageWarning=deadline.date?'':' Buy date unavailable; BTST age cannot yet be verified.';
 
   // The tape contributes an upside LEVEL, but never decides whether Target becomes a loss exit.
   // Target is a profit objective, floored above average buy by the active Target Anchor. SELL can
@@ -10411,7 +10426,6 @@ function getOpenPositionTapePolicy(sym,pos){
     :'Average buy is unavailable, so the displayed level comes only from the 5-minute tape.';
   const paceRs=pacePct!=null&&hi>0?hi*pacePct/100:null;
   const reason=deadline.due?'BTST deadline reached: exit by this session close.'
-    :signal==='NEEDS DATA'?'Buy date unavailable; load the tradebook to verify the BTST deadline.'
     :liveHarvest
     ?'Fresh high on an unfinished 5-minute candle whose partial volume is already top-quartile; harvest at the live tape price.'
     :highRejection
@@ -10436,7 +10450,7 @@ function getOpenPositionTapePolicy(sym,pos){
     stopPrice,pacePct,paceRs,
     eodPct,eodPrice:eodPrice>0?tickPrice(eodPrice):null,
     flowPct:100*tape.cvdPct,pressurePct:tape.pressurePct,
-    pullPct,liveHarvest,highRejection,paceFailed,stopBreached,regime:tape.regime,why:reason,tape};
+    pullPct,liveHarvest,highRejection,paceFailed,stopBreached,regime:tape.regime,ageUnknown:!deadline.date,why:reason+ageWarning,tape};
 }
 
 function getPositionAction(sym,pos){
@@ -12254,10 +12268,9 @@ async function loadIntradayInventory(){
     // query was written and reverted because a partial answer would have replaced a symbol's
     // history. An empty `since` (nothing held yet) still asks for everything.
     const since=(()=>{
-      const ms=newestTapeBucketMs();
+      const ms=newestTapeBucketMs()-10*60000;
       if(!(ms>0)) return '';
-      const d=new Date(ms),z=n=>String(n).padStart(2,'0');
-      return d.getFullYear()+'-'+z(d.getMonth()+1)+'-'+z(d.getDate())+' '+z(d.getHours())+':'+z(d.getMinutes());
+      return new Date(ms+5.5*3600000).toISOString().slice(0,16).replace('T',' ');
     })();
     const storeVAtRequest=INTRADAY_STORE_V;
     // PAGED WHEN THERE IS NOTHING HELD (v1287). A cold read is ~40 MB across ~1,650 symbols and
@@ -12317,7 +12330,7 @@ async function mergeInventoryPage(j,since,storeVAtRequest){
       const csv=['"Date","Open","High","Low","Close","% Change","% Change vs Average","Volume"']
         .concat(rows.map(c=>{
           const d=String(c[0]);
-          const dt=d.slice(8,10)+'/'+d.slice(5,7)+' '+d.slice(11,16);
+          const dt=d.slice(0,16).replace(' ','T')+':00+05:30';
           return ['"'+dt+'"','"'+c[1]+'"','"'+c[2]+'"','"'+c[3]+'"','"'+c[4]+'"','"0"','"0"','"'+(c[5]||0)+'"'].join(',');
         })).join('\n');
       const res=parseIntradayPaste(csv,sym,{merge:!!since});
@@ -12333,6 +12346,21 @@ async function mergeInventoryPage(j,since,storeVAtRequest){
     // scoring pass would split that pass across two versions of the tape. The reorder and the
     // render belong to the caller, so a paged read publishes ONE result, not one per page.
     return await runHeavyJob(merge);
+}
+async function refreshHeldPositionTape(){
+  if(!KITE_API) return 0;
+  const syms=Object.keys(getHeldPositionMap()||{}).map(normSym).filter(Boolean);
+  if(!syms.length) return 0;
+  // A held symbol must never depend on the fastest unrelated symbol's incremental cursor.
+  const since=istDayKey(Date.now())+' 00:00',version=INTRADAY_STORE_V;
+  try{
+    const j=await readHelperResponse('/api/kite/inventory?syms='+encodeURIComponent(syms.join(','))
+      +'&since='+encodeURIComponent(since)+'&limit='+syms.length,{timeout:10000});
+    if(!j?.ok||!j.data) return 0;
+    const n=await mergeInventoryPage(j,since,version);
+    if(n){await drainCooperatively(applyIntradayReorderGen(ALL));applyFilters();}
+    return n;
+  }catch(e){return 0;}
 }
 let _candleFetchRunning=false;
 async function fetchCandlesInApp(limit,opts){
@@ -13444,7 +13472,8 @@ async function streamRefreshTick(){
     // bars in it. `tapeBarsBehind` already excludes the bar still forming.
     const tapeStale=tapeBarsBehind(newestTapeBucketMs())>=1;
     const needBars=STREAM_STATUS?.statusUnknown||!STREAM_STATUS?.connected||!!(deltaRes&&deltaRes.barCompleted)||tapeStale;
-    const barsRead=needBars?await loadIntradayInventory():0;
+    const heldBarsRead=await refreshHeldPositionTape();
+    const barsRead=(needBars?await loadIntradayInventory():0)+heldBarsRead;
     // The book metrics and the one-minute bars ride the same beat. Both are small in-memory reads
     // on the helper - no file walk, no full-universe payload - and both are best-effort: a failure
     // leaves the previous values in place and the score simply carries on without them.
