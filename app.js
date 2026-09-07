@@ -1,5 +1,5 @@
-const BUILD_TS='2026-09-07 08:35 IST'; // release build time (IST)
-const APP_VERSION=1298; // Kite login recovery, coherent refreshes, saved inputs and failure cleanup.
+const BUILD_TS='2026-09-07 09:01 IST'; // release build time (IST)
+const APP_VERSION=1299; // Goal-aware allocation with existing inputs and bounded basket funding.
 const RADAR_SCORE_VERSION='tape-decision-v4';
 const EQUITY_OPEN_MIN=9*60+15, EQUITY_CLOSE_MIN=15*60+30;
 // v1093: a baseline reward:risk MEASURED on the cross-section (last completed bhav session) instead of learned from the owner's own fills - reported on every row, deliberately not enforced. Includes v1092: position size split by Radar score / stop distance, so equally-scored names carry equal RUPEE risk, plus an opt-in Risk /trade cap.
@@ -6653,15 +6653,29 @@ function getAverageTradesPerEntryDay(){
   _avgTradesMemo={tb,avg:value};
   return value;
 }
-function getDefaultMaxAlloc(){
-  const tb=TRADEBOOK_STATS?.tripsData;
-  const capital=getEffectiveCapital();
-  if(_defMaxAllocMemo&&_defMaxAllocMemo.tb===tb&&_defMaxAllocMemo.capital===capital) return _defMaxAllocMemo.v;
-  const avgTrades=getAverageTradesPerEntryDay();
-  const v=capital>0&&avgTrades>0?Math.round(capital/avgTrades):0;
-  _defMaxAllocMemo={tb,capital,v,avgTrades};
-  return v;
+function getGoalAllocationPlan(){
+  const capital=getEffectiveCapital(),trades=getAverageTradesPerEntryDay();
+  const need=getTodayRupeeNeed();
+  // Use the existing goal's daily requirement, not its loss-sensitive outstanding balance.
+  const dailyGoal=need?.need>0?need.need:HARVEST_DAILY_NET_GOAL_RS;
+  const targetPct=getEffectiveTgtPct();
+  const netPct=targetPct-estimateRoundTripCostPct(targetPct);
+  const profitPerTrade=trades>0?dailyGoal/trades:null;
+  const required=profitPerTrade>0&&netPct>0?profitPerTrade/(netPct/100):null;
+  return {capital,trades,dailyGoal,targetPct,netPct,profitPerTrade,required,
+    maxAlloc:capital>0&&required>0?Math.min(capital,Math.ceil(required)):0,
+    turnoverMultiple:capital>0&&netPct>0?dailyGoal/(capital*netPct/100):null};
 }
+function getDefaultMaxAlloc(){return getGoalAllocationPlan().maxAlloc;}
+function goalAllocationExplanation(){
+  const p=getGoalAllocationPlan();
+  if(!(p.trades>0)) return 'Need completed trade history to estimate entries per day; existing capital and risk limits still apply.';
+  if(!(p.netPct>0)) return 'Target does not cover estimated costs; no goal-sized allocation can be calculated.';
+  return `Daily goal ${fmtINR(p.dailyGoal)} / ${p.trades.toFixed(2)} historical entries per day / ${p.netPct.toFixed(2)}% target net = ${fmtINR(p.required)} per trade before limits. `
+    +`Requires ${p.turnoverMultiple.toFixed(2)}x capital deployment across the day if all trades reach target; losses, slippage and BTST holds can leave a shortfall. `
+    +'A planning requirement, not expected profit. Score/stop weighting and capital, liquidity and typed limits can reduce funding. Saved overrides remain active.';
+}
+
 function getEffectiveCapital(){
   const v=parseFloat(document.getElementById('fCapital')?.value);
   return (Number.isFinite(v)&&v>0)?v:getDefaultCapital();
@@ -6779,7 +6793,7 @@ function updateFilterPlaceholders(){
   const capEl=document.getElementById('fCapital');
   if(capEl){ const d=getDefaultCapital(); if(d>0){ capEl.placeholder=String(Math.round(d)); capEl.title=`Empty = your computed capital ₹${Math.round(d).toLocaleString('en-IN')} (holdings + open positions). Type a value to override.`; } }
   const maxEl=document.getElementById('fMaxAlloc');
-  if(maxEl){ const d=getDefaultMaxAlloc(),avg=getAverageTradesPerEntryDay(),capital=getEffectiveCapital(); if(d>0&&avg>0){ maxEl.placeholder=String(d); maxEl.title=`Empty = Capital ₹${Math.round(capital).toLocaleString('en-IN')} ÷ ${avg.toFixed(2)} average positions per entry day = ₹${d.toLocaleString('en-IN')}. Type a value to override the per-stock cap.`; } else { maxEl.placeholder='need trade history'; } }
+  if(maxEl){ const d=getDefaultMaxAlloc(); maxEl.placeholder=d>0?String(d):'need net target/history'; maxEl.title=goalAllocationExplanation(); }
   const riskEl=document.getElementById('fRiskPerTrade');
   if(riskEl){ const d=getDefaultRiskPerTrade(),med=_defRiskMemo?.medianStopPct,ma=getEffectiveMaxAlloc();
     if(d>0&&med>0){ riskEl.placeholder=String(d);
@@ -6808,7 +6822,7 @@ function getGoalFreeCapitalParts(){
 function getGoalPortfolioBasis(){return getGoalFreeCapitalParts().total;}
 let _goalRateCache=null;
 // Required NET %/trading day toward the goal, on FREE capital. Informational only:
-// this compass display never alters harvest targets, scoring, or allocation.
+// this requirement informs default allocation, never harvest targets or stock scores.
 function getGoalRequiredNetPct(){
   const g=getGoalConfig();
   const basis=getGoalPortfolioBasis();
@@ -8391,7 +8405,7 @@ function renderPerformance(){
   updateFilterPlaceholders();
   const allocationCapital=getEffectiveCapital();
   const allocationCadence=getAverageTradesPerEntryDay();
-  const autoMaxAlloc=allocationCapital>0&&allocationCadence?Math.round(allocationCapital/allocationCadence):0;
+  const autoMaxAlloc=getDefaultMaxAlloc();
   const typedMaxAlloc=parseFloat(document.getElementById('fMaxAlloc')?.value);
   const maxAllocOverride=Number.isFinite(typedMaxAlloc)&&typedMaxAlloc>0;
 
@@ -8406,7 +8420,7 @@ function renderPerformance(){
     {label:'Win Rate',value:p.winRate+'%',color:p.winRate>=55?'var(--green)':p.winRate>=45?'var(--amber)':'var(--red)',sub:`${p.winners}W · ${p.losers}L lots`},
     {label:'Expectancy',value:fmtPerfRs(p.expectancy),color:clr(p.expectancy),sub:'Net ₹ you make per lot, on average'},
     {label:'Profit Factor',value:p.profitFactor!=null?p.profitFactor:'—',color:p.profitFactor>=1.5?'var(--green)':p.profitFactor>=1?'var(--amber)':'var(--red)',sub:'Gross wins ÷ gross losses · above 1 = profitable'},
-    {label:'Max Allocation',value:autoMaxAlloc?fmtINR(autoMaxAlloc):'—',color:autoMaxAlloc?'var(--amber)':'var(--t3)',sub:autoMaxAlloc?`${fmtINR(allocationCapital)} capital ÷ ${allocationCadence.toFixed(2)} avg positions/entry day${maxAllocOverride?` · typed override ${fmtINR(typedMaxAlloc)} active`:''}`:'Load trade history to calculate trading cadence'},
+    {label:'Max Allocation',value:autoMaxAlloc?fmtINR(autoMaxAlloc):'?',color:autoMaxAlloc?'var(--amber)':'var(--t3)',sub:goalAllocationExplanation()+(maxAllocOverride?` Typed override ${fmtINR(typedMaxAlloc)} active.`:'')},
     (()=>{const g=getHighGapStats();
       return {label:'High vs Exit',
         value:g.meanMin==null?'—':(g.meanMin>0?`+${g.meanMin}m`:`${g.meanMin}m`),
@@ -10480,7 +10494,8 @@ function getAllocationBlockReason(s,ctx=null){
 }
 function computeAlloc(capital, selList){
   if(!capital||!selList.length) return {};
-  const maxAllocV=getEffectiveMaxAlloc(); // typed value, else capital ÷ average entry-day positions
+  const maxAllocV=getEffectiveMaxAlloc(); // existing override or goal-derived default
+  const goalPlan=getGoalAllocationPlan();
   const targetAnchor=getEffectiveTgtPct();
   // Held qty/avg are part of the key (v1070): the top-up cap depends on them, so a fill that
   // changes the position must invalidate the memo or the next basket would reuse a stale cap.
@@ -10488,7 +10503,7 @@ function computeAlloc(capital, selList){
   const riskPerTrade=getEffectiveRiskPerTrade();
   // slPct joins the key with atr: both feed getRowStopDistancePct, which now drives the WEIGHT and
   // not just the displayed stop, so a change in either must invalidate the memo.
-  const memoKey=capital+'|'+maxAllocV+'|'+targetAnchor+'|'+riskPerTrade+'|'+selList.map(s=>{
+  const memoKey=capital+'|'+goalPlan.profitPerTrade+'|'+maxAllocV+'|'+targetAnchor+'|'+riskPerTrade+'|'+selList.map(s=>{
     const h=heldMap[s.symbol];
     return s.symbol+':'+s.price+':'+s.rocketScore+':'+s.atr+':'+s.slPct+':'+s.rangePct+':'+s.turnover+':'+(h?h.qty+'@'+h.avg:'-');
   }).join(',')+'|'+BOOK_V+'|'+Math.floor(Date.now()/TAPE_BAR_MS);
@@ -10528,6 +10543,9 @@ function computeAlloc(capital, selList){
     return stop>0?sc/stop:0;
   };
   const totalRiskWeight=selList.reduce((sum,s)=>sum+riskWeight(s),0)||1;
+  const strongestRiskWeight=Math.max(...selList.map(riskWeight),1e-9);
+  const goalSizing=goalPlan.required>0;
+  let remainingBudget=spendableCapital;
   // Residual redistribution (pass 2) still walks by CONVICTION, not by weight: the spare rupee
   // should go to the best setup. Risk normalisation governs the size of the slice, not its priority.
   const sortedSel=[...selList].sort((a,b)=>rawScore(b)-rawScore(a));
@@ -10542,7 +10560,14 @@ function computeAlloc(capital, selList){
         reason:'missing daily turnover; market-impact safety cannot be verified',liquidityCap:0};
       continue;
     }
-    const scoreLimit=spendableCapital*(riskWeight(s)/totalRiskWeight);
+    // Price the desired rupee profit using this row's actual target/charges and known book friction.
+    const probeQty=Math.max(1,Math.floor(Math.min(cap,spendableCapital)/buyP));
+    const probe=goalSizing?evalNet(s,buyP,probeQty):null;
+    const rowNetPct=probe&&!probe.skip?probe.expectedNet/(probeQty*buyP)*100:null;
+    const desired=goalSizing&&rowNetPct>0?goalPlan.profitPerTrade/(rowNetPct/100):0;
+    const weighted=goalSizing?desired*(riskWeight(s)/strongestRiskWeight)
+      :spendableCapital*(riskWeight(s)/totalRiskWeight);
+    const scoreLimit=Math.min(weighted,remainingBudget);
     const topUpCap=getHeldTopUpNotionalCap(s,buyP,heldMap); // Infinity unless held and in profit
     const riskCap=riskNotionalCap(s,riskPerTrade);          // Infinity when no risk budget is set
     const railLimit=Math.min(cap,turnoverCap,topUpCap,riskCap);   // every rail EXCEPT the score share
@@ -10552,7 +10577,16 @@ function computeAlloc(capital, selList){
     limits[s.symbol]=rowLimit;
     limitReasons[s.symbol]=limitReason;
     const qty=affordableQty(rowLimit,buyP,rowLimit);
-    if(qty<=0) continue;
+    if(qty<=0){
+      if(goalSizing){
+        allocMap[s.symbol]={alloc:0,debit:0,qty:0,buyPrice:buyP,limit:0,
+          reason:desired>0?'Basket capital committed to higher-ranked trades':'Target does not cover estimated costs',
+          limitReason:'goal funding'};
+        railLimits[s.symbol]=0; // no one-share fallback past the goal/budget decision
+      }
+      continue;
+    }
+    remainingBudget=Math.max(0,remainingBudget-buyDebit(buyP,qty));
     const ev=evalNet(s,buyP,qty);
     if(ev.rejected){
       allocMap[s.symbol]={alloc:0,debit:0,qty:0,buyPrice:buyP,rejected:true,reason:ev.reason,
@@ -10648,8 +10682,9 @@ function allocationSubline(am,unitLabel='shares'){
   if(am?.limitReason==='turnover'){
     return `<div style="font-size:11px;color:var(--amber);margin-top:1px" title="Market-impact rail: allocation is capped at 0.10% of daily turnover (${fmtINR(am.liquidityCap)}), then rounded down to whole ${unitLabel}.${riskTip}${netTip}">turnover · ${am.qty}${unitShort}${netStr}</div>`;
   }
+  if(am?.limitReason==='goal funding') return `<div style="font-size:11px;color:var(--amber)" title="${escHtml(am.reason)}">Unfunded ? ${escHtml(am.reason)}</div>`;
   const sizedBy=am?.limitReason==='risk weight'
-    ? `Sized by Radar score ÷ this stock's ${Number(am.stopDistancePct).toFixed(2)}% stop, so equally-scored names carry equal rupee risk.`
+    ? `Sized by Radar score ÷ this stock's ${Number(am.stopDistancePct).toFixed(2)}% stop, with goal-sized funding; targets and capital limits can change the rupee risk.`
     : 'Capped by the Max Allocation rail.';
   return `<div style="font-size:11px;color:var(--t3);margin-top:1px;max-width:190px;overflow:hidden;text-overflow:ellipsis" title="${sizedBy}${riskTip}${netTip}">${am.qty}${unitShort}${am?.riskRs>0?` · r${fmtINR(am.riskRs)}`:''}${netStr}</div>`;
 }
@@ -13120,7 +13155,7 @@ function renderStatusBar(){
       const spread=risks.length>1?`${fmtINR(risks[0])}–${fmtINR(risks.at(-1))}`:fmtINR(risks[0]);
       const budget=getEffectiveRiskPerTrade();
       const budgetLbl=budget>0?` Risk ₹/trade budget: ${fmtINR(budget)} per position.`:'';
-      html+=` <span style="color:var(--cyan);font-size:13px;font-family:'DM Mono',monospace;font-weight:700;margin-left:8px" title="Total rupees at risk if every position in this basket hits its own stop — ${spread} per position across ${risks.length}. Positions are sized by Radar score ÷ stop distance, so equally-scored names carry equal rupee risk; a wide spread here means a cap (turnover, Max Allocation, top-up cushion) is binding instead of the weight.${budgetLbl}">· 🛡 ${fmtINR(totalRisk)} at risk (${riskPct.toFixed(1)}% of capital) · ${spread}/trade</span>`;
+      html+=` <span style="color:var(--cyan);font-size:13px;font-family:'DM Mono',monospace;font-weight:700;margin-left:8px" title="Total rupees at risk if every position in this basket hits its own stop — ${spread} per position across ${risks.length}. Positions are sized by Radar score ÷ stop distance, with goal-sized funding in rank order; differing row targets, available basket capital and caps can change the rupee risk.${budgetLbl}">· 🛡 ${fmtINR(totalRisk)} at risk (${riskPct.toFixed(1)}% of capital) · ${spread}/trade</span>`;
     }
     // Expected net uses each stock's own capacity-aware target. The Harvest/goal/manual
     // value is an anchor only; it is never pasted uniformly onto every selected row.
