@@ -1,6 +1,7 @@
-const BUILD_TS='2026-09-04 16:22 IST'; // release build time (IST)
-const APP_VERSION=1296; // v1296: remove separate intraday verdict buttons; score is the single recommendation verdict.
-const RADAR_SCORE_VERSION='tape-decision-v3';
+const BUILD_TS='2026-09-07 07:54 IST'; // release build time (IST)
+const APP_VERSION=1297; // Intraday/BTST calculation, execution and forward-audit corrections.
+const RADAR_SCORE_VERSION='tape-decision-v4';
+const EQUITY_OPEN_MIN=9*60+15, EQUITY_CLOSE_MIN=15*60+30;
 // v1093: a baseline reward:risk MEASURED on the cross-section (last completed bhav session) instead of learned from the owner's own fills - reported on every row, deliberately not enforced. Includes v1092: position size split by Radar score / stop distance, so equally-scored names carry equal RUPEE risk, plus an opt-in Risk /trade cap.
 // v556: parse the NSE Market Activity Report (MA<date>.csv) — official Nifty %, advances/declines and sector index moves shown as market CONTEXT in the status bar (EOD data, display only, never fed into per-row scoring); MA added to the ℹ️ file manifest.
 // v555 market-cycle stage awareness (stateless, self-calibrating): per-row stage label (1 accumulation · 2 breakout · 3 event · 4 profit-booking · 5 re-accumulation · 6 second-leg); a quiet-accumulation signal (conjunction-of-percentiles) injected via the rocket-diagnostic weighting; sell-the-news decay off Recent earnings date (horizon = review days). v1065 makes the market-breadth gauge an entry-eligibility input while still never changing ranking.
@@ -138,7 +139,7 @@ const TRADE_INPUTS_STORE='rs_trade_inputs_v1';
 let _lastTradeInputSig=''; // gate brain writes to genuine trade-input changes, not every keystroke
 let _tradeInputPersistTimer=null;
 const ALL_STORE='rs_data';
-const ALL_STORE_SCHEMA='radar_composite_v15'; // v1230 invalidates cached rows from the pre-predictor score scale.
+const ALL_STORE_SCHEMA='radar_composite_v16'; // v1297 rescoring only; saved user settings are untouched.
 const HOLD_STORE='rs_holdings';
 const ORDERS_STORE='rs_orders';
 const POS_STORE='rs_positions';
@@ -2177,6 +2178,63 @@ function resolveRocketDay(bar,entryPrice,targetPct,stopPct,prevHigh=null,prevLow
 }
 // Did this pick's resolved state count as a rocket? Ambiguity is deliberately NOT a rocket.
 function isRocketOutcome(p){return p?.rocketOutcome===ROCKET_OUTCOME.ROCKET;}
+// Paper outcome of the declared target / entry stop / BTST deadline, not a claim of execution.
+function resolveNetRecommendation(p,asOf){
+  if(p.paperComplete) return;
+  const bars=INTRADAY_BARS[normSym(p.symbol)]||[];
+  const end=Date.now(),clock=istClock(end);
+  const eligible=bars.filter(b=>Number(b.t)>=p.issuedAt&&Number(b.t)+TAPE_BAR_MS<=end
+    &&tradingDaysBetween(p.issueDate,istDayKey(b.t))<=1).sort((a,b)=>a.t-b.t);
+  if(eligible.length&&eligible[0].t>Math.ceil(p.issuedAt/TAPE_BAR_MS)*TAPE_BAR_MS) p.evidenceIncomplete=true;
+  const partial=bars.find(b=>b.t<p.issuedAt&&b.t+TAPE_BAR_MS>p.issuedAt);
+  if(partial&&(partial.l<=p.entryPrice*(1-p.stopPct/100)||partial.h>=p.entryPrice*(1+p.targetPct/100))) p.evidenceIncomplete=true;
+  let entry=p.entryPrice,entered=p.orderType!=='LIMIT',exit=null,exitBar=null;
+  let prev=null;
+  for(const b of eligible){
+    if(prev&&istDayKey(prev.t)===istDayKey(b.t)&&b.t-prev.t>TAPE_BAR_MS){p.evidenceIncomplete=true;break;}
+    prev=b;
+    if(!entered){
+      if(!(p.limitPrice>0)||b.l>p.limitPrice) continue;
+      entry=Math.min(Number(b.o)||p.limitPrice,p.limitPrice); entered=true;
+      p.paperEntryPrice=entry;p.paperEntryAt=b.t;
+      // A limit fill's intrabar ordering cannot be recovered from OHLC.
+      if(b.l<=entry*(1-p.stopPct/100)||b.h>=entry*(1+p.targetPct/100)){
+        p.rocketOutcome=ROCKET_OUTCOME.AMBIGUOUS;p.paperComplete=true;return;
+      }
+      continue;
+    }
+    const up=entry*(1+p.targetPct/100),dn=entry*(1-p.stopPct/100);
+    if(b.o<=dn){exit=b.o;p.rocketOutcome=ROCKET_OUTCOME.STOPPED;}
+    else if(b.o>=up){exit=up;p.rocketOutcome=ROCKET_OUTCOME.ROCKET;}
+    else if(b.h>=up&&b.l<=dn){p.rocketOutcome=ROCKET_OUTCOME.AMBIGUOUS;p.paperComplete=true;return;}
+    else if(b.l<=dn){exit=dn;p.rocketOutcome=ROCKET_OUTCOME.STOPPED;}
+    else if(b.h>=up){exit=up;p.rocketOutcome=ROCKET_OUTCOME.ROCKET;}
+    else if(tradingDaysBetween(p.issueDate,istDayKey(b.t))===1&&istClock(b.t).mins>=EQUITY_CLOSE_MIN-5){
+      exit=b.c;p.rocketOutcome=ROCKET_OUTCOME.EXPIRED;
+    }
+    const mark=(b.c/entry-1)*100;
+    p.latestMarkProfitPct=+mark.toFixed(3);
+    p.maxAdversePct=Math.max(p.maxAdversePct||0,100*(1-b.l/entry));
+    const gross=(b.h/entry-1)*100;
+    const cost=(calcZerodhaCharges(entry,p.auditQty,false,istDayKey(b.t)===p.issueDate)
+      +calcZerodhaCharges(b.h,p.auditQty,true,istDayKey(b.t)===p.issueDate))/(entry*p.auditQty)*100;
+    if(p.firstProfitMinutes==null&&p.frictionPct!=null&&gross>cost+p.frictionPct)
+      p.firstProfitMinutes=Math.max(0,(b.t+TAPE_BAR_MS-p.issuedAt)/60000);
+    if(exit!=null){exitBar=b;break;}
+  }
+  if(exitBar&&!p.evidenceIncomplete){
+    const intra=istDayKey(exitBar.t)===p.issueDate;
+    const charges=calcZerodhaCharges(entry,p.auditQty,false,intra)+calcZerodhaCharges(exit,p.auditQty,true,intra);
+    p.paperGrossPct=+(100*(exit/entry-1)).toFixed(3);
+    p.paperNetBeforeFrictionPct=+(p.paperGrossPct-100*charges/(entry*p.auditQty)).toFixed(3);
+    p.paperNetPct=p.frictionPct!=null?+(p.paperNetBeforeFrictionPct-p.frictionPct).toFixed(3):null;
+    p.paperExitAt=exitBar.t+TAPE_BAR_MS;p.paperExitPrice=exit;p.paperComplete=true;
+    p.rocketResolvedOn=istDayKey(exitBar.t);p.rocketResolvedDay=tradingDaysBetween(p.issueDate,p.rocketResolvedOn);
+    p.complete=true;
+  }else if(tradingDaysBetween(p.issueDate,asOf)>1||(tradingDaysBetween(p.issueDate,asOf)===1&&clock.mins>=EQUITY_CLOSE_MIN)){
+    p.paperComplete=true;p.evidenceIncomplete=true;p.unfilled=!entered;p.rocketOutcome=ROCKET_OUTCOME.EXPIRED;
+  }
+}
 function resolveRocketForPick(p,bar,gap,scanDate){
   if(!p||!bar) return;
   if(p.rocketOutcome&&p.rocketOutcome!==ROCKET_OUTCOME.PENDING) return; // already resolved
@@ -2185,13 +2243,13 @@ function resolveRocketForPick(p,bar,gap,scanDate){
     p.rocketUnresolvedReason='no per-stock target/stop recorded at issue';
     return;
   }
+  if(p.outcomePolicy==='net-policy-v1'){resolveNetRecommendation(p,scanDate);return;}
   const horizon=Math.max(1,p.rocketHorizonDays||ROCKET_HORIZON_DAYS);
   if(gap>horizon-1){ // window closed without either barrier being touched
     p.rocketOutcome=ROCKET_OUTCOME.EXPIRED;p.rocketResolvedOn=scanDate;p.rocketResolvedDay=gap;
     return;
   }
-  if(p.rocketDaysSeen&&p.rocketDaysSeen.includes(gap)) return;
-  p.rocketDaysSeen=[...(p.rocketDaysSeen||[]),gap];
+  if(!(p.rocketDaysSeen||[]).includes(gap)) p.rocketDaysSeen=[...(p.rocketDaysSeen||[]),gap];
   // Only the ISSUE day needs its pre-recommendation action excluded (see resolveRocketDay).
   const res=resolveRocketDay(bar,p.entryPrice,p.targetPct,p.stopPct,
     gap===0?p.high1dAtIssue:null, gap===0?p.low1dAtIssue:null);
@@ -2211,22 +2269,8 @@ function getRocketArrivalStats(){
     p75:percentileValue(days,0.75),
   };
 }
-function getAdaptiveOutcomeHorizonDays(){
-  const arrival=getRocketArrivalStats();
-  const adaptiveTrips=TRADEBOOK_STATS?.tripsData?.length?getAdaptiveTradeTrips(TRADEBOOK_STATS.tripsData):[];
-  const avgHold=adaptiveTrips.length?meanArr(adaptiveTrips.map(r=>r.holdDays)):TRADEBOOK_STATS?.avgHoldDays;
-  const evidence=[
-    avgHold!=null&&isFinite(avgHold)?Math.max(1,Math.round(avgHold)):null,
-    arrival.p75!=null?Math.ceil(arrival.p75+1):null,
-  ].filter(v=>v!=null&&v>0);
-  return Math.min(OUTCOME_HORIZON_MAX_DAYS,Math.max(1,evidence.length?Math.max(...evidence):OUTCOME_HORIZON_FALLBACK_DAYS));
-}
-function getEffectiveReviewDays(){
-  const realised=TRADEBOOK_STATS?.exitPolicy?.holdDays||TRADEBOOK_STATS?.holdLimitDays||null;
-  const rocketFloor=getRocketArrivalStats().p75;
-  const evidence=[realised,rocketFloor].filter(v=>v!=null&&isFinite(v)&&v>0);
-  return evidence.length?Math.max(1,Math.ceil(Math.max(...evidence))):null;
-}
+function getAdaptiveOutcomeHorizonDays(){return ROCKET_HORIZON_DAYS-1;}
+function getEffectiveReviewDays(){return ROCKET_HORIZON_DAYS-1;}
 function getOutcomeCheckpointDays(horizonDays){
   return Math.max(1,Math.round(Math.max(1,horizonDays)/3));
 }
@@ -2274,6 +2318,24 @@ function calcRecommendationOutcomeScore(p,threshold){
   }
   return +clampNum(score,-1,1).toFixed(3);
 }
+function captureLiveRecommendationScan(){
+  const c=istClock(),date=new Date(c.dateMs).toISOString().slice(0,10);
+  if(!isNseTradingDate(date)||c.mins<EQUITY_OPEN_MIN||c.mins>EQUITY_CLOSE_MIN) return;
+  const candidates=getDisplayedEntryCandidates(ALL).filter(r=>isSelectableRecommendation(r)&&r.price>0);
+  const recommendations=candidates.map(r=>{
+    const entryPrice=getBuyPrice(r),policy=getRowExitPolicy(r,entryPrice);
+    const auditQty=Math.max(1,Math.floor(frictionSizeBasis()/entryPrice));
+    const fr=getTradeFrictionPct(r,auditQty*r.price);
+    return {symbol:r.symbol,entryPrice,score:r.score,scoreVersion:RADAR_SCORE_VERSION,rank:r.rank,
+      auditQty,frictionPct:fr?.covered&&Number.isFinite(fr.entryPct)&&Number.isFinite(fr.exitPct)?Math.max(0,fr.entryPct+fr.exitPct):null,
+      orderType:r.entryAtLimit?'LIMIT':'MARKET',limitPrice:r.entryLimitPrice||null,
+      targetPct:policy.targetPct,stopPct:policy.stopPct,entryReady:r.entryReady,directionConfirmed:r.directionConfirmed,
+      high1dAtIssue:r.high1d,low1dAtIssue:r.low1d,issueMinute:c.mins-EQUITY_OPEN_MIN,
+      issueClock:String(c.h).padStart(2,'0')+':'+String(c.m).padStart(2,'0'),features:{}};
+  });
+  recordRecommendationOutcomeScan({date,ts:Date.now(),scoreVersion:RADAR_SCORE_VERSION,threshold:RECOMMEND_MIN_SCORE,
+    rows:ALL.map(r=>({symbol:r.symbol,price:r.price,high1d:r.high1d,low1d:r.low1d})),recommendations});
+}
 function recordRecommendationOutcomeScan(scan){
   if(!scan?.date||!scan.rows?.length) return;
   const adaptiveHorizon=getAdaptiveOutcomeHorizonDays();
@@ -2307,11 +2369,11 @@ function recordRecommendationOutcomeScan(scan){
       const row=rowMap[p.symbol];
       if(!row||!(p.entryPrice>0)) return;
       resolveRocketForPick(p,row,gap,scan.date);
-      if(p.evaluatedThrough===scan.date) return;
+      const firstObservation=p.evaluatedThrough!==scan.date;
       const highProfit=row.high1d>0?((row.high1d-p.entryPrice)/p.entryPrice)*100:null;
       const closeProfit=row.price>0?((row.price-p.entryPrice)/p.entryPrice)*100:null;
       const lowProfit=row.low1d>0?((row.low1d-p.entryPrice)/p.entryPrice)*100:null;
-      p.observations=(p.observations||0)+1;
+      if(firstObservation) p.observations=(p.observations||0)+1;
       p.evaluatedThrough=scan.date;
       if(highProfit!=null&&(p.bestHighProfitPct==null||highProfit>p.bestHighProfitPct)){
         p.bestHighProfitPct=+highProfit.toFixed(2);p.bestDays=gap;
@@ -2319,7 +2381,10 @@ function recordRecommendationOutcomeScan(scan){
       if(closeProfit!=null&&(p.bestCloseProfitPct==null||closeProfit>p.bestCloseProfitPct)){
         p.bestCloseProfitPct=+closeProfit.toFixed(2);
       }
-      if(closeProfit!=null) p.finalCloseProfitPct=+closeProfit.toFixed(2);
+      if(closeProfit!=null){
+        p.latestMarkProfitPct=+closeProfit.toFixed(2);
+        if(istClock(scan.ts||Date.now()).mins>=EQUITY_CLOSE_MIN) p.finalCloseProfitPct=+closeProfit.toFixed(2);
+      }
       if(lowProfit!=null&&(p.worstLowProfitPct==null||lowProfit<p.worstLowProfitPct)){
         p.worstLowProfitPct=+lowProfit.toFixed(2);
       }
@@ -2337,7 +2402,7 @@ function recordRecommendationOutcomeScan(scan){
         p.conversionAssessed=true;
       }
       p.outcomeScore=calcRecommendationOutcomeScore(p,issue.threshold);
-      p.complete=gap>=horizon;
+      p.complete=gap>=horizon&&istClock(scan.ts||Date.now()).mins>=EQUITY_CLOSE_MIN;
     });
   });
   const scanScoreVersion=scan.scoreVersion||RADAR_SCORE_VERSION;
@@ -2362,13 +2427,19 @@ function recordRecommendationOutcomeScan(scan){
       delete p.rocketUnresolvedReason;
     });
   }
-  const isNewIssueDate=!currentIssue||!(currentIssue.picks||[]).length;
-  if(scan.recommendations?.length&&isNewIssueDate){
-    const issueKey=store.issues[scan.date]?scan.date+'|'+scanScoreVersion:scan.date;
+  const additions=(scan.recommendations||[]).filter(p=>!(currentIssue?.picks||[])
+    .some(old=>old.symbol===p.symbol&&!!old.control===!!p.control));
+  if(additions.length){
+    const issueKey=currentIssueKey||(store.issues[scan.date]?scan.date+'|'+scanScoreVersion:scan.date);
     store.issues[issueKey]={
       date:scan.date,threshold:scan.threshold,scoreVersion:scan.scoreVersion||RADAR_SCORE_VERSION,horizonDays:adaptiveHorizon,
       regime:(typeof MARKET_REGIME!=='undefined'&&MARKET_REGIME)?MARKET_REGIME:null,
-      picks:scan.recommendations.map(p=>({symbol:p.symbol,entryPrice:p.entryPrice,score:p.score,scoreVersion:p.scoreVersion||scan.scoreVersion||RADAR_SCORE_VERSION,rank:p.rank,
+      picks:(currentIssue?.picks||[]).concat(additions.map(p=>({
+        outcomePolicy:'net-policy-v1',issuedAt:Number(scan.ts)||Date.now(),issueDate:scan.date,
+        orderType:p.orderType||'MARKET',limitPrice:p.limitPrice||null,
+        auditQty:Math.max(1,Math.floor(Number(p.auditQty)||1)),
+        frictionPct:Number.isFinite(p.frictionPct)?p.frictionPct:null,
+        symbol:p.symbol,entryPrice:p.entryPrice,score:p.score,scoreVersion:p.scoreVersion||scan.scoreVersion||RADAR_SCORE_VERSION,rank:p.rank,
         features:compactOutcomeFeatures(p.features,outcomeFeatureOrder),
         entryReady:p.entryReady!==false,
         blockReason:p.entryReady===false?[
@@ -2406,7 +2477,7 @@ function recordRecommendationOutcomeScan(scan){
         observations:0,evaluatedThrough:null,rocketDate:null,rocketDays:null,
         bestHighProfitPct:null,bestCloseProfitPct:null,finalCloseProfitPct:null,worstLowProfitPct:null,
         conversionHighProfitPct:null,conversionCloseProfitPct:null,conversionWorstLowProfitPct:null,conversionAssessed:false,
-        bestDays:null,outcomeScore:null,horizonDays:adaptiveHorizon,complete:false}))
+        bestDays:null,outcomeScore:null,horizonDays:adaptiveHorizon,complete:false})))
     };
   }
   const cutoff=new Date(scan.date+'T12:00:00Z');
@@ -2438,13 +2509,14 @@ const POST_CLOSE_CONDITIONS=[
 ];
 function buildPostCloseIssueAudit(issue,asOf){
   const picks=(issue?.picks||[]).filter(p=>!p.control);
-  const resolved=picks.filter(p=>p.rocketOutcome&&p.rocketOutcome!==ROCKET_OUTCOME.PENDING);
-  const rockets=resolved.filter(isRocketOutcome);
+  const resolved=picks.filter(p=>p.outcomePolicy==='net-policy-v1'&&p.paperComplete&&!p.evidenceIncomplete&&Number.isFinite(p.paperNetPct));
+  const netWin=p=>p.paperNetPct>0;
+  const rockets=resolved.filter(netWin);
   const conditions=POST_CLOSE_CONDITIONS.map(c=>{
-    const matched=resolved.filter(c.test),wins=matched.filter(isRocketOutcome).length,losses=matched.length-wins;
+    const matched=resolved.filter(c.test),wins=matched.filter(netWin).length,losses=matched.length-wins;
     return {key:c.key,label:c.label,n:matched.length,wins,losses,precision:matched.length?+(100*wins/matched.length).toFixed(1):null};
   });
-  return {issueDate:issue.date,asOf,issued:picks.length,resolved:resolved.length,rockets:rockets.length,
+  return {objective:'net-policy-v1',issueDate:issue.date,asOf,issued:picks.length,resolved:resolved.length,rockets:rockets.length,
     pending:picks.length-resolved.length,precision:resolved.length?+(100*rockets.length/resolved.length).toFixed(1):null,
     conditions,candidates:conditions.filter(c=>c.n>0&&c.precision>=95)};
 }
@@ -2480,7 +2552,7 @@ function indicatorWatchTCrit(n){ return familyTCrit(n); }
 function postCloseConditionStats(audits,key){
   const lifts=[],ses=[];let wins=0,losses=0,picks=0;
   Object.values(audits||{}).forEach(a=>{
-    if(!(a&&a.resolved>0)) return;
+    if(!(a&&a.resolved>0)||a.objective!=='net-policy-v1') return;
     const c=(a.conditions||[]).find(x=>x.key===key);
     if(!c||!c.n) return;
     const p=c.wins/c.n, b=a.rockets/a.resolved;
@@ -2619,7 +2691,7 @@ function runPostCloseAudit(force=false){
   const audits={...(prior.audits||{})};
   Object.values(issues).forEach(issue=>{
     const picks=(issue?.picks||[]).filter(p=>!p.control);
-    const observed=picks.some(p=>(p.rocketDaysSeen||[]).length||p.evaluatedThrough);
+    const observed=picks.some(p=>p.issuedAt||(p.rocketDaysSeen||[]).length||p.evaluatedThrough);
     if(observed) audits[issue.date]=buildPostCloseIssueAudit(issue,today);
   });
   const gainers={...(prior.gainers||{})};
@@ -2636,14 +2708,14 @@ function postCloseAuditStatus(){
 }
 function activePostCloseTriggerRules(mode){
   const store=FS.get(POST_CLOSE_AUDIT_STORE)||{};
-  const scorecard=store.scorecard||getPostCloseRuleScorecard(store.audits||{});
+  const scorecard=getPostCloseRuleScorecard(store.audits||{});
   return scorecard.map(s=>({score:s,definition:POST_CLOSE_CONDITIONS.find(c=>c.key===s.key)}))
     .filter(x=>x.definition&&x.definition.mode===mode&&(
       mode==='veto-on-retired'?x.score.status==='RETIRED':['ARMED','ELIGIBLE'].includes(x.score.status)));
 }
 function applyLearnedTriggerRanking(rows){
   const active=activePostCloseTriggerRules('boost');
-  rows.forEach(r=>{r.modelTriggers=[];});
+  rows.forEach(r=>{r.modelTriggers=[];r.triggerFactor=1;});
   if(!active.length||!rows.length)return 0;
   let matched=0;
   rows.forEach(r=>{
@@ -2969,22 +3041,23 @@ function assessExecutedEntryOutcomeScan(scan){
         }
       }
     }
-    if(gap<=0||entry.evaluatedThrough===scan.date) return;
-    const highNet=estimatedEntryNetPct(entry,row.high1d>0?row.high1d:row.price);
+    if(gap<0) return;
+    const firstObservation=entry.evaluatedThrough!==scan.date;
+    const highNet=gap>0?estimatedEntryNetPct(entry,row.high1d>0?row.high1d:row.price):null;
     const closeNet=estimatedEntryNetPct(entry,row.price);
-    entry.observations=(entry.observations||0)+1;
+    if(firstObservation) entry.observations=(entry.observations||0)+1;
     entry.evaluatedThrough=scan.date;
     if(highNet!=null&&(entry.bestNetHighPct==null||highNet>entry.bestNetHighPct)){
       entry.bestNetHighPct=+highNet.toFixed(2);
       entry.bestHighDays=gap;
     }
-    const velocity=highNet!=null?highNet/gap:null;
+    const velocity=highNet!=null&&gap>0?highNet/gap:null;
     if(velocity!=null&&(entry.bestVelocityPctPerDay==null||velocity>entry.bestVelocityPctPerDay)){
       entry.bestVelocityPctPerDay=+velocity.toFixed(3);
       entry.bestVelocityDays=gap;
     }
     if(closeNet!=null&&(entry.bestNetClosePct==null||closeNet>entry.bestNetClosePct)) entry.bestNetClosePct=+closeNet.toFixed(2);
-    entry.complete=gap>=horizon;
+    entry.complete=gap>=horizon&&istClock(scan.ts||Date.now()).mins>=EQUITY_CLOSE_MIN;
     changed=true;
   });
   if(changed) FS.set(ENTRY_OUTCOME_STORE,store);
@@ -3209,6 +3282,24 @@ function radarRiskFactor(r){
 // only a REJECTED tape is a veto. Nothing here consults meetsRecommendationBar - it reads the row's
 // own facts - so the score cannot recurse into the gate that reads the score.
 const RADAR_PERMISSION_TAPE_ABSENT=0.6;
+let _tapeProfitMemo=null;
+function getTapeProfitEvidence(){
+  const store=FS.get(RECOMMEND_OUTCOME_STORE),today=getSessionDate();
+  if(_tapeProfitMemo?.store===store&&_tapeProfitMemo.today===today) return _tapeProfitMemo.value;
+  const sessions=[];
+  for(const issue of Object.values(store?.issues||{})){
+    if(issue.scoreVersion!==RADAR_SCORE_VERSION||issue.date>=today) continue;
+    const picks=(issue.picks||[]).filter(p=>!p.control);
+    if(!picks.length||picks.some(p=>!p.paperComplete||p.evidenceIncomplete||!Number.isFinite(p.paperNetPct)
+      ||istDayKey(p.paperExitAt)>=today)) continue;
+    sessions.push({date:issue.date,net:meanArr(picks.map(p=>p.paperNetPct))});
+  }
+  const days=sessions.sort((a,b)=>a.date.localeCompare(b.date)).slice(-5);
+  const mean=days.length?meanArr(days.map(d=>d.net)):null;
+  const positive=days.filter(d=>d.net>0).length;
+  const value={sessions:days.length,mean,positive,status:days.length<5?'unvalidated':mean>0&&positive>=3?'qualified':'losing'};
+  _tapeProfitMemo={store,today,value};return value;
+}
 function radarPermissionLevel(r,tapeStanding){
   const has=v=>v!==null&&v!==undefined&&v!==''&&Number.isFinite(Number(v));
   if(!r) return {p:0,why:'no row'};
@@ -3233,8 +3324,9 @@ function radarPermissionLevel(r,tapeStanding){
   if(r.recommendationTriggerBlocked===true) veto.push('trigger veto');
   if(r.noHistory===true) veto.push('no multi-day history');
   if(r.intradaySellingToday===true) veto.push('selling today');
-  const hasPred=has(r.predictiveLevel)&&Number(r.predictiveSessions)>=3;
-  if(!hasPred) veto.push('no qualified predictor');
+  const freshness=getRecommendationFreshness(r.symbol);
+  if(!freshness.ok) veto.push(freshness.why);
+  if(getTapeProfitEvidence().status==='losing') veto.push('Five-session net-profit audit failed');
   if(veto.length) return {p:0,why:veto[0],vetoes:veto};
   if(r.entryReady===false&&r.entryAtLimit!==true) timing.push('move already consumed');
   if(r.directionConfirmed!==true) timing.push('direction not confirmed');
@@ -3284,19 +3376,17 @@ function radarPermissionLevel(r,tapeStanding){
 // that worked sit at 15 and 25 minutes, and 5-minute was the WORST cell for netVolPct (+0.070
 // against +0.100 at 15m). Nothing here reads a single 5-minute bar as a signal.
 const INTRADAY_STORE_MAX=1000;   // = the helper's MAX_ROWS file trim; not a second number
-const TAPE_NETVOL_BARS=3;     // 15 minutes: the best measured cell (rho +0.141 vs forward high)
-const TAPE_VWAP_BARS=5;       // 25 minutes: best for price-vs-VWAP (rho +0.105 to close)
-// THE SCORING FLOOR, DERIVED FROM THE HORIZON RATHER THAN WRITTEN IN. Net flow is read on
-// 15-minute buckets and needs TWO of them before it has a comparison at all, so the continuous tape
-// becomes readable at exactly 2 x TAPE_NETVOL_BARS bars - 30 minutes of five-minute data. The window
-// is rolling across the session boundary; a missing early-today tick must not turn a live board off.
+const TAPE_NETVOL_BARS=3;     // Three recent bars for the participation comparison.
+const TAPE_VWAP_BARS=5;       // Legacy diagnostic aggregation; scoring VWAP uses every window bar.
+// Retain six completed bars across sessions. Both pressure and VWAP use the whole window.
 const TAPE_MIN_SESSION_BARS=2*TAPE_NETVOL_BARS;
 function continuousTapeWindow(all){
   if(!Array.isArray(all)||all.length<TAPE_MIN_SESSION_BARS) return null;
   // INTRADAY_BARS is the merged, timestamp-ordered store. Keep the minimum measured horizon so
   // yesterday's tape bridges startup/pre-open without allowing an old session to dominate today's
   // live read. The exchange gap remains visible as a real time gap; it is not fabricated away.
-  return all.slice(-TAPE_MIN_SESSION_BARS);
+  const complete=all.filter(b=>Number(b.t)+5*60*1000<=Date.now());
+  return complete.length>=TAPE_MIN_SESSION_BARS?complete.slice(-TAPE_MIN_SESSION_BARS):null;
 }
 function tapeAggregate(bars,k){
   if(k<=1) return bars.slice();
@@ -3324,7 +3414,7 @@ function radarTapeEvidence(sym){
   const key=normSym(sym||'');
   const bars=INTRADAY_BARS[key];
   if(!bars||bars.length<TAPE_MIN_SESSION_BARS) return null;
-  const stamp=bars.length+':'+bars[bars.length-1].t+':'+BOOK_V+':'+((BOOK_EDGES.book?.w||0)+(BOOK_EDGES.split?.w||0)+(BOOK_EDGES.spoof?.w||0));
+  const stamp=Math.floor(Date.now()/TAPE_BAR_MS)+':'+INTRADAY_STORE_V+':'+BOOK_V+':'+TAPE_IMPACT_W+':'+['book','split','spoof'].map(k=>(BOOK_EDGES[k]?.w||0)+'/'+(BOOK_EDGES[k]?.dir||1)).join(':');
   const hit=_tapeEvidenceMemo.get(key);
   if(hit&&hit.stamp===stamp) return hit.val;
   const val=_radarTapeEvidenceUncached(key);
@@ -3339,17 +3429,10 @@ function _radarTapeEvidenceUncached(sym){
   const totV=day.reduce((n,b)=>n+(Number(b.v)||0),0);
   if(!(totV>0)) return null;
 
-  // 1. NET BUY vs SELL VOLUME at 15 minutes - the strongest measured single reading.
-  const agg=tapeAggregate(day,TAPE_NETVOL_BARS);
-  let up=0,dn=0;
-  for(let i=1;i<agg.length;i++){ const d=agg[i].c-agg[i-1].c;
-    if(d>0) up+=agg[i].v; else if(d<0) dn+=agg[i].v; }
-  const netVol=(up+dn)>0?(up-dn)/(up+dn):null;
-
-  // 2. PRICE vs the session's own VWAP, read on 25-minute candles.
-  const a5=tapeAggregate(day,TAPE_VWAP_BARS);
-  const vTot=a5.reduce((n,b)=>n+b.v,0);
-  const vwap=vTot>0?a5.reduce((n,b)=>n+((b.h+b.l+b.c)/3)*b.v,0)/vTot:null;
+  // Candle-pressure proxy, not executed buy/sell volume. Every bar contributes its volume.
+  const netVol=day.reduce((n,b)=>n+tapeDelta(b),0)/totV;
+  // Rolling HLC3 VWAP over ALL six bars, including the newest completed bar.
+  const vwap=day.reduce((n,b)=>n+((b.h+b.l+b.c)/3)*(Number(b.v)||0),0)/totV;
   const last=day[day.length-1].c;
   const vwapDist=(vwap>0&&last>0)?(last/vwap-1)*100:null;
 
@@ -3409,18 +3492,20 @@ function _radarTapeEvidenceUncached(sym){
   const wSpoof=clamp01(BOOK_EDGES.spoof?.w||0,0,0.35);
   // Resting intent at the touch, -1..+1 -> 0..1. Absent book sits at the neutral midpoint, never at
   // zero: absence takes the median, it is not evidence against the row.
-  const eBook=(bk&&Number.isFinite(bk.imbalance))?clamp01((bk.imbalance+1)/2,0,1):0.5;
+  const bookRaw=(bk&&Number.isFinite(bk.imbalance))?clamp01((bk.imbalance+1)/2,0,1):0.5;
+  const eBook=BOOK_EDGES.book?.dir===-1?1-bookRaw:bookRaw;
   // The CLASSIFIED buy share - executed volume tagged against the touch that stood before it, not
   // inferred from where the candle closed. This is the first flow reading in this app that is not a
   // guess about direction, and it still has to earn its weight like everything else.
-  const eSplit=(bk&&Number.isFinite(bk.buyShare))?clamp01(bk.buyShare,0,1):0.5;
+  const splitRaw=(bk&&Number.isFinite(bk.buyShare))?clamp01(bk.buyShare,0,1):0.5;
+  const eSplit=BOOK_EDGES.split?.dir===-1?1-splitRaw:splitRaw;
   // Quantity that left the book WITHOUT trading, against what actually traded. High is bad, so the
   // term is inverted before it enters an evidence blend where 1 means good. The measured direction
   // rides along: if the grader finds the opposite sign, `dir` flips it rather than us assuming.
   const spoofDir=BOOK_EDGES.spoof?.dir===-1?-1:1;
   const cancelRatio=(bk&&Number.isFinite(bk.cancelRatio))?bk.cancelRatio:null;
   const eSpoofRaw=cancelRatio===null?0.5:clamp01(1-cancelRatio/2,0,1);   // 2x cancelled-to-traded -> 0
-  const eSpoof=spoofDir===1?eSpoofRaw:1-eSpoofRaw;
+  const eSpoof=spoofDir===1?1-eSpoofRaw:eSpoofRaw;
   const nor=(f,v,c,s,i,b,sp,cx)=>1-(1-f*W.flow)*(1-v*W.vwap)*(1-c*W.cross)*(1-s*W.size)*(1-i*wImp)
     *(1-b*wBook)*(1-sp*wSplit)*(1-cx*wSpoof);
   const level=clamp01(nor(eFlow,eVwap,eCross,eSize,eImpact,eBook,eSplit,eSpoof)/nor(1,1,1,1,1,1,1,1),0,1);
@@ -3501,7 +3586,10 @@ function radarScoreComponents(r,tapeStanding){
   if(!tev) return {flow:0,vwapPos:0,crossover:0,participation:0,impact:null,predictor:0,runway:0,tapeBars:0,
                    direction:0,feasibility:0,tape:0,evidence:0,riskFactor:+riskFactor.toFixed(3),permission:0,total:0,
                    block:'no usable recent 5-minute tape'};
-  const evidence=tev.level;
+  const champion=FS.get(INDICATOR_WATCH_STORE)?.nextChampionStats;
+  const predictorFactor=champion?.objective==='net-policy-v1'&&champion.mean>0&&champion.n>=5
+    ?0.5+clamp01(predictorBase,0,1):1;
+  const evidence=clamp01(tev.level*predictorFactor*trigger,0,1);
   const range=Number(r.rangePct),fromOpen=Number(r.changeOpen);
   const dirLevel=(range>0&&fromOpen>0)?clamp01(fromOpen/(range*0.5),0,1):0;
   const out={
@@ -3523,6 +3611,7 @@ function radarScoreComponents(r,tapeStanding){
     direction:+(RADAR_SCORE_BUDGETS.direction*dirLevel).toFixed(1),
     feasibility:+(RADAR_SCORE_BUDGETS.feasibility*(perm.room??0)).toFixed(1),
     tape:+(RADAR_SCORE_BUDGETS.tape*(perm.tape??0)).toFixed(1),
+    modelState:getTapeProfitEvidence().status,
     evidence:+evidence.toFixed(3),
     riskFactor:+riskFactor.toFixed(3),
     permission:+(perm.p||0).toFixed(3),
@@ -3890,7 +3979,7 @@ function meetsRecommendationBar(s){
   if(s.scoreVersion!==RADAR_SCORE_VERSION) return false; // never apply today's policy bar to an old scale
   if(s.recommendationTriggerBlocked===true)return false;
   if(s.noHistory===true) return false;   // v1170: no multi-day history, so nothing to rank it on
-  if(s.predictiveLevel===null||s.predictiveLevel===undefined||!Number.isFinite(Number(s.predictiveLevel))||Number(s.predictiveSessions)<3) return false;
+  if(!getRecommendationFreshness(s.symbol).ok) return false;
   if(s.directionConfirmed!==true) return false; // prediction may score early; execution still needs a live bullish turn
   // v1237: a consumed/failed move is still not buyable at market. A peak block that names a
   // pullback level is buyable AT THAT LEVEL, and exports as a LIMIT order rather than being erased.
@@ -3985,10 +4074,19 @@ function tapeDepthNoteHtml(dep){
     : ' \u00b7 <b style="color:var(--amber)">'+dep.deepest+'/'+dep.need
       +' recent bars \u2014 too short to score</b>';
 }
-function passesIntradayValidation(s){
-  if(!s?.symbol) return false;
-  return meetsScoreBar(s.score);
+function getRecommendationFreshness(sym){
+  const bars=INTRADAY_BARS[normSym(sym||'')];
+  if(!bars?.length) return {ok:false,why:'Awaiting 5-minute tape'};
+  const clock=istClock(),date=new Date(clock.dateMs).toISOString().slice(0,10);
+  const last=Number(bars[bars.length-1].t);
+  if(!isNseTradingDate(date)||clock.mins<EQUITY_OPEN_MIN||clock.mins>=EQUITY_CLOSE_MIN)
+    return {ok:false,why:'Market closed - waiting for the next session'};
+  if(istDayKey(last)!==date) return {ok:false,why:'Awaiting this session?s 5-minute tape'};
+  if(!Number.isFinite(last)||tapeBarsBehind(last)>1)
+    return {ok:false,why:'Stale 5-minute tape - refresh required'};
+  return {ok:true,why:''};
 }
+function passesIntradayValidation(s){return !!s&&getRecommendationFreshness(s.symbol).ok;}
 const ROW_ACTION_MEMO=new WeakMap();
 function getRowActionState(s){
   if(!s) return {state:'BLOCKED', reason:'Invalid row'};
@@ -3996,11 +4094,11 @@ function getRowActionState(s){
   // keystroke on a 1,669-row board calls this 6,876 times (applyFilters, the two status-bar scans,
   // the selection rebuild and the table), so the cache HIT path was allocating an array and a
   // string 6,876 times to answer "has anything changed". Same key, same answer, no allocation.
-  const a=RADAR.scoredAt||0,b=INTRADAY_STORE_V,c=RECOMMEND_MIN_SCORE;
+  const a=RADAR.scoredAt||0,b=INTRADAY_STORE_V,c=RECOMMEND_MIN_SCORE,d=Math.floor(Date.now()/TAPE_BAR_MS);
   const cached=ROW_ACTION_MEMO.get(s);
-  if(cached&&cached.a===a&&cached.b===b&&cached.c===c) return cached.value;
+  if(cached&&cached.a===a&&cached.b===b&&cached.c===c&&cached.d===d) return cached.value;
   const value=_getRowActionStateUncached(s);
-  ROW_ACTION_MEMO.set(s,{a,b,c,value});
+  ROW_ACTION_MEMO.set(s,{a,b,c,d,value});
   return value;
 }
 function _getRowActionStateUncached(s){
@@ -4024,14 +4122,16 @@ function _getRowActionStateUncached(s){
   }
   if(s.directionConfirmed!==true) return {state:'BLOCKED', reason:'Direction not confirmed'};
 
-  if(s.predictiveLevel==null||!Number.isFinite(s.predictiveLevel)||Number(s.predictiveSessions)<3)
-    return {state:'WAIT', reason:'Awaiting predictive evidence (>=3 sessions)'};
+
 
   if(s.entryReady===false&&s.entryAtLimit!==true)
     return {state:'WAIT', reason:s.entryTiming||'Extended (upper-quarter peak timing)'};
 
   if(s.intradaySellingToday===true)
     return {state:'BLOCKED', reason:s.intradayWhy||'5-minute tape selling today'};
+
+  const freshness=getRecommendationFreshness(s.symbol);
+  if(!freshness.ok) return {state:'WAIT',reason:freshness.why};
 
   if(Number.isFinite(Number(s.score))&&Number(s.score)<RECOMMEND_MIN_SCORE)
     return {state:'WAIT', reason:`Score ${Number(s.score).toFixed(1)} < ${RECOMMEND_MIN_SCORE}`};
@@ -5675,18 +5775,40 @@ function scoreIwAnchor(a,flat,effectMap){
 function updateNextModelChampion(store){
   const summaries=[];
   for(const profile of NEXT_PREDICTOR_PROFILES){
-    const rows=(store.nextModelAudit||[]).filter(x=>x.profile===profile&&Number.isFinite(x.netMean)).slice(-5);
+    const rows=(store.nextModelAudit||[]).filter(x=>x.objective==='net-policy-v1'&&x.profile===profile&&Number.isFinite(x.netMean)).slice(-5);
     if(rows.length<5) continue;
     const mean=rows.reduce((n,x)=>n+x.netMean,0)/rows.length;
     const consistent=rows.filter(x=>x.netMean>0).length/rows.length;
     summaries.push({profile,mean,consistent,n:rows.length});
   }
-  if(!summaries.length) return store.nextChampion||'preMove';
+  if(!summaries.length){store.nextChampionStats={objective:'net-policy-v1',status:'unvalidated',mean:null,n:0};return store.nextChampion||'preMove';}
   const working=summaries.filter(x=>x.mean>0&&x.consistent>=0.6)
     .sort((a,b)=>b.mean-a.mean||b.consistent-a.consistent);
   store.nextChampion=working[0]?.profile||'none';
-  store.nextChampionStats=working[0]||{profile:'none',mean:null,consistent:0,n:5};
+  store.nextChampionStats={objective:'net-policy-v1',...(working[0]||{profile:'none',mean:null,consistent:0,n:5})};
   return store.nextChampion;
+}
+function completedAuditClose(sym,date){
+  const history=FS.get(PRICE_HISTORY_STORE)?.sessions||{};
+  const official=phClose(history[date]?.[sym]);
+  if(official>0) return official;
+  const bars=INTRADAY_BARS[normSym(sym)]||[];
+  const last=bars.filter(b=>istDayKey(b.t)===date&&istClock(b.t).mins===EQUITY_CLOSE_MIN-5
+    &&Number(b.t)+TAPE_BAR_MS<=Date.now()).at(-1);
+  return Number(last?.c)>0?Number(last.c):null;
+}
+function refreshPendingNextModelAudits(store){
+  for(const rec of store.nextModelAudit||[]){
+    if(rec.objective!=='net-policy-v1'||Number.isFinite(rec.netMean)||!rec.symbols?.length) continue;
+    const gross=rec.symbols.map(sym=>{const p0=completedAuditClose(sym,rec.anchor),p1=completedAuditClose(sym,rec.next);
+      return p0>0&&p1>0?(p1/p0-1)*100:null;}).filter(Number.isFinite);
+    rec.grossN=gross.length;
+    // Complete frozen cohort, not whichever survivors happen to have prices.
+    if(gross.length<5||gross.length!==rec.symbols.length) continue;
+    rec.grossMean=meanArr(gross);
+    rec.netMean=rec.grossMean-estimateRoundTripCostPct(Math.max(.5,Math.abs(rec.grossMean)));
+  }
+  updateNextModelChampion(store);
 }
 function auditNextModelProfiles(store,a,flat,next,moverSet){
   const history=FS.get(PRICE_HISTORY_STORE)?.sessions||{},from=history[a.date]||{},to=history[next.date]||{};
@@ -5695,12 +5817,12 @@ function auditNextModelProfiles(store,a,flat,next,moverSet){
     const map=buildNextEffectMap(store.logNext||{},profile),top=scoreIwAnchor(a,flat,map).slice(0,20);
     if(!top.length) continue;
     const gross=top.map(x=>{
-      const p0=phClose(from[x.symbol]),p1=phClose(to[x.symbol]);
+      const p0=completedAuditClose(x.symbol,a.date),p1=completedAuditClose(x.symbol,next.date);
       return p0>0&&p1>0?(p1/p0-1)*100:null;
     }).filter(Number.isFinite);
-    const grossMean=gross.length>=5?gross.reduce((n,x)=>n+x,0)/gross.length:null;
+    const grossMean=gross.length>=5&&gross.length===top.length?gross.reduce((n,x)=>n+x,0)/gross.length:null;
     const cost=grossMean===null?null:estimateRoundTripCostPct(Math.max(0.5,Math.abs(grossMean)));
-    const rec={anchor:a.date,next:next.date,profile,n:top.length,
+    const rec={objective:'net-policy-v1',symbols:top.map(x=>x.symbol),anchor:a.date,next:next.date,profile,n:top.length,
       hits:top.filter(x=>moverSet.has(x.symbol)).length,
       grossN:gross.length,grossMean:grossMean===null?null:+grossMean.toFixed(3),
       netMean:grossMean===null?null:+(grossMean-cost).toFixed(3),
@@ -5745,6 +5867,9 @@ async function iwResolveNext(store,a,cutoffDate=null){
 }
 async function resolveIndicatorWatchNextBacklog(cutoffDate){
   const store=getIndicatorWatchStore(); let changed=false;
+  const before=JSON.stringify(store.nextModelAudit||[]);
+  refreshPendingNextModelAudits(store);
+  changed=before!==JSON.stringify(store.nextModelAudit||[]);
   for(const a of store.pending||[]){
     if(a.nextDone) continue;
     if(await iwResolveNext(store,a,cutoffDate)){a.nextDone=true;changed=true;}
@@ -7973,9 +8098,8 @@ function buildOpenPositionsPanel(query=''){
     const afterCostFloor=getPositionAfterCostFloor(avg,qty);
     // The tape stop still protects the policy internally. On this manual-action surface, however,
     // SL is specifically the point at which the owner can switch to TSL without locking a loss.
-    // Hide it until the stop is above buy AND a sale there pays both CNC legs and the DP charge.
-    const stopPrice=tapeStopPrice!=null&&afterCostFloor!=null
-      &&tapeStopPrice>avg&&tapeStopPrice>=afterCostFloor?tapeStopPrice:null;
+    // Show the active protective stop even below entry; it is manual exit advice.
+    const stopPrice=tapeStopPrice;
     const targetPct=tapePolicy.targetPct;
     const baseQty=qty;
     // v1106 (owner): the day-1 time-exit ADVICE went with the Action column - the trading surface
@@ -10101,14 +10225,39 @@ function getOpenPositionTargetFloor(sym,pos){
   return {avgPrice,price:+price.toFixed(2),anchorPrice:+anchorPrice.toFixed(2),
     costFloorPrice,anchorPct,source};
 }
+function getPositionDeadline(sym,pos){
+  const qty=Math.max(0,Number(pos?.qty)||0);
+  const lots=(TRADEBOOK_STATS?.openPositionLotsMap?.[sym]||[]).filter(l=>l.qty>0&&l.date)
+    .map(l=>({...l})).sort((a,b)=>a.date.localeCompare(b.date));
+  let sold=Math.max(0,lots.reduce((n,l)=>n+Number(l.qty),0)-qty),date=null;
+  for(const l of lots){const removed=Math.min(sold,l.qty);sold-=removed;if(l.qty>removed){date=l.date;break;}}
+  if(!date&&pos?.buyDate) date=pos.buyDate;
+  if(!date&&(ORDERS_TODAY||[]).filter(o=>o.symbol===sym&&o.type==='BUY'&&normOrderDate(o.time)===getSessionDate()).reduce((n,o)=>n+(Number(o.qty)||0),0)>=qty&&qty>0) date=getSessionDate();
+  const clock=istClock(),today=new Date(clock.dateMs).toISOString().slice(0,10);
+  const days=date?tradingDaysBetween(date,today):null;
+  return {date,days,due:days!=null&&(days>1||(days===1&&clock.mins>=EQUITY_CLOSE_MIN-5))};
+}
+const POSITION_STOP_STORE='rs_position_entry_stops_v1';
+function getPositionEntryStop(sym,pos){
+  const avg=Number(pos?.avg)>0?Number(pos.avg):Number(getHoldingAvgCost(sym));
+  if(!(avg>0)) return null;
+  const row=(ALL||[]).find(r=>r.symbol===sym)||pos;
+  const computed=tickPrice(avg*(1-getRowStopDistancePct(row)/100));
+  const store=FS.get(POSITION_STOP_STORE)||{},old=store[sym];
+  const basis=avg+':'+(getPositionDeadline(sym,pos).date||'unknown');
+  const stop=old?.basis===basis?Math.max(old.stop||0,computed):computed;
+  if(old?.basis!==basis||old.stop!==stop) FS.set(POSITION_STOP_STORE,{...store,[sym]:{basis,stop}});
+  return stop;
+}
 function getOpenPositionTapePolicy(sym,pos){
   const s=normSym(sym||pos?.symbol||'');
   const qty=Math.max(0,Number(pos?.qty)||0);
+  const deadline=getPositionDeadline(s,pos),entryStop=getPositionEntryStop(s,pos);
   const all=INTRADAY_BARS[s];
   if(!s||!Array.isArray(all)||!all.length){
-    return {symbol:s,signal:'NEEDS DATA',signalSort:3,qty,price:null,targetPrice:null,stopPrice:null,
+    return {symbol:s,signal:deadline.due?'SELL':'NEEDS DATA',signalSort:deadline.due?0:3,qty,price:null,targetPrice:null,stopPrice:entryStop,
       pacePct:null,paceRs:null,eodPct:null,eodPrice:null,flowPct:null,
-      why:'No 5-minute tape for this position yet.'};
+      why:deadline.due?'BTST deadline reached; exit manually using a fresh broker quote.':'No 5-minute tape for this position yet.'};
   }
   const ordered=all.slice().sort((a,b)=>a.t-b.t);
   const key=istDayKey(ordered[ordered.length-1].t);
@@ -10123,22 +10272,22 @@ function getOpenPositionTapePolicy(sym,pos){
     const clock=istClock();
     const boundary=clock&&Number.isFinite(clock.mins)?Math.floor((clock.mins-5)/5)*5:null;
     if(boundary!=null){
-      const completed=rawDay.filter(b=>{const d=new Date(b.t);return d.getHours()*60+d.getMinutes()<=boundary;});
-      const live=rawDay.filter(b=>{const d=new Date(b.t);return d.getHours()*60+d.getMinutes()>boundary;});
+      const completed=rawDay.filter(b=>{return istClock(b.t).mins<=boundary;});
+      const live=rawDay.filter(b=>{return istClock(b.t).mins>boundary;});
       if(completed.length>=3){ day=completed; forming=live.length?live[live.length-1]:null; }
     }
   }
-  if(key!==today||day.length<3){
-    return {symbol:s,signal:'NEEDS DATA',signalSort:3,qty,price:null,targetPrice:null,stopPrice:null,
+  if(key!==today||day.length<3||(isMarketHours()&&tapeBarsBehind(Number(day.at(-1)?.t))>1)){
+    return {symbol:s,signal:deadline.due?'SELL':'NEEDS DATA',signalSort:deadline.due?0:3,qty,price:null,targetPrice:null,stopPrice:entryStop,
       pacePct:null,paceRs:null,eodPct:null,eodPrice:null,flowPct:null,
-      why:key!==today?'The latest 5-minute tape is from '+key+', not this session.':'Fewer than three completed 5-minute bars.'};
+      why:deadline.due?'BTST deadline reached; exit manually using a fresh broker quote.':'Current completed tape is missing or stale; entry stop remains in force.'};
   }
 
   const tape=buildIntradayTrajectory(day,ordered);
   if(!tape){
-    return {symbol:s,signal:'NEEDS DATA',signalSort:3,qty,price:null,targetPrice:null,stopPrice:null,
+    return {symbol:s,signal:deadline.due?'SELL':'NEEDS DATA',signalSort:deadline.due?0:3,qty,price:null,targetPrice:null,stopPrice:entryStop,
       pacePct:null,paceRs:null,eodPct:null,eodPrice:null,flowPct:null,
-      why:'The completed 5-minute bars carry no usable volume trajectory.'};
+      why:deadline.due?'BTST deadline reached; exit manually using a fresh broker quote.':'No usable trajectory; entry stop remains in force.'};
   }
   const last=day[day.length-1],prior=day[day.length-2];
   const completedPrice=Number(last.c),completedHi=Math.max(...day.map(b=>b.h));
@@ -10184,8 +10333,9 @@ function getOpenPositionTapePolicy(sym,pos){
   const pacePct=Number.isFinite(tape.confirmedPacePct)?tape.confirmedPacePct:null;
   const pullPct=Number.isFinite(tape.currentPullbackPct)?tape.currentPullbackPct:null;
   const paceFailed=pacePct!=null&&pullPct!=null&&pullPct>pacePct&&tape.flowSlope<0;
-  const stopPrice=(pacePct!=null&&hi>0)?tickPrice(hi*(1-pacePct/100)):null;
-  const stopBreached=stopPrice!=null&&completedPrice<=stopPrice;
+  const tapeStop=(pacePct!=null&&hi>0)?tickPrice(hi*(1-pacePct/100)):null;
+  const stopPrice=Math.max(entryStop||0,tapeStop||0)||null;
+  const stopBreached=stopPrice!=null&&livePrice<=stopPrice;
   const convertingDown=tape.regime==='selling'&&Number.isFinite(tape.pressurePct)&&tape.pressurePct<0;
 
   // A SERIES CHANGE ON SOMETHING YOU ALREADY OWN IS NEWS (owner, v1292: "SPECIALITY-BE turned BE
@@ -10199,10 +10349,12 @@ function getOpenPositionTapePolicy(sym,pos){
     ?('now trading in the '+heldSeries+' series, not EQ - intraday exit is not available on this holding')
     :null;
   let signal='HOLD';
-  if(liveHarvest||highRejection||paceFailed||stopBreached||convertingDown) signal='SELL';
+  if(deadline.due||liveHarvest||highRejection||paceFailed||stopBreached||convertingDown) signal='SELL';
   else if(tape.regime==='accumulating'&&tape.pressureConverting!==false
           &&Number.isFinite(tape.pressurePct)&&tape.pressurePct>0
           &&tape.priceSlope>0&&tape.flowSlope>0) signal='BUY';
+
+  if(!deadline.date&&signal!=='SELL') signal='NEEDS DATA';
 
   // The tape contributes an upside LEVEL, but never decides whether Target becomes a loss exit.
   // Target is a profit objective, floored above average buy by the active Target Anchor. SELL can
@@ -10232,14 +10384,16 @@ function getOpenPositionTapePolicy(sym,pos){
         +(targetFloor.costFloorPrice!=null?'; the after-cost minimum is '+fmtINR(targetFloor.costFloorPrice):'')+'.')
     :'Average buy is unavailable, so the displayed level comes only from the 5-minute tape.';
   const paceRs=pacePct!=null&&hi>0?hi*pacePct/100:null;
-  const reason=liveHarvest
+  const reason=deadline.due?'BTST deadline reached: exit by this session close.'
+    :signal==='NEEDS DATA'?'Buy date unavailable; load the tradebook to verify the BTST deadline.'
+    :liveHarvest
     ?'Fresh high on an unfinished 5-minute candle whose partial volume is already top-quartile; harvest at the live tape price.'
     :highRejection
     ?'Fresh high rejected on top-quartile 5-minute volume; work the tape target.'
     :paceFailed
       ?'Unrecovered pullback '+pullPct.toFixed(2)+'% exceeded proven Pace '+pacePct.toFixed(2)+'% while flow weakened.'
       :stopBreached
-        ?'Completed close breached the tape trail at '+fmtINR(stopPrice)+'.'
+        ?'Price breached the entry stop / tighter tape trail at '+fmtINR(stopPrice)+'.'
         :convertingDown
           ?'Selling pressure is converting into lower completed closes.'
           :signal==='BUY'
@@ -10323,7 +10477,7 @@ function computeAlloc(capital, selList){
   const memoKey=capital+'|'+maxAllocV+'|'+targetAnchor+'|'+riskPerTrade+'|'+selList.map(s=>{
     const h=heldMap[s.symbol];
     return s.symbol+':'+s.price+':'+s.rocketScore+':'+s.atr+':'+s.slPct+':'+s.rangePct+':'+s.turnover+':'+(h?h.qty+'@'+h.avg:'-');
-  }).join(',');
+  }).join(',')+'|'+BOOK_V+'|'+Math.floor(Date.now()/TAPE_BAR_MS);
   if(_allocMemo?.key===memoKey) return _allocMemo.val;
   const cap=maxAllocV>0?maxAllocV:capital;
   const spendableCapital=Math.max(0,capital-BASKET_CASH_RESERVE_RS);
@@ -10345,7 +10499,11 @@ function computeAlloc(capital, selList){
     const buyChg=calcZerodhaCharges(buyP,qty,false);
     const sellChg=calcZerodhaCharges(sellP,qty,true);
     const charges=buyChg+sellChg;
-    return {ok:true,expectedNet:qty*buyP*(tgtPct/100)-charges,charges,tgtPct,policy};
+    const fr=getTradeFrictionPct(s,qty*Number(s.price));
+    const frictionKnown=!!(fr?.covered&&Number.isFinite(fr.entryPct)&&Number.isFinite(fr.exitPct));
+    const frictionRs=frictionKnown?qty*buyP*Math.max(0,fr.entryPct+fr.exitPct)/100:null;
+    return {ok:true,expectedNet:qty*buyP*(tgtPct/100)-charges-(frictionRs||0),
+      frictionKnown,frictionRs,charges,tgtPct,policy};
   }
 
   const rawScore=s=>Math.max(0,Number(s.rocketScore)||0);
@@ -10388,7 +10546,7 @@ function computeAlloc(capital, selList){
       continue;
     }
     allocMap[s.symbol]={alloc:qty*buyP,debit:buyDebit(buyP,qty),buyCharges:calcZerodhaCharges(buyP,qty,false,false,false),qty,buyPrice:buyP,
-      limit:rowLimit,stopDistancePct:ev.policy.stopPct,expectedNet:ev.expectedNet,charges:ev.charges,tgtPct:ev.tgtPct,exitPolicy:ev.policy,liquidityCap:turnoverCap,limitReason};
+      limit:rowLimit,stopDistancePct:ev.policy.stopPct,expectedNet:ev.expectedNet,frictionKnown:ev.frictionKnown,frictionRs:ev.frictionRs,charges:ev.charges,tgtPct:ev.tgtPct,exitPolicy:ev.policy,liquidityCap:turnoverCap,limitReason};
   }
 
   let deployed=Object.values(allocMap).reduce((sum,am)=>sum+am.debit,0);
@@ -10416,7 +10574,7 @@ function computeAlloc(capital, selList){
           continue;
         }
         allocMap[s.symbol]={alloc:qty*buyP,debit:buyDebit(buyP,qty),buyCharges:calcZerodhaCharges(buyP,qty,false,false,false),qty,buyPrice:buyP,
-          limit:rowLimit,stopDistancePct:ev.policy.stopPct,expectedNet:ev.expectedNet,charges:ev.charges,tgtPct:ev.tgtPct,exitPolicy:ev.policy,liquidityCap:getTurnoverAllocationCap(s),limitReason:limitReasons[s.symbol]};
+          limit:rowLimit,stopDistancePct:ev.policy.stopPct,expectedNet:ev.expectedNet,frictionKnown:ev.frictionKnown,frictionRs:ev.frictionRs,charges:ev.charges,tgtPct:ev.tgtPct,exitPolicy:ev.policy,liquidityCap:getTurnoverAllocationCap(s),limitReason:limitReasons[s.symbol]};
         am=allocMap[s.symbol];
         residual-=am.debit; deployed+=am.debit; progress=true;
       }
@@ -10425,7 +10583,7 @@ function computeAlloc(capital, selList){
       if(incremental>residual+0.001||am.alloc+buyP>(limits[s.symbol]??am.limit)+0.5) continue;
       am.qty++; am.alloc+=buyP; am.debit=nextDebit; am.buyCharges=calcZerodhaCharges(buyP,am.qty,false,false,false);
       const ev=evalNet(s,buyP,am.qty);
-      if(!ev.skip){am.expectedNet=ev.expectedNet;am.charges=ev.charges;am.tgtPct=ev.tgtPct;}
+      if(!ev.skip){am.expectedNet=ev.expectedNet;am.frictionKnown=ev.frictionKnown;am.frictionRs=ev.frictionRs;am.charges=ev.charges;am.tgtPct=ev.tgtPct;}
       residual-=incremental; deployed+=incremental; progress=true;
     }
   }
@@ -10460,7 +10618,7 @@ function allocationSubline(am,unitLabel='shares'){
   // different money once the turnover rail and whole-share rounding have had their say — measured on
   // the release board, where every top-60 row showed 3.45% and netted between ₹91 and ₹2,365.
   const netTip=Number.isFinite(am?.expectedNet)
-    ? ` Nets ${fmtINR(am.expectedNet)} after all charges if its ${Number(am.tgtPct).toFixed(2)}% target fills.`
+    ? ` Nets ${fmtINR(am.expectedNet)} after charges${am.frictionKnown?' and current book friction':'; slippage unknown'} if its ${Number(am.tgtPct).toFixed(2)}% target fills.`
     : '';
   const netStr=Number.isFinite(am?.expectedNet)
     ? ` · <b style="color:var(--green)">+${fmtINR(am.expectedNet)}</b>`
@@ -11413,6 +11571,7 @@ async function loadTapeEdge(){
     clearTimeout(t);
     const j=r.ok?await r.json():null;
     TAPE_IMPACT_EDGE=(j&&j.ok)?j:null;
+    if(j&&j.objective!=='net-policy-v1'){ TAPE_IMPACT_W=0; return TAPE_IMPACT_EDGE; }
     TAPE_IMPACT_W=(TAPE_IMPACT_EDGE&&Number.isFinite(Number(TAPE_IMPACT_EDGE.weight)))
       ?Math.max(0,Math.min(0.35,Number(TAPE_IMPACT_EDGE.weight))):0;
   }catch(e){ TAPE_IMPACT_EDGE=null; TAPE_IMPACT_W=0; }
@@ -11433,7 +11592,7 @@ async function loadBookEdges(){
       const r=await fetch(KITE_HELPER+'/api/kite/edge?field='+field,{cache:'no-store',signal:c.signal});
       clearTimeout(t);
       const j=r.ok?await r.json():null;
-      if(!j||!j.ok) return {w:0,dir:1,edge:null};
+      if(!j||!j.ok||j.objective!=='net-policy-v1') return {w:0,dir:1,edge:j||null};
       return {w:Math.max(0,Math.min(0.35,Number(j.weight)||0)),dir:Number(j.dir)===-1?-1:1,edge:j};
     }catch(e){ return {w:0,dir:1,edge:null}; }
   };
@@ -11494,7 +11653,7 @@ let BOOK_V=0;   // bumped on every book update, so the tape memo can key off it
 // this row takes from you just to get in and back out at your size. It is a COST, not a filter -
 // it joins charges in the net calculation the allocator already runs, so the existing viability
 // test does the removing and no new threshold is invented.
-function getBookLadder(sym){ const l=BOOK_LADDER[normSym(sym||'')]; return (l&&Array.isArray(l.bids)&&l.bids.length)?l:null; }
+function getBookLadder(sym){ const l=BOOK_LADDER[normSym(sym||'')]; return (l&&Date.now()-Number(l.at)<60000&&Array.isArray(l.bids)&&l.bids.length)?l:null; }
 // The rupee size friction is quoted at: the per-stock allocation cap the owner is actually working
 // to. Memoised per paint - it is a settings read, not a per-row computation.
 let _frictionSizeMemo={at:0,v:0};
@@ -11523,7 +11682,7 @@ function walkLadder(levels,shares){
   return {vwap:val/got,filled:got,short:Math.max(0,shares-got)};
 }
 // The whole cost of a round trip at this size, in percent: what the offer makes you pay to get in,
-// what the bid makes you give up to get out, and what whole-share rounding wastes. Every term is
+// what the bid makes you give up to get out, and what whole-share rounding leaves undeployed. Every term is
 // derived from the row's own book and the owner's own size - there is no chosen constant anywhere
 // in it, and it is null rather than optimistic when the book is not there to answer.
 // HOW MUCH OF THIS STOCK'S NORMAL FIVE MINUTES AM I? (owner, v1293.) He asked what his capital has
@@ -12944,7 +13103,7 @@ function renderStatusBar(){
       const stopRange=stops.length?(Math.abs(stops.at(-1)-stops[0])<0.001?stops[0].toFixed(2)+'%':`${stops[0].toFixed(2)}–${stops.at(-1).toFixed(2)}%`):'—';
       const needed=harvestPlan.capitalNeeded?` Capital needed for ${fmtINR(harvestPlan.dailyGoal)} at this learned edge: ${fmtINR(harvestPlan.capitalNeeded)}.`:'';
       const warn=harvestPlan.warning?` Warning: ${harvestPlan.warning}`:'';
-      const tip=`Per-stock targets ${targetRange} and ATR stops ${stopRange}; ${srcLbl} ${active.tgtPct.toFixed(2)}% supplies portfolio context only. Expected net is charge-aware.${needed}${warn}`;
+      const tip=`Per-stock targets ${targetRange} and ATR stops ${stopRange}; ${srcLbl} ${active.tgtPct.toFixed(2)}% supplies portfolio context only. Net shown assumes every target fills; includes quoted friction where available, otherwise slippage is unknown.${needed}${warn}`;
       const color=totalNet>=0?'var(--green)':'var(--red)';
       const goalLbl=(_todayRs&&_todayRs.outstanding>0)
         ? `${(goalCoverage*100).toFixed(0)}% of the ${fmtINR(goalTargetRs)} today still needs`
@@ -13217,6 +13376,7 @@ async function streamRefreshTick(){
     // The weights only move when the Book archive grows, which is once a session - so this is a
     // ten-minute refresh, not a beat-by-beat one. It is the only call here that reads files.
     if(Date.now()-_bookEdgeAt>600000){ _bookEdgeAt=Date.now(); try{ await loadBookEdges(); }catch(e){} }
+    captureLiveRecommendationScan();
     const done=Date.now();
     setStreamActivity({phase:STREAM_STATUS?.connected?'live':'stream-down',lastCompleteAt:done,
       lastSuccessAt:STREAM_STATUS?done:STREAM_ACTIVITY.lastSuccessAt,
@@ -13865,9 +14025,8 @@ function calcZerodhaChargesSplit(price, qty, isSell, isIntraday, skipDp){
 }
 
 function planBasketExport(capital, selected){
-  // Export is transport-only. The selection already happened on the board; do not re-apply
-  // capital, target, timing, turnover, or score gates while serializing that selection.
-  const exportList=(selected||[]).filter(s=>s&&s.symbol).slice(0,20);
+  // Recheck live eligibility and preserve the allocator's quantities; no one-share fallback.
+  const exportList=(selected||[]).filter(s=>s&&s.symbol&&isSelectableRecommendation(s)).slice(0,20);
   const basketAlloc=computeAlloc(capital,exportList);
   return {exportList,basketAlloc,orderCount:exportList.length,timingBlocked:false,timing:null};
 }
@@ -13944,8 +14103,8 @@ async function exportBasket(){
   exportList.forEach(s=>{
     const am = basketAlloc[s.symbol];
     // Export is a transport operation, not a capital or target-viability gate. If sizing has no
-    // quantity for a selected recommendation, retain that stock in the Zerodha basket at one share.
-    const qty = capital > 0 ? (am?.qty || 1) : 1;
+    // quantity for a selected recommendation, preserve zero: eligibility cannot create capital.
+    const qty = capital > 0 && !am?.rejected ? Math.max(0,Math.floor(Number(am?.qty)||0)) : 0;
     pushBuyOrder(s,qty,'base');
   });
   orders.forEach(o=>{
@@ -13953,7 +14112,7 @@ async function exportBasket(){
     o._meta.fullQty=total;
   });
 
-  if(!orders.length){showToast('No selected recommendations to export.',4000,true);return;}
+  if(!orders.length){showToast('No orders fit the current tape, capital, risk and liquidity limits.',5000,true);return;}
   if(orders.length>20) throw new Error(`Basket planning invariant failed: ${orders.length} orders`);
   // _meta is internal bookkeeping (which leg, which symbol) — it must never reach the saved file.
   const payload=orders.map(o=>{const c={...o};delete c._meta;return c;});
@@ -14232,7 +14391,13 @@ function applySavedFiltersForMode(mode){
             stopPct=Number(pol?.stopPct)>0?Number(pol.stopPct):null;
             targetReachable=pol?.reachable===true;
           }catch(e){}
-          return {symbol:s.symbol,entryPrice:s.price,score:s.score,scoreVersion:s.scoreVersion||RADAR_SCORE_VERSION,rank:i+1,
+          const auditQty=Math.max(1,Math.floor(frictionSizeBasis()/getBuyPrice(s)));
+          const friction=getTradeFrictionPct(s,auditQty*s.price);
+          const frictionPct=friction?.covered&&Number.isFinite(friction.entryPct)&&Number.isFinite(friction.exitPct)
+            ?Math.max(0,friction.entryPct+friction.exitPct):null;
+          return {symbol:s.symbol,entryPrice:getBuyPrice(s),auditQty,frictionPct,
+            orderType:s.entryAtLimit?'LIMIT':'MARKET',limitPrice:s.entryLimitPrice||null,
+            score:s.score,scoreVersion:s.scoreVersion||RADAR_SCORE_VERSION,rank:i+1,
             // v1128: a control row is graded exactly like a pick but is NOT one — it is excluded
             // from every recommendation metric so the app never reports buying what it did not.
             control:controlSet.has(s.symbol)||undefined,
