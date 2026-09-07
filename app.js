@@ -1,5 +1,5 @@
-const BUILD_TS='2026-09-07 09:01 IST'; // release build time (IST)
-const APP_VERSION=1299; // Goal-aware allocation with existing inputs and bounded basket funding.
+const BUILD_TS='2026-09-07 09:13 IST'; // release build time (IST)
+const APP_VERSION=1300; // Scanner active window: 09:00-16:00 IST.
 const RADAR_SCORE_VERSION='tape-decision-v4';
 const EQUITY_OPEN_MIN=9*60+15, EQUITY_CLOSE_MIN=15*60+30;
 // v1093: a baseline reward:risk MEASURED on the cross-section (last completed bhav session) instead of learned from the owner's own fills - reported on every row, deliberately not enforced. Includes v1092: position size split by Radar score / stop distance, so equally-scored names carry equal RUPEE risk, plus an opt-in Risk /trade cap.
@@ -1183,13 +1183,11 @@ function getModelTradingDate(timestamp=Date.now()){
 function istNow(){ return istClock(Date.now()); }
 function isEquitySession(timestamp=Date.now()){
   const c=istClock(timestamp),date=new Date(c.dateMs).toISOString().slice(0,10);
-  return isNseTradingDate(date)&&c.mins>=EQUITY_OPEN_MIN&&c.mins<EQUITY_CLOSE_MIN;
+  return isNseTradingDate(date)&&c.mins>=DAY_START_MIN&&c.mins<DAY_END_MIN;
 }
 function isMarketHours(){return isEquitySession();}
 function isMarketRefreshWindow(timestamp=Date.now()){
-  const c=istClock(timestamp),date=new Date(c.dateMs).toISOString().slice(0,10);
-  // Keep the closing bar and final portfolio catch-up running after trading ends.
-  return isNseTradingDate(date)&&c.mins>=EQUITY_OPEN_MIN&&c.mins<DAY_END_MIN;
+  return isEquitySession(timestamp);
 }
 function getSessionDate(){ return getModelTradingDate(Date.now()); }
 
@@ -11241,8 +11239,7 @@ function corpusRotationJobs(spare){
 // that would most improve the corpus goes first, and a symbol that reaches BACKFILL_MIN_SESSIONS
 // leaves the queue permanently instead of being re-pulled forever.
 function outsideLiveSession(ts){
-  const c=istClock(ts);
-  return c.mins<DAY_START_MIN||c.mins>=DAY_END_MIN;
+  return !isMarketRefreshWindow(ts);
 }
 function corpusBackfillJobs(spare){
   if(!(spare>0)) return [];
