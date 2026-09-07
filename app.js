@@ -1,5 +1,5 @@
-const BUILD_TS='2026-09-07 07:54 IST'; // release build time (IST)
-const APP_VERSION=1297; // Intraday/BTST calculation, execution and forward-audit corrections.
+const BUILD_TS='2026-09-07 08:35 IST'; // release build time (IST)
+const APP_VERSION=1298; // Kite login recovery, coherent refreshes, saved inputs and failure cleanup.
 const RADAR_SCORE_VERSION='tape-decision-v4';
 const EQUITY_OPEN_MIN=9*60+15, EQUITY_CLOSE_MIN=15*60+30;
 // v1093: a baseline reward:risk MEASURED on the cross-section (last completed bhav session) instead of learned from the owner's own fills - reported on every row, deliberately not enforced. Includes v1092: position size split by Radar score / stop distance, so equally-scored names carry equal RUPEE risk, plus an opt-in Risk /trade cap.
@@ -950,7 +950,15 @@ function isMainTabActive(n){
   return !!t&&t.classList.contains('act');
 }
 
+let _driveConnectBusy=false;
 async function connectCloudStorage(opts={}){
+  if(_driveConnectBusy) return false;
+  _driveConnectBusy=true;
+  try{return await connectCloudStorageImpl(opts);}
+  catch(e){showToast('Drive connection failed: '+(e.message||e),6000,true);return false;}
+  finally{_driveConnectBusy=false;setLoading(false);updateFolderUI();}
+}
+async function connectCloudStorageImpl(opts={}){
   const reloadAfterConnect=false;
   if(!FS.isConfigured()){
     const id=window.prompt('Paste your Google OAuth Web Client ID. This is a public app identifier, not a password or secret.');
@@ -1173,9 +1181,15 @@ function getModelTradingDate(timestamp=Date.now()){
   return isoDateFromUtcDate(anchor);
 }
 function istNow(){ return istClock(Date.now()); }
-function isMarketHours(){
-  const {mins}=istNow();
-  return mins>=DAY_START_MIN&&mins<DAY_END_MIN;
+function isEquitySession(timestamp=Date.now()){
+  const c=istClock(timestamp),date=new Date(c.dateMs).toISOString().slice(0,10);
+  return isNseTradingDate(date)&&c.mins>=EQUITY_OPEN_MIN&&c.mins<EQUITY_CLOSE_MIN;
+}
+function isMarketHours(){return isEquitySession();}
+function isMarketRefreshWindow(timestamp=Date.now()){
+  const c=istClock(timestamp),date=new Date(c.dateMs).toISOString().slice(0,10);
+  // Keep the closing bar and final portfolio catch-up running after trading ends.
+  return isNseTradingDate(date)&&c.mins>=EQUITY_OPEN_MIN&&c.mins<DAY_END_MIN;
 }
 function getSessionDate(){ return getModelTradingDate(Date.now()); }
 
@@ -10621,7 +10635,7 @@ function allocationSubline(am,unitLabel='shares'){
     ? ` Nets ${fmtINR(am.expectedNet)} after charges${am.frictionKnown?' and current book friction':'; slippage unknown'} if its ${Number(am.tgtPct).toFixed(2)}% target fills.`
     : '';
   const netStr=Number.isFinite(am?.expectedNet)
-    ? ` · <b style="color:var(--green)">+${fmtINR(am.expectedNet)}</b>`
+    ? ` · <b style="color:${am.expectedNet>=0?'var(--green)':'var(--red)'}">${am.expectedNet>=0?'+':''}${fmtINR(am.expectedNet)}</b>`
     : '';
   if(am?.limitReason==='risk cap'){
     return `<div style="font-size:11px;color:var(--cyan);margin-top:1px" title="Sized down to fit the Risk ₹/trade budget at this stock's own ${Number(am.stopDistancePct).toFixed(2)}% stop.${riskTip}${netTip}">risk cap · ${am.qty}${unitShort} · r${fmtINR(am.riskRs)}${netStr}</div>`;
@@ -11443,6 +11457,15 @@ let LAST_FETCH=null;        // what the last fetch actually brought back, shown 
 let FETCH_BUSY=null;        // v1177: {n, syms, at} while a fetch is in flight - it must be VISIBLE
 let LAST_FETCH_HIDDEN=false; // v1172: the list is collapsed for space; the DATA is never discarded
 const KITE_HELPER='http://localhost:8787';
+async function readHelperResponse(path,options={}){
+  const {timeout=8000,type='json',...request}=options;
+  const ctl=new AbortController(),timer=setTimeout(()=>ctl.abort(),timeout);
+  try{
+    const r=await fetch(KITE_HELPER+path,{cache:'no-store',...request,signal:ctl.signal});
+    if(!r.ok) throw new Error('Helper HTTP '+r.status);
+    return await r[type]();
+  }finally{clearTimeout(timer);}
+}
 function rssCompanyKey(value){
   return String(value||'').toUpperCase().replace(/&AMP;/g,' AND ').replace(/\b(LIMITED|LTD|PRIVATE|PVT|INDIA)\b/g,' ')
     .replace(/[^A-Z0-9]+/g,' ').trim().replace(/\s+/g,' ');
@@ -11492,19 +11515,49 @@ async function refreshNseFundamentals(){
     return false;
   }finally{clearTimeout(timer);}
 }
-async function detectKiteApi(force){
+let KITE_LOGIN_PENDING=false,LAST_KITE_STATUS_AT=0;
+let _kiteAuthRefresh=null,_kiteReturnRefresh=null;
+async function detectKiteApi(force,options={}){
+  let timer=null;
   try{
     const c=new AbortController();
-    const t=setTimeout(()=>c.abort(),1500);      // it is either running locally or it is not
+    timer=setTimeout(()=>c.abort(),force?8000:3000);
     const r=await fetch(KITE_HELPER+'/api/kite/status'+(force?'?force=1':''),{cache:'no-store',signal:c.signal});
-    clearTimeout(t);
-    KITE_API=r.ok?await r.json():null;
-    if(KITE_API&&KITE_API.mode==='connect') KITE_CONNECT_SEEN=true;
-  }catch(e){ KITE_API=null; }
-  try{ renderTable(); }catch(e){}
-  if(KITE_API) { try{ loadIntradayInventory(); }catch(e){} }
-  try{ maybePromptKiteToken(); }catch(e){}
+    const next=r.ok?await r.json():null;
+    if(!next?.ok) throw new Error('Kite status unavailable');
+    KITE_API=next;LAST_KITE_STATUS_AT=Date.now();
+    if(KITE_API.mode==='connect') KITE_CONNECT_SEEN=true;
+    if(KITE_API.hasToken&&KITE_API.tokenValid===true&&!KITE_API.needsLogin){
+      KITE_LOGIN_PENDING=false;KITE_TOKEN_PROMPTED=false;
+    }
+  }catch(e){
+    // A slow status request does not invalidate the last known authentication state.
+    if(!options.statusOnly) KITE_API=null;
+  }finally{if(timer)clearTimeout(timer);}
+  try{renderLiveTapeBar();}catch(e){}
+  if(!options.statusOnly){
+    try{renderTable();}catch(e){}
+    if(KITE_API){try{loadIntradayInventory();}catch(e){}}
+    try{maybePromptKiteToken();}catch(e){}
+  }
   return KITE_API;
+}
+function refreshKiteLoginStatus(force=false){
+  if(_kiteAuthRefresh) return _kiteAuthRefresh;
+  _kiteAuthRefresh=detectKiteApi(force,{statusOnly:true}).finally(()=>{_kiteAuthRefresh=null;});
+  return _kiteAuthRefresh;
+}
+function refreshKiteOnReturn(){
+  if(document.hidden) return Promise.resolve();
+  if(_kiteReturnRefresh) return _kiteReturnRefresh;
+  _kiteReturnRefresh=(async()=>{
+    // Authentication must refresh even when the market beat is paused or already busy.
+    await refreshKiteLoginStatus(KITE_LOGIN_PENDING||!!KITE_API?.needsLogin||KITE_API?.tokenValid===false);
+    await loadStreamStatus();
+    try{renderLiveTapeBar();}catch(e){}
+    await streamRefreshTick();
+  })().finally(()=>{_kiteReturnRefresh=null;});
+  return _kiteReturnRefresh;
 }
 let KITE_TOKEN_PROMPTED=false;   // once per page load; dismissing must not re-prompt on every render
 
@@ -11524,7 +11577,7 @@ async function saveKiteConnectKeys(){
     if(!j||!j.ok){ showToast('Kite Connect setup failed: '+((j&&j.why)||'no answer'),6000,true); return; }
     const sb=document.getElementById('kiteApiSecretBox'); if(sb) sb.value='';
     showToast('Stored. Opening Kite login…',3000);
-    if(j.login) window.open(j.login,'_blank','noopener');
+    if(j.login){KITE_LOGIN_PENDING=true;window.open(j.login,'_blank','noopener');}
     await detectKiteApi(true);
   }catch(e){ showToast('Kite Connect setup failed: '+e.message,6000,true); }
 }
@@ -11532,8 +11585,8 @@ async function openKiteConnectLogin(){
   try{
     const r=await fetch(KITE_HELPER+'/api/kite/connect/login',{cache:'no-store'});
     const j=await r.json();
-    if(j&&j.ok&&j.url){ window.open(j.url,'_blank','noopener');
-      showToast('Log in on the Kite tab. Come back and press Fetch candles.',6000); }
+    if(j&&j.ok&&j.url){ KITE_LOGIN_PENDING=true;window.open(j.url,'_blank','noopener');
+      showToast('Complete login in Kite, then return here. Login status updates automatically.',6000); }
     else showToast('No Kite Connect app key stored yet.',5000,true);
   }catch(e){ showToast('Could not reach the helper: '+e.message,5000,true); }
 }
@@ -11565,11 +11618,7 @@ let TAPE_IMPACT_EDGE=null;
 async function loadTapeEdge(){
   if(!KITE_API) return null;
   try{
-    const c=new AbortController();
-    const t=setTimeout(()=>c.abort(),8000);
-    const r=await fetch(KITE_HELPER+'/api/kite/edge',{cache:'no-store',signal:c.signal});
-    clearTimeout(t);
-    const j=r.ok?await r.json():null;
+    const j=await readHelperResponse('/api/kite/edge');
     TAPE_IMPACT_EDGE=(j&&j.ok)?j:null;
     if(j&&j.objective!=='net-policy-v1'){ TAPE_IMPACT_W=0; return TAPE_IMPACT_EDGE; }
     TAPE_IMPACT_W=(TAPE_IMPACT_EDGE&&Number.isFinite(Number(TAPE_IMPACT_EDGE.weight)))
@@ -11588,10 +11637,7 @@ async function loadBookEdges(){
   if(!KITE_API) return BOOK_EDGES;
   const one=async field=>{
     try{
-      const c=new AbortController(); const t=setTimeout(()=>c.abort(),8000);
-      const r=await fetch(KITE_HELPER+'/api/kite/edge?field='+field,{cache:'no-store',signal:c.signal});
-      clearTimeout(t);
-      const j=r.ok?await r.json():null;
+      const j=await readHelperResponse('/api/kite/edge?field='+field);
       if(!j||!j.ok||j.objective!=='net-policy-v1') return {w:0,dir:1,edge:j||null};
       return {w:Math.max(0,Math.min(0.35,Number(j.weight)||0)),dir:Number(j.dir)===-1?-1:1,edge:j};
     }catch(e){ return {w:0,dir:1,edge:null}; }
@@ -11606,11 +11652,7 @@ let BOOK={},BOOK_AT='';
 async function loadBookState(){
   if(!KITE_API) return 0;
   try{
-    const c=new AbortController(); const t=setTimeout(()=>c.abort(),8000);
-    const r=await fetch(KITE_HELPER+'/api/kite/book'+(BOOK_AT?('?since='+encodeURIComponent(BOOK_AT)):''),
-      {cache:'no-store',signal:c.signal});
-    clearTimeout(t);
-    const j=r.ok?await r.json():null;
+    const j=await readHelperResponse('/api/kite/book'+(BOOK_AT?('?since='+encodeURIComponent(BOOK_AT)):''));
     if(!j||!j.ok||!j.rows) return 0;
     if(j.ladder&&typeof j.ladder==='object'){
       // The ladder is a full replacement each pass, never a merge: a level that is gone must
@@ -11834,11 +11876,7 @@ async function loadMinuteBars(){
     const board=(Array.isArray(FILT)?FILT:[]).slice(0,40).map(r=>r.symbol);
     const want=[...new Set([...held,...board].map(normSym).filter(Boolean))].slice(0,60);
     if(!want.length) return 0;
-    const c=new AbortController(); const t=setTimeout(()=>c.abort(),8000);
-    const r=await fetch(KITE_HELPER+'/api/kite/minute?syms='+encodeURIComponent(want.join(',')),
-      {cache:'no-store',signal:c.signal});
-    clearTimeout(t);
-    const j=r.ok?await r.json():null;
+    const j=await readHelperResponse('/api/kite/minute?syms='+encodeURIComponent(want.join(',')));
     if(!j||!j.ok||!j.data) return 0;
     let n=0;
     for(const sym in j.data){
@@ -11913,12 +11951,9 @@ let _helperInputSigs={};
 async function fetchHelperInputList(){
   if(!KITE_API) return null;
   try{
-    const c=new AbortController(); const t=setTimeout(()=>c.abort(),5000);
-    const r=await fetch(KITE_HELPER+'/api/inputs/list',{cache:'no-store',signal:c.signal});
-    clearTimeout(t);
-    const j=r.ok?await r.json():null;
-    return (j&&j.ok&&Array.isArray(j.files))?j.files:null;
-  }catch(e){ return null; }
+    const j=await readHelperResponse('/api/inputs/list',{timeout:5000});
+    return j?.ok&&Array.isArray(j.files)?j.files:null;
+  }catch(e){return null;}
 }
 // Only the files the app consumes, and only when their size:lastModified changed - the same
 // signature the Drive push uses, so an unchanged folder costs one small JSON.
@@ -11947,11 +11982,8 @@ async function hydrateFromHelper(reason){
   const structuralChanged=changed.filter(f=>!isScannerCsvName(f.name)&&!isPortfolioFile(f));
   const fetchOne=async f=>{
     try{
-      const ctl=new AbortController(); const t=setTimeout(()=>ctl.abort(),15000);
-      const r=await fetch(KITE_HELPER+'/api/inputs/file?name='+encodeURIComponent(f.name),{cache:'no-store',signal:ctl.signal});
-      clearTimeout(t);
-      if(!r.ok) return null;
-      return new File([await r.blob()],f.name,{lastModified:f.lastModified});
+      const blob=await readHelperResponse('/api/inputs/file?name='+encodeURIComponent(f.name),{timeout:15000,type:'blob'});
+      return new File([blob],f.name,{lastModified:f.lastModified});
     }catch(e){ return null; }
   };
 
@@ -11960,13 +11992,13 @@ async function hydrateFromHelper(reason){
     const scannerChanged=changed.filter(f=>isScannerCsvName(f.name));
     const portfolioChanged=changed.filter(isPortfolioFile);
     if(scannerChanged.length){
-      if(reason==='live refresh'){
+      if(reason==='live refresh'||reason==='portfolio refresh'){
         // v1267: Delta transport owns live universe updates. Do not download full CSV on the live beat.
         for(const x of scannerChanged) _helperInputSigs[x.name]=sig(x);
       } else {
         const f=scannerChanged.find(x=>isGeneratedUniverseName(x.name))||scannerChanged[0];
         const file=f&&await fetchOne(f);
-        const ok=!!file&&await processScannerUpload(file,'stock');
+        const ok=!!file&&await processScannerUpload(file,'stock',{preserveSelection:true});
         if(ok){
           for(const x of scannerChanged) _helperInputSigs[x.name]=sig(x);
           try{renderTradingDashboardNow();}catch(e){}
@@ -11978,7 +12010,7 @@ async function hydrateFromHelper(reason){
       const files=[];
       for(const f of portfolioChanged){const file=await fetchOne(f);if(file)files.push(file);}
       const ok=files.length===portfolioChanged.length
-        &&await processFiles(files,reason||'portfolio',{silent:true,skipDriveBackup:true});
+        &&await processFiles(files,reason||'portfolio',{silent:true,skipDriveBackup:true,preserveSelection:true});
       if(ok){
         for(const f of portfolioChanged) _helperInputSigs[f.name]=sig(f);
         any=true;
@@ -11990,8 +12022,8 @@ async function hydrateFromHelper(reason){
   // Something structural changed - fetch the whole set so processFiles sees a coherent picture.
   const files=[];
   for(const f of wanted){ const file=await fetchOne(f); if(file) files.push(file); }
-  if(!files.length) return false;
-  const ok=await processFiles(files,reason||'helper',{silent:true});
+  if(files.length!==wanted.length) return false;
+  const ok=await processFiles(files,reason||'helper',{silent:true,preserveSelection:true});
   // Marked seen only once the load SUCCEEDED, so a failed pass retries rather than going quiet.
   if(ok) for(const f of wanted) _helperInputSigs[f.name]=sig(f);
   return ok;
@@ -12119,29 +12151,32 @@ async function pollUniverseDelta(){
     // did not answer in 60 s while the helper was blocked in its bar flush) stopped the 30-second
     // loop permanently, which reads on screen as the app going dead rather than as a slow helper.
     // A timeout costs one skipped beat; no timeout costs the session.
-    const ctl=new AbortController(); const t=setTimeout(()=>ctl.abort(),8000);
-    const r = await fetch(KITE_HELPER + '/api/kite/universe-delta?since=' + _clientUniverseRev, { cache: 'no-store', signal: ctl.signal });
-    clearTimeout(t);
-    if(!r.ok) return { ok: false, changed: false };
-    const j = await r.json();
-    if(!j) return { ok: false, changed: false };
-
+    const j=await readHelperResponse('/api/kite/universe-delta?since='+_clientUniverseRev);
+    if(!j||j.ok===false) return {ok:false,changed:false};
     const newRev = Number(j.rev) || 0;
     const newBarRev = Number(j.barRev) || 0;
     const barCompleted = (_clientBarRev > 0 && newBarRev > _clientBarRev);
     const isCold = (_clientUniverseRev === 0 || j.full);
-
-    _clientUniverseRev = newRev;
-    _clientBarRev = newBarRev;
+    if(!j.full&&newRev<_clientUniverseRev){
+      _clientUniverseRev=0;_clientBarRev=0;
+      return {ok:false,changed:false,error:'Helper restarted; requesting a full snapshot'};
+    }
 
     const changedSyms = Object.keys(j.rows || {});
+    // A helper still warming its initial universe must retry a full read, not strand a tiny snapshot.
+    if(isCold&&changedSyms.length<20){
+      _clientUniverseRev=0;_clientBarRev=0;
+      return {ok:false,changed:false,error:'Waiting for the helper universe to populate'};
+    }
     if(changedSyms.length === 0 && !isCold){
       if(barCompleted){
         scheduleScoreJob();
       }
+      _clientUniverseRev=newRev;_clientBarRev=newBarRev;
       return { ok: true, changed: false, barCompleted };
     }
 
+    if(isCold) _universeMap.clear();
     for(const sym of changedSyms){
       _universeMap.set(sym, j.rows[sym]);
     }
@@ -12169,6 +12204,7 @@ async function pollUniverseDelta(){
         scheduleScoreJob();
       }
     }
+    _clientUniverseRev=newRev;_clientBarRev=newBarRev;
     return { ok: true, changed: changedSyms.length > 0, barCompleted };
   } catch(e) {
     return { ok: false, changed: false, error: e.message };
@@ -12206,10 +12242,7 @@ async function loadIntradayInventory(){
       const q=[];
       if(since) q.push('since='+encodeURIComponent(since));
       if(PAGE){ q.push('limit='+PAGE); q.push('offset='+pageOff); }
-      const ctl=new AbortController(); const t=setTimeout(()=>ctl.abort(),20000);
-      const r=await fetch(KITE_HELPER+'/api/kite/inventory'+(q.length?('?'+q.join('&')):''),{cache:'no-store',signal:ctl.signal});
-      clearTimeout(t);
-      const j=await r.json();
+      const j=await readHelperResponse('/api/kite/inventory'+(q.length?('?'+q.join('&')):''),{timeout:20000});
       if(!j||!j.ok||!j.data) break;
       pages++;
       const merged=await mergeInventoryPage(j,since,storeVAtRequest);
@@ -12269,7 +12302,14 @@ async function mergeInventoryPage(j,since,storeVAtRequest){
     // render belong to the caller, so a paged read publishes ONE result, not one per page.
     return await runHeavyJob(merge);
 }
+let _candleFetchRunning=false;
 async function fetchCandlesInApp(limit,opts){
+  if(_candleFetchRunning) return;
+  _candleFetchRunning=true;
+  try{return await fetchCandlesInAppImpl(limit,opts);}
+  finally{_candleFetchRunning=false;FETCH_BUSY=null;}
+}
+async function fetchCandlesInAppImpl(limit,opts){
   const auto=!!(opts&&opts.auto)||!!(limit&&limit.auto);
   if(limit&&typeof limit==='object') limit=null;
   const say=(m,ms,bad)=>{ if(!auto) showToast(m,ms,bad); };   // silent on the automatic path
@@ -12353,8 +12393,8 @@ async function fetchCandlesInApp(limit,opts){
     const callFor=async(list,days)=>{
       if(!list.length) return {ok:true,data:{},files:{}};
       const qq=list.map(x=>x.s+':'+x.t).join(',');
-      const rr=await fetch(KITE_HELPER+'/api/kite/candles?days='+days+'&jobs='+encodeURIComponent(qq),{cache:'no-store'});
-      return await rr.json();
+      return await readHelperResponse('/api/kite/candles?days='+days+'&jobs='+encodeURIComponent(qq),
+        {timeout:15000+list.length*2000});
     };
     const jLight=await callFor(light,INTRADAY_FETCH_DAYS);
     const jDeep=await callFor(deep,INTRADAY_BACKFILL_DAYS);
@@ -12464,7 +12504,7 @@ function intradayPasteBarHtml(){
   const activity=STREAM_ACTIVITY||{};
   const now=Date.now();
   const clock=istClock();
-  const inSession=clock.mins>=DAY_START_MIN&&clock.mins<DAY_END_MIN;
+  const inSession=isEquitySession(now);
   const checked=liveTapeTime(activity.lastCompleteAt);
   const nextSecs=activity.nextAt>now?Math.max(0,Math.ceil((activity.nextAt-now)/1000)):0;
   const portfolioAt=liveTapeTime(activity.lastPortfolioAt);
@@ -12477,10 +12517,10 @@ function intradayPasteBarHtml(){
   const needsSetup=KITE_API.mode!=='connect';
   const needsLogin=!needsSetup&&(KITE_API.needsLogin||!KITE_API.hasToken||KITE_API.tokenValid===false);
   const st=STREAM_STATUS;
-  const connected=!!(st&&st.connected);
+  const connected=!!(st&&st.connected&&!st.statusUnknown);
   const live=inSession&&connected&&!needsLogin;
   const bars=Object.keys(INTRADAY_BARS||{}).length;
-  const dot=!inSession?'var(--border-hi)':(live?'var(--green)':(needsLogin?'var(--amber)':'var(--red)'));
+  const dot=!inSession?'var(--border-hi)':(live?'var(--green)':(needsLogin||st?.statusUnknown?'var(--amber)':'var(--red)'));
   // THE DEPTH OF THE SESSION, NOT ONLY THE BREADTH OF IT (v1264). `1648 symbols with a tape` was
   // true and useless at 10:05: every one of those tapes was 3 bars deep against a 6-bar scoring
   // floor, so this row read healthy while the board beneath it was empty. Breadth says the socket
@@ -12491,6 +12531,8 @@ function intradayPasteBarHtml(){
       +`${(st.ticks||0).toLocaleString('en-IN')} ticks \u00b7 ${bars} symbols with a tape${depthTxt}`
     : !inSession
       ? `<b style="color:var(--t2)">\u25cb market closed</b> · helper connected · ${bars} symbols stored`
+    : st?.statusUnknown&&!needsLogin
+      ? `<b style="color:var(--amber)">Stream status unavailable</b> - retrying`
     : needsLogin
       ? `<b style="color:var(--amber)">\u25cb Kite login expired</b> \u2014 one click, once a day`
       : `<b style="color:var(--red)">\u25cb stream down</b>${st&&st.why?' \u2014 '+escHtml(st.why):''}`;
@@ -13326,16 +13368,19 @@ async function streamRefreshTick(){
         return;
       }
     }
+    // Login state is independent of market hours. Callback writes invalidate the helper cache,
+    // so a normal status read can discover a successful login without another broker probe.
+    if(KITE_LOGIN_PENDING||KITE_API.needsLogin||!KITE_API.hasToken||KITE_API.tokenValid===false
+      ||Date.now()-LAST_KITE_STATUS_AT>=300000) await refreshKiteLoginStatus();
     // loadIntradayInventory re-reads the stored bars through the ONE parser and, when anything
     // changed, re-runs applyIntradayReorder + applyFilters + renderRankingsPanels itself. The
     // v1238 freshness rule then decides what may still be recommended, so a stalled stream empties
     // the board honestly rather than leaving yesterday's picks sitting there looking actionable.
     await loadStreamStatus();
-    const c=istClock();
-    if(c.mins<DAY_START_MIN||c.mins>=DAY_END_MIN){
+    if(!isMarketRefreshWindow()){
       const done=Date.now();
       setStreamActivity({phase:'market-closed',lastCompleteAt:done,
-        lastSuccessAt:STREAM_STATUS?done:STREAM_ACTIVITY.lastSuccessAt,nextAt:done+STREAM_REFRESH_MS});
+        lastSuccessAt:STREAM_STATUS&&!STREAM_STATUS.statusUnknown?done:STREAM_ACTIVITY.lastSuccessAt,nextAt:done+STREAM_REFRESH_MS});
       return;
     }
     // v1267: Delta transport replaces 30-second full Kite Universe.csv download.
@@ -13366,7 +13411,7 @@ async function streamRefreshTick(){
     // once every five minutes, and the read is incremental, so it costs a request with a handful of
     // bars in it. `tapeBarsBehind` already excludes the bar still forming.
     const tapeStale=tapeBarsBehind(newestTapeBucketMs())>=1;
-    const needBars=!STREAM_STATUS?.connected||!!(deltaRes&&deltaRes.barCompleted)||tapeStale;
+    const needBars=STREAM_STATUS?.statusUnknown||!STREAM_STATUS?.connected||!!(deltaRes&&deltaRes.barCompleted)||tapeStale;
     const barsRead=needBars?await loadIntradayInventory():0;
     // The book metrics and the one-minute bars ride the same beat. Both are small in-memory reads
     // on the helper - no file walk, no full-universe payload - and both are best-effort: a failure
@@ -13378,8 +13423,8 @@ async function streamRefreshTick(){
     if(Date.now()-_bookEdgeAt>600000){ _bookEdgeAt=Date.now(); try{ await loadBookEdges(); }catch(e){} }
     captureLiveRecommendationScan();
     const done=Date.now();
-    setStreamActivity({phase:STREAM_STATUS?.connected?'live':'stream-down',lastCompleteAt:done,
-      lastSuccessAt:STREAM_STATUS?done:STREAM_ACTIVITY.lastSuccessAt,
+    setStreamActivity({phase:STREAM_STATUS?.statusUnknown?'checking':STREAM_STATUS?.connected?'live':'stream-down',lastCompleteAt:done,
+      lastSuccessAt:STREAM_STATUS&&!STREAM_STATUS.statusUnknown?done:STREAM_ACTIVITY.lastSuccessAt,
       lastDataAt:(universeChanged||portfolioChanged||barsRead)?done:STREAM_ACTIVITY.lastDataAt,
       nextAt:done+STREAM_REFRESH_MS,error:''});
   }catch(e){
@@ -13397,16 +13442,8 @@ function startStreamRefresh(){
   _streamRefreshUiTimer=setInterval(()=>{try{renderLiveTapeBar();}catch(e){}},1000);
   if(!_streamVisibilityBound){
     _streamVisibilityBound=true;
-    document.addEventListener('visibilitychange',()=>{
-      if(document.hidden) return;
-      // Status first so the tape bar is honest immediately, then a FULL beat - coming back to the
-      // tab is exactly the moment the board is most likely to be behind, and waiting up to 30
-      // seconds for the next tick to even ask is what made it look frozen.
-      loadStreamStatus().then(()=>{
-        try{renderLiveTapeBar();}catch(e){}
-        streamRefreshTick();
-      });
-    });
+    document.addEventListener('visibilitychange',refreshKiteOnReturn);
+    window.addEventListener('focus',refreshKiteOnReturn);
   }
   streamRefreshTick();
 }
@@ -13414,18 +13451,16 @@ function startStreamRefresh(){
 // look exactly like a quiet market.
 let STREAM_STATUS=null;
 async function loadStreamStatus(){
-  if(!KITE_API) { STREAM_STATUS=null; return null; }
+  if(!KITE_API){STREAM_STATUS=null;return null;}
   try{
-    const ctl=new AbortController(); const t=setTimeout(()=>ctl.abort(),3000);
-    const r=await fetch(KITE_HELPER+'/api/kite/stream',{cache:'no-store',signal:ctl.signal});
-    clearTimeout(t);
-    STREAM_STATUS=r.ok?await r.json():null;
+    const next=await readHelperResponse('/api/kite/stream',{timeout:3000});
+    if(!next||next.ok===false) throw new Error('Stream status unavailable');
+    STREAM_STATUS={...next,statusUnknown:false,checkedAt:Date.now()};
+    return STREAM_STATUS;
   }catch(e){
-    // A background-tab timeout means status is unknown, not that the authenticated WebSocket died.
-    // Preserve the last confirmed state until the next successful control response.
-    if(STREAM_STATUS) STREAM_STATUS={...STREAM_STATUS,statusUnknown:true};
+    STREAM_STATUS={...(STREAM_STATUS||{}),statusUnknown:true};
+    return null;
   }
-  return STREAM_STATUS;
 }
 async function hydrateSessionCSVsFromPreferredInputs(reason='startup'){
   if(KITE_API){
@@ -14554,6 +14589,11 @@ const DEPTH_MIN_BOOK_QTY=1000;      // a book too small to mean anything
 const DEPTH_MIN_PREOPEN_TURNOVER=2e5;
 let _lastNseZipSig='';   // v1254: size:lastModified of the zip whose parse produced the live NSE maps
 async function processFiles(files,sourceLabel,opts={}){
+  try{return await processFilesImpl(files,sourceLabel,opts);}
+  catch(e){console.error('Input processing failed',e);showToast('Input load failed: '+(e.message||e),6000,true);return false;}
+  finally{if(!opts.silent)setLoading(false);}
+}
+async function processFilesImpl(files,sourceLabel,opts={}){
   const silent=!!opts.silent; // watcher refreshes: no overlay, no toasts, corner pill only
   const skipDriveBackup=!!opts.skipDriveBackup;
   setFileLoadStatus(sourceLabel||'Scanner Uploads',files,'not in folder');
@@ -14741,7 +14781,8 @@ async function processFiles(files,sourceLabel,opts={}){
   const scannerJobs=[];
   if(tvFile)scannerJobs.push({mode:'stock',file:tvFile});
   for(const job of scannerJobs){
-    const ok=await processScannerUpload(job.file,job.mode);
+    const ok=await processScannerUpload(job.file,job.mode,{preserveSelection:!!opts.preserveSelection||silent});
+    if(!ok) return false;
     // The manifest key is the generated universe now; marking the retired name would leave the
     // checklist permanently showing the scanner file as missing (v1257).
     if(ok&&job.mode==='stock') updateFileLoadStatus('Kite Universe.csv','loaded');
@@ -14793,7 +14834,8 @@ async function initApp(){
   updateModeUI();
   setLoading(true,'Loading latest cloud data...');
   // Step 0: Restore an active Drive token for this browser session and load cloud brain data.
-  const brain=await FS.init();
+  let brain=null;
+  try{brain=await FS.init();}catch(e){console.warn('Local/cloud startup restore failed; continuing with helper',e);}
   if(!brain&&!FS.hasFolder()){
     console.log('INIT: Google Drive is not authorized; continuing with the local Kite helper.');
     updateFolderUI();
@@ -14875,7 +14917,11 @@ async function initApp(){
   // The helper hydrates on the refresh beat; nothing watches a folder handle any more.
   startStreamRefresh();
 }
-initApp();
+initApp().catch(e=>{
+  console.error('Startup failed',e);setLoading(false);
+  showToast('Startup could not finish: '+(e.message||e)+'. Helper reconnect will keep retrying.',6000,true);
+  startStreamRefresh();
+});
 
 function saveFilterState(){
   if(!FILTERS_RESTORED) return; // never persist the blank pre-restore inputs
@@ -14929,12 +14975,12 @@ function loadFilterState(){
     const pick=(k)=>(ti&&ti[k]!=null)?ti[k]:(shared[k]!=null?shared[k]:state[k]);
     const sharedCapital=pick('capital'), sharedMaxAlloc=pick('maxAlloc'), sharedTgt=pick('tgtOverride');
     const sharedRisk=pick('riskPerTrade');
-    if(sharedCapital){const el=document.getElementById('fCapital');if(el)el.value=sharedCapital;}
-    if(sharedMaxAlloc){const el=document.getElementById('fMaxAlloc');if(el)el.value=sharedMaxAlloc;}
-    if(sharedTgt){const el=document.getElementById('fTgtOverride');if(el)el.value=sharedTgt;}
-    if(sharedRisk){const el=document.getElementById('fRiskPerTrade');if(el)el.value=sharedRisk;}
+    if(sharedCapital!=null){const el=document.getElementById('fCapital');if(el)el.value=sharedCapital;}
+    if(sharedMaxAlloc!=null){const el=document.getElementById('fMaxAlloc');if(el)el.value=sharedMaxAlloc;}
+    if(sharedTgt!=null){const el=document.getElementById('fTgtOverride');if(el)el.value=sharedTgt;}
+    if(sharedRisk!=null){const el=document.getElementById('fRiskPerTrade');if(el)el.value=sharedRisk;}
     // Prime the change-gate so the first save after load doesn't needlessly rewrite the brain.
-    _lastTradeInputSig=JSON.stringify({capital:sharedCapital||'',maxAlloc:sharedMaxAlloc||'',tgtOverride:sharedTgt||'',riskPerTrade:sharedRisk||''});
+    _lastTradeInputSig=JSON.stringify({capital:sharedCapital??'',maxAlloc:sharedMaxAlloc??'',tgtOverride:sharedTgt??'',riskPerTrade:sharedRisk??''});
     updateFilterPlaceholders(); // empty fields show + use the computed defaults
     // Legacy engine sort columns migrate to the Radar rank ordering once.
     const legacy=new Set(['_rank','rocketScore','snapshotChange','tslRefPoints','velocityPotential','delivPct','volume']);
