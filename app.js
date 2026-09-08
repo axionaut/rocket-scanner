@@ -1,4 +1,4 @@
-const BUILD_TS='2026-09-08 17:40 IST'; // release build time (IST)
+const BUILD_TS='2026-09-08 17:45 IST'; // release build time (IST)
 const APP_VERSION=1319; // v1319: Tape-anchored fresh momentum velocity & continuous deadband ceiling compression.
 const RADAR_SCORE_VERSION='tape-decision-v4';
 const EQUITY_OPEN_MIN=9*60+15, EQUITY_CLOSE_MIN=15*60+30;
@@ -4017,8 +4017,7 @@ function radarScoreComponents(r,tapeStanding){
     const p5=Number.isFinite(Number(r.price5m))?Number(r.price5m):0;
     const freshMom=Math.max(0, p5);
     const trajectoryConfirm=Math.min(1.0, (coPct-0.10)/0.50);
-    const timeFactor=Math.sqrt(1+elapsedMin/20);
-    const rawBoost=Math.min(30, (freshMom*15/timeFactor)*trajectoryConfirm);
+    const rawBoost=Math.min(30, freshMom*15*trajectoryConfirm);
     // Envelope Protection: velocity boost is strictly scaled by (perm.p * riskFactor),
     // preventing low-liquidity or high-risk penny stocks from bypassing risk controls.
     const velocityBoost=+(rawBoost*envelope).toFixed(1);
