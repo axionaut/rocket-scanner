@@ -1,5 +1,5 @@
-const BUILD_TS='2026-09-07 10:29 IST'; // release build time (IST)
-const APP_VERSION=1302; // Clearing overrides persists immediately; explicit automatic input state.
+const BUILD_TS='2026-09-08 09:29 IST'; // release build time (IST)
+const APP_VERSION=1303; // v1303: the universe delta endpoint answered 500 on every call; live prices were never reaching the board.
 const RADAR_SCORE_VERSION='tape-decision-v4';
 const EQUITY_OPEN_MIN=9*60+15, EQUITY_CLOSE_MIN=15*60+30;
 // v1093: a baseline reward:risk MEASURED on the cross-section (last completed bhav session) instead of learned from the owner's own fills - reported on every row, deliberately not enforced. Includes v1092: position size split by Radar score / stop distance, so equally-scored names carry equal RUPEE risk, plus an opt-in Risk /trade cap.
@@ -12094,6 +12094,14 @@ async function hydrateFromHelper(reason){
 let _clientUniverseRev = 0;
 let _clientBarRev = 0;
 const _universeMap = new Map();
+// A DEAD PRICE FEED MUST NOT LOOK HEALTHY. `/api/kite/universe-delta` answered HTTP 500 on every
+// call from the day it shipped (a ReferenceError in the helper), pollUniverseDelta swallowed it as
+// {ok:false}, and the board went on scoring whatever `Kite Universe.csv` snapshot was on disk -
+// measured 2026-09-08: CAMS priced at Rs746.85 from a file written five days earlier while the tape
+// said 734.40. The tape row read `live` throughout, because the SOCKET was healthy; it is the
+// universe transport that was not, and nothing on screen separated the two.
+let _universeLiveAt = 0;
+let _universeDeltaError = '';
 let _scoreJobRunning = false;
 let _scoreJobPending = false;
 
@@ -12213,7 +12221,7 @@ async function pollUniverseDelta(){
     // loop permanently, which reads on screen as the app going dead rather than as a slow helper.
     // A timeout costs one skipped beat; no timeout costs the session.
     const j=await readHelperResponse('/api/kite/universe-delta?since='+_clientUniverseRev);
-    if(!j||j.ok===false) return {ok:false,changed:false};
+    if(!j||j.ok===false){ _universeDeltaError='helper returned no universe'; return {ok:false,changed:false}; }
     const newRev = Number(j.rev) || 0;
     const newBarRev = Number(j.barRev) || 0;
     const barCompleted = (_clientBarRev > 0 && newBarRev > _clientBarRev);
@@ -12234,6 +12242,7 @@ async function pollUniverseDelta(){
         scheduleScoreJob();
       }
       _clientUniverseRev=newRev;_clientBarRev=newBarRev;
+      _universeLiveAt=Date.now();_universeDeltaError='';
       return { ok: true, changed: false, barCompleted };
     }
 
@@ -12266,8 +12275,10 @@ async function pollUniverseDelta(){
       }
     }
     _clientUniverseRev=newRev;_clientBarRev=newBarRev;
+    _universeLiveAt=Date.now();_universeDeltaError='';
     return { ok: true, changed: changedSyms.length > 0, barCompleted };
   } catch(e) {
+    _universeDeltaError=e.message||'unreachable';
     return { ok: false, changed: false, error: e.message };
   }
 }
@@ -12638,6 +12649,16 @@ function intradayPasteBarHtml(){
       bits.push('book '+bookN.toLocaleString('en-IN')
         +(Object.keys(MINUTE_BARS||{}).length?' · 1m '+Object.keys(MINUTE_BARS).length:'')
         +(armed>0?'':' (weights 0)'));
+    }
+    // THE SOCKET AND THE PRICE FEED ARE TWO DIFFERENT THINGS, AND THE ROW MUST SAY WHICH ONE IS UP.
+    // `live` describes the tick socket. Prices on the board arrive through the universe delta, and
+    // when that fails the row stayed fully green while every Price/Day cell aged silently.
+    if(inSession){
+      const ageMs=_universeLiveAt?(now-_universeLiveAt):Infinity;
+      if(!_universeLiveAt) bits.push('<b style="color:var(--red)">prices not updating</b>'
+        +(_universeDeltaError?' — '+escHtml(_universeDeltaError):'')+' — board is on a stored universe');
+      else if(ageMs>120000) bits.push('<b style="color:var(--amber)">prices '+Math.round(ageMs/60000)+'m stale</b>');
+      else bits.push('prices '+liveTapeTime(_universeLiveAt));
     }
     if(checked) bits.push('checked '+checked);
     if(portfolioAt) bits.push('positions '+portfolioAt);
