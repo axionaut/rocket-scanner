@@ -1,5 +1,5 @@
-const BUILD_TS='2026-09-08 13:15 IST'; // release build time (IST)
-const APP_VERSION=1308; // v1308: numeric score column, status bar below-threshold toggle, strict score filter, score descending sort, removed action column.
+const BUILD_TS='2026-09-08 13:35 IST'; // release build time (IST)
+const APP_VERSION=1309; // v1309: Total market depth buy vs sell volume gate & score penalty, strict score descending default.
 const RADAR_SCORE_VERSION='tape-decision-v4';
 const EQUITY_OPEN_MIN=9*60+15, EQUITY_CLOSE_MIN=15*60+30;
 // v1093: a baseline reward:risk MEASURED on the cross-section (last completed bhav session) instead of learned from the owner's own fills - reported on every row, deliberately not enforced. Includes v1092: position size split by Radar score / stop distance, so equally-scored names carry equal RUPEE risk, plus an opt-in Risk /trade cap.
@@ -88,6 +88,8 @@ let ALL=[],FILT=[],PG=1,PGSZ=100,SCOL='score',SDIR=-1;
 let SHOW_BELOW_THRESHOLD=false;
 function toggleBelowThreshold(){
   SHOW_BELOW_THRESHOLD=!SHOW_BELOW_THRESHOLD;
+  SCOL='score';
+  SDIR=-1;
   saveFilterState();
   applyFilters();
 }
@@ -3353,6 +3355,32 @@ function getTapeProfitEvidence(){
   const value={sessions:days.length,mean,positive,status:days.length<5?'unvalidated':mean>0&&positive>=3?'qualified':'losing'};
   _tapeProfitMemo={store,today,value};return value;
 }
+function getTotalDepth(sym){
+  const s=normSym(sym||'');
+  const lad=typeof BOOK_LADDER==='object'&&BOOK_LADDER[s];
+  if(lad){
+    const bq=Number(lad.buyQty)||0;
+    const sq=Number(lad.sellQty)||0;
+    if(bq>0||sq>0) return {buyQty:bq,sellQty:sq,source:'stream_total'};
+    const b5=Array.isArray(lad.bids)?lad.bids.reduce((n,b)=>n+(Number(b[1]||b.quantity||b.q)||0),0):0;
+    const s5=Array.isArray(lad.asks)?lad.asks.reduce((n,a)=>n+(Number(a[1]||a.quantity||a.q)||0),0):0;
+    if(b5>0||s5>0) return {buyQty:b5,sellQty:s5,source:'stream_5level'};
+  }
+  const lv=typeof DEPTH_LIVE==='object'&&DEPTH_LIVE[s];
+  if(lv&&(Number(lv.buyQty)>0||Number(lv.sellQty)>0)){
+    return {buyQty:Number(lv.buyQty)||0,sellQty:Number(lv.sellQty)||0,source:'pasted'};
+  }
+  const bk=typeof NSE_DEPTH==='object'&&NSE_DEPTH[s];
+  if(bk&&(Number(bk.buyQty)>0||Number(bk.sellQty)>0)){
+    return {buyQty:Number(bk.buyQty)||0,sellQty:Number(bk.sellQty)||0,source:'preopen'};
+  }
+  return null;
+}
+function isDepthRecommendable(sym){
+  const d=getTotalDepth(sym);
+  if(!d) return true; // if no depth information is available, do not blindly veto
+  return d.buyQty>d.sellQty;
+}
 function radarPermissionLevel(r,tapeStanding){
   const has=v=>v!==null&&v!==undefined&&v!==''&&Number.isFinite(Number(v));
   if(!r) return {p:0,why:'no row'};
@@ -3383,6 +3411,7 @@ function radarPermissionLevel(r,tapeStanding){
   if(veto.length) return {p:0,why:veto[0],vetoes:veto};
   if(r.entryReady===false&&r.entryAtLimit!==true) timing.push('move already consumed');
   if(r.directionConfirmed!==true) timing.push('direction not confirmed');
+  if(!isDepthRecommendable(r.symbol)) timing.push('sell volume exceeds buy volume');
   // continuous permissions
   // HEADROOM IS THE EXCHANGE CIRCUIT, NOT THE STATISTICAL CEILING (v1237). This was min(f,cf), which
   // is the exact shape v1208 removed from the score: `feasibility` carries the v1083 session-ceiling
@@ -3671,6 +3700,9 @@ function radarScoreComponents(r,tapeStanding){
     block:perm.p>0?null:(perm.why||null)
   };
   out.total=+Math.max(0,Math.min(100,100*evidence*(perm.p||0)*riskFactor)).toFixed(1);
+  if(!isDepthRecommendable(r.symbol)){
+    out.total=+Math.min(out.total, +(RECOMMEND_MIN_SCORE - 0.1)).toFixed(1);
+  }
   return out;
 }
 
@@ -4218,6 +4250,9 @@ function _getRowActionStateUncached(s){
   const _sNum=Number(s.score);
   if(!Number.isFinite(_sNum)||_sNum<RECOMMEND_MIN_SCORE)
     return {state:'WAIT', reason:`Score ${Number.isFinite(_sNum)?_sNum.toFixed(1):'0.0'} < ${RECOMMEND_MIN_SCORE}`};
+
+  if(!isDepthRecommendable(s.symbol))
+    return {state:'BLOCKED', reason:'Sell volume exceeds buy volume'};
 
   return {state:'GO', reason:'Actionable recommendation'};
 }
@@ -15114,9 +15149,14 @@ function loadFilterState(){
     }
     updateFilterPlaceholders(); // empty fields show + use the computed defaults
     // Legacy engine sort columns migrate to the Radar rank ordering once.
-    const legacy=new Set(['_rank','rank','rocketScore','snapshotChange','tslRefPoints','velocityPotential','delivPct','volume','action']);
-    if(state.sortCol&&!legacy.has(state.sortCol))SCOL=state.sortCol;
-    if(state.sortDir&&!legacy.has(state.sortCol||''))SDIR=state.sortDir;
+    const legacy=new Set(['_rank','rank','rocketScore','snapshotChange','tslRefPoints','velocityPotential','delivPct','volume','action','risk','chk']);
+    if(state.sortCol&&!legacy.has(state.sortCol)){
+      SCOL=state.sortCol;
+      if(state.sortDir!=null) SDIR=state.sortDir;
+    } else {
+      SCOL='score';
+      SDIR=-1;
+    }
     FILTERS_RESTORED=true;
     return true;
   }catch(e){
