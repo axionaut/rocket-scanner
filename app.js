@@ -1,5 +1,5 @@
-const BUILD_TS='2026-09-08 15:15 IST'; // release build time (IST)
-const APP_VERSION=1314; // v1314: Interday cohort calibration, factor edge auto-weights, post-close tab overhaul.
+const BUILD_TS='2026-09-08 15:20 IST'; // release build time (IST)
+const APP_VERSION=1315; // v1315: Dynamic page-load session baseline, zero pollution across refreshes/releases.
 const RADAR_SCORE_VERSION='tape-decision-v4';
 const EQUITY_OPEN_MIN=9*60+15, EQUITY_CLOSE_MIN=15*60+30;
 // v1093: a baseline reward:risk MEASURED on the cross-section (last completed bhav session) instead of learned from the owner's own fills - reported on every row, deliberately not enforced. Includes v1092: position size split by Radar score / stop distance, so equally-scored names carry equal RUPEE risk, plus an opt-in Risk /trade cap.
@@ -167,7 +167,10 @@ const RECOMMEND_MIN_PROGRESS_FRACTION=0.25;
 const LEFT_ON_TABLE_STORE='rs_left_on_table_v1';
 const LEFT_ON_TABLE_KEEP_SESSIONS=30;   // how much history is retained
 const OPEN_SNAPSHOT_STORE='rs_open_snapshot_v1';
+const PAGE_SESSION_BOOT_TIME=Date.now();
+let _sessionBaselineInitialized=false;
 let OPEN_SNAPSHOT_MAP={};
+
 function loadOpenSnapshotMap(){
   try{
     const raw=localStorage.getItem(OPEN_SNAPSHOT_STORE);
@@ -190,30 +193,39 @@ function saveOpenSnapshotMap(){
 function captureOpenSnapshots(rows){
   if(!_universeLiveAt) return;
   const today=getSessionDate();
+  const clock=istClock();
+  const inMarketHours=clock.mins>=DAY_START_MIN&&clock.mins<DAY_END_MIN;
+
+  // Whenever the page is opened or manually refreshed during market hours, that exact moment
+  // becomes the clean, unpolluted baseline for this release/run. Old snapshot data is wiped.
+  if(!_sessionBaselineInitialized && inMarketHours){
+    OPEN_SNAPSHOT_MAP={};
+    TABLE_ENTRY_MAP={};
+    _sessionBaselineInitialized=true;
+  }
+
   let changed=false;
-  const now=Date.now();
+  const now=PAGE_SESSION_BOOT_TIME;
   (rows||[]).forEach(r=>{
-    if(!r||!r.symbol) return;
+    if(!r||!r.symbol||!(Number(r.price)>0)) return;
     const sym=normSym(r.symbol);
     const existing=OPEN_SNAPSHOT_MAP[sym];
     if(!existing||existing.date!==today){
-      const openPrice=Number(r.open1d)>0?Number(r.open1d):(Number(r.open)>0?Number(r.open):Number(r.price));
-      if(openPrice>0){
-        OPEN_SNAPSHOT_MAP[sym]={
-          date:today,
-          openPrice,
-          openScore:Number(r.score)||0,
-          features:{
-            gap:Number(r.gap)||0,
-            depthRatio:(Number(r.depthBuyQty)>0&&Number(r.depthSellQty)>0)?+(r.depthBuyQty/r.depthSellQty).toFixed(2):1,
-            relvol:Number(r.relvol)||0,
-            setupPct:Number(r.setupPct)||0,
-            ignitePct:Number(r.ignitePct)||0
-          },
-          at:now
-        };
-        changed=true;
-      }
+      const currPrice=Number(r.price);
+      OPEN_SNAPSHOT_MAP[sym]={
+        date:today,
+        openPrice:currPrice,
+        openScore:Number(r.score)||0,
+        features:{
+          gap:Number(r.gap)||0,
+          depthRatio:(Number(r.depthBuyQty)>0&&Number(r.depthSellQty)>0)?+(r.depthBuyQty/r.depthSellQty).toFixed(2):1,
+          relvol:Number(r.relvol)||0,
+          setupPct:Number(r.setupPct)||0,
+          ignitePct:Number(r.ignitePct)||0
+        },
+        at:now
+      };
+      changed=true;
     }
   });
   if(changed) saveOpenSnapshotMap();
@@ -3946,16 +3958,16 @@ function radarScoreComponents(r,tapeStanding){
   if(!isDepthRecommendable(r.symbol)){
     out.total=+Math.min(out.total, +(RECOMMEND_MIN_SCORE - 0.1)).toFixed(1);
   }
-  // Single-Stock Intraday Calibration: Institutional momentum defends the 09:15 open print.
-  // If a stock trades below its 09:15 open, long momentum is broken. It is capped below the
-  // policy bar and dynamically penalized further the deeper it trades below its open.
+  // Single-Stock Session Calibration: Momentum defends the price level at page load / session open.
+  // If a stock trades below its session load baseline, momentum is broken. It is capped below the
+  // policy bar and dynamically penalized further the deeper it trades below baseline.
   const calWeights=getCalibratedWeights();
   if(calWeights.depthMultiplier!==1.0 && Number(r.depthImbalance)>0){
     out.total=+Math.max(0, Math.min(100, out.total*calWeights.depthMultiplier)).toFixed(1);
   }
   const snap=getOpenSnapshot(r.symbol);
-  const baseOpen=(snap&&snap.openPrice>0)?snap.openPrice:(Number(r.open1d)>0?Number(r.open1d):0);
-  const coPct=Number.isFinite(Number(r.changeOpen))?Number(r.changeOpen):(baseOpen>0&&Number(r.price)>0?((Number(r.price)-baseOpen)/baseOpen)*100:0);
+  const basePrice=(snap&&snap.openPrice>0)?snap.openPrice:(Number(r.price)>0?Number(r.price):0);
+  const coPct=basePrice>0&&Number(r.price)>0?((Number(r.price)-basePrice)/basePrice)*100:0;
   if(coPct<0){
     const dropPct=Math.abs(coPct);
     const belowOpenPenalty=Math.min(35, dropPct*6*(calWeights.gapFadeMultiplier||1.0));
@@ -3995,7 +4007,7 @@ function radarScoreTitle(r){
       return ` · ${bits.join(' · ')} [${armed?`weights ${w.split.toFixed(2)}/${w.book.toFixed(2)}/${w.spoof.toFixed(2)}`:'measured at weight 0, not counted yet'}]`;
     })()
     +` over ${Number(c.tapeBars)||0} bars`;
-  if(c.belowOpenDrop>0) return `NOT ACTIONABLE - below 09:15 open (-${c.belowOpenDrop.toFixed(2)}%). Score penalized and capped below policy bar (${RECOMMEND_MIN_SCORE}) because opening price was not defended.`;
+  if(c.belowOpenDrop>0) return `NOT ACTIONABLE - below session load baseline (-${c.belowOpenDrop.toFixed(2)}%). Score penalized and capped below policy bar (${RECOMMEND_MIN_SCORE}) because base price was not defended.`;
   if(c.block) return `NOT ACTIONABLE - ${c.block}. Tape evidence ${(Number(c.evidence)*100).toFixed(0)}/100 (${ev}), but permission is zero so the score is zero. The score is what you can act on, not what looks interesting.`;
   return `Recommendation strength ${Number(c.total).toFixed(1)} = tape evidence ${(Number(c.evidence)*100).toFixed(0)}/100 × permission ${(Number(c.permission)*100).toFixed(0)}% × risk factor ${(Number(c.riskFactor)*100).toFixed(0)}%.`
     +` Evidence, from the continuous merged 5-minute tape window: ${ev}.`
@@ -11283,7 +11295,7 @@ function renderTable(){
         const hm=`${String(c.h).padStart(2,'0')}:${String(c.m).padStart(2,'0')}`;
         const ageM=Math.max(0,Math.floor((Date.now()-(Number(info.at)||Date.now()))/60000));
         const ageTxt=ageM<60?`${ageM}m`:`${Math.floor(ageM/60)}h ${ageM%60}m`;
-        const tip=`Since first entered table today at ${hm} (${ageTxt} ago) @ ₹${info.entryPrice.toFixed(2)} (current ₹${Number(s.price).toFixed(2)})`;
+        const tip=`Since page loaded at ${hm} (${ageTxt} ago) @ ₹${info.entryPrice.toFixed(2)} (current ₹${Number(s.price).toFixed(2)})`;
         return `<span style="color:${col};font-weight:700;font-family:'DM Mono',monospace" title="${escHtml(tip)}">${sign}${p.toFixed(2)}%</span> <span style="font-size:11px;color:var(--t3);font-family:'DM Mono',monospace" title="${escHtml(tip)}">${ageTxt} · ${hm}</span>`;
       })()}</td>`,
       day:`<td>${fPerf(s.day??s.priceChange)}${s.corpAction?`<span title="Corporate action (${escHtml(s.corpAction)}) — mechanical ex-date move, neutralised in scoring" style="font-size:11px;color:var(--amber);margin-left:4px;cursor:help">⚑</span>`:''}</td>`,
@@ -12541,7 +12553,7 @@ function patchVisiblePrices(){
           const hm=`${String(c.h).padStart(2,'0')}:${String(c.m).padStart(2,'0')}`;
           const ageM=Math.max(0,Math.floor((Date.now()-(Number(info.at)||Date.now()))/60000));
           const ageTxt=ageM<60?`${ageM}m`:`${Math.floor(ageM/60)}h ${ageM%60}m`;
-          const tip=`Since first entered table today at ${hm} (${ageTxt} ago) @ ₹${info.entryPrice.toFixed(2)} (current ₹${Number(s.price).toFixed(2)})`;
+          const tip=`Since page loaded at ${hm} (${ageTxt} ago) @ ₹${info.entryPrice.toFixed(2)} (current ₹${Number(s.price).toFixed(2)})`;
           sinceCell.innerHTML=`<span style="color:${col};font-weight:700;font-family:'DM Mono',monospace" title="${escHtml(tip)}">${sign}${p.toFixed(2)}%</span> <span style="font-size:11px;color:var(--t3);font-family:'DM Mono',monospace" title="${escHtml(tip)}">${ageTxt} · ${hm}</span>`;
         }
       }
@@ -13493,10 +13505,10 @@ function renderPostClose(){
     return '<section class="m-card pc-card pc-hero">'
       +'<div class="pc-head"><div><div class="pc-eyebrow">Single-Stock Closed-Loop Calibration</div>'
       +'<h3 class="pc-title">09:15 Open Cohort & Factor Edge Audit</h3>'
-      +'<p class="pc-copy">Audits the exact 09:15 opening print against closing outcomes. Automatically rewards features with positive forward alpha and penalizes fading morning traps.</p></div>'
+      +'<p class="pc-copy">Audits performance against the live prices stamped at page load / session open against closing outcomes. Automatically rewards features with positive forward alpha and penalizes fading morning traps.</p></div>'
       +'<div class="pc-state" style="color:'+stateColor+'">'+stateText+'</div></div>'
       +'<div class="pc-kpis">'
-      +'<div class="pc-kpi"><div class="pc-kpi-label">Tracked from Open</div><div class="pc-kpi-value">'+cal.total+'</div><div class="pc-kpi-sub">stocks with 09:15 print</div></div>'
+      +'<div class="pc-kpi"><div class="pc-kpi-label">Tracked from Open</div><div class="pc-kpi-value">'+cal.total+'</div><div class="pc-kpi-sub">stocks tracked from page load</div></div>'
       +'<div class="pc-kpi"><div class="pc-kpi-label">🚀 Rockets (Alpha)</div><div class="pc-kpi-value" style="color:var(--green)">'+cal.rockets+'</div><div class="pc-kpi-sub">Score ≥ 60 & Day ≥ +2%</div></div>'
       +'<div class="pc-kpi"><div class="pc-kpi-label">⚠️ Morning Traps</div><div class="pc-kpi-value" style="color:var(--red)">'+cal.traps+'</div><div class="pc-kpi-sub">Score ≥ 60 & Faded < 0%</div></div>'
       +'<div class="pc-kpi"><div class="pc-kpi-label">👀 Missed Runners</div><div class="pc-kpi-value" style="color:var(--amber)">'+cal.missed+'</div><div class="pc-kpi-sub">Score < 60 & Day ≥ +4%</div></div>'
@@ -13508,7 +13520,7 @@ function renderPostClose(){
       +'<div class="pc-kpi"><div class="pc-kpi-label">Volume Velocity (>1.5x)</div><div class="pc-kpi-value">'+n2(f.relvolHigh.winRate,1)+'% win</div><div class="pc-kpi-sub">Avg '+pp(f.relvolHigh.avgReturn)+' ('+f.relvolHigh.n+' stocks)</div></div>'
       +'<div class="pc-kpi"><div class="pc-kpi-label">Learned Weights</div><div class="pc-kpi-value" style="font-size:16px;margin-top:8px">Depth '+w.depthMultiplier+'× · Fade '+w.gapFadeMultiplier+'×</div><div class="pc-kpi-sub"><button class="btn" onclick="resetCalibratedWeights()" style="font-size:10px;padding:2px 6px;margin-top:2px">Reset to 1.0×</button></div></div>'
       +'</div>'
-      +'<div class="pc-section-head" style="margin-top:18px"><h4 class="pc-subsection-title">09:15 Cohort Outcome Ledger</h4><div class="pc-counts">'+cal.total+' stocks audited</div></div>'
+      +'<div class="pc-section-head" style="margin-top:18px"><h4 class="pc-subsection-title">Session Load Cohort Outcome Ledger</h4><div class="pc-counts">'+cal.total+' stocks audited</div></div>'
       +'<div class="pc-table-wrap" style="max-height:360px;overflow-y:auto"><table class="pc-table"><thead><tr>'
       +'<th>Symbol</th><th class="num">09:15 Score</th><th class="num">Open Price</th><th class="num">Close/Current</th><th class="num">Since Open</th><th class="num">Max Day Gain</th><th class="center">Verdict</th>'
       +'</tr></thead><tbody>'+rows+'</tbody></table></div>'
