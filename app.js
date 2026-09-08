@@ -1,5 +1,5 @@
-const BUILD_TS='2026-09-08 13:35 IST'; // release build time (IST)
-const APP_VERSION=1309; // v1309: Total market depth buy vs sell volume gate & score penalty, strict score descending default.
+const BUILD_TS='2026-09-08 14:00 IST'; // release build time (IST)
+const APP_VERSION=1310; // v1310: Scope Since In strictly to today's session date and display entry time.
 const RADAR_SCORE_VERSION='tape-decision-v4';
 const EQUITY_OPEN_MIN=9*60+15, EQUITY_CLOSE_MIN=15*60+30;
 // v1093: a baseline reward:risk MEASURED on the cross-section (last completed bhav session) instead of learned from the owner's own fills - reported on every row, deliberately not enforced. Includes v1092: position size split by Radar score / stop distance, so equally-scored names carry equal RUPEE risk, plus an opt-in Risk /trade cap.
@@ -166,12 +166,23 @@ const NSE_FUNDAMENTAL_STORE='rs_nse_fundamentals_v1';
 const RECOMMEND_MIN_PROGRESS_FRACTION=0.25;
 const LEFT_ON_TABLE_STORE='rs_left_on_table_v1';
 const LEFT_ON_TABLE_KEEP_SESSIONS=30;   // how much history is retained
-const TABLE_ENTRY_STORE='rs_table_entry_v1';
+const TABLE_ENTRY_STORE='rs_table_entry_v2';
 let TABLE_ENTRY_MAP={};
 function loadTableEntryMap(){
   try{
+    localStorage.removeItem('rs_table_entry_v1'); // Purge legacy unisolated entries
     const raw=localStorage.getItem(TABLE_ENTRY_STORE);
     if(raw) TABLE_ENTRY_MAP=JSON.parse(raw)||{};
+    const today=getSessionDate();
+    let pruned=false;
+    for(const k of Object.keys(TABLE_ENTRY_MAP)){
+      const entry=TABLE_ENTRY_MAP[k];
+      if(!entry||entry.date!==today||!(Number(entry.price)>0)){
+        delete TABLE_ENTRY_MAP[k];
+        pruned=true;
+      }
+    }
+    if(pruned) saveTableEntryMap();
   }catch(e){ TABLE_ENTRY_MAP={}; }
 }
 function saveTableEntryMap(){
@@ -183,21 +194,40 @@ function recordTableEntries(rows){
   const now=Date.now();
   (rows||[]).forEach(r=>{
     if(!r||!r.symbol||!(Number(r.price)>0)) return;
+    // Only record stocks that actively qualify as actionable recommendations
+    if(typeof isSelectableRecommendation==='function'&&!isSelectableRecommendation(r)) return;
     const sym=normSym(r.symbol);
     const prev=TABLE_ENTRY_MAP[sym];
+    const currPrice=Number(r.price);
     if(!prev||prev.date!==today){
-      TABLE_ENTRY_MAP[sym]={date:today, price:Number(r.price), at:now};
+      TABLE_ENTRY_MAP[sym]={date:today, price:currPrice, at:now};
       changed=true;
+    } else if(prev.price>0){
+      // Single-day circuit limit on NSE is at most 20%.
+      // If the difference between current price and stored entry price is > 20.5%,
+      // the stored entry price is corrupted by stale historical data and must be re-anchored.
+      const move=Math.abs((currPrice-prev.price)/prev.price);
+      if(move>0.205){
+        TABLE_ENTRY_MAP[sym]={date:today, price:currPrice, at:now};
+        changed=true;
+      }
     }
   });
   if(changed) saveTableEntryMap();
 }
 function getTableEntryInfo(sym,currentPrice){
   const today=getSessionDate();
-  const entry=TABLE_ENTRY_MAP[normSym(sym||'')];
+  const key=normSym(sym||'');
+  const entry=TABLE_ENTRY_MAP[key];
   if(!entry||entry.date!==today||!(entry.price>0)) return null;
   const curr=Number(currentPrice)>0?Number(currentPrice):entry.price;
   const movePct=((curr-entry.price)/entry.price)*100;
+  // If movePct exceeds daily circuit bounds (> 20.5%), reject as corrupted
+  if(Math.abs(movePct)>20.5){
+    delete TABLE_ENTRY_MAP[key];
+    saveTableEntryMap();
+    return null;
+  }
   return {entryPrice:entry.price, at:entry.at, movePct};
 }
 loadTableEntryMap();
@@ -11022,7 +11052,7 @@ function renderTable(){
         const c=istClock(info.at);
         const hm=`${String(c.h).padStart(2,'0')}:${String(c.m).padStart(2,'0')}`;
         const tip=`Since first entered table today at ${hm} @ ₹${info.entryPrice.toFixed(2)} (current ₹${Number(s.price).toFixed(2)})`;
-        return `<span style="color:${col};font-weight:700;font-family:'DM Mono',monospace" title="${escHtml(tip)}">${sign}${p.toFixed(2)}%</span>`;
+        return `<span style="color:${col};font-weight:700;font-family:'DM Mono',monospace" title="${escHtml(tip)}">${sign}${p.toFixed(2)}%</span> <span style="font-size:11px;color:var(--t3);font-family:'DM Mono',monospace" title="${escHtml(tip)}">${hm}</span>`;
       })()}</td>`,
       day:`<td>${fPerf(s.day??s.priceChange)}${s.corpAction?`<span title="Corporate action (${escHtml(s.corpAction)}) — mechanical ex-date move, neutralised in scoring" style="font-size:11px;color:var(--amber);margin-left:4px;cursor:help">⚑</span>`:''}</td>`,
       relvol:`<td style="white-space:nowrap">${s.relvol!=null&&isFinite(s.relvol)?Number(s.relvol).toFixed(2)+'×':'—'}<span style="color:var(--t3)"> · </span>${Number.isFinite(s.depthImbalance)?`<span style="color:${s.depthImbalance>0?'var(--green)':'var(--red)'};font-size:12px" title="Order book: ${Number.isFinite(s.depthPct)?'stronger than '+Math.round(s.depthPct*100)+'% of books':''}${s.depthLive?' · LIVE reading':' · pre-open, decayed by the session'}">${(s.depthImbalance>0?'+':'')+s.depthImbalance.toFixed(2)}</span>`:'<span style="color:var(--t3)">—</span>'}</td>`,
@@ -12889,7 +12919,7 @@ function applyFilters({preservePage=false}={}){
   recordTableEntries(FILT);
   rows.forEach(r=>{
     const info=getTableEntryInfo(r.symbol,r.price);
-    r.sinceIn=info?.movePct??0;
+    r.sinceIn=info?.movePct??null;
     r.sinceInEntry=info;
   });
   applySort();
