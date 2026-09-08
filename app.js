@@ -1,5 +1,5 @@
 const BUILD_TS='2026-09-08 15:30 IST'; // release build time (IST)
-const APP_VERSION=1317; // v1317: Risk-bounded time-decayed velocity, smooth demotion, coherent gate score capping.
+const APP_VERSION=1318; // v1318: Retain during-market state in off-market hours; robust Since In & session scores.
 const RADAR_SCORE_VERSION='tape-decision-v4';
 const EQUITY_OPEN_MIN=9*60+15, EQUITY_CLOSE_MIN=15*60+30;
 // v1093: a baseline reward:risk MEASURED on the cross-section (last completed bhav session) instead of learned from the owner's own fills - reported on every row, deliberately not enforced. Includes v1092: position size split by Radar score / stop distance, so equally-scored names carry equal RUPEE risk, plus an opt-in Risk /trade cap.
@@ -191,14 +191,14 @@ function saveOpenSnapshotMap(){
   try{ localStorage.setItem(OPEN_SNAPSHOT_STORE, JSON.stringify(OPEN_SNAPSHOT_MAP)); }catch(e){}
 }
 function captureOpenSnapshots(rows){
-  if(!_universeLiveAt) return;
   const today=getSessionDate();
   const clock=istClock();
   const inMarketHours=clock.mins>=DAY_START_MIN&&clock.mins<DAY_END_MIN;
+  if(inMarketHours && !_universeLiveAt) return;
 
   // Whenever the page is opened or manually refreshed during market hours, that exact moment
   // becomes the clean, unpolluted baseline for this release/run. Old snapshot data is wiped.
-  if(!_sessionBaselineInitialized && inMarketHours){
+  if(!_sessionBaselineInitialized && inMarketHours && _universeLiveAt > 0){
     OPEN_SNAPSHOT_MAP={};
     TABLE_ENTRY_MAP={};
     _sessionBaselineInitialized=true;
@@ -206,15 +206,21 @@ function captureOpenSnapshots(rows){
 
   let changed=false;
   const now=PAGE_SESSION_BOOT_TIME;
+  const sessionOpenMs=new Date(today+'T09:15:00+05:30').getTime()||now;
   (rows||[]).forEach(r=>{
     if(!r||!r.symbol||!(Number(r.price)>0)) return;
     const sym=normSym(r.symbol);
     const existing=OPEN_SNAPSHOT_MAP[sym];
     if(!existing||existing.date!==today){
       const currPrice=Number(r.price);
+      const chgOpen=Number(r.changeOpen);
+      const openPx=(!inMarketHours && Number.isFinite(chgOpen) && chgOpen>-99)
+        ? +(currPrice / (1 + chgOpen / 100)).toFixed(2)
+        : currPrice;
+      const snapAt=inMarketHours ? now : sessionOpenMs;
       OPEN_SNAPSHOT_MAP[sym]={
         date:today,
-        openPrice:currPrice,
+        openPrice:openPx,
         openScore:Number(r.score)||0,
         features:{
           gap:Number(r.gap)||0,
@@ -223,7 +229,7 @@ function captureOpenSnapshots(rows){
           setupPct:Number(r.setupPct)||0,
           ignitePct:Number(r.ignitePct)||0
         },
-        at:now
+        at:snapAt
       };
       changed=true;
     }
@@ -410,11 +416,14 @@ function saveTableEntryMap(){
   try{ localStorage.setItem(TABLE_ENTRY_STORE, JSON.stringify(TABLE_ENTRY_MAP)); }catch(e){}
 }
 function recordTableEntries(rows){
-  if(!_universeLiveAt) return;
+  const clock=istClock();
+  const inMarketHours=clock.mins>=DAY_START_MIN&&clock.mins<DAY_END_MIN;
+  if(inMarketHours && !_universeLiveAt) return;
   captureOpenSnapshots(rows);
   const today=getSessionDate();
   let changed=false;
   const now=Date.now();
+  const sessionOpenMs=new Date(today+'T09:15:00+05:30').getTime()||now;
   (rows||[]).forEach(r=>{
     if(!r||!r.symbol||!(Number(r.price)>0)) return;
     const sym=normSym(r.symbol);
@@ -422,10 +431,16 @@ function recordTableEntries(rows){
     const currPrice=Number(r.price);
     const low=Number(r.low1d)||Number(r.low)||0;
     const high=Number(r.high1d)||Number(r.high)||0;
+    const chgOpen=Number(r.changeOpen);
+    const openPx=(!inMarketHours && Number.isFinite(chgOpen) && chgOpen>-99)
+      ? +(currPrice / (1 + chgOpen / 100)).toFixed(2)
+      : currPrice;
+    const entryTime=inMarketHours ? now : sessionOpenMs;
+
     if(!prev||prev.date!==today){
-      TABLE_ENTRY_MAP[sym]={date:today, price:currPrice, at:now};
+      TABLE_ENTRY_MAP[sym]={date:today, price:openPx, at:entryTime};
       changed=true;
-    } else if(prev.price>0){
+    } else if(prev.price>0 && inMarketHours){
       const move=Math.abs((currPrice-prev.price)/prev.price);
       // If stored entry price is outside today's recorded trading range, or moved > 8% when day change is small,
       // the stored entry price is corrupted by stale cache and must be re-anchored to the true live price.
@@ -438,17 +453,32 @@ function recordTableEntries(rows){
   });
   if(changed) saveTableEntryMap();
 }
-function getTableEntryInfo(sym,currentPrice){
+function getTableEntryInfo(sym,currentPrice,row=null){
   const today=getSessionDate();
   const key=normSym(sym||'');
   const snap=getOpenSnapshot(key);
   const entry=TABLE_ENTRY_MAP[key];
-  const basePrice=(snap&&snap.openPrice>0)?snap.openPrice:(entry&&entry.date===today&&entry.price>0?entry.price:0);
-  const baseAt=(snap&&snap.at>0)?snap.at:(entry&&entry.date===today?entry.at:Date.now());
+  let basePrice=(snap&&snap.openPrice>0)?snap.openPrice:(entry&&entry.date===today&&entry.price>0?entry.price:0);
+  let baseAt=(snap&&snap.at>0)?snap.at:(entry&&entry.date===today?entry.at:0);
+
+  const curr=Number(currentPrice)>0?Number(currentPrice):(row&&Number(row.price)>0?Number(row.price):0);
+  if(!(basePrice>0)){
+    const r=row||(typeof ALL!=='undefined'&&Array.isArray(ALL)?ALL.find(x=>normSym(x.symbol)===key):null);
+    if(r&&Number(r.price)>0){
+      const chgOpen=Number(r.changeOpen);
+      if(Number.isFinite(chgOpen)&&chgOpen>-99){
+        basePrice=+(Number(r.price)/(1+chgOpen/100)).toFixed(2);
+      } else {
+        basePrice=Number(r.price);
+      }
+      baseAt=new Date(today+'T09:15:00+05:30').getTime()||Date.now();
+    }
+  }
   if(!(basePrice>0)) return null;
-  const curr=Number(currentPrice)>0?Number(currentPrice):basePrice;
-  const movePct=((curr-basePrice)/basePrice)*100;
-  if(Math.abs(movePct)>20.5){
+  if(!(baseAt>0)) baseAt=Date.now();
+
+  const movePct=curr>0?((curr-basePrice)/basePrice)*100:0;
+  if(Math.abs(movePct)>20.5 && isEquitySession(Date.now())){
     TABLE_ENTRY_MAP[key]={date:today, price:curr, at:Date.now()};
     saveTableEntryMap();
     return {entryPrice:curr, at:Date.now(), movePct:0};
@@ -3662,7 +3692,13 @@ function radarPermissionLevel(r,tapeStanding){
   if(r.intradaySellingToday===true) veto.push('selling today');
   if(NSE_SURV[r.symbol]?.length) veto.push('surveillance flag ('+(NSE_SURV[r.symbol].join(' · '))+')');
   const freshness=getRecommendationFreshness(r.symbol);
-  if(!freshness.ok) veto.push(freshness.why);
+  if(!freshness.ok){
+    if(isEquitySession(Date.now())){
+      veto.push(freshness.why);
+    } else if(freshness.why !== 'Market closed - waiting for the next session' && freshness.why !== 'Awaiting 5-minute tape'){
+      veto.push(freshness.why);
+    }
+  }
   if(getTapeProfitEvidence().status==='losing') veto.push('Five-session net-profit audit failed');
   if(veto.length) return {p:0,why:veto[0],vetoes:veto};
   if(r.entryReady===false&&r.entryAtLimit!==true) timing.push('move already consumed');
@@ -3969,7 +4005,10 @@ function radarScoreComponents(r,tapeStanding){
   const basePrice=(snap&&snap.openPrice>0)?snap.openPrice:(Number(r.price)>0?Number(r.price):0);
   const coPct=basePrice>0&&Number(r.price)>0?((Number(r.price)-basePrice)/basePrice)*100:0;
   const baseTime=(snap&&snap.at>0)?snap.at:PAGE_SESSION_BOOT_TIME;
-  const elapsedMin=Math.max(1,Math.floor((Date.now()-baseTime)/60000));
+  const inLiveSession=isEquitySession(Date.now());
+  const sessionCloseMs=new Date(getSessionDate()+'T15:30:00+05:30').getTime()||Date.now();
+  const effectiveNow=inLiveSession?Date.now():sessionCloseMs;
+  const elapsedMin=Math.max(1,Math.floor((effectiveNow-baseTime)/60000));
 
   // Deadband ±0.10% absorbs normal bid/ask spread noise
   if(coPct>0.10){
@@ -4473,8 +4512,12 @@ function getRecommendationFreshness(sym){
   if(!bars?.length) return {ok:false,why:'Awaiting 5-minute tape'};
   const clock=istClock(),date=new Date(clock.dateMs).toISOString().slice(0,10);
   const last=Number(bars[bars.length-1].t);
-  if(!isMarketRefreshWindow())
+  if(!isMarketRefreshWindow()){
+    if(bars.length && (istDayKey(last)===date || date===getSessionDate())){
+      return {ok:true,why:'Session closed — tape retained'};
+    }
     return {ok:false,why:'Market closed - waiting for the next session'};
+  }
   if(istDayKey(last)!==date) return {ok:false,why:'Awaiting this session?s 5-minute tape'};
   if(!Number.isFinite(last)||tapeBarsBehind(last)>1)
     return {ok:false,why:'Stale 5-minute tape - refresh required'};
@@ -4521,13 +4564,18 @@ function universePriceStaleness(){
 }
 function _getRowActionStateUncached(s){
   if(!s) return {state:'BLOCKED', reason:'Invalid row'};
-  const _stalePx=universePriceStaleness();
-  if(_stalePx) return {state:'BLOCKED', reason:_stalePx};
   if(s.scoreVersion!==RADAR_SCORE_VERSION) return {state:'BLOCKED', reason:'Older score scale - rescore required'};
   if(NSE_SURV[s.symbol]?.length) return {state:'BLOCKED', reason:'Surveillance flag ('+(NSE_SURV[s.symbol].join(' · '))+')'};
   if(s.recommendationTriggerBlocked) return {state:'BLOCKED', reason:'Evidence trigger: '+(s.recommendationTriggerReasons||[]).join(', ')};
   if(s.noHistory===true) return {state:'BLOCKED', reason:'Listed too recently (insufficient history)'};
   if(s.basketEligible===false) return {state:'BLOCKED', reason:'Non-EQ series or price band < 10%'};
+
+  if(!isEquitySession(Date.now())){
+    return {state:'WAIT', reason:'Market closed — viewing last session state'};
+  }
+
+  const _stalePx=universePriceStaleness();
+  if(_stalePx) return {state:'BLOCKED', reason:_stalePx};
 
   const _vw=Number(s.vwap), _px=Number(s.price), _co=Number(s.changeOpen), _day=Number(s.day);
   const _aboveVwap=_vw>0&&_px>=_vw;
@@ -11320,11 +11368,16 @@ function renderTable(){
       series:`<td>${radarSeriesBandPill(s)}</td>`,
       price:`<td data-key="price" style="white-space:nowrap">${livePriceAge(s.symbol)}${fmtINR(s.price)}<span style="color:var(--t3)"> · </span><span style="font-size:12px">${fPerf(s.day??s.priceChange)}${s.corpAction?`<span title="Corporate action (${escHtml(s.corpAction)}) — mechanical ex-date move, neutralised in scoring" style="font-size:11px;color:var(--amber);margin-left:4px;cursor:help">⚑</span>`:''}</span></td>`,
       sinceIn:`<td data-key="sinceIn" style="white-space:nowrap">${(()=>{
-        const info=s.sinceInEntry||getTableEntryInfo(s.symbol,s.price);
+        const info=s.sinceInEntry||getTableEntryInfo(s.symbol,s.price,s);
         if(!info||!Number.isFinite(info.movePct)) return '<span style="color:var(--t3)">—</span>';
         const p=info.movePct;
         const col=p>0?'var(--green)':p<0?'var(--red)':'var(--t3)';
         const sign=p>0?'+':'';
+        const inSession=isEquitySession(Date.now());
+        if(!inSession){
+          const tip=`Session move: ${sign}${p.toFixed(2)}% (Open ₹${info.entryPrice.toFixed(2)} → Close ₹${Number(s.price).toFixed(2)})`;
+          return `<span style="color:${col};font-weight:700;font-family:'DM Mono',monospace" title="${escHtml(tip)}">${sign}${p.toFixed(2)}%</span> <span style="font-size:11px;color:var(--t3);font-family:'DM Mono',monospace" title="${escHtml(tip)}">close · 15:30</span>`;
+        }
         const c=istClock(info.at);
         const hm=`${String(c.h).padStart(2,'0')}:${String(c.m).padStart(2,'0')}`;
         const ageM=Math.max(0,Math.floor((Date.now()-(Number(info.at)||Date.now()))/60000));
@@ -12582,17 +12635,23 @@ function patchVisiblePrices(){
       }
       const sinceCell = tr.querySelector('td[data-key="sinceIn"]');
       if(sinceCell){
-        const info = s.sinceInEntry || getTableEntryInfo(s.symbol, s.price);
+        const info = s.sinceInEntry || getTableEntryInfo(s.symbol, s.price, s);
         if(info && Number.isFinite(info.movePct)){
           const p=info.movePct;
           const col=p>0?'var(--green)':p<0?'var(--red)':'var(--t3)';
           const sign=p>0?'+':'';
-          const c=istClock(info.at);
-          const hm=`${String(c.h).padStart(2,'0')}:${String(c.m).padStart(2,'0')}`;
-          const ageM=Math.max(0,Math.floor((Date.now()-(Number(info.at)||Date.now()))/60000));
-          const ageTxt=ageM<60?`${ageM}m`:`${Math.floor(ageM/60)}h ${ageM%60}m`;
-          const tip=`Since page loaded at ${hm} (${ageTxt} ago) @ ₹${info.entryPrice.toFixed(2)} (current ₹${Number(s.price).toFixed(2)})`;
-          sinceCell.innerHTML=`<span style="color:${col};font-weight:700;font-family:'DM Mono',monospace" title="${escHtml(tip)}">${sign}${p.toFixed(2)}%</span> <span style="font-size:11px;color:var(--t3);font-family:'DM Mono',monospace" title="${escHtml(tip)}">${ageTxt} · ${hm}</span>`;
+          const inSession=isEquitySession(Date.now());
+          if(!inSession){
+            const tip=`Session move: ${sign}${p.toFixed(2)}% (Open ₹${info.entryPrice.toFixed(2)} → Close ₹${Number(s.price).toFixed(2)})`;
+            sinceCell.innerHTML=`<span style="color:${col};font-weight:700;font-family:'DM Mono',monospace" title="${escHtml(tip)}">${sign}${p.toFixed(2)}%</span> <span style="font-size:11px;color:var(--t3);font-family:'DM Mono',monospace" title="${escHtml(tip)}">close · 15:30</span>`;
+          } else {
+            const c=istClock(info.at);
+            const hm=`${String(c.h).padStart(2,'0')}:${String(c.m).padStart(2,'0')}`;
+            const ageM=Math.max(0,Math.floor((Date.now()-(Number(info.at)||Date.now()))/60000));
+            const ageTxt=ageM<60?`${ageM}m`:`${Math.floor(ageM/60)}h ${ageM%60}m`;
+            const tip=`Since page loaded at ${hm} (${ageTxt} ago) @ ₹${info.entryPrice.toFixed(2)} (current ₹${Number(s.price).toFixed(2)})`;
+            sinceCell.innerHTML=`<span style="color:${col};font-weight:700;font-family:'DM Mono',monospace" title="${escHtml(tip)}">${sign}${p.toFixed(2)}%</span> <span style="font-size:11px;color:var(--t3);font-family:'DM Mono',monospace" title="${escHtml(tip)}">${ageTxt} · ${hm}</span>`;
+          }
         }
       }
     }
@@ -12620,7 +12679,7 @@ function patchUniverseDeltas(deltaRows){
       }
     }
   }
-  recordTableEntries(FILT);
+  recordTableEntries(ALL);
 
   // Check if score moves changed the sorting order
   if(scoreMoved && SCOL === 'score' && FILT.length > 1){
@@ -13238,9 +13297,9 @@ function applyFilters({preservePage=false}={}){
   });
   rows.sort((a,b)=>(Number(b.score)||0)-(Number(a.score)||0));
   FILT=rows;
-  recordTableEntries(FILT);
+  recordTableEntries(ALL);
   rows.forEach(r=>{
-    const info=getTableEntryInfo(r.symbol,r.price);
+    const info=getTableEntryInfo(r.symbol,r.price,r);
     r.sinceIn=info?.movePct??0;
     r.sinceInEntry=info;
   });
