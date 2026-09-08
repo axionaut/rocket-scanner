@@ -1,5 +1,5 @@
-const BUILD_TS='2026-09-08 09:29 IST'; // release build time (IST)
-const APP_VERSION=1303; // v1303: the universe delta endpoint answered 500 on every call; live prices were never reaching the board.
+const BUILD_TS='2026-09-08 09:47 IST'; // release build time (IST)
+const APP_VERSION=1304; // v1304: the delta handler read u.searchParams on a url.parse object and threw before its first line.
 const RADAR_SCORE_VERSION='tape-decision-v4';
 const EQUITY_OPEN_MIN=9*60+15, EQUITY_CLOSE_MIN=15*60+30;
 // v1093: a baseline reward:risk MEASURED on the cross-section (last completed bhav session) instead of learned from the owner's own fills - reported on every row, deliberately not enforced. Includes v1092: position size split by Radar score / stop distance, so equally-scored names carry equal RUPEE risk, plus an opt-in Risk /trade cap.
@@ -4107,14 +4107,40 @@ function getRowActionState(s){
   // the selection rebuild and the table), so the cache HIT path was allocating an array and a
   // string 6,876 times to answer "has anything changed". Same key, same answer, no allocation.
   const a=RADAR.scoredAt||0,b=INTRADAY_STORE_V,c=RECOMMEND_MIN_SCORE,d=Math.floor(Date.now()/TAPE_BAR_MS);
+  // THE PRICE-STALENESS VERDICT MUST BE IN THE KEY. `d` is a FIVE-MINUTE bucket, so without this a
+  // GO decided just before the feed died would be served for another five minutes on top of the
+  // five the staleness test allows. Two arithmetic ops, no call - this runs ~6,900 times a
+  // keystroke - and a minute-granular key is what makes the block appear and clear promptly.
+  const e=_universeLiveAt?Math.floor((Date.now()-_universeLiveAt)/60000):-1;
   const cached=ROW_ACTION_MEMO.get(s);
-  if(cached&&cached.a===a&&cached.b===b&&cached.c===c&&cached.d===d) return cached.value;
+  if(cached&&cached.a===a&&cached.b===b&&cached.c===c&&cached.d===d&&cached.e===e) return cached.value;
   const value=_getRowActionStateUncached(s);
-  ROW_ACTION_MEMO.set(s,{a,b,c,d,value});
+  ROW_ACTION_MEMO.set(s,{a,b,c,d,e,value});
   return value;
+}
+// A BOARD ON A STORED UNIVERSE IS NOT A RECOMMENDATION. Price, day change, turnover, ATR, range,
+// gap and change-from-open all come from the universe row, so when the delta transport is dead every
+// score, target, stop and allocation is computed on whatever snapshot was last written to disk -
+// measured 2026-09-08, five days old. The tape stays honest, the decision does not. This blocks the
+// ACTION only; rows keep their scores and stay visible, and it clears itself the moment prices move.
+const UNIVERSE_STALE_MS=5*60*1000;
+// DECLARED HERE, NOT BESIDE pollUniverseDelta. `getRowActionState` reads these ~6,900 times a
+// keystroke and sits 8,000 lines above that function; a `let` declared later is in the temporal
+// dead zone for any top-level call, which throws rather than reading 0.
+let _universeLiveAt = 0;
+let _universeDeltaError = '';
+function universePriceStaleness(){
+  if(!isEquitySession(Date.now())) return null;
+  if(!_universeLiveAt) return 'Live prices are not updating'
+    +(_universeDeltaError?' ('+_universeDeltaError+')':'')+' - the board is on a stored universe';
+  const age=Date.now()-_universeLiveAt;
+  if(age>UNIVERSE_STALE_MS) return 'Live prices are '+Math.round(age/60000)+' minutes stale';
+  return null;
 }
 function _getRowActionStateUncached(s){
   if(!s) return {state:'BLOCKED', reason:'Invalid row'};
+  const _stalePx=universePriceStaleness();
+  if(_stalePx) return {state:'BLOCKED', reason:_stalePx};
   if(s.scoreVersion!==RADAR_SCORE_VERSION) return {state:'BLOCKED', reason:'Older score scale - rescore required'};
   if(NSE_SURV[s.symbol]?.length) return {state:'BLOCKED', reason:'Surveillance flag ('+(NSE_SURV[s.symbol].join(' · '))+')'};
   if(s.recommendationTriggerBlocked) return {state:'BLOCKED', reason:'Evidence trigger: '+(s.recommendationTriggerReasons||[]).join(', ')};
@@ -12095,13 +12121,11 @@ let _clientUniverseRev = 0;
 let _clientBarRev = 0;
 const _universeMap = new Map();
 // A DEAD PRICE FEED MUST NOT LOOK HEALTHY. `/api/kite/universe-delta` answered HTTP 500 on every
-// call from the day it shipped (a ReferenceError in the helper), pollUniverseDelta swallowed it as
-// {ok:false}, and the board went on scoring whatever `Kite Universe.csv` snapshot was on disk -
-// measured 2026-09-08: CAMS priced at Rs746.85 from a file written five days earlier while the tape
-// said 734.40. The tape row read `live` throughout, because the SOCKET was healthy; it is the
-// universe transport that was not, and nothing on screen separated the two.
-let _universeLiveAt = 0;
-let _universeDeltaError = '';
+// call from the day it shipped, pollUniverseDelta swallowed it as {ok:false}, and the board went on
+// scoring whatever `Kite Universe.csv` snapshot was on disk - measured 2026-09-08: CAMS priced at
+// Rs746.85 from a file written five days earlier while the tape said 732.90 (-6.28% on the day).
+// `_universeLiveAt` / `_universeDeltaError` are declared with UNIVERSE_STALE_MS, well above this -
+// see the note there.
 let _scoreJobRunning = false;
 let _scoreJobPending = false;
 
