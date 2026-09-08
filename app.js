@@ -1,5 +1,5 @@
-const BUILD_TS='2026-09-08 15:20 IST'; // release build time (IST)
-const APP_VERSION=1315; // v1315: Dynamic page-load session baseline, zero pollution across refreshes/releases.
+const BUILD_TS='2026-09-08 15:30 IST'; // release build time (IST)
+const APP_VERSION=1316; // v1316: Forward velocity boost, accelerated demotion, live delta re-scoring & auto-sort.
 const RADAR_SCORE_VERSION='tape-decision-v4';
 const EQUITY_OPEN_MIN=9*60+15, EQUITY_CLOSE_MIN=15*60+30;
 // v1093: a baseline reward:risk MEASURED on the cross-section (last completed bhav session) instead of learned from the owner's own fills - reported on every row, deliberately not enforced. Includes v1092: position size split by Radar score / stop distance, so equally-scored names carry equal RUPEE risk, plus an opt-in Risk /trade cap.
@@ -3968,9 +3968,18 @@ function radarScoreComponents(r,tapeStanding){
   const snap=getOpenSnapshot(r.symbol);
   const basePrice=(snap&&snap.openPrice>0)?snap.openPrice:(Number(r.price)>0?Number(r.price):0);
   const coPct=basePrice>0&&Number(r.price)>0?((Number(r.price)-basePrice)/basePrice)*100:0;
-  if(coPct<0){
+  if(coPct>0){
+    // Forward Velocity Boost: stock is actively expanding above page-load baseline.
+    // Give direct momentum credit so positive runners leapfrog stagnant stocks.
+    const gainPct=coPct;
+    const velocityBoost=Math.min(30, gainPct*15);
+    out.total=+Math.min(100, out.total+velocityBoost).toFixed(1);
+    out.velocityBoost=velocityBoost;
+  } else if(coPct<0){
+    // Accelerated Demotion: stock is dropping below page-load baseline.
+    // Decaying stocks plunge rapidly down the rankings.
     const dropPct=Math.abs(coPct);
-    const belowOpenPenalty=Math.min(35, dropPct*6*(calWeights.gapFadeMultiplier||1.0));
+    const belowOpenPenalty=Math.min(45, dropPct*12*(calWeights.gapFadeMultiplier||1.0));
     out.total=+Math.max(0, Math.min(out.total, +(RECOMMEND_MIN_SCORE - 0.1)) - belowOpenPenalty).toFixed(1);
     out.belowOpenDrop=dropPct;
   }
@@ -11276,7 +11285,7 @@ function renderTable(){
     const cellH={
       chk:`<td style="text-align:center"><input type="checkbox" ${isSelected?'checked':''} ${canBuy?'':'disabled'} style="width:14px;height:14px;accent-color:var(--amber);cursor:${canBuy?'pointer':'not-allowed'}" onclick="event.stopPropagation()" onchange="toggleStock('${s.symbol}',this.checked)" title="${checkTitle}"></td>`,
       rank:`<td style="font-family:'DM Mono',monospace;font-weight:800;color:var(--t1);text-align:right">${s.rank??'—'}</td>`,
-      score:`<td>${radarScoreCell(s.score,radarScoreTitle(s))}</td>`,
+      score:`<td data-key="score">${radarScoreCell(s.score,radarScoreTitle(s))}</td>`,
       // v1142: routed through symbolChartButton like every other table. This cell had built its own
       // TradingView link since v1070, so the "one symbol interaction everywhere" rule was true of the
       // panels and quietly false of the main table - which is why swapping to Zerodha missed it.
@@ -12542,6 +12551,10 @@ function patchVisiblePrices(){
       if(pxCell){
         pxCell.innerHTML = `${livePriceAge(sym)}${fmtINR(s.price)}<span style="color:var(--t3)"> · </span><span style="font-size:12px">${fPerf(s.day??s.priceChange)}${s.corpAction?`<span title="Corporate action (${escHtml(s.corpAction)}) — mechanical ex-date move, neutralised in scoring" style="font-size:11px;color:var(--amber);margin-left:4px;cursor:help">⚑</span>`:''}</span>`;
       }
+      const scoreCell = tr.querySelector('td[data-key="score"]');
+      if(scoreCell){
+        scoreCell.innerHTML = radarScoreCell(s.score, radarScoreTitle(s));
+      }
       const sinceCell = tr.querySelector('td[data-key="sinceIn"]');
       if(sinceCell){
         const info = s.sinceInEntry || getTableEntryInfo(s.symbol, s.price);
@@ -12564,19 +12577,43 @@ function patchVisiblePrices(){
 function patchUniverseDeltas(deltaRows){
   if(!deltaRows || !ALL.length) return;
   const symMap = new Map(ALL.map(s => [s.symbol, s]));
+  let scoreMoved = false;
   for(const sym in deltaRows){
     const f = deltaRows[sym];
     const s = symMap.get(sym);
     if(s && f){
+      const prevPx = s.price;
       if(Number.isFinite(f.price)) s.price = f.price;
       if(Number.isFinite(f.dayPct)) s.day = f.dayPct;
       if(Number.isFinite(f.changeOpenPct)) s.changeOpen = f.changeOpenPct;
       if(Number.isFinite(f.turnover)) s.turnover = f.turnover;
       if(Number.isFinite(f.vwap)) s.vwap = f.vwap;
       if(Number.isFinite(f.volume)) s.volume = f.volume;
+      if(prevPx !== s.price){
+        setRadarEvidenceScore(s);
+        scoreMoved = true;
+      }
     }
   }
   recordTableEntries(FILT);
+
+  // Check if score moves changed the sorting order
+  if(scoreMoved && SCOL === 'score' && FILT.length > 1){
+    let orderChanged = false;
+    for(let i = 0; i < FILT.length - 1; i++){
+      const sa = Number(FILT[i].score) || 0;
+      const sb = Number(FILT[i+1].score) || 0;
+      if(SDIR === -1 ? sa < sb : sa > sb){
+        orderChanged = true;
+        break;
+      }
+    }
+    if(orderChanged){
+      applySort();
+      renderTable();
+      return;
+    }
+  }
   patchVisiblePrices();
 }
 
