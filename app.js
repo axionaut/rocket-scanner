@@ -1,5 +1,5 @@
-const BUILD_TS='2026-09-08 14:15 IST'; // release build time (IST)
-const APP_VERSION=1312; // v1312: Guard Since In against cold brain cache, display elapsed minutes, live patch Since In.
+const BUILD_TS='2026-09-08 15:05 IST'; // release build time (IST)
+const APP_VERSION=1313; // v1313: 09:15 open snapshot store, single-stock below-open score penalty, align Since In with open baseline.
 const RADAR_SCORE_VERSION='tape-decision-v4';
 const EQUITY_OPEN_MIN=9*60+15, EQUITY_CLOSE_MIN=15*60+30;
 // v1093: a baseline reward:risk MEASURED on the cross-section (last completed bhav session) instead of learned from the owner's own fills - reported on every row, deliberately not enforced. Includes v1092: position size split by Radar score / stop distance, so equally-scored names carry equal RUPEE risk, plus an opt-in Risk /trade cap.
@@ -166,6 +166,67 @@ const NSE_FUNDAMENTAL_STORE='rs_nse_fundamentals_v1';
 const RECOMMEND_MIN_PROGRESS_FRACTION=0.25;
 const LEFT_ON_TABLE_STORE='rs_left_on_table_v1';
 const LEFT_ON_TABLE_KEEP_SESSIONS=30;   // how much history is retained
+const OPEN_SNAPSHOT_STORE='rs_open_snapshot_v1';
+let OPEN_SNAPSHOT_MAP={};
+function loadOpenSnapshotMap(){
+  try{
+    const raw=localStorage.getItem(OPEN_SNAPSHOT_STORE);
+    if(raw) OPEN_SNAPSHOT_MAP=JSON.parse(raw)||{};
+    const today=getSessionDate();
+    let pruned=false;
+    for(const k of Object.keys(OPEN_SNAPSHOT_MAP)){
+      const entry=OPEN_SNAPSHOT_MAP[k];
+      if(!entry||entry.date!==today||!(Number(entry.openPrice)>0)){
+        delete OPEN_SNAPSHOT_MAP[k];
+        pruned=true;
+      }
+    }
+    if(pruned) saveOpenSnapshotMap();
+  }catch(e){ OPEN_SNAPSHOT_MAP={}; }
+}
+function saveOpenSnapshotMap(){
+  try{ localStorage.setItem(OPEN_SNAPSHOT_STORE, JSON.stringify(OPEN_SNAPSHOT_MAP)); }catch(e){}
+}
+function captureOpenSnapshots(rows){
+  if(!_universeLiveAt) return;
+  const today=getSessionDate();
+  let changed=false;
+  const now=Date.now();
+  (rows||[]).forEach(r=>{
+    if(!r||!r.symbol) return;
+    const sym=normSym(r.symbol);
+    const existing=OPEN_SNAPSHOT_MAP[sym];
+    if(!existing||existing.date!==today){
+      const openPrice=Number(r.open1d)>0?Number(r.open1d):(Number(r.open)>0?Number(r.open):Number(r.price));
+      if(openPrice>0){
+        OPEN_SNAPSHOT_MAP[sym]={
+          date:today,
+          openPrice,
+          openScore:Number(r.score)||0,
+          features:{
+            gap:Number(r.gap)||0,
+            depthRatio:(Number(r.depthBuyQty)>0&&Number(r.depthSellQty)>0)?+(r.depthBuyQty/r.depthSellQty).toFixed(2):1,
+            relvol:Number(r.relvol)||0,
+            setupPct:Number(r.setupPct)||0,
+            ignitePct:Number(r.ignitePct)||0
+          },
+          at:now
+        };
+        changed=true;
+      }
+    }
+  });
+  if(changed) saveOpenSnapshotMap();
+}
+function getOpenSnapshot(sym){
+  const today=getSessionDate();
+  const key=normSym(sym||'');
+  const snap=OPEN_SNAPSHOT_MAP[key];
+  if(snap&&snap.date===today&&snap.openPrice>0) return snap;
+  return null;
+}
+loadOpenSnapshotMap();
+
 const TABLE_ENTRY_STORE='rs_table_entry_v3';
 let TABLE_ENTRY_MAP={};
 function loadTableEntryMap(){
@@ -190,9 +251,8 @@ function saveTableEntryMap(){
   try{ localStorage.setItem(TABLE_ENTRY_STORE, JSON.stringify(TABLE_ENTRY_MAP)); }catch(e){}
 }
 function recordTableEntries(rows){
-  // Do not record entries from cold restored brain cache before live quotes have arrived.
-  // _universeLiveAt is 0 until the helper streams the first live universe delta.
   if(!_universeLiveAt) return;
+  captureOpenSnapshots(rows);
   const today=getSessionDate();
   let changed=false;
   const now=Date.now();
@@ -222,17 +282,19 @@ function recordTableEntries(rows){
 function getTableEntryInfo(sym,currentPrice){
   const today=getSessionDate();
   const key=normSym(sym||'');
+  const snap=getOpenSnapshot(key);
   const entry=TABLE_ENTRY_MAP[key];
-  if(!entry||entry.date!==today||!(entry.price>0)) return null;
-  const curr=Number(currentPrice)>0?Number(currentPrice):entry.price;
-  const movePct=((curr-entry.price)/entry.price)*100;
-  // If movePct exceeds realistic single-session bounds (> 8%), re-anchor to live price
-  if(Math.abs(movePct)>8.0){
+  const basePrice=(snap&&snap.openPrice>0)?snap.openPrice:(entry&&entry.date===today&&entry.price>0?entry.price:0);
+  const baseAt=(snap&&snap.at>0)?snap.at:(entry&&entry.date===today?entry.at:Date.now());
+  if(!(basePrice>0)) return null;
+  const curr=Number(currentPrice)>0?Number(currentPrice):basePrice;
+  const movePct=((curr-basePrice)/basePrice)*100;
+  if(Math.abs(movePct)>20.5){
     TABLE_ENTRY_MAP[key]={date:today, price:curr, at:Date.now()};
     saveTableEntryMap();
     return {entryPrice:curr, at:Date.now(), movePct:0};
   }
-  return {entryPrice:entry.price, at:entry.at, movePct};
+  return {entryPrice:basePrice, at:baseAt, movePct};
 }
 loadTableEntryMap();
 const LEFT_ON_TABLE_POOL_SESSIONS=10;   // how much of it the pool actually reads
@@ -3737,6 +3799,18 @@ function radarScoreComponents(r,tapeStanding){
   if(!isDepthRecommendable(r.symbol)){
     out.total=+Math.min(out.total, +(RECOMMEND_MIN_SCORE - 0.1)).toFixed(1);
   }
+  // Single-Stock Intraday Calibration: Institutional momentum defends the 09:15 open print.
+  // If a stock trades below its 09:15 open, long momentum is broken. It is capped below the
+  // policy bar and dynamically penalized further the deeper it trades below its open.
+  const snap=getOpenSnapshot(r.symbol);
+  const baseOpen=(snap&&snap.openPrice>0)?snap.openPrice:(Number(r.open1d)>0?Number(r.open1d):0);
+  const coPct=Number.isFinite(Number(r.changeOpen))?Number(r.changeOpen):(baseOpen>0&&Number(r.price)>0?((Number(r.price)-baseOpen)/baseOpen)*100:0);
+  if(coPct<0){
+    const dropPct=Math.abs(coPct);
+    const belowOpenPenalty=Math.min(35, dropPct*6);
+    out.total=+Math.max(0, Math.min(out.total, +(RECOMMEND_MIN_SCORE - 0.1)) - belowOpenPenalty).toFixed(1);
+    out.belowOpenDrop=dropPct;
+  }
   return out;
 }
 
@@ -3770,6 +3844,7 @@ function radarScoreTitle(r){
       return ` · ${bits.join(' · ')} [${armed?`weights ${w.split.toFixed(2)}/${w.book.toFixed(2)}/${w.spoof.toFixed(2)}`:'measured at weight 0, not counted yet'}]`;
     })()
     +` over ${Number(c.tapeBars)||0} bars`;
+  if(c.belowOpenDrop>0) return `NOT ACTIONABLE - below 09:15 open (-${c.belowOpenDrop.toFixed(2)}%). Score penalized and capped below policy bar (${RECOMMEND_MIN_SCORE}) because opening price was not defended.`;
   if(c.block) return `NOT ACTIONABLE - ${c.block}. Tape evidence ${(Number(c.evidence)*100).toFixed(0)}/100 (${ev}), but permission is zero so the score is zero. The score is what you can act on, not what looks interesting.`;
   return `Recommendation strength ${Number(c.total).toFixed(1)} = tape evidence ${(Number(c.evidence)*100).toFixed(0)}/100 × permission ${(Number(c.permission)*100).toFixed(0)}% × risk factor ${(Number(c.riskFactor)*100).toFixed(0)}%.`
     +` Evidence, from the continuous merged 5-minute tape window: ${ev}.`
