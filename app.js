@@ -1,5 +1,5 @@
-const BUILD_TS='2026-09-08 09:47 IST'; // release build time (IST)
-const APP_VERSION=1304; // v1304: the delta handler read u.searchParams on a url.parse object and threw before its first line.
+const BUILD_TS='2026-09-08 10:25 IST'; // release build time (IST)
+const APP_VERSION=1305; // v1305: live token prices, coherent refresh, and absolute session gap recovery.
 const RADAR_SCORE_VERSION='tape-decision-v4';
 const EQUITY_OPEN_MIN=9*60+15, EQUITY_CLOSE_MIN=15*60+30;
 // v1093: a baseline reward:risk MEASURED on the cross-section (last completed bhav session) instead of learned from the owner's own fills - reported on every row, deliberately not enforced. Includes v1092: position size split by Radar score / stop distance, so equally-scored names carry equal RUPEE risk, plus an opt-in Risk /trade cap.
@@ -3912,10 +3912,11 @@ function syncRecommendationThreshold(){
 }
 function meetsScoreBar(score){const s=Number(score);return isFinite(s)&&s>=RECOMMEND_MIN_SCORE;}
 const isGreenScore=meetsScoreBar;   // legacy alias - do not use in new code
-function buildMarketTimingWindows(){
+function* buildMarketTimingWindowsGen(){
   const W={};
   let n=0;
   for(const sym in INTRADAY_BARS){
+    yield;
     const bars=INTRADAY_BARS[sym]; if(!bars||bars.length<12) continue;
     const byDay={};
     bars.forEach(b=>{const k=istDayKey(b.t);(byDay[k]??=[]).push(b);});
@@ -3950,10 +3951,12 @@ function buildMarketTimingWindows(){
     g.peerRank=spread>0?Math.max(0,Math.min(1,0.5+(g.shrunk-base)/(2*spread))):0.5;});
   return {windows:keys.map(k=>W[k]),graded:n,base};
 }
+function buildMarketTimingWindows(){
+  const it=buildMarketTimingWindowsGen();let s=it.next();while(!s.done)s=it.next();return s.value;
+}
 let _mktWinMemo=null;
 function getMarketTimingWindows(){
-  const sig=Object.keys(INTRADAY_BARS).length+'|'+
-    Object.keys(INTRADAY_BARS).reduce((t,k)=>t+(INTRADAY_BARS[k]?INTRADAY_BARS[k].length:0),0);
+  const sig=INTRADAY_STORE_V;
   if(_mktWinMemo&&_mktWinMemo.sig===sig) return _mktWinMemo.v;
   const v=buildMarketTimingWindows(); _mktWinMemo={sig,v}; return v;
 }
@@ -4764,7 +4767,7 @@ function* applyIntradayReorderGen(rows){
   if(!rows||!rows.length) return 0;
   let n=0,_ri=0;
   for(const r of rows){
-    if(_ri&&(_ri&31)===0) yield;
+    if(_ri&&(_ri&7)===0) yield;
     _ri++;
     const read=getIntradayRead(r.symbol);
     r.intraday=read||null;
@@ -4791,7 +4794,7 @@ function* applyIntradayReorderGen(rows){
     r._tapeStanding=f;
   });
   for(let _si=0;_si<rows.length;_si++){
-    if(_si&&(_si&63)===0) yield;
+    if(_si&&(_si&7)===0) yield;
     setRadarEvidenceScore(rows[_si],rows[_si]._tapeStanding);
     delete rows[_si]._iAdj;
   }
@@ -4864,7 +4867,7 @@ function* applyIntradayReorderGen(rows){
   // measured on the release board: SUBEXLTD, KOHINOOR and PKTEA each carried
   // intradaySellingToday=true beside scores of 67.9 / 67.8 / 60.9, clearing a bar they could never
   // pass. Rescore and re-rank once the flags are known, so the number and the verdict agree.
-  for(let _vi=0;_vi<rows.length;_vi++){ if(_vi&&(_vi&63)===0) yield; setRadarEvidenceScore(rows[_vi],rows[_vi]._tapeStanding); }
+  for(let _vi=0;_vi<rows.length;_vi++){ if(_vi&&(_vi&7)===0) yield; setRadarEvidenceScore(rows[_vi],rows[_vi]._tapeStanding); }
   // v1237: THE VERDICT IS DERIVED FROM THE SCORE, SO IT MUST BE DERIVED FROM THE FINAL ONE. v1232
   // moved the rescore after the veto flags but left confirmed/rejected computed from the score as it
   // stood BEFORE that rescore, so a row the rescore promoted kept the verdict its old score earned -
@@ -5332,7 +5335,7 @@ function* radarAnalyzeGen(headers,rawRows,supplements={},heldSymbols=new Set()){
   };
   const allRows=new Array(rawRows.length);
   for(let _ri=0;_ri<rawRows.length;_ri++){
-    if(_ri&&(_ri&15)===0) yield;     // row boundary: the row just built is complete before any pause
+    if(_ri&&(_ri&3)===0) yield;     // row boundary: the row just built is complete before any pause
     allRows[_ri]=buildRadarRow(rawRows[_ri],_ri);
   }
   const predictiveSorted=allRows.map(r=>r.predictiveRaw).filter(Number.isFinite).sort((a,b)=>a-b);
@@ -5346,7 +5349,7 @@ function* radarAnalyzeGen(headers,rawRows,supplements={},heldSymbols=new Set()){
   const rawScores=rows.map(r=>r.rawScore).sort((a,b)=>a-b);
   let _pi=0;
   for(const r of rows){
-    if(_pi&&(_pi&31)===0) yield;     // row boundary
+    if(_pi&&(_pi&7)===0) yield;     // row boundary
     _pi++;
     r.compositePct=radarPct(rawScores,r.rawScore);
     r.noHistory=!!_noHist[normSym(r.symbol)];
@@ -5448,7 +5451,7 @@ function* radarAnalyzeGen(headers,rawRows,supplements={},heldSymbols=new Set()){
     }
   }
   // The score is readiness evidence, not a position in today's queue.
-  for(let _si=0;_si<rows.length;_si++){ if(_si&&(_si&127)===0) yield; setRadarEvidenceScore(rows[_si]); }
+  for(let _si=0;_si<rows.length;_si++){ if(_si&&(_si&15)===0) yield; setRadarEvidenceScore(rows[_si]); }
   rows.sort((a,b)=>b.score-a.score||radarRankTieBreak(a,b));
   rows.forEach((r,i)=>{r.rank=i+1;});          // row ORDER only - never a gate, never a column
   applyLearnedTriggerRanking(rows);
@@ -5459,7 +5462,7 @@ function* radarAnalyzeGen(headers,rawRows,supplements={},heldSymbols=new Set()){
   // Internal order answers what is strongest; this second pass answers whether the move is
   // executable in the current market. Breadth is known only after the cross-section is measured.
   for(let _ei=0;_ei<rows.length;_ei++){
-    if(_ei&&(_ei&31)===0) yield;
+    if(_ei&&(_ei&7)===0) yield;
     const r=rows[_ei];
     r.entryTiming=getMarketAlignedEntryTiming(r,marketIntraday);
     // R4d is applied HERE, after the market-aligned pass, because that pass REPLACES entryTiming
@@ -5481,7 +5484,7 @@ function* radarAnalyzeGen(headers,rawRows,supplements={},heldSymbols=new Set()){
   // the zero it was given while the veto still applied. Measured: CAPLIPOINT computed 88.2 on demand
   // while carrying r.score 0, and the board went from 10 selectable to 28 on a plain rescore.
   // Rescore once the flags are known - the same rule v1232 wrote for intradaySellingToday.
-  for(let _fi=0;_fi<rows.length;_fi++){ if(_fi&&(_fi&127)===0) yield; setRadarEvidenceScore(rows[_fi],rows[_fi]._tapeStanding); }
+  for(let _fi=0;_fi<rows.length;_fi++){ if(_fi&&(_fi&15)===0) yield; setRadarEvidenceScore(rows[_fi],rows[_fi]._tapeStanding); }
   applyLearnedRecommendationGates(rows);
   yield;                              // the tape reorder below is the last phase of the pass
   // THE TAPE REORDER MOVED HERE, AND THIS IS THE REAL v1237 ORDERING FIX. It used to run BEFORE the
@@ -7279,7 +7282,7 @@ function renderStats(){
   if(HOLDINGS?.length&&Object.keys(SURV_ALL_HITS).length) try{updateSurvCorrelation();}catch(e){}
   const infoBarEl=document.getElementById('infoBar');
   infoBarEl.innerHTML=`<div style="display:flex;gap:6px;flex-wrap:wrap">${[...filterPills,...infoPills].join('')}</div>`;
-  void infoBarEl.offsetHeight;
+  // Let the browser lay out the updated cards with its next paint.
 }
 
 const COL_ORDER_LS='rs_col_order_v1';
@@ -10937,7 +10940,7 @@ function renderTable(){
         `<div style="font-weight:700;font-size:15px;color:var(--t1);max-width:230px;overflow:hidden;text-overflow:ellipsis">${escHtml(s.symbol)}${chartLinkButtons(s.symbol)}${(()=>{const bf=getBookFlag(s.symbol);if(!bf)return '';return `<span style="font-size:11px;background:rgba(245,158,11,.14);color:var(--amber);border-radius:4px;padding:1px 5px;margin-left:5px;font-weight:700;vertical-align:middle" title="Order book: ${escHtml(bf.text)}. Display only - it does not change the score unless the graded book weight says it should.">${bf.iceberg?'🧊':'⚑'}${bf.heavyCancel?' cx':''}</span>`;})()}${(()=>{const flags=s.meta?.flags||[];if(!flags.length)return '';return `<span style="font-size:12px;background:rgba(239,68,68,.15);color:var(--red);border-radius:4px;padding:1px 5px;margin-left:5px;font-weight:700;vertical-align:middle" title="NSE surveillance flags: ${escHtml(flags.join(' · '))}">⚠ ${flags.length}</span>`;})()}${s._held?`<span style="font-size:12px;background:rgba(244,114,182,.15);color:#f472b6;border-radius:4px;padding:1px 5px;margin-left:5px;font-weight:700;vertical-align:middle" title="You already hold this. Held stocks stay in the ranking (v1070) and can be recommended again — buying here ADDS to the existing position.">📌 held</span>`:''}</div>${radarSurveillanceNames(s)}<div style="font-size:11px;color:var(--t3);max-width:150px;overflow:hidden;text-overflow:ellipsis" title="${escHtml((s.name||'')+(s.setup?' · '+s.setup:''))}">${radarSeriesBandPill(s)} ${escHtml(s.setup||s.name||'')}</div>`)}</td>`,
       setup:`<td style="font-size:13px;color:var(--t2)">${escHtml(s.setup||'—')}${s.stage?' '+radarStagePill(s):''}${(s.modelTriggers||[]).length?' '+radarTriggerPill(s):''}</td>`,
       series:`<td>${radarSeriesBandPill(s)}</td>`,
-      price:`<td style="white-space:nowrap">${fmtINR(s.price)}<span style="color:var(--t3)"> · </span><span style="font-size:12px">${fPerf(s.day??s.priceChange)}${s.corpAction?`<span title="Corporate action (${escHtml(s.corpAction)}) — mechanical ex-date move, neutralised in scoring" style="font-size:11px;color:var(--amber);margin-left:4px;cursor:help">⚑</span>`:''}</span></td>`,
+      price:`<td data-key="price" style="white-space:nowrap">${livePriceAge(s.symbol)}${fmtINR(s.price)}<span style="color:var(--t3)"> · </span><span style="font-size:12px">${fPerf(s.day??s.priceChange)}${s.corpAction?`<span title="Corporate action (${escHtml(s.corpAction)}) — mechanical ex-date move, neutralised in scoring" style="font-size:11px;color:var(--amber);margin-left:4px;cursor:help">⚑</span>`:''}</span></td>`,
       day:`<td>${fPerf(s.day??s.priceChange)}${s.corpAction?`<span title="Corporate action (${escHtml(s.corpAction)}) — mechanical ex-date move, neutralised in scoring" style="font-size:11px;color:var(--amber);margin-left:4px;cursor:help">⚑</span>`:''}</td>`,
       relvol:`<td style="white-space:nowrap">${s.relvol!=null&&isFinite(s.relvol)?Number(s.relvol).toFixed(2)+'×':'—'}<span style="color:var(--t3)"> · </span>${Number.isFinite(s.depthImbalance)?`<span style="color:${s.depthImbalance>0?'var(--green)':'var(--red)'};font-size:12px" title="Order book: ${Number.isFinite(s.depthPct)?'stronger than '+Math.round(s.depthPct*100)+'% of books':''}${s.depthLive?' · LIVE reading':' · pre-open, decayed by the session'}">${(s.depthImbalance>0?'+':'')+s.depthImbalance.toFixed(2)}</span>`:'<span style="color:var(--t3)">—</span>'}</td>`,
       // v1139: the order book, in the recommendation table rather than a list of its own. Muted em
@@ -12126,6 +12129,7 @@ const _universeMap = new Map();
 // Rs746.85 from a file written five days earlier while the tape said 732.90 (-6.28% on the day).
 // `_universeLiveAt` / `_universeDeltaError` are declared with UNIVERSE_STALE_MS, well above this -
 // see the note there.
+let _clientRepairRev=0,_pendingRepairRev=0;
 let _scoreJobRunning = false;
 let _scoreJobPending = false;
 
@@ -12162,6 +12166,12 @@ function universeFieldsToRow(sym, f){
   };
 }
 
+function livePriceAge(sym){
+  const f=_universeMap.get(sym);
+  if(!f) return '<div style="font-size:10px;color:var(--amber)">stored price</div>';
+  const age=f.priceAt>0?Math.max(0,Math.floor((Date.now()-f.priceAt)/1000)):null;
+  return `<div style="font-size:10px;color:var(--t3)">${escHtml(f.priceSource||'stored price')}${age===null?'':` / ${age}s ago`} / refresh 30s</div>`;
+}
 function patchVisiblePrices(){
   const rows = document.querySelectorAll('#tBody tr[data-sym]');
   if(!rows.length) return;
@@ -12172,7 +12182,7 @@ function patchVisiblePrices(){
     if(s){
       const pxCell = tr.querySelector('td[data-key="price"]');
       if(pxCell){
-        pxCell.innerHTML = `${fmtINR(s.price)}<span style="color:var(--t3)"> · </span><span style="font-size:12px">${fPerf(s.day??s.priceChange)}${s.corpAction?`<span title="Corporate action (${escHtml(s.corpAction)}) — mechanical ex-date move, neutralised in scoring" style="font-size:11px;color:var(--amber);margin-left:4px;cursor:help">⚑</span>`:''}</span>`;
+        pxCell.innerHTML = `${livePriceAge(sym)}${fmtINR(s.price)}<span style="color:var(--t3)"> · </span><span style="font-size:12px">${fPerf(s.day??s.priceChange)}${s.corpAction?`<span title="Corporate action (${escHtml(s.corpAction)}) — mechanical ex-date move, neutralised in scoring" style="font-size:11px;color:var(--amber);margin-left:4px;cursor:help">⚑</span>`:''}</span>`;
       }
     }
   });
@@ -12222,8 +12232,12 @@ async function scheduleScoreJob(){
         raw.push(universeFieldsToRow(sym, f));
       }
       if(raw.length < 20) return;
+      if(!_mktWinMemo||_mktWinMemo.sig!==INTRADAY_STORE_V){
+        const sig=INTRADAY_STORE_V;
+        _mktWinMemo={sig,v:await drainCooperatively(buildMarketTimingWindowsGen())};
+      }
       ALL = await radarScoreRowsAsync(raw);
-      applyFilters();
+      applyFilters({preservePage:true});
     });
   } catch(e) {
     console.warn('scheduleScoreJob error:', e);
@@ -12236,7 +12250,7 @@ async function scheduleScoreJob(){
   }
 }
 
-async function pollUniverseDelta(){
+async function pollUniverseDelta(deferScore=false){
   if(!KITE_API) return { ok: false, changed: false };
   try {
     // EVERY HELPER CALL ON THE BEAT IS BOUNDED (v1287). This one was not, and `_streamRefreshBusy`
@@ -12248,7 +12262,9 @@ async function pollUniverseDelta(){
     if(!j||j.ok===false){ _universeDeltaError='helper returned no universe'; return {ok:false,changed:false}; }
     const newRev = Number(j.rev) || 0;
     const newBarRev = Number(j.barRev) || 0;
-    const barCompleted = (_clientBarRev > 0 && newBarRev > _clientBarRev);
+    _pendingRepairRev=Number(j.repairRev)||0;
+    const repairChanged=_pendingRepairRev!==_clientRepairRev;
+    const barCompleted = (newBarRev > _clientBarRev);
     const isCold = (_clientUniverseRev === 0 || j.full);
     if(!j.full&&newRev<_clientUniverseRev){
       _clientUniverseRev=0;_clientBarRev=0;
@@ -12262,12 +12278,9 @@ async function pollUniverseDelta(){
       return {ok:false,changed:false,error:'Waiting for the helper universe to populate'};
     }
     if(changedSyms.length === 0 && !isCold){
-      if(barCompleted){
-        scheduleScoreJob();
-      }
       _clientUniverseRev=newRev;_clientBarRev=newBarRev;
       _universeLiveAt=Date.now();_universeDeltaError='';
-      return { ok: true, changed: false, barCompleted };
+      return { ok: true, changed: false, barCompleted, repairChanged };
     }
 
     if(isCold) _universeMap.clear();
@@ -12275,7 +12288,7 @@ async function pollUniverseDelta(){
       _universeMap.set(sym, j.rows[sym]);
     }
 
-    if(isCold){
+    if(isCold&&!deferScore){
       // THE COLD SNAPSHOT IS THE STARTUP FREEZE. This ran the synchronous scorer on the full
       // universe on the first poll after load - the single longest task on the page. Same result,
       // same order, through the cooperative driver and the same one-at-a-time queue as every other
@@ -12294,20 +12307,17 @@ async function pollUniverseDelta(){
       });
     } else {
       patchUniverseDeltas(j.rows);
-      if(barCompleted){
-        scheduleScoreJob();
-      }
     }
     _clientUniverseRev=newRev;_clientBarRev=newBarRev;
     _universeLiveAt=Date.now();_universeDeltaError='';
-    return { ok: true, changed: changedSyms.length > 0, barCompleted };
+    return { ok: true, changed: changedSyms.length > 0, barCompleted, repairChanged };
   } catch(e) {
     _universeDeltaError=e.message||'unreachable';
     return { ok: false, changed: false, error: e.message };
   }
 }
 let _inventoryLoadRunning=false;
-async function loadIntradayInventory(){
+async function loadIntradayInventory({deferScore=false,repair=false}={}){
   if(_inventoryLoadRunning) return 0;
   _inventoryLoadRunning=true;
   try{
@@ -12318,6 +12328,7 @@ async function loadIntradayInventory(){
     // query was written and reverted because a partial answer would have replaced a symbol's
     // history. An empty `since` (nothing held yet) still asks for everything.
     const since=(()=>{
+      if(repair) return istDayKey(Date.now())+' 09:15';
       const ms=newestTapeBucketMs()-10*60000;
       if(!(ms>0)) return '';
       return new Date(ms+5.5*3600000).toISOString().slice(0,16).replace('T',' ');
@@ -12343,11 +12354,11 @@ async function loadIntradayInventory(){
       const merged=await mergeInventoryPage(j,since,storeVAtRequest);
       n+=merged;
       processed+=Object.keys(j.data).length;
-      if(!PAGE||j.next==null) break;
+      if(!PAGE||j.next==null){if(repair) _clientRepairRev=_pendingRepairRev;break;}
       pageOff=j.next;
       await yieldToUi();
     }
-    if(n){
+    if(n&&!deferScore){
       try{ await drainCooperatively(applyIntradayReorderGen(ALL)); }catch(e){}
       await yieldToUi();
       try{ applyFilters(); }catch(e){}
@@ -12397,7 +12408,7 @@ async function mergeInventoryPage(j,since,storeVAtRequest){
     // render belong to the caller, so a paged read publishes ONE result, not one per page.
     return await runHeavyJob(merge);
 }
-async function refreshHeldPositionTape(){
+async function refreshHeldPositionTape({deferScore=false}={}){
   if(!KITE_API) return 0;
   const syms=Object.keys(getHeldPositionMap()||{}).map(normSym).filter(Boolean);
   if(!syms.length) return 0;
@@ -12408,7 +12419,7 @@ async function refreshHeldPositionTape(){
       +'&since='+encodeURIComponent(since)+'&limit='+syms.length,{timeout:10000});
     if(!j?.ok||!j.data) return 0;
     const n=await mergeInventoryPage(j,since,version);
-    if(n){await drainCooperatively(applyIntradayReorderGen(ALL));applyFilters();}
+    if(n&&!deferScore){await drainCooperatively(applyIntradayReorderGen(ALL));applyFilters();}
     return n;
   }catch(e){return 0;}
 }
@@ -12723,7 +12734,7 @@ function scheduleFilterPaint(){
   if(typeof requestAnimationFrame==='function') requestAnimationFrame(paint);
   else setTimeout(paint,0);
 }
-function applyFilters(){
+function applyFilters({preservePage=false}={}){
   syncRecommendationThreshold();
   const q=(document.getElementById('fSearch')?.value||'').trim().toLowerCase();
   const turnIdx=+(document.getElementById('fMinTurnover')?.value||0);
@@ -12823,7 +12834,8 @@ function applyFilters(){
   }
   SELECTED=newSelected;
 
-  PG=1;scheduleFilterPaint();saveFilterState();updateTabCounts();
+  PG=preservePage?Math.min(PG,Math.max(1,Math.ceil(FILT.length/PGSZ))):1;
+  scheduleFilterPaint();if(!preservePage)saveFilterState();updateTabCounts();
   // Portfolio panels are secondary and can build several large tables. Keep them off the
   // wheel/typing critical path, then refresh once the user pauses.
   clearTimeout(window._filterPanelsTimer);
@@ -13505,7 +13517,7 @@ async function streamRefreshTick(){
     }
     // v1267: Delta transport replaces 30-second full Kite Universe.csv download.
     // The helper maintains live state in memory and sends only changed symbols/bars.
-    const deltaRes=await pollUniverseDelta();
+    const deltaRes=await pollUniverseDelta(true);
     const universeChanged=deltaRes&&deltaRes.changed;
     // Holdings, positions and orders used to wait for the helper's ten-minute housekeeping tick.
     // Ask on this same visible 30-second beat, then immediately hydrate whatever changed, so a new
@@ -13531,9 +13543,9 @@ async function streamRefreshTick(){
     // once every five minutes, and the read is incremental, so it costs a request with a handful of
     // bars in it. `tapeBarsBehind` already excludes the bar still forming.
     const tapeStale=tapeBarsBehind(newestTapeBucketMs())>=1;
-    const needBars=STREAM_STATUS?.statusUnknown||!STREAM_STATUS?.connected||!!(deltaRes&&deltaRes.barCompleted)||tapeStale;
-    const heldBarsRead=await refreshHeldPositionTape();
-    const barsRead=(needBars?await loadIntradayInventory():0)+heldBarsRead;
+    const needBars=deltaRes?.repairChanged||STREAM_STATUS?.statusUnknown||!STREAM_STATUS?.connected||!!(deltaRes&&deltaRes.barCompleted)||tapeStale;
+    const heldBarsRead=await refreshHeldPositionTape({deferScore:true});
+    const barsRead=(needBars?await loadIntradayInventory({deferScore:true,repair:deltaRes?.repairChanged}):0)+heldBarsRead;
     // The book metrics and the one-minute bars ride the same beat. Both are small in-memory reads
     // on the helper - no file walk, no full-universe payload - and both are best-effort: a failure
     // leaves the previous values in place and the score simply carries on without them.
@@ -13542,6 +13554,9 @@ async function streamRefreshTick(){
     // The weights only move when the Book archive grows, which is once a session - so this is a
     // ten-minute refresh, not a beat-by-beat one. It is the only call here that reads files.
     if(Date.now()-_bookEdgeAt>600000){ _bookEdgeAt=Date.now(); try{ await loadBookEdges(); }catch(e){} }
+    // Publish only after prices, completed tape, book and minute inputs have all arrived.
+    // Recompute every beat: clock-dependent permission and live sizing cannot wait for barRev.
+    if(deltaRes?.ok) await scheduleScoreJob();
     captureLiveRecommendationScan();
     const done=Date.now();
     setStreamActivity({phase:STREAM_STATUS?.statusUnknown?'checking':STREAM_STATUS?.connected?'live':'stream-down',lastCompleteAt:done,
