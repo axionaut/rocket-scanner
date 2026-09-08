@@ -1,5 +1,5 @@
-const BUILD_TS='2026-09-08 11:45 IST'; // release build time (IST)
-const APP_VERSION=1306; // v1306: timer sync, live stream book depth, basket GTT target & button fix, and Since In column.
+const BUILD_TS='2026-09-08 12:55 IST'; // release build time (IST)
+const APP_VERSION=1307; // v1307: unified recommendation table with Show below threshold toggle, retired separate removed table.
 const RADAR_SCORE_VERSION='tape-decision-v4';
 const EQUITY_OPEN_MIN=9*60+15, EQUITY_CLOSE_MIN=15*60+30;
 // v1093: a baseline reward:risk MEASURED on the cross-section (last completed bhav session) instead of learned from the owner's own fills - reported on every row, deliberately not enforced. Includes v1092: position size split by Radar score / stop distance, so equally-scored names carry equal RUPEE risk, plus an opt-in Risk /trade cap.
@@ -9254,6 +9254,7 @@ function getCols(){
   // User-dragged column order (v536) applies here so header and cells always agree.
   return applyColOrder('main-rankings',[
     {key:'chk',label:'',s:0},
+    {key:'action',label:'Action',s:1},
     {key:'score',label:'Score',s:1},
     {key:'symbol',label:'Symbol',s:1},
     {key:'price',label:'Price/Day',s:1},
@@ -11079,6 +11080,7 @@ function renderTable(){
     const cells=COLS.map(c=>cellH[c.key]||'<td></td>').join('');
     let _trStyle='cursor:pointer';
     if(isSelected) _trStyle+=';background:rgba(251,191,36,.04);outline:1px solid rgba(251,191,36,.12);outline-offset:-1px';
+    else if(!canBuy) _trStyle+=';opacity:0.8';
     return`<tr data-sym="${s.symbol}" style="${_trStyle}" onclick="showRadarDetail('${s.symbol}')" title="Click for the full scoring breakdown">${cells}</tr>`;
   }).join('')||`<tr><td colspan="${COLS.length}"><div style="padding:48px 20px;text-align:center;color:var(--t3)">${emptyBoardReason()}</div></td></tr>`;
   renderPgn();
@@ -12810,6 +12812,7 @@ function applyFilters({preservePage=false}={}){
   ALLOC_BLOCKED=0;
   DIRECTION_REMOVED=0;
   REMOVED_ROWS=[];
+  const showBelowThreshold=!!document.getElementById('fShowBelowThreshold')?.checked;
   let rows=ALL.filter(s=>{
     if(s._held)SUPPRESSED_HELD++;
     // Hard exclusions must win the explanation even when the same row also fails a user filter.
@@ -12817,27 +12820,12 @@ function applyFilters({preservePage=false}={}){
     if(NSE_SURV[s.symbol]?.length){
       SURV_HARD_REMOVED++;
       REMOVED_ROWS.push({s,reason:'surv',rules:NSE_SURV[s.symbol],detail:'configured surveillance rule'});
-      return false;
-    }
-    if(s.recommendationTriggerBlocked){
+      if(!showBelowThreshold) return false;
+    } else if(s.recommendationTriggerBlocked){
       REMOVED_ROWS.push({s,reason:'trigger',chip:(s.recommendationTriggerReasons||[])[0]||'evidence trigger veto',
         detail:'automatic evidence trigger: '+(s.recommendationTriggerReasons||[]).join(', ')});
-      return false;
-    }
-    // Discovery filters: Min Turnover, Max Price, Min Score, Search. Risk is scored, not filtered.
-    // `chip` is what the removed-audit PRINTS, `detail` is the sentence behind it. A chip that says
-    // only "Your filter" answers nothing - which filter, and by how much, is the whole question when
-    // 1,426 rows are removed at once (owner, v1287).
-    // ONE CONTROL REPLACES MIN TURNOVER AND MAX PRICE (owner, v1292). Both were proxies for the
-    // same question - can I actually get in and out of this - and neither could answer it. Turnover
-    // is a whole-day statistic against a position you exit in minutes; a price ceiling is a proxy
-    // for share granularity that punishes every expensive liquid stock to catch a few illiquid
-    // ones. Friction measures the thing itself, in the same percent unit as the target.
-    // ABSENCE IS NOT A REMOVAL: a row with no live book has friction `null` and is left alone. The
-    // book is only ten minutes old on a fresh helper, and an unmeasured row is not an expensive one.
-    // THE THIN CUT RUNS FIRST: it is a statement about the stock, so it should be the reason the
-    // row is gone. A row with no tape yet is NOT removed - unmeasured is not thin.
-    if(dropThinPct!=null){
+      if(!showBelowThreshold) return false;
+    } else if(dropThinPct!=null){
       const cutInfo=getSharesPerBarCut(dropThinPct);
       const prof=getTapeFlowProfile(s.symbol);
       if(cutInfo&&cutInfo.cut!==null&&prof&&prof.medianShares>0&&prof.medianShares<cutInfo.cut){
@@ -12847,13 +12835,12 @@ function applyFilters({preservePage=false}={}){
             +' shares in a typical 5-minute bar, below the cut of '+Math.round(cutInfo.cut).toLocaleString('en-IN')
             +' that drops the thinnest '+dropThinPct+'% of the '+cutInfo.n.toLocaleString('en-IN')
             +' stocks with a tape today'});
-        return false;
+        if(!showBelowThreshold) return false;
       }
-    }
-    if(Number.isFinite(Number(s.score))&&Number(s.score)<RECOMMEND_MIN_SCORE){
+    } else if(Number.isFinite(Number(s.score))&&Number(s.score)<RECOMMEND_MIN_SCORE){
       REMOVED_ROWS.push({s,reason:'filter',chip:'Score '+Number(s.score).toFixed(1)+' < min '+RECOMMEND_MIN_SCORE,
         detail:'score '+Number(s.score).toFixed(1)+' is below your Min Score of '+RECOMMEND_MIN_SCORE});
-      return false;
+      if(!showBelowThreshold) return false;
     }
     if(q&&![s.symbol,s.name,s.sector].join(' ').toLowerCase().includes(q)) return false;
 
@@ -12911,7 +12898,7 @@ function applyFilters({preservePage=false}={}){
 function renderRankingsPanels(){
   const q=rankingsSearchQuery();
   const remEl=document.getElementById('rankRemoved');
-  if(remEl) remEl.innerHTML=buildRemovedPanel(q);
+  if(remEl) remEl.innerHTML='';
   const latestEl=document.getElementById('rankLatestSession');
   if(latestEl){
     const latest=buildLatestSessionPanel(q);
@@ -12946,87 +12933,7 @@ function survRuleLabels(keys,symbol=''){
   return labels;
 }
 function buildRemovedPanel(query=''){
-  const all=[...REMOVED_ROWS].sort((a,b)=>(a.s.rank??1e9)-(b.s.rank??1e9));
-  if(!all.length) return '';
-  const heldN=all.filter(r=>r.reason==='held').length;
-  const survN=all.filter(r=>r.reason==='surv').length;
-  const dirN=all.filter(r=>r.reason==='direction').length;
-  const filtRows=all.filter(r=>r.reason==='filter');
-  const filtN=filtRows.length;
-  // WHICH filter, with its value - "1,426 by your filters" names nothing the owner can act on.
-  const filtBreak=(()=>{
-    const by={};
-    for(const r of filtRows){
-      const c=String(r.chip||'');
-      const k=c.split(' ')[0]||'Filter';
-      if(!by[k]) by[k]={n:0,cut:''};
-      by[k].n++;
-      if(!by[k].cut){ const m=c.match(/[<>]\s*(?:min |max )?(.+)$/i); if(m) by[k].cut=m[1]; }
-    }
-    const phrase={Score:'below Min Score',Turnover:'below Min Turnover',Price:'above Max Price'};
-    return Object.entries(by).sort((a,b)=>b[1].n-a[1].n)
-      .map(([k,v])=>`${v.n} ${phrase[k]||('by '+k.toLowerCase())}${v.cut?' '+v.cut:''}`).join(' · ');
-  })();
-  const peakN=all.filter(r=>r.reason==='peak').length;
-  const allocN=all.filter(r=>r.reason==='alloc').length;
-  const triggerN=all.filter(r=>r.reason==='trigger').length;
-  const flowN=all.filter(r=>r.reason==='flow').length;
-  const nohistN=all.filter(r=>r.reason==='nohistory').length;
-  const shown=filterPanelRows(all,query,r=>[r.s.symbol,r.s.name,r.s.sector]);
-  const CAP=100;
-  const view=shown.slice(0,CAP);
-  const rowsHtml=view.map(r=>{
-    const s=r.s;
-    const reason=r.reason==='direction'
-      ?`<span style="font-size:11px;background:rgba(239,68,68,.12);color:var(--red);border:1px solid rgba(239,68,68,.25);border-radius:5px;padding:1px 7px;white-space:nowrap" title="${escHtml(r.detail||'')}">📉 Not lifting off</span>`
-      :r.reason==='filter'
-      ?`<span style="font-size:11px;background:rgba(148,163,184,.10);color:var(--t2);border:1px solid rgba(148,163,184,.22);border-radius:5px;padding:1px 7px;white-space:nowrap" title="${escHtml(r.detail||'')}">⚙ ${escHtml(r.chip||'Your filter')}</span>`
-      :r.reason==='trigger'
-      ?`<span style="font-size:11px;background:rgba(239,68,68,.12);color:var(--red);border:1px solid rgba(239,68,68,.25);border-radius:5px;padding:1px 7px;white-space:nowrap" title="${escHtml(r.detail||'')}">⛔ ${escHtml(r.chip||'Automatic trigger veto')}</span>`
-      :r.reason==='held'
-      ?`<span style="font-size:11px;background:rgba(244,114,182,.12);color:#f472b6;border:1px solid rgba(244,114,182,.25);border-radius:5px;padding:1px 7px;white-space:nowrap">📌 Held · in Open Positions</span>`
-      :r.reason==='alloc'
-        ?`<span style="font-size:11px;background:rgba(148,163,184,.12);color:var(--t2);border:1px solid rgba(148,163,184,.28);border-radius:5px;padding:1px 7px;white-space:nowrap" title="${escHtml(r.detail||'')}">🚫 Cannot allocate</span>`
-      :r.reason==='flow'
-        ?`<span style="font-size:11px;background:rgba(239,68,68,.12);color:var(--red);border:1px solid rgba(239,68,68,.25);border-radius:5px;padding:1px 7px;white-space:nowrap" title="${escHtml(r.detail||'')}">📊 Current tape rejects it</span>`
-      :r.reason==='nohistory'
-        ?`<span style="font-size:11px;background:rgba(148,163,184,.10);color:var(--t2);border:1px solid rgba(148,163,184,.22);border-radius:5px;padding:1px 7px;white-space:nowrap" title="${escHtml(r.detail||'')}">🆕 No price history to rank it on</span>`
-      :r.reason==='peak'
-        ?`<span style="font-size:11px;background:rgba(245,158,11,.12);color:var(--amber);border:1px solid rgba(245,158,11,.3);border-radius:5px;padding:1px 7px;white-space:nowrap" title="${escHtml(r.s.entryTiming?.reason||'Entry timing is not confirmed')} · range location ${fmt(r.s.entryTiming?.rangeLocation,0)}% · expected range used ${fmt(r.s.entryTiming?.rangeUsed,0)}%${r.s.entryTiming?.pullbackPrice?` · wait near/below ${fmtINR(r.s.entryTiming.pullbackPrice)}`:''}">⏳ ${escHtml(r.s.entryTiming?.action||'Wait for confirmation')}</span>`
-        :r.reason==='surv'
-        ?(()=>{const labels=survRuleLabels(r.rules,s.symbol);const shown=labels.length?labels:['Configured REG1 surveillance flag'];return `<span style="font-size:11px;background:rgba(239,68,68,.12);color:var(--red);border:1px solid rgba(239,68,68,.25);border-radius:5px;padding:1px 7px;white-space:nowrap" title="Configured surveillance rule(s): ${escHtml(shown.join(' · '))}">⚠ ${escHtml(shown[0])}${shown.length>1?` +${shown.length-1}`:''}</span>`;})()
-        :`<span style="font-size:11px;background:rgba(148,163,184,.12);color:var(--t2);border:1px solid rgba(148,163,184,.28);border-radius:5px;padding:1px 7px;white-space:nowrap" title="${escHtml(r.detail||'No detail was recorded with this removal.')}">Removed · ${escHtml(String(r.reason||'reason not recorded'))}</span>`;
-    // Same interaction as every other stock table (owner, v1070): the NAME opens the
-    // TradingView chart, the ROW opens the Radar scoring breakdown.
-    return `<tr onclick="showRadarDetail('${s.symbol}')" title="Click for the full scoring breakdown" style="border-bottom:1px solid var(--border);cursor:pointer">
-      <td style="padding:6px 10px;text-align:right;font-family:'DM Mono',monospace;color:var(--t2)">#${s.rank??'—'}</td>
-      <td style="padding:6px 10px"><span style="font-weight:700;color:var(--t1);font-size:14px">${escHtml(s.symbol)}</span>${chartLinkButtons(s.symbol)} <span style="color:var(--t3);font-size:12px">${escHtml((s.name||'').slice(0,28))}</span></td>
-      <td style="padding:6px 10px;text-align:right">${radarScoreCell(s.score)}</td>
-      <td style="padding:6px 10px;text-align:right">${fPerf(s.day??s.priceChange)}</td>
-      <td style="padding:6px 10px">${reason}</td>
-    </tr>`;
-  }).join('');
-  const tag=query&&shown.length!==all.length?` <span style="font-weight:500;text-transform:none;letter-spacing:0;color:var(--t3)">· ${shown.length} of ${all.length} matching "${escHtml(query)}"</span>`:'';
-  const capNote=shown.length>CAP?`<div style="padding:6px 10px;font-size:12px;color:var(--t3)">Showing the top ${CAP} by rank · ${shown.length-CAP} more removed further down the ranking.</div>`:'';
-  // Always visible, no collapse, no internal scroll (owner v547) — the page scrolls. Capped
-  // at the top 100 by rank so the DOM stays bounded; it sits last on the Rankings tab.
-  const body=shown.length
-    ?`<div><table style="width:100%;border-collapse:collapse;font-size:14px">
-        <thead><tr style="color:var(--t3);border-bottom:1px solid var(--border)">
-          <th style="padding:6px 10px;text-align:right;font-size:12px;text-transform:uppercase">Rank</th>
-          <th style="padding:6px 10px;text-align:left;font-size:12px;text-transform:uppercase">Symbol</th>
-          <th style="padding:6px 10px;text-align:right;font-size:12px;text-transform:uppercase">Score</th>
-          <th style="padding:6px 10px;text-align:right;font-size:12px;text-transform:uppercase">Day %</th>
-          <th style="padding:6px 10px;text-align:left;font-size:12px;text-transform:uppercase">Reason removed</th>
-        </tr></thead><tbody>${rowsHtml}</tbody></table></div>${capNote}`
-    :panelNoMatchHtml(query,'removed stock');
-  return `<div id="rank-removed-card" style="background:var(--bg-card);border:1px solid var(--border);border-radius:10px;overflow:hidden">
-    <div style="padding:10px 16px;border-bottom:1px solid var(--border)">
-      <span style="font-size:12px;font-weight:700;color:var(--t2);text-transform:uppercase;letter-spacing:.1em">Removed from rankings — ${all.length}${tag}</span>
-      <span style="font-size:13px;color:var(--t3);font-weight:400;margin-left:8px">${[dirN?`📉 ${dirN} not lifting off`:'',heldN?`📌 ${heldN} held`:'',survN?`⚠ ${survN} surveillance`:'',triggerN?`${triggerN} automatic trigger veto`:'',peakN?`⏳ ${peakN} waiting for entry confirmation`:'',flowN?`📊 ${flowN} rejected by the current tape`:'',nohistN?`🆕 ${nohistN} without price history`:'',allocN?`🚫 ${allocN} not allocatable`:'',filtN?`⚙ ${filtBreak||(filtN+' by your filters')}`:''].filter(Boolean).join(' · ')}${all.length?' · ':''}why the ranks skip</span>
-    </div>
-    ${body}
-  </div>`;
+  return '';
 }
 function showRadarDetail(sym){
   const r=ALL.find(x=>x.symbol===sym);
@@ -15148,6 +15055,7 @@ function saveFilterState(){
   const state={
     search:document.getElementById('fSearch')?.value||'',
     minScore:document.getElementById('fMinScore')?.value||'60',
+    showBelowThreshold:document.getElementById('fShowBelowThreshold')?.checked||false,
     minTurnover:document.getElementById('fMinTurnover')?.value||'0',
     dropThin:document.getElementById('fDropThin')?.value??'',
     sortCol:SCOL,
@@ -15184,6 +15092,7 @@ function loadFilterState(){
     const shared=JSON.parse(localStorage.getItem(SHARED_FILTER_STORE)||'{}');
     if(state.search!=null){const el=document.getElementById('fSearch');if(el)el.value=state.search;}
     if(state.minScore!=null){const el=document.getElementById('fMinScore');if(el)el.value=state.minScore;}
+    if(state.showBelowThreshold!=null){const el=document.getElementById('fShowBelowThreshold');if(el)el.checked=!!state.showBelowThreshold;}
     if(state.minTurnover!=null){const el=document.getElementById('fMinTurnover');if(el)el.value=state.minTurnover;}
     if(state.dropThin!=null){const el=document.getElementById('fDropThin');if(el)el.value=state.dropThin;}
     resetRecommendationSelectionForRefresh(); // legacy persisted exclusions are deliberately ignored
