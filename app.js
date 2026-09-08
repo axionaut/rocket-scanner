@@ -1,5 +1,5 @@
-const BUILD_TS='2026-09-08 10:25 IST'; // release build time (IST)
-const APP_VERSION=1305; // v1305: live token prices, coherent refresh, and absolute session gap recovery.
+const BUILD_TS='2026-09-08 11:45 IST'; // release build time (IST)
+const APP_VERSION=1306; // v1306: timer sync, live stream book depth, basket GTT target & button fix, and Since In column.
 const RADAR_SCORE_VERSION='tape-decision-v4';
 const EQUITY_OPEN_MIN=9*60+15, EQUITY_CLOSE_MIN=15*60+30;
 // v1093: a baseline reward:risk MEASURED on the cross-section (last completed bhav session) instead of learned from the owner's own fills - reported on every row, deliberately not enforced. Includes v1092: position size split by Radar score / stop distance, so equally-scored names carry equal RUPEE risk, plus an opt-in Risk /trade cap.
@@ -158,6 +158,41 @@ const NSE_FUNDAMENTAL_STORE='rs_nse_fundamentals_v1';
 const RECOMMEND_MIN_PROGRESS_FRACTION=0.25;
 const LEFT_ON_TABLE_STORE='rs_left_on_table_v1';
 const LEFT_ON_TABLE_KEEP_SESSIONS=30;   // how much history is retained
+const TABLE_ENTRY_STORE='rs_table_entry_v1';
+let TABLE_ENTRY_MAP={};
+function loadTableEntryMap(){
+  try{
+    const raw=localStorage.getItem(TABLE_ENTRY_STORE);
+    if(raw) TABLE_ENTRY_MAP=JSON.parse(raw)||{};
+  }catch(e){ TABLE_ENTRY_MAP={}; }
+}
+function saveTableEntryMap(){
+  try{ localStorage.setItem(TABLE_ENTRY_STORE, JSON.stringify(TABLE_ENTRY_MAP)); }catch(e){}
+}
+function recordTableEntries(rows){
+  const today=getSessionDate();
+  let changed=false;
+  const now=Date.now();
+  (rows||[]).forEach(r=>{
+    if(!r||!r.symbol||!(Number(r.price)>0)) return;
+    const sym=normSym(r.symbol);
+    const prev=TABLE_ENTRY_MAP[sym];
+    if(!prev||prev.date!==today){
+      TABLE_ENTRY_MAP[sym]={date:today, price:Number(r.price), at:now};
+      changed=true;
+    }
+  });
+  if(changed) saveTableEntryMap();
+}
+function getTableEntryInfo(sym,currentPrice){
+  const today=getSessionDate();
+  const entry=TABLE_ENTRY_MAP[normSym(sym||'')];
+  if(!entry||entry.date!==today||!(entry.price>0)) return null;
+  const curr=Number(currentPrice)>0?Number(currentPrice):entry.price;
+  const movePct=((curr-entry.price)/entry.price)*100;
+  return {entryPrice:entry.price, at:entry.at, movePct};
+}
+loadTableEntryMap();
 const LEFT_ON_TABLE_POOL_SESSIONS=10;   // how much of it the pool actually reads
 // v1098: dated official closes, so a multi-session drift can be measured properly. The app has never
 // retained any price history — NSE_BHAV is rebuilt from the current zip on every load — which is why
@@ -5375,15 +5410,21 @@ function* radarAnalyzeGen(headers,rawRows,supplements={},heldSymbols=new Set()){
     }
     const _dirOk=(Number(r.vwap)>0&&Number(r.price)>=Number(r.vwap))
       &&Number(r.changeOpen)>0&&Number(r.day)>0;
-    r.directionConfirmed=!!_dirOk;
-    r.feasibility=+_feas.toFixed(4);
     const _bk=NSE_DEPTH[r.symbol];
     const _lv=DEPTH_LIVE[r.symbol];
+    const _lad=getBookLadder(r.symbol);
     // A pasted book (chart summary, v1144) is a direct reading of what is resting NOW - it needs no
     // decay, because nothing about it is leftover auction inventory.
     if(_lv&&_lv.buyQty>0&&_lv.sellQty>0){
       r.depthImbalance=(_lv.buyQty-_lv.sellQty)/(_lv.buyQty+_lv.sellQty);
       r.depthLive=true; r.depthSource='pasted';
+    }else if(_lad&&Array.isArray(_lad.bids)&&Array.isArray(_lad.asks)&&(_lad.bids.length||_lad.asks.length)){
+      const bq=_lad.bids.reduce((n,b)=>n+(Number(b.quantity||b.q)||0),0);
+      const sq=_lad.asks.reduce((n,a)=>n+(Number(a.quantity||a.q)||0),0);
+      if(bq+sq>0){
+        r.depthImbalance=(bq-sq)/(bq+sq);
+        r.depthLive=true; r.depthSource='stream';
+      }
     }else if(_bk&&_bk.series==='EQ'&&_bk.bookQty>=DEPTH_MIN_BOOK_QTY){
       const d=deriveLiveBookImbalance(_bk,r);
       if(d){r.depthImbalance=d.imb;r.depthLive=false;r.depthSource=d.source;
@@ -9216,6 +9257,7 @@ function getCols(){
     {key:'score',label:'Score',s:1},
     {key:'symbol',label:'Symbol',s:1},
     {key:'price',label:'Price/Day',s:1},
+    {key:'sinceIn',label:'Since In',s:1},
     {key:'relvol',label:'Vol/Bk',s:1},
     {key:'turnover',label:'Liq',s:1},
     {key:'avgMove',label:'Pace',s:1},
@@ -10774,7 +10816,8 @@ function recomputeAlloc(){
 }
 function renderBasketBtn(){
   const buyBtn=document.getElementById('basketBtn');
-  if(buyBtn&&window.BASKET_EXPORT_BUSY){
+  if(!buyBtn) return;
+  if(window.BASKET_EXPORT_BUSY){
     buyBtn.disabled=true;
     buyBtn.innerHTML='⏳ Preparing basket…';
     buyBtn.title='Preparing the latest filtered basket…';
@@ -10784,14 +10827,11 @@ function renderBasketBtn(){
   // Allocation is display/sizing context only. A selected recommendation remains exportable even
   // when its calculated allocation is zero; the exporter supplies a one-share fallback.
   const buyCount=selList.length;
-  if(buyBtn){
-    const cntSpan=document.getElementById('basketCount');
-    if(cntSpan)cntSpan.textContent=buyCount>0?`(${buyCount})`:'';
-    buyBtn.disabled=buyCount===0;
-    buyBtn.title=buyCount===0
-      ? 'No selected score-eligible recommendation has an allocated quantity > 0.'
-      : 'Export selected stocks as Zerodha basket order';
-  }
+  buyBtn.innerHTML=`🧺 Buy Basket <span id="basketCount">${buyCount>0?`(${buyCount})`:''}</span>`;
+  buyBtn.disabled=buyCount===0;
+  buyBtn.title=buyCount===0
+    ? 'No selected score-eligible recommendation has an allocated quantity > 0.'
+    : 'Export selected stocks as Zerodha basket order';
 }
 function renderBasketSummary(){
   const capital=getEffectiveCapital();
@@ -10941,6 +10981,17 @@ function renderTable(){
       setup:`<td style="font-size:13px;color:var(--t2)">${escHtml(s.setup||'—')}${s.stage?' '+radarStagePill(s):''}${(s.modelTriggers||[]).length?' '+radarTriggerPill(s):''}</td>`,
       series:`<td>${radarSeriesBandPill(s)}</td>`,
       price:`<td data-key="price" style="white-space:nowrap">${livePriceAge(s.symbol)}${fmtINR(s.price)}<span style="color:var(--t3)"> · </span><span style="font-size:12px">${fPerf(s.day??s.priceChange)}${s.corpAction?`<span title="Corporate action (${escHtml(s.corpAction)}) — mechanical ex-date move, neutralised in scoring" style="font-size:11px;color:var(--amber);margin-left:4px;cursor:help">⚑</span>`:''}</span></td>`,
+      sinceIn:`<td data-key="sinceIn" style="white-space:nowrap">${(()=>{
+        const info=s.sinceInEntry||getTableEntryInfo(s.symbol,s.price);
+        if(!info||!Number.isFinite(info.movePct)) return '<span style="color:var(--t3)">—</span>';
+        const p=info.movePct;
+        const col=p>0?'var(--green)':p<0?'var(--red)':'var(--t3)';
+        const sign=p>0?'+':'';
+        const c=istClock(info.at);
+        const hm=`${String(c.h).padStart(2,'0')}:${String(c.m).padStart(2,'0')}`;
+        const tip=`Since first entered table today at ${hm} @ ₹${info.entryPrice.toFixed(2)} (current ₹${Number(s.price).toFixed(2)})`;
+        return `<span style="color:${col};font-weight:700;font-family:'DM Mono',monospace" title="${escHtml(tip)}">${sign}${p.toFixed(2)}%</span>`;
+      })()}</td>`,
       day:`<td>${fPerf(s.day??s.priceChange)}${s.corpAction?`<span title="Corporate action (${escHtml(s.corpAction)}) — mechanical ex-date move, neutralised in scoring" style="font-size:11px;color:var(--amber);margin-left:4px;cursor:help">⚑</span>`:''}</td>`,
       relvol:`<td style="white-space:nowrap">${s.relvol!=null&&isFinite(s.relvol)?Number(s.relvol).toFixed(2)+'×':'—'}<span style="color:var(--t3)"> · </span>${Number.isFinite(s.depthImbalance)?`<span style="color:${s.depthImbalance>0?'var(--green)':'var(--red)'};font-size:12px" title="Order book: ${Number.isFinite(s.depthPct)?'stronger than '+Math.round(s.depthPct*100)+'% of books':''}${s.depthLive?' · LIVE reading':' · pre-open, decayed by the session'}">${(s.depthImbalance>0?'+':'')+s.depthImbalance.toFixed(2)}</span>`:'<span style="color:var(--t3)">—</span>'}</td>`,
       // v1139: the order book, in the recommendation table rather than a list of its own. Muted em
@@ -11645,7 +11696,11 @@ function refreshKiteOnReturn(){
     await refreshKiteLoginStatus(KITE_LOGIN_PENDING||!!KITE_API?.needsLogin||KITE_API?.tokenValid===false);
     await loadStreamStatus();
     try{renderLiveTapeBar();}catch(e){}
-    await streamRefreshTick();
+    const lastDone=STREAM_ACTIVITY?.lastCompleteAt||0;
+    if(Date.now()-lastDone>=10000&&!_streamRefreshBusy){
+      if(_streamRefreshTimer){clearTimeout(_streamRefreshTimer);_streamRefreshTimer=null;}
+      await streamRefreshTick();
+    }
   })().finally(()=>{_kiteReturnRefresh=null;});
   return _kiteReturnRefresh;
 }
@@ -12814,6 +12869,12 @@ function applyFilters({preservePage=false}={}){
   });
   rows.sort((a,b)=>(a.rank??Infinity)-(b.rank??Infinity));
   FILT=rows;
+  recordTableEntries(FILT);
+  rows.forEach(r=>{
+    const info=getTableEntryInfo(r.symbol,r.price);
+    r.sinceIn=info?.movePct??0;
+    r.sinceInEntry=info;
+  });
   applySort();
 
   CURRENT_TRADE_TIMING=getCurrentTradeTimingDecision();
@@ -13475,13 +13536,30 @@ async function refreshPortfolioFromHelper(){
 // refresh cannot cost the machine what the old full-universe passes did.
 const HIDDEN_REFRESH_MS=60000;
 let _lastHiddenBeatAt=0;
+function scheduleStreamRefresh(delay=STREAM_REFRESH_MS){
+  if(_streamRefreshTimer){clearTimeout(_streamRefreshTimer);_streamRefreshTimer=null;}
+  const nextDelay=Math.max(0,delay);
+  const nextAt=Date.now()+nextDelay;
+  if(STREAM_ACTIVITY) STREAM_ACTIVITY.nextAt=nextAt;
+  _streamRefreshTimer=setTimeout(async()=>{
+    _streamRefreshTimer=null;
+    await streamRefreshTick();
+  },nextDelay);
+}
 async function streamRefreshTick(){
   if(_streamRefreshBusy) return;
   if(document.hidden){
-    if(Date.now()-_lastHiddenBeatAt<HIDDEN_REFRESH_MS) return;
+    if(Date.now()-_lastHiddenBeatAt<HIDDEN_REFRESH_MS){
+      scheduleStreamRefresh(Math.max(1000,HIDDEN_REFRESH_MS-(Date.now()-_lastHiddenBeatAt)));
+      return;
+    }
     _lastHiddenBeatAt=Date.now();
   }
-  if(_folderWatchBusy){setStreamActivity({phase:'ingesting'});return;} // do not race an authoritative ingest
+  if(_folderWatchBusy){
+    setStreamActivity({phase:'ingesting'});
+    scheduleStreamRefresh(5000);
+    return;
+  }
   _streamRefreshBusy=true;
   setStreamActivity({phase:'checking',lastAttemptAt:Date.now(),nextAt:0,error:''});
   try{
@@ -13569,19 +13647,19 @@ async function streamRefreshTick(){
       error:String(e?.message||e)});
   }finally{
     _streamRefreshBusy=false;
+    scheduleStreamRefresh(STREAM_REFRESH_MS);
     try{renderLiveTapeBar();}catch(e){}
   }
 }
 function startStreamRefresh(){
   if(_streamRefreshTimer) return;
-  _streamRefreshTimer=setInterval(streamRefreshTick,STREAM_REFRESH_MS);
   _streamRefreshUiTimer=setInterval(()=>{try{renderLiveTapeBar();}catch(e){}},1000);
   if(!_streamVisibilityBound){
     _streamVisibilityBound=true;
     document.addEventListener('visibilitychange',refreshKiteOnReturn);
     window.addEventListener('focus',refreshKiteOnReturn);
   }
-  streamRefreshTick();
+  scheduleStreamRefresh(0);
 }
 // Is the stream actually up? A control that cannot work must say so - a silent dead stream would
 // look exactly like a quiet market.
@@ -14243,6 +14321,10 @@ async function exportBasket(){
     if(!(qty>0)) return;
     const sym=s.symbol;
     const name=s.name||sym;
+    const policy=getRowExitPolicy(s,Number(s.price)||0);
+    const targetPct=(policy&&Number.isFinite(policy.targetPct)&&policy.targetPct>0)
+      ? parseFloat(Number(policy.targetPct).toFixed(2))
+      : null;
     orders.push({
       id:Date.now()+orderSeq++,
       instrument:{
@@ -14266,9 +14348,10 @@ async function exportBasket(){
         // v1083 (owner): TARGET ONLY. The stop leg is no longer exported — the owner manages losses
         // manually. The stop is still computed and shown (SL % column, Open Positions, allocation
         // sizing all keep using getRowStopDistancePct); it simply never leaves the app as an order.
-        tags:[]
+        ...(targetPct>0 ? {gtt:{target:targetPct}} : {}),
+        tags:targetPct>0 ? ['TGT'] : []
       },
-      _meta:{leg:leg||'base',sym,fullQty:null}
+      _meta:{leg:leg||'base',sym,targetPct,fullQty:null}
     });
   };
   exportList.forEach(s=>{
@@ -14289,7 +14372,8 @@ async function exportBasket(){
   const payload=orders.map(o=>{const c={...o};delete c._meta;return c;});
   const saved=await saveBasketToScannerUploads(payload,'Zerodha_Basket_Buy');
   if(!saved) return;
-  showToast(`<strong>Exported ${orders.length} CNC BUY orders</strong> for ${new Set(orders.map(o=>o._meta.sym)).size} selected stocks as Zerodha_Basket_Buy.json`);
+  const targetNote=orders.some(o=>o.params?.gtt?.target)?' with target GTTs':'';
+  showToast(`<strong>Exported ${orders.length} CNC BUY orders</strong> for ${new Set(orders.map(o=>o._meta.sym)).size} selected stocks${targetNote} as Zerodha_Basket_Buy.json`);
   }catch(e){
     console.error('Basket export failed',e);
     showToast('Basket export failed: '+(e?.message||e),6000,true);
