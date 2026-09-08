@@ -1,5 +1,5 @@
 const BUILD_TS='2026-09-08 15:30 IST'; // release build time (IST)
-const APP_VERSION=1316; // v1316: Forward velocity boost, accelerated demotion, live delta re-scoring & auto-sort.
+const APP_VERSION=1317; // v1317: Risk-bounded time-decayed velocity, smooth demotion, coherent gate score capping.
 const RADAR_SCORE_VERSION='tape-decision-v4';
 const EQUITY_OPEN_MIN=9*60+15, EQUITY_CLOSE_MIN=15*60+30;
 // v1093: a baseline reward:risk MEASURED on the cross-section (last completed bhav session) instead of learned from the owner's own fills - reported on every row, deliberately not enforced. Includes v1092: position size split by Radar score / stop distance, so equally-scored names carry equal RUPEE risk, plus an opt-in Risk /trade cap.
@@ -3660,6 +3660,7 @@ function radarPermissionLevel(r,tapeStanding){
   if(r.recommendationTriggerBlocked===true) veto.push('trigger veto');
   if(r.noHistory===true) veto.push('no multi-day history');
   if(r.intradaySellingToday===true) veto.push('selling today');
+  if(NSE_SURV[r.symbol]?.length) veto.push('surveillance flag ('+(NSE_SURV[r.symbol].join(' · '))+')');
   const freshness=getRecommendationFreshness(r.symbol);
   if(!freshness.ok) veto.push(freshness.why);
   if(getTapeProfitEvidence().status==='losing') veto.push('Five-session net-profit audit failed');
@@ -3954,34 +3955,56 @@ function radarScoreComponents(r,tapeStanding){
     permission:+(perm.p||0).toFixed(3),
     block:perm.p>0?null:(perm.why||null)
   };
-  out.total=+Math.max(0,Math.min(100,100*evidence*(perm.p||0)*riskFactor)).toFixed(1);
-  if(!isDepthRecommendable(r.symbol)){
-    out.total=+Math.min(out.total, +(RECOMMEND_MIN_SCORE - 0.1)).toFixed(1);
-  }
-  // Single-Stock Session Calibration: Momentum defends the price level at page load / session open.
-  // If a stock trades below its session load baseline, momentum is broken. It is capped below the
-  // policy bar and dynamically penalized further the deeper it trades below baseline.
+  const envelope=(perm.p||0)*riskFactor;
+  out.total=+Math.max(0,Math.min(100,100*evidence*envelope)).toFixed(1);
+
+  // Single-Stock Session Calibration: Dynamic Depth Edge Multiplier
   const calWeights=getCalibratedWeights();
   if(calWeights.depthMultiplier!==1.0 && Number(r.depthImbalance)>0){
     out.total=+Math.max(0, Math.min(100, out.total*calWeights.depthMultiplier)).toFixed(1);
   }
+
+  // Live Session Baseline Expansion & Demotion
   const snap=getOpenSnapshot(r.symbol);
   const basePrice=(snap&&snap.openPrice>0)?snap.openPrice:(Number(r.price)>0?Number(r.price):0);
   const coPct=basePrice>0&&Number(r.price)>0?((Number(r.price)-basePrice)/basePrice)*100:0;
-  if(coPct>0){
-    // Forward Velocity Boost: stock is actively expanding above page-load baseline.
-    // Give direct momentum credit so positive runners leapfrog stagnant stocks.
-    const gainPct=coPct;
-    const velocityBoost=Math.min(30, gainPct*15);
+  const baseTime=(snap&&snap.at>0)?snap.at:PAGE_SESSION_BOOT_TIME;
+  const elapsedMin=Math.max(1,Math.floor((Date.now()-baseTime)/60000));
+
+  // Deadband ±0.10% absorbs normal bid/ask spread noise
+  if(coPct>0.10){
+    // Forward Velocity Boost: stock is actively expanding above baseline.
+    // True velocity rate: time-discounted with square-root elapsed time so fresh surges rank highest,
+    // and stalling/stagnant moves naturally cool off over time.
+    const gainPct=coPct-0.10;
+    const timeFactor=Math.sqrt(1+elapsedMin/20);
+    const velocityRate=gainPct/timeFactor;
+    const rawBoost=Math.min(30, velocityRate*15);
+    // Envelope Protection: velocity boost is strictly scaled by (perm.p * riskFactor),
+    // preventing low-liquidity or high-risk penny stocks from bypassing risk controls.
+    const velocityBoost=+(rawBoost*envelope).toFixed(1);
     out.total=+Math.min(100, out.total+velocityBoost).toFixed(1);
     out.velocityBoost=velocityBoost;
-  } else if(coPct<0){
-    // Accelerated Demotion: stock is dropping below page-load baseline.
-    // Decaying stocks plunge rapidly down the rankings.
-    const dropPct=Math.abs(coPct);
-    const belowOpenPenalty=Math.min(45, dropPct*12*(calWeights.gapFadeMultiplier||1.0));
-    out.total=+Math.max(0, Math.min(out.total, +(RECOMMEND_MIN_SCORE - 0.1)) - belowOpenPenalty).toFixed(1);
+  } else if(coPct<-0.10){
+    // Accelerated Demotion: stock is dropping below baseline print.
+    // Continuous smooth penalty without an abrupt 30-point cliff.
+    const dropPct=Math.abs(coPct)-0.10;
+    const rawPenalty=Math.min(45, dropPct*12*(calWeights.gapFadeMultiplier||1.0));
+    const demotionPenalty=+(rawPenalty*Math.max(0.5, envelope)).toFixed(1);
+    out.total=+Math.max(0, out.total-demotionPenalty).toFixed(1);
+    // Clear breakdown (drop >= 0.25% outside spread): cap below recommendation threshold
+    if(dropPct>=0.25){
+      out.total=+Math.min(out.total, +(RECOMMEND_MIN_SCORE - 0.1)).toFixed(1);
+    }
     out.belowOpenDrop=dropPct;
+  }
+
+  // Coherent Hard-Gate Enforcement on Final Score:
+  // If a stock is blocked by structural vetoes (ASM surveillance, sell volume > buy volume,
+  // non-basket-eligible, or missing history), its final score CANNOT clear the recommendation policy bar.
+  // This guarantees that top green scores and recommendation checkboxes never contradict each other.
+  if(NSE_SURV[r.symbol]?.length || !isDepthRecommendable(r.symbol) || r.basketEligible===false || r.noHistory===true){
+    out.total=+Math.min(out.total, +(RECOMMEND_MIN_SCORE - 0.1)).toFixed(1);
   }
   return out;
 }
@@ -4016,9 +4039,11 @@ function radarScoreTitle(r){
       return ` · ${bits.join(' · ')} [${armed?`weights ${w.split.toFixed(2)}/${w.book.toFixed(2)}/${w.spoof.toFixed(2)}`:'measured at weight 0, not counted yet'}]`;
     })()
     +` over ${Number(c.tapeBars)||0} bars`;
-  if(c.belowOpenDrop>0) return `NOT ACTIONABLE - below session load baseline (-${c.belowOpenDrop.toFixed(2)}%). Score penalized and capped below policy bar (${RECOMMEND_MIN_SCORE}) because base price was not defended.`;
+  if(c.belowOpenDrop>=0.25) return `NOT ACTIONABLE - below session load baseline (-${c.belowOpenDrop.toFixed(2)}%). Score penalized and capped below policy bar (${RECOMMEND_MIN_SCORE}) because base price was not defended.`;
   if(c.block) return `NOT ACTIONABLE - ${c.block}. Tape evidence ${(Number(c.evidence)*100).toFixed(0)}/100 (${ev}), but permission is zero so the score is zero. The score is what you can act on, not what looks interesting.`;
   return `Recommendation strength ${Number(c.total).toFixed(1)} = tape evidence ${(Number(c.evidence)*100).toFixed(0)}/100 × permission ${(Number(c.permission)*100).toFixed(0)}% × risk factor ${(Number(c.riskFactor)*100).toFixed(0)}%.`
+    +(c.velocityBoost>0?` Forward velocity boost +${Number(c.velocityBoost).toFixed(1)} pts.`:'')
+    +(c.belowOpenDrop>0?` Below baseline penalty -${Number(c.belowOpenDrop).toFixed(2)}%.`:'')
     +` Evidence, from the continuous merged 5-minute tape window: ${ev}.`
     +` Permission: headroom ${Number(c.feasibility).toFixed(1)}/${RADAR_SCORE_BUDGETS.feasibility} · tape standing ${Number(c.tape).toFixed(1)}/${RADAR_SCORE_BUDGETS.tape}${Number(c.permission)<1?' (an absent tape caps permission until candles confirm it)':''}.`
     +` Policy bar ${RECOMMEND_MIN_SCORE}; not a profit probability.`;
