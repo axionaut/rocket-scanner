@@ -1,5 +1,5 @@
-const BUILD_TS='2026-09-08 14:08 IST'; // release build time (IST)
-const APP_VERSION=1311; // v1311: Record Since In for all table rows and auto-reanchor circuit overshoots.
+const BUILD_TS='2026-09-08 14:15 IST'; // release build time (IST)
+const APP_VERSION=1312; // v1312: Guard Since In against cold brain cache, display elapsed minutes, live patch Since In.
 const RADAR_SCORE_VERSION='tape-decision-v4';
 const EQUITY_OPEN_MIN=9*60+15, EQUITY_CLOSE_MIN=15*60+30;
 // v1093: a baseline reward:risk MEASURED on the cross-section (last completed bhav session) instead of learned from the owner's own fills - reported on every row, deliberately not enforced. Includes v1092: position size split by Radar score / stop distance, so equally-scored names carry equal RUPEE risk, plus an opt-in Risk /trade cap.
@@ -166,11 +166,12 @@ const NSE_FUNDAMENTAL_STORE='rs_nse_fundamentals_v1';
 const RECOMMEND_MIN_PROGRESS_FRACTION=0.25;
 const LEFT_ON_TABLE_STORE='rs_left_on_table_v1';
 const LEFT_ON_TABLE_KEEP_SESSIONS=30;   // how much history is retained
-const TABLE_ENTRY_STORE='rs_table_entry_v2';
+const TABLE_ENTRY_STORE='rs_table_entry_v3';
 let TABLE_ENTRY_MAP={};
 function loadTableEntryMap(){
   try{
-    localStorage.removeItem('rs_table_entry_v1'); // Purge legacy unisolated entries
+    localStorage.removeItem('rs_table_entry_v1');
+    localStorage.removeItem('rs_table_entry_v2'); // Purge legacy stale cache entries
     const raw=localStorage.getItem(TABLE_ENTRY_STORE);
     if(raw) TABLE_ENTRY_MAP=JSON.parse(raw)||{};
     const today=getSessionDate();
@@ -189,6 +190,9 @@ function saveTableEntryMap(){
   try{ localStorage.setItem(TABLE_ENTRY_STORE, JSON.stringify(TABLE_ENTRY_MAP)); }catch(e){}
 }
 function recordTableEntries(rows){
+  // Do not record entries from cold restored brain cache before live quotes have arrived.
+  // _universeLiveAt is 0 until the helper streams the first live universe delta.
+  if(!_universeLiveAt) return;
   const today=getSessionDate();
   let changed=false;
   const now=Date.now();
@@ -197,15 +201,17 @@ function recordTableEntries(rows){
     const sym=normSym(r.symbol);
     const prev=TABLE_ENTRY_MAP[sym];
     const currPrice=Number(r.price);
+    const low=Number(r.low1d)||Number(r.low)||0;
+    const high=Number(r.high1d)||Number(r.high)||0;
     if(!prev||prev.date!==today){
       TABLE_ENTRY_MAP[sym]={date:today, price:currPrice, at:now};
       changed=true;
     } else if(prev.price>0){
-      // Single-day circuit limit on NSE is at most 20%.
-      // If the difference between current price and stored entry price is > 20.5%,
-      // the stored entry price is corrupted by stale historical data and must be re-anchored.
       const move=Math.abs((currPrice-prev.price)/prev.price);
-      if(move>0.205){
+      // If stored entry price is outside today's recorded trading range, or moved > 8% when day change is small,
+      // the stored entry price is corrupted by stale cache and must be re-anchored to the true live price.
+      const outsideRange=(low>0&&prev.price<low*0.98)||(high>0&&prev.price>high*1.02);
+      if(outsideRange||move>0.08){
         TABLE_ENTRY_MAP[sym]={date:today, price:currPrice, at:now};
         changed=true;
       }
@@ -220,8 +226,8 @@ function getTableEntryInfo(sym,currentPrice){
   if(!entry||entry.date!==today||!(entry.price>0)) return null;
   const curr=Number(currentPrice)>0?Number(currentPrice):entry.price;
   const movePct=((curr-entry.price)/entry.price)*100;
-  // If movePct exceeds daily circuit bounds (> 20.5%), auto-reanchor to live price
-  if(Math.abs(movePct)>20.5){
+  // If movePct exceeds realistic single-session bounds (> 8%), re-anchor to live price
+  if(Math.abs(movePct)>8.0){
     TABLE_ENTRY_MAP[key]={date:today, price:curr, at:Date.now()};
     saveTableEntryMap();
     return {entryPrice:curr, at:Date.now(), movePct:0};
@@ -11049,8 +11055,10 @@ function renderTable(){
         const sign=p>0?'+':'';
         const c=istClock(info.at);
         const hm=`${String(c.h).padStart(2,'0')}:${String(c.m).padStart(2,'0')}`;
-        const tip=`Since first entered table today at ${hm} @ ₹${info.entryPrice.toFixed(2)} (current ₹${Number(s.price).toFixed(2)})`;
-        return `<span style="color:${col};font-weight:700;font-family:'DM Mono',monospace" title="${escHtml(tip)}">${sign}${p.toFixed(2)}%</span> <span style="font-size:11px;color:var(--t3);font-family:'DM Mono',monospace" title="${escHtml(tip)}">${hm}</span>`;
+        const ageM=Math.max(0,Math.floor((Date.now()-(Number(info.at)||Date.now()))/60000));
+        const ageTxt=ageM<60?`${ageM}m`:`${Math.floor(ageM/60)}h ${ageM%60}m`;
+        const tip=`Since first entered table today at ${hm} (${ageTxt} ago) @ ₹${info.entryPrice.toFixed(2)} (current ₹${Number(s.price).toFixed(2)})`;
+        return `<span style="color:${col};font-weight:700;font-family:'DM Mono',monospace" title="${escHtml(tip)}">${sign}${p.toFixed(2)}%</span> <span style="font-size:11px;color:var(--t3);font-family:'DM Mono',monospace" title="${escHtml(tip)}">${ageTxt} · ${hm}</span>`;
       })()}</td>`,
       day:`<td>${fPerf(s.day??s.priceChange)}${s.corpAction?`<span title="Corporate action (${escHtml(s.corpAction)}) — mechanical ex-date move, neutralised in scoring" style="font-size:11px;color:var(--amber);margin-left:4px;cursor:help">⚑</span>`:''}</td>`,
       relvol:`<td style="white-space:nowrap">${s.relvol!=null&&isFinite(s.relvol)?Number(s.relvol).toFixed(2)+'×':'—'}<span style="color:var(--t3)"> · </span>${Number.isFinite(s.depthImbalance)?`<span style="color:${s.depthImbalance>0?'var(--green)':'var(--red)'};font-size:12px" title="Order book: ${Number.isFinite(s.depthPct)?'stronger than '+Math.round(s.depthPct*100)+'% of books':''}${s.depthLive?' · LIVE reading':' · pre-open, decayed by the session'}">${(s.depthImbalance>0?'+':'')+s.depthImbalance.toFixed(2)}</span>`:'<span style="color:var(--t3)">—</span>'}</td>`,
@@ -12296,6 +12304,21 @@ function patchVisiblePrices(){
       if(pxCell){
         pxCell.innerHTML = `${livePriceAge(sym)}${fmtINR(s.price)}<span style="color:var(--t3)"> · </span><span style="font-size:12px">${fPerf(s.day??s.priceChange)}${s.corpAction?`<span title="Corporate action (${escHtml(s.corpAction)}) — mechanical ex-date move, neutralised in scoring" style="font-size:11px;color:var(--amber);margin-left:4px;cursor:help">⚑</span>`:''}</span>`;
       }
+      const sinceCell = tr.querySelector('td[data-key="sinceIn"]');
+      if(sinceCell){
+        const info = s.sinceInEntry || getTableEntryInfo(s.symbol, s.price);
+        if(info && Number.isFinite(info.movePct)){
+          const p=info.movePct;
+          const col=p>0?'var(--green)':p<0?'var(--red)':'var(--t3)';
+          const sign=p>0?'+':'';
+          const c=istClock(info.at);
+          const hm=`${String(c.h).padStart(2,'0')}:${String(c.m).padStart(2,'0')}`;
+          const ageM=Math.max(0,Math.floor((Date.now()-(Number(info.at)||Date.now()))/60000));
+          const ageTxt=ageM<60?`${ageM}m`:`${Math.floor(ageM/60)}h ${ageM%60}m`;
+          const tip=`Since first entered table today at ${hm} (${ageTxt} ago) @ ₹${info.entryPrice.toFixed(2)} (current ₹${Number(s.price).toFixed(2)})`;
+          sinceCell.innerHTML=`<span style="color:${col};font-weight:700;font-family:'DM Mono',monospace" title="${escHtml(tip)}">${sign}${p.toFixed(2)}%</span> <span style="font-size:11px;color:var(--t3);font-family:'DM Mono',monospace" title="${escHtml(tip)}">${ageTxt} · ${hm}</span>`;
+        }
+      }
     }
   });
 }
@@ -12315,6 +12338,7 @@ function patchUniverseDeltas(deltaRows){
       if(Number.isFinite(f.volume)) s.volume = f.volume;
     }
   }
+  recordTableEntries(FILT);
   patchVisiblePrices();
 }
 
@@ -12400,6 +12424,8 @@ async function pollUniverseDelta(deferScore=false){
       _universeMap.set(sym, j.rows[sym]);
     }
 
+    _clientUniverseRev=newRev;_clientBarRev=newBarRev;
+    _universeLiveAt=Date.now();_universeDeltaError='';
     if(isCold&&!deferScore){
       // THE COLD SNAPSHOT IS THE STARTUP FREEZE. This ran the synchronous scorer on the full
       // universe on the first poll after load - the single longest task on the page. Same result,
@@ -12420,8 +12446,6 @@ async function pollUniverseDelta(deferScore=false){
     } else {
       patchUniverseDeltas(j.rows);
     }
-    _clientUniverseRev=newRev;_clientBarRev=newBarRev;
-    _universeLiveAt=Date.now();_universeDeltaError='';
     return { ok: true, changed: changedSyms.length > 0, barCompleted, repairChanged };
   } catch(e) {
     _universeDeltaError=e.message||'unreachable';
