@@ -1,5 +1,5 @@
-const BUILD_TS='2026-09-08 15:05 IST'; // release build time (IST)
-const APP_VERSION=1313; // v1313: 09:15 open snapshot store, single-stock below-open score penalty, align Since In with open baseline.
+const BUILD_TS='2026-09-08 15:15 IST'; // release build time (IST)
+const APP_VERSION=1314; // v1314: Interday cohort calibration, factor edge auto-weights, post-close tab overhaul.
 const RADAR_SCORE_VERSION='tape-decision-v4';
 const EQUITY_OPEN_MIN=9*60+15, EQUITY_CLOSE_MIN=15*60+30;
 // v1093: a baseline reward:risk MEASURED on the cross-section (last completed bhav session) instead of learned from the owner's own fills - reported on every row, deliberately not enforced. Includes v1092: position size split by Radar score / stop distance, so equally-scored names carry equal RUPEE risk, plus an opt-in Risk /trade cap.
@@ -226,6 +226,153 @@ function getOpenSnapshot(sym){
   return null;
 }
 loadOpenSnapshotMap();
+
+const CALIBRATED_WEIGHTS_STORE='rs_calibrated_weights_v1';
+const DAILY_CALIBRATION_STORE='rs_daily_calibration_v1';
+
+function getCalibratedWeights(){
+  try{
+    const raw=localStorage.getItem(CALIBRATED_WEIGHTS_STORE);
+    if(raw){
+      const parsed=JSON.parse(raw);
+      if(parsed&&typeof parsed==='object') return parsed;
+    }
+  }catch(e){}
+  return { depthMultiplier: 1.0, gapFadeMultiplier: 1.0, updated: '' };
+}
+function saveCalibratedWeights(w){
+  try{ localStorage.setItem(CALIBRATED_WEIGHTS_STORE, JSON.stringify(w)); }catch(e){}
+}
+function resetCalibratedWeights(){
+  saveCalibratedWeights({ depthMultiplier: 1.0, gapFadeMultiplier: 1.0, updated: '' });
+  if(typeof renderPostClose==='function') renderPostClose();
+}
+window.resetCalibratedWeights=resetCalibratedWeights;
+
+function runDailyCohortCalibration(force=false){
+  const today=getSessionDate();
+  const keys=Object.keys(OPEN_SNAPSHOT_MAP||{}).filter(k=>OPEN_SNAPSHOT_MAP[k]?.date===today);
+  if(!keys.length) return null;
+
+  const allMap=new Map((ALL||[]).map(s=>[s.symbol,s]));
+  const evaluated=[];
+  let rockets=0, traps=0, missed=0, totalReturn=0;
+
+  let depthPassReturns=[], depthFailReturns=[];
+  let gapHighReturns=[], gapLowReturns=[];
+  let relvolHighReturns=[], relvolLowReturns=[];
+
+  keys.forEach(sym=>{
+    const snap=OPEN_SNAPSHOT_MAP[sym];
+    const s=allMap.get(sym)||_universeMap.get(sym);
+    if(!snap||!(snap.openPrice>0)||!s||!(Number(s.price)>0)) return;
+
+    const openPrice=snap.openPrice;
+    const currentPrice=Number(s.price);
+    const dayReturn=((currentPrice-openPrice)/openPrice)*100;
+    const openScore=Number(snap.openScore)||0;
+    const high=Number(s.high1d)>0?Number(s.high1d):currentPrice;
+    const maxGain=((high-openPrice)/openPrice)*100;
+
+    let verdict='NEUTRAL';
+    if(openScore>=RECOMMEND_MIN_SCORE && dayReturn>=2.0){
+      verdict='ROCKET';
+      rockets++;
+    } else if(openScore>=RECOMMEND_MIN_SCORE && dayReturn<0){
+      verdict='TRAP';
+      traps++;
+    } else if(openScore<RECOMMEND_MIN_SCORE && dayReturn>=4.0){
+      verdict='MISSED';
+      missed++;
+    }
+
+    totalReturn += dayReturn;
+
+    const feats=snap.features||{};
+    if(feats.depthRatio>=1.5) depthPassReturns.push(dayReturn);
+    else depthFailReturns.push(dayReturn);
+
+    if(feats.gap>=2.5) gapHighReturns.push(dayReturn);
+    else gapLowReturns.push(dayReturn);
+
+    if(feats.relvol>=1.5) relvolHighReturns.push(dayReturn);
+    else relvolLowReturns.push(dayReturn);
+
+    evaluated.push({
+      symbol: sym,
+      openPrice,
+      currentPrice,
+      dayReturn,
+      openScore,
+      maxGain,
+      verdict,
+      features: feats
+    });
+  });
+
+  const avg=(arr)=>arr.length?arr.reduce((a,b)=>a+b,0)/arr.length:0;
+  const winRate=(arr)=>arr.length?(arr.filter(r=>r>0).length/arr.length)*100:0;
+
+  const clock=istClock();
+  const isPostClose=clock.mins>=DAY_END_MIN||force;
+
+  let weights=getCalibratedWeights();
+  if(isPostClose && evaluated.length>=5){
+    const dWr=winRate(depthPassReturns);
+    let newDepthMul=weights.depthMultiplier;
+    if(dWr>=60) newDepthMul=Math.min(1.30, +(newDepthMul+0.05).toFixed(2));
+    else if(dWr<=40) newDepthMul=Math.max(0.75, +(newDepthMul-0.05).toFixed(2));
+
+    const gWr=winRate(gapHighReturns);
+    const gAvg=avg(gapHighReturns);
+    let newFadeMul=weights.gapFadeMultiplier;
+    if(gWr<40||gAvg<0) newFadeMul=Math.min(1.50, +(newFadeMul+0.05).toFixed(2));
+    else if(gWr>=60&&gAvg>1.0) newFadeMul=Math.max(0.80, +(newFadeMul-0.05).toFixed(2));
+
+    weights={
+      depthMultiplier: newDepthMul,
+      gapFadeMultiplier: newFadeMul,
+      updated: today
+    };
+    saveCalibratedWeights(weights);
+  }
+
+  const result={
+    date: today,
+    evaluated,
+    total: evaluated.length,
+    rockets,
+    traps,
+    missed,
+    avgReturn: evaluated.length?totalReturn/evaluated.length:0,
+    factors:{
+      depth:{ n: depthPassReturns.length, winRate: winRate(depthPassReturns), avgReturn: avg(depthPassReturns) },
+      depthControl:{ n: depthFailReturns.length, winRate: winRate(depthFailReturns), avgReturn: avg(depthFailReturns) },
+      gapHigh:{ n: gapHighReturns.length, winRate: winRate(gapHighReturns), avgReturn: avg(gapHighReturns) },
+      gapLow:{ n: gapLowReturns.length, winRate: winRate(gapLowReturns), avgReturn: avg(gapLowReturns) },
+      relvolHigh:{ n: relvolHighReturns.length, winRate: winRate(relvolHighReturns), avgReturn: avg(relvolHighReturns) }
+    },
+    weights,
+    isPostClose
+  };
+
+  try{
+    const store=JSON.parse(localStorage.getItem(DAILY_CALIBRATION_STORE)||'{}');
+    store[today]={
+      date: today,
+      total: result.total,
+      rockets: result.rockets,
+      traps: result.traps,
+      missed: result.missed,
+      avgReturn: +result.avgReturn.toFixed(2),
+      factors: result.factors,
+      weights: result.weights
+    };
+    localStorage.setItem(DAILY_CALIBRATION_STORE, JSON.stringify(store));
+  }catch(e){}
+
+  return result;
+}
 
 const TABLE_ENTRY_STORE='rs_table_entry_v3';
 let TABLE_ENTRY_MAP={};
@@ -3802,12 +3949,16 @@ function radarScoreComponents(r,tapeStanding){
   // Single-Stock Intraday Calibration: Institutional momentum defends the 09:15 open print.
   // If a stock trades below its 09:15 open, long momentum is broken. It is capped below the
   // policy bar and dynamically penalized further the deeper it trades below its open.
+  const calWeights=getCalibratedWeights();
+  if(calWeights.depthMultiplier!==1.0 && Number(r.depthImbalance)>0){
+    out.total=+Math.max(0, Math.min(100, out.total*calWeights.depthMultiplier)).toFixed(1);
+  }
   const snap=getOpenSnapshot(r.symbol);
   const baseOpen=(snap&&snap.openPrice>0)?snap.openPrice:(Number(r.open1d)>0?Number(r.open1d):0);
   const coPct=Number.isFinite(Number(r.changeOpen))?Number(r.changeOpen):(baseOpen>0&&Number(r.price)>0?((Number(r.price)-baseOpen)/baseOpen)*100:0);
   if(coPct<0){
     const dropPct=Math.abs(coPct);
-    const belowOpenPenalty=Math.min(35, dropPct*6);
+    const belowOpenPenalty=Math.min(35, dropPct*6*(calWeights.gapFadeMultiplier||1.0));
     out.total=+Math.max(0, Math.min(out.total, +(RECOMMEND_MIN_SCORE - 0.1)) - belowOpenPenalty).toFixed(1);
     out.belowOpenDrop=dropPct;
   }
@@ -13181,6 +13332,7 @@ function renderPostClose(){
   const el=document.getElementById('postCloseContent');if(!el)return;
   const clock=istClock();
   if(clock.mins>=DAY_END_MIN) runPostCloseAudit();
+  const cal=runDailyCohortCalibration();
   const {today,audit,store}=postCloseAuditStatus();
   const afterClose=clock.mins>=DAY_END_MIN;
   const scorecard=store.scorecard||getPostCloseRuleScorecard(store.audits||{});
@@ -13303,7 +13455,67 @@ function renderPostClose(){
       +escHtml(rss.snapshot||'saved locally')+'.'
     : (rss?.why?'RSS unavailable: '+escHtml(rss.why)+'.':'The local helper will fetch and snapshot the official indexes on the next load.');
 
-  el.innerHTML='<div class="pc-shell">'
+  const calHtml=(()=>{
+    if(!cal||!cal.total){
+      return '<section class="m-card pc-card pc-hero">'
+        +'<div class="pc-head"><div><div class="pc-eyebrow">Single-Stock Closed-Loop Calibration</div>'
+        +'<h3 class="pc-title">09:15 Open Cohort & Factor Edge</h3><p class="pc-copy">Waiting for the market open (09:15 IST) to capture the initial baseline quotes and scores.</p></div></div>'
+        +'</section>';
+    }
+    const n2=(v,d=2)=>v==null||!Number.isFinite(v)?'—':Number(v).toFixed(d);
+    const pp=(v)=>v==null?'—':(v>=0?'+':'')+n2(v,2)+'%';
+    const stateText=cal.isPostClose?'OFFICIAL POST-CLOSE CALIBRATION (16:00+)':'LIVE INTRADAY COHORT PROGRESS';
+    const stateColor=cal.isPostClose?'var(--green)':'var(--amber)';
+
+    const rows=(cal.evaluated||[]).slice().sort((a,b)=>{
+      const order={ROCKET:0,TRAP:1,MISSED:2,NEUTRAL:3};
+      return (order[a.verdict]??3)-(order[b.verdict]??3) || b.dayReturn-a.dayReturn;
+    }).map(r=>{
+      const vBadge=r.verdict==='ROCKET'?'<span class="pc-status pc-status--armed">🚀 ROCKET</span>'
+        :r.verdict==='TRAP'?'<span class="pc-status pc-status--retired">⚠️ TRAP</span>'
+        :r.verdict==='MISSED'?'<span class="pc-status pc-status--collecting">👀 MISSED</span>'
+        :'<span style="color:var(--t3)">NEUTRAL</span>';
+      const col=r.dayReturn>0?'var(--green)':r.dayReturn<0?'var(--red)':'var(--t3)';
+      return '<tr>'
+        +'<td>'+escHtml(r.symbol)+'</td>'
+        +'<td class="num">'+n2(r.openScore,1)+'</td>'
+        +'<td class="num">₹'+n2(r.openPrice,2)+'</td>'
+        +'<td class="num">₹'+n2(r.currentPrice,2)+'</td>'
+        +'<td class="num" style="color:'+col+';font-weight:700">'+pp(r.dayReturn)+'</td>'
+        +'<td class="num pc-lift--up">+'+n2(r.maxGain,2)+'%</td>'
+        +'<td class="center">'+vBadge+'</td>'
+        +'</tr>';
+    }).join('');
+
+    const f=cal.factors;
+    const w=cal.weights||{depthMultiplier:1.0,gapFadeMultiplier:1.0};
+
+    return '<section class="m-card pc-card pc-hero">'
+      +'<div class="pc-head"><div><div class="pc-eyebrow">Single-Stock Closed-Loop Calibration</div>'
+      +'<h3 class="pc-title">09:15 Open Cohort & Factor Edge Audit</h3>'
+      +'<p class="pc-copy">Audits the exact 09:15 opening print against closing outcomes. Automatically rewards features with positive forward alpha and penalizes fading morning traps.</p></div>'
+      +'<div class="pc-state" style="color:'+stateColor+'">'+stateText+'</div></div>'
+      +'<div class="pc-kpis">'
+      +'<div class="pc-kpi"><div class="pc-kpi-label">Tracked from Open</div><div class="pc-kpi-value">'+cal.total+'</div><div class="pc-kpi-sub">stocks with 09:15 print</div></div>'
+      +'<div class="pc-kpi"><div class="pc-kpi-label">🚀 Rockets (Alpha)</div><div class="pc-kpi-value" style="color:var(--green)">'+cal.rockets+'</div><div class="pc-kpi-sub">Score ≥ 60 & Day ≥ +2%</div></div>'
+      +'<div class="pc-kpi"><div class="pc-kpi-label">⚠️ Morning Traps</div><div class="pc-kpi-value" style="color:var(--red)">'+cal.traps+'</div><div class="pc-kpi-sub">Score ≥ 60 & Faded < 0%</div></div>'
+      +'<div class="pc-kpi"><div class="pc-kpi-label">👀 Missed Runners</div><div class="pc-kpi-value" style="color:var(--amber)">'+cal.missed+'</div><div class="pc-kpi-sub">Score < 60 & Day ≥ +4%</div></div>'
+      +'<div class="pc-kpi"><div class="pc-kpi-label">Avg Move From Open</div><div class="pc-kpi-value" style="color:'+(cal.avgReturn>=0?'var(--green)':'var(--red)')+'">'+pp(cal.avgReturn)+'</div><div class="pc-kpi-sub">Cohort mean</div></div>'
+      +'</div>'
+      +'<div class="pc-winner-kpis" style="margin-top:14px">'
+      +'<div class="pc-kpi"><div class="pc-kpi-label">Buy Depth Dominance (>1.5x)</div><div class="pc-kpi-value">'+n2(f.depth.winRate,1)+'% win</div><div class="pc-kpi-sub">Avg '+pp(f.depth.avgReturn)+' ('+f.depth.n+' stocks)</div></div>'
+      +'<div class="pc-kpi"><div class="pc-kpi-label">Opening Gap (>2.5%)</div><div class="pc-kpi-value" style="color:'+(f.gapHigh.avgReturn>=0?'var(--green)':'var(--red)')+'">'+n2(f.gapHigh.winRate,1)+'% win</div><div class="pc-kpi-sub">Avg '+pp(f.gapHigh.avgReturn)+' ('+f.gapHigh.n+' stocks)</div></div>'
+      +'<div class="pc-kpi"><div class="pc-kpi-label">Volume Velocity (>1.5x)</div><div class="pc-kpi-value">'+n2(f.relvolHigh.winRate,1)+'% win</div><div class="pc-kpi-sub">Avg '+pp(f.relvolHigh.avgReturn)+' ('+f.relvolHigh.n+' stocks)</div></div>'
+      +'<div class="pc-kpi"><div class="pc-kpi-label">Learned Weights</div><div class="pc-kpi-value" style="font-size:16px;margin-top:8px">Depth '+w.depthMultiplier+'× · Fade '+w.gapFadeMultiplier+'×</div><div class="pc-kpi-sub"><button class="btn" onclick="resetCalibratedWeights()" style="font-size:10px;padding:2px 6px;margin-top:2px">Reset to 1.0×</button></div></div>'
+      +'</div>'
+      +'<div class="pc-section-head" style="margin-top:18px"><h4 class="pc-subsection-title">09:15 Cohort Outcome Ledger</h4><div class="pc-counts">'+cal.total+' stocks audited</div></div>'
+      +'<div class="pc-table-wrap" style="max-height:360px;overflow-y:auto"><table class="pc-table"><thead><tr>'
+      +'<th>Symbol</th><th class="num">09:15 Score</th><th class="num">Open Price</th><th class="num">Close/Current</th><th class="num">Since Open</th><th class="num">Max Day Gain</th><th class="center">Verdict</th>'
+      +'</tr></thead><tbody>'+rows+'</tbody></table></div>'
+      +'</section>';
+  })();
+
+  el.innerHTML='<div class="pc-shell">'+calHtml
     +'<section class="m-card pc-card pc-hero"><div class="pc-head"><div><div class="pc-eyebrow">Automatic learning audit</div>'
     +'<h3 class="pc-title">Post-close model audit</h3><p class="pc-copy">Runs after 16:00 on the refreshed closing tape. It grades the cohort exactly as issued and keeps unresolved two-day picks pending.</p></div>'
     +'<div class="pc-state" style="color:'+state.c+'">'+escHtml(state.t)+'</div></div>'
