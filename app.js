@@ -1,5 +1,5 @@
-const BUILD_TS='2026-09-08 15:30 IST'; // release build time (IST)
-const APP_VERSION=1318; // v1318: Retain during-market state in off-market hours; robust Since In & session scores.
+const BUILD_TS='2026-09-08 17:40 IST'; // release build time (IST)
+const APP_VERSION=1319; // v1319: Tape-anchored fresh momentum velocity & continuous deadband ceiling compression.
 const RADAR_SCORE_VERSION='tape-decision-v4';
 const EQUITY_OPEN_MIN=9*60+15, EQUITY_CLOSE_MIN=15*60+30;
 // v1093: a baseline reward:risk MEASURED on the cross-section (last completed bhav session) instead of learned from the owner's own fills - reported on every row, deliberately not enforced. Includes v1092: position size split by Radar score / stop distance, so equally-scored names carry equal RUPEE risk, plus an opt-in Risk /trade cap.
@@ -4013,12 +4013,12 @@ function radarScoreComponents(r,tapeStanding){
   // Deadband ±0.10% absorbs normal bid/ask spread noise
   if(coPct>0.10){
     // Forward Velocity Boost: stock is actively expanding above baseline.
-    // True velocity rate: time-discounted with square-root elapsed time so fresh surges rank highest,
-    // and stalling/stagnant moves naturally cool off over time.
-    const gainPct=coPct-0.10;
+    // Primary velocity driver: signed recent tape momentum (price5m), gated by positive engagement trajectory.
+    const p5=Number.isFinite(Number(r.price5m))?Number(r.price5m):0;
+    const freshMom=Math.max(0, p5);
+    const trajectoryConfirm=Math.min(1.0, (coPct-0.10)/0.50);
     const timeFactor=Math.sqrt(1+elapsedMin/20);
-    const velocityRate=gainPct/timeFactor;
-    const rawBoost=Math.min(30, velocityRate*15);
+    const rawBoost=Math.min(30, (freshMom*15/timeFactor)*trajectoryConfirm);
     // Envelope Protection: velocity boost is strictly scaled by (perm.p * riskFactor),
     // preventing low-liquidity or high-risk penny stocks from bypassing risk controls.
     const velocityBoost=+(rawBoost*envelope).toFixed(1);
@@ -4026,16 +4026,14 @@ function radarScoreComponents(r,tapeStanding){
     out.velocityBoost=velocityBoost;
   } else if(coPct<-0.10){
     // Accelerated Demotion: stock is dropping below baseline print.
-    // Continuous smooth penalty without an abrupt 30-point cliff.
-    const dropPct=Math.abs(coPct)-0.10;
-    const rawPenalty=Math.min(45, dropPct*12*(calWeights.gapFadeMultiplier||1.0));
+    // Continuous smooth penalty with smooth ceiling compression (zero cliff jump at the deadband boundary).
+    const effectiveDrop=Math.abs(coPct)-0.10;
+    const rawPenalty=Math.min(45, effectiveDrop*15*(calWeights.gapFadeMultiplier||1.0));
     const demotionPenalty=+(rawPenalty*Math.max(0.5, envelope)).toFixed(1);
     out.total=+Math.max(0, out.total-demotionPenalty).toFixed(1);
-    // Clear breakdown (drop >= 0.25% outside spread): cap below recommendation threshold
-    if(dropPct>=0.25){
-      out.total=+Math.min(out.total, +(RECOMMEND_MIN_SCORE - 0.1)).toFixed(1);
-    }
-    out.belowOpenDrop=dropPct;
+    const smoothCeiling=Math.max(0, +(100 - effectiveDrop*100).toFixed(1));
+    out.total=+Math.min(out.total, smoothCeiling).toFixed(1);
+    out.belowOpenDrop=effectiveDrop;
   }
 
   // Coherent Hard-Gate Enforcement on Final Score:
