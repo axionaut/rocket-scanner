@@ -1,5 +1,5 @@
-const BUILD_TS='2026-09-08 12:55 IST'; // release build time (IST)
-const APP_VERSION=1307; // v1307: unified recommendation table with Show below threshold toggle, retired separate removed table.
+const BUILD_TS='2026-09-08 13:15 IST'; // release build time (IST)
+const APP_VERSION=1308; // v1308: numeric score column, status bar below-threshold toggle, strict score filter, score descending sort, removed action column.
 const RADAR_SCORE_VERSION='tape-decision-v4';
 const EQUITY_OPEN_MIN=9*60+15, EQUITY_CLOSE_MIN=15*60+30;
 // v1093: a baseline reward:risk MEASURED on the cross-section (last completed bhav session) instead of learned from the owner's own fills - reported on every row, deliberately not enforced. Includes v1092: position size split by Radar score / stop distance, so equally-scored names carry equal RUPEE risk, plus an opt-in Risk /trade cap.
@@ -84,7 +84,13 @@ function updateModeUI(){
   if(brand) brand.textContent='Same-Day Composite Radar';
   document.querySelectorAll('.currency-lbl').forEach(el=>{el.textContent='₹';});
 }
-let ALL=[],FILT=[],PG=1,PGSZ=100,SCOL='rank',SDIR=1;
+let ALL=[],FILT=[],PG=1,PGSZ=100,SCOL='score',SDIR=-1;
+let SHOW_BELOW_THRESHOLD=false;
+function toggleBelowThreshold(){
+  SHOW_BELOW_THRESHOLD=!SHOW_BELOW_THRESHOLD;
+  saveFilterState();
+  applyFilters();
+}
 // THE TAPE STORE'S OWN WRITE COUNTER. Every "has the tape changed" memo used to answer that
 // question by WALKING THE WHOLE STORE - newestTapeBucketMs scans every symbol, and three separate
 // memo signatures sum every symbol's bar count. That was affordable when ~120 symbols carried a
@@ -4209,15 +4215,16 @@ function _getRowActionStateUncached(s){
   const freshness=getRecommendationFreshness(s.symbol);
   if(!freshness.ok) return {state:'WAIT',reason:freshness.why};
 
-  if(Number.isFinite(Number(s.score))&&Number(s.score)<RECOMMEND_MIN_SCORE)
-    return {state:'WAIT', reason:`Score ${Number(s.score).toFixed(1)} < ${RECOMMEND_MIN_SCORE}`};
+  const _sNum=Number(s.score);
+  if(!Number.isFinite(_sNum)||_sNum<RECOMMEND_MIN_SCORE)
+    return {state:'WAIT', reason:`Score ${Number.isFinite(_sNum)?_sNum.toFixed(1):'0.0'} < ${RECOMMEND_MIN_SCORE}`};
 
   return {state:'GO', reason:'Actionable recommendation'};
 }
 function isSelectableRecommendation(s){
   return !!s && getRowActionState(s).state === 'GO';
 }
-// Score number + proportional bar, both tinted by the band.
+// Score number only, tinted by the band.
 function radarScoreCell(score,title='',recommendationState=null){
   const s=Number(score);
   if(score===null||score===undefined||!isFinite(s)) return '<span class="sc-m" style="color:var(--t3)">—</span>';
@@ -4227,11 +4234,7 @@ function radarScoreCell(score,title='',recommendationState=null){
   const c=ok&&recommendationState===false?'var(--amber)':radarScoreColor(s);
   const tip=title||(ok?`Clears the decision-score policy bar (${RECOMMEND_MIN_SCORE}); all independent gates must still pass.`
     :`Below the decision-score policy bar — ${s.toFixed(1)} against ${RECOMMEND_MIN_SCORE}. This score is readiness evidence, not a profit probability.`);
-  return `<span class="sc-m" style="color:${c}" title="${escHtml(tip)}">${s.toFixed(1)}${ok?'':'<sub style="font-size:9px;color:var(--t3)">\u25be</sub>'}</span>`
-    +`<span class="score-bar" style="position:relative">`
-    +`<i style="width:${Math.max(0,Math.min(100,s))}%;background:${c};opacity:${ok?1:.42}"></i>`
-    +`<em style="position:absolute;left:${RECOMMEND_MIN_SCORE}%;top:0;bottom:0;width:1px;background:var(--t3);opacity:.75"></em>`
-    +`</span>`;
+  return `<span class="sc-m" style="font-family:'DM Mono',monospace;font-weight:800;font-size:15px;color:${c}" title="${escHtml(tip)}">${s.toFixed(1)}${ok?'':'<sub style="font-size:9px;color:var(--t3)">\u25be</sub>'}</span>`;
 }
 function radarSetupLabel(r){
   const b=[];
@@ -9254,7 +9257,6 @@ function getCols(){
   // User-dragged column order (v536) applies here so header and cells always agree.
   return applyColOrder('main-rankings',[
     {key:'chk',label:'',s:0},
-    {key:'action',label:'Action',s:1},
     {key:'score',label:'Score',s:1},
     {key:'symbol',label:'Symbol',s:1},
     {key:'price',label:'Price/Day',s:1},
@@ -10962,23 +10964,17 @@ function renderTable(){
       :!recommendationGo?('Not selectable: '+act.reason)
       :!validated?'Awaiting current 5-minute validation'
       :'Include in the Zerodha basket export';
-    const actPill = act.state === 'GO'
-      ? `<span style="display:inline-block;padding:2px 7px;border-radius:4px;font-size:11px;font-weight:800;letter-spacing:.3px;background:rgba(34,197,94,.15);color:var(--green)" title="${escHtml(act.reason)}">GO</span>`
-      : act.state === 'WAIT'
-      ? `<span style="display:inline-block;padding:2px 6px;border-radius:4px;font-size:11px;font-weight:700;letter-spacing:.3px;background:rgba(251,191,36,.15);color:var(--amber)" title="${escHtml(act.reason)}">WAIT</span><div style="font-size:10px;color:var(--t3);max-width:130px;overflow:hidden;text-overflow:ellipsis;line-height:1.2;margin-top:2px" title="${escHtml(act.reason)}">${escHtml(act.reason)}</div>`
-      : `<span style="display:inline-block;padding:2px 6px;border-radius:4px;font-size:11px;font-weight:700;letter-spacing:.3px;background:rgba(239,68,68,.15);color:var(--red)" title="${escHtml(act.reason)}">BLOCKED</span><div style="font-size:10px;color:var(--t3);max-width:130px;overflow:hidden;text-overflow:ellipsis;line-height:1.2;margin-top:2px" title="${escHtml(act.reason)}">${escHtml(act.reason)}</div>`;
     // Cells are keyed and joined in COLS order so they always match the (possibly
     // user-reordered) header (v536).
     const cellH={
       chk:`<td style="text-align:center"><input type="checkbox" ${isSelected?'checked':''} ${canBuy?'':'disabled'} style="width:14px;height:14px;accent-color:var(--amber);cursor:${canBuy?'pointer':'not-allowed'}" onclick="event.stopPropagation()" onchange="toggleStock('${s.symbol}',this.checked)" title="${checkTitle}"></td>`,
-      action:`<td style="white-space:nowrap">${actPill}</td>`,
       rank:`<td style="font-family:'DM Mono',monospace;font-weight:800;color:var(--t1);text-align:right">${s.rank??'—'}</td>`,
       score:`<td>${radarScoreCell(s.score,radarScoreTitle(s))}</td>`,
       // v1142: routed through symbolChartButton like every other table. This cell had built its own
       // TradingView link since v1070, so the "one symbol interaction everywhere" rule was true of the
       // panels and quietly false of the main table - which is why swapping to Zerodha missed it.
       symbol:`<td style="font-family:'Plus Jakarta Sans',sans-serif">${(
-        `<div style="font-weight:700;font-size:15px;color:var(--t1);max-width:230px;overflow:hidden;text-overflow:ellipsis">${escHtml(s.symbol)}${chartLinkButtons(s.symbol)}${(()=>{const bf=getBookFlag(s.symbol);if(!bf)return '';return `<span style="font-size:11px;background:rgba(245,158,11,.14);color:var(--amber);border-radius:4px;padding:1px 5px;margin-left:5px;font-weight:700;vertical-align:middle" title="Order book: ${escHtml(bf.text)}. Display only - it does not change the score unless the graded book weight says it should.">${bf.iceberg?'🧊':'⚑'}${bf.heavyCancel?' cx':''}</span>`;})()}${(()=>{const flags=s.meta?.flags||[];if(!flags.length)return '';return `<span style="font-size:12px;background:rgba(239,68,68,.15);color:var(--red);border-radius:4px;padding:1px 5px;margin-left:5px;font-weight:700;vertical-align:middle" title="NSE surveillance flags: ${escHtml(flags.join(' · '))}">⚠ ${flags.length}</span>`;})()}${s._held?`<span style="font-size:12px;background:rgba(244,114,182,.15);color:#f472b6;border-radius:4px;padding:1px 5px;margin-left:5px;font-weight:700;vertical-align:middle" title="You already hold this. Held stocks stay in the ranking (v1070) and can be recommended again — buying here ADDS to the existing position.">📌 held</span>`:''}</div>${radarSurveillanceNames(s)}<div style="font-size:11px;color:var(--t3);max-width:150px;overflow:hidden;text-overflow:ellipsis" title="${escHtml((s.name||'')+(s.setup?' · '+s.setup:''))}">${radarSeriesBandPill(s)} ${escHtml(s.setup||s.name||'')}</div>`)}</td>`,
+        `<div style="font-weight:700;font-size:15px;color:var(--t1);max-width:280px;overflow:hidden;text-overflow:ellipsis">${escHtml(s.symbol)}${chartLinkButtons(s.symbol)}${(()=>{const bf=getBookFlag(s.symbol);if(!bf)return '';return `<span style="font-size:11px;background:rgba(245,158,11,.14);color:var(--amber);border-radius:4px;padding:1px 5px;margin-left:5px;font-weight:700;vertical-align:middle" title="Order book: ${escHtml(bf.text)}. Display only - it does not change the score unless the graded book weight says it should.">${bf.iceberg?'🧊':'⚑'}${bf.heavyCancel?' cx':''}</span>`;})()}${(()=>{const flags=s.meta?.flags||[];if(!flags.length)return '';return `<span style="font-size:12px;background:rgba(239,68,68,.15);color:var(--red);border-radius:4px;padding:1px 5px;margin-left:5px;font-weight:700;vertical-align:middle" title="NSE surveillance flags: ${escHtml(flags.join(' · '))}">⚠ ${flags.length}</span>`;})()}${s._held?`<span style="font-size:12px;background:rgba(244,114,182,.15);color:#f472b6;border-radius:4px;padding:1px 5px;margin-left:5px;font-weight:700;vertical-align:middle" title="You already hold this. Held stocks stay in the ranking (v1070) and can be recommended again — buying here ADDS to the existing position.">📌 held</span>`:''}</div>${radarSurveillanceNames(s)}<div style="font-size:11px;color:var(--t3);max-width:180px;overflow:hidden;text-overflow:ellipsis" title="${escHtml((s.name||'')+(s.setup?' · '+s.setup:''))}">${radarSeriesBandPill(s)} ${escHtml(s.setup||s.name||'')}</div>`)}</td>`,
       setup:`<td style="font-size:13px;color:var(--t2)">${escHtml(s.setup||'—')}${s.stage?' '+radarStagePill(s):''}${(s.modelTriggers||[]).length?' '+radarTriggerPill(s):''}</td>`,
       series:`<td>${radarSeriesBandPill(s)}</td>`,
       price:`<td data-key="price" style="white-space:nowrap">${livePriceAge(s.symbol)}${fmtINR(s.price)}<span style="color:var(--t3)"> · </span><span style="font-size:12px">${fPerf(s.day??s.priceChange)}${s.corpAction?`<span title="Corporate action (${escHtml(s.corpAction)}) — mechanical ex-date move, neutralised in scoring" style="font-size:11px;color:var(--amber);margin-left:4px;cursor:help">⚑</span>`:''}</span></td>`,
@@ -11107,19 +11103,15 @@ function scrollToSection(id){
   window.scrollTo({top:y,behavior:'smooth'});
 }
 function goP(p){PG=p;renderTable();scrollToSection('tHead');}
-function doSort(col){if(SCOL===col)SDIR*=-1;else{SCOL=col;SDIR=['symbol','setup','series','risk','action'].includes(col)?1:-1;}applySort();PG=1;renderHead();renderTable();saveFilterState();}
+function doSort(col){if(SCOL===col)SDIR*=-1;else{SCOL=col;SDIR=['symbol','setup','series','risk'].includes(col)?1:-1;}applySort();PG=1;renderHead();renderTable();saveFilterState();}
 function applySort(){
   const col=SCOL;
-  if(col==='action'){
-    const rankMap={GO:0,WAIT:1,BLOCKED:2};
-    FILT.sort((a,b)=>{
-      const sa=rankMap[getRowActionState(a).state]??9;
-      const sb=rankMap[getRowActionState(b).state]??9;
-      return (sa-sb)*SDIR;
-    });
-    return;
-  }
   FILT.sort((a,b)=>{
+    if(col==='score'){
+      const sa=Number(a.score)||0;
+      const sb=Number(b.score)||0;
+      return (sa-sb)*SDIR;
+    }
     const va=a[col],vb=b[col];
     if(va===null||va===undefined)return 1;if(vb===null||vb===undefined)return-1;
     if(typeof va==='string')return va.localeCompare(vb)*SDIR;return(va-vb)*SDIR;
@@ -12811,36 +12803,39 @@ function applyFilters({preservePage=false}={}){
   PEAK_TIMING_REMOVED=0;
   ALLOC_BLOCKED=0;
   DIRECTION_REMOVED=0;
-  REMOVED_ROWS=[];
-  const showBelowThreshold=!!document.getElementById('fShowBelowThreshold')?.checked;
   let rows=ALL.filter(s=>{
     if(s._held)SUPPRESSED_HELD++;
-    // Hard exclusions must win the explanation even when the same row also fails a user filter.
-    // Otherwise the audit misleadingly labels every row "Your Filter" and hides surveillance.
+    let removedReason=null;
     if(NSE_SURV[s.symbol]?.length){
       SURV_HARD_REMOVED++;
-      REMOVED_ROWS.push({s,reason:'surv',rules:NSE_SURV[s.symbol],detail:'configured surveillance rule'});
-      if(!showBelowThreshold) return false;
+      removedReason={s,reason:'surv',rules:NSE_SURV[s.symbol],detail:'configured surveillance rule'};
     } else if(s.recommendationTriggerBlocked){
-      REMOVED_ROWS.push({s,reason:'trigger',chip:(s.recommendationTriggerReasons||[])[0]||'evidence trigger veto',
-        detail:'automatic evidence trigger: '+(s.recommendationTriggerReasons||[]).join(', ')});
-      if(!showBelowThreshold) return false;
+      removedReason={s,reason:'trigger',chip:(s.recommendationTriggerReasons||[])[0]||'evidence trigger veto',
+        detail:'automatic evidence trigger: '+(s.recommendationTriggerReasons||[]).join(', ')};
     } else if(dropThinPct!=null){
       const cutInfo=getSharesPerBarCut(dropThinPct);
       const prof=getTapeFlowProfile(s.symbol);
       if(cutInfo&&cutInfo.cut!==null&&prof&&prof.medianShares>0&&prof.medianShares<cutInfo.cut){
-        REMOVED_ROWS.push({s,reason:'filter',
+        removedReason={s,reason:'filter',
           chip:'Volume '+Math.round(prof.medianShares).toLocaleString('en-IN')+' sh/bar (bottom '+dropThinPct+'%)',
           detail:'trades about '+Math.round(prof.medianShares).toLocaleString('en-IN')
             +' shares in a typical 5-minute bar, below the cut of '+Math.round(cutInfo.cut).toLocaleString('en-IN')
             +' that drops the thinnest '+dropThinPct+'% of the '+cutInfo.n.toLocaleString('en-IN')
-            +' stocks with a tape today'});
-        if(!showBelowThreshold) return false;
+            +' stocks with a tape today'};
       }
-    } else if(Number.isFinite(Number(s.score))&&Number(s.score)<RECOMMEND_MIN_SCORE){
-      REMOVED_ROWS.push({s,reason:'filter',chip:'Score '+Number(s.score).toFixed(1)+' < min '+RECOMMEND_MIN_SCORE,
-        detail:'score '+Number(s.score).toFixed(1)+' is below your Min Score of '+RECOMMEND_MIN_SCORE});
-      if(!showBelowThreshold) return false;
+    }
+    const numScore=Number(s.score);
+    const scoreVal=Number.isFinite(numScore)?numScore:0;
+    const belowThreshold=scoreVal<RECOMMEND_MIN_SCORE;
+    if(belowThreshold&&!removedReason){
+      removedReason={s,reason:'filter',chip:'Score '+scoreVal.toFixed(1)+' < min '+RECOMMEND_MIN_SCORE,
+        detail:'score '+scoreVal.toFixed(1)+' is below your Min Score of '+RECOMMEND_MIN_SCORE};
+    }
+    if(removedReason){
+      REMOVED_ROWS.push(removedReason);
+      if(!SHOW_BELOW_THRESHOLD) return false;
+    } else if(belowThreshold){
+      if(!SHOW_BELOW_THRESHOLD) return false;
     }
     if(q&&![s.symbol,s.name,s.sector].join(' ').toLowerCase().includes(q)) return false;
 
@@ -12854,7 +12849,7 @@ function applyFilters({preservePage=false}={}){
     }
     return true;
   });
-  rows.sort((a,b)=>(a.rank??Infinity)-(b.rank??Infinity));
+  rows.sort((a,b)=>(Number(b.score)||0)-(Number(a.score)||0));
   FILT=rows;
   recordTableEntries(FILT);
   rows.forEach(r=>{
@@ -13296,12 +13291,14 @@ function renderStatusBar(){
   if(SURV_HARD_REMOVED>0)html+=` <span class="sb-tag sb-tag-red" style="margin-left:4px" title="Weeded out by the configured surveillance rules in the Methodology table (hard filter).">⚠ ${SURV_HARD_REMOVED} surveillance removed</span>`;
   if(ALLOC_BLOCKED>0)html+=` <span class="sb-tag" style="margin-left:4px" title="Removed because no share can be allocated to them: no daily turnover, allocation rails below one share, no viable target after costs, or already held at a profit with no cushion for an add. Listed with the reason in Removed from rankings.">🚫 ${ALLOC_BLOCKED} not allocatable</span>`;
   if(tags.length){html+=`<span class="sb-sep">|</span>`;html+=tags.map(t=>`<span class="sb-tag">${t}</span>`).join('');}
-  if(isFiltered)html+=`<button class="sb-clear" onclick="clearFilters()">✕ Clear filters</button>`;
+  html+=`<button class="sb-clear" id="btnToggleBelowThreshold" onclick="toggleBelowThreshold()" style="margin-left:auto;${SHOW_BELOW_THRESHOLD?'border-color:var(--amber);color:var(--amber);background:rgba(251,191,36,.1)':''}" title="${SHOW_BELOW_THRESHOLD?'Hide stocks below recommendation threshold':'Show stocks that do not clear the recommendation threshold'}">${SHOW_BELOW_THRESHOLD?'Hide below threshold':'Show below threshold'}</button>`;
+  if(isFiltered)html+=`<button class="sb-clear" style="margin-left:8px" onclick="clearFilters()">✕ Clear filters</button>`;
   const el=document.getElementById('statusBar');
   if(el)el.innerHTML=html;
 }
 
 function clearFilters(){
+  SHOW_BELOW_THRESHOLD=false;
   ['fSearch','fMinScore'].forEach(id=>{const el=document.getElementById(id);if(el)el.value=id==='fMinScore'?'60':'';});
   const turnEl=document.getElementById('fMinTurnover');if(turnEl)turnEl.value='0';
   const dtEl=document.getElementById('fDropThin');if(dtEl)dtEl.value='';
@@ -15055,7 +15052,7 @@ function saveFilterState(){
   const state={
     search:document.getElementById('fSearch')?.value||'',
     minScore:document.getElementById('fMinScore')?.value||'60',
-    showBelowThreshold:document.getElementById('fShowBelowThreshold')?.checked||false,
+    showBelowThreshold:SHOW_BELOW_THRESHOLD,
     minTurnover:document.getElementById('fMinTurnover')?.value||'0',
     dropThin:document.getElementById('fDropThin')?.value??'',
     sortCol:SCOL,
@@ -15092,7 +15089,7 @@ function loadFilterState(){
     const shared=JSON.parse(localStorage.getItem(SHARED_FILTER_STORE)||'{}');
     if(state.search!=null){const el=document.getElementById('fSearch');if(el)el.value=state.search;}
     if(state.minScore!=null){const el=document.getElementById('fMinScore');if(el)el.value=state.minScore;}
-    if(state.showBelowThreshold!=null){const el=document.getElementById('fShowBelowThreshold');if(el)el.checked=!!state.showBelowThreshold;}
+    if(state.showBelowThreshold!=null){SHOW_BELOW_THRESHOLD=!!state.showBelowThreshold;}
     if(state.minTurnover!=null){const el=document.getElementById('fMinTurnover');if(el)el.value=state.minTurnover;}
     if(state.dropThin!=null){const el=document.getElementById('fDropThin');if(el)el.value=state.dropThin;}
     resetRecommendationSelectionForRefresh(); // legacy persisted exclusions are deliberately ignored
@@ -15117,7 +15114,7 @@ function loadFilterState(){
     }
     updateFilterPlaceholders(); // empty fields show + use the computed defaults
     // Legacy engine sort columns migrate to the Radar rank ordering once.
-    const legacy=new Set(['_rank','rocketScore','snapshotChange','tslRefPoints','velocityPotential','delivPct','volume']);
+    const legacy=new Set(['_rank','rank','rocketScore','snapshotChange','tslRefPoints','velocityPotential','delivPct','volume','action']);
     if(state.sortCol&&!legacy.has(state.sortCol))SCOL=state.sortCol;
     if(state.sortDir&&!legacy.has(state.sortCol||''))SDIR=state.sortDir;
     FILTERS_RESTORED=true;
