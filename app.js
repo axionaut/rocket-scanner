@@ -1,5 +1,5 @@
-const BUILD_TS='2026-09-08 14:00 IST'; // release build time (IST)
-const APP_VERSION=1310; // v1310: Scope Since In strictly to today's session date and display entry time.
+const BUILD_TS='2026-09-08 14:08 IST'; // release build time (IST)
+const APP_VERSION=1311; // v1311: Record Since In for all table rows and auto-reanchor circuit overshoots.
 const RADAR_SCORE_VERSION='tape-decision-v4';
 const EQUITY_OPEN_MIN=9*60+15, EQUITY_CLOSE_MIN=15*60+30;
 // v1093: a baseline reward:risk MEASURED on the cross-section (last completed bhav session) instead of learned from the owner's own fills - reported on every row, deliberately not enforced. Includes v1092: position size split by Radar score / stop distance, so equally-scored names carry equal RUPEE risk, plus an opt-in Risk /trade cap.
@@ -194,8 +194,6 @@ function recordTableEntries(rows){
   const now=Date.now();
   (rows||[]).forEach(r=>{
     if(!r||!r.symbol||!(Number(r.price)>0)) return;
-    // Only record stocks that actively qualify as actionable recommendations
-    if(typeof isSelectableRecommendation==='function'&&!isSelectableRecommendation(r)) return;
     const sym=normSym(r.symbol);
     const prev=TABLE_ENTRY_MAP[sym];
     const currPrice=Number(r.price);
@@ -222,11 +220,11 @@ function getTableEntryInfo(sym,currentPrice){
   if(!entry||entry.date!==today||!(entry.price>0)) return null;
   const curr=Number(currentPrice)>0?Number(currentPrice):entry.price;
   const movePct=((curr-entry.price)/entry.price)*100;
-  // If movePct exceeds daily circuit bounds (> 20.5%), reject as corrupted
+  // If movePct exceeds daily circuit bounds (> 20.5%), auto-reanchor to live price
   if(Math.abs(movePct)>20.5){
-    delete TABLE_ENTRY_MAP[key];
+    TABLE_ENTRY_MAP[key]={date:today, price:curr, at:Date.now()};
     saveTableEntryMap();
-    return null;
+    return {entryPrice:curr, at:Date.now(), movePct:0};
   }
   return {entryPrice:entry.price, at:entry.at, movePct};
 }
@@ -12919,7 +12917,7 @@ function applyFilters({preservePage=false}={}){
   recordTableEntries(FILT);
   rows.forEach(r=>{
     const info=getTableEntryInfo(r.symbol,r.price);
-    r.sinceIn=info?.movePct??null;
+    r.sinceIn=info?.movePct??0;
     r.sinceInEntry=info;
   });
   applySort();
