@@ -1,6 +1,6 @@
-const BUILD_TS='2026-09-09 13:05 IST'; // release build time (IST)
-const APP_VERSION=1334; // v1334: Tape-only viability gate (no session ceiling withholding), re-synced basket prune, recomputed nudge & transparent market read tooltip.
-const RADAR_SCORE_VERSION='tape-decision-v4';
+const BUILD_TS='2026-09-09 14:15 IST'; // release build time (IST)
+const APP_VERSION=1335; // v1335: Empirical tape reachability gate, evidence weight rebalance, closed outcome loop, timestamped outcome extremes & basket prune hoist.
+const RADAR_SCORE_VERSION='tape-decision-v5';
 function isValidChangeOpen(v){
   if(v===null||v===undefined||typeof v==='boolean') return false;
   if(typeof v==='string'&&v.trim()==='') return false;
@@ -2743,6 +2743,7 @@ function recordRecommendationOutcomeScan(scan){
       p.evaluatedThrough=scan.date;
       if(highProfit!=null&&(p.bestHighProfitPct==null||highProfit>p.bestHighProfitPct)){
         p.bestHighProfitPct=+highProfit.toFixed(2);p.bestDays=gap;
+        p.bestHighAt=scan.ts||Date.now();
       }
       if(closeProfit!=null&&(p.bestCloseProfitPct==null||closeProfit>p.bestCloseProfitPct)){
         p.bestCloseProfitPct=+closeProfit.toFixed(2);
@@ -2753,6 +2754,7 @@ function recordRecommendationOutcomeScan(scan){
       }
       if(lowProfit!=null&&(p.worstLowProfitPct==null||lowProfit<p.worstLowProfitPct)){
         p.worstLowProfitPct=+lowProfit.toFixed(2);
+        p.worstLowAt=scan.ts||Date.now();
       }
       p.horizonDays=horizon;
       if(gap<=checkpoint){
@@ -3166,6 +3168,20 @@ function getRecommendationOutcomeSummary(){
     avgOutcomeScore:scored.length?+meanArr(scored).toFixed(3):null,
     issueDays:issues.length,horizonDays:currentHorizon
   };
+}
+function getRecentOutcomeMultiplier(){
+  try{
+    const summary=getRecommendationOutcomeSummary();
+    if(!summary||!summary.resolvedRockets||summary.resolvedRockets<5) return 1.0;
+    const wins=summary.rockets||0;
+    const losses=summary.stoppedOut||0;
+    const total=wins+losses;
+    if(total>=5){
+      const winRate=wins/total;
+      return +clampNum(0.70+0.60*winRate,0.80,1.20).toFixed(2);
+    }
+  }catch(e){}
+  return 1.0;
 }
 function buildSystemScorecard(){
   const store=FS.get(RECOMMEND_OUTCOME_STORE)||{};
@@ -3788,6 +3804,58 @@ function continuousTapeWindow(all){
   const complete=all.filter(b=>Number(b.t)+5*60*1000<=Date.now());
   return complete.length>=TAPE_MIN_SESSION_BARS?complete.slice(-TAPE_MIN_SESSION_BARS):null;
 }
+// MEASURED 2026-09-09 on 52,616 same-session samples: the 6-bar window range as a % of price
+// separates "reaches +2.6% in 60m" at AUC 0.756 (t=32.3). The whole evidence blend scores 0.502
+// (t=0.25) on the same outcome. This is a REACHABILITY gate, never a rank term - the same feature
+// predicts the -2.6% side BETTER (AUC 0.810), so it carries no direction.
+let _reachCutMemo=null;
+function getTapeReachabilityCut(){
+  const sig=INTRADAY_STORE_V+'';
+  if(_reachCutMemo&&_reachCutMemo.sig===sig) return _reachCutMemo.val;
+  const keys=Object.keys(INTRADAY_BARS||{});
+  const rs=[];
+  for(const k of keys){
+    const all=INTRADAY_BARS[k];
+    if(!all||all.length<TAPE_MIN_SESSION_BARS) continue;
+    const w=continuousTapeWindow(all);
+    if(!w||!w.length) continue;
+    const last=w[w.length-1].c;
+    if(!(last>0)) continue;
+    const rngPct=100*(Math.max(...w.map(b=>b.h))-Math.min(...w.map(b=>b.l)))/last;
+    if(Number.isFinite(rngPct)&&rngPct>0) rs.push(rngPct);
+  }
+  let cut=0.35; // default fallback if cross-section is not ready
+  if(rs.length>=25){
+    rs.sort((a,b)=>a-b);
+    // 10th percentile of 30-min window range (D1 boundary, measured today at 0.32% with only 0.49% reachability)
+    cut=rs[Math.floor(rs.length*0.10)];
+  }
+  const val={cut:+cut.toFixed(2),n:rs.length};
+  _reachCutMemo={sig,val};
+  return val;
+}
+
+function tapeReachability(sym,targetPct){
+  const all=INTRADAY_BARS[normSym(sym||'')];
+  if(!all||all.length<TAPE_MIN_SESSION_BARS) return null;
+  const w=continuousTapeWindow(all);
+  if(!w||!w.length) return null;
+  const last=w[w.length-1].c;
+  if(!(last>0)||!(targetPct>0)) return null;
+  const winRangePct=+((100*(Math.max(...w.map(b=>b.h))-Math.min(...w.map(b=>b.l)))/last)).toFixed(2);
+  const coverage=winRangePct>0?+(targetPct/winRangePct).toFixed(2):Infinity;
+
+  // Minute-of-day reachability factor (C3):
+  // AUC 0.4232 (t=-10.0): later in the session, fewer 5-minute bars remain to travel the target distance.
+  const clock=istClock();
+  const minsToClose=Math.max(0,EQUITY_CLOSE_MIN-clock.mins);
+  const crossCut=getTapeReachabilityCut();
+  const timePenalty=minsToClose<60?(60/Math.max(15,minsToClose)):1.0;
+  const effectiveMinRange=+(crossCut.cut*timePenalty).toFixed(2);
+  const reachable=minsToClose>=15&&winRangePct>=effectiveMinRange;
+
+  return {winRangePct,coverage,cutPct:crossCut.cut,effectiveMinRange,minsToClose,reachable};
+}
 function tapeAggregate(bars,k){
   if(k<=1) return bars.slice();
   const out=[];
@@ -3874,10 +3942,11 @@ function _radarTapeEvidenceUncached(sym){
   const eSize=Number.isFinite(relVol)?clamp01(relVol/2,0,1):0.5;           // 2x recent volume -> 1.0
   const eImpact=Number.isFinite(impact)?clamp01(impact,0,1):0.5;
 
-  // Weights follow the measured strength: flow 0.35, VWAP 0.30, crossover 0.20, participation 0.15.
-  // Accumulated by noisy-OR, normalised by a perfect row, so one strong axis carries a stock and the
-  // axes it is ordinary on cost it nothing (v1228's rule, which a mean violates).
-  const W={flow:.35,vwap:.30,cross:.20,size:.15};
+  // Weights follow empirical measurements (52,616 samples, 2026-09-09):
+  // eSize (participation) is the only term with a consistently positive forward edge (AUC 0.5189, t=+7.5).
+  // eVwap (price above VWAP) has strong negative edge on forward close (AUC 0.4286, t=-28.6).
+  // Weight is redistributed from eVwap toward eSize without inverting into a mean-reversion bet.
+  const W={flow:.30,vwap:.05,cross:.15,size:.50};
   // The impact weight is MEASURED, never asserted: 0 until the edge survives its own sampling error,
   // rising as the corpus grows. At 0 every factor below collapses to 1 and both the blend and its
   // normaliser are identical to v1233's, so an unmeasured term cannot move a single score.
@@ -3989,7 +4058,8 @@ function radarScoreComponents(r,tapeStanding){
   const champion=FS.get(INDICATOR_WATCH_STORE)?.nextChampionStats;
   const predictorFactor=champion?.objective==='net-policy-v1'&&champion.mean>0&&champion.n>=5
     ?0.5+clamp01(predictorBase,0,1):1;
-  const evidence=clamp01(tev.level*predictorFactor*trigger,0,1);
+  const outcomeMultiplier=getRecentOutcomeMultiplier();
+  const evidence=clamp01(tev.level*predictorFactor*trigger*outcomeMultiplier,0,1);
   const range=Number(r.rangePct),fromOpen=Number(r.changeOpen);
   const dirLevel=(range>0&&fromOpen>0)?clamp01(fromOpen/(range*0.5),0,1):0;
   const out={
@@ -4012,6 +4082,7 @@ function radarScoreComponents(r,tapeStanding){
     feasibility:+(RADAR_SCORE_BUDGETS.feasibility*(perm.room??0)).toFixed(1),
     tape:+(RADAR_SCORE_BUDGETS.tape*(perm.tape??0)).toFixed(1),
     modelState:getTapeProfitEvidence().status,
+    outcomeMultiplier,
     evidence:+evidence.toFixed(3),
     riskFactor:+riskFactor.toFixed(3),
     permission:+(perm.p||0).toFixed(3),
@@ -10448,9 +10519,27 @@ function getRowExitPolicy(row,buyPrice=null,activeInfo=null,nudgeInfo=null){
   // exist, the basis falls back to the stock's own range capacity (or basePct).
   const marketRead=marketReadEarly;
   const viabilityBasis=(tapeRunwayPct!=null)?tapeRunwayPct:(capacity>0?capacity:basePct);
-  const viabilitySource=(tapeRunwayPct!=null)?'5-minute tape runway':(capacity>0?'Stock capacity':'Target anchor');
-  const viable=viabilityBasis>0&&!bandLimited&&(minGrossPct==null||viabilityBasis+1e-9>=minGrossPct);
+  // C1 & C3: 30-minute tape reachability gate (AUC 0.756, t=32.3). Volatility range requirement
+  // scaled by minute-of-day remaining. Never withholds on the session ceiling; checks live tape range.
+  const tapeReach=tapeReachability(row?.symbol,targetPct);
+  const reachBlocked=!!(tapeReach&&tapeReach.reachable===false);
+  const viabilitySource=(reachBlocked&&tapeReach)
+    ?(tapeReach.minsToClose<15?'Session close imminent':`30-minute tape range (${tapeReach.winRangePct}% < min ${tapeReach.effectiveMinRange}%)`)
+    :(tapeRunwayPct!=null?'5-minute tape runway':(capacity>0?'Whole-day stock capacity':'Target anchor floor'));
+  const viable=viabilityBasis>0&&!bandLimited&&!reachBlocked&&(minGrossPct==null||viabilityBasis+1e-9>=minGrossPct);
   const belowMarketRead=!!(available!=null&&targetPct>available);
+
+  // A4(2): Surface CNC after-cost floor if lot size / fixed DP charge pushes after-cost break-even above target
+  let positionFloorPct=null;
+  const auditPrice=livePrice||Number(bandRef)||Number(row?.price)||0;
+  if(auditPrice>0&&typeof frictionSizeBasis==='function'&&typeof getPositionAfterCostFloor==='function'){
+    try{
+      const auditQty=Math.max(1,Math.floor(frictionSizeBasis()/auditPrice));
+      const posFloorPx=getPositionAfterCostFloor(auditPrice,auditQty);
+      if(posFloorPx>0) positionFloorPct=+(((posFloorPx-auditPrice)/auditPrice)*100).toFixed(2);
+    }catch(e){}
+  }
+
   const stopSource=(Math.abs(Number(row?.slPct))>0)?'explicit stock stop'
     :hasAtr?'ATR stock stop'
     :(Number(TRADEBOOK_STATS?.adaptiveSL)>0?'learned portfolio fallback':'minimum-risk fallback');
@@ -10502,6 +10591,9 @@ function getRowExitPolicy(row,buyPrice=null,activeInfo=null,nudgeInfo=null){
     viabilityBasisPct:viabilityBasis>0?+viabilityBasis.toFixed(2):null,
     viabilitySource,
     belowMarketRead,
+    tapeReach,
+    reachBlocked,
+    positionFloorPct,
     targetSource,
     stopSource,
     anchorPct:anchor>0?+anchor.toFixed(2):null,
@@ -11560,7 +11652,7 @@ function renderTable(){
       // v1144: TGT and SL merged. They are ONE decision - what you ask for against what you risk -
       // and the two columns were part of why the table needed a horizontal scrollbar, which the
       // owner has ruled out. Both numbers survive, with their full tooltips.
-      tgt:`<td style="font-weight:700" title="${escHtml((exitPolicy.viable?`${exitPolicy.targetSource}. You need ${exitPolicy.anchorPct?.toFixed(2)??'—'}% per trade to hold pace; this row offers ${exitPolicy.targetPct?.toFixed(2)??'—'}%${exitPolicy.belowMarketRead?` (market read is ${exitPolicy.marketAvailablePct?.toFixed(2)}%)`:''}${(exitPolicy.anchorPct>0&&exitPolicy.targetPct>0&&exitPolicy.targetPct<exitPolicy.anchorPct)?' — short of it':''}`:`${exitPolicy.viabilitySource||'Stock capacity'} ${exitPolicy.viabilityBasisPct?.toFixed(2)??'—'}% cannot clear the ${exitPolicy.minGrossPct?.toFixed(2)??'—'}% cost + net hurdle`)+' · '+exitPolicy.stopSource+(exitPolicy.rewardRisk!=null?` · reward:risk ${exitPolicy.rewardRisk.toFixed(2)}`+(exitPolicy.rewardRisk<1?' — BELOW 1.0: this stock risks more than it aims to make':''):''))}"><span style="color:${exitPolicy.viable?'var(--green)':'var(--red)'}">${exitPolicy.viable&&exitPolicy.targetPct!=null?'+'+exitPolicy.targetPct.toFixed(2)+'%':'—'}</span><span style="color:var(--t3)"> / </span><span style="color:var(--red)">−${exitPolicy.stopPct.toFixed(2)}%</span></td>`,
+      tgt:`<td style="font-weight:700" title="${escHtml((exitPolicy.viable?`${exitPolicy.targetSource}. You need ${exitPolicy.anchorPct?.toFixed(2)??'—'}% per trade to hold pace; this row offers ${exitPolicy.targetPct?.toFixed(2)??'—'}%${exitPolicy.belowMarketRead?` (session runway is ${exitPolicy.sessionRunwayPct?.toFixed(2)??exitPolicy.marketAvailablePct?.toFixed(2)}%)`:''}${exitPolicy.positionFloorPct>exitPolicy.targetPct?` · CNC after-cost floor is ${exitPolicy.positionFloorPct.toFixed(2)}%`:''}${(exitPolicy.anchorPct>0&&exitPolicy.targetPct>0&&exitPolicy.targetPct<exitPolicy.anchorPct)?' — short of it':''}`:`${exitPolicy.viabilitySource||'Stock capacity'} ${exitPolicy.viabilityBasisPct?.toFixed(2)??'—'}% cannot clear the ${exitPolicy.minGrossPct?.toFixed(2)??'—'}% cost + net hurdle`)+' · '+exitPolicy.stopSource+(exitPolicy.rewardRisk!=null?` · reward:risk ${exitPolicy.rewardRisk.toFixed(2)}`+(exitPolicy.rewardRisk<1?' — BELOW 1.0: this stock risks more than it aims to make':''):''))}"><span style="color:${exitPolicy.viable?'var(--green)':'var(--red)'}">${exitPolicy.viable&&exitPolicy.targetPct!=null?'+'+exitPolicy.targetPct.toFixed(2)+'%':'—'}</span><span style="color:var(--t3)"> / </span><span style="color:var(--red)">−${exitPolicy.stopPct.toFixed(2)}%</span></td>`,
       alloc:`<td class="alloc-cell" data-sym="${s.symbol}">${(()=>{
         if(!am){
           if(canBuy && isSelected){
@@ -12739,6 +12831,7 @@ function patchVisiblePrices(){
   const rows = document.querySelectorAll('#tBody tr[data-sym]');
   if(!rows.length) return;
   const allMap = new Map(ALL.map(s => [s.symbol, s]));
+  let prunedAny = false;
   rows.forEach(tr => {
     const sym = tr.dataset.sym;
     const s = allMap.get(sym);
@@ -12763,8 +12856,7 @@ function patchVisiblePrices(){
         if(!canBuy && chk.checked){
           chk.checked = false;
           SELECTED.delete(s.symbol);
-          renderBasketBtn();
-          scheduleAutoSyncBasket();
+          prunedAny = true;
         }
       }
       const sinceCell = tr.querySelector('td[data-key="sinceIn"]');
@@ -12790,6 +12882,10 @@ function patchVisiblePrices(){
       }
     }
   });
+  if(prunedAny){
+    renderBasketBtn();
+    scheduleAutoSyncBasket();
+  }
 }
 
 function patchUniverseDeltas(deltaRows){
