@@ -1,5 +1,5 @@
-const BUILD_TS='2026-09-09 12:15 IST'; // release build time (IST)
-const APP_VERSION=1333; // v1333: Harmonize candidate targets with Open Positions via max(anchor, available), restore viability gate, and patch ineligible selection hole.
+const BUILD_TS='2026-09-09 13:05 IST'; // release build time (IST)
+const APP_VERSION=1334; // v1334: Tape-only viability gate (no session ceiling withholding), re-synced basket prune, recomputed nudge & transparent market read tooltip.
 const RADAR_SCORE_VERSION='tape-decision-v4';
 function isValidChangeOpen(v){
   if(v===null||v===undefined||typeof v==='boolean') return false;
@@ -10413,6 +10413,7 @@ function getRowExitPolicy(row,buyPrice=null,activeInfo=null,nudgeInfo=null){
   }
   if(circuitRunwayPct!=null&&circuitRunwayPct>0&&targetPct>circuitRunwayPct){
     targetPct=toStep(circuitRunwayPct);
+    nudgePct=+(targetPct-basePct).toFixed(2);
     targetSource='bounded by the NSE circuit';
   }
   // v1216: WHAT THE TARGET PERCENTAGE IS MEASURED FROM. A clock or tape read is further travel
@@ -10431,7 +10432,7 @@ function getRowExitPolicy(row,buyPrice=null,activeInfo=null,nudgeInfo=null){
   const uc=getUpperCircuitInfo(row,bandRef);
   const bandLimited=!!(uc&&basePct>0&&uc.runwayPct<basePct);
   const rangeExhausted=!!(sc&&basePct>0&&sc.runwayPct<basePct);
-  // v1212: viability is decided on the target the row will ACTUALLY be given - but only where the
+  // v1212/v1334: viability is decided on the target the row will ACTUALLY be given - but only where the
   // number that set it is HARD. v1112 (owner) removed the statistical session ceiling from this
   // decision after measuring twice that the cohort it deletes is the cohort that reaches target
   // (349 of 900 rows, most of the top ten), and that stands: a low session ceiling may lower the
@@ -10440,15 +10441,16 @@ function getRowExitPolicy(row,buyPrice=null,activeInfo=null,nudgeInfo=null){
   // from this point in the session, on its own sessions. Where that exists it decides affordability,
   // and the row is withheld when it cannot clear costs plus the desired net. Where it does not, the
   // basis falls back to the stock's own range capacity, exactly as before v1212.
-  // v1216: AFFORDABILITY IS UNCHANGED FROM v1212, deliberately. The clock read is a statement
-  // about WHEN, and v1112's rule is that a read of what is left of the session may lower the PRICE
-  // on a row but may never be the reason the row is withheld. Routing it into viability shrank
-  // every basis to ~0.7x capacity and cost the release fixture its last basket row - measured. So
-  // only the stock's OWN tape decides affordability, exactly as before, and the whole-day reach is
-  // resolved alongside it for the goal-floor report.
+  // v1216/v1334: AFFORDABILITY IS UNCHANGED FROM v1212, deliberately. The clock read or statistical
+  // session ceiling is a statement about typical session profiles, and v1112's settled rule is that
+  // a statistical session ceiling may lower the PRICE on a row but may NEVER be the reason the row is
+  // withheld. Therefore, only the stock's OWN tape runway decides affordability; where it does not
+  // exist, the basis falls back to the stock's own range capacity (or basePct).
   const marketRead=marketReadEarly;
-  const viabilityBasis=(available!=null)?available:(capacity>0?capacity:basePct);
+  const viabilityBasis=(tapeRunwayPct!=null)?tapeRunwayPct:(capacity>0?capacity:basePct);
+  const viabilitySource=(tapeRunwayPct!=null)?'5-minute tape runway':(capacity>0?'Stock capacity':'Target anchor');
   const viable=viabilityBasis>0&&!bandLimited&&(minGrossPct==null||viabilityBasis+1e-9>=minGrossPct);
+  const belowMarketRead=!!(available!=null&&targetPct>available);
   const stopSource=(Math.abs(Number(row?.slPct))>0)?'explicit stock stop'
     :hasAtr?'ATR stock stop'
     :(Number(TRADEBOOK_STATS?.adaptiveSL)>0?'learned portfolio fallback':'minimum-risk fallback');
@@ -10479,7 +10481,7 @@ function getRowExitPolicy(row,buyPrice=null,activeInfo=null,nudgeInfo=null){
     targetPct:targetPct>0?+targetPct.toFixed(2):null,
     // v1097, all REPORTED so the nudge is auditable on every row:
     basePct:basePct>0?+basePct.toFixed(2):null,   // the goal rate alone — what eligibility is judged on
-    nudgePct:+Number(nudgePct||0).toFixed(2),      // what the left-on-table pool added
+    nudgePct:+Number(nudgePct||0).toFixed(2),      // market expansion above anchor floor
     stopPct:+stopPct.toFixed(2),
     rewardRisk,
     reachable,
@@ -10498,6 +10500,8 @@ function getRowExitPolicy(row,buyPrice=null,activeInfo=null,nudgeInfo=null){
     wholeDayReachPct:wholeDayReachPct!=null?+wholeDayReachPct.toFixed(2):null,
     targetRefPrice:targetRefPrice>0?+targetRefPrice.toFixed(2):null,targetRefSource,
     viabilityBasisPct:viabilityBasis>0?+viabilityBasis.toFixed(2):null,
+    viabilitySource,
+    belowMarketRead,
     targetSource,
     stopSource,
     anchorPct:anchor>0?+anchor.toFixed(2):null,
@@ -11556,7 +11560,7 @@ function renderTable(){
       // v1144: TGT and SL merged. They are ONE decision - what you ask for against what you risk -
       // and the two columns were part of why the table needed a horizontal scrollbar, which the
       // owner has ruled out. Both numbers survive, with their full tooltips.
-      tgt:`<td style="font-weight:700" title="${escHtml((exitPolicy.viable?`${exitPolicy.targetSource}. You need ${exitPolicy.anchorPct?.toFixed(2)??'—'}% per trade to hold pace; this row offers ${exitPolicy.targetPct?.toFixed(2)??'—'}%${(exitPolicy.anchorPct>0&&exitPolicy.targetPct>0&&exitPolicy.targetPct<exitPolicy.anchorPct)?' — short of it':''}`:`Stock capacity ${exitPolicy.capacityPct?.toFixed(2)??'—'}% cannot clear the ${exitPolicy.minGrossPct?.toFixed(2)??'—'}% cost + net hurdle`)+' · '+exitPolicy.stopSource+(exitPolicy.rewardRisk!=null?` · reward:risk ${exitPolicy.rewardRisk.toFixed(2)}`+(exitPolicy.rewardRisk<1?' — BELOW 1.0: this stock risks more than it aims to make':''):''))}"><span style="color:${exitPolicy.viable?'var(--green)':'var(--red)'}">${exitPolicy.viable&&exitPolicy.targetPct!=null?'+'+exitPolicy.targetPct.toFixed(2)+'%':'—'}</span><span style="color:var(--t3)"> / </span><span style="color:var(--red)">−${exitPolicy.stopPct.toFixed(2)}%</span></td>`,
+      tgt:`<td style="font-weight:700" title="${escHtml((exitPolicy.viable?`${exitPolicy.targetSource}. You need ${exitPolicy.anchorPct?.toFixed(2)??'—'}% per trade to hold pace; this row offers ${exitPolicy.targetPct?.toFixed(2)??'—'}%${exitPolicy.belowMarketRead?` (market read is ${exitPolicy.marketAvailablePct?.toFixed(2)}%)`:''}${(exitPolicy.anchorPct>0&&exitPolicy.targetPct>0&&exitPolicy.targetPct<exitPolicy.anchorPct)?' — short of it':''}`:`${exitPolicy.viabilitySource||'Stock capacity'} ${exitPolicy.viabilityBasisPct?.toFixed(2)??'—'}% cannot clear the ${exitPolicy.minGrossPct?.toFixed(2)??'—'}% cost + net hurdle`)+' · '+exitPolicy.stopSource+(exitPolicy.rewardRisk!=null?` · reward:risk ${exitPolicy.rewardRisk.toFixed(2)}`+(exitPolicy.rewardRisk<1?' — BELOW 1.0: this stock risks more than it aims to make':''):''))}"><span style="color:${exitPolicy.viable?'var(--green)':'var(--red)'}">${exitPolicy.viable&&exitPolicy.targetPct!=null?'+'+exitPolicy.targetPct.toFixed(2)+'%':'—'}</span><span style="color:var(--t3)"> / </span><span style="color:var(--red)">−${exitPolicy.stopPct.toFixed(2)}%</span></td>`,
       alloc:`<td class="alloc-cell" data-sym="${s.symbol}">${(()=>{
         if(!am){
           if(canBuy && isSelected){
@@ -12759,6 +12763,8 @@ function patchVisiblePrices(){
         if(!canBuy && chk.checked){
           chk.checked = false;
           SELECTED.delete(s.symbol);
+          renderBasketBtn();
+          scheduleAutoSyncBasket();
         }
       }
       const sinceCell = tr.querySelector('td[data-key="sinceIn"]');
