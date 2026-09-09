@@ -1,5 +1,5 @@
-const BUILD_TS='2026-09-09 10:30 IST'; // release build time (IST)
-const APP_VERSION=1323; // v1323: Remove speculative EoD column, clean RelVol display without missing depth clutter.
+const BUILD_TS='2026-09-09 10:35 IST'; // release build time (IST)
+const APP_VERSION=1324; // v1324: Remove Pace column and fix directionConfirmed assignment bug unblocking eligible stocks.
 const RADAR_SCORE_VERSION='tape-decision-v4';
 const EQUITY_OPEN_MIN=9*60+15, EQUITY_CLOSE_MIN=15*60+30;
 // v1093: a baseline reward:risk MEASURED on the cross-section (last completed bhav session) instead of learned from the owner's own fills - reported on every row, deliberately not enforced. Includes v1092: position size split by Radar score / stop distance, so equally-scored names carry equal RUPEE risk, plus an opt-in Risk /trade cap.
@@ -4642,14 +4642,14 @@ function _getRowActionStateUncached(s, ignoreMarketClosed=false){
   const _aboveVwap=_vw>0&&_px>=_vw;
   const _aboveOpen=Number.isFinite(_co)&&_co>0;
   const _greenDay=Number.isFinite(_day)&&_day>0;
-  if(!(_aboveVwap&&_aboveOpen&&_greenDay)){
+  s.directionConfirmed = (_aboveVwap && _aboveOpen && _greenDay);
+  if(!s.directionConfirmed){
     const why=[];
     if(!_greenDay) why.push('red day ('+(Number.isFinite(_day)?_day.toFixed(2)+'%':'no day move')+')');
     if(!_aboveVwap) why.push(_vw>0?'below VWAP ('+((_px/_vw-1)*100).toFixed(2)+'%)':'no VWAP');
     if(!_aboveOpen) why.push(Number.isFinite(_co)?'below open ('+_co.toFixed(2)+'%)':'no open move');
     return {state:'BLOCKED', reason:'Not lifting off: '+why.join(', ')};
   }
-  if(s.directionConfirmed!==true) return {state:'BLOCKED', reason:'Direction not confirmed'};
 
 
 
@@ -5821,7 +5821,8 @@ function* radarAnalyzeGen(headers,rawRows,supplements={},heldSymbols=new Set()){
       rocketReady,gateReasons,series,band:band??null,status,eqEligible,basketEligible,meta,
       igniteReady:igniteArr[ri]!==null,
       igniteStrength:igniteArr[ri]===null?null:+igniteArr[ri].toFixed(4),
-      ignitePct:igniteArr[ri]===null?0:radarPct(igniteSorted,igniteArr[ri])};
+      ignitePct:igniteArr[ri]===null?0:radarPct(igniteSorted,igniteArr[ri]),
+      directionConfirmed: (price > 0 && vwapI >= 0 && Number(raw[vwapI]) > 0 && price >= Number(raw[vwapI]) && Number(changeOpen) > 0 && Number(dispDay) > 0)};
     out.entryTiming=getPeakEntryTiming(out);
     out.entryReady=!out.entryTiming.blocked;
     return out;
@@ -9719,7 +9720,6 @@ function getCols(){
     {key:'sinceIn',label:'Since In',s:1},
     {key:'relvol',label:'RelVol',s:1},
     {key:'turnover',label:'Liq',s:1},
-    {key:'avgMove',label:'Pace',s:1},
     {key:'tgt',label:'TGT/SL',s:0},
     {key:'alloc',label:'Alloc',s:0},
     {key:'risk',label:'Risk',s:1},
