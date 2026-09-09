@@ -1,5 +1,5 @@
-const BUILD_TS='2026-09-09 10:00 IST'; // release build time (IST)
-const APP_VERSION=1321; // v1321: Objective tape acceleration, exhaustion guard, truthful staleness & idle-cpu zeroing.
+const BUILD_TS='2026-09-09 10:25 IST'; // release build time (IST)
+const APP_VERSION=1322; // v1322: Dedicated Status/Rejection column, loopDelay scope fix, rangeUsed guard & calendar session bridge.
 const RADAR_SCORE_VERSION='tape-decision-v4';
 const EQUITY_OPEN_MIN=9*60+15, EQUITY_CLOSE_MIN=15*60+30;
 // v1093: a baseline reward:risk MEASURED on the cross-section (last completed bhav session) instead of learned from the owner's own fills - reported on every row, deliberately not enforced. Includes v1092: position size split by Radar score / stop distance, so equally-scored names carry equal RUPEE risk, plus an opt-in Risk /trade cap.
@@ -218,13 +218,13 @@ function captureOpenSnapshots(rows){
       const currPrice=Number(r.price);
       const chgOpen=Number(r.changeOpen);
       let openPx=currPrice;
-      let snapAt=Date.now();
+      let snapAt=sessionOpenMs;
       if(Number.isFinite(chgOpen) && chgOpen>-99){
         openPx=+(currPrice / (1 + chgOpen / 100)).toFixed(2);
         snapAt=sessionOpenMs;
       } else {
         openPx=currPrice;
-        snapAt=inMarketHours ? Date.now() : sessionOpenMs;
+        snapAt=inMarketHours ? now : sessionOpenMs;
       }
       OPEN_SNAPSHOT_MAP[sym]={
         date:today,
@@ -442,13 +442,13 @@ function recordTableEntries(rows){
     const high=Number(r.high1d)||Number(r.high)||0;
     const chgOpen=Number(r.changeOpen);
     let openPx=currPrice;
-    let entryTime=Date.now();
+    let entryTime=sessionOpenMs;
     if(Number.isFinite(chgOpen) && chgOpen>-99){
       openPx=+(currPrice / (1 + chgOpen / 100)).toFixed(2);
       entryTime=sessionOpenMs;
     } else {
       openPx=currPrice;
-      entryTime=inMarketHours ? Date.now() : sessionOpenMs;
+      entryTime=inMarketHours ? baselineBootTime : sessionOpenMs;
     }
 
     if(!prev||prev.date!==today){
@@ -1514,6 +1514,13 @@ function isNseTradingDate(dateText){
   if(Number.isNaN(date.getTime())) return false;
   const day=date.getUTCDay();
   return day!==0&&day!==6&&!NSE_HOLIDAYS.has(isoDateFromUtcDate(date));
+}
+function getPreviousTradingDate(dateText){
+  const date=new Date(String(dateText||'')+'T12:00:00Z');
+  if(Number.isNaN(date.getTime())) return '';
+  date.setUTCDate(date.getUTCDate()-1);
+  while(!isNseTradingDate(isoDateFromUtcDate(date))) date.setUTCDate(date.getUTCDate()-1);
+  return isoDateFromUtcDate(date);
 }
 function getModelTradingDate(timestamp=Date.now()){
   const clock=istClock(timestamp);
@@ -4023,30 +4030,33 @@ function radarScoreComponents(r,tapeStanding){
   const p15 = Number.isFinite(Number(r.price15m)) ? Number(r.price15m) : 0;
 
   // 3. Exhaustion & Extension Guard (protecting against chasing tops):
-  // If the stock has already consumed >= 80% of its expected day range or breached upper volatility bands,
-  // it is in the climax/exhaustion zone. We scale down or eliminate the boost to prevent chasing.
   const timing = r.entryTiming || getPeakEntryTiming(r);
-  const isExhausted = timing?.rangeConsumed || (timing?.rangeLocation >= 80 && timing?.bandExtended);
-  const extensionMultiplier = isExhausted ? 0.0 : (timing?.rangeLocation >= 75 ? 0.4 : 1.0);
+  const rangeUsedPct = Number(timing?.rangeUsed) || 0;
+  const rangeLocPct = Number(timing?.rangeLocation) || 0;
+  const isExhausted = rangeUsedPct >= 75 || (rangeLocPct >= 75 && timing?.bandExtended) || timing?.gapLedFade || timing?.failedBreakout;
+  const extensionMultiplier = isExhausted ? 0.0 : (rangeLocPct >= 70 ? 0.4 : 1.0);
 
   // Deadband ±0.10% absorbs normal bid/ask spread noise
   if(coPct > 0.10 && extensionMultiplier > 0){
-    // Forward Acceleration Boost:
-    // Requires positive recent 5m momentum.
+    // Forward Acceleration Boost: requires positive recent 5m momentum
     const freshMom = Math.max(0, p5);
     if(freshMom > 0){
-      // Acceleration factor: is 5m pace accelerating relative to 15m pace?
       let accelFactor = 1.0;
       if(p15 > 0.10){
-        // Expected 5m share of a steady 15m move is p15 / 3.
-        const pace = freshMom / (p15 / 3);
-        accelFactor = Math.max(0.4, Math.min(1.4, pace));
+        const priorPace = Math.max(0, (p15 - freshMom) / 2);
+        if(freshMom < priorPace * 0.5){
+          accelFactor = 0.0; // Decelerating / exhausted runner
+        } else {
+          accelFactor = Math.max(0.4, Math.min(1.4, freshMom / Math.max(0.1, priorPace)));
+        }
       }
-      const trajectoryConfirm = Math.min(1.0, (coPct - 0.10) / 0.50);
-      const rawBoost = Math.min(25, freshMom * 12 * accelFactor * trajectoryConfirm * extensionMultiplier);
-      const velocityBoost = +(rawBoost * envelope).toFixed(1);
-      out.total = +Math.min(100, out.total + velocityBoost).toFixed(1);
-      out.velocityBoost = velocityBoost;
+      if(accelFactor > 0){
+        const trajectoryConfirm = Math.min(1.0, (coPct - 0.10) / 0.50);
+        const rawBoost = Math.min(25, freshMom * 12 * accelFactor * trajectoryConfirm * extensionMultiplier);
+        const velocityBoost = +(rawBoost * envelope).toFixed(1);
+        out.total = +Math.min(100, out.total + velocityBoost).toFixed(1);
+        out.velocityBoost = velocityBoost;
+      }
     }
   } else if(coPct < -0.10){
     // Accelerated Demotion: stock is dropping below official opening price.
@@ -4467,6 +4477,10 @@ function tapeBarsBehind(heldMs){
       const heldBarIndex=Math.floor(heldMinsElapsed / 5);
       return Math.max(0, completableBarsToday - 1 - heldBarIndex);
     }
+    // Held bar is from previous session:
+    // During opening window (first 15 mins / 3 bars), today's bars are still forming/merging:
+    if(completableBarsToday <= 3) return 0;
+    return completableBarsToday;
     // Held bar is from previous session: return exact completable bars elapsed today
     return Math.max(0, completableBarsToday);
   }
@@ -4553,20 +4567,22 @@ function getRecommendationFreshness(sym){
     return {ok:false,why:'Market closed - waiting for the next session'};
   }
   const isOpeningWindow = clock.mins >= DAY_START_MIN && clock.mins < DAY_START_MIN + 15;
-  const isRecentSession = Number.isFinite(last) && (clock.dateMs - last) <= 4 * 24 * 60 * 60 * 1000;
-  if(istDayKey(last)!==date){
-    if(isOpeningWindow && bars.length>=TAPE_MIN_SESSION_BARS && isRecentSession){
-      return {ok:true,why:'Opening window — bridging previous tape'};
+  const prevTradingDate = getPreviousTradingDate(date);
+  const lastDayKey = istDayKey(last);
+  const isPrevSession = Number.isFinite(last) && last <= Date.now() && lastDayKey === prevTradingDate;
+  if(lastDayKey !== date){
+    if(isOpeningWindow && bars.length >= TAPE_MIN_SESSION_BARS && isPrevSession){
+      return {ok:true, why:'Opening window — bridging previous tape'};
     }
-    return {ok:false,why:'Awaiting this session\'s 5-minute tape'};
+    return {ok:false, why:'Awaiting this session\'s 5-minute tape'};
   }
-  if(!Number.isFinite(last)||tapeBarsBehind(last)>1){
-    if(isOpeningWindow && bars.length>=TAPE_MIN_SESSION_BARS && isRecentSession){
-      return {ok:true,why:'Opening window — bridging previous tape'};
+  if(!Number.isFinite(last) || tapeBarsBehind(last) > 1){
+    if(isOpeningWindow && bars.length >= TAPE_MIN_SESSION_BARS && isPrevSession){
+      return {ok:true, why:'Opening window — bridging previous tape'};
     }
-    return {ok:false,why:'Stale 5-minute tape - refresh required'};
+    return {ok:false, why:'Stale 5-minute tape - refresh required'};
   }
-  return {ok:true,why:''};
+  return {ok:true, why:''};
 }
 function passesIntradayValidation(s){return !!s&&getRecommendationFreshness(s.symbol).ok;}
 const ROW_ACTION_MEMO=new WeakMap();
@@ -9698,6 +9714,7 @@ function getCols(){
     {key:'chk',label:'',s:0},
     {key:'score',label:'Score',s:1},
     {key:'symbol',label:'Symbol',s:1},
+    {key:'status',label:'Status / Rejection',s:1},
     {key:'price',label:'Price/Day',s:1},
     {key:'sinceIn',label:'Since In',s:1},
     {key:'relvol',label:'Vol/Bk',s:1},
@@ -11414,6 +11431,19 @@ function renderTable(){
       // panels and quietly false of the main table - which is why swapping to Zerodha missed it.
       symbol:`<td style="font-family:'Plus Jakarta Sans',sans-serif">${(
         `<div style="font-weight:700;font-size:15px;color:var(--t1);max-width:280px;overflow:hidden;text-overflow:ellipsis">${escHtml(s.symbol)}${chartLinkButtons(s.symbol)}${(()=>{const bf=getBookFlag(s.symbol);if(!bf)return '';return `<span style="font-size:11px;background:rgba(245,158,11,.14);color:var(--amber);border-radius:4px;padding:1px 5px;margin-left:5px;font-weight:700;vertical-align:middle" title="Order book: ${escHtml(bf.text)}. Display only - it does not change the score unless the graded book weight says it should.">${bf.iceberg?'🧊':'⚑'}${bf.heavyCancel?' cx':''}</span>`;})()}${(()=>{const flags=s.meta?.flags||[];if(!flags.length)return '';return `<span style="font-size:12px;background:rgba(239,68,68,.15);color:var(--red);border-radius:4px;padding:1px 5px;margin-left:5px;font-weight:700;vertical-align:middle" title="NSE surveillance flags: ${escHtml(flags.join(' · '))}">⚠ ${flags.length}</span>`;})()}${s._held?`<span style="font-size:12px;background:rgba(244,114,182,.15);color:#f472b6;border-radius:4px;padding:1px 5px;margin-left:5px;font-weight:700;vertical-align:middle" title="You already hold this. Held stocks stay in the ranking (v1070) and can be recommended again — buying here ADDS to the existing position.">📌 held</span>`:''}</div>${radarSurveillanceNames(s)}<div style="font-size:11px;color:var(--t3);max-width:180px;overflow:hidden;text-overflow:ellipsis" title="${escHtml((s.name||'')+(s.setup?' · '+s.setup:''))}">${radarSeriesBandPill(s)} ${escHtml(s.setup||s.name||'')}</div>`)}</td>`,
+      status:`<td style="white-space:nowrap;font-size:12px">${(()=>{
+        const act=getRowActionState(s);
+        if(act.state==='GO'){
+          if(s.entryReady===false&&s.entryAtLimit===true){
+            return `<span class="info-pill pill-cyan" style="padding:2px 8px;font-weight:700" title="Extended — limit buy at pullback price ${fmtINR(s.entryLimitPrice)}">Limit @ ${fmtINR(s.entryLimitPrice)}</span>`;
+          }
+          return `<span class="info-pill pill-green" style="padding:2px 8px;font-weight:700" title="Actionable recommendation clearing all technical gates">✓ GO</span>`;
+        }
+        if(act.state==='WAIT'){
+          return `<span class="info-pill pill-amber" style="padding:2px 8px;max-width:220px;overflow:hidden;text-overflow:ellipsis;display:inline-block;vertical-align:middle" title="${escHtml(act.reason)}">⏳ ${escHtml(act.reason)}</span>`;
+        }
+        return `<span class="info-pill pill-red" style="padding:2px 8px;max-width:220px;overflow:hidden;text-overflow:ellipsis;display:inline-block;vertical-align:middle" title="${escHtml(act.reason)}">✕ ${escHtml(act.reason)}</span>`;
+      })()}</td>`,
       setup:`<td style="font-size:13px;color:var(--t2)">${escHtml(s.setup||'—')}${s.stage?' '+radarStagePill(s):''}${(s.modelTriggers||[]).length?' '+radarTriggerPill(s):''}</td>`,
       series:`<td>${radarSeriesBandPill(s)}</td>`,
       price:`<td data-key="price" style="white-space:nowrap">${livePriceAge(s.symbol)}${fmtINR(s.price)}<span style="color:var(--t3)"> · </span><span style="font-size:12px">${fPerf(s.day??s.priceChange)}${s.corpAction?`<span title="Corporate action (${escHtml(s.corpAction)}) — mechanical ex-date move, neutralised in scoring" style="font-size:11px;color:var(--amber);margin-left:4px;cursor:help">⚑</span>`:''}</span></td>`,
@@ -11549,7 +11579,7 @@ function scrollToSection(id){
   window.scrollTo({top:y,behavior:'smooth'});
 }
 function goP(p){PG=p;renderTable();scrollToSection('tHead');}
-function doSort(col){if(SCOL===col)SDIR*=-1;else{SCOL=col;SDIR=['symbol','setup','series','risk'].includes(col)?1:-1;}applySort();PG=1;renderHead();renderTable();saveFilterState();}
+function doSort(col){if(SCOL===col)SDIR*=-1;else{SCOL=col;SDIR=['symbol','setup','series','risk','status'].includes(col)?1:-1;}applySort();PG=1;renderHead();renderTable();saveFilterState();}
 function applySort(){
   const col=SCOL;
   FILT.sort((a,b)=>{
@@ -11557,6 +11587,21 @@ function applySort(){
       const sa=Number(a.score)||0;
       const sb=Number(b.score)||0;
       return (sa-sb)*SDIR;
+    }
+    if(col==='status'){
+      const getStatusWeight=(s)=>{
+        const act=getRowActionState(s);
+        if(act.state==='GO'){
+          if(s.entryReady===false&&s.entryAtLimit===true) return 2;
+          return 1;
+        }
+        if(act.state==='WAIT') return 3;
+        return 4;
+      };
+      const wa=getStatusWeight(a), wb=getStatusWeight(b);
+      if(wa!==wb) return (wa-wb)*SDIR;
+      const ra=getRowActionState(a).reason||'', rb=getRowActionState(b).reason||'';
+      return ra.localeCompare(rb)*SDIR;
     }
     const va=a[col],vb=b[col];
     if(va===null||va===undefined)return 1;if(vb===null||vb===undefined)return-1;
@@ -14012,8 +14057,10 @@ function scheduleStreamRefresh(delay=STREAM_REFRESH_MS){
     await streamRefreshTick();
   },nextDelay);
 }
+let _lastScoreJobAt=0;
 async function streamRefreshTick(){
   if(_streamRefreshBusy) return;
+  let loopDelay=isMarketRefreshWindow() ? 1000 : STREAM_REFRESH_MS;
   if(document.hidden){
     if(Date.now()-_lastHiddenBeatAt<HIDDEN_REFRESH_MS){
       scheduleStreamRefresh(Math.max(1000,HIDDEN_REFRESH_MS-(Date.now()-_lastHiddenBeatAt)));
@@ -14102,12 +14149,15 @@ async function streamRefreshTick(){
     // ten-minute refresh, not a beat-by-beat one. It is the only call here that reads files.
     if(Date.now()-_bookEdgeAt>600000){ _bookEdgeAt=Date.now(); try{ await loadBookEdges(); }catch(e){} }
     // Publish only after prices, completed tape, book and minute inputs have all arrived.
-    // Recompute only when prices or completed tape actually changed — avoids idle CPU churn.
-    if((deltaRes&&deltaRes.changed)||barsRead>0) await scheduleScoreJob();
+    // Recompute when prices or tape changed, or periodically every 30s for clock-driven transitions.
+    const needScore = (deltaRes&&deltaRes.changed)||barsRead>0||(Date.now()-_lastScoreJobAt>=30000);
+    if(needScore){
+      _lastScoreJobAt=Date.now();
+      await scheduleScoreJob();
+    }
     captureLiveRecommendationScan();
     const done=Date.now();
-    const inMarket=isMarketRefreshWindow();
-    let loopDelay=inMarket ? 1000 : STREAM_REFRESH_MS;
+    loopDelay=isMarketRefreshWindow() ? 1000 : STREAM_REFRESH_MS;
     setStreamActivity({phase:STREAM_STATUS?.statusUnknown?'checking':STREAM_STATUS?.connected?'live':'stream-down',lastCompleteAt:done,
       lastSuccessAt:STREAM_STATUS&&!STREAM_STATUS.statusUnknown?done:STREAM_ACTIVITY.lastSuccessAt,
       lastDataAt:(universeChanged||portfolioChanged||barsRead)?done:STREAM_ACTIVITY.lastDataAt,
