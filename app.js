@@ -1,5 +1,5 @@
-const BUILD_TS='2026-09-09 14:35 IST'; // release build time (IST)
-const APP_VERSION=1336; // v1336: In-session reachability guard, memoized tape window, per-band outcome feedback, proportional weights & truthful tooltip.
+const BUILD_TS='2026-09-09 14:45 IST'; // release build time (IST)
+const APP_VERSION=1337; // v1337: Measured tape weights, continuous monotone outcome calibration & time-bucketed tape window cache.
 const RADAR_SCORE_VERSION='tape-decision-v5';
 function isValidChangeOpen(v){
   if(v===null||v===undefined||typeof v==='boolean') return false;
@@ -3180,18 +3180,20 @@ function getScoreBandKey(score){
   return '<60';
 }
 let _bandOutcomeMemo=null;
-function getBandOutcomeMultiplier(score){
+function getBandOutcomeCalibration(score){
+  const s=Math.max(0,Math.min(100,Number(score)||0));
   try{
-    const band=getScoreBandKey(score);
     const store=FS.get(RECOMMEND_OUTCOME_STORE)||{};
     const issues=store.issues||{};
     const issueKeys=Object.keys(issues);
-    const sig=issueKeys.length+':'+(store.updatedAt||'');
+    const sig=issueKeys.length+':'+(store.updatedAt||'')+'::'+RADAR_SCORE_VERSION;
     if(!_bandOutcomeMemo||_bandOutcomeMemo.sig!==sig){
       const bands={};
       Object.values(issues).forEach(issue=>{
         (issue.picks||[]).forEach(p=>{
           if(p.control) return;
+          // B1 & B2: only evaluate completed, observed picks issued on the CURRENT score scale
+          if(p.scoreVersion!==RADAR_SCORE_VERSION||!p.complete||!(p.observations>0)) return;
           const b=getScoreBandKey(p.score);
           if(!bands[b]) bands[b]={wins:0,losses:0,total:0};
           if(isRocketOutcome(p)){
@@ -3204,19 +3206,53 @@ function getBandOutcomeMultiplier(score){
         });
       });
       const mults={};
-      Object.entries(bands).forEach(([b,st])=>{
-        if(st.total>=5){
+      ['<60','60-69','70-79','80+'].forEach(b=>{
+        const st=bands[b];
+        if(st&&st.total>=5){
           const winRate=st.wins/st.total;
           mults[b]=+clampNum(0.70+0.60*winRate,0.80,1.20).toFixed(2);
         } else {
           mults[b]=1.0;
         }
       });
-      _bandOutcomeMemo={sig,mults,bands};
+      // B3: Construct strictly monotonic, continuous piecewise-linear mapping Y(C)
+      const pts=[
+        {c:0,  m:mults['<60']},
+        {c:50, m:mults['<60']},
+        {c:65, m:mults['60-69']},
+        {c:75, m:mults['70-79']},
+        {c:85, m:mults['80+']},
+        {c:100,m:mults['80+']}
+      ];
+      const Y=pts.map(p=>p.c*p.m);
+      // Forward pass: ensure minimum positive slope so Y[i] > Y[i-1]
+      for(let i=1;i<pts.length;i++){
+        const minDelta=0.5*(pts[i].c-pts[i-1].c);
+        if(Y[i]<Y[i-1]+minDelta) Y[i]=Y[i-1]+minDelta;
+      }
+      // Backward pass: ensure upper bound 100 is respected without inverting slopes
+      if(Y[pts.length-1]>100){
+        Y[pts.length-1]=100;
+        for(let i=pts.length-2;i>=0;i--){
+          const minDelta=0.5*(pts[i+1].c-pts[i].c);
+          if(Y[i]>Y[i+1]-minDelta) Y[i]=Y[i+1]-minDelta;
+        }
+        if(Y[0]<0) Y[0]=0;
+      }
+      _bandOutcomeMemo={sig,mults,bands,pts,Y};
     }
-    return _bandOutcomeMemo.mults[band]??1.0;
+    const {pts,Y}=_bandOutcomeMemo;
+    let i=0;
+    while(i<pts.length-2&&s>pts[i+1].c) i++;
+    const t=(s-pts[i].c)/(pts[i+1].c-pts[i].c);
+    const calibrated=+(Y[i]+t*(Y[i+1]-Y[i])).toFixed(1);
+    const multiplier=s>0?+(calibrated/s).toFixed(2):1.0;
+    return {calibrated,multiplier};
   }catch(e){}
-  return 1.0;
+  return {calibrated:s,multiplier:1.0};
+}
+function getBandOutcomeMultiplier(score){
+  return getBandOutcomeCalibration(score).multiplier;
 }
 function buildSystemScorecard(){
   const store=FS.get(RECOMMEND_OUTCOME_STORE)||{};
@@ -3827,24 +3863,32 @@ function radarPermissionLevel(r,tapeStanding){
 // that worked sit at 15 and 25 minutes, and 5-minute was the WORST cell for netVolPct (+0.070
 // against +0.100 at 15m). Nothing here reads a single 5-minute bar as a signal.
 const INTRADAY_STORE_MAX=1000;   // = the helper's MAX_ROWS file trim; not a second number
+const TAPE_BAR_MS=5*60*1000;
 const TAPE_NETVOL_BARS=3;     // Three recent bars for the participation comparison.
 const TAPE_VWAP_BARS=5;       // Legacy diagnostic aggregation; scoring VWAP uses every window bar.
 // Retain six completed bars across sessions. Both pressure and VWAP use the whole window.
 const TAPE_MIN_SESSION_BARS=2*TAPE_NETVOL_BARS;
+// Per-symbol memo storing {sig, val} (Finding C). Sig binds length, last bar timestamp, and 5-min
+// clock bucket so completing bars are recognized even if the array hasn't changed, without full map flushes.
 const _continuousTapeMemo=new Map();
 function continuousTapeWindow(all,symKey){
   if(!Array.isArray(all)||all.length<TAPE_MIN_SESSION_BARS) return null;
-  const key=symKey?(symKey+':'+all.length+':'+(all[all.length-1]?.t||'')):null;
-  if(key&&_continuousTapeMemo.has(key)) return _continuousTapeMemo.get(key);
+  const k=symKey||'';
+  const lastT=all[all.length-1]?.t||'';
+  const barBucket=Math.floor(Date.now()/TAPE_BAR_MS);
+  const sig=all.length+':'+lastT+':'+barBucket;
+  if(k&&_continuousTapeMemo.has(k)){
+    const entry=_continuousTapeMemo.get(k);
+    if(entry&&entry.sig===sig) return entry.val;
+  }
   // INTRADAY_BARS is the merged, timestamp-ordered store. Keep the minimum measured horizon so
   // yesterday's tape bridges startup/pre-open without allowing an old session to dominate today's
   // live read. The exchange gap remains visible as a real time gap; it is not fabricated away.
   const now=Date.now();
-  const complete=all.filter(b=>Number(b.t)+5*60*1000<=now);
+  const complete=all.filter(b=>Number(b.t)+TAPE_BAR_MS<=now);
   const res=complete.length>=TAPE_MIN_SESSION_BARS?complete.slice(-TAPE_MIN_SESSION_BARS):null;
-  if(key){
-    if(_continuousTapeMemo.size>2000) _continuousTapeMemo.clear();
-    _continuousTapeMemo.set(key,res);
+  if(k){
+    _continuousTapeMemo.set(k,{sig,val:res});
   }
   return res;
 }
@@ -3997,12 +4041,14 @@ function _radarTapeEvidenceUncached(sym){
   const eSize=Number.isFinite(relVol)?clamp01(relVol/2,0,1):0.5;           // 2x recent volume -> 1.0
   const eImpact=Number.isFinite(impact)?clamp01(impact,0,1):0.5;
 
-  // Weights follow empirical measurements (52,616 samples, 2026-09-09):
-  // Forward 60m close: flow 0.4950, vwap 0.4286 (t=-28.6), cross 0.4996, size 0.5189 (t=+7.5).
-  // Target reach (+2.6% in 60m): flow 0.5369 (t=+11.3), cross 0.5173 (t=+5.3), size 0.5190 (t=+5.8), vwap 0.4851 (t=-4.5).
-  // eVwap has negative edge on both outcomes; reduced to 0.05.
-  // The freed 0.20 weight is distributed proportionally across flow (.45), cross (.25), and size (.25).
-  const W={flow:.45,vwap:.05,cross:.25,size:.25};
+  // MEASURED on 64,181 same-session samples across 1,642 symbols (2026-09-09 tape):
+  // Target reach (+2.6% in 60m): size 0.5163 (t 2.20), vwap 0.5040 (t 0.55), flow 0.5022 (t 0.29), cross 0.4989 (t -0.15).
+  // Forward 60m close: size 0.5175 (t +7.7), cross 0.4693 (t -13.5), flow 0.4541 (t -20.2), vwap 0.4239 (t -33.9).
+  // eSize (participation) is the only term with a consistently positive forward edge across both outcomes (t > 2).
+  // eVwap has a strong negative edge on forward close and is reduced to floor weight 0.05.
+  // eFlow and eCross barely separate on target reach (|t| < 0.3); weights spread evenly across the non-VWAP terms,
+  // with eSize given highest allocation as the sole statistically significant positive predictor.
+  const W={flow:.30,vwap:.05,cross:.30,size:.35};
   // The impact weight is MEASURED, never asserted: 0 until the edge survives its own sampling error,
   // rising as the corpus grows. At 0 every factor below collapses to 1 and both the blend and its
   // normaliser are identical to v1233's, so an unmeasured term cannot move a single score.
@@ -4210,12 +4256,13 @@ function radarScoreComponents(r,tapeStanding){
     out.belowOpenDrop = effectiveDrop;
   }
 
-  // Score-band outcome feedback calibration (Finding 2):
-  // Buckets candidate's preliminary score into bands (80+, 70-79, 60-69, <60) and adjusts by empirical win rate.
-  // Modulating per-band changes relative ranking across rows rather than shifting the whole board monotonically.
-  const bandMultiplier=getBandOutcomeMultiplier(out.total);
-  out.outcomeMultiplier=bandMultiplier;
-  out.total=+Math.max(0,Math.min(100,out.total*bandMultiplier)).toFixed(1);
+  // Score-band outcome feedback calibration (Findings 2 & B1-B3):
+  // Evaluates completed picks strictly on current RADAR_SCORE_VERSION scale (B1/B2).
+  // Applies continuous, strictly monotonic piecewise calibration across band centers (B3),
+  // preventing step inversions and ensuring rank order is monotone in preliminary score.
+  const outcomeCal=getBandOutcomeCalibration(out.total);
+  out.outcomeMultiplier=outcomeCal.multiplier;
+  out.total=outcomeCal.calibrated;
 
   // Coherent Hard-Gate Enforcement on Final Score:
   // If a stock is blocked by structural vetoes (ASM surveillance, sell volume > buy volume,
@@ -4609,8 +4656,7 @@ let _newestBucketMemo={v:-1,ms:0};
 // a full bar ago - never the one now forming. Measuring the gap from the stamp instead (v1288)
 // overstates it by one bar plus however far into the current bar the clock has run. Five-minute
 // boundaries fall at the same instants in IST and UTC (the offset is a whole 30 minutes), so plain
-// epoch arithmetic is correct here.
-const TAPE_BAR_MS=5*60*1000;
+// TAPE_BAR_MS hoisted to line 3830 above continuousTapeWindow
 function tapeBarsBehind(heldMs){
   if(!(heldMs>0)) return Infinity;
   const clock=istClock();
