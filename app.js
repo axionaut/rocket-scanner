@@ -1,5 +1,5 @@
-const BUILD_TS='2026-09-09 09:30 IST'; // release build time (IST)
-const APP_VERSION=1320; // v1320: Show/Hide ineligible toggle, market opening tape bridge & session-aware staleness.
+const BUILD_TS='2026-09-09 10:00 IST'; // release build time (IST)
+const APP_VERSION=1321; // v1321: Objective tape acceleration, exhaustion guard, truthful staleness & idle-cpu zeroing.
 const RADAR_SCORE_VERSION='tape-decision-v4';
 const EQUITY_OPEN_MIN=9*60+15, EQUITY_CLOSE_MIN=15*60+30;
 // v1093: a baseline reward:risk MEASURED on the cross-section (last completed bhav session) instead of learned from the owner's own fills - reported on every row, deliberately not enforced. Includes v1092: position size split by Radar score / stop distance, so equally-scored names carry equal RUPEE risk, plus an opt-in Risk /trade cap.
@@ -217,10 +217,15 @@ function captureOpenSnapshots(rows){
     if(!existing||existing.date!==today){
       const currPrice=Number(r.price);
       const chgOpen=Number(r.changeOpen);
-      const openPx=(!inMarketHours && Number.isFinite(chgOpen) && chgOpen>-99)
-        ? +(currPrice / (1 + chgOpen / 100)).toFixed(2)
-        : currPrice;
-      const snapAt=inMarketHours ? now : sessionOpenMs;
+      let openPx=currPrice;
+      let snapAt=Date.now();
+      if(Number.isFinite(chgOpen) && chgOpen>-99){
+        openPx=+(currPrice / (1 + chgOpen / 100)).toFixed(2);
+        snapAt=sessionOpenMs;
+      } else {
+        openPx=currPrice;
+        snapAt=inMarketHours ? Date.now() : sessionOpenMs;
+      }
       OPEN_SNAPSHOT_MAP[sym]={
         date:today,
         openPrice:openPx,
@@ -436,10 +441,15 @@ function recordTableEntries(rows){
     const low=Number(r.low1d)||Number(r.low)||0;
     const high=Number(r.high1d)||Number(r.high)||0;
     const chgOpen=Number(r.changeOpen);
-    const openPx=(!inMarketHours && Number.isFinite(chgOpen) && chgOpen>-99)
-      ? +(currPrice / (1 + chgOpen / 100)).toFixed(2)
-      : currPrice;
-    const entryTime=inMarketHours ? baselineBootTime : sessionOpenMs;
+    let openPx=currPrice;
+    let entryTime=Date.now();
+    if(Number.isFinite(chgOpen) && chgOpen>-99){
+      openPx=+(currPrice / (1 + chgOpen / 100)).toFixed(2);
+      entryTime=sessionOpenMs;
+    } else {
+      openPx=currPrice;
+      entryTime=inMarketHours ? Date.now() : sessionOpenMs;
+    }
 
     if(!prev||prev.date!==today){
       TABLE_ENTRY_MAP[sym]={date:today, price:openPx, at:entryTime};
@@ -4004,40 +4014,50 @@ function radarScoreComponents(r,tapeStanding){
     out.total=+Math.max(0, Math.min(100, out.total*calWeights.depthMultiplier)).toFixed(1);
   }
 
-  // Live Session Baseline Expansion & Demotion
-  const snap=getOpenSnapshot(r.symbol);
-  const basePrice=(snap&&snap.openPrice>0)?snap.openPrice:(Number(r.price)>0?Number(r.price):0);
-  const coPct=basePrice>0&&Number(r.price)>0?((Number(r.price)-basePrice)/basePrice)*100:0;
-  const baseTime=(snap&&snap.at>0)?snap.at:PAGE_SESSION_BOOT_TIME;
-  const inLiveSession=isEquitySession(Date.now());
-  const sessionCloseMs=new Date(getSessionDate()+'T15:30:00+05:30').getTime()||Date.now();
-  const effectiveNow=inLiveSession?Date.now():sessionCloseMs;
-  const elapsedMin=Math.max(1,Math.floor((effectiveNow-baseTime)/60000));
+  // Live Session Momentum & Trajectory Assessment
+  // 1. Objective session return from official market open (independent of user page-boot time):
+  const coPct = Number.isFinite(Number(r.changeOpen)) ? Number(r.changeOpen) : 0;
+
+  // 2. Recent 5-minute and 15-minute tape momentum:
+  const p5 = Number.isFinite(Number(r.price5m)) ? Number(r.price5m) : 0;
+  const p15 = Number.isFinite(Number(r.price15m)) ? Number(r.price15m) : 0;
+
+  // 3. Exhaustion & Extension Guard (protecting against chasing tops):
+  // If the stock has already consumed >= 80% of its expected day range or breached upper volatility bands,
+  // it is in the climax/exhaustion zone. We scale down or eliminate the boost to prevent chasing.
+  const timing = r.entryTiming || getPeakEntryTiming(r);
+  const isExhausted = timing?.rangeConsumed || (timing?.rangeLocation >= 80 && timing?.bandExtended);
+  const extensionMultiplier = isExhausted ? 0.0 : (timing?.rangeLocation >= 75 ? 0.4 : 1.0);
 
   // Deadband ±0.10% absorbs normal bid/ask spread noise
-  if(coPct>0.10){
-    // Forward Velocity Boost: stock is actively expanding above baseline.
-    // Primary velocity driver: signed recent tape momentum (price5m), gated by positive engagement trajectory.
-    const p5=Number.isFinite(Number(r.price5m))?Number(r.price5m):0;
-    const freshMom=Math.max(0, p5);
-    const trajectoryConfirm=Math.min(1.0, (coPct-0.10)/0.50);
-    const timeFactor=Math.sqrt(1+elapsedMin/20);
-    const rawBoost=Math.min(30, (freshMom*15/timeFactor)*trajectoryConfirm);
-    // Envelope Protection: velocity boost is strictly scaled by (perm.p * riskFactor),
-    // preventing low-liquidity or high-risk penny stocks from bypassing risk controls.
-    const velocityBoost=+(rawBoost*envelope).toFixed(1);
-    out.total=+Math.min(100, out.total+velocityBoost).toFixed(1);
-    out.velocityBoost=velocityBoost;
-  } else if(coPct<-0.10){
-    // Accelerated Demotion: stock is dropping below baseline print.
+  if(coPct > 0.10 && extensionMultiplier > 0){
+    // Forward Acceleration Boost:
+    // Requires positive recent 5m momentum.
+    const freshMom = Math.max(0, p5);
+    if(freshMom > 0){
+      // Acceleration factor: is 5m pace accelerating relative to 15m pace?
+      let accelFactor = 1.0;
+      if(p15 > 0.10){
+        // Expected 5m share of a steady 15m move is p15 / 3.
+        const pace = freshMom / (p15 / 3);
+        accelFactor = Math.max(0.4, Math.min(1.4, pace));
+      }
+      const trajectoryConfirm = Math.min(1.0, (coPct - 0.10) / 0.50);
+      const rawBoost = Math.min(25, freshMom * 12 * accelFactor * trajectoryConfirm * extensionMultiplier);
+      const velocityBoost = +(rawBoost * envelope).toFixed(1);
+      out.total = +Math.min(100, out.total + velocityBoost).toFixed(1);
+      out.velocityBoost = velocityBoost;
+    }
+  } else if(coPct < -0.10){
+    // Accelerated Demotion: stock is dropping below official opening price.
     // Continuous smooth penalty with smooth ceiling compression (zero cliff jump at the deadband boundary).
-    const effectiveDrop=Math.abs(coPct)-0.10;
-    const rawPenalty=Math.min(45, effectiveDrop*15*(calWeights.gapFadeMultiplier||1.0));
-    const demotionPenalty=+(rawPenalty*Math.max(0.5, envelope)).toFixed(1);
-    out.total=+Math.max(0, out.total-demotionPenalty).toFixed(1);
-    const smoothCeiling=Math.max(0, +(100 - effectiveDrop*100).toFixed(1));
-    out.total=+Math.min(out.total, smoothCeiling).toFixed(1);
-    out.belowOpenDrop=effectiveDrop;
+    const effectiveDrop = Math.abs(coPct) - 0.10;
+    const rawPenalty = Math.min(45, effectiveDrop * 15 * (calWeights.gapFadeMultiplier || 1.0));
+    const demotionPenalty = +(rawPenalty * Math.max(0.5, envelope)).toFixed(1);
+    out.total = +Math.max(0, out.total - demotionPenalty).toFixed(1);
+    const smoothCeiling = Math.max(0, +(100 - effectiveDrop * 100).toFixed(1));
+    out.total = +Math.min(out.total, smoothCeiling).toFixed(1);
+    out.belowOpenDrop = effectiveDrop;
   }
 
   // Coherent Hard-Gate Enforcement on Final Score:
@@ -4447,10 +4467,8 @@ function tapeBarsBehind(heldMs){
       const heldBarIndex=Math.floor(heldMinsElapsed / 5);
       return Math.max(0, completableBarsToday - 1 - heldBarIndex);
     }
-    // Held bar is from previous session:
-    // During opening window (first 15 mins / 3 bars), today's bars are still forming/merging:
-    if(completableBarsToday <= 3) return 0;
-    return completableBarsToday;
+    // Held bar is from previous session: return exact completable bars elapsed today
+    return Math.max(0, completableBarsToday);
   }
   return 0;
 }
@@ -4535,14 +4553,15 @@ function getRecommendationFreshness(sym){
     return {ok:false,why:'Market closed - waiting for the next session'};
   }
   const isOpeningWindow = clock.mins >= DAY_START_MIN && clock.mins < DAY_START_MIN + 15;
+  const isRecentSession = Number.isFinite(last) && (clock.dateMs - last) <= 4 * 24 * 60 * 60 * 1000;
   if(istDayKey(last)!==date){
-    if(isOpeningWindow && bars.length>=TAPE_MIN_SESSION_BARS){
+    if(isOpeningWindow && bars.length>=TAPE_MIN_SESSION_BARS && isRecentSession){
       return {ok:true,why:'Opening window — bridging previous tape'};
     }
     return {ok:false,why:'Awaiting this session\'s 5-minute tape'};
   }
   if(!Number.isFinite(last)||tapeBarsBehind(last)>1){
-    if(isOpeningWindow && bars.length>=TAPE_MIN_SESSION_BARS){
+    if(isOpeningWindow && bars.length>=TAPE_MIN_SESSION_BARS && isRecentSession){
       return {ok:true,why:'Opening window — bridging previous tape'};
     }
     return {ok:false,why:'Stale 5-minute tape - refresh required'};
@@ -14083,24 +14102,23 @@ async function streamRefreshTick(){
     // ten-minute refresh, not a beat-by-beat one. It is the only call here that reads files.
     if(Date.now()-_bookEdgeAt>600000){ _bookEdgeAt=Date.now(); try{ await loadBookEdges(); }catch(e){} }
     // Publish only after prices, completed tape, book and minute inputs have all arrived.
-    // Recompute every beat: clock-dependent permission and live sizing cannot wait for barRev.
-    if(deltaRes?.ok) await scheduleScoreJob();
+    // Recompute only when prices or completed tape actually changed — avoids idle CPU churn.
+    if((deltaRes&&deltaRes.changed)||barsRead>0) await scheduleScoreJob();
     captureLiveRecommendationScan();
     const done=Date.now();
     const inMarket=isMarketRefreshWindow();
-    const loopDelay=inMarket ? 1000 : STREAM_REFRESH_MS;
+    let loopDelay=inMarket ? 1000 : STREAM_REFRESH_MS;
     setStreamActivity({phase:STREAM_STATUS?.statusUnknown?'checking':STREAM_STATUS?.connected?'live':'stream-down',lastCompleteAt:done,
       lastSuccessAt:STREAM_STATUS&&!STREAM_STATUS.statusUnknown?done:STREAM_ACTIVITY.lastSuccessAt,
       lastDataAt:(universeChanged||portfolioChanged||barsRead)?done:STREAM_ACTIVITY.lastDataAt,
       nextAt:done+loopDelay,error:''});
   }catch(e){
     const done=Date.now();
-    const loopDelay=isMarketRefreshWindow() ? 2000 : STREAM_REFRESH_MS;
+    loopDelay=isMarketRefreshWindow() ? 2000 : STREAM_REFRESH_MS;
     setStreamActivity({phase:'error',lastCompleteAt:done,nextAt:done+loopDelay,
       error:String(e?.message||e)});
   }finally{
     _streamRefreshBusy=false;
-    const loopDelay=isMarketRefreshWindow() ? 1000 : STREAM_REFRESH_MS;
     scheduleStreamRefresh(loopDelay);
     try{renderLiveTapeBar();}catch(e){}
   }
