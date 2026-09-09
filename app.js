@@ -1,6 +1,12 @@
-const BUILD_TS='2026-09-09 10:48 IST'; // release build time (IST)
-const APP_VERSION=1326; // v1326: Reset REMOVED_ROWS on every applyFilters pass to prevent accumulator leak in empty table breakdown.
+const BUILD_TS='2026-09-09 11:00 IST'; // release build time (IST)
+const APP_VERSION=1327; // v1327: Restrict eligible recommendations strictly to GO (market price), continuous acceleration guard, canonical basket sync & serialized writer queue.
 const RADAR_SCORE_VERSION='tape-decision-v4';
+function isValidChangeOpen(v){
+  if(v===null||v===undefined||typeof v==='boolean') return false;
+  if(typeof v==='string'&&v.trim()==='') return false;
+  const n=Number(v);
+  return Number.isFinite(n)&&n>-99&&n<10000;
+}
 const EQUITY_OPEN_MIN=9*60+15, EQUITY_CLOSE_MIN=15*60+30;
 // v1093: a baseline reward:risk MEASURED on the cross-section (last completed bhav session) instead of learned from the owner's own fills - reported on every row, deliberately not enforced. Includes v1092: position size split by Radar score / stop distance, so equally-scored names carry equal RUPEE risk, plus an opt-in Risk /trade cap.
 // v556: parse the NSE Market Activity Report (MA<date>.csv) — official Nifty %, advances/declines and sector index moves shown as market CONTEXT in the status bar (EOD data, display only, never fed into per-row scoring); MA added to the ℹ️ file manifest.
@@ -217,10 +223,9 @@ function captureOpenSnapshots(rows){
     if(!existing||existing.date!==today){
       const currPrice=Number(r.price);
       const rawChg=r.changeOpen;
-      const hasValidChg=rawChg!==null&&rawChg!==undefined&&rawChg!==''&&!isNaN(Number(rawChg))&&Number(rawChg)>-99;
       let openPx=currPrice;
       let snapAt=sessionOpenMs;
-      if(hasValidChg){
+      if(isValidChangeOpen(rawChg)){
         openPx=+(currPrice / (1 + Number(rawChg) / 100)).toFixed(2);
         snapAt=sessionOpenMs;
       } else {
@@ -442,10 +447,9 @@ function recordTableEntries(rows){
     const low=Number(r.low1d)||Number(r.low)||0;
     const high=Number(r.high1d)||Number(r.high)||0;
     const rawChg=r.changeOpen;
-    const hasValidChg=rawChg!==null&&rawChg!==undefined&&rawChg!==''&&!isNaN(Number(rawChg))&&Number(rawChg)>-99;
     let openPx=currPrice;
     let entryTime=sessionOpenMs;
-    if(hasValidChg){
+    if(isValidChangeOpen(rawChg)){
       openPx=+(currPrice / (1 + Number(rawChg) / 100)).toFixed(2);
       entryTime=sessionOpenMs;
     } else {
@@ -4029,7 +4033,9 @@ function radarScoreComponents(r,tapeStanding){
 
   // 2. Recent 5-minute and 15-minute tape momentum:
   const p5 = Number.isFinite(Number(r.price5m)) ? Number(r.price5m) : 0;
-  const p15 = Number.isFinite(Number(r.price15m)) ? Number(r.price15m) : 0;
+  const rawP15 = r.price15m;
+  const hasP15 = rawP15 !== null && rawP15 !== undefined && (typeof rawP15 !== 'string' || rawP15.trim() !== '') && Number.isFinite(Number(rawP15));
+  const p15 = hasP15 ? Number(rawP15) : null;
 
   // 3. Exhaustion & Extension Guard (protecting against chasing tops):
   const timing = r.entryTiming || getPeakEntryTiming(r);
@@ -4044,18 +4050,19 @@ function radarScoreComponents(r,tapeStanding){
     const freshMom = Math.max(0, p5);
     if(freshMom > 0){
       let accelFactor = 1.0;
-      if(Number.isFinite(p15) && p15 !== 0){
+      if(hasP15){
         const ratio = (1 + p15 / 100) / (1 + freshMom / 100);
-        const priorPace = ratio > 0 ? 100 * (Math.sqrt(ratio) - 1) : 0;
-        if(priorPace > 0){
-          if(freshMom < priorPace * 0.5){
-            accelFactor = 0.0; // Decelerating / exhausted runner
-          } else {
-            accelFactor = Math.max(0.4, Math.min(1.4, freshMom / priorPace));
-          }
+        const priorPace = ratio > 0 ? 100 * (Math.sqrt(ratio) - 1) : -99;
+        const basePace = Math.max(0, priorPace);
+        if(freshMom >= priorPace){
+          // Smooth, continuous acceleration boost without division cliffs
+          const excess = freshMom - basePace;
+          accelFactor = 1.0 + Math.min(0.3, excess * 0.2);
+        } else if(priorPace > 0){
+          // Continuous deceleration taper: smoothly reaches 0.0 at 0.25 * priorPace
+          accelFactor = Math.max(0.0, (freshMom - 0.25 * priorPace) / (0.75 * priorPace));
         } else {
-          // Accelerating out of a flat or consolidating base: healthy initial impulse
-          accelFactor = 1.1;
+          accelFactor = 1.0;
         }
       }
       if(accelFactor > 0){
@@ -4090,8 +4097,8 @@ function radarScoreComponents(r,tapeStanding){
 
 function isDirectionConfirmed(s){
   if(!s) return false;
-  const vw=Number(s.vwap), px=Number(s.price), co=Number(s.changeOpen), day=Number(s.day);
-  return (vw > 0 && px >= vw && Number.isFinite(co) && co > 0 && Number.isFinite(day) && day > 0);
+  const vw=Number(s.vwap), px=Number(s.price), day=Number(s.day);
+  return (vw > 0 && px >= vw && isValidChangeOpen(s.changeOpen) && Number(s.changeOpen) > 0 && Number.isFinite(day) && day > 0);
 }
 function radarEvidenceScore(r,tapeStanding){return radarScoreComponents(r,tapeStanding).total;}
 function setRadarEvidenceScore(r,tapeStanding){
@@ -4460,9 +4467,8 @@ function meetsRecommendationBar(s){
   if(s.noHistory===true) return false;   // v1170: no multi-day history, so nothing to rank it on
   if(!getRecommendationFreshness(s.symbol).ok) return false;
   if(s.directionConfirmed!==true) return false; // prediction may score early; execution still needs a live bullish turn
-  // v1237: a consumed/failed move is still not buyable at market. A peak block that names a
-  // pullback level is buyable AT THAT LEVEL, and exports as a LIMIT order rather than being erased.
-  if(s.entryReady===false&&s.entryAtLimit!==true) return false;
+  // Only stocks ready to enter immediately at market price (entryReady !== false) are recommendable.
+  if(s.entryReady===false) return false;
   if(s.intradaySellingToday===true) return false;
   // Score is the one numeric policy bar. Rank remains internal row order only; all other safety and
   // current-tape checks stay independent so a large number cannot average away a veto.
@@ -4667,7 +4673,7 @@ function _getRowActionStateUncached(s, ignoreMarketClosed=false){
 
 
 
-  if(s.entryReady===false&&s.entryAtLimit!==true)
+  if(s.entryReady===false)
     return {state:'WAIT', reason:s.entryTiming||'Extended (upper-quarter peak timing)'};
 
   if(s.intradaySellingToday===true)
@@ -9764,6 +9770,7 @@ function toggleSelectAll(checked){
   saveFilterState();
   renderTable();
   renderBasketBtn();
+  scheduleAutoSyncBasket(150);
 }
 function toggleStock(sym,checked){
   const row=FILT.find(s=>s.symbol===sym);
@@ -9773,6 +9780,7 @@ function toggleStock(sym,checked){
   saveFilterState();
   updateSelectAll();
   recomputeAlloc();
+  scheduleAutoSyncBasket(150);
 }
 function getBuyPrice(s){
   // A limit row is bought AT its level, so it needs no slippage cushion - the buffer exists only
@@ -11291,19 +11299,37 @@ function renderBasketBtn(){
   if(!buyBtn) return;
   if(window.BASKET_EXPORT_BUSY){
     buyBtn.disabled=true;
-    buyBtn.innerHTML='⏳ Preparing basket…';
-    buyBtn.title='Preparing the latest filtered basket…';
+    buyBtn.innerHTML='⏳ Exporting…';
+    buyBtn.title='Exporting the selected recommendations…';
     return;
   }
-  const selList=FILT.filter(s=>SELECTED.has(s.symbol)&&isSelectableRecommendation(s));
-  // Allocation is display/sizing context only. A selected recommendation remains exportable even
-  // when its calculated allocation is zero; the exporter supplies a one-share fallback.
+  const selList=(Array.isArray(FILT)?FILT:[]).filter(s=>s&&s.symbol&&SELECTED.has(s.symbol)&&isSelectableRecommendation(s));
   const buyCount=selList.length;
   buyBtn.innerHTML=`🧺 Buy Basket <span id="basketCount">${buyCount>0?`(${buyCount})`:''}</span>`;
   buyBtn.disabled=buyCount===0;
-  const syncNote=_lastAutoSyncedAt?` · Auto-synced ready in Zerodha_Basket_Buy.json (${Math.max(0,Math.round((Date.now()-_lastAutoSyncedAt)/1000))}s ago)`:'';
+
+  const desiredOrders=getDesiredBasketOrders();
+  const desiredSig=getCanonicalBasketSignature(desiredOrders);
+  const isUpToDate=(_lastSavedBasketSig!=='' && desiredSig===_lastSavedBasketSig);
+  const ageSec=_lastSavedBasketAt>0?Math.max(0,Math.round((Date.now()-_lastSavedBasketAt)/1000)):0;
+
+  let syncNote='';
+  if(_basketWriterInFlight||_pendingBasketTask||_autoBasketTimer){
+    syncNote=' · Updating Zerodha_Basket_Buy.json…';
+  } else if(_lastBasketSyncError){
+    syncNote=` · Auto-sync failed: ${_lastBasketSyncError}`;
+  } else if(isUpToDate){
+    if(desiredSig==='EMPTY'){
+      syncNote=` · Zerodha_Basket_Buy.json cleared on disk (${ageSec}s ago)`;
+    } else {
+      syncNote=` · Auto-synced ready in Zerodha_Basket_Buy.json (${ageSec}s ago)`;
+    }
+  } else {
+    syncNote=' · Pending sync to Zerodha_Basket_Buy.json';
+  }
+
   buyBtn.title=buyCount===0
-    ? 'No selected score-eligible recommendation has an allocated quantity > 0.'
+    ? ('No selected score-eligible recommendation has an allocated quantity > 0.'+syncNote)
     : ('Export selected stocks as Zerodha basket order'+syncNote);
 }
 function renderBasketSummary(){
@@ -11448,9 +11474,6 @@ function renderTable(){
       status:`<td style="white-space:nowrap;font-size:12px">${(()=>{
         const act=getRowActionState(s);
         if(act.state==='GO'){
-          if(s.entryReady===false&&s.entryAtLimit===true){
-            return `<span class="info-pill pill-cyan" style="padding:2px 8px;font-weight:700" title="Extended — limit buy at pullback price ${fmtINR(s.entryLimitPrice)}">Limit @ ${fmtINR(s.entryLimitPrice)}</span>`;
-          }
           return `<span class="info-pill pill-green" style="padding:2px 8px;font-weight:700" title="Actionable recommendation clearing all technical gates">✓ GO</span>`;
         }
         if(act.state==='WAIT'){
@@ -13448,8 +13471,7 @@ function applyFilters({preservePage=false}={}){
     clearTimeout(window._filterStatsTimer);
     window._filterStatsTimer=setTimeout(()=>{try{renderStats();}catch(e){}},220);
   }
-  clearTimeout(window._autoBasketTimer);
-  window._autoBasketTimer=setTimeout(()=>{try{autoSyncBasket();}catch(e){}},300);
+  scheduleAutoSyncBasket(300);
 }
 function renderRankingsPanels(){
   const q=rankingsSearchQuery();
@@ -13505,10 +13527,6 @@ function showRadarDetail(sym){
       ?`<b style="color:var(--amber)">WAIT:</b> Decision Score ${fmt(r.score,1)} is below the ${RECOMMEND_MIN_SCORE} policy bar.`
     :r.recommendationTriggerBlocked
       ?'<b style="color:var(--red)">BLOCKED:</b> '+escHtml((r.recommendationTriggerReasons||[]).join(', ')||'an automatic evidence gate failed')+'.'
-    :(r.entryReady===false&&r.entryAtLimit===true)
-      ?'<b style="color:var(--green)">GO, AT A PRICE:</b> the move is extended, so this is a LIMIT buy at '
-        +escHtml(fmtINR(r.entryLimitPrice))+' ('+escHtml(fmt(((Number(r.entryLimitPrice)/Number(r.price))-1)*100,1))
-        +'% from the last price), not a market order. It fills only on the pullback.'
     :r.entryReady===false
       ?'<b style="color:var(--amber)">WAIT:</b> '+escHtml(r.entryTiming?.reason||'the move has not re-armed')+'.'
     :r.intradaySellingToday===true
@@ -13522,9 +13540,7 @@ function showRadarDetail(sym){
   const groups=Object.entries(RADAR_GROUPS).map(([k,g])=>`<div class="rr-group"><b>${g.label}<i>${r.parts?fmt(r.parts[k],0):'—'}/100</i></b><meter min="0" max="100" value="${r.parts?.[k]??0}"></meter></div>`).join('');
   const contribs=[...(r.contrib||[])].sort((a,b)=>Math.abs(b.impact)-Math.abs(a.impact)).slice(0,36).map(x=>`<div class="rr-contrib"><div><b>${escHtml(x.name)}</b><small>${RADAR_GROUPS[x.group]?.label||x.group} · percentile ${fmt(x.p*100,0)}</small></div><b class="${x.impact>=0?'pos':'neg'}">${x.impact>=0?'+':''}${fmt(x.impact,3)}</b></div>`).join('');
   const gate=r.rocketReady?'Meets the model’s high-feasibility criteria.':'Feasibility cautions: '+escHtml((r.gateReasons||[]).join(', ')||'not evaluated')+'.';
-  const entryNote=(r.entryReady===false&&r.entryAtLimit===true)
-    ?`<br><b style="color:var(--green)">Entry timing:</b> the move is extended — buy this one on the pullback with a LIMIT order at ${fmtINR(r.entryLimitPrice)}, not at market. Range location ${fmt(r.entryTiming?.rangeLocation,0)}%, expected range used ${fmt(r.entryTiming?.rangeUsed,0)}%. ${escHtml(r.entryTiming?.reason||'')} The basket exports it as a LIMIT order at that level.`
-    :r.entryReady===false
+  const entryNote=r.entryReady===false
     ?`<br><b style="color:var(--amber)">Entry timing:</b> ${escHtml(r.entryTiming?.action||'Wait for confirmation')} — ${escHtml(r.entryTiming?.reason||'insufficient confirmation')}. Range location ${fmt(r.entryTiming?.rangeLocation,0)}%, expected range used ${fmt(r.entryTiming?.rangeUsed,0)}%${r.entryTiming?.pullbackPrice?`, reconsider near/below ${fmtINR(r.entryTiming.pullbackPrice)}`:''}. The breakout rank is preserved, but recommendation and basket export are blocked.`
     :'';
   const flags=(r.meta?.flags||[]).length?escHtml(r.meta.flags.join(', ')):'none';
@@ -14833,7 +14849,7 @@ function buildBasketOrders(capital, selList){
       ? parseFloat(Number(policy.targetPct).toFixed(2))
       : null;
     orders.push({
-      id:Date.now()+orderSeq++,
+      id:Date.now()+(++orderSeq),
       instrument:{
         tradingsymbol:sym,scripCode:'',type:'EQ',symbol:sym,
         segment:'NSE',exchange:'NSE',tickSize:0.01,lotSize:1,
@@ -14846,10 +14862,10 @@ function buildBasketOrders(capital, selList){
       weight:0,
       params:{
         transactionType:'BUY',product:'CNC',
-        orderType:(s.entryAtLimit===true&&Number(s.entryLimitPrice)>0)?'LIMIT':'MARKET',
+        orderType:'MARKET',
         validity:'DAY',validityTTL:1,
         quantity:qty,
-        price:(s.entryAtLimit===true&&Number(s.entryLimitPrice)>0)?Number(s.entryLimitPrice):0,
+        price:0,
         triggerPrice:0,disclosedQuantity:0,lastPrice:Number(s.price)||0,
         variety:'regular',
         ...(targetPct>0 ? {gtt:{target:targetPct}} : {}),
@@ -14870,112 +14886,170 @@ function buildBasketOrders(capital, selList){
   return orders;
 }
 
-let _lastAutoSyncedBasketSig='';
-let _lastAutoSyncedAt=0;
-let _autoSyncBusy=false;
-async function autoSyncBasket(){
-  if(_autoSyncBusy || window.BASKET_EXPORT_BUSY || !KITE_API) return;
-  _autoSyncBusy=true;
-  try{
-    const capital=getEffectiveCapital();
-    const selList=FILT.filter(s=>SELECTED.has(s.symbol)&&isSelectableRecommendation(s));
-    if(!selList.length) return;
-    const orders=buildBasketOrders(capital,selList);
-    if(!orders.length || orders.length>20) return;
-    const sig=orders.map(o=>`${o.instrument.tradingsymbol}:${o.params.quantity}:${o.params.orderType}:${o.params.price}:${o.params.lastPrice}`).join('|');
-    if(sig===_lastAutoSyncedBasketSig) return;
-    const payload=orders.map(o=>{const c={...o};delete c._meta;return c;});
-    const ctl=new AbortController();
-    const timer=setTimeout(()=>ctl.abort(),8000);
-    try{
-      const r=await fetch(KITE_HELPER+'/api/inputs/basket',{
-        method:'POST',signal:ctl.signal,
-        headers:{'content-type':'application/json'},
-        body:JSON.stringify({name:'Zerodha_Basket_Buy.json',orders:payload})
-      });
-      const j=r.ok?await r.json():null;
-      if(j?.ok){
-        _lastAutoSyncedBasketSig=sig;
-        _lastAutoSyncedAt=Date.now();
-        renderBasketBtn();
-      }
-    }finally{clearTimeout(timer);}
-  }catch(e){
-    // Silent background sync
-  }finally{
-    _autoSyncBusy=false;
+function getCanonicalBasketSignature(orders){
+  if(!Array.isArray(orders) || !orders.length) return 'EMPTY';
+  const clean = orders.map(o => ({
+    sym: o.instrument?.tradingsymbol || '',
+    ex: o.instrument?.exchange || 'NSE',
+    qty: Number(o.params?.quantity) || 0,
+    type: o.params?.orderType || '',
+    side: o.params?.transactionType || 'BUY',
+    prod: o.params?.product || 'CNC',
+    px: Number(o.params?.price) || 0,
+    last: Number(o.params?.lastPrice) || 0,
+    tgt: Number(o.params?.gtt?.target) || 0,
+    tags: Array.isArray(o.params?.tags) ? [...o.params.tags].sort().join(',') : ''
+  })).sort((a, b) => a.sym.localeCompare(b.sym) || a.qty - b.qty);
+  return JSON.stringify(clean);
+}
+
+function getDesiredBasketOrders(){
+  const capital = getEffectiveCapital();
+  const selList = (Array.isArray(FILT) ? FILT : []).filter(s => s && s.symbol && SELECTED.has(s.symbol) && isSelectableRecommendation(s));
+  if(!selList.length || !(capital > 0)) return [];
+  return buildBasketOrders(capital, selList);
+}
+
+let _basketWriterInFlight = false;
+let _pendingBasketTask = null;
+let _lastSavedBasketSig = '';
+let _lastSavedBasketAt = 0;
+let _lastBasketSyncError = null;
+let _autoBasketTimer = null;
+
+function scheduleAutoSyncBasket(delayMs = 300){
+  if(_autoBasketTimer) clearTimeout(_autoBasketTimer);
+  _autoBasketTimer = setTimeout(() => {
+    _autoBasketTimer = null;
+    requestBasketSync({ manual: false }).catch(() => {});
+  }, delayMs);
+}
+
+function requestBasketSync({ manual = false } = {}){
+  return new Promise((resolve, reject) => {
+    const orders = getDesiredBasketOrders();
+    const sig = getCanonicalBasketSignature(orders);
+
+    if(!manual && sig === _lastSavedBasketSig){
+      resolve({ ok: true, skipped: true });
+      return;
+    }
+
+    _pendingBasketTask = { orders, signature: sig, manual, resolve, reject };
+    renderBasketBtn();
+    _drainBasketQueue();
+  });
+}
+
+async function _drainBasketQueue(){
+  if(_basketWriterInFlight || !_pendingBasketTask) return;
+  _basketWriterInFlight = true;
+  const task = _pendingBasketTask;
+  _pendingBasketTask = null;
+
+  try {
+    const { orders, signature, manual, resolve, reject } = task;
+    const payload = orders.map(o => { const c = { ...o }; delete c._meta; return c; });
+    const saved = await saveBasketToScannerUploads(payload, 'Zerodha_Basket_Buy');
+    if(saved){
+      _lastSavedBasketSig = signature;
+      _lastSavedBasketAt = Date.now();
+      _lastBasketSyncError = null;
+      renderBasketBtn();
+      if(resolve) resolve({ ok: true, count: orders.length });
+    } else {
+      _lastBasketSyncError = 'Save rejected by helper';
+      renderBasketBtn();
+      if(reject) reject(new Error('Save rejected by helper'));
+    }
+  } catch(e) {
+    _lastBasketSyncError = e?.message || String(e);
+    renderBasketBtn();
+    if(task.reject) task.reject(e);
+  } finally {
+    _basketWriterInFlight = false;
+    renderBasketBtn();
+    if(_pendingBasketTask){
+      _drainBasketQueue();
+    }
   }
 }
 
-window.BASKET_EXPORT_BUSY=false;
+window.BASKET_EXPORT_BUSY = false;
 async function exportBasket(){
   if(window.BASKET_EXPORT_BUSY) return;
-  window.BASKET_EXPORT_BUSY=true;
-  const buyBtn=document.getElementById('basketBtn');
+  window.BASKET_EXPORT_BUSY = true;
+  const buyBtn = document.getElementById('basketBtn');
   if(buyBtn){
-    buyBtn.disabled=true;
-    buyBtn.innerHTML='⏳ Exporting…';
-    buyBtn.title='Exporting the selected recommendations…';
+    buyBtn.disabled = true;
+    buyBtn.innerHTML = '⏳ Exporting…';
+    buyBtn.title = 'Exporting the selected recommendations…';
   }
-  // Let the browser paint the acknowledgement before doing any synchronous allocation work.
-  await new Promise(resolve=>requestAnimationFrame(()=>setTimeout(resolve,0)));
-  try{
-    // A click can arrive while the 90ms filter debounce is pending. Flush it now so the export
-    // is built from the values currently visible in the controls, never the previous board.
+  await new Promise(resolve => requestAnimationFrame(() => setTimeout(resolve, 0)));
+  try {
     if(APPLY_FILTERS_TIMER){
       clearTimeout(APPLY_FILTERS_TIMER);
-      APPLY_FILTERS_TIMER=null;
+      APPLY_FILTERS_TIMER = null;
       applyFilters();
     }
-    renderBasketBtn();
-    if(buyBtn){
-      buyBtn.disabled=true;
-      buyBtn.innerHTML='⏳ Exporting…';
-      buyBtn.title='Exporting the selected recommendations…';
+    const capital = getEffectiveCapital();
+    const selList = (Array.isArray(FILT) ? FILT : []).filter(s => s && s.symbol && SELECTED.has(s.symbol));
+    if(!selList.length){
+      showToast('Select at least one stock first.', 3000, true);
+      return;
     }
-    const capital=getEffectiveCapital();
-    const selList=FILT.filter(s=>SELECTED.has(s.symbol));
-    if(!selList.length){showToast('Select at least one stock first.',3000,true);return;}
-    const orders=buildBasketOrders(capital,selList);
-    if(!orders.length){showToast('No orders fit the current tape, capital, risk and liquidity limits.',5000,true);return;}
-    if(orders.length>20) throw new Error(`Basket planning invariant failed: ${orders.length} orders`);
-    // _meta is internal bookkeeping (which leg, which symbol) — it must never reach the saved file.
-    const payload=orders.map(o=>{const c={...o};delete c._meta;return c;});
-    const saved=await saveBasketToScannerUploads(payload,'Zerodha_Basket_Buy');
-    if(!saved) return;
-    _lastAutoSyncedBasketSig=orders.map(o=>`${o.instrument.tradingsymbol}:${o.params.quantity}:${o.params.orderType}:${o.params.price}:${o.params.lastPrice}`).join('|');
-    _lastAutoSyncedAt=Date.now();
-    const targetNote=orders.some(o=>o.params?.gtt?.target)?' with target GTTs':'';
-    showToast(`<strong>Exported ${orders.length} CNC BUY orders</strong> for ${new Set(orders.map(o=>o._meta.sym)).size} selected stocks${targetNote} as Zerodha_Basket_Buy.json`);
-  }catch(e){
-    console.error('Basket export failed',e);
-    showToast('Basket export failed: '+(e?.message||e),6000,true);
-  }finally{
-    window.BASKET_EXPORT_BUSY=false;
+    const orders = buildBasketOrders(capital, selList);
+    if(!orders.length){
+      showToast('No orders fit the current tape, capital, risk and liquidity limits.', 5000, true);
+      return;
+    }
+    if(orders.length > 20) throw new Error(`Basket planning invariant failed: ${orders.length} orders`);
+
+    const res = await requestBasketSync({ manual: true });
+    if(res?.ok){
+      const targetNote = orders.some(o => o.params?.gtt?.target) ? ' with target GTTs' : '';
+      showToast(`<strong>Exported ${orders.length} CNC BUY orders</strong> for ${new Set(orders.map(o => o._meta.sym)).size} selected stocks${targetNote} as Zerodha_Basket_Buy.json`);
+    } else {
+      showToast('Basket export failed: helper did not save file', 5000, true);
+    }
+  } catch(e) {
+    console.error('Basket export failed', e);
+    showToast('Basket export failed: ' + (e?.message || e), 6000, true);
+  } finally {
+    window.BASKET_EXPORT_BUSY = false;
     renderBasketBtn();
   }
 }
 
 async function saveBasketToScannerUploads(orders, filename){
-  if(orders.length>20) throw new Error(`Refusing to truncate basket with ${orders.length} orders`);
+  if(orders.length > 20) throw new Error(`Refusing to truncate basket with ${orders.length} orders`);
   if(!KITE_API){
-    showToast('Start Rocket Scanner.bat before exporting the basket.',5000,true);
     return false;
   }
-  let timer=null;
-  try{
-    const ctl=new AbortController();timer=setTimeout(()=>ctl.abort(),10000);
-    const r=await fetch(KITE_HELPER+'/api/inputs/basket',{method:'POST',signal:ctl.signal,
-      headers:{'content-type':'application/json'},
-      body:JSON.stringify({name:filename+'.json',orders})});
-    const j=r.ok?await r.json():null;
-    if(!j?.ok) throw new Error(j?.why||('helper HTTP '+r.status));
+  let timer = null;
+  try {
+    const ctl = new AbortController();
+    timer = setTimeout(() => ctl.abort(), 10000);
+    const r = await fetch(KITE_HELPER + '/api/inputs/basket', {
+      method: 'POST',
+      signal: ctl.signal,
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ name: filename + '.json', orders })
+    });
+    const j = r.ok ? await r.json() : null;
+    if(!j?.ok){
+      if(orders.length === 0 && j?.why === 'basket has no orders'){
+        return true;
+      }
+      throw new Error(j?.why || ('helper HTTP ' + r.status));
+    }
     return true;
-  }catch(e){
-    console.error('Basket save failed',e);
-    showToast('Could not save the basket through the local helper: '+(e?.message||e),6000,true);
+  } catch(e) {
+    console.warn('Basket save through helper failed:', e);
     return false;
-  }finally{if(timer)clearTimeout(timer);}
+  } finally {
+    if(timer) clearTimeout(timer);
+  }
 }
 
 function switchTab(n){
