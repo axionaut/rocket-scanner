@@ -1,5 +1,5 @@
-const BUILD_TS='2026-09-09 10:45 IST'; // release build time (IST)
-const APP_VERSION=1325; // v1325: Exact compounding pace, reject future-dated bars, truthful tapeBarsBehind, strict changeOpen validation & read-only getRowActionState.
+const BUILD_TS='2026-09-09 10:48 IST'; // release build time (IST)
+const APP_VERSION=1326; // v1326: Reset REMOVED_ROWS on every applyFilters pass to prevent accumulator leak in empty table breakdown.
 const RADAR_SCORE_VERSION='tape-decision-v4';
 const EQUITY_OPEN_MIN=9*60+15, EQUITY_CLOSE_MIN=15*60+30;
 // v1093: a baseline reward:risk MEASURED on the cross-section (last completed bhav session) instead of learned from the owner's own fills - reported on every row, deliberately not enforced. Includes v1092: position size split by Radar score / stop distance, so equally-scored names carry equal RUPEE risk, plus an opt-in Risk /trade cap.
@@ -13358,6 +13358,7 @@ function applyFilters({preservePage=false}={}){
   PEAK_TIMING_REMOVED=0;
   ALLOC_BLOCKED=0;
   DIRECTION_REMOVED=0;
+  REMOVED_ROWS=[];
   let rows=ALL.filter(s=>{
     if(s._held)SUPPRESSED_HELD++;
     let removedReason=null;
