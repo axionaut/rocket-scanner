@@ -1,5 +1,5 @@
 const BUILD_TS='2026-09-09 12:15 IST'; // release build time (IST)
-const APP_VERSION=1331; // v1331: Anchor candidate and basket targets firmly to Target Anchor floor, matching Open Positions.
+const APP_VERSION=1332; // v1332: Synchronize live price delta rescores with filtering and action state cache to enforce Min Score threshold.
 const RADAR_SCORE_VERSION='tape-decision-v4';
 function isValidChangeOpen(v){
   if(v===null||v===undefined||typeof v==='boolean') return false;
@@ -4603,20 +4603,20 @@ function passesIntradayValidation(s){return !!s&&getRecommendationFreshness(s.sy
 const ROW_ACTION_MEMO=new WeakMap();
 function getRowActionState(s){
   if(!s) return {state:'BLOCKED', reason:'Invalid row'};
-  // The three stamp values are compared directly rather than joined into a string. MEASURED: one
+  // The stamp values are compared directly rather than joined into a string. MEASURED: one
   // keystroke on a 1,669-row board calls this 6,876 times (applyFilters, the two status-bar scans,
   // the selection rebuild and the table), so the cache HIT path was allocating an array and a
   // string 6,876 times to answer "has anything changed". Same key, same answer, no allocation.
+  // s.score and s.price must be verified in the cache key so live price deltas and rescores
+  // immediately invalidate the cached action state rather than serving stale 'GO' decisions.
   const a=RADAR.scoredAt||0,b=INTRADAY_STORE_V,c=RECOMMEND_MIN_SCORE,d=Math.floor(Date.now()/TAPE_BAR_MS);
-  // THE PRICE-STALENESS VERDICT MUST BE IN THE KEY. `d` is a FIVE-MINUTE bucket, so without this a
-  // GO decided just before the feed died would be served for another five minutes on top of the
-  // five the staleness test allows. Two arithmetic ops, no call - this runs ~6,900 times a
-  // keystroke - and a minute-granular key is what makes the block appear and clear promptly.
   const e=_universeLiveAt?Math.floor((Date.now()-_universeLiveAt)/60000):-1;
+  const score=Number(s.score)||0;
+  const px=Number(s.price)||0;
   const cached=ROW_ACTION_MEMO.get(s);
-  if(cached&&cached.a===a&&cached.b===b&&cached.c===c&&cached.d===d&&cached.e===e) return cached.value;
+  if(cached&&cached.a===a&&cached.b===b&&cached.c===c&&cached.d===d&&cached.e===e&&cached.score===score&&cached.px===px) return cached.value;
   const value=_getRowActionStateUncached(s);
-  ROW_ACTION_MEMO.set(s,{a,b,c,d,e,value});
+  ROW_ACTION_MEMO.set(s,{a,b,c,d,e,score,px,value});
   return value;
 }
 // A BOARD ON A STORED UNIVERSE IS NOT A RECOMMENDATION. Price, day change, turnover, ATR, range,
@@ -4687,10 +4687,10 @@ function _getRowActionStateUncached(s, ignoreMarketClosed=false){
   return {state:'GO', reason:'Actionable recommendation'};
 }
 function isSelectableRecommendation(s){
-  return !!s && getRowActionState(s).state === 'GO';
+  return !!s && meetsScoreBar(s.score) && getRowActionState(s).state === 'GO';
 }
 function isStockEligible(s){
-  if(!s) return false;
+  if(!s || !meetsScoreBar(s.score)) return false;
   if(isEquitySession(Date.now())) return getRowActionState(s).state === 'GO';
   return _getRowActionStateUncached(s, true).state === 'GO';
 }
@@ -11453,7 +11453,7 @@ function renderTable(){
       // panels and quietly false of the main table - which is why swapping to Zerodha missed it.
       symbol:`<td style="font-family:'Plus Jakarta Sans',sans-serif">${(
         `<div style="font-weight:700;font-size:15px;color:var(--t1);max-width:280px;overflow:hidden;text-overflow:ellipsis">${escHtml(s.symbol)}${chartLinkButtons(s.symbol)}${(()=>{const bf=getBookFlag(s.symbol);if(!bf)return '';return `<span style="font-size:11px;background:rgba(245,158,11,.14);color:var(--amber);border-radius:4px;padding:1px 5px;margin-left:5px;font-weight:700;vertical-align:middle" title="Order book: ${escHtml(bf.text)}. Display only - it does not change the score unless the graded book weight says it should.">${bf.iceberg?'🧊':'⚑'}${bf.heavyCancel?' cx':''}</span>`;})()}${(()=>{const flags=s.meta?.flags||[];if(!flags.length)return '';return `<span style="font-size:12px;background:rgba(239,68,68,.15);color:var(--red);border-radius:4px;padding:1px 5px;margin-left:5px;font-weight:700;vertical-align:middle" title="NSE surveillance flags: ${escHtml(flags.join(' · '))}">⚠ ${flags.length}</span>`;})()}${s._held?`<span style="font-size:12px;background:rgba(244,114,182,.15);color:#f472b6;border-radius:4px;padding:1px 5px;margin-left:5px;font-weight:700;vertical-align:middle" title="You already hold this. Held stocks stay in the ranking (v1070) and can be recommended again — buying here ADDS to the existing position.">📌 held</span>`:''}</div>${radarSurveillanceNames(s)}<div style="font-size:11px;color:var(--t3);max-width:180px;overflow:hidden;text-overflow:ellipsis" title="${escHtml((s.name||'')+(s.setup?' · '+s.setup:''))}">${radarSeriesBandPill(s)} ${escHtml(s.setup||s.name||'')}</div>`)}</td>`,
-      status:`<td style="white-space:nowrap;font-size:12px">${(()=>{
+      status:`<td data-key="status" style="white-space:nowrap;font-size:12px">${(()=>{
         const act=getRowActionState(s);
         if(act.state==='GO'){
           return `<span class="info-pill pill-green" style="padding:2px 8px;font-weight:700" title="Actionable recommendation clearing all technical gates">✓ GO</span>`;
@@ -12744,6 +12744,23 @@ function patchVisiblePrices(){
       if(scoreCell){
         scoreCell.innerHTML = radarScoreCell(s.score, radarScoreTitle(s));
       }
+      const statusCell = tr.querySelector('td[data-key="status"]');
+      if(statusCell){
+        const act = getRowActionState(s);
+        if(act.state === 'GO'){
+          statusCell.innerHTML = `<span class="info-pill pill-green" style="padding:2px 8px;font-weight:700" title="Actionable recommendation clearing all technical gates">✓ GO</span>`;
+        } else if(act.state === 'WAIT'){
+          statusCell.innerHTML = `<span class="info-pill pill-amber" style="padding:2px 8px;max-width:220px;overflow:hidden;text-overflow:ellipsis;display:inline-block;vertical-align:middle" title="${escHtml(act.reason)}">⏳ ${escHtml(act.reason)}</span>`;
+        } else {
+          statusCell.innerHTML = `<span class="info-pill pill-red" style="padding:2px 8px;max-width:220px;overflow:hidden;text-overflow:ellipsis;display:inline-block;vertical-align:middle" title="${escHtml(act.reason)}">✕ ${escHtml(act.reason)}</span>`;
+        }
+      }
+      const chk = tr.querySelector('input[type="checkbox"]');
+      if(chk){
+        const canBuy = isSelectableRecommendation(s);
+        chk.disabled = !canBuy;
+        chk.style.cursor = canBuy ? 'pointer' : 'not-allowed';
+      }
       const sinceCell = tr.querySelector('td[data-key="sinceIn"]');
       if(sinceCell){
         const info = s.sinceInEntry || getTableEntryInfo(s.symbol, s.price, s);
@@ -12773,11 +12790,13 @@ function patchUniverseDeltas(deltaRows){
   if(!deltaRows || !ALL.length) return;
   const symMap = new Map(ALL.map(s => [s.symbol, s]));
   let scoreMoved = false;
+  let eligibilityChanged = false;
   for(const sym in deltaRows){
     const f = deltaRows[sym];
     const s = symMap.get(sym);
     if(s && f){
       const prevPx = s.price;
+      const prevScore = s.score;
       if(Number.isFinite(f.price)) s.price = f.price;
       if(Number.isFinite(f.dayPct)) s.day = f.dayPct;
       if(Number.isFinite(f.changeOpenPct)) s.changeOpen = f.changeOpenPct;
@@ -12787,27 +12806,41 @@ function patchUniverseDeltas(deltaRows){
       if(prevPx !== s.price){
         setRadarEvidenceScore(s);
         scoreMoved = true;
+        ROW_ACTION_MEMO.delete(s);
+        if(meetsScoreBar(prevScore) !== meetsScoreBar(s.score)){
+          eligibilityChanged = true;
+        }
       }
     }
   }
   recordTableEntries(ALL);
 
   // Check if score moves changed the sorting order
-  if(scoreMoved && SCOL === 'score' && FILT.length > 1){
-    let orderChanged = false;
-    for(let i = 0; i < FILT.length - 1; i++){
-      const sa = Number(FILT[i].score) || 0;
-      const sb = Number(FILT[i+1].score) || 0;
-      if(SDIR === -1 ? sa < sb : sa > sb){
-        orderChanged = true;
-        break;
+  let orderChanged = false;
+  if(scoreMoved && FILT.length > 1){
+    if(SCOL === 'score'){
+      for(let i = 0; i < FILT.length - 1; i++){
+        const sa = Number(FILT[i].score) || 0;
+        const sb = Number(FILT[i+1].score) || 0;
+        if(SDIR === -1 ? sa < sb : sa > sb){
+          orderChanged = true;
+          break;
+        }
       }
     }
-    if(orderChanged){
-      applySort();
-      renderTable();
-      return;
-    }
+  }
+
+  // If any stock's eligibility changed or sort order changed, re-filter so rows crossing the threshold
+  // or becoming ineligible are immediately dropped or demoted rather than stranded with obsolete GO status.
+  const filtHasIneligible = !SHOW_INELIGIBLE && FILT.some(s => !isStockEligible(s));
+  if(eligibilityChanged || filtHasIneligible){
+    applyFilters({preservePage: true});
+    return;
+  }
+  if(orderChanged){
+    applySort();
+    renderTable();
+    return;
   }
   patchVisiblePrices();
 }
@@ -13384,13 +13417,14 @@ function applyFilters({preservePage=false}={}){
     }
     const numScore=Number(s.score);
     const scoreVal=Number.isFinite(numScore)?numScore:0;
-    const belowThreshold=scoreVal<RECOMMEND_MIN_SCORE;
+    const belowThreshold=!meetsScoreBar(s.score);
     const eligible=isStockEligible(s);
-    if(!eligible){
+    if(belowThreshold || !eligible){
       if(!removedReason){
         const act=getRowActionState(s);
-        removedReason={s,reason:'ineligible',chip:act.reason||('Score '+scoreVal.toFixed(1)+' < min '+RECOMMEND_MIN_SCORE),
-          detail:act.reason||('ineligible: score '+scoreVal.toFixed(1)+' or pending entry gate')};
+        const rReason=belowThreshold?`Score ${scoreVal.toFixed(1)} < ${RECOMMEND_MIN_SCORE}`:act.reason;
+        removedReason={s,reason:belowThreshold?'threshold':'ineligible',chip:rReason||('Score '+scoreVal.toFixed(1)+' < min '+RECOMMEND_MIN_SCORE),
+          detail:rReason||('ineligible: score '+scoreVal.toFixed(1)+' or pending entry gate')};
       }
       REMOVED_ROWS.push(removedReason);
       if(!SHOW_INELIGIBLE) return false;
