@@ -1,6 +1,6 @@
-const BUILD_TS='2026-09-09 15:22 IST'; // release build time (IST)
-const APP_VERSION=1339; // Entry-time scoring, next-session horizon and complete outcome feedback.
-const RADAR_SCORE_VERSION='tape-decision-v6';
+const BUILD_TS='2026-09-09 20:09 IST'; // release build time (IST)
+const APP_VERSION=1340; // Unified adaptive evidence, protected rules and live score audit.
+const RADAR_SCORE_VERSION='unified-evidence-v1';
 function isValidChangeOpen(v){
   if(v===null||v===undefined||typeof v==='boolean') return false;
   if(typeof v==='string'&&v.trim()==='') return false;
@@ -167,6 +167,7 @@ const SURV_RETIRE_MARK='rs_surv_retired_v1169';
 const SURV_CORR_STORE='rs_surv_corr';
 const SAME_DAY_EXIT_OPPORTUNITY_STORE='rs_same_day_exit_opportunity_v3';
 const RECOMMEND_OUTCOME_STORE='rs_recommend_outcomes_delta_v1';
+const SCORE_LEARNING_STORE='rs_score_learning_v1';
 const POST_CLOSE_AUDIT_STORE='rs_post_close_audit_v1';
 const NSE_FUNDAMENTAL_STORE='rs_nse_fundamentals_v1';
 const RECOMMEND_MIN_PROGRESS_FRACTION=0.25;
@@ -174,7 +175,6 @@ const LEFT_ON_TABLE_STORE='rs_left_on_table_v1';
 const LEFT_ON_TABLE_KEEP_SESSIONS=30;   // how much history is retained
 const OPEN_SNAPSHOT_STORE='rs_open_snapshot_v1';
 const PAGE_SESSION_BOOT_TIME=Date.now();
-let _sessionBaselineInitialized=false;
 let OPEN_SNAPSHOT_MAP={};
 
 function loadOpenSnapshotMap(){
@@ -202,23 +202,15 @@ function captureOpenSnapshots(rows){
   const inMarketHours=clock.mins>=DAY_START_MIN&&clock.mins<DAY_END_MIN;
   if(inMarketHours && !_universeLiveAt) return;
 
-  // Whenever the page is opened or manually refreshed during market hours, that exact moment
-  // becomes the clean, unpolluted baseline for this release/run. Old snapshot data is wiped.
-  if(!_sessionBaselineInitialized && inMarketHours && _universeLiveAt > 0){
-    OPEN_SNAPSHOT_MAP={};
-    TABLE_ENTRY_MAP={};
-    _sessionBaselineInitialized=true;
-  }
-
   let changed=false;
   const sessionOpenMs=new Date(today+'T09:15:00+05:30').getTime()||Date.now();
   const baselineBootTime=Math.max(sessionOpenMs, PAGE_SESSION_BOOT_TIME);
   const now=inMarketHours ? baselineBootTime : sessionOpenMs;
   (rows||[]).forEach(r=>{
-    if(!r||!r.symbol||!(Number(r.price)>0)) return;
+    if(!r||!r.symbol||!(Number(r.price)>0)||!r.scoreComponents?.unified) return;
     const sym=normSym(r.symbol);
     const existing=OPEN_SNAPSHOT_MAP[sym];
-    if(!existing||existing.date!==today){
+    if(!existing||existing.date!==today||existing.scoreVersion!==RADAR_SCORE_VERSION){
       const currPrice=Number(r.price);
       const rawChg=r.changeOpen;
       let openPx=currPrice;
@@ -233,7 +225,8 @@ function captureOpenSnapshots(rows){
       OPEN_SNAPSHOT_MAP[sym]={
         date:today,
         openPrice:openPx,
-        openScore:Number(r.score)||0,
+        openScore:Number.isFinite(r.scoreComponents?.signalScore)?r.scoreComponents.signalScore:null,
+        capturedAt:Date.now(),scoreVersion:RADAR_SCORE_VERSION,
         features:{
           gap:Number(r.gap)||0,
           depthRatio:(Number(r.depthBuyQty)>0&&Number(r.depthSellQty)>0)?+(r.depthBuyQty/r.depthSellQty).toFixed(2):1,
@@ -258,7 +251,6 @@ function getOpenSnapshot(sym){
 loadOpenSnapshotMap();
 
 const CALIBRATED_WEIGHTS_STORE='rs_calibrated_weights_v1';
-const DAILY_CALIBRATION_STORE='rs_daily_calibration_v1';
 
 function getCalibratedWeights(){
   try{
@@ -270,140 +262,6 @@ function getCalibratedWeights(){
   }catch(e){}
   return { depthMultiplier: 1.0, gapFadeMultiplier: 1.0, updated: '' };
 }
-function saveCalibratedWeights(w){
-  try{ localStorage.setItem(CALIBRATED_WEIGHTS_STORE, JSON.stringify(w)); }catch(e){}
-}
-function resetCalibratedWeights(){
-  saveCalibratedWeights({ depthMultiplier: 1.0, gapFadeMultiplier: 1.0, updated: '' });
-  if(typeof renderPostClose==='function') renderPostClose();
-}
-window.resetCalibratedWeights=resetCalibratedWeights;
-
-function runDailyCohortCalibration(force=false){
-  const today=getSessionDate();
-  const keys=Object.keys(OPEN_SNAPSHOT_MAP||{}).filter(k=>OPEN_SNAPSHOT_MAP[k]?.date===today);
-  if(!keys.length) return null;
-
-  const allMap=new Map((ALL||[]).map(s=>[s.symbol,s]));
-  const evaluated=[];
-  let rockets=0, traps=0, missed=0, totalReturn=0;
-
-  let depthPassReturns=[], depthFailReturns=[];
-  let gapHighReturns=[], gapLowReturns=[];
-  let relvolHighReturns=[], relvolLowReturns=[];
-
-  keys.forEach(sym=>{
-    const snap=OPEN_SNAPSHOT_MAP[sym];
-    const s=allMap.get(sym)||_universeMap.get(sym);
-    if(!snap||!(snap.openPrice>0)||!s||!(Number(s.price)>0)) return;
-
-    const openPrice=snap.openPrice;
-    const currentPrice=Number(s.price);
-    const dayReturn=((currentPrice-openPrice)/openPrice)*100;
-    const openScore=Number(snap.openScore)||0;
-    const high=Number(s.high1d)>0?Number(s.high1d):currentPrice;
-    const maxGain=((high-openPrice)/openPrice)*100;
-
-    let verdict='NEUTRAL';
-    if(openScore>=RECOMMEND_MIN_SCORE && dayReturn>=2.0){
-      verdict='ROCKET';
-      rockets++;
-    } else if(openScore>=RECOMMEND_MIN_SCORE && dayReturn<0){
-      verdict='TRAP';
-      traps++;
-    } else if(openScore<RECOMMEND_MIN_SCORE && dayReturn>=4.0){
-      verdict='MISSED';
-      missed++;
-    }
-
-    totalReturn += dayReturn;
-
-    const feats=snap.features||{};
-    if(feats.depthRatio>=1.5) depthPassReturns.push(dayReturn);
-    else depthFailReturns.push(dayReturn);
-
-    if(feats.gap>=2.5) gapHighReturns.push(dayReturn);
-    else gapLowReturns.push(dayReturn);
-
-    if(feats.relvol>=1.5) relvolHighReturns.push(dayReturn);
-    else relvolLowReturns.push(dayReturn);
-
-    evaluated.push({
-      symbol: sym,
-      openPrice,
-      currentPrice,
-      dayReturn,
-      openScore,
-      maxGain,
-      verdict,
-      features: feats
-    });
-  });
-
-  const avg=(arr)=>arr.length?arr.reduce((a,b)=>a+b,0)/arr.length:0;
-  const winRate=(arr)=>arr.length?(arr.filter(r=>r>0).length/arr.length)*100:0;
-
-  const clock=istClock();
-  const isPostClose=clock.mins>=DAY_END_MIN||force;
-
-  let weights=getCalibratedWeights();
-  if(isPostClose && evaluated.length>=5){
-    const dWr=winRate(depthPassReturns);
-    let newDepthMul=weights.depthMultiplier;
-    if(dWr>=60) newDepthMul=Math.min(1.30, +(newDepthMul+0.05).toFixed(2));
-    else if(dWr<=40) newDepthMul=Math.max(0.75, +(newDepthMul-0.05).toFixed(2));
-
-    const gWr=winRate(gapHighReturns);
-    const gAvg=avg(gapHighReturns);
-    let newFadeMul=weights.gapFadeMultiplier;
-    if(gWr<40||gAvg<0) newFadeMul=Math.min(1.50, +(newFadeMul+0.05).toFixed(2));
-    else if(gWr>=60&&gAvg>1.0) newFadeMul=Math.max(0.80, +(newFadeMul-0.05).toFixed(2));
-
-    weights={
-      depthMultiplier: newDepthMul,
-      gapFadeMultiplier: newFadeMul,
-      updated: today
-    };
-    saveCalibratedWeights(weights);
-  }
-
-  const result={
-    date: today,
-    evaluated,
-    total: evaluated.length,
-    rockets,
-    traps,
-    missed,
-    avgReturn: evaluated.length?totalReturn/evaluated.length:0,
-    factors:{
-      depth:{ n: depthPassReturns.length, winRate: winRate(depthPassReturns), avgReturn: avg(depthPassReturns) },
-      depthControl:{ n: depthFailReturns.length, winRate: winRate(depthFailReturns), avgReturn: avg(depthFailReturns) },
-      gapHigh:{ n: gapHighReturns.length, winRate: winRate(gapHighReturns), avgReturn: avg(gapHighReturns) },
-      gapLow:{ n: gapLowReturns.length, winRate: winRate(gapLowReturns), avgReturn: avg(gapLowReturns) },
-      relvolHigh:{ n: relvolHighReturns.length, winRate: winRate(relvolHighReturns), avgReturn: avg(relvolHighReturns) }
-    },
-    weights,
-    isPostClose
-  };
-
-  try{
-    const store=JSON.parse(localStorage.getItem(DAILY_CALIBRATION_STORE)||'{}');
-    store[today]={
-      date: today,
-      total: result.total,
-      rockets: result.rockets,
-      traps: result.traps,
-      missed: result.missed,
-      avgReturn: +result.avgReturn.toFixed(2),
-      factors: result.factors,
-      weights: result.weights
-    };
-    localStorage.setItem(DAILY_CALIBRATION_STORE, JSON.stringify(store));
-  }catch(e){}
-
-  return result;
-}
-
 const TABLE_ENTRY_STORE='rs_table_entry_v3';
 let TABLE_ENTRY_MAP={};
 function loadTableEntryMap(){
@@ -2544,20 +2402,31 @@ function resolveRocketDay(bar,entryPrice,targetPct,stopPct,prevHigh=null,prevLow
 // Did this pick's resolved state count as a rocket? Ambiguity is deliberately NOT a rocket.
 function isRocketOutcome(p){return p?.rocketOutcome===ROCKET_OUTCOME.ROCKET;}
 // Paper outcome of the declared target / entry stop / BTST deadline, not a claim of execution.
+function nextScoreBarStart(timestamp){
+  const rounded=Math.ceil(timestamp/TAPE_BAR_MS)*TAPE_BAR_MS;
+  let day=istDayKey(rounded);
+  const mins=istClock(rounded).mins;
+  if(isNseTradingDate(day)&&mins>=EQUITY_OPEN_MIN&&mins<EQUITY_CLOSE_MIN) return rounded;
+  if(isNseTradingDate(day)&&mins<EQUITY_OPEN_MIN) return Date.parse(day+'T09:15:00+05:30');
+  do{day=new Date(Date.parse(day+'T12:00:00Z')+86400000).toISOString().slice(0,10);}while(!isNseTradingDate(day));
+  return Date.parse(day+'T09:15:00+05:30');
+}
 function resolveNetRecommendation(p,asOf){
   if(p.paperComplete) return;
+  p.evidenceIncomplete=false; // replay repaired history; unresolved gaps are rechecked below
   const bars=INTRADAY_BARS[normSym(p.symbol)]||[];
   const end=Date.now(),clock=istClock(end);
   const eligible=bars.filter(b=>Number(b.t)>=p.issuedAt&&Number(b.t)+TAPE_BAR_MS<=end
     &&tradingDaysBetween(p.issueDate,istDayKey(b.t))<=1).sort((a,b)=>a.t-b.t);
-  if(eligible.length&&eligible[0].t>Math.ceil(p.issuedAt/TAPE_BAR_MS)*TAPE_BAR_MS) p.evidenceIncomplete=true;
+  if(eligible.length&&eligible[0].t>nextScoreBarStart(p.issuedAt)) p.evidenceIncomplete=true;
   const partial=bars.find(b=>b.t<p.issuedAt&&b.t+TAPE_BAR_MS>p.issuedAt);
+  if(p.issuedAt%TAPE_BAR_MS!==0&&!partial) p.evidenceIncomplete=true;
   if(partial&&(partial.l<=p.entryPrice*(1-p.stopPct/100)||partial.h>=p.entryPrice*(1+p.targetPct/100))) p.evidenceIncomplete=true;
   // Preserved for replaying pre-v1329 historical records that carried LIMIT:
   let entry=p.entryPrice,entered=p.orderType!=='LIMIT',exit=null,exitBar=null;
   let prev=null;
   for(const b of eligible){
-    if(prev&&istDayKey(prev.t)===istDayKey(b.t)&&b.t-prev.t>TAPE_BAR_MS){p.evidenceIncomplete=true;break;}
+    if(prev&&b.t>nextScoreBarStart(Number(prev.t)+TAPE_BAR_MS)){p.evidenceIncomplete=true;break;}
     prev=b;
     if(!entered){
       if(!(p.limitPrice>0)||b.l>p.limitPrice) continue;
@@ -2873,7 +2742,6 @@ function recordRecommendationOutcomeScan(scan){
   });
   store.updatedAt=Date.now();
   FS.set(RECOMMEND_OUTCOME_STORE,store);
-  _bandOutcomeMemo=null;
   _tapeProfitMemo=null;
 }
 const POST_CLOSE_CONDITIONS=[
@@ -3071,36 +2939,12 @@ function getGainerScorecard(gainers){
             meanLift:sessions?+m.toFixed(1):null,t,agreement,tCrit,status,why};
   });
 }
-function runPostCloseAudit(force=false){
-  const clock=istClock(),today=getSessionDate();
-  if(!force&&clock.mins<DAY_END_MIN) return null;
-  const issues=(FS.get(RECOMMEND_OUTCOME_STORE)||{}).issues||{};
-  const prior=FS.get(POST_CLOSE_AUDIT_STORE)||{version:1,audits:{}};
-  const audits={...(prior.audits||{})};
-  Object.values(issues).forEach(issue=>{
-    const picks=(issue?.picks||[]).filter(p=>!p.control);
-    const observed=picks.some(p=>p.issuedAt||(p.rocketDaysSeen||[]).length||p.evaluatedThrough);
-    if(observed) audits[issue.date]=buildPostCloseIssueAudit(issue,today);
-  });
-  const gainers={...(prior.gainers||{})};
-  const g=buildGainerAudit(today);
-  if(g) gainers[today]=g;
-  const out={version:1,updatedAt:new Date().toISOString(),latestSession:today,audits,gainers,
-    scorecard:getPostCloseRuleScorecard(audits),gainerScorecard:getGainerScorecard(gainers)};
-  FS.set(POST_CLOSE_AUDIT_STORE,out);
-  return out;
-}
-function postCloseAuditStatus(){
-  const today=getSessionDate(),store=FS.get(POST_CLOSE_AUDIT_STORE)||{};
-  return {today,audit:store.audits?.[today]||null,store};
-}
+
 function activePostCloseTriggerRules(mode){
-  const store=FS.get(POST_CLOSE_AUDIT_STORE)||{};
-  const scorecard=getPostCloseRuleScorecard(store.audits||{});
-  return scorecard.map(s=>({score:s,definition:POST_CLOSE_CONDITIONS.find(c=>c.key===s.key)}))
-    .filter(x=>x.definition&&x.definition.mode===mode&&(
-      mode==='veto-on-retired'?x.score.status==='RETIRED':['ARMED','ELIGIBLE'].includes(x.score.status)));
+  return (getUnifiedModelState().frozenRules||[]).map(score=>({score,definition:POST_CLOSE_CONDITIONS.find(c=>c.key===score.key)}))
+    .filter(x=>x.definition&&x.definition.mode===mode&&(mode==='veto-on-retired'?x.score.status==='RETIRED':['ARMED','ELIGIBLE'].includes(x.score.status)));
 }
+
 function applyLearnedTriggerRanking(rows){
   const active=activePostCloseTriggerRules('boost');
   rows.forEach(r=>{r.modelTriggers=[];r.triggerFactor=1;});
@@ -3197,89 +3041,215 @@ function getScoreBandKey(score){
   if(s>=60) return '60-69';
   return '<60';
 }
-let _bandOutcomeMemo=null;
-function getBandOutcomeCalibration(score){
-  const s=Math.max(0,Math.min(100,Number(score)||0));
-  try{
-    const store=FS.get(RECOMMEND_OUTCOME_STORE)||{};
-    const issues=store.issues||{};
-    const issueKeys=Object.keys(issues);
-    const sig=issueKeys.length+':'+(store.updatedAt||'')+'::'+RADAR_SCORE_VERSION;
-    if(!_bandOutcomeMemo||_bandOutcomeMemo.sig!==sig){
-      const bands={};
-      Object.values(issues).forEach(issue=>{
-        (issue.picks||[]).forEach(p=>{
-          if(p.control) return;
-          // B1 & B2: only evaluate completed, observed picks issued on the CURRENT score scale
-          if(p.scoreVersion!==RADAR_SCORE_VERSION||!p.paperComplete||p.evidenceIncomplete||p.unfilled) return;
-          const b=getScoreBandKey(p.score);
-          if(!bands[b]) bands[b]={wins:0,losses:0,total:0,days:{}};
-          if(![ROCKET_OUTCOME.ROCKET,ROCKET_OUTCOME.STOPPED,ROCKET_OUTCOME.EXPIRED].includes(p.rocketOutcome)) return;
-          const day=issue.date||p.issueDate;
-          const ds=bands[b].days[day]??={wins:0,total:0};
-          ds.total++;
-          if(isRocketOutcome(p)){
-            ds.wins++;
-            bands[b].wins++;
-            bands[b].total++;
-          } else if(p.rocketOutcome===ROCKET_OUTCOME.STOPPED||p.rocketOutcome===ROCKET_OUTCOME.EXPIRED){
-            bands[b].losses++;
-            bands[b].total++;
-          }
-        });
-      });
-      const mults={};
-      ['<60','60-69','70-79','80+'].forEach(b=>{
-        const st=bands[b];
-        if(st&&Object.keys(st.days).length>=5){
-          // Repeated intraday decisions are correlated. A busy session gets one vote, and
-          // calibration waits for five distinct completed issue sessions on this score version.
-          const days=Object.values(st.days);
-          const winRate=days.reduce((n,d)=>n+d.wins/d.total,0)/days.length;
-          mults[b]=+clampNum(0.70+0.60*winRate,0.80,1.20).toFixed(2);
-        } else {
-          mults[b]=1.0;
-        }
-      });
-      // B3: Construct strictly monotonic, continuous piecewise-linear mapping Y(C)
-      const pts=[
-        {c:0,  m:mults['<60']},
-        {c:50, m:mults['<60']},
-        {c:65, m:mults['60-69']},
-        {c:75, m:mults['70-79']},
-        {c:85, m:mults['80+']},
-        {c:100,m:mults['80+']}
-      ];
-      const Y=pts.map(p=>p.c*p.m);
-      // Forward pass: ensure minimum positive slope so Y[i] > Y[i-1]
-      for(let i=1;i<pts.length;i++){
-        const minDelta=0.5*(pts[i].c-pts[i-1].c);
-        if(Y[i]<Y[i-1]+minDelta) Y[i]=Y[i-1]+minDelta;
+// One adjustable evidence model. Eligibility, depth, freshness, timing, circuit and risk
+// safeguards are applied separately and are never parameters of the learner.
+const SCORE_SOURCES=[
+  ['flow','Candle pressure',1],['vwap','Tape VWAP position',1],['cross','Pressure crossover',1],['size','Recent participation',1],
+  ['impact','Price impact',1],['book','Order-book imbalance',1],['split','Classified buy share',1],['cancel','Book cancellations',1],
+  ['predictor','Qualified predictor',1],['trigger','Existing signal boosts',1],['depth','Depth evidence',1],
+  ['velocity','Recent acceleration',1],['fade','Below-open penalty',1],
+  ['participation','Participation setup',0],['momentum','Momentum setup',0],['trend','Trend setup',0],
+  ['structure','Price structure',0],['liquidity','Liquidity context',0],['volatility','Range context',0],['context','Market context',0],
+  ['fundamental','Fundamental signal',0],['distance','Target versus capacity',0],['clock','Time through next close',0]
+];
+const SCORE_SEED=SCORE_SOURCES.map(x=>x[2]);
+const SCORE_GROUPS=['participation','momentum','trend','structure','liquidity','volatility','context'];
+let _unifiedState=null,_unifiedStateSource=null,_scoreLearningAt=0,_scoreLearningBusy=false;
+function validScoreWeights(w){
+  return Array.isArray(w)&&w.length===SCORE_SEED.length&&w.every((v,i)=>Number.isFinite(v)&&v>=(i<13?0.5:-1)&&v<=(i<13?1.5:1));
+}
+function getUnifiedModelState(){
+  const raw=FS.get(SCORE_LEARNING_STORE);
+  if(_unifiedState&&raw===_unifiedStateSource) return _unifiedState;
+  const good=raw?.schema===RADAR_SCORE_VERSION&&validScoreWeights(raw.live);
+  const state=good?raw:{schema:RADAR_SCORE_VERSION,live:SCORE_SEED.slice(),revision:0,records:[],history:[],
+    legacyDepth:getCalibratedWeights(),
+    frozenRules:getPostCloseRuleScorecard((FS.get(POST_CLOSE_AUDIT_STORE)||{}).audits||{})
+      .filter(r=>['ARMED','ELIGIBLE','RETIRED'].includes(r.status)).map(r=>({key:r.key,status:r.status})),
+    status:'Collecting forward outcomes',updatedAt:0};
+  if(!Array.isArray(state.records)) state.records=[];
+  if(!Array.isArray(state.history)) state.history=[];
+  if(state.candidate&&!validScoreWeights(state.candidate.weights)) state.candidate=null;
+  _unifiedStateSource=raw;_unifiedState=state;return state;
+}
+function computeUnifiedEvidence(input,weights){
+  const w=validScoreWeights(weights)?weights:SCORE_SEED;
+  let miss=1,perfectMiss=1;
+  for(let i=0;i<8;i++){
+    const k=Math.max(0,Math.min(0.95,(input.base[i]||0)*w[i]));
+    const v=Number.isFinite(input.parts[i])?input.parts[i]:0.5;
+    miss*=1-k*v;perfectMiss*=1-k;
+  }
+  const tape=perfectMiss<1?(1-miss)/(1-perfectMiss):0;
+  const predictor=Math.max(0,1+(input.predictor-1)*w[8]);
+  const trigger=Math.max(0,1+(input.trigger-1)*w[9]);
+  const evidence=Math.max(0,Math.min(1,tape*predictor*trigger));
+  const depth=Math.max(0,1+(input.depth-1)*w[10]);
+  let setup=0;
+  // These are as-of feature priors/percentiles, NOT the same-session winner-fitted modal scores.
+  for(let i=13;i<w.length;i++) if(Number.isFinite(input.context[i-13])) setup+=10*w[i]*(input.context[i-13]-0.5);
+  const raw=Math.max(0,Math.min(100,100*evidence*depth+input.velocity*w[11]-input.fade*w[12]+setup));
+  const envelope=input.permission*input.risk;
+  let total=100*evidence*depth*envelope+input.velocity*w[11]*envelope-input.fade*w[12]*Math.max(0.5,envelope)+setup*envelope;
+  total=Math.max(0,Math.min(100,input.ceiling,total));
+  return {raw:+raw.toFixed(3),total:+total.toFixed(1),evidence,tape};
+}
+function getUnifiedScoreDetail(c){
+  if(!c?.unified) return '';
+  const weights=getUnifiedModelState().live;
+  const rows=SCORE_SOURCES.map((x,i)=>{
+    const value=i<8?c.unified.parts[i]:i>=13?c.unified.context[i-13]:null;
+    const prior=x[2],learned=weights[i];
+    return `<tr><td>${escHtml(x[1])}</td><td>${value==null?'context':(100*value).toFixed(0)+'/100'}</td><td>${learned.toFixed(3)}</td><td>${(learned-prior)>=0?'+':''}${(learned-prior).toFixed(3)}</td></tr>`;
+  }).join('');
+  return `<div class="rr-read"><b>One weighted evidence model - revision ${c.modelRevision}</b><br>
+    Signal score ${c.signalScore.toFixed(1)}; after fixed readiness/risk rules ${c.total.toFixed(1)}.
+    ${c.block?'Rule: '+escHtml(c.block)+'. ':''}Buy volume must exceed sell volume when depth is available; learning cannot override this rule.
+    <details><summary>Signal weights and current readings</summary><div class="pc-table-wrap"><table class="pc-table"><thead><tr><th>Source</th><th>Reading</th><th>Weight factor</th><th>Change from initial</th></tr></thead><tbody>${rows}</tbody></table></div>
+    Existing sources start at 1x. Additional setup/context adjustments start at zero and need forward validation. Weight factors are not score points.</details></div>`;
+}
+function scoreLearningBand(p){
+  if(p.block) return 'Blocked by rules';
+  return Math.floor(Math.max(0,Math.min(99.9,p.score))/20)*20;
+}
+function usableScoreOutcome(p){
+  return p.paperComplete&&!p.evidenceIncomplete&&!p.unfilled&&['rocket','stopped','expired'].includes(p.rocketOutcome);
+}
+function matureScoreOutcome(p,today){
+  const days=tradingDaysBetween(p.issueDate,today);
+  return usableScoreOutcome(p)&&(days>1||(days===1&&istClock().mins>=EQUITY_CLOSE_MIN));
+}
+function scoreOutcomeTarget(p){return p.rocketOutcome===ROCKET_OUTCOME.ROCKET?1:0;}
+function scoreSessionMeans(records,value){
+  const days={};
+  for(const p of records){const v=value(p);if(!Number.isFinite(v)) continue;(days[p.issueDate]??=[]).push(v);}
+  return Object.values(days).map(v=>v.reduce((a,b)=>a+b,0)/v.length);
+}
+async function fitScoreWeights(records,live){
+  // Bounded, regularised finite-difference optimisation of target-hit squared error.
+  // Sessions get equal influence; a busy day or repeated intraday samples cannot dominate.
+  const days={};for(const p of records)(days[p.issueDate]??=[]).push(p);
+  const data=Object.values(days).flatMap(v=>v.filter((_,i)=>i%Math.max(1,Math.ceil(v.length/60))===0));
+  const counts={};data.forEach(p=>counts[p.issueDate]=(counts[p.issueDate]||0)+1);
+  let w=live.slice();const nDays=Object.keys(counts).length;
+  for(let pass=0;pass<12;pass++){
+    const grads=w.map(()=>0);
+    let processed=0;
+    for(const p of data){
+      const y=scoreOutcomeTarget(p),pred=computeUnifiedEvidence(p.input,w).raw/100;
+      for(let i=0;i<w.length;i++){
+        const trial=w.slice(),step=w[i]+0.01<=(i<13?1.5:1)?0.01:-0.01;trial[i]+=step;
+        const derivative=(computeUnifiedEvidence(p.input,trial).raw/100-pred)/step;
+        grads[i]+=2*(pred-y)*derivative/counts[p.issueDate]/nDays;
       }
-      // Backward pass: ensure upper bound 100 is respected without inverting slopes
-      if(Y[pts.length-1]>100){
-        Y[pts.length-1]=100;
-        for(let i=pts.length-2;i>=0;i--){
-          const minDelta=0.5*(pts[i+1].c-pts[i].c);
-          if(Y[i]>Y[i+1]-minDelta) Y[i]=Y[i+1]-minDelta;
-        }
-        if(Y[0]<0) Y[0]=0;
-      }
-      _bandOutcomeMemo={sig,mults,bands,pts,Y};
+      if(++processed%20===0) await new Promise(resolve=>setTimeout(resolve,0));
     }
-    const {pts,Y}=_bandOutcomeMemo;
+    w=w.map((v,i)=>+Math.max(i<13?0.5:-1,Math.min(i<13?1.5:1,v-0.8*(grads[i]+0.02*(v-SCORE_SEED[i])))).toFixed(5));
+  }
+  return w;
+}
+function evaluateScoreCandidate(records,candidate){
+  // Stored predictions were made BEFORE outcomes and after candidate creation. Never backscore
+  // the training observations and call that a validation result.
+  const val=records.filter(p=>p.candidateId===candidate.id&&p.issuedAt>candidate.createdAt);
+  const paired=scoreSessionMeans(val,p=>(p.livePrediction-scoreOutcomeTarget(p))**2-(p.candidatePrediction-scoreOutcomeTarget(p))**2);
+  const slots={};val.filter(p=>!p.block&&Number.isFinite(p.paperNetPct)).forEach(p=>(slots[p.bucket]??=[]).push(p));
+  const trades=[];
+  for(const v of Object.values(slots)){
+    if(v.length<4) continue;
+    const k=Math.max(1,Math.ceil(v.length/4));
+    const top=key=>v.slice().sort((a,b)=>b[key]-a[key]||a.symbol.localeCompare(b.symbol)).slice(0,k);
+    const live=top('liveDecision'),trial=top('candidateDecision');
+    trades.push({issueDate:v[0].issueDate,net:trial.reduce((n,p)=>n+p.paperNetPct,0)/k,
+      netLift:(trial.reduce((n,p)=>n+p.paperNetPct,0)-live.reduce((n,p)=>n+p.paperNetPct,0))/k,
+      hitLift:(trial.reduce((n,p)=>n+scoreOutcomeTarget(p),0)-live.reduce((n,p)=>n+scoreOutcomeTarget(p),0))/k});
+  }
+  const mean=a=>a.length?a.reduce((n,v)=>n+v,0)/a.length:null;
+  const net=scoreSessionMeans(trades,p=>p.net),netLift=scoreSessionMeans(trades,p=>p.netLift),hitLift=scoreSessionMeans(trades,p=>p.hitLift);
+  const enough=val.length>=100&&paired.length>=5&&net.length>=5;
+  return {n:val.length,days:paired.length,netDays:net.length,enough,errorGain:mean(paired),net:mean(net),netLift:mean(netLift),hitLift:mean(hitLift),
+    qualifies:enough&&mean(paired)>0&&paired.filter(v=>v>0).length/paired.length>=0.6&&mean(net)>0&&mean(netLift)>0&&mean(hitLift)>=0&&net.filter(v=>v>0).length/net.length>=0.6};
+}
+function scoreSampleHash(text){let h=2166136261;for(let i=0;i<text.length;i++)h=Math.imul(h^text.charCodeAt(i),16777619);return h>>>0;}
+async function updateScoreLearning(){
+  const now=Date.now();
+  if(_scoreLearningBusy||now-_scoreLearningAt<30000) return;
+  _scoreLearningBusy=true;_scoreLearningAt=now;
+  try{
+    const state=getUnifiedModelState(),today=getSessionDate();
     let i=0;
-    while(i<pts.length-2&&s>pts[i+1].c) i++;
-    const t=(s-pts[i].c)/(pts[i+1].c-pts[i].c);
-    const calibrated=+(Y[i]+t*(Y[i+1]-Y[i])).toFixed(1);
-    const multiplier=s>0?+(calibrated/s).toFixed(2):1.0;
-    return {calibrated,multiplier};
-  }catch(e){}
-  return {calibrated:s,multiplier:1.0};
+    for(const p of state.records){
+      if(p.paperComplete) continue;
+      resolveNetRecommendation(p,today);
+      if(++i%40===0) await new Promise(resolve=>setTimeout(resolve,0));
+    }
+    // Resolve whenever fresh data arrives, including after 16:00. Only record new buy-time
+    // observations during the equity session and with fresh prices and complete tape.
+    const captureAt=Date.now();
+    if(isEquitySession(captureAt)&&!universePriceStaleness()){
+      const bucket=Math.floor(captureAt/(30*60*1000));
+      if(state.lastBucket!==bucket){
+        const pool=ALL.filter(r=>r.scoreVersion===RADAR_SCORE_VERSION&&r.scoreComponents?.unified&&r.price>0
+          &&r.basketEligible!==false&&!r.noHistory&&getRecommendationFreshness(r.symbol).ok);
+        if(pool.length){
+          const groups={};for(const r of pool){const k=Math.floor(r.scoreComponents.signalScore/20);(groups[k]??=[]).push(r);}
+          const chosen=new Map();
+          pool.filter(isSelectableRecommendation).sort((a,b)=>b.score-a.score).slice(0,10).forEach(r=>chosen.set(r.symbol,r));
+          // Stratified outcome-independent sampling includes low scores and rule-blocked stocks.
+          // This is a sampled audit, not an exhaustive ledger or a universe-wide return estimate.
+          for(const rows of Object.values(groups)) rows.sort((a,b)=>scoreSampleHash(a.symbol+'|'+bucket)-scoreSampleHash(b.symbol+'|'+bucket)).slice(0,8).forEach(r=>chosen.set(r.symbol,r));
+          for(const r of chosen.values()){
+            const c=r.scoreComponents,policy=getRowExitPolicy(r,r.price);
+            if(!(policy.targetPct>0&&policy.stopPct>0)) continue;
+            const qty=Math.max(1,Math.floor(frictionSizeBasis()/r.price)),fr=getTradeFrictionPct(r,qty*r.price);
+            const input=JSON.parse(JSON.stringify(c.unified)),live=computeUnifiedEvidence(input,state.live);
+            const trial=state.candidate?computeUnifiedEvidence(input,state.candidate.weights):null;
+            state.records.push({symbol:r.symbol,issueDate:today,issuedAt:captureAt,bucket,score:r.score,signalScore:c.signalScore,
+              block:c.block||null,minScore:RECOMMEND_MIN_SCORE,input,modelRevision:state.revision,livePrediction:live.raw/100,liveDecision:live.total,
+              candidateId:trial?state.candidate.id:null,candidatePrediction:trial?trial.raw/100:null,candidateDecision:trial?trial.total:null,
+              entryPrice:r.price,targetPct:policy.targetPct,stopPct:policy.stopPct,auditQty:qty,orderType:'MARKET',
+              frictionPct:fr?.covered&&Number.isFinite(fr.entryPct)&&Number.isFinite(fr.exitPct)?Math.max(0,fr.entryPct+fr.exitPct):null,
+              rocketOutcome:ROCKET_OUTCOME.PENDING,scoreVersion:RADAR_SCORE_VERSION,outcomePolicy:'net-policy-v1'});
+          }
+          state.lastBucket=bucket;
+        }
+      }
+    }
+    const mature=state.records.filter(p=>matureScoreOutcome(p,today));
+    const days=new Set(mature.map(p=>p.issueDate)).size;
+    if(state.candidate){
+      const result=evaluateScoreCandidate(mature,state.candidate);state.candidate.validation=result;
+      if(result.enough){
+        if(result.qualifies){
+          state.live=state.candidate.weights.slice();state.revision++;state.appliedAt=now;
+          state.status='Validated weight update applied';
+          state.history.push({at:now,revision:state.revision,weights:state.live.slice(),validation:result});
+        } else state.status='Candidate did not improve later outcomes; live weights retained';
+        state.candidate=null;
+      }
+    }
+    if(!state.candidate&&mature.length>=100&&days>=5&&mature.filter(p=>p.issuedAt>(state.lastTrainingIssuedAt||0)).length>=100){
+      state.status='Building candidate weights from completed outcomes';
+      const weights=await fitScoreWeights(mature,state.live);
+      const createdAt=Date.now();
+      state.candidate={id:createdAt,createdAt,weights,trainingCount:mature.length,trainingDays:days};
+      state.lastTrainingIssuedAt=Math.max(...mature.map(p=>p.issuedAt));state.status='Checking candidate weights on new decisions';
+    }
+    // Bound the new audit store; legacy records/settings are never migrated or rewritten.
+    // Keep pending outcomes and the latest 10,000 completed samples, plus model-update history.
+    const completed=state.records.filter(p=>p.paperComplete);
+    if(completed.length>10000){const keep=new Set(completed.slice(-10000));state.records=state.records.filter(p=>!p.paperComplete||keep.has(p));}
+    state.history=state.history.slice(-30);state.updatedAt=now;
+    FS.set(SCORE_LEARNING_STORE,state);_unifiedStateSource=state;
+    if(state.revision!==state.publishedRevision){
+      state.publishedRevision=state.revision;
+      await scheduleScoreJob(); // one coherent rescore/filter/basket publication after promotion
+    }
+    if(document.getElementById('postCloseContent')?.offsetParent!==null) renderPostClose();
+  }finally{_scoreLearningBusy=false;}
 }
-function getBandOutcomeMultiplier(score){
-  return getBandOutcomeCalibration(score).multiplier;
-}
+
+
 function buildSystemScorecard(){
   const store=FS.get(RECOMMEND_OUTCOME_STORE)||{};
   const issues=store.issues||{};
@@ -3705,29 +3675,8 @@ const RADAR_GROUPS={
   volatility:{label:'Volatility',budget:8,desc:'ATR and range expansion without chaos'},
   context:{label:'Context',budget:5,desc:'Sector-relative regime and fundamentals'}
 };
-// One source for the six component budgets: the multiplier that fills a slot and the cap that
-// bounds it must never be two separate numbers.
-const RADAR_SCORE_BUDGETS={predictor:35,participation:15,direction:15,runway:15,feasibility:10,tape:10};
 const RADAR_RATING={'strong sell':-2,'sell':-1,'neutral':0,'buy':1,'strong buy':2};
-// THE DECISION SCORE. One number, but not a disguised rank and not a probability.
-//
-// The leading component is a causal next-session model: feature deciles are frozen on session D,
-// the D+1 mover set is attached only later, and direct descriptions of D's move are excluded. The
-// rest uses fixed meanings: participation, post-open travel, remaining runway, target/circuit
-// feasibility and current 5-minute standing. The six components add to 100; permissions remain
-// separate recommendation gates.
-function radarParticipationLevel(r){
-  const values=[];
-  const rv=Number(r&&r.relvol),rat=Number(r&&r.relAt),vc=Number(r&&r.volChg);
-  if(Number.isFinite(rv)) values.push(clamp01((rv-1)/1,0,1));       // normal 1x -> strong 2x
-  if(Number.isFinite(rat)) values.push(clamp01((rat-1)/1,0,1));    // same fixed ratio scale
-  if(Number.isFinite(vc)) values.push(clamp01(vc/100,0,1));        // +100% volume -> strong
-  if(values.length) return Math.max(...values);                    // the engine's ignition is OR
-  const ig=Number(r&&r.igniteStrength);
-  if(!Number.isFinite(ig)) return 0;
-  const ordinary=3*Math.LN2,strong=3*Math.LN3;
-  return clamp01((ig-ordinary)/(strong-ordinary),0,1);
-}
+// Fixed risk safeguards remain outside the adaptive evidence weights.
 function radarRiskFactor(r){
   if(!r) return 0;
   const price=Number(r.price)||0,turnover=rowLiquidityRupees(r);
@@ -4109,147 +4058,49 @@ function worthFetchingTape(r){
   return p>=10&&rowLiquidityRupees(r)>=2500000;
 }
 function radarScoreComponents(r,tapeStanding){
-  const hasNumber=v=>v!==null&&v!==undefined&&v!==''&&Number.isFinite(Number(v));
-  const zero={predictor:0,participation:0,direction:0,runway:0,feasibility:0,tape:0,
-              evidence:0,permission:0,total:0,block:'no row'};
-  if(!r) return zero;
-  const perm=radarPermissionLevel(r,tapeStanding);
-  const riskFactor=radarRiskFactor(r);
+  if(!r) return {total:0,permission:0,block:'No row'};
+  const perm=radarPermissionLevel(r,tapeStanding),risk=radarRiskFactor(r),tev=radarTapeEvidence(r.symbol);
+  if(!tev) return {total:0,permission:0,evidence:0,tapeBars:0,block:'Awaiting usable completed 5-minute tape'};
+  const state=getUnifiedModelState(),champion=FS.get(INDICATOR_WATCH_STORE)?.nextChampionStats;
+  const predictor=champion?.objective==='net-policy-v1'&&champion.mean>0&&champion.n>=5
+    ?0.5+clamp01(Number(r.predictiveLevel)||0,0,1):1;
   const trigger=Number.isFinite(Number(r.triggerFactor))?clamp01(Number(r.triggerFactor),0.5,1.5):1;
-  const hasPredictor=hasNumber(r.predictiveLevel);
-  const predictorBase=hasPredictor?Number(r.predictiveLevel):0;   // no qualified model, no credit
-  const eP=clamp01(predictorBase*trigger,0,1);
-  const eA=radarParticipationLevel(r);
-  const usedRaw=r.entryTiming&&r.entryTiming.rangeUsed,used=Number(usedRaw);
-  const eR=hasNumber(usedRaw)?clamp01(1-used/75,0,1):0.5;
-  // EVIDENCE ACCUMULATES, IT DOES NOT AVERAGE. v1228 measured that a budget-weighted MEAN makes
-  // “good at everything” score like “extreme at one thing”, which is backwards for a stock about
-  // to run - it is extreme in one axis and ordinary elsewhere. My first v1232 form used a mean and
-  // the board collapsed to ZERO rows over the bar, because participation reads 0 on most rows at
-  // this hour and dragged every one of them down. Noisy-OR restored: one extreme axis carries a
-  // row on its own, and the axes it is ordinary on cost it nothing.
-  const wP=RADAR_SCORE_BUDGETS.predictor,wA=RADAR_SCORE_BUDGETS.participation,wR=RADAR_SCORE_BUDGETS.runway;
-  // Normalised by the noisy-OR of a PERFECT row, so evidence genuinely spans 0..1 and the owner's
-  // 60 bar keeps its meaning. Without this the accumulator tops out at 0.727 and the bar becomes
-  // unreachable - the board went to zero rows over it, which this release's own probe caught. The
-  // normaliser is a constant of the weights, not of the day, so the scale cannot drift.
-  const tev=(typeof radarTapeEvidence==='function')?radarTapeEvidence(r.symbol):null;
-  if(!tev) return {flow:0,vwapPos:0,crossover:0,participation:0,impact:null,predictor:0,runway:0,tapeBars:0,
-                   direction:0,feasibility:0,tape:0,evidence:0,riskFactor:+riskFactor.toFixed(3),permission:0,total:0,
-                   block:'no usable recent 5-minute tape'};
-  const champion=FS.get(INDICATOR_WATCH_STORE)?.nextChampionStats;
-  const predictorFactor=champion?.objective==='net-policy-v1'&&champion.mean>0&&champion.n>=5
-    ?0.5+clamp01(predictorBase,0,1):1;
-  const evidence=clamp01(tev.level*predictorFactor*trigger,0,1);
-  const range=Number(r.rangePct),fromOpen=Number(r.changeOpen);
-  const dirLevel=(range>0&&fromOpen>0)?clamp01(fromOpen/(range*0.5),0,1):0;
-  const out={
-    // reported on the same scales as before so the tooltip still itemises the evidence
-    flow:+(100*tev.parts.flow).toFixed(0),
-    vwapPos:+(100*tev.parts.vwap).toFixed(0),
-    crossover:+(100*tev.parts.cross).toFixed(0),
-    participation:+(100*tev.parts.size).toFixed(0),
-    impact:Number.isFinite(Number(tev.parts.impact))?+(100*tev.parts.impact).toFixed(0):null,
-    // The book terms, on the same 0-100 scale as the rest, plus the weights they actually carry so
-    // the tooltip can say "measured at 0" rather than implying they are doing work.
-    bookImb:tev.book&&Number.isFinite(tev.book.imbalance)?+(100*tev.parts.book).toFixed(0):null,
-    buySplit:tev.book&&Number.isFinite(tev.book.buyShare)?+(100*tev.parts.split).toFixed(0):null,
-    cancelRatio:tev.book&&Number.isFinite(tev.book.cancelRatio)?+Number(tev.book.cancelRatio).toFixed(2):null,
-    bookWeights:tev.bookWeights||{book:0,split:0,spoof:0},
-    predictor:+(wP*eP).toFixed(1),
-    runway:+(wR*eR).toFixed(1),
-    tapeBars:tev.bars,
-    direction:+(RADAR_SCORE_BUDGETS.direction*dirLevel).toFixed(1),
-    feasibility:+(RADAR_SCORE_BUDGETS.feasibility*(perm.room??0)).toFixed(1),
-    tape:+(RADAR_SCORE_BUDGETS.tape*(perm.tape??0)).toFixed(1),
-    modelState:getTapeProfitEvidence().status,
-    outcomeMultiplier:1.0,
-    evidence:+evidence.toFixed(3),
-    riskFactor:+riskFactor.toFixed(3),
-    permission:+(perm.p||0).toFixed(3),
-    block:perm.p>0?null:(perm.why||null)
-  };
-  const envelope=(perm.p||0)*riskFactor;
-  out.total=+Math.max(0,Math.min(100,100*evidence*envelope)).toFixed(1);
-
-  // Single-Stock Session Calibration: Dynamic Depth Edge Multiplier
-  const calWeights=getCalibratedWeights();
-  if(calWeights.depthMultiplier!==1.0 && Number(r.depthImbalance)>0){
-    out.total=+Math.max(0, Math.min(100, out.total*calWeights.depthMultiplier)).toFixed(1);
-  }
-
-  // Live Session Momentum & Trajectory Assessment
-  // 1. Objective session return from official market open (independent of user page-boot time):
-  const coPct = Number.isFinite(Number(r.changeOpen)) ? Number(r.changeOpen) : 0;
-
-  // 2. Recent 5-minute and 15-minute tape momentum:
-  const p5 = Number.isFinite(Number(r.price5m)) ? Number(r.price5m) : 0;
-  const rawP15 = r.price15m;
-  const hasP15 = rawP15 !== null && rawP15 !== undefined && (typeof rawP15 !== 'string' || rawP15.trim() !== '') && Number.isFinite(Number(rawP15));
-  const p15 = hasP15 ? Number(rawP15) : null;
-
-  // 3. Exhaustion & Extension Guard (protecting against chasing tops):
-  const timing = r.entryTiming || getPeakEntryTiming(r);
-  const rangeUsedPct = Number(timing?.rangeUsed) || 0;
-  const rangeLocPct = Number(timing?.rangeLocation) || 0;
-  const isExhausted = rangeUsedPct >= 75 || (rangeLocPct >= 75 && timing?.bandExtended) || timing?.gapLedFade || timing?.failedBreakout;
-  const extensionMultiplier = isExhausted ? 0.0 : (rangeLocPct >= 70 ? 0.4 : 1.0);
-
-  // Deadband ±0.10% absorbs normal bid/ask spread noise
-  if(coPct > 0.10 && extensionMultiplier > 0){
-    // Forward Acceleration Boost: requires positive recent 5m momentum
-    const freshMom = Math.max(0, p5);
-    if(freshMom > 0){
-      let accelFactor = 1.0;
-      if(hasP15){
-        const ratio = (1 + p15 / 100) / (1 + freshMom / 100);
-        const priorPace = ratio > 0 ? 100 * (Math.sqrt(ratio) - 1) : -99;
-        const basePace = Math.max(0, priorPace);
-        if(freshMom >= priorPace){
-          // Smooth, continuous acceleration boost without division cliffs
-          const excess = freshMom - basePace;
-          accelFactor = 1.0 + Math.min(0.3, excess * 0.2);
-        } else if(priorPace > 0){
-          // Continuous deceleration taper: smoothly reaches 0.0 at 0.25 * priorPace
-          accelFactor = Math.max(0.0, (freshMom - 0.25 * priorPace) / (0.75 * priorPace));
-        } else {
-          accelFactor = 1.0;
-        }
-      }
-      if(accelFactor > 0){
-        const trajectoryConfirm = Math.min(1.0, (coPct - 0.10) / 0.50);
-        const rawBoost = Math.min(25, freshMom * 12 * accelFactor * trajectoryConfirm * extensionMultiplier);
-        const velocityBoost = +(rawBoost * envelope).toFixed(1);
-        out.total = +Math.min(100, out.total + velocityBoost).toFixed(1);
-        out.velocityBoost = velocityBoost;
-      }
+  const legacy=state.legacyDepth||{},depth=Number(r.depthImbalance)>0&&Number.isFinite(legacy.depthMultiplier)?legacy.depthMultiplier:1;
+  const co=Number(r.changeOpen)||0,p5=Number(r.price5m)||0;
+  const hasP15=r.price15m!==null&&r.price15m!==undefined&&r.price15m!==''&&Number.isFinite(Number(r.price15m));
+  const timing=r.entryTiming||getPeakEntryTiming(r),used=Number(timing?.rangeUsed)||0,loc=Number(timing?.rangeLocation)||0;
+  const exhausted=used>=75||(loc>=75&&timing?.bandExtended)||timing?.gapLedFade||timing?.failedBreakout;
+  const extension=exhausted?0:loc>=70?0.4:1;
+  let velocity=0,fade=0,ceiling=100;
+  if(co>0.10&&extension>0&&p5>0){
+    let accel=1;
+    if(hasP15){
+      const ratio=(1+Number(r.price15m)/100)/(1+p5/100);
+      const prior=ratio>0?100*(Math.sqrt(ratio)-1):-99;
+      accel=p5>=prior?1+Math.min(0.3,(p5-Math.max(0,prior))*0.2):prior>0?Math.max(0,(p5-0.25*prior)/(0.75*prior)):1;
     }
-  } else if(coPct < -0.10){
-    // Accelerated Demotion: stock is dropping below official opening price.
-    // Continuous smooth penalty with smooth ceiling compression (zero cliff jump at the deadband boundary).
-    const effectiveDrop = Math.abs(coPct) - 0.10;
-    const rawPenalty = Math.min(45, effectiveDrop * 15 * (calWeights.gapFadeMultiplier || 1.0));
-    const demotionPenalty = +(rawPenalty * Math.max(0.5, envelope)).toFixed(1);
-    out.total = +Math.max(0, out.total - demotionPenalty).toFixed(1);
-    const smoothCeiling = Math.max(0, +(100 - effectiveDrop * 100).toFixed(1));
-    out.total = +Math.min(out.total, smoothCeiling).toFixed(1);
-    out.belowOpenDrop = effectiveDrop;
+    velocity=Math.min(25,p5*12*accel*Math.min(1,(co-0.10)/0.50)*extension);
+  }else if(co< -0.10){
+    fade=Math.min(45,(Math.abs(co)-0.10)*15*(Number(legacy.gapFadeMultiplier)||1));
+    ceiling=Math.max(0,100-(Math.abs(co)-0.10)*100);
   }
-
-  // Score-band outcome feedback calibration (Findings 2 & B1-B3):
-  // Evaluates completed picks strictly on current RADAR_SCORE_VERSION scale (B1/B2).
-  // Applies continuous, strictly monotonic piecewise calibration across band centers (B3),
-  // preventing step inversions and ensuring rank order is monotone in preliminary score.
-  const outcomeCal=getBandOutcomeCalibration(out.total);
-  out.outcomeMultiplier=outcomeCal.multiplier;
-  out.total=outcomeCal.calibrated;
-
-  // Coherent Hard-Gate Enforcement on Final Score:
-  // If a stock is blocked by structural vetoes (ASM surveillance, sell volume > buy volume,
-  // non-basket-eligible, or missing history), its final score CANNOT clear the recommendation policy bar.
-  // This guarantees that top green scores and recommendation checkboxes never contradict each other.
-  applyReadinessScoreCap(r,out);
-  return out;
+  const bw=tev.bookWeights||{};
+  const input={parts:['flow','vwap','cross','size','impact','book','split','spoof'].map(k=>tev.parts[k]??0.5),
+    base:[0.10,0.05,0.10,0.75,tev.impactWeight||0,bw.book||0,bw.split||0,bw.spoof||0],
+    predictor,trigger,depth,velocity,fade,ceiling,permission:perm.p||0,risk,
+    context:SCORE_GROUPS.map(k=>Number.isFinite(r.scorePriors?.[k])?r.scorePriors[k]:null).concat([
+      Number.isFinite(r.fundamentalTrigger)?0.5+0.5*clamp01(r.fundamentalTrigger,-1,1):null,
+      Number.isFinite(r.stretch)&&r.stretch>=0?1/(1+r.stretch):null,
+      isEquitySession(Date.now())?(375+Math.max(0,EQUITY_CLOSE_MIN-istClock().mins))/750:null])};
+  const calc=computeUnifiedEvidence(input,state.live);
+  const out={total:calc.total,signalScore:calc.raw,unified:input,modelRevision:state.revision,
+    evidence:calc.evidence,permission:input.permission,riskFactor:risk,tapeBars:tev.bars,
+    flow:100*tev.parts.flow,vwapPos:100*tev.parts.vwap,crossover:100*tev.parts.cross,participation:100*tev.parts.size,
+    impact:100*tev.parts.impact,bookWeights:bw,feasibility:10*(perm.room||0),tape:10*(perm.tape||0),
+    velocityBoost:velocity*state.live[11]*input.permission*risk,belowOpenDrop:co< -0.10?Math.abs(co)-0.10:0,
+    modelState:state.revision>0?'forward-validated update':'initial weights - collecting outcomes',
+    block:input.permission>0?null:perm.why||'Readiness rule failed'};
+  return applyReadinessScoreCap(r,out);
 }
 
 function isDirectionConfirmed(s){
@@ -4275,38 +4126,12 @@ function applyReadinessScoreCap(r,c){
   return c;
 }
 function radarScoreTitle(r){
-  const c=r&&r.scoreComponents;
-  if(!c) return `Recommendation strength. ${RECOMMEND_MIN_SCORE} is the policy bar.`;
-  // EVIDENCE IS THE TAPE, SO THE TOOLTIP MUST ITEMISE THE TAPE (v1246). This listed
-  // `predictor · participation · runway` - the v1230 budget components, which v1232 REPLACED when
-  // evidence became the tape noisy-OR. The three do not compose evidence and never summed to it, and
-  // `participation` was printed as a 0-100 tape value over a budget of 15, so the board showed
-  // `participation 100.0/15`. These four ARE evidence, on the scale evidence is actually built from.
-  const ev=`flow ${Number(c.flow).toFixed(0)}/100 · vs VWAP ${Number(c.vwapPos).toFixed(0)}/100`
-    +` · crossover ${Number(c.crossover).toFixed(0)}/100 · participation ${Number(c.participation).toFixed(0)}/100`
-    +(Number.isFinite(Number(c.impact))?` · impact ${Number(c.impact).toFixed(0)}/100`:'')
-    +(()=>{
-      // The book reading is SHOWN whether or not it counts, and it says which. A term at weight 0
-      // is measured and inert; printing it as if it contributed would be the v1246 defect again.
-      const w=c.bookWeights||{book:0,split:0,spoof:0};
-      const bits=[];
-      if(Number.isFinite(Number(c.buySplit))) bits.push(`classified buy share ${Number(c.buySplit).toFixed(0)}/100`);
-      if(Number.isFinite(Number(c.bookImb))) bits.push(`book imbalance ${Number(c.bookImb).toFixed(0)}/100`);
-      if(Number.isFinite(Number(c.cancelRatio))) bits.push(`cancel ratio ${Number(c.cancelRatio).toFixed(2)}x`);
-      if(!bits.length) return '';
-      const armed=(w.book>0||w.split>0||w.spoof>0);
-      return ` · ${bits.join(' · ')} [${armed?`weights ${w.split.toFixed(2)}/${w.book.toFixed(2)}/${w.spoof.toFixed(2)}`:'measured at weight 0, not counted yet'}]`;
-    })()
-    +` over ${Number(c.tapeBars)||0} bars`;
-  if(c.belowOpenDrop>=0.25) return `NOT ACTIONABLE - below session load baseline (-${c.belowOpenDrop.toFixed(2)}%). Score penalized and capped below policy bar (${RECOMMEND_MIN_SCORE}) because base price was not defended.`;
-  if(c.block) return `Below policy bar: ${c.block}. Final score ${Number(c.total).toFixed(1)}; Min Score ${RECOMMEND_MIN_SCORE}. Tape evidence ${(Number(c.evidence)*100).toFixed(0)}/100 (${ev}).`;
-  return `Recommendation strength ${Number(c.total).toFixed(1)} = tape evidence ${(Number(c.evidence)*100).toFixed(0)}/100 × permission ${(Number(c.permission)*100).toFixed(0)}% × risk factor ${(Number(c.riskFactor)*100).toFixed(0)}%.`
-    +(c.velocityBoost>0?` Forward velocity boost +${Number(c.velocityBoost).toFixed(1)} pts.`:'')
-    +(c.belowOpenDrop>0?` Below baseline penalty -${Number(c.belowOpenDrop).toFixed(2)}%.`:'')
-    +` Evidence, from the continuous merged 5-minute tape window: ${ev}.`
-    +` Permission: headroom ${Number(c.feasibility).toFixed(1)}/${RADAR_SCORE_BUDGETS.feasibility} · tape standing ${Number(c.tape).toFixed(1)}/${RADAR_SCORE_BUDGETS.tape}${Number(c.permission)<1?' (an absent tape caps permission until candles confirm it)':''}.`
-    +` Policy bar ${RECOMMEND_MIN_SCORE}; not a profit probability.`;
+  const c=r?.scoreComponents;
+  if(!c?.unified) return 'Awaiting usable completed tape; no prediction recorded yet.';
+  return `Unified signal ${c.signalScore.toFixed(1)}; final score ${c.total.toFixed(1)} after readiness and risk. Model revision ${c.modelRevision}. `
+    +(c.block?`Rule: ${c.block}. `:'')+`Min Score ${RECOMMEND_MIN_SCORE}. Dynamic signal values use the current live weights; only later, completed outcomes can qualify a weight change. Not a profit probability.`;
 }
+
 // Columns that are EXPORTED but deliberately NOT modelled as features. Exporting and scoring are
 // separate decisions: the data stays available for derived signals and future use, it simply does
 // not earn a feature weight of its own. Never remove these from the TradingView export (v1071).
@@ -5805,7 +5630,7 @@ function* radarAnalyzeGen(headers,rawRows,supplements={},heldSymbols=new Set()){
   const igniteSorted=igniteArr.filter(v=>v!==null&&isFinite(v)).sort((a,b)=>a-b);
   const STAGE_LABEL={1:'Accumulation',2:'Breakout',3:'Event day',4:'Profit-booking',5:'Re-accumulation',6:'Second leg'};
   const buildRadarRow=(raw,ri)=>{
-    const parts={},weights={},contrib=[];
+    const parts={},weights={},contrib=[],scorePriors={},priorValues={};
     let predictiveSum=0,predictiveWeight=0;
     for(const g in RADAR_GROUPS){parts[g]=0;weights[g]=0;}
     let observed=0;
@@ -5818,6 +5643,7 @@ function* radarAnalyzeGen(headers,rawRows,supplements={},heldSymbols=new Set()){
       v=clamp01(v,f.lo,f.hi);
       const p=radarPct(f.sorted,v),learn=Math.sign(f.effect||1)*(2*p-1),alpha=clamp01(Math.abs(f.effect)*1.35,.12,.58),sig=alpha*learn+(1-alpha)*radarPrior(f,p),w=f.weight;
       parts[f.group]+=sig*w;weights[f.group]+=w;observed++;
+      (priorValues[f.group]??=[]).push(clamp01((radarPrior(f,p)+1)/2,0,1));
       if(Number.isFinite(f.nextEffect)){
         const pw=Math.abs(f.nextEffect);
         predictiveSum+=pw*Math.sign(f.nextEffect)*(2*p-1);
@@ -5981,7 +5807,8 @@ function* radarAnalyzeGen(headers,rawRows,supplements={},heldSymbols=new Set()){
     if(turn<5e5)rawScore-=7;
     if(price<5)rawScore-=5;
     const dispDay=meta._corpNeutralised&&meta._realDay!=null?meta._realDay:day;
-    const out={symbol,name:String(raw[descI]||symbol),sector:raw[sectorI]||'',rawScore,parts,contrib,quality,
+    for(const k of Object.keys(priorValues)) scorePriors[k]=priorValues[k].reduce((a,b)=>a+b,0)/priorValues[k].length;
+    const out={symbol,name:String(raw[descI]||symbol),sector:raw[sectorI]||'',rawScore,parts,contrib,quality,scorePriors,
       predictiveRaw:predictiveWeight?predictiveSum/predictiveWeight:null,predictiveSessions:nextPrediction.sessions||0,
       predictiveModel:nextPrediction.champion||'preMove',
       price,day:dispDay,priceChange:dispDay,turnover:turn,avgVol10:(avgVolI>=0?radarNum(raw[avgVolI]):null),relvol,relAt,volChg,gap,gapSigned,changeOpen,rangePct,sessionVolatilityPct,stretch,stretchBarPct:_stretchBar,atr:atrPct,
@@ -9846,8 +9673,8 @@ function _renderMethodologyInner(){
     <div class="m-grid">
       <div class="m-card"><h4>Ranking Inputs</h4><p>Daily/Kite universe columns enter through typed transformations, robust percentiles and seven diagnostic groups. They set the Setup label, Risk classification, exchange context and entry/exit context; they do <strong>not</strong> make the numeric Decision Score. Exchange data adds authoritative series, price band, status, delivery, trades, 52-week range, surveillance and deal context.</p><div class="rr-groups" style="margin-top:10px">${groupsHTML}</div></div>
       <div class="m-card"><h4>What the Score Does</h4><ol style="padding-left:18px;color:var(--t2);font-size:14px;line-height:1.7">
-        <li>Builds the numeric score from the continuous merged 5-minute tape window: net flow, price versus VWAP, crossover, participation and the measured impact term when its evidence-backed weight is non-zero.</li>
-        <li>Combines those tape terms with noisy-OR, then multiplies by permission. Permission reflects circuit headroom and tape standing; technical readiness failures cap the final score below your Min Score, including when it is zero.</li>
+        <li>Builds one weighted signal from tape pressure, VWAP, crossover, participation, measured impact/book terms, the qualified predictor, existing boosts, depth and momentum. Additional setup/context inputs start at zero influence and must earn it on later outcomes.</li>
+        <li>One model controls influence factors. Tape terms use a normalised blend; predictor, boosts, depth and acceleration join the same calculation. Fixed permission, risk and readiness rules remain outside the learner; failures cap the final score below Min Score, including zero.</li>
         <li>Scores continuously from the merged tape. Current-session freshness remains a separate action-safety check; an absent tape is not treated as bearish, but it cannot produce a selectable recommendation.</li>
         <li>Uses the causal predictor, direction, listing history, selling state, entry timing, allocation viability and evidence-trigger checks as independent recommendation gates. A peak-timing block may supply a stock-specific LIMIT price; it is not silently treated as a market entry.</li>
         <li>Reports daily-column feature separation and same-session rocket separation for diagnostics. Neither same-session outcome labels nor the diagnostic composite feeds the Decision Score.</li>
@@ -9864,7 +9691,7 @@ function _renderMethodologyInner(){
     ${buildIndicatorWatchHTML()}
     <div id="meth-hf-wrap">${hardFiltersHTML}</div>
     <h3 id="meth-performance" style="margin-top:28px">Performance Tab</h3>
-    <p style="color:var(--t2);font-size:14.5px;line-height:1.7">Performance describes realised execution history, not current recommendations. Its headline cards use closed Tradebook round trips net of charges; when Orders contains a newer booked session, that addendum updates only money totals and the Monthly Breakdown, while behavioural metrics remain Tradebook-only. The scorecard grades current-version recommendation cohorts on each pick's own target-before-stop result within ${ROCKET_HORIZON_DAYS} trading days; completed, unambiguous outcomes calibrate the score scale after five issue sessions; deadline misses count as failures. This monotonic calibration preserves ranking and is not a probability estimate. XIRR uses closed round trips only, so open positions are excluded. Latest Session and Open Positions are live portfolio surfaces on Rankings, not Performance.</p>
+    <p style="color:var(--t2);font-size:14.5px;line-height:1.7">Performance describes realised execution history, not current recommendations. Its headline cards use closed Tradebook round trips net of charges; when Orders contains a newer booked session, that addendum updates only money totals and the Monthly Breakdown, while behavioural metrics remain Tradebook-only. The scorecard grades current-version recommendation cohorts on each pick's own target-before-stop result within ${ROCKET_HORIZON_DAYS} trading days; the separate live score audit records as-of signal inputs and checks candidate weights on later outcomes before applying a new revision. Deadline misses count as failures; unknown or ambiguous outcomes are excluded. Adaptive weights can change ranking, but cannot override trading safeguards. XIRR uses closed round trips only, so open positions are excluded. Latest Session and Open Positions are live portfolio surfaces on Rankings, not Performance.</p>
     <h3 id="meth-guide" style="margin-top:28px">Use & Risk</h3>
     <div class="m-grid">
       <div class="m-card"><h4>Entry Workflow</h4><ol style="padding-left:18px;color:var(--t2);font-size:14px;line-height:1.7">
@@ -13802,19 +13629,10 @@ function showRadarDetail(sym){
   // drives the setup labels and the Risk classification the filter bar uses, so removing them would
   // break a live control. They are labelled for what they actually do, and demoted below the tape.
   const tc=r.scoreComponents;
-  const tapeRead=tc&&!tc.block?`<div class="rr-read" style="margin-bottom:10px">
-      <b>What made this score — this session's 5-minute tape:</b>
-      net flow ${fmt(tc.flow,0)}/100 · price vs VWAP ${fmt(tc.vwapPos,0)}/100 · crossover ${fmt(tc.crossover,0)}/100
-      · participation ${fmt(tc.participation,0)}/100${Number.isFinite(Number(tc.impact))?` · impact ${fmt(tc.impact,0)}/100`:''}
-      &nbsp;over ${fmt(tc.tapeBars,0)} bars.<br>
-      <b>Permission:</b> headroom ${fmt(tc.feasibility,1)}/${RADAR_SCORE_BUDGETS.feasibility}
-      · tape standing ${fmt(tc.tape,1)}/${RADAR_SCORE_BUDGETS.tape}
-      · risk factor ${fmt((tc.riskFactor??1)*100,0)}%.
-      </div>`:'';
+  const tapeRead=getUnifiedScoreDetail(tc);
   document.getElementById('radarDetailBody').innerHTML=`${detailNote}${decisionRead}${tapeRead}
-    <h3 style="font-size:15px;margin:14px 0 4px">Setup &amp; risk classification</h3>
-    <div style="font-size:12px;color:var(--t3);margin-bottom:8px">From the daily columns. These set the
-      Setup label and Risk pill; the same risk signals also reduce the Decision Score above.</div>
+    <h3 style="font-size:15px;margin:14px 0 4px">Setup &amp; risk context</h3>
+    <div style="font-size:12px;color:var(--t3);margin-bottom:8px">These descriptive bars set the Setup label and Risk pill. The weighted model uses separately recorded feature priors; the actual live weights are shown above.</div>
     <div class="rr-groups">${groups}</div>
     <div class="rr-read"><b>Exchange check:</b> Series ${escHtml(r.series||'—')}, price band ${r.band??'not supplied'}, status ${escHtml(r.status||'—')}; basket ${r.basketEligible!==false?'eligible':'ineligible'}. Official delivery ${r.meta?.delivery==null?'unavailable':fmt(r.meta.delivery,1)+'%'}, trades ${r.meta?.trades==null?'unavailable':fmt(r.meta.trades,0)}, surveillance triggers: ${flags}.${bandNote}${varNote}${masterNote}${corpNote}${triggerNote}<br>
     <b>Feasibility:</b> ${gate} Strongest daily range estimate ${fmt(r.rangePct,2)}%; the session target takes ${fmt(r.stretch,2)}× that range. The stock remains ranked either way.${entryNote}<br>
@@ -13828,218 +13646,49 @@ function showRadarDetail(sym){
 }
 function closeRadarDetail(){document.getElementById('radarDetail')?.close();}
 
+let SCORE_AUDIT_DAY='';
 function renderPostClose(){
-  const el=document.getElementById('postCloseContent');if(!el)return;
-  const clock=istClock();
-  if(clock.mins>=DAY_END_MIN) runPostCloseAudit();
-  const cal=runDailyCohortCalibration();
-  const {today,audit,store}=postCloseAuditStatus();
-  const afterClose=clock.mins>=DAY_END_MIN;
-  const scorecard=store.scorecard||getPostCloseRuleScorecard(store.audits||{});
-  const gs=store.gainerScorecard||getGainerScorecard(store.gainers||{});
-  // Live authority reads ONLY the pick scorecard. The independent gainer stream is discovery
-  // evidence: useful, visible, and explicitly diagnostic until it is deliberately promoted.
-  const liveBoosts=activePostCloseTriggerRules('boost');
-  const liveGates=activePostCloseTriggerRules('gate');
-  const liveVetos=activePostCloseTriggerRules('veto-on-retired');
-  const liveByKey=new Map([
-    ...liveBoosts.map(x=>[x.definition.key,{label:'RANK BOOST',kind:'armed'}]),
-    ...liveGates.map(x=>[x.definition.key,{label:'REQUIRED GATE',kind:'armed'}]),
-    ...liveVetos.map(x=>[x.definition.key,{label:'VETO',kind:'retired'}]),
-  ]);
-  const gToday=store.gainers?.[today]||null;
-  const n2=(v,d=2)=>v==null||!Number.isFinite(v)?'—':Number(v).toFixed(d);
-  const pp=v=>v==null?'—':(v>=0?'+':'')+v+'pp';
-
-  // v1213: "Complete" used to mean only that an audit OBJECT existed for today, so the header read
-  // "Complete for 2026-08-21" beside Resolved 0 / Pending 20. A cohort with nothing resolved is not
-  // a completed audit; it is an issued one still inside its two-session window.
-  const issued=audit?.issued??0, resolved=audit?.resolved??0, pending=audit?.pending??0;
-  const state=!audit?(afterClose?{t:'Waiting for the post-close universe rebuild',c:'var(--amber)'}
-                                :{t:'Audit runs automatically at 16:00 IST',c:'var(--t3)'})
-    :resolved===0?{t:'Issued for '+today+' — nothing resolved yet, '+pending+' still inside their window',c:'var(--amber)'}
-    :pending>0?{t:'Partly graded for '+today+' — '+resolved+' of '+issued+' resolved, '+pending+' pending',c:'var(--amber)'}
-    :{t:'Fully graded for '+today,c:'var(--green)'};
-
-  // ONE tracker, not three. The tab carried three tables over the SAME condition list: a >=95%
-  // candidate list, a pick-side tracker and a gainer-side tracker. They are one question - does this
-  // condition separate winners - asked of two evidence streams, so they become one table with a
-  // column for each stream.
-  const gsBy=Object.fromEntries(gs.map(r=>[r.key,r]));
-  const merged=scorecard.map(r=>({p:r,g:gsBy[r.key]||{}}))
-    .filter(x=>x.p.sessions>0||x.g.sessions>0);
-  const dormant=scorecard.length-merged.length;
-  const rank=x=>liveByKey.has(x.p.key)?0
-    :(x.g.status==='ARMED'||x.g.status==='RETIRED')?1:2;
-  merged.sort((a,b)=>rank(a)-rank(b)||Math.abs(b.p.t||0)-Math.abs(a.p.t||0));
-  const badge=(st,why,label=st)=>{
-    const k=st==='ARMED'?'armed':st==='RETIRED'?'retired':'collecting';
-    return '<span class="pc-status pc-status--'+k+'">'+escHtml(label)+'</span>'
-      +(why?'<div class="pc-status-why">'+escHtml(why)+'</div>':'');
-  };
-  const liftCell=(v,t)=>{
-    if(v==null) return '<span style="color:var(--t3)">—</span>';
-    const k=v>0?'up':v<0?'down':'flat';
-    return '<span class="pc-lift pc-lift--'+k+'">'+pp(v)+'</span>'
-      +(t!=null&&t!==0?'<div class="pc-cell-sub">t '+Number(t).toFixed(2)+'</div>':'');
-  };
-  const trackerRows=merged.map(x=>{
-    const p=x.p,g=x.g;
-    const effect=liveByKey.get(p.key)||null;
-    const effectHtml=effect
-      ?badge(effect.kind==='retired'?'RETIRED':'ARMED','',effect.label)
-        +'<div class="pc-status-why">pick evidence '+escHtml(p.status.toLowerCase())+'</div>'
-      :badge('COLLECTING',p.why||'', 'NO LIVE EFFECT')
-        +'<div class="pc-status-why">pick evidence '+escHtml((p.status||'COLLECTING').toLowerCase())+'</div>';
-    const gStatus=g.status||'COLLECTING';
-    const gHtml=badge(gStatus,gStatus==='COLLECTING'?(g.why||''):'' ,'DIAGNOSTIC '+gStatus);
-    return '<tr>'
-      +'<td>'+escHtml(p.label)+'</td>'
-      +'<td class="num"><span class="pc-cell-main">'+(p.sessions||'—')+'</span>'
-        +'<div class="pc-cell-sub">'+(p.total||0)+' picks</div></td>'
-      +'<td class="num">'+liftCell(p.meanLift,p.t)+'</td>'
-      +'<td>'+effectHtml+'</td>'
-      +'<td class="num"><span class="pc-cell-main">'+(g.sessions||'—')+'</span></td>'
-      +'<td class="num">'+liftCell(g.meanLift,g.t)+'</td>'
-      +'<td>'+gHtml+'</td>'
-      +'</tr>';
+  const el=document.getElementById('postCloseContent');if(!el) return;
+  const state=getUnifiedModelState(),today=getSessionDate();
+  const days=[...new Set([today,...state.records.map(p=>p.issueDate)])].sort().reverse();
+  const day=days.includes(SCORE_AUDIT_DAY)?SCORE_AUDIT_DAY:today;
+  const records=state.records.filter(p=>p.issueDate===day),resolved=records.filter(usableScoreOutcome);
+  const blocked=records.filter(p=>p.block).length,incomplete=records.filter(p=>p.paperComplete&&!usableScoreOutcome(p)).length;
+  const pending=records.filter(p=>!p.paperComplete).length;
+  const pct=(v,n)=>n?(100*v/n).toFixed(1)+'%':'Waiting';
+  const mean=a=>a.length?a.reduce((n,v)=>n+v,0)/a.length:null;
+  const num=v=>v==null?'Waiting':(v>=0?'+':'')+v.toFixed(2)+'%';
+  const when=t=>t?new Date(t).toLocaleString('en-IN',{timeZone:'Asia/Kolkata',hour:'2-digit',minute:'2-digit',day:'2-digit',month:'short'}):'No observations yet';
+  const rows=[80,60,40,20,0,'Blocked by rules'].map(b=>{
+    const all=records.filter(p=>scoreLearningBand(p)===b),done=all.filter(usableScoreOutcome),net=done.filter(p=>Number.isFinite(p.paperNetPct));
+    const wins=done.filter(p=>scoreOutcomeTarget(p)===1);
+    const mins=wins.map(p=>Math.max(0,tradingDaysBetween(p.issueDate,istDayKey(p.paperExitAt))*375+istClock(p.paperExitAt).mins-istClock(p.issuedAt).mins)).filter(Number.isFinite).sort((a,b)=>a-b);
+    const med=mins.length?mins[Math.floor(mins.length/2)].toFixed(0)+' trading min':'Waiting';
+    return `<tr><td><b>${typeof b==='number'?b+'-'+(b===80?100:b+19):b}</b></td><td>${all.length}</td><td>${pct(wins.length,done.length)}<small> ${wins.length}/${done.length} resolved</small></td><td>${num(mean(net.map(p=>p.paperNetPct)))}<small> ${net.length} cost-covered</small></td><td>${med}</td><td>${all.filter(p=>!p.paperComplete).length}</td><td>${all.filter(p=>p.paperComplete&&!usableScoreOutcome(p)).length}</td></tr>`;
   }).join('');
-
-  const gCard=(()=>{
-    if(!gToday) return '<section class="m-card pc-card"><div class="pc-section-head"><h3 class="pc-section-title">Today’s winners, graded</h3></div>'
-      +'<div class="pc-empty">Runs after 16:00 on the refreshed closing tape. The day’s '
-      +GAINER_COHORT_N+' biggest EQ gainers are scored against the picks and the rest of the tradeable market, so a stock the board missed becomes evidence.</div></section>';
-    const f=gToday.fields||{};
-    // v1213: the `feasibility` column is dropped. It is the STATISTICAL session-ceiling term v1208
-    // removed from the score, it printed 0.000 on every row of this table, and it sat beside scores
-    // of 91.7 that plainly did not use it. `circuitFeasibility` is what the score actually reads.
-    const rows=gToday.symbols.map(x=>'<tr>'
-      +'<td>'+escHtml(x.s)+'</td>'
-      +'<td class="num pc-lift--up">+'+n2(x.day)+'%</td>'
-      +'<td class="num">'+(x.rank??'—')+'</td>'
-      +'<td class="num">'+n2(x.score,1)+'</td>'
-      +'<td class="num">'+n2(x.setupPct,3)+'</td>'
-      +'<td class="num">'+n2(x.circuitFeasibility,3)+'</td>'
-      +'<td class="num">'+(x.relvol==null?'—':n2(x.relvol)+'×')+'</td>'
-      +'<td class="center" style="color:'+(x.dirOk?'var(--green)':'var(--red)')+'">'+(x.dirOk?'Y':'N')+'</td></tr>').join('');
-    const cond=(gToday.conditions||[]).slice().sort((a,b)=>b.lift-a.lift).map(c=>'<tr>'
-      +'<td>'+escHtml(c.label)+'</td><td class="num">'+c.hit+'/'+c.of+'</td>'
-      +'<td class="num">'+c.hitPct+'%</td><td class="num">'+c.basePct+'%</td>'
-      +'<td class="num pc-lift '+(c.lift>=GAINER_LIFT_MIN?'pc-lift--up':c.lift<=-GAINER_LIFT_MIN?'pc-lift--down':'pc-lift--flat')+'">'+pp(c.lift)+'</td></tr>').join('');
-    // v1213: "median circuit feasibility 1.000 / rest 1.000" was a card that could not discriminate
-    // between the two cohorts. The cards kept are the ones where they actually differ.
-    const card=(lbl,val,sub)=>'<div class="pc-kpi"><div class="pc-kpi-label">'+lbl+'</div><div class="pc-kpi-value">'+val+'</div><div class="pc-kpi-sub">'+sub+'</div></div>';
-    return '<section class="m-card pc-card">'
-      +'<div class="pc-section-head"><h3 class="pc-section-title">Today’s winners, graded</h3></div>'
-      +'<p class="pc-copy">The day’s '+gToday.n+' biggest EQ gainers against the '+gToday.controlN
-      +' tradeable rows that were not. <b>'+gToday.caught.onBoard+'</b> were inside the board’s top '+RECOMMEND_MAX_RANK
-      +'; <b>'+gToday.caught.scored+'</b> cleared the '+RECOMMEND_MIN_SCORE+' score bar.</p>'
-      +'<div class="pc-winner-kpis">'
-      +card('Median rank',f.rank?.cohort??'—','rest of market '+(f.rank?.control??'—'))
-      +card('Median score',n2(f.score?.cohort,1),'rest '+n2(f.score?.control,1))
-      +card('Median setup pct',n2(f.setupPct?.cohort,3),'rest '+n2(f.setupPct?.control,3))
-      +card('Median relative volume',n2(f.relvol?.cohort)+'×','rest '+n2(f.relvol?.control)+'×')
-      +'</div>'
-      +'<div class="pc-data-grid">'
-      +'<div class="pc-subsection"><h4 class="pc-subsection-title">What separated them</h4><div class="pc-table-wrap"><table class="pc-table pc-table--conditions"><thead><tr><th>Condition</th><th class="num">Winners</th><th class="num">Winner rate</th><th class="num">Market rate</th><th class="num">Lift</th></tr></thead><tbody>'+cond+'</tbody></table></div></div>'
-      +'<div class="pc-subsection"><h4 class="pc-subsection-title">The cohort</h4><div class="pc-table-wrap"><table class="pc-table pc-table--cohort"><thead><tr><th>Symbol</th><th class="num">Day</th><th class="num">Rank</th><th class="num">Score</th><th class="num">Setup</th><th class="num">Circuit feas</th><th class="num">RelVol</th><th class="center">Dir</th></tr></thead><tbody>'+rows+'</tbody></table></div></div>'
-      +'</div></section>';
-  })();
-
-  const rss=NSE_FUNDAMENTAL_META,events=Object.values(NSE_FUNDAMENTALS).reduce((n,a)=>n+(a?.length||0),0);
-  const gArmed=merged.filter(x=>x.g.status==='ARMED').length;
-  const gRetired=merged.filter(x=>x.g.status==='RETIRED').length;
-  const rssText=rss?.ok
-    ? events+' symbol-linked filing events from '+(rss.feeds||0)+' official RSS indexes; '
-      +(rss.financials?.parsed||0)+' of '+(rss.financials?.attempted||0)+' result XBRLs parsed; snapshot '
-      +escHtml(rss.snapshot||'saved locally')+'.'
-    : (rss?.why?'RSS unavailable: '+escHtml(rss.why)+'.':'The local helper will fetch and snapshot the official indexes on the next load.');
-
-  const calHtml=(()=>{
-    if(!cal||!cal.total){
-      return '<section class="m-card pc-card pc-hero">'
-        +'<div class="pc-head"><div><div class="pc-eyebrow">Single-Stock Closed-Loop Calibration</div>'
-        +'<h3 class="pc-title">09:15 Open Cohort & Factor Edge</h3><p class="pc-copy">Waiting for the market open (09:15 IST) to capture the initial baseline quotes and scores.</p></div></div>'
-        +'</section>';
-    }
-    const n2=(v,d=2)=>v==null||!Number.isFinite(v)?'—':Number(v).toFixed(d);
-    const pp=(v)=>v==null?'—':(v>=0?'+':'')+n2(v,2)+'%';
-    const stateText=cal.isPostClose?'OFFICIAL POST-CLOSE CALIBRATION (16:00+)':'LIVE INTRADAY COHORT PROGRESS';
-    const stateColor=cal.isPostClose?'var(--green)':'var(--amber)';
-
-    const rows=(cal.evaluated||[]).slice().sort((a,b)=>{
-      const order={ROCKET:0,TRAP:1,MISSED:2,NEUTRAL:3};
-      return (order[a.verdict]??3)-(order[b.verdict]??3) || b.dayReturn-a.dayReturn;
-    }).map(r=>{
-      const vBadge=r.verdict==='ROCKET'?'<span class="pc-status pc-status--armed">🚀 ROCKET</span>'
-        :r.verdict==='TRAP'?'<span class="pc-status pc-status--retired">⚠️ TRAP</span>'
-        :r.verdict==='MISSED'?'<span class="pc-status pc-status--collecting">👀 MISSED</span>'
-        :'<span style="color:var(--t3)">NEUTRAL</span>';
-      const col=r.dayReturn>0?'var(--green)':r.dayReturn<0?'var(--red)':'var(--t3)';
-      return '<tr>'
-        +'<td>'+escHtml(r.symbol)+'</td>'
-        +'<td class="num">'+n2(r.openScore,1)+'</td>'
-        +'<td class="num">₹'+n2(r.openPrice,2)+'</td>'
-        +'<td class="num">₹'+n2(r.currentPrice,2)+'</td>'
-        +'<td class="num" style="color:'+col+';font-weight:700">'+pp(r.dayReturn)+'</td>'
-        +'<td class="num pc-lift--up">+'+n2(r.maxGain,2)+'%</td>'
-        +'<td class="center">'+vBadge+'</td>'
-        +'</tr>';
-    }).join('');
-
-    const f=cal.factors;
-    const w=cal.weights||{depthMultiplier:1.0,gapFadeMultiplier:1.0};
-
-    return '<section class="m-card pc-card pc-hero">'
-      +'<div class="pc-head"><div><div class="pc-eyebrow">Single-Stock Closed-Loop Calibration</div>'
-      +'<h3 class="pc-title">09:15 Open Cohort & Factor Edge Audit</h3>'
-      +'<p class="pc-copy">Audits performance against the live prices stamped at page load / session open against closing outcomes. Automatically rewards features with positive forward alpha and penalizes fading morning traps.</p></div>'
-      +'<div class="pc-state" style="color:'+stateColor+'">'+stateText+'</div></div>'
-      +'<div class="pc-kpis">'
-      +'<div class="pc-kpi"><div class="pc-kpi-label">Tracked from Open</div><div class="pc-kpi-value">'+cal.total+'</div><div class="pc-kpi-sub">stocks tracked from page load</div></div>'
-      +'<div class="pc-kpi"><div class="pc-kpi-label">🚀 Rockets (Alpha)</div><div class="pc-kpi-value" style="color:var(--green)">'+cal.rockets+'</div><div class="pc-kpi-sub">Score ≥ 60 & Day ≥ +2%</div></div>'
-      +'<div class="pc-kpi"><div class="pc-kpi-label">⚠️ Morning Traps</div><div class="pc-kpi-value" style="color:var(--red)">'+cal.traps+'</div><div class="pc-kpi-sub">Score ≥ 60 & Faded < 0%</div></div>'
-      +'<div class="pc-kpi"><div class="pc-kpi-label">👀 Missed Runners</div><div class="pc-kpi-value" style="color:var(--amber)">'+cal.missed+'</div><div class="pc-kpi-sub">Score < 60 & Day ≥ +4%</div></div>'
-      +'<div class="pc-kpi"><div class="pc-kpi-label">Avg Move From Open</div><div class="pc-kpi-value" style="color:'+(cal.avgReturn>=0?'var(--green)':'var(--red)')+'">'+pp(cal.avgReturn)+'</div><div class="pc-kpi-sub">Cohort mean</div></div>'
-      +'</div>'
-      +'<div class="pc-winner-kpis" style="margin-top:14px">'
-      +'<div class="pc-kpi"><div class="pc-kpi-label">Buy Depth Dominance (>1.5x)</div><div class="pc-kpi-value">'+n2(f.depth.winRate,1)+'% win</div><div class="pc-kpi-sub">Avg '+pp(f.depth.avgReturn)+' ('+f.depth.n+' stocks)</div></div>'
-      +'<div class="pc-kpi"><div class="pc-kpi-label">Opening Gap (>2.5%)</div><div class="pc-kpi-value" style="color:'+(f.gapHigh.avgReturn>=0?'var(--green)':'var(--red)')+'">'+n2(f.gapHigh.winRate,1)+'% win</div><div class="pc-kpi-sub">Avg '+pp(f.gapHigh.avgReturn)+' ('+f.gapHigh.n+' stocks)</div></div>'
-      +'<div class="pc-kpi"><div class="pc-kpi-label">Volume Velocity (>1.5x)</div><div class="pc-kpi-value">'+n2(f.relvolHigh.winRate,1)+'% win</div><div class="pc-kpi-sub">Avg '+pp(f.relvolHigh.avgReturn)+' ('+f.relvolHigh.n+' stocks)</div></div>'
-      +'<div class="pc-kpi"><div class="pc-kpi-label">Learned Weights</div><div class="pc-kpi-value" style="font-size:16px;margin-top:8px">Depth '+w.depthMultiplier+'× · Fade '+w.gapFadeMultiplier+'×</div><div class="pc-kpi-sub"><button class="btn" onclick="resetCalibratedWeights()" style="font-size:10px;padding:2px 6px;margin-top:2px">Reset to 1.0×</button></div></div>'
-      +'</div>'
-      +'<div class="pc-section-head" style="margin-top:18px"><h4 class="pc-subsection-title">Session Load Cohort Outcome Ledger</h4><div class="pc-counts">'+cal.total+' stocks audited</div></div>'
-      +'<div class="pc-table-wrap" style="max-height:360px;overflow-y:auto"><table class="pc-table"><thead><tr>'
-      +'<th>Symbol</th><th class="num">09:15 Score</th><th class="num">Open Price</th><th class="num">Close/Current</th><th class="num">Since Open</th><th class="num">Max Day Gain</th><th class="center">Verdict</th>'
-      +'</tr></thead><tbody>'+rows+'</tbody></table></div>'
-      +'</section>';
-  })();
-
-  el.innerHTML='<div class="pc-shell">'+calHtml
-    +'<section class="m-card pc-card pc-hero"><div class="pc-head"><div><div class="pc-eyebrow">Automatic learning audit</div>'
-    +'<h3 class="pc-title">Post-close model audit</h3><p class="pc-copy">Runs after 16:00 on the refreshed closing tape. It grades the cohort exactly as issued and keeps unresolved two-day picks pending.</p></div>'
-    +'<div class="pc-state" style="color:'+state.c+'">'+escHtml(state.t)+'</div></div>'
-    +'<div class="pc-kpis">'
-    +'<div class="pc-kpi"><div class="pc-kpi-label">Issued</div><div class="pc-kpi-value">'+(audit?issued:'—')+'</div></div>'
-    +'<div class="pc-kpi"><div class="pc-kpi-label">Resolved</div><div class="pc-kpi-value">'+(audit?resolved:'—')+'</div></div>'
-    +'<div class="pc-kpi"><div class="pc-kpi-label">Rockets</div><div class="pc-kpi-value" style="color:var(--green)">'+(audit?.rockets??'—')+'</div></div>'
-    +'<div class="pc-kpi"><div class="pc-kpi-label">Pending</div><div class="pc-kpi-value" style="color:var(--amber)">'+(audit?pending:'—')+'</div></div>'
-    +'<div class="pc-kpi"><div class="pc-kpi-label">Resolved precision</div><div class="pc-kpi-value">'+(audit?.precision==null?'—':audit.precision+'%')+'</div></div>'
-    +'</div></section>'
-    +'<section class="m-card pc-card">'
-    +'<div class="pc-section-head"><h3 class="pc-section-title">Condition tracker</h3>'
-    +'<div class="pc-counts"><b style="color:var(--t1)">LIVE NOW:</b> <b style="color:var(--green)">'+liveBoosts.length+'</b> rank boosts · <b style="color:var(--green)">'+liveGates.length+'</b> gates · <b style="color:var(--red)">'+liveVetos.length+'</b> vetoes<br>'
-    +'<span style="color:var(--t3)">Gainer evidence only: '+gArmed+' armed · '+gRetired+' retired · '+(merged.length-gArmed-gRetired)+' collecting'+(dormant?' · '+dormant+' not yet scored':'')+'</span></div></div>'
-    +'<p class="pc-copy">Each condition is measured against <b>the cohort’s own base rate for that session</b> on two independent streams. <b>Only resolved-pick evidence can change live ranking, gates, or vetoes.</b> The day’s biggest-gainer stream discovers patterns the board may have missed, but its ARMED/RETIRED labels are diagnostic and have no live authority. Lift is the gap in percentage points; the evidence bar is |t| past '
-    +postCloseTCrit()+'.</p>'
-    +'<div class="pc-table-wrap"><table class="pc-table pc-table--tracker"><thead><tr>'
-    +'<th>Condition</th><th class="num">Pick sessions</th><th class="num">Lift vs base</th>'
-    +'<th>Live effect</th><th class="num">Gainer sessions</th><th class="num">Lift vs market</th><th>Gainer evidence</th>'
-    +'</tr></thead><tbody>'+(trackerRows||'<tr><td colspan="7" style="color:var(--t3)">No condition has been scored by an audited session yet.</td></tr>')+'</tbody></table></div></section>'
-    +gCard
-    +'<section class="m-card pc-card pc-fundamental"><div class="pc-fundamental-icon">▦</div><div><h3>Official NSE fundamental triggers</h3><p>'+rssText
-    +' A fresh result becomes positive only when revenue, profit, operating profit and audit quality pass and price confirms above VWAP and the open. Only the resolved-pick stream can grant this condition live rank authority or turn a persistently losing negative-result condition into a veto; gainer evidence remains diagnostic.</p></div></section>'
-    +'</div>';
+  const mature=state.records.filter(p=>matureScoreOutcome(p,today)),sessions=new Set(mature.map(p=>p.issueDate)).size;
+  const candidate=state.candidate,result=candidate?.validation;
+  const learning=candidate?`Checking new weights on later decisions: ${result?.n||0}/100 completed observations across ${result?.days||0}/5 sessions. ${result?.netDays||0}/5 sessions have enough cost-covered comparisons.`
+    :state.revision>0?`Revision ${state.revision} active. Last update ${when(state.appliedAt)}. ${escHtml(state.status)}.`
+    :`Initial weights active. ${mature.length}/100 completed observations across ${sessions}/5 issue sessions available to learn from. ${escHtml(state.status)}.`;
+  const sources=SCORE_SOURCES.map((x,i)=>`<tr><td>${escHtml(x[1])}</td><td>${x[2].toFixed(3)}</td><td>${state.live[i].toFixed(3)}</td><td>${candidate?candidate.weights[i].toFixed(3):'Not being tested'}</td></tr>`).join('');
+  const card=(label,value,sub)=>`<div class="pc-kpi"><div class="pc-kpi-label">${label}</div><div class="pc-kpi-value">${value}</div><div class="pc-kpi-sub">${sub}</div></div>`;
+  el.innerHTML=`<div class="pc-shell"><section class="m-card pc-card pc-hero">
+    <div class="pc-head"><div><h3 class="pc-title">Did higher scores predict better outcomes?</h3>
+    <p class="pc-copy">Collects throughout the session, whether this tab is open or not. Each recorded score is frozen before its outcome. Review this day after close, and again when its next-session deadline finishes.</p></div>
+    <label>Decision date <select onchange="SCORE_AUDIT_DAY=this.value;renderPostClose()">${days.map(d=>`<option value="${d}" ${d===day?'selected':''}>${d}</option>`).join('')}</select></label></div>
+    <div class="pc-kpis">${card('Recorded decisions',records.length,'Sampled every 30 minutes')}${card('Target reached',pct(resolved.filter(p=>scoreOutcomeTarget(p)).length,resolved.length),'Before stop, through next trading close')}${card('Still pending',pending,'Not counted as failures')}${card('Insufficient evidence',incomplete,'Excluded from learning')}${card('Rule-blocked samples',blocked,'Audited; never authorised as buys')}</div>
+    <p class="pc-copy">Last observation: ${when(records.length?Math.max(...records.map(p=>p.issuedAt)):0)}. Last outcome check: ${when(state.updatedAt)}.
+    The sample includes high and low signal scores and blocked stocks; it is not the entire market and repeated decisions are correlated.</p>
+    <div class="pc-table-wrap"><table class="pc-table"><thead><tr><th>Final score at issue</th><th>Observations</th><th>Target hit rate</th><th>Average net return at exit</th><th>Time to target</th><th>Pending</th><th>Excluded</th></tr></thead><tbody>${rows}</tbody></table></div>
+    <p class="pc-copy">A deadline miss counts as a failed target prediction, even if the trade finishes positive. Net return includes charges and measured friction; missing cost coverage is not treated as zero cost. Blocked observations are hypothetical diagnostics, not recommendations. Scores, thresholds and model revisions are retained as issued.</p>
+    </section><section class="m-card pc-card"><h3 class="pc-title">What is feeding live scores now?</h3><p class="pc-copy">${learning}</p>
+    <p class="pc-copy">New observations train a bounded candidate. It can replace live weights only after later, untouched decisions show lower prediction error, better positive net returns, no worse target-hit rate and agreement across sessions. Decisions used for training are never used to validate that candidate.</p>
+    <p class="pc-copy"><b>Protected rules:</b> buy volume must exceed sell volume when depth is available, plus existing direction, entry timing, exchange, surveillance, stale-data and risk safeguards. Weight changes cannot bypass these checks. Older armed conditions are preserved; this page no longer creates extra gates or changes weights when opened.</p>
+    <details><summary>See current weights and changes being checked</summary><div class="pc-table-wrap"><table class="pc-table"><thead><tr><th>Signal source</th><th>Initial factor</th><th>Live factor</th><th>Being checked</th></tr></thead><tbody>${sources}</tbody></table></div>
+    <p class="pc-copy">Existing signals start at 1x. Additional setup/context adjustments start at zero. These are influence factors, not score points or return probabilities. Correlated setup fields are grouped; their readings exclude the old same-session winner-fitted contributions.</p></details>
+    <p class="pc-copy">${state.history.length?'Validated updates applied: '+state.history.length+'. Most recent validation used '+state.history[state.history.length-1].validation.n+' later observations.':'No adaptive update has qualified yet. Initial scores remain unvalidated.'} Retains the latest 10,000 completed sampled decisions, pending decisions and 30 model updates. No live trades are placed by this audit.</p>
+    </section></div>`;
 }
 
 let APPLY_FILTERS_TIMER=null;
@@ -14424,6 +14073,7 @@ async function streamRefreshTick(){
       await scheduleScoreJob();
     }
     captureLiveRecommendationScan();
+    await updateScoreLearning();
     const done=Date.now();
     loopDelay=isMarketRefreshWindow() ? 1000 : STREAM_REFRESH_MS;
     setStreamActivity({phase:STREAM_STATUS?.statusUnknown?'checking':STREAM_STATUS?.connected?'live':'stream-down',lastCompleteAt:done,
@@ -15312,7 +14962,7 @@ function updateTabCounts(){
   const c3=document.getElementById('tabCount3');
   if(c0) c0.textContent=FILT.length?'('+FILT.length+')':'';
   if(c1) c1.textContent=RADAR.features.length?'('+RADAR.features.length+')':'';
-  if(c3){const s=postCloseAuditStatus();c3.textContent=s.audit?'(✓)':'';}
+  if(c3){const s=FS.get(SCORE_LEARNING_STORE);c3.textContent=s?.records?.length?'('+s.records.length+')':'';}
 }
 
 // ── NSE Direct Fetch ──
@@ -15446,7 +15096,7 @@ function compactRankingRows(rows){
   return (rows||[]).map(s=>({
     symbol:s.symbol,name:s.name,sector:s.sector,
     price:s.price,day:s.day,priceChange:s.priceChange,
-    score:s.score,scoreVersion:s.scoreVersion||RADAR_SCORE_VERSION,scoreComponents:s.scoreComponents||null,rocketScore:s.rocketScore,rank:s.rank,
+    score:s.score,scoreVersion:s.scoreVersion||RADAR_SCORE_VERSION,scoreComponents:s.scoreComponents||null,scorePriors:s.scorePriors||null,rocketScore:s.rocketScore,rank:s.rank,
     predictiveLevel:s.predictiveLevel??null,predictiveRaw:s.predictiveRaw??null,predictiveSessions:s.predictiveSessions??0,predictiveModel:s.predictiveModel||null,
     setup:s.setup,risk:s.risk,series:s.series,band:s.band??null,status:s.status,
     basketEligible:s.basketEligible!==false,eqEligible:s.eqEligible!==false,
@@ -15571,8 +15221,6 @@ function applySavedFiltersForMode(mode){
         recommendations
       };
       recordRecommendationOutcomeScan(window._lastStockOutcomeScan);
-      const completedAudit=runPostCloseAudit(); // inert before 16:00; refreshed close can arm gates for the next issue
-      if(completedAudit)applyLearnedRecommendationGates(ALL);
       recordDisplayedEntryCohort({date:uploadSession,candidates:eligibleCandidates});
       // Indicator-orientation watch: fire-and-forget so compression never delays rankings.
       recordIndicatorWatch(uploadSession).catch(e=>console.warn('indicator watch record failed',e));
