@@ -1,5 +1,5 @@
-const BUILD_TS='2026-09-09 14:45 IST'; // release build time (IST)
-const APP_VERSION=1337; // v1337: Measured tape weights, continuous monotone outcome calibration & time-bucketed tape window cache.
+const BUILD_TS='2026-09-09 15:00 IST'; // release build time (IST)
+const APP_VERSION=1338; // v1338: Enforce viability in action state, truthful allocation skip messages, concentrated size weight & funded basket count.
 const RADAR_SCORE_VERSION='tape-decision-v5';
 function isValidChangeOpen(v){
   if(v===null||v===undefined||typeof v==='boolean') return false;
@@ -3946,6 +3946,9 @@ function tapeReachability(sym,targetPct){
   let reachable=true;
 
   if(cutPct!=null){
+    // Chosen architectural risk ramp: within the final 60 minutes, scales minimum volatility inversely
+    // with remaining trading time (60 / max(15, minsToClose)). Designated explicitly as an operational
+    // risk ramp rather than empirical parameter, ensuring late-session entries require higher live volatility.
     const timePenalty=(inSession&&minsToClose!=null&&minsToClose<60)?(60/Math.max(15,minsToClose)):1.0;
     effectiveMinRange=+(cutPct*timePenalty).toFixed(2);
     reachable=inSession?(minsToClose>=15&&winRangePct>=effectiveMinRange):(winRangePct>=cutPct);
@@ -4044,11 +4047,11 @@ function _radarTapeEvidenceUncached(sym){
   // MEASURED on 64,181 same-session samples across 1,642 symbols (2026-09-09 tape):
   // Target reach (+2.6% in 60m): size 0.5163 (t 2.20), vwap 0.5040 (t 0.55), flow 0.5022 (t 0.29), cross 0.4989 (t -0.15).
   // Forward 60m close: size 0.5175 (t +7.7), cross 0.4693 (t -13.5), flow 0.4541 (t -20.2), vwap 0.4239 (t -33.9).
-  // eSize (participation) is the only term with a consistently positive forward edge across both outcomes (t > 2).
-  // eVwap has a strong negative edge on forward close and is reduced to floor weight 0.05.
-  // eFlow and eCross barely separate on target reach (|t| < 0.3); weights spread evenly across the non-VWAP terms,
-  // with eSize given highest allocation as the sole statistically significant positive predictor.
-  const W={flow:.30,vwap:.05,cross:.30,size:.35};
+  // eSize (participation) is the ONLY term with a consistently positive forward edge across both outcomes (t > 2).
+  // eVwap, eFlow, and eCross all carry negative forward close edges and fail to separate from noise on target reach (|t| < 0.6).
+  // Following the measured data, weight is concentrated on eSize (0.75), while flow (0.10), cross (0.10), and vwap (0.05)
+  // are reduced to floor monitoring weights so unproven signals do not dominate candidate ranking.
+  const W={flow:.10,vwap:.05,cross:.10,size:.75};
   // The impact weight is MEASURED, never asserted: 0 until the edge survives its own sampling error,
   // rising as the corpus grows. At 0 every factor below collapses to 1 and both the blend and its
   // normaliser are identical to v1233's, so an unmeasured term cannot move a single score.
@@ -4860,6 +4863,14 @@ function _getRowActionStateUncached(s, ignoreMarketClosed=false){
 
   if(!isDepthRecommendable(s.symbol))
     return {state:'BLOCKED', reason:'Sell volume exceeds buy volume'};
+
+  // Viability and Reachability Gate (v1338 / Part B):
+  // A row whose target cannot clear costs or is unreachable on the 5-minute tape is NOT actionable.
+  // Gated here so non-viable rows display WAIT, disable checkboxes, and are excluded from auto-buy baskets.
+  const exitPolicy=getRowExitPolicy(s);
+  if(exitPolicy&&exitPolicy.viable===false){
+    return {state:'WAIT', reason:exitPolicy.viabilitySource||'Target not reachable on 5-minute tape'};
+  }
 
   return {state:'GO', reason:'Actionable recommendation'};
 }
@@ -11257,9 +11268,9 @@ function getAllocationBlockReason(s,ctx=null){
   if(rail<buyP) return `allocation rails (${fmtINR(rail)}) are below one share at ${fmtINR(buyP)}`;
   const policy=getRowExitPolicy(s,buyP,c.active);
   if(policy&&policy.bandLimited) return `only ${policy.bandRunwayPct}% left to the ${policy.bandPct}% upper circuit (₹${policy.ucPrice}) — the ${policy.basePct}% target cannot be reached inside today's band`;
-  if(policy&&policy.viable===false) return policy.capacityPct!=null
+  if(policy&&policy.viable===false) return policy.viabilitySource || (policy.capacityPct!=null
     ? `stock capacity ${policy.capacityPct.toFixed(2)}% cannot clear the ${policy.minGrossPct?.toFixed(2)??'—'}% cost + net hurdle`
-    : 'no viable target after costs';
+    : 'no viable target after costs');
   const floorRs=getDesiredNetRupees();
   if(floorRs>0){
     const ec=getRowRupeeEconomics(s,rowAchievableNotional(s,c),policy,c);
@@ -11295,10 +11306,10 @@ function computeAlloc(capital, selList){
   };
   function evalNet(s,buyP,qty){
     const policy=getRowExitPolicy(s,buyP);
+    if(policy&&policy.viable===false){
+      return {ok:false,rejected:true,reason:policy.viabilitySource||'Target not viable after costs',policy};
+    }
     const tgtPct=policy.targetPct;
-    // Viability is descriptive context for the target display, not a second eligibility gate.
-    // Score eligibility is the single contract; a valid selected row may still be sized and
-    // exported even when its target is conservative or unavailable.
     if(tgtPct===null||tgtPct<=0) return {ok:true,skip:true,policy};
     const sellP=buyP*(1+tgtPct/100);
     const buyChg=calcZerodhaCharges(buyP,qty,false);
@@ -11356,9 +11367,16 @@ function computeAlloc(capital, selList){
     if(qty<=0){
       if(goalSizing){
         allocMap[s.symbol]={alloc:0,debit:0,qty:0,buyPrice:buyP,limit:0,
-          reason:desired>0?'Basket capital committed to higher-ranked trades':'Target does not cover estimated costs',
-          limitReason:'goal funding'};
-        railLimits[s.symbol]=0; // no one-share fallback past the goal/budget decision
+          remainingAtSkip:remainingBudget,
+          bindingRail:limitReason,
+          desiredProfit:desired,
+          goalSizing:true,
+          reason:desired<=0?'Target does not cover estimated costs':'',
+          limitReason:limitReason!=='risk weight'?limitReason:'goal funding',
+          liquidityCap:turnoverCap};
+        if(remainingBudget<buyP||railLimit<buyP){
+          railLimits[s.symbol]=0; // no one-share fallback past the goal/budget decision
+        }
       }
       continue;
     }
@@ -11421,11 +11439,41 @@ function computeAlloc(capital, selList){
   for(const s of sortedSel){
     if(allocMap[s.symbol]) continue;
     const buyP=getBuyPrice(s);
-    const railCeil=railLimits[s.symbol]||0;
     allocMap[s.symbol]={alloc:0,debit:0,qty:0,buyPrice:buyP,rejected:true,liquidityCap:getTurnoverAllocationCap(s),
-      reason:railCeil>0&&buyP>0&&railCeil<buyP
-        ? `one share costs ${fmtINR(buyP)} but this stock's rails allow only ${fmtINR(railCeil)}`
-        : `capital exhausted before this row — one share costs ${fmtINR(buyP)} and the basket was already fully deployed`};
+      remainingAtSkip:residual,bindingRail:limitReasons[s.symbol]||'risk weight',desiredProfit:0};
+  }
+  // Post-loop refinement pass for truthful skip messages across all unfunded / skipped rows (v1338 / Part C)
+  for(let i=0; i<sortedSel.length; i++){
+    const s=sortedSel[i];
+    const am=allocMap[s.symbol];
+    if(!am || am.qty>0) continue;
+    if(am.rejected && !am.bindingRail && am.reason) continue; // preserve explicit evalNet / turnover rejections
+
+    const buyP=am.buyPrice||getBuyPrice(s);
+    const railCeil=railLimits[s.symbol]??(limits[s.symbol]||0);
+    const bindingRail=am.bindingRail||limitReasons[s.symbol];
+
+    if(bindingRail && bindingRail!=='risk weight'){
+      // Case 3: A real physical or configured rail bound it (turnover, risk cap, max alloc, top-up)
+      am.reason=`one share costs ${fmtINR(buyP)} but ${bindingRail} rail allows only ${fmtINR(railCeil)}`;
+      am.limitReason=bindingRail;
+    } else if(am.goalSizing && am.desiredProfit<=0){
+      // Case 4: Target does not cover costs
+      am.reason='Target does not cover estimated costs';
+      am.limitReason='goal funding';
+    } else {
+      // Score / budget constraint: check if any subsequent lower-ranked trade in sortedSel received allocation
+      const fundedBelow=sortedSel.slice(i+1).some(sub=>allocMap[sub.symbol]?.qty>0);
+      const rem=am.remainingAtSkip!=null?am.remainingAtSkip:residual;
+      if(fundedBelow){
+        // Case 1: single share exceeds remaining budget, but lower-ranked trades were funded
+        am.reason=`one share (${fmtINR(buyP)}) exceeds remaining budget (${fmtINR(rem)}); funded lower-ranked trades`;
+      } else {
+        // Case 2: basket capital exhausted (no subsequent trades funded either)
+        am.reason=`basket capital exhausted by higher-ranked trades (${fmtINR(rem)} left, below one share at ${fmtINR(buyP)})`;
+      }
+      am.limitReason='goal funding';
+    }
   }
   _allocMemo={key:memoKey,val:allocMap};
   return allocMap;
@@ -11458,7 +11506,7 @@ function allocationSubline(am,unitLabel='shares'){
   if(am?.limitReason==='turnover'){
     return `<div style="font-size:11px;color:var(--amber);margin-top:1px" title="Market-impact rail: allocation is capped at 0.10% of daily turnover (${fmtINR(am.liquidityCap)}), then rounded down to whole ${unitLabel}.${riskTip}${netTip}">turnover · ${am.qty}${unitShort}${netStr}</div>`;
   }
-  if(am?.limitReason==='goal funding') return `<div style="font-size:11px;color:var(--amber)" title="${escHtml(am.reason)}">Unfunded ? ${escHtml(am.reason)}</div>`;
+  if(am?.limitReason==='goal funding') return `<div style="font-size:11px;color:var(--amber)" title="${escHtml(am.reason)}">Unfunded — ${escHtml(am.reason)}</div>`;
   const sizedBy=am?.limitReason==='risk weight'
     ? `Sized by Radar score ÷ this stock's ${Number(am.stopDistancePct).toFixed(2)}% stop, with goal-sized funding; targets and capital limits can change the rupee risk.`
     : 'Capped by the Max Allocation rail.';
@@ -11502,7 +11550,11 @@ function renderBasketBtn(){
     return;
   }
   const selList=(Array.isArray(FILT)?FILT:[]).filter(s=>s&&s.symbol&&SELECTED.has(s.symbol)&&isSelectableRecommendation(s));
-  const buyCount=selList.length;
+  const capital=getEffectiveCapital();
+  const allocMap=capital?computeAlloc(capital,selList):null;
+  const buyCount=allocMap
+    ? selList.filter(s=>allocMap[s.symbol]?.qty>0).length
+    : selList.length;
   buyBtn.innerHTML=`🧺 Buy Basket <span id="basketCount">${buyCount>0?`(${buyCount})`:''}</span>`;
   buyBtn.disabled=buyCount===0;
 
@@ -13655,6 +13707,7 @@ function applyFilters({preservePage=false}={}){
       else if(act.reason.includes('lifting off')) DIRECTION_REMOVED++;
     } else if(act.state==='WAIT'){
       if(act.reason.includes('Extended')) PEAK_TIMING_REMOVED++;
+      else if(act.reason.includes('tape range') || act.reason.includes('hurdle') || act.reason.includes('viable') || act.reason.includes('capacity') || act.reason.includes('cost')) ALLOC_BLOCKED++;
     }
     return true;
   });
