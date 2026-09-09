@@ -1,5 +1,5 @@
-const BUILD_TS='2026-09-09 11:10 IST'; // release build time (IST)
-const APP_VERSION=1328; // v1328: Settle all queue waiters, in-flight reconciliation, string reason for WAIT extended rows & strict positive helper acknowledgement.
+const BUILD_TS='2026-09-09 11:40 IST'; // release build time (IST)
+const APP_VERSION=1329; // v1329: Fix reconcile retry loop, align exportBasket with desired orders, fully retire entryAtLimit from scoring, and remove dead state.
 const RADAR_SCORE_VERSION='tape-decision-v4';
 function isValidChangeOpen(v){
   if(v===null||v===undefined||typeof v==='boolean') return false;
@@ -2695,7 +2695,7 @@ function captureLiveRecommendationScan(){
     const fr=getTradeFrictionPct(r,auditQty*r.price);
     return {symbol:r.symbol,entryPrice,score:r.score,scoreVersion:RADAR_SCORE_VERSION,rank:r.rank,
       auditQty,frictionPct:fr?.covered&&Number.isFinite(fr.entryPct)&&Number.isFinite(fr.exitPct)?Math.max(0,fr.entryPct+fr.exitPct):null,
-      orderType:r.entryAtLimit?'LIMIT':'MARKET',limitPrice:r.entryLimitPrice||null,
+      orderType:'MARKET',limitPrice:null,
       targetPct:policy.targetPct,stopPct:policy.stopPct,entryReady:r.entryReady,directionConfirmed:r.directionConfirmed,
       high1dAtIssue:r.high1d,low1dAtIssue:r.low1d,issueMinute:c.mins-DAY_START_MIN,
       issueClock:String(c.h).padStart(2,'0')+':'+String(c.m).padStart(2,'0'),features:{}};
@@ -3728,7 +3728,7 @@ function radarPermissionLevel(r,tapeStanding){
   }
   if(getTapeProfitEvidence().status==='losing') veto.push('Five-session net-profit audit failed');
   if(veto.length) return {p:0,why:veto[0],vetoes:veto};
-  if(r.entryReady===false&&r.entryAtLimit!==true) timing.push('move already consumed');
+  if(r.entryReady===false) timing.push('move already consumed');
   if(r.directionConfirmed!==true) timing.push('direction not confirmed');
   if(!isDepthRecommendable(r.symbol)) timing.push('sell volume exceeds buy volume');
   // continuous permissions
@@ -9783,11 +9783,7 @@ function toggleStock(sym,checked){
   scheduleAutoSyncBasket(150);
 }
 function getBuyPrice(s){
-  // A limit row is bought AT its level, so it needs no slippage cushion - the buffer exists only
-  // because a MARKET order can fill above the last price.
-  if(s&&s.entryAtLimit===true&&Number(s.entryLimitPrice)>0)
-    return parseFloat(tickPrice(Number(s.entryLimitPrice)).toFixed(2));
-  const ltp=s.price>0?s.price:0;
+  const ltp=s&&s.price>0?s.price:0;
   if(!(ltp>0)) return 0;
   const budgetReference=ltp*(1+BASKET_MARKET_BUDGET_BUFFER_PCT/100);
   return parseFloat(tickPrice(budgetReference).toFixed(2));
@@ -11628,12 +11624,9 @@ function applySort(){
     if(col==='status'){
       const getStatusWeight=(s)=>{
         const act=getRowActionState(s);
-        if(act.state==='GO'){
-          if(s.entryReady===false&&s.entryAtLimit===true) return 2;
-          return 1;
-        }
-        if(act.state==='WAIT') return 3;
-        return 4;
+        if(act.state==='GO') return 1;
+        if(act.state==='WAIT') return 2;
+        return 3;
       };
       const wa=getStatusWeight(a), wb=getStatusWeight(b);
       if(wa!==wb) return (wa-wb)*SDIR;
@@ -14911,7 +14904,6 @@ function getDesiredBasketOrders(){
 }
 
 let _basketWriterInFlight = false;
-let _inFlightBasketSig = null;
 let _pendingWaiters = []; // [{ resolve, reject, manual }]
 let _lastSavedBasketSig = '';
 let _lastSavedBasketAt = 0;
@@ -14960,13 +14952,14 @@ async function _drainBasketQueue(){
   }
 
   _basketWriterInFlight = true;
-  _inFlightBasketSig = targetSig;
   renderBasketBtn();
 
+  let writeOk = false;
   try {
     const payload = orders.map(o => { const c = { ...o }; delete c._meta; return c; });
     const saved = await saveBasketToScannerUploads(payload, 'Zerodha_Basket_Buy');
     if(saved){
+      writeOk = true;
       _lastSavedBasketSig = targetSig;
       _lastSavedBasketAt = Date.now();
       _lastBasketSyncError = null;
@@ -14986,12 +14979,11 @@ async function _drainBasketQueue(){
     });
   } finally {
     _basketWriterInFlight = false;
-    _inFlightBasketSig = null;
     renderBasketBtn();
-    // Reconcile: if board changed while in-flight or new waiters arrived, drain again immediately
+    // Reconcile: if write succeeded and board changed while in-flight, or new waiters arrived, drain again immediately
     const freshOrders = getDesiredBasketOrders();
     const freshSig = getCanonicalBasketSignature(freshOrders);
-    if(freshSig !== _lastSavedBasketSig || _pendingWaiters.length > 0){
+    if((writeOk && freshSig !== _lastSavedBasketSig) || _pendingWaiters.length > 0){
       _drainBasketQueue();
     }
   }
@@ -15014,15 +15006,14 @@ async function exportBasket(){
       APPLY_FILTERS_TIMER = null;
       applyFilters();
     }
-    const capital = getEffectiveCapital();
-    const selList = (Array.isArray(FILT) ? FILT : []).filter(s => s && s.symbol && SELECTED.has(s.symbol));
-    if(!selList.length){
-      showToast('Select at least one stock first.', 3000, true);
-      return;
-    }
-    const orders = buildBasketOrders(capital, selList);
+    const orders = getDesiredBasketOrders();
     if(!orders.length){
-      showToast('No orders fit the current tape, capital, risk and liquidity limits.', 5000, true);
+      const anySelected = (Array.isArray(FILT) ? FILT : []).some(s => s && s.symbol && SELECTED.has(s.symbol));
+      if(!anySelected){
+        showToast('Select at least one stock first.', 3000, true);
+      } else {
+        showToast('No eligible GO recommendations fit the current tape, capital, risk and liquidity limits.', 5000, true);
+      }
       return;
     }
     if(orders.length > 20) throw new Error(`Basket planning invariant failed: ${orders.length} orders`);
@@ -15046,7 +15037,7 @@ async function exportBasket(){
 async function saveBasketToScannerUploads(orders, filename){
   if(orders.length > 20) throw new Error(`Refusing to truncate basket with ${orders.length} orders`);
   if(!KITE_API){
-    return false;
+    throw new Error('Kite helper is not running');
   }
   let timer = null;
   try {
@@ -15317,7 +15308,7 @@ function applySavedFiltersForMode(mode){
           const frictionPct=friction?.covered&&Number.isFinite(friction.entryPct)&&Number.isFinite(friction.exitPct)
             ?Math.max(0,friction.entryPct+friction.exitPct):null;
           return {symbol:s.symbol,entryPrice:getBuyPrice(s),auditQty,frictionPct,
-            orderType:s.entryAtLimit?'LIMIT':'MARKET',limitPrice:s.entryLimitPrice||null,
+            orderType:'MARKET',limitPrice:null,
             score:s.score,scoreVersion:s.scoreVersion||RADAR_SCORE_VERSION,rank:i+1,
             // v1128: a control row is graded exactly like a pick but is NOT one — it is excluded
             // from every recommendation metric so the app never reports buying what it did not.
