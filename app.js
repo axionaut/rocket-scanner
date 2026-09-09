@@ -1,5 +1,5 @@
-const BUILD_TS='2026-09-09 20:09 IST'; // release build time (IST)
-const APP_VERSION=1340; // Unified adaptive evidence, protected rules and live score audit.
+const BUILD_TS='2026-09-09 20:31 IST'; // release build time (IST)
+const APP_VERSION=1341; // Market Memory: causal structural context and independent forward qualification.
 const RADAR_SCORE_VERSION='unified-evidence-v1';
 function isValidChangeOpen(v){
   if(v===null||v===undefined||typeof v==='boolean') return false;
@@ -3043,6 +3043,132 @@ function getScoreBandKey(score){
 }
 // One adjustable evidence model. Eligibility, depth, freshness, timing, circuit and risk
 // safeguards are applied separately and are never parameters of the learner.
+const MEMORY_SPEC=Object.freeze({id:'memory-forward-v1',sessions:13,minBars:60,targetPct:2.6,
+  bucketATR:0.1,maxATR:3,recent:3,dates:30,minCohort:200,permutations:200,rr:1.30,transitions:7,t:3});
+const MEMORY_NAMES=['Overhead participation','Open space above versus below','Recent overhead activity'];
+const _memoryProfiles=new Map(),_memoryRevisions=new Map();
+function memoryDay(t){return new Date(Number(t)+19800000).toISOString().slice(0,10);}
+function buildMemoryProfile(bars,asOf){
+  const day=memoryDay(asOf),sessions=new Map();
+  for(const b of bars||[]){
+    if(!Number.isFinite(b.t)||b.t+300000>asOf||memoryDay(b.t)>=day) continue;
+    const minute=Math.floor((b.t+19800000)/60000)%1440;
+    if(minute<555||minute>=930||![b.h,b.l,b.c,b.v].every(Number.isFinite)||b.l<=0||b.h<b.l||b.c<b.l||b.c>b.h||b.v<0) continue;
+    const d=memoryDay(b.t);if(!sessions.has(d)) sessions.set(d,new Map());sessions.get(d).set(b.t,b);
+  }
+  const dates=[...sessions.keys()].filter(d=>sessions.get(d).size>=MEMORY_SPEC.minBars).sort().slice(-MEMORY_SPEC.sessions).reverse();
+  if(dates.length!==MEMORY_SPEC.sessions) return {ok:false,sessions:dates.length,reason:'Needs 13 preceding sessions with at least 60 equity bars each'};
+  const points=[],totals=[];
+  for(let age=0;age<dates.length;age++){
+    totals[age]=0;
+    for(const b of sessions.get(dates[age]).values()){
+      const p=(b.h+b.l+b.c)/3;points.push({p,v:b.v,age});totals[age]+=b.v;
+    }
+    if(!(totals[age]>0)) return {ok:false,sessions:dates.length,reason:'Historical session volume unavailable'};
+  }
+  points.sort((a,b)=>a.p-b.p);
+  const prefix=[0];points.forEach(p=>prefix.push(prefix[prefix.length-1]+p.v));
+  return {ok:true,sessions:dates.length,dates,points,prefix,totals,total:prefix[prefix.length-1],
+    firstClose:[...sessions.get(dates[dates.length-1]).values()].sort((a,b)=>a.t-b.t).at(-1).c};
+}
+function memoryProfileFor(symbol,asOf=Date.now()){
+  const bars=INTRADAY_BARS[normSym(symbol)]||[],key=normSym(symbol);
+  const sig=memoryDay(asOf)+':'+(_memoryRevisions.get(key)||0);
+  const old=_memoryProfiles.get(key);
+  if(old?.sig===sig&&old.bars===bars) return old.value;
+  const value=buildMemoryProfile(bars,asOf);_memoryProfiles.set(key,{sig,bars,value});return value;
+}
+function calcMemoryFeatures(profile,price,atr){
+  if(!profile?.ok||!(price>0&&atr>0)) return {ok:false,reason:profile?.reason||'Current ATR unavailable'};
+  const {points}=profile;
+  const lower=x=>{let l=0,h=points.length;while(l<h){const m=(l+h)>>1;if(points[m].p<x)l=m+1;else h=m;}return l;};
+  const corridorEnd=price*(1+MEMORY_SPEC.targetPct/100),sessionVolume=Array(13).fill(0);
+  let weighted=0;
+  for(let j=lower(price);j<points.length&&points[j].p<=corridorEnd;j++){
+    const p=points[j];weighted+=p.v*Math.exp(-(p.p-price)/atr);sessionVolume[p.age]+=p.v;
+  }
+  const h=sessionVolume.map((v,i)=>v/profile.totals[i]);
+  const mean=v=>v.reduce((a,b)=>a+b,0)/v.length;
+  const wosd=weighted/profile.total,rmd=mean(h.slice(0,3))-mean(h.slice(3));
+  // Buckets move with current price/ATR. The cached profile never stores projected buckets.
+  const width=MEMORY_SPEC.bucketATR*atr,volumes=new Map();
+  for(const p of points){const k=Math.floor((p.p-price)/width);volumes.set(k,(volumes.get(k)||0)+p.v);}
+  const nonempty=[...volumes.values()].filter(v=>v>0).sort((a,b)=>a-b);
+  const mid=Math.floor(nonempty.length/2),threshold=nonempty.length%2?nonempty[mid]:(nonempty[mid-1]+nonempty[mid])/2;
+  const distance=dir=>{
+    for(let k=0;k<30;k++){
+      if((volumes.get(dir>0?k:-k-1)||0)>=threshold) return (k+0.5)*MEMORY_SPEC.bucketATR;
+    }
+    return MEMORY_SPEC.maxATR;
+  };
+  const up=distance(1),down=distance(-1),apa=(up-down)/(up+down);
+  return {ok:true,version:MEMORY_SPEC.id,wosd,apa,rmd,h,up,down,sessions:13,
+    values:[1-wosd,(1+apa)/2,(1-rmd)/2],displacement:100*(price/profile.firstClose-1)};
+}
+function getMemoryReading(r){
+  return calcMemoryFeatures(memoryProfileFor(r.symbol),Number(r.price),Number(r.price)*Number(r.atr)/100);
+}
+function memoryFeatureAllowed(state,i){return state.memoryStudy?.version===MEMORY_SPEC.id&&state.memoryStudy?.results?.[i]?.pass===true;}
+function memoryStudyState(state){
+  if(!state.memoryStudy) state.memoryStudy={version:MEMORY_SPEC.id,createdAt:Date.now(),dates:[],symbols:null,results:null,status:'Collecting new decisions',records:[]};
+  return state.memoryStudy;
+}
+function memoryMean(a){return a.length?a.reduce((x,y)=>x+y,0)/a.length:null;}
+function memoryEffect(rows,feature,control=null,override=null){
+  const grouped=new Map();
+  for(const p of rows){const key=p.issueDate+'|'+(control==null?'all':p.memoryControls[control]);if(!grouped.has(key)) grouped.set(key,[]);grouped.get(key).push(p);}
+  const dates=new Map();
+  for(const group of grouped.values()){
+    if(group.length<20) continue;
+    const value=p=>override?override(p):p.memory.values[feature];
+    const values=group.map(value).sort((a,b)=>a-b),bins=Array.from({length:10},()=>[]);
+    for(const p of group) bins[Math.min(9,Math.floor(10*radarPct(values,value(p))))].push(scoreOutcomeTarget(p));
+    if(bins.some(b=>!b.length)) continue; // tied/empty deciles cannot manufacture separation
+    const rates=bins.map(memoryMean),base=memoryMean(group.map(scoreOutcomeTarget));
+    const d=group[0].issueDate;if(!dates.has(d)) dates.set(d,[]);
+    dates.get(d).push({rates,base,top:rates[9],lift:rates[9]-base});
+  }
+  const day=[...dates.values()].map(groups=>({rates:Array.from({length:10},(_,i)=>memoryMean(groups.map(g=>g.rates[i]))),
+    base:memoryMean(groups.map(g=>g.base)),top:memoryMean(groups.map(g=>g.top)),lift:memoryMean(groups.map(g=>g.lift))}));
+  const lift=memoryMean(day.map(d=>d.lift)),base=memoryMean(day.map(d=>d.base)),top=memoryMean(day.map(d=>d.top));
+  const variance=day.length>1?day.reduce((s,d)=>s+(d.lift-lift)**2,0)/(day.length-1):null;
+  const t=variance>0?lift/Math.sqrt(variance/day.length):lift>0?1e6:0;
+  const rates=Array.from({length:10},(_,i)=>memoryMean(day.map(d=>d.rates[i])));
+  return {days:day.length,lift,rr:base>0?top/base:0,t,transitions:rates.slice(1).filter((v,i)=>v!=null&&v>rates[i]).length};
+}
+async function evaluateMemoryStudy(study){
+  // A separate prospective qualification, not a replay or reinterpretation of the frozen v1339 archive study.
+  const records=study.records.filter(usableScoreOutcome),results=[];
+  for(let i=0;i<3;i++){
+    const raw=memoryEffect(records,i),controls=[0,1,2,3].map(c=>memoryEffect(records,i,c));
+    const sufficient=raw.days===30&&controls.every(c=>c.days===30);
+    let placebo=null;
+    if(i===2&&sufficient){
+      let exceeded=0;
+      for(let k=0;k<MEMORY_SPEC.permutations;k++){
+        // One permutation per symbol/date, shared by its overlapping snapshots.
+        const orders=new Map();
+        const value=p=>{
+          const key=p.symbol+'|'+p.issueDate;
+          if(!orders.has(key)){
+            let seed=scoreSampleHash(MEMORY_SPEC.id+'|'+k+'|'+key);const order=Array.from({length:13},(_,n)=>n);
+            for(let j=12;j>0;j--){seed=(Math.imul(seed,1664525)+1013904223)>>>0;const n=seed%(j+1);[order[j],order[n]]=[order[n],order[j]];}
+            orders.set(key,order);
+          }
+          const h=orders.get(key).map(j=>p.memory.h[j]);return (1-(memoryMean(h.slice(0,3))-memoryMean(h.slice(3))))/2;
+        };
+        if(memoryEffect(records,i,null,value).lift>=raw.lift) exceeded++;
+        if(k%5===0) await new Promise(resolve=>setTimeout(resolve,0));
+      }
+      placebo=(exceeded+1)/(MEMORY_SPEC.permutations+1);
+    }
+    const pass=sufficient&&raw.rr>=MEMORY_SPEC.rr&&raw.transitions>=MEMORY_SPEC.transitions&&raw.t>=MEMORY_SPEC.t
+      &&controls.every(c=>c.lift>0&&c.t>=MEMORY_SPEC.t)&&(i!==2||placebo<=0.05);
+    results.push({pass,verdict:pass?'Qualified for weight testing':!sufficient?'Inconclusive - study closed':'Did not qualify',raw,controls,placebo});
+    await new Promise(resolve=>setTimeout(resolve,0));
+  }
+  return results;
+}
 const SCORE_SOURCES=[
   ['flow','Candle pressure',1],['vwap','Tape VWAP position',1],['cross','Pressure crossover',1],['size','Recent participation',1],
   ['impact','Price impact',1],['book','Order-book imbalance',1],['split','Classified buy share',1],['cancel','Book cancellations',1],
@@ -3050,17 +3176,23 @@ const SCORE_SOURCES=[
   ['velocity','Recent acceleration',1],['fade','Below-open penalty',1],
   ['participation','Participation setup',0],['momentum','Momentum setup',0],['trend','Trend setup',0],
   ['structure','Price structure',0],['liquidity','Liquidity context',0],['volatility','Range context',0],['context','Market context',0],
-  ['fundamental','Fundamental signal',0],['distance','Target versus capacity',0],['clock','Time through next close',0]
+  ['fundamental','Fundamental signal',0],['distance','Target versus capacity',0],['clock','Time through next close',0],
+  ['memoryOverhead',MEMORY_NAMES[0],0],['memorySpace',MEMORY_NAMES[1],0],['memoryAge',MEMORY_NAMES[2],0]
 ];
 const SCORE_SEED=SCORE_SOURCES.map(x=>x[2]);
 const SCORE_GROUPS=['participation','momentum','trend','structure','liquidity','volatility','context'];
 let _unifiedState=null,_unifiedStateSource=null,_scoreLearningAt=0,_scoreLearningBusy=false;
 function validScoreWeights(w){
-  return Array.isArray(w)&&w.length===SCORE_SEED.length&&w.every((v,i)=>Number.isFinite(v)&&v>=(i<13?0.5:-1)&&v<=(i<13?1.5:1));
+  return Array.isArray(w)&&w.length===SCORE_SEED.length&&w.every((v,i)=>Number.isFinite(v)&&v>=(i<13?0.5:i>=23?0:-1)&&v<=(i<13?1.5:1));
 }
 function getUnifiedModelState(){
   const raw=FS.get(SCORE_LEARNING_STORE);
   if(_unifiedState&&raw===_unifiedStateSource) return _unifiedState;
+  // Add zero-influence slots without resetting learned weights, observations or an existing candidate.
+  if(raw?.schema===RADAR_SCORE_VERSION&&Array.isArray(raw.live)&&raw.live.length===23){
+    raw.live.push(0,0,0);
+    if(raw.candidate?.weights?.length===23) raw.candidate.weights.push(0,0,0);
+  }
   const good=raw?.schema===RADAR_SCORE_VERSION&&validScoreWeights(raw.live);
   const state=good?raw:{schema:RADAR_SCORE_VERSION,live:SCORE_SEED.slice(),revision:0,records:[],history:[],
     legacyDepth:getCalibratedWeights(),
@@ -3106,7 +3238,25 @@ function getUnifiedScoreDetail(c){
     Signal score ${c.signalScore.toFixed(1)}; after fixed readiness/risk rules ${c.total.toFixed(1)}.
     ${c.block?'Rule: '+escHtml(c.block)+'. ':''}Buy volume must exceed sell volume when depth is available; learning cannot override this rule.
     <details><summary>Signal weights and current readings</summary><div class="pc-table-wrap"><table class="pc-table"><thead><tr><th>Source</th><th>Reading</th><th>Weight factor</th><th>Change from initial</th></tr></thead><tbody>${rows}</tbody></table></div>
-    Existing sources start at 1x. Additional setup/context adjustments start at zero and need forward validation. Weight factors are not score points.</details></div>`;
+    Existing sources start at 1x. Additional setup/context adjustments start at zero and need forward validation. Weight factors are not score points.</details>
+    ${c.unified.memory?.ok?`<p><b>Historical structure:</b> weighted overhead participation ${(100*c.unified.memory.wosd).toFixed(1)}%; open space ${c.unified.memory.up.toFixed(2)} ATR above / ${c.unified.memory.down.toFixed(2)} ATR below; recent overhead difference ${(100*c.unified.memory.rmd).toFixed(1)} percentage points. Uses 13 preceding sessions and a fixed +2.6% research corridor. Historical trading is a proxy, not known sell orders. ${weights.slice(23).some(v=>v>0)?'Qualified weights contribute to this score.':'Observation only; zero score influence.'}</p>`:
+      `<p><b>Historical structure:</b> ${escHtml(c.unified.memory?.reason||'Not yet observed')}. No score adjustment for missing history.</p>`}</div>`;
+}
+function renderMemoryStudy(state){
+  const study=state.memoryStudy;
+  const observed=ALL.filter(r=>r.scoreComponents?.unified?.memory),covered=observed.filter(r=>r.scoreComponents.unified.memory.ok);
+  const rows=MEMORY_NAMES.map((name,i)=>{
+    const result=study?.results?.[i],live=state.live[23+i]||0;
+    return `<tr><td>${name}</td><td>${live.toFixed(3)}</td><td>${live>0?'Active after forward validation':result?escHtml(result.verdict):'Observing; no live influence'}</td>
+      <td>${result?result.raw.days+' sessions; '+result.raw.rr.toFixed(2)+'x target hit rate; '+result.raw.transitions+'/9 ordered steps':'Sealed until study closes'}</td></tr>`;
+  }).join('');
+  return `<section class="m-card pc-card"><h3 class="pc-title">Does historical trading improve the score?</h3>
+    <p class="pc-copy">Market Memory checks trading between the current price and +2.6%, open space above versus below, and whether recent overhead activity matters. ${covered.length}/${observed.length} scored stocks have usable 13-session history. Missing history gives no bonus or penalty.</p>
+    <p class="pc-copy">${study?.dates.length||0}/30 new decision sessions recorded; ${study?.records.length||0} observations. ${escHtml(study?.status||'Waiting for the next live session')}.
+    The fixed feature study is evaluated once after all 30 sessions reach their next-session deadline. Insufficient evidence closes it as inconclusive; it is not enlarged and repeatedly retested.</p>
+    <div class="pc-table-wrap"><table class="pc-table"><thead><tr><th>Historical input</th><th>Live factor</th><th>Status</th><th>Completed study</th></tr></thead><tbody>${rows}</tbody></table></div>
+    <p class="pc-copy">A qualified feature only earns weight testing. A candidate using it then needs 30 later sessions with better positive net outcomes, and must also beat the same candidate with Market Memory switched off. Existing buy/sell, direction and risk rules remain binding.</p>
+    <details><summary>What this study measures</summary><p class="pc-copy">Prospective study ${MEMORY_SPEC.id}; separate from the historical v1339 archive experiment. Frozen symbol cohort; fixed +2.6% target before the existing stop through next trading close. Each feature is tested independently with equal date weighting, ATR/day-move/13-session-displacement/current-score controls, a conservative family threshold t &gt;= 3, at least 1.30x top-decile hit rate and 7/9 ordered steps. Age additionally needs a 200-permutation placebo p &lt;= .05. No probability, ownership or causal psychology claim. The eventual candidate is checked against actual dynamic trade targets and costs.</p></details></section>`;
 }
 function scoreLearningBand(p){
   if(p.block) return 'Blocked by rules';
@@ -3138,13 +3288,15 @@ async function fitScoreWeights(records,live){
     for(const p of data){
       const y=scoreOutcomeTarget(p),pred=computeUnifiedEvidence(p.input,w).raw/100;
       for(let i=0;i<w.length;i++){
+        if(i>=23&&!memoryFeatureAllowed(getUnifiedModelState(),i-23)) continue;
         const trial=w.slice(),step=w[i]+0.01<=(i<13?1.5:1)?0.01:-0.01;trial[i]+=step;
         const derivative=(computeUnifiedEvidence(p.input,trial).raw/100-pred)/step;
         grads[i]+=2*(pred-y)*derivative/counts[p.issueDate]/nDays;
       }
       if(++processed%20===0) await new Promise(resolve=>setTimeout(resolve,0));
     }
-    w=w.map((v,i)=>+Math.max(i<13?0.5:-1,Math.min(i<13?1.5:1,v-0.8*(grads[i]+0.02*(v-SCORE_SEED[i])))).toFixed(5));
+    w=w.map((v,i)=>i>=23&&!memoryFeatureAllowed(getUnifiedModelState(),i-23)?0:
+      +Math.max(i<13?0.5:i>=23?0:-1,Math.min(i<13?1.5:1,v-0.8*(grads[i]+0.02*(v-SCORE_SEED[i])))).toFixed(5));
   }
   return w;
 }
@@ -3166,9 +3318,26 @@ function evaluateScoreCandidate(records,candidate){
   }
   const mean=a=>a.length?a.reduce((n,v)=>n+v,0)/a.length:null;
   const net=scoreSessionMeans(trades,p=>p.net),netLift=scoreSessionMeans(trades,p=>p.netLift),hitLift=scoreSessionMeans(trades,p=>p.hitLift);
-  const enough=val.length>=100&&paired.length>=5&&net.length>=5;
+  const usesMemory=candidate.weights.slice(23).some(v=>v>0);
+  const memoryError=usesMemory?scoreSessionMeans(val,p=>Number.isFinite(p.withoutMemoryPrediction)
+    ?(p.withoutMemoryPrediction-scoreOutcomeTarget(p))**2-(p.candidatePrediction-scoreOutcomeTarget(p))**2:null):[];
+  const memoryTrades=[];
+  if(usesMemory) for(const v of Object.values(slots)){
+    if(v.length<4||v.some(p=>!Number.isFinite(p.withoutMemoryDecision))) continue;
+    const k=Math.max(1,Math.ceil(v.length/4));
+    const top=key=>v.slice().sort((a,b)=>b[key]-a[key]||a.symbol.localeCompare(b.symbol)).slice(0,k);
+    const yes=top('candidateDecision'),no=top('withoutMemoryDecision');
+    memoryTrades.push({issueDate:v[0].issueDate,net:memoryMean(yes.map(p=>p.paperNetPct))-memoryMean(no.map(p=>p.paperNetPct)),
+      hit:memoryMean(yes.map(scoreOutcomeTarget))-memoryMean(no.map(scoreOutcomeTarget))});
+  }
+  const memoryNet=scoreSessionMeans(memoryTrades,p=>p.net),memoryHit=scoreSessionMeans(memoryTrades,p=>p.hit);
+  const requiredDays=usesMemory?30:5;
+  const enough=val.length>=100&&paired.length>=requiredDays&&net.length>=requiredDays;
+  const memoryPass=!usesMemory||(memoryError.length>=30&&memoryNet.length>=30&&mean(memoryError)>0
+    &&mean(memoryNet)>0&&mean(memoryHit)>=0&&memoryNet.filter(v=>v>0).length/memoryNet.length>=0.6);
   return {n:val.length,days:paired.length,netDays:net.length,enough,errorGain:mean(paired),net:mean(net),netLift:mean(netLift),hitLift:mean(hitLift),
-    qualifies:enough&&mean(paired)>0&&paired.filter(v=>v>0).length/paired.length>=0.6&&mean(net)>0&&mean(netLift)>0&&mean(hitLift)>=0&&net.filter(v=>v>0).length/net.length>=0.6};
+    requiredDays,memoryPass,memoryNetLift:mean(memoryNet),memoryErrorGain:mean(memoryError),
+    qualifies:enough&&memoryPass&&mean(paired)>0&&paired.filter(v=>v>0).length/paired.length>=0.6&&mean(net)>0&&mean(netLift)>0&&mean(hitLift)>=0&&net.filter(v=>v>0).length/net.length>=0.6};
 }
 function scoreSampleHash(text){let h=2166136261;for(let i=0;i<text.length;i++)h=Math.imul(h^text.charCodeAt(i),16777619);return h>>>0;}
 async function updateScoreLearning(){
@@ -3176,11 +3345,15 @@ async function updateScoreLearning(){
   if(_scoreLearningBusy||now-_scoreLearningAt<30000) return;
   _scoreLearningBusy=true;_scoreLearningAt=now;
   try{
-    const state=getUnifiedModelState(),today=getSessionDate();
+    const state=getUnifiedModelState(),today=getSessionDate(),study=memoryStudyState(state);
     let i=0;
     for(const p of state.records){
       if(p.paperComplete) continue;
       resolveNetRecommendation(p,today);
+      if(++i%40===0) await new Promise(resolve=>setTimeout(resolve,0));
+    }
+    if(!study.results) for(const p of study.records){
+      if(!p.paperComplete) resolveNetRecommendation(p,today);
       if(++i%40===0) await new Promise(resolve=>setTimeout(resolve,0));
     }
     // Resolve whenever fresh data arrives, including after 16:00. Only record new buy-time
@@ -3192,6 +3365,13 @@ async function updateScoreLearning(){
         const pool=ALL.filter(r=>r.scoreVersion===RADAR_SCORE_VERSION&&r.scoreComponents?.unified&&r.price>0
           &&r.basketEligible!==false&&!r.noHistory&&getRecommendationFreshness(r.symbol).ok);
         if(pool.length){
+          const covered=pool.filter(r=>r.scoreComponents.unified.memory?.ok);
+          if(!study.symbols&&covered.length>=MEMORY_SPEC.minCohort){study.symbols=covered.map(r=>r.symbol).sort();study.status='Collecting new decisions';}
+          if(!study.symbols) study.status='Waiting for 200 stocks with complete historical profiles before freezing the study cohort';
+          const cohort=new Set(study.symbols||[]);
+          const studyOpen=!study.results&&(study.dates.includes(today)||study.dates.length<MEMORY_SPEC.dates);
+          const controls=covered.map(r=>[r.atr,r.changeOpen,r.scoreComponents.unified.memory.displacement,r.score]);
+          const controlSorted=Array.from({length:4},(_,j)=>controls.map(v=>v[j]).filter(Number.isFinite).sort((a,b)=>a-b));
           const groups={};for(const r of pool){const k=Math.floor(r.scoreComponents.signalScore/20);(groups[k]??=[]).push(r);}
           const chosen=new Map();
           pool.filter(isSelectableRecommendation).sort((a,b)=>b.score-a.score).slice(0,10).forEach(r=>chosen.set(r.symbol,r));
@@ -3204,18 +3384,39 @@ async function updateScoreLearning(){
             const qty=Math.max(1,Math.floor(frictionSizeBasis()/r.price)),fr=getTradeFrictionPct(r,qty*r.price);
             const input=JSON.parse(JSON.stringify(c.unified)),live=computeUnifiedEvidence(input,state.live);
             const trial=state.candidate?computeUnifiedEvidence(input,state.candidate.weights):null;
+            const withoutMemory=state.candidate?computeUnifiedEvidence(input,state.candidate.weights.map((v,i)=>i>=23?0:v)):null;
             state.records.push({symbol:r.symbol,issueDate:today,issuedAt:captureAt,bucket,score:r.score,signalScore:c.signalScore,
               block:c.block||null,minScore:RECOMMEND_MIN_SCORE,input,modelRevision:state.revision,livePrediction:live.raw/100,liveDecision:live.total,
               candidateId:trial?state.candidate.id:null,candidatePrediction:trial?trial.raw/100:null,candidateDecision:trial?trial.total:null,
+              withoutMemoryPrediction:withoutMemory?withoutMemory.raw/100:null,withoutMemoryDecision:withoutMemory?withoutMemory.total:null,
               entryPrice:r.price,targetPct:policy.targetPct,stopPct:policy.stopPct,auditQty:qty,orderType:'MARKET',
               frictionPct:fr?.covered&&Number.isFinite(fr.entryPct)&&Number.isFinite(fr.exitPct)?Math.max(0,fr.entryPct+fr.exitPct):null,
               rocketOutcome:ROCKET_OUTCOME.PENDING,scoreVersion:RADAR_SCORE_VERSION,outcomePolicy:'net-policy-v1'});
+            if(studyOpen&&cohort.has(r.symbol)&&input.memory?.ok){
+              const values=[r.atr,r.changeOpen,input.memory.displacement,r.score];
+              if(values.every(Number.isFinite)){
+                const p=state.records.at(-1);
+                study.records.push({symbol:p.symbol,issueDate:today,issuedAt:captureAt,bucket,entryPrice:p.entryPrice,
+                  targetPct:MEMORY_SPEC.targetPct,stopPct:p.stopPct,auditQty:qty,orderType:'MARKET',frictionPct:p.frictionPct,
+                  rocketOutcome:ROCKET_OUTCOME.PENDING,outcomePolicy:'net-policy-v1',memory:input.memory,
+                  memoryControls:values.map((v,j)=>Math.min(9,Math.floor(10*radarPct(controlSorted[j],v))))});
+                if(!study.dates.includes(today)) study.dates.push(today);
+              }
+            }
           }
           state.lastBucket=bucket;
         }
       }
     }
     const mature=state.records.filter(p=>matureScoreOutcome(p,today));
+    if(!study.results&&study.dates.length===MEMORY_SPEC.dates){
+      const last=study.dates.at(-1),gap=tradingDaysBetween(last,today);
+      if(gap>1||(gap===1&&istClock().mins>=EQUITY_CLOSE_MIN)){
+        study.status='Evaluating the sealed 30-session study';
+        study.results=await evaluateMemoryStudy(study);study.closedAt=Date.now();
+        study.status='Study closed; only qualified features may enter candidate weight testing';
+      }
+    }
     const days=new Set(mature.map(p=>p.issueDate)).size;
     if(state.candidate){
       const result=evaluateScoreCandidate(mature,state.candidate);state.candidate.validation=result;
@@ -3238,7 +3439,8 @@ async function updateScoreLearning(){
     // Bound the new audit store; legacy records/settings are never migrated or rewritten.
     // Keep pending outcomes and the latest 10,000 completed samples, plus model-update history.
     const completed=state.records.filter(p=>p.paperComplete);
-    if(completed.length>10000){const keep=new Set(completed.slice(-10000));state.records=state.records.filter(p=>!p.paperComplete||keep.has(p));}
+    if(completed.length>10000){const keep=new Set(completed.slice(-10000));state.records=state.records.filter(p=>!p.paperComplete||keep.has(p)
+      ||(state.candidate&&p.candidateId===state.candidate.id));}
     state.history=state.history.slice(-30);state.updatedAt=now;
     FS.set(SCORE_LEARNING_STORE,state);_unifiedStateSource=state;
     if(state.revision!==state.publishedRevision){
@@ -3837,7 +4039,7 @@ function radarPermissionLevel(r,tapeStanding){
 // HORIZONS ARE THE MEASURED ONES, NOT THE DEFAULT ONE. 5-minute is the building block; the readings
 // that worked sit at 15 and 25 minutes, and 5-minute was the WORST cell for netVolPct (+0.070
 // against +0.100 at 15m). Nothing here reads a single 5-minute bar as a signal.
-const INTRADAY_STORE_MAX=1000;   // = the helper's MAX_ROWS file trim; not a second number
+const INTRADAY_STORE_MAX=1200;   // 13 completed equity sessions PLUS today's bars and boundary slack.
 const TAPE_BAR_MS=5*60*1000;
 const TAPE_NETVOL_BARS=3;     // Three recent bars for the participation comparison.
 const TAPE_VWAP_BARS=5;       // Legacy diagnostic aggregation; scoring VWAP uses every window bar.
@@ -4085,13 +4287,15 @@ function radarScoreComponents(r,tapeStanding){
     ceiling=Math.max(0,100-(Math.abs(co)-0.10)*100);
   }
   const bw=tev.bookWeights||{};
-  const input={parts:['flow','vwap','cross','size','impact','book','split','spoof'].map(k=>tev.parts[k]??0.5),
+  const memory=getMemoryReading(r);
+  const input={memory,parts:['flow','vwap','cross','size','impact','book','split','spoof'].map(k=>tev.parts[k]??0.5),
     base:[0.10,0.05,0.10,0.75,tev.impactWeight||0,bw.book||0,bw.split||0,bw.spoof||0],
     predictor,trigger,depth,velocity,fade,ceiling,permission:perm.p||0,risk,
     context:SCORE_GROUPS.map(k=>Number.isFinite(r.scorePriors?.[k])?r.scorePriors[k]:null).concat([
       Number.isFinite(r.fundamentalTrigger)?0.5+0.5*clamp01(r.fundamentalTrigger,-1,1):null,
       Number.isFinite(r.stretch)&&r.stretch>=0?1/(1+r.stretch):null,
-      isEquitySession(Date.now())?(375+Math.max(0,EQUITY_CLOSE_MIN-istClock().mins))/750:null])};
+      isEquitySession(Date.now())?(375+Math.max(0,EQUITY_CLOSE_MIN-istClock().mins))/750:null],
+      memory.ok?memory.values:[null,null,null])};
   const calc=computeUnifiedEvidence(input,state.live);
   const out={total:calc.total,signalScore:calc.raw,unified:input,modelRevision:state.revision,
     evidence:calc.evidence,permission:input.permission,riskFactor:risk,tapeBars:tev.bars,
@@ -4942,7 +5146,10 @@ function parseIntradayPaste(text,forSymbol,opts){
       INTRADAY_BARS[sym]=all.length>INTRADAY_STORE_MAX?all.slice(-INTRADAY_STORE_MAX):all;
     }
   } else INTRADAY_BARS[sym]=bars;
-  if(changed) INTRADAY_STORE_V++; // unchanged inclusive deltas must not invalidate every memo
+  if(changed){
+    INTRADAY_STORE_V++;
+    if(bars.some(b=>memoryDay(b.t)<memoryDay(Date.now()))) _memoryRevisions.set(sym,(_memoryRevisions.get(sym)||0)+1);
+  } // Historical repairs invalidate only this symbol's memory profile, including interior repairs.
   return {ok:true,changed,sym,bars:bars.length,sessions:new Set(bars.map(b=>istDayKey(b.t))).size,live};
 }
 function istDayKey(ms){
@@ -13668,7 +13875,7 @@ function renderPostClose(){
   }).join('');
   const mature=state.records.filter(p=>matureScoreOutcome(p,today)),sessions=new Set(mature.map(p=>p.issueDate)).size;
   const candidate=state.candidate,result=candidate?.validation;
-  const learning=candidate?`Checking new weights on later decisions: ${result?.n||0}/100 completed observations across ${result?.days||0}/5 sessions. ${result?.netDays||0}/5 sessions have enough cost-covered comparisons.`
+  const learning=candidate?`Checking new weights on later decisions: ${result?.n||0}/100 completed observations across ${result?.days||0}/${result?.requiredDays||(candidate.weights.slice(23).some(v=>v>0)?30:5)} sessions. ${result?.netDays||0}/${result?.requiredDays||(candidate.weights.slice(23).some(v=>v>0)?30:5)} sessions have enough cost-covered comparisons.`
     :state.revision>0?`Revision ${state.revision} active. Last update ${when(state.appliedAt)}. ${escHtml(state.status)}.`
     :`Initial weights active. ${mature.length}/100 completed observations across ${sessions}/5 issue sessions available to learn from. ${escHtml(state.status)}.`;
   const sources=SCORE_SOURCES.map((x,i)=>`<tr><td>${escHtml(x[1])}</td><td>${x[2].toFixed(3)}</td><td>${state.live[i].toFixed(3)}</td><td>${candidate?candidate.weights[i].toFixed(3):'Not being tested'}</td></tr>`).join('');
@@ -13687,8 +13894,8 @@ function renderPostClose(){
     <p class="pc-copy"><b>Protected rules:</b> buy volume must exceed sell volume when depth is available, plus existing direction, entry timing, exchange, surveillance, stale-data and risk safeguards. Weight changes cannot bypass these checks. Older armed conditions are preserved; this page no longer creates extra gates or changes weights when opened.</p>
     <details><summary>See current weights and changes being checked</summary><div class="pc-table-wrap"><table class="pc-table"><thead><tr><th>Signal source</th><th>Initial factor</th><th>Live factor</th><th>Being checked</th></tr></thead><tbody>${sources}</tbody></table></div>
     <p class="pc-copy">Existing signals start at 1x. Additional setup/context adjustments start at zero. These are influence factors, not score points or return probabilities. Correlated setup fields are grouped; their readings exclude the old same-session winner-fitted contributions.</p></details>
-    <p class="pc-copy">${state.history.length?'Validated updates applied: '+state.history.length+'. Most recent validation used '+state.history[state.history.length-1].validation.n+' later observations.':'No adaptive update has qualified yet. Initial scores remain unvalidated.'} Retains the latest 10,000 completed sampled decisions, pending decisions and 30 model updates. No live trades are placed by this audit.</p>
-    </section></div>`;
+    <p class="pc-copy">${state.history.length?'Validated updates applied: '+state.history.length+'. Most recent validation used '+state.history[state.history.length-1].validation.n+' later observations.':'No adaptive update has qualified yet. Initial scores remain unvalidated.'} Retains the latest 10,000 completed sampled decisions, pending decisions, all observations for the active candidate and 30 model updates. No live trades are placed by this audit.</p>
+    </section>${renderMemoryStudy(state)}</div>`;
 }
 
 let APPLY_FILTERS_TIMER=null;
