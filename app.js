@@ -1,5 +1,5 @@
-const BUILD_TS='2026-09-08 17:45 IST'; // release build time (IST)
-const APP_VERSION=1319; // v1319: Tape-anchored fresh momentum velocity & continuous deadband ceiling compression.
+const BUILD_TS='2026-09-09 09:30 IST'; // release build time (IST)
+const APP_VERSION=1320; // v1320: Show/Hide ineligible toggle, market opening tape bridge & session-aware staleness.
 const RADAR_SCORE_VERSION='tape-decision-v4';
 const EQUITY_OPEN_MIN=9*60+15, EQUITY_CLOSE_MIN=15*60+30;
 // v1093: a baseline reward:risk MEASURED on the cross-section (last completed bhav session) instead of learned from the owner's own fills - reported on every row, deliberately not enforced. Includes v1092: position size split by Radar score / stop distance, so equally-scored names carry equal RUPEE risk, plus an opt-in Risk /trade cap.
@@ -85,9 +85,11 @@ function updateModeUI(){
   document.querySelectorAll('.currency-lbl').forEach(el=>{el.textContent='₹';});
 }
 let ALL=[],FILT=[],PG=1,PGSZ=100,SCOL='score',SDIR=-1;
+let SHOW_INELIGIBLE=false;
 let SHOW_BELOW_THRESHOLD=false;
 function toggleBelowThreshold(){
-  SHOW_BELOW_THRESHOLD=!SHOW_BELOW_THRESHOLD;
+  SHOW_INELIGIBLE=!SHOW_INELIGIBLE;
+  SHOW_BELOW_THRESHOLD=SHOW_INELIGIBLE;
   SCOL='score';
   SDIR=-1;
   saveFilterState();
@@ -205,8 +207,9 @@ function captureOpenSnapshots(rows){
   }
 
   let changed=false;
-  const now=PAGE_SESSION_BOOT_TIME;
-  const sessionOpenMs=new Date(today+'T09:15:00+05:30').getTime()||now;
+  const sessionOpenMs=new Date(today+'T09:15:00+05:30').getTime()||Date.now();
+  const baselineBootTime=Math.max(sessionOpenMs, PAGE_SESSION_BOOT_TIME);
+  const now=inMarketHours ? baselineBootTime : sessionOpenMs;
   (rows||[]).forEach(r=>{
     if(!r||!r.symbol||!(Number(r.price)>0)) return;
     const sym=normSym(r.symbol);
@@ -422,8 +425,9 @@ function recordTableEntries(rows){
   captureOpenSnapshots(rows);
   const today=getSessionDate();
   let changed=false;
+  const sessionOpenMs=new Date(today+'T09:15:00+05:30').getTime()||Date.now();
+  const baselineBootTime=Math.max(sessionOpenMs, PAGE_SESSION_BOOT_TIME);
   const now=Date.now();
-  const sessionOpenMs=new Date(today+'T09:15:00+05:30').getTime()||now;
   (rows||[]).forEach(r=>{
     if(!r||!r.symbol||!(Number(r.price)>0)) return;
     const sym=normSym(r.symbol);
@@ -435,7 +439,7 @@ function recordTableEntries(rows){
     const openPx=(!inMarketHours && Number.isFinite(chgOpen) && chgOpen>-99)
       ? +(currPrice / (1 + chgOpen / 100)).toFixed(2)
       : currPrice;
-    const entryTime=inMarketHours ? now : sessionOpenMs;
+    const entryTime=inMarketHours ? baselineBootTime : sessionOpenMs;
 
     if(!prev||prev.date!==today){
       TABLE_ENTRY_MAP[sym]={date:today, price:openPx, at:entryTime};
@@ -4017,7 +4021,8 @@ function radarScoreComponents(r,tapeStanding){
     const p5=Number.isFinite(Number(r.price5m))?Number(r.price5m):0;
     const freshMom=Math.max(0, p5);
     const trajectoryConfirm=Math.min(1.0, (coPct-0.10)/0.50);
-    const rawBoost=Math.min(30, freshMom*15*trajectoryConfirm);
+    const timeFactor=Math.sqrt(1+elapsedMin/20);
+    const rawBoost=Math.min(30, (freshMom*15/timeFactor)*trajectoryConfirm);
     // Envelope Protection: velocity boost is strictly scaled by (perm.p * riskFactor),
     // preventing low-liquidity or high-risk penny stocks from bypassing risk controls.
     const velocityBoost=+(rawBoost*envelope).toFixed(1);
@@ -4432,8 +4437,22 @@ let _newestBucketMemo={v:-1,ms:0};
 const TAPE_BAR_MS=5*60*1000;
 function tapeBarsBehind(heldMs){
   if(!(heldMs>0)) return Infinity;
-  const newestCompletable=Math.floor((Date.now()-TAPE_BAR_MS)/TAPE_BAR_MS)*TAPE_BAR_MS;
-  return Math.max(0,Math.round((newestCompletable-heldMs)/TAPE_BAR_MS));
+  const clock=istClock();
+  if(isEquitySession()){
+    const sessionMinsElapsed=Math.max(0, clock.mins - DAY_START_MIN);
+    const completableBarsToday=Math.floor(sessionMinsElapsed / 5);
+    const todayDate=new Date(clock.dateMs).toISOString().slice(0,10);
+    if(istDayKey(heldMs)===todayDate){
+      const heldMinsElapsed=Math.max(0, istClock(heldMs).mins - DAY_START_MIN);
+      const heldBarIndex=Math.floor(heldMinsElapsed / 5);
+      return Math.max(0, completableBarsToday - 1 - heldBarIndex);
+    }
+    // Held bar is from previous session:
+    // During opening window (first 15 mins / 3 bars), today's bars are still forming/merging:
+    if(completableBarsToday <= 3) return 0;
+    return completableBarsToday;
+  }
+  return 0;
 }
 function newestTapeBucketMs(){
   if(_newestBucketMemo.v===INTRADAY_STORE_V) return _newestBucketMemo.ms;
@@ -4515,9 +4534,19 @@ function getRecommendationFreshness(sym){
     }
     return {ok:false,why:'Market closed - waiting for the next session'};
   }
-  if(istDayKey(last)!==date) return {ok:false,why:'Awaiting this session?s 5-minute tape'};
-  if(!Number.isFinite(last)||tapeBarsBehind(last)>1)
+  const isOpeningWindow = clock.mins >= DAY_START_MIN && clock.mins < DAY_START_MIN + 15;
+  if(istDayKey(last)!==date){
+    if(isOpeningWindow && bars.length>=TAPE_MIN_SESSION_BARS){
+      return {ok:true,why:'Opening window — bridging previous tape'};
+    }
+    return {ok:false,why:'Awaiting this session\'s 5-minute tape'};
+  }
+  if(!Number.isFinite(last)||tapeBarsBehind(last)>1){
+    if(isOpeningWindow && bars.length>=TAPE_MIN_SESSION_BARS){
+      return {ok:true,why:'Opening window — bridging previous tape'};
+    }
     return {ok:false,why:'Stale 5-minute tape - refresh required'};
+  }
   return {ok:true,why:''};
 }
 function passesIntradayValidation(s){return !!s&&getRecommendationFreshness(s.symbol).ok;}
@@ -4559,7 +4588,7 @@ function universePriceStaleness(){
   if(age>UNIVERSE_STALE_MS) return 'Live prices are '+Math.round(age/60000)+' minutes stale';
   return null;
 }
-function _getRowActionStateUncached(s){
+function _getRowActionStateUncached(s, ignoreMarketClosed=false){
   if(!s) return {state:'BLOCKED', reason:'Invalid row'};
   if(s.scoreVersion!==RADAR_SCORE_VERSION) return {state:'BLOCKED', reason:'Older score scale - rescore required'};
   if(NSE_SURV[s.symbol]?.length) return {state:'BLOCKED', reason:'Surveillance flag ('+(NSE_SURV[s.symbol].join(' · '))+')'};
@@ -4567,7 +4596,7 @@ function _getRowActionStateUncached(s){
   if(s.noHistory===true) return {state:'BLOCKED', reason:'Listed too recently (insufficient history)'};
   if(s.basketEligible===false) return {state:'BLOCKED', reason:'Non-EQ series or price band < 10%'};
 
-  if(!isEquitySession(Date.now())){
+  if(!ignoreMarketClosed && !isEquitySession(Date.now())){
     return {state:'WAIT', reason:'Market closed — viewing last session state'};
   }
 
@@ -4609,6 +4638,11 @@ function _getRowActionStateUncached(s){
 }
 function isSelectableRecommendation(s){
   return !!s && getRowActionState(s).state === 'GO';
+}
+function isStockEligible(s){
+  if(!s) return false;
+  if(isEquitySession(Date.now())) return getRowActionState(s).state === 'GO';
+  return _getRowActionStateUncached(s, true).state === 'GO';
 }
 // Score number only, tinted by the band.
 function radarScoreCell(score,title='',recommendationState=null){
@@ -13270,15 +13304,18 @@ function applyFilters({preservePage=false}={}){
     const numScore=Number(s.score);
     const scoreVal=Number.isFinite(numScore)?numScore:0;
     const belowThreshold=scoreVal<RECOMMEND_MIN_SCORE;
-    if(belowThreshold&&!removedReason){
-      removedReason={s,reason:'filter',chip:'Score '+scoreVal.toFixed(1)+' < min '+RECOMMEND_MIN_SCORE,
-        detail:'score '+scoreVal.toFixed(1)+' is below your Min Score of '+RECOMMEND_MIN_SCORE};
-    }
-    if(removedReason){
+    const eligible=isStockEligible(s);
+    if(!eligible){
+      if(!removedReason){
+        const act=getRowActionState(s);
+        removedReason={s,reason:'ineligible',chip:act.reason||('Score '+scoreVal.toFixed(1)+' < min '+RECOMMEND_MIN_SCORE),
+          detail:act.reason||('ineligible: score '+scoreVal.toFixed(1)+' or pending entry gate')};
+      }
       REMOVED_ROWS.push(removedReason);
-      if(!SHOW_BELOW_THRESHOLD) return false;
-    } else if(belowThreshold){
-      if(!SHOW_BELOW_THRESHOLD) return false;
+      if(!SHOW_INELIGIBLE) return false;
+    } else if(removedReason){
+      REMOVED_ROWS.push(removedReason);
+      if(!SHOW_INELIGIBLE) return false;
     }
     if(q&&![s.symbol,s.name,s.sector].join(' ').toLowerCase().includes(q)) return false;
 
@@ -13795,13 +13832,14 @@ function renderStatusBar(){
   if(SURV_HARD_REMOVED>0)html+=` <span class="sb-tag sb-tag-red" style="margin-left:4px" title="Weeded out by the configured surveillance rules in the Methodology table (hard filter).">⚠ ${SURV_HARD_REMOVED} surveillance removed</span>`;
   if(ALLOC_BLOCKED>0)html+=` <span class="sb-tag" style="margin-left:4px" title="Removed because no share can be allocated to them: no daily turnover, allocation rails below one share, no viable target after costs, or already held at a profit with no cushion for an add. Listed with the reason in Removed from rankings.">🚫 ${ALLOC_BLOCKED} not allocatable</span>`;
   if(tags.length){html+=`<span class="sb-sep">|</span>`;html+=tags.map(t=>`<span class="sb-tag">${t}</span>`).join('');}
-  html+=`<button class="sb-clear" id="btnToggleBelowThreshold" onclick="toggleBelowThreshold()" style="margin-left:auto;${SHOW_BELOW_THRESHOLD?'border-color:var(--amber);color:var(--amber);background:rgba(251,191,36,.1)':''}" title="${SHOW_BELOW_THRESHOLD?'Hide stocks below recommendation threshold':'Show stocks that do not clear the recommendation threshold'}">${SHOW_BELOW_THRESHOLD?'Hide below threshold':'Show below threshold'}</button>`;
+  html+=`<button class="sb-clear" id="btnToggleBelowThreshold" onclick="toggleBelowThreshold()" style="margin-left:auto;${SHOW_INELIGIBLE?'border-color:var(--amber);color:var(--amber);background:rgba(251,191,36,.1)':''}" title="${SHOW_INELIGIBLE?'Hide ineligible stocks (show only actionable recommendations)':'Show all candidate stocks including ineligible ones'}">${SHOW_INELIGIBLE?'Hide ineligible':'Show ineligible'}</button>`;
   if(isFiltered)html+=`<button class="sb-clear" style="margin-left:8px" onclick="clearFilters()">✕ Clear filters</button>`;
   const el=document.getElementById('statusBar');
   if(el)el.innerHTML=html;
 }
 
 function clearFilters(){
+  SHOW_INELIGIBLE=false;
   SHOW_BELOW_THRESHOLD=false;
   ['fSearch','fMinScore'].forEach(id=>{const el=document.getElementById(id);if(el)el.value=id==='fMinScore'?'60':'';});
   const turnEl=document.getElementById('fMinTurnover');if(turnEl)turnEl.value='0';
@@ -13913,6 +13951,7 @@ function setStreamActivity(patch){
   STREAM_ACTIVITY={...STREAM_ACTIVITY,...patch};
   try{renderLiveTapeBar();}catch(e){}
 }
+let _lastPortfolioCheckAt=0;
 async function refreshPortfolioFromHelper(){
   if(!KITE_API||KITE_API.needsLogin||KITE_API.tokenValid===false)
     return {ok:false,skipped:true,why:'Kite Connect is not ready'};
@@ -14005,11 +14044,14 @@ async function streamRefreshTick(){
     // The helper maintains live state in memory and sends only changed symbols/bars.
     const deltaRes=await pollUniverseDelta(true);
     const universeChanged=deltaRes&&deltaRes.changed;
-    // Holdings, positions and orders used to wait for the helper's ten-minute housekeeping tick.
-    // Ask on this same visible 30-second beat, then immediately hydrate whatever changed, so a new
-    // fill appears on Open Positions without a second timer or a manual action.
-    const portfolio=await refreshPortfolioFromHelper();
-    const portfolioChanged=portfolio.ok?await hydrateFromHelper('portfolio refresh'):false;
+    // Holdings, positions and orders: throttled check every 10s during continuous loop
+    let portfolio={ok:false,skipped:true};
+    let portfolioChanged=false;
+    if(Date.now()-_lastPortfolioCheckAt>=10000){
+      _lastPortfolioCheckAt=Date.now();
+      portfolio=await refreshPortfolioFromHelper();
+      portfolioChanged=portfolio.ok?await hydrateFromHelper('portfolio refresh'):false;
+    }
     // THE DELTA CARRIES PRICES, NOT BARS (v1287). v1267 replaced the inventory read with the
     // universe delta on the grounds that the delta "already carries the changed live symbols" - it
     // carries live PRICE FIELDS, and nothing else in the page merges 5-minute bars while the socket
@@ -14045,17 +14087,21 @@ async function streamRefreshTick(){
     if(deltaRes?.ok) await scheduleScoreJob();
     captureLiveRecommendationScan();
     const done=Date.now();
+    const inMarket=isMarketRefreshWindow();
+    const loopDelay=inMarket ? 1000 : STREAM_REFRESH_MS;
     setStreamActivity({phase:STREAM_STATUS?.statusUnknown?'checking':STREAM_STATUS?.connected?'live':'stream-down',lastCompleteAt:done,
       lastSuccessAt:STREAM_STATUS&&!STREAM_STATUS.statusUnknown?done:STREAM_ACTIVITY.lastSuccessAt,
       lastDataAt:(universeChanged||portfolioChanged||barsRead)?done:STREAM_ACTIVITY.lastDataAt,
-      nextAt:done+STREAM_REFRESH_MS,error:''});
+      nextAt:done+loopDelay,error:''});
   }catch(e){
     const done=Date.now();
-    setStreamActivity({phase:'error',lastCompleteAt:done,nextAt:done+STREAM_REFRESH_MS,
+    const loopDelay=isMarketRefreshWindow() ? 2000 : STREAM_REFRESH_MS;
+    setStreamActivity({phase:'error',lastCompleteAt:done,nextAt:done+loopDelay,
       error:String(e?.message||e)});
   }finally{
     _streamRefreshBusy=false;
-    scheduleStreamRefresh(STREAM_REFRESH_MS);
+    const loopDelay=isMarketRefreshWindow() ? 1000 : STREAM_REFRESH_MS;
+    scheduleStreamRefresh(loopDelay);
     try{renderLiveTapeBar();}catch(e){}
   }
 }
@@ -15556,7 +15602,8 @@ function saveFilterState(){
   const state={
     search:document.getElementById('fSearch')?.value||'',
     minScore:document.getElementById('fMinScore')?.value||'60',
-    showBelowThreshold:SHOW_BELOW_THRESHOLD,
+    showIneligible:SHOW_INELIGIBLE,
+    showBelowThreshold:SHOW_INELIGIBLE,
     minTurnover:document.getElementById('fMinTurnover')?.value||'0',
     dropThin:document.getElementById('fDropThin')?.value??'',
     sortCol:SCOL,
@@ -15593,7 +15640,8 @@ function loadFilterState(){
     const shared=JSON.parse(localStorage.getItem(SHARED_FILTER_STORE)||'{}');
     if(state.search!=null){const el=document.getElementById('fSearch');if(el)el.value=state.search;}
     if(state.minScore!=null){const el=document.getElementById('fMinScore');if(el)el.value=state.minScore;}
-    if(state.showBelowThreshold!=null){SHOW_BELOW_THRESHOLD=!!state.showBelowThreshold;}
+    if(state.showIneligible!=null){SHOW_INELIGIBLE=!!state.showIneligible;SHOW_BELOW_THRESHOLD=SHOW_INELIGIBLE;}
+    else if(state.showBelowThreshold!=null){SHOW_INELIGIBLE=!!state.showBelowThreshold;SHOW_BELOW_THRESHOLD=SHOW_INELIGIBLE;}
     if(state.minTurnover!=null){const el=document.getElementById('fMinTurnover');if(el)el.value=state.minTurnover;}
     if(state.dropThin!=null){const el=document.getElementById('fDropThin');if(el)el.value=state.dropThin;}
     resetRecommendationSelectionForRefresh(); // legacy persisted exclusions are deliberately ignored
