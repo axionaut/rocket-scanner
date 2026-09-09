@@ -1,5 +1,5 @@
-const BUILD_TS='2026-09-09 11:55 IST'; // release build time (IST)
-const APP_VERSION=1330; // v1330: Complete entryAtLimit retirement, drop live price churn from basket signature & optimize allocation passes.
+const BUILD_TS='2026-09-09 12:15 IST'; // release build time (IST)
+const APP_VERSION=1331; // v1331: Anchor candidate and basket targets firmly to Target Anchor floor, matching Open Positions.
 const RADAR_SCORE_VERSION='tape-decision-v4';
 function isValidChangeOpen(v){
   if(v===null||v===undefined||typeof v==='boolean') return false;
@@ -10392,15 +10392,13 @@ function getRowExitPolicy(row,buyPrice=null,activeInfo=null,nudgeInfo=null){
   // capacity units, which carries that bound inside it. Applying it again pins every reach at
   // exactly 1.00 capacity and re-creates the flat target this release removes.
   if(available!=null&&!inCapacityUnits&&capacity>0) available=Math.min(available,capacity);
-  // A MANUAL Target Anchor is an owner input and outranks every measurement, exactly as before.
-  if(available!=null&&targetPct>0&&active.source!=='manual'){
-    // The goal/harvest anchor no longer RAISES the target to a level the session cannot deliver -
-    // that is exactly how HINDZINC was armed at 2.85% with 0.13% of tape left. It survives as the
-    // viability floor below, which is where an unaffordable trade belongs.
-    targetPct=toStep(available);
-    nudgePct=+(targetPct-basePct).toFixed(2);
-    targetSource='what the market has left, read from '+availableSource
-      +(circuitRunwayPct!=null&&Math.abs(available-circuitRunwayPct)<1e-9?' (bounded by the NSE circuit)':'');
+  // Target stays firmly anchored to the Target Anchor (manual, goal, or harvest rate).
+  // A momentum scanner hunts abnormal expanding breakouts, so statistical "typical day"
+  // runway guesstimates must not shrink the target into tiny scalps or diverge from Open Positions.
+  // The only hard bound is the legal NSE upper circuit limit.
+  if(circuitRunwayPct!=null&&circuitRunwayPct>0&&targetPct>circuitRunwayPct){
+    targetPct=toStep(circuitRunwayPct);
+    targetSource='bounded by the NSE circuit';
   }
   // v1216: WHAT THE TARGET PERCENTAGE IS MEASURED FROM. A clock or tape read is further travel
   // from where the stock is NOW, so resolving it against the entry restates a level the market has
