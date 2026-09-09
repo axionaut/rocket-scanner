@@ -1,6 +1,6 @@
-const BUILD_TS='2026-09-09 15:00 IST'; // release build time (IST)
-const APP_VERSION=1338; // v1338: Enforce viability in action state, truthful allocation skip messages, concentrated size weight & funded basket count.
-const RADAR_SCORE_VERSION='tape-decision-v5';
+const BUILD_TS='2026-09-09 15:22 IST'; // release build time (IST)
+const APP_VERSION=1339; // Entry-time scoring, next-session horizon and complete outcome feedback.
+const RADAR_SCORE_VERSION='tape-decision-v6';
 function isValidChangeOpen(v){
   if(v===null||v===undefined||typeof v==='boolean') return false;
   if(typeof v==='string'&&v.trim()==='') return false;
@@ -2684,9 +2684,15 @@ function calcRecommendationOutcomeScore(p,threshold){
   }
   return +clampNum(score,-1,1).toFixed(3);
 }
+let _lastLiveOutcomeScanAt=0;
 function captureLiveRecommendationScan(){
   const c=istClock(),date=new Date(c.dateMs).toISOString().slice(0,10);
   if(!isMarketRefreshWindow()) return;
+  // The stream can beat every second. Leave time for the 1.6s persistence debounce and
+  // avoid walking historical outcomes on each tick; scoring itself continues independently.
+  const now=Date.now();
+  if(now-_lastLiveOutcomeScanAt<30000) return;
+  _lastLiveOutcomeScanAt=now;
   const candidates=getDisplayedEntryCandidates(ALL).filter(r=>isSelectableRecommendation(r)&&r.price>0);
   const recommendations=candidates.map(r=>{
     const entryPrice=getBuyPrice(r),policy=getRowExitPolicy(r,entryPrice);
@@ -2797,15 +2803,24 @@ function recordRecommendationOutcomeScan(scan){
       delete p.rocketUnresolvedReason;
     });
   }
-  const additions=(scan.recommendations||[]).filter(p=>!(currentIssue?.picks||[])
-    .some(old=>old.symbol===p.symbol&&!!old.control===!!p.control));
+  // Sample fresh entry decisions every 30 minutes, retaining their actual entry time and price.
+  // Repeated refreshes within a bucket do not multiply observations. These are correlated
+  // paper decisions, not independent trades; calibration weights sessions equally below.
+  const decisionBucket=Math.floor((Number(scan.ts)||Date.now())/(30*60*1000));
+  const existingDecisions=new Set((currentIssue?.picks||[]).map(p=>
+    p.symbol+'|'+!!p.control+'|'+(p.decisionBucket??Math.floor((Number(p.issuedAt)||0)/(30*60*1000)))));
+  const additions=(scan.recommendations||[]).filter(p=>{
+    const key=p.symbol+'|'+!!p.control+'|'+decisionBucket;
+    if(existingDecisions.has(key)) return false;
+    existingDecisions.add(key);return true;
+  });
   if(additions.length){
     const issueKey=currentIssueKey||(store.issues[scan.date]?scan.date+'|'+scanScoreVersion:scan.date);
     store.issues[issueKey]={
       date:scan.date,threshold:scan.threshold,scoreVersion:scan.scoreVersion||RADAR_SCORE_VERSION,horizonDays:adaptiveHorizon,
       regime:(typeof MARKET_REGIME!=='undefined'&&MARKET_REGIME)?MARKET_REGIME:null,
       picks:(currentIssue?.picks||[]).concat(additions.map(p=>({
-        outcomePolicy:'net-policy-v1',issuedAt:Number(scan.ts)||Date.now(),issueDate:scan.date,
+        outcomePolicy:'net-policy-v1',issuedAt:Number(scan.ts)||Date.now(),issueDate:scan.date,decisionBucket,
         orderType:p.orderType||'MARKET',limitPrice:p.limitPrice||null,
         auditQty:Math.max(1,Math.floor(Number(p.auditQty)||1)),
         frictionPct:Number.isFinite(p.frictionPct)?p.frictionPct:null,
@@ -2856,7 +2871,10 @@ function recordRecommendationOutcomeScan(scan){
     const issueDate=String(store.issues[key]?.date||key).slice(0,10);
     if(issueDate<cutoff.toISOString().slice(0,10)) delete store.issues[key];
   });
+  store.updatedAt=Date.now();
   FS.set(RECOMMEND_OUTCOME_STORE,store);
+  _bandOutcomeMemo=null;
+  _tapeProfitMemo=null;
 }
 const POST_CLOSE_CONDITIONS=[
   {key:'entry-ready',label:'Entry gate approved',mode:'gate',test:p=>p.entryReady!==false,rowTest:r=>r.entryReady!==false},
@@ -3193,13 +3211,18 @@ function getBandOutcomeCalibration(score){
         (issue.picks||[]).forEach(p=>{
           if(p.control) return;
           // B1 & B2: only evaluate completed, observed picks issued on the CURRENT score scale
-          if(p.scoreVersion!==RADAR_SCORE_VERSION||!p.complete||!(p.observations>0)) return;
+          if(p.scoreVersion!==RADAR_SCORE_VERSION||!p.paperComplete||p.evidenceIncomplete||p.unfilled) return;
           const b=getScoreBandKey(p.score);
-          if(!bands[b]) bands[b]={wins:0,losses:0,total:0};
+          if(!bands[b]) bands[b]={wins:0,losses:0,total:0,days:{}};
+          if(![ROCKET_OUTCOME.ROCKET,ROCKET_OUTCOME.STOPPED,ROCKET_OUTCOME.EXPIRED].includes(p.rocketOutcome)) return;
+          const day=issue.date||p.issueDate;
+          const ds=bands[b].days[day]??={wins:0,total:0};
+          ds.total++;
           if(isRocketOutcome(p)){
+            ds.wins++;
             bands[b].wins++;
             bands[b].total++;
-          } else if(p.rocketOutcome===ROCKET_OUTCOME.STOPPED){
+          } else if(p.rocketOutcome===ROCKET_OUTCOME.STOPPED||p.rocketOutcome===ROCKET_OUTCOME.EXPIRED){
             bands[b].losses++;
             bands[b].total++;
           }
@@ -3208,8 +3231,11 @@ function getBandOutcomeCalibration(score){
       const mults={};
       ['<60','60-69','70-79','80+'].forEach(b=>{
         const st=bands[b];
-        if(st&&st.total>=5){
-          const winRate=st.wins/st.total;
+        if(st&&Object.keys(st.days).length>=5){
+          // Repeated intraday decisions are correlated. A busy session gets one vote, and
+          // calibration waits for five distinct completed issue sessions on this score version.
+          const days=Object.values(st.days);
+          const winRate=days.reduce((n,d)=>n+d.wins/d.total,0)/days.length;
           mults[b]=+clampNum(0.70+0.60*winRate,0.80,1.20).toFixed(2);
         } else {
           mults[b]=1.0;
@@ -3892,37 +3918,8 @@ function continuousTapeWindow(all,symKey){
   }
   return res;
 }
-// MEASURED 2026-09-09 on 52,616 same-session samples: the 6-bar window range as a % of price
-// separates "reaches +2.6% in 60m" at AUC 0.756 (t=32.3). The whole evidence blend scores 0.502
-// (t=0.25) on the same outcome. This is a REACHABILITY gate, never a rank term - the same feature
-// predicts the -2.6% side BETTER (AUC 0.810), so it carries no direction.
-let _reachCutMemo=null;
-function getTapeReachabilityCut(){
-  const sig=INTRADAY_STORE_V+'';
-  if(_reachCutMemo&&_reachCutMemo.sig===sig) return _reachCutMemo.val;
-  const keys=Object.keys(INTRADAY_BARS||{});
-  const rs=[];
-  for(const k of keys){
-    const all=INTRADAY_BARS[k];
-    if(!all||all.length<TAPE_MIN_SESSION_BARS) continue;
-    const w=continuousTapeWindow(all,k);
-    if(!w||!w.length) continue;
-    const last=w[w.length-1].c;
-    if(!(last>0)) continue;
-    const rngPct=100*(Math.max(...w.map(b=>b.h))-Math.min(...w.map(b=>b.l)))/last;
-    if(Number.isFinite(rngPct)&&rngPct>0) rs.push(rngPct);
-  }
-  let cut=null; // zero-constant policy: no synthetic threshold without established cross-section
-  if(rs.length>=25){
-    rs.sort((a,b)=>a-b);
-    // 10th percentile of 30-min window range (D1 boundary, measured today at 0.32% with only 0.49% reachability)
-    cut=+(rs[Math.floor(rs.length*0.10)]).toFixed(2);
-  }
-  const val={cut,n:rs.length};
-  _reachCutMemo={sig,val};
-  return val;
-}
-
+// Recent unsigned range is displayed beside historical same-day travel. Neither is a
+// calibrated forecast of target-before-stop by the next trading close.
 function tapeReachability(sym,targetPct){
   const k=normSym(sym||'');
   const all=INTRADAY_BARS[k];
@@ -3934,29 +3931,9 @@ function tapeReachability(sym,targetPct){
   const winRangePct=+((100*(Math.max(...w.map(b=>b.h))-Math.min(...w.map(b=>b.l)))/last)).toFixed(2);
   const coverage=winRangePct>0?+(targetPct/winRangePct).toFixed(2):Infinity;
 
-  // Minute-of-day reachability factor (C3 & Finding 1):
-  // AUC 0.4232 (t=-10.0): later in the session, fewer 5-minute bars remain to travel the target distance.
-  // Guarded by isEquitySession: off-market hours (evenings, weekends) must not clamp to 0 mins left or blank targets.
-  const inSession=typeof isEquitySession==='function'?isEquitySession(Date.now()):false;
-  const clock=istClock();
-  const minsToClose=inSession?Math.max(0,EQUITY_CLOSE_MIN-clock.mins):null;
-  const crossCut=getTapeReachabilityCut();
-  const cutPct=crossCut.cut;
-  let effectiveMinRange=null;
-  let reachable=true;
-
-  if(cutPct!=null){
-    // Chosen architectural risk ramp: within the final 60 minutes, scales minimum volatility inversely
-    // with remaining trading time (60 / max(15, minsToClose)). Designated explicitly as an operational
-    // risk ramp rather than empirical parameter, ensuring late-session entries require higher live volatility.
-    const timePenalty=(inSession&&minsToClose!=null&&minsToClose<60)?(60/Math.max(15,minsToClose)):1.0;
-    effectiveMinRange=+(cutPct*timePenalty).toFixed(2);
-    reachable=inSession?(minsToClose>=15&&winRangePct>=effectiveMinRange):(winRangePct>=cutPct);
-  } else {
-    reachable=inSession?(minsToClose>=15):true;
-  }
-
-  return {winRangePct,coverage,cutPct,effectiveMinRange,minsToClose,reachable};
+  // Range is context, not a directional forecast. Coverage responds to target distance.
+  // Today's remaining clock cannot veto an entry with a next-session deadline.
+  return {winRangePct,coverage,reachable:null,horizon:'through next trading close'};
 }
 function tapeAggregate(bars,k){
   if(k<=1) return bars.slice();
@@ -4049,8 +4026,8 @@ function _radarTapeEvidenceUncached(sym){
   // Forward 60m close: size 0.5175 (t +7.7), cross 0.4693 (t -13.5), flow 0.4541 (t -20.2), vwap 0.4239 (t -33.9).
   // eSize (participation) is the ONLY term with a consistently positive forward edge across both outcomes (t > 2).
   // eVwap, eFlow, and eCross all carry negative forward close edges and fail to separate from noise on target reach (|t| < 0.6).
-  // Following the measured data, weight is concentrated on eSize (0.75), while flow (0.10), cross (0.10), and vwap (0.05)
-  // are reduced to floor monitoring weights so unproven signals do not dominate candidate ranking.
+  // Provisional fixed blend, NOT an optimal fit or a validated probability. Same-session marginal
+  // AUCs do not validate these weights or the complete buy-now / next-session policy.
   const W={flow:.10,vwap:.05,cross:.10,size:.75};
   // The impact weight is MEASURED, never asserted: 0 until the edge survives its own sampling error,
   // rising as the corpus grows. At 0 every factor below collapses to 1 and both the blend and its
@@ -4271,9 +4248,7 @@ function radarScoreComponents(r,tapeStanding){
   // If a stock is blocked by structural vetoes (ASM surveillance, sell volume > buy volume,
   // non-basket-eligible, or missing history), its final score CANNOT clear the recommendation policy bar.
   // This guarantees that top green scores and recommendation checkboxes never contradict each other.
-  if(NSE_SURV[r.symbol]?.length || !isDepthRecommendable(r.symbol) || r.basketEligible===false || r.noHistory===true){
-    out.total=+Math.min(out.total, +(RECOMMEND_MIN_SCORE - 0.1)).toFixed(1);
-  }
+  applyReadinessScoreCap(r,out);
   return out;
 }
 
@@ -4286,8 +4261,18 @@ function radarEvidenceScore(r,tapeStanding){return radarScoreComponents(r,tapeSt
 function setRadarEvidenceScore(r,tapeStanding){
   if(r) r.directionConfirmed = isDirectionConfirmed(r);
   const c=radarScoreComponents(r,tapeStanding);
+  applyReadinessScoreCap(r,c); // includes the early no-tape return, even with Min Score = 0
   r.score=c.total;r.rocketScore=r.score;r.scoreVersion=RADAR_SCORE_VERSION;r.scoreComponents=c;
   return r.score;
+}
+function applyReadinessScoreCap(r,c){
+  const issue=getRowReadinessIssue(r);
+  const reason=issue?.reason||(c.permission===0?c.block||'No usable current tape':null);
+  if(reason){
+    c.total=+Math.min(c.total,RECOMMEND_MIN_SCORE-0.1).toFixed(1);
+    c.block=reason;
+  }
+  return c;
 }
 function radarScoreTitle(r){
   const c=r&&r.scoreComponents;
@@ -4314,7 +4299,7 @@ function radarScoreTitle(r){
     })()
     +` over ${Number(c.tapeBars)||0} bars`;
   if(c.belowOpenDrop>=0.25) return `NOT ACTIONABLE - below session load baseline (-${c.belowOpenDrop.toFixed(2)}%). Score penalized and capped below policy bar (${RECOMMEND_MIN_SCORE}) because base price was not defended.`;
-  if(c.block) return `NOT ACTIONABLE - ${c.block}. Tape evidence ${(Number(c.evidence)*100).toFixed(0)}/100 (${ev}), but permission is zero so the score is zero. The score is what you can act on, not what looks interesting.`;
+  if(c.block) return `Below policy bar: ${c.block}. Final score ${Number(c.total).toFixed(1)}; Min Score ${RECOMMEND_MIN_SCORE}. Tape evidence ${(Number(c.evidence)*100).toFixed(0)}/100 (${ev}).`;
   return `Recommendation strength ${Number(c.total).toFixed(1)} = tape evidence ${(Number(c.evidence)*100).toFixed(0)}/100 × permission ${(Number(c.permission)*100).toFixed(0)}% × risk factor ${(Number(c.riskFactor)*100).toFixed(0)}%.`
     +(c.velocityBoost>0?` Forward velocity boost +${Number(c.velocityBoost).toFixed(1)} pts.`:'')
     +(c.belowOpenDrop>0?` Below baseline penalty -${Number(c.belowOpenDrop).toFixed(2)}%.`:'')
@@ -4530,7 +4515,7 @@ function radarScoreColor(score){
 const RECOMMEND_MAX_RANK=10;    // SEARCH DEPTH ONLY: candle collection and diagnostic coverage.
 // It never gates a recommendation and never appears beside Score in the recommendation table.
 let RECOMMEND_MIN_SCORE=60;   // explicit policy bar on the six-component 0-100 readiness scale; user-adjustable.
-// This means "60 readiness points plus every independent gate", not "60% likely to profit".
+// Technical readiness is reflected in the final score; the score is not a profit probability.
 // Forward target-before-stop results for this exact score version are shown separately and must earn
 // any predictive interpretation; old score versions are never pooled into those bands.
 let RADAR_SCORE_BANDS=(()=>{
@@ -4547,7 +4532,9 @@ function syncRecommendationThreshold(){
   const raw=el?.value?.trim()||'';
   const n=raw===''?60:Number(raw);
   const next=Number.isFinite(n)?Math.max(0,Math.min(100,Math.round(n*2)/2)):60;
+  const changed=RECOMMEND_MIN_SCORE!==next;
   RECOMMEND_MIN_SCORE=next;
+  if(changed&&typeof ALL!=='undefined') ALL.forEach(r=>setRadarEvidenceScore(r,r._tapeStanding));
   if(el&&raw!==''&&Number(el.value)!==next) el.value=String(next);
   const bar=next, mid=+(bar*0.66).toFixed(1), low=+(bar*0.33).toFixed(1);
   RADAR_SCORE_BANDS=[
@@ -4637,19 +4624,9 @@ function timingDepth(){
   const v=getTimingDepth(); _timingDepthMemo={k,n,v}; return v;
 }
 function meetsRecommendationBar(s){
-  if(!s) return false;
-  if(s.scoreVersion!==RADAR_SCORE_VERSION) return false; // never apply today's policy bar to an old scale
-  if(s.recommendationTriggerBlocked===true)return false;
-  if(s.noHistory===true) return false;   // v1170: no multi-day history, so nothing to rank it on
-  if(!getRecommendationFreshness(s.symbol).ok) return false;
-  if(s.directionConfirmed!==true) return false; // prediction may score early; execution still needs a live bullish turn
-  // Only stocks ready to enter immediately at market price (entryReady !== false) are recommendable.
-  if(s.entryReady===false) return false;
-  if(s.intradaySellingToday===true) return false;
-  // Score is the one numeric policy bar. Rank remains internal row order only; all other safety and
-  // current-tape checks stay independent so a large number cannot average away a veto.
-  return meetsScoreBar(s.score);
+  return !!s&&s.scoreVersion===RADAR_SCORE_VERSION&&meetsScoreBar(s.score);
 }
+
 // The freshest completed bar the app holds ANYWHERE - the market's own clock as this app knows it.
 // Not a wall-clock read: if nothing has been fetched for an hour, every row is equally behind and
 // none is penalised for the app's own idleness.
@@ -4818,20 +4795,12 @@ function universePriceStaleness(){
   if(age>UNIVERSE_STALE_MS) return 'Live prices are '+Math.round(age/60000)+' minutes stale';
   return null;
 }
-function _getRowActionStateUncached(s, ignoreMarketClosed=false){
+function getRowReadinessIssue(s){
   if(!s) return {state:'BLOCKED', reason:'Invalid row'};
-  if(s.scoreVersion!==RADAR_SCORE_VERSION) return {state:'BLOCKED', reason:'Older score scale - rescore required'};
   if(NSE_SURV[s.symbol]?.length) return {state:'BLOCKED', reason:'Surveillance flag ('+(NSE_SURV[s.symbol].join(' · '))+')'};
   if(s.recommendationTriggerBlocked) return {state:'BLOCKED', reason:'Evidence trigger: '+(s.recommendationTriggerReasons||[]).join(', ')};
   if(s.noHistory===true) return {state:'BLOCKED', reason:'Listed too recently (insufficient history)'};
   if(s.basketEligible===false) return {state:'BLOCKED', reason:'Non-EQ series or price band < 10%'};
-
-  if(!ignoreMarketClosed && !isEquitySession(Date.now())){
-    return {state:'WAIT', reason:'Market closed — viewing last session state'};
-  }
-
-  const _stalePx=universePriceStaleness();
-  if(_stalePx) return {state:'BLOCKED', reason:_stalePx};
 
   const _vw=Number(s.vwap), _px=Number(s.price), _co=Number(s.changeOpen), _day=Number(s.day);
   const _aboveVwap=_vw>0&&_px>=_vw;
@@ -4855,23 +4824,24 @@ function _getRowActionStateUncached(s, ignoreMarketClosed=false){
     return {state:'BLOCKED', reason:s.intradayWhy||'5-minute tape selling today'};
 
   const freshness=getRecommendationFreshness(s.symbol);
-  if(!freshness.ok) return {state:'WAIT',reason:freshness.why};
-
-  const _sNum=Number(s.score);
-  if(!Number.isFinite(_sNum)||_sNum<RECOMMEND_MIN_SCORE)
-    return {state:'WAIT', reason:`Score ${Number.isFinite(_sNum)?_sNum.toFixed(1):'0.0'} < ${RECOMMEND_MIN_SCORE}`};
+  if(!freshness.ok&&isEquitySession(Date.now())) return {state:'WAIT',reason:freshness.why};
 
   if(!isDepthRecommendable(s.symbol))
     return {state:'BLOCKED', reason:'Sell volume exceeds buy volume'};
 
-  // Viability and Reachability Gate (v1338 / Part B):
-  // A row whose target cannot clear costs or is unreachable on the 5-minute tape is NOT actionable.
-  // Gated here so non-viable rows display WAIT, disable checkboxes, and are excluded from auto-buy baskets.
-  const exitPolicy=getRowExitPolicy(s);
-  if(exitPolicy&&exitPolicy.viable===false){
-    return {state:'WAIT', reason:exitPolicy.viabilitySource||'Target not reachable on 5-minute tape'};
-  }
-
+  return null;
+}
+function _getRowActionStateUncached(s, ignoreMarketClosed=false){
+  if(!s) return {state:'BLOCKED',reason:'Invalid row'};
+  if(s.scoreVersion!==RADAR_SCORE_VERSION) return {state:'BLOCKED',reason:'Older score scale - rescore required'};
+  if(!ignoreMarketClosed&&!isEquitySession(Date.now()))
+    return {state:'WAIT',reason:'Market closed — viewing last session state'};
+  const stale=universePriceStaleness();
+  if(stale) return {state:'BLOCKED',reason:stale};
+  if(!meetsScoreBar(s.score)) return {state:'WAIT',reason:s.scoreComponents?.block||`Score ${Number(s.score).toFixed(1)} < ${RECOMMEND_MIN_SCORE}`};
+  // Clock-dependent feed freshness is an execution safeguard, never a historical runway veto.
+  const freshness=getRecommendationFreshness(s.symbol);
+  if(!freshness.ok&&isEquitySession(Date.now())) return {state:'WAIT',reason:freshness.why};
   return {state:'GO', reason:'Actionable recommendation'};
 }
 function isSelectableRecommendation(s){
@@ -4890,14 +4860,14 @@ function radarScoreCell(score,title='',recommendationState=null){
   // In the recommendation table green means actionable. A score above the numeric bar while an
   // independent gate is pending is amber, matching the disabled checkbox beside it.
   const c=ok&&recommendationState===false?'var(--amber)':radarScoreColor(s);
-  const tip=title||(ok?`Clears the decision-score policy bar (${RECOMMEND_MIN_SCORE}); all independent gates must still pass.`
+  const tip=title||(ok?`Clears the decision-score policy bar (${RECOMMEND_MIN_SCORE}). Execution requires an open market and fresh data.`
     :`Below the decision-score policy bar — ${s.toFixed(1)} against ${RECOMMEND_MIN_SCORE}. This score is readiness evidence, not a profit probability.`);
   return `<span class="sc-m" style="font-family:'DM Mono',monospace;font-weight:800;font-size:15px;color:${c}" title="${escHtml(tip)}">${s.toFixed(1)}${ok?'':'<sub style="font-size:9px;color:var(--t3)">\u25be</sub>'}</span>`;
 }
 function rowStatusPillHtml(s){
   const act=getRowActionState(s);
   if(act.state==='GO'){
-    return `<span class="info-pill pill-green" style="padding:2px 8px;font-weight:700" title="Actionable recommendation clearing all technical gates">✓ GO</span>`;
+    return `<span class="info-pill pill-green" style="padding:2px 8px;font-weight:700" title="Clears Min Score; technical readiness is included in the final score">✓ GO</span>`;
   }
   if(act.state==='WAIT'){
     return `<span class="info-pill pill-amber" style="padding:2px 8px;max-width:220px;overflow:hidden;text-overflow:ellipsis;display:inline-block;vertical-align:middle" title="${escHtml(act.reason)}">⏳ ${escHtml(act.reason)}</span>`;
@@ -9877,7 +9847,7 @@ function _renderMethodologyInner(){
       <div class="m-card"><h4>Ranking Inputs</h4><p>Daily/Kite universe columns enter through typed transformations, robust percentiles and seven diagnostic groups. They set the Setup label, Risk classification, exchange context and entry/exit context; they do <strong>not</strong> make the numeric Decision Score. Exchange data adds authoritative series, price band, status, delivery, trades, 52-week range, surveillance and deal context.</p><div class="rr-groups" style="margin-top:10px">${groupsHTML}</div></div>
       <div class="m-card"><h4>What the Score Does</h4><ol style="padding-left:18px;color:var(--t2);font-size:14px;line-height:1.7">
         <li>Builds the numeric score from the continuous merged 5-minute tape window: net flow, price versus VWAP, crossover, participation and the measured impact term when its evidence-backed weight is non-zero.</li>
-        <li>Combines those tape terms with noisy-OR, then multiplies by permission. Permission reflects circuit headroom and tape standing; timing conditions scale the score, while structural vetoes reduce it to zero.</li>
+        <li>Combines those tape terms with noisy-OR, then multiplies by permission. Permission reflects circuit headroom and tape standing; technical readiness failures cap the final score below your Min Score, including when it is zero.</li>
         <li>Scores continuously from the merged tape. Current-session freshness remains a separate action-safety check; an absent tape is not treated as bearish, but it cannot produce a selectable recommendation.</li>
         <li>Uses the causal predictor, direction, listing history, selling state, entry timing, allocation viability and evidence-trigger checks as independent recommendation gates. A peak-timing block may supply a stock-specific LIMIT price; it is not silently treated as a market entry.</li>
         <li>Reports daily-column feature separation and same-session rocket separation for diagnostics. Neither same-session outcome labels nor the diagnostic composite feeds the Decision Score.</li>
@@ -9888,20 +9858,20 @@ function _renderMethodologyInner(){
       <div class="m-card"><h4>What Learns — and What Does Not</h4><p>The next-session predictor is rebuilt as each later session resolves, using only features captured before its outcome. It needs at least three resolved sessions, sign agreement in at least two-thirds of them, and a minimum mover/non-mover decile gap. Three causal challengers are graded before each new outcome is added. After five graded sessions, the champion must have positive cost-adjusted mean return and positive results in at least three of five sessions; the best qualifying mean return wins, with consistency as the tie-break. If none qualifies, prediction recommendations stand down instead of preserving a losing model. The predictor can therefore block a recommendation, but it does not supply the tape evidence magnitude. Same-session rocket separation and the seven daily-column groups remain diagnostic. Rank is row order, never a live gate. Realised trades may calibrate execution facts such as the fallback stop, review horizon, charges and entry cadence, but they never set automatic target magnitude.</p></div>
     </div>
     <h3 style="margin-top:28px">Live Recommendation Funnel</h3>
-    <p style="color:var(--t2);font-size:14.5px;line-height:1.7">A high score alone is not a recommendation. Rankings first require a positive day, price at or above VWAP, price above its open, the selected liquidity/price filters, exchange eligibility, configured surveillance and evidence-trigger checks, enough multi-day history, no current-session selling veto, and an allocatable economically viable order. The row must then clear <strong>Decision Score ${RECOMMEND_MIN_SCORE}</strong>, have a causal predictor with at least three resolved sessions, pass direction and entry timing, and hold a <strong>current confirmed 5-minute verdict</strong>. A peak-entry row with a valid pullback price may instead be recommended as a LIMIT buy at that price. Rank never gates the result; current-tape freshness is checked separately before selection or export.</p>
+    <p style="color:var(--t2);font-size:14.5px;line-height:1.7">The entry objective is to reach the stock's target before its stop, from the current entry price through the next trading close. Technical readiness, direction, exchange eligibility, surveillance, entry timing and current tape are included in the final score: a failing row is capped below <strong>Min Score ${RECOMMEND_MIN_SCORE}</strong>. During an open market with fresh data, above-bar rows in your filtered list are eligible; the basket selects up to 20 and respects manual exclusions. Capital, whole shares, costs and risk rails determine which selected rows can be funded. Historical remaining-session upside and recent 30-minute range are context, not next-day rejection rules. Scores and targets remain unvalidated forecasts, not probabilities or guaranteed returns.</p>
     <h3 id="meth-ledger" style="margin-top:28px">Feature Ledger <span style="font-size:14px;color:var(--t3);font-weight:400">(${RADAR.features.length||0} modeled of ${RADAR.headers.length||0} columns)</span></h3>
     ${buildRadarLedgerHTML()}
     ${buildIndicatorWatchHTML()}
     <div id="meth-hf-wrap">${hardFiltersHTML}</div>
     <h3 id="meth-performance" style="margin-top:28px">Performance Tab</h3>
-    <p style="color:var(--t2);font-size:14.5px;line-height:1.7">Performance describes realised execution history, not current recommendations. Its headline cards use closed Tradebook round trips net of charges; when Orders contains a newer booked session, that addendum updates only money totals and the Monthly Breakdown, while behavioural metrics remain Tradebook-only. The scorecard grades current-version recommendation cohorts on each pick's own target-before-stop result within ${ROCKET_HORIZON_DAYS} trading days; it is outcome evidence, not a ranking input. XIRR uses closed round trips only, so open positions are excluded. Latest Session and Open Positions are live portfolio surfaces on Rankings, not Performance.</p>
+    <p style="color:var(--t2);font-size:14.5px;line-height:1.7">Performance describes realised execution history, not current recommendations. Its headline cards use closed Tradebook round trips net of charges; when Orders contains a newer booked session, that addendum updates only money totals and the Monthly Breakdown, while behavioural metrics remain Tradebook-only. The scorecard grades current-version recommendation cohorts on each pick's own target-before-stop result within ${ROCKET_HORIZON_DAYS} trading days; completed, unambiguous outcomes calibrate the score scale after five issue sessions; deadline misses count as failures. This monotonic calibration preserves ranking and is not a probability estimate. XIRR uses closed round trips only, so open positions are excluded. Latest Session and Open Positions are live portfolio surfaces on Rankings, not Performance.</p>
     <h3 id="meth-guide" style="margin-top:28px">Use & Risk</h3>
     <div class="m-grid">
       <div class="m-card"><h4>Entry Workflow</h4><ol style="padding-left:18px;color:var(--t2);font-size:14px;line-height:1.7">
         <li>Keep Kite Connect logged in and let the live stream provide the current universe and 5-minute tape.</li>
-        <li>Use the recommendation state, not Score alone: ${RECOMMEND_MIN_SCORE} is the visible numeric policy bar, while direction, predictor, entry, allocation, surveillance and current-tape gates must also pass.</li>
-        <li>Direction, exchange restrictions, evidence triggers, listing history, current-session selling, entry timing and allocation viability are enforced before a row can be recommended.</li>
-        <li>Wait for the current-session 5-minute verdict and its freshness check. Unchecked, stale, rejected or unverified rows cannot be selected or exported; a peak-entry LIMIT row must use its displayed pullback price.</li>
+        <li>Use Min Score to select technical readiness. Market closure or stale live data pauses execution.</li>
+        <li>Readiness failures appear in the score and status. Allocation separately explains any selected row that cannot be funded.</li>
+        <li>Entries use current market price. Outcome audits sample new entry decisions every 30 minutes, with independent entry prices, targets and deadlines; repeated samples are correlated and are not independent trades.</li>
         <li>Review the row's market-derived target, stock-specific stop, expected net after charges and the rail that limits allocation before placing the basket.</li>
       </ol></div>
       <div class="m-card"><h4>Interpretation</h4><ul style="padding-left:18px;color:var(--t2);font-size:14px;line-height:1.7">
@@ -10288,15 +10258,17 @@ function getTapeRunwayPct(sym){
     const days=Object.keys(byDay).sort();
     if(days.length>=2){
       const today=byDay[days[days.length-1]].slice().sort((a,b)=>a.t-b.t);
-      const i=today.length-1;
+      const atMinute=istClock(today[today.length-1].t).mins;
       const travels=[];
       days.slice(0,-1).forEach(d=>{
         const bs=byDay[d].slice().sort((a,b)=>a.t-b.t);
-        if(i>=bs.length) return;               // that session was shorter; no comparable point
+        const i=bs.findIndex(b=>istClock(b.t).mins===atMinute);
+        if(i<0) return; // Align clocks, not row counts: missing bars must not shift the comparison.
         const ref=Number(bs[i].c);
         if(!(ref>0)) return;
-        let hi=-Infinity;
-        for(let k=i;k<bs.length;k++){ const h=Number(bs[k].h); if(h>hi) hi=h; }
+        let hi=ref;
+        // Entry is the completed bar's close; its earlier high was never forward opportunity.
+        for(let k=i+1;k<bs.length;k++){ const h=Number(bs[k].h); if(h>hi) hi=h; }
         if(hi>0&&isFinite(hi)) travels.push(100*(hi-ref)/ref);
       });
       // Two comparable sessions is the minimum that can carry a median at all. Below that the
@@ -10577,7 +10549,7 @@ function getRowExitPolicy(row,buyPrice=null,activeInfo=null,nudgeInfo=null){
       +' ('+reachRead.unitReach.toFixed(2)+'x its own capacity, p'+Math.round(reachRead.quantile*100)
       +' of '+reachRead.n+(reachRead.conditioned?' comparable moves)':' rows)');
   }
-  else if(tapeRunwayPct!=null){ available=tapeRunwayPct; availableSource='its own 5-minute tape'; }
+  else if(tapeRunwayPct!=null){ available=tapeRunwayPct; availableSource='historical remaining-session upside (not a next-day forecast)'; }
   else if(sessionRunwayUsable!=null){ available=sessionRunwayUsable; availableSource='the session ceiling'; }
   else if(capacity>0){ available=capacity; availableSource='its range capacity'; }
   // The circuit is what it may LEGALLY reach and bounds every estimate.
@@ -10601,7 +10573,7 @@ function getRowExitPolicy(row,buyPrice=null,activeInfo=null,nudgeInfo=null){
       ? ('what the market has left, read from '+availableSource)
       : (active.source==='manual' ? 'manual target anchor' : active.source==='goal' ? 'daily goal target anchor' : 'target anchor floor');
   }
-  if(circuitRunwayPct!=null&&circuitRunwayPct>0&&targetPct>circuitRunwayPct){
+  if(exitingToday&&circuitRunwayPct!=null&&circuitRunwayPct>0&&targetPct>circuitRunwayPct){
     targetPct=toStep(circuitRunwayPct);
     nudgePct=+(targetPct-basePct).toFixed(2);
     targetSource='bounded by the NSE circuit';
@@ -10622,31 +10594,19 @@ function getRowExitPolicy(row,buyPrice=null,activeInfo=null,nudgeInfo=null){
   const uc=getUpperCircuitInfo(row,bandRef);
   const bandLimited=!!(uc&&basePct>0&&uc.runwayPct<basePct);
   const rangeExhausted=!!(sc&&basePct>0&&sc.runwayPct<basePct);
-  // v1212/v1334: viability is decided on the target the row will ACTUALLY be given - but only where the
-  // number that set it is HARD. v1112 (owner) removed the statistical session ceiling from this
-  // decision after measuring twice that the cohort it deletes is the cohort that reaches target
-  // (349 of 900 rows, most of the top ten), and that stands: a low session ceiling may lower the
-  // PRICE printed on a row, it may never be the reason the row is withheld.
-  // The stock's OWN 5-minute tape is not a statistical ceiling - it is what this stock actually did
-  // from this point in the session, on its own sessions. Where that exists it decides affordability,
-  // and the row is withheld when it cannot clear costs plus the desired net. Where it does not, the
-  // basis falls back to the stock's own range capacity, exactly as before v1212.
-  // v1216/v1334: AFFORDABILITY IS UNCHANGED FROM v1212, deliberately. The clock read or statistical
-  // session ceiling is a statement about typical session profiles, and v1112's settled rule is that
-  // a statistical session ceiling may lower the PRICE on a row but may NEVER be the reason the row is
-  // withheld. Therefore, only the stock's OWN tape runway decides affordability; where it does not
-  // exist, the basis falls back to the stock's own range capacity (or basePct).
+  // Fresh entries have until NEXT trading close. Historical same-day travel and recent
+  // unsigned range cannot prove that deadline impossible; both remain labelled context.
   const marketRead=marketReadEarly;
-  const viabilityBasis=(tapeRunwayPct!=null)?tapeRunwayPct:(capacity>0?capacity:basePct);
-  // C1 & C3: 30-minute tape reachability gate (AUC 0.756, t=32.3). Volatility range requirement
-  // scaled by minute-of-day remaining. Never withholds on the session ceiling; checks live tape range.
+  const viabilityBasis=targetPct;
   const tapeReach=tapeReachability(row?.symbol,targetPct);
-  const reachBlocked=!!(tapeReach&&tapeReach.reachable===false);
-  const viabilitySource=(reachBlocked&&tapeReach)
-    ?((tapeReach.minsToClose!=null&&tapeReach.minsToClose<15)?'Session close imminent':`30-minute tape range (${tapeReach.winRangePct}% < min ${tapeReach.effectiveMinRange}%)`)
-    :(tapeRunwayPct!=null?'5-minute tape runway':(capacity>0?'Whole-day stock capacity':'Target anchor floor'));
-  const viable=viabilityBasis>0&&!bandLimited&&!reachBlocked&&(minGrossPct==null||viabilityBasis+1e-9>=minGrossPct);
+  const reachBlocked=false;
+  const viabilitySource='Target economics';
+  const viable=targetPct>0&&(minGrossPct==null||targetPct+1e-9>=minGrossPct);
   const belowMarketRead=!!(available!=null&&targetPct>available);
+  const horizonNote=(exitingToday?'Existing position exit policy.':'Entry objective: target before stop, by next trading close; predictive accuracy unvalidated.')
+    +(tapeRunwayPct!=null?` Historical remaining-session upside: ${tapeRunwayPct.toFixed(2)}% (context only).`:'')
+    +(tapeReach?` Recent 30-minute range: ${tapeReach.winRangePct.toFixed(2)}%; target is ${Number.isFinite(tapeReach.coverage)?tapeReach.coverage.toFixed(1):'unbounded'} times that range (not a forecast).`:'')
+    +(!exitingToday&&bandLimited?" Target exceeds today's circuit headroom; reaching it may require the next session.":'');
 
   // A4(2): Surface CNC after-cost floor if lot size / fixed DP charge pushes after-cost break-even above target
   let positionFloorPct=null;
@@ -10708,7 +10668,7 @@ function getRowExitPolicy(row,buyPrice=null,activeInfo=null,nudgeInfo=null){
     wholeDayReachPct:wholeDayReachPct!=null?+wholeDayReachPct.toFixed(2):null,
     targetRefPrice:targetRefPrice>0?+targetRefPrice.toFixed(2):null,targetRefSource,
     viabilityBasisPct:viabilityBasis>0?+viabilityBasis.toFixed(2):null,
-    viabilitySource,
+    viabilitySource,horizonNote,
     belowMarketRead,
     tapeReach,
     reachBlocked,
@@ -11267,10 +11227,7 @@ function getAllocationBlockReason(s,ctx=null){
   const rail=Math.min(c.maxAlloc>0?c.maxAlloc:c.capital,turnoverCap,topUpCap,riskCap);
   if(rail<buyP) return `allocation rails (${fmtINR(rail)}) are below one share at ${fmtINR(buyP)}`;
   const policy=getRowExitPolicy(s,buyP,c.active);
-  if(policy&&policy.bandLimited) return `only ${policy.bandRunwayPct}% left to the ${policy.bandPct}% upper circuit (₹${policy.ucPrice}) — the ${policy.basePct}% target cannot be reached inside today's band`;
-  if(policy&&policy.viable===false) return policy.viabilitySource || (policy.capacityPct!=null
-    ? `stock capacity ${policy.capacityPct.toFixed(2)}% cannot clear the ${policy.minGrossPct?.toFixed(2)??'—'}% cost + net hurdle`
-    : 'no viable target after costs');
+  if(policy&&policy.viable===false) return `Target ${policy.targetPct?.toFixed(2)??'unknown'}% is below the ${policy.minGrossPct?.toFixed(2)??'unknown'}% costs + net hurdle`;
   const floorRs=getDesiredNetRupees();
   if(floorRs>0){
     const ec=getRowRupeeEconomics(s,rowAchievableNotional(s,c),policy,c);
@@ -11307,7 +11264,7 @@ function computeAlloc(capital, selList){
   function evalNet(s,buyP,qty){
     const policy=getRowExitPolicy(s,buyP);
     if(policy&&policy.viable===false){
-      return {ok:false,rejected:true,reason:policy.viabilitySource||'Target not viable after costs',policy};
+      return {ok:false,rejected:true,reason:`Target ${policy.targetPct?.toFixed(2)??'unknown'}% does not cover the ${policy.minGrossPct?.toFixed(2)??'unknown'}% costs + net hurdle`,policy};
     }
     const tgtPct=policy.targetPct;
     if(tgtPct===null||tgtPct<=0) return {ok:true,skip:true,policy};
@@ -11812,7 +11769,7 @@ function renderTable(){
       // v1144: TGT and SL merged. They are ONE decision - what you ask for against what you risk -
       // and the two columns were part of why the table needed a horizontal scrollbar, which the
       // owner has ruled out. Both numbers survive, with their full tooltips.
-      tgt:`<td style="font-weight:700" title="${escHtml((exitPolicy.viable?`${exitPolicy.targetSource}. You need ${exitPolicy.anchorPct?.toFixed(2)??'—'}% per trade to hold pace; this row offers ${exitPolicy.targetPct?.toFixed(2)??'—'}%${exitPolicy.belowMarketRead?` (market read is ${exitPolicy.marketAvailablePct?.toFixed(2)}%)`:''}${exitPolicy.positionFloorPct>exitPolicy.targetPct?` · CNC after-cost floor is ${exitPolicy.positionFloorPct.toFixed(2)}%`:''}${(exitPolicy.anchorPct>0&&exitPolicy.targetPct>0&&exitPolicy.targetPct<exitPolicy.anchorPct)?' — short of it':''}`:`${exitPolicy.viabilitySource||'Stock capacity'} ${exitPolicy.viabilityBasisPct?.toFixed(2)??'—'}% cannot clear the ${exitPolicy.minGrossPct?.toFixed(2)??'—'}% cost + net hurdle`)+' · '+exitPolicy.stopSource+(exitPolicy.rewardRisk!=null?` · reward:risk ${exitPolicy.rewardRisk.toFixed(2)}`+(exitPolicy.rewardRisk<1?' — BELOW 1.0: this stock risks more than it aims to make':''):''))}"><span style="color:${exitPolicy.viable?'var(--green)':'var(--red)'}">${exitPolicy.viable&&exitPolicy.targetPct!=null?'+'+exitPolicy.targetPct.toFixed(2)+'%':'—'}</span><span style="color:var(--t3)"> / </span><span style="color:var(--red)">−${exitPolicy.stopPct.toFixed(2)}%</span></td>`,
+      tgt:`<td style="font-weight:700" title="${escHtml((exitPolicy.viable?`${exitPolicy.targetSource}. You need ${exitPolicy.anchorPct?.toFixed(2)??'—'}% per trade to hold pace; this row offers ${exitPolicy.targetPct?.toFixed(2)??'—'}%${exitPolicy.belowMarketRead?` (market read is ${exitPolicy.marketAvailablePct?.toFixed(2)}%)`:''}${exitPolicy.positionFloorPct>exitPolicy.targetPct?` · CNC after-cost floor is ${exitPolicy.positionFloorPct.toFixed(2)}%`:''}${(exitPolicy.anchorPct>0&&exitPolicy.targetPct>0&&exitPolicy.targetPct<exitPolicy.anchorPct)?' — short of it':''}`:`${exitPolicy.viabilitySource||'Stock capacity'} ${exitPolicy.viabilityBasisPct?.toFixed(2)??'—'}% cannot clear the ${exitPolicy.minGrossPct?.toFixed(2)??'—'}% cost + net hurdle`)+' · '+exitPolicy.horizonNote+' '+exitPolicy.stopSource+(exitPolicy.rewardRisk!=null?` · reward:risk ${exitPolicy.rewardRisk.toFixed(2)}`+(exitPolicy.rewardRisk<1?' — BELOW 1.0: this stock risks more than it aims to make':''):''))}"><span style="color:${exitPolicy.viable?'var(--green)':'var(--red)'}">${exitPolicy.viable&&exitPolicy.targetPct!=null?'+'+exitPolicy.targetPct.toFixed(2)+'%':'—'}</span><span style="color:var(--t3)"> / </span><span style="color:var(--red)">−${exitPolicy.stopPct.toFixed(2)}%</span></td>`,
       alloc:`<td class="alloc-cell" data-sym="${s.symbol}">${(()=>{
         if(!am){
           if(canBuy && isSelected){
@@ -13057,15 +13014,15 @@ function patchUniverseDeltas(deltaRows){
     const f = deltaRows[sym];
     const s = symMap.get(sym);
     if(s && f){
-      const prevPx = s.price;
       const prevScore = s.score;
+      const prevInputs=[s.price,s.day,s.changeOpen,s.turnover,s.vwap,s.volume].join('|');
       if(Number.isFinite(f.price)) s.price = f.price;
       if(Number.isFinite(f.dayPct)) s.day = f.dayPct;
       if(Number.isFinite(f.changeOpenPct)) s.changeOpen = f.changeOpenPct;
       if(Number.isFinite(f.turnover)) s.turnover = f.turnover;
       if(Number.isFinite(f.vwap)) s.vwap = f.vwap;
       if(Number.isFinite(f.volume)) s.volume = f.volume;
-      if(prevPx !== s.price){
+      if(prevInputs!==[s.price,s.day,s.changeOpen,s.turnover,s.vwap,s.volume].join('|')){
         setRadarEvidenceScore(s);
         scoreMoved = true;
         ROW_ACTION_MEMO.delete(s);
@@ -13707,7 +13664,6 @@ function applyFilters({preservePage=false}={}){
       else if(act.reason.includes('lifting off')) DIRECTION_REMOVED++;
     } else if(act.state==='WAIT'){
       if(act.reason.includes('Extended')) PEAK_TIMING_REMOVED++;
-      else if(act.reason.includes('tape range') || act.reason.includes('hurdle') || act.reason.includes('viable') || act.reason.includes('capacity') || act.reason.includes('cost')) ALLOC_BLOCKED++;
     }
     return true;
   });
