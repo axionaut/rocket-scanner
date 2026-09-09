@@ -1,5 +1,5 @@
-const BUILD_TS='2026-09-09 11:00 IST'; // release build time (IST)
-const APP_VERSION=1327; // v1327: Restrict eligible recommendations strictly to GO (market price), continuous acceleration guard, canonical basket sync & serialized writer queue.
+const BUILD_TS='2026-09-09 11:10 IST'; // release build time (IST)
+const APP_VERSION=1328; // v1328: Settle all queue waiters, in-flight reconciliation, string reason for WAIT extended rows & strict positive helper acknowledgement.
 const RADAR_SCORE_VERSION='tape-decision-v4';
 function isValidChangeOpen(v){
   if(v===null||v===undefined||typeof v==='boolean') return false;
@@ -4674,7 +4674,7 @@ function _getRowActionStateUncached(s, ignoreMarketClosed=false){
 
 
   if(s.entryReady===false)
-    return {state:'WAIT', reason:s.entryTiming||'Extended (upper-quarter peak timing)'};
+    return {state:'WAIT', reason:(typeof s.entryTiming==='string'?s.entryTiming:s.entryTiming?.reason)||'Extended (upper-quarter peak timing)'};
 
   if(s.intradaySellingToday===true)
     return {state:'BLOCKED', reason:s.intradayWhy||'5-minute tape selling today'};
@@ -11314,7 +11314,7 @@ function renderBasketBtn(){
   const ageSec=_lastSavedBasketAt>0?Math.max(0,Math.round((Date.now()-_lastSavedBasketAt)/1000)):0;
 
   let syncNote='';
-  if(_basketWriterInFlight||_pendingBasketTask||_autoBasketTimer){
+  if(_basketWriterInFlight||_pendingWaiters.length>0||_autoBasketTimer){
     syncNote=' · Updating Zerodha_Basket_Buy.json…';
   } else if(_lastBasketSyncError){
     syncNote=` · Auto-sync failed: ${_lastBasketSyncError}`;
@@ -14911,7 +14911,8 @@ function getDesiredBasketOrders(){
 }
 
 let _basketWriterInFlight = false;
-let _pendingBasketTask = null;
+let _inFlightBasketSig = null;
+let _pendingWaiters = []; // [{ resolve, reject, manual }]
 let _lastSavedBasketSig = '';
 let _lastSavedBasketAt = 0;
 let _lastBasketSyncError = null;
@@ -14930,46 +14931,67 @@ function requestBasketSync({ manual = false } = {}){
     const orders = getDesiredBasketOrders();
     const sig = getCanonicalBasketSignature(orders);
 
-    if(!manual && sig === _lastSavedBasketSig){
+    // Skip only when completely idle, no waiters pending, and disk already has desired payload
+    if(!manual && !_basketWriterInFlight && _pendingWaiters.length === 0 && sig === _lastSavedBasketSig){
       resolve({ ok: true, skipped: true });
       return;
     }
 
-    _pendingBasketTask = { orders, signature: sig, manual, resolve, reject };
+    _pendingWaiters.push({ resolve, reject, manual });
     renderBasketBtn();
     _drainBasketQueue();
   });
 }
 
 async function _drainBasketQueue(){
-  if(_basketWriterInFlight || !_pendingBasketTask) return;
+  if(_basketWriterInFlight) return;
+
+  const orders = getDesiredBasketOrders();
+  const targetSig = getCanonicalBasketSignature(orders);
+  const waiters = _pendingWaiters.slice();
+  _pendingWaiters = [];
+
+  // If nothing changed and no manual export requested, resolve waiting callers and return
+  if(targetSig === _lastSavedBasketSig && !waiters.some(w => w.manual)){
+    waiters.forEach(w => {
+      try { w.resolve({ ok: true, count: orders.length, skipped: true }); } catch(e){}
+    });
+    return;
+  }
+
   _basketWriterInFlight = true;
-  const task = _pendingBasketTask;
-  _pendingBasketTask = null;
+  _inFlightBasketSig = targetSig;
+  renderBasketBtn();
 
   try {
-    const { orders, signature, manual, resolve, reject } = task;
     const payload = orders.map(o => { const c = { ...o }; delete c._meta; return c; });
     const saved = await saveBasketToScannerUploads(payload, 'Zerodha_Basket_Buy');
     if(saved){
-      _lastSavedBasketSig = signature;
+      _lastSavedBasketSig = targetSig;
       _lastSavedBasketAt = Date.now();
       _lastBasketSyncError = null;
-      renderBasketBtn();
-      if(resolve) resolve({ ok: true, count: orders.length });
+      waiters.forEach(w => {
+        try { w.resolve({ ok: true, count: orders.length }); } catch(e){}
+      });
     } else {
       _lastBasketSyncError = 'Save rejected by helper';
-      renderBasketBtn();
-      if(reject) reject(new Error('Save rejected by helper'));
+      waiters.forEach(w => {
+        try { w.reject(new Error('Save rejected by helper')); } catch(e){}
+      });
     }
   } catch(e) {
     _lastBasketSyncError = e?.message || String(e);
-    renderBasketBtn();
-    if(task.reject) task.reject(e);
+    waiters.forEach(w => {
+      try { w.reject(e); } catch(x){}
+    });
   } finally {
     _basketWriterInFlight = false;
+    _inFlightBasketSig = null;
     renderBasketBtn();
-    if(_pendingBasketTask){
+    // Reconcile: if board changed while in-flight or new waiters arrived, drain again immediately
+    const freshOrders = getDesiredBasketOrders();
+    const freshSig = getCanonicalBasketSignature(freshOrders);
+    if(freshSig !== _lastSavedBasketSig || _pendingWaiters.length > 0){
       _drainBasketQueue();
     }
   }
@@ -15038,15 +15060,12 @@ async function saveBasketToScannerUploads(orders, filename){
     });
     const j = r.ok ? await r.json() : null;
     if(!j?.ok){
-      if(orders.length === 0 && j?.why === 'basket has no orders'){
-        return true;
-      }
       throw new Error(j?.why || ('helper HTTP ' + r.status));
     }
     return true;
   } catch(e) {
     console.warn('Basket save through helper failed:', e);
-    return false;
+    throw e;
   } finally {
     if(timer) clearTimeout(timer);
   }
