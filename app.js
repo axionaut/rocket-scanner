@@ -1,5 +1,5 @@
-const BUILD_TS='2026-09-09 11:40 IST'; // release build time (IST)
-const APP_VERSION=1329; // v1329: Fix reconcile retry loop, align exportBasket with desired orders, fully retire entryAtLimit from scoring, and remove dead state.
+const BUILD_TS='2026-09-09 11:55 IST'; // release build time (IST)
+const APP_VERSION=1330; // v1330: Complete entryAtLimit retirement, drop live price churn from basket signature & optimize allocation passes.
 const RADAR_SCORE_VERSION='tape-decision-v4';
 function isValidChangeOpen(v){
   if(v===null||v===undefined||typeof v==='boolean') return false;
@@ -2555,6 +2555,7 @@ function resolveNetRecommendation(p,asOf){
   if(eligible.length&&eligible[0].t>Math.ceil(p.issuedAt/TAPE_BAR_MS)*TAPE_BAR_MS) p.evidenceIncomplete=true;
   const partial=bars.find(b=>b.t<p.issuedAt&&b.t+TAPE_BAR_MS>p.issuedAt);
   if(partial&&(partial.l<=p.entryPrice*(1-p.stopPct/100)||partial.h>=p.entryPrice*(1+p.targetPct/100))) p.evidenceIncomplete=true;
+  // Preserved for replaying pre-v1329 historical records that carried LIMIT:
   let entry=p.entryPrice,entered=p.orderType!=='LIMIT',exit=null,exitBar=null;
   let prev=null;
   for(const b of eligible){
@@ -4306,14 +4307,8 @@ function getMarketAlignedEntryTiming(row,marketIntraday=MARKET_INTRADAY){
   // broad market is a condition with no level to name; all three stay vetoes. Measured on the
   // release board: of 2,530 entry-blocked rows, 347 are peak blocks carrying a usable price, 594
   // are gap-led fades, 56 are failed breakouts and 1,533 are the weak-market overlay.
-  // The level must be STRICTLY below the last price. pullbackPrice is low+0.75*(high-low) and the
-  // peak block needs rangeLocation>=0.75, so they meet exactly at the boundary and tick-rounding can
-  // put the level a hair above the market - where a LIMIT buy is just a market order with extra
-  // steps and no pullback to wait for.
-  const limitEntry=!!local.blocked&&!local.gapLedFade&&!local.failedBreakout
-    &&!weakMarketBlocked&&Number(local.pullbackPrice)>0&&Number(local.pullbackPrice)<Number(price);
   return {
-    ...local,_local:false,blocked,marketWeak,stockConfirmed,weakMarketBlocked,limitEntry,
+    ...local,_local:false,blocked,marketWeak,stockConfirmed,weakMarketBlocked,
     action:local.action||(weakMarketBlocked?'wait for stock + market confirmation':''),
     reason
   };
@@ -5989,28 +5984,21 @@ function* radarAnalyzeGen(headers,rawRows,supplements={},heldSymbols=new Set()){
     // wholesale — merging R4d any earlier silently lost it. Entry timing has exactly one final
     // author, and this is it.
     if(r.r4d&&r.r4d.blocked){
-      r.entryTiming={...r.entryTiming,blocked:true,digestionRisk:true,limitEntry:false,
+      r.entryTiming={...r.entryTiming,blocked:true,digestionRisk:true,
         reason:r.entryTiming.reason?r.entryTiming.reason+'; '+r.r4d.reason:r.r4d.reason,
         action:r.entryTiming.action||'Wait for re-accumulation'};
     } else r.entryTiming.digestionRisk=false;
     r.entryReady=!r.entryTiming.blocked;
-    // entryReady stays FALSE - the row is still not buyable AT MARKET. What changes is that it is
-    // buyable at a named level instead of being erased.
-    r.entryAtLimit=r.entryTiming.limitEntry===true;
-    r.entryLimitPrice=r.entryAtLimit?Number(r.entryTiming.pullbackPrice):null;
   }
-  // THE v1232 DEFECT CLASS AGAIN: this pass is the FINAL author of entryReady/entryAtLimit, and the
-  // score was computed before it ran, so a row the entry pass had just made buyable-at-a-limit kept
-  // the zero it was given while the veto still applied. Measured: CAPLIPOINT computed 88.2 on demand
-  // while carrying r.score 0, and the board went from 10 selectable to 28 on a plain rescore.
-  // Rescore once the flags are known - the same rule v1232 wrote for intradaySellingToday.
+  // THE v1232 DEFECT CLASS AGAIN: this pass is the FINAL author of entryReady, and the score
+  // was computed before it ran. Rescore once the flags are known.
   for(let _fi=0;_fi<rows.length;_fi++){ if(_fi&&(_fi&15)===0) yield; setRadarEvidenceScore(rows[_fi],rows[_fi]._tapeStanding); }
   applyLearnedRecommendationGates(rows);
   yield;                              // the tape reorder below is the last phase of the pass
   // THE TAPE REORDER MOVED HERE, AND THIS IS THE REAL v1237 ORDERING FIX. It used to run BEFORE the
   // market-aligned entry pass above - the pass this file already calls "exactly one final author" of
-  // entry timing - so it set verdicts, rescored and recorded the distribution from entryReady and
-  // entryAtLimit that DID NOT EXIST YET. Measured: CAPLIPOINT computed 88.2 on demand while carrying
+  // entry timing - so it set verdicts, rescored and recorded the distribution from entryReady
+  // that DID NOT EXIST YET. Measured: CAPLIPOINT computed 88.2 on demand while carrying
   // score 0 and verdict 'rejected', and 18 rows cleared the full recommendation bar while every one
   // of them read rejected and none could be selected.
   yield* applyIntradayReorderGen(rows);
@@ -14889,7 +14877,6 @@ function getCanonicalBasketSignature(orders){
     side: o.params?.transactionType || 'BUY',
     prod: o.params?.product || 'CNC',
     px: Number(o.params?.price) || 0,
-    last: Number(o.params?.lastPrice) || 0,
     tgt: Number(o.params?.gtt?.target) || 0,
     tags: Array.isArray(o.params?.tags) ? [...o.params.tags].sort().join(',') : ''
   })).sort((a, b) => a.sym.localeCompare(b.sym) || a.qty - b.qty);
@@ -14918,9 +14905,9 @@ function scheduleAutoSyncBasket(delayMs = 300){
   }, delayMs);
 }
 
-function requestBasketSync({ manual = false } = {}){
+function requestBasketSync({ manual = false, precomputedOrders = null } = {}){
   return new Promise((resolve, reject) => {
-    const orders = getDesiredBasketOrders();
+    const orders = precomputedOrders || getDesiredBasketOrders();
     const sig = getCanonicalBasketSignature(orders);
 
     // Skip only when completely idle, no waiters pending, and disk already has desired payload
@@ -14931,14 +14918,14 @@ function requestBasketSync({ manual = false } = {}){
 
     _pendingWaiters.push({ resolve, reject, manual });
     renderBasketBtn();
-    _drainBasketQueue();
+    _drainBasketQueue(orders);
   });
 }
 
-async function _drainBasketQueue(){
+async function _drainBasketQueue(preferredOrders = null){
   if(_basketWriterInFlight) return;
 
-  const orders = getDesiredBasketOrders();
+  const orders = preferredOrders || getDesiredBasketOrders();
   const targetSig = getCanonicalBasketSignature(orders);
   const waiters = _pendingWaiters.slice();
   _pendingWaiters = [];
@@ -14957,21 +14944,14 @@ async function _drainBasketQueue(){
   let writeOk = false;
   try {
     const payload = orders.map(o => { const c = { ...o }; delete c._meta; return c; });
-    const saved = await saveBasketToScannerUploads(payload, 'Zerodha_Basket_Buy');
-    if(saved){
-      writeOk = true;
-      _lastSavedBasketSig = targetSig;
-      _lastSavedBasketAt = Date.now();
-      _lastBasketSyncError = null;
-      waiters.forEach(w => {
-        try { w.resolve({ ok: true, count: orders.length }); } catch(e){}
-      });
-    } else {
-      _lastBasketSyncError = 'Save rejected by helper';
-      waiters.forEach(w => {
-        try { w.reject(new Error('Save rejected by helper')); } catch(e){}
-      });
-    }
+    await saveBasketToScannerUploads(payload, 'Zerodha_Basket_Buy');
+    writeOk = true;
+    _lastSavedBasketSig = targetSig;
+    _lastSavedBasketAt = Date.now();
+    _lastBasketSyncError = null;
+    waiters.forEach(w => {
+      try { w.resolve({ ok: true, count: orders.length }); } catch(e){}
+    });
   } catch(e) {
     _lastBasketSyncError = e?.message || String(e);
     waiters.forEach(w => {
@@ -14984,7 +14964,7 @@ async function _drainBasketQueue(){
     const freshOrders = getDesiredBasketOrders();
     const freshSig = getCanonicalBasketSignature(freshOrders);
     if((writeOk && freshSig !== _lastSavedBasketSig) || _pendingWaiters.length > 0){
-      _drainBasketQueue();
+      _drainBasketQueue(freshOrders);
     }
   }
 }
@@ -15018,13 +14998,9 @@ async function exportBasket(){
     }
     if(orders.length > 20) throw new Error(`Basket planning invariant failed: ${orders.length} orders`);
 
-    const res = await requestBasketSync({ manual: true });
-    if(res?.ok){
-      const targetNote = orders.some(o => o.params?.gtt?.target) ? ' with target GTTs' : '';
-      showToast(`<strong>Exported ${orders.length} CNC BUY orders</strong> for ${new Set(orders.map(o => o._meta.sym)).size} selected stocks${targetNote} as Zerodha_Basket_Buy.json`);
-    } else {
-      showToast('Basket export failed: helper did not save file', 5000, true);
-    }
+    await requestBasketSync({ manual: true, precomputedOrders: orders });
+    const targetNote = orders.some(o => o.params?.gtt?.target) ? ' with target GTTs' : '';
+    showToast(`<strong>Exported ${orders.length} CNC BUY orders</strong> for ${new Set(orders.map(o => o._meta.sym)).size} selected stocks${targetNote} as Zerodha_Basket_Buy.json`);
   } catch(e) {
     console.error('Basket export failed', e);
     showToast('Basket export failed: ' + (e?.message || e), 6000, true);
