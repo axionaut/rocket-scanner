@@ -1,5 +1,5 @@
-const BUILD_TS='2026-09-09 14:15 IST'; // release build time (IST)
-const APP_VERSION=1335; // v1335: Empirical tape reachability gate, evidence weight rebalance, closed outcome loop, timestamped outcome extremes & basket prune hoist.
+const BUILD_TS='2026-09-09 14:35 IST'; // release build time (IST)
+const APP_VERSION=1336; // v1336: In-session reachability guard, memoized tape window, per-band outcome feedback, proportional weights & truthful tooltip.
 const RADAR_SCORE_VERSION='tape-decision-v5';
 function isValidChangeOpen(v){
   if(v===null||v===undefined||typeof v==='boolean') return false;
@@ -2743,7 +2743,8 @@ function recordRecommendationOutcomeScan(scan){
       p.evaluatedThrough=scan.date;
       if(highProfit!=null&&(p.bestHighProfitPct==null||highProfit>p.bestHighProfitPct)){
         p.bestHighProfitPct=+highProfit.toFixed(2);p.bestDays=gap;
-        p.bestHighAt=scan.ts||Date.now();
+        p.bestHighSeenAt=scan.ts||Date.now();
+        p.bestHighAt=p.bestHighSeenAt;
       }
       if(closeProfit!=null&&(p.bestCloseProfitPct==null||closeProfit>p.bestCloseProfitPct)){
         p.bestCloseProfitPct=+closeProfit.toFixed(2);
@@ -2754,7 +2755,8 @@ function recordRecommendationOutcomeScan(scan){
       }
       if(lowProfit!=null&&(p.worstLowProfitPct==null||lowProfit<p.worstLowProfitPct)){
         p.worstLowProfitPct=+lowProfit.toFixed(2);
-        p.worstLowAt=scan.ts||Date.now();
+        p.worstLowSeenAt=scan.ts||Date.now();
+        p.worstLowAt=p.worstLowSeenAt;
       }
       p.horizonDays=horizon;
       if(gap<=checkpoint){
@@ -3169,17 +3171,50 @@ function getRecommendationOutcomeSummary(){
     issueDays:issues.length,horizonDays:currentHorizon
   };
 }
-function getRecentOutcomeMultiplier(){
+function getScoreBandKey(score){
+  const s=Number(score);
+  if(!Number.isFinite(s)) return 'unknown';
+  if(s>=80) return '80+';
+  if(s>=70) return '70-79';
+  if(s>=60) return '60-69';
+  return '<60';
+}
+let _bandOutcomeMemo=null;
+function getBandOutcomeMultiplier(score){
   try{
-    const summary=getRecommendationOutcomeSummary();
-    if(!summary||!summary.resolvedRockets||summary.resolvedRockets<5) return 1.0;
-    const wins=summary.rockets||0;
-    const losses=summary.stoppedOut||0;
-    const total=wins+losses;
-    if(total>=5){
-      const winRate=wins/total;
-      return +clampNum(0.70+0.60*winRate,0.80,1.20).toFixed(2);
+    const band=getScoreBandKey(score);
+    const store=FS.get(RECOMMEND_OUTCOME_STORE)||{};
+    const issues=store.issues||{};
+    const issueKeys=Object.keys(issues);
+    const sig=issueKeys.length+':'+(store.updatedAt||'');
+    if(!_bandOutcomeMemo||_bandOutcomeMemo.sig!==sig){
+      const bands={};
+      Object.values(issues).forEach(issue=>{
+        (issue.picks||[]).forEach(p=>{
+          if(p.control) return;
+          const b=getScoreBandKey(p.score);
+          if(!bands[b]) bands[b]={wins:0,losses:0,total:0};
+          if(isRocketOutcome(p)){
+            bands[b].wins++;
+            bands[b].total++;
+          } else if(p.rocketOutcome===ROCKET_OUTCOME.STOPPED){
+            bands[b].losses++;
+            bands[b].total++;
+          }
+        });
+      });
+      const mults={};
+      Object.entries(bands).forEach(([b,st])=>{
+        if(st.total>=5){
+          const winRate=st.wins/st.total;
+          mults[b]=+clampNum(0.70+0.60*winRate,0.80,1.20).toFixed(2);
+        } else {
+          mults[b]=1.0;
+        }
+      });
+      _bandOutcomeMemo={sig,mults,bands};
     }
+    return _bandOutcomeMemo.mults[band]??1.0;
   }catch(e){}
   return 1.0;
 }
@@ -3796,13 +3831,22 @@ const TAPE_NETVOL_BARS=3;     // Three recent bars for the participation compari
 const TAPE_VWAP_BARS=5;       // Legacy diagnostic aggregation; scoring VWAP uses every window bar.
 // Retain six completed bars across sessions. Both pressure and VWAP use the whole window.
 const TAPE_MIN_SESSION_BARS=2*TAPE_NETVOL_BARS;
-function continuousTapeWindow(all){
+const _continuousTapeMemo=new Map();
+function continuousTapeWindow(all,symKey){
   if(!Array.isArray(all)||all.length<TAPE_MIN_SESSION_BARS) return null;
+  const key=symKey?(symKey+':'+all.length+':'+(all[all.length-1]?.t||'')):null;
+  if(key&&_continuousTapeMemo.has(key)) return _continuousTapeMemo.get(key);
   // INTRADAY_BARS is the merged, timestamp-ordered store. Keep the minimum measured horizon so
   // yesterday's tape bridges startup/pre-open without allowing an old session to dominate today's
   // live read. The exchange gap remains visible as a real time gap; it is not fabricated away.
-  const complete=all.filter(b=>Number(b.t)+5*60*1000<=Date.now());
-  return complete.length>=TAPE_MIN_SESSION_BARS?complete.slice(-TAPE_MIN_SESSION_BARS):null;
+  const now=Date.now();
+  const complete=all.filter(b=>Number(b.t)+5*60*1000<=now);
+  const res=complete.length>=TAPE_MIN_SESSION_BARS?complete.slice(-TAPE_MIN_SESSION_BARS):null;
+  if(key){
+    if(_continuousTapeMemo.size>2000) _continuousTapeMemo.clear();
+    _continuousTapeMemo.set(key,res);
+  }
+  return res;
 }
 // MEASURED 2026-09-09 on 52,616 same-session samples: the 6-bar window range as a % of price
 // separates "reaches +2.6% in 60m" at AUC 0.756 (t=32.3). The whole evidence blend scores 0.502
@@ -3817,44 +3861,55 @@ function getTapeReachabilityCut(){
   for(const k of keys){
     const all=INTRADAY_BARS[k];
     if(!all||all.length<TAPE_MIN_SESSION_BARS) continue;
-    const w=continuousTapeWindow(all);
+    const w=continuousTapeWindow(all,k);
     if(!w||!w.length) continue;
     const last=w[w.length-1].c;
     if(!(last>0)) continue;
     const rngPct=100*(Math.max(...w.map(b=>b.h))-Math.min(...w.map(b=>b.l)))/last;
     if(Number.isFinite(rngPct)&&rngPct>0) rs.push(rngPct);
   }
-  let cut=0.35; // default fallback if cross-section is not ready
+  let cut=null; // zero-constant policy: no synthetic threshold without established cross-section
   if(rs.length>=25){
     rs.sort((a,b)=>a-b);
     // 10th percentile of 30-min window range (D1 boundary, measured today at 0.32% with only 0.49% reachability)
-    cut=rs[Math.floor(rs.length*0.10)];
+    cut=+(rs[Math.floor(rs.length*0.10)]).toFixed(2);
   }
-  const val={cut:+cut.toFixed(2),n:rs.length};
+  const val={cut,n:rs.length};
   _reachCutMemo={sig,val};
   return val;
 }
 
 function tapeReachability(sym,targetPct){
-  const all=INTRADAY_BARS[normSym(sym||'')];
+  const k=normSym(sym||'');
+  const all=INTRADAY_BARS[k];
   if(!all||all.length<TAPE_MIN_SESSION_BARS) return null;
-  const w=continuousTapeWindow(all);
+  const w=continuousTapeWindow(all,k);
   if(!w||!w.length) return null;
   const last=w[w.length-1].c;
   if(!(last>0)||!(targetPct>0)) return null;
   const winRangePct=+((100*(Math.max(...w.map(b=>b.h))-Math.min(...w.map(b=>b.l)))/last)).toFixed(2);
   const coverage=winRangePct>0?+(targetPct/winRangePct).toFixed(2):Infinity;
 
-  // Minute-of-day reachability factor (C3):
+  // Minute-of-day reachability factor (C3 & Finding 1):
   // AUC 0.4232 (t=-10.0): later in the session, fewer 5-minute bars remain to travel the target distance.
+  // Guarded by isEquitySession: off-market hours (evenings, weekends) must not clamp to 0 mins left or blank targets.
+  const inSession=typeof isEquitySession==='function'?isEquitySession(Date.now()):false;
   const clock=istClock();
-  const minsToClose=Math.max(0,EQUITY_CLOSE_MIN-clock.mins);
+  const minsToClose=inSession?Math.max(0,EQUITY_CLOSE_MIN-clock.mins):null;
   const crossCut=getTapeReachabilityCut();
-  const timePenalty=minsToClose<60?(60/Math.max(15,minsToClose)):1.0;
-  const effectiveMinRange=+(crossCut.cut*timePenalty).toFixed(2);
-  const reachable=minsToClose>=15&&winRangePct>=effectiveMinRange;
+  const cutPct=crossCut.cut;
+  let effectiveMinRange=null;
+  let reachable=true;
 
-  return {winRangePct,coverage,cutPct:crossCut.cut,effectiveMinRange,minsToClose,reachable};
+  if(cutPct!=null){
+    const timePenalty=(inSession&&minsToClose!=null&&minsToClose<60)?(60/Math.max(15,minsToClose)):1.0;
+    effectiveMinRange=+(cutPct*timePenalty).toFixed(2);
+    reachable=inSession?(minsToClose>=15&&winRangePct>=effectiveMinRange):(winRangePct>=cutPct);
+  } else {
+    reachable=inSession?(minsToClose>=15):true;
+  }
+
+  return {winRangePct,coverage,cutPct,effectiveMinRange,minsToClose,reachable};
 }
 function tapeAggregate(bars,k){
   if(k<=1) return bars.slice();
@@ -3943,10 +3998,11 @@ function _radarTapeEvidenceUncached(sym){
   const eImpact=Number.isFinite(impact)?clamp01(impact,0,1):0.5;
 
   // Weights follow empirical measurements (52,616 samples, 2026-09-09):
-  // eSize (participation) is the only term with a consistently positive forward edge (AUC 0.5189, t=+7.5).
-  // eVwap (price above VWAP) has strong negative edge on forward close (AUC 0.4286, t=-28.6).
-  // Weight is redistributed from eVwap toward eSize without inverting into a mean-reversion bet.
-  const W={flow:.30,vwap:.05,cross:.15,size:.50};
+  // Forward 60m close: flow 0.4950, vwap 0.4286 (t=-28.6), cross 0.4996, size 0.5189 (t=+7.5).
+  // Target reach (+2.6% in 60m): flow 0.5369 (t=+11.3), cross 0.5173 (t=+5.3), size 0.5190 (t=+5.8), vwap 0.4851 (t=-4.5).
+  // eVwap has negative edge on both outcomes; reduced to 0.05.
+  // The freed 0.20 weight is distributed proportionally across flow (.45), cross (.25), and size (.25).
+  const W={flow:.45,vwap:.05,cross:.25,size:.25};
   // The impact weight is MEASURED, never asserted: 0 until the edge survives its own sampling error,
   // rising as the corpus grows. At 0 every factor below collapses to 1 and both the blend and its
   // normaliser are identical to v1233's, so an unmeasured term cannot move a single score.
@@ -4058,8 +4114,7 @@ function radarScoreComponents(r,tapeStanding){
   const champion=FS.get(INDICATOR_WATCH_STORE)?.nextChampionStats;
   const predictorFactor=champion?.objective==='net-policy-v1'&&champion.mean>0&&champion.n>=5
     ?0.5+clamp01(predictorBase,0,1):1;
-  const outcomeMultiplier=getRecentOutcomeMultiplier();
-  const evidence=clamp01(tev.level*predictorFactor*trigger*outcomeMultiplier,0,1);
+  const evidence=clamp01(tev.level*predictorFactor*trigger,0,1);
   const range=Number(r.rangePct),fromOpen=Number(r.changeOpen);
   const dirLevel=(range>0&&fromOpen>0)?clamp01(fromOpen/(range*0.5),0,1):0;
   const out={
@@ -4082,7 +4137,7 @@ function radarScoreComponents(r,tapeStanding){
     feasibility:+(RADAR_SCORE_BUDGETS.feasibility*(perm.room??0)).toFixed(1),
     tape:+(RADAR_SCORE_BUDGETS.tape*(perm.tape??0)).toFixed(1),
     modelState:getTapeProfitEvidence().status,
-    outcomeMultiplier,
+    outcomeMultiplier:1.0,
     evidence:+evidence.toFixed(3),
     riskFactor:+riskFactor.toFixed(3),
     permission:+(perm.p||0).toFixed(3),
@@ -4154,6 +4209,13 @@ function radarScoreComponents(r,tapeStanding){
     out.total = +Math.min(out.total, smoothCeiling).toFixed(1);
     out.belowOpenDrop = effectiveDrop;
   }
+
+  // Score-band outcome feedback calibration (Finding 2):
+  // Buckets candidate's preliminary score into bands (80+, 70-79, 60-69, <60) and adjusts by empirical win rate.
+  // Modulating per-band changes relative ranking across rows rather than shifting the whole board monotonically.
+  const bandMultiplier=getBandOutcomeMultiplier(out.total);
+  out.outcomeMultiplier=bandMultiplier;
+  out.total=+Math.max(0,Math.min(100,out.total*bandMultiplier)).toFixed(1);
 
   // Coherent Hard-Gate Enforcement on Final Score:
   // If a stock is blocked by structural vetoes (ASM surveillance, sell volume > buy volume,
@@ -10524,7 +10586,7 @@ function getRowExitPolicy(row,buyPrice=null,activeInfo=null,nudgeInfo=null){
   const tapeReach=tapeReachability(row?.symbol,targetPct);
   const reachBlocked=!!(tapeReach&&tapeReach.reachable===false);
   const viabilitySource=(reachBlocked&&tapeReach)
-    ?(tapeReach.minsToClose<15?'Session close imminent':`30-minute tape range (${tapeReach.winRangePct}% < min ${tapeReach.effectiveMinRange}%)`)
+    ?((tapeReach.minsToClose!=null&&tapeReach.minsToClose<15)?'Session close imminent':`30-minute tape range (${tapeReach.winRangePct}% < min ${tapeReach.effectiveMinRange}%)`)
     :(tapeRunwayPct!=null?'5-minute tape runway':(capacity>0?'Whole-day stock capacity':'Target anchor floor'));
   const viable=viabilityBasis>0&&!bandLimited&&!reachBlocked&&(minGrossPct==null||viabilityBasis+1e-9>=minGrossPct);
   const belowMarketRead=!!(available!=null&&targetPct>available);
@@ -11652,7 +11714,7 @@ function renderTable(){
       // v1144: TGT and SL merged. They are ONE decision - what you ask for against what you risk -
       // and the two columns were part of why the table needed a horizontal scrollbar, which the
       // owner has ruled out. Both numbers survive, with their full tooltips.
-      tgt:`<td style="font-weight:700" title="${escHtml((exitPolicy.viable?`${exitPolicy.targetSource}. You need ${exitPolicy.anchorPct?.toFixed(2)??'—'}% per trade to hold pace; this row offers ${exitPolicy.targetPct?.toFixed(2)??'—'}%${exitPolicy.belowMarketRead?` (session runway is ${exitPolicy.sessionRunwayPct?.toFixed(2)??exitPolicy.marketAvailablePct?.toFixed(2)}%)`:''}${exitPolicy.positionFloorPct>exitPolicy.targetPct?` · CNC after-cost floor is ${exitPolicy.positionFloorPct.toFixed(2)}%`:''}${(exitPolicy.anchorPct>0&&exitPolicy.targetPct>0&&exitPolicy.targetPct<exitPolicy.anchorPct)?' — short of it':''}`:`${exitPolicy.viabilitySource||'Stock capacity'} ${exitPolicy.viabilityBasisPct?.toFixed(2)??'—'}% cannot clear the ${exitPolicy.minGrossPct?.toFixed(2)??'—'}% cost + net hurdle`)+' · '+exitPolicy.stopSource+(exitPolicy.rewardRisk!=null?` · reward:risk ${exitPolicy.rewardRisk.toFixed(2)}`+(exitPolicy.rewardRisk<1?' — BELOW 1.0: this stock risks more than it aims to make':''):''))}"><span style="color:${exitPolicy.viable?'var(--green)':'var(--red)'}">${exitPolicy.viable&&exitPolicy.targetPct!=null?'+'+exitPolicy.targetPct.toFixed(2)+'%':'—'}</span><span style="color:var(--t3)"> / </span><span style="color:var(--red)">−${exitPolicy.stopPct.toFixed(2)}%</span></td>`,
+      tgt:`<td style="font-weight:700" title="${escHtml((exitPolicy.viable?`${exitPolicy.targetSource}. You need ${exitPolicy.anchorPct?.toFixed(2)??'—'}% per trade to hold pace; this row offers ${exitPolicy.targetPct?.toFixed(2)??'—'}%${exitPolicy.belowMarketRead?` (market read is ${exitPolicy.marketAvailablePct?.toFixed(2)}%)`:''}${exitPolicy.positionFloorPct>exitPolicy.targetPct?` · CNC after-cost floor is ${exitPolicy.positionFloorPct.toFixed(2)}%`:''}${(exitPolicy.anchorPct>0&&exitPolicy.targetPct>0&&exitPolicy.targetPct<exitPolicy.anchorPct)?' — short of it':''}`:`${exitPolicy.viabilitySource||'Stock capacity'} ${exitPolicy.viabilityBasisPct?.toFixed(2)??'—'}% cannot clear the ${exitPolicy.minGrossPct?.toFixed(2)??'—'}% cost + net hurdle`)+' · '+exitPolicy.stopSource+(exitPolicy.rewardRisk!=null?` · reward:risk ${exitPolicy.rewardRisk.toFixed(2)}`+(exitPolicy.rewardRisk<1?' — BELOW 1.0: this stock risks more than it aims to make':''):''))}"><span style="color:${exitPolicy.viable?'var(--green)':'var(--red)'}">${exitPolicy.viable&&exitPolicy.targetPct!=null?'+'+exitPolicy.targetPct.toFixed(2)+'%':'—'}</span><span style="color:var(--t3)"> / </span><span style="color:var(--red)">−${exitPolicy.stopPct.toFixed(2)}%</span></td>`,
       alloc:`<td class="alloc-cell" data-sym="${s.symbol}">${(()=>{
         if(!am){
           if(canBuy && isSelected){
