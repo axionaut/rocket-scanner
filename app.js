@@ -1,5 +1,5 @@
 const BUILD_TS='2026-09-09 12:15 IST'; // release build time (IST)
-const APP_VERSION=1332; // v1332: Synchronize live price delta rescores with filtering and action state cache to enforce Min Score threshold.
+const APP_VERSION=1333; // v1333: Harmonize candidate targets with Open Positions via max(anchor, available), restore viability gate, and patch ineligible selection hole.
 const RADAR_SCORE_VERSION='tape-decision-v4';
 function isValidChangeOpen(v){
   if(v===null||v===undefined||typeof v==='boolean') return false;
@@ -92,10 +92,8 @@ function updateModeUI(){
 }
 let ALL=[],FILT=[],PG=1,PGSZ=100,SCOL='score',SDIR=-1;
 let SHOW_INELIGIBLE=false;
-let SHOW_BELOW_THRESHOLD=false;
 function toggleBelowThreshold(){
   SHOW_INELIGIBLE=!SHOW_INELIGIBLE;
-  SHOW_BELOW_THRESHOLD=SHOW_INELIGIBLE;
   SCOL='score';
   SDIR=-1;
   saveFilterState();
@@ -4705,6 +4703,16 @@ function radarScoreCell(score,title='',recommendationState=null){
   const tip=title||(ok?`Clears the decision-score policy bar (${RECOMMEND_MIN_SCORE}); all independent gates must still pass.`
     :`Below the decision-score policy bar — ${s.toFixed(1)} against ${RECOMMEND_MIN_SCORE}. This score is readiness evidence, not a profit probability.`);
   return `<span class="sc-m" style="font-family:'DM Mono',monospace;font-weight:800;font-size:15px;color:${c}" title="${escHtml(tip)}">${s.toFixed(1)}${ok?'':'<sub style="font-size:9px;color:var(--t3)">\u25be</sub>'}</span>`;
+}
+function rowStatusPillHtml(s){
+  const act=getRowActionState(s);
+  if(act.state==='GO'){
+    return `<span class="info-pill pill-green" style="padding:2px 8px;font-weight:700" title="Actionable recommendation clearing all technical gates">✓ GO</span>`;
+  }
+  if(act.state==='WAIT'){
+    return `<span class="info-pill pill-amber" style="padding:2px 8px;max-width:220px;overflow:hidden;text-overflow:ellipsis;display:inline-block;vertical-align:middle" title="${escHtml(act.reason)}">⏳ ${escHtml(act.reason)}</span>`;
+  }
+  return `<span class="info-pill pill-red" style="padding:2px 8px;max-width:220px;overflow:hidden;text-overflow:ellipsis;display:inline-block;vertical-align:middle" title="${escHtml(act.reason)}">✕ ${escHtml(act.reason)}</span>`;
 }
 function radarSetupLabel(r){
   const b=[];
@@ -10392,10 +10400,17 @@ function getRowExitPolicy(row,buyPrice=null,activeInfo=null,nudgeInfo=null){
   // capacity units, which carries that bound inside it. Applying it again pins every reach at
   // exactly 1.00 capacity and re-creates the flat target this release removes.
   if(available!=null&&!inCapacityUnits&&capacity>0) available=Math.min(available,capacity);
-  // Target stays firmly anchored to the Target Anchor (manual, goal, or harvest rate).
-  // A momentum scanner hunts abnormal expanding breakouts, so statistical "typical day"
-  // runway guesstimates must not shrink the target into tiny scalps or diverge from Open Positions.
-  // The only hard bound is the legal NSE upper circuit limit.
+  // Target is anchored to the Target Anchor floor (manual, goal, or harvest rate), while allowing
+  // expansion if market available runway / capacity is higher. Never compresses below the Target Anchor floor,
+  // matching the Open Positions target policy (which also enforces target >= floor).
+  if(available!=null&&targetPct>0){
+    const expandedPct=Math.max(basePct,available);
+    targetPct=toStep(expandedPct);
+    nudgePct=+(targetPct-basePct).toFixed(2);
+    targetSource=(expandedPct>basePct)
+      ? ('what the market has left, read from '+availableSource)
+      : (active.source==='manual' ? 'manual target anchor' : active.source==='goal' ? 'daily goal target anchor' : 'target anchor floor');
+  }
   if(circuitRunwayPct!=null&&circuitRunwayPct>0&&targetPct>circuitRunwayPct){
     targetPct=toStep(circuitRunwayPct);
     targetSource='bounded by the NSE circuit';
@@ -10432,7 +10447,7 @@ function getRowExitPolicy(row,buyPrice=null,activeInfo=null,nudgeInfo=null){
   // only the stock's OWN tape decides affordability, exactly as before, and the whole-day reach is
   // resolved alongside it for the goal-floor report.
   const marketRead=marketReadEarly;
-  const viabilityBasis=(tapeRunwayPct!=null)?targetPct:(capacity>0?capacity:basePct);
+  const viabilityBasis=(available!=null)?available:(capacity>0?capacity:basePct);
   const viable=viabilityBasis>0&&!bandLimited&&(minGrossPct==null||viabilityBasis+1e-9>=minGrossPct);
   const stopSource=(Math.abs(Number(row?.slPct))>0)?'explicit stock stop'
     :hasAtr?'ATR stock stop'
@@ -10444,12 +10459,9 @@ function getRowExitPolicy(row,buyPrice=null,activeInfo=null,nudgeInfo=null){
   // so an unreachable target is visible, never as a cap on the target itself (owner: no ATR-driven
   // targets). null when the stock has no usable range estimate.
   const reachable=(capacity>0&&targetPct>0)?(capacity+1e-9>=targetPct):null;
-  // v1216 (owner): "the goal based target should be the minimum, not final target". v1212 replaced
-  // the anchor outright (targetPct=toStep(available)) and left no record that a row had been priced
-  // BELOW the rate the goal needs. It cannot be a floor on the PRICE - v1211 measured that arming a
-  // target above the remaining runway is the defect this whole path exists to fix - so it is a floor
-  // on WHETHER THE ROW IS WORTH THE CAPITAL, enforced at the allocation gate, which is where an
-  // unaffordable trade belongs. The row stays visible and honestly priced.
+  // v1216 (owner): "the goal based target should be the minimum, not final target". targetPct is anchored
+  // by basePct as a floor (targetPct=toStep(Math.max(basePct, available))) so it is never compressed below
+  // the Target Anchor, matching Open Positions, while allowing expansion on higher market runway.
   // The comparison must be like for like. A clock read taken at 12:15 is what is left of THIS
   // session, while the goal rate is what a WHOLE trading day must produce - measuring one against
   // the other is the v1206 window defect and blocked 2,773 of 2,980 rows when first built. The
@@ -11453,16 +11465,7 @@ function renderTable(){
       // panels and quietly false of the main table - which is why swapping to Zerodha missed it.
       symbol:`<td style="font-family:'Plus Jakarta Sans',sans-serif">${(
         `<div style="font-weight:700;font-size:15px;color:var(--t1);max-width:280px;overflow:hidden;text-overflow:ellipsis">${escHtml(s.symbol)}${chartLinkButtons(s.symbol)}${(()=>{const bf=getBookFlag(s.symbol);if(!bf)return '';return `<span style="font-size:11px;background:rgba(245,158,11,.14);color:var(--amber);border-radius:4px;padding:1px 5px;margin-left:5px;font-weight:700;vertical-align:middle" title="Order book: ${escHtml(bf.text)}. Display only - it does not change the score unless the graded book weight says it should.">${bf.iceberg?'🧊':'⚑'}${bf.heavyCancel?' cx':''}</span>`;})()}${(()=>{const flags=s.meta?.flags||[];if(!flags.length)return '';return `<span style="font-size:12px;background:rgba(239,68,68,.15);color:var(--red);border-radius:4px;padding:1px 5px;margin-left:5px;font-weight:700;vertical-align:middle" title="NSE surveillance flags: ${escHtml(flags.join(' · '))}">⚠ ${flags.length}</span>`;})()}${s._held?`<span style="font-size:12px;background:rgba(244,114,182,.15);color:#f472b6;border-radius:4px;padding:1px 5px;margin-left:5px;font-weight:700;vertical-align:middle" title="You already hold this. Held stocks stay in the ranking (v1070) and can be recommended again — buying here ADDS to the existing position.">📌 held</span>`:''}</div>${radarSurveillanceNames(s)}<div style="font-size:11px;color:var(--t3);max-width:180px;overflow:hidden;text-overflow:ellipsis" title="${escHtml((s.name||'')+(s.setup?' · '+s.setup:''))}">${radarSeriesBandPill(s)} ${escHtml(s.setup||s.name||'')}</div>`)}</td>`,
-      status:`<td data-key="status" style="white-space:nowrap;font-size:12px">${(()=>{
-        const act=getRowActionState(s);
-        if(act.state==='GO'){
-          return `<span class="info-pill pill-green" style="padding:2px 8px;font-weight:700" title="Actionable recommendation clearing all technical gates">✓ GO</span>`;
-        }
-        if(act.state==='WAIT'){
-          return `<span class="info-pill pill-amber" style="padding:2px 8px;max-width:220px;overflow:hidden;text-overflow:ellipsis;display:inline-block;vertical-align:middle" title="${escHtml(act.reason)}">⏳ ${escHtml(act.reason)}</span>`;
-        }
-        return `<span class="info-pill pill-red" style="padding:2px 8px;max-width:220px;overflow:hidden;text-overflow:ellipsis;display:inline-block;vertical-align:middle" title="${escHtml(act.reason)}">✕ ${escHtml(act.reason)}</span>`;
-      })()}</td>`,
+      status:`<td data-key="status" style="white-space:nowrap;font-size:12px">${rowStatusPillHtml(s)}</td>`,
       setup:`<td style="font-size:13px;color:var(--t2)">${escHtml(s.setup||'—')}${s.stage?' '+radarStagePill(s):''}${(s.modelTriggers||[]).length?' '+radarTriggerPill(s):''}</td>`,
       series:`<td>${radarSeriesBandPill(s)}</td>`,
       price:`<td data-key="price" style="white-space:nowrap">${livePriceAge(s.symbol)}${fmtINR(s.price)}<span style="color:var(--t3)"> · </span><span style="font-size:12px">${fPerf(s.day??s.priceChange)}${s.corpAction?`<span title="Corporate action (${escHtml(s.corpAction)}) — mechanical ex-date move, neutralised in scoring" style="font-size:11px;color:var(--amber);margin-left:4px;cursor:help">⚑</span>`:''}</span></td>`,
@@ -12746,20 +12749,17 @@ function patchVisiblePrices(){
       }
       const statusCell = tr.querySelector('td[data-key="status"]');
       if(statusCell){
-        const act = getRowActionState(s);
-        if(act.state === 'GO'){
-          statusCell.innerHTML = `<span class="info-pill pill-green" style="padding:2px 8px;font-weight:700" title="Actionable recommendation clearing all technical gates">✓ GO</span>`;
-        } else if(act.state === 'WAIT'){
-          statusCell.innerHTML = `<span class="info-pill pill-amber" style="padding:2px 8px;max-width:220px;overflow:hidden;text-overflow:ellipsis;display:inline-block;vertical-align:middle" title="${escHtml(act.reason)}">⏳ ${escHtml(act.reason)}</span>`;
-        } else {
-          statusCell.innerHTML = `<span class="info-pill pill-red" style="padding:2px 8px;max-width:220px;overflow:hidden;text-overflow:ellipsis;display:inline-block;vertical-align:middle" title="${escHtml(act.reason)}">✕ ${escHtml(act.reason)}</span>`;
-        }
+        statusCell.innerHTML = rowStatusPillHtml(s);
       }
       const chk = tr.querySelector('input[type="checkbox"]');
       if(chk){
         const canBuy = isSelectableRecommendation(s);
         chk.disabled = !canBuy;
         chk.style.cursor = canBuy ? 'pointer' : 'not-allowed';
+        if(!canBuy && chk.checked){
+          chk.checked = false;
+          SELECTED.delete(s.symbol);
+        }
       }
       const sinceCell = tr.querySelector('td[data-key="sinceIn"]');
       if(sinceCell){
@@ -12830,10 +12830,14 @@ function patchUniverseDeltas(deltaRows){
     }
   }
 
-  // If any stock's eligibility changed or sort order changed, re-filter so rows crossing the threshold
-  // or becoming ineligible are immediately dropped or demoted rather than stranded with obsolete GO status.
-  const filtHasIneligible = !SHOW_INELIGIBLE && FILT.some(s => !isStockEligible(s));
-  if(eligibilityChanged || filtHasIneligible){
+  // If any stock's eligibility changed, sort order changed, or if any stock in selection or
+  // the filtered board became ineligible, re-filter so the board and basket stay completely truthful.
+  const filtNeedsPrune = !SHOW_INELIGIBLE && FILT.some(s => !isStockEligible(s));
+  const selectionHasIneligible = Array.from(SELECTED).some(sym => {
+    const s = symMap.get(sym);
+    return !s || !isSelectableRecommendation(s);
+  });
+  if(eligibilityChanged || filtNeedsPrune || selectionHasIneligible){
     applyFilters({preservePage: true});
     return;
   }
@@ -13950,7 +13954,6 @@ function renderStatusBar(){
 
 function clearFilters(){
   SHOW_INELIGIBLE=false;
-  SHOW_BELOW_THRESHOLD=false;
   ['fSearch','fMinScore'].forEach(id=>{const el=document.getElementById(id);if(el)el.value=id==='fMinScore'?'60':'';});
   const turnEl=document.getElementById('fMinTurnover');if(turnEl)turnEl.value='0';
   const dtEl=document.getElementById('fDropThin');if(dtEl)dtEl.value='';
@@ -15814,7 +15817,6 @@ function saveFilterState(){
     search:document.getElementById('fSearch')?.value||'',
     minScore:document.getElementById('fMinScore')?.value||'60',
     showIneligible:SHOW_INELIGIBLE,
-    showBelowThreshold:SHOW_INELIGIBLE,
     minTurnover:document.getElementById('fMinTurnover')?.value||'0',
     dropThin:document.getElementById('fDropThin')?.value??'',
     sortCol:SCOL,
@@ -15851,8 +15853,8 @@ function loadFilterState(){
     const shared=JSON.parse(localStorage.getItem(SHARED_FILTER_STORE)||'{}');
     if(state.search!=null){const el=document.getElementById('fSearch');if(el)el.value=state.search;}
     if(state.minScore!=null){const el=document.getElementById('fMinScore');if(el)el.value=state.minScore;}
-    if(state.showIneligible!=null){SHOW_INELIGIBLE=!!state.showIneligible;SHOW_BELOW_THRESHOLD=SHOW_INELIGIBLE;}
-    else if(state.showBelowThreshold!=null){SHOW_INELIGIBLE=!!state.showBelowThreshold;SHOW_BELOW_THRESHOLD=SHOW_INELIGIBLE;}
+    if(state.showIneligible!=null){SHOW_INELIGIBLE=!!state.showIneligible;}
+    else if(state.showBelowThreshold!=null){SHOW_INELIGIBLE=!!state.showBelowThreshold;}
     if(state.minTurnover!=null){const el=document.getElementById('fMinTurnover');if(el)el.value=state.minTurnover;}
     if(state.dropThin!=null){const el=document.getElementById('fDropThin');if(el)el.value=state.dropThin;}
     resetRecommendationSelectionForRefresh(); // legacy persisted exclusions are deliberately ignored
