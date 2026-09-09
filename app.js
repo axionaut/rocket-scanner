@@ -1,5 +1,5 @@
-const BUILD_TS='2026-09-09 10:35 IST'; // release build time (IST)
-const APP_VERSION=1324; // v1324: Remove Pace column and fix directionConfirmed assignment bug unblocking eligible stocks.
+const BUILD_TS='2026-09-09 10:45 IST'; // release build time (IST)
+const APP_VERSION=1325; // v1325: Exact compounding pace, reject future-dated bars, truthful tapeBarsBehind, strict changeOpen validation & read-only getRowActionState.
 const RADAR_SCORE_VERSION='tape-decision-v4';
 const EQUITY_OPEN_MIN=9*60+15, EQUITY_CLOSE_MIN=15*60+30;
 // v1093: a baseline reward:risk MEASURED on the cross-section (last completed bhav session) instead of learned from the owner's own fills - reported on every row, deliberately not enforced. Includes v1092: position size split by Radar score / stop distance, so equally-scored names carry equal RUPEE risk, plus an opt-in Risk /trade cap.
@@ -216,15 +216,16 @@ function captureOpenSnapshots(rows){
     const existing=OPEN_SNAPSHOT_MAP[sym];
     if(!existing||existing.date!==today){
       const currPrice=Number(r.price);
-      const chgOpen=Number(r.changeOpen);
+      const rawChg=r.changeOpen;
+      const hasValidChg=rawChg!==null&&rawChg!==undefined&&rawChg!==''&&!isNaN(Number(rawChg))&&Number(rawChg)>-99;
       let openPx=currPrice;
       let snapAt=sessionOpenMs;
-      if(Number.isFinite(chgOpen) && chgOpen>-99){
-        openPx=+(currPrice / (1 + chgOpen / 100)).toFixed(2);
+      if(hasValidChg){
+        openPx=+(currPrice / (1 + Number(rawChg) / 100)).toFixed(2);
         snapAt=sessionOpenMs;
       } else {
         openPx=currPrice;
-        snapAt=inMarketHours ? now : sessionOpenMs;
+        snapAt=inMarketHours ? Date.now() : sessionOpenMs;
       }
       OPEN_SNAPSHOT_MAP[sym]={
         date:today,
@@ -440,15 +441,16 @@ function recordTableEntries(rows){
     const currPrice=Number(r.price);
     const low=Number(r.low1d)||Number(r.low)||0;
     const high=Number(r.high1d)||Number(r.high)||0;
-    const chgOpen=Number(r.changeOpen);
+    const rawChg=r.changeOpen;
+    const hasValidChg=rawChg!==null&&rawChg!==undefined&&rawChg!==''&&!isNaN(Number(rawChg))&&Number(rawChg)>-99;
     let openPx=currPrice;
     let entryTime=sessionOpenMs;
-    if(Number.isFinite(chgOpen) && chgOpen>-99){
-      openPx=+(currPrice / (1 + chgOpen / 100)).toFixed(2);
+    if(hasValidChg){
+      openPx=+(currPrice / (1 + Number(rawChg) / 100)).toFixed(2);
       entryTime=sessionOpenMs;
     } else {
       openPx=currPrice;
-      entryTime=inMarketHours ? baselineBootTime : sessionOpenMs;
+      entryTime=inMarketHours ? Date.now() : sessionOpenMs;
     }
 
     if(!prev||prev.date!==today){
@@ -4042,12 +4044,18 @@ function radarScoreComponents(r,tapeStanding){
     const freshMom = Math.max(0, p5);
     if(freshMom > 0){
       let accelFactor = 1.0;
-      if(p15 > 0.10){
-        const priorPace = Math.max(0, (p15 - freshMom) / 2);
-        if(freshMom < priorPace * 0.5){
-          accelFactor = 0.0; // Decelerating / exhausted runner
+      if(Number.isFinite(p15) && p15 !== 0){
+        const ratio = (1 + p15 / 100) / (1 + freshMom / 100);
+        const priorPace = ratio > 0 ? 100 * (Math.sqrt(ratio) - 1) : 0;
+        if(priorPace > 0){
+          if(freshMom < priorPace * 0.5){
+            accelFactor = 0.0; // Decelerating / exhausted runner
+          } else {
+            accelFactor = Math.max(0.4, Math.min(1.4, freshMom / priorPace));
+          }
         } else {
-          accelFactor = Math.max(0.4, Math.min(1.4, freshMom / Math.max(0.1, priorPace)));
+          // Accelerating out of a flat or consolidating base: healthy initial impulse
+          accelFactor = 1.1;
         }
       }
       if(accelFactor > 0){
@@ -4080,8 +4088,14 @@ function radarScoreComponents(r,tapeStanding){
   return out;
 }
 
+function isDirectionConfirmed(s){
+  if(!s) return false;
+  const vw=Number(s.vwap), px=Number(s.price), co=Number(s.changeOpen), day=Number(s.day);
+  return (vw > 0 && px >= vw && Number.isFinite(co) && co > 0 && Number.isFinite(day) && day > 0);
+}
 function radarEvidenceScore(r,tapeStanding){return radarScoreComponents(r,tapeStanding).total;}
 function setRadarEvidenceScore(r,tapeStanding){
+  if(r) r.directionConfirmed = isDirectionConfirmed(r);
   const c=radarScoreComponents(r,tapeStanding);
   r.score=c.total;r.rocketScore=r.score;r.scoreVersion=RADAR_SCORE_VERSION;r.scoreComponents=c;
   return r.score;
@@ -4477,12 +4491,9 @@ function tapeBarsBehind(heldMs){
       const heldBarIndex=Math.floor(heldMinsElapsed / 5);
       return Math.max(0, completableBarsToday - 1 - heldBarIndex);
     }
-    // Held bar is from previous session:
-    // During opening window (first 15 mins / 3 bars), today's bars are still forming/merging:
-    if(completableBarsToday <= 3) return 0;
+    // Held bar is from previous session: return exact completable bars elapsed today.
+    // Opening window bridge tolerance remains strictly encapsulated inside getRecommendationFreshness().
     return completableBarsToday;
-    // Held bar is from previous session: return exact completable bars elapsed today
-    return Math.max(0, completableBarsToday);
   }
   return 0;
 }
@@ -4560,6 +4571,9 @@ function getRecommendationFreshness(sym){
   if(!bars?.length) return {ok:false,why:'Awaiting 5-minute tape'};
   const clock=istClock(),date=new Date(clock.dateMs).toISOString().slice(0,10);
   const last=Number(bars[bars.length-1].t);
+  if(!Number.isFinite(last) || last > Date.now() + 60000){
+    return {ok:false, why:'Invalid or future-dated 5-minute tape timestamp'};
+  }
   if(!isMarketRefreshWindow()){
     if(bars.length && (istDayKey(last)===date || date===getSessionDate())){
       return {ok:true,why:'Session closed — tape retained'};
@@ -4642,8 +4656,8 @@ function _getRowActionStateUncached(s, ignoreMarketClosed=false){
   const _aboveVwap=_vw>0&&_px>=_vw;
   const _aboveOpen=Number.isFinite(_co)&&_co>0;
   const _greenDay=Number.isFinite(_day)&&_day>0;
-  s.directionConfirmed = (_aboveVwap && _aboveOpen && _greenDay);
-  if(!s.directionConfirmed){
+  const dirOk = (_aboveVwap && _aboveOpen && _greenDay);
+  if(!dirOk){
     const why=[];
     if(!_greenDay) why.push('red day ('+(Number.isFinite(_day)?_day.toFixed(2)+'%':'no day move')+')');
     if(!_aboveVwap) why.push(_vw>0?'below VWAP ('+((_px/_vw-1)*100).toFixed(2)+'%)':'no VWAP');
@@ -11287,9 +11301,10 @@ function renderBasketBtn(){
   const buyCount=selList.length;
   buyBtn.innerHTML=`🧺 Buy Basket <span id="basketCount">${buyCount>0?`(${buyCount})`:''}</span>`;
   buyBtn.disabled=buyCount===0;
+  const syncNote=_lastAutoSyncedAt?` · Auto-synced ready in Zerodha_Basket_Buy.json (${Math.max(0,Math.round((Date.now()-_lastAutoSyncedAt)/1000))}s ago)`:'';
   buyBtn.title=buyCount===0
     ? 'No selected score-eligible recommendation has an allocated quantity > 0.'
-    : 'Export selected stocks as Zerodha basket order';
+    : ('Export selected stocks as Zerodha basket order'+syncNote);
 }
 function renderBasketSummary(){
   const capital=getEffectiveCapital();
@@ -13432,6 +13447,8 @@ function applyFilters({preservePage=false}={}){
     clearTimeout(window._filterStatsTimer);
     window._filterStatsTimer=setTimeout(()=>{try{renderStats();}catch(e){}},220);
   }
+  clearTimeout(window._autoBasketTimer);
+  window._autoBasketTimer=setTimeout(()=>{try{autoSyncBasket();}catch(e){}},300);
 }
 function renderRankingsPanels(){
   const q=rankingsSearchQuery();
@@ -14802,42 +14819,10 @@ function planBasketExport(capital, selected){
 }
 
 
-window.BASKET_EXPORT_BUSY=false;
-async function exportBasket(){
-  if(window.BASKET_EXPORT_BUSY) return;
-  window.BASKET_EXPORT_BUSY=true;
-  const buyBtn=document.getElementById('basketBtn');
-  if(buyBtn){
-    buyBtn.disabled=true;
-    buyBtn.innerHTML='⏳ Exporting…';
-    buyBtn.title='Exporting the selected recommendations…';
-  }
-  // Let the browser paint the acknowledgement before doing any synchronous allocation work.
-  await new Promise(resolve=>requestAnimationFrame(()=>setTimeout(resolve,0)));
-  try{
-    // A click can arrive while the 90ms filter debounce is pending. Flush it now so the export
-    // is built from the values currently visible in the controls, never the previous board.
-    if(APPLY_FILTERS_TIMER){
-      clearTimeout(APPLY_FILTERS_TIMER);
-      APPLY_FILTERS_TIMER=null;
-      applyFilters();
-    }
-    renderBasketBtn();
-    if(buyBtn){
-      buyBtn.disabled=true;
-      buyBtn.innerHTML='⏳ Exporting…';
-      buyBtn.title='Exporting the selected recommendations…';
-    }
-  const capital=getEffectiveCapital();
-  const selList=FILT.filter(s=>SELECTED.has(s.symbol));
-  if(!selList.length){showToast('Select at least one stock first.',3000,true);return;}
+function buildBasketOrders(capital, selList){
   const {exportList,basketAlloc}=planBasketExport(capital,selList);
-
   const orders=[];
   let orderSeq=0;
-  // One buy LEG. v1115: a stock now emits up to two of these — a BASE leg whose GTT sells at the
-  // row's own target, and a RUNNER leg whose GTT sells further out. Each leg carries its own GTT, so
-  // the split exit is armed the moment the buys fill and never needs re-arming by hand.
   const pushBuyOrder=(s,qty,leg)=>{
     if(!(qty>0)) return;
     const sym=s.symbol;
@@ -14866,9 +14851,6 @@ async function exportBasket(){
         price:(s.entryAtLimit===true&&Number(s.entryLimitPrice)>0)?Number(s.entryLimitPrice):0,
         triggerPrice:0,disclosedQuantity:0,lastPrice:Number(s.price)||0,
         variety:'regular',
-        // v1083 (owner): TARGET ONLY. The stop leg is no longer exported — the owner manages losses
-        // manually. The stop is still computed and shown (SL % column, Open Positions, allocation
-        // sizing all keep using getRowStopDistancePct); it simply never leaves the app as an order.
         ...(targetPct>0 ? {gtt:{target:targetPct}} : {}),
         tags:targetPct>0 ? ['TGT'] : []
       },
@@ -14877,8 +14859,6 @@ async function exportBasket(){
   };
   exportList.forEach(s=>{
     const am = basketAlloc[s.symbol];
-    // Export is a transport operation, not a capital or target-viability gate. If sizing has no
-    // quantity for a selected recommendation, preserve zero: eligibility cannot create capital.
     const qty = capital > 0 && !am?.rejected ? Math.max(0,Math.floor(Number(am?.qty)||0)) : 0;
     pushBuyOrder(s,qty,'base');
   });
@@ -14886,15 +14866,86 @@ async function exportBasket(){
     const total=orders.filter(x=>x._meta.sym===o._meta.sym).reduce((n,x)=>n+x.params.quantity,0);
     o._meta.fullQty=total;
   });
+  return orders;
+}
 
-  if(!orders.length){showToast('No orders fit the current tape, capital, risk and liquidity limits.',5000,true);return;}
-  if(orders.length>20) throw new Error(`Basket planning invariant failed: ${orders.length} orders`);
-  // _meta is internal bookkeeping (which leg, which symbol) — it must never reach the saved file.
-  const payload=orders.map(o=>{const c={...o};delete c._meta;return c;});
-  const saved=await saveBasketToScannerUploads(payload,'Zerodha_Basket_Buy');
-  if(!saved) return;
-  const targetNote=orders.some(o=>o.params?.gtt?.target)?' with target GTTs':'';
-  showToast(`<strong>Exported ${orders.length} CNC BUY orders</strong> for ${new Set(orders.map(o=>o._meta.sym)).size} selected stocks${targetNote} as Zerodha_Basket_Buy.json`);
+let _lastAutoSyncedBasketSig='';
+let _lastAutoSyncedAt=0;
+let _autoSyncBusy=false;
+async function autoSyncBasket(){
+  if(_autoSyncBusy || window.BASKET_EXPORT_BUSY || !KITE_API) return;
+  _autoSyncBusy=true;
+  try{
+    const capital=getEffectiveCapital();
+    const selList=FILT.filter(s=>SELECTED.has(s.symbol)&&isSelectableRecommendation(s));
+    if(!selList.length) return;
+    const orders=buildBasketOrders(capital,selList);
+    if(!orders.length || orders.length>20) return;
+    const sig=orders.map(o=>`${o.instrument.tradingsymbol}:${o.params.quantity}:${o.params.orderType}:${o.params.price}:${o.params.lastPrice}`).join('|');
+    if(sig===_lastAutoSyncedBasketSig) return;
+    const payload=orders.map(o=>{const c={...o};delete c._meta;return c;});
+    const ctl=new AbortController();
+    const timer=setTimeout(()=>ctl.abort(),8000);
+    try{
+      const r=await fetch(KITE_HELPER+'/api/inputs/basket',{
+        method:'POST',signal:ctl.signal,
+        headers:{'content-type':'application/json'},
+        body:JSON.stringify({name:'Zerodha_Basket_Buy.json',orders:payload})
+      });
+      const j=r.ok?await r.json():null;
+      if(j?.ok){
+        _lastAutoSyncedBasketSig=sig;
+        _lastAutoSyncedAt=Date.now();
+        renderBasketBtn();
+      }
+    }finally{clearTimeout(timer);}
+  }catch(e){
+    // Silent background sync
+  }finally{
+    _autoSyncBusy=false;
+  }
+}
+
+window.BASKET_EXPORT_BUSY=false;
+async function exportBasket(){
+  if(window.BASKET_EXPORT_BUSY) return;
+  window.BASKET_EXPORT_BUSY=true;
+  const buyBtn=document.getElementById('basketBtn');
+  if(buyBtn){
+    buyBtn.disabled=true;
+    buyBtn.innerHTML='⏳ Exporting…';
+    buyBtn.title='Exporting the selected recommendations…';
+  }
+  // Let the browser paint the acknowledgement before doing any synchronous allocation work.
+  await new Promise(resolve=>requestAnimationFrame(()=>setTimeout(resolve,0)));
+  try{
+    // A click can arrive while the 90ms filter debounce is pending. Flush it now so the export
+    // is built from the values currently visible in the controls, never the previous board.
+    if(APPLY_FILTERS_TIMER){
+      clearTimeout(APPLY_FILTERS_TIMER);
+      APPLY_FILTERS_TIMER=null;
+      applyFilters();
+    }
+    renderBasketBtn();
+    if(buyBtn){
+      buyBtn.disabled=true;
+      buyBtn.innerHTML='⏳ Exporting…';
+      buyBtn.title='Exporting the selected recommendations…';
+    }
+    const capital=getEffectiveCapital();
+    const selList=FILT.filter(s=>SELECTED.has(s.symbol));
+    if(!selList.length){showToast('Select at least one stock first.',3000,true);return;}
+    const orders=buildBasketOrders(capital,selList);
+    if(!orders.length){showToast('No orders fit the current tape, capital, risk and liquidity limits.',5000,true);return;}
+    if(orders.length>20) throw new Error(`Basket planning invariant failed: ${orders.length} orders`);
+    // _meta is internal bookkeeping (which leg, which symbol) — it must never reach the saved file.
+    const payload=orders.map(o=>{const c={...o};delete c._meta;return c;});
+    const saved=await saveBasketToScannerUploads(payload,'Zerodha_Basket_Buy');
+    if(!saved) return;
+    _lastAutoSyncedBasketSig=orders.map(o=>`${o.instrument.tradingsymbol}:${o.params.quantity}:${o.params.orderType}:${o.params.price}:${o.params.lastPrice}`).join('|');
+    _lastAutoSyncedAt=Date.now();
+    const targetNote=orders.some(o=>o.params?.gtt?.target)?' with target GTTs':'';
+    showToast(`<strong>Exported ${orders.length} CNC BUY orders</strong> for ${new Set(orders.map(o=>o._meta.sym)).size} selected stocks${targetNote} as Zerodha_Basket_Buy.json`);
   }catch(e){
     console.error('Basket export failed',e);
     showToast('Basket export failed: '+(e?.message||e),6000,true);
