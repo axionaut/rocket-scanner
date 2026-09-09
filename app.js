@@ -1,5 +1,5 @@
-const BUILD_TS='2026-09-09 10:25 IST'; // release build time (IST)
-const APP_VERSION=1322; // v1322: Dedicated Status/Rejection column, loopDelay scope fix, rangeUsed guard & calendar session bridge.
+const BUILD_TS='2026-09-09 10:30 IST'; // release build time (IST)
+const APP_VERSION=1323; // v1323: Remove speculative EoD column, clean RelVol display without missing depth clutter.
 const RADAR_SCORE_VERSION='tape-decision-v4';
 const EQUITY_OPEN_MIN=9*60+15, EQUITY_CLOSE_MIN=15*60+30;
 // v1093: a baseline reward:risk MEASURED on the cross-section (last completed bhav session) instead of learned from the owner's own fills - reported on every row, deliberately not enforced. Includes v1092: position size split by Radar score / stop distance, so equally-scored names carry equal RUPEE risk, plus an opt-in Risk /trade cap.
@@ -9717,10 +9717,9 @@ function getCols(){
     {key:'status',label:'Status / Rejection',s:1},
     {key:'price',label:'Price/Day',s:1},
     {key:'sinceIn',label:'Since In',s:1},
-    {key:'relvol',label:'Vol/Bk',s:1},
+    {key:'relvol',label:'RelVol',s:1},
     {key:'turnover',label:'Liq',s:1},
     {key:'avgMove',label:'Pace',s:1},
-    {key:'predEod',label:'EoD',s:1},
     {key:'tgt',label:'TGT/SL',s:0},
     {key:'alloc',label:'Alloc',s:0},
     {key:'risk',label:'Risk',s:1},
@@ -11466,7 +11465,7 @@ function renderTable(){
         return `<span style="color:${col};font-weight:700;font-family:'DM Mono',monospace" title="${escHtml(tip)}">${sign}${p.toFixed(2)}%</span> <span style="font-size:11px;color:var(--t3);font-family:'DM Mono',monospace" title="${escHtml(tip)}">${ageTxt} · ${hm}</span>`;
       })()}</td>`,
       day:`<td>${fPerf(s.day??s.priceChange)}${s.corpAction?`<span title="Corporate action (${escHtml(s.corpAction)}) — mechanical ex-date move, neutralised in scoring" style="font-size:11px;color:var(--amber);margin-left:4px;cursor:help">⚑</span>`:''}</td>`,
-      relvol:`<td style="white-space:nowrap">${s.relvol!=null&&isFinite(s.relvol)?Number(s.relvol).toFixed(2)+'×':'—'}<span style="color:var(--t3)"> · </span>${Number.isFinite(s.depthImbalance)?`<span style="color:${s.depthImbalance>0?'var(--green)':'var(--red)'};font-size:12px" title="Order book: ${Number.isFinite(s.depthPct)?'stronger than '+Math.round(s.depthPct*100)+'% of books':''}${s.depthLive?' · LIVE reading':' · pre-open, decayed by the session'}">${(s.depthImbalance>0?'+':'')+s.depthImbalance.toFixed(2)}</span>`:'<span style="color:var(--t3)">—</span>'}</td>`,
+      relvol:`<td style="white-space:nowrap">${s.relvol!=null&&isFinite(s.relvol)?Number(s.relvol).toFixed(2)+'×':'—'}${Number.isFinite(s.depthImbalance)?`<span style="color:var(--t3)"> · </span><span style="color:${s.depthImbalance>0?'var(--green)':'var(--red)'};font-size:12px" title="Order book: ${Number.isFinite(s.depthPct)?'stronger than '+Math.round(s.depthPct*100)+'% of books':''}${s.depthLive?' · LIVE reading':' · pre-open, decayed by the session'}">${(s.depthImbalance>0?'+':'')+s.depthImbalance.toFixed(2)}</span>`:''}</td>`,
       // v1139: the order book, in the recommendation table rather than a list of its own. Muted em
       // dash when the stock has no book - absent is not bearish.
       turnover:`<td>${(()=>{
