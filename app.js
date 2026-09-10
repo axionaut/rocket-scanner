@@ -1,5 +1,5 @@
-const BUILD_TS='2026-09-10 18:24 IST'; // release build time (IST)
-const APP_VERSION=1361;
+const BUILD_TS='2026-09-10 18:47 IST'; // release build time (IST)
+const APP_VERSION=1362;
 const RADAR_SCORE_VERSION='unified-evidence-v1';
 
 // ── v1358: AN UNCAUGHT ERROR MUST NAME ITSELF ─────────────────────────────────────────────────
@@ -3104,7 +3104,8 @@ const SCORE_SOURCES=[
   ['rule:target-clears-costs','Target clears round-trip costs at tradeable size',0],
   ['rule:share-fits-allocation','Share price fits one unit of allocation',0],
   ['rule:book-absorbs-exit','Visible book can absorb an exit at size',0],
-  ['rule:not-thin','Trades more than the thinnest of the market',0]
+  ['rule:not-thin','Trades more than the thinnest of the market',0],
+  ['rule:results-positive','Latest official results are profitable',0]
 ];
 const SCORE_SEED=SCORE_SOURCES.map(x=>x[2]);
 // A slot that does not line up with its rule would silently weight the WRONG rule, which is worse
@@ -3299,6 +3300,16 @@ const DECISION_RULE_DEFS=[
       const sh=Number(prof?.medianShares),cut=Number(cutInfo?.cut);
       return sh>0&&cut>0?ruleRead(sh>=cut,100*(sh/cut-1)):ruleRead(null,null);
     }catch(e){return ruleRead(null,null);}}},
+  // ---- Official NSE result filings ------------------------------------------------------------
+  // The helper has been fetching six NSE RSS indexes daily and parsing result XBRLs into
+  // `fundamentalTrigger` (+1 profitable with price confirmation, -1 loss / negative operations /
+  // qualified audit) since v1202. It reached the score through a slot whose weight is 0, and the
+  // legacy armed-condition path it also fed had 0 of 18 conditions armed as of v1227. So it was the
+  // one genuine signal collected every day and moving nothing, and invisible in this table.
+  // It is now an ordinary graded rule and earns weight exactly like the rest.
+  {key:'results-positive',label:'Latest official results are profitable',group:'Fundamentals',kind:RULE_ADJUSTABLE,unit:'',
+    read:r=>{const v=Number(r?.fundamentalTrigger);
+      return Number.isFinite(v)&&v!==0?ruleRead(v>0,v):ruleRead(null,null);}},
   // ---- Protected: measured, never weakened automatically -------------------------------------
   {key:'eq-and-band',label:'EQ series and eligible price band',group:'Exchange & safety',kind:RULE_PROTECTED,unit:'',
     read:r=>ruleRead(r?.basketEligible===true?true:r?.basketEligible===false?false:null,null)},
@@ -3562,6 +3573,49 @@ function ruleWeightMap(state){
   }
   return {weights:out,evidence:ev,scale};
 }
+// ── v1362: THE TAPE COMPONENTS ARE EARNED, NOT ASSERTED ──────────────────────────────────────
+// Measured on 54 archived sessions, 493,725 graded samples, through the helper's
+// /api/kite/edge?field=tape - the same shrinkage the impact term has used since v1235:
+//
+//     impact AUC 0.5327  surviving weight 0.0483
+//     flow   AUC 0.5162                   0.0151
+//     cross  AUC 0.5154                   0.0135
+//     vwap   AUC 0.5114                   0.0055
+//     size   AUC 0.4895                   0        <- INVERTED: its high end predicts the WORSE
+//                                                     outcome, and it carried a hard 1.0 (and 75%
+//                                                     of the tape weight after v1338, off ONE
+//                                                     session of 64,181 samples).
+//
+// These are RELATIVE weights. The absolute AUCs are small, so using them raw would multiply the
+// whole board to nearly zero - which is honest about the edge but destroys the ranking that the
+// edge does support. They are normalised against the strongest earned component, so the ORDER and
+// the RELATIVE trust are measured while the LEVEL is set by calibration further down. The
+// normaliser is the cross-section's own maximum, not a chosen number.
+const TAPE_EDGE_KEYS=['flow','vwap','cross','size','impact'];
+let TAPE_EDGE_STATE=null,_tapeEdgeAt=0,_tapeEdgeBusy=false;
+async function refreshTapeEdges(){
+  if(_tapeEdgeBusy||!KITE_API) return TAPE_EDGE_STATE;
+  // The archive only changes once a session, so this is asked for rarely and never on the beat.
+  if(TAPE_EDGE_STATE&&Date.now()-_tapeEdgeAt<30*60*1000) return TAPE_EDGE_STATE;
+  _tapeEdgeBusy=true;
+  try{
+    const ctl=new AbortController(),to=setTimeout(()=>ctl.abort(),120000);
+    const res=await fetch(KITE_HELPER+'/api/kite/edge?field=tape',{cache:'no-store',signal:ctl.signal});
+    clearTimeout(to);
+    const data=await res.json();
+    if(data?.ok&&data.fields){TAPE_EDGE_STATE=data;_tapeEdgeAt=Date.now();}
+  }catch(e){ /* an unreachable helper leaves the weights where they are; it never invents them */ }
+  finally{ _tapeEdgeBusy=false; }
+  return TAPE_EDGE_STATE;
+}
+function tapeEdgeWeights(){
+  const f=TAPE_EDGE_STATE?.fields;
+  if(!f) return null;
+  const earned=TAPE_EDGE_KEYS.map(k=>Math.max(0,Number(f[k]?.weight)||0));
+  const top=Math.max(...earned);
+  if(!(top>0)) return TAPE_EDGE_KEYS.map(()=>0);
+  return earned.map(w=>w/top);
+}
 let _ruleWeightMemo={sig:'',vec:null};
 function ruleWeightVector(state){
   // Read once per scoring pass, not once per row: ruleEvidence walks every session of every rule.
@@ -3571,6 +3625,65 @@ function ruleWeightVector(state){
   const vec=adjustableRules().map(rule=>Number(weights[rule.key])||0);
   _ruleWeightMemo={sig,vec};
   return vec;
+}
+// ── v1362: THE SCORE IS CALIBRATED, SO 100 MEANS SOMETHING ───────────────────────────────────
+// Owner's stated objective: "a score of 100 will mean very high confidence and a score of 0 will
+// mean very low confidence." Until now it meant neither - it was a product of evidence and
+// permission with no relationship to any observed frequency, and the app's own tooltip said so
+// ("readiness evidence, not a profit probability").
+//
+// This maps the raw score onto the frequency with which rows at that level ACTUALLY reached their
+// target, measured on matured records only. It is monotone by construction, so it can never
+// reorder the board - it only restates the level. With no evidence it is the IDENTITY, so nothing
+// changes until something has been measured, and it re-derives itself as records accumulate.
+const CALIB_BUCKETS=10;
+let _calibMemo={sig:'',map:null};
+function scoreCalibration(state){
+  const st=state||getUnifiedModelState();
+  const sig=(st?.updatedAt||0)+'|'+(st?.records?.length||0);
+  if(_calibMemo.sig===sig) return _calibMemo.map;
+  const today=getSessionDate();
+  const rows=(st?.records||[]).filter(p=>p.ruleSchema===RULE_SCHEMA_VERSION&&matureScoreOutcome(p,today)
+    &&Number.isFinite(Number(p.score)));
+  let map=null;
+  // A bucket needs enough matured rows to state a frequency at all; below that there is nothing to
+  // calibrate against and the identity is the honest answer.
+  const need=Math.max(25,Math.ceil(rows.length/(CALIB_BUCKETS*4)));
+  if(rows.length>=CALIB_BUCKETS*need){
+    const sorted=rows.slice().sort((a,b)=>Number(a.score)-Number(b.score));
+    const pts=[];
+    for(let i=0;i<CALIB_BUCKETS;i++){
+      const lo=Math.floor(i*sorted.length/CALIB_BUCKETS),hi=Math.floor((i+1)*sorted.length/CALIB_BUCKETS);
+      const slice=sorted.slice(lo,hi);
+      if(slice.length<need){pts.length=0;break;}
+      const mid=slice.reduce((n,p)=>n+Number(p.score),0)/slice.length;
+      const hit=slice.reduce((n,p)=>n+scoreOutcomeTarget(p),0)/slice.length;
+      pts.push({raw:mid,pct:100*hit});
+    }
+    if(pts.length===CALIB_BUCKETS){
+      // Enforce monotonicity: a higher raw score may never calibrate to a lower confidence, or the
+      // board would reorder itself against its own ranking (the v1337 boundary-inversion trap).
+      for(let i=1;i<pts.length;i++) if(pts[i].pct<pts[i-1].pct) pts[i].pct=pts[i-1].pct;
+      map=pts;
+    }
+  }
+  _calibMemo={sig,map};
+  return map;
+}
+function calibrateScore(rawScore,state){
+  const v=Number(rawScore);
+  if(!Number.isFinite(v)) return v;
+  const pts=scoreCalibration(state);
+  if(!pts||!pts.length) return v;              // identity until measured
+  if(v<=pts[0].raw) return +(v/Math.max(1e-9,pts[0].raw)*pts[0].pct).toFixed(1);
+  for(let i=1;i<pts.length;i++){
+    if(v<=pts[i].raw){
+      const t=(v-pts[i-1].raw)/Math.max(1e-9,pts[i].raw-pts[i-1].raw);
+      return +(pts[i-1].pct+t*(pts[i].pct-pts[i-1].pct)).toFixed(1);
+    }
+  }
+  const last=pts[pts.length-1];
+  return +Math.min(100,last.pct+(v-last.raw)).toFixed(1);
 }
 // THE COUNTERFACTUAL. The blocked rows are the control group and are already recorded, so with
 // margins stored the question "how much would this rule have to move to catch what it rejected"
@@ -3603,74 +3716,6 @@ function scoreSessionMeans(records,value){
   const days={};
   for(const p of records){const v=value(p);if(!Number.isFinite(v)) continue;(days[p.issueDate]??=[]).push(v);}
   return Object.values(days).map(v=>v.reduce((a,b)=>a+b,0)/v.length);
-}
-async function fitScoreWeights(records,live){
-  // Bounded, regularised finite-difference optimisation of target-hit squared error.
-  // Sessions get equal influence; a busy day or repeated intraday samples cannot dominate.
-  const days={};for(const p of records)(days[p.issueDate]??=[]).push(p);
-  const data=Object.values(days).flatMap(v=>v.filter((_,i)=>i%Math.max(1,Math.ceil(v.length/60))===0));
-  const counts={};data.forEach(p=>counts[p.issueDate]=(counts[p.issueDate]||0)+1);
-  let w=live.slice();const nDays=Object.keys(counts).length;
-  for(let pass=0;pass<12;pass++){
-    const grads=w.map(()=>0);
-    let processed=0;
-    for(const p of data){
-      const y=scoreOutcomeTarget(p),pred=computeUnifiedEvidence(p.input,w).raw/100;
-      for(let i=0;i<w.length;i++){
-        if(i>=EXACT_SCORE_START) continue; // rule weights are measured, never fitted by search
-        if(i>=23&&i<EXACT_SCORE_START&&!memoryFeatureAllowed(getUnifiedModelState(),i-23)) continue;
-        const trial=w.slice(),step=w[i]+0.01<=(i<13?1.5:1)?0.01:-0.01;trial[i]+=step;
-        const derivative=(computeUnifiedEvidence(p.input,trial).raw/100-pred)/step;
-        grads[i]+=2*(pred-y)*derivative/counts[p.issueDate]/nDays;
-      }
-      if(++processed%20===0) await new Promise(resolve=>setTimeout(resolve,0));
-    }
-    const _rw=ruleWeightVector(getUnifiedModelState());
-    w=w.map((v,i)=>i>=EXACT_SCORE_START?(_rw[i-EXACT_SCORE_START]||0):
-      i>=23&&i<EXACT_SCORE_START&&!memoryFeatureAllowed(getUnifiedModelState(),i-23)?0:
-      +Math.max(i<13?0.5:i>=23?0:-1,Math.min(i<13?1.5:1,v-0.8*(grads[i]+0.02*(v-SCORE_SEED[i])))).toFixed(5));
-  }
-  return w;
-}
-function evaluateScoreCandidate(records,candidate){
-  // Stored predictions were made BEFORE outcomes and after candidate creation. Never backscore
-  // the training observations and call that a validation result.
-  const val=records.filter(p=>p.targetPolicy===TARGET_POLICY_VERSION&&candidate.targetPolicy===TARGET_POLICY_VERSION
-    &&p.candidateId===candidate.id&&p.issuedAt>candidate.createdAt);
-  const paired=scoreSessionMeans(val,p=>(p.livePrediction-scoreOutcomeTarget(p))**2-(p.candidatePrediction-scoreOutcomeTarget(p))**2);
-  const slots={};val.filter(p=>!p.block&&Number.isFinite(p.paperNetPct)).forEach(p=>(slots[p.bucket]??=[]).push(p));
-  const trades=[];
-  for(const v of Object.values(slots)){
-    if(v.length<4) continue;
-    const k=Math.max(1,Math.ceil(v.length/4));
-    const top=key=>v.slice().sort((a,b)=>b[key]-a[key]||a.symbol.localeCompare(b.symbol)).slice(0,k);
-    const live=top('liveDecision'),trial=top('candidateDecision');
-    trades.push({issueDate:v[0].issueDate,net:trial.reduce((n,p)=>n+p.paperNetPct,0)/k,
-      netLift:(trial.reduce((n,p)=>n+p.paperNetPct,0)-live.reduce((n,p)=>n+p.paperNetPct,0))/k,
-      hitLift:(trial.reduce((n,p)=>n+scoreOutcomeTarget(p),0)-live.reduce((n,p)=>n+scoreOutcomeTarget(p),0))/k});
-  }
-  const mean=a=>a.length?a.reduce((n,v)=>n+v,0)/a.length:null;
-  const net=scoreSessionMeans(trades,p=>p.net),netLift=scoreSessionMeans(trades,p=>p.netLift),hitLift=scoreSessionMeans(trades,p=>p.hitLift);
-  const usesMemory=candidate.weights.slice(23,EXACT_SCORE_START).some(v=>v>0);
-  const memoryError=usesMemory?scoreSessionMeans(val,p=>Number.isFinite(p.withoutMemoryPrediction)
-    ?(p.withoutMemoryPrediction-scoreOutcomeTarget(p))**2-(p.candidatePrediction-scoreOutcomeTarget(p))**2:null):[];
-  const memoryTrades=[];
-  if(usesMemory) for(const v of Object.values(slots)){
-    if(v.length<4||v.some(p=>!Number.isFinite(p.withoutMemoryDecision))) continue;
-    const k=Math.max(1,Math.ceil(v.length/4));
-    const top=key=>v.slice().sort((a,b)=>b[key]-a[key]||a.symbol.localeCompare(b.symbol)).slice(0,k);
-    const yes=top('candidateDecision'),no=top('withoutMemoryDecision');
-    memoryTrades.push({issueDate:v[0].issueDate,net:memoryMean(yes.map(p=>p.paperNetPct))-memoryMean(no.map(p=>p.paperNetPct)),
-      hit:memoryMean(yes.map(scoreOutcomeTarget))-memoryMean(no.map(scoreOutcomeTarget))});
-  }
-  const memoryNet=scoreSessionMeans(memoryTrades,p=>p.net),memoryHit=scoreSessionMeans(memoryTrades,p=>p.hit);
-  const requiredDays=usesMemory?30:5;
-  const enough=val.length>=100&&paired.length>=requiredDays&&net.length>=requiredDays;
-  const memoryPass=!usesMemory||(memoryError.length>=30&&memoryNet.length>=30&&mean(memoryError)>0
-    &&mean(memoryNet)>0&&mean(memoryHit)>=0&&memoryNet.filter(v=>v>0).length/memoryNet.length>=0.6);
-  return {n:val.length,days:paired.length,netDays:net.length,enough,errorGain:mean(paired),net:mean(net),netLift:mean(netLift),hitLift:mean(hitLift),
-    requiredDays,memoryPass,memoryNetLift:mean(memoryNet),memoryErrorGain:mean(memoryError),
-    qualifies:enough&&memoryPass&&mean(paired)>0&&paired.filter(v=>v>0).length/paired.length>=0.6&&mean(net)>0&&mean(netLift)>0&&mean(hitLift)>=0&&net.filter(v=>v>0).length/net.length>=0.6};
 }
 function scoreSampleHash(text){let h=2166136261;for(let i=0;i<text.length;i++)h=Math.imul(h^text.charCodeAt(i),16777619);return h>>>0;}
 async function updateScoreLearning(){
@@ -3765,25 +3810,15 @@ async function updateScoreLearning(){
         study.status='Study closed; only qualified features may enter candidate weight testing';
       }
     }
-    const days=new Set(mature.map(p=>p.issueDate)).size;
-    if(state.candidate){
-      const result=evaluateScoreCandidate(mature,state.candidate);state.candidate.validation=result;
-      if(result.enough){
-        if(result.qualifies){
-          state.live=state.candidate.weights.slice();state.revision++;state.appliedAt=now;
-          state.status='Validated weight update applied';
-          state.history.push({at:now,revision:state.revision,weights:state.live.slice(),validation:result});
-        } else state.status='Candidate did not improve later outcomes; live weights retained';
-        state.candidate=null;
-      }
-    }
-    if(!state.candidate&&mature.length>=100&&days>=5&&mature.filter(p=>p.issuedAt>(state.lastTrainingIssuedAt||0)).length>=100){
-      state.status='Building candidate weights from completed outcomes';
-      const weights=await fitScoreWeights(mature,state.live);
-      const createdAt=Date.now();
-      state.candidate={id:createdAt,createdAt,weights,trainingCount:mature.length,trainingDays:days,targetPolicy:TARGET_POLICY_VERSION};
-      state.lastTrainingIssuedAt=Math.max(...mature.map(p=>p.issuedAt));state.status='Checking candidate weights on new decisions';
-    }
+    // v1362: THE CANDIDATE / VALIDATION PATH IS DELETED. It was the last collect-then-arm gate in
+    // the app - >=100 resolved observations across >=5 mature sessions, freeze a candidate, then
+    // >=100 more to promote - and it optimised TARGET-HIT SQUARED ERROR, the signal v1360 removed
+    // from the display for reading 93-100% on every bucket. Keeping it meant the components with
+    // the most influence learned slowest, through the gate the owner asked to remove, graded on the
+    // metric we had already established was unusable. Every weight in the score now comes from one
+    // mechanism: measured edge, shrunk by its own sampling error, moving continuously.
+    await refreshTapeEdges();
+    state.candidate=null;
     // Bound the new audit store; legacy records/settings are never migrated or rewritten.
     // Keep pending outcomes and the latest 10,000 completed samples, plus model-update history.
     // RETENTION IS BY SESSION, NOT BY ROW COUNT. The old 10,000-row cap was about 21 sessions at
@@ -4553,7 +4588,14 @@ function radarScoreComponents(r,tapeStanding){
         memory.ok?memory.values:[null,null,null],ruleContextVector(ruleRead1.margins))};
       checkRuleSlotAlignment();
       const _ruleW=ruleWeightVector(state);
-      const effectiveWeights=state.live.map((weight,index)=>index>=EXACT_SCORE_START?(_ruleW[index-EXACT_SCORE_START]||0):weight);
+      const _tapeW=tapeEdgeWeights();
+      const effectiveWeights=state.live.map((weight,index)=>{
+        if(index>=EXACT_SCORE_START) return _ruleW[index-EXACT_SCORE_START]||0;
+        // Slots 0-4 are the bar-derived tape components. Until the archive has graded them the
+        // weight stays where it is; once it has, the measurement replaces the assertion.
+        if(_tapeW&&index<TAPE_EDGE_KEYS.length) return _tapeW[index];
+        return weight;
+      });
       const calc=computeUnifiedEvidence(input,effectiveWeights);
   const out={total:calc.total,signalScore:calc.raw,unified:input,modelRevision:state.revision,
     evidence:calc.evidence,permission:input.permission,riskFactor:risk,tapeBars:tev.bars,
@@ -4574,6 +4616,12 @@ function setRadarEvidenceScore(r,tapeStanding){
   if(r) r.directionConfirmed = isDirectionConfirmed(r);
   const c=radarScoreComponents(r,tapeStanding);
   applyReadinessScoreCap(r,c); // includes the early no-tape return, even with Min Score = 0
+  // v1362: ONE MEANING PER QUANTITY. The calibrated value is what the whole app sees - the bar, the
+  // sort, the export and the modal - so a score cannot mean confidence on one surface and raw
+  // evidence on another. It is the identity until enough matured records exist to state a
+  // frequency, so this changes nothing on release day and arms itself as records accumulate.
+  c.rawTotal=c.total;
+  c.total=calibrateScore(c.total);
   r.score=c.total;r.rocketScore=r.score;r.scoreVersion=RADAR_SCORE_VERSION;r.scoreComponents=c;
   return r.score;
 }
@@ -5142,12 +5190,23 @@ function isStockEligible(s){
   return _getRowActionStateUncached(s, true).state === 'GO';
 }
 // Score number only, tinted by the band.
-function radarScoreCell(score,title='',recommendationState=null){
+function rowVetoReason(s){
+  // Only a STRUCTURAL veto earns the veto face. A timing condition scales the score and the row
+  // stays a number, because it may clear within minutes (v1250).
+  const c=s&&s.scoreComponents;
+  if(!c||c.permission!==0) return null;
+  return c.block||null;
+}
+function radarScoreCell(score,title='',recommendationState=null,vetoReason=null){
   const s=Number(score);
   if(score===null||score===undefined||!isFinite(s)) return '<span class="sc-m" style="color:var(--t3)">—</span>';
   const ok=meetsScoreBar(s);
   // In the recommendation table green means actionable. A score above the numeric bar while an
   // independent gate is pending is amber, matching the disabled checkbox beside it.
+  // A STRUCTURAL VETO IS NOT A LOW SCORE. Both used to print as a small number, so "0" meant both
+  // "nothing is stopping this, it is simply weak" and "this cannot be traded at all". The veto now
+  // says so on its face; only genuinely weak rows carry a number at the bottom of the scale.
+  if(vetoReason) return `<span class="sc-m" style="font-family:'DM Mono',monospace;font-weight:800;font-size:15px;color:var(--t3)" title="${escHtml('Not tradeable: '+vetoReason)}">&#10005;<sub style="font-size:9px">veto</sub></span>`;
   const c=ok&&recommendationState===false?'var(--amber)':radarScoreColor(s);
   const tip=title||(ok?`Clears the decision-score policy bar (${RECOMMEND_MIN_SCORE}). Execution requires an open market and fresh data.`
     :`Below the decision-score policy bar — ${s.toFixed(1)} against ${RECOMMEND_MIN_SCORE}. This score is readiness evidence, not a profit probability.`);
@@ -11537,7 +11596,7 @@ function renderTable(){
     const cellH={
       chk:`<td style="text-align:center"><input type="checkbox" ${isSelected?'checked':''} ${canBuy?'':'disabled'} style="width:14px;height:14px;accent-color:var(--amber);cursor:${canBuy?'pointer':'not-allowed'}" onclick="event.stopPropagation()" onchange="toggleStock('${s.symbol}',this.checked)" title="${checkTitle}"></td>`,
       rank:`<td style="font-family:'DM Mono',monospace;font-weight:800;color:var(--t1);text-align:right">${s.rank??'—'}</td>`,
-      score:`<td data-key="score">${radarScoreCell(s.score,radarScoreTitle(s))}</td>`,
+      score:`<td data-key="score">${radarScoreCell(s.score,radarScoreTitle(s),null,rowVetoReason(s))}</td>`,
       // v1142: routed through symbolChartButton like every other table. This cell had built its own
       // TradingView link since v1070, so the "one symbol interaction everywhere" rule was true of the
       // panels and quietly false of the main table - which is why swapping to Zerodha missed it.
@@ -12789,7 +12848,7 @@ function patchVisiblePrices(){
       }
       const scoreCell = tr.querySelector('td[data-key="score"]');
       if(scoreCell){
-        scoreCell.innerHTML = radarScoreCell(s.score, radarScoreTitle(s));
+        scoreCell.innerHTML = radarScoreCell(s.score, radarScoreTitle(s), null, rowVetoReason(s));
       }
       const statusCell = tr.querySelector('td[data-key="status"]');
       if(statusCell){
