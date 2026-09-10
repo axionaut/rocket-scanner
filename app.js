@@ -1,6 +1,7 @@
-const BUILD_TS='2026-09-10 11:55 IST'; // release build time (IST)
-const APP_VERSION=1347; // Market-driven maximum upside targets (T+1 capacity & circuit limits).
+const BUILD_TS='2026-09-10 12:44 IST'; // release build time (IST)
+const APP_VERSION=1348;
 const RADAR_SCORE_VERSION='unified-evidence-v1';
+const TARGET_POLICY_VERSION='clock-stop-next-close-v1';
 function isValidChangeOpen(v){
   if(v===null||v===undefined||typeof v==='boolean') return false;
   if(typeof v==='string'&&v.trim()==='') return false;
@@ -2570,7 +2571,7 @@ function captureLiveRecommendationScan(){
     return {symbol:r.symbol,entryPrice,score:r.score,scoreVersion:RADAR_SCORE_VERSION,rank:r.rank,
       auditQty,frictionPct:fr?.covered&&Number.isFinite(fr.entryPct)&&Number.isFinite(fr.exitPct)?Math.max(0,fr.entryPct+fr.exitPct):null,
       orderType:'MARKET',limitPrice:null,
-      targetPct:policy.targetPct,stopPct:policy.stopPct,entryReady:r.entryReady,directionConfirmed:r.directionConfirmed,
+      targetPct:policy.targetPct,targetPolicy:TARGET_POLICY_VERSION,stopPct:policy.stopPct,entryReady:r.entryReady,directionConfirmed:r.directionConfirmed,
       high1dAtIssue:r.high1d,low1dAtIssue:r.low1d,issueMinute:c.mins-DAY_START_MIN,
       issueClock:String(c.h).padStart(2,'0')+':'+String(c.m).padStart(2,'0'),features:{}};
   });
@@ -2722,7 +2723,7 @@ function recordRecommendationOutcomeScan(scan){
         rocketReady:p.rocketReady===true,
         targetReachable:p.targetReachable===true,
         fundamentalTrigger:Number.isFinite(Number(p.fundamentalTrigger))?Number(p.fundamentalTrigger):0,
-        targetPct:Number(p.targetPct)>0?Number(p.targetPct):null,
+        targetPct:Number(p.targetPct)>0?Number(p.targetPct):null,targetPolicy:p.targetPolicy||TARGET_POLICY_VERSION,
         stopPct:Number(p.stopPct)>0?Number(p.stopPct):null,
         high1dAtIssue:Number(p.high1dAtIssue)>0?Number(p.high1dAtIssue):null,
         low1dAtIssue:Number(p.low1dAtIssue)>0?Number(p.low1dAtIssue):null,
@@ -3303,7 +3304,8 @@ async function fitScoreWeights(records,live){
 function evaluateScoreCandidate(records,candidate){
   // Stored predictions were made BEFORE outcomes and after candidate creation. Never backscore
   // the training observations and call that a validation result.
-  const val=records.filter(p=>p.candidateId===candidate.id&&p.issuedAt>candidate.createdAt);
+  const val=records.filter(p=>p.targetPolicy===TARGET_POLICY_VERSION&&candidate.targetPolicy===TARGET_POLICY_VERSION
+    &&p.candidateId===candidate.id&&p.issuedAt>candidate.createdAt);
   const paired=scoreSessionMeans(val,p=>(p.livePrediction-scoreOutcomeTarget(p))**2-(p.candidatePrediction-scoreOutcomeTarget(p))**2);
   const slots={};val.filter(p=>!p.block&&Number.isFinite(p.paperNetPct)).forEach(p=>(slots[p.bucket]??=[]).push(p));
   const trades=[];
@@ -3346,6 +3348,14 @@ async function updateScoreLearning(){
   _scoreLearningBusy=true;_scoreLearningAt=now;
   try{
     const state=getUnifiedModelState(),today=getSessionDate(),study=memoryStudyState(state);
+    if(state.targetPolicy!==TARGET_POLICY_VERSION){
+      if(state.candidate) state.history.push({at:now,retiredCandidate:state.candidate,
+        reason:'Target policy changed; original candidate and observations retained, not promoted'});
+      state.candidate=null;
+      state.targetPolicy=TARGET_POLICY_VERSION;
+      state.lastTrainingIssuedAt=0;
+      state.status='Collecting new target-policy outcomes; existing live weights retained provisionally';
+    }
     let i=0;
     for(const p of state.records){
       if(p.paperComplete) continue;
@@ -3391,7 +3401,8 @@ async function updateScoreLearning(){
               withoutMemoryPrediction:withoutMemory?withoutMemory.raw/100:null,withoutMemoryDecision:withoutMemory?withoutMemory.total:null,
               entryPrice:r.price,targetPct:policy.targetPct,stopPct:policy.stopPct,auditQty:qty,orderType:'MARKET',
               frictionPct:fr?.covered&&Number.isFinite(fr.entryPct)&&Number.isFinite(fr.exitPct)?Math.max(0,fr.entryPct+fr.exitPct):null,
-              rocketOutcome:ROCKET_OUTCOME.PENDING,scoreVersion:RADAR_SCORE_VERSION,outcomePolicy:'net-policy-v1'});
+              rocketOutcome:ROCKET_OUTCOME.PENDING,scoreVersion:RADAR_SCORE_VERSION,outcomePolicy:'net-policy-v1',
+              targetPolicy:TARGET_POLICY_VERSION,targetSource:policy.targetSource,targetEvidence:policy.targetEvidence});
             if(studyOpen&&cohort.has(r.symbol)&&input.memory?.ok){
               const values=[r.atr,r.changeOpen,input.memory.displacement,r.score];
               if(values.every(Number.isFinite)){
@@ -3408,7 +3419,7 @@ async function updateScoreLearning(){
         }
       }
     }
-    const mature=state.records.filter(p=>matureScoreOutcome(p,today));
+    const mature=state.records.filter(p=>p.targetPolicy===TARGET_POLICY_VERSION&&matureScoreOutcome(p,today));
     if(!study.results&&study.dates.length===MEMORY_SPEC.dates){
       const last=study.dates.at(-1),gap=tradingDaysBetween(last,today);
       if(gap>1||(gap===1&&istClock().mins>=EQUITY_CLOSE_MIN)){
@@ -3433,7 +3444,7 @@ async function updateScoreLearning(){
       state.status='Building candidate weights from completed outcomes';
       const weights=await fitScoreWeights(mature,state.live);
       const createdAt=Date.now();
-      state.candidate={id:createdAt,createdAt,weights,trainingCount:mature.length,trainingDays:days};
+      state.candidate={id:createdAt,createdAt,weights,trainingCount:mature.length,trainingDays:days,targetPolicy:TARGET_POLICY_VERSION};
       state.lastTrainingIssuedAt=Math.max(...mature.map(p=>p.issuedAt));state.status='Checking candidate weights on new decisions';
     }
     // Bound the new audit store; legacy records/settings are never migrated or rewritten.
@@ -10543,6 +10554,59 @@ function getRunnerTargetPct(policy){
   return Math.max(base,Math.floor(want*20)/20);
 }
 
+const HORIZON_TARGET_MEMO=new Map();
+function historicalHorizonTarget(sym,stopPct,horizonDays=1,at=Date.now()){
+  const today=istDayKey(at),clock=istClock(at);
+  const minute=Math.max(EQUITY_OPEN_MIN,Math.min(EQUITY_CLOSE_MIN-5,Math.floor(clock.mins/5)*5));
+  const symbol=normSym(sym||''),bars=INTRADAY_BARS[symbol];
+  const signature=[INTRADAY_STORE_V,today,minute,stopPct,horizonDays].join(':');
+  const cached=HORIZON_TARGET_MEMO.get(symbol);
+  if(cached?.signature===signature) return cached.value;
+  const sessions=new Map();
+  for(const bar of bars||[]){
+    const date=istDayKey(bar.t);
+    if(date>=today||!isNseTradingDate(date)||!Number.isFinite(bar.t)||bar.t%TAPE_BAR_MS!==0) continue;
+    if(![bar.o,bar.h,bar.l,bar.c,bar.v].every(Number.isFinite)||bar.l<=0
+      ||bar.h<Math.max(bar.o,bar.c)||bar.l>Math.min(bar.o,bar.c)||bar.v<0) continue;
+    if(!sessions.has(date)) sessions.set(date,new Map());
+    sessions.get(date).set(istClock(bar.t).mins,bar);
+  }
+  const complete=new Map();
+  for(const [date,byMinute] of sessions){
+    const day=[];
+    for(let slot=EQUITY_OPEN_MIN;slot<EQUITY_CLOSE_MIN;slot+=5){
+      const bar=byMinute.get(slot);
+      if(!bar) break;
+      day.push(bar);
+    }
+    if(day.length===(EQUITY_CLOSE_MIN-EQUITY_OPEN_MIN)/5&&day.some(bar=>bar.v>0)) complete.set(date,day);
+  }
+  const samples=[];
+  for(const [date,day] of complete){
+    let path=day.slice((minute-EQUITY_OPEN_MIN)/5);
+    if(horizonDays===1){
+      const next=istDayKey(nextScoreBarStart(Number(day.at(-1).t)+TAPE_BAR_MS));
+      if(!complete.has(next)||tradingDaysBetween(date,next)!==1) continue;
+      path=path.concat(complete.get(next));
+    }
+    const entry=Number(path[0]?.o);
+    if(!(entry>0&&stopPct>0)) continue;
+    const stop=entry*(1-stopPct/100);
+    let high=entry;
+    for(const bar of path){
+      if(bar.o<=stop) break;
+      high=Math.max(high,bar.o);
+      if(bar.l<=stop) break;
+      high=Math.max(high,bar.h);
+    }
+    samples.push(100*(high/entry-1));
+  }
+  samples.sort((left,right)=>left-right);
+  const value={pct:samples.length>=5?quantileSorted(samples,0.5):null,sessions:samples.length,
+    minute,horizonDays,policy:TARGET_POLICY_VERSION};
+  HORIZON_TARGET_MEMO.set(symbol,{signature,value});
+  return value;
+}
 function getRowExitPolicy(row,buyPrice=null,activeInfo=null,nudgeInfo=null){
   const active=activeInfo||getActiveTargetInfo();
   const anchor=Number(active.tgtPct)>0?Number(active.tgtPct):Math.abs(Number(TRADEBOOK_STATS?.adaptiveTGT))||null;
@@ -10591,7 +10655,7 @@ function getRowExitPolicy(row,buyPrice=null,activeInfo=null,nudgeInfo=null){
   // release fixture (DVL netted Rs124 against a Rs303 floor purely for being read at 12:15). That
   // is a board-economics change and belongs in its own release with its own forward evidence. The
   // exit side is what was reported and what is fixed here.
-  const exitingToday=!!row?._held;
+  const exitingToday=false;
   const reachRead=exitingToday?clockRead:null;
   const reachPct=reachRead?reachRead.pct:null;
   let available=null, availableSource='', inCapacityUnits=false;
@@ -10612,32 +10676,17 @@ function getRowExitPolicy(row,buyPrice=null,activeInfo=null,nudgeInfo=null){
   // exactly 1.00 capacity and re-creates the flat target this release removes.
   if(available!=null&&!inCapacityUnits&&capacity>0) available=Math.min(available,capacity);
 
-  // v1347: OUTSIDE-IN MARKET-DRIVEN MAXIMUM UPSIDE TARGET
-  // Decoupled from arbitrary portfolio/goal anchors. Target is derived from the stock's natural
-  // maximum expansion potential within the T+1 horizon (capacity/ATR), bounded by upper circuit.
+  const horizonTarget=historicalHorizonTarget(row?.symbol,getRowStopDistancePct(row));
   let targetPct=null;
   let targetSource='';
   if(active.source==='manual'&&Number(active.tgtPct)>0){
     targetPct=toStep(Number(active.tgtPct));
     targetSource='manual anchor';
-  } else if(exitingToday){
-    let exitUpside=available!=null&&available>0?available:(capacity>0?capacity:(anchor>0?anchor:2.5));
-    if(circuitRunwayPct!=null&&circuitRunwayPct>0) exitUpside=Math.min(exitUpside,circuitRunwayPct);
-    targetPct=toStep(exitUpside);
-    targetSource=circuitRunwayPct!=null&&circuitRunwayPct>0&&exitUpside>=circuitRunwayPct
-      ?'bounded by the NSE circuit'
-      :(availableSource?'intraday runway ('+availableSource+')':'intraday capacity');
   } else {
-    // T+1 breakout horizon capacity (1.5x 1-day typical range capacity/ATR)
-    const t1Capacity=capacity>0?capacity*1.5:(hasAtr?atr*1.5:(available>0?available:(anchor>0?anchor:2.5)));
-    let maxUpside=t1Capacity;
-    if(circuitRunwayPct!=null&&circuitRunwayPct>0){
-      maxUpside=Math.min(maxUpside,circuitRunwayPct);
-    }
-    targetPct=toStep(maxUpside);
-    targetSource=circuitRunwayPct!=null&&circuitRunwayPct>0&&maxUpside>=circuitRunwayPct
-      ?'bounded by the NSE circuit'
-      :(capacity>0?'T+1 range capacity (1.5x daily range)':(hasAtr?'T+1 ATR capacity':'market capacity fallback'));
+    targetPct=horizonTarget.pct>0?Math.floor(horizonTarget.pct*20)/20:null;
+    targetSource=horizonTarget.pct==null
+      ?`Insufficient complete historical paths (${horizonTarget.sessions}/5)`
+      :`Historical median upside before stop through next close (${horizonTarget.sessions} paths; not a forecast)`;
   }
   const basePct=targetPct;
   let nudgePct=0;
@@ -10646,8 +10695,8 @@ function getRowExitPolicy(row,buyPrice=null,activeInfo=null,nudgeInfo=null){
   // already passed - EIDPARRY was armed 826.20 off a 813.99 average while trading 864. The anchor
   // and capacity paths are entry-relative as before.
   const livePrice=Number(row?.price)>0?Number(row?.price):null;
-  const targetRefPrice=(marketReadEarly&&livePrice>0)?livePrice:(Number(bandRef)>0?Number(bandRef):livePrice);
-  const targetRefSource=(marketReadEarly&&livePrice>0)?'live price':'entry price';
+  const targetRefPrice=Number(bandRef)>0?Number(bandRef):livePrice;
+  const targetRefSource='entry price';
   const stopPct=getRowStopDistancePct(row);
   let minGrossPct=null;
   if(basePct>0){
@@ -10663,7 +10712,7 @@ function getRowExitPolicy(row,buyPrice=null,activeInfo=null,nudgeInfo=null){
   const viabilityBasis=targetPct;
   const tapeReach=tapeReachability(row?.symbol,targetPct);
   const reachBlocked=false;
-  const viabilitySource='Target economics';
+  const viabilitySource=targetPct>0?'Target economics':targetSource;
   const viable=targetPct>0&&(minGrossPct==null||targetPct+1e-9>=minGrossPct);
   const belowMarketRead=!!(available!=null&&targetPct>available);
   const horizonNote=(exitingToday?'Existing position exit policy.':'Entry objective: target before stop, by next trading close; predictive accuracy unvalidated.')
@@ -10688,10 +10737,7 @@ function getRowExitPolicy(row,buyPrice=null,activeInfo=null,nudgeInfo=null){
   // v1073: reward:risk is returned on EVERY row and rendered in the TGT/SL tooltips. It sat below
   // 1.0 on 400/400 rows for releases without anyone noticing, because nothing ever displayed it.
   const rewardRisk=(targetPct>0&&stopPct>0)?+(targetPct/stopPct).toFixed(2):null;
-  // v1347: can this stock plausibly travel the target distance within its trade horizon?
-  // For open positions exiting today: today's 1-day capacity. For fresh recommendations: T+1 horizon (1.5x capacity).
-  const maxHorizonCap=exitingToday?capacity:(capacity>0?capacity*1.5:null);
-  const reachable=(maxHorizonCap>0&&targetPct>0)?(maxHorizonCap+1e-9>=targetPct):null;
+  const reachable=null;
   const anchorFloorPct=basePct>0?+basePct.toFixed(2):null;
   // NOT ENFORCED AS AN ALLOCATION BLOCK, and the reason is measured, not cautious: an allocation
   // block feeds ALLOC_BLOCKED, which REMOVES the row from the board - so a goal floor there does
@@ -10702,6 +10748,7 @@ function getRowExitPolicy(row,buyPrice=null,activeInfo=null,nudgeInfo=null){
   const belowAnchorFloor=!!(anchorFloorPct!=null&&active.source==='goal'
     &&wholeDayReachPct!=null&&wholeDayReachPct+1e-9<anchorFloorPct);
   return {
+    targetPolicy:TARGET_POLICY_VERSION,targetEvidence:horizonTarget,
     targetPct:targetPct>0?+targetPct.toFixed(2):null,
     // v1097, all REPORTED so the nudge is auditable on every row:
     basePct:basePct>0?+basePct.toFixed(2):null,   // the goal rate alone — what eligibility is judged on
@@ -11030,15 +11077,13 @@ function getOpenPositionTargetFloor(sym,pos){
   if(!(avgPrice>0)) return null;
   let active=null;
   try{ active=getActiveTargetInfo(); }catch(e){}
-  const anchorPct=Number(active?.tgtPct)>0?Number(active.tgtPct):null;
+  const anchorPct=active?.source==='manual'&&Number(active.tgtPct)>0?Number(active.tgtPct):null;
   const raw=anchorPct!=null?avgPrice*(1+anchorPct/100):avgPrice+0.05;
   const nextTick=+((Math.floor((avgPrice+1e-9)/0.05)+1)*0.05).toFixed(2);
   const anchorPrice=Math.max(nextTick,tickPrice(raw));
   const costFloorPrice=getPositionAfterCostFloor(avgPrice,Number(pos?.qty));
   const price=Math.max(anchorPrice,costFloorPrice||0);
-  const source=active?.source==='manual'?'manual Target Anchor'
-    :active?.source==='goal'?'goal-led Target Anchor'
-    :active?.source==='harvest'?'Harvest Target Anchor':'minimum profit tick';
+  const source=anchorPct!=null?'manual Target Anchor':'after-cost profit floor (not predicted upside)';
   return {avgPrice,price:+price.toFixed(2),anchorPrice:+anchorPrice.toFixed(2),
     costFloorPrice,anchorPct,source};
 }
@@ -11193,34 +11238,35 @@ function getOpenPositionTapePolicy(sym,pos){
   // still mean act at the live tape price and SL can remain below cost; neither may overwrite Target.
   const eodPct=Number.isFinite(tape.predPct)?tape.predPct:null;
   const eodPrice=Number.isFinite(tape.predClose)?tape.predClose:null;
-  let targetRaw=(eodPct!=null&&eodPct>0&&eodPrice>0)?eodPrice:null;
-  if(targetRaw==null&&signal!=='SELL'&&hi>livePrice&&!paceFailed) targetRaw=hi;
-  if(targetRaw==null) targetRaw=livePrice;
-  if(liveHarvest) targetRaw=livePrice;
-  if(highRejection) targetRaw=Math.min(Number(last.h)||targetRaw,targetRaw);
-  const tapeTargetPrice=tickPrice(Math.max(livePrice,targetRaw));
+  const remainingDays=deadline.days===0?1:0;
+  const targetEvidence=deadline.date&&livePrice>0&&entryStop>0&&livePrice>entryStop
+    ?historicalHorizonTarget(s,100*(1-entryStop/livePrice),remainingDays):null;
+  const horizonPrice=targetEvidence?.pct>0?livePrice*(1+targetEvidence.pct/100):null;
+  const tapeTargetPrice=tickPrice(horizonPrice||livePrice);
   const targetFloor=getOpenPositionTargetFloor(s,pos);
   const targetPrice=tickPrice(Math.max(tapeTargetPrice,targetFloor?.price||0));
   const targetPct=targetFloor?.avgPrice>0
     ?100*(targetPrice/targetFloor.avgPrice-1)
     :livePrice>0?100*(targetPrice/livePrice-1):null;
   const floorBound=!!(targetFloor&&targetFloor.price>tapeTargetPrice);
-  const targetWhy=targetFloor
+  const targetWhy=(horizonPrice
+    ?`Historical median upside before the entry stop across ${targetEvidence.sessions} complete paths, through ${remainingDays?'next':'today\'s'} trading close; not a forecast. `
+    :`No positive historical target estimate (${targetEvidence?.sessions||0}/5 complete paths, or unknown entry age); any displayed profit floor is an objective, not predicted upside. `)+(targetFloor
     ?(floorBound
-      ?'The 5-minute tape level '+fmtINR(tapeTargetPrice)+' was below the required profit floor from average buy '+fmtINR(targetFloor.avgPrice)
+      ?'The historical level or current-price fallback '+fmtINR(tapeTargetPrice)+' was below the required profit floor from average buy '+fmtINR(targetFloor.avgPrice)
         +'; Target is held at '+targetFloor.source
         +(targetFloor.anchorPct!=null?' (+'+targetFloor.anchorPct.toFixed(2)+'%)':'')
         +(targetFloor.costFloorPrice!=null?'; the after-cost profit floor is '+fmtINR(targetFloor.costFloorPrice):'')+'.'
-      :'The 5-minute tape supports '+fmtINR(tapeTargetPrice)+', at or above the '+targetFloor.source
+      :'The historical level or current-price fallback is '+fmtINR(tapeTargetPrice)+', at or above the '+targetFloor.source
         +' profit floor from average buy '+fmtINR(targetFloor.avgPrice)
         +(targetFloor.costFloorPrice!=null?'; the after-cost minimum is '+fmtINR(targetFloor.costFloorPrice):'')+'.')
-    :'Average buy is unavailable, so the displayed level comes only from the 5-minute tape.';
+    :'Average buy is unavailable, so no entry-relative profit floor can be established.');
   const paceRs=pacePct!=null&&hi>0?hi*pacePct/100:null;
   const reason=deadline.due?'BTST deadline reached: exit by this session close.'
     :liveHarvest
     ?'Fresh high on an unfinished 5-minute candle whose partial volume is already top-quartile; harvest at the live tape price.'
     :highRejection
-    ?'Fresh high rejected on top-quartile 5-minute volume; work the tape target.'
+    ?'Fresh high rejected on top-quartile 5-minute volume; exit using the live execution price.'
     :paceFailed
       ?'Unrecovered pullback '+pullPct.toFixed(2)+'% exceeded proven Pace '+pacePct.toFixed(2)+'% while flow weakened.'
       :stopBreached
@@ -11234,7 +11280,7 @@ function getOpenPositionTapePolicy(sym,pos){
     exitFriction:getTradeFrictionPct({symbol:s,price:livePrice,turnover:null},qty*livePrice),
     price:+livePrice.toFixed(2),open:day[0].o,high:hi,low:lo,asOf:forming?forming.t:last.t,
     completedAsOf:last.t,
-    targetPrice,targetPct,tapeTargetPrice,
+    targetPrice,targetPct,tapeTargetPrice,targetEvidence,targetPolicy:TARGET_POLICY_VERSION,
     targetFloorPrice:targetFloor?.price||null,targetFloorPct:targetFloor?.anchorPct??null,
     targetCostFloorPrice:targetFloor?.costFloorPrice||null,
     targetAvgPrice:targetFloor?.avgPrice||null,targetFloorSource:targetFloor?.source||null,targetWhy,
@@ -11810,7 +11856,7 @@ function renderTable(){
       // v1144: TGT and SL merged. They are ONE decision - what you ask for against what you risk -
       // and the two columns were part of why the table needed a horizontal scrollbar, which the
       // owner has ruled out. Both numbers survive, with their full tooltips.
-      tgt:`<td style="font-weight:700" title="${escHtml((exitPolicy.viable?`${exitPolicy.targetSource}. You need ${exitPolicy.anchorPct?.toFixed(2)??'—'}% per trade to hold pace; this row offers ${exitPolicy.targetPct?.toFixed(2)??'—'}%${exitPolicy.belowMarketRead?` (market read is ${exitPolicy.marketAvailablePct?.toFixed(2)}%)`:''}${exitPolicy.positionFloorPct>exitPolicy.targetPct?` · CNC after-cost floor is ${exitPolicy.positionFloorPct.toFixed(2)}%`:''}${(exitPolicy.anchorPct>0&&exitPolicy.targetPct>0&&exitPolicy.targetPct<exitPolicy.anchorPct)?' — short of it':''}`:`${exitPolicy.viabilitySource||'Stock capacity'} ${exitPolicy.viabilityBasisPct?.toFixed(2)??'—'}% cannot clear the ${exitPolicy.minGrossPct?.toFixed(2)??'—'}% cost + net hurdle`)+' · '+exitPolicy.horizonNote+' '+exitPolicy.stopSource+(exitPolicy.rewardRisk!=null?` · reward:risk ${exitPolicy.rewardRisk.toFixed(2)}`+(exitPolicy.rewardRisk<1?' — BELOW 1.0: this stock risks more than it aims to make':''):''))}"><span style="color:${exitPolicy.viable?'var(--green)':'var(--red)'}">${exitPolicy.viable&&exitPolicy.targetPct!=null?'+'+exitPolicy.targetPct.toFixed(2)+'%':'—'}</span><span style="color:var(--t3)"> / </span><span style="color:var(--red)">−${exitPolicy.stopPct.toFixed(2)}%</span></td>`,
+      tgt:`<td style="font-weight:700" title="${escHtml((exitPolicy.viable?`${exitPolicy.targetSource}. Entry-relative objective ${exitPolicy.targetPct?.toFixed(2)??'—'}%; target-hit proceeds are not expected returns.${exitPolicy.positionFloorPct>exitPolicy.targetPct?` CNC after-cost floor is ${exitPolicy.positionFloorPct.toFixed(2)}%.`:''}`:`${exitPolicy.viabilitySource||'Target economics'}; target unavailable or below the cost + net hurdle.`)+' '+exitPolicy.horizonNote+' '+exitPolicy.stopSource+(exitPolicy.rewardRisk!=null?` · reward:risk ${exitPolicy.rewardRisk.toFixed(2)}`:''))}"><span style="color:${exitPolicy.viable?'var(--green)':'var(--red)'}">${exitPolicy.viable&&exitPolicy.targetPct!=null?'+'+exitPolicy.targetPct.toFixed(2)+'%':'—'}</span><span style="color:var(--t3)"> / </span><span style="color:var(--red)">−${exitPolicy.stopPct.toFixed(2)}%</span></td>`,
       alloc:`<td class="alloc-cell" data-sym="${s.symbol}">${(()=>{
         if(!am||am.rejected||!(am.qty>0)) return '<span style="color:var(--t3);font-size:13px">—</span>';
         return `<span style="color:var(--amber);font-weight:700;font-family:'DM Mono',monospace;font-size:14px">${fmtINR(am.alloc)}</span>${allocationSubline(am,unitLabel)}`;
@@ -14015,7 +14061,7 @@ function renderPostClose(){
   }
 
   const tableRowsHtml=`${scoreBandsHtml}${blockedTotalRow}${ruleBreakdownHtml}`;
-  const mature=state.records.filter(p=>matureScoreOutcome(p,today)),sessions=new Set(mature.map(p=>p.issueDate)).size;
+  const mature=state.records.filter(p=>p.targetPolicy===TARGET_POLICY_VERSION&&matureScoreOutcome(p,today)),sessions=new Set(mature.map(p=>p.issueDate)).size;
   const candidate=state.candidate,result=candidate?.validation;
   const learning=candidate?`Checking new weights on later decisions: ${result?.n||0}/100 completed observations across ${result?.days||0}/${result?.requiredDays||(candidate.weights.slice(23).some(v=>v>0)?30:5)} sessions. ${result?.netDays||0}/${result?.requiredDays||(candidate.weights.slice(23).some(v=>v>0)?30:5)} sessions have enough cost-covered comparisons.`
     :state.revision>0?`Revision ${state.revision} active. Last update ${when(state.appliedAt)}. ${escHtml(state.status)}.`
