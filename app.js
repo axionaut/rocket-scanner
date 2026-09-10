@@ -1,5 +1,5 @@
-const BUILD_TS='2026-09-09 20:31 IST'; // release build time (IST)
-const APP_VERSION=1341; // Market Memory: causal structural context and independent forward qualification.
+const BUILD_TS='2026-09-10 09:08 IST'; // release build time (IST)
+const APP_VERSION=1342; // Automatic Kite handoff and independent input refresh.
 const RADAR_SCORE_VERSION='unified-evidence-v1';
 function isValidChangeOpen(v){
   if(v===null||v===undefined||typeof v==='boolean') return false;
@@ -12473,18 +12473,24 @@ async function saveKiteConnectKeys(){
     if(!j||!j.ok){ showToast('Kite Connect setup failed: '+((j&&j.why)||'no answer'),6000,true); return; }
     const sb=document.getElementById('kiteApiSecretBox'); if(sb) sb.value='';
     showToast('Stored. Opening Kite login…',3000);
-    if(j.login){KITE_LOGIN_PENDING=true;window.open(j.login,'_blank','noopener');}
+    if(j.login) await openKiteConnectLogin();
     await detectKiteApi(true);
   }catch(e){ showToast('Kite Connect setup failed: '+e.message,6000,true); }
 }
 async function openKiteConnectLogin(){
+  if(KITE_LOGIN_PENDING) return;
+  KITE_LOGIN_PENDING=true;
   try{
     const r=await fetch(KITE_HELPER+'/api/kite/connect/login',{cache:'no-store'});
     const j=await r.json();
-    if(j&&j.ok&&j.url){ KITE_LOGIN_PENDING=true;window.open(j.url,'_blank','noopener');
-      showToast('Complete login in Kite, then return here. Login status updates automatically.',6000); }
-    else showToast('No Kite Connect app key stored yet.',5000,true);
-  }catch(e){ showToast('Could not reach the helper: '+e.message,5000,true); }
+    if(j&&j.ok&&j.url){
+      const url=new URL(j.url);
+      if(url.origin!=='https://kite.zerodha.com'||url.pathname!=='/connect/login') throw new Error('Unexpected Kite login address');
+      try{sessionStorage.setItem('rs_kite_auto_login_attempt',getSessionDate());}catch(e){}
+      // Same-tab navigation works without popup permission. The helper redirects back after exchange.
+      location.assign(url.href);
+    } else {KITE_LOGIN_PENDING=false;showToast('No Kite Connect app key stored yet.',5000,true);}
+  }catch(e){KITE_LOGIN_PENDING=false;showToast('Could not reach the helper: '+e.message,5000,true);}
 }
 // ---- THE ENCTOKEN PATH IS GONE (v1251) --------------------------------------------------------
 // v1239 kept it as a fallback "until Connect is proven in live use". It is proven: the stream has
@@ -12498,7 +12504,15 @@ function maybePromptKiteToken(){
   if(KITE_TOKEN_PROMPTED) return;
   if(kiteTokenDialogState()!=='connect-login') return;
   KITE_TOKEN_PROMPTED=true;
-  showToast('Kite login has expired - press "Log in to Kite" to resume streaming.',8000,true);
+  // Survives the round trip/reload: a rejected or cancelled login must not create a redirect loop.
+  const key='rs_kite_auto_login_attempt',day=getSessionDate();
+  try{
+    if(sessionStorage.getItem(key)!==day){
+      sessionStorage.setItem(key,day);
+      void openKiteConnectLogin();return;
+    }
+  }catch(e){} // Storage unavailable: retain the explicit login button.
+  showToast('Kite connection needs login. Use "Log in to Kite" to retry.',6000,true);
 }
 // The enctoken dialog, saver and compatibility stubs are gone. Kite Connect login is the only
 // credential action the page exposes.
@@ -12844,8 +12858,15 @@ async function loadCorpusCoverage(){
 // on its 09:07 scoring while the helper wrote fresh files every 30 seconds. The helper already owns
 // the folder, so it hands the files over. No grant, no button, no manual step.
 let _helperInputSigs={};
+let _helperHydration=null;
+let _lastIndependentInputCheck=0;
+async function refreshChangedHelperInputs(){
+  if(Date.now()-_lastIndependentInputCheck<10000) return false;
+  _lastIndependentInputCheck=Date.now();
+  try{return await hydrateFromHelper('live refresh');}
+  catch(e){console.warn('Input refresh will retry:',e.message);return false;}
+}
 async function fetchHelperInputList(){
-  if(!KITE_API) return null;
   try{
     const j=await readHelperResponse('/api/inputs/list',{timeout:5000});
     return j?.ok&&Array.isArray(j.files)?j.files:null;
@@ -12854,6 +12875,12 @@ async function fetchHelperInputList(){
 // Only the files the app consumes, and only when their size:lastModified changed - the same
 // signature the Drive push uses, so an unchanged folder costs one small JSON.
 async function hydrateFromHelper(reason){
+  if(_helperHydration) return _helperHydration;
+  _folderWatchBusy=true;
+  _helperHydration=hydrateFromHelperOnce(reason).finally(()=>{_helperHydration=null;_folderWatchBusy=false;});
+  return _helperHydration;
+}
+async function hydrateFromHelperOnce(reason){
   const list=await fetchHelperInputList();
   if(!list||!list.length) return false;
   const wanted=list.filter(f=>{
@@ -14200,6 +14227,8 @@ async function streamRefreshTick(){
   _streamRefreshBusy=true;
   setStreamActivity({phase:'checking',lastAttemptAt:Date.now(),nextAt:0,error:''});
   try{
+    // Disk inputs do not depend on broker authentication, portfolio success or market hours.
+    const inputsChanged=await refreshChangedHelperInputs();
     if(!KITE_API){
     // SELF-HEAL, DO NOT GIVE UP (v1256). detectKiteApi runs ONCE at startup behind a 1.5s timeout,
     // and a helper busy answering a 5 MB inventory can miss it. Before v1255 the folder watch would
@@ -14219,6 +14248,7 @@ async function streamRefreshTick(){
     // so a normal status read can discover a successful login without another broker probe.
     if(KITE_LOGIN_PENDING||KITE_API.needsLogin||!KITE_API.hasToken||KITE_API.tokenValid===false
       ||Date.now()-LAST_KITE_STATUS_AT>=300000) await refreshKiteLoginStatus();
+    maybePromptKiteToken();
     // loadIntradayInventory re-reads the stored bars through the ONE parser and, when anything
     // changed, re-runs applyIntradayReorder + applyFilters + renderRankingsPanels itself. The
     // v1238 freshness rule then decides what may still be recommended, so a stalled stream empties
@@ -14236,11 +14266,10 @@ async function streamRefreshTick(){
     const universeChanged=deltaRes&&deltaRes.changed;
     // Holdings, positions and orders: throttled check every 10s during continuous loop
     let portfolio={ok:false,skipped:true};
-    let portfolioChanged=false;
+    let portfolioChanged=inputsChanged;
     if(Date.now()-_lastPortfolioCheckAt>=10000){
       _lastPortfolioCheckAt=Date.now();
       portfolio=await refreshPortfolioFromHelper();
-      portfolioChanged=portfolio.ok?await hydrateFromHelper('portfolio refresh'):false;
     }
     // THE DELTA CARRIES PRICES, NOT BARS (v1287). v1267 replaced the inventory read with the
     // universe delta on the grounds that the delta "already carries the changed live symbols" - it
