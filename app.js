@@ -1,5 +1,5 @@
-const BUILD_TS='2026-09-10 13:47 IST'; // release build time (IST)
-const APP_VERSION=1352;
+const BUILD_TS='2026-09-10 13:55 IST'; // release build time (IST)
+const APP_VERSION=1353;
 const RADAR_SCORE_VERSION='unified-evidence-v1';
 const TARGET_POLICY_VERSION='clock-stop-next-close-v1';
 function isValidChangeOpen(v){
@@ -4555,7 +4555,7 @@ function radarScoreColor(score){
 }
 const RECOMMEND_MAX_RANK=10;    // SEARCH DEPTH ONLY: candle collection and diagnostic coverage.
 // It never gates a recommendation and never appears beside Score in the recommendation table.
-let RECOMMEND_MIN_SCORE=60;   // explicit policy bar on the six-component 0-100 readiness scale; user-adjustable.
+let RECOMMEND_MIN_SCORE=0;    // explicit policy bar on the six-component 0-100 readiness scale; user-adjustable.
 // Technical readiness is reflected in the final score; the score is not a profit probability.
 // Forward target-before-stop results for this exact score version are shown separately and must earn
 // any predictive interpretation; old score versions are never pooled into those bands.
@@ -4571,8 +4571,8 @@ let RADAR_SCORE_BANDS=(()=>{
 function syncRecommendationThreshold(){
   const el=document.getElementById('fMinScore');
   const raw=el?.value?.trim()||'';
-  const n=raw===''?60:Number(raw);
-  const next=Number.isFinite(n)?Math.max(0,Math.min(100,Math.round(n*2)/2)):60;
+  const n=raw===''?0:Number(raw);
+  const next=Number.isFinite(n)?Math.max(0,Math.min(100,Math.round(n*2)/2)):0;
   const changed=RECOMMEND_MIN_SCORE!==next;
   RECOMMEND_MIN_SCORE=next;
   if(changed&&typeof ALL!=='undefined') ALL.forEach(r=>setRadarEvidenceScore(r,r._tapeStanding));
@@ -14214,7 +14214,7 @@ function renderStatusBar(){
 
 function clearFilters(){
   SHOW_INELIGIBLE=false;
-  ['fSearch','fMinScore'].forEach(id=>{const el=document.getElementById(id);if(el)el.value=id==='fMinScore'?'60':'';});
+  ['fSearch','fMinScore'].forEach(id=>{const el=document.getElementById(id);if(el)el.value='';});
   const turnEl=document.getElementById('fMinTurnover');if(turnEl)turnEl.value='0';
   const dtEl=document.getElementById('fDropThin');if(dtEl)dtEl.value='';
   updateFilterPlaceholders();
@@ -16076,7 +16076,8 @@ function saveFilterState(){
   if(!FILTERS_RESTORED) return; // never persist the blank pre-restore inputs
   const state={
     search:document.getElementById('fSearch')?.value||'',
-    minScore:document.getElementById('fMinScore')?.value||'60',
+    minScore:document.getElementById('fMinScore')?.value||'',
+    minScorePolicyVersion:1,
     showIneligible:SHOW_INELIGIBLE,
     minTurnover:document.getElementById('fMinTurnover')?.value||'0',
     dropThin:document.getElementById('fDropThin')?.value??'',
@@ -16113,7 +16114,7 @@ function loadFilterState(){
     const state=JSON.parse(localStorage.getItem(modeKey(SCANNER_STORE))||'{}');
     const shared=JSON.parse(localStorage.getItem(SHARED_FILTER_STORE)||'{}');
     if(state.search!=null){const el=document.getElementById('fSearch');if(el)el.value=state.search;}
-    if(state.minScore!=null){const el=document.getElementById('fMinScore');if(el)el.value=state.minScore;}
+    if(state.minScore!=null){const el=document.getElementById('fMinScore');if(el)el.value=state.minScore==='60'&&state.minScorePolicyVersion!==1?'':state.minScore;}
     if(state.showIneligible!=null){SHOW_INELIGIBLE=!!state.showIneligible;}
     else if(state.showBelowThreshold!=null){SHOW_INELIGIBLE=!!state.showBelowThreshold;}
     if(state.minTurnover!=null){const el=document.getElementById('fMinTurnover');if(el)el.value=state.minTurnover;}
