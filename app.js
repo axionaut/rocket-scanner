@@ -1,5 +1,5 @@
-const BUILD_TS='2026-09-10 09:48 IST'; // release build time (IST)
-const APP_VERSION=1345; // Exclude unfunded basket rows from recommendations and streamline rejection reasons.
+const BUILD_TS='2026-09-10 11:35 IST'; // release build time (IST)
+const APP_VERSION=1346; // Granular rule-by-rule breakdown in Post-Close Audit table.
 const RADAR_SCORE_VERSION='unified-evidence-v1';
 function isValidChangeOpen(v){
   if(v===null||v===undefined||typeof v==='boolean') return false;
@@ -13887,9 +13887,64 @@ function showRadarDetail(sym){
       <div class="rr-contribs">${contribs}</div>`:''}`;
   dlg.showModal();
 }
-function closeRadarDetail(){document.getElementById('radarDetail')?.close();}
+function humanizeSurvRule(key){
+  if(!key) return '';
+  const k = key.toLowerCase().trim();
+  if(k.includes('long_term_additional') || k === 'long_term_asm' || k.includes('long term asm')) return 'Long Term ASM';
+  if(k.includes('short_term_additional') || k === 'short_term_asm' || k.includes('short term asm')) return 'Short Term ASM';
+  if(k.includes('encumbered') || k.includes('pledge')) return 'Promoter Encumbered / Pledge > 50%';
+  if(k.includes('pan_traded') || k.includes('unique_pan')) return '< 100 Unique PANs Traded (30d)';
+  if(k.includes('loss_making')) return 'Loss Making';
+  if(k === 'gsm' || k.includes('graded_surveillance')) return 'GSM (Graded Surveillance)';
+  if(k === 'esm' || k.includes('enhanced_surveillance')) return 'ESM (Enhanced Surveillance)';
+  if(k.includes('insolvency') || k.includes('irp')) return 'Insolvency Resolution (IRP)';
+  if(k.includes('listing_fee') || k.includes('annual listing fee')) return 'Listing Fee Unpaid';
+  if(k.includes('bz_sz') || k.includes('bz/sz')) return 'Under BZ/SZ Series';
+  if(k.includes('add_on_pb') || k.includes('add-on price band')) return 'Add-on Price Band';
+  if(k.includes('unsolicited_sms')) return 'Unsolicited SMS';
+  if(k.includes('social_media')) return 'Social Media Platforms';
+  if(k === 'default') return 'Default';
+  if(k === 'ica') return 'ICA';
+  return key.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
+}
+
+const SCORE_AUDIT_CATEGORIES = [
+  { id: 'cat_dir', color: 'var(--cyan)', label: 'Direction Gate', test: p => { const s = (p.block||'').toLowerCase(); return s.includes('not lifting off') || s.includes('vwap') || s.includes('red day') || s.includes('below open'); } },
+  { id: 'cat_depth', color: 'var(--amber)', label: 'Depth & Order Book Pressure', test: p => { const s = (p.block||'').toLowerCase(); return s.includes('holding it up') || s.includes('being sold') || s.includes('net flow') || s.includes('tape') || s.includes('sell volume') || s.includes('pressure is not converting'); } },
+  { id: 'cat_timing', color: 'var(--purple)', label: 'Entry Timing Gate', test: p => { const s = (p.block||'').toLowerCase(); return s.includes('peak') || s.includes('range consumed') || s.includes('extended') || s.includes('pullback') || s.includes('wait for confirmation'); } },
+  { id: 'cat_surv', color: 'var(--red)', label: 'Exchange Surveillance & Regulatory', test: p => { const s = (p.block||'').toLowerCase(); return s.includes('surveillance') || s.includes('encumbered') || s.includes('pledge') || s.includes('pan_traded') || s.includes('loss_making') || s.includes('asm') || s.includes('gsm') || s.includes('esm'); } },
+  { id: 'cat_struct', color: 'var(--t3)', label: 'Structural & Liquidity Limits', test: p => { const s = (p.block||'').toLowerCase(); return s.includes('band') || s.includes('series') || s.includes('history') || s.includes('recently') || s.includes('stale') || s.includes('no usable current tape'); } },
+  { id: 'cat_trig', color: 'var(--green)', label: 'Evidence Triggers', test: p => { const s = (p.block||'').toLowerCase(); return s.includes('trigger'); } }
+];
+
+const SCORE_AUDIT_RULES = [
+  // Direction Gate
+  { cat: 'cat_dir', label: 'Below VWAP', test: p => (p.block||'').toLowerCase().includes('vwap') },
+  { cat: 'cat_dir', label: 'Red day', test: p => (p.block||'').toLowerCase().includes('red day') },
+  { cat: 'cat_dir', label: 'Below open', test: p => (p.block||'').toLowerCase().includes('below open') },
+  // Depth & Tape Flow
+  { cat: 'cat_depth', label: 'Bids not holding / Depth ratio', test: p => (p.block||'').toLowerCase().includes('holding it up') },
+  { cat: 'cat_depth', label: 'Net intraday selling flow', test: p => (p.block||'').toLowerCase().includes('being sold') || (p.block||'').toLowerCase().includes('net flow') },
+  { cat: 'cat_depth', label: 'Tape selling / Flow mismatch', test: p => { const s = (p.block||'').toLowerCase(); return s.includes('tape is selling') || s.includes('tape selling') || s.includes('pressure is not converting'); } },
+  { cat: 'cat_depth', label: 'Sell volume exceeds buy volume', test: p => (p.block||'').toLowerCase().includes('sell volume exceeds') },
+  // Entry Timing
+  { cat: 'cat_timing', label: 'Upper-quarter peak (range consumed)', test: p => { const s = (p.block||'').toLowerCase(); return s.includes('peak') || s.includes('range consumed') || s.includes('extended'); } },
+  { cat: 'cat_timing', label: 'Pullback confirmation required', test: p => { const s = (p.block||'').toLowerCase(); return s.includes('pullback') || s.includes('wait for confirmation'); } },
+  // Structural & Liquidity Limits
+  { cat: 'cat_struct', label: 'Non-EQ series or price band < 10%', test: p => { const s = (p.block||'').toLowerCase(); return s.includes('band') || s.includes('series'); } },
+  { cat: 'cat_struct', label: 'Insufficient listing history (<30d)', test: p => { const s = (p.block||'').toLowerCase(); return s.includes('history') || s.includes('recently'); } },
+  { cat: 'cat_struct', label: 'Stale feed / No usable current tape', test: p => { const s = (p.block||'').toLowerCase(); return s.includes('no usable current tape') || s.includes('stale'); } },
+  // Evidence Triggers
+  { cat: 'cat_trig', label: 'Evidence trigger veto', test: p => (p.block||'').toLowerCase().includes('trigger') }
+];
 
 let SCORE_AUDIT_DAY='';
+let SCORE_AUDIT_EXPAND_RULES=true;
+function toggleScoreAuditRules(){
+  SCORE_AUDIT_EXPAND_RULES=!SCORE_AUDIT_EXPAND_RULES;
+  renderPostClose();
+}
+
 function renderPostClose(){
   const el=document.getElementById('postCloseContent');if(!el) return;
   const state=getUnifiedModelState(),today=getSessionDate();
@@ -13902,13 +13957,77 @@ function renderPostClose(){
   const mean=a=>a.length?a.reduce((n,v)=>n+v,0)/a.length:null;
   const num=v=>v==null?'Waiting':(v>=0?'+':'')+v.toFixed(2)+'%';
   const when=t=>t?new Date(t).toLocaleString('en-IN',{timeZone:'Asia/Kolkata',hour:'2-digit',minute:'2-digit',day:'2-digit',month:'short'}):'No observations yet';
-  const rows=[80,60,40,20,0,'Blocked by rules'].map(b=>{
-    const all=records.filter(p=>scoreLearningBand(p)===b),done=all.filter(usableScoreOutcome),net=done.filter(p=>Number.isFinite(p.paperNetPct));
+
+  function formatAuditRow(labelHtml, recordList, trClass='', indentPx=0){
+    const done=recordList.filter(usableScoreOutcome), net=done.filter(p=>Number.isFinite(p.paperNetPct));
     const wins=done.filter(p=>scoreOutcomeTarget(p)===1);
     const mins=wins.map(p=>Math.max(0,tradingDaysBetween(p.issueDate,istDayKey(p.paperExitAt))*375+istClock(p.paperExitAt).mins-istClock(p.issuedAt).mins)).filter(Number.isFinite).sort((a,b)=>a-b);
     const med=mins.length?mins[Math.floor(mins.length/2)].toFixed(0)+' trading min':'Waiting';
-    return `<tr><td><b>${typeof b==='number'?b+'-'+(b===80?100:b+19):b}</b></td><td>${all.length}</td><td>${pct(wins.length,done.length)}<small> ${wins.length}/${done.length} resolved</small></td><td>${num(mean(net.map(p=>p.paperNetPct)))}<small> ${net.length} cost-covered</small></td><td>${med}</td><td>${all.filter(p=>!p.paperComplete).length}</td><td>${all.filter(p=>p.paperComplete&&!usableScoreOutcome(p)).length}</td></tr>`;
+    const style=indentPx?`style="padding-left:${indentPx}px"`:'';
+    return `<tr class="${trClass}"><td ${style}>${labelHtml}</td><td>${recordList.length}</td><td>${pct(wins.length,done.length)}<small> ${wins.length}/${done.length} resolved</small></td><td>${num(mean(net.map(p=>p.paperNetPct)))}<small> ${net.length} cost-covered</small></td><td>${med}</td><td>${recordList.filter(p=>!p.paperComplete).length}</td><td>${recordList.filter(p=>p.paperComplete&&!usableScoreOutcome(p)).length}</td></tr>`;
+  }
+
+  const scoreBandsHtml=[80,60,40,20,0].map(b=>{
+    const all=records.filter(p=>scoreLearningBand(p)===b);
+    const label=`<b>${b}-${b===80?100:b+19}</b>`;
+    return formatAuditRow(label, all);
   }).join('');
+
+  const blockedList=records.filter(p=>p.block);
+  const toggleBtn=`<button type="button" class="sb-clear" style="padding:1px 7px;margin-left:8px;font-size:11px;cursor:pointer;border-radius:4px" onclick="toggleScoreAuditRules()">${SCORE_AUDIT_EXPAND_RULES?'▲ Collapse rules':'▼ Show all rules'}</button>`;
+  const blockedTotalRow=formatAuditRow(`<b>Blocked by rules (Total)</b>${toggleBtn}`, blockedList, 'pc-cat-row');
+
+  let ruleBreakdownHtml='';
+  if(SCORE_AUDIT_EXPAND_RULES && blockedList.length>0){
+    const rows=[];
+    SCORE_AUDIT_CATEGORIES.forEach(cat=>{
+      const catList=blockedList.filter(cat.test);
+      if(catList.length>0){
+        const catBadge=`<span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:${cat.color};margin-right:6px;vertical-align:middle"></span><b>${escHtml(cat.label)}</b>`;
+        rows.push(formatAuditRow(catBadge, catList, 'pc-cat-row', 16));
+        if(cat.id==='cat_surv'){
+          const survMap=new Map();
+          catList.forEach(p=>{
+            const m=(p.block||'').match(/Surveillance flag \((.*?)\)/i);
+            if(m){
+              const parts=m[1].split(' · ').map(x=>x.trim()).filter(Boolean);
+              parts.forEach(k=>{
+                const name=humanizeSurvRule(k);
+                if(!survMap.has(name)) survMap.set(name,[]);
+                survMap.get(name).push(p);
+              });
+            } else {
+              const name='General Surveillance Flag';
+              if(!survMap.has(name)) survMap.set(name,[]);
+              survMap.get(name).push(p);
+            }
+          });
+          Array.from(survMap.keys()).sort().forEach(ruleName=>{
+            const rList=survMap.get(ruleName);
+            const subLabel=`<span style="color:var(--t3);margin-right:6px">↳</span>${escHtml(ruleName)}`;
+            rows.push(formatAuditRow(subLabel, rList, 'pc-subrule-row', 32));
+          });
+        } else {
+          const rules=SCORE_AUDIT_RULES.filter(r=>r.cat===cat.id);
+          rules.forEach(r=>{
+            const rList=catList.filter(r.test);
+            if(rList.length>0){
+              const subLabel=`<span style="color:var(--t3);margin-right:6px">↳</span>${escHtml(r.label)}`;
+              rows.push(formatAuditRow(subLabel, rList, 'pc-subrule-row', 32));
+            }
+          });
+        }
+      }
+    });
+    const otherList=blockedList.filter(p=>!SCORE_AUDIT_CATEGORIES.some(cat=>cat.test(p)));
+    if(otherList.length>0){
+      const otherBadge=`<span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:var(--t3);margin-right:6px;vertical-align:middle"></span><b>Other rule caps</b>`;
+      rows.push(formatAuditRow(otherBadge, otherList, 'pc-cat-row', 16));
+    }
+    ruleBreakdownHtml=rows.join('');
+  }
+
+  const tableRowsHtml=`${scoreBandsHtml}${blockedTotalRow}${ruleBreakdownHtml}`;
   const mature=state.records.filter(p=>matureScoreOutcome(p,today)),sessions=new Set(mature.map(p=>p.issueDate)).size;
   const candidate=state.candidate,result=candidate?.validation;
   const learning=candidate?`Checking new weights on later decisions: ${result?.n||0}/100 completed observations across ${result?.days||0}/${result?.requiredDays||(candidate.weights.slice(23).some(v=>v>0)?30:5)} sessions. ${result?.netDays||0}/${result?.requiredDays||(candidate.weights.slice(23).some(v=>v>0)?30:5)} sessions have enough cost-covered comparisons.`
@@ -13923,7 +14042,7 @@ function renderPostClose(){
     <div class="pc-kpis">${card('Recorded decisions',records.length,'Sampled every 30 minutes')}${card('Target reached',pct(resolved.filter(p=>scoreOutcomeTarget(p)).length,resolved.length),'Before stop, through next trading close')}${card('Still pending',pending,'Not counted as failures')}${card('Insufficient evidence',incomplete,'Excluded from learning')}${card('Rule-blocked samples',blocked,'Audited; never authorised as buys')}</div>
     <p class="pc-copy">Last observation: ${when(records.length?Math.max(...records.map(p=>p.issuedAt)):0)}. Last outcome check: ${when(state.updatedAt)}.
     The sample includes high and low signal scores and blocked stocks; it is not the entire market and repeated decisions are correlated.</p>
-    <div class="pc-table-wrap"><table class="pc-table"><thead><tr><th>Final score at issue</th><th>Observations</th><th>Target hit rate</th><th>Average net return at exit</th><th>Time to target</th><th>Pending</th><th>Excluded</th></tr></thead><tbody>${rows}</tbody></table></div>
+    <div class="pc-table-wrap"><table class="pc-table"><thead><tr><th>Final score at issue / Rule veto</th><th>Observations</th><th>Target hit rate</th><th>Average net return at exit</th><th>Time to target</th><th>Pending</th><th>Excluded</th></tr></thead><tbody>${tableRowsHtml}</tbody></table></div>
     <p class="pc-copy">A deadline miss counts as a failed target prediction, even if the trade finishes positive. Net return includes charges and measured friction; missing cost coverage is not treated as zero cost. Blocked observations are hypothetical diagnostics, not recommendations. Scores, thresholds and model revisions are retained as issued.</p>
     </section><section class="m-card pc-card"><h3 class="pc-title">What is feeding live scores now?</h3><p class="pc-copy">${learning}</p>
     <p class="pc-copy">New observations train a bounded candidate. It can replace live weights only after later, untouched decisions show lower prediction error, better positive net returns, no worse target-hit rate and agreement across sessions. Decisions used for training are never used to validate that candidate.</p>
