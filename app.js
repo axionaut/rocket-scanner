@@ -1,5 +1,5 @@
-const BUILD_TS='2026-09-10 09:20 IST'; // release build time (IST)
-const APP_VERSION=1343; // Reject allocations whose target cannot cover quantity-specific costs.
+const BUILD_TS='2026-09-10 09:28 IST'; // release build time (IST)
+const APP_VERSION=1344; // Wrapped empty rankings and truthful feature-ledger labels.
 const RADAR_SCORE_VERSION='unified-evidence-v1';
 function isValidChangeOpen(v){
   if(v===null||v===undefined||typeof v==='boolean') return false;
@@ -5727,7 +5727,6 @@ function* radarAnalyzeGen(headers,rawRows,supplements={},heldSymbols=new Set()){
   // WS4/R6: sector-relative day move per row (post-neutralisation; blanked rows are null).
   const srArr=rawRows.map(raw=>{const d=radarNum(raw[targetI]);return d===null?null:clamp01(d,-10,10)-(sectorMedians[raw[sectorI]||'Unknown']??0);});
   const minObs=Math.max(25,Math.floor(rawRows.length*.08));
-  const rocketCohortTrusted=false;
   // v1135: forward-measured effects, resolved once per pass (see getForwardIndicatorEffects).
   const fwdEffects=(typeof getForwardIndicatorEffects==='function')?getForwardIndicatorEffects():new Map();
   const nextPrediction=(typeof getNextSessionIndicatorEffects==='function')?getNextSessionIndicatorEffects():{map:new Map(),sessions:0};
@@ -5758,7 +5757,7 @@ function* radarAnalyzeGen(headers,rawRows,supplements={},heldSymbols=new Set()){
     }
     const mr=ar.length?ar.reduce((a,b)=>a+b,0)/ar.length:.5,mo=ao.length?ao.reduce((a,b)=>a+b,0)/ao.length:.5;
     // v1083: the rocket cohort must clear the SAME minimum-observation bar every feature must clear
-    // before it is modeled at all. See rocketCohortTrusted above for the full reasoning.
+    // before it is modeled at all. Same-day comparisons below are display-only.
     // v1085: the separation is still MEASURED (the ledger shows it) but never APPLIED.
     f.diagnosticEffect=clamp01((mr-mo)*2,-1,1);
     // v1135: the SAME-DAY separation stays diagnostic-only, exactly as v1085 requires. The effect
@@ -5769,7 +5768,7 @@ function* radarAnalyzeGen(headers,rawRows,supplements={},heldSymbols=new Set()){
     f.forwardSessions=_fwd?_fwd.n:0;
     f.nextEffect=_next?_next.effect:null;
     f.nextSessions=_next?_next.n:0;
-    f.effect=_fwd?_fwd.effect:(rocketCohortTrusted?f.diagnosticEffect:0);
+    f.effect=_fwd?_fwd.effect:0;
     f.reliability=Math.sqrt(f.coverage)*(rocketRows.length/(rocketRows.length+12));
     f.weight=(.07+Math.abs(f.effect))*.6+.4*Math.sqrt(f.coverage);
     features.push(f);
@@ -5783,7 +5782,7 @@ function* radarAnalyzeGen(headers,rawRows,supplements={},heldSymbols=new Set()){
       srArr.forEach((v,ri)=>{if(v===null)return;(rset.has(ri)?ar:ao).push(radarPct(wins,clamp01(v,q02,q98)));});
       const mr=ar.length?ar.reduce((a,b)=>a+b,0)/ar.length:.5,mo=ao.length?ao.reduce((a,b)=>a+b,0)/ao.length:.5;
       const diagnosticEffect=clamp01((mr-mo)*2,-1,1);
-      const effect=rocketCohortTrusted?diagnosticEffect:0,coverage=vals.length/rawRows.length;
+      const effect=0,coverage=vals.length/rawRows.length;
       srFeat={sorted:wins,q02,q98,effect,diagnosticEffect,weight:(.07+Math.abs(effect))*.6+.4*Math.sqrt(coverage)};
     }
   }
@@ -5818,7 +5817,7 @@ function* radarAnalyzeGen(headers,rawRows,supplements={},heldSymbols=new Set()){
       accArr.forEach((v,ri)=>{if(v===null)return;(rset.has(ri)?ar:ao).push(radarPct(wins,clamp01(v,q02,q98)));});
       const mr=ar.length?ar.reduce((a,b)=>a+b,0)/ar.length:.5,mo=ao.length?ao.reduce((a,b)=>a+b,0)/ao.length:.5;
       const diagnosticEffect=clamp01((mr-mo)*2,-1,1);
-      const effect=rocketCohortTrusted?diagnosticEffect:0,coverage=vals.length/rawRows.length;
+      const effect=0,coverage=vals.length/rawRows.length;
       accFeat={sorted:wins,q02,q98,effect,diagnosticEffect,weight:(.07+Math.abs(effect))*.6+.4*Math.sqrt(coverage)};
     }
   }
@@ -9811,7 +9810,7 @@ function buildRadarLedgerHTML(){
     else use=cov===0?'Empty in this snapshot; retained in audit':'Constant, sparse, or non-numeric; retained in audit';
     return `<tr><td style="font-family:'Plus Jakarta Sans',sans-serif;font-weight:600;color:var(--t1);white-space:normal;min-width:230px">${escHtml(h)}</td><td style="font-size:13px;color:var(--t2)">${escHtml(use)}</td><td style="font-size:12px;color:var(--cyan);text-transform:uppercase;font-weight:700">${group}</td><td style="font-weight:700">${w?w.toFixed(3):'0'}</td><td><span style="display:inline-block;width:7px;height:7px;border-radius:50%;margin-right:5px;background:${cov>.9?'var(--green)':cov>.5?'var(--amber)':'var(--red)'}"></span>${(cov*100).toFixed(0)}%</td><td>${sep===null?'—':`<span class="${sep>=0?'pos':'neg'}">${sep>=0?'+':''}${(sep*100).toFixed(1)} pp</span>`}</td></tr>`;
   }).join('');
-  return `<div class="corr-wrap"><table class="ct"><thead><tr><th>Column / Feature</th><th>Use</th><th>Group</th><th>Model Weight</th><th>Coverage</th><th>Today-Rocket Separation</th></tr></thead><tbody>${ledgerRows}</tbody></table></div>`;
+  return `<div class="corr-wrap"><table class="ct"><thead><tr><th>Column / Feature</th><th>Use</th><th>Group</th><th>Setup weight</th><th>Input coverage</th><th title="Twice the mean percentile-rank difference between today's rocket group and other stocks. Diagnostic only; not a predicted return or success rate.">Scaled same-day rank gap</th></tr></thead><tbody>${ledgerRows}</tbody></table></div>`;
 }
 function buildIndicatorWatchHTML(){
   let w;try{w=evaluateIndicatorWatch();}catch(e){return '';}
@@ -9893,7 +9892,8 @@ function _renderMethodologyInner(){
     </div>
     <h3 style="margin-top:28px">Live Recommendation Funnel</h3>
     <p style="color:var(--t2);font-size:14.5px;line-height:1.7">The entry objective is to reach the stock's target before its stop, from the current entry price through the next trading close. Technical readiness, direction, exchange eligibility, surveillance, entry timing and current tape are included in the final score: a failing row is capped below <strong>Min Score ${RECOMMEND_MIN_SCORE}</strong>. During an open market with fresh data, above-bar rows in your filtered list are eligible; the basket selects up to 20 and respects manual exclusions. Capital, whole shares, costs and risk rails determine which selected rows can be funded. Historical remaining-session upside and recent 30-minute range are context, not next-day rejection rules. Scores and targets remain unvalidated forecasts, not probabilities or guaranteed returns.</p>
-    <h3 id="meth-ledger" style="margin-top:28px">Feature Ledger <span style="font-size:14px;color:var(--t3);font-weight:400">(${RADAR.features.length||0} modeled of ${RADAR.headers.length||0} columns)</span></h3>
+    <h3 id="meth-ledger" style="margin-top:28px">Feature Ledger <span style="font-size:14px;color:var(--t3);font-weight:400">(${RADAR.features.length||0} setup features from ${RADAR.headers.length||0} input columns)</span></h3>
+    <p style="color:var(--t2);line-height:1.7">These are input-file and setup diagnostics. Setup weights are not the live adaptive scoring factors; see Post-close for those. Grouped prior readings feed the adaptive model, while some setup components also inform fixed risk checks. Input coverage describes this file only, not live-tape availability. The same-day rank gap is descriptive and never supplies a scoring effect.</p>
     ${buildRadarLedgerHTML()}
     ${buildIndicatorWatchHTML()}
     <div id="meth-hf-wrap">${hardFiltersHTML}</div>
@@ -11829,7 +11829,7 @@ function renderTable(){
     if(isSelected) _trStyle+=';background:rgba(251,191,36,.04);outline:1px solid rgba(251,191,36,.12);outline-offset:-1px';
     else if(!canBuy) _trStyle+=';opacity:0.8';
     return`<tr data-sym="${s.symbol}" style="${_trStyle}" onclick="showRadarDetail('${s.symbol}')" title="Click for the full scoring breakdown">${cells}</tr>`;
-  }).join('')||`<tr><td colspan="${COLS.length}"><div style="padding:48px 20px;text-align:center;color:var(--t3)">${emptyBoardReason()}</div></td></tr>`;
+  }).join('')||`<tr><td colspan="${COLS.length}" class="rankings-empty-cell"><div class="rankings-empty-message">${emptyBoardReason()}</div></td></tr>`;
   renderPgn();
   updateSelectAll();
 }
@@ -13498,16 +13498,15 @@ function emptyBoardReason(){
   const scored=ALL.filter(r=>r&&!r._held&&Number.isFinite(Number(r.score))&&Number(r.score)>0).length;
   if(!scored&&!dep.ready){
     if(dep.withToday&&dep.deepest>0){
-      const at=newestTapeBucketMs()+(dep.need-dep.deepest)*5*60000;
+      const at=newestTapeBucketMs()+(dep.need-dep.deepest+1)*5*60000;
       const from=liveTapeTime(dep.openMs);
       return 'The live tape is running, but it is too <b>short</b> to score yet.'
         +'<br><span style="font-size:12px">'
         +dep.withToday.toLocaleString('en-IN')+' symbols carry a tape for this session, and the deepest holds <b>'
         +dep.deepest+' of the '+dep.need+'</b> five-minute bars scoring needs '
         +'(net flow is read on 15-minute buckets and needs two of them).'
-        +(from?' The tape starts at <b>'+escHtml(from)+'</b>, not 09:15 \u2014 the helper was not streaming before that, '
-              +'so the opening bars are missing and are being fetched back.':'')
-        +' Scoring starts around <b>'+escHtml(liveTapeTime(at))+'</b>.</span>';
+        +(from?' Earliest available bar: <b>'+escHtml(from)+'</b>.':'')
+        +' If bars arrive normally, enough tape is expected around <b>'+escHtml(liveTapeTime(at))+'</b>.</span>';
     }
     return 'Nothing is ranked yet \u2014 the live tape has not produced a read for this session.'
       +'<br><span style="font-size:12px">'+total.toLocaleString('en-IN')
