@@ -1,5 +1,5 @@
-const BUILD_TS='2026-09-10 13:30 IST'; // release build time (IST)
-const APP_VERSION=1351;
+const BUILD_TS='2026-09-10 13:47 IST'; // release build time (IST)
+const APP_VERSION=1352;
 const RADAR_SCORE_VERSION='unified-evidence-v1';
 const TARGET_POLICY_VERSION='clock-stop-next-close-v1';
 function isValidChangeOpen(v){
@@ -243,6 +243,7 @@ function captureOpenSnapshots(rows){
   if(changed) saveOpenSnapshotMap();
 }
 function getOpenSnapshot(sym){
+  const today=getSessionDate();
   const key=normSym(sym||'');
   const snap=OPEN_SNAPSHOT_MAP[key];
   if(snap&&snap.date===today&&snap.openPrice>0) return snap;
@@ -3389,23 +3390,24 @@ async function updateScoreLearning(){
           for(const rows of Object.values(groups)) rows.sort((a,b)=>scoreSampleHash(a.symbol+'|'+bucket)-scoreSampleHash(b.symbol+'|'+bucket)).slice(0,8).forEach(r=>chosen.set(r.symbol,r));
           for(const r of chosen.values()){
             const c=r.scoreComponents,policy=getRowExitPolicy(r,r.price);
-            if(!(policy.targetPct>0&&policy.stopPct>0)) continue;
+            if(!(policy.stopPct>0)) continue;
             const qty=Math.max(1,Math.floor(frictionSizeBasis()/r.price)),fr=getTradeFrictionPct(r,qty*r.price);
             const input=JSON.parse(JSON.stringify(c.unified)),live=computeUnifiedEvidence(input,state.live);
             const trial=state.candidate?computeUnifiedEvidence(input,state.candidate.weights):null;
             const withoutMemory=state.candidate?computeUnifiedEvidence(input,state.candidate.weights.map((v,i)=>i>=23?0:v)):null;
-            state.records.push({symbol:r.symbol,issueDate:today,issuedAt:captureAt,bucket,score:r.score,signalScore:c.signalScore,
+            const observation={symbol:r.symbol,issueDate:today,issuedAt:captureAt,bucket,score:r.score,signalScore:c.signalScore,
               block:c.block||null,minScore:RECOMMEND_MIN_SCORE,input,modelRevision:state.revision,livePrediction:live.raw/100,liveDecision:live.total,
               candidateId:trial?state.candidate.id:null,candidatePrediction:trial?trial.raw/100:null,candidateDecision:trial?trial.total:null,
               withoutMemoryPrediction:withoutMemory?withoutMemory.raw/100:null,withoutMemoryDecision:withoutMemory?withoutMemory.total:null,
               entryPrice:r.price,targetPct:policy.targetPct,stopPct:policy.stopPct,auditQty:qty,orderType:'MARKET',
               frictionPct:fr?.covered&&Number.isFinite(fr.entryPct)&&Number.isFinite(fr.exitPct)?Math.max(0,fr.entryPct+fr.exitPct):null,
               rocketOutcome:ROCKET_OUTCOME.PENDING,scoreVersion:RADAR_SCORE_VERSION,outcomePolicy:'net-policy-v1',
-              targetPolicy:TARGET_POLICY_VERSION,targetSource:policy.targetSource,targetEvidence:policy.targetEvidence});
+              targetPolicy:TARGET_POLICY_VERSION,targetSource:policy.targetSource,targetEvidence:policy.targetEvidence};
+            if(policy.targetPct>0) state.records.push(observation);
             if(studyOpen&&cohort.has(r.symbol)&&input.memory?.ok){
               const values=[r.atr,r.changeOpen,input.memory.displacement,r.score];
               if(values.every(Number.isFinite)){
-                const p=state.records.at(-1);
+                const p=observation;
                 study.records.push({symbol:p.symbol,issueDate:today,issuedAt:captureAt,bucket,entryPrice:p.entryPrice,
                   targetPct:MEMORY_SPEC.targetPct,stopPct:p.stopPct,auditQty:qty,orderType:'MARKET',frictionPct:p.frictionPct,
                   rocketOutcome:ROCKET_OUTCOME.PENDING,outcomePolicy:'net-policy-v1',memory:input.memory,
@@ -4927,10 +4929,9 @@ function planFundedRecommendations(rows,capital){
 }
 function rowStatusPillHtml(s){
   if(!s) return '';
-  const survFlags=(s?.meta?.flags||[]).map(x=>String(x||'').trim()).filter(Boolean);
   const nseSurv=(NSE_SURV[s?.symbol]||[]);
-  if(survFlags.length || nseSurv.length){
-    const names=[...new Set([...survFlags, ...nseSurv])].join(' · ');
+  if(nseSurv.length){
+    const names=[...new Set(nseSurv)].join(' · ');
     return `<span class="info-pill pill-red" style="padding:2px 8px;display:inline-block;vertical-align:middle;line-height:1.3" title="NSE surveillance: ${escHtml(names)}">✕ Surveillance: ${escHtml(names)}</span>`;
   }
   const reason=BASKET_ROW_REASONS.get(s.symbol);
@@ -9049,11 +9050,11 @@ function buildOpenPositionsPanel(query=''){
       },
       clrFn:()=>'var(--green)'},
     {key:'stopPrice',label:'SL ₹',align:'right',fmt:(v,row)=>{
-      if(v==null) return `<span style="color:var(--t3)" title="${escHtml('Hidden until the tape stop is above average buy and covers estimated Zerodha CNC charges. Nothing switches to TSL automatically.')}">—</span>`;
+      if(v==null) return `<span style="color:var(--t3)" title="${escHtml('No valid protective stop is available. Nothing switches to TSL automatically.')}">—</span>`;
       const ltp=Number(row.ltp),deltaPct=ltp>0?100*(Number(v)-ltp)/ltp:null;
       const distance=Number.isFinite(deltaPct)
         ?`<span style="font-size:12px;color:var(--t3);margin-left:4px">${Math.abs(deltaPct).toFixed(2)}% ${deltaPct<=0?'below':'above'} LTP</span>`:'';
-      return `<span title="${escHtml('Manual TSL switch trigger. The percentage is this displayed stop price relative to current LTP. A sale at this tape stop is above average buy and covers estimated Zerodha CNC charges, including the DP charge. No trailing mode is changed automatically.')}">${fmtINR(v)}${distance}</span>`;
+      return `<span title="${escHtml('Protective stop: the tighter of entry risk and the recovered-pullback trail. The percentage is relative to current LTP, not profit after costs. An exit can realise a loss. No trailing mode is changed automatically.')}">${fmtINR(v)}${distance}</span>`;
     },
       clrFn:v=>v==null?'var(--t3)':'var(--green)'},
     {key:'score',label:'Score/#',align:'right',bold:true,
@@ -9140,7 +9141,7 @@ function buildOpenPositionsPanel(query=''){
         <span style="font-size:13px;font-weight:800;color:var(--t1);text-transform:uppercase;letter-spacing:.08em">Open Positions${panelFilterTag(rows,shown,query)}</span>
         <span style="font-size:14px;font-weight:700;color:${pnlColor}">${rows.length} live position${rows.length===1?'':'s'} · ${fmtINR(totalCapital)} deployed · ${fmtSignedINR(totalPnl)}</span>
       </div>
-      <div style="font-size:14px;color:var(--t2);line-height:1.5">Live merge of Holdings, Positions, and today's net buys. Rows default to highest numerical Radar confidence (Score, then better Rank). Buy/Sell/Hold and every order level come only from 5-minute price-volume pressure. Pace and EoD use completed candles; a fresh high whose partial candle volume already reaches this stock's own top quartile can pull Target to the live tape price. Radar score, rank and risk are optional recommendation context and never move these position numbers. ${radarNote}</div>
+      <div style="font-size:14px;color:var(--t2);line-height:1.5">Live merge of Holdings, Positions, and today's net buys. Targets use prior complete five-minute paths through the remaining holding deadline, subject to the after-cost objective and any manual override. Pace measures completed recovered pullbacks; its rupee trail gap follows the current high. Protective stops and exit deadlines remain binding even when the target is not reached. Radar score, rank and risk are recommendation context, not inputs to these position levels. ${radarNote}</div>
     </div>
     ${shown.length?`<div class="scroll-x">${table.getHtml()}</div>`:panelNoMatchHtml(query,'open position')}
   </div>`;
@@ -13552,19 +13553,18 @@ function emptyBoardReason(){
   const q=(document.getElementById('fSearch')?.value||'').trim();
   if(q) bits.push('search \u201c'+escHtml(q)+'\u201d');
   // THE EFFECTIVE BAR, NOT THE FIELD: a blank Min Score is still a bar of 60.
-  if(RECOMMEND_MIN_SCORE>0) bits.push('score \u2265 '+RECOMMEND_MIN_SCORE
+  if(!SHOW_INELIGIBLE&&RECOMMEND_MIN_SCORE>0) bits.push('score \u2265 '+RECOMMEND_MIN_SCORE
     +(((document.getElementById('fMinScore')?.value||'').trim()==='')?' (default)':''));
   const dt=(document.getElementById('fDropThin')?.value||'').trim();
-  if(dt&&Number(dt)>0) bits.push('thinnest '+escHtml(dt)+'% dropped');
-  if(!bits.length) return 'Nothing is ranked yet \u2014 the live tape has not produced a current read.';
+  if(!SHOW_INELIGIBLE&&dt&&Number(dt)>0) bits.push('thinnest '+escHtml(dt)+'% dropped');
   const best=ALL.reduce((m,r)=>(r&&!r._held&&Number.isFinite(Number(r.score))&&Number(r.score)>m)?Number(r.score):m,0);
   const removedSummary=Object.entries(REMOVED_ROWS.reduce((m,r)=>{m[r.reason]=(m[r.reason]||0)+1;return m},{}))
     .map(([k,v])=>k==='surv'?v+' surveillance':k==='trigger'?v+' evidence vetoes':k==='filter'?v+' user-filter matches':k==='allocation'?v+' not allocatable':v+' '+k).join(' · ');
-  return 'No rows match your filters: '+bits.join(' \u00b7 ')
+  return (SHOW_INELIGIBLE?'No rows match the current search':'No funded actionable recommendations')+(bits.length?': '+bits.join(' \u00b7 '):'')
     +'.<br><span style="font-size:12px">'+total.toLocaleString('en-IN')
     +' stocks are ranked and the best scores '+best.toFixed(1)
     +(removedSummary?' · removed breakdown: '+escHtml(removedSummary):'')
-    +' \u2014 press <b>Clear filters</b>, or lower <b>Min Score</b>, to see them.</span>';
+    +(SHOW_INELIGIBLE?'':' \u2014 ineligible rows include rule-blocked and unfunded candidates; a high score alone does not authorise a buy.')+'</span>';
 }
 const LIVE_TAPE_TIME_FMT=new Intl.DateTimeFormat('en-IN',{
   timeZone:'Asia/Kolkata',hour:'2-digit',minute:'2-digit',second:'2-digit',hour12:false
@@ -14079,7 +14079,7 @@ function renderPostClose(){
     <p class="pc-copy"><b>Protected rules:</b> buy volume must exceed sell volume when depth is available, plus existing direction, entry timing, exchange, surveillance, stale-data and risk safeguards. Weight changes cannot bypass these checks. Older armed conditions are preserved; this page no longer creates extra gates or changes weights when opened.</p>
     <details><summary>See current weights and changes being checked</summary><div class="pc-table-wrap"><table class="pc-table"><thead><tr><th>Signal source</th><th>Initial factor</th><th>Live factor</th><th>Being checked</th></tr></thead><tbody>${sources}</tbody></table></div>
     <p class="pc-copy">Existing signals start at 1x. Additional setup/context adjustments start at zero. These are influence factors, not score points or return probabilities. Correlated setup fields are grouped; their readings exclude the old same-session winner-fitted contributions.</p></details>
-    <p class="pc-copy">${state.history.length?'Validated updates applied: '+state.history.length+'. Most recent validation used '+state.history[state.history.length-1].validation.n+' later observations.':'No adaptive update has qualified yet. Initial scores remain unvalidated.'} Retains the latest 10,000 completed sampled decisions, pending decisions, all observations for the active candidate and 30 model updates. No live trades are placed by this audit.</p>
+    <p class="pc-copy">${state.history.filter(entry=>entry.validation).length?'Validated updates applied: '+state.history.filter(entry=>entry.validation).length+'. Most recent validation used '+state.history.filter(entry=>entry.validation).at(-1).validation.n+' later observations.':'No retained validated update. Retired candidates are not promotions.'} Retains the latest 10,000 completed sampled decisions, pending decisions, all observations for the active candidate and 30 model updates. No live trades are placed by this audit.</p>
     </section>${renderMemoryStudy(state)}</div>`;
 }
 
