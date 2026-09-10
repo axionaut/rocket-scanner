@@ -1,5 +1,5 @@
-const BUILD_TS='2026-09-10 13:12 IST'; // release build time (IST)
-const APP_VERSION=1350;
+const BUILD_TS='2026-09-10 13:30 IST'; // release build time (IST)
+const APP_VERSION=1351;
 const RADAR_SCORE_VERSION='unified-evidence-v1';
 const TARGET_POLICY_VERSION='clock-stop-next-close-v1';
 function isValidChangeOpen(v){
@@ -243,7 +243,6 @@ function captureOpenSnapshots(rows){
   if(changed) saveOpenSnapshotMap();
 }
 function getOpenSnapshot(sym){
-  const today=getSessionDate();
   const key=normSym(sym||'');
   const snap=OPEN_SNAPSHOT_MAP[key];
   if(snap&&snap.date===today&&snap.openPrice>0) return snap;
@@ -7598,9 +7597,9 @@ function updateFilterPlaceholders(){
       riskEl.title=`Empty = NO cap; sizing follows Radar score ÷ stop distance and the existing rails, which today imply about ₹${d.toLocaleString('en-IN')} at risk for a full Max Alloc ₹${Math.round(ma).toLocaleString('en-IN')} position at the ${med.toFixed(2)}% median stop. Type a value to cap what any one position may lose — it can only shrink a position, never grow one.`; }
     else { riskEl.placeholder='auto'; } }
   const tgtEl=document.getElementById('fTgtOverride');
-  if(tgtEl){ let d=0; try{d=getDefaultTgtPct();}catch(e){} tgtEl.placeholder=d>0?d.toFixed(1):'auto'; tgtEl.title='Empty = calculated harvest target, a price-move percentage before costs. A typed value overrides it; clearing restores automatic calculation.'; }
+  if(tgtEl){ let d=0; try{d=getDefaultTgtPct();}catch(e){} tgtEl.placeholder=d>0?d.toFixed(1):'auto'; tgtEl.title='Empty keeps this as a harvest-based planning reference for goal allocation only. It does not set automatic candidate or held-position targets. Type a value to explicitly override those targets; clear it to restore planning-only Auto.'; }
   showTradeInputMode(capEl);showTradeInputMode(maxEl);
-  showTradeInputMode(riskEl,'No cap');showTradeInputMode(tgtEl);
+  showTradeInputMode(riskEl,'No cap');showTradeInputMode(tgtEl,'Planning');
 }
 // Goal capital basis = effective capital (the field if the owner typed one, else the
 // computed deployed book). An empty field means the default, never zero.
@@ -7886,9 +7885,9 @@ function renderStats(){
     if((s.priceChange||0)>0) secBreadths[s.sector].up++;
   });
   let topSec='—', topSecPct=0;
-  if(tgtEl){ let d=0; try{d=getDefaultTgtPct();}catch(e){} tgtEl.placeholder=d>0?d.toFixed(1):'auto'; tgtEl.title='Empty keeps this as a harvest-based planning reference for goal allocation only. It does not set automatic candidate or held-position targets. Type a value to explicitly override those targets; clear it to restore planning-only Auto.'; }
+  Object.entries(secBreadths).forEach(([sec,d])=>{
     if(d.total>=5){const pct=d.up/d.total*100; if(pct>topSecPct){topSecPct=pct;topSec=sec;}}
-  showTradeInputMode(riskEl,'No cap');showTradeInputMode(tgtEl,'Planning');
+  });
 
   let bookedCard='';
   const booked=PERF_LATEST_SUMMARY;
