@@ -1,5 +1,5 @@
-const BUILD_TS='2026-09-10 13:55 IST'; // release build time (IST)
-const APP_VERSION=1353;
+const BUILD_TS='2026-09-10 14:12 IST'; // release build time (IST)
+const APP_VERSION=1354;
 const RADAR_SCORE_VERSION='unified-evidence-v1';
 const TARGET_POLICY_VERSION='clock-stop-next-close-v1';
 function isValidChangeOpen(v){
@@ -4120,6 +4120,28 @@ const tapeDelta=b=>(b.h>b.l?(Number(b.v)||0)*(2*(b.c-b.l)/(b.h-b.l)-1):0);
 // signature is the bar count plus the last bar's timestamp - the same memo shape getIntradayThinCut
 // already uses. A new bar invalidates it by construction; nothing else can.
 const _tapeEvidenceMemo=new Map();
+const BOOK_HISTORY_MAX=12;
+const BOOK_HISTORY=Object.create(null);
+function getBookDeltaRead(sym){
+  const rows=BOOK_HISTORY[normSym(sym||'')];
+  if(!rows||rows.length<2) return null;
+  const current=rows[rows.length-1],previous=rows[rows.length-2];
+  if(!Number.isFinite(current.imbalance)||!Number.isFinite(previous.imbalance)) return null;
+  const deltas=[];
+  Object.values(BOOK_HISTORY).forEach(history=>{
+    for(let i=1;i<history.length;i++){
+      const d=Number(history[i].imbalance)-Number(history[i-1].imbalance);
+      if(Number.isFinite(d)) deltas.push(Math.abs(d));
+    }
+  });
+  if(deltas.length<25) return null;
+  deltas.sort((a,b)=>a-b);
+  const median=deltas[Math.floor(deltas.length/2)];
+  if(!(median>0)) return null;
+  const delta=current.imbalance-previous.imbalance;
+  return {current:current.imbalance,previous:previous.imbalance,delta,
+    strength:Math.max(-1,Math.min(1,delta/(2*median))),at:current.t};
+}
 function radarTapeEvidence(sym){
   const key=normSym(sym||'');
   const bars=INTRADAY_BARS[key];
@@ -4201,13 +4223,16 @@ function _radarTapeEvidenceUncached(sym){
   // 0 - and therefore bit-for-bit inert - until it has earned otherwise. Nothing here asserts that
   // the book predicts anything; it makes the claim testable and lets it arm itself.
   const bk=getBookRead(sym);
+  const bookDelta=getBookDeltaRead(sym);
   const wBook=clamp01(BOOK_EDGES.book?.w||0,0,0.35);
   const wSplit=clamp01(BOOK_EDGES.split?.w||0,0,0.35);
   const wSpoof=clamp01(BOOK_EDGES.spoof?.w||0,0,0.35);
   // Resting intent at the touch, -1..+1 -> 0..1. Absent book sits at the neutral midpoint, never at
   // zero: absence takes the median, it is not evidence against the row.
   const bookRaw=(bk&&Number.isFinite(bk.imbalance))?clamp01((bk.imbalance+1)/2,0,1):0.5;
-  const eBook=BOOK_EDGES.book?.dir===-1?1-bookRaw:bookRaw;
+  const deltaRaw=bookDelta?clamp01(0.5+0.5*bookDelta.strength,0,1):0.5;
+  const bookBlend=bookDelta?0.5*bookRaw+0.5*deltaRaw:bookRaw;
+  const eBook=BOOK_EDGES.book?.dir===-1?1-bookBlend:bookBlend;
   // The CLASSIFIED buy share - executed volume tagged against the touch that stood before it, not
   // inferred from where the candle closed. This is the first flow reading in this app that is not a
   // guess about direction, and it still has to earn its weight like everything else.
@@ -4227,9 +4252,10 @@ function _radarTapeEvidenceUncached(sym){
           impactWeight:wImp,
           book:bk?{imbalance:bk.imbalance,buyShare:bk.buyShare,cancelRatio:bk.cancelRatio,
                    cancelSkew:bk.cancelSkew,replenish:bk.replenish,at:bk.t}:null,
+          bookDelta,
           bookWeights:{book:wBook,split:wSplit,spoof:wSpoof},
           parts:{flow:eFlow,vwap:eVwap,cross:eCross,size:eSize,impact:eImpact,
-                 book:eBook,split:eSplit,spoof:eSpoof}};
+                 book:eBook,bookLevel:bookRaw,bookDelta:deltaRaw,split:eSplit,spoof:eSpoof}};
 }
 
 // THE QUEUE MAY NOT ASK THE BAR'S QUESTION. The bar asks “can I buy this now?”, and since v1232
@@ -4300,7 +4326,7 @@ function radarScoreComponents(r,tapeStanding){
   }
   const bw=tev.bookWeights||{};
   const memory=getMemoryReading(r);
-  const input={memory,parts:['flow','vwap','cross','size','impact','book','split','spoof'].map(k=>tev.parts[k]??0.5),
+  const input={memory,bookDelta:tev.bookDelta||null,parts:['flow','vwap','cross','size','impact','book','split','spoof'].map(k=>tev.parts[k]??0.5),
     base:[0.10,0.05,0.10,0.75,tev.impactWeight||0,bw.book||0,bw.split||0,bw.spoof||0],
     predictor,trigger,depth,velocity,fade,ceiling,permission:perm.p||0,risk,
     context:SCORE_GROUPS.map(k=>Number.isFinite(r.scorePriors?.[k])?r.scorePriors[k]:null).concat([
@@ -4344,8 +4370,11 @@ function applyReadinessScoreCap(r,c){
 function radarScoreTitle(r){
   const c=r?.scoreComponents;
   if(!c?.unified) return 'Awaiting usable completed tape; no prediction recorded yet.';
+  const bd=c.unified.bookDelta;
+  const bookDeltaText=bd&&Number.isFinite(bd.delta)
+    ?` Book delta is ${(bd.delta>=0?'+':'')+(100*bd.delta).toFixed(2)} percentage points versus the prior completed book bucket; positive means bid support is increasing.`:'';
   return `Unified signal ${c.signalScore.toFixed(1)}; final score ${c.total.toFixed(1)} after readiness and risk. Model revision ${c.modelRevision}. `
-    +(c.block?`Rule: ${c.block}. `:'')+`Min Score ${RECOMMEND_MIN_SCORE}. Dynamic signal values use the current live weights; only later, completed outcomes can qualify a weight change. Not a profit probability.`;
+    +(c.block?`Rule: ${c.block}. `:'')+`Min Score ${RECOMMEND_MIN_SCORE}.${bookDeltaText} Dynamic signal values use the current live weights; only later, completed outcomes can qualify a weight change. Not a profit probability.`;
 }
 
 // Columns that are EXPORTED but deliberately NOT modelled as features. Exporting and scoring are
@@ -11208,6 +11237,9 @@ function getOpenPositionTapePolicy(sym,pos){
   const pacePct=Number.isFinite(tape.confirmedPacePct)?tape.confirmedPacePct:null;
   const pullPct=Number.isFinite(tape.currentPullbackPct)?tape.currentPullbackPct:null;
   const paceFailed=pacePct!=null&&pullPct!=null&&pullPct>pacePct&&tape.flowSlope<0;
+  const bookDelta=getBookDeltaRead(s);
+  const bookDeltaDeteriorating=!!(bookDelta&&bookDelta.strength<=-0.5
+    &&(tape.priceSlope<=0||tape.flowSlope<0));
   const tapeStop=(pacePct!=null&&hi>0)?tickPrice(hi*(1-pacePct/100)):null;
   const stopPrice=Math.max(entryStop||0,tapeStop||0)||null;
   const stopBreached=stopPrice!=null&&livePrice<=stopPrice;
@@ -11224,7 +11256,7 @@ function getOpenPositionTapePolicy(sym,pos){
     ?('now trading in the '+heldSeries+' series, not EQ - intraday exit is not available on this holding')
     :null;
   let signal='HOLD';
-  if(deadline.due||liveHarvest||highRejection||paceFailed||stopBreached||convertingDown) signal='SELL';
+  if(deadline.due||liveHarvest||highRejection||paceFailed||stopBreached||convertingDown||bookDeltaDeteriorating) signal='SELL';
   else if(tape.regime==='accumulating'&&tape.pressureConverting!==false
           &&Number.isFinite(tape.pressurePct)&&tape.pressurePct>0
           &&tape.priceSlope>0&&tape.flowSlope>0) signal='BUY';
@@ -11271,6 +11303,8 @@ function getOpenPositionTapePolicy(sym,pos){
         ?'Price breached the entry stop / tighter tape trail at '+fmtINR(stopPrice)+'.'
         :convertingDown
           ?'Selling pressure is converting into lower completed closes.'
+            :bookDeltaDeteriorating
+            ?'Bid support has materially weakened versus the prior completed book bucket while price or flow is weakening.'
           :signal==='BUY'
             ?'Buying pressure is still converting into higher completed closes.'
             :'Pressure is mixed or being absorbed; keep the numerical levels unchanged.';
@@ -11285,7 +11319,7 @@ function getOpenPositionTapePolicy(sym,pos){
     stopPrice,pacePct,paceRs,
     eodPct,eodPrice:eodPrice>0?tickPrice(eodPrice):null,
     flowPct:100*tape.cvdPct,pressurePct:tape.pressurePct,
-    pullPct,liveHarvest,highRejection,paceFailed,stopBreached,regime:tape.regime,ageUnknown:!deadline.date,why:reason+ageWarning,tape};
+    pullPct,bookDelta,bookDeltaDeteriorating,liveHarvest,highRejection,paceFailed,stopBreached,regime:tape.regime,ageUnknown:!deadline.date,why:reason+ageWarning,tape};
 }
 
 function getPositionAction(sym,pos){
@@ -12602,6 +12636,14 @@ async function loadBookEdges(){
 // The last completed 5-minute bucket's book metrics, per symbol. Served from the helper's memory,
 // so this is a small answer even on a full universe.
 let BOOK={},BOOK_AT='';
+function rememberBookRow(sym,row){
+  if(!row||!Number.isFinite(Number(row.imbalance))||!row.t) return;
+  const key=normSym(sym),history=BOOK_HISTORY[key]||(BOOK_HISTORY[key]=[]);
+  if(history.length&&history[history.length-1].t===row.t){history[history.length-1]=row;return;}
+  if(history.length&&history[history.length-1].t>row.t) return;
+  history.push(row);
+  if(history.length>BOOK_HISTORY_MAX) history.splice(0,history.length-BOOK_HISTORY_MAX);
+}
 async function loadBookState(){
   if(!KITE_API) return 0;
   try{
@@ -12618,6 +12660,7 @@ async function loadBookState(){
     for(const sym in j.rows){
       const row=j.rows[sym];
       BOOK[normSym(sym)]=row; n++;
+      rememberBookRow(sym,row);
       if(row&&row.t>newest) newest=row.t;
     }
     BOOK_AT=newest;
