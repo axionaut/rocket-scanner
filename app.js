@@ -1,5 +1,5 @@
-const BUILD_TS='2026-09-10 09:08 IST'; // release build time (IST)
-const APP_VERSION=1342; // Automatic Kite handoff and independent input refresh.
+const BUILD_TS='2026-09-10 09:20 IST'; // release build time (IST)
+const APP_VERSION=1343; // Reject allocations whose target cannot cover quantity-specific costs.
 const RADAR_SCORE_VERSION='unified-evidence-v1';
 function isValidChangeOpen(v){
   if(v===null||v===undefined||typeof v==='boolean') return false;
@@ -11300,8 +11300,8 @@ function computeAlloc(capital, selList){
     if(policy&&policy.viable===false){
       return {ok:false,rejected:true,reason:`Target ${policy.targetPct?.toFixed(2)??'unknown'}% does not cover the ${policy.minGrossPct?.toFixed(2)??'unknown'}% costs + net hurdle`,policy};
     }
-    const tgtPct=policy.targetPct;
-    if(tgtPct===null||tgtPct<=0) return {ok:true,skip:true,policy};
+    const tgtPct=policy?.targetPct;
+    if(!Number.isFinite(tgtPct)||tgtPct<=0) return {ok:false,rejected:true,reason:'No valid target to verify trading costs',policy:policy||{}};
     const sellP=buyP*(1+tgtPct/100);
     const buyChg=calcZerodhaCharges(buyP,qty,false);
     const sellChg=calcZerodhaCharges(sellP,qty,true);
@@ -11309,7 +11309,12 @@ function computeAlloc(capital, selList){
     const fr=getTradeFrictionPct(s,qty*Number(s.price));
     const frictionKnown=!!(fr?.covered&&Number.isFinite(fr.entryPct)&&Number.isFinite(fr.exitPct));
     const frictionRs=frictionKnown?qty*buyP*Math.max(0,fr.entryPct+fr.exitPct)/100:null;
-    return {ok:true,expectedNet:qty*buyP*(tgtPct/100)-charges-(frictionRs||0),
+    const expectedNet=qty*buyP*(tgtPct/100)-charges-(frictionRs||0);
+    if(!Number.isFinite(expectedNet)||Math.round(expectedNet*100)<=0){
+      return {ok:false,rejected:true,expectedNet,charges,frictionKnown,frictionRs,tgtPct,policy,
+        reason:`${qty} shares: target gain ${fmtINR(qty*buyP*tgtPct/100)} cannot clear ${fmtINR(charges+(frictionRs||0))} estimated delivery costs${frictionKnown?' including slippage':''}`};
+    }
+    return {ok:true,expectedNet,
       frictionKnown,frictionRs,charges,tgtPct,policy};
   }
 
@@ -11371,13 +11376,13 @@ function computeAlloc(capital, selList){
       }
       continue;
     }
-    remainingBudget=Math.max(0,remainingBudget-buyDebit(buyP,qty));
     const ev=evalNet(s,buyP,qty);
     if(ev.rejected){
       allocMap[s.symbol]={alloc:0,debit:0,qty:0,buyPrice:buyP,rejected:true,reason:ev.reason,
         stopDistancePct:ev.policy.stopPct,tgtPct:ev.policy.targetPct,exitPolicy:ev.policy,liquidityCap:turnoverCap,limitReason};
       continue;
     }
+    remainingBudget=Math.max(0,remainingBudget-buyDebit(buyP,qty));
     allocMap[s.symbol]={alloc:qty*buyP,debit:buyDebit(buyP,qty),buyCharges:calcZerodhaCharges(buyP,qty,false,false,false),qty,buyPrice:buyP,
       limit:rowLimit,stopDistancePct:ev.policy.stopPct,expectedNet:ev.expectedNet,frictionKnown:ev.frictionKnown,frictionRs:ev.frictionRs,charges:ev.charges,tgtPct:ev.tgtPct,exitPolicy:ev.policy,liquidityCap:turnoverCap,limitReason};
   }
@@ -11414,8 +11419,9 @@ function computeAlloc(capital, selList){
       const buyP=am.buyPrice;
       const nextDebit=buyDebit(buyP,am.qty+1),incremental=nextDebit-am.debit;
       if(incremental>residual+0.001||am.alloc+buyP>(limits[s.symbol]??am.limit)+0.5) continue;
+      const ev=evalNet(s,buyP,am.qty+1);
+      if(ev.rejected) continue;
       am.qty++; am.alloc+=buyP; am.debit=nextDebit; am.buyCharges=calcZerodhaCharges(buyP,am.qty,false,false,false);
-      const ev=evalNet(s,buyP,am.qty);
       if(!ev.skip){am.expectedNet=ev.expectedNet;am.frictionKnown=ev.frictionKnown;am.frictionRs=ev.frictionRs;am.charges=ev.charges;am.tgtPct=ev.tgtPct;}
       residual-=incremental; deployed+=incremental; progress=true;
     }
