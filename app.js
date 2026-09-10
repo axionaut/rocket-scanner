@@ -1,5 +1,5 @@
-const BUILD_TS='2026-09-10 13:07 IST'; // release build time (IST)
-const APP_VERSION=1349;
+const BUILD_TS='2026-09-10 13:12 IST'; // release build time (IST)
+const APP_VERSION=1350;
 const RADAR_SCORE_VERSION='unified-evidence-v1';
 const TARGET_POLICY_VERSION='clock-stop-next-close-v1';
 function isValidChangeOpen(v){
@@ -87,9 +87,9 @@ function isLooseNseSupportCsvName(name){
 }
 
 function updateModeUI(){
-  if(tgtEl){ let d=0; try{d=getDefaultTgtPct();}catch(e){} tgtEl.placeholder=d>0?d.toFixed(1):'auto'; tgtEl.title='Empty keeps this as a harvest-based planning reference for goal allocation only. It does not set automatic candidate or held-position targets. Type a value to explicitly override those targets; clear it to restore planning-only Auto.'; }
+  const brand=document.querySelector('.brand-tag');
   if(brand) brand.textContent='Same-Day Composite Radar';
-  showTradeInputMode(riskEl,'No cap');showTradeInputMode(tgtEl,'Planning');
+  document.querySelectorAll('.currency-lbl').forEach(el=>{el.textContent='₹';});
 }
 let ALL=[],FILT=[],PG=1,PGSZ=100,SCOL='score',SDIR=-1;
 let SHOW_INELIGIBLE=false;
@@ -7886,9 +7886,9 @@ function renderStats(){
     if((s.priceChange||0)>0) secBreadths[s.sector].up++;
   });
   let topSec='—', topSecPct=0;
-  Object.entries(secBreadths).forEach(([sec,d])=>{
+  if(tgtEl){ let d=0; try{d=getDefaultTgtPct();}catch(e){} tgtEl.placeholder=d>0?d.toFixed(1):'auto'; tgtEl.title='Empty keeps this as a harvest-based planning reference for goal allocation only. It does not set automatic candidate or held-position targets. Type a value to explicitly override those targets; clear it to restore planning-only Auto.'; }
     if(d.total>=5){const pct=d.up/d.total*100; if(pct>topSecPct){topSecPct=pct;topSec=sec;}}
-  });
+  showTradeInputMode(riskEl,'No cap');showTradeInputMode(tgtEl,'Planning');
 
   let bookedCard='';
   const booked=PERF_LATEST_SUMMARY;
