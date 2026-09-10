@@ -1,5 +1,5 @@
-const BUILD_TS='2026-09-10 16:34 IST'; // release build time (IST)
-const APP_VERSION=1359;
+const BUILD_TS='2026-09-10 18:00 IST'; // release build time (IST)
+const APP_VERSION=1360;
 const RADAR_SCORE_VERSION='unified-evidence-v1';
 
 // ── v1358: AN UNCAUGHT ERROR MUST NAME ITSELF ─────────────────────────────────────────────────
@@ -2445,6 +2445,11 @@ function resolveNetRecommendation(p,asOf){
     const mark=(b.c/entry-1)*100;
     p.latestMarkProfitPct=+mark.toFixed(3);
     p.maxAdversePct=Math.max(p.maxAdversePct||0,100*(1-b.l/entry));
+    // THE PRIMARY LEARNING SIGNAL (v1360). Best move above the issue price while the decision was
+    // live. Available from the first completed bar for every record, pending or resolved, so a
+    // rule's edge can be measured without waiting for a barrier and without the resolved pool
+    // being enriched by whichever barrier happened to be nearer.
+    p.maxFavourablePct=+Math.max(Number(p.maxFavourablePct)||0,100*(b.h/entry-1)).toFixed(3);
     const gross=(b.h/entry-1)*100;
     const cost=(calcZerodhaCharges(entry,p.auditQty,false,istDayKey(b.t)===p.issueDate)
       +calcZerodhaCharges(b.h,p.auditQty,true,istDayKey(b.t)===p.issueDate))/(entry*p.auditQty)*100;
@@ -3087,12 +3092,35 @@ const SCORE_SOURCES=[
   ['structure','Price structure',0],['liquidity','Liquidity context',0],['volatility','Range context',0],['context','Market context',0],
   ['fundamental','Fundamental signal',0],['distance','Target versus capacity',0],['clock','Time through next close',0],
   ['memoryOverhead',MEMORY_NAMES[0],0],['memorySpace',MEMORY_NAMES[1],0],['memoryAge',MEMORY_NAMES[2],0],
+  // One slot per ADJUSTABLE decision rule, in DECISION_RULE_DEFS order. Every one starts at the
+  // prior, which is 0 for this additive wiring - so the release is bit-for-bit identical to v1359
+  // and the weights separate only as evidence arrives. checkRuleSlotAlignment() below fails loudly
+  // if this list and the registry ever drift apart.
   ['rule:above-vwap','Price at or above VWAP',0],['rule:green-day','Positive day move',0],
   ['rule:above-open','Price above session open',0],['rule:bids-holding','Visible bids exceed visible offers',0],
   ['rule:non-selling-flow','Completed tape is not net selling',0],['rule:pressure-converting','Tape pressure converts into price',0],
-  ['rule:range-not-consumed','Expected range is not consumed',0],['rule:entry-confirmed','Entry timing is confirmed',0]
+  ['rule:buy-over-sell-volume','Buy volume exceeds sell volume',0],
+  ['rule:range-not-consumed','Expected range is not consumed',0],['rule:entry-confirmed','Entry timing is confirmed',0],
+  ['rule:score-bar','Score clears the policy bar',0],
+  ['rule:target-clears-costs','Target clears round-trip costs at tradeable size',0],
+  ['rule:share-fits-allocation','Share price fits one unit of allocation',0],
+  ['rule:book-absorbs-exit','Visible book can absorb an exit at size',0],
+  ['rule:not-thin','Trades more than the thinnest of the market',0]
 ];
 const SCORE_SEED=SCORE_SOURCES.map(x=>x[2]);
+// A slot that does not line up with its rule would silently weight the WRONG rule, which is worse
+// than no learning at all. Checked once, lazily, because DECISION_RULE_DEFS is declared later.
+let _ruleSlotChecked=false;
+function checkRuleSlotAlignment(){
+  if(_ruleSlotChecked) return true;
+  _ruleSlotChecked=true;
+  const rules=adjustableRules();
+  const slots=SCORE_SOURCES.slice(EXACT_SCORE_START).map(x=>String(x[0]).replace(/^rule:/,''));
+  const ok=slots.length===rules.length&&rules.every((r,i)=>r.key===slots[i]);
+  if(!ok) reportAppError('Rule slot misalignment',
+    new Error('SCORE_SOURCES rule slots ['+slots.join(',')+'] do not match registry ['+rules.map(r=>r.key).join(',')+']'),'');
+  return ok;
+}
 const SCORE_GROUPS=['participation','momentum','trend','structure','liquidity','volatility','context'];
 const EXACT_SCORE_START=26;
 let _unifiedState=null,_unifiedStateSource=null,_scoreLearningAt=0,_scoreLearningBusy=false;
@@ -3119,7 +3147,15 @@ function getUnifiedModelState(){
     status:'Collecting forward outcomes',updatedAt:0};
   if(!Array.isArray(state.records)) state.records=[];
   if(!Array.isArray(state.history)) state.history=[];
-  if(!Array.isArray(state.exactRules)) state.exactRules=[];
+  if(!state.ruleAgg||typeof state.ruleAgg!=='object') state.ruleAgg={};
+  // Retire records written before margins existed. They cannot answer the loosen/tighten question
+  // and their boolean rule states belong to a different taxonomy; keeping them would mix two
+  // schemas inside one edge. This is the clean start, and it happens once.
+  if(state.ruleSchema!==RULE_SCHEMA_VERSION){
+    state.records=[];state.ruleAgg={};state.ruleSchema=RULE_SCHEMA_VERSION;
+    state.candidate=null;state.lastTrainingIssuedAt=0;
+    state.status='Rule learning restarted on measured margins; weights begin equal';
+  }
   if(state.candidate&&!validScoreWeights(state.candidate.weights)) state.candidate=null;
   _unifiedStateSource=raw;_unifiedState=state;return state;
 }
@@ -3162,7 +3198,7 @@ function getUnifiedScoreDetail(c){
     ${c.block?'Rule: '+escHtml(c.block)+'. ':''}Buy volume must exceed sell volume when depth is available; learning cannot override this rule.
     <details><summary>Signal weights and current readings</summary><div class="pc-table-wrap"><table class="pc-table"><thead><tr><th>Source</th><th>Reading</th><th>Weight factor</th><th>Change from initial</th></tr></thead><tbody>${rows}</tbody></table></div>
     Existing sources start at 1x. Additional setup/context adjustments start at zero and need forward validation. Weight factors are not score points.</details>
-    ${c.unified.memory?.ok?`<p><b>Historical structure:</b> weighted overhead participation ${(100*c.unified.memory.wosd).toFixed(1)}%; open space ${c.unified.memory.up.toFixed(2)} ATR above / ${c.unified.memory.down.toFixed(2)} ATR below; recent overhead difference ${(100*c.unified.memory.rmd).toFixed(1)} percentage points. Uses 13 preceding sessions and a fixed +2.6% research corridor. Historical trading is a proxy, not known sell orders. ${weights.slice(23,EXACT_SCORE_START).some(v=>v>0)?'Qualified weights contribute to this score.':'Observation only; zero score influence.'}</p>`:
+    ${c.unified.memory?.ok?`<p><b>Historical structure:</b> weighted overhead participation ${(100*c.unified.memory.wosd).toFixed(1)}%; open space ${c.unified.memory.up.toFixed(2)} ATR above / ${c.unified.memory.down.toFixed(2)} ATR below; recent overhead difference ${(100*c.unified.memory.rmd).toFixed(1)} percentage points. The +2.6% corridor is the FEATURE definition - the band overhead supply is counted in - not a target this tab grades against. Since v1360 rules and scores are graded on the best move actually made, so no outcome yardstick is used anywhere. Historical trading is a proxy, not known sell orders. ${weights.slice(23,EXACT_SCORE_START).some(v=>v>0)?'Qualified weights contribute to this score.':'Observation only; zero score influence.'}</p>`:
       `<p><b>Historical structure:</b> ${escHtml(c.unified.memory?.reason||'Not yet observed')}. No score adjustment for missing history.</p>`}</div>`;
 }
 function renderMemoryStudy(state){
@@ -3174,135 +3210,382 @@ function renderMemoryStudy(state){
       <td>${result?result.raw.days+' sessions; '+result.raw.rr.toFixed(2)+'x target hit rate; '+result.raw.transitions+'/9 ordered steps':'Sealed until study closes'}</td></tr>`;
   }).join('');
   return `<section class="m-card pc-card"><h3 class="pc-title">Does historical trading improve the score?</h3>
-    <p class="pc-copy">Market Memory checks trading between the current price and +2.6%, open space above versus below, and whether recent overhead activity matters. ${covered.length}/${observed.length} scored stocks have usable 13-session history. Missing history gives no bonus or penalty.</p>
+    <p class="pc-copy">Market Memory checks trading between the current price and the fixed +2.6% corridor that DEFINES the feature, open space above versus below, and whether recent overhead activity matters. That corridor is a measurement band, not a target. ${covered.length}/${observed.length} scored stocks have usable 13-session history. Missing history gives no bonus or penalty.</p>
     <p class="pc-copy">${study?.dates.length||0}/30 new decision sessions recorded; ${study?.records.length||0} observations. ${escHtml(study?.status||'Waiting for the next live session')}.
     The fixed feature study is evaluated once after all 30 sessions reach their next-session deadline. Insufficient evidence closes it as inconclusive; it is not enlarged and repeatedly retested.</p>
     <div class="pc-table-wrap"><table class="pc-table"><thead><tr><th>Historical input</th><th>Live factor</th><th>Status</th><th>Completed study</th></tr></thead><tbody>${rows}</tbody></table></div>
     <p class="pc-copy">A qualified feature only earns weight testing. A candidate using it then needs 30 later sessions with better positive net outcomes, and must also beat the same candidate with Market Memory switched off. Existing buy/sell, direction and risk rules remain binding.</p>
-    <details><summary>What this study measures</summary><p class="pc-copy">Prospective study ${MEMORY_SPEC.id}; separate from the historical v1339 archive experiment. Frozen symbol cohort; fixed +2.6% target before the existing stop through next trading close. Each feature is tested independently with equal date weighting, ATR/day-move/13-session-displacement/current-score controls, a conservative family threshold t &gt;= 3, at least 1.30x top-decile hit rate and 7/9 ordered steps. Age additionally needs a 200-permutation placebo p &lt;= .05. No probability, ownership or causal psychology claim. The eventual candidate is checked against actual dynamic trade targets and costs.</p></details></section>`;
+    <details><summary>What this study measures</summary><p class="pc-copy">Prospective study ${MEMORY_SPEC.id}; separate from the historical v1339 archive experiment. Frozen symbol cohort; the +2.6% band defines where overhead supply is counted, and is deliberately fixed so observations stay comparable across symbols and over time. Each feature is tested independently with equal date weighting, ATR/day-move/13-session-displacement/current-score controls, a conservative family threshold t &gt;= 3, at least 1.30x top-decile hit rate and 7/9 ordered steps. Age additionally needs a 200-permutation placebo p &lt;= .05. No probability, ownership or causal psychology claim. The eventual candidate is checked against actual dynamic trade targets and costs.</p></details></section>`;
 }
-const EXACT_SCORE_RULES=[
-  {key:'above-vwap',cat:'Direction',label:'Price at or above VWAP',source:'VWAP rule',adjustable:true,
-    read:r=>Number(r?.vwap)>0&&Number(r?.price)>0?Number(r.price)>=Number(r.vwap):null},
-  {key:'green-day',cat:'Direction',label:'Positive day move',source:'Direction rule',adjustable:true,
-    read:r=>Number.isFinite(Number(r?.day))?Number(r.day)>0:null},
-  {key:'above-open',cat:'Direction',label:'Price above session open',source:'Direction rule',adjustable:true,
-    read:r=>isValidChangeOpen(r?.changeOpen)?Number(r.changeOpen)>0:null},
-  {key:'bids-holding',cat:'Depth & Tape',label:'Visible bids exceed visible offers',source:'Depth rule',adjustable:true,
-    read:r=>{const d=getTotalDepth(r?.symbol);return d&&(d.buyQty>0||d.sellQty>0)?d.buyQty>d.sellQty:null;}},
-  {key:'non-selling-flow',cat:'Depth & Tape',label:'Completed tape is not net selling',source:'Flow rule',adjustable:true,
-    read:r=>{const t=r?.intraday?.current?r.intraday.todayTraj:null;return Number.isFinite(Number(t?.cvdPct))?Number(t.cvdPct)>=0:null;}},
-  {key:'pressure-converting',cat:'Depth & Tape',label:'Tape pressure converts into price',source:'Crossover rule',adjustable:true,
-    read:r=>{const t=r?.intraday?.current?r.intraday.todayTraj:null;return t?.pressureConverting===true?true:t?.pressureConverting===false?false:null;}},
-  {key:'range-not-consumed',cat:'Entry Timing',label:'Expected range is not consumed',source:'Timing rule',adjustable:true,
-    read:r=>Number.isFinite(Number(r?.entryTiming?.rangeUsed))?Number(r.entryTiming.rangeUsed)<75:null},
-  {key:'entry-confirmed',cat:'Entry Timing',label:'Entry timing is confirmed',source:'Timing rule',adjustable:true,
-    read:r=>r?.entryReady===true?true:r?.entryReady===false?false:null},
-  {key:'eq-and-band',cat:'Exchange & Safety',label:'EQ series and eligible price band',source:'Protected execution rule',adjustable:false,
-    read:r=>r?.basketEligible===true?true:r?.basketEligible===false?false:null},
-  {key:'listing-history',cat:'Exchange & Safety',label:'Sufficient listing history',source:'Protected data rule',adjustable:false,
-    read:r=>r?.noHistory===true?false:r?.noHistory===false?true:null},
-  {key:'fresh-tape',cat:'Exchange & Safety',label:'Fresh usable completed tape',source:'Protected data rule',adjustable:false,
-    read:r=>{try{return getRecommendationFreshness(r?.symbol).ok;}catch(e){return null;}}},
-  {key:'surveillance-clear',cat:'Exchange & Safety',label:'No configured surveillance veto',source:'Protected regulatory rule',adjustable:false,
-    read:r=>r?.symbol?!(NSE_SURV[r.symbol]?.length):null}
+// ── v1360: ONE RULE REGISTRY. A RULE IS A PREDICATE WITH A MARGIN, NEVER A SENTENCE. ──────────
+// What this replaces: statusReasonCode() classified rules by running regular expressions over the
+// English rejection sentences the decision code emits, and anything it failed to match fell through
+// to `return 'other:'+text.slice(0,80)` - a truncated sentence with its numbers replaced by '#',
+// used as a category name. "Other" was the fallback branch, so it could never be deleted and every
+// new reason string silently created another one. Now every gate carries a rule id, the sentence is
+// rendered FROM the id, and the same id drives Status/Rejection, the Learning table and the weight.
+//
+// A rule reports {pass, margin}. The MARGIN is how far past its own line the stock sat, signed, in
+// the rule's own units - `price/vwap-1` as a percent, not `false`. A boolean can only say in or out;
+// a margin answers "and what would it have taken", which is the whole loosen/tighten counterfactual.
+// A rule with no natural scalar returns margin null and is graded on pass/fail alone.
+const RULE_ADJUSTABLE='adjustable', RULE_PROTECTED='protected', RULE_OPERATIONAL='operational';
+function ruleRead(pass,margin){
+  return {pass:typeof pass==='boolean'?pass:null,
+          margin:Number.isFinite(Number(margin))?Number(margin):null};
+}
+function todayTrajOf(r){ return r?.intraday?.current?r.intraday.todayTraj:null; }
+const DECISION_RULE_DEFS=[
+  // ---- Direction ----------------------------------------------------------------------------
+  {key:'above-vwap',label:'Price at or above VWAP',group:'Direction',kind:RULE_ADJUSTABLE,unit:'%',
+    read:r=>{const v=Number(r?.vwap),px=Number(r?.price);
+      return v>0&&px>0?ruleRead(px>=v,100*(px/v-1)):ruleRead(null,null);}},
+  {key:'green-day',label:'Positive day move',group:'Direction',kind:RULE_ADJUSTABLE,unit:'%',
+    read:r=>{const d=Number(r?.day);return Number.isFinite(d)?ruleRead(d>0,d):ruleRead(null,null);}},
+  {key:'above-open',label:'Price above session open',group:'Direction',kind:RULE_ADJUSTABLE,unit:'%',
+    read:r=>{const c=Number(r?.changeOpen);
+      return isValidChangeOpen(r?.changeOpen)?ruleRead(c>0,c):ruleRead(null,null);}},
+  // ---- Depth and tape -----------------------------------------------------------------------
+  {key:'bids-holding',label:'Visible bids exceed visible offers',group:'Depth & tape',kind:RULE_ADJUSTABLE,unit:'%',
+    read:r=>{const d=getTotalDepth(r?.symbol);
+      if(!d||!(d.buyQty>0||d.sellQty>0)) return ruleRead(null,null);
+      const tot=d.buyQty+d.sellQty;
+      return ruleRead(d.buyQty>d.sellQty, tot>0?100*(d.buyQty-d.sellQty)/tot:null);}},
+  {key:'non-selling-flow',label:'Completed tape is not net selling',group:'Depth & tape',kind:RULE_ADJUSTABLE,unit:'%',
+    read:r=>{const t=todayTrajOf(r),v=Number(t?.cvdPct);
+      return Number.isFinite(v)?ruleRead(v>=0,v):ruleRead(null,null);}},
+  {key:'pressure-converting',label:'Tape pressure converts into price',group:'Depth & tape',kind:RULE_ADJUSTABLE,unit:'',
+    read:r=>{const t=todayTrajOf(r);
+      if(t?.pressureConverting!==true&&t?.pressureConverting!==false) return ruleRead(null,null);
+      const slope=Number(t?.priceSlope);
+      return ruleRead(t.pressureConverting===true, Number.isFinite(slope)?slope:null);}},
+  {key:'buy-over-sell-volume',label:'Buy volume exceeds sell volume',group:'Depth & tape',kind:RULE_ADJUSTABLE,unit:'%',
+    read:r=>{const d=getTotalDepth(r?.symbol);
+      if(!d||!(d.buyQty>0&&d.sellQty>0)) return ruleRead(null,null);
+      return ruleRead(d.buyQty>d.sellQty,100*(d.buyQty/d.sellQty-1));}},
+  // ---- Entry timing -------------------------------------------------------------------------
+  {key:'range-not-consumed',label:'Expected range is not consumed',group:'Entry timing',kind:RULE_ADJUSTABLE,unit:'pts',
+    read:r=>{const u=Number(r?.entryTiming?.rangeUsed);
+      return Number.isFinite(u)?ruleRead(u<75,75-u):ruleRead(null,null);}},
+  {key:'entry-confirmed',label:'Entry timing is confirmed',group:'Entry timing',kind:RULE_ADJUSTABLE,unit:'',
+    read:r=>{if(r?.entryReady!==true&&r?.entryReady!==false) return ruleRead(null,null);
+      const loc=Number(r?.entryTiming?.rangeLocation);
+      return ruleRead(r.entryReady===true, Number.isFinite(loc)?100*(0.75-loc):null);}},
+  // ---- Score policy -------------------------------------------------------------------------
+  {key:'score-bar',label:'Score clears the policy bar',group:'Score policy',kind:RULE_ADJUSTABLE,unit:'pts',
+    read:r=>{const sc=Number(r?.score);
+      return Number.isFinite(sc)?ruleRead(sc>=RECOMMEND_MIN_SCORE, sc-RECOMMEND_MIN_SCORE):ruleRead(null,null);}},
+  // ---- Tradability, stated as facts about the STOCK (owner, 2026-09-10) ----------------------
+  // "one share costs more than the rail allows" is a fact about the share price against the size
+  // this account trades, not about the wallet, so it carries a real edge column.
+  {key:'target-clears-costs',label:'Target clears round-trip costs at tradeable size',group:'Tradability',kind:RULE_ADJUSTABLE,unit:'%',
+    read:r=>{try{const pol=getRowExitPolicy(r,Number(r?.price)||0);
+      const tgt=Number(pol?.targetPct),floor=Number(pol?.minGrossPct);
+      return Number.isFinite(tgt)&&Number.isFinite(floor)?ruleRead(tgt>=floor,tgt-floor):ruleRead(null,null);
+    }catch(e){return ruleRead(null,null);}}},
+  {key:'share-fits-allocation',label:'Share price fits one unit of allocation',group:'Tradability',kind:RULE_ADJUSTABLE,unit:'%',
+    read:r=>{const px=Number(r?.price),cap=Number(getEffectiveMaxAlloc&&getEffectiveMaxAlloc());
+      return px>0&&cap>0?ruleRead(cap>=px,100*(cap/px-1)):ruleRead(null,null);}},
+  {key:'book-absorbs-exit',label:'Visible book can absorb an exit at size',group:'Tradability',kind:RULE_ADJUSTABLE,unit:'%',
+    read:r=>{try{const cap=Number(getTurnoverAllocationCap(r)),want=Number(getEffectiveMaxAlloc&&getEffectiveMaxAlloc());
+      return cap>0&&want>0?ruleRead(cap>=want,100*(cap/want-1)):ruleRead(null,null);
+    }catch(e){return ruleRead(null,null);}}},
+  {key:'not-thin',label:'Trades more than the thinnest of the market',group:'Tradability',kind:RULE_ADJUSTABLE,unit:'%',
+    read:r=>{try{const prof=getTapeFlowProfile(r?.symbol),cutInfo=getSharesPerBarCut(25);
+      const sh=Number(prof?.medianShares),cut=Number(cutInfo?.cut);
+      return sh>0&&cut>0?ruleRead(sh>=cut,100*(sh/cut-1)):ruleRead(null,null);
+    }catch(e){return ruleRead(null,null);}}},
+  // ---- Protected: measured, never weakened automatically -------------------------------------
+  {key:'eq-and-band',label:'EQ series and eligible price band',group:'Exchange & safety',kind:RULE_PROTECTED,unit:'',
+    read:r=>ruleRead(r?.basketEligible===true?true:r?.basketEligible===false?false:null,null)},
+  {key:'listing-history',label:'Sufficient listing history',group:'Exchange & safety',kind:RULE_PROTECTED,unit:'',
+    read:r=>ruleRead(r?.noHistory===true?false:r?.noHistory===false?true:null,null)},
+  {key:'fresh-tape',label:'Fresh usable completed tape',group:'Exchange & safety',kind:RULE_PROTECTED,unit:'',
+    read:r=>{try{return ruleRead(getRecommendationFreshness(r?.symbol).ok,null);}catch(e){return ruleRead(null,null);}}},
+  {key:'circuit-headroom',label:'Room left before the exchange circuit',group:'Exchange & safety',kind:RULE_PROTECTED,unit:'%',
+    read:r=>{const cr=Number(r?.circuitRunwayPct);
+      return Number.isFinite(cr)?ruleRead(cr>0,cr):ruleRead(null,null);}},
+  // ---- Operational: describes the app or the account, not the stock. Never graded. ------------
+  {key:'op-market-open',label:'Equity session is open',group:'Operational',kind:RULE_OPERATIONAL,unit:'',
+    read:()=>ruleRead(isEquitySession(Date.now()),null)},
+  {key:'op-prices-live',label:'Live prices are current',group:'Operational',kind:RULE_OPERATIONAL,unit:'',
+    read:()=>ruleRead(!universePriceStaleness(),null)},
+  {key:'op-score-version',label:'Row carries the current score scale',group:'Operational',kind:RULE_OPERATIONAL,unit:'',
+    read:r=>ruleRead(r?.scoreVersion===RADAR_SCORE_VERSION,null)},
+  {key:'op-capital-set',label:'Capital is set',group:'Operational',kind:RULE_OPERATIONAL,unit:'',
+    read:()=>ruleRead(Number(getEffectiveCapital())>0,null)},
+  {key:'op-not-excluded',label:'Not excluded from the basket by you',group:'Operational',kind:RULE_OPERATIONAL,unit:'',
+    read:r=>ruleRead(!EXPORT_EXCLUDED.has(r?.symbol),null)}
 ];
-function readExactScoreRules(row){
-  const out={};
-  EXACT_SCORE_RULES.forEach(rule=>{try{const value=rule.read(row);out[rule.key]=typeof value==='boolean'?value:null;}catch(e){out[rule.key]=null;}});
-  return out;
+// SURVEILLANCE RULES COME FROM THE REG1 FILE, NOT FROM A LIST IN THIS SOURCE (owner, 2026-09-10:
+// "we should build the logic as dynamically ingesting new rules and not hardcoding things").
+// Today's file carries 40 real surveillance columns - 63 minus 5 identity and 18 filler - of which
+// 36 flag at least one stock. The old seed list named 12. When NSE adds a column it appears here on
+// its own with no code change. Each is PROTECTED: measured every session, never weakened by the
+// learner, and configured rules keep their existing hard-veto behaviour untouched.
+let _survRuleDefs=null,_survRuleDefsSig='';
+function surveillanceRuleDefs(){
+  const file=Array.isArray(SURV_FILE_RULES)?SURV_FILE_RULES:[];
+  const sig=file.map(x=>x.key).join('|');
+  if(_survRuleDefs&&_survRuleDefsSig===sig) return _survRuleDefs;
+  _survRuleDefsSig=sig;
+  _survRuleDefs=file.map(rule=>({
+    key:'surv:'+rule.key,label:humanizeSurvRule(rule.label||rule.column),
+    group:'Surveillance',kind:RULE_PROTECTED,unit:'',survColumn:rule.column,
+    read:r=>{const hits=SURV_ALL_HITS[r?.symbol];
+      if(!r?.symbol||!hits) return ruleRead(null,null);
+      return ruleRead(!hits.some(h=>survRuleKey(h)===rule.key),null);}
+  }));
+  return _survRuleDefs;
 }
-function exactRuleContext(ruleStates){
-  return EXACT_SCORE_RULES.filter(rule=>rule.adjustable).map(rule=>ruleStates?.[rule.key]===true?1:ruleStates?.[rule.key]===false?0:null);
+let _decisionRules=null,_decisionRulesSig='';
+function decisionRules(){
+  const surv=surveillanceRuleDefs(),sig=_survRuleDefsSig;
+  if(_decisionRules&&_decisionRulesSig===sig) return _decisionRules;
+  _decisionRulesSig=sig;_decisionRules=DECISION_RULE_DEFS.concat(surv);
+  return _decisionRules;
 }
-function exactRuleStats(records,rule){
-  const days={};
-  records.forEach(record=>{
-    const state=record.ruleStates?.[rule.key];
-    if(typeof state!=='boolean'||!usableScoreOutcome(record)) return;
-    (days[record.issueDate]??=[]).push(record);
+function decisionRule(key){ return decisionRules().find(x=>x.key===key)||null; }
+function adjustableRules(){ return DECISION_RULE_DEFS.filter(x=>x.kind===RULE_ADJUSTABLE); }
+function ruleLabel(key){
+  const rule=decisionRule(key);
+  if(rule) return rule.label;
+  if(String(key).startsWith('surv:')) return humanizeSurvRule(String(key).slice(5));
+  return String(key||'').replace(/-/g,' ').replace(/\b\w/g,c=>c.toUpperCase());
+}
+// READ EVERY RULE ONCE, AND STORE COMPACTLY. Storage is the binding constraint: at bar resolution
+// this records roughly 2,800 rows a session against a brain already at 13.8 MB, so a full
+// {pass,margin} object for ~65 rules per row is not affordable. Adjustable rules keep their MARGIN
+// (the sign carries pass/fail, so nothing is lost); protected and operational rules store only the
+// keys that FAILED, which is empty or one or two entries on almost every row.
+function readDecisionRules(row){
+  const margins={},failed=[],unknown=[];
+  for(const rule of decisionRules()){
+    let v;try{ v=rule.read(row); }catch(e){ v=null; }
+    if(!v||typeof v.pass!=='boolean'){ if(rule.kind!==RULE_OPERATIONAL) unknown.push(rule.key); continue; }
+    if(rule.kind===RULE_ADJUSTABLE){
+      // Margin sign must agree with the verdict, or the counterfactual would read backwards.
+      let m=v.margin;
+      if(!Number.isFinite(m)) m=v.pass?1:-1;
+      else if(v.pass&&m<0) m=Math.abs(m);
+      else if(!v.pass&&m>0) m=-m;
+      margins[rule.key]=+Number(m).toFixed(4);
+    }
+    if(!v.pass) failed.push(rule.key);
+  }
+  return {margins,failed,unknown};
+}
+function ruleStatePass(record,key){
+  if(!record) return null;
+  if(record.margins&&Object.prototype.hasOwnProperty.call(record.margins,key)){
+    const m=Number(record.margins[key]);
+    return Number.isFinite(m)?m>=0:null;
+  }
+  if(Array.isArray(record.failed)&&record.failed.includes(key)) return false;
+  if(Array.isArray(record.unknown)&&record.unknown.includes(key)) return null;
+  if(Array.isArray(record.failed)) return true; // recorded, not failed, not unknown
+  return null;
+}
+function ruleStateMargin(record,key){
+  const m=Number(record?.margins?.[key]);
+  return Number.isFinite(m)?m:null;
+}
+function ruleContextVector(margins){
+  return adjustableRules().map(rule=>{
+    const m=Number(margins?.[rule.key]);
+    return Number.isFinite(m)?(m>=0?1:0):null;
   });
-  const edges=[];let passN=0,failN=0,passHits=0,failHits=0;
-  Object.values(days).forEach(rows=>{
-    const pass=rows.filter(row=>row.ruleStates[rule.key]===true);
-    const fail=rows.filter(row=>row.ruleStates[rule.key]===false);
-    passN+=pass.length;failN+=fail.length;
-    passHits+=pass.reduce((n,row)=>n+scoreOutcomeTarget(row),0);
-    failHits+=fail.reduce((n,row)=>n+scoreOutcomeTarget(row),0);
-    if(pass.length&&fail.length) edges.push(pass.reduce((n,row)=>n+scoreOutcomeTarget(row),0)/pass.length
-      -fail.reduce((n,row)=>n+scoreOutcomeTarget(row),0)/fail.length);
-  });
-  const sessions=edges.length,edge=sessions?meanArr(edges):null;
-  const sd=sessions>1?Math.sqrt(edges.reduce((n,value)=>n+(value-edge)*(value-edge),0)/(sessions-1)):0;
-  const t=sessions>1&&sd>0?edge/(sd/Math.sqrt(sessions)):0;
-  const agreement=sessions&&edge!==0?100*edges.filter(value=>Math.sign(value)===Math.sign(edge)).length/sessions:0;
-  return {sessions,passN,failN,passHits,failHits,edge:edge==null?null:+(100*edge).toFixed(1),t:+t.toFixed(2),agreement:+agreement.toFixed(0)};
 }
-function buildExactRuleScorecard(records){
-  const tCrit=familyTCrit(EXACT_SCORE_RULES.filter(rule=>rule.adjustable).length);
-  return EXACT_SCORE_RULES.map(rule=>{
-    const stats=exactRuleStats(records,rule);
-    let status=rule.adjustable?'COLLECTING':'PROTECTED',why='';
-    if(rule.adjustable&&stats.sessions>=3&&stats.agreement>=70&&stats.t>=tCrit&&stats.edge>0) status='ELIGIBLE';
-    else if(rule.adjustable&&stats.sessions>=3&&stats.agreement>=70&&stats.t<=-tCrit&&stats.edge<0) status='CONTRADICTED';
-    else if(rule.adjustable&&stats.sessions<3) why='needs '+(3-stats.sessions)+' more paired session'+(3-stats.sessions===2?'':'s');
-    else if(rule.adjustable&&stats.agreement<70) why='sign agreement '+stats.agreement+'% of 70% required';
-    else if(rule.adjustable) why='|t| '+Math.abs(stats.t).toFixed(2)+' of '+tCrit+' required';
-    return {...stats,key:rule.key,cat:rule.cat,label:rule.label,source:rule.source,adjustable:rule.adjustable,status,why,tCrit};
-  });
-}
-function exactRuleWeightAllowed(state,index){
-  const rule=EXACT_SCORE_RULES.filter(item=>item.adjustable)[index-EXACT_SCORE_START];
-  return !!rule&&state?.exactRules?.some(score=>score.key===rule.key&&score.status==='ELIGIBLE');
-}
-function statusReasonCode(reason){
-  const text=String(reason||'').trim(),s=text.toLowerCase();
-  if(!text) return 'actionable';
-  if(s.startsWith('score ')||s.includes('score scale')) return 'score-bar';
-  if(s.includes('target')&&(s.includes('cost')||s.includes('hurdle')||s.includes('gain'))) return 'target-cost';
-  if(s.includes('allocation rail')||s.includes('one share')||s.includes('remaining budget')||s.includes('capital exhausted')||s.includes('funded basket')||s.includes('affordable whole-share')) return 'allocation';
-  if(s.includes('set capital')) return 'capital-missing';
-  if(s.includes('excluded from basket')) return 'user-excluded';
-  if(s.includes('surveillance')) return 'surveillance';
-  if(s.includes('vwap')) return 'below-vwap';
-  if(s.includes('red day')) return 'red-day';
-  if(s.includes('below open')) return 'below-open';
-  if(s.includes('sell volume exceeds')) return 'sell-volume';
-  if(s.includes('being sold')||s.includes('net flow')) return 'selling-flow';
-  if(s.includes('pressure is not converting')||s.includes('tape selling')) return 'pressure-mismatch';
-  if(s.includes('peak')||s.includes('range consumed')||s.includes('extended')) return 'range-consumed';
-  if(s.includes('pullback')||s.includes('confirmation')) return 'entry-confirmation';
-  if(s.includes('series')||s.includes('price band')||s.includes('basket-eligible')) return 'exchange-eligibility';
-  if(s.includes('history')||s.includes('listed too recently')) return 'listing-history';
-  if(s.includes('stale')||s.includes('tape')||s.includes('live prices')||s.includes('helper')) return 'data-freshness';
-  if(s.includes('turnover')||s.includes('market-impact')) return 'liquidity';
-  if(s.includes('trigger')) return 'evidence-trigger';
-  return 'other:'+s.replace(/[-+]?\d[\d,.]*(?:%|x|rs|₹)?/g,'#').replace(/\s+/g,' ').slice(0,80);
-}
-function statusReasonCodes(reason){
-  const text=String(reason||''),s=text.toLowerCase(),codes=[];
-  if(s.includes('vwap')) codes.push('below-vwap');
-  if(s.includes('red day')) codes.push('red-day');
-  if(s.includes('below open')) codes.push('below-open');
-  if(s.includes('sell volume exceeds')) codes.push('sell-volume');
-  if(s.includes('being sold')||s.includes('net flow')) codes.push('selling-flow');
-  if(s.includes('pressure is not converting')||s.includes('tape selling')) codes.push('pressure-mismatch');
-  if(s.includes('peak')||s.includes('range consumed')||s.includes('extended')) codes.push('range-consumed');
-  if(s.includes('pullback')||s.includes('wait for confirmation')) codes.push('entry-confirmation');
-  return codes.length?[...new Set(codes)]:[statusReasonCode(text)];
+// THE STATUS / REJECTION SENTENCE IS RENDERED FROM THE RULE IDS, NOT PARSED BACK OUT OF PROSE.
+// Precedence matches what actually stops a trade: operational state, then protected vetoes, then
+// the adjustable rules, then funding. Every failing rule is listed, so a compound failure keeps
+// all of its reasons and no reason can fall into an unnamed bucket.
+function decisionRuleFailures(row){
+  const {margins,failed}=readDecisionRules(row);
+  const order={[RULE_OPERATIONAL]:0,[RULE_PROTECTED]:1,[RULE_ADJUSTABLE]:2};
+  return failed.slice().sort((a,b)=>{
+    const ra=decisionRule(a),rb=decisionRule(b);
+    return (order[ra?.kind]??3)-(order[rb?.kind]??3);
+  }).map(key=>({key,label:ruleLabel(key),margin:ruleStateMargin({margins},key)}));
 }
 function getStatusAuditReason(row){
-  const surveillance=NSE_SURV[row?.symbol]||[];
-  if(surveillance.length){
-    const text='Surveillance: '+surveillance.join(' · ');
-    const codes=surveillance.map(rule=>'surveillance:'+String(rule).trim());
-    return {code:codes[0],codes,text};
-  }
+  const failures=decisionRuleFailures(row);
   const fundedReason=BASKET_ROW_REASONS.get(row?.symbol);
-  if(fundedReason){const codes=statusReasonCodes(fundedReason);return {code:codes[0],codes,text:fundedReason};}
-  const action=getRowActionState(row);
-  const codes=action.state==='GO'?['actionable']:statusReasonCodes(action.reason);
-  return {code:codes[0],codes,text:action.reason||action.state};
+  const codes=failures.map(f=>f.key);
+  if(fundedReason&&!codes.length) codes.push('op-funded-basket');
+  if(!codes.length) return {code:'actionable',codes:['actionable'],text:'Actionable recommendation'};
+  const text=fundedReason&&!failures.length?fundedReason:failures.map(f=>f.label).join(' · ');
+  return {code:codes[0],codes,text};
+}
+
+// ── v1360: MEASURE THE MOVE, NOT A TARGET VERDICT ────────────────────────────────────────────
+// The old primary signal was target-before-stop, and on 2026-09-10 it made every bucket on the
+// Learning tab read 93-100%: score 0-19 at 100.0%, score 60-79 at 100.0%, and "Red day" - a stock
+// going DOWN - at 93.3%. A rule that predicts nothing and a rule that predicts everything were
+// indistinguishable. The cause is not a thin sample. A record resolves on target, on stop, or on
+// the deadline; both barriers resolve in minutes while the deadline waits for the next close, so
+// the resolved pool is almost purely "touched the near barrier first" and everything that merely
+// drifted sits pending until tomorrow.
+//
+// The primary signal is now what the stock ACTUALLY DID after issue - the best move above the issue
+// price. It exists from the first tick for every record, pending or not, so nothing waits and
+// nothing is enriched by which barrier happens to be nearer. Target-hit survives as a secondary
+// column computed only on MATURE records (past their deadline), which is what the training path
+// already used while the display did not.
+function ruleOutcomeMove(p){
+  const v=Number(p?.maxFavourablePct);
+  return Number.isFinite(v)?v:null;
+}
+function ruleOutcomeUsable(p){ return ruleOutcomeMove(p)!=null; }
+// THE UNIT OF EVIDENCE IS THE STOCK-SESSION RULE-STATE RUN (owner asked what a session is, which
+// exposed that a flat once-per-stock-per-session rule is too blunt). Deduplication exists because
+// repeated samples share one forward outcome, and that only holds while the rule state is
+// unchanged: a stock BELOW VWAP at 09:30 and ABOVE it at 14:30 lands on opposite sides of the
+// comparison and carries real discriminating information. So one observation per stock, per
+// session, per contiguous run of the same rule state, evaluated separately for each rule.
+// A stock oscillating around a line is genuinely uninformative for that rule, so a single
+// stock-session's contribution to any one rule is bounded by RULE_MAX_RUNS.
+const RULE_MAX_RUNS=2;
+function ruleRunsForSession(records,key){
+  const bySymbol={};
+  for(const p of records){
+    if(!ruleOutcomeUsable(p)) continue;
+    const pass=ruleStatePass(p,key);
+    if(typeof pass!=='boolean') continue;
+    (bySymbol[p.symbol]??=[]).push({at:Number(p.issuedAt)||0,pass,move:ruleOutcomeMove(p),
+      hit:scoreOutcomeTarget(p),margin:ruleStateMargin(p,key),symbol:p.symbol,rec:p});
+  }
+  const runs=[];
+  for(const rows of Object.values(bySymbol)){
+    rows.sort((a,b)=>a.at-b.at);
+    const collapsed=[];
+    for(const row of rows){
+      const last=collapsed[collapsed.length-1];
+      if(last&&last.pass===row.pass){ last.move=Math.max(last.move,row.move); last.n++;
+        if(Number.isFinite(row.margin)&&(!Number.isFinite(last.margin)||Math.abs(row.margin)<Math.abs(last.margin))) last.margin=row.margin;
+        last.hit=Math.max(last.hit,row.hit); continue; }
+      collapsed.push({...row,n:1});
+    }
+    for(const run of collapsed.slice(0,RULE_MAX_RUNS)) runs.push(run);
+  }
+  return runs;
+}
+function ruleSessionStat(records,key){
+  const runs=ruleRunsForSession(records,key);
+  const pass=runs.filter(r=>r.pass),fail=runs.filter(r=>!r.pass);
+  if(!pass.length&&!fail.length) return null;
+  const mean=a=>a.length?a.reduce((n,r)=>n+r.move,0)/a.length:null;
+  return {passN:pass.length,failN:fail.length,
+    passMove:mean(pass),failMove:mean(fail),
+    passHit:pass.reduce((n,r)=>n+r.hit,0),failHit:fail.reduce((n,r)=>n+r.hit,0),
+    edge:(pass.length&&fail.length)?mean(pass)-mean(fail):null};
+}
+// Sessions are NOT the sample count - 307 distinct stocks in one session is a large sample and
+// weights must be able to move on day one. They are the CONSISTENCY check: 307 stocks establish
+// that an edge existed today, they cannot establish that today was not an unusual session. The
+// market-wide component cancels by construction, because edge is passers minus failers measured on
+// the same day in the same market.
+function ruleEvidence(agg,key){
+  const perDay=agg?.[key]||{};
+  const days=Object.keys(perDay).sort();
+  const edges=[],all=[];
+  let passN=0,failN=0,passHit=0,failHit=0;
+  for(const d of days){
+    const st=perDay[d];if(!st) continue;
+    passN+=st.passN||0;failN+=st.failN||0;passHit+=st.passHit||0;failHit+=st.failHit||0;
+    all.push(st);
+    if(Number.isFinite(st.edge)) edges.push(st.edge);
+  }
+  const sessions=edges.length;
+  const edge=sessions?edges.reduce((a,b)=>a+b,0)/sessions:null;
+  const sd=sessions>1?Math.sqrt(edges.reduce((n,v)=>n+(v-edge)*(v-edge),0)/(sessions-1)):0;
+  // Session-clustered standard error, floored by the sampling error the run counts imply so a
+  // near-constant edge series cannot produce an infinite t (the v1213 trap).
+  const n=passN+failN;
+  const floor=n>1?Math.abs(edge||0)/Math.sqrt(n):0;
+  const se=sessions>1?Math.max(sd/Math.sqrt(sessions),floor*0.25):Infinity;
+  const tCrit=familyTCrit(Math.max(1,adjustableRules().length));
+  const agreement=sessions&&edge?100*edges.filter(v=>Math.sign(v)===Math.sign(edge)).length/sessions:0;
+  // weight = prior + edge x confidence(n). `edge` is SIGNED: positive raises, negative lowers.
+  // confidence only ever grows and sets how fast a weight leaves the prior, never the direction.
+  const shrunk=(edge==null||!Number.isFinite(se))?0:Math.sign(edge)*Math.max(0,Math.abs(edge)-tCrit*se);
+  const confidence=(edge&&Number.isFinite(se))?Math.max(0,Math.min(1,shrunk/edge)):0;
+  return {sessions,passN,failN,passHit,failHit,
+    passMove:all.length?all.reduce((n2,st)=>n2+(st.passMove||0)*(st.passN||0),0)/Math.max(1,passN):null,
+    failMove:all.length?all.reduce((n2,st)=>n2+(st.failMove||0)*(st.failN||0),0)/Math.max(1,failN):null,
+    edge,shrunk,confidence,se:Number.isFinite(se)?se:null,tCrit,agreement:+agreement.toFixed(0)};
+}
+// THE PRIOR IS THE ONE NUMBER THAT IS NOT MEASURED, SO IT CARRIES THE LEAST POSSIBLE OPINION:
+// every rule starts EQUAL (owner, 2026-09-10). Its MAGNITUDE is derived, not chosen - set so the
+// ensemble's opening score matches current scoring behaviour, and for this wiring
+// (setup += 10*w*(context-0.5), an additive term) that derivation gives exactly 0. So release day
+// is bit-for-bit identical to v1359 and the weights separate from the first session's evidence.
+const RULE_PRIOR=0;
+// START CLEAN (owner, 2026-09-10). Margins cannot be reconstructed for records written before this
+// release, so old rows are retired rather than migrated: at the open every prior is equal, and the
+// weights move as the session's own data arrives. Bumping this string is what retires them.
+const RULE_SCHEMA_VERSION='rule-margin-v1';
+// Per-session per-rule aggregates are the PERMANENT learning store. They are recomputed from the
+// raw window for every session still held, and frozen once that session leaves the window, so
+// evidence accumulates without bound while the brain does not.
+function updateRuleAggregates(state,today){
+  if(!state.ruleAgg||typeof state.ruleAgg!=='object') state.ruleAgg={};
+  const usable=state.records.filter(p=>p.ruleSchema===RULE_SCHEMA_VERSION&&ruleOutcomeUsable(p));
+  const bySession={};
+  for(const p of usable)(bySession[p.issueDate]??=[]).push(p);
+  for(const rule of decisionRules()){
+    const perDay=state.ruleAgg[rule.key]||(state.ruleAgg[rule.key]={});
+    for(const [date,rows] of Object.entries(bySession)){
+      const st=ruleSessionStat(rows,rule.key);
+      if(st) perDay[date]=st; else delete perDay[date];
+    }
+  }
+  // Drop aggregates for rules that no longer exist (a withdrawn REG1 column, say).
+  const live=new Set(decisionRules().map(r=>r.key));
+  for(const key of Object.keys(state.ruleAgg)) if(!live.has(key)) delete state.ruleAgg[key];
+}
+function ruleWeightMap(state){
+  const agg=state?.ruleAgg||{},out={};
+  const rules=adjustableRules();
+  const ev=rules.map(rule=>({key:rule.key,...ruleEvidence(agg,rule.key)}));
+  // The scale is the cross-section's own strongest shrunk edge, so the best-evidenced rule reaches
+  // the bound and everything else lands in proportion. No chosen magnitude, and with no evidence
+  // anywhere the scale is 0 and every weight is exactly the prior.
+  const scale=Math.max(...ev.map(e=>Math.abs(e.shrunk)||0),0);
+  for(const e of ev){
+    const w=scale>0?RULE_PRIOR+Math.max(0,e.shrunk)/scale:RULE_PRIOR;
+    out[e.key]=Math.max(0,Math.min(1,w));
+  }
+  return {weights:out,evidence:ev,scale};
+}
+let _ruleWeightMemo={sig:'',vec:null};
+function ruleWeightVector(state){
+  // Read once per scoring pass, not once per row: ruleEvidence walks every session of every rule.
+  const sig=(state?.revision||0)+'|'+(state?.updatedAt||0)+'|'+Object.keys(state?.ruleAgg||{}).length;
+  if(_ruleWeightMemo.sig===sig&&_ruleWeightMemo.vec) return _ruleWeightMemo.vec;
+  const {weights}=ruleWeightMap(state);
+  const vec=adjustableRules().map(rule=>Number(weights[rule.key])||0);
+  _ruleWeightMemo={sig,vec};
+  return vec;
+}
+// THE COUNTERFACTUAL. The blocked rows are the control group and are already recorded, so with
+// margins stored the question "how much would this rule have to move to catch what it rejected"
+// is answered directly and needs no resolution and no waiting.
+function ruleCounterfactual(records,key,shiftPct){
+  const rule=decisionRule(key);
+  if(!rule||rule.kind!==RULE_ADJUSTABLE) return null;
+  const rows=records.filter(p=>Number.isFinite(ruleStateMargin(p,key))&&ruleOutcomeUsable(p));
+  if(!rows.length) return null;
+  const margins=rows.map(p=>Math.abs(ruleStateMargin(p,key))).sort((a,b)=>a-b);
+  // The step is a percentile of the rule's OWN observed margin spread, not a chosen number.
+  const step=margins[Math.floor(margins.length*0.25)]||0;
+  const shift=step*shiftPct;
+  const entering=rows.filter(p=>{const m=ruleStateMargin(p,key);return m<0&&m+shift>=0;});
+  const leaving=rows.filter(p=>{const m=ruleStateMargin(p,key);return m>=0&&m+shift<0;});
+  const summarise=list=>list.length?{n:list.length,
+    move:list.reduce((n,p)=>n+ruleOutcomeMove(p),0)/list.length,
+    hits:list.reduce((n,p)=>n+scoreOutcomeTarget(p),0)}:null;
+  return {shift:+shift.toFixed(3),unit:rule.unit||'',entering:summarise(entering),leaving:summarise(leaving)};
 }
 function scoreLearningBand(p){
   if(p.block) return 'Blocked by rules';
@@ -3334,7 +3617,7 @@ async function fitScoreWeights(records,live){
     for(const p of data){
       const y=scoreOutcomeTarget(p),pred=computeUnifiedEvidence(p.input,w).raw/100;
       for(let i=0;i<w.length;i++){
-        if(i>=EXACT_SCORE_START&&!exactRuleWeightAllowed(getUnifiedModelState(),i)) continue;
+        if(i>=EXACT_SCORE_START) continue; // rule weights are measured, never fitted by search
         if(i>=23&&i<EXACT_SCORE_START&&!memoryFeatureAllowed(getUnifiedModelState(),i-23)) continue;
         const trial=w.slice(),step=w[i]+0.01<=(i<13?1.5:1)?0.01:-0.01;trial[i]+=step;
         const derivative=(computeUnifiedEvidence(p.input,trial).raw/100-pred)/step;
@@ -3342,7 +3625,8 @@ async function fitScoreWeights(records,live){
       }
       if(++processed%20===0) await new Promise(resolve=>setTimeout(resolve,0));
     }
-    w=w.map((v,i)=>i>=EXACT_SCORE_START&&!exactRuleWeightAllowed(getUnifiedModelState(),i)?0:
+    const _rw=ruleWeightVector(getUnifiedModelState());
+    w=w.map((v,i)=>i>=EXACT_SCORE_START?(_rw[i-EXACT_SCORE_START]||0):
       i>=23&&i<EXACT_SCORE_START&&!memoryFeatureAllowed(getUnifiedModelState(),i-23)?0:
       +Math.max(i<13?0.5:i>=23?0:-1,Math.min(i<13?1.5:1,v-0.8*(grads[i]+0.02*(v-SCORE_SEED[i])))).toFixed(5));
   }
@@ -3442,10 +3726,12 @@ async function updateScoreLearning(){
             const input=JSON.parse(JSON.stringify(c.unified)),live=computeUnifiedEvidence(input,state.live);
             const trial=state.candidate?computeUnifiedEvidence(input,state.candidate.weights):null;
             const withoutMemory=state.candidate?computeUnifiedEvidence(input,state.candidate.weights.map((v,i)=>i>=23&&i<EXACT_SCORE_START?0:v)):null;
-            const statusReason=getStatusAuditReason(r),ruleStates=readExactScoreRules(r);
+            const statusReason=getStatusAuditReason(r),ruleRead2=readDecisionRules(r);
             const observation={symbol:r.symbol,issueDate:today,issuedAt:captureAt,bucket,score:r.score,signalScore:c.signalScore,
               block:c.block||null,minScore:RECOMMEND_MIN_SCORE,input,modelRevision:state.revision,livePrediction:live.raw/100,liveDecision:live.total,
-              statusCode:statusReason.code,statusCodes:statusReason.codes,statusReason:statusReason.text,ruleStates,
+              statusCode:statusReason.code,statusCodes:statusReason.codes,statusReason:statusReason.text,
+              margins:ruleRead2.margins,failed:ruleRead2.failed,unknown:ruleRead2.unknown,
+              maxFavourablePct:0,ruleSchema:RULE_SCHEMA_VERSION,
               candidateId:trial?state.candidate.id:null,candidatePrediction:trial?trial.raw/100:null,candidateDecision:trial?trial.total:null,
               withoutMemoryPrediction:withoutMemory?withoutMemory.raw/100:null,withoutMemoryDecision:withoutMemory?withoutMemory.total:null,
               entryPrice:r.price,targetPct:policy.targetPct,stopPct:policy.stopPct,auditQty:qty,orderType:'MARKET',
@@ -3470,20 +3756,7 @@ async function updateScoreLearning(){
       }
     }
     const mature=state.records.filter(p=>p.targetPolicy===TARGET_POLICY_VERSION&&matureScoreOutcome(p,today));
-    state.exactRules=buildExactRuleScorecard(mature);
-    const withdrawn=(weight,index)=>index>=EXACT_SCORE_START&&weight!==0&&!exactRuleWeightAllowed(state,index);
-    if(state.live.some(withdrawn)){
-      state.live=state.live.map((weight,index)=>withdrawn(weight,index)?0:weight);
-      state.revision++;
-      state.history.push({at:now,revision:state.revision,reason:'Exact rule qualification withdrawn; affected live factors disabled'});
-    }
-    if(state.candidate?.weights.some(withdrawn)){
-      // Recorded candidate predictions belong to its immutable weights. Never grade a
-      // changed vector against those old predictions: retire it and train a fresh ID.
-      state.history.push({at:now,retiredCandidate:state.candidate,reason:'Exact rule qualification withdrawn; candidate retired'});
-      state.candidate=null;state.lastTrainingIssuedAt=0;
-      state.status='Rule evidence changed; candidate will be rebuilt and validated on new decisions';
-    }
+    updateRuleAggregates(state,today);
     if(!study.results&&study.dates.length===MEMORY_SPEC.dates){
       const last=study.dates.at(-1),gap=tradingDaysBetween(last,today);
       if(gap>1||(gap===1&&istClock().mins>=EQUITY_CLOSE_MIN)){
@@ -3513,9 +3786,16 @@ async function updateScoreLearning(){
     }
     // Bound the new audit store; legacy records/settings are never migrated or rewritten.
     // Keep pending outcomes and the latest 10,000 completed samples, plus model-update history.
-    const completed=state.records.filter(p=>p.paperComplete);
-    if(completed.length>10000){const keep=new Set(completed.slice(-10000));state.records=state.records.filter(p=>!p.paperComplete||keep.has(p)
-      ||(state.candidate&&p.candidateId===state.candidate.id));}
+    // RETENTION IS BY SESSION, NOT BY ROW COUNT. The old 10,000-row cap was about 21 sessions at
+    // 30-minute sampling but only ~3.6 at bar resolution, and it was an undeserved constant either
+    // way. Per-session per-rule AGGREGATES are the permanent learning store and are tiny, so
+    // evidence is unbounded while bytes are not. Raw rows are the rolling window the loosen/tighten
+    // counterfactual needs, kept for ROCKET_HORIZON_DAYS+1 sessions - long enough for every record
+    // to reach its next-close deadline, which is derived rather than chosen.
+    const rawSessions=[...new Set(state.records.map(p=>p.issueDate))].sort().slice(-(ROCKET_HORIZON_DAYS+1));
+    const keepSessions=new Set(rawSessions);
+    state.records=state.records.filter(p=>keepSessions.has(p.issueDate)
+      ||(state.candidate&&p.candidateId===state.candidate.id));
     state.history=state.history.slice(-30);state.updatedAt=now;
     FS.set(SCORE_LEARNING_STORE,state);_unifiedStateSource=state;
     if(state.revision!==state.publishedRevision){
@@ -4262,7 +4542,7 @@ function radarScoreComponents(r,tapeStanding){
   }
   const bw=tev.bookWeights||{};
   const memory=getMemoryReading(r);
-  const ruleStates=readExactScoreRules(r);
+  const ruleRead1=readDecisionRules(r);
   const input={memory,bookDelta:tev.bookDelta||null,deltaWeight:tev.bookWeights?.delta||0,parts:['flow','vwap','cross','size','impact','book','split','spoof'].map(k=>tev.parts[k]??0.5),
     base:[0.10,0.05,0.10,0.75,tev.impactWeight||0,bw.book||0,bw.split||0,bw.spoof||0],
     predictor,trigger,depth,velocity,fade,ceiling,permission:perm.p||0,risk,
@@ -4270,8 +4550,10 @@ function radarScoreComponents(r,tapeStanding){
       Number.isFinite(r.fundamentalTrigger)?0.5+0.5*clamp01(r.fundamentalTrigger,-1,1):null,
       Number.isFinite(r.stretch)&&r.stretch>=0?1/(1+r.stretch):null,
         isEquitySession(Date.now())?(375+Math.max(0,EQUITY_CLOSE_MIN-istClock().mins))/750:null],
-        memory.ok?memory.values:[null,null,null],exactRuleContext(ruleStates))};
-      const effectiveWeights=state.live.map((weight,index)=>index>=EXACT_SCORE_START&&!exactRuleWeightAllowed(state,index)?0:weight);
+        memory.ok?memory.values:[null,null,null],ruleContextVector(ruleRead1.margins))};
+      checkRuleSlotAlignment();
+      const _ruleW=ruleWeightVector(state);
+      const effectiveWeights=state.live.map((weight,index)=>index>=EXACT_SCORE_START?(_ruleW[index-EXACT_SCORE_START]||0):weight);
       const calc=computeUnifiedEvidence(input,effectiveWeights);
   const out={total:calc.total,signalScore:calc.raw,unified:input,modelRevision:state.revision,
     evidence:calc.evidence,permission:input.permission,riskFactor:risk,tapeBars:tev.bars,
@@ -13368,131 +13650,147 @@ function humanizeSurvRule(key){
   return key.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
 }
 
-const STATUS_AUDIT_LABELS={
-  'score-bar':'Decision Score below Min Score','target-cost':'Target does not cover costs','allocation':'Allocation or whole-share rail',
-  'capital-missing':'Capital unavailable','user-excluded':'Excluded from basket by user','below-vwap':'Below VWAP','red-day':'Red day',
-  'below-open':'Below session open','sell-volume':'Sell volume exceeds buy volume','selling-flow':'Net intraday selling flow',
-  'pressure-mismatch':'Tape pressure is not converting','range-consumed':'Upper-quarter peak / range consumed',
-  'entry-confirmation':'Pullback confirmation required','exchange-eligibility':'Non-EQ series or price band',
-  'listing-history':'Insufficient listing history','data-freshness':'Stale feed / no usable current tape',
-  'liquidity':'Turnover or market-impact safety','evidence-trigger':'Evidence trigger veto'
-};
-function auditStatusCodes(record){
-  if(Array.isArray(record?.statusCodes)&&record.statusCodes.length) return record.statusCodes;
-  if(record?.statusCode) return [record.statusCode];
-  return statusReasonCodes(record?.statusReason||record?.block||'');
-}
-function auditStatusLabel(code){
-  if(code.startsWith('surveillance:')) return humanizeSurvRule(code.slice('surveillance:'.length));
-  if(code.startsWith('other:')) return 'Other: '+code.slice(6);
-  return STATUS_AUDIT_LABELS[code]||code.replace(/-/g,' ').replace(/\b\w/g,c=>c.toUpperCase());
-}
-function auditStatusCategory(code){
-  if(['below-vwap','red-day','below-open'].includes(code)) return 'Direction';
-  if(['sell-volume','selling-flow','pressure-mismatch'].includes(code)) return 'Depth & Tape';
-  if(['range-consumed','entry-confirmation'].includes(code)) return 'Entry Timing';
-  if(code.startsWith('surveillance:')) return 'Surveillance';
-  if(['exchange-eligibility','listing-history','data-freshness','liquidity'].includes(code)) return 'Exchange & Safety';
-  if(['target-cost','allocation','capital-missing','user-excluded'].includes(code)) return 'Allocation & Economics';
-  if(code==='score-bar') return 'Score Policy';
-  if(code==='evidence-trigger') return 'Evidence Triggers';
-  return 'Other';
-}
-
-let SCORE_AUDIT_DAY='';
-let SCORE_AUDIT_EXPAND_RULES=true;
-function toggleScoreAuditRules(){
-  SCORE_AUDIT_EXPAND_RULES=!SCORE_AUDIT_EXPAND_RULES;
+// ── v1360: ONE TABLE. FLAT, CUMULATIVE, SORTABLE. NO CATEGORIES AND NO "OTHER". ───────────────
+// The two tables this replaces described the same subject through two incompatible mechanisms:
+// one regexed English rejection sentences into buckets (with a truncated sentence as the fallback
+// bucket name), the other kept a hand-maintained list of 12 predicates and showed learning state
+// without ever showing outcomes. Rows now come from the rule registry, so a rule cannot exist in
+// the pipeline and be missing here, and "Other" is impossible by construction.
+//
+// There is NO decision-date picker. It filtered records to a single issueDate, which is a
+// debugging question and is why the sample counts on screen were so thin; learning is cumulative.
+let RULE_TABLE_SORT='edge', RULE_TABLE_DIR=-1;
+function sortRuleTable(key){
+  if(RULE_TABLE_SORT===key) RULE_TABLE_DIR=-RULE_TABLE_DIR;
+  else { RULE_TABLE_SORT=key; RULE_TABLE_DIR=-1; }
   renderPostClose();
 }
-
+function ruleTableRowsData(state,today){
+  const map=ruleWeightMap(state);
+  const evidence=map.evidence;
+  const weightByKey={};evidence.forEach(e=>{weightByKey[e.key]=e;});
+  const raw=state.records.filter(p=>p.ruleSchema===RULE_SCHEMA_VERSION);
+  const rows=[];
+  // Score bands are graded with exactly the same columns as a rule, because the score is one more
+  // predictor being asked the same question.
+  for(const b of [80,60,40,20,0]){
+    const inBand=raw.filter(p=>{const sc=Number(p.score);return Number.isFinite(sc)&&Math.floor(Math.max(0,Math.min(99.9,sc))/20)*20===b;});
+    const done=inBand.filter(ruleOutcomeUsable);
+    const mature=inBand.filter(p=>matureScoreOutcome(p,today));
+    rows.push({kind:'band',key:'band-'+b,label:'Score '+b+'-'+(b===80?100:b+19),group:'Score bands',
+      passN:done.length,failN:0,passMove:done.length?done.reduce((n,x)=>n+ruleOutcomeMove(x),0)/done.length:null,
+      failMove:null,edge:null,shrunk:0,confidence:0,sessions:new Set(inBand.map(x=>x.issueDate)).size,
+      matureN:mature.length,matureHits:mature.reduce((n,x)=>n+scoreOutcomeTarget(x),0),weight:null,gradeable:false});
+  }
+  for(const rule of decisionRules()){
+    const ev=weightByKey[rule.key]||ruleEvidence(state.ruleAgg||{},rule.key);
+    const gradeable=rule.kind!==RULE_OPERATIONAL;
+    const mature=raw.filter(p=>matureScoreOutcome(p,today)&&typeof ruleStatePass(p,rule.key)==='boolean');
+    const maturePass=mature.filter(p=>ruleStatePass(p,rule.key)===true);
+    rows.push({kind:'rule',key:rule.key,label:rule.label,group:rule.group,ruleKind:rule.kind,unit:rule.unit||'',
+      passN:ev.passN,failN:ev.failN,passMove:ev.passMove,failMove:ev.failMove,
+      edge:gradeable?ev.edge:null,shrunk:gradeable?ev.shrunk:0,confidence:gradeable?ev.confidence:0,
+      sessions:ev.sessions,matureN:maturePass.length,
+      matureHits:maturePass.reduce((n,x)=>n+scoreOutcomeTarget(x),0),
+      weight:rule.kind===RULE_ADJUSTABLE?Math.max(0,Math.min(1,Number(map.weights[rule.key])||0)):null,
+      gradeable});
+  }
+  const dir=RULE_TABLE_DIR,key=RULE_TABLE_SORT;
+  const val=r=>{
+    if(key==='label') return r.label;
+    if(key==='edge') return Number.isFinite(r.shrunk)?r.shrunk:-Infinity;
+    if(key==='n') return (r.passN||0)+(r.failN||0);
+    if(key==='passMove') return Number.isFinite(r.passMove)?r.passMove:-Infinity;
+    if(key==='failMove') return Number.isFinite(r.failMove)?r.failMove:-Infinity;
+    if(key==='sessions') return r.sessions||0;
+    if(key==='weight') return Number.isFinite(r.weight)?r.weight:-Infinity;
+    if(key==='hit') return r.matureN?r.matureHits/r.matureN:-Infinity;
+    return 0;
+  };
+  rows.sort((a,b)=>{
+    const x=val(a),y=val(b);
+    if(typeof x==='string') return dir*String(x).localeCompare(String(y));
+    return dir*((x||0)-(y||0));
+  });
+  return rows;
+}
 function renderPostClose(){
   const el=document.getElementById('postCloseContent');if(!el) return;
   const state=getUnifiedModelState(),today=getSessionDate();
-  const days=[...new Set([today,...state.records.map(p=>p.issueDate)])].sort().reverse();
-  const day=days.includes(SCORE_AUDIT_DAY)?SCORE_AUDIT_DAY:today;
-  const records=state.records.filter(p=>p.issueDate===day),resolved=records.filter(usableScoreOutcome);
-  const blocked=records.filter(p=>auditStatusCodes(p).some(code=>code!=='actionable')).length,incomplete=records.filter(p=>p.paperComplete&&!usableScoreOutcome(p)).length;
-  const pending=records.filter(p=>!p.paperComplete).length;
-  const pct=(v,n)=>n?(100*v/n).toFixed(1)+'%':'Waiting';
-  const mean=a=>a.length?a.reduce((n,v)=>n+v,0)/a.length:null;
-  const num=v=>v==null?'Waiting':(v>=0?'+':'')+v.toFixed(2)+'%';
+  checkRuleSlotAlignment();
+  const raw=state.records.filter(p=>p.ruleSchema===RULE_SCHEMA_VERSION);
+  const measured=raw.filter(ruleOutcomeUsable);
+  const mature=raw.filter(p=>matureScoreOutcome(p,today));
+  const sessionsSeen=new Set(Object.values(state.ruleAgg||{}).flatMap(d=>Object.keys(d||{})));
+  const stockSessions=new Set(raw.map(p=>p.issueDate+'|'+p.symbol)).size;
+  const pctOf=(v,n)=>n?(100*v/n).toFixed(1)+'%':'—';
+  const mv=v=>Number.isFinite(v)?(v>=0?'+':'')+v.toFixed(2)+'%':'—';
   const when=t=>t?new Date(t).toLocaleString('en-IN',{timeZone:'Asia/Kolkata',hour:'2-digit',minute:'2-digit',day:'2-digit',month:'short'}):'No observations yet';
-
-  function formatAuditRow(labelHtml, recordList, trClass='', indentPx=0){
-    const done=recordList.filter(usableScoreOutcome), net=done.filter(p=>Number.isFinite(p.paperNetPct));
-    const wins=done.filter(p=>scoreOutcomeTarget(p)===1);
-    const mins=wins.map(p=>Math.max(0,tradingDaysBetween(p.issueDate,istDayKey(p.paperExitAt))*375+istClock(p.paperExitAt).mins-istClock(p.issuedAt).mins)).filter(Number.isFinite).sort((a,b)=>a-b);
-    const med=mins.length?mins[Math.floor(mins.length/2)].toFixed(0)+' trading min':'Waiting';
-    const style=indentPx?`style="padding-left:${indentPx}px"`:'';
-    return `<tr class="${trClass}"><td ${style}>${labelHtml}</td><td>${recordList.length}</td><td>${pct(wins.length,done.length)}<small> ${wins.length}/${done.length} resolved</small></td><td>${num(mean(net.map(p=>p.paperNetPct)))}<small> ${net.length} cost-covered</small></td><td>${med}</td><td>${recordList.filter(p=>!p.paperComplete).length}</td><td>${recordList.filter(p=>p.paperComplete&&!usableScoreOutcome(p)).length}</td></tr>`;
-  }
-
-  const scoreBandsHtml=[80,60,40,20,0].map(b=>{
-    const all=records.filter(p=>scoreLearningBand(p)===b);
-    const label=`<b>${b}-${b===80?100:b+19}</b>`;
-    return formatAuditRow(label, all);
-  }).join('');
-
-  const blockedList=records.filter(p=>auditStatusCodes(p).some(code=>code!=='actionable'));
-  const toggleBtn=`<button type="button" class="sb-clear" style="padding:1px 7px;margin-left:8px;font-size:11px;cursor:pointer;border-radius:4px" onclick="toggleScoreAuditRules()">${SCORE_AUDIT_EXPAND_RULES?'▲ Collapse rules':'▼ Show all rules'}</button>`;
-  const blockedTotalRow=formatAuditRow(`<b>Blocked by rules (Total)</b>${toggleBtn}`, blockedList, 'pc-cat-row');
-
-  let ruleBreakdownHtml='';
-  if(SCORE_AUDIT_EXPAND_RULES){
-    const codes=new Set(blockedList.flatMap(auditStatusCodes).filter(code=>code!=='actionable'));
-    if(day===today) ALL.forEach(row=>getStatusAuditReason(row).codes.filter(code=>code!=='actionable').forEach(code=>codes.add(code)));
-    const categories=[...new Set([...codes].map(auditStatusCategory))];
-    const rows=[];
-    categories.forEach(category=>{
-      const categoryCodes=[...codes].filter(code=>auditStatusCategory(code)===category).sort((a,b)=>auditStatusLabel(a).localeCompare(auditStatusLabel(b)));
-      const categoryRecords=blockedList.filter(record=>auditStatusCodes(record).some(code=>categoryCodes.includes(code)));
-      rows.push(formatAuditRow(`<b>${escHtml(category)}</b>`,categoryRecords,'pc-cat-row',16));
-      categoryCodes.forEach(code=>{
-        const matched=blockedList.filter(record=>auditStatusCodes(record).includes(code));
-        rows.push(formatAuditRow(`<span style="color:var(--t3);margin-right:6px">↳</span>${escHtml(auditStatusLabel(code))}`,matched,'pc-subrule-row',32));
-      });
-    });
-    ruleBreakdownHtml=rows.join('');
-  }
-
-  const tableRowsHtml=`${scoreBandsHtml}${blockedTotalRow}${ruleBreakdownHtml}`;
-  const mature=state.records.filter(p=>p.targetPolicy===TARGET_POLICY_VERSION&&matureScoreOutcome(p,today)),sessions=new Set(mature.map(p=>p.issueDate)).size;
-  const candidate=state.candidate,result=candidate?.validation;
-  const learning=candidate?`Checking new weights on later decisions: ${result?.n||0}/100 completed observations across ${result?.days||0}/${result?.requiredDays||(candidate.weights.slice(23,EXACT_SCORE_START).some(v=>v>0)?30:5)} sessions. ${result?.netDays||0}/${result?.requiredDays||(candidate.weights.slice(23,EXACT_SCORE_START).some(v=>v>0)?30:5)} sessions have enough cost-covered comparisons.`
-    :state.revision>0?`Revision ${state.revision} active. Last update ${when(state.appliedAt)}. ${escHtml(state.status)}.`
-    :`Initial weights active. ${mature.length}/100 completed observations across ${sessions}/5 issue sessions available to learn from. ${escHtml(state.status)}.`;
-  const sources=SCORE_SOURCES.map((x,i)=>`<tr><td>${escHtml(x[1])}</td><td>${x[2].toFixed(3)}</td><td>${state.live[i].toFixed(3)}</td><td>${candidate?candidate.weights[i].toFixed(3):'Not being tested'}</td></tr>`).join('');
-  const exactRules=state.exactRules?.length?state.exactRules:buildExactRuleScorecard(state.records.filter(record=>matureScoreOutcome(record,today)));
-  let adjustableIndex=0;
-  const exactRuleRows=exactRules.map(rule=>{
-    const sourceIndex=rule.adjustable?EXACT_SCORE_START+adjustableIndex++:null;
-    const passRate=rule.passN?pct(rule.passHits,rule.passN):'Waiting';
-    const failRate=rule.failN?pct(rule.failHits,rule.failN):'Waiting';
-    const edge=rule.edge==null?'Waiting':(rule.edge>=0?'+':'')+rule.edge.toFixed(1)+' pp';
-    const factor=sourceIndex==null?'Protected':state.live[sourceIndex].toFixed(3);
-    const trial=sourceIndex==null?'Never weakened':candidate?candidate.weights[sourceIndex].toFixed(3):'Not being tested';
-    return `<tr><td><b>${escHtml(rule.label)}</b><small>${escHtml(rule.cat)} · ${escHtml(rule.source)}</small></td><td>${rule.sessions}</td><td>${passRate}<small>${rule.passHits}/${rule.passN}</small></td><td>${failRate}<small>${rule.failHits}/${rule.failN}</small></td><td>${edge}</td><td>${escHtml(rule.status)}<small>${escHtml(rule.why||'')}</small></td><td>${factor}</td><td>${trial}</td></tr>`;
+  const rows=ruleTableRowsData(state,today);
+  const arrow=k=>RULE_TABLE_SORT===k?(RULE_TABLE_DIR<0?' ▼':' ▲'):'';
+  const th=(k,label,title)=>`<th style="cursor:pointer" title="${escHtml(title||'')}" onclick="sortRuleTable('${k}')">${escHtml(label)}${arrow(k)}</th>`;
+  const kindTag=r=>r.kind==='band'?'<small>Score bands</small>'
+    :r.ruleKind===RULE_PROTECTED?'<small>'+escHtml(r.group)+' · protected</small>'
+    :r.ruleKind===RULE_OPERATIONAL?'<small>'+escHtml(r.group)+' · not gradeable</small>'
+    :'<small>'+escHtml(r.group)+'</small>';
+  const counterHtml=r=>{
+    if(r.kind!=='rule'||r.ruleKind!==RULE_ADJUSTABLE) return '—';
+    const loose=ruleCounterfactual(raw,r.key,1),tight=ruleCounterfactual(raw,r.key,-1);
+    if(!loose&&!tight) return '<small>collecting margins</small>';
+    const part=(cf,word)=>{
+      const side=word==='Loosen'?cf?.entering:cf?.leaving;
+      if(!cf||!side) return '';
+      return `${word} ${Math.abs(cf.shift).toFixed(2)}${escHtml(cf.unit)} → ${side.n} stock${side.n===1?'':'s'}, mean best move ${mv(side.move)}`;
+    };
+    const a=part(loose,'Loosen'),b=part(tight,'Tighten');
+    return `<small>${a||''}${a&&b?'<br>':''}${b||''}</small>`||'<small>no crossings yet</small>';
+  };
+  const body=rows.map(r=>{
+    const edge=r.gradeable&&Number.isFinite(r.edge)
+      ?`${mv(r.edge)}<small>acting on ${mv(r.shrunk)}</small>`
+      :r.gradeable?'<small>collecting</small>':'<small>not gradeable</small>';
+    const weight=r.weight==null?(r.ruleKind===RULE_PROTECTED?'<small>never weakened</small>':'—'):r.weight.toFixed(3);
+    return `<tr><td><b>${escHtml(r.label)}</b>${kindTag(r)}</td>`
+      +`<td>${r.passN||0} / ${r.failN||0}</td>`
+      +`<td>${mv(r.passMove)}</td><td>${mv(r.failMove)}</td>`
+      +`<td>${edge}</td>`
+      +`<td>${r.matureN?pctOf(r.matureHits,r.matureN):'—'}<small>${r.matureN?r.matureHits+'/'+r.matureN+' matured':'awaiting deadline'}</small></td>`
+      +`<td>${r.sessions||0}</td><td>${weight}</td><td>${counterHtml(r)}</td></tr>`;
   }).join('');
   const card=(label,value,sub)=>`<div class="pc-kpi"><div class="pc-kpi-label">${label}</div><div class="pc-kpi-value">${value}</div><div class="pc-kpi-sub">${sub}</div></div>`;
+  const candidate=state.candidate,result=candidate?.validation;
+  const learning=candidate?`Checking new weights on later decisions: ${result?.n||0}/100 completed observations across ${result?.days||0}/${result?.requiredDays||5} sessions.`
+    :state.revision>0?`Revision ${state.revision} active. Last update ${when(state.appliedAt)}. ${escHtml(state.status)}.`
+    :`${escHtml(state.status)}.`;
+  const liveRuleW=ruleWeightVector(state);
+  const sources=SCORE_SOURCES.map((x,i)=>`<tr><td>${escHtml(x[1])}</td><td>${x[2].toFixed(3)}</td><td>${(i>=EXACT_SCORE_START?(liveRuleW[i-EXACT_SCORE_START]||0):state.live[i]).toFixed(3)}</td></tr>`).join('');
   el.innerHTML=`<div class="pc-shell"><section class="m-card pc-card pc-hero">
-    <div class="pc-head"><div><h3 class="pc-title">Did higher scores predict better outcomes?</h3>
-    <p class="pc-copy">Learning collects throughout the session, whether this tab is open or not. Each score, exact rule state and Status / Rejection reason is frozen before its outcome, then updated through the next-session deadline.</p></div>
-    <label>Decision date <select onchange="SCORE_AUDIT_DAY=this.value;renderPostClose()">${days.map(d=>`<option value="${d}" ${d===day?'selected':''}>${d}</option>`).join('')}</select></label></div>
-    <div class="pc-kpis">${card('Recorded decisions',records.length,'Sampled every 30 minutes')}${card('Target reached',pct(resolved.filter(p=>scoreOutcomeTarget(p)).length,resolved.length),'Before stop, through next trading close')}${card('Still pending',pending,'Not counted as failures')}${card('Insufficient evidence',incomplete,'Excluded from learning')}${card('Rule-blocked samples',blocked,'Audited; never authorised as buys')}</div>
-    <p class="pc-copy">Last observation: ${when(records.length?Math.max(...records.map(p=>p.issuedAt)):0)}. Last outcome check: ${when(state.updatedAt)}.
-    The sample includes high and low signal scores and blocked stocks; it is not the entire market and repeated decisions are correlated.</p>
-    <div class="pc-table-wrap"><table class="pc-table"><thead><tr><th>Final score at issue / Rule veto</th><th>Observations</th><th>Target hit rate</th><th>Average net return at exit</th><th>Time to target</th><th>Pending</th><th>Excluded</th></tr></thead><tbody>${tableRowsHtml}</tbody></table></div>
-    <p class="pc-copy">A deadline miss counts as a failed target prediction, even if the trade finishes positive. Net return includes charges and measured friction; missing cost coverage is not treated as zero cost. Blocked observations are hypothetical diagnostics, not recommendations. Scores, thresholds and model revisions are retained as issued.</p>
-    </section><section class="m-card pc-card"><h3 class="pc-title">Exact rule learning</h3>
-    <p class="pc-copy">Each row freezes its own pass/fail state when the score is recorded, then compares target-before-stop outcomes across issue dates. Adjustable rules begin at zero influence, need three paired sessions, 70% sign agreement and the family-wise t threshold, and still enter only a candidate that must win on later untouched decisions. Exchange, stale-data and surveillance protections are measured but never weakened automatically.</p>
-    <div class="pc-table-wrap"><table class="pc-table"><thead><tr><th>Exact rule</th><th>Paired sessions</th><th>Pass hit rate</th><th>Fail hit rate</th><th>Pass edge</th><th>Evidence state</th><th>Live factor</th><th>Candidate factor</th></tr></thead><tbody>${exactRuleRows}</tbody></table></div>
+    <div class="pc-head"><div><h3 class="pc-title">Which rules earn their place?</h3>
+    <p class="pc-copy">Every rule the pipeline applies, measured continuously against what its stocks actually did.
+    Learning collects whether this tab is open or not, and accumulates across all sessions - there is no date to pick.</p></div></div>
+    <div class="pc-kpis">${card('Rules measured',rows.filter(r=>r.kind==='rule').length,'Registry plus every REG1 column')}
+    ${card('Stock-sessions',stockSessions,'The unit of evidence')}
+    ${card('Measured decisions',measured.length,'Best move known from the first bar')}
+    ${card('Matured',mature.length,'Past their next-close deadline')}
+    ${card('Sessions',sessionsSeen.size,'Consistency check, not the sample count')}</div>
+    <p class="pc-copy">Last observation: ${when(raw.length?Math.max(...raw.map(p=>p.issuedAt)):0)}. Last outcome check: ${when(state.updatedAt)}.
+    <b>Edge</b> is the mean best move of the stocks that passed a rule minus the mean of those that failed it, both measured on the same day in the same market, so whatever the session did to everything cancels.
+    <b>Acting on</b> is what survives that rule's own sampling error - a 1-of-1 sample moves nothing however good its rate looks, while 19-of-20 moves materially - and it is what sets the weight.</p>
+    <div class="pc-table-wrap"><table class="pc-table"><thead><tr>
+    ${th('label','Rule')}${th('n','Passed / failed','Stock-session runs, deduplicated per rule')}
+    ${th('passMove','Best move when passed')}${th('failMove','Best move when failed')}
+    ${th('edge','Edge','Mean best move of passers minus failers, and the part that survives sampling error')}
+    ${th('hit','Reached target','Matured records only, so early winners cannot dominate')}
+    ${th('sessions','Sessions')}${th('weight','Weight now')}
+    <th>Loosen / tighten</th></tr></thead><tbody>${body}</tbody></table></div>
+    <p class="pc-copy">All weights start EQUAL at the prior and move only as evidence arrives; there is no collecting-then-arming step and no threshold to cross.
+    Protected rules - exchange eligibility, listing history, tape freshness, circuit headroom and every configured surveillance column - are measured here but are never weakened automatically.
+    Operational states describe the app or the account rather than the stock, so they are listed for completeness and excluded from the edge maths.</p>
     </section><section class="m-card pc-card"><h3 class="pc-title">What is feeding live scores now?</h3><p class="pc-copy">${learning}</p>
-    <p class="pc-copy">New observations train a bounded candidate. It can replace live weights only after later, untouched decisions show lower prediction error, better positive net returns, no worse target-hit rate and agreement across sessions. Decisions used for training are never used to validate that candidate.</p>
-    <p class="pc-copy"><b>Protected rules:</b> buy volume must exceed sell volume when depth is available, plus existing direction, entry timing, exchange, surveillance, stale-data and risk safeguards. Weight changes cannot bypass these checks. Older armed conditions are preserved; this page no longer creates extra gates or changes weights when opened.</p>
-    <details><summary>See current weights and changes being checked</summary><div class="pc-table-wrap"><table class="pc-table"><thead><tr><th>Signal source</th><th>Initial factor</th><th>Live factor</th><th>Being checked</th></tr></thead><tbody>${sources}</tbody></table></div>
-    <p class="pc-copy">Existing signals start at 1x. Additional setup/context adjustments start at zero. These are influence factors, not score points or return probabilities. Correlated setup fields are grouped; their readings exclude the old same-session winner-fitted contributions.</p></details>
-    <p class="pc-copy">${state.history.filter(entry=>entry.validation).length?'Validated updates applied: '+state.history.filter(entry=>entry.validation).length+'. Most recent validation used '+state.history.filter(entry=>entry.validation).at(-1).validation.n+' later observations.':'No retained validated update. Retired candidates are not promotions.'} Retains the latest 10,000 completed sampled decisions, pending decisions, all observations for the active candidate and 30 model updates. No live trades are placed by this audit.</p>
+    <p class="pc-copy"><b>Protected rules:</b> buy volume must exceed sell volume when depth is available, plus existing direction, entry timing, exchange, surveillance, stale-data and risk safeguards. Weight changes cannot bypass these checks.</p>
+    <details><summary>See current weights</summary><div class="pc-table-wrap"><table class="pc-table"><thead><tr><th>Signal source</th><th>Prior</th><th>Live factor</th></tr></thead><tbody>${sources}</tbody></table></div>
+    <p class="pc-copy">These are influence factors, not score points or return probabilities.</p></details>
+    <p class="pc-copy">Raw decisions are retained for ${ROCKET_HORIZON_DAYS+1} sessions so every record can reach its deadline and the loosen/tighten column has margins to work with; per-session per-rule evidence is retained permanently and is what the weights read. No live trades are placed by this audit.</p>
     </section>${renderMemoryStudy(state)}</div>`;
 }
 
