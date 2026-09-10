@@ -1,5 +1,5 @@
-const BUILD_TS='2026-09-10 12:44 IST'; // release build time (IST)
-const APP_VERSION=1348;
+const BUILD_TS='2026-09-10 13:07 IST'; // release build time (IST)
+const APP_VERSION=1349;
 const RADAR_SCORE_VERSION='unified-evidence-v1';
 const TARGET_POLICY_VERSION='clock-stop-next-close-v1';
 function isValidChangeOpen(v){
@@ -87,9 +87,9 @@ function isLooseNseSupportCsvName(name){
 }
 
 function updateModeUI(){
-  const brand=document.querySelector('.brand-tag');
+  if(tgtEl){ let d=0; try{d=getDefaultTgtPct();}catch(e){} tgtEl.placeholder=d>0?d.toFixed(1):'auto'; tgtEl.title='Empty keeps this as a harvest-based planning reference for goal allocation only. It does not set automatic candidate or held-position targets. Type a value to explicitly override those targets; clear it to restore planning-only Auto.'; }
   if(brand) brand.textContent='Same-Day Composite Radar';
-  document.querySelectorAll('.currency-lbl').forEach(el=>{el.textContent='₹';});
+  showTradeInputMode(riskEl,'No cap');showTradeInputMode(tgtEl,'Planning');
 }
 let ALL=[],FILT=[],PG=1,PGSZ=100,SCOL='score',SDIR=-1;
 let SHOW_INELIGIBLE=false;
@@ -7786,7 +7786,7 @@ function buildGoalReadout(){
         const netPct=+(at.tgtPct-estimateRoundTripCostPct(at.tgtPct)).toFixed(3);
         if(netPct>0){
           const bp=projectGoalCompletionDate(basis,g.target,netPct,g,g.reinvestPct);
-          const srcLbl=at.source==='manual'?'manual':at.source==='goal'?'goal-led':'Harvest';
+          const srcLbl=at.source==='manual'?'manual':'planning reference';
           bestHtml=bp
             ? `If every session hit its ${at.tgtPct.toFixed(1)}% ${srcLbl} target: ${dateSpan(bp)}`
             : `At the ${srcLbl} anchor: 8+ years`;
@@ -8945,7 +8945,6 @@ function buildOpenPositionsPanel(query=''){
       dayPct:Number.isFinite(tapePolicy.price)&&tapePolicy.open>0
         ?100*(tapePolicy.price/tapePolicy.open-1):null,risk:scannerRow?.risk||'',
       pace:tapePolicy.pacePct,
-      predEod:tapePolicy.eodPct,
       scannerRow
     });
   });
@@ -9050,28 +9049,28 @@ function buildOpenPositionsPanel(query=''){
         /* c8 ignore stop */
       },
       clrFn:()=>'var(--green)'},
-    {key:'stopPrice',label:'SL ₹',align:'right',fmt:(v,row)=>v!=null
-      ?`<span title="${escHtml('Manual TSL switch trigger. A sale at this tape stop is above average buy and covers estimated Zerodha CNC charges, including the DP charge. No trailing mode is changed automatically.')}">${fmtINR(v)}<span style="font-size:12px;color:var(--t3);margin-left:4px">-${Number(row.pace).toFixed(2)}%</span></span>`
-      :`<span style="color:var(--t3)" title="${escHtml('Hidden until the tape stop is above average buy and covers estimated Zerodha CNC charges. Nothing switches to TSL automatically.')}">—</span>`,
+    {key:'stopPrice',label:'SL ₹',align:'right',fmt:(v,row)=>{
+      if(v==null) return `<span style="color:var(--t3)" title="${escHtml('Hidden until the tape stop is above average buy and covers estimated Zerodha CNC charges. Nothing switches to TSL automatically.')}">—</span>`;
+      const ltp=Number(row.ltp),deltaPct=ltp>0?100*(Number(v)-ltp)/ltp:null;
+      const distance=Number.isFinite(deltaPct)
+        ?`<span style="font-size:12px;color:var(--t3);margin-left:4px">${Math.abs(deltaPct).toFixed(2)}% ${deltaPct<=0?'below':'above'} LTP</span>`:'';
+      return `<span title="${escHtml('Manual TSL switch trigger. The percentage is this displayed stop price relative to current LTP. A sale at this tape stop is above average buy and covers estimated Zerodha CNC charges, including the DP charge. No trailing mode is changed automatically.')}">${fmtINR(v)}${distance}</span>`;
+    },
       clrFn:v=>v==null?'var(--t3)':'var(--green)'},
     {key:'score',label:'Score/#',align:'right',bold:true,
       fmt:(v,row)=>radarScoreCell(v)+`<span style="font-size:11px;color:var(--t3)"> #${row.rank??'—'}</span>`,
       clrFn:()=>'var(--t1)'},
     {key:'dayPct',label:'Day %',align:'right',fmt:fPerf,clrFn:()=>'var(--t2)'},
-    // Pace and EoD share one cell so the panel does not gain a horizontal scrollbar. Pace is the
-    // suggested Zerodha trigger GAP: the deepest seller retreat buyers proved survivable by making
-    // a later high. EoD keeps its separate volume-weighted per-bar speed model.
-    {key:'pace',label:'Pace / EoD',align:'right',
+    // Pace is the suggested Zerodha trigger GAP: the deepest seller retreat buyers proved
+    // survivable by making a later high.
+    {key:'pace',label:'Pace',align:'right',
       fmt:(v,row)=>{
         const dim=(txt,title)=>`<span style="color:var(--t3)"${title?` title="${escHtml(title)}"`:''}>${txt}</span>`;
         const p=row.tapePolicy||getOpenPositionTapePolicy(row.sym,row);
         const tapePace=Number.isFinite(p.pacePct)
           ?`<span title="${escHtml('Proven recovered pullback; Zerodha trail gap ₹'+Number(p.paceRs||0).toFixed(2)+'.')}">${p.pacePct.toFixed(2)}%<span style="color:var(--t3);font-size:11px"> ₹${Number(p.paceRs||0).toFixed(2)}</span></span>`
           :dim('—','No seller pullback has yet been recovered by a later high.');
-        const tapeEod=Number.isFinite(p.eodPct)&&Number.isFinite(p.eodPrice)
-          ?`<span style="color:${p.eodPct>=0?'var(--green)':'var(--red)'};font-weight:700" title="${escHtml('Completed 5-minute pressure projects '+fmtINR(p.eodPrice)+' at the session close.')}">${fmtINR(p.eodPrice)} <span style="font-size:11px">${p.eodPct>=0?'+':''}${p.eodPct.toFixed(2)}%</span></span>`
-          :dim('—','The 5-minute pressure is not converting into a defensible closing projection.');
-        return tapePace+'<span style="color:var(--t3)"> / </span>'+tapeEod;
+        return tapePace;
         /* c8 ignore start -- legacy renderer retained below for old assertion source only. */
         const rd=getIntradayRead(row.sym);
         if(!rd) return dim('—','No 5-minute read for this stock yet.');
@@ -10204,10 +10203,9 @@ function maxReachableAnchorPct(){
 function getActiveTargetInfo(){
   const harvest=computeHarvestPlan().targetPct;
   const goal=getGoalLedTargetPct();
-  // v1267: Goal remains informational. With no manual Target Anchor, use the stable
-  // market/evidence-derived fallback independent of Capital. Typing Capital must never move
-  // the Target Anchor or make candidates fail viability.
-  const auto={tgtPct:harvest,source:'harvest'};
+  // The automatic value is retained for allocation/goal planning only. v1348 targets come
+  // from each stock's market history unless the owner explicitly supplies an override.
+  const auto={tgtPct:harvest,source:'planning'};
   const manual=parseFloat(document.getElementById('fTgtOverride')?.value);
   if(Number.isFinite(manual)&&manual>0&&manual<=maxReachableAnchorPct())
     return {tgtPct:manual,source:'manual',harvestPct:harvest,goalPct:goal,autoPct:auto.tgtPct};
@@ -14153,7 +14151,7 @@ function renderStatusBar(){
       const _todayRs=getTodayRupeeNeed();
       const goalTargetRs=(_todayRs&&_todayRs.outstanding>0)?_todayRs.outstanding:harvestPlan.dailyGoal;
       const goalCoverage=goalTargetRs>0?Math.max(0,totalNet)/goalTargetRs:0;
-      const srcLbl=active.source==='manual'?'✎ manual anchor':active.source==='goal'?'goal-led anchor':'Harvest anchor';
+      const srcLbl=active.source==='manual'?'✎ manual override':'planning reference';
       const targetRange=Math.abs(targets.at(-1)-targets[0])<0.001?targets[0].toFixed(2)+'%':`${targets[0].toFixed(2)}–${targets.at(-1).toFixed(2)}%`;
       const stopRange=stops.length?(Math.abs(stops.at(-1)-stops[0])<0.001?stops[0].toFixed(2)+'%':`${stops[0].toFixed(2)}–${stops.at(-1).toFixed(2)}%`):'—';
       const needed=harvestPlan.capitalNeeded?` Capital needed for ${fmtINR(harvestPlan.dailyGoal)} at this learned edge: ${fmtINR(harvestPlan.capitalNeeded)}.`:'';
