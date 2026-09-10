@@ -1,5 +1,5 @@
-const BUILD_TS='2026-09-10 09:28 IST'; // release build time (IST)
-const APP_VERSION=1344; // Wrapped empty rankings and truthful feature-ledger labels.
+const BUILD_TS='2026-09-10 09:48 IST'; // release build time (IST)
+const APP_VERSION=1345; // Exclude unfunded basket rows from recommendations and streamline rejection reasons.
 const RADAR_SCORE_VERSION='unified-evidence-v1';
 function isValidChangeOpen(v){
   if(v===null||v===undefined||typeof v==='boolean') return false;
@@ -4893,15 +4893,53 @@ function radarScoreCell(score,title='',recommendationState=null){
     :`Below the decision-score policy bar — ${s.toFixed(1)} against ${RECOMMEND_MIN_SCORE}. This score is readiness evidence, not a profit probability.`);
   return `<span class="sc-m" style="font-family:'DM Mono',monospace;font-weight:800;font-size:15px;color:${c}" title="${escHtml(tip)}">${s.toFixed(1)}${ok?'':'<sub style="font-size:9px;color:var(--t3)">\u25be</sub>'}</span>`;
 }
+let BASKET_ROW_REASONS=new Map();
+function planFundedRecommendations(rows,capital){
+  const reasons=new Map(),pool=rows.filter(r=>{
+    if(EXPORT_EXCLUDED.has(r.symbol)){reasons.set(r.symbol,'Excluded from basket by you');return false;}
+    if(!isStockEligible(r)) return false;
+    if(!(capital>0)){reasons.set(r.symbol,'Set capital to fund recommendations');return false;}
+    return true;
+  });
+  let active=pool.slice(0,20),next=active.length;
+  while(active.length){
+    const alloc=computeAlloc(capital,active);
+    const rejected=active.filter(r=>alloc[r.symbol]?.rejected||!(alloc[r.symbol]?.qty>0));
+    if(!rejected.length) break;
+    const removed=new Set(rejected.map(r=>r.symbol));
+    rejected.forEach(r=>reasons.set(r.symbol,alloc[r.symbol]?.reason||'No affordable whole-share allocation'));
+    active=active.filter(r=>!removed.has(r.symbol));
+    while(active.length<20&&next<pool.length) active.push(pool[next++]);
+  }
+  const funded=new Set(active.map(r=>r.symbol));
+  pool.forEach(r=>{if(!funded.has(r.symbol)&&!reasons.has(r.symbol)) reasons.set(r.symbol,'Outside the funded basket of up to 20 trades');});
+  return {funded,reasons};
+}
 function rowStatusPillHtml(s){
+  if(!s) return '';
+  const survFlags=(s?.meta?.flags||[]).map(x=>String(x||'').trim()).filter(Boolean);
+  const nseSurv=(NSE_SURV[s?.symbol]||[]);
+  if(survFlags.length || nseSurv.length){
+    const names=[...new Set([...survFlags, ...nseSurv])].join(' · ');
+    return `<span class="info-pill pill-red" style="padding:2px 8px;display:inline-block;vertical-align:middle;line-height:1.3" title="NSE surveillance: ${escHtml(names)}">✕ Surveillance: ${escHtml(names)}</span>`;
+  }
+  const reason=BASKET_ROW_REASONS.get(s.symbol);
+  if(reason){
+    const isExcl=reason.includes('Excluded from basket');
+    const isAlloc=reason.includes('rail') || reason.includes('target gain') || reason.includes('exceeds remaining') || reason.includes('capital exhausted') || reason.includes('Outside the funded') || reason.includes('No affordable');
+    const isWait=reason.startsWith('Set capital');
+    const pillClass=(isExcl||isAlloc||isWait)?'pill-amber':'pill-red';
+    const icon=isExcl?'⊘ ':isAlloc?'⚠️ ':isWait?'⏳ ':'✕ ';
+    return `<span class="info-pill ${pillClass}" style="padding:2px 8px;display:inline-block;vertical-align:middle;line-height:1.3" title="${escHtml(reason)}">${icon}${escHtml(reason)}</span>`;
+  }
   const act=getRowActionState(s);
   if(act.state==='GO'){
-    return `<span class="info-pill pill-green" style="padding:2px 8px;font-weight:700" title="Clears Min Score; technical readiness is included in the final score">✓ GO</span>`;
+    return `<span class="info-pill pill-green" style="padding:2px 8px;font-weight:700" title="Funded and included in the basket">✓ GO</span>`;
   }
   if(act.state==='WAIT'){
-    return `<span class="info-pill pill-amber" style="padding:2px 8px;max-width:220px;overflow:hidden;text-overflow:ellipsis;display:inline-block;vertical-align:middle" title="${escHtml(act.reason)}">⏳ ${escHtml(act.reason)}</span>`;
+    return `<span class="info-pill pill-amber" style="padding:2px 8px;max-width:260px;overflow:hidden;text-overflow:ellipsis;display:inline-block;vertical-align:middle" title="${escHtml(act.reason)}">⏳ ${escHtml(act.reason)}</span>`;
   }
-  return `<span class="info-pill pill-red" style="padding:2px 8px;max-width:220px;overflow:hidden;text-overflow:ellipsis;display:inline-block;vertical-align:middle" title="${escHtml(act.reason)}">✕ ${escHtml(act.reason)}</span>`;
+  return `<span class="info-pill pill-red" style="padding:2px 8px;max-width:260px;overflow:hidden;text-overflow:ellipsis;display:inline-block;vertical-align:middle" title="${escHtml(act.reason)}">✕ ${escHtml(act.reason)}</span>`;
 }
 function radarSetupLabel(r){
   const b=[];
@@ -9950,16 +9988,13 @@ function resetRecommendationSelectionForRefresh(){
 }
 function toggleSelectAll(checked){
   if(checked){
-    FILT.forEach(s=>EXPORT_EXCLUDED.delete(s.symbol));
-    SELECTED=new Set(FILT.filter(isSelectableRecommendation)
-      .slice(0,20).map(s=>s.symbol));
+    (Array.isArray(FILT)?FILT:[]).forEach(s=>EXPORT_EXCLUDED.delete(s.symbol));
   } else {
-    FILT.forEach(s=>{if(s.basketEligible!==false)EXPORT_EXCLUDED.add(s.symbol);});
+    (Array.isArray(FILT)?FILT:[]).forEach(s=>{if(s.basketEligible!==false)EXPORT_EXCLUDED.add(s.symbol);});
     SELECTED.clear();
   }
   saveFilterState();
-  renderTable();
-  renderBasketBtn();
+  recomputeAlloc();
   scheduleAutoSyncBasket(150);
 }
 function toggleStock(sym,checked){
@@ -11510,33 +11545,10 @@ function allocationSubline(am,unitLabel='shares'){
   return `<div style="font-size:11px;color:var(--t3);margin-top:1px;max-width:190px;overflow:hidden;text-overflow:ellipsis" title="${sizedBy}${riskTip}${netTip}">${am.qty}${unitShort}${am?.riskRs>0?` · r${fmtINR(am.riskRs)}`:''}${netStr}</div>`;
 }
 function recomputeAlloc(){
-  const capital=getEffectiveCapital();
-  if(!capital){document.querySelectorAll('.alloc-cell').forEach(el=>el.innerHTML='<span style="color:var(--t3);font-size:13px">—</span>');return;}
-  const selList=FILT.filter(s=>SELECTED.has(s.symbol));
-  const allocMap=computeAlloc(capital, selList);
-  const unitLabel='shares';
-  document.querySelectorAll('.alloc-cell').forEach(el=>{
-    const sym=el.dataset.sym;
-    if(!SELECTED.has(sym)){el.innerHTML='<span style="color:var(--t3);font-size:13px">—</span>';return;}
-    const am=allocMap[sym];
-    if(!am){
-      const allocCtx=getAllocationPassContext();
-      const s=FILT.find(x=>x.symbol===sym);
-      const railReason=s?getAllocationBlockReason(s,allocCtx):null;
-      el.innerHTML=railReason
-        ? `<span style="color:var(--amber);font-size:11px;line-height:1.2;display:block" title="${escHtml(railReason)}">${escHtml(railReason)}</span>`
-        : '<span style="color:var(--t3);font-size:13px">—</span>';
-      return;
-    }
-    if(am.rejected || am.qty === 0){
-      el.innerHTML=`<span style="color:var(--amber);font-size:11px;line-height:1.2;display:block" title="${escHtml(am.reason||'No whole share allocated')}">${escHtml(am.reason||'0 shares')}</span>`;
-      return;
-    }
-    el.innerHTML=`<span style="color:var(--amber);font-weight:700;font-family:'DM Mono',monospace;font-size:14px">${fmtINR(am.alloc)}</span>${allocationSubline(am,unitLabel)}`;
-  });
-  renderBasketSummary();
-  renderBasketBtn();
+  applyFilters({preservePage:true});
+  renderBasketSummary();renderBasketBtn();
 }
+
 function renderBasketBtn(){
   const buyBtn=document.getElementById('basketBtn');
   if(!buyBtn) return;
@@ -11702,10 +11714,12 @@ function renderTable(){
     const act=getRowActionState(s);
     const recommendationGo=act.state==='GO';
     const validated=passesIntradayValidation(s);
-    const canBuy=isSelectableRecommendation(s);
+    const allocReason=BASKET_ROW_REASONS.get(s.symbol);
+    const canBuy=isSelectableRecommendation(s)&&((am?.qty>0&&!am.rejected)||EXPORT_EXCLUDED.has(s.symbol));
     const checkTitle=!exchangeEligible?'Ineligible for the basket'
       :!recommendationGo?('Not selectable: '+act.reason)
       :!validated?'Awaiting current 5-minute validation'
+      :allocReason?('Not funded: '+allocReason)
       :'Include in the Zerodha basket export';
     // Cells are keyed and joined in COLS order so they always match the (possibly
     // user-reordered) header (v536).
@@ -11717,8 +11731,8 @@ function renderTable(){
       // TradingView link since v1070, so the "one symbol interaction everywhere" rule was true of the
       // panels and quietly false of the main table - which is why swapping to Zerodha missed it.
       symbol:`<td style="font-family:'Plus Jakarta Sans',sans-serif">${(
-        `<div style="font-weight:700;font-size:15px;color:var(--t1);max-width:280px;overflow:hidden;text-overflow:ellipsis">${escHtml(s.symbol)}${chartLinkButtons(s.symbol)}${(()=>{const bf=getBookFlag(s.symbol);if(!bf)return '';return `<span style="font-size:11px;background:rgba(245,158,11,.14);color:var(--amber);border-radius:4px;padding:1px 5px;margin-left:5px;font-weight:700;vertical-align:middle" title="Order book: ${escHtml(bf.text)}. Display only - it does not change the score unless the graded book weight says it should.">${bf.iceberg?'🧊':'⚑'}${bf.heavyCancel?' cx':''}</span>`;})()}${(()=>{const flags=s.meta?.flags||[];if(!flags.length)return '';return `<span style="font-size:12px;background:rgba(239,68,68,.15);color:var(--red);border-radius:4px;padding:1px 5px;margin-left:5px;font-weight:700;vertical-align:middle" title="NSE surveillance flags: ${escHtml(flags.join(' · '))}">⚠ ${flags.length}</span>`;})()}${s._held?`<span style="font-size:12px;background:rgba(244,114,182,.15);color:#f472b6;border-radius:4px;padding:1px 5px;margin-left:5px;font-weight:700;vertical-align:middle" title="You already hold this. Held stocks stay in the ranking (v1070) and can be recommended again — buying here ADDS to the existing position.">📌 held</span>`:''}</div>${radarSurveillanceNames(s)}<div style="font-size:11px;color:var(--t3);max-width:180px;overflow:hidden;text-overflow:ellipsis" title="${escHtml((s.name||'')+(s.setup?' · '+s.setup:''))}">${radarSeriesBandPill(s)} ${escHtml(s.setup||s.name||'')}</div>`)}</td>`,
-      status:`<td data-key="status" style="white-space:nowrap;font-size:12px">${rowStatusPillHtml(s)}</td>`,
+        `<div style="font-weight:700;font-size:15px;color:var(--t1);max-width:280px;overflow:hidden;text-overflow:ellipsis">${escHtml(s.symbol)}${chartLinkButtons(s.symbol)}${(()=>{const bf=getBookFlag(s.symbol);if(!bf)return '';return `<span style="font-size:11px;background:rgba(245,158,11,.14);color:var(--amber);border-radius:4px;padding:1px 5px;margin-left:5px;font-weight:700;vertical-align:middle" title="Order book: ${escHtml(bf.text)}. Display only - it does not change the score unless the graded book weight says it should.">${bf.iceberg?'🧊':'⚑'}${bf.heavyCancel?' cx':''}</span>`;})()}${s._held?`<span style="font-size:12px;background:rgba(244,114,182,.15);color:#f472b6;border-radius:4px;padding:1px 5px;margin-left:5px;font-weight:700;vertical-align:middle" title="You already hold this. Held stocks stay in the ranking (v1070) and can be recommended again — buying here ADDS to the existing position.">📌 held</span>`:''}</div><div style="font-size:11px;color:var(--t3);max-width:180px;overflow:hidden;text-overflow:ellipsis" title="${escHtml((s.name||'')+(s.setup?' · '+s.setup:''))}">${radarSeriesBandPill(s)} ${escHtml(s.setup||s.name||'')}</div>`)}</td>`,
+      status:`<td data-key="status" class="recommendation-status">${rowStatusPillHtml(s)}</td>`,
       setup:`<td style="font-size:13px;color:var(--t2)">${escHtml(s.setup||'—')}${s.stage?' '+radarStagePill(s):''}${(s.modelTriggers||[]).length?' '+radarTriggerPill(s):''}</td>`,
       series:`<td>${radarSeriesBandPill(s)}</td>`,
       price:`<td data-key="price" style="white-space:nowrap">${livePriceAge(s.symbol)}${fmtINR(s.price)}<span style="color:var(--t3)"> · </span><span style="font-size:12px">${fPerf(s.day??s.priceChange)}${s.corpAction?`<span title="Corporate action (${escHtml(s.corpAction)}) — mechanical ex-date move, neutralised in scoring" style="font-size:11px;color:var(--amber);margin-left:4px;cursor:help">⚑</span>`:''}</span></td>`,
@@ -11811,15 +11825,7 @@ function renderTable(){
       // owner has ruled out. Both numbers survive, with their full tooltips.
       tgt:`<td style="font-weight:700" title="${escHtml((exitPolicy.viable?`${exitPolicy.targetSource}. You need ${exitPolicy.anchorPct?.toFixed(2)??'—'}% per trade to hold pace; this row offers ${exitPolicy.targetPct?.toFixed(2)??'—'}%${exitPolicy.belowMarketRead?` (market read is ${exitPolicy.marketAvailablePct?.toFixed(2)}%)`:''}${exitPolicy.positionFloorPct>exitPolicy.targetPct?` · CNC after-cost floor is ${exitPolicy.positionFloorPct.toFixed(2)}%`:''}${(exitPolicy.anchorPct>0&&exitPolicy.targetPct>0&&exitPolicy.targetPct<exitPolicy.anchorPct)?' — short of it':''}`:`${exitPolicy.viabilitySource||'Stock capacity'} ${exitPolicy.viabilityBasisPct?.toFixed(2)??'—'}% cannot clear the ${exitPolicy.minGrossPct?.toFixed(2)??'—'}% cost + net hurdle`)+' · '+exitPolicy.horizonNote+' '+exitPolicy.stopSource+(exitPolicy.rewardRisk!=null?` · reward:risk ${exitPolicy.rewardRisk.toFixed(2)}`+(exitPolicy.rewardRisk<1?' — BELOW 1.0: this stock risks more than it aims to make':''):''))}"><span style="color:${exitPolicy.viable?'var(--green)':'var(--red)'}">${exitPolicy.viable&&exitPolicy.targetPct!=null?'+'+exitPolicy.targetPct.toFixed(2)+'%':'—'}</span><span style="color:var(--t3)"> / </span><span style="color:var(--red)">−${exitPolicy.stopPct.toFixed(2)}%</span></td>`,
       alloc:`<td class="alloc-cell" data-sym="${s.symbol}">${(()=>{
-        if(!am){
-          if(canBuy && isSelected){
-            const allocCtx=getAllocationPassContext();
-            const railReason = getAllocationBlockReason(s, allocCtx);
-            if(railReason) return `<span style="color:var(--amber);font-size:11px;line-height:1.2;display:block" title="${escHtml(railReason)}">${escHtml(railReason)}</span>`;
-          }
-          return '<span style="color:var(--t3);font-size:13px">—</span>';
-        }
-        if(am.rejected || am.qty === 0) return `<span style="color:var(--amber);font-size:11px;line-height:1.2;display:block" title="${escHtml(am.reason||'Below 1 share')}">${escHtml(am.reason||'0 shares')}</span>`;
+        if(!am||am.rejected||!(am.qty>0)) return '<span style="color:var(--t3);font-size:13px">—</span>';
         return `<span style="color:var(--amber);font-weight:700;font-family:'DM Mono',monospace;font-size:14px">${fmtINR(am.alloc)}</span>${allocationSubline(am,unitLabel)}`;
       })()}</td>`,
       risk:`<td>${radarRiskPill(s.risk)}</td>`
@@ -13523,7 +13529,7 @@ function emptyBoardReason(){
   if(!bits.length) return 'Nothing is ranked yet \u2014 the live tape has not produced a current read.';
   const best=ALL.reduce((m,r)=>(r&&!r._held&&Number.isFinite(Number(r.score))&&Number(r.score)>m)?Number(r.score):m,0);
   const removedSummary=Object.entries(REMOVED_ROWS.reduce((m,r)=>{m[r.reason]=(m[r.reason]||0)+1;return m},{}))
-    .map(([k,v])=>k==='surv'?v+' surveillance':k==='trigger'?v+' evidence vetoes':k==='filter'?v+' user-filter matches':v+' '+k).join(' · ');
+    .map(([k,v])=>k==='surv'?v+' surveillance':k==='trigger'?v+' evidence vetoes':k==='filter'?v+' user-filter matches':k==='allocation'?v+' not allocatable':v+' '+k).join(' · ');
   return 'No rows match your filters: '+bits.join(' \u00b7 ')
     +'.<br><span style="font-size:12px">'+total.toLocaleString('en-IN')
     +' stocks are ranked and the best scores '+best.toFixed(1)
@@ -13734,6 +13740,21 @@ function applyFilters({preservePage=false}={}){
     return true;
   });
   rows.sort((a,b)=>(Number(b.score)||0)-(Number(a.score)||0));
+  const excludedByFilters=new Set(REMOVED_ROWS.map(r=>r.s.symbol));
+  const candidatePool=rows.filter(r=>!excludedByFilters.has(r.symbol));
+  const plan=planFundedRecommendations(candidatePool,getEffectiveCapital());
+  BASKET_ROW_REASONS=new Map();
+  REMOVED_ROWS.forEach(r=>{
+    if(r?.s?.symbol) BASKET_ROW_REASONS.set(r.s.symbol,r.detail||r.chip||r.reason);
+  });
+  plan.reasons.forEach((reason,sym)=>{
+    BASKET_ROW_REASONS.set(sym,reason);
+    ALLOC_BLOCKED++;
+    const s=ALL.find(x=>x.symbol===sym)||candidatePool.find(x=>x.symbol===sym);
+    if(s) REMOVED_ROWS.push({s,reason:'allocation',chip:reason,detail:reason});
+  });
+  if(!SHOW_INELIGIBLE) rows=rows.filter(r=>plan.funded.has(r.symbol));
+  SELECTED=plan.funded;
   FILT=rows;
   recordTableEntries(ALL);
   rows.forEach(r=>{
@@ -13744,23 +13765,6 @@ function applyFilters({preservePage=false}={}){
   applySort();
 
   CURRENT_TRADE_TIMING=getCurrentTradeTimingDecision();
-  // `rows` has already been ordered by applySort(); do not clone and sort the whole universe again.
-  const selectionRows=rows;
-  const newSelected=new Set();
-  for(const sym of SELECTED){
-    const s=rows.find(r=>r.symbol===sym);
-    if(s && isSelectableRecommendation(s) && !EXPORT_EXCLUDED.has(sym)){
-      newSelected.add(sym);
-    }
-  }
-  for(const s of selectionRows){
-    if(newSelected.size>=20) break;
-    if(isSelectableRecommendation(s) && !EXPORT_EXCLUDED.has(s.symbol)){
-      newSelected.add(s.symbol);
-    }
-  }
-  SELECTED=newSelected;
-
   PG=preservePage?Math.min(PG,Math.max(1,Math.ceil(FILT.length/PGSZ))):1;
   scheduleFilterPaint();if(!preservePage)saveFilterState();updateTabCounts();
   // Portfolio panels are secondary and can build several large tables. Keep them off the
