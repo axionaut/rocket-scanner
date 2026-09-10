@@ -62,7 +62,7 @@ body::before{content:'';position:fixed;inset:0;background:radial-gradient(ellips
 .m-card{background:var(--bg-card);border:1px solid var(--border);border-radius:10px;padding:18px 22px}
 .m-card h4{font-size:15px;font-weight:700;margin-bottom:8px;display:flex;align-items:center;gap:8px}
 .m-card p{font-size:14px;margin-bottom:0}
-/* Post-close is a dense audit surface, not prose pasted into generic cards. Its tables had no CSS
+/* Learning is a dense audit surface, not prose pasted into generic cards. Its tables had no CSS
    at all through v1218, so they collapsed to intrinsic width at the left of a 1900px card. */
 .pc-shell{padding:18px 0 44px;display:grid;gap:16px}
 .pc-card{padding:22px 24px;overflow:hidden}

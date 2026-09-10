@@ -1,5 +1,5 @@
-const BUILD_TS='2026-09-10 14:38 IST'; // release build time (IST)
-const APP_VERSION=1355;
+const BUILD_TS='2026-09-10 15:16 IST'; // release build time (IST)
+const APP_VERSION=1356;
 const RADAR_SCORE_VERSION='unified-evidence-v1';
 const TARGET_POLICY_VERSION='clock-stop-next-close-v1';
 function isValidChangeOpen(v){
@@ -3178,10 +3178,15 @@ const SCORE_SOURCES=[
   ['participation','Participation setup',0],['momentum','Momentum setup',0],['trend','Trend setup',0],
   ['structure','Price structure',0],['liquidity','Liquidity context',0],['volatility','Range context',0],['context','Market context',0],
   ['fundamental','Fundamental signal',0],['distance','Target versus capacity',0],['clock','Time through next close',0],
-  ['memoryOverhead',MEMORY_NAMES[0],0],['memorySpace',MEMORY_NAMES[1],0],['memoryAge',MEMORY_NAMES[2],0]
+  ['memoryOverhead',MEMORY_NAMES[0],0],['memorySpace',MEMORY_NAMES[1],0],['memoryAge',MEMORY_NAMES[2],0],
+  ['rule:above-vwap','Price at or above VWAP',0],['rule:green-day','Positive day move',0],
+  ['rule:above-open','Price above session open',0],['rule:bids-holding','Visible bids exceed visible offers',0],
+  ['rule:non-selling-flow','Completed tape is not net selling',0],['rule:pressure-converting','Tape pressure converts into price',0],
+  ['rule:range-not-consumed','Expected range is not consumed',0],['rule:entry-confirmed','Entry timing is confirmed',0]
 ];
 const SCORE_SEED=SCORE_SOURCES.map(x=>x[2]);
 const SCORE_GROUPS=['participation','momentum','trend','structure','liquidity','volatility','context'];
+const EXACT_SCORE_START=26;
 let _unifiedState=null,_unifiedStateSource=null,_scoreLearningAt=0,_scoreLearningBusy=false;
 function validScoreWeights(w){
   return Array.isArray(w)&&w.length===SCORE_SEED.length&&w.every((v,i)=>Number.isFinite(v)&&v>=(i<13?0.5:i>=23?0:-1)&&v<=(i<13?1.5:1));
@@ -3194,6 +3199,10 @@ function getUnifiedModelState(){
     raw.live.push(0,0,0);
     if(raw.candidate?.weights?.length===23) raw.candidate.weights.push(0,0,0);
   }
+  if(raw?.schema===RADAR_SCORE_VERSION&&Array.isArray(raw.live)&&raw.live.length===EXACT_SCORE_START){
+    raw.live.push(...Array(SCORE_SEED.length-EXACT_SCORE_START).fill(0));
+    if(raw.candidate?.weights?.length===EXACT_SCORE_START) raw.candidate.weights.push(...Array(SCORE_SEED.length-EXACT_SCORE_START).fill(0));
+  }
   const good=raw?.schema===RADAR_SCORE_VERSION&&validScoreWeights(raw.live);
   const state=good?raw:{schema:RADAR_SCORE_VERSION,live:SCORE_SEED.slice(),revision:0,records:[],history:[],
     legacyDepth:getCalibratedWeights(),
@@ -3202,6 +3211,7 @@ function getUnifiedModelState(){
     status:'Collecting forward outcomes',updatedAt:0};
   if(!Array.isArray(state.records)) state.records=[];
   if(!Array.isArray(state.history)) state.history=[];
+  if(!Array.isArray(state.exactRules)) state.exactRules=[];
   if(state.candidate&&!validScoreWeights(state.candidate.weights)) state.candidate=null;
   _unifiedStateSource=raw;_unifiedState=state;return state;
 }
@@ -3244,7 +3254,7 @@ function getUnifiedScoreDetail(c){
     ${c.block?'Rule: '+escHtml(c.block)+'. ':''}Buy volume must exceed sell volume when depth is available; learning cannot override this rule.
     <details><summary>Signal weights and current readings</summary><div class="pc-table-wrap"><table class="pc-table"><thead><tr><th>Source</th><th>Reading</th><th>Weight factor</th><th>Change from initial</th></tr></thead><tbody>${rows}</tbody></table></div>
     Existing sources start at 1x. Additional setup/context adjustments start at zero and need forward validation. Weight factors are not score points.</details>
-    ${c.unified.memory?.ok?`<p><b>Historical structure:</b> weighted overhead participation ${(100*c.unified.memory.wosd).toFixed(1)}%; open space ${c.unified.memory.up.toFixed(2)} ATR above / ${c.unified.memory.down.toFixed(2)} ATR below; recent overhead difference ${(100*c.unified.memory.rmd).toFixed(1)} percentage points. Uses 13 preceding sessions and a fixed +2.6% research corridor. Historical trading is a proxy, not known sell orders. ${weights.slice(23).some(v=>v>0)?'Qualified weights contribute to this score.':'Observation only; zero score influence.'}</p>`:
+    ${c.unified.memory?.ok?`<p><b>Historical structure:</b> weighted overhead participation ${(100*c.unified.memory.wosd).toFixed(1)}%; open space ${c.unified.memory.up.toFixed(2)} ATR above / ${c.unified.memory.down.toFixed(2)} ATR below; recent overhead difference ${(100*c.unified.memory.rmd).toFixed(1)} percentage points. Uses 13 preceding sessions and a fixed +2.6% research corridor. Historical trading is a proxy, not known sell orders. ${weights.slice(23,EXACT_SCORE_START).some(v=>v>0)?'Qualified weights contribute to this score.':'Observation only; zero score influence.'}</p>`:
       `<p><b>Historical structure:</b> ${escHtml(c.unified.memory?.reason||'Not yet observed')}. No score adjustment for missing history.</p>`}</div>`;
 }
 function renderMemoryStudy(state){
@@ -3262,6 +3272,129 @@ function renderMemoryStudy(state){
     <div class="pc-table-wrap"><table class="pc-table"><thead><tr><th>Historical input</th><th>Live factor</th><th>Status</th><th>Completed study</th></tr></thead><tbody>${rows}</tbody></table></div>
     <p class="pc-copy">A qualified feature only earns weight testing. A candidate using it then needs 30 later sessions with better positive net outcomes, and must also beat the same candidate with Market Memory switched off. Existing buy/sell, direction and risk rules remain binding.</p>
     <details><summary>What this study measures</summary><p class="pc-copy">Prospective study ${MEMORY_SPEC.id}; separate from the historical v1339 archive experiment. Frozen symbol cohort; fixed +2.6% target before the existing stop through next trading close. Each feature is tested independently with equal date weighting, ATR/day-move/13-session-displacement/current-score controls, a conservative family threshold t &gt;= 3, at least 1.30x top-decile hit rate and 7/9 ordered steps. Age additionally needs a 200-permutation placebo p &lt;= .05. No probability, ownership or causal psychology claim. The eventual candidate is checked against actual dynamic trade targets and costs.</p></details></section>`;
+}
+const EXACT_SCORE_RULES=[
+  {key:'above-vwap',cat:'Direction',label:'Price at or above VWAP',source:'VWAP rule',adjustable:true,
+    read:r=>Number(r?.vwap)>0&&Number(r?.price)>0?Number(r.price)>=Number(r.vwap):null},
+  {key:'green-day',cat:'Direction',label:'Positive day move',source:'Direction rule',adjustable:true,
+    read:r=>Number.isFinite(Number(r?.day))?Number(r.day)>0:null},
+  {key:'above-open',cat:'Direction',label:'Price above session open',source:'Direction rule',adjustable:true,
+    read:r=>isValidChangeOpen(r?.changeOpen)?Number(r.changeOpen)>0:null},
+  {key:'bids-holding',cat:'Depth & Tape',label:'Visible bids exceed visible offers',source:'Depth rule',adjustable:true,
+    read:r=>{const d=getTotalDepth(r?.symbol);return d&&(d.buyQty>0||d.sellQty>0)?d.buyQty>d.sellQty:null;}},
+  {key:'non-selling-flow',cat:'Depth & Tape',label:'Completed tape is not net selling',source:'Flow rule',adjustable:true,
+    read:r=>{const t=r?.intraday?.current?r.intraday.todayTraj:null;return Number.isFinite(Number(t?.cvdPct))?Number(t.cvdPct)>=0:null;}},
+  {key:'pressure-converting',cat:'Depth & Tape',label:'Tape pressure converts into price',source:'Crossover rule',adjustable:true,
+    read:r=>{const t=r?.intraday?.current?r.intraday.todayTraj:null;return t?.pressureConverting===true?true:t?.pressureConverting===false?false:null;}},
+  {key:'range-not-consumed',cat:'Entry Timing',label:'Expected range is not consumed',source:'Timing rule',adjustable:true,
+    read:r=>Number.isFinite(Number(r?.entryTiming?.rangeUsed))?Number(r.entryTiming.rangeUsed)<75:null},
+  {key:'entry-confirmed',cat:'Entry Timing',label:'Entry timing is confirmed',source:'Timing rule',adjustable:true,
+    read:r=>r?.entryReady===true?true:r?.entryReady===false?false:null},
+  {key:'eq-and-band',cat:'Exchange & Safety',label:'EQ series and eligible price band',source:'Protected execution rule',adjustable:false,
+    read:r=>r?.basketEligible===true?true:r?.basketEligible===false?false:null},
+  {key:'listing-history',cat:'Exchange & Safety',label:'Sufficient listing history',source:'Protected data rule',adjustable:false,
+    read:r=>r?.noHistory===true?false:r?.noHistory===false?true:null},
+  {key:'fresh-tape',cat:'Exchange & Safety',label:'Fresh usable completed tape',source:'Protected data rule',adjustable:false,
+    read:r=>{try{return getRecommendationFreshness(r?.symbol).ok;}catch(e){return null;}}},
+  {key:'surveillance-clear',cat:'Exchange & Safety',label:'No configured surveillance veto',source:'Protected regulatory rule',adjustable:false,
+    read:r=>r?.symbol?!(NSE_SURV[r.symbol]?.length):null}
+];
+function readExactScoreRules(row){
+  const out={};
+  EXACT_SCORE_RULES.forEach(rule=>{try{const value=rule.read(row);out[rule.key]=typeof value==='boolean'?value:null;}catch(e){out[rule.key]=null;}});
+  return out;
+}
+function exactRuleContext(ruleStates){
+  return EXACT_SCORE_RULES.filter(rule=>rule.adjustable).map(rule=>ruleStates?.[rule.key]===true?1:ruleStates?.[rule.key]===false?0:null);
+}
+function exactRuleStats(records,rule){
+  const days={};
+  records.forEach(record=>{
+    const state=record.ruleStates?.[rule.key];
+    if(typeof state!=='boolean'||!usableScoreOutcome(record)) return;
+    (days[record.issueDate]??=[]).push(record);
+  });
+  const edges=[];let passN=0,failN=0,passHits=0,failHits=0;
+  Object.values(days).forEach(rows=>{
+    const pass=rows.filter(row=>row.ruleStates[rule.key]===true);
+    const fail=rows.filter(row=>row.ruleStates[rule.key]===false);
+    passN+=pass.length;failN+=fail.length;
+    passHits+=pass.reduce((n,row)=>n+scoreOutcomeTarget(row),0);
+    failHits+=fail.reduce((n,row)=>n+scoreOutcomeTarget(row),0);
+    if(pass.length&&fail.length) edges.push(pass.reduce((n,row)=>n+scoreOutcomeTarget(row),0)/pass.length
+      -fail.reduce((n,row)=>n+scoreOutcomeTarget(row),0)/fail.length);
+  });
+  const sessions=edges.length,edge=sessions?meanArr(edges):null;
+  const sd=sessions>1?Math.sqrt(edges.reduce((n,value)=>n+(value-edge)*(value-edge),0)/(sessions-1)):0;
+  const t=sessions>1&&sd>0?edge/(sd/Math.sqrt(sessions)):0;
+  const agreement=sessions&&edge!==0?100*edges.filter(value=>Math.sign(value)===Math.sign(edge)).length/sessions:0;
+  return {sessions,passN,failN,passHits,failHits,edge:edge==null?null:+(100*edge).toFixed(1),t:+t.toFixed(2),agreement:+agreement.toFixed(0)};
+}
+function buildExactRuleScorecard(records){
+  const tCrit=familyTCrit(EXACT_SCORE_RULES.filter(rule=>rule.adjustable).length);
+  return EXACT_SCORE_RULES.map(rule=>{
+    const stats=exactRuleStats(records,rule);
+    let status=rule.adjustable?'COLLECTING':'PROTECTED',why='';
+    if(rule.adjustable&&stats.sessions>=3&&stats.agreement>=70&&stats.t>=tCrit&&stats.edge>0) status='ELIGIBLE';
+    else if(rule.adjustable&&stats.sessions>=3&&stats.agreement>=70&&stats.t<=-tCrit&&stats.edge<0) status='CONTRADICTED';
+    else if(rule.adjustable&&stats.sessions<3) why='needs '+(3-stats.sessions)+' more paired session'+(3-stats.sessions===2?'':'s');
+    else if(rule.adjustable&&stats.agreement<70) why='sign agreement '+stats.agreement+'% of 70% required';
+    else if(rule.adjustable) why='|t| '+Math.abs(stats.t).toFixed(2)+' of '+tCrit+' required';
+    return {...stats,key:rule.key,cat:rule.cat,label:rule.label,source:rule.source,adjustable:rule.adjustable,status,why,tCrit};
+  });
+}
+function exactRuleWeightAllowed(state,index){
+  const rule=EXACT_SCORE_RULES.filter(item=>item.adjustable)[index-EXACT_SCORE_START];
+  return !!rule&&state?.exactRules?.some(score=>score.key===rule.key&&score.status==='ELIGIBLE');
+}
+function statusReasonCode(reason){
+  const text=String(reason||'').trim(),s=text.toLowerCase();
+  if(!text) return 'actionable';
+  if(s.startsWith('score ')||s.includes('score scale')) return 'score-bar';
+  if(s.includes('target')&&(s.includes('cost')||s.includes('hurdle')||s.includes('gain'))) return 'target-cost';
+  if(s.includes('allocation rail')||s.includes('one share')||s.includes('remaining budget')||s.includes('capital exhausted')||s.includes('funded basket')||s.includes('affordable whole-share')) return 'allocation';
+  if(s.includes('set capital')) return 'capital-missing';
+  if(s.includes('excluded from basket')) return 'user-excluded';
+  if(s.includes('surveillance')) return 'surveillance';
+  if(s.includes('vwap')) return 'below-vwap';
+  if(s.includes('red day')) return 'red-day';
+  if(s.includes('below open')) return 'below-open';
+  if(s.includes('sell volume exceeds')) return 'sell-volume';
+  if(s.includes('being sold')||s.includes('net flow')) return 'selling-flow';
+  if(s.includes('pressure is not converting')||s.includes('tape selling')) return 'pressure-mismatch';
+  if(s.includes('peak')||s.includes('range consumed')||s.includes('extended')) return 'range-consumed';
+  if(s.includes('pullback')||s.includes('confirmation')) return 'entry-confirmation';
+  if(s.includes('series')||s.includes('price band')||s.includes('basket-eligible')) return 'exchange-eligibility';
+  if(s.includes('history')||s.includes('listed too recently')) return 'listing-history';
+  if(s.includes('stale')||s.includes('tape')||s.includes('live prices')||s.includes('helper')) return 'data-freshness';
+  if(s.includes('turnover')||s.includes('market-impact')) return 'liquidity';
+  if(s.includes('trigger')) return 'evidence-trigger';
+  return 'other:'+s.replace(/[-+]?\d[\d,.]*(?:%|x|rs|₹)?/g,'#').replace(/\s+/g,' ').slice(0,80);
+}
+function statusReasonCodes(reason){
+  const text=String(reason||''),s=text.toLowerCase(),codes=[];
+  if(s.includes('vwap')) codes.push('below-vwap');
+  if(s.includes('red day')) codes.push('red-day');
+  if(s.includes('below open')) codes.push('below-open');
+  if(s.includes('sell volume exceeds')) codes.push('sell-volume');
+  if(s.includes('being sold')||s.includes('net flow')) codes.push('selling-flow');
+  if(s.includes('pressure is not converting')||s.includes('tape selling')) codes.push('pressure-mismatch');
+  if(s.includes('peak')||s.includes('range consumed')||s.includes('extended')) codes.push('range-consumed');
+  if(s.includes('pullback')||s.includes('wait for confirmation')) codes.push('entry-confirmation');
+  return codes.length?[...new Set(codes)]:[statusReasonCode(text)];
+}
+function getStatusAuditReason(row){
+  const surveillance=NSE_SURV[row?.symbol]||[];
+  if(surveillance.length){
+    const text='Surveillance: '+surveillance.join(' · ');
+    const codes=surveillance.map(rule=>'surveillance:'+String(rule).trim());
+    return {code:codes[0],codes,text};
+  }
+  const fundedReason=BASKET_ROW_REASONS.get(row?.symbol);
+  if(fundedReason){const codes=statusReasonCodes(fundedReason);return {code:codes[0],codes,text:fundedReason};}
+  const action=getRowActionState(row);
+  const codes=action.state==='GO'?['actionable']:statusReasonCodes(action.reason);
+  return {code:codes[0],codes,text:action.reason||action.state};
 }
 function scoreLearningBand(p){
   if(p.block) return 'Blocked by rules';
@@ -3293,14 +3426,16 @@ async function fitScoreWeights(records,live){
     for(const p of data){
       const y=scoreOutcomeTarget(p),pred=computeUnifiedEvidence(p.input,w).raw/100;
       for(let i=0;i<w.length;i++){
-        if(i>=23&&!memoryFeatureAllowed(getUnifiedModelState(),i-23)) continue;
+        if(i>=EXACT_SCORE_START&&!exactRuleWeightAllowed(getUnifiedModelState(),i)) continue;
+        if(i>=23&&i<EXACT_SCORE_START&&!memoryFeatureAllowed(getUnifiedModelState(),i-23)) continue;
         const trial=w.slice(),step=w[i]+0.01<=(i<13?1.5:1)?0.01:-0.01;trial[i]+=step;
         const derivative=(computeUnifiedEvidence(p.input,trial).raw/100-pred)/step;
         grads[i]+=2*(pred-y)*derivative/counts[p.issueDate]/nDays;
       }
       if(++processed%20===0) await new Promise(resolve=>setTimeout(resolve,0));
     }
-    w=w.map((v,i)=>i>=23&&!memoryFeatureAllowed(getUnifiedModelState(),i-23)?0:
+    w=w.map((v,i)=>i>=EXACT_SCORE_START&&!exactRuleWeightAllowed(getUnifiedModelState(),i)?0:
+      i>=23&&i<EXACT_SCORE_START&&!memoryFeatureAllowed(getUnifiedModelState(),i-23)?0:
       +Math.max(i<13?0.5:i>=23?0:-1,Math.min(i<13?1.5:1,v-0.8*(grads[i]+0.02*(v-SCORE_SEED[i])))).toFixed(5));
   }
   return w;
@@ -3324,7 +3459,7 @@ function evaluateScoreCandidate(records,candidate){
   }
   const mean=a=>a.length?a.reduce((n,v)=>n+v,0)/a.length:null;
   const net=scoreSessionMeans(trades,p=>p.net),netLift=scoreSessionMeans(trades,p=>p.netLift),hitLift=scoreSessionMeans(trades,p=>p.hitLift);
-  const usesMemory=candidate.weights.slice(23).some(v=>v>0);
+  const usesMemory=candidate.weights.slice(23,EXACT_SCORE_START).some(v=>v>0);
   const memoryError=usesMemory?scoreSessionMeans(val,p=>Number.isFinite(p.withoutMemoryPrediction)
     ?(p.withoutMemoryPrediction-scoreOutcomeTarget(p))**2-(p.candidatePrediction-scoreOutcomeTarget(p))**2:null):[];
   const memoryTrades=[];
@@ -3398,9 +3533,11 @@ async function updateScoreLearning(){
             const qty=Math.max(1,Math.floor(frictionSizeBasis()/r.price)),fr=getTradeFrictionPct(r,qty*r.price);
             const input=JSON.parse(JSON.stringify(c.unified)),live=computeUnifiedEvidence(input,state.live);
             const trial=state.candidate?computeUnifiedEvidence(input,state.candidate.weights):null;
-            const withoutMemory=state.candidate?computeUnifiedEvidence(input,state.candidate.weights.map((v,i)=>i>=23?0:v)):null;
+            const withoutMemory=state.candidate?computeUnifiedEvidence(input,state.candidate.weights.map((v,i)=>i>=23&&i<EXACT_SCORE_START?0:v)):null;
+            const statusReason=getStatusAuditReason(r),ruleStates=readExactScoreRules(r);
             const observation={symbol:r.symbol,issueDate:today,issuedAt:captureAt,bucket,score:r.score,signalScore:c.signalScore,
               block:c.block||null,minScore:RECOMMEND_MIN_SCORE,input,modelRevision:state.revision,livePrediction:live.raw/100,liveDecision:live.total,
+              statusCode:statusReason.code,statusCodes:statusReason.codes,statusReason:statusReason.text,ruleStates,
               candidateId:trial?state.candidate.id:null,candidatePrediction:trial?trial.raw/100:null,candidateDecision:trial?trial.total:null,
               withoutMemoryPrediction:withoutMemory?withoutMemory.raw/100:null,withoutMemoryDecision:withoutMemory?withoutMemory.total:null,
               entryPrice:r.price,targetPct:policy.targetPct,stopPct:policy.stopPct,auditQty:qty,orderType:'MARKET',
@@ -3425,6 +3562,9 @@ async function updateScoreLearning(){
       }
     }
     const mature=state.records.filter(p=>p.targetPolicy===TARGET_POLICY_VERSION&&matureScoreOutcome(p,today));
+    state.exactRules=buildExactRuleScorecard(mature);
+    state.live=state.live.map((weight,index)=>index>=EXACT_SCORE_START&&!exactRuleWeightAllowed(state,index)?0:weight);
+    if(state.candidate) state.candidate.weights=state.candidate.weights.map((weight,index)=>index>=EXACT_SCORE_START&&!exactRuleWeightAllowed(state,index)?0:weight);
     if(!study.results&&study.dates.length===MEMORY_SPEC.dates){
       const last=study.dates.at(-1),gap=tradingDaysBetween(last,today);
       if(gap>1||(gap===1&&istClock().mins>=EQUITY_CLOSE_MIN)){
@@ -4329,15 +4469,17 @@ function radarScoreComponents(r,tapeStanding){
   }
   const bw=tev.bookWeights||{};
   const memory=getMemoryReading(r);
+  const ruleStates=readExactScoreRules(r);
   const input={memory,bookDelta:tev.bookDelta||null,deltaWeight:tev.bookWeights?.delta||0,parts:['flow','vwap','cross','size','impact','book','split','spoof'].map(k=>tev.parts[k]??0.5),
     base:[0.10,0.05,0.10,0.75,tev.impactWeight||0,bw.book||0,bw.split||0,bw.spoof||0],
     predictor,trigger,depth,velocity,fade,ceiling,permission:perm.p||0,risk,
     context:SCORE_GROUPS.map(k=>Number.isFinite(r.scorePriors?.[k])?r.scorePriors[k]:null).concat([
       Number.isFinite(r.fundamentalTrigger)?0.5+0.5*clamp01(r.fundamentalTrigger,-1,1):null,
       Number.isFinite(r.stretch)&&r.stretch>=0?1/(1+r.stretch):null,
-      isEquitySession(Date.now())?(375+Math.max(0,EQUITY_CLOSE_MIN-istClock().mins))/750:null],
-      memory.ok?memory.values:[null,null,null])};
-  const calc=computeUnifiedEvidence(input,state.live);
+        isEquitySession(Date.now())?(375+Math.max(0,EQUITY_CLOSE_MIN-istClock().mins))/750:null],
+        memory.ok?memory.values:[null,null,null],exactRuleContext(ruleStates))};
+      const effectiveWeights=state.live.map((weight,index)=>index>=EXACT_SCORE_START&&!exactRuleWeightAllowed(state,index)?0:weight);
+      const calc=computeUnifiedEvidence(input,effectiveWeights);
   const out={total:calc.total,signalScore:calc.raw,unified:input,modelRevision:state.revision,
     evidence:calc.evidence,permission:input.permission,riskFactor:risk,tapeBars:tev.bars,
     flow:100*tev.parts.flow,vwapPos:100*tev.parts.vwap,crossover:100*tev.parts.cross,participation:100*tev.parts.size,
@@ -8054,7 +8196,7 @@ function renderStats(){
     }catch(e){}
   })();
   if(SUPPRESSED_HELD>0)filterPills.push(`<span class="info-pill pill-rose" title="Stocks you already hold (Holdings + Positions + today's net Orders buys). Since v1070 these stay in the ranking and can be recommended again — the badge is a duplicate-buy warning, not a filter.">📌 ${SUPPRESSED_HELD} already held</span>`);
-  if(PEAK_TIMING_REMOVED>0)filterPills.push(`<span class="info-pill pill-amber" title="Automatic trigger input: these stocks fail the entry-timing condition. They remain eligible while the condition is collecting; if its forward precision arms in Post-close, failures are removed automatically.">⚡ ${PEAK_TIMING_REMOVED} timing-trigger misses</span>`);
+  if(PEAK_TIMING_REMOVED>0)filterPills.push(`<span class="info-pill pill-amber" title="Automatic trigger input: these stocks fail the entry-timing condition. Learning measures the exact rule continuously; only qualified and later-validated influence can change the score.">⚡ ${PEAK_TIMING_REMOVED} timing-trigger misses</span>`);
   const inelig=ALL.filter(s=>s.basketEligible===false).length;
   if(inelig>0)filterPills.push(`<span class="info-pill pill-orange" title="Non-EQ series, inactive status, or a price band below 10% — visible in the ranking with penalties, but never exported to the basket.">⚠ ${inelig} basket-ineligible (ranked with penalties)</span>`);
 
@@ -9451,7 +9593,7 @@ function renderPerformance(){
         <div title="For the current score version only: on the SAME issue session, did a target-hitter have a higher Decision Score than a non-winner? 50% means the score ordering carries no information."><div class="st-l">Score concordance</div><div class="st-v" style="font-size:19px;color:${sc.concordancePct==null?'var(--t3)':sc.concordancePct>=60?'var(--green)':sc.concordancePct>=52?'var(--amber)':'var(--red)'}">${sc.concordancePct==null?'—':sc.concordancePct+'%'}</div><div class="st-d">${sc.concordancePairs} current-version winner/loser pairs · 50% = no information</div></div>
         <div><div class="st-l">Time to target</div><div class="st-v" style="font-size:19px">${sc.medDaysToTarget==null?'—':(sc.medDaysToTarget===0?'same day':sc.medDaysToTarget+'d')}</div><div class="st-d">${sc.sameDay} same day · ${sc.nextDay} next day</div></div>
       </div>`
-    : `<div style="padding:16px;color:var(--t2);font-size:13px">No cohort has resolved yet. A pick resolves once the post-close universe closes its issue day and the following session's bar is read.</div>`;
+    : `<div style="padding:16px;color:var(--t2);font-size:13px">No cohort has resolved yet. A pick resolves after its issue session and following-session deadline are complete.</div>`;
   const bandRows=sc.bands.filter(b=>b.n>0).map(b=>
     `<tr><td style="padding:4px 10px">${b.label}</td>`
     +`<td style="padding:4px 10px;text-align:right">${b.n}</td>`
@@ -9973,7 +10115,7 @@ function _renderMethodologyInner(){
     <h3 style="margin-top:28px">Live Recommendation Funnel</h3>
     <p style="color:var(--t2);font-size:14.5px;line-height:1.7">The entry objective is to reach the stock's target before its stop, from the current entry price through the next trading close. Technical readiness, direction, exchange eligibility, surveillance, entry timing and current tape are included in the final score: a failing row is capped below <strong>Min Score ${RECOMMEND_MIN_SCORE}</strong>. During an open market with fresh data, above-bar rows in your filtered list are eligible; the basket selects up to 20 and respects manual exclusions. Capital, whole shares, costs and risk rails determine which selected rows can be funded. Historical remaining-session upside and recent 30-minute range are context, not next-day rejection rules. Scores and targets remain unvalidated forecasts, not probabilities or guaranteed returns.</p>
     <h3 id="meth-ledger" style="margin-top:28px">Feature Ledger <span style="font-size:14px;color:var(--t3);font-weight:400">(${RADAR.features.length||0} setup features from ${RADAR.headers.length||0} input columns)</span></h3>
-    <p style="color:var(--t2);line-height:1.7">These are input-file and setup diagnostics. Setup weights are not the live adaptive scoring factors; see Post-close for those. Grouped prior readings feed the adaptive model, while some setup components also inform fixed risk checks. Input coverage describes this file only, not live-tape availability. The same-day rank gap is descriptive and never supplies a scoring effect.</p>
+    <p style="color:var(--t2);line-height:1.7">These are input-file and setup diagnostics. Setup weights are not the live adaptive scoring factors; see Learning for those. Grouped prior readings feed the adaptive model, while some setup components also inform fixed risk checks. Input coverage describes this file only, not live-tape availability. The same-day rank gap is descriptive and never supplies a scoring effect.</p>
     ${buildRadarLedgerHTML()}
     ${buildIndicatorWatchHTML()}
     <div id="meth-hf-wrap">${hardFiltersHTML}</div>
@@ -13986,35 +14128,36 @@ function humanizeSurvRule(key){
   return key.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
 }
 
-const SCORE_AUDIT_CATEGORIES = [
-  { id: 'cat_dir', color: 'var(--cyan)', label: 'Direction Gate', test: p => { const s = (p.block||'').toLowerCase(); return s.includes('not lifting off') || s.includes('vwap') || s.includes('red day') || s.includes('below open'); } },
-  { id: 'cat_depth', color: 'var(--amber)', label: 'Depth & Order Book Pressure', test: p => { const s = (p.block||'').toLowerCase(); return s.includes('holding it up') || s.includes('being sold') || s.includes('net flow') || s.includes('tape') || s.includes('sell volume') || s.includes('pressure is not converting'); } },
-  { id: 'cat_timing', color: 'var(--purple)', label: 'Entry Timing Gate', test: p => { const s = (p.block||'').toLowerCase(); return s.includes('peak') || s.includes('range consumed') || s.includes('extended') || s.includes('pullback') || s.includes('wait for confirmation'); } },
-  { id: 'cat_surv', color: 'var(--red)', label: 'Exchange Surveillance & Regulatory', test: p => { const s = (p.block||'').toLowerCase(); return s.includes('surveillance') || s.includes('encumbered') || s.includes('pledge') || s.includes('pan_traded') || s.includes('loss_making') || s.includes('asm') || s.includes('gsm') || s.includes('esm'); } },
-  { id: 'cat_struct', color: 'var(--t3)', label: 'Structural & Liquidity Limits', test: p => { const s = (p.block||'').toLowerCase(); return s.includes('band') || s.includes('series') || s.includes('history') || s.includes('recently') || s.includes('stale') || s.includes('no usable current tape'); } },
-  { id: 'cat_trig', color: 'var(--green)', label: 'Evidence Triggers', test: p => { const s = (p.block||'').toLowerCase(); return s.includes('trigger'); } }
-];
-
-const SCORE_AUDIT_RULES = [
-  // Direction Gate
-  { cat: 'cat_dir', label: 'Below VWAP', test: p => (p.block||'').toLowerCase().includes('vwap') },
-  { cat: 'cat_dir', label: 'Red day', test: p => (p.block||'').toLowerCase().includes('red day') },
-  { cat: 'cat_dir', label: 'Below open', test: p => (p.block||'').toLowerCase().includes('below open') },
-  // Depth & Tape Flow
-  { cat: 'cat_depth', label: 'Bids not holding / Depth ratio', test: p => (p.block||'').toLowerCase().includes('holding it up') },
-  { cat: 'cat_depth', label: 'Net intraday selling flow', test: p => (p.block||'').toLowerCase().includes('being sold') || (p.block||'').toLowerCase().includes('net flow') },
-  { cat: 'cat_depth', label: 'Tape selling / Flow mismatch', test: p => { const s = (p.block||'').toLowerCase(); return s.includes('tape is selling') || s.includes('tape selling') || s.includes('pressure is not converting'); } },
-  { cat: 'cat_depth', label: 'Sell volume exceeds buy volume', test: p => (p.block||'').toLowerCase().includes('sell volume exceeds') },
-  // Entry Timing
-  { cat: 'cat_timing', label: 'Upper-quarter peak (range consumed)', test: p => { const s = (p.block||'').toLowerCase(); return s.includes('peak') || s.includes('range consumed') || s.includes('extended'); } },
-  { cat: 'cat_timing', label: 'Pullback confirmation required', test: p => { const s = (p.block||'').toLowerCase(); return s.includes('pullback') || s.includes('wait for confirmation'); } },
-  // Structural & Liquidity Limits
-  { cat: 'cat_struct', label: 'Non-EQ series or price band < 10%', test: p => { const s = (p.block||'').toLowerCase(); return s.includes('band') || s.includes('series'); } },
-  { cat: 'cat_struct', label: 'Insufficient listing history (<30d)', test: p => { const s = (p.block||'').toLowerCase(); return s.includes('history') || s.includes('recently'); } },
-  { cat: 'cat_struct', label: 'Stale feed / No usable current tape', test: p => { const s = (p.block||'').toLowerCase(); return s.includes('no usable current tape') || s.includes('stale'); } },
-  // Evidence Triggers
-  { cat: 'cat_trig', label: 'Evidence trigger veto', test: p => (p.block||'').toLowerCase().includes('trigger') }
-];
+const STATUS_AUDIT_LABELS={
+  'score-bar':'Decision Score below Min Score','target-cost':'Target does not cover costs','allocation':'Allocation or whole-share rail',
+  'capital-missing':'Capital unavailable','user-excluded':'Excluded from basket by user','below-vwap':'Below VWAP','red-day':'Red day',
+  'below-open':'Below session open','sell-volume':'Sell volume exceeds buy volume','selling-flow':'Net intraday selling flow',
+  'pressure-mismatch':'Tape pressure is not converting','range-consumed':'Upper-quarter peak / range consumed',
+  'entry-confirmation':'Pullback confirmation required','exchange-eligibility':'Non-EQ series or price band',
+  'listing-history':'Insufficient listing history','data-freshness':'Stale feed / no usable current tape',
+  'liquidity':'Turnover or market-impact safety','evidence-trigger':'Evidence trigger veto'
+};
+function auditStatusCodes(record){
+  if(Array.isArray(record?.statusCodes)&&record.statusCodes.length) return record.statusCodes;
+  if(record?.statusCode) return [record.statusCode];
+  return statusReasonCodes(record?.statusReason||record?.block||'');
+}
+function auditStatusLabel(code){
+  if(code.startsWith('surveillance:')) return humanizeSurvRule(code.slice('surveillance:'.length));
+  if(code.startsWith('other:')) return 'Other: '+code.slice(6);
+  return STATUS_AUDIT_LABELS[code]||code.replace(/-/g,' ').replace(/\b\w/g,c=>c.toUpperCase());
+}
+function auditStatusCategory(code){
+  if(['below-vwap','red-day','below-open'].includes(code)) return 'Direction';
+  if(['sell-volume','selling-flow','pressure-mismatch'].includes(code)) return 'Depth & Tape';
+  if(['range-consumed','entry-confirmation'].includes(code)) return 'Entry Timing';
+  if(code.startsWith('surveillance:')) return 'Surveillance';
+  if(['exchange-eligibility','listing-history','data-freshness','liquidity'].includes(code)) return 'Exchange & Safety';
+  if(['target-cost','allocation','capital-missing','user-excluded'].includes(code)) return 'Allocation & Economics';
+  if(code==='score-bar') return 'Score Policy';
+  if(code==='evidence-trigger') return 'Evidence Triggers';
+  return 'Other';
+}
 
 let SCORE_AUDIT_DAY='';
 let SCORE_AUDIT_EXPAND_RULES=true;
@@ -14029,7 +14172,7 @@ function renderPostClose(){
   const days=[...new Set([today,...state.records.map(p=>p.issueDate)])].sort().reverse();
   const day=days.includes(SCORE_AUDIT_DAY)?SCORE_AUDIT_DAY:today;
   const records=state.records.filter(p=>p.issueDate===day),resolved=records.filter(usableScoreOutcome);
-  const blocked=records.filter(p=>p.block).length,incomplete=records.filter(p=>p.paperComplete&&!usableScoreOutcome(p)).length;
+  const blocked=records.filter(p=>auditStatusCodes(p).some(code=>code!=='actionable')).length,incomplete=records.filter(p=>p.paperComplete&&!usableScoreOutcome(p)).length;
   const pending=records.filter(p=>!p.paperComplete).length;
   const pct=(v,n)=>n?(100*v/n).toFixed(1)+'%':'Waiting';
   const mean=a=>a.length?a.reduce((n,v)=>n+v,0)/a.length:null;
@@ -14051,77 +14194,59 @@ function renderPostClose(){
     return formatAuditRow(label, all);
   }).join('');
 
-  const blockedList=records.filter(p=>p.block);
+  const blockedList=records.filter(p=>auditStatusCodes(p).some(code=>code!=='actionable'));
   const toggleBtn=`<button type="button" class="sb-clear" style="padding:1px 7px;margin-left:8px;font-size:11px;cursor:pointer;border-radius:4px" onclick="toggleScoreAuditRules()">${SCORE_AUDIT_EXPAND_RULES?'▲ Collapse rules':'▼ Show all rules'}</button>`;
   const blockedTotalRow=formatAuditRow(`<b>Blocked by rules (Total)</b>${toggleBtn}`, blockedList, 'pc-cat-row');
 
   let ruleBreakdownHtml='';
-  if(SCORE_AUDIT_EXPAND_RULES && blockedList.length>0){
+  if(SCORE_AUDIT_EXPAND_RULES){
+    const codes=new Set(blockedList.flatMap(auditStatusCodes).filter(code=>code!=='actionable'));
+    if(day===today) ALL.forEach(row=>getStatusAuditReason(row).codes.filter(code=>code!=='actionable').forEach(code=>codes.add(code)));
+    const categories=[...new Set([...codes].map(auditStatusCategory))];
     const rows=[];
-    SCORE_AUDIT_CATEGORIES.forEach(cat=>{
-      const catList=blockedList.filter(cat.test);
-      if(catList.length>0){
-        const catBadge=`<span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:${cat.color};margin-right:6px;vertical-align:middle"></span><b>${escHtml(cat.label)}</b>`;
-        rows.push(formatAuditRow(catBadge, catList, 'pc-cat-row', 16));
-        if(cat.id==='cat_surv'){
-          const survMap=new Map();
-          catList.forEach(p=>{
-            const m=(p.block||'').match(/Surveillance flag \((.*?)\)/i);
-            if(m){
-              const parts=m[1].split(' · ').map(x=>x.trim()).filter(Boolean);
-              parts.forEach(k=>{
-                const name=humanizeSurvRule(k);
-                if(!survMap.has(name)) survMap.set(name,[]);
-                survMap.get(name).push(p);
-              });
-            } else {
-              const name='General Surveillance Flag';
-              if(!survMap.has(name)) survMap.set(name,[]);
-              survMap.get(name).push(p);
-            }
-          });
-          Array.from(survMap.keys()).sort().forEach(ruleName=>{
-            const rList=survMap.get(ruleName);
-            const subLabel=`<span style="color:var(--t3);margin-right:6px">↳</span>${escHtml(ruleName)}`;
-            rows.push(formatAuditRow(subLabel, rList, 'pc-subrule-row', 32));
-          });
-        } else {
-          const rules=SCORE_AUDIT_RULES.filter(r=>r.cat===cat.id);
-          rules.forEach(r=>{
-            const rList=catList.filter(r.test);
-            if(rList.length>0){
-              const subLabel=`<span style="color:var(--t3);margin-right:6px">↳</span>${escHtml(r.label)}`;
-              rows.push(formatAuditRow(subLabel, rList, 'pc-subrule-row', 32));
-            }
-          });
-        }
-      }
+    categories.forEach(category=>{
+      const categoryCodes=[...codes].filter(code=>auditStatusCategory(code)===category).sort((a,b)=>auditStatusLabel(a).localeCompare(auditStatusLabel(b)));
+      const categoryRecords=blockedList.filter(record=>auditStatusCodes(record).some(code=>categoryCodes.includes(code)));
+      rows.push(formatAuditRow(`<b>${escHtml(category)}</b>`,categoryRecords,'pc-cat-row',16));
+      categoryCodes.forEach(code=>{
+        const matched=blockedList.filter(record=>auditStatusCodes(record).includes(code));
+        rows.push(formatAuditRow(`<span style="color:var(--t3);margin-right:6px">↳</span>${escHtml(auditStatusLabel(code))}`,matched,'pc-subrule-row',32));
+      });
     });
-    const otherList=blockedList.filter(p=>!SCORE_AUDIT_CATEGORIES.some(cat=>cat.test(p)));
-    if(otherList.length>0){
-      const otherBadge=`<span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:var(--t3);margin-right:6px;vertical-align:middle"></span><b>Other rule caps</b>`;
-      rows.push(formatAuditRow(otherBadge, otherList, 'pc-cat-row', 16));
-    }
     ruleBreakdownHtml=rows.join('');
   }
 
   const tableRowsHtml=`${scoreBandsHtml}${blockedTotalRow}${ruleBreakdownHtml}`;
   const mature=state.records.filter(p=>p.targetPolicy===TARGET_POLICY_VERSION&&matureScoreOutcome(p,today)),sessions=new Set(mature.map(p=>p.issueDate)).size;
   const candidate=state.candidate,result=candidate?.validation;
-  const learning=candidate?`Checking new weights on later decisions: ${result?.n||0}/100 completed observations across ${result?.days||0}/${result?.requiredDays||(candidate.weights.slice(23).some(v=>v>0)?30:5)} sessions. ${result?.netDays||0}/${result?.requiredDays||(candidate.weights.slice(23).some(v=>v>0)?30:5)} sessions have enough cost-covered comparisons.`
+  const learning=candidate?`Checking new weights on later decisions: ${result?.n||0}/100 completed observations across ${result?.days||0}/${result?.requiredDays||(candidate.weights.slice(23,EXACT_SCORE_START).some(v=>v>0)?30:5)} sessions. ${result?.netDays||0}/${result?.requiredDays||(candidate.weights.slice(23,EXACT_SCORE_START).some(v=>v>0)?30:5)} sessions have enough cost-covered comparisons.`
     :state.revision>0?`Revision ${state.revision} active. Last update ${when(state.appliedAt)}. ${escHtml(state.status)}.`
     :`Initial weights active. ${mature.length}/100 completed observations across ${sessions}/5 issue sessions available to learn from. ${escHtml(state.status)}.`;
   const sources=SCORE_SOURCES.map((x,i)=>`<tr><td>${escHtml(x[1])}</td><td>${x[2].toFixed(3)}</td><td>${state.live[i].toFixed(3)}</td><td>${candidate?candidate.weights[i].toFixed(3):'Not being tested'}</td></tr>`).join('');
+  const exactRules=state.exactRules?.length?state.exactRules:buildExactRuleScorecard(state.records.filter(record=>matureScoreOutcome(record,today)));
+  let adjustableIndex=0;
+  const exactRuleRows=exactRules.map(rule=>{
+    const sourceIndex=rule.adjustable?EXACT_SCORE_START+adjustableIndex++:null;
+    const passRate=rule.passN?pct(rule.passHits,rule.passN):'Waiting';
+    const failRate=rule.failN?pct(rule.failHits,rule.failN):'Waiting';
+    const edge=rule.edge==null?'Waiting':(rule.edge>=0?'+':'')+rule.edge.toFixed(1)+' pp';
+    const factor=sourceIndex==null?'Protected':state.live[sourceIndex].toFixed(3);
+    const trial=sourceIndex==null?'Never weakened':candidate?candidate.weights[sourceIndex].toFixed(3):'Not being tested';
+    return `<tr><td><b>${escHtml(rule.label)}</b><small>${escHtml(rule.cat)} · ${escHtml(rule.source)}</small></td><td>${rule.sessions}</td><td>${passRate}<small>${rule.passHits}/${rule.passN}</small></td><td>${failRate}<small>${rule.failHits}/${rule.failN}</small></td><td>${edge}</td><td>${escHtml(rule.status)}<small>${escHtml(rule.why||'')}</small></td><td>${factor}</td><td>${trial}</td></tr>`;
+  }).join('');
   const card=(label,value,sub)=>`<div class="pc-kpi"><div class="pc-kpi-label">${label}</div><div class="pc-kpi-value">${value}</div><div class="pc-kpi-sub">${sub}</div></div>`;
   el.innerHTML=`<div class="pc-shell"><section class="m-card pc-card pc-hero">
     <div class="pc-head"><div><h3 class="pc-title">Did higher scores predict better outcomes?</h3>
-    <p class="pc-copy">Collects throughout the session, whether this tab is open or not. Each recorded score is frozen before its outcome. Review this day after close, and again when its next-session deadline finishes.</p></div>
+    <p class="pc-copy">Learning collects throughout the session, whether this tab is open or not. Each score, exact rule state and Status / Rejection reason is frozen before its outcome, then updated through the next-session deadline.</p></div>
     <label>Decision date <select onchange="SCORE_AUDIT_DAY=this.value;renderPostClose()">${days.map(d=>`<option value="${d}" ${d===day?'selected':''}>${d}</option>`).join('')}</select></label></div>
     <div class="pc-kpis">${card('Recorded decisions',records.length,'Sampled every 30 minutes')}${card('Target reached',pct(resolved.filter(p=>scoreOutcomeTarget(p)).length,resolved.length),'Before stop, through next trading close')}${card('Still pending',pending,'Not counted as failures')}${card('Insufficient evidence',incomplete,'Excluded from learning')}${card('Rule-blocked samples',blocked,'Audited; never authorised as buys')}</div>
     <p class="pc-copy">Last observation: ${when(records.length?Math.max(...records.map(p=>p.issuedAt)):0)}. Last outcome check: ${when(state.updatedAt)}.
     The sample includes high and low signal scores and blocked stocks; it is not the entire market and repeated decisions are correlated.</p>
     <div class="pc-table-wrap"><table class="pc-table"><thead><tr><th>Final score at issue / Rule veto</th><th>Observations</th><th>Target hit rate</th><th>Average net return at exit</th><th>Time to target</th><th>Pending</th><th>Excluded</th></tr></thead><tbody>${tableRowsHtml}</tbody></table></div>
     <p class="pc-copy">A deadline miss counts as a failed target prediction, even if the trade finishes positive. Net return includes charges and measured friction; missing cost coverage is not treated as zero cost. Blocked observations are hypothetical diagnostics, not recommendations. Scores, thresholds and model revisions are retained as issued.</p>
+    </section><section class="m-card pc-card"><h3 class="pc-title">Exact rule learning</h3>
+    <p class="pc-copy">Each row freezes its own pass/fail state when the score is recorded, then compares target-before-stop outcomes across issue dates. Adjustable rules begin at zero influence, need three paired sessions, 70% sign agreement and the family-wise t threshold, and still enter only a candidate that must win on later untouched decisions. Exchange, stale-data and surveillance protections are measured but never weakened automatically.</p>
+    <div class="pc-table-wrap"><table class="pc-table"><thead><tr><th>Exact rule</th><th>Paired sessions</th><th>Pass hit rate</th><th>Fail hit rate</th><th>Pass edge</th><th>Evidence state</th><th>Live factor</th><th>Candidate factor</th></tr></thead><tbody>${exactRuleRows}</tbody></table></div>
     </section><section class="m-card pc-card"><h3 class="pc-title">What is feeding live scores now?</h3><p class="pc-copy">${learning}</p>
     <p class="pc-copy">New observations train a bounded candidate. It can replace live weights only after later, untouched decisions show lower prediction error, better positive net returns, no worse target-hit rate and agreement across sessions. Decisions used for training are never used to validate that candidate.</p>
     <p class="pc-copy"><b>Protected rules:</b> buy volume must exceed sell volume when depth is available, plus existing direction, entry timing, exchange, surveillance, stale-data and risk safeguards. Weight changes cannot bypass these checks. Older armed conditions are preserved; this page no longer creates extra gates or changes weights when opened.</p>
