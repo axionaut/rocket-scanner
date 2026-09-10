@@ -1,5 +1,5 @@
-const BUILD_TS='2026-09-10 18:00 IST'; // release build time (IST)
-const APP_VERSION=1360;
+const BUILD_TS='2026-09-10 18:24 IST'; // release build time (IST)
+const APP_VERSION=1361;
 const RADAR_SCORE_VERSION='unified-evidence-v1';
 
 // ── v1358: AN UNCAUGHT ERROR MUST NAME ITSELF ─────────────────────────────────────────────────
@@ -3101,7 +3101,6 @@ const SCORE_SOURCES=[
   ['rule:non-selling-flow','Completed tape is not net selling',0],['rule:pressure-converting','Tape pressure converts into price',0],
   ['rule:buy-over-sell-volume','Buy volume exceeds sell volume',0],
   ['rule:range-not-consumed','Expected range is not consumed',0],['rule:entry-confirmed','Entry timing is confirmed',0],
-  ['rule:score-bar','Score clears the policy bar',0],
   ['rule:target-clears-costs','Target clears round-trip costs at tradeable size',0],
   ['rule:share-fits-allocation','Share price fits one unit of allocation',0],
   ['rule:book-absorbs-exit','Visible book can absorb an exit at size',0],
@@ -3271,8 +3270,13 @@ const DECISION_RULE_DEFS=[
     read:r=>{if(r?.entryReady!==true&&r?.entryReady!==false) return ruleRead(null,null);
       const loc=Number(r?.entryTiming?.rangeLocation);
       return ruleRead(r.entryReady===true, Number.isFinite(loc)?100*(0.75-loc):null);}},
-  // ---- Score policy -------------------------------------------------------------------------
-  {key:'score-bar',label:'Score clears the policy bar',group:'Score policy',kind:RULE_ADJUSTABLE,unit:'pts',
+  // ---- Score policy ---------------------------------------------------------------------------
+  // NOT ADJUSTABLE, and this is the same category error as the band rows, one level deeper and
+  // less visible: v1360 gave the score bar a weight slot INSIDE the score, so the score's own
+  // threshold became a weighted input to the score. It is a threshold on the OUTPUT and can never
+  // be an input to it. It stays in the registry because it is a real rejection reason that must
+  // appear in Status / Rejection, and it is graded nowhere.
+  {key:'score-bar',label:'Score clears the policy bar',group:'Score policy',kind:RULE_OPERATIONAL,unit:'pts',
     read:r=>{const sc=Number(r?.score);
       return Number.isFinite(sc)?ruleRead(sc>=RECOMMEND_MIN_SCORE, sc-RECOMMEND_MIN_SCORE):ruleRead(null,null);}},
   // ---- Tradability, stated as facts about the STOCK (owner, 2026-09-10) ----------------------
@@ -3586,10 +3590,6 @@ function ruleCounterfactual(records,key,shiftPct){
     move:list.reduce((n,p)=>n+ruleOutcomeMove(p),0)/list.length,
     hits:list.reduce((n,p)=>n+scoreOutcomeTarget(p),0)}:null;
   return {shift:+shift.toFixed(3),unit:rule.unit||'',entering:summarise(entering),leaving:summarise(leaving)};
-}
-function scoreLearningBand(p){
-  if(p.block) return 'Blocked by rules';
-  return Math.floor(Math.max(0,Math.min(99.9,p.score))/20)*20;
 }
 function usableScoreOutcome(p){
   return p.paperComplete&&!p.evidenceIncomplete&&!p.unfilled&&['rocket','stopped','expired'].includes(p.rocketOutcome);
@@ -13671,17 +13671,12 @@ function ruleTableRowsData(state,today){
   const weightByKey={};evidence.forEach(e=>{weightByKey[e.key]=e;});
   const raw=state.records.filter(p=>p.ruleSchema===RULE_SCHEMA_VERSION);
   const rows=[];
-  // Score bands are graded with exactly the same columns as a rule, because the score is one more
-  // predictor being asked the same question.
-  for(const b of [80,60,40,20,0]){
-    const inBand=raw.filter(p=>{const sc=Number(p.score);return Number.isFinite(sc)&&Math.floor(Math.max(0,Math.min(99.9,sc))/20)*20===b;});
-    const done=inBand.filter(ruleOutcomeUsable);
-    const mature=inBand.filter(p=>matureScoreOutcome(p,today));
-    rows.push({kind:'band',key:'band-'+b,label:'Score '+b+'-'+(b===80?100:b+19),group:'Score bands',
-      passN:done.length,failN:0,passMove:done.length?done.reduce((n,x)=>n+ruleOutcomeMove(x),0)/done.length:null,
-      failMove:null,edge:null,shrunk:0,confidence:0,sessions:new Set(inBand.map(x=>x.issueDate)).size,
-      matureN:mature.length,matureHits:mature.reduce((n,x)=>n+scoreOutcomeTarget(x),0),weight:null,gradeable:false});
-  }
+  // v1361: THE SCORE IS NOT A RULE, SO IT DOES NOT GET A ROW HERE. v1360 graded score bands with
+  // the same columns as a rule, which is a category error: the score is the OUTPUT of the rules,
+  // so a band cannot carry a weight and every one of those rows printed "not gradeable" beside a
+  // "-" weight. The score adjusts because its underlying rule weights adjust; nothing adjusts it
+  // directly, and there is nothing to learn about a band that is not already learnt about the
+  // rules that produced it.
   for(const rule of decisionRules()){
     const ev=weightByKey[rule.key]||ruleEvidence(state.ruleAgg||{},rule.key);
     const gradeable=rule.kind!==RULE_OPERATIONAL;
@@ -13729,12 +13724,11 @@ function renderPostClose(){
   const rows=ruleTableRowsData(state,today);
   const arrow=k=>RULE_TABLE_SORT===k?(RULE_TABLE_DIR<0?' ▼':' ▲'):'';
   const th=(k,label,title)=>`<th style="cursor:pointer" title="${escHtml(title||'')}" onclick="sortRuleTable('${k}')">${escHtml(label)}${arrow(k)}</th>`;
-  const kindTag=r=>r.kind==='band'?'<small>Score bands</small>'
-    :r.ruleKind===RULE_PROTECTED?'<small>'+escHtml(r.group)+' · protected</small>'
+  const kindTag=r=>r.ruleKind===RULE_PROTECTED?'<small>'+escHtml(r.group)+' · protected</small>'
     :r.ruleKind===RULE_OPERATIONAL?'<small>'+escHtml(r.group)+' · not gradeable</small>'
     :'<small>'+escHtml(r.group)+'</small>';
   const counterHtml=r=>{
-    if(r.kind!=='rule'||r.ruleKind!==RULE_ADJUSTABLE) return '—';
+    if(r.ruleKind!==RULE_ADJUSTABLE) return '—';
     const loose=ruleCounterfactual(raw,r.key,1),tight=ruleCounterfactual(raw,r.key,-1);
     if(!loose&&!tight) return '<small>collecting margins</small>';
     const part=(cf,word)=>{
@@ -13768,7 +13762,7 @@ function renderPostClose(){
     <div class="pc-head"><div><h3 class="pc-title">Which rules earn their place?</h3>
     <p class="pc-copy">Every rule the pipeline applies, measured continuously against what its stocks actually did.
     Learning collects whether this tab is open or not, and accumulates across all sessions - there is no date to pick.</p></div></div>
-    <div class="pc-kpis">${card('Rules measured',rows.filter(r=>r.kind==='rule').length,'Registry plus every REG1 column')}
+    <div class="pc-kpis">${card('Rules measured',rows.length,'Registry plus every REG1 column')}
     ${card('Stock-sessions',stockSessions,'The unit of evidence')}
     ${card('Measured decisions',measured.length,'Best move known from the first bar')}
     ${card('Matured',mature.length,'Past their next-close deadline')}
