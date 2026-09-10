@@ -1,5 +1,5 @@
-const BUILD_TS='2026-09-10 16:15 IST'; // release build time (IST)
-const APP_VERSION=1358;
+const BUILD_TS='2026-09-10 16:34 IST'; // release build time (IST)
+const APP_VERSION=1359;
 const RADAR_SCORE_VERSION='unified-evidence-v1';
 
 // ── v1358: AN UNCAUGHT ERROR MUST NAME ITSELF ─────────────────────────────────────────────────
@@ -1625,7 +1625,6 @@ function deriveProfitVelocityPolicy(trips,fallbackSL,fallbackTGT){
     objective:'observed net % / holding day'};
 }
 function tickPrice(v){return Math.round(v/0.05)*0.05;}
-function tickBelowPrice(v){return Math.max(0,(Math.ceil((v*100)/5)*5-5)/100);}
 function survRuleKey(label){return String(label||'').trim().toLowerCase().replace(/[^a-z0-9]+/g,'_').replace(/^_|_$/g,'');}
 function isSurvFlag(v){
   const s=String(v||'').trim();
@@ -6993,25 +6992,6 @@ function recordLeftOnTableSession(date,summary){
 let _leftPoolMemo=null;
 const REACHABLE_MIN_SAMPLES=40;         // below this the distribution is not worth trusting
 let _reachMemo=null;
-function getLeftOnTablePool(){
-  const store=getLeftOnTableStore();
-  const dates=Object.keys(store.sessions||{}).sort().slice(-LEFT_ON_TABLE_POOL_SESSIONS);
-  const sig=dates.map(d=>d+':'+store.sessions[d].leftPct+':'+store.sessions[d].proceeds).join('|');
-  if(_leftPoolMemo&&_leftPoolMemo.sig===sig) return _leftPoolMemo.val;
-  let num=0,den=0;
-  for(const d of dates){
-    const s=store.sessions[d];
-    if(!(s&&s.proceeds>0&&Number.isFinite(s.leftPct))) continue;
-    num+=s.leftPct*s.proceeds; den+=s.proceeds;
-  }
-  const raw=den>0?num/den:null;
-  const val={poolPct:raw==null?0:Math.max(0,+raw.toFixed(2)),
-             rawPct:raw==null?null:+raw.toFixed(2),
-             sessions:dates.length,proceeds:Math.round(den),
-             source:raw==null?'no recorded sessions yet':(raw<=0?'exits already at or above the post-sell price — no nudge':`${dates.length} session${dates.length===1?'':'s'}, proceeds-weighted`)};
-  _leftPoolMemo={sig,val};
-  return val;
-}
 
 function computeLatestOrderBooked(){
   // Only compute from orders loaded this session — never from brain-restored stale orders.
@@ -7491,30 +7471,9 @@ function rowAchievableNotional(s,ctx=null){
 }
 // What ONE position in this stock is actually worth, in rupees, at a given notional: whole shares and
 // the full Zerodha charge model on both legs. This is the number the owner trades on.
-function getRowRupeeEconomics(s,notional,policy=null,ctx=null){
-  const buyP=getBuyPrice(s);
-  const pol=policy||getRowExitPolicy(s,buyP,(ctx||getAllocationPassContext()).active);
-  const out={qty:0,notional:0,grossRs:0,chargesRs:0,netRs:0,riskRs:0,
-             tgtPct:pol?.targetPct??null,stopPct:pol?.stopPct??null};
-  if(!(buyP>0)||!(notional>0)||!(pol?.targetPct>0)) return out;
-  const qty=Math.floor(notional/buyP);
-  if(qty<=0) return out;
-  const sellP=buyP*(1+pol.targetPct/100);
-  out.qty=qty;
-  out.notional=qty*buyP;
-  out.grossRs=qty*buyP*(pol.targetPct/100);
-  out.chargesRs=calcZerodhaCharges(buyP,qty,false)+calcZerodhaCharges(sellP,qty,true);
-  out.netRs=out.grossRs-out.chargesRs;
-  out.riskRs=pol.stopPct>0?qty*buyP*(pol.stopPct/100):0;
-  return out;
-}
 // The SAME economic floor as HARVEST_DESIRED_NET_PCT, expressed in rupees at the reference notional.
 // NOT a new constant - a conversion of the existing one - but applied against each row's ACTUAL
 // rupees, which is what makes it discriminate where the percentage never could.
-function getDesiredNetRupees(){
-  const ref=getEffectiveMaxAlloc();
-  return ref>0?ref*(HARVEST_DESIRED_NET_PCT/100):0;
-}
 // Rupees the goal needs TODAY, and what is still outstanding after what is already booked. Extracted
 // from buildGoalCard (v1078), which computed it inline and so could not share it with the basket.
 function getTodayRupeeNeed(){
@@ -8381,40 +8340,6 @@ function getTradeTimingModel(){return buildTradeTimingModel(TRADEBOOK_STATS?.tri
 //
 // Not folded into getPostSellExtremes: that function backs the per-row note and is deliberately
 // unbounded. One meaning per quantity - this is a different quantity, so it gets its own name.
-function getPostSellHorizonHigh(sym,sellDate,sellTime,horizonSessions){
-  const s=normSym(sym);
-  const out={sameDayHigh:null,sameDayKnown:false,horizonHigh:null,sessions:0};
-  if(!s||!sellDate) return out;
-  // (a) the sell day, AFTER the exit only. v1259: the 5-minute tape splits the day at the fill
-  // exactly; the sampled watch is the fallback for a session the tape no longer reaches. Without
-  // either, the sell day is unknown rather than assumed.
-  try{
-    const tp=getPostSellTapeExtremes(s,sellDate,sellTime);
-    if(tp){
-      out.sameDayKnown=true;
-      out.sameDayHigh=(tp.bars>0&&tp.high>0)?tp.high:null;
-    } else {
-      const w=getPostSellHighFromWatch(s,sellDate,sellTime);
-      if(w){
-        out.sameDayKnown=true;
-        out.sameDayHigh=(w.advanced&&w.postSellHigh>0)?w.postSellHigh:null;
-      }
-    }
-  }catch(e){}
-  // (b) the next N sessions, strictly after the sell day, N fixed for every row.
-  const raw=FS.get(PRICE_HISTORY_STORE);
-  const store=(raw&&typeof raw==='object'&&raw.sessions)?raw.sessions:{};
-  const horizon=Math.max(1,Number(horizonSessions)||1);
-  for(const d of Object.keys(store).sort()){
-    if(d<=sellDate) continue;
-    const v=store[d]?.[s];
-    if(v===undefined) continue;
-    const hi=phHigh(v)??phClose(v);
-    if(hi>0) out.horizonHigh=out.horizonHigh==null?hi:Math.max(out.horizonHigh,hi);
-    if(++out.sessions>=horizon) break;
-  }
-  return out;
-}
 
 // v1211 (owner): "how long should I hold a stock, both intraday and long term". Two cohorts,
 // because they are different questions: a position closed the same session is bucketed by ELAPSED
@@ -10644,20 +10569,6 @@ function getTurnoverAllocationCap(row){
   const bookCap=getBookAllocationCap(row);
   if(bookCap>0&&turnCap>0) return Math.min(bookCap,turnCap);
   return bookCap>0?bookCap:turnCap;
-}
-function getRestingOrderMap(){
-  const out={};
-  if(!ORDERS_TODAY||!ORDERS_TODAY.length) return out;
-  const today=(typeof getSessionDate==='function')?getSessionDate():null;
-  for(const o of ORDERS_TODAY){
-    if(!o||!o.symbol||!(o.pending>0)) continue;
-    if(today&&normOrderDate(o.time)!==today) continue;
-    const key=o.symbol, side=(o.type||'').toUpperCase()==='SELL'?'sell':'buy';
-    const e=out[key]||(out[key]={sellQty:0,sellPrice:null,buyQty:0,buyPrice:null});
-    if(side==='sell'){ e.sellQty+=o.pending; if(o.qty>0&&o.price>0) e.sellPrice=o.price; }
-    else { e.buyQty+=o.pending; if(o.qty>0&&o.price>0) e.buyPrice=o.price; }
-  }
-  return out;
 }
 function getPositionFlowRead(rd){
   const tt=rd&&rd.current?(rd.todayTraj||rd.traj):null;
