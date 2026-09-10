@@ -1,5 +1,5 @@
-const BUILD_TS='2026-09-10 15:16 IST'; // release build time (IST)
-const APP_VERSION=1356;
+const BUILD_TS='2026-09-10 15:47 IST'; // release build time (IST)
+const APP_VERSION=1357;
 const RADAR_SCORE_VERSION='unified-evidence-v1';
 const TARGET_POLICY_VERSION='clock-stop-next-close-v1';
 function isValidChangeOpen(v){
@@ -1395,11 +1395,13 @@ function getModelTradingDate(timestamp=Date.now()){
 function istNow(){ return istClock(Date.now()); }
 function isEquitySession(timestamp=Date.now()){
   const c=istClock(timestamp),date=new Date(c.dateMs).toISOString().slice(0,10);
-  return isNseTradingDate(date)&&c.mins>=DAY_START_MIN&&c.mins<DAY_END_MIN;
+  return isNseTradingDate(date)&&c.mins>=EQUITY_OPEN_MIN&&c.mins<EQUITY_CLOSE_MIN;
 }
 function isMarketHours(){return isEquitySession();}
 function isMarketRefreshWindow(timestamp=Date.now()){
-  return isEquitySession(timestamp);
+  // Keep collecting the closing tape through 16:00; this is not an entry window.
+  const c=istClock(timestamp),date=new Date(c.dateMs).toISOString().slice(0,10);
+  return isNseTradingDate(date)&&c.mins>=DAY_START_MIN&&c.mins<DAY_END_MIN;
 }
 function getSessionDate(){ return getModelTradingDate(Date.now()); }
 
@@ -3563,8 +3565,19 @@ async function updateScoreLearning(){
     }
     const mature=state.records.filter(p=>p.targetPolicy===TARGET_POLICY_VERSION&&matureScoreOutcome(p,today));
     state.exactRules=buildExactRuleScorecard(mature);
-    state.live=state.live.map((weight,index)=>index>=EXACT_SCORE_START&&!exactRuleWeightAllowed(state,index)?0:weight);
-    if(state.candidate) state.candidate.weights=state.candidate.weights.map((weight,index)=>index>=EXACT_SCORE_START&&!exactRuleWeightAllowed(state,index)?0:weight);
+    const withdrawn=(weight,index)=>index>=EXACT_SCORE_START&&weight!==0&&!exactRuleWeightAllowed(state,index);
+    if(state.live.some(withdrawn)){
+      state.live=state.live.map((weight,index)=>withdrawn(weight,index)?0:weight);
+      state.revision++;
+      state.history.push({at:now,revision:state.revision,reason:'Exact rule qualification withdrawn; affected live factors disabled'});
+    }
+    if(state.candidate?.weights.some(withdrawn)){
+      // Recorded candidate predictions belong to its immutable weights. Never grade a
+      // changed vector against those old predictions: retire it and train a fresh ID.
+      state.history.push({at:now,retiredCandidate:state.candidate,reason:'Exact rule qualification withdrawn; candidate retired'});
+      state.candidate=null;state.lastTrainingIssuedAt=0;
+      state.status='Rule evidence changed; candidate will be rebuilt and validated on new decisions';
+    }
     if(!study.results&&study.dates.length===MEMORY_SPEC.dates){
       const last=study.dates.at(-1),gap=tradingDaysBetween(last,today);
       if(gap>1||(gap===1&&istClock().mins>=EQUITY_CLOSE_MIN)){
@@ -4266,11 +4279,10 @@ const tapeDelta=b=>(b.h>b.l?(Number(b.v)||0)*(2*(b.c-b.l)/(b.h-b.l)-1):0);
 const _tapeEvidenceMemo=new Map();
 const BOOK_HISTORY_MAX=12;
 const BOOK_HISTORY=Object.create(null);
-function getBookDeltaRead(sym){
-  const rows=BOOK_HISTORY[normSym(sym||'')];
-  if(!rows||rows.length<2) return null;
-  const current=rows[rows.length-1],previous=rows[rows.length-2];
-  if(!Number.isFinite(current.imbalance)||!Number.isFinite(previous.imbalance)) return null;
+let BOOK_HISTORY_V=0;
+let _bookDeltaScaleMemo={v:-1,median:null};
+function getBookDeltaScale(){
+  if(_bookDeltaScaleMemo.v===BOOK_HISTORY_V) return _bookDeltaScaleMemo.median;
   const deltas=[];
   Object.values(BOOK_HISTORY).forEach(history=>{
     for(let i=1;i<history.length;i++){
@@ -4278,9 +4290,17 @@ function getBookDeltaRead(sym){
       if(Number.isFinite(d)) deltas.push(Math.abs(d));
     }
   });
-  if(deltas.length<25) return null;
   deltas.sort((a,b)=>a-b);
-  const median=deltas[Math.floor(deltas.length/2)];
+  const median=deltas.length>=25?deltas[Math.floor(deltas.length/2)]:null;
+  _bookDeltaScaleMemo={v:BOOK_HISTORY_V,median};
+  return median;
+}
+function getBookDeltaRead(sym){
+  const rows=BOOK_HISTORY[normSym(sym||'')];
+  if(!rows||rows.length<2) return null;
+  const current=rows[rows.length-1],previous=rows[rows.length-2];
+  if(!Number.isFinite(current.imbalance)||!Number.isFinite(previous.imbalance)) return null;
+  const median=getBookDeltaScale();
   if(!(median>0)) return null;
   const delta=current.imbalance-previous.imbalance;
   return {current:current.imbalance,previous:previous.imbalance,delta,
@@ -4290,7 +4310,7 @@ function radarTapeEvidence(sym){
   const key=normSym(sym||'');
   const bars=INTRADAY_BARS[key];
   if(!bars||bars.length<TAPE_MIN_SESSION_BARS) return null;
-  const stamp=Math.floor(Date.now()/TAPE_BAR_MS)+':'+INTRADAY_STORE_V+':'+BOOK_V+':'+TAPE_IMPACT_W+':'+['book','split','spoof'].map(k=>(BOOK_EDGES[k]?.w||0)+'/'+(BOOK_EDGES[k]?.dir||1)).join(':');
+  const stamp=Math.floor(Date.now()/TAPE_BAR_MS)+':'+INTRADAY_STORE_V+':'+BOOK_V+':'+TAPE_IMPACT_W+':'+['book','split','spoof','delta'].map(k=>(BOOK_EDGES[k]?.w||0)+'/'+(BOOK_EDGES[k]?.dir||1)).join(':');
   const hit=_tapeEvidenceMemo.get(key);
   if(hit&&hit.stamp===stamp) return hit.val;
   const val=_radarTapeEvidenceUncached(key);
@@ -11508,7 +11528,7 @@ function getAllocationBlockReason(s,ctx=null){
   const rail=Math.min(c.maxAlloc>0?c.maxAlloc:c.capital,turnoverCap,topUpCap,riskCap);
   if(rail<buyP) return `allocation rails (${fmtINR(rail)}) are below one share at ${fmtINR(buyP)}`;
   const policy=getRowExitPolicy(s,buyP,c.active);
-  if(policy&&policy.viable===false) return `Target ${policy.targetPct?.toFixed(2)??'unknown'}% is below the ${policy.minGrossPct?.toFixed(2)??'unknown'}% costs + net hurdle`;
+  if(policy&&policy.viable===false) return targetPolicyBlockReason(policy);
   const floorRs=getDesiredNetRupees();
   if(floorRs>0){
     const ec=getRowRupeeEconomics(s,rowAchievableNotional(s,c),policy,c);
@@ -11516,6 +11536,10 @@ function getAllocationBlockReason(s,ctx=null){
       return `nets only ${fmtINR(ec.netRs)} on the ${fmtINR(ec.notional)} this stock allows — below the ${fmtINR(floorRs)} minimum for a trade worth taking`;
   }
   return null;
+}
+function targetPolicyBlockReason(policy){
+  if(!(policy?.targetPct>0)) return policy?.viabilitySource||'No valid target to verify trading costs';
+  return `Target ${policy.targetPct.toFixed(2)}% does not cover the ${policy.minGrossPct?.toFixed(2)??'unknown'}% costs + net hurdle`;
 }
 function computeAlloc(capital, selList){
   if(!capital||!selList.length) return {};
@@ -11545,7 +11569,7 @@ function computeAlloc(capital, selList){
   function evalNet(s,buyP,qty){
     const policy=getRowExitPolicy(s,buyP);
     if(policy&&policy.viable===false){
-      return {ok:false,rejected:true,reason:`Target ${policy.targetPct?.toFixed(2)??'unknown'}% does not cover the ${policy.minGrossPct?.toFixed(2)??'unknown'}% costs + net hurdle`,policy};
+      return {ok:false,rejected:true,reason:targetPolicyBlockReason(policy),policy};
     }
     const tgtPct=policy?.targetPct;
     if(!Number.isFinite(tgtPct)||tgtPct<=0) return {ok:false,rejected:true,reason:'No valid target to verify trading costs',policy:policy||{}};
@@ -11593,6 +11617,11 @@ function computeAlloc(capital, selList){
     // Price the desired rupee profit using this row's actual target/charges and known book friction.
     const probeQty=Math.max(1,Math.floor(Math.min(cap,spendableCapital)/buyP));
     const probe=goalSizing?evalNet(s,buyP,probeQty):null;
+    if(probe?.rejected){
+      allocMap[s.symbol]={alloc:0,debit:0,qty:0,buyPrice:buyP,rejected:true,
+        reason:probe.reason,exitPolicy:probe.policy,liquidityCap:turnoverCap};
+      continue;
+    }
     const rowNetPct=probe&&!probe.skip?probe.expectedNet/(probeQty*buyP)*100:null;
     const desired=goalSizing&&rowNetPct>0?goalPlan.profitPerTrade/(rowNetPct/100):0;
     const weighted=goalSizing?desired*(riskWeight(s)/strongestRiskWeight)
@@ -12786,9 +12815,13 @@ let BOOK={},BOOK_AT='';
 function rememberBookRow(sym,row){
   if(!row||!Number.isFinite(Number(row.imbalance))||!row.t) return;
   const key=normSym(sym),history=BOOK_HISTORY[key]||(BOOK_HISTORY[key]=[]);
-  if(history.length&&history[history.length-1].t===row.t){history[history.length-1]=row;return;}
+  if(history.length&&history[history.length-1].t===row.t){
+    if(Number(history[history.length-1].imbalance)!==Number(row.imbalance)) BOOK_HISTORY_V++;
+    history[history.length-1]=row;return;
+  }
   if(history.length&&history[history.length-1].t>row.t) return;
   history.push(row);
+  BOOK_HISTORY_V++;
   if(history.length>BOOK_HISTORY_MAX) history.splice(0,history.length-BOOK_HISTORY_MAX);
 }
 async function loadBookState(){
@@ -13473,7 +13506,8 @@ async function pollUniverseDelta(deferScore=false){
   }
 }
 let _inventoryLoadRunning=false;
-async function loadIntradayInventory({deferScore=false,repair=false}={}){
+let _historyRepairReadAt=0;
+async function loadIntradayInventory({deferScore=false,repair=false,historyRepairAt=0}={}){
   if(_inventoryLoadRunning) return 0;
   _inventoryLoadRunning=true;
   try{
@@ -13484,6 +13518,7 @@ async function loadIntradayInventory({deferScore=false,repair=false}={}){
     // query was written and reverted because a partial answer would have replaced a symbol's
     // history. An empty `since` (nothing held yet) still asks for everything.
     const since=(()=>{
+      if(historyRepairAt) return '';
       if(repair) return istDayKey(Date.now())+' 09:15';
       const ms=newestTapeBucketMs()-10*60000;
       if(!(ms>0)) return '';
@@ -13510,7 +13545,11 @@ async function loadIntradayInventory({deferScore=false,repair=false}={}){
       const merged=await mergeInventoryPage(j,since,storeVAtRequest);
       n+=merged;
       processed+=Object.keys(j.data).length;
-      if(!PAGE||j.next==null){if(repair) _clientRepairRev=_pendingRepairRev;break;}
+      if(!PAGE||j.next==null){
+        if(repair) _clientRepairRev=_pendingRepairRev;
+        if(historyRepairAt) _historyRepairReadAt=historyRepairAt;
+        break;
+      }
       pageOff=j.next;
       await yieldToUi();
     }
@@ -13937,7 +13976,7 @@ function applyFilters({preservePage=false}={}){
     if(belowThreshold || !eligible){
       if(!removedReason){
         const act=getRowActionState(s);
-        const rReason=belowThreshold?`Score ${scoreVal.toFixed(1)} < ${RECOMMEND_MIN_SCORE}`:act.reason;
+        const rReason=belowThreshold?(s.scoreComponents?.block||`Score ${scoreVal.toFixed(1)} < ${RECOMMEND_MIN_SCORE}`):act.reason;
         removedReason={s,reason:belowThreshold?'threshold':'ineligible',chip:rReason||('Score '+scoreVal.toFixed(1)+' < min '+RECOMMEND_MIN_SCORE),
           detail:rReason||('ineligible: score '+scoreVal.toFixed(1)+' or pending entry gate')};
       }
@@ -14585,7 +14624,12 @@ async function streamRefreshTick(){
     // v1238 freshness rule then decides what may still be recommended, so a stalled stream empties
     // the board honestly rather than leaving yesterday's picks sitting there looking actionable.
     await loadStreamStatus();
+    const historyRepairAt=Number(STREAM_STATUS?.historyRepairAt)||0;
+    const historyBarsRead=historyRepairAt&&historyRepairAt!==_historyRepairReadAt&&!STREAM_STATUS.historyRepairBusy
+      ?await loadIntradayInventory({deferScore:true,historyRepairAt}):0;
     if(!isMarketRefreshWindow()){
+      if(historyBarsRead) await scheduleScoreJob();
+      await updateScoreLearning();
       const done=Date.now();
       setStreamActivity({phase:'market-closed',lastCompleteAt:done,
         lastSuccessAt:STREAM_STATUS&&!STREAM_STATUS.statusUnknown?done:STREAM_ACTIVITY.lastSuccessAt,nextAt:done+STREAM_REFRESH_MS});
@@ -14623,7 +14667,7 @@ async function streamRefreshTick(){
     const tapeStale=tapeBarsBehind(newestTapeBucketMs())>=1;
     const needBars=deltaRes?.repairChanged||STREAM_STATUS?.statusUnknown||!STREAM_STATUS?.connected||!!(deltaRes&&deltaRes.barCompleted)||tapeStale;
     const heldBarsRead=await refreshHeldPositionTape({deferScore:true});
-    const barsRead=(needBars?await loadIntradayInventory({deferScore:true,repair:deltaRes?.repairChanged}):0)+heldBarsRead;
+    const barsRead=(needBars?await loadIntradayInventory({deferScore:true,repair:deltaRes?.repairChanged}):0)+heldBarsRead+historyBarsRead;
     // The book metrics and the one-minute bars ride the same beat. Both are small in-memory reads
     // on the helper - no file walk, no full-universe payload - and both are best-effort: a failure
     // leaves the previous values in place and the score simply carries on without them.
