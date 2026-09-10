@@ -1,5 +1,5 @@
-const BUILD_TS='2026-09-10 11:35 IST'; // release build time (IST)
-const APP_VERSION=1346; // Granular rule-by-rule breakdown in Post-Close Audit table.
+const BUILD_TS='2026-09-10 11:55 IST'; // release build time (IST)
+const APP_VERSION=1347; // Market-driven maximum upside targets (T+1 capacity & circuit limits).
 const RADAR_SCORE_VERSION='unified-evidence-v1';
 function isValidChangeOpen(v){
   if(v===null||v===undefined||typeof v==='boolean') return false;
@@ -10549,27 +10549,11 @@ function getRowExitPolicy(row,buyPrice=null,activeInfo=null,nudgeInfo=null){
   const atr=Number(row?.atr);
   const hasAtr=Number.isFinite(atr)&&atr>0;
   const capacity=rowCapacityPct(row);
-  let targetPct=anchor;
-  let targetSource='portfolio fallback';
   // v1216: a POSITIVE reach may never floor to a zero target. Math.floor(v*20)/20 sends anything
   // under 0.05% to exactly 0, which is not "a small target" - it is a GTT with no level, and the
   // standing suite has been reporting one on DVL. The floor is the step the policy already rounds
   // to, so this introduces no new unit; a genuinely zero reach still yields zero.
   const toStep=v=>v>0?Math.max(Math.floor(v*20)/20,0.05):0;
-  if(anchor>0){
-    targetPct=toStep(anchor);
-    targetSource=active.source==='manual'?'manual anchor'
-      :active.source==='goal'?'goal-required daily rate'
-      :'learned harvest rate';
-  } else if(capacity>0){
-    // Only when no goal/harvest rate can be computed at all.
-    targetPct=toStep(capacity);
-    targetSource='stock capacity fallback (no goal rate available)';
-  }
-  // v1097: the base rate is the contract floor and is retained separately — feasibility, viability and
-  // the recommendation gates all keep using it (see radarAnalyze). Only the EXIT PRICE gets the nudge.
-  const basePct=targetPct;
-  let nudgePct=0;
   const bandRef=Number(buyPrice)>0?Number(buyPrice):getBuyPrice(row||{});
   // v1083: what the stock may PLAUSIBLY reach this session - the day's low plus one typical day's
   // range. Resolved HERE, above the nudge, because v1211 bounds the target with it.
@@ -10623,30 +10607,40 @@ function getRowExitPolicy(row,buyPrice=null,activeInfo=null,nudgeInfo=null){
   else if(capacity>0){ available=capacity; availableSource='its range capacity'; }
   // The circuit is what it may LEGALLY reach and bounds every estimate.
   if(available!=null&&circuitRunwayPct!=null) available=Math.min(available,circuitRunwayPct);
-  // ...and so does the stock's own range capacity. A session ceiling measured from a low the stock
-  // has already left can exceed what the stock actually does in a day (DHARIWAL priced 22.35% on a
-  // 17.67% capacity, UHTL 3.80% on 3.63%), and a target the stock has never travelled is the same
-  // defect as one the session cannot deliver, pointing the other way.
   // ...and so does the stock's own range capacity - EXCEPT for a read already expressed in
   // capacity units, which carries that bound inside it. Applying it again pins every reach at
   // exactly 1.00 capacity and re-creates the flat target this release removes.
   if(available!=null&&!inCapacityUnits&&capacity>0) available=Math.min(available,capacity);
-  // Target is anchored to the Target Anchor floor (manual, goal, or harvest rate), while allowing
-  // expansion if market available runway / capacity is higher. Never compresses below the Target Anchor floor,
-  // matching the Open Positions target policy (which also enforces target >= floor).
-  if(available!=null&&targetPct>0){
-    const expandedPct=Math.max(basePct,available);
-    targetPct=toStep(expandedPct);
-    nudgePct=+(targetPct-basePct).toFixed(2);
-    targetSource=(expandedPct>basePct)
-      ? ('what the market has left, read from '+availableSource)
-      : (active.source==='manual' ? 'manual target anchor' : active.source==='goal' ? 'daily goal target anchor' : 'target anchor floor');
+
+  // v1347: OUTSIDE-IN MARKET-DRIVEN MAXIMUM UPSIDE TARGET
+  // Decoupled from arbitrary portfolio/goal anchors. Target is derived from the stock's natural
+  // maximum expansion potential within the T+1 horizon (capacity/ATR), bounded by upper circuit.
+  let targetPct=null;
+  let targetSource='';
+  if(active.source==='manual'&&Number(active.tgtPct)>0){
+    targetPct=toStep(Number(active.tgtPct));
+    targetSource='manual anchor';
+  } else if(exitingToday){
+    let exitUpside=available!=null&&available>0?available:(capacity>0?capacity:(anchor>0?anchor:2.5));
+    if(circuitRunwayPct!=null&&circuitRunwayPct>0) exitUpside=Math.min(exitUpside,circuitRunwayPct);
+    targetPct=toStep(exitUpside);
+    targetSource=circuitRunwayPct!=null&&circuitRunwayPct>0&&exitUpside>=circuitRunwayPct
+      ?'bounded by the NSE circuit'
+      :(availableSource?'intraday runway ('+availableSource+')':'intraday capacity');
+  } else {
+    // T+1 breakout horizon capacity (1.5x 1-day typical range capacity/ATR)
+    const t1Capacity=capacity>0?capacity*1.5:(hasAtr?atr*1.5:(available>0?available:(anchor>0?anchor:2.5)));
+    let maxUpside=t1Capacity;
+    if(circuitRunwayPct!=null&&circuitRunwayPct>0){
+      maxUpside=Math.min(maxUpside,circuitRunwayPct);
+    }
+    targetPct=toStep(maxUpside);
+    targetSource=circuitRunwayPct!=null&&circuitRunwayPct>0&&maxUpside>=circuitRunwayPct
+      ?'bounded by the NSE circuit'
+      :(capacity>0?'T+1 range capacity (1.5x daily range)':(hasAtr?'T+1 ATR capacity':'market capacity fallback'));
   }
-  if(exitingToday&&circuitRunwayPct!=null&&circuitRunwayPct>0&&targetPct>circuitRunwayPct){
-    targetPct=toStep(circuitRunwayPct);
-    nudgePct=+(targetPct-basePct).toFixed(2);
-    targetSource='bounded by the NSE circuit';
-  }
+  const basePct=targetPct;
+  let nudgePct=0;
   // v1216: WHAT THE TARGET PERCENTAGE IS MEASURED FROM. A clock or tape read is further travel
   // from where the stock is NOW, so resolving it against the entry restates a level the market has
   // already passed - EIDPARRY was armed 826.20 off a 813.99 average while trading 864. The anchor
@@ -10694,17 +10688,10 @@ function getRowExitPolicy(row,buyPrice=null,activeInfo=null,nudgeInfo=null){
   // v1073: reward:risk is returned on EVERY row and rendered in the TGT/SL tooltips. It sat below
   // 1.0 on 400/400 rows for releases without anyone noticing, because nothing ever displayed it.
   const rewardRisk=(targetPct>0&&stopPct>0)?+(targetPct/stopPct).toFixed(2):null;
-  // v1077: can this stock plausibly travel the goal-required distance in a day? Reported as a FLAG
-  // so an unreachable target is visible, never as a cap on the target itself (owner: no ATR-driven
-  // targets). null when the stock has no usable range estimate.
-  const reachable=(capacity>0&&targetPct>0)?(capacity+1e-9>=targetPct):null;
-  // v1216 (owner): "the goal based target should be the minimum, not final target". targetPct is anchored
-  // by basePct as a floor (targetPct=toStep(Math.max(basePct, available))) so it is never compressed below
-  // the Target Anchor, matching Open Positions, while allowing expansion on higher market runway.
-  // The comparison must be like for like. A clock read taken at 12:15 is what is left of THIS
-  // session, while the goal rate is what a WHOLE trading day must produce - measuring one against
-  // the other is the v1206 window defect and blocked 2,773 of 2,980 rows when first built. The
-  // floor therefore asks the whole-day question: from the OPEN, can this stock pay the goal rate?
+  // v1347: can this stock plausibly travel the target distance within its trade horizon?
+  // For open positions exiting today: today's 1-day capacity. For fresh recommendations: T+1 horizon (1.5x capacity).
+  const maxHorizonCap=exitingToday?capacity:(capacity>0?capacity*1.5:null);
+  const reachable=(maxHorizonCap>0&&targetPct>0)?(maxHorizonCap+1e-9>=targetPct):null;
   const anchorFloorPct=basePct>0?+basePct.toFixed(2):null;
   // NOT ENFORCED AS AN ALLOCATION BLOCK, and the reason is measured, not cautious: an allocation
   // block feeds ALLOC_BLOCKED, which REMOVES the row from the board - so a goal floor there does
