@@ -1,6 +1,46 @@
-const BUILD_TS='2026-09-10 15:47 IST'; // release build time (IST)
-const APP_VERSION=1357;
+const BUILD_TS='2026-09-10 16:15 IST'; // release build time (IST)
+const APP_VERSION=1358;
 const RADAR_SCORE_VERSION='unified-evidence-v1';
+
+// ── v1358: AN UNCAUGHT ERROR MUST NAME ITSELF ─────────────────────────────────────────────────
+// This is the class of defect that has cost the most sessions in this app's history, and until now
+// nothing on screen reported it. v1249 shipped a ReferenceError inside radarAnalyze: every scoring
+// pass threw, ALL was never populated, and the board read "0 over the bar" for three hours while
+// the tape row said `live 1542`. v1350 and v1351 were the same shape (`tgtEl is not defined`, then
+// `brand is not defined`) and each needed its own release to find. An exception that reaches the
+// window, or an async rejection nobody awaited, now prints its stack and paints a red toast naming
+// the file and line, so a dead board can never again be mistaken for a quiet market.
+//
+// It REPORTS, it does not repair - there is nothing honest to substitute for a failed score, and
+// swallowing the error here would recreate the silence it exists to break.
+let _lastAppErrorKey='',_lastAppErrorAt=0;
+function reportAppError(kind,err,where){
+  try{
+    const detail=err&&err.stack?String(err.stack):String(err&&err.message||err);
+    const key=kind+'|'+detail.slice(0,200);
+    const now=Date.now();
+    // One identical error per 30s: a throw inside a 30-second refresh beat would otherwise paper
+    // the screen with the same toast and hide everything else.
+    if(key===_lastAppErrorKey&&now-_lastAppErrorAt<30000) return;
+    _lastAppErrorKey=key;_lastAppErrorAt=now;
+    console.error('['+kind+']'+(where?' '+where:''),err);
+    if(typeof document!=='undefined'&&document.body&&typeof showToast==='function'){
+      const first=detail.split(String.fromCharCode(10))[0];
+      showToast('⚠ '+escHtml(kind)+': '+escHtml(first)+(where?' ('+escHtml(where)+')':'')
+        +'<br><span style="font-size:11px;opacity:.8">The board may be stale. Console has the stack.</span>',12000,true);
+    }
+  }catch(e){ try{console.error('error reporter failed',e);}catch(e2){} }
+}
+if(typeof window!=='undefined'){
+  window.addEventListener('error',ev=>{
+    // Resource load failures (a missing <img>) surface here too and are not app faults.
+    if(ev&&ev.target&&ev.target!==window&&ev.target.tagName) return;
+    reportAppError('Uncaught error',ev&&(ev.error||ev.message),ev&&ev.filename?ev.filename.split('/').pop()+':'+ev.lineno:'');
+  });
+  window.addEventListener('unhandledrejection',ev=>{
+    reportAppError('Unhandled promise rejection',ev&&ev.reason,'');
+  });
+}
 const TARGET_POLICY_VERSION='clock-stop-next-close-v1';
 function isValidChangeOpen(v){
   if(v===null||v===undefined||typeof v==='boolean') return false;
@@ -74,16 +114,6 @@ function isCsvLikeFile(file){
   const name=inputBaseName(file?.name||file||'');
   const type=String(file?.type||'').toLowerCase();
   return /\.csv$/i.test(name)||type.includes('csv')||type.includes('comma-separated')||type.includes('excel');
-}
-function isLooseNseSupportCsvName(name){
-  const n=inputNameLower(name);
-  return n==='nse holidays.csv'||
-    n==='block.csv'||
-    n==='bulk.csv'||
-    /^cm_52_wk_high_low_\d{8}\.csv$/i.test(inputBaseName(name))||
-    /^reg1_ind\d{6}\.csv$/i.test(inputBaseName(name))||
-    /^sec_bhavdata_full_\d{8}\.csv$/i.test(inputBaseName(name))||
-    /^sec_list_\d{8}\.csv$/i.test(inputBaseName(name));
 }
 
 function updateModeUI(){
@@ -1410,11 +1440,6 @@ const LIQ_MIN_AVG_VOL=10000;
 const LIQ_MIN_AVG_TURNOVER=10000000;
 const MIN_PRICE_FLOOR=5;
 const MIN_MCAP_FLOOR=500000000;
-function passesAverageLiquidity(avgVol10D,avgTurnover){
-  if(avgVol10D==null||!isFinite(avgVol10D)) return true;
-  if(avgVol10D<LIQ_MIN_AVG_VOL) return false;
-  return avgTurnover==null||!isFinite(avgTurnover)||avgTurnover>=LIQ_MIN_AVG_TURNOVER;
-}
 // ── CSV Parser ──
 function parseCSVRaw(text){
   const lines=[];let cur='',inQ=false;
@@ -1544,9 +1569,6 @@ function capSLDistancePct(v){
   if(!Number.isFinite(n)||n<=0) return SL_MIN_PCT;
   return Math.max(SL_MIN_PCT,Math.min(n,SL_MAX_PCT));
 }
-function getCappedSLPct(rawDistance){
-  return -capSLDistancePct(rawDistance);
-}
 function getActiveStopDistancePct(atrPct){
   const atr=Number(atrPct);
   return capSLDistancePct(atr>0?atr*SL_ATR_MULT:SL_MIN_PCT);
@@ -1604,10 +1626,6 @@ function deriveProfitVelocityPolicy(trips,fallbackSL,fallbackTGT){
 }
 function tickPrice(v){return Math.round(v/0.05)*0.05;}
 function tickBelowPrice(v){return Math.max(0,(Math.ceil((v*100)/5)*5-5)/100);}
-function actionableSellTrigger(stop, ltp){
-  if(!(stop>0)||!(ltp>0)) return stop;
-  return +Math.min(tickPrice(stop),tickBelowPrice(ltp)).toFixed(2);
-}
 function survRuleKey(label){return String(label||'').trim().toLowerCase().replace(/[^a-z0-9]+/g,'_').replace(/^_|_$/g,'');}
 function isSurvFlag(v){
   const s=String(v||'').trim();
@@ -1673,16 +1691,6 @@ function loadSurvRules(){
     showToast('Saved surveillance rules could not be read. The app preserved the current table and will not overwrite the saved setting.',7000,true);
     return false;
   }
-}
-function syncSurvRuleRows(savedRows){
-  const byKey={};
-  (savedRows||[]).forEach(row=>{if(row&&row.key) byKey[row.key]=row;});
-  const activeHeaders=new Set((SURV_HEADERS||[]).map(h=>String(h).trim().toLowerCase()));
-  return getSurvRules().map(rule=>{
-    const prev=byKey[rule.key]||{};
-    const active=prev.active!=null?prev.active:activeHeaders.has(rule.column.toLowerCase());
-    return {key:rule.key,label:rule.label,column:rule.column,active,flagged:prev.flagged||0,removed:prev.removed||0};
-  });
 }
 // ── NSE Parsers ──
 function parseBhavdata(text){
@@ -2045,13 +2053,6 @@ function getNSEPriceBandPct(symbol){
   const band=pb?.bandPct;
   return band!=null&&isFinite(band)&&band>0?band:null;
 }
-function getPriceBandBlockReason(s){
-  const band=s?.price_band_pct??getNSEPriceBandPct(s?.symbol);
-  if(!(band!=null&&isFinite(band)&&band>0)) return '';
-  const pc=s?.priceChange;
-  if(pc!=null&&isFinite(pc)&&pc>=band-PRICE_BAND_BLOCK_BUFFER_PCT) return `Near ${band}% NSE price band`;
-  return '';
-}
 function getUpperCircuitInfo(row,refPrice=null){
   const band=row?.price_band_pct??getNSEPriceBandPct(row?.symbol);
   if(!(band!=null&&isFinite(band)&&band>0)) return null;   // no band on file: fail open
@@ -2286,14 +2287,6 @@ function parseIndexGroups(text){
 function getNewHighLowMap(){
   const out={};
   Object.entries(NSE_NEW_HL_BYNAME).forEach(([name,v])=>{const sym=NSE_NAME_TO_SYM[name];if(sym)out[sym]=v;});
-  return out;
-}
-function getIndexGroupMap(){
-  // gl's names are truncated to 24 characters, so the name join is lossy. pd's symbol-keyed
-  // constituent flag is authoritative for Nifty 50 and takes precedence.
-  const out={};
-  Object.entries(NSE_INDEX_GROUP_BYNAME).forEach(([name,g])=>{const sym=NSE_NAME_TO_SYM[name];if(sym)out[sym]=g;});
-  Object.entries(NSE_INDEX_GROUP_BYSYM).forEach(([sym,g])=>{out[sym]=g;});
   return out;
 }
 function buildLiveNiftyProxy(rows){
@@ -2766,19 +2759,6 @@ const POST_CLOSE_CONDITIONS=[
   {key:'fundamental-positive',label:'Profitable results plus price confirmation',mode:'boost',test:p=>Number(p.fundamentalTrigger)>0,rowTest:r=>Number(r.fundamentalTrigger)>0},
   {key:'fundamental-negative',label:'Loss, negative operations, or qualified audit',mode:'veto-on-retired',test:p=>Number(p.fundamentalTrigger)<0,rowTest:r=>Number(r.fundamentalTrigger)<0},
 ];
-function buildPostCloseIssueAudit(issue,asOf){
-  const picks=(issue?.picks||[]).filter(p=>!p.control);
-  const resolved=picks.filter(p=>p.outcomePolicy==='net-policy-v1'&&p.paperComplete&&!p.evidenceIncomplete&&Number.isFinite(p.paperNetPct));
-  const netWin=p=>p.paperNetPct>0;
-  const rockets=resolved.filter(netWin);
-  const conditions=POST_CLOSE_CONDITIONS.map(c=>{
-    const matched=resolved.filter(c.test),wins=matched.filter(netWin).length,losses=matched.length-wins;
-    return {key:c.key,label:c.label,n:matched.length,wins,losses,precision:matched.length?+(100*wins/matched.length).toFixed(1):null};
-  });
-  return {objective:'net-policy-v1',issueDate:issue.date,asOf,issued:picks.length,resolved:resolved.length,rockets:rockets.length,
-    pending:picks.length-resolved.length,precision:resolved.length?+(100*rockets.length/resolved.length).toFixed(1):null,
-    conditions,candidates:conditions.filter(c=>c.n>0&&c.precision>=95)};
-}
 // v1213: the previous rule was `wins>=3 && sessions>=2 && losses<=1 && precision>=95`, and it was
 // UNREACHABLE BY CONSTRUCTION. `losses` is a cumulative count over every audited session and only
 // grows, so one condition's second contradiction disabled it permanently: measured 2026-08-21,
@@ -2869,46 +2849,6 @@ function getGainerCohort(rows){
     &&Number(r.turnover)>=25e5&&Number(r.price)>=10&&Number.isFinite(Number(r.day)));
   return pool.slice().sort((a,b)=>Number(b.day)-Number(a.day)).slice(0,GAINER_COHORT_N);
 }
-function buildGainerAudit(asOf){
-  const rows=Array.isArray(ALL)?ALL:[];
-  if(rows.length<200) return null;
-  const cohort=getGainerCohort(rows);
-  if(cohort.length<5) return null;
-  const win=new Set(cohort.map(r=>r.symbol));
-  const control=rows.filter(r=>!win.has(r.symbol)&&r.eqEligible!==false
-    &&Number(r.turnover)>=25e5&&Number(r.price)>=10);
-  if(control.length<200) return null;
-  const safe=(fn,r)=>{try{return !!fn(r);}catch(e){return false;}};
-  const conditions=POST_CLOSE_CONDITIONS.map(c=>{
-    const hit=cohort.filter(r=>safe(c.rowTest,r)).length;
-    const base=control.filter(r=>safe(c.rowTest,r)).length;
-    const hp=hit/cohort.length, bp=base/control.length;
-    return {key:c.key,label:c.label,mode:c.mode,hit,of:cohort.length,
-      hitPct:+(100*hp).toFixed(1),basePct:+(100*bp).toFixed(1),lift:+((hp-bp)*100).toFixed(1)};
-  });
-  const num=(f)=>{
-    const a=cohort.map(f).filter(Number.isFinite).sort((x,y)=>x-y);
-    const b=control.map(f).filter(Number.isFinite).sort((x,y)=>x-y);
-    const med=v=>v.length?v[Math.floor(v.length/2)]:null;
-    return {cohort:med(a),control:med(b)};
-  };
-  const fields={
-    rank:num(r=>Number(r.rank)), score:num(r=>Number(r.score)),
-    setupPct:num(r=>Number(r.setupPct)), ignitePct:num(r=>Number(r.ignitePct)),
-    compositePct:num(r=>Number(r.compositePct)), feasibility:num(r=>Number(r.feasibility)),
-    circuitFeasibility:num(r=>Number(r.circuitFeasibility)),
-    relvol:num(r=>Number(r.relvol)), day:num(r=>Number(r.day))};
-  const onBoard=cohort.filter(r=>Number(r.rank)<=RECOMMEND_MAX_RANK).length;
-  const scored=cohort.filter(r=>Number(r.score)>=RECOMMEND_MIN_SCORE).length;
-  return {date:asOf,n:cohort.length,controlN:control.length,
-    symbols:cohort.map(r=>({s:r.symbol,day:+Number(r.day).toFixed(2),rank:Number(r.rank)||null,
-      score:Number(r.score)||0,setupPct:Number(r.setupPct)||null,
-      feasibility:Number.isFinite(r.feasibility)?+r.feasibility.toFixed(3):null,
-      circuitFeasibility:Number.isFinite(r.circuitFeasibility)?+r.circuitFeasibility.toFixed(3):null,
-      relvol:Number.isFinite(r.relvol)?+r.relvol.toFixed(2):null,
-      dirOk:!!r.directionConfirmed})),
-    caught:{onBoard,scored},fields,conditions};
-}
 // A condition ARMS on the same shape of bar the pick audit uses: it has to hold, with the same sign,
 // across sessions rather than once. LIFT_MIN is the cohort/control gap in percentage points; a
 // condition present in the winners at the market's own base rate says nothing.
@@ -2917,31 +2857,6 @@ const GAINER_LIFT_MIN=25;
 // condition was disabled permanently by its second bad day and then reported COLLECTING. The lift
 // is already measured per session against the market's own base rate, so the honest test is
 // whether that lift is reliably non-zero, on the same derived critical value the pick side uses.
-function getGainerScorecard(gainers){
-  const days=Object.values(gainers||{});
-  const tCrit=postCloseTCrit();
-  return POST_CLOSE_CONDITIONS.map(c=>{
-    const rows=days.map(d=>(d.conditions||[]).find(x=>x.key===c.key)).filter(Boolean);
-    const lifts=rows.map(x=>Number(x.lift)).filter(v=>Number.isFinite(v));
-    const sessions=lifts.length;
-    const confirms=rows.filter(x=>x.lift>=GAINER_LIFT_MIN).length;
-    const contradictions=rows.filter(x=>x.lift<=-GAINER_LIFT_MIN).length;
-    const m=sessions?lifts.reduce((a,b)=>a+b,0)/sessions:null;
-    const sd=sessions>1?Math.sqrt(lifts.reduce((a,b)=>a+(b-m)*(b-m),0)/(sessions-1)):0;
-    const t=(sessions>1&&sd>0)?+(m/(sd/Math.sqrt(sessions))).toFixed(2):0;
-    const agreement=sessions?+(100*lifts.filter(v=>Math.sign(v)===Math.sign(m)).length/sessions).toFixed(0):null;
-    const enough=sessions>=3&&agreement>=70;
-    let status='COLLECTING',why='';
-    if(enough&&t>=tCrit&&m>0) status='ARMED';
-    else if(enough&&t<=-tCrit&&m<0) status='RETIRED';
-    else if(!sessions) why='no gainer cohort has scored it yet';
-    else if(sessions<3) why='needs '+(3-sessions)+' more session'+(3-sessions===1?'':'s');
-    else if(agreement<70) why='its sign flips too often ('+agreement+'% agreement)';
-    else why='|t| '+Math.abs(t).toFixed(2)+' of the '+tCrit+' required';
-    return {key:c.key,label:c.label,mode:c.mode,sessions,confirms,contradictions,
-            meanLift:sessions?+m.toFixed(1):null,t,agreement,tCrit,status,why};
-  });
-}
 
 function activePostCloseTriggerRules(mode){
   return (getUnifiedModelState().frozenRules||[]).map(score=>({score,definition:POST_CLOSE_CONDITIONS.find(c=>c.key===score.key)}))
@@ -3035,14 +2950,6 @@ function getRecommendationOutcomeSummary(){
     avgOutcomeScore:scored.length?+meanArr(scored).toFixed(3):null,
     issueDays:issues.length,horizonDays:currentHorizon
   };
-}
-function getScoreBandKey(score){
-  const s=Number(score);
-  if(!Number.isFinite(s)) return 'unknown';
-  if(s>=80) return '80+';
-  if(s>=70) return '70-79';
-  if(s>=60) return '60-69';
-  return '<60';
 }
 // One adjustable evidence model. Eligibility, depth, freshness, timing, circuit and risk
 // safeguards are applied separately and are never parameters of the learner.
@@ -3620,100 +3527,6 @@ async function updateScoreLearning(){
   }finally{_scoreLearningBusy=false;}
 }
 
-
-function buildSystemScorecard(){
-  const store=FS.get(RECOMMEND_OUTCOME_STORE)||{};
-  const issues=store.issues||{};
-  const rows=[];
-  let tot={picks:0,resolvable:0,target:0,stopped:0,expired:0,ambiguous:0,pending:0,legacy:0};
-  const daysToTarget=[];
-  Object.keys(issues).sort().forEach(date=>{
-    const issue=issues[date]||{};
-    const picks=issue.picks||[];
-    // v1128: control rows are graded but are NOT recommendations — excluded here so the scorecard
-    // reports what the app actually picked. They are used by the band breakdown below.
-    const resolvable=picks.filter(p=>Number(p.targetPct)>0&&Number(p.stopPct)>0&&!p.control);
-    const legacy=picks.filter(p=>!p.control).length-resolvable.length;
-    const target=resolvable.filter(p=>isRocketOutcome(p));
-    const stopped=resolvable.filter(p=>p.rocketOutcome===ROCKET_OUTCOME.STOPPED);
-    const expired=resolvable.filter(p=>p.rocketOutcome===ROCKET_OUTCOME.EXPIRED);
-    const ambiguous=resolvable.filter(p=>p.rocketOutcome===ROCKET_OUTCOME.AMBIGUOUS);
-    const settled=target.length+stopped.length+expired.length+ambiguous.length;
-    const pending=resolvable.length-settled;
-    target.forEach(p=>{if(p.rocketDays!=null)daysToTarget.push(Number(p.rocketDays));});
-    tot.picks+=picks.filter(p=>!p.control).length; tot.resolvable+=resolvable.length; tot.legacy+=legacy;
-    tot.target+=target.length; tot.stopped+=stopped.length; tot.expired+=expired.length;
-    tot.ambiguous+=ambiguous.length; tot.pending+=pending;
-    if(!resolvable.length) return;                        // a wholly legacy cohort says nothing
-    const regimeData=issue.regime;
-    const regimeLabel=String(regimeData?.label||regimeData||'—');
-     const regimeDetail=regimeData&&typeof regimeData==='object'
-      ? [`VIX range ${regimeData.vixRangePos==null?'—':Number(regimeData.vixRangePos).toFixed(0)+'th'}`,
-        `breadth ${regimeData.breadthPct==null?'—':Number(regimeData.breadthPct).toFixed(0)+'%'}`,
-        `Nifty ${regimeData.niftyPct==null?'—':(Number(regimeData.niftyPct)>=0?'+':'')+Number(regimeData.niftyPct).toFixed(2)+'%'}`].join(' · ')
-      : 'detail unavailable in stored cohort';
-    rows.push({date:issue.date||date,
-      regime:regimeDetail?regimeLabel+' · '+regimeDetail:regimeLabel,
-      picks:resolvable.length, target:target.length, stopped:stopped.length,
-      ambiguous:ambiguous.length,
-      expired:expired.length, pending,
-      hitPct:settled?+(target.length/settled*100).toFixed(0):null,
-      medDays:target.length?median(target.map(p=>Number(p.rocketDays)).filter(v=>Number.isFinite(v))):null});
-  });
-  let cBetter=0,cWorse=0,cPairs=0;
-  Object.keys(issues).forEach(date=>{
-    const issue=issues[date]||{};
-    const day=issue.picks||[];
-    const g=day.filter(p=>Number(p.targetPct)>0&&Number(p.stopPct)>0&&!p.control
-      &&(p.scoreVersion||issue.scoreVersion||'legacy-pre-v1229')===RADAR_SCORE_VERSION
-      &&Number.isFinite(+p.score)
-      &&['rocket','stopped','expired','ambiguous'].includes(String(p.rocketOutcome)));
-    for(let i=0;i<g.length;i++) for(let j=i+1;j<g.length;j++){
-      const a=g[i],b2=g[j];
-      const wa=isRocketOutcome(a), wb=isRocketOutcome(b2);
-      if(wa===wb) continue;                       // only winner/loser pairs discriminate
-      const winner=wa?a:b2, loser=wa?b2:a;
-      cPairs++;
-      if(+winner.score>+loser.score) cBetter++; else if(+winner.score<+loser.score) cWorse++;
-    }
-  });
-  const bandDefs=RADAR_SCORE_BANDS.map((b,i)=>[
-    Number.isFinite(b.min)?Math.max(0,b.min):0,
-    i?RADAR_SCORE_BANDS[i-1].min:101,
-    b.range
-  ]);
-  const bands=bandDefs.map(([lo,hi,label])=>({label,lo,hi,n:0,target:0,settled:0,control:0}));
-  let legacyScorePicks=0;
-  Object.keys(issues).forEach(date=>{
-    const issue=issues[date]||{};
-    (issue.picks||[]).forEach(p=>{
-      if(!(Number(p.targetPct)>0&&Number(p.stopPct)>0))return;
-      if((p.scoreVersion||issue.scoreVersion||'legacy-pre-v1229')!==RADAR_SCORE_VERSION){legacyScorePicks++;return;}
-      const sc=Number(p.score); if(!Number.isFinite(sc))return;
-      const b=bands.find(x=>sc>=x.lo&&sc<x.hi); if(!b)return;
-      b.n++; if(p.control)b.control++;
-      const st=String(p.rocketOutcome);
-      if(['rocket','stopped','expired','ambiguous'].includes(st)){
-        b.settled++; if(isRocketOutcome(p))b.target++;
-      }
-    });
-  });
-  bands.forEach(b=>{b.hitPct=b.settled?+(b.target/b.settled*100).toFixed(0):null;});
-  const settled=tot.target+tot.stopped+tot.expired+tot.ambiguous;
-  daysToTarget.sort((a,b)=>a-b);
-  return {rows:rows.reverse(),                            // newest cohort first
-    settled, ...tot,
-    hitPct:settled?+(tot.target/settled*100).toFixed(1):null,
-    stopPct:settled?+(tot.stopped/settled*100).toFixed(1):null,
-    expiredPct:settled?+(tot.expired/settled*100).toFixed(1):null,
-    medDaysToTarget:daysToTarget.length?median(daysToTarget):null,
-    concordancePct:cPairs?+(cBetter/cPairs*100).toFixed(1):null, concordancePairs:cPairs,
-    legacyScorePicks,
-    bands,
-    sameDay:daysToTarget.filter(v=>v===0).length,
-    nextDay:daysToTarget.filter(v=>v===1).length,
-    cohorts:rows.length};
-}
 function median(a){
   const v=(a||[]).filter(x=>Number.isFinite(x)).sort((x,y)=>x-y);
   if(!v.length) return null;
@@ -3894,20 +3707,6 @@ function getExecutedEntryOutcomeSummary(){
     horizonDays:getAdaptiveOutcomeHorizonDays()
   };
 }
-function calcExecutedEntryOutcomeScore(entry){
-  const tgt=getEffectiveTgtPct()||TRADEBOOK_STATS?.adaptiveTGT||4;
-  const best=entry.bestNetHighPct;
-  const close=entry.bestNetClosePct;
-  const velocity=entry.bestVelocityPctPerDay;
-  let score=0;
-  if(best!=null&&isFinite(best)) score=Math.max(score,clampNum(best/tgt,-1,0.8));
-  if(close!=null&&isFinite(close)){
-    score=(score*0.7)+(clampNum(close/tgt,-1,1)*0.3);
-    if(close<0&&(best==null||best<tgt*0.35)) score=Math.min(score,clampNum(close/(tgt*0.5),-1,-0.05));
-  }
-  if(velocity!=null&&isFinite(velocity)) score+=clampNum(velocity/tgt,-0.25,0.25);
-  return +clampNum(score,-1,1).toFixed(3);
-}
 function getClosedSaleCohorts(trips){
   const cohorts={};
   (trips||[]).forEach(trip=>{
@@ -4025,17 +3824,6 @@ function detectNSE(filename,content){
 
 // ── Stats ──
 function mean(a){return a.length?a.reduce((s,v)=>s+v,0)/a.length:0;}
-function previousTradingSessionDate(dateText){
-  if(!dateText) return null;
-  const date=new Date(dateText+'T12:00:00Z');
-  if(Number.isNaN(date.getTime())) return null;
-  do{
-    date.setUTCDate(date.getUTCDate()-1);
-    const dow=date.getUTCDay();
-    const key=date.toISOString().slice(0,10);
-    if(dow!==0&&dow!==6&&!NSE_HOLIDAYS.has(key)) return key;
-  }while(true);
-}
 
 const RADAR_GROUPS={
   participation:{label:'Participation',budget:20,desc:'Relative volume, money flow and turnover impulse'},
@@ -4255,17 +4043,6 @@ function tapeReachability(sym,targetPct){
   // Today's remaining clock cannot veto an entry with a next-session deadline.
   return {winRangePct,coverage,reachable:null,horizon:'through next trading close'};
 }
-function tapeAggregate(bars,k){
-  if(k<=1) return bars.slice();
-  const out=[];
-  for(let i=0;i+k<=bars.length;i+=k){
-    const s=bars.slice(i,i+k);
-    out.push({t:s[0].t,o:s[0].o,c:s[s.length-1].c,
-      h:Math.max(...s.map(b=>b.h)),l:Math.min(...s.map(b=>b.l)),
-      v:s.reduce((n,b)=>n+(Number(b.v)||0),0)});
-  }
-  return out;
-}
 // Signed volume for one candle: buyers minus sellers, by where it closed inside its own range.
 const tapeDelta=b=>(b.h>b.l?(Number(b.v)||0)*(2*(b.c-b.l)/(b.h-b.l)-1):0);
 // MEMOIZED ON THE BAR SIGNATURE (v1254). This re-aggregates a symbol's whole session - 15-minute
@@ -4427,9 +4204,6 @@ function _radarTapeEvidenceUncached(sym){
 // v1203/v1227 starvation, and this release's own suite caught it before release.
 // The queue asks instead: IF the tape confirmed, would this be a recommendation? That is the row
 // scored with a confirmed tape - exactly the value a request could unlock.
-function radarPotentialScore(r){
-  try{ return Number(radarScoreComponents(r,1).total)||0; }catch(e){ return 0; }
-}
 // THE POOL IS THE FETCH LIST (v1233). Owner: the filtered ALL NSE always holds a low number of
 // stocks, so all of them can be fetched on every refresh - which is what makes tape-only decisions
 // possible. Membership is therefore the eligible pool itself, NOT a score-chosen subset (the v1227
@@ -4515,7 +4289,6 @@ function isDirectionConfirmed(s){
   const vw=Number(s.vwap), px=Number(s.price), day=Number(s.day);
   return (vw > 0 && px >= vw && isValidChangeOpen(s.changeOpen) && Number(s.changeOpen) > 0 && Number.isFinite(day) && day > 0);
 }
-function radarEvidenceScore(r,tapeStanding){return radarScoreComponents(r,tapeStanding).total;}
 function setRadarEvidenceScore(r,tapeStanding){
   if(r) r.directionConfirmed = isDirectionConfirmed(r);
   const c=radarScoreComponents(r,tapeStanding);
@@ -7756,16 +7529,6 @@ function getTodayRupeeNeed(){
   try{const b=getLatestBookedSummary(); if(b&&Number.isFinite(Number(b.total))) booked=Number(b.total);}catch(e){}
   return {need,booked,outstanding:Math.max(0,need-(booked||0))};
 }
-function getBasketRupeeProjection(allocMap){
-  const rows=Object.values(allocMap||{}).filter(a=>a&&!a.rejected&&a.qty>0);
-  const expectedNet=rows.reduce((sum,a)=>sum+(Number(a.expectedNet)||0),0);
-  const riskRs=rows.reduce((sum,a)=>sum+(Number(a.riskRs)||0),0);
-  const deployed=rows.reduce((sum,a)=>sum+(Number(a.debit)||0),0);
-  const t=getTodayRupeeNeed();
-  return {positions:rows.length,deployed,expectedNet,riskRs,
-          need:t?t.need:null,booked:t?t.booked:null,outstanding:t?t.outstanding:null,
-          coverPct:(t&&t.outstanding>0)?(expectedNet/t.outstanding*100):null};
-}
 // Show each default in its field's placeholder so an empty field visibly reflects what the
 // calculation will use (grey = default in effect; a typed value = your override).
 function onTradeInputChange(){
@@ -7848,12 +7611,6 @@ function goalFmtRs(v){
   return Math.round(n).toLocaleString('en-IN');
 }
 // Celebration/punishment reps (v482): profit ₹ = steps to walk; |loss| ÷ 100 = pushups.
-function goalRepsHTML(v){
-  const n=Number(v)||0;
-  if(n>0) return `<div style="font-size:11px;color:var(--green)">🎉 ${Math.round(n).toLocaleString('en-IN')} steps</div>`;
-  if(n<0) return `<div style="font-size:11px;color:var(--red)">💪 ${Math.max(1,Math.ceil(Math.abs(n)/100))} pushups</div>`;
-  return '';
-}
 function goalFieldStyle(accent){
   return `width:100%;padding:7px 9px;background:var(--bg-card);border:1px solid var(--border);border-radius:8px;`
     +`color:var(--t1);font-family:'DM Mono',monospace;font-size:14px;outline:none;transition:border .2s`;
@@ -8658,64 +8415,6 @@ function getPostSellHorizonHigh(sym,sellDate,sellTime,horizonSessions){
   }
   return out;
 }
-function buildExitTimingModel(trips){
-  // The ceiling must be at least as long as he ACTUALLY holds, or "afterwards" is answered over a
-  // window shorter than the decision it informs: getEffectiveReviewDays() resolved to 1 session on
-  // this book. Both inputs are existing learned quantities - the later of the review window and the
-  // 75th percentile of observed overnight holds. No chosen number.
-  const heldDays=(trips||[]).map(t=>Number(t?.holdDays)).filter(v=>Number.isFinite(v)&&v>0).sort((a,b)=>a-b);
-  const p75Hold=heldDays.length?heldDays[Math.min(heldDays.length-1,Math.floor(heldDays.length*0.75))]:0;
-  const reviewDays=Number((typeof getEffectiveReviewDays==='function')?getEffectiveReviewDays():0)||0;
-  const horizon=Math.max(1,Math.round(Math.max(reviewDays,p75Hold))||2);
-  const rows=[];
-  (trips||[]).forEach(t=>{
-    if(!t||!t.sym||!t.sellDate||!t.sellTime) return;
-    const minute=clockMinutes(t.sellTime);
-    if(minute==null) return;
-    const sell=Number(t.sellPrice), qty=Number(t.qty)||0;
-    if(!(sell>0)||!(qty>0)) return;
-    let sameDayPct=null, horizonPct=null, horizonRs=null, sameDayKnown=false, horizonKnown=false;
-    try{
-      const e=getPostSellHorizonHigh(t.sym,t.sellDate,t.sellTime,horizon);
-      sameDayKnown=e.sameDayKnown;
-      // A watched sell day with no new high is a REAL zero, not a gap: the stock did not go higher.
-      if(e.sameDayKnown) sameDayPct=e.sameDayHigh!=null?+(((e.sameDayHigh-sell)/sell)*100).toFixed(2):0;
-      if(e.sessions>0){
-        horizonKnown=true;
-        const ref=e.horizonHigh!=null?e.horizonHigh:sell;
-        horizonPct=+(((ref-sell)/sell)*100).toFixed(2);
-        horizonRs=Math.round((ref-sell)*qty);
-      }
-    }catch(e){}
-    rows.push({minute,windowMinute:Math.floor(minute/30)*30,date:t.sellDate,
-      netPct:Number(t.netPnlPct),sameDayPct,horizonPct,horizonRs,sameDayKnown,horizonKnown});
-  });
-  if(!rows.length) return {exits:0,rows:[],horizon,totalHorizonRs:0};
-  const buckets={};
-  rows.forEach(r=>(buckets[r.windowMinute]??=[]).push(r));
-  const pad=x=>String(Math.floor(x/60)).padStart(2,'0')+':'+String(x%60).padStart(2,'0');
-  const out=Object.keys(buckets).map(k=>+k).sort((a,b)=>a-b).map(m=>{
-    const list=buckets[m];
-    const nets=list.map(r=>r.netPct).filter(v=>Number.isFinite(v));
-    const sd=list.filter(r=>r.sameDayKnown).map(r=>r.sameDayPct);
-    const hz=list.filter(r=>r.horizonKnown).map(r=>r.horizonPct);
-    const hzRs=list.filter(r=>r.horizonKnown);
-    return {
-      key:String(m), slice:pad(m)+'-'+pad(m+30), exits:list.length,
-      days:new Set(list.map(r=>r.date)).size,
-      medianNetPct:nets.length?+tradeMedian(nets).toFixed(2):null,
-      sameDayPct:sd.length?+tradeMedian(sd).toFixed(2):null,
-      sameDayN:sd.length,
-      horizonPct:hz.length?+tradeMedian(hz).toFixed(2):null,
-      horizonRs:hzRs.reduce((a,r)=>a+r.horizonRs,0),
-      wentHigherPct:hz.length?+(100*hz.filter(v=>v>0).length/hz.length).toFixed(0):null
-    };
-  });
-  return {exits:rows.length,rows:out,horizon,
-    sameDayCoverage:rows.filter(r=>r.sameDayKnown).length,
-    horizonCoverage:rows.filter(r=>r.horizonKnown).length,
-    totalHorizonRs:out.reduce((a,r)=>a+r.horizonRs,0)};
-}
 
 // v1211 (owner): "how long should I hold a stock, both intraday and long term". Two cohorts,
 // because they are different questions: a position closed the same session is bucketed by ELAPSED
@@ -8728,61 +8427,6 @@ function buildExitTimingModel(trips){
 // needed longer" and not only "what waiting earns". This is descriptive of what happened. The
 // unconfounded companion is time-to-peak, which the app already measures forward from issue
 // (getRocketArrivalStats), and it is reported beside the table rather than mixed into it.
-function buildHoldDurationModel(trips){
-  const INTRA=[[0,15,'<15m'],[15,30,'15-29m'],[30,60,'30-59m'],[60,120,'1-2h'],[120,240,'2-4h'],[240,1e9,'4h+']];
-  const DAYS=[[1,2,'1d'],[2,3,'2d'],[3,6,'3-5d'],[6,11,'6-10d'],[11,21,'11-20d'],[21,1e9,'21d+']];
-  const rows=[];
-  (trips||[]).forEach(t=>{
-    const pct=Number(t?.netPnlPct), rs=Number(t?.netPnl), cost=Number(t?.capital);
-    if(!Number.isFinite(pct)||!Number.isFinite(rs)) return;
-    const hd=Number(t?.holdDays);
-    if(!Number.isFinite(hd)) return;
-    if(hd===0){
-      const b=clockMinutes(t?.buyTime), sl=clockMinutes(t?.sellTime);
-      if(b==null||sl==null||sl<b) return;
-      const mins=sl-b;
-      const band=INTRA.find(x=>mins>=x[0]&&mins<x[1]);
-      if(!band) return;
-      // An intraday position occupies that session's SLOT, not a fraction of it - you cannot run
-      // 125 sequential three-minute trades. Dividing by elapsed minutes made a 3-minute +1.8% read
-      // as 226% per session and named it the best bucket, which is a normalisation artefact and not
-      // advice. Intraday therefore costs one session of capital, which is also what makes it
-      // directly comparable with the overnight cohort's per-session figure.
-      rows.push({cohort:'Intraday',key:'i'+band[0],label:band[2],pct,rs,cost,
-        perDay:pct,unit:mins});
-    } else {
-      const band=DAYS.find(x=>hd>=x[0]&&hd<x[1]);
-      if(!band) return;
-      rows.push({cohort:'Overnight',key:'d'+band[0],label:band[2],pct,rs,cost,
-        perDay:pct/hd,unit:hd});
-    }
-  });
-  if(!rows.length) return {trips:0,rows:[],best:null};
-  const buckets={};
-  rows.forEach(r=>(buckets[r.cohort+'|'+r.key]??=[]).push(r));
-  const order=['Intraday','Overnight'];
-  const out=Object.keys(buckets).map(k=>{
-    const list=buckets[k];
-    const pcts=list.map(r=>r.pct);
-    const wins=list.filter(r=>r.rs>0).length;
-    return {
-      cohort:list[0].cohort, slice:list[0].label, sortKey:list[0].unit,
-      trips:list.length,
-      winPct:+(100*wins/list.length).toFixed(0),
-      medianPct:+tradeMedian(pcts).toFixed(2),
-      medianPerDay:+tradeMedian(list.map(r=>r.perDay)).toFixed(2),
-      totalRs:Math.round(list.reduce((a,r)=>a+r.rs,0))
-    };
-  }).sort((a,b)=>order.indexOf(a.cohort)-order.indexOf(b.cohort)||a.sortKey-b.sortKey);
-  // The decision the table exists to make: the bucket with the best return per day of capital,
-  // within each cohort, and only where the sample can carry it.
-  const pick=c=>{
-    const c2=out.filter(r=>r.cohort===c&&r.trips>=10);
-    if(!c2.length) return null;
-    return c2.reduce((a,b)=>b.medianPerDay>a.medianPerDay?b:a);
-  };
-  return {trips:rows.length,rows:out,best:{intraday:pick('Intraday'),overnight:pick('Overnight')}};
-}
 
 // v1211 (owner): money-weighted return on CLOSED round trips. Each trip is two dated cash flows -
 // the cost out on the buy date, the proceeds back (net of charges) on the sell date - so a run of
@@ -10470,39 +10114,7 @@ function getBaselineRewardRisk(){
   return c&&c.rr>0?c.rr:null;
 }
 let _nudgeMemo=null;
-function getTargetNudgeContext(){
-  const pool=getLeftOnTablePool();
-  const cohort=(Array.isArray(ALL)?ALL:[])
-    .filter(r=>r&&r.basketEligible&&Number.isFinite(Number(r.score))&&Number(r.score)>0)
-    .sort((a,b)=>(a.rank||1e9)-(b.rank||1e9))
-    .slice(0,typeof RECOMMEND_MAX_RANK==='number'?RECOMMEND_MAX_RANK:10);
-  const meanScore=cohort.length?cohort.reduce((s,r)=>s+Number(r.score),0)/cohort.length:null;
-  const sig=`${pool.poolPct}|${meanScore==null?'-':meanScore.toFixed(3)}|${cohort.length}`;
-  if(_nudgeMemo&&_nudgeMemo.sig===sig) return _nudgeMemo.val;
-  const val={poolPct:pool.poolPct,rawPoolPct:pool.rawPct,meanScore,cohort:cohort.length,
-             sessions:pool.sessions,poolSource:pool.source};
-  _nudgeMemo={sig,val};
-  return val;
-}
 let _capMedMemo=null;
-function getUniverseMedianCapacity(){
-  if(_capMedMemo&&_capMedMemo.all===ALL) return _capMedMemo.val;
-  const caps=[];
-  for(const r of (Array.isArray(ALL)?ALL:[])){
-    if(r&&r.basketEligible===false) continue;
-    if(!(Number(r&&r.turnover)>=2500000)||!(Number(r&&r.price)>=10)) continue;
-    const atr=Number(r&&r.atr), range=Number(r&&r.rangePct);
-    const hasA=Number.isFinite(atr)&&atr>0, hasR=Number.isFinite(range)&&range>0;
-    const c=hasA&&hasR?Math.sqrt(atr*range):hasA?atr:hasR?range:null;
-    if(c>0) caps.push(c);
-  }
-  // Below a real cross-section the median is not a median. Null makes the scaling inert and the
-  // portfolio number is used exactly as v1119 left it.
-  const val=caps.length>=ACHIEVE_MIN_ROWS
-    ?caps.sort((a,b)=>a-b)[Math.floor(caps.length/2)]:null;
-  _capMedMemo={all:ALL,val};
-  return val;
-}
 // v1212 (owner, standing rule): TARGETS COME FROM THE MARKET, NOT FROM HIS TRADE HISTORY.
 // "The app needs to evolve, not build on past mistakes... the trade history tells you previous
 // logics/versions did not work and that's why we are here." v1105/v1206 priced the target from
@@ -10727,23 +10339,6 @@ function getReachableTargets(){
   }
   _reachMemo={sig,val};
   return val;
-}
-
-function splitQty(qty){
-  const q=Math.floor(Number(qty)||0);
-  if(q<=0) return {base:0,runner:0};
-  if(q<2) return {base:q,runner:0};
-  const base=Math.ceil(q/2);
-  return {base,runner:q-base};
-}
-
-function getRunnerTargetPct(policy){
-  const base=Number(policy&&policy.targetPct);
-  if(!(base>0)) return null;
-  const reach=getReachableTargets();
-  const cap=Number(policy&&policy.capacityPct);
-  const want=reach.runnerPct>0?reach.runnerPct:(cap>0?cap*1.5:base);
-  return Math.max(base,Math.floor(want*20)/20);
 }
 
 const HORIZON_TARGET_MEMO=new Map();
@@ -10980,30 +10575,6 @@ function getRowExitPolicy(row,buyPrice=null,activeInfo=null,nudgeInfo=null){
     buyPrice:Number(buyPrice)>0?Number(buyPrice):null
   };
 }
-function getPositionExitSignal(row){
-  if(!row) return null;
-  const price=Number(row.price), vwap=Number(row.vwap);
-  const hi=Number(row.high1d), lo=Number(row.low1d);
-  const cmf=Number(row.chaikinMF), mfi15=Number(row.mfi15m);
-  const parts=[], missing=[];
-  const push=(ok,label)=>{ if(ok===null){missing.push(label);return;} parts.push({ok,label}); };
-  push((vwap>0&&price>0)?price>=vwap:null,'above VWAP');
-  push(Number.isFinite(cmf)?cmf>0:null,'money flowing in');
-  push(Number.isFinite(mfi15)?mfi15>60:null,'15m money flow strong');
-  if(!parts.length) return {state:'unknown',score:null,parts:[],missing,
-    note:'No VWAP or money-flow data on this row, so whether it is still being bought is unknown.'};
-  const held=parts.filter(x=>x.ok).length;
-  const frac=held/parts.length;
-  // Retention is CONTEXT, never an input — it is the thing these signals are judged against, so
-  // feeding it back in would be exactly the circularity the note above warns about.
-  const retention=(hi>lo&&price>0)?+((price-lo)/(hi-lo)).toFixed(2):null;
-  const state=frac>=0.99?'holding':frac>=0.5?'mixed':'fading';
-  const retTxt=retention!=null?('; price sits at '+Math.round(retention*100)+'% of today’s range'):'';
-  return {state,score:+frac.toFixed(2),held,of:parts.length,retention,
-    parts:parts.map(x=>(x.ok?'✓ ':'✗ ')+x.label),missing,
-    note:held+' of '+parts.length+' buying signals still on'+retTxt
-      +'. Reported only — this moves no target and places no order.'};
-}
 function summarizeRowExitPolicies(rows){
   const policies=(rows||[]).map(r=>getRowExitPolicy(r,r?.price)).filter(p=>p.targetPct>0&&p.stopPct>0&&p.viable);
   if(!policies.length) return null;
@@ -11111,150 +10682,6 @@ function getPositionAfterCostFloor(avgPrice,qty){
   let tick=+(Math.ceil((hi-1e-9)/0.05)*0.05).toFixed(2);
   while(netAt(tick)<=0) tick=+(tick+0.05).toFixed(2);
   return tick;
-}
-function getLegacyPositionAction(sym,pos){
-  const s=(Array.isArray(ALL)?ALL:[]).find(r=>normSym(r.symbol)===normSym(sym))||null;
-  const qty=Number(pos&&pos.qty)||0;
-  if(!(qty>0)) return null;
-  const _rest=(typeof getRestingOrderMap==='function')?getRestingOrderMap()[normSym(sym)]:null;
-  // v1210: the working order is NETTED OUT of the instruction, not merely mentioned in it. Telling
-  // the owner to sell 92 when 57 are already on the offer asks for a double sale of 57 shares. The
-  // recorded quantity keeps its v1207 meaning everywhere else; it is the ASK that shrinks.
-  const _withResting=(a)=>{
-    if(!a||!/^EXIT/.test(a.act)||!_rest||!(_rest.sellQty>0)) return a;
-    const rq=Math.min(qty,_rest.sellQty);
-    const rd2=getIntradayRead(sym);
-    const proj=(rd2&&rd2.eod&&Number.isFinite(rd2.eod.close))?rd2.eod.close:null;
-    const unreachable=(proj!=null&&_rest.sellPrice>0&&proj<_rest.sellPrice);
-    const remain=Math.max(0,(Number(a.qty)||0)-rq);
-    a.resting={qty:rq,price:_rest.sellPrice,unreachable};
-    a.covered=!(remain>0);
-    if(!a.covered&&a.act!=='EXIT ALL') a.act='EXIT '+remain;
-    a.qty=a.covered?0:remain;
-    a.why=a.why+' — '+rq+' of '+qty+' already resting on a sell'
-      +(_rest.sellPrice>0?' worked at '+fmtINR(_rest.sellPrice):'')
-      +(unreachable?', which this session projects to '+fmtINR(proj)+' and will not reach'
-                   :', still live')
-      +(a.covered?'; the whole ask is already on the offer, so there is nothing further to place'
-                 :'; '+remain+' still to place');
-    return a;
-  };
-  // EXECUTION, NOT DECISION. The projection may never decide WHETHER to exit - v1191 stands - but
-  // the owner's question of 2026-08-21 (SPECTRUM reading EXIT ALL beside EoD +10.63%) is about the
-  // PRICE, and leaving that to a column which argues with the instruction next to it IS the
-  // contradiction. When this session's own projection sits above the live price the exit is WORKED
-  // at that level instead of hit at market. Bounded by the row's own target, so a stop-out can
-  // never be talked into a moonshot, and it expires with the session it was projected for.
-  const _withExecution=(a)=>{
-    if(!a||!/^EXIT/.test(a.act)||a.covered) return a;
-    const rd2=getIntradayRead(sym);
-    const t=(rd2&&rd2.current)?rd2.eod:null;   // resolved again: _withExecution is declared above rd
-    const px=ltp;
-    if(!t||!Number.isFinite(t.pct)||!(t.pct>0)||!Number.isFinite(t.close)||!(px>0)) return a;
-    let level=tickPrice(t.close),capped=false;
-    const av=Number(pos&&pos.avg)||0;
-    if(s&&av>0){
-      const pol=getRowExitPolicy(s,av);
-      const tgt=av*(1+Number(pol.targetPct||0)/100);
-      if(Number.isFinite(tgt)&&tgt>0&&level>tgt){ level=tgt; capped=true; }
-    }
-    if(!(level>px)) return a;
-    a.execution={level,projPct:t.pct,barsLeft:t.barsLeft,capped,
-      note:'Work this exit at '+fmtINR(level)+(capped?' (its own target)':'')
-        +' rather than hitting the bid at '+fmtINR(px)+': this session projects +'+t.pct.toFixed(2)
-        +'% over its remaining '+t.barsLeft+' bars. The projection expires with this session — '
-        +'unfilled at the close, exit at market.'};
-    a.why=a.why+' — but this session projects +'+t.pct.toFixed(2)+'% over its remaining '
-      +t.barsLeft+' bars, so work the exit at '+fmtINR(level)
-      +(capped?' (its own target, which the projection overshoots)':'')
-      +' rather than hitting the bid at '+fmtINR(px)
-      +'. The projection expires with this session: unfilled at the close, exit at market.';
-    return a;
-  };
-  const _exit=(a)=>_withExecution(_withResting(a));
-  const avg=Number(pos?.avg);
-  const ltp=(()=>{
-    const scan=Number(s&&s.price);
-    if(scan>0) return scan;
-    const p2=Number(pos&&pos.ltp);
-    return p2>0?p2:0;
-  })();
-  // THE TAPE IS READ FIRST, WHATEVER DECIDES. A stop-driven exit used to say only "stop breached"
-  // and the tape lived in a tooltip built from another window - which is how one row could carry
-  // three stories. The boundary check still has FIRST authority (a blown stop is not a matter of
-  // opinion); it simply no longer speaks alone.
-  const rd=getIntradayRead(sym);
-  const {tt,span}=getPositionFlowRead(rd);
-  const _proj=(rd&&rd.current)?rd.eod:null;
-  const _projNote=(!_proj||!Number.isFinite(_proj.pct))
-    ?((rd&&rd.current&&rd.todayTraj&&rd.todayTraj.pressureConverting===false)
-        ?'; this session has no close projection - its imbalance is being absorbed rather than converted'
-        :'')
-    :('; this session projects '+(_proj.pct>=0?'+':'')+_proj.pct.toFixed(2)+'% into the close'
-       +(Number.isFinite(_proj.close)?' ('+fmtINR(_proj.close)+')':''));
-  const _tapeNote=tt
-    ?('; today\u2019s tape is net '+(tt.cvdPct>=0?'+':'')+(100*tt.cvdPct).toFixed(0)+'% of everything traded'
-      +(Number.isFinite(tt.costRatio)?' at a cost ratio of '+tt.costRatio.toFixed(2)
-        +' against the day\u2019s median '+getIntradayThinCut().toFixed(2):'')+span+_projNote)
-    :'; no 5-minute read for this session yet';
-
-  if(s&&avg>0&&ltp>0){
-    const policy=getRowExitPolicy(s,avg);
-    const target=avg*(1+Number(policy.targetPct||0)/100),stop=avg*(1-Number(policy.stopPct||0)/100);
-    if(target>avg&&ltp>=target)return _exit({act:'EXIT ALL',qty,tone:'green',
-      why:`target reached at ${fmtINR(target)}`+_tapeNote});
-    if(stop>0&&ltp<=stop)return _exit({act:'EXIT ALL',qty,tone:'red',
-      why:`stop breached at ${fmtINR(stop)}`+_tapeNote});
-  }
-
-  // NO READ IS NOT A HOLD. Saying "hold" on no evidence is the thing this panel was doing wrong in
-  // a different costume. v1171 fetches held names automatically, so this clears itself.
-  if(!tt) return {act:'NEEDS DATA',qty:0,tone:'grey',
-    why:rd&&!rd.current?('last read was '+rd.on+', not this session'):'no 5-minute read for this session yet'};
-
-  const sold=tt.cvdPct<0;
-  const thinCut=getIntradayThinCut();
-  const thin=Number.isFinite(tt.costRatio)&&tt.costRatio>0&&tt.costRatio<thinCut;
-  const shares=n=>Math.round(n).toLocaleString('en-IN');
-
-  // BOTH readings against it - supply is arriving AND nothing is holding it up.
-  if(sold&&thin) return _exit({act:'EXIT ALL',qty,tone:'red',
-    why:'sold into all session (net '+(100*tt.cvdPct).toFixed(0)+'%) and 1% down costs only '
-      +shares(tt.dnCost)+' shares against '+shares(tt.upCost)+' up'+span});
-  // ONE against it - reduce, do not abandon.
-  if(sold||thin){
-    const half=Math.max(1,Math.floor(qty/2));
-    return _exit({act:'EXIT '+half,qty:half,tone:'red',
-      why:(sold?('net selling this session ('+(100*tt.cvdPct).toFixed(0)+'% of everything traded), but demand still costs more to move')
-              :('nothing holding it up - 1% down costs '+shares(tt.dnCost)+' shares against '+shares(tt.upCost)
-                 +' up (ratio '+tt.costRatio.toFixed(2)+' against the day’s own median '+thinCut.toFixed(2)
-                 +'), though flow is still net positive'))+span});
-  }
-  // BOTH readings for it, and the tape is still pushing - size the add from the cushion so a top-up
-  // can never turn a position in profit into a losing one (v1070).
-  const pressing=Number.isFinite(tt.pressurePct)&&tt.pressurePct>0;
-  const reviewDays=getEffectiveReviewDays(),daysHeld=getOpenPositionDaysHeld(sym,qty);
-  if(reviewDays>0&&daysHeld!=null&&daysHeld>=reviewDays&&!pressing){
-    return _exit({act:'EXIT ALL',qty,tone:'red',
-      why:`held ${daysHeld}d against the learned ${reviewDays}d review horizon, with no unspent buying pressure`+_projNote});
-  }
-  if(pressing&&s){
-    try{
-      const buyP=getBuyPrice(s);
-      const cushion=getHeldTopUpNotionalCap(s,buyP);
-      let cap=cushion;
-      if(!Number.isFinite(cap)){
-        cap=(typeof rowAchievableNotional==='function')?rowAchievableNotional(s):0;
-      }
-      const add=(Number.isFinite(cap)&&cap>0&&buyP>0)?Math.floor(cap/buyP):0;
-      if(add>0) return {act:'ADD '+add,qty:add,tone:'green',
-        why:'bought all session (net +'+(100*tt.cvdPct).toFixed(0)+'%), 1% up costs '+shares(tt.upCost)
-          +' shares against '+shares(tt.dnCost)+' down, and '+tt.pressurePct.toFixed(2)+'% of buying is still unspent'+span+_projNote};
-    }catch(e){}
-  }
-  return {act:'HOLD',qty:0,tone:'amber',
-    why:'demand still costs more to move than supply (net +'+(100*tt.cvdPct).toFixed(0)+'%'
-      +(Number.isFinite(tt.costRatio)?', ratio '+tt.costRatio.toFixed(2):'')+')'+span+_projNote};
 }
 // Open Positions is a different decision surface from Recommendations. Recommendations begin with
 // the ALL NSE cross-section and ask whether a fresh entry survives a 5-minute validation. A held
@@ -11515,28 +10942,6 @@ function getAllocationPassContext(){
 // `ctx` carries the pass-constants (capital, max allocation, held map, target anchor) so a caller
 // scanning the whole universe resolves them ONCE — see getAllocationPassContext(). Called without
 // one it resolves them itself, which is correct but ~4ms per row.
-function getAllocationBlockReason(s,ctx=null){
-  const c=ctx||getAllocationPassContext();
-  if(!(c.capital>0)) return null;         // no capital known: nothing to judge with, never filter
-  const buyP=getBuyPrice(s);
-  if(!(buyP>0)) return null;              // no price: the scorer already handles this elsewhere
-  const turnoverCap=getTurnoverAllocationCap(s);
-  if(!(turnoverCap>0)) return 'no daily turnover — market-impact safety cannot be verified';
-  const topUpCap=getHeldTopUpNotionalCap(s,buyP,c.heldMap);
-  if(!(topUpCap>0)) return 'already held at a profit with no cushion — an add would put the blended position at a loss on its own stop';
-  const riskCap=riskNotionalCap(s,c.riskPerTrade);
-  const rail=Math.min(c.maxAlloc>0?c.maxAlloc:c.capital,turnoverCap,topUpCap,riskCap);
-  if(rail<buyP) return `allocation rails (${fmtINR(rail)}) are below one share at ${fmtINR(buyP)}`;
-  const policy=getRowExitPolicy(s,buyP,c.active);
-  if(policy&&policy.viable===false) return targetPolicyBlockReason(policy);
-  const floorRs=getDesiredNetRupees();
-  if(floorRs>0){
-    const ec=getRowRupeeEconomics(s,rowAchievableNotional(s,c),policy,c);
-    if(ec.qty>0&&ec.netRs<floorRs)
-      return `nets only ${fmtINR(ec.netRs)} on the ${fmtINR(ec.notional)} this stock allows — below the ${fmtINR(floorRs)} minimum for a trade worth taking`;
-  }
-  return null;
-}
 function targetPolicyBlockReason(policy){
   if(!(policy?.targetPct>0)) return policy?.viabilitySource||'No valid target to verify trading costs';
   return `Target ${policy.targetPct.toFixed(2)}% does not cover the ${policy.minGrossPct?.toFixed(2)??'unknown'}% costs + net hurdle`;
@@ -11877,11 +11282,6 @@ function fmtINR(v){return v===null||v===undefined||isNaN(v)?'—':'₹'+inr2(v);
 function fmtSignedINR(v){return v===null||v===undefined||isNaN(v)?'—':(v>=0?'+':'−')+'₹'+inr2(Math.abs(Number(v)));}
 function fmtNegINR(v){return v>0?'−₹'+inr2(v):'—';}
 function fV(v){if(v===null||isNaN(v))return'—';if(v>=1e7)return(v/1e7).toFixed(2)+'Cr';if(v>=1e5)return(v/1e5).toFixed(2)+'L';if(v>=1e3)return(v/1e3).toFixed(2)+'K';return inr2(v);}
-function fDel(v){
-  if(v===null||v===undefined||isNaN(v))return'—';
-  const c=v>=60?'var(--green)':v>=40?'var(--cyan)':v>=25?'var(--orange)':'var(--red)';
-  return`<span style="color:${c};font-weight:600">${v.toFixed(1)}%</span>`;
-}
 function fPerf(v){
   if(v===null||v===undefined||isNaN(v))return'—';
   const c=v>0?'var(--green)':v<0?'var(--red)':'var(--t3)';
@@ -11911,29 +11311,6 @@ function radarSeriesBandPill(s){
   const band=s.band!=null?s.band+'%':'No band';
   const title=ok?'Active EQ security; eligible for the Zerodha basket.':'Ineligible for the basket: '+escHtml((s.gateReasons||[]).slice(0,3).join(', ')||'exchange eligibility');
   return `<span class="info-pill ${ok?'pill-green':'pill-red'}" style="padding:2px 8px;font-size:12px" title="${title}">${escHtml(s.series||'—')} · ${band}</span>`;
-}
-function radarSurveillanceNames(s){
-  const flags=(s?.meta?.flags||[]).map(x=>String(x||'').trim()).filter(Boolean);
-  if(!flags.length)return '';
-  const names=flags.join(' · ');
-  return `<div class="radar-surveillance-names" style="font-size:10px;color:var(--red);max-width:170px;line-height:1.25;margin-top:2px;white-space:normal;overflow-wrap:anywhere" title="NSE REG1 surveillance: ${escHtml(names)}">⚠ ${escHtml(names)}</div>`;
-}
-function intradayVerdictFace(v,has){
-  // v1207: `unverified` is its own face. It must not read as confirmed (nothing has checked it) and
-  // must not read as rejected (nothing has condemned it) - the current session cannot speak yet.
-  return v==='stale'?'\u29d6':v==='confirmed'?'\u2713':v==='rejected'?'\u2717'
-    :v==='unverified'?'\u25f4':(has?'\u2022':'5m');
-}
-function intradayVerdictColor(v,has,sel){
-  return sel?'var(--amber)'
-    :v==='stale'?'var(--t3)'
-    :v==='confirmed'?'var(--green)'
-    :v==='rejected'?'var(--red)'
-    :v==='unverified'?'var(--amber)'
-    :has?'var(--cyan)':'var(--t3)';
-}
-function intradayRowButton(s){
-  return '';
 }
 
 function renderTable(){
@@ -12136,68 +11513,8 @@ function toggleFilters(){
 }
 // The paste surface lives ON the recommendation table (owner: no second table, no separate box).
 // Click a row's `5m` button, paste that stock's chart export, and the recommendations re-rank.
-function setIntradayTarget(sym){
-  INTRADAY_TARGET=normSym(sym||'');INTRADAY_RESULT=null;
-  renderTable();
-  // The check now lives on Open Positions too (v1148), so the panels have to follow the selection.
-  try{renderRankingsPanels();}catch(e){}
-  const el=document.getElementById('intradayBox');
-  if(el){el.value='';el.focus();el.scrollIntoView({block:'nearest'});}
-}
-function onIntradayPaste(){
-  const el=document.getElementById('intradayBox');
-  if(!el) return;
-  // A batch payload carries many stocks at once and names each one, so it
-  // does not need a selected target. Try it first; fall back to the single-table paste.
-  const batch=ingestKiteCandlePayload(el.value);
-  if(batch){
-    el.value='';
-    INTRADAY_RESULT={ok:true,sym:batch.done.join(', '),bars:0,sessions:0,batch:batch};
-    const st=getIntradayLoopState();
-    INTRADAY_TARGET=st.need.length?normSym(st.need[0].symbol):'';
-    renderTable();
-    showToast('Read '+batch.done.length+' stock(s): '+batch.done.join(', ')
-      +(batch.failed.length?(' · could not read '+batch.failed.join(', ')):''),6000,!batch.done.length);
-    return;
-  }
-  const res=parseIntradayPaste(el.value,INTRADAY_TARGET);
-  INTRADAY_RESULT=res;
-  if(res.ok){
-    const read=getIntradayRead(res.sym);
-    INTRADAY_RESULT=Object.assign({},res,{read});
-    el.value='';
-    applyIntradayReorder(ALL);
-    applyFilters();
-    try{renderRankingsPanels();}catch(e){}
-    // The loop: re-rank, then point at whatever is now in the top and still unchecked. When nothing
-    // is left the list has SETTLED - every name at the top was checked and survived the check.
-    const st=getIntradayLoopState();
-    INTRADAY_TARGET=st.need.length?normSym(st.need[0].symbol):'';
-    showToast(res.sym+': '+res.bars+' bars over '+res.sessions+' session'+(res.sessions>1?'s':'')
-      +(res.live?' · LIVE book '+((res.live.imbalance>0?'+':'')+res.live.imbalance.toFixed(3)):'')
-      +(read?(read.traj?' · '+read.regime.toUpperCase()+' · net flow '+(read.cvdPct*100).toFixed(1)+'% of volume'
-                       :' · first 15m '+(read.first15Up?'UP':'DOWN')+' · path '+(read.efficiency*100).toFixed(0)+'% efficient'):''),4000);
-  }else{
-    showToast('Could not read that paste — '+res.why,4000,true);
-  }
-  renderTable();
-}
-function collapseFetchList(){
-  LAST_FETCH_HIDDEN=!LAST_FETCH_HIDDEN;
-  renderTable();
-}
 // Kept for the case the owner actually asked for at v1146 - throwing away a stock's data on purpose
 // - but reachable only per stock, never as a wipe of everything gathered.
-function forgetIntradayFor(sym){
-  const k=normSym(sym||''); if(!k) return;
-  delete INTRADAY_BARS[k];
-  INTRADAY_STORE_V++;
-  if(INTRADAY_TARGET===k) INTRADAY_TARGET='';
-  const r=(Array.isArray(ALL)?ALL:[]).find(x=>normSym(x.symbol)===k);
-  if(r){ r.intraday=null;r.intradayVerdict=null;r.intradayWhy=null;r.intradaySellingToday=false; }
-  try{ applyIntradayReorder(ALL); }catch(e){}
-  scheduleApplyFilters();renderTable();
-}
 const FETCH_MAX_PER_DAY=400;
 // Owner risk preference, not a derived magnitude: how many of the day's leftover requests may go
 // to building measurement history rather than to a live decision. Small on purpose - the point is
@@ -13070,13 +12387,6 @@ async function loadMinuteBars(){
 }
 // The freshest price this app holds for a symbol, and how old it is. A one-minute bar beats a
 // five-minute one by up to four minutes; when there is none, the five-minute tape answers.
-function getFreshestTapePrice(sym){
-  const m=MINUTE_BARS[normSym(sym||'')];
-  if(m&&m.length){ const b=m[m.length-1]; return {price:b.c,at:b.t,source:'1m'}; }
-  const bars=INTRADAY_BARS[normSym(sym||'')];
-  if(bars&&bars.length){ const b=bars[bars.length-1]; return {price:b.c,at:b.t,source:'5m'}; }
-  return null;
-}
 // The helper does the fetching but the app knows which rows are eligible. Symbols only - the helper
 // resolves tokens from its own daily dump, which is fresher than anything this page holds.
 async function postCorpusPool(){
@@ -14058,26 +13368,6 @@ function renderRankingsPanels(){
 // Map configured-surveillance rule keys → their human labels. A removed row can outlive the exact
 // in-memory key array that created it (Drive/settings refresh), so recover through the stock's raw
 // REG1 columns before ever falling back to a generic reason.
-function survRuleLabels(keys,symbol=''){
-  const rules=getSurvRules();
-  const byKey=new Map(rules.map(r=>[r.key,r.label||r.column]));
-  const labels=[];
-  const add=v=>{v=String(v||'').trim();if(v&&!labels.includes(v))labels.push(v);};
-  (keys||[]).forEach(k=>{
-    const raw=String(k||'').trim(),key=survRuleKey(raw);
-    add(byKey.get(raw)||byKey.get(key)||raw);
-  });
-  if(!labels.length&&symbol){
-    const hitCols=Object.keys(SURV_ALL_HITS[normSym(symbol)]||{});
-    rules.forEach(rule=>{
-      if(hitCols.some(col=>survRuleKey(col)===rule.key)) add(rule.label||rule.column);
-    });
-  }
-  return labels;
-}
-function buildRemovedPanel(query=''){
-  return '';
-}
 function showRadarDetail(sym){
   const r=ALL.find(x=>x.symbol===sym);
   const dlg=document.getElementById('radarDetail');
@@ -14803,22 +14093,6 @@ function importBrain(event){
   };
   reader.readAsText(file);
   event.target.value='';
-}
-
-function showBrainPrompt(){
-  // Remove any existing toast
-  const old=document.getElementById('brainToast');
-  if(old) old.remove();
-  const toast=document.createElement('div');
-  toast.className='brain-toast';
-  toast.id='brainToast';
-  toast.innerHTML=`
-    <div class="brain-toast-msg"><strong>Brain updated</strong></div>
-    <button class="brain-toast-btn" onclick="exportBrain();document.getElementById('brainToast')?.remove()">💾 Export Brain</button>
-    <button class="brain-toast-x" onclick="this.parentElement.remove()" title="Dismiss">✕</button>`;
-  document.body.appendChild(toast);
-  // Auto-dismiss after 15 seconds
-  setTimeout(()=>{const t=document.getElementById('brainToast');if(t)t.remove();},15000);
 }
 
 function resetBrain(btn){
@@ -15742,7 +15016,12 @@ function applySavedFiltersForMode(mode){
     const capEl=document.getElementById('fCapital');if(capEl&&shared.capital!=null)capEl.value=shared.capital;
     const maxEl=document.getElementById('fMaxAlloc');if(maxEl&&shared.maxAlloc!=null)maxEl.value=shared.maxAlloc;
     const rkEl=document.getElementById('fRiskPerTrade');if(rkEl&&shared.riskPerTrade!=null)rkEl.value=shared.riskPerTrade;
-  }catch(e){}
+  }catch(e){
+    // v1358: this was bare. loadFilterState() already reports unreadable saved filters and locks
+    // persistence (v1215); this sibling silently left the previous mode's values on screen, so a
+    // corrupted store looked like a deliberate setting. It still must not write anything back.
+    console.warn('Could not apply saved filters for mode '+mode+'; leaving the current inputs untouched.',e);
+  }
   return ()=>ids.forEach(id=>{const el=document.getElementById(id);if(el&&prev[id]!=null)el.value=prev[id];});
 }async function processScannerUpload(scannerFile, mode, options={}){
   if(!scannerFile) return false;
