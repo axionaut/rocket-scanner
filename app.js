@@ -1,5 +1,5 @@
-const BUILD_TS='2026-09-11 08:41 IST'; // release build time (IST)
-const APP_VERSION=1363;
+const BUILD_TS='2026-09-11 10:39 IST'; // release build time (IST)
+const APP_VERSION=1364;
 const RADAR_SCORE_VERSION='unified-evidence-v1';
 
 // ── v1358: AN UNCAUGHT ERROR MUST NAME ITSELF ─────────────────────────────────────────────────
@@ -137,11 +137,35 @@ function toggleBelowThreshold(){
 // passesIntradayValidation. Bumped at every store mutation, so a signature costs one integer read
 // instead of a full scan.
 let INTRADAY_STORE_V=0;
+// v1364: PRIOR SESSIONS CHANGE RARELY; THE FORMING BAR CHANGES EVERY BEAT. Everything that reads only
+// completed prior sessions (the clock-runway table, the historical horizon target) was keyed on
+// INTRADAY_STORE_V, which moves on every forming-bar tick, so each beat rebuilt them from ~1,000 bars
+// per symbol for ~1,650 symbols - measured at ~40 s of main thread per scoring pass. This moves only
+// when a prior-session bar is written, a symbol's file is replaced, or the store trims its oldest bar.
+let INTRADAY_HISTORY_V=0;
 // Derived tape reads are pure for one tape-store revision and session date. The same read was being
 // rebuilt repeatedly by scoring, filtering, row rendering and the basket summary; cache the result
 // without changing its inputs or output. `ageMin` is refreshed on cache hits so the displayed age stays
 // live even while the underlying bars are unchanged.
 const INTRADAY_READ_MEMO=new Map();
+// v1364: a derived read of ONE symbol is keyed on that symbol's own bars. Keying on the store-wide
+// revision rebuilt every symbol's read whenever ANY symbol ticked - ~1,650 rebuilds per beat.
+// The last session's bars, found from the end: bars are time-ordered, so this stops at the first
+// earlier day instead of formatting a date for every one of ~1,000 bars.
+function sameDayTail(bars){
+  if(!bars||!bars.length) return [];
+  const key=istDayKey(bars[bars.length-1].t);
+  const dayStart=Date.parse(key+'T00:00:00+05:30');
+  let i=bars.length-1;
+  while(i>0&&Number(bars[i-1].t)>=dayStart) i--;
+  return bars.slice(i);
+}
+function tapeSigOf(key){
+  const bars=INTRADAY_BARS[key];
+  if(!Array.isArray(bars)||!bars.length) return 'none';
+  const a=bars[0],z=bars[bars.length-1];
+  return bars.length+':'+a.t+':'+z.t+':'+z.o+':'+z.h+':'+z.l+':'+z.c+':'+z.v+':'+(_memoryRevisions.get(key)||0);
+}
 let _tvLoadedThisSession=false; // true once a TV CSV has been processed this session
 let PERF_PERIOD_FILTER='all'; // 'all' | '1m' | '3m' | '6m' | '1y'
 let PERF_TRACK_ISSUE=null; // issue date selected in the recommendation-tracking outcome panel
@@ -1401,6 +1425,37 @@ const DAY_LENGTH_MIN= DAY_END_MIN - DAY_START_MIN; // 420
 const SESSION_CLOSE_MIN      = 15*60+30;  // 15:30 - continuous close outside the F&O segment
 const CAS_CONTINUOUS_END_MIN = 15*60+15;  // 15:15 - earliest close the auction regime can produce
 
+// v1364: WHICH OF THE TWO EXCHANGE CLOSES THIS STOCK TRADES TO, read from its own tape. A stock in
+// the closing auction regime prints no trade between 15:15 and 15:30, so a session that traded in
+// that window is a 15:30 session. The majority of its recent prior sessions decides; with no prior
+// session the old 15:30 answer stands. Everything that asked "is this a complete session" or "has the
+// last bar printed" against a flat 15:30 was asking an F&O stock for three bars it can never print -
+// which is why every F&O name read "Insufficient complete historical paths (1/5)".
+const _closeMinMemo=new Map();
+function continuousCloseMin(sym){
+  const key=normSym(sym||''),bars=INTRADAY_BARS[key];
+  if(!Array.isArray(bars)||!bars.length) return SESSION_CLOSE_MIN;
+  const today=istDayKey(Date.now());
+  const sig=(_memoryRevisions.get(key)||0)+':'+bars[0].t+':'+today;
+  const hit=_closeMinMemo.get(key);
+  if(hit&&hit.sig===sig) return hit.v;
+  // Volume cannot decide it: the stream has written auction-period buckets carrying the closing
+  // auction's quantity (TCS 15:25 "1,826,507" on 2026-09-03) and depth-only buckets with a few
+  // shares. PRICE decides it: in the auction regime the price is frozen, so its 15:15-15:25 buckets
+  // have no range; a stock trading continuously to 15:30 prints ranged bars there.
+  const late=new Map();
+  for(const b of bars){
+    const d=istDayKey(b.t);
+    if(d>=today) break;
+    if(!late.has(d)) late.set(d,0);
+    const m=istClock(b.t).mins;
+    if(m>=CAS_CONTINUOUS_END_MIN&&m<SESSION_CLOSE_MIN&&Number(b.h)>Number(b.l)) late.set(d,late.get(d)+1);
+  }
+  const days=[...late.values()].slice(-10).map(n=>n>=2);
+  const v=!days.length?SESSION_CLOSE_MIN:(days.filter(Boolean).length*2>=days.length?SESSION_CLOSE_MIN:CAS_CONTINUOUS_END_MIN);
+  _closeMinMemo.set(key,{sig,v});
+  return v;
+}
 function istClock(timestamp=Date.now()){
   const ts=Number(timestamp)||Date.now();
   const shifted=new Date(ts+5.5*60*60*1000);
@@ -2407,11 +2462,14 @@ function resolveRocketDay(bar,entryPrice,targetPct,stopPct,prevHigh=null,prevLow
 // Did this pick's resolved state count as a rocket? Ambiguity is deliberately NOT a rocket.
 function isRocketOutcome(p){return p?.rocketOutcome===ROCKET_OUTCOME.ROCKET;}
 // Paper outcome of the declared target / entry stop / BTST deadline, not a claim of execution.
-function nextScoreBarStart(timestamp){
+// `closeMin` is the stock's own continuous close (v1364): after an F&O stock's 15:10 bar the next
+// bar is tomorrow's 09:15, not a 15:15 bar it can never print - which marked every overnight record
+// on an F&O stock evidence-incomplete and hid every one of its complete sessions from the target.
+function nextScoreBarStart(timestamp,closeMin=EQUITY_CLOSE_MIN){
   const rounded=Math.ceil(timestamp/TAPE_BAR_MS)*TAPE_BAR_MS;
   let day=istDayKey(rounded);
   const mins=istClock(rounded).mins;
-  if(isNseTradingDate(day)&&mins>=EQUITY_OPEN_MIN&&mins<EQUITY_CLOSE_MIN) return rounded;
+  if(isNseTradingDate(day)&&mins>=EQUITY_OPEN_MIN&&mins<closeMin) return rounded;
   if(isNseTradingDate(day)&&mins<EQUITY_OPEN_MIN) return Date.parse(day+'T09:15:00+05:30');
   do{day=new Date(Date.parse(day+'T12:00:00Z')+86400000).toISOString().slice(0,10);}while(!isNseTradingDate(day));
   return Date.parse(day+'T09:15:00+05:30');
@@ -2421,9 +2479,13 @@ function resolveNetRecommendation(p,asOf){
   p.evidenceIncomplete=false; // replay repaired history; unresolved gaps are rechecked below
   const bars=INTRADAY_BARS[normSym(p.symbol)]||[];
   const end=Date.now(),clock=istClock(end);
+  const _closeMin=continuousCloseMin(p.symbol);
+  // Only bars of the continuous session count: the stream has written pre-open (09:00-09:10) and
+  // post-close buckets that are not candles of any tradeable window.
+  const inSession=b=>{const m=istClock(b.t).mins;return m>=EQUITY_OPEN_MIN&&m<_closeMin;};
   const eligible=bars.filter(b=>Number(b.t)>=p.issuedAt&&Number(b.t)+TAPE_BAR_MS<=end
-    &&tradingDaysBetween(p.issueDate,istDayKey(b.t))<=1).sort((a,b)=>a.t-b.t);
-  if(eligible.length&&eligible[0].t>nextScoreBarStart(p.issuedAt)) p.evidenceIncomplete=true;
+    &&tradingDaysBetween(p.issueDate,istDayKey(b.t))<=1&&inSession(b)).sort((a,b)=>a.t-b.t);
+  if(eligible.length&&eligible[0].t>nextScoreBarStart(p.issuedAt,_closeMin)) p.evidenceIncomplete=true;
   const partial=bars.find(b=>b.t<p.issuedAt&&b.t+TAPE_BAR_MS>p.issuedAt);
   if(p.issuedAt%TAPE_BAR_MS!==0&&!partial) p.evidenceIncomplete=true;
   if(partial&&(partial.l<=p.entryPrice*(1-p.stopPct/100)||partial.h>=p.entryPrice*(1+p.targetPct/100))) p.evidenceIncomplete=true;
@@ -2431,7 +2493,7 @@ function resolveNetRecommendation(p,asOf){
   let entry=p.entryPrice,entered=p.orderType!=='LIMIT',exit=null,exitBar=null;
   let prev=null;
   for(const b of eligible){
-    if(prev&&b.t>nextScoreBarStart(Number(prev.t)+TAPE_BAR_MS)){p.evidenceIncomplete=true;break;}
+    if(prev&&b.t>nextScoreBarStart(Number(prev.t)+TAPE_BAR_MS,_closeMin)){p.evidenceIncomplete=true;break;}
     prev=b;
     if(!entered){
       if(!(p.limitPrice>0)||b.l>p.limitPrice) continue;
@@ -2449,7 +2511,7 @@ function resolveNetRecommendation(p,asOf){
     else if(b.h>=up&&b.l<=dn){p.rocketOutcome=ROCKET_OUTCOME.AMBIGUOUS;p.paperComplete=true;return;}
     else if(b.l<=dn){exit=dn;p.rocketOutcome=ROCKET_OUTCOME.STOPPED;}
     else if(b.h>=up){exit=up;p.rocketOutcome=ROCKET_OUTCOME.ROCKET;}
-    else if(tradingDaysBetween(p.issueDate,istDayKey(b.t))===1&&istClock(b.t).mins>=EQUITY_CLOSE_MIN-5){
+    else if(tradingDaysBetween(p.issueDate,istDayKey(b.t))===1&&istClock(b.t).mins>=continuousCloseMin(p.symbol)-5){
       exit=b.c;p.rocketOutcome=ROCKET_OUTCOME.EXPIRED;
     }
     const mark=(b.c/entry-1)*100;
@@ -3134,13 +3196,38 @@ function checkRuleSlotAlignment(){
 const SCORE_GROUPS=['participation','momentum','trend','structure','liquidity','volatility','context'];
 const EXACT_SCORE_START=26;
 let _unifiedState=null,_unifiedStateSource=null,_scoreLearningAt=0,_scoreLearningBusy=false;
-function validScoreWeights(w){
-  return Array.isArray(w)&&w.length===SCORE_SEED.length&&w.every((v,i)=>Number.isFinite(v)&&v>=(i<13?0.5:i>=23?0:-1)&&v<=(i<13?1.5:1));
+// v1364: SLOTS 0-7 MAY BE 0. They are the noisy-OR tape terms, and since v1362 their weight is the
+// edge each one EARNED on the archive - 0 for a component that cannot separate winners (size, which
+// is inverted). The old floor of 0.5 dated from when all thirteen were asserted at 1.0 and learning
+// could only nudge them. It rejected the earned vector outright, so every score silently fell back
+// to SCORE_SEED and v1362's measured weights never ran at all.
+function scoreWeightBounds(i){
+  if(i<8) return [0,1.5];           // tape terms: earned, may be zero
+  if(i<13) return [0.5,1.5];        // predictor, trigger, depth, velocity, fade: still seeded at 1
+  if(i<23) return [-1,1];           // setup/context groups
+  if(i>=EXACT_SCORE_START) return [-1,1];   // rule slots: signed, a worse-than-failing rule subtracts
+  return [0,1];                     // memory slots
 }
+let _lastWeightProblem=null;
+function scoreWeightProblem(w){
+  if(!Array.isArray(w)) return 'weight vector is not an array';
+  if(w.length!==SCORE_SEED.length) return 'weight vector has '+w.length+' slots, the scorer expects '+SCORE_SEED.length;
+  for(let i=0;i<w.length;i++){
+    const [lo,hi]=scoreWeightBounds(i),v=w[i];
+    if(!Number.isFinite(v)||v<lo||v>hi) return 'slot '+i+' ('+(SCORE_SOURCES[i]?.[0]||'?')+') = '+v+', outside ['+lo+','+hi+']';
+  }
+  return null;
+}
+function validScoreWeights(w){ return scoreWeightProblem(w)===null; }
 function getUnifiedModelState(){
   const raw=FS.get(SCORE_LEARNING_STORE);
   if(_unifiedState&&raw===_unifiedStateSource) return _unifiedState;
   // Add zero-influence slots without resetting learned weights, observations or an existing candidate.
+  if(raw?.schema===RADAR_SCORE_VERSION&&Array.isArray(raw.live)&&raw.live.length>=EXACT_SCORE_START
+     &&raw.live.length!==SCORE_SEED.length){
+    raw.live=raw.live.slice(0,SCORE_SEED.length);
+    while(raw.live.length<SCORE_SEED.length) raw.live.push(SCORE_SEED[raw.live.length]);
+  }
   if(raw?.schema===RADAR_SCORE_VERSION&&Array.isArray(raw.live)&&raw.live.length===23){
     raw.live.push(0,0,0);
     if(raw.candidate?.weights?.length===23) raw.candidate.weights.push(0,0,0);
@@ -3170,7 +3257,15 @@ function getUnifiedModelState(){
   _unifiedStateSource=raw;_unifiedState=state;return state;
 }
 function computeUnifiedEvidence(input,weights){
-  const w=validScoreWeights(weights)?weights:SCORE_SEED;
+  let w=weights;
+  const problem=scoreWeightProblem(weights);
+  if(problem){
+    w=SCORE_SEED;
+    if(problem!==_lastWeightProblem){
+      _lastWeightProblem=problem;
+      reportAppError('Score weights rejected - scoring on the seed vector',new Error(problem),'computeUnifiedEvidence');
+    }
+  }
   let miss=1,perfectMiss=1;
   for(let i=0;i<8;i++){
     const k=Math.max(0,Math.min(0.95,(input.base[i]||0)*w[i]));
@@ -3348,6 +3443,14 @@ const DECISION_RULE_DEFS=[
 // 36 flag at least one stock. The old seed list named 12. When NSE adds a column it appears here on
 // its own with no code change. Each is PROTECTED: measured every session, never weakened by the
 // learner, and configured rules keep their existing hard-veto behaviour untouched.
+const _survHitKeyMemo=new WeakMap(),_NO_SURV_HITS=new Set();
+function survHitKeys(sym){
+  const hits=SURV_ALL_HITS[sym];
+  if(!hits||typeof hits!=='object') return _NO_SURV_HITS;
+  let set=_survHitKeyMemo.get(hits);
+  if(!set){set=new Set(Object.keys(hits).filter(h=>hits[h]).map(survRuleKey));_survHitKeyMemo.set(hits,set);}
+  return set;
+}
 let _survRuleDefs=null,_survRuleDefsSig='';
 function surveillanceRuleDefs(){
   const file=Array.isArray(SURV_FILE_RULES)?SURV_FILE_RULES:[];
@@ -3357,9 +3460,12 @@ function surveillanceRuleDefs(){
   _survRuleDefs=file.map(rule=>({
     key:'surv:'+rule.key,label:humanizeSurvRule(rule.label||rule.column),
     group:'Surveillance',kind:RULE_PROTECTED,unit:'',survColumn:rule.column,
-    read:r=>{const hits=SURV_ALL_HITS[r?.symbol];
-      if(!r?.symbol||!hits) return ruleRead(null,null);
-      return ruleRead(!hits.some(h=>survRuleKey(h)===rule.key),null);}
+    // SURV_ALL_HITS[sym] is {header:true}. v1360 called .some() on it, which THREW for every
+    // flagged stock - caught as "unknown" - and returned unknown for every unflagged one, so none of
+    // the 40 surveillance rules ever recorded a pass or a failure, and the thrown errors cost ~5 s of
+    // main thread per scoring pass. A symbol the REG1 file does not flag passes.
+    read:r=>{if(!r?.symbol) return ruleRead(null,null);
+      return ruleRead(!survHitKeys(r.symbol).has(rule.key),null);}
   }));
   return _survRuleDefs;
 }
@@ -3500,10 +3606,16 @@ function ruleSessionStat(records,key){
   const pass=runs.filter(r=>r.pass),fail=runs.filter(r=>!r.pass);
   if(!pass.length&&!fail.length) return null;
   const mean=a=>a.length?a.reduce((n,r)=>n+r.move,0)/a.length:null;
+  // v1364: the sampling error of THIS session's edge, from its own stocks. Without it a single
+  // session had no standard error at all and every weight sat at exactly 0 however many stocks
+  // it held - the "sessions are the sample count" error v1360 said it had removed.
+  const vari=a=>{if(a.length<2)return null;const m=mean(a);return a.reduce((n,r)=>n+(r.move-m)*(r.move-m),0)/(a.length-1);};
+  const vp=vari(pass),vf=vari(fail);
   return {passN:pass.length,failN:fail.length,
     passMove:mean(pass),failMove:mean(fail),
     passHit:pass.reduce((n,r)=>n+r.hit,0),failHit:fail.reduce((n,r)=>n+r.hit,0),
-    edge:(pass.length&&fail.length)?mean(pass)-mean(fail):null};
+    edge:(pass.length&&fail.length)?mean(pass)-mean(fail):null,
+    edgeSe:(vp!=null&&vf!=null)?Math.sqrt(vp/pass.length+vf/fail.length):null};
 }
 // Sessions are NOT the sample count - 307 distinct stocks in one session is a large sample and
 // weights must be able to move on day one. They are the CONSISTENCY check: 307 stocks establish
@@ -3513,13 +3625,13 @@ function ruleSessionStat(records,key){
 function ruleEvidence(agg,key){
   const perDay=agg?.[key]||{};
   const days=Object.keys(perDay).sort();
-  const edges=[],all=[];
+  const edges=[],all=[],within=[];
   let passN=0,failN=0,passHit=0,failHit=0;
   for(const d of days){
     const st=perDay[d];if(!st) continue;
     passN+=st.passN||0;failN+=st.failN||0;passHit+=st.passHit||0;failHit+=st.failHit||0;
     all.push(st);
-    if(Number.isFinite(st.edge)) edges.push(st.edge);
+    if(Number.isFinite(st.edge)){ edges.push(st.edge); if(Number.isFinite(st.edgeSe)) within.push(st.edgeSe); }
   }
   const sessions=edges.length;
   const edge=sessions?edges.reduce((a,b)=>a+b,0)/sessions:null;
@@ -3528,13 +3640,23 @@ function ruleEvidence(agg,key){
   // near-constant edge series cannot produce an infinite t (the v1213 trap).
   const n=passN+failN;
   const floor=n>1?Math.abs(edge||0)/Math.sqrt(n):0;
-  const se=sessions>1?Math.max(sd/Math.sqrt(sessions),floor*0.25):Infinity;
+  // Two sources of error, and the larger one governs: the stocks inside each session (available
+  // from day one) and the disagreement between sessions (available from day two).
+  const withinSe=within.length?Math.sqrt(within.reduce((a,v)=>a+v*v,0))/within.length:null;
+  const betweenSe=sessions>1?Math.max(sd/Math.sqrt(sessions),floor*0.25):null;
+  const se=withinSe!=null||betweenSe!=null?Math.max(withinSe||0,betweenSe||0):Infinity;
   const tCrit=familyTCrit(Math.max(1,adjustableRules().length));
   const agreement=sessions&&edge?100*edges.filter(v=>Math.sign(v)===Math.sign(edge)).length/sessions:0;
   // weight = prior + edge x confidence(n). `edge` is SIGNED: positive raises, negative lowers.
   // confidence only ever grows and sets how fast a weight leaves the prior, never the direction.
-  const shrunk=(edge==null||!Number.isFinite(se))?0:Math.sign(edge)*Math.max(0,Math.abs(edge)-tCrit*se);
-  const confidence=(edge&&Number.isFinite(se))?Math.max(0,Math.min(1,shrunk/edge)):0;
+  // CONTINUOUS, NOT A CUTOFF (v1364). The old form subtracted tCrit x se, so an edge short of the
+  // family-wise bar carried exactly 0 - a gate by another name. Now the edge is scaled by
+  // t^2/(t^2+tCrit^2): an edge at the family-wise bar acts at half strength, a well-measured one at
+  // nearly all of it, a 1-of-1 sample (t near 0) at nearly nothing, and every step in between is
+  // continuous in both directions. The critical value is still the derived family-wise one.
+  const t=(edge!=null&&Number.isFinite(se)&&se>0)?Math.abs(edge)/se:0;
+  const confidence=t>0?t*t/(t*t+tCrit*tCrit):0;
+  const shrunk=edge==null?0:edge*confidence;
   return {sessions,passN,failN,passHit,failHit,
     passMove:all.length?all.reduce((n2,st)=>n2+(st.passMove||0)*(st.passN||0),0)/Math.max(1,passN):null,
     failMove:all.length?all.reduce((n2,st)=>n2+(st.failMove||0)*(st.failN||0),0)/Math.max(1,failN):null,
@@ -3578,8 +3700,11 @@ function ruleWeightMap(state){
   // anywhere the scale is 0 and every weight is exactly the prior.
   const scale=Math.max(...ev.map(e=>Math.abs(e.shrunk)||0),0);
   for(const e of ev){
-    const w=scale>0?RULE_PRIOR+Math.max(0,e.shrunk)/scale:RULE_PRIOR;
-    out[e.key]=Math.max(0,Math.min(1,w));
+    // SIGNED (v1364). A rule whose passing stocks did WORSE earns a negative weight, so passing it
+    // lowers the score - weights move down as well as up. The old max(0,...) floored every such
+    // rule at 0, which is why "Price at or above VWAP" (edge -0.88%) could never act at all.
+    const w=scale>0?RULE_PRIOR+e.shrunk/scale:RULE_PRIOR;
+    out[e.key]=Math.max(-1,Math.min(1,w));
   }
   return {weights:out,evidence:ev,scale};
 }
@@ -3746,11 +3871,11 @@ async function updateScoreLearning(){
     for(const p of state.records){
       if(p.paperComplete) continue;
       resolveNetRecommendation(p,today);
-      if(++i%40===0) await new Promise(resolve=>setTimeout(resolve,0));
+      if(++i%40===0) await yieldToUi();
     }
     if(!study.results) for(const p of study.records){
       if(!p.paperComplete) resolveNetRecommendation(p,today);
-      if(++i%40===0) await new Promise(resolve=>setTimeout(resolve,0));
+      if(++i%40===0) await yieldToUi();
     }
     // Resolve whenever fresh data arrives, including after 16:00. Only record new buy-time
     // observations during the equity session and with fresh prices and complete tape.
@@ -4329,12 +4454,21 @@ const TAPE_MIN_SESSION_BARS=2*TAPE_NETVOL_BARS;
 // Per-symbol memo storing {sig, val} (Finding C). Sig binds length, last bar timestamp, and 5-min
 // clock bucket so completing bars are recognized even if the array hasn't changed, without full map flushes.
 const _continuousTapeMemo=new Map();
+// v1364: THE WINDOW SLIDES, IT DOES NOT STEP. It used to be the last six COMPLETED bars, so the
+// evidence - and the score - moved once every five minutes and then jumped. It is now the same
+// thirty minutes measured continuously: the bar forming now is included as it grows, and the oldest
+// completed bar is weighted by the share of the current bucket still to run, so the window always
+// spans exactly six bars of time. At a bucket boundary the outgoing bar's weight has reached zero and
+// the incoming bar holds almost nothing, so the reading is continuous across it - no jump, no jitter.
+// With no forming bar (stream down, closed market) it is exactly the old six completed bars.
 function continuousTapeWindow(all,symKey){
   if(!Array.isArray(all)||all.length<TAPE_MIN_SESSION_BARS) return null;
   const k=symKey||'';
-  const lastT=all[all.length-1]?.t||'';
-  const barBucket=Math.floor(Date.now()/TAPE_BAR_MS);
-  const sig=all.length+':'+lastT+':'+barBucket;
+  const z=all[all.length-1]||{};
+  const now=Date.now();
+  const formingNow=Number(z.t)<=now&&Number(z.t)+TAPE_BAR_MS>now;
+  const quantum=formingNow?Math.floor(now/2000):Math.floor(now/TAPE_BAR_MS);
+  const sig=all.length+':'+z.t+':'+z.c+':'+z.v+':'+quantum;
   if(k&&_continuousTapeMemo.has(k)){
     const entry=_continuousTapeMemo.get(k);
     if(entry&&entry.sig===sig) return entry.val;
@@ -4342,9 +4476,15 @@ function continuousTapeWindow(all,symKey){
   // INTRADAY_BARS is the merged, timestamp-ordered store. Keep the minimum measured horizon so
   // yesterday's tape bridges startup/pre-open without allowing an old session to dominate today's
   // live read. The exchange gap remains visible as a real time gap; it is not fabricated away.
-  const now=Date.now();
   const complete=all.filter(b=>Number(b.t)+TAPE_BAR_MS<=now);
-  const res=complete.length>=TAPE_MIN_SESSION_BARS?complete.slice(-TAPE_MIN_SESSION_BARS):null;
+  let res=complete.length>=TAPE_MIN_SESSION_BARS?complete.slice(-TAPE_MIN_SESSION_BARS):null;
+  if(res&&formingNow&&Number(z.v)>=0&&Number(z.t)>Number(res[res.length-1].t)){
+    const f=Math.min(1,Math.max(0,(now-Number(z.t))/TAPE_BAR_MS));
+    const oldest=res[0];
+    res=[{...oldest,v:(Number(oldest.v)||0)*(1-f),_w:1-f}].concat(res.slice(1),[z]);
+    res._span=TAPE_MIN_SESSION_BARS;
+    res._formingShare=f;
+  }
   if(k){
     _continuousTapeMemo.set(k,{sig,val:res});
   }
@@ -4411,7 +4551,11 @@ function radarTapeEvidence(sym){
   const key=normSym(sym||'');
   const bars=INTRADAY_BARS[key];
   if(!bars||bars.length<TAPE_MIN_SESSION_BARS) return null;
-  const stamp=Math.floor(Date.now()/TAPE_BAR_MS)+':'+INTRADAY_STORE_V+':'+BOOK_V+':'+TAPE_IMPACT_W+':'+['book','split','spoof','delta'].map(k=>(BOOK_EDGES[k]?.w||0)+'/'+(BOOK_EDGES[k]?.dir||1)).join(':');
+  // Keyed on THIS symbol's bars (v1364) and, while a bar is forming, a two-second clock so the
+  // sliding window's weights advance; not on the store-wide revision, which any symbol moves.
+  const z=bars[bars.length-1],now=Date.now();
+  const clock=Number(z.t)+TAPE_BAR_MS>now?Math.floor(now/2000):Math.floor(now/TAPE_BAR_MS);
+  const stamp=clock+':'+tapeSigOf(key)+':'+BOOK_V+':'+TAPE_IMPACT_W+':'+['book','split','spoof','delta'].map(k=>(BOOK_EDGES[k]?.w||0)+'/'+(BOOK_EDGES[k]?.dir||1)).join(':');
   const hit=_tapeEvidenceMemo.get(key);
   if(hit&&hit.stamp===stamp) return hit.val;
   const val=_radarTapeEvidenceUncached(key);
@@ -4438,7 +4582,8 @@ function _radarTapeEvidenceUncached(sym){
   //    held more often but paid nothing (+1.47% quiet against +0.07% at the highest volume decile),
   //    so quietness is the term, not the crossing alone.
   let cum=0,crossed=false,quietCross=false;
-  const avgV=totV/day.length;
+  const span=day._span||day.length;
+  const avgV=totV/span;
   let prev=0;
   for(const b of day){
     cum+=tapeDelta(b);
@@ -4449,7 +4594,14 @@ function _radarTapeEvidenceUncached(sym){
 
   // 4. PARTICIPATION - predicts the SIZE of the next move, not its direction (measured: the >=+1%
   //    tail ran 1.1% in the quietest quintile against 3.2% in the busiest).
-  const recent=day.slice(-TAPE_NETVOL_BARS).reduce((n,b)=>n+(Number(b.v)||0),0)/TAPE_NETVOL_BARS;
+  const tail=day.slice(-TAPE_NETVOL_BARS);
+  let recentV=tail.reduce((n,b)=>n+(Number(b.v)||0),0);
+  // Sliding: the bar just before the last three still counts for the part of the bucket not yet run.
+  if(day._span&&day.length>TAPE_NETVOL_BARS){
+    const prior=day[day.length-TAPE_NETVOL_BARS-1];
+    recentV+=(Number(prior._w!=null?prior.v/(prior._w||1):prior.v)||0)*(1-(day._formingShare||0));
+  }
+  const recent=recentV/TAPE_NETVOL_BARS;
   const relVol=avgV>0?recent/avgV:null;
 
   // map each to 0..1 on fixed, inspectable scales
@@ -4512,7 +4664,7 @@ function _radarTapeEvidenceUncached(sym){
   const nor=(f,v,c,s,i,b,sp,cx)=>1-(1-f*W.flow)*(1-v*W.vwap)*(1-c*W.cross)*(1-s*W.size)*(1-i*wImp)
     *(1-b*wBook)*(1-sp*wSplit)*(1-cx*wSpoof);
   const level=clamp01(nor(eFlow,eVwap,eCross,eSize,eImpact,eBook,eSplit,eSpoof)/nor(1,1,1,1,1,1,1,1),0,1);
-  return {level,bars:day.length,netVol,vwapDist,crossed,quietCross,netPositive,relVol,impact,
+  return {level,bars:day._span||day.length,formingShare:day._formingShare??null,netVol,vwapDist,crossed,quietCross,netPositive,relVol,impact,
           impactWeight:wImp,
           book:bk?{imbalance:bk.imbalance,buyShare:bk.buyShare,cancelRatio:bk.cancelRatio,
                    cancelSkew:bk.cancelSkew,replenish:bk.replenish,at:bk.t}:null,
@@ -4936,8 +5088,11 @@ function buildMarketTimingWindows(){
   const it=buildMarketTimingWindowsGen();let s=it.next();while(!s.done)s=it.next();return s.value;
 }
 let _mktWinMemo=null;
+function marketTimingSig(){return newestTapeBucketMs()+':'+INTRADAY_HISTORY_V+':'+Object.keys(INTRADAY_BARS||{}).length;}
 function getMarketTimingWindows(){
-  const sig=INTRADAY_STORE_V;
+  // Rebuilt when a new 5-minute bucket first appears (i.e. the previous bar completed) or history
+  // changes - not on every forming-bar tick, which rebuilt it ~once a second for the same answer.
+  const sig=marketTimingSig();
   if(_mktWinMemo&&_mktWinMemo.sig===sig) return _mktWinMemo.v;
   const v=buildMarketTimingWindows(); _mktWinMemo={sig,v}; return v;
 }
@@ -5490,7 +5645,7 @@ function parseIntradayPaste(text,forSymbol,opts){
   // whole history with the one new bar an incremental read returns - which is why v1243's
   // `?since=` read was reverted rather than shipped. Keyed on the bar timestamp so a re-sent bar
   // updates in place (the forming candle changes until it closes) and can never duplicate.
-  let changed=true;
+  let changed=true,_histTouched=!_merge;
   if(_merge&&Array.isArray(INTRADAY_BARS[sym])&&INTRADAY_BARS[sym].length){
     const prior=INTRADAY_BARS[sym], firstNew=bars[0].t, priorLast=prior[prior.length-1].t;
     if(firstNew>=priorLast){
@@ -5503,18 +5658,30 @@ function parseIntradayPaste(text,forSymbol,opts){
           if(old.o!==b.o||old.h!==b.h||old.l!==b.l||old.c!==b.c||old.v!==b.v){prior[i]=b;changed=true;}
         }else if(!old||b.t>old.t){prior.push(b);changed=true;}
       }
-      if(prior.length>INTRADAY_STORE_MAX) INTRADAY_BARS[sym]=prior.slice(-INTRADAY_STORE_MAX);
+      if(prior.length>INTRADAY_STORE_MAX){INTRADAY_BARS[sym]=prior.slice(-INTRADAY_STORE_MAX);_histTouched=true;}
     }else{
       const byT=new Map();
       for(const b of prior) byT.set(b.t,b);
-      for(const b of bars) byT.set(b.t,b);
-      const all=[...byT.values()].sort((a,b)=>a.t-b.t);
-      INTRADAY_BARS[sym]=all.length>INTRADAY_STORE_MAX?all.slice(-INTRADAY_STORE_MAX):all;
+      // Re-sent identical bars (the held-position read returns the whole day every beat) change
+      // nothing, so they must not bump the store revision and trigger a full rescore each beat.
+      changed=false;
+      for(const b of bars){
+        const old=byT.get(b.t);
+        if(!old||old.forming||old.o!==b.o||old.h!==b.h||old.l!==b.l||old.c!==b.c||old.v!==b.v){byT.set(b.t,b);changed=true;}
+      }
+      if(changed){
+        const all=[...byT.values()].sort((a,b)=>a.t-b.t);
+        if(all.length>INTRADAY_STORE_MAX) _histTouched=true;
+        INTRADAY_BARS[sym]=all.length>INTRADAY_STORE_MAX?all.slice(-INTRADAY_STORE_MAX):all;
+      }
     }
-  } else INTRADAY_BARS[sym]=bars;
+  } else {INTRADAY_BARS[sym]=bars;_histTouched=true;}
   if(changed){
     INTRADAY_STORE_V++;
-    if(bars.some(b=>memoryDay(b.t)<memoryDay(Date.now()))) _memoryRevisions.set(sym,(_memoryRevisions.get(sym)||0)+1);
+    if(bars.some(b=>memoryDay(b.t)<memoryDay(Date.now()))){
+      _memoryRevisions.set(sym,(_memoryRevisions.get(sym)||0)+1);_histTouched=true;
+    }
+    if(_histTouched) INTRADAY_HISTORY_V++;
   } // Historical repairs invalidate only this symbol's memory profile, including interior repairs.
   return {ok:true,changed,sym,bars:bars.length,sessions:new Set(bars.map(b=>istDayKey(b.t))).size,live};
 }
@@ -5720,7 +5887,7 @@ let _thinCutMemo=null;
 // number. Below the scorer's own modeled-feature density floor there is no cross-section to read
 // and parity is the only defensible neutral.
 function getIntradayThinCut(){
-  const sig=INTRADAY_STORE_V+'';
+  const sig=crossSectionSig();
   if(_thinCutMemo&&_thinCutMemo.sig===sig) return _thinCutMemo.val;   // the memo hit costs nothing now
   const keys=Object.keys(INTRADAY_BARS||{});
   const rs=[];
@@ -5759,7 +5926,7 @@ function intradayFetchListRow(sym,w){
 function getIntradayRead(sym){
   const key=normSym(sym||'');
   const sessionKey=(typeof getSessionDate==='function')?getSessionDate():'';
-  const memoSig=INTRADAY_STORE_V+'|'+sessionKey;
+  const memoSig=tapeSigOf(key)+'|'+sessionKey;
   const cached=INTRADAY_READ_MEMO.get(key);
   if(cached&&cached.sig===memoSig){
     if(cached.value&&Number.isFinite(cached.value.asOf)){
@@ -5770,7 +5937,7 @@ function getIntradayRead(sym){
   const bars=INTRADAY_BARS[key];
   if(!bars||!bars.length){INTRADAY_READ_MEMO.set(key,{sig:memoSig,value:null});return null;}
   const barSessionKey=istDayKey(bars[bars.length-1].t);
-  const day=bars.filter(b=>istDayKey(b.t)===barSessionKey);
+  const day=sameDayTail(bars);
   if(bars.length<3){INTRADAY_READ_MEMO.set(key,{sig:memoSig,value:null});return null;}
   const open=day[0].o, close=day[day.length-1].c;
   const hi=Math.max(...day.map(b=>b.h)), lo=Math.min(...day.map(b=>b.l));
@@ -6909,7 +7076,8 @@ function completedAuditClose(sym,date){
   const official=phClose(history[date]?.[sym]);
   if(official>0) return official;
   const bars=INTRADAY_BARS[normSym(sym)]||[];
-  const last=bars.filter(b=>istDayKey(b.t)===date&&istClock(b.t).mins===EQUITY_CLOSE_MIN-5
+  const lastMin=continuousCloseMin(sym)-5;
+  const last=bars.filter(b=>istDayKey(b.t)===date&&istClock(b.t).mins===lastMin
     &&Number(b.t)+TAPE_BAR_MS<=Date.now()).at(-1);
   return Number(last?.c)>0?Number(last.c):null;
 }
@@ -7506,11 +7674,13 @@ const GOAL_STORE='rs_goal_v1';
 let _repsState=null; // {date,lastTotal,lastDelta} — session-only reps trigger state (v483)
 let _goalCfgMemo=null;
 function getGoalConfig(){
+  // Keyed on content, not identity: with no saved goal `FS.get(...)||{}` is a new object on every
+  // call, so the identity memo missed every time and re-walked the trading calendar per row.
   const raw=FS.get(GOAL_STORE)||{};
-  const day=getSessionDate();
-  if(_goalCfgMemo&&_goalCfgMemo.raw===raw&&_goalCfgMemo.day===day) return _goalCfgMemo.v;
+  const day=getSessionDate(),key=JSON.stringify(raw)+'|'+day+'|'+NSE_HOLIDAYS.size;
+  if(_goalCfgMemo&&_goalCfgMemo.key===key) return _goalCfgMemo.v;
   const v=_computeGoalConfig(raw);
-  _goalCfgMemo={raw,day,v};
+  _goalCfgMemo={key,v};
   return v;
 }
 function _computeGoalConfig(rawCfg){
@@ -7763,9 +7933,17 @@ function getEffectiveCapital(){
   const v=parseFloat(document.getElementById('fCapital')?.value);
   return (Number.isFinite(v)&&v>0)?v:getDefaultCapital();
 }
+// ONE value for the whole board, read by two rules on every row of every scoring pass (~3,300
+// calls). The same short-lived memo computeHarvestPlan uses; a typed value is read directly.
+let _maxAllocMemo=null;
 function getEffectiveMaxAlloc(){
   const v=parseFloat(document.getElementById('fMaxAlloc')?.value);
-  return (Number.isFinite(v)&&v>0)?v:getDefaultMaxAlloc();
+  if(Number.isFinite(v)&&v>0) return v;
+  const cap=document.getElementById('fCapital')?.value||'';
+  if(_maxAllocMemo&&_maxAllocMemo.cap===cap&&Date.now()-_maxAllocMemo.at<1500) return _maxAllocMemo.v;
+  const d=getDefaultMaxAlloc();
+  _maxAllocMemo={cap,at:Date.now(),v:d};
+  return d;
 }
 function rowRiskRupees(notional,stopPct){
   const n=Number(notional),s=Number(stopPct);
@@ -7832,7 +8010,7 @@ function getTodayRupeeNeed(){
   const basis=getGoalPortfolioBasis();
   const days=goalRemainingDays(g);
   if(!(basis>0)||!(days>0)) return null;
-  const r=solveGoalDailyRate(basis,g.target,days,g,g.reinvestPct);
+  const r=goalDailyRateCached(basis,g,days);
   if(!(r>0)) return null;
   const need=basis*r;                                  // r is a FRACTION, not a percent
   let booked=null;
@@ -7888,15 +8066,23 @@ function getGoalFreeCapitalParts(){
 }
 function getGoalPortfolioBasis(){return getGoalFreeCapitalParts().total;}
 let _goalRateCache=null;
+let _goalSolveMemo=null;
+function goalDailyRateCached(basis,g,days){
+  const key=[g.target,g.endDate,days,g.withdrawAmount,g.withdrawFreq,g.reinvestPct,Math.round(basis),getSessionDate(),NSE_HOLIDAYS.size].join('|');
+  if(_goalSolveMemo?.key===key) return _goalSolveMemo.r;
+  const r=solveGoalDailyRate(basis,g.target,days,g,g.reinvestPct);
+  _goalSolveMemo={key,r};
+  return r;
+}
 // Required NET %/trading day toward the goal, on FREE capital. Informational only:
 // this requirement informs default allocation, never harvest targets or stock scores.
 function getGoalRequiredNetPct(){
   const g=getGoalConfig();
   const basis=getGoalPortfolioBasis();
   const days=goalRemainingDays(g);
-  const key=[g.target,g.endDate,days,g,g.reinvestPct,Math.round(basis)].join('|');
+  const key=[g.target,g.endDate,days,g.withdrawAmount,g.withdrawFreq,g.reinvestPct,Math.round(basis)].join('|');
   if(_goalRateCache?.key===key) return _goalRateCache.v;
-  const r=solveGoalDailyRate(basis,g.target,days,g,g.reinvestPct);
+  const r=goalDailyRateCached(basis,g,days);
   const v=(r!=null&&r>0)?+(r*100).toFixed(3):null;
   _goalRateCache={key,v};
   return v;
@@ -10255,6 +10441,8 @@ function invalidateTargetAnchorCaches(){
   _nudgeMemo=null;         // left-on-table pool cohort
   _avgTradesMemo=null;     // trade cadence -> Max Alloc default
   _defMaxAllocMemo=null;
+  _maxAllocMemo=null;
+  _goalSolveMemo=null;
   _defRiskMemo=null;
   _allocMemo=null;
   _reachMemo=null;         // v1119: the reachable level is read from the exit store, which a load refreshes
@@ -10404,12 +10592,11 @@ let _capMedMemo=null;
 //   2. the session ceiling (ALL NSE) - low1d + one typical day's range, against the live price;
 //   3. its range capacity (ALL NSE) - sqrt(ATR% x rangePct), when there is no session read.
 // All three are bounded by the NSE circuit, which is what it may LEGALLY reach.
-let _tapeRunwayMemo=null;
+const _tapeRunwayMemo=new Map();
 function getTapeRunwayPct(sym){
-  const sig=INTRADAY_STORE_V+'';
-  if(!_tapeRunwayMemo||_tapeRunwayMemo.sig!==sig) _tapeRunwayMemo={sig,map:new Map()};
-  const s=normSym(sym||'');
-  if(_tapeRunwayMemo.map.has(s)) return _tapeRunwayMemo.map.get(s);
+  const s=normSym(sym||''),sig=tapeSigOf(s);
+  const hit=_tapeRunwayMemo.get(s);
+  if(hit&&hit.sig===sig) return hit.out;
   let out=null;
   const bars=INTRADAY_BARS[s];
   if(Array.isArray(bars)&&bars.length){
@@ -10442,7 +10629,7 @@ function getTapeRunwayPct(sym){
       }
     }
   }
-  _tapeRunwayMemo.map.set(s,out);
+  _tapeRunwayMemo.set(s,{sig,out});
   return out;
 }
 // v1216: THE TARGET IS A CLOCK-CONDITIONAL CROSS-SECTIONAL REACH, AND IT NAMES ITS HOUR.
@@ -10487,7 +10674,10 @@ function rowCapacityPct(row){
   return hasAtr&&hasRange?Math.sqrt(atr*range):hasAtr?atr:hasRange?range:null;
 }
 function buildClockRunwayTable(){
-  const sig=INTRADAY_STORE_V+':'+((ALL&&ALL.length)||0);
+  // Only sessions observed through their close enter (below), so today's forming bars cannot change
+  // this table before the earliest continuous close; after it they can, and the live revision rejoins.
+  const late=istClock().mins>=CAS_CONTINUOUS_END_MIN;
+  const sig=INTRADAY_HISTORY_V+':'+(late?INTRADAY_STORE_V:0)+':'+getSessionDate()+':'+((ALL&&ALL.length)||0);
   if(_clockRunwayMemo&&_clockRunwayMemo.sig===sig) return _clockRunwayMemo.tab;
   const keys=Object.keys(INTRADAY_BARS||{});
   const capOf={};
@@ -10520,7 +10710,7 @@ function buildClockRunwayTable(){
     });
   });
   highMins.sort((a,b)=>a-b);
-  const tab={byClock,highMins};
+  const tab={byClock,highMins,clocks:null,reads:new Map()};
   _clockRunwayMemo={sig,tab};
   return tab;
 }
@@ -10541,9 +10731,10 @@ function getExpectedHighWindow(){
 // moves its session boundaries and a written-in 09:15 would silently rot.
 function sessionOpenClockMinutes(){
   const tab=buildClockRunwayTable();
+  if(tab.openClock!==undefined) return tab.openClock;
   const clocks=Object.keys(tab.byClock).map(Number)
     .filter(c=>tab.byClock[c]&&tab.byClock[c].length>=25).sort((a,b)=>a-b);
-  return clocks.length?clocks[0]:null;
+  return tab.openClock=clocks.length?clocks[0]:null;
 }
 function clockLabelOf(mins){
   const v=Math.max(0,Math.round(Number(mins)||0));
@@ -10558,7 +10749,9 @@ function getClockRunwayRead(row,opts){
   const cap=rowCapacityPct(row);
   if(!(cap>0)) return null;
   const tab=buildClockRunwayTable();
-  const clocks=Object.keys(tab.byClock).map(Number).sort((a,b)=>a-b);
+  // v1364: everything below except `cap` is the same for every row at one clock and one side of the
+  // pool's median move, so it is computed once per (clock, side) instead of sorted once per row.
+  const clocks=tab.clocks||(tab.clocks=Object.keys(tab.byClock).map(Number).sort((a,b)=>a-b));
   if(!clocks.length) return null;
   const now=(opts&&Number.isFinite(opts.atMinutes))?opts.atMinutes:istClock().mins;
   let at=null, bestGap=Infinity;
@@ -10569,20 +10762,30 @@ function getClockRunwayRead(row,opts){
     if(gap<bestGap){ bestGap=gap; at=c; }
   }
   if(at==null) return null;
-  const pool=tab.byClock[at];
-  const moves=pool.map(x=>x.mv).sort((a,b)=>a-b);
-  const medMove=quantileSorted(moves,0.5);
-  const rowMove=Number(row?.changeOpen);
-  let use=pool;
-  if(Number.isFinite(rowMove)&&medMove!=null){
-    const half=pool.filter(x=>rowMove>=medMove?x.mv>=medMove:x.mv<medMove);
-    if(half.length>=25) use=half;
+  let slot=tab.reads.get(at);
+  if(!slot){
+    const pool=tab.byClock[at];
+    const moves=pool.map(x=>x.mv).sort((a,b)=>a-b);
+    const side=use=>{const sorted=use.map(x=>x.v).sort((a,b)=>a-b);return {best:reachQuantileOf(sorted),n:sorted.length};};
+    const medMove=quantileSorted(moves,0.5);
+    slot={medMove,all:side(pool),up:null,down:null};
+    if(medMove!=null){
+      const up=pool.filter(x=>x.mv>=medMove),down=pool.filter(x=>x.mv<medMove);
+      if(up.length>=25) slot.up=side(up);
+      if(down.length>=25) slot.down=side(down);
+    }
+    tab.reads.set(at,slot);
   }
-  const sorted=use.map(x=>x.v).sort((a,b)=>a-b);
-  const best=reachQuantileOf(sorted);
+  const rowMove=Number(row?.changeOpen);
+  let use=slot.all,conditioned=false;
+  if(Number.isFinite(rowMove)&&slot.medMove!=null){
+    const half=rowMove>=slot.medMove?slot.up:slot.down;
+    if(half){use=half;conditioned=true;}
+  }
+  const best=use.best;
   if(!best) return null;
   return {pct:+(cap*best.q).toFixed(2),unitReach:+best.q.toFixed(3),quantile:best.p,
-    n:sorted.length,conditioned:use!==pool,atMinutes:at,clockLabel:clockLabelOf(at)};
+    n:use.n,conditioned,atMinutes:at,clockLabel:clockLabelOf(at)};
 }
 // v1217: RETAINED WITH NO APP CONSUMER, and that is the whole point of the entry.
 // getReachableTargets is the p50/p75 of buy -> that-day's-high on the owner's own CLOSED EXITS.
@@ -10620,9 +10823,12 @@ function getReachableTargets(){
 const HORIZON_TARGET_MEMO=new Map();
 function historicalHorizonTarget(sym,stopPct,horizonDays=1,at=Date.now()){
   const today=istDayKey(at),clock=istClock(at);
-  const minute=Math.max(EQUITY_OPEN_MIN,Math.min(EQUITY_CLOSE_MIN-5,Math.floor(clock.mins/5)*5));
   const symbol=normSym(sym||''),bars=INTRADAY_BARS[symbol];
-  const signature=[INTRADAY_STORE_V,today,minute,stopPct,horizonDays].join(':');
+  const closeMin=continuousCloseMin(symbol);
+  const minute=Math.max(EQUITY_OPEN_MIN,Math.min(closeMin-5,Math.floor(clock.mins/5)*5));
+  // Prior sessions only (`date>=today` is skipped below), so the key is the symbol's history
+  // revision and its oldest retained bar - not the live revision, which moves on every tick.
+  const signature=[_memoryRevisions.get(symbol)||0,bars?.[0]?.t||0,today,minute,closeMin,stopPct,horizonDays].join(':');
   const cached=HORIZON_TARGET_MEMO.get(symbol);
   if(cached?.signature===signature) return cached.value;
   const sessions=new Map();
@@ -10637,18 +10843,18 @@ function historicalHorizonTarget(sym,stopPct,horizonDays=1,at=Date.now()){
   const complete=new Map();
   for(const [date,byMinute] of sessions){
     const day=[];
-    for(let slot=EQUITY_OPEN_MIN;slot<EQUITY_CLOSE_MIN;slot+=5){
+    for(let slot=EQUITY_OPEN_MIN;slot<closeMin;slot+=5){
       const bar=byMinute.get(slot);
       if(!bar) break;
       day.push(bar);
     }
-    if(day.length===(EQUITY_CLOSE_MIN-EQUITY_OPEN_MIN)/5&&day.some(bar=>bar.v>0)) complete.set(date,day);
+    if(day.length===(closeMin-EQUITY_OPEN_MIN)/5&&day.some(bar=>bar.v>0)) complete.set(date,day);
   }
   const samples=[];
   for(const [date,day] of complete){
     let path=day.slice((minute-EQUITY_OPEN_MIN)/5);
     if(horizonDays===1){
-      const next=istDayKey(nextScoreBarStart(Number(day.at(-1).t)+TAPE_BAR_MS));
+      const next=istDayKey(nextScoreBarStart(Number(day.at(-1).t)+TAPE_BAR_MS,closeMin));
       if(!complete.has(next)||tradingDaysBetween(date,next)!==1) continue;
       path=path.concat(complete.get(next));
     }
@@ -10978,7 +11184,7 @@ function getPositionDeadline(sym,pos){
   if(!date&&(ORDERS_TODAY||[]).filter(o=>o.symbol===sym&&o.type==='BUY'&&normOrderDate(o.time)===getSessionDate()).reduce((n,o)=>n+(Number(o.qty)||0),0)>=qty&&qty>0) date=getSessionDate();
   const clock=istClock(),today=new Date(clock.dateMs).toISOString().slice(0,10);
   const days=date?tradingDaysBetween(date,today):null;
-  return {date,days,due:days!=null&&(days>1||(days===1&&clock.mins>=EQUITY_CLOSE_MIN-5))};
+  return {date,days,due:days!=null&&(days>1||(days===1&&clock.mins>=continuousCloseMin(sym)-5))};
 }
 const POSITION_STOP_STORE='rs_position_entry_stops_v1';
 function getPositionEntryStop(sym,pos){
@@ -12489,17 +12695,16 @@ function walkLadder(levels,shares){
 // thin in the abstract, it is thin against the 297 shares you are about to hold. Turnover cannot
 // say this (it is a whole-day rupee figure) and neither can the five-level book (it is a snapshot
 // of resting intent, not of flow). This is the flow half, and it is the half that was missing.
-let _flowProfileMemo={v:-1,map:null};
+const _flowProfileMemo=new Map();
 function getTapeFlowProfile(sym){
   const s=normSym(sym||'');
   const bars=INTRADAY_BARS[s];
   if(!Array.isArray(bars)||!bars.length) return null;
-  if(_flowProfileMemo.v!==INTRADAY_STORE_V){ _flowProfileMemo={v:INTRADAY_STORE_V,map:new Map()}; }
-  const hit=_flowProfileMemo.map.get(s);
-  if(hit) return hit;
+  const sig=tapeSigOf(s),hit=_flowProfileMemo.get(s);
+  if(hit&&hit.sig===sig) return hit.out;
   const key=istDayKey(bars[bars.length-1].t);
-  const day=bars.filter(b=>istDayKey(b.t)===key);
-  if(day.length<3){ _flowProfileMemo.map.set(s,null); return null; }
+  const day=sameDayTail(bars);
+  if(day.length<3){ _flowProfileMemo.set(s,{sig,out:null}); return null; }
   const traded=day.filter(b=>Number(b.v)>0);
   const vols=traded.map(b=>Number(b.v)).sort((a,b)=>a-b);
   const out={
@@ -12508,7 +12713,7 @@ function getTapeFlowProfile(sym){
     medianShares:vols.length?vols[Math.floor(vols.length/2)]:0,
     session:key
   };
-  _flowProfileMemo.map.set(s,out);
+  _flowProfileMemo.set(s,{sig,out});
   return out;
 }
 // THE THIN-STOCK CUT (owner, v1294). "I do not want to get into stocks which deal in low volumes."
@@ -12522,10 +12727,15 @@ function getTapeFlowProfile(sym){
 // sinks expensive stocks whatever their activity, so it doubles as the price ceiling he was
 // already running by hand at Rs800.
 let _volCutMemo={v:-1,pct:-1,cut:null,n:0};
+// v1364: a cross-sectional cut over the whole market is re-derived when a bar COMPLETES (or history
+// changes), not on every forming-bar tick - recomputing ~1,600 reads per beat was a multi-second
+// main-thread stall once forming bars began arriving every two seconds.
+function crossSectionSig(){return newestTapeBucketMs()+':'+INTRADAY_HISTORY_V+':'+Object.keys(INTRADAY_BARS||{}).length;}
 function getSharesPerBarCut(pct){
   const p=Number(pct);
   if(!(p>0)||p>=100) return null;
-  if(_volCutMemo.v===INTRADAY_STORE_V&&_volCutMemo.pct===p) return _volCutMemo;
+  const v=crossSectionSig();
+  if(_volCutMemo.v===v&&_volCutMemo.pct===p) return _volCutMemo;
   const vals=[];
   for(const r of (Array.isArray(ALL)?ALL:[])){
     const f=getTapeFlowProfile(r&&r.symbol);
@@ -12535,8 +12745,8 @@ function getSharesPerBarCut(pct){
   // A percentile needs a cross-section. Below the scorer's own density floor there is nothing to
   // rank against, so it declines to cut rather than inventing a bar out of a handful of rows.
   const out=(vals.length>=25)
-    ? {v:INTRADAY_STORE_V,pct:p,cut:radarQuant(vals,p/100),n:vals.length}
-    : {v:INTRADAY_STORE_V,pct:p,cut:null,n:vals.length};
+    ? {v,pct:p,cut:radarQuant(vals,p/100),n:vals.length}
+    : {v,pct:p,cut:null,n:vals.length};
   _volCutMemo=out;
   return out;
 }
@@ -12768,13 +12978,32 @@ async function hydrateFromHelperOnce(reason){
       }
     }
     if(portfolioChanged.length){
-      const files=[];
-      for(const f of portfolioChanged){const file=await fetchOne(f);if(file)files.push(file);}
-      const ok=files.length===portfolioChanged.length
-        &&await processFiles(files,reason||'portfolio',{silent:true,skipDriveBackup:true,preserveSelection:true});
+      // All three are read together so the structure is judged on one coherent snapshot.
+      const trio=wanted.filter(isPortfolioFile);
+      const files=(await Promise.all(trio.map(fetchOne))).filter(Boolean);
+      const ok=files.length===trio.length;
       if(ok){
-        for(const f of portfolioChanged) _helperInputSigs[f.name]=sig(f);
-        any=true;
+        const byName=n=>files.find(f=>isExactCsvName(f.name,n))||null;
+        const holdFile=byName('Holdings.csv'),ordFile=byName('Orders.csv'),posFile=byName('Positions.csv');
+        const texts=await Promise.all([holdFile,posFile,ordFile].map(f=>f?f.text():''));
+        const struct=portfolioStructureOf(texts);
+        const structural=struct!==_portfolioStructSig;
+        try{
+          await applyPortfolioFiles({holdFile,ordFile,posFile},structural);
+          if(structural){
+            _portfolioStructSig=struct;
+            invalidateTargetAnchorCaches();
+            syncExecutedRecommendedEntries();
+            renderTradingDashboardNow();
+            saveBrainInBackground('Brain saved after portfolio change');
+            any=true;
+          }else{
+            // Prices only: the two portfolio tables and the cards, nothing else.
+            try{renderRankingsPanels();}catch(e){}
+            try{renderStats();}catch(e){}
+          }
+          for(const f of trio) _helperInputSigs[f.name]=sig(f);
+        }catch(e){console.warn('Portfolio refresh failed; will retry',e);allOk=false;}
       }else allOk=false;
     }
     return any&&allOk;
@@ -12904,14 +13133,52 @@ function patchVisiblePrices(){
   }
 }
 
-function patchUniverseDeltas(deltaRows){
+// v1364: THE BAR FORMING NOW, FROM THE DELTA THE PAGE ALREADY READS. The helper sends each traded
+// symbol's current bucket with its price; it is written at the tail of the store, flagged as forming,
+// and replaced by the completed bar when the file read brings it. Returns true when the tail moved.
+function mergeFormingBar(sym,fb){
+  if(!Array.isArray(fb)||fb.length<6) return false;
+  const t=Date.parse(String(fb[0]).slice(0,16).replace(' ','T')+':00+05:30');
+  const o=+fb[1],h=+fb[2],l=+fb[3],c=+fb[4],v=+fb[5];
+  if(!Number.isFinite(t)||!(o>0&&h>0&&l>0&&c>0)||h<l||!(v>=0)) return false;
+  const key=normSym(sym),bars=INTRADAY_BARS[key];
+  if(!Array.isArray(bars)||!bars.length) return false;   // no history to extend: the file read owns it
+  const last=bars[bars.length-1],bar={t,o,h,l,c,v,forming:true};
+  if(t===last.t){
+    if(!last.forming) return false;                       // the completed bar has already landed
+    if(last.o===o&&last.h===h&&last.l===l&&last.c===c&&last.v===v) return false;
+    bars[bars.length-1]=bar;
+  }else if(t>last.t){
+    bars.push(bar);
+    if(bars.length>INTRADAY_STORE_MAX){INTRADAY_BARS[key]=bars.slice(-INTRADAY_STORE_MAX);INTRADAY_HISTORY_V++;}
+  }else return false;
+  INTRADAY_STORE_V++;
+  return true;
+}
+// Cooperative, and behind the same one-at-a-time queue as a full pass: with prices and forming bars
+// arriving every two seconds this now rescores hundreds of rows per beat, and doing that in one
+// synchronous loop is exactly the freeze being removed.
+async function patchUniverseDeltas(deltaRows){
   if(!deltaRows || !ALL.length) return;
+  return runHeavyJob(()=>drainCooperatively(patchUniverseDeltasGen(deltaRows)));
+}
+function* patchUniverseDeltasGen(deltaRows){
   const symMap = new Map(ALL.map(s => [s.symbol, s]));
   let scoreMoved = false;
   let eligibilityChanged = false;
+  let n=0;
+  // WHERE CONTINUOUS RESCORING GOES. Every traded symbol now changes every two seconds; rescoring all
+  // ~1,600 of them per beat saturated the main thread (measured: the page stopped answering). The
+  // rows rescored as their prices and forming bars move are the ones on screen, the ones you hold and
+  // the top of the last full ranking - where a change can alter what you see or do. Every other row
+  // is rescored by the full cross-sectional pass, which still runs at least every 30 seconds.
+  const live=new Set(FILT.slice((PG-1)*PGSZ,PG*PGSZ));
+  for(let i=0;i<Math.min(PGSZ,ALL.length);i++) live.add(ALL[i]);
+  for(const r of ALL) if(r._held) live.add(r);
   for(const sym in deltaRows){
     const f = deltaRows[sym];
     const s = symMap.get(sym);
+    const barMoved=!!(f&&f.fb)&&mergeFormingBar(sym,f.fb);
     if(s && f){
       const prevScore = s.score;
       const prevInputs=[s.price,s.day,s.changeOpen,s.turnover,s.vwap,s.volume].join('|');
@@ -12921,7 +13188,8 @@ function patchUniverseDeltas(deltaRows){
       if(Number.isFinite(f.turnover)) s.turnover = f.turnover;
       if(Number.isFinite(f.vwap)) s.vwap = f.vwap;
       if(Number.isFinite(f.volume)) s.volume = f.volume;
-      if(prevInputs!==[s.price,s.day,s.changeOpen,s.turnover,s.vwap,s.volume].join('|')){
+      if((prevInputs!==[s.price,s.day,s.changeOpen,s.turnover,s.vwap,s.volume].join('|')||barMoved)&&live.has(s)){
+        if((++n)%20===0) yield;
         setRadarEvidenceScore(s);
         scoreMoved = true;
         ROW_ACTION_MEMO.delete(s);
@@ -12993,8 +13261,8 @@ async function scheduleScoreJob(){
         raw.push(universeFieldsToRow(sym, f));
       }
       if(raw.length < 20) return;
-      if(!_mktWinMemo||_mktWinMemo.sig!==INTRADAY_STORE_V){
-        const sig=INTRADAY_STORE_V;
+      if(!_mktWinMemo||_mktWinMemo.sig!==marketTimingSig()){
+        const sig=marketTimingSig();
         _mktWinMemo={sig,v:await drainCooperatively(buildMarketTimingWindowsGen())};
       }
       ALL = await radarScoreRowsAsync(raw);
@@ -13023,6 +13291,7 @@ async function pollUniverseDelta(deferScore=false){
     if(!j||j.ok===false){ _universeDeltaError='helper returned no universe'; return {ok:false,changed:false}; }
     const newRev = Number(j.rev) || 0;
     const newBarRev = Number(j.barRev) || 0;
+    _helperPortfolioRev=Number(j.portfolioRev)||0;
     _pendingRepairRev=Number(j.repairRev)||0;
     const repairChanged=_pendingRepairRev!==_clientRepairRev;
     const barCompleted = (newBarRev > _clientBarRev);
@@ -13069,7 +13338,7 @@ async function pollUniverseDelta(deferScore=false){
         }
       });
     } else {
-      patchUniverseDeltas(j.rows);
+      await patchUniverseDeltas(j.rows);
     }
     return { ok: true, changed: changedSyms.length > 0, barCompleted, repairChanged };
   } catch(e) {
@@ -13149,7 +13418,9 @@ async function mergeInventoryPage(j,since,storeVAtRequest){
       if(!Array.isArray(rows)||rows.length<(since?1:3)) continue;
       if(storeMoved){
         const held=INTRADAY_BARS[normSym(sym)];
-        const heldMs=(held&&held.length)?Number(held[held.length-1].t):0;
+        let hi=held?held.length-1:-1;
+        while(hi>=0&&held[hi].forming) hi--;
+        const heldMs=hi>=0?Number(held[hi].t):0;
         const rawStamp=String(rows[rows.length-1][0]||'');
         const respMs=Date.parse(rawStamp.slice(0,10)+'T'+(rawStamp.slice(11,19)||'00:00:00')+'+05:30');
         if(heldMs>0&&Number.isFinite(respMs)&&heldMs>=respMs) continue;
@@ -13756,7 +14027,7 @@ function ruleTableRowsData(state,today){
       edge:gradeable?ev.edge:null,shrunk:gradeable?ev.shrunk:0,confidence:gradeable?ev.confidence:0,
       sessions:ev.sessions,matureN:maturePass.length,
       matureHits:maturePass.reduce((n,x)=>n+scoreOutcomeTarget(x),0),
-      weight:rule.kind===RULE_ADJUSTABLE?Math.max(0,Math.min(1,Number(map.weights[rule.key])||0)):null,
+      weight:rule.kind===RULE_ADJUSTABLE?Math.max(-1,Math.min(1,Number(map.weights[rule.key])||0)):null,
       gradeable});
   }
   const dir=RULE_TABLE_DIR,key=RULE_TABLE_SORT;
@@ -13812,7 +14083,7 @@ function renderPostClose(){
     const edge=r.gradeable&&Number.isFinite(r.edge)
       ?`${mv(r.edge)}<small>acting on ${mv(r.shrunk)}</small>`
       :r.gradeable?'<small>collecting</small>':'<small>not gradeable</small>';
-    const weight=r.weight==null?(r.ruleKind===RULE_PROTECTED?'<small>never weakened</small>':'—'):r.weight.toFixed(3);
+    const weight=r.weight==null?(r.ruleKind===RULE_PROTECTED?'<small>never weakened</small>':'—'):`<span class="${r.weight>0?'pos':r.weight<0?'neg':''}">${r.weight>0?'+':''}${r.weight.toFixed(3)}</span>`;
     return `<tr><td><b>${escHtml(r.label)}</b>${kindTag(r)}</td>`
       +`<td>${r.passN||0} / ${r.failN||0}</td>`
       +`<td>${mv(r.passMove)}</td><td>${mv(r.failMove)}</td>`
@@ -14099,6 +14370,7 @@ function setStreamActivity(patch){
   try{renderLiveTapeBar();}catch(e){}
 }
 let _lastPortfolioCheckAt=0;
+let _helperPortfolioRev=0,_seenPortfolioRev=0;
 async function refreshPortfolioFromHelper(){
   if(!KITE_API||KITE_API.needsLogin||KITE_API.tokenValid===false)
     return {ok:false,skipped:true,why:'Kite Connect is not ready'};
@@ -14191,7 +14463,7 @@ async function streamRefreshTick(){
       ?await loadIntradayInventory({deferScore:true,historyRepairAt}):0;
     if(!isMarketRefreshWindow()){
       if(historyBarsRead) await scheduleScoreJob();
-      await updateScoreLearning();
+      updateScoreLearning().catch(e=>console.warn('Score learning pass failed',e));
       const done=Date.now();
       setStreamActivity({phase:'market-closed',lastCompleteAt:done,
         lastSuccessAt:STREAM_STATUS&&!STREAM_STATUS.statusUnknown?done:STREAM_ACTIVITY.lastSuccessAt,nextAt:done+STREAM_REFRESH_MS});
@@ -14201,12 +14473,27 @@ async function streamRefreshTick(){
     // The helper maintains live state in memory and sends only changed symbols/bars.
     const deltaRes=await pollUniverseDelta(true);
     const universeChanged=deltaRes&&deltaRes.changed;
+    // The helper announces an order fill / portfolio change as a revision on the delta it is already
+    // answering every beat (it hears Kite's order postback on the tick socket), so the new files are
+    // read on THIS beat instead of waiting for the next ten-second input check.
+    let portfolioEvent=false;
+    if(_helperPortfolioRev&&_helperPortfolioRev!==_seenPortfolioRev){
+      _seenPortfolioRev=_helperPortfolioRev;
+      _lastIndependentInputCheck=0;
+      portfolioEvent=await refreshChangedHelperInputs();
+    }
     // Holdings, positions and orders: throttled check every 10s during continuous loop
     let portfolio={ok:false,skipped:true};
-    let portfolioChanged=inputsChanged;
+    let portfolioChanged=inputsChanged||portfolioEvent;
     if(Date.now()-_lastPortfolioCheckAt>=10000){
       _lastPortfolioCheckAt=Date.now();
       portfolio=await refreshPortfolioFromHelper();
+      // The helper has just rewritten the files; read them now rather than on the next check.
+      if(portfolio.ok){
+        _lastIndependentInputCheck=0;
+        if(Number(portfolio.portfolioRev)) _seenPortfolioRev=Number(portfolio.portfolioRev);
+        portfolioChanged=(await refreshChangedHelperInputs())||portfolioChanged;
+      }
     }
     // THE DELTA CARRIES PRICES, NOT BARS (v1287). v1267 replaced the inventory read with the
     // universe delta on the grounds that the delta "already carries the changed live symbols" - it
@@ -14240,13 +14527,17 @@ async function streamRefreshTick(){
     if(Date.now()-_bookEdgeAt>600000){ _bookEdgeAt=Date.now(); try{ await loadBookEdges(); }catch(e){} }
     // Publish only after prices, completed tape, book and minute inputs have all arrived.
     // Recompute when prices or tape changed, or periodically every 30s for clock-driven transitions.
-    const needScore = (deltaRes&&deltaRes.changed)||barsRead>0||(Date.now()-_lastScoreJobAt>=30000);
+    // Prices and the forming bar re-score their own rows in patchUniverseDeltas as they arrive; the
+    // full cross-sectional pass runs when completed bars land and every 30 s for clock transitions.
+    const needScore = barsRead>0||(Date.now()-_lastScoreJobAt>=30000);
     if(needScore){
       _lastScoreJobAt=Date.now();
       await scheduleScoreJob();
     }
     captureLiveRecommendationScan();
-    await updateScoreLearning();
+    // Learning has its own busy guard and 30-second cadence; the beat does not wait for it, so
+    // resolving outcomes can never hold prices, portfolio and scores back (measured: a 24 s pass).
+    updateScoreLearning().catch(e=>console.warn('Score learning pass failed',e));
     const done=Date.now();
     loopDelay=isMarketRefreshWindow() ? 1000 : STREAM_REFRESH_MS;
     setStreamActivity({phase:STREAM_STATUS?.statusUnknown?'checking':STREAM_STATUS?.connected?'live':'stream-down',lastCompleteAt:done,
@@ -15505,6 +15796,54 @@ const RADAR_DEPTH_IN_SCORE=true;   // v1139: one word reverts the score to v1138
 const DEPTH_MIN_BOOK_QTY=1000;      // a book too small to mean anything
 const DEPTH_MIN_PREOPEN_TURNOVER=2e5;
 let _lastNseZipSig='';   // v1254: size:lastModified of the zip whose parse produced the live NSE maps
+// v1364: THE THREE PORTFOLIO FILES, PARSED IN ONE PLACE. The full load and the live fast path both
+// call this, so there is one parser per input (standing rule) and the fast path no longer has to
+// route a two-row positions change through the whole-dashboard ingest.
+async function applyPortfolioFiles({holdFile,ordFile,posFile},persist=true){
+  if(holdFile){
+    setLoadMsg('Processing holdings...');
+    const holdText=await holdFile.text();
+    HOLDINGS=parseHoldings(holdText);
+    PORTFOLIO_FILE_DATES.holdings=fileDateISO(holdFile.lastModified); // v1079
+    if(persist) try{FS.set(HOLD_STORE,{holdings:HOLDINGS,costMap:HOLD_COST_MAP});}catch(e){}
+    updateFileLoadStatus('Holdings.csv','loaded');
+  }
+  // v557: ORDERS are parsed BEFORE positions, because the orders' own row dates are the most
+  // trustworthy signal of which session the portfolio files describe (see resolvePortfolioStaleness).
+  if(ordFile){
+    setLoadMsg('Processing orders...');
+    const ordText=await ordFile.text();
+    ORDERS_TODAY=parseOrders(ordText);
+    if(ORDERS_TODAY) ORDERS_TODAY._loadedThisSession=true;
+    if(persist) try{FS.set(ORDERS_STORE,{orders:ORDERS_TODAY,sourcePath:ordFile.name,lastModified:ordFile.lastModified});}catch(e){}
+    const _ord=resolvePortfolioStaleness();
+    updateFileLoadStatus('Orders.csv',_ord.ordersStale?'stale':'loaded',_ord.ordersStale?`prior session ${_ord.portfolioDate||'unknown'} - excluded from today`:'');
+  }
+  if(posFile){
+    setLoadMsg('Processing positions...');
+    const posText=await posFile.text();
+    const posHash=(function(t){let h=0;for(let i=0;i<t.length;i++){h=((h<<5)-h)+t.charCodeAt(i);h|=0;}return h;})(posText);
+    const today=getSessionDate();
+    const positionsCurrent=isPositionsFileCurrent(posFile);
+    POSITIONS=positionsCurrent?parsePositions(posText):[];
+    PORTFOLIO_FILE_DATES.positions=fileDateISO(posFile.lastModified); // v1079
+    if(persist) try{FS.set(POS_STORE,{positions:POSITIONS,hash:posHash,sessionDate:today,sourceDate:inputFileSessionDate(posFile),stale:!positionsCurrent});}catch(e){}
+    updateFileLoadStatus('Positions.csv',positionsCurrent?'loaded':'stale',positionsCurrent?'':'stale - ignored');
+  }
+}
+// WHAT A POSITION IS, WITHOUT WHAT IT IS WORTH THIS SECOND. The helper rewrites Holdings/Positions
+// every call because their LTP and P&L columns move with the market, so a size:mtime check reports a
+// "change" on every refresh. Only a change in WHAT is held (symbol, quantity, average, product) or in
+// the order book is a portfolio event; everything else is a price, and prices already stream.
+const PORTFOLIO_LIVE_COLS=new Set(['ltp','cur. val','p&l','net chg.','day chg.','chg.','']);
+let _portfolioStructSig='';
+function portfolioStructureOf(texts){
+  return texts.map(t=>{
+    const rows=parseCSV(String(t||''))||[];
+    const cols=rows.length?Object.keys(rows[0]).filter(k=>!PORTFOLIO_LIVE_COLS.has(String(k).trim().toLowerCase())):[];
+    return cols.join(',')+'\n'+rows.map(r=>cols.map(c=>r[c]).join('|')).join('\n');
+  }).join('\n--\n');
+}
 async function processFiles(files,sourceLabel,opts={}){
   try{return await processFilesImpl(files,sourceLabel,opts);}
   catch(e){console.error('Input processing failed',e);showToast('Input load failed: '+(e.message||e),6000,true);return false;}
@@ -15650,36 +15989,7 @@ async function processFilesImpl(files,sourceLabel,opts={}){
     return false;
   }
 
-  if(holdFile){
-    setLoadMsg('Processing holdings...');
-    const holdText=await holdFile.text();
-    HOLDINGS=parseHoldings(holdText);
-    PORTFOLIO_FILE_DATES.holdings=fileDateISO(holdFile.lastModified); // v1079
-    try{FS.set(HOLD_STORE,{holdings:HOLDINGS,costMap:HOLD_COST_MAP});}catch(e){}
-    updateFileLoadStatus('Holdings.csv','loaded');
-  }
-  // v557: ORDERS are parsed BEFORE positions, because the orders' own row dates are the most
-  // trustworthy signal of which session the portfolio files describe (see resolvePortfolioStaleness).
-  if(ordFile){
-    setLoadMsg('Processing orders...');
-    const ordText=await ordFile.text();
-    ORDERS_TODAY=parseOrders(ordText);
-    if(ORDERS_TODAY) ORDERS_TODAY._loadedThisSession=true;
-    try{FS.set(ORDERS_STORE,{orders:ORDERS_TODAY,sourcePath:ordFile.name,lastModified:ordFile.lastModified});}catch(e){}
-    const _ord=resolvePortfolioStaleness();
-    updateFileLoadStatus('Orders.csv',_ord.ordersStale?'stale':'loaded',_ord.ordersStale?`prior session ${_ord.portfolioDate||'unknown'} - excluded from today`:'');
-  }
-  if(posFile){
-    setLoadMsg('Processing positions...');
-    const posText=await posFile.text();
-    const posHash=(function(t){let h=0;for(let i=0;i<t.length;i++){h=((h<<5)-h)+t.charCodeAt(i);h|=0;}return h;})(posText);
-    const today=getSessionDate();
-    const positionsCurrent=isPositionsFileCurrent(posFile);
-    POSITIONS=positionsCurrent?parsePositions(posText):[];
-    PORTFOLIO_FILE_DATES.positions=fileDateISO(posFile.lastModified); // v1079
-    try{FS.set(POS_STORE,{positions:POSITIONS,hash:posHash,sessionDate:today,sourceDate:inputFileSessionDate(posFile),stale:!positionsCurrent});}catch(e){}
-    updateFileLoadStatus('Positions.csv',positionsCurrent?'loaded':'stale',positionsCurrent?'':'stale - ignored');
-  }
+  await applyPortfolioFiles({holdFile,ordFile,posFile});
   if(tbFile){
     setLoadMsg('Analyzing tradebook...');
     const tbText=await tbFile.text();
