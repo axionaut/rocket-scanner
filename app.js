@@ -1,5 +1,5 @@
-const BUILD_TS='2026-09-11 15:06 IST'; // release build time (IST)
-const APP_VERSION=1369;
+const BUILD_TS='2026-09-11 15:44 IST'; // release build time (IST)
+const APP_VERSION=1370;
 const RADAR_SCORE_VERSION='rocket-tick-v1';
 
 // ── v1358: AN UNCAUGHT ERROR MUST NAME ITSELF ─────────────────────────────────────────────────
@@ -9526,7 +9526,10 @@ function getBookAllocationCap(row){
   const l=getBookLadder(row&&row.symbol);
   const px=Number(row?.price)||0;
   if(!l||!(px>0)) return 0;
-  const exitable=l.bids.reduce((n,x)=>n+(Number(x[1])||0),0);
+  // v1370 (owner): the exit cap is Kite's TOTAL bid quantity across every price level, not only the
+  // five levels NSE displays - real depth sits below them. Top five is the fallback when the total is absent.
+  const total=Number(l.buyQty)||0;
+  const exitable=total>0?total:l.bids.reduce((n,x)=>n+(Number(x[1])||0),0);
   return exitable>0?exitable*px:0;
 }
 function getTurnoverAllocationCap(row){
