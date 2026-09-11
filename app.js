@@ -1,6 +1,6 @@
-const BUILD_TS='2026-09-11 12:14 IST'; // release build time (IST)
-const APP_VERSION=1366;
-const RADAR_SCORE_VERSION='unified-evidence-v1';
+const BUILD_TS='2026-09-11 13:11 IST'; // release build time (IST)
+const APP_VERSION=1367;
+const RADAR_SCORE_VERSION='rocket-tick-v1';
 
 // ── v1358: AN UNCAUGHT ERROR MUST NAME ITSELF ─────────────────────────────────────────────────
 // This is the class of defect that has cost the most sessions in this app's history, and until now
@@ -53,7 +53,6 @@ const EQUITY_OPEN_MIN=9*60+15, EQUITY_CLOSE_MIN=15*60+30;
 // v556: parse the NSE Market Activity Report (MA<date>.csv) — official Nifty %, advances/declines and sector index moves shown as market CONTEXT in the status bar (EOD data, display only, never fed into per-row scoring); MA added to the ℹ️ file manifest.
 // v555 market-cycle stage awareness (stateless, self-calibrating): per-row stage label (1 accumulation · 2 breakout · 3 event · 4 profit-booking · 5 re-accumulation · 6 second-leg); a quiet-accumulation signal (conjunction-of-percentiles) injected via the rocket-diagnostic weighting; sell-the-news decay off Recent earnings date (horizon = review days). v1065 makes the market-breadth gauge an entry-eligibility input while still never changing ranking.
 const GOOGLE_DRIVE_CLIENT_ID='1015012642264-oi2nelv3v90k3d39r994a6nelgjs2a56.apps.googleusercontent.com'; // Public OAuth Web Client ID.
-const PRICE_BAND_BLOCK_BUFFER_PCT=0.15; // Treat rounded 4.9/9.9/19.9 rows as effectively band-locked.
 const BASKET_CASH_RESERVE_RS=1; // Leave a rupee for broker-side tax/rounding differences.
 const MAX_TURNOVER_PARTICIPATION=0.001; // Market-impact rail: never exceed 0.10% of a stock's daily rupee turnover.
 const BASKET_MARKET_BUDGET_BUFFER_PCT=0.25; // Sizing cushion only; exported buys remain MARKET orders.
@@ -168,7 +167,6 @@ function tapeSigOf(key){
 }
 let _tvLoadedThisSession=false; // true once a TV CSV has been processed this session
 let PERF_PERIOD_FILTER='all'; // 'all' | '1m' | '3m' | '6m' | '1y'
-let PERF_TRACK_ISSUE=null; // issue date selected in the recommendation-tracking outcome panel
 let PERF_LATEST_SUMMARY=null; // cached latest session summary from buildLatestSessionPanel — used by renderStats card
 let PERF_RENDERED=false; // true after background or foreground performance calculation
 let PERF_RENDER_QUEUED=false;
@@ -222,8 +220,6 @@ const SURV_RETIRE_MARK='rs_surv_retired_v1169';
 const SURV_CORR_STORE='rs_surv_corr';
 const SAME_DAY_EXIT_OPPORTUNITY_STORE='rs_same_day_exit_opportunity_v3';
 const RECOMMEND_OUTCOME_STORE='rs_recommend_outcomes_delta_v1';
-const SCORE_LEARNING_STORE='rs_score_learning_v1';
-const POST_CLOSE_AUDIT_STORE='rs_post_close_audit_v1';
 const NSE_FUNDAMENTAL_STORE='rs_nse_fundamentals_v1';
 const RECOMMEND_MIN_PROGRESS_FRACTION=0.25;
 const LEFT_ON_TABLE_STORE='rs_left_on_table_v1';
@@ -305,18 +301,7 @@ function getOpenSnapshot(sym){
 }
 loadOpenSnapshotMap();
 
-const CALIBRATED_WEIGHTS_STORE='rs_calibrated_weights_v1';
 
-function getCalibratedWeights(){
-  try{
-    const raw=localStorage.getItem(CALIBRATED_WEIGHTS_STORE);
-    if(raw){
-      const parsed=JSON.parse(raw);
-      if(parsed&&typeof parsed==='object') return parsed;
-    }
-  }catch(e){}
-  return { depthMultiplier: 1.0, gapFadeMultiplier: 1.0, updated: '' };
-}
 const TABLE_ENTRY_STORE='rs_table_entry_v3';
 let TABLE_ENTRY_MAP={};
 function loadTableEntryMap(){
@@ -417,7 +402,6 @@ function getTableEntryInfo(sym,currentPrice,row=null){
   return {entryPrice:basePrice, at:baseAt, movePct};
 }
 loadTableEntryMap();
-const LEFT_ON_TABLE_POOL_SESSIONS=10;   // how much of it the pool actually reads
 // v1098: dated official closes, so a multi-session drift can be measured properly. The app has never
 // retained any price history — NSE_BHAV is rebuilt from the current zip on every load — which is why
 // v1097 had to approximate "the drift into the results" from a 1-week column.
@@ -425,10 +409,6 @@ const PRICE_HISTORY_STORE='rs_price_history_v1';
 const PRICE_HISTORY_KEEP_SESSIONS=40;
 const PRE_RESULTS_DRIFT_SESSIONS=3;     // the owner's 2-3 day window, measured to the last close before today
 const ENTRY_OUTCOME_STORE='rs_entry_outcomes_delta_v1';
-const OUTCOME_HORIZON_FALLBACK_DAYS=5;
-const OUTCOME_HORIZON_MAX_DAYS=20;
-const OUTCOME_FEEDBACK_MIN_SAMPLES=6;
-const OUTCOME_SCORE_ADJ_MAX=8;
 const OUTCOME_FEATURE_SIGNATURE_MAX=24;
 const NSE_HOLIDAYS_STORE='rs_nse_holidays';
 // Keep rocket_brain.json for learned state only. Input-file derivatives are rebuilt
@@ -1500,11 +1480,6 @@ function isMarketRefreshWindow(timestamp=Date.now()){
 }
 function getSessionDate(){ return getModelTradingDate(Date.now()); }
 
-// Stable liquidity and self-managing display filters
-const LIQ_MIN_AVG_VOL=10000;
-const LIQ_MIN_AVG_TURNOVER=10000000;
-const MIN_PRICE_FLOOR=5;
-const MIN_MCAP_FLOOR=500000000;
 // ── CSV Parser ──
 function parseCSVRaw(text){
   const lines=[];let cur='',inQ=false;
@@ -2575,18 +2550,6 @@ function resolveRocketForPick(p,bar,gap,scanDate){
   p.rocketOutcome=res;p.rocketResolvedOn=scanDate;p.rocketResolvedDay=gap;
   if(res===ROCKET_OUTCOME.ROCKET){p.rocketDate=scanDate;p.rocketDays=gap;}
 }
-function getRocketArrivalStats(){
-  const issues=Object.values((FS.get(RECOMMEND_OUTCOME_STORE)||{}).issues||{});
-  const days=issues.flatMap(issue=>(issue.picks||[])
-      .filter(p=>String(p.rocketOutcome)===String(ROCKET_OUTCOME.ROCKET))
-      .map(p=>p.rocketDays))
-    .filter(v=>v!=null&&isFinite(v)&&v>0);
-  return {
-    count:days.length,
-    avg:days.length?+meanArr(days).toFixed(1):null,
-    p75:percentileValue(days,0.75),
-  };
-}
 function getAdaptiveOutcomeHorizonDays(){return ROCKET_HORIZON_DAYS-1;}
 function getEffectiveReviewDays(){return ROCKET_HORIZON_DAYS-1;}
 function getOutcomeCheckpointDays(horizonDays){
@@ -2827,25 +2790,6 @@ function recordRecommendationOutcomeScan(scan){
   FS.set(RECOMMEND_OUTCOME_STORE,store);
   _tapeProfitMemo=null;
 }
-const POST_CLOSE_CONDITIONS=[
-  {key:'entry-ready',label:'Entry gate approved',mode:'gate',test:p=>p.entryReady!==false,rowTest:r=>r.entryReady!==false},
-  {key:'score-bar',label:'Decision score cleared its policy bar',mode:'gate',
-    test:p=>(p.scoreVersion||'legacy-pre-v1229')===RADAR_SCORE_VERSION&&Number(p.score)>=RECOMMEND_MIN_SCORE,
-    rowTest:r=>r.scoreVersion===RADAR_SCORE_VERSION&&Number(r.score)>=RECOMMEND_MIN_SCORE},
-  {key:'setup-p95',label:'Setup percentile at least 95%',mode:'gate',test:p=>Number(p.setupPct)>=.95,rowTest:r=>Number(r.setupPct)>=.95},
-  {key:'ignite-p95',label:'Ignition percentile at least 95%',mode:'gate',test:p=>Number(p.ignitePct)>=.95,rowTest:r=>Number(r.ignitePct)>=.95},
-  {key:'direction-confirmed',label:'Direction confirmed at issue',mode:'gate',test:p=>p.directionConfirmed===true,rowTest:r=>r.directionConfirmed===true},
-  {key:'range-location-75',label:'Range location at most 75%',mode:'gate',test:p=>Number.isFinite(Number(p.rangeLocationAtIssue))&&Number(p.rangeLocationAtIssue)<=75,rowTest:r=>Number.isFinite(Number(r.entryTiming?.rangeLocation))&&Number(r.entryTiming.rangeLocation)<=75},
-  {key:'range-used-75',label:'Expected range used below 75%',mode:'gate',test:p=>Number.isFinite(Number(p.rangeUsedAtIssue))&&Number(p.rangeUsedAtIssue)<75,rowTest:r=>Number.isFinite(Number(r.entryTiming?.rangeUsed))&&Number(r.entryTiming.rangeUsed)<75},
-  {key:'rocket-ready',label:'All feasibility tests passed',mode:'gate',test:p=>p.rocketReady===true,rowTest:r=>r.rocketReady===true},
-  {key:'target-reachable',label:'Target fits the stock range estimate',mode:'gate',test:p=>p.targetReachable===true,rowTest:r=>{try{return getRowExitPolicy(r).reachable===true;}catch(e){return false;}}},
-  {key:'stage-accumulation',label:'Accumulation or re-accumulation stage',mode:'boost',test:p=>[1,5].includes(Number(p.stage)),rowTest:r=>[1,5].includes(Number(r.stage))},
-  {key:'stage-breakout',label:'Initial or second-leg breakout stage',mode:'boost',test:p=>[2,6].includes(Number(p.stage)),rowTest:r=>[2,6].includes(Number(r.stage))},
-  {key:'stage-event',label:'Unresolved event-day stage',mode:'veto-on-retired',test:p=>Number(p.stage)===3,rowTest:r=>Number(r.stage)===3},
-  {key:'stage-digestion',label:'Post-result profit-booking stage',mode:'veto-on-retired',test:p=>Number(p.stage)===4,rowTest:r=>Number(r.stage)===4},
-  {key:'fundamental-positive',label:'Profitable results plus price confirmation',mode:'boost',test:p=>Number(p.fundamentalTrigger)>0,rowTest:r=>Number(r.fundamentalTrigger)>0},
-  {key:'fundamental-negative',label:'Loss, negative operations, or qualified audit',mode:'veto-on-retired',test:p=>Number(p.fundamentalTrigger)<0,rowTest:r=>Number(r.fundamentalTrigger)<0},
-];
 // v1213: the previous rule was `wins>=3 && sessions>=2 && losses<=1 && precision>=95`, and it was
 // UNREACHABLE BY CONSTRUCTION. `losses` is a cumulative count over every audited session and only
 // grows, so one condition's second contradiction disabled it permanently: measured 2026-08-21,
@@ -2871,62 +2815,9 @@ function familyTCrit(n){
   const t=Math.sqrt(-2*Math.log(p));
   return +(t-(2.30753+0.27061*t)/(1+0.99229*t+0.04481*t*t)).toFixed(3);
 }
-function postCloseTCrit(){ return familyTCrit((POST_CLOSE_CONDITIONS||[]).length); }
 // The indicator family is whatever is actually being tested this pass, so the bar moves with the
 // evidence instead of standing at a number derived from a feature count that no longer holds.
 function indicatorWatchTCrit(n){ return familyTCrit(n); }
-function postCloseConditionStats(audits,key){
-  const lifts=[],ses=[];let wins=0,losses=0,picks=0;
-  Object.values(audits||{}).forEach(a=>{
-    if(!(a&&a.resolved>0)||a.objective!=='net-policy-v1') return;
-    const c=(a.conditions||[]).find(x=>x.key===key);
-    if(!c||!c.n) return;
-    const p=c.wins/c.n, b=a.rockets/a.resolved;
-    lifts.push(p-b);
-    // Each session's lift is a difference of two proportions and carries its OWN sampling error.
-    // The variance is computed on LAPLACE-SMOOTHED rates (+1 success, +1 failure) purely for the
-    // error term, never for the lift itself: a clean 1-of-1 has a raw variance of exactly zero and
-    // scored MORE certain than a 10-pick sample on the first cut of this release. Smoothing is the
-    // standard correction for that and is not a tuned number - it is one observation of each kind.
-    const ps=(c.wins+1)/(c.n+2), bs=(a.rockets+1)/(a.resolved+2);
-    ses.push(Math.sqrt(ps*(1-ps)/c.n+bs*(1-bs)/a.resolved));
-    wins+=c.wins;losses+=c.losses;picks+=c.n;
-  });
-  const n=lifts.length;
-  if(!n) return {sessions:0,wins,losses,picks,meanLift:null,t:null,agreement:null};
-  const m=lifts.reduce((x,y)=>x+y,0)/n;
-  const sd=n>1?Math.sqrt(lifts.reduce((x,y)=>x+(y-m)*(y-m),0)/(n-1)):0;
-  // A near-constant series has a variance of ~1e-17 and would produce a t of ~1e16 - certainty
-  // manufactured out of a rounding error. The denominator is floored by the mean sampling error the
-  // counts themselves imply, which is DERIVED from the data and not a chosen epsilon: a condition
-  // measured on ten picks can never look more certain than ten picks allow.
-  const seFloor=ses.length?ses.reduce((x,y)=>x+y,0)/ses.length:0;
-  const spread=Math.max(sd,seFloor);
-  const t=(n>1&&spread>0)?m/(spread/Math.sqrt(n)):0;
-  const agreement=n?lifts.filter(x=>Math.sign(x)===Math.sign(m)).length/n:0;
-  return {sessions:n,wins,losses,picks,meanLift:+(100*m).toFixed(1),t:+t.toFixed(2),
-          agreement:+(100*agreement).toFixed(0)};
-}
-function getPostCloseRuleScorecard(audits){
-  const tCrit=postCloseTCrit();
-  return POST_CLOSE_CONDITIONS.map(c=>{
-    const st=postCloseConditionStats(audits,c.key);
-    const total=st.wins+st.losses;
-    const precision=total?+(100*st.wins/total).toFixed(1):null;
-    // POST_CLOSE_MIN_SESSIONS is the existing v1202 bar (>=3 confirming sessions), reused so no
-    // new sample-size number is introduced.
-    const enough=st.sessions>=3&&st.agreement>=70;
-    let status='COLLECTING',why='';
-    if(enough&&st.t>=tCrit&&st.meanLift>0) status='ARMED';
-    else if(enough&&st.t<=-tCrit&&st.meanLift<0) status='RETIRED';
-    else if(st.sessions===0) why='no audited session has scored it yet';
-    else if(st.sessions<3) why='needs '+(3-st.sessions)+' more audited session'+(3-st.sessions===1?'':'s');
-    else if(st.agreement<70) why='its sign flips too often ('+st.agreement+'% agreement, needs 70%)';
-    else why='|t| '+Math.abs(st.t).toFixed(2)+' of the '+tCrit+' its own family size requires';
-    return {key:c.key,label:c.label,wins:st.wins,losses:st.losses,sessions:st.sessions,total,
-            precision,meanLift:st.meanLift,t:st.t,agreement:st.agreement,tCrit,status,why};
-  });
-}
 const GAINER_COHORT_N=20;
 // v1208: the existing audit grades the app's OWN picks, so it can only ever learn from what it
 // already recommends. This grades the day's ACTUAL winners against the same conditions, whether or
@@ -2936,64 +2827,18 @@ function getGainerCohort(rows){
     &&Number(r.turnover)>=25e5&&Number(r.price)>=10&&Number.isFinite(Number(r.day)));
   return pool.slice().sort((a,b)=>Number(b.day)-Number(a.day)).slice(0,GAINER_COHORT_N);
 }
-// A condition ARMS on the same shape of bar the pick audit uses: it has to hold, with the same sign,
-// across sessions rather than once. LIFT_MIN is the cohort/control gap in percentage points; a
-// condition present in the winners at the market's own base rate says nothing.
-const GAINER_LIFT_MIN=25;
 // v1213: same defect as the pick tracker - `contradictions<=1` is cumulative and only grows, so a
 // condition was disabled permanently by its second bad day and then reported COLLECTING. The lift
 // is already measured per session against the market's own base rate, so the honest test is
 // whether that lift is reliably non-zero, on the same derived critical value the pick side uses.
 
-function activePostCloseTriggerRules(mode){
-  return (getUnifiedModelState().frozenRules||[]).map(score=>({score,definition:POST_CLOSE_CONDITIONS.find(c=>c.key===score.key)}))
-    .filter(x=>x.definition&&x.definition.mode===mode&&(mode==='veto-on-retired'?x.score.status==='RETIRED':['ARMED','ELIGIBLE'].includes(x.score.status)));
-}
 
-function applyLearnedTriggerRanking(rows){
-  const active=activePostCloseTriggerRules('boost');
-  rows.forEach(r=>{r.modelTriggers=[];r.triggerFactor=1;});
-  if(!active.length||!rows.length)return 0;
-  let matched=0;
-  rows.forEach(r=>{
-    const hits=active.filter(x=>x.definition.rowTest(r));
-    r.modelTriggers=hits.map(x=>({key:x.definition.key,label:x.definition.label,action:'rank boost',evidence:x.score}));
-    if(hits.length)matched++;
-    const triggerPct=hits.length?1:.5;
-    r._triggerBlend=Math.sqrt(Math.max(0,Number(r.depthBlendPct)||0)*triggerPct);
-  });
-  if(!matched){rows.forEach(r=>delete r._triggerBlend);return 0;}
-  // An armed trigger raises or lowers the row it matches. It may not re-rank the whole board, and
-  // it may not restate what a score MEANS - so it is a bounded factor on that row's own evidence.
-  const blends=rows.map(r=>Number(r._triggerBlend)).filter(Number.isFinite);
-  const mid=blends.length?blends.slice().sort((a,b)=>a-b)[Math.floor(blends.length/2)]:1;
-  rows.forEach(r=>{
-    const b=Number(r._triggerBlend);
-    delete r._triggerBlend;
-    r.triggerFactor=(Number.isFinite(b)&&mid>0)?Math.max(0.5,Math.min(1.5,b/mid)):1;
-    setRadarEvidenceScore(r);
-  });
-  rows.sort((a,b)=>b.score-a.score||radarRankTieBreak(a,b));
-  rows.forEach((r,i)=>{r.rank=i+1;});
-  return matched;
-}
 function radarRankTieBreak(a,b){
   const st=r=>{
     const d=Number(r&&r.depthBlendPct); if(Number.isFinite(d)) return d;
     const p=Number(r&&r.setupPct); return Number.isFinite(p)?p:-1;
   };
   return (st(b)-st(a))||String(a.symbol||'').localeCompare(String(b.symbol||''));
-}
-function applyLearnedRecommendationGates(rows){
-  const active=[...activePostCloseTriggerRules('gate'),...activePostCloseTriggerRules('veto-on-retired')];
-  rows.forEach(r=>{
-    const failed=active.filter(x=>x.definition.mode==='gate'?!x.definition.rowTest(r):x.definition.rowTest(r));
-    r.recommendationTriggerBlocked=failed.length>0;
-    r.recommendationTriggerReasons=failed.map(x=>x.definition.label);
-    r.modelTriggers=[...(r.modelTriggers||[]).filter(t=>t.action==='rank boost'),...active.filter(x=>!failed.includes(x)&&x.definition.rowTest(r))
-      .map(x=>({key:x.definition.key,label:x.definition.label,action:x.definition.mode==='gate'?'recommendation gate':'veto',evidence:x.score}))];
-  });
-  return active.length;
 }
 function getRecommendationOutcomeSummary(){
   const issues=Object.values((FS.get(RECOMMEND_OUTCOME_STORE)||{}).issues||{});
@@ -3038,985 +2883,9 @@ function getRecommendationOutcomeSummary(){
     issueDays:issues.length,horizonDays:currentHorizon
   };
 }
-// One adjustable evidence model. Eligibility, depth, freshness, timing, circuit and risk
-// safeguards are applied separately and are never parameters of the learner.
-const MEMORY_SPEC=Object.freeze({id:'memory-forward-v1',sessions:13,minBars:60,targetPct:2.6,
-  bucketATR:0.1,maxATR:3,recent:3,dates:30,minCohort:200,permutations:200,rr:1.30,transitions:7,t:3});
-const MEMORY_NAMES=['Overhead participation','Open space above versus below','Recent overhead activity'];
-const _memoryProfiles=new Map(),_memoryRevisions=new Map();
+// Per-symbol history revision: bumped when a prior-session bar is written, read by every tape signature.
+const _memoryRevisions=new Map();
 function memoryDay(t){return new Date(Number(t)+19800000).toISOString().slice(0,10);}
-function buildMemoryProfile(bars,asOf){
-  const day=memoryDay(asOf),sessions=new Map();
-  for(const b of bars||[]){
-    if(!Number.isFinite(b.t)||b.t+300000>asOf||memoryDay(b.t)>=day) continue;
-    const minute=Math.floor((b.t+19800000)/60000)%1440;
-    if(minute<555||minute>=930||![b.h,b.l,b.c,b.v].every(Number.isFinite)||b.l<=0||b.h<b.l||b.c<b.l||b.c>b.h||b.v<0) continue;
-    const d=memoryDay(b.t);if(!sessions.has(d)) sessions.set(d,new Map());sessions.get(d).set(b.t,b);
-  }
-  const dates=[...sessions.keys()].filter(d=>sessions.get(d).size>=MEMORY_SPEC.minBars).sort().slice(-MEMORY_SPEC.sessions).reverse();
-  if(dates.length!==MEMORY_SPEC.sessions) return {ok:false,sessions:dates.length,reason:'Needs 13 preceding sessions with at least 60 equity bars each'};
-  const points=[],totals=[];
-  for(let age=0;age<dates.length;age++){
-    totals[age]=0;
-    for(const b of sessions.get(dates[age]).values()){
-      const p=(b.h+b.l+b.c)/3;points.push({p,v:b.v,age});totals[age]+=b.v;
-    }
-    if(!(totals[age]>0)) return {ok:false,sessions:dates.length,reason:'Historical session volume unavailable'};
-  }
-  points.sort((a,b)=>a.p-b.p);
-  const prefix=[0];points.forEach(p=>prefix.push(prefix[prefix.length-1]+p.v));
-  return {ok:true,sessions:dates.length,dates,points,prefix,totals,total:prefix[prefix.length-1],
-    firstClose:[...sessions.get(dates[dates.length-1]).values()].sort((a,b)=>a.t-b.t).at(-1).c};
-}
-function memoryProfileFor(symbol,asOf=Date.now()){
-  const bars=INTRADAY_BARS[normSym(symbol)]||[],key=normSym(symbol);
-  const sig=memoryDay(asOf)+':'+(_memoryRevisions.get(key)||0);
-  const old=_memoryProfiles.get(key);
-  if(old?.sig===sig&&old.bars===bars) return old.value;
-  const value=buildMemoryProfile(bars,asOf);_memoryProfiles.set(key,{sig,bars,value});return value;
-}
-function calcMemoryFeatures(profile,price,atr){
-  if(!profile?.ok||!(price>0&&atr>0)) return {ok:false,reason:profile?.reason||'Current ATR unavailable'};
-  const {points}=profile;
-  const lower=x=>{let l=0,h=points.length;while(l<h){const m=(l+h)>>1;if(points[m].p<x)l=m+1;else h=m;}return l;};
-  const corridorEnd=price*(1+MEMORY_SPEC.targetPct/100),sessionVolume=Array(13).fill(0);
-  let weighted=0;
-  for(let j=lower(price);j<points.length&&points[j].p<=corridorEnd;j++){
-    const p=points[j];weighted+=p.v*Math.exp(-(p.p-price)/atr);sessionVolume[p.age]+=p.v;
-  }
-  const h=sessionVolume.map((v,i)=>v/profile.totals[i]);
-  const mean=v=>v.reduce((a,b)=>a+b,0)/v.length;
-  const wosd=weighted/profile.total,rmd=mean(h.slice(0,3))-mean(h.slice(3));
-  // Buckets move with current price/ATR. The cached profile never stores projected buckets.
-  const width=MEMORY_SPEC.bucketATR*atr,volumes=new Map();
-  for(const p of points){const k=Math.floor((p.p-price)/width);volumes.set(k,(volumes.get(k)||0)+p.v);}
-  const nonempty=[...volumes.values()].filter(v=>v>0).sort((a,b)=>a-b);
-  const mid=Math.floor(nonempty.length/2),threshold=nonempty.length%2?nonempty[mid]:(nonempty[mid-1]+nonempty[mid])/2;
-  const distance=dir=>{
-    for(let k=0;k<30;k++){
-      if((volumes.get(dir>0?k:-k-1)||0)>=threshold) return (k+0.5)*MEMORY_SPEC.bucketATR;
-    }
-    return MEMORY_SPEC.maxATR;
-  };
-  const up=distance(1),down=distance(-1),apa=(up-down)/(up+down);
-  return {ok:true,version:MEMORY_SPEC.id,wosd,apa,rmd,h,up,down,sessions:13,
-    values:[1-wosd,(1+apa)/2,(1-rmd)/2],displacement:100*(price/profile.firstClose-1)};
-}
-function getMemoryReading(r){
-  return calcMemoryFeatures(memoryProfileFor(r.symbol),Number(r.price),Number(r.price)*Number(r.atr)/100);
-}
-function memoryFeatureAllowed(state,i){return state.memoryStudy?.version===MEMORY_SPEC.id&&state.memoryStudy?.results?.[i]?.pass===true;}
-function memoryStudyState(state){
-  if(!state.memoryStudy) state.memoryStudy={version:MEMORY_SPEC.id,createdAt:Date.now(),dates:[],symbols:null,results:null,status:'Collecting new decisions',records:[]};
-  return state.memoryStudy;
-}
-function memoryMean(a){return a.length?a.reduce((x,y)=>x+y,0)/a.length:null;}
-function memoryEffect(rows,feature,control=null,override=null){
-  const grouped=new Map();
-  for(const p of rows){const key=p.issueDate+'|'+(control==null?'all':p.memoryControls[control]);if(!grouped.has(key)) grouped.set(key,[]);grouped.get(key).push(p);}
-  const dates=new Map();
-  for(const group of grouped.values()){
-    if(group.length<20) continue;
-    const value=p=>override?override(p):p.memory.values[feature];
-    const values=group.map(value).sort((a,b)=>a-b),bins=Array.from({length:10},()=>[]);
-    for(const p of group) bins[Math.min(9,Math.floor(10*radarPct(values,value(p))))].push(scoreOutcomeTarget(p));
-    if(bins.some(b=>!b.length)) continue; // tied/empty deciles cannot manufacture separation
-    const rates=bins.map(memoryMean),base=memoryMean(group.map(scoreOutcomeTarget));
-    const d=group[0].issueDate;if(!dates.has(d)) dates.set(d,[]);
-    dates.get(d).push({rates,base,top:rates[9],lift:rates[9]-base});
-  }
-  const day=[...dates.values()].map(groups=>({rates:Array.from({length:10},(_,i)=>memoryMean(groups.map(g=>g.rates[i]))),
-    base:memoryMean(groups.map(g=>g.base)),top:memoryMean(groups.map(g=>g.top)),lift:memoryMean(groups.map(g=>g.lift))}));
-  const lift=memoryMean(day.map(d=>d.lift)),base=memoryMean(day.map(d=>d.base)),top=memoryMean(day.map(d=>d.top));
-  const variance=day.length>1?day.reduce((s,d)=>s+(d.lift-lift)**2,0)/(day.length-1):null;
-  const t=variance>0?lift/Math.sqrt(variance/day.length):lift>0?1e6:0;
-  const rates=Array.from({length:10},(_,i)=>memoryMean(day.map(d=>d.rates[i])));
-  return {days:day.length,lift,rr:base>0?top/base:0,t,transitions:rates.slice(1).filter((v,i)=>v!=null&&v>rates[i]).length};
-}
-async function evaluateMemoryStudy(study){
-  // A separate prospective qualification, not a replay or reinterpretation of the frozen v1339 archive study.
-  const records=study.records.filter(usableScoreOutcome),results=[];
-  for(let i=0;i<3;i++){
-    const raw=memoryEffect(records,i),controls=[0,1,2,3].map(c=>memoryEffect(records,i,c));
-    const sufficient=raw.days===30&&controls.every(c=>c.days===30);
-    let placebo=null;
-    if(i===2&&sufficient){
-      let exceeded=0;
-      for(let k=0;k<MEMORY_SPEC.permutations;k++){
-        // One permutation per symbol/date, shared by its overlapping snapshots.
-        const orders=new Map();
-        const value=p=>{
-          const key=p.symbol+'|'+p.issueDate;
-          if(!orders.has(key)){
-            let seed=scoreSampleHash(MEMORY_SPEC.id+'|'+k+'|'+key);const order=Array.from({length:13},(_,n)=>n);
-            for(let j=12;j>0;j--){seed=(Math.imul(seed,1664525)+1013904223)>>>0;const n=seed%(j+1);[order[j],order[n]]=[order[n],order[j]];}
-            orders.set(key,order);
-          }
-          const h=orders.get(key).map(j=>p.memory.h[j]);return (1-(memoryMean(h.slice(0,3))-memoryMean(h.slice(3))))/2;
-        };
-        if(memoryEffect(records,i,null,value).lift>=raw.lift) exceeded++;
-        if(k%5===0) await new Promise(resolve=>setTimeout(resolve,0));
-      }
-      placebo=(exceeded+1)/(MEMORY_SPEC.permutations+1);
-    }
-    const pass=sufficient&&raw.rr>=MEMORY_SPEC.rr&&raw.transitions>=MEMORY_SPEC.transitions&&raw.t>=MEMORY_SPEC.t
-      &&controls.every(c=>c.lift>0&&c.t>=MEMORY_SPEC.t)&&(i!==2||placebo<=0.05);
-    results.push({pass,verdict:pass?'Qualified for weight testing':!sufficient?'Inconclusive - study closed':'Did not qualify',raw,controls,placebo});
-    await new Promise(resolve=>setTimeout(resolve,0));
-  }
-  return results;
-}
-const SCORE_SOURCES=[
-  ['flow','Candle pressure',1],['vwap','Tape VWAP position',1],['cross','Pressure crossover',1],['size','Recent participation',1],
-  ['impact','Price impact',1],['book','Order-book imbalance',1],['split','Classified buy share',1],['cancel','Book cancellations',1],
-  ['predictor','Qualified predictor',1],['trigger','Existing signal boosts',1],['depth','Depth evidence',1],
-  ['velocity','Recent acceleration',1],['fade','Below-open penalty',1],
-  ['participation','Participation setup',0],['momentum','Momentum setup',0],['trend','Trend setup',0],
-  ['structure','Price structure',0],['liquidity','Liquidity context',0],['volatility','Range context',0],['context','Market context',0],
-  ['fundamental','Fundamental signal',0],['distance','Target versus capacity',0],['clock','Time through next close',0],
-  ['memoryOverhead',MEMORY_NAMES[0],0],['memorySpace',MEMORY_NAMES[1],0],['memoryAge',MEMORY_NAMES[2],0],
-  // One slot per ADJUSTABLE decision rule, in DECISION_RULE_DEFS order. Every one starts at the
-  // prior, which is 0 for this additive wiring - so the release is bit-for-bit identical to v1359
-  // and the weights separate only as evidence arrives. checkRuleSlotAlignment() below fails loudly
-  // if this list and the registry ever drift apart.
-  ['rule:above-vwap','Price at or above VWAP',0],['rule:green-day','Positive day move',0],
-  ['rule:above-open','Price above session open',0],['rule:bids-holding','Visible bids exceed visible offers',0],
-  ['rule:non-selling-flow','Completed tape is not net selling',0],['rule:pressure-converting','Tape pressure converts into price',0],
-  ['rule:buy-over-sell-volume','Buy volume exceeds sell volume',0],
-  ['rule:range-not-consumed','Expected range is not consumed',0],['rule:entry-confirmed','Entry timing is confirmed',0],
-  ['rule:target-clears-costs','Target clears round-trip costs at tradeable size',0],
-  ['rule:share-fits-allocation','Share price fits one unit of allocation',0],
-  ['rule:book-absorbs-exit','Visible book can absorb an exit at size',0],
-  ['rule:not-thin','Trades more than the thinnest of the market',0],
-  ['rule:results-positive','Latest official results are profitable',0]
-];
-const SCORE_SEED=SCORE_SOURCES.map(x=>x[2]);
-// A slot that does not line up with its rule would silently weight the WRONG rule, which is worse
-// than no learning at all. Checked once, lazily, because DECISION_RULE_DEFS is declared later.
-let _ruleSlotChecked=false;
-function checkRuleSlotAlignment(){
-  if(_ruleSlotChecked) return true;
-  _ruleSlotChecked=true;
-  const rules=adjustableRules();
-  const slots=SCORE_SOURCES.slice(EXACT_SCORE_START).map(x=>String(x[0]).replace(/^rule:/,''));
-  const ok=slots.length===rules.length&&rules.every((r,i)=>r.key===slots[i]);
-  if(!ok) reportAppError('Rule slot misalignment',
-    new Error('SCORE_SOURCES rule slots ['+slots.join(',')+'] do not match registry ['+rules.map(r=>r.key).join(',')+']'),'');
-  return ok;
-}
-const SCORE_GROUPS=['participation','momentum','trend','structure','liquidity','volatility','context'];
-const EXACT_SCORE_START=26;
-let _unifiedState=null,_unifiedStateSource=null,_scoreLearningAt=0,_scoreLearningBusy=false;
-// v1364: SLOTS 0-7 MAY BE 0. They are the noisy-OR tape terms, and since v1362 their weight is the
-// edge each one EARNED on the archive - 0 for a component that cannot separate winners (size, which
-// is inverted). The old floor of 0.5 dated from when all thirteen were asserted at 1.0 and learning
-// could only nudge them. It rejected the earned vector outright, so every score silently fell back
-// to SCORE_SEED and v1362's measured weights never ran at all.
-function scoreWeightBounds(i){
-  if(i<8) return [0,1.5];           // tape terms: earned, may be zero
-  if(i<13) return [0.5,1.5];        // predictor, trigger, depth, velocity, fade: still seeded at 1
-  if(i<23) return [-1,1];           // setup/context groups
-  if(i>=EXACT_SCORE_START) return [-1,1];   // rule slots: signed, a worse-than-failing rule subtracts
-  return [0,1];                     // memory slots
-}
-let _lastWeightProblem=null;
-function scoreWeightProblem(w){
-  if(!Array.isArray(w)) return 'weight vector is not an array';
-  if(w.length!==SCORE_SEED.length) return 'weight vector has '+w.length+' slots, the scorer expects '+SCORE_SEED.length;
-  for(let i=0;i<w.length;i++){
-    const [lo,hi]=scoreWeightBounds(i),v=w[i];
-    if(!Number.isFinite(v)||v<lo||v>hi) return 'slot '+i+' ('+(SCORE_SOURCES[i]?.[0]||'?')+') = '+v+', outside ['+lo+','+hi+']';
-  }
-  return null;
-}
-function validScoreWeights(w){ return scoreWeightProblem(w)===null; }
-function getUnifiedModelState(){
-  const raw=FS.get(SCORE_LEARNING_STORE);
-  if(_unifiedState&&raw===_unifiedStateSource) return _unifiedState;
-  // Add zero-influence slots without resetting learned weights, observations or an existing candidate.
-  if(raw?.schema===RADAR_SCORE_VERSION&&Array.isArray(raw.live)&&raw.live.length>=EXACT_SCORE_START
-     &&raw.live.length!==SCORE_SEED.length){
-    raw.live=raw.live.slice(0,SCORE_SEED.length);
-    while(raw.live.length<SCORE_SEED.length) raw.live.push(SCORE_SEED[raw.live.length]);
-  }
-  if(raw?.schema===RADAR_SCORE_VERSION&&Array.isArray(raw.live)&&raw.live.length===23){
-    raw.live.push(0,0,0);
-    if(raw.candidate?.weights?.length===23) raw.candidate.weights.push(0,0,0);
-  }
-  if(raw?.schema===RADAR_SCORE_VERSION&&Array.isArray(raw.live)&&raw.live.length===EXACT_SCORE_START){
-    raw.live.push(...Array(SCORE_SEED.length-EXACT_SCORE_START).fill(0));
-    if(raw.candidate?.weights?.length===EXACT_SCORE_START) raw.candidate.weights.push(...Array(SCORE_SEED.length-EXACT_SCORE_START).fill(0));
-  }
-  const good=raw?.schema===RADAR_SCORE_VERSION&&validScoreWeights(raw.live);
-  const state=good?raw:{schema:RADAR_SCORE_VERSION,live:SCORE_SEED.slice(),revision:0,records:[],history:[],
-    legacyDepth:getCalibratedWeights(),
-    frozenRules:getPostCloseRuleScorecard((FS.get(POST_CLOSE_AUDIT_STORE)||{}).audits||{})
-      .filter(r=>['ARMED','ELIGIBLE','RETIRED'].includes(r.status)).map(r=>({key:r.key,status:r.status})),
-    status:'Collecting forward outcomes',updatedAt:0};
-  if(!Array.isArray(state.records)) state.records=[];
-  if(!Array.isArray(state.history)) state.history=[];
-  if(!state.ruleAgg||typeof state.ruleAgg!=='object') state.ruleAgg={};
-  // Retire records written before margins existed. They cannot answer the loosen/tighten question
-  // and their boolean rule states belong to a different taxonomy; keeping them would mix two
-  // schemas inside one edge. This is the clean start, and it happens once.
-  if(state.ruleSchema!==RULE_SCHEMA_VERSION){
-    state.records=[];state.ruleAgg={};state.ruleSchema=RULE_SCHEMA_VERSION;
-    state.candidate=null;state.lastTrainingIssuedAt=0;
-    state.status='Rule learning restarted on measured margins; weights begin equal';
-  }
-  if(state.candidate&&!validScoreWeights(state.candidate.weights)) state.candidate=null;
-  _unifiedStateSource=raw;_unifiedState=state;return state;
-}
-function computeUnifiedEvidence(input,weights){
-  let w=weights;
-  const problem=scoreWeightProblem(weights);
-  if(problem){
-    w=SCORE_SEED;
-    if(problem!==_lastWeightProblem){
-      _lastWeightProblem=problem;
-      reportAppError('Score weights rejected - scoring on the seed vector',new Error(problem),'computeUnifiedEvidence');
-    }
-  }
-  let miss=1,perfectMiss=1;
-  for(let i=0;i<8;i++){
-    const k=Math.max(0,Math.min(0.95,(input.base[i]||0)*w[i]));
-    const v=Number.isFinite(input.parts[i])?input.parts[i]:0.5;
-    miss*=1-k*v;perfectMiss*=1-k;
-  }
-  const tape=perfectMiss<1?(1-miss)/(1-perfectMiss):0;
-  const deltaWeight=Math.max(0,Math.min(0.35,Number(input.deltaWeight)||0));
-  const deltaValue=Number.isFinite(input.bookDelta?.strength)
-    ?Math.max(0,Math.min(1,0.5+0.5*input.bookDelta.strength)):0.5;
-  const deltaFactor=1-deltaWeight+deltaWeight*deltaValue;
-  const predictor=Math.max(0,1+(input.predictor-1)*w[8]);
-  const trigger=Math.max(0,1+(input.trigger-1)*w[9]);
-  const evidence=Math.max(0,Math.min(1,tape*deltaFactor*predictor*trigger));
-  const depth=Math.max(0,1+(input.depth-1)*w[10]);
-  let setup=0;
-  // These are as-of feature priors/percentiles, NOT the same-session winner-fitted modal scores.
-  for(let i=13;i<w.length;i++) if(Number.isFinite(input.context[i-13])) setup+=10*w[i]*(input.context[i-13]-0.5);
-  const raw=Math.max(0,Math.min(100,100*evidence*depth+input.velocity*w[11]-input.fade*w[12]+setup));
-  const envelope=input.permission*input.risk;
-  let total=100*evidence*depth*envelope+input.velocity*w[11]*envelope-input.fade*w[12]*Math.max(0.5,envelope)+setup*envelope;
-  total=Math.max(0,Math.min(100,input.ceiling,total));
-  return {raw:+raw.toFixed(3),total:+total.toFixed(1),evidence,tape,deltaFactor};
-}
-function getUnifiedScoreDetail(c){
-  if(!c?.unified) return '';
-  const weights=getUnifiedModelState().live;
-  const rows=SCORE_SOURCES.map((x,i)=>{
-    const value=i<8?c.unified.parts[i]:i>=13?c.unified.context[i-13]:null;
-    const prior=x[2],learned=weights[i];
-    return `<tr><td>${escHtml(x[1])}</td><td>${value==null?'context':(100*value).toFixed(0)+'/100'}</td><td>${learned.toFixed(3)}</td><td>${(learned-prior)>=0?'+':''}${(learned-prior).toFixed(3)}</td></tr>`;
-  }).join('');
-  return `<div class="rr-read"><b>One weighted evidence model - revision ${c.modelRevision}</b><br>
-    Signal score ${c.signalScore.toFixed(1)}; after fixed readiness/risk rules ${c.total.toFixed(1)}.
-    ${c.block?'Rule: '+escHtml(c.block)+'. ':''}Buy volume must exceed sell volume when depth is available; learning cannot override this rule.
-    <details><summary>Signal weights and current readings</summary><div class="pc-table-wrap"><table class="pc-table"><thead><tr><th>Source</th><th>Reading</th><th>Weight factor</th><th>Change from initial</th></tr></thead><tbody>${rows}</tbody></table></div>
-    Existing sources start at 1x. Additional setup/context adjustments start at zero and need forward validation. Weight factors are not score points.</details>
-    ${c.unified.memory?.ok?`<p><b>Historical structure:</b> weighted overhead participation ${(100*c.unified.memory.wosd).toFixed(1)}%; open space ${c.unified.memory.up.toFixed(2)} ATR above / ${c.unified.memory.down.toFixed(2)} ATR below; recent overhead difference ${(100*c.unified.memory.rmd).toFixed(1)} percentage points. The +2.6% corridor is the FEATURE definition - the band overhead supply is counted in - not a target this tab grades against. Since v1360 rules and scores are graded on the best move actually made, so no outcome yardstick is used anywhere. Historical trading is a proxy, not known sell orders. ${weights.slice(23,EXACT_SCORE_START).some(v=>v>0)?'Qualified weights contribute to this score.':'Observation only; zero score influence.'}</p>`:
-      `<p><b>Historical structure:</b> ${escHtml(c.unified.memory?.reason||'Not yet observed')}. No score adjustment for missing history.</p>`}</div>`;
-}
-function renderMemoryStudy(state){
-  const study=state.memoryStudy;
-  const observed=ALL.filter(r=>r.scoreComponents?.unified?.memory),covered=observed.filter(r=>r.scoreComponents.unified.memory.ok);
-  const rows=MEMORY_NAMES.map((name,i)=>{
-    const result=study?.results?.[i],live=state.live[23+i]||0;
-    return `<tr><td>${name}</td><td>${live.toFixed(3)}</td><td>${live>0?'Active after forward validation':result?escHtml(result.verdict):'Observing; no live influence'}</td>
-      <td>${result?result.raw.days+' sessions; '+result.raw.rr.toFixed(2)+'x target hit rate; '+result.raw.transitions+'/9 ordered steps':'Sealed until study closes'}</td></tr>`;
-  }).join('');
-  return `<section class="m-card pc-card"><h3 class="pc-title">Does historical trading improve the score?</h3>
-    <p class="pc-copy">Market Memory checks trading between the current price and the fixed +2.6% corridor that DEFINES the feature, open space above versus below, and whether recent overhead activity matters. That corridor is a measurement band, not a target. ${covered.length}/${observed.length} scored stocks have usable 13-session history. Missing history gives no bonus or penalty.</p>
-    <p class="pc-copy">${study?.dates.length||0}/30 new decision sessions recorded; ${study?.records.length||0} observations. ${escHtml(study?.status||'Waiting for the next live session')}.
-    The fixed feature study is evaluated once after all 30 sessions reach their next-session deadline. Insufficient evidence closes it as inconclusive; it is not enlarged and repeatedly retested.</p>
-    <div class="pc-table-wrap"><table class="pc-table"><thead><tr><th>Historical input</th><th>Live factor</th><th>Status</th><th>Completed study</th></tr></thead><tbody>${rows}</tbody></table></div>
-    <p class="pc-copy">A qualified feature only earns weight testing. A candidate using it then needs 30 later sessions with better positive net outcomes, and must also beat the same candidate with Market Memory switched off. Existing buy/sell, direction and risk rules remain binding.</p>
-    <details><summary>What this study measures</summary><p class="pc-copy">Prospective study ${MEMORY_SPEC.id}; separate from the historical v1339 archive experiment. Frozen symbol cohort; the +2.6% band defines where overhead supply is counted, and is deliberately fixed so observations stay comparable across symbols and over time. Each feature is tested independently with equal date weighting, ATR/day-move/13-session-displacement/current-score controls, a conservative family threshold t &gt;= 3, at least 1.30x top-decile hit rate and 7/9 ordered steps. Age additionally needs a 200-permutation placebo p &lt;= .05. No probability, ownership or causal psychology claim. The eventual candidate is checked against actual dynamic trade targets and costs.</p></details></section>`;
-}
-// ── v1360: ONE RULE REGISTRY. A RULE IS A PREDICATE WITH A MARGIN, NEVER A SENTENCE. ──────────
-// What this replaces: statusReasonCode() classified rules by running regular expressions over the
-// English rejection sentences the decision code emits, and anything it failed to match fell through
-// to `return 'other:'+text.slice(0,80)` - a truncated sentence with its numbers replaced by '#',
-// used as a category name. "Other" was the fallback branch, so it could never be deleted and every
-// new reason string silently created another one. Now every gate carries a rule id, the sentence is
-// rendered FROM the id, and the same id drives Status/Rejection, the Learning table and the weight.
-//
-// A rule reports {pass, margin}. The MARGIN is how far past its own line the stock sat, signed, in
-// the rule's own units - `price/vwap-1` as a percent, not `false`. A boolean can only say in or out;
-// a margin answers "and what would it have taken", which is the whole loosen/tighten counterfactual.
-// A rule with no natural scalar returns margin null and is graded on pass/fail alone.
-const RULE_ADJUSTABLE='adjustable', RULE_PROTECTED='protected', RULE_OPERATIONAL='operational';
-function ruleRead(pass,margin){
-  return {pass:typeof pass==='boolean'?pass:null,
-          margin:Number.isFinite(Number(margin))?Number(margin):null};
-}
-function todayTrajOf(r){ return r?.intraday?.current?r.intraday.todayTraj:null; }
-const DECISION_RULE_DEFS=[
-  // ---- Direction ----------------------------------------------------------------------------
-  {key:'above-vwap',label:'Price at or above VWAP',group:'Direction',kind:RULE_ADJUSTABLE,unit:'%',
-    read:r=>{const v=Number(r?.vwap),px=Number(r?.price);
-      return v>0&&px>0?ruleRead(px>=v,100*(px/v-1)):ruleRead(null,null);}},
-  {key:'green-day',label:'Positive day move',group:'Direction',kind:RULE_ADJUSTABLE,unit:'%',
-    read:r=>{const d=Number(r?.day);return Number.isFinite(d)?ruleRead(d>0,d):ruleRead(null,null);}},
-  {key:'above-open',label:'Price above session open',group:'Direction',kind:RULE_ADJUSTABLE,unit:'%',
-    read:r=>{const c=Number(r?.changeOpen);
-      return isValidChangeOpen(r?.changeOpen)?ruleRead(c>0,c):ruleRead(null,null);}},
-  // ---- Depth and tape -----------------------------------------------------------------------
-  {key:'bids-holding',label:'Visible bids exceed visible offers',group:'Depth & tape',kind:RULE_ADJUSTABLE,unit:'%',
-    read:r=>{const d=getTotalDepth(r?.symbol);
-      if(!d||!(d.buyQty>0||d.sellQty>0)) return ruleRead(null,null);
-      const tot=d.buyQty+d.sellQty;
-      return ruleRead(d.buyQty>d.sellQty, tot>0?100*(d.buyQty-d.sellQty)/tot:null);}},
-  {key:'non-selling-flow',label:'Completed tape is not net selling',group:'Depth & tape',kind:RULE_ADJUSTABLE,unit:'%',
-    read:r=>{const t=todayTrajOf(r),v=Number(t?.cvdPct);
-      return Number.isFinite(v)?ruleRead(v>=0,v):ruleRead(null,null);}},
-  {key:'pressure-converting',label:'Tape pressure converts into price',group:'Depth & tape',kind:RULE_ADJUSTABLE,unit:'',
-    read:r=>{const t=todayTrajOf(r);
-      if(t?.pressureConverting!==true&&t?.pressureConverting!==false) return ruleRead(null,null);
-      const slope=Number(t?.priceSlope);
-      return ruleRead(t.pressureConverting===true, Number.isFinite(slope)?slope:null);}},
-  {key:'buy-over-sell-volume',label:'Buy volume exceeds sell volume',group:'Depth & tape',kind:RULE_ADJUSTABLE,unit:'%',
-    read:r=>{const d=getTotalDepth(r?.symbol);
-      if(!d||!(d.buyQty>0&&d.sellQty>0)) return ruleRead(null,null);
-      return ruleRead(d.buyQty>d.sellQty,100*(d.buyQty/d.sellQty-1));}},
-  // ---- Entry timing -------------------------------------------------------------------------
-  {key:'range-not-consumed',label:'Expected range is not consumed',group:'Entry timing',kind:RULE_ADJUSTABLE,unit:'pts',
-    read:r=>{const u=Number(r?.entryTiming?.rangeUsed);
-      return Number.isFinite(u)?ruleRead(u<75,75-u):ruleRead(null,null);}},
-  {key:'entry-confirmed',label:'Entry timing is confirmed',group:'Entry timing',kind:RULE_ADJUSTABLE,unit:'',
-    read:r=>{if(r?.entryReady!==true&&r?.entryReady!==false) return ruleRead(null,null);
-      const loc=Number(r?.entryTiming?.rangeLocation);
-      return ruleRead(r.entryReady===true, Number.isFinite(loc)?100*(0.75-loc):null);}},
-  // ---- Score policy ---------------------------------------------------------------------------
-  // NOT ADJUSTABLE, and this is the same category error as the band rows, one level deeper and
-  // less visible: v1360 gave the score bar a weight slot INSIDE the score, so the score's own
-  // threshold became a weighted input to the score. It is a threshold on the OUTPUT and can never
-  // be an input to it. It stays in the registry because it is a real rejection reason that must
-  // appear in Status / Rejection, and it is graded nowhere.
-  {key:'score-bar',label:'Score clears the policy bar',group:'Score policy',kind:RULE_OPERATIONAL,unit:'pts',
-    read:r=>{const sc=Number(r?.score);
-      return Number.isFinite(sc)?ruleRead(sc>=RECOMMEND_MIN_SCORE, sc-RECOMMEND_MIN_SCORE):ruleRead(null,null);}},
-  // ---- Tradability, stated as facts about the STOCK (owner, 2026-09-10) ----------------------
-  // "one share costs more than the rail allows" is a fact about the share price against the size
-  // this account trades, not about the wallet, so it carries a real edge column.
-  {key:'target-clears-costs',label:'Target clears round-trip costs at tradeable size',group:'Tradability',kind:RULE_ADJUSTABLE,unit:'%',
-    read:r=>{try{const pol=getRowExitPolicy(r,Number(r?.price)||0);
-      const tgt=Number(pol?.targetPct),floor=Number(pol?.minGrossPct);
-      return Number.isFinite(tgt)&&Number.isFinite(floor)?ruleRead(tgt>=floor,tgt-floor):ruleRead(null,null);
-    }catch(e){return ruleRead(null,null);}}},
-  {key:'share-fits-allocation',label:'Share price fits one unit of allocation',group:'Tradability',kind:RULE_ADJUSTABLE,unit:'%',
-    read:r=>{const px=Number(r?.price),cap=Number(getEffectiveMaxAlloc&&getEffectiveMaxAlloc());
-      return px>0&&cap>0?ruleRead(cap>=px,100*(cap/px-1)):ruleRead(null,null);}},
-  {key:'book-absorbs-exit',label:'Visible book can absorb an exit at size',group:'Tradability',kind:RULE_ADJUSTABLE,unit:'%',
-    read:r=>{try{const cap=Number(getTurnoverAllocationCap(r)),want=Number(getEffectiveMaxAlloc&&getEffectiveMaxAlloc());
-      return cap>0&&want>0?ruleRead(cap>=want,100*(cap/want-1)):ruleRead(null,null);
-    }catch(e){return ruleRead(null,null);}}},
-  {key:'not-thin',label:'Trades more than the thinnest of the market',group:'Tradability',kind:RULE_ADJUSTABLE,unit:'%',
-    read:r=>{try{const prof=getTapeFlowProfile(r?.symbol),cutInfo=getSharesPerBarCut(25);
-      const sh=Number(prof?.medianShares),cut=Number(cutInfo?.cut);
-      return sh>0&&cut>0?ruleRead(sh>=cut,100*(sh/cut-1)):ruleRead(null,null);
-    }catch(e){return ruleRead(null,null);}}},
-  // ---- Official NSE result filings ------------------------------------------------------------
-  // The helper has been fetching six NSE RSS indexes daily and parsing result XBRLs into
-  // `fundamentalTrigger` (+1 profitable with price confirmation, -1 loss / negative operations /
-  // qualified audit) since v1202. It reached the score through a slot whose weight is 0, and the
-  // legacy armed-condition path it also fed had 0 of 18 conditions armed as of v1227. So it was the
-  // one genuine signal collected every day and moving nothing, and invisible in this table.
-  // It is now an ordinary graded rule and earns weight exactly like the rest.
-  {key:'results-positive',label:'Latest official results are profitable',group:'Fundamentals',kind:RULE_ADJUSTABLE,unit:'',
-    read:r=>{const v=Number(r?.fundamentalTrigger);
-      return Number.isFinite(v)&&v!==0?ruleRead(v>0,v):ruleRead(null,null);}},
-  // ---- Protected: measured, never weakened automatically -------------------------------------
-  {key:'eq-and-band',label:'EQ series and eligible price band',group:'Exchange & safety',kind:RULE_PROTECTED,unit:'',
-    read:r=>ruleRead(r?.basketEligible===true?true:r?.basketEligible===false?false:null,null)},
-  {key:'listing-history',label:'Sufficient listing history',group:'Exchange & safety',kind:RULE_PROTECTED,unit:'',
-    read:r=>ruleRead(r?.noHistory===true?false:r?.noHistory===false?true:null,null)},
-  {key:'fresh-tape',label:'Fresh usable completed tape',group:'Exchange & safety',kind:RULE_PROTECTED,unit:'',
-    read:r=>{try{return ruleRead(getRecommendationFreshness(r?.symbol).ok,null);}catch(e){return ruleRead(null,null);}}},
-  {key:'circuit-headroom',label:'Room left before the exchange circuit',group:'Exchange & safety',kind:RULE_PROTECTED,unit:'%',
-    read:r=>{const cr=Number(r?.circuitRunwayPct);
-      return Number.isFinite(cr)?ruleRead(cr>0,cr):ruleRead(null,null);}},
-  // ---- Operational: describes the app or the account, not the stock. Never graded. ------------
-  {key:'op-market-open',label:'Equity session is open',group:'Operational',kind:RULE_OPERATIONAL,unit:'',
-    read:()=>ruleRead(isEquitySession(Date.now()),null)},
-  {key:'op-prices-live',label:'Live prices are current',group:'Operational',kind:RULE_OPERATIONAL,unit:'',
-    read:()=>ruleRead(!universePriceStaleness(),null)},
-  {key:'op-score-version',label:'Row carries the current score scale',group:'Operational',kind:RULE_OPERATIONAL,unit:'',
-    read:r=>ruleRead(r?.scoreVersion===RADAR_SCORE_VERSION,null)},
-  {key:'op-capital-set',label:'Capital is set',group:'Operational',kind:RULE_OPERATIONAL,unit:'',
-    read:()=>ruleRead(Number(getEffectiveCapital())>0,null)},
-  {key:'op-not-excluded',label:'Not excluded from the basket by you',group:'Operational',kind:RULE_OPERATIONAL,unit:'',
-    read:r=>ruleRead(!EXPORT_EXCLUDED.has(r?.symbol),null)}
-];
-// SURVEILLANCE RULES COME FROM THE REG1 FILE, NOT FROM A LIST IN THIS SOURCE (owner, 2026-09-10:
-// "we should build the logic as dynamically ingesting new rules and not hardcoding things").
-// Today's file carries 40 real surveillance columns - 63 minus 5 identity and 18 filler - of which
-// 36 flag at least one stock. The old seed list named 12. When NSE adds a column it appears here on
-// its own with no code change. Each is PROTECTED: measured every session, never weakened by the
-// learner, and configured rules keep their existing hard-veto behaviour untouched.
-const _survHitKeyMemo=new WeakMap(),_NO_SURV_HITS=new Set();
-function survHitKeys(sym){
-  const hits=SURV_ALL_HITS[sym];
-  if(!hits||typeof hits!=='object') return _NO_SURV_HITS;
-  let set=_survHitKeyMemo.get(hits);
-  if(!set){set=new Set(Object.keys(hits).filter(h=>hits[h]).map(survRuleKey));_survHitKeyMemo.set(hits,set);}
-  return set;
-}
-let _survRuleDefs=null,_survRuleDefsSig='';
-function surveillanceRuleDefs(){
-  const file=Array.isArray(SURV_FILE_RULES)?SURV_FILE_RULES:[];
-  const sig=file.map(x=>x.key).join('|');
-  if(_survRuleDefs&&_survRuleDefsSig===sig) return _survRuleDefs;
-  _survRuleDefsSig=sig;
-  _survRuleDefs=file.map(rule=>({
-    key:'surv:'+rule.key,label:humanizeSurvRule(rule.label||rule.column),
-    group:'Surveillance',kind:RULE_PROTECTED,unit:'',survColumn:rule.column,
-    // SURV_ALL_HITS[sym] is {header:true}. v1360 called .some() on it, which THREW for every
-    // flagged stock - caught as "unknown" - and returned unknown for every unflagged one, so none of
-    // the 40 surveillance rules ever recorded a pass or a failure, and the thrown errors cost ~5 s of
-    // main thread per scoring pass. A symbol the REG1 file does not flag passes.
-    read:r=>{if(!r?.symbol) return ruleRead(null,null);
-      return ruleRead(!survHitKeys(r.symbol).has(rule.key),null);}
-  }));
-  return _survRuleDefs;
-}
-let _decisionRules=null,_decisionRulesSig='';
-function decisionRules(){
-  const surv=surveillanceRuleDefs(),sig=_survRuleDefsSig;
-  if(_decisionRules&&_decisionRulesSig===sig) return _decisionRules;
-  _decisionRulesSig=sig;_decisionRules=DECISION_RULE_DEFS.concat(surv);
-  return _decisionRules;
-}
-function decisionRule(key){ return decisionRules().find(x=>x.key===key)||null; }
-function adjustableRules(){ return DECISION_RULE_DEFS.filter(x=>x.kind===RULE_ADJUSTABLE); }
-function ruleLabel(key){
-  const rule=decisionRule(key);
-  if(rule) return rule.label;
-  if(String(key).startsWith('surv:')) return humanizeSurvRule(String(key).slice(5));
-  return String(key||'').replace(/-/g,' ').replace(/\b\w/g,c=>c.toUpperCase());
-}
-// READ EVERY RULE ONCE, AND STORE COMPACTLY. Storage is the binding constraint: at bar resolution
-// this records roughly 2,800 rows a session against a brain already at 13.8 MB, so a full
-// {pass,margin} object for ~65 rules per row is not affordable. Adjustable rules keep their MARGIN
-// (the sign carries pass/fail, so nothing is lost); protected and operational rules store only the
-// keys that FAILED, which is empty or one or two entries on almost every row.
-function readDecisionRules(row){
-  const margins={},failed=[],unknown=[];
-  for(const rule of decisionRules()){
-    let v;try{ v=rule.read(row); }catch(e){ v=null; }
-    if(!v||typeof v.pass!=='boolean'){ if(rule.kind!==RULE_OPERATIONAL) unknown.push(rule.key); continue; }
-    if(rule.kind===RULE_ADJUSTABLE){
-      // Margin sign must agree with the verdict, or the counterfactual would read backwards.
-      let m=v.margin;
-      if(!Number.isFinite(m)) m=v.pass?1:-1;
-      else if(v.pass&&m<0) m=Math.abs(m);
-      else if(!v.pass&&m>0) m=-m;
-      margins[rule.key]=+Number(m).toFixed(4);
-    }
-    if(!v.pass) failed.push(rule.key);
-  }
-  return {margins,failed,unknown};
-}
-function ruleStateKey(read){
-  const m=read?.margins||{};
-  return Object.keys(m).sort().map(k=>k+(Number(m[k])>=0?'+':'-')).join(',')
-    +'|'+(Array.isArray(read?.failed)?read.failed.slice().sort().join(','):'');
-}
-function ruleStatePass(record,key){
-  if(!record) return null;
-  if(record.margins&&Object.prototype.hasOwnProperty.call(record.margins,key)){
-    const m=Number(record.margins[key]);
-    return Number.isFinite(m)?m>=0:null;
-  }
-  if(Array.isArray(record.failed)&&record.failed.includes(key)) return false;
-  if(Array.isArray(record.unknown)&&record.unknown.includes(key)) return null;
-  if(Array.isArray(record.failed)) return true; // recorded, not failed, not unknown
-  return null;
-}
-function ruleStateMargin(record,key){
-  const m=Number(record?.margins?.[key]);
-  return Number.isFinite(m)?m:null;
-}
-function ruleContextVector(margins){
-  return adjustableRules().map(rule=>{
-    const m=Number(margins?.[rule.key]);
-    return Number.isFinite(m)?(m>=0?1:0):null;
-  });
-}
-// THE STATUS / REJECTION SENTENCE IS RENDERED FROM THE RULE IDS, NOT PARSED BACK OUT OF PROSE.
-// Precedence matches what actually stops a trade: operational state, then protected vetoes, then
-// the adjustable rules, then funding. Every failing rule is listed, so a compound failure keeps
-// all of its reasons and no reason can fall into an unnamed bucket.
-function decisionRuleFailures(row){
-  const {margins,failed}=readDecisionRules(row);
-  const order={[RULE_OPERATIONAL]:0,[RULE_PROTECTED]:1,[RULE_ADJUSTABLE]:2};
-  return failed.slice().sort((a,b)=>{
-    const ra=decisionRule(a),rb=decisionRule(b);
-    return (order[ra?.kind]??3)-(order[rb?.kind]??3);
-  }).map(key=>({key,label:ruleLabel(key),margin:ruleStateMargin({margins},key)}));
-}
-function getStatusAuditReason(row){
-  const failures=decisionRuleFailures(row);
-  const fundedReason=BASKET_ROW_REASONS.get(row?.symbol);
-  const codes=failures.map(f=>f.key);
-  if(fundedReason&&!codes.length) codes.push('op-funded-basket');
-  if(!codes.length) return {code:'actionable',codes:['actionable'],text:'Actionable recommendation'};
-  const text=fundedReason&&!failures.length?fundedReason:failures.map(f=>f.label).join(' · ');
-  return {code:codes[0],codes,text};
-}
-
-// ── v1360: MEASURE THE MOVE, NOT A TARGET VERDICT ────────────────────────────────────────────
-// The old primary signal was target-before-stop, and on 2026-09-10 it made every bucket on the
-// Learning tab read 93-100%: score 0-19 at 100.0%, score 60-79 at 100.0%, and "Red day" - a stock
-// going DOWN - at 93.3%. A rule that predicts nothing and a rule that predicts everything were
-// indistinguishable. The cause is not a thin sample. A record resolves on target, on stop, or on
-// the deadline; both barriers resolve in minutes while the deadline waits for the next close, so
-// the resolved pool is almost purely "touched the near barrier first" and everything that merely
-// drifted sits pending until tomorrow.
-//
-// The primary signal is now what the stock ACTUALLY DID after issue - the best move above the issue
-// price. It exists from the first tick for every record, pending or not, so nothing waits and
-// nothing is enriched by which barrier happens to be nearer. Target-hit survives as a secondary
-// column computed only on MATURE records (past their deadline), which is what the training path
-// already used while the display did not.
-function ruleOutcomeMove(p){
-  const v=Number(p?.maxFavourablePct);
-  return Number.isFinite(v)?v:null;
-}
-function ruleOutcomeUsable(p){ return ruleOutcomeMove(p)!=null; }
-// THE UNIT OF EVIDENCE IS THE STOCK-SESSION RULE-STATE RUN (owner asked what a session is, which
-// exposed that a flat once-per-stock-per-session rule is too blunt). Deduplication exists because
-// repeated samples share one forward outcome, and that only holds while the rule state is
-// unchanged: a stock BELOW VWAP at 09:30 and ABOVE it at 14:30 lands on opposite sides of the
-// comparison and carries real discriminating information. So one observation per stock, per
-// session, per contiguous run of the same rule state, evaluated separately for each rule.
-// A stock oscillating around a line is genuinely uninformative for that rule, so a single
-// stock-session's contribution to any one rule is bounded by RULE_MAX_RUNS.
-const RULE_MAX_RUNS=2;
-function ruleRunsForSession(records,key){
-  const bySymbol={};
-  for(const p of records){
-    if(!ruleOutcomeUsable(p)) continue;
-    const pass=ruleStatePass(p,key);
-    if(typeof pass!=='boolean') continue;
-    (bySymbol[p.symbol]??=[]).push({at:Number(p.issuedAt)||0,pass,move:ruleOutcomeMove(p),
-      hit:scoreOutcomeTarget(p),margin:ruleStateMargin(p,key),symbol:p.symbol,rec:p});
-  }
-  const runs=[];
-  for(const rows of Object.values(bySymbol)){
-    rows.sort((a,b)=>a.at-b.at);
-    const collapsed=[];
-    for(const row of rows){
-      const last=collapsed[collapsed.length-1];
-      if(last&&last.pass===row.pass){ last.move=Math.max(last.move,row.move); last.n++;
-        if(Number.isFinite(row.margin)&&(!Number.isFinite(last.margin)||Math.abs(row.margin)<Math.abs(last.margin))) last.margin=row.margin;
-        last.hit=Math.max(last.hit,row.hit); continue; }
-      collapsed.push({...row,n:1});
-    }
-    for(const run of collapsed.slice(0,RULE_MAX_RUNS)) runs.push(run);
-  }
-  return runs;
-}
-function ruleSessionStat(records,key){
-  const runs=ruleRunsForSession(records,key);
-  const pass=runs.filter(r=>r.pass),fail=runs.filter(r=>!r.pass);
-  if(!pass.length&&!fail.length) return null;
-  const mean=a=>a.length?a.reduce((n,r)=>n+r.move,0)/a.length:null;
-  // v1364: the sampling error of THIS session's edge, from its own stocks. Without it a single
-  // session had no standard error at all and every weight sat at exactly 0 however many stocks
-  // it held - the "sessions are the sample count" error v1360 said it had removed.
-  const vari=a=>{if(a.length<2)return null;const m=mean(a);return a.reduce((n,r)=>n+(r.move-m)*(r.move-m),0)/(a.length-1);};
-  const vp=vari(pass),vf=vari(fail);
-  const sum=a=>a.reduce((n,r)=>n+r.move,0),sq=a=>a.reduce((n,r)=>n+r.move*r.move,0);
-  return {passN:pass.length,failN:fail.length,
-    passSum:sum(pass),failSum:sum(fail),passSq:sq(pass),failSq:sq(fail),
-    passMove:mean(pass),failMove:mean(fail),
-    passHit:pass.reduce((n,r)=>n+r.hit,0),failHit:fail.reduce((n,r)=>n+r.hit,0),
-    edge:(pass.length&&fail.length)?mean(pass)-mean(fail):null,
-    edgeSe:(vp!=null&&vf!=null)?Math.sqrt(vp/pass.length+vf/fail.length):null};
-}
-// Sessions are NOT the sample count - 307 distinct stocks in one session is a large sample and
-// weights must be able to move on day one. They are the CONSISTENCY check: 307 stocks establish
-// that an edge existed today, they cannot establish that today was not an unusual session. The
-// market-wide component cancels by construction, because edge is passers minus failers measured on
-// the same day in the same market.
-// v1365: EVERY OBSERVATION COUNTS THE MOMENT IT EXISTS - NO SESSION UNIT. Each stock's best move
-// is taken relative to the day it happened on (the move minus that day's mean over every observed
-// stock), which cancels whatever the whole market did that day, and then EVERY observation from
-// every day is pooled into one comparison: passers against failers. A stock observed at 10:02 moves
-// the weight at 10:02. The error is the pooled sampling error of those two groups, so twenty
-// consistent stocks move a weight materially and one stock moves it by almost nothing.
-function ruleEvidence(agg,key){
-  const perDay=agg?.[key]||{};
-  let passN=0,failN=0,passHit=0,failHit=0,rawPS=0,rawFS=0;
-  let cP=0,cF=0,pS=0,fS=0,pQ=0,fQ=0,qP=0,qF=0,days=0;
-  for(const d of Object.keys(perDay)){
-    const st=perDay[d];if(!st) continue;
-    const pn=st.passN||0,fn=st.failN||0;
-    passN+=pn;failN+=fn;passHit+=st.passHit||0;failHit+=st.failHit||0;
-    rawPS+=(Number(st.passMove)||0)*pn;rawFS+=(Number(st.failMove)||0)*fn;
-    if(!(pn>0&&fn>0)) continue;               // a day with only one side offers no comparison
-    const ps=Number.isFinite(st.passSum)?st.passSum:(Number(st.passMove)||0)*pn;
-    const fs=Number.isFinite(st.failSum)?st.failSum:(Number(st.failMove)||0)*fn;
-    const m=(ps+fs)/(pn+fn);                  // that day's own level, removed from every stock
-    cP+=pn;cF+=fn;pS+=ps-pn*m;fS+=fs-fn*m;days++;
-    if(Number.isFinite(st.passSq)&&Number.isFinite(st.failSq)){
-      pQ+=st.passSq-2*m*ps+pn*m*m;fQ+=st.failSq-2*m*fs+fn*m*m;qP+=pn;qF+=fn;
-    }
-  }
-  const edge=(cP&&cF)?pS/cP-fS/cF:null;
-  let se=Infinity;
-  if(edge!=null&&qP===cP&&qF===cF&&cP>1&&cF>1){
-    const vp=Math.max(0,(pQ-pS*pS/cP)/(cP-1)),vf=Math.max(0,(fQ-fS*fS/cF)/(cF-1));
-    se=Math.sqrt(vp/cP+vf/cF);
-    // A perfectly uniform sample has no measurable spread; its error is bounded by what the counts
-    // themselves imply, so it cannot claim infinite certainty (the v1213 trap).
-    se=Math.max(se,Math.abs(edge)/Math.sqrt(cP+cF)*0.25);
-  }
-  const tCrit=familyTCrit(Math.max(1,adjustableRules().length));
-  // CONTINUOUS, NOT A CUTOFF (v1364): the edge acts at t^2/(t^2+tCrit^2) of its size.
-  const t=(edge!=null&&Number.isFinite(se)&&se>0)?Math.abs(edge)/se:0;
-  const confidence=t>0?t*t/(t*t+tCrit*tCrit):0;
-  const shrunk=edge==null?0:edge*confidence;
-  return {sessions:days,passN,failN,passHit,failHit,
-    passMove:passN?rawPS/passN:null,failMove:failN?rawFS/failN:null,
-    edge,shrunk,confidence,se:Number.isFinite(se)?se:null,tCrit,compared:cP+cF};
-}
-// THE PRIOR IS THE ONE NUMBER THAT IS NOT MEASURED, SO IT CARRIES THE LEAST POSSIBLE OPINION:
-// every rule starts EQUAL (owner, 2026-09-10). Its MAGNITUDE is derived, not chosen - set so the
-// ensemble's opening score matches current scoring behaviour, and for this wiring
-// (setup += 10*w*(context-0.5), an additive term) that derivation gives exactly 0. So release day
-// is bit-for-bit identical to v1359 and the weights separate from the first session's evidence.
-const RULE_PRIOR=0;
-// START CLEAN (owner, 2026-09-10). Margins cannot be reconstructed for records written before this
-// release, so old rows are retired rather than migrated: at the open every prior is equal, and the
-// weights move as the session's own data arrives. Bumping this string is what retires them.
-const RULE_SCHEMA_VERSION='rule-margin-v1';
-// Per-session per-rule aggregates are the PERMANENT learning store. They are recomputed from the
-// raw window for every session still held, and frozen once that session leaves the window, so
-// evidence accumulates without bound while the brain does not.
-function updateRuleAggregates(state,today){
-  if(!state.ruleAgg||typeof state.ruleAgg!=='object') state.ruleAgg={};
-  const usable=state.records.filter(p=>p.ruleSchema===RULE_SCHEMA_VERSION&&ruleOutcomeUsable(p));
-  const bySession={};
-  for(const p of usable)(bySession[p.issueDate]??=[]).push(p);
-  for(const rule of decisionRules()){
-    const perDay=state.ruleAgg[rule.key]||(state.ruleAgg[rule.key]={});
-    for(const [date,rows] of Object.entries(bySession)){
-      const st=ruleSessionStat(rows,rule.key);
-      if(st) perDay[date]=st; else delete perDay[date];
-    }
-  }
-  // Drop aggregates for rules that no longer exist (a withdrawn REG1 column, say).
-  const live=new Set(decisionRules().map(r=>r.key));
-  for(const key of Object.keys(state.ruleAgg)) if(!live.has(key)) delete state.ruleAgg[key];
-}
-function ruleWeightMap(state){
-  const agg=state?.ruleAgg||{},out={};
-  const rules=adjustableRules();
-  const ev=rules.map(rule=>({key:rule.key,...ruleEvidence(agg,rule.key)}));
-  // The scale is the cross-section's own strongest shrunk edge, so the best-evidenced rule reaches
-  // the bound and everything else lands in proportion. No chosen magnitude, and with no evidence
-  // anywhere the scale is 0 and every weight is exactly the prior.
-  const scale=Math.max(...ev.map(e=>Math.abs(e.shrunk)||0),0);
-  for(const e of ev){
-    // SIGNED (v1364). A rule whose passing stocks did WORSE earns a negative weight, so passing it
-    // lowers the score - weights move down as well as up. The old max(0,...) floored every such
-    // rule at 0, which is why "Price at or above VWAP" (edge -0.88%) could never act at all.
-    const w=scale>0?RULE_PRIOR+e.shrunk/scale:RULE_PRIOR;
-    out[e.key]=Math.max(-1,Math.min(1,w));
-  }
-  return {weights:out,evidence:ev,scale};
-}
-// ── v1362: THE TAPE COMPONENTS ARE EARNED, NOT ASSERTED ──────────────────────────────────────
-// Measured on 54 archived sessions, 493,725 graded samples, through the helper's
-// /api/kite/edge?field=tape - the same shrinkage the impact term has used since v1235:
-//
-//     impact AUC 0.5327  surviving weight 0.0483
-//     flow   AUC 0.5162                   0.0151
-//     cross  AUC 0.5154                   0.0135
-//     vwap   AUC 0.5114                   0.0055
-//     size   AUC 0.4895                   0        <- INVERTED: its high end predicts the WORSE
-//                                                     outcome, and it carried a hard 1.0 (and 75%
-//                                                     of the tape weight after v1338, off ONE
-//                                                     session of 64,181 samples).
-//
-// These are RELATIVE weights. The absolute AUCs are small, so using them raw would multiply the
-// whole board to nearly zero - which is honest about the edge but destroys the ranking that the
-// edge does support. They are normalised against the strongest earned component, so the ORDER and
-// the RELATIVE trust are measured while the LEVEL is set by calibration further down. The
-// normaliser is the cross-section's own maximum, not a chosen number.
-const TAPE_EDGE_KEYS=['flow','vwap','cross','size','impact'];
-let TAPE_EDGE_STATE=null,_tapeEdgeAt=0,_tapeEdgeBusy=false;
-async function refreshTapeEdges(){
-  if(_tapeEdgeBusy||!KITE_API) return TAPE_EDGE_STATE;
-  // The archive only changes once a session, so this is asked for rarely and never on the beat.
-  if(TAPE_EDGE_STATE&&Date.now()-_tapeEdgeAt<30*60*1000) return TAPE_EDGE_STATE;
-  _tapeEdgeBusy=true;
-  try{
-    const ctl=new AbortController(),to=setTimeout(()=>ctl.abort(),120000);
-    const res=await fetch(KITE_HELPER+'/api/kite/edge?field=tape',{cache:'no-store',signal:ctl.signal});
-    clearTimeout(to);
-    const data=await res.json();
-    if(data?.ok&&data.fields){TAPE_EDGE_STATE=data;_tapeEdgeAt=Date.now();}
-  }catch(e){ /* an unreachable helper leaves the weights where they are; it never invents them */ }
-  finally{ _tapeEdgeBusy=false; }
-  return TAPE_EDGE_STATE;
-}
-function tapeEdgeWeights(){
-  const f=TAPE_EDGE_STATE?.fields;
-  if(!f) return null;
-  const earned=TAPE_EDGE_KEYS.map(k=>Math.max(0,Number(f[k]?.weight)||0));
-  const top=Math.max(...earned);
-  if(!(top>0)) return TAPE_EDGE_KEYS.map(()=>0);
-  return earned.map(w=>w/top);
-}
-let _ruleWeightMemo={sig:'',vec:null};
-function ruleWeightVector(state){
-  // Read once per scoring pass, not once per row: ruleEvidence walks every session of every rule.
-  const sig=(state?.revision||0)+'|'+(state?.updatedAt||0)+'|'+Object.keys(state?.ruleAgg||{}).length;
-  if(_ruleWeightMemo.sig===sig&&_ruleWeightMemo.vec) return _ruleWeightMemo.vec;
-  const {weights}=ruleWeightMap(state);
-  const vec=adjustableRules().map(rule=>Number(weights[rule.key])||0);
-  _ruleWeightMemo={sig,vec};
-  return vec;
-}
-// ── v1362: THE SCORE IS CALIBRATED, SO 100 MEANS SOMETHING ───────────────────────────────────
-// Owner's stated objective: "a score of 100 will mean very high confidence and a score of 0 will
-// mean very low confidence." Until now it meant neither - it was a product of evidence and
-// permission with no relationship to any observed frequency, and the app's own tooltip said so
-// ("readiness evidence, not a profit probability").
-//
-// This maps the raw score onto the frequency with which rows at that level ACTUALLY reached their
-// target, measured on matured records only. It is monotone by construction, so it can never
-// reorder the board - it only restates the level. With no evidence it is the IDENTITY, so nothing
-// changes until something has been measured, and it re-derives itself as records accumulate.
-const CALIB_BUCKETS=10;
-let _calibMemo={sig:'',map:null};
-function scoreCalibration(state){
-  const st=state||getUnifiedModelState();
-  const sig=(st?.updatedAt||0)+'|'+(st?.records?.length||0);
-  if(_calibMemo.sig===sig) return _calibMemo.map;
-  const today=getSessionDate();
-  const rows=(st?.records||[]).filter(p=>p.ruleSchema===RULE_SCHEMA_VERSION&&matureScoreOutcome(p,today)
-    &&Number.isFinite(Number(p.score)));
-  let map=null;
-  // A bucket needs enough matured rows to state a frequency at all; below that there is nothing to
-  // calibrate against and the identity is the honest answer.
-  const need=Math.max(25,Math.ceil(rows.length/(CALIB_BUCKETS*4)));
-  if(rows.length>=CALIB_BUCKETS*need){
-    const sorted=rows.slice().sort((a,b)=>Number(a.score)-Number(b.score));
-    const pts=[];
-    for(let i=0;i<CALIB_BUCKETS;i++){
-      const lo=Math.floor(i*sorted.length/CALIB_BUCKETS),hi=Math.floor((i+1)*sorted.length/CALIB_BUCKETS);
-      const slice=sorted.slice(lo,hi);
-      if(slice.length<need){pts.length=0;break;}
-      const mid=slice.reduce((n,p)=>n+Number(p.score),0)/slice.length;
-      const hit=slice.reduce((n,p)=>n+scoreOutcomeTarget(p),0)/slice.length;
-      pts.push({raw:mid,pct:100*hit});
-    }
-    if(pts.length===CALIB_BUCKETS){
-      // Enforce monotonicity: a higher raw score may never calibrate to a lower confidence, or the
-      // board would reorder itself against its own ranking (the v1337 boundary-inversion trap).
-      for(let i=1;i<pts.length;i++) if(pts[i].pct<pts[i-1].pct) pts[i].pct=pts[i-1].pct;
-      map=pts;
-    }
-  }
-  _calibMemo={sig,map};
-  return map;
-}
-function calibrateScore(rawScore,state){
-  const v=Number(rawScore);
-  if(!Number.isFinite(v)) return v;
-  const pts=scoreCalibration(state);
-  if(!pts||!pts.length) return v;              // identity until measured
-  if(v<=pts[0].raw) return +(v/Math.max(1e-9,pts[0].raw)*pts[0].pct).toFixed(1);
-  for(let i=1;i<pts.length;i++){
-    if(v<=pts[i].raw){
-      const t=(v-pts[i-1].raw)/Math.max(1e-9,pts[i].raw-pts[i-1].raw);
-      return +(pts[i-1].pct+t*(pts[i].pct-pts[i-1].pct)).toFixed(1);
-    }
-  }
-  const last=pts[pts.length-1];
-  return +Math.min(100,last.pct+(v-last.raw)).toFixed(1);
-}
-// THE COUNTERFACTUAL. The blocked rows are the control group and are already recorded, so with
-// margins stored the question "how much would this rule have to move to catch what it rejected"
-// is answered directly and needs no resolution and no waiting.
-function ruleCounterfactual(records,key,shiftPct){
-  const rule=decisionRule(key);
-  if(!rule||rule.kind!==RULE_ADJUSTABLE) return null;
-  const rows=records.filter(p=>Number.isFinite(ruleStateMargin(p,key))&&ruleOutcomeUsable(p));
-  if(!rows.length) return null;
-  const margins=rows.map(p=>Math.abs(ruleStateMargin(p,key))).sort((a,b)=>a-b);
-  // The step is a percentile of the rule's OWN observed margin spread, not a chosen number.
-  const step=margins[Math.floor(margins.length*0.25)]||0;
-  const shift=step*shiftPct;
-  const entering=rows.filter(p=>{const m=ruleStateMargin(p,key);return m<0&&m+shift>=0;});
-  const leaving=rows.filter(p=>{const m=ruleStateMargin(p,key);return m>=0&&m+shift<0;});
-  const summarise=list=>list.length?{n:list.length,
-    move:list.reduce((n,p)=>n+ruleOutcomeMove(p),0)/list.length,
-    hits:list.reduce((n,p)=>n+scoreOutcomeTarget(p),0)}:null;
-  return {shift:+shift.toFixed(3),unit:rule.unit||'',entering:summarise(entering),leaving:summarise(leaving)};
-}
-function usableScoreOutcome(p){
-  return p.paperComplete&&!p.evidenceIncomplete&&!p.unfilled&&['rocket','stopped','expired'].includes(p.rocketOutcome);
-}
-function matureScoreOutcome(p,today){
-  const days=tradingDaysBetween(p.issueDate,today);
-  return usableScoreOutcome(p)&&(days>1||(days===1&&istClock().mins>=EQUITY_CLOSE_MIN));
-}
-function scoreOutcomeTarget(p){return p.rocketOutcome===ROCKET_OUTCOME.ROCKET?1:0;}
-function scoreSessionMeans(records,value){
-  const days={};
-  for(const p of records){const v=value(p);if(!Number.isFinite(v)) continue;(days[p.issueDate]??=[]).push(v);}
-  return Object.values(days).map(v=>v.reduce((a,b)=>a+b,0)/v.length);
-}
-function scoreSampleHash(text){let h=2166136261;for(let i=0;i<text.length;i++)h=Math.imul(h^text.charCodeAt(i),16777619);return h>>>0;}
-async function updateScoreLearning(){
-  const now=Date.now();
-  // v1365: no cadence. Every beat runs a pass (the busy guard stops overlap), so a new observation,
-  // a best move and a weight all update as the data arrives rather than on a 30-second or 30-minute
-  // clock.
-  if(_scoreLearningBusy) return;
-  _scoreLearningBusy=true;_scoreLearningAt=now;
-  try{
-    const state=getUnifiedModelState(),today=getSessionDate(),study=memoryStudyState(state);
-    if(state.targetPolicy!==TARGET_POLICY_VERSION){
-      if(state.candidate) state.history.push({at:now,retiredCandidate:state.candidate,
-        reason:'Target policy changed; original candidate and observations retained, not promoted'});
-      state.candidate=null;
-      state.targetPolicy=TARGET_POLICY_VERSION;
-      state.lastTrainingIssuedAt=0;
-      state.status='Collecting new target-policy outcomes; existing live weights retained provisionally';
-    }
-    let i=0;
-    for(const p of state.records){
-      if(p.paperComplete) continue;
-      resolveNetRecommendation(p,today);
-      if(++i%40===0) await yieldToUi();
-    }
-    if(!study.results) for(const p of study.records){
-      if(!p.paperComplete) resolveNetRecommendation(p,today);
-      if(++i%40===0) await yieldToUi();
-    }
-    // Resolve whenever fresh data arrives, including after 16:00. Only record new buy-time
-    // observations during the equity session and with fresh prices and complete tape.
-    const captureAt=Date.now();
-    if(isEquitySession(captureAt)&&!universePriceStaleness()){
-      // The 30-minute bucket survives ONLY for the sealed Market Memory study, whose prospective
-      // design was declared on that cadence and must not change mid-study. Rule learning captures
-      // continuously (below) and is not tied to it.
-      const bucket=Math.floor(captureAt/(30*60*1000));
-      const studyDue=state.lastBucket!==bucket;
-      {
-        const lastToday=new Map();
-        for(const p of state.records){
-          if(p.issueDate!==today||p.ruleSchema!==RULE_SCHEMA_VERSION) continue;
-          const q=lastToday.get(p.symbol);
-          if(!q||p.issuedAt>q.issuedAt) lastToday.set(p.symbol,p);
-        }
-        const pool=ALL.filter(r=>r.scoreVersion===RADAR_SCORE_VERSION&&r.scoreComponents?.unified&&r.price>0
-          &&r.basketEligible!==false&&!r.noHistory&&getRecommendationFreshness(r.symbol).ok);
-        if(pool.length){
-          const covered=pool.filter(r=>r.scoreComponents.unified.memory?.ok);
-          if(!study.symbols&&covered.length>=MEMORY_SPEC.minCohort){study.symbols=covered.map(r=>r.symbol).sort();study.status='Collecting new decisions';}
-          if(!study.symbols) study.status='Waiting for 200 stocks with complete historical profiles before freezing the study cohort';
-          const cohort=new Set(study.symbols||[]);
-          const studyOpen=!study.results&&(study.dates.includes(today)||study.dates.length<MEMORY_SPEC.dates);
-          const controls=covered.map(r=>[r.atr,r.changeOpen,r.scoreComponents.unified.memory.displacement,r.score]);
-          const controlSorted=Array.from({length:4},(_,j)=>controls.map(v=>v[j]).filter(Number.isFinite).sort((a,b)=>a-b));
-          const groups={};for(const r of pool){const k=Math.floor(r.scoreComponents.signalScore/20);(groups[k]??=[]).push(r);}
-          const chosen=new Map();
-          pool.filter(isSelectableRecommendation).sort((a,b)=>b.score-a.score).slice(0,10).forEach(r=>chosen.set(r.symbol,r));
-          // Stratified outcome-independent sampling includes low scores and rule-blocked stocks.
-          // This is a sampled audit, not an exhaustive ledger or a universe-wide return estimate.
-          // The strata are drawn once per day (seeded by the date, not a clock bucket), so the same
-          // stocks are followed continuously through the session instead of reshuffled.
-          for(const rows of Object.values(groups)) rows.sort((a,b)=>scoreSampleHash(a.symbol+'|'+today)-scoreSampleHash(b.symbol+'|'+today)).slice(0,8).forEach(r=>chosen.set(r.symbol,r));
-          for(const r of chosen.values()){
-            // RECORDED WHEN SOMETHING HAPPENS. A stock is written the first time it is followed today
-            // and again the moment any rule flips for it - crossing VWAP at 10:02 is recorded at
-            // 10:02 - and never while nothing about it has changed.
-            const ruleRead2=readDecisionRules(r),stateKey=ruleStateKey(ruleRead2);
-            const prev=lastToday.get(r.symbol);
-            if(prev&&(prev.stateKey||ruleStateKey(prev))===stateKey) continue;
-            const c=r.scoreComponents,policy=getRowExitPolicy(r,r.price);
-            if(!(policy.stopPct>0)) continue;
-            const qty=Math.max(1,Math.floor(frictionSizeBasis()/r.price)),fr=getTradeFrictionPct(r,qty*r.price);
-            const input=JSON.parse(JSON.stringify(c.unified)),live=computeUnifiedEvidence(input,state.live);
-            const trial=state.candidate?computeUnifiedEvidence(input,state.candidate.weights):null;
-            const withoutMemory=state.candidate?computeUnifiedEvidence(input,state.candidate.weights.map((v,i)=>i>=23&&i<EXACT_SCORE_START?0:v)):null;
-            const statusReason=getStatusAuditReason(r);
-            const observation={symbol:r.symbol,issueDate:today,issuedAt:captureAt,bucket,score:r.score,signalScore:c.signalScore,
-              block:c.block||null,minScore:RECOMMEND_MIN_SCORE,input,modelRevision:state.revision,livePrediction:live.raw/100,liveDecision:live.total,
-              statusCode:statusReason.code,statusCodes:statusReason.codes,statusReason:statusReason.text,
-              margins:ruleRead2.margins,failed:ruleRead2.failed,unknown:ruleRead2.unknown,stateKey,
-              maxFavourablePct:0,ruleSchema:RULE_SCHEMA_VERSION,
-              candidateId:trial?state.candidate.id:null,candidatePrediction:trial?trial.raw/100:null,candidateDecision:trial?trial.total:null,
-              withoutMemoryPrediction:withoutMemory?withoutMemory.raw/100:null,withoutMemoryDecision:withoutMemory?withoutMemory.total:null,
-              entryPrice:r.price,targetPct:policy.targetPct,stopPct:policy.stopPct,auditQty:qty,orderType:'MARKET',
-              frictionPct:fr?.covered&&Number.isFinite(fr.entryPct)&&Number.isFinite(fr.exitPct)?Math.max(0,fr.entryPct+fr.exitPct):null,
-              rocketOutcome:ROCKET_OUTCOME.PENDING,scoreVersion:RADAR_SCORE_VERSION,outcomePolicy:'net-policy-v1',
-              targetPolicy:TARGET_POLICY_VERSION,targetSource:policy.targetSource,targetEvidence:policy.targetEvidence};
-            if(policy.targetPct>0){ state.records.push(observation); lastToday.set(r.symbol,observation); }
-            if(studyDue&&studyOpen&&cohort.has(r.symbol)&&input.memory?.ok){
-              const values=[r.atr,r.changeOpen,input.memory.displacement,r.score];
-              if(values.every(Number.isFinite)){
-                const p=observation;
-                study.records.push({symbol:p.symbol,issueDate:today,issuedAt:captureAt,bucket,entryPrice:p.entryPrice,
-                  targetPct:MEMORY_SPEC.targetPct,stopPct:p.stopPct,auditQty:qty,orderType:'MARKET',frictionPct:p.frictionPct,
-                  rocketOutcome:ROCKET_OUTCOME.PENDING,outcomePolicy:'net-policy-v1',memory:input.memory,
-                  memoryControls:values.map((v,j)=>Math.min(9,Math.floor(10*radarPct(controlSorted[j],v))))});
-                if(!study.dates.includes(today)) study.dates.push(today);
-              }
-            }
-          }
-          state.lastBucket=bucket;
-        }
-      }
-    }
-    const mature=state.records.filter(p=>p.targetPolicy===TARGET_POLICY_VERSION&&matureScoreOutcome(p,today));
-    updateRuleAggregates(state,today);
-    if(!study.results&&study.dates.length===MEMORY_SPEC.dates){
-      const last=study.dates.at(-1),gap=tradingDaysBetween(last,today);
-      if(gap>1||(gap===1&&istClock().mins>=EQUITY_CLOSE_MIN)){
-        study.status='Evaluating the sealed 30-session study';
-        study.results=await evaluateMemoryStudy(study);study.closedAt=Date.now();
-        study.status='Study closed; only qualified features may enter candidate weight testing';
-      }
-    }
-    // v1362: THE CANDIDATE / VALIDATION PATH IS DELETED. It was the last collect-then-arm gate in
-    // the app - >=100 resolved observations across >=5 mature sessions, freeze a candidate, then
-    // >=100 more to promote - and it optimised TARGET-HIT SQUARED ERROR, the signal v1360 removed
-    // from the display for reading 93-100% on every bucket. Keeping it meant the components with
-    // the most influence learned slowest, through the gate the owner asked to remove, graded on the
-    // metric we had already established was unusable. Every weight in the score now comes from one
-    // mechanism: measured edge, shrunk by its own sampling error, moving continuously.
-    await refreshTapeEdges();
-    state.candidate=null;
-    // Bound the new audit store; legacy records/settings are never migrated or rewritten.
-    // Keep pending outcomes and the latest 10,000 completed samples, plus model-update history.
-    // RETENTION IS BY SESSION, NOT BY ROW COUNT. The old 10,000-row cap was about 21 sessions at
-    // 30-minute sampling but only ~3.6 at bar resolution, and it was an undeserved constant either
-    // way. Per-session per-rule AGGREGATES are the permanent learning store and are tiny, so
-    // evidence is unbounded while bytes are not. Raw rows are the rolling window the loosen/tighten
-    // counterfactual needs, kept for ROCKET_HORIZON_DAYS+1 sessions - long enough for every record
-    // to reach its next-close deadline, which is derived rather than chosen.
-    const rawSessions=[...new Set(state.records.map(p=>p.issueDate))].sort().slice(-(ROCKET_HORIZON_DAYS+1));
-    const keepSessions=new Set(rawSessions);
-    state.records=state.records.filter(p=>keepSessions.has(p.issueDate)
-      ||(state.candidate&&p.candidateId===state.candidate.id));
-    state.history=state.history.slice(-30);state.updatedAt=now;
-    FS.set(SCORE_LEARNING_STORE,state);_unifiedStateSource=state;
-    if(state.revision!==state.publishedRevision){
-      state.publishedRevision=state.revision;
-      await scheduleScoreJob(); // one coherent rescore/filter/basket publication after promotion
-    }
-    if(document.getElementById('postCloseContent')?.offsetParent!==null) renderPostClose();
-  }finally{_scoreLearningBusy=false;}
-}
-
 function median(a){
   const v=(a||[]).filter(x=>Number.isFinite(x)).sort((x,y)=>x-y);
   if(!v.length) return null;
@@ -4325,149 +3194,7 @@ const RADAR_GROUPS={
   context:{label:'Context',budget:5,desc:'Sector-relative regime and fundamentals'}
 };
 const RADAR_RATING={'strong sell':-2,'sell':-1,'neutral':0,'buy':1,'strong buy':2};
-// Fixed risk safeguards remain outside the adaptive evidence weights.
-function radarRiskFactor(r){
-  if(!r) return 0;
-  const price=Number(r.price)||0,turnover=rowLiquidityRupees(r);
-  const move=Math.max(Math.abs(Number(r.day)||0),Math.abs(Number(r.gap)||0));
-  const volatility=Number(r.parts?.volatility);
-  const flags=Array.isArray(r.meta?.flags)?r.meta.flags.length:0;
-  const dimensions=[
-    turnover>0?clamp01(turnover/2500000,0,1):0,
-    price>0?clamp01(price/10,0,1):0,
-    move>6?clamp01(6/move,0,1):1,
-    Number.isFinite(volatility)&&volatility<38?clamp01(volatility/38,0,1):1,
-    clamp01(1-flags/3,0,1)
-  ];
-  return Math.min(...dimensions);
-}
-// v1232: THE SCORE IS RECOMMENDATION STRENGTH AGAIN. Owner, on the v1231 board: 74.8 and 73.1 were
-// not buyable while the one green row was 70.2.
-//
-// MEASURED on that board: 310 rows cleared the 60 bar and 3 were selectable; the 3 sat at score-rank
-// 49, 86 and 91 of 3,129; NONE of the top ten was buyable. Mean score of a selectable row 68.83
-// against 65.71 for the 307 over-bar rows that could not be bought - 3.1 points of separation. A
-// confirmed current tape, without which nothing can be bought at all, was worth 1.68 points of 100.
-//
-// The cause was v1230 making permissions small ADDITIVE components. v1228 had them multiplicative,
-// where each vetoes alone. That is restored here: the bar is the whole test again, so clearing 60
-// means buyable and row order IS recommendation order.
-//
-// PERMISSION IS NOT ALLOWED TO STARVE THE FETCH QUEUE. An absent tape scores 0.6, not 0: the queue
-// selects what to fetch through meetsRecommendationBar, so zeroing every row without candles would
-// stop candles ever being fetched (the v1203/v1227 starvation). Absent means "cannot act yet";
-// only a REJECTED tape is a veto. Nothing here consults meetsRecommendationBar - it reads the row's
-// own facts - so the score cannot recurse into the gate that reads the score.
-const RADAR_PERMISSION_TAPE_ABSENT=0.6;
 let _tapeProfitMemo=null;
-function getTapeProfitEvidence(){
-  const store=FS.get(RECOMMEND_OUTCOME_STORE),today=getSessionDate();
-  if(_tapeProfitMemo?.store===store&&_tapeProfitMemo.today===today) return _tapeProfitMemo.value;
-  const sessions=[];
-  for(const issue of Object.values(store?.issues||{})){
-    if(issue.scoreVersion!==RADAR_SCORE_VERSION||issue.date>=today) continue;
-    const picks=(issue.picks||[]).filter(p=>!p.control);
-    if(!picks.length||picks.some(p=>!p.paperComplete||p.evidenceIncomplete||!Number.isFinite(p.paperNetPct)
-      ||istDayKey(p.paperExitAt)>=today)) continue;
-    sessions.push({date:issue.date,net:meanArr(picks.map(p=>p.paperNetPct))});
-  }
-  const days=sessions.sort((a,b)=>a.date.localeCompare(b.date)).slice(-5);
-  const mean=days.length?meanArr(days.map(d=>d.net)):null;
-  const positive=days.filter(d=>d.net>0).length;
-  const value={sessions:days.length,mean,positive,status:days.length<5?'unvalidated':mean>0&&positive>=3?'qualified':'losing'};
-  _tapeProfitMemo={store,today,value};return value;
-}
-function getTotalDepth(sym){
-  const s=normSym(sym||'');
-  const lad=typeof BOOK_LADDER==='object'&&BOOK_LADDER[s];
-  if(lad){
-    const bq=Number(lad.buyQty)||0;
-    const sq=Number(lad.sellQty)||0;
-    if(bq>0||sq>0) return {buyQty:bq,sellQty:sq,source:'stream_total'};
-    const b5=Array.isArray(lad.bids)?lad.bids.reduce((n,b)=>n+(Number(b[1]||b.quantity||b.q)||0),0):0;
-    const s5=Array.isArray(lad.asks)?lad.asks.reduce((n,a)=>n+(Number(a[1]||a.quantity||a.q)||0),0):0;
-    if(b5>0||s5>0) return {buyQty:b5,sellQty:s5,source:'stream_5level'};
-  }
-  const lv=typeof DEPTH_LIVE==='object'&&DEPTH_LIVE[s];
-  if(lv&&(Number(lv.buyQty)>0||Number(lv.sellQty)>0)){
-    return {buyQty:Number(lv.buyQty)||0,sellQty:Number(lv.sellQty)||0,source:'pasted'};
-  }
-  const bk=typeof NSE_DEPTH==='object'&&NSE_DEPTH[s];
-  if(bk&&(Number(bk.buyQty)>0||Number(bk.sellQty)>0)){
-    return {buyQty:Number(bk.buyQty)||0,sellQty:Number(bk.sellQty)||0,source:'preopen'};
-  }
-  return null;
-}
-function isDepthRecommendable(sym){
-  const d=getTotalDepth(sym);
-  if(!d) return true; // if no depth information is available, do not blindly veto
-  return d.buyQty>d.sellQty;
-}
-function radarPermissionLevel(r,tapeStanding){
-  const has=v=>v!==null&&v!==undefined&&v!==''&&Number.isFinite(Number(v));
-  if(!r) return {p:0,why:'no row'};
-  // A TIMING VETO AND A STRUCTURAL VETO ARE NOT THE SAME THING (v1250). Owner: "the recommendation
-  // is score threshold based, but that doesn't mean stocks are not shown there with whatever score
-  // they have." Every gate here used to return p=0, so on a weak session the ENTIRE board scored
-  // exactly 0.0 and carried no ranking information at all - measured 2026-09-02 at 09:40: breadth
-  // 33%, 1,543 rows, every one of them 0.0 while showing +3.9% to +6.5% day moves.
-  //
-  // STRUCTURAL means the row cannot be traded at all today: not EQ-eligible, no history, at the
-  // circuit, condemned by the tape, blocked by an armed trigger. Those stay hard zeros - a zero is
-  // the honest score for something that is not a trade.
-  //
-  // TIMING means it is not buyable RIGHT NOW and may be in ten minutes: the move is extended, the
-  // broad market has not confirmed, the turn has not shown yet. Those SCALE the score down instead,
-  // so the row keeps its ordering and the owner can see what is building. It is not loosened:
-  // `meetsRecommendationBar` still refuses `entryReady===false` and `directionConfirmed!==true`
-  // independently, so a scaled row can never be selected or exported, and radarScoreCell renders an
-  // above-bar score amber when the row is not selectable.
-  const veto=[],timing=[];
-  if(r.eqEligible===false||r.basketEligible===false) veto.push('not basket-eligible');
-  if(r.recommendationTriggerBlocked===true) veto.push('trigger veto');
-  if(r.noHistory===true) veto.push('no multi-day history');
-  if(r.intradaySellingToday===true) veto.push('selling today');
-  if(NSE_SURV[r.symbol]?.length) veto.push('surveillance flag ('+(NSE_SURV[r.symbol].join(' · '))+')');
-  const freshness=getRecommendationFreshness(r.symbol);
-  if(!freshness.ok){
-    if(isEquitySession(Date.now())){
-      veto.push(freshness.why);
-    } else if(freshness.why !== 'Market closed - waiting for the next session' && freshness.why !== 'Awaiting 5-minute tape'){
-      veto.push(freshness.why);
-    }
-  }
-  if(getTapeProfitEvidence().status==='losing') veto.push('Five-session net-profit audit failed');
-  if(veto.length) return {p:0,why:veto[0],vetoes:veto};
-  if(r.entryReady===false) timing.push('move already consumed');
-  if(r.directionConfirmed!==true) timing.push('direction not confirmed');
-  if(!isDepthRecommendable(r.symbol)) timing.push('sell volume exceeds buy volume');
-  // continuous permissions
-  // HEADROOM IS THE EXCHANGE CIRCUIT, NOT THE STATISTICAL CEILING (v1237). This was min(f,cf), which
-  // is the exact shape v1208 removed from the score: `feasibility` carries the v1083 session-ceiling
-  // estimate, measured at correlation -0.579 with the day's move, i.e. a monotone anti-momentum
-  // multiplier, and v1112 removed it from withholding twice because "it almost takes every good
-  // stock out". Taking the min let it back in as a VETO, which is the strongest withholding there
-  // is. Measured on the release board: 18 of the 120 taped rows were zeroed by it, CAPLIPOINT and
-  // ENGINERSIN among them, both with tape evidence above 0.95. A stock at its exchange band truly
-  // has no room; one that has merely spent its statistical range does not. `feasibility` is still
-  // reported on the row and still prices the target - it just cannot delete the row any more.
-  const cf=has(r.circuitFeasibility)?clamp01(Number(r.circuitFeasibility),0,1):1;
-  const room=cf;
-  if(!(room>0)) return {p:0,why:'at the exchange circuit limit',vetoes:['at the exchange circuit limit']};
-  // tape: confirmed proves it, absent defers it, rejected condemns it
-  let tape=RADAR_PERMISSION_TAPE_ABSENT,tapeWhy='no current tape';
-  if(has(tapeStanding)){
-    const ts=clamp01(Number(tapeStanding),0,1);
-    if(ts<=0) return {p:0,why:'tape rejected',vetoes:['tape rejected']};
-    tape=clamp01(0.6+0.4*ts,0,1); tapeWhy='tape '+(ts>=0.5?'confirming':'weak');
-  }
-  // Each unmet timing condition halves what is left. Halving is the same "one more thing has to go
-  // right" step applied twice, not a tuned weight, and two of them still leave a quarter - enough
-  // to rank a strong setup well below a buyable one without erasing it.
-  const timingFactor=Math.pow(0.5,timing.length);
-  return {p:clamp01(room*tape*timingFactor,0,1),
-          why:timing.length?timing[0]:tapeWhy,room,tape,timing,timingFactor};
-}
 // ── EVIDENCE COMES FROM THE TAPE (v1233) ──────────────────────────────────────────────────────
 // Owner: "ALL NSE's role is only that" - a pool of stocks on which to do 5-minute analysis - and
 // "only do 5-minute analysis then, on stocks available to you in the new filtered ALL NSE."
@@ -4489,7 +3216,6 @@ function radarPermissionLevel(r,tapeStanding){
 const INTRADAY_STORE_MAX=1200;   // 13 completed equity sessions PLUS today's bars and boundary slack.
 const TAPE_BAR_MS=5*60*1000;
 const TAPE_NETVOL_BARS=3;     // Three recent bars for the participation comparison.
-const TAPE_VWAP_BARS=5;       // Legacy diagnostic aggregation; scoring VWAP uses every window bar.
 // Retain six completed bars across sessions. Both pressure and VWAP use the whole window.
 const TAPE_MIN_SESSION_BARS=2*TAPE_NETVOL_BARS;
 // Per-symbol memo storing {sig, val} (Finding C). Sig binds length, last bar timestamp, and 5-min
@@ -4550,15 +3276,6 @@ function tapeReachability(sym,targetPct){
 }
 // Signed volume for one candle: buyers minus sellers, by where it closed inside its own range.
 const tapeDelta=b=>(b.h>b.l?(Number(b.v)||0)*(2*(b.c-b.l)/(b.h-b.l)-1):0);
-// MEMOIZED ON THE BAR SIGNATURE (v1254). This re-aggregates a symbol's whole session - 15-minute
-// and 25-minute rollups, a VWAP pass, a cumulative-delta walk - and it is called once per row by
-// setRadarEvidenceScore, again by applyIntradayReorder, and again by every consumer that asks for a
-// standing. Measured on a 1,669-row board: radarScoreRows 1,915ms, applyFilters 1,298ms,
-// applyIntradayReorder 1,129ms - about 4.6 SECONDS of main-thread work every 30 seconds, which is
-// what made the filters and tabs unusable. The answer only changes when a bar arrives, so the
-// signature is the bar count plus the last bar's timestamp - the same memo shape getIntradayThinCut
-// already uses. A new bar invalidates it by construction; nothing else can.
-const _tapeEvidenceMemo=new Map();
 const BOOK_HISTORY_MAX=12;
 const BOOK_HISTORY=Object.create(null);
 let BOOK_HISTORY_V=0;
@@ -4587,132 +3304,6 @@ function getBookDeltaRead(sym){
   const delta=current.imbalance-previous.imbalance;
   return {current:current.imbalance,previous:previous.imbalance,delta,
     strength:Math.max(-1,Math.min(1,delta/(2*median))),at:current.t};
-}
-function radarTapeEvidence(sym){
-  const key=normSym(sym||'');
-  const bars=INTRADAY_BARS[key];
-  if(!bars||bars.length<TAPE_MIN_SESSION_BARS) return null;
-  // Keyed on THIS symbol's bars (v1364) and, while a bar is forming, a two-second clock so the
-  // sliding window's weights advance; not on the store-wide revision, which any symbol moves.
-  const z=bars[bars.length-1],now=Date.now();
-  const clock=Number(z.t)+TAPE_BAR_MS>now?Math.floor(now/2000):Math.floor(now/TAPE_BAR_MS);
-  const stamp=clock+':'+tapeSigOf(key)+':'+BOOK_V+':'+TAPE_IMPACT_W+':'+['book','split','spoof','delta'].map(k=>(BOOK_EDGES[k]?.w||0)+'/'+(BOOK_EDGES[k]?.dir||1)).join(':');
-  const hit=_tapeEvidenceMemo.get(key);
-  if(hit&&hit.stamp===stamp) return hit.val;
-  const val=_radarTapeEvidenceUncached(key);
-  _tapeEvidenceMemo.set(key,{stamp,val});
-  return val;
-}
-function _radarTapeEvidenceUncached(sym){
-  const all=INTRADAY_BARS[normSym(sym||'')];
-  if(!all||all.length<TAPE_MIN_SESSION_BARS) return null;
-  const day=continuousTapeWindow(all);
-  if(!day) return null;
-  const totV=day.reduce((n,b)=>n+(Number(b.v)||0),0);
-  if(!(totV>0)) return null;
-
-  // Candle-pressure proxy, not executed buy/sell volume. Every bar contributes its volume.
-  const netVol=day.reduce((n,b)=>n+tapeDelta(b),0)/totV;
-  // Rolling HLC3 VWAP over ALL six bars, including the newest completed bar.
-  const vwap=day.reduce((n,b)=>n+((b.h+b.l+b.c)/3)*(Number(b.v)||0),0)/totV;
-  const last=day[day.length-1].c;
-  const vwapDist=(vwap>0&&last>0)?(last/vwap-1)*100:null;
-
-  // 3. THE CROSSOVER, AND WHETHER IT WAS QUIET. Cumulative signed volume from the open; a cross
-  //    from net-sell to net-buy on BELOW-average volume was the best event measured. A loud cross
-  //    held more often but paid nothing (+1.47% quiet against +0.07% at the highest volume decile),
-  //    so quietness is the term, not the crossing alone.
-  let cum=0,crossed=false,quietCross=false;
-  const span=day._span||day.length;
-  const avgV=totV/span;
-  let prev=0;
-  for(const b of day){
-    cum+=tapeDelta(b);
-    if(prev<=0&&cum>0){ crossed=true; quietCross=(Number(b.v)||0)<avgV; }
-    prev=cum;
-  }
-  const netPositive=cum>0;
-
-  // 4. PARTICIPATION - predicts the SIZE of the next move, not its direction (measured: the >=+1%
-  //    tail ran 1.1% in the quietest quintile against 3.2% in the busiest).
-  const tail=day.slice(-TAPE_NETVOL_BARS);
-  let recentV=tail.reduce((n,b)=>n+(Number(b.v)||0),0);
-  // Sliding: the bar just before the last three still counts for the part of the bucket not yet run.
-  if(day._span&&day.length>TAPE_NETVOL_BARS){
-    const prior=day[day.length-TAPE_NETVOL_BARS-1];
-    recentV+=(Number(prior._w!=null?prior.v/(prior._w||1):prior.v)||0)*(1-(day._formingShare||0));
-  }
-  const recent=recentV/TAPE_NETVOL_BARS;
-  const relVol=avgV>0?recent/avgV:null;
-
-  // map each to 0..1 on fixed, inspectable scales
-  // 5. IMPACT - %change per unit of net flow (owner's thesis, 2026-09-01). Measured head-to-head on
-  //    the archive it was the best of six candidates (AUC 0.531 overall, 0.558 on big movers),
-  //    beating the v1233 blend and beating the inverse absorption form. It is also WEAK, so its
-  //    weight is NOT asserted here - the helper grades it against forward outcomes and returns a
-  //    weight already shrunk by its own error bar. At zero weight this term is bit-for-bit inert.
-  //    atan2 keeps it monotone in move/share (so the graded edge is preserved exactly) and bounded
-  //    with no chosen scale constant; both arguments are percentages, so the ratio is dimensionless.
-  const openC=day[0].c,sharePct=totV>0?(cum/totV)*100:0;
-  const movePct=(openC>0&&last>0)?(last/openC-1)*100:null;
-  const impact=Number.isFinite(movePct)
-    ?0.5+Math.atan2(movePct,Math.max(Math.abs(sharePct),1e-6))/Math.PI:null;
-
-  const eFlow=Number.isFinite(netVol)?clamp01((netVol+1)/2,0,1):0.5;
-  const eVwap=Number.isFinite(vwapDist)?clamp01(0.5+vwapDist/2,0,1):0.5;   // +1% over VWAP -> 1.0
-  const eCross=netPositive?(quietCross?1:0.7):(crossed?0.4:0.15);
-  const eSize=Number.isFinite(relVol)?clamp01(relVol/2,0,1):0.5;           // 2x recent volume -> 1.0
-  const eImpact=Number.isFinite(impact)?clamp01(impact,0,1):0.5;
-
-  // MEASURED on 64,181 same-session samples across 1,642 symbols (2026-09-09 tape):
-  // Target reach (+2.6% in 60m): size 0.5163 (t 2.20), vwap 0.5040 (t 0.55), flow 0.5022 (t 0.29), cross 0.4989 (t -0.15).
-  // Forward 60m close: size 0.5175 (t +7.7), cross 0.4693 (t -13.5), flow 0.4541 (t -20.2), vwap 0.4239 (t -33.9).
-  // eSize (participation) is the ONLY term with a consistently positive forward edge across both outcomes (t > 2).
-  // eVwap, eFlow, and eCross all carry negative forward close edges and fail to separate from noise on target reach (|t| < 0.6).
-  // Provisional fixed blend, NOT an optimal fit or a validated probability. Same-session marginal
-  // AUCs do not validate these weights or the complete buy-now / next-session policy.
-  const W={flow:.10,vwap:.05,cross:.10,size:.75};
-  // The impact weight is MEASURED, never asserted: 0 until the edge survives its own sampling error,
-  // rising as the corpus grows. At 0 every factor below collapses to 1 and both the blend and its
-  // normaliser are identical to v1233's, so an unmeasured term cannot move a single score.
-  const wImp=Number.isFinite(TAPE_IMPACT_W)?clamp01(TAPE_IMPACT_W,0,0.35):0;
-  // THE THREE ORDER-BOOK TERMS (v1291), on exactly the same footing as impact: each carries a
-  // weight the helper MEASURED against forward outcomes and shrank by its own error bar, so each is
-  // 0 - and therefore bit-for-bit inert - until it has earned otherwise. Nothing here asserts that
-  // the book predicts anything; it makes the claim testable and lets it arm itself.
-  const bk=getBookRead(sym);
-  const bookDelta=getBookDeltaRead(sym);
-  const wBook=clamp01(BOOK_EDGES.book?.w||0,0,0.35);
-  const wSplit=clamp01(BOOK_EDGES.split?.w||0,0,0.35);
-  const wSpoof=clamp01(BOOK_EDGES.spoof?.w||0,0,0.35);
-  // Resting intent at the touch, -1..+1 -> 0..1. Absent book sits at the neutral midpoint, never at
-  // zero: absence takes the median, it is not evidence against the row.
-  const bookRaw=(bk&&Number.isFinite(bk.imbalance))?clamp01((bk.imbalance+1)/2,0,1):0.5;
-  const deltaRaw=bookDelta?clamp01(0.5+0.5*bookDelta.strength,0,1):0.5;
-  const eBook=BOOK_EDGES.book?.dir===-1?1-bookRaw:bookRaw;
-  // The CLASSIFIED buy share - executed volume tagged against the touch that stood before it, not
-  // inferred from where the candle closed. This is the first flow reading in this app that is not a
-  // guess about direction, and it still has to earn its weight like everything else.
-  const splitRaw=(bk&&Number.isFinite(bk.buyShare))?clamp01(bk.buyShare,0,1):0.5;
-  const eSplit=BOOK_EDGES.split?.dir===-1?1-splitRaw:splitRaw;
-  // Quantity that left the book WITHOUT trading, against what actually traded. High is bad, so the
-  // term is inverted before it enters an evidence blend where 1 means good. The measured direction
-  // rides along: if the grader finds the opposite sign, `dir` flips it rather than us assuming.
-  const spoofDir=BOOK_EDGES.spoof?.dir===-1?-1:1;
-  const cancelRatio=(bk&&Number.isFinite(bk.cancelRatio))?bk.cancelRatio:null;
-  const eSpoofRaw=cancelRatio===null?0.5:clamp01(1-cancelRatio/2,0,1);   // 2x cancelled-to-traded -> 0
-  const eSpoof=spoofDir===1?1-eSpoofRaw:eSpoofRaw;
-  const nor=(f,v,c,s,i,b,sp,cx)=>1-(1-f*W.flow)*(1-v*W.vwap)*(1-c*W.cross)*(1-s*W.size)*(1-i*wImp)
-    *(1-b*wBook)*(1-sp*wSplit)*(1-cx*wSpoof);
-  const level=clamp01(nor(eFlow,eVwap,eCross,eSize,eImpact,eBook,eSplit,eSpoof)/nor(1,1,1,1,1,1,1,1),0,1);
-  return {level,bars:day._span||day.length,formingShare:day._formingShare??null,netVol,vwapDist,crossed,quietCross,netPositive,relVol,impact,
-          impactWeight:wImp,
-          book:bk?{imbalance:bk.imbalance,buyShare:bk.buyShare,cancelRatio:bk.cancelRatio,
-                   cancelSkew:bk.cancelSkew,replenish:bk.replenish,at:bk.t}:null,
-          bookDelta,
-          bookWeights:{book:wBook,delta:clamp01(BOOK_EDGES.delta?.w||0,0,0.35),split:wSplit,spoof:wSpoof},
-          parts:{flow:eFlow,vwap:eVwap,cross:eCross,size:eSize,impact:eImpact,
-                 book:eBook,bookLevel:bookRaw,bookDelta:deltaRaw,split:eSplit,spoof:eSpoof}};
 }
 
 // THE QUEUE MAY NOT ASK THE BAR'S QUESTION. The bar asks “can I buy this now?”, and since v1232
@@ -4747,67 +3338,8 @@ function rowLiquidityRupees(r){
 function worthFetchingTape(r){
   if(!r||r._held) return false;
   if(r.eqEligible===false||r.basketEligible===false) return false;
-  if(r.recommendationTriggerBlocked===true) return false;
   const p=Number(r.price);
   return p>=10&&rowLiquidityRupees(r)>=2500000;
-}
-function radarScoreComponents(r,tapeStanding){
-  if(!r) return {total:0,permission:0,block:'No row'};
-  const perm=radarPermissionLevel(r,tapeStanding),risk=radarRiskFactor(r),tev=radarTapeEvidence(r.symbol);
-  if(!tev) return {total:0,permission:0,evidence:0,tapeBars:0,block:'Awaiting usable completed 5-minute tape'};
-  const state=getUnifiedModelState(),champion=FS.get(INDICATOR_WATCH_STORE)?.nextChampionStats;
-  const predictor=champion?.objective==='net-policy-v1'&&champion.mean>0&&champion.n>=5
-    ?0.5+clamp01(Number(r.predictiveLevel)||0,0,1):1;
-  const trigger=Number.isFinite(Number(r.triggerFactor))?clamp01(Number(r.triggerFactor),0.5,1.5):1;
-  const legacy=state.legacyDepth||{},depth=Number(r.depthImbalance)>0&&Number.isFinite(legacy.depthMultiplier)?legacy.depthMultiplier:1;
-  const co=Number(r.changeOpen)||0,p5=Number(r.price5m)||0;
-  const hasP15=r.price15m!==null&&r.price15m!==undefined&&r.price15m!==''&&Number.isFinite(Number(r.price15m));
-  const timing=r.entryTiming||getPeakEntryTiming(r),used=Number(timing?.rangeUsed)||0,loc=Number(timing?.rangeLocation)||0;
-  const exhausted=used>=75||(loc>=75&&timing?.bandExtended)||timing?.gapLedFade||timing?.failedBreakout;
-  const extension=exhausted?0:loc>=70?0.4:1;
-  let velocity=0,fade=0,ceiling=100;
-  if(co>0.10&&extension>0&&p5>0){
-    let accel=1;
-    if(hasP15){
-      const ratio=(1+Number(r.price15m)/100)/(1+p5/100);
-      const prior=ratio>0?100*(Math.sqrt(ratio)-1):-99;
-      accel=p5>=prior?1+Math.min(0.3,(p5-Math.max(0,prior))*0.2):prior>0?Math.max(0,(p5-0.25*prior)/(0.75*prior)):1;
-    }
-    velocity=Math.min(25,p5*12*accel*Math.min(1,(co-0.10)/0.50)*extension);
-  }else if(co< -0.10){
-    fade=Math.min(45,(Math.abs(co)-0.10)*15*(Number(legacy.gapFadeMultiplier)||1));
-    ceiling=Math.max(0,100-(Math.abs(co)-0.10)*100);
-  }
-  const bw=tev.bookWeights||{};
-  const memory=getMemoryReading(r);
-  const ruleRead1=readDecisionRules(r);
-  const input={memory,bookDelta:tev.bookDelta||null,deltaWeight:tev.bookWeights?.delta||0,parts:['flow','vwap','cross','size','impact','book','split','spoof'].map(k=>tev.parts[k]??0.5),
-    base:[0.10,0.05,0.10,0.75,tev.impactWeight||0,bw.book||0,bw.split||0,bw.spoof||0],
-    predictor,trigger,depth,velocity,fade,ceiling,permission:perm.p||0,risk,
-    context:SCORE_GROUPS.map(k=>Number.isFinite(r.scorePriors?.[k])?r.scorePriors[k]:null).concat([
-      Number.isFinite(r.fundamentalTrigger)?0.5+0.5*clamp01(r.fundamentalTrigger,-1,1):null,
-      Number.isFinite(r.stretch)&&r.stretch>=0?1/(1+r.stretch):null,
-        isEquitySession(Date.now())?(375+Math.max(0,EQUITY_CLOSE_MIN-istClock().mins))/750:null],
-        memory.ok?memory.values:[null,null,null],ruleContextVector(ruleRead1.margins))};
-      checkRuleSlotAlignment();
-      const _ruleW=ruleWeightVector(state);
-      const _tapeW=tapeEdgeWeights();
-      const effectiveWeights=state.live.map((weight,index)=>{
-        if(index>=EXACT_SCORE_START) return _ruleW[index-EXACT_SCORE_START]||0;
-        // Slots 0-4 are the bar-derived tape components. Until the archive has graded them the
-        // weight stays where it is; once it has, the measurement replaces the assertion.
-        if(_tapeW&&index<TAPE_EDGE_KEYS.length) return _tapeW[index];
-        return weight;
-      });
-      const calc=computeUnifiedEvidence(input,effectiveWeights);
-  const out={total:calc.total,signalScore:calc.raw,unified:input,modelRevision:state.revision,
-    evidence:calc.evidence,permission:input.permission,riskFactor:risk,tapeBars:tev.bars,
-    flow:100*tev.parts.flow,vwapPos:100*tev.parts.vwap,crossover:100*tev.parts.cross,participation:100*tev.parts.size,
-    impact:100*tev.parts.impact,bookWeights:bw,feasibility:10*(perm.room||0),tape:10*(perm.tape||0),
-    velocityBoost:velocity*state.live[11]*input.permission*risk,belowOpenDrop:co< -0.10?Math.abs(co)-0.10:0,
-    modelState:state.revision>0?'forward-validated update':'initial weights - collecting outcomes',
-    block:input.permission>0?null:perm.why||'Readiness rule failed'};
-  return applyReadinessScoreCap(r,out);
 }
 
 function isDirectionConfirmed(s){
@@ -4815,36 +3347,34 @@ function isDirectionConfirmed(s){
   const vw=Number(s.vwap), px=Number(s.price), day=Number(s.day);
   return (vw > 0 && px >= vw && isValidChangeOpen(s.changeOpen) && Number(s.changeOpen) > 0 && Number.isFinite(day) && day > 0);
 }
-function setRadarEvidenceScore(r,tapeStanding){
-  if(r) r.directionConfirmed = isDirectionConfirmed(r);
-  const c=radarScoreComponents(r,tapeStanding);
-  applyReadinessScoreCap(r,c); // includes the early no-tape return, even with Min Score = 0
-  // v1362: ONE MEANING PER QUANTITY. The calibrated value is what the whole app sees - the bar, the
-  // sort, the export and the modal - so a score cannot mean confidence on one surface and raw
-  // evidence on another. It is the identity until enough matured records exist to state a
-  // frequency, so this changes nothing on release day and arms itself as records accumulate.
-  c.rawTotal=c.total;
-  c.total=calibrateScore(c.total);
-  r.score=c.total;r.rocketScore=r.score;r.scoreVersion=RADAR_SCORE_VERSION;r.scoreComponents=c;
-  return r.score;
+// v1367: THE ROCKET SCORE (owner's specification). Tick direction only: the helper counts every LTP
+// observation as up (+1), down (-1) or unchanged (0) into 10-second buckets, and once per bucket
+//     Tick Pressure = (U-D)/(U+D),   S = 0.891*S + 0.109*Tick Pressure,   Rocket Score = 50*(1+S)
+// S persists across sessions. The page does not compute anything: it reads S from the live feed.
+// It is the ONLY decision metric - no indicator, volume, magnitude or market variable enters it, and
+// no gate edits it. Whether a row can be traded (surveillance, exchange eligibility, circuit, a live
+// price feed, funding) is decided separately and shown in Status, never folded into the number.
+function rocketScoreOf(sym){
+  const f=_universeMap.get(sym);
+  const S=Number(f?.rs);
+  return (f&&f.rs!==null&&f.rs!==undefined&&Number.isFinite(S))?+(50*(1+Math.max(-1,Math.min(1,S)))).toFixed(1):null;
 }
-function applyReadinessScoreCap(r,c){
-  const issue=getRowReadinessIssue(r);
-  const reason=issue?.reason||(c.permission===0?c.block||'No usable current tape':null);
-  if(reason){
-    c.total=+Math.min(c.total,RECOMMEND_MIN_SCORE-0.1).toFixed(1);
-    c.block=reason;
-  }
-  return c;
+function setRadarEvidenceScore(r){
+  if(!r) return null;
+  r.directionConfirmed=isDirectionConfirmed(r);
+  const f=_universeMap.get(r.symbol),sc=rocketScoreOf(r.symbol);
+  r.score=sc;r.rocketScore=sc;r.scoreVersion=RADAR_SCORE_VERSION;
+  r.scoreComponents={total:sc,S:Number.isFinite(Number(f?.rs))?Number(f.rs):null,
+    pressure:Number.isFinite(Number(f?.rp))?Number(f.rp):null,permission:1,
+    block:sc===null?'No tick history for this stock yet':null};
+  return sc;
 }
 function radarScoreTitle(r){
   const c=r?.scoreComponents;
-  if(!c?.unified) return 'Awaiting usable completed tape; no prediction recorded yet.';
-  const bd=c.unified.bookDelta;
-  const bookDeltaText=bd&&Number.isFinite(bd.delta)
-    ?` Book delta is ${(bd.delta>=0?'+':'')+(100*bd.delta).toFixed(2)} percentage points versus the prior completed book bucket; positive means bid support is increasing.`:'';
-  return `Unified signal ${c.signalScore.toFixed(1)}; final score ${c.total.toFixed(1)} after readiness and risk. Model revision ${c.modelRevision}. `
-    +(c.block?`Rule: ${c.block}. `:'')+`Min Score ${RECOMMEND_MIN_SCORE}.${bookDeltaText} Dynamic signal values use the current live weights; only later, completed outcomes can qualify a weight change. Not a profit probability.`;
+  if(!c||c.total===null||c.total===undefined) return 'No tick history for this stock yet.';
+  return `Rocket Score ${c.total.toFixed(1)} = 50 x (1 + S), S ${c.S!==null?c.S.toFixed(4):'—'}`
+    +(c.pressure!==null?`; last 10-second tick pressure ${(c.pressure>=0?'+':'')+c.pressure.toFixed(2)}`:'')
+    +`. Upticks minus downticks over all directional ticks, one-minute half-life. Min Score ${RECOMMEND_MIN_SCORE}.`;
 }
 
 // Columns that are EXPORTED but deliberately NOT modelled as features. Exporting and scoring are
@@ -5061,10 +3591,10 @@ let RECOMMEND_MIN_SCORE=0;    // explicit policy bar on the six-component 0-100 
 let RADAR_SCORE_BANDS=(()=>{
   const bar=RECOMMEND_MIN_SCORE, mid=+(bar*0.66).toFixed(1), low=+(bar*0.33).toFixed(1);
   return [
-    {min:bar,color:'var(--green)',range:bar+'–100',note:'clears the recommendation bar on its own evidence.'},
-    {min:mid,color:'var(--amber)',range:mid+'–'+(bar-0.1).toFixed(1),note:'real evidence, short of the bar.'},
-    {min:low,color:'var(--cyan)',range:low+'–'+(mid-0.1).toFixed(1),note:'some evidence on one or two axes.'},
-    {min:-Infinity,color:'var(--red)',range:'Below '+low,note:'little or no evidence, or a permission veto.'}
+    {min:bar,color:'var(--green)',range:bar+'–100',note:'upticks dominate enough to clear your Min Score.'},
+    {min:mid,color:'var(--amber)',range:mid+'–'+(bar-0.1).toFixed(1),note:'more buying than selling pressure, or close to it, short of the bar.'},
+    {min:low,color:'var(--cyan)',range:low+'–'+(mid-0.1).toFixed(1),note:'selling pressure has the upper hand.'},
+    {min:-Infinity,color:'var(--red)',range:'Below '+low,note:'downticks dominate.'}
   ];
 })();
 function syncRecommendationThreshold(){
@@ -5078,10 +3608,10 @@ function syncRecommendationThreshold(){
   if(el&&raw!==''&&Number(el.value)!==next) el.value=String(next);
   const bar=next, mid=+(bar*0.66).toFixed(1), low=+(bar*0.33).toFixed(1);
   RADAR_SCORE_BANDS=[
-    {min:bar,color:'var(--green)',range:bar+'–100',note:'clears the recommendation bar on its own evidence.'},
-    {min:mid,color:'var(--amber)',range:mid+'–'+(bar-0.1).toFixed(1),note:'real evidence, short of the bar.'},
-    {min:low,color:'var(--cyan)',range:low+'–'+(mid-0.1).toFixed(1),note:'some evidence on one or two axes.'},
-    {min:-Infinity,color:'var(--red)',range:'Below '+low,note:'little or no evidence, or a permission veto.'}
+    {min:bar,color:'var(--green)',range:bar+'–100',note:'upticks dominate enough to clear your Min Score.'},
+    {min:mid,color:'var(--amber)',range:mid+'–'+(bar-0.1).toFixed(1),note:'more buying than selling pressure, or close to it, short of the bar.'},
+    {min:low,color:'var(--cyan)',range:low+'–'+(mid-0.1).toFixed(1),note:'selling pressure has the upper hand.'},
+    {min:-Infinity,color:'var(--red)',range:'Below '+low,note:'downticks dominate.'}
   ];
 }
 function meetsScoreBar(score){const s=Number(score);return isFinite(s)&&s>=RECOMMEND_MIN_SCORE;}
@@ -5338,42 +3868,6 @@ function universePriceStaleness(){
   if(age>UNIVERSE_STALE_MS) return 'Live prices are '+Math.round(age/60000)+' minutes stale';
   return null;
 }
-function getRowReadinessIssue(s){
-  if(!s) return {state:'BLOCKED', reason:'Invalid row'};
-  if(NSE_SURV[s.symbol]?.length) return {state:'BLOCKED', reason:'Surveillance flag ('+(NSE_SURV[s.symbol].join(' · '))+')'};
-  if(s.recommendationTriggerBlocked) return {state:'BLOCKED', reason:'Evidence trigger: '+(s.recommendationTriggerReasons||[]).join(', ')};
-  if(s.noHistory===true) return {state:'BLOCKED', reason:'Listed too recently (insufficient history)'};
-  if(s.basketEligible===false) return {state:'BLOCKED', reason:'Non-EQ series or price band < 10%'};
-
-  const _vw=Number(s.vwap), _px=Number(s.price), _co=Number(s.changeOpen), _day=Number(s.day);
-  const _aboveVwap=_vw>0&&_px>=_vw;
-  const _aboveOpen=Number.isFinite(_co)&&_co>0;
-  const _greenDay=Number.isFinite(_day)&&_day>0;
-  const dirOk = (_aboveVwap && _aboveOpen && _greenDay);
-  if(!dirOk){
-    const why=[];
-    if(!_greenDay) why.push('red day ('+(Number.isFinite(_day)?_day.toFixed(2)+'%':'no day move')+')');
-    if(!_aboveVwap) why.push(_vw>0?'below VWAP ('+((_px/_vw-1)*100).toFixed(2)+'%)':'no VWAP');
-    if(!_aboveOpen) why.push(Number.isFinite(_co)?'below open ('+_co.toFixed(2)+'%)':'no open move');
-    return {state:'BLOCKED', reason:'Not lifting off: '+why.join(', ')};
-  }
-
-
-
-  if(s.entryReady===false)
-    return {state:'WAIT', reason:(typeof s.entryTiming==='string'?s.entryTiming:s.entryTiming?.reason)||'Extended (upper-quarter peak timing)'};
-
-  if(s.intradaySellingToday===true)
-    return {state:'BLOCKED', reason:s.intradayWhy||'5-minute tape selling today'};
-
-  const freshness=getRecommendationFreshness(s.symbol);
-  if(!freshness.ok&&isEquitySession(Date.now())) return {state:'WAIT',reason:freshness.why};
-
-  if(!isDepthRecommendable(s.symbol))
-    return {state:'BLOCKED', reason:'Sell volume exceeds buy volume'};
-
-  return null;
-}
 function _getRowActionStateUncached(s, ignoreMarketClosed=false){
   if(!s) return {state:'BLOCKED',reason:'Invalid row'};
   if(s.scoreVersion!==RADAR_SCORE_VERSION) return {state:'BLOCKED',reason:'Older score scale - rescore required'};
@@ -5381,10 +3875,11 @@ function _getRowActionStateUncached(s, ignoreMarketClosed=false){
     return {state:'WAIT',reason:'Market closed — viewing last session state'};
   const stale=universePriceStaleness();
   if(stale) return {state:'BLOCKED',reason:stale};
+  if(NSE_SURV[s.symbol]?.length) return {state:'BLOCKED',reason:'Surveillance: '+NSE_SURV[s.symbol].join(' · ')};
+  if(s.basketEligible===false) return {state:'BLOCKED',reason:'Non-EQ series or price band under 10%'};
+  const cr=Number(s.circuitRunwayPct);
+  if(Number.isFinite(cr)&&cr<=0) return {state:'BLOCKED',reason:'At the upper circuit - nothing to buy'};
   if(!meetsScoreBar(s.score)) return {state:'WAIT',reason:s.scoreComponents?.block||`Score ${Number(s.score).toFixed(1)} < ${RECOMMEND_MIN_SCORE}`};
-  // Clock-dependent feed freshness is an execution safeguard, never a historical runway veto.
-  const freshness=getRecommendationFreshness(s.symbol);
-  if(!freshness.ok&&isEquitySession(Date.now())) return {state:'WAIT',reason:freshness.why};
   return {state:'GO', reason:'Actionable recommendation'};
 }
 function isSelectableRecommendation(s){
@@ -5608,7 +4103,6 @@ function getNextSessionIndicatorEffects(){
 }
 let INTRADAY_BARS={};        // symbol -> [{t,o,h,l,c}] most recent session last
 let INTRADAY_TARGET='';      // which row the next paste belongs to (the paste carries no symbol)
-let INTRADAY_RESULT=null;
 
 // `merge` accepts a PARTIAL update: the same parser, the same bars, only the store write differs.
 // This is not a second ingestion path - the standing rule is one PARSER per input, and this is it.
@@ -6165,7 +4659,7 @@ function* applyIntradayReorderGen(rows){
       ?meetsRecommendationBar(r):(r.score>=RECOMMEND_MIN_SCORE);
     r.intradayVerdict=passes?'confirmed':'rejected';
   });
-  rows.sort((a,b)=>b.score-a.score||radarRankTieBreak(a,b));
+  rows.sort((a,b)=>(b.score??-1)-(a.score??-1)||radarRankTieBreak(a,b));
   rows.forEach((r,i)=>{r.rank=i+1;});
   recordScoreDistribution(rows);
   return n;
@@ -6190,7 +4684,6 @@ function recordScoreDistribution(rows){
       nonZero:sc.filter(v=>v>0).length,
       overBar:(bar!==null)?sc.filter(v=>v>=bar).length:null,
       bar,
-      tapeImpactWeight:(typeof TAPE_IMPACT_W==='number')?TAPE_IMPACT_W:0,
       scoreVersion:(typeof RADAR_SCORE_VERSION==='string')?RADAR_SCORE_VERSION:null
     };
   }catch(e){ RADAR_SCORE_DIST=null; }
@@ -6744,9 +5237,8 @@ function* radarAnalyzeGen(headers,rawRows,supplements={},heldSymbols=new Set()){
   }
   // The score is readiness evidence, not a position in today's queue.
   for(let _si=0;_si<rows.length;_si++){ if(_si&&(_si&15)===0) yield; setRadarEvidenceScore(rows[_si]); }
-  rows.sort((a,b)=>b.score-a.score||radarRankTieBreak(a,b));
+  rows.sort((a,b)=>(b.score??-1)-(a.score??-1)||radarRankTieBreak(a,b));
   rows.forEach((r,i)=>{r.rank=i+1;});          // row ORDER only - never a gate, never a column
-  applyLearnedTriggerRanking(rows);
   // WS-D: stateless market intraday breadth (share of the universe up from open). Market-wide ⇒ it
   // does NOT change the ranking; surfaced in the status bar + basket export as an entry-timing gauge.
   const _open=chgOpenArr.filter(v=>v!==null&&isFinite(v)),_adv=_open.filter(v=>v>0).length,_dec=_open.filter(v=>v<0).length;
@@ -6770,7 +5262,6 @@ function* radarAnalyzeGen(headers,rawRows,supplements={},heldSymbols=new Set()){
   // THE v1232 DEFECT CLASS AGAIN: this pass is the FINAL author of entryReady, and the score
   // was computed before it ran. Rescore once the flags are known.
   for(let _fi=0;_fi<rows.length;_fi++){ if(_fi&&(_fi&15)===0) yield; setRadarEvidenceScore(rows[_fi],rows[_fi]._tapeStanding); }
-  applyLearnedRecommendationGates(rows);
   yield;                              // the tape reorder below is the last phase of the pass
   // THE TAPE REORDER MOVED HERE, AND THIS IS THE REAL v1237 ORDERING FIX. It used to run BEFORE the
   // market-aligned entry pass above - the pass this file already calls "exactly one final author" of
@@ -6780,15 +5271,6 @@ function* radarAnalyzeGen(headers,rawRows,supplements={},heldSymbols=new Set()){
   // of them read rejected and none could be selected.
   yield* applyIntradayReorderGen(rows);
   return {rows,features,rockets:rocketRows.length,rocketTargetPct:_radarSessionTargetPct,stretchBarPct:_radarStretchBarUsed,continuationCount:continuationRows.length,suppressedHeld,marketIntraday,ids:{priceI,targetI,sectorI,symbolI,descI}};
-}
-// THE TWO DRIVERS OF ONE PASS. Same generator, same order, same arithmetic - they differ only in
-// whether the thread is handed back between chunks. `radarAnalyze` drains without pausing, so every
-// existing synchronous caller behaves exactly as before.
-function radarAnalyze(headers,rawRows,supplements={},heldSymbols=new Set()){
-  const it=radarAnalyzeGen(headers,rawRows,supplements,heldSymbols);
-  let s=it.next();
-  while(!s.done) s=it.next();
-  return s.value;
 }
 const RADAR_SLICE_MS=12;   // one animation frame's worth of work before the thread goes back to the UI
 // Drains any of the cooperative passes, handing the thread back whenever a slice has run long. The
@@ -6804,19 +5286,6 @@ async function drainCooperatively(it){
 }
 function radarAnalyzeAsync(headers,rawRows,supplements={},heldSymbols=new Set()){
   return drainCooperatively(radarAnalyzeGen(headers,rawRows,supplements,heldSymbols));
-}
-// Score the current upload (object rows from parseCSV) through the Radar composite.
-function radarScoreRows(objRows){
-  const headers=objRows?._headers||Object.keys(objRows?.[0]||{});
-  const matrix=(objRows||[]).map(o=>headers.map(h=>o[h]??''));
-  const heldPos=getHeldPositionMap();
-  const held=new Set(Object.keys(heldPos).map(normSym));
-  const t0=performance.now();
-  const result=radarAnalyze(headers,matrix,buildRadarSupplements(),held);
-  RADAR={headers,matrix,features:result.features,ids:result.ids,rockets:result.rockets,rocketTargetPct:result.rocketTargetPct??null,stretchBarPct:result.stretchBarPct??null,continuationCount:result.continuationCount,ms:performance.now()-t0,sourceNote:'',scoredAt:Date.now()};
-  SUPPRESSED_HELD=result.suppressedHeld;
-  MARKET_INTRADAY=result.marketIntraday; // v555 WS-D: market breadth for the status bar + basket export
-  return result.rows;
 }
 async function radarScoreRowsAsync(objRows){
   const headers=objRows?._headers||Object.keys(objRows?.[0]||{});
@@ -7551,8 +6020,6 @@ function recordLeftOnTableSession(date,summary){
   FS.set(LEFT_ON_TABLE_STORE,out);
   return out;
 }
-let _leftPoolMemo=null;
-const REACHABLE_MIN_SAMPLES=40;         // below this the distribution is not worth trusting
 let _reachMemo=null;
 
 function computeLatestOrderBooked(){
@@ -8512,7 +6979,7 @@ function renderStats(){
     }catch(e){}
   })();
   if(SUPPRESSED_HELD>0)filterPills.push(`<span class="info-pill pill-rose" title="Stocks you already hold (Holdings + Positions + today's net Orders buys). Since v1070 these stay in the ranking and can be recommended again — the badge is a duplicate-buy warning, not a filter.">📌 ${SUPPRESSED_HELD} already held</span>`);
-  if(PEAK_TIMING_REMOVED>0)filterPills.push(`<span class="info-pill pill-amber" title="Automatic trigger input: these stocks fail the entry-timing condition. Learning measures the exact rule continuously; only qualified and later-validated influence can change the score.">⚡ ${PEAK_TIMING_REMOVED} timing-trigger misses</span>`);
+  if(PEAK_TIMING_REMOVED>0)filterPills.push(`<span class="info-pill pill-amber" title="These stocks fail the entry-timing condition. It is context only and never changes the Rocket Score.">⚡ ${PEAK_TIMING_REMOVED} timing-trigger misses</span>`);
   const inelig=ALL.filter(s=>s.basketEligible===false).length;
   if(inelig>0)filterPills.push(`<span class="info-pill pill-orange" title="Non-EQ series, inactive status, or a price band below 10% — visible in the ranking with penalties, but never exported to the basket.">⚠ ${inelig} basket-ineligible (ranked with penalties)</span>`);
 
@@ -9083,7 +7550,6 @@ function buildLatestSessionPanel(query=''){
   const withRadar=arr=>{arr.forEach(r=>{const a=_latestAllBySym.get(r.sym);r._score=a&&isFinite(Number(a.score))?Number(a.score):null;r._rank=a?.rank??null;});return arr;};
   const radarCols=dash=>[
     {key:'_score',label:'Radar Score',align:'right',bold:true,fmt:v=>radarScoreCell(v),clrFn:()=>'var(--t1)',...dash},
-    {key:'_rank',label:'Rank',align:'right',fmt:v=>v??'—',clrFn:()=>'var(--t2)',...dash},
   ];
   const leftClr=v=>v==null?'var(--t3)':v>0?'var(--red)':v===0?'var(--green)':'var(--amber)';
   const _leftTot={totFmt:v=>v!=null?fmtINR(v):'—',totClrFn:leftClr};
@@ -9759,7 +8225,7 @@ function renderPerformance(){
         <div><div class="st-l">Reached target</div><div class="st-v" style="font-size:19px;color:${sc.hitPct>=40?'var(--green)':sc.hitPct>=20?'var(--amber)':'var(--red)'}">${sc.hitPct}%</div><div class="st-d">${sc.target} picks</div></div>
         <div><div class="st-l">Stopped first</div><div class="st-v" style="font-size:19px;color:${sc.stopped?'var(--red)':'var(--green)'}">${sc.stopPct}%</div><div class="st-d">${sc.stopped} picks — dipped to stop before target</div></div>
         <div><div class="st-l">Never moved</div><div class="st-v" style="font-size:19px;color:var(--amber)">${sc.expiredPct}%</div><div class="st-d">${sc.expired} picks — neither barrier in ${ROCKET_HORIZON_DAYS} days</div></div>
-        <div title="For the current score version only: on the SAME issue session, did a target-hitter have a higher Decision Score than a non-winner? 50% means the score ordering carries no information."><div class="st-l">Score concordance</div><div class="st-v" style="font-size:19px;color:${sc.concordancePct==null?'var(--t3)':sc.concordancePct>=60?'var(--green)':sc.concordancePct>=52?'var(--amber)':'var(--red)'}">${sc.concordancePct==null?'—':sc.concordancePct+'%'}</div><div class="st-d">${sc.concordancePairs} current-version winner/loser pairs · 50% = no information</div></div>
+        <div title="For the current score version only: on the SAME issue session, did a target-hitter have a higher Rocket Score than a non-winner? 50% means the score ordering carries no information."><div class="st-l">Score concordance</div><div class="st-v" style="font-size:19px;color:${sc.concordancePct==null?'var(--t3)':sc.concordancePct>=60?'var(--green)':sc.concordancePct>=52?'var(--amber)':'var(--red)'}">${sc.concordancePct==null?'—':sc.concordancePct+'%'}</div><div class="st-d">${sc.concordancePairs} current-version winner/loser pairs · 50% = no information</div></div>
         <div><div class="st-l">Time to target</div><div class="st-v" style="font-size:19px">${sc.medDaysToTarget==null?'—':(sc.medDaysToTarget===0?'same day':sc.medDaysToTarget+'d')}</div><div class="st-d">${sc.sameDay} same day · ${sc.nextDay} next day</div></div>
       </div>`
     : `<div style="padding:16px;color:var(--t2);font-size:13px">No cohort has resolved yet. A pick resolves after its issue session and following-session deadline are complete.</div>`;
@@ -9770,7 +8236,7 @@ function renderPerformance(){
     +`<td style="padding:4px 10px;text-align:right">${b.settled}</td>`
     +`<td style="padding:4px 10px;text-align:right;font-weight:700;color:${b.hitPct==null?'var(--t3)':b.hitPct>=30?'var(--green)':b.hitPct>=18?'var(--amber)':'var(--red)'}">${b.hitPct==null?'—':b.hitPct+'%'}</td></tr>`).join('');
   const bandTable=bandRows?`<div style="padding:10px 16px;border-top:1px solid var(--border)">
-      <div class="st-l" style="margin-bottom:6px">Hit rate by current Decision Score band</div>
+      <div class="st-l" style="margin-bottom:6px">Hit rate by current Rocket Score band</div>
       <table style="width:100%;font-size:13px;border-collapse:collapse">
         <tr style="color:var(--t3);font-size:11px;text-transform:uppercase;letter-spacing:.06em">
           <td style="padding:4px 10px">Score</td><td style="padding:4px 10px;text-align:right">Graded</td>
@@ -10265,44 +8731,40 @@ function _renderMethodologyInner(){
       <a href="#meth-performance" onclick="event.preventDefault();scrollToSection('meth-performance')" style="padding:4px 12px;border-radius:6px;background:var(--bg-card);border:1px solid var(--border);color:var(--t2);font-size:13px;font-weight:600;text-decoration:none;cursor:pointer">📈 Performance</a>
       <a href="#meth-guide" onclick="event.preventDefault();scrollToSection('meth-guide')" style="padding:4px 12px;border-radius:6px;background:var(--bg-card);border:1px solid var(--border);color:var(--t2);font-size:13px;font-weight:600;text-decoration:none;cursor:pointer">📖 Use & Risk</a>
     </nav>
-    <h3 id="meth-scoring">Decision Score — Live 5-Minute Tape</h3>
-    <p><strong>Evidence boundary:</strong> the predictor freezes a liquid-universe feature snapshot on session D and learns only after session D+1 is observed. It cannot use D+1 while scoring D, and it excludes direct descriptions of D's already-completed move. That causal predictor is a prerequisite gate for recommendations; the numeric Decision Score itself is built from the continuous merged 5-minute tape window and its permission state. A <strong>rocket</strong> remains the separate target-before-stop outcome audit. It is a research screener, not investment advice.</p>
+    <h3 id="meth-scoring">Rocket Score — Tick Direction</h3>
+    <p>The Rocket Score is the <strong>only</strong> decision metric. It reads nothing but the direction of each traded price. It is a research screener, not investment advice.</p>
     <div class="m-grid">
-      <div class="m-card"><h4>Ranking Inputs</h4><p>Daily/Kite universe columns enter through typed transformations, robust percentiles and seven diagnostic groups. They set the Setup label, Risk classification, exchange context and entry/exit context; they do <strong>not</strong> make the numeric Decision Score. Exchange data adds authoritative series, price band, status, delivery, trades, 52-week range, surveillance and deal context.</p><div class="rr-groups" style="margin-top:10px">${groupsHTML}</div></div>
-      <div class="m-card"><h4>What the Score Does</h4><ol style="padding-left:18px;color:var(--t2);font-size:14px;line-height:1.7">
-        <li>Builds one weighted signal from tape pressure, VWAP, crossover, participation, measured impact/book terms, the qualified predictor, existing boosts, depth and momentum. Additional setup/context inputs start at zero influence and must earn it on later outcomes.</li>
-        <li>One model controls influence factors. Tape terms use a normalised blend; predictor, boosts, depth and acceleration join the same calculation. Fixed permission, risk and readiness rules remain outside the learner; failures cap the final score below Min Score, including zero.</li>
-        <li>Scores continuously from the merged tape. Current-session freshness remains a separate action-safety check; an absent tape is not treated as bearish, but it cannot produce a selectable recommendation.</li>
-        <li>Uses the causal predictor, direction, listing history, selling state, entry timing, allocation viability and evidence-trigger checks as independent recommendation gates. A peak-timing block may supply a stock-specific LIMIT price; it is not silently treated as a market entry.</li>
-        <li>Reports daily-column feature separation and same-session rocket separation for diagnostics. Neither same-session outcome labels nor the diagnostic composite feeds the Decision Score.</li>
-        <li>Cross-checks official delivery, close versus average price, 52-week position, deal activity and surveillance flags. Configured surveillance rules remove rows; other flags remain score penalties and badges.</li>
-        <li>Uses stock-specific market-derived target and stop context for viability and export. The score bar is ${RECOMMEND_MIN_SCORE} in the current scale, not a fixed percentage move or a profit probability.</li>
-      </ol>${diagHTML}</div>
-      <div class="m-card"><h4>Held Positions & Basket</h4><p>Held positions stay ranked and may be recommended again as ADDs. The add is bounded by the same allocation rails plus a cushion that prevents the blended position from crossing its own stop into a loss. Quantities come from the charge-aware score/stop-weighted allocator and can never exceed 0.10% of that stock's daily rupee turnover; missing turnover blocks a market order. Automatic target magnitude comes from the stock's own 5-minute tape where available, otherwise its session ceiling, otherwise its ATR/range capacity; the NSE circuit and the stock's capacity bound it. Stops remain stock-specific inside the ${SL_MIN_PCT.toFixed(1)}%–${SL_MAX_PCT.toFixed(1)}% risk rails.</p></div>
-      <div class="m-card"><h4>What Learns — and What Does Not</h4><p>The next-session predictor is rebuilt as each later session resolves, using only features captured before its outcome. It needs at least three resolved sessions, sign agreement in at least two-thirds of them, and a minimum mover/non-mover decile gap. Three causal challengers are graded before each new outcome is added. After five graded sessions, the champion must have positive cost-adjusted mean return and positive results in at least three of five sessions; the best qualifying mean return wins, with consistency as the tie-break. If none qualifies, prediction recommendations stand down instead of preserving a losing model. The predictor can therefore block a recommendation, but it does not supply the tape evidence magnitude. Same-session rocket separation and the seven daily-column groups remain diagnostic. Rank is row order, never a live gate. Realised trades may calibrate execution facts such as the fallback stop, review horizon, charges and entry cadence, but they never set automatic target magnitude.</p></div>
+      <div class="m-card"><h4>How It Is Computed</h4><ol style="padding-left:18px;color:var(--t2);font-size:14px;line-height:1.7">
+        <li>Every last-traded-price observation from the Kite stream scores <strong>+1</strong> if it is above the previous traded price, <strong>−1</strong> if below and <strong>0</strong> if unchanged.</li>
+        <li>Observations are counted into fixed 10-second wall-clock buckets. Each bucket's <strong>Tick Pressure = (U − D) / (U + D)</strong>, and 0 when the bucket held no directional change.</li>
+        <li>Once per bucket: <strong>S = 0.891 × S + 0.109 × Tick Pressure</strong> (λ = 0.5<sup>10/60</sup>, a one-minute half-life). S starts at 0.</li>
+        <li><strong>Rocket Score = 50 × (1 + S)</strong>: 50 is balanced, above 50 is net buying pressure, below 50 is net selling. The board is sorted by it, highest first.</li>
+        <li>S persists across sessions and does not decay while the market is closed. The previous session's last traded price is the reference for the next session's first observation.</li>
+      </ol></div>
+      <div class="m-card"><h4>What Does Not Enter It</h4><p>No indicator, volume, price magnitude, market breadth or learned weight. Thin stocks are handled by the <strong>Drop thinnest %</strong> filter, not by the formula. The seven daily-column groups below describe the Setup label and Risk pill only.</p><div class="rr-groups" style="margin-top:10px">${groupsHTML}</div>${diagHTML}</div>
+      <div class="m-card"><h4>When a Row Is GO</h4><p>A row is <strong>GO</strong> when the market is open, live prices are current, the stock is not under a configured surveillance rule, its series and price band are basket-eligible, it is not at the upper circuit, and its Rocket Score is at or above <strong>Min Score ${RECOMMEND_MIN_SCORE}</strong>. These checks decide whether a row can be bought; none of them changes the score. Capital, whole shares and costs then decide how much is funded.</p></div>
+      <div class="m-card"><h4>Held Positions & Basket</h4><p>Held positions stay ranked and may be recommended again as ADDs, bounded by the same allocation rails. Automatic target magnitude comes from the stock's own 5-minute tape where available, otherwise its session ceiling, otherwise its ATR/range capacity; the NSE circuit bounds it. Stops remain stock-specific inside the ${SL_MIN_PCT.toFixed(1)}%–${SL_MAX_PCT.toFixed(1)}% risk rails.</p></div>
     </div>
-    <h3 style="margin-top:28px">Live Recommendation Funnel</h3>
-    <p style="color:var(--t2);font-size:14.5px;line-height:1.7">The entry objective is to reach the stock's target before its stop, from the current entry price through the next trading close. Technical readiness, direction, exchange eligibility, surveillance, entry timing and current tape are included in the final score: a failing row is capped below <strong>Min Score ${RECOMMEND_MIN_SCORE}</strong>. During an open market with fresh data, above-bar rows in your filtered list are eligible; the basket selects up to 20 and respects manual exclusions. Capital, whole shares, costs and risk rails determine which selected rows can be funded. Historical remaining-session upside and recent 30-minute range are context, not next-day rejection rules. Scores and targets remain unvalidated forecasts, not probabilities or guaranteed returns.</p>
     <h3 id="meth-ledger" style="margin-top:28px">Feature Ledger <span style="font-size:14px;color:var(--t3);font-weight:400">(${RADAR.features.length||0} setup features from ${RADAR.headers.length||0} input columns)</span></h3>
-    <p style="color:var(--t2);line-height:1.7">These are input-file and setup diagnostics. Setup weights are not the live adaptive scoring factors; see Learning for those. Grouped prior readings feed the adaptive model, while some setup components also inform fixed risk checks. Input coverage describes this file only, not live-tape availability. The same-day rank gap is descriptive and never supplies a scoring effect.</p>
+    <p style="color:var(--t2);line-height:1.7">These are input-file and setup diagnostics. They set the Setup label and Risk pill and never enter the Rocket Score. Input coverage describes this file only, not live-tape availability.</p>
     ${buildRadarLedgerHTML()}
     ${buildIndicatorWatchHTML()}
     <div id="meth-hf-wrap">${hardFiltersHTML}</div>
     <h3 id="meth-performance" style="margin-top:28px">Performance Tab</h3>
-    <p style="color:var(--t2);font-size:14.5px;line-height:1.7">Performance describes realised execution history, not current recommendations. Its headline cards use closed Tradebook round trips net of charges; when Orders contains a newer booked session, that addendum updates only money totals and the Monthly Breakdown, while behavioural metrics remain Tradebook-only. The scorecard grades current-version recommendation cohorts on each pick's own target-before-stop result within ${ROCKET_HORIZON_DAYS} trading days; the separate live score audit records as-of signal inputs and checks candidate weights on later outcomes before applying a new revision. Deadline misses count as failures; unknown or ambiguous outcomes are excluded. Adaptive weights can change ranking, but cannot override trading safeguards. XIRR uses closed round trips only, so open positions are excluded. Latest Session and Open Positions are live portfolio surfaces on Rankings, not Performance.</p>
+    <p style="color:var(--t2);font-size:14.5px;line-height:1.7">Performance describes realised execution history, not current recommendations. Its headline cards use closed Tradebook round trips net of charges; when Orders contains a newer booked session, that addendum updates only money totals and the Monthly Breakdown, while behavioural metrics remain Tradebook-only. The scorecard grades current-version recommendation cohorts on each pick's own target-before-stop result within ${ROCKET_HORIZON_DAYS} trading days. Deadline misses count as failures; unknown or ambiguous outcomes are excluded. XIRR uses closed round trips only, so open positions are excluded. Latest Session and Open Positions are live portfolio surfaces on Rankings, not Performance.</p>
     <h3 id="meth-guide" style="margin-top:28px">Use & Risk</h3>
     <div class="m-grid">
       <div class="m-card"><h4>Entry Workflow</h4><ol style="padding-left:18px;color:var(--t2);font-size:14px;line-height:1.7">
         <li>Keep Kite Connect logged in and let the live stream provide the current universe and 5-minute tape.</li>
-        <li>Use Min Score to select technical readiness. Market closure or stale live data pauses execution.</li>
-        <li>Readiness failures appear in the score and status. Allocation separately explains any selected row that cannot be funded.</li>
-        <li>Entries use current market price. Outcome audits sample new entry decisions every 30 minutes, with independent entry prices, targets and deadlines; repeated samples are correlated and are not independent trades.</li>
+        <li>Use Min Score as the Rocket Score bar. Market closure or stale live data pauses execution.</li>
+        <li>Status / Rejection names the check that blocks a row. Allocation separately explains any selected row that cannot be funded.</li>
+        <li>Entries use current market price.</li>
         <li>Review the row's market-derived target, stock-specific stop, expected net after charges and the rail that limits allocation before placing the basket.</li>
       </ol></div>
       <div class="m-card"><h4>Interpretation</h4><ul style="padding-left:18px;color:var(--t2);font-size:14px;line-height:1.7">
         ${RADAR_SCORE_BANDS.map(b=>`<li><b style="color:${b.color}">${b.range}:</b> ${b.note}</li>`).join('')}
-        <li>Decision Score is <strong>100 × tape evidence × permission</strong>. Tape evidence combines flow, price versus VWAP, crossover, participation and the measured impact term when armed. Permission incorporates circuit headroom, tape standing and timing state. The causal predictor is a separate prerequisite gate; it excludes the anchor session's day move, relative volume, volume change, short-interval prices, VWAP and gap so it cannot describe a move already underway.</li>
-        <li>A score of 90 does not mean a 90% chance. Forward target-before-stop results are isolated by score version before the app reports band performance.</li>
+        <li>Rocket Score is <strong>50 × (1 + S)</strong>, S being the one-minute-half-life average of 10-second uptick/downtick pressure. 50 is balanced.</li>
+        <li>A score of 90 does not mean a 90% chance; it means upticks have heavily outnumbered downticks over the last few minutes.</li>
       </ul></div>
     </div>
     <p style="color:var(--t3);font-style:italic;margin-top:4px">⚠ Quantitative screening only. Not financial advice. Past momentum ≠ future returns.</p>`;
@@ -10615,13 +9077,7 @@ function buildAchievabilityCurve(){
   _achieveMemo={...sig,val};
   return val;
 }
-// The baseline multiple of risk worth aiming for. null when the curve cannot be trusted.
-function getBaselineRewardRisk(){
-  const c=buildAchievabilityCurve();
-  return c&&c.rr>0?c.rr:null;
-}
 let _nudgeMemo=null;
-let _capMedMemo=null;
 // v1212 (owner, standing rule): TARGETS COME FROM THE MARKET, NOT FROM HIS TRADE HISTORY.
 // "The app needs to evolve, not build on past mistakes... the trade history tells you previous
 // logics/versions did not work and that's why we are here." v1105/v1206 priced the target from
@@ -10829,38 +9285,6 @@ function getClockRunwayRead(row,opts){
   if(!best) return null;
   return {pct:+(cap*best.q).toFixed(2),unitReach:+best.q.toFixed(3),quantile:best.p,
     n:use.n,conditioned,atMinutes:at,clockLabel:clockLabelOf(at)};
-}
-// v1217: RETAINED WITH NO APP CONSUMER, and that is the whole point of the entry.
-// getReachableTargets is the p50/p75 of buy -> that-day's-high on the owner's own CLOSED EXITS.
-// v1212 removed it from the target path; v1217 removed its last consumer, the fabricated runner
-// leg. It is kept in the tree ONLY because eight historical suite blocks reference it and deleting
-// it aborted them at their first line, costing ~176 still-valid assertions of unrelated coverage.
-// THE CONTRACT IS ENFORCED BEHAVIOURALLY, NOT BY ABSENCE: assert-v1217 stubs it with a nonsense
-// percentile and requires that no target anywhere moves, and separately requires that no call site
-// survives outside a comment. Do not wire either function back into a decision.
-function getReachableTargets(){
-  const store=FS.get(SAME_DAY_EXIT_OPPORTUNITY_STORE);
-  const entries=store?.entries||{};
-  const sig=(store?.lastUpdated||'')+'|'+Object.keys(entries).length;
-  if(_reachMemo&&_reachMemo.sig===sig) return _reachMemo.val;
-  const rows=Object.values(entries)
-    .filter(e=>Number(e.avgBuy)>0&&Number(e.dayHigh)>0)
-    .map(e=>(Number(e.dayHigh)/Number(e.avgBuy)-1)*100)
-    .filter(v=>Number.isFinite(v))
-    .sort((a,b)=>a-b);
-  let val;
-  if(rows.length<REACHABLE_MIN_SAMPLES){
-    val={basePct:null,runnerPct:null,samples:rows.length,
-         source:`only ${rows.length} exits on file, needs ${REACHABLE_MIN_SAMPLES}`};
-  } else {
-    const at=p=>rows[Math.min(rows.length-1,Math.floor(p*rows.length))];
-    val={basePct:+Math.max(0,at(0.50)).toFixed(2),
-         runnerPct:+Math.max(0,at(0.75)).toFixed(2),
-         samples:rows.length,
-         source:`${rows.length} closed exits, buy to that day's high`};
-  }
-  _reachMemo={sig,val};
-  return val;
 }
 
 const HORIZON_TARGET_MEMO=new Map();
@@ -11811,12 +10235,6 @@ function radarStagePill(r){
   const t={1:'Silent accumulation — quiet strength before a move (a higher-quality candidate)',5:'Re-accumulation — quiet, holding above its 50-day MA after digesting a result',2:'Initial breakout — fresh high-volume move through resistance',6:'Second leg — breakout with an already-established trend, the event behind it',3:'Event day — today’s move may be event-driven and less pattern-reliable',4:'Profit-booking — digesting a recent result'+(r.daysSinceEarnings!=null?` (${r.daysSinceEarnings}d since results)`:'')}[r.stage]||'';
   return `<span style="font-size:12px;font-weight:700;border-radius:4px;padding:1px 5px;color:${c};border:1px solid ${c};white-space:nowrap;cursor:help" title="${escHtml(t)}">${escHtml(r.stageLabel||'')}</span>`;
 }
-function radarTriggerPill(r){
-  const n=(r?.modelTriggers||[]).length;
-  if(!n)return '';
-  const title=(r.modelTriggers||[]).map(t=>`${t.label} → ${t.action}`).join(' · ');
-  return `<span style="font-size:12px;font-weight:800;border-radius:4px;padding:1px 5px;color:var(--green);border:1px solid var(--green);white-space:nowrap;cursor:help" title="${escHtml(title)}">⚡ ${n}</span>`;
-}
 function radarSeriesBandPill(s){
   const ok=s.basketEligible!==false;
   const band=s.band!=null?s.band+'%':'No band';
@@ -11862,7 +10280,7 @@ function renderTable(){
       symbol:`<td style="font-family:'Plus Jakarta Sans',sans-serif">${(
         `<div style="font-weight:700;font-size:15px;color:var(--t1);max-width:280px;overflow:hidden;text-overflow:ellipsis">${escHtml(s.symbol)}${chartLinkButtons(s.symbol)}${(()=>{const bf=getBookFlag(s.symbol);if(!bf)return '';return `<span style="font-size:11px;background:rgba(245,158,11,.14);color:var(--amber);border-radius:4px;padding:1px 5px;margin-left:5px;font-weight:700;vertical-align:middle" title="Order book: ${escHtml(bf.text)}. Display only - it does not change the score unless the graded book weight says it should.">${bf.iceberg?'🧊':'⚑'}${bf.heavyCancel?' cx':''}</span>`;})()}${s._held?`<span style="font-size:12px;background:rgba(244,114,182,.15);color:#f472b6;border-radius:4px;padding:1px 5px;margin-left:5px;font-weight:700;vertical-align:middle" title="You already hold this. Held stocks stay in the ranking (v1070) and can be recommended again — buying here ADDS to the existing position.">📌 held</span>`:''}</div><div style="font-size:11px;color:var(--t3);max-width:180px;overflow:hidden;text-overflow:ellipsis" title="${escHtml((s.name||'')+(s.setup?' · '+s.setup:''))}">${radarSeriesBandPill(s)} ${escHtml(s.setup||s.name||'')}</div>`)}</td>`,
       status:`<td data-key="status" class="recommendation-status">${rowStatusPillHtml(s)}</td>`,
-      setup:`<td style="font-size:13px;color:var(--t2)">${escHtml(s.setup||'—')}${s.stage?' '+radarStagePill(s):''}${(s.modelTriggers||[]).length?' '+radarTriggerPill(s):''}</td>`,
+      setup:`<td style="font-size:13px;color:var(--t2)">${escHtml(s.setup||'—')}${s.stage?' '+radarStagePill(s):''}</td>`,
       series:`<td>${radarSeriesBandPill(s)}</td>`,
       price:`<td data-key="price" style="white-space:nowrap">${livePriceAge(s.symbol)}${fmtINR(s.price)}<span style="color:var(--t3)"> · </span><span style="font-size:12px">${fPerf(s.day??s.priceChange)}${s.corpAction?`<span title="Corporate action (${escHtml(s.corpAction)}) — mechanical ex-date move, neutralised in scoring" style="font-size:11px;color:var(--amber);margin-left:4px;cursor:help">⚑</span>`:''}</span></td>`,
       sinceIn:`<td data-key="sinceIn" style="white-space:nowrap">${(()=>{
@@ -12602,21 +11020,6 @@ function maybePromptKiteToken(){
 // score, target, stop, allocation or recommendation reads this. Null when the helper is old or
 // stopped, and every reader falls back to the live file's own depth.
 let CORPUS_COVERAGE=null;
-// The impact term's weight, GRADED by the helper against forward outcomes on the archive and already
-// shrunk by its own error bar. Null/absent helper leaves it 0, which makes the term inert.
-let TAPE_IMPACT_W=0;
-let TAPE_IMPACT_EDGE=null;
-async function loadTapeEdge(){
-  if(!KITE_API) return null;
-  try{
-    const j=await readHelperResponse('/api/kite/edge');
-    TAPE_IMPACT_EDGE=(j&&j.ok)?j:null;
-    if(j&&j.objective!=='net-policy-v1'){ TAPE_IMPACT_W=0; return TAPE_IMPACT_EDGE; }
-    TAPE_IMPACT_W=(TAPE_IMPACT_EDGE&&Number.isFinite(Number(TAPE_IMPACT_EDGE.weight)))
-      ?Math.max(0,Math.min(0.35,Number(TAPE_IMPACT_EDGE.weight))):0;
-  }catch(e){ TAPE_IMPACT_EDGE=null; TAPE_IMPACT_W=0; }
-  return TAPE_IMPACT_EDGE;
-}
 // THE FOUR ORDER-BOOK FIELDS, EACH ON ITS OWN MEASURED WEIGHT (v1291/v1355). Book imbalance, the
 // classified buy share and the cancel-to-execute ratio are all plausible and all unmeasured, so
 // none of them may assert a magnitude. Same grader as the impact term, same forward outcome, same
@@ -12624,19 +11027,6 @@ async function loadTapeEdge(){
 // bit-for-bit inert in the scorer until it has earned otherwise. `dir` rides along because a
 // cancel ratio that predicts DOWN must subtract rather than add.
 let BOOK_EDGES={book:{w:0,dir:1},delta:{w:0,dir:1},split:{w:0,dir:1},spoof:{w:0,dir:1}};
-async function loadBookEdges(){
-  if(!KITE_API) return BOOK_EDGES;
-  const one=async field=>{
-    try{
-      const j=await readHelperResponse('/api/kite/edge?field='+field);
-      if(!j||!j.ok||j.objective!=='net-policy-v1') return {w:0,dir:1,edge:j||null};
-      return {w:Math.max(0,Math.min(0.35,Number(j.weight)||0)),dir:Number(j.dir)===-1?-1:1,edge:j};
-    }catch(e){ return {w:0,dir:1,edge:null}; }
-  };
-  const [book,delta,split,spoof]=await Promise.all([one('book'),one('delta'),one('split'),one('spoof')]);
-  BOOK_EDGES={book,delta,split,spoof};
-  return BOOK_EDGES;
-}
 // The last completed 5-minute bucket's book metrics, per symbol. Served from the helper's memory,
 // so this is a small answer even on a full universe.
 let BOOK={},BOOK_AT='';
@@ -12842,7 +11232,6 @@ function getTradeFrictionPct(row,rupees){
             ?('the visible book buys only '+(shares-shortSell)+' of '+shares+' shares - the rest has no bid on screen')
             :('walks '+shares+' shares through the live book')};
 }
-let _bookEdgeAt=0;
 // A ROW'S CANCEL RATIO IS ONLY MEANINGFUL AGAINST THE DAY'S OWN. Book behaviour differs by
 // liquidity, by sector and by session, so a fixed "suspicious" number would be a constant in
 // disguise. The cut is this session's own upper decile among rows that HAVE a book - the same
@@ -13222,14 +11611,6 @@ function* patchUniverseDeltasGen(deltaRows){
   let scoreMoved = false;
   let eligibilityChanged = false;
   let n=0;
-  // WHERE CONTINUOUS RESCORING GOES. Every traded symbol now changes every two seconds; rescoring all
-  // ~1,600 of them per beat saturated the main thread (measured: the page stopped answering). The
-  // rows rescored as their prices and forming bars move are the ones on screen, the ones you hold and
-  // the top of the last full ranking - where a change can alter what you see or do. Every other row
-  // is rescored by the full cross-sectional pass, which still runs at least every 30 seconds.
-  const live=new Set(FILT.slice((PG-1)*PGSZ,PG*PGSZ));
-  for(let i=0;i<Math.min(PGSZ,ALL.length);i++) live.add(ALL[i]);
-  for(const r of ALL) if(r._held) live.add(r);
   for(const sym in deltaRows){
     const f = deltaRows[sym];
     const s = symMap.get(sym);
@@ -13243,7 +11624,7 @@ function* patchUniverseDeltasGen(deltaRows){
       if(Number.isFinite(f.turnover)) s.turnover = f.turnover;
       if(Number.isFinite(f.vwap)) s.vwap = f.vwap;
       if(Number.isFinite(f.volume)) s.volume = f.volume;
-      if((prevInputs!==[s.price,s.day,s.changeOpen,s.turnover,s.vwap,s.volume].join('|')||barMoved)&&live.has(s)){
+      if(prevInputs!==[s.price,s.day,s.changeOpen,s.turnover,s.vwap,s.volume].join('|')||barMoved||s.score!==rocketScoreOf(s.symbol)){
         if((++n)%20===0) yield;
         setRadarEvidenceScore(s);
         scoreMoved = true;
@@ -13544,8 +11925,7 @@ async function fetchCandlesInAppImpl(limit,opts){
     if(STREAM_STATUS&&STREAM_STATUS.connected){ LAST_FETCH_HIDDEN=false; return; }
   }
   if(!KITE_API){ say('The helper is not running. Double-click "Start Rocket Scanner.bat" and leave that window open — the app itself stays on GitHub Pages.',8000,true); return; }
-  try{ await loadTapeEdge(); }catch(e){}
-  try{ await loadBookEdges(); }catch(e){}
+
   try{ await postCorpusPool(); }catch(e){}
   const r=intradayFetchJobs(limit);
   const budget=fetchBudgetLeft();
@@ -13852,9 +12232,6 @@ function applyFilters({preservePage=false}={}){
     if(NSE_SURV[s.symbol]?.length){
       SURV_HARD_REMOVED++;
       removedReason={s,reason:'surv',rules:NSE_SURV[s.symbol],detail:'configured surveillance rule'};
-    } else if(s.recommendationTriggerBlocked){
-      removedReason={s,reason:'trigger',chip:(s.recommendationTriggerReasons||[])[0]||'evidence trigger veto',
-        detail:'automatic evidence trigger: '+(s.recommendationTriggerReasons||[]).join(', ')};
     } else if(dropThinPct!=null){
       const cutInfo=getSharesPerBarCut(dropThinPct);
       const prof=getTapeFlowProfile(s.symbol);
@@ -13967,24 +12344,9 @@ function showRadarDetail(sym){
   if(!r||!dlg) return;
   // innerHTML (not textContent) so the score carries its band colour; both interpolations are escaped.
   document.getElementById('radarDetailTitle').innerHTML=`${escHtml(r.symbol)}${chartLinkButtons(r.symbol)} · <span style="color:${radarScoreColor(r.score)}">${isFinite(r.score)?Number(r.score).toFixed(1):'—'}</span> · ${escHtml(r.risk||'—')} risk`;
-  const decisionAction=isSelectableRecommendation(r)
-    ?'<b style="color:var(--green)">GO:</b> every recommendation gate and the current 5-minute validation pass; the row can be selected/exported.'
-    :r.scoreVersion!==RADAR_SCORE_VERSION
-      ?'<b style="color:var(--amber)">RELOAD:</b> this row belongs to an older score scale and cannot be recommended.'
-    :!meetsScoreBar(r.score)
-      ?`<b style="color:var(--amber)">WAIT:</b> Decision Score ${fmt(r.score,1)} is below the ${RECOMMEND_MIN_SCORE} policy bar.`
-    :r.recommendationTriggerBlocked
-      ?'<b style="color:var(--red)">BLOCKED:</b> '+escHtml((r.recommendationTriggerReasons||[]).join(', ')||'an automatic evidence gate failed')+'.'
-    :r.entryReady===false
-      ?'<b style="color:var(--amber)">WAIT:</b> '+escHtml(r.entryTiming?.reason||'the move has not re-armed')+'.'
-    :r.intradaySellingToday===true
-      ?'<b style="color:var(--red)">BLOCKED:</b> '+escHtml(r.intradayWhy||'the current tape shows selling')+'.'
-    :r.noHistory===true
-      ?'<b style="color:var(--red)">BLOCKED:</b> insufficient multi-day price history.'
-    :r.basketEligible===false
-      ?'<b style="color:var(--red)">BLOCKED:</b> exchange or circuit eligibility failed.'
-    :'<b style="color:var(--amber)">WAIT:</b> Score clears, but a fresh current-session 5-minute verdict has not confirmed the entry.';
-  const decisionRead=`<div class="rr-read" style="margin-bottom:10px"><b>What to do now:</b> ${decisionAction}<br><b>Decision Score:</b> ${escHtml(radarScoreTitle(r))}</div>`;
+  const act=getRowActionState(r);
+  const decisionAction=`<b style="color:${act.state==='GO'?'var(--green)':act.state==='BLOCKED'?'var(--red)':'var(--amber)'}">${act.state}:</b> ${escHtml(act.reason||'')}.`;
+  const decisionRead=`<div class="rr-read" style="margin-bottom:10px"><b>What to do now:</b> ${decisionAction}<br><b>Rocket Score:</b> ${escHtml(radarScoreTitle(r))}</div>`;
   const groups=Object.entries(RADAR_GROUPS).map(([k,g])=>`<div class="rr-group"><b>${g.label}<i>${r.parts?fmt(r.parts[k],0):'—'}/100</i></b><meter min="0" max="100" value="${r.parts?.[k]??0}"></meter></div>`).join('');
   const contribs=[...(r.contrib||[])].sort((a,b)=>Math.abs(b.impact)-Math.abs(a.impact)).slice(0,36).map(x=>`<div class="rr-contrib"><div><b>${escHtml(x.name)}</b><small>${RADAR_GROUPS[x.group]?.label||x.group} · percentile ${fmt(x.p*100,0)}</small></div><b class="${x.impact>=0?'pos':'neg'}">${x.impact>=0?'+':''}${fmt(x.impact,3)}</b></div>`).join('');
   const gate=r.rocketReady?'Meets the model’s high-feasibility criteria.':'Feasibility cautions: '+escHtml((r.gateReasons||[]).join(', ')||'not evaluated')+'.';
@@ -14000,192 +12362,38 @@ function showRadarDetail(sym){
   if(r.meta?.announceToday)eventBits.push(`announcement filed today: ${escHtml(String(r.meta.announceToday))}`);
   (r.meta?.fundamentalEvents||[]).slice(0,3).forEach(e=>eventBits.push(`${escHtml(e.subject||e.source||'official filing')} ${escHtml(e.pubDate||'')}${e.link?` <a href="${escHtml(e.link)}" target="_blank" rel="noopener">official filing</a>`:''}`));
   const corpNote=eventBits.length?` <b style="color:var(--amber)">Events:</b> ${eventBits.join('; ')}.`:'';
-  const triggerBits=(r.modelTriggers||[]).map(t=>`${escHtml(t.label)} → ${escHtml(t.action)}`);
+  const triggerBits=[];
   if(r.fundamental?.label)triggerBits.unshift(`${escHtml(r.fundamental.label)}: ${escHtml(r.fundamental.why||'')}`);
   const triggerNote=triggerBits.length?` <b style="color:var(--green)">Automatic triggers:</b> ${triggerBits.join('; ')}.`:'';
   const varNote=r.meta?.nseVar?.totalMarginPct!=null?` NSE EOD margin ${fmt(r.meta.nseVar.totalMarginPct,2)}% (security VaR ${fmt(r.meta.nseVar.securityVarPct,2)}% + ELM ${fmt(r.meta.nseVar.elmPct,2)}%).`:'';
   const bandNote=r.meta?.bandNote?` ${escHtml(r.meta.bandNote)}.`:'';
   const masterNote=r.meta?.securityMaster?` ISIN ${escHtml(r.meta.securityMaster.isin||'—')}${r.meta.securityMaster.listingDate?`, listed ${escHtml(r.meta.securityMaster.listingDate)}`:''}.`:'';
   const detailNote=(r.contrib||[]).length?'':'<div style="color:var(--amber);font-size:13px;margin-bottom:8px">Restored compact ranking — load files again for the full per-feature breakdown.</div>';
-  // WHAT MADE THE SCORE COMES FIRST, AND WHAT DID NOT SAYS SO (v1246). The seven group meters and
-  // the feature contributions are the daily-column composite. Since v1233 they DO NOT set the score
-  // - it is tape evidence x permission - yet they had the whole page under a headline they did not
-  // produce, which is the coherence defect v1227 recorded. They are NOT deleted: `r.parts` still
-  // drives the setup labels and the Risk classification the filter bar uses, so removing them would
-  // break a live control. They are labelled for what they actually do, and demoted below the tape.
-  const tc=r.scoreComponents;
-  const tapeRead=getUnifiedScoreDetail(tc);
+  // v1367: the Rocket Score is the only decision metric, so it is the only thing explained as one.
+  // Everything below it is descriptive context and says so.
+  const tc=r.scoreComponents||{};
+  const tapeRead=`<div class="rr-read"><b>Rocket Score ${tc.total!=null?Number(tc.total).toFixed(1):'—'}</b>
+    = 50 × (1 + S)${tc.S!=null?`, S = ${Number(tc.S).toFixed(4)}`:''}${tc.pressure!=null?`; last 10-second tick pressure ${(tc.pressure>=0?'+':'')+Number(tc.pressure).toFixed(2)}`:''}.<br>
+    Every price print counts +1 if it is above the previous price, −1 if below, 0 if unchanged. Each 10-second
+    bucket's tick pressure is (up − down) / (up + down), or 0 when nothing moved, and
+    S = 0.891 × S + 0.109 × pressure (a one-minute half-life). S carries over from the previous session.
+    No indicator, volume or price size enters it. Surveillance, series/band, the circuit and a live price
+    feed decide whether the row can be bought; they never change the number.</div>`;
   document.getElementById('radarDetailBody').innerHTML=`${detailNote}${decisionRead}${tapeRead}
     <h3 style="font-size:15px;margin:14px 0 4px">Setup &amp; risk context</h3>
-    <div style="font-size:12px;color:var(--t3);margin-bottom:8px">These descriptive bars set the Setup label and Risk pill. The weighted model uses separately recorded feature priors; the actual live weights are shown above.</div>
+    <div style="font-size:12px;color:var(--t3);margin-bottom:8px">Descriptive only: these bars set the Setup label and Risk pill. They do not enter the Rocket Score.</div>
     <div class="rr-groups">${groups}</div>
     <div class="rr-read"><b>Exchange check:</b> Series ${escHtml(r.series||'—')}, price band ${r.band??'not supplied'}, status ${escHtml(r.status||'—')}; basket ${r.basketEligible!==false?'eligible':'ineligible'}. Official delivery ${r.meta?.delivery==null?'unavailable':fmt(r.meta.delivery,1)+'%'}, trades ${r.meta?.trades==null?'unavailable':fmt(r.meta.trades,0)}, surveillance triggers: ${flags}.${bandNote}${varNote}${masterNote}${corpNote}${triggerNote}<br>
     <b>Feasibility:</b> ${gate} Strongest daily range estimate ${fmt(r.rangePct,2)}%; the session target takes ${fmt(r.stretch,2)}× that range. The stock remains ranked either way.${entryNote}<br>
     ${r.stage?`<b>Market-cycle stage:</b> ${radarStagePill(r)} — ${escHtml({1:'silent accumulation (quiet strength before a move)',2:'initial breakout',3:'event day (move may be event-driven)',4:'profit-booking (digesting a recent result)',5:'re-accumulation',6:'second leg'}[r.stage]||'')}.<br>`:''}
-    <b>Read:</b> ${escHtml(r.setup||'—')}. Data coverage ${r.quality!=null?fmt(r.quality*100,0)+'%':'—'}, day move ${(r.day??0)>=0?'+':''}${fmt(r.day,2)}%, relative volume ${r.relvol==null?'unavailable':fmt(r.relvol,2)+'×'}, turnover ${fV(r.turnover)}. Decision Score is readiness evidence, not a literal profit probability.</div>
+    <b>Read:</b> ${escHtml(r.setup||'—')}. Data coverage ${r.quality!=null?fmt(r.quality*100,0)+'%':'—'}, day move ${(r.day??0)>=0?'+':''}${fmt(r.day,2)}%, relative volume ${r.relvol==null?'unavailable':fmt(r.relvol,2)+'×'}, turnover ${fV(r.turnover)}. The Rocket Score measures tick direction, not a profit probability.</div>
     ${contribs?`<h3 style="font-size:16px;margin:12px 0 4px">Largest feature contributions</h3>
       <div style="font-size:12px;color:var(--t3);margin-bottom:8px">Diagnostic only — these explain the
-        setup and risk classification above, not the Decision Score.</div>
+        setup and risk classification above, not the Rocket Score.</div>
       <div class="rr-contribs">${contribs}</div>`:''}`;
   dlg.showModal();
 }
-function humanizeSurvRule(key){
-  if(!key) return '';
-  const k = key.toLowerCase().trim();
-  if(k.includes('long_term_additional') || k === 'long_term_asm' || k.includes('long term asm')) return 'Long Term ASM';
-  if(k.includes('short_term_additional') || k === 'short_term_asm' || k.includes('short term asm')) return 'Short Term ASM';
-  if(k.includes('encumbered') || k.includes('pledge')) return 'Promoter Encumbered / Pledge > 50%';
-  if(k.includes('pan_traded') || k.includes('unique_pan')) return '< 100 Unique PANs Traded (30d)';
-  if(k.includes('loss_making')) return 'Loss Making';
-  if(k === 'gsm' || k.includes('graded_surveillance')) return 'GSM (Graded Surveillance)';
-  if(k === 'esm' || k.includes('enhanced_surveillance')) return 'ESM (Enhanced Surveillance)';
-  if(k.includes('insolvency') || k.includes('irp')) return 'Insolvency Resolution (IRP)';
-  if(k.includes('listing_fee') || k.includes('annual listing fee')) return 'Listing Fee Unpaid';
-  if(k.includes('bz_sz') || k.includes('bz/sz')) return 'Under BZ/SZ Series';
-  if(k.includes('add_on_pb') || k.includes('add-on price band')) return 'Add-on Price Band';
-  if(k.includes('unsolicited_sms')) return 'Unsolicited SMS';
-  if(k.includes('social_media')) return 'Social Media Platforms';
-  if(k === 'default') return 'Default';
-  if(k === 'ica') return 'ICA';
-  return key.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
-}
 
-// ── v1360: ONE TABLE. FLAT, CUMULATIVE, SORTABLE. NO CATEGORIES AND NO "OTHER". ───────────────
-// The two tables this replaces described the same subject through two incompatible mechanisms:
-// one regexed English rejection sentences into buckets (with a truncated sentence as the fallback
-// bucket name), the other kept a hand-maintained list of 12 predicates and showed learning state
-// without ever showing outcomes. Rows now come from the rule registry, so a rule cannot exist in
-// the pipeline and be missing here, and "Other" is impossible by construction.
-//
-// There is NO decision-date picker. It filtered records to a single issueDate, which is a
-// debugging question and is why the sample counts on screen were so thin; learning is cumulative.
-let RULE_TABLE_SORT='edge', RULE_TABLE_DIR=-1;
-function sortRuleTable(key){
-  if(RULE_TABLE_SORT===key) RULE_TABLE_DIR=-RULE_TABLE_DIR;
-  else { RULE_TABLE_SORT=key; RULE_TABLE_DIR=-1; }
-  renderPostClose();
-}
-function ruleTableRowsData(state,today){
-  const map=ruleWeightMap(state);
-  const evidence=map.evidence;
-  const weightByKey={};evidence.forEach(e=>{weightByKey[e.key]=e;});
-  const raw=state.records.filter(p=>p.ruleSchema===RULE_SCHEMA_VERSION);
-  const rows=[];
-  // v1361: THE SCORE IS NOT A RULE, SO IT DOES NOT GET A ROW HERE. v1360 graded score bands with
-  // the same columns as a rule, which is a category error: the score is the OUTPUT of the rules,
-  // so a band cannot carry a weight and every one of those rows printed "not gradeable" beside a
-  // "-" weight. The score adjusts because its underlying rule weights adjust; nothing adjusts it
-  // directly, and there is nothing to learn about a band that is not already learnt about the
-  // rules that produced it.
-  for(const rule of decisionRules()){
-    const ev=weightByKey[rule.key]||ruleEvidence(state.ruleAgg||{},rule.key);
-    const gradeable=rule.kind!==RULE_OPERATIONAL;
-    const mature=raw.filter(p=>matureScoreOutcome(p,today)&&typeof ruleStatePass(p,rule.key)==='boolean');
-    const maturePass=mature.filter(p=>ruleStatePass(p,rule.key)===true);
-    rows.push({kind:'rule',key:rule.key,label:rule.label,group:rule.group,ruleKind:rule.kind,unit:rule.unit||'',
-      passN:ev.passN,failN:ev.failN,passMove:ev.passMove,failMove:ev.failMove,
-      edge:gradeable?ev.edge:null,shrunk:gradeable?ev.shrunk:0,confidence:gradeable?ev.confidence:0,
-      sessions:ev.sessions,matureN:maturePass.length,
-      matureHits:maturePass.reduce((n,x)=>n+scoreOutcomeTarget(x),0),
-      weight:rule.kind===RULE_ADJUSTABLE?Math.max(-1,Math.min(1,Number(map.weights[rule.key])||0)):null,
-      gradeable});
-  }
-  const dir=RULE_TABLE_DIR,key=RULE_TABLE_SORT;
-  const val=r=>{
-    if(key==='label') return r.label;
-    if(key==='edge') return Number.isFinite(r.shrunk)?r.shrunk:-Infinity;
-    if(key==='n') return (r.passN||0)+(r.failN||0);
-    if(key==='passMove') return Number.isFinite(r.passMove)?r.passMove:-Infinity;
-    if(key==='failMove') return Number.isFinite(r.failMove)?r.failMove:-Infinity;
-    if(key==='sessions') return r.sessions||0;
-    if(key==='weight') return Number.isFinite(r.weight)?r.weight:-Infinity;
-    if(key==='hit') return r.matureN?r.matureHits/r.matureN:-Infinity;
-    return 0;
-  };
-  rows.sort((a,b)=>{
-    const x=val(a),y=val(b);
-    if(typeof x==='string') return dir*String(x).localeCompare(String(y));
-    return dir*((x||0)-(y||0));
-  });
-  return rows;
-}
-function renderPostClose(){
-  const el=document.getElementById('postCloseContent');if(!el) return;
-  const state=getUnifiedModelState(),today=getSessionDate();
-  checkRuleSlotAlignment();
-  const raw=state.records.filter(p=>p.ruleSchema===RULE_SCHEMA_VERSION);
-  const measured=raw.filter(ruleOutcomeUsable);
-  const mature=raw.filter(p=>matureScoreOutcome(p,today));
-  const sessionsSeen=new Set(Object.values(state.ruleAgg||{}).flatMap(d=>Object.keys(d||{})));
-  const stockSessions=new Set(raw.map(p=>p.issueDate+'|'+p.symbol)).size;
-  const pctOf=(v,n)=>n?(100*v/n).toFixed(1)+'%':'—';
-  const mv=v=>Number.isFinite(v)?(v>=0?'+':'')+v.toFixed(2)+'%':'—';
-  const when=t=>t?new Date(t).toLocaleString('en-IN',{timeZone:'Asia/Kolkata',hour:'2-digit',minute:'2-digit',day:'2-digit',month:'short'}):'No observations yet';
-  const rows=ruleTableRowsData(state,today);
-  const arrow=k=>RULE_TABLE_SORT===k?(RULE_TABLE_DIR<0?' ▼':' ▲'):'';
-  const th=(k,label,title)=>`<th style="cursor:pointer" title="${escHtml(title||'')}" onclick="sortRuleTable('${k}')">${escHtml(label)}${arrow(k)}</th>`;
-  const kindTag=r=>r.ruleKind===RULE_PROTECTED?'<small>'+escHtml(r.group)+' · protected</small>'
-    :r.ruleKind===RULE_OPERATIONAL?'<small>'+escHtml(r.group)+' · not gradeable</small>'
-    :'<small>'+escHtml(r.group)+'</small>';
-  const counterHtml=r=>{
-    if(r.ruleKind!==RULE_ADJUSTABLE) return '—';
-    const loose=ruleCounterfactual(raw,r.key,1),tight=ruleCounterfactual(raw,r.key,-1);
-    if(!loose&&!tight) return '<small>collecting margins</small>';
-    const part=(cf,word)=>{
-      const side=word==='Loosen'?cf?.entering:cf?.leaving;
-      if(!cf||!side) return '';
-      return `${word} ${Math.abs(cf.shift).toFixed(2)}${escHtml(cf.unit)} → ${side.n} stock${side.n===1?'':'s'}, mean best move ${mv(side.move)}`;
-    };
-    const a=part(loose,'Loosen'),b=part(tight,'Tighten');
-    return `<small>${a||''}${a&&b?'<br>':''}${b||''}</small>`||'<small>no crossings yet</small>';
-  };
-  const body=rows.map(r=>{
-    const edge=r.gradeable&&Number.isFinite(r.edge)
-      ?`${mv(r.edge)}<small>acting on ${mv(r.shrunk)}</small>`
-      :r.gradeable?'<small>collecting</small>':'<small>not gradeable</small>';
-    const weight=r.weight==null?(r.ruleKind===RULE_PROTECTED?'<small>never weakened</small>':'—'):`<span class="${r.weight>0?'pos':r.weight<0?'neg':''}">${r.weight>0?'+':''}${r.weight.toFixed(3)}</span>`;
-    return `<tr><td><b>${escHtml(r.label)}</b>${kindTag(r)}</td>`
-      +`<td>${r.passN||0} / ${r.failN||0}</td>`
-      +`<td>${mv(r.passMove)}</td><td>${mv(r.failMove)}</td>`
-      +`<td>${edge}</td>`
-      +`<td>${r.matureN?pctOf(r.matureHits,r.matureN):'—'}<small>${r.matureN?r.matureHits+'/'+r.matureN+' matured':'awaiting deadline'}</small></td>`
-      +`<td>${weight}</td><td>${counterHtml(r)}</td></tr>`;
-  }).join('');
-  const card=(label,value,sub)=>`<div class="pc-kpi"><div class="pc-kpi-label">${label}</div><div class="pc-kpi-value">${value}</div><div class="pc-kpi-sub">${sub}</div></div>`;
-  const candidate=state.candidate,result=candidate?.validation;
-  const learning=candidate?`Checking new weights on later decisions: ${result?.n||0}/100 completed observations across ${result?.days||0}/${result?.requiredDays||5} sessions.`
-    :state.revision>0?`Revision ${state.revision} active. Last update ${when(state.appliedAt)}. ${escHtml(state.status)}.`
-    :`${escHtml(state.status)}.`;
-  const liveRuleW=ruleWeightVector(state);
-  const sources=SCORE_SOURCES.map((x,i)=>`<tr><td>${escHtml(x[1])}</td><td>${x[2].toFixed(3)}</td><td>${(i>=EXACT_SCORE_START?(liveRuleW[i-EXACT_SCORE_START]||0):state.live[i]).toFixed(3)}</td></tr>`).join('');
-  el.innerHTML=`<div class="pc-shell"><section class="m-card pc-card pc-hero">
-    <div class="pc-head"><div><h3 class="pc-title">Which rules earn their place?</h3>
-    <p class="pc-copy">Every rule the pipeline applies, measured continuously against what its stocks actually did.
-    Learning runs on every refresh beat whether this tab is open or not: a stock is recorded the moment a rule flips for it, its best move updates with every print, and every weight is recomputed from all observations at once.</p></div></div>
-    <div class="pc-kpis">${card('Rules measured',rows.length,'Registry plus every REG1 column')}
-    ${card('Stocks observed',stockSessions,'Each stock once per day, again when a rule flips for it')}
-    ${card('Measured decisions',measured.length,'Best move known from the first bar')}
-    ${card('Matured',mature.length,'Past their next-close deadline')}</div>
-    <p class="pc-copy">Last observation: ${when(raw.length?Math.max(...raw.map(p=>p.issuedAt)):0)}. Last outcome check: ${when(state.updatedAt)}.
-    <b>Edge</b> is the mean best move of the stocks that passed a rule minus the mean of those that failed it, each move taken relative to its own day so whatever the whole market did cancels, pooled over every observation.
-    <b>Acting on</b> is what survives that rule's own sampling error - a 1-of-1 sample moves nothing however good its rate looks, while 19-of-20 moves materially - and it is what sets the weight.</p>
-    <div class="pc-table-wrap"><table class="pc-table"><thead><tr>
-    ${th('label','Rule')}${th('n','Passed / failed','Observations: one per stock per day, plus one each time a rule flips for it')}
-    ${th('passMove','Best move when passed')}${th('failMove','Best move when failed')}
-    ${th('edge','Edge','Mean best move of passers minus failers, and the part that survives sampling error')}
-    ${th('hit','Reached target','Matured records only, so early winners cannot dominate')}
-    ${th('weight','Weight now')}
-    <th>Loosen / tighten</th></tr></thead><tbody>${body}</tbody></table></div>
-    <p class="pc-copy">All weights start EQUAL at the prior and move only as evidence arrives; there is no collecting-then-arming step and no threshold to cross.
-    Protected rules - exchange eligibility, listing history, tape freshness, circuit headroom and every configured surveillance column - are measured here but are never weakened automatically.
-    Operational states describe the app or the account rather than the stock, so they are listed for completeness and excluded from the edge maths.</p>
-    </section><section class="m-card pc-card"><h3 class="pc-title">What is feeding live scores now?</h3><p class="pc-copy">${learning}</p>
-    <p class="pc-copy"><b>Protected rules:</b> buy volume must exceed sell volume when depth is available, plus existing direction, entry timing, exchange, surveillance, stale-data and risk safeguards. Weight changes cannot bypass these checks.</p>
-    <details><summary>See current weights</summary><div class="pc-table-wrap"><table class="pc-table"><thead><tr><th>Signal source</th><th>Prior</th><th>Live factor</th></tr></thead><tbody>${sources}</tbody></table></div>
-    <p class="pc-copy">These are influence factors, not score points or return probabilities.</p></details>
-    <p class="pc-copy">Raw decisions are retained for ${ROCKET_HORIZON_DAYS+1} sessions so every record can reach its deadline and the loosen/tighten column has margins to work with; per-session per-rule evidence is retained permanently and is what the weights read. No live trades are placed by this audit.</p>
-    </section>${renderMemoryStudy(state)}</div>`;
-}
 
 let APPLY_FILTERS_TIMER=null;
 function scheduleApplyFilters(){
@@ -14522,7 +12730,7 @@ async function streamRefreshTick(){
       ?await loadIntradayInventory({deferScore:true,historyRepairAt}):0;
     if(!isMarketRefreshWindow()){
       if(historyBarsRead) await scheduleScoreJob();
-      updateScoreLearning().catch(e=>console.warn('Score learning pass failed',e));
+
       const done=Date.now();
       setStreamActivity({phase:'market-closed',lastCompleteAt:done,
         lastSuccessAt:STREAM_STATUS&&!STREAM_STATUS.statusUnknown?done:STREAM_ACTIVITY.lastSuccessAt,nextAt:done+STREAM_REFRESH_MS});
@@ -14583,7 +12791,7 @@ async function streamRefreshTick(){
     try{ await loadMinuteBars(); }catch(e){}
     // The weights only move when the Book archive grows, which is once a session - so this is a
     // ten-minute refresh, not a beat-by-beat one. It is the only call here that reads files.
-    if(Date.now()-_bookEdgeAt>600000){ _bookEdgeAt=Date.now(); try{ await loadBookEdges(); }catch(e){} }
+
     // Publish only after prices, completed tape, book and minute inputs have all arrived.
     // Recompute when prices or tape changed, or periodically every 30s for clock-driven transitions.
     // Prices and the forming bar re-score their own rows in patchUniverseDeltas as they arrive; the
@@ -14594,9 +12802,7 @@ async function streamRefreshTick(){
       await scheduleScoreJob();
     }
     captureLiveRecommendationScan();
-    // Learning has its own busy guard and 30-second cadence; the beat does not wait for it, so
-    // resolving outcomes can never hold prices, portfolio and scores back (measured: a 24 s pass).
-    updateScoreLearning().catch(e=>console.warn('Score learning pass failed',e));
+
     const done=Date.now();
     loopDelay=isMarketRefreshWindow() ? 1000 : STREAM_REFRESH_MS;
     setStreamActivity({phase:STREAM_STATUS?.statusUnknown?'checking':STREAM_STATUS?.connected?'live':'stream-down',lastCompleteAt:done,
@@ -15458,7 +13664,6 @@ function switchTab(n){
   if(n===1&&(METHODOLOGY_DIRTY||!METHODOLOGY_BUILT)) renderMethodology();
   // Performance analytics are intentionally deferred so tab switching paints immediately.
   if(n===2&&(PERF_DIRTY||!PERF_RENDERED)) schedulePerformanceRender();
-  if(n===3) renderPostClose();
   // v1101: a hidden grid has clientWidth 0, so balancing on the tab it lives in is the only moment
   // the column count can actually be computed. rAF lets the tab paint first.
   requestAnimationFrame(balanceGrids);
@@ -15466,10 +13671,8 @@ function switchTab(n){
 function updateTabCounts(){
   const c0=document.getElementById('tabCount0');
   const c1=document.getElementById('tabCount1');
-  const c3=document.getElementById('tabCount3');
   if(c0) c0.textContent=FILT.length?'('+FILT.length+')':'';
   if(c1) c1.textContent=RADAR.features.length?'('+RADAR.features.length+')':'';
-  if(c3){const s=FS.get(SCORE_LEARNING_STORE);c3.textContent=s?.records?.length?'('+s.records.length+')':'';}
 }
 
 // ── NSE Direct Fetch ──
@@ -15614,7 +13817,6 @@ function compactRankingRows(rows){
     price1h:s.price1h??null,price15m:s.price15m??null,price5m:s.price5m??null,
     stage:s.stage??null,stageLabel:s.stageLabel??null,legTrendPct:s.legTrendPct??null,legHighPct:s.legHighPct??null,
     fundamentalTrigger:Number(s.fundamentalTrigger)||0,fundamental:s.fundamental||null,
-    modelTriggers:(s.modelTriggers||[]).slice(0,12),recommendationTriggerBlocked:!!s.recommendationTriggerBlocked,recommendationTriggerReasons:(s.recommendationTriggerReasons||[]).slice(0,12),
     igniteReady:!!s.igniteReady,igniteStrength:s.igniteStrength??null,ignitePct:s.ignitePct??0,compositePct:s.compositePct??null,setupPct:s.setupPct??null,upStreak:s.upStreak??null,upStreakPct:s.upStreakPct??null,feasibility:s.feasibility??null,directionConfirmed:!!s.directionConfirmed,marketCap:s.marketCap??null,
     entryReady:s.entryReady!==false,entryTiming:s.entryTiming||null,
     preResults:s.preResults?{resultsDate:s.preResults.resultsDate,resultsSource:s.preResults.resultsSource,
@@ -15853,7 +14055,6 @@ function getDepthPctMap(){
 }
 const RADAR_DEPTH_IN_SCORE=true;   // v1139: one word reverts the score to v1138
 const DEPTH_MIN_BOOK_QTY=1000;      // a book too small to mean anything
-const DEPTH_MIN_PREOPEN_TURNOVER=2e5;
 let _lastNseZipSig='';   // v1254: size:lastModified of the zip whose parse produced the live NSE maps
 // v1364: THE THREE PORTFOLIO FILES, PARSED IN ONE PLACE. The full load and the live fast path both
 // call this, so there is one parser per input (standing rule) and the fast path no longer has to
