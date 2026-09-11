@@ -1,5 +1,5 @@
-const BUILD_TS='2026-09-11 13:11 IST'; // release build time (IST)
-const APP_VERSION=1367;
+const BUILD_TS='2026-09-11 14:59 IST'; // release build time (IST)
+const APP_VERSION=1368;
 const RADAR_SCORE_VERSION='rocket-tick-v1';
 
 // ── v1358: AN UNCAUGHT ERROR MUST NAME ITSELF ─────────────────────────────────────────────────
@@ -41,7 +41,7 @@ if(typeof window!=='undefined'){
     reportAppError('Unhandled promise rejection',ev&&ev.reason,'');
   });
 }
-const TARGET_POLICY_VERSION='clock-stop-next-close-v1';
+const TARGET_POLICY_VERSION='cost-floor-v1';
 function isValidChangeOpen(v){
   if(v===null||v===undefined||typeof v==='boolean') return false;
   if(typeof v==='string'&&v.trim()==='') return false;
@@ -6937,14 +6937,13 @@ function renderStats(){
     const trips = (TRADEBOOK_STATS && TRADEBOOK_STATS.tripsData) || [];
     const valid = trips.filter(r => r.qty > 0 && r.charges >= 0);
     const totCharges = valid.reduce((a, r) => a + r.charges, 0);
-    const totValue = valid.reduce((a, r) =>
-      a + (r.buyPrice > 0 ? r.buyPrice * r.qty : 0) + (r.sellPrice > 0 ? r.sellPrice * r.qty : 0), 0);
+    // Per round trip as a share of the POSITION (buy value), so it reads in the same unit as a target.
+    const totValue = valid.reduce((a, r) => a + (r.buyPrice > 0 ? r.buyPrice * r.qty : 0), 0);
     const costPct = totValue > 0 ? totCharges / totValue * 100 : null;
     const perLot = valid.length ? totCharges / valid.length : null;
-    const hurdle = estimateRoundTripCostPct(getEffectiveTgtPct() || 1);
     const tip = valid.length
-      ? `All-in cost of one round trip: ₹${Math.round(totCharges).toLocaleString('en-IN')} of charges over ₹${Math.round(totValue).toLocaleString('en-IN')} traded across ${valid.length.toLocaleString()} closed trips — all seven charges on Zerodha's published rate card (Zerodha Equity Trading Charges.csv): brokerage, STT, transaction, GST, SEBI, stamp and DP — including DP, which is ₹15.34 per ISIN per SELL DAY rather than per trade. The tradebook carries no charges column, so these are computed from that rate card and applied to every fill. Value-weighted, so it is what you actually paid rather than an average of ratios (a mean of per-trip percentages reads ${(TRADEBOOK_STATS && TRADEBOOK_STATS.avgChargePct != null ? TRADEBOOK_STATS.avgChargePct.toFixed(3) : '—')}%, inflated by the flat ₹15.34 DP fee on small lots). Works out to about ₹${perLot != null ? Math.round(perLot) : '—'} a trip. The allocator charges ${hurdle.toFixed(2)}% when testing whether a stock's target clears costs.`
-      : `No tradebook loaded, so the allocator falls back to a hardcoded ${hurdle.toFixed(2)}% when testing whether a stock's target clears costs.`;
+      ? `All-in cost of one round trip: ₹${Math.round(totCharges).toLocaleString('en-IN')} of charges on ₹${Math.round(totValue).toLocaleString('en-IN')} of positions across ${valid.length.toLocaleString()} closed trips — all seven charges on Zerodha's published rate card (Zerodha Equity Trading Charges.csv): brokerage, STT, transaction, GST, SEBI, stamp and DP — including DP, which is ₹15.34 per ISIN per SELL DAY rather than per trade. The tradebook carries no charges column, so these are computed from that rate card and applied to every fill. Value-weighted, so it is what you actually paid. Works out to about ₹${perLot != null ? Math.round(perLot) : '—'} a trip. Income tax is not included. Targets do not use this average: each order's cost-floor target is computed from its own exact charges and live book slippage.`
+      : `No tradebook loaded. Targets do not need it: each order's cost-floor target is computed from its own exact charges and live book slippage.`;
     return `<div class="st" title="${escHtml(tip)}">
       <div class="st-l">Avg Cost</div>
       <div class="st-v" style="font-size:17px;color:${costPct == null ? 'var(--t3)' : costPct >= 0.30 ? 'var(--amber)' : 'var(--cyan)'}">${costPct != null ? costPct.toFixed(2) + '%' : '—'}</div>
@@ -8743,7 +8742,7 @@ function _renderMethodologyInner(){
       </ol></div>
       <div class="m-card"><h4>What Does Not Enter It</h4><p>No indicator, volume, price magnitude, market breadth or learned weight. Thin stocks are handled by the <strong>Drop thinnest %</strong> filter, not by the formula. The seven daily-column groups below describe the Setup label and Risk pill only.</p><div class="rr-groups" style="margin-top:10px">${groupsHTML}</div>${diagHTML}</div>
       <div class="m-card"><h4>When a Row Is GO</h4><p>A row is <strong>GO</strong> when the market is open, live prices are current, the stock is not under a configured surveillance rule, its series and price band are basket-eligible, it is not at the upper circuit, and its Rocket Score is at or above <strong>Min Score ${RECOMMEND_MIN_SCORE}</strong>. These checks decide whether a row can be bought; none of them changes the score. Capital, whole shares and costs then decide how much is funded.</p></div>
-      <div class="m-card"><h4>Held Positions & Basket</h4><p>Held positions stay ranked and may be recommended again as ADDs, bounded by the same allocation rails. Automatic target magnitude comes from the stock's own 5-minute tape where available, otherwise its session ceiling, otherwise its ATR/range capacity; the NSE circuit bounds it. Stops remain stock-specific inside the ${SL_MIN_PCT.toFixed(1)}%–${SL_MAX_PCT.toFixed(1)}% risk rails.</p></div>
+      <div class="m-card"><h4>Held Positions & Basket</h4><p>Held positions stay ranked and may be recommended again as ADDs, bounded by the same allocation rails. The target is the <strong>cost floor</strong>: the first price at which the order, at its real share count, nets a profit after Zerodha's charges on both legs (DP included) and the live book's slippage. It is deliberately small, so capital is freed quickly and redeployed; the Rocket Score supplies the conviction. Income tax is a share of profit and never moves that break-even. A manual Target Override replaces it but is never allowed below it. Stops remain stock-specific inside the ${SL_MIN_PCT.toFixed(1)}%–${SL_MAX_PCT.toFixed(1)}% risk rails.</p></div>
     </div>
     <h3 id="meth-ledger" style="margin-top:28px">Feature Ledger <span style="font-size:14px;color:var(--t3);font-weight:400">(${RADAR.features.length||0} setup features from ${RADAR.headers.length||0} input columns)</span></h3>
     <p style="color:var(--t2);line-height:1.7">These are input-file and setup diagnostics. They set the Setup label and Risk pill and never enter the Rocket Score. Input coverage describes this file only, not live-tape availability.</p>
@@ -9287,63 +9286,7 @@ function getClockRunwayRead(row,opts){
     n:use.n,conditioned,atMinutes:at,clockLabel:clockLabelOf(at)};
 }
 
-const HORIZON_TARGET_MEMO=new Map();
-function historicalHorizonTarget(sym,stopPct,horizonDays=1,at=Date.now()){
-  const today=istDayKey(at),clock=istClock(at);
-  const symbol=normSym(sym||''),bars=INTRADAY_BARS[symbol];
-  const closeMin=continuousCloseMin(symbol);
-  const minute=Math.max(EQUITY_OPEN_MIN,Math.min(closeMin-5,Math.floor(clock.mins/5)*5));
-  // Prior sessions only (`date>=today` is skipped below), so the key is the symbol's history
-  // revision and its oldest retained bar - not the live revision, which moves on every tick.
-  const signature=[_memoryRevisions.get(symbol)||0,bars?.[0]?.t||0,today,minute,closeMin,stopPct,horizonDays].join(':');
-  const cached=HORIZON_TARGET_MEMO.get(symbol);
-  if(cached?.signature===signature) return cached.value;
-  const sessions=new Map();
-  for(const bar of bars||[]){
-    const date=istDayKey(bar.t);
-    if(date>=today||!isNseTradingDate(date)||!Number.isFinite(bar.t)||bar.t%TAPE_BAR_MS!==0) continue;
-    if(![bar.o,bar.h,bar.l,bar.c,bar.v].every(Number.isFinite)||bar.l<=0
-      ||bar.h<Math.max(bar.o,bar.c)||bar.l>Math.min(bar.o,bar.c)||bar.v<0) continue;
-    if(!sessions.has(date)) sessions.set(date,new Map());
-    sessions.get(date).set(istClock(bar.t).mins,bar);
-  }
-  const complete=new Map();
-  for(const [date,byMinute] of sessions){
-    const day=[];
-    for(let slot=EQUITY_OPEN_MIN;slot<closeMin;slot+=5){
-      const bar=byMinute.get(slot);
-      if(!bar) break;
-      day.push(bar);
-    }
-    if(day.length===(closeMin-EQUITY_OPEN_MIN)/5&&day.some(bar=>bar.v>0)) complete.set(date,day);
-  }
-  const samples=[];
-  for(const [date,day] of complete){
-    let path=day.slice((minute-EQUITY_OPEN_MIN)/5);
-    if(horizonDays===1){
-      const next=istDayKey(nextScoreBarStart(Number(day.at(-1).t)+TAPE_BAR_MS,closeMin));
-      if(!complete.has(next)||tradingDaysBetween(date,next)!==1) continue;
-      path=path.concat(complete.get(next));
-    }
-    const entry=Number(path[0]?.o);
-    if(!(entry>0&&stopPct>0)) continue;
-    const stop=entry*(1-stopPct/100);
-    let high=entry;
-    for(const bar of path){
-      if(bar.o<=stop) break;
-      high=Math.max(high,bar.o);
-      if(bar.l<=stop) break;
-      high=Math.max(high,bar.h);
-    }
-    samples.push(100*(high/entry-1));
-  }
-  samples.sort((left,right)=>left-right);
-  const value={pct:samples.length>=5?quantileSorted(samples,0.5):null,sessions:samples.length,
-    minute,horizonDays,policy:TARGET_POLICY_VERSION};
-  HORIZON_TARGET_MEMO.set(symbol,{signature,value});
-  return value;
-}
-function getRowExitPolicy(row,buyPrice=null,activeInfo=null,nudgeInfo=null){
+function getRowExitPolicy(row,buyPrice=null,activeInfo=null,nudgeInfo=null,qty=null){
   const active=activeInfo||getActiveTargetInfo();
   const anchor=Number(active.tgtPct)>0?Number(active.tgtPct):Math.abs(Number(TRADEBOOK_STATS?.adaptiveTGT))||null;
   const atr=Number(row?.atr);
@@ -9412,17 +9355,18 @@ function getRowExitPolicy(row,buyPrice=null,activeInfo=null,nudgeInfo=null){
   // exactly 1.00 capacity and re-creates the flat target this release removes.
   if(available!=null&&!inCapacityUnits&&capacity>0) available=Math.min(available,capacity);
 
-  const horizonTarget=historicalHorizonTarget(row?.symbol,getRowStopDistancePct(row));
+  const floorT=costFloorTarget(row,bandRef,qty);
   let targetPct=null;
   let targetSource='';
   if(active.source==='manual'&&Number(active.tgtPct)>0){
     targetPct=toStep(Number(active.tgtPct));
     targetSource='manual anchor';
   } else {
-    targetPct=horizonTarget.pct>0?Math.floor(horizonTarget.pct*20)/20:null;
-    targetSource=horizonTarget.pct==null
-      ?`Insufficient complete historical paths (${horizonTarget.sessions}/5)`
-      :`Historical median upside before stop through next close (${horizonTarget.sessions} paths; not a forecast)`;
+    targetPct=floorT?floorT.pct:null;
+    targetSource=floorT
+      ?`Cost floor: the first target that nets a profit on ${floorT.qty} shares after ₹${floorT.chargesRs.toFixed(2)} charges`
+        +(floorT.slippagePct>0?` and ${floorT.slippagePct.toFixed(2)}% book slippage`:'')
+      :'No price to size the cost floor';
   }
   const basePct=targetPct;
   let nudgePct=0;
@@ -9434,11 +9378,8 @@ function getRowExitPolicy(row,buyPrice=null,activeInfo=null,nudgeInfo=null){
   const targetRefPrice=Number(bandRef)>0?Number(bandRef):livePrice;
   const targetRefSource='entry price';
   const stopPct=getRowStopDistancePct(row);
-  let minGrossPct=null;
-  if(basePct>0){
-    minGrossPct=roundPct05(HARVEST_DESIRED_NET_PCT+estimateRoundTripCostPct(basePct));
-    minGrossPct=roundPct05(HARVEST_DESIRED_NET_PCT+estimateRoundTripCostPct(minGrossPct));
-  }
+  // The cost floor IS the hurdle: a manual target is held to it, the automatic target is it.
+  const minGrossPct=floorT?floorT.pct:null;
   const uc=getUpperCircuitInfo(row,bandRef);
   const bandLimited=!!(uc&&basePct>0&&uc.runwayPct<basePct);
   const rangeExhausted=!!(sc&&basePct>0&&sc.runwayPct<basePct);
@@ -9449,7 +9390,7 @@ function getRowExitPolicy(row,buyPrice=null,activeInfo=null,nudgeInfo=null){
   const tapeReach=tapeReachability(row?.symbol,targetPct);
   const reachBlocked=false;
   const viabilitySource=targetPct>0?'Target economics':targetSource;
-  const viable=targetPct>0&&(minGrossPct==null||targetPct+1e-9>=minGrossPct);
+  const viable=targetPct>0&&(minGrossPct==null||targetPct+1e-9>=minGrossPct);   // automatic: true by construction
   const belowMarketRead=!!(available!=null&&targetPct>available);
   const horizonNote=(exitingToday?'Existing position exit policy.':'Entry objective: target before stop, by next trading close; predictive accuracy unvalidated.')
     +(tapeRunwayPct!=null?` Historical remaining-session upside: ${tapeRunwayPct.toFixed(2)}% (context only).`:'')
@@ -9484,7 +9425,7 @@ function getRowExitPolicy(row,buyPrice=null,activeInfo=null,nudgeInfo=null){
   const belowAnchorFloor=!!(anchorFloorPct!=null&&active.source==='goal'
     &&wholeDayReachPct!=null&&wholeDayReachPct+1e-9<anchorFloorPct);
   return {
-    targetPolicy:TARGET_POLICY_VERSION,targetEvidence:horizonTarget,
+    targetPolicy:TARGET_POLICY_VERSION,targetEvidence:floorT,
     targetPct:targetPct>0?+targetPct.toFixed(2):null,
     // v1097, all REPORTED so the nudge is auditable on every row:
     basePct:basePct>0?+basePct.toFixed(2):null,   // the goal rate alone — what eligibility is judged on
@@ -9618,6 +9559,34 @@ function getPositionAfterCostFloor(avgPrice,qty){
   while(netAt(tick)<=0) tick=+(tick+0.05).toFixed(2);
   return tick;
 }
+// v1368: THE TARGET IS THE COST FLOOR (owner): the smallest target at which THIS order, at its real
+// share count, still nets a profit after every cost the app can measure - Zerodha's charges on both
+// legs (DP included) and the live book's slippage in and out. Fast target, fast capital recycling;
+// conviction comes from the Rocket Score, not from asking a stock for a bigger move. Income tax is a
+// share of the PROFIT, so it shrinks the gain but can never move this break-even. The arithmetic is
+// the allocator's own (evalNet), and the sale price is floored to the tick, so a target produced here
+// always passes that check.
+function costFloorTarget(row,buyPrice,qty){
+  const bp=Number(buyPrice);
+  if(!(bp>0)) return null;
+  let q=Math.floor(Number(qty)||0);
+  if(!(q>0)) q=Math.max(1,Math.floor(frictionSizeBasis()/bp));
+  const fr=getTradeFrictionPct(row,q*(Number(row?.price)>0?Number(row.price):bp));
+  const slipPct=(fr?.covered&&Number.isFinite(fr.entryPct)&&Number.isFinite(fr.exitPct))?Math.max(0,fr.entryPct+fr.exitPct):0;
+  const buyChg=calcZerodhaCharges(bp,q,false);
+  const netAt=pct=>{
+    const sell=Math.floor(bp*(1+pct/100)/0.05+1e-9)*0.05;
+    return q*(sell-bp)-buyChg-calcZerodhaCharges(sell,q,true)-q*bp*slipPct/100;
+  };
+  let hi=1;
+  while(netAt(hi)<=0&&hi<64) hi*=2;
+  if(netAt(hi)<=0) return null;
+  let lo=0;
+  for(let i=0;i<40;i++){ const mid=(lo+hi)/2; if(netAt(mid)>0) hi=mid; else lo=mid; }
+  let pct=Math.ceil(hi*100)/100;
+  while(Math.round(netAt(pct)*100)<=0) pct=+(pct+0.01).toFixed(2);
+  return {pct,qty:q,slippagePct:+slipPct.toFixed(3),chargesRs:+(buyChg+calcZerodhaCharges(bp*(1+pct/100),q,true)).toFixed(2)};
+}
 // Open Positions is a different decision surface from Recommendations. Recommendations begin with
 // the ALL NSE cross-section and ask whether a fresh entry survives a 5-minute validation. A held
 // stock already owns capital: its SL, Pace, EoD and Buy/Sell/Hold instruction therefore come from
@@ -9637,7 +9606,7 @@ function getOpenPositionTargetFloor(sym,pos){
   const anchorPrice=Math.max(nextTick,tickPrice(raw));
   const costFloorPrice=getPositionAfterCostFloor(avgPrice,Number(pos?.qty));
   const price=Math.max(anchorPrice,costFloorPrice||0);
-  const source=anchorPct!=null?'manual Target Anchor':'after-cost profit floor (not predicted upside)';
+  const source=anchorPct!=null?'manual Target Override':'cost floor';
   return {avgPrice,price:+price.toFixed(2),anchorPrice:+anchorPrice.toFixed(2),
     costFloorPrice,anchorPct,source};
 }
@@ -9797,29 +9766,19 @@ function getOpenPositionTapePolicy(sym,pos){
   // still mean act at the live tape price and SL can remain below cost; neither may overwrite Target.
   const eodPct=Number.isFinite(tape.predPct)?tape.predPct:null;
   const eodPrice=Number.isFinite(tape.predClose)?tape.predClose:null;
-  const remainingDays=deadline.days===0?1:0;
-  const targetEvidence=deadline.date&&livePrice>0&&entryStop>0&&livePrice>entryStop
-    ?historicalHorizonTarget(s,100*(1-entryStop/livePrice),remainingDays):null;
-  const horizonPrice=targetEvidence?.pct>0?livePrice*(1+targetEvidence.pct/100):null;
-  const tapeTargetPrice=tickPrice(horizonPrice||livePrice);
+  const tapeTargetPrice=tickPrice(livePrice);
   const targetFloor=getOpenPositionTargetFloor(s,pos);
-  const targetPrice=tickPrice(Math.max(tapeTargetPrice,targetFloor?.price||0));
+  // v1368: the held target is the cost floor itself (or the manual override), not the historical
+  // upside - reach it, free the capital, redeploy it.
+  const targetPrice=targetFloor?.price>0?+targetFloor.price.toFixed(2):tapeTargetPrice;
   const targetPct=targetFloor?.avgPrice>0
     ?100*(targetPrice/targetFloor.avgPrice-1)
     :livePrice>0?100*(targetPrice/livePrice-1):null;
-  const floorBound=!!(targetFloor&&targetFloor.price>tapeTargetPrice);
-  const targetWhy=(horizonPrice
-    ?`Historical median upside before the entry stop across ${targetEvidence.sessions} complete paths, through ${remainingDays?'next':'today\'s'} trading close; not a forecast. `
-    :`No positive historical target estimate (${targetEvidence?.sessions||0}/5 complete paths, or unknown entry age); any displayed profit floor is an objective, not predicted upside. `)+(targetFloor
-    ?(floorBound
-      ?'The historical level or current-price fallback '+fmtINR(tapeTargetPrice)+' was below the required profit floor from average buy '+fmtINR(targetFloor.avgPrice)
-        +'; Target is held at '+targetFloor.source
-        +(targetFloor.anchorPct!=null?' (+'+targetFloor.anchorPct.toFixed(2)+'%)':'')
-        +(targetFloor.costFloorPrice!=null?'; the after-cost profit floor is '+fmtINR(targetFloor.costFloorPrice):'')+'.'
-      :'The historical level or current-price fallback is '+fmtINR(tapeTargetPrice)+', at or above the '+targetFloor.source
-        +' profit floor from average buy '+fmtINR(targetFloor.avgPrice)
-        +(targetFloor.costFloorPrice!=null?'; the after-cost minimum is '+fmtINR(targetFloor.costFloorPrice):'')+'.')
-    :'Average buy is unavailable, so no entry-relative profit floor can be established.');
+  const targetWhy=targetFloor
+    ?(targetFloor.anchorPct!=null
+      ?`Manual Target Override +${targetFloor.anchorPct.toFixed(2)}% from average buy ${fmtINR(targetFloor.avgPrice)}, never below the after-cost floor.`
+      :`Cost floor: the first price at which selling ${qty} shares bought at ${fmtINR(targetFloor.avgPrice)} nets a profit after both legs' charges (DP included).`)
+    :'Average buy is unavailable, so no cost floor can be established.';
   const paceRs=pacePct!=null&&hi>0?hi*pacePct/100:null;
   const reason=deadline.due?'BTST deadline reached: exit by this session close.'
     :liveHarvest
@@ -9841,7 +9800,7 @@ function getOpenPositionTapePolicy(sym,pos){
     exitFriction:getTradeFrictionPct({symbol:s,price:livePrice,turnover:null},qty*livePrice),
     price:+livePrice.toFixed(2),open:day[0].o,high:hi,low:lo,asOf:forming?forming.t:last.t,
     completedAsOf:last.t,
-    targetPrice,targetPct,tapeTargetPrice,targetEvidence,targetPolicy:TARGET_POLICY_VERSION,
+    targetPrice,targetPct,tapeTargetPrice,targetPolicy:TARGET_POLICY_VERSION,
     targetFloorPrice:targetFloor?.price||null,targetFloorPct:targetFloor?.anchorPct??null,
     targetCostFloorPrice:targetFloor?.costFloorPrice||null,
     targetAvgPrice:targetFloor?.avgPrice||null,targetFloorSource:targetFloor?.source||null,targetWhy,
@@ -9879,7 +9838,7 @@ function getAllocationPassContext(){
 // one it resolves them itself, which is correct but ~4ms per row.
 function targetPolicyBlockReason(policy){
   if(!(policy?.targetPct>0)) return policy?.viabilitySource||'No valid target to verify trading costs';
-  return `Target ${policy.targetPct.toFixed(2)}% does not cover the ${policy.minGrossPct?.toFixed(2)??'unknown'}% costs + net hurdle`;
+  return `Target ${policy.targetPct.toFixed(2)}% does not cover the ${policy.minGrossPct?.toFixed(2)??'unknown'}% cost floor`;
 }
 function computeAlloc(capital, selList){
   if(!capital||!selList.length) return {};
@@ -9907,7 +9866,7 @@ function computeAlloc(capital, selList){
     return qty;
   };
   function evalNet(s,buyP,qty){
-    const policy=getRowExitPolicy(s,buyP);
+    const policy=getRowExitPolicy(s,buyP,null,null,qty);
     if(policy&&policy.viable===false){
       return {ok:false,rejected:true,reason:targetPolicyBlockReason(policy),policy};
     }
@@ -13442,7 +13401,7 @@ function buildBasketOrders(capital, selList){
     if(!(qty>0)) return;
     const sym=s.symbol;
     const name=s.name||sym;
-    const policy=getRowExitPolicy(s,Number(s.price)||0);
+    const policy=getRowExitPolicy(s,Number(s.price)||0,null,null,qty);
     const targetPct=(policy&&Number.isFinite(policy.targetPct)&&policy.targetPct>0)
       ? parseFloat(Number(policy.targetPct).toFixed(2))
       : null;
