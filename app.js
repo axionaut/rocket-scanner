@@ -1,5 +1,5 @@
-const BUILD_TS='2026-09-11 10:39 IST'; // release build time (IST)
-const APP_VERSION=1364;
+const BUILD_TS='2026-09-11 11:24 IST'; // release build time (IST)
+const APP_VERSION=1365;
 const RADAR_SCORE_VERSION='unified-evidence-v1';
 
 // ── v1358: AN UNCAUGHT ERROR MUST NAME ITSELF ─────────────────────────────────────────────────
@@ -142,7 +142,7 @@ let INTRADAY_STORE_V=0;
 // INTRADAY_STORE_V, which moves on every forming-bar tick, so each beat rebuilt them from ~1,000 bars
 // per symbol for ~1,650 symbols - measured at ~40 s of main thread per scoring pass. This moves only
 // when a prior-session bar is written, a symbol's file is replaced, or the store trims its oldest bar.
-let INTRADAY_HISTORY_V=0;
+let INTRADAY_HISTORY_V=0,INTRADAY_SYMBOLS_V=0;
 // Derived tape reads are pure for one tape-store revision and session date. The same read was being
 // rebuilt repeatedly by scoring, filtering, row rendering and the basket summary; cache the result
 // without changing its inputs or output. `ageMin` is refreshed on cache hits so the displayed age stays
@@ -2529,6 +2529,17 @@ function resolveNetRecommendation(p,asOf){
       p.firstProfitMinutes=Math.max(0,(b.t+TAPE_BAR_MS-p.issuedAt)/60000);
     if(exit!=null){exitBar=b;break;}
   }
+  // A price that has traded is a price that was available, so the bar still forming counts toward
+  // the best move and the live mark the moment it prints - not five minutes later. Barriers are NOT
+  // resolved on it: only completed bars can settle target-before-stop.
+  if(!exitBar&&!p.paperComplete&&entered){
+    const live=bars.length?bars[bars.length-1]:null;
+    if(live&&Number(live.t)>=p.issuedAt&&Number(live.t)+TAPE_BAR_MS>end&&inSession(live)
+      &&tradingDaysBetween(p.issueDate,istDayKey(live.t))<=1&&Number(live.h)>0){
+      p.maxFavourablePct=+Math.max(Number(p.maxFavourablePct)||0,100*(live.h/entry-1)).toFixed(3);
+      p.latestMarkProfitPct=+((live.c/entry-1)*100).toFixed(3);
+    }
+  }
   if(exitBar&&!p.evidenceIncomplete){
     const intra=istDayKey(exitBar.t)===p.issueDate;
     const charges=calcZerodhaCharges(entry,p.auditQty,false,intra)+calcZerodhaCharges(exit,p.auditQty,true,intra);
@@ -3506,6 +3517,11 @@ function readDecisionRules(row){
   }
   return {margins,failed,unknown};
 }
+function ruleStateKey(read){
+  const m=read?.margins||{};
+  return Object.keys(m).sort().map(k=>k+(Number(m[k])>=0?'+':'-')).join(',')
+    +'|'+(Array.isArray(read?.failed)?read.failed.slice().sort().join(','):'');
+}
 function ruleStatePass(record,key){
   if(!record) return null;
   if(record.margins&&Object.prototype.hasOwnProperty.call(record.margins,key)){
@@ -3611,7 +3627,9 @@ function ruleSessionStat(records,key){
   // it held - the "sessions are the sample count" error v1360 said it had removed.
   const vari=a=>{if(a.length<2)return null;const m=mean(a);return a.reduce((n,r)=>n+(r.move-m)*(r.move-m),0)/(a.length-1);};
   const vp=vari(pass),vf=vari(fail);
+  const sum=a=>a.reduce((n,r)=>n+r.move,0),sq=a=>a.reduce((n,r)=>n+r.move*r.move,0);
   return {passN:pass.length,failN:fail.length,
+    passSum:sum(pass),failSum:sum(fail),passSq:sq(pass),failSq:sq(fail),
     passMove:mean(pass),failMove:mean(fail),
     passHit:pass.reduce((n,r)=>n+r.hit,0),failHit:fail.reduce((n,r)=>n+r.hit,0),
     edge:(pass.length&&fail.length)?mean(pass)-mean(fail):null,
@@ -3622,45 +3640,47 @@ function ruleSessionStat(records,key){
 // that an edge existed today, they cannot establish that today was not an unusual session. The
 // market-wide component cancels by construction, because edge is passers minus failers measured on
 // the same day in the same market.
+// v1365: EVERY OBSERVATION COUNTS THE MOMENT IT EXISTS - NO SESSION UNIT. Each stock's best move
+// is taken relative to the day it happened on (the move minus that day's mean over every observed
+// stock), which cancels whatever the whole market did that day, and then EVERY observation from
+// every day is pooled into one comparison: passers against failers. A stock observed at 10:02 moves
+// the weight at 10:02. The error is the pooled sampling error of those two groups, so twenty
+// consistent stocks move a weight materially and one stock moves it by almost nothing.
 function ruleEvidence(agg,key){
   const perDay=agg?.[key]||{};
-  const days=Object.keys(perDay).sort();
-  const edges=[],all=[],within=[];
-  let passN=0,failN=0,passHit=0,failHit=0;
-  for(const d of days){
+  let passN=0,failN=0,passHit=0,failHit=0,rawPS=0,rawFS=0;
+  let cP=0,cF=0,pS=0,fS=0,pQ=0,fQ=0,qP=0,qF=0,days=0;
+  for(const d of Object.keys(perDay)){
     const st=perDay[d];if(!st) continue;
-    passN+=st.passN||0;failN+=st.failN||0;passHit+=st.passHit||0;failHit+=st.failHit||0;
-    all.push(st);
-    if(Number.isFinite(st.edge)){ edges.push(st.edge); if(Number.isFinite(st.edgeSe)) within.push(st.edgeSe); }
+    const pn=st.passN||0,fn=st.failN||0;
+    passN+=pn;failN+=fn;passHit+=st.passHit||0;failHit+=st.failHit||0;
+    rawPS+=(Number(st.passMove)||0)*pn;rawFS+=(Number(st.failMove)||0)*fn;
+    if(!(pn>0&&fn>0)) continue;               // a day with only one side offers no comparison
+    const ps=Number.isFinite(st.passSum)?st.passSum:(Number(st.passMove)||0)*pn;
+    const fs=Number.isFinite(st.failSum)?st.failSum:(Number(st.failMove)||0)*fn;
+    const m=(ps+fs)/(pn+fn);                  // that day's own level, removed from every stock
+    cP+=pn;cF+=fn;pS+=ps-pn*m;fS+=fs-fn*m;days++;
+    if(Number.isFinite(st.passSq)&&Number.isFinite(st.failSq)){
+      pQ+=st.passSq-2*m*ps+pn*m*m;fQ+=st.failSq-2*m*fs+fn*m*m;qP+=pn;qF+=fn;
+    }
   }
-  const sessions=edges.length;
-  const edge=sessions?edges.reduce((a,b)=>a+b,0)/sessions:null;
-  const sd=sessions>1?Math.sqrt(edges.reduce((n,v)=>n+(v-edge)*(v-edge),0)/(sessions-1)):0;
-  // Session-clustered standard error, floored by the sampling error the run counts imply so a
-  // near-constant edge series cannot produce an infinite t (the v1213 trap).
-  const n=passN+failN;
-  const floor=n>1?Math.abs(edge||0)/Math.sqrt(n):0;
-  // Two sources of error, and the larger one governs: the stocks inside each session (available
-  // from day one) and the disagreement between sessions (available from day two).
-  const withinSe=within.length?Math.sqrt(within.reduce((a,v)=>a+v*v,0))/within.length:null;
-  const betweenSe=sessions>1?Math.max(sd/Math.sqrt(sessions),floor*0.25):null;
-  const se=withinSe!=null||betweenSe!=null?Math.max(withinSe||0,betweenSe||0):Infinity;
+  const edge=(cP&&cF)?pS/cP-fS/cF:null;
+  let se=Infinity;
+  if(edge!=null&&qP===cP&&qF===cF&&cP>1&&cF>1){
+    const vp=Math.max(0,(pQ-pS*pS/cP)/(cP-1)),vf=Math.max(0,(fQ-fS*fS/cF)/(cF-1));
+    se=Math.sqrt(vp/cP+vf/cF);
+    // A perfectly uniform sample has no measurable spread; its error is bounded by what the counts
+    // themselves imply, so it cannot claim infinite certainty (the v1213 trap).
+    se=Math.max(se,Math.abs(edge)/Math.sqrt(cP+cF)*0.25);
+  }
   const tCrit=familyTCrit(Math.max(1,adjustableRules().length));
-  const agreement=sessions&&edge?100*edges.filter(v=>Math.sign(v)===Math.sign(edge)).length/sessions:0;
-  // weight = prior + edge x confidence(n). `edge` is SIGNED: positive raises, negative lowers.
-  // confidence only ever grows and sets how fast a weight leaves the prior, never the direction.
-  // CONTINUOUS, NOT A CUTOFF (v1364). The old form subtracted tCrit x se, so an edge short of the
-  // family-wise bar carried exactly 0 - a gate by another name. Now the edge is scaled by
-  // t^2/(t^2+tCrit^2): an edge at the family-wise bar acts at half strength, a well-measured one at
-  // nearly all of it, a 1-of-1 sample (t near 0) at nearly nothing, and every step in between is
-  // continuous in both directions. The critical value is still the derived family-wise one.
+  // CONTINUOUS, NOT A CUTOFF (v1364): the edge acts at t^2/(t^2+tCrit^2) of its size.
   const t=(edge!=null&&Number.isFinite(se)&&se>0)?Math.abs(edge)/se:0;
   const confidence=t>0?t*t/(t*t+tCrit*tCrit):0;
   const shrunk=edge==null?0:edge*confidence;
-  return {sessions,passN,failN,passHit,failHit,
-    passMove:all.length?all.reduce((n2,st)=>n2+(st.passMove||0)*(st.passN||0),0)/Math.max(1,passN):null,
-    failMove:all.length?all.reduce((n2,st)=>n2+(st.failMove||0)*(st.failN||0),0)/Math.max(1,failN):null,
-    edge,shrunk,confidence,se:Number.isFinite(se)?se:null,tCrit,agreement:+agreement.toFixed(0)};
+  return {sessions:days,passN,failN,passHit,failHit,
+    passMove:passN?rawPS/passN:null,failMove:failN?rawFS/failN:null,
+    edge,shrunk,confidence,se:Number.isFinite(se)?se:null,tCrit,compared:cP+cF};
 }
 // THE PRIOR IS THE ONE NUMBER THAT IS NOT MEASURED, SO IT CARRIES THE LEAST POSSIBLE OPINION:
 // every rule starts EQUAL (owner, 2026-09-10). Its MAGNITUDE is derived, not chosen - set so the
@@ -3855,7 +3875,10 @@ function scoreSessionMeans(records,value){
 function scoreSampleHash(text){let h=2166136261;for(let i=0;i<text.length;i++)h=Math.imul(h^text.charCodeAt(i),16777619);return h>>>0;}
 async function updateScoreLearning(){
   const now=Date.now();
-  if(_scoreLearningBusy||now-_scoreLearningAt<30000) return;
+  // v1365: no cadence. Every beat runs a pass (the busy guard stops overlap), so a new observation,
+  // a best move and a weight all update as the data arrives rather than on a 30-second or 30-minute
+  // clock.
+  if(_scoreLearningBusy) return;
   _scoreLearningBusy=true;_scoreLearningAt=now;
   try{
     const state=getUnifiedModelState(),today=getSessionDate(),study=memoryStudyState(state);
@@ -3881,8 +3904,18 @@ async function updateScoreLearning(){
     // observations during the equity session and with fresh prices and complete tape.
     const captureAt=Date.now();
     if(isEquitySession(captureAt)&&!universePriceStaleness()){
+      // The 30-minute bucket survives ONLY for the sealed Market Memory study, whose prospective
+      // design was declared on that cadence and must not change mid-study. Rule learning captures
+      // continuously (below) and is not tied to it.
       const bucket=Math.floor(captureAt/(30*60*1000));
-      if(state.lastBucket!==bucket){
+      const studyDue=state.lastBucket!==bucket;
+      {
+        const lastToday=new Map();
+        for(const p of state.records){
+          if(p.issueDate!==today||p.ruleSchema!==RULE_SCHEMA_VERSION) continue;
+          const q=lastToday.get(p.symbol);
+          if(!q||p.issuedAt>q.issuedAt) lastToday.set(p.symbol,p);
+        }
         const pool=ALL.filter(r=>r.scoreVersion===RADAR_SCORE_VERSION&&r.scoreComponents?.unified&&r.price>0
           &&r.basketEligible!==false&&!r.noHistory&&getRecommendationFreshness(r.symbol).ok);
         if(pool.length){
@@ -3898,19 +3931,27 @@ async function updateScoreLearning(){
           pool.filter(isSelectableRecommendation).sort((a,b)=>b.score-a.score).slice(0,10).forEach(r=>chosen.set(r.symbol,r));
           // Stratified outcome-independent sampling includes low scores and rule-blocked stocks.
           // This is a sampled audit, not an exhaustive ledger or a universe-wide return estimate.
-          for(const rows of Object.values(groups)) rows.sort((a,b)=>scoreSampleHash(a.symbol+'|'+bucket)-scoreSampleHash(b.symbol+'|'+bucket)).slice(0,8).forEach(r=>chosen.set(r.symbol,r));
+          // The strata are drawn once per day (seeded by the date, not a clock bucket), so the same
+          // stocks are followed continuously through the session instead of reshuffled.
+          for(const rows of Object.values(groups)) rows.sort((a,b)=>scoreSampleHash(a.symbol+'|'+today)-scoreSampleHash(b.symbol+'|'+today)).slice(0,8).forEach(r=>chosen.set(r.symbol,r));
           for(const r of chosen.values()){
+            // RECORDED WHEN SOMETHING HAPPENS. A stock is written the first time it is followed today
+            // and again the moment any rule flips for it - crossing VWAP at 10:02 is recorded at
+            // 10:02 - and never while nothing about it has changed.
+            const ruleRead2=readDecisionRules(r),stateKey=ruleStateKey(ruleRead2);
+            const prev=lastToday.get(r.symbol);
+            if(prev&&(prev.stateKey||ruleStateKey(prev))===stateKey) continue;
             const c=r.scoreComponents,policy=getRowExitPolicy(r,r.price);
             if(!(policy.stopPct>0)) continue;
             const qty=Math.max(1,Math.floor(frictionSizeBasis()/r.price)),fr=getTradeFrictionPct(r,qty*r.price);
             const input=JSON.parse(JSON.stringify(c.unified)),live=computeUnifiedEvidence(input,state.live);
             const trial=state.candidate?computeUnifiedEvidence(input,state.candidate.weights):null;
             const withoutMemory=state.candidate?computeUnifiedEvidence(input,state.candidate.weights.map((v,i)=>i>=23&&i<EXACT_SCORE_START?0:v)):null;
-            const statusReason=getStatusAuditReason(r),ruleRead2=readDecisionRules(r);
+            const statusReason=getStatusAuditReason(r);
             const observation={symbol:r.symbol,issueDate:today,issuedAt:captureAt,bucket,score:r.score,signalScore:c.signalScore,
               block:c.block||null,minScore:RECOMMEND_MIN_SCORE,input,modelRevision:state.revision,livePrediction:live.raw/100,liveDecision:live.total,
               statusCode:statusReason.code,statusCodes:statusReason.codes,statusReason:statusReason.text,
-              margins:ruleRead2.margins,failed:ruleRead2.failed,unknown:ruleRead2.unknown,
+              margins:ruleRead2.margins,failed:ruleRead2.failed,unknown:ruleRead2.unknown,stateKey,
               maxFavourablePct:0,ruleSchema:RULE_SCHEMA_VERSION,
               candidateId:trial?state.candidate.id:null,candidatePrediction:trial?trial.raw/100:null,candidateDecision:trial?trial.total:null,
               withoutMemoryPrediction:withoutMemory?withoutMemory.raw/100:null,withoutMemoryDecision:withoutMemory?withoutMemory.total:null,
@@ -3918,8 +3959,8 @@ async function updateScoreLearning(){
               frictionPct:fr?.covered&&Number.isFinite(fr.entryPct)&&Number.isFinite(fr.exitPct)?Math.max(0,fr.entryPct+fr.exitPct):null,
               rocketOutcome:ROCKET_OUTCOME.PENDING,scoreVersion:RADAR_SCORE_VERSION,outcomePolicy:'net-policy-v1',
               targetPolicy:TARGET_POLICY_VERSION,targetSource:policy.targetSource,targetEvidence:policy.targetEvidence};
-            if(policy.targetPct>0) state.records.push(observation);
-            if(studyOpen&&cohort.has(r.symbol)&&input.memory?.ok){
+            if(policy.targetPct>0){ state.records.push(observation); lastToday.set(r.symbol,observation); }
+            if(studyDue&&studyOpen&&cohort.has(r.symbol)&&input.memory?.ok){
               const values=[r.atr,r.changeOpen,input.memory.displacement,r.score];
               if(values.every(Number.isFinite)){
                 const p=observation;
@@ -5088,7 +5129,7 @@ function buildMarketTimingWindows(){
   const it=buildMarketTimingWindowsGen();let s=it.next();while(!s.done)s=it.next();return s.value;
 }
 let _mktWinMemo=null;
-function marketTimingSig(){return newestTapeBucketMs()+':'+INTRADAY_HISTORY_V+':'+Object.keys(INTRADAY_BARS||{}).length;}
+function marketTimingSig(){return newestTapeBucketMs()+':'+INTRADAY_HISTORY_V+':'+INTRADAY_SYMBOLS_V;}
 function getMarketTimingWindows(){
   // Rebuilt when a new 5-minute bucket first appears (i.e. the previous bar completed) or history
   // changes - not on every forming-bar tick, which rebuilt it ~once a second for the same answer.
@@ -5658,7 +5699,10 @@ function parseIntradayPaste(text,forSymbol,opts){
           if(old.o!==b.o||old.h!==b.h||old.l!==b.l||old.c!==b.c||old.v!==b.v){prior[i]=b;changed=true;}
         }else if(!old||b.t>old.t){prior.push(b);changed=true;}
       }
-      if(prior.length>INTRADAY_STORE_MAX){INTRADAY_BARS[sym]=prior.slice(-INTRADAY_STORE_MAX);_histTouched=true;}
+      // Dropping the oldest retained bar is not a history revision for the cross-sectional tables
+      // (every per-symbol read keys on its own first bar); bumping here rebuilt the whole clock
+      // table once per symbol per new bar - measured 35 s in one pass.
+      if(prior.length>INTRADAY_STORE_MAX) INTRADAY_BARS[sym]=prior.slice(-INTRADAY_STORE_MAX);
     }else{
       const byT=new Map();
       for(const b of prior) byT.set(b.t,b);
@@ -5671,11 +5715,10 @@ function parseIntradayPaste(text,forSymbol,opts){
       }
       if(changed){
         const all=[...byT.values()].sort((a,b)=>a.t-b.t);
-        if(all.length>INTRADAY_STORE_MAX) _histTouched=true;
         INTRADAY_BARS[sym]=all.length>INTRADAY_STORE_MAX?all.slice(-INTRADAY_STORE_MAX):all;
       }
     }
-  } else {INTRADAY_BARS[sym]=bars;_histTouched=true;}
+  } else {if(!INTRADAY_BARS[sym]) INTRADAY_SYMBOLS_V++;INTRADAY_BARS[sym]=bars;_histTouched=true;}
   if(changed){
     INTRADAY_STORE_V++;
     if(bars.some(b=>memoryDay(b.t)<memoryDay(Date.now()))){
@@ -10677,7 +10720,7 @@ function buildClockRunwayTable(){
   // Only sessions observed through their close enter (below), so today's forming bars cannot change
   // this table before the earliest continuous close; after it they can, and the live revision rejoins.
   const late=istClock().mins>=CAS_CONTINUOUS_END_MIN;
-  const sig=INTRADAY_HISTORY_V+':'+(late?INTRADAY_STORE_V:0)+':'+getSessionDate()+':'+((ALL&&ALL.length)||0);
+  const sig=INTRADAY_HISTORY_V+':'+(late?newestTapeBucketMs():0)+':'+getSessionDate()+':'+((ALL&&ALL.length)||0);
   if(_clockRunwayMemo&&_clockRunwayMemo.sig===sig) return _clockRunwayMemo.tab;
   const keys=Object.keys(INTRADAY_BARS||{});
   const capOf={};
@@ -12730,7 +12773,7 @@ let _volCutMemo={v:-1,pct:-1,cut:null,n:0};
 // v1364: a cross-sectional cut over the whole market is re-derived when a bar COMPLETES (or history
 // changes), not on every forming-bar tick - recomputing ~1,600 reads per beat was a multi-second
 // main-thread stall once forming bars began arriving every two seconds.
-function crossSectionSig(){return newestTapeBucketMs()+':'+INTRADAY_HISTORY_V+':'+Object.keys(INTRADAY_BARS||{}).length;}
+function crossSectionSig(){return newestTapeBucketMs()+':'+INTRADAY_HISTORY_V+':'+INTRADAY_SYMBOLS_V;}
 function getSharesPerBarCut(pct){
   const p=Number(pct);
   if(!(p>0)||p>=100) return null;
@@ -12953,7 +12996,10 @@ async function hydrateFromHelperOnce(reason){
   const structuralChanged=changed.filter(f=>!isScannerCsvName(f.name)&&!isPortfolioFile(f));
   const fetchOne=async f=>{
     try{
-      const blob=await readHelperResponse('/api/inputs/file?name='+encodeURIComponent(f.name),{timeout:15000,type:'blob'});
+      // A 4.7 MB reports ZIP read while the helper is also serving the cold tape read cannot be held
+      // to the 15 s a small CSV gets; the allowance scales with the file (v1365).
+      const blob=await readHelperResponse('/api/inputs/file?name='+encodeURIComponent(f.name),
+        {timeout:Math.max(15000,Math.round((Number(f.size)||0)/100)),type:'blob'});
       return new File([blob],f.name,{lastModified:f.lastModified});
     }catch(e){ return null; }
   };
@@ -13009,14 +13055,23 @@ async function hydrateFromHelperOnce(reason){
     return any&&allOk;
   }
 
-  // Something structural changed - fetch the whole set so processFiles sees a coherent picture.
-  const files=(await Promise.all(wanted.map(fetchOne))).filter(Boolean);
-  if(files.length!==wanted.length) return false;
+  // Something structural changed. v1365: once the live delta is delivering prices, the universe
+  // CSV is not part of this load - re-scoring the whole universe from a file the delta already
+  // superseded was most of a measured 59 s pass that held the refresh beat (and the portfolio) back.
+  const liveDelta=_universeLiveAt>0;
+  const set=liveDelta?wanted.filter(f=>!isScannerCsvName(f.name)):wanted;
+  if(liveDelta) for(const f of wanted) if(isScannerCsvName(f.name)) _helperInputSigs[f.name]=sig(f);
+  const fetched=await Promise.all(set.map(async f=>({f,file:await fetchOne(f)})));
+  const got=fetched.filter(x=>x.file);
+  if(!got.length) return false;
+  // What arrived is loaded now; a file that did not arrive is retried on the next beat instead of
+  // discarding every file that did (one slow ZIP read used to throw the whole set away).
+  const files=got.map(x=>x.file);
   const ok=await processFiles(files,reason||'helper',{silent:true,skipDriveBackup:true,preserveSelection:true});
   if(ok) queueHelperInputBackup(files);
   // Marked seen only once the load SUCCEEDED, so a failed pass retries rather than going quiet.
-  if(ok) for(const f of wanted) _helperInputSigs[f.name]=sig(f);
-  return ok;
+  if(ok) for(const x of got) _helperInputSigs[x.f.name]=sig(x.f);
+  return ok&&got.length===set.length;
 }
 
 // ---- DELTA TRANSPORT & NON-BLOCKING SCORING (v1267) -------------------------------------------
@@ -13150,7 +13205,7 @@ function mergeFormingBar(sym,fb){
     bars[bars.length-1]=bar;
   }else if(t>last.t){
     bars.push(bar);
-    if(bars.length>INTRADAY_STORE_MAX){INTRADAY_BARS[key]=bars.slice(-INTRADAY_STORE_MAX);INTRADAY_HISTORY_V++;}
+    if(bars.length>INTRADAY_STORE_MAX) INTRADAY_BARS[key]=bars.slice(-INTRADAY_STORE_MAX);
   }else return false;
   INTRADAY_STORE_V++;
   return true;
@@ -14089,7 +14144,7 @@ function renderPostClose(){
       +`<td>${mv(r.passMove)}</td><td>${mv(r.failMove)}</td>`
       +`<td>${edge}</td>`
       +`<td>${r.matureN?pctOf(r.matureHits,r.matureN):'—'}<small>${r.matureN?r.matureHits+'/'+r.matureN+' matured':'awaiting deadline'}</small></td>`
-      +`<td>${r.sessions||0}</td><td>${weight}</td><td>${counterHtml(r)}</td></tr>`;
+      +`<td>${weight}</td><td>${counterHtml(r)}</td></tr>`;
   }).join('');
   const card=(label,value,sub)=>`<div class="pc-kpi"><div class="pc-kpi-label">${label}</div><div class="pc-kpi-value">${value}</div><div class="pc-kpi-sub">${sub}</div></div>`;
   const candidate=state.candidate,result=candidate?.validation;
@@ -14101,21 +14156,20 @@ function renderPostClose(){
   el.innerHTML=`<div class="pc-shell"><section class="m-card pc-card pc-hero">
     <div class="pc-head"><div><h3 class="pc-title">Which rules earn their place?</h3>
     <p class="pc-copy">Every rule the pipeline applies, measured continuously against what its stocks actually did.
-    Learning collects whether this tab is open or not, and accumulates across all sessions - there is no date to pick.</p></div></div>
+    Learning runs on every refresh beat whether this tab is open or not: a stock is recorded the moment a rule flips for it, its best move updates with every print, and every weight is recomputed from all observations at once.</p></div></div>
     <div class="pc-kpis">${card('Rules measured',rows.length,'Registry plus every REG1 column')}
-    ${card('Stock-sessions',stockSessions,'The unit of evidence')}
+    ${card('Stocks observed',stockSessions,'Each stock once per day, again when a rule flips for it')}
     ${card('Measured decisions',measured.length,'Best move known from the first bar')}
-    ${card('Matured',mature.length,'Past their next-close deadline')}
-    ${card('Sessions',sessionsSeen.size,'Consistency check, not the sample count')}</div>
+    ${card('Matured',mature.length,'Past their next-close deadline')}</div>
     <p class="pc-copy">Last observation: ${when(raw.length?Math.max(...raw.map(p=>p.issuedAt)):0)}. Last outcome check: ${when(state.updatedAt)}.
-    <b>Edge</b> is the mean best move of the stocks that passed a rule minus the mean of those that failed it, both measured on the same day in the same market, so whatever the session did to everything cancels.
+    <b>Edge</b> is the mean best move of the stocks that passed a rule minus the mean of those that failed it, each move taken relative to its own day so whatever the whole market did cancels, pooled over every observation.
     <b>Acting on</b> is what survives that rule's own sampling error - a 1-of-1 sample moves nothing however good its rate looks, while 19-of-20 moves materially - and it is what sets the weight.</p>
     <div class="pc-table-wrap"><table class="pc-table"><thead><tr>
-    ${th('label','Rule')}${th('n','Passed / failed','Stock-session runs, deduplicated per rule')}
+    ${th('label','Rule')}${th('n','Passed / failed','Observations: one per stock per day, plus one each time a rule flips for it')}
     ${th('passMove','Best move when passed')}${th('failMove','Best move when failed')}
     ${th('edge','Edge','Mean best move of passers minus failers, and the part that survives sampling error')}
     ${th('hit','Reached target','Matured records only, so early winners cannot dominate')}
-    ${th('sessions','Sessions')}${th('weight','Weight now')}
+    ${th('weight','Weight now')}
     <th>Loosen / tighten</th></tr></thead><tbody>${body}</tbody></table></div>
     <p class="pc-copy">All weights start EQUAL at the prior and move only as evidence arrives; there is no collecting-then-arming step and no threshold to cross.
     Protected rules - exchange eligibility, listing history, tape freshness, circuit headroom and every configured surveillance column - are measured here but are never weakened automatically.
