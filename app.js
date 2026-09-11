@@ -1,5 +1,5 @@
-const BUILD_TS='2026-09-10 18:47 IST'; // release build time (IST)
-const APP_VERSION=1362;
+const BUILD_TS='2026-09-11 08:41 IST'; // release build time (IST)
+const APP_VERSION=1363;
 const RADAR_SCORE_VERSION='unified-evidence-v1';
 
 // ── v1358: AN UNCAUGHT ERROR MUST NAME ITSELF ─────────────────────────────────────────────────
@@ -1151,6 +1151,16 @@ async function saveInputsToDrive(files){
   const saved=await FS.saveUploadedInputs(pending);
   pending.forEach(markDriveInputPushed);
   return saved;
+}
+// Helper files are already durable locally. Serialize backup sweeps without making rankings
+// wait for Google; failed files remain unmarked and can be retried on the next hydration.
+let _helperInputBackup=Promise.resolve();
+function queueHelperInputBackup(files){
+  _helperInputBackup=_helperInputBackup.then(()=>saveInputsToDrive(files)).catch(e=>{
+    console.warn('Helper input Drive backup failed',e);
+    showToast('Drive input backup failed. Local inputs are loaded; reconnect Drive to retry.',5000,true);
+  });
+  return _helperInputBackup;
 }
 function saveBrainInBackground(label='Brain saved'){
   idleTask(()=>{
@@ -12771,10 +12781,10 @@ async function hydrateFromHelperOnce(reason){
   }
 
   // Something structural changed - fetch the whole set so processFiles sees a coherent picture.
-  const files=[];
-  for(const f of wanted){ const file=await fetchOne(f); if(file) files.push(file); }
+  const files=(await Promise.all(wanted.map(fetchOne))).filter(Boolean);
   if(files.length!==wanted.length) return false;
-  const ok=await processFiles(files,reason||'helper',{silent:true,preserveSelection:true});
+  const ok=await processFiles(files,reason||'helper',{silent:true,skipDriveBackup:true,preserveSelection:true});
+  if(ok) queueHelperInputBackup(files);
   // Marked seen only once the load SUCCEEDED, so a failed pass retries rather than going quiet.
   if(ok) for(const f of wanted) _helperInputSigs[f.name]=sig(f);
   return ok;
@@ -15737,7 +15747,8 @@ async function processFilesImpl(files,sourceLabel,opts={}){
 async function initApp(){
   // Establish helper state before any hydrated/folder input can start the refresh pipeline. This
   // is a localhost probe capped at 1.5s; failure is explicitly tolerated by detectKiteApi().
-  try{ await detectKiteApi(); }catch(e){}
+  const helperReady=detectKiteApi().catch(()=>{});
+  const startupAt=performance.now();
   updateModeUI();
   setLoading(true,'Loading latest cloud data...');
   // Step 0: Restore an active Drive token for this browser session and load cloud brain data.
@@ -15795,6 +15806,9 @@ async function initApp(){
   // state, so reading them back afterwards would persist blank inputs over the real ones.
   try{loadFilterState();}catch(e){console.error('INIT loadFilterState failed:',e);}
 
+  // Both restores must finish before inputs can score or persist settings.
+  await helperReady;
+  console.info('Startup restore ms:',Math.round(performance.now()-startupAt));
   // The local Kite helper owns current inputs; Drive is a backup only.
   try{await hydrateSessionCSVsFromPreferredInputs('INIT');}catch(e){console.warn('INIT: input hydration failed',e);}
 
@@ -15805,7 +15819,7 @@ async function initApp(){
   try{if(ALL.length) renderStats();}catch(e){console.error('INIT step3 renderStats failed:',e);}
 
   // Step 4: Render methodology
-  try{renderMethodology();}catch(e){console.error('INIT step4 renderMethodology failed:',e);}
+  try{if(isMainTabActive(1)) renderMethodology(); else METHODOLOGY_DIRTY=true;}catch(e){console.error('INIT step4 renderMethodology failed:',e);}
 
   // Step 5: Re-apply filter state now that the tradebook can supply the learned Max Alloc.
   try{loadFilterState();}catch(e){console.error('INIT step5 loadFilterState failed:',e);}
@@ -15820,6 +15834,7 @@ async function initApp(){
   // Step 7: Apply filters and render table — runs once, cleanly, with all filters restored
   try{applyFilters();}catch(e){console.error('INIT step7 applyFilters failed:',e);}
   setLoading(false);
+  console.info('Startup ready ms:',Math.round(performance.now()-startupAt));
   schedulePerformanceRender();
   // The helper hydrates on the refresh beat; nothing watches a folder handle any more.
   startStreamRefresh();
