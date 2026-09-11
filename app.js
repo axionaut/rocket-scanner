@@ -1,5 +1,5 @@
-const BUILD_TS='2026-09-11 14:59 IST'; // release build time (IST)
-const APP_VERSION=1368;
+const BUILD_TS='2026-09-11 15:06 IST'; // release build time (IST)
+const APP_VERSION=1369;
 const RADAR_SCORE_VERSION='rocket-tick-v1';
 
 // ── v1358: AN UNCAUGHT ERROR MUST NAME ITSELF ─────────────────────────────────────────────────
@@ -8742,7 +8742,7 @@ function _renderMethodologyInner(){
       </ol></div>
       <div class="m-card"><h4>What Does Not Enter It</h4><p>No indicator, volume, price magnitude, market breadth or learned weight. Thin stocks are handled by the <strong>Drop thinnest %</strong> filter, not by the formula. The seven daily-column groups below describe the Setup label and Risk pill only.</p><div class="rr-groups" style="margin-top:10px">${groupsHTML}</div>${diagHTML}</div>
       <div class="m-card"><h4>When a Row Is GO</h4><p>A row is <strong>GO</strong> when the market is open, live prices are current, the stock is not under a configured surveillance rule, its series and price band are basket-eligible, it is not at the upper circuit, and its Rocket Score is at or above <strong>Min Score ${RECOMMEND_MIN_SCORE}</strong>. These checks decide whether a row can be bought; none of them changes the score. Capital, whole shares and costs then decide how much is funded.</p></div>
-      <div class="m-card"><h4>Held Positions & Basket</h4><p>Held positions stay ranked and may be recommended again as ADDs, bounded by the same allocation rails. The target is the <strong>cost floor</strong>: the first price at which the order, at its real share count, nets a profit after Zerodha's charges on both legs (DP included) and the live book's slippage. It is deliberately small, so capital is freed quickly and redeployed; the Rocket Score supplies the conviction. Income tax is a share of profit and never moves that break-even. A manual Target Override replaces it but is never allowed below it. Stops remain stock-specific inside the ${SL_MIN_PCT.toFixed(1)}%–${SL_MAX_PCT.toFixed(1)}% risk rails.</p></div>
+      <div class="m-card"><h4>Held Positions & Basket</h4><p>Held positions stay ranked and may be recommended again as ADDs, bounded by the same allocation rails. The target is <strong>break-even plus the minimum safe cushion</strong>: the first price at which the order, at its real share count, nets a profit after Zerodha's charges on both legs (DP included) and the live book's slippage, plus the stock's own live bid-ask spread (at least one tick). It is deliberately small, so capital is freed quickly and redeployed; the Rocket Score supplies the conviction. Income tax is a share of profit and never moves that break-even. A manual Target Override replaces it but is never allowed below it. Stops remain stock-specific inside the ${SL_MIN_PCT.toFixed(1)}%–${SL_MAX_PCT.toFixed(1)}% risk rails.</p></div>
     </div>
     <h3 id="meth-ledger" style="margin-top:28px">Feature Ledger <span style="font-size:14px;color:var(--t3);font-weight:400">(${RADAR.features.length||0} setup features from ${RADAR.headers.length||0} input columns)</span></h3>
     <p style="color:var(--t2);line-height:1.7">These are input-file and setup diagnostics. They set the Setup label and Risk pill and never enter the Rocket Score. Input coverage describes this file only, not live-tape availability.</p>
@@ -9364,8 +9364,9 @@ function getRowExitPolicy(row,buyPrice=null,activeInfo=null,nudgeInfo=null,qty=n
   } else {
     targetPct=floorT?floorT.pct:null;
     targetSource=floorT
-      ?`Cost floor: the first target that nets a profit on ${floorT.qty} shares after ₹${floorT.chargesRs.toFixed(2)} charges`
-        +(floorT.slippagePct>0?` and ${floorT.slippagePct.toFixed(2)}% book slippage`:'')
+      ?`Break-even ${floorT.breakEvenPct.toFixed(2)}% on ${floorT.qty} shares (₹${floorT.chargesRs.toFixed(2)} charges`
+        +(floorT.slippagePct>0?` + ${floorT.slippagePct.toFixed(2)}% book slippage`:'')
+        +`) + ${floorT.cushionPct.toFixed(2)}% cushion (${floorT.cushionIsSpread?'its live bid-ask spread':'one tick'})`
       :'No price to size the cost floor';
   }
   const basePct=targetPct;
@@ -9583,9 +9584,14 @@ function costFloorTarget(row,buyPrice,qty){
   if(netAt(hi)<=0) return null;
   let lo=0;
   for(let i=0;i<40;i++){ const mid=(lo+hi)/2; if(netAt(mid)>0) hi=mid; else lo=mid; }
-  let pct=Math.ceil(hi*100)/100;
-  while(Math.round(netAt(pct)*100)<=0) pct=+(pct+0.01).toFixed(2);
-  return {pct,qty:q,slippagePct:+slipPct.toFixed(3),chargesRs:+(buyChg+calcZerodhaCharges(bp*(1+pct/100),q,true)).toFixed(2)};
+  let be=Math.ceil(hi*100)/100;
+  while(Math.round(netAt(be)*100)<=0) be=+(be+0.01).toFixed(2);
+  // v1368: THE MINIMUM SAFE CUSHION above break-even is the stock's own live bid-ask spread - the price
+  // gap between what is quoted and what you may actually get - and never less than one tick. A target
+  // one paisa over break-even is erased by landing on the wrong side of the book once.
+  const cushionPct=Math.max(Number.isFinite(fr?.spreadPct)&&fr.spreadPct>0?fr.spreadPct:0,0.05/bp*100);
+  const pct=+(Math.ceil((be+cushionPct)*100)/100).toFixed(2);
+  return {pct,breakEvenPct:be,cushionPct:+cushionPct.toFixed(3),cushionIsSpread:cushionPct>0.05/bp*100,qty:q,slippagePct:+slipPct.toFixed(3),chargesRs:+(buyChg+calcZerodhaCharges(bp*(1+pct/100),q,true)).toFixed(2)};
 }
 // Open Positions is a different decision surface from Recommendations. Recommendations begin with
 // the ALL NSE cross-section and ask whether a fresh entry survives a 5-minute validation. A held
@@ -9605,10 +9611,14 @@ function getOpenPositionTargetFloor(sym,pos){
   const nextTick=+((Math.floor((avgPrice+1e-9)/0.05)+1)*0.05).toFixed(2);
   const anchorPrice=Math.max(nextTick,tickPrice(raw));
   const costFloorPrice=getPositionAfterCostFloor(avgPrice,Number(pos?.qty));
-  const price=Math.max(anchorPrice,costFloorPrice||0);
+  // v1368: break-even plus the minimum safe cushion - the live bid-ask spread, at least one tick.
+  const frH=costFloorPrice>0?getTradeFrictionPct({symbol:sym,price:avgPrice,turnover:null},Number(pos?.qty)*avgPrice):null;
+  const cushionPx=Math.max(0.05,Number.isFinite(frH?.spreadPct)&&frH.spreadPct>0?costFloorPrice*frH.spreadPct/100:0);
+  const cushionFloorPrice=costFloorPrice>0?+(Math.ceil((costFloorPrice+cushionPx-1e-9)/0.05)*0.05).toFixed(2):null;
+  const price=Math.max(anchorPrice,cushionFloorPrice||0);
   const source=anchorPct!=null?'manual Target Override':'cost floor';
   return {avgPrice,price:+price.toFixed(2),anchorPrice:+anchorPrice.toFixed(2),
-    costFloorPrice,anchorPct,source};
+    costFloorPrice,cushionFloorPrice,cushionIsSpread:cushionPx>0.05,anchorPct,source};
 }
 function getPositionDeadline(sym,pos){
   const qty=Math.max(0,Number(pos?.qty)||0);
@@ -9777,7 +9787,7 @@ function getOpenPositionTapePolicy(sym,pos){
   const targetWhy=targetFloor
     ?(targetFloor.anchorPct!=null
       ?`Manual Target Override +${targetFloor.anchorPct.toFixed(2)}% from average buy ${fmtINR(targetFloor.avgPrice)}, never below the after-cost floor.`
-      :`Cost floor: the first price at which selling ${qty} shares bought at ${fmtINR(targetFloor.avgPrice)} nets a profit after both legs' charges (DP included).`)
+      :`Break-even ${fmtINR(targetFloor.costFloorPrice)} for ${qty} shares bought at ${fmtINR(targetFloor.avgPrice)} (both legs' charges, DP included) + a cushion of ${targetFloor.cushionIsSpread?'its live bid-ask spread':'one tick'}.`)
     :'Average buy is unavailable, so no cost floor can be established.';
   const paceRs=pacePct!=null&&hi>0?hi*pacePct/100:null;
   const reason=deadline.due?'BTST deadline reached: exit by this session close.'
