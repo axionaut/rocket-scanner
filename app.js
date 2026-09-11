@@ -1,5 +1,5 @@
-const BUILD_TS='2026-09-11 11:24 IST'; // release build time (IST)
-const APP_VERSION=1365;
+const BUILD_TS='2026-09-11 12:14 IST'; // release build time (IST)
+const APP_VERSION=1366;
 const RADAR_SCORE_VERSION='unified-evidence-v1';
 
 // ── v1358: AN UNCAUGHT ERROR MUST NAME ITSELF ─────────────────────────────────────────────────
@@ -13956,6 +13956,11 @@ function renderRankingsPanels(){
 // Map configured-surveillance rule keys → their human labels. A removed row can outlive the exact
 // in-memory key array that created it (Drive/settings refresh), so recover through the stock's raw
 // REG1 columns before ever falling back to a generic reason.
+// v1366: restored - v1346's patch deleted it while index.html's Close button still calls it, so the
+// button threw a ReferenceError and did nothing (Esc was the only way out). A click on the dimmed
+// backdrop (the dialog element itself, outside the panel) closes it too.
+function closeRadarDetail(){document.getElementById('radarDetail')?.close();}
+document.addEventListener('click',e=>{const d=document.getElementById('radarDetail');if(d&&d.open&&e.target===d) d.close();});
 function showRadarDetail(sym){
   const r=ALL.find(x=>x.symbol===sym);
   const dlg=document.getElementById('radarDetail');
