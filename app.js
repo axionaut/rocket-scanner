@@ -1,5 +1,5 @@
-const BUILD_TS='2026-09-15 10:43 IST'; // release build time (IST)
-const APP_VERSION=1376;
+const BUILD_TS='2026-09-15 10:57 IST'; // release build time (IST)
+const APP_VERSION=1377;
 const RADAR_SCORE_VERSION='rocket-tick-v1'; // v1375: the score is v1371's arithmetic again, so it
 // carries v1371's tag - outcome records from before the learning layer are directly comparable.
 
@@ -42,7 +42,7 @@ if(typeof window!=='undefined'){
     reportAppError('Unhandled promise rejection',ev&&ev.reason,'');
   });
 }
-const TARGET_POLICY_VERSION='market-reach-cost-floor-v1'; // v1376: reverted to v1371's market-derived target
+const TARGET_POLICY_VERSION='market-target-independent-v2';
 function isValidChangeOpen(v){
   if(v===null||v===undefined||typeof v==='boolean') return false;
   if(typeof v==='string'&&v.trim()==='') return false;
@@ -6461,21 +6461,6 @@ function getDefaultMaxAlloc(){return getGoalAllocationPlan().maxAlloc;}
 // respectable profit?" A trade is worth taking only if it nets what ONE trade has to earn for the
 // owner's own goal: the goal's daily rupee need divided by his entries per day. Not a chosen number -
 // the same per-trade figure v1299 sizes allocations with. Read by every target, so memoized briefly.
-let _respectableProfitMemo=null;
-function respectableProfitRs(){
-  const now=Date.now();
-  if(_respectableProfitMemo&&now-_respectableProfitMemo.at<1500) return _respectableProfitMemo.v;
-  let v=0;
-  try{ const p=getGoalAllocationPlan(); v=Number(p.profitPerTrade)>0?Number(p.profitPerTrade):0; }catch(e){}
-  // v1372 (owner): "don't allocate if the return isn't enough to cover the cost plus a minimum of
-  // Rs.100". The goal figure above is DYNAMIC - daily need divided by entries per day - so it falls
-  // with capital, with a goal nearly met, or with no tradebook history at all, and nothing stopped it
-  // reaching a few rupees and recommending a Rs10 trade. MIN_TRADE_NET_RS is the floor under it: an
-  // owner risk preference, and the one place a trade is declared too small to be worth taking.
-  v=Math.max(MIN_TRADE_NET_RS,v);
-  _respectableProfitMemo={at:now,v};
-  return v;
-}
 function goalAllocationExplanation(){
   const p=getGoalAllocationPlan();
   if(!(p.trades>0)) return 'Need completed trade history to estimate entries per day; existing capital and risk limits still apply.';
@@ -9422,15 +9407,8 @@ function getRowExitPolicy(row,buyPrice=null,activeInfo=null,nudgeInfo=null,qty=n
     targetPct=toStep(Number(active.tgtPct));
     targetSource='manual anchor';
   } else {
-    // v1375 (owner): REVERTED to v1371/v1212 - the automatic price is the MARKET read (tape/session
-    // reach, already bounded above by capacity and the circuit), never a rupee profit figure forced
-    // onto every row. Only when no market read exists at all does the cost floor stand in.
-    targetPct=available>0?toStep(available):(floorT?floorT.floorPct:null);
-    targetSource=available>0?availableSource
-      :floorT?`Break-even ${floorT.breakEvenPct.toFixed(2)}% on ${floorT.qty} shares (₹${floorT.chargesRs.toFixed(2)} charges`
-        +(floorT.slippagePct>0?` + ${floorT.slippagePct.toFixed(2)}% book slippage`:'')
-        +`) + ${floorT.cushionPct.toFixed(2)}% cushion (${floorT.cushionIsSpread?'its live bid-ask spread':'one tick'})`
-      :'No price to size the cost floor';
+    targetPct=available>0?toStep(available):null;
+    targetSource=available>0?availableSource:'No market-derived target available';
   }
   // v1371: the order's own target must be a move the stock can make. Its reach is the measured
   // whole-day read from the open (v1216: remaining travel to the session high pooled from the app's own
@@ -9446,7 +9424,7 @@ function getRowExitPolicy(row,buyPrice=null,activeInfo=null,nudgeInfo=null,qty=n
   // (₹100). This is the "no 1 share of a 24 rupee stock" rule; it no longer inflates the target
   // itself toward the full goal-sized rupee figure (that was v1371-v1374's costFloorTarget search).
   const netAtTarget=(floorT&&targetPct>0)?floorT.netAt(targetPct):null;
-  const profitShort=!!(active.source!=='manual'&&(!floorT||!(targetPct>0)||netAtTarget==null||netAtTarget<MIN_TRADE_NET_RS));
+  const profitShort=!!(!floorT||!(targetPct>0)||netAtTarget==null||netAtTarget<MIN_TRADE_NET_RS);
   const basePct=targetPct;
   let nudgePct=0;
   // v1216: WHAT THE TARGET PERCENTAGE IS MEASURED FROM. A clock or tape read is further travel
@@ -9704,27 +9682,13 @@ function getOpenPositionTargetFloor(sym,pos){
   const frH=costFloorPrice>0?getTradeFrictionPct({symbol:sym,price:avgPrice,turnover:null},Number(pos?.qty)*avgPrice):null;
   const cushionPx=Math.max(0.05,Number.isFinite(frH?.spreadPct)&&frH.spreadPct>0?costFloorPrice*frH.spreadPct/100:0);
   const cushionFloorPrice=costFloorPrice>0?+(Math.ceil((costFloorPrice+cushionPx-1e-9)/0.05)*0.05).toFixed(2):null;
-  // v1371: the same respectable profit the entry's GTT was priced for, at the real avg and qty - but
-  // never above the stock's own daily reach from the average, so a small legacy holding is not handed
-  // an unreachable target.
-  let profitPrice=null,profitCapped=false;
-  const qtyH=Math.abs(Number(pos?.qty)||0),R=respectableProfitRs();
-  if(anchorPct==null&&R>0&&qtyH>0){
-    const buyDebit=avgPrice*qtyH+calcZerodhaCharges(avgPrice,qtyH,false,false,false);
-    const netAt=p=>p*qtyH-calcZerodhaCharges(p,qtyH,true,false,false)-buyDebit;
-    let lo=avgPrice,hi=avgPrice*1.01;
-    for(let i=0;i<30&&netAt(hi)<R;i++) hi=avgPrice+(hi-avgPrice)*2;
-    if(netAt(hi)>=R){
-      for(let i=0;i<48;i++){ const mid=(lo+hi)/2; if(netAt(mid)>=R) hi=mid; else lo=mid; }
-      profitPrice=+(Math.ceil((hi-1e-9)/0.05)*0.05).toFixed(2);
-    }
-    let cap=null; try{ const row=Array.isArray(ALL)?ALL.find(s=>s.symbol===sym):null; const om=sessionOpenClockMinutes(); const w=row&&om!=null?getClockRunwayRead(row,{atMinutes:om}):null; const c=w&&w.pct>0?w.pct:rowCapacityPct(row); if(c>0) cap=avgPrice*(1+c/100); }catch(e){}
-    if(cap>0&&(profitPrice==null||profitPrice>cap)){ profitPrice=+(Math.floor(cap/0.05)*0.05).toFixed(2); profitCapped=true; }
-  }
-  const price=Math.max(anchorPrice,cushionFloorPrice||0,profitPrice||0);
-  const source=anchorPct!=null?'manual Target Override':(profitPrice>0&&profitPrice>=(cushionFloorPrice||0)?(profitCapped?'its typical reach (a full per-trade profit is out of reach at this size)':'cost floor + per-trade profit'):'cost floor');
+  const row=(ALL||[]).find(candidate=>candidate.symbol===sym);
+  const policy=anchorPct==null&&row?getRowExitPolicy(row,avgPrice,active,null,Number(pos?.qty)):null;
+  const marketPrice=policy?.targetPct>0?tickPrice(avgPrice*(1+policy.targetPct/100)):null;
+  const price=Math.max(anchorPrice,cushionFloorPrice||0,marketPrice||0);
+  const source=anchorPct!=null?'manual Target Override':marketPrice>0?policy.targetSource:'cost floor';
   return {avgPrice,price:+price.toFixed(2),anchorPrice:+anchorPrice.toFixed(2),
-    costFloorPrice,cushionFloorPrice,cushionIsSpread:cushionPx>0.05,anchorPct,source,profitPrice,profitRs:R>0?R:null};
+    costFloorPrice,cushionFloorPrice,cushionIsSpread:cushionPx>0.05,anchorPct,source,marketPrice};
 }
 function getPositionDeadline(sym,pos){
   const qty=Math.max(0,Number(pos?.qty)||0);
@@ -9884,8 +9848,6 @@ function getOpenPositionTapePolicy(sym,pos){
   const eodPrice=Number.isFinite(tape.predClose)?tape.predClose:null;
   const tapeTargetPrice=tickPrice(livePrice);
   const targetFloor=getOpenPositionTargetFloor(s,pos);
-  // v1368: the held target is the cost floor itself (or the manual override), not the historical
-  // upside - reach it, free the capital, redeploy it.
   const targetPrice=targetFloor?.price>0?+targetFloor.price.toFixed(2):tapeTargetPrice;
   const targetPct=targetFloor?.avgPrice>0
     ?100*(targetPrice/targetFloor.avgPrice-1)
@@ -9893,7 +9855,7 @@ function getOpenPositionTapePolicy(sym,pos){
   const targetWhy=targetFloor
     ?(targetFloor.anchorPct!=null
       ?`Manual Target Override +${targetFloor.anchorPct.toFixed(2)}% from average buy ${fmtINR(targetFloor.avgPrice)}, never below the after-cost floor.`
-      :`Break-even ${fmtINR(targetFloor.costFloorPrice)} for ${qty} shares bought at ${fmtINR(targetFloor.avgPrice)} (both legs' charges, DP included) + a cushion of ${targetFloor.cushionIsSpread?'its live bid-ask spread':'one tick'}.`)
+      :`${targetFloor.marketPrice>0?'Market target from '+targetFloor.source+'. ':''}After-cost floor ${fmtINR(targetFloor.cushionFloorPrice)} for ${qty} shares bought at ${fmtINR(targetFloor.avgPrice)} (both legs' charges, DP and cushion included). This floor is a profit objective, not evidence of achievable upside.`)
     :'Average buy is unavailable, so no cost floor can be established.';
   const paceRs=pacePct!=null&&hi>0?hi*pacePct/100:null;
   const reason=deadline.due?'BTST deadline reached: exit by this session close.'
@@ -9996,7 +9958,7 @@ function computeAlloc(capital, selList){
     const frictionKnown=!!(fr?.covered&&Number.isFinite(fr.entryPct)&&Number.isFinite(fr.exitPct));
     const frictionRs=frictionKnown?qty*buyP*Math.max(0,fr.entryPct+fr.exitPct)/100:null;
     const expectedNet=qty*buyP*(tgtPct/100)-charges-(frictionRs||0);
-    if(!Number.isFinite(expectedNet)||Math.round(expectedNet*100)<=0){
+    if(!Number.isFinite(expectedNet)||expectedNet<MIN_TRADE_NET_RS){
       return {ok:false,rejected:true,expectedNet,charges,frictionKnown,frictionRs,tgtPct,policy,
         reason:`${qty} shares: target gain ${fmtINR(qty*buyP*tgtPct/100)} cannot clear ${fmtINR(charges+(frictionRs||0))} estimated delivery costs${frictionKnown?' including slippage':''}`};
     }
