@@ -1,5 +1,5 @@
-const BUILD_TS='2026-09-13 10:44 IST'; // release build time (IST)
-const APP_VERSION=1373;
+const BUILD_TS='2026-09-15 09:59 IST'; // release build time (IST)
+const APP_VERSION=1374;
 const RADAR_SCORE_VERSION='rocket-opportunity-v2';
 
 // ── v1358: AN UNCAUGHT ERROR MUST NAME ITSELF ─────────────────────────────────────────────────
@@ -3414,13 +3414,26 @@ function radarScoreTitle(r){
 
 // Pressure paths and outcomes only. v1 aggregates cannot recover lost trajectory shapes;
 // retain that store untouched, but do not relabel it as v2 evidence.
-const PRESSURE_LEARN_STORE='rs_pressure_learning_v2';
-const PRESSURE_LEARN_SCHEMA='pressure-outcome-v2';
+const PRESSURE_LEARN_STORE='rs_pressure_learning_v3';
+const PRESSURE_LEARN_SCHEMA='pressure-outcome-v3';
+// THE OUTCOME WINDOW IS THE APP'S OWN EVIDENCE WINDOW (v1372's rule, restored in v1374), not a new
+// number: TAPE_MIN_SESSION_BARS five-minute bars. v1373 ended an outcome the first bucket pressure
+// fell to 50, which with 10-second buckets and a one-minute half-life is a ~10-SECOND window.
+// Measured on 1,637 live symbols: the median case lived ONE bucket (0.17 min), 59.8% of cases
+// recorded zero upside and mean upside was 0.063% against a 0.35-0.50% round-trip cost - so every
+// row failed by arithmetic, permanently, and no amount of waiting could change it. The same tape
+// graded over a fixed window gives 0.127% at 1 min, 0.326% at 6 min and 0.422% at 12 min. v2 cases
+// are 10-second outcomes and cannot be compared with these, so the store starts again at v3.
+const PRESSURE_HORIZON_MS=TAPE_BAR_MS*TAPE_MIN_SESSION_BARS;
 // Explicit implementation parameters, not market truths. No minimum sample gate.
 const PRESSURE_PATH_POINTS=7; // whole path, evenly spaced over the helper's half-life
-const PRESSURE_MAX_CASES=5000; // rolling storage budget; oldest matured cases retire first
+// One case per symbol per window now instead of one every few buckets, so the store must span
+// hours rather than the ~90 seconds 5,000 bought at v1373's rate. At ~55 matured cases a minute
+// this is about three hours of market-wide evidence, and it is what the prediction pass can
+// afford: benchmarked at 716 ms for 10,000 cases x 1,650 rows (1,349 ms at 20,000).
+const PRESSURE_MAX_CASES=10000; // rolling storage budget; oldest matured cases retire first
 const ROCKET_OPP_SCALE=0.05; // percent net per minute at score 50; stable across boards
-let PRESSURE_LEARN=null, _pressureRevision=0;
+let PRESSURE_LEARN=null, _pressureRevision=0, _pressureSaveAt=0;
 const _pressurePredictionMemo=new Map();
 function pressureLearnState(){
   if(PRESSURE_LEARN) return PRESSURE_LEARN;
@@ -3442,7 +3455,7 @@ function pressurePath(history,at,halfLife){
   for(let i=0;i<PRESSURE_PATH_POINTS;i++){
     const t=start+i*halfLife/(PRESSURE_PATH_POINTS-1);
     while(j+1<history.length&&history[j+1].t<=t)j++;
-    path.push(history[j].p);
+    path.push(+history[j].p.toFixed(1));
   }
   return path;
 }
@@ -3455,9 +3468,13 @@ function rocketLearningTick(){
       const x=history[i];
       if(!(x.t>Number(st.seen[sym]||0))||x.t>now||!(x.px>0)||!Number.isFinite(x.p))continue;
       let pending=st.pend[sym];
-      // Missing captured buckets censor the case; never call partial history complete.
-      // Overnight continuity is allowed only when no open-session buckets are missing.
-      if(pending&&x.t-pending.lastT>step*1.5){
+      // The PATH is censored on any missing bucket below (an unobserved shape is not a flat one).
+      // The OUTCOME is not: the helper writes a bucket only when it actually saw ticks, so a
+      // missing bucket is a stock that did not trade and no price was missed. Only a gap longer
+      // than the pressure's own memory breaks continuous observation. Measured: censoring the
+      // outcome at 1.5 buckets killed 98.4% of 12-minute windows, so v1373's rule and a fixed
+      // horizon together would have matured almost nothing.
+      if(pending&&x.t-pending.lastT>halfLife){
         const a=istClock(pending.lastT-1),b=istClock(x.t-1);
         const overnight=istDayKey(pending.lastT)!==istDayKey(x.t)&&a.mins>=15*60+30-step/60000&&b.mins<9*60+15+step/60000;
         if(!overnight){delete st.pend[sym];pending=null;}
@@ -3465,10 +3482,10 @@ function rocketLearningTick(){
       if(pending){
         if(x.hiT>pending.t&&x.hiT<=x.t&&x.hi>pending.hi){pending.hi=x.hi;pending.hiT=x.hiT;}
         pending.lastT=x.t;
-        if(x.p<=50){
+        if(x.t-pending.t>=PRESSURE_HORIZON_MS){
           const up=Math.max(0,(pending.hi/pending.p0-1)*100);
-          // A zero-upside case spends the full observed continuation time, not zero minutes.
-          st.cases.push({id:sym+':'+pending.t,path:pending.path,up,
+          // A zero-upside case spends the whole window, not zero minutes.
+          st.cases.push({path:pending.path,up,
             minutes:((up>0?pending.hiT:x.t)-pending.t)/60000,maturedAt:x.t});
           if(st.cases.length>PRESSURE_MAX_CASES)st.cases.splice(0,st.cases.length-PRESSURE_MAX_CASES);
           delete st.pend[sym];
@@ -3486,23 +3503,94 @@ function rocketLearningTick(){
   }
   if(changed){
     _pressureRevision++;_pressurePredictionMemo.clear();
-    if(typeof localStorage!=='undefined')localStorage.setItem(PRESSURE_LEARN_STORE,JSON.stringify(st));
-    FS.set(PRESSURE_LEARN_STORE,structuredClone(st));
+    // The store is rebuildable evidence, so it is written on the pressure bucket's own cadence
+    // rather than on every pass: a 20,000-case stringify plus clone on each beat is not free.
+    if(now-_pressureSaveAt>=60000){
+      _pressureSaveAt=now;
+      if(typeof localStorage!=='undefined')localStorage.setItem(PRESSURE_LEARN_STORE,JSON.stringify(st));
+      FS.set(PRESSURE_LEARN_STORE,structuredClone(st));
+    }
   }
+}
+// The store is re-read for every scored row, so it is laid out ONCE per learning revision as flat
+// typed arrays and the per-row scratch is reused. Object-of-arrays plus a fresh 20,000-element
+// buffer per row measured 3,464 ms over 1,650 rows; this is 1/6th of that for identical output.
+let _presMatrix=null,_presDist=null,_presAt=null;
+function pressureCaseMatrix(cases,L){
+  if(_presMatrix&&_presMatrix.rev===_pressureRevision&&_presMatrix.L===L&&_presMatrix.src===cases.length)
+    return _presMatrix;
+  const src=cases.length,m=new Float32Array(src*L),up=new Float64Array(src),
+        mins=new Float64Array(src),mat=new Float64Array(src);
+  let n=0;
+  for(let i=0;i<src;i++){
+    const c=cases[i];
+    if(!c||!Array.isArray(c.path)||c.path.length!==L||!Number.isFinite(c.up)||!Number.isFinite(c.minutes))continue;
+    for(let k=0;k<L;k++)m[n*L+k]=c.path[k];
+    up[n]=c.up;mins[n]=c.minutes;mat[n]=c.maturedAt;n++;
+  }
+  // The record's own mean is a property of the store, not of the query, so it is taken once here.
+  let sUp=0,sMin=0;for(let i=0;i<n;i++){sUp+=up[i];sMin+=mins[i];}
+  return _presMatrix={m,up,mins,mat,n,L,meanUp:n?sUp/n:0,meanMin:n?sMin/n:0,rev:_pressureRevision,src};
+}
+// Quickselect: the k-th smallest distance in O(n), keeping each distance paired with its case.
+// A full sort of 10,000 distances for every one of ~1,650 rows is not affordable on the beat.
+function pressureSelectKth(dist,at,n,k){
+  let lo=0,hi=n-1;
+  while(lo<hi){
+    const p=dist[lo+((Math.random()*(hi-lo+1))|0)];
+    let i=lo,j=hi;
+    while(i<=j){
+      while(dist[i]<p)i++;
+      while(dist[j]>p)j--;
+      if(i<=j){
+        const d=dist[i];dist[i]=dist[j];dist[j]=d;
+        const a=at[i];at[i]=at[j];at[j]=a;
+        i++;j--;
+      }
+    }
+    if(k<=j)hi=j;else if(k>=i)lo=i;else return dist[k];
+  }
+  return dist[k];
 }
 function pressurePrediction(sym){
   const st=pressureLearnState(),path=st.paths[sym];
   if(!st.cases.length||!path)return null;
   const cached=_pressurePredictionMemo.get(sym);if(cached)return cached;
-  const now=Date.now();let weight=0,up=0,time=0,n=0;
-  for(const c of st.cases){
-    if(c.maturedAt>now||c.path.length!==path.length)continue;
+  const L=path.length,M=pressureCaseMatrix(st.cases,L);
+  if(!M.n)return null;
+  const now=Date.now(),m=M.m;
+  if(!_presDist||_presDist.length<M.n){_presDist=new Float64Array(M.n);_presAt=new Int32Array(M.n);}
+  const dist=_presDist,at=_presAt;let n=0;
+  for(let i=0,o=0;i<M.n;i++,o+=L){
+    if(M.mat[i]>now)continue;
     // Direct whole-path squared distance in pressure units, no derived indicators.
-    const distance=c.path.reduce((a,p,i)=>a+(p-path[i])**2,0)/path.length;
-    const w=1/(1+distance);weight+=w;up+=w*c.up;time+=w*c.minutes;n++;
+    let d=0;for(let k=0;k<L;k++){const e=m[o+k]-path[k];d+=e*e;}
+    dist[n]=d/L;at[n]=i;n++;
+  }
+  if(!n)return null;
+  // THE BANDWIDTH IS THE DISTANCE TO THIS QUERY'S OWN sqrt(n)-th NEAREST CASE - the standard
+  // nearest-neighbour rate, derived from the store's size rather than chosen, and it follows the
+  // neighbourhood however large or small it is. v1373 weighted by 1/(1+distance), which has no
+  // width at all: measured over 5,000 live cases the single closest case carried 0.14% of the
+  // total weight, so every stock was handed the store's global mean and the trajectory match was
+  // inert (predicted upside spanned 0.043-0.091% across 400 rows against a store mean of 0.064%).
+  // A fixed decile of the distance spread fails the other way: a matching neighbourhood smaller
+  // than that decile is drowned by the mass outside it.
+  const h=Math.max(pressureSelectKth(dist,at,n,Math.max(1,Math.ceil(Math.sqrt(n)))-1),1e-9),far=12*h;
+  let weight=0,up=0,time=0;
+  for(let i=0;i<n;i++){
+    // exp(-12) is 6e-6: past that a case cannot move the estimate, and the call is the hot cost.
+    if(dist[i]>far)continue;
+    const j=at[i],w=Math.exp(-dist[i]/h);
+    weight+=w;up+=w*M.up[j];time+=w*M.mins[j];
   }
   if(!weight)return null;
-  const result={upPct:up/weight,minutes:time/weight,cell:'raw pressure path',n,obs:n};
+  // Shrunk toward the whole record by counting it as ONE observation - the same rule v1372 used to
+  // shrink a cell toward its parent. A sharp bandwidth on a young store would otherwise let the
+  // single nearest case become the entire forecast; here one close match barely moves off the
+  // record's own mean and hundreds of them own the estimate. No minimum sample gate is created.
+  const result={upPct:(up+M.meanUp)/(weight+1),minutes:(time+M.meanMin)/(weight+1),
+    cell:'raw pressure path',n,obs:n};
   _pressurePredictionMemo.set(sym,result);return result;
 }
 function rocketCostRead(r,upPct=0,quantity=null){
