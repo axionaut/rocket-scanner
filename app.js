@@ -1,5 +1,5 @@
-const BUILD_TS='2026-09-15 10:17 IST'; // release build time (IST)
-const APP_VERSION=1375;
+const BUILD_TS='2026-09-15 10:43 IST'; // release build time (IST)
+const APP_VERSION=1376;
 const RADAR_SCORE_VERSION='rocket-tick-v1'; // v1375: the score is v1371's arithmetic again, so it
 // carries v1371's tag - outcome records from before the learning layer are directly comparable.
 
@@ -42,7 +42,7 @@ if(typeof window!=='undefined'){
     reportAppError('Unhandled promise rejection',ev&&ev.reason,'');
   });
 }
-const TARGET_POLICY_VERSION='cost-floor-profit-v1';
+const TARGET_POLICY_VERSION='market-reach-cost-floor-v1'; // v1376: reverted to v1371's market-derived target
 function isValidChangeOpen(v){
   if(v===null||v===undefined||typeof v==='boolean') return false;
   if(typeof v==='string'&&v.trim()==='') return false;
@@ -9422,12 +9422,14 @@ function getRowExitPolicy(row,buyPrice=null,activeInfo=null,nudgeInfo=null,qty=n
     targetPct=toStep(Number(active.tgtPct));
     targetSource='manual anchor';
   } else {
-    targetPct=floorT?floorT.pct:null;
-    targetSource=floorT
-      ?`Break-even ${floorT.breakEvenPct.toFixed(2)}% on ${floorT.qty} shares (₹${floorT.chargesRs.toFixed(2)} charges`
+    // v1375 (owner): REVERTED to v1371/v1212 - the automatic price is the MARKET read (tape/session
+    // reach, already bounded above by capacity and the circuit), never a rupee profit figure forced
+    // onto every row. Only when no market read exists at all does the cost floor stand in.
+    targetPct=available>0?toStep(available):(floorT?floorT.floorPct:null);
+    targetSource=available>0?availableSource
+      :floorT?`Break-even ${floorT.breakEvenPct.toFixed(2)}% on ${floorT.qty} shares (₹${floorT.chargesRs.toFixed(2)} charges`
         +(floorT.slippagePct>0?` + ${floorT.slippagePct.toFixed(2)}% book slippage`:'')
-        +`) + ${floorT.profitPct!=null?`₹${Math.round(floorT.profitRs).toLocaleString('en-IN')} net profit (your goal per trade)`
-          :`${floorT.cushionPct.toFixed(2)}% cushion (${floorT.cushionIsSpread?'its live bid-ask spread':'one tick'})`}`
+        +`) + ${floorT.cushionPct.toFixed(2)}% cushion (${floorT.cushionIsSpread?'its live bid-ask spread':'one tick'})`
       :'No price to size the cost floor';
   }
   // v1371: the order's own target must be a move the stock can make. Its reach is the measured
@@ -9439,7 +9441,12 @@ function getRowExitPolicy(row,buyPrice=null,activeInfo=null,nudgeInfo=null,qty=n
   // range, was funded at +18.36%).
   const reachBound=[wholeDayReachPct>0?wholeDayReachPct:medianRowCapacityPct(),circuitRunwayPct>0?circuitRunwayPct:null].filter(v=>v>0);
   const reachPctBound=reachBound.length?Math.min(...reachBound):null;
-  const profitShort=!!(floorT&&active.source!=='manual'&&(floorT.profitUnreachable||(reachPctBound!=null&&targetPct>reachPctBound)));
+  // v1375 (owner): the ALLOCATION gate, kept - a row cannot be recommended for a size whose own
+  // target, at its own share count, fails to clear costs plus the minimum MIN_TRADE_NET_RS profit
+  // (₹100). This is the "no 1 share of a 24 rupee stock" rule; it no longer inflates the target
+  // itself toward the full goal-sized rupee figure (that was v1371-v1374's costFloorTarget search).
+  const netAtTarget=(floorT&&targetPct>0)?floorT.netAt(targetPct):null;
+  const profitShort=!!(active.source!=='manual'&&(!floorT||!(targetPct>0)||netAtTarget==null||netAtTarget<MIN_TRADE_NET_RS));
   const basePct=targetPct;
   let nudgePct=0;
   // v1216: WHAT THE TARGET PERCENTAGE IS MEASURED FROM. A clock or tape read is further travel
@@ -9450,8 +9457,8 @@ function getRowExitPolicy(row,buyPrice=null,activeInfo=null,nudgeInfo=null,qty=n
   const targetRefPrice=Number(bandRef)>0?Number(bandRef):livePrice;
   const targetRefSource='entry price';
   const stopPct=getRowStopDistancePct(row);
-  // The cost floor IS the hurdle: a manual target is held to it, the automatic target is it.
-  const minGrossPct=floorT?floorT.pct:null;
+  // The cost floor is the hurdle: a manual target is held to it, the automatic target is bounded by it.
+  const minGrossPct=floorT?floorT.floorPct:null;
   const uc=getUpperCircuitInfo(row,bandRef);
   const bandLimited=!!(uc&&basePct>0&&uc.runwayPct<basePct);
   const rangeExhausted=!!(sc&&basePct>0&&sc.runwayPct<basePct);
@@ -9462,8 +9469,10 @@ function getRowExitPolicy(row,buyPrice=null,activeInfo=null,nudgeInfo=null,qty=n
   const tapeReach=tapeReachability(row?.symbol,targetPct);
   const reachBlocked=false;
   const viabilitySource=profitShort
-    ?`₹${Math.round(floorT.orderRs).toLocaleString('en-IN')} (${floorT.qty} sh) needs ${floorT.profitUnreachable?'an impossible move':'+'+targetPct.toFixed(2)+'%'} to clear costs and net ₹${Math.round(floorT.profitRs).toLocaleString('en-IN')}`
-      +(reachPctBound!=null?`; it typically reaches ${reachPctBound.toFixed(2)}%`:'')
+    ?(floorT
+        ?`₹${Math.round(floorT.orderRs).toLocaleString('en-IN')} (${floorT.qty} sh) at ${targetPct>0?targetPct.toFixed(2)+'%':'no target'} nets ₹${netAtTarget!=null?Math.round(netAtTarget).toLocaleString('en-IN'):'0'}, short of costs + ₹${MIN_TRADE_NET_RS} minimum`
+          +(reachPctBound!=null?`; it typically reaches ${reachPctBound.toFixed(2)}%`:'')
+        :'No price to size the cost floor')
     :targetPct>0?'Target economics':targetSource;
   const viable=!profitShort&&targetPct>0&&(minGrossPct==null||targetPct+1e-9>=minGrossPct);
   const belowMarketRead=!!(available!=null&&targetPct>available);
@@ -9637,13 +9646,14 @@ function getPositionAfterCostFloor(avgPrice,qty){
   while(netAt(tick)<=0) tick=+(tick+0.05).toFixed(2);
   return tick;
 }
-// v1368: THE TARGET IS THE COST FLOOR (owner): the smallest target at which THIS order, at its real
-// share count, still nets a profit after every cost the app can measure - Zerodha's charges on both
-// legs (DP included) and the live book's slippage in and out. Fast target, fast capital recycling;
-// conviction comes from the Rocket Score, not from asking a stock for a bigger move. Income tax is a
-// share of the PROFIT, so it shrinks the gain but can never move this break-even. The arithmetic is
-// the allocator's own (evalNet), and the sale price is floored to the tick, so a target produced here
-// always passes that check.
+// v1375 (owner): REVERTED to v1371's market-derived target. costFloorTarget now returns only the
+// COST FLOOR - break-even plus the minimum safe cushion (its own live bid-ask spread, never less
+// than one tick) - and a netAt(pct) probe. It no longer searches for the percentage that nets a
+// fixed goal-sized rupee figure: that search priced every stock at whatever % happened to net the
+// SAME rupee amount (the goal's per-trade profit), which is why unrelated stocks converged on one
+// identical net profit on screen. The floor is used only as an ALLOCATION GATE now (see
+// getRowExitPolicy): a row may not be recommended unless its own target, at its own share count,
+// nets costs plus the minimum MIN_TRADE_NET_RS profit - never the full goal-sized figure.
 function costFloorTarget(row,buyPrice,qty){
   const bp=Number(buyPrice);
   if(!(bp>0)) return null;
@@ -9663,32 +9673,14 @@ function costFloorTarget(row,buyPrice,qty){
   for(let i=0;i<40;i++){ const mid=(lo+hi)/2; if(netAt(mid)>0) hi=mid; else lo=mid; }
   let be=Math.ceil(hi*100)/100;
   while(Math.round(netAt(be)*100)<=0) be=+(be+0.01).toFixed(2);
-  // v1368: THE MINIMUM SAFE CUSHION above break-even is the stock's own live bid-ask spread - the price
+  // The MINIMUM SAFE CUSHION above break-even is the stock's own live bid-ask spread - the price
   // gap between what is quoted and what you may actually get - and never less than one tick. A target
   // one paisa over break-even is erased by landing on the wrong side of the book once.
   const cushionPct=Math.max(Number.isFinite(fr?.spreadPct)&&fr.spreadPct>0?fr.spreadPct:0,0.05/bp*100);
-  let pct=+(Math.ceil((be+cushionPct)*100)/100).toFixed(2);
-  // v1371: AND A RESPECTABLE PROFIT. Break-even plus the spread nets a few rupees (measured: GRAVITA
-  // Rs1.89L at +0.25% netted Rs36), so the target is also the first level at which THIS order nets the
-  // goal's per-trade profit. It is priced at the order's own size, so a small order needs a big move -
-  // which is exactly why a 2-share order can never be worth taking (getRowExitPolicy refuses a target
-  // the stock's own daily range cannot reach).
-  const profitRs=respectableProfitRs();
-  let profitPct=null,profitUnreachable=false;
-  if(profitRs>0&&netAt(pct)<profitRs){
-    let h=Math.max(pct,1);
-    while(netAt(h)<profitRs&&h<1000) h*=2;
-    if(netAt(h)>=profitRs){
-      let l=pct;
-      for(let i=0;i<40;i++){ const mid=(l+h)/2; if(netAt(mid)>=profitRs) h=mid; else l=mid; }
-      profitPct=Math.ceil(h*100)/100;
-      while(netAt(profitPct)<profitRs) profitPct=+(profitPct+0.01).toFixed(2);
-      pct=+profitPct.toFixed(2);
-    } else profitUnreachable=true;
-  }
-  return {pct:profitUnreachable?null:pct,breakEvenPct:be,cushionPct:+cushionPct.toFixed(3),cushionIsSpread:cushionPct>0.05/bp*100,
-    profitRs:profitRs>0?+profitRs.toFixed(2):null,profitPct,profitUnreachable,orderRs:+(q*bp).toFixed(2),
-    qty:q,slippagePct:+slipPct.toFixed(3),chargesRs:+(buyChg+calcZerodhaCharges(bp*(1+(profitUnreachable?be:pct)/100),q,true)).toFixed(2)};
+  const floorPct=+(Math.ceil((be+cushionPct)*100)/100).toFixed(2);
+  return {floorPct,breakEvenPct:be,cushionPct:+cushionPct.toFixed(3),cushionIsSpread:cushionPct>0.05/bp*100,
+    orderRs:+(q*bp).toFixed(2),qty:q,slippagePct:+slipPct.toFixed(3),
+    chargesRs:+(buyChg+calcZerodhaCharges(bp*(1+floorPct/100),q,true)).toFixed(2),netAt};
 }
 // Open Positions is a different decision surface from Recommendations. Recommendations begin with
 // the ALL NSE cross-section and ask whether a fresh entry survives a 5-minute validation. A held
