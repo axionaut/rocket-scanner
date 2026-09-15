@@ -1,5 +1,5 @@
-const BUILD_TS='2026-09-15 13:51 IST'; // release build time (IST)
-const APP_VERSION=1378;
+const BUILD_TS='2026-09-15 15:01 IST'; // release build time (IST)
+const APP_VERSION=1379;
 const RADAR_SCORE_VERSION='rocket-tick-v2'; // v1378: ordered directional ticks, six-tick half-life.
 
 // ── v1358: AN UNCAUGHT ERROR MUST NAME ITSELF ─────────────────────────────────────────────────
@@ -53,7 +53,7 @@ const EQUITY_OPEN_MIN=9*60+15, EQUITY_CLOSE_MIN=15*60+30;
 // v556: parse the NSE Market Activity Report (MA<date>.csv) — official Nifty %, advances/declines and sector index moves shown as market CONTEXT in the status bar (EOD data, display only, never fed into per-row scoring); MA added to the ℹ️ file manifest.
 // v555 market-cycle stage awareness (stateless, self-calibrating): per-row stage label (1 accumulation · 2 breakout · 3 event · 4 profit-booking · 5 re-accumulation · 6 second-leg); a quiet-accumulation signal (conjunction-of-percentiles) injected via the rocket-diagnostic weighting; sell-the-news decay off Recent earnings date (horizon = review days). v1065 makes the market-breadth gauge an entry-eligibility input while still never changing ranking.
 const GOOGLE_DRIVE_CLIENT_ID='1015012642264-oi2nelv3v90k3d39r994a6nelgjs2a56.apps.googleusercontent.com'; // Public OAuth Web Client ID.
-const MIN_TRADE_NET_RS=100;   // owner risk preference: the least net profit worth a round trip
+const MIN_ALLOCATION_SHARES=10; // v1379: minimum funded order; targets and profit do not gate allocation
 const BASKET_CASH_RESERVE_RS=1; // Leave a rupee for broker-side tax/rounding differences.
 const MAX_TURNOVER_PARTICIPATION=0.001; // Market-impact rail: never exceed 0.10% of a stock's daily rupee turnover.
 const BASKET_MARKET_BUDGET_BUFFER_PCT=0.25; // Sizing cushion only; exported buys remain MARKET orders.
@@ -3860,7 +3860,7 @@ function getRowActionState(s){
   // s.score and s.price must be verified in the cache key so live price deltas and rescores
   // immediately invalidate the cached action state rather than serving stale 'GO' decisions.
   const a=RADAR.scoredAt||0,b=INTRADAY_STORE_V,c=RECOMMEND_MIN_SCORE,d=Math.floor(Date.now()/TAPE_BAR_MS);
-  const e=_universeLiveAt?Math.floor((Date.now()-_universeLiveAt)/60000):-1;
+  const e=_universeTickAt!==null?Math.floor((Date.now()-_universeTickAt)/10000):(_universeLiveAt?Math.floor((Date.now()-_universeLiveAt)/60000):-1);
   const score=Number(s.score)||0;
   const px=Number(s.price)||0;
   const cached=ROW_ACTION_MEMO.get(s);
@@ -3880,8 +3880,10 @@ const UNIVERSE_STALE_MS=5*60*1000;
 // dead zone for any top-level call, which throws rather than reading 0.
 let _universeLiveAt = 0;
 let _universeDeltaError = '';
+let _universeTickAt=null;
 function universePriceStaleness(){
   if(!isEquitySession(Date.now())) return null;
+  if(_universeTickAt!==null&&(!_universeTickAt||Date.now()-_universeTickAt>30000)) return 'Market ticks are stale - reconnecting feed';
   if(!_universeLiveAt) return 'Live prices are not updating'
     +(_universeDeltaError?' ('+_universeDeltaError+')':'')+' - the board is on a stored universe';
   const age=Date.now()-_universeLiveAt;
@@ -6449,18 +6451,13 @@ function getGoalAllocationPlan(){
     maxAlloc:capital>0&&required>0?Math.min(capital,Math.ceil(required)):0,
     turnoverMultiple:capital>0&&netPct>0?dailyGoal/(capital*netPct/100):null};
 }
-function getDefaultMaxAlloc(){return getGoalAllocationPlan().maxAlloc;}
+function getDefaultMaxAlloc(){return getEffectiveCapital();}
 // v1371 (owner): "why would I buy 1 share of 26 rupees? Does that even cover costs and give me a
 // respectable profit?" A trade is worth taking only if it nets what ONE trade has to earn for the
 // owner's own goal: the goal's daily rupee need divided by his entries per day. Not a chosen number -
 // the same per-trade figure v1299 sizes allocations with. Read by every target, so memoized briefly.
 function goalAllocationExplanation(){
-  const p=getGoalAllocationPlan();
-  if(!(p.trades>0)) return 'Need completed trade history to estimate entries per day; existing capital and risk limits still apply.';
-  if(!(p.netPct>0)) return 'Target does not cover estimated costs; no goal-sized allocation can be calculated.';
-  return `Daily goal ${fmtINR(p.dailyGoal)} / ${p.trades.toFixed(2)} historical entries per day / ${p.netPct.toFixed(2)}% target net = ${fmtINR(p.required)} per trade before limits. `
-    +`Requires ${p.turnoverMultiple.toFixed(2)}x capital deployment across the day if all trades reach target; losses, slippage and BTST holds can leave a shortfall. `
-    +'A planning requirement, not expected profit. Score/stop weighting and capital, liquidity and typed limits can reduce funding. Saved overrides remain active.';
+  return 'Allocate by Rocket Score, with at least 10 shares per funded stock. Available cash and Max Allocation bound sizing. Targets, estimated profit and stop risk are planning information only.';
 }
 
 function getEffectiveCapital(){
@@ -6522,16 +6519,10 @@ function allocLimitReason(caps){
 // stocks were selected and admitting it would make a stock's rank depend on its neighbours.
 function rowAchievableNotional(s,ctx=null){
   const c=ctx||getAllocationPassContext();
-  const buyP=getBuyPrice(s);
-  if(!(buyP>0)) return 0;
-  const turnoverCap=getTurnoverAllocationCap(s);
-  if(!(turnoverCap>0)) return 0;
-  const topUpCap=getHeldTopUpNotionalCap(s,buyP,c.heldMap);
-  const riskCap=riskNotionalCap(s,c.riskPerTrade);
-  const maxCap=c.maxAlloc>0?c.maxAlloc:c.capital;
-  const v=Math.min(maxCap,turnoverCap,topUpCap,riskCap);
-  return Number.isFinite(v)&&v>0?v:0;
+  if(!(getBuyPrice(s)>0)) return 0;
+  return Math.max(0,Math.min(c.capital,c.maxAlloc>0?c.maxAlloc:c.capital));
 }
+
 // What ONE position in this stock is actually worth, in rupees, at a given notional: whole shares and
 // the full Zerodha charge model on both legs. This is the number the owner trades on.
 // The SAME economic floor as HARVEST_DESIRED_NET_PCT, expressed in rupees at the reference notional.
@@ -6570,16 +6561,13 @@ function updateFilterPlaceholders(){
   const capEl=document.getElementById('fCapital');
   if(capEl){ const d=getDefaultCapital(); if(d>0){ capEl.placeholder=String(Math.round(d)); capEl.title=`Empty = your computed capital ₹${Math.round(d).toLocaleString('en-IN')} (holdings + open positions). Type a value to override.`; } }
   const maxEl=document.getElementById('fMaxAlloc');
-  if(maxEl){ const d=getDefaultMaxAlloc(); maxEl.placeholder=d>0?String(d):'need net target/history'; maxEl.title=goalAllocationExplanation(); }
+  if(maxEl){ const d=getDefaultMaxAlloc(); maxEl.placeholder=d>0?String(d):'set capital'; maxEl.title=goalAllocationExplanation(); }
   const riskEl=document.getElementById('fRiskPerTrade');
-  if(riskEl){ const d=getDefaultRiskPerTrade(),med=_defRiskMemo?.medianStopPct,ma=getEffectiveMaxAlloc();
-    if(d>0&&med>0){ riskEl.placeholder=String(d);
-      riskEl.title=`Empty = NO cap; sizing follows Radar score ÷ stop distance and the existing rails, which today imply about ₹${d.toLocaleString('en-IN')} at risk for a full Max Alloc ₹${Math.round(ma).toLocaleString('en-IN')} position at the ${med.toFixed(2)}% median stop. Type a value to cap what any one position may lose — it can only shrink a position, never grow one.`; }
-    else { riskEl.placeholder='auto'; } }
   const tgtEl=document.getElementById('fTgtOverride');
-  if(tgtEl){ let d=0; try{d=getDefaultTgtPct();}catch(e){} tgtEl.placeholder=d>0?d.toFixed(1):'auto'; tgtEl.title='Empty keeps this as a harvest-based planning reference for goal allocation only. It does not set automatic candidate or held-position targets. Type a value to explicitly override those targets; clear it to restore planning-only Auto.'; }
+  if(tgtEl){ let d=0; try{d=getDefaultTgtPct();}catch(e){} tgtEl.placeholder=d>0?d.toFixed(1):'auto'; tgtEl.title='Empty keeps this as a harvest-based planning reference only; it never changes allocation. It does not set automatic candidate or held-position targets. Type a value to explicitly override those targets; clear it to restore planning-only Auto.'; }
   showTradeInputMode(capEl);showTradeInputMode(maxEl);
-  showTradeInputMode(riskEl,'No cap');showTradeInputMode(tgtEl,'Planning');
+  if(riskEl?.closest('.fg')) riskEl.closest('.fg').style.display='none'; // retained saved value; no risk gate in tick sizing
+  showTradeInputMode(tgtEl,'Planning');
 }
 // Goal capital basis = effective capital (the field if the owner typed one, else the
 // computed deployed book). An empty field means the default, never zero.
@@ -8770,8 +8758,8 @@ function _renderMethodologyInner(){
         <li>S persists across sessions and does not decay while the market is closed. The previous session's last traded price is the reference for the next session's first observation.</li>
       </ol></div>
       <div class="m-card"><h4>What Does Not Enter It</h4><p>No indicator, volume, price magnitude, market breadth or learned weight. Thin stocks are handled by the <strong>Drop thinnest %</strong> filter, not by the formula. The seven daily-column groups below describe the Setup label and Risk pill only.</p><div class="rr-groups" style="margin-top:10px">${groupsHTML}</div>${diagHTML}</div>
-      <div class="m-card"><h4>When a Row Is GO</h4><p>A row is <strong>GO</strong> when the market is open, live prices are current, the stock is not under a configured surveillance rule, its series and price band are basket-eligible, it is not at the upper circuit, and its Rocket Score is at or above <strong>Min Score ${RECOMMEND_MIN_SCORE}</strong>. These checks decide whether a row can be bought; none of them changes the score. Capital, whole shares and costs then decide how much is funded.</p></div>
-      <div class="m-card"><h4>Held Positions & Basket</h4><p>Held positions stay ranked and may be recommended again as ADDs, bounded by the same allocation rails. The target is <strong>break-even plus the minimum safe cushion</strong>: the first price at which the order, at its real share count, nets a profit after Zerodha's charges on both legs (DP included) and the live book's slippage, plus the stock's own live bid-ask spread (at least one tick). It is deliberately small, so capital is freed quickly and redeployed; the Rocket Score supplies the conviction. Income tax is a share of profit and never moves that break-even. A manual Target Override replaces it but is never allowed below it. Stops remain stock-specific inside the ${SL_MIN_PCT.toFixed(1)}%–${SL_MAX_PCT.toFixed(1)}% risk rails.</p></div>
+      <div class="m-card"><h4>When a Row Is GO</h4><p>A row is <strong>GO</strong> when the market is open, live prices are current, the stock is not under a configured surveillance rule, its series and price band are basket-eligible, it is not at the upper circuit, and its Rocket Score is at or above <strong>Min Score ${RECOMMEND_MIN_SCORE}</strong>. These checks decide whether a row can be bought; none of them changes the score. Funding requires at least 10 shares within cash including purchase charges and Max Allocation.</p></div>
+      <div class="m-card"><h4>Held Positions &amp; Basket</h4><p>Qualifying stocks receive at least 10 shares or remain unfunded. Minimum lots are reserved in score order, then remaining cash is split by Rocket Score within Max Allocation. Purchase charges are included in affordability. Targets, profit estimates and stop risk are planning information; none gates allocation. Existing held-position exit rules remain active.</p></div>
     </div>
     <h3 id="meth-ledger" style="margin-top:28px">Feature Ledger <span style="font-size:14px;color:var(--t3);font-weight:400">(${RADAR.features.length||0} setup features from ${RADAR.headers.length||0} input columns)</span></h3>
     <p style="color:var(--t2);line-height:1.7">These are input-file and setup diagnostics. They set the Setup label and Risk pill and never enter the Rocket Score. Input coverage describes this file only, not live-tape availability.</p>
@@ -9412,12 +9400,8 @@ function getRowExitPolicy(row,buyPrice=null,activeInfo=null,nudgeInfo=null,qty=n
   // range, was funded at +18.36%).
   const reachBound=[wholeDayReachPct>0?wholeDayReachPct:medianRowCapacityPct(),circuitRunwayPct>0?circuitRunwayPct:null].filter(v=>v>0);
   const reachPctBound=reachBound.length?Math.min(...reachBound):null;
-  // v1375 (owner): the ALLOCATION gate, kept - a row cannot be recommended for a size whose own
-  // target, at its own share count, fails to clear costs plus the minimum MIN_TRADE_NET_RS profit
-  // (₹100). This is the "no 1 share of a 24 rupee stock" rule; it no longer inflates the target
-  // itself toward the full goal-sized rupee figure (that was v1371-v1374's costFloorTarget search).
-  const netAtTarget=(floorT&&targetPct>0)?floorT.netAt(targetPct):null;
-  const profitShort=!!(!floorT||!(targetPct>0)||netAtTarget==null||netAtTarget<MIN_TRADE_NET_RS);
+  // v1379: target economics describe the plan; they never veto a tick-qualified allocation.
+  const profitShort=false;
   const basePct=targetPct;
   let nudgePct=0;
   // v1216: WHAT THE TARGET PERCENTAGE IS MEASURED FROM. A clock or tape read is further travel
@@ -9439,13 +9423,8 @@ function getRowExitPolicy(row,buyPrice=null,activeInfo=null,nudgeInfo=null,qty=n
   const viabilityBasis=targetPct;
   const tapeReach=tapeReachability(row?.symbol,targetPct);
   const reachBlocked=false;
-  const viabilitySource=profitShort
-    ?(floorT
-        ?`₹${Math.round(floorT.orderRs).toLocaleString('en-IN')} (${floorT.qty} sh) at ${targetPct>0?targetPct.toFixed(2)+'%':'no target'} nets ₹${netAtTarget!=null?Math.round(netAtTarget).toLocaleString('en-IN'):'0'}, short of costs + ₹${MIN_TRADE_NET_RS} minimum`
-          +(reachPctBound!=null?`; it typically reaches ${reachPctBound.toFixed(2)}%`:'')
-        :'No price to size the cost floor')
-    :targetPct>0?'Target economics':targetSource;
-  const viable=!profitShort&&targetPct>0&&(minGrossPct==null||targetPct+1e-9>=minGrossPct);
+  const viabilitySource=targetPct>0?'Planning target; not an allocation condition':targetSource;
+  const viable=targetPct>0;
   const belowMarketRead=!!(available!=null&&targetPct>available);
   const horizonNote=(exitingToday?'Existing position exit policy.':'Entry objective: target before stop, by next trading close; predictive accuracy unvalidated.')
     +(tapeRunwayPct!=null?` Historical remaining-session upside: ${tapeRunwayPct.toFixed(2)}% (context only).`:'')
@@ -9617,14 +9596,7 @@ function getPositionAfterCostFloor(avgPrice,qty){
   while(netAt(tick)<=0) tick=+(tick+0.05).toFixed(2);
   return tick;
 }
-// v1375 (owner): REVERTED to v1371's market-derived target. costFloorTarget now returns only the
-// COST FLOOR - break-even plus the minimum safe cushion (its own live bid-ask spread, never less
-// than one tick) - and a netAt(pct) probe. It no longer searches for the percentage that nets a
-// fixed goal-sized rupee figure: that search priced every stock at whatever % happened to net the
-// SAME rupee amount (the goal's per-trade profit), which is why unrelated stocks converged on one
-// identical net profit on screen. The floor is used only as an ALLOCATION GATE now (see
-// getRowExitPolicy): a row may not be recommended unless its own target, at its own share count,
-// nets costs plus the minimum MIN_TRADE_NET_RS profit - never the full goal-sized figure.
+// Planning-only break-even and spread cushion. No return from this function vetoes allocation.
 function costFloorTarget(row,buyPrice,qty){
   const bp=Number(buyPrice);
   if(!(bp>0)) return null;
@@ -9907,249 +9879,71 @@ function getAllocationPassContext(){
 // `ctx` carries the pass-constants (capital, max allocation, held map, target anchor) so a caller
 // scanning the whole universe resolves them ONCE — see getAllocationPassContext(). Called without
 // one it resolves them itself, which is correct but ~4ms per row.
-function targetPolicyBlockReason(policy){
-  if(policy?.profitShort||!(policy?.targetPct>0)) return policy?.viabilitySource||'No valid target to verify trading costs';
-  return `Target ${policy.targetPct.toFixed(2)}% does not cover the ${policy.minGrossPct?.toFixed(2)??'unknown'}% cost floor`;
-}
-function computeAlloc(capital, selList){
-  if(!capital||!selList.length) return {};
-  const maxAllocV=getEffectiveMaxAlloc(); // existing override or goal-derived default
-  const goalPlan=getGoalAllocationPlan();
-  const targetAnchor=getEffectiveTgtPct();
-  // Held qty/avg are part of the key (v1070): the top-up cap depends on them, so a fill that
-  // changes the position must invalidate the memo or the next basket would reuse a stale cap.
-  const heldMap=getHeldPositionMap();
-  const riskPerTrade=getEffectiveRiskPerTrade();
-  // slPct joins the key with atr: both feed getRowStopDistancePct, which now drives the WEIGHT and
-  // not just the displayed stop, so a change in either must invalidate the memo.
-  const memoKey=BOOK_V+'|'+Math.floor(Date.now()/1000)+'|'+capital+'|'+goalPlan.profitPerTrade+'|'+maxAllocV+'|'+targetAnchor+'|'+riskPerTrade+'|'+selList.map(s=>{
-    const h=heldMap[s.symbol];
-    return s.symbol+':'+s.price+':'+s.rocketScore+':'+s.atr+':'+s.slPct+':'+s.rangePct+':'+s.turnover+':'+(h?h.qty+'@'+h.avg:'-');
-  }).join(',')+'|'+BOOK_V+'|'+Math.floor(Date.now()/TAPE_BAR_MS);
-  if(_allocMemo?.key===memoKey) return _allocMemo.val;
-  const cap=maxAllocV>0?maxAllocV:capital;
-  const spendableCapital=Math.max(0,capital-BASKET_CASH_RESERVE_RS);
-  const buyDebit=(buyP,qty)=>qty>0?(buyP*qty)+calcZerodhaCharges(buyP,qty,false,false,false):0;
-  const affordableQty=(budget,buyP,maxNotional=Infinity)=>{
-    if(!(budget>0)||!(buyP>0)) return 0;
-    let qty=Math.min(Math.floor(budget/buyP),Math.floor(maxNotional/buyP));
-    while(qty>0&&buyDebit(buyP,qty)>budget+0.001) qty--;
+// Cash includes purchase charges. No target, profit, stop, turnover or book estimate gates sizing.
+function computeAlloc(capital,selList){
+  if(!(capital>0)||!selList.length) return {};
+  const maxAlloc=getEffectiveMaxAlloc(),cap=Math.min(capital,maxAlloc>0?maxAlloc:capital);
+  const spendable=Math.max(0,capital-BASKET_CASH_RESERVE_RS);
+  const memoKey=[capital,cap,BOOK_V,INTRADAY_STORE_V,Math.floor(Date.now()/1000),getEffectiveTgtPct(),RECOMMEND_MIN_SCORE,
+    selList.map(r=>[r.symbol,r.price,r.score,r.atr,r.slPct,r.rangePct,isStockEligible(r)].join(':')).join(',')].join('|');
+  if(_allocMemo?.key===memoKey)return _allocMemo.val;
+  const sorted=[...selList].sort((a,b)=>(b.score??-1)-(a.score??-1)||radarRankTieBreak(a,b));
+  const result={},funded=[];
+  const debit=(price,qty)=>qty>0?price*qty+calcZerodhaCharges(price,qty,false,false,false):0;
+  const affordable=(budget,price,maxQty)=>{
+    let qty=Math.min(maxQty,Math.floor(Math.max(0,budget)/price));
+    while(qty>0&&debit(price,qty)>budget+0.001)qty--;
     return qty;
   };
-  function evalNet(s,buyP,qty){
-    const policy=getRowExitPolicy(s,buyP,null,null,qty);
-    if(policy&&policy.viable===false){
-      return {ok:false,rejected:true,reason:targetPolicyBlockReason(policy),policy};
-    }
-    const tgtPct=policy?.targetPct;
-    if(!Number.isFinite(tgtPct)||tgtPct<=0) return {ok:false,rejected:true,reason:'No valid target to verify trading costs',policy:policy||{}};
-    const sellP=buyP*(1+tgtPct/100);
-    const buyChg=calcZerodhaCharges(buyP,qty,false);
-    const sellChg=calcZerodhaCharges(sellP,qty,true);
-    const charges=buyChg+sellChg;
-    const fr=getTradeFrictionPct(s,qty*Number(s.price));
-    const frictionKnown=!!(fr?.covered&&Number.isFinite(fr.entryPct)&&Number.isFinite(fr.exitPct));
-    const frictionRs=frictionKnown?qty*buyP*Math.max(0,fr.entryPct+fr.exitPct)/100:null;
-    const expectedNet=qty*buyP*(tgtPct/100)-charges-(frictionRs||0);
-    if(!Number.isFinite(expectedNet)||expectedNet<MIN_TRADE_NET_RS){
-      return {ok:false,rejected:true,expectedNet,charges,frictionKnown,frictionRs,tgtPct,policy,
-        reason:`${qty} shares: target gain ${fmtINR(qty*buyP*tgtPct/100)} cannot clear ${fmtINR(charges+(frictionRs||0))} estimated delivery costs${frictionKnown?' including slippage':''}`};
-    }
-    return {ok:true,expectedNet,
-      frictionKnown,frictionRs,charges,tgtPct,policy};
-  }
-  // v1371: the smallest quantity between lo and hi whose order is worth taking - its own target clears
-  // costs, nets the goal's per-trade profit and sits inside the stock's reach. The target falls as the
-  // order grows, so viability is monotone in quantity and a bisection finds the boundary.
-  function smallestWorthwhileQty(s,buyP,lo,hi){
-    lo=Math.max(1,Math.floor(lo)); hi=Math.floor(hi);
-    if(!(hi>=lo)) return null;
-    const top=evalNet(s,buyP,hi);
-    if(top.rejected) return {qty:0,ev:top};
-    let a=lo,b=hi,best=top,bestQ=hi;
-    const first=evalNet(s,buyP,a);
-    if(!first.rejected) return {qty:a,ev:first};
-    while(b-a>1){
-      const m=Math.floor((a+b)/2),ev=evalNet(s,buyP,m);
-      if(ev.rejected) a=m; else {b=m;best=ev;bestQ=m;}
-    }
-    return {qty:bestQ,ev:best};
-  }
-
-  const rawScore=s=>Math.max(0,Number(s.rocketScore)||0);
-  const riskWeight=s=>{
-    const sc=rawScore(s);
-    if(!(sc>0)) return 0;
-    const stop=getRowStopDistancePct(s);          // already clamped to SL_MIN_PCT..SL_MAX_PCT
-    return stop>0?sc/stop:0;
-  };
-  const totalRiskWeight=selList.reduce((sum,s)=>sum+riskWeight(s),0)||1;
-  const strongestRiskWeight=Math.max(...selList.map(riskWeight),1e-9);
-  const goalSizing=goalPlan.required>0;
-  let remainingBudget=spendableCapital;
-  // Residual redistribution (pass 2) still walks by CONVICTION, not by weight: the spare rupee
-  // should go to the best setup. Risk normalisation governs the size of the slice, not its priority.
-  const sortedSel=[...selList].sort((a,b)=>rawScore(b)-rawScore(a));
-  const allocMap={},limits={},railLimits={},limitReasons={};
-
-  for(const s of sortedSel){
-    const buyP=getBuyPrice(s);
-    if(!(buyP>0)) continue;
-    const turnoverCap=getTurnoverAllocationCap(s);
-    if(!(turnoverCap>0)){
-      allocMap[s.symbol]={alloc:0,debit:0,qty:0,buyPrice:buyP,rejected:true,
-        reason:'missing daily turnover; market-impact safety cannot be verified',liquidityCap:0};
+  let remaining=spendable;
+  for(const row of sorted){
+    const price=getBuyPrice(row),maxQty=price>0?Math.floor(cap/price):0;
+    const minDebit=price>0?debit(price,MIN_ALLOCATION_SHARES):Infinity;
+    const am={alloc:0,debit:0,qty:0,buyPrice:price,rejected:true};result[row.symbol]=am;
+    if(!isStockEligible(row)){am.reason=getRowActionState(row).reason;continue;}
+    if(!(price>0)){am.reason='No valid live price';continue;}
+    if(maxQty<MIN_ALLOCATION_SHARES||minDebit>remaining+0.001){
+      am.reason=`Minimum ${MIN_ALLOCATION_SHARES} shares costs ${fmtINR(minDebit)} including buy charges; `
+        +(maxQty<MIN_ALLOCATION_SHARES?`Max Allocation allows ${maxQty} shares`:`${fmtINR(remaining)} cash remains`);
       continue;
     }
-    // Price the desired rupee profit using this row's actual target/charges and known book friction.
-    const probeQty=Math.max(1,Math.floor(Math.min(cap,spendableCapital)/buyP));
-    const probe=goalSizing?evalNet(s,buyP,probeQty):null;
-    if(probe?.rejected){
-      allocMap[s.symbol]={alloc:0,debit:0,qty:0,buyPrice:buyP,rejected:true,
-        reason:probe.reason,exitPolicy:probe.policy,liquidityCap:turnoverCap};
-      continue;
-    }
-    const rowNetPct=probe&&!probe.skip?probe.expectedNet/(probeQty*buyP)*100:null;
-    const desired=goalSizing&&rowNetPct>0?goalPlan.profitPerTrade/(rowNetPct/100):0;
-    const weighted=goalSizing?desired*(riskWeight(s)/strongestRiskWeight)
-      :spendableCapital*(riskWeight(s)/totalRiskWeight);
-    const scoreLimit=Math.min(weighted,remainingBudget);
-    const topUpCap=getHeldTopUpNotionalCap(s,buyP,heldMap); // Infinity unless held and in profit
-    const riskCap=riskNotionalCap(s,riskPerTrade);          // Infinity when no risk budget is set
-    const railLimit=Math.min(cap,turnoverCap,topUpCap,riskCap);   // every rail EXCEPT the score share
-    const rowLimit=Math.min(scoreLimit,railLimit);
-    const limitReason=allocLimitReason({score:scoreLimit,max:cap,turnover:turnoverCap,topUp:topUpCap,risk:riskCap});
-    railLimits[s.symbol]=railLimit;
-    limits[s.symbol]=rowLimit;
-    limitReasons[s.symbol]=limitReason;
-    let qty=affordableQty(rowLimit,buyP,rowLimit);
-    if(qty<=0){
-      if(goalSizing){
-        allocMap[s.symbol]={alloc:0,debit:0,qty:0,buyPrice:buyP,limit:0,
-          remainingAtSkip:remainingBudget,
-          bindingRail:limitReason,
-          desiredProfit:desired,
-          goalSizing:true,
-          reason:desired<=0?'Target does not cover estimated costs':'',
-          limitReason:limitReason!=='risk weight'?limitReason:'goal funding',
-          liquidityCap:turnoverCap};
-        if(remainingBudget<buyP||railLimit<buyP){
-          railLimits[s.symbol]=0; // no one-share fallback past the goal/budget decision
-        }
-      }
-      continue;
-    }
-    let ev=evalNet(s,buyP,qty);
-    if(ev.rejected&&ev.policy?.profitShort){
-      // Its score slice is too small to be worth a trade. Grow it - within its own rails and what is
-      // left - only as far as the first size that is; never down to a crumb.
-      const maxQty=affordableQty(Math.min(railLimit,remainingBudget),buyP,railLimit);
-      const w=maxQty>qty?smallestWorthwhileQty(s,buyP,qty+1,maxQty):null;
-      if(w&&w.qty>0){ qty=w.qty; ev=w.ev; limits[s.symbol]=Math.max(rowLimit,qty*buyP); }
-      else if(w&&w.ev) ev=w.ev;
-    }
-    if(ev.rejected){
-      allocMap[s.symbol]={alloc:0,debit:0,qty:0,buyPrice:buyP,rejected:true,reason:ev.reason,
-        stopDistancePct:ev.policy.stopPct,tgtPct:ev.policy.targetPct,exitPolicy:ev.policy,liquidityCap:turnoverCap,limitReason};
-      continue;
-    }
-    remainingBudget=Math.max(0,remainingBudget-buyDebit(buyP,qty));
-    allocMap[s.symbol]={alloc:qty*buyP,debit:buyDebit(buyP,qty),buyCharges:calcZerodhaCharges(buyP,qty,false,false,false),qty,buyPrice:buyP,
-      limit:rowLimit,stopDistancePct:ev.policy.stopPct,expectedNet:ev.expectedNet,frictionKnown:ev.frictionKnown,frictionRs:ev.frictionRs,charges:ev.charges,tgtPct:ev.tgtPct,exitPolicy:ev.policy,liquidityCap:turnoverCap,limitReason};
+    Object.assign(am,{qty:MIN_ALLOCATION_SHARES,debit:minDebit,alloc:price*MIN_ALLOCATION_SHARES,rejected:false,limitReason:'tick score'});
+    remaining-=minDebit;funded.push({row,am,maxQty});
   }
-
-  let deployed=Object.values(allocMap).reduce((sum,am)=>sum+am.debit,0);
-  let residual=spendableCapital-deployed;
-  let progress=true;
-  while(residual>0&&progress){
-    progress=false;
-    for(const s of sortedSel){
-      const rowLimit=limits[s.symbol]||0;
-      let am=allocMap[s.symbol];
-      if(am?.rejected) continue;
-      if(!am){
-        const buyP=getBuyPrice(s);
-        const railCeil=railLimits[s.symbol]||0;
-        if(!(buyP>0)) continue;
-        if(rowLimit<buyP){
-          if(railCeil<buyP) continue;                 // a real rail, not rounding — leave it alone
-          limits[s.symbol]=Math.max(rowLimit,buyP);   // one share, then the normal growth check binds
-        }
-        if(buyDebit(buyP,1)>residual+0.001) continue;
-        // v1371: a row is opened at the smallest size worth trading, never at one share. The old
-        // one-share pass handed leftover capital out in crumbs whose own target had to be +6-16%.
-        const maxQty=affordableQty(Math.min(railCeil,residual),buyP,railCeil);
-        const w=maxQty>=1?smallestWorthwhileQty(s,buyP,1,maxQty):null;
-        const qty=w&&w.qty>0?w.qty:1,ev=w&&w.ev?w.ev:evalNet(s,buyP,1);
-        if(!ev.rejected) limits[s.symbol]=Math.max(limits[s.symbol]||0,qty*buyP);
-        if(ev.rejected){
-          allocMap[s.symbol]={alloc:0,debit:0,qty:0,buyPrice:buyP,rejected:true,reason:ev.reason,
-            stopDistancePct:ev.policy.stopPct,tgtPct:ev.policy.targetPct,exitPolicy:ev.policy,liquidityCap:getTurnoverAllocationCap(s),limitReason:limitReasons[s.symbol]};
-          continue;
-        }
-        allocMap[s.symbol]={alloc:qty*buyP,debit:buyDebit(buyP,qty),buyCharges:calcZerodhaCharges(buyP,qty,false,false,false),qty,buyPrice:buyP,
-          limit:rowLimit,stopDistancePct:ev.policy.stopPct,expectedNet:ev.expectedNet,frictionKnown:ev.frictionKnown,frictionRs:ev.frictionRs,charges:ev.charges,tgtPct:ev.tgtPct,exitPolicy:ev.policy,liquidityCap:getTurnoverAllocationCap(s),limitReason:limitReasons[s.symbol]};
-        am=allocMap[s.symbol];
-        residual-=am.debit; deployed+=am.debit; progress=true;
-      }
-      const buyP=am.buyPrice;
-      const nextDebit=buyDebit(buyP,am.qty+1),incremental=nextDebit-am.debit;
-      if(incremental>residual+0.001||am.alloc+buyP>(limits[s.symbol]??am.limit)+0.5) continue;
-      const ev=evalNet(s,buyP,am.qty+1);
-      if(ev.rejected) continue;
-      am.qty++; am.alloc+=buyP; am.debit=nextDebit; am.buyCharges=calcZerodhaCharges(buyP,am.qty,false,false,false);
-      if(!ev.skip){am.expectedNet=ev.expectedNet;am.frictionKnown=ev.frictionKnown;am.frictionRs=ev.frictionRs;am.charges=ev.charges;am.tgtPct=ev.tgtPct;am.exitPolicy=ev.policy;}
-      residual-=incremental; deployed+=incremental; progress=true;
+  // Reserve the ten-share minimum in score order, then distribute spare cash by score.
+  // Whole-share rounding and Max Allocation are the only limits on the remaining slices.
+  let active=funded.filter(x=>x.am.qty<x.maxQty);
+  while(remaining>0&&active.length){
+    const budget=remaining,total=active.reduce((sum,x)=>sum+Math.max(0,Number(x.row.score)||0),0);
+    let progressed=false;
+    for(const x of active){
+      const {row,am,maxQty}=x,weight=total>0?Math.max(0,Number(row.score)||0)/total:1/active.length;
+      const qty=affordable(am.debit+Math.min(remaining,budget*weight),am.buyPrice,maxQty);
+      if(qty<=am.qty)continue;
+      const next=debit(am.buyPrice,qty);remaining-=next-am.debit;
+      am.qty=qty;am.debit=next;am.alloc=qty*am.buyPrice;progressed=true;
+    }
+    active=active.filter(x=>x.am.qty<x.maxQty&&debit(x.am.buyPrice,x.am.qty+1)-x.am.debit<=remaining+0.001);
+    if(!progressed){
+      const x=active[0];if(!x)break;
+      const next=debit(x.am.buyPrice,x.am.qty+1);remaining-=next-x.am.debit;
+      x.am.qty++;x.am.debit=next;x.am.alloc=x.am.qty*x.am.buyPrice;
     }
   }
-  // riskRs is stamped ONCE here, after pass 2 has finished growing positions, so it can never
-  // describe a stale quantity. It is the rupees this position loses if its own stop is hit —
-  // the number the Risk ₹/trade budget caps, and the one surfaced in the Alloc cell.
-  Object.values(allocMap).forEach(am=>{
-    delete am.limit;
+  // Planning values are calculated only after funding; they cannot change quantity or admission.
+  for(const {row,am} of funded){
+    const policy=getRowExitPolicy(row,am.buyPrice,null,null,am.qty);
+    am.exitPolicy=policy;am.stopDistancePct=policy?.stopPct;am.tgtPct=policy?.targetPct;
     am.riskRs=rowRiskRupees(am.alloc,am.stopDistancePct);
-  });
-  for(const s of sortedSel){
-    if(allocMap[s.symbol]) continue;
-    const buyP=getBuyPrice(s);
-    allocMap[s.symbol]={alloc:0,debit:0,qty:0,buyPrice:buyP,rejected:true,liquidityCap:getTurnoverAllocationCap(s),
-      remainingAtSkip:residual,bindingRail:limitReasons[s.symbol]||'risk weight',desiredProfit:0};
+    am.buyCharges=calcZerodhaCharges(am.buyPrice,am.qty,false,false,false);
+    const fr=getTradeFrictionPct(row,am.alloc);
+    am.frictionKnown=!!(fr?.covered&&Number.isFinite(fr.entryPct)&&Number.isFinite(fr.exitPct));
+    am.frictionRs=am.frictionKnown?am.alloc*Math.max(0,fr.entryPct+fr.exitPct)/100:null;
+    am.charges=am.tgtPct>0?am.buyCharges+calcZerodhaCharges(am.buyPrice*(1+am.tgtPct/100),am.qty,true):null;
+    am.expectedNet=am.tgtPct>0?am.alloc*am.tgtPct/100-am.charges-(am.frictionRs||0):null;
   }
-  // Post-loop refinement pass for truthful skip messages across all unfunded / skipped rows (v1338 / Part C)
-  for(let i=0; i<sortedSel.length; i++){
-    const s=sortedSel[i];
-    const am=allocMap[s.symbol];
-    if(!am || am.qty>0) continue;
-    if(am.rejected && !am.bindingRail && am.reason) continue; // preserve explicit evalNet / turnover rejections
-
-    const buyP=am.buyPrice||getBuyPrice(s);
-    const railCeil=railLimits[s.symbol]??(limits[s.symbol]||0);
-    const bindingRail=am.bindingRail||limitReasons[s.symbol];
-
-    if(bindingRail && bindingRail!=='risk weight'){
-      // Case 3: A real physical or configured rail bound it (turnover, risk cap, max alloc, top-up)
-      am.reason=`one share costs ${fmtINR(buyP)} but ${bindingRail} rail allows only ${fmtINR(railCeil)}`;
-      am.limitReason=bindingRail;
-    } else if(am.goalSizing && am.desiredProfit<=0){
-      // Case 4: Target does not cover costs
-      am.reason='Target does not cover estimated costs';
-      am.limitReason='goal funding';
-    } else {
-      // Score / budget constraint: check if any subsequent lower-ranked trade in sortedSel received allocation
-      const fundedBelow=sortedSel.slice(i+1).some(sub=>allocMap[sub.symbol]?.qty>0);
-      const rem=am.remainingAtSkip!=null?am.remainingAtSkip:residual;
-      if(fundedBelow){
-        // Case 1: single share exceeds remaining budget, but lower-ranked trades were funded
-        am.reason=`one share (${fmtINR(buyP)}) exceeds remaining budget (${fmtINR(rem)}); funded lower-ranked trades`;
-      } else {
-        // Case 2: basket capital exhausted (no subsequent trades funded either)
-        am.reason=`basket capital exhausted by higher-ranked trades (${fmtINR(rem)} left, below one share at ${fmtINR(buyP)})`;
-      }
-      am.limitReason='goal funding';
-    }
-  }
-  _allocMemo={key:memoKey,val:allocMap};
-  return allocMap;
+  _allocMemo={key:memoKey,val:result};
+  return result;
 }
 function allocationSubline(am,unitLabel='shares'){
   const unitShort=unitLabel==='shares'?'sh':(' '+unitLabel);
@@ -10168,20 +9962,8 @@ function allocationSubline(am,unitLabel='shares'){
   const netStr=Number.isFinite(am?.expectedNet)
     ? ` · <b style="color:${am.expectedNet>=0?'var(--green)':'var(--red)'}">${am.expectedNet>=0?'+':''}${fmtINR(am.expectedNet)}</b>`
     : '';
-  if(am?.limitReason==='risk cap'){
-    return `<div style="font-size:11px;color:var(--cyan);margin-top:1px" title="Sized down to fit the Risk ₹/trade budget at this stock's own ${Number(am.stopDistancePct).toFixed(2)}% stop.${riskTip}${netTip}">risk cap · ${am.qty}${unitShort} · r${fmtINR(am.riskRs)}${netStr}</div>`;
-  }
-  if(am?.limitReason==='top-up average cost'){
-    // v1070: an add to a stock already in profit, sized so the blended average stays below the
-    // new entry's own stop. A zero here means the existing average has no cushion left.
-    return `<div style="font-size:11px;color:#f472b6;margin-top:1px" title="You already hold this at a profit. The add is sized so the blended average cost stays below this entry's own stop price — if the stop is hit, the combined position is still not at a loss.${riskTip}${netTip}">📌 capped · ${am.qty}${unitShort}${netStr}</div>`;
-  }
-  if(am?.limitReason==='turnover'){
-    return `<div style="font-size:11px;color:var(--amber);margin-top:1px" title="Market-impact rail: allocation is capped at 0.10% of daily turnover (${fmtINR(am.liquidityCap)}), then rounded down to whole ${unitLabel}.${riskTip}${netTip}">turnover · ${am.qty}${unitShort}${netStr}</div>`;
-  }
-  if(am?.limitReason==='goal funding') return `<div style="font-size:11px;color:var(--amber)" title="${escHtml(am.reason)}">Unfunded — ${escHtml(am.reason)}</div>`;
-  const sizedBy=am?.limitReason==='risk weight'
-    ? `Sized by Radar score ÷ this stock's ${Number(am.stopDistancePct).toFixed(2)}% stop, with goal-sized funding; targets and capital limits can change the rupee risk.`
+  const sizedBy=am?.limitReason==='tick score'
+    ? 'Sized by Rocket Score, with a minimum of 10 shares; available cash and Max Allocation bound sizing.'
     : 'Capped by the Max Allocation rail.';
   return `<div style="font-size:11px;color:var(--t3);margin-top:1px;max-width:190px;overflow:hidden;text-overflow:ellipsis" title="${sizedBy}${riskTip}${netTip}">${am.qty}${unitShort}${am?.riskRs>0?` · r${fmtINR(am.riskRs)}`:''}${netStr}</div>`;
 }
@@ -10432,7 +10214,7 @@ function renderTable(){
       // v1144: TGT and SL merged. They are ONE decision - what you ask for against what you risk -
       // and the two columns were part of why the table needed a horizontal scrollbar, which the
       // owner has ruled out. Both numbers survive, with their full tooltips.
-      tgt:`<td style="font-weight:700" title="${escHtml((exitPolicy.viable?`${exitPolicy.targetSource}. Entry-relative objective ${exitPolicy.targetPct?.toFixed(2)??'—'}%; target-hit proceeds are not expected returns.${exitPolicy.positionFloorPct>exitPolicy.targetPct?` CNC after-cost floor is ${exitPolicy.positionFloorPct.toFixed(2)}%.`:''}`:`${exitPolicy.viabilitySource||'Target economics'}; target unavailable or below the cost + net hurdle.`)+' '+exitPolicy.horizonNote+' '+exitPolicy.stopSource+(exitPolicy.rewardRisk!=null?` · reward:risk ${exitPolicy.rewardRisk.toFixed(2)}`:''))}"><span style="color:${exitPolicy.viable?'var(--green)':'var(--red)'}">${exitPolicy.viable&&exitPolicy.targetPct!=null?'+'+exitPolicy.targetPct.toFixed(2)+'%':'—'}</span><span style="color:var(--t3)"> / </span><span style="color:var(--red)">−${exitPolicy.stopPct.toFixed(2)}%</span></td>`,
+      tgt:`<td style="font-weight:700" title="${escHtml((exitPolicy.viable?`${exitPolicy.targetSource}. Entry-relative objective ${exitPolicy.targetPct?.toFixed(2)??'—'}%; target-hit proceeds are not expected returns.${exitPolicy.positionFloorPct>exitPolicy.targetPct?` CNC after-cost floor is ${exitPolicy.positionFloorPct.toFixed(2)}%.`:''}`:`${exitPolicy.viabilitySource||'Target economics'}; planning target unavailable; allocation uses the 10-share minimum.`)+' '+exitPolicy.horizonNote+' '+exitPolicy.stopSource+(exitPolicy.rewardRisk!=null?` · reward:risk ${exitPolicy.rewardRisk.toFixed(2)}`:''))}"><span style="color:${exitPolicy.viable?'var(--green)':'var(--red)'}">${exitPolicy.viable&&exitPolicy.targetPct!=null?'+'+exitPolicy.targetPct.toFixed(2)+'%':'—'}</span><span style="color:var(--t3)"> / </span><span style="color:var(--red)">−${exitPolicy.stopPct.toFixed(2)}%</span></td>`,
       alloc:`<td class="alloc-cell" data-sym="${s.symbol}">${(()=>{
         if(!am||am.rejected||!(am.qty>0)) return '<span style="color:var(--t3);font-size:13px">—</span>';
         return `<span style="color:var(--amber);font-weight:700;font-family:'DM Mono',monospace;font-size:14px">${fmtINR(am.alloc)}</span>${allocationSubline(am,unitLabel)}`;
@@ -11767,6 +11549,7 @@ async function pollUniverseDelta(deferScore=false){
     // A timeout costs one skipped beat; no timeout costs the session.
     const j=await readHelperResponse('/api/kite/universe-delta?since='+_clientUniverseRev);
     if(!j||j.ok===false){ _universeDeltaError='helper returned no universe'; return {ok:false,changed:false}; }
+    if(Number.isFinite(j.lastTickAt)) _universeTickAt=j.lastTickAt;
     const newRev = Number(j.rev) || 0;
     const newBarRev = Number(j.barRev) || 0;
     _helperPortfolioRev=Number(j.portfolioRev)||0;
@@ -12151,7 +11934,7 @@ function intradayPasteBarHtml(){
   const needsSetup=KITE_API.mode!=='connect';
   const needsLogin=!needsSetup&&(KITE_API.needsLogin||!KITE_API.hasToken||KITE_API.tokenValid===false);
   const st=STREAM_STATUS;
-  const connected=!!(st&&st.connected&&!st.statusUnknown);
+  const connected=!!(st&&st.connected&&!st.statusUnknown&&(!inSession||!Number.isFinite(st.lastTickAt)||(st.lastTickAt>0&&now-st.lastTickAt<=30000)));
   const live=inSession&&connected&&!needsLogin;
   const bars=Object.keys(INTRADAY_BARS||{}).length;
   const dot=!inSession?'var(--border-hi)':(live?'var(--green)':(needsLogin||st?.statusUnknown?'var(--amber)':'var(--red)'));
@@ -12202,11 +11985,12 @@ function intradayPasteBarHtml(){
     // `live` describes the tick socket. Prices on the board arrive through the universe delta, and
     // when that fails the row stayed fully green while every Price/Day cell aged silently.
     if(inSession){
-      const ageMs=_universeLiveAt?(now-_universeLiveAt):Infinity;
-      if(!_universeLiveAt) bits.push('<b style="color:var(--red)">prices not updating</b>'
+      const priceAt=_universeTickAt===null?_universeLiveAt:_universeTickAt;
+      const ageMs=priceAt?(now-priceAt):Infinity;
+      if(!priceAt) bits.push('<b style="color:var(--red)">prices not updating</b>'
         +(_universeDeltaError?' — '+escHtml(_universeDeltaError):'')+' — board is on a stored universe');
       else if(ageMs>120000) bits.push('<b style="color:var(--amber)">prices '+Math.round(ageMs/60000)+'m stale</b>');
-      else bits.push('prices '+liveTapeTime(_universeLiveAt));
+      else bits.push('last market tick '+liveTapeTime(priceAt));
     }
     if(checked) bits.push('checked '+checked);
     if(portfolioAt) bits.push('positions '+portfolioAt);
@@ -12483,8 +12267,8 @@ function renderStatusBar(){
       const riskPct=capital>0?(totalRisk/capital)*100:0;
       const spread=risks.length>1?`${fmtINR(risks[0])}–${fmtINR(risks.at(-1))}`:fmtINR(risks[0]);
       const budget=getEffectiveRiskPerTrade();
-      const budgetLbl=budget>0?` Risk ₹/trade budget: ${fmtINR(budget)} per position.`:'';
-      html+=` <span style="color:var(--cyan);font-size:13px;font-family:'DM Mono',monospace;font-weight:700;margin-left:8px" title="Total rupees at risk if every position in this basket hits its own stop — ${spread} per position across ${risks.length}. Positions are sized by Radar score ÷ stop distance, with goal-sized funding in rank order; differing row targets, available basket capital and caps can change the rupee risk.${budgetLbl}">· 🛡 ${fmtINR(totalRisk)} at risk (${riskPct.toFixed(1)}% of capital) · ${spread}/trade</span>`;
+      const budgetLbl='';
+      html+=` <span style="color:var(--cyan);font-size:13px;font-family:'DM Mono',monospace;font-weight:700;margin-left:8px" title="Total rupees at risk if every position in this basket hits its own stop — ${spread} per position across ${risks.length}. Positions are sized by Rocket Score with at least 10 shares; stop risk is reported only.${budgetLbl}">· 🛡 ${fmtINR(totalRisk)} at risk (${riskPct.toFixed(1)}% of capital) · ${spread}/trade</span>`;
     }
     // Expected net uses each stock's own capacity-aware target. The Harvest/goal/manual
     // value is an anchor only; it is never pasted uniformly onto every selected row.
@@ -12558,7 +12342,7 @@ function renderStatusBar(){
   }
   if(SUPPRESSED_HELD>0)html+=` <span class="sb-tag" style="margin-left:8px" title="Stocks you already hold (Holdings + Positions + today's net Orders buys). Since v1070 they remain in the ranking and can be recommended again — buying adds to the existing position. See Open Positions below.">📌 ${SUPPRESSED_HELD} already held</span>`;
   if(SURV_HARD_REMOVED>0)html+=` <span class="sb-tag sb-tag-red" style="margin-left:4px" title="Weeded out by the configured surveillance rules in the Methodology table (hard filter).">⚠ ${SURV_HARD_REMOVED} surveillance removed</span>`;
-  if(ALLOC_BLOCKED>0)html+=` <span class="sb-tag" style="margin-left:4px" title="Removed because no share can be allocated to them: no daily turnover, allocation rails below one share, no viable target after costs, or already held at a profit with no cushion for an add. Listed with the reason in Removed from rankings.">🚫 ${ALLOC_BLOCKED} not allocatable</span>`;
+  if(ALLOC_BLOCKED>0)html+=` <span class="sb-tag" style="margin-left:4px" title="Cannot fund the minimum 10 shares within available cash and Max Allocation. Listed with the reason in Removed from rankings.">🚫 ${ALLOC_BLOCKED} not allocatable</span>`;
   if(tags.length){html+=`<span class="sb-sep">|</span>`;html+=tags.map(t=>`<span class="sb-tag">${t}</span>`).join('');}
   html+=`<button class="sb-clear" id="btnToggleBelowThreshold" onclick="toggleBelowThreshold()" style="margin-left:auto;${SHOW_INELIGIBLE?'border-color:var(--amber);color:var(--amber);background:rgba(251,191,36,.1)':''}" title="${SHOW_INELIGIBLE?'Hide ineligible stocks (show only actionable recommendations)':'Show all candidate stocks including ineligible ones'}">${SHOW_INELIGIBLE?'Hide ineligible':'Show ineligible'}</button>`;
   if(isFiltered)html+=`<button class="sb-clear" style="margin-left:8px" onclick="clearFilters()">✕ Clear filters</button>`;
@@ -12884,6 +12668,7 @@ async function loadStreamStatus(){
     const next=await readHelperResponse('/api/kite/stream',{timeout:3000});
     if(!next||next.ok===false) throw new Error('Stream status unavailable');
     STREAM_STATUS={...next,statusUnknown:false,checkedAt:Date.now()};
+    if(Number.isFinite(next.lastTickAt)) _universeTickAt=next.lastTickAt;
     return STREAM_STATUS;
   }catch(e){
     STREAM_STATUS={...(STREAM_STATUS||{}),statusUnknown:true};
