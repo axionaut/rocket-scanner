@@ -1,5 +1,5 @@
-const BUILD_TS='2026-09-15 20:08 IST'; // release build time (IST)
-const APP_VERSION=1382;
+const BUILD_TS='2026-09-15 21:15 IST'; // release build time (IST)
+const APP_VERSION=1383;
 const RADAR_SCORE_VERSION='rocket-tick-v2'; // v1378: ordered directional ticks, six-tick half-life.
 
 // ── v1358: AN UNCAUGHT ERROR MUST NAME ITSELF ─────────────────────────────────────────────────
@@ -3947,10 +3947,11 @@ function getRowActionState(s){
   const e=_universeTickAt!==null?Math.floor((Date.now()-_universeTickAt)/10000):(_universeLiveAt?Math.floor((Date.now()-_universeLiveAt)/60000):-1);
   const score=Number(s.score)||0;
   const px=Number(s.price)||0;
+  const quote=_universeMap.get(s.symbol), priceAt=quote?.priceAt, priceSource=quote?.priceSource, tickAt=_universeTickAt, universeRev=_clientUniverseRev;
   const cached=ROW_ACTION_MEMO.get(s);
-  if(cached&&cached.a===a&&cached.b===b&&cached.c===c&&cached.d===d&&cached.e===e&&cached.score===score&&cached.px===px&&cached.bookRev===bookRev) return cached.value;
+  if(cached&&cached.a===a&&cached.b===b&&cached.c===c&&cached.d===d&&cached.e===e&&cached.score===score&&cached.px===px&&cached.bookRev===bookRev&&cached.priceAt===priceAt&&cached.priceSource===priceSource&&cached.tickAt===tickAt&&cached.universeRev===universeRev) return cached.value;
   const value=_getRowActionStateUncached(s);
-  ROW_ACTION_MEMO.set(s,{a,b,c,d,e,score,px,bookRev,value});
+  ROW_ACTION_MEMO.set(s,{a,b,c,d,e,score,px,bookRev,priceAt,priceSource,tickAt,universeRev,value});
   return value;
 }
 // A BOARD ON A STORED UNIVERSE IS NOT A RECOMMENDATION. Price, day change, turnover, ATR, range,
@@ -3967,13 +3968,44 @@ let _universeDeltaError = '';
 let _universeTickAt=null;
 function universePriceStaleness(){
   if(!isEquitySession(Date.now())) return null;
-  if(_universeTickAt!==null&&(!_universeTickAt||Date.now()-_universeTickAt>30000)) return 'Market ticks are stale - reconnecting feed';
+  // HTTP success is transport health, never evidence that market ticks are arriving.
+  if(!Number.isFinite(_universeTickAt)||_universeTickAt<=0||_universeTickAt>Date.now()||Date.now()-_universeTickAt>30000) return 'Market ticks are stale or unavailable - awaiting fresh feed';
   if(!_universeLiveAt) return 'Live prices are not updating'
     +(_universeDeltaError?' ('+_universeDeltaError+')':'')+' - the board is on a stored universe';
   const age=Date.now()-_universeLiveAt;
   if(age>UNIVERSE_STALE_MS) return 'Live prices are '+Math.round(age/60000)+' minutes stale';
   return null;
 }
+function stockPriceStaleness(symbol){
+  const quote=_universeMap.get(symbol), at=quote?.priceAt, now=Date.now();
+  // Use the helper's per-stock observation, not another stock's tick or a candle timestamp.
+  if(quote?.priceSource!=='live tick'||!Number.isFinite(at)||at<=0||at>now)
+    return 'Awaiting a live tick for '+symbol;
+  if(now-at>30000) return symbol+' tick is stale - awaiting a fresh price';
+  return null;
+}
+let LIVE_BREADTH_MEMO=null;
+function liveMarketBreadth(){
+  const now=Date.now(), beat=Math.floor(now/1000), rev=_clientUniverseRev;
+  if(LIVE_BREADTH_MEMO?.beat===beat&&LIVE_BREADTH_MEMO.rev===rev) return LIVE_BREADTH_MEMO;
+  let advancing=0,total=0;
+  for(const quote of _universeMap.values()){
+    const at=quote.priceAt,price=quote.price,open=quote.open;
+    if(quote.priceSource!=='live tick'||!Number.isFinite(at)||at<=0||at>now||now-at>30000||
+      !Number.isFinite(price)||price<=0||!Number.isFinite(open)||open<=0) continue;
+    total++;
+    if(price>open) advancing++;
+  }
+  return LIVE_BREADTH_MEMO={beat,rev,advancing,total,pct:total?100*advancing/total:null};
+}
+function weakMarketQualificationIssue(){
+  const breadth=liveMarketBreadth();
+  if(breadth.pct===null) return 'Awaiting fresh market breadth';
+  return breadth.advancing*2<breadth.total
+    ? `Weak market breadth: ${breadth.pct.toFixed(1)}% above open (${breadth.advancing}/${breadth.total} fresh stocks); at least 50% required for new buys`
+    : null;
+}
+
 function _getRowActionStateUncached(s, ignoreMarketClosed=false){
   if(!s) return {state:'BLOCKED',reason:'Invalid row'};
   if(s.scoreVersion!==RADAR_SCORE_VERSION) return {state:'BLOCKED',reason:'Older score scale - rescore required'};
@@ -3981,11 +4013,19 @@ function _getRowActionStateUncached(s, ignoreMarketClosed=false){
     return {state:'WAIT',reason:'Market closed — viewing last session state'};
   const stale=universePriceStaleness();
   if(stale) return {state:'BLOCKED',reason:stale};
+  if(isEquitySession(Date.now())){
+    const stockStale=stockPriceStaleness(s.symbol);
+    if(stockStale) return {state:'BLOCKED',reason:stockStale};
+  }
   if(NSE_SURV[s.symbol]?.length) return {state:'BLOCKED',reason:'Surveillance: '+NSE_SURV[s.symbol].join(' · ')};
   if(s.basketEligible===false) return {state:'BLOCKED',reason:'Non-EQ series or price band under 10%'};
   const cr=Number(s.circuitRunwayPct);
   if(Number.isFinite(cr)&&cr<=0) return {state:'BLOCKED',reason:'At the upper circuit - nothing to buy'};
   if(!meetsScoreBar(s.score)) return {state:'WAIT',reason:s.scoreComponents?.block||`Score ${Number(s.score).toFixed(1)} < ${RECOMMEND_MIN_SCORE}`};
+  if(isEquitySession(Date.now())){
+    const breadthIssue=weakMarketQualificationIssue();
+    if(breadthIssue) return {state:'BLOCKED',reason:breadthIssue};
+  }
   const depthIssue=depthQualificationIssue(s.symbol);
   if(depthIssue) return {state:'BLOCKED',reason:depthIssue};
   // A WIDENING GAP DRIVEN BY ORDERS NOBODY FILLS IS NOT STRENGTH (v1382). Average order size is the
@@ -8852,7 +8892,7 @@ function _renderMethodologyInner(){
         <li>S persists across sessions and does not decay while the market is closed. The previous session's last traded price is the reference for the next session's first observation.</li>
       </ol></div>
       <div class="m-card"><h4>What Does Not Enter It</h4><p>No indicator, volume, price magnitude, market breadth or learned weight. Thin stocks are handled by the <strong>Drop thinnest %</strong> filter, not by the formula. The seven daily-column groups below describe the Setup label and Risk pill only.</p><div class="rr-groups" style="margin-top:10px">${groupsHTML}</div>${diagHTML}</div>
-      <div class="m-card"><h4>When a Row Is GO</h4><p>A row is <strong>GO</strong> when the market is open, live prices are current, the stock is not under a configured surveillance rule, its series and price band are basket-eligible, it is not at the upper circuit, its Rocket Score is at or above <strong>Min Score ${RECOMMEND_MIN_SCORE}</strong>, and fresh market depth shows <strong>Total Buy Quantity &gt; Total Sell Quantity</strong> with that gap <strong>wider than it was a minute ago</strong>, and the <strong>average order size</strong> gap (quantity per order across the five displayed rungs, buy side minus sell side) is <strong>also wider than a minute ago</strong>. A qualifying row whose book cancelled more than it traded today still says so. These checks decide whether a row can be bought; none of them changes the score. Funding requires at least 10 shares within cash including purchase charges and Max Allocation.</p></div>
+      <div class="m-card"><h4>When a Row Is GO</h4><p>A row is <strong>GO</strong> when the market is open, market and individual-stock ticks are no older than 30 seconds, at least half of fresh live stocks are above their session open (flat stocks count in the total). Additionally, the stock is not under a configured surveillance rule, its series and price band are basket-eligible, it is not at the upper circuit, its Rocket Score is at or above <strong>Min Score ${RECOMMEND_MIN_SCORE}</strong>, and fresh market depth shows <strong>Total Buy Quantity &gt; Total Sell Quantity</strong> with that gap <strong>wider than it was a minute ago</strong>, and the <strong>average order size</strong> gap (quantity per order across the five displayed rungs, buy side minus sell side) is <strong>also wider than a minute ago</strong>. A qualifying row whose book cancelled more than it traded today still says so. These checks decide whether a row can be bought; none of them changes the score. Funding requires at least 10 shares within cash including purchase charges and Max Allocation.</p></div>
       <div class="m-card"><h4>Held Positions &amp; Basket</h4><p>Qualifying stocks receive at least 10 shares or remain unfunded. Minimum lots are reserved in score order, then remaining cash is split by Rocket Score within Max Allocation. Purchase charges are included in affordability. Targets, profit estimates and stop risk are planning information; none gates allocation. Existing held-position exit rules remain active.</p></div>
     </div>
     <h3 id="meth-ledger" style="margin-top:28px">Feature Ledger <span style="font-size:14px;color:var(--t3);font-weight:400">(${RADAR.features.length||0} setup features from ${RADAR.headers.length||0} input columns)</span></h3>
@@ -12027,7 +12067,7 @@ function intradayPasteBarHtml(){
   const needsSetup=KITE_API.mode!=='connect';
   const needsLogin=!needsSetup&&(KITE_API.needsLogin||!KITE_API.hasToken||KITE_API.tokenValid===false);
   const st=STREAM_STATUS;
-  const connected=!!(st&&st.connected&&!st.statusUnknown&&(!inSession||!Number.isFinite(st.lastTickAt)||(st.lastTickAt>0&&now-st.lastTickAt<=30000)));
+  const connected=!!(st&&st.connected&&!st.statusUnknown&&(!inSession||(Number.isFinite(st.lastTickAt)&&st.lastTickAt>0&&st.lastTickAt<=now&&now-st.lastTickAt<=30000)));
   const live=inSession&&connected&&!needsLogin;
   const bars=Object.keys(INTRADAY_BARS||{}).length;
   const dot=!inSession?'var(--border-hi)':(live?'var(--green)':(needsLogin||st?.statusUnknown?'var(--amber)':'var(--red)'));
@@ -12078,11 +12118,11 @@ function intradayPasteBarHtml(){
     // `live` describes the tick socket. Prices on the board arrive through the universe delta, and
     // when that fails the row stayed fully green while every Price/Day cell aged silently.
     if(inSession){
-      const priceAt=_universeTickAt===null?_universeLiveAt:_universeTickAt;
+      const priceAt=Number.isFinite(_universeTickAt)&&_universeTickAt<=now?_universeTickAt:0;
       const ageMs=priceAt?(now-priceAt):Infinity;
       if(!priceAt) bits.push('<b style="color:var(--red)">prices not updating</b>'
         +(_universeDeltaError?' — '+escHtml(_universeDeltaError):'')+' — board is on a stored universe');
-      else if(ageMs>120000) bits.push('<b style="color:var(--amber)">prices '+Math.round(ageMs/60000)+'m stale</b>');
+      else if(ageMs>30000) bits.push('<b style="color:var(--amber)">prices '+Math.round(ageMs/60000)+'m stale</b>');
       else bits.push('last market tick '+liveTapeTime(priceAt));
     }
     if(checked) bits.push('checked '+checked);
@@ -12413,10 +12453,11 @@ function renderStatusBar(){
   } else if(capital>0 && goCount>0){
     html+=` <span style="color:var(--t3);font-size:13px;margin-left:8px">· select ${instrumentLabel} to allocate ${fmtINR(capital)}</span>`;
   }
-  // v555 WS-D: market intraday breadth gauge (entry timing). Market-wide, so it never changes the ranking.
-  if(MARKET_INTRADAY&&MARKET_INTRADAY.advPct!=null){
-    const up=MARKET_INTRADAY.advPct>=0.5,c=up?'var(--green)':'var(--red)',pct=(MARKET_INTRADAY.advPct*100).toFixed(0);
-    html+=` <span style="color:${c};font-size:13px;font-family:'DM Mono',monospace;font-weight:700;margin-left:8px" title="Automatic breadth trigger: ${MARKET_INTRADAY.adv} of ${MARKET_INTRADAY.adv+MARKET_INTRADAY.dec} stocks are trading above their open. In broad weakness, an entry is blocked unless that stock independently confirms above VWAP and its open on positive completed tape.">· ⚡ Market ${up?'▲':'▼'} ${pct}% up-from-open</span>`;
+  // Show the same fresh cross-section used by the breadth entry gate.
+  if(isEquitySession(Date.now())){
+    const breadth=liveMarketBreadth(),up=breadth.pct!==null&&breadth.pct>=50;
+    const pct=breadth.pct===null?'unavailable':breadth.pct.toFixed(1)+'% above open';
+    html+=` <span style="color:${up?'var(--green)':'var(--red)'};font-size:13px;margin-left:8px" title="${breadth.advancing}/${breadth.total} fresh stocks above open. New buys require at least 50% above open. Stale stocks are excluded; flat stocks count in the total.">Market breadth: ${pct} (${breadth.advancing}/${breadth.total})</span>`;
   }
   // v557: say it out loud when Positions/Orders are a prior session's snapshot. Zerodha only rewrites
   // them on a new trade, so the morning after a no-trade day they still hold yesterday's rows — they
