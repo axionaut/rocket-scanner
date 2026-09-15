@@ -1,5 +1,5 @@
-const BUILD_TS='2026-09-15 15:08 IST'; // release build time (IST)
-const APP_VERSION=1380;
+const BUILD_TS='2026-09-15 15:32 IST'; // release build time (IST)
+const APP_VERSION=1381;
 const RADAR_SCORE_VERSION='rocket-tick-v2'; // v1378: ordered directional ticks, six-tick half-life.
 
 // ── v1358: AN UNCAUGHT ERROR MUST NAME ITSELF ─────────────────────────────────────────────────
@@ -3852,14 +3852,56 @@ function getRecommendationFreshness(sym){
 function passesIntradayValidation(s){return !!s&&getRecommendationFreshness(s.symbol).ok;}
 let BOOK_LADDER={};
 let BOOK_V=0; // qualification must invalidate even when only the order book changes
-const ROW_ACTION_MEMO=new WeakMap();
+// The age at which live depth totals stop being evidence. It is also the width of the window the
+// buy-minus-sell trend is measured over, so the rule reads "bigger than it was a minute ago" and
+// there is one number, not two.
+const DEPTH_TOTALS_MAX_AGE_MS=60000;
+// One sample a second is the beat's own granularity (the action memo already keys on that clock),
+// so a full window is this many readings. The cap is the window expressed in beats, not a chosen
+// number, and it stops a faster-than-expected packet rate growing an array per symbol without end.
+const DEPTH_TOTALS_TREND_MAX=Math.ceil(DEPTH_TOTALS_MAX_AGE_MS/1000)+2;
+// Per-symbol {at,diff} samples of total buy minus total sell, one per distinct totals stamp, pruned
+// to the window above. A repeated packet carrying the same stamp is the SAME observation and must
+// not be recorded twice, or a still book would manufacture its own trend.
+let BOOK_TOTALS_TREND={};
+function recordDepthTotals(sym,l){
+  const key=normSym(sym||'');
+  if(!key) return;
+  const at=Number(l?.totalsAt);
+  if(!l||!Number.isFinite(at)||at<=0||!Number.isFinite(l.buyQty)||!Number.isFinite(l.sellQty)
+    ||l.buyQty<0||l.sellQty<0){ delete BOOK_TOTALS_TREND[key]; return; }
+  const hist=BOOK_TOTALS_TREND[key]||(BOOK_TOTALS_TREND[key]=[]);
+  const last=hist[hist.length-1];
+  if(last&&last.at>=at) return;   // same or older stamp: not a new observation
+  hist.push({at,diff:l.buyQty-l.sellQty});
+  const floor=at-DEPTH_TOTALS_MAX_AGE_MS;
+  // Keep one sample OLDER than the window so the comparison still spans the full minute rather
+  // than collapsing onto the newest reading as the window slides.
+  let cut=0;
+  while(cut+1<hist.length&&hist[cut+1].at<=floor) cut++;
+  if(cut>0) hist.splice(0,cut);
+  // Over the cap, thin from the MIDDLE. The oldest entry is the comparison anchor and the newest is
+  // the current reading; dropping either would silently change what the rule tests.
+  if(hist.length>DEPTH_TOTALS_TREND_MAX) hist.splice(1,hist.length-DEPTH_TOTALS_TREND_MAX);
+}
 function depthQualificationIssue(sym){
-  const l=BOOK_LADDER[normSym(sym||'')],at=l?.totalsAt??l?.at;
-  if(!l||!Number.isFinite(at)||at<=0||Date.now()-at>=60000||at>Date.now()+1000
+  const key=normSym(sym||''),l=BOOK_LADDER[key],at=l?.totalsAt??l?.at,now=Date.now();
+  if(!l||!Number.isFinite(at)||at<=0||now-at>=DEPTH_TOTALS_MAX_AGE_MS||at>now+1000
     ||!Number.isFinite(l.buyQty)||!Number.isFinite(l.sellQty)||l.buyQty<0||l.sellQty<0)
     return 'Awaiting fresh total buy/sell quantities';
-  return l.buyQty>l.sellQty?null:`Total Buy ${l.buyQty.toLocaleString('en-IN')} must exceed Total Sell ${l.sellQty.toLocaleString('en-IN')}`;
+  if(!(l.buyQty>l.sellQty))
+    return `Total Buy ${l.buyQty.toLocaleString('en-IN')} must exceed Total Sell ${l.sellQty.toLocaleString('en-IN')}`;
+  // AND THE GAP MUST BE WIDENING. Buy above sell says where the book stands; only a growing
+  // difference says it is still being built. The comparison is against the oldest reading still
+  // describing this minute, so a single flat packet cannot disqualify a row that is climbing.
+  const hist=BOOK_TOTALS_TREND[key]||[],diff=l.buyQty-l.sellQty;
+  let prior=null;
+  for(let i=0;i<hist.length;i++){ if(hist[i].at<at){ prior=hist[i]; break; } }
+  if(!prior) return 'Awaiting an earlier depth reading to compare against';
+  if(diff>prior.diff) return null;
+  return `Buy-sell gap ${diff.toLocaleString('en-IN')} is not above the earlier ${prior.diff.toLocaleString('en-IN')}`;
 }
+const ROW_ACTION_MEMO=new WeakMap();
 function getRowActionState(s){
   if(!s) return {state:'BLOCKED', reason:'Invalid row'};
   // The stamp values are compared directly rather than joined into a string. MEASURED: one
@@ -8769,7 +8811,7 @@ function _renderMethodologyInner(){
         <li>S persists across sessions and does not decay while the market is closed. The previous session's last traded price is the reference for the next session's first observation.</li>
       </ol></div>
       <div class="m-card"><h4>What Does Not Enter It</h4><p>No indicator, volume, price magnitude, market breadth or learned weight. Thin stocks are handled by the <strong>Drop thinnest %</strong> filter, not by the formula. The seven daily-column groups below describe the Setup label and Risk pill only.</p><div class="rr-groups" style="margin-top:10px">${groupsHTML}</div>${diagHTML}</div>
-      <div class="m-card"><h4>When a Row Is GO</h4><p>A row is <strong>GO</strong> when the market is open, live prices are current, the stock is not under a configured surveillance rule, its series and price band are basket-eligible, it is not at the upper circuit, its Rocket Score is at or above <strong>Min Score ${RECOMMEND_MIN_SCORE}</strong>, and fresh market-depth <strong>Total Buy Quantity &gt; Total Sell Quantity</strong>. These checks decide whether a row can be bought; none of them changes the score. Funding requires at least 10 shares within cash including purchase charges and Max Allocation.</p></div>
+      <div class="m-card"><h4>When a Row Is GO</h4><p>A row is <strong>GO</strong> when the market is open, live prices are current, the stock is not under a configured surveillance rule, its series and price band are basket-eligible, it is not at the upper circuit, its Rocket Score is at or above <strong>Min Score ${RECOMMEND_MIN_SCORE}</strong>, and fresh market depth shows <strong>Total Buy Quantity &gt; Total Sell Quantity</strong> with that gap <strong>wider than it was a minute ago</strong>. These checks decide whether a row can be bought; none of them changes the score. Funding requires at least 10 shares within cash including purchase charges and Max Allocation.</p></div>
       <div class="m-card"><h4>Held Positions &amp; Basket</h4><p>Qualifying stocks receive at least 10 shares or remain unfunded. Minimum lots are reserved in score order, then remaining cash is split by Rocket Score within Max Allocation. Purchase charges are included in affordability. Targets, profit estimates and stop risk are planning information; none gates allocation. Existing held-position exit rules remain active.</p></div>
     </div>
     <h3 id="meth-ledger" style="margin-top:28px">Feature Ledger <span style="font-size:14px;color:var(--t3);font-weight:400">(${RADAR.features.length||0} setup features from ${RADAR.headers.length||0} input columns)</span></h3>
@@ -10886,7 +10928,8 @@ async function loadBookState(){
       // The ladder is a full replacement each pass, never a merge: a level that is gone must
       // disappear, and a stale rung would price an exit that is not there any more.
       const next={};
-      for(const sym in j.ladder) next[normSym(sym)]=j.ladder[sym];
+      for(const sym in j.ladder){ const k=normSym(sym); next[k]=j.ladder[sym]; recordDepthTotals(k,next[k]); }
+      for(const k in BOOK_TOTALS_TREND) if(!(k in next)) delete BOOK_TOTALS_TREND[k];
       BOOK_LADDER=next;
     }
     let n=0,newest=BOOK_AT;
