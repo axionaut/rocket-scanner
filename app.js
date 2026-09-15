@@ -1,5 +1,5 @@
-const BUILD_TS='2026-09-15 15:01 IST'; // release build time (IST)
-const APP_VERSION=1379;
+const BUILD_TS='2026-09-15 15:08 IST'; // release build time (IST)
+const APP_VERSION=1380;
 const RADAR_SCORE_VERSION='rocket-tick-v2'; // v1378: ordered directional ticks, six-tick half-life.
 
 // ── v1358: AN UNCAUGHT ERROR MUST NAME ITSELF ─────────────────────────────────────────────────
@@ -3850,7 +3850,16 @@ function getRecommendationFreshness(sym){
   return {ok:true, why:''};
 }
 function passesIntradayValidation(s){return !!s&&getRecommendationFreshness(s.symbol).ok;}
+let BOOK_LADDER={};
+let BOOK_V=0; // qualification must invalidate even when only the order book changes
 const ROW_ACTION_MEMO=new WeakMap();
+function depthQualificationIssue(sym){
+  const l=BOOK_LADDER[normSym(sym||'')],at=l?.totalsAt??l?.at;
+  if(!l||!Number.isFinite(at)||at<=0||Date.now()-at>=60000||at>Date.now()+1000
+    ||!Number.isFinite(l.buyQty)||!Number.isFinite(l.sellQty)||l.buyQty<0||l.sellQty<0)
+    return 'Awaiting fresh total buy/sell quantities';
+  return l.buyQty>l.sellQty?null:`Total Buy ${l.buyQty.toLocaleString('en-IN')} must exceed Total Sell ${l.sellQty.toLocaleString('en-IN')}`;
+}
 function getRowActionState(s){
   if(!s) return {state:'BLOCKED', reason:'Invalid row'};
   // The stamp values are compared directly rather than joined into a string. MEASURED: one
@@ -3859,14 +3868,14 @@ function getRowActionState(s){
   // string 6,876 times to answer "has anything changed". Same key, same answer, no allocation.
   // s.score and s.price must be verified in the cache key so live price deltas and rescores
   // immediately invalidate the cached action state rather than serving stale 'GO' decisions.
-  const a=RADAR.scoredAt||0,b=INTRADAY_STORE_V,c=RECOMMEND_MIN_SCORE,d=Math.floor(Date.now()/TAPE_BAR_MS);
+  const a=RADAR.scoredAt||0,b=INTRADAY_STORE_V,c=RECOMMEND_MIN_SCORE,d=Math.floor(Date.now()/1000),bookRev=BOOK_V;
   const e=_universeTickAt!==null?Math.floor((Date.now()-_universeTickAt)/10000):(_universeLiveAt?Math.floor((Date.now()-_universeLiveAt)/60000):-1);
   const score=Number(s.score)||0;
   const px=Number(s.price)||0;
   const cached=ROW_ACTION_MEMO.get(s);
-  if(cached&&cached.a===a&&cached.b===b&&cached.c===c&&cached.d===d&&cached.e===e&&cached.score===score&&cached.px===px) return cached.value;
+  if(cached&&cached.a===a&&cached.b===b&&cached.c===c&&cached.d===d&&cached.e===e&&cached.score===score&&cached.px===px&&cached.bookRev===bookRev) return cached.value;
   const value=_getRowActionStateUncached(s);
-  ROW_ACTION_MEMO.set(s,{a,b,c,d,e,score,px,value});
+  ROW_ACTION_MEMO.set(s,{a,b,c,d,e,score,px,bookRev,value});
   return value;
 }
 // A BOARD ON A STORED UNIVERSE IS NOT A RECOMMENDATION. Price, day change, turnover, ATR, range,
@@ -3902,6 +3911,8 @@ function _getRowActionStateUncached(s, ignoreMarketClosed=false){
   const cr=Number(s.circuitRunwayPct);
   if(Number.isFinite(cr)&&cr<=0) return {state:'BLOCKED',reason:'At the upper circuit - nothing to buy'};
   if(!meetsScoreBar(s.score)) return {state:'WAIT',reason:s.scoreComponents?.block||`Score ${Number(s.score).toFixed(1)} < ${RECOMMEND_MIN_SCORE}`};
+  const depthIssue=depthQualificationIssue(s.symbol);
+  if(depthIssue) return {state:'BLOCKED',reason:depthIssue};
   return {state:'GO', reason:'Actionable recommendation'};
 }
 function isSelectableRecommendation(s){
@@ -8758,7 +8769,7 @@ function _renderMethodologyInner(){
         <li>S persists across sessions and does not decay while the market is closed. The previous session's last traded price is the reference for the next session's first observation.</li>
       </ol></div>
       <div class="m-card"><h4>What Does Not Enter It</h4><p>No indicator, volume, price magnitude, market breadth or learned weight. Thin stocks are handled by the <strong>Drop thinnest %</strong> filter, not by the formula. The seven daily-column groups below describe the Setup label and Risk pill only.</p><div class="rr-groups" style="margin-top:10px">${groupsHTML}</div>${diagHTML}</div>
-      <div class="m-card"><h4>When a Row Is GO</h4><p>A row is <strong>GO</strong> when the market is open, live prices are current, the stock is not under a configured surveillance rule, its series and price band are basket-eligible, it is not at the upper circuit, and its Rocket Score is at or above <strong>Min Score ${RECOMMEND_MIN_SCORE}</strong>. These checks decide whether a row can be bought; none of them changes the score. Funding requires at least 10 shares within cash including purchase charges and Max Allocation.</p></div>
+      <div class="m-card"><h4>When a Row Is GO</h4><p>A row is <strong>GO</strong> when the market is open, live prices are current, the stock is not under a configured surveillance rule, its series and price band are basket-eligible, it is not at the upper circuit, its Rocket Score is at or above <strong>Min Score ${RECOMMEND_MIN_SCORE}</strong>, and fresh market-depth <strong>Total Buy Quantity &gt; Total Sell Quantity</strong>. These checks decide whether a row can be bought; none of them changes the score. Funding requires at least 10 shares within cash including purchase charges and Max Allocation.</p></div>
       <div class="m-card"><h4>Held Positions &amp; Basket</h4><p>Qualifying stocks receive at least 10 shares or remain unfunded. Minimum lots are reserved in score order, then remaining cash is split by Rocket Score within Max Allocation. Purchase charges are included in affordability. Targets, profit estimates and stop risk are planning information; none gates allocation. Existing held-position exit rules remain active.</p></div>
     </div>
     <h3 id="meth-ledger" style="margin-top:28px">Feature Ledger <span style="font-size:14px;color:var(--t3);font-weight:400">(${RADAR.features.length||0} setup features from ${RADAR.headers.length||0} input columns)</span></h3>
@@ -10890,8 +10901,6 @@ async function loadBookState(){
     return n;
   }catch(e){ return 0; }
 }
-let BOOK_LADDER={};
-let BOOK_V=0;   // bumped on every book update, so the tape memo can key off it
 // ---- WHAT IT COSTS TO TRADE THIS ROW AT MY SIZE (v1292) ---------------------------------------
 // Owner, on four stuck positions: "The Min Turnover does try to handle the liquidity thing, but if
 // we set it at 25L and the stock's price is 5000, that just means a stock with only 500 volume
