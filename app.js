@@ -1,7 +1,6 @@
-const BUILD_TS='2026-09-15 10:57 IST'; // release build time (IST)
-const APP_VERSION=1377;
-const RADAR_SCORE_VERSION='rocket-tick-v1'; // v1375: the score is v1371's arithmetic again, so it
-// carries v1371's tag - outcome records from before the learning layer are directly comparable.
+const BUILD_TS='2026-09-15 13:51 IST'; // release build time (IST)
+const APP_VERSION=1378;
+const RADAR_SCORE_VERSION='rocket-tick-v2'; // v1378: ordered directional ticks, six-tick half-life.
 
 // ── v1358: AN UNCAUGHT ERROR MUST NAME ITSELF ─────────────────────────────────────────────────
 // This is the class of defect that has cost the most sessions in this app's history, and until now
@@ -3349,16 +3348,10 @@ function isDirectionConfirmed(s){
   const vw=Number(s.vwap), px=Number(s.price), day=Number(s.day);
   return (vw > 0 && px >= vw && isValidChangeOpen(s.changeOpen) && Number(s.changeOpen) > 0 && Number.isFinite(day) && day > 0);
 }
-// THE ROCKET SCORE (v1367's specification; briefly renamed Rocket Pressure in v1372-v1374 while a
-// learning layer sat on top of it, and named Rocket Score again in v1375 now that it is the whole
-// decision metric once more. The arithmetic has never changed and must stay untouched.)
-// Tick direction only: the helper counts every LTP observation as up (+1), down
-// (-1) or unchanged (0) into 10-second buckets, and once per bucket
-//     Directional Pressure = (U-D)/(U+D),   S = 0.891*S + 0.109*Directional Pressure,   Rocket Score = 50*(1+S)
-// S persists across sessions. The page does not compute anything: it reads S from the live feed.
-// No indicator, volume, magnitude or market variable enters it, and no gate edits it. Whether a row
-// can be traded (surveillance, exchange eligibility, circuit, a live price feed, funding) is decided
-// separately and shown in Status / Rejection, never folded into it.
+// v1378: the helper updates S on each directional price change, in order.
+// S = 0.891*S + 0.109*direction; six directional ticks halve the earlier influence.
+// Equal prices leave S unchanged. State persists; the page reads it and maps to 0-100.
+// No indicator, magnitude, volume or eligibility gate edits the score.
 function rocketPressureOf(sym){
   const f=_universeMap.get(sym);
   const S=Number(f?.rs);
@@ -3384,8 +3377,8 @@ function setRadarEvidenceScore(r){
 function pressureTitle(c){
   if(!c||c.pressure===null||c.pressure===undefined) return 'No move history for this stock yet.';
   return `Rocket Score ${c.pressure.toFixed(1)} = 50 x (1 + S), S ${c.S!==null?c.S.toFixed(4):'—'}`
-    +(c.tick!==null&&c.tick!==undefined?`; last bucket directional pressure ${(c.tick>=0?'+':'')+c.tick.toFixed(2)}`:'')
-    +'. Up moves minus down moves over all directional moves, one-minute half-life.';
+    +(c.tick!==null&&c.tick!==undefined?`; last directional tick ${(c.tick>=0?'+':'')+c.tick.toFixed(2)}`:'')
+    +'. Ordered up/down price changes, six-directional-tick half-life; unchanged prices leave the score unchanged.';
 }
 function radarScoreTitle(r){
   const c=r?.scoreComponents;
@@ -8763,7 +8756,7 @@ function _renderMethodologyInner(){
     </nav>
     <h3 id="meth-scoring">Rocket Score</h3>
     <p>The <strong>Rocket Score</strong> is move direction and nothing else: every last-traded-price print counts
-    +1, −1 or 0 against the previous print, folded into 10-second buckets with a one-minute half-life and read on a
+    +1 or -1 against the previous price, applied in order with a six-directional-tick half-life and read on a
     fixed 0–100 scale where 50 is balanced. The board is sorted by it, highest first. It describes what the stock is
     doing now; it is not a forecast, a probability or a claim about profit, and it is a research screener rather than
     investment advice. Whether a row can be bought — surveillance, series and band, the circuit, a live price feed,
@@ -8771,8 +8764,8 @@ function _renderMethodologyInner(){
     <div class="m-grid">
       <div class="m-card"><h4>How It Is Computed</h4><ol style="padding-left:18px;color:var(--t2);font-size:14px;line-height:1.7">
         <li>Every last-traded-price observation from the Kite stream scores <strong>+1</strong> if it is above the previous traded price, <strong>−1</strong> if below and <strong>0</strong> if unchanged.</li>
-        <li>Observations are counted into fixed 10-second wall-clock buckets. Each bucket's <strong>Directional Pressure = (U − D) / (U + D)</strong>, and 0 when the bucket held no directional change.</li>
-        <li>Once per bucket: <strong>S = 0.891 × S + 0.109 × Directional Pressure</strong> (λ = 0.5<sup>10/60</sup>, a one-minute half-life). S starts at 0.</li>
+        <li>Each directional price change updates the score in the helper. Unchanged prices leave it unchanged; the first price establishes the reference.</li>
+        <li>Each directional tick: <strong>S = 0.891 &times; S + 0.109 &times; Direction</strong> (&lambda; = 0.5<sup>1/6</sup>, a six-directional-tick half-life). S starts at 0. Active stocks respond faster in clock time.</li>
         <li><strong>Rocket Score = 50 × (1 + S)</strong>: 50 is balanced, above 50 is net buying pressure, below 50 is net selling. It describes the stock, and on its own it is not a reason to buy.</li>
         <li>S persists across sessions and does not decay while the market is closed. The previous session's last traded price is the reference for the next session's first observation.</li>
       </ol></div>
@@ -8798,8 +8791,8 @@ function _renderMethodologyInner(){
       </ol></div>
       <div class="m-card"><h4>Interpretation</h4><ul style="padding-left:18px;color:var(--t2);font-size:14px;line-height:1.7">
         ${RADAR_SCORE_BANDS.map(b=>`<li><b style="color:${b.color}">${b.range}:</b> ${b.note}</li>`).join('')}
-<li>Rocket Score is <strong>50 × (1 + S)</strong>, S being the one-minute-half-life average of 10-second uptick/downtick pressure. 50 is balanced, and the scale is fixed, so the same number means the same thing on any day and on any stock.</li>
-        <li>It is a reading of move direction over roughly the last minute — never a probability of profit, never an expected return, and no evidence of forward predictive value is claimed.</li>
+<li>Rocket Score is <strong>50 × (1 + S)</strong>, S being the six-directional-tick-half-life average of ordered up/down price changes. 50 is balanced, and the scale is fixed, so the same number means the same thing on any day and on any stock.</li>
+        <li>It is a reading of move direction over recent directional ticks — never a probability of profit, never an expected return, and no evidence of forward predictive value is claimed.</li>
       </ul></div>
     </div>
     <p style="color:var(--t3);font-style:italic;margin-top:4px">⚠ Quantitative screening only. Not financial advice. Past momentum ≠ future returns.</p>`;
@@ -12422,10 +12415,10 @@ function showRadarDetail(sym){
   // Everything below it is descriptive context and says so.
   const tc=r.scoreComponents||{};
   const tapeRead=`<div class="rr-read"><b>Rocket Score ${tc.total!=null?Number(tc.total).toFixed(1):'—'}</b>
-    = 50 × (1 + S)${tc.S!=null?`, S = ${Number(tc.S).toFixed(4)}`:''}${tc.tick!=null?`; last bucket directional pressure ${(tc.tick>=0?'+':'')+Number(tc.tick).toFixed(2)}`:''}.<br>
-    Every price print counts +1 if it is above the previous price, −1 if below, 0 if unchanged. Each 10-second
-    bucket's directional pressure is (up − down) / (up + down), or 0 when nothing moved, and
-    S = 0.891 × S + 0.109 × pressure (a one-minute half-life). S carries over from the previous session.
+    = 50 × (1 + S)${tc.S!=null?`, S = ${Number(tc.S).toFixed(4)}`:''}${tc.tick!=null?`; last directional tick ${(tc.tick>=0?'+':'')+Number(tc.tick).toFixed(2)}`:''}.<br>
+    Each price change counts +1 if above the previous price, -1 if below. Unchanged prices leave S unchanged.
+    Each directional tick applies S = 0.891 &times; S + 0.109 &times; direction, in order, with a six-directional-tick half-life.
+    S carries over from the previous session; ten-second history snapshots do not change it.
     No indicator, volume or price size enters it. Surveillance, series/band, the circuit and a live price feed
     decide whether the row can be bought; they never change the number.</div>`;
   document.getElementById('radarDetailBody').innerHTML=`${detailNote}${decisionRead}${tapeRead}
