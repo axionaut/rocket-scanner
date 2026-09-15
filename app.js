@@ -1,5 +1,5 @@
-const BUILD_TS='2026-09-15 15:32 IST'; // release build time (IST)
-const APP_VERSION=1381;
+const BUILD_TS='2026-09-15 20:08 IST'; // release build time (IST)
+const APP_VERSION=1382;
 const RADAR_SCORE_VERSION='rocket-tick-v2'; // v1378: ordered directional ticks, six-tick half-life.
 
 // ── v1358: AN UNCAUGHT ERROR MUST NAME ITSELF ─────────────────────────────────────────────────
@@ -3864,16 +3864,18 @@ const DEPTH_TOTALS_TREND_MAX=Math.ceil(DEPTH_TOTALS_MAX_AGE_MS/1000)+2;
 // to the window above. A repeated packet carrying the same stamp is the SAME observation and must
 // not be recorded twice, or a still book would manufacture its own trend.
 let BOOK_TOTALS_TREND={};
-function recordDepthTotals(sym,l){
-  const key=normSym(sym||'');
-  if(!key) return;
-  const at=Number(l?.totalsAt);
-  if(!l||!Number.isFinite(at)||at<=0||!Number.isFinite(l.buyQty)||!Number.isFinite(l.sellQty)
-    ||l.buyQty<0||l.sellQty<0){ delete BOOK_TOTALS_TREND[key]; return; }
-  const hist=BOOK_TOTALS_TREND[key]||(BOOK_TOTALS_TREND[key]=[]);
+// AND THE SAME SHAPE FOR AVERAGE ORDER SIZE (v1382), kept in its OWN series against its OWN stamp.
+// A packet can carry whole-book totals without carrying a readable five-rung book, so one may not
+// refresh the other's age or borrow the other's samples.
+let BOOK_ORDERS_TREND={};
+// One trend recorder, two series. `at` is the series' own stamp, so a repeated packet carrying the
+// same stamp is the SAME observation and is never recorded twice - a still book cannot manufacture
+// its own trend.
+function pushTrendSample(store,key,at,diff){
+  const hist=store[key]||(store[key]=[]);
   const last=hist[hist.length-1];
-  if(last&&last.at>=at) return;   // same or older stamp: not a new observation
-  hist.push({at,diff:l.buyQty-l.sellQty});
+  if(last&&last.at>=at) return;
+  hist.push({at,diff});
   const floor=at-DEPTH_TOTALS_MAX_AGE_MS;
   // Keep one sample OLDER than the window so the comparison still spans the full minute rather
   // than collapsing onto the newest reading as the window slides.
@@ -3883,6 +3885,24 @@ function recordDepthTotals(sym,l){
   // Over the cap, thin from the MIDDLE. The oldest entry is the comparison anchor and the newest is
   // the current reading; dropping either would silently change what the rule tests.
   if(hist.length>DEPTH_TOTALS_TREND_MAX) hist.splice(1,hist.length-DEPTH_TOTALS_TREND_MAX);
+}
+// The oldest reading still describing this minute - the anchor the widening test compares against.
+function priorTrendSample(store,key,at){
+  const hist=store[key]||[];
+  for(let i=0;i<hist.length;i++) if(hist[i].at<at) return hist[i];
+  return null;
+}
+function recordDepthTotals(sym,l){
+  const key=normSym(sym||'');
+  if(!key) return;
+  const at=Number(l?.totalsAt);
+  if(!l||!Number.isFinite(at)||at<=0||!Number.isFinite(l.buyQty)||!Number.isFinite(l.sellQty)
+    ||l.buyQty<0||l.sellQty<0) delete BOOK_TOTALS_TREND[key];
+  else pushTrendSample(BOOK_TOTALS_TREND,key,at,l.buyQty-l.sellQty);
+  const oAt=Number(l?.ordersAt),ab=Number(l?.avgBuyOrder),as=Number(l?.avgSellOrder);
+  if(!l||!Number.isFinite(oAt)||oAt<=0||!Number.isFinite(ab)||!Number.isFinite(as)||ab<=0||as<=0)
+    delete BOOK_ORDERS_TREND[key];
+  else pushTrendSample(BOOK_ORDERS_TREND,key,oAt,ab-as);
 }
 function depthQualificationIssue(sym){
   const key=normSym(sym||''),l=BOOK_LADDER[key],at=l?.totalsAt??l?.at,now=Date.now();
@@ -3894,12 +3914,25 @@ function depthQualificationIssue(sym){
   // AND THE GAP MUST BE WIDENING. Buy above sell says where the book stands; only a growing
   // difference says it is still being built. The comparison is against the oldest reading still
   // describing this minute, so a single flat packet cannot disqualify a row that is climbing.
-  const hist=BOOK_TOTALS_TREND[key]||[],diff=l.buyQty-l.sellQty;
-  let prior=null;
-  for(let i=0;i<hist.length;i++){ if(hist[i].at<at){ prior=hist[i]; break; } }
+  const diff=l.buyQty-l.sellQty,prior=priorTrendSample(BOOK_TOTALS_TREND,key,at);
   if(!prior) return 'Awaiting an earlier depth reading to compare against';
-  if(diff>prior.diff) return null;
-  return `Buy-sell gap ${diff.toLocaleString('en-IN')} is not above the earlier ${prior.diff.toLocaleString('en-IN')}`;
+  if(!(diff>prior.diff))
+    return `Buy-sell gap ${diff.toLocaleString('en-IN')} is not above the earlier ${prior.diff.toLocaleString('en-IN')}`;
+  // SECOND CONDITION (v1382): the AVERAGE ORDER SIZE gap must be widening too. Total quantity says
+  // how much is resting; quantity per order says whether it arrived as conviction or as a crowd.
+  // This is a TOP-FIVE-RUNGS reading - order counts exist only per rung, the whole-book totals
+  // above have no order-count counterpart - so it is a different population from the test above,
+  // deliberately, and is an ADDITIONAL requirement rather than a replacement for it. Only the
+  // widening is tested: the owner asked for the delta, and a level test was not requested.
+  const oAt=Number(l?.ordersAt),ab=Number(l?.avgBuyOrder),as=Number(l?.avgSellOrder);
+  if(!Number.isFinite(oAt)||oAt<=0||now-oAt>=DEPTH_TOTALS_MAX_AGE_MS||oAt>now+1000
+    ||!Number.isFinite(ab)||!Number.isFinite(as)||ab<=0||as<=0)
+    return 'Awaiting fresh average buy/sell order sizes';
+  const oDiff=ab-as,oPrior=priorTrendSample(BOOK_ORDERS_TREND,key,oAt);
+  if(!oPrior) return 'Awaiting an earlier average order size to compare against';
+  if(!(oDiff>oPrior.diff))
+    return `Average order size gap ${oDiff.toFixed(1)} is not above the earlier ${oPrior.diff.toFixed(1)}`;
+  return null;
 }
 const ROW_ACTION_MEMO=new WeakMap();
 function getRowActionState(s){
@@ -3955,6 +3988,14 @@ function _getRowActionStateUncached(s, ignoreMarketClosed=false){
   if(!meetsScoreBar(s.score)) return {state:'WAIT',reason:s.scoreComponents?.block||`Score ${Number(s.score).toFixed(1)} < ${RECOMMEND_MIN_SCORE}`};
   const depthIssue=depthQualificationIssue(s.symbol);
   if(depthIssue) return {state:'BLOCKED',reason:depthIssue};
+  // A WIDENING GAP DRIVEN BY ORDERS NOBODY FILLS IS NOT STRENGTH (v1382). Average order size is the
+  // cheapest book statistic to fake - one large order you intend to pull moves it, where standing
+  // whole-book quantity costs real exposure - so where the session's own cancel evidence says this
+  // book withdraws more than it trades, the row still qualifies but SAYS SO. Display only: no new
+  // veto is invented here, and any score influence comes from the graded `spoof` weight alone.
+  const bookFlag=getBookFlag(s.symbol);
+  if(bookFlag?.heavyCancel)
+    return {state:'GO', reason:'Actionable recommendation - but this book '+bookFlag.text};
   return {state:'GO', reason:'Actionable recommendation'};
 }
 function isSelectableRecommendation(s){
@@ -8811,7 +8852,7 @@ function _renderMethodologyInner(){
         <li>S persists across sessions and does not decay while the market is closed. The previous session's last traded price is the reference for the next session's first observation.</li>
       </ol></div>
       <div class="m-card"><h4>What Does Not Enter It</h4><p>No indicator, volume, price magnitude, market breadth or learned weight. Thin stocks are handled by the <strong>Drop thinnest %</strong> filter, not by the formula. The seven daily-column groups below describe the Setup label and Risk pill only.</p><div class="rr-groups" style="margin-top:10px">${groupsHTML}</div>${diagHTML}</div>
-      <div class="m-card"><h4>When a Row Is GO</h4><p>A row is <strong>GO</strong> when the market is open, live prices are current, the stock is not under a configured surveillance rule, its series and price band are basket-eligible, it is not at the upper circuit, its Rocket Score is at or above <strong>Min Score ${RECOMMEND_MIN_SCORE}</strong>, and fresh market depth shows <strong>Total Buy Quantity &gt; Total Sell Quantity</strong> with that gap <strong>wider than it was a minute ago</strong>. These checks decide whether a row can be bought; none of them changes the score. Funding requires at least 10 shares within cash including purchase charges and Max Allocation.</p></div>
+      <div class="m-card"><h4>When a Row Is GO</h4><p>A row is <strong>GO</strong> when the market is open, live prices are current, the stock is not under a configured surveillance rule, its series and price band are basket-eligible, it is not at the upper circuit, its Rocket Score is at or above <strong>Min Score ${RECOMMEND_MIN_SCORE}</strong>, and fresh market depth shows <strong>Total Buy Quantity &gt; Total Sell Quantity</strong> with that gap <strong>wider than it was a minute ago</strong>, and the <strong>average order size</strong> gap (quantity per order across the five displayed rungs, buy side minus sell side) is <strong>also wider than a minute ago</strong>. A qualifying row whose book cancelled more than it traded today still says so. These checks decide whether a row can be bought; none of them changes the score. Funding requires at least 10 shares within cash including purchase charges and Max Allocation.</p></div>
       <div class="m-card"><h4>Held Positions &amp; Basket</h4><p>Qualifying stocks receive at least 10 shares or remain unfunded. Minimum lots are reserved in score order, then remaining cash is split by Rocket Score within Max Allocation. Purchase charges are included in affordability. Targets, profit estimates and stop risk are planning information; none gates allocation. Existing held-position exit rules remain active.</p></div>
     </div>
     <h3 id="meth-ledger" style="margin-top:28px">Feature Ledger <span style="font-size:14px;color:var(--t3);font-weight:400">(${RADAR.features.length||0} setup features from ${RADAR.headers.length||0} input columns)</span></h3>
