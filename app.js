@@ -1,6 +1,7 @@
-const BUILD_TS='2026-09-15 09:59 IST'; // release build time (IST)
-const APP_VERSION=1374;
-const RADAR_SCORE_VERSION='rocket-opportunity-v2';
+const BUILD_TS='2026-09-15 10:17 IST'; // release build time (IST)
+const APP_VERSION=1375;
+const RADAR_SCORE_VERSION='rocket-tick-v1'; // v1375: the score is v1371's arithmetic again, so it
+// carries v1371's tag - outcome records from before the learning layer are directly comparable.
 
 // ── v1358: AN UNCAUGHT ERROR MUST NAME ITSELF ─────────────────────────────────────────────────
 // This is the class of defect that has cost the most sessions in this app's history, and until now
@@ -2835,7 +2836,11 @@ function getGainerCohort(rows){
 
 
 function radarRankTieBreak(a,b){
-  return (Number(b._oppRate)||0)-(Number(a._oppRate)||0)||String(a.symbol||'').localeCompare(String(b.symbol||''));
+  const st=r=>{
+    const d=Number(r&&r.depthBlendPct); if(Number.isFinite(d)) return d;
+    const p=Number(r&&r.setupPct); return Number.isFinite(p)?p:-1;
+  };
+  return (st(b)-st(a))||String(a.symbol||'').localeCompare(String(b.symbol||''));
 }
 function getRecommendationOutcomeSummary(){
   const issues=Object.values((FS.get(RECOMMEND_OUTCOME_STORE)||{}).issues||{});
@@ -3344,274 +3349,48 @@ function isDirectionConfirmed(s){
   const vw=Number(s.vwap), px=Number(s.price), day=Number(s.day);
   return (vw > 0 && px >= vw && isValidChangeOpen(s.changeOpen) && Number(s.changeOpen) > 0 && Number.isFinite(day) && day > 0);
 }
-// ROCKET PRESSURE (v1367's specification, renamed in v1372 - the arithmetic is untouched and must
-// stay untouched). Tick direction only: the helper counts every LTP observation as up (+1), down
+// THE ROCKET SCORE (v1367's specification; briefly renamed Rocket Pressure in v1372-v1374 while a
+// learning layer sat on top of it, and named Rocket Score again in v1375 now that it is the whole
+// decision metric once more. The arithmetic has never changed and must stay untouched.)
+// Tick direction only: the helper counts every LTP observation as up (+1), down
 // (-1) or unchanged (0) into 10-second buckets, and once per bucket
-//     Directional Pressure = (U-D)/(U+D),   S = 0.891*S + 0.109*Directional Pressure,   Rocket Pressure = 50*(1+S)
+//     Directional Pressure = (U-D)/(U+D),   S = 0.891*S + 0.109*Directional Pressure,   Rocket Score = 50*(1+S)
 // S persists across sessions. The page does not compute anything: it reads S from the live feed.
-// No indicator, volume, magnitude or market variable enters it, no gate edits it, and - the v1372
-// rule - nothing downstream of it may feed back into it: the learned prediction reads this number
-// and never writes it. Whether a row can be traded (surveillance, exchange eligibility, circuit, a
-// live price feed, funding) is decided separately and shown in Status, never folded into it.
+// No indicator, volume, magnitude or market variable enters it, and no gate edits it. Whether a row
+// can be traded (surveillance, exchange eligibility, circuit, a live price feed, funding) is decided
+// separately and shown in Status / Rejection, never folded into it.
 function rocketPressureOf(sym){
   const f=_universeMap.get(sym);
   const S=Number(f?.rs);
   return (f&&f.rs!==null&&f.rs!==undefined&&Number.isFinite(S))?+(50*(1+Math.max(-1,Math.min(1,S)))).toFixed(1):null;
 }
-// ROCKET PRESSURE IS WHAT THE STOCK IS DOING; ROCKET SCORE IS HOW ATTRACTIVE IT IS TO BUY NOW.
-// The pressure is read (never computed here, never adjusted by anything below it); the learned
-// outcomes of similar pressure trajectories give expected upside and time; this order's own
-// round-trip cost comes off; what is left per minute becomes the score. Until outcomes exist the
-// score IS the pressure, so the board orders exactly as it did before any learning had happened.
+// THE ROCKET SCORE IS THE ROCKET PRESSURE (v1375, owner: back to the v1371 implementation). The
+// v1372 learning layer - matched pressure trajectories, expected upside, round-trip cost, net per
+// minute - is REMOVED, not disabled: measured over a live session the horizon it graded on was
+// wrong (v1374 fixed that), and with the horizon right the reference-size book walk then withheld a
+// score from most of the board, so the screen carried no recommendation either way. Section 6: a
+// losing path goes the day it loses. Pressure is read, never computed here, and nothing adjusts it.
 function setRadarEvidenceScore(r){
   if(!r) return null;
   r.directionConfirmed=isDirectionConfirmed(r);
-  const f=_universeMap.get(r.symbol),pressure=rocketPressureOf(r.symbol);
-  r.pressure=pressure;
-  const op=pressure===null?null:rocketOpportunityOf(r);
-  r._oppRate=op?op.opp:null;
-  let sc,block=null,source;
-  if(pressure===null){ sc=null; source='none'; block='No move history for this stock yet'; }
-  else if(!op){
-    if(pressureLearnState().cases.length){sc=null;source='unavailable';block='Learned score unavailable: missing trajectory or executable live book';}
-    else {sc=pressure;source='pressure';}
-  }
-  else if(!op.qualifies){
-    sc=0; source='opportunity';
-    block=op.netPct<=0
-      ? `Expected upside ${op.upPct.toFixed(2)}% does not cover ${op.costPct.toFixed(2)}% round-trip cost`
-      : 'Expected time is unavailable';
-  }
-  else { sc=rocketScoreFromOpp(op.opp); source='opportunity'; if(sc===null){ sc=pressure; source='pressure'; } }
-  r._pressureRevision=_pressureRevision;r._scoreBook=BOOK_V;
+  const f=_universeMap.get(r.symbol),sc=rocketPressureOf(r.symbol);
+  r.pressure=sc;
   r.score=sc;r.rocketScore=sc;r.scoreVersion=RADAR_SCORE_VERSION;
   r.scoreComponents={total:sc,S:Number.isFinite(Number(f?.rs))?Number(f.rs):null,
-    pressure,tick:Number.isFinite(Number(f?.rp))?Number(f.rp):null,permission:1,source,
-    upPct:op?op.upPct:null,minutes:op?op.minutes:null,costPct:op?op.costPct:null,
-    netPct:op?op.netPct:null,netRs:op?op.netRs:null,floorRs:op?op.floorRs:null,
-    opp:op?op.opp:null,cell:op?op.cell:null,cellN:op?op.n:null,obs:op?op.obs:null,
-    netBlocked:!!(op&&!op.qualifies),block};
+    pressure:sc,tick:Number.isFinite(Number(f?.rp))?Number(f.rp):null,permission:1,source:'pressure',
+    block:sc===null?'No move history for this stock yet':null};
   return sc;
 }
 function pressureTitle(c){
   if(!c||c.pressure===null||c.pressure===undefined) return 'No move history for this stock yet.';
-  return `Rocket Pressure ${c.pressure.toFixed(1)} = 50 x (1 + S), S ${c.S!==null?c.S.toFixed(4):'—'}`
+  return `Rocket Score ${c.pressure.toFixed(1)} = 50 x (1 + S), S ${c.S!==null?c.S.toFixed(4):'—'}`
     +(c.tick!==null&&c.tick!==undefined?`; last bucket directional pressure ${(c.tick>=0?'+':'')+c.tick.toFixed(2)}`:'')
     +'. Up moves minus down moves over all directional moves, one-minute half-life.';
 }
 function radarScoreTitle(r){
   const c=r?.scoreComponents;
-  if(!c||c.total===null||c.total===undefined) return pressureTitle(c)+(c?.block?' '+c.block:'');
-  if(c.source==='pressure') return pressureTitle(c)
-    +` No matured outcomes yet, so the Rocket Score is the pressure itself. Min Score ${RECOMMEND_MIN_SCORE}.`;
-  if(c.netBlocked) return pressureTitle(c)+' '+(c.block||'')
-    +`. Expected upside ${c.upPct.toFixed(2)}% in ${c.minutes.toFixed(0)} min from ${c.cellN} matched observations.`;
-  return `Rocket Score ${c.total.toFixed(1)}: expected net ${c.netPct.toFixed(2)}% (${fmtINR(c.netRs)}) in ${c.minutes.toFixed(0)} min`
-    +` = ${c.opp.toFixed(4)}%/min, after ${c.costPct.toFixed(2)}% round-trip cost. `
-    +`Learned from ${c.cellN} observations of trajectory ${c.cell} (${c.obs} total). `
-    +pressureTitle(c)+` Min Score ${RECOMMEND_MIN_SCORE}.`;
-}
-
-// Pressure paths and outcomes only. v1 aggregates cannot recover lost trajectory shapes;
-// retain that store untouched, but do not relabel it as v2 evidence.
-const PRESSURE_LEARN_STORE='rs_pressure_learning_v3';
-const PRESSURE_LEARN_SCHEMA='pressure-outcome-v3';
-// THE OUTCOME WINDOW IS THE APP'S OWN EVIDENCE WINDOW (v1372's rule, restored in v1374), not a new
-// number: TAPE_MIN_SESSION_BARS five-minute bars. v1373 ended an outcome the first bucket pressure
-// fell to 50, which with 10-second buckets and a one-minute half-life is a ~10-SECOND window.
-// Measured on 1,637 live symbols: the median case lived ONE bucket (0.17 min), 59.8% of cases
-// recorded zero upside and mean upside was 0.063% against a 0.35-0.50% round-trip cost - so every
-// row failed by arithmetic, permanently, and no amount of waiting could change it. The same tape
-// graded over a fixed window gives 0.127% at 1 min, 0.326% at 6 min and 0.422% at 12 min. v2 cases
-// are 10-second outcomes and cannot be compared with these, so the store starts again at v3.
-const PRESSURE_HORIZON_MS=TAPE_BAR_MS*TAPE_MIN_SESSION_BARS;
-// Explicit implementation parameters, not market truths. No minimum sample gate.
-const PRESSURE_PATH_POINTS=7; // whole path, evenly spaced over the helper's half-life
-// One case per symbol per window now instead of one every few buckets, so the store must span
-// hours rather than the ~90 seconds 5,000 bought at v1373's rate. At ~55 matured cases a minute
-// this is about three hours of market-wide evidence, and it is what the prediction pass can
-// afford: benchmarked at 716 ms for 10,000 cases x 1,650 rows (1,349 ms at 20,000).
-const PRESSURE_MAX_CASES=10000; // rolling storage budget; oldest matured cases retire first
-const ROCKET_OPP_SCALE=0.05; // percent net per minute at score 50; stable across boards
-let PRESSURE_LEARN=null, _pressureRevision=0, _pressureSaveAt=0;
-const _pressurePredictionMemo=new Map();
-function pressureLearnState(){
-  if(PRESSURE_LEARN) return PRESSURE_LEARN;
-  const local=typeof localStorage!=='undefined'?localStorage.getItem(PRESSURE_LEARN_STORE):null;
-  const saved=local?JSON.parse(local):FS.get(PRESSURE_LEARN_STORE);
-  if(saved&&saved.schema!==PRESSURE_LEARN_SCHEMA) throw new Error('Unknown pressure learning schema');
-  return PRESSURE_LEARN=(saved?structuredClone(saved):null)||{schema:PRESSURE_LEARN_SCHEMA,cases:[],pend:{},seen:{},paths:{}};
-}
-function rocketLearningSummary(){
-  const st=pressureLearnState(),n=st.cases.length;
-  return {observations:n,cells:n,pending:Object.keys(st.pend).length,
-    meanUpPct:n?st.cases.reduce((a,c)=>a+c.up,0)/n:null,
-    meanMinutes:n?st.cases.reduce((a,c)=>a+c.minutes,0)/n:null};
-}
-function pressurePath(history,at,halfLife){
-  const start=at-halfLife;
-  if(!history.length||history[0].t>start) return null;
-  const path=[];let j=0;
-  for(let i=0;i<PRESSURE_PATH_POINTS;i++){
-    const t=start+i*halfLife/(PRESSURE_PATH_POINTS-1);
-    while(j+1<history.length&&history[j+1].t<=t)j++;
-    path.push(+history[j].p.toFixed(1));
-  }
-  return path;
-}
-function rocketLearningTick(){
-  const st=pressureLearnState(),now=Date.now();let changed=false;
-  for(const [sym,f] of _universeMap){
-    const history=Array.isArray(f.rb)?f.rb:[],step=Number(f.rocketBucketMs)||10000;
-    const halfLife=Number(f.rocketHalfLifeMs)||60000;
-    for(let i=0;i<history.length;i++){
-      const x=history[i];
-      if(!(x.t>Number(st.seen[sym]||0))||x.t>now||!(x.px>0)||!Number.isFinite(x.p))continue;
-      let pending=st.pend[sym];
-      // The PATH is censored on any missing bucket below (an unobserved shape is not a flat one).
-      // The OUTCOME is not: the helper writes a bucket only when it actually saw ticks, so a
-      // missing bucket is a stock that did not trade and no price was missed. Only a gap longer
-      // than the pressure's own memory breaks continuous observation. Measured: censoring the
-      // outcome at 1.5 buckets killed 98.4% of 12-minute windows, so v1373's rule and a fixed
-      // horizon together would have matured almost nothing.
-      if(pending&&x.t-pending.lastT>halfLife){
-        const a=istClock(pending.lastT-1),b=istClock(x.t-1);
-        const overnight=istDayKey(pending.lastT)!==istDayKey(x.t)&&a.mins>=15*60+30-step/60000&&b.mins<9*60+15+step/60000;
-        if(!overnight){delete st.pend[sym];pending=null;}
-      }
-      if(pending){
-        if(x.hiT>pending.t&&x.hiT<=x.t&&x.hi>pending.hi){pending.hi=x.hi;pending.hiT=x.hiT;}
-        pending.lastT=x.t;
-        if(x.t-pending.t>=PRESSURE_HORIZON_MS){
-          const up=Math.max(0,(pending.hi/pending.p0-1)*100);
-          // A zero-upside case spends the whole window, not zero minutes.
-          st.cases.push({path:pending.path,up,
-            minutes:((up>0?pending.hiT:x.t)-pending.t)/60000,maturedAt:x.t});
-          if(st.cases.length>PRESSURE_MAX_CASES)st.cases.splice(0,st.cases.length-PRESSURE_MAX_CASES);
-          delete st.pend[sym];
-        }
-      }
-      const contiguous=history.slice(0,i+1).filter(y=>y.t>=x.t-halfLife-step);
-      const hasGap=contiguous.some((y,k)=>k&&y.t-contiguous[k-1].t>step*1.5);
-      const path=hasGap?null:pressurePath(contiguous,x.t,halfLife);
-      if(path){
-        st.paths[sym]=path;
-        if(!st.pend[sym])st.pend[sym]={t:x.t,lastT:x.t,p0:x.px,hi:x.px,hiT:x.t,path:path.slice()};
-      }else delete st.paths[sym];
-      st.seen[sym]=x.t;changed=true;
-    }
-  }
-  if(changed){
-    _pressureRevision++;_pressurePredictionMemo.clear();
-    // The store is rebuildable evidence, so it is written on the pressure bucket's own cadence
-    // rather than on every pass: a 20,000-case stringify plus clone on each beat is not free.
-    if(now-_pressureSaveAt>=60000){
-      _pressureSaveAt=now;
-      if(typeof localStorage!=='undefined')localStorage.setItem(PRESSURE_LEARN_STORE,JSON.stringify(st));
-      FS.set(PRESSURE_LEARN_STORE,structuredClone(st));
-    }
-  }
-}
-// The store is re-read for every scored row, so it is laid out ONCE per learning revision as flat
-// typed arrays and the per-row scratch is reused. Object-of-arrays plus a fresh 20,000-element
-// buffer per row measured 3,464 ms over 1,650 rows; this is 1/6th of that for identical output.
-let _presMatrix=null,_presDist=null,_presAt=null;
-function pressureCaseMatrix(cases,L){
-  if(_presMatrix&&_presMatrix.rev===_pressureRevision&&_presMatrix.L===L&&_presMatrix.src===cases.length)
-    return _presMatrix;
-  const src=cases.length,m=new Float32Array(src*L),up=new Float64Array(src),
-        mins=new Float64Array(src),mat=new Float64Array(src);
-  let n=0;
-  for(let i=0;i<src;i++){
-    const c=cases[i];
-    if(!c||!Array.isArray(c.path)||c.path.length!==L||!Number.isFinite(c.up)||!Number.isFinite(c.minutes))continue;
-    for(let k=0;k<L;k++)m[n*L+k]=c.path[k];
-    up[n]=c.up;mins[n]=c.minutes;mat[n]=c.maturedAt;n++;
-  }
-  // The record's own mean is a property of the store, not of the query, so it is taken once here.
-  let sUp=0,sMin=0;for(let i=0;i<n;i++){sUp+=up[i];sMin+=mins[i];}
-  return _presMatrix={m,up,mins,mat,n,L,meanUp:n?sUp/n:0,meanMin:n?sMin/n:0,rev:_pressureRevision,src};
-}
-// Quickselect: the k-th smallest distance in O(n), keeping each distance paired with its case.
-// A full sort of 10,000 distances for every one of ~1,650 rows is not affordable on the beat.
-function pressureSelectKth(dist,at,n,k){
-  let lo=0,hi=n-1;
-  while(lo<hi){
-    const p=dist[lo+((Math.random()*(hi-lo+1))|0)];
-    let i=lo,j=hi;
-    while(i<=j){
-      while(dist[i]<p)i++;
-      while(dist[j]>p)j--;
-      if(i<=j){
-        const d=dist[i];dist[i]=dist[j];dist[j]=d;
-        const a=at[i];at[i]=at[j];at[j]=a;
-        i++;j--;
-      }
-    }
-    if(k<=j)hi=j;else if(k>=i)lo=i;else return dist[k];
-  }
-  return dist[k];
-}
-function pressurePrediction(sym){
-  const st=pressureLearnState(),path=st.paths[sym];
-  if(!st.cases.length||!path)return null;
-  const cached=_pressurePredictionMemo.get(sym);if(cached)return cached;
-  const L=path.length,M=pressureCaseMatrix(st.cases,L);
-  if(!M.n)return null;
-  const now=Date.now(),m=M.m;
-  if(!_presDist||_presDist.length<M.n){_presDist=new Float64Array(M.n);_presAt=new Int32Array(M.n);}
-  const dist=_presDist,at=_presAt;let n=0;
-  for(let i=0,o=0;i<M.n;i++,o+=L){
-    if(M.mat[i]>now)continue;
-    // Direct whole-path squared distance in pressure units, no derived indicators.
-    let d=0;for(let k=0;k<L;k++){const e=m[o+k]-path[k];d+=e*e;}
-    dist[n]=d/L;at[n]=i;n++;
-  }
-  if(!n)return null;
-  // THE BANDWIDTH IS THE DISTANCE TO THIS QUERY'S OWN sqrt(n)-th NEAREST CASE - the standard
-  // nearest-neighbour rate, derived from the store's size rather than chosen, and it follows the
-  // neighbourhood however large or small it is. v1373 weighted by 1/(1+distance), which has no
-  // width at all: measured over 5,000 live cases the single closest case carried 0.14% of the
-  // total weight, so every stock was handed the store's global mean and the trajectory match was
-  // inert (predicted upside spanned 0.043-0.091% across 400 rows against a store mean of 0.064%).
-  // A fixed decile of the distance spread fails the other way: a matching neighbourhood smaller
-  // than that decile is drowned by the mass outside it.
-  const h=Math.max(pressureSelectKth(dist,at,n,Math.max(1,Math.ceil(Math.sqrt(n)))-1),1e-9),far=12*h;
-  let weight=0,up=0,time=0;
-  for(let i=0;i<n;i++){
-    // exp(-12) is 6e-6: past that a case cannot move the estimate, and the call is the hot cost.
-    if(dist[i]>far)continue;
-    const j=at[i],w=Math.exp(-dist[i]/h);
-    weight+=w;up+=w*M.up[j];time+=w*M.mins[j];
-  }
-  if(!weight)return null;
-  // Shrunk toward the whole record by counting it as ONE observation - the same rule v1372 used to
-  // shrink a cell toward its parent. A sharp bandwidth on a young store would otherwise let the
-  // single nearest case become the entire forecast; here one close match barely moves off the
-  // record's own mean and hundreds of them own the estimate. No minimum sample gate is created.
-  const result={upPct:(up+M.meanUp)/(weight+1),minutes:(time+M.meanMin)/(weight+1),
-    cell:'raw pressure path',n,obs:n};
-  _pressurePredictionMemo.set(sym,result);return result;
-}
-function rocketCostRead(r,upPct=0,quantity=null){
-  const bp=getBuyPrice(r);if(!(bp>0))return null;
-  // Score uses a reference size independent of score/allocation. The allocator rechecks its
-  // actual quantity. No cost cache: two charge evaluations and two five-level walks only.
-  const qty=quantity>0?Math.floor(quantity):Math.max(1,Math.floor(getEffectiveMaxAlloc()/bp));
-  if(!(qty>0))return null;
-  const book=getBookLadder(r.symbol),buy=book?walkLadder(book.asks,qty):null,sell=book?walkLadder(book.bids,qty):null;
-  if(!buy||!sell||buy.short>0||sell.short>0)return null;
-  const mid=(book.asks[0][0]+book.bids[0][0])/2;
-  const slip=Math.max(0,(buy.vwap-sell.vwap)/mid*100);
-  const costPct=(calcZerodhaCharges(bp,qty,false)+calcZerodhaCharges(bp*(1+upPct/100),qty,true))/(bp*qty)*100+slip;
-  return {costPct,orderRs:qty*bp,qty};
-}
-function rocketOpportunityOf(r,quantity=null){
-  const pred=pressurePrediction(r.symbol);if(!pred)return null;
-  const cost=rocketCostRead(r,pred.upPct,quantity);if(!cost)return null;
-  const netPct=pred.upPct-cost.costPct,netRs=netPct/100*cost.orderRs;
-  return {...pred,...cost,netPct,netRs,floorRs:respectableProfitRs(),qualifies:netPct>0&&pred.minutes>0,
-    opp:netPct>0&&pred.minutes>0?netPct/pred.minutes:0};
+  if(!c||c.total===null||c.total===undefined) return pressureTitle(c);
+  return pressureTitle(c)+` Min Score ${RECOMMEND_MIN_SCORE}.`;
 }
 function* refreshRocketScoresGen(){
   const staged=[];
@@ -3623,9 +3402,6 @@ function* refreshRocketScoresGen(){
   for(const [row,next] of staged){Object.assign(row,next);ROW_ACTION_MEMO.delete(row);}
   ALL.sort((a,b)=>(b.score??-1)-(a.score??-1)||radarRankTieBreak(a,b));
   applyFilters();
-}
-function rocketScoreFromOpp(opp){
-  return opp>0?100*(2/Math.PI)*Math.atan(opp/ROCKET_OPP_SCALE):0;
 }
 
 // Columns that are EXPORTED but deliberately NOT modelled as features. Exporting and scoring are
@@ -4130,7 +3906,6 @@ function _getRowActionStateUncached(s, ignoreMarketClosed=false){
   if(s.basketEligible===false) return {state:'BLOCKED',reason:'Non-EQ series or price band under 10%'};
   const cr=Number(s.circuitRunwayPct);
   if(Number.isFinite(cr)&&cr<=0) return {state:'BLOCKED',reason:'At the upper circuit - nothing to buy'};
-  if(s.scoreComponents?.netBlocked) return {state:'WAIT',reason:s.scoreComponents.block};
   if(!meetsScoreBar(s.score)) return {state:'WAIT',reason:s.scoreComponents?.block||`Score ${Number(s.score).toFixed(1)} < ${RECOMMEND_MIN_SCORE}`};
   return {state:'GO', reason:'Actionable recommendation'};
 }
@@ -7249,7 +7024,7 @@ function renderStats(){
     }catch(e){}
   })();
   if(SUPPRESSED_HELD>0)filterPills.push(`<span class="info-pill pill-rose" title="Stocks you already hold (Holdings + Positions + today's net Orders buys). Since v1070 these stay in the ranking and can be recommended again — the badge is a duplicate-buy warning, not a filter.">📌 ${SUPPRESSED_HELD} already held</span>`);
-  if(PEAK_TIMING_REMOVED>0)filterPills.push(`<span class="info-pill pill-amber" title="These stocks fail the entry-timing condition. It is context only and never changes the Rocket Pressure or the Rocket Score.">⚡ ${PEAK_TIMING_REMOVED} timing-trigger misses</span>`);
+  if(PEAK_TIMING_REMOVED>0)filterPills.push(`<span class="info-pill pill-amber" title="These stocks fail the entry-timing condition. It is context only and never changes the Rocket Score.">⚡ ${PEAK_TIMING_REMOVED} timing-trigger misses</span>`);
   const inelig=ALL.filter(s=>s.basketEligible===false).length;
   if(inelig>0)filterPills.push(`<span class="info-pill pill-orange" title="Non-EQ series, inactive status, or a price band below 10% — visible in the ranking with penalties, but never exported to the basket.">⚠ ${inelig} basket-ineligible (ranked with penalties)</span>`);
 
@@ -9001,32 +8776,23 @@ function _renderMethodologyInner(){
       <a href="#meth-performance" onclick="event.preventDefault();scrollToSection('meth-performance')" style="padding:4px 12px;border-radius:6px;background:var(--bg-card);border:1px solid var(--border);color:var(--t2);font-size:13px;font-weight:600;text-decoration:none;cursor:pointer">📈 Performance</a>
       <a href="#meth-guide" onclick="event.preventDefault();scrollToSection('meth-guide')" style="padding:4px 12px;border-radius:6px;background:var(--bg-card);border:1px solid var(--border);color:var(--t2);font-size:13px;font-weight:600;text-decoration:none;cursor:pointer">📖 Use & Risk</a>
     </nav>
-    <h3 id="meth-scoring">Rocket Pressure → Rocket Score</h3>
-    <p><strong>Rocket Pressure</strong> is what the stock is doing right now: move direction, nothing else.
-    <strong>Rocket Score</strong> is how attractive it is to buy now: what happened after similar pressure
-    trajectories in the past, minus estimated round-trip cost at a reference size, per minute of expected wait. The board
-    is sorted by Rocket Score, highest first. It is a research screener, not investment advice.
-    ${(()=>{const l=rocketLearningSummary();return l.observations
-      ? `Learned so far: <strong>${l.observations.toLocaleString('en-IN')}</strong> matured raw-path observations, ${l.pending} in flight. The average observation was followed by ${l.meanUpPct.toFixed(2)}% of upside${l.meanMinutes?` in ${l.meanMinutes.toFixed(0)} minutes`:''}.`
-      : 'No observation has matured yet, so the Rocket Score is still the Rocket Pressure itself. An observation matures when pressure next reaches 50 or below; there is no fixed time cap.';})()}</p>
+    <h3 id="meth-scoring">Rocket Score</h3>
+    <p>The <strong>Rocket Score</strong> is move direction and nothing else: every last-traded-price print counts
+    +1, −1 or 0 against the previous print, folded into 10-second buckets with a one-minute half-life and read on a
+    fixed 0–100 scale where 50 is balanced. The board is sorted by it, highest first. It describes what the stock is
+    doing now; it is not a forecast, a probability or a claim about profit, and it is a research screener rather than
+    investment advice. Whether a row can be bought — surveillance, series and band, the circuit, a live price feed,
+    funding — is decided separately and shown in Status / Rejection, and never folded into the number.</p>
     <div class="m-grid">
       <div class="m-card"><h4>How It Is Computed</h4><ol style="padding-left:18px;color:var(--t2);font-size:14px;line-height:1.7">
         <li>Every last-traded-price observation from the Kite stream scores <strong>+1</strong> if it is above the previous traded price, <strong>−1</strong> if below and <strong>0</strong> if unchanged.</li>
         <li>Observations are counted into fixed 10-second wall-clock buckets. Each bucket's <strong>Directional Pressure = (U − D) / (U + D)</strong>, and 0 when the bucket held no directional change.</li>
         <li>Once per bucket: <strong>S = 0.891 × S + 0.109 × Directional Pressure</strong> (λ = 0.5<sup>10/60</sup>, a one-minute half-life). S starts at 0.</li>
-        <li><strong>Rocket Pressure = 50 × (1 + S)</strong>: 50 is balanced, above 50 is net buying pressure, below 50 is net selling. It describes the stock, and on its own it is not a reason to buy.</li>
+        <li><strong>Rocket Score = 50 × (1 + S)</strong>: 50 is balanced, above 50 is net buying pressure, below 50 is net selling. It describes the stock, and on its own it is not a reason to buy.</li>
         <li>S persists across sessions and does not decay while the market is closed. The previous session's last traded price is the reference for the next session's first observation.</li>
       </ol></div>
-      <div class="m-card"><h4>From Pressure to Score</h4><ol style="padding-left:18px;color:var(--t2);font-size:14px;line-height:1.7">
-        <li>A stock's <strong>Rocket Pressure trajectory</strong> is seven raw pressure readings evenly spaced over one half-life. No direction class or indicator replaces that path.</li>
-        <li>An observation ends when pressure next reaches 50 or below. Its outcome is the best subsequent observed price and time to it; zero-upside cases retain elapsed time to closure. This endpoint defines the experiment, not a guaranteed market peak. Missing history censors a case.</li>
-        <li>Historical raw paths are weighted by 1 / (1 + mean squared pressure distance). Learning starts with one matured case. The latest 5,000 matured cases are retained as an explicit storage budget.</li>
-        <li><strong>Expected Net Profit % = Expected Remaining Upside % − round-trip cost %</strong>, using the existing delivery charge calculator and both sides of the live book at the configured maximum allocation as reference size. Incomplete books yield no score; future slippage and delivery treatment are estimates.</li>
-        <li>Nonpositive expected net gives score zero. The allocator separately requires the actual quantity to clear the existing dynamic profit requirement, with a ${fmtINR(MIN_TRADE_NET_RS)} floor; this never changes score.</li>
-        <li><strong>Net Opportunity = Expected Net Profit % ÷ Expected Time</strong>, and the <strong>Rocket Score</strong> is that rate on a 0–100 scale where 0.05% net per minute reads 50, independent of unrelated stocks.</li>
-      </ol><p style="color:var(--t3);font-size:13px;margin-top:8px">The prediction never feeds back into Rocket Pressure, and nothing but pressure history and the prices that followed it feeds the prediction.</p></div>
       <div class="m-card"><h4>What Does Not Enter It</h4><p>No indicator, volume, price magnitude, market breadth or learned weight. Thin stocks are handled by the <strong>Drop thinnest %</strong> filter, not by the formula. The seven daily-column groups below describe the Setup label and Risk pill only.</p><div class="rr-groups" style="margin-top:10px">${groupsHTML}</div>${diagHTML}</div>
-      <div class="m-card"><h4>When a Row Is GO</h4><p>A row is <strong>GO</strong> when the market is open, live prices are current, the stock is not under a configured surveillance rule, its series and price band are basket-eligible, it is not at the upper circuit, its expected net is positive, and its Rocket Score is at or above <strong>Min Score ${RECOMMEND_MIN_SCORE}</strong>. These checks decide whether a row can be bought; none of them changes the score. Capital, whole shares and costs then decide how much is funded.</p></div>
+      <div class="m-card"><h4>When a Row Is GO</h4><p>A row is <strong>GO</strong> when the market is open, live prices are current, the stock is not under a configured surveillance rule, its series and price band are basket-eligible, it is not at the upper circuit, and its Rocket Score is at or above <strong>Min Score ${RECOMMEND_MIN_SCORE}</strong>. These checks decide whether a row can be bought; none of them changes the score. Capital, whole shares and costs then decide how much is funded.</p></div>
       <div class="m-card"><h4>Held Positions & Basket</h4><p>Held positions stay ranked and may be recommended again as ADDs, bounded by the same allocation rails. The target is <strong>break-even plus the minimum safe cushion</strong>: the first price at which the order, at its real share count, nets a profit after Zerodha's charges on both legs (DP included) and the live book's slippage, plus the stock's own live bid-ask spread (at least one tick). It is deliberately small, so capital is freed quickly and redeployed; the Rocket Score supplies the conviction. Income tax is a share of profit and never moves that break-even. A manual Target Override replaces it but is never allowed below it. Stops remain stock-specific inside the ${SL_MIN_PCT.toFixed(1)}%–${SL_MAX_PCT.toFixed(1)}% risk rails.</p></div>
     </div>
     <h3 id="meth-ledger" style="margin-top:28px">Feature Ledger <span style="font-size:14px;color:var(--t3);font-weight:400">(${RADAR.features.length||0} setup features from ${RADAR.headers.length||0} input columns)</span></h3>
@@ -9040,15 +8806,15 @@ function _renderMethodologyInner(){
     <div class="m-grid">
       <div class="m-card"><h4>Entry Workflow</h4><ol style="padding-left:18px;color:var(--t2);font-size:14px;line-height:1.7">
         <li>Keep Kite Connect logged in and let the live stream provide the current universe and 5-minute tape.</li>
-        <li>Use Min Score as the Rocket Score bar — expected net profit per minute, not raw pressure. Market closure or stale live data pauses execution.</li>
+        <li>Use Min Score as the Rocket Score bar. Market closure or stale live data pauses execution.</li>
         <li>Status / Rejection names the check that blocks a row. Allocation separately explains any selected row that cannot be funded.</li>
         <li>Entries use current market price.</li>
-        <li>Review the row's market-derived target, stock-specific stop, expected net after charges and the rail that limits allocation before placing the basket.</li>
+        <li>Review the row's cost-floor target, stock-specific stop and the rail that limits allocation before placing the basket.</li>
       </ol></div>
       <div class="m-card"><h4>Interpretation</h4><ul style="padding-left:18px;color:var(--t2);font-size:14px;line-height:1.7">
         ${RADAR_SCORE_BANDS.map(b=>`<li><b style="color:${b.color}">${b.range}:</b> ${b.note}</li>`).join('')}
-        <li>Rocket Pressure is <strong>50 × (1 + S)</strong>, S being the one-minute-half-life average of 10-second uptick/downtick pressure. 50 is balanced. It is printed as <strong>P</strong> under each score.</li>
-        <li>Rocket Score is expected net profit per minute after this order's real costs, learned from what followed similar pressure trajectories. A high score is a better expected opportunity in less time — never a probability of profit, and never a promise that the upside arrives.</li>
+<li>Rocket Score is <strong>50 × (1 + S)</strong>, S being the one-minute-half-life average of 10-second uptick/downtick pressure. 50 is balanced, and the scale is fixed, so the same number means the same thing on any day and on any stock.</li>
+        <li>It is a reading of move direction over roughly the last minute — never a probability of profit, never an expected return, and no evidence of forward predictive value is claimed.</li>
       </ul></div>
     </div>
     <p style="color:var(--t3);font-style:italic;margin-top:4px">⚠ Quantitative screening only. Not financial advice. Past momentum ≠ future returns.</p>`;
@@ -10209,7 +9975,7 @@ function computeAlloc(capital, selList){
   const riskPerTrade=getEffectiveRiskPerTrade();
   // slPct joins the key with atr: both feed getRowStopDistancePct, which now drives the WEIGHT and
   // not just the displayed stop, so a change in either must invalidate the memo.
-  const memoKey=BOOK_V+'|'+_pressureRevision+'|'+Math.floor(Date.now()/1000)+'|'+capital+'|'+goalPlan.profitPerTrade+'|'+maxAllocV+'|'+targetAnchor+'|'+riskPerTrade+'|'+selList.map(s=>{
+  const memoKey=BOOK_V+'|'+Math.floor(Date.now()/1000)+'|'+capital+'|'+goalPlan.profitPerTrade+'|'+maxAllocV+'|'+targetAnchor+'|'+riskPerTrade+'|'+selList.map(s=>{
     const h=heldMap[s.symbol];
     return s.symbol+':'+s.price+':'+s.rocketScore+':'+s.atr+':'+s.slPct+':'+s.rangePct+':'+s.turnover+':'+(h?h.qty+'@'+h.avg:'-');
   }).join(',')+'|'+BOOK_V+'|'+Math.floor(Date.now()/TAPE_BAR_MS);
@@ -10224,11 +9990,6 @@ function computeAlloc(capital, selList){
     return qty;
   };
   function evalNet(s,buyP,qty){
-    if(pressureLearnState().cases.length){
-      const learned=rocketOpportunityOf(s,qty);
-      if(!learned||!learned.qualifies||learned.netRs<respectableProfitRs())
-        return {ok:false,rejected:true,reason:'Learned remaining upside at this quantity does not clear costs and the execution profit floor',policy:{}};
-    }
     const policy=getRowExitPolicy(s,buyP,null,null,qty);
     if(policy&&policy.viable===false){
       return {ok:false,rejected:true,reason:targetPolicyBlockReason(policy),policy};
@@ -10627,12 +10388,7 @@ function renderTable(){
     const cellH={
       chk:`<td style="text-align:center"><input type="checkbox" ${isSelected?'checked':''} ${canBuy?'':'disabled'} style="width:14px;height:14px;accent-color:var(--amber);cursor:${canBuy?'pointer':'not-allowed'}" onclick="event.stopPropagation()" onchange="toggleStock('${s.symbol}',this.checked)" title="${checkTitle}"></td>`,
       rank:`<td style="font-family:'DM Mono',monospace;font-weight:800;color:var(--t1);text-align:right">${s.rank??'—'}</td>`,
-      score:`<td data-key="score">${radarScoreCell(s.score,radarScoreTitle(s),null,rowVetoReason(s))}${(()=>{
-        const c=s.scoreComponents;
-        if(!c||c.pressure===null||c.pressure===undefined) return '';
-        const tail=c.source==='opportunity'&&c.minutes!=null?` · ${c.minutes.toFixed(0)}m`:'';
-        return `<div style="font-size:11px;color:var(--t3);font-family:'DM Mono',monospace" title="${escHtml(pressureTitle(c))}">P ${c.pressure.toFixed(1)}${tail}</div>`;
-      })()}</td>`,
+      score:`<td data-key="score">${radarScoreCell(s.score,radarScoreTitle(s),null,rowVetoReason(s))}</td>`,
       // v1142: routed through symbolChartButton like every other table. This cell had built its own
       // TradingView link since v1070, so the "one symbol interaction everywhere" rule was true of the
       // panels and quietly false of the main table - which is why swapping to Zerodha missed it.
@@ -11963,7 +11719,7 @@ function* patchUniverseDeltasGen(deltaRows){
       if(Number.isFinite(f.turnover)) s.turnover = f.turnover;
       if(Number.isFinite(f.vwap)) s.vwap = f.vwap;
       if(Number.isFinite(f.volume)) s.volume = f.volume;
-      if(prevInputs!==[s.price,s.day,s.changeOpen,s.turnover,s.vwap,s.volume].join('|')||barMoved||s.pressure!==rocketPressureOf(s.symbol)||s._pressureRevision!==_pressureRevision||s._scoreBook!==BOOK_V){
+      if(prevInputs!==[s.price,s.day,s.changeOpen,s.turnover,s.vwap,s.volume].join('|')||barMoved||s.pressure!==rocketPressureOf(s.symbol)){
         if((++n)%20===0) yield;
         setRadarEvidenceScore(s);
         scoreMoved = true;
@@ -12093,7 +11849,6 @@ async function pollUniverseDelta(deferScore=false){
       _universeMap.set(sym, j.rows[sym]);
     }
 
-    rocketLearningTick();
     _clientUniverseRev=newRev;_clientBarRev=newBarRev;
     _universeLiveAt=Date.now();_universeDeltaError='';
     if(isCold&&!deferScore){
@@ -12712,26 +12467,13 @@ function showRadarDetail(sym){
   // v1367: the Rocket Score is the only decision metric, so it is the only thing explained as one.
   // Everything below it is descriptive context and says so.
   const tc=r.scoreComponents||{};
-  // v1372: two numbers, two meanings, in the order the decision is actually made - what the stock is
-  // doing (pressure), then what that has been worth after costs (score).
-  const oppRead=tc.source!=='opportunity'
-    ? (tc.source==='pressure'?'No matured outcomes yet; ordering by Rocket Pressure.':(tc.block||'Learned estimate unavailable.'))
-    : `Trajectory <b>${escHtml(String(tc.cell))}</b> has ${tc.cellN} matched observations (of ${tc.obs} in all):
-       expected <b>+${Number(tc.upPct).toFixed(2)}%</b> in <b>${Number(tc.minutes).toFixed(0)} min</b>, less
-       <b>${Number(tc.costPct).toFixed(2)}%</b> estimated delivery round-trip cost at the reference size, leaving
-       <b>${Number(tc.netPct).toFixed(2)}%</b> (${fmtINR(tc.netRs)})${tc.netBlocked
-         ? ` — expected net is not positive, so this is not a recommendation.`
-         : `, i.e. ${Number(tc.opp).toFixed(4)}% per minute.`}`;
-  const tapeRead=`<div class="rr-read"><b>Rocket Score ${tc.total!=null?Number(tc.total).toFixed(1):'—'}</b> — how attractive it is to buy now.<br>
-    ${oppRead}<br><br>
-    <b>Rocket Pressure ${tc.pressure!=null?Number(tc.pressure).toFixed(1):'—'}</b> — what the stock is doing now,
+  const tapeRead=`<div class="rr-read"><b>Rocket Score ${tc.total!=null?Number(tc.total).toFixed(1):'—'}</b>
     = 50 × (1 + S)${tc.S!=null?`, S = ${Number(tc.S).toFixed(4)}`:''}${tc.tick!=null?`; last bucket directional pressure ${(tc.tick>=0?'+':'')+Number(tc.tick).toFixed(2)}`:''}.<br>
     Every price print counts +1 if it is above the previous price, −1 if below, 0 if unchanged. Each 10-second
     bucket's directional pressure is (up − down) / (up + down), or 0 when nothing moved, and
     S = 0.891 × S + 0.109 × pressure (a one-minute half-life). S carries over from the previous session.
-    No indicator, volume or price size enters it, and the prediction above never changes it. Surveillance,
-    series/band, the circuit and a live price feed decide whether the row can be bought; they never change
-    either number.</div>`;
+    No indicator, volume or price size enters it. Surveillance, series/band, the circuit and a live price feed
+    decide whether the row can be bought; they never change the number.</div>`;
   document.getElementById('radarDetailBody').innerHTML=`${detailNote}${decisionRead}${tapeRead}
     <h3 style="font-size:15px;margin:14px 0 4px">Setup &amp; risk context</h3>
     <div style="font-size:12px;color:var(--t3);margin-bottom:8px">Descriptive only: these bars set the Setup label and Risk pill. They do not enter the Rocket Score.</div>
@@ -12739,7 +12481,7 @@ function showRadarDetail(sym){
     <div class="rr-read"><b>Exchange check:</b> Series ${escHtml(r.series||'—')}, price band ${r.band??'not supplied'}, status ${escHtml(r.status||'—')}; basket ${r.basketEligible!==false?'eligible':'ineligible'}. Official delivery ${r.meta?.delivery==null?'unavailable':fmt(r.meta.delivery,1)+'%'}, trades ${r.meta?.trades==null?'unavailable':fmt(r.meta.trades,0)}, surveillance triggers: ${flags}.${bandNote}${varNote}${masterNote}${corpNote}${triggerNote}<br>
     <b>Feasibility:</b> ${gate} Strongest daily range estimate ${fmt(r.rangePct,2)}%; the session target takes ${fmt(r.stretch,2)}× that range. The stock remains ranked either way.${entryNote}<br>
     ${r.stage?`<b>Market-cycle stage:</b> ${radarStagePill(r)} — ${escHtml({1:'silent accumulation (quiet strength before a move)',2:'initial breakout',3:'event day (move may be event-driven)',4:'profit-booking (digesting a recent result)',5:'re-accumulation',6:'second leg'}[r.stage]||'')}.<br>`:''}
-    <b>Read:</b> ${escHtml(r.setup||'—')}. Data coverage ${r.quality!=null?fmt(r.quality*100,0)+'%':'—'}, day move ${(r.day??0)>=0?'+':''}${fmt(r.day,2)}%, relative volume ${r.relvol==null?'unavailable':fmt(r.relvol,2)+'×'}, turnover ${fV(r.turnover)}. Rocket Pressure measures tick direction; the Rocket Score is an expected net-profit rate after costs, not a probability.</div>
+    <b>Read:</b> ${escHtml(r.setup||'—')}. Data coverage ${r.quality!=null?fmt(r.quality*100,0)+'%':'—'}, day move ${(r.day??0)>=0?'+':''}${fmt(r.day,2)}%, relative volume ${r.relvol==null?'unavailable':fmt(r.relvol,2)+'×'}, turnover ${fV(r.turnover)}. The Rocket Score measures move direction only; it is not a probability and not an expected return.</div>
     ${contribs?`<h3 style="font-size:16px;margin:12px 0 4px">Largest feature contributions</h3>
       <div style="font-size:12px;color:var(--t3);margin-bottom:8px">Diagnostic only — these explain the
         setup and risk classification above, not the Rocket Score.</div>
@@ -13093,10 +12835,6 @@ async function streamRefreshTick(){
     // The helper maintains live state in memory and sends only changed symbols/bars.
     const deltaRes=await pollUniverseDelta(true);
     const universeChanged=deltaRes&&deltaRes.changed;
-    // EVERY BEAT FEEDS THE LEARNER. Prices and pressures are current at exactly this point, which is
-    // what an outcome observation needs; the pass is self-throttled to the helper's own 10-second
-    // pressure bucket and folds only the observations whose window has run.
-    try{ rocketLearningTick(); }catch(e){ console.warn('learning pass',e); }
     // The helper announces an order fill / portfolio change as a revision on the delta it is already
     // answering every beat (it hears Kite's order postback on the tick socket), so the new files are
     // read on THIS beat instead of waiting for the next ten-second input check.
