@@ -1,5 +1,5 @@
-const BUILD_TS='2026-09-16 14:27 IST'; // release build time (IST)
-const APP_VERSION=1391;
+const BUILD_TS='2026-09-16 14:46 IST'; // release build time (IST)
+const APP_VERSION=1392;
 const RADAR_SCORE_VERSION='v1389-strategy-3tier'; // 3-Tier Strategy Engine; thresholds are policy, not validated edge (CLAUDE.md §1).
 
 // ── v1358: AN UNCAUGHT ERROR MUST NAME ITSELF ─────────────────────────────────────────────────
@@ -6814,7 +6814,7 @@ function getDefaultMaxAlloc(){return getEffectiveCapital();}
 // owner's own goal: the goal's daily rupee need divided by his entries per day. Not a chosen number -
 // the same per-trade figure v1299 sizes allocations with. Read by every target, so memoized briefly.
 function goalAllocationExplanation(){
-  return 'Empty = Auto: available cash is split equally across GO stocks (top 20 by score), at least Rs 5,000 each plus buy charges. Type a value to cap every stock at that amount instead.';
+  return 'Empty = Auto: cash is split equally across GO stocks (top 20 by score), each at least Rs 5,000 and at most the larger of Rs 5,000 or Capital / 20. Type a value to cap every stock at that amount instead.';
 }
 
 function getEffectiveCapital(){
@@ -9023,11 +9023,12 @@ function _renderMethodologyInner(){
     <div class="m-grid">
     <div class="m-card"><h4>1. Liquid momentum universe</h4><p>Price Rs 50 to Rs 5,000. Turnover >=Rs 5 crore OR ten-day average volume >=100,000 shares. RVOL >=1.5x (time-adjusted when available). Price strictly above day open and VWAP. Missing required measurements fail qualification. Held stocks, configured surveillance and ineligible exchange series/bands are blocked.</p></div>
     <div class="m-card"><h4>2. Entry policy</h4><p>Distance (day high | price) / price <=1.2%; upper-circuit headroom >=3%; fresh total pending buyer quantity greater than seller quantity. Fresh market ticks, an individual stock tick and two-sided depth are required. A disconnect or stale price changes GO to WAIT and prevents export.</p><p>Being near the high does not demonstrate acceleration or prove a breakout. Pending orders are not executed buying volume. This threshold is an unvalidated policy choice.</p></div>
-    <div class="m-card"><h4>3. Allocation and exits</h4><p>Rank GO stocks by strategy score. Fund whole shares within Capital and Max Alloc, reserving buy charges. Each funded position must have at least Rs 5,000 notional; insufficient cash leaves it unfunded. Basket JSON requests +2% target and -1.8% stop via GTT parameters.</p><p>Open positions use the same percentages from average buy cost and a four-trading-day time stop, measured from the oldest remaining FIFO lot. Fresh prices are required for live exit advice. Unknown holding age is shown explicitly. Exporting JSON does not confirm that a broker GTT is active; time-stop alerts do not place sell orders.</p></div></div>
+    <div class="m-card"><h4>3. Allocation and exits</h4><p>Rank GO stocks by strategy score (top 20). Max Alloc empty (Auto): cash is split equally across GO stocks, each capped at the larger of Rs 5,000 and one twentieth of Capital. A typed Max Alloc caps every stock at that amount. Whole shares, buy charges reserved. Each funded position must have at least Rs 5,000 notional; insufficient cash leaves it unfunded. Basket JSON requests +2% target and -1.8% stop via GTT parameters.</p><p>Open positions use the same percentages from average buy cost and a four-trading-day time stop, measured from the oldest remaining FIFO lot. Fresh prices are required for live exit advice. Unknown holding age is shown explicitly. Exporting JSON does not confirm that a broker GTT is active; time-stop alerts do not place sell orders.</p></div></div>
     <h3>What the investigation established</h3>
     <p>The saved FIFO report covers 4,848 matched trades. Winners averaged 3.9 calendar days held and losers 11.8. Losses held over five calendar days contributed Rs 218,752.88 of Rs 272,922.62 gross losses (80.2%). These are descriptive associations, not a simulated four-day exit policy. The script computes price-difference P&amp;L without charges despite its Net P&amp;L heading.</p>
     <p>The cited 31 August tape test reported +2.202% maximum favourable excursion but <b>-0.523% net holdout return</b>. It tested a different tape-ranking model, not the current day-high rule. It does not establish the 1.2% threshold, pending-depth trigger, or +2%/-1.8% exits as profitable. Exact thresholds remain configured hypotheses; no profitable holdout validation of this complete strategy is recorded.</p>
-    <h3>Score and display</h3><p>The heuristic score rewards liquidity, above-open trend, high proximity and buyer depth. Eligibility is separate from funding. Show ineligible reveals BLOCKED rows; GO and WAIT remain visible. Search narrows the displayed basket pool. Historical performance reflects executed trades across earlier versions, not verified performance of this strategy.</p>
+    <p><b>Replay, 16 Sep 2026</b> (stored 5-minute bars, about 1,640 stocks, 17 Aug to 16 Sep 2026, 0.25% round-trip cost, first entry per stock per day): the Tier 1 + near-high rule averaged <b>-0.42% net per trade</b> (3,752 entries, 6 of 22 sessions positive). Buying any liquid stock at 10:05 with the same exits averaged -0.45%. Adding buyers &gt; sellers (8 sessions with stored book data) gave -0.50% (414 entries). Skipping spiked candles or requiring 15-minute volume did not change results, and no tested target/stop/time-stop pair was positive. Over this period the entry rules showed no edge over a random liquid long. Depth and circuit bands are approximated or omitted in the replay.</p>
+    <h3>Score and display</h3><p>The heuristic score rewards liquidity, above-open trend, high proximity and buyer depth. Eligibility is separate from funding. By default the table shows funded GO buys only; Show ineligible adds unfunded GO, WAIT and BLOCKED rows with reasons. Search narrows the displayed basket pool. Historical performance reflects executed trades across earlier versions, not verified performance of this strategy.</p>
     <h3>Surveillance settings</h3>${buildHardFilterMethodologyHTML(ENGINE_DATA)}`;
 }
 
@@ -9821,6 +9822,7 @@ function _planDualBasketUncached(rows,capital){
   let remaining=Math.max(0,Number(capital||0)-BASKET_CASH_RESERVE_RS);
   const pool=[...(rows||[])].sort((a,b)=>(Number(b.score)||0)-(Number(a.score)||0)||a.symbol.localeCompare(b.symbol));
   const unitDebitOf=price=>price+calcZerodhaCharges(price,1,false,false,false);
+  const autoCap=Math.max(minRequired,Number(capital||0)/20);
   let candidatesLeft=pool.filter(r=>!EXPORT_EXCLUDED.has(r.symbol)&&isStockEligible(r)&&getBuyPrice(r)>0).length;
   for(const r of pool){
     let reason=EXPORT_EXCLUDED.has(r.symbol)?'Excluded from basket by you':!isStockEligible(r)?getRowActionState(r).reason:null;
@@ -9830,7 +9832,9 @@ function _planDualBasketUncached(rows,capital){
     // Auto (Max Alloc empty): split remaining cash equally across the GO stocks still to fund,
     // never below Rs 5,000 each, so one top-ranked stock cannot absorb the whole capital.
     const slots=Math.max(1,Math.min(candidatesLeft,20-funded.length,Math.floor(remaining/(minRequired*1.005))));
-    let budget=Math.min(remaining,maxAlloc>0?maxAlloc:remaining/slots);
+    // Auto also caps each stock at the larger of Rs 5,000 and one twentieth of capital, so a lone GO
+    // stock cannot absorb the account (investigation Problem 3: concentration).
+    let budget=Math.min(remaining,maxAlloc>0?maxAlloc:Math.min(remaining/slots,autoCap));
     let qty=0;
     if(!reason){
       candidatesLeft--;
@@ -9839,7 +9843,8 @@ function _planDualBasketUncached(rows,capital){
       if(maxAlloc<=0&&qty*price<minRequired){
         // Coarse share prices: take the smallest quantity reaching Rs 5,000 when the other slots keep their minimum.
         const minQty=Math.ceil(minRequired/price);
-        if(minQty*unitDebitOf(price)<=remaining-Math.max(0,slots-1)*minRequired*1.005){qty=minQty;budget=minQty*unitDebitOf(price);}
+        const minDebit=minQty*price+calcZerodhaCharges(price,minQty,false,false,false);
+        if(minDebit<=remaining-Math.max(0,slots-1)*minRequired*1.005){qty=minQty;budget=minDebit;}
       }
     }
     const cost=qty*price,charges=qty>0?calcZerodhaCharges(price,qty,false,false,false):0,debit=cost+charges;
