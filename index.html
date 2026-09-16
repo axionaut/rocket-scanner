@@ -97,16 +97,31 @@
 
 <dialog id="radarDetail"><div class="rr-modalhead"><h2 id="radarDetailTitle"></h2><button class="rr-close" onclick="closeRadarDetail()">Close</button></div><div class="rr-modalbody" id="radarDetailBody"></div></dialog>
 
-<!-- Cache-proof app loader. The visible version/timestamp comes from the loaded app.js. -->
+<!-- Cache-proof app loader. Load strategy engine then app.js. -->
 <script>
 (function () {
   var cacheKey = Date.now().toString(36);
-  var script = document.createElement('script');
-  script.id = 'appScript';
-  script.async = false;
-  script.src = 'app.js?cb=' + cacheKey;
-  script.dataset.cacheKey = cacheKey;
-  document.head.appendChild(script);
+  var stratScript = document.createElement('script');
+  stratScript.id = 'strategyScript';
+  stratScript.async = false;
+  stratScript.src = 'strategy.js?cb=' + cacheKey;
+  stratScript.onload = function() {
+    var script = document.createElement('script');
+    script.id = 'appScript';
+    script.async = false;
+    script.src = 'app.js?cb=' + cacheKey;
+    script.dataset.cacheKey = cacheKey;
+    document.head.appendChild(script);
+  };
+  stratScript.onerror = function() {
+    console.error('Failed to load strategy.js');
+    var script = document.createElement('script');
+    script.id = 'appScript';
+    script.async = false;
+    script.src = 'app.js?cb=' + cacheKey;
+    document.head.appendChild(script);
+  };
+  document.head.appendChild(stratScript);
 })();
 </script>
 

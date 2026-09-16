@@ -1,5 +1,5 @@
-const BUILD_TS='2026-09-16 11:19 IST'; // release build time (IST)
-const APP_VERSION=1386;
+const BUILD_TS='2026-09-16 13:00 IST'; // release build time (IST)
+const APP_VERSION=1387;
 const RADAR_SCORE_VERSION='dual-tick-v2-median-v1'; // Independent tick and median scores; union display only.
 
 // ── v1358: AN UNCAUGHT ERROR MUST NAME ITSELF ─────────────────────────────────────────────────
@@ -4246,6 +4246,15 @@ function _getRowActionStateUncached(s, ignoreMarketClosed=false){
   }
   if(NSE_SURV[s.symbol]?.length) return {state:'BLOCKED',reason:'Surveillance: '+NSE_SURV[s.symbol].join(' · ')};
   if(s.basketEligible===false) return {state:'BLOCKED',reason:'Non-EQ series or price band under 10%'};
+  const ltpVal=Number(s.price||s.ltp||0);
+  if(ltpVal>0 && typeof RocketStrategy!=='undefined'){
+    if(ltpVal < RocketStrategy.CONFIG.MIN_PRICE) return {state:'BLOCKED',reason:`Price under ₹${RocketStrategy.CONFIG.MIN_PRICE} floor (penny risk)`};
+    if(ltpVal > RocketStrategy.CONFIG.MAX_PRICE) return {state:'BLOCKED',reason:`Price over ₹${RocketStrategy.CONFIG.MAX_PRICE} ceiling`};
+  }
+  const openPosMap=typeof getCombinedOpenPositionMap==='function'?getCombinedOpenPositionMap():{};
+  if(openPosMap[s.symbol] && Number(openPosMap[s.symbol].qty)>0){
+    return {state:'BLOCKED',reason:'Already held in open positions (anti-averaging rule)'};
+  }
   const cr=Number(s.circuitRunwayPct);
   if(Number.isFinite(cr)&&cr<=0) return {state:'BLOCKED',reason:'At the upper circuit - nothing to buy'};
   if(!meetsScoreBar(s.score)) return {state:'WAIT',reason:s.scoreComponents?.block||`Score ${Number(s.score).toFixed(1)} < ${RECOMMEND_MIN_SCORE}`};
@@ -8143,20 +8152,34 @@ function buildOpenPositionsPanel(query=''){
       // pushed this panel into a horizontal scrollbar, which the owner has ruled out everywhere.
       fmt:(v,row)=>{
         const p=row.tapePolicy||getOpenPositionTapePolicy(v,row);
+        let stratBadge = '';
+        if (typeof RocketStrategy !== 'undefined' && RocketStrategy.evaluateExit) {
+          const exitCheck = RocketStrategy.evaluateExit({
+            symbol: v,
+            avgCost: row.avg,
+            qty: row.qty,
+            daysHeld: row.daysHeld
+          }, row.ltp);
+
+          if (exitCheck.shouldExit) {
+            const bCol = exitCheck.exitType === 'TARGET' ? 'var(--green)' : 'var(--red)';
+            stratBadge = `<div style="font-size:11px;background:${bCol};color:#fff;padding:2px 6px;border-radius:4px;font-weight:800;display:inline-block;margin-top:2px;letter-spacing:0.5px" title="${escHtml(exitCheck.reason)}">🚨 EXIT: ${escHtml(exitCheck.exitType)}</div>`;
+          } else {
+            stratBadge = `<div style="font-size:10px;color:var(--t3);margin-top:1px" title="${escHtml(exitCheck.reason)}">Gov: Day ${row.daysHeld || 0}/${RocketStrategy.CONFIG.MAX_HOLD_DAYS}</div>`;
+          }
+        }
         const ac=p.signal==='BUY'?'var(--green)':p.signal==='SELL'?'var(--red)'
           :p.signal==='HOLD'?'var(--amber)':'var(--t3)';
         const detail=(Number.isFinite(p.flowPct)?' Net flow '+(p.flowPct>=0?'+':'')+p.flowPct.toFixed(1)+'%.':'')
           +(Number.isFinite(p.pressurePct)?' Unspent pressure '+(p.pressurePct>=0?'+':'')+p.pressurePct.toFixed(2)+'%.':'')
           +(p.regime?' '+p.regime+'.':'');
         const tapeTag=`<div style="font-size:11px;color:${ac};font-weight:800" title="${escHtml(p.why+detail)}">${escHtml(p.signal)}</div>`;
-        // Two things the panel could not say before v1292: that the series changed underneath the
-        // holding, and what it will cost to get this exact quantity out of the live book.
         const alert=p.seriesAlert
           ?`<div style="font-size:11px;color:var(--amber);font-weight:700" title="${escHtml(p.seriesAlert)}">\u26a0 ${escHtml(String(p.seriesAlert).split(',')[0])}</div>`:'';
         const fr=p.exitFriction;
         const frTag=(fr&&fr.ladder&&Number.isFinite(fr.exitPct))
           ?`<div style="font-size:11px;color:${fr.covered?'var(--t3)':'var(--red)'}" title="${escHtml('Selling '+fr.shares+' shares into the live book costs '+Number(fr.exitPct).toFixed(2)+'% against the mid. '+fr.basis+'.')}">exit ${Number(fr.exitPct).toFixed(2)}%${fr.covered?'':' \u26a0'}</div>`:'';
-        return symbolChartButton(v)+tapeTag+alert+frTag;
+        return symbolChartButton(v)+stratBadge+tapeTag+alert+frTag;
         /* c8 ignore start -- legacy renderer retained below only until the consolidated v1172 assertions are retired. */
         const rd=getIntradayRead(v);
         let tag='';

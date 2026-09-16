@@ -6,5 +6,6 @@
 !.gitignore
 !index.html
 !app.js
+!strategy.js
 !styles.css
 dev/
