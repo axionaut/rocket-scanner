@@ -6,7 +6,7 @@ This document is the single source of truth for the architecture, trading rules,
 
 ## 1. Core Architecture: The 3 Gold Pillars
 
-Based on the empirical analysis of 4,848 completed trades across 11 months, the scanner's historical profitability was driven by early momentum discovery (+2.2% average MFE), while 80.2% of all gross losses were caused by holding positions past 5 days and averaging down into losing trades.
+**Evidence limits (read before tuning or citing results).** The saved FIFO report on 4,848 matched trades shows losses held over five calendar days made up ₹218,752.88 of ₹272,922.62 gross losses (80.2%). Winners averaged 3.9 days held, losers 11.8. That is a descriptive association, not a simulated four-day exit, and the script ignores charges despite its "Net P&L" heading. The 31 Aug tape test cited for "+2.2% MFE" reported **−0.523% net holdout return**, and it tested a different tape-ranking model. Nothing here validates the 1.2% near-high entry, the depth trigger, or the +2%/−1.8% exits as profitable. They are configured policy hypotheses, and the app says so in Methodology and the score tooltip.
 
 The system is strictly unbundled into three distinct tiers in [`strategy.js`](strategy.js):
 
@@ -23,6 +23,8 @@ Confirms real-time momentum before signaling an entry:
 - **Micro-Continuation Proximity**: Within `1.2%` of Day High (`(Day High - LTP) / LTP <= 1.2%`).
 - **Circuit Headroom**: Upper circuit ceiling must be at least `3.0%` away (`(Upper Circuit - LTP) / LTP >= 3.0%`).
 - **Order Book Confirmation**: Total Buyer Depth > Total Seller Depth (`Total Bid Qty > Total Ask Qty`).
+- **Missing data never qualifies**: absent price, liquidity, RVOL, open, VWAP, day high, upper circuit or two-sided depth totals fail the check (v1389).
+- **Live-evidence gate**: GO requires a fresh market tick, a fresh per-stock tick and fresh depth totals, all timestamped after the last stream break. Disconnects, stale prices, refreshes and reopened tabs drop GO to WAIT, clear basket selections and disable export until fresh evidence arrives.
 - **Trigger Status**: Stocks meeting all conditions fire **`GO`** immediately. Stocks meeting Tier 1 but tracking towards the high display **`WAIT`**. Illiquid/penny/held stocks are marked **`BLOCKED`**.
 
 ### Tier 3: Automated Broker Protection & Exit Governor ("Exit")
@@ -33,7 +35,9 @@ Enforces strict asymmetric risk management at the broker level and in the UI:
 - **Open Positions Exit Governor**: Monitors open positions every tick and flags immediate action:
   - `🚨 EXIT: TARGET` (+2.0% reached)
   - `🚨 EXIT: STOP_LOSS` (-1.8% reached)
-  - `🚨 EXIT: TIME_STOP` (4 days held without hitting target — cuts off 80.2% of historical losses)
+  - `🚨 EXIT: TIME_STOP` (4 trading days since the oldest remaining FIFO lot, without hitting target)
+  - Exit advice is withheld (WAIT) when the holding's live quote is stale.
+- **Allocation**: GO stocks ranked by strategy score, funded in whole shares within Capital and Max Alloc with buy charges reserved; each funded scrip must reach ₹5,000 notional or it stays unfunded (the floor never shrinks with low capital).
 
 ---
 
@@ -78,7 +82,17 @@ flowchart TD
 
 ## 4. Release History
 
-### v1388 (Current Production)
+### v1389 (Current Production)
+- **One recommendation table, one Show/Hide Ineligible button**: removed the duplicate model-comparison table and the duplicate toggle; the existing button now works.
+- **Unified strategy decisions**: table rows, header counts, GO/WAIT/BLOCKED pills, funding, basket selection and export all read the same `getRowActionState` / `RocketStrategy.evaluateUniverse` result. Old per-row targets/stops were replaced with fixed +2%/−1.8%, and legacy filter overrides no longer apply (saved preferences are left untouched).
+- **Missing-data fix**: v1388 let absent liquidity, RVOL, VWAP, circuit or depth data pass. They now fail.
+- **Stream-break safety restored**: the v1388 rewrite bypassed freshness checks. Disconnects now invalidate live evidence immediately, and recovery needs new per-stock ticks and depth, not just a `connected` flag.
+- **Budget fixes**: charge-aware funding; the ₹5,000 minimum no longer shrinks below capital; unfunded GO rows are not selected.
+- **Time stop**: counts trading days from the oldest remaining lot, not a weighted calendar-day age.
+- **Evidence honesty**: Methodology, tooltips and §1 now state that thresholds are unvalidated policy. The cited backtest was −0.523% net on holdout, not a +2.2% edge.
+- **Verified**: `node --check`, 42 boundary/stream/budget/exit checks (`dev/strategy-reconciliation-check.cjs`, local), and an isolated Playwright run covering one table and toggle, funded selection, disconnect/recovery and all tabs with zero page errors.
+
+### v1388
 - **Version Bump & Full Release**: Upgraded release to v1388.
 - **3-Tier Strategy Engine Deployed**: Replaced dual-model tick/median split with clean `RocketStrategy` engine in [`strategy.js`](strategy.js).
 - **Table Overhaul**: Main table columns updated to `Strategy Score` and `Trigger Status`. Cell displays `⚡ 80+ GO`, `WAIT`, or `—`.

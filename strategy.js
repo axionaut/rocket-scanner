@@ -39,41 +39,31 @@
    * @param {Set} heldSymbols - Set of uppercase symbols currently open
    * @returns {Array} Filtered candidates
    */
+  // Missing measurements cannot establish eligibility. The thresholds are policy,
+  // not a validated forecast of profit (see CLAUDE.md evidence limits).
+  function inputs(stock = {}) {
+    const n=(...values)=>{for(const v of values){if(v!==null&&v!==undefined&&v!==''&&Number.isFinite(Number(v)))return Number(v);}return null;};
+    const price=n(stock.price,stock.ltp,stock.c);
+    const volume=n(stock.dayVolume,stock.volume,stock.v,stock.vol);
+    return {price,volume,turnover:n(stock.turnover,price>0&&volume>=0?price*volume:null),
+      avgVol10:n(stock.avgVol10,stock.av10),rvol:n(stock.relAt,stock.relVolAtTime,stock.relvol,stock.rvol,stock.relVol),
+      open:n(stock.open1d,stock.open,stock.dayOpen,stock.o),vwap:n(stock.vwap,stock.vwap5),
+      high:n(stock.high1d,stock.high,stock.dayHigh,stock.h),upperCircuit:n(stock.upperCircuit,stock.uc)};
+  }
+  function evaluateUniverse(stock, heldSymbols = new Set()) {
+    const reject=reason=>({eligible:false,reason});
+    if(!stock?.symbol)return reject('Invalid stock');
+    if(heldSymbols.has(String(stock.symbol).trim().toUpperCase()))return reject('Already held (no additional buys)');
+    const x=inputs(stock);
+    if(!(x.price>=CONFIG.MIN_PRICE&&x.price<=CONFIG.MAX_PRICE))return reject('Price outside Rs 50 to Rs 5,000 range');
+    if(!(x.turnover>=CONFIG.MIN_TURNOVER||x.avgVol10>=CONFIG.MIN_AVG_VOLUME))return reject('Liquidity below Rs 5 Cr turnover / 100,000 average shares, or unavailable');
+    if(!(x.rvol>=CONFIG.MIN_RVOL))return reject('RVOL below 1.5x or unavailable');
+    if(!(x.open>0&&x.price>x.open))return reject('Price must be above day open (valid open required)');
+    if(!(x.vwap>0&&x.price>x.vwap))return reject('Price must be above VWAP (valid VWAP required)');
+    return {eligible:true,reason:'Liquid momentum candidate'};
+  }
   function filterUniverse(stocks, heldSymbols = new Set()) {
-    if (!Array.isArray(stocks)) return [];
-
-    return stocks.filter(stock => {
-      if (!stock || !stock.symbol) return false;
-      const sym = String(stock.symbol).toUpperCase().trim();
-
-      // Guard: Never recommend a stock already held (prevents averaging down)
-      if (heldSymbols.has(sym)) return false;
-
-      const ltp = Number(stock.ltp || stock.price || stock.c || 0);
-      if (!(ltp >= CONFIG.MIN_PRICE && ltp <= CONFIG.MAX_PRICE)) return false;
-
-      // Turnover & Volume checks
-      const volume = Number(stock.dayVolume || stock.volume || stock.v || stock.vol || 0);
-      const turnover = Number(stock.turnover || (ltp * volume) || 0);
-      const avgVol10 = Number(stock.avgVol10 || stock.av10 || 0);
-
-      const passesLiquidity = (turnover >= CONFIG.MIN_TURNOVER) || (avgVol10 >= CONFIG.MIN_AVG_VOLUME);
-      if (turnover > 0 && avgVol10 > 0 && !passesLiquidity) return false;
-
-      // RVOL check (must have volume momentum)
-      const rvol = Number(stock.relvol || stock.relVolAtTime || stock.rvol || stock.relVol || 0);
-      if (rvol > 0 && rvol < CONFIG.MIN_RVOL) return false;
-
-      // Trend Strength: Must be trading above day's open
-      const open = Number(stock.open1d || stock.open || stock.dayOpen || stock.o || 0);
-      if (open > 0 && ltp < open) return false;
-
-      // Trend Strength: Must be trading above VWAP
-      const vwap = Number(stock.vwap || stock.vwap5 || 0);
-      if (vwap > 0 && ltp < vwap) return false;
-
-      return true;
-    });
+    return Array.isArray(stocks)?stocks.filter(s=>evaluateUniverse(s,heldSymbols).eligible):[];
   }
 
   /**
@@ -83,42 +73,18 @@
    * @returns {Object} Trigger evaluation
    */
   function evaluateTrigger(stock, book = null) {
-    const ltp = Number(stock.ltp || stock.price || stock.c || 0);
-    const dayHigh = Number(stock.high1d || stock.high || stock.dayHigh || stock.h || 0);
-    const upperCircuit = Number(stock.upperCircuit || stock.uc || (ltp * 1.20));
-
-    if (ltp <= 0) {
-      return { canBuy: false, reason: 'Invalid price' };
-    }
-    if (dayHigh <= 0) {
-      return { canBuy: false, reason: 'No day high data' };
-    }
-
-    // 1. Proximity to Day High (Micro-continuation within 1.2%)
-    const distToHighPct = ((dayHigh - ltp) / ltp) * 100;
-    if (distToHighPct > CONFIG.MAX_HIGH_DISTANCE_PCT) {
-      return { canBuy: false, reason: `${distToHighPct.toFixed(1)}% below day high ₹${dayHigh.toFixed(2)} (max ${CONFIG.MAX_HIGH_DISTANCE_PCT}%)` };
-    }
-
-    // 2. Circuit headroom check (at least 3% below Upper Circuit)
-    const circuitRoomPct = upperCircuit > 0 ? ((upperCircuit - ltp) / ltp) * 100 : 10;
-    if (circuitRoomPct < CONFIG.MIN_CIRCUIT_HEADROOM_PCT) {
-      return { canBuy: false, reason: `Near circuit ceiling (${circuitRoomPct.toFixed(1)}% headroom)` };
-    }
-
-    // 3. Order Book Depth Imbalance (if live depth is provided)
-    let depthScore = 50;
-    if (book) {
-      const totalBuyQty = Number(book.buyQty || book.totalBidQty || 0);
-      const totalSellQty = Number(book.sellQty || book.totalAskQty || 0);
-
-      if (totalBuyQty > 0 && totalSellQty > 0) {
-        if (totalBuyQty <= totalSellQty) {
-          return { canBuy: false, reason: 'Seller depth dominates order book' };
-        }
-        depthScore = Math.min(100, Math.round((totalBuyQty / (totalBuyQty + totalSellQty)) * 100));
-      }
-    }
+    const x=inputs(stock),ltp=x.price,dayHigh=x.high,upperCircuit=x.upperCircuit;
+    if(!(ltp>0))return {canBuy:false,reason:'Invalid price'};
+    if(!(dayHigh>0)||dayHigh<ltp)return {canBuy:false,reason:'Missing or inconsistent day high'};
+    const distToHighPct=(dayHigh-ltp)/ltp*100;
+    if(distToHighPct>CONFIG.MAX_HIGH_DISTANCE_PCT)return {canBuy:false,reason:`${distToHighPct.toFixed(2)}% from day high (max 1.2%)`};
+    if(!(upperCircuit>0))return {canBuy:false,reason:'Upper circuit unavailable'};
+    const circuitRoomPct=(upperCircuit-ltp)/ltp*100;
+    if(circuitRoomPct<CONFIG.MIN_CIRCUIT_HEADROOM_PCT)return {canBuy:false,reason:`Only ${circuitRoomPct.toFixed(2)}% circuit headroom (min 3%)`};
+    const buy=Number(book?.buyQty??book?.totalBidQty),sell=Number(book?.sellQty??book?.totalAskQty);
+    if(!Number.isFinite(buy)||!Number.isFinite(sell)||buy<=0||sell<=0)return {canBuy:false,reason:'Two-sided order-book totals unavailable'};
+    if(buy<=sell)return {canBuy:false,reason:'Buyer depth does not exceed seller depth'};
+    const depthScore=Math.round(100*buy/(buy+sell));
 
     // Target and Stop prices
     const targetPrice = +(ltp * (1 + CONFIG.TARGET_PCT / 100)).toFixed(2);
@@ -133,7 +99,7 @@
       depthScore,
       targetPct: CONFIG.TARGET_PCT,
       stopLossPct: CONFIG.STOP_LOSS_PCT,
-      reason: 'Volume surge + depth pressure at day highs'
+      reason: 'Near-high policy and buyer-depth conditions met'
     };
   }
 
@@ -150,7 +116,8 @@
     }
 
     const avgCost = Number(position.avgCost);
-    const ltp = Number(liveLtp || position.ltp || avgCost);
+    const ltp = Number(liveLtp ?? position.ltp);
+    if(!(ltp>0))return {shouldExit:false,action:'WAIT',reason:'Live price unavailable'};
     const daysHeld = Number(position.daysHeld || 0);
     const pnlPct = +(((ltp - avgCost) / avgCost) * 100).toFixed(2);
 
@@ -254,6 +221,8 @@
 
   return {
     CONFIG,
+    inputs,
+    evaluateUniverse,
     filterUniverse,
     evaluateTrigger,
     evaluateExit,
