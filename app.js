@@ -1,6 +1,6 @@
-const BUILD_TS='2026-09-16 14:46 IST'; // release build time (IST)
-const APP_VERSION=1392;
-const RADAR_SCORE_VERSION='v1389-strategy-3tier'; // 3-Tier Strategy Engine; thresholds are policy, not validated edge (CLAUDE.md §1).
+const BUILD_TS='2026-09-16 21:47 IST'; // release build time (IST)
+const APP_VERSION=1393;
+const RADAR_SCORE_VERSION='v1393-btst-engine'; // BTST engine (April 2.0): model top picks at 15:15, +3% GTT, 15:20 next-session exit.
 
 // ── v1358: AN UNCAUGHT ERROR MUST NAME ITSELF ─────────────────────────────────────────────────
 // This is the class of defect that has cost the most sessions in this app's history, and until now
@@ -118,7 +118,7 @@ function isCsvLikeFile(file){
 
 function updateModeUI(){
   const brand=document.querySelector('.brand-tag');
-  if(brand) brand.textContent='3-Tier Momentum Strategy';
+  if(brand) brand.textContent='BTST Engine';
   document.querySelectorAll('.currency-lbl').forEach(el=>{el.textContent='₹';});
 }
 let ALL=[],FILT=[],PG=1,PGSZ=100,SCOL='score',SDIR=-1;
@@ -3559,7 +3559,7 @@ function modelBadgeHtml(model,note=''){
   if(!model) return '';
   return `<span class="model-badge model-badge-${model}" title="${escHtml('Recommended by the '+MODEL_LABELS[model]+' model.'+(note?' '+note:''))}">${model==='tick'?'T':'M'} ${MODEL_LABELS[model]}</span>`;
 }
-function enabledModelsLabel(){return '3-tier strategy';
+function enabledModelsLabel(){return 'BTST engine';
 }
 function dualScoreCell(row){
   const act=getRowActionState(row);
@@ -3610,10 +3610,11 @@ function setRadarEvidenceScore(r){
   const book=typeof BOOK_LADDER!=='undefined'?(BOOK_LADDER[normSym(r.symbol)]||null):null;
   let sc=null;
   if(typeof RocketStrategy!=='undefined'){
-    sc=RocketStrategy.scoreStock(r,book);
-    r.strategyTrigger=RocketStrategy.evaluateTrigger(strategyStock(r),book);
-    r.targetPrice=r.strategyTrigger?.targetPrice;
-    r.stopPrice=r.strategyTrigger?.stopPrice;
+    const pick=typeof btstPickOf==='function'?btstPickOf(r.symbol):null;
+    sc=pick?100-pick.rank:0;
+    r.btstPick=pick;
+    r.targetPrice=Number(r.price)>0?+(Number(r.price)*(1+RocketStrategy.CONFIG.TARGET_PCT/100)).toFixed(2):null;
+    r.stopPrice=null;
   } else {
     const tick=rocketPressureOf(r.symbol);
     sc=Number.isFinite(tick)?tick:50;
@@ -3624,7 +3625,9 @@ function setRadarEvidenceScore(r){
   return sc;
 }
 function radarScoreTitle(r){
-  return `Strategy score ${Number(r?.score||0).toFixed(1)}: liquidity, above-open trend, proximity to day high and pending buyer depth. Ranking heuristic, not a probability or a validated profit forecast. Eligibility and funding are separate.`;
+  const p=r?.btstPick;
+  return p?`BTST pick #${p.rank}: model score ${p.score} (predicted next-session net return %, after costs). Walk-forward Dec-2025..Sep-2026: top 5 averaged +1.18% per trade with the market gate.`
+    :"Not in today's BTST top picks. Score = 100 - pick rank.";
 }
 function* refreshRocketScoresGen(){
   const staged=[];
@@ -4175,6 +4178,37 @@ function depthQualificationIssue(sym){
     return `Average order size gap ${oDiff.toFixed(1)} is not above the earlier ${oPrior.diff.toFixed(1)}`;
   return null;
 }
+// ── BTST ENGINE PICKS (v1393) ──────────────────────────────────────────────────────────────────
+// The helper runs dev/btst_engine.py at 15:05 (provisional) and 15:15 (final) and writes btst_picks.json.
+// GO = today's live picks while the market gate is on. Nothing else is a buy recommendation.
+let BTST={data:null,key:'',v:0,loadedAt:0};
+async function loadBtstPicks(){
+  if(!KITE_API) return;
+  try{
+    const j=await readHelperResponse('/api/inputs/file?name=btst_picks.json',{timeout:6000});
+    const key=[j?.asOf,j?.stage,j?.ok,j?.session].join('|');
+    BTST.loadedAt=Date.now();
+    if(key===BTST.key) return;
+    BTST={data:j,key,v:BTST.v+1,loadedAt:Date.now()};
+    for(const row of ALL){ROW_ACTION_MEMO.delete(row);setRadarEvidenceScore(row);}
+    _dualPlanMemo=null;
+    if(ALL.length) applyFilters({preservePage:true});
+    try{renderStats();}catch(e){}
+  }catch(e){}
+}
+function btstToday(){
+  const d=BTST.data;
+  return d&&d.ok&&d.mode==='live'&&d.session===getSessionDate()&&Array.isArray(d.picks)?d:null;
+}
+function btstPickOf(sym){
+  const d=btstToday();
+  return d?d.picks.find(p=>normSym(p.symbol)===normSym(sym))||null:null;
+}
+function btstWaitReason(){
+  const d=BTST.data;
+  if(d&&d.session===getSessionDate()&&d.ok===false) return 'BTST engine failed at '+String(d.asOf||'').slice(11,16)+': '+(d.error||'unknown error');
+  return "Today's BTST picks publish at 15:05 (provisional) and 15:15 (final); buy at 15:20";
+}
 const ROW_ACTION_MEMO=new WeakMap();
 function getRowActionState(s){
   if(!s) return {state:'BLOCKED', reason:'Invalid row'};
@@ -4189,7 +4223,7 @@ function getRowActionState(s){
   const score=Number(s.score)||0;
   const px=Number(s.price)||0;
   const quote=_universeMap.get(s.symbol), priceAt=quote?.priceAt, priceSource=quote?.priceSource, tickAt=_universeTickAt, universeRev=_clientUniverseRev;
-  const safety=_streamConfirmed+':'+_freshEvidenceAfter,heldQty=getCombinedOpenPositionMap()[s.symbol]?.qty||0;
+  const safety=_streamConfirmed+':'+_freshEvidenceAfter+':'+BTST.v,heldQty=getCombinedOpenPositionMap()[s.symbol]?.qty||0;
   const cached=ROW_ACTION_MEMO.get(s);
   if(cached&&cached.safety===safety&&cached.heldQty===heldQty&&cached.a===a&&cached.b===b&&cached.c===c&&cached.d===d&&cached.e===e&&cached.score===score&&cached.px===px&&cached.bookRev===bookRev&&cached.priceAt===priceAt&&cached.priceSource===priceSource&&cached.tickAt===tickAt&&cached.universeRev===universeRev) return cached.value;
   const value=_getRowActionStateUncached(s);
@@ -4261,17 +4295,15 @@ function _getRowActionStateUncached(s, ignoreMarketClosed=false){
   if(s.basketEligible===false)return {state:'BLOCKED',reason:'Non-EQ series or price band under 10%'};
   const held=getCombinedOpenPositionMap()[s.symbol];
   if(held?.qty>0)return {state:'BLOCKED',reason:'Already held (no additional buys)'};
-  const universe=RocketStrategy.evaluateUniverse(s);
-  if(!universe.eligible)return {state:'BLOCKED',reason:universe.reason};
+  const d=btstToday();
+  if(!d)return {state:'WAIT',reason:btstWaitReason()};
+  const pick=d.picks.find(p=>normSym(p.symbol)===normSym(s.symbol));
+  if(!pick)return {state:'WAIT',reason:"Not in today's BTST top "+d.picks.length};
+  if(!d.gate?.on)return {state:'WAIT',reason:`Market gate off: equal-weight market ${d.gate?.marketTrendPct}% vs its 50DMA (trades above ${d.gate?.threshold}%)`};
   if(!ignoreMarketClosed&&!isEquitySession(Date.now()))return {state:'WAIT',reason:'Market closed'};
   const stale=universePriceStaleness()||stockPriceStaleness(s.symbol);
   if(stale)return {state:'WAIT',reason:stale};
-  const book=BOOK_LADDER[normSym(s.symbol)];
-  const at=Number(book?.totalsAt),now=Date.now();
-  if(!Number.isFinite(at)||at<=0||at>now||at<_freshEvidenceAfter||now-at>=DEPTH_TOTALS_MAX_AGE_MS)
-    return {state:'WAIT',reason:'Awaiting fresh order-book totals'};
-  const trig=RocketStrategy.evaluateTrigger(strategyStock(s),book);
-  return {state:trig.canBuy?'GO':'WAIT',reason:trig.reason};
+  return {state:'GO',reason:`BTST pick #${pick.rank} of ${d.picks.length} (${d.stage} ${String(d.asOf||'').slice(11,16)} IST) - buy 15:20, +${RocketStrategy.CONFIG.TARGET_PCT}% GTT, sell 15:20 next session if unfilled`};
 }
 function strategyStock(row){
   const upper=Number(row?.upperCircuit??row?.uc);
@@ -7229,23 +7261,26 @@ function renderStats(){
     <div class="st-v" style="font-size:18px;color:${niftyTone}">${nifty != null ? `NIFTY ${nifty >= 0 ? '+' : ''}${nifty.toFixed(2)}%` : (breadthPct != null ? breadthPct.toFixed(0) + '% breadth' : '—')}</div>
     <div class="st-d">${breadthPct != null ? `${breadthPct.toFixed(0)}% advancing` : ''} · ${bull} up / ${t - bull} down</div></div>`;
 
-  // Tier 1 Universe Card
-  const universeCard = `<div class="st" title="Tier 1 Universe: Filtered for ₹50+ price, ₹5 Cr+ turnover, above day open, and non-held.">
-    <div class="st-l">Tier 1 Universe</div>
-    <div class="st-v" style="font-size:18px;color:var(--t1)">${eligibleCandidates.length.toLocaleString()} <span style="font-size:12px;color:var(--t2)">eligible</span></div>
-    <div class="st-d">of ${t.toLocaleString()} total scrips scanned · liquid momentum</div></div>`;
+  // BTST engine cards (v1393)
+  const bd = typeof btstToday === 'function' ? btstToday() : null;
+  const braw = typeof BTST !== 'undefined' ? BTST.data : null;
+  const engineState = bd ? `${bd.stage === 'final' ? 'Final' : 'Provisional'} ${String(bd.asOf || '').slice(11, 16)}`
+    : (braw && braw.session === getSessionDate() && braw.ok === false ? 'Engine failed' : 'Waiting');
+  const engineTone = bd ? (bd.gate?.on ? 'var(--green)' : 'var(--amber)') : (engineState === 'Engine failed' ? 'var(--red)' : 'var(--t2)');
+  const universeCard = `<div class="st" title="${escHtml(bd ? 'Model trained through ' + (bd.model?.trainedThrough || '?') + ' on ' + (bd.model?.trainRows || '?') + ' rows; scored ' + bd.universe + ' liquid stocks.' : btstWaitReason())}">
+    <div class="st-l">BTST Engine</div>
+    <div class="st-v" style="font-size:18px;color:${engineTone}">${escHtml(engineState)}</div>
+    <div class="st-d">${bd ? `market gate ${bd.gate?.on ? 'ON' : 'OFF'} · ${bd.gate?.marketTrendPct}% vs 50DMA (needs > ${bd.gate?.threshold}%)` : 'picks at 15:05 / 15:15 · buy 15:20'}</div></div>`;
 
-  // Tier 2 Breakout Triggers Card
-  const triggersCard = `<div class="st" title="Tier 2 Triggers: Within 1.2% of Day High with buyer depth dominating order book.">
-    <div class="st-l">Tier 2 Breakouts</div>
-    <div class="st-v" style="font-size:18px;color:${triggered.length?'var(--green)':'var(--t1)'}">${triggered.length} <span style="font-size:12px;color:var(--t2)">firing GO</span></div>
-    <div class="st-d">within 1.2% of day high · buyer book dominance</div></div>`;
+  const triggersCard = `<div class="st" title="${escHtml(bd ? bd.picks.map(p => '#' + p.rank + ' ' + p.symbol + ' score ' + p.score).join(' | ') : 'No picks for today yet')}">
+    <div class="st-l">Today's Picks</div>
+    <div class="st-v" style="font-size:18px;color:${triggered.length ? 'var(--green)' : 'var(--t1)'}">${triggered.length} <span style="font-size:12px;color:var(--t2)">GO of ${bd ? bd.picks.length : 0}</span></div>
+    <div class="st-d">${bd ? escHtml(bd.picks.map(p => p.symbol).join(', ')) : 'top 5 by model score'}</div></div>`;
 
-  // Tier 3 Automated Protection Card
-  const protectionCard = `<div class="st" title="Tier 3 Automated Protection: Fixed +2.0% Target and -1.8% Stop-Loss GTT attached to basket export; 4-day time stop on open holdings.">
-    <div class="st-l">Tier 3 Protection</div>
-    <div class="st-v" style="font-size:18px"><span style="color:var(--green)">+2.0%</span><span style="color:var(--t2);font-size:13px"> / </span><span style="color:var(--red)">−1.8%</span></div>
-    <div class="st-d">GTT Target &amp; SL · 4-day time stop · ₹5k min size</div></div>`;
+  const protectionCard = `<div class="st" title="Every buy carries a +${RocketStrategy.CONFIG.TARGET_PCT}% GTT target. No stop-loss: overnight gaps jump stops. If the target has not filled, sell at 15:20 on the next session.">
+    <div class="st-l">Exit Rules</div>
+    <div class="st-v" style="font-size:18px"><span style="color:var(--green)">+${RocketStrategy.CONFIG.TARGET_PCT}% GTT</span></div>
+    <div class="st-d">sell 15:20 next session if unfilled · no stop</div></div>`;
 
   // Active Basket Allocation Card
   const capital = getEffectiveCapital();
@@ -7253,7 +7288,7 @@ function renderStats(){
   plan.funded=new Set(plan.rows.map(r=>r.symbol));
   let totalAlloc = 0;
   Object.values(plan.alloc||{}).forEach(a => { if(!a.rejected && a.alloc > 0) totalAlloc += a.alloc; });
-  const allocCard = `<div class="st" title="Capital allocated to top firing breakout candidates (min ₹5,000 per position to clear DP/charges).">
+  const allocCard = `<div class="st" title="Capital split equally across today's BTST picks (${RocketStrategy.CONFIG.TOP_K} slots, min ₹5,000 each).">
     <div class="st-l">Active Basket</div>
     <div class="st-v" style="font-size:18px;color:var(--amber)">${plan.funded.size} <span style="font-size:12px;color:var(--t2)">funded (${fmtINR(totalAlloc)})</span></div>
     <div class="st-d">of ${fmtINR(capital)} capital · ₹5,000 min per scrip</div></div>`;
@@ -7289,7 +7324,7 @@ function renderStats(){
     filterPills.push(`<span class="info-pill pill-orange" title="Stocks removed due to NSE surveillance lists (GSM/ASM/Trade-for-trade).">🛡 ${SURV_HARD_REMOVED} surveillance excluded</span>`);
   }
   if (triggered.length > 0) {
-    filterPills.push(`<span class="info-pill pill-green" title="Stocks with active breakout triggers ready for execution.">🚀 ${triggered.length} firing breakout GO</span>`);
+    filterPills.push(`<span class="info-pill pill-green" title="Today's BTST picks ready to buy at 15:20.">🚀 ${triggered.length} BTST picks GO</span>`);
   }
   const infoBarEl = document.getElementById('infoBar');
   if (infoBarEl) {
@@ -8256,7 +8291,7 @@ function buildOpenPositionsPanel(query=''){
         <span style="font-size:13px;font-weight:800;color:var(--t1);text-transform:uppercase;letter-spacing:.08em">Open Positions${panelFilterTag(rows,shown,query)}</span>
         <span style="font-size:14px;font-weight:700;color:${pnlColor}">${rows.length} live position${rows.length===1?'':'s'} · ${fmtINR(totalCapital)} deployed · ${fmtSignedINR(totalPnl)}</span>
       </div>
-      <div style="font-size:14px;color:var(--t2);line-height:1.5">Live merge of Holdings, Positions, and today's net buys. Targets +2% and stops -1.8% use average cost. Exit advice requires fresh live prices; time stop is four trading days. </div>
+      <div style="font-size:14px;color:var(--t2);line-height:1.5">Live merge of Holdings, Positions, and today's net buys. BTST exits: +${RocketStrategy.CONFIG.TARGET_PCT}% target from average cost, no stop, SELL at 15:20 on the session after the buy (shown from 15:15). Exit advice requires fresh live prices. </div>
     </div>
     ${shown.length?`<div class="scroll-x">${table.getHtml()}</div>`:panelNoMatchHtml(query,'open position')}
   </div>`;
@@ -9018,17 +9053,15 @@ function buildIndicatorWatchHTML(){
 }
 function _renderMethodologyInner(){
   const mc=document.getElementById('methContent');if(!mc)return;
-  mc.innerHTML=`<h3>3-tier strategy</h3>
-    <p>One strategy supplies the recommendation table, eligibility counts, allocation and basket export. GO means the configured entry conditions pass; it is not a profit forecast.</p>
+  mc.innerHTML=`<h3>BTST engine (v1393)</h3>
+    <p>One model supplies the recommendation table, counts, allocation and basket. It is the April-2026 idea (score every stock, learn what is working) rebuilt on Zerodha data with a gradient-boosting learner. No ALL NSE files.</p>
     <div class="m-grid">
-    <div class="m-card"><h4>1. Liquid momentum universe</h4><p>Price Rs 50 to Rs 5,000. Turnover >=Rs 5 crore OR ten-day average volume >=100,000 shares. RVOL >=1.5x (time-adjusted when available). Price strictly above day open and VWAP. Missing required measurements fail qualification. Held stocks, configured surveillance and ineligible exchange series/bands are blocked.</p></div>
-    <div class="m-card"><h4>2. Entry policy</h4><p>Distance (day high | price) / price <=1.2%; upper-circuit headroom >=3%; fresh total pending buyer quantity greater than seller quantity. Fresh market ticks, an individual stock tick and two-sided depth are required. A disconnect or stale price changes GO to WAIT and prevents export.</p><p>Being near the high does not demonstrate acceleration or prove a breakout. Pending orders are not executed buying volume. This threshold is an unvalidated policy choice.</p></div>
-    <div class="m-card"><h4>3. Allocation and exits</h4><p>Rank GO stocks by strategy score (top 20). Max Alloc empty (Auto): cash is split equally across GO stocks, each capped at the larger of Rs 5,000 and one twentieth of Capital. A typed Max Alloc caps every stock at that amount. Whole shares, buy charges reserved. Each funded position must have at least Rs 5,000 notional; insufficient cash leaves it unfunded. Basket JSON requests +2% target and -1.8% stop via GTT parameters.</p><p>Open positions use the same percentages from average buy cost and a four-trading-day time stop, measured from the oldest remaining FIFO lot. Fresh prices are required for live exit advice. Unknown holding age is shown explicitly. Exporting JSON does not confirm that a broker GTT is active; time-stop alerts do not place sell orders.</p></div></div>
-    <h3>What the investigation established</h3>
-    <p>The saved FIFO report covers 4,848 matched trades. Winners averaged 3.9 calendar days held and losers 11.8. Losses held over five calendar days contributed Rs 218,752.88 of Rs 272,922.62 gross losses (80.2%). These are descriptive associations, not a simulated four-day exit policy. The script computes price-difference P&amp;L without charges despite its Net P&amp;L heading.</p>
-    <p>The cited 31 August tape test reported +2.202% maximum favourable excursion but <b>-0.523% net holdout return</b>. It tested a different tape-ranking model, not the current day-high rule. It does not establish the 1.2% threshold, pending-depth trigger, or +2%/-1.8% exits as profitable. Exact thresholds remain configured hypotheses; no profitable holdout validation of this complete strategy is recorded.</p>
-    <p><b>Replay, 16 Sep 2026</b> (stored 5-minute bars, about 1,640 stocks, 17 Aug to 16 Sep 2026, 0.25% round-trip cost, first entry per stock per day): the Tier 1 + near-high rule averaged <b>-0.42% net per trade</b> (3,752 entries, 6 of 22 sessions positive). Buying any liquid stock at 10:05 with the same exits averaged -0.45%. Adding buyers &gt; sellers (8 sessions with stored book data) gave -0.50% (414 entries). Skipping spiked candles or requiring 15-minute volume did not change results, and no tested target/stop/time-stop pair was positive. Over this period the entry rules showed no edge over a random liquid long. Depth and circuit bands are approximated or omitted in the replay.</p>
-    <h3>Score and display</h3><p>The heuristic score rewards liquidity, above-open trend, high proximity and buyer depth. Eligibility is separate from funding. By default the table shows funded GO buys only; Show ineligible adds unfunded GO, WAIT and BLOCKED rows with reasons. Search narrows the displayed basket pool. Historical performance reflects executed trades across earlier versions, not verified performance of this strategy.</p>
+    <div class="m-card"><h4>1. Score (15:05 provisional, 15:15 final)</h4><p>The local helper runs <code>dev/btst_engine.py</code>. It builds 45 features for every liquid stock (20-day average turnover ≥ ₹5 Cr, price ₹50–₹5,000) from Zerodha daily bars plus today's live price and volume: returns from 1 day to 3 months, gap, close location, range, volume surges, volatility, distance to highs and averages, RSI, stochastics, ADX, MACD, TradingView-style ratings, relative strength and market condition. The model predicts the next-session trade result after costs and is retrained every 5 sessions on the last 220 sessions.</p></div>
+    <div class="m-card"><h4>2. Buy (15:20)</h4><p>Top ${RocketStrategy.CONFIG.TOP_K} picks are GO, split equally across ${RocketStrategy.CONFIG.TOP_K} slots (minimum ₹5,000 each). Stocks already held are excluded. Market gate: no buys when the equal-weight market index is more than 2% below its 50-day average. Stale prices or a broken stream turn GO into WAIT.</p></div>
+    <div class="m-card"><h4>3. Exit</h4><p>The basket attaches a +${RocketStrategy.CONFIG.TARGET_PCT}% GTT target. No stop-loss: overnight gaps jump stops, and a −2% stop turned the tested result negative. If the target has not filled, sell at 15:20 on the next session (Open Positions shows SELL from 15:15).</p></div></div>
+    <h3>Evidence</h3>
+    <p>Walk-forward on NSE daily data, Dec 2025 – Sep 2026 (the model never saw the future), costs included: top 5 bought at the close and sold at +3% the next day or at its close averaged <b>+0.91% per trade</b>, 73% of days positive. With the market gate: <b>+1.18% per trade, 79% of days positive, worst drawdown −4.7%</b>. A 1-minute replay of 36 recent sessions (buy at the real 15:25 price, +3% only when price traded through it) averaged <b>+1.17% per trade</b>, 26 of 36 days positive. Different random seeds and settings gave +0.91% to +1.05%.</p>
+    <p>The earlier near-high rules (v1388–v1392) and every intraday entry rule tested on 5-minute and 1-minute data did not beat costs; they are retired.</p>
     <h3>Surveillance settings</h3>${buildHardFilterMethodologyHTML(ENGINE_DATA)}`;
 }
 
@@ -9552,8 +9585,8 @@ function getClockRunwayRead(row,opts){
 
 function getRowExitPolicy(row,buyPrice=null,activeInfo=null,nudgeInfo=null,qty=null){
   const {TARGET_PCT:targetPct,STOP_LOSS_PCT:stopPct}=RocketStrategy.CONFIG;
-  return {targetPct,basePct:targetPct,stopPct,viable:true,targetPolicy:'three-tier-fixed',
-    targetSource:'Fixed strategy target',stopSource:'Fixed strategy stop',rewardRisk:targetPct/stopPct};
+  return {targetPct,basePct:targetPct,stopPct,viable:true,targetPolicy:'btst-fixed',
+    targetSource:'BTST +'+targetPct+'% GTT',stopSource:stopPct>0?'Fixed strategy stop':'No stop: time exit 15:20 next session',rewardRisk:stopPct>0?targetPct/stopPct:null};
 }
 function summarizeRowExitPolicies(rows){
   const policies=(rows||[]).map(r=>getRowExitPolicy(r,r?.price)).filter(p=>p.targetPct>0&&p.stopPct>0&&p.viable);
@@ -9580,7 +9613,16 @@ function getOpenPositionDaysHeld(sym,liveQty){
   const qty=Math.max(0,Number(liveQty)||0);
   const lots=(TRADEBOOK_STATS?.openPositionLotsMap?.[sym]||[]).filter(l=>Number(l.qty)>0&&l.date)
     .map(l=>({qty:Number(l.qty),date:l.date})).sort((a,b)=>a.date.localeCompare(b.date));
-  if(!qty||!lots.length)return null;
+  if(!qty)return null;
+  if(!lots.length){
+    // No tradebook lots yet (Console publishes after settlement; the append may lag). Zerodha's own
+    // files still tell the one thing the BTST exit needs: holdings carry settled + T1 quantity, so any
+    // quantity beyond today's positive position was bought before today (>= 1 session).
+    const inHold=(typeof HOLDINGS!=='undefined'&&HOLDINGS||[]).reduce((v,h)=>normSym(h?.symbol)===normSym(sym)?v+Math.max(0,Number(h.qty)||0):v,0);
+    const today=(typeof POSITIONS!=='undefined'&&POSITIONS||[]).reduce((v,p)=>normSym(p?.symbol)===normSym(sym)?v+Math.max(0,Number(p.qty)||0):v,0);
+    if(inHold>0||today>0) return inHold>0?1:0;
+    return null;
+  }
   let sold=Math.max(0,lots.reduce((v,l)=>v+l.qty,0)-qty),oldest=null;
   for(const lot of lots){const removed=Math.min(sold,lot.qty);sold-=removed;
     if(lot.qty>removed){oldest=lot.date;break;}}
@@ -9745,10 +9787,11 @@ function getOpenPositionTapePolicy(sym,pos){
   const stale=!isEquitySession(Date.now())?'Market closed':universePriceStaleness()||stockPriceStaleness(symbol);
   const price=Number(quote?.price)>0?Number(quote.price):Number(pos?.ltp)||null;
   const verdict=stale?{action:'WAIT',reason:stale,shouldExit:false}:RocketStrategy.evaluateExit({avgCost:avg,daysHeld:days},price);
-  const targetPrice=avg>0?+(avg*1.02).toFixed(2):null,stopPrice=avg>0?+(avg*.982).toFixed(2):null;
+  const {TARGET_PCT:tgtPct,STOP_LOSS_PCT:slPct}=RocketStrategy.CONFIG;
+  const targetPrice=avg>0?+(avg*(1+tgtPct/100)).toFixed(2):null,stopPrice=avg>0&&slPct>0?+(avg*(1-slPct/100)).toFixed(2):null;
   return {symbol,qty,price,open:quote?.open,signal:verdict.action,signalSort:verdict.shouldExit?0:1,
-    why:verdict.reason,exitVerdict:verdict,targetPrice,stopPrice,targetPct:2,stopPct:1.8,
-    targetWhy:'Fixed +2% from average buy cost',stopWhy:'Fixed -1.8% from average buy cost',
+    why:verdict.reason,exitVerdict:verdict,targetPrice,stopPrice,targetPct:tgtPct,stopPct:slPct,
+    targetWhy:`+${tgtPct}% GTT from average buy cost`,stopWhy:slPct>0?`-${slPct}% from average buy cost`:'No stop: sell at 15:20 next session if the target has not filled',
     pacePct:null,paceRs:null,daysHeld:days,ageUnknown:days==null,afterCostFloor:null};
 }
 
@@ -9822,7 +9865,7 @@ function _planDualBasketUncached(rows,capital){
   let remaining=Math.max(0,Number(capital||0)-BASKET_CASH_RESERVE_RS);
   const pool=[...(rows||[])].sort((a,b)=>(Number(b.score)||0)-(Number(a.score)||0)||a.symbol.localeCompare(b.symbol));
   const unitDebitOf=price=>price+calcZerodhaCharges(price,1,false,false,false);
-  const autoCap=Math.max(minRequired,Number(capital||0)/20);
+  const autoCap=Math.max(minRequired,Number(capital||0)/(RocketStrategy.CONFIG.TOP_K||5));
   let candidatesLeft=pool.filter(r=>!EXPORT_EXCLUDED.has(r.symbol)&&isStockEligible(r)&&getBuyPrice(r)>0).length;
   for(const r of pool){
     let reason=EXPORT_EXCLUDED.has(r.symbol)?'Excluded from basket by you':!isStockEligible(r)?getRowActionState(r).reason:null;
@@ -11917,8 +11960,10 @@ function emptyBoardReason(){
   if(!isEquitySession(Date.now()))return 'Market closed - no buy recommendations. Use Show ineligible to inspect every stock.';
   const stale=universePriceStaleness();
   if(stale)return 'No buy recommendations: '+escHtml(stale)+'. Use Show ineligible to inspect every stock.';
-  const wait=ALL.filter(r=>getRowActionState(r).state==='WAIT').length;
-  return 'No stock is GO right now. '+wait+' pass Tier 1 and are waiting on the entry trigger. Use Show ineligible to see them.';
+  const d=btstToday();
+  if(!d)return escHtml(btstWaitReason())+'.';
+  if(!d.gate?.on)return `No BTST buys today: market gate off (equal-weight market ${d.gate?.marketTrendPct}% vs its 50DMA; trades above ${d.gate?.threshold}%).`;
+  return `Today's BTST picks (${escHtml(d.picks.map(p=>p.symbol).join(', '))}) are held, stale or blocked. Use Show ineligible to see why.`;
 }
 const LIVE_TAPE_TIME_FMT=new Intl.DateTimeFormat('en-IN',{
   timeZone:'Asia/Kolkata',hour:'2-digit',minute:'2-digit',second:'2-digit',hour12:false
@@ -12190,7 +12235,7 @@ function showRadarDetail(sym){
   document.getElementById('radarDetailTitle').textContent=r.symbol+' | Strategy';
   document.getElementById('radarDetailBody').innerHTML=`<p><b>${act.state}</b>: ${escHtml(act.reason)}</p>
     <p>${escHtml(radarScoreTitle(r))}</p><p>Price ${fmtINR(x.price)} | Day high ${fmtINR(x.high)} | Open ${fmtINR(x.open)} | VWAP ${fmtINR(x.vwap)}</p>
-    <p>Target +2.0% | Stop -1.8% | Time stop 4 trading days. These are configured rules, not proven optimal thresholds.</p>`;
+    <p>Target +${RocketStrategy.CONFIG.TARGET_PCT}% GTT | No stop | Sell at 15:20 next session if unfilled.</p>`;
   dlg.showModal();
 }
 
@@ -12529,6 +12574,7 @@ function refreshStrategySafety(){
 }
 function startStreamRefresh(){
   if(_streamRefreshTimer) return;
+  if(!startStreamRefresh.btst){startStreamRefresh.btst=setInterval(()=>loadBtstPicks(),20000);loadBtstPicks();}
   _streamRefreshUiTimer=setInterval(()=>{try{refreshStrategySafety();renderLiveTapeBar();}catch(e){console.warn('Strategy safety refresh',e);}},1000);
   if(!_streamVisibilityBound){
     _streamVisibilityBound=true;

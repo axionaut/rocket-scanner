@@ -26,10 +26,14 @@
     MAX_HIGH_DISTANCE_PCT: 1.2,  // Within 1.2% of Day High
     MIN_CIRCUIT_HEADROOM_PCT: 3.0, // At least 3.0% below Upper Circuit
 
-    // Tier 3: Exit Governor & Allocation
-    TARGET_PCT: 2.0,             // +2.0% profit target
-    STOP_LOSS_PCT: 1.8,          // -1.8% hard stop loss
-    MAX_HOLD_DAYS: 4,            // 4 days max hold before time-stop exit
+    // BTST engine (v1393): exits and allocation. Buy the top picks at 15:20; GTT sell at +3% next session;
+    // if unfilled, sell at 15:20 next session. No stop: overnight gaps jump stops (a -2% stop turned the
+    // walk-forward result negative).
+    TARGET_PCT: 3.0,             // +3.0% GTT target
+    STOP_LOSS_PCT: 0,            // no stop-loss
+    MAX_HOLD_DAYS: 1,            // exit on the next session
+    EXIT_AT_MIN: 15 * 60 + 20,   // 15:20 IST time exit
+    TOP_K: 5,                    // positions per day (equal weight)
     MIN_ALLOCATION_RS: 5000.0    // ₹5,000 minimum allocation per stock to ensure profits clear DP & charges
   };
 
@@ -88,7 +92,7 @@
 
     // Target and Stop prices
     const targetPrice = +(ltp * (1 + CONFIG.TARGET_PCT / 100)).toFixed(2);
-    const stopPrice = +(ltp * (1 - CONFIG.STOP_LOSS_PCT / 100)).toFixed(2);
+    const stopPrice = CONFIG.STOP_LOSS_PCT > 0 ? +(ltp * (1 - CONFIG.STOP_LOSS_PCT / 100)).toFixed(2) : null;
 
     return {
       canBuy: true,
@@ -110,7 +114,7 @@
    * @param {number} liveLtp - Current live market price
    * @returns {Object} Exit verdict
    */
-  function evaluateExit(position, liveLtp) {
+  function evaluateExit(position, liveLtp, nowMinIST) {
     if (!position || !(position.avgCost > 0)) {
       return { shouldExit: false, action: 'HOLD', reason: 'Invalid position cost' };
     }
@@ -132,8 +136,8 @@
       };
     }
 
-    // Rule 2: Hard Stop-Loss Hit (-1.8%)
-    if (pnlPct <= -CONFIG.STOP_LOSS_PCT) {
+    // Rule 2: Hard Stop-Loss Hit (only when a stop is configured)
+    if (CONFIG.STOP_LOSS_PCT > 0 && pnlPct <= -CONFIG.STOP_LOSS_PCT) {
       return {
         shouldExit: true,
         action: 'SELL',
@@ -143,14 +147,26 @@
       };
     }
 
-    // Rule 3: Time Stop Expired (>= 4 days without target)
-    if (daysHeld >= CONFIG.MAX_HOLD_DAYS) {
+    // Rule 3: Time exit - from the next session, sell at 15:20 if the target has not filled
+    const now = new Date(Date.now() + 19800000);
+    const nowMin = Number.isFinite(nowMinIST) ? nowMinIST : now.getUTCHours() * 60 + now.getUTCMinutes();
+    const exitAt = CONFIG.EXIT_AT_MIN || (15 * 60 + 20);
+    if (daysHeld >= CONFIG.MAX_HOLD_DAYS && nowMin >= exitAt - 5) {
       return {
         shouldExit: true,
         action: 'SELL',
         exitType: 'TIME_STOP',
         pnlPct,
-        reason: `Time-stop expired: held ${daysHeld} days (max ${CONFIG.MAX_HOLD_DAYS} days)`
+        reason: `Time exit: held ${daysHeld} session${daysHeld === 1 ? '' : 's'} and +${CONFIG.TARGET_PCT}% not filled - sell at 15:20`
+      };
+    }
+    if (daysHeld >= CONFIG.MAX_HOLD_DAYS) {
+      return {
+        shouldExit: false,
+        action: 'HOLD',
+        exitType: 'ACTIVE',
+        pnlPct,
+        reason: `Target +${CONFIG.TARGET_PCT}% not reached; time exit at 15:20 today (P&L ${pnlPct > 0 ? '+' : ''}${pnlPct}%)`
       };
     }
 
@@ -160,7 +176,7 @@
       action: 'HOLD',
       exitType: 'ACTIVE',
       pnlPct,
-      reason: `Tracking: P&L ${pnlPct > 0 ? '+' : ''}${pnlPct}%, Day ${daysHeld}/${CONFIG.MAX_HOLD_DAYS}`
+      reason: `Bought today: target +${CONFIG.TARGET_PCT}%; time exit 15:20 next session (P&L ${pnlPct > 0 ? '+' : ''}${pnlPct}%)`
     };
   }
 
