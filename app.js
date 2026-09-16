@@ -1,5 +1,5 @@
-const BUILD_TS='2026-09-16 10:02 IST'; // release build time (IST)
-const APP_VERSION=1385;
+const BUILD_TS='2026-09-16 11:19 IST'; // release build time (IST)
+const APP_VERSION=1386;
 const RADAR_SCORE_VERSION='dual-tick-v2-median-v1'; // Independent tick and median scores; union display only.
 
 // ── v1358: AN UNCAUGHT ERROR MUST NAME ITSELF ─────────────────────────────────────────────────
@@ -4233,14 +4233,6 @@ function liveMarketBreadth(){
   }
   return LIVE_BREADTH_MEMO={beat,rev,advancing,total,pct:total?100*advancing/total:null};
 }
-function weakMarketQualificationIssue(){
-  const breadth=liveMarketBreadth();
-  if(breadth.pct===null) return 'Awaiting fresh market breadth';
-  return breadth.advancing*2<breadth.total
-    ? `Weak market breadth: ${breadth.pct.toFixed(1)}% above open (${breadth.advancing}/${breadth.total} fresh stocks); at least 50% required for new buys`
-    : null;
-}
-
 function _getRowActionStateUncached(s, ignoreMarketClosed=false){
   if(!s) return {state:'BLOCKED',reason:'Invalid row'};
   if(s.scoreVersion!==RADAR_SCORE_VERSION) return {state:'BLOCKED',reason:'Older score scale - rescore required'};
@@ -4257,10 +4249,6 @@ function _getRowActionStateUncached(s, ignoreMarketClosed=false){
   const cr=Number(s.circuitRunwayPct);
   if(Number.isFinite(cr)&&cr<=0) return {state:'BLOCKED',reason:'At the upper circuit - nothing to buy'};
   if(!meetsScoreBar(s.score)) return {state:'WAIT',reason:s.scoreComponents?.block||`Score ${Number(s.score).toFixed(1)} < ${RECOMMEND_MIN_SCORE}`};
-  if(isEquitySession(Date.now())){
-    const breadthIssue=weakMarketQualificationIssue();
-    if(breadthIssue) return {state:'BLOCKED',reason:breadthIssue};
-  }
   const depthIssue=depthQualificationIssue(s.symbol);
   if(depthIssue) return {state:'BLOCKED',reason:depthIssue};
   // A WIDENING GAP DRIVEN BY ORDERS NOBODY FILLS IS NOT STRENGTH (v1382). Average order size is the
@@ -12931,11 +12919,14 @@ function renderStatusBar(){
   } else if(capital>0 && goCount>0){
     html+=` <span style="color:var(--t3);font-size:13px;margin-left:8px">· select ${instrumentLabel} to allocate ${fmtINR(capital)}</span>`;
   }
-  // Show the same fresh cross-section used by the breadth entry gate.
+  // CONTEXT, NOT A GATE. Measured over 57 archived sessions and 310 decision points, breadth at the
+  // decision minute carries no relationship to whether individual stocks run afterwards
+  // (correlation -0.004 on the >=5% rate, -0.160 on the top-20 move), so it no longer blocks a buy
+  // and is not coloured against a threshold it does not earn.
   if(isEquitySession(Date.now())){
-    const breadth=liveMarketBreadth(),up=breadth.pct!==null&&breadth.pct>=50;
+    const breadth=liveMarketBreadth();
     const pct=breadth.pct===null?'unavailable':breadth.pct.toFixed(1)+'% above open';
-    html+=` <span style="color:${up?'var(--green)':'var(--red)'};font-size:13px;margin-left:8px" title="${breadth.advancing}/${breadth.total} fresh stocks above open. New buys require at least 50% above open. Stale stocks are excluded; flat stocks count in the total.">Market breadth: ${pct} (${breadth.advancing}/${breadth.total})</span>`;
+    html+=` <span style="color:var(--t3);font-size:13px;margin-left:8px" title="${breadth.advancing}/${breadth.total} fresh stocks above open. Context only - it does not gate any buy. Measured across 57 sessions, breadth does not predict whether individual stocks run (correlation -0.004); the weakest-breadth sessions carried the most runners.">Market breadth: ${pct} (${breadth.advancing}/${breadth.total})</span>`;
   }
   // v557: say it out loud when Positions/Orders are a prior session's snapshot. Zerodha only rewrites
   // them on a new trade, so the morning after a no-trade day they still hold yesterday's rows — they
