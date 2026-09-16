@@ -1,5 +1,5 @@
-const BUILD_TS='2026-09-16 13:45 IST'; // release build time (IST)
-const APP_VERSION=1389;
+const BUILD_TS='2026-09-16 14:21 IST'; // release build time (IST)
+const APP_VERSION=1390;
 const RADAR_SCORE_VERSION='v1389-strategy-3tier'; // 3-Tier Strategy Engine; thresholds are policy, not validated edge (CLAUDE.md §1).
 
 // ── v1358: AN UNCAUGHT ERROR MUST NAME ITSELF ─────────────────────────────────────────────────
@@ -11501,7 +11501,7 @@ function* patchUniverseDeltasGen(deltaRows){
 
   // If any stock's eligibility changed, sort order changed, or if any stock in selection or
   // the filtered board became ineligible, re-filter so the board and basket stay completely truthful.
-  const filtNeedsPrune = !SHOW_INELIGIBLE && FILT.some(s => getRowActionState(s).state==='BLOCKED');
+  const filtNeedsPrune = !SHOW_INELIGIBLE && FILT.some(s => getRowActionState(s).state!=='GO');
   const selectionHasIneligible = Array.from(SELECTED).some(sym => {
     const s = symMap.get(sym);
     return !s || !isSelectableRecommendation(s);
@@ -11887,7 +11887,13 @@ async function fetchCandlesInAppImpl(limit,opts){
 function emptyBoardReason(){
   if(!ALL.length)return 'Waiting for stock data.';
   const search=(document.getElementById('fSearch')?.value||'').trim();
-  return search?'No stocks match this search.':'No stocks currently pass Tier 1. Use Show ineligible to inspect the reasons.';
+  if(search)return 'No GO stocks match this search.'+(SHOW_INELIGIBLE?'':' Use Show ineligible to search every stock.');
+  if(SHOW_INELIGIBLE)return 'No stocks to show.';
+  if(!isEquitySession(Date.now()))return 'Market closed - no buy recommendations. Use Show ineligible to inspect every stock.';
+  const stale=universePriceStaleness();
+  if(stale)return 'No buy recommendations: '+escHtml(stale)+'. Use Show ineligible to inspect every stock.';
+  const wait=ALL.filter(r=>getRowActionState(r).state==='WAIT').length;
+  return 'No stock is GO right now. '+wait+' pass Tier 1 and are waiting on the entry trigger. Use Show ineligible to see them.';
 }
 const LIVE_TAPE_TIME_FMT=new Intl.DateTimeFormat('en-IN',{
   timeZone:'Asia/Kolkata',hour:'2-digit',minute:'2-digit',second:'2-digit',hour12:false
@@ -12071,6 +12077,9 @@ function applyFilters({preservePage=false}={}){
     } else if(removedReason){
       REMOVED_ROWS.push(removedReason);
       if(!SHOW_INELIGIBLE) return false;
+    } else if(act.state!=='GO'&&!SHOW_INELIGIBLE){
+      // The recommendation table lists buy-now stocks only. WAIT is not a recommendation.
+      return false;
     }
     if(q&&![s.symbol,s.name,s.sector].join(' ').toLowerCase().includes(q)) return false;
 
@@ -12172,7 +12181,7 @@ function scheduleApplyFilters(){
 
 function renderStatusBar(){
   const el=document.getElementById('statusBar');if(!el)return;
-  const go=FILT.filter(isStockEligible).length,wait=FILT.filter(r=>getRowActionState(r).state==='WAIT').length;
+  const go=ALL.filter(isStockEligible).length,wait=ALL.filter(r=>getRowActionState(r).state==='WAIT').length;
   const plan=computeAlloc(getEffectiveCapital(),FILT.filter(r=>SELECTED.has(r.symbol)));
   const active=Object.values(plan).filter(a=>!a.rejected&&a.qty>0);
   el.innerHTML=`<span class="sb-count">${FILT.length} shown / ${ALL.length} scanned</span> | ${go} GO | ${wait} WAIT | ${active.length} funded | ${fmtINR(active.reduce((v,a)=>v+a.debit,0))} estimated buy debit`;
@@ -12181,7 +12190,7 @@ function renderStatusBar(){
 function updateIneligibleToggle(){
   const button=document.getElementById('btnToggleBelowThreshold');
   if(button){button.textContent=SHOW_INELIGIBLE?'Hide ineligible':'Show ineligible';button.setAttribute('aria-pressed',String(SHOW_INELIGIBLE));
-    button.title='Show or hide BLOCKED stocks. GO and WAIT candidates remain visible.';}
+    button.title=SHOW_INELIGIBLE?'Showing every stock with its GO / WAIT / BLOCKED reason. Click to show GO recommendations only.':'Showing GO recommendations only. Click to also show WAIT and BLOCKED stocks with their reasons.';}
 }
 
 function clearFilters(){
