@@ -13899,7 +13899,12 @@ function buildBasketOrders(capital, selList){
     const policy=Number(allocTgt)>0?{targetPct:Number(allocTgt)}:getRowExitPolicy(s,Number(s.price)||0,null,null,qty);
     const targetPct=(policy&&Number.isFinite(policy.targetPct)&&policy.targetPct>0)
       ? parseFloat(Number(policy.targetPct).toFixed(2))
-      : null;
+      : (typeof RocketStrategy!=='undefined' ? RocketStrategy.CONFIG.TARGET_PCT : 2.0);
+    const stoplossPct = (typeof RocketStrategy!=='undefined' ? RocketStrategy.CONFIG.STOP_LOSS_PCT : 1.8);
+    const gttPayload = {};
+    if(stoplossPct > 0) gttPayload.stoploss = -parseFloat(Number(stoplossPct).toFixed(2));
+    if(targetPct > 0) gttPayload.target = targetPct;
+
     orders.push({
       id:Date.now()+(++orderSeq),
       instrument:{
@@ -13920,10 +13925,10 @@ function buildBasketOrders(capital, selList){
         price:0,
         triggerPrice:0,disclosedQuantity:0,lastPrice:Number(s.price)||0,
         variety:'regular',
-        ...(targetPct>0 ? {gtt:{target:targetPct}} : {}),
-        tags:[...(targetPct>0?['TGT']:[]),'RS_'+s.basketModel.toUpperCase()]
+        ...(Object.keys(gttPayload).length > 0 ? {gtt: gttPayload} : {}),
+        tags:[...(targetPct>0?['TGT']:[]), ...(stoplossPct>0?['SL']:[]), 'RS_'+s.basketModel.toUpperCase()]
       },
-      _meta:{leg:leg||'base',sym,targetPct,fullQty:null,model:s.basketModel,modelScores:s.modelScores}
+      _meta:{leg:leg||'base',sym,targetPct,stoplossPct,fullQty:null,model:s.basketModel,modelScores:s.modelScores}
     });
   };
   exportList.forEach(s=>{
@@ -13949,6 +13954,7 @@ function getCanonicalBasketSignature(orders){
     prod: o.params?.product || 'CNC',
     px: Number(o.params?.price) || 0,
     tgt: Number(o.params?.gtt?.target) || 0,
+    sl: Number(o.params?.gtt?.stoploss) || 0,
     tags: Array.isArray(o.params?.tags) ? [...o.params.tags].sort().join(',') : '',
     model:o._meta?.model||''
   })).sort((a, b) => a.sym.localeCompare(b.sym) || a.qty - b.qty);
@@ -14072,8 +14078,10 @@ async function exportBasket(){
     if(orders.length > 20) throw new Error(`Basket planning invariant failed: ${orders.length} orders`);
 
     await requestBasketSync({ manual: true, precomputedOrders: orders });
-    const targetNote = orders.some(o => o.params?.gtt?.target) ? ' with target GTTs' : '';
-    showToast(`<strong>Exported ${orders.length} CNC BUY orders</strong> for ${new Set(orders.map(o => o._meta.sym)).size} selected stocks${targetNote} as Zerodha_Basket_Buy.json`);
+    const hasTgt = orders.some(o => o.params?.gtt?.target);
+    const hasSl = orders.some(o => o.params?.gtt?.stoploss);
+    const gttNote = hasTgt && hasSl ? ' with Target & SL GTTs' : hasTgt ? ' with target GTTs' : '';
+    showToast(`<strong>Exported ${orders.length} CNC BUY orders</strong> for ${new Set(orders.map(o => o._meta.sym)).size} selected stocks${gttNote} as Zerodha_Basket_Buy.json`);
   } catch(e) {
     console.error('Basket export failed', e);
     showToast('Basket export failed: ' + (e?.message || e), 6000, true);
