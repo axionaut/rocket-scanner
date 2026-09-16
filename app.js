@@ -1,5 +1,5 @@
-const BUILD_TS='2026-09-16 14:21 IST'; // release build time (IST)
-const APP_VERSION=1390;
+const BUILD_TS='2026-09-16 14:27 IST'; // release build time (IST)
+const APP_VERSION=1391;
 const RADAR_SCORE_VERSION='v1389-strategy-3tier'; // 3-Tier Strategy Engine; thresholds are policy, not validated edge (CLAUDE.md §1).
 
 // ── v1358: AN UNCAUGHT ERROR MUST NAME ITSELF ─────────────────────────────────────────────────
@@ -4333,8 +4333,9 @@ function rowStatusPillHtml(s){
   if(!s)return '';
   const act=getRowActionState(s),reason=BASKET_ROW_REASONS.get(s.symbol);
   const funded=SELECTED.has(s.symbol)&&act.state==='GO';
-  const tone=act.state==='BLOCKED'?'red':act.state==='GO'?'green':'amber';
-  return `<span class="info-pill pill-${tone}" title="${escHtml(act.reason)}">${act.state}${funded?' | Funded':''}</span>`
+  const unfunded=act.state==='GO'&&!funded;
+  const tone=act.state==='BLOCKED'?'red':act.state==='GO'&&!unfunded?'green':'amber';
+  return `<span class="info-pill pill-${tone}" title="${escHtml(act.reason)}">${act.state}${funded?' | Funded':unfunded?' | Not funded':''}</span>`
     +(act.state!=='GO'?`<div style="font-size:11px;color:var(--t3)">${escHtml(act.reason)}</div>`:'')
     +(act.state==='GO'&&reason?`<div style="font-size:11px;color:var(--amber)">${escHtml(reason)}</div>`:'');
 }
@@ -6813,7 +6814,7 @@ function getDefaultMaxAlloc(){return getEffectiveCapital();}
 // owner's own goal: the goal's daily rupee need divided by his entries per day. Not a chosen number -
 // the same per-trade figure v1299 sizes allocations with. Read by every target, so memoized briefly.
 function goalAllocationExplanation(){
-  return 'Run Tick and Median together. Basket slots split equally between distinct stocks. Each order needs at least 10 shares and costs plus the higher of Rs100 or the goal per-trade requirement. Cash and Max Allocation still apply.';
+  return 'Empty = Auto: available cash is split equally across GO stocks (top 20 by score), at least Rs 5,000 each plus buy charges. Type a value to cap every stock at that amount instead.';
 }
 
 function getEffectiveCapital(){
@@ -6823,6 +6824,12 @@ function getEffectiveCapital(){
 // ONE value for the whole board, read by two rules on every row of every scoring pass (~3,300
 // calls). The same short-lived memo computeHarvestPlan uses; a typed value is read directly.
 let _maxAllocMemo=null;
+// A typed Max Alloc caps every stock. Empty (Auto) returns 0: the basket planner then splits cash
+// equally across GO stocks instead of letting one stock take the whole capital.
+function getTypedMaxAlloc(){
+  const v=parseFloat(document.getElementById('fMaxAlloc')?.value);
+  return Number.isFinite(v)&&v>0?v:0;
+}
 function getEffectiveMaxAlloc(){
   const v=parseFloat(document.getElementById('fMaxAlloc')?.value);
   if(Number.isFinite(v)&&v>0) return v;
@@ -6917,7 +6924,7 @@ function updateFilterPlaceholders(){
   const capEl=document.getElementById('fCapital');
   if(capEl){ const d=getDefaultCapital(); if(d>0){ capEl.placeholder=String(Math.round(d)); capEl.title=`Empty = your computed capital ₹${Math.round(d).toLocaleString('en-IN')} (holdings + open positions). Type a value to override.`; } }
   const maxEl=document.getElementById('fMaxAlloc');
-  if(maxEl){ const d=getDefaultMaxAlloc(); maxEl.placeholder=d>0?String(d):'set capital'; maxEl.title=goalAllocationExplanation(); }
+  if(maxEl){ const d=getDefaultMaxAlloc(); maxEl.placeholder=d>0?'Auto: equal split':'set capital'; maxEl.title=goalAllocationExplanation(); }
   const riskEl=document.getElementById('fRiskPerTrade');
   const tgtEl=document.getElementById('fTgtOverride');
   if(tgtEl){ let d=0; try{d=getDefaultTgtPct();}catch(e){} tgtEl.placeholder=d>0?d.toFixed(1):'auto'; tgtEl.title='Empty keeps this as a harvest-based planning reference only; it never changes allocation. It does not set automatic candidate or held-position targets. Type a value to explicitly override those targets; clear it to restore planning-only Auto.'; }
@@ -9810,19 +9817,30 @@ function planDualBasket(rows,capital){
 }
 function _planDualBasketUncached(rows,capital){
   const reasons=new Map(),alloc={},funded=[];
-  const maxAlloc=getEffectiveMaxAlloc(),minRequired=RocketStrategy.CONFIG.MIN_ALLOCATION_RS;
+  const maxAlloc=getTypedMaxAlloc(),minRequired=RocketStrategy.CONFIG.MIN_ALLOCATION_RS;
   let remaining=Math.max(0,Number(capital||0)-BASKET_CASH_RESERVE_RS);
   const pool=[...(rows||[])].sort((a,b)=>(Number(b.score)||0)-(Number(a.score)||0)||a.symbol.localeCompare(b.symbol));
+  const unitDebitOf=price=>price+calcZerodhaCharges(price,1,false,false,false);
+  let candidatesLeft=pool.filter(r=>!EXPORT_EXCLUDED.has(r.symbol)&&isStockEligible(r)&&getBuyPrice(r)>0).length;
   for(const r of pool){
     let reason=EXPORT_EXCLUDED.has(r.symbol)?'Excluded from basket by you':!isStockEligible(r)?getRowActionState(r).reason:null;
-    const price=getBuyPrice(r),budget=Math.min(remaining,maxAlloc>0?maxAlloc:remaining);
+    const price=getBuyPrice(r);
     if(!reason&&funded.length>=20)reason='Outside the top 20 funded candidates';
     if(!reason&&!(price>0))reason='No valid buy price';
-    let qty=price>0?Math.floor(budget/price):0;
-    if(qty>0){
+    // Auto (Max Alloc empty): split remaining cash equally across the GO stocks still to fund,
+    // never below Rs 5,000 each, so one top-ranked stock cannot absorb the whole capital.
+    const slots=Math.max(1,Math.min(candidatesLeft,20-funded.length,Math.floor(remaining/(minRequired*1.005))));
+    let budget=Math.min(remaining,maxAlloc>0?maxAlloc:remaining/slots);
+    let qty=0;
+    if(!reason){
+      candidatesLeft--;
       // Buy-side charges are linear for CNC. Reserve both notional and charges.
-      const unitDebit=price+calcZerodhaCharges(price,1,false,false,false);
-      qty=Math.floor(budget/unitDebit);
+      qty=Math.floor(budget/unitDebitOf(price));
+      if(maxAlloc<=0&&qty*price<minRequired){
+        // Coarse share prices: take the smallest quantity reaching Rs 5,000 when the other slots keep their minimum.
+        const minQty=Math.ceil(minRequired/price);
+        if(minQty*unitDebitOf(price)<=remaining-Math.max(0,slots-1)*minRequired*1.005){qty=minQty;budget=minQty*unitDebitOf(price);}
+      }
     }
     const cost=qty*price,charges=qty>0?calcZerodhaCharges(price,qty,false,false,false):0,debit=cost+charges;
     if(!reason&&(!(cost>=minRequired)||debit>budget))reason='Available cash / Max Alloc cannot fund Rs 5,000 plus buy charges';
@@ -11501,7 +11519,7 @@ function* patchUniverseDeltasGen(deltaRows){
 
   // If any stock's eligibility changed, sort order changed, or if any stock in selection or
   // the filtered board became ineligible, re-filter so the board and basket stay completely truthful.
-  const filtNeedsPrune = !SHOW_INELIGIBLE && FILT.some(s => getRowActionState(s).state!=='GO');
+  const filtNeedsPrune = !SHOW_INELIGIBLE && FILT.some(s => getRowActionState(s).state!=='GO' || (!SELECTED.has(s.symbol)&&!EXPORT_EXCLUDED.has(s.symbol)));
   const selectionHasIneligible = Array.from(SELECTED).some(sym => {
     const s = symMap.get(sym);
     return !s || !isSelectableRecommendation(s);
@@ -11889,6 +11907,8 @@ function emptyBoardReason(){
   const search=(document.getElementById('fSearch')?.value||'').trim();
   if(search)return 'No GO stocks match this search.'+(SHOW_INELIGIBLE?'':' Use Show ineligible to search every stock.');
   if(SHOW_INELIGIBLE)return 'No stocks to show.';
+  const goCount=ALL.filter(isStockEligible).length;
+  if(goCount)return goCount+' stock'+(goCount===1?' is':'s are')+' GO but none can be funded from Capital / Max Alloc. Use Show ineligible to see why.';
   if(!isEquitySession(Date.now()))return 'Market closed - no buy recommendations. Use Show ineligible to inspect every stock.';
   const stale=universePriceStaleness();
   if(stale)return 'No buy recommendations: '+escHtml(stale)+'. Use Show ineligible to inspect every stock.';
@@ -12107,6 +12127,9 @@ function applyFilters({preservePage=false}={}){
     if(s) REMOVED_ROWS.push({s,reason:'allocation',chip:reason,detail:reason});
   });
   SELECTED=plan.funded;
+  // Hide ineligible: the table is the buy list. Only funded GO stocks remain, plus any GO stock
+  // you excluded by hand so it can be ticked back in.
+  if(!SHOW_INELIGIBLE)rows=rows.filter(r=>SELECTED.has(r.symbol)||(EXPORT_EXCLUDED.has(r.symbol)&&isStockEligible(r)));
   FILT=rows;
   recordTableEntries(ALL);
   rows.forEach(r=>{
@@ -12190,7 +12213,7 @@ function renderStatusBar(){
 function updateIneligibleToggle(){
   const button=document.getElementById('btnToggleBelowThreshold');
   if(button){button.textContent=SHOW_INELIGIBLE?'Hide ineligible':'Show ineligible';button.setAttribute('aria-pressed',String(SHOW_INELIGIBLE));
-    button.title=SHOW_INELIGIBLE?'Showing every stock with its GO / WAIT / BLOCKED reason. Click to show GO recommendations only.':'Showing GO recommendations only. Click to also show WAIT and BLOCKED stocks with their reasons.';}
+    button.title=SHOW_INELIGIBLE?'Showing every stock with its reason. Click to show funded GO buys only.':'Showing funded GO buys only. Click to also show unfunded GO, WAIT and BLOCKED stocks with their reasons.';}
 }
 
 function clearFilters(){
