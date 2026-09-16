@@ -1,5 +1,5 @@
-const BUILD_TS='2026-09-16 21:47 IST'; // release build time (IST)
-const APP_VERSION=1393;
+const BUILD_TS='2026-09-16 22:00 IST'; // release build time (IST)
+const APP_VERSION=1394;
 const RADAR_SCORE_VERSION='v1393-btst-engine'; // BTST engine (April 2.0): model top picks at 15:15, +3% GTT, 15:20 next-session exit.
 
 // ── v1358: AN UNCAUGHT ERROR MUST NAME ITSELF ─────────────────────────────────────────────────
@@ -9062,7 +9062,9 @@ function _renderMethodologyInner(){
     <h3>Evidence</h3>
     <p>Walk-forward on NSE daily data, Dec 2025 – Sep 2026 (the model never saw the future), costs included: top 5 bought at the close and sold at +3% the next day or at its close averaged <b>+0.91% per trade</b>, 73% of days positive. With the market gate: <b>+1.18% per trade, 79% of days positive, worst drawdown −4.7%</b>. A 1-minute replay of 36 recent sessions (buy at the real 15:25 price, +3% only when price traded through it) averaged <b>+1.17% per trade</b>, 26 of 36 days positive. Different random seeds and settings gave +0.91% to +1.05%.</p>
     <p>The earlier near-high rules (v1388–v1392) and every intraday entry rule tested on 5-minute and 1-minute data did not beat costs; they are retired.</p>
-    <h3>Surveillance settings</h3>${buildHardFilterMethodologyHTML(ENGINE_DATA)}`;
+    <div id="meth-hf-wrap">${buildHardFilterMethodologyHTML(ENGINE_DATA)}</div>`;
+  // v1393: restored (dropped in v1389) - the rule and correlation tables only exist after render().
+  setTimeout(()=>{_methTbls.hf?.render();_methTbls.sc?.render();},0);
 }
 
 // Fixed columns + dynamic top 10 rocket-relevance features (skip empty ones)
