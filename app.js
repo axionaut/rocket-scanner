@@ -1,5 +1,5 @@
-const BUILD_TS='2026-09-16 09:01 IST'; // release build time (IST)
-const APP_VERSION=1384;
+const BUILD_TS='2026-09-16 10:02 IST'; // release build time (IST)
+const APP_VERSION=1385;
 const RADAR_SCORE_VERSION='dual-tick-v2-median-v1'; // Independent tick and median scores; union display only.
 
 // ── v1358: AN UNCAUGHT ERROR MUST NAME ITSELF ─────────────────────────────────────────────────
@@ -3378,9 +3378,21 @@ function medianTemplateAt(phase,model=MEDIAN_PATH_MODEL){
   const x=Math.max(0,Math.min(1,phase))*100,i=Math.min(99,Math.floor(x));
   return model.curve[i]+(model.curve[i+1]-model.curve[i])*(x-i);
 }
+const IST_MS=19800000,DAY_MS=86400000;
+function istDayNumber(at){return Math.floor((at+IST_MS)/DAY_MS);}
+function medianDayNumbers(dates){return dates.map(d=>Math.floor((Date.parse(d+'T00:00:00Z'))/DAY_MS));}
 function medianTradingMinute(at,dates){
-  const d=new Date(at+19800000),day=d.toISOString().slice(0,10),index=dates.indexOf(day);
-  return index<0?null:index*375+Math.max(0,Math.min(375,d.getUTCHours()*60+d.getUTCMinutes()-555));
+  const index=dates.indexOf(istDayKey(at));
+  if(index<0)return null;
+  const mins=Math.floor(((at+IST_MS)%DAY_MS)/60000);
+  return index*375+Math.max(0,Math.min(375,mins-555));
+}
+// The hot form: the caller resolves the window's day numbers once, so this allocates nothing.
+function medianTradingMinuteAt(at,dayNums){
+  const index=dayNums.indexOf(istDayNumber(at));
+  if(index<0)return -1;
+  const mins=Math.floor(((at+IST_MS)%DAY_MS)/60000);
+  return index*375+Math.max(0,Math.min(375,mins-555));
 }
 function medianPathDates(now){
   const dates=[];let day=istDayKey(now);
@@ -3390,23 +3402,39 @@ function medianPathDates(now){
   }
   return dates;
 }
+function medianWindowStart(dates){
+  // The window is the dates array itself; anything earlier can never key to a trading minute.
+  return Date.parse(dates[0]+'T00:00:00+05:30');
+}
+function medianFirstBarIndex(bars,fromMs){
+  // Bars are stored in ascending time order, so the window start is a binary search, not a scan.
+  let lo=0,hi=bars.length;
+  while(lo<hi){const mid=(lo+hi)>>1;if(bars[mid].t<fromMs)lo=mid+1;else hi=mid;}
+  return lo;
+}
 function medianObservedPath(symbol,now,dates){
   const bucket=Math.floor(now/300000),old=MEDIAN_PATH_CACHE.get(symbol),today=dates.at(-1);
-  let base=old?.version===INTRADAY_STORE_V&&old.bucket===bucket?old:null;
+  const dayNums=medianDayNumbers(dates),todayNum=dayNums[dayNums.length-1];
+  const bars=INTRADAY_BARS[symbol]||[];
+  // This symbol's own tape identity. INTRADAY_STORE_V moves whenever ANY symbol gets a bar, so
+  // keying on it re-walked all 1,676 symbols on every beat for one symbol's new bar.
+  const sig=bars.length+':'+(bars.length?bars[bars.length-1].t:0);
+  let base=old?.sig===sig&&old.bucket===bucket?old:null;
   if(!base){
     const complete=[];
-    for(const b of INTRADAY_BARS[symbol]||[]){
-      if(!(b.t+300000<=now)||!(b.l>0)||!(b.h>0)||!(b.c>0))continue;
-      const m=medianTradingMinute(b.t,dates);
-      if(m!==null)complete.push({...b,m,day:istDayKey(b.t)});
-    }
     let anchor=null,high=0,highAt=0;
-    for(const b of complete){
-      if(b.day<today&&(!anchor||b.l<anchor.l))anchor=b;
-      if(b.day===today&&b.h>high){high=b.h;highAt=b.t+300000;}
+    for(let i=medianFirstBarIndex(bars,medianWindowStart(dates));i<bars.length;i++){
+      const b=bars[i];
+      if(!(b.t+300000<=now)||!(b.l>0)||!(b.h>0)||!(b.c>0))continue;
+      const dn=istDayNumber(b.t),m=medianTradingMinuteAt(b.t,dayNums);
+      if(m<0)continue;
+      const rec={...b,m,dayNum:dn};
+      complete.push(rec);
+      if(dn<todayNum&&(!anchor||b.l<anchor.l))anchor=rec;
+      if(dn===todayNum&&b.h>high){high=b.h;highAt=b.t+300000;}
     }
     if(old?.day===today&&old.high>high){high=old.high;highAt=old.highAt;}
-    base={version:INTRADAY_STORE_V,bucket,day:today,low:anchor?.l,lowAt:anchor?.t,
+    base={sig,bucket,day:today,low:anchor?.l,lowAt:anchor?.t,
       lowMinute:anchor?.m,path:anchor?complete.filter(b=>b.t>=anchor.t):[],high,highAt};
     MEDIAN_PATH_CACHE.set(symbol,base);
   }
@@ -3433,14 +3461,15 @@ function medianReferenceQuantity(price){
   return qty;
 }
 function medianPathModelAt(now){
-  const sizing=[getEffectiveMaxAlloc(),getEffectiveCapital(),BOOK_V].join('|');
-  if(MEDIAN_PATH_RUNTIME&&MEDIAN_PATH_RUNTIME.sizing===sizing&&now-MEDIAN_PATH_CHECK_AT<1000)return MEDIAN_PATH_RUNTIME;
+  // BOOK_V is deliberately NOT in this key: it moves on every ladder update, which would defeat
+  // the gate entirely. Sizing that actually changes the reference quantity is capital and Max Alloc.
+  const sizing=[getEffectiveMaxAlloc(),getEffectiveCapital()].join('|');
+  const signature=newestTapeBucketMs()+'|'+Math.floor(now/300000)+'|'+sizing;
+  if(MEDIAN_PATH_RUNTIME&&MEDIAN_PATH_RUNTIME.signature===signature)return MEDIAN_PATH_RUNTIME;
   MEDIAN_PATH_CHECK_AT=now;
-  const dates=medianPathDates(now),members=[],symbols=Object.keys(INTRADAY_BARS).sort();
-  let signature=INTRADAY_STORE_V+'|'+Math.floor(now/300000)+'|'+sizing;
+  const dates=medianPathDates(now),members=[],symbols=Object.keys(INTRADAY_BARS);
   for(const symbol of symbols){
     const base=medianObservedPath(symbol,now,dates);
-    signature+='|'+symbol+':'+base.high+':'+base.highAt;
     if(!(base.low>0)||!(base.high>base.low)||base.path.length<2)continue;
     const price=Number(_universeMap.get(symbol)?.price)||base.path.at(-1).c;
     const row={symbol,price},qty=medianReferenceQuantity(price);
@@ -3461,7 +3490,6 @@ function medianPathModelAt(now){
     }
     members.push({symbol,base,curve,gain:100*amp/base.low,minutes:span});
   }
-  if(MEDIAN_PATH_RUNTIME?.signature===signature)return MEDIAN_PATH_RUNTIME;
   const previous=MEDIAN_PATH_RUNTIME;
   // Grade the prior revision's next observed prices BEFORE replacing any coefficients.
   let n=0,error=0;
@@ -3551,7 +3579,11 @@ function dualScoreCell(row){
 function balancedModelCandidates(rows,limit=20){
   const rank=model=>rows.filter(r=>meetsScoreBar(modelScore(r,model)))
     .sort((a,b)=>modelScore(b,model)-modelScore(a,model)||a.symbol.localeCompare(b.symbol));
-  const tick=rank('tick'),median=rank('median'),used=new Set(),out=[];
+  return balancedModelPicks(rank('tick'),rank('median'),limit);
+}
+// Both lists arrive already ranked by their own model, highest first.
+function balancedModelPicks(tickRanked,medianRanked,limit=20){
+  const tick=tickRanked,median=medianRanked,used=new Set(),out=[];
   while(out.length+2<=limit){
     const ts=tick.filter(r=>!used.has(r.symbol)),ms=median.filter(r=>!used.has(r.symbol));
     if(!ts.length||!ms.length)break;
@@ -4285,7 +4317,7 @@ function setBasketModelEnabled(model,enabled){
   BASKET_MODEL_MODE=BASKET_TICK_ENABLED&&BASKET_MEDIAN_ENABLED?'both':BASKET_TICK_ENABLED?'tick':BASKET_MEDIAN_ENABLED?'median':'none';
   BASKET_MODELS=new Map();
   ALL.forEach(r=>{setRadarEvidenceScore(r);ROW_ACTION_MEMO.delete(r);});
-  _allocMemo=null;_modelComparisonAt=0;
+  _allocMemo=null;_dualPlanMemo=null;_modelComparisonAt=0;
   applyFilters();
   scheduleAutoSyncBasket();
 }
@@ -10263,7 +10295,17 @@ function minimumModelQuantity(row,price,maxQty){
   }
   return modelNetEconomics(row,price,lo).net>=floor?lo:0;
 }
+let _dualPlanMemo=null;
 function planDualBasket(rows,capital){
+  const key=[capital,BASKET_MODEL_MODE,RECOMMEND_MIN_SCORE,getEffectiveMaxAlloc(),BOOK_V,INTRADAY_STORE_V,
+    Math.floor(Date.now()/1000),
+    (rows||[]).map(r=>r.symbol+':'+r.price+':'+r.modelScores?.tick+':'+r.modelScores?.median).join(',')].join('|');
+  if(_dualPlanMemo?.key===key) return _dualPlanMemo.val;
+  const val=_planDualBasketUncached(rows,capital);
+  _dualPlanMemo={key,val};
+  return val;
+}
+function _planDualBasketUncached(rows,capital){
   const reasons=new Map(),blocked=new Set();
   let pool=(rows||[]).filter(r=>{
     if(EXPORT_EXCLUDED.has(r.symbol)){reasons.set(r.symbol,'Excluded from basket by you');return false;}
@@ -10271,18 +10313,24 @@ function planDualBasket(rows,capital){
     if(!(capital>0)){reasons.set(r.symbol,'Set capital to fund recommendations');return false;}
     return true;
   });
+  // RANK ONCE, NOT ONCE PER ATTEMPT. Measured on a 600-row pool this loop ran 30 passes, each
+  // spreading every row into a fresh object and sorting the pool twice - 18,000 row copies and
+  // 36,000 rows sorted for one basket, and planDualBasket is called four times per render pass.
+  // Ranking depends only on each model's score, which does not change between attempts; the only
+  // thing that changes is which (symbol,model) pairs are blocked, so that is filtered per pass.
+  const ranked={
+    tick:pool.filter(r=>meetsScoreBar(modelScore(r,'tick')))
+      .sort((a,b)=>modelScore(b,'tick')-modelScore(a,'tick')||a.symbol.localeCompare(b.symbol)),
+    median:pool.filter(r=>meetsScoreBar(modelScore(r,'median')))
+      .sort((a,b)=>modelScore(b,'median')-modelScore(a,'median')||a.symbol.localeCompare(b.symbol))};
   let chosen=[],alloc={},limit=20;
   for(let attempt=0;attempt<=20*pool.length+10;attempt++){
-    const candidates=pool.map(r=>({...r,modelScores:{
-      tick:blocked.has(r.symbol+'|tick')?null:modelScore(r,'tick'),
-      median:blocked.has(r.symbol+'|median')?null:modelScore(r,'median')}}));
-    if(BASKET_MODEL_MODE==='both') chosen=balancedModelCandidates(candidates,limit);
+    const live=m=>ranked[m].filter(r=>!blocked.has(r.symbol+'|'+m));
+    if(BASKET_MODEL_MODE==='both') chosen=balancedModelPicks(live('tick'),live('median'),limit);
     else if(BASKET_MODEL_MODE==='none') chosen=[];
     else {
       const model=BASKET_MODEL_MODE;
-      chosen=candidates.filter(r=>meetsScoreBar(r.modelScores[model]))
-        .sort((a,b)=>b.modelScores[model]-a.modelScores[model]||a.symbol.localeCompare(b.symbol))
-        .slice(0,limit).map(r=>modelRow(r,model));
+      chosen=live(model).slice(0,limit).map(r=>modelRow(r,model));
     }
     if(!chosen.length){alloc={};break;}
     alloc=computeModelAlloc(capital,chosen);
