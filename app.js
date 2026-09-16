@@ -1,6 +1,6 @@
-const BUILD_TS='2026-09-15 21:15 IST'; // release build time (IST)
-const APP_VERSION=1383;
-const RADAR_SCORE_VERSION='rocket-tick-v2'; // v1378: ordered directional ticks, six-tick half-life.
+const BUILD_TS='2026-09-16 09:01 IST'; // release build time (IST)
+const APP_VERSION=1384;
+const RADAR_SCORE_VERSION='dual-tick-v2-median-v1'; // Independent tick and median scores; union display only.
 
 // ── v1358: AN UNCAUGHT ERROR MUST NAME ITSELF ─────────────────────────────────────────────────
 // This is the class of defect that has cost the most sessions in this app's history, and until now
@@ -41,7 +41,7 @@ if(typeof window!=='undefined'){
     reportAppError('Unhandled promise rejection',ev&&ev.reason,'');
   });
 }
-const TARGET_POLICY_VERSION='market-target-independent-v2';
+const TARGET_POLICY_VERSION='dual-model-target-net-v1';
 function isValidChangeOpen(v){
   if(v===null||v===undefined||typeof v==='boolean') return false;
   if(typeof v==='string'&&v.trim()==='') return false;
@@ -53,7 +53,7 @@ const EQUITY_OPEN_MIN=9*60+15, EQUITY_CLOSE_MIN=15*60+30;
 // v556: parse the NSE Market Activity Report (MA<date>.csv) — official Nifty %, advances/declines and sector index moves shown as market CONTEXT in the status bar (EOD data, display only, never fed into per-row scoring); MA added to the ℹ️ file manifest.
 // v555 market-cycle stage awareness (stateless, self-calibrating): per-row stage label (1 accumulation · 2 breakout · 3 event · 4 profit-booking · 5 re-accumulation · 6 second-leg); a quiet-accumulation signal (conjunction-of-percentiles) injected via the rocket-diagnostic weighting; sell-the-news decay off Recent earnings date (horizon = review days). v1065 makes the market-breadth gauge an entry-eligibility input while still never changing ranking.
 const GOOGLE_DRIVE_CLIENT_ID='1015012642264-oi2nelv3v90k3d39r994a6nelgjs2a56.apps.googleusercontent.com'; // Public OAuth Web Client ID.
-const MIN_ALLOCATION_SHARES=10; // v1379: minimum funded order; targets and profit do not gate allocation
+const MIN_ALLOCATION_SHARES=10; // Each funded model pick must also clear net economics.
 const BASKET_CASH_RESERVE_RS=1; // Leave a rupee for broker-side tax/rounding differences.
 const MAX_TURNOVER_PARTICIPATION=0.001; // Market-impact rail: never exceed 0.10% of a stock's daily rupee turnover.
 const BASKET_MARKET_BUDGET_BUFFER_PCT=0.25; // Sizing cushion only; exported buys remain MARKET orders.
@@ -543,6 +543,16 @@ function mergeCumulativeBrain(first,second){
     if(Math.max(bt,it)>0) mergedMeta[key]=Math.max(bt,it);
   });
   if(Object.keys(mergedMeta).length) merged[USER_SETTINGS_META_STORE]=mergedMeta;
+  // Union the independent comparison ledger; a stale cloud copy cannot erase local outcomes.
+  const comparisonKey='rs_model_execution_v1';
+  if(base[comparisonKey]||incoming[comparisonKey]){
+    const entries={...(base[comparisonKey]?.entries||{})};
+    for(const [key,value] of Object.entries(incoming[comparisonKey]?.entries||{})){
+      const old=entries[key];
+      if(!old||(value.closedQty||0)>(old.closedQty||0))entries[key]=value;
+    }
+    merged[comparisonKey]={version:1,entries,exports:{...(base[comparisonKey]?.exports||{}),...(incoming[comparisonKey]?.exports||{})}};
+  }
   const a=base[TRADE_TIMING_CONTEXT_STORE],b=incoming[TRADE_TIMING_CONTEXT_STORE];
   if(a?.entries||b?.entries){
     const entries={...(a?.entries||{}),...(b?.entries||{})};
@@ -2614,7 +2624,7 @@ function captureLiveRecommendationScan(){
     const entryPrice=getBuyPrice(r),policy=getRowExitPolicy(r,entryPrice);
     const auditQty=Math.max(1,Math.floor(frictionSizeBasis()/entryPrice));
     const fr=getTradeFrictionPct(r,auditQty*r.price);
-    return {symbol:r.symbol,entryPrice,score:r.score,scoreVersion:RADAR_SCORE_VERSION,rank:r.rank,
+    return {symbol:r.symbol,entryPrice,score:r.score,modelScores:r.modelScores,model:BASKET_MODELS.get(r.symbol)||null,scoreVersion:RADAR_SCORE_VERSION,rank:r.rank,
       auditQty,frictionPct:fr?.covered&&Number.isFinite(fr.entryPct)&&Number.isFinite(fr.exitPct)?Math.max(0,fr.entryPct+fr.exitPct):null,
       orderType:'MARKET',limitPrice:null,
       targetPct:policy.targetPct,targetPolicy:TARGET_POLICY_VERSION,stopPct:policy.stopPct,entryReady:r.entryReady,directionConfirmed:r.directionConfirmed,
@@ -2740,7 +2750,7 @@ function recordRecommendationOutcomeScan(scan){
         orderType:p.orderType||'MARKET',limitPrice:p.limitPrice||null,
         auditQty:Math.max(1,Math.floor(Number(p.auditQty)||1)),
         frictionPct:Number.isFinite(p.frictionPct)?p.frictionPct:null,
-        symbol:p.symbol,entryPrice:p.entryPrice,score:p.score,scoreVersion:p.scoreVersion||scan.scoreVersion||RADAR_SCORE_VERSION,rank:p.rank,
+        symbol:p.symbol,entryPrice:p.entryPrice,score:p.score,modelScores:p.modelScores||null,model:p.model||null,scoreVersion:p.scoreVersion||scan.scoreVersion||RADAR_SCORE_VERSION,rank:p.rank,
         features:compactOutcomeFeatures(p.features,outcomeFeatureOrder),
         entryReady:p.entryReady!==false,
         blockReason:p.entryReady===false?[
@@ -3357,33 +3367,226 @@ function rocketPressureOf(sym){
   const S=Number(f?.rs);
   return (f&&f.rs!==null&&f.rs!==undefined&&Number.isFinite(S))?+(50*(1+Math.max(-1,Math.min(1,S)))).toFixed(1):null;
 }
-// THE ROCKET SCORE IS THE ROCKET PRESSURE (v1375, owner: back to the v1371 implementation). The
-// v1372 learning layer - matched pressure trajectories, expected upside, round-trip cost, net per
-// minute - is REMOVED, not disabled: measured over a live session the horizon it graded on was
-// wrong (v1374 fixed that), and with the horizon right the reference-size book walk then withheld a
-// score from most of the board, so the screen carried no recommendation either way. Section 6: a
-// losing path goes the day it loses. Pressure is read, never computed here, and nothing adjusts it.
+const MEDIAN_PATH_MODEL={"fittedThrough":"2026-09-15","population":1631,"selected":815,"gainPct":5.722599418040741,"minutes":700,"dispersion":0.7705548262592916,"curve":[0.0,0.10405727923627724,0.15105932203390104,0.17356730769230627,0.19830508474576444,0.2162977867203231,0.22063116370808664,0.22712574850299352,0.2419354838709686,0.25843996494303145,0.25900900900900975,0.26736666666666653,0.2872628726287271,0.29487179487179543,0.3010933081998116,0.31500810372771465,0.32160000000000105,0.33240093240093244,0.33761026463512495,0.3404791929382097,0.352674230145867,0.36530916844349887,0.3701492537313426,0.3793223928004237,0.3894957983193265,0.4032258064516141,0.4270089552238807,0.43425914695775203,0.4400000000000034,0.437886597938145,0.44684129429892155,0.4591666666666659,0.47116370808678487,0.4771052631578904,0.47131428571428696,0.4804363636363633,0.4912836767036448,0.49404559373936696,0.5094130675526027,0.5026477024070027,0.5144787644787648,0.5081867798665852,0.5130260521042084,0.5231305375073831,0.5281792717086834,0.5321585903083698,0.5318506876227903,0.5324368840286215,0.5341176470588243,0.5407642124883506,0.5428280081577155,0.5408991596638656,0.5336216216216217,0.5402864583333317,0.541282051282051,0.5455235204855842,0.5482681564245826,0.5594436717663407,0.5685029940119756,0.5662878787878757,0.5675862068965529,0.566173633440515,0.5631446540880505,0.5658547008547016,0.5644983461962505,0.570772676371779,0.575135517322649,0.5725972006220843,0.5774647887323938,0.577503974562798,0.5834782608695648,0.5951788491446349,0.5974468085106388,0.6090109890109886,0.612333333333335,0.6073094867807152,0.6111731843575419,0.6085427135678375,0.6230919765166353,0.6272018970189699,0.6350364963503646,0.638722466960351,0.6432330827067665,0.6511310592459596,0.6513409961685818,0.6617521367521388,0.6622474747474726,0.6710497237569062,0.6766017366815299,0.6788235294117652,0.6887477313974566,0.6929316338354577,0.6994673123486684,0.7075,0.7261761158021715,0.7375000000000002,0.7566823529411766,0.7671893848009657,0.7917073170731713,0.8481589479702687,1.0]};
+// Hindsight template fitted through 2026-09-15; similarity is not a profit probability.
+// Runtime uses completed observations only. No future low, high or duration is read.
+const MEDIAN_PATH_CACHE=new Map();
+let MEDIAN_PATH_RUNTIME=null,MEDIAN_PATH_CHECK_AT=0,MEDIAN_PATH_REV=0;
+const MEDIAN_MIN_COHORT=25;
+const MEDIAN_REVISION_QUEUE=[];
+function medianTemplateAt(phase,model=MEDIAN_PATH_MODEL){
+  const x=Math.max(0,Math.min(1,phase))*100,i=Math.min(99,Math.floor(x));
+  return model.curve[i]+(model.curve[i+1]-model.curve[i])*(x-i);
+}
+function medianTradingMinute(at,dates){
+  const d=new Date(at+19800000),day=d.toISOString().slice(0,10),index=dates.indexOf(day);
+  return index<0?null:index*375+Math.max(0,Math.min(375,d.getUTCHours()*60+d.getUTCMinutes()-555));
+}
+function medianPathDates(now){
+  const dates=[];let day=istDayKey(now);
+  for(let n=0;n<20&&dates.length<5;n++){
+    if(isNseTradingDate(day))dates.unshift(day);
+    day=new Date(Date.parse(day+'T12:00:00Z')-86400000).toISOString().slice(0,10);
+  }
+  return dates;
+}
+function medianObservedPath(symbol,now,dates){
+  const bucket=Math.floor(now/300000),old=MEDIAN_PATH_CACHE.get(symbol),today=dates.at(-1);
+  let base=old?.version===INTRADAY_STORE_V&&old.bucket===bucket?old:null;
+  if(!base){
+    const complete=[];
+    for(const b of INTRADAY_BARS[symbol]||[]){
+      if(!(b.t+300000<=now)||!(b.l>0)||!(b.h>0)||!(b.c>0))continue;
+      const m=medianTradingMinute(b.t,dates);
+      if(m!==null)complete.push({...b,m,day:istDayKey(b.t)});
+    }
+    let anchor=null,high=0,highAt=0;
+    for(const b of complete){
+      if(b.day<today&&(!anchor||b.l<anchor.l))anchor=b;
+      if(b.day===today&&b.h>high){high=b.h;highAt=b.t+300000;}
+    }
+    if(old?.day===today&&old.high>high){high=old.high;highAt=old.highAt;}
+    base={version:INTRADAY_STORE_V,bucket,day:today,low:anchor?.l,lowAt:anchor?.t,
+      lowMinute:anchor?.m,path:anchor?complete.filter(b=>b.t>=anchor.t):[],high,highAt};
+    MEDIAN_PATH_CACHE.set(symbol,base);
+  }
+  const quote=_universeMap.get(symbol),at=Number(quote?.priceAt),px=Number(quote?.price);
+  if(quote?.priceSource==='live tick'&&at>0&&at<=now&&now-at<=30000&&istDayKey(at)===today&&px>base.high){
+    base.high=px;base.highAt=at;
+  }
+  return base;
+}
+function medianOpportunityNet(row,qty,low=row?.medianPath?.low,high=row?.medianPath?.liveHigh){
+  if(!(qty>=MIN_ALLOCATION_SHARES)||!(low>0)||!(high>low))return null;
+  const fr=getTradeFrictionPct(row,qty*Number(row.price));
+  const slip=fr?.covered&&Number.isFinite(fr.entryPct)&&Number.isFinite(fr.exitPct)
+    ?Math.max(0,fr.entryPct+fr.exitPct):2*BASKET_MARKET_BUDGET_BUFFER_PCT;
+  const sell=Math.floor(high/0.05+1e-9)*0.05;
+  return qty*(sell-low)-calcZerodhaCharges(low,qty,false,false,false)
+    -calcZerodhaCharges(sell,qty,true,false,false)-qty*low*slip/100;
+}
+function medianReferenceQuantity(price){
+  const budget=Math.min(getEffectiveMaxAlloc(),getEffectiveCapital());
+  if(!(price>0)||!(budget>0))return 0;
+  let qty=Math.floor(budget/price);
+  while(qty>0&&price*qty+calcZerodhaCharges(price,qty,false,false,false)>budget)qty--;
+  return qty;
+}
+function medianPathModelAt(now){
+  const sizing=[getEffectiveMaxAlloc(),getEffectiveCapital(),BOOK_V].join('|');
+  if(MEDIAN_PATH_RUNTIME&&MEDIAN_PATH_RUNTIME.sizing===sizing&&now-MEDIAN_PATH_CHECK_AT<1000)return MEDIAN_PATH_RUNTIME;
+  MEDIAN_PATH_CHECK_AT=now;
+  const dates=medianPathDates(now),members=[],symbols=Object.keys(INTRADAY_BARS).sort();
+  let signature=INTRADAY_STORE_V+'|'+Math.floor(now/300000)+'|'+sizing;
+  for(const symbol of symbols){
+    const base=medianObservedPath(symbol,now,dates);
+    signature+='|'+symbol+':'+base.high+':'+base.highAt;
+    if(!(base.low>0)||!(base.high>base.low)||base.path.length<2)continue;
+    const price=Number(_universeMap.get(symbol)?.price)||base.path.at(-1).c;
+    const row={symbol,price},qty=medianReferenceQuantity(price);
+    if(!(medianOpportunityNet(row,qty,base.low,base.high)>=100))continue;
+    const end=medianTradingMinute(base.highAt,dates),span=end-base.lowMinute;
+    if(!(span>0))continue;
+    const path=base.path.filter(b=>b.m<=end),amp=base.high-base.low,curve=[];
+    // Interpolation only aligns observed paths; closes are never replaced by candle extremes.
+    const samples=path.map(b=>({m:b.m,c:b.c}));
+    samples.push({m:end,c:base.high});
+    let k=0;
+    for(let i=0;i<=100;i++){
+      const t=base.lowMinute+span*i/100;
+      while(k+1<samples.length&&samples[k+1].m<t)k++;
+      const a=samples[k],b=samples[Math.min(k+1,samples.length-1)];
+      const f=b.m>a.m?(t-a.m)/(b.m-a.m):0;
+      curve.push((a.c+(b.c-a.c)*f-base.low)/amp);
+    }
+    members.push({symbol,base,curve,gain:100*amp/base.low,minutes:span});
+  }
+  if(MEDIAN_PATH_RUNTIME?.signature===signature)return MEDIAN_PATH_RUNTIME;
+  const previous=MEDIAN_PATH_RUNTIME;
+  // Grade the prior revision's next observed prices BEFORE replacing any coefficients.
+  let n=0,error=0;
+  if(previous?.available)for(const m of members){
+    const a=previous.anchors?.[m.symbol];if(!a)continue;
+    const px=Number(_universeMap.get(m.symbol)?.price)||m.base.path.at(-1).c;
+    const phase=(medianTradingMinute(now,dates)-m.base.lowMinute)/previous.minutes;
+    const predicted=a.low*(1+previous.gainPct/100*medianTemplateAt(phase,previous));
+    error+=Math.abs(px/predicted-1)*100;n++;
+  }
+  const revision=++MEDIAN_PATH_REV,common={revision,asOf:now,signature,sizing,dates,cohort:members.length,
+    previousGrade:n?{revision:previous.revision,n,meanAbsolutePriceErrorPct:error/n}:null};
+  if(members.length<MEDIAN_MIN_COHORT){
+    MEDIAN_PATH_RUNTIME={...common,available:false};return MEDIAN_PATH_RUNTIME;
+  }
+  const quant=(values,p)=>{const a=values.slice().sort((a,b)=>a-b),x=(a.length-1)*p,i=Math.floor(x);return a[i]+(a[Math.min(i+1,a.length-1)]-a[i])*(x-i);};
+  const raw=Array.from({length:101},(_,i)=>quant(members.map(m=>m.curve[i]),.5));
+  const p10=raw.map((_,i)=>quant(members.map(m=>m.curve[i]),.1)),p90=raw.map((_,i)=>quant(members.map(m=>m.curve[i]),.9));
+  // Equal-stock medians are robust to extreme winners. Twenty-five prior pseudo-observations
+  // prevent a small changing cohort from redrawing the curve; no observations are fabricated.
+  const prior=previous?.available?previous:MEDIAN_PATH_MODEL,weight=members.length/(members.length+MEDIAN_MIN_COHORT);
+  const blend=(a,b)=>weight*a+(1-weight)*b;
+  const model={...common,available:true,curve:raw.map((v,i)=>blend(v,prior.curve[i])),p10,p90,
+    gainPct:blend(quant(members.map(m=>m.gain),.5),prior.gainPct),
+    minutes:blend(quant(members.map(m=>m.minutes),.5),prior.minutes),
+    dispersion:Math.max(Number.EPSILON,blend(quant(p90.map((v,i)=>v-p10[i]),.5),prior.dispersion)),
+    anchors:Object.fromEntries(members.map(m=>[m.symbol,{low:m.base.low,lowAt:m.base.lowAt,high:m.base.high,highAt:m.base.highAt}]))};
+  MEDIAN_PATH_RUNTIME=model;
+  MEDIAN_REVISION_QUEUE.push({revision,asOf:now,cohort:model.cohort,curve:model.curve,p10,p90,
+    gainPct:model.gainPct,minutes:model.minutes,dispersion:model.dispersion,previousGrade:common.previousGrade,
+    sourceRevision:INTRADAY_STORE_V,universeRevision:_clientUniverseRev});
+  if(MEDIAN_REVISION_QUEUE.length>240)MEDIAN_REVISION_QUEUE.shift();
+  return model;
+}
+function medianPathRead(row,now=Date.now()){
+  const model=medianPathModelAt(now),symbol=normSym(row.symbol);
+  if(!model.available)return {score:null,modelRevision:model.revision,block:`Median path: ${model.cohort}/${MEDIAN_MIN_COHORT} economically qualifying paths`};
+  const base=medianObservedPath(symbol,now,model.dates),px=Number(row.price);
+  if(!(base.low>0)||base.path.length<2||!(px>0))return {score:null,block:'Median path: prior-session low or path unavailable'};
+  const elapsed=medianTradingMinute(now,model.dates)-base.lowMinute,phase=elapsed/model.minutes;
+  const amplitude=base.low*model.gainPct/100,target=base.low+amplitude,progress=(px-base.low)/amplitude;
+  const coverage=Math.min(1,base.path.length/Math.max(1,Math.floor(elapsed/5)));
+  if(base.errorRevision!==model.revision){
+    base.error=base.path.reduce((sum,b)=>sum+Math.abs((b.c-base.low)/amplitude-medianTemplateAt((b.m-base.lowMinute)/model.minutes,model)),0);
+    base.errorRevision=model.revision;
+  }
+  const distance=(base.error+Math.abs(progress-medianTemplateAt(phase,model)))/(base.path.length+1);
+  const quantity=medianReferenceQuantity(px),expectedNet=medianOpportunityNet(row,quantity,base.low,base.high);
+  const economic=expectedNet>=100,valid=phase>0&&phase<1&&px>base.low&&px<target;
+  return {score:valid&&economic?+(100*coverage/(1+distance/model.dispersion)).toFixed(1):0,
+    phase,progress,target,low:base.low,lowAt:base.lowAt,delayMinutes:elapsed,durationMinutes:model.minutes,
+    coverage,distance,liveHigh:base.high,quantity,expectedNet,economic,modelRevision:model.revision,
+    block:!economic?'Median path: observed move does not cover costs plus Rs100':!valid?'Median path: low broken or estimated upside exhausted':null};
+}
+function modelScore(row,model){
+  return row?.modelScores?.[model]??null;
+}
+function modelRow(row,model){
+  return {...row,basketModel:model,score:modelScore(row,model)};
+}
+const MODEL_LABELS={tick:'Tick pressure',median:'Median path'};
+function modelEnabled(model){return model==='tick'?BASKET_TICK_ENABLED:BASKET_MEDIAN_ENABLED;}
+// Which model actually put this stock in the basket. Empty until a funded plan has been built.
+function basketModelOf(sym){return BASKET_MODELS.get(sym)||null;}
+function modelBadgeHtml(model,note=''){
+  if(!model) return '';
+  return `<span class="model-badge model-badge-${model}" title="${escHtml('Recommended by the '+MODEL_LABELS[model]+' model.'+(note?' '+note:''))}">${model==='tick'?'T':'M'} ${MODEL_LABELS[model]}</span>`;
+}
+function enabledModelsLabel(){
+  return BASKET_MODEL_MODE==='both'?'Tick pressure and Median path'
+    :BASKET_MODEL_MODE==='none'?'no model':MODEL_LABELS[BASKET_MODEL_MODE];
+}
+function dualScoreCell(row){
+  const own=basketModelOf(row.symbol);
+  const line=model=>{
+    const owns=own===model,off=!modelEnabled(model);
+    const tip=MODEL_LABELS[model]+(off?' — switched off, scored but not funded'
+      :owns?' — this model owns the basket slot for this stock':'');
+    return `<span style="display:block;white-space:nowrap${off?';opacity:.45':''}" title="${escHtml(tip)}">`
+      +`<b style="font-size:10px;font-family:'DM Mono',monospace;color:${owns?'var(--green)':'var(--t3)'}">${model==='tick'?'T':'M'}${owns?'●':''}</b> `
+      +radarScoreCell(modelScore(row,model),radarScoreTitle(row))+'</span>';
+  };
+  return line('tick')+line('median');
+}
+// Equal slots, not equal rupee amounts. A symbol occupies only one slot.
+// Search both rankings so a shared top pick cannot starve a model's unique pick.
+function balancedModelCandidates(rows,limit=20){
+  const rank=model=>rows.filter(r=>meetsScoreBar(modelScore(r,model)))
+    .sort((a,b)=>modelScore(b,model)-modelScore(a,model)||a.symbol.localeCompare(b.symbol));
+  const tick=rank('tick'),median=rank('median'),used=new Set(),out=[];
+  while(out.length+2<=limit){
+    const ts=tick.filter(r=>!used.has(r.symbol)),ms=median.filter(r=>!used.has(r.symbol));
+    if(!ts.length||!ms.length)break;
+    let t=ts[0],m=ms[0];
+    if(t.symbol===m.symbol){
+      const loseT=ts[1]?modelScore(t,'tick')-modelScore(ts[1],'tick'):Infinity;
+      const loseM=ms[1]?modelScore(m,'median')-modelScore(ms[1],'median'):Infinity;
+      if(!Number.isFinite(Math.min(loseT,loseM)))break;
+      if(loseT<loseM)t=ts[1];else m=ms[1];
+    }
+    used.add(t.symbol);used.add(m.symbol);
+    out.push(modelRow(t,'tick'),modelRow(m,'median'));
+  }
+  return out;
+}
+
 function setRadarEvidenceScore(r){
   if(!r) return null;
   r.directionConfirmed=isDirectionConfirmed(r);
-  const f=_universeMap.get(r.symbol),sc=rocketPressureOf(r.symbol);
-  r.pressure=sc;
+  const tick=rocketPressureOf(r.symbol),median=medianPathRead(r);
+  r.pressure=tick;r.medianPath=median;
+  r.modelScores={tick,median:median.score};
+  const scores=[BASKET_TICK_ENABLED?tick:null,BASKET_MEDIAN_ENABLED?median.score:null].filter(Number.isFinite);
+  const sc=scores.length?Math.max(...scores):null;
   r.score=sc;r.rocketScore=sc;r.scoreVersion=RADAR_SCORE_VERSION;
-  r.scoreComponents={total:sc,S:Number.isFinite(Number(f?.rs))?Number(f.rs):null,
-    pressure:sc,tick:Number.isFinite(Number(f?.rp))?Number(f.rp):null,permission:1,source:'pressure',
-    block:sc===null?'No move history for this stock yet':null};
+  r.scoreComponents={total:sc,pressure:tick,median:median.score,permission:1,
+    source:'dual',block:sc===null?(BASKET_MODEL_MODE==='none'?'Both models are switched off':'Enabled models need more observations'):null};
   return sc;
 }
-function pressureTitle(c){
-  if(!c||c.pressure===null||c.pressure===undefined) return 'No move history for this stock yet.';
-  return `Rocket Score ${c.pressure.toFixed(1)} = 50 x (1 + S), S ${c.S!==null?c.S.toFixed(4):'—'}`
-    +(c.tick!==null&&c.tick!==undefined?`; last directional tick ${(c.tick>=0?'+':'')+c.tick.toFixed(2)}`:'')
-    +'. Ordered up/down price changes, six-directional-tick half-life; unchanged prices leave the score unchanged.';
-}
 function radarScoreTitle(r){
-  const c=r?.scoreComponents;
-  if(!c||c.total===null||c.total===undefined) return pressureTitle(c);
-  return pressureTitle(c)+` Min Score ${RECOMMEND_MIN_SCORE}.`;
+  const show=v=>Number.isFinite(v)?v.toFixed(1):'unavailable';
+  const m=r?.medianPath;
+  return `Tick ${show(r?.modelScores?.tick)}; Median ${show(r?.modelScores?.median)}. Both run independently; Min Score ${RECOMMEND_MIN_SCORE}.`
+    +(m?.phase!=null?` Median phase ${(100*m.phase).toFixed(1)}%, observed-low delay ${m.delayMinutes.toFixed(0)} trading minutes; coverage ${(100*m.coverage).toFixed(0)}%.`:'')
+    +' Similarity scores are not profit probabilities. Basket slots are split equally.';
 }
 function* refreshRocketScoresGen(){
   const staged=[];
@@ -4070,26 +4273,26 @@ function radarScoreCell(score,title='',recommendationState=null,vetoReason=null)
   return `<span class="sc-m" style="font-family:'DM Mono',monospace;font-weight:800;font-size:15px;color:${c}" title="${escHtml(tip)}">${s.toFixed(1)}${ok?'':'<sub style="font-size:9px;color:var(--t3)">\u25be</sub>'}</span>`;
 }
 let BASKET_ROW_REASONS=new Map();
+let BASKET_MODELS=new Map();
+let BASKET_TICK_ENABLED=localStorage.getItem('rs_basket_tick_enabled')==='1';
+let BASKET_MEDIAN_ENABLED=localStorage.getItem('rs_basket_median_enabled')!=='0';
+let BASKET_MODEL_MODE=BASKET_TICK_ENABLED&&BASKET_MEDIAN_ENABLED?'both':BASKET_TICK_ENABLED?'tick':BASKET_MEDIAN_ENABLED?'median':'none';
+function setBasketModelEnabled(model,enabled){
+  if(model==='tick')BASKET_TICK_ENABLED=!!enabled;
+  if(model==='median')BASKET_MEDIAN_ENABLED=!!enabled;
+  localStorage.setItem('rs_basket_tick_enabled',BASKET_TICK_ENABLED?'1':'0');
+  localStorage.setItem('rs_basket_median_enabled',BASKET_MEDIAN_ENABLED?'1':'0');
+  BASKET_MODEL_MODE=BASKET_TICK_ENABLED&&BASKET_MEDIAN_ENABLED?'both':BASKET_TICK_ENABLED?'tick':BASKET_MEDIAN_ENABLED?'median':'none';
+  BASKET_MODELS=new Map();
+  ALL.forEach(r=>{setRadarEvidenceScore(r);ROW_ACTION_MEMO.delete(r);});
+  _allocMemo=null;_modelComparisonAt=0;
+  applyFilters();
+  scheduleAutoSyncBasket();
+}
 function planFundedRecommendations(rows,capital){
-  const reasons=new Map(),pool=rows.filter(r=>{
-    if(EXPORT_EXCLUDED.has(r.symbol)){reasons.set(r.symbol,'Excluded from basket by you');return false;}
-    if(!isStockEligible(r)) return false;
-    if(!(capital>0)){reasons.set(r.symbol,'Set capital to fund recommendations');return false;}
-    return true;
-  });
-  let active=pool.slice(0,20),next=active.length;
-  while(active.length){
-    const alloc=computeAlloc(capital,active);
-    const rejected=active.filter(r=>alloc[r.symbol]?.rejected||!(alloc[r.symbol]?.qty>0));
-    if(!rejected.length) break;
-    const removed=new Set(rejected.map(r=>r.symbol));
-    rejected.forEach(r=>reasons.set(r.symbol,alloc[r.symbol]?.reason||'No affordable whole-share allocation'));
-    active=active.filter(r=>!removed.has(r.symbol));
-    while(active.length<20&&next<pool.length) active.push(pool[next++]);
-  }
-  const funded=new Set(active.map(r=>r.symbol));
-  pool.forEach(r=>{if(!funded.has(r.symbol)&&!reasons.has(r.symbol)) reasons.set(r.symbol,'Outside the funded basket of up to 20 trades');});
-  return {funded,reasons};
+  const plan=planDualBasket(rows,capital);
+  BASKET_MODELS=new Map(plan.rows.map(r=>[r.symbol,r.basketModel]));
+  return {funded:new Set(plan.rows.map(r=>r.symbol)),reasons:plan.reasons};
 }
 function rowStatusPillHtml(s){
   if(!s) return '';
@@ -4109,7 +4312,8 @@ function rowStatusPillHtml(s){
   }
   const act=getRowActionState(s);
   if(act.state==='GO'){
-    return `<span class="info-pill pill-green" style="padding:2px 8px;font-weight:700" title="Funded and included in the basket">✓ GO</span>`;
+    const own=basketModelOf(s.symbol);
+    return `<span class="info-pill pill-green" style="padding:2px 8px;font-weight:700" title="${escHtml('Funded and included in the basket'+(own?' by the '+MODEL_LABELS[own]+' model.':'.'))}">✓ GO${own?' · '+MODEL_LABELS[own]:''}</span>`;
   }
   if(act.state==='WAIT'){
     return `<span class="info-pill pill-amber" style="padding:2px 8px;max-width:260px;overflow:hidden;text-overflow:ellipsis;display:inline-block;vertical-align:middle" title="${escHtml(act.reason)}">⏳ ${escHtml(act.reason)}</span>`;
@@ -6591,7 +6795,7 @@ function getDefaultMaxAlloc(){return getEffectiveCapital();}
 // owner's own goal: the goal's daily rupee need divided by his entries per day. Not a chosen number -
 // the same per-trade figure v1299 sizes allocations with. Read by every target, so memoized briefly.
 function goalAllocationExplanation(){
-  return 'Allocate by Rocket Score, with at least 10 shares per funded stock. Available cash and Max Allocation bound sizing. Targets, estimated profit and stop risk are planning information only.';
+  return 'Run Tick and Median together. Basket slots split equally between distinct stocks. Each order needs at least 10 shares and costs plus the higher of Rs100 or the goal per-trade requirement. Cash and Max Allocation still apply.';
 }
 
 function getEffectiveCapital(){
@@ -7059,7 +7263,8 @@ function renderStats(){
   const medianRisk=Object.entries(riskCounts).sort((a,b)=>b[1]-a[1])[0]?.[0]||'—';
   const selCount=FILT.filter(s=>SELECTED.has(s.symbol)).length;
   const rocketsCard=`<div class="st"><div class="st-l">Rockets Today</div><div class="st-v" style="color:var(--fire)">${(RADAR.rockets||0).toLocaleString()}</div><div class="st-d" title="v1085 definition: reached its own target before its own stop. This card shows DAY 1 only — the full label runs over 2 trading days and is resolved in the outcome store after the next session. Diagnostic; it sets no feature weight.">reached target before stop today · day 1 of 2 · diagnostic${RADAR.continuationCount?` · ${RADAR.continuationCount.toLocaleString()} broader continuation signals scored separately`:''}</div></div>`;
-  const scoreCard=`<div class="st"><div class="st-l">Top Score</div><div class="st-v" style="color:${radarScoreColor(top?.score)}">${topScore}</div><div class="st-d">${FILT.length.toLocaleString()} displayed · ${selCount} selected for export · median risk ${medianRisk} · ${RADAR.features.length||0} modeled features</div></div>`;
+  const bestOf=m=>{const v=ALL.reduce((x,r)=>{const n=Number(modelScore(r,m));return r&&!r._held&&Number.isFinite(n)&&n>x?n:x;},-Infinity);return Number.isFinite(v)?v.toFixed(1):'—';};
+  const scoreCard=`<div class="st" title="${escHtml('Both models score the same universe. The headline is the higher of the models you have switched on ('+enabledModelsLabel()+').')}"><div class="st-l">Top Score</div><div class="st-v" style="color:${radarScoreColor(top?.score)}">${topScore}</div><div class="st-d">Tick ${bestOf('tick')} · Median ${bestOf('median')} · ${FILT.length.toLocaleString()} displayed · ${selCount} selected · median risk ${medianRisk}</div></div>`;
 
   const breadthPct = t ? (bull / t * 100) : null;
   const reg = (typeof MARKET_REGIME !== 'undefined' && MARKET_REGIME) ? MARKET_REGIME : null;
@@ -7124,7 +7329,7 @@ function renderStats(){
     }catch(e){}
   })();
   if(SUPPRESSED_HELD>0)filterPills.push(`<span class="info-pill pill-rose" title="Stocks you already hold (Holdings + Positions + today's net Orders buys). Since v1070 these stay in the ranking and can be recommended again — the badge is a duplicate-buy warning, not a filter.">📌 ${SUPPRESSED_HELD} already held</span>`);
-  if(PEAK_TIMING_REMOVED>0)filterPills.push(`<span class="info-pill pill-amber" title="These stocks fail the entry-timing condition. It is context only and never changes the Rocket Score.">⚡ ${PEAK_TIMING_REMOVED} timing-trigger misses</span>`);
+  if(PEAK_TIMING_REMOVED>0)filterPills.push(`<span class="info-pill pill-amber" title="These stocks fail the entry-timing condition. It is context only and changes neither model score.">⚡ ${PEAK_TIMING_REMOVED} timing-trigger misses</span>`);
   const inelig=ALL.filter(s=>s.basketEligible===false).length;
   if(inelig>0)filterPills.push(`<span class="info-pill pill-orange" title="Non-EQ series, inactive status, or a price band below 10% — visible in the ranking with penalties, but never exported to the basket.">⚠ ${inelig} basket-ineligible (ranked with penalties)</span>`);
 
@@ -8370,7 +8575,7 @@ function renderPerformance(){
         <div><div class="st-l">Reached target</div><div class="st-v" style="font-size:19px;color:${sc.hitPct>=40?'var(--green)':sc.hitPct>=20?'var(--amber)':'var(--red)'}">${sc.hitPct}%</div><div class="st-d">${sc.target} picks</div></div>
         <div><div class="st-l">Stopped first</div><div class="st-v" style="font-size:19px;color:${sc.stopped?'var(--red)':'var(--green)'}">${sc.stopPct}%</div><div class="st-d">${sc.stopped} picks — dipped to stop before target</div></div>
         <div><div class="st-l">Never moved</div><div class="st-v" style="font-size:19px;color:var(--amber)">${sc.expiredPct}%</div><div class="st-d">${sc.expired} picks — neither barrier in ${ROCKET_HORIZON_DAYS} days</div></div>
-        <div title="For the current score version only: on the SAME issue session, did a target-hitter have a higher Rocket Score than a non-winner? 50% means the score ordering carries no information."><div class="st-l">Score concordance</div><div class="st-v" style="font-size:19px;color:${sc.concordancePct==null?'var(--t3)':sc.concordancePct>=60?'var(--green)':sc.concordancePct>=52?'var(--amber)':'var(--red)'}">${sc.concordancePct==null?'—':sc.concordancePct+'%'}</div><div class="st-d">${sc.concordancePairs} current-version winner/loser pairs · 50% = no information</div></div>
+        <div title="For the current score version only: on the SAME issue session, did a target-hitter have a higher score than a non-winner, on the model that issued it? 50% means the score ordering carries no information."><div class="st-l">Score concordance</div><div class="st-v" style="font-size:19px;color:${sc.concordancePct==null?'var(--t3)':sc.concordancePct>=60?'var(--green)':sc.concordancePct>=52?'var(--amber)':'var(--red)'}">${sc.concordancePct==null?'—':sc.concordancePct+'%'}</div><div class="st-d">${sc.concordancePairs} current-version winner/loser pairs · 50% = no information</div></div>
         <div><div class="st-l">Time to target</div><div class="st-v" style="font-size:19px">${sc.medDaysToTarget==null?'—':(sc.medDaysToTarget===0?'same day':sc.medDaysToTarget+'d')}</div><div class="st-d">${sc.sameDay} same day · ${sc.nextDay} next day</div></div>
       </div>`
     : `<div style="padding:16px;color:var(--t2);font-size:13px">No cohort has resolved yet. A pick resolves after its issue session and following-session deadline are complete.</div>`;
@@ -8381,7 +8586,7 @@ function renderPerformance(){
     +`<td style="padding:4px 10px;text-align:right">${b.settled}</td>`
     +`<td style="padding:4px 10px;text-align:right;font-weight:700;color:${b.hitPct==null?'var(--t3)':b.hitPct>=30?'var(--green)':b.hitPct>=18?'var(--amber)':'var(--red)'}">${b.hitPct==null?'—':b.hitPct+'%'}</td></tr>`).join('');
   const bandTable=bandRows?`<div style="padding:10px 16px;border-top:1px solid var(--border)">
-      <div class="st-l" style="margin-bottom:6px">Hit rate by Rocket Score band at issue</div>
+      <div class="st-l" style="margin-bottom:6px">Hit rate by score band at issue</div>
       <table style="width:100%;font-size:13px;border-collapse:collapse">
         <tr style="color:var(--t3);font-size:11px;text-transform:uppercase;letter-spacing:.06em">
           <td style="padding:4px 10px">Score</td><td style="padding:4px 10px;text-align:right">Graded</td>
@@ -8876,27 +9081,30 @@ function _renderMethodologyInner(){
       <a href="#meth-performance" onclick="event.preventDefault();scrollToSection('meth-performance')" style="padding:4px 12px;border-radius:6px;background:var(--bg-card);border:1px solid var(--border);color:var(--t2);font-size:13px;font-weight:600;text-decoration:none;cursor:pointer">📈 Performance</a>
       <a href="#meth-guide" onclick="event.preventDefault();scrollToSection('meth-guide')" style="padding:4px 12px;border-radius:6px;background:var(--bg-card);border:1px solid var(--border);color:var(--t2);font-size:13px;font-weight:600;text-decoration:none;cursor:pointer">📖 Use & Risk</a>
     </nav>
-    <h3 id="meth-scoring">Rocket Score</h3>
-    <p>The <strong>Rocket Score</strong> is move direction and nothing else: every last-traded-price print counts
-    +1 or -1 against the previous price, applied in order with a six-directional-tick half-life and read on a
-    fixed 0–100 scale where 50 is balanced. The board is sorted by it, highest first. It describes what the stock is
-    doing now; it is not a forecast, a probability or a claim about profit, and it is a research screener rather than
-    investment advice. Whether a row can be bought — surveillance, series and band, the circuit, a live price feed,
-    funding — is decided separately and shown in Status / Rejection, and never folded into the number.</p>
+    <h3 id="meth-scoring">Two scores, run side by side</h3>
+    <p>Every stock carries <strong>two independent scores</strong>, computed on the same universe at the same instant and
+    never averaged. <strong>Tick pressure</strong> reads move direction and nothing else. <strong>Median path</strong> reads how
+    closely this stock's completed path since its observed prior-session low matches the median path of the stocks whose
+    own observed move would have covered costs plus the minimum net profit. Each can be switched on or off in the live
+    comparison above the table; the score cell shows both and marks the one that owns the stock's basket slot. Neither is
+    a forecast, a probability or a claim about profit, and this remains a research screener rather than investment
+    advice. Whether a row can be bought — surveillance, series and band, the circuit, breadth, depth, a live price feed,
+    funding — is decided separately and shown in Status / Rejection, and never folded into either number.</p>
     <div class="m-grid">
       <div class="m-card"><h4>How It Is Computed</h4><ol style="padding-left:18px;color:var(--t2);font-size:14px;line-height:1.7">
         <li>Every last-traded-price observation from the Kite stream scores <strong>+1</strong> if it is above the previous traded price, <strong>−1</strong> if below and <strong>0</strong> if unchanged.</li>
         <li>Each directional price change updates the score in the helper. Unchanged prices leave it unchanged; the first price establishes the reference.</li>
         <li>Each directional tick: <strong>S = 0.891 &times; S + 0.109 &times; Direction</strong> (&lambda; = 0.5<sup>1/6</sup>, a six-directional-tick half-life). S starts at 0. Active stocks respond faster in clock time.</li>
-        <li><strong>Rocket Score = 50 × (1 + S)</strong>: 50 is balanced, above 50 is net buying pressure, below 50 is net selling. It describes the stock, and on its own it is not a reason to buy.</li>
+        <li><strong>Tick pressure = 50 × (1 + S)</strong>: 50 is balanced, above 50 is net buying pressure, below 50 is net selling. It describes the stock, and on its own it is not a reason to buy.</li>
         <li>S persists across sessions and does not decay while the market is closed. The previous session's last traded price is the reference for the next session's first observation.</li>
+        <li><strong>Median path</strong> is fitted live: every stock whose observed prior-session low to current session high would have covered costs plus the minimum net profit contributes one equally weighted path, and the cohort's median shape, median gain and median duration form the template. A stock scores on how closely its own completed bars track that template and how far through it the stock has travelled, scaled by how much of the elapsed time it actually has bars for. It reads completed observations only — no future high, low or duration is known — and the template needs at least 25 qualifying paths before it will score anything.</li>
       </ol></div>
-      <div class="m-card"><h4>What Does Not Enter It</h4><p>No indicator, volume, price magnitude, market breadth or learned weight. Thin stocks are handled by the <strong>Drop thinnest %</strong> filter, not by the formula. The seven daily-column groups below describe the Setup label and Risk pill only.</p><div class="rr-groups" style="margin-top:10px">${groupsHTML}</div>${diagHTML}</div>
-      <div class="m-card"><h4>When a Row Is GO</h4><p>A row is <strong>GO</strong> when the market is open, market and individual-stock ticks are no older than 30 seconds, at least half of fresh live stocks are above their session open (flat stocks count in the total). Additionally, the stock is not under a configured surveillance rule, its series and price band are basket-eligible, it is not at the upper circuit, its Rocket Score is at or above <strong>Min Score ${RECOMMEND_MIN_SCORE}</strong>, and fresh market depth shows <strong>Total Buy Quantity &gt; Total Sell Quantity</strong> with that gap <strong>wider than it was a minute ago</strong>, and the <strong>average order size</strong> gap (quantity per order across the five displayed rungs, buy side minus sell side) is <strong>also wider than a minute ago</strong>. A qualifying row whose book cancelled more than it traded today still says so. These checks decide whether a row can be bought; none of them changes the score. Funding requires at least 10 shares within cash including purchase charges and Max Allocation.</p></div>
-      <div class="m-card"><h4>Held Positions &amp; Basket</h4><p>Qualifying stocks receive at least 10 shares or remain unfunded. Minimum lots are reserved in score order, then remaining cash is split by Rocket Score within Max Allocation. Purchase charges are included in affordability. Targets, profit estimates and stop risk are planning information; none gates allocation. Existing held-position exit rules remain active.</p></div>
+      <div class="m-card"><h4>What Does Not Enter It</h4><p>Tick pressure reads no indicator, volume, price magnitude, market breadth or learned weight. Median path reads only completed 5-minute bars, the live tick and this session's own cross-section; it never reads a future price. Neither model reads the other's output, and the two are never averaged into one number. Thin stocks are handled by the <strong>Drop thinnest %</strong> filter, not by either formula. The seven daily-column groups below describe the Setup label and Risk pill only.</p><div class="rr-groups" style="margin-top:10px">${groupsHTML}</div>${diagHTML}</div>
+      <div class="m-card"><h4>When a Row Is GO</h4><p>A row is <strong>GO</strong> when the market is open, market and individual-stock ticks are no older than 30 seconds, at least half of fresh live stocks are above their session open (flat stocks count in the total). Additionally, the stock is not under a configured surveillance rule, its series and price band are basket-eligible, it is not at the upper circuit, the score of at least one switched-on model is at or above <strong>Min Score ${RECOMMEND_MIN_SCORE}</strong>, and fresh market depth shows <strong>Total Buy Quantity &gt; Total Sell Quantity</strong> with that gap <strong>wider than it was a minute ago</strong>, and the <strong>average order size</strong> gap (quantity per order across the five displayed rungs, buy side minus sell side) is <strong>also wider than a minute ago</strong>. A qualifying row whose book cancelled more than it traded today still says so. These checks decide whether a row can be bought; none of them changes either score. Funding requires at least 10 shares, and enough shares that the order's own target clears charges, book friction and the higher of ₹100 or the goal's per-trade profit requirement, within cash including purchase charges and Max Allocation.</p></div>
+      <div class="m-card"><h4>Held Positions &amp; Basket</h4><p>With both models on, <strong>basket slots are split equally</strong>: each pair of slots takes one distinct stock from each model's own ranking, so a stock both models like occupies one slot and counts for one model only. If either model cannot supply a funded pick the basket shrinks rather than letting the other model fill the gap — that is what keeps the two records comparable. With one model on, that model fills the basket alone. Every funded order carries an <code>RS_TICK</code> or <code>RS_MEDIAN</code> tag, and the same attribution is matched against the actual Tradebook fills so the live comparison can report realised net return per model. Qualifying stocks receive at least their minimum profitable quantity or remain unfunded; remaining cash is then split by each pick's own model score within Max Allocation. Existing held-position exit rules remain active.</p></div>
     </div>
     <h3 id="meth-ledger" style="margin-top:28px">Feature Ledger <span style="font-size:14px;color:var(--t3);font-weight:400">(${RADAR.features.length||0} setup features from ${RADAR.headers.length||0} input columns)</span></h3>
-    <p style="color:var(--t2);line-height:1.7">These are input-file and setup diagnostics. They set the Setup label and Risk pill and never enter the Rocket Score. Input coverage describes this file only, not live-tape availability.</p>
+    <p style="color:var(--t2);line-height:1.7">These are input-file and setup diagnostics. They set the Setup label and Risk pill and enter neither model score. Input coverage describes this file only, not live-tape availability.</p>
     ${buildRadarLedgerHTML()}
     ${buildIndicatorWatchHTML()}
     <div id="meth-hf-wrap">${hardFiltersHTML}</div>
@@ -8906,14 +9114,14 @@ function _renderMethodologyInner(){
     <div class="m-grid">
       <div class="m-card"><h4>Entry Workflow</h4><ol style="padding-left:18px;color:var(--t2);font-size:14px;line-height:1.7">
         <li>Keep Kite Connect logged in and let the live stream provide the current universe and 5-minute tape.</li>
-        <li>Use Min Score as the Rocket Score bar. Market closure or stale live data pauses execution.</li>
+        <li>Min Score is applied to each model separately. Market closure or stale live data pauses execution.</li>
         <li>Status / Rejection names the check that blocks a row. Allocation separately explains any selected row that cannot be funded.</li>
         <li>Entries use current market price.</li>
         <li>Review the row's cost-floor target, stock-specific stop and the rail that limits allocation before placing the basket.</li>
       </ol></div>
       <div class="m-card"><h4>Interpretation</h4><ul style="padding-left:18px;color:var(--t2);font-size:14px;line-height:1.7">
         ${RADAR_SCORE_BANDS.map(b=>`<li><b style="color:${b.color}">${b.range}:</b> ${b.note}</li>`).join('')}
-<li>Rocket Score is <strong>50 × (1 + S)</strong>, S being the six-directional-tick-half-life average of ordered up/down price changes. 50 is balanced, and the scale is fixed, so the same number means the same thing on any day and on any stock.</li>
+<li>Tick pressure is <strong>50 × (1 + S)</strong>, S being the six-directional-tick-half-life average of ordered up/down price changes. 50 is balanced, and the scale is fixed, so the same number means the same thing on any day and on any stock. Median path is a similarity-and-progress reading against a live-fitted cohort template; its forward accuracy is <strong>not validated</strong>, which is why both models run at once and their realised results are kept separate.</li>
         <li>It is a reading of move direction over recent directional ticks — never a probability of profit, never an expected return, and no evidence of forward predictive value is claimed.</li>
       </ul></div>
     </div>
@@ -8926,7 +9134,7 @@ function getCols(){
   // User-dragged column order (v536) applies here so header and cells always agree.
   return applyColOrder('main-rankings',[
     {key:'chk',label:'',s:0},
-    {key:'score',label:'Rocket Score',s:1},
+    {key:'score',label:'Tick / Median',s:1},
     {key:'symbol',label:'Symbol',s:1},
     {key:'status',label:'Status / Rejection',s:1},
     {key:'price',label:'Price/Day',s:1},
@@ -9447,6 +9655,20 @@ function getClockRunwayRead(row,opts){
 }
 
 function getRowExitPolicy(row,buyPrice=null,activeInfo=null,nudgeInfo=null,qty=null){
+  if(row?.basketModel==='median'||(!row?.basketModel&&BASKET_MODELS.get(row?.symbol)==='median')){
+    const price=Number(buyPrice)>0?Number(buyPrice):getBuyPrice(row);
+    const upper=getUpperCircuitInfo(row,price)?.ucPrice;
+    let target=Number(row?.medianPath?.target);
+    if(upper>0)target=Math.min(target,upper);
+    const active=activeInfo||getActiveTargetInfo();
+    if(active.source==='manual'&&active.tgtPct>0)target=Math.min(target,price*(1+active.tgtPct/100));
+    const pct=target>price?Math.floor((target/price-1)*10000)/100:null;
+    const stopPct=getRowStopDistancePct(row);
+    return {targetPct:pct,basePct:pct,stopPct,viable:pct>0,targetPolicy:TARGET_POLICY_VERSION,
+      targetSource:'Median-path fitted amplitude (unvalidated forecast)',viabilitySource:'Median path has no remaining upside',
+      horizonNote:'Estimated phase uses trading time since the observed low; future high is unknown.',
+      stopSource:'Existing stock stop',rewardRisk:pct>0?pct/stopPct:null,positionFloorPct:null};
+  }
   const active=activeInfo||getActiveTargetInfo();
   const anchor=Number(active.tgtPct)>0?Number(active.tgtPct):Math.abs(Number(TRADEBOOK_STATS?.adaptiveTGT))||null;
   const atr=Number(row?.atr);
@@ -10014,12 +10236,180 @@ function getAllocationPassContext(){
 // scanning the whole universe resolves them ONCE — see getAllocationPassContext(). Called without
 // one it resolves them itself, which is correct but ~4ms per row.
 // Cash includes purchase charges. No target, profit, stop, turnover or book estimate gates sizing.
+function respectableProfitRs(){
+  return Math.max(100,Number(getGoalAllocationPlan().profitPerTrade)||0);
+}
+function modelNetEconomics(row,price,qty){
+  const policy=getRowExitPolicy(row,price,null,null,qty),pct=policy?.targetPct;
+  if(!(price>0)||!(qty>0)||!(pct>0))return {net:null,targetPct:null};
+  const sell=Math.floor(price*(1+pct/100)/0.05+1e-9)*0.05;
+  const charges=calcZerodhaCharges(price,qty,false,false,false)+calcZerodhaCharges(sell,qty,true,false,false);
+  const fr=getTradeFrictionPct(row,qty*Number(row.price));
+  // Existing 0.25% execution budget cushion is also the explicit fallback on each leg.
+  // Missing book impact is never silently treated as zero cost.
+  const slip=fr?.covered&&Number.isFinite(fr.entryPct)&&Number.isFinite(fr.exitPct)
+    ?Math.max(0,fr.entryPct+fr.exitPct):2*BASKET_MARKET_BUDGET_BUFFER_PCT;
+  const opportunityNet=row.basketModel==='median'?medianOpportunityNet(row,qty):Infinity;
+  return {net:opportunityNet>=100?qty*(sell-price)-charges-qty*price*slip/100:null,targetPct:pct,charges,slip,opportunityNet};
+}
+function minimumModelQuantity(row,price,maxQty){
+  if(!(price>0)||maxQty<MIN_ALLOCATION_SHARES)return 0;
+  const floor=respectableProfitRs();
+  if(!(modelNetEconomics(row,price,maxQty).net>=floor))return 0;
+  let lo=MIN_ALLOCATION_SHARES,hi=maxQty;
+  while(lo<hi){
+    const mid=Math.floor((lo+hi)/2);
+    if(modelNetEconomics(row,price,mid).net>=floor)hi=mid;else lo=mid+1;
+  }
+  return modelNetEconomics(row,price,lo).net>=floor?lo:0;
+}
+function planDualBasket(rows,capital){
+  const reasons=new Map(),blocked=new Set();
+  let pool=(rows||[]).filter(r=>{
+    if(EXPORT_EXCLUDED.has(r.symbol)){reasons.set(r.symbol,'Excluded from basket by you');return false;}
+    if(!isStockEligible(r)){reasons.set(r.symbol,getRowActionState(r).reason);return false;}
+    if(!(capital>0)){reasons.set(r.symbol,'Set capital to fund recommendations');return false;}
+    return true;
+  });
+  let chosen=[],alloc={},limit=20;
+  for(let attempt=0;attempt<=20*pool.length+10;attempt++){
+    const candidates=pool.map(r=>({...r,modelScores:{
+      tick:blocked.has(r.symbol+'|tick')?null:modelScore(r,'tick'),
+      median:blocked.has(r.symbol+'|median')?null:modelScore(r,'median')}}));
+    if(BASKET_MODEL_MODE==='both') chosen=balancedModelCandidates(candidates,limit);
+    else if(BASKET_MODEL_MODE==='none') chosen=[];
+    else {
+      const model=BASKET_MODEL_MODE;
+      chosen=candidates.filter(r=>meetsScoreBar(r.modelScores[model]))
+        .sort((a,b)=>b.modelScores[model]-a.modelScores[model]||a.symbol.localeCompare(b.symbol))
+        .slice(0,limit).map(r=>modelRow(r,model));
+    }
+    if(!chosen.length){alloc={};break;}
+    alloc=computeModelAlloc(capital,chosen);
+    const rejected=chosen.filter(r=>alloc[r.symbol]?.rejected||!(alloc[r.symbol]?.qty>0));
+    if(!rejected.length)break;
+    if(chosen.length>(BASKET_MODEL_MODE==='both'?2:1)){limit=chosen.length-(BASKET_MODEL_MODE==='both'?2:1);continue;}
+    rejected.forEach(r=>{
+      blocked.add(r.symbol+'|'+r.basketModel);
+      reasons.set(r.symbol,alloc[r.symbol]?.reason||'Insufficient funded quantity');
+    });
+    limit=20;
+  }
+  const funded=new Set(chosen.map(r=>r.symbol));
+  for(const r of pool){
+    if(funded.has(r.symbol))reasons.delete(r.symbol);
+    else if(!reasons.has(r.symbol))reasons.set(r.symbol,BASKET_MODEL_MODE==='both'?'Awaiting a funded partner from the other model (equal basket split)':'Outside the selected '+BASKET_MODEL_MODE+' model basket');
+  }
+  return {rows:chosen,alloc,reasons};
+}
 function computeAlloc(capital,selList){
+  return planDualBasket(selList,capital).alloc;
+}
+const MODEL_COMPARISON_STORE='rs_model_execution_v1';
+let _modelComparisonAt=0,_modelAuditAt=0;
+function modelTradeTimestamp(date,time){
+  const raw=String(time||'');
+  const clock=raw.match(/(?:T|\s|^)(\d{2}:\d{2}:\d{2})(?:\.|$|[+Z])/);
+  return clock&&/^\d{4}-\d{2}-\d{2}$/.test(date)?Date.parse(date+'T'+clock[1]+'+05:30'):null;
+}
+function recordModelBasketExport(orders,now=Date.now()){
+  const picks=orders.filter(o=>['tick','median'].includes(o._meta?.model)&&o.params?.quantity>0)
+    .map(o=>({symbol:o._meta.sym,model:o._meta.model,qty:o.params.quantity,modelScores:o._meta.modelScores}));
+  if(!picks.length)return;
+  const store=FS.get(MODEL_COMPARISON_STORE)||{version:1,exports:{},entries:{}};
+  const id=now+'|'+getCanonicalBasketSignature(orders);
+  store.exports[id]={at:now,date:istDayKey(now),picks};
+  FS.set(MODEL_COMPARISON_STORE,store);_modelAuditAt=0;
+}
+function reconcileModelExecutions(exports,trips,buyFills){
+  const groups=new Map(),usage=new Map(),entries={};
+  for(const fill of buyFills||[]){
+    const at=modelTradeTimestamp(fill.date,fill.time),qty=Number(fill.qty),price=Number(fill.price);
+    if(!at||!(qty>0)||!(price>0))continue;
+    const symbol=normSym(fill.symbol),key=symbol+'|'+at;
+    const g=groups.get(key)||{key,symbol,date:fill.date,at,qty:0,value:0,closedQty:0,net:0,closedCapital:0};
+    g.qty+=qty;g.value+=qty*price;groups.set(key,g);
+  }
+  for(const trip of trips||[]){
+    if(trip.shortTrip||!(trip.qty>0)||!Number.isFinite(trip.netPnl)||!trip.sellDate)continue;
+    const at=modelTradeTimestamp(trip.buyDate,trip.buyTime),g=groups.get(normSym(trip.sym)+'|'+at);
+    if(!g||g.closedQty+trip.qty>g.qty+1e-7)continue;
+    g.closedQty+=trip.qty;g.net+=trip.netPnl;g.closedCapital+=trip.buyPrice*trip.qty;
+  }
+  for(const g of [...groups.values()].sort((a,b)=>a.at-b.at||a.symbol.localeCompare(b.symbol))){
+    const candidates=[];
+    for(const event of Object.values(exports||{})){
+      if(event.date!==g.date||event.at>g.at)continue;
+      for(const pick of event.picks||[])if(normSym(pick.symbol)===g.symbol&&pick.qty>=g.qty)candidates.push(pick);
+    }
+    const models=new Set(candidates.map(p=>p.model));
+    // No export before the real BUY, or conflicting model ownership: leave unattributed.
+    if(models.size!==1)continue;
+    const model=[...models][0],key=g.date+'|'+g.symbol+'|'+model;
+    const limit=Math.max(...candidates.map(p=>p.qty)),used=usage.get(key)||0;
+    if(used+g.qty>limit+1e-7)continue;
+    usage.set(key,used+g.qty);
+    entries[g.key]={symbol:g.symbol,model,executed:true,executedAt:g.at,executedQty:g.qty,
+      executedEntryPrice:g.value/g.qty,closedQty:g.closedQty,closedCapital:g.closedCapital,
+      net:g.net,resolved:g.closedQty>0,complete:g.closedQty>=g.qty,source:'tradebook FIFO actual fills'};
+  }
+  return entries;
+}
+function updateModelComparisonAudit(now=Date.now()){
+  if(now-_modelAuditAt<30000)return;
+  _modelAuditAt=now;
+  const store=FS.get(MODEL_COMPARISON_STORE)||{version:1,exports:{},entries:{}};
+  const next=reconcileModelExecutions(store.exports,TRADEBOOK_STATS?.tripsData||[],TRADEBOOK_BUY_FILLS||[]);
+  // Reconciliation uses one authoritative tradebook, never adds Orders duplicates or candle exits.
+  if(Object.keys(next).length){
+    store.entries={...(store.entries||{}),...next};FS.set(MODEL_COMPARISON_STORE,store);
+  }
+  if(MEDIAN_REVISION_QUEUE.length){
+    const history=FS.get('rs_median_model_revisions_v1')||{revisions:[]};
+    history.revisions=history.revisions.concat(MEDIAN_REVISION_QUEUE.splice(0)).slice(-240);
+    FS.set('rs_median_model_revisions_v1',history);
+  }
+}
+function renderModelComparison(){
+  const host=document.getElementById('modelComparison'),now=Date.now();
+  if(!host||now-_modelComparisonAt<1000)return;
+  _modelComparisonAt=now;
+  updateModelComparisonAudit(now);
+  const entries=Object.values((FS.get(MODEL_COMPARISON_STORE)||{}).entries||{});
+  const show=v=>Number.isFinite(v)?v.toFixed(1):'—';
+  const card=(model,title,description)=>{
+    const ranked=ALL.filter(r=>Number.isFinite(modelScore(r,model))).slice()
+      .sort((a,b)=>modelScore(b,model)-modelScore(a,model)||a.symbol.localeCompare(b.symbol));
+    const qualified=ranked.filter(r=>meetsScoreBar(modelScore(r,model)));
+    const funded=[...BASKET_MODELS.values()].filter(m=>m===model).length;
+    const samples=entries.filter(p=>p.model===model),done=samples.filter(p=>p.executed&&p.resolved);
+    const wins=done.filter(p=>p.net>0).length,cleared=done.filter(p=>p.net>=p.requiredNet).length;
+    const netTotal=done.reduce((sum,p)=>sum+(Number(p.net)||0),0);
+    const deployed=done.reduce((sum,p)=>sum+(Number(p.closedCapital)||0),0);
+    const performanceScore=deployed>0?100*netTotal/deployed:null;
+    const passing=qualified.filter(r=>getRowActionState(modelRow(r,model)).state==='GO').length;
+    const enabled=model==='tick'?BASKET_TICK_ENABLED:BASKET_MEDIAN_ENABLED;
+    return `<article class="model-comparison-card"><h3><label class="model-toggle"><input type="checkbox" ${enabled?'checked':''} onchange="setBasketModelEnabled('${model}',this.checked)"><span>${title}</span></label></h3><div class="model-comparison-note">${description}</div>
+      <div>${ranked.length} scored · ${qualified.length} above Min Score · ${passing} pass entry checks · <b>${funded} basket picks</b></div>
+      <div class="model-performance-score"><small>Executed return · net return after costs / actual filled capital</small><b>${Number.isFinite(performanceScore)?`${performanceScore>=0?'+':''}${performanceScore.toFixed(2)}%`:'Pending'}</b></div>
+
+      <table><thead><tr><th>Leading stocks</th><th>Tick</th><th>Median</th><th>Action</th></tr></thead><tbody>${ranked.slice(0,5).map(r=>{
+        const action=getRowActionState(modelRow(r,model)),own=BASKET_MODELS.get(r.symbol);
+        return `<tr><td>${escHtml(r.symbol)}</td><td>${show(modelScore(r,'tick'))}</td><td>${show(modelScore(r,'median'))}</td><td title="${escHtml(action.reason)}">${own===model?'In basket':own?'Basket: '+own:escHtml(action.state)}</td></tr>`;
+      }).join('')}</tbody></table></article>`;
+  };
+  const shared=ALL.filter(r=>meetsScoreBar(modelScore(r,'tick'))&&meetsScoreBar(modelScore(r,'median'))).length;
+  const feed=isEquitySession(now)?universePriceStaleness()||'Live feed':'Market closed';
+  host.innerHTML=`<div class="model-comparison-note">${escHtml(feed)} · same ${ALL.length} stocks · ${new Date(now).toLocaleTimeString('en-IN')} · ${shared} shared qualifying picks. Basket: ${BASKET_MODEL_MODE==='both'?'equal slots from both models':BASKET_MODEL_MODE==='none'?'both models off':BASKET_MODEL_MODE+' only'}.</div>
+    <div class="model-comparison-grid">${card('tick','Tick pressure','Existing directional-tick scorer; six price changes halve earlier influence.')}${card('median','Median path','Adaptive median of all observed prior-low/current-high paths clearing costs plus Rs100. Forward accuracy unvalidated.')}</div>
+    <div class="model-comparison-note">Executed return = realized net P&amp;L / entry capital of the shares actually sold. Uses Tradebook BUY and SELL fills and existing charge calculations, including DP where applicable. Open shares, unfilled signals and ambiguous model matches are excluded. Matching requires a recorded same-day export before the BUY, the same stock and sufficient exported quantity; Orders duplicates and hypothetical candle exits are never included.</div>`;
+}
+function computeModelAlloc(capital,selList){
   if(!(capital>0)||!selList.length) return {};
   const maxAlloc=getEffectiveMaxAlloc(),cap=Math.min(capital,maxAlloc>0?maxAlloc:capital);
   const spendable=Math.max(0,capital-BASKET_CASH_RESERVE_RS);
-  const memoKey=[capital,cap,BOOK_V,INTRADAY_STORE_V,Math.floor(Date.now()/1000),getEffectiveTgtPct(),RECOMMEND_MIN_SCORE,
-    selList.map(r=>[r.symbol,r.price,r.score,r.atr,r.slPct,r.rangePct,isStockEligible(r)].join(':')).join(',')].join('|');
+  const memoKey=[capital,cap,BOOK_V,INTRADAY_STORE_V,Math.floor(Date.now()/1000),getEffectiveTgtPct(),respectableProfitRs(),RECOMMEND_MIN_SCORE,
+    selList.map(r=>[r.symbol,r.price,r.score,r.atr,r.slPct,r.rangePct,r.basketModel,r.medianPath?.target,r.medianPath?.low,r.medianPath?.liveHigh,r.medianPath?.modelRevision,isStockEligible(r)].join(':')).join(',')].join('|');
   if(_allocMemo?.key===memoKey)return _allocMemo.val;
   const sorted=[...selList].sort((a,b)=>(b.score??-1)-(a.score??-1)||radarRankTieBreak(a,b));
   const result={},funded=[];
@@ -10032,20 +10422,21 @@ function computeAlloc(capital,selList){
   let remaining=spendable;
   for(const row of sorted){
     const price=getBuyPrice(row),maxQty=price>0?Math.floor(cap/price):0;
-    const minDebit=price>0?debit(price,MIN_ALLOCATION_SHARES):Infinity;
+    const minQty=minimumModelQuantity(row,price,maxQty);
+    const minDebit=minQty>0?debit(price,minQty):Infinity;
     const am={alloc:0,debit:0,qty:0,buyPrice:price,rejected:true};result[row.symbol]=am;
     if(!isStockEligible(row)){am.reason=getRowActionState(row).reason;continue;}
     if(!(price>0)){am.reason='No valid live price';continue;}
-    if(maxQty<MIN_ALLOCATION_SHARES||minDebit>remaining+0.001){
-      am.reason=`Minimum ${MIN_ALLOCATION_SHARES} shares costs ${fmtINR(minDebit)} including buy charges; `
+    if(!(minQty>0)){am.reason='Model target cannot cover charges plus '+fmtINR(respectableProfitRs())+' net within Max Allocation';continue;}
+    if(maxQty<minQty||minDebit>remaining+0.001){
+      am.reason=`Minimum profitable ${minQty} shares costs ${fmtINR(minDebit)} including buy charges; `
         +(maxQty<MIN_ALLOCATION_SHARES?`Max Allocation allows ${maxQty} shares`:`${fmtINR(remaining)} cash remains`);
       continue;
     }
-    Object.assign(am,{qty:MIN_ALLOCATION_SHARES,debit:minDebit,alloc:price*MIN_ALLOCATION_SHARES,rejected:false,limitReason:'tick score'});
+    Object.assign(am,{qty:minQty,debit:minDebit,alloc:price*minQty,rejected:false,limitReason:'model score',model:row.basketModel});
     remaining-=minDebit;funded.push({row,am,maxQty});
   }
-  // Reserve the ten-share minimum in score order, then distribute spare cash by score.
-  // Whole-share rounding and Max Allocation are the only limits on the remaining slices.
+  // Reserve each pick's minimum profitable quantity, then distribute spare cash by its own score.
   let active=funded.filter(x=>x.am.qty<x.maxQty);
   while(remaining>0&&active.length){
     const budget=remaining,total=active.reduce((sum,x)=>sum+Math.max(0,Number(x.row.score)||0),0);
@@ -10064,7 +10455,7 @@ function computeAlloc(capital,selList){
       x.am.qty++;x.am.debit=next;x.am.alloc=x.am.qty*x.am.buyPrice;
     }
   }
-  // Planning values are calculated only after funding; they cannot change quantity or admission.
+  // Recheck economics at the final whole-share size before either model can export.
   for(const {row,am} of funded){
     const policy=getRowExitPolicy(row,am.buyPrice,null,null,am.qty);
     am.exitPolicy=policy;am.stopDistancePct=policy?.stopPct;am.tgtPct=policy?.targetPct;
@@ -10074,7 +10465,11 @@ function computeAlloc(capital,selList){
     am.frictionKnown=!!(fr?.covered&&Number.isFinite(fr.entryPct)&&Number.isFinite(fr.exitPct));
     am.frictionRs=am.frictionKnown?am.alloc*Math.max(0,fr.entryPct+fr.exitPct)/100:null;
     am.charges=am.tgtPct>0?am.buyCharges+calcZerodhaCharges(am.buyPrice*(1+am.tgtPct/100),am.qty,true):null;
-    am.expectedNet=am.tgtPct>0?am.alloc*am.tgtPct/100-am.charges-(am.frictionRs||0):null;
+    const economics=modelNetEconomics(row,am.buyPrice,am.qty);
+    am.expectedNet=economics.net;am.tgtPct=economics.targetPct;
+    if(!(am.expectedNet>=respectableProfitRs())){
+      am.rejected=true;am.reason='Allocated quantity does not clear the minimum net profit';am.qty=0;am.alloc=0;am.debit=0;
+    }
   }
   _allocMemo={key:memoKey,val:result};
   return result;
@@ -10096,10 +10491,12 @@ function allocationSubline(am,unitLabel='shares'){
   const netStr=Number.isFinite(am?.expectedNet)
     ? ` · <b style="color:${am.expectedNet>=0?'var(--green)':'var(--red)'}">${am.expectedNet>=0?'+':''}${fmtINR(am.expectedNet)}</b>`
     : '';
-  const sizedBy=am?.limitReason==='tick score'
-    ? 'Sized by Rocket Score, with a minimum of 10 shares; available cash and Max Allocation bound sizing.'
+  const modelName=am?.model?MODEL_LABELS[am.model]:null;
+  const sizedBy=am?.limitReason==='model score'
+    ? (modelName?modelName+' picked this stock. ':'')+'Sized by its own model score; at least 10 shares and the active net-profit minimum, within cash and Max Allocation.'
     : 'Capped by the Max Allocation rail.';
-  return `<div style="font-size:11px;color:var(--t3);margin-top:1px;max-width:190px;overflow:hidden;text-overflow:ellipsis" title="${sizedBy}${riskTip}${netTip}">${am.qty}${unitShort}${am?.riskRs>0?` · r${fmtINR(am.riskRs)}`:''}${netStr}</div>`;
+  const modelTag=am?.model?`<b style="color:var(--t2);font-family:'DM Mono',monospace" title="${escHtml(MODEL_LABELS[am.model])}">${am.model==='tick'?'T':'M'}</b> · `:'';
+  return `<div style="font-size:11px;color:var(--t3);margin-top:1px;max-width:190px;overflow:hidden;text-overflow:ellipsis" title="${sizedBy}${riskTip}${netTip}">${modelTag}${am.qty}${unitShort}${am?.riskRs>0?` · r${fmtINR(am.riskRs)}`:''}${netStr}</div>`;
 }
 function recomputeAlloc(){
   applyFilters({preservePage:true});
@@ -10144,9 +10541,12 @@ function renderBasketBtn(){
     syncNote=' · Pending sync to Zerodha_Basket_Buy.json';
   }
 
+  const fundedRows=allocMap?selList.filter(x=>allocMap[x.symbol]?.qty>0):[];
+  const per=m=>fundedRows.filter(x=>allocMap[x.symbol]?.model===m).length;
+  const split=fundedRows.length?` · ${per('tick')} from Tick pressure, ${per('median')} from Median path`:'';
   buyBtn.title=buyCount===0
-    ? ('No selected score-eligible recommendation has an allocated quantity > 0.'+syncNote)
-    : ('Export selected stocks as Zerodha basket order'+syncNote);
+    ? (`No selected pick from ${enabledModelsLabel()} has an allocated quantity > 0.`+syncNote)
+    : (`Export selected stocks as Zerodha basket order${split}. Each order carries an RS_TICK or RS_MEDIAN tag naming the model that picked it.`+syncNote);
 }
 function renderBasketSummary(){
   const capital=getEffectiveCapital();
@@ -10219,6 +10619,7 @@ function radarSeriesBandPill(s){
 }
 
 function renderTable(){
+  renderModelComparison();
   renderLiveTapeBar();
   const capital=getEffectiveCapital();
   // Allocation only across SELECTED instruments
@@ -10251,7 +10652,7 @@ function renderTable(){
     const cellH={
       chk:`<td style="text-align:center"><input type="checkbox" ${isSelected?'checked':''} ${canBuy?'':'disabled'} style="width:14px;height:14px;accent-color:var(--amber);cursor:${canBuy?'pointer':'not-allowed'}" onclick="event.stopPropagation()" onchange="toggleStock('${s.symbol}',this.checked)" title="${checkTitle}"></td>`,
       rank:`<td style="font-family:'DM Mono',monospace;font-weight:800;color:var(--t1);text-align:right">${s.rank??'—'}</td>`,
-      score:`<td data-key="score">${radarScoreCell(s.score,radarScoreTitle(s),null,rowVetoReason(s))}</td>`,
+      score:`<td data-key="score">${dualScoreCell(s)}</td>`,
       // v1142: routed through symbolChartButton like every other table. This cell had built its own
       // TradingView link since v1070, so the "one symbol interaction everywhere" rule was true of the
       // panels and quietly false of the main table - which is why swapping to Zerodha missed it.
@@ -11474,6 +11875,7 @@ function livePriceAge(sym){
   return `<div style="font-size:10px;color:var(--t3)">${escHtml(f.priceSource||'stored price')}${age===null?'':` / ${age}s ago`} / refresh 30s</div>`;
 }
 function patchVisiblePrices(){
+  renderModelComparison();
   const rows = document.querySelectorAll('#tBody tr[data-sym]');
   if(!rows.length) return;
   const allMap = new Map(ALL.map(s => [s.symbol, s]));
@@ -11488,7 +11890,7 @@ function patchVisiblePrices(){
       }
       const scoreCell = tr.querySelector('td[data-key="score"]');
       if(scoreCell){
-        scoreCell.innerHTML = radarScoreCell(s.score, radarScoreTitle(s), null, rowVetoReason(s));
+        scoreCell.innerHTML = dualScoreCell(s);
       }
       const statusCell = tr.querySelector('td[data-key="status"]');
       if(statusCell){
@@ -12022,14 +12424,26 @@ function emptyBoardReason(){
     +(((document.getElementById('fMinScore')?.value||'').trim()==='')?' (default)':''));
   const dt=(document.getElementById('fDropThin')?.value||'').trim();
   if(!SHOW_INELIGIBLE&&dt&&Number(dt)>0) bits.push('thinnest '+escHtml(dt)+'% dropped');
-  const best=ALL.reduce((m,r)=>(r&&!r._held&&Number.isFinite(Number(r.score))&&Number(r.score)>m)?Number(r.score):m,0);
+  const perModel=['tick','median'].map(m=>{
+    const scored=ALL.filter(r=>r&&!r._held&&Number.isFinite(Number(modelScore(r,m))));
+    const best=scored.reduce((x,r)=>Math.max(x,Number(modelScore(r,m))),-Infinity);
+    const over=scored.filter(r=>meetsScoreBar(modelScore(r,m))).length;
+    return MODEL_LABELS[m]+(modelEnabled(m)?'':' (off)')+': '
+      +(scored.length?'best '+best.toFixed(1)+', '+over+' above the bar':'nothing scored yet');
+  }).join(' · ');
   const removedSummary=Object.entries(REMOVED_ROWS.reduce((m,r)=>{m[r.reason]=(m[r.reason]||0)+1;return m},{}))
     .map(([k,v])=>k==='surv'?v+' surveillance':k==='trigger'?v+' evidence vetoes':k==='filter'?v+' user-filter matches':k==='allocation'?v+' not allocatable':v+' '+k).join(' · ');
-  return (SHOW_INELIGIBLE?'No rows match the current search':'No funded actionable recommendations')+(bits.length?': '+bits.join(' \u00b7 '):'')
+  // A basket slot needs a funded pick from EACH enabled model, so name that before the raw counts.
+  const splitNote=BASKET_MODEL_MODE==='none'
+    ? ' — both models are switched off, so nothing can be funded. Switch one on in the model comparison above.'
+    : BASKET_MODEL_MODE==='both'
+      ? ' — basket slots are split equally, so a slot needs a funded pick from each model; every order must also clear at least 10 shares plus charges and the minimum net profit.'
+      : ' — only '+MODEL_LABELS[BASKET_MODEL_MODE]+' is switched on; every order must clear at least 10 shares plus charges and the minimum net profit.';
+  return (SHOW_INELIGIBLE?'No rows match the current search':'No funded actionable recommendations from '+enabledModelsLabel())+(bits.length?': '+bits.join(' · '):'')
     +'.<br><span style="font-size:12px">'+total.toLocaleString('en-IN')
-    +' stocks are ranked and the best scores '+best.toFixed(1)
+    +' stocks are ranked · '+escHtml(perModel)
     +(removedSummary?' · removed breakdown: '+escHtml(removedSummary):'')
-    +(SHOW_INELIGIBLE?'':' \u2014 ineligible rows include rule-blocked and unfunded candidates; a high score alone does not authorise a buy.')+'</span>';
+    +(SHOW_INELIGIBLE?'':splitNote)+'</span>';
 }
 const LIVE_TAPE_TIME_FMT=new Intl.DateTimeFormat('en-IN',{
   timeZone:'Asia/Kolkata',hour:'2-digit',minute:'2-digit',second:'2-digit',hour12:false
@@ -12305,7 +12719,10 @@ function showRadarDetail(sym){
   document.getElementById('radarDetailTitle').innerHTML=`${escHtml(r.symbol)}${chartLinkButtons(r.symbol)} · <span style="color:${radarScoreColor(r.score)}">${isFinite(r.score)?Number(r.score).toFixed(1):'—'}</span> · ${escHtml(r.risk||'—')} risk`;
   const act=getRowActionState(r);
   const decisionAction=`<b style="color:${act.state==='GO'?'var(--green)':act.state==='BLOCKED'?'var(--red)':'var(--amber)'}">${act.state}:</b> ${escHtml(act.reason||'')}.`;
-  const decisionRead=`<div class="rr-read" style="margin-bottom:10px"><b>What to do now:</b> ${decisionAction}<br><b>Rocket Score:</b> ${escHtml(radarScoreTitle(r))}</div>`;
+  const ownModel=basketModelOf(r.symbol);
+  const decisionRead=`<div class="rr-read" style="margin-bottom:10px"><b>What to do now:</b> ${decisionAction}`
+    +(ownModel?` ${modelBadgeHtml(ownModel,'It owns this stock\u2019s basket slot.')}`:'')
+    +`<br><b>Scores:</b> ${escHtml(radarScoreTitle(r))}</div>`;
   const groups=Object.entries(RADAR_GROUPS).map(([k,g])=>`<div class="rr-group"><b>${g.label}<i>${r.parts?fmt(r.parts[k],0):'—'}/100</i></b><meter min="0" max="100" value="${r.parts?.[k]??0}"></meter></div>`).join('');
   const contribs=[...(r.contrib||[])].sort((a,b)=>Math.abs(b.impact)-Math.abs(a.impact)).slice(0,36).map(x=>`<div class="rr-contrib"><div><b>${escHtml(x.name)}</b><small>${RADAR_GROUPS[x.group]?.label||x.group} · percentile ${fmt(x.p*100,0)}</small></div><b class="${x.impact>=0?'pos':'neg'}">${x.impact>=0?'+':''}${fmt(x.impact,3)}</b></div>`).join('');
   const gate=r.rocketReady?'Meets the model’s high-feasibility criteria.':'Feasibility cautions: '+escHtml((r.gateReasons||[]).join(', ')||'not evaluated')+'.';
@@ -12328,27 +12745,40 @@ function showRadarDetail(sym){
   const bandNote=r.meta?.bandNote?` ${escHtml(r.meta.bandNote)}.`:'';
   const masterNote=r.meta?.securityMaster?` ISIN ${escHtml(r.meta.securityMaster.isin||'—')}${r.meta.securityMaster.listingDate?`, listed ${escHtml(r.meta.securityMaster.listingDate)}`:''}.`:'';
   const detailNote=(r.contrib||[]).length?'':'<div style="color:var(--amber);font-size:13px;margin-bottom:8px">Restored compact ranking — load files again for the full per-feature breakdown.</div>';
-  // v1367: the Rocket Score is the only decision metric, so it is the only thing explained as one.
-  // Everything below it is descriptive context and says so.
+  // Both models are decision metrics, so both are explained as one and the stock says which model
+  // funded it. Everything below them is descriptive context and says so.
   const tc=r.scoreComponents||{};
-  const tapeRead=`<div class="rr-read"><b>Rocket Score ${tc.total!=null?Number(tc.total).toFixed(1):'—'}</b>
-    = 50 × (1 + S)${tc.S!=null?`, S = ${Number(tc.S).toFixed(4)}`:''}${tc.tick!=null?`; last directional tick ${(tc.tick>=0?'+':'')+Number(tc.tick).toFixed(2)}`:''}.<br>
-    Each price change counts +1 if above the previous price, -1 if below. Unchanged prices leave S unchanged.
-    Each directional tick applies S = 0.891 &times; S + 0.109 &times; direction, in order, with a six-directional-tick half-life.
-    S carries over from the previous session; ten-second history snapshots do not change it.
-    No indicator, volume or price size enters it. Surveillance, series/band, the circuit and a live price feed
-    decide whether the row can be bought; they never change the number.</div>`;
+  const own=ownModel;
+  const mp=r.medianPath||{};
+  const num=v=>Number.isFinite(Number(v))?Number(v).toFixed(1):'—';
+  const tapeRead=`<div class="rr-read"><b>Two scorers, run independently on the same stock.</b>
+    ${own?`This stock currently occupies the <b style="color:var(--green)">${MODEL_LABELS[own]}</b> basket slot.`
+        :'Neither model has funded this stock in the current basket.'}
+    Switched on: ${escHtml(enabledModelsLabel())}.<br>
+    <b>Tick pressure ${num(tc.pressure)}${modelEnabled('tick')?'':' (off)'}</b> = 50 &times; (1 + S). Every last-traded price
+    counts +1 if above the previous print, -1 if below; unchanged prices leave S unchanged. Each directional tick
+    applies S = 0.891 &times; S + 0.109 &times; direction, in order, with a six-directional-tick half-life. S carries
+    over from the previous session. No indicator, volume or price size enters it.<br>
+    <b>Median path ${num(tc.median)}${modelEnabled('median')?'':' (off)'}</b> compares this stock's completed path since its
+    observed prior-session low against the median path of every stock whose own observed low-to-high move would have
+    covered costs plus the minimum net profit. Closer to that shape and further through it scores higher.
+    ${mp.phase!=null?`Phase ${(100*mp.phase).toFixed(1)}% of a ${Math.round(mp.durationMinutes||0)}-trading-minute template, ${Math.round(mp.delayMinutes||0)} minutes since the low, coverage ${(100*(mp.coverage||0)).toFixed(0)}%.`:''}
+    ${mp.block?`<span style="color:var(--amber)">${escHtml(mp.block)}.</span>`:''}
+    It reads completed observations only; no future high, low or duration is known, and the similarity is not a
+    probability of profit.<br>
+    Surveillance, series/band, the circuit, market breadth, depth and a live price feed decide whether the row can be
+    bought. None of them changes either number.</div>`;
   document.getElementById('radarDetailBody').innerHTML=`${detailNote}${decisionRead}${tapeRead}
     <h3 style="font-size:15px;margin:14px 0 4px">Setup &amp; risk context</h3>
-    <div style="font-size:12px;color:var(--t3);margin-bottom:8px">Descriptive only: these bars set the Setup label and Risk pill. They do not enter the Rocket Score.</div>
+    <div style="font-size:12px;color:var(--t3);margin-bottom:8px">Descriptive only: these bars set the Setup label and Risk pill. They enter neither model score.</div>
     <div class="rr-groups">${groups}</div>
     <div class="rr-read"><b>Exchange check:</b> Series ${escHtml(r.series||'—')}, price band ${r.band??'not supplied'}, status ${escHtml(r.status||'—')}; basket ${r.basketEligible!==false?'eligible':'ineligible'}. Official delivery ${r.meta?.delivery==null?'unavailable':fmt(r.meta.delivery,1)+'%'}, trades ${r.meta?.trades==null?'unavailable':fmt(r.meta.trades,0)}, surveillance triggers: ${flags}.${bandNote}${varNote}${masterNote}${corpNote}${triggerNote}<br>
     <b>Feasibility:</b> ${gate} Strongest daily range estimate ${fmt(r.rangePct,2)}%; the session target takes ${fmt(r.stretch,2)}× that range. The stock remains ranked either way.${entryNote}<br>
     ${r.stage?`<b>Market-cycle stage:</b> ${radarStagePill(r)} — ${escHtml({1:'silent accumulation (quiet strength before a move)',2:'initial breakout',3:'event day (move may be event-driven)',4:'profit-booking (digesting a recent result)',5:'re-accumulation',6:'second leg'}[r.stage]||'')}.<br>`:''}
-    <b>Read:</b> ${escHtml(r.setup||'—')}. Data coverage ${r.quality!=null?fmt(r.quality*100,0)+'%':'—'}, day move ${(r.day??0)>=0?'+':''}${fmt(r.day,2)}%, relative volume ${r.relvol==null?'unavailable':fmt(r.relvol,2)+'×'}, turnover ${fV(r.turnover)}. The Rocket Score measures move direction only; it is not a probability and not an expected return.</div>
+    <b>Read:</b> ${escHtml(r.setup||'—')}. Data coverage ${r.quality!=null?fmt(r.quality*100,0)+'%':'—'}, day move ${(r.day??0)>=0?'+':''}${fmt(r.day,2)}%, relative volume ${r.relvol==null?'unavailable':fmt(r.relvol,2)+'×'}, turnover ${fV(r.turnover)}. Neither model score is a probability or an expected return.</div>
     ${contribs?`<h3 style="font-size:16px;margin:12px 0 4px">Largest feature contributions</h3>
       <div style="font-size:12px;color:var(--t3);margin-bottom:8px">Diagnostic only — these explain the
-        setup and risk classification above, not the Rocket Score.</div>
+        setup and risk classification above, and neither model score.</div>
       <div class="rr-contribs">${contribs}</div>`:''}`;
   dlg.showModal();
 }
@@ -12401,7 +12831,7 @@ function renderStatusBar(){
       const spread=risks.length>1?`${fmtINR(risks[0])}–${fmtINR(risks.at(-1))}`:fmtINR(risks[0]);
       const budget=getEffectiveRiskPerTrade();
       const budgetLbl='';
-      html+=` <span style="color:var(--cyan);font-size:13px;font-family:'DM Mono',monospace;font-weight:700;margin-left:8px" title="Total rupees at risk if every position in this basket hits its own stop — ${spread} per position across ${risks.length}. Positions are sized by Rocket Score with at least 10 shares; stop risk is reported only.${budgetLbl}">· 🛡 ${fmtINR(totalRisk)} at risk (${riskPct.toFixed(1)}% of capital) · ${spread}/trade</span>`;
+      html+=` <span style="color:var(--cyan);font-size:13px;font-family:'DM Mono',monospace;font-weight:700;margin-left:8px" title="Total rupees at risk if every position in this basket hits its own stop — ${spread} per position across ${risks.length}. Positions are sized by their own model score with at least 10 shares; stop risk is reported only.${budgetLbl}">· 🛡 ${fmtINR(totalRisk)} at risk (${riskPct.toFixed(1)}% of capital) · ${spread}/trade</span>`;
     }
     // Expected net uses each stock's own capacity-aware target. The Harvest/goal/manual
     // value is an anchor only; it is never pasted uniformly onto every selected row.
@@ -13391,13 +13821,9 @@ function calcZerodhaChargesSplit(price, qty, isSell, isIntraday, skipDp){
 }
 
 function planBasketExport(capital, selected){
-  // Recheck live eligibility and preserve the allocator's quantities; no one-share fallback.
-  const exportList=(selected||[]).filter(s=>s&&s.symbol&&isSelectableRecommendation(s)).slice(0,20);
-  const basketAlloc=computeAlloc(capital,exportList);
-  return {exportList,basketAlloc,orderCount:exportList.length,timingBlocked:false,timing:null};
+  const plan=planDualBasket(selected||[],capital);
+  return {exportList:plan.rows,basketAlloc:plan.alloc,orderCount:plan.rows.length,timingBlocked:false,timing:null};
 }
-
-
 function buildBasketOrders(capital, selList){
   const {exportList,basketAlloc}=planBasketExport(capital,selList);
   const orders=[];
@@ -13433,9 +13859,9 @@ function buildBasketOrders(capital, selList){
         triggerPrice:0,disclosedQuantity:0,lastPrice:Number(s.price)||0,
         variety:'regular',
         ...(targetPct>0 ? {gtt:{target:targetPct}} : {}),
-        tags:targetPct>0 ? ['TGT'] : []
+        tags:[...(targetPct>0?['TGT']:[]),'RS_'+s.basketModel.toUpperCase()]
       },
-      _meta:{leg:leg||'base',sym,targetPct,fullQty:null}
+      _meta:{leg:leg||'base',sym,targetPct,fullQty:null,model:s.basketModel,modelScores:s.modelScores}
     });
   };
   exportList.forEach(s=>{
@@ -13461,7 +13887,8 @@ function getCanonicalBasketSignature(orders){
     prod: o.params?.product || 'CNC',
     px: Number(o.params?.price) || 0,
     tgt: Number(o.params?.gtt?.target) || 0,
-    tags: Array.isArray(o.params?.tags) ? [...o.params.tags].sort().join(',') : ''
+    tags: Array.isArray(o.params?.tags) ? [...o.params.tags].sort().join(',') : '',
+    model:o._meta?.model||''
   })).sort((a, b) => a.sym.localeCompare(b.sym) || a.qty - b.qty);
   return JSON.stringify(clean);
 }
@@ -13529,6 +13956,7 @@ async function _drainBasketQueue(preferredOrders = null){
     const payload = orders.map(o => { const c = { ...o }; delete c._meta; return c; });
     await saveBasketToScannerUploads(payload, 'Zerodha_Basket_Buy');
     writeOk = true;
+    recordModelBasketExport(orders);
     _lastSavedBasketSig = targetSig;
     _lastSavedBasketAt = Date.now();
     _lastBasketSyncError = null;
@@ -13772,7 +14200,7 @@ function compactRankingRows(rows){
   return (rows||[]).map(s=>({
     symbol:s.symbol,name:s.name,sector:s.sector,
     price:s.price,day:s.day,priceChange:s.priceChange,
-    score:s.score,scoreVersion:s.scoreVersion||RADAR_SCORE_VERSION,scoreComponents:s.scoreComponents||null,scorePriors:s.scorePriors||null,rocketScore:s.rocketScore,rank:s.rank,
+    score:s.score,modelScores:s.modelScores||null,medianPath:s.medianPath||null,scoreVersion:s.scoreVersion||RADAR_SCORE_VERSION,scoreComponents:s.scoreComponents||null,scorePriors:s.scorePriors||null,rocketScore:s.rocketScore,rank:s.rank,
     predictiveLevel:s.predictiveLevel??null,predictiveRaw:s.predictiveRaw??null,predictiveSessions:s.predictiveSessions??0,predictiveModel:s.predictiveModel||null,
     setup:s.setup,risk:s.risk,series:s.series,band:s.band??null,status:s.status,
     basketEligible:s.basketEligible!==false,eqEligible:s.eqEligible!==false,

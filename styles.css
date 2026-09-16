@@ -316,3 +316,21 @@ dialog#radarDetail::backdrop{background:rgba(2,5,7,.87)}
 @media(max-width:700px){.rr-groups,.rr-contribs,.rr-diag{grid-template-columns:1fr}}
 @media(prefers-reduced-motion:reduce){*{animation:none!important;transition:none!important}}
 @keyframes rsspin{to{transform:rotate(360deg)}}
+/* Both scorers observe the same universe. Stack the comparison on narrow screens. */
+#modelComparison{margin:12px 0}
+.model-comparison-grid{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+.model-comparison-card{background:var(--bg-card);border:1px solid var(--border);border-radius:10px;padding:14px;min-width:0}
+.model-comparison-card h3{margin:0 0 8px;font-size:15px}
+.model-toggle{display:flex;align-items:center;gap:8px;cursor:pointer}
+.model-toggle input{accent-color:var(--green);width:16px;height:16px;margin:0}
+.model-comparison-card table{width:100%;font-size:12px;border-collapse:collapse}
+.model-comparison-card td,.model-comparison-card th{padding:5px;text-align:left;border-bottom:1px solid var(--border)}
+.model-comparison-note{font-size:12px;color:var(--t3);margin:8px 0;line-height:1.5}
+.model-performance-score{display:flex;align-items:baseline;justify-content:space-between;gap:12px;margin:10px 0;padding:10px;background:var(--bg);border:1px solid var(--border);border-radius:6px}
+.model-performance-score small{color:var(--t3);font-size:10px}
+.model-performance-score b{font-size:20px;color:var(--green);white-space:nowrap}
+@media(max-width:760px){.model-comparison-grid{grid-template-columns:1fr}}
+/* The model that actually funded a basket slot, named wherever a pick is shown. */
+.model-badge{display:inline-block;font-size:10px;font-weight:800;letter-spacing:.02em;border-radius:4px;padding:1px 6px;vertical-align:middle;white-space:nowrap}
+.model-badge-tick{background:rgba(56,189,248,.15);color:var(--cyan)}
+.model-badge-median{background:rgba(34,197,94,.15);color:var(--green)}
