@@ -192,10 +192,65 @@
     };
   }
 
+  /**
+   * Composite scoring function (0 to 100) based on 3-Tier criteria
+   * @param {Object} stock - Stock data
+   * @param {Object} book - Live order-book data
+   * @returns {number} Score from 0 to 100
+   */
+  function scoreStock(stock, book = null) {
+    if (!stock) return 0;
+    const ltp = Number(stock.ltp || stock.price || stock.c || 0);
+    const dayHigh = Number(stock.high || stock.dayHigh || stock.h || ltp);
+    const dayOpen = Number(stock.open || stock.dayOpen || stock.o || 0);
+    const volume = Number(stock.volume || stock.v || 0);
+    const turnover = Number(stock.turnover || (ltp * volume) || 0);
+    const avgVol10 = Number(stock.avgVol10 || stock.av10 || 0);
+
+    // Basic price filter
+    if (ltp < CONFIG.MIN_PRICE || ltp > CONFIG.MAX_PRICE) return 0;
+
+    // Liquidity base
+    let score = 50;
+    if (turnover >= CONFIG.MIN_TURNOVER || avgVol10 >= CONFIG.MIN_AVG_VOLUME) {
+      score += 10;
+    }
+
+    // Trend alignment (above open)
+    if (dayOpen > 0 && ltp > dayOpen) {
+      score += 10;
+    } else if (dayOpen > 0 && ltp < dayOpen) {
+      return 25; // below open: penalized
+    }
+
+    // High proximity (up to +20 points)
+    const distToHighPct = dayHigh > 0 ? ((dayHigh - ltp) / ltp) * 100 : 0;
+    if (distToHighPct <= CONFIG.MAX_HIGH_DISTANCE_PCT) {
+      const proxScore = Math.max(0, Math.round(20 * (1 - (distToHighPct / CONFIG.MAX_HIGH_DISTANCE_PCT))));
+      score += proxScore;
+    }
+
+    // Order book depth (up to +10 points)
+    if (book) {
+      const buyQty = Number(book.buyQty || book.totalBidQty || 0);
+      const sellQty = Number(book.sellQty || book.totalAskQty || 0);
+      if (buyQty > 0 && sellQty > 0) {
+        if (buyQty > sellQty) {
+          const depthRatio = buyQty / (buyQty + sellQty);
+          score += Math.round(depthRatio * 10);
+        }
+      }
+    }
+
+    return Math.min(100, Math.max(0, score));
+  }
+
   return {
     CONFIG,
     filterUniverse,
     evaluateTrigger,
-    evaluateExit
+    evaluateExit,
+    scoreStock
   };
 }));
+
