@@ -1,6 +1,6 @@
-const BUILD_TS='2026-09-16 13:30 IST'; // release build time (IST)
-const APP_VERSION=1387;
-const RADAR_SCORE_VERSION='v1387-strategy-3tier'; // 3-Tier Strategy Engine based on Gold Nugget findings.
+const BUILD_TS='2026-09-16 13:35 IST'; // release build time (IST)
+const APP_VERSION=1388;
+const RADAR_SCORE_VERSION='v1388-strategy-3tier'; // 3-Tier Strategy Engine based on Gold Nugget findings.
 
 // ── v1358: AN UNCAUGHT ERROR MUST NAME ITSELF ─────────────────────────────────────────────────
 // This is the class of defect that has cost the most sessions in this app's history, and until now
@@ -3619,7 +3619,9 @@ function setRadarEvidenceScore(r){
     const tick=rocketPressureOf(r.symbol);
     sc=Number.isFinite(tick)?tick:50;
   }
-  r.score=sc;r.rocketScore=sc;r.scoreVersion=RADAR_SCORE_VERSION;
+  r.score=sc;
+  r.rocketScore=sc;
+  r.scoreVersion=RADAR_SCORE_VERSION;
   r.modelScores={strategy:sc,tick:sc,median:sc};
   r.scoreComponents={total:sc,permission:1,source:'strategy',block:null};
   return sc;
@@ -8632,6 +8634,8 @@ function renderPerformance(){
         <div><div class="st-l">Reached target</div><div class="st-v" style="font-size:19px;color:${sc.hitPct>=40?'var(--green)':sc.hitPct>=20?'var(--amber)':'var(--red)'}">${sc.hitPct}%</div><div class="st-d">${sc.target} picks</div></div>
         <div><div class="st-l">Stopped first</div><div class="st-v" style="font-size:19px;color:${sc.stopped?'var(--red)':'var(--green)'}">${sc.stopPct}%</div><div class="st-d">${sc.stopped} picks — dipped to stop before target</div></div>
         <div><div class="st-l">Never moved</div><div class="st-v" style="font-size:19px;color:var(--amber)">${sc.expiredPct}%</div><div class="st-d">${sc.expired} picks — neither barrier in ${ROCKET_HORIZON_DAYS} days</div></div>
+        <div title="For the current score version only: on the SAME issue session, did a target-hitter have a higher score than a non-winner, on the model that issued it? 50% means the score ordering carries no information."><div class="st-l">Score concordance</div><div class="st-v" style="font-size:19px;color:${sc.concordancePct==null?'var(--t3)':sc.concordancePct>=60?'var(--green)':sc.concordancePct>=52?'var(--amber)':'var(--red)'}">${sc.concordancePct==null?'—':sc.concordancePct+'%'}</div><div class="st-d">${sc.concordancePairs} current-version 
+... [truncated for diff preview]
         <div title="For the current score version only: on the SAME issue session, did a target-hitter have a higher score than a non-winner, on the model that issued it? 50% means the score ordering carries no information."><div class="st-l">Score concordance</div><div class="st-v" style="font-size:19px;color:${sc.concordancePct==null?'var(--t3)':sc.concordancePct>=60?'var(--green)':sc.concordancePct>=52?'var(--amber)':'var(--red)'}">${sc.concordancePct==null?'—':sc.concordancePct+'%'}</div><div class="st-d">${sc.concordancePairs} current-version winner/loser pairs · 50% = no information</div></div>
         <div><div class="st-l">Time to target</div><div class="st-v" style="font-size:19px">${sc.medDaysToTarget==null?'—':(sc.medDaysToTarget===0?'same day':sc.medDaysToTarget+'d')}</div><div class="st-d">${sc.sameDay} same day · ${sc.nextDay} next day</div></div>
       </div>`
