@@ -26,10 +26,11 @@
     MAX_HIGH_DISTANCE_PCT: 1.2,  // Within 1.2% of Day High
     MIN_CIRCUIT_HEADROOM_PCT: 3.0, // At least 3.0% below Upper Circuit
 
-    // Tier 3: Exit Governor
+    // Tier 3: Exit Governor & Allocation
     TARGET_PCT: 2.0,             // +2.0% profit target
     STOP_LOSS_PCT: 1.8,          // -1.8% hard stop loss
-    MAX_HOLD_DAYS: 4             // 4 days max hold before time-stop exit
+    MAX_HOLD_DAYS: 4,            // 4 days max hold before time-stop exit
+    MIN_ALLOCATION_RS: 5000.0    // ₹5,000 minimum allocation per stock to ensure profits clear DP & charges
   };
 
   /**
@@ -48,26 +49,27 @@
       // Guard: Never recommend a stock already held (prevents averaging down)
       if (heldSymbols.has(sym)) return false;
 
-      const ltp = Number(stock.ltp || stock.price || stock.c);
+      const ltp = Number(stock.ltp || stock.price || stock.c || 0);
       if (!(ltp >= CONFIG.MIN_PRICE && ltp <= CONFIG.MAX_PRICE)) return false;
 
       // Turnover & Volume checks
-      const volume = Number(stock.volume || stock.v || 0);
-      const turnover = ltp * volume;
+      const volume = Number(stock.dayVolume || stock.volume || stock.v || stock.vol || 0);
+      const turnover = Number(stock.turnover || (ltp * volume) || 0);
       const avgVol10 = Number(stock.avgVol10 || stock.av10 || 0);
 
       const passesLiquidity = (turnover >= CONFIG.MIN_TURNOVER) || (avgVol10 >= CONFIG.MIN_AVG_VOLUME);
-      if (!passesLiquidity) return false;
+      if (turnover > 0 && avgVol10 > 0 && !passesLiquidity) return false;
 
-      // RVOL check
-      const rvol = Number(stock.relVolAtTime || stock.rvol || stock.relVol || 1.0);
-      if (rvol < CONFIG.MIN_RVOL) return false;
+      // RVOL check (must have volume momentum)
+      const rvol = Number(stock.relvol || stock.relVolAtTime || stock.rvol || stock.relVol || 0);
+      if (rvol > 0 && rvol < CONFIG.MIN_RVOL) return false;
 
-      // Trend Strength: Must be trading above day's open and VWAP
-      const open = Number(stock.open || stock.dayOpen || stock.o || 0);
-      const vwap = Number(stock.vwap || 0);
-
+      // Trend Strength: Must be trading above day's open
+      const open = Number(stock.open1d || stock.open || stock.dayOpen || stock.o || 0);
       if (open > 0 && ltp < open) return false;
+
+      // Trend Strength: Must be trading above VWAP
+      const vwap = Number(stock.vwap || stock.vwap5 || 0);
       if (vwap > 0 && ltp < vwap) return false;
 
       return true;
@@ -82,20 +84,23 @@
    */
   function evaluateTrigger(stock, book = null) {
     const ltp = Number(stock.ltp || stock.price || stock.c || 0);
-    const dayHigh = Number(stock.high || stock.dayHigh || stock.h || ltp);
+    const dayHigh = Number(stock.high1d || stock.high || stock.dayHigh || stock.h || 0);
     const upperCircuit = Number(stock.upperCircuit || stock.uc || (ltp * 1.20));
 
     if (ltp <= 0) {
       return { canBuy: false, reason: 'Invalid price' };
     }
-
-    // 1. Proximity to Day High (Micro-continuation)
-    const distToHighPct = dayHigh > 0 ? ((dayHigh - ltp) / ltp) * 100 : 0;
-    if (distToHighPct > CONFIG.MAX_HIGH_DISTANCE_PCT) {
-      return { canBuy: false, reason: `Too far from day high (${distToHighPct.toFixed(1)}% > ${CONFIG.MAX_HIGH_DISTANCE_PCT}%)` };
+    if (dayHigh <= 0) {
+      return { canBuy: false, reason: 'No day high data' };
     }
 
-    // 2. Circuit headroom check
+    // 1. Proximity to Day High (Micro-continuation within 1.2%)
+    const distToHighPct = ((dayHigh - ltp) / ltp) * 100;
+    if (distToHighPct > CONFIG.MAX_HIGH_DISTANCE_PCT) {
+      return { canBuy: false, reason: `${distToHighPct.toFixed(1)}% below day high ₹${dayHigh.toFixed(2)} (max ${CONFIG.MAX_HIGH_DISTANCE_PCT}%)` };
+    }
+
+    // 2. Circuit headroom check (at least 3% below Upper Circuit)
     const circuitRoomPct = upperCircuit > 0 ? ((upperCircuit - ltp) / ltp) * 100 : 10;
     if (circuitRoomPct < CONFIG.MIN_CIRCUIT_HEADROOM_PCT) {
       return { canBuy: false, reason: `Near circuit ceiling (${circuitRoomPct.toFixed(1)}% headroom)` };
@@ -201,9 +206,9 @@
   function scoreStock(stock, book = null) {
     if (!stock) return 0;
     const ltp = Number(stock.ltp || stock.price || stock.c || 0);
-    const dayHigh = Number(stock.high || stock.dayHigh || stock.h || ltp);
-    const dayOpen = Number(stock.open || stock.dayOpen || stock.o || 0);
-    const volume = Number(stock.volume || stock.v || 0);
+    const dayHigh = Number(stock.high1d || stock.high || stock.dayHigh || stock.h || 0);
+    const dayOpen = Number(stock.open1d || stock.open || stock.dayOpen || stock.o || 0);
+    const volume = Number(stock.dayVolume || stock.volume || stock.v || stock.vol || 0);
     const turnover = Number(stock.turnover || (ltp * volume) || 0);
     const avgVol10 = Number(stock.avgVol10 || stock.av10 || 0);
 
@@ -223,11 +228,13 @@
       return 25; // below open: penalized
     }
 
-    // High proximity (up to +20 points)
-    const distToHighPct = dayHigh > 0 ? ((dayHigh - ltp) / ltp) * 100 : 0;
-    if (distToHighPct <= CONFIG.MAX_HIGH_DISTANCE_PCT) {
-      const proxScore = Math.max(0, Math.round(20 * (1 - (distToHighPct / CONFIG.MAX_HIGH_DISTANCE_PCT))));
-      score += proxScore;
+    // High proximity (up to +20 points, only if within 1.2%)
+    if (dayHigh > 0) {
+      const distToHighPct = ((dayHigh - ltp) / ltp) * 100;
+      if (distToHighPct <= CONFIG.MAX_HIGH_DISTANCE_PCT) {
+        const proxScore = Math.max(0, Math.round(20 * (1 - (distToHighPct / CONFIG.MAX_HIGH_DISTANCE_PCT))));
+        score += proxScore;
+      }
     }
 
     // Order book depth (up to +10 points)

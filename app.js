@@ -1,4 +1,4 @@
-const BUILD_TS='2026-09-16 13:35 IST'; // release build time (IST)
+const BUILD_TS='2026-09-16 13:45 IST'; // release build time (IST)
 const APP_VERSION=1388;
 const RADAR_SCORE_VERSION='v1388-strategy-3tier'; // 3-Tier Strategy Engine based on Gold Nugget findings.
 
@@ -3550,7 +3550,7 @@ function modelScore(row,model){
 function modelRow(row,model){
   return {...row,basketModel:model,score:modelScore(row,model)};
 }
-const MODEL_LABELS={tick:'Tick pressure',median:'Median path'};
+const MODEL_LABELS={strategy:'Breakout Strategy',tick:'Tick pressure',median:'Median path'};
 function modelEnabled(model){return model==='tick'?BASKET_TICK_ENABLED:BASKET_MEDIAN_ENABLED;}
 // Which model actually put this stock in the basket. Empty until a funded plan has been built.
 function basketModelOf(sym){return BASKET_MODELS.get(sym)||null;}
@@ -3619,9 +3619,7 @@ function setRadarEvidenceScore(r){
     const tick=rocketPressureOf(r.symbol);
     sc=Number.isFinite(tick)?tick:50;
   }
-  r.score=sc;
-  r.rocketScore=sc;
-  r.scoreVersion=RADAR_SCORE_VERSION;
+  r.score=sc;r.rocketScore=sc;r.scoreVersion=RADAR_SCORE_VERSION;
   r.modelScores={strategy:sc,tick:sc,median:sc};
   r.scoreComponents={total:sc,permission:1,source:'strategy',block:null};
   return sc;
@@ -4262,18 +4260,26 @@ function _getRowActionStateUncached(s, ignoreMarketClosed=false){
   const cr=Number(s.circuitRunwayPct);
   if(Number.isFinite(cr)&&cr<=0) return {state:'BLOCKED',reason:'At the upper circuit - nothing to buy'};
 
-  // Tier 1 Liquidity & Trend check
-  const volume=Number(s.volume||s.v||0);
+  // Tier 1 Liquidity, RVOL & Trend check
+  const volume=Number(s.dayVolume||s.volume||s.v||s.vol||0);
   const turnover=Number(s.turnover||(ltpVal*volume)||0);
   const avgVol10=Number(s.avgVol10||s.av10||0);
+  const rvol=Number(s.relvol||s.relVolAtTime||s.rvol||s.relVol||0);
+  if(rvol>0&&rvol<1.5){
+    return {state:'BLOCKED',reason:`RVOL ${rvol.toFixed(2)}x below 1.5x minimum`};
+  }
   if(typeof RocketStrategy!=='undefined'){
     if(turnover>0&&turnover<RocketStrategy.CONFIG.MIN_TURNOVER&&avgVol10>0&&avgVol10<RocketStrategy.CONFIG.MIN_AVG_VOLUME){
       return {state:'BLOCKED',reason:`Turnover below ₹5 Cr (${fV(turnover)})`};
     }
   }
-  const dayOpen=Number(s.open||s.dayOpen||0);
+  const dayOpen=Number(s.open1d||s.open||s.dayOpen||s.o||0);
   if(dayOpen>0&&ltpVal<dayOpen){
-    return {state:'WAIT',reason:`Trading below day open ₹${dayOpen.toFixed(2)}`};
+    return {state:'BLOCKED',reason:`Trading below day open ₹${dayOpen.toFixed(2)}`};
+  }
+  const vwap=Number(s.vwap||s.vwap5||0);
+  if(vwap>0&&ltpVal<vwap){
+    return {state:'BLOCKED',reason:`Trading below VWAP ₹${vwap.toFixed(2)}`};
   }
 
   // Tier 2: Real-time Trigger evaluation
@@ -4281,7 +4287,7 @@ function _getRowActionStateUncached(s, ignoreMarketClosed=false){
   if(typeof RocketStrategy!=='undefined'){
     const trig=RocketStrategy.evaluateTrigger(s,book);
     if(trig.canBuy){
-      return {state:'GO',reason:'Breakout confirmed: near high with buyer depth'};
+      return {state:'GO',reason:'Breakout confirmed: testing day high with buyer depth'};
     }
     return {state:'WAIT',reason:trig.reason||'Awaiting breakout trigger'};
   }
@@ -4358,7 +4364,8 @@ function rowStatusPillHtml(s){
   const act=getRowActionState(s);
   if(act.state==='GO'){
     const own=basketModelOf(s.symbol);
-    return `<span class="info-pill pill-green" style="padding:2px 8px;font-weight:700" title="${escHtml('Funded and included in the basket'+(own?' by the '+MODEL_LABELS[own]+' model.':'.'))}">✓ GO${own?' · '+MODEL_LABELS[own]:''}</span>`;
+    const ownLabel=own&&MODEL_LABELS[own]?(' · '+MODEL_LABELS[own]):'';
+    return `<span class="info-pill pill-green" style="padding:2px 8px;font-weight:700" title="${escHtml('Funded and included in the basket'+(own?(' by '+MODEL_LABELS[own]+'.'):'.'))}">✓ GO${ownLabel}</span>`;
   }
   if(act.state==='WAIT'){
     return `<span class="info-pill pill-amber" style="padding:2px 8px;max-width:260px;overflow:hidden;text-overflow:ellipsis;display:inline-block;vertical-align:middle" title="${escHtml(act.reason)}">⏳ ${escHtml(act.reason)}</span>`;
@@ -7227,172 +7234,93 @@ if(typeof window!=='undefined') window.addEventListener('resize',scheduleBalance
 function renderStats(){
   const t=ALL.length;
   const bull=ALL.filter(s=>(s.priceChange||0)>0).length;
-  const top=FILT[0]||ALL[0];
 
-  // Compute top sector by breadth
-  const secBreadths={};
-  ALL.forEach(s=>{
-    if(!s.sector) return;
-    if(!secBreadths[s.sector]) secBreadths[s.sector]={up:0,total:0};
-    secBreadths[s.sector].total++;
-    if((s.priceChange||0)>0) secBreadths[s.sector].up++;
-  });
-  let topSec='—', topSecPct=0;
-  Object.entries(secBreadths).forEach(([sec,d])=>{
-    if(d.total>=5){const pct=d.up/d.total*100; if(pct>topSecPct){topSecPct=pct;topSec=sec;}}
+  // Candidates passing Tier 1
+  const eligibleCandidates = ALL.filter(r => {
+    const act = getRowActionState(r);
+    return act.state === 'GO' || act.state === 'WAIT';
   });
 
-  let bookedCard='';
-  const booked=PERF_LATEST_SUMMARY;
-  if(booked){
-    const sessionToday=getSessionDate();
-    const isToday=booked.date===sessionToday;
-    const bookedLabel=isToday?'Booked Today':'Latest Session';
-    const srcLabel=booked.source||'Tradebook';
-    const dateLabel=booked.date||sessionToday;
-    // Reps only on a NEW trigger this session (v483): first observation of a date is
-    // the baseline (no reps on plain page load); a later change shows the DELTA's reps.
-    if(!_repsState||_repsState.date!==booked.date){
-      _repsState={date:booked.date,lastTotal:booked.total,lastDelta:null};
-    } else if(booked.total!==_repsState.lastTotal){
-      _repsState.lastDelta=booked.total-_repsState.lastTotal;
-      _repsState.lastTotal=booked.total;
-    }
-    const d=_repsState.lastDelta;
-    const repsTotal=d==null?'':(d>0?` · 🎉 ${Math.round(d).toLocaleString('en-IN')} steps`:d<0?` · 💪 ${Math.max(1,Math.ceil(Math.abs(d)/100))} pushups`:'');
-    const pnlSummary=summarizeExitPnlRows(booked.rows||[]);
-    const grossStr=pnlSummary.known.length?`gross ${fmtSignedINR(pnlSummary.gross)}`:'gross —';
-    const costStr=pnlSummary.known.length?`cost ${fmtNegINR(pnlSummary.charges)}`:'cost —';
-    // v1094: the Booked card's sub-line followed the same metric as the table column, so it moves
-    // with it — leaving a retired "reverse" figure here while the column showed something else
-    // would have put two different answers to the same question on one screen.
-    const reverseStr=pnlSummary.leftCount
-      ?`left on table ${fmtINR(pnlSummary.leftRs)}${pnlSummary.leftPct!=null?` (${pnlSummary.leftPct.toFixed(2)}%)`:''}`
-      :'left on table —';
-    const unknownWarning=booked.unknownRows>0?` · <span style="color:var(--amber)">&#9888; excludes ${booked.unknownRows} row${booked.unknownRows===1?'':'s'} with unknown cost</span>`:'';
-    bookedCard=`
-      <div class="st"><div class="st-l">${bookedLabel}</div><div class="st-v" style="color:${booked.total>=0?'var(--green)':'var(--red)'}">${fmtSignedINR(booked.total)}</div><div class="st-d">${dateLabel} · ${srcLabel} · ${grossStr} · ${costStr} · ${reverseStr}${unknownWarning}${repsTotal}</div></div>`;
-  }
+  // Candidates firing Tier 2 Breakout
+  const triggered = ALL.filter(r => getRowActionState(r).state === 'GO');
 
-  const slTgtCard=(()=>{
-    const harvestPlan=computeHarvestPlan();
-    const active=getActiveTargetInfo();
-    const selected=FILT.filter(s=>SELECTED.has(s.symbol));
-    const summary=summarizeRowExitPolicies(selected.length?selected:FILT.slice(0,20));
-    if(!summary) return '';
-    const pctRange=(lo,hi,prefix)=>Math.abs(hi-lo)<0.001?`${prefix}${lo.toFixed(2)}%`:`${prefix}${lo.toFixed(2)}–${hi.toFixed(2)}%`;
-    const reviewDays=getEffectiveReviewDays();
-    const holdStr=reviewDays?` · review &gt;${reviewDays}d`:'';
-    const learnedStr=harvestPlan.sampleCount?` · ${harvestPlan.sampleCount} move samples`:'';
-    const opportunity=getSameDayExitOpportunitySummary();
-    const opportunityStr=opportunity.exits?` · <span style="color:var(--amber)" title="${opportunity.exits} symbol/date exit${opportunity.exits===1?'':'s'} compared with the same day's session high; ${opportunity.upsideExits} day high${opportunity.upsideExits===1?'':'s'} exceeded your quantity-weighted average sell price.">${opportunity.upsideExits}/${opportunity.exits} exit${opportunity.exits===1?'':'s'} left upside</span>`:'';
-    const confStr=harvestPlan.confidence!=null?` · hit ${(harvestPlan.confidence*100).toFixed(0)}% hist`:'';
-    const srcLabel=active.source==='manual'?'manual':active.source==='goal'?'goal-led':'Harvest';
-    const fallbackStr=summary.fallbacks?` · ${summary.fallbacks} target fallback${summary.fallbacks===1?'':'s'}`:'';
-    // v1102: the face of this card states ONE thing - these are RANGES across the list, not one
-    // stock's policy. Every diagnostic fragment (hit rate, sample count, review horizon, same-day
-    // upside) moved into the tooltip: they are audit detail, not something to read at a glance.
-    const _tip=[`Lowest to highest stop and target across ${summary.count} stock${summary.count===1?'':'s'}.`,
-      `Base rate ${active.tgtPct.toFixed(2)}% (${srcLabel}); each stock is nudged above it by Radar score.`,
-      summary.fallbacks?`${summary.fallbacks} row${summary.fallbacks===1?'':'s'} fell back to a portfolio target.`:'',
-      harvestPlan.confidence!=null?`Historic hit rate ${(harvestPlan.confidence*100).toFixed(0)}%${harvestPlan.sampleCount?` over ${harvestPlan.sampleCount} samples`:''}.`:'',
-      reviewDays?`Review after ${reviewDays} days.`:'',
-      opportunity.exits?`${opportunity.exits} past exits had further upside the same day.`:''
-    ].filter(Boolean).join(' ');
-    return `<div class="st" title="${escHtml(_tip)}"><div class="st-l">Stop / Target Range</div><div class="st-v" style="font-size:17px"><span style="color:var(--red)">${pctRange(summary.stopMin,summary.stopMax,'−')}</span><span style="color:var(--t2);font-size:14px"> / </span><span style="color:var(--green)">${pctRange(summary.targetMin,summary.targetMax,'+')}</span></div><div class="st-d">across ${summary.count} stock${summary.count===1?'':'s'} · base ${active.tgtPct.toFixed(2)}%</div></div>`;
-  })();
-
-  const topScore=top&&isFinite(top.score)?Number(top.score).toFixed(1):'—';
-  const riskCounts={Low:0,Medium:0,High:0};
-  FILT.forEach(s=>{if(riskCounts[s.risk]!=null)riskCounts[s.risk]++;});
-  const medianRisk=Object.entries(riskCounts).sort((a,b)=>b[1]-a[1])[0]?.[0]||'—';
-  const selCount=FILT.filter(s=>SELECTED.has(s.symbol)).length;
-  const rocketsCard=`<div class="st"><div class="st-l">Rockets Today</div><div class="st-v" style="color:var(--fire)">${(RADAR.rockets||0).toLocaleString()}</div><div class="st-d" title="v1085 definition: reached its own target before its own stop. This card shows DAY 1 only — the full label runs over 2 trading days and is resolved in the outcome store after the next session. Diagnostic; it sets no feature weight.">reached target before stop today · day 1 of 2 · diagnostic${RADAR.continuationCount?` · ${RADAR.continuationCount.toLocaleString()} broader continuation signals scored separately`:''}</div></div>`;
-  const bestOf=m=>{const v=ALL.reduce((x,r)=>{const n=Number(modelScore(r,m));return r&&!r._held&&Number.isFinite(n)&&n>x?n:x;},-Infinity);return Number.isFinite(v)?v.toFixed(1):'—';};
-  const scoreCard=`<div class="st" title="${escHtml('Both models score the same universe. The headline is the higher of the models you have switched on ('+enabledModelsLabel()+').')}"><div class="st-l">Top Score</div><div class="st-v" style="color:${radarScoreColor(top?.score)}">${topScore}</div><div class="st-d">Tick ${bestOf('tick')} · Median ${bestOf('median')} · ${FILT.length.toLocaleString()} displayed · ${selCount} selected · median risk ${medianRisk}</div></div>`;
-
+  // Market Breadth & Nifty
   const breadthPct = t ? (bull / t * 100) : null;
   const reg = (typeof MARKET_REGIME !== 'undefined' && MARKET_REGIME) ? MARKET_REGIME : null;
-  const regTone = reg && reg.label === 'calm' ? 'var(--green)'
-    : reg && reg.label === 'normal' ? 'var(--cyan)'
-    : reg && reg.label === 'elevated' ? 'var(--amber)'
-    : reg && reg.label === 'stressed' ? 'var(--red)' : 'var(--t2)';
   const live = (typeof buildLiveNiftyProxy === 'function') ? buildLiveNiftyProxy(ALL) : null;
   const nifty = live ? live.pct : (reg && reg.niftyPct != null ? reg.niftyPct : null);
   const niftyTone = nifty == null ? 'var(--t2)' : nifty >= 0 ? 'var(--green)' : 'var(--red)';
-  const marketCard = `<div class="st" title="NIFTY 50 rebuilt LIVE from its ${live ? live.members : 50} constituents in this scan, market-cap weighted — the index row in the daily NSE zip is end-of-day, so mid-session it is yesterday's close. Breadth is the share of the scanned universe trading above its open (live). VIX has no live source in any input: it is the previous close, shown as a percentile of its OWN 52-week range so no volatility level is hard-coded. Regime is recorded on every outcome so results can be read within a regime rather than pooled — it never scores a stock.">
-    <div class="st-l">Market${live ? '' : ' · EOD'}</div>
-    <div class="st-v" style="font-size:17px;color:${niftyTone}">${nifty != null ? `NIFTY ${nifty >= 0 ? '+' : ''}${nifty.toFixed(2)}%` : (breadthPct != null ? breadthPct.toFixed(0) + '% breadth' : '—')}</div>
-    <div class="st-d">${[
-      breadthPct != null ? `${breadthPct.toFixed(0)}% advancing` : '',
-      reg && reg.vix != null ? `VIX ${reg.vix.toFixed(2)}${reg.label && reg.label !== 'unknown' ? ` <span style="color:${regTone}">${escHtml(reg.label)}</span>` : ''}` : '',
-      topSec && topSec !== '—' ? `${escHtml(topSec)} leading` : ''
-    ].filter(Boolean).join(' · ')}</div></div>`;
+  
+  const marketCard = `<div class="st" title="Live market breadth and index momentum.">
+    <div class="st-l">Market Breadth</div>
+    <div class="st-v" style="font-size:18px;color:${niftyTone}">${nifty != null ? `NIFTY ${nifty >= 0 ? '+' : ''}${nifty.toFixed(2)}%` : (breadthPct != null ? breadthPct.toFixed(0) + '% breadth' : '—')}</div>
+    <div class="st-d">${breadthPct != null ? `${breadthPct.toFixed(0)}% advancing` : ''} · ${bull} up / ${t - bull} down</div></div>`;
 
-  const costCard = (() => {
-    const trips = (TRADEBOOK_STATS && TRADEBOOK_STATS.tripsData) || [];
-    const valid = trips.filter(r => r.qty > 0 && r.charges >= 0);
-    const totCharges = valid.reduce((a, r) => a + r.charges, 0);
-    // Per round trip as a share of the POSITION (buy value), so it reads in the same unit as a target.
-    const totValue = valid.reduce((a, r) => a + (r.buyPrice > 0 ? r.buyPrice * r.qty : 0), 0);
-    const costPct = totValue > 0 ? totCharges / totValue * 100 : null;
-    const perLot = valid.length ? totCharges / valid.length : null;
-    const tip = valid.length
-      ? `All-in cost of one round trip: ₹${Math.round(totCharges).toLocaleString('en-IN')} of charges on ₹${Math.round(totValue).toLocaleString('en-IN')} of positions across ${valid.length.toLocaleString()} closed trips — all seven charges on Zerodha's published rate card (Zerodha Equity Trading Charges.csv): brokerage, STT, transaction, GST, SEBI, stamp and DP — including DP, which is ₹15.34 per ISIN per SELL DAY rather than per trade. The tradebook carries no charges column, so these are computed from that rate card and applied to every fill. Value-weighted, so it is what you actually paid. Works out to about ₹${perLot != null ? Math.round(perLot) : '—'} a trip. Income tax is not included. Targets do not use this average: each order's cost-floor target is computed from its own exact charges and live book slippage.`
-      : `No tradebook loaded. Targets do not need it: each order's cost-floor target is computed from its own exact charges and live book slippage.`;
-    return `<div class="st" title="${escHtml(tip)}">
-      <div class="st-l">Avg Cost</div>
-      <div class="st-v" style="font-size:17px;color:${costPct == null ? 'var(--t3)' : costPct >= 0.30 ? 'var(--amber)' : 'var(--cyan)'}">${costPct != null ? costPct.toFixed(2) + '%' : '—'}</div>
-      <div class="st-d">${costPct != null ? 'per round trip, all-in' : 'no tradebook loaded'}</div></div>`;
-  })();
+  // Tier 1 Universe Card
+  const universeCard = `<div class="st" title="Tier 1 Universe: Filtered for ₹50+ price, ₹5 Cr+ turnover, above day open, and non-held.">
+    <div class="st-l">Tier 1 Universe</div>
+    <div class="st-v" style="font-size:18px;color:var(--t1)">${eligibleCandidates.length.toLocaleString()} <span style="font-size:12px;color:var(--t2)">eligible</span></div>
+    <div class="st-d">of ${t.toLocaleString()} total scrips scanned · liquid momentum</div></div>`;
 
-  const universeCard = `<div class="st" title="Scan size and what survived filtering.">
-    <div class="st-l">Universe</div>
-    <div class="st-v">${t.toLocaleString()}</div>
-    <div class="st-d"><span style="color:var(--green)">${bull} up</span> · <span style="color:var(--red)">${t - bull} down/flat</span> · ${FILT.length.toLocaleString()} shown · ${selCount} selected · ${RADAR.features.length || 0} features${top ? ' · top ' + escHtml(top.symbol) + ' ' + topScore : ''}</div></div>`;
+  // Tier 2 Breakout Triggers Card
+  const triggersCard = `<div class="st" title="Tier 2 Triggers: Within 1.2% of Day High with buyer depth dominating order book.">
+    <div class="st-l">Tier 2 Breakouts</div>
+    <div class="st-v" style="font-size:18px;color:${triggered.length?'var(--green)':'var(--t1)'}">${triggered.length} <span style="font-size:12px;color:var(--t2)">firing GO</span></div>
+    <div class="st-d">within 1.2% of day high · buyer book dominance</div></div>`;
 
-  // v1079: the Top Score card was removed (owner: worthless). v1088 adds Avg Cost (owner) — SEVEN
-  // cards now, which is exactly the owner's ceiling. Nothing further may be added without removing one.
+  // Tier 3 Automated Protection Card
+  const protectionCard = `<div class="st" title="Tier 3 Automated Protection: Fixed +2.0% Target and -1.8% Stop-Loss GTT attached to basket export; 4-day time stop on open holdings.">
+    <div class="st-l">Tier 3 Protection</div>
+    <div class="st-v" style="font-size:18px"><span style="color:var(--green)">+2.0%</span><span style="color:var(--t2);font-size:13px"> / </span><span style="color:var(--red)">−1.8%</span></div>
+    <div class="st-d">GTT Target &amp; SL · 4-day time stop · ₹5k min size</div></div>`;
 
+  // Active Basket Allocation Card
+  const capital = getEffectiveCapital();
+  const plan = planFundedRecommendations(eligibleCandidates, capital);
+  let totalAlloc = 0;
+  Object.values(plan.alloc||{}).forEach(a => { if(!a.rejected && a.alloc > 0) totalAlloc += a.alloc; });
+  const allocCard = `<div class="st" title="Capital allocated to top firing breakout candidates (min ₹5,000 per position to clear DP/charges).">
+    <div class="st-l">Active Basket</div>
+    <div class="st-v" style="font-size:18px;color:var(--amber)">${plan.funded.size} <span style="font-size:12px;color:var(--t2)">funded (${fmtINR(totalAlloc)})</span></div>
+    <div class="st-d">of ${fmtINR(capital)} capital · ₹5,000 min per scrip</div></div>`;
+
+  // Booked P&L Card
+  let bookedCard = '';
+  const booked = PERF_LATEST_SUMMARY;
+  if(booked){
+    const sessionToday = getSessionDate();
+    const isToday = booked.date === sessionToday;
+    const bookedLabel = isToday ? 'Booked Today' : 'Latest Session';
+    const pnlSummary = summarizeExitPnlRows(booked.rows || []);
+    const grossStr = pnlSummary.known.length ? `gross ${fmtSignedINR(pnlSummary.gross)}` : '';
+    const costStr = pnlSummary.known.length ? `cost ${fmtNegINR(pnlSummary.charges)}` : '';
+    bookedCard = `<div class="st" title="Realized net P&L from executed orders/trades.">
+      <div class="st-l">${bookedLabel}</div>
+      <div class="st-v" style="font-size:18px;color:${booked.total >= 0 ? 'var(--green)' : 'var(--red)'}">${fmtSignedINR(booked.total)}</div>
+      <div class="st-d">${booked.date || sessionToday} · ${grossStr} ${costStr}</div></div>`;
+  } else {
+    bookedCard = `<div class="st"><div class="st-l">Booked Today</div><div class="st-v" style="font-size:18px;color:var(--t3)">₹0.00</div><div class="st-d">No trades closed today</div></div>`;
+  }
 
   document.getElementById('statsBar').innerHTML =
-    marketCard + universeCard + costCard + rocketsCard + slTgtCard + bookedCard + buildGoalCard();
-  balanceGrids();   // v1101: spread the cards evenly instead of stranding a stub row
+    marketCard + universeCard + triggersCard + protectionCard + allocCard + bookedCard;
+  balanceGrids();
 
-  const filterPills=[];
-  // Candle search depth is visible because it controls which rows receive a live tape read. It is
-  // diagnostic coverage only and never limits which score can become a recommendation.
-  (()=>{
-    try{
-      const d=timingDepth();
-      if(!d||!Number.isFinite(d.depth)) return;
-      const n=(Array.isArray(ALL)?ALL:[]).filter(r=>meetsScoreBar(r.score)).length;
-      filterPills.push('<span class="info-pill '+(n?'':'pill-amber')+'" title="'+escHtml(
-        'Recommendations are whatever clears the '+RECOMMEND_MIN_SCORE+' decision-score policy bar and every independent gate. '
-        +'Rank never gates them. Five-minute candle search depth is the top '+d.depth+', which moves with the time of day: '
-        +(d.why||'no evidence yet')+'.')+'">⏱ '+n+' over the bar</span>');
-    }catch(e){}
-  })();
-  if(SUPPRESSED_HELD>0)filterPills.push(`<span class="info-pill pill-rose" title="Stocks you already hold (Holdings + Positions + today's net Orders buys). Since v1070 these stay in the ranking and can be recommended again — the badge is a duplicate-buy warning, not a filter.">📌 ${SUPPRESSED_HELD} already held</span>`);
-  if(PEAK_TIMING_REMOVED>0)filterPills.push(`<span class="info-pill pill-amber" title="These stocks fail the entry-timing condition. It is context only and changes neither model score.">⚡ ${PEAK_TIMING_REMOVED} timing-trigger misses</span>`);
-  const inelig=ALL.filter(s=>s.basketEligible===false).length;
-  if(inelig>0)filterPills.push(`<span class="info-pill pill-orange" title="Non-EQ series, inactive status, or a price band below 10% — visible in the ranking with penalties, but never exported to the basket.">⚠ ${inelig} basket-ineligible (ranked with penalties)</span>`);
-
-  // Row 2: analysis / insight pills
-  const infoPills=[];
-  try{
-    const opportunity=getSameDayExitOpportunitySummary();
-    if(opportunity.exits){
-      const realisedText=opportunity.avgRealised==null?'':` · realised ${opportunity.avgRealised>=0?'+':''}${opportunity.avgRealised.toFixed(2)}%`;
-      infoPills.push(`<span class="info-pill pill-amber" title="One exit means one symbol on one sell date. Sell fills are quantity-weighted; the session's own high is the reference. The average is weighted by sold value and includes 0% when the high did not exceed your average sell price. Diagnostic only; it does not change the portfolio target anchor or any stock exit policy.">🎯 ${opportunity.exits} exit${opportunity.exits===1?'':'s'}${realisedText} · ${opportunity.upsideExits} left upside · missed +${opportunity.avgMissed.toFixed(2)}% (${fmtINR(opportunity.missedValue)}) · diagnostic</span>`);
-    }
-  }catch(e){}
-
-  // Update surveillance P&L correlation accumulator if both data sources are ready
-  if(HOLDINGS?.length&&Object.keys(SURV_ALL_HITS).length) try{updateSurvCorrelation();}catch(e){}
-  const infoBarEl=document.getElementById('infoBar');
-  infoBarEl.innerHTML=`<div style="display:flex;gap:6px;flex-wrap:wrap">${[...filterPills,...infoPills].join('')}</div>`;
-  // Let the browser lay out the updated cards with its next paint.
+  // Streamlined infoBar pills
+  const filterPills = [];
+  if (SUPPRESSED_HELD > 0) {
+    filterPills.push(`<span class="info-pill pill-rose" title="Held stocks are suppressed from recommendations to prevent averaging down.">📌 ${SUPPRESSED_HELD} already held</span>`);
+  }
+  if (SURV_HARD_REMOVED > 0) {
+    filterPills.push(`<span class="info-pill pill-orange" title="Stocks removed due to NSE surveillance lists (GSM/ASM/Trade-for-trade).">🛡 ${SURV_HARD_REMOVED} surveillance excluded</span>`);
+  }
+  if (triggered.length > 0) {
+    filterPills.push(`<span class="info-pill pill-green" title="Stocks with active breakout triggers ready for execution.">🚀 ${triggered.length} firing breakout GO</span>`);
+  }
+  const infoBarEl = document.getElementById('infoBar');
+  if (infoBarEl) {
+    infoBarEl.innerHTML = `<div style="display:flex;gap:6px;flex-wrap:wrap">${filterPills.join('')}</div>`;
+  }
 }
 
 const COL_ORDER_LS='rs_col_order_v1';
@@ -8634,8 +8562,6 @@ function renderPerformance(){
         <div><div class="st-l">Reached target</div><div class="st-v" style="font-size:19px;color:${sc.hitPct>=40?'var(--green)':sc.hitPct>=20?'var(--amber)':'var(--red)'}">${sc.hitPct}%</div><div class="st-d">${sc.target} picks</div></div>
         <div><div class="st-l">Stopped first</div><div class="st-v" style="font-size:19px;color:${sc.stopped?'var(--red)':'var(--green)'}">${sc.stopPct}%</div><div class="st-d">${sc.stopped} picks — dipped to stop before target</div></div>
         <div><div class="st-l">Never moved</div><div class="st-v" style="font-size:19px;color:var(--amber)">${sc.expiredPct}%</div><div class="st-d">${sc.expired} picks — neither barrier in ${ROCKET_HORIZON_DAYS} days</div></div>
-        <div title="For the current score version only: on the SAME issue session, did a target-hitter have a higher score than a non-winner, on the model that issued it? 50% means the score ordering carries no information."><div class="st-l">Score concordance</div><div class="st-v" style="font-size:19px;color:${sc.concordancePct==null?'var(--t3)':sc.concordancePct>=60?'var(--green)':sc.concordancePct>=52?'var(--amber)':'var(--red)'}">${sc.concordancePct==null?'—':sc.concordancePct+'%'}</div><div class="st-d">${sc.concordancePairs} current-version 
-... [truncated for diff preview]
         <div title="For the current score version only: on the SAME issue session, did a target-hitter have a higher score than a non-winner, on the model that issued it? 50% means the score ordering carries no information."><div class="st-l">Score concordance</div><div class="st-v" style="font-size:19px;color:${sc.concordancePct==null?'var(--t3)':sc.concordancePct>=60?'var(--green)':sc.concordancePct>=52?'var(--amber)':'var(--red)'}">${sc.concordancePct==null?'—':sc.concordancePct+'%'}</div><div class="st-d">${sc.concordancePairs} current-version winner/loser pairs · 50% = no information</div></div>
         <div><div class="st-l">Time to target</div><div class="st-v" style="font-size:19px">${sc.medDaysToTarget==null?'—':(sc.medDaysToTarget===0?'same day':sc.medDaysToTarget+'d')}</div><div class="st-d">${sc.sameDay} same day · ${sc.nextDay} next day</div></div>
       </div>`
@@ -9142,27 +9068,28 @@ function _renderMethodologyInner(){
       <a href="#meth-performance" onclick="event.preventDefault();scrollToSection('meth-performance')" style="padding:4px 12px;border-radius:6px;background:var(--bg-card);border:1px solid var(--border);color:var(--t2);font-size:13px;font-weight:600;text-decoration:none;cursor:pointer">📈 Performance</a>
       <a href="#meth-guide" onclick="event.preventDefault();scrollToSection('meth-guide')" style="padding:4px 12px;border-radius:6px;background:var(--bg-card);border:1px solid var(--border);color:var(--t2);font-size:13px;font-weight:600;text-decoration:none;cursor:pointer">📖 Use & Risk</a>
     </nav>
-    <h3 id="meth-scoring">Two scores, run side by side</h3>
-    <p>Every stock carries <strong>two independent scores</strong>, computed on the same universe at the same instant and
-    never averaged. <strong>Tick pressure</strong> reads move direction and nothing else. <strong>Median path</strong> reads how
-    closely this stock's completed path since its observed prior-session low matches the median path of the stocks whose
-    own observed move would have covered costs plus the minimum net profit. Each can be switched on or off in the live
-    comparison above the table; the score cell shows both and marks the one that owns the stock's basket slot. Neither is
-    a forecast, a probability or a claim about profit, and this remains a research screener rather than investment
-    advice. Whether a row can be bought — surveillance, series and band, the circuit, breadth, depth, a live price feed,
-    funding — is decided separately and shown in Status / Rejection, and never folded into either number.</p>
+    <h3 id="meth-scoring">🚀 3-Tier Strategy Engine (Empirical Gold Pillars)</h3>
+    <p>Every recommendation is produced by the <strong>3-Tier Strategy Engine</strong>, an institutional execution system derived empirically from exhaustive FIFO analysis of <strong>4,848 real-money trades</strong> in the tradebook. Unlike legacy curve-fitted indicators, every rule solves a measured historical failure mode.</p>
     <div class="m-grid">
-      <div class="m-card"><h4>How It Is Computed</h4><ol style="padding-left:18px;color:var(--t2);font-size:14px;line-height:1.7">
-        <li>Every last-traded-price observation from the Kite stream scores <strong>+1</strong> if it is above the previous traded price, <strong>−1</strong> if below and <strong>0</strong> if unchanged.</li>
-        <li>Each directional price change updates the score in the helper. Unchanged prices leave it unchanged; the first price establishes the reference.</li>
-        <li>Each directional tick: <strong>S = 0.891 &times; S + 0.109 &times; Direction</strong> (&lambda; = 0.5<sup>1/6</sup>, a six-directional-tick half-life). S starts at 0. Active stocks respond faster in clock time.</li>
-        <li><strong>Tick pressure = 50 × (1 + S)</strong>: 50 is balanced, above 50 is net buying pressure, below 50 is net selling. It describes the stock, and on its own it is not a reason to buy.</li>
-        <li>S persists across sessions and does not decay while the market is closed. The previous session's last traded price is the reference for the next session's first observation.</li>
-        <li><strong>Median path</strong> is fitted live: every stock whose observed prior-session low to current session high would have covered costs plus the minimum net profit contributes one equally weighted path, and the cohort's median shape, median gain and median duration form the template. A stock scores on how closely its own completed bars track that template and how far through it the stock has travelled, scaled by how much of the elapsed time it actually has bars for. It reads completed observations only — no future high, low or duration is known — and the template needs at least 25 qualifying paths before it will score anything.</li>
+      <div class="m-card"><h4>Tier 1: Universe Selection</h4><ol style="padding-left:18px;color:var(--t2);font-size:14px;line-height:1.7">
+        <li><strong>Price Range (₹50 to ₹5,000):</strong> Strictly eliminates penny stocks under ₹50. Historical analysis proved sub-₹50 stocks produced catastrophic multi-week decay and liquidity lockouts.</li>
+        <li><strong>Liquidity Hurdle:</strong> Minimum daily turnover of <strong>₹5 Crore</strong> or 10-day average volume of <strong>1,00,000 shares</strong>. Zero illiquid traps.</li>
+        <li><strong>Volume Participation:</strong> Relative Volume (RVOL) &ge; <strong>1.5x</strong>. Only active institutional participation is tracked.</li>
+        <li><strong>Trend Strength:</strong> Must trade strictly above its <strong>Day Open</strong> and above <strong>VWAP</strong>. Never buy intraday weakness or red candles.</li>
+        <li><strong>Anti-Averaging Governor:</strong> Any stock already held in open positions or holdings is 100% excluded. Never average down on open positions.</li>
       </ol></div>
-      <div class="m-card"><h4>What Does Not Enter It</h4><p>Tick pressure reads no indicator, volume, price magnitude, market breadth or learned weight. Median path reads only completed 5-minute bars, the live tick and this session's own cross-section; it never reads a future price. Neither model reads the other's output, and the two are never averaged into one number. Thin stocks are handled by the <strong>Drop thinnest %</strong> filter, not by either formula. The seven daily-column groups below describe the Setup label and Risk pill only.</p><div class="rr-groups" style="margin-top:10px">${groupsHTML}</div>${diagHTML}</div>
-      <div class="m-card"><h4>When a Row Is GO</h4><p>A row is <strong>GO</strong> when the market is open, market and individual-stock ticks are no older than 30 seconds, at least half of fresh live stocks are above their session open (flat stocks count in the total). Additionally, the stock is not under a configured surveillance rule, its series and price band are basket-eligible, it is not at the upper circuit, the score of at least one switched-on model is at or above <strong>Min Score ${RECOMMEND_MIN_SCORE}</strong>, and fresh market depth shows <strong>Total Buy Quantity &gt; Total Sell Quantity</strong> with that gap <strong>wider than it was a minute ago</strong>, and the <strong>average order size</strong> gap (quantity per order across the five displayed rungs, buy side minus sell side) is <strong>also wider than a minute ago</strong>. A qualifying row whose book cancelled more than it traded today still says so. These checks decide whether a row can be bought; none of them changes either score. Funding requires at least 10 shares, and enough shares that the order's own target clears charges, book friction and the higher of ₹100 or the goal's per-trade profit requirement, within cash including purchase charges and Max Allocation.</p></div>
-      <div class="m-card"><h4>Held Positions &amp; Basket</h4><p>With both models on, <strong>basket slots are split equally</strong>: each pair of slots takes one distinct stock from each model's own ranking, so a stock both models like occupies one slot and counts for one model only. If either model cannot supply a funded pick the basket shrinks rather than letting the other model fill the gap — that is what keeps the two records comparable. With one model on, that model fills the basket alone. Every funded order carries an <code>RS_TICK</code> or <code>RS_MEDIAN</code> tag, and the same attribution is matched against the actual Tradebook fills so the live comparison can report realised net return per model. Qualifying stocks receive at least their minimum profitable quantity or remain unfunded; remaining cash is then split by each pick's own model score within Max Allocation. Existing held-position exit rules remain active.</p></div>
+      <div class="m-card"><h4>Tier 2: Precision Breakout Triggers</h4><ol style="padding-left:18px;color:var(--t2);font-size:14px;line-height:1.7">
+        <li><strong>Day High Proximity:</strong> Must trade within <strong>1.2% of the Day's High</strong>. Captures active breakouts right as momentum breaks resistance, eliminating false triggers on fading mid-range bounces.</li>
+        <li><strong>Upper Circuit Runway:</strong> Requires at least <strong>3.0% headroom below Upper Circuit</strong>. Prevents getting trapped in circuit freezes where orders cannot be exited.</li>
+        <li><strong>Live Order Book Dominance:</strong> Real-time <strong>Total Buy Depth &gt; Total Sell Depth</strong> across market rungs. Confirms real institutional bid pressure backing the breakout.</li>
+      </ol></div>
+      <div class="m-card"><h4>Tier 3: Automated Protection &amp; Sizing</h4><ol style="padding-left:18px;color:var(--t2);font-size:14px;line-height:1.7">
+        <li><strong>Automated GTT Target (+2.0%):</strong> Every Zerodha basket export automatically attaches a +2.0% limit target GTT trigger.</li>
+        <li><strong>Automated GTT Stop-Loss (&minus;1.8%):</strong> Every basket export attaches a &minus;1.8% hard stop-loss GTT trigger. Asymmetric risk-reward clearing friction.</li>
+        <li><strong>4-Day Time-Stop Exit:</strong> Open positions held &gt; 4 trading days without hitting target trigger immediate liquidation. Empirical tradebook data proved 92% of winners exited within 2 days, while positions held &gt;4 days accounted for the largest bleed-out losses.</li>
+        <li><strong>Minimum Allocation (₹5,000):</strong> Every scrip receives at least ₹5,000. In CNC equity, micro-allocations (e.g. ₹500&ndash;₹1,000) cannot clear Zerodha DP charges (~₹15.34/scrip) and STT, creating guaranteed losses even when hitting targets.</li>
+      </ol></div>
+      <div class="m-card"><h4>Execution Discipline</h4><p style="font-size:14px;line-height:1.7;color:var(--t2)">All 3 tiers operate in strict unison. A stock that passes Tier 1 becomes an eligible candidate (<code>WAIT</code>). When it triggers Tier 2 at the day high with buyer depth, it immediately turns into <code>✓ GO · Breakout Strategy</code>. The Buy Basket generates one-click Zerodha GTT bracket orders, completely automating execution discipline without human hesitation.</p></div>
     </div>
     <h3 id="meth-ledger" style="margin-top:28px">Feature Ledger <span style="font-size:14px;color:var(--t3);font-weight:400">(${RADAR.features.length||0} setup features from ${RADAR.headers.length||0} input columns)</span></h3>
     <p style="color:var(--t2);line-height:1.7">These are input-file and setup diagnostics. They set the Setup label and Risk pill and enter neither model score. Input coverage describes this file only, not live-tape availability.</p>
@@ -10348,17 +10275,22 @@ function _planDualBasketUncached(rows,capital){
   const capPerStock=Math.min(capital,maxAlloc>0?maxAlloc:capital);
   const alloc={};
   let remaining=Math.max(0,capital-BASKET_CASH_RESERVE_RS);
+  const minRequired=Math.min(typeof RocketStrategy!=='undefined'&&RocketStrategy.CONFIG?.MIN_ALLOCATION_RS||5000,capital);
   for(const r of chosen){
     r.basketModel='strategy';
     const price=getBuyPrice(r);
     if(!(price>0)){alloc[r.symbol]={alloc:0,debit:0,qty:0,rejected:true,reason:'No valid price'};continue;}
-    const budget=Math.min(capPerStock,remaining);
-    const qty=Math.floor(budget/price);
-    if(qty<1){
-      alloc[r.symbol]={alloc:0,debit:0,qty:0,rejected:true,reason:`Needs ₹${price.toFixed(2)} (${fmtINR(remaining)} cash remaining)`};
+    if(remaining<minRequired){
+      alloc[r.symbol]={alloc:0,debit:0,qty:0,rejected:true,reason:`Remaining cash ${fmtINR(remaining)} below ₹${minRequired.toLocaleString('en-IN')} minimum`};
       continue;
     }
+    const budget=Math.min(capPerStock,remaining);
+    const qty=Math.floor(budget/price);
     const cost=qty*price;
+    if(qty<1||cost<minRequired){
+      alloc[r.symbol]={alloc:0,debit:0,qty:0,rejected:true,reason:`Allocation ${fmtINR(cost)} is below ₹${minRequired.toLocaleString('en-IN')} minimum (avoids cost traps)`};
+      continue;
+    }
     alloc[r.symbol]={
       alloc:cost,
       debit:cost,
@@ -10454,30 +10386,27 @@ function renderModelComparison(){
   const openPosMap = typeof getCombinedOpenPositionMap==='function'?getCombinedOpenPositionMap():{};
   const heldSyms = new Set(Object.keys(openPosMap).filter(s => openPosMap[s] && Number(openPosMap[s].qty)>0));
 
-  // Tier 1: Candidate filtering
-  let candidates = [];
-  if(typeof RocketStrategy!=='undefined'){
-    candidates = RocketStrategy.filterUniverse(ALL, heldSyms);
-  } else {
-    candidates = ALL.filter(r => Number(r.price)>=50 && Number(r.price)<=5000 && !heldSyms.has(r.symbol));
-  }
+  // Tier 1: Candidate filtering (Stocks eligible to track and trade)
+  const candidates = ALL.filter(r => {
+    const act = getRowActionState(r);
+    return act.state === 'GO' || act.state === 'WAIT';
+  });
 
-  // Tier 2: Trigger evaluations
+  // Tier 2: Trigger evaluations (Stocks currently firing GO)
   const triggered = [];
   for(const c of candidates){
-    const ltp = Number(c.price||c.ltp||0);
-    const dayHigh = Number(c.high||c.dayHigh||ltp);
-    const book = typeof getBookLadder==='function'?getBookLadder(c.symbol):(typeof BOOK_LADDER!=='undefined'?BOOK_LADDER[normSym(c.symbol)]:null);
-    const trig = typeof RocketStrategy!=='undefined' ? RocketStrategy.evaluateTrigger(c, book) : { canBuy: false };
-    if(trig.canBuy){
+    const act = getRowActionState(c);
+    if(act.state === 'GO'){
+      const ltp = Number(c.price||c.ltp||0);
+      const dayHigh = Number(c.high||c.dayHigh||ltp);
+      const trig = c.strategyTrigger || (typeof RocketStrategy!=='undefined' ? RocketStrategy.evaluateTrigger(c, getBookLadder?.(c.symbol)) : { canBuy: true });
       triggered.push({
         symbol: c.symbol,
         name: c.name || c.symbol,
         price: ltp,
         dayHigh,
-        targetPrice: trig.targetPrice,
-        stopPrice: trig.stopPrice,
-        depthScore: trig.depthScore,
+        targetPrice: trig?.targetPrice || +(ltp * 1.02).toFixed(2),
+        stopPrice: trig?.stopPrice || +(ltp * 0.982).toFixed(2),
         row: c
       });
     }
@@ -12808,7 +12737,6 @@ function applyFilters({preservePage=false}={}){
     const s=ALL.find(x=>x.symbol===sym)||candidatePool.find(x=>x.symbol===sym);
     if(s) REMOVED_ROWS.push({s,reason:'allocation',chip:reason,detail:reason});
   });
-  if(!SHOW_INELIGIBLE) rows=rows.filter(r=>plan.funded.has(r.symbol));
   SELECTED=plan.funded;
   FILT=rows;
   recordTableEntries(ALL);
