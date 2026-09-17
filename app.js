@@ -1,5 +1,5 @@
-const BUILD_TS='2026-09-16 22:00 IST'; // release build time (IST)
-const APP_VERSION=1394;
+const BUILD_TS='2026-09-17 09:47 IST'; // release build time (IST)
+const APP_VERSION=1395;
 const RADAR_SCORE_VERSION='v1393-btst-engine'; // BTST engine (April 2.0): model top picks at 15:15, +3% GTT, 15:20 next-session exit.
 
 // ── v1358: AN UNCAUGHT ERROR MUST NAME ITSELF ─────────────────────────────────────────────────
@@ -10299,7 +10299,7 @@ function renderTable(){
       // v1144: TGT and SL merged. They are ONE decision - what you ask for against what you risk -
       // and the two columns were part of why the table needed a horizontal scrollbar, which the
       // owner has ruled out. Both numbers survive, with their full tooltips.
-      tgt:`<td style="font-weight:700" title="${escHtml((exitPolicy.viable?`${exitPolicy.targetSource}. Entry-relative objective ${exitPolicy.targetPct?.toFixed(2)??'—'}%; target-hit proceeds are not expected returns.${exitPolicy.positionFloorPct>exitPolicy.targetPct?` CNC after-cost floor is ${exitPolicy.positionFloorPct.toFixed(2)}%.`:''}`:`${exitPolicy.viabilitySource||'Target economics'}; planning target unavailable; allocation uses the 10-share minimum.`)+' '+exitPolicy.horizonNote+' '+exitPolicy.stopSource+(exitPolicy.rewardRisk!=null?` · reward:risk ${exitPolicy.rewardRisk.toFixed(2)}`:''))}"><span style="color:${exitPolicy.viable?'var(--green)':'var(--red)'}">${exitPolicy.viable&&exitPolicy.targetPct!=null?'+'+exitPolicy.targetPct.toFixed(2)+'%':'—'}</span><span style="color:var(--t3)"> / </span><span style="color:var(--red)">−${exitPolicy.stopPct.toFixed(2)}%</span></td>`,
+      tgt:`<td style="font-weight:700" title="${escHtml((exitPolicy.viable?`${exitPolicy.targetSource}. Entry-relative objective ${exitPolicy.targetPct?.toFixed(2)??'—'}%; target-hit proceeds are not expected returns.${exitPolicy.positionFloorPct>exitPolicy.targetPct?` CNC after-cost floor is ${exitPolicy.positionFloorPct.toFixed(2)}%.`:''}`:`${exitPolicy.viabilitySource||'Target economics'}; planning target unavailable; allocation uses the 10-share minimum.`)+' '+exitPolicy.horizonNote+' '+exitPolicy.stopSource+(exitPolicy.rewardRisk!=null?` · reward:risk ${exitPolicy.rewardRisk.toFixed(2)}`:''))}"><span style="color:${exitPolicy.viable?'var(--green)':'var(--red)'}">${exitPolicy.viable&&exitPolicy.targetPct!=null?'+'+exitPolicy.targetPct.toFixed(2)+'%':'—'}</span><span style="color:var(--t3)"> / </span><span style="color:var(--red)">${exitPolicy.stopPct>0?'−'+exitPolicy.stopPct.toFixed(2)+'%':'no stop'}</span></td>`,
       alloc:`<td class="alloc-cell" data-sym="${s.symbol}">${(()=>{
         if(!am||am.rejected||!(am.qty>0)) return '<span style="color:var(--t3);font-size:13px">—</span>';
         return `<span style="color:var(--amber);font-weight:700;font-family:'DM Mono',monospace;font-size:14px">${fmtINR(am.alloc)}</span>${allocationSubline(am,unitLabel)}`;
@@ -12588,17 +12588,26 @@ function startStreamRefresh(){
 // Is the stream actually up? A control that cannot work must say so - a silent dead stream would
 // look exactly like a quiet market.
 let STREAM_STATUS=null;
+// v1395: one slow status reply is not an outage. The helper blocks for several seconds while it
+// flushes 5-minute bars (measured 17-Sep 09:45:00: >8 s) and this 3-second check used to wipe every GO
+// and basket selection while ticks kept flowing. Price freshness (universe + per-stock ticks <= 30 s)
+// already guards real outages every second; only 3 consecutive failed checks invalidate here.
+let STREAM_STATUS_FAILS=0;
 async function loadStreamStatus(){
   if(!KITE_API){STREAM_STATUS=null;return null;}
   try{
     const next=await readHelperResponse('/api/kite/stream',{timeout:3000});
     if(!next||next.ok===false) throw new Error('Stream status unavailable');
+    STREAM_STATUS_FAILS=0;
     STREAM_STATUS={...next,statusUnknown:false,checkedAt:Date.now()};
     acceptStreamEvidence(next);
     return STREAM_STATUS;
   }catch(e){
-    STREAM_STATUS={...(STREAM_STATUS||{}),connected:false,statusUnknown:true};
-    invalidateLiveEvidence('Stream status unavailable');
+    STREAM_STATUS_FAILS++;
+    if(STREAM_STATUS_FAILS>=3){
+      STREAM_STATUS={...(STREAM_STATUS||{}),connected:false,statusUnknown:true};
+      invalidateLiveEvidence('Stream status unavailable');
+    }
     return null;
   }
 }
