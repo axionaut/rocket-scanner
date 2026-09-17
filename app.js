@@ -1,5 +1,5 @@
-const BUILD_TS='2026-09-17 16:05 IST'; // release build time (IST)
-const APP_VERSION=1397;
+const BUILD_TS='2026-09-17 15:45 IST'; // release build time (IST)
+const APP_VERSION=1398;
 const RADAR_SCORE_VERSION='v1393-btst-engine'; // BTST engine (April 2.0): model top picks at 15:15, +3% GTT, 15:20 next-session exit.
 
 // ── v1358: AN UNCAUGHT ERROR MUST NAME ITSELF ─────────────────────────────────────────────────
@@ -4329,6 +4329,14 @@ function _getRowActionStateUncached(s, ignoreMarketClosed=false){
   if(!d)return {state:'WAIT',reason:(rankNote?rankNote+'. ':'')+btstWaitReason()};
   const pick=d.picks.find(p=>normSym(p.symbol)===normSym(s.symbol));
   if(!pick)return {state:'WAIT',reason:(rankNote?rankNote+'. ':'')+"Not in today's BTST top "+d.picks.length};
+  // v1398: ONLY THE 15:15 FINAL IS TRADEABLE. 17 Sep the 15:05 provisional named TEGA/VENUSPIPES/
+  // AWHCL/PNCINFRA/INGERRAND and the owner bought all five for Rs 96,792; the 15:15 final then
+  // replaced every one of them (TVSSRICHAK/FIEMIND/KRSNAA/ENTERO/VSSL) - zero of five overlapped.
+  // The provisional runs on a partial bar whose volume is projected from ~5h50m of the session and
+  // exists to warm the panel cache and preview likely names; the tested edge (+1.18%/trade) is the
+  // FINAL list bought at the close. A provisional pick now shows its names as WAIT, so the basket
+  // can never fund them - the preview informs, only the final trades.
+  if(d.stage!=='final')return {state:'WAIT',reason:`Provisional BTST pick #${pick.rank} (${String(d.asOf||'').slice(11,16)} IST) - preview only, not tradeable. The 15:15 final list decides; it can differ completely (17 Sep: 0 of 5 carried over). Buy 15:20 from the final.`};
   if(!d.gate?.on)return {state:'WAIT',reason:`Market gate off: equal-weight market ${d.gate?.marketTrendPct}% vs its 50DMA (trades above ${d.gate?.threshold}%)`};
   if(!ignoreMarketClosed&&!isEquitySession(Date.now()))return {state:'WAIT',reason:'Market closed'};
   const stale=universePriceStaleness()||stockPriceStaleness(s.symbol);
@@ -13283,10 +13291,31 @@ function buildBasketOrders(capital, selList){
       _meta:{leg:leg||'base',sym,targetPct,stoplossPct,fullQty:null,model:s.basketModel,modelScores:s.modelScores}
     });
   };
+  // v1398: NO EXPORTED ORDER MAY EXCEED THE CASH BEHIND IT. 17 Sep 15:24 a BUY VENUSPIPES 6,000 @
+  // Rs 2,131 (Rs 1.28 crore, ~137x the account) reached the broker and was rejected only by
+  // Zerodha's own margin check - the last line of defence was outside this app. The planner already
+  // sizes every slot, so its funded quantity is the ceiling; anything above it is clamped and a
+  // corrupted quantity cannot leave the file.
+  const clampQty=(s,qty,am)=>{
+    // buyPrice is the price the planner actually sized against; s.price is the fallback.
+    const px=Number(am?.buyPrice)>0?Number(am.buyPrice):(Number(s?.price)||0);
+    if(!(qty>0)||!(px>0)||!(capital>0)) return 0;
+    // The planner's own funded quantity is the ceiling when it sized this row (alloc = qty*price
+    // exactly, so a re-derivation from cost would round a legitimate order down by a share). With
+    // no funded quantity the fallback is whole capital, which only a corrupted qty can exceed.
+    const planned=Number(am?.qty)||0;
+    const ceil=planned>0?Math.floor(planned):Math.floor(capital/px);
+    if(!(ceil>0)) return 0;
+    if(qty>ceil){
+      console.warn(`basket: ${s.symbol} qty ${qty} exceeds the funded ${ceil} at Rs ${px} - clamped`);
+      return ceil;
+    }
+    return qty;
+  };
   exportList.forEach(s=>{
     const am = basketAlloc[s.symbol];
-    const qty = capital > 0 && !am?.rejected ? Math.max(0,Math.floor(Number(am?.qty)||0)) : 0;
-    pushBuyOrder(s,qty,'base',am?.tgtPct);
+    const raw = capital > 0 && !am?.rejected ? Math.max(0,Math.floor(Number(am?.qty)||0)) : 0;
+    pushBuyOrder(s,clampQty(s,raw,am),'base',am?.tgtPct);
   });
   orders.forEach(o=>{
     const total=orders.filter(x=>x._meta.sym===o._meta.sym).reduce((n,x)=>n+x.params.quantity,0);
