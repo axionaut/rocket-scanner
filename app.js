@@ -1,5 +1,5 @@
-const BUILD_TS='2026-09-17 12:55 IST'; // release build time (IST)
-const APP_VERSION=1396;
+const BUILD_TS='2026-09-17 16:05 IST'; // release build time (IST)
+const APP_VERSION=1397;
 const RADAR_SCORE_VERSION='v1393-btst-engine'; // BTST engine (April 2.0): model top picks at 15:15, +3% GTT, 15:20 next-session exit.
 
 // ── v1358: AN UNCAUGHT ERROR MUST NAME ITSELF ─────────────────────────────────────────────────
@@ -6870,13 +6870,23 @@ function getGoalAllocationPlan(){
     maxAlloc:capital>0&&required>0?Math.min(capital,Math.ceil(required)):0,
     turnoverMultiple:capital>0&&netPct>0?dailyGoal/(capital*netPct/100):null};
 }
-function getDefaultMaxAlloc(){return getEffectiveCapital();}
+// v1397: the Auto per-stock cap, in ONE place. v1391/v1392 moved Auto to "equal split, capped at the
+// larger of Rs 5,000 and Capital/TOP_K", but this function kept returning the whole capital, so the
+// Max Allocation KPI read "full capital" and three sizing consumers sized at full capital. This is
+// the same expression the basket planner applies as `autoCap` - not a new number.
+function getAutoMaxAllocCap(capital=getEffectiveCapital()){
+  const cap=Number(capital);
+  if(!(cap>0)) return 0;
+  return Math.max(RocketStrategy.CONFIG.MIN_ALLOCATION_RS,cap/(RocketStrategy.CONFIG.TOP_K||5));
+}
+function getDefaultMaxAlloc(){return getAutoMaxAllocCap();}
 // v1371 (owner): "why would I buy 1 share of 26 rupees? Does that even cover costs and give me a
 // respectable profit?" A trade is worth taking only if it nets what ONE trade has to earn for the
 // owner's own goal: the goal's daily rupee need divided by his entries per day. Not a chosen number -
 // the same per-trade figure v1299 sizes allocations with. Read by every target, so memoized briefly.
 function goalAllocationExplanation(){
-  return 'Empty = Auto: cash is split equally across GO stocks (top 20 by score), each at least Rs 5,000 and at most the larger of Rs 5,000 or Capital / 20. Type a value to cap every stock at that amount instead.';
+  const k=RocketStrategy.CONFIG.TOP_K||5;
+  return `Empty = Auto: cash is split equally across GO stocks, each at least Rs ${RocketStrategy.CONFIG.MIN_ALLOCATION_RS.toLocaleString('en-IN')} and at most the larger of that or Capital / ${k}. Type a value to cap every stock at that amount instead.`;
 }
 
 function getEffectiveCapital(){
@@ -8399,7 +8409,9 @@ function renderPerformance(){
     {label:'Win Rate',value:p.winRate+'%',color:p.winRate>=55?'var(--green)':p.winRate>=45?'var(--amber)':'var(--red)',sub:`${p.winners}W · ${p.losers}L lots`},
     {label:'Expectancy',value:fmtPerfRs(p.expectancy),color:clr(p.expectancy),sub:'Net ₹ you make per lot, on average'},
     {label:'Profit Factor',value:p.profitFactor!=null?p.profitFactor:'—',color:p.profitFactor>=1.5?'var(--green)':p.profitFactor>=1?'var(--amber)':'var(--red)',sub:'Gross wins ÷ gross losses · above 1 = profitable'},
-    {label:'Max Allocation',value:autoMaxAlloc?fmtINR(autoMaxAlloc):'?',color:autoMaxAlloc?'var(--amber)':'var(--t3)',sub:goalAllocationExplanation()+(maxAllocOverride?` Typed override ${fmtINR(typedMaxAlloc)} active.`:'')},
+    {label:'Max Allocation',value:maxAllocOverride?fmtINR(typedMaxAlloc):(autoMaxAlloc?fmtINR(autoMaxAlloc):'?'),
+      color:(maxAllocOverride||autoMaxAlloc)?'var(--amber)':'var(--t3)',
+      sub:(maxAllocOverride?`Typed cap, per stock. `:`Auto cap, per stock (Capital ${fmtINR(allocationCapital)} / ${RocketStrategy.CONFIG.TOP_K||5}, min ${fmtINR(RocketStrategy.CONFIG.MIN_ALLOCATION_RS)}). `)+goalAllocationExplanation()},
     (()=>{const g=getHighGapStats();
       return {label:'High vs Exit',
         value:g.meanMin==null?'—':(g.meanMin>0?`+${g.meanMin}m`:`${g.meanMin}m`),
@@ -9897,7 +9909,7 @@ function _planDualBasketUncached(rows,capital){
   let remaining=Math.max(0,Number(capital||0)-BASKET_CASH_RESERVE_RS);
   const pool=[...(rows||[])].sort((a,b)=>(Number(b.score)||0)-(Number(a.score)||0)||a.symbol.localeCompare(b.symbol));
   const unitDebitOf=price=>price+calcZerodhaCharges(price,1,false,false,false);
-  const autoCap=Math.max(minRequired,Number(capital||0)/(RocketStrategy.CONFIG.TOP_K||5));
+  const autoCap=getAutoMaxAllocCap(capital);
   let candidatesLeft=pool.filter(r=>!EXPORT_EXCLUDED.has(r.symbol)&&isStockEligible(r)&&getBuyPrice(r)>0).length;
   for(const r of pool){
     let reason=EXPORT_EXCLUDED.has(r.symbol)?'Excluded from basket by you':!isStockEligible(r)?getRowActionState(r).reason:null;
