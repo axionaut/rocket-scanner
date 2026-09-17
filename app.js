@@ -1,5 +1,5 @@
-const BUILD_TS='2026-09-17 09:47 IST'; // release build time (IST)
-const APP_VERSION=1395;
+const BUILD_TS='2026-09-17 12:55 IST'; // release build time (IST)
+const APP_VERSION=1396;
 const RADAR_SCORE_VERSION='v1393-btst-engine'; // BTST engine (April 2.0): model top picks at 15:15, +3% GTT, 15:20 next-session exit.
 
 // ── v1358: AN UNCAUGHT ERROR MUST NAME ITSELF ─────────────────────────────────────────────────
@@ -2846,6 +2846,9 @@ function getGainerCohort(rows){
 
 
 function radarRankTieBreak(a,b){
+  // v1396: the BTST engine's live ranking orders rows that share a score (all WAIT rows before the picks).
+  const ra=typeof btstRankOf==='function'?btstRankOf(a&&a.symbol):null,rb=typeof btstRankOf==='function'?btstRankOf(b&&b.symbol):null;
+  if(ra||rb) return (ra||1e9)-(rb||1e9);
   const st=r=>{
     const d=Number(r&&r.depthBlendPct); if(Number.isFinite(d)) return d;
     const p=Number(r&&r.setupPct); return Number.isFinite(p)?p:-1;
@@ -3571,8 +3574,9 @@ function dualScoreCell(row){
     </div>`;
   }
   if(act.state==='WAIT'){
+    const rk=btstRankOf(row.symbol);
     return `<div style="display:flex;align-items:center;gap:6px;justify-content:flex-end">
-      <span style="font-family:'DM Mono',monospace;font-weight:700;font-size:14px;color:var(--amber)">${sc}</span>
+      <span style="font-family:'DM Mono',monospace;font-weight:700;font-size:14px;color:var(--amber)" title="${rk?escHtml(btstRankNote(row.symbol)+' - ranking only, not a buy signal'):'Not ranked by the BTST engine'}">${rk?'#'+rk:sc}</span>
       <span style="font-size:10px;font-weight:600;color:var(--t3)">WAIT</span>
     </div>`;
   }
@@ -4181,15 +4185,18 @@ function depthQualificationIssue(sym){
 // ── BTST ENGINE PICKS (v1393) ──────────────────────────────────────────────────────────────────
 // The helper runs dev/btst_engine.py at 15:05 (provisional) and 15:15 (final) and writes btst_picks.json.
 // GO = today's live picks while the market gate is on. Nothing else is a buy recommendation.
-let BTST={data:null,key:'',v:0,loadedAt:0};
+let BTST={data:null,key:'',v:0,loadedAt:0,rank:null,rankKey:''};
 async function loadBtstPicks(){
   if(!KITE_API) return;
   try{
-    const j=await readHelperResponse('/api/inputs/file?name=btst_picks.json',{timeout:6000});
-    const key=[j?.asOf,j?.stage,j?.ok,j?.session].join('|');
+    const [j,rk]=await Promise.all([
+      readHelperResponse('/api/inputs/file?name=btst_picks.json',{timeout:6000}).catch(()=>null),
+      readHelperResponse('/api/inputs/file?name=btst_rank.json',{timeout:6000}).catch(()=>null)]);
+    const key=[j?.asOf,j?.stage,j?.ok,j?.session].join('|'),rankKey=[rk?.asOf,rk?.ok,rk?.session].join('|');
     BTST.loadedAt=Date.now();
-    if(key===BTST.key) return;
-    BTST={data:j,key,v:BTST.v+1,loadedAt:Date.now()};
+    if(key===BTST.key&&rankKey===BTST.rankKey) return;
+    BTST={data:j,key,v:BTST.v+1,loadedAt:Date.now(),rank:rk,rankKey};
+    _btstRankMemo=null;
     for(const row of ALL){ROW_ACTION_MEMO.delete(row);setRadarEvidenceScore(row);}
     _dualPlanMemo=null;
     if(ALL.length) applyFilters({preservePage:true});
@@ -4199,6 +4206,28 @@ async function loadBtstPicks(){
 function btstToday(){
   const d=BTST.data;
   return d&&d.ok&&d.mode==='live'&&d.session===getSessionDate()&&Array.isArray(d.picks)?d:null;
+}
+// v1396: full ranking of the liquid universe. Today's picks file (15:05/15:15) wins; before it the helper's
+// intraday preview (btst_rank.json, every 10 minutes) orders the table. A preview never makes a stock GO.
+let _btstRankMemo=null;
+function btstRanking(){
+  const pk=btstToday();
+  const src=pk&&Array.isArray(pk.ranking)?pk
+    :(BTST.rank&&BTST.rank.ok&&BTST.rank.mode==='live'&&BTST.rank.session===getSessionDate()&&Array.isArray(BTST.rank.ranking)?BTST.rank:null);
+  if(!src) return null;
+  if(_btstRankMemo&&_btstRankMemo.src===src) return _btstRankMemo;
+  const map=new Map();
+  src.ranking.forEach((x,i)=>{const s=normSym(x&&x[0]);if(s&&!map.has(s))map.set(s,i+1);});
+  _btstRankMemo={src,map,n:src.ranking.length,at:String(src.asOf||'').slice(11,16),stage:src.stage};
+  return _btstRankMemo;
+}
+function btstRankOf(sym){
+  const r=btstRanking();
+  return r&&sym?r.map.get(normSym(sym))||null:null;
+}
+function btstRankNote(sym){
+  const r=btstRanking(),k=btstRankOf(sym);
+  return r&&k?`BTST rank #${k} of ${r.n} (${r.stage==='preview'?'preview':r.stage} ${r.at})`:'';
 }
 function btstPickOf(sym){
   const d=btstToday();
@@ -4296,9 +4325,10 @@ function _getRowActionStateUncached(s, ignoreMarketClosed=false){
   const held=getCombinedOpenPositionMap()[s.symbol];
   if(held?.qty>0)return {state:'BLOCKED',reason:'Already held (no additional buys)'};
   const d=btstToday();
-  if(!d)return {state:'WAIT',reason:btstWaitReason()};
+  const rankNote=btstRankNote(s.symbol);
+  if(!d)return {state:'WAIT',reason:(rankNote?rankNote+'. ':'')+btstWaitReason()};
   const pick=d.picks.find(p=>normSym(p.symbol)===normSym(s.symbol));
-  if(!pick)return {state:'WAIT',reason:"Not in today's BTST top "+d.picks.length};
+  if(!pick)return {state:'WAIT',reason:(rankNote?rankNote+'. ':'')+"Not in today's BTST top "+d.picks.length};
   if(!d.gate?.on)return {state:'WAIT',reason:`Market gate off: equal-weight market ${d.gate?.marketTrendPct}% vs its 50DMA (trades above ${d.gate?.threshold}%)`};
   if(!ignoreMarketClosed&&!isEquitySession(Date.now()))return {state:'WAIT',reason:'Market closed'};
   const stale=universePriceStaleness()||stockPriceStaleness(s.symbol);
@@ -12164,7 +12194,7 @@ function applyFilters({preservePage=false}={}){
     }
     return true;
   });
-  rows.sort((a,b)=>(Number(b.score)||0)-(Number(a.score)||0));
+  rows.sort((a,b)=>(Number(b.score)||0)-(Number(a.score)||0)||radarRankTieBreak(a,b));
   const excludedByFilters=new Set(REMOVED_ROWS.map(r=>r.s.symbol));
   const candidatePool=rows.filter(r=>!excludedByFilters.has(r.symbol));
   const plan=planFundedRecommendations(candidatePool,getEffectiveCapital());
