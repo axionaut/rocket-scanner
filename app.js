@@ -1,5 +1,5 @@
-const BUILD_TS='2026-09-18 15:40 IST'; // release build time (IST)
-const APP_VERSION=1401;
+const BUILD_TS='2026-09-18 16:05 IST'; // release build time (IST)
+const APP_VERSION=1402;
 const RADAR_SCORE_VERSION='v1393-btst-engine'; // BTST engine (April 2.0): model top picks at 15:15, +3% GTT, 15:20 next-session exit.
 
 // ── v1358: AN UNCAUGHT ERROR MUST NAME ITSELF ─────────────────────────────────────────────────
@@ -12432,12 +12432,33 @@ function renderStatusBar(){
   if(SURV_HARD_REMOVED>0) bits.push(`<span style="color:var(--amber)" title="Stocks removed due to NSE surveillance lists (GSM/ASM/Trade-for-trade).">🛡 ${SURV_HARD_REMOVED} surv</span>`);
   let tape='';
   try{tape=compactTapeStatus();}catch(e){}
-  el.innerHTML=bits.join(' <span style="color:var(--t3)">|</span> ')+(tape?' <span style="color:var(--t3)">|</span> '+tape:'');
+  if(tape) bits.push(tape);
+  // v1402: say what is actually in the export file. The owner read "last update 14:48" off the
+  // file's timestamp at 15:10 and reasonably concluded the writer was dead - it was idle, because
+  // nothing is GO before the 15:15 final so the content never changed and the file was never
+  // rewritten. State belongs on screen, not inferred from an mtime.
+  try{
+    const b=basketFileStatus();
+    if(b) bits.push(b);
+  }catch(e){}
+  el.innerHTML=bits.join(' <span style="color:var(--t3)">|</span> ');
   updateIneligibleToggle();
 }
 // The live tape reduced to a dot plus one phrase. The full census (instruments, ticks, symbols with
 // a tape, depth) moves into the tooltip - it is diagnostic, read once when something looks wrong,
 // and it does not deserve a permanent row above the recommendations.
+// What is in Zerodha_Basket_Buy.json right now, and when it was armed. Three states only:
+// armed (orders on disk), empty (nothing written yet today), or a write error.
+function basketFileStatus(){
+  if(typeof _lastSavedBasketCount!=='number') return '';
+  if(_lastBasketSyncError)
+    return `<span style="color:var(--red)" title="${escHtml('Basket write failed: '+_lastBasketSyncError+'. Use the Buy Basket button to retry.')}">⚠ basket write failed</span>`;
+  if(_lastSavedBasketCount>0){
+    const at=_lastSavedBasketAt?new Date(_lastSavedBasketAt).toLocaleTimeString('en-IN',{hour12:false,hour:'2-digit',minute:'2-digit'}):'';
+    return `<span style="color:var(--amber)" title="${escHtml('Zerodha_Basket_Buy.json holds '+_lastSavedBasketCount+' order(s). It is kept until a new set of GO picks replaces it - an empty board (market closed, stale tick) no longer erases it. Import this file in Kite.')}">🧺 basket ${_lastSavedBasketCount}${at?' @'+at:''}</span>`;
+  }
+  return `<span style="color:var(--t3)" title="${escHtml('No basket written yet. It fills automatically when today\'s 15:15 FINAL picks arrive and are funded.')}">🧺 basket empty</span>`;
+}
 function compactTapeStatus(){
   const st=(typeof STREAM_STATUS!=='undefined'&&STREAM_STATUS)||null;
   const now=Date.now(),inSession=isEquitySession(now);
@@ -12779,7 +12800,8 @@ function refreshStrategySafety(){
 }
 function startStreamRefresh(){
   if(_streamRefreshTimer) return;
-  if(!startStreamRefresh.btst){startStreamRefresh.btst=setInterval(()=>{loadBtstPicks();try{checkTimeAlerts();}catch(e){}},20000);loadBtstPicks();try{checkTimeAlerts();}catch(e){}}
+  if(!startStreamRefresh.btst){startStreamRefresh.btst=setInterval(()=>{loadBtstPicks();try{checkTimeAlerts();}catch(e){}},20000);loadBtstPicks();try{checkTimeAlerts();}catch(e){}
+    try{seedSavedBasketCount();}catch(e){}}
   _streamRefreshUiTimer=setInterval(()=>{try{refreshStrategySafety();renderLiveTapeBar();}catch(e){console.warn('Strategy safety refresh',e);}},1000);
   if(!_streamVisibilityBound){
     _streamVisibilityBound=true;
@@ -13534,6 +13556,29 @@ function requestBasketSync({ manual = false, precomputedOrders = null } = {}){
   });
 }
 
+// v1402: AN EMPTY AUTO-SYNC MAY NEVER ERASE A REAL BASKET.
+// The file mirrored live GO state, and GO is transient by design: it needs an open market
+// (EQUITY_CLOSE_MIN=15:30) and a per-stock tick under 30s old. So the basket armed at 15:15 was
+// wiped at 15:30:03 the instant the session flag flipped - measured 18 Sep, the file went to `[]`
+// at exactly 15:30:03 - and a single slow tick could blank it mid-window too (the owner found it
+// empty at 15:18 with valid final picks on screen). Nothing ever restored it, because the writer
+// only rewrites when the signature CHANGES, so an accidental empty is permanent.
+// A basket export is a SNAPSHOT OF A DECISION, not a live mirror. An empty result now means "no
+// new decision", never "erase the decision you are about to import". Manual export still clears.
+function basketAutoSyncWouldErase(orders, manualRequested){
+  return !manualRequested && (!orders || !orders.length) && _lastSavedBasketCount > 0;
+}
+let _lastSavedBasketCount = 0;
+// Seeded from disk on load: without this a page refresh at 15:16 resets the counter to 0, the
+// guard sees "nothing to protect" and the next empty auto-sync erases the basket anyway - the
+// exact bug, one reload later.
+async function seedSavedBasketCount(){
+  if(!KITE_API) return;
+  try{
+    const j = await readHelperResponse('/api/inputs/file?name=Zerodha_Basket_Buy.json',{timeout:6000});
+    if(Array.isArray(j)) _lastSavedBasketCount = j.length;
+  }catch(e){}
+}
 async function _drainBasketQueue(preferredOrders = null){
   if(_basketWriterInFlight) return;
 
@@ -13541,6 +13586,13 @@ async function _drainBasketQueue(preferredOrders = null){
   const targetSig = getCanonicalBasketSignature(orders);
   const waiters = _pendingWaiters.slice();
   _pendingWaiters = [];
+
+  if(basketAutoSyncWouldErase(orders, waiters.some(w => w.manual))){
+    waiters.forEach(w => {
+      try { w.resolve({ ok: true, count: _lastSavedBasketCount, kept: true }); } catch(e){}
+    });
+    return;
+  }
 
   // If nothing changed and no manual export requested, resolve waiting callers and return
   if(targetSig === _lastSavedBasketSig && !waiters.some(w => w.manual)){
@@ -13561,6 +13613,7 @@ async function _drainBasketQueue(preferredOrders = null){
     recordModelBasketExport(orders);
     _lastSavedBasketSig = targetSig;
     _lastSavedBasketAt = Date.now();
+    _lastSavedBasketCount = orders.length;
     _lastBasketSyncError = null;
     waiters.forEach(w => {
       try { w.resolve({ ok: true, count: orders.length }); } catch(e){}
@@ -13573,10 +13626,14 @@ async function _drainBasketQueue(preferredOrders = null){
   } finally {
     _basketWriterInFlight = false;
     renderBasketBtn();
-    // Reconcile: if write succeeded and board changed while in-flight, or new waiters arrived, drain again immediately
+    // Reconcile: if write succeeded and board changed while in-flight, or new waiters arrived, drain again immediately.
+    // An empty fresh result is NOT a change worth re-draining for (v1402) - the signature of `[]`
+    // differs from a real basket forever, so without this the reconcile would re-enter on every
+    // pass for the rest of the session just to hit the keep-guard and return.
     const freshOrders = getDesiredBasketOrders();
     const freshSig = getCanonicalBasketSignature(freshOrders);
-    if((writeOk && freshSig !== _lastSavedBasketSig) || _pendingWaiters.length > 0){
+    const freshWouldErase = basketAutoSyncWouldErase(freshOrders, false);
+    if((writeOk && freshSig !== _lastSavedBasketSig && !freshWouldErase) || _pendingWaiters.length > 0){
       _drainBasketQueue(freshOrders);
     }
   }
