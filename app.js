@@ -1,5 +1,5 @@
-const BUILD_TS='2026-09-18 14:05 IST'; // release build time (IST)
-const APP_VERSION=1400;
+const BUILD_TS='2026-09-18 15:40 IST'; // release build time (IST)
+const APP_VERSION=1401;
 const RADAR_SCORE_VERSION='v1393-btst-engine'; // BTST engine (April 2.0): model top picks at 15:15, +3% GTT, 15:20 next-session exit.
 
 // ── v1358: AN UNCAUGHT ERROR MUST NAME ITSELF ─────────────────────────────────────────────────
@@ -7478,21 +7478,11 @@ function renderStats(){
     marketCard + universeCard + triggersCard + protectionCard + allocCard + bookedCard;
   balanceGrids();
 
-  // Streamlined infoBar pills
-  const filterPills = [];
-  if (SUPPRESSED_HELD > 0) {
-    filterPills.push(`<span class="info-pill pill-rose" title="Held stocks are suppressed from recommendations to prevent averaging down.">📌 ${SUPPRESSED_HELD} already held</span>`);
-  }
-  if (SURV_HARD_REMOVED > 0) {
-    filterPills.push(`<span class="info-pill pill-orange" title="Stocks removed due to NSE surveillance lists (GSM/ASM/Trade-for-trade).">🛡 ${SURV_HARD_REMOVED} surveillance excluded</span>`);
-  }
-  if (triggered.length > 0) {
-    filterPills.push(`<span class="info-pill pill-green" title="Today's BTST picks ready to buy at 15:20.">🚀 ${triggered.length} BTST picks GO</span>`);
-  }
+  // v1401: the held / surveillance / GO pills moved into the single status line (renderStatusBar),
+  // so this row is no longer drawn - it was a full-width row carrying three short pills. Emptied
+  // rather than deleted so the element and its callers stay intact.
   const infoBarEl = document.getElementById('infoBar');
-  if (infoBarEl) {
-    infoBarEl.innerHTML = `<div style="display:flex;gap:6px;flex-wrap:wrap">${filterPills.join('')}</div>`;
-  }
+  if (infoBarEl) infoBarEl.innerHTML = '';
 }
 
 const COL_ORDER_LS='rs_col_order_v1';
@@ -12170,6 +12160,10 @@ function intradayPasteBarHtml(){
   const st=STREAM_STATUS;
   const connected=!!(st&&st.connected&&!st.statusUnknown&&(!inSession||(Number.isFinite(st.lastTickAt)&&st.lastTickAt>0&&st.lastTickAt<=now&&now-st.lastTickAt<=30000)));
   const live=inSession&&connected&&!needsLogin;
+  // v1401: when nothing needs doing, this whole row is chrome - the status line already carries the
+  // dot, the instrument count and the full census in its tooltip. The panel still draws when Kite
+  // needs a login or first-time keys, because those are BUTTONS the owner must click, not a readout.
+  if(!needsLogin&&!needsSetup) return '';
   const bars=Object.keys(INTRADAY_BARS||{}).length;
   const dot=!inSession?'var(--border-hi)':(live?'var(--green)':(needsLogin||st?.statusUnknown?'var(--amber)':'var(--red)'));
   // THE DEPTH OF THE SESSION, NOT ONLY THE BREADTH OF IT (v1264). `1648 symbols with a tape` was
@@ -12419,13 +12413,57 @@ function scheduleApplyFilters(){
 }
 
 
+// v1401: ONE ROW, NOT FOUR. The held/surveillance pills, the count line and the live-tape panel each
+// owned a full-width row above the table, so on a 1080p screen the owner saw four rows of chrome and
+// about five recommendations. They are now one line: counts, exclusions and tape health, with the
+// detail moved into tooltips. Nothing is removed - every number still renders, and the tape's
+// login/setup controls still appear inline when Kite needs them (that is an action, not chrome).
 function renderStatusBar(){
   const el=document.getElementById('statusBar');if(!el)return;
   const go=ALL.filter(isStockEligible).length,wait=ALL.filter(r=>getRowActionState(r).state==='WAIT').length;
   const plan=computeAlloc(getEffectiveCapital(),FILT.filter(r=>SELECTED.has(r.symbol)));
   const active=Object.values(plan).filter(a=>!a.rejected&&a.qty>0);
-  el.innerHTML=`<span class="sb-count">${FILT.length} shown / ${ALL.length} scanned</span> | ${go} GO | ${wait} WAIT | ${active.length} funded | ${fmtINR(active.reduce((v,a)=>v+a.debit,0))} estimated buy debit`;
+  const bits=[`<span class="sb-count">${FILT.length}/${ALL.length}</span>`,
+    `<span style="color:var(--green)">${go} GO</span>`,
+    `${wait} WAIT`,
+    `${active.length} funded`,
+    `${fmtINR(active.reduce((v,a)=>v+a.debit,0))} debit`];
+  if(SUPPRESSED_HELD>0) bits.push(`<span style="color:#f472b6" title="Held stocks are suppressed from recommendations to prevent averaging down.">📌 ${SUPPRESSED_HELD} held</span>`);
+  if(SURV_HARD_REMOVED>0) bits.push(`<span style="color:var(--amber)" title="Stocks removed due to NSE surveillance lists (GSM/ASM/Trade-for-trade).">🛡 ${SURV_HARD_REMOVED} surv</span>`);
+  let tape='';
+  try{tape=compactTapeStatus();}catch(e){}
+  el.innerHTML=bits.join(' <span style="color:var(--t3)">|</span> ')+(tape?' <span style="color:var(--t3)">|</span> '+tape:'');
   updateIneligibleToggle();
+}
+// The live tape reduced to a dot plus one phrase. The full census (instruments, ticks, symbols with
+// a tape, depth) moves into the tooltip - it is diagnostic, read once when something looks wrong,
+// and it does not deserve a permanent row above the recommendations.
+function compactTapeStatus(){
+  const st=(typeof STREAM_STATUS!=='undefined'&&STREAM_STATUS)||null;
+  const now=Date.now(),inSession=isEquitySession(now);
+  const needsSetup=!KITE_API||KITE_API.mode!=='connect';
+  const needsLogin=!needsSetup&&(KITE_API.needsLogin||!KITE_API.hasToken||KITE_API.tokenValid===false);
+  // Same liveness test as the full panel (line ~12171): a `connected` flag alone is not evidence,
+  // the last tick must also be within 30s. Copying the weaker test here would let this line read
+  // green while the board correctly refuses to trade.
+  const connected=!!(st&&st.connected&&!st.statusUnknown&&(!inSession||(Number.isFinite(st.lastTickAt)&&st.lastTickAt>0&&st.lastTickAt<=now&&now-st.lastTickAt<=30000)));
+  const live=inSession&&connected&&!needsLogin;
+  const bars=Object.keys(INTRADAY_BARS||{}).length;
+  let txt,col,tip;
+  if(live){
+    col='var(--green)';txt='tape '+(st.subscribed||0);
+    tip=`Live: ${st.subscribed||0} instruments, ${(st.ticks||0).toLocaleString('en-IN')} ticks, ${bars} symbols with a tape${String(tapeDepthNoteHtml(tapeSessionDepth())).replace(/<[^>]*>/g,'')}. Five-minute bars are folded from this feed; the board re-reads them every 30 seconds.`;
+  }else if(!inSession){
+    col='var(--t3)';txt='market closed';tip=`Helper connected, ${bars} symbols stored. Background market refresh is paused outside 09:15-15:30.`;
+  }else if(needsLogin){
+    col='var(--amber)';txt='Kite login expired';tip='Kite Connect tokens expire around 06:00 IST. One click, once a day - use the Log in to Kite button.';
+  }else if(st&&st.statusUnknown){
+    col='var(--amber)';txt='tape status unknown';tip='The helper did not answer the stream check. Retrying; three consecutive failures invalidate live evidence.';
+  }else{
+    col='var(--red)';txt='tape down';
+    tip='No live tape'+(st&&st.why?' - '+st.why:'')+'. The board only recommends on a current read, so GO turns to WAIT rather than acting on stale prices.';
+  }
+  return `<span title="${escHtml(tip)}"><span style="color:${col}">●</span> ${escHtml(txt)}</span>`;
 }
 function updateIneligibleToggle(){
   const button=document.getElementById('btnToggleBelowThreshold');
