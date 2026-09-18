@@ -37,6 +37,7 @@
     </div>
     <button class="btn" id="driveBtn" onclick="connectCloudStorage()" title="Connect or reconnect Google Drive">Drive</button>
 
+    <button class="btn" id="alertToggle" onclick="setAlertsEnabled(!ALERTS_ON)" title="Audible + on-screen alerts at 14:45 (helper check), 15:15 (final picks) and 15:20 (buy/exit), and whenever the picks file changes. Click once per session to let the browser play sound." style="padding:8px 12px;margin-left:4px">🔔 Alerts on</button>
     <button class="btn" id="goalBtn" onclick="toggleGoalPopover()" title="Goal settings" style="font-size:16px;padding:8px 12px;margin-left:4px">⚙ Goal</button>
     <div id="goalPopover" style="display:none;position:absolute;top:100%;right:0;margin-top:8px;background:var(--bg-raised);border:1px solid var(--border-hi);border-radius:12px;padding:14px 16px;z-index:1000;box-shadow:0 8px 32px rgba(0,0,0,.35);width:440px;max-width:calc(100vw - 24px)">
       <div id="goalPopoverContent" style="font-size:13px;line-height:1.6;color:var(--t2)"></div>

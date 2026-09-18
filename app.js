@@ -1,5 +1,5 @@
-const BUILD_TS='2026-09-18 13:35 IST'; // release build time (IST)
-const APP_VERSION=1399;
+const BUILD_TS='2026-09-18 14:05 IST'; // release build time (IST)
+const APP_VERSION=1400;
 const RADAR_SCORE_VERSION='v1393-btst-engine'; // BTST engine (April 2.0): model top picks at 15:15, +3% GTT, 15:20 next-session exit.
 
 // ── v1358: AN UNCAUGHT ERROR MUST NAME ITSELF ─────────────────────────────────────────────────
@@ -4182,6 +4182,119 @@ function depthQualificationIssue(sym){
     return `Average order size gap ${oDiff.toFixed(1)} is not above the earlier ${oPrior.diff.toFixed(1)}`;
   return null;
 }
+// ── TRADE ALERTS (v1400) ───────────────────────────────────────────────────────────────────────
+// The BTST window is ~5 minutes wide (final picks 15:15, buy 15:20) and the owner is not watching
+// the screen - on 17 Sep he acted on the 15:05 provisional partly because nothing announced the
+// final. These alerts are deliberately NOT showToast: that auto-dismisses and each new toast
+// removes the previous one, so a missed glance is a missed trade. An alert stays until dismissed.
+const ALERT_STORE='rs_alerts_enabled';
+let ALERTS_ON=(()=>{try{return localStorage.getItem(ALERT_STORE)!=='0';}catch(e){return true;}})();
+const ALERT_FIRED=new Set();        // key -> already fired this session (survives re-render, not reload)
+let _alertAudioCtx=null;
+function setAlertsEnabled(on){
+  ALERTS_ON=!!on;
+  try{localStorage.setItem(ALERT_STORE,ALERTS_ON?'1':'0');}catch(e){}
+  const b=document.getElementById('alertToggle');
+  if(b){b.textContent=ALERTS_ON?'🔔 Alerts on':'🔕 Alerts off';b.classList.toggle('alert-off',!ALERTS_ON);}
+  if(ALERTS_ON) alertChime(1);   // audible confirmation doubles as the browser autoplay unlock
+}
+// WebAudio rather than an audio file: no asset to ship, no load failure, and the page is served
+// from GitHub Pages where a missing file would fail silently.
+function alertChime(beeps=2){
+  if(!ALERTS_ON) return;
+  try{
+    const AC=window.AudioContext||window.webkitAudioContext; if(!AC) return;
+    _alertAudioCtx=_alertAudioCtx||new AC();
+    const ctx=_alertAudioCtx;
+    if(ctx.state==='suspended') ctx.resume().catch(()=>{});
+    for(let i=0;i<beeps;i++){
+      const t0=ctx.currentTime+i*0.28,o=ctx.createOscillator(),g=ctx.createGain();
+      o.type='sine'; o.frequency.setValueAtTime(i%2?988:1319,t0);   // B5 / E6
+      g.gain.setValueAtTime(0.0001,t0);
+      g.gain.exponentialRampToValueAtTime(0.25,t0+0.02);
+      g.gain.exponentialRampToValueAtTime(0.0001,t0+0.24);
+      o.connect(g);g.connect(ctx.destination);o.start(t0);o.stop(t0+0.26);
+    }
+  }catch(e){}
+}
+function dismissAlert(){const el=document.getElementById('tradeAlert');if(el)el.remove();}
+// once=a key that must only ever fire once per session; omit for alerts that may repeat.
+function fireAlert({title,body,tone='go',beeps=2,once=null}){
+  if(once){ if(ALERT_FIRED.has(once)) return false; ALERT_FIRED.add(once); }
+  if(!ALERTS_ON) return false;
+  try{
+    dismissAlert();
+    const d=document.createElement('div');
+    d.id='tradeAlert'; d.className='trade-alert alert-'+tone; d.setAttribute('role','alert');
+    d.innerHTML='<div class="ta-title">'+escHtml(title)+'</div><div class="ta-body">'+body+'</div>'
+      +'<button class="ta-x" type="button" aria-label="Dismiss">Dismiss</button>';
+    d.querySelector('.ta-x').addEventListener('click',dismissAlert);
+    document.body.appendChild(d);
+    alertChime(beeps);
+    // Desktop notification too, for when the tab is in the background - the whole point.
+    if(typeof Notification!=='undefined'&&Notification.permission==='granted'){
+      try{new Notification(title,{body:String(body).replace(/<[^>]*>/g,''),tag:'rs-'+(once||tone)});}catch(e){}
+    }
+  }catch(e){}
+  return true;
+}
+function requestAlertPermission(){
+  if(typeof Notification==='undefined'||Notification.permission!=='default') return;
+  try{Notification.requestPermission().catch(()=>{});}catch(e){}
+}
+// Runs here, not in initVersion(): that IIFE executes at line ~1338, far above this const, so
+// touching ALERTS_ON from it throws a temporal-dead-zone ReferenceError and the button never
+// initialises (silently, inside its try/catch). Caught in testing.
+function initAlertUI(){
+  try{
+    const b=document.getElementById('alertToggle');
+    if(b){b.textContent=ALERTS_ON?'🔔 Alerts on':'🔕 Alerts off';b.classList.toggle('alert-off',!ALERTS_ON);}
+    if(ALERTS_ON) requestAlertPermission();
+  }catch(e){}
+}
+if(typeof document!=='undefined'){
+  if(document.readyState==='loading') document.addEventListener('DOMContentLoaded',initAlertUI);
+  else initAlertUI();
+}
+// Clock-driven alerts. Checked every 20s alongside the picks poll. Each fires once per session.
+function checkTimeAlerts(){
+  if(!ALERTS_ON) return;
+  const c=istNow(),session=getSessionDate();
+  if(!isNseTradingDate(session)) return;
+  const at=(h,m)=>h*60+m, mins=c.mins, day=session;
+  // Fire within a 2-minute window so a backgrounded/throttled tab still catches it.
+  const due=(h,m)=>mins>=at(h,m)&&mins<at(h,m)+2;
+  if(due(14,45)) fireAlert({once:day+'|helper',tone:'warn',beeps:1,
+    title:'14:45 — helper check',
+    body:'BTST runs at 15:05 and 15:15. Make sure the helper is up and streaming now so the 15:05 run warms the panel cache.'});
+  if(due(15,15)) fireAlert({once:day+'|final',tone:'go',beeps:3,
+    title:'15:15 — FINAL picks due',
+    body:'The final list is the only tradeable one. Check the table, then buy at 15:20.'});
+  if(due(15,19)) fireAlert({once:day+'|buy',tone:'go',beeps:3,
+    title:'15:20 — BUY window',
+    body:'Import <strong>Zerodha_Basket_Buy</strong> and send. Exits: +3% GTT, sell 15:20 next session.'});
+  if(due(15,18)) fireAlert({once:day+'|exit',tone:'warn',beeps:2,
+    title:'15:20 — EXIT unfilled positions',
+    body:'Sell any BTST position from the previous session whose +3% target has not filled.'});
+}
+// Fired from loadBtstPicks when the picks file's stage changes. Only 'final' is tradeable (v1398).
+function alertOnPicksChange(prev,next){
+  if(!next||!next.ok||next.mode!=='live'||next.session!==getSessionDate()) return;
+  if(prev&&prev.asOf===next.asOf&&prev.stage===next.stage) return;
+  const names=(next.picks||[]).map(p=>p.symbol).join(', ')||'none';
+  const at=String(next.asOf||'').slice(11,16);
+  const gateOff=next.gate&&next.gate.on===false;
+  if(next.stage==='final'){
+    fireAlert({once:getSessionDate()+'|final-file',tone:gateOff?'warn':'go',beeps:3,
+      title:gateOff?'FINAL picks in — but the market gate is OFF':'FINAL picks are in ('+at+')',
+      body:gateOff?'No buys today: the gate is off. '+escHtml(names)
+        :'<strong>'+escHtml(names)+'</strong><br>Buy at 15:20. This is the tradeable list.'});
+  }else if(next.stage==='provisional'){
+    fireAlert({once:getSessionDate()+'|prov-file',tone:'warn',beeps:1,
+      title:'Provisional picks ('+at+') — not tradeable',
+      body:escHtml(names)+'<br>Preview only. Wait for the 15:15 final; on 17 Sep it replaced all five.'});
+  }
+}
 // ── BTST ENGINE PICKS (v1393) ──────────────────────────────────────────────────────────────────
 // The helper runs dev/btst_engine.py at 15:05 (provisional) and 15:15 (final) and writes btst_picks.json.
 // GO = today's live picks while the market gate is on. Nothing else is a buy recommendation.
@@ -4195,7 +4308,9 @@ async function loadBtstPicks(){
     const key=[j?.asOf,j?.stage,j?.ok,j?.session].join('|'),rankKey=[rk?.asOf,rk?.ok,rk?.session].join('|');
     BTST.loadedAt=Date.now();
     if(key===BTST.key&&rankKey===BTST.rankKey) return;
+    const prevPicks=BTST.data;
     BTST={data:j,key,v:BTST.v+1,loadedAt:Date.now(),rank:rk,rankKey};
+    try{alertOnPicksChange(prevPicks,j);}catch(e){}
     _btstRankMemo=null;
     for(const row of ALL){ROW_ACTION_MEMO.delete(row);setRadarEvidenceScore(row);}
     _dualPlanMemo=null;
@@ -12626,7 +12741,7 @@ function refreshStrategySafety(){
 }
 function startStreamRefresh(){
   if(_streamRefreshTimer) return;
-  if(!startStreamRefresh.btst){startStreamRefresh.btst=setInterval(()=>loadBtstPicks(),20000);loadBtstPicks();}
+  if(!startStreamRefresh.btst){startStreamRefresh.btst=setInterval(()=>{loadBtstPicks();try{checkTimeAlerts();}catch(e){}},20000);loadBtstPicks();try{checkTimeAlerts();}catch(e){}}
   _streamRefreshUiTimer=setInterval(()=>{try{refreshStrategySafety();renderLiveTapeBar();}catch(e){console.warn('Strategy safety refresh',e);}},1000);
   if(!_streamVisibilityBound){
     _streamVisibilityBound=true;
