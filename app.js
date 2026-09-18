@@ -1,5 +1,5 @@
-const BUILD_TS='2026-09-17 15:45 IST'; // release build time (IST)
-const APP_VERSION=1398;
+const BUILD_TS='2026-09-18 13:35 IST'; // release build time (IST)
+const APP_VERSION=1399;
 const RADAR_SCORE_VERSION='v1393-btst-engine'; // BTST engine (April 2.0): model top picks at 15:15, +3% GTT, 15:20 next-session exit.
 
 // ── v1358: AN UNCAUGHT ERROR MUST NAME ITSELF ─────────────────────────────────────────────────
