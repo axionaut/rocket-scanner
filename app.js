@@ -1,5 +1,5 @@
-const BUILD_TS='2026-09-21 14:21 IST'; // release build time (IST)
-const APP_VERSION=1404;
+const BUILD_TS='2026-09-21 14:38 IST'; // release build time (IST)
+const APP_VERSION=1405;
 const RADAR_SCORE_VERSION='v1393-btst-engine'; // BTST engine (April 2.0): model top picks at 15:15, +3% GTT, 15:20 next-session exit.
 
 // ── v1358: AN UNCAUGHT ERROR MUST NAME ITSELF ─────────────────────────────────────────────────
@@ -3612,15 +3612,25 @@ function dualScoreCell(row){
   const act=getRowActionState(row);
   const sc=Math.round(Number(row.score)||0);
   if(act.state==='GO'){
+    // v1405: a GO row shows its real model score too. `sc` is 100-rank, a display ordinal with no
+    // units; the pick's own `score` is the predicted next-session net return the rule tests.
+    const pick=btstPickOf(row.symbol),ps=Number(pick&&pick.score);
     return `<div style="display:flex;align-items:center;gap:6px;justify-content:flex-end">
-      <span style="font-family:'DM Mono',monospace;font-weight:800;font-size:15px;color:var(--green)">⚡ ${sc}</span>
+      <span style="font-family:'DM Mono',monospace;font-weight:800;font-size:15px;color:var(--green)" title="${escHtml(radarScoreTitle(row)||'')}">⚡ ${Number.isFinite(ps)?(ps>=0?'+':'')+ps.toFixed(2):sc}</span>
       <span style="font-size:10px;font-weight:800;background:var(--green);color:#fff;padding:1px 5px;border-radius:3px">GO</span>
     </div>`;
   }
   if(act.state==='WAIT'){
     const rk=btstRankOf(row.symbol);
+    // v1405: show the MODEL SCORE, not just the ordinal rank. The pick rule is "score >= floor",
+    // so a rank without its score hides the only quantity that decides anything - #1 on a dead day
+    // and #1 on a strong day looked identical. Green = clears the floor (it will be bought at
+    // 15:15 if it holds), amber = ranked but short of it.
+    const ms=btstScoreOf(row.symbol),floor=btstMinScore();
+    const clears=ms!==null&&floor!==null&&ms>=floor;
     return `<div style="display:flex;align-items:center;gap:6px;justify-content:flex-end">
-      <span style="font-family:'DM Mono',monospace;font-weight:700;font-size:14px;color:var(--amber)" title="${rk?escHtml(btstRankNote(row.symbol)+' - ranking only, not a buy signal'):'Not ranked by the BTST engine'}">${rk?'#'+rk:sc}</span>
+      ${ms===null?'':`<span style="font-family:'DM Mono',monospace;font-weight:800;font-size:15px;color:${clears?'var(--green)':'var(--amber)'}" title="${escHtml(btstRankNote(row.symbol))}">${ms>=0?'+':''}${ms.toFixed(2)}</span>`}
+      <span style="font-family:'DM Mono',monospace;font-weight:600;font-size:11px;color:var(--t3)" title="${rk?escHtml(btstRankNote(row.symbol)+' - ranking only, not a buy signal'):'Not ranked by the BTST engine'}">${rk?'#'+rk:sc}</span>
       <span style="font-size:10px;font-weight:600;color:var(--t3)">WAIT</span>
     </div>`;
   }
@@ -4381,17 +4391,38 @@ function btstRanking(){
   if(!src) return null;
   if(_btstRankMemo&&_btstRankMemo.src===src) return _btstRankMemo;
   const map=new Map();
-  src.ranking.forEach((x,i)=>{const s=normSym(x&&x[0]);if(s&&!map.has(s))map.set(s,i+1);});
-  _btstRankMemo={src,map,n:src.ranking.length,at:String(src.asOf||'').slice(11,16),stage:src.stage};
+  // v1405: keep the SCORE alongside the rank. The engine publishes [symbol, score] pairs and this
+  // used to discard x[1], so the one number that decides the trade (score >= MIN_SCORE) was the
+  // one number never shown. Rank is ordinal - #1 of a weak day and #1 of a strong day look
+  // identical - so rank alone cannot tell the owner whether anything is close to qualifying.
+  src.ranking.forEach((x,i)=>{const s=normSym(x&&x[0]);if(s&&!map.has(s))map.set(s,{rank:i+1,score:Number(x&&x[1])});});
+  _btstRankMemo={src,map,n:src.ranking.length,at:String(src.asOf||'').slice(11,16),stage:src.stage,
+    minScore:Number(src.rules&&src.rules.minScore)};
   return _btstRankMemo;
 }
 function btstRankOf(sym){
   const r=btstRanking();
-  return r&&sym?r.map.get(normSym(sym))||null:null;
+  return r&&sym?r.map.get(normSym(sym))?.rank||null:null;
+}
+// The model's predicted return for this symbol, or null. This is the quantity the pick rule tests.
+function btstScoreOf(sym){
+  const r=btstRanking();
+  if(!r||!sym) return null;
+  const v=r.map.get(normSym(sym))?.score;
+  return Number.isFinite(v)?v:null;
+}
+// The floor the engine applied, as published in the picks/rank file. Null when the file predates it.
+function btstMinScore(){
+  const r=btstRanking();
+  return r&&Number.isFinite(r.minScore)?r.minScore:null;
 }
 function btstRankNote(sym){
   const r=btstRanking(),k=btstRankOf(sym);
-  return r&&k?`BTST rank #${k} of ${r.n} (${r.stage==='preview'?'preview':r.stage} ${r.at})`:'';
+  if(!r||!k) return '';
+  const sc=btstScoreOf(sym),floor=btstMinScore();
+  const scoreBit=sc===null?'':`, score ${sc>=0?'+':''}${sc.toFixed(2)}`
+    +(floor===null?'':` vs floor +${floor.toFixed(2)} (${sc>=floor?'clears':'short by '+(floor-sc).toFixed(2)})`);
+  return `BTST rank #${k} of ${r.n} (${r.stage==='preview'?'preview':r.stage} ${r.at})${scoreBit}`;
 }
 function btstPickOf(sym){
   const d=btstToday();
@@ -9279,7 +9310,7 @@ function getCols(){
   // User-dragged column order (v536) applies here so header and cells always agree.
   return applyColOrder('main-rankings',[
     {key:'chk',label:'',s:0},
-    {key:'score',label:'Strategy Score',s:1},
+    {key:'score',label:'Model Score',s:1},
     {key:'symbol',label:'Symbol',s:1},
     {key:'status',label:'Trigger Status',s:1},
     {key:'price',label:'Price/Day',s:1},
