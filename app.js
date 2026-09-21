@@ -1,5 +1,5 @@
-const BUILD_TS='2026-09-21 15:50 IST'; // release build time (IST)
-const APP_VERSION=1408;
+const BUILD_TS='2026-09-21 16:20 IST'; // release build time (IST)
+const APP_VERSION=1409;
 const RADAR_SCORE_VERSION='v1393-btst-engine'; // BTST engine (April 2.0): model top picks at 15:15, +3% GTT, 15:20 next-session exit.
 
 // ── v1358: AN UNCAUGHT ERROR MUST NAME ITSELF ─────────────────────────────────────────────────
@@ -3615,7 +3615,7 @@ function dualScoreCell(row){
     // v1405: a GO row shows its real model score too. `sc` is 100-rank, a display ordinal with no
     // units; the pick's own `score` is the predicted next-session net return the rule tests.
     const pick=btstPickOf(row.symbol),ps=Number(pick&&pick.score);
-    return `<div style="display:flex;align-items:center;gap:6px;justify-content:flex-end">
+    return `<div style="display:flex;align-items:center;gap:6px;justify-content:center">
       <span style="font-family:'DM Mono',monospace;font-weight:800;font-size:15px;color:var(--green)" title="${escHtml(radarScoreTitle(row)||'')}">⚡ ${Number.isFinite(ps)?(ps>=0?'+':'')+ps.toFixed(2):sc}</span>
       <span style="font-size:10px;font-weight:800;background:var(--green);color:#fff;padding:1px 5px;border-radius:3px">GO</span>
     </div>`;
@@ -3628,13 +3628,13 @@ function dualScoreCell(row){
     // 15:15 if it holds), amber = ranked but short of it.
     const ms=btstScoreOf(row.symbol),floor=btstMinScore();
     const clears=ms!==null&&floor!==null&&ms>=floor;
-    return `<div style="display:flex;align-items:center;gap:6px;justify-content:flex-end">
+    return `<div style="display:flex;align-items:center;gap:6px;justify-content:center">
       ${ms===null?'':`<span style="font-family:'DM Mono',monospace;font-weight:800;font-size:15px;color:${clears?'var(--green)':'var(--amber)'}" title="${escHtml(btstRankNote(row.symbol))}">${ms>=0?'+':''}${ms.toFixed(2)}</span>`}
       <span style="font-family:'DM Mono',monospace;font-weight:600;font-size:11px;color:var(--t3)" title="${rk?escHtml(btstRankNote(row.symbol)+' - ranking only, not a buy signal'):'Not ranked by the BTST engine'}">${rk?'#'+rk:sc}</span>
       <span style="font-size:10px;font-weight:600;color:var(--t3)">WAIT</span>
     </div>`;
   }
-  return `<div style="font-family:'DM Mono',monospace;font-weight:500;font-size:13px;color:var(--t3);text-align:right">—</div>`;
+  return `<div style="font-family:'DM Mono',monospace;font-weight:500;font-size:13px;color:var(--t3);text-align:center">—</div>`;
 }
 // Equal slots, not equal rupee amounts. A symbol occupies only one slot.
 // Search both rankings so a shared top pick cannot starve a model's unique pick.
@@ -4302,22 +4302,21 @@ function requestAlertPermission(){
 // The score floor is a GLOBAL display preference, not a per-mode scanner filter, so it restores
 // from its own key rather than through applySavedFiltersForMode (which would reset it on a mode
 // switch). Runs on DOMContentLoaded beside the alert toggle for the same TDZ reason.
+// v1409: SEEDS THE INPUT ONCE, AND NEVER WHILE IT IS BEING TYPED IN. v1408 called this from
+// applyFilters(), and every keystroke runs oninput -> onScoreFloorChange() -> applyFilters(),
+// so `el.value=...` fired mid-edit. Assigning .value to a focused <input type=number> collapses
+// the caret to position 0, which is why each typed character landed at the front ("2.1" -> "1.2").
+// Restoring a stored preference is a startup job, not a repaint job: it runs once, and bails out
+// if the element is already seeded or currently focused.
+let _scoreFloorSeeded=false;
 function initScoreFloorUI(){
   try{
-    let el=document.getElementById('fScoreFloor');
-    if(!el){
-      const panel=document.getElementById('ctrlsPanel');
-      if(panel){
-        const div=document.createElement('div');
-        div.className='fg';
-        div.innerHTML='<span class="fg-lbl" style="color:var(--green)">Score Floor</span><input type="number" id="fScoreFloor" placeholder="engine" step="0.1" style="width:90px;padding:8px 10px;background:var(--bg-card);border:1px solid var(--border);border-radius:8px;color:var(--t1);font-family:\'DM Mono\',monospace;font-size:14px;outline:none;transition:border .2s" onfocus="this.style.borderColor=\'var(--green)\'" onblur="this.style.borderColor=\'var(--border)\'" oninput="onScoreFloorChange()" title="Model-score floor used for the clears/short verdict shown on each row. Empty = the floor the engine actually applied (MIN_SCORE, published in btst_picks.json / btst_rank.json). DISPLAY ONLY: this does not change which stocks the engine publishes as picks, and does not create or remove a GO.">';
-        const btn=document.getElementById('btnToggleBelowThreshold');
-        if(btn) panel.insertBefore(div,btn);
-        else panel.appendChild(div);
-        el=document.getElementById('fScoreFloor');
-      }
-    }
-    if(el) el.value=localStorage.getItem(SCORE_FLOOR_STORE)||'';
+    const el=document.getElementById('fScoreFloor');
+    if(!el) return;                                   // markup lives in index.html (v1407)
+    if(_scoreFloorSeeded) return;                     // seed once; repaints must not rewrite it
+    if(document.activeElement===el) return;           // never overwrite what is being typed
+    el.value=localStorage.getItem(SCORE_FLOOR_STORE)||'';
+    _scoreFloorSeeded=true;
   }catch(e){}
 }
 function initAlertUI(){
@@ -4631,18 +4630,16 @@ function upperCircuitBlock(row){
   const uc=getUpperCircuitInfo(row,row?.price);
   if(uc&&Number(row?.price)>0&&uc.ucPrice>0&&Number(row.price)>=uc.ucPrice*(1-UC_LOCK_EPS_PCT/100))
     return `At the +${uc.band}% upper circuit (Rs ${uc.ucPrice.toFixed(2)}) - no sellers at the ceiling, cannot be bought.`;
-  // 3. NSE Band Hit today (from bh CSV report).
-  if(typeof NSE_BAND_HIT!=='undefined'&&NSE_BAND_HIT&&NSE_BAND_HIT[sym]==='H')
-    return 'Hit upper band today (NSE band hits report). Cannot be bought.';
-  // 4. Day gain at or through circuit band, or pinned at the max 20% ceiling.
-  const pc=Number(row?.priceChange??row?.day);
-  const band=row?.price_band_pct??row?.band??(typeof getNSEPriceBandPct==='function'?getNSEPriceBandPct(sym):null);
-  if(Number.isFinite(pc)){
-    if(band&&pc>=band-UC_LOCK_EPS_PCT)
-      return `Up +${pc.toFixed(1)}% at the +${band}% upper circuit. Cannot be bought.`;
-    if(pc>=19.9)
-      return `Up +${pc.toFixed(1)}% at the maximum 20% upper circuit. Cannot be bought.`;
-  }
+  // v1409 REMOVED two v1408 tests. Neither is reinstated without a date guard and a check:
+  //   (3) NSE_BAND_HIT[sym]==='H' blocked on the PR-zip bh<ddmmyyyy>.csv, an END-OF-DAY report.
+  //       Intraday the loaded zip is the PREVIOUS session's, so a stock that locked last Thursday
+  //       and trades freely today was blocked all day - while the reason string said "today".
+  //       Over-blocking is worse than it looks: it silently deletes tradeable picks.
+  //   (4) "pc >= band - eps" was algebraically identical to test 2 above, which derives ucPrice
+  //       from prevClose = px/(1+pc/100) using the same pc and the same band expression - so it
+  //       could only ever fire through its bare pc>=19.9 fallback, and THAT contradicts the rule
+  //       this function is built on: a near-band stock still trading is not blocked, only an
+  //       unbuyable one is. +19.95% with a live offer side is a legal buy.
   return null;
 }
 function strategyStock(row){
@@ -10486,7 +10483,10 @@ function renderHead(){
       </th>`;
     }
     const arr=c.key===SCOL?(SDIR===-1?'▼':'▲'):'';
-    return`<th data-key="${c.key}" class="${c.key===SCOL?'sorted':''}" ${c.s?`onclick="doSort('${c.key}')"`:''}>${c.label}<span class="sa">${arr}</span></th>`;
+    // v1409: the score column is centre-aligned, so its header must match or the label floats
+    // left of the numbers it titles.
+    const align=c.key==='score'?' style="text-align:center"':'';
+    return`<th data-key="${c.key}"${align} class="${c.key===SCOL?'sorted':''}" ${c.s?`onclick="doSort('${c.key}')"`:''}>${c.label}<span class="sa">${arr}</span></th>`;
   }).join('')+'</tr>';
   // Drag-to-reorder columns; the saved order re-enters through getCols() (v536).
   attachColDrag(document.getElementById('tHead').parentElement,'main-rankings',()=>{COLS=getCols();renderHead();renderTable();});
@@ -10573,7 +10573,7 @@ function renderTable(){
     const cellH={
       chk:`<td style="text-align:center"><input type="checkbox" ${isSelected?'checked':''} ${canBuy?'':'disabled'} style="width:14px;height:14px;accent-color:var(--amber);cursor:${canBuy?'pointer':'not-allowed'}" onclick="event.stopPropagation()" onchange="toggleStock('${s.symbol}',this.checked)" title="${checkTitle}"></td>`,
       rank:`<td style="font-family:'DM Mono',monospace;font-weight:800;color:var(--t1);text-align:right">${s.rank??'—'}</td>`,
-      score:`<td data-key="score">${dualScoreCell(s)}</td>`,
+      score:`<td data-key="score" style="text-align:center">${dualScoreCell(s)}</td>`,
       // v1142: routed through symbolChartButton like every other table. This cell had built its own
       // TradingView link since v1070, so the "one symbol interaction everywhere" rule was true of the
       // panels and quietly false of the main table - which is why swapping to Zerodha missed it.
@@ -12499,7 +12499,6 @@ function scheduleFilterPaint(){
   else setTimeout(paint,0);
 }
 function applyFilters({preservePage=false}={}){
-  initScoreFloorUI();
   syncRecommendationThreshold();
   const q=(document.getElementById('fSearch')?.value||'').trim().toLowerCase();
   const turnIdx=+(document.getElementById('fMinTurnover')?.value||0);
