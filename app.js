@@ -1,5 +1,5 @@
-const BUILD_TS='2026-09-21 11:42 IST'; // release build time (IST)
-const APP_VERSION=1403;
+const BUILD_TS='2026-09-21 14:21 IST'; // release build time (IST)
+const APP_VERSION=1404;
 const RADAR_SCORE_VERSION='v1393-btst-engine'; // BTST engine (April 2.0): model top picks at 15:15, +3% GTT, 15:20 next-session exit.
 
 // ── v1358: AN UNCAUGHT ERROR MUST NAME ITSELF ─────────────────────────────────────────────────
@@ -4329,9 +4329,14 @@ function alertOnPicksChange(prev,next){
   const at=String(next.asOf||'').slice(11,16);
   const gateOff=next.gate&&next.gate.on===false;
   if(next.stage==='final'){
-    fireAlert({once:getSessionDate()+'|final-file',tone:gateOff?'warn':'go',beeps:3,
-      title:gateOff?'FINAL picks in — but the market gate is OFF':'FINAL picks are in ('+at+')',
+    // v1404: an empty final list is a real outcome (score floor). Never chime green and say
+    // "buy at 15:20" over a list of nothing - that reads as a missed/broken feed.
+    const none=!(next.picks||[]).length;
+    fireAlert({once:getSessionDate()+'|final-file',tone:(gateOff||none)?'warn':'go',beeps:none?1:3,
+      title:gateOff?'FINAL picks in — but the market gate is OFF'
+        :none?'No BTST picks today ('+at+')':'FINAL picks are in ('+at+')',
       body:gateOff?'No buys today: the gate is off. '+escHtml(names)
+        :none?'Nothing cleared the model score floor. No buy today — this is the filter working, not a failed run.'
         :'<strong>'+escHtml(names)+'</strong><br>Buy at 15:20. This is the tradeable list.'});
   }else if(next.stage==='provisional'){
     fireAlert({once:getSessionDate()+'|prov-file',tone:'warn',beeps:1,
@@ -4487,6 +4492,9 @@ function _getRowActionStateUncached(s, ignoreMarketClosed=false){
   const rankNote=btstRankNote(s.symbol);
   if(!d)return {state:'WAIT',reason:(rankNote?rankNote+'. ':'')+btstWaitReason()};
   const pick=d.picks.find(p=>normSym(p.symbol)===normSym(s.symbol));
+  // v1404: the score floor can legitimately produce an empty final list - "not in today's top 0"
+  // would be nonsense, so say why nothing qualified.
+  if(!pick&&!d.picks.length)return {state:'WAIT',reason:(rankNote?rankNote+'. ':'')+`No BTST picks today: nothing cleared the model's score floor${d.rules&&d.rules.minScore!=null?' of +'+d.rules.minScore:''}. Sitting out is the rule working, not a failure.`};
   if(!pick)return {state:'WAIT',reason:(rankNote?rankNote+'. ':'')+"Not in today's BTST top "+d.picks.length};
   // v1398: ONLY THE 15:15 FINAL IS TRADEABLE. 17 Sep the 15:05 provisional named TEGA/VENUSPIPES/
   // AWHCL/PNCINFRA/INGERRAND and the owner bought all five for Rs 96,792; the 15:15 final then
@@ -7482,7 +7490,7 @@ function renderStats(){
   const triggersCard = `<div class="st" title="${escHtml(bd ? bd.picks.map(p => '#' + p.rank + ' ' + p.symbol + ' score ' + p.score).join(' | ') : 'No picks for today yet')}">
     <div class="st-l">Today's Picks</div>
     <div class="st-v" style="font-size:18px;color:${triggered.length ? 'var(--green)' : 'var(--t1)'}">${triggered.length} <span style="font-size:12px;color:var(--t2)">GO of ${bd ? bd.picks.length : 0}</span></div>
-    <div class="st-d">${bd ? escHtml(bd.picks.map(p => p.symbol).join(', ')) : 'top 5 by model score'}</div></div>`;
+    <div class="st-d">${bd ? (bd.picks.length ? escHtml(bd.picks.map(p => p.symbol).join(', ')) : 'none cleared the score floor') : 'top 5 by model score'}</div></div>`;
 
   const protectionCard = `<div class="st" title="Every buy carries a +${RocketStrategy.CONFIG.TARGET_PCT}% GTT target. No stop-loss: overnight gaps jump stops. If the target has not filled, sell at 15:20 on the next session.">
     <div class="st-l">Exit Rules</div>
@@ -12164,6 +12172,7 @@ function emptyBoardReason(){
   const d=btstToday();
   if(!d)return escHtml(btstWaitReason())+'.';
   if(!d.gate?.on)return `No BTST buys today: market gate off (equal-weight market ${d.gate?.marketTrendPct}% vs its 50DMA; trades above ${d.gate?.threshold}%).`;
+  if(!d.picks.length)return `No BTST picks today: nothing cleared the model's score floor${d.rules&&d.rules.minScore!=null?' of +'+d.rules.minScore:''}. On the tested history that happens on about 1 session in 4 - sitting out is the rule, not a failure.`;
   return `Today's BTST picks (${escHtml(d.picks.map(p=>p.symbol).join(', '))}) are held, stale or blocked. Use Show ineligible to see why.`;
 }
 const LIVE_TAPE_TIME_FMT=new Intl.DateTimeFormat('en-IN',{
