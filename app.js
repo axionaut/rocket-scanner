@@ -1,5 +1,5 @@
-const BUILD_TS='2026-09-18 16:05 IST'; // release build time (IST)
-const APP_VERSION=1402;
+const BUILD_TS='2026-09-21 11:42 IST'; // release build time (IST)
+const APP_VERSION=1403;
 const RADAR_SCORE_VERSION='v1393-btst-engine'; // BTST engine (April 2.0): model top picks at 15:15, +3% GTT, 15:20 next-session exit.
 
 // ── v1358: AN UNCAUGHT ERROR MUST NAME ITSELF ─────────────────────────────────────────────────
@@ -1537,7 +1537,7 @@ function num(v){
 }
 function normSym(s){return String(s||'').trim().replace(/^[A-Z]+:/,'').replace(/_/g,'-').toUpperCase().replace(/-(EQ|BE|BZ|SM|ST|SZ)$/,'');}
 function escHtml(s){return String(s??'').replace(/[&<>"]/g,ch=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[ch]));}
-// TWO NAMED BUTTONS, EVERY SYMBOL, EVERY TABLE (owner, v1290). The stock name itself used to be the
+// Named actions beside every symbol. The stock name itself used to be the
 // Kite link, which is invisible until you hover it and offers no second destination. `Z` opens the
 // Zerodha Kite chart (resolving the instrument token, copying the symbol), `T` opens TradingView.
 // Both stop propagation, so a row that opens a detail modal still does that when the name is
@@ -1554,7 +1554,51 @@ function chartLinkButtons(sym,extraStyle=''){
       +` style="${base}border:1px solid rgba(56,189,248,.35);background:rgba(56,189,248,.10);color:var(--cyan);${extraStyle}">Z</button>`
     +`<button type="button" onclick='event.stopPropagation();tradingViewOpen(${JSON.stringify(n)})'`
       +` title="Open ${escHtml(s)} on TradingView"`
-      +` style="${base}border:1px solid rgba(148,163,184,.35);background:rgba(148,163,184,.12);color:var(--t2);${extraStyle}">T</button>`;
+      +` style="${base}border:1px solid rgba(148,163,184,.35);background:rgba(148,163,184,.12);color:var(--t2);${extraStyle}">T</button>`
+    +`<button type="button" onclick="event.stopPropagation();kiteBuyOpen(${escHtml(JSON.stringify(n))})"`
+      +` aria-label="Buy ${escHtml(s)} in Zerodha" title="Open manual BUY dialog for ${escHtml(s)} in Zerodha (quantity 1, editable)"`
+      +` style="${base}border:1px solid rgba(34,197,94,.35);background:rgba(34,197,94,.10);color:var(--green);${extraStyle}">B</button>`;
+}
+function kitePublisherKey(login){
+  try{
+    const url=new URL(login);
+    return url.origin==='https://kite.zerodha.com'&&url.pathname==='/connect/login'
+      ?url.searchParams.get('api_key')||'':'';
+  }catch(e){return '';}
+}
+async function kiteBuyOpen(sym){
+  const s=normSym(sym||'');
+  if(!s)return;
+  // Open on the click, before any helper request, to retain popup permission.
+  const dialog=window.open('about:blank','_blank','popup,width=660,height=760');
+  if(!dialog){showToast('Allow popups to open the Zerodha Buy dialog.',4000,true);return;}
+  try{
+    dialog.opener=null;
+    dialog.document.title='Buy '+s+' — Zerodha';
+    dialog.document.body.textContent='Opening Zerodha Buy dialog for '+s+'…';
+    let key=kitePublisherKey(KITE_API?.login);
+    if(!key){
+      const login=await readHelperResponse('/api/kite/connect/login',{timeout:6000});
+      key=kitePublisherKey(login?.url);
+    }
+    if(!key)throw new Error('Kite Connect is not configured. Connect Kite first.');
+    if(dialog.closed)return;
+    // Official offsite order review. This form opens Kite's confirmation screen;
+    // it never calls the order-placement API. Quantity stays editable in Kite.
+    const form=dialog.document.createElement('form');
+    form.method='POST';form.action='https://kite.zerodha.com/connect/basket';
+    const order={variety:'regular',exchange:'NSE',tradingsymbol:s,transaction_type:'BUY',
+      order_type:'MARKET',product:'CNC',quantity:1,validity:'DAY',readonly:false};
+    for(const [name,value] of Object.entries({api_key:key,data:JSON.stringify([order])})){
+      const input=dialog.document.createElement('input');
+      input.type='hidden';input.name=name;input.value=value;form.appendChild(input);
+    }
+    dialog.document.body.replaceChildren(form);
+    form.submit();
+  }catch(e){
+    try{if(!dialog.closed)dialog.close();}catch(ignore){}
+    showToast('Could not open Zerodha Buy: '+escHtml(e.message||String(e)),5000,true);
+  }
 }
 function tradingViewOpen(sym){
   const s=normSym(sym||'');
