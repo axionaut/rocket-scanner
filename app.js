@@ -1,5 +1,5 @@
-const BUILD_TS='2026-09-21 14:43 IST'; // release build time (IST)
-const APP_VERSION=1407;
+const BUILD_TS='2026-09-21 15:50 IST'; // release build time (IST)
+const APP_VERSION=1408;
 const RADAR_SCORE_VERSION='v1393-btst-engine'; // BTST engine (April 2.0): model top picks at 15:15, +3% GTT, 15:20 next-session exit.
 
 // ── v1358: AN UNCAUGHT ERROR MUST NAME ITSELF ─────────────────────────────────────────────────
@@ -4304,7 +4304,19 @@ function requestAlertPermission(){
 // switch). Runs on DOMContentLoaded beside the alert toggle for the same TDZ reason.
 function initScoreFloorUI(){
   try{
-    const el=document.getElementById('fScoreFloor');
+    let el=document.getElementById('fScoreFloor');
+    if(!el){
+      const panel=document.getElementById('ctrlsPanel');
+      if(panel){
+        const div=document.createElement('div');
+        div.className='fg';
+        div.innerHTML='<span class="fg-lbl" style="color:var(--green)">Score Floor</span><input type="number" id="fScoreFloor" placeholder="engine" step="0.1" style="width:90px;padding:8px 10px;background:var(--bg-card);border:1px solid var(--border);border-radius:8px;color:var(--t1);font-family:\'DM Mono\',monospace;font-size:14px;outline:none;transition:border .2s" onfocus="this.style.borderColor=\'var(--green)\'" onblur="this.style.borderColor=\'var(--border)\'" oninput="onScoreFloorChange()" title="Model-score floor used for the clears/short verdict shown on each row. Empty = the floor the engine actually applied (MIN_SCORE, published in btst_picks.json / btst_rank.json). DISPLAY ONLY: this does not change which stocks the engine publishes as picks, and does not create or remove a GO.">';
+        const btn=document.getElementById('btnToggleBelowThreshold');
+        if(btn) panel.insertBefore(div,btn);
+        else panel.appendChild(div);
+        el=document.getElementById('fScoreFloor');
+      }
+    }
     if(el) el.value=localStorage.getItem(SCORE_FLOOR_STORE)||'';
   }catch(e){}
 }
@@ -4619,6 +4631,18 @@ function upperCircuitBlock(row){
   const uc=getUpperCircuitInfo(row,row?.price);
   if(uc&&Number(row?.price)>0&&uc.ucPrice>0&&Number(row.price)>=uc.ucPrice*(1-UC_LOCK_EPS_PCT/100))
     return `At the +${uc.band}% upper circuit (Rs ${uc.ucPrice.toFixed(2)}) - no sellers at the ceiling, cannot be bought.`;
+  // 3. NSE Band Hit today (from bh CSV report).
+  if(typeof NSE_BAND_HIT!=='undefined'&&NSE_BAND_HIT&&NSE_BAND_HIT[sym]==='H')
+    return 'Hit upper band today (NSE band hits report). Cannot be bought.';
+  // 4. Day gain at or through circuit band, or pinned at the max 20% ceiling.
+  const pc=Number(row?.priceChange??row?.day);
+  const band=row?.price_band_pct??row?.band??(typeof getNSEPriceBandPct==='function'?getNSEPriceBandPct(sym):null);
+  if(Number.isFinite(pc)){
+    if(band&&pc>=band-UC_LOCK_EPS_PCT)
+      return `Up +${pc.toFixed(1)}% at the +${band}% upper circuit. Cannot be bought.`;
+    if(pc>=19.9)
+      return `Up +${pc.toFixed(1)}% at the maximum 20% upper circuit. Cannot be bought.`;
+  }
   return null;
 }
 function strategyStock(row){
@@ -12475,6 +12499,7 @@ function scheduleFilterPaint(){
   else setTimeout(paint,0);
 }
 function applyFilters({preservePage=false}={}){
+  initScoreFloorUI();
   syncRecommendationThreshold();
   const q=(document.getElementById('fSearch')?.value||'').trim().toLowerCase();
   const turnIdx=+(document.getElementById('fMinTurnover')?.value||0);
