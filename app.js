@@ -1,5 +1,5 @@
 const BUILD_TS='2026-09-21 14:43 IST'; // release build time (IST)
-const APP_VERSION=1406;
+const APP_VERSION=1407;
 const RADAR_SCORE_VERSION='v1393-btst-engine'; // BTST engine (April 2.0): model top picks at 15:15, +3% GTT, 15:20 next-session exit.
 
 // ── v1358: AN UNCAUGHT ERROR MUST NAME ITSELF ─────────────────────────────────────────────────
@@ -2149,9 +2149,9 @@ function getNSEPriceBandPct(symbol){
   return band!=null&&isFinite(band)&&band>0?band:null;
 }
 function getUpperCircuitInfo(row,refPrice=null){
-  const band=row?.price_band_pct??getNSEPriceBandPct(row?.symbol);
+  const band=row?.price_band_pct??row?.band??getNSEPriceBandPct(row?.symbol);
   if(!(band!=null&&isFinite(band)&&band>0)) return null;   // no band on file: fail open
-  const pc=Number(row?.priceChange), px=Number(row?.price);
+  const pc=Number(row?.priceChange??row?.day), px=Number(row?.price);
   if(!Number.isFinite(pc)||!(px>0)) return null;
   const prevClose=px/(1+pc/100);
   if(!(prevClose>0)) return null;
@@ -4299,6 +4299,15 @@ function requestAlertPermission(){
 // Runs here, not in initVersion(): that IIFE executes at line ~1338, far above this const, so
 // touching ALERTS_ON from it throws a temporal-dead-zone ReferenceError and the button never
 // initialises (silently, inside its try/catch). Caught in testing.
+// The score floor is a GLOBAL display preference, not a per-mode scanner filter, so it restores
+// from its own key rather than through applySavedFiltersForMode (which would reset it on a mode
+// switch). Runs on DOMContentLoaded beside the alert toggle for the same TDZ reason.
+function initScoreFloorUI(){
+  try{
+    const el=document.getElementById('fScoreFloor');
+    if(el) el.value=localStorage.getItem(SCORE_FLOOR_STORE)||'';
+  }catch(e){}
+}
 function initAlertUI(){
   try{
     const b=document.getElementById('alertToggle');
@@ -4307,8 +4316,9 @@ function initAlertUI(){
   }catch(e){}
 }
 if(typeof document!=='undefined'){
-  if(document.readyState==='loading') document.addEventListener('DOMContentLoaded',initAlertUI);
-  else initAlertUI();
+  const initUI=()=>{initAlertUI();initScoreFloorUI();};
+  if(document.readyState==='loading') document.addEventListener('DOMContentLoaded',initUI);
+  else initUI();
 }
 // Clock-driven alerts. Checked every 20s alongside the picks poll. Each fires once per session.
 function checkTimeAlerts(){
@@ -4411,17 +4421,52 @@ function btstScoreOf(sym){
   const v=r.map.get(normSym(sym))?.score;
   return Number.isFinite(v)?v:null;
 }
+// v1407: the floor is adjustable from the filters row, DISPLAY ONLY. The engine publishes its own
+// MIN_SCORE in the picks/rank file and that is what actually selected the picks; typing a number
+// here only changes the clears/short verdict rendered beside each score, so the owner can ask "what
+// would a 1.2 floor have shown today" without touching the tested rule. It deliberately does NOT
+// feed _getRowActionStateUncached: GO still comes only from the engine's own FINAL picks list, so
+// lowering this cannot manufacture a buy and raising it cannot suppress one (invariant 5).
+function btstFloorOverride(){
+  const v=parseFloat(document.getElementById('fScoreFloor')?.value);
+  return Number.isFinite(v)?v:null;
+}
+// True when the displayed floor is the owner's, not the engine's - the verdict is then labelled.
+function btstFloorIsOverridden(){
+  const o=btstFloorOverride();
+  if(o===null) return false;
+  const r=btstRanking();
+  return !(r&&Number.isFinite(r.minScore)&&r.minScore===o);
+}
 // The floor the engine applied, as published in the picks/rank file. Null when the file predates it.
-function btstMinScore(){
+function btstEngineMinScore(){
   const r=btstRanking();
   return r&&Number.isFinite(r.minScore)?r.minScore:null;
+}
+// What the screen judges against: the override when typed, otherwise the engine's own floor.
+function btstMinScore(){
+  const o=btstFloorOverride();
+  return o!==null?o:btstEngineMinScore();
+}
+const SCORE_FLOOR_STORE='rs_score_floor';
+function onScoreFloorChange(){
+  try{
+    const el=document.getElementById('fScoreFloor');
+    localStorage.setItem(SCORE_FLOOR_STORE,el?.value||'');
+  }catch(e){}
+  // Verdict text and colour live in the rendered rows, so a redraw is the whole update.
+  if(typeof applyFilters==='function') applyFilters();
 }
 function btstRankNote(sym){
   const r=btstRanking(),k=btstRankOf(sym);
   if(!r||!k) return '';
-  const sc=btstScoreOf(sym),floor=btstMinScore();
+  const sc=btstScoreOf(sym),floor=btstMinScore(),eng=btstEngineMinScore();
+  // An overridden floor must say so on its face: "clears" against a floor the owner typed is NOT
+  // the engine's verdict, and the engine's own number is shown beside it so both are visible.
+  const who=btstFloorIsOverridden()
+    ? ` (your floor, display only${eng===null?'':`; engine used +${eng.toFixed(2)}`})` : '';
   const scoreBit=sc===null?'':`, score ${sc>=0?'+':''}${sc.toFixed(2)}`
-    +(floor===null?'':` vs floor +${floor.toFixed(2)} (${sc>=floor?'clears':'short by '+(floor-sc).toFixed(2)})`);
+    +(floor===null?'':` vs floor +${floor.toFixed(2)}${who} (${sc>=floor?'clears':'short by '+(floor-sc).toFixed(2)})`);
   return `BTST rank #${k} of ${r.n} (${r.stage==='preview'?'preview':r.stage} ${r.at})${scoreBit}`;
 }
 function btstPickOf(sym){
@@ -4516,6 +4561,13 @@ function _getRowActionStateUncached(s, ignoreMarketClosed=false){
   if(!s)return {state:'BLOCKED',reason:'Invalid row'};
   if(typeof RocketStrategy==='undefined')return {state:'BLOCKED',reason:'Strategy module unavailable'};
   if(NSE_SURV[s.symbol]?.length)return {state:'BLOCKED',reason:'Surveillance: '+NSE_SURV[s.symbol].join(' | ')};
+  // v1407: SURVEILLANCE AND THE UPPER CIRCUIT ARE DIFFERENT PROBLEMS AND ONE CANNOT COVER THE
+  // OTHER. 21 Sep FEDDERSHOL ranked #1 and PROTEAN #2 while both sat locked at +20% with nothing
+  // on offer, and REG1 flagged NEITHER - correctly: NSE lists ASM/GSM/ESM for sustained abnormal
+  // behaviour, so a stock that locks its band TODAY appears in no surveillance column today.
+  // A locked stock cannot be bought at any price, so this is a block, not a score penalty.
+  const ucBlock=upperCircuitBlock(s);
+  if(ucBlock)return {state:'BLOCKED',reason:ucBlock};
   if(s.basketEligible===false)return {state:'BLOCKED',reason:'Non-EQ series or price band under 10%'};
   const held=getCombinedOpenPositionMap()[s.symbol];
   if(held?.qty>0)return {state:'BLOCKED',reason:'Already held (no additional buys)'};
@@ -4540,6 +4592,34 @@ function _getRowActionStateUncached(s, ignoreMarketClosed=false){
   const stale=universePriceStaleness()||stockPriceStaleness(s.symbol);
   if(stale)return {state:'WAIT',reason:stale};
   return {state:'GO',reason:`BTST pick #${pick.rank} of ${d.picks.length} (${d.stage} ${String(d.asOf||'').slice(11,16)} IST) - buy 15:20, +${RocketStrategy.CONFIG.TARGET_PCT}% GTT, sell 15:20 next session if unfilled`};
+}
+// v1407: A STOCK FROZEN AT ITS UPPER CIRCUIT CANNOT BE BOUGHT AT ALL. 21 Sep FEDDERSHOL ranked
+// #1 (+2.13) and PROTEAN #2 while both sat locked at +20%: Kite showed 75,34,463 shares bid and
+// an offer side of exactly ZERO. A MARKET CNC buy against an empty book either does not fill or
+// fills at the next session's open at any price - neither is the trade the +1.18%/trade edge was
+// measured on (buy at the 15:15 close, +3% GTT). The model has no circuit feature, so it happily
+// ranks a locked stock first; the app must refuse it.
+//
+// Two independent tests, either one sufficient, because each can be missing:
+//   1. LIVE BOOK - a fresh depth packet with buyers and no sellers. This is direct proof, needs no
+//      reference data, and is what the owner saw on the broker screen.
+//   2. PRICE BAND - the last price sitting at (or through) the band ceiling. Needs sec_list to be
+//      loaded; getUpperCircuitInfo returns null without it, so this test simply does not fire.
+// A near-band stock that is still trading is NOT blocked: only an unbuyable one is.
+const UC_LOCK_EPS_PCT=0.05;   // within 0.05% of the ceiling counts as pinned to it
+function upperCircuitBlock(row){
+  const sym=normSym(row?.symbol||'');
+  if(!sym) return null;
+  // 1. Live book: buyers queued, nothing offered.
+  const l=BOOK_LADDER[sym],at=Number(l?.totalsAt??l?.at),now=Date.now();
+  const bookFresh=l&&Number.isFinite(at)&&at>0&&at<=now+1000&&now-at<DEPTH_TOTALS_MAX_AGE_MS;
+  if(bookFresh&&Number.isFinite(l.buyQty)&&Number.isFinite(l.sellQty)&&l.buyQty>0&&l.sellQty<=0)
+    return `Locked at upper circuit - ${Number(l.buyQty).toLocaleString('en-IN')} shares bid, nothing on offer. Cannot be bought.`;
+  // 2. Price band ceiling (only when the band is on file).
+  const uc=getUpperCircuitInfo(row,row?.price);
+  if(uc&&Number(row?.price)>0&&uc.ucPrice>0&&Number(row.price)>=uc.ucPrice*(1-UC_LOCK_EPS_PCT/100))
+    return `At the +${uc.band}% upper circuit (Rs ${uc.ucPrice.toFixed(2)}) - no sellers at the ceiling, cannot be bought.`;
+  return null;
 }
 function strategyStock(row){
   const upper=Number(row?.upperCircuit??row?.uc);
