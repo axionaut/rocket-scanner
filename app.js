@@ -1,5 +1,5 @@
-const BUILD_TS='2026-09-21 16:20 IST'; // release build time (IST)
-const APP_VERSION=1409;
+const BUILD_TS='2026-09-21 16:45 IST'; // release build time (IST)
+const APP_VERSION=1410;
 const RADAR_SCORE_VERSION='v1393-btst-engine'; // BTST engine (April 2.0): model top picks at 15:15, +3% GTT, 15:20 next-session exit.
 
 // ── v1358: AN UNCAUGHT ERROR MUST NAME ITSELF ─────────────────────────────────────────────────
@@ -4630,16 +4630,20 @@ function upperCircuitBlock(row){
   const uc=getUpperCircuitInfo(row,row?.price);
   if(uc&&Number(row?.price)>0&&uc.ucPrice>0&&Number(row.price)>=uc.ucPrice*(1-UC_LOCK_EPS_PCT/100))
     return `At the +${uc.band}% upper circuit (Rs ${uc.ucPrice.toFixed(2)}) - no sellers at the ceiling, cannot be bought.`;
-  // v1409 REMOVED two v1408 tests. Neither is reinstated without a date guard and a check:
-  //   (3) NSE_BAND_HIT[sym]==='H' blocked on the PR-zip bh<ddmmyyyy>.csv, an END-OF-DAY report.
-  //       Intraday the loaded zip is the PREVIOUS session's, so a stock that locked last Thursday
-  //       and trades freely today was blocked all day - while the reason string said "today".
-  //       Over-blocking is worse than it looks: it silently deletes tradeable picks.
-  //   (4) "pc >= band - eps" was algebraically identical to test 2 above, which derives ucPrice
-  //       from prevClose = px/(1+pc/100) using the same pc and the same band expression - so it
-  //       could only ever fire through its bare pc>=19.9 fallback, and THAT contradicts the rule
-  //       this function is built on: a near-band stock still trading is not blocked, only an
-  //       unbuyable one is. +19.95% with a live offer side is a legal buy.
+  // 3. Day gain at or through its circuit band, or pinned at the max 20% ceiling. This is the
+  // owner's actual complaint (v1409): a stock ALREADY at its band gets recommended all day and is
+  // untradeable by 15:15. It fires on today's live priceChange, so no depth book and no reference
+  // file are needed - it catches the locked-all-day case that tests 1 and 2 miss when the book is
+  // absent and sec_list has not loaded. `bh` (the prior-session EOD band-hit report) is deliberately
+  // NOT used here; only today's move drives this.
+  const pc=Number(row?.priceChange??row?.day);
+  if(Number.isFinite(pc)){
+    const band=row?.price_band_pct??row?.band??(typeof getNSEPriceBandPct==='function'?getNSEPriceBandPct(sym):null);
+    if(band&&band>0&&pc>=band-UC_LOCK_EPS_PCT)
+      return `Up +${pc.toFixed(1)}% at the +${band}% upper circuit. Cannot be bought.`;
+    if(pc>=19.9)
+      return `Up +${pc.toFixed(1)}% at the maximum 20% upper circuit. Cannot be bought.`;
+  }
   return null;
 }
 function strategyStock(row){
