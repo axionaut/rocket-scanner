@@ -1,5 +1,5 @@
-const BUILD_TS='2026-09-21 14:38 IST'; // release build time (IST)
-const APP_VERSION=1405;
+const BUILD_TS='2026-09-21 14:43 IST'; // release build time (IST)
+const APP_VERSION=1406;
 const RADAR_SCORE_VERSION='v1393-btst-engine'; // BTST engine (April 2.0): model top picks at 15:15, +3% GTT, 15:20 next-session exit.
 
 // ── v1358: AN UNCAUGHT ERROR MUST NAME ITSELF ─────────────────────────────────────────────────
@@ -9314,7 +9314,7 @@ function getCols(){
     {key:'symbol',label:'Symbol',s:1},
     {key:'status',label:'Trigger Status',s:1},
     {key:'price',label:'Price/Day',s:1},
-    {key:'highDistance',label:'From High',s:0},
+    {key:'highDistance',label:'From High',s:1},
     {key:'depth',label:'Buyer / Seller',s:0},
     {key:'relvol',label:'RelVol',s:1},
     {key:'turnover',label:'Turnover',s:1},
@@ -10574,11 +10574,62 @@ function scrollToSection(id){
   window.scrollTo({top:y,behavior:'smooth'});
 }
 function goP(p){PG=p;renderTable();scrollToSection('tHead');}
-function doSort(){applySort();PG=1;renderHead();renderTable();}
+// v1406: the header passed the clicked key and doSort() took no parameter, so every click
+// re-sorted by whatever SCOL already was - and applySort() then forced SCOL='score' anyway, so
+// the table could only ever be in one order. Clicking a header now sorts by that column, and
+// clicking the same header again reverses it. Score remains the DEFAULT (and the order the
+// recommendation logic assumes), it is simply no longer the only possibility.
+function doSort(key){
+  if(key){
+    if(SCOL===key) SDIR=-SDIR; else{SCOL=key;SDIR=-1;}
+  }
+  applySort();PG=1;renderHead();renderTable();
+}
+// Sort value for a column key. Numbers sort numerically, everything else as text; missing values
+// always sink to the bottom regardless of direction, so a blank cell never outranks a real one.
+function sortValueOf(row,key){
+  if(!row) return null;
+  // `Number(undefined) ?? null` is NaN, not null - and one NaN makes every comparison against it
+  // false, which silently scrambles the whole sort. Every numeric path returns null or a finite
+  // number, never NaN.
+  const num=v=>{const n=Number(v);return Number.isFinite(n)?n:null;};
+  if(key==='score'){
+    // The model score is the decision quantity; fall back to the display score for unranked rows.
+    const ms=typeof btstScoreOf==='function'?btstScoreOf(row.symbol):null;
+    return ms!==null?ms:num(row.score);
+  }
+  // Derived columns render a formatted STRING ("1.90%", "GO"), so the underlying number has to be
+  // recomputed here - sorting row.highDistance would compare `undefined` on every row.
+  if(key==='highDistance'){
+    const x=RocketStrategy.inputs(row);
+    return x.price>0&&x.high>=x.price?(x.high-x.price)/x.price*100:null;
+  }
+  if(key==='status'){
+    // GO first, then WAIT, then BLOCKED - decision order, not alphabetical. Negated because the
+    // first click on any column is descending, and on this column "best first" is what's wanted.
+    const st=getRowActionState(row).state;
+    return st==='GO'?2:st==='WAIT'?1:0;
+  }
+  if(key==='price') return num(row.price);
+  if(key==='relvol') return num(RocketStrategy.inputs(row).rvol);
+  const v=row[key];
+  if(v===null||v===undefined||v==='') return null;
+  const n=num(v);
+  return n!==null?n:String(v);
+}
 function applySort(){
-  // Recommendation order is the single economic score. Do not rewrite saved preferences.
-  SCOL='score';SDIR=-1;
-  FILT.sort((a,b)=>(b.score??-1)-(a.score??-1)||radarRankTieBreak(a,b));
+  if(!SCOL){SCOL='score';SDIR=-1;}
+  FILT.sort((a,b)=>{
+    const av=sortValueOf(a,SCOL),bv=sortValueOf(b,SCOL);
+    const an=av===null,bn=bv===null;
+    if(an&&bn) return radarRankTieBreak(a,b);
+    if(an) return 1;            // missing sinks, in both directions
+    if(bn) return -1;
+    let c;
+    if(typeof av==='number'&&typeof bv==='number') c=av-bv;
+    else c=String(av).localeCompare(String(bv),undefined,{numeric:true,sensitivity:'base'});
+    return (SDIR===-1?-c:c)||radarRankTieBreak(a,b);
+  });
 }
 function toggleFilters(){
   const p=document.getElementById('ctrlsPanel');
