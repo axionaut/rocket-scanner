@@ -105,7 +105,7 @@
 <script>
 (function () {
   // Kite Publisher redirects Finish to the registered scanner URL. A B-button order opens in a
-  // named popup, so close that returned popup before it boots a duplicate Rocket Scanner instance.
+  // named tab, so close that returned tab before it boots a duplicate Rocket Scanner instance.
   if (window.opener && window.name === 'rocket-kite-buy') {
     window.close();
     return;

@@ -1,5 +1,5 @@
-const BUILD_TS='2026-09-22 08:53 IST'; // release build time (IST)
-const APP_VERSION=1411;
+const BUILD_TS='2026-09-22 10:34 IST'; // release build time (IST)
+const APP_VERSION=1412;
 const RADAR_SCORE_VERSION='v1393-btst-engine'; // BTST engine (April 2.0): model top picks at 15:15, +3% GTT, 15:20 next-session exit.
 
 // ── v1358: AN UNCAUGHT ERROR MUST NAME ITSELF ─────────────────────────────────────────────────
@@ -1578,13 +1578,14 @@ async function kiteBuyOpen(sym){
   let quantity=planned?.qty>0&&!planned.rejected?Math.floor(planned.qty):Math.floor(budget/limitPrice);
   while(quantity>0&&quantity*limitPrice+calcZerodhaCharges(limitPrice,quantity,false,false,false)>budget)quantity--;
   if(!(quantity>0)){showToast('The current allocation cannot fund one share of '+escHtml(s)+'.',5000,true);return;}
-  // Open on the click, before any helper request, to retain popup permission.
-  const dialog=window.open('about:blank','_blank','popup,width=660,height=760');
-  if(!dialog){showToast('Allow popups to open the Zerodha Buy dialog.',4000,true);return;}
+  // Open on the click, before any helper request, to retain the opener permission.
+  // No popup feature string: request a normal browsing context for the prefilled order.
+  // Tab versus window presentation follows browser preferences; authentication is unchanged.
+  const dialog=window.open('about:blank','rocket-kite-buy');
+  if(!dialog){showToast('Allow popups to open the Zerodha Buy tab.',4000,true);return;}
   try{
-    dialog.name='rocket-kite-buy';
     dialog.document.title='Buy '+s+' — Zerodha';
-    dialog.document.body.textContent='Opening Zerodha Buy dialog for '+s+'…';
+    dialog.document.body.textContent='Opening Zerodha Buy for '+s+'…';
     let key=kitePublisherKey(KITE_API?.login);
     if(!key){
       const login=await readHelperResponse('/api/kite/connect/login',{timeout:6000});
@@ -1606,7 +1607,7 @@ async function kiteBuyOpen(sym){
     form.submit();
   }catch(e){
     try{if(!dialog.closed)dialog.close();}catch(ignore){}
-    showToast('Could not open Zerodha Buy: '+escHtml(e.message||String(e)),5000,true);
+    showToast('Could not open Zerodha Buy tab: '+escHtml(e.message||String(e)),5000,true);
   }
 }
 function tradingViewOpen(sym){
