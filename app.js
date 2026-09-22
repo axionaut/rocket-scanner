@@ -1,5 +1,5 @@
 const BUILD_TS='2026-09-22 10:34 IST'; // release build time (IST)
-const APP_VERSION=1412;
+const APP_VERSION=1413;
 const RADAR_SCORE_VERSION='v1393-btst-engine'; // BTST engine (April 2.0): model top picks at 15:15, +3% GTT, 15:20 next-session exit.
 
 // ── v1358: AN UNCAUGHT ERROR MUST NAME ITSELF ─────────────────────────────────────────────────
@@ -6235,6 +6235,26 @@ function getTapeDayHigh(sym,sessionDate){
   for(const b of day) if(b.h>0&&(high==null||b.h>high)){ high=b.h; at=barClockHHMM(b.t); }
   return high==null?null:{high,at,bars:day.length,firstAt:barClockHHMM(day[0].t)};
 }
+// v1413 (C): the high over the HOLDING WINDOW, not the whole session. "Day's high" is the wrong
+// benchmark for an overnight trade — a high printed at 09:30 on the buy day, or before the buy
+// on the sell day, was never available to this position, yet getTapeDayHigh counts it and makes
+// the exit look late. Window = the buy fill (same day) or the session open (a carried position)
+// through the sell fill. Returns null when the tape has no bar inside the window.
+function getHoldWindowHigh(sym,sessionDate,fromTime,toTime){
+  const day=tapeBarsForSession(sym,sessionDate);
+  if(!day) return null;
+  const from=fromTime==null?null:clockMinutes(fromTime);
+  const to=toTime==null?null:clockMinutes(toTime);
+  let high=null,at=null,n=0;
+  for(const b of day){
+    const d=new Date(b.t), m=d.getHours()*60+d.getMinutes();
+    if(from!=null&&m<from) continue;
+    if(to!=null&&m>to) continue;
+    n++;
+    if(b.h>0&&(high==null||b.h>high)){ high=b.h; at=barClockHHMM(b.t); }
+  }
+  return high==null?null:{high,at,bars:n};
+}
 function getPostSellHighFromWatch(sym,sessionDate,sellTime){
   const day=getSessionWatchStore().highs[sessionDate||getSessionDate()];
   const e=day&&day[normSym(sym)];
@@ -6256,6 +6276,43 @@ function getHighTimeInfo(sym,sessionDate){
   const e=d&&d[normSym(sym)];
   return e?{high:e.h,at:e.at,firstSeen:e.first,observations:e.n||0,exact:false}:null;
 }
+// v1413 (B): which mechanism closed this trade. A trip records no exit type, so it is inferred
+// from what is observable, and the classes are deliberately coarse:
+//   gtt    - realized return reached the +3% target, so the resting limit is what filled it.
+//   time   - sold at/after 15:18, i.e. the "sell 15:20 next session" rule.
+//   manual - sold intraday, below target: a discretionary exit. ZOTA's 09:25 TSL lands here.
+// A stop-loss or trailing stop is indistinguishable from any other early sell in this data,
+// so it counts as manual. This is an inference, not a broker-reported field.
+const EXIT_KIND_LABEL={gtt:'GTT target',manual:'manual/early',time:'15:20 time exit'};
+function classifyExitKind(t){
+  const tgt=Number(RocketStrategy?.CONFIG?.TARGET_PCT);
+  const pct=Number(t?.pnlPct!=null?t.pnlPct:t?.netPnlPct);
+  // Tolerance covers charge rounding and a fill a paisa through the trigger.
+  if(Number.isFinite(tgt)&&Number.isFinite(pct)&&pct>=tgt-0.15) return 'gtt';
+  const se=clockMinutes(t?.sellTime);
+  if(se!=null&&se>=15*60+18) return 'time';
+  return 'manual';
+}
+// Renders the per-mechanism split for the High vs Exit tile, e.g.
+// "GTT target 4 · −52m | manual/early 11 · +38m | 15:20 time exit 9 · −61m".
+// Omitted entirely when only one mechanism is present: a single class tells you nothing.
+function highGapKindBreakdown(g){
+  const k=g&&g.kinds; if(!k) return '';
+  const parts=[];
+  for(const id of ['gtt','manual','time']){
+    const s=k[id]; if(!s) continue;
+    parts.push(`${EXIT_KIND_LABEL[id]} ${s.n} · ${s.meanMin>0?'+':''}${s.meanMin}m`);
+  }
+  return parts.length>1?parts.join(' | '):'';
+}
+function summarizeGaps(list){
+  if(!Array.isArray(list)||!list.length) return null;
+  const sorted=[...list].sort((a,b)=>a-b);
+  return {n:list.length,
+    meanMin:Math.round(list.reduce((a,b)=>a+b,0)/list.length),
+    medianMin:Math.round(sorted[Math.floor(sorted.length/2)]),
+    afterCount:list.filter(g=>g>0).length};
+}
 let _gapStatsMemo=null;
 function getHighGapStats(){
   const store=getSessionWatchStore();
@@ -6271,13 +6328,19 @@ function getHighGapStats(){
     .map(([d,day])=>d+':'+Object.entries(day||{}).map(([s,e])=>s+e.at+e.h).join(''))
     .join('|')+'|'+(Array.isArray(trips)?trips.length:0)+'|'+tapeSig+':'+tapeLast;
   if(_gapStatsMemo&&_gapStatsMemo.sig===sig) return _gapStatsMemo.val;
-  const gaps=[];const sessions=new Set();
+  const gaps=[];const sessions=new Set();const byKind={gtt:[],manual:[],time:[]};
   (Array.isArray(trips)?trips:[]).forEach(t=>{
     const d=t&&t.sellDate; if(!d) return;
-    const e=getHighTimeInfo(t.sym,d); if(!e||!e.at) return;
+    // v1413 (C): measure the high over the holding window, falling back to the day's high only
+    // when the tape cannot cover the window (a carried position starts at the session open).
+    const sameDay=t.buyDate===d;
+    const w=getHoldWindowHigh(t.sym,d,sameDay?t.buyTime:null,t.sellTime);
+    const e=w||getHighTimeInfo(t.sym,d); if(!e||!e.at) return;
     const hi=clockMinutes(e.at), se=clockMinutes(t.sellTime);
     if(hi==null||se==null) return;
-    gaps.push(hi-se); sessions.add(d);
+    const gap=hi-se;
+    gaps.push(gap); sessions.add(d);
+    byKind[classifyExitKind(t)].push(gap);
   });
   // Today's exits are in orders.csv, not yet in the tradebook, so fold them in from the same source
   // the Latest Session panel uses — otherwise the card reads empty on the day it matters most.
@@ -6285,23 +6348,26 @@ function getHighGapStats(){
     const s=getLatestBookedSummary();
     if(s&&s.source==='Orders.csv'&&Array.isArray(s.rows)){
       s.rows.forEach(r=>{
-        const e=getHighTimeInfo(r.sym,s.date); if(!e||!e.at) return;
+        // Today's rows carry no buyDate/buyTime, so the window opens at the session start.
+        const w=getHoldWindowHigh(r.sym,s.date,null,r.sellTime);
+        const e=w||getHighTimeInfo(r.sym,s.date); if(!e||!e.at) return;
         const hi=clockMinutes(e.at), se=clockMinutes(r.sellTime);
         if(hi==null||se==null) return;
-        gaps.push(hi-se); sessions.add(s.date);
+        const gap=hi-se;
+        gaps.push(gap); sessions.add(s.date);
+        byKind[classifyExitKind(r)].push(gap);
       });
     }
   }catch(err){}
   let val;
+  const kinds={};
+  for(const k of ['gtt','manual','time']){ const s=summarizeGaps(byKind[k]); if(s) kinds[k]=s; }
   if(!gaps.length){
-    val={n:0,sessions:0,meanMin:null,medianMin:null,afterCount:0,
+    val={n:0,sessions:0,meanMin:null,medianMin:null,afterCount:0,kinds,
          source:'no session with a tape or watch record has a matching exit yet'};
   } else {
-    const sorted=[...gaps].sort((a,b)=>a-b);
-    val={n:gaps.length,sessions:sessions.size,
-         meanMin:Math.round(gaps.reduce((a,b)=>a+b,0)/gaps.length),
-         medianMin:Math.round(sorted[Math.floor(sorted.length/2)]),
-         afterCount:gaps.filter(g=>g>0).length,
+    const all=summarizeGaps(gaps);
+    val={...all,sessions:sessions.size,kinds,
          source:`${gaps.length} exit${gaps.length===1?'':'s'} across ${sessions.size} session${sessions.size===1?'':'s'}`};
   }
   _gapStatsMemo={sig,val};
@@ -8729,7 +8795,8 @@ function renderPerformance(){
         color:g.meanMin==null?'var(--t3)':g.meanMin>0?'var(--red)':'var(--green)',
         sub:g.meanMin==null
           ? `Recording since 2026-08-11 · ${g.source}`
-          : `Mean minutes from your exit to the day's high · median ${g.medianMin>0?'+':''}${g.medianMin}m · high came AFTER the exit on ${g.afterCount} of ${g.n} · ${g.source}`};})(),
+          : `Mean minutes from your exit to the high of the holding window · median ${g.medianMin>0?'+':''}${g.medianMin}m · high came AFTER the exit on ${g.afterCount} of ${g.n}`
+            +(highGapKindBreakdown(g)?` · ${highGapKindBreakdown(g)}`:'')+` · ${g.source}`};})(),
     {label:'Max Drawdown',value:p.maxDrawdown>0?fmtSignedINR(-p.maxDrawdown):'—',color:'var(--red)',sub:'Worst peak-to-trough fall in this period'},
     {label:'Largest Loss',value:fmtSignedINR(p.largestLossRs),color:'var(--red)',sub:'Worst single lot, net of charges'},
     {label:'Avg Hold',value:p.avgHoldDays+'d',color:'var(--t1)',sub:'How long a position actually lasts'},
