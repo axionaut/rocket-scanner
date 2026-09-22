@@ -1,5 +1,5 @@
 const BUILD_TS='2026-09-22 15:03 IST'; // release build time (IST)
-const APP_VERSION=1416;
+const APP_VERSION=1417;
 const RADAR_SCORE_VERSION='v1393-btst-engine'; // BTST engine (April 2.0): model top picks at 15:15, +3% GTT, 15:20 next-session exit.
 
 // ── v1358: AN UNCAUGHT ERROR MUST NAME ITSELF ─────────────────────────────────────────────────
@@ -4380,6 +4380,20 @@ function checkTimeAlerts(){
     title:'15:20 — EXIT unfilled positions',
     body:'Sell any BTST position from the previous session whose +3% target has not filled.'});
 }
+// v1417: "0 GO of 2" beside two named stocks reads as a fault in the app. It is not - the picks
+// can be real and simply unbuyable. Names the count so the tile explains itself.
+function picksBlockedNote(bd){
+  try{
+    const picks=bd&&bd.picks||[];
+    if(!picks.length) return '';
+    const n=picks.filter(p=>{
+      const row=(Array.isArray(ALL)?ALL:[]).find(r=>normSym(r?.symbol)===normSym(p.symbol));
+      return row&&getRowActionState(row).state==='BLOCKED';
+    }).length;
+    if(!n) return '';
+    return ` <span style="color:var(--red)">· ${n===picks.length?'all':n} blocked</span>`;
+  }catch(e){return '';}
+}
 // Fired from loadBtstPicks when the picks file's stage changes. Only 'final' is tradeable (v1398).
 function alertOnPicksChange(prev,next){
   if(!next||!next.ok||next.mode!=='live'||next.session!==getSessionDate()) return;
@@ -4391,12 +4405,37 @@ function alertOnPicksChange(prev,next){
     // v1404: an empty final list is a real outcome (score floor). Never chime green and say
     // "buy at 15:20" over a list of nothing - that reads as a missed/broken feed.
     const none=!(next.picks||[]).length;
-    fireAlert({once:getSessionDate()+'|final-file',tone:(gateOff||none)?'warn':'go',beeps:none?1:3,
+    // v1417: A PICK IS NOT THE SAME AS A BUYABLE PICK. 22 Sep the 15:15 final published OPTIEMUS
+    // and AHCL and this alert chimed green with "Buy at 15:20. This is the tradeable list." while
+    // BOTH sat locked at their upper circuit with nothing on offer - the board showed 0 GO and an
+    // empty basket at the same moment. The engine has no circuit feature so it ranks a locked
+    // stock happily (invariant 12); the app blocks it, and this alert must read the app's own
+    // verdict rather than the raw file. The buy window is ~5 minutes wide and the owner is not
+    // watching the screen, so an alert naming unbuyable names is exactly what gets acted on.
+    const verdicts=(next.picks||[]).map(p=>{
+      const row=(Array.isArray(ALL)?ALL:[]).find(r=>normSym(r?.symbol)===normSym(p.symbol));
+      // No row yet (universe still loading) counts as unknown, not as buyable.
+      return {sym:p.symbol,st:row?getRowActionState(row):null};
+    });
+    const blocked=verdicts.filter(v=>v.st&&v.st.state==='BLOCKED');
+    const allBlocked=!none&&blocked.length===verdicts.length;
+    const buyable=verdicts.filter(v=>!(v.st&&v.st.state==='BLOCKED')).map(v=>v.sym).join(', ');
+    const blockNote=blocked.length
+      ? '<br><span style="opacity:.85">'+escHtml(blocked.map(v=>v.sym).join(', '))
+        +' '+(blocked.length===1?'is':'are')+' blocked: '
+        +escHtml(String(blocked[0].st.reason||'').split(' - ')[0])+'.</span>'
+      : '';
+    fireAlert({once:getSessionDate()+'|final-file',tone:(gateOff||none||allBlocked)?'warn':'go',
+      beeps:(none||allBlocked)?1:3,
       title:gateOff?'FINAL picks in — but the market gate is OFF'
-        :none?'No BTST picks today ('+at+')':'FINAL picks are in ('+at+')',
+        :none?'No BTST picks today ('+at+')'
+        :allBlocked?'FINAL picks in ('+at+') — none are buyable'
+        :'FINAL picks are in ('+at+')',
       body:gateOff?'No buys today: the gate is off. '+escHtml(names)
         :none?'Nothing cleared the model score floor. No buy today — this is the filter working, not a failed run.'
-        :'<strong>'+escHtml(names)+'</strong><br>Buy at 15:20. This is the tradeable list.'});
+        :allBlocked?'<strong>'+escHtml(names)+'</strong> — every pick is blocked and cannot be bought at any price.'
+          +blockNote+'<br>No trade today.'
+        :'<strong>'+escHtml(buyable)+'</strong><br>Buy at 15:20. This is the tradeable list.'+blockNote});
   }else if(next.stage==='provisional'){
     fireAlert({once:getSessionDate()+'|prov-file',tone:'warn',beeps:1,
       title:'Provisional picks ('+at+') — not tradeable',
@@ -7761,7 +7800,7 @@ function renderStats(){
   const triggersCard = `<div class="st" title="${escHtml(bd ? bd.picks.map(p => '#' + p.rank + ' ' + p.symbol + ' score ' + p.score).join(' | ') : 'No picks for today yet')}">
     <div class="st-l">Today's Picks</div>
     <div class="st-v" style="font-size:18px;color:${triggered.length ? 'var(--green)' : 'var(--t1)'}">${triggered.length} <span style="font-size:12px;color:var(--t2)">GO of ${bd ? bd.picks.length : 0}</span></div>
-    <div class="st-d">${bd ? (bd.picks.length ? escHtml(bd.picks.map(p => p.symbol).join(', ')) : 'none cleared the score floor') : 'top 5 by model score'}</div></div>`;
+    <div class="st-d">${bd ? (bd.picks.length ? escHtml(bd.picks.map(p => p.symbol).join(', ')) + picksBlockedNote(bd) : 'none cleared the score floor') : 'top 5 by model score'}</div></div>`;
 
   const protectionCard = `<div class="st" title="Every buy carries a +${RocketStrategy.CONFIG.TARGET_PCT}% GTT target. No stop-loss: overnight gaps jump stops. If the target has not filled, sell at 15:20 on the next session.">
     <div class="st-l">Exit Rules</div>
