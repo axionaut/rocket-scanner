@@ -1,5 +1,5 @@
-const BUILD_TS='2026-09-22 10:34 IST'; // release build time (IST)
-const APP_VERSION=1413;
+const BUILD_TS='2026-09-22 15:03 IST'; // release build time (IST)
+const APP_VERSION=1414;
 const RADAR_SCORE_VERSION='v1393-btst-engine'; // BTST engine (April 2.0): model top picks at 15:15, +3% GTT, 15:20 next-session exit.
 
 // ── v1358: AN UNCAUGHT ERROR MUST NAME ITSELF ─────────────────────────────────────────────────
@@ -4318,6 +4318,7 @@ function requestAlertPermission(){
 // the caret to position 0, which is why each typed character landed at the front ("2.1" -> "1.2").
 // Restoring a stored preference is a startup job, not a repaint job: it runs once, and bails out
 // if the element is already seeded or currently focused.
+const SCORE_FLOOR_STORE='rs_score_floor';
 let _scoreFloorSeeded=false;
 function initScoreFloorUI(){
   try{
@@ -4469,7 +4470,6 @@ function btstMinScore(){
   const o=btstFloorOverride();
   return o!==null?o:btstEngineMinScore();
 }
-const SCORE_FLOOR_STORE='rs_score_floor';
 function onScoreFloorChange(){
   try{
     const el=document.getElementById('fScoreFloor');
