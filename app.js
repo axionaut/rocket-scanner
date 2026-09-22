@@ -1,6 +1,6 @@
-const BUILD_TS='2026-09-22 15:03 IST'; // release build time (IST)
-const APP_VERSION=1418;
-const RADAR_SCORE_VERSION='v1418-intraday-crossing'; // Eligible on crossing the score floor at any time; +3% GTT, 15:20 next-session exit at the latest.
+const BUILD_TS='2026-09-22 20:21 IST'; // release build time (IST)
+const APP_VERSION=1419;
+const RADAR_SCORE_VERSION='v1419-recross-batches'; // Eligible on crossing the score floor at any time; +3% GTT, 15:20 next-session exit at the latest.
 
 // ── v1358: AN UNCAUGHT ERROR MUST NAME ITSELF ─────────────────────────────────────────────────
 // This is the class of defect that has cost the most sessions in this app's history, and until now
@@ -3624,13 +3624,13 @@ function dualScoreCell(row){
   if(act.state==='GO'){
     // v1405: a GO row shows its real model score too. `sc` is 100-rank, a display ordinal with no
     // units; the pick's own `score` is the predicted next-session net return the rule tests.
-    const pick=btstPickOf(row.symbol),ps=Number(pick&&pick.score);
+    const ps=btstScoreOf(row.symbol);
     return `<div style="display:flex;align-items:center;gap:6px;justify-content:center">
-      <span style="font-family:'DM Mono',monospace;font-weight:800;font-size:15px;color:var(--green)" title="${escHtml(radarScoreTitle(row)||'')}">⚡ ${Number.isFinite(ps)?(ps>=0?'+':'')+ps.toFixed(2):sc}</span>
+      <span style="font-family:'DM Mono',monospace;font-weight:800;font-size:15px;color:var(--green)" title="${escHtml(radarScoreTitle(row)||'')}">⚡ ${Number.isFinite(ps)?(ps>=0?'+':'')+ps.toFixed(2):'N/A'}</span>
       <span style="font-size:10px;font-weight:800;background:var(--green);color:#fff;padding:1px 5px;border-radius:3px">GO</span>
     </div>`;
   }
-  if(act.state==='WAIT'){
+  if(act.state!=='GO'){
     const rk=btstRankOf(row.symbol);
     // v1405: show the MODEL SCORE, not just the ordinal rank. The pick rule is "score >= floor",
     // so a rank without its score hides the only quantity that decides anything - #1 on a dead day
@@ -3639,9 +3639,9 @@ function dualScoreCell(row){
     const ms=btstScoreOf(row.symbol),floor=btstMinScore();
     const clears=ms!==null&&floor!==null&&ms>=floor;
     return `<div style="display:flex;align-items:center;gap:6px;justify-content:center">
-      ${ms===null?'':`<span style="font-family:'DM Mono',monospace;font-weight:800;font-size:15px;color:${clears?'var(--green)':'var(--amber)'}" title="${escHtml(btstRankNote(row.symbol))}">${ms>=0?'+':''}${ms.toFixed(2)}</span>`}
-      <span style="font-family:'DM Mono',monospace;font-weight:600;font-size:11px;color:var(--t3)" title="${rk?escHtml(btstRankNote(row.symbol)+' - ranking only, not a buy signal'):'Not ranked by the BTST engine'}">${rk?'#'+rk:sc}</span>
-      <span style="font-size:10px;font-weight:600;color:var(--t3)">WAIT</span>
+      ${ms===null?'N/A':`<span style="font-family:'DM Mono',monospace;font-weight:800;font-size:15px;color:${clears?'var(--green)':'var(--amber)'}" title="${escHtml(btstRankNote(row.symbol))}">${ms>=0?'+':''}${ms.toFixed(2)}</span>`}
+      <span style="font-family:'DM Mono',monospace;font-weight:600;font-size:11px;color:var(--t3)" title="${rk?escHtml(btstRankNote(row.symbol)+' - ranking only, not a buy signal'):'Not ranked by the BTST engine'}">${rk?'#'+rk:''}</span>
+      <span style="font-size:10px;font-weight:600;color:var(--t3)">${act.state}</span>
     </div>`;
   }
   return `<div style="font-family:'DM Mono',monospace;font-weight:500;font-size:13px;color:var(--t3);text-align:center">—</div>`;
@@ -4509,8 +4509,8 @@ function btstToday(){
 let _btstRankMemo=null;
 function btstRanking(){
   const pk=btstToday();
-  const src=pk&&Array.isArray(pk.ranking)?pk
-    :(BTST.rank&&BTST.rank.ok&&BTST.rank.mode==='live'&&BTST.rank.session===getSessionDate()&&Array.isArray(BTST.rank.ranking)?BTST.rank:null);
+  const preview=BTST.rank&&BTST.rank.ok&&BTST.rank.mode==='live'&&BTST.rank.session===getSessionDate()&&Array.isArray(BTST.rank.ranking)?BTST.rank:null;
+  const src=pk&&Array.isArray(pk.ranking)&&(!preview||String(pk.asOf)>=String(preview.asOf))?pk:preview;
   if(!src) return null;
   if(_btstRankMemo&&_btstRankMemo.src===src) return _btstRankMemo;
   const map=new Map();
@@ -4604,14 +4604,31 @@ function btstCrossingState(s){
   // Only a LIVE ranking may trigger a buy. A replay, a dry run or another session's file must
   // never reach here - same rule the final path has enforced since v1393.
   if(!r||!r.src||r.src.mode!=='live'||r.src.session!==getSessionDate()) return null;
+  const st=crossingStore(),key=normSym(s.symbol);
+  st.rebuy=st.rebuy||{};
+  const qty=Number(getCombinedOpenPositionMap()[s.symbol]?.qty)||0;
+  const fills=typeof TRADEBOOK_BUY_FILLS==='undefined'?[]:TRADEBOOK_BUY_FILLS;
+  const buys=fills.filter(f=>normSym(f.symbol)===key&&f.date===getSessionDate());
+  const fillKey=JSON.stringify(buys.map(f=>[f.date,f.time,f.qty,f.price]));
+  let state=st.rebuy[key];
+  if(!state) state=st.rebuy[key]={qty,fillKey,consumed:qty>0||buys.length>0,armed:false};
+  if(qty>state.qty||(fillKey!==state.fillKey&&buys.length>0)){
+    state.consumed=true;state.armed=false;
+  }
+  state.qty=qty;state.fillKey=fillKey;
+  if(score<floor&&state.consumed) state.armed=true;
+  if(score>=floor&&state.consumed&&state.armed){state.consumed=false;state.armed=false;}
+  saveCrossings();
+  if(state.consumed&&score>=floor)
+    return {state:'WAIT',reason:'Already bought on this crossing; waiting for a fresh dip below the floor and re-crossing.'};
   if(score<floor){
     // Below the floor and never crossed today: nothing to say beyond the usual rank note.
-    if(!crossingStore().at[normSym(s.symbol)]) return null;
+    if(!crossingStore().at[normSym(s.symbol)]) return {state:'WAIT',reason:'Model score is below your score floor'};
     // It crossed earlier and has since fallen back. Requirement 1: if it was NOT bought and
     // crosses again it is eligible again - so this is a WAIT, not a permanent disqualification.
     return {state:'WAIT',reason:`Crossed +${floor.toFixed(2)} earlier today but is back to +${score.toFixed(2)}. Eligible again if it re-crosses.`};
   }
-  const gateOff=(btstToday()&&!btstToday().gate?.on)||(r.src.gate&&r.src.gate.on===false);
+  const gateOff=r.src.gate?.on!==true;
   if(gateOff) return {state:'WAIT',reason:`Score +${score.toFixed(2)} clears +${floor.toFixed(2)}, but the market gate is off - no buys today.`};
   const first=noteCrossing(s.symbol,score,floor);
   if(!isEquitySession(Date.now())) return {state:'WAIT',reason:`Score +${score.toFixed(2)} clears +${floor.toFixed(2)} - market closed.`};
@@ -4706,7 +4723,7 @@ function getRowActionState(s){
   const pcKey=Number.isFinite(pctChg)?Math.round(pctChg*100):null;
   const bandKey=Number(s.price_band_pct??s.band)||null;
   const quote=_universeMap.get(s.symbol), priceAt=quote?.priceAt, priceSource=quote?.priceSource, tickAt=_universeTickAt, universeRev=_clientUniverseRev;
-  const safety=_streamConfirmed+':'+_freshEvidenceAfter+':'+BTST.v,heldQty=getCombinedOpenPositionMap()[s.symbol]?.qty||0;
+  const safety=_streamConfirmed+':'+_freshEvidenceAfter+':'+BTST.v+':'+btstMinScore()+':'+(typeof TRADEBOOK_BUY_FILLS==='undefined'?0:TRADEBOOK_BUY_FILLS.length),heldQty=getCombinedOpenPositionMap()[s.symbol]?.qty||0;
   const cached=ROW_ACTION_MEMO.get(s);
   if(cached&&cached.safety===safety&&cached.heldQty===heldQty&&cached.a===a&&cached.b===b&&cached.c===c&&cached.d===d&&cached.e===e&&cached.score===score&&cached.px===px&&cached.pcKey===pcKey&&cached.bandKey===bandKey&&cached.bookRev===bookRev&&cached.priceAt===priceAt&&cached.priceSource===priceSource&&cached.tickAt===tickAt&&cached.universeRev===universeRev) return cached.value;
   const value=_getRowActionStateUncached(s);
@@ -4784,7 +4801,7 @@ function _getRowActionStateUncached(s, ignoreMarketClosed=false){
   if(ucBlock)return {state:'BLOCKED',reason:ucBlock};
   if(s.basketEligible===false)return {state:'BLOCKED',reason:'Non-EQ series or price band under 10%'};
   const held=getCombinedOpenPositionMap()[s.symbol];
-  if(held?.qty>0)return {state:'BLOCKED',reason:'Already held (no additional buys)'};
+  // Actual purchases consume their crossing in btstCrossingState; a fresh crossing allows a rebuy.
   // ── v1418: ONE PATH. CROSSING THE SCORE FLOOR MAKES A STOCK ELIGIBLE, AT ANY TIME OF DAY. ──
   // Measured 18-22 Sep 2026, the three sessions this system has actually run. Buying each name
   // when it FIRST crossed the owner's 1.2 floor intraday, +3% target, 5 slots of Capital/5:
@@ -4803,31 +4820,9 @@ function _getRowActionStateUncached(s, ignoreMarketClosed=false){
   //
   // This REPLACES the 15:15-final-only rule rather than running beside it (owner requirement 1).
   // The final list is still published and still trades; it is simply no longer the only way a
-  // stock becomes eligible. Re-crossing after being bought does NOT re-qualify - the held check
-  // above already returns BLOCKED for anything with an open position.
-  const d=btstToday();
-  const rankNote=btstRankNote(s.symbol);
+  // stock becomes eligible. A purchase consumes the current crossing; a later dip and re-crossing permits another buy.
   const cross=btstCrossingState(s);
-  if(cross) return cross;
-  if(!d)return {state:'WAIT',reason:(rankNote?rankNote+'. ':'')+btstWaitReason()};
-  const pick=d.picks.find(p=>normSym(p.symbol)===normSym(s.symbol));
-  // v1404: the score floor can legitimately produce an empty final list - "not in today's top 0"
-  // would be nonsense, so say why nothing qualified.
-  if(!pick&&!d.picks.length)return {state:'WAIT',reason:(rankNote?rankNote+'. ':'')+`No BTST picks today: nothing cleared the model's score floor${d.rules&&d.rules.minScore!=null?' of +'+d.rules.minScore:''}. Sitting out is the rule working, not a failure.`};
-  if(!pick)return {state:'WAIT',reason:(rankNote?rankNote+'. ':'')+"Not in today's BTST top "+d.picks.length};
-  // v1398: ONLY THE 15:15 FINAL IS TRADEABLE. 17 Sep the 15:05 provisional named TEGA/VENUSPIPES/
-  // AWHCL/PNCINFRA/INGERRAND and the owner bought all five for Rs 96,792; the 15:15 final then
-  // replaced every one of them (TVSSRICHAK/FIEMIND/KRSNAA/ENTERO/VSSL) - zero of five overlapped.
-  // The provisional runs on a partial bar whose volume is projected from ~5h50m of the session and
-  // exists to warm the panel cache and preview likely names; the tested edge (+1.18%/trade) is the
-  // FINAL list bought at the close. A provisional pick now shows its names as WAIT, so the basket
-  // can never fund them - the preview informs, only the final trades.
-  if(d.stage!=='final')return {state:'WAIT',reason:`Provisional BTST pick #${pick.rank} (${String(d.asOf||'').slice(11,16)} IST) - preview only, not tradeable. The 15:15 final list decides; it can differ completely (17 Sep: 0 of 5 carried over). Buy 15:20 from the final.`};
-  if(!d.gate?.on)return {state:'WAIT',reason:`Market gate off: equal-weight market ${d.gate?.marketTrendPct}% vs its 50DMA (trades above ${d.gate?.threshold}%)`};
-  if(!ignoreMarketClosed&&!isEquitySession(Date.now()))return {state:'WAIT',reason:'Market closed'};
-  const stale=universePriceStaleness()||stockPriceStaleness(s.symbol);
-  if(stale)return {state:'WAIT',reason:stale};
-  return {state:'GO',reason:`BTST pick #${pick.rank} of ${d.picks.length} (${d.stage} ${String(d.asOf||'').slice(11,16)} IST) - buy 15:20, +${RocketStrategy.CONFIG.TARGET_PCT}% GTT, sell 15:20 next session if unfilled`};
+  return cross||{state:'WAIT',reason:btstRankNote(s.symbol)||'Awaiting a current model score'};
 }
 // v1407: A STOCK FROZEN AT ITS UPPER CIRCUIT CANNOT BE BOUGHT AT ALL. 21 Sep FEDDERSHOL ranked
 // #1 (+2.13) and PROTEAN #2 while both sat locked at +20%: Kite showed 75,34,463 shares bid and
@@ -9692,7 +9687,7 @@ function _renderMethodologyInner(){
     <p>One model supplies the recommendation table, counts, allocation and basket. It is the April-2026 idea (score every stock, learn what is working) rebuilt on Zerodha data with a gradient-boosting learner. No ALL NSE files.</p>
     <div class="m-grid">
     <div class="m-card"><h4>1. Score (15:05 provisional, 15:15 final)</h4><p>The local helper runs <code>dev/btst_engine.py</code>. It builds 45 features for every liquid stock (20-day average turnover ≥ ₹5 Cr, price ₹50–₹5,000) from Zerodha daily bars plus today's live price and volume: returns from 1 day to 3 months, gap, close location, range, volume surges, volatility, distance to highs and averages, RSI, stochastics, ADX, MACD, TradingView-style ratings, relative strength and market condition. The model predicts the next-session trade result after costs and is retrained every 5 sessions on the last 220 sessions.</p></div>
-    <div class="m-card"><h4>2. Buy (15:20)</h4><p>Top ${RocketStrategy.CONFIG.TOP_K} picks are GO, split equally across ${RocketStrategy.CONFIG.TOP_K} slots (minimum ₹5,000 each). Stocks already held are excluded. Market gate: no buys when the equal-weight market index is more than 2% below its 50-day average. Stale prices or a broken stream turn GO into WAIT.</p></div>
+    <div class="m-card"><h4>2. Buy on qualification</h4><p>Top ${RocketStrategy.CONFIG.TOP_K} picks are GO, split equally across ${RocketStrategy.CONFIG.TOP_K} slots (minimum ₹5,000 each). A bought stock may qualify again after a fresh dip below the floor and re-crossing. Market gate: no buys when the equal-weight market index is more than 2% below its 50-day average. Stale prices or a broken stream turn GO into WAIT.</p></div>
     <div class="m-card"><h4>3. Exit</h4><p>The basket attaches a +${RocketStrategy.CONFIG.TARGET_PCT}% GTT target. No stop-loss: overnight gaps jump stops, and a −2% stop turned the tested result negative. If the target has not filled, sell at 15:20 on the next session (Open Positions shows SELL from 15:15).</p></div></div>
     <h3>Evidence</h3>
     <p>Walk-forward on NSE daily data, Dec 2025 – Sep 2026 (the model never saw the future), costs included: top 5 bought at the close and sold at +3% the next day or at its close averaged <b>+0.91% per trade</b>, 73% of days positive. With the market gate: <b>+1.18% per trade, 79% of days positive, worst drawdown −4.7%</b>. A 1-minute replay of 36 recent sessions (buy at the real 15:25 price, +3% only when price traded through it) averaged <b>+1.17% per trade</b>, 26 of 36 days positive. Different random seeds and settings gave +0.91% to +1.05%.</p>
@@ -10500,10 +10495,11 @@ function _planDualBasketUncached(rows,capital){
   const reasons=new Map(),alloc={},funded=[];
   const maxAlloc=getTypedMaxAlloc(),minRequired=RocketStrategy.CONFIG.MIN_ALLOCATION_RS;
   let remaining=Math.max(0,Number(capital||0)-BASKET_CASH_RESERVE_RS);
-  const pool=[...(rows||[])].sort((a,b)=>(Number(b.score)||0)-(Number(a.score)||0)||a.symbol.localeCompare(b.symbol));
+  const pool=[...(rows||[])].sort((a,b)=>(btstScoreOf(b.symbol)??(Number(b.score)||0))-(btstScoreOf(a.symbol)??(Number(a.score)||0))||a.symbol.localeCompare(b.symbol));
   const unitDebitOf=price=>price+calcZerodhaCharges(price,1,false,false,false);
   const autoCap=getAutoMaxAllocCap(capital);
-  const eligiblePool=pool.filter(r=>!EXPORT_EXCLUDED.has(r.symbol)&&isStockEligible(r)&&getBuyPrice(r)>0);
+  const eligiblePool=pool.filter(r=>!EXPORT_EXCLUDED.has(r.symbol)&&isStockEligible(r)&&getBuyPrice(r)>0).slice(0,20);
+  const batch=new Set(eligiblePool.map(r=>r.symbol));
   let candidatesLeft=eligiblePool.length;
   // ── v1418 requirement 2: NO SLOT CAP, AND CAPITAL SPLIT BY SCORE ──────────────────────────────
   // Every eligible name is funded, not the first five. The share each gets is proportional to how
@@ -10534,6 +10530,7 @@ function _planDualBasketUncached(rows,capital){
     let reason=EXPORT_EXCLUDED.has(r.symbol)?'Excluded from basket by you':!isStockEligible(r)?getRowActionState(r).reason:null;
     const price=getBuyPrice(r);
     if(!reason&&!(price>0))reason='No valid buy price';
+    if(!reason&&!batch.has(r.symbol))reason='Next basket: Zerodha allows 20 stocks per export';
     // Auto (Max Alloc empty): split remaining cash equally across the GO stocks still to fund,
     // never below Rs 5,000 each, so one top-ranked stock cannot absorb the whole capital.
     const slots=Math.max(1,Math.min(candidatesLeft,Math.floor(remaining/(minRequired*1.005))));
