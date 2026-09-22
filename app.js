@@ -1,5 +1,5 @@
 const BUILD_TS='2026-09-22 15:03 IST'; // release build time (IST)
-const APP_VERSION=1414;
+const APP_VERSION=1416;
 const RADAR_SCORE_VERSION='v1393-btst-engine'; // BTST engine (April 2.0): model top picks at 15:15, +3% GTT, 15:20 next-session exit.
 
 // ── v1358: AN UNCAUGHT ERROR MUST NAME ITSELF ─────────────────────────────────────────────────
@@ -4320,6 +4320,10 @@ function requestAlertPermission(){
 // if the element is already seeded or currently focused.
 const SCORE_FLOOR_STORE='rs_score_floor';
 let _scoreFloorSeeded=false;
+// v1416: declared HERE, not beside pushScoreFloorToEngine ~160 lines below. initScoreFloorUI
+// adopts the helper's value into it, and a `let` declared later is in the temporal dead zone -
+// the v1400 trap that left the alert toggle silently uninitialised inside its own try/catch.
+let _floorPushTimer=null,_floorPushed=null;
 function initScoreFloorUI(){
   try{
     const el=document.getElementById('fScoreFloor');
@@ -4328,6 +4332,19 @@ function initScoreFloorUI(){
     if(document.activeElement===el) return;           // never overwrite what is being typed
     el.value=localStorage.getItem(SCORE_FLOOR_STORE)||'';
     _scoreFloorSeeded=true;
+    // v1416: the helper holds the floor the ENGINE will use, and it outlives this browser's
+    // localStorage (another machine, a cleared profile, a hand-edited state file). Reconcile to it
+    // so the box never shows a floor the engine is not applying. Still skips a focused input.
+    readHelperResponse('/api/btst/min-score',{timeout:6000}).then(d=>{
+      if(!d||d.ok===false) return;
+      const server=d.minScore==null?'':String(d.minScore);
+      const shown=String(el.value||'');
+      if(server===shown||document.activeElement===el) return;
+      el.value=server;
+      _floorPushed=server;                            // adopt, do not echo it straight back
+      try{localStorage.setItem(SCORE_FLOOR_STORE,server);}catch(e){}
+      if(typeof applyFilters==='function') applyFilters();
+    }).catch(()=>{});
   }catch(e){}
 }
 function initAlertUI(){
@@ -4470,11 +4487,40 @@ function btstMinScore(){
   const o=btstFloorOverride();
   return o!==null?o:btstEngineMinScore();
 }
+// v1416: THE FLOOR NOW DECIDES WHAT TRADES. It is pushed to the helper, which passes --min-score
+// to every engine run including the scheduled 15:05/15:15 ones, so the picks file is cut at the
+// owner's number rather than the engine's built-in 1.6. This deliberately supersedes the v1407
+// "display only" design: invariant 5 still holds - GO comes solely from the FINAL picks list - but
+// that list is now produced under a floor the owner chose.
+// HARD FLOOR 1.2, enforced in three places (here, the helper, the engine) because each can be
+// bypassed: this one can be skipped by a stale page, the helper's by a hand-written state file.
+// The engine's clamp is the authoritative one.
+const SCORE_FLOOR_HARD_MIN=1.2;   // _floorPushTimer/_floorPushed are declared beside SCORE_FLOOR_STORE
+function pushScoreFloorToEngine(raw){
+  // Debounced: typing "2.15" would otherwise fire on 2, 2.1, 2.15.
+  clearTimeout(_floorPushTimer);
+  _floorPushTimer=setTimeout(()=>{
+    const v=String(raw??'').trim();
+    if(v===_floorPushed) return;
+    _floorPushed=v;
+    // readHelperResponse, not a bare fetch on KITE_HELPER: that const is declared ~11,270 lines
+    // below this function and a direct reference here is the v1400 temporal-dead-zone trap.
+    readHelperResponse('/api/btst/min-score?set='+encodeURIComponent(v),{timeout:6000}).then(d=>{
+      if(!d||d.ok===false){ showToast('Score floor not applied: '+escHtml(d?.why||'helper refused'),4000,true); return; }
+      if(d.minScore==null){ showToast('Score floor cleared - the engine uses its own +'+(btstEngineMinScore()??1.6).toFixed(2)+' from the next run.',4000); return; }
+      showToast('Score floor +'+Number(d.minScore).toFixed(2)+(d.clamped?' (raised to the '+Number(d.hardFloor).toFixed(1)+' hard floor)':'')
+        +' applies from the next engine run.',4500);
+    }).catch(()=>{ showToast('Helper unreachable - the score floor was saved locally but the engine still uses its own.',5000,true); });
+  },700);
+}
 function onScoreFloorChange(){
+  let raw='';
   try{
     const el=document.getElementById('fScoreFloor');
-    localStorage.setItem(SCORE_FLOOR_STORE,el?.value||'');
+    raw=el?.value||'';
+    localStorage.setItem(SCORE_FLOOR_STORE,raw);
   }catch(e){}
+  pushScoreFloorToEngine(raw);
   // Verdict text and colour live in the rendered rows, so a redraw is the whole update.
   if(typeof applyFilters==='function') applyFilters();
 }
@@ -4482,10 +4528,13 @@ function btstRankNote(sym){
   const r=btstRanking(),k=btstRankOf(sym);
   if(!r||!k) return '';
   const sc=btstScoreOf(sym),floor=btstMinScore(),eng=btstEngineMinScore();
-  // An overridden floor must say so on its face: "clears" against a floor the owner typed is NOT
-  // the engine's verdict, and the engine's own number is shown beside it so both are visible.
+  // v1416: a typed floor now drives the engine, but the CURRENTLY LOADED picks file was cut at
+  // whatever floor that run used. While the two differ the row must say so - otherwise a verdict
+  // computed against the new floor reads as if today's picks honoured it.
+  const pending=eng!==null&&btstFloorIsOverridden()&&Math.abs(floor-eng)>1e-9;
   const who=btstFloorIsOverridden()
-    ? ` (your floor, display only${eng===null?'':`; engine used +${eng.toFixed(2)}`})` : '';
+    ? (pending?` (your floor; this run used +${eng.toFixed(2)} - yours applies from the next engine run)`
+             :` (your floor${eng===null?'':`, in force`})`) : '';
   const scoreBit=sc===null?'':`, score ${sc>=0?'+':''}${sc.toFixed(2)}`
     +(floor===null?'':` vs floor +${floor.toFixed(2)}${who} (${sc>=floor?'clears':'short by '+(floor-sc).toFixed(2)})`);
   return `BTST rank #${k} of ${r.n} (${r.stage==='preview'?'preview':r.stage} ${r.at})${scoreBit}`;
@@ -4512,12 +4561,22 @@ function getRowActionState(s){
   const e=_universeTickAt!==null?Math.floor((Date.now()-_universeTickAt)/10000):(_universeLiveAt?Math.floor((Date.now()-_universeLiveAt)/60000):-1);
   const score=Number(s.score)||0;
   const px=Number(s.price)||0;
+  // v1415: priceChange MUST be in the key. upperCircuitBlock's test 3 (the day-move band check)
+  // reads row.priceChange, and it was the only one of its three inputs not verified here. On the
+  // first paint a row can arrive with price set but priceChange still absent - tests 1 and 2 have
+  // no depth book and no loaded sec_list that early, so the row evaluates as NOT blocked and that
+  // verdict is memoised. When priceChange lands it changed nothing in the key, so the stale
+  // non-blocked answer kept being served: that is the few seconds AHCL (+10.0% at a 10% band)
+  // showed as tradeable while locked. Same for the band, which getNSEPriceBandPct fills in late.
+  const pctChg=Number(s.priceChange??s.day);
+  const pcKey=Number.isFinite(pctChg)?Math.round(pctChg*100):null;
+  const bandKey=Number(s.price_band_pct??s.band)||null;
   const quote=_universeMap.get(s.symbol), priceAt=quote?.priceAt, priceSource=quote?.priceSource, tickAt=_universeTickAt, universeRev=_clientUniverseRev;
   const safety=_streamConfirmed+':'+_freshEvidenceAfter+':'+BTST.v,heldQty=getCombinedOpenPositionMap()[s.symbol]?.qty||0;
   const cached=ROW_ACTION_MEMO.get(s);
-  if(cached&&cached.safety===safety&&cached.heldQty===heldQty&&cached.a===a&&cached.b===b&&cached.c===c&&cached.d===d&&cached.e===e&&cached.score===score&&cached.px===px&&cached.bookRev===bookRev&&cached.priceAt===priceAt&&cached.priceSource===priceSource&&cached.tickAt===tickAt&&cached.universeRev===universeRev) return cached.value;
+  if(cached&&cached.safety===safety&&cached.heldQty===heldQty&&cached.a===a&&cached.b===b&&cached.c===c&&cached.d===d&&cached.e===e&&cached.score===score&&cached.px===px&&cached.pcKey===pcKey&&cached.bandKey===bandKey&&cached.bookRev===bookRev&&cached.priceAt===priceAt&&cached.priceSource===priceSource&&cached.tickAt===tickAt&&cached.universeRev===universeRev) return cached.value;
   const value=_getRowActionStateUncached(s);
-  ROW_ACTION_MEMO.set(s,{safety,heldQty,a,b,c,d,e,score,px,bookRev,priceAt,priceSource,tickAt,universeRev,value});
+  ROW_ACTION_MEMO.set(s,{safety,heldQty,a,b,c,d,e,score,px,pcKey,bandKey,bookRev,priceAt,priceSource,tickAt,universeRev,value});
   return value;
 }
 // A BOARD ON A STORED UNIVERSE IS NOT A RECOMMENDATION. Price, day change, turnover, ATR, range,
