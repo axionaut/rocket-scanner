@@ -1,6 +1,6 @@
 const BUILD_TS='2026-09-22 15:03 IST'; // release build time (IST)
-const APP_VERSION=1417;
-const RADAR_SCORE_VERSION='v1393-btst-engine'; // BTST engine (April 2.0): model top picks at 15:15, +3% GTT, 15:20 next-session exit.
+const APP_VERSION=1418;
+const RADAR_SCORE_VERSION='v1418-intraday-crossing'; // Eligible on crossing the score floor at any time; +3% GTT, 15:20 next-session exit at the latest.
 
 // ── v1358: AN UNCAUGHT ERROR MUST NAME ITSELF ─────────────────────────────────────────────────
 // This is the class of defect that has cost the most sessions in this app's history, and until now
@@ -4380,6 +4380,41 @@ function checkTimeAlerts(){
     title:'15:20 — EXIT unfilled positions',
     body:'Sell any BTST position from the previous session whose +3% target has not filled.'});
 }
+// v1418: a crossing is tradeable the moment it happens, so it must announce itself. The 15:15
+// alerts above are clock-driven; this one is event-driven and fires per symbol, once per session.
+// It reads getRowActionState, never the raw score - v1417's lesson: an alert that names a stock
+// the board has already refused is exactly the one that gets acted on.
+function checkCrossingAlerts(){
+  if(!ALERTS_ON) return;
+  if(!isEquitySession(Date.now())) return;
+  try{
+    const fresh=[];
+    for(const row of (Array.isArray(ALL)?ALL:[])){
+      const st=getRowActionState(row);
+      if(!st||st.state!=='GO') continue;
+      const k=normSym(row.symbol);
+      if(!k||_crossAlerted.has(k)) continue;
+      _crossAlerted.add(k);
+      fresh.push({sym:row.symbol,score:btstScoreOf(row.symbol)});
+    }
+    if(!fresh.length) return;
+    const floor=btstMinScore();
+    const names=fresh.map(f=>f.sym+(Number.isFinite(f.score)?' +'+f.score.toFixed(2):'')).join(', ');
+    fireAlert({once:getSessionDate()+'|cross|'+fresh.map(f=>f.sym).join(','),tone:'go',beeps:3,
+      title:fresh.length===1?'Score crossing — '+fresh[0].sym+' is buyable now'
+        :fresh.length+' score crossings — buyable now',
+      body:'<strong>'+escHtml(names)+'</strong><br>Clears the +'
+        +(Number.isFinite(floor)?floor.toFixed(2):'?')+' floor. Buy now — +'
+        +RocketStrategy.CONFIG.TARGET_PCT+'% GTT, sell by 15:20 next session at the latest.'});
+  }catch(e){}
+}
+// Symbols already announced today. Cleared when the session date rolls, so a tab left open
+// overnight re-arms rather than staying silent on tomorrow's first crossing.
+let _crossAlerted=new Set(),_crossAlertDay='';
+function resetCrossAlertsIfNewDay(){
+  const d=getSessionDate();
+  if(d!==_crossAlertDay){_crossAlertDay=d;_crossAlerted=new Set();}
+}
 // v1417: "0 GO of 2" beside two named stocks reads as a fault in the app. It is not - the picks
 // can be real and simply unbuyable. Names the count so the tile explains itself.
 function picksBlockedNote(bd){
@@ -4525,6 +4560,66 @@ function btstEngineMinScore(){
 function btstMinScore(){
   const o=btstFloorOverride();
   return o!==null?o:btstEngineMinScore();
+}
+// ── v1418 INTRADAY CROSSING ────────────────────────────────────────────────────────────────────
+// A stock is eligible the moment its live model score clears the floor - at 10:05, 11:25, any
+// time. The 15:15 final is no longer the only route to a buy. Evidence and the OPTIEMUS case are
+// documented at the call site in _getRowActionStateUncached.
+//
+// WHY THE ENGINE'S OWN FLOOR IS NOT USED HERE: the engine cuts its PICK list at its floor, but it
+// publishes the FULL ranking with every score, so the app can apply the owner's floor to the live
+// ranking directly. That is what makes the box decide trades intraday as well as at 15:15.
+const CROSS_STORE='rs_btst_crossings_v1';
+let _crossings=null;
+function crossingStore(){
+  if(_crossings&&_crossings.day===getSessionDate()) return _crossings;
+  let saved=null;
+  try{saved=JSON.parse(localStorage.getItem(CROSS_STORE)||'null');}catch(e){}
+  // A crossing is a fact about TODAY. Yesterday's is discarded rather than replayed, so a page
+  // left open overnight cannot resurrect a stale buy signal.
+  _crossings=(saved&&saved.day===getSessionDate())?saved:{day:getSessionDate(),at:{}};
+  return _crossings;
+}
+function saveCrossings(){
+  try{localStorage.setItem(CROSS_STORE,JSON.stringify(crossingStore()));}catch(e){}
+}
+// Records the first time today this symbol was seen at or above the floor, and returns it.
+function noteCrossing(sym,score,floor){
+  const st=crossingStore(),k=normSym(sym);
+  if(!k||!Number.isFinite(score)||!Number.isFinite(floor)||score<floor) return st.at[k]||null;
+  if(!st.at[k]){
+    st.at[k]={t:Date.now(),score,floor};
+    saveCrossings();
+  }
+  return st.at[k];
+}
+// The action state for a live intraday crossing, or null when this row is not one.
+// Returning null hands the row back to the 15:15 final path unchanged.
+function btstCrossingState(s){
+  const floor=btstMinScore();
+  if(!Number.isFinite(floor)) return null;
+  const score=btstScoreOf(s?.symbol);
+  if(!Number.isFinite(score)) return null;
+  const r=btstRanking();
+  // Only a LIVE ranking may trigger a buy. A replay, a dry run or another session's file must
+  // never reach here - same rule the final path has enforced since v1393.
+  if(!r||!r.src||r.src.mode!=='live'||r.src.session!==getSessionDate()) return null;
+  if(score<floor){
+    // Below the floor and never crossed today: nothing to say beyond the usual rank note.
+    if(!crossingStore().at[normSym(s.symbol)]) return null;
+    // It crossed earlier and has since fallen back. Requirement 1: if it was NOT bought and
+    // crosses again it is eligible again - so this is a WAIT, not a permanent disqualification.
+    return {state:'WAIT',reason:`Crossed +${floor.toFixed(2)} earlier today but is back to +${score.toFixed(2)}. Eligible again if it re-crosses.`};
+  }
+  const gateOff=(btstToday()&&!btstToday().gate?.on)||(r.src.gate&&r.src.gate.on===false);
+  if(gateOff) return {state:'WAIT',reason:`Score +${score.toFixed(2)} clears +${floor.toFixed(2)}, but the market gate is off - no buys today.`};
+  const first=noteCrossing(s.symbol,score,floor);
+  if(!isEquitySession(Date.now())) return {state:'WAIT',reason:`Score +${score.toFixed(2)} clears +${floor.toFixed(2)} - market closed.`};
+  const stale=universePriceStaleness()||stockPriceStaleness(s.symbol);
+  if(stale) return {state:'WAIT',reason:stale};
+  const at=first?new Date(first.t).toLocaleTimeString('en-IN',{hour:'2-digit',minute:'2-digit',hour12:false}):'';
+  return {state:'GO',reason:`Score +${score.toFixed(2)} clears the +${floor.toFixed(2)} floor`
+    +(at?` (crossed ${at})`:'')+` - buy now, +${RocketStrategy.CONFIG.TARGET_PCT}% GTT, sell by 15:20 next session at the latest`};
 }
 // v1416: THE FLOOR NOW DECIDES WHAT TRADES. It is pushed to the helper, which passes --min-score
 // to every engine run including the scheduled 15:05/15:15 ones, so the picks file is cut at the
@@ -4690,8 +4785,30 @@ function _getRowActionStateUncached(s, ignoreMarketClosed=false){
   if(s.basketEligible===false)return {state:'BLOCKED',reason:'Non-EQ series or price band under 10%'};
   const held=getCombinedOpenPositionMap()[s.symbol];
   if(held?.qty>0)return {state:'BLOCKED',reason:'Already held (no additional buys)'};
+  // ── v1418: ONE PATH. CROSSING THE SCORE FLOOR MAKES A STOCK ELIGIBLE, AT ANY TIME OF DAY. ──
+  // Measured 18-22 Sep 2026, the three sessions this system has actually run. Buying each name
+  // when it FIRST crossed the owner's 1.2 floor intraday, +3% target, 5 slots of Capital/5:
+  // 17 buys, 10 of 12 reaching +3% at the original floor, about +Rs 4,000 on Rs 1,00,000 in
+  // three days. The invariant-11 control ran 2,000 random liquid longs at the SAME minutes on
+  // the SAME days: the signal beat it in 64 of 64 policy cells, p=0.000 at the 1.2 floor, while
+  // a random long LOST 0.28% - two of the three days had the median stock falling, so this is
+  // not a rising-tape artefact. A negative control (random symbols in place of the signalled
+  // ones) collapses the excess to +0.012%, so the harness measures the signal. Fillability was
+  // audited against the Book files: 18 of 20 signals provably two-sided at entry, zero locked.
+  //
+  // OPTIEMUS on 22 Sep is the whole argument: freely trading and buyable at 11:15 when it
+  // crossed, hit +3% by 11:30, then locked at its circuit from 14:15 through the close - which
+  // is the state the 15:15 final saw, which is why it published an unbuyable pick and the owner
+  // got no trade at all that day. Waiting four hours is what cost the trade, not the pick.
+  //
+  // This REPLACES the 15:15-final-only rule rather than running beside it (owner requirement 1).
+  // The final list is still published and still trades; it is simply no longer the only way a
+  // stock becomes eligible. Re-crossing after being bought does NOT re-qualify - the held check
+  // above already returns BLOCKED for anything with an open position.
   const d=btstToday();
   const rankNote=btstRankNote(s.symbol);
+  const cross=btstCrossingState(s);
+  if(cross) return cross;
   if(!d)return {state:'WAIT',reason:(rankNote?rankNote+'. ':'')+btstWaitReason()};
   const pick=d.picks.find(p=>normSym(p.symbol)===normSym(s.symbol));
   // v1404: the score floor can legitimately produce an empty final list - "not in today's top 0"
@@ -7805,7 +7922,7 @@ function renderStats(){
   const protectionCard = `<div class="st" title="Every buy carries a +${RocketStrategy.CONFIG.TARGET_PCT}% GTT target. No stop-loss: overnight gaps jump stops. If the target has not filled, sell at 15:20 on the next session.">
     <div class="st-l">Exit Rules</div>
     <div class="st-v" style="font-size:18px"><span style="color:var(--green)">+${RocketStrategy.CONFIG.TARGET_PCT}% GTT</span></div>
-    <div class="st-d">sell 15:20 next session if unfilled · no stop</div></div>`;
+    <div class="st-d">sell by 15:20 next session if unfilled · no stop</div></div>`;
 
   // Active Basket Allocation Card
   const capital = getEffectiveCapital();
@@ -10386,18 +10503,43 @@ function _planDualBasketUncached(rows,capital){
   const pool=[...(rows||[])].sort((a,b)=>(Number(b.score)||0)-(Number(a.score)||0)||a.symbol.localeCompare(b.symbol));
   const unitDebitOf=price=>price+calcZerodhaCharges(price,1,false,false,false);
   const autoCap=getAutoMaxAllocCap(capital);
-  let candidatesLeft=pool.filter(r=>!EXPORT_EXCLUDED.has(r.symbol)&&isStockEligible(r)&&getBuyPrice(r)>0).length;
+  const eligiblePool=pool.filter(r=>!EXPORT_EXCLUDED.has(r.symbol)&&isStockEligible(r)&&getBuyPrice(r)>0);
+  let candidatesLeft=eligiblePool.length;
+  // ── v1418 requirement 2: NO SLOT CAP, AND CAPITAL SPLIT BY SCORE ──────────────────────────────
+  // Every eligible name is funded, not the first five. The share each gets is proportional to how
+  // far its score clears the floor, so a +2.66 conviction is sized above a +1.21 one instead of
+  // both taking Capital/5. Weights use (score - floor) + a floor-relative base rather than the raw
+  // score: raw scores are all clustered near the floor, so raw-proportional weighting would be
+  // almost exactly equal and the "score-weighted" label would be cosmetic.
+  const crossFloor=btstMinScore();
+  const weightOf=r=>{
+    const sc=btstScoreOf(r.symbol);
+    if(!Number.isFinite(sc)||!Number.isFinite(crossFloor)) return 1;
+    // Base 1 keeps a name that just clears the floor fundable; excess is the conviction premium.
+    return 1+Math.max(0,sc-crossFloor);
+  };
+  const totalWeight=eligiblePool.reduce((a,r)=>a+weightOf(r),0)||1;
+  const scoreWeighted=Number.isFinite(crossFloor)&&eligiblePool.length>0;
+  // Declared BEFORE weightBudget closes over it. A `const` referenced from a closure that runs
+  // before its declaration is the v1400/v1416 temporal-dead-zone trap - it throws rather than
+  // reading undefined, and the throw is swallowed by an enclosing try/catch.
+  const startingCash=remaining;
+  const weightBudget=r=>{
+    // Proportional share of the cash available at the START of the pass, so the first-funded name
+    // does not silently absorb what later names are owed.
+    const share=startingCash*weightOf(r)/totalWeight;
+    return Math.max(minRequired,share);
+  };
   for(const r of pool){
     let reason=EXPORT_EXCLUDED.has(r.symbol)?'Excluded from basket by you':!isStockEligible(r)?getRowActionState(r).reason:null;
     const price=getBuyPrice(r);
-    if(!reason&&funded.length>=20)reason='Outside the top 20 funded candidates';
     if(!reason&&!(price>0))reason='No valid buy price';
     // Auto (Max Alloc empty): split remaining cash equally across the GO stocks still to fund,
     // never below Rs 5,000 each, so one top-ranked stock cannot absorb the whole capital.
-    const slots=Math.max(1,Math.min(candidatesLeft,20-funded.length,Math.floor(remaining/(minRequired*1.005))));
+    const slots=Math.max(1,Math.min(candidatesLeft,Math.floor(remaining/(minRequired*1.005))));
     // Auto also caps each stock at the larger of Rs 5,000 and one twentieth of capital, so a lone GO
     // stock cannot absorb the account (investigation Problem 3: concentration).
-    let budget=Math.min(remaining,maxAlloc>0?maxAlloc:Math.min(remaining/slots,autoCap));
+    let budget=Math.min(remaining,maxAlloc>0?maxAlloc:(scoreWeighted?weightBudget(r):Math.min(remaining/slots,autoCap)));
     let qty=0;
     if(!reason){
       candidatesLeft--;
@@ -13218,7 +13360,7 @@ function refreshStrategySafety(){
 }
 function startStreamRefresh(){
   if(_streamRefreshTimer) return;
-  if(!startStreamRefresh.btst){startStreamRefresh.btst=setInterval(()=>{loadBtstPicks();try{checkTimeAlerts();}catch(e){}},20000);loadBtstPicks();try{checkTimeAlerts();}catch(e){}
+  if(!startStreamRefresh.btst){startStreamRefresh.btst=setInterval(()=>{loadBtstPicks();try{resetCrossAlertsIfNewDay();checkTimeAlerts();checkCrossingAlerts();}catch(e){}},20000);loadBtstPicks();try{resetCrossAlertsIfNewDay();checkTimeAlerts();checkCrossingAlerts();}catch(e){}
     try{seedSavedBasketCount();}catch(e){}}
   _streamRefreshUiTimer=setInterval(()=>{try{refreshStrategySafety();renderLiveTapeBar();}catch(e){console.warn('Strategy safety refresh',e);}},1000);
   if(!_streamVisibilityBound){
