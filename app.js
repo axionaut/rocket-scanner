@@ -1,5 +1,5 @@
-const BUILD_TS='2026-09-21 16:45 IST'; // release build time (IST)
-const APP_VERSION=1410;
+const BUILD_TS='2026-09-22 08:53 IST'; // release build time (IST)
+const APP_VERSION=1411;
 const RADAR_SCORE_VERSION='v1393-btst-engine'; // BTST engine (April 2.0): model top picks at 15:15, +3% GTT, 15:20 next-session exit.
 
 // ── v1358: AN UNCAUGHT ERROR MUST NAME ITSELF ─────────────────────────────────────────────────
@@ -56,7 +56,7 @@ const GOOGLE_DRIVE_CLIENT_ID='1015012642264-oi2nelv3v90k3d39r994a6nelgjs2a56.app
 const MIN_ALLOCATION_SHARES=10; // Each funded model pick must also clear net economics.
 const BASKET_CASH_RESERVE_RS=1; // Leave a rupee for broker-side tax/rounding differences.
 const MAX_TURNOVER_PARTICIPATION=0.001; // Market-impact rail: never exceed 0.10% of a stock's daily rupee turnover.
-const BASKET_MARKET_BUDGET_BUFFER_PCT=0.25; // Sizing cushion only; exported buys remain MARKET orders.
+const BASKET_MARKET_BUDGET_BUFFER_PCT=0.25; // Sizing cushion and manual-buy limit protection above the live price.
 let RADAR_STRETCH_USE_TARGET=true;
 const SYSTEM_TRADE_START_DATE='2026-04-01'; // Adaptive stats use trades closed from this date onward.
 const HARVEST_DAILY_NET_GOAL_RS=15000; // North-star daily pure-profit goal, never a forced capital assumption.
@@ -1556,7 +1556,7 @@ function chartLinkButtons(sym,extraStyle=''){
       +` title="Open ${escHtml(s)} on TradingView"`
       +` style="${base}border:1px solid rgba(148,163,184,.35);background:rgba(148,163,184,.12);color:var(--t2);${extraStyle}">T</button>`
     +`<button type="button" onclick="event.stopPropagation();kiteBuyOpen(${escHtml(JSON.stringify(n))})"`
-      +` aria-label="Buy ${escHtml(s)} in Zerodha" title="Open manual BUY dialog for ${escHtml(s)} in Zerodha (quantity 1, editable)"`
+      +` aria-label="Buy ${escHtml(s)} in Zerodha" title="Open the allocated BUY order for ${escHtml(s)} in Zerodha"`
       +` style="${base}border:1px solid rgba(34,197,94,.35);background:rgba(34,197,94,.10);color:var(--green);${extraStyle}">B</button>`;
 }
 function kitePublisherKey(login){
@@ -1569,11 +1569,20 @@ function kitePublisherKey(login){
 async function kiteBuyOpen(sym){
   const s=normSym(sym||'');
   if(!s)return;
+  const row=(Array.isArray(ALL)?ALL:[]).find(r=>normSym(r?.symbol)===s);
+  const limitPrice=row?getBuyPrice(row):0;
+  if(!(limitPrice>0)){showToast('No valid live price for '+escHtml(s)+'.',4000,true);return;}
+  const selected=(Array.isArray(FILT)?FILT:[]).filter(r=>r&&SELECTED.has(r.symbol));
+  const planned=computeAlloc(getEffectiveCapital(),selected)[s];
+  const budget=Math.min(getEffectiveCapital(),getEffectiveMaxAlloc());
+  let quantity=planned?.qty>0&&!planned.rejected?Math.floor(planned.qty):Math.floor(budget/limitPrice);
+  while(quantity>0&&quantity*limitPrice+calcZerodhaCharges(limitPrice,quantity,false,false,false)>budget)quantity--;
+  if(!(quantity>0)){showToast('The current allocation cannot fund one share of '+escHtml(s)+'.',5000,true);return;}
   // Open on the click, before any helper request, to retain popup permission.
   const dialog=window.open('about:blank','_blank','popup,width=660,height=760');
   if(!dialog){showToast('Allow popups to open the Zerodha Buy dialog.',4000,true);return;}
   try{
-    dialog.opener=null;
+    dialog.name='rocket-kite-buy';
     dialog.document.title='Buy '+s+' — Zerodha';
     dialog.document.body.textContent='Opening Zerodha Buy dialog for '+s+'…';
     let key=kitePublisherKey(KITE_API?.login);
@@ -1583,12 +1592,12 @@ async function kiteBuyOpen(sym){
     }
     if(!key)throw new Error('Kite Connect is not configured. Connect Kite first.');
     if(dialog.closed)return;
-    // Official offsite order review. This form opens Kite's confirmation screen;
-    // it never calls the order-placement API. Quantity stays editable in Kite.
+    // Official offsite order review. NSE blocks unprotected API market orders, and the Publisher
+    // basket does not accept market_protection, so use the same buffered price used for sizing.
     const form=dialog.document.createElement('form');
     form.method='POST';form.action='https://kite.zerodha.com/connect/basket';
     const order={variety:'regular',exchange:'NSE',tradingsymbol:s,transaction_type:'BUY',
-      order_type:'MARKET',product:'CNC',quantity:1,validity:'DAY',readonly:false};
+      order_type:'LIMIT',product:'CNC',price:limitPrice,quantity,validity:'DAY',readonly:false};
     for(const [name,value] of Object.entries({api_key:key,data:JSON.stringify([order])})){
       const input=dialog.document.createElement('input');
       input.type='hidden';input.name=name;input.value=value;form.appendChild(input);

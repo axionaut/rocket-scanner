@@ -104,6 +104,12 @@
 <!-- Cache-proof app loader. Load strategy engine then app.js. -->
 <script>
 (function () {
+  // Kite Publisher redirects Finish to the registered scanner URL. A B-button order opens in a
+  // named popup, so close that returned popup before it boots a duplicate Rocket Scanner instance.
+  if (window.opener && window.name === 'rocket-kite-buy') {
+    window.close();
+    return;
+  }
   var cacheKey = Date.now().toString(36);
   var stratScript = document.createElement('script');
   stratScript.id = 'strategyScript';
