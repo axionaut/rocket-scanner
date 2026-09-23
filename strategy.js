@@ -26,10 +26,10 @@
     MAX_HIGH_DISTANCE_PCT: 1.2,  // Within 1.2% of Day High
     MIN_CIRCUIT_HEADROOM_PCT: 3.0, // At least 3.0% below Upper Circuit
 
-    // BTST engine (v1393): exits and allocation. Buy the top picks at 15:20; GTT sell at +3% next session;
-    // if unfilled, sell at 15:20 next session. No stop: overnight gaps jump stops (a -2% stop turned the
-    // walk-forward result negative).
-    TARGET_PCT: 3.0,             // +3.0% GTT target
+    // BTST: +3% is the fallback for legacy positions and insufficient target-learning evidence.
+    // New funded orders may carry a learned target; all unfilled positions exit by 15:20 next session.
+    // No stop: overnight gaps jump stops (a -2% stop turned the walk-forward result negative).
+    TARGET_PCT: 3.0,
     STOP_LOSS_PCT: 0,            // no stop-loss
     MAX_HOLD_DAYS: 1,            // exit on the next session
     EXIT_AT_MIN: 15 * 60 + 20,   // 15:20 IST time exit
@@ -125,14 +125,15 @@
     const daysHeld = Number(position.daysHeld || 0);
     const pnlPct = +(((ltp - avgCost) / avgCost) * 100).toFixed(2);
 
-    // Rule 1: Target Hit (+2.0%)
-    if (pnlPct >= CONFIG.TARGET_PCT) {
+    const targetPct = Number(position.targetPct) > 0 ? Number(position.targetPct) : CONFIG.TARGET_PCT;
+    // Use the target attached to this executed BTST entry; legacy positions retain +3%.
+    if (pnlPct >= targetPct) {
       return {
         shouldExit: true,
         action: 'SELL',
         exitType: 'TARGET',
         pnlPct,
-        reason: `Target hit: +${pnlPct}% (>= +${CONFIG.TARGET_PCT}%)`
+        reason: `Target hit: +${pnlPct}% (>= +${targetPct}%)`
       };
     }
 
@@ -157,7 +158,7 @@
         action: 'SELL',
         exitType: 'TIME_STOP',
         pnlPct,
-        reason: `Time exit: held ${daysHeld} session${daysHeld === 1 ? '' : 's'} and +${CONFIG.TARGET_PCT}% not filled - sell at 15:20`
+        reason: `Time exit: held ${daysHeld} session${daysHeld === 1 ? '' : 's'} and +${targetPct}% not filled - sell at 15:20`
       };
     }
     if (daysHeld >= CONFIG.MAX_HOLD_DAYS) {
@@ -166,7 +167,7 @@
         action: 'HOLD',
         exitType: 'ACTIVE',
         pnlPct,
-        reason: `Target +${CONFIG.TARGET_PCT}% not reached; time exit at 15:20 today (P&L ${pnlPct > 0 ? '+' : ''}${pnlPct}%)`
+        reason: `Target +${targetPct}% not reached; time exit at 15:20 today (P&L ${pnlPct > 0 ? '+' : ''}${pnlPct}%)`
       };
     }
 
@@ -176,7 +177,7 @@
       action: 'HOLD',
       exitType: 'ACTIVE',
       pnlPct,
-      reason: `Bought today: target +${CONFIG.TARGET_PCT}%; time exit 15:20 next session (P&L ${pnlPct > 0 ? '+' : ''}${pnlPct}%)`
+      reason: `Bought today: target +${targetPct}%; time exit 15:20 next session (P&L ${pnlPct > 0 ? '+' : ''}${pnlPct}%)`
     };
   }
 

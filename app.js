@@ -1,6 +1,6 @@
-const BUILD_TS='2026-09-23 11:27 IST'; // release build time (IST)
-const APP_VERSION=1421;
-const RADAR_SCORE_VERSION='v1419-recross-batches'; // Eligible on crossing the score floor at any time; +3% GTT, 15:20 next-session exit at the latest.
+const BUILD_TS='2026-09-23 11:46 IST'; // release build time (IST)
+const APP_VERSION=1422;
+const RADAR_SCORE_VERSION='v1419-recross-batches'; // Eligible on crossing the score floor at any time; learned target or +3% fallback, BTST-max exit.
 
 // ── v1358: AN UNCAUGHT ERROR MUST NAME ITSELF ─────────────────────────────────────────────────
 // This is the class of defect that has cost the most sessions in this app's history, and until now
@@ -41,7 +41,7 @@ if(typeof window!=='undefined'){
     reportAppError('Unhandled promise rejection',ev&&ev.reason,'');
   });
 }
-const TARGET_POLICY_VERSION='dual-model-target-net-v1';
+const TARGET_POLICY_VERSION='btst-score-learned-target-v1';
 function isValidChangeOpen(v){
   if(v===null||v===undefined||typeof v==='boolean') return false;
   if(typeof v==='string'&&v.trim()==='') return false;
@@ -4372,13 +4372,13 @@ function checkTimeAlerts(){
     body:'BTST runs at 15:05 and 15:15. Make sure the helper is up and streaming now so the 15:05 run warms the panel cache.'});
   if(due(15,15)) fireAlert({once:day+'|final',tone:'go',beeps:3,
     title:'15:15 — FINAL picks due',
-    body:'The final list is the only tradeable one. Check the table, then buy at 15:20.'});
+    body:'Check the final scores and funded GO rows; eligible crossings can be bought now.'});
   if(due(15,19)) fireAlert({once:day+'|buy',tone:'go',beeps:3,
     title:'15:20 — BUY window',
-    body:'Import <strong>Zerodha_Basket_Buy</strong> and send. Exits: +3% GTT, sell 15:20 next session.'});
+    body:'Import <strong>Zerodha_Basket_Buy</strong> and send. Use each order\'s GTT target; sell unfilled BTST positions by 15:20 next session.'});
   if(due(15,18)) fireAlert({once:day+'|exit',tone:'warn',beeps:2,
     title:'15:20 — EXIT unfilled positions',
-    body:'Sell any BTST position from the previous session whose +3% target has not filled.'});
+    body:'Sell any BTST position from the previous session whose GTT target has not filled.'});
 }
 // v1418: a crossing is tradeable the moment it happens, so it must announce itself. The 15:15
 // alerts above are clock-driven; this one is event-driven and fires per symbol, once per session.
@@ -4404,8 +4404,7 @@ function checkCrossingAlerts(){
       title:fresh.length===1?'Score crossing — '+fresh[0].sym+' is buyable now'
         :fresh.length+' score crossings — buyable now',
       body:'<strong>'+escHtml(names)+'</strong><br>Clears the +'
-        +(Number.isFinite(floor)?floor.toFixed(2):'?')+' floor. Buy now — +'
-        +RocketStrategy.CONFIG.TARGET_PCT+'% GTT, sell by 15:20 next session at the latest.'});
+        +(Number.isFinite(floor)?floor.toFixed(2):'?')+' floor. Buy the funded basket now; use its GTT target, then sell by 15:20 next session at the latest.'});
   }catch(e){}
 }
 // Symbols already announced today. Cleared when the session date rolls, so a tab left open
@@ -4480,18 +4479,20 @@ function alertOnPicksChange(prev,next){
 // ── BTST ENGINE PICKS (v1393) ──────────────────────────────────────────────────────────────────
 // The helper runs dev/btst_engine.py at 15:05 (provisional) and 15:15 (final) and writes btst_picks.json.
 // GO = today's live picks while the market gate is on. Nothing else is a buy recommendation.
-let BTST={data:null,key:'',v:0,loadedAt:0,rank:null,rankKey:''};
+let BTST={data:null,key:'',v:0,loadedAt:0,rank:null,rankKey:'',targetModel:null,targetKey:''};
 async function loadBtstPicks(){
   if(!KITE_API) return;
   try{
-    const [j,rk]=await Promise.all([
+    const [j,rk,tm]=await Promise.all([
       readHelperResponse('/api/inputs/file?name=btst_picks.json',{timeout:6000}).catch(()=>null),
-      readHelperResponse('/api/inputs/file?name=btst_rank.json',{timeout:6000}).catch(()=>null)]);
+      readHelperResponse('/api/inputs/file?name=btst_rank.json',{timeout:6000}).catch(()=>null),
+      readHelperResponse('/api/inputs/file?name=btst_target_model.json',{timeout:6000}).catch(()=>null)]);
     const key=[j?.asOf,j?.stage,j?.ok,j?.session].join('|'),rankKey=[rk?.asOf,rk?.ok,rk?.session].join('|');
+    const targetKey=[tm?.asOfSession,tm?.trainedThrough,tm?.cases?.length].join('|');
     BTST.loadedAt=Date.now();
-    if(key===BTST.key&&rankKey===BTST.rankKey) return;
+    if(key===BTST.key&&rankKey===BTST.rankKey&&targetKey===BTST.targetKey) return;
     const prevPicks=BTST.data;
-    BTST={data:j,key,v:BTST.v+1,loadedAt:Date.now(),rank:rk,rankKey};
+    BTST={data:j,key,v:BTST.v+1,loadedAt:Date.now(),rank:rk,rankKey,targetModel:tm,targetKey};
     try{alertOnPicksChange(prevPicks,j);}catch(e){}
     _btstRankMemo=null;
     for(const row of ALL){ROW_ACTION_MEMO.delete(row);setRadarEvidenceScore(row);}
@@ -4636,7 +4637,7 @@ function btstCrossingState(s){
   if(stale) return {state:'WAIT',reason:stale};
   const at=first?new Date(first.t).toLocaleTimeString('en-IN',{hour:'2-digit',minute:'2-digit',hour12:false}):'';
   return {state:'GO',reason:`Score +${score.toFixed(2)} clears the +${floor.toFixed(2)} floor`
-    +(at?` (crossed ${at})`:'')+` - buy now, +${RocketStrategy.CONFIG.TARGET_PCT}% GTT, sell by 15:20 next session at the latest`};
+    +(at?` (crossed ${at})`:'')+` - buy the funded basket now; use its GTT target, sell by 15:20 next session at the latest`};
 }
 // v1416: THE FLOOR NOW DECIDES WHAT TRADES. It is pushed to the helper, which passes --min-score
 // to every engine run including the scheduled 15:05/15:15 ones, so the picks file is cut at the
@@ -10215,10 +10216,50 @@ function getClockRunwayRead(row,opts){
     n:use.n,conditioned,atMinutes:at,clockLabel:clockLabelOf(at)};
 }
 
+const BTST_TARGET_CHOICES=[1.5,2,2.5,3,3.5,4];
+function learnedBtstTarget(score){
+  const model=BTST.targetModel,day=getSessionDate();
+  if(!Number.isFinite(score)||!model||!Array.isArray(model.cases)||!(model.trainedThrough<day)||model.asOfSession!==day)return null;
+  // Nearest-score empirical learner, using only COMPLETED earlier sessions. Two distinct days and
+  // ten paths are required. A new target must beat fixed +3% by 0.25% net on average and must not
+  // lose the comparison on either day. No same-day path can train a same-day order.
+  const near=model.cases.filter(c=>c.day<day&&c.day<=model.trainedThrough&&Number.isFinite(Number(c.score))&&Math.abs(Number(c.score)-score)<=0.8)
+    .sort((a,b)=>Math.abs(a.score-score)-Math.abs(b.score-score)).slice(0,12);
+  const days=[...new Set(near.map(c=>c.day))];
+  if(near.length<10||days.length<2||days.some(d=>near.filter(c=>c.day===d).length<2))return null;
+  let best=null;
+  for(const target of BTST_TARGET_CHOICES){
+    const deltas=near.map(c=>Number(c.returns?.[String(target)])-Number(c.returns?.['3.0']));
+    if(deltas.some(x=>!Number.isFinite(x)))continue;
+    const improvement=deltas.reduce((a,b)=>a+b,0)/deltas.length;
+    if(target!==3&&(improvement<0.25||days.some(d=>near.filter(c=>c.day===d).reduce((n,c)=>n+Number(c.returns[String(target)])-Number(c.returns['3.0']),0)<0)))continue;
+    if(!best||improvement>best.improvement+1e-9)best={pct:target,improvement,n:near.length,through:model.trainedThrough};
+  }
+  return best&&best.pct!==3?best:null;
+}
+function btstTargetNetRs(price,qty,pct){
+  const sale=price*(1+pct/100);
+  // 0.25% per leg is the existing basket execution cushion. A target that fails this and actual
+  // CNC charges is not an acceptable minimum-profit target even if its historical hit rate is high.
+  return qty*(sale-price)-calcZerodhaCharges(price,qty,false,false,false)
+    -calcZerodhaCharges(sale,qty,true,false,false)-qty*price*2*BASKET_MARKET_BUDGET_BUFFER_PCT/100;
+}
 function getRowExitPolicy(row,buyPrice=null,activeInfo=null,nudgeInfo=null,qty=null){
-  const {TARGET_PCT:targetPct,STOP_LOSS_PCT:stopPct}=RocketStrategy.CONFIG;
-  return {targetPct,basePct:targetPct,stopPct,viable:true,targetPolicy:'btst-fixed',
-    targetSource:'BTST +'+targetPct+'% GTT',stopSource:stopPct>0?'Fixed strategy stop':'No stop: time exit 15:20 next session',rewardRisk:stopPct>0?targetPct/stopPct:null};
+  const {TARGET_PCT:basePct,STOP_LOSS_PCT:stopPct}=RocketStrategy.CONFIG;
+  const learned=learnedBtstTarget(btstScoreOf(row?.symbol)),price=Number(buyPrice),shares=Number(qty);
+  let targetPct=learned?.pct||basePct;
+  let viable=true;
+  if(price>0&&shares>0){
+    const minimum=respectableProfitRs();
+    if(learned){
+      const safe=BTST_TARGET_CHOICES.find(p=>p>=targetPct&&btstTargetNetRs(price,shares,p)>=minimum);
+      if(safe)targetPct=safe;else viable=false;
+    }else if(btstTargetNetRs(price,shares,targetPct)<minimum) viable=false;
+  }
+  return {targetPct,basePct,stopPct,viable,targetPolicy:learned?'btst-score-learned':'btst-fixed',
+    targetSource:learned?`Score-learned BTST target (${learned.n} completed paths through ${learned.through})`:`BTST +${basePct}% GTT (learning fallback)`,
+    viabilitySource:viable?null:'Target cannot clear the minimum after charges and execution cushion',
+    stopSource:stopPct>0?'Fixed strategy stop':'No stop: time exit 15:20 next session',rewardRisk:stopPct>0?targetPct/stopPct:null};
 }
 function summarizeRowExitPolicies(rows){
   const policies=(rows||[]).map(r=>getRowExitPolicy(r,r?.price)).filter(p=>p.targetPct>0&&p.stopPct>0&&p.viable);
@@ -10347,6 +10388,33 @@ function costFloorTarget(row,buyPrice,qty){
 // upside level with a profit floor above average buy; downside belongs only in the dedicated SL.
 // Stable projections use completed bars; the bounded high-volume harvest below is the one
 // live-candle exception.
+const BTST_EXPORTED_TARGETS_STORE='rs_btst_exported_targets_v1';
+function recordBtstExportedTargets(orders,at=Date.now()){
+  try{
+    const old=JSON.parse(localStorage.getItem(BTST_EXPORTED_TARGETS_STORE)||'[]');
+    const keep=(Array.isArray(old)?old:[]).filter(x=>Number(x.at)>at-14*86400000);
+    for(const order of orders||[]){
+      const pct=Number(order.params?.gtt?.target),sym=normSym(order._meta?.sym);
+      if(sym&&pct>0&&Number(order.params?.quantity)>0)keep.push({sym,at,pct});
+    }
+    localStorage.setItem(BTST_EXPORTED_TARGETS_STORE,JSON.stringify(keep.slice(-300)));
+  }catch(e){}
+}
+function executedBtstTarget(sym){
+  try{
+    const key=normSym(sym);
+    const orders=(ORDERS_TODAY||[]).filter(o=>normSym(o.symbol)===key&&o.type==='BUY'&&Number(o.qty)>0)
+      .map(o=>modelTradeTimestamp(normOrderDate(o.time),o.time)).filter(Number.isFinite);
+    const fills=(TRADEBOOK_BUY_FILLS||[]).filter(f=>normSym(f.symbol)===key)
+      .map(f=>modelTradeTimestamp(f.date,f.time)).filter(Number.isFinite);
+    const latest=Math.max(0,...orders,...fills);
+    if(!latest)return null;
+    const records=JSON.parse(localStorage.getItem(BTST_EXPORTED_TARGETS_STORE)||'[]');
+    const matched=(Array.isArray(records)?records:[]).filter(x=>x.sym===key&&x.at<=latest&&latest-x.at<86400000)
+      .sort((a,b)=>b.at-a.at)[0];
+    return Number(matched?.pct)>0?Number(matched.pct):null;
+  }catch(e){return null;}
+}
 function getOpenPositionTargetFloor(sym,pos){
   const avgFromPos=Number(pos?.avg);
   const avgPrice=avgFromPos>0?avgFromPos:Number(getHoldingAvgCost(sym));
@@ -10354,7 +10422,8 @@ function getOpenPositionTargetFloor(sym,pos){
   let active=null;
   try{ active=getActiveTargetInfo(); }catch(e){}
   const anchorPct=active?.source==='manual'&&Number(active.tgtPct)>0?Number(active.tgtPct):null;
-  const raw=anchorPct!=null?avgPrice*(1+anchorPct/100):avgPrice+0.05;
+  const boughtPct=anchorPct==null?executedBtstTarget(sym):null;
+  const raw=avgPrice*(1+(anchorPct??boughtPct??RocketStrategy.CONFIG.TARGET_PCT)/100);
   const nextTick=+((Math.floor((avgPrice+1e-9)/0.05)+1)*0.05).toFixed(2);
   const anchorPrice=Math.max(nextTick,tickPrice(raw));
   const costFloorPrice=getPositionAfterCostFloor(avgPrice,Number(pos?.qty));
@@ -10362,11 +10431,9 @@ function getOpenPositionTargetFloor(sym,pos){
   const frH=costFloorPrice>0?getTradeFrictionPct({symbol:sym,price:avgPrice,turnover:null},Number(pos?.qty)*avgPrice):null;
   const cushionPx=Math.max(0.05,Number.isFinite(frH?.spreadPct)&&frH.spreadPct>0?costFloorPrice*frH.spreadPct/100:0);
   const cushionFloorPrice=costFloorPrice>0?+(Math.ceil((costFloorPrice+cushionPx-1e-9)/0.05)*0.05).toFixed(2):null;
-  const row=(ALL||[]).find(candidate=>candidate.symbol===sym);
-  const policy=anchorPct==null&&row?getRowExitPolicy(row,avgPrice,active,null,Number(pos?.qty)):null;
-  const marketPrice=policy?.targetPct>0?tickPrice(avgPrice*(1+policy.targetPct/100)):null;
+  const marketPrice=tickPrice(raw);
   const price=Math.max(anchorPrice,cushionFloorPrice||0,marketPrice||0);
-  const source=anchorPct!=null?'manual Target Override':marketPrice>0?policy.targetSource:'cost floor';
+  const source=anchorPct!=null?'manual Target Override':boughtPct!=null?'exported BTST GTT target':'fixed +3% BTST fallback';
   return {avgPrice,price:+price.toFixed(2),anchorPrice:+anchorPrice.toFixed(2),
     costFloorPrice,cushionFloorPrice,cushionIsSpread:cushionPx>0.05,anchorPct,source,marketPrice};
 }
@@ -10418,8 +10485,9 @@ function getOpenPositionTapePolicy(sym,pos){
   const days=getOpenPositionDaysHeld(symbol,qty);
   const stale=!isEquitySession(Date.now())?'Market closed':universePriceStaleness()||stockPriceStaleness(symbol);
   const price=Number(quote?.price)>0?Number(quote.price):Number(pos?.ltp)||null;
-  const verdict=stale?{action:'WAIT',reason:stale,shouldExit:false}:RocketStrategy.evaluateExit({avgCost:avg,daysHeld:days},price);
-  const {TARGET_PCT:tgtPct,STOP_LOSS_PCT:slPct}=RocketStrategy.CONFIG;
+  const tgtPct=executedBtstTarget(symbol)||RocketStrategy.CONFIG.TARGET_PCT;
+  const verdict=stale?{action:'WAIT',reason:stale,shouldExit:false}:RocketStrategy.evaluateExit({avgCost:avg,daysHeld:days,targetPct:tgtPct},price);
+  const {STOP_LOSS_PCT:slPct}=RocketStrategy.CONFIG;
   const targetPrice=avg>0?+(avg*(1+tgtPct/100)).toFixed(2):null,stopPrice=avg>0&&slPct>0?+(avg*(1-slPct/100)).toFixed(2):null;
   return {symbol,qty,price,open:quote?.open,signal:verdict.action,signalSort:verdict.shouldExit?0:1,
     why:verdict.reason,exitVerdict:verdict,targetPrice,stopPrice,targetPct:tgtPct,stopPct:slPct,
@@ -10556,6 +10624,11 @@ function _planDualBasketUncached(rows,capital){
     if(reason){reasons.set(r.symbol,reason);alloc[r.symbol]={alloc:0,debit:0,qty:0,rejected:true,reason};continue;}
     r.basketModel='strategy';
     const exitPolicy=getRowExitPolicy(r,price,null,null,qty);
+    if(!exitPolicy.viable){
+      reason=exitPolicy.viabilitySource;
+      reasons.set(r.symbol,reason);alloc[r.symbol]={alloc:0,debit:0,qty:0,rejected:true,reason};
+      continue;
+    }
     alloc[r.symbol]={alloc:cost,debit,qty,buyPrice:price,rejected:false,model:'strategy',exitPolicy,
       tgtPct:exitPolicy.targetPct,slPct:exitPolicy.stopPct};
     funded.push(r);remaining-=debit;
@@ -14176,6 +14249,7 @@ async function _drainBasketQueue(preferredOrders = null){
     await saveBasketToScannerUploads(payload, 'Zerodha_Basket_Buy');
     writeOk = true;
     recordModelBasketExport(orders);
+    recordBtstExportedTargets(orders);
     _lastSavedBasketSig = targetSig;
     _lastSavedBasketAt = Date.now();
     _lastSavedBasketCount = orders.length;
