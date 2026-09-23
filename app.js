@@ -1,5 +1,5 @@
 const BUILD_TS='2026-09-23 13:11 IST'; // release build time (IST)
-const APP_VERSION=1423;
+const APP_VERSION=1424;
 const RADAR_SCORE_VERSION='v1419-recross-batches'; // Eligible on crossing the score floor at any time; learned target or +3% fallback, BTST-max exit.
 
 // ── v1358: AN UNCAUGHT ERROR MUST NAME ITSELF ─────────────────────────────────────────────────
@@ -7487,9 +7487,30 @@ function goalAllocationExplanation(){
   return `Empty = Auto: cash is split equally across GO stocks, each at least Rs ${RocketStrategy.CONFIG.MIN_ALLOCATION_RS.toLocaleString('en-IN')} and at most the larger of that or Capital / ${k}. Type a value to cap every stock at that amount instead.`;
 }
 
+// v1424: an empty Capital field means Kite's live allocatable cash (equity `net`, the "Available"
+// figure in Kite's order window), fetched by the helper. It already nets today's buys, sale credits
+// and payouts. Used only while fresh; otherwise the computed book is the fallback, as before.
+var KITE_MARGINS={net:null,at:0,available:null,utilised:null};
+const KITE_MARGINS_MAX_AGE_MS=5*60*1000;
+function getKiteAvailableCash(){
+  return (KITE_MARGINS.net!=null&&Date.now()-KITE_MARGINS.at<KITE_MARGINS_MAX_AGE_MS)?KITE_MARGINS.net:null;
+}
+async function loadKiteMargins(){
+  if(!KITE_API) return;
+  const j=await readHelperResponse('/api/kite/margins',{timeout:8000}).catch(()=>null);
+  if(!j||!j.ok||!Number.isFinite(Number(j.net))) return;
+  const prev=KITE_MARGINS.net;
+  KITE_MARGINS={net:Math.max(0,Number(j.net)),at:Date.now(),available:j.available||null,utilised:j.utilised||null};
+  updateFilterPlaceholders();
+  if(prev!==KITE_MARGINS.net&&!(parseFloat(document.getElementById('fCapital')?.value)>0)&&ALL.length){
+    _dualPlanMemo=null;_maxAllocMemo=null;scheduleApplyFilters();
+  }
+}
 function getEffectiveCapital(){
   const v=parseFloat(document.getElementById('fCapital')?.value);
-  return (Number.isFinite(v)&&v>0)?v:getDefaultCapital();
+  if(Number.isFinite(v)&&v>0) return v;
+  const kite=getKiteAvailableCash();
+  return kite!=null?kite:getDefaultCapital();
 }
 // ONE value for the whole board, read by two rules on every row of every scoring pass (~3,300
 // calls). The same short-lived memo computeHarvestPlan uses; a typed value is read directly.
@@ -7592,13 +7613,20 @@ function showTradeInputMode(el,automaticLabel='Auto'){
 }
 function updateFilterPlaceholders(){
   const capEl=document.getElementById('fCapital');
-  if(capEl){ const d=getDefaultCapital(); if(d>0){ capEl.placeholder=String(Math.round(d)); capEl.title=`Empty = your computed capital ₹${Math.round(d).toLocaleString('en-IN')} (holdings + open positions). Type a value to override.`; } }
+  const kiteCash=getKiteAvailableCash();
+  if(capEl){
+    if(kiteCash!=null){
+      const a=KITE_MARGINS.available||{},u=KITE_MARGINS.utilised||{},f=v=>'₹'+(Number(v)||0).toLocaleString('en-IN',{maximumFractionDigits:2});
+      capEl.placeholder=kiteCash.toFixed(2);
+      capEl.title=`Empty = Kite available cash ${f(kiteCash)}, refreshed every 20 s (as of ${new Date(KITE_MARGINS.at).toLocaleTimeString('en-IN',{hour12:false})}).\n= opening balance ${f(a.opening_balance)} + intraday pay-in ${f(a.intraday_payin)} − debits ${f(u.debits)} − payout ${f(u.payout)}\n(debits = today's delivery buys ${f(u.delivery)} − sale credit ${f(u.holding_sales)} + charges/other)\nType a value to override.`;
+    } else { const d=getDefaultCapital(); if(d>0){ capEl.placeholder=String(Math.round(d)); capEl.title=`Empty = your computed capital ₹${Math.round(d).toLocaleString('en-IN')} (holdings + open positions); Kite cash unavailable. Type a value to override.`; } }
+  }
   const maxEl=document.getElementById('fMaxAlloc');
   if(maxEl){ const d=getDefaultMaxAlloc(); maxEl.placeholder=d>0?'Auto: equal split':'set capital'; maxEl.title=goalAllocationExplanation(); }
   const riskEl=document.getElementById('fRiskPerTrade');
   const tgtEl=document.getElementById('fTgtOverride');
   if(tgtEl){ let d=0; try{d=getDefaultTgtPct();}catch(e){} tgtEl.placeholder=d>0?d.toFixed(1):'auto'; tgtEl.title='Empty keeps this as a harvest-based planning reference only; it never changes allocation. It does not set automatic candidate or held-position targets. Type a value to explicitly override those targets; clear it to restore planning-only Auto.'; }
-  showTradeInputMode(capEl);showTradeInputMode(maxEl);
+  showTradeInputMode(capEl,kiteCash!=null?'Kite':'Auto');showTradeInputMode(maxEl);
   if(riskEl?.closest('.fg')) riskEl.closest('.fg').style.display='none'; // retained saved value; no risk gate in tick sizing
   showTradeInputMode(tgtEl,'Planning');
 }
@@ -13445,7 +13473,7 @@ function refreshStrategySafety(){
 }
 function startStreamRefresh(){
   if(_streamRefreshTimer) return;
-  if(!startStreamRefresh.btst){startStreamRefresh.btst=setInterval(()=>{loadBtstPicks();try{resetCrossAlertsIfNewDay();checkTimeAlerts();checkCrossingAlerts();}catch(e){}},20000);loadBtstPicks();try{resetCrossAlertsIfNewDay();checkTimeAlerts();checkCrossingAlerts();}catch(e){}
+  if(!startStreamRefresh.btst){startStreamRefresh.btst=setInterval(()=>{loadBtstPicks();loadKiteMargins();try{resetCrossAlertsIfNewDay();checkTimeAlerts();checkCrossingAlerts();}catch(e){}},20000);loadBtstPicks();loadKiteMargins();try{resetCrossAlertsIfNewDay();checkTimeAlerts();checkCrossingAlerts();}catch(e){}
     try{seedSavedBasketCount();}catch(e){}}
   _streamRefreshUiTimer=setInterval(()=>{try{refreshStrategySafety();renderLiveTapeBar();}catch(e){console.warn('Strategy safety refresh',e);}},1000);
   if(!_streamVisibilityBound){
