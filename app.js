@@ -1,5 +1,5 @@
 const BUILD_TS='2026-09-23 13:11 IST'; // release build time (IST)
-const APP_VERSION=1425;
+const APP_VERSION=1426;
 const RADAR_SCORE_VERSION='v1419-recross-batches'; // Eligible on crossing the score floor at any time; learned target or +3% fallback, BTST-max exit.
 
 // ── v1358: AN UNCAUGHT ERROR MUST NAME ITSELF ─────────────────────────────────────────────────
@@ -14279,10 +14279,26 @@ function requestBasketSync({ manual = false, precomputedOrders = null } = {}){
 // only rewrites when the signature CHANGES, so an accidental empty is permanent.
 // A basket export is a SNAPSHOT OF A DECISION, not a live mirror. An empty result now means "no
 // new decision", never "erase the decision you are about to import". Manual export still clears.
-function basketAutoSyncWouldErase(orders, manualRequested){
-  return !manualRequested && (!orders || !orders.length) && _lastSavedBasketCount > 0;
+// v1426: ...but only while the saved basket is still a decision the account can pay for. The guard
+// was written for TRANSIENT empties (the 15:30 close, a stale tick), where capital is unchanged. On
+// 23 Sep the owner bought and Kite cash fell to Rs 33; the new plan was empty because nothing is
+// fundable, and the guard kept PREMIERPOL x1037 (Rs 99,562) sized at the old capital - a spent
+// basket that would re-buy if imported again. When the saved basket costs more than the capital now
+// available, the emptiness is a capital decision, not a transient one, and the file is cleared.
+function basketAutoSyncWouldErase(orders, manualRequested, capital = getEffectiveCapital()){
+  if(manualRequested || (orders && orders.length) || !(_lastSavedBasketCount > 0)) return false;
+  const cap = Number(capital);
+  if(_lastSavedBasketCost > 0 && Number.isFinite(cap) && cap >= 0 && _lastSavedBasketCost > cap * 1.005 + 1) return false;
+  return true;
+}
+function basketOrdersCost(orders){
+  return (Array.isArray(orders) ? orders : []).reduce((sum, o) => {
+    const q = Number(o?.params?.quantity) || 0, px = Number(o?.params?.lastPrice) || Number(o?.params?.price) || 0;
+    return sum + (q > 0 && px > 0 ? q * px : 0);
+  }, 0);
 }
 let _lastSavedBasketCount = 0;
+let _lastSavedBasketCost = 0;
 // Seeded from disk on load: without this a page refresh at 15:16 resets the counter to 0, the
 // guard sees "nothing to protect" and the next empty auto-sync erases the basket anyway - the
 // exact bug, one reload later.
@@ -14290,7 +14306,7 @@ async function seedSavedBasketCount(){
   if(!KITE_API) return;
   try{
     const j = await readHelperResponse('/api/inputs/file?name=Zerodha_Basket_Buy.json',{timeout:6000});
-    if(Array.isArray(j)) _lastSavedBasketCount = j.length;
+    if(Array.isArray(j)){ _lastSavedBasketCount = j.length; _lastSavedBasketCost = basketOrdersCost(j); }
   }catch(e){}
 }
 async function _drainBasketQueue(preferredOrders = null){
@@ -14329,6 +14345,7 @@ async function _drainBasketQueue(preferredOrders = null){
     _lastSavedBasketSig = targetSig;
     _lastSavedBasketAt = Date.now();
     _lastSavedBasketCount = orders.length;
+    _lastSavedBasketCost = basketOrdersCost(orders);
     _lastBasketSyncError = null;
     waiters.forEach(w => {
       try { w.resolve({ ok: true, count: orders.length }); } catch(e){}
