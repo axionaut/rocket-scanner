@@ -1,5 +1,5 @@
-const BUILD_TS='2026-09-22 20:21 IST'; // release build time (IST)
-const APP_VERSION=1419;
+const BUILD_TS='2026-09-23 11:01 IST'; // release build time (IST)
+const APP_VERSION=1420;
 const RADAR_SCORE_VERSION='v1419-recross-batches'; // Eligible on crossing the score floor at any time; +3% GTT, 15:20 next-session exit at the latest.
 
 // ── v1358: AN UNCAUGHT ERROR MUST NAME ITSELF ─────────────────────────────────────────────────
@@ -13026,6 +13026,10 @@ function compactTapeStatus(){
   // green while the board correctly refuses to trade.
   const connected=!!(st&&st.connected&&!st.statusUnknown&&(!inSession||(Number.isFinite(st.lastTickAt)&&st.lastTickAt>0&&st.lastTickAt<=now&&now-st.lastTickAt<=30000)));
   const live=inSession&&connected&&!needsLogin;
+  // Hidden tabs can have their one-minute refresh delayed by the browser. An old
+  // observation is unknown, not evidence that the helper's current stream is down.
+  const observationExpired=!!(st&&st.connected&&!st.statusUnknown&&Number.isFinite(st.checkedAt)
+    &&now-st.checkedAt>30000);
   const bars=Object.keys(INTRADAY_BARS||{}).length;
   let txt,col,tip;
   if(live){
@@ -13037,6 +13041,8 @@ function compactTapeStatus(){
     col='var(--amber)';txt='Kite login expired';tip='Kite Connect tokens expire around 06:00 IST. One click, once a day - use the Log in to Kite button.';
   }else if(st&&st.statusUnknown){
     col='var(--amber)';txt='tape status unknown';tip='The helper did not answer the stream check. Retrying; three consecutive failures invalidate live evidence.';
+  }else if(inSession&&observationExpired){
+    col='var(--amber)';txt='tape checking';tip='The page has not checked the helper recently. Background tabs can pause timers; returning to this tab starts a fresh check. Trade eligibility still requires current ticks and prices.';
   }else{
     col='var(--red)';txt='tape down';
     tip='No live tape'+(st&&st.why?' - '+st.why:'')+'. The board only recommends on a current read, so GO turns to WAIT rather than acting on stale prices.';
