@@ -1,5 +1,5 @@
 const BUILD_TS='2026-09-23 13:11 IST'; // release build time (IST)
-const APP_VERSION=1424;
+const APP_VERSION=1425;
 const RADAR_SCORE_VERSION='v1419-recross-batches'; // Eligible on crossing the score floor at any time; learned target or +3% fallback, BTST-max exit.
 
 // ── v1358: AN UNCAUGHT ERROR MUST NAME ITSELF ─────────────────────────────────────────────────
@@ -1490,7 +1490,16 @@ function isMarketRefreshWindow(timestamp=Date.now()){
   const c=istClock(timestamp),date=new Date(c.dateMs).toISOString().slice(0,10);
   return isNseTradingDate(date)&&c.mins>=DAY_START_MIN&&c.mins<DAY_END_MIN;
 }
-function getSessionDate(){ return getModelTradingDate(Date.now()); }
+// Called tens of thousands of times a second by the row evaluators; the answer can only change on a
+// minute boundary (DAY_START_MIN) or when the holiday list loads, so memoise it per minute.
+let _sessionDateMemo=null;
+function getSessionDate(){
+  const minute=Math.floor(Date.now()/60000),hol=NSE_HOLIDAYS.size;
+  if(_sessionDateMemo&&_sessionDateMemo.minute===minute&&_sessionDateMemo.hol===hol&&_sessionDateMemo.set===NSE_HOLIDAYS) return _sessionDateMemo.v;
+  const v=getModelTradingDate(Date.now());
+  _sessionDateMemo={minute,hol,set:NSE_HOLIDAYS,v};
+  return v;
+}
 
 // ── CSV Parser ──
 function parseCSVRaw(text){
@@ -4581,8 +4590,28 @@ function crossingStore(){
   _crossings=(saved&&saved.day===getSessionDate())?saved:{day:getSessionDate(),at:{}};
   return _crossings;
 }
-function saveCrossings(){
+// Coalesced: the store is serialised at most once per tick, and only after something changed.
+// It used to be stringified and written to localStorage on EVERY row evaluation - measured as 60%
+// of the page's CPU on a 1,662-row board (23 Sep). A pending write is flushed on pagehide.
+let _crossSaveTimer=null;
+function flushCrossings(){
+  clearTimeout(_crossSaveTimer);_crossSaveTimer=null;
   try{localStorage.setItem(CROSS_STORE,JSON.stringify(crossingStore()));}catch(e){}
+}
+function saveCrossings(){
+  if(_crossSaveTimer) return;
+  _crossSaveTimer=setTimeout(flushCrossings,0);
+}
+try{window.addEventListener('pagehide',()=>{if(_crossSaveTimer)flushCrossings();});}catch(e){}
+// Today's buy fills grouped by symbol, rebuilt only when the fills array or the session changes.
+let _todayFillsMemo=null;
+function todayBuyFillsBySymbol(){
+  const fills=typeof TRADEBOOK_BUY_FILLS==='undefined'?[]:TRADEBOOK_BUY_FILLS,day=getSessionDate();
+  if(_todayFillsMemo&&_todayFillsMemo.fills===fills&&_todayFillsMemo.n===fills.length&&_todayFillsMemo.day===day) return _todayFillsMemo.map;
+  const map=new Map();
+  for(const f of fills){ if(f.date!==day) continue; const k=normSym(f.symbol); if(!map.has(k)) map.set(k,[]); map.get(k).push(f); }
+  _todayFillsMemo={fills,n:fills.length,day,map};
+  return map;
 }
 // Records the first time today this symbol was seen at or above the floor, and returns it.
 function noteCrossing(sym,score,floor){
@@ -4608,10 +4637,10 @@ function btstCrossingState(s){
   const st=crossingStore(),key=normSym(s.symbol);
   st.rebuy=st.rebuy||{};
   const qty=Number(getCombinedOpenPositionMap()[s.symbol]?.qty)||0;
-  const fills=typeof TRADEBOOK_BUY_FILLS==='undefined'?[]:TRADEBOOK_BUY_FILLS;
-  const buys=fills.filter(f=>normSym(f.symbol)===key&&f.date===getSessionDate());
-  const fillKey=JSON.stringify(buys.map(f=>[f.date,f.time,f.qty,f.price]));
+  const buys=todayBuyFillsBySymbol().get(key)||[];
+  const fillKey=buys.length?JSON.stringify(buys.map(f=>[f.date,f.time,f.qty,f.price])):'[]';
   let state=st.rebuy[key];
+  const before=state?state.qty+'|'+state.fillKey+'|'+state.consumed+'|'+state.armed:'';
   if(!state) state=st.rebuy[key]={qty,fillKey,consumed:qty>0||buys.length>0,armed:false};
   if(qty>state.qty||(fillKey!==state.fillKey&&buys.length>0)){
     state.consumed=true;state.armed=false;
@@ -4619,7 +4648,7 @@ function btstCrossingState(s){
   state.qty=qty;state.fillKey=fillKey;
   if(score<floor&&state.consumed) state.armed=true;
   if(score>=floor&&state.consumed&&state.armed){state.consumed=false;state.armed=false;}
-  saveCrossings();
+  if(before!==state.qty+'|'+state.fillKey+'|'+state.consumed+'|'+state.armed) saveCrossings();
   if(state.consumed&&score>=floor)
     return {state:'WAIT',reason:'Already bought on this crossing; waiting for a fresh dip below the floor and re-crossing.'};
   if(score<floor){
@@ -9791,7 +9820,19 @@ function getHeldPositionMap(){
   });
   return heldPos;
 }
+// Rebuilt ~2x per row per evaluation (3,300+ calls a pass) from inputs that change only when a
+// portfolio file loads. Memoised on the identity and length of every input, plus a 1 s ceiling so an
+// in-place edit can never be served for longer than that. Callers only read the result.
+let _openPosMemo=null;
 function getCombinedOpenPositionMap(){
+  const now=Date.now(),m=_openPosMemo;
+  if(m&&now-m.at<1000&&m.h===HOLDINGS&&m.p===POSITIONS&&m.o===ORDERS_TODAY&&m.c===HOLD_COST_MAP
+    &&m.hn===(HOLDINGS?.length||0)&&m.pn===(POSITIONS?.length||0)&&m.on===(ORDERS_TODAY?.length||0)&&m.day===getSessionDate()) return m.v;
+  const v=_combinedOpenPositionMapUncached();
+  _openPosMemo={at:now,h:HOLDINGS,p:POSITIONS,o:ORDERS_TODAY,c:HOLD_COST_MAP,hn:HOLDINGS?.length||0,pn:POSITIONS?.length||0,on:ORDERS_TODAY?.length||0,day:getSessionDate(),v};
+  return v;
+}
+function _combinedOpenPositionMapUncached(){
   const combined={};
   const ensure=(symbol)=>{
     if(!combined[symbol]) combined[symbol]={symbol,qty:0,avg:0,ltp:null,hasLivePosition:false};
