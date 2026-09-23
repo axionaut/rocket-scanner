@@ -1,5 +1,5 @@
-const BUILD_TS='2026-09-23 11:01 IST'; // release build time (IST)
-const APP_VERSION=1420;
+const BUILD_TS='2026-09-23 11:27 IST'; // release build time (IST)
+const APP_VERSION=1421;
 const RADAR_SCORE_VERSION='v1419-recross-batches'; // Eligible on crossing the score floor at any time; +3% GTT, 15:20 next-session exit at the latest.
 
 // ── v1358: AN UNCAUGHT ERROR MUST NAME ITSELF ─────────────────────────────────────────────────
@@ -10485,7 +10485,7 @@ let _dualPlanMemo=null;
 function planDualBasket(rows,capital){
   const key=[capital,BASKET_MODEL_MODE,RECOMMEND_MIN_SCORE,getEffectiveMaxAlloc(),BOOK_V,INTRADAY_STORE_V,
     Math.floor(Date.now()/1000),
-    (rows||[]).map(r=>r.symbol+':'+r.price+':'+r.score+':'+getRowActionState(r).state+':'+EXPORT_EXCLUDED.has(r.symbol)).join(',')].join('|');
+    (rows||[]).map(r=>r.symbol+':'+r.price+':'+r.turnover+':'+r.score+':'+getRowActionState(r).state+':'+EXPORT_EXCLUDED.has(r.symbol)).join(',')].join('|');
   if(_dualPlanMemo?.key===key) return _dualPlanMemo.val;
   const val=_planDualBasketUncached(rows,capital);
   _dualPlanMemo={key,val};
@@ -10531,12 +10531,14 @@ function _planDualBasketUncached(rows,capital){
     const price=getBuyPrice(r);
     if(!reason&&!(price>0))reason='No valid buy price';
     if(!reason&&!batch.has(r.symbol))reason='Next basket: Zerodha allows 20 stocks per export';
+    const liquidityCap=getTurnoverAllocationCap(r);
+    if(!reason&&!(liquidityCap>0))reason='No turnover or order-book depth to enforce the market-impact cap';
     // Auto (Max Alloc empty): split remaining cash equally across the GO stocks still to fund,
     // never below Rs 5,000 each, so one top-ranked stock cannot absorb the whole capital.
     const slots=Math.max(1,Math.min(candidatesLeft,Math.floor(remaining/(minRequired*1.005))));
     // Auto also caps each stock at the larger of Rs 5,000 and one twentieth of capital, so a lone GO
     // stock cannot absorb the account (investigation Problem 3: concentration).
-    let budget=Math.min(remaining,maxAlloc>0?maxAlloc:(scoreWeighted?weightBudget(r):Math.min(remaining/slots,autoCap)));
+    let budget=Math.min(remaining,maxAlloc>0?maxAlloc:(scoreWeighted?weightBudget(r):Math.min(remaining/slots,autoCap)),liquidityCap);
     let qty=0;
     if(!reason){
       candidatesLeft--;
@@ -10546,11 +10548,11 @@ function _planDualBasketUncached(rows,capital){
         // Coarse share prices: take the smallest quantity reaching Rs 5,000 when the other slots keep their minimum.
         const minQty=Math.ceil(minRequired/price);
         const minDebit=minQty*price+calcZerodhaCharges(price,minQty,false,false,false);
-        if(minDebit<=remaining-Math.max(0,slots-1)*minRequired*1.005){qty=minQty;budget=minDebit;}
+        if(minDebit<=budget&&minDebit<=remaining-Math.max(0,slots-1)*minRequired*1.005){qty=minQty;budget=minDebit;}
       }
     }
     const cost=qty*price,charges=qty>0?calcZerodhaCharges(price,qty,false,false,false):0,debit=cost+charges;
-    if(!reason&&(!(cost>=minRequired)||debit>budget))reason='Available cash / Max Alloc cannot fund Rs 5,000 plus buy charges';
+    if(!reason&&(!(cost>=minRequired)||debit>budget))reason=liquidityCap<minRequired?'Market-impact cap below Rs 5,000 minimum':'Available cash / Max Alloc / market-impact cap cannot fund Rs 5,000 plus buy charges';
     if(reason){reasons.set(r.symbol,reason);alloc[r.symbol]={alloc:0,debit:0,qty:0,rejected:true,reason};continue;}
     r.basketModel='strategy';
     const exitPolicy=getRowExitPolicy(r,price,null,null,qty);
