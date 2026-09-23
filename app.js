@@ -1,5 +1,5 @@
-const BUILD_TS='2026-09-23 11:46 IST'; // release build time (IST)
-const APP_VERSION=1422;
+const BUILD_TS='2026-09-23 13:11 IST'; // release build time (IST)
+const APP_VERSION=1423;
 const RADAR_SCORE_VERSION='v1419-recross-batches'; // Eligible on crossing the score floor at any time; learned target or +3% fallback, BTST-max exit.
 
 // ── v1358: AN UNCAUGHT ERROR MUST NAME ITSELF ─────────────────────────────────────────────────
@@ -3697,7 +3697,7 @@ function radarScoreTitle(r){
   return p?`BTST pick #${p.rank}: model score ${p.score} (predicted next-session net return %, after costs). Walk-forward Dec-2025..Sep-2026: top 5 averaged +1.18% per trade with the market gate.`
     :"Not in today's BTST top picks. Score = 100 - pick rank.";
 }
-function* refreshRocketScoresGen(){
+function* refreshRocketScoresGen(deferPaint=false){
   const staged=[];
   for(const row of ALL){
     const next={...row};setRadarEvidenceScore(next);staged.push([row,next]);
@@ -3706,7 +3706,7 @@ function* refreshRocketScoresGen(){
   // Publish one complete score revision after cooperative calculation.
   for(const [row,next] of staged){Object.assign(row,next);ROW_ACTION_MEMO.delete(row);}
   ALL.sort((a,b)=>(b.score??-1)-(a.score??-1)||radarRankTieBreak(a,b));
-  applyFilters();
+  if(!deferPaint)applyFilters();
 }
 
 // Columns that are EXPORTED but deliberately NOT modelled as features. Exporting and scoring are
@@ -10250,7 +10250,7 @@ function getRowExitPolicy(row,buyPrice=null,activeInfo=null,nudgeInfo=null,qty=n
   let targetPct=learned?.pct||basePct;
   let viable=true;
   if(price>0&&shares>0){
-    const minimum=respectableProfitRs();
+    const minimum=Number(activeInfo?.minProfitRs)>0?Number(activeInfo.minProfitRs):respectableProfitRs();
     if(learned){
       const safe=BTST_TARGET_CHOICES.find(p=>p>=targetPct&&btstTargetNetRs(price,shares,p)>=minimum);
       if(safe)targetPct=safe;else viable=false;
@@ -10562,6 +10562,7 @@ function planDualBasket(rows,capital){
 function _planDualBasketUncached(rows,capital){
   const reasons=new Map(),alloc={},funded=[];
   const maxAlloc=getTypedMaxAlloc(),minRequired=RocketStrategy.CONFIG.MIN_ALLOCATION_RS;
+  let minProfitRs=null;
   let remaining=Math.max(0,Number(capital||0)-BASKET_CASH_RESERVE_RS);
   const pool=[...(rows||[])].sort((a,b)=>(btstScoreOf(b.symbol)??(Number(b.score)||0))-(btstScoreOf(a.symbol)??(Number(a.score)||0))||a.symbol.localeCompare(b.symbol));
   const unitDebitOf=price=>price+calcZerodhaCharges(price,1,false,false,false);
@@ -10623,7 +10624,8 @@ function _planDualBasketUncached(rows,capital){
     if(!reason&&(!(cost>=minRequired)||debit>budget))reason=liquidityCap<minRequired?'Market-impact cap below Rs 5,000 minimum':'Available cash / Max Alloc / market-impact cap cannot fund Rs 5,000 plus buy charges';
     if(reason){reasons.set(r.symbol,reason);alloc[r.symbol]={alloc:0,debit:0,qty:0,rejected:true,reason};continue;}
     r.basketModel='strategy';
-    const exitPolicy=getRowExitPolicy(r,price,null,null,qty);
+    if(minProfitRs===null)minProfitRs=respectableProfitRs();
+    const exitPolicy=getRowExitPolicy(r,price,{minProfitRs},null,qty);
     if(!exitPolicy.viable){
       reason=exitPolicy.viabilitySource;
       reasons.set(r.symbol,reason);alloc[r.symbol]={alloc:0,debit:0,qty:0,rejected:true,reason};
@@ -12299,11 +12301,11 @@ function mergeFormingBar(sym,fb){
 // Cooperative, and behind the same one-at-a-time queue as a full pass: with prices and forming bars
 // arriving every two seconds this now rescores hundreds of rows per beat, and doing that in one
 // synchronous loop is exactly the freeze being removed.
-async function patchUniverseDeltas(deltaRows){
+async function patchUniverseDeltas(deltaRows,deferPaint=false){
   if(!deltaRows || !ALL.length) return;
-  return runHeavyJob(()=>drainCooperatively(patchUniverseDeltasGen(deltaRows)));
+  return runHeavyJob(()=>drainCooperatively(patchUniverseDeltasGen(deltaRows,deferPaint)));
 }
-function* patchUniverseDeltasGen(deltaRows){
+function* patchUniverseDeltasGen(deltaRows,deferPaint=false){
   const symMap = new Map(ALL.map(s => [s.symbol, s]));
   let scoreMoved = false;
   let eligibilityChanged = false;
@@ -12313,7 +12315,7 @@ function* patchUniverseDeltasGen(deltaRows){
     const s = symMap.get(sym);
     const barMoved=!!(f&&f.fb)&&mergeFormingBar(sym,f.fb);
     if(s && f){
-      const prevState = getRowActionState(s).state;
+      const prevState = deferPaint?null:getRowActionState(s).state;
       const prevScore = s.score;
       const prevInputs=[s.price,s.day,s.changeOpen,s.turnover,s.vwap,s.volume,s.high1d,s.open1d,s.relAt,s.avgVol10].join('|');
       if(Number.isFinite(f.price)) s.price = f.price;
@@ -12330,12 +12332,15 @@ function* patchUniverseDeltasGen(deltaRows){
         setRadarEvidenceScore(s);
         scoreMoved = true;
         ROW_ACTION_MEMO.delete(s);
-        if(prevState !== getRowActionState(s).state){
+        if(!deferPaint&&prevState !== getRowActionState(s).state){
           eligibilityChanged = true;
         }
       }
     }
   }
+  // The one-second refresh beat still has book, tape and clock inputs to read. Its final pass
+  // publishes all of them together; painting here duplicates the full 1,662-row filter/render.
+  if(deferPaint) return;
   recordTableEntries(ALL);
 
   // Check if score moves changed the sorting order
@@ -12477,7 +12482,7 @@ async function pollUniverseDelta(deferScore=false){
         }
       });
     } else {
-      await patchUniverseDeltas(j.rows);
+      await patchUniverseDeltas(j.rows,deferScore);
     }
     return { ok: true, changed: changedSyms.length > 0, barCompleted, repairChanged };
   } catch(e) {
@@ -13396,7 +13401,7 @@ async function streamRefreshTick(){
     try{ await loadBookState(); }catch(e){}
     // Reprice all opportunities against the just-read book, including expiry and settings.
     // Prediction reads are memoized by evidence revision; price/cost reads are not.
-    if(ALL.length)await runHeavyJob(()=>drainCooperatively(refreshRocketScoresGen()));
+    if(ALL.length)await runHeavyJob(()=>drainCooperatively(refreshRocketScoresGen(true)));
     try{ await loadMinuteBars(); }catch(e){}
     // The weights only move when the Book archive grows, which is once a session - so this is a
     // ten-minute refresh, not a beat-by-beat one. It is the only call here that reads files.
@@ -13410,7 +13415,9 @@ async function streamRefreshTick(){
       _lastScoreJobAt=Date.now();
       await scheduleScoreJob();
     }
-    applyFilters({preservePage:true});
+    // scheduleScoreJob publishes its own filtered board. If another score job is still running,
+    // publish this beat's safety/portfolio state now and let that job publish its final result later.
+    if(!needScore||_scoreJobRunning)applyFilters({preservePage:true});
     captureLiveRecommendationScan();
 
     const done=Date.now();
