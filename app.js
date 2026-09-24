@@ -1,5 +1,5 @@
-const BUILD_TS='2026-09-23 13:11 IST'; // release build time (IST)
-const APP_VERSION=1426;
+const BUILD_TS='2026-09-24 03:39 IST'; // release build time (IST)
+const APP_VERSION=1427;
 const RADAR_SCORE_VERSION='v1419-recross-batches'; // Eligible on crossing the score floor at any time; learned target or +3% fallback, BTST-max exit.
 
 // ── v1358: AN UNCAUGHT ERROR MUST NAME ITSELF ─────────────────────────────────────────────────
@@ -1740,6 +1740,9 @@ function deriveProfitVelocityPolicy(trips,fallbackSL,fallbackTGT){
     objective:'observed net % / holding day'};
 }
 function tickPrice(v){return Math.round(v/0.05)*0.05;}
+// Per-lot GTT display: Kite prices sub-Rs 250 stocks in paise. Rounding to 0.01 below Rs 250 and 0.05
+// above reproduced all four live GTTs on 24 Sep (99.41, 99.64, 1,016.20, 300.75).
+function gttLotPrice(v){const t=v<250?0.01:0.05;return +(Math.round(v/t)*t).toFixed(2);}
 function survRuleKey(label){return String(label||'').trim().toLowerCase().replace(/[^a-z0-9]+/g,'_').replace(/^_|_$/g,'');}
 function isSurvFlag(v){
   const s=String(v||'').trim();
@@ -4915,6 +4918,13 @@ function rowVetoReason(s){
   if(!c||c.permission!==0) return null;
   return c.block||null;
 }
+// v1427: the BTST model score (predicted net %), the number every current rule tests. The portfolio
+// tables used to show the retired Radar score, which reads 0.0 for every row under the BTST engine.
+function modelScoreCell(v){
+  if(!Number.isFinite(v)) return '<span style="color:var(--t3)" title="No current model score for this symbol">—</span>';
+  const floor=btstMinScore(),ok=Number.isFinite(floor)&&v>=floor;
+  return `<span style="color:${ok?'var(--green)':'var(--amber)'}" title="Current model score${Number.isFinite(floor)?' vs floor +'+floor.toFixed(2):''}">${v>=0?'+':''}${v.toFixed(2)}</span>`;
+}
 function radarScoreCell(score,title='',recommendationState=null,vetoReason=null){
   const s=Number(score);
   if(score===null||score===undefined||!isFinite(s)) return '<span class="sc-m" style="color:var(--t3)">—</span>';
@@ -7090,6 +7100,28 @@ function recordLeftOnTableSession(date,summary){
 }
 let _reachMemo=null;
 
+// v1427: HOW ZERODHA SPLITS A DAY WITH BUYS AND SELLS IN THE SAME STOCK. Matched quantity is intraday
+// and is taken from the EARLIEST buys of the day; only the later lots carry. Kite's positions `Avg.`
+// is the average of EVERY buy that day, so on 23 Sep MANINDS read 955.16 (all 411 shares) while the
+// 100 carried shares cost 991.40 - the figure Kite Holdings and the GTT both use. Pricing the
+// intraday trip at the day average also flipped PREMIERPOL's 540-share trip from +890 to -407.
+function sessionBuyFifo(sym,orders){
+  const key=normSym(sym);
+  const mine=(orders||[]).filter(o=>normSym(o.symbol)===key&&Number(o.qty)>0&&Number(o.price)>0);
+  const buys=mine.filter(o=>o.type==='BUY').sort((a,b)=>String(a.time).localeCompare(String(b.time)));
+  const buyQty=buys.reduce((t,o)=>t+Number(o.qty),0),sellQty=mine.filter(o=>o.type==='SELL').reduce((t,o)=>t+Number(o.qty),0);
+  if(!(buyQty>0)) return null;
+  let left=Math.min(buyQty,sellQty),sameCost=0;
+  const lots=[];
+  for(const o of buys){
+    const q=Number(o.qty),px=Number(o.price),use=Math.min(left,q);
+    sameCost+=use*px;left-=use;
+    if(q-use>0) lots.push({qty:q-use,price:px,time:o.time});
+  }
+  const sameDayQty=Math.min(buyQty,sellQty),carriedQty=lots.reduce((t,l)=>t+l.qty,0);
+  return {buyQty,sellQty,sameDayQty,sameDayAvg:sameDayQty>0?sameCost/sameDayQty:null,
+    carriedQty,carriedAvg:carriedQty>0?lots.reduce((t,l)=>t+l.qty*l.price,0)/carriedQty:null,lots};
+}
 function computeLatestOrderBooked(){
   // Only compute from orders loaded this session — never from brain-restored stale orders.
   if(!ORDERS_TODAY?._loadedThisSession) return null;
@@ -7115,7 +7147,8 @@ function computeLatestOrderBooked(){
     const totalBuyQty=buys.reduce((s,o)=>s+o.qty,0);
     const sameDayQty=Math.min(totalBuyQty,totalSellQty);
     const deliveryQty=totalSellQty-sameDayQty;
-    const todayAvg=totalBuyQty>0?buys.reduce((s,o)=>s+o.price*o.qty,0)/totalBuyQty:null;
+    const fifo=sessionBuyFifo(sym,session.orders);
+    const todayAvg=fifo?.sameDayAvg??(totalBuyQty>0?buys.reduce((s,o)=>s+o.price*o.qty,0)/totalBuyQty:null);
     const components=[];
     const addKnownComponent=(qty,avgBuy,isSameDay)=>{
       if(!(qty>0)||!(avgBuy>0)) return;
@@ -7534,6 +7567,20 @@ async function loadKiteMargins(){
   if(prev!==KITE_MARGINS.net&&!(parseFloat(document.getElementById('fCapital')?.value)>0)&&ALL.length){
     _dualPlanMemo=null;_maxAllocMemo=null;scheduleApplyFilters();
   }
+}
+// v1427: the owner's active sell GTTs from Kite, keyed by symbol. The Target column shows these when
+// present - they ARE the exits - instead of a price re-derived from average cost.
+var KITE_GTTS={bySym:new Map(),at:0};
+async function loadKiteGtts(){
+  if(!KITE_API) return;
+  const j=await readHelperResponse('/api/kite/gtt',{timeout:8000}).catch(()=>null);
+  if(!j||!j.ok||!Array.isArray(j.gtts)) return;
+  const bySym=new Map();
+  for(const g of j.gtts){const k=normSym(g.sym);if(!bySym.has(k))bySym.set(k,[]);bySym.get(k).push({trigger:Number(g.trigger),qty:Number(g.qty)});}
+  KITE_GTTS={bySym,at:Date.now()};
+}
+function kiteGttsFor(sym){
+  return Date.now()-KITE_GTTS.at<5*60*1000?(KITE_GTTS.bySym.get(normSym(sym))||null):null;
 }
 function getEffectiveCapital(){
   const v=parseFloat(document.getElementById('fCapital')?.value);
@@ -8564,9 +8611,9 @@ function buildLatestSessionPanel(query=''){
   // Attach Radar score/rank to each sold row so the session shows the scoring context of
   // what was exited (owner v546); the 'Trades' count column was dropped as noise.
   const _latestAllBySym=new Map(ALL.map(x=>[x.symbol,x]));
-  const withRadar=arr=>{arr.forEach(r=>{const a=_latestAllBySym.get(r.sym);r._score=a&&isFinite(Number(a.score))?Number(a.score):null;r._rank=a?.rank??null;});return arr;};
+  const withRadar=arr=>{arr.forEach(r=>{r._score=btstScoreOf(r.sym);r._rank=btstRankOf(r.sym);});return arr;};
   const radarCols=dash=>[
-    {key:'_score',label:'Radar Score',align:'right',bold:true,fmt:v=>radarScoreCell(v),clrFn:()=>'var(--t1)',...dash},
+    {key:'_score',label:'Model Score',align:'right',bold:true,fmt:v=>modelScoreCell(v),clrFn:()=>'var(--t1)',...dash},
   ];
   const leftClr=v=>v==null?'var(--t3)':v>0?'var(--red)':v===0?'var(--green)':'var(--amber)';
   const _leftTot={totFmt:v=>v!=null?fmtINR(v):'—',totClrFn:leftClr};
@@ -8624,6 +8671,7 @@ function buildLatestSessionPanel(query=''){
       {key:'sym',label:'Symbol',align:'left',fmt:v=>symbolChartButton(v),clrFn:()=>'var(--t1)',bold:true,totFmt:v=>v??'',totClrFn:()=>'var(--t2)'},
       ...radarCols(_dash),
       {key:'buyPrice',label:'Buy ₹',align:'right',fmt:(v,r)=>v!=null?Number(v).toLocaleString('en-IN',INR_2):`<span style="color:var(--amber);font-size:12px" title="Load Holdings.csv to see avg cost">avg cost?</span>`,clrFn:()=>'var(--t2)',..._dash},
+      {key:'capital',label:'Invested ₹',align:'right',fmt:v=>v!=null?fmtINR(v):'—',clrFn:()=>'var(--t1)',totFmt:v=>v!=null?fmtINR(v):'—',totClrFn:()=>'var(--t1)'},
       {key:'sellPrice',label:'Sell ₹',align:'right',fmt:v=>Number(v).toLocaleString('en-IN',INR_2),clrFn:()=>'var(--t2)',..._dash},
       {key:'priceDiff',label:'Diff ₹',align:'right',fmt:v=>v!=null?fmtSignedINR(v).replace('₹','₹/sh '):'—',clrFn:v=>v!=null?clr(v):'var(--t3)',..._dash},
       {key:'currentPrice',label:'Now ₹',align:'right',fmt:v=>v!=null?Number(v).toLocaleString('en-IN',INR_2):'—',clrFn:()=>'var(--t2)',..._dash},
@@ -8651,6 +8699,7 @@ function buildLatestSessionPanel(query=''){
       charges:_sum('charges'),
       grossPnl:shownSummary.known.length?shownSummary.gross:null,
       netPnl:shownTotal,
+      capital:shownSummary.known.length?shownSummary.capital:null,
       netPnlPct:shownSummary.pct,
       // v1121: the session's AVERAGE gap between the exit and the day's high. Straight mean over the
       // rows that have one — negatives included, because a negative is the informative case (the
@@ -8691,6 +8740,7 @@ function buildLatestSessionPanel(query=''){
       {key:'sym',label:'Symbol',align:'left',fmt:v=>symbolChartButton(v,`<span style="font-weight:700;font-size:14px">${escHtml(v)}</span>`),totFmt:v=>v??'',totClrFn:()=>'var(--t2)'},
       ...radarCols(_dash),
       {key:'buyPrice',label:'Buy ₹',align:'right',fmt:v=>`<span style="font-family:'DM Mono',monospace">${Number(v).toLocaleString('en-IN',INR_2)}</span>`,..._dash},
+      {key:'capital',label:'Invested ₹',align:'right',fmt:v=>v!=null?fmtINR(v):'—',clrFn:()=>'var(--t1)',totFmt:v=>v!=null?fmtINR(v):'—',totClrFn:()=>'var(--t1)'},
       {key:'sellPrice',label:'Sell ₹',align:'right',fmt:v=>`<span style="font-family:'DM Mono',monospace">${Number(v).toLocaleString('en-IN',INR_2)}</span>`,..._dash},
       {key:'priceDiff',label:'Diff ₹',align:'right',fmt:v=>v!=null?fmtSignedINR(v).replace('₹','₹/sh '):'—',clrFn:v=>v!=null?clr(v):'var(--t3)',..._dash},
       {key:'currentPrice',label:'Now ₹',align:'right',fmt:v=>v!=null?Number(v).toLocaleString('en-IN',INR_2):'—',clrFn:()=>'var(--t2)',..._dash},
@@ -8707,6 +8757,7 @@ function buildLatestSessionPanel(query=''){
       charges:rows.reduce((s,r)=>s+(r.charges||0),0),
       grossPnl:tbSummary.known.length?tbSummary.gross:null,
       netPnl:shownTotal,
+      capital:tbSummary.known.length?tbSummary.capital:null,
       netPnlPct:tbSummary.pct
     }:null;
     const tbTbl=makeSortableTable('rank-latest-session',tbCols,rows,'_sort',-1,null,tbTotals,'sym');
@@ -8744,9 +8795,10 @@ function buildOpenPositionsPanel(query=''){
     const ltp=Number(tapePolicy.price)>0?Number(tapePolicy.price)
       :Number(pos.ltp)>0?Number(pos.ltp):null;
     const pnlPct=(avg&&ltp)?+((ltp-avg)/avg*100).toFixed(2):null;
-    const pnlRs=(avg&&ltp)?+((ltp-avg)*qty).toFixed(0):null;
+    const pnlRs=(avg&&ltp)?+(ltp*qty-(Number(pos.lotCost)>0?Number(pos.lotCost):avg*qty)).toFixed(2):null;
     const daysHeld=getOpenPositionDaysHeld(pos.symbol,qty);
-    const capital=avg?+(avg*qty).toFixed(0):null;
+    const lotCost=Number(pos.lotCost)>0?Number(pos.lotCost):Array.isArray(pos.lots)&&pos.lots.length?pos.lots.reduce((t,l)=>t+l.qty*l.price,0):null;
+    const capital=lotCost>0?+lotCost.toFixed(2):avg?+(avg*qty).toFixed(2):null;
     const targetPrice=tapePolicy.targetPrice;
     const tapeStopPrice=tapePolicy.stopPrice;
     const afterCostFloor=getPositionAfterCostFloor(avg,qty);
@@ -8758,8 +8810,8 @@ function buildOpenPositionsPanel(query=''){
     const baseQty=qty;
     // v1106 (owner): the day-1 time-exit ADVICE went with the Action column - the trading surface
     // carries no instructions. The evidence behind it is unchanged and lives in Methodology.
-    const radarScore=isFinite(Number(scannerRow?.score))?Number(scannerRow.score):null;
-    const radarRank=Number.isFinite(Number(scannerRow?.rank))?Number(scannerRow.rank):null;
+    const radarScore=btstScoreOf(pos.symbol);
+    const radarRank=btstRankOf(pos.symbol);
     rows.push({
       sym:pos.symbol,qty,avg,ltp,pnlPct,pnlRs,capital,daysHeld,targetPrice,stopPrice,tapeStopPrice,
       afterCostFloor,targetPct,tapePolicy,
@@ -8771,6 +8823,7 @@ function buildOpenPositionsPanel(query=''){
       dayPct:Number.isFinite(tapePolicy.price)&&tapePolicy.open>0
         ?100*(tapePolicy.price/tapePolicy.open-1):null,risk:scannerRow?.risk||'',
       pace:tapePolicy.pacePct,
+      lots:Array.isArray(pos.lots)&&pos.lots.length>1?pos.lots:null,
       scannerRow
     });
   });
@@ -8798,7 +8851,7 @@ function buildOpenPositionsPanel(query=''){
             const bCol = exitCheck.exitType === 'TARGET' ? 'var(--green)' : 'var(--red)';
             stratBadge = `<div style="font-size:11px;background:${bCol};color:#fff;padding:2px 6px;border-radius:4px;font-weight:800;display:inline-block;margin-top:2px;letter-spacing:0.5px" title="${escHtml(exitCheck.reason)}">🚨 EXIT: ${escHtml(exitCheck.exitType)}</div>`;
           } else {
-            stratBadge = `<div style="font-size:10px;color:var(--t3)">${row.daysHeld==null?'Holding age unknown':`Day ${row.daysHeld}/4`}</div>`;
+            stratBadge = `<div style="font-size:10px;color:var(--t3)">${row.daysHeld==null?'Holding age unknown':`Day ${row.daysHeld}/${reviewDays}`}</div>`;
           }
         }
         const ac=p.signal==='BUY'?'var(--green)':p.signal==='SELL'?'var(--red)'
@@ -8855,6 +8908,7 @@ function buildOpenPositionsPanel(query=''){
       }},
 
     {key:'qty',label:'Qty',align:'right',fmt:v=>v,clrFn:()=>'var(--t2)',totFmt:v=>v??'—'},
+    {key:'capital',label:'Invested ₹',align:'right',fmt:v=>v!=null?fmtINR(v):'—',clrFn:()=>'var(--t1)',totFmt:v=>v!=null?fmtINR(v):'—',totClrFn:()=>'var(--t1)'},
     {key:'ltp',label:'Avg / LTP',align:'right',
       fmt:(v,row)=>`${row.avg!=null?Number(row.avg).toLocaleString('en-IN',INR_2):'—'}<span style="color:var(--t3)"> / </span>${v!=null?Number(v).toLocaleString('en-IN',INR_2):'—'}`,
       clrFn:()=>'var(--t1)'},
@@ -8864,7 +8918,17 @@ function buildOpenPositionsPanel(query=''){
     {key:'daysHeld',label:'Held',align:'right',fmt:daysFmt,clrFn:()=>'var(--t1)'},
     {key:'targetPrice',label:'Target ₹',align:'right',
       fmt:(v,row)=>{
+        const gtts=kiteGttsFor(row.sym);
+        if(gtts&&gtts.length){
+          const covered=gtts.reduce((t,g)=>t+g.qty,0);
+          return gtts.slice().sort((a,b)=>b.qty-a.qty).map(g=>`<div title="${escHtml('Active Kite GTT: sell '+g.qty+' at '+fmtINR(g.trigger)+(row.avg>0?' ('+(g.trigger/row.avg*100-100).toFixed(2)+'% above average cost)':''))}">${fmtINR(g.trigger)}<span style="font-size:11px;color:var(--t3)">×${g.qty}</span></div>`).join('')
+            +(covered<row.qty?`<div style="font-size:11px;color:var(--amber)" title="Shares held with no active GTT">${row.qty-covered} without GTT</div>`:'');
+        }
         if(v==null) return '<span style="color:var(--t3)">—</span>';
+        if(row.lots&&Number(row.targetPct)>0){
+          const pct=Number(row.targetPct);
+          return row.lots.map(l=>`<div title="${escHtml('Lot bought '+String(l.time||'').slice(11,16)+' at '+fmtINR(l.price)+': +'+pct.toFixed(2)+'% target, one GTT per lot')}">${fmtINR(gttLotPrice(l.price*(1+pct/100)))}<span style="font-size:11px;color:var(--t3)">×${l.qty}</span></div>`).join('');
+        }
         return fmtINR(v)+`<span style="font-size:11px;color:var(--t3)">×${row.qty??''}</span>`
           +`<span title="${escHtml('Profit target: '
             +(row.targetPct!=null?('+'+Number(row.targetPct).toFixed(2)+'% from average buy. '):'')
@@ -8892,8 +8956,8 @@ function buildOpenPositionsPanel(query=''){
       return `<span title="${escHtml('Protective stop: the tighter of entry risk and the recovered-pullback trail. The percentage is relative to current LTP, not profit after costs. An exit can realise a loss. No trailing mode is changed automatically.')}">${fmtINR(v)}${distance}</span>`;
     },
       clrFn:v=>v==null?'var(--t3)':'var(--green)'},
-    {key:'score',label:'Score/#',align:'right',bold:true,
-      fmt:(v,row)=>radarScoreCell(v)+`<span style="font-size:11px;color:var(--t3)"> #${row.rank??'—'}</span>`,
+    {key:'score',label:'Model Score',align:'right',bold:true,
+      fmt:(v,row)=>modelScoreCell(v)+`<span style="font-size:11px;color:var(--t3)"> #${row.rank??'—'}</span>`,
       clrFn:()=>'var(--t1)'},
     {key:'dayPct',label:'Day %',align:'right',fmt:fPerf,clrFn:()=>'var(--t2)'},
     // Pace is the suggested Zerodha trigger GAP: the deepest seller retreat buyers proved
@@ -8963,7 +9027,7 @@ function buildOpenPositionsPanel(query=''){
   const totalPnl=rows.reduce((sum,row)=>sum+(row.pnlRs||0),0);
   const pnlColor=totalPnl>0?'var(--green)':totalPnl<0?'var(--red)':'var(--t3)';
   const shown=filterPanelRows(rows,query,row=>[row.sym,row.scannerRow?.name,row.scannerRow?.sector]);
-  const openTotals={sym:'TOTAL',qty:shown.reduce((sum,row)=>sum+(row.qty||0),0),pnlRs:shown.reduce((sum,row)=>sum+(row.pnlRs||0),0)};
+  const openTotals={sym:'TOTAL',qty:shown.reduce((sum,row)=>sum+(row.qty||0),0),capital:shown.reduce((sum,row)=>sum+(row.capital||0),0),pnlRs:shown.reduce((sum,row)=>sum+(row.pnlRs||0),0)};
   // Default order is numerical confidence: higher Radar score first, then the better (lower) rank.
   // The composite only sorts; the cell continues to display the unmodified Score/# values.
   const table=makeSortableTable('rank-open-positions',cols,shown,'score',-1,null,openTotals,'sym','rank',1);
@@ -9834,6 +9898,13 @@ function getCombinedOpenPositionMap(){
 }
 function _combinedOpenPositionMapUncached(){
   const combined={};
+  // Positions.csv and Orders.csv describe the same session when their dates agree.
+  const posSessionOrders=(()=>{try{
+    if(!ORDERS_TODAY?.length) return null;
+    const days=[...new Set(ORDERS_TODAY.map(o=>normOrderDate(o.time)).filter(Boolean))].sort();
+    const last=days.at(-1);
+    return last?ORDERS_TODAY.filter(o=>normOrderDate(o.time)===last):null;
+  }catch(e){return null;}})();
   const ensure=(symbol)=>{
     if(!combined[symbol]) combined[symbol]={symbol,qty:0,avg:0,ltp:null,hasLivePosition:false};
     return combined[symbol];
@@ -9844,12 +9915,29 @@ function _combinedOpenPositionMapUncached(){
     pos.qty=h.qty;
     pos.avg=HOLD_COST_MAP[h.symbol]??h.avgCost??0;
     pos.ltp=h.ltp??pos.ltp;
+    // Lots bought as separate orders carry separate GTTs; group the tradebook's open FIFO fills by
+    // execution time (one order's partial fills share it) when they account for the whole holding.
+    try{
+      const open=(TRADEBOOK_STATS?.openPositionLotsMap?.[h.symbol]||[]).filter(l=>l.qty>0&&l.price>0);
+      if(open.length&&Math.abs(open.reduce((t,l)=>t+l.qty,0)-h.qty)<1e-6){
+        const byTime=new Map();
+        for(const l of open){const k=String(l.time||l.date);const g=byTime.get(k)||{qty:0,cost:0,time:l.time||l.date};g.qty+=l.qty;g.cost+=l.qty*l.price;byTime.set(k,g);}
+        const lots=[...byTime.values()].map(g=>({qty:g.qty,price:g.cost/g.qty,time:g.time}));
+        if(lots.length>1) pos.lots=lots;
+        pos.lotCost=open.reduce((t,l)=>t+l.qty*l.price,0);
+      }
+    }catch(e){}
   });
   if(POSITIONS?.length) POSITIONS.forEach(p=>{
     if(!p?.symbol||!isFinite(Number(p.qty))) return;
     const pos=ensure(p.symbol);
     const liveQty=Number(p.qty)||0;
-    const liveAvg=Number(p.avg??p.avgCost)||0;
+    let liveAvg=Number(p.avg??p.avgCost)||0;
+    // v1427: carried shares cost what their own lots cost, not Kite's all-buys day average.
+    if(liveQty>0&&posSessionOrders){
+      const f=sessionBuyFifo(p.symbol,posSessionOrders);
+      if(f&&Math.abs(f.carriedQty-liveQty)<1e-6&&f.carriedAvg>0){ liveAvg=f.carriedAvg; if(!(pos.qty>0)){ pos.lots=f.lots; pos.lotCost=f.lots.reduce((t,l)=>t+l.qty*l.price,0); } }
+    }
     pos.hasLivePosition=true;
     pos.ltp=p.ltp??pos.ltp;
     if(liveQty>0){
@@ -9857,6 +9945,7 @@ function _combinedOpenPositionMapUncached(){
       const liveValue=liveAvg>0?liveQty*liveAvg:0;
       pos.qty+=liveQty;
       pos.avg=pos.qty>0?(settledValue+liveValue)/pos.qty:0;
+      if(settledValue>0){ pos.lots=null; pos.lotCost=null; }   // settled + new shares: per-lot split no longer describes the row
     }else if(liveQty<0){
       if(!(pos.qty>0)){
         pos.qty+=liveQty;
@@ -13514,7 +13603,7 @@ function refreshStrategySafety(){
 }
 function startStreamRefresh(){
   if(_streamRefreshTimer) return;
-  if(!startStreamRefresh.btst){startStreamRefresh.btst=setInterval(()=>{loadBtstPicks();loadKiteMargins();try{resetCrossAlertsIfNewDay();checkTimeAlerts();checkCrossingAlerts();}catch(e){}},20000);loadBtstPicks();loadKiteMargins();try{resetCrossAlertsIfNewDay();checkTimeAlerts();checkCrossingAlerts();}catch(e){}
+  if(!startStreamRefresh.btst){startStreamRefresh.btst=setInterval(()=>{loadBtstPicks();loadKiteMargins();loadKiteGtts();try{resetCrossAlertsIfNewDay();checkTimeAlerts();checkCrossingAlerts();}catch(e){}},20000);loadBtstPicks();loadKiteMargins();loadKiteGtts();try{resetCrossAlertsIfNewDay();checkTimeAlerts();checkCrossingAlerts();}catch(e){}
     try{seedSavedBasketCount();}catch(e){}}
   _streamRefreshUiTimer=setInterval(()=>{try{refreshStrategySafety();renderLiveTapeBar();}catch(e){console.warn('Strategy safety refresh',e);}},1000);
   if(!_streamVisibilityBound){
@@ -13991,7 +14080,7 @@ function parseTradebook(text){
         openAvgCostMap[sym]=+(buyQueue.reduce((s,b)=>s+b.price*b.qty,0)/totalQty).toFixed(2);
         openPositionLotsMap[sym]=buyQueue
           .filter(b=>b.qty>0&&b.date)
-          .map(b=>({qty:b.qty,date:b.date}));
+          .map(b=>({qty:b.qty,date:b.date,price:b.price,time:b.time}));
       }
     }
   });
