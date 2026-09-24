@@ -1,5 +1,5 @@
-const BUILD_TS='2026-09-24 09:31 IST'; // release build time (IST)
-const APP_VERSION=1429;
+const BUILD_TS='2026-09-24 11:04 IST'; // release build time (IST)
+const APP_VERSION=1430;
 const RADAR_SCORE_VERSION='v1419-recross-batches'; // Eligible on crossing the score floor at any time; learned target or +3% fallback, BTST-max exit.
 
 // ── v1358: AN UNCAUGHT ERROR MUST NAME ITSELF ─────────────────────────────────────────────────
@@ -4379,15 +4379,6 @@ function checkTimeAlerts(){
   const at=(h,m)=>h*60+m, mins=c.mins, day=session;
   // Fire within a 2-minute window so a backgrounded/throttled tab still catches it.
   const due=(h,m)=>mins>=at(h,m)&&mins<at(h,m)+2;
-  if(due(14,45)) fireAlert({once:day+'|helper',tone:'warn',beeps:1,
-    title:'14:45 — helper check',
-    body:'BTST runs at 15:05 and 15:15. Make sure the helper is up and streaming now so the 15:05 run warms the panel cache.'});
-  if(due(15,15)) fireAlert({once:day+'|final',tone:'go',beeps:3,
-    title:'15:15 — FINAL picks due',
-    body:'Check the final scores and funded GO rows; eligible crossings can be bought now.'});
-  if(due(15,19)) fireAlert({once:day+'|buy',tone:'go',beeps:3,
-    title:'15:20 — BUY window',
-    body:'Import <strong>Zerodha_Basket_Buy</strong> and send. Use each order\'s GTT target; sell unfilled BTST positions by 15:20 next session.'});
   if(due(15,18)) fireAlert({once:day+'|exit',tone:'warn',beeps:2,
     title:'15:20 — EXIT unfilled positions',
     body:'Sell any BTST position from the previous session whose GTT target has not filled.'});
@@ -4489,11 +4480,13 @@ function alertOnPicksChange(prev,next){
   }
 }
 // ── BTST ENGINE PICKS (v1393) ──────────────────────────────────────────────────────────────────
-// The helper runs dev/btst_engine.py at 15:05 (provisional) and 15:15 (final) and writes btst_picks.json.
-// GO = today's live picks while the market gate is on. Nothing else is a buy recommendation.
+// The helper publishes live rankings throughout the session. A score-floor crossing can become GO
+// at any time; the late-session picks file is only another live snapshot, not the card's authority.
 let BTST={data:null,key:'',v:0,loadedAt:0,rank:null,rankKey:'',targetModel:null,targetKey:''};
 async function loadBtstPicks(){
-  if(!KITE_API) return;
+  // Read scores even when an independent helper status probe has timed out.
+  if(loadBtstPicks.busy) return;
+  loadBtstPicks.busy=true;
   try{
     const [j,rk,tm]=await Promise.all([
       readHelperResponse('/api/inputs/file?name=btst_picks.json',{timeout:6000}).catch(()=>null),
@@ -4509,15 +4502,14 @@ async function loadBtstPicks(){
     const targetKey=[target?.asOfSession,target?.trainedThrough,target?.cases?.length].join('|');
     BTST.loadedAt=Date.now();
     if(key===BTST.key&&rankKey===BTST.rankKey&&targetKey===BTST.targetKey) return;
-    const prevPicks=BTST.data;
     BTST={data:picks,key,v:BTST.v+1,loadedAt:Date.now(),rank,rankKey,targetModel:target,targetKey};
-    try{alertOnPicksChange(prevPicks,picks);}catch(e){}
+    // Live crossing alerts below own buy notifications; file stages are not buy signals.
     _btstRankMemo=null;
     for(const row of ALL){ROW_ACTION_MEMO.delete(row);setRadarEvidenceScore(row);}
     _dualPlanMemo=null;
     if(ALL.length) applyFilters({preservePage:true});
     try{renderStats();}catch(e){}
-  }catch(e){}
+  }catch(e){}finally{loadBtstPicks.busy=false;}
 }
 function btstToday(){
   const d=BTST.data;
@@ -4746,7 +4738,7 @@ function btstPickOf(sym){
 function btstWaitReason(){
   const d=BTST.data;
   if(d&&d.session===getSessionDate()&&d.ok===false) return 'BTST engine failed at '+String(d.asOf||'').slice(11,16)+': '+(d.error||'unknown error');
-  return "Today's BTST picks publish at 15:05 (provisional) and 15:15 (final); buy at 15:20";
+  return "Today's live model ranking has not reached this tab. Check the local helper connection.";
 }
 const ROW_ACTION_MEMO=new WeakMap();
 function getRowActionState(s){
@@ -8021,14 +8013,16 @@ function renderStats(){
 
   // BTST engine cards (v1393)
   const bd = typeof btstToday === 'function' ? btstToday() : null;
+  const br = typeof btstRanking === 'function' ? btstRanking() : null;
   const braw = typeof BTST !== 'undefined' ? BTST.data : null;
-  const engineState = bd ? `${bd.stage === 'final' ? 'Final' : 'Provisional'} ${String(bd.asOf || '').slice(11, 16)}`
+  const liveSource = br?.src || bd;
+  const engineState = br ? `Live scores ${br.at}`
     : (braw && braw.session === getSessionDate() && braw.ok === false ? 'Engine failed' : 'Waiting');
-  const engineTone = bd ? (bd.gate?.on ? 'var(--green)' : 'var(--amber)') : (engineState === 'Engine failed' ? 'var(--red)' : 'var(--t2)');
-  const universeCard = `<div class="st" title="${escHtml(bd ? 'Model trained through ' + (bd.model?.trainedThrough || '?') + ' on ' + (bd.model?.trainRows || '?') + ' rows; scored ' + bd.universe + ' liquid stocks.' : btstWaitReason())}">
-    <div class="st-l">BTST Engine</div>
+  const engineTone = br ? (liveSource?.gate?.on ? 'var(--green)' : 'var(--amber)') : (engineState === 'Engine failed' ? 'var(--red)' : 'var(--t2)');
+  const universeCard = `<div class="st" title="${escHtml(br ? 'Current live ranking: ' + br.n + ' scored stocks at ' + br.at + '. A stock qualifies whenever its score crosses your floor.' : btstWaitReason())}">
+    <div class="st-l">Live Model</div>
     <div class="st-v" style="font-size:18px;color:${engineTone}">${escHtml(engineState)}</div>
-    <div class="st-d">${bd ? `market gate ${bd.gate?.on ? 'ON' : 'OFF'} · ${bd.gate?.marketTrendPct}% vs 50DMA (needs > ${bd.gate?.threshold}%)` : 'picks at 15:05 / 15:15 · buy 15:20'}</div></div>`;
+    <div class="st-d">${br ? `${br.n} scored · floor ${btstMinScore()} · qualifies throughout the session` : 'Waiting for a current-session live ranking'}</div></div>`;
 
   const triggersCard = `<div class="st" title="${escHtml(bd ? bd.picks.map(p => '#' + p.rank + ' ' + p.symbol + ' score ' + p.score).join(' | ') : 'No picks for today yet')}">
     <div class="st-l">Today's Picks</div>
@@ -9824,7 +9818,7 @@ function _renderMethodologyInner(){
   mc.innerHTML=`<h3>BTST engine (v1393)</h3>
     <p>One model supplies the recommendation table, counts, allocation and basket. It is the April-2026 idea (score every stock, learn what is working) rebuilt on Zerodha data with a gradient-boosting learner. No ALL NSE files.</p>
     <div class="m-grid">
-    <div class="m-card"><h4>1. Score (15:05 provisional, 15:15 final)</h4><p>The local helper runs <code>dev/btst_engine.py</code>. It builds 45 features for every liquid stock (20-day average turnover ≥ ₹5 Cr, price ₹50–₹5,000) from Zerodha daily bars plus today's live price and volume: returns from 1 day to 3 months, gap, close location, range, volume surges, volatility, distance to highs and averages, RSI, stochastics, ADX, MACD, TradingView-style ratings, relative strength and market condition. The model predicts the next-session trade result after costs and is retrained every 5 sessions on the last 220 sessions.</p></div>
+    <div class="m-card"><h4>1. Live score (throughout the session)</h4><p>The local helper runs <code>dev/btst_engine.py</code>. It builds 45 features for every liquid stock (20-day average turnover ≥ ₹5 Cr, price ₹50–₹5,000) from Zerodha daily bars plus today's live price and volume: returns from 1 day to 3 months, gap, close location, range, volume surges, volatility, distance to highs and averages, RSI, stochastics, ADX, MACD, TradingView-style ratings, relative strength and market condition. The model predicts the next-session trade result after costs and is retrained every 5 sessions on the last 220 sessions.</p></div>
     <div class="m-card"><h4>2. Buy on qualification</h4><p>Top ${RocketStrategy.CONFIG.TOP_K} picks are GO, split equally across ${RocketStrategy.CONFIG.TOP_K} slots (minimum ₹5,000 each). A bought stock may qualify again after a fresh dip below the floor and re-crossing. Market gate: no buys when the equal-weight market index is more than 2% below its 50-day average. Stale prices or a broken stream turn GO into WAIT.</p></div>
     <div class="m-card"><h4>3. Exit</h4><p>The basket attaches a +${RocketStrategy.CONFIG.TARGET_PCT}% GTT target. No stop-loss: overnight gaps jump stops, and a −2% stop turned the tested result negative. If the target has not filled, sell at 15:20 on the next session (Open Positions shows SELL from 15:15).</p></div></div>
     <h3>Evidence</h3>
@@ -12603,7 +12597,7 @@ async function pollUniverseDelta(deferScore=false){
     // did not answer in 60 s while the helper was blocked in its bar flush) stopped the 30-second
     // loop permanently, which reads on screen as the app going dead rather than as a slow helper.
     // A timeout costs one skipped beat; no timeout costs the session.
-    const j=await readHelperResponse('/api/kite/universe-delta?since='+_clientUniverseRev);
+    const j=await readHelperResponse('/api/kite/universe-delta?compact=1&since='+_clientUniverseRev);
     if(!j||j.ok===false){invalidateLiveEvidence('Helper returned no universe');return {ok:false,changed:false};}
     acceptStreamEvidence(j);
     const newRev = Number(j.rev) || 0;
@@ -13268,7 +13262,7 @@ function basketFileStatus(){
     const at=_lastSavedBasketAt?new Date(_lastSavedBasketAt).toLocaleTimeString('en-IN',{hour12:false,hour:'2-digit',minute:'2-digit'}):'';
     return `<span style="color:var(--amber)" title="${escHtml('Zerodha_Basket_Buy.json holds '+_lastSavedBasketCount+' order(s). It is kept until a new set of GO picks replaces it - an empty board (market closed, stale tick) no longer erases it. Import this file in Kite.')}">🧺 basket ${_lastSavedBasketCount}${at?' @'+at:''}</span>`;
   }
-  return `<span style="color:var(--t3)" title="${escHtml('No basket written yet. It fills automatically when today\'s 15:15 FINAL picks arrive and are funded.')}">🧺 basket empty</span>`;
+  return `<span style="color:var(--t3)" title="${escHtml('No basket written yet. Eligible live score crossings fill it automatically when capital and execution checks allow funding.')}">🧺 basket empty</span>`;
 }
 function compactTapeStatus(){
   const st=(typeof STREAM_STATUS!=='undefined'&&STREAM_STATUS)||null;
