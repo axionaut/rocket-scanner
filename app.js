@@ -1,5 +1,5 @@
-const BUILD_TS='2026-09-24 11:24 IST'; // release build time (IST)
-const APP_VERSION=1431;
+const BUILD_TS='2026-09-24 12:47 IST'; // release build time (IST)
+const APP_VERSION=1432;
 const RADAR_SCORE_VERSION='v1419-recross-batches'; // Eligible on crossing the score floor at any time; learned target or +3% fallback, BTST-max exit.
 
 // ── v1358: AN UNCAUGHT ERROR MUST NAME ITSELF ─────────────────────────────────────────────────
@@ -4707,7 +4707,7 @@ function onScoreFloorChange(){
   if(typeof applyFilters==='function') applyFilters();
 }
 // Why a symbol has no model score, in plain words. The engine publishes the exact exclusion per
-// symbol (price outside Rs 20-4,000, turnover under Rs 5 Cr, a >22% day in 60 sessions, short
+// symbol (price outside Rs 5-4,000, turnover under Rs 5 Cr, a >22% day in 60 sessions, short
 // history, circuit lock, surveillance). Replaces the old "Awaiting a current model score".
 function btstUnscoredReason(sym){
   const r=btstRanking();

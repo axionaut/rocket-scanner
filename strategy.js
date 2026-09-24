@@ -16,8 +16,8 @@
 
   const CONFIG = {
     // Tier 1: Universe Filters
-    MIN_PRICE: 50.0,
-    MAX_PRICE: 5000.0,
+    MIN_PRICE: 5.0,               // mirrors dev/btst_engine.py LIQ; not read by the app's decision path
+    MAX_PRICE: 4000.0,
     MIN_TURNOVER: 50000000,      // ₹5 Crore minimum traded value
     MIN_AVG_VOLUME: 100000,      // 1 Lakh shares 10-day average
     MIN_RVOL: 1.5,               // 1.5x time-of-day expected volume
@@ -59,7 +59,7 @@
     if(!stock?.symbol)return reject('Invalid stock');
     if(heldSymbols.has(String(stock.symbol).trim().toUpperCase()))return reject('Already held (no additional buys)');
     const x=inputs(stock);
-    if(!(x.price>=CONFIG.MIN_PRICE&&x.price<=CONFIG.MAX_PRICE))return reject('Price outside Rs 50 to Rs 5,000 range');
+    if(!(x.price>=CONFIG.MIN_PRICE&&x.price<=CONFIG.MAX_PRICE))return reject('Price outside Rs 5 to Rs 4,000 range');
     if(!(x.turnover>=CONFIG.MIN_TURNOVER||x.avgVol10>=CONFIG.MIN_AVG_VOLUME))return reject('Liquidity below Rs 5 Cr turnover / 100,000 average shares, or unavailable');
     if(!(x.rvol>=CONFIG.MIN_RVOL))return reject('RVOL below 1.5x or unavailable');
     if(!(x.open>0&&x.price>x.open))return reject('Price must be above day open (valid open required)');
