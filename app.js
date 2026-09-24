@@ -1,4 +1,4 @@
-const BUILD_TS='2026-09-24 03:39 IST'; // release build time (IST)
+const BUILD_TS='2026-09-24 09:09 IST'; // release build time (IST)
 const APP_VERSION=1427;
 const RADAR_SCORE_VERSION='v1419-recross-batches'; // Eligible on crossing the score floor at any time; learned target or +3% fallback, BTST-max exit.
 
