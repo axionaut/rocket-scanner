@@ -1,5 +1,5 @@
-const BUILD_TS='2026-09-24 09:09 IST'; // release build time (IST)
-const APP_VERSION=1427;
+const BUILD_TS='2026-09-24 09:31 IST'; // release build time (IST)
+const APP_VERSION=1428;
 const RADAR_SCORE_VERSION='v1419-recross-batches'; // Eligible on crossing the score floor at any time; learned target or +3% fallback, BTST-max exit.
 
 // ── v1358: AN UNCAUGHT ERROR MUST NAME ITSELF ─────────────────────────────────────────────────
@@ -3651,7 +3651,7 @@ function dualScoreCell(row){
     const ms=btstScoreOf(row.symbol),floor=btstMinScore();
     const clears=ms!==null&&floor!==null&&ms>=floor;
     return `<div style="display:flex;align-items:center;gap:6px;justify-content:center">
-      ${ms===null?'N/A':`<span style="font-family:'DM Mono',monospace;font-weight:800;font-size:15px;color:${clears?'var(--green)':'var(--amber)'}" title="${escHtml(btstRankNote(row.symbol))}">${ms>=0?'+':''}${ms.toFixed(2)}</span>`}
+      ${ms===null?`<span title="${escHtml(btstUnscoredReason(row.symbol))}">N/A</span>`:`<span style="font-family:'DM Mono',monospace;font-weight:800;font-size:15px;color:${clears?'var(--green)':'var(--amber)'}" title="${escHtml(btstRankNote(row.symbol))}">${ms>=0?'+':''}${ms.toFixed(2)}</span>`}
       <span style="font-family:'DM Mono',monospace;font-weight:600;font-size:11px;color:var(--t3)" title="${rk?escHtml(btstRankNote(row.symbol)+' - ranking only, not a buy signal'):'Not ranked by the BTST engine'}">${rk?'#'+rk:''}</span>
       <span style="font-size:10px;font-weight:600;color:var(--t3)">${act.state}</span>
     </div>`;
@@ -4708,6 +4708,16 @@ function onScoreFloorChange(){
   // Verdict text and colour live in the rendered rows, so a redraw is the whole update.
   if(typeof applyFilters==='function') applyFilters();
 }
+// Why a symbol has no model score, in plain words. The engine publishes the exact exclusion per
+// symbol (price outside Rs 20-4,000, turnover under Rs 5 Cr, a >22% day in 60 sessions, short
+// history, circuit lock, surveillance). Replaces the old "Awaiting a current model score".
+function btstUnscoredReason(sym){
+  const r=btstRanking();
+  if(!r) return 'No model ranking published yet today - the engine scores from 09:20, then every 2 minutes';
+  const why=r.src?.unscored?.[normSym(sym)];
+  if(why) return 'Not scored by the model: '+why;
+  return `Not in the ${r.stage==='preview'?'preview':r.stage} ranking of ${r.at} - no live price reached the engine for this stock`;
+}
 function btstRankNote(sym){
   const r=btstRanking(),k=btstRankOf(sym);
   if(!r||!k) return '';
@@ -4855,7 +4865,7 @@ function _getRowActionStateUncached(s, ignoreMarketClosed=false){
   // The final list is still published and still trades; it is simply no longer the only way a
   // stock becomes eligible. A purchase consumes the current crossing; a later dip and re-crossing permits another buy.
   const cross=btstCrossingState(s);
-  return cross||{state:'WAIT',reason:btstRankNote(s.symbol)||'Awaiting a current model score'};
+  return cross||{state:'WAIT',reason:btstRankNote(s.symbol)||btstUnscoredReason(s.symbol)};
 }
 // v1407: A STOCK FROZEN AT ITS UPPER CIRCUIT CANNOT BE BOUGHT AT ALL. 21 Sep FEDDERSHOL ranked
 // #1 (+2.13) and PROTEAN #2 while both sat locked at +20%: Kite showed 75,34,463 shares bid and
@@ -9832,7 +9842,7 @@ function getCols(){
     {key:'depth',label:'Buyer / Seller',s:0},
     {key:'relvol',label:'RelVol',s:1},
     {key:'turnover',label:'Turnover',s:1},
-    {key:'tgt',label:'TGT/SL',s:0},
+    {key:'tgt',label:'Target',s:0},
     {key:'alloc',label:'Alloc',s:0},
 
   ]);
@@ -11194,7 +11204,7 @@ function renderTable(){
       // v1144: TGT and SL merged. They are ONE decision - what you ask for against what you risk -
       // and the two columns were part of why the table needed a horizontal scrollbar, which the
       // owner has ruled out. Both numbers survive, with their full tooltips.
-      tgt:`<td style="font-weight:700" title="${escHtml((exitPolicy.viable?`${exitPolicy.targetSource}. Entry-relative objective ${exitPolicy.targetPct?.toFixed(2)??'—'}%; target-hit proceeds are not expected returns.${exitPolicy.positionFloorPct>exitPolicy.targetPct?` CNC after-cost floor is ${exitPolicy.positionFloorPct.toFixed(2)}%.`:''}`:`${exitPolicy.viabilitySource||'Target economics'}; planning target unavailable; allocation uses the 10-share minimum.`)+' '+exitPolicy.horizonNote+' '+exitPolicy.stopSource+(exitPolicy.rewardRisk!=null?` · reward:risk ${exitPolicy.rewardRisk.toFixed(2)}`:''))}"><span style="color:${exitPolicy.viable?'var(--green)':'var(--red)'}">${exitPolicy.viable&&exitPolicy.targetPct!=null?'+'+exitPolicy.targetPct.toFixed(2)+'%':'—'}</span><span style="color:var(--t3)"> / </span><span style="color:var(--red)">${exitPolicy.stopPct>0?'−'+exitPolicy.stopPct.toFixed(2)+'%':'no stop'}</span></td>`,
+      tgt:`<td style="font-weight:700" title="${escHtml((exitPolicy.viable?`${exitPolicy.targetSource}. Entry-relative objective ${exitPolicy.targetPct?.toFixed(2)??'—'}%; target-hit proceeds are not expected returns.${exitPolicy.positionFloorPct>exitPolicy.targetPct?` CNC after-cost floor is ${exitPolicy.positionFloorPct.toFixed(2)}%.`:''}`:`${exitPolicy.viabilitySource||'Target economics'}; planning target unavailable; allocation uses the 10-share minimum.`)+' '+exitPolicy.horizonNote+' '+exitPolicy.stopSource+(exitPolicy.rewardRisk!=null?` · reward:risk ${exitPolicy.rewardRisk.toFixed(2)}`:''))}"><span style="color:${exitPolicy.viable?'var(--green)':'var(--red)'}">${exitPolicy.viable&&exitPolicy.targetPct!=null?'+'+exitPolicy.targetPct.toFixed(2)+'%':'—'}</span>${exitPolicy.stopPct>0?`<span style="color:var(--t3)"> / </span><span style="color:var(--red)">−${exitPolicy.stopPct.toFixed(2)}%</span>`:''}</td>`,
       alloc:`<td class="alloc-cell" data-sym="${s.symbol}">${(()=>{
         if(!am||am.rejected||!(am.qty>0)) return '<span style="color:var(--t3);font-size:13px">—</span>';
         return `<span style="color:var(--amber);font-weight:700;font-family:'DM Mono',monospace;font-size:14px">${fmtINR(am.alloc)}</span>${allocationSubline(am,unitLabel)}`;
