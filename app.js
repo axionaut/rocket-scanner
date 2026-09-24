@@ -1,5 +1,5 @@
-const BUILD_TS='2026-09-24 11:04 IST'; // release build time (IST)
-const APP_VERSION=1430;
+const BUILD_TS='2026-09-24 11:24 IST'; // release build time (IST)
+const APP_VERSION=1431;
 const RADAR_SCORE_VERSION='v1419-recross-batches'; // Eligible on crossing the score floor at any time; learned target or +3% fallback, BTST-max exit.
 
 // ── v1358: AN UNCAUGHT ERROR MUST NAME ITSELF ─────────────────────────────────────────────────
@@ -4714,7 +4714,7 @@ function btstUnscoredReason(sym){
   if(!r) return 'Today’s model ranking is not available in this tab yet. The engine starts at 09:20; check the local helper connection.';
   const why=r.src?.unscored?.[normSym(sym)];
   if(why) return 'Not scored by the model: '+why;
-  return `Not in the ${r.stage==='preview'?'preview':r.stage} ranking of ${r.at} - no live price reached the engine for this stock`;
+  return `Not in the ${r.stage==='preview'?'preview':r.stage} ranking of ${r.at}; the engine did not provide an exclusion reason`;
 }
 function btstRankNote(sym){
   const r=btstRanking(),k=btstRankOf(sym);
@@ -11261,9 +11261,9 @@ function sortValueOf(row,key){
   // number, never NaN.
   const num=v=>{const n=Number(v);return Number.isFinite(n)?n:null;};
   if(key==='score'){
-    // The model score is the decision quantity; fall back to the display score for unranked rows.
+    // Sort the displayed model score only. Missing scores stay last, including below negative scores.
     const ms=typeof btstScoreOf==='function'?btstScoreOf(row.symbol):null;
-    return ms!==null?ms:num(row.score);
+    return Number.isFinite(ms)?ms:null;
   }
   // Derived columns render a formatted STRING ("1.90%", "GO"), so the underlying number has to be
   // recomputed here - sorting row.highDistance would compare `undefined` on every row.
