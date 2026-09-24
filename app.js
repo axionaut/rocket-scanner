@@ -1,5 +1,5 @@
 const BUILD_TS='2026-09-24 09:31 IST'; // release build time (IST)
-const APP_VERSION=1428;
+const APP_VERSION=1429;
 const RADAR_SCORE_VERSION='v1419-recross-batches'; // Eligible on crossing the score floor at any time; learned target or +3% fallback, BTST-max exit.
 
 // ── v1358: AN UNCAUGHT ERROR MUST NAME ITSELF ─────────────────────────────────────────────────
@@ -4499,13 +4499,19 @@ async function loadBtstPicks(){
       readHelperResponse('/api/inputs/file?name=btst_picks.json',{timeout:6000}).catch(()=>null),
       readHelperResponse('/api/inputs/file?name=btst_rank.json',{timeout:6000}).catch(()=>null),
       readHelperResponse('/api/inputs/file?name=btst_target_model.json',{timeout:6000}).catch(()=>null)]);
-    const key=[j?.asOf,j?.stage,j?.ok,j?.session].join('|'),rankKey=[rk?.asOf,rk?.ok,rk?.session].join('|');
-    const targetKey=[tm?.asOfSession,tm?.trainedThrough,tm?.cases?.length].join('|');
+    // A busy helper can miss one poll. Keep only today's last valid files so a transient
+    // timeout cannot turn every visible model score into N/A.
+    const today=getSessionDate();
+    const picks=j||((BTST.data?.session===today)?BTST.data:null);
+    const rank=rk||((BTST.rank?.session===today)?BTST.rank:null);
+    const target=tm||BTST.targetModel;
+    const key=[picks?.asOf,picks?.stage,picks?.ok,picks?.session].join('|'),rankKey=[rank?.asOf,rank?.ok,rank?.session].join('|');
+    const targetKey=[target?.asOfSession,target?.trainedThrough,target?.cases?.length].join('|');
     BTST.loadedAt=Date.now();
     if(key===BTST.key&&rankKey===BTST.rankKey&&targetKey===BTST.targetKey) return;
     const prevPicks=BTST.data;
-    BTST={data:j,key,v:BTST.v+1,loadedAt:Date.now(),rank:rk,rankKey,targetModel:tm,targetKey};
-    try{alertOnPicksChange(prevPicks,j);}catch(e){}
+    BTST={data:picks,key,v:BTST.v+1,loadedAt:Date.now(),rank,rankKey,targetModel:target,targetKey};
+    try{alertOnPicksChange(prevPicks,picks);}catch(e){}
     _btstRankMemo=null;
     for(const row of ALL){ROW_ACTION_MEMO.delete(row);setRadarEvidenceScore(row);}
     _dualPlanMemo=null;
@@ -4713,7 +4719,7 @@ function onScoreFloorChange(){
 // history, circuit lock, surveillance). Replaces the old "Awaiting a current model score".
 function btstUnscoredReason(sym){
   const r=btstRanking();
-  if(!r) return 'No model ranking published yet today - the engine scores from 09:20, then every 2 minutes';
+  if(!r) return 'Today’s model ranking is not available in this tab yet. The engine starts at 09:20; check the local helper connection.';
   const why=r.src?.unscored?.[normSym(sym)];
   if(why) return 'Not scored by the model: '+why;
   return `Not in the ${r.stage==='preview'?'preview':r.stage} ranking of ${r.at} - no live price reached the engine for this stock`;
