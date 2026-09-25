@@ -8,4 +8,10 @@
 !app.js
 !strategy.js
 !styles.css
+!browser-extension/
+!browser-extension/manifest.json
+!browser-extension/background.js
+!browser-extension/relay.js
+!browser-extension/kite-import.js
+!browser-extension/README.md
 dev/

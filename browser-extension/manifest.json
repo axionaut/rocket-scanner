@@ -1,0 +1,13 @@
+{
+  "manifest_version": 3,
+  "name": "Rocket Scanner — Kite Basket Bridge",
+  "version": "1.0.0",
+  "description": "Send funded Rocket Scanner orders to an open Scanner_Import basket. Never executes orders.",
+  "permissions": ["scripting"],
+  "host_permissions": ["https://kite.zerodha.com/*"],
+  "background": {"service_worker": "background.js"},
+  "content_scripts": [{
+    "matches": ["https://axionaut.github.io/rocket-scanner/*"],
+    "js": ["relay.js"]
+  }]
+}
