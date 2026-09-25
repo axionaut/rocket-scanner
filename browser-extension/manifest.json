@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Rocket Scanner — Kite Basket Bridge",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "Send funded Rocket Scanner orders to an open Scanner_Import basket. Never executes orders.",
   "permissions": ["scripting"],
   "host_permissions": ["https://kite.zerodha.com/*"],

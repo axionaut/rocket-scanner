@@ -1,5 +1,5 @@
-const BUILD_TS='2026-09-25 10:33 IST'; // release build time (IST)
-const APP_VERSION=1435;
+const BUILD_TS='2026-09-25 11:01 IST'; // release build time (IST)
+const APP_VERSION=1436;
 const RADAR_SCORE_VERSION='v1419-recross-batches'; // Eligible on crossing the score floor at any time; learned target or +3% fallback, BTST-max exit.
 
 // ── v1358: AN UNCAUGHT ERROR MUST NAME ITSELF ─────────────────────────────────────────────────
@@ -14266,6 +14266,7 @@ async function _drainBasketQueue(preferredOrders = null){
 
   // If nothing changed and no manual export requested, resolve waiting callers and return
   if(targetSig === _lastSavedBasketSig && !waiters.some(w => w.manual)){
+    scheduleKiteBasketSync();
     waiters.forEach(w => {
       try { w.resolve({ ok: true, count: orders.length, skipped: true }); } catch(e){}
     });
@@ -14288,6 +14289,7 @@ async function _drainBasketQueue(preferredOrders = null){
     _lastSavedBasketCount = orders.length;
     _lastSavedBasketCost = basketOrdersCost(orders);
     _lastBasketSyncError = null;
+    scheduleKiteBasketSync();
     waiters.forEach(w => {
       try { w.resolve({ ok: true, count: orders.length }); } catch(e){}
     });
@@ -14313,16 +14315,26 @@ async function _drainBasketQueue(preferredOrders = null){
 }
 
 window.BASKET_EXPORT_BUSY = false;
-async function sendBasketToKite(){
-  if(window.BASKET_EXPORT_BUSY) return;
-  window.BASKET_EXPORT_BUSY=true;
+let _kiteTransferBusy=false,_kiteSyncTimer=null,_kiteSentSignature='';
+function scheduleKiteBasketSync(delay=500){
+  if(_kiteSyncTimer||_kiteTransferBusy) return;
+  _kiteSyncTimer=setTimeout(()=>{_kiteSyncTimer=null;sendBasketToKite(true);},delay);
+}
+async function sendBasketToKite(automatic=false){
+  if(_kiteTransferBusy) return;
+  _kiteTransferBusy=true;
   const button=document.getElementById('sendKiteBtn');
   if(button){button.disabled=true;button.textContent='Sending to Kite…';}
+  let retry=false;
   try{
     if(APPLY_FILTERS_TIMER){clearTimeout(APPLY_FILTERS_TIMER);APPLY_FILTERS_TIMER=null;applyFilters();}
     const orders=getDesiredBasketOrders();
+    const signature=getCanonicalBasketSignature(orders);
+    if(automatic&&(!orders.length||signature===_kiteSentSignature)) return;
     if(!orders.length) throw new Error('No selected GO orders fit the available cash and allocation limits.');
-    await requestBasketSync({manual:true,precomputedOrders:orders});
+    if(automatic){
+      if(signature!==_lastSavedBasketSig) return;
+    }else await requestBasketSync({manual:true,precomputedOrders:orders});
     if(getCanonicalBasketSignature(orders)!==getCanonicalBasketSignature(getDesiredBasketOrders())) throw new Error('Recommendations changed. Send the current basket again.');
     const id=crypto.randomUUID();
     const result=await new Promise((resolve,reject)=>{
@@ -14335,14 +14347,21 @@ async function sendBasketToKite(){
         reject(new Error('No confirmation from Kite Basket Bridge. Install it from the browser-extension folder and reload both tabs. If already installed, inspect Scanner_Import before retrying.'));
       },30000);
       window.addEventListener('message',listener);
-      window.postMessage({type:'RS_KITE_PREPARE',id,createdAt:Date.now(),orders:orders.map(o=>({id:o.id,instrument:o.instrument,weight:o.weight,params:o.params}))},location.origin);
+      window.postMessage({type:'RS_KITE_PREPARE',id,automatic,createdAt:Date.now(),orders:orders.map(o=>({id:o.id,instrument:o.instrument,weight:o.weight,params:o.params}))},location.origin);
     });
     if(!result.ok) throw new Error(result.why||'Kite did not confirm the basket.');
+    _kiteSentSignature=signature;
+    if(button) button.title='Scanner_Import is ready. Review and Execute in Kite. New funded baskets are sent automatically.';
     showToast(`<strong>${result.count} orders ${result.already?'already in':'loaded into'} Scanner_Import.</strong> Review and Execute in Kite.`,7000);
-  }catch(e){showToast(escHtml(e?.message||String(e)),10000,true);}
+  }catch(e){
+    retry=automatic;
+    if(button) button.title='Kite auto-send pending: '+(e?.message||String(e));
+    if(!automatic) showToast(escHtml(e?.message||String(e)),10000,true);
+  }
   finally{
-    window.BASKET_EXPORT_BUSY=false;
-    if(button){button.disabled=false;button.textContent='Send to Kite';}
+    _kiteTransferBusy=false;
+    if(button){button.disabled=false;button.textContent=retry?'Kite sync pending':'Kite auto-send';}
+    if(retry) scheduleKiteBasketSync(20000);
     renderBasketBtn();
   }
 }

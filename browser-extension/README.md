@@ -6,7 +6,7 @@ One-time setup in Chrome or Edge (the same browser/profile used for both apps):
 2. Choose **Load unpacked** and select this `browser-extension` folder.
 3. Reload Rocket Scanner and Kite.
 
-Open the empty **Scanner_Import** basket in Kite. In Rocket Scanner click **Send to Kite**. The bridge uses Kite's native JSON import handler, including the exported quantities and GTT targets. It verifies the basket items before reporting success. Review the basket and click Execute yourself.
+Open the empty **Scanner_Import** basket in Kite. Rocket Scanner automatically sends each new funded basket after its normal file save. The **Kite auto-send** button is an optional manual retry. Keep the basket open; pending transfers retry every 20 seconds using the current live plan. Automatic transfers do not switch tabs. The bridge uses Kite's native JSON import handler, including the exported quantities and GTT targets. It verifies the basket items before reporting success. Review the basket and click Execute yourself.
 
 An identical basket is left alone. A different non-empty basket is never overwritten or appended to: review and clear it in Kite first. Keep one Kite tab open. If an import is partial, inspect and clear it before retrying.
 

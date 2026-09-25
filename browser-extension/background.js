@@ -11,7 +11,7 @@ chrome.runtime.onMessage.addListener((m,sender,reply)=>{
     const results=await chrome.scripting.executeScript({target:{tabId:tabs[0].id},world:'MAIN',func:rocketKiteImport,args:[m.orders,m.createdAt]});
     const result=results[0]?.result;
     if(!result) throw new Error('Kite did not confirm the transfer. Inspect Scanner_Import before retrying.');
-    if(result.ok) await chrome.tabs.update(tabs[0].id,{active:true});
+    if(result.ok&&!m.automatic) await chrome.tabs.update(tabs[0].id,{active:true});
     return result;
   })().then(reply,e=>reply({ok:false,why:e.message})).finally(()=>{busy=false;});
   return true;
