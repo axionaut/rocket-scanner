@@ -1,5 +1,5 @@
 const BUILD_TS='2026-09-25 11:10 IST'; // release build time (IST)
-const APP_VERSION=1437;
+const APP_VERSION=1438;
 const RADAR_SCORE_VERSION='v1419-recross-batches'; // Eligible on crossing the score floor at any time; learned target or +3% fallback, BTST-max exit.
 
 // ── v1358: AN UNCAUGHT ERROR MUST NAME ITSELF ─────────────────────────────────────────────────
@@ -1568,7 +1568,7 @@ function pinButton(sym){
   const on=isPinned(sym);
   return `<button type="button" onclick="event.stopPropagation();togglePin(${escHtml(JSON.stringify(normSym(sym)))})"`
     +` aria-label="${on?'Unpin':'Pin'} ${escHtml(sym)}" title="${on?'Unpin':'Pin to the top of the table (display only; never buys or funds)'}"`
-    +` style="background:none;border:0;padding:0 5px 0 0;cursor:pointer;font-size:14px;line-height:1;vertical-align:middle;color:${on?'var(--amber)':'var(--t3)'}">${on?'★':'☆'}</button>`;
+    +` style="background:none;border:0;padding:0 5px 0 0;cursor:pointer;font-size:16px;line-height:1;vertical-align:middle;color:${on?'var(--amber)':'var(--t3)'}">${on?'★':'☆'}</button>`;
 }
 // Named actions beside every symbol. The stock name itself used to be the
 // Kite link, which is invisible until you hover it and offers no second destination. `Z` opens the
@@ -7177,8 +7177,31 @@ function computeLatestOrderBooked(){
     const avgSell=sells.reduce((s,o)=>s+o.price*o.qty,0)/totalSellQty;
     const holdingAvg=getHoldingAvgCost(sym);
     const totalBuyQty=buys.reduce((s,o)=>s+o.qty,0);
-    const sameDayQty=Math.min(totalBuyQty,totalSellQty);
-    const deliveryQty=totalSellQty-sameDayQty;
+    // v1438: Chronological same-day matching.  Zerodha settles intraday only when
+    // buy shares are available at the time of the sell.  A sell-then-rebuy of carried
+    // stock (e.g. GTT fires at 10:10, re-buy at 14:30) is a delivery sell + a new
+    // position, not an intraday round-trip.  Walk buys and sells by time: a sell
+    // share counts as same-day only when a preceding same-day buy share exists.
+    let sameDayQty=0,deliveryQty=0;
+    if(totalBuyQty>0&&totalSellQty>0){
+      const sortedBuys=buys.slice().sort((a,b)=>String(a.time).localeCompare(String(b.time)));
+      const sortedSells=sells.slice().sort((a,b)=>String(a.time).localeCompare(String(b.time)));
+      // Build a running tally of buy-share supply available at each moment.
+      // For each sell, consume only the buy shares that were filled AT OR BEFORE it.
+      let buyPool=0,bi=0;
+      for(const s of sortedSells){
+        const sTime=String(s.time||'');
+        while(bi<sortedBuys.length&&String(sortedBuys[bi].time||'')<=sTime){
+          buyPool+=Number(sortedBuys[bi].qty);bi++;
+        }
+        const matchable=Math.min(Number(s.qty),buyPool);
+        sameDayQty+=matchable;
+        buyPool-=matchable;
+        deliveryQty+=Number(s.qty)-matchable;
+      }
+    } else {
+      deliveryQty=totalSellQty;
+    }
     const fifo=sessionBuyFifo(sym,session.orders);
     const todayAvg=fifo?.sameDayAvg??(totalBuyQty>0?buys.reduce((s,o)=>s+o.price*o.qty,0)/totalBuyQty:null);
     const components=[];
