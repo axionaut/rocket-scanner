@@ -1,5 +1,5 @@
 const BUILD_TS='2026-09-25 11:51 IST'; // release build time (IST)
-const APP_VERSION=1441;
+const APP_VERSION=1442;
 const RADAR_SCORE_VERSION='v1419-recross-batches'; // Eligible on crossing the score floor at any time; learned target or +3% fallback, BTST-max exit.
 
 // ── v1358: AN UNCAUGHT ERROR MUST NAME ITSELF ─────────────────────────────────────────────────
@@ -7216,35 +7216,47 @@ function computeLatestOrderBooked(){
     // stock (e.g. GTT fires at 10:10, re-buy at 14:30) is a delivery sell + a new
     // position, not an intraday round-trip.  Walk buys and sells by time: a sell
     // share counts as same-day only when a preceding same-day buy share exists.
-    let sameDayQty=0,deliveryQty=0;
-    if(totalBuyQty>0&&totalSellQty>0){
-      const sortedBuys=buys.slice().sort((a,b)=>String(a.time).localeCompare(String(b.time)));
-      const sortedSells=sells.slice().sort((a,b)=>String(a.time).localeCompare(String(b.time)));
-      // Build a running tally of buy-share supply available at each moment.
-      // For each sell, consume only the buy shares that were filled AT OR BEFORE it.
-      let buyPool=0,bi=0;
-      for(const s of sortedSells){
-        const sTime=String(s.time||'');
-        while(bi<sortedBuys.length&&String(sortedBuys[bi].time||'')<=sTime){
-          buyPool+=Number(sortedBuys[bi].qty);bi++;
-        }
-        const matchable=Math.min(Number(s.qty),buyPool);
-        sameDayQty+=matchable;
-        buyPool-=matchable;
-        deliveryQty+=Number(s.qty)-matchable;
+    // 25 Sep: each leg also keeps its OWN sell proceeds and buy lots. Using the symbol's average
+    // sell for every leg priced SHANTIGOLD's 09:26 carried sell (293.97) and its later same-day
+    // sells (314.32, 323.65) all at 310.23: the total survived, the legs and their charges did not.
+    let sameDayQty=0,deliveryQty=0,sameCost=0,sameProceeds=0,deliveryProceeds=0;
+    const sortedSells=sells.slice().sort((a,b)=>String(a.time).localeCompare(String(b.time)));
+    const lots=buys.slice().sort((a,b)=>String(a.time).localeCompare(String(b.time))).map(b=>({t:String(b.time||''),q:Number(b.qty),p:Number(b.price),v:0}));
+    let li=0;
+    const avail=[],sameOrderValues=[];
+    for(const s of sortedSells){
+      const sTime=String(s.time||'');
+      while(li<lots.length&&lots[li].t<=sTime) avail.push(lots[li++]);
+      let need=Number(s.qty),sellMatched=0;
+      while(need>0&&avail.length){
+        const lot=avail[0],use=Math.min(need,lot.q);
+        sameDayQty+=use;sameCost+=use*lot.p;sameProceeds+=use*Number(s.price);
+        lot.v+=use*lot.p;sellMatched+=use*Number(s.price);
+        lot.q-=use;need-=use;
+        if(lot.q<=0) avail.shift();
       }
-    } else {
-      deliveryQty=totalSellQty;
+      deliveryQty+=need;deliveryProceeds+=need*Number(s.price);
+      if(sellMatched>0) sameOrderValues.push(sellMatched);
     }
-    const fifo=sessionBuyFifo(sym,session.orders);
-    const todayAvg=fifo?.sameDayAvg??(totalBuyQty>0?buys.reduce((s,o)=>s+o.price*o.qty,0)/totalBuyQty:null);
+    lots.forEach(l=>{if(l.v>0) sameOrderValues.push(l.v);});
+    // Zerodha caps intraday brokerage at Rs 20 PER ORDER; charging the leg as one order halved it
+    // for SHANTIGOLD's four ~Rs 1 lakh same-day orders (Rs 40 instead of Rs 80, plus GST).
+    const sameDayBrokerage=sameOrderValues.reduce((t,v)=>t+Math.min(0.0003*v,20),0);
+    const todayAvg=sameDayQty>0?sameCost/sameDayQty:null;
+    const sameSellAvg=sameDayQty>0?sameProceeds/sameDayQty:null;
+    const deliverySellAvg=deliveryQty>0?deliveryProceeds/deliveryQty:null;
     const components=[];
     const addKnownComponent=(qty,avgBuy,isSameDay)=>{
+      const avgSell=isSameDay?sameSellAvg:deliverySellAvg;
       if(!(qty>0)||!(avgBuy>0)) return;
       const skipDp=isSameDay||dpCharged.has(sym);
       if(!isSameDay) dpCharged.add(sym);
       const bcS=calcZerodhaChargesSplit(avgBuy,qty,false,isSameDay,false);
       const scS=calcZerodhaChargesSplit(avgSell,qty,true,isSameDay,skipDp);
+      if(isSameDay){
+        const shift=sameDayBrokerage-(bcS.brokerage+scS.brokerage);
+        scS.brokerage+=shift;scS.gst+=0.18*shift;
+      }
       const parts={
         _brok:+(bcS.brokerage+scS.brokerage).toFixed(2),
         _stt:+(bcS.stt+scS.stt).toFixed(2),
@@ -7257,7 +7269,7 @@ function computeLatestOrderBooked(){
       const charges=+sumChargeParts(parts).toFixed(0);
       const capital=avgBuy*qty;
       const netPnl=+((avgSell-avgBuy)*qty-charges).toFixed(0);
-      components.push({qty,avgBuy,capital,charges,netPnl,...parts});
+      components.push({qty,avgBuy,capital,proceeds:avgSell*qty,charges,netPnl,...parts});
     };
     if(sameDayQty>0) addKnownComponent(sameDayQty,todayAvg,true);
     if(deliveryQty>0&&holdingAvg!=null) addKnownComponent(deliveryQty,holdingAvg,false);
@@ -7275,16 +7287,17 @@ function computeLatestOrderBooked(){
       // Preserve a known intraday component, but disclose carried shares whose cost is unavailable.
       const skipDp=dpCharged.has(sym);
       dpCharged.add(sym);
-      const scS=calcZerodhaChargesSplit(avgSell,deliveryQty,true,false,skipDp);
+      const scS=calcZerodhaChargesSplit(deliverySellAvg,deliveryQty,true,false,skipDp);
       const _brok=+scS.brokerage.toFixed(2),_stt=+scS.stt.toFixed(2),_txn=+scS.txn.toFixed(2);
       const _sebi=+scS.sebi.toFixed(2),_gst=+scS.gst.toFixed(2),_stamp=+scS.stamp.toFixed(2),_dp=+scS.dp.toFixed(2);
       const charges=+sumChargeParts({_brok,_stt,_txn,_sebi,_gst,_stamp,_dp}).toFixed(0);
-      rows.push(enrichExitPnlRow({sym,sellTime:_sellTime,lots:sells.length,qty:deliveryQty,capital:null,buyPrice:null,sellPrice:+avgSell.toFixed(2),_brok,_stt,_txn,_sebi,_gst,_stamp,_dp,charges,winRate:null,netPnl:null,netPnlPct:null,_sort:-Infinity,_noAvgCost:true},session.date));
+      rows.push(enrichExitPnlRow({sym,sellTime:_sellTime,lots:sells.length,qty:deliveryQty,capital:null,buyPrice:null,sellPrice:+deliverySellAvg.toFixed(2),_brok,_stt,_txn,_sebi,_gst,_stamp,_dp,charges,winRate:null,netPnl:null,netPnlPct:null,_sort:-Infinity,_noAvgCost:true},session.date));
     }
     if(!components.length) return;
     const matchedQty=components.reduce((sum,c)=>sum+c.qty,0);
     const capital=components.reduce((sum,c)=>sum+c.capital,0);
     const avgBuy=capital/matchedQty;
+    const avgSellMatched=components.reduce((sum,c)=>sum+c.proceeds,0)/matchedQty;
     const _brok=+components.reduce((sum,c)=>sum+c._brok,0).toFixed(2);
     const _stt=+components.reduce((sum,c)=>sum+c._stt,0).toFixed(2);
     const _txn=+components.reduce((sum,c)=>sum+c._txn,0).toFixed(2);
@@ -7295,7 +7308,7 @@ function computeLatestOrderBooked(){
     const charges=+components.reduce((sum,c)=>sum+c.charges,0).toFixed(0);
     const netPnl=+components.reduce((sum,c)=>sum+c.netPnl,0).toFixed(0);
     const netPnlPct=capital>0?+(netPnl/capital*100).toFixed(2):null;
-    rows.push(enrichExitPnlRow({sym,sellTime:_sellTime,lots:sells.length,qty:matchedQty,capital,buyPrice:+avgBuy.toFixed(2),sellPrice:+avgSell.toFixed(2),_brok,_stt,_txn,_sebi,_gst,_stamp,_dp,charges,winRate:netPnl>0?100:0,netPnl,netPnlPct,_sort:netPnl},session.date));
+    rows.push(enrichExitPnlRow({sym,sellTime:_sellTime,lots:sells.length,qty:matchedQty,capital,buyPrice:+avgBuy.toFixed(2),sellPrice:+avgSellMatched.toFixed(2),_brok,_stt,_txn,_sebi,_gst,_stamp,_dp,charges,winRate:netPnl>0?100:0,netPnl,netPnlPct,_sort:netPnl},session.date));
   });
   const total=rows.reduce((s,r)=>s+(r.netPnl||0),0);
   const unknownRows=rows.filter(r=>r.netPnl==null).length;
