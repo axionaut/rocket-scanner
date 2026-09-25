@@ -1,5 +1,5 @@
-const BUILD_TS='2026-09-25 11:35 IST'; // release build time (IST)
-const APP_VERSION=1439;
+const BUILD_TS='2026-09-25 11:51 IST'; // release build time (IST)
+const APP_VERSION=1440;
 const RADAR_SCORE_VERSION='v1419-recross-batches'; // Eligible on crossing the score floor at any time; learned target or +3% fallback, BTST-max exit.
 
 // ── v1358: AN UNCAUGHT ERROR MUST NAME ITSELF ─────────────────────────────────────────────────
@@ -14372,6 +14372,15 @@ function scheduleKiteBasketSync(delay=500){
   if(_kiteSyncTimer||_kiteTransferBusy) return;
   _kiteSyncTimer=setTimeout(()=>{_kiteSyncTimer=null;sendBasketToKite(true);},delay);
 }
+// Every Kite basket outcome goes to the phone through the helper's ntfy push: the basket-file alert alone
+// cannot say whether Scanner_Import was actually updated. The helper de-duplicates repeats.
+let _kiteLastReported='';
+function reportKiteBasketOutcome(ok,message){
+  const key=(ok?'1':'0')+message;
+  if(key===_kiteLastReported) return;
+  _kiteLastReported=key;
+  readHelperResponse(`/api/notify/kite?ok=${ok?1:0}&msg=${encodeURIComponent(String(message).slice(0,400))}`,{timeout:6000}).catch(()=>{});
+}
 async function sendBasketToKite(automatic=false){
   if(_kiteTransferBusy) return;
   _kiteTransferBusy=true;
@@ -14391,22 +14400,25 @@ async function sendBasketToKite(automatic=false){
     const id=crypto.randomUUID();
     const result=await new Promise((resolve,reject)=>{
       const listener=event=>{
-        if(event.source!==window||event.origin!==location.origin||event.data?.type!=='RS_KITE_RESULT'||event.data.id!==id)return;
+        // A relay without `bridge` is a copy orphaned by an extension reload; its reply is not the extension's answer.
+        if(event.source!==window||event.origin!==location.origin||event.data?.type!=='RS_KITE_RESULT'||event.data.id!==id||!event.data.bridge)return;
         clearTimeout(timer);window.removeEventListener('message',listener);resolve(event.data);
       };
       const timer=setTimeout(()=>{
         window.removeEventListener('message',listener);
-        reject(new Error('No confirmation from Kite Basket Bridge. Install it from the browser-extension folder and reload both tabs. If already installed, inspect Scanner_Import before retrying.'));
+        reject(new Error('No reply from the Kite Basket Bridge. In chrome://extensions reload Kite Basket Bridge (1.2.0 or later), then reload this page.'));
       },30000);
       window.addEventListener('message',listener);
       window.postMessage({type:'RS_KITE_PREPARE',id,automatic,createdAt:Date.now(),orders:orders.map(o=>({id:o.id,instrument:o.instrument,weight:o.weight,params:o.params}))},location.origin);
     });
     if(!result.ok) throw new Error(result.why||'Kite did not confirm the basket.');
     _kiteSentSignature=signature;
+    reportKiteBasketOutcome(true,`${result.count} order${result.count===1?'':'s'} ${result.already?'already in':'written to'} Scanner_Import: ${orders.map(o=>o.instrument.tradingsymbol+' x'+o.params.quantity).join(', ')}. Review and Execute in Kite.`);
     if(button) button.title='Scanner_Import is ready. Review and Execute in Kite. New funded baskets are sent automatically.';
     showToast(`<strong>${result.count} orders ${result.already?'already in':'loaded into'} Scanner_Import.</strong> Review and Execute in Kite.`,7000);
   }catch(e){
     retry=automatic;
+    reportKiteBasketOutcome(false,e?.message||String(e));
     if(button) button.title='Kite auto-send pending: '+(e?.message||String(e));
     if(!automatic) showToast(escHtml(e?.message||String(e)),10000,true);
   }

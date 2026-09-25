@@ -1,5 +1,10 @@
 'use strict';
 let busy=false;
+// After an install or reload, reconnect already-open Rocket Scanner tabs without making the owner reload them.
+chrome.runtime.onInstalled.addListener(async()=>{
+  for(const tab of await chrome.tabs.query({url:'https://axionaut.github.io/rocket-scanner/*'}))
+    chrome.scripting.executeScript({target:{tabId:tab.id},files:['relay.js']}).catch(()=>{});
+});
 // Load kite-import.js into Kite's page, then call one of its functions by name.
 const run=async(tabId,name,args=[])=>{
   await chrome.scripting.executeScript({target:{tabId},world:'MAIN',files:['kite-import.js']});
