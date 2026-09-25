@@ -1,5 +1,5 @@
-const BUILD_TS='2026-09-25 11:10 IST'; // release build time (IST)
-const APP_VERSION=1438;
+const BUILD_TS='2026-09-25 11:35 IST'; // release build time (IST)
+const APP_VERSION=1439;
 const RADAR_SCORE_VERSION='v1419-recross-batches'; // Eligible on crossing the score floor at any time; learned target or +3% fallback, BTST-max exit.
 
 // ── v1358: AN UNCAUGHT ERROR MUST NAME ITSELF ─────────────────────────────────────────────────
@@ -1568,7 +1568,7 @@ function pinButton(sym){
   const on=isPinned(sym);
   return `<button type="button" onclick="event.stopPropagation();togglePin(${escHtml(JSON.stringify(normSym(sym)))})"`
     +` aria-label="${on?'Unpin':'Pin'} ${escHtml(sym)}" title="${on?'Unpin':'Pin to the top of the table (display only; never buys or funds)'}"`
-    +` style="background:none;border:0;padding:0 5px 0 0;cursor:pointer;font-size:16px;line-height:1;vertical-align:middle;color:${on?'var(--amber)':'var(--t3)'}">${on?'★':'☆'}</button>`;
+    +` style="background:none;border:0;padding:4px 8px 4px 2px;margin:-4px 0;cursor:pointer;font-size:24px;line-height:1;vertical-align:middle;color:${on?'var(--amber)':'var(--t3)'}">${on?'★':'☆'}</button>`;
 }
 // Named actions beside every symbol. The stock name itself used to be the
 // Kite link, which is invisible until you hover it and offers no second destination. `Z` opens the
@@ -11090,6 +11090,8 @@ function renderTable(){
     let _trStyle='cursor:pointer';
     if(isSelected) _trStyle+=';background:rgba(251,191,36,.04);outline:1px solid rgba(251,191,36,.12);outline-offset:-1px';
     else if(!canBuy) _trStyle+=';opacity:0.8';
+    // Pinned rows: distinct blue tint and an amber left edge, at full opacity.
+    if(isPinned(s.symbol)) _trStyle+=';opacity:1;background:rgba(56,189,248,.10);box-shadow:inset 4px 0 0 var(--amber)';
     return`<tr data-sym="${s.symbol}" style="${_trStyle}" onclick="showRadarDetail('${s.symbol}')" title="Click for the full scoring breakdown">${cells}</tr>`;
   }).join('')||`<tr><td colspan="${COLS.length}" class="rankings-empty-cell"><div class="rankings-empty-message">${emptyBoardReason()}</div></td></tr>`;
   renderPgn();
