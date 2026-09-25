@@ -1,5 +1,5 @@
-const BUILD_TS='2026-09-25 11:51 IST'; // release build time (IST)
-const APP_VERSION=1443;
+const BUILD_TS='2026-09-25 16:48 IST'; // release build time (IST)
+const APP_VERSION=1444;
 const RADAR_SCORE_VERSION='v1419-recross-batches'; // Eligible on crossing the score floor at any time; learned target or +3% fallback, BTST-max exit.
 
 // ── v1358: AN UNCAUGHT ERROR MUST NAME ITSELF ─────────────────────────────────────────────────
@@ -41,7 +41,7 @@ if(typeof window!=='undefined'){
     reportAppError('Unhandled promise rejection',ev&&ev.reason,'');
   });
 }
-const TARGET_POLICY_VERSION='btst-score-learned-target-v1';
+const TARGET_POLICY_VERSION='btst-profit-target-model-v2';
 function isValidChangeOpen(v){
   if(v===null||v===undefined||typeof v==='boolean') return false;
   if(typeof v==='string'&&v.trim()==='') return false;
@@ -4523,7 +4523,7 @@ async function loadBtstPicks(){
     const rank=rk||((BTST.rank?.session===today)?BTST.rank:null);
     const target=tm||BTST.targetModel;
     const key=[picks?.asOf,picks?.stage,picks?.ok,picks?.session].join('|'),rankKey=[rank?.asOf,rank?.ok,rank?.session].join('|');
-    const targetKey=[target?.asOfSession,target?.trainedThrough,target?.cases?.length].join('|');
+    const targetKey=[target?.version,target?.asOf,target?.asOfSession,target?.trainedThrough,target?.cases?.length].join('|');
     BTST.loadedAt=Date.now();
     if(key===BTST.key&&rankKey===BTST.rankKey&&targetKey===BTST.targetKey) return;
     BTST={data:picks,key,v:BTST.v+1,loadedAt:Date.now(),rank,rankKey,targetModel:target,targetKey};
@@ -10363,8 +10363,14 @@ function getClockRunwayRead(row,opts){
 }
 
 const BTST_TARGET_CHOICES=[1.5,2,2.5,3,3.5,4];
-function learnedBtstTarget(score){
+function learnedBtstTarget(score,symbol=null){
   const model=BTST.targetModel,day=getSessionDate();
+  if(model?.version===2){
+    if(model.enabled!==true)return null;
+    const p=model.predictions?.[symbol],rank=btstRanking()?.src;
+    if(model.asOfSession!==day||!(model.trainedThrough<day)||model.asOf!==rank?.asOf||!Number.isFinite(score)||!p||Math.abs(p.scoreA-score)>0.001||p.n<10||!Number.isFinite(p.pct)||p.pct<1.5||p.pct>10)return null;
+    return {pct:p.pct,n:p.n,through:model.trainedThrough,method:'profit-model'};
+  }
   if(!Number.isFinite(score)||!model||!Array.isArray(model.cases)||!(model.trainedThrough<day)||model.asOfSession!==day)return null;
   // Nearest-score empirical learner, using only COMPLETED earlier sessions. Two distinct days and
   // ten paths are required. A new target must beat fixed +3% by 0.25% net on average and must not
@@ -10385,12 +10391,12 @@ function learnedBtstTarget(score){
 }
 function getRowExitPolicy(row,buyPrice=null,activeInfo=null,nudgeInfo=null,qty=null){
   const {TARGET_PCT:basePct,STOP_LOSS_PCT:stopPct}=RocketStrategy.CONFIG;
-  const learned=learnedBtstTarget(btstScoreAOf(row?.symbol));
+  const learned=learnedBtstTarget(btstScoreAOf(row?.symbol),row?.symbol);
   // v1434: qualification determines GO; a rupee-profit goal must not veto funding
   // or inflate the learned target. Cash and execution limits remain in the allocator.
   const targetPct=learned?.pct||basePct;
-  return {targetPct,basePct,stopPct,viable:true,targetPolicy:learned?'btst-score-learned':'btst-fixed',
-    targetSource:learned?`Score-learned BTST target (${learned.n} completed paths through ${learned.through})`:`BTST +${basePct}% GTT (learning fallback)`,
+  return {targetPct,basePct,stopPct,viable:true,targetPolicy:learned?(learned.method==='profit-model'?'btst-profit-model':'btst-score-learned'):'btst-fixed',
+    targetSource:learned?`${learned.method==='profit-model'?'Profit-model':'Score-learned'} BTST target (${learned.n} completed paths through ${learned.through})`:`BTST +${basePct}% GTT (learning fallback)`,
     viabilitySource:null,
     stopSource:stopPct>0?'Fixed strategy stop':'No stop: time exit 15:20 next session',rewardRisk:stopPct>0?targetPct/stopPct:null};
 }
