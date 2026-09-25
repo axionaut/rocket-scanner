@@ -1,5 +1,5 @@
-const BUILD_TS='2026-09-25 11:01 IST'; // release build time (IST)
-const APP_VERSION=1436;
+const BUILD_TS='2026-09-25 11:10 IST'; // release build time (IST)
+const APP_VERSION=1437;
 const RADAR_SCORE_VERSION='v1419-recross-batches'; // Eligible on crossing the score floor at any time; learned target or +3% fallback, BTST-max exit.
 
 // ── v1358: AN UNCAUGHT ERROR MUST NAME ITSELF ─────────────────────────────────────────────────
@@ -1546,6 +1546,30 @@ function num(v){
 }
 function normSym(s){return String(s||'').trim().replace(/^[A-Z]+:/,'').replace(/_/g,'-').toUpperCase().replace(/-(EQ|BE|BZ|SM|ST|SZ)$/,'');}
 function escHtml(s){return String(s??'').replace(/[&<>"]/g,ch=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[ch]));}
+// Owner pins: starred symbols stay at the top of the recommendation table and stay visible
+// even when not GO. Display only - a pin never makes a stock GO, funds it or adds it to a basket.
+function pinnedSymbols(){
+  if(!window.__pinnedSyms){
+    let saved=[];
+    try{saved=JSON.parse(localStorage.getItem('rocket-pinned-v1')||'[]');}catch(e){}
+    window.__pinnedSyms=new Set(Array.isArray(saved)?saved.map(normSym).filter(Boolean):[]);
+  }
+  return window.__pinnedSyms;
+}
+function isPinned(sym){return pinnedSymbols().has(normSym(sym));}
+function togglePin(sym){
+  const set=pinnedSymbols(),n=normSym(sym);
+  if(!n) return;
+  if(set.has(n)) set.delete(n); else set.add(n);
+  try{localStorage.setItem('rocket-pinned-v1',JSON.stringify([...set]));}catch(e){}
+  applyFilters({preservePage:true});
+}
+function pinButton(sym){
+  const on=isPinned(sym);
+  return `<button type="button" onclick="event.stopPropagation();togglePin(${escHtml(JSON.stringify(normSym(sym)))})"`
+    +` aria-label="${on?'Unpin':'Pin'} ${escHtml(sym)}" title="${on?'Unpin':'Pin to the top of the table (display only; never buys or funds)'}"`
+    +` style="background:none;border:0;padding:0 5px 0 0;cursor:pointer;font-size:14px;line-height:1;vertical-align:middle;color:${on?'var(--amber)':'var(--t3)'}">${on?'★':'☆'}</button>`;
+}
 // Named actions beside every symbol. The stock name itself used to be the
 // Kite link, which is invisible until you hover it and offers no second destination. `Z` opens the
 // Zerodha Kite chart (resolving the instrument token, copying the symbol), `T` opens TradingView.
@@ -10969,7 +10993,7 @@ function renderTable(){
       // TradingView link since v1070, so the "one symbol interaction everywhere" rule was true of the
       // panels and quietly false of the main table - which is why swapping to Zerodha missed it.
       symbol:`<td style="font-family:'Plus Jakarta Sans',sans-serif">${(
-        `<div style="font-weight:700;font-size:15px;color:var(--t1);max-width:280px;overflow:hidden;text-overflow:ellipsis">${escHtml(s.symbol)}${chartLinkButtons(s.symbol)}${(()=>{const bf=getBookFlag(s.symbol);if(!bf)return '';return `<span style="font-size:11px;background:rgba(245,158,11,.14);color:var(--amber);border-radius:4px;padding:1px 5px;margin-left:5px;font-weight:700;vertical-align:middle" title="Order book: ${escHtml(bf.text)}. Display only - it does not change the score unless the graded book weight says it should.">${bf.iceberg?'🧊':'⚑'}${bf.heavyCancel?' cx':''}</span>`;})()}${s._held?`<span style="font-size:12px;background:rgba(244,114,182,.15);color:#f472b6;border-radius:4px;padding:1px 5px;margin-left:5px;font-weight:700;vertical-align:middle" title="You already hold this. Held stocks stay in the ranking (v1070) and can be recommended again — buying here ADDS to the existing position.">📌 held</span>`:''}</div><div style="font-size:11px;color:var(--t3);max-width:180px;overflow:hidden;text-overflow:ellipsis" title="${escHtml((s.name||'')+(s.setup?' · '+s.setup:''))}">${radarSeriesBandPill(s)} ${escHtml(s.setup||s.name||'')}</div>`)}</td>`,
+        `<div style="font-weight:700;font-size:15px;color:var(--t1);max-width:280px;overflow:hidden;text-overflow:ellipsis">${pinButton(s.symbol)}${escHtml(s.symbol)}${chartLinkButtons(s.symbol)}${(()=>{const bf=getBookFlag(s.symbol);if(!bf)return '';return `<span style="font-size:11px;background:rgba(245,158,11,.14);color:var(--amber);border-radius:4px;padding:1px 5px;margin-left:5px;font-weight:700;vertical-align:middle" title="Order book: ${escHtml(bf.text)}. Display only - it does not change the score unless the graded book weight says it should.">${bf.iceberg?'🧊':'⚑'}${bf.heavyCancel?' cx':''}</span>`;})()}${s._held?`<span style="font-size:12px;background:rgba(244,114,182,.15);color:#f472b6;border-radius:4px;padding:1px 5px;margin-left:5px;font-weight:700;vertical-align:middle" title="You already hold this. Held stocks stay in the ranking (v1070) and can be recommended again — buying here ADDS to the existing position.">📌 held</span>`:''}</div><div style="font-size:11px;color:var(--t3);max-width:180px;overflow:hidden;text-overflow:ellipsis" title="${escHtml((s.name||'')+(s.setup?' · '+s.setup:''))}">${radarSeriesBandPill(s)} ${escHtml(s.setup||s.name||'')}</div>`)}</td>`,
       status:`<td data-key="status" class="recommendation-status">${rowStatusPillHtml(s)}</td>`,
       setup:`<td style="font-size:13px;color:var(--t2)">${escHtml(s.setup||'—')}${s.stage?' '+radarStagePill(s):''}</td>`,
       series:`<td>${radarSeriesBandPill(s)}</td>`,
@@ -11115,6 +11139,8 @@ function sortValueOf(row,key){
 function applySort(){
   if(!SCOL){SCOL='score';SDIR=-1;}
   FILT.sort((a,b)=>{
+    const ap=isPinned(a.symbol),bp=isPinned(b.symbol);
+    if(ap!==bp) return ap?-1:1;   // pinned rows first, then the chosen sort within each group
     const av=sortValueOf(a,SCOL),bv=sortValueOf(b,SCOL);
     const an=av===null,bn=bv===null;
     if(an&&bn) return radarRankTieBreak(a,b);
@@ -12915,6 +12941,7 @@ function applyFilters({preservePage=false}={}){
   REMOVED_ROWS=[];
   let rows=ALL.filter(s=>{
     if(s._held)SUPPRESSED_HELD++;
+    const pinned=isPinned(s.symbol);
     let removedReason=null;
     if(NSE_SURV[s.symbol]?.length){
       SURV_HARD_REMOVED++;
@@ -12937,11 +12964,11 @@ function applyFilters({preservePage=false}={}){
         removedReason={s,reason:'blocked',chip:act.reason,detail:act.reason};
       }
       REMOVED_ROWS.push(removedReason);
-      if(!SHOW_INELIGIBLE) return false;
+      if(!SHOW_INELIGIBLE&&!pinned) return false;
     } else if(removedReason){
       REMOVED_ROWS.push(removedReason);
-      if(!SHOW_INELIGIBLE) return false;
-    } else if(act.state!=='GO'&&!SHOW_INELIGIBLE){
+      if(!SHOW_INELIGIBLE&&!pinned) return false;
+    } else if(act.state!=='GO'&&!SHOW_INELIGIBLE&&!pinned){
       // The recommendation table lists buy-now stocks only. WAIT is not a recommendation.
       return false;
     }
@@ -12973,7 +13000,7 @@ function applyFilters({preservePage=false}={}){
   SELECTED=plan.funded;
   // Hide ineligible: the table is the buy list. Only funded GO stocks remain, plus any GO stock
   // you excluded by hand so it can be ticked back in.
-  if(!SHOW_INELIGIBLE)rows=rows.filter(r=>SELECTED.has(r.symbol)||(EXPORT_EXCLUDED.has(r.symbol)&&isStockEligible(r)));
+  if(!SHOW_INELIGIBLE)rows=rows.filter(r=>SELECTED.has(r.symbol)||isPinned(r.symbol)||(EXPORT_EXCLUDED.has(r.symbol)&&isStockEligible(r)));
   FILT=rows;
   recordTableEntries(ALL);
   rows.forEach(r=>{
