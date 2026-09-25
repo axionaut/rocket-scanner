@@ -1,5 +1,5 @@
-const BUILD_TS='2026-09-24 17:05 IST'; // release build time (IST)
-const APP_VERSION=1433;
+const BUILD_TS='2026-09-25 09:38 IST'; // release build time (IST)
+const APP_VERSION=1434;
 const RADAR_SCORE_VERSION='v1419-recross-batches'; // Eligible on crossing the score floor at any time; learned target or +3% fallback, BTST-max exit.
 
 // ── v1358: AN UNCAUGHT ERROR MUST NAME ITSELF ─────────────────────────────────────────────────
@@ -10253,28 +10253,15 @@ function learnedBtstTarget(score){
   }
   return best&&best.pct!==3?best:null;
 }
-function btstTargetNetRs(price,qty,pct){
-  const sale=price*(1+pct/100);
-  // 0.25% per leg is the existing basket execution cushion. A target that fails this and actual
-  // CNC charges is not an acceptable minimum-profit target even if its historical hit rate is high.
-  return qty*(sale-price)-calcZerodhaCharges(price,qty,false,false,false)
-    -calcZerodhaCharges(sale,qty,true,false,false)-qty*price*2*BASKET_MARKET_BUDGET_BUFFER_PCT/100;
-}
 function getRowExitPolicy(row,buyPrice=null,activeInfo=null,nudgeInfo=null,qty=null){
   const {TARGET_PCT:basePct,STOP_LOSS_PCT:stopPct}=RocketStrategy.CONFIG;
-  const learned=learnedBtstTarget(btstScoreOf(row?.symbol)),price=Number(buyPrice),shares=Number(qty);
-  let targetPct=learned?.pct||basePct;
-  let viable=true;
-  if(price>0&&shares>0){
-    const minimum=Number(activeInfo?.minProfitRs)>0?Number(activeInfo.minProfitRs):respectableProfitRs();
-    if(learned){
-      const safe=BTST_TARGET_CHOICES.find(p=>p>=targetPct&&btstTargetNetRs(price,shares,p)>=minimum);
-      if(safe)targetPct=safe;else viable=false;
-    }else if(btstTargetNetRs(price,shares,targetPct)<minimum) viable=false;
-  }
-  return {targetPct,basePct,stopPct,viable,targetPolicy:learned?'btst-score-learned':'btst-fixed',
+  const learned=learnedBtstTarget(btstScoreOf(row?.symbol));
+  // v1434: qualification determines GO; a rupee-profit goal must not veto funding
+  // or inflate the learned target. Cash and execution limits remain in the allocator.
+  const targetPct=learned?.pct||basePct;
+  return {targetPct,basePct,stopPct,viable:true,targetPolicy:learned?'btst-score-learned':'btst-fixed',
     targetSource:learned?`Score-learned BTST target (${learned.n} completed paths through ${learned.through})`:`BTST +${basePct}% GTT (learning fallback)`,
-    viabilitySource:viable?null:'Target cannot clear the minimum after charges and execution cushion',
+    viabilitySource:null,
     stopSource:stopPct>0?'Fixed strategy stop':'No stop: time exit 15:20 next session',rewardRisk:stopPct>0?targetPct/stopPct:null};
 }
 function summarizeRowExitPolicies(rows){
@@ -10578,7 +10565,6 @@ function planDualBasket(rows,capital){
 function _planDualBasketUncached(rows,capital){
   const reasons=new Map(),alloc={},funded=[];
   const maxAlloc=getTypedMaxAlloc(),minRequired=RocketStrategy.CONFIG.MIN_ALLOCATION_RS;
-  let minProfitRs=null;
   let remaining=Math.max(0,Number(capital||0)-BASKET_CASH_RESERVE_RS);
   const pool=[...(rows||[])].sort((a,b)=>(btstScoreOf(b.symbol)??(Number(b.score)||0))-(btstScoreOf(a.symbol)??(Number(a.score)||0))||a.symbol.localeCompare(b.symbol));
   const unitDebitOf=price=>price+calcZerodhaCharges(price,1,false,false,false);
@@ -10640,13 +10626,7 @@ function _planDualBasketUncached(rows,capital){
     if(!reason&&(!(cost>=minRequired)||debit>budget))reason=liquidityCap<minRequired?'Market-impact cap below Rs 5,000 minimum':'Available cash / Max Alloc / market-impact cap cannot fund Rs 5,000 plus buy charges';
     if(reason){reasons.set(r.symbol,reason);alloc[r.symbol]={alloc:0,debit:0,qty:0,rejected:true,reason};continue;}
     r.basketModel='strategy';
-    if(minProfitRs===null)minProfitRs=respectableProfitRs();
-    const exitPolicy=getRowExitPolicy(r,price,{minProfitRs},null,qty);
-    if(!exitPolicy.viable){
-      reason=exitPolicy.viabilitySource;
-      reasons.set(r.symbol,reason);alloc[r.symbol]={alloc:0,debit:0,qty:0,rejected:true,reason};
-      continue;
-    }
+    const exitPolicy=getRowExitPolicy(r,price,null,null,qty);
     alloc[r.symbol]={alloc:cost,debit,qty,buyPrice:price,rejected:false,model:'strategy',exitPolicy,
       tgtPct:exitPolicy.targetPct,slPct:exitPolicy.stopPct};
     funded.push(r);remaining-=debit;
@@ -14101,8 +14081,7 @@ function buildBasketOrders(capital, selList){
     if(!(qty>0)) return;
     const sym=s.symbol;
     const name=s.name||sym;
-    // v1371: the GTT is the allocator's own target for this order - the one it verified nets the
-    // per-trade profit - not a re-derivation at a different reference price.
+    // The GTT uses the allocator's chosen learned target or +3% fallback.
     const policy=Number(allocTgt)>0?{targetPct:Number(allocTgt)}:getRowExitPolicy(s,Number(s.price)||0,null,null,qty);
     const targetPct=(policy&&Number.isFinite(policy.targetPct)&&policy.targetPct>0)
       ? parseFloat(Number(policy.targetPct).toFixed(2))
