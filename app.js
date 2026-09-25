@@ -1,5 +1,5 @@
 const BUILD_TS='2026-09-25 11:51 IST'; // release build time (IST)
-const APP_VERSION=1442;
+const APP_VERSION=1443;
 const RADAR_SCORE_VERSION='v1419-recross-batches'; // Eligible on crossing the score floor at any time; learned target or +3% fallback, BTST-max exit.
 
 // ── v1358: AN UNCAUGHT ERROR MUST NAME ITSELF ─────────────────────────────────────────────────
@@ -7116,6 +7116,42 @@ function enrichExitPnlRow(row,bookedDate=null){
       : `UPPER BOUND${ext.sellDayNote?` (${ext.sellDayNote})`:''}: part of that day's range may predate the exit. For a LIMIT sell it is exact — price can only reach the limit once, so anything above it came at or after the fill.`;
     const live=(typeof isMarketHours==='function'&&isMarketHours())?' The market is still open, so this is still moving.':'';
     const both=`Post-sell high ₹${hi!=null?hi.toFixed(2):'—'}, low ₹${lo!=null?lo.toFixed(2):'—'}.`;
+    // 25 Sep: a sell followed by a re-buy is not money left on the table at the later high - the
+    // shares came back. SHANTIGOLD sold 342, 322 and 316 shares in three round trips, and one
+    // blended price x 980 shares reported Rs 22,344 when no more than ~342 were ever held.
+    // Each sell is charged only what it actually cost: the premium paid to buy back in, plus the
+    // later high on shares that were never bought back.
+    const legs=row?.legs;
+    const multi=legs&&Array.isArray(legs.sells)&&(legs.sells.length>1||(legs.buys||[]).some(b=>b.time>legs.sells[0].time));
+    if(multi){
+      // A buy-back re-enters the MOST RECENT earlier sell first (11:23 buy <- 11:22 sell).
+      const sl=legs.sells.map(x=>({...x,rq:0,reentry:0}));
+      for(const b of legs.buys||[]){
+        let q=b.qty;
+        for(let i=sl.length-1;i>=0&&q>0;i--){
+          if(sl[i].time>=b.time) continue;
+          const u=Math.min(q,sl[i].qty-sl[i].rq);
+          if(u<=0) continue;
+          sl[i].rq+=u;sl[i].reentry+=u*Math.max(0,b.price-sl[i].price);q-=u;
+        }
+      }
+      let rs=0,proceeds=0;const parts=[];
+      for(const x of sl){
+        const q=x.qty-x.rq;let tail=0;
+        if(q>0){
+          const e=getPostSellExtremes(row?.sym,bookedDate,x.time);
+          if(e?.high!=null&&e.high>x.price) tail=(e.high-x.price)*q;
+        }
+        rs+=x.reentry+tail;proceeds+=x.qty*x.price;
+        parts.push(`${x.time.slice(11,16)||x.time} sold ${x.qty} @ ₹${x.price.toFixed(2)}`
+          +(x.rq?`, bought ${x.rq} back ${x.reentry>0?`for ${fmtINR(x.reentry)} more`:'no higher'}`:'')
+          +(q>0?`, ${q} never bought back ${tail>0?`(${fmtINR(tail)} to the later high)`:'(no higher later)'}`:''));
+      }
+      out.leftOnTableRs=+rs.toFixed(0);
+      out.leftOnTablePct=proceeds>0?+(rs/proceeds*100).toFixed(2):null;
+      out.leftOnTableNote=`Several trades today, so each sell is charged only what it cost you: ${parts.join('; ')}. Total ${fmtINR(out.leftOnTableRs)}.`;
+      return out;
+    }
     out.leftOnTableNote=out.leftOnTableRs>0
       ? `Sold at ₹${sell.toFixed(2)}; it went on to ₹${hi.toFixed(2)} — ${fmtINR(out.leftOnTableRs)} (${out.leftOnTablePct.toFixed(2)}%) left on the table across ${qty} shares. ${both} ${res}${live}`
       : out.leftOnTableRs===0
@@ -7308,7 +7344,7 @@ function computeLatestOrderBooked(){
     const charges=+components.reduce((sum,c)=>sum+c.charges,0).toFixed(0);
     const netPnl=+components.reduce((sum,c)=>sum+c.netPnl,0).toFixed(0);
     const netPnlPct=capital>0?+(netPnl/capital*100).toFixed(2):null;
-    rows.push(enrichExitPnlRow({sym,sellTime:_sellTime,lots:sells.length,qty:matchedQty,capital,buyPrice:+avgBuy.toFixed(2),sellPrice:+avgSellMatched.toFixed(2),_brok,_stt,_txn,_sebi,_gst,_stamp,_dp,charges,winRate:netPnl>0?100:0,netPnl,netPnlPct,_sort:netPnl},session.date));
+    rows.push(enrichExitPnlRow({sym,sellTime:_sellTime,lots:sells.length,legs:{sells:sortedSells.map(o=>({time:String(o.time||''),qty:Number(o.qty),price:Number(o.price)})),buys:buys.map(o=>({time:String(o.time||''),qty:Number(o.qty),price:Number(o.price)})).sort((a,b)=>a.time.localeCompare(b.time))},qty:matchedQty,capital,buyPrice:+avgBuy.toFixed(2),sellPrice:+avgSellMatched.toFixed(2),_brok,_stt,_txn,_sebi,_gst,_stamp,_dp,charges,winRate:netPnl>0?100:0,netPnl,netPnlPct,_sort:netPnl},session.date));
   });
   const total=rows.reduce((s,r)=>s+(r.netPnl||0),0);
   const unknownRows=rows.filter(r=>r.netPnl==null).length;
