@@ -1,5 +1,5 @@
 const BUILD_TS='2026-09-25 11:51 IST'; // release build time (IST)
-const APP_VERSION=1440;
+const APP_VERSION=1441;
 const RADAR_SCORE_VERSION='v1419-recross-batches'; // Eligible on crossing the score floor at any time; learned target or +3% fallback, BTST-max exit.
 
 // ── v1358: AN UNCAUGHT ERROR MUST NAME ITSELF ─────────────────────────────────────────────────
@@ -4391,7 +4391,7 @@ function initAlertUI(){
   }catch(e){}
 }
 if(typeof document!=='undefined'){
-  const initUI=()=>{initAlertUI();initScoreFloorUI();};
+  const initUI=()=>{initAlertUI();initScoreFloorUI();try{initModelUI();}catch(e){}};
   if(document.readyState==='loading') document.addEventListener('DOMContentLoaded',initUI);
   else initUI();
 }
@@ -4554,8 +4554,11 @@ function btstRanking(){
   // one number never shown. Rank is ordinal - #1 of a weak day and #1 of a strong day look
   // identical - so rank alone cannot tell the owner whether anything is close to qualifying.
   src.ranking.forEach((x,i)=>{const s=normSym(x&&x[0]);if(s&&!map.has(s))map.set(s,{rank:i+1,score:Number(x&&x[1])});});
-  _btstRankMemo={src,map,n:src.ranking.length,at:String(src.asOf||'').slice(11,16),stage:src.stage,
-    minScore:Number(src.rules&&src.rules.minScore)};
+  // 25 Sep 2026: two models score every run; `ranking` is the ACTIVE one's, `rankings` holds both.
+  const scoresA=new Map();
+  (src.rankings?.A||[]).forEach(x=>{const s=normSym(x&&x[0]);if(s)scoresA.set(s,Number(x&&x[1]));});
+  _btstRankMemo={src,map,scoresA,n:src.ranking.length,at:String(src.asOf||'').slice(11,16),stage:src.stage,
+    minScore:Number(src.rules&&src.rules.minScore),model:src.activeModel||'A'};
   return _btstRankMemo;
 }
 function btstRankOf(sym){
@@ -4568,6 +4571,37 @@ function btstScoreOf(sym){
   if(!r||!sym) return null;
   const v=r.map.get(normSym(sym))?.score;
   return Number.isFinite(v)?v:null;
+}
+// The original model's (A) score. The learned exit target was trained on A-scale scores from the
+// preview log, so it must keep reading A even while the ensemble ranks and trades.
+function btstScoreAOf(sym){
+  const r=btstRanking();
+  if(!r||!sym) return null;
+  if(r.scoresA.size){const v=r.scoresA.get(normSym(sym));return Number.isFinite(v)?v:null;}
+  return r.model==='A'?btstScoreOf(sym):null;
+}
+const BTST_MODEL_NAMES={ENS:'Ensemble',A:'Original'};
+function btstModelName(m){return BTST_MODEL_NAMES[m]||m||'Original';}
+// Model switch (index.html #fModel). The helper stores the choice and passes it to every engine run;
+// the other model keeps scoring as a shadow for the day-end review. Applies from the next run.
+let _modelSeeded=false;
+function initModelUI(){
+  try{
+    const el=document.getElementById('fModel');
+    if(!el||_modelSeeded) return;
+    _modelSeeded=true;
+    readHelperResponse('/api/btst/model',{timeout:6000}).then(d=>{
+      if(d&&d.ok!==false&&d.model&&document.activeElement!==el) el.value=d.model;
+    }).catch(()=>{});
+  }catch(e){}
+}
+function onModelChange(){
+  const el=document.getElementById('fModel');
+  const m=el?.value||'ENS';
+  readHelperResponse('/api/btst/model?set='+encodeURIComponent(m),{timeout:6000}).then(d=>{
+    if(!d||d.ok===false){showToast('Model not switched: '+escHtml(d?.why||'helper refused'),4000,true);return;}
+    showToast(btstModelName(d.model)+' model ranks and trades from the next engine run (within 2 minutes). The other keeps scoring as a shadow.',5000);
+  }).catch(()=>showToast('Helper unreachable - the model was not switched.',5000,true));
 }
 // v1407: the floor is adjustable from the filters row, DISPLAY ONLY. The engine publishes its own
 // MIN_SCORE in the picks/rank file and that is what actually selected the picks; typing a number
@@ -4753,7 +4787,7 @@ function btstRankNote(sym){
              :` (your floor${eng===null?'':`, in force`})`) : '';
   const scoreBit=sc===null?'':`, score ${sc>=0?'+':''}${sc.toFixed(2)}`
     +(floor===null?'':` vs floor +${floor.toFixed(2)}${who} (${sc>=floor?'clears':'short by '+(floor-sc).toFixed(2)})`);
-  return `BTST rank #${k} of ${r.n} (${r.stage==='preview'?'preview':r.stage} ${r.at})${scoreBit}`;
+  return `${btstModelName(r.model)} model rank #${k} of ${r.n} (${r.stage==='preview'?'preview':r.stage} ${r.at})${scoreBit}`;
 }
 function btstPickOf(sym){
   const d=btstToday();
@@ -8067,9 +8101,9 @@ function renderStats(){
     : (braw && braw.session === getSessionDate() && braw.ok === false ? 'Engine failed' : 'Waiting');
   const engineTone = br ? (liveSource?.gate?.on ? 'var(--green)' : 'var(--amber)') : (engineState === 'Engine failed' ? 'var(--red)' : 'var(--t2)');
   const universeCard = `<div class="st" title="${escHtml(br ? 'Current live ranking: ' + br.n + ' scored stocks at ' + br.at + '. A stock qualifies whenever its score crosses your floor.' : btstWaitReason())}">
-    <div class="st-l">Live Model</div>
+    <div class="st-l">Live Model${br ? ' · ' + escHtml(btstModelName(br.model)) : ''}</div>
     <div class="st-v" style="font-size:18px;color:${engineTone}">${escHtml(engineState)}</div>
-    <div class="st-d">${br ? `${br.n} scored · floor ${btstMinScore()} · qualifies throughout the session` : 'Waiting for a current-session live ranking'}</div></div>`;
+    <div class="st-d">${br ? `${br.n} scored · floor ${btstMinScore()} · shadow ${escHtml(btstModelName(br.model === 'ENS' ? 'A' : 'ENS'))}${br.src?.modelNote ? ' · ' + escHtml(br.src.modelNote) : ''}` : 'Waiting for a current-session live ranking'}</div></div>`;
 
   const triggersCard = `<div class="st" title="Current GO decisions from live scores, including trading eligibility and freshness checks.">
     <div class="st-l">Live qualification</div><div class="st-v" style="font-size:18px;color:${triggered.length?'var(--green)':'var(--t1)'}">${triggered.length} <span style="font-size:12px;color:var(--t2)">GO now</span></div>
@@ -10302,7 +10336,7 @@ function learnedBtstTarget(score){
 }
 function getRowExitPolicy(row,buyPrice=null,activeInfo=null,nudgeInfo=null,qty=null){
   const {TARGET_PCT:basePct,STOP_LOSS_PCT:stopPct}=RocketStrategy.CONFIG;
-  const learned=learnedBtstTarget(btstScoreOf(row?.symbol));
+  const learned=learnedBtstTarget(btstScoreAOf(row?.symbol));
   // v1434: qualification determines GO; a rupee-profit goal must not veto funding
   // or inflate the learned target. Cash and execution limits remain in the allocator.
   const targetPct=learned?.pct||basePct;
@@ -14169,6 +14203,7 @@ function buildBasketOrders(capital, selList){
       _meta:{leg:leg||'base',sym,targetPct,stoplossPct,fullQty:null,model:s.basketModel,modelScores:s.modelScores,
         recommendation:{capturedAt:Date.now(),session:getSessionDate(),score:btstScoreOf(sym),
           scoreAsOf:btstRanking()?.src?.asOf||null,scoreFloor:btstMinScore(),
+          scoringModel:btstRanking()?.model||null,scoreA:btstScoreAOf(sym),
           referencePrice:Number(s.price)||null,appVersion:APP_VERSION,targetPolicy:TARGET_POLICY_VERSION}}
     });
   };
