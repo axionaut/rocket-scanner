@@ -1,5 +1,5 @@
 const BUILD_TS='2026-09-25 16:48 IST'; // release build time (IST)
-const APP_VERSION=1444;
+const APP_VERSION=1445;
 const RADAR_SCORE_VERSION='v1419-recross-batches'; // Eligible on crossing the score floor at any time; learned target or +3% fallback, BTST-max exit.
 
 // ── v1358: AN UNCAUGHT ERROR MUST NAME ITSELF ─────────────────────────────────────────────────
@@ -41,7 +41,7 @@ if(typeof window!=='undefined'){
     reportAppError('Unhandled promise rejection',ev&&ev.reason,'');
   });
 }
-const TARGET_POLICY_VERSION='btst-profit-target-model-v2';
+const TARGET_POLICY_VERSION='btst-model-evolving-t2-v3';
 function isValidChangeOpen(v){
   if(v===null||v===undefined||typeof v==='boolean') return false;
   if(typeof v==='string'&&v.trim()==='') return false;
@@ -4405,7 +4405,7 @@ function checkTimeAlerts(){
   const due=(h,m)=>mins>=at(h,m)&&mins<at(h,m)+2;
   if(due(15,18)) fireAlert({once:day+'|exit',tone:'warn',beeps:2,
     title:'15:20 — EXIT unfilled positions',
-    body:'Sell any BTST position from the previous session whose GTT target has not filled.'});
+    body:'Sell unfilled BTST positions whose second trading session after entry is today (T+2).'});
 }
 // v1418: a crossing is tradeable the moment it happens, so it must announce itself. The 15:15
 // alerts above are clock-driven; this one is event-driven and fires per symbol, once per session.
@@ -4431,7 +4431,7 @@ function checkCrossingAlerts(){
       title:fresh.length===1?'Score crossing — '+fresh[0].sym+' is buyable now'
         :fresh.length+' score crossings — buyable now',
       body:'<strong>'+escHtml(names)+'</strong><br>Clears the +'
-        +(Number.isFinite(floor)?floor.toFixed(2):'?')+' floor. Buy the funded basket now; use its GTT target, then sell by 15:20 next session at the latest.'});
+        +(Number.isFinite(floor)?floor.toFixed(2):'?')+' floor. Buy the funded basket now; use its GTT target, then sell by 15:20 on T+2 at the latest.'});
   }catch(e){}
 }
 // Symbols already announced today. Cleared when the session date rolls, so a tab left open
@@ -4725,7 +4725,7 @@ function btstCrossingState(s){
   if(stale) return {state:'WAIT',reason:stale};
   const at=first?new Date(first.t).toLocaleTimeString('en-IN',{hour:'2-digit',minute:'2-digit',hour12:false}):'';
   return {state:'GO',reason:`Score +${score.toFixed(2)} clears the +${floor.toFixed(2)} floor`
-    +(at?` (crossed ${at})`:'')+` - buy the funded basket now; use its GTT target, sell by 15:20 next session at the latest`};
+    +(at?` (crossed ${at})`:'')+` - buy the funded basket now; use its GTT target, sell by 15:20 on T+2 at the latest`};
 }
 // v1416: THE FLOOR NOW DECIDES WHAT TRADES. It is pushed to the helper, which passes --min-score
 // to every engine run including the scheduled 15:05/15:15 ones, so the picks file is cut at the
@@ -8157,8 +8157,11 @@ function renderStats(){
   const triggersCard = `<div class="st" title="Current GO decisions from live scores, including trading eligibility and freshness checks.">
     <div class="st-l">Live qualification</div><div class="st-v" style="font-size:18px;color:${triggered.length?'var(--green)':'var(--t1)'}">${triggered.length} <span style="font-size:12px;color:var(--t2)">GO now</span></div>
     <div class="st-d">${triggered.length?escHtml(triggered.map(p=>p.symbol).slice(0,5).join(', '))+(triggered.length>5?' + more':''):'No currently actionable entries'}</div></div>`;
-  const protectionCard = `<div class="st" title="Use the target attached to each order. A guarded learned target may replace the +3% fallback. No stop-loss; sell unfilled positions by 15:20 next session.">
-    <div class="st-l">Exit rules</div><div class="st-v" style="font-size:18px;color:var(--green)">Order-specific GTT</div><div class="st-d">+3% fallback · deadline 15:20 next session</div></div>`;
+  const targetRead=learnedBtstTarget(null);
+  const protectionCard = `<div class="st" title="Each model has its own evolving peak history. Target = max(75% of median, 25% of median, costs plus minimum net profit). Existing executed GTTs stay fixed.">
+    <div class="st-l">${targetRead?.model==='ENS'?'Ensemble':'Original'} target</div>
+    <div class="st-v" style="font-size:18px;color:var(--green)">+${(targetRead?.pct??3).toFixed(2)}% base</div>
+    <div class="st-d">${targetRead&&!targetRead.fallback?`${targetRead.n} closed / ${targetRead.provisional} evolving`:'Startup fallback'} ? cost/profit floor applies ? T+2 15:20</div></div>`;
 
   // Active Basket Allocation Card
   const capital = getEffectiveCapital();
@@ -9176,7 +9179,7 @@ function buildOpenPositionsPanel(query=''){
         <span style="font-size:13px;font-weight:800;color:var(--t1);text-transform:uppercase;letter-spacing:.08em">Open Positions${panelFilterTag(rows,shown,query)}</span>
         <span style="font-size:14px;font-weight:700;color:${pnlColor}">${rows.length} live position${rows.length===1?'':'s'} · ${fmtINR(totalCapital)} deployed · ${fmtSignedINR(totalPnl)}</span>
       </div>
-      <div style="font-size:14px;color:var(--t2);line-height:1.5">Live merge of Holdings, Positions, and today's net buys. BTST exits: +${RocketStrategy.CONFIG.TARGET_PCT}% target from average cost, no stop, SELL at 15:20 on the session after the buy (shown from 15:15). Exit advice requires fresh live prices. </div>
+      <div style="font-size:14px;color:var(--t2);line-height:1.5">Live merge of Holdings, Positions, and today's net buys. BTST exits: the target saved with each executed order (+3% for legacy buys) from average cost, no stop, SELL at 15:20 on the second trading session after the buy (shown from 15:15). Exit advice requires fresh live prices. </div>
     </div>
     ${shown.length?`<div class="scroll-x">${table.getHtml()}</div>`:panelNoMatchHtml(query,'open position')}
   </div>`;
@@ -9798,7 +9801,7 @@ function _renderMethodologyInner(){
     <div class="m-grid">
     <div class="m-card"><h4>1. Live score (throughout the session)</h4><p>The local helper runs <code>dev/btst_engine.py</code>. It builds 45 features for every liquid stock (20-day average turnover ≥ ₹5 Cr, price ₹50–₹5,000) from Zerodha daily bars plus today's live price and volume: returns from 1 day to 3 months, gap, close location, range, volume surges, volatility, distance to highs and averages, RSI, stochastics, ADX, MACD, TradingView-style ratings, relative strength and market condition. The model predicts the next-session trade result after costs and is retrained every 5 sessions on the last 220 sessions.</p></div>
     <div class="m-card"><h4>2. Buy on qualification</h4><p>Top ${RocketStrategy.CONFIG.TOP_K} picks are GO, split equally across ${RocketStrategy.CONFIG.TOP_K} slots (minimum ₹5,000 each). A bought stock may qualify again after a fresh dip below the floor and re-crossing. Market gate: no buys when the equal-weight market index is more than 2% below its 50-day average. Stale prices or a broken stream turn GO into WAIT.</p></div>
-    <div class="m-card"><h4>3. Exit</h4><p>The basket attaches a +${RocketStrategy.CONFIG.TARGET_PCT}% GTT target. No stop-loss: overnight gaps jump stops, and a −2% stop turned the tested result negative. If the target has not filled, sell at 15:20 on the next session (Open Positions shows SELL from 15:15).</p></div></div>
+    <div class="m-card"><h4>3. Exit</h4><p>The basket attaches the selected model?s evolving target: 75% of its median post-entry peak, with a floor covering costs and the existing minimum net profit. Closed simulated recommendations enter immediately and keep updating their highs through T+2. Both models track independently; without closed history, +3% is the startup fallback. No stop-loss: overnight gaps jump stops, and a −2% stop turned the tested result negative. If the target has not filled, sell at 15:20 on T+2 (Open Positions shows SELL from 15:15).</p></div></div>
     <h3>Evidence</h3>
     <p>Walk-forward on NSE daily data, Dec 2025 – Sep 2026 (the model never saw the future), costs included: top 5 bought at the close and sold at +3% the next day or at its close averaged <b>+0.91% per trade</b>, 73% of days positive. With the market gate: <b>+1.18% per trade, 79% of days positive, worst drawdown −4.7%</b>. A 1-minute replay of 36 recent sessions (buy at the real 15:25 price, +3% only when price traded through it) averaged <b>+1.17% per trade</b>, 26 of 36 days positive. Different random seeds and settings gave +0.91% to +1.05%.</p>
     <p>The earlier near-high rules (v1388–v1392) and every intraday entry rule tested on 5-minute and 1-minute data did not beat costs; they are retired.</p>
@@ -10362,43 +10365,41 @@ function getClockRunwayRead(row,opts){
     n:use.n,conditioned,atMinutes:at,clockLabel:clockLabelOf(at)};
 }
 
-const BTST_TARGET_CHOICES=[1.5,2,2.5,3,3.5,4];
 function learnedBtstTarget(score,symbol=null){
-  const model=BTST.targetModel,day=getSessionDate();
-  if(model?.version===2){
-    if(model.enabled!==true)return null;
-    const p=model.predictions?.[symbol],rank=btstRanking()?.src;
-    if(model.asOfSession!==day||!(model.trainedThrough<day)||model.asOf!==rank?.asOf||!Number.isFinite(score)||!p||Math.abs(p.scoreA-score)>0.001||p.n<10||!Number.isFinite(p.pct)||p.pct<1.5||p.pct>10)return null;
-    return {pct:p.pct,n:p.n,through:model.trainedThrough,method:'profit-model'};
-  }
-  if(!Number.isFinite(score)||!model||!Array.isArray(model.cases)||!(model.trainedThrough<day)||model.asOfSession!==day)return null;
-  // Nearest-score empirical learner, using only COMPLETED earlier sessions. Two distinct days and
-  // ten paths are required. A new target must beat fixed +3% by 0.25% net on average and must not
-  // lose the comparison on either day. No same-day path can train a same-day order.
-  const near=model.cases.filter(c=>c.day<day&&c.day<=model.trainedThrough&&Number.isFinite(Number(c.score))&&Math.abs(Number(c.score)-score)<=0.8)
-    .sort((a,b)=>Math.abs(a.score-score)-Math.abs(b.score-score)).slice(0,12);
-  const days=[...new Set(near.map(c=>c.day))];
-  if(near.length<10||days.length<2||days.some(d=>near.filter(c=>c.day===d).length<2))return null;
-  let best=null;
-  for(const target of BTST_TARGET_CHOICES){
-    const deltas=near.map(c=>Number(c.returns?.[String(target)])-Number(c.returns?.['3.0']));
-    if(deltas.some(x=>!Number.isFinite(x)))continue;
-    const improvement=deltas.reduce((a,b)=>a+b,0)/deltas.length;
-    if(target!==3&&(improvement<0.25||days.some(d=>near.filter(c=>c.day===d).reduce((n,c)=>n+Number(c.returns[String(target)])-Number(c.returns['3.0']),0)<0)))continue;
-    if(!best||improvement>best.improvement+1e-9)best={pct:target,improvement,n:near.length,through:model.trainedThrough};
-  }
-  return best&&best.pct!==3?best:null;
+  const model=BTST.targetModel;
+  if(model?.version!==3)return null;
+  const mdl=btstRanking()?.src?.activeModel||'A',p=model.models?.[mdl];
+  if(!p||!Number.isFinite(p.pct)||p.pct<0)return null;
+  return {pct:p.pct,y:p.y||0,x:p.x,n:p.n,provisional:p.provisional,
+    through:model.asOf,model:mdl,fallback:p.fallback,method:'evolving-t2'};
 }
 function getRowExitPolicy(row,buyPrice=null,activeInfo=null,nudgeInfo=null,qty=null){
   const {TARGET_PCT:basePct,STOP_LOSS_PCT:stopPct}=RocketStrategy.CONFIG;
   const learned=learnedBtstTarget(btstScoreAOf(row?.symbol),row?.symbol);
-  // v1434: qualification determines GO; a rupee-profit goal must not veto funding
-  // or inflate the learned target. Cash and execution limits remain in the allocator.
-  const targetPct=learned?.pct||basePct;
+  // Owner policy: quantity-specific cost + existing minimum net-profit floor.
+  const price=Number(buyPrice)||Number(row?.price),q=Number(qty);
+  let z=0;
+  if(price>0&&q>0){
+    const fr=getTradeFrictionPct(row,q*price);
+    const slip=fr?.covered&&Number.isFinite(fr.entryPct)&&Number.isFinite(fr.exitPct)
+      ?Math.max(0,fr.entryPct+fr.exitPct):2*BASKET_MARKET_BUDGET_BUFFER_PCT;
+    const need=respectableProfitRs(),buyCost=calcZerodhaCharges(price,q,false,false,false);
+    const net=sell=>q*(sell-price)-buyCost-calcZerodhaCharges(sell,q,true,false,false)-q*price*slip/100;
+    let lo=price,hi=price+Math.max(0.05,(need+buyCost)/q+price*0.01);
+    for(let i=0;i<32&&net(hi)<need;i++)hi=price+2*(hi-price);
+    for(let i=0;i<48;i++){const mid=(lo+hi)/2;if(net(mid)>=need)hi=mid;else lo=mid;}
+    const sell=Math.ceil((hi-1e-9)/0.05)*0.05;
+    z=(sell/price-1)*100;
+  }
+  const targetPct=Math.ceil((Math.max(learned?.pct??basePct,learned?.y||0,z)-1e-9)*100)/100;
+  if(learned?.method==='evolving-t2')return {targetPct,basePct,stopPct,viable:true,
+    targetPolicy:TARGET_POLICY_VERSION,x:learned.x,y:learned.y,z,
+    targetSource:`${learned.model==='ENS'?'Ensemble':'Original'}: ${learned.fallback?'3% startup fallback':`75% of median ${learned.x.toFixed(2)}%`}; ${learned.n} closed signals (${learned.provisional} still tracking); costs + minimum net floor ${z.toFixed(2)}%`,
+    viabilitySource:null,stopSource:'No stop: T+2 15:20 exit',rewardRisk:null};
   return {targetPct,basePct,stopPct,viable:true,targetPolicy:learned?(learned.method==='profit-model'?'btst-profit-model':'btst-score-learned'):'btst-fixed',
     targetSource:learned?`${learned.method==='profit-model'?'Profit-model':'Score-learned'} BTST target (${learned.n} completed paths through ${learned.through})`:`BTST +${basePct}% GTT (learning fallback)`,
     viabilitySource:null,
-    stopSource:stopPct>0?'Fixed strategy stop':'No stop: time exit 15:20 next session',rewardRisk:stopPct>0?targetPct/stopPct:null};
+    stopSource:stopPct>0?'Fixed strategy stop':'No stop: time exit 15:20 on T+2',rewardRisk:stopPct>0?targetPct/stopPct:null};
 }
 function summarizeRowExitPolicies(rows){
   const policies=(rows||[]).map(r=>getRowExitPolicy(r,r?.price)).filter(p=>p.targetPct>0&&p.stopPct>0&&p.viable);
@@ -10586,7 +10587,7 @@ function getPositionDeadline(sym,pos){
   if(!date&&(ORDERS_TODAY||[]).filter(o=>o.symbol===sym&&o.type==='BUY'&&normOrderDate(o.time)===getSessionDate()).reduce((n,o)=>n+(Number(o.qty)||0),0)>=qty&&qty>0) date=getSessionDate();
   const clock=istClock(),today=new Date(clock.dateMs).toISOString().slice(0,10);
   const days=date?tradingDaysBetween(date,today):null;
-  return {date,days,due:days!=null&&(days>1||(days===1&&clock.mins>=continuousCloseMin(sym)-5))};
+  return {date,days,due:days!=null&&(days>RocketStrategy.CONFIG.MAX_HOLD_DAYS||(days===RocketStrategy.CONFIG.MAX_HOLD_DAYS&&clock.mins>=RocketStrategy.CONFIG.EXIT_AT_MIN-5))};
 }
 const POSITION_STOP_STORE='rs_position_entry_stops_v1';
 function getPositionEntryStop(sym,pos){
@@ -10630,7 +10631,7 @@ function getOpenPositionTapePolicy(sym,pos){
   const targetPrice=avg>0?+(avg*(1+tgtPct/100)).toFixed(2):null,stopPrice=avg>0&&slPct>0?+(avg*(1-slPct/100)).toFixed(2):null;
   return {symbol,qty,price,open:quote?.open,signal:verdict.action,signalSort:verdict.shouldExit?0:1,
     why:verdict.reason,exitVerdict:verdict,targetPrice,stopPrice,targetPct:tgtPct,stopPct:slPct,
-    targetWhy:`+${tgtPct}% GTT from average buy cost`,stopWhy:slPct>0?`-${slPct}% from average buy cost`:'No stop: sell at 15:20 next session if the target has not filled',
+    targetWhy:`+${tgtPct}% GTT from average buy cost`,stopWhy:slPct>0?`-${slPct}% from average buy cost`:'No stop: sell at 15:20 on T+2 if the target has not filled',
     pacePct:null,paceRs:null,daysHeld:days,ageUnknown:days==null,afterCostFloor:null};
 }
 
@@ -13170,7 +13171,7 @@ function showRadarDetail(sym){
   document.getElementById('radarDetailTitle').textContent=r.symbol+' | Strategy';
   document.getElementById('radarDetailBody').innerHTML=`<p><b>${act.state}</b>: ${escHtml(act.reason)}</p>
     <p>${escHtml(radarScoreTitle(r))}</p><p>Price ${fmtINR(x.price)} | Day high ${fmtINR(x.high)} | Open ${fmtINR(x.open)} | VWAP ${fmtINR(x.vwap)}</p>
-    <p>Target +${RocketStrategy.CONFIG.TARGET_PCT}% GTT | No stop | Sell at 15:20 next session if unfilled.</p>`;
+    <p>Target +${getRowExitPolicy(r,r.price).targetPct}% base GTT (allocated order includes cost/profit floor) | No stop | Sell at 15:20 on T+2 if unfilled.</p>`;
   dlg.showModal();
 }
 
