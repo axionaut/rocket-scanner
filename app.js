@@ -1,6 +1,6 @@
-const BUILD_TS='2026-09-25 16:48 IST'; // release build time (IST)
-const APP_VERSION=1445;
-const RADAR_SCORE_VERSION='v1419-recross-batches'; // Eligible on crossing the score floor at any time; learned target or +3% fallback, BTST-max exit.
+const BUILD_TS='2026-09-25 17:55 IST'; // release build time (IST)
+const APP_VERSION=1446;
+const RADAR_SCORE_VERSION='v1419-recross-batches'; // Eligible on crossing the score floor at any time; selected model's evolving target, T+2 exit.
 
 // ── v1358: AN UNCAUGHT ERROR MUST NAME ITSELF ─────────────────────────────────────────────────
 // This is the class of defect that has cost the most sessions in this app's history, and until now
@@ -3717,7 +3717,7 @@ function setRadarEvidenceScore(r){
     const pick=typeof btstPickOf==='function'?btstPickOf(r.symbol):null;
     sc=pick?100-pick.rank:0;
     r.btstPick=pick;
-    r.targetPrice=Number(r.price)>0?+(Number(r.price)*(1+RocketStrategy.CONFIG.TARGET_PCT/100)).toFixed(2):null;
+    r.targetPrice=Number(r.price)>0?+(Number(r.price)*(1+currentModelTargetPct()/100)).toFixed(2):null;
     r.stopPrice=null;
   } else {
     const tick=rocketPressureOf(r.symbol);
@@ -3730,7 +3730,7 @@ function setRadarEvidenceScore(r){
 }
 function radarScoreTitle(r){
   const p=r?.btstPick;
-  return p?`BTST pick #${p.rank}: model score ${p.score} (predicted next-session net return %, after costs). Walk-forward Dec-2025..Sep-2026: top 5 averaged +1.18% per trade with the market gate.`
+  return p?`BTST pick #${p.rank}: model score ${p.score} (predicted next-session net return %, after costs). Buyable when it crosses your score floor; exit at the selected model's evolving target or 15:20 on T+2.`
     :"Not in today's BTST top picks. Score = 100 - pick rank.";
 }
 function* refreshRocketScoresGen(deferPaint=false){
@@ -4584,22 +4584,51 @@ const BTST_MODEL_NAMES={ENS:'Ensemble',A:'Original'};
 function btstModelName(m){return BTST_MODEL_NAMES[m]||m||'Original';}
 // Model switch (index.html #fModel). The helper stores the choice and passes it to every engine run;
 // the other model keeps scoring as a shadow for the day-end review. Applies from the next run.
+// v1446: the helper owns the choice, but the browser must not display the wrong one while asking it.
+// The select's markup default is Ensemble, so before v1446 EVERY reload showed Ensemble until an
+// async round-trip answered - and showed it permanently whenever the helper was slow or down.
+// localStorage now paints the owner's last known choice synchronously; the helper still wins on reply.
+const MODEL_STORE='rocket-btst-model-v1';
+function savedModelChoice(){
+  try{const v=localStorage.getItem(MODEL_STORE);return v==='A'||v==='ENS'?v:null;}catch(e){return null;}
+}
+function rememberModelChoice(m){
+  try{if(m==='A'||m==='ENS') localStorage.setItem(MODEL_STORE,m);}catch(e){}
+}
 let _modelSeeded=false;
 function initModelUI(){
   try{
     const el=document.getElementById('fModel');
     if(!el||_modelSeeded) return;
     _modelSeeded=true;
+    const saved=savedModelChoice();
+    if(saved&&document.activeElement!==el) el.value=saved;   // synchronous: no wrong model on screen
     readHelperResponse('/api/btst/model',{timeout:6000}).then(d=>{
-      if(d&&d.ok!==false&&d.model&&document.activeElement!==el) el.value=d.model;
-    }).catch(()=>{});
+      if(d&&d.ok!==false&&d.model){
+        rememberModelChoice(d.model);
+        if(document.activeElement!==el&&el.value!==d.model){el.value=d.model;applyFilters();}
+      }
+    }).catch(()=>{});   // helper down: the saved choice stays on screen rather than reverting
   }catch(e){}
+}
+// The model the OWNER selected, which is what new orders must be targeted on. Deliberately NOT the
+// ranking file's activeModel: that records which model produced the last engine run, so after a
+// switch it names the outgoing model until the next run - which is how the Ensemble +3% startup
+// fallback stayed on the card and on every row after the owner had moved to Original (v1446).
+function selectedBtstModel(){
+  const el=typeof document!=='undefined'&&document.getElementById?document.getElementById('fModel'):null;
+  const v=el?.value;
+  if(v==='A'||v==='ENS') return v;
+  return savedModelChoice()||btstRanking()?.src?.activeModel||'A';
 }
 function onModelChange(){
   const el=document.getElementById('fModel');
   const m=el?.value||'ENS';
+  rememberModelChoice(m);
+  applyFilters();   // targets are model-specific: repaint immediately, don't wait for the helper
   readHelperResponse('/api/btst/model?set='+encodeURIComponent(m),{timeout:6000}).then(d=>{
     if(!d||d.ok===false){showToast('Model not switched: '+escHtml(d?.why||'helper refused'),4000,true);return;}
+    rememberModelChoice(d.model);
     showToast(btstModelName(d.model)+' model ranks and trades from the next engine run (within 2 minutes). The other keeps scoring as a shadow.',5000);
   }).catch(()=>showToast('Helper unreachable - the model was not switched.',5000,true));
 }
@@ -6601,7 +6630,8 @@ function getHighTimeInfo(sym,sessionDate){
 // so it counts as manual. This is an inference, not a broker-reported field.
 const EXIT_KIND_LABEL={gtt:'GTT target',manual:'manual/early',time:'15:20 time exit'};
 function classifyExitKind(t){
-  const tgt=Number(RocketStrategy?.CONFIG?.TARGET_PCT);
+  // v1446: judge against the target this trade actually carried, not a fixed +3%.
+  const tgt=Number((typeof executedBtstTarget==='function'&&executedBtstTarget(t?.symbol||t?.sym))||RocketStrategy?.CONFIG?.TARGET_PCT);
   const pct=Number(t?.pnlPct!=null?t.pnlPct:t?.netPnlPct);
   // Tolerance covers charge rounding and a fill a paisa through the trigger.
   if(Number.isFinite(tgt)&&Number.isFinite(pct)&&pct>=tgt-0.15) return 'gtt';
@@ -8161,7 +8191,7 @@ function renderStats(){
   const protectionCard = `<div class="st" title="Each model has its own evolving peak history. Target = max(75% of median, 25% of median, costs plus minimum net profit). Existing executed GTTs stay fixed.">
     <div class="st-l">${targetRead?.model==='ENS'?'Ensemble':'Original'} target</div>
     <div class="st-v" style="font-size:18px;color:var(--green)">+${(targetRead?.pct??3).toFixed(2)}% base</div>
-    <div class="st-d">${targetRead&&!targetRead.fallback?`${targetRead.n} closed / ${targetRead.provisional} evolving`:'Startup fallback'} ? cost/profit floor applies ? T+2 15:20</div></div>`;
+    <div class="st-d">${targetRead&&!targetRead.fallback?`${targetRead.n} closed / ${targetRead.provisional} evolving`:'Startup fallback'} · cost/profit floor applies · T+2 15:20</div></div>`;
 
   // Active Basket Allocation Card
   const capital = getEffectiveCapital();
@@ -9801,7 +9831,7 @@ function _renderMethodologyInner(){
     <div class="m-grid">
     <div class="m-card"><h4>1. Live score (throughout the session)</h4><p>The local helper runs <code>dev/btst_engine.py</code>. It builds 45 features for every liquid stock (20-day average turnover ≥ ₹5 Cr, price ₹50–₹5,000) from Zerodha daily bars plus today's live price and volume: returns from 1 day to 3 months, gap, close location, range, volume surges, volatility, distance to highs and averages, RSI, stochastics, ADX, MACD, TradingView-style ratings, relative strength and market condition. The model predicts the next-session trade result after costs and is retrained every 5 sessions on the last 220 sessions.</p></div>
     <div class="m-card"><h4>2. Buy on qualification</h4><p>Top ${RocketStrategy.CONFIG.TOP_K} picks are GO, split equally across ${RocketStrategy.CONFIG.TOP_K} slots (minimum ₹5,000 each). A bought stock may qualify again after a fresh dip below the floor and re-crossing. Market gate: no buys when the equal-weight market index is more than 2% below its 50-day average. Stale prices or a broken stream turn GO into WAIT.</p></div>
-    <div class="m-card"><h4>3. Exit</h4><p>The basket attaches the selected model?s evolving target: 75% of its median post-entry peak, with a floor covering costs and the existing minimum net profit. Closed simulated recommendations enter immediately and keep updating their highs through T+2. Both models track independently; without closed history, +3% is the startup fallback. No stop-loss: overnight gaps jump stops, and a −2% stop turned the tested result negative. If the target has not filled, sell at 15:20 on T+2 (Open Positions shows SELL from 15:15).</p></div></div>
+    <div class="m-card"><h4>3. Exit</h4><p>The basket attaches the selected model’s evolving target: 75% of its median post-entry peak, with a floor covering costs and the existing minimum net profit. Closed simulated recommendations enter immediately and keep updating their highs through T+2. Both models track independently; without closed history, +3% is the startup fallback. No stop-loss: overnight gaps jump stops, and a −2% stop turned the tested result negative. If the target has not filled, sell at 15:20 on T+2 (Open Positions shows SELL from 15:15).</p></div></div>
     <h3>Evidence</h3>
     <p>Walk-forward on NSE daily data, Dec 2025 – Sep 2026 (the model never saw the future), costs included: top 5 bought at the close and sold at +3% the next day or at its close averaged <b>+0.91% per trade</b>, 73% of days positive. With the market gate: <b>+1.18% per trade, 79% of days positive, worst drawdown −4.7%</b>. A 1-minute replay of 36 recent sessions (buy at the real 15:25 price, +3% only when price traded through it) averaged <b>+1.17% per trade</b>, 26 of 36 days positive. Different random seeds and settings gave +0.91% to +1.05%.</p>
     <p>The earlier near-high rules (v1388–v1392) and every intraday entry rule tested on 5-minute and 1-minute data did not beat costs; they are retired.</p>
@@ -10085,7 +10115,7 @@ function maxReachableAnchorPct(){
   return m>0?m:20;
 }
 function getActiveTargetInfo(){
-  return {tgtPct:RocketStrategy.CONFIG.TARGET_PCT,source:'strategy'};
+  return {tgtPct:currentModelTargetPct(),source:'strategy'};
 }
 function getDefaultTgtPct(){
   const harvest=computeHarvestPlan().targetPct;
@@ -10365,10 +10395,16 @@ function getClockRunwayRead(row,opts){
     n:use.n,conditioned,atMinutes:at,clockLabel:clockLabelOf(at)};
 }
 
+// v1446: the one place a non-order-specific target comes from - the selected model's evolving
+// base target, +3% only as its labelled startup fallback when the tracker has not loaded.
+function currentModelTargetPct(){
+  const t=learnedBtstTarget(null);
+  return Number.isFinite(t?.pct)&&t.pct>0?t.pct:RocketStrategy.CONFIG.TARGET_PCT;
+}
 function learnedBtstTarget(score,symbol=null){
   const model=BTST.targetModel;
   if(model?.version!==3)return null;
-  const mdl=btstRanking()?.src?.activeModel||'A',p=model.models?.[mdl];
+  const mdl=selectedBtstModel(),p=model.models?.[mdl];
   if(!p||!Number.isFinite(p.pct)||p.pct<0)return null;
   return {pct:p.pct,y:p.y||0,x:p.x,n:p.n,provisional:p.provisional,
     through:model.asOf,model:mdl,fallback:p.fallback,method:'evolving-t2'};
@@ -10563,7 +10599,7 @@ function getOpenPositionTargetFloor(sym,pos){
   try{ active=getActiveTargetInfo(); }catch(e){}
   const anchorPct=active?.source==='manual'&&Number(active.tgtPct)>0?Number(active.tgtPct):null;
   const boughtPct=anchorPct==null?executedBtstTarget(sym):null;
-  const raw=avgPrice*(1+(anchorPct??boughtPct??RocketStrategy.CONFIG.TARGET_PCT)/100);
+  const raw=avgPrice*(1+(anchorPct??boughtPct??currentModelTargetPct())/100);
   const nextTick=+((Math.floor((avgPrice+1e-9)/0.05)+1)*0.05).toFixed(2);
   const anchorPrice=Math.max(nextTick,tickPrice(raw));
   const costFloorPrice=getPositionAfterCostFloor(avgPrice,Number(pos?.qty));
@@ -10573,7 +10609,7 @@ function getOpenPositionTargetFloor(sym,pos){
   const cushionFloorPrice=costFloorPrice>0?+(Math.ceil((costFloorPrice+cushionPx-1e-9)/0.05)*0.05).toFixed(2):null;
   const marketPrice=tickPrice(raw);
   const price=Math.max(anchorPrice,cushionFloorPrice||0,marketPrice||0);
-  const source=anchorPct!=null?'manual Target Override':boughtPct!=null?'exported BTST GTT target':'fixed +3% BTST fallback';
+  const source=anchorPct!=null?'manual Target Override':boughtPct!=null?'exported BTST GTT target':'selected model target (no exported target recorded)';
   return {avgPrice,price:+price.toFixed(2),anchorPrice:+anchorPrice.toFixed(2),
     costFloorPrice,cushionFloorPrice,cushionIsSpread:cushionPx>0.05,anchorPct,source,marketPrice};
 }
@@ -10625,7 +10661,7 @@ function getOpenPositionTapePolicy(sym,pos){
   const days=getOpenPositionDaysHeld(symbol,qty);
   const stale=!isEquitySession(Date.now())?'Market closed':universePriceStaleness()||stockPriceStaleness(symbol);
   const price=Number(quote?.price)>0?Number(quote.price):Number(pos?.ltp)||null;
-  const tgtPct=executedBtstTarget(symbol)||RocketStrategy.CONFIG.TARGET_PCT;
+  const tgtPct=executedBtstTarget(symbol)||currentModelTargetPct();
   const verdict=stale?{action:'WAIT',reason:stale,shouldExit:false}:RocketStrategy.evaluateExit({avgCost:avg,daysHeld:days,targetPct:tgtPct},price);
   const {STOP_LOSS_PCT:slPct}=RocketStrategy.CONFIG;
   const targetPrice=avg>0?+(avg*(1+tgtPct/100)).toFixed(2):null,stopPrice=avg>0&&slPct>0?+(avg*(1-slPct/100)).toFixed(2):null;
@@ -13577,7 +13613,16 @@ async function streamRefreshTick(){
 }
 function refreshStrategySafety(){
   if(!ALL.length)return;
-  if(_streamConfirmed&&isEquitySession(Date.now())&&universePriceStaleness())invalidateLiveEvidence('Live feed expired');
+  const now=Date.now(),open=isEquitySession(now);
+  if(_streamConfirmed&&open&&universePriceStaleness())invalidateLiveEvidence('Live feed expired');
+  // v1446: this re-evaluates all ~1,670 rows. Every second it blocked the main thread, so a native
+  // <select> (the Model dropdown) could not open until the scan finished. While a select is focused,
+  // skip the scan (the stale-feed invalidation above still runs); with the market closed nothing can
+  // become GO, so scan every 30 s instead of every second.
+  const ae=typeof document!=='undefined'?document.activeElement:null;
+  if(ae&&ae.tagName==='SELECT')return;
+  if(!open&&now-(refreshStrategySafety.at||0)<30000)return;
+  refreshStrategySafety.at=now;
   const states=ALL.map(r=>r.symbol+':'+getRowActionState(r).state).join('|');
   if(states!==refreshStrategySafety.last){refreshStrategySafety.last=states;applyFilters({preservePage:true});}
 }
@@ -14223,11 +14268,11 @@ function buildBasketOrders(capital, selList){
     if(!(qty>0)) return;
     const sym=s.symbol;
     const name=s.name||sym;
-    // The GTT uses the allocator's chosen learned target or +3% fallback.
+    // The GTT uses the allocator's target: the selected model's evolving target, floored by cost + min profit.
     const policy=Number(allocTgt)>0?{targetPct:Number(allocTgt)}:getRowExitPolicy(s,Number(s.price)||0,null,null,qty);
     const targetPct=(policy&&Number.isFinite(policy.targetPct)&&policy.targetPct>0)
       ? parseFloat(Number(policy.targetPct).toFixed(2))
-      : (typeof RocketStrategy!=='undefined' ? RocketStrategy.CONFIG.TARGET_PCT : 2.0);
+      : currentModelTargetPct();
     const stoplossPct = (typeof RocketStrategy!=='undefined' ? RocketStrategy.CONFIG.STOP_LOSS_PCT : 1.8);
     const gttPayload = {};
     if(stoplossPct > 0) gttPayload.stoploss = -parseFloat(Number(stoplossPct).toFixed(2));
