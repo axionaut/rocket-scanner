@@ -1,5 +1,5 @@
-const BUILD_TS='2026-09-25 17:55 IST'; // release build time (IST)
-const APP_VERSION=1446;
+const BUILD_TS='2026-09-26 10:30 IST'; // release build time (IST)
+const APP_VERSION=1447;
 const RADAR_SCORE_VERSION='v1419-recross-batches'; // Eligible on crossing the score floor at any time; selected model's evolving target, T+2 exit.
 
 // ── v1358: AN UNCAUGHT ERROR MUST NAME ITSELF ─────────────────────────────────────────────────
@@ -9280,9 +9280,10 @@ function renderPerformance(){
   const periodLabel=PERF_PERIOD_FILTER==='btst'?`Entries since ${BTST_PERFORMANCE_START}`:_cutoff?`Entries since ${_cutoff}`:'All recorded history';
   const settledNet=perfTrips.reduce((n,r)=>n+(Number(r.netPnl)||0),0);
   const charges=perfTrips.reduce((n,r)=>n+(Number(r.charges)||0),0),money=v=>v==null?'—':fmtPerfRs(v);
+  const dpTotal=perfTrips.reduce((n,r)=>n+(Number(r.dpCharge)||0),0);
   const kpis=[
-    {label:'Net realised',value:money(settledNet),color:clr(settledNet),sub:'Tradebook only · after estimated charges'},
-    {label:'Trading costs',value:fmtINR(charges),color:'var(--t2)',sub:'Estimated charges on realised fills'},
+    {label:'Net realised',value:money(settledNet),color:clr(settledNet),sub:'Tradebook · after charges, excl. DP (Zerodha basis)'},
+    {label:'Trading costs',value:fmtINR(charges),color:'var(--t2)',sub:`Estimated, on realised fills · DP ${fmtINR(dpTotal)} billed separately`},
     {label:'Closed entries',value:entries.count,color:'var(--t1)',sub:'Grouped by buy order; timestamp fallback'+(entries.excluded?` · ${entries.excluded} partial/undated excluded`:'')},
     {label:'Win rate',value:entries.winRate==null?'—':entries.winRate.toFixed(1)+'%',color:'var(--t1)',sub:`${entries.wins} wins · ${entries.losses} losses · ${entries.flat} flat; after charges`},
     {label:'Avg net / entry',value:money(entries.expectancy),color:entries.expectancy==null?'var(--t3)':clr(entries.expectancy),sub:'Fully closed entries only'},
@@ -14022,12 +14023,18 @@ function applyTradebookCharges(trips){
         const value=values.get(orderKey(r,sell));
         parts.brokerage=value>0?Math.min(20,value*0.0003)*(price*r.qty/value):0;
         parts.gst=0.18*(parts.brokerage+parts.sebi+parts.txn);
-      }else if(sell)parts.dp=15.34*r.qty/deliveryQty.get(r.sym+'|'+r.sellDate);
+      }else if(sell)dp=15.34*r.qty/deliveryQty.get(r.sym+'|'+r.sellDate);
+      parts.dp=0;
       return sumChargeParts(parts);
     };
+    // v1447: Zerodha's "Net realised P&L" excludes DP charges (billed to the ledger as other debits).
+    // Reconciled 26 Sep: tradebook to 25 Sep, app -9,629.93 + DP 8,406.32 = -1,223.61 vs Zerodha
+    // -1,611.76; the rest is contract-note rounding. netPnl now uses Zerodha's basis; DP is kept
+    // separately (dpCharge) and shown on the Trading costs card, never dropped silently.
+    let dp=0;
     const bc=charge(false),sc=charge(true),charges=+(bc+sc).toFixed(2);
     const netPnl=+((r.sellPrice-r.buyPrice)*r.qty-bc-sc).toFixed(2);
-    return {...r,charges,buyCharges:+bc.toFixed(2),sellCharges:+sc.toFixed(2),netPnl,netPnlPct:r.capital>0?netPnl/r.capital*100:0};
+    return {...r,charges,dpCharge:+dp.toFixed(2),buyCharges:+bc.toFixed(2),sellCharges:+sc.toFixed(2),netPnl,netPnlPct:r.capital>0?netPnl/r.capital*100:0};
   });
 }
 function parseTradebook(text){
