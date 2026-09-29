@@ -131,6 +131,21 @@
     const pnlPct = +(((ltp - avgCost) / avgCost) * 100).toFixed(2);
 
     const targetPct = Number(position.targetPct) > 0 ? Number(position.targetPct) : CONFIG.TARGET_PCT;
+    // v1451: a runner's target GTT was cancelled by the helper, which now trails it; the helper's
+    // stop replaces both the target and the local lock computation.
+    const runnerStop = Number(position.runnerStopPrice);
+    if (runnerStop > 0) {
+      const stopPct = +(((runnerStop - avgCost) / avgCost) * 100).toFixed(2);
+      const sell = ltp <= runnerStop;
+      return {
+        shouldExit: sell, action: sell ? 'SELL' : 'HOLD', exitType: sell ? 'PROFIT_LOCK' : 'RUNNER',
+        pnlPct, runner: true, lockArmed: true, lockStopPrice: runnerStop, lockStopPct: stopPct,
+        peakPnlPct: Number.isFinite(Number(position.peakPnlPct)) ? Number(position.peakPnlPct) : null,
+        reason: sell
+          ? `Runner stop hit: +${pnlPct}% (stop ${stopPct >= 0 ? '+' : ''}${stopPct}%)`
+          : `Runner past target: helper trails the peak, stop ${stopPct >= 0 ? '+' : ''}${stopPct}% (P&L ${pnlPct > 0 ? '+' : ''}${pnlPct}%)`
+      };
+    }
     // Use the target attached to this executed BTST entry; legacy positions retain +3%.
     if (pnlPct >= targetPct) {
       return {

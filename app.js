@@ -1,5 +1,5 @@
 const BUILD_TS='2026-09-29 14:00 IST'; // release build time (IST)
-const APP_VERSION=1450;
+const APP_VERSION=1451;
 const RADAR_SCORE_VERSION='v1419-recross-batches'; // Eligible on crossing the score floor at any time; selected model's evolving target, T+2 exit.
 
 // ── v1358: AN UNCAUGHT ERROR MUST NAME ITSELF ─────────────────────────────────────────────────
@@ -9100,6 +9100,8 @@ function buildOpenPositionsPanel(query=''){
             const bCol = exitCheck.exitType === 'TARGET' || exitCheck.exitType === 'PROFIT_LOCK' ? 'var(--green)' : 'var(--red)';
             const icon = exitCheck.exitType === 'PROFIT_LOCK' ? '🛡️' : '🚨';
             stratBadge = `<div style="font-size:11px;background:${bCol};color:#fff;padding:2px 6px;border-radius:4px;font-weight:800;display:inline-block;margin-top:2px;letter-spacing:0.5px" title="${escHtml(exitCheck.reason)}">${icon} EXIT: ${escHtml(exitCheck.exitType)}</div>`;
+          } else if (exitCheck?.runner) {
+            stratBadge = `<div style="font-size:11px;background:var(--green);color:#fff;padding:2px 6px;border-radius:4px;font-weight:700;display:inline-block;margin-top:2px" title="${escHtml(exitCheck.reason)}">🚀 RUNNER stop ₹${exitCheck.lockStopPrice}</div>`;
           } else if (exitCheck?.lockArmed) {
             stratBadge = `<div style="font-size:11px;background:var(--amber);color:#000;padding:2px 6px;border-radius:4px;font-weight:700;display:inline-block;margin-top:2px" title="${escHtml(exitCheck.reason)}">🛡️ LOCK +${exitCheck.lockStopPct}%</div>`;
           } else {
@@ -10747,7 +10749,7 @@ function getOpenPositionTapePolicy(sym,pos){
   const price=Number(quote?.price)>0?Number(quote.price):Number(pos?.ltp)||null;
   const tgtPct=executedBtstTarget(symbol)||currentModelTargetPct();
   const plk=profitLockFor(symbol);
-  const verdict=stale?{action:'WAIT',reason:stale,shouldExit:false}:RocketStrategy.evaluateExit({avgCost:avg,daysHeld:days,targetPct:tgtPct,peakPnlPct:plk?.peakPnlPct??null},price);
+  const verdict=stale?{action:'WAIT',reason:stale,shouldExit:false}:RocketStrategy.evaluateExit({avgCost:avg,daysHeld:days,targetPct:tgtPct,peakPnlPct:plk?.peakPnlPct??null,runnerStopPrice:plk?.runner&&!plk?.triggered?plk.effectiveStop:null},price);
   const {STOP_LOSS_PCT:slPct}=RocketStrategy.CONFIG;
   const targetPrice=avg>0?+(avg*(1+tgtPct/100)).toFixed(2):null,stopPrice=avg>0&&slPct>0?+(avg*(1-slPct/100)).toFixed(2):null;
   return {symbol,qty,price,open:quote?.open,signal:verdict.action,signalSort:verdict.shouldExit?0:1,
@@ -14612,6 +14614,12 @@ function reportKiteBasketOutcome(ok,message){
 }
 async function sendBasketToKite(automatic=false){
   if(_kiteTransferBusy) return;
+  // v1451: with Auto-Buy ON the helper places these orders itself; a copy in Scanner_Import would
+  // be bought a second time if executed in Kite.
+  if(typeof AUTO_BUY_ENABLED!=='undefined'&&AUTO_BUY_ENABLED){
+    if(!automatic) showToast('<strong>Auto-Buy is ON:</strong> the helper buys GO baskets directly, so nothing is sent to Kite Scanner_Import. Turn Auto-Buy off to use the basket.',7000,true);
+    return;
+  }
   _kiteTransferBusy=true;
   const button=document.getElementById('sendKiteBtn');
   if(button){button.disabled=true;button.textContent='Sending to Kite…';}
