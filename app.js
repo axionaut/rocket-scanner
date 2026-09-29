@@ -1,5 +1,5 @@
 const BUILD_TS='2026-09-29 14:00 IST'; // release build time (IST)
-const APP_VERSION=1451;
+const APP_VERSION=1452;
 const RADAR_SCORE_VERSION='v1419-recross-batches'; // Eligible on crossing the score floor at any time; selected model's evolving target, T+2 exit.
 
 // ── v1358: AN UNCAUGHT ERROR MUST NAME ITSELF ─────────────────────────────────────────────────
@@ -7776,7 +7776,8 @@ async function loadAutoBuyStatus(){
     enabled: !!j.enabled,
     executedToday: Array.isArray(j.executedToday) ? j.executedToday : [],
     countToday: Number(j.countToday) || 0,
-    at: j.asOf || Date.now()
+    at: j.asOf || Date.now(),
+    blockedWhy: j.apiOrdersAllowed === false ? String(j.why || 'API orders disabled') : ''
   };
   if (AUTO_BUY_STATUS.enabled !== AUTO_BUY_ENABLED) {
     AUTO_BUY_ENABLED = AUTO_BUY_STATUS.enabled;
@@ -7800,12 +7801,17 @@ async function toggleAutoBuy(){
     if (j && j.ok) {
       AUTO_BUY_ENABLED = !!j.enabled;
       localStorage.setItem('rs_auto_buy_enabled', AUTO_BUY_ENABLED ? '1' : '0');
+      AUTO_BUY_STATUS.blockedWhy = j.apiOrdersAllowed === false ? String(j.why || 'API orders disabled') : '';
     }
   } catch (e) {
     console.warn('Auto-buy toggle sync notice:', e);
   }
   renderAutoBuyBtn();
-  showToast(AUTO_BUY_ENABLED 
+  if (next && !AUTO_BUY_ENABLED && AUTO_BUY_STATUS.blockedWhy) {
+    showToast('<strong>⚡ Auto-Buy unavailable:</strong> ' + escHtml(AUTO_BUY_STATUS.blockedWhy), 8000);
+    return;
+  }
+  showToast(AUTO_BUY_ENABLED
     ? '<strong>⚡ Auto-Buy ON:</strong> Qualifying basket recommendations will be executed automatically via Kite API.' 
     : '<strong>⚡ Auto-Buy OFF:</strong> Baskets will be exported to Zerodha_Basket_Buy.json for manual execution.',
     6000
@@ -7826,8 +7832,11 @@ function renderAutoBuyBtn(){
     btn.style.background = 'var(--bg-card)';
     btn.style.borderColor = 'var(--border)';
     btn.style.color = 'var(--t2)';
-    span.textContent = 'OFF';
-    btn.title = 'Auto-Buy is DISABLED. Baskets are exported to Zerodha_Basket_Buy.json for manual review and execution. Click to enable.';
+    const blocked = AUTO_BUY_STATUS && AUTO_BUY_STATUS.blockedWhy;
+    span.textContent = blocked ? 'OFF (no static IP)' : 'OFF';
+    btn.title = blocked
+      ? 'Auto-Buy unavailable: ' + blocked + ' Buy basket and Zerodha_Basket_Sell.json are for manual execution in Kite.'
+      : 'Auto-Buy is DISABLED. Baskets are exported to Zerodha_Basket_Buy.json for manual review and execution. Click to enable.';
   }
 }
 function getEffectiveCapital(){
