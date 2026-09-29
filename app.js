@@ -1,5 +1,5 @@
-const BUILD_TS='2026-09-26 10:30 IST'; // release build time (IST)
-const APP_VERSION=1447;
+const BUILD_TS='2026-09-29 13:35 IST'; // release build time (IST)
+const APP_VERSION=1449;
 const RADAR_SCORE_VERSION='v1419-recross-batches'; // Eligible on crossing the score floor at any time; selected model's evolving target, T+2 exit.
 
 // ── v1358: AN UNCAUGHT ERROR MUST NAME ITSELF ─────────────────────────────────────────────────
@@ -4391,7 +4391,7 @@ function initAlertUI(){
   }catch(e){}
 }
 if(typeof document!=='undefined'){
-  const initUI=()=>{initAlertUI();initScoreFloorUI();try{initModelUI();}catch(e){}};
+  const initUI=()=>{initAlertUI();initScoreFloorUI();try{initModelUI();}catch(e){}try{renderAutoBuyBtn();loadAutoBuyStatus();}catch(e){}};
   if(document.readyState==='loading') document.addEventListener('DOMContentLoaded',initUI);
   else initUI();
 }
@@ -7765,6 +7765,71 @@ async function loadProfitLockStatus(){
 function profitLockFor(sym){
   return Date.now()-PROFIT_LOCK_STATUS.at<60000?(PROFIT_LOCK_STATUS.bySym.get(normSym(sym))||null):null;
 }
+// ── Auto-Buy Execution Status (v1449) ──────────────────────────────────────────
+var AUTO_BUY_ENABLED = localStorage.getItem('rs_auto_buy_enabled') === '1';
+var AUTO_BUY_STATUS = { enabled: AUTO_BUY_ENABLED, executedToday: [], countToday: 0, at: 0 };
+
+async function loadAutoBuyStatus(){
+  const j = await readHelperResponse('/api/auto-buy/status', { timeout: 5000 }).catch(() => null);
+  if (!j || !j.ok) return;
+  AUTO_BUY_STATUS = {
+    enabled: !!j.enabled,
+    executedToday: Array.isArray(j.executedToday) ? j.executedToday : [],
+    countToday: Number(j.countToday) || 0,
+    at: j.asOf || Date.now()
+  };
+  if (AUTO_BUY_STATUS.enabled !== AUTO_BUY_ENABLED) {
+    AUTO_BUY_ENABLED = AUTO_BUY_STATUS.enabled;
+    localStorage.setItem('rs_auto_buy_enabled', AUTO_BUY_ENABLED ? '1' : '0');
+  }
+  renderAutoBuyBtn();
+}
+
+async function toggleAutoBuy(){
+  const next = !AUTO_BUY_ENABLED;
+  AUTO_BUY_ENABLED = next;
+  localStorage.setItem('rs_auto_buy_enabled', next ? '1' : '0');
+  renderAutoBuyBtn();
+  try {
+    const res = await fetch((typeof KITE_HELPER !== 'undefined' ? KITE_HELPER : '') + '/api/auto-buy/toggle', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ enabled: next })
+    });
+    const j = await res.json();
+    if (j && j.ok) {
+      AUTO_BUY_ENABLED = !!j.enabled;
+      localStorage.setItem('rs_auto_buy_enabled', AUTO_BUY_ENABLED ? '1' : '0');
+    }
+  } catch (e) {
+    console.warn('Auto-buy toggle sync notice:', e);
+  }
+  renderAutoBuyBtn();
+  showToast(AUTO_BUY_ENABLED 
+    ? '<strong>⚡ Auto-Buy ON:</strong> Qualifying basket recommendations will be executed automatically via Kite API.' 
+    : '<strong>⚡ Auto-Buy OFF:</strong> Baskets will be exported to Zerodha_Basket_Buy.json for manual execution.',
+    6000
+  );
+}
+
+function renderAutoBuyBtn(){
+  const btn = document.getElementById('autoBuyBtn');
+  const span = document.getElementById('autoBuyStatus');
+  if (!btn || !span) return;
+  if (AUTO_BUY_ENABLED) {
+    btn.style.background = 'rgba(16,185,129,.16)';
+    btn.style.borderColor = 'rgba(16,185,129,.4)';
+    btn.style.color = 'var(--green)';
+    span.textContent = 'ON';
+    btn.title = 'Auto-Buy is ENABLED. Qualifying baskets are automatically executed via Kite API with +target GTT & profit lock ratchet trailing exit. Click to disable.';
+  } else {
+    btn.style.background = 'var(--bg-card)';
+    btn.style.borderColor = 'var(--border)';
+    btn.style.color = 'var(--t2)';
+    span.textContent = 'OFF';
+    btn.title = 'Auto-Buy is DISABLED. Baskets are exported to Zerodha_Basket_Buy.json for manual review and execution. Click to enable.';
+  }
+}
 function getEffectiveCapital(){
   const v=parseFloat(document.getElementById('fCapital')?.value);
   if(Number.isFinite(v)&&v>0) return v;
@@ -11042,6 +11107,7 @@ function renderBasketBtn(){
   buyBtn.title=buyCount===0
     ? (`No selected pick from ${enabledModelsLabel()} has an allocated quantity > 0.`+syncNote)
     : (`Export selected stocks as Zerodha basket order${split}. Each order carries an RS_TICK or RS_MEDIAN tag naming the model that picked it.`+syncNote);
+  renderAutoBuyBtn();
 }
 function renderBasketSummary(){
   const capital=getEffectiveCapital();
@@ -13649,7 +13715,7 @@ function refreshStrategySafety(){
 }
 function startStreamRefresh(){
   if(_streamRefreshTimer) return;
-  if(!startStreamRefresh.btst){startStreamRefresh.btst=setInterval(()=>{loadBtstPicks();loadKiteMargins();loadKiteGtts();loadProfitLockStatus();try{resetCrossAlertsIfNewDay();checkTimeAlerts();checkCrossingAlerts();}catch(e){}},20000);loadBtstPicks();loadKiteMargins();loadKiteGtts();loadProfitLockStatus();try{resetCrossAlertsIfNewDay();checkTimeAlerts();checkCrossingAlerts();}catch(e){}
+  if(!startStreamRefresh.btst){startStreamRefresh.btst=setInterval(()=>{loadBtstPicks();loadKiteMargins();loadKiteGtts();loadProfitLockStatus();loadAutoBuyStatus();try{resetCrossAlertsIfNewDay();checkTimeAlerts();checkCrossingAlerts();}catch(e){}},20000);loadBtstPicks();loadKiteMargins();loadKiteGtts();loadProfitLockStatus();loadAutoBuyStatus();try{resetCrossAlertsIfNewDay();checkTimeAlerts();checkCrossingAlerts();}catch(e){}
     try{seedSavedBasketCount();}catch(e){}}
   _streamRefreshUiTimer=setInterval(()=>{try{refreshStrategySafety();renderLiveTapeBar();}catch(e){console.warn('Strategy safety refresh',e);}},1000);
   if(!_streamVisibilityBound){
@@ -14625,7 +14691,8 @@ async function exportBasket(){
     const hasTgt = orders.some(o => o.params?.gtt?.target);
     const hasSl = orders.some(o => o.params?.gtt?.stoploss);
     const gttNote = hasTgt && hasSl ? ' with Target & SL GTTs' : hasTgt ? ' with target GTTs' : '';
-    showToast(`<strong>Exported ${orders.length} CNC BUY orders</strong> for ${new Set(orders.map(o => o._meta.sym)).size} selected stocks${gttNote} as Zerodha_Basket_Buy.json`);
+    const autoNote = AUTO_BUY_ENABLED ? ' (⚡ Auto-Buy ON: Executing via Kite API)' : '';
+    showToast(`<strong>Exported ${orders.length} CNC BUY orders</strong> for ${new Set(orders.map(o => o._meta.sym)).size} selected stocks${gttNote}${autoNote} as Zerodha_Basket_Buy.json`);
   } catch(e) {
     console.error('Basket export failed', e);
     showToast('Basket export failed: ' + (e?.message || e), 6000, true);
@@ -14648,7 +14715,7 @@ async function saveBasketToScannerUploads(orders, filename, audit = []){
       method: 'POST',
       signal: ctl.signal,
       headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ name: filename + '.json', orders, audit })
+      body: JSON.stringify({ name: filename + '.json', orders, audit, autoBuy: AUTO_BUY_ENABLED })
     });
     const j = r.ok ? await r.json() : null;
     if(!j?.ok){
