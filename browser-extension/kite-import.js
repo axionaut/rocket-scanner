@@ -2,11 +2,13 @@
 // Runs in Kite's page and calls Kite's own basket API client, the same calls its basket screen makes.
 // The basket does not need to be open. No credentials are read and no order API is called.
 
-// True when a Scanner_Import basket is open on screen in this tab (the owner may be reviewing it).
-function rocketKiteBasketOpen(){
+// Buys go to Scanner_Buy, profit-lock sells to Scanner_Sell. `var`: this file is re-injected on every call.
+var ROCKET_BASKET={BUY:'Scanner_Buy',SELL:'Scanner_Sell'};
+// True when the named basket is open on screen in this tab (the owner may be reviewing it).
+function rocketKiteBasketOpen(name='Scanner_Buy'){
   for(const el of document.querySelectorAll('*')){
     const v=el.__vue__;
-    if(v?.name==='Scanner_Import'&&v.enabled===true&&Array.isArray(v.items)) return true;
+    if(v?.name===name&&v.enabled===true&&Array.isArray(v.items)) return true;
   }
   return false;
 }
@@ -28,16 +30,22 @@ function rocketKiteRefresh(basket){
   }catch(e){}
 }
 
-async function rocketKiteImport(orders,createdAt,openElsewhere=false){
-  const NAME='Scanner_Import';
+async function rocketKiteImport(orders,createdAt,openElsewhere=false,side='BUY'){
+  const sell=side==='SELL';
+  const NAME=sell?ROCKET_BASKET.SELL:ROCKET_BASKET.BUY;
   const fail=why=>({ok:false,why});
   if(location.origin!=='https://kite.zerodha.com') return fail('Open Kite first.');
   if(!Number.isFinite(createdAt)||Date.now()-createdAt>30000||createdAt>Date.now()+1000) return fail('Transfer expired. Send a fresh basket from Rocket Scanner.');
-  if(!Array.isArray(orders)||!orders.length||orders.length>20) return fail('Expected 1–20 funded buy orders.');
+  // A sell basket may be empty: that clears Scanner_Sell once the shares are gone.
+  if(!Array.isArray(orders)||(!sell&&!orders.length)||orders.length>20) return fail(sell?'Expected 0–20 sell orders.':'Expected 1–20 funded buy orders.');
   const symbols=new Set();
   for(const o of orders){
     const p=o?.params,s=o?.instrument?.tradingsymbol;
-    if(!s||symbols.has(s)||o.instrument.exchange!=='NSE'||p?.transactionType!=='BUY'||p.product!=='CNC'||p.orderType!=='MARKET'||p.variety!=='regular'||p.validity!=='DAY'||!Number.isSafeInteger(p.quantity)||p.quantity<=0||!Number.isFinite(p.gtt?.target)||p.gtt.target<=0||Number(p.gtt?.stoploss||0)!==0) return fail('Invalid funded CNC buy order. Nothing was imported.');
+    const common=s&&!symbols.has(s)&&o.instrument.exchange==='NSE'&&p?.product==='CNC'&&p.orderType==='MARKET'&&p.variety==='regular'&&p.validity==='DAY'&&Number.isSafeInteger(p.quantity)&&p.quantity>0;
+    const ok=sell
+      ? common&&p.transactionType==='SELL'&&!p.gtt
+      : common&&p.transactionType==='BUY'&&Number.isFinite(p.gtt?.target)&&p.gtt.target>0&&Number(p.gtt?.stoploss||0)===0;
+    if(!ok) return fail(sell?'Invalid CNC sell order. Nothing was written.':'Invalid funded CNC buy order. Nothing was imported.');
     symbols.add(s);
   }
   // Kite's basket API module, found by its own route name rather than a build-specific module id.
@@ -63,27 +71,28 @@ async function rocketKiteImport(orders,createdAt,openElsewhere=false){
     const all=(await api.getBaskets())?.data?.data;
     if(!Array.isArray(all)) return fail('Kite did not return your baskets. Reload Kite and retry.');
     const named=all.filter(b=>b?.name===NAME);
-    if(named.length>1) return fail('Kite has more than one Scanner_Import basket. Delete the extra one.');
+    if(named.length>1) return fail(`Kite has more than one ${NAME} basket. Delete the extra one.`);
     let basket=named[0];
     if(basket&&signature(basket.items)===want) return {ok:true,count:orders.length,already:true,basket};
+    if(!basket&&!orders.length) return {ok:true,count:0,already:true,basket:null};
     // Never change a basket the owner has open: Kite executes the items shown on screen.
-    if(basket?.items?.length&&(openElsewhere||rocketKiteBasketOpen())) return fail('Scanner_Import is open in Kite with different orders. Close it; the new basket is written on the next retry.');
+    if(basket?.items?.length&&(openElsewhere||rocketKiteBasketOpen(NAME))) return fail(`${NAME} is open in Kite with different orders. Close it; the new basket is written on the next retry.`);
     if(!basket){
       const id=(await api.createBasket({name:NAME}))?.data?.data;
-      if(!id) return fail('Kite did not create the Scanner_Import basket.');
+      if(!id) return fail(`Kite did not create the ${NAME} basket.`);
       basket={id,name:NAME,items:[]};
     }
     const replaced=basket.items?.length||0;
     for(const item of basket.items||[]) await api.removeBasketItem(basket.id,item.id);
     for(const [weight,o] of orders.entries()){
       const p=o.params;
-      await api.addBasketItem(basket.id,{tradingsymbol:o.instrument.tradingsymbol,exchange:o.instrument.exchange,weight,params:JSON.stringify({transaction_type:p.transactionType,product:p.product,order_type:p.orderType,validity:p.validity,validity_ttl:p.validityTTL,variety:p.variety,quantity:p.quantity,price:p.price,trigger_price:p.triggerPrice,disclosed_quantity:p.disclosedQuantity,gtt:p.gtt,tags:Array.isArray(p.tags)?p.tags:[]})});
+      await api.addBasketItem(basket.id,{tradingsymbol:o.instrument.tradingsymbol,exchange:o.instrument.exchange,weight,params:JSON.stringify({transaction_type:p.transactionType,product:p.product,order_type:p.orderType,validity:p.validity,validity_ttl:p.validityTTL,variety:p.variety,quantity:p.quantity,price:p.price,trigger_price:p.triggerPrice,disclosed_quantity:p.disclosedQuantity,...(p.gtt?{gtt:p.gtt}:{}),tags:Array.isArray(p.tags)?p.tags:[]})});
     }
     const fresh=((await api.getBaskets())?.data?.data||[]).find(b=>b?.id===basket.id);
-    if(!fresh||signature(fresh.items)!==want) return fail('Kite did not confirm every item. Inspect Scanner_Import before retrying. No orders were executed.');
+    if(!fresh||signature(fresh.items)!==want) return fail(`Kite did not confirm every item. Inspect ${NAME} before retrying. No orders were executed.`);
     rocketKiteRefresh(fresh);
     return {ok:true,count:orders.length,replaced,basket:fresh};
-  }catch(e){return fail('Kite rejected the basket update ('+(e?.response?.data?.message||e?.message||'unknown error')+'). Inspect Scanner_Import before retrying. No orders were executed.');}
+  }catch(e){return fail('Kite rejected the basket update ('+(e?.response?.data?.message||e?.message||'unknown error')+`). Inspect ${NAME} before retrying. No orders were executed.`);}
   finally{window.__rocketImportBusy=false;}
 }
-if(typeof module!=='undefined') module.exports={rocketKiteImport,rocketKiteBasketOpen,rocketKiteRefresh};
+if(typeof module!=='undefined') module.exports={rocketKiteImport,rocketKiteBasketOpen,rocketKiteRefresh,ROCKET_BASKET};

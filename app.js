@@ -1,5 +1,5 @@
 const BUILD_TS='2026-09-29 14:00 IST'; // release build time (IST)
-const APP_VERSION=1452;
+const APP_VERSION=1453;
 const RADAR_SCORE_VERSION='v1419-recross-batches'; // Eligible on crossing the score floor at any time; selected model's evolving target, T+2 exit.
 
 // ── v1358: AN UNCAUGHT ERROR MUST NAME ITSELF ─────────────────────────────────────────────────
@@ -13726,7 +13726,7 @@ function refreshStrategySafety(){
 }
 function startStreamRefresh(){
   if(_streamRefreshTimer) return;
-  if(!startStreamRefresh.btst){startStreamRefresh.btst=setInterval(()=>{loadBtstPicks();loadKiteMargins();loadKiteGtts();loadProfitLockStatus();loadAutoBuyStatus();try{resetCrossAlertsIfNewDay();checkTimeAlerts();checkCrossingAlerts();}catch(e){}},20000);loadBtstPicks();loadKiteMargins();loadKiteGtts();loadProfitLockStatus();loadAutoBuyStatus();try{resetCrossAlertsIfNewDay();checkTimeAlerts();checkCrossingAlerts();}catch(e){}
+  if(!startStreamRefresh.btst){startStreamRefresh.btst=setInterval(()=>{loadBtstPicks();loadKiteMargins();loadKiteGtts();loadProfitLockStatus();loadAutoBuyStatus();syncSellBasketToKite();try{resetCrossAlertsIfNewDay();checkTimeAlerts();checkCrossingAlerts();}catch(e){}},20000);loadBtstPicks();loadKiteMargins();loadKiteGtts();loadProfitLockStatus();loadAutoBuyStatus();syncSellBasketToKite();try{resetCrossAlertsIfNewDay();checkTimeAlerts();checkCrossingAlerts();}catch(e){}
     try{seedSavedBasketCount();}catch(e){}}
   _streamRefreshUiTimer=setInterval(()=>{try{refreshStrategySafety();renderLiveTapeBar();}catch(e){console.warn('Strategy safety refresh',e);}},1000);
   if(!_streamVisibilityBound){
@@ -14613,7 +14613,7 @@ function scheduleKiteBasketSync(delay=500){
   _kiteSyncTimer=setTimeout(()=>{_kiteSyncTimer=null;sendBasketToKite(true);},delay);
 }
 // Every Kite basket outcome goes to the phone through the helper's ntfy push: the basket-file alert alone
-// cannot say whether Scanner_Import was actually updated. The helper de-duplicates repeats.
+// cannot say whether Scanner_Buy was actually updated. The helper de-duplicates repeats.
 let _kiteLastReported='';
 function reportKiteBasketOutcome(ok,message){
   const key=(ok?'1':'0')+message;
@@ -14621,12 +14621,55 @@ function reportKiteBasketOutcome(ok,message){
   _kiteLastReported=key;
   readHelperResponse(`/api/notify/kite?ok=${ok?1:0}&msg=${encodeURIComponent(String(message).slice(0,400))}`,{timeout:6000}).catch(()=>{});
 }
+// One round trip to the Kite Basket Bridge extension. BUY -> Scanner_Buy, SELL -> Scanner_Sell.
+function kiteBridgeRequest(orders,side='BUY',automatic=true){
+  const id=crypto.randomUUID();
+  return new Promise((resolve,reject)=>{
+    const listener=event=>{
+      // A relay without `bridge` is a copy orphaned by an extension reload; its reply is not the extension's answer.
+      if(event.source!==window||event.origin!==location.origin||event.data?.type!=='RS_KITE_RESULT'||event.data.id!==id||!event.data.bridge)return;
+      clearTimeout(timer);window.removeEventListener('message',listener);
+      const [maj,min]=String(event.data.bridge).split('.').map(Number);
+      if(side==='SELL'&&!(maj>1||(maj===1&&min>=3))) return reject(new Error('Kite Basket Bridge '+event.data.bridge+' cannot write Scanner_Sell. In chrome://extensions reload it (1.3.0), then reload this page.'));
+      resolve(event.data);
+    };
+    const timer=setTimeout(()=>{
+      window.removeEventListener('message',listener);
+      reject(new Error('No reply from the Kite Basket Bridge. In chrome://extensions reload Kite Basket Bridge (1.3.0 or later), then reload this page.'));
+    },30000);
+    window.addEventListener('message',listener);
+    window.postMessage({type:'RS_KITE_PREPARE',id,side,automatic,createdAt:Date.now(),orders:orders.map(o=>({id:o.id,instrument:o.instrument,weight:o.weight,params:o.params}))},location.origin);
+  });
+}
+// The helper writes Zerodha_Basket_Sell.json when a profit-lock stop is hit (it cannot place API orders
+// without a static IP). Mirror it into Scanner_Sell on every 20 s poll; an empty file empties the basket.
+let _kiteSellSent=null,_kiteSellBusy=false;
+async function syncSellBasketToKite(){
+  if(_kiteSellBusy||_kiteTransferBusy||!KITE_API) return;
+  const list=await readHelperResponse('/api/inputs/file?name=Zerodha_Basket_Sell.json',{timeout:6000}).catch(()=>null);
+  if(!Array.isArray(list)) return;
+  const sig=list.map(o=>o?.instrument?.tradingsymbol+':'+o?.params?.quantity).sort().join('|');
+  if(sig===_kiteSellSent) return;
+  _kiteSellBusy=true;
+  try{
+    const r=await kiteBridgeRequest(list,'SELL');
+    if(!r.ok) throw new Error(r.why||'Kite did not confirm Scanner_Sell.');
+    _kiteSellSent=sig;
+    if(list.length){
+      const names=list.map(o=>o.instrument.tradingsymbol+' x'+o.params.quantity).join(', ');
+      reportKiteBasketOutcome(true,`SELL ${names} ${r.already?'already in':'written to'} Scanner_Sell. Open Scanner_Sell in Kite and Execute.`);
+      showToast(`<strong>Scanner_Sell ready:</strong> ${escHtml(names)}. Open it in Kite and Execute.`,10000,true);
+    }
+  }catch(e){
+    reportKiteBasketOutcome(false,'Scanner_Sell: '+(e?.message||String(e)));
+  }finally{_kiteSellBusy=false;}
+}
 async function sendBasketToKite(automatic=false){
   if(_kiteTransferBusy) return;
-  // v1451: with Auto-Buy ON the helper places these orders itself; a copy in Scanner_Import would
+  // v1451: with Auto-Buy ON the helper places these orders itself; a copy in Scanner_Buy would
   // be bought a second time if executed in Kite.
   if(typeof AUTO_BUY_ENABLED!=='undefined'&&AUTO_BUY_ENABLED){
-    if(!automatic) showToast('<strong>Auto-Buy is ON:</strong> the helper buys GO baskets directly, so nothing is sent to Kite Scanner_Import. Turn Auto-Buy off to use the basket.',7000,true);
+    if(!automatic) showToast('<strong>Auto-Buy is ON:</strong> the helper buys GO baskets directly, so nothing is sent to Kite Scanner_Buy. Turn Auto-Buy off to use the basket.',7000,true);
     return;
   }
   _kiteTransferBusy=true;
@@ -14643,25 +14686,12 @@ async function sendBasketToKite(automatic=false){
       if(signature!==_lastSavedBasketSig) return;
     }else await requestBasketSync({manual:true,precomputedOrders:orders});
     if(getCanonicalBasketSignature(orders)!==getCanonicalBasketSignature(getDesiredBasketOrders())) throw new Error('Recommendations changed. Send the current basket again.');
-    const id=crypto.randomUUID();
-    const result=await new Promise((resolve,reject)=>{
-      const listener=event=>{
-        // A relay without `bridge` is a copy orphaned by an extension reload; its reply is not the extension's answer.
-        if(event.source!==window||event.origin!==location.origin||event.data?.type!=='RS_KITE_RESULT'||event.data.id!==id||!event.data.bridge)return;
-        clearTimeout(timer);window.removeEventListener('message',listener);resolve(event.data);
-      };
-      const timer=setTimeout(()=>{
-        window.removeEventListener('message',listener);
-        reject(new Error('No reply from the Kite Basket Bridge. In chrome://extensions reload Kite Basket Bridge (1.2.0 or later), then reload this page.'));
-      },30000);
-      window.addEventListener('message',listener);
-      window.postMessage({type:'RS_KITE_PREPARE',id,automatic,createdAt:Date.now(),orders:orders.map(o=>({id:o.id,instrument:o.instrument,weight:o.weight,params:o.params}))},location.origin);
-    });
+    const result=await kiteBridgeRequest(orders,'BUY',automatic);
     if(!result.ok) throw new Error(result.why||'Kite did not confirm the basket.');
     _kiteSentSignature=signature;
-    reportKiteBasketOutcome(true,`${result.count} order${result.count===1?'':'s'} ${result.already?'already in':'written to'} Scanner_Import: ${orders.map(o=>o.instrument.tradingsymbol+' x'+o.params.quantity).join(', ')}. Review and Execute in Kite.`);
-    if(button) button.title='Scanner_Import is ready. Review and Execute in Kite. New funded baskets are sent automatically.';
-    showToast(`<strong>${result.count} orders ${result.already?'already in':'loaded into'} Scanner_Import.</strong> Review and Execute in Kite.`,7000);
+    reportKiteBasketOutcome(true,`${result.count} order${result.count===1?'':'s'} ${result.already?'already in':'written to'} Scanner_Buy: ${orders.map(o=>o.instrument.tradingsymbol+' x'+o.params.quantity).join(', ')}. Review and Execute in Kite.`);
+    if(button) button.title='Scanner_Buy is ready. Review and Execute in Kite. New funded baskets are sent automatically.';
+    showToast(`<strong>${result.count} orders ${result.already?'already in':'loaded into'} Scanner_Buy.</strong> Review and Execute in Kite.`,7000);
   }catch(e){
     retry=automatic;
     reportKiteBasketOutcome(false,e?.message||String(e));
