@@ -7750,6 +7750,21 @@ async function loadKiteGtts(){
 function kiteGttsFor(sym){
   return Date.now()-KITE_GTTS.at<5*60*1000?(KITE_GTTS.bySym.get(normSym(sym))||null):null;
 }
+// ── Profit Lock / Ratchet Trailing Exit Status (v1448) ──────────────────────
+// The helper tracks every held position's peak price on every WebSocket tick and arms a ratchet
+// trailing exit when a position reaches +1.8%. This poller fetches the tracker state so the
+// browser can show armed / triggered badges and feed peakPnlPct to strategy.js evaluateExit.
+var PROFIT_LOCK_STATUS={bySym:new Map(),at:0};
+async function loadProfitLockStatus(){
+  const j=await readHelperResponse('/api/profit-lock/status',{timeout:5000}).catch(()=>null);
+  if(!j||!j.ok||!Array.isArray(j.positions)) return;
+  const bySym=new Map();
+  for(const p of j.positions){if(p&&p.sym)bySym.set(normSym(p.sym),p);}
+  PROFIT_LOCK_STATUS={bySym,at:j.asOf||Date.now()};
+}
+function profitLockFor(sym){
+  return Date.now()-PROFIT_LOCK_STATUS.at<60000?(PROFIT_LOCK_STATUS.bySym.get(normSym(sym))||null):null;
+}
 function getEffectiveCapital(){
   const v=parseFloat(document.getElementById('fCapital')?.value);
   if(Number.isFinite(v)&&v>0) return v;
@@ -9017,8 +9032,11 @@ function buildOpenPositionsPanel(query=''){
           const exitCheck = p.exitVerdict;
 
           if (exitCheck?.shouldExit) {
-            const bCol = exitCheck.exitType === 'TARGET' ? 'var(--green)' : 'var(--red)';
-            stratBadge = `<div style="font-size:11px;background:${bCol};color:#fff;padding:2px 6px;border-radius:4px;font-weight:800;display:inline-block;margin-top:2px;letter-spacing:0.5px" title="${escHtml(exitCheck.reason)}">🚨 EXIT: ${escHtml(exitCheck.exitType)}</div>`;
+            const bCol = exitCheck.exitType === 'TARGET' || exitCheck.exitType === 'PROFIT_LOCK' ? 'var(--green)' : 'var(--red)';
+            const icon = exitCheck.exitType === 'PROFIT_LOCK' ? '🛡️' : '🚨';
+            stratBadge = `<div style="font-size:11px;background:${bCol};color:#fff;padding:2px 6px;border-radius:4px;font-weight:800;display:inline-block;margin-top:2px;letter-spacing:0.5px" title="${escHtml(exitCheck.reason)}">${icon} EXIT: ${escHtml(exitCheck.exitType)}</div>`;
+          } else if (exitCheck?.lockArmed) {
+            stratBadge = `<div style="font-size:11px;background:var(--amber);color:#000;padding:2px 6px;border-radius:4px;font-weight:700;display:inline-block;margin-top:2px" title="${escHtml(exitCheck.reason)}">🛡️ LOCK +${exitCheck.lockStopPct}%</div>`;
           } else {
             stratBadge = `<div style="font-size:10px;color:var(--t3)">${row.daysHeld==null?'Holding age unknown':`Day ${row.daysHeld}/${reviewDays}`}</div>`;
           }
@@ -10663,13 +10681,15 @@ function getOpenPositionTapePolicy(sym,pos){
   const stale=!isEquitySession(Date.now())?'Market closed':universePriceStaleness()||stockPriceStaleness(symbol);
   const price=Number(quote?.price)>0?Number(quote.price):Number(pos?.ltp)||null;
   const tgtPct=executedBtstTarget(symbol)||currentModelTargetPct();
-  const verdict=stale?{action:'WAIT',reason:stale,shouldExit:false}:RocketStrategy.evaluateExit({avgCost:avg,daysHeld:days,targetPct:tgtPct},price);
+  const plk=profitLockFor(symbol);
+  const verdict=stale?{action:'WAIT',reason:stale,shouldExit:false}:RocketStrategy.evaluateExit({avgCost:avg,daysHeld:days,targetPct:tgtPct,peakPnlPct:plk?.peakPnlPct??null},price);
   const {STOP_LOSS_PCT:slPct}=RocketStrategy.CONFIG;
   const targetPrice=avg>0?+(avg*(1+tgtPct/100)).toFixed(2):null,stopPrice=avg>0&&slPct>0?+(avg*(1-slPct/100)).toFixed(2):null;
   return {symbol,qty,price,open:quote?.open,signal:verdict.action,signalSort:verdict.shouldExit?0:1,
     why:verdict.reason,exitVerdict:verdict,targetPrice,stopPrice,targetPct:tgtPct,stopPct:slPct,
     targetWhy:`+${tgtPct}% GTT from average buy cost`,stopWhy:slPct>0?`-${slPct}% from average buy cost`:'No stop: sell at 15:20 on T+2 if the target has not filled',
-    pacePct:null,paceRs:null,daysHeld:days,ageUnknown:days==null,afterCostFloor:null};
+    pacePct:null,paceRs:null,daysHeld:days,ageUnknown:days==null,afterCostFloor:null,
+    profitLock:plk||null,lockStopPrice:verdict.lockStopPrice||null};
 }
 
 function getPositionAction(sym,pos){
@@ -13629,7 +13649,7 @@ function refreshStrategySafety(){
 }
 function startStreamRefresh(){
   if(_streamRefreshTimer) return;
-  if(!startStreamRefresh.btst){startStreamRefresh.btst=setInterval(()=>{loadBtstPicks();loadKiteMargins();loadKiteGtts();try{resetCrossAlertsIfNewDay();checkTimeAlerts();checkCrossingAlerts();}catch(e){}},20000);loadBtstPicks();loadKiteMargins();loadKiteGtts();try{resetCrossAlertsIfNewDay();checkTimeAlerts();checkCrossingAlerts();}catch(e){}
+  if(!startStreamRefresh.btst){startStreamRefresh.btst=setInterval(()=>{loadBtstPicks();loadKiteMargins();loadKiteGtts();loadProfitLockStatus();try{resetCrossAlertsIfNewDay();checkTimeAlerts();checkCrossingAlerts();}catch(e){}},20000);loadBtstPicks();loadKiteMargins();loadKiteGtts();loadProfitLockStatus();try{resetCrossAlertsIfNewDay();checkTimeAlerts();checkCrossingAlerts();}catch(e){}
     try{seedSavedBasketCount();}catch(e){}}
   _streamRefreshUiTimer=setInterval(()=>{try{refreshStrategySafety();renderLiveTapeBar();}catch(e){console.warn('Strategy safety refresh',e);}},1000);
   if(!_streamVisibilityBound){

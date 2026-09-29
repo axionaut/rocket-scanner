@@ -34,7 +34,11 @@
     MAX_HOLD_DAYS: 2,            // exit on the second trading session after entry
     EXIT_AT_MIN: 15 * 60 + 20,   // 15:20 IST time exit
     TOP_K: 5,                    // positions per day (equal weight)
-    MIN_ALLOCATION_RS: 5000.0    // ₹5,000 minimum allocation per stock to ensure profits clear DP & charges
+    MIN_ALLOCATION_RS: 5000.0,   // ₹5,000 minimum allocation per stock to ensure profits clear DP & charges
+    // Profit Lock / Ratchet Trailing Exit
+    PROFIT_LOCK_ACTIVATION_PCT: 1.8, // Arm ratchet when position reaches +1.8%
+    PROFIT_LOCK_FLOOR_PCT: 1.0,      // Minimum guaranteed profit floor once armed (+1.0%)
+    PROFIT_LOCK_TRAIL_DROP_PCT: 0.7  // Exit if price drops 0.7% from peak
   };
 
   /**
@@ -137,6 +141,29 @@
       };
     }
 
+    // Rule 1.5: Profit Lock / Ratchet Trailing Exit
+    // If trade touched +1.8% or more, lock +1.0% floor and trail 0.7% from peak
+    const peakPnlPct = Number(position.peakPnlPct ?? position.highPnlPct);
+    const actPct = CONFIG.PROFIT_LOCK_ACTIVATION_PCT || 1.8;
+    const floorPct = CONFIG.PROFIT_LOCK_FLOOR_PCT || 1.0;
+    const dropPct = CONFIG.PROFIT_LOCK_TRAIL_DROP_PCT || 0.7;
+    const isLockArmed = Number.isFinite(peakPnlPct) && peakPnlPct >= actPct;
+    const effectiveStopPct = isLockArmed ? Math.max(floorPct, +(peakPnlPct - dropPct).toFixed(2)) : null;
+    const lockStopPrice = effectiveStopPct != null && avgCost > 0 ? +(avgCost * (1 + effectiveStopPct / 100)).toFixed(2) : null;
+
+    if (isLockArmed && pnlPct <= effectiveStopPct) {
+      return {
+        shouldExit: true,
+        action: 'SELL',
+        exitType: 'PROFIT_LOCK',
+        pnlPct,
+        peakPnlPct,
+        effectiveStopPct,
+        lockStopPrice,
+        reason: `Profit lock triggered: dropped to +${pnlPct}% from +${peakPnlPct}% peak (trail stop was +${effectiveStopPct}%)`
+      };
+    }
+
     // Rule 2: Hard Stop-Loss Hit (only when a stop is configured)
     if (CONFIG.STOP_LOSS_PCT > 0 && pnlPct <= -CONFIG.STOP_LOSS_PCT) {
       return {
@@ -165,9 +192,15 @@
       return {
         shouldExit: false,
         action: 'HOLD',
-        exitType: 'ACTIVE',
+        exitType: isLockArmed ? 'PROFIT_LOCK_ARMED' : 'ACTIVE',
         pnlPct,
-        reason: `Target +${targetPct}% not reached; time exit at 15:20 today (P&L ${pnlPct > 0 ? '+' : ''}${pnlPct}%)`
+        peakPnlPct: isLockArmed ? peakPnlPct : null,
+        lockStopPct: effectiveStopPct,
+        lockStopPrice,
+        lockArmed: isLockArmed,
+        reason: isLockArmed
+          ? `Profit lock active: peak +${peakPnlPct}%, stop ratcheted to +${effectiveStopPct}% (P&L ${pnlPct > 0 ? '+' : ''}${pnlPct}%)`
+          : `Target +${targetPct}% not reached; time exit at 15:20 today (P&L ${pnlPct > 0 ? '+' : ''}${pnlPct}%)`
       };
     }
 
@@ -175,9 +208,15 @@
     return {
       shouldExit: false,
       action: 'HOLD',
-      exitType: 'ACTIVE',
+      exitType: isLockArmed ? 'PROFIT_LOCK_ARMED' : 'ACTIVE',
       pnlPct,
-      reason: `Target +${targetPct}%; time exit 15:20 on T+2 (${Math.max(0,CONFIG.MAX_HOLD_DAYS-daysHeld)} sessions remaining; P&L ${pnlPct > 0 ? '+' : ''}${pnlPct}%)`
+      peakPnlPct: isLockArmed ? peakPnlPct : null,
+      lockStopPct: effectiveStopPct,
+      lockStopPrice,
+      lockArmed: isLockArmed,
+      reason: isLockArmed
+        ? `Profit lock active: peak +${peakPnlPct}%, stop ratcheted to +${effectiveStopPct}% (P&L ${pnlPct > 0 ? '+' : ''}${pnlPct}%)`
+        : `Target +${targetPct}%; time exit 15:20 on T+2 (${Math.max(0,CONFIG.MAX_HOLD_DAYS-daysHeld)} sessions remaining; P&L ${pnlPct > 0 ? '+' : ''}${pnlPct}%)`
     };
   }
 
