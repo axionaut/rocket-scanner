@@ -1587,10 +1587,7 @@ function chartLinkButtons(sym,extraStyle=''){
       +` style="${base}border:1px solid rgba(56,189,248,.35);background:rgba(56,189,248,.10);color:var(--cyan);${extraStyle}">Z</button>`
     +`<button type="button" onclick='event.stopPropagation();tradingViewOpen(${JSON.stringify(n)})'`
       +` title="Open ${escHtml(s)} on TradingView"`
-      +` style="${base}border:1px solid rgba(148,163,184,.35);background:rgba(148,163,184,.12);color:var(--t2);${extraStyle}">T</button>`
-    +`<button type="button" onclick="event.stopPropagation();kiteBuyOpen(${escHtml(JSON.stringify(n))})"`
-      +` aria-label="Buy ${escHtml(s)} in Zerodha" title="Open the allocated BUY order for ${escHtml(s)} in Zerodha"`
-      +` style="${base}border:1px solid rgba(34,197,94,.35);background:rgba(34,197,94,.10);color:var(--green);${extraStyle}">B</button>`;
+      +` style="${base}border:1px solid rgba(148,163,184,.35);background:rgba(148,163,184,.12);color:var(--t2);${extraStyle}">T</button>`;
 }
 function kitePublisherKey(login){
   try{
@@ -7777,7 +7774,8 @@ async function loadAutoBuyStatus(){
     executedToday: Array.isArray(j.executedToday) ? j.executedToday : [],
     countToday: Number(j.countToday) || 0,
     at: j.asOf || Date.now(),
-    blockedWhy: j.apiOrdersAllowed === false ? String(j.why || 'API orders disabled') : ''
+    mode: j.mode || (j.apiOrdersAllowed ? 'api' : 'gtt-dip'),
+    blockedWhy: (j.apiOrdersAllowed === false && !j.mode && j.why) ? String(j.why) : ''
   };
   if (AUTO_BUY_STATUS.enabled !== AUTO_BUY_ENABLED) {
     AUTO_BUY_ENABLED = AUTO_BUY_STATUS.enabled;
@@ -7801,7 +7799,8 @@ async function toggleAutoBuy(){
     if (j && j.ok) {
       AUTO_BUY_ENABLED = !!j.enabled;
       localStorage.setItem('rs_auto_buy_enabled', AUTO_BUY_ENABLED ? '1' : '0');
-      AUTO_BUY_STATUS.blockedWhy = j.apiOrdersAllowed === false ? String(j.why || 'API orders disabled') : '';
+      AUTO_BUY_STATUS.mode = j.mode || (j.apiOrdersAllowed ? 'api' : 'gtt-dip');
+      AUTO_BUY_STATUS.blockedWhy = (j.apiOrdersAllowed === false && !j.mode && j.why) ? String(j.why) : '';
     }
   } catch (e) {
     console.warn('Auto-buy toggle sync notice:', e);
@@ -7812,7 +7811,7 @@ async function toggleAutoBuy(){
     return;
   }
   showToast(AUTO_BUY_ENABLED
-    ? '<strong>⚡ Auto-Buy ON:</strong> Qualifying basket recommendations will be executed automatically via Kite API.' 
+    ? '<strong>⚡ Auto-Buy ON:</strong> Qualifying recommendations will automatically place BUY GTT orders on dip with +target GTT.' 
     : '<strong>⚡ Auto-Buy OFF:</strong> Baskets will be exported to Zerodha_Basket_Buy.json for manual execution.',
     6000
   );
@@ -7827,7 +7826,7 @@ function renderAutoBuyBtn(){
     btn.style.borderColor = 'rgba(16,185,129,.4)';
     btn.style.color = 'var(--green)';
     span.textContent = 'ON';
-    btn.title = 'Auto-Buy is ENABLED. Qualifying baskets are automatically executed via Kite API with +target GTT & profit lock ratchet trailing exit. Click to disable.';
+    btn.title = 'Auto-Buy is ENABLED via Dip-Buy GTTs. Qualifying recommendations automatically place BUY GTTs on 0.25%/9p dip with target GTT upon fill. Click to disable.';
   } else {
     btn.style.background = 'var(--bg-card)';
     btn.style.borderColor = 'var(--border)';
@@ -14738,7 +14737,7 @@ async function exportBasket(){
     const hasTgt = orders.some(o => o.params?.gtt?.target);
     const hasSl = orders.some(o => o.params?.gtt?.stoploss);
     const gttNote = hasTgt && hasSl ? ' with Target & SL GTTs' : hasTgt ? ' with target GTTs' : '';
-    const autoNote = AUTO_BUY_ENABLED ? ' (⚡ Auto-Buy ON: Executing via Kite API)' : '';
+    const autoNote = AUTO_BUY_ENABLED ? ' (⚡ Auto-Buy ON: Executing via Dip-Buy GTTs)' : '';
     showToast(`<strong>Exported ${orders.length} CNC BUY orders</strong> for ${new Set(orders.map(o => o._meta.sym)).size} selected stocks${gttNote}${autoNote} as Zerodha_Basket_Buy.json`);
   } catch(e) {
     console.error('Basket export failed', e);
