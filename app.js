@@ -1,5 +1,5 @@
-const BUILD_TS='2026-09-29 14:00 IST'; // release build time (IST)
-const APP_VERSION=1453;
+const BUILD_TS='2026-09-30 09:50 IST'; // release build time (IST)
+const APP_VERSION=1454;
 const RADAR_SCORE_VERSION='v1419-recross-batches'; // Eligible on crossing the score floor at any time; selected model's evolving target, T+2 exit.
 
 // ── v1358: AN UNCAUGHT ERROR MUST NAME ITSELF ─────────────────────────────────────────────────
@@ -14630,12 +14630,12 @@ function kiteBridgeRequest(orders,side='BUY',automatic=true){
       if(event.source!==window||event.origin!==location.origin||event.data?.type!=='RS_KITE_RESULT'||event.data.id!==id||!event.data.bridge)return;
       clearTimeout(timer);window.removeEventListener('message',listener);
       const [maj,min]=String(event.data.bridge).split('.').map(Number);
-      if(side==='SELL'&&!(maj>1||(maj===1&&min>=3))) return reject(new Error('Kite Basket Bridge '+event.data.bridge+' cannot write Scanner_Sell. In chrome://extensions reload it (1.3.0), then reload this page.'));
+      if(side==='SELL'&&!(maj>1||(maj===1&&min>=4))) return reject(new Error('Kite Basket Bridge '+event.data.bridge+' cannot write Scanner_Sell (LIMIT sells need 1.4.0). In chrome://extensions reload it, then reload this page.'));
       resolve(event.data);
     };
     const timer=setTimeout(()=>{
       window.removeEventListener('message',listener);
-      reject(new Error('No reply from the Kite Basket Bridge. In chrome://extensions reload Kite Basket Bridge (1.3.0 or later), then reload this page.'));
+      reject(new Error('No reply from the Kite Basket Bridge. In chrome://extensions reload Kite Basket Bridge (1.4.0 or later), then reload this page.'));
     },30000);
     window.addEventListener('message',listener);
     window.postMessage({type:'RS_KITE_PREPARE',id,side,automatic,createdAt:Date.now(),orders:orders.map(o=>({id:o.id,instrument:o.instrument,weight:o.weight,params:o.params}))},location.origin);
@@ -14648,7 +14648,7 @@ async function syncSellBasketToKite(){
   if(_kiteSellBusy||_kiteTransferBusy||!KITE_API) return;
   const list=await readHelperResponse('/api/inputs/file?name=Zerodha_Basket_Sell.json',{timeout:6000}).catch(()=>null);
   if(!Array.isArray(list)) return;
-  const sig=list.map(o=>o?.instrument?.tradingsymbol+':'+o?.params?.quantity).sort().join('|');
+  const sig=list.map(o=>o?.instrument?.tradingsymbol+':'+o?.params?.quantity+'@'+(o?.params?.price||0)).sort().join('|');
   if(sig===_kiteSellSent) return;
   _kiteSellBusy=true;
   try{
@@ -14656,7 +14656,7 @@ async function syncSellBasketToKite(){
     if(!r.ok) throw new Error(r.why||'Kite did not confirm Scanner_Sell.');
     _kiteSellSent=sig;
     if(list.length){
-      const names=list.map(o=>o.instrument.tradingsymbol+' x'+o.params.quantity).join(', ');
+      const names=list.map(o=>o.instrument.tradingsymbol+' x'+o.params.quantity+(o.params.orderType==='LIMIT'?' @'+o.params.price:'')).join(', ');
       reportKiteBasketOutcome(true,`SELL ${names} ${r.already?'already in':'written to'} Scanner_Sell. Open Scanner_Sell in Kite and Execute.`);
       showToast(`<strong>Scanner_Sell ready:</strong> ${escHtml(names)}. Open it in Kite and Execute.`,10000,true);
     }

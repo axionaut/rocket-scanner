@@ -41,10 +41,11 @@ async function rocketKiteImport(orders,createdAt,openElsewhere=false,side='BUY')
   const symbols=new Set();
   for(const o of orders){
     const p=o?.params,s=o?.instrument?.tradingsymbol;
-    const common=s&&!symbols.has(s)&&o.instrument.exchange==='NSE'&&p?.product==='CNC'&&p.orderType==='MARKET'&&p.variety==='regular'&&p.validity==='DAY'&&Number.isSafeInteger(p.quantity)&&p.quantity>0;
+    const common=s&&!symbols.has(s)&&o.instrument.exchange==='NSE'&&p?.product==='CNC'&&p.variety==='regular'&&p.validity==='DAY'&&Number.isSafeInteger(p.quantity)&&p.quantity>0;
     const ok=sell
-      ? common&&p.transactionType==='SELL'&&!p.gtt
-      : common&&p.transactionType==='BUY'&&Number.isFinite(p.gtt?.target)&&p.gtt.target>0&&Number(p.gtt?.stoploss||0)===0;
+      // 1.4.0: a profit-lock sell is a LIMIT at the lock floor (never below it), so SELL takes LIMIT with a price.
+      ? common&&p.transactionType==='SELL'&&!p.gtt&&(p.orderType==='MARKET'||(p.orderType==='LIMIT'&&Number.isFinite(p.price)&&p.price>0))
+      : common&&p.orderType==='MARKET'&&p.transactionType==='BUY'&&Number.isFinite(p.gtt?.target)&&p.gtt.target>0&&Number(p.gtt?.stoploss||0)===0;
     if(!ok) return fail(sell?'Invalid CNC sell order. Nothing was written.':'Invalid funded CNC buy order. Nothing was imported.');
     symbols.add(s);
   }

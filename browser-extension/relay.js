@@ -2,7 +2,7 @@
 // Relays Rocket Scanner's basket requests to the extension. Replies carry `bridge` so the app can ignore a relay
 // left behind by an older, reloaded copy of this extension (it can no longer reach the extension).
 (()=>{
-  const BRIDGE='1.3.0';
+  const BRIDGE='1.4.0';
   const listener=async event=>{
     if(event.source!==window || event.origin!==location.origin) return;
     const m=event.data;
