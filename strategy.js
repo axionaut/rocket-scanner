@@ -36,7 +36,7 @@
     TOP_K: 5,                    // positions per day (equal weight)
     MIN_ALLOCATION_RS: 5000.0,   // ₹5,000 minimum allocation per stock to ensure profits clear DP & charges
     // Profit Lock / Ratchet Trailing Exit
-    PROFIT_LOCK_ACTIVATION_PCT: 1.0, // Arm ratchet when position reaches +1.0%
+    PROFIT_LOCK_ACTIVATION_PCT: 0,   // v1455: early lock OFF (0). Replay on 65 live signals: every +1-2% lock lost to the target alone; only the runner (arm at target, 1% trail) beat it
     PROFIT_LOCK_FLOOR_PCT: 0.3,      // Minimum guaranteed profit floor once armed (+0.3% break-even)
     PROFIT_LOCK_STEP2_PCT: 1.5,      // When peak reaches +1.5%, step floor up to +1.0%
     PROFIT_LOCK_TRAIL_DROP_PCT: 0.5  // Exit if price drops 0.5% from peak (min 10 paise)
@@ -160,12 +160,12 @@
     // Rule 1.5: Profit Lock / Ratchet Trailing Exit
     // If trade touched +1.0% or more, lock +0.3% break-even floor (+1.0% floor once peak >= +1.5%) and trail 0.5% (min 10p)
     const peakPnlPct = Number(position.peakPnlPct ?? position.highPnlPct);
-    const actPct = CONFIG.PROFIT_LOCK_ACTIVATION_PCT || 1.0;
+    const actPct = Number(CONFIG.PROFIT_LOCK_ACTIVATION_PCT) || 0;
     const floorPct = (Number.isFinite(peakPnlPct) && peakPnlPct >= (CONFIG.PROFIT_LOCK_STEP2_PCT || 1.5))
       ? 1.0
       : (CONFIG.PROFIT_LOCK_FLOOR_PCT || 0.3);
     const dropPct = CONFIG.PROFIT_LOCK_TRAIL_DROP_PCT || 0.5;
-    const isLockArmed = Number.isFinite(peakPnlPct) && peakPnlPct >= actPct;
+    const isLockArmed = actPct > 0 && Number.isFinite(peakPnlPct) && peakPnlPct >= actPct;
     const peakPrice = isLockArmed && avgCost > 0 ? avgCost * (1 + peakPnlPct / 100) : null;
     const trailDropAmount = peakPrice != null ? Math.max(peakPrice * (dropPct / 100), 0.10) : 0;
     const trailStopPrice = peakPrice != null ? +(peakPrice - trailDropAmount).toFixed(2) : null;
