@@ -1,5 +1,5 @@
-const BUILD_TS='2026-10-01 15:20 IST'; // release build time (IST)
-const APP_VERSION=1462;
+const BUILD_TS='2026-10-01 18:02 IST'; // release build time (IST)
+const APP_VERSION=1463;
 const RADAR_SCORE_VERSION='v1419-recross-batches'; // Eligible on crossing the score floor at any time; selected model's evolving target, T+2 exit.
 
 // ── v1358: AN UNCAUGHT ERROR MUST NAME ITSELF ─────────────────────────────────────────────────
@@ -10767,7 +10767,10 @@ function getOpenPositionTapePolicy(sym,pos){
   const price=Number(quote?.price)>0?Number(quote.price):Number(pos?.ltp)||null;
   const tgtPct=executedBtstTarget(symbol)||currentModelTargetPct();
   const plk=profitLockFor(symbol);
-  const verdict=stale?{action:'WAIT',reason:stale,shouldExit:false}:RocketStrategy.evaluateExit({avgCost:avg,daysHeld:days,targetPct:tgtPct,peakPnlPct:plk?.peakPnlPct??null,runnerStopPrice:plk?.runner&&!plk?.triggered?plk.effectiveStop:null,swingStopPrice:plk?.swingLock&&plk?.activated&&!plk?.runner&&!plk?.triggered&&plk.effectiveStop>0?plk.effectiveStop:null},price);
+  const brokerStop=plk?.stopConfirmed&&plk?.stopGttId&&plk?.stopGttTrigger>0?plk.stopGttTrigger:null;
+  const verdict=stale?{action:'WAIT',reason:stale,shouldExit:false}:RocketStrategy.evaluateExit({avgCost:avg,daysHeld:days,targetPct:tgtPct,peakPnlPct:plk?.peakPnlPct??null,runnerStopPrice:plk?.runner&&!plk?.triggered?brokerStop:null,swingStopPrice:plk?.swingLock&&plk?.activated&&!plk?.runner&&!plk?.triggered?brokerStop:null},price);
+  if(!stale&&plk?.activated&&!plk?.triggered&&!brokerStop&&!verdict.shouldExit) verdict.reason='Profit protection pending broker confirmation. '+verdict.reason;
+  else if(!stale&&plk?.swingDataMissing&&!plk?.activated&&!verdict.shouldExit) verdict.reason='Swing estimate unavailable; profit trail not armed. '+verdict.reason;
   const {STOP_LOSS_PCT:slPct}=RocketStrategy.CONFIG;
   const targetPrice=avg>0?+(avg*(1+tgtPct/100)).toFixed(2):null,stopPrice=avg>0&&slPct>0?+(avg*(1-slPct/100)).toFixed(2):null;
   return {symbol,qty,price,open:quote?.open,signal:verdict.action,signalSort:verdict.shouldExit?0:1,
