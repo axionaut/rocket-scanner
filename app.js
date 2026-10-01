@@ -1,5 +1,5 @@
-const BUILD_TS='2026-10-01 12:55 IST'; // release build time (IST)
-const APP_VERSION=1459;
+const BUILD_TS='2026-10-01 15:05 IST'; // release build time (IST)
+const APP_VERSION=1460;
 const RADAR_SCORE_VERSION='v1419-recross-batches'; // Eligible on crossing the score floor at any time; selected model's evolving target, T+2 exit.
 
 // ── v1358: AN UNCAUGHT ERROR MUST NAME ITSELF ─────────────────────────────────────────────────
@@ -4410,6 +4410,8 @@ function checkTimeAlerts(){
 // the board has already refused is exactly the one that gets acted on.
 function checkCrossingAlerts(){
   if(!ALERTS_ON) return;
+  // Owner 1 Oct: with Auto-Buy on the helper places the buy itself; the "buy the basket now" popup is noise.
+  if(AUTO_BUY_ENABLED) return;
   if(!isEquitySession(Date.now())) return;
   try{
     const fresh=[];
@@ -10513,7 +10515,9 @@ function getRowExitPolicy(row,buyPrice=null,activeInfo=null,nudgeInfo=null,qty=n
     const fr=getTradeFrictionPct(row,q*price);
     const slip=fr?.covered&&Number.isFinite(fr.entryPct)&&Number.isFinite(fr.exitPct)
       ?Math.max(0,fr.entryPct+fr.exitPct):2*BASKET_MARKET_BUDGET_BUFFER_PCT;
-    const need=respectableProfitRs(),buyCost=calcZerodhaCharges(price,q,false,false,false);
+    // 1 Oct: the floor is costs + 0.12% (the v1457 minimum-profit floor), not a fixed rupee goal. A rupee goal on a
+    // small position made the target absurd (DOLPHIN 19 x Rs 610 -> +10.82%).
+    const need=q*price*0.0012,buyCost=calcZerodhaCharges(price,q,false,false,false);
     const net=sell=>q*(sell-price)-buyCost-calcZerodhaCharges(sell,q,true,false,false)-q*price*slip/100;
     let lo=price,hi=price+Math.max(0.05,(need+buyCost)/q+price*0.01);
     for(let i=0;i<32&&net(hi)<need;i++)hi=price+2*(hi-price);
@@ -10812,7 +10816,8 @@ function modelNetEconomics(row,price,qty){
 }
 function minimumModelQuantity(row,price,maxQty){
   if(!(price>0)||maxQty<MIN_ALLOCATION_SHARES)return 0;
-  const floor=respectableProfitRs();
+  // 1 Oct (v1434 owner rule): funding needs a positive net at the target after costs, not the daily rupee goal.
+  const floor=0.01;
   if(!(modelNetEconomics(row,price,maxQty).net>=floor))return 0;
   let lo=MIN_ALLOCATION_SHARES,hi=maxQty;
   while(lo<hi){
@@ -10997,7 +11002,7 @@ function computeModelAlloc(capital,selList){
     const am={alloc:0,debit:0,qty:0,buyPrice:price,rejected:true};result[row.symbol]=am;
     if(!isStockEligible(row)){am.reason=getRowActionState(row).reason;continue;}
     if(!(price>0)){am.reason='No valid live price';continue;}
-    if(!(minQty>0)){am.reason='Model target cannot cover charges plus '+fmtINR(respectableProfitRs())+' net within Max Allocation';continue;}
+    if(!(minQty>0)){am.reason='Model target cannot cover charges within Max Allocation';continue;}
     if(maxQty<minQty||minDebit>remaining+0.001){
       am.reason=`Minimum profitable ${minQty} shares costs ${fmtINR(minDebit)} including buy charges; `
         +(maxQty<MIN_ALLOCATION_SHARES?`Max Allocation allows ${maxQty} shares`:`${fmtINR(remaining)} cash remains`);
@@ -11037,8 +11042,8 @@ function computeModelAlloc(capital,selList){
     am.charges=am.tgtPct>0?am.buyCharges+calcZerodhaCharges(am.buyPrice*(1+am.tgtPct/100),am.qty,true):null;
     const economics=modelNetEconomics(row,am.buyPrice,am.qty);
     am.expectedNet=economics.net;am.tgtPct=economics.targetPct;
-    if(!(am.expectedNet>=respectableProfitRs())){
-      am.rejected=true;am.reason='Allocated quantity does not clear the minimum net profit';am.qty=0;am.alloc=0;am.debit=0;
+    if(!(am.expectedNet>0)){
+      am.rejected=true;am.reason='Allocated quantity does not cover costs at the target';am.qty=0;am.alloc=0;am.debit=0;
     }
   }
   _allocMemo={key:memoKey,val:result};
