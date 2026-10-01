@@ -1,5 +1,5 @@
-const BUILD_TS='2026-10-01 15:05 IST'; // release build time (IST)
-const APP_VERSION=1460;
+const BUILD_TS='2026-10-01 15:20 IST'; // release build time (IST)
+const APP_VERSION=1461;
 const RADAR_SCORE_VERSION='v1419-recross-batches'; // Eligible on crossing the score floor at any time; selected model's evolving target, T+2 exit.
 
 // ── v1358: AN UNCAUGHT ERROR MUST NAME ITSELF ─────────────────────────────────────────────────
@@ -4704,7 +4704,8 @@ function todayBuyFillsBySymbol(){
 function noteCrossing(sym,score,floor){
   const st=crossingStore(),k=normSym(sym);
   if(!k||!Number.isFinite(score)||!Number.isFinite(floor)||score<floor) return st.at[k]||null;
-  if(!st.at[k]){
+  if(!st.at[k]||st.at[k].below){
+    // 1 Oct: a re-crossing after a below-floor run gets a fresh time; it is a new buy signal.
     st.at[k]={t:Date.now(),score,floor};
     saveCrossings();
   }
@@ -4734,6 +4735,7 @@ function btstCrossingState(s){
   }
   state.qty=qty;state.fillKey=fillKey;
   if(score<floor&&state.consumed) state.armed=true;
+  if(score<floor&&st.at?.[key]&&!st.at[key].below){st.at[key].below=true;saveCrossings();}
   if(score>=floor&&state.consumed&&state.armed){state.consumed=false;state.armed=false;}
   if(before!==state.qty+'|'+state.fillKey+'|'+state.consumed+'|'+state.armed) saveCrossings();
   if(state.consumed&&score>=floor)
@@ -4898,7 +4900,11 @@ function stockPriceStaleness(symbol){
   // Use the helper's per-stock observation, not another stock's tick or a candle timestamp.
   if(quote?.priceSource!=='live tick'||!Number.isFinite(at)||at<=0||at>now)
     return 'Awaiting a live tick for '+symbol;
-  if(now-at>30000||at<_freshEvidenceAfter) return symbol+' tick is stale - awaiting a fresh price';
+  // 1 Oct (DOLPHIN): a thin stock may not tick for minutes; no trade means its last price still stands. The feed
+  // itself is guarded by universePriceStaleness (ticks <30 s across the universe). Require a tick from this
+  // session after the last reconnect, not one in the last 30 s - the 30 s rule held DOLPHIN at WAIT for a whole run.
+  if(at<_freshEvidenceAfter||new Date(at+19800000).toISOString().slice(0,10)!==new Date(now+19800000).toISOString().slice(0,10))
+    return symbol+' has no live tick this session since the feed reconnected - awaiting a fresh price';
   return null;
 }
 let LIVE_BREADTH_MEMO=null;
@@ -14462,7 +14468,9 @@ function getCanonicalBasketSignature(orders){
     tgt: Number(o.params?.gtt?.target) || 0,
     sl: Number(o.params?.gtt?.stoploss) || 0,
     tags: Array.isArray(o.params?.tags) ? [...o.params.tags].sort().join(',') : '',
-    model:o._meta?.model||''
+    model:o._meta?.model||'',
+    // 1 Oct: a re-crossing must reach the helper even when symbol/qty/target repeat (DOLPHIN 14:02/14:06).
+    cross:(()=>{try{return crossingStore().at?.[normSym(o.instrument?.tradingsymbol||'')]?.t||0;}catch(e){return 0;}})()
   })).sort((a, b) => a.sym.localeCompare(b.sym) || a.qty - b.qty);
   return JSON.stringify(clean);
 }
