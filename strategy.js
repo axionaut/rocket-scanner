@@ -146,6 +146,20 @@
           : `Runner past target: helper trails the peak, stop ${stopPct >= 0 ? '+' : ''}${stopPct}% (P&L ${pnlPct > 0 ? '+' : ''}${pnlPct}%)`
       };
     }
+    // v1462: the helper's swing stop below the target (the target GTT stays live above it).
+    const swingStop = Number(position.swingStopPrice);
+    if (swingStop > 0 && pnlPct < targetPct) {
+      const stopPct = +(((swingStop - avgCost) / avgCost) * 100).toFixed(2);
+      const sell = ltp <= swingStop;
+      return {
+        shouldExit: sell, action: sell ? 'SELL' : 'HOLD', exitType: sell ? 'PROFIT_LOCK' : 'PROFIT_LOCK_ARMED',
+        pnlPct, lockArmed: true, lockStopPrice: swingStop, lockStopPct: stopPct,
+        peakPnlPct: Number.isFinite(Number(position.peakPnlPct)) ? Number(position.peakPnlPct) : null,
+        reason: sell
+          ? `Swing stop hit: +${pnlPct}% (stop +${stopPct}%)`
+          : `Profit protected: swing stop +${stopPct}%, target +${targetPct}% (P&L ${pnlPct > 0 ? '+' : ''}${pnlPct}%)`
+      };
+    }
     // Use the target attached to this executed BTST entry; legacy positions retain +3%.
     if (pnlPct >= targetPct) {
       return {
