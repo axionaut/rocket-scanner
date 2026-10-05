@@ -7,6 +7,8 @@
 !index.html
 !app.js
 !strategy.js
+!finance.js
+!intl.js
 !styles.css
 !browser-extension/
 !browser-extension/manifest.json
