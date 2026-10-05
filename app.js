@@ -1,5 +1,5 @@
-const BUILD_TS='2026-10-05 09:25 IST'; // release build time (IST)
-const APP_VERSION=1465;
+const BUILD_TS='2026-10-05 09:51 IST'; // release build time (IST)
+const APP_VERSION=1466;
 const RADAR_SCORE_VERSION='v1419-recross-batches'; // Eligible on crossing the score floor at any time; selected model's evolving target, T+2 exit.
 
 // ── v1358: AN UNCAUGHT ERROR MUST NAME ITSELF ─────────────────────────────────────────────────
@@ -10601,8 +10601,24 @@ function getBookAllocationCap(row){
   const exitable=total>0?total:l.bids.reduce((n,x)=>n+(Number(x[1])||0),0);
   return exitable>0?exitable*px:0;
 }
+// v1466: the 0.10% rail applies to the projected FULL-day turnover, not the part of the day traded so far,
+// which blocked ~20% of liquid stocks at 09:45 and ~11% at 10:30. Median share of a day's rupee turnover
+// traded by each time (dev/turnover_projection_study.py, 229 sessions, ~1,300 stocks; holdout median error
+// 53% at 09:45, 22% at 12:30, 9% at 14:30). Clamped at the 09:45 share so the first half hour, which was
+// not measured, never projects more than ~6.8x what has traded. Order-book depth still caps every order.
+const TURNOVER_DAY_SHARE=[[555,0],[585,0.148],[630,0.273],[690,0.407],[750,0.526],[810,0.637],[870,0.755],[930,1]];
+function projectedDayTurnover(turnover,now=new Date()){
+  const ist=new Date(now.getTime()+now.getTimezoneOffset()*60000+19800000),m=ist.getHours()*60+ist.getMinutes();
+  if(!(turnover>0)||m>=930||m<555) return turnover;
+  let share=1;
+  for(let i=1;i<TURNOVER_DAY_SHARE.length;i++){
+    const [m1,s1]=TURNOVER_DAY_SHARE[i-1],[m2,s2]=TURNOVER_DAY_SHARE[i];
+    if(m<=m2){share=s1+(s2-s1)*(m-m1)/(m2-m1);break;}
+  }
+  return turnover/Math.max(TURNOVER_DAY_SHARE[1][1],share);
+}
 function getTurnoverAllocationCap(row){
-  const turnover=Number(row?.turnover);
+  const turnover=projectedDayTurnover(Number(row?.turnover));
   const turnCap=Number.isFinite(turnover)&&turnover>0?turnover*MAX_TURNOVER_PARTICIPATION:0;
   const bookCap=getBookAllocationCap(row);
   if(bookCap>0&&turnCap>0) return Math.min(bookCap,turnCap);
