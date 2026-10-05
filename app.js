@@ -1,5 +1,5 @@
 const BUILD_TS='2026-10-05 09:51 IST'; // release build time (IST)
-const APP_VERSION=1466;
+const APP_VERSION=1467;
 const RADAR_SCORE_VERSION='v1419-recross-batches'; // Eligible on crossing the score floor at any time; selected model's evolving target, T+2 exit.
 
 // ── v1358: AN UNCAUGHT ERROR MUST NAME ITSELF ─────────────────────────────────────────────────
@@ -4595,41 +4595,28 @@ function rememberModelChoice(m){
   try{if(m==='A'||m==='ENS') localStorage.setItem(MODEL_STORE,m);}catch(e){}
 }
 let _modelSeeded=false;
+// v1467 (owner, 5 Oct): Ensemble is the only trading model. The original model (A) still scores
+// every run because it is one of Ensemble's five members, but it can no longer be selected.
 function initModelUI(){
   try{
-    const el=document.getElementById('fModel');
-    if(!el||_modelSeeded) return;
+    if(_modelSeeded) return;
     _modelSeeded=true;
-    const saved=savedModelChoice();
-    if(saved&&document.activeElement!==el) el.value=saved;   // synchronous: no wrong model on screen
+    rememberModelChoice('ENS');
+    const el=document.getElementById('fModel');
+    if(el) el.value='ENS';
     readHelperResponse('/api/btst/model',{timeout:6000}).then(d=>{
-      if(d&&d.ok!==false&&d.model){
-        rememberModelChoice(d.model);
-        if(document.activeElement!==el&&el.value!==d.model){el.value=d.model;applyFilters();}
-      }
-    }).catch(()=>{});   // helper down: the saved choice stays on screen rather than reverting
+      if(d&&d.model&&d.model!=='ENS') return readHelperResponse('/api/btst/model?set=ENS',{timeout:6000});
+    }).catch(()=>{});
   }catch(e){}
 }
-// The model the OWNER selected, which is what new orders must be targeted on. Deliberately NOT the
-// ranking file's activeModel: that records which model produced the last engine run, so after a
-// switch it names the outgoing model until the next run - which is how the Ensemble +3% startup
-// fallback stayed on the card and on every row after the owner had moved to Original (v1446).
+// The model new orders are targeted on: always Ensemble since v1467.
 function selectedBtstModel(){
-  const el=typeof document!=='undefined'&&document.getElementById?document.getElementById('fModel'):null;
-  const v=el?.value;
-  if(v==='A'||v==='ENS') return v;
-  return savedModelChoice()||btstRanking()?.src?.activeModel||'A';
+  return 'ENS';
 }
 function onModelChange(){
   const el=document.getElementById('fModel');
-  const m=el?.value||'ENS';
-  rememberModelChoice(m);
-  applyFilters();   // targets are model-specific: repaint immediately, don't wait for the helper
-  readHelperResponse('/api/btst/model?set='+encodeURIComponent(m),{timeout:6000}).then(d=>{
-    if(!d||d.ok===false){showToast('Model not switched: '+escHtml(d?.why||'helper refused'),4000,true);return;}
-    rememberModelChoice(d.model);
-    showToast(btstModelName(d.model)+' model ranks and trades from the next engine run (within 2 minutes). The other keeps scoring as a shadow.',5000);
-  }).catch(()=>showToast('Helper unreachable - the model was not switched.',5000,true));
+  if(el) el.value='ENS';
+  rememberModelChoice('ENS');
 }
 // v1407: the floor is adjustable from the filters row, DISPLAY ONLY. The engine publishes its own
 // MIN_SCORE in the picks/rank file and that is what actually selected the picks; typing a number
