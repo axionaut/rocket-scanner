@@ -1,5 +1,5 @@
 const BUILD_TS='2026-10-05 09:51 IST'; // release build time (IST)
-const APP_VERSION=1472;
+const APP_VERSION=1473;
 const RADAR_SCORE_VERSION='v1419-recross-batches'; // Eligible on crossing the score floor at any time; selected model's evolving target, T+2 exit.
 
 // ── v1358: AN UNCAUGHT ERROR MUST NAME ITSELF ─────────────────────────────────────────────────
@@ -7844,20 +7844,24 @@ function getEffectiveCapital(){
 let _maxAllocMemo=null;
 // A typed Max Alloc caps every stock. Empty (Auto) returns 0: the basket planner then splits cash
 // equally across GO stocks instead of letting one stock take the whole capital.
-// v1472 (owner): Min Alloc Rs + Max % of capital replace the rupee Max Alloc box.
-function getMinAlloc(){
-  const v=parseFloat(document.getElementById('fMinAlloc')?.value);
-  return Number.isFinite(v)&&v>0?v:RocketStrategy.CONFIG.MIN_ALLOCATION_RS;
+// v1473 (owner): per-stock cap = max(capital x Max %, min(capital, All-in up to Rs)). Small capital
+// goes all into one stock; large capital is capped at a % that follows capital. The Rs 5,000
+// qualifying minimum is fixed again (v1472's Min Alloc box was a misreading).
+function getMinAlloc(){return RocketStrategy.CONFIG.MIN_ALLOCATION_RS;}
+function getAllInUpTo(){
+  const v=parseFloat(document.getElementById('fAllIn')?.value);
+  return Number.isFinite(v)&&v>0?v:0;
 }
 function getMaxAllocPct(){
   const v=parseFloat(document.getElementById('fMaxPct')?.value);
   return Number.isFinite(v)&&v>0&&v<100?v:100;
 }
-// Per-stock rupee cap from Max %; 0 = no cap (100%). Never below Min Alloc (owner: min wins).
+// Per-stock rupee cap; 0 = no cap. Never below the Rs 5,000 minimum.
 function getTypedMaxAlloc(capital=getEffectiveCapital()){
   const pct=getMaxAllocPct(),cap=Number(capital);
   if(pct>=100||!(cap>0)) return 0;
-  return Math.max(getMinAlloc(),cap*pct/100);
+  const v=Math.max(cap*pct/100,Math.min(cap,getAllInUpTo()));
+  return v>=cap?0:Math.max(getMinAlloc(),v);
 }
 function getEffectiveMaxAlloc(){
   const v=getTypedMaxAlloc();
@@ -7960,7 +7964,7 @@ function updateFilterPlaceholders(){
     } else { const d=getDefaultCapital(); if(d>0){ capEl.placeholder=String(Math.round(d)); capEl.title=`Empty = your computed capital ₹${Math.round(d).toLocaleString('en-IN')} (holdings + open positions); Kite cash unavailable. Type a value to override.`; } }
   }
   const maxEl=document.getElementById('fMaxPct');
-  if(maxEl){ const m=getTypedMaxAlloc(); maxEl.title='No single stock gets more than this % of capital'+(m>0?` (now Rs ${Math.round(m).toLocaleString('en-IN')})`:'')+'. If that is below Min Alloc, Min Alloc wins. Empty = 100%.'; }
+  if(maxEl){ const m=getTypedMaxAlloc(); maxEl.title='Per-stock cap = the larger of capital x this % and capital up to the All-in amount. Now: '+(m>0?`Rs ${Math.round(m).toLocaleString('en-IN')} per stock`:'no cap (one stock may take all capital)')+'. Empty = 100%.'; }
   const riskEl=document.getElementById('fRiskPerTrade');
   const tgtEl=document.getElementById('fTgtOverride');
   if(tgtEl){ let d=0; try{d=getDefaultTgtPct();}catch(e){} tgtEl.placeholder=d>0?d.toFixed(1):'auto'; tgtEl.title='Empty keeps this as a harvest-based planning reference only; it never changes allocation. It does not set automatic candidate or held-position targets. Type a value to explicitly override those targets; clear it to restore planning-only Auto.'; }
@@ -10851,7 +10855,7 @@ function minimumModelQuantity(row,price,maxQty){
 }
 let _dualPlanMemo=null;
 function planDualBasket(rows,capital){
-  const key=[capital,BASKET_MODEL_MODE,RECOMMEND_MIN_SCORE,getEffectiveMaxAlloc(),getMinAlloc(),getMaxAllocPct(),BOOK_V,INTRADAY_STORE_V,
+  const key=[capital,BASKET_MODEL_MODE,RECOMMEND_MIN_SCORE,getEffectiveMaxAlloc(),getAllInUpTo(),getMaxAllocPct(),BOOK_V,INTRADAY_STORE_V,
     Math.floor(Date.now()/1000),
     (rows||[]).map(r=>r.symbol+':'+r.price+':'+r.turnover+':'+r.score+':'+getRowActionState(r).state+':'+EXPORT_EXCLUDED.has(r.symbol)).join(',')].join('|');
   if(_dualPlanMemo?.key===key) return _dualPlanMemo.val;
@@ -10921,11 +10925,11 @@ function _planDualBasketUncached(rows,capital){
         // market-impact cap and the other slots' minimums still bind.
         const minQty=Math.ceil(minRequired/price);
         const minDebit=minQty*price+calcZerodhaCharges(price,minQty,false,false,false);
-        if(liquidityCap>=minRequired&&minDebit<=remaining&&minDebit<=remaining-Math.max(0,slots-1)*minRequired*1.005){qty=minQty;budget=minDebit;}
+        if(minDebit<=liquidityCap&&minDebit<=remaining&&minDebit<=remaining-Math.max(0,slots-1)*minRequired*1.005){qty=minQty;budget=minDebit;}
       }
     }
     const cost=qty*price,charges=qty>0?calcZerodhaCharges(price,qty,false,false,false):0,debit=cost+charges;
-    if(!reason&&(!(cost>=minRequired)||debit>budget))reason=liquidityCap<minRequired?`Market-impact cap below Min Alloc ${minTxt}`:`Available cash / Max % / market-impact cap cannot fund Min Alloc ${minTxt} plus buy charges`;
+    if(!reason&&(!(cost>=minRequired)||debit>budget))reason=liquidityCap<minRequired?`Market-impact cap below the ${minTxt} minimum`:`Available cash / per-stock cap / market-impact cap cannot fund the ${minTxt} minimum plus buy charges`;
     if(reason){reasons.set(r.symbol,reason);alloc[r.symbol]={alloc:0,debit:0,qty:0,rejected:true,reason};continue;}
     r.basketModel='strategy';
     const exitPolicy=getRowExitPolicy(r,price,null,null,qty);
@@ -14990,7 +14994,7 @@ function compactRankingRows(rows){
   }));
 }
 function applySavedFiltersForMode(mode){
-  const ids=['fSearch','fMinScore','fDropThin','fCapital','fMinAlloc','fMaxPct','fRiskPerTrade'];
+  const ids=['fSearch','fMinScore','fDropThin','fCapital','fAllIn','fMaxPct','fRiskPerTrade'];
   const prev={};
   ids.forEach(id=>{const el=document.getElementById(id);if(el)prev[id]=el.value;});
   try{
@@ -14999,7 +15003,7 @@ function applySavedFiltersForMode(mode){
     const map={minScore:'fMinScore',dropThin:'fDropThin'};
     Object.entries(map).forEach(([k,id])=>{const el=document.getElementById(id);if(el&&st[k]!=null)el.value=st[k];});
     const capEl=document.getElementById('fCapital');if(capEl&&shared.capital!=null)capEl.value=shared.capital;
-    const minEl=document.getElementById('fMinAlloc');if(minEl&&shared.minAlloc!=null)minEl.value=shared.minAlloc;
+    const minEl=document.getElementById('fAllIn');if(minEl&&shared.allIn!=null)minEl.value=shared.allIn;
     const pctEl=document.getElementById('fMaxPct');if(pctEl&&shared.maxPct!=null)pctEl.value=shared.maxPct;
     const rkEl=document.getElementById('fRiskPerTrade');if(rkEl&&shared.riskPerTrade!=null)rkEl.value=shared.riskPerTrade;
   }catch(e){
@@ -15595,7 +15599,7 @@ function saveFilterState(){
   // default" (shown in the placeholder), so we persist the raw value as-is.
   const tradeInputs={
     capital:capEl?.value||'',
-    minAlloc:document.getElementById('fMinAlloc')?.value||'',
+    allIn:document.getElementById('fAllIn')?.value||'',
     maxPct:document.getElementById('fMaxPct')?.value||'',
     tgtOverride:document.getElementById('fTgtOverride')?.value||'',
     riskPerTrade:document.getElementById('fRiskPerTrade')?.value||''
@@ -15632,15 +15636,15 @@ function loadFilterState(){
     const localNewer=Number(shared._updatedAt)>brainAt;
     const pick=(k)=>localNewer&&shared[k]!=null?shared[k]
       :(ti&&ti[k]!=null)?ti[k]:(shared[k]!=null?shared[k]:state[k]);
-    const sharedCapital=pick('capital'), sharedMinAlloc=pick('minAlloc'), sharedMaxPct=pick('maxPct'), sharedTgt=pick('tgtOverride');
+    const sharedCapital=pick('capital'), sharedAllIn=pick('allIn'), sharedMaxPct=pick('maxPct'), sharedTgt=pick('tgtOverride');
     const sharedRisk=pick('riskPerTrade');
     if(sharedCapital!=null){const el=document.getElementById('fCapital');if(el)el.value=sharedCapital;}
-    if(sharedMinAlloc!=null){const el=document.getElementById('fMinAlloc');if(el)el.value=sharedMinAlloc;}
+    if(sharedAllIn!=null){const el=document.getElementById('fAllIn');if(el)el.value=sharedAllIn;}
     if(sharedMaxPct!=null){const el=document.getElementById('fMaxPct');if(el)el.value=sharedMaxPct;}
     if(sharedTgt!=null){const el=document.getElementById('fTgtOverride');if(el)el.value=sharedTgt;}
     if(sharedRisk!=null){const el=document.getElementById('fRiskPerTrade');if(el)el.value=sharedRisk;}
     // Prime the change-gate so the first save after load doesn't needlessly rewrite the brain.
-    _lastTradeInputSig=JSON.stringify({capital:sharedCapital??'',minAlloc:sharedMinAlloc??'',maxPct:sharedMaxPct??'',tgtOverride:sharedTgt??'',riskPerTrade:sharedRisk??''});
+    _lastTradeInputSig=JSON.stringify({capital:sharedCapital??'',allIn:sharedAllIn??'',maxPct:sharedMaxPct??'',tgtOverride:sharedTgt??'',riskPerTrade:sharedRisk??''});
     if(localNewer){
       FS.setUserSetting(TRADE_INPUTS_STORE,JSON.parse(_lastTradeInputSig));
       saveBrainInBackground();
