@@ -1,5 +1,5 @@
 const BUILD_TS='2026-10-05 09:51 IST'; // release build time (IST)
-const APP_VERSION=1470;
+const APP_VERSION=1471;
 const RADAR_SCORE_VERSION='v1419-recross-batches'; // Eligible on crossing the score floor at any time; selected model's evolving target, T+2 exit.
 
 // ── v1358: AN UNCAUGHT ERROR MUST NAME ITSELF ─────────────────────────────────────────────────
@@ -3728,7 +3728,7 @@ function setRadarEvidenceScore(r){
 function radarScoreTitle(r){
   const p=r?.btstPick;
   return p?`BTST pick #${p.rank}: model score ${p.score} (predicted next-session net return %, after costs). Buyable when it crosses your score floor; exit at the selected model's evolving target or 15:20 on T+2.`
-    :"Not in today's BTST top picks. Score = 100 - pick rank.";
+    :"Model score: predicted next-session net return % after costs. GO when it is at or above your score floor.";
 }
 function* refreshRocketScoresGen(deferPaint=false){
   const staged=[];
