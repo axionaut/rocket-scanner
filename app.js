@@ -1,5 +1,5 @@
 const BUILD_TS='2026-10-05 09:51 IST'; // release build time (IST)
-const APP_VERSION=1467;
+const APP_VERSION=1468;
 const RADAR_SCORE_VERSION='v1419-recross-batches'; // Eligible on crossing the score floor at any time; selected model's evolving target, T+2 exit.
 
 // ── v1358: AN UNCAUGHT ERROR MUST NAME ITSELF ─────────────────────────────────────────────────
@@ -8265,7 +8265,7 @@ function renderStats(){
   const universeCard = `<div class="st" title="${escHtml(br ? 'Current live ranking: ' + br.n + ' scored stocks at ' + br.at + '. A stock qualifies whenever its score crosses your floor.' : btstWaitReason())}">
     <div class="st-l">Live Model${br ? ' · ' + escHtml(btstModelName(br.model)) : ''}</div>
     <div class="st-v" style="font-size:18px;color:${engineTone}">${escHtml(engineState)}</div>
-    <div class="st-d">${br ? `${br.n} scored · floor ${btstMinScore()} · shadow ${escHtml(btstModelName(br.model === 'ENS' ? 'A' : 'ENS'))}${br.src?.modelNote ? ' · ' + escHtml(br.src.modelNote) : ''}` : 'Waiting for a current-session live ranking'}</div></div>`;
+    <div class="st-d">${br ? `${br.n} scored · floor ${btstMinScore()}${br.src?.modelNote ? ' · ' + escHtml(br.src.modelNote) : ''}` : 'Waiting for a current-session live ranking'}</div></div>`;
 
   const triggersCard = `<div class="st" title="Current GO decisions from live scores, including trading eligibility and freshness checks.">
     <div class="st-l">Live qualification</div><div class="st-v" style="font-size:18px;color:${triggered.length?'var(--green)':'var(--t1)'}">${triggered.length} <span style="font-size:12px;color:var(--t2)">GO now</span></div>
