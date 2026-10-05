@@ -147,7 +147,7 @@ window.finEdit=function(listName,id,field,el){
 };
 window.finAdd=function(listName){
   if(!FIN) return;
-  const base={incomes:{name:'New income',amount:0,counts:true},expenses:{name:'New expense',amount:0},
+  const base={incomes:{name:'New income',amount:0,role:'reserve'},expenses:{name:'New expense',amount:0},
     obligations:{name:'New obligation',amount:0,dueDay:null,group:'household'},
     loans:{name:'New loan',borrower:owner(),paidByToday:owner(),rateType:'fixed',rate:0,emi:0,principal:0,tenureLeft:0,endDate:'',dueDay:null,prepayChargePct:null,notes:''},
     salary:{name:'New item',amount:0}}[listName];
@@ -190,11 +190,15 @@ function renderFinance(){
   const living=FIN.expenses.reduce((s,e)=>s+n(e.amount),0);
   const emis=activeLoans.reduce((s,l)=>s+n(l.emi),0);
   const totalExp=living+emis;
-  const counted=FIN.incomes.filter(i=>i.counts).reduce((s,i)=>s+n(i.amount),0);
-  const allInc=FIN.incomes.reduce((s,i)=>s+n(i.amount),0);
-  const netNeed=Math.max(0,totalExp-counted), aloneNeed=totalExp;
+  // 5 Oct (owner): he shoulders every expense and EMI; other household income goes to a reserve.
+  // An income counts against the need only when explicitly set to 'covers'.
+  const covers=i=>i.role==='covers';
+  const counted=FIN.incomes.filter(covers).reduce((s,i)=>s+n(i.amount),0);
+  const reserveIn=FIN.incomes.filter(i=>!covers(i)).reduce((s,i)=>s+n(i.amount),0);
+  const netNeed=Math.max(0,totalExp-counted);
   const mode=S.taxMode||'business', flat=S.flatTaxPct??30;
-  const gross=grossFor(mode,netNeed,flat), grossAlone=grossFor(mode,aloneNeed,flat);
+  const gross=grossFor(mode,netNeed,flat);
+  const reserveBal=n(S.reserveBalance), reserveMonths=netNeed>0?reserveBal/netNeed:null;
   const days=n(S.tradingDaysPerMonth)||18, perDay=gross/days;
   const real=monthRealised(), sess=sessionsLeftThisMonth(), cap=tradingCapital();
   const remaining=Math.max(0,gross-real.total), perLeft=sess.left?remaining/sess.left:remaining;
@@ -211,40 +215,44 @@ function renderFinance(){
 
   // headline
   h+=`<div class="stats" style="margin-top:10px">`;
-  h+=card('Monthly need from trading',inr(netNeed),`expenses ${inr(totalExp)} − counted income ${inr(counted)} (after tax)`,'var(--amber)');
+  h+=card('Monthly need from trading',inr(netNeed),`living ${inr(living)} + EMIs ${inr(emis)}${counted?' − '+inr(counted)+' covered by other income':''} (after tax)`,'var(--amber)');
   h+=card('Gross trading target',inr(gross),`before tax · ${mode==='business'?'business income, new regime':mode==='stcg'?'STCG 20%':'flat '+flat+'%'}`,'var(--fire)');
   h+=card('Per trading day',inr(perDay),`${days} trading days/month${capPct!=null?' · '+pct(capPct)+' of capital/day':''}`);
   h+=card('Earned this month',inr(real.total),real.asOf?`Zerodha net realised, to ${real.asOf}`:'no closed trades this month yet',real.total>=0?'var(--green)':'var(--red)');
   h+=card('Still needed',inr(remaining),`${sess.left} NSE sessions left · ${inr(perLeft)}/session${capPctLeft!=null?' ('+pct(capPctLeft)+' of capital)':''}`,remaining>0?'var(--amber)':'var(--green)');
+  h+=card('Reserve',inr(reserveBal),`+${inr(reserveIn)}/month from other income${reserveMonths!=null?' · covers '+reserveMonths.toFixed(1)+' months of the need':''}`,'var(--blue)');
   h+=card('Trading capital',cap.total?inr(cap.total):'—',cap.cash!=null?`Kite cash ${inr(cap.cash)} + holdings ${inr(cap.invested)}`:'Kite cash not loaded yet');
   h+=`</div>`;
   h+=`<div style="font-size:12px;color:var(--t2);margin-top:4px">The target is a yardstick for this screen only. It never changes the score floor, trade count or sizing on the Rankings tab.</div>`;
 
   // scenario + tax
   const modes=[['business','Business income (slab, new regime)'],['stcg','Short-term capital gains (20%)'],['flat','Flat %']];
-  const taxRows=modes.map(([m,lab])=>{const g=grossFor(m,netNeed,flat),ga=grossFor(m,aloneNeed,flat);
-    return `<tr style="${m===mode?'background:rgba(251,191,36,.08)':''}"><td style="${cell}"><label style="cursor:pointer"><input type="radio" name="finTax" ${m===mode?'checked':''} onchange="finEdit('root','','settings.taxMode',{type:'text',value:'${m}',dataset:{}})"> ${lab}${m==='flat'?' '+inp('root','','settings.flatTaxPct',flat,{num:true,w:60}):''}</label></td><td style="${cell};text-align:right">${inr(g)}</td><td style="${cell};text-align:right">${inr(g-netNeed)}</td><td style="${cell};text-align:right">${inr(ga)}</td><td style="${cell};text-align:right">${inr(g/days)}</td></tr>`;});
-  h+=section('Income target and tax',tbl(['How trading income is taxed','Gross / month (today)','Tax / month','Gross / month ('+esc(owner())+' alone)','Per trading day'],taxRows)+
-    `<div style="font-size:12px;color:var(--t2);margin-top:6px;line-height:1.6">New regime FY 2026-27: 0-4L nil, 4-8L 5%, 8-12L 10%, 12-16L 15%, 16-20L 20%, 20-24L 25%, above 30%; 87A rebate up to ₹60,000 when income ≤ ₹12L (with marginal relief); 4% cess; surcharge above ₹50L. Intraday profit is speculative business income; frequent delivery trading can be declared business income (CBDT circular 6/2016) or taxed as STCG at 20% after the ₹4L basic exemption (no 87A rebate on STCG). "Today" counts the incomes ticked below; "${esc(owner())} alone" covers every expense and EMI with no other income. Trading days/month: ${inp('root','','settings.tradingDaysPerMonth',days,{num:true,w:60})}</div>`,
-    `today ${inr(netNeed)} net · ${esc(owner())} alone ${inr(aloneNeed)} net`);
+  const taxRows=modes.map(([m,lab])=>{const g=grossFor(m,netNeed,flat);
+    return `<tr style="${m===mode?'background:rgba(251,191,36,.08)':''}"><td style="${cell}"><label style="cursor:pointer"><input type="radio" name="finTax" ${m===mode?'checked':''} onchange="finEdit('root','','settings.taxMode',{type:'text',value:'${m}',dataset:{}})"> ${lab}${m==='flat'?' '+inp('root','','settings.flatTaxPct',flat,{num:true,w:60}):''}</label></td><td style="${cell};text-align:right">${inr(g)}</td><td style="${cell};text-align:right">${inr(g-netNeed)}</td><td style="${cell};text-align:right">${inr(g/days)}</td></tr>`;});
+  h+=section('Income target and tax',tbl(['How trading income is taxed','Gross / month','Tax / month','Per trading day'],taxRows)+
+    `<div style="font-size:12px;color:var(--t2);margin-top:6px;line-height:1.6">New regime FY 2026-27: 0-4L nil, 4-8L 5%, 8-12L 10%, 12-16L 15%, 16-20L 20%, 20-24L 25%, above 30%; 87A rebate up to ₹60,000 when income ≤ ₹12L (with marginal relief); 4% cess; surcharge above ₹50L. Intraday profit is speculative business income; frequent delivery trading can be declared business income (CBDT circular 6/2016) or taxed as STCG at 20% after the ₹4L basic exemption (no 87A rebate on STCG). The need is every living expense and EMI; other household income goes to the reserve unless set to "covers expenses" below. Trading days/month: ${inp('root','','settings.tradingDaysPerMonth',days,{num:true,w:60})}</div>`,
+    `${inr(netNeed)} net a month`);
 
   // incomes
-  h+=section('Household income',tbl(['Source','Amount / month','Counts toward household',''],
-    FIN.incomes.map(i=>`<tr><td style="${cell}">${inp('incomes',i.id,'name',i.name,{w:240})}</td><td style="${cell}">${inp('incomes',i.id,'amount',i.amount,{num:true,w:110})}</td><td style="${cell}"><input type="checkbox" ${i.counts?'checked':''} onchange="finEdit('incomes','${i.id}','counts',this)"> ${i.counts?'yes':'no - kept by its earner'}</td><td style="${cell}">${delBtn('incomes',i.id)}</td></tr>`),
-    `<tr><td style="${cell};font-weight:700">Counted</td><td style="${cell};font-weight:700;text-align:right">${inr(counted)}</td><td style="${cell};color:var(--t2)">of ${inr(allInc)}</td><td></td></tr>`)+addBtn('incomes','income'),
-    'untick a source to plan without it');
+  h+=section('Other household income',tbl(['Source','Amount / month','Goes to',''],
+    FIN.incomes.map(i=>`<tr><td style="${cell}">${inp('incomes',i.id,'name',i.name,{w:240})}</td><td style="${cell}">${inp('incomes',i.id,'amount',i.amount,{num:true,w:110})}</td><td style="${cell}">${sel('incomes',i.id,'role',covers(i)?'covers':'reserve',[['reserve','reserve'],['covers','covers expenses']])}</td><td style="${cell}">${delBtn('incomes',i.id)}</td></tr>`),
+    `<tr><td style="${cell};font-weight:700">To reserve</td><td style="${cell};font-weight:700;text-align:right">${inr(reserveIn)}</td><td style="${cell};color:var(--t2)">${counted?inr(counted)+' covers expenses':''}</td><td></td></tr>`)+addBtn('incomes','income')+
+    `<div style="margin-top:8px;font-size:14px">Reserve balance now ${inp('root','','settings.reserveBalance',S.reserveBalance||0,{num:true,w:120})}</div>`,
+    'the need is carried by trading; this income builds the reserve');
 
   // obligations this month
   const obPaid=FIN.obligations.filter(o=>paidMap[o.id]).reduce((s,o)=>s+n(o.amount),0);
   const obAll=FIN.obligations.reduce((s,o)=>s+n(o.amount),0), obLeft=obAll-obPaid;
-  const cash=n(FIN.cashInHand), withdraw=obLeft-cash;
+  // Everything leaves this account now: what is left of the fixed obligations plus the rest of the month's
+  // spending (living + EMIs not on the fixed list), less the cash already in savings.
+  const restOfMonth=Math.max(0,totalExp-obAll), cash=n(FIN.cashInHand), withdraw=obLeft+restOfMonth-cash;
   const obRows=FIN.obligations.slice().sort((a,b)=>(a.dueDay??99)-(b.dueDay??99)).map(o=>{
     const p=!!paidMap[o.id],d=o.dueDay?n(o.dueDay)-today:null;
     const st=p?'<span style="color:var(--green)">paid</span>':d==null?'<span style="color:var(--t3)">set due day</span>':d<0?'<span style="color:var(--red);font-weight:700">overdue</span>':d===0?'<span style="color:var(--amber);font-weight:700">due today</span>':`<span style="color:var(--t2)">in ${d} d</span>`;
     return `<tr style="${p?'opacity:.6':''}"><td style="${cell}"><input type="checkbox" ${p?'checked':''} onchange="finTogglePaid('${o.id}',this)"></td><td style="${cell}">${inp('obligations',o.id,'name',o.name,{w:160})}</td><td style="${cell}">${inp('obligations',o.id,'amount',o.amount,{num:true,w:100})}</td><td style="${cell}">${inp('obligations',o.id,'dueDay',o.dueDay,{num:true,w:60})}</td><td style="${cell}">${st}</td><td style="${cell}">${sel('obligations',o.id,'group',o.group||'household',[['household','household'],['loan','loan / EMI'],['salary','salary'],['fees','fees'],['other','other']])}</td><td style="${cell}">${delBtn('obligations',o.id)}</td></tr>`;});
-  h+=section(`Fixed obligations · ${now.toLocaleString('en-IN',{month:'long'})}`,tbl(['Paid','Item','Amount','Due day','Status','Type',''],obRows,
+  h+=section(`Paid from your account by the 5th · ${now.toLocaleString('en-IN',{month:'long'})}`,tbl(['Paid','Item','Amount','Due day','Status','Type',''],obRows,
     `<tr><td></td><td style="${cell};font-weight:700">Total</td><td style="${cell};font-weight:700;text-align:right">${inr(obAll)}</td><td colspan="4" style="${cell};color:var(--t2)">paid ${inr(obPaid)} · <b style="color:${obLeft>0?'var(--red)':'var(--green)'}">left ${inr(obLeft)}</b></td></tr>`)+
-    `<div style="display:flex;gap:18px;flex-wrap:wrap;align-items:center;margin-top:8px;font-size:14px"><span>Cash in savings ${inp('root','','cashInHand',FIN.cashInHand,{num:true,w:110})}</span><span>${withdraw>0?`<b style="color:var(--amber)">Withdraw ${inr(withdraw)} from trading</b> to cover what is left this month`:`<b style="color:var(--green)">Covered</b> - ${inr(-withdraw)} spare after the remaining obligations`}</span></div>`+addBtn('obligations','obligation'),
+    `<div style="display:flex;gap:18px;flex-wrap:wrap;align-items:center;margin-top:8px;font-size:14px"><span>Cash in savings ${inp('root','','cashInHand',FIN.cashInHand,{num:true,w:110})}</span><span>${withdraw>0?`<b style="color:var(--amber)">Withdraw ${inr(withdraw)} from trading</b>`:`<b style="color:var(--green)">Covered</b> - ${inr(-withdraw)} spare`} <span style="color:var(--t2);font-size:12px">= ${inr(obLeft)} fixed still to pay + ${inr(restOfMonth)} rest of the month's living & EMIs − ${inr(cash)} in savings</span></span></div>`+addBtn('obligations','obligation'),
     `ticks reset each month · reminders ${inp('root','','settings.reminderDays',S.reminderDays??3,{num:true,w:50})} days ahead`);
 
   // loans
@@ -294,7 +302,7 @@ function renderFinance(){
   h+=section(esc(mz.label||'Partner salary'),`<div style="display:flex;gap:18px;flex-wrap:wrap;font-size:14px;margin-bottom:6px"><span>Gross ${inp('root','','salary.gross',mz.gross,{num:true,w:100})}</span><span>Deductions ${inp('root','','salary.deductions',mz.deductions,{num:true,w:100})}</span><span>Net <b>${inr(mNet)}</b></span></div>`+
     tbl(['Paid from her net','Amount',''],(mz.allocations||[]).map(a=>`<tr><td style="${cell}">${inp('salary',a.id,'name',a.name,{w:200})}</td><td style="${cell}">${inp('salary',a.id,'amount',a.amount,{num:true,w:100})}</td><td style="${cell}">${delBtn('salary',a.id)}</td></tr>`),
       `<tr><td style="${cell};font-weight:700">Allocated</td><td style="${cell};font-weight:700;text-align:right">${inr(mAlloc)}</td><td style="${cell};color:${mNet-mAlloc<0?'var(--red)':'var(--t2)'}">${mNet-mAlloc===0?'fully allocated':(mNet-mAlloc>0?inr(mNet-mAlloc)+' free':inr(mAlloc-mNet)+' over')}</td></tr>`)+addBtn('salary','item'),
-    'what her salary carries today');
+    'how her salary is spent today - informational; the plan does not depend on it');
   h+=`</div>`;
   const ae=document.activeElement, focusKey=ae&&ae.closest&&ae.closest('#finContent')?[...root.querySelectorAll('input,select')].indexOf(ae):-1;
   root.innerHTML=h;
