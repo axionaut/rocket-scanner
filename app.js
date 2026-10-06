@@ -1,5 +1,5 @@
-const BUILD_TS='2026-10-06 09:52 IST'; // release build time (IST)
-const APP_VERSION=1475;
+const BUILD_TS='2026-10-06 10:52 IST'; // release build time (IST)
+const APP_VERSION=1476;
 const RADAR_SCORE_VERSION='v1419-recross-batches'; // Eligible on crossing the score floor at any time; selected model's evolving target, T+2 exit.
 
 // ── v1358: AN UNCAUGHT ERROR MUST NAME ITSELF ─────────────────────────────────────────────────
@@ -14730,12 +14730,6 @@ async function syncSellBasketToKite(){
 }
 async function sendBasketToKite(automatic=false){
   if(_kiteTransferBusy) return;
-  // v1451: with Auto-Buy ON the helper places these orders itself; a copy in Scanner_Buy would
-  // be bought a second time if executed in Kite.
-  if(typeof AUTO_BUY_ENABLED!=='undefined'&&AUTO_BUY_ENABLED){
-    if(!automatic) showToast('<strong>Auto-Buy is ON:</strong> the helper buys GO baskets directly, so nothing is sent to Kite Scanner_Buy. Turn Auto-Buy off to use the basket.',7000,true);
-    return;
-  }
   _kiteTransferBusy=true;
   const button=document.getElementById('sendKiteBtn');
   if(button){button.disabled=true;button.textContent='Sending to Kite…';}
@@ -14753,9 +14747,11 @@ async function sendBasketToKite(automatic=false){
     const result=await kiteBridgeRequest(orders,'BUY',automatic);
     if(!result.ok) throw new Error(result.why||'Kite did not confirm the basket.');
     _kiteSentSignature=signature;
-    reportKiteBasketOutcome(true,`${result.count} order${result.count===1?'':'s'} ${result.already?'already in':'written to'} Scanner_Buy: ${orders.map(o=>o.instrument.tradingsymbol+' x'+o.params.quantity).join(', ')}. Review and Execute in Kite.`);
-    if(button) button.title='Scanner_Buy is ready. Review and Execute in Kite. New funded baskets are sent automatically.';
-    showToast(`<strong>${result.count} orders ${result.already?'already in':'loaded into'} Scanner_Buy.</strong> Review and Execute in Kite.`,7000);
+    const isAutoOn = typeof AUTO_BUY_ENABLED!=='undefined'&&AUTO_BUY_ENABLED;
+    const autoNote = isAutoOn ? ' (Auto-Buy also active via dip GTT)' : '';
+    reportKiteBasketOutcome(true,`${result.count} order${result.count===1?'':'s'} ${result.already?'already in':'written to'} Scanner_Buy: ${orders.map(o=>o.instrument.tradingsymbol+' x'+o.params.quantity).join(', ')}. Review and Execute in Kite${autoNote}.`);
+    if(button) button.title=`Scanner_Buy is ready. Review and Execute in Kite. New funded baskets are sent automatically.${autoNote}`;
+    showToast(`<strong>${result.count} orders ${result.already?'already in':'loaded into'} Scanner_Buy.</strong> Review and Execute in Kite${isAutoOn ? ', or let Auto-Buy dip-buy' : ''}.`,7000);
   }catch(e){
     retry=automatic;
     reportKiteBasketOutcome(false,e?.message||String(e));
