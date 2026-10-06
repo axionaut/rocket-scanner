@@ -1,5 +1,5 @@
-const BUILD_TS='2026-10-06 13:35 IST'; // release build time (IST)
-const APP_VERSION=1479;
+const BUILD_TS='2026-10-06 14:20 IST'; // release build time (IST)
+const APP_VERSION=1480;
 const RADAR_SCORE_VERSION='v1419-recross-batches'; // Eligible on crossing the score floor at any time; selected model's evolving target, T+2 exit.
 
 // ── v1358: AN UNCAUGHT ERROR MUST NAME ITSELF ─────────────────────────────────────────────────
@@ -7786,6 +7786,7 @@ async function loadAutoBuyStatus(){
   AUTO_BUY_STATUS = {
     enabled: !!j.enabled,
     executedToday: Array.isArray(j.executedToday) ? j.executedToday : [],
+    dipBuys: Array.isArray(j.dipBuys) ? j.dipBuys : [],
     countToday: Number(j.countToday) || 0,
     at: j.asOf || Date.now(),
     mode: j.mode || (j.apiOrdersAllowed ? 'api' : 'gtt-dip'),
@@ -7796,6 +7797,33 @@ async function loadAutoBuyStatus(){
     localStorage.setItem('rs_auto_buy_enabled', AUTO_BUY_ENABLED ? '1' : '0');
   }
   renderAutoBuyBtn();
+  syncFilledBuyBasketToKite().catch(()=>{});
+}
+
+function filledBuyBasketSymbols(){
+  const consumed=new Set(AUTO_BUY_STATUS.executedToday||[]);
+  return new Set((AUTO_BUY_STATUS.dipBuys||[]).filter(d=>d.day===getSessionDate()&&Number(d.filled)>0&&consumed.has(d.sym)).map(d=>d.sym));
+}
+const _kiteCleanedFills=new Set();
+function filledBasketCleanupEvents(){
+  return (AUTO_BUY_STATUS.dipBuys||[]).filter(d=>d.day===getSessionDate()&&Number(d.filled)>0)
+    .map(d=>({sym:d.sym,key:[d.day,d.sym,d.orderId,d.placedAt].join('|')}));
+}
+async function syncFilledBuyBasketToKite(){
+  const consumed=filledBuyBasketSymbols();
+  const events=filledBasketCleanupEvents().filter(e=>consumed.has(e.sym)||!_kiteCleanedFills.has(e.key));
+  const syms=[...new Set(events.map(e=>e.sym))];
+  if(!syms.length||_kiteTransferBusy||_kiteSellBusy) return;
+  _kiteTransferBusy=true;
+  try{
+    const orders=syms.map(sym=>({instrument:{tradingsymbol:sym,exchange:'NSE'},params:{}}));
+    const r=await kiteBridgeRequest(orders,'CLEANUP_BUY');
+    if(!r.ok) throw new Error(r.why||'Filled-stock basket cleanup failed');
+    events.forEach(e=>_kiteCleanedFills.add(e.key));
+    if(r.removed) showToast('Removed filled '+syms.join(', ')+' from Scanner_Buy.',5000);
+  }catch(e){
+    reportKiteBasketOutcome(false,'Filled buy still needs basket cleanup: '+(e?.message||String(e)));
+  }finally{_kiteTransferBusy=false;}
 }
 
 async function toggleAutoBuy(){
@@ -14529,7 +14557,8 @@ function getCanonicalBasketSignature(orders){
 
 function getDesiredBasketOrders(){
   const capital = getEffectiveCapital();
-  const selList = (Array.isArray(FILT) ? FILT : []).filter(s => s && s.symbol && SELECTED.has(s.symbol) && isSelectableRecommendation(s));
+  const filled=filledBuyBasketSymbols();
+  const selList = (Array.isArray(FILT) ? FILT : []).filter(s => s && s.symbol && !filled.has(s.symbol) && SELECTED.has(s.symbol) && isSelectableRecommendation(s));
   if(!selList.length || !(capital > 0)) return [];
   return buildBasketOrders(capital, selList);
 }
@@ -14667,6 +14696,7 @@ async function _drainBasketQueue(preferredOrders = null){
     if((writeOk && freshSig !== _lastSavedBasketSig && !freshWouldErase) || _pendingWaiters.length > 0){
       _drainBasketQueue(freshOrders);
     }
+    else if(!writeOk&&freshOrders.length) scheduleAutoSyncBasket(5000);
   }
 }
 
@@ -14694,6 +14724,7 @@ function kiteBridgeRequest(orders,side='BUY',automatic=true){
       if(event.source!==window||event.origin!==location.origin||event.data?.type!=='RS_KITE_RESULT'||event.data.id!==id||!event.data.bridge)return;
       clearTimeout(timer);window.removeEventListener('message',listener);
       const [maj,min]=String(event.data.bridge).split('.').map(Number);
+      if(side==='CLEANUP_BUY'&&!(maj>1||(maj===1&&min>=5))) return reject(new Error('Reload Kite Basket Bridge 1.5.0 in chrome://extensions to remove filled buy entries automatically.'));
       if(side==='SELL'&&!(maj>1||(maj===1&&min>=4))) return reject(new Error('Kite Basket Bridge '+event.data.bridge+' cannot write Scanner_Sell (LIMIT sells need 1.4.0). In chrome://extensions reload it, then reload this page.'));
       resolve(event.data);
     };
@@ -14729,6 +14760,10 @@ async function syncSellBasketToKite(){
   }finally{_kiteSellBusy=false;}
 }
 async function sendBasketToKite(automatic=false){
+  if(filledBasketCleanupEvents().some(e=>!_kiteCleanedFills.has(e.key))){
+    await syncFilledBuyBasketToKite();
+    if(filledBasketCleanupEvents().some(e=>!_kiteCleanedFills.has(e.key))){scheduleKiteBasketSync(5000);return;}
+  }
   if(_kiteTransferBusy) return;
   _kiteTransferBusy=true;
   const button=document.getElementById('sendKiteBtn');
@@ -14834,6 +14869,7 @@ async function saveBasketToScannerUploads(orders, filename, audit = []){
     return true;
   } catch(e) {
     console.warn('Basket save through helper failed:', e);
+    if(e?.name==='AbortError'||e?.name==='TimeoutError') throw new Error('Helper did not acknowledge the basket within 10 seconds. It may already have saved it; automatic sync will retry.');
     throw e;
   } finally {
     if(timer) clearTimeout(timer);

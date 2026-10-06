@@ -17,13 +17,13 @@ chrome.runtime.onMessage.addListener((m,sender,reply)=>{
   (async()=>{
     const tabs=await chrome.tabs.query({url:'https://kite.zerodha.com/*'});
     if(!tabs.length) throw new Error('Open Kite (any page, logged in) in this browser first.');
-    const side=m.side==='SELL'?'SELL':'BUY', name=side==='SELL'?'Scanner_Sell':'Scanner_Buy';
+    const side=m.side==='SELL'?'SELL':m.side==='CLEANUP_BUY'?'CLEANUP_BUY':'BUY', name=side==='SELL'?'Scanner_Sell':'Scanner_Buy';
     // The target basket open on screen, in any Kite tab, blocks a change to it.
     let openElsewhere=false;
     for(const tab of tabs.slice(1)) openElsewhere=openElsewhere||!!(await run(tab.id,'rocketKiteBasketOpen',[name]).catch(()=>false));
     const result=await run(tabs[0].id,'rocketKiteImport',[m.orders,m.createdAt,openElsewhere,side]);
     if(!result) throw new Error(`Kite did not confirm the transfer. Inspect ${name} before retrying.`);
-    if(result.ok&&result.basket) for(const tab of tabs.slice(1)) await run(tab.id,'rocketKiteRefresh',[result.basket]).catch(()=>{});
+    if(result.ok&&result.basket) for(const tab of tabs.slice(1)) await run(tab.id,'rocketKiteRefresh',[result.basket,side==='CLEANUP_BUY']).catch(()=>{});
     delete result.basket;
     return result;
   })().then(reply,e=>reply({ok:false,why:e.message})).finally(()=>{busy=false;});

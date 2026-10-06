@@ -14,14 +14,14 @@ function rocketKiteBasketOpen(name='Scanner_Buy'){
 }
 
 // Refresh Kite's views after an API write: the Baskets list, and a closed basket tray still holding old items.
-function rocketKiteRefresh(basket){
+function rocketKiteRefresh(basket,refreshOpen=false){
   const seen=new Set();
   for(const el of document.querySelectorAll('*')){
     const v=el.__vue__;
     if(!v||seen.has(v)) continue;
     seen.add(v);
     try{
-      if(basket&&v.id===basket.id&&v.enabled!==true&&typeof v.setBasketFromAPIResponse==='function') v.setBasketFromAPIResponse(basket);
+      if(basket&&v.id===basket.id&&(refreshOpen||v.enabled!==true)&&typeof v.setBasketFromAPIResponse==='function') v.setBasketFromAPIResponse(basket);
     }catch(e){}
   }
   try{
@@ -32,6 +32,7 @@ function rocketKiteRefresh(basket){
 
 async function rocketKiteImport(orders,createdAt,openElsewhere=false,side='BUY'){
   const sell=side==='SELL';
+  const cleanup=side==='CLEANUP_BUY';
   const NAME=sell?ROCKET_BASKET.SELL:ROCKET_BASKET.BUY;
   const fail=why=>({ok:false,why});
   if(location.origin!=='https://kite.zerodha.com') return fail('Open Kite first.');
@@ -41,6 +42,10 @@ async function rocketKiteImport(orders,createdAt,openElsewhere=false,side='BUY')
   const symbols=new Set();
   for(const o of orders){
     const p=o?.params,s=o?.instrument?.tradingsymbol;
+    if(cleanup){
+      if(typeof s!=='string'||!s||o.instrument.exchange!=='NSE') return fail('Invalid filled-stock cleanup.');
+      symbols.add(s); continue;
+    }
     const common=s&&!symbols.has(s)&&o.instrument.exchange==='NSE'&&p?.product==='CNC'&&p.variety==='regular'&&p.validity==='DAY'&&Number.isSafeInteger(p.quantity)&&p.quantity>0;
     const ok=sell
       // 1.4.0: a profit-lock sell is a LIMIT at the lock floor (never below it), so SELL takes LIMIT with a price.
@@ -74,6 +79,21 @@ async function rocketKiteImport(orders,createdAt,openElsewhere=false,side='BUY')
     const named=all.filter(b=>b?.name===NAME);
     if(named.length>1) return fail(`Kite has more than one ${NAME} basket. Delete the extra one.`);
     let basket=named[0];
+    if(cleanup){
+      if(!basket) return {ok:true,count:0,removed:0,basket:null};
+      let removed=0;
+      for(const item of basket.items||[]){
+        const p=typeof item.params==='string'?JSON.parse(item.params):item.params;
+        if(symbols.has(item.tradingsymbol)&&item.exchange==='NSE'&&p?.product==='CNC'&&(p.transaction_type??p.transactionType)==='BUY'){
+          await api.removeBasketItem(basket.id,item.id); removed++;
+        }
+      }
+      const fresh=((await api.getBaskets())?.data?.data||[]).find(b=>b?.id===basket.id);
+      if(!fresh) return fail('Filled-stock cleanup could not be verified.');
+      if((fresh.items||[]).some(i=>{const p=typeof i.params==='string'?JSON.parse(i.params):i.params;return symbols.has(i.tradingsymbol)&&i.exchange==='NSE'&&p?.product==='CNC'&&(p.transaction_type??p.transactionType)==='BUY';})) return fail('Filled stock is still in Scanner_Buy; cleanup will retry.');
+      rocketKiteRefresh(fresh,true);
+      return {ok:true,count:fresh.items.length,removed,basket:fresh};
+    }
     if(basket&&signature(basket.items)===want) return {ok:true,count:orders.length,already:true,basket};
     if(!basket&&!orders.length) return {ok:true,count:0,already:true,basket:null};
     // Never change a basket the owner has open: Kite executes the items shown on screen.
