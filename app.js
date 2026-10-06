@@ -1,5 +1,5 @@
-const BUILD_TS='2026-10-05 09:51 IST'; // release build time (IST)
-const APP_VERSION=1473;
+const BUILD_TS='2026-10-06 09:04 IST'; // release build time (IST)
+const APP_VERSION=1474;
 const RADAR_SCORE_VERSION='v1419-recross-batches'; // Eligible on crossing the score floor at any time; selected model's evolving target, T+2 exit.
 
 // ── v1358: AN UNCAUGHT ERROR MUST NAME ITSELF ─────────────────────────────────────────────────
@@ -7448,7 +7448,7 @@ function getGoalConfig(){
   // Keyed on content, not identity: with no saved goal `FS.get(...)||{}` is a new object on every
   // call, so the identity memo missed every time and re-walked the trading calendar per row.
   const raw=FS.get(GOAL_STORE)||{};
-  const day=getSessionDate(),key=JSON.stringify(raw)+'|'+day+'|'+NSE_HOLIDAYS.size;
+  const day=getSessionDate(),key=JSON.stringify(raw)+'|'+day+'|'+NSE_HOLIDAYS.size+'|'+financeMonthlyWithdrawal();
   if(_goalCfgMemo&&_goalCfgMemo.key===key) return _goalCfgMemo.v;
   const v=_computeGoalConfig(raw);
   _goalCfgMemo={key,v};
@@ -7475,8 +7475,25 @@ function _computeGoalConfig(rawCfg){
     endDate=goalImpliedEndDate(Math.max(0,Math.floor(Number(g.days))-elapsed));
   }
   if(!endDate) endDate=goalImpliedEndDate(250); // ~one trading year default
+  // v1474 (owner): the goal lives in the Finance tab and its withdrawal IS Finance's gross monthly
+  // trading target (need + tax). The typed amount is only the fallback while Finance is not loaded.
+  const fin=financeMonthlyWithdrawal();
+  const linked=fin>0;
   return {target,endDate,days:goalTradingDaysUntil(endDate),withdrawMonthly,
-          withdrawAmount,withdrawFreq,reinvestPct};
+          withdrawAmount:linked?fin:withdrawAmount,withdrawFreq:linked?'monthly':withdrawFreq,
+          withdrawSource:linked?'finance':'typed',reinvestPct};
+}
+function financeMonthlyWithdrawal(){
+  try{const v=window.RocketFinance&&window.RocketFinance.monthlyWithdrawal();return v>0?Math.round(v):0;}catch(e){return 0;}
+}
+// Finance data loaded or edited: the goal's withdrawal moved with it.
+function onFinanceChanged(){
+  _goalCfgMemo=null;_goalRateCache=null;
+  try{invalidateTargetAnchorCaches();renderStats();refreshGoalReadout();}catch(e){}
+}
+function openGoalInFinance(){
+  switchTab(3);
+  requestAnimationFrame(()=>{const el=document.getElementById('finGoal');if(el)el.scrollIntoView({behavior:'smooth',block:'start'});});
 }
 function goalRemainingDays(g){return Math.max(0,Number(g.days)||0);}
 // Implied calendar end date: walk N trading days forward from today (display hint only).
@@ -7506,12 +7523,14 @@ function _applyGoalChange(){
   const w=parseFloat(document.getElementById('goalWd')?.value);
   const wf=String(document.getElementById('goalWdFreq')?.value||'').trim();
   const cur=getGoalConfig();
+  // Finance-linked: the withdrawal field is read-only, so the stored fallback is kept as it was.
+  const raw=FS.get(GOAL_STORE)||{},linked=cur.withdrawSource==='finance';
   _goalCfgMemo=null;FS.setUserSetting(GOAL_STORE,{
     target:t>0?t:cur.target,
     endDate:/^\d{4}-\d{2}-\d{2}$/.test(e)?e:cur.endDate,
     withdrawMonthly:cur.withdrawMonthly,           // legacy field, kept so an older build still reads
-    withdrawAmount:Number.isFinite(w)&&w>=0?w:cur.withdrawAmount,
-    withdrawFreq:GOAL_WITHDRAW_FREQS.includes(wf)?wf:cur.withdrawFreq,
+    withdrawAmount:linked?raw.withdrawAmount:(Number.isFinite(w)&&w>=0?w:cur.withdrawAmount),
+    withdrawFreq:linked?raw.withdrawFreq:(GOAL_WITHDRAW_FREQS.includes(wf)?wf:cur.withdrawFreq),
     reinvestPct:(()=>{const v=document.getElementById('goalReinvest');if(!v)return cur.reinvestPct;
       const t=String(v.value||'').trim();if(t==='')return null;
       const n=Number(t);return isFinite(n)?Math.min(100,Math.max(0,n)):cur.reinvestPct;})()
@@ -8061,8 +8080,8 @@ function buildGoalPopoverContent(){
     <label><span style="${_lbl}">By</span><input id="goalEnd" type="date" min="${getSessionDate()}" value="${g.endDate}" style="${goalFieldStyle()}" oninput="onGoalChange()" onchange="onGoalChange(true)" onfocus="this.style.borderColor='var(--amber)'" onblur="this.style.borderColor='var(--border)'" title="Deadline for the earnings target. Trading days left are counted from today to this date, skipping weekends and NSE holidays."></label>
   </div>
   <div class="goal-form-secondary">
-    <label><span style="${_lbl}">Withdraw ₹</span><input id="goalWd" type="number" min="0" step="100" placeholder="0" value="${g.withdrawAmount?g.withdrawAmount:''}" oninput="onGoalChange()" onchange="onGoalChange(true)" title="A FIXED rupee amount you take out of the account on the schedule beside this — rent, salary, expenses. It leaves whether or not the day earned, so it shrinks the compounding base and RAISES the daily rate the goal needs. Separate from Reinvest %, which only splits the days that do earn. Blank or 0 = no scheduled withdrawal." style="${goalFieldStyle()}" onfocus="this.style.borderColor='var(--amber)'" onblur="this.style.borderColor='var(--border)'"></label>
-    <label><span style="${_lbl}">Every</span><select id="goalWdFreq" onchange="onGoalChange(true)" title="How often the Withdraw ₹ amount leaves the account. Daily = every trading day; Weekly = the first trading day of each new week; Monthly = the first trading day of each new month." style="${goalFieldStyle()}" onfocus="this.style.borderColor='var(--amber)'" onblur="this.style.borderColor='var(--border)'">
+    ${g.withdrawSource==='finance'?`<label><span style="${_lbl}">Withdraw ₹ · from Finance</span><input id="goalWd" type="number" value="${g.withdrawAmount}" readonly title="Your gross monthly trading target from the Finance tab (monthly need + tax). Change expenses, EMIs or incomes there to change it." style="${goalFieldStyle()};opacity:.8;cursor:default"></label>`:`<label><span style="${_lbl}">Withdraw ₹</span><input id="goalWd" type="number" min="0" step="100" placeholder="0" value="${g.withdrawAmount?g.withdrawAmount:''}" oninput="onGoalChange()" onchange="onGoalChange(true)" title="A FIXED rupee amount you take out of the account on the schedule beside this — rent, salary, expenses. It leaves whether or not the day earned, so it shrinks the compounding base and RAISES the daily rate the goal needs. Separate from Reinvest %, which only splits the days that do earn. Blank or 0 = no scheduled withdrawal." style="${goalFieldStyle()}" onfocus="this.style.borderColor='var(--amber)'" onblur="this.style.borderColor='var(--border)'"></label>`}
+    <label><span style="${_lbl}">Every</span><select id="goalWdFreq" ${g.withdrawSource==='finance'?'disabled ':''}onchange="onGoalChange(true)" title="How often the Withdraw ₹ amount leaves the account. Daily = every trading day; Weekly = the first trading day of each new week; Monthly = the first trading day of each new month." style="${goalFieldStyle()}" onfocus="this.style.borderColor='var(--amber)'" onblur="this.style.borderColor='var(--border)'">
       <option value="daily"${g.withdrawFreq==='daily'?' selected':''}>Day</option>
       <option value="weekly"${g.withdrawFreq==='weekly'?' selected':''}>Week</option>
       <option value="monthly"${g.withdrawFreq==='monthly'?' selected':''}>Month</option>
@@ -13471,7 +13490,8 @@ function toggleHeaderMenu(){
     menu.style.display='none';
   }
 }
-function toggleGoalPopover(){
+function toggleGoalPopover(){ return openGoalInFinance(); }   // v1474: the popover is gone
+function _retiredGoalPopover(){
   const pop=document.getElementById('goalPopover');
   if(!pop) return;
   const isHidden=pop.style.display==='none';

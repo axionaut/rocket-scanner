@@ -188,7 +188,23 @@ function tbl(head,rows,foot='',align='',fit=false){
 const delBtn=(l,id)=>`<button class="btn" style="padding:2px 8px;font-size:12px" title="Delete" onclick="finDel('${l}','${id}')">✕</button>`;
 const addBtn=(l,t)=>`<button class="btn" style="padding:4px 10px;font-size:12px;margin-top:6px" onclick="finAdd('${l}')">+ ${t}</button>`;
 
+// Gross monthly trading target (net need grossed up for tax) - also the Goal's monthly withdrawal.
+function monthlyGross(){
+  if(!FIN) return 0;
+  const S=FIN.settings||{};
+  const living=FIN.expenses.reduce((s,e)=>s+n(e.amount),0);
+  const emis=FIN.loans.filter(l=>n(l.principal)>0).reduce((s,l)=>s+n(l.emi),0);
+  const counted=FIN.incomes.filter(i=>i.role==='covers').reduce((s,i)=>s+n(i.amount),0);
+  return grossFor(S.taxMode||'business',Math.max(0,living+emis-counted),S.flatTaxPct??30);
+}
+let FIN_GROSS_SENT=null;
+function notifyApp(){
+  const g=monthlyGross();
+  if(g===FIN_GROSS_SENT) return; FIN_GROSS_SENT=g;
+  try{if(typeof onFinanceChanged==='function') onFinanceChanged();}catch(e){}
+}
 function renderFinance(){
+  notifyApp();
   const root=$('finContent'); if(!root) return;
   if(!FIN){root.innerHTML=`<div style="padding:40px;text-align:center;color:var(--t2)">${FIN_ERR?esc(FIN_ERR):'Loading finance data…'}<div style="margin-top:12px"><button class="btn" onclick="RocketFinance.reload()">Retry</button></div></div>`;return;}
   // keep focus position across a re-render
@@ -231,6 +247,13 @@ function renderFinance(){
   h+=card('Trading capital',cap.total?inr(cap.total):'—',cap.cash!=null?`Kite cash ${inr(cap.cash)} + holdings ${inr(cap.invested)}`:'Kite cash not loaded yet');
   h+=`</div>`;
   h+=`<div style="font-size:12px;color:var(--t2);margin-top:4px">The target is a yardstick for this screen only. It never changes the score floor, trade count or sizing on the Rankings tab.</div>`;
+
+  // Goal (v1474): the corpus goal lives here; its monthly withdrawal is the gross trading target above.
+  if(typeof buildGoalPopoverContent==='function'){
+    let goal='';try{goal=buildGoalPopoverContent();}catch(e){goal='<div style="color:var(--t2)">Goal unavailable: '+esc(e.message)+'</div>';}
+    h+=`<div id="finGoal" style="scroll-margin-top:80px">`+section('Goal',`<div id="goalPopoverContent" style="max-width:560px;font-size:13px;line-height:1.6;color:var(--t2)">${goal}</div>`,
+      `withdrawal = gross trading target ${inr(gross)}/month`)+`</div>`;
+  }
 
   // scenario + tax
   const modes=[['business','Business income (slab, new regime)'],['stcg','Short-term capital gains (20%)'],['flat','Flat %']];
@@ -329,7 +352,7 @@ function setTabBadge(due){
   el.style.color=over?'var(--red)':due.length?'var(--amber)':'';
   el.title=due.map(x=>x.o.name+' '+inr(x.o.amount)+' due on the '+ord(x.o.dueDay)).join(' · ');
 }
-window.RocketFinance={reload:loadFinance,render:()=>{if(!FIN&&!FIN_LOADING)loadFinance();else renderFinance();},
+window.RocketFinance={reload:loadFinance,monthlyWithdrawal:monthlyGross,render:()=>{if(!FIN&&!FIN_LOADING)loadFinance();else renderFinance();},
   _test:{taxBusiness,taxSTCG,grossFor,loanMonthsLeft,simulate,priorityRate}};
 // Reminders matter even when the tab is closed: load once at start and refresh the tab every 10 minutes.
 setTimeout(loadFinance,1500);
