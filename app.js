@@ -1,5 +1,5 @@
-const BUILD_TS='2026-10-06 09:04 IST'; // release build time (IST)
-const APP_VERSION=1474;
+const BUILD_TS='2026-10-06 09:52 IST'; // release build time (IST)
+const APP_VERSION=1475;
 const RADAR_SCORE_VERSION='v1419-recross-batches'; // Eligible on crossing the score floor at any time; selected model's evolving target, T+2 exit.
 
 // ── v1358: AN UNCAUGHT ERROR MUST NAME ITSELF ─────────────────────────────────────────────────
@@ -11250,7 +11250,13 @@ function radarSeriesBandPill(s){
 
 function strategySignalCells(row){
   const x=RocketStrategy.inputs(row),book=BOOK_LADDER[normSym(row.symbol)];
-  const at=Number(book?.totalsAt),fresh=at>0&&at>=_freshEvidenceAfter&&at<=Date.now()&&Date.now()-at<DEPTH_TOTALS_MAX_AGE_MS;
+  // v1475: Kite sends a book only when it changes, so a quiet stock's last book stays correct while the
+  // stream is up. Display it if it arrived on the current connection today; the 60 s age rule (and any
+  // page-side hiccup resetting _freshEvidenceAfter) showed "Unavailable" for most of 2,700 streamed stocks.
+  // Trading gates (circuit-lock book test) keep their own 60 s rule.
+  const at=Number(book?.totalsAt),now=Date.now(),since=Number(STREAM_STATUS?.since)||0;
+  const fresh=at>0&&at<=now+1000&&STREAM_STATUS?.connected===true&&at>=since
+    &&new Date(at+19800000).toISOString().slice(0,10)===new Date(now+19800000).toISOString().slice(0,10);
   const buy=Number(book?.buyQty),sell=Number(book?.sellQty);
   return {highDistance:x.price>0&&x.high>=x.price?((x.high-x.price)/x.price*100).toFixed(2)+'%':'--',
     rvol:x.rvol==null?'--':x.rvol.toFixed(2)+'x',
@@ -12088,7 +12094,7 @@ async function loadBookState(){
     BOOK_AT=newest;
     BOOK_V++;      // the ladder moves every pass even when no bucket closed
     return n;
-  }catch(e){ BOOK_LADDER={};BOOK_V++;return 0; }
+  }catch(e){ return 0; }   // v1475: a timed-out read keeps the books already held (was: wiped every row)
 }
 // ---- WHAT IT COSTS TO TRADE THIS ROW AT MY SIZE (v1292) ---------------------------------------
 // Owner, on four stuck positions: "The Min Turnover does try to handle the liquidity thing, but if
