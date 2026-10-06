@@ -1,5 +1,5 @@
-const BUILD_TS='2026-10-06 13:00 IST'; // release build time (IST)
-const APP_VERSION=1478;
+const BUILD_TS='2026-10-06 13:35 IST'; // release build time (IST)
+const APP_VERSION=1479;
 const RADAR_SCORE_VERSION='v1419-recross-batches'; // Eligible on crossing the score floor at any time; selected model's evolving target, T+2 exit.
 
 // ── v1358: AN UNCAUGHT ERROR MUST NAME ITSELF ─────────────────────────────────────────────────
@@ -4736,18 +4736,6 @@ function btstCrossingState(s){
   }
   const gateOff=r.src.gate?.on!==true;
   if(gateOff) return {state:'WAIT',reason:`Score +${score.toFixed(2)} clears +${floor.toFixed(2)}, but the market gate is off - no buys today.`};
-  // Micro-structure & Intraday Exhaustion Overlay:
-  // Reject mid-day spikes that are overextended >4% above VWAP while fading >1.5% from day high
-  const ltp = Number(s?.price || s?.ltp || 0);
-  const vwap = Number(s?.vwap || s?.vwap5 || 0);
-  const high = Number(s?.high || s?.high1d || s?.dayHigh || ltp);
-  if (ltp > 0 && vwap > 0 && high >= ltp) {
-    const vwapDistPct = (ltp - vwap) / vwap * 100;
-    const highDistPct = (high - ltp) / high * 100;
-    if (vwapDistPct > 4.0 && highDistPct > 1.5) {
-      return { state: 'WAIT', reason: `Momentum overextended: +${vwapDistPct.toFixed(1)}% above VWAP (${highDistPct.toFixed(1)}% off high). Awaiting consolidation.` };
-    }
-  }
   const first=noteCrossing(s.symbol,score,floor);
   if(!isEquitySession(Date.now())) return {state:'WAIT',reason:`Score +${score.toFixed(2)} clears +${floor.toFixed(2)} - market closed.`};
   const stale=universePriceStaleness()||stockPriceStaleness(s.symbol);

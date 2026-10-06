@@ -24,7 +24,6 @@
 
     // Tier 2: Entry Triggers
     MAX_HIGH_DISTANCE_PCT: 1.2,  // Within 1.2% of Day High
-    MAX_VWAP_DISTANCE_PCT: 4.0,  // Max 4.0% above VWAP without consolidation (exhaustion protection)
     MIN_CIRCUIT_HEADROOM_PCT: 3.0, // At least 3.0% below Upper Circuit
 
     // BTST: +3% is the fallback for legacy positions and insufficient target-learning evidence.
@@ -70,12 +69,6 @@
     if(!(x.rvol>=CONFIG.MIN_RVOL))return reject('RVOL below 1.5x or unavailable');
     if(!(x.open>0&&x.price>x.open))return reject('Price must be above day open (valid open required)');
     if(!(x.vwap>0&&x.price>x.vwap))return reject('Price must be above VWAP (valid VWAP required)');
-    if(x.vwap>0&&CONFIG.MAX_VWAP_DISTANCE_PCT>0){
-      const vwapDistPct=(x.price-x.vwap)/x.vwap*100;
-      if(vwapDistPct>CONFIG.MAX_VWAP_DISTANCE_PCT&&x.high>0&&((x.high-x.price)/x.high*100)>1.5){
-        return reject(`Momentum overextended: +${vwapDistPct.toFixed(1)}% above VWAP and fading from high`);
-      }
-    }
     return {eligible:true,reason:'Liquid momentum candidate'};
   }
   function filterUniverse(stocks, heldSymbols = new Set()) {
@@ -94,12 +87,6 @@
     if(!(dayHigh>0)||dayHigh<ltp)return {canBuy:false,reason:'Missing or inconsistent day high'};
     const distToHighPct=(dayHigh-ltp)/ltp*100;
     if(distToHighPct>CONFIG.MAX_HIGH_DISTANCE_PCT)return {canBuy:false,reason:`${distToHighPct.toFixed(2)}% from day high (max 1.2%)`};
-    if(x.vwap>0&&CONFIG.MAX_VWAP_DISTANCE_PCT>0){
-      const vwapDistPct=(ltp-x.vwap)/x.vwap*100;
-      if(vwapDistPct>CONFIG.MAX_VWAP_DISTANCE_PCT&&distToHighPct>1.0){
-        return {canBuy:false,reason:`Overextended momentum: +${vwapDistPct.toFixed(1)}% above VWAP while ${distToHighPct.toFixed(2)}% off high`};
-      }
-    }
     if(!(upperCircuit>0))return {canBuy:false,reason:'Upper circuit unavailable'};
     const circuitRoomPct=(upperCircuit-ltp)/ltp*100;
     if(circuitRoomPct<CONFIG.MIN_CIRCUIT_HEADROOM_PCT)return {canBuy:false,reason:`Only ${circuitRoomPct.toFixed(2)}% circuit headroom (min 3%)`};
