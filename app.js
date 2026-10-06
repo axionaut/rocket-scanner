@@ -1,5 +1,5 @@
-const BUILD_TS='2026-10-06 14:20 IST'; // release build time (IST)
-const APP_VERSION=1480;
+const BUILD_TS='2026-10-06 14:42 IST'; // release build time (IST)
+const APP_VERSION=1481;
 const RADAR_SCORE_VERSION='v1419-recross-batches'; // Eligible on crossing the score floor at any time; selected model's evolving target, T+2 exit.
 
 // ── v1358: AN UNCAUGHT ERROR MUST NAME ITSELF ─────────────────────────────────────────────────
@@ -7822,7 +7822,12 @@ async function syncFilledBuyBasketToKite(){
     events.forEach(e=>_kiteCleanedFills.add(e.key));
     if(r.removed) showToast('Removed filled '+syms.join(', ')+' from Scanner_Buy.',5000);
   }catch(e){
-    reportKiteBasketOutcome(false,'Filled buy still needs basket cleanup: '+(e?.message||String(e)));
+    const msg = String(e?.message||e);
+    if(msg.includes('already running')){
+      setTimeout(syncFilledBuyBasketToKite, 3000);
+    } else {
+      reportKiteBasketOutcome(false,'Filled buy still needs basket cleanup: '+msg);
+    }
   }finally{_kiteTransferBusy=false;}
 }
 
@@ -14756,7 +14761,12 @@ async function syncSellBasketToKite(){
       showToast(`<strong>Scanner_Sell ready:</strong> ${escHtml(names)}. Open it in Kite and Execute.`,10000,true);
     }
   }catch(e){
-    reportKiteBasketOutcome(false,'Scanner_Sell: '+(e?.message||String(e)));
+    const msg = String(e?.message||e);
+    if(msg.includes('already running')){
+      setTimeout(syncSellBasketToKite, 3000);
+    } else {
+      reportKiteBasketOutcome(false,'Scanner_Sell: '+msg);
+    }
   }finally{_kiteSellBusy=false;}
 }
 async function sendBasketToKite(automatic=false){
