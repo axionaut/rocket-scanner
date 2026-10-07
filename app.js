@@ -1,6 +1,6 @@
-const BUILD_TS='2026-10-06 15:28 IST'; // release build time (IST)
-const APP_VERSION=1482;
-const RADAR_SCORE_VERSION='v1419-recross-batches'; // Eligible on crossing the score floor at any time; selected model's evolving target, T+2 exit.
+const BUILD_TS='2026-10-07 16:00 IST'; // release build time (IST)
+const APP_VERSION=1483;
+const RADAR_SCORE_VERSION='v1419-recross-batches'; // Eligible on crossing the score floor at any time; selected model's evolving target and movement-based profit protection.
 
 // ── v1358: AN UNCAUGHT ERROR MUST NAME ITSELF ─────────────────────────────────────────────────
 // This is the class of defect that has cost the most sessions in this app's history, and until now
@@ -3727,8 +3727,8 @@ function setRadarEvidenceScore(r){
 }
 function radarScoreTitle(r){
   const p=r?.btstPick;
-  return p?`BTST pick #${p.rank}: model score ${p.score} (predicted next-session net return %, after costs). Buyable when it crosses your score floor; exit at the selected model's evolving target or 15:20 on T+2.`
-    :"Model score: predicted next-session net return % after costs. GO when it is at or above your score floor.";
+  return p?`BTST pick #${p.rank}: model score ${p.score}. Buyable when it crosses your score floor; exit through the selected model's target and adaptive profit protection.`
+    :"Model score: the selected model score (Ensemble uses mapped percentiles, not calibrated return percentages). GO requires a fresh crossing of your score floor.";
 }
 function* refreshRocketScoresGen(deferPaint=false){
   const staged=[];
@@ -4280,7 +4280,8 @@ function depthQualificationIssue(sym){
   return null;
 }
 // ── TRADE ALERTS (v1400) ───────────────────────────────────────────────────────────────────────
-// The BTST window is ~5 minutes wide (final picks 15:15, buy 15:20) and the owner is not watching
+// Alerts follow score crossings throughout the session; snapshot stages do not authorize buys.
+// Historical context: the owner was not watching
 // the screen - on 17 Sep he acted on the 15:05 provisional partly because nothing announced the
 // final. These alerts are deliberately NOT showToast: that auto-dismisses and each new toast
 // removes the previous one, so a missed glance is a missed trade. An alert stays until dismissed.
@@ -4392,20 +4393,9 @@ if(typeof document!=='undefined'){
   if(document.readyState==='loading') document.addEventListener('DOMContentLoaded',initUI);
   else initUI();
 }
-// Clock-driven alerts. Checked every 20s alongside the picks poll. Each fires once per session.
-function checkTimeAlerts(){
-  if(!ALERTS_ON) return;
-  const c=istNow(),session=getSessionDate();
-  if(!isNseTradingDate(session)) return;
-  const at=(h,m)=>h*60+m, mins=c.mins, day=session;
-  // Fire within a 2-minute window so a backgrounded/throttled tab still catches it.
-  const due=(h,m)=>mins>=at(h,m)&&mins<at(h,m)+2;
-  if(due(15,18)) fireAlert({once:day+'|exit',tone:'warn',beeps:2,
-    title:'15:20 — EXIT unfilled positions',
-    body:'Sell unfilled BTST positions whose second trading session after entry is today (T+2).'});
-}
-// v1418: a crossing is tradeable the moment it happens, so it must announce itself. The 15:15
-// alerts above are clock-driven; this one is event-driven and fires per symbol, once per session.
+// Crossing alerts are checked alongside the live ranking poll.
+
+// A fresh crossing is tradeable immediately; each consumed crossing is announced once.
 // It reads getRowActionState, never the raw score - v1417's lesson: an alert that names a stock
 // the board has already refused is exactly the one that gets acted on.
 function checkCrossingAlerts(){
@@ -4419,18 +4409,19 @@ function checkCrossingAlerts(){
       const st=getRowActionState(row);
       if(!st||st.state!=='GO') continue;
       const k=normSym(row.symbol);
-      if(!k||_crossAlerted.has(k)) continue;
-      _crossAlerted.add(k);
-      fresh.push({sym:row.symbol,score:btstScoreOf(row.symbol)});
+      const crossingId=k+'|'+(crossingStore().at?.[k]?.t||'uncaptured');
+      if(!k||_crossAlerted.has(crossingId)) continue;
+      _crossAlerted.add(crossingId);
+      fresh.push({sym:row.symbol,score:btstScoreOf(row.symbol),crossingId});
     }
     if(!fresh.length) return;
     const floor=btstMinScore();
     const names=fresh.map(f=>f.sym+(Number.isFinite(f.score)?' +'+f.score.toFixed(2):'')).join(', ');
-    fireAlert({once:getSessionDate()+'|cross|'+fresh.map(f=>f.sym).join(','),tone:'go',beeps:3,
+    fireAlert({once:getSessionDate()+'|cross|'+fresh.map(f=>f.crossingId).join(','),tone:'go',beeps:3,
       title:fresh.length===1?'Score crossing — '+fresh[0].sym+' is buyable now'
         :fresh.length+' score crossings — buyable now',
       body:'<strong>'+escHtml(names)+'</strong><br>Clears the +'
-        +(Number.isFinite(floor)?floor.toFixed(2):'?')+' floor. Buy the funded basket now; use its GTT target, then sell by 15:20 on T+2 at the latest.'});
+        +(Number.isFinite(floor)?floor.toFixed(2):'?')+' floor. Buy the funded basket now; use its GTT target, let the adaptive profit trail manage the exit.'});
   }catch(e){}
 }
 // Symbols already announced today. Cleared when the session date rolls, so a tab left open
@@ -4454,54 +4445,8 @@ function picksBlockedNote(bd){
     return ` <span style="color:var(--red)">· ${n===picks.length?'all':n} blocked</span>`;
   }catch(e){return '';}
 }
-// Fired from loadBtstPicks when the picks file's stage changes. Only 'final' is tradeable (v1398).
-function alertOnPicksChange(prev,next){
-  if(!next||!next.ok||next.mode!=='live'||next.session!==getSessionDate()) return;
-  if(prev&&prev.asOf===next.asOf&&prev.stage===next.stage) return;
-  const names=(next.picks||[]).map(p=>p.symbol).join(', ')||'none';
-  const at=String(next.asOf||'').slice(11,16);
-  const gateOff=next.gate&&next.gate.on===false;
-  if(next.stage==='final'){
-    // v1404: an empty final list is a real outcome (score floor). Never chime green and say
-    // "buy at 15:20" over a list of nothing - that reads as a missed/broken feed.
-    const none=!(next.picks||[]).length;
-    // v1417: A PICK IS NOT THE SAME AS A BUYABLE PICK. 22 Sep the 15:15 final published OPTIEMUS
-    // and AHCL and this alert chimed green with "Buy at 15:20. This is the tradeable list." while
-    // BOTH sat locked at their upper circuit with nothing on offer - the board showed 0 GO and an
-    // empty basket at the same moment. The engine has no circuit feature so it ranks a locked
-    // stock happily (invariant 12); the app blocks it, and this alert must read the app's own
-    // verdict rather than the raw file. The buy window is ~5 minutes wide and the owner is not
-    // watching the screen, so an alert naming unbuyable names is exactly what gets acted on.
-    const verdicts=(next.picks||[]).map(p=>{
-      const row=(Array.isArray(ALL)?ALL:[]).find(r=>normSym(r?.symbol)===normSym(p.symbol));
-      // No row yet (universe still loading) counts as unknown, not as buyable.
-      return {sym:p.symbol,st:row?getRowActionState(row):null};
-    });
-    const blocked=verdicts.filter(v=>v.st&&v.st.state==='BLOCKED');
-    const allBlocked=!none&&blocked.length===verdicts.length;
-    const buyable=verdicts.filter(v=>!(v.st&&v.st.state==='BLOCKED')).map(v=>v.sym).join(', ');
-    const blockNote=blocked.length
-      ? '<br><span style="opacity:.85">'+escHtml(blocked.map(v=>v.sym).join(', '))
-        +' '+(blocked.length===1?'is':'are')+' blocked: '
-        +escHtml(String(blocked[0].st.reason||'').split(' - ')[0])+'.</span>'
-      : '';
-    fireAlert({once:getSessionDate()+'|final-file',tone:(gateOff||none||allBlocked)?'warn':'go',
-      beeps:(none||allBlocked)?1:3,
-      title:gateOff?'FINAL picks in — but the market gate is OFF'
-        :none?'No BTST picks today ('+at+')'
-        :allBlocked?'FINAL picks in ('+at+') — none are buyable'
-        :'FINAL picks are in ('+at+')',
-      body:gateOff?'No buys today: the gate is off. '+escHtml(names)
-        :none?'Nothing cleared the model score floor. No buy today — this is the filter working, not a failed run.'
-        :allBlocked?'<strong>'+escHtml(names)+'</strong> — every pick is blocked and cannot be bought at any price.'
-          +blockNote+'<br>No trade today.'
-        :'<strong>'+escHtml(buyable)+'</strong><br>Buy at 15:20. This is the tradeable list.'+blockNote});
-  }else if(next.stage==='provisional'){
-    fireAlert({once:getSessionDate()+'|prov-file',tone:'warn',beeps:1,
-      title:'Provisional picks ('+at+') — not tradeable',
-      body:escHtml(names)+'<br>Preview only. Wait for the 15:15 final; on 17 Sep it replaced all five.'});
-  }
-}
+// Qualification and alerts follow live score crossings rather than publication stage.
+
 // ── BTST ENGINE PICKS (v1393) ──────────────────────────────────────────────────────────────────
 // The helper publishes live rankings throughout the session. A score-floor crossing can become GO
 // at any time; the late-session picks file is only another live snapshot, not the card's authority.
@@ -4742,7 +4687,7 @@ function btstCrossingState(s){
   if(stale) return {state:'WAIT',reason:stale};
   const at=first?new Date(first.t).toLocaleTimeString('en-IN',{hour:'2-digit',minute:'2-digit',hour12:false}):'';
   return {state:'GO',reason:`Score +${score.toFixed(2)} clears the +${floor.toFixed(2)} floor`
-    +(at?` (crossed ${at})`:'')+` - buy the funded basket now; use its GTT target, sell by 15:20 on T+2 at the latest`};
+    +(at?` (crossed ${at})`:'')+` - buy the funded basket now; let the target GTT and adaptive profit trail manage the exit`};
 }
 // v1416: THE FLOOR NOW DECIDES WHAT TRADES. It is pushed to the helper, which passes --min-score
 // to every engine run including the scheduled 15:05/15:15 ones, so the picks file is cut at the
@@ -6616,23 +6561,21 @@ function getHighTimeInfo(sym,sessionDate){
 // v1413 (B): which mechanism closed this trade. A trip records no exit type, so it is inferred
 // from what is observable, and the classes are deliberately coarse:
 //   gtt    - realized return reached the +3% target, so the resting limit is what filled it.
-//   time   - sold at/after 15:18, i.e. the "sell 15:20 next session" rule.
+// Sale time does not establish which broker mechanism closed a trade.
 //   manual - sold intraday, below target: a discretionary exit. ZOTA's 09:25 TSL lands here.
 // A stop-loss or trailing stop is indistinguishable from any other early sell in this data,
 // so it counts as manual. This is an inference, not a broker-reported field.
-const EXIT_KIND_LABEL={gtt:'GTT target',manual:'manual/early',time:'15:20 time exit'};
+const EXIT_KIND_LABEL={gtt:'At/above reference target (inferred)',manual:'Other exit (mechanism unknown)'};
 function classifyExitKind(t){
   // v1446: judge against the target this trade actually carried, not a fixed +3%.
   const tgt=Number((typeof executedBtstTarget==='function'&&executedBtstTarget(t?.symbol||t?.sym))||RocketStrategy?.CONFIG?.TARGET_PCT);
   const pct=Number(t?.pnlPct!=null?t.pnlPct:t?.netPnlPct);
   // Tolerance covers charge rounding and a fill a paisa through the trigger.
   if(Number.isFinite(tgt)&&Number.isFinite(pct)&&pct>=tgt-0.15) return 'gtt';
-  const se=clockMinutes(t?.sellTime);
-  if(se!=null&&se>=15*60+18) return 'time';
   return 'manual';
 }
 // Renders the per-mechanism split for the High vs Exit tile, e.g.
-// "GTT target 4 · −52m | manual/early 11 · +38m | 15:20 time exit 9 · −61m".
+// Labels explicitly distinguish inferred target-level exits from unknown mechanisms.
 // Omitted entirely when only one mechanism is present: a single class tells you nothing.
 function highGapKindBreakdown(g){
   const k=g&&g.kinds; if(!k) return '';
@@ -7724,8 +7667,7 @@ function getDefaultMaxAlloc(){return getAutoMaxAllocCap();}
 // owner's own goal: the goal's daily rupee need divided by his entries per day. Not a chosen number -
 // the same per-trade figure v1299 sizes allocations with. Read by every target, so memoized briefly.
 function goalAllocationExplanation(){
-  const k=RocketStrategy.CONFIG.TOP_K||5;
-  return `Empty = Auto: cash is split equally across GO stocks, each at least Rs ${RocketStrategy.CONFIG.MIN_ALLOCATION_RS.toLocaleString('en-IN')} and at most the larger of that or Capital / ${k}. Type a value to cap every stock at that amount instead.`;
+  return `Eligible stocks share cash by score, within your saved All-in and Max % Capital limits. Minimum funded allocation is Rs ${RocketStrategy.CONFIG.MIN_ALLOCATION_RS.toLocaleString('en-IN')}.`;
 }
 
 // v1424: an empty Capital field means Kite's live allocatable cash (equity `net`, the "Available"
@@ -7755,15 +7697,14 @@ async function loadKiteGtts(){
   const j=await readHelperResponse('/api/kite/gtt',{timeout:8000}).catch(()=>null);
   if(!j||!j.ok||!Array.isArray(j.gtts)) return;
   const bySym=new Map();
-  for(const g of j.gtts){const k=normSym(g.sym);if(!bySym.has(k))bySym.set(k,[]);bySym.get(k).push({trigger:Number(g.trigger),qty:Number(g.qty)});}
+  for(const g of j.gtts){const k=normSym(g.sym);if(!bySym.has(k))bySym.set(k,[]);bySym.get(k).push({id:Number(g.id),trigger:Number(g.trigger),price:Number(g.price),qty:Number(g.qty)});}
   KITE_GTTS={bySym,at:Date.now()};
 }
 function kiteGttsFor(sym){
   return Date.now()-KITE_GTTS.at<5*60*1000?(KITE_GTTS.bySym.get(normSym(sym))||null):null;
 }
 // ── Profit Lock / Ratchet Trailing Exit Status (v1448) ──────────────────────
-// The helper tracks every held position's peak price on every WebSocket tick and arms a ratchet
-// trailing exit when a position reaches +1.8%. This poller fetches the tracker state so the
+// The helper tracks live highs and observed swings; target/stop GTT confirmation drives profit protection. This poller fetches the tracker state so the
 // browser can show armed / triggered badges and feed peakPnlPct to strategy.js evaluateExit.
 var PROFIT_LOCK_STATUS={bySym:new Map(),at:0};
 async function loadProfitLockStatus(){
@@ -8341,7 +8282,7 @@ function renderStats(){
   const protectionCard = `<div class="st" title="Each model has its own evolving peak history. Target = max(75% of median, 25% of median, costs plus minimum net profit). Existing executed GTTs stay fixed.">
     <div class="st-l">${targetRead?.model==='ENS'?'Ensemble':'Original'} target</div>
     <div class="st-v" style="font-size:18px;color:var(--green)">+${(targetRead?.pct??3).toFixed(2)}% base</div>
-    <div class="st-d">${targetRead&&!targetRead.fallback?`${targetRead.n} closed / ${targetRead.provisional} evolving`:'Startup fallback'} · cost/profit floor applies · T+2 15:20</div></div>`;
+    <div class="st-d">${targetRead&&!targetRead.fallback?`${targetRead.n} closed / ${targetRead.provisional} evolving`:'Startup fallback'} · cost/profit floor applies · adaptive profit protection</div></div>`;
 
   // Active Basket Allocation Card
   const capital = getEffectiveCapital();
@@ -9099,7 +9040,6 @@ function buildLatestSessionPanel(query=''){
 // It reads the exit-policy helpers but never feeds anything back into scoring.
 // `query` filters only what is DISPLAYED; the panel always computes from the full position set.
 function buildOpenPositionsPanel(query=''){
-  const reviewDays=RocketStrategy.CONFIG.MAX_HOLD_DAYS;
   const scannerBySymbol=new Map(ALL.map(row=>[row.symbol,row]));
   const rows=[];
 
@@ -9109,8 +9049,7 @@ function buildOpenPositionsPanel(query=''){
     const scannerRow=scannerBySymbol.get(pos.symbol)||null;
     const avg=Number(pos.avg)>0?Number(pos.avg):(HOLD_COST_MAP[pos.symbol]||null);
     const tapePolicy=getOpenPositionTapePolicy(pos.symbol,avg>0?Object.assign({},pos,{avg}):pos);
-    // Position decisions use the 5-minute tape. Position/ALL NSE LTP is only a display fallback
-    // while the tape is missing; it cannot move Target, SL, Pace, EoD or the instruction.
+    // Decisions use fresh prices and confirmed helper/broker protection.
     const ltp=Number(tapePolicy.price)>0?Number(tapePolicy.price)
       :Number(pos.ltp)>0?Number(pos.ltp):null;
     const pnlPct=(avg&&ltp)?+((ltp-avg)/avg*100).toFixed(2):null;
@@ -9121,14 +9060,11 @@ function buildOpenPositionsPanel(query=''){
     const targetPrice=tapePolicy.targetPrice;
     const tapeStopPrice=tapePolicy.stopPrice;
     const afterCostFloor=getPositionAfterCostFloor(avg,qty);
-    // The tape stop still protects the policy internally. On this manual-action surface, however,
-    // SL is specifically the point at which the owner can switch to TSL without locking a loss.
-    // Show the active protective stop even below entry; it is manual exit advice.
+    // Show confirmed active profit protection; no configured loss stop.
     const stopPrice=tapeStopPrice;
     const targetPct=tapePolicy.targetPct;
     const baseQty=qty;
-    // v1106 (owner): the day-1 time-exit ADVICE went with the Action column - the trading surface
-    // carries no instructions. The evidence behind it is unchanged and lives in Methodology.
+    // Holding age is informational and never forces an exit.
     const radarScore=btstScoreOf(pos.symbol);
     const radarRank=btstRankOf(pos.symbol);
     rows.push({
@@ -9153,8 +9089,8 @@ function buildOpenPositionsPanel(query=''){
 
   const daysFmt=(v)=>{
     if(v==null) return '<span style="color:var(--t3)">—</span>';
-    const color=v>reviewDays?'var(--red)':v>=reviewDays?'var(--amber)':'var(--t1)';
-    return `<span title="Trading-day age of oldest remaining FIFO buy lot" style="color:${color};font-weight:${v>reviewDays?700:500}">${v}d</span>`;
+    const color='var(--t1)';
+    return `<span title="Trading-day age of oldest remaining FIFO buy lot" style="color:${color};font-weight:500">${v}d</span>`;
   };
   const cols=[
     {key:'sym',label:'Symbol',align:'left',bold:true,totFmt:()=>'<b>TOTAL</b>',
@@ -9175,7 +9111,7 @@ function buildOpenPositionsPanel(query=''){
           } else if (exitCheck?.lockArmed) {
             stratBadge = `<div style="font-size:11px;background:var(--amber);color:#000;padding:2px 6px;border-radius:4px;font-weight:700;display:inline-block;margin-top:2px" title="${escHtml(exitCheck.reason)}">🛡️ LOCK +${exitCheck.lockStopPct}%</div>`;
           } else {
-            stratBadge = `<div style="font-size:10px;color:var(--t3)">${row.daysHeld==null?'Holding age unknown':`Day ${row.daysHeld}/${reviewDays}`}</div>`;
+            stratBadge = `<div style="font-size:10px;color:var(--t3)">${row.daysHeld==null?'Holding age unknown':`Held ${row.daysHeld} sessions`}</div>`;
           }
         }
         const ac=p.signal==='BUY'?'var(--green)':p.signal==='SELL'?'var(--red)'
@@ -9364,7 +9300,7 @@ function buildOpenPositionsPanel(query=''){
         <span style="font-size:13px;font-weight:800;color:var(--t1);text-transform:uppercase;letter-spacing:.08em">Open Positions${panelFilterTag(rows,shown,query)}</span>
         <span style="font-size:14px;font-weight:700;color:${pnlColor}">${rows.length} live position${rows.length===1?'':'s'} · ${fmtINR(totalCapital)} deployed · ${fmtSignedINR(totalPnl)}</span>
       </div>
-      <div style="font-size:14px;color:var(--t2);line-height:1.5">Live merge of Holdings, Positions, and today's net buys. BTST exits: the target saved with each executed order (+3% for legacy buys) from average cost, no stop, SELL at 15:20 on the second trading session after the buy (shown from 15:15). Exit advice requires fresh live prices. </div>
+      <div style="font-size:14px;color:var(--t2);line-height:1.5">Live merge of Holdings, Positions, and today's net buys. Exits follow the active broker target and confirmed adaptive profit stop. No loss stop or holding-age deadline. Exit advice requires fresh live prices. </div>
     </div>
     ${shown.length?`<div class="scroll-x">${table.getHtml()}</div>`:panelNoMatchHtml(query,'open position')}
   </div>`;
@@ -9982,13 +9918,13 @@ function buildIndicatorWatchHTML(){
 }
 function _renderMethodologyInner(){
   const mc=document.getElementById('methContent');if(!mc)return;
-  mc.innerHTML=`<h3>BTST engine (v1393)</h3>
-    <p>One model supplies the recommendation table, counts, allocation and basket. It is the April-2026 idea (score every stock, learn what is working) rebuilt on Zerodha data with a gradient-boosting learner. No ALL NSE files.</p>
+  mc.innerHTML=`<h3>Live score-crossing engine</h3>
+    <p>The selected Ensemble model supplies the recommendation table, counts, allocation and basket. It is the April-2026 idea (score every stock, learn what is working) rebuilt on Zerodha data with a gradient-boosting learner. No ALL NSE files.</p>
     <div class="m-grid">
-    <div class="m-card"><h4>1. Live score (throughout the session)</h4><p>The local helper runs <code>dev/btst_engine.py</code>. It builds 45 features for every liquid stock (20-day average turnover ≥ ₹5 Cr, price ₹50–₹5,000) from Zerodha daily bars plus today's live price and volume: returns from 1 day to 3 months, gap, close location, range, volume surges, volatility, distance to highs and averages, RSI, stochastics, ADX, MACD, TradingView-style ratings, relative strength and market condition. The model predicts the next-session trade result after costs and is retrained every 5 sessions on the last 220 sessions.</p></div>
-    <div class="m-card"><h4>2. Buy on qualification</h4><p>Top ${RocketStrategy.CONFIG.TOP_K} picks are GO, split equally across ${RocketStrategy.CONFIG.TOP_K} slots (minimum ₹5,000 each). A bought stock may qualify again after a fresh dip below the floor and re-crossing. Market gate: no buys when the equal-weight market index is more than 5% below its 50-day average. Stale prices or a broken stream turn GO into WAIT.</p></div>
-    <div class="m-card"><h4>3. Exit</h4><p>The basket attaches the selected model’s evolving target: 75% of its median post-entry peak, with a floor covering costs and the existing minimum net profit. Closed simulated recommendations enter immediately and keep updating their highs through T+2. Both models track independently; without closed history, +3% is the startup fallback. No stop-loss: overnight gaps jump stops, and a −2% stop turned the tested result negative. If the target has not filled, sell at 15:20 on T+2 (Open Positions shows SELL from 15:15).</p></div></div>
-    <h3>Evidence</h3>
+    <div class="m-card"><h4>1. Live score (throughout the session)</h4><p>The local helper runs <code>dev/btst_engine.py</code>. It builds daily, market, sector and intraday-sequence features for every liquid stock (20-day average turnover ≥ ₹5 Cr, price ₹5–₹4,000) from Zerodha daily bars plus today's live price and volume: returns from 1 day to 3 months, gap, close location, range, volume surges, volatility, distance to highs and averages, RSI, stochastics, ADX, MACD, TradingView-style ratings, relative strength and market condition. The selected model ranks opportunities; Ensemble scores are percentile-mapped scores, not calibrated expected returns. Models are retrained every 5 sessions on the last 220 sessions.</p></div>
+    <div class="m-card"><h4>2. Buy on qualification</h4><p>A current live score clearing your floor can become GO throughout the session. Qualifying names share available capital by score, within saved allocation and execution limits (minimum ₹5,000 per funded stock). A purchase consumes its crossing; a completed below-floor observation enables a fresh crossing, held or unheld. The market gate, price freshness, circuit, surveillance and EQ checks still apply.</p></div>
+    <div class="m-card"><h4>3. Exit</h4><p>Orders carry the selected model target, floored for costs and profit. The target learner observes simulated signals through two later sessions; that research horizon does not force a live exit. +3% is its startup fallback. Profit protection follows measured candle swings and 30-second live samples: quieter movement tightens the distance; wider swings cannot lower an established stop. The runner hands off near the target after broker protection is confirmed. No loss stop or scheduled expiry.</p></div></div>
+    <h3>Historical evidence</h3><p>The experiments below used older fixed entry and exit rules. They do not validate the current score-crossing entries, adaptive profit trail or holding without a time deadline.</p>
     <p>Walk-forward on NSE daily data, Dec 2025 – Sep 2026 (the model never saw the future), costs included: top 5 bought at the close and sold at +3% the next day or at its close averaged <b>+0.91% per trade</b>, 73% of days positive. With the market gate: <b>+1.18% per trade, 79% of days positive, worst drawdown −4.7%</b>. A 1-minute replay of 36 recent sessions (buy at the real 15:25 price, +3% only when price traded through it) averaged <b>+1.17% per trade</b>, 26 of 36 days positive. Different random seeds and settings gave +0.91% to +1.05%.</p>
     <p>The earlier near-high rules (v1388–v1392) and every intraday entry rule tested on 5-minute and 1-minute data did not beat costs; they are retired.</p>
     <div id="meth-hf-wrap">${buildHardFilterMethodologyHTML(ENGINE_DATA)}</div>`;
@@ -10589,11 +10525,11 @@ function getRowExitPolicy(row,buyPrice=null,activeInfo=null,nudgeInfo=null,qty=n
   if(learned?.method==='evolving-t2')return {targetPct,basePct,stopPct,viable:true,
     targetPolicy:TARGET_POLICY_VERSION,x:learned.x,y:learned.y,z,
     targetSource:`${learned.model==='ENS'?'Ensemble':'Original'}: ${learned.fallback?'3% startup fallback':`75% of median ${learned.x.toFixed(2)}%`}; ${learned.n} closed signals (${learned.provisional} still tracking); costs + minimum net floor ${z.toFixed(2)}%`,
-    viabilitySource:null,stopSource:'No stop: T+2 15:20 exit',rewardRisk:null};
+    viabilitySource:null,stopSource:'No loss stop; target GTT and adaptive profit protection',rewardRisk:null};
   return {targetPct,basePct,stopPct,viable:true,targetPolicy:learned?(learned.method==='profit-model'?'btst-profit-model':'btst-score-learned'):'btst-fixed',
     targetSource:learned?`${learned.method==='profit-model'?'Profit-model':'Score-learned'} BTST target (${learned.n} completed paths through ${learned.through})`:`BTST +${basePct}% GTT (learning fallback)`,
     viabilitySource:null,
-    stopSource:stopPct>0?'Fixed strategy stop':'No stop: time exit 15:20 on T+2',rewardRisk:stopPct>0?targetPct/stopPct:null};
+    stopSource:stopPct>0?'Fixed strategy stop':'No loss stop; target GTT and adaptive profit protection',rewardRisk:stopPct>0?targetPct/stopPct:null};
 }
 function summarizeRowExitPolicies(rows){
   const policies=(rows||[]).map(r=>getRowExitPolicy(r,r?.price)).filter(p=>p.targetPct>0&&p.stopPct>0&&p.viable);
@@ -10787,7 +10723,7 @@ function getOpenPositionTargetFloor(sym,pos){
   return {avgPrice,price:+price.toFixed(2),anchorPrice:+anchorPrice.toFixed(2),
     costFloorPrice,cushionFloorPrice,cushionIsSpread:cushionPx>0.05,anchorPct,source,marketPrice};
 }
-function getPositionDeadline(sym,pos){
+function getPositionAgeData(sym,pos){
   const qty=Math.max(0,Number(pos?.qty)||0);
   const lots=(TRADEBOOK_STATS?.openPositionLotsMap?.[sym]||[]).filter(l=>l.qty>0&&l.date)
     .map(l=>({...l})).sort((a,b)=>a.date.localeCompare(b.date));
@@ -10797,7 +10733,7 @@ function getPositionDeadline(sym,pos){
   if(!date&&(ORDERS_TODAY||[]).filter(o=>o.symbol===sym&&o.type==='BUY'&&normOrderDate(o.time)===getSessionDate()).reduce((n,o)=>n+(Number(o.qty)||0),0)>=qty&&qty>0) date=getSessionDate();
   const clock=istClock(),today=new Date(clock.dateMs).toISOString().slice(0,10);
   const days=date?tradingDaysBetween(date,today):null;
-  return {date,days,due:days!=null&&(days>RocketStrategy.CONFIG.MAX_HOLD_DAYS||(days===RocketStrategy.CONFIG.MAX_HOLD_DAYS&&clock.mins>=RocketStrategy.CONFIG.EXIT_AT_MIN-5))};
+  return {date,days,due:false};
 }
 const POSITION_STOP_STORE='rs_position_entry_stops_v1';
 function getPositionEntryStop(sym,pos){
@@ -10806,7 +10742,7 @@ function getPositionEntryStop(sym,pos){
   const row=(ALL||[]).find(r=>r.symbol===sym)||pos;
   const computed=tickPrice(avg*(1-getRowStopDistancePct(row)/100));
   const store=FS.get(POSITION_STOP_STORE)||{},old=store[sym];
-  const basis=avg+':'+(getPositionDeadline(sym,pos).date||'unknown');
+  const basis=avg+':'+(getPositionAgeData(sym,pos).date||'unknown');
   const stop=old?.basis===basis?Math.max(old.stop||0,computed):computed;
   if(old?.basis!==basis||old.stop!==stop) FS.set(POSITION_STOP_STORE,{...store,[sym]:{basis,stop}});
   return stop;
@@ -10818,15 +10754,14 @@ function getPositionTapeFallback(sym,pos,deadline,entryStop,bars,why){
     .sort((a,b)=>Number(a.t)-Number(b.t)).at(-1);
   const price=recent?Number(recent.c):null;
   const stopBreached=price>0&&entryStop>0&&price<=entryStop;
-  const sell=deadline.due||stopBreached;
+  const sell=RocketStrategy.CONFIG.STOP_LOSS_PCT>0&&stopBreached;
   const signal=sell?'SELL':recent?'WARMING UP':'REFRESHING';
   const floor=getOpenPositionTargetFloor(sym,pos);
   const ageWarning=deadline.date?'':' Buy date unavailable; BTST age cannot yet be verified.';
   return {symbol:sym,signal,signalSort:sell?0:3,qty,price,asOf:recent?.t||null,
     targetPrice:floor?.price||null,stopPrice:entryStop,pacePct:null,paceRs:null,
     eodPct:null,eodPrice:null,flowPct:null,ageUnknown:!deadline.date,
-    why:(deadline.due?'BTST deadline reached; exit using a fresh broker quote.'
-      :stopBreached?'Fresh price breached the protective entry stop.'
+    why:(sell?'Fresh price breached the protective entry stop.'
       :why+' Automatic refresh is running; the entry stop remains active.')+ageWarning};
 }
 function getOpenPositionTapePolicy(sym,pos){
@@ -10835,17 +10770,21 @@ function getOpenPositionTapePolicy(sym,pos){
   const days=getOpenPositionDaysHeld(symbol,qty);
   const stale=!isEquitySession(Date.now())?'Market closed':universePriceStaleness()||stockPriceStaleness(symbol);
   const price=Number(quote?.price)>0?Number(quote.price):Number(pos?.ltp)||null;
-  const tgtPct=executedBtstTarget(symbol)||currentModelTargetPct();
   const plk=profitLockFor(symbol);
-  const brokerStop=plk?.stopConfirmed&&plk?.stopGttId&&plk?.stopGttTrigger>0?plk.stopGttTrigger:null;
-  const verdict=stale?{action:'WAIT',reason:stale,shouldExit:false}:RocketStrategy.evaluateExit({avgCost:avg,daysHeld:days,targetPct:tgtPct,peakPnlPct:plk?.peakPnlPct??null,runnerStopPrice:plk?.runner&&!plk?.triggered?brokerStop:null,swingStopPrice:plk?.swingLock&&plk?.activated&&!plk?.runner&&!plk?.triggered?brokerStop:null},price);
+  const brokerTarget=(kiteGttsFor(symbol)||[]).find(g=>Number(g.id)===Number(plk?.targetGttId)&&g.qty===qty);
+  const activeTarget=brokerTarget?.trigger>0?brokerTarget.trigger
+    :plk?.targetGttId&&plk.targetGttQty===qty&&plk.targetPrice>0&&!plk.targetMissingSince?plk.targetPrice:null;
+  const tgtPct=activeTarget>0&&avg>0?(activeTarget/avg-1)*100:executedBtstTarget(symbol)||currentModelTargetPct();
+  const brokerStop=plk?.stopConfirmed&&plk?.stopGttId&&plk?.stopGttQty===qty&&plk?.stopGttTrigger>0?plk.stopGttTrigger:null;
+  const pending=plk&&(plk.triggered||plk.cleanupPending||plk.needsReconcile||plk.handoffPending||(plk.runner&&!brokerStop));
+  const verdict=stale?{action:'WAIT',reason:stale,shouldExit:false}:pending?{action:'WAIT',reason:plk.triggered?'Broker exit triggered; awaiting fill or cleanup.':'Broker profit protection is being reconciled.',shouldExit:false}:RocketStrategy.evaluateExit({avgCost:avg,daysHeld:days,targetPct:tgtPct,targetPrice:activeTarget,peakPnlPct:plk?.peakPnlPct??null,runnerStopPrice:plk?.runner&&!plk?.triggered?brokerStop:null,swingStopPrice:plk?.swingLock&&plk?.activated&&!plk?.runner&&!plk?.triggered?brokerStop:null},price);
   if(!stale&&plk?.activated&&!plk?.triggered&&!brokerStop&&!verdict.shouldExit) verdict.reason='Profit protection pending broker confirmation. '+verdict.reason;
   else if(!stale&&plk?.swingDataMissing&&!plk?.activated&&!verdict.shouldExit) verdict.reason='Swing estimate unavailable; profit trail not armed. '+verdict.reason;
   const {STOP_LOSS_PCT:slPct}=RocketStrategy.CONFIG;
   const targetPrice=avg>0?+(avg*(1+tgtPct/100)).toFixed(2):null,stopPrice=avg>0&&slPct>0?+(avg*(1-slPct/100)).toFixed(2):null;
   return {symbol,qty,price,open:quote?.open,signal:verdict.action,signalSort:verdict.shouldExit?0:1,
     why:verdict.reason,exitVerdict:verdict,targetPrice,stopPrice,targetPct:tgtPct,stopPct:slPct,
-    targetWhy:`+${tgtPct}% GTT from average buy cost`,stopWhy:slPct>0?`-${slPct}% from average buy cost`:'No stop: sell at 15:20 on T+2 if the target has not filled',
+    targetWhy:activeTarget>0?`Active target GTT at ${activeTarget}`:`Entry target +${tgtPct}% (active broker target not confirmed)`,stopWhy:slPct>0?`-${slPct}% from average buy cost`:'No loss stop; target GTT and adaptive profit protection',
     pacePct:null,paceRs:null,daysHeld:days,ageUnknown:days==null,afterCostFloor:null,
     profitLock:plk||null,lockStopPrice:verdict.lockStopPrice||null};
 }
@@ -13399,7 +13338,7 @@ function showRadarDetail(sym){
   document.getElementById('radarDetailTitle').textContent=r.symbol+' | Strategy';
   document.getElementById('radarDetailBody').innerHTML=`<p><b>${act.state}</b>: ${escHtml(act.reason)}</p>
     <p>${escHtml(radarScoreTitle(r))}</p><p>Price ${fmtINR(x.price)} | Day high ${fmtINR(x.high)} | Open ${fmtINR(x.open)} | VWAP ${fmtINR(x.vwap)}</p>
-    <p>Target +${getRowExitPolicy(r,r.price).targetPct}% base GTT (allocated order includes cost/profit floor) | No stop | Sell at 15:20 on T+2 if unfilled.</p>`;
+    <p>Target +${getRowExitPolicy(r,r.price).targetPct}% base GTT (allocated order includes cost/profit floor) | No loss stop | Adaptive profit protection; no scheduled exit.</p>`;
   dlg.showModal();
 }
 
@@ -13821,7 +13760,7 @@ function refreshStrategySafety(){
 }
 function startStreamRefresh(){
   if(_streamRefreshTimer) return;
-  if(!startStreamRefresh.btst){startStreamRefresh.btst=setInterval(()=>{loadBtstPicks();loadKiteMargins();loadKiteGtts();loadProfitLockStatus();loadAutoBuyStatus();syncSellBasketToKite();try{resetCrossAlertsIfNewDay();checkTimeAlerts();checkCrossingAlerts();}catch(e){}},20000);loadBtstPicks();loadKiteMargins();loadKiteGtts();loadProfitLockStatus();loadAutoBuyStatus();syncSellBasketToKite();try{resetCrossAlertsIfNewDay();checkTimeAlerts();checkCrossingAlerts();}catch(e){}
+  if(!startStreamRefresh.btst){startStreamRefresh.btst=setInterval(()=>{loadBtstPicks();loadKiteMargins();loadKiteGtts();loadProfitLockStatus();loadAutoBuyStatus();syncSellBasketToKite();try{resetCrossAlertsIfNewDay();checkCrossingAlerts();}catch(e){}},20000);loadBtstPicks();loadKiteMargins();loadKiteGtts();loadProfitLockStatus();loadAutoBuyStatus();syncSellBasketToKite();try{resetCrossAlertsIfNewDay();checkCrossingAlerts();}catch(e){}
     try{seedSavedBasketCount();}catch(e){}}
   _streamRefreshUiTimer=setInterval(()=>{try{refreshStrategySafety();renderLiveTapeBar();}catch(e){console.warn('Strategy safety refresh',e);}},1000);
   if(!_streamVisibilityBound){

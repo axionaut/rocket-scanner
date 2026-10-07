@@ -27,17 +27,15 @@
     MIN_CIRCUIT_HEADROOM_PCT: 3.0, // At least 3.0% below Upper Circuit
 
     // BTST: +3% is the fallback for legacy positions and insufficient target-learning evidence.
-    // New funded orders may carry a learned target; all unfilled positions exit by 15:20 on T+2.
+    // New funded orders carry a learned target and adaptive profit protection; no scheduled expiry.
     // No stop: overnight gaps jump stops (a -2% stop turned the walk-forward result negative).
     TARGET_PCT: 3.0,
     STOP_LOSS_PCT: 0,            // no stop-loss
-    MAX_HOLD_DAYS: 2,            // exit on the second trading session after entry
-    EXIT_AT_MIN: 15 * 60 + 20,   // 15:20 IST time exit
     TOP_K: 5,                    // positions per day (equal weight)
     MIN_ALLOCATION_RS: 5000.0,   // ₹5,000 minimum allocation per stock to ensure profits clear DP & charges
     // Profit Lock / Ratchet Trailing Exit
     PROFIT_LOCK_ACTIVATION_PCT: 0,   // v1455: early lock OFF (0). Replay on 65 live signals: every +1-2% lock lost to the target alone; only the runner (arm at target, 1% trail) beat it
-    PROFIT_LOCK_FLOOR_PCT: 0.3,      // Minimum guaranteed profit floor once armed (+0.3% break-even)
+    PROFIT_LOCK_FLOOR_PCT: 0.3,      // Legacy protected floor once armed (LIMIT fills are not guaranteed) (+0.3% break-even)
     PROFIT_LOCK_STEP2_PCT: 1.5,      // When peak reaches +1.5%, step floor up to +1.0%
     PROFIT_LOCK_TRAIL_DROP_PCT: 0.5  // Exit if price drops 0.5% from peak (min 10 paise)
   };
@@ -127,10 +125,10 @@
     const avgCost = Number(position.avgCost);
     const ltp = Number(liveLtp ?? position.ltp);
     if(!(ltp>0))return {shouldExit:false,action:'WAIT',reason:'Live price unavailable'};
-    const daysHeld = Number(position.daysHeld || 0);
     const pnlPct = +(((ltp - avgCost) / avgCost) * 100).toFixed(2);
 
     const targetPct = Number(position.targetPct) > 0 ? Number(position.targetPct) : CONFIG.TARGET_PCT;
+    const targetPrice = Number(position.targetPrice) > 0 ? Number(position.targetPrice) : avgCost * (1 + targetPct / 100);
     // v1451: a runner's target GTT was cancelled by the helper, which now trails it; the helper's
     // stop replaces both the target and the local lock computation.
     const runnerStop = Number(position.runnerStopPrice);
@@ -148,7 +146,7 @@
     }
     // v1462: the helper's swing stop below the target (the target GTT stays live above it).
     const swingStop = Number(position.swingStopPrice);
-    if (swingStop > 0 && pnlPct < targetPct) {
+    if (swingStop > 0 && ltp < targetPrice - 1e-8) {
       const stopPct = +(((swingStop - avgCost) / avgCost) * 100).toFixed(2);
       const sell = ltp <= swingStop;
       return {
@@ -161,7 +159,7 @@
       };
     }
     // Use the target attached to this executed BTST entry; legacy positions retain +3%.
-    if (pnlPct >= targetPct) {
+    if (ltp >= targetPrice - 1e-8) {
       return {
         shouldExit: true,
         action: 'SELL',
@@ -211,35 +209,6 @@
       };
     }
 
-    // Rule 3: Time exit - on T+2, sell at 15:20 if the target has not filled
-    const now = new Date(Date.now() + 19800000);
-    const nowMin = Number.isFinite(nowMinIST) ? nowMinIST : now.getUTCHours() * 60 + now.getUTCMinutes();
-    const exitAt = CONFIG.EXIT_AT_MIN || (15 * 60 + 20);
-    if (daysHeld > CONFIG.MAX_HOLD_DAYS || (daysHeld === CONFIG.MAX_HOLD_DAYS && nowMin >= exitAt - 5)) {
-      return {
-        shouldExit: true,
-        action: 'SELL',
-        exitType: 'TIME_STOP',
-        pnlPct,
-        reason: `Time exit: held ${daysHeld} session${daysHeld === 1 ? '' : 's'} and +${targetPct}% not filled - sell at 15:20`
-      };
-    }
-    if (daysHeld >= CONFIG.MAX_HOLD_DAYS) {
-      return {
-        shouldExit: false,
-        action: 'HOLD',
-        exitType: isLockArmed ? 'PROFIT_LOCK_ARMED' : 'ACTIVE',
-        pnlPct,
-        peakPnlPct: isLockArmed ? peakPnlPct : null,
-        lockStopPct: effectiveStopPct,
-        lockStopPrice,
-        lockArmed: isLockArmed,
-        reason: isLockArmed
-          ? `Profit lock active: peak +${peakPnlPct}%, stop ratcheted to +${effectiveStopPct}% (P&L ${pnlPct > 0 ? '+' : ''}${pnlPct}%)`
-          : `Target +${targetPct}% not reached; time exit at 15:20 today (P&L ${pnlPct > 0 ? '+' : ''}${pnlPct}%)`
-      };
-    }
-
     // Otherwise maintain position
     return {
       shouldExit: false,
@@ -252,7 +221,7 @@
       lockArmed: isLockArmed,
       reason: isLockArmed
         ? `Profit lock active: peak +${peakPnlPct}%, stop ratcheted to +${effectiveStopPct}% (P&L ${pnlPct > 0 ? '+' : ''}${pnlPct}%)`
-        : `Target +${targetPct}%; time exit 15:20 on T+2 (${Math.max(0,CONFIG.MAX_HOLD_DAYS-daysHeld)} sessions remaining; P&L ${pnlPct > 0 ? '+' : ''}${pnlPct}%)`
+        : `Target +${targetPct}% with adaptive profit protection (P&L ${pnlPct > 0 ? '+' : ''}${pnlPct}%)`
     };
   }
 

@@ -63,7 +63,7 @@ function rankingTable(){
     h+=`<tr style="${r.go?'background:rgba(52,211,153,.08)':''}"><td style="${cell}">${i+1}</td><td style="${cell}">${r.flag} ${r.mkt}</td><td style="${cell};font-weight:700">${esc(r.symbol)}</td><td style="${cell}">${esc(r.name!==r.symbol?r.name:'')}</td><td style="${cell}">${esc(r.sector)}</td><td style="${cell}">${num(r.price)}</td><td style="${cell};color:${r.chgPct>=0?'var(--green)':'var(--red)'}">${sgn(r.chgPct)}%</td><td style="${cell};font-weight:700;color:${Number(r.score)>=r.fl?'var(--green)':'var(--amber)'}">${sgn(r.score,3)}</td><td style="${cell};font-weight:700;color:${r.go?'var(--green)':'var(--t2)'}">${r.go?'GO':'WAIT'}</td><td style="${cell}">${num(r.targetPrice)} <span style="color:var(--t2);font-size:11px">+${r.tgt}%</span></td><td style="${cell}">${(Number(r.turnover20)/1e6).toFixed(1)}M</td></tr>`;
   });
   if(!rows.length) h+=`<tr><td colspan="11" style="${cell};color:var(--t2)">No scored stocks for this filter yet.</td></tr>`;
-  return h+`</tbody></table></div><div style="font-size:12px;color:var(--t2);margin-top:6px">Prices and turnover are in each market's own currency (SAR / USD). Rule: buy on the crossing, +3% target else sell at the T+2 close, no stop. No exchange surveillance list exists for these markets in the app.</div>`;
+  return h+`</tbody></table></div><div style="font-size:12px;color:var(--t2);margin-top:6px">Prices and turnover are in each market's own currency (SAR / USD). Research benchmark: score-crossing entry, +3% target or a two-session closing-price outcome, no stop. This is a benchmark horizon, not an NSE exit instruction. No exchange surveillance list exists for these markets in the app.</div>`;
 }
 function recordTable(){
   const rows=[];
@@ -81,7 +81,7 @@ function render(force){
   const root=$('intlContent'); if(!root) return;
   const ae=document.activeElement;
   if(!force&&ae&&ae.tagName==='SELECT'&&root.contains(ae)) return;   // don't rebuild under an open dropdown
-  let h=`<div style="padding:12px 16px"><div style="font-size:13px;color:var(--t2);line-height:1.6;margin-bottom:10px">Same system as NSE: Ensemble score (5 models, same scale), your Score Floor, the same market gate, buy when a stock crosses the floor at any time, +3% target else sell at the T+2 close, no stop. Trained separately on each market's history. Picks only - no orders are placed.</div>`;
+  let h=`<div style="padding:12px 16px"><div style="font-size:13px;color:var(--t2);line-height:1.6;margin-bottom:10px">Separate international research feed: Ensemble score (5 models), your Score Floor and market gate, with crossing signals throughout each session. Trained and evaluated separately on each market's history. The fixed-target research benchmark does not provide NSE's adaptive broker protection. Picks only - no orders are placed.</div>`;
   h+=MK.map(statusLine).join('')+rankingTable()+recordTable()+`</div>`;
   root.innerHTML=h;
   const live=MK.reduce((n,m)=>n+((DATA[m.id]&&DATA[m.id].live&&(DATA[m.id].picks||[]).length)||0),0);
