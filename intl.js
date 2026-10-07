@@ -29,7 +29,7 @@ window.intlRun=function(){};   // v1468: no manual scoring - the helper scores e
 
 function stageBadge(d){
   if(!d) return '';
-  const c=d.live?['live - scored every '+(d.market==='SA'?10:15)+' min','var(--green)']:['market closed - last close','var(--t2)'];
+  const c=d.live?['live - scored every '+(d.market==='SA'?'10 min':'2 min'),'var(--green)']:['market closed - last close','var(--t2)'];
   return `<span style="padding:2px 8px;border-radius:999px;border:1px solid ${c[1]};color:${c[1]};font-size:12px;font-weight:700">${c[0]}</span>`;
 }
 // v1469: one status line per market, then ONE table of every stock ranked by score with a Market column and filter
