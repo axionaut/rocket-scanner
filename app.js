@@ -1,5 +1,5 @@
 const BUILD_TS='2026-10-08 IST'; // release build date (IST)
-const APP_VERSION=1490;
+const APP_VERSION=1491;
 const RADAR_SCORE_VERSION='v1419-recross-batches'; // Eligible on crossing the score floor at any time; selected model's evolving target and movement-based profit protection.
 
 // ── v1358: AN UNCAUGHT ERROR MUST NAME ITSELF ─────────────────────────────────────────────────
@@ -8274,7 +8274,7 @@ function renderStats(){
     <div class="st-d">${up.capital>0?'of $'+up.capital.toFixed(2)+' typed capital · manual IBKR':'Enter US Capital $ to size US GO rows'}</div></div>`;
   document.getElementById('statsBar').innerHTML =
     dashboardMarketCards() + (mv.nse ? allocCard + bookedCard : '') + (mv.us ? usAllocCard : '')
-      + (mv.nse ? '' : '<div class="st"><div class="st-l">US · Account P&amp;L</div><div class="st-v" style="font-size:18px">Not imported</div><div class="st-d">IBKR holdings and trades are not connected</div></div>');
+      + (mv.us ? usAccountCard() : '');
   balanceGrids();
 
   // v1401: the held / surveillance / GO pills moved into the single status line (renderStatusBar),
@@ -9306,6 +9306,7 @@ function renderPerformance(){
   // Latest Session and Open Positions now live on the Rankings tab (v530).
   if(!tb){
     el.innerHTML=`<div style="padding:12px 16px"><div style="text-align:center;padding:60px 40px;color:var(--t2)"><div style="font-size:18px;font-weight:700;color:var(--t1);margin-bottom:8px">No Tradebook Loaded</div><div>Upload TRADEBOOK.csv to see performance analytics. Open Positions and Latest Session are on the Rankings tab.</div></div></div>`;
+    el.innerHTML+=buildUsPerformancePanel();
     return;
   }
 
@@ -9316,6 +9317,7 @@ function renderPerformance(){
   const allTripsRaw=tb.tripsData||[];
   if(!allTripsRaw.length&&tb.roundTrips>0){
     el.innerHTML=`<div style="padding:12px 16px"><div style="text-align:center;padding:60px 40px;color:var(--t2)"><div style="font-size:18px;font-weight:700;color:var(--t1);margin-bottom:8px">Re-upload TRADEBOOK.csv</div><div>Brain has ${tb.roundTrips} trades stored in the old format. Re-upload TRADEBOOK.csv once to rebuild with full trip data.</div></div></div>`;
+    el.innerHTML+=buildUsPerformancePanel();
     return;
   }
 
@@ -9425,6 +9427,7 @@ function renderPerformance(){
       ${monthRows.length?perfCard('Monthly Breakdown',monthTbl.getHtml(),'','perf-monthly'):''}
       ${symRows.length?perfCard('Stocks',symTbl.getHtml(),'360px','perf-stocks'):''}
     </div>`;
+  el.innerHTML+=buildUsPerformancePanel();
 
   setTimeout(()=>{monthTbl.render();symTbl.render();},0);
 }
@@ -11271,20 +11274,36 @@ function onUsCapitalChange(){
   try{localStorage.setItem(US_CAPITAL_STORE,(document.getElementById('fUsCapital')?.value||'').trim());}catch(e){}
   renderTable();
 }
-function ibkrCommission(qty,price){
-  if(!(qty>0))return 0;
-  return Math.min(Math.max(0.35,0.0035*qty),0.01*qty*price);
+// v1491: the owner's first IBKR fill (RES 16 @ 6.01, 8 Oct) was charged $0.99 - IBKR Pro FIXED
+// ($0.005/share, min $1, max 1% of value), not Tiered ($0.0035/share, min $0.35, max 1%). The plan is
+// a fact about the account, so the owner picks it (saved); sizing, net profit and the ledger use it.
+const US_PLAN_STORE='rocket-us-ibkr-plan-v1';
+function usIbkrPlan(){
+  const el=document.getElementById('fUsPlan');
+  const v=el?el.value:(()=>{try{return localStorage.getItem(US_PLAN_STORE);}catch(e){return '';}})();
+  return v==='tiered'?'tiered':'fixed';
 }
+function onUsPlanChange(){
+  try{localStorage.setItem(US_PLAN_STORE,usIbkrPlan());}catch(e){}
+  syncUsLedger();renderTable();renderRankingsPanels();
+}
+function ibkrCommission(qty,price,plan=usIbkrPlan()){
+  if(!(qty>0))return 0;
+  const fixed=plan==='fixed';
+  return Math.min(Math.max(fixed?1:0.35,(fixed?0.005:0.0035)*qty),0.01*qty*price);
+}
+const usCents=v=>Math.ceil(v*100-1e-6)/100;
 const US_BUY_BUFFER=1.0025;
 let _usPlanMemo=null;
 function usPlan(){
   const d=US_FEED.data,cap=usCapital(),fl=usFloor(),pct=typeof getMaxAllocPct==='function'?getMaxAllocPct():100,live=usFeedLive();
-  if(_usPlanMemo&&_usPlanMemo.d===d&&_usPlanMemo.cap===cap&&_usPlanMemo.fl===fl&&_usPlanMemo.pct===pct&&_usPlanMemo.live===live)return _usPlanMemo.plan;
+  const ibkr=usIbkrPlan(),tgt=Number(d?.rules?.targetPct)||3;
+  if(_usPlanMemo&&_usPlanMemo.d===d&&_usPlanMemo.cap===cap&&_usPlanMemo.fl===fl&&_usPlanMemo.pct===pct&&_usPlanMemo.live===live&&_usPlanMemo.ibkr===ibkr)return _usPlanMemo.plan;
   const plan={capital:cap,alloc:{},funded:0,spent:0};
   const go=d&&d.ok&&live&&d.gateOn!==false?(d.ranking||[]).filter(r=>Number.isFinite(Number(r.score))&&Number(r.score)>=fl&&Number(r.price)>0)
-    .map(r=>({sym:r.symbol,score:Number(r.score),px:Number(r.price)*US_BUY_BUFFER,impact:Number(r.turnover20)>0?0.001*Number(r.turnover20):0}))
+    .map(r=>({sym:r.symbol,score:Number(r.score),px:usCents(Number(r.price)*US_BUY_BUFFER),impact:Number(r.turnover20)>0?0.001*Number(r.turnover20):0}))
     .sort((a,b)=>b.score-a.score):[];
-  const debit=(q,px)=>q*px+ibkrCommission(q,px);
+  const debit=(q,px)=>q*px+ibkrCommission(q,px,ibkr);
   if(cap>0&&go.length){
     const perCap=cap*Math.min(pct,100)/100,W=go.reduce((t,g)=>t+1+Math.max(0,g.score-fl),0);
     go.forEach(g=>{g.lim=Math.min(perCap,g.impact||0);g.qty=0;});
@@ -11299,14 +11318,156 @@ function usPlan(){
       for(const g of go){const extra=debit(g.qty+1,g.px)-debit(g.qty,g.px);
         if(debit(g.qty+1,g.px)<=g.lim+1e-9&&extra<=cash+1e-9){g.qty++;cash-=extra;moved=true;}}}
     go.forEach(g=>{
-      if(g.qty>0){const cost=g.qty*g.px,comm=ibkrCommission(g.qty,g.px);
-        plan.alloc[g.sym]={qty:g.qty,limit:g.px,alloc:cost+comm,comm};plan.funded++;plan.spent+=cost+comm;}
+      // Sell target = limit +target%, rounded up to the cent; net = profit at the target after both commissions.
+      const sell=usCents(g.px*(1+tgt/100));
+      const net=q=>q*(sell-g.px)-ibkrCommission(q,g.px,ibkr)-ibkrCommission(q,sell,ibkr);
+      if(g.qty>0&&net(g.qty)<=0){g.lossQty=g.qty;g.qty=0;}
+      if(g.qty>0){const cost=g.qty*g.px,comm=ibkrCommission(g.qty,g.px,ibkr);
+        plan.alloc[g.sym]={qty:g.qty,limit:g.px,alloc:cost+comm,comm,sell,net:net(g.qty),
+          roundTrip:comm+ibkrCommission(g.qty,sell,ibkr)};plan.funded++;plan.spent+=cost+comm;}
+      else if(g.lossQty)plan.alloc[g.sym]={rejected:true,reason:'Commissions take the whole +'+tgt+'% at this size'};
       else plan.alloc[g.sym]={rejected:true,reason:!(g.impact>0)?'No turnover figure for the market-impact cap'
         :g.lim<debit(1,g.px)?(g.lim===g.impact?'One share exceeds 0.10% of 20-day turnover':'One share exceeds Max % Capital'):'Cash used by stronger scores'};
     });
   }else go.forEach(g=>{plan.alloc[g.sym]={rejected:true,reason:'Enter US Capital $ to size'};});
-  _usPlanMemo={d,cap,fl,pct,live,plan};
+  _usPlanMemo={d,cap,fl,pct,live,ibkr,plan};
   return plan;
+}
+// IBKR order-ticket steps learned on the first live order (8 Oct): units, TIF, Profit Taker,
+// Price Management Algo, and the <$5k liquid-net-worth limit of one day trade per 5 trading days.
+function usTicketSteps(sym,a){
+  const f=v=>'$'+Number(v).toFixed(2),dt=usDayTradeStatus();
+  return [sym+' in IBKR (suggest-only):',
+    '1. Buy - Quantity '+a.qty+', unit Shares (not USD), Limit '+f(a.limit)+', TIF Day, Outside RTH No, All or None No.',
+    dt.left>0?'2. Attach Profit Taker '+f(a.sell)+', TIF Good till Cancel. Stop Loss OFF (no loss stop).'
+      :'2. NO day trade left ('+dt.used+' used in 5 sessions): do NOT attach the Profit Taker. Place the '+f(a.sell)+' GTC sell next US session.',
+    '3. Price Management Algo may cap the submitted price. Review its disclosure and verify both buy and GTC sell are accepted in Orders.',
+    '4. After the fill, add it under IBKR Positions so P&L and the day-trade count stay current.',
+    'Estimated cost (other exchange/regulatory fees excluded) '+f(a.alloc)+' incl. '+f(a.comm)+' buy commission ('+usIbkrPlan()+' plan); net at target '+(a.net>=0?'+':'')+f(a.net)+' after '+f(a.roundTrip)+' round-trip commission.'].join('\n');
+}
+// ── v1491 IBKR POSITIONS LEDGER ─────────────────────────────────────────────────────────────────
+// IBKR is not connected (no API), so the owner records fills here; prices come from the US feed.
+// Stored locally and mirrored to the helper for ntfy advice. This account displayed a one-day-trade
+// limit; recorded same-day exits over five weekdays are an estimate. IBKR is authoritative.
+const US_LEDGER_STORE='rocket-us-ledger-v1',US_DAY_TRADE_LIMIT=1;
+function usLedger(){
+  try{const raw=localStorage.getItem(US_LEDGER_STORE);if(raw===null)return {open:[],closed:[]};
+    const v=JSON.parse(raw);if(!Array.isArray(v.open)||!Array.isArray(v.closed))throw new Error('Invalid ledger');
+    return {open:v.open,closed:v.closed};
+  }catch(e){return {open:[],closed:[],unreadable:true};}
+}
+function saveUsLedger(l){
+  if(l.unreadable){showToast('Saved IBKR ledger is unreadable; preserved. Restore a valid ledger before editing.',6000,true);return;}
+  try{localStorage.setItem(US_LEDGER_STORE,JSON.stringify(l));}catch(e){showToast('IBKR ledger could not be saved: '+e.message,6000,true);return;}
+  syncUsLedger();PERF_DIRTY=true;renderRankingsPanels();renderTable();
+}
+let US_LEDGER_SYNC={busy:false,error:null},US_ADVICE={};
+async function syncUsLedger(){
+  if(US_LEDGER_SYNC.busy){US_LEDGER_SYNC.again=true;return;}
+  US_LEDGER_SYNC.busy=true;
+  try{
+    const raw=localStorage.getItem(US_LEDGER_STORE);
+    if(raw===null){
+      const remote=await readHelperResponse('/api/us/ledger',{timeout:6000});
+      if(remote?.exists&&localStorage.getItem(US_LEDGER_STORE)===null){
+        localStorage.setItem(US_LEDGER_STORE,JSON.stringify({open:remote.open,closed:remote.closed}));
+        if(localStorage.getItem(US_PLAN_STORE)===null&&['fixed','tiered'].includes(remote.plan)){
+          localStorage.setItem(US_PLAN_STORE,remote.plan);const pl=document.getElementById('fUsPlan');if(pl)pl.value=remote.plan;
+        }
+        PERF_DIRTY=true;
+      }
+    }else{
+      const local=JSON.parse(raw);
+      if(!Array.isArray(local.open)||!Array.isArray(local.closed))throw new Error('Saved ledger is unreadable; preserved');
+      const result=await readHelperResponse('/api/us/ledger',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({...local,plan:usIbkrPlan()}),timeout:6000});
+      if(!result?.ok)throw new Error(result?.why||'Helper did not save ledger');
+    }
+    const advice=await readHelperResponse('/api/us/advice',{timeout:6000});
+    if(advice?.ok)US_ADVICE=advice.positions||{};
+    US_LEDGER_SYNC.error=null;
+  }catch(e){US_LEDGER_SYNC.error=e.message;}finally{US_LEDGER_SYNC.busy=false;if(US_LEDGER_SYNC.again){US_LEDGER_SYNC.again=false;syncUsLedger();}}
+}
+function nyDate(t=Date.now()){return new Date(t).toLocaleDateString('en-CA',{timeZone:'America/New_York'});}
+function usSessionsBack(n,from=nyDate()){
+  const out=[];let d=new Date(from+'T12:00:00Z');
+  while(out.length<n){const w=d.getUTCDay();if(w!==0&&w!==6)out.push(d.toISOString().slice(0,10));d=new Date(d.getTime()-864e5);}
+  return out;
+}
+function usDayTradeStatus(ledger=usLedger(),today=nyDate()){
+  const win=new Set(usSessionsBack(5,today));
+  const used=ledger.closed.filter(c=>c.buyDate&&c.buyDate===c.sellDate&&win.has(c.sellDate)).length;
+  return {used,left:Math.max(0,US_DAY_TRADE_LIMIT-used)};
+}
+function usLastPrice(sym){const r=(US_FEED.data?.ranking||[]).find(x=>x.symbol===sym);const p=Number(r?.price);return Number.isFinite(p)&&p>0?p:null;}
+function usAddPosition(){
+  const v=id=>(document.getElementById(id)?.value||'').trim();
+  const sym=v('usAddSym').toUpperCase(),qty=parseInt(v('usAddQty'),10),px=parseFloat(v('usAddPx'));
+  const commTyped=parseFloat(v('usAddComm')),date=v('usAddDate')||nyDate();
+  if(!sym||!(qty>0)||!(px>0)){if(typeof showToast==='function')showToast('Enter symbol, shares and fill price');return;}
+  const comm=Number.isFinite(commTyped)&&commTyped>=0?commTyped:ibkrCommission(qty,px);
+  const tgt=Number(US_FEED.data?.rules?.targetPct)||3;
+  if(!/^[A-Z0-9][A-Z0-9.-]{0,19}$/.test(sym)||!Number.isInteger(Number(v('usAddQty')))||!/^\d{4}-\d{2}-\d{2}$/.test(date)){showToast('Use a valid ticker, whole shares and YYYY-MM-DD fill date',6000,true);return;}
+  const l=usLedger();l.open.push({id:Date.now().toString(36),sym,qty,px,comm,date,target:usCents(px*(1+tgt/100))});saveUsLedger(l);
+}
+function usSellPosition(id){
+  const l=usLedger(),p=l.open.find(x=>x.id===id);if(!p)return;
+  const sp=parseFloat(prompt('Sell price for '+p.qty+' '+p.sym+' (IBKR fill):',p.target));
+  if(!(sp>0))return;
+  const rawComm=prompt('Sell commission (IBKR Orders & Trades):',ibkrCommission(p.qty,sp).toFixed(2));if(rawComm===null)return;
+  const sc=parseFloat(rawComm);if(!(sc>=0))return;
+  const sd=prompt('Sell date (New York, YYYY-MM-DD):',nyDate());if(!sd||!/^\d{4}-\d{2}-\d{2}$/.test(sd)||sd<p.date)return;
+  l.open=l.open.filter(x=>x.id!==id);
+  l.closed.unshift({sym:p.sym,qty:p.qty,buy:p.px,buyComm:p.comm,buyDate:p.date,sell:sp,sellComm:Number.isFinite(sc)?sc:ibkrCommission(p.qty,sp),sellDate:sd});
+  saveUsLedger(l);
+}
+function usRemovePosition(id){const l=usLedger();if(!confirm('Remove this IBKR position from the ledger?'))return;l.open=l.open.filter(x=>x.id!==id);saveUsLedger(l);}
+function usClosedNet(c){return c.qty*(c.sell-c.buy)-c.buyComm-c.sellComm;}
+function usAccountCard(){
+  const l=usLedger();let cost=0,val=0,priced=true;
+  l.open.forEach(p=>{const ltp=usLastPrice(p.sym);cost+=p.qty*p.px+p.comm;if(ltp)val+=p.qty*ltp;else priced=false;});
+  const realized=l.closed.reduce((n,c)=>n+usClosedNet(c),0),un=val-cost,dt=usDayTradeStatus(l);
+  const sg=v=>(v>=0?'+':'-')+'$'+Math.abs(v).toFixed(2);
+  return '<div class="st" title="From the IBKR fills you recorded under IBKR · US Positions."><div class="st-l">US · IBKR P&amp;L</div><div class="st-v" style="font-size:18px;color:'+(un+realized>=0?'var(--green)':'var(--red)')+'">'+(l.open.length||l.closed.length?(priced?sg(un+realized):'Partly unpriced'):'No fills recorded')+'</div><div class="st-d">'+l.open.length+' open · unrealized '+(priced?sg(un):'partly unpriced')+' · realized '+sg(realized)+' · recorded same-day exits '+dt.used+'/'+US_DAY_TRADE_LIMIT+'</div></div>';
+}
+function buildUsPositionsPanel(){
+  const l=usLedger(),dt=usDayTradeStatus(l),f=v=>Number.isFinite(v)?'$'+v.toFixed(2):'—';
+  const sg=v=>Number.isFinite(v)?(v>=0?'+':'-')+'$'+Math.abs(v).toFixed(2):'—',cl=v=>v>0?'var(--green)':v<0?'var(--red)':'var(--t3)';
+  if(!l.open.length&&!l.closed.length&&!marketsShown().us)return '';
+  const th=t=>`<th style="text-align:right;padding:6px 10px;font-size:11px;color:var(--t3);font-weight:700;text-transform:uppercase">${t}</th>`;
+  const td=(v,c='var(--t1)')=>`<td style="text-align:right;padding:6px 10px;font-family:'DM Mono',monospace;color:${c}">${v}</td>`;
+  let cost=0,val=0,priced=true;
+  const openRows=l.open.map(p=>{
+    const ltp=usLastPrice(p.sym),c=p.qty*p.px+p.comm,mv=ltp?p.qty*ltp:null,pnl=mv!=null?mv-c:null;
+    cost+=c;if(mv!=null)val+=mv;else priced=false;
+    return `<tr><td style="padding:6px 10px;font-weight:700">🇺🇸 ${escHtml(p.sym)}</td>${td(p.qty)}${td(f(p.px))}${td(f(c))}${td(f(ltp))}${td(sg(pnl),cl(pnl))}${td(pnl!=null?(100*pnl/c).toFixed(2)+'%':'—',cl(pnl))}${td(f(p.target)+(US_ADVICE[p.id]?'<div style="font-size:10px;color:var(--t2)">Suggested '+(US_ADVICE[p.id].runner?'stop ':'target ')+f(US_ADVICE[p.id].runner?US_ADVICE[p.id].stop:US_ADVICE[p.id].adv)+'</div>':''),'var(--green)')}${td(escHtml(p.date),'var(--t2)')}
+      <td style="padding:6px 10px;white-space:nowrap"><button class="btn" style="padding:3px 8px;font-size:11px" onclick="usSellPosition('${p.id}')">Sold</button> <button class="btn" style="padding:3px 8px;font-size:11px" onclick="usRemovePosition('${p.id}')" title="Remove (entered by mistake)">✕</button></td></tr>`;
+  }).join('');
+  const realized=l.closed.reduce((n,c)=>n+usClosedNet(c),0);
+  const closedRows=l.closed.slice(0,15).map(c=>{const n=usClosedNet(c),cst=c.qty*c.buy+c.buyComm;
+    return `<tr><td style="padding:6px 10px;font-weight:700">🇺🇸 ${escHtml(c.sym)}${c.buyDate===c.sellDate?' <span style="font-size:10px;color:var(--amber)" title="Bought and sold the same New York day">day trade</span>':''}</td>${td(c.qty)}${td(f(c.buy))}${td(f(c.sell))}${td(f(c.buyComm+c.sellComm),'var(--red)')}${td(sg(n),cl(n))}${td((100*n/cst).toFixed(2)+'%',cl(n))}${td(escHtml(c.buyDate+' → '+c.sellDate),'var(--t2)')}</tr>`;}).join('');
+  const inp=(id,ph,w,t='text')=>`<input id="${id}" type="${t}" placeholder="${ph}" style="width:${w}px;padding:5px 8px;background:var(--bg);border:1px solid var(--border);border-radius:6px;color:var(--t1);font-family:'DM Mono',monospace;font-size:12px">`;
+  const unreal=val-cost;
+  return `<div style="background:var(--bg-card);border:1px solid #818cf8;border-radius:10px;overflow:hidden;margin-top:12px">
+    <div style="padding:12px 16px;border-bottom:1px solid var(--border);display:flex;justify-content:space-between;flex-wrap:wrap;gap:8px">
+      <span style="font-size:13px;font-weight:800;color:#818cf8;text-transform:uppercase;letter-spacing:.08em">IBKR · US Positions <span style="font-weight:400;color:var(--t3);text-transform:none;letter-spacing:0">(entered by you · prices from the US feed · ${usIbkrPlan()} commissions)</span></span>
+      <span style="font-size:12px;color:var(--t2)">Open ${l.open.length} · cost ${f(cost)} · unrealized <b style="color:${cl(unreal)}">${priced?sg(unreal):'Partly unpriced'}</b> · realized <b style="color:${cl(realized)}">${sg(realized)}</b> · <span style="color:${dt.left?'var(--t2)':'var(--red)'}" title="This account displayed a one-day-trade limit. Estimate from recorded exits over five weekdays; holidays and unrecorded trades are not included. Check IBKR Day Trades Left.">recorded same-day exits ${dt.used}/${US_DAY_TRADE_LIMIT} (5 weekdays)</span></span>
+    </div>
+    <div style="padding:8px 16px;font-size:12px;color:var(--t2)">${l.unreadable?'Saved ledger unreadable; preserved.':US_LEDGER_SYNC.error?'Sell-advisor sync unavailable: '+escHtml(US_LEDGER_SYNC.error):'Sell advice mirrored to the helper for ntfy ? suggestions require your manual IBKR action.'} Two-minute price snapshots; suggested orders are not broker confirmations.</div>
+    <table style="width:100%;border-collapse:collapse;font-size:13px"><thead><tr><th style="text-align:left;padding:6px 10px;font-size:11px;color:var(--t3)">SYMBOL</th>${th('Qty')}${th('Fill $')}${th('Cost incl. fee')}${th('LTP')}${th('P&L $')}${th('P&L %')}${th('Target GTC')}${th('Bought (NY)')}<th></th></tr></thead>
+    <tbody>${openRows||'<tr><td colspan="10" style="padding:10px;color:var(--t3)">No open IBKR positions recorded.</td></tr>'}</tbody></table>
+    <div style="padding:8px 16px;border-top:1px solid var(--border);display:flex;gap:6px;flex-wrap:wrap;align-items:center;font-size:12px;color:var(--t2)">Add fill:
+      ${inp('usAddSym','Symbol',80)}${inp('usAddQty','Shares',70,'number')}${inp('usAddPx','Fill $',80,'number')}${inp('usAddComm','Commission $ (auto)',130,'number')}${inp('usAddDate',nyDate(),100)}
+      <button class="btn" style="padding:4px 10px;font-size:12px" onclick="usAddPosition()">Add</button>
+      <span style="color:var(--t3)">Commission = IBKR cost basis − shares × fill.</span></div>
+    ${closedRows?`<div style="padding:8px 16px;border-top:1px solid var(--border);font-size:12px;font-weight:700;color:var(--t2);text-transform:uppercase">Closed IBKR trades</div>
+    <table style="width:100%;border-collapse:collapse;font-size:13px"><thead><tr><th style="text-align:left;padding:6px 10px;font-size:11px;color:var(--t3)">SYMBOL</th>${th('Qty')}${th('Buy $')}${th('Sell $')}${th('Fees')}${th('Net $')}${th('Net %')}${th('Dates (NY)')}</tr></thead><tbody>${closedRows}</tbody></table>`:''}
+  </div>`;
+}
+function buildUsPerformancePanel(){
+  const l=usLedger(),money=v=>(v>=0?'+':'-')+'$'+Math.abs(v).toFixed(2);
+  const net=l.closed.reduce((n,c)=>n+usClosedNet(c),0),fees=l.closed.reduce((n,c)=>n+c.buyComm+c.sellComm,0);
+  const rows=l.closed.map(c=>`<tr><td>${escHtml(c.sym)}</td><td>${c.qty}</td><td>${escHtml(c.buyDate+' ? '+c.sellDate)}</td><td>${money(usClosedNet(c))}</td></tr>`).join('');
+  return `<div style="padding:16px;margin-top:12px;border:1px solid #818cf8;border-radius:10px"><b>IBKR ? Recorded performance (USD)</b><p>${l.closed.length} closed trades ? net ${money(net)} ? recorded fees $${fees.toFixed(2)}. Manual fills; separate from NSE analytics.</p>${l.unreadable?'Saved ledger unreadable; preserved.':rows?'<table style="width:100%;text-align:left"><thead><tr><th>Symbol</th><th>Shares</th><th>Dates (NY)</th><th>Net P&amp;L</th></tr></thead><tbody>'+rows+'</tbody></table>':'No IBKR sales recorded yet. Add buys and actual sale fills under Open Positions.'}</div>`;
 }
 function usRows(){
   const d=US_FEED.data;
@@ -11399,16 +11560,20 @@ function usRowHtml(r){
       const a=usPlan().alloc[r.symbol];
       if(!a)return '<span style="color:var(--t3);font-size:13px">—</span>';
       if(a.rejected)return `<span style="color:var(--t3);font-size:12px" title="${escHtml(a.reason)}">Not sized</span>`;
-      return `<span style="color:#818cf8;font-weight:700;font-family:'DM Mono',monospace;font-size:14px" title="LIMIT ${usd(a.limit)} (last +0.25%) · IBKR commission ${usd(a.comm)} included. In IBKR set Quantity unit to Shares (not USD), Limit order.">Buy ${a.qty} sh</span><div style="font-size:11px;color:var(--t3)">limit ${usd(a.limit)} · ${usd(a.alloc)} incl. fee</div>`;
+      const tip=usTicketSteps(r.symbol,a);
+      return `<span style="color:#818cf8;font-weight:700;font-family:'DM Mono',monospace;font-size:14px" title="${escHtml(tip)}">Buy ${a.qty} sh</span><div style="font-size:11px;color:var(--t3)" title="${escHtml(tip)}">limit ${usd(a.limit)} Day · sell ${usd(a.sell)} GTC</div><div style="font-size:11px;color:${a.net>0?'var(--green)':'var(--red)'}" title="${escHtml(tip)}">net ${a.net>=0?'+':'-'}${usd(Math.abs(a.net))} after ${usd(a.roundTrip)} fees</div>`;
     })()}</td>`
   };
   const cells=COLS.map(c=>cellH[c.key]||'<td style="color:var(--t3)">—</td>').join('');
   return `<tr data-us="${escHtml(r.symbol)}" style="background:rgba(129,140,248,.09);box-shadow:inset 4px 0 0 #818cf8${r.live?'':';opacity:.75'}" title="US stock - suggest only, trade it in IBKR">${cells}</tr>`;
 }
 async function loadUsFeed(){
+  await syncUsLedger();
   try{
     const d=await readHelperResponse('/api/inputs/file?name='+encodeURIComponent('intl_US.json'),{timeout:6000});
     US_FEED.data=d;US_FEED.at=Date.now();US_FEED.err=null;
+    const usEl=document.getElementById('rankUsPositions');
+    if(usEl&&!usEl.contains(document.activeElement)){try{usEl.innerHTML=buildUsPositionsPanel();}catch(e){}}
     const ae=document.activeElement?.tagName;
     if(ae!=='INPUT'&&ae!=='SELECT') renderTable();
   }catch(e){US_FEED.err=e.message;renderTable();}
@@ -11417,6 +11582,8 @@ function initMarketViewUI(){
   const el=document.getElementById('fMarket');if(el) el.value=marketView();
   const uc=document.getElementById('fUsCapital');
   if(uc&&!uc.value)try{uc.value=localStorage.getItem(US_CAPITAL_STORE)||'';}catch(e){}
+  const pl=document.getElementById('fUsPlan');
+  if(pl)try{const v=localStorage.getItem(US_PLAN_STORE);if(v==='tiered'||v==='fixed')pl.value=v;}catch(e){}
   readHelperResponse('/api/intl/min-score',{timeout:6000}).then(d=>{
     const u=document.getElementById('fUsFloor');
     if(u&&d&&Number.isFinite(Number(d.US))&&document.activeElement!==u) u.value=d.US;
@@ -13526,6 +13693,9 @@ function renderRankingsPanels(){
     posEl.innerHTML=positions.html;
     positions.table?.render();
   }
+  const usEl=document.getElementById('rankUsPositions');
+  // Never rebuild under the owner's cursor while typing a fill.
+  if(usEl&&!usEl.contains(document.activeElement)){try{usEl.innerHTML=buildUsPositionsPanel();}catch(e){}}
 }
 // Map configured-surveillance rule keys → their human labels. A removed row can outlive the exact
 // in-memory key array that created it (Drive/settings refresh), so recover through the stock's raw
