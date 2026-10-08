@@ -1,5 +1,5 @@
 const BUILD_TS='2026-10-08 IST'; // release build date (IST)
-const APP_VERSION=1485;
+const APP_VERSION=1486;
 const RADAR_SCORE_VERSION='v1419-recross-batches'; // Eligible on crossing the score floor at any time; selected model's evolving target and movement-based profit protection.
 
 // ── v1358: AN UNCAUGHT ERROR MUST NAME ITSELF ─────────────────────────────────────────────────
@@ -8238,52 +8238,6 @@ function scheduleBalanceGrids(){
 }
 if(typeof window!=='undefined') window.addEventListener('resize',scheduleBalanceGrids,{passive:true});
 function renderStats(){
-  const t=ALL.length;
-  const bull=ALL.filter(s=>(s.priceChange||0)>0).length;
-
-  // Candidates passing Tier 1
-  const eligibleCandidates = ALL.filter(r => {
-    const act = getRowActionState(r);
-    return act.state === 'GO' || act.state === 'WAIT';
-  });
-
-  // Candidates firing Tier 2 Breakout
-  const triggered = ALL.filter(r => getRowActionState(r).state === 'GO');
-
-  // Market Breadth & Nifty
-  const breadthPct = t ? (bull / t * 100) : null;
-  const reg = (typeof MARKET_REGIME !== 'undefined' && MARKET_REGIME) ? MARKET_REGIME : null;
-  const live = (typeof buildLiveNiftyProxy === 'function') ? buildLiveNiftyProxy(ALL) : null;
-  const nifty = live ? live.pct : (reg && reg.niftyPct != null ? reg.niftyPct : null);
-  const niftyTone = nifty == null ? 'var(--t2)' : nifty >= 0 ? 'var(--green)' : 'var(--red)';
-  
-  const marketCard = `<div class="st" title="Live market breadth and index momentum.">
-    <div class="st-l">Market Breadth</div>
-    <div class="st-v" style="font-size:18px;color:${niftyTone}">${nifty != null ? `NIFTY ${nifty >= 0 ? '+' : ''}${nifty.toFixed(2)}%` : (breadthPct != null ? breadthPct.toFixed(0) + '% breadth' : '—')}</div>
-    <div class="st-d">${breadthPct != null ? `${breadthPct.toFixed(0)}% advancing` : ''} · ${bull} up / ${t - bull} down</div></div>`;
-
-  // BTST engine cards (v1393)
-  const bd = typeof btstToday === 'function' ? btstToday() : null;
-  const br = typeof btstRanking === 'function' ? btstRanking() : null;
-  const braw = typeof BTST !== 'undefined' ? BTST.data : null;
-  const liveSource = br?.src || bd;
-  const engineState = br ? `Live scores ${br.at}`
-    : (braw && braw.session === getSessionDate() && braw.ok === false ? 'Engine failed' : 'Waiting');
-  const engineTone = br ? (liveSource?.gate?.on ? 'var(--green)' : 'var(--amber)') : (engineState === 'Engine failed' ? 'var(--red)' : 'var(--t2)');
-  const universeCard = `<div class="st" title="${escHtml(br ? 'Current live ranking: ' + br.n + ' scored stocks at ' + br.at + '. A stock qualifies whenever its score crosses your floor.' : btstWaitReason())}">
-    <div class="st-l">Live Model${br ? ' · ' + escHtml(btstModelName(br.model)) : ''}</div>
-    <div class="st-v" style="font-size:18px;color:${engineTone}">${escHtml(engineState)}</div>
-    <div class="st-d">${br ? `${br.n} scored · floor ${btstMinScore()}${br.src?.modelNote ? ' · ' + escHtml(br.src.modelNote) : ''}` : 'Waiting for a current-session live ranking'}</div></div>`;
-
-  const triggersCard = `<div class="st" title="Current GO decisions from live scores, including trading eligibility and freshness checks.">
-    <div class="st-l">Live qualification</div><div class="st-v" style="font-size:18px;color:${triggered.length?'var(--green)':'var(--t1)'}">${triggered.length} <span style="font-size:12px;color:var(--t2)">GO now</span></div>
-    <div class="st-d">${triggered.length?escHtml(triggered.map(p=>p.symbol).slice(0,5).join(', '))+(triggered.length>5?' + more':''):'No currently actionable entries'}</div></div>`;
-  const targetRead=learnedBtstTarget(null);
-  const protectionCard = `<div class="st" title="Each model has its own evolving peak history. Target = max(75% of median, 25% of median, costs plus minimum net profit). Existing executed GTTs stay fixed.">
-    <div class="st-l">${targetRead?.model==='ENS'?'Ensemble':'Original'} target</div>
-    <div class="st-v" style="font-size:18px;color:var(--green)">+${(targetRead?.pct??3).toFixed(2)}% base</div>
-    <div class="st-d">${targetRead&&!targetRead.fallback?`${targetRead.n} closed / ${targetRead.provisional} evolving`:'Startup fallback'} · cost/profit floor applies · adaptive profit protection</div></div>`;
-
   // Active Basket Allocation Card
   const capital = getEffectiveCapital();
   const plan = planDualBasket(FILT.filter(r=>SELECTED.has(r.symbol)), capital);
@@ -8291,7 +8245,7 @@ function renderStats(){
   let totalAlloc = 0;
   Object.values(plan.alloc||{}).forEach(a => { if(!a.rejected && a.alloc > 0) totalAlloc += a.alloc; });
   const allocCard = `<div class="st" title="Capital allocated by score across eligible entries, subject to liquidity, minimum size and the 20-order export batch.">
-    <div class="st-l">Active Basket</div>
+    <div class="st-l">NSE · Active Basket</div>
     <div class="st-v" style="font-size:18px;color:var(--amber)">${plan.funded.size} <span style="font-size:12px;color:var(--t2)">funded (${fmtINR(totalAlloc)})</span></div>
     <div class="st-d">of ${fmtINR(capital)} capital · ₹5,000 min per scrip</div></div>`;
 
@@ -8306,15 +8260,16 @@ function renderStats(){
     const grossStr = pnlSummary.known.length ? `gross ${fmtSignedINR(pnlSummary.gross)}` : '';
     const costStr = pnlSummary.known.length ? `cost ${fmtNegINR(pnlSummary.charges)}` : '';
     bookedCard = `<div class="st" title="Realized net P&L from executed orders/trades.">
-      <div class="st-l">${bookedLabel}</div>
+      <div class="st-l">NSE · ${bookedLabel}</div>
       <div class="st-v" style="font-size:18px;color:${booked.total >= 0 ? 'var(--green)' : 'var(--red)'}">${fmtSignedINR(booked.total)}</div>
       <div class="st-d">${booked.date || sessionToday} · ${grossStr} ${costStr}</div></div>`;
   } else {
-    bookedCard = `<div class="st"><div class="st-l">Booked Today</div><div class="st-v" style="font-size:18px;color:var(--t3)">₹0.00</div><div class="st-d">No trades closed today</div></div>`;
+    bookedCard = `<div class="st"><div class="st-l">NSE · Booked Today</div><div class="st-v" style="font-size:18px;color:var(--t3)">₹0.00</div><div class="st-d">No trades closed today</div></div>`;
   }
 
   document.getElementById('statsBar').innerHTML =
-    marketCard + universeCard + triggersCard + protectionCard + allocCard + bookedCard;
+    dashboardMarketCards() + (marketsShown().nse ? allocCard + bookedCard
+      : '<div class="st"><div class="st-l">US · Trading</div><div class="st-v" style="font-size:18px">Manual IBKR</div><div class="st-d">Suggest-only · no basket or auto-buy</div></div><div class="st"><div class="st-l">US · Account P&amp;L</div><div class="st-v" style="font-size:18px">Not imported</div><div class="st-d">IBKR cash, holdings and trades are not connected</div></div>');
   balanceGrids();
 
   // v1401: the held / surveillance / GO pills moved into the single status line (renderStatusBar),
@@ -11238,7 +11193,7 @@ function strategySignalCells(row){
 // US stocks (helper's intl engine, S&P 1500, scored every 2 minutes in US hours) share the main
 // table with NSE. Suggest-only: US rows never fund, export or reach Zerodha; the owner places them in
 // IBKR himself. Scores live on different scales (NSE floor 1.6, US 0.6), so in the default score
-// order both markets merge on "score above its own floor". US rows are tinted, no Market column.
+// order both markets merge on percentage above their own floor. US rows are tinted, no Market column.
 // Market "Auto" shows the markets that are live now (both when neither is); NSE / US / All override.
 const US_FEED={data:null,at:0,err:null};
 const MARKET_VIEW_STORE='rocket-market-view-v1';
@@ -11247,6 +11202,14 @@ function onMarketViewChange(){
   const v=document.getElementById('fMarket')?.value||'auto';
   try{localStorage.setItem(MARKET_VIEW_STORE,v);}catch(e){}
   PG=1;renderTable();
+}
+// Relative threshold margin is a display ordering, not a calibrated return or probability.
+function floorMargin(score,floor){
+  return Number.isFinite(score)&&Number.isFinite(floor)&&floor>0?100*(score-floor)/floor:null;
+}
+function marginHtml(margin){
+  const txt=margin===null?'Undefined at zero/missing floor':`${margin>=0?'+':''}${margin.toFixed(1)}% vs floor`;
+  return `<div style="font-size:10px;color:var(--t3)" title="Relative threshold margin = 100 × (score / floor − 1). Used for score sorting; not calibrated confidence or expected return.">${txt}</div>`;
 }
 function usFeedLive(){
   const d=US_FEED.data;
@@ -11275,28 +11238,68 @@ function usRows(){
   return (d.ranking||[]).map(r=>{
     const score=Number(r.score);
     return {...r,_us:true,score,fl,edge:Number.isFinite(score)?score-fl:null,
-      go:live&&gateOn&&Number.isFinite(score)&&score>=fl,live,gateOn,tgtPct:Number(d.rules?.targetPct)||3};
+      go:live&&gateOn&&Number.isFinite(score)&&score>=fl,live,gateOn,tgtPct:Number(d.rules?.targetPct)||3,
+      margin:floorMargin(score,fl)};
   }).filter(r=>(SHOW_INELIGIBLE||r.go)&&(!q||String(r.symbol).toUpperCase().includes(q)||String(r.name||'').toUpperCase().includes(q)))
     .sort((a,b)=>(b.edge??-1e9)-(a.edge??-1e9));
 }
 function nseEdge(s){
   const sc=btstScoreOf(s.symbol),fl=btstMinScore();
-  return Number.isFinite(sc)&&Number.isFinite(fl)?sc-fl:null;
+  return floorMargin(sc,fl);
 }
-// NSE rows keep FILT's order; US rows interleave by edge only in the default score order.
+// Work on a display copy: filtering, allocation, selection and execution keep the NSE list.
 function dashboardRows(){
   const m=marketsShown(),nse=m.nse?FILT:[],us=m.us?usRows():[];
-  if(!us.length) return nse;
-  if(!nse.length) return us;
-  if(SCOL!=='score'||SDIR!==-1) return nse.concat(us);
-  const out=[];let j=0;
-  for(const s of nse){
-    const e=isPinned(s.symbol)?Infinity:nseEdge(s);
-    while(j<us.length&&e!==null&&(us[j].edge??-1e9)>e) out.push(us[j++]);
-    out.push(s);
+  if(SCOL!=='score') return nse.concat(us);
+  return nse.concat(us).sort((a,b)=>{
+    const ap=!a._us&&isPinned(a.symbol),bp=!b._us&&isPinned(b.symbol);
+    if(ap!==bp)return ap?-1:1;
+    const av=a._us?a.margin:nseEdge(a),bv=b._us?b.margin:nseEdge(b);
+    if(av===null)return bv===null?0:1;
+    if(bv===null)return -1;
+    return (SDIR===-1?-1:1)*(av-bv);
+  });
+}
+function usMarketStatus(){
+  const d=US_FEED.data;
+  if(US_FEED.err)return 'feed unavailable';
+  if(!d)return 'awaiting scores';
+  if(!d.ok)return 'scoring failed';
+  if(usFeedLive())return 'live';
+  return d.live&&(!d.closesAt||Date.now()<Date.parse(d.closesAt))?'scores stale':'closed';
+}
+function dashboardMarketCards(){
+  const m=marketsShown(),d=US_FEED.data,br=btstRanking(),target=learnedBtstTarget(null);
+  const groups=[[],[],[],[]];
+  const add=(i,market,value,detail)=>groups[i].push(`<div><b>${market}</b> ${value}<div class="st-d">${detail}</div></div>`);
+  const signed=v=>Number.isFinite(v)?(v>=0?'+':'')+v.toFixed(2)+'%':'Unavailable';
+  if(m.nse){
+    const bull=ALL.filter(s=>(s.priceChange||0)>0).length;
+    add(0,'NSE',ALL.length?(100*bull/ALL.length).toFixed(0)+'% advancing':'Unavailable',`${bull} up / ${ALL.length-bull} not up · ${isEquitySession(Date.now())?'session open':'closed'}`);
+    add(1,'NSE',br?escHtml(br.at):'Awaiting scores',`${br?br.n:0} scored · floor ${btstMinScore()} · ${isEquitySession(Date.now())?'current session':'last session'}`);
+    const go=ALL.filter(isStockEligible).length;
+    add(2,'NSE',`${go} GO`,'Kite execution checks apply');
+    add(3,'NSE',signed(target?.pct??3),'Learned target · adaptive profit protection');
   }
-  while(j<us.length) out.push(us[j++]);
-  return out;
+  if(m.us){
+    const trend=d?.marketTrendPct;
+    add(0,'US',signed(typeof trend==='number'?trend:NaN),`vs 50-day average · ${escHtml(usMarketStatus())}`);
+    const at=d?.asOf?new Date(d.asOf).toLocaleString('en-IN',{day:'numeric',month:'short',hour:'2-digit',minute:'2-digit'}):'Awaiting scores';
+    add(1,'US',escHtml(at),`${d?.ok?d.universe??d.ranking?.length??0:0} scored · floor ${usFloor()} · ${d?.ranking?.length??0} rows published`);
+    const go=d?.ok&&usFeedLive()&&d.gateOn!==false?(d.ranking||[]).filter(r=>Number.isFinite(Number(r.score))&&Number(r.score)>=usFloor()).length:0;
+    add(2,'US',`${go} GO`,'Suggestions · manual IBKR trades');
+    add(3,'US',signed(Number(d?.rules?.targetPct)||3),'Suggested target · no automated protection');
+  }
+  return groups.map((rows,i)=>`<div class="st"><div class="st-l">${['Market context','Model scores','Qualification','Targets'][i]}</div><div style="font-size:15px;line-height:1.7">${rows.join('')}</div></div>`).join('');
+}
+function refreshMarketSummary(){
+  const el=document.getElementById('fMarket');
+  if(el){
+    const opt=el.querySelector('option[value="auto"]');
+    const nse=isEquitySession(Date.now()),us=usFeedLive();
+    if(opt)opt.textContent=nse||us?'Auto (live)':'Auto (no live feed · both)';
+  }
+  renderStats();renderStatusBar();updateTabCounts();
 }
 let DASH_LEN=0;
 function usRowHtml(r){
@@ -11311,7 +11314,7 @@ function usRowHtml(r){
   const cellH={
     chk:`<td style="text-align:center"><input type="checkbox" disabled title="US stock: suggest-only, place it in IBKR yourself" style="width:14px;height:14px"></td>`,
     rank:'<td style="text-align:right;color:var(--t3)">—</td>',
-    score:`<td data-key="score" style="text-align:center" title="US model score vs the US floor ${r.fl}"><span style="font-weight:800;font-family:'DM Mono',monospace;color:${r.score>=r.fl?'var(--green)':'var(--amber)'}">${sc}</span><span style="font-size:11px;color:var(--t3)"> / ${r.fl}</span></td>`,
+    score:`<td data-key="score" style="text-align:center" title="US model score vs the US floor ${r.fl}"><span style="font-weight:800;font-family:'DM Mono',monospace;color:${r.score>=r.fl?'var(--green)':'var(--amber)'}">${sc}</span><span style="font-size:11px;color:var(--t3)"> / ${r.fl}</span>${marginHtml(r.margin)}</td>`,
     symbol:`<td style="font-family:'Plus Jakarta Sans',sans-serif"><div style="font-weight:700;font-size:15px;color:var(--t1)">🇺🇸 ${escHtml(r.symbol)} <a href="https://www.tradingview.com/chart/?symbol=${encodeURIComponent(r.symbol)}" target="_blank" rel="noopener" onclick="event.stopPropagation()" style="font-size:11px;color:var(--cyan);text-decoration:none" title="TradingView chart">T</a></div><div style="font-size:11px;color:var(--t3);max-width:200px;overflow:hidden;text-overflow:ellipsis">${escHtml(r.sector||'')}</div></td>`,
     status:`<td data-key="status" class="recommendation-status">${status}</td>`,
     price:`<td data-key="price" style="white-space:nowrap">${usd(r.price)}<span style="color:var(--t3)"> · </span><span style="font-size:12px">${fPerf(chg)}</span></td>`,
@@ -11325,11 +11328,10 @@ function usRowHtml(r){
 async function loadUsFeed(){
   try{
     const d=await readHelperResponse('/api/inputs/file?name='+encodeURIComponent('intl_US.json'),{timeout:6000});
-    const changed=JSON.stringify([d?.asOf,d?.lastError])!==JSON.stringify([US_FEED.data?.asOf,US_FEED.data?.lastError]);
     US_FEED.data=d;US_FEED.at=Date.now();US_FEED.err=null;
     const ae=document.activeElement?.tagName;
-    if(changed&&ae!=='INPUT'&&ae!=='SELECT') renderTable();
-  }catch(e){US_FEED.err=e.message;}
+    if(ae!=='INPUT'&&ae!=='SELECT') renderTable();
+  }catch(e){US_FEED.err=e.message;renderTable();}
 }
 function initMarketViewUI(){
   const el=document.getElementById('fMarket');if(el) el.value=marketView();
@@ -11386,7 +11388,7 @@ function renderTable(){
     const cellH={
       chk:`<td style="text-align:center"><input type="checkbox" ${isSelected?'checked':''} ${canBuy?'':'disabled'} style="width:14px;height:14px;accent-color:var(--amber);cursor:${canBuy?'pointer':'not-allowed'}" onclick="event.stopPropagation()" onchange="toggleStock('${s.symbol}',this.checked)" title="${checkTitle}"></td>`,
       rank:`<td style="font-family:'DM Mono',monospace;font-weight:800;color:var(--t1);text-align:right">${s.rank??'—'}</td>`,
-      score:`<td data-key="score" style="text-align:center">${dualScoreCell(s)}</td>`,
+      score:`<td data-key="score" style="text-align:center">${dualScoreCell(s)}${marginHtml(nseEdge(s))}</td>`,
       // v1142: routed through symbolChartButton like every other table. This cell had built its own
       // TradingView link since v1070, so the "one symbol interaction everywhere" rule was true of the
       // panels and quietly false of the main table - which is why swapping to Zerodha missed it.
@@ -11471,6 +11473,7 @@ function renderTable(){
   }).join('')||`<tr><td colspan="${COLS.length}" class="rankings-empty-cell"><div class="rankings-empty-message">${emptyBoardReason()}</div></td></tr>`;
   renderPgn();
   updateSelectAll();
+  refreshMarketSummary();
 }
 
 function renderPgn(){
@@ -12650,7 +12653,7 @@ function patchVisiblePrices(){
       }
       const scoreCell = tr.querySelector('td[data-key="score"]');
       if(scoreCell){
-        scoreCell.innerHTML = dualScoreCell(s);
+        scoreCell.innerHTML = dualScoreCell(s)+marginHtml(nseEdge(s));
       }
       const statusCell = tr.querySelector('td[data-key="status"]');
       if(statusCell){
@@ -13483,11 +13486,14 @@ function renderStatusBar(){
   const go=ALL.filter(isStockEligible).length,wait=ALL.filter(r=>getRowActionState(r).state==='WAIT').length;
   const plan=computeAlloc(getEffectiveCapital(),FILT.filter(r=>SELECTED.has(r.symbol)));
   const active=Object.values(plan).filter(a=>!a.rejected&&a.qty>0);
-  const bits=[`<span class="sb-count">${FILT.length}/${ALL.length}</span>`,
-    `<span style="color:var(--green)">${go} GO</span>`,
-    `${wait} WAIT`,
-    `${active.length} funded`,
-    `${fmtINR(active.reduce((v,a)=>v+a.debit,0))} debit`];
+  const m=marketsShown(),us=usRows(),ugo=us.filter(r=>r.go).length;
+  const bits=[`<span class="sb-count">${dashboardRows().length} shown</span>`];
+  if(m.nse)bits.push(`NSE ${FILT.length}/${ALL.length}`,`<span style="color:var(--green)">NSE ${go} GO</span>`,
+    `NSE ${wait} WAIT`,`${active.length} NSE funded`,`${fmtINR(active.reduce((v,a)=>v+a.debit,0))} NSE debit`);
+  if(m.us)bits.push(`US ${us.length}/${US_FEED.data?.ranking?.length??0} published rows`,
+    `<span style="color:#818cf8">US ${ugo} GO · ${us.length-ugo} WAIT</span>`,`US ${escHtml(usMarketStatus())} · suggest-only`);
+  if(marketView()==='auto'&&!isEquitySession(Date.now())&&!usFeedLive())bits.push('Auto: no live feed · showing both');
+  if(m.nse){
   if(SUPPRESSED_HELD>0) bits.push(`<span style="color:#f472b6" title="Held stocks are suppressed from recommendations to prevent averaging down.">📌 ${SUPPRESSED_HELD} held</span>`);
   if(SURV_HARD_REMOVED>0) bits.push(`<span style="color:var(--amber)" title="Stocks removed due to NSE surveillance lists (GSM/ASM/Trade-for-trade).">🛡 ${SURV_HARD_REMOVED} surv</span>`);
   let tape='';
@@ -13501,6 +13507,7 @@ function renderStatusBar(){
     const b=basketFileStatus();
     if(b) bits.push(b);
   }catch(e){}
+  }
   el.innerHTML=bits.join(' <span style="color:var(--t3)">|</span> ');
   updateIneligibleToggle();
 }
@@ -14960,7 +14967,8 @@ function switchTab(n){
 function updateTabCounts(){
   const c0=document.getElementById('tabCount0');
   const c1=document.getElementById('tabCount1');
-  if(c0) c0.textContent=FILT.length?'('+FILT.length+')':'';
+  const count=dashboardRows().length;
+  if(c0) c0.textContent=count?'('+count+')':'';
   if(c1) c1.textContent=RADAR.features.length?'('+RADAR.features.length+')':'';
 }
 
