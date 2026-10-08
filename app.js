@@ -1,5 +1,5 @@
 const BUILD_TS='2026-10-08 IST'; // release build date (IST)
-const APP_VERSION=1488;
+const APP_VERSION=1489;
 const RADAR_SCORE_VERSION='v1419-recross-batches'; // Eligible on crossing the score floor at any time; selected model's evolving target and movement-based profit protection.
 
 // ── v1358: AN UNCAUGHT ERROR MUST NAME ITSELF ─────────────────────────────────────────────────
@@ -8267,9 +8267,14 @@ function renderStats(){
     bookedCard = `<div class="st"><div class="st-l">NSE · Booked Today</div><div class="st-v" style="font-size:18px;color:var(--t3)">₹0.00</div><div class="st-d">No trades closed today</div></div>`;
   }
 
+  const mv=marketsShown(),up=usPlan();
+  const usAllocCard = `<div class="st" title="Sized from the US Capital $ you typed (IBKR cash is not readable). Suggest-only: place the orders in IBKR yourself.">
+    <div class="st-l">US · Suggested sizing</div>
+    <div class="st-v" style="font-size:18px;color:#818cf8">${up.funded} <span style="font-size:12px;color:var(--t2)">sized ($${up.spent.toFixed(2)})</span></div>
+    <div class="st-d">${up.capital>0?'of $'+up.capital.toFixed(2)+' typed capital · manual IBKR':'Enter US Capital $ to size US GO rows'}</div></div>`;
   document.getElementById('statsBar').innerHTML =
-    dashboardMarketCards() + (marketsShown().nse ? allocCard + bookedCard
-      : '<div class="st"><div class="st-l">US · Trading</div><div class="st-v" style="font-size:18px">Manual IBKR</div><div class="st-d">Suggest-only · no basket or auto-buy</div></div><div class="st"><div class="st-l">US · Account P&amp;L</div><div class="st-v" style="font-size:18px">Not imported</div><div class="st-d">IBKR cash, holdings and trades are not connected</div></div>');
+    dashboardMarketCards() + (mv.nse ? allocCard + bookedCard : '') + (mv.us ? usAllocCard : '')
+      + (mv.nse ? '' : '<div class="st"><div class="st-l">US · Account P&amp;L</div><div class="st-v" style="font-size:18px">Not imported</div><div class="st-d">IBKR holdings and trades are not connected</div></div>');
   balanceGrids();
 
   // v1401: the held / surveillance / GO pills moved into the single status line (renderStatusBar),
@@ -11252,6 +11257,57 @@ function usFloor(){
   const p=Number(US_FEED.data?.rules?.minScore);
   return Number.isFinite(p)?p:0.6;
 }
+// v1489: IBKR cash is not readable, so the owner types it (US Capital $). US GO rows are sized with
+// the NSE weighting (1 + score above floor), Max % Capital per stock, 0.10% of 20-day turnover,
+// whole shares, IBKR Pro tiered commission (0.0035/share, min 0.35, max 1% of value) inside the cash.
+// Display only: no order reaches IBKR. All-in up to Rs is a rupee amount and is not applied.
+const US_CAPITAL_STORE='rocket-us-capital-v1';
+function usCapital(){
+  const el=document.getElementById('fUsCapital');
+  const v=parseFloat(el?el.value:(()=>{try{return localStorage.getItem(US_CAPITAL_STORE);}catch(e){return '';}})());
+  return Number.isFinite(v)&&v>0?v:0;
+}
+function onUsCapitalChange(){
+  try{localStorage.setItem(US_CAPITAL_STORE,(document.getElementById('fUsCapital')?.value||'').trim());}catch(e){}
+  renderTable();
+}
+function ibkrCommission(qty,price){
+  if(!(qty>0))return 0;
+  return Math.min(Math.max(0.35,0.0035*qty),0.01*qty*price);
+}
+const US_BUY_BUFFER=1.0025;
+let _usPlanMemo=null;
+function usPlan(){
+  const d=US_FEED.data,cap=usCapital(),fl=usFloor(),pct=typeof getMaxAllocPct==='function'?getMaxAllocPct():100,live=usFeedLive();
+  if(_usPlanMemo&&_usPlanMemo.d===d&&_usPlanMemo.cap===cap&&_usPlanMemo.fl===fl&&_usPlanMemo.pct===pct&&_usPlanMemo.live===live)return _usPlanMemo.plan;
+  const plan={capital:cap,alloc:{},funded:0,spent:0};
+  const go=d&&d.ok&&live&&d.gateOn!==false?(d.ranking||[]).filter(r=>Number.isFinite(Number(r.score))&&Number(r.score)>=fl&&Number(r.price)>0)
+    .map(r=>({sym:r.symbol,score:Number(r.score),px:Number(r.price)*US_BUY_BUFFER,impact:Number(r.turnover20)>0?0.001*Number(r.turnover20):0}))
+    .sort((a,b)=>b.score-a.score):[];
+  const debit=(q,px)=>q*px+ibkrCommission(q,px);
+  if(cap>0&&go.length){
+    const perCap=cap*Math.min(pct,100)/100,W=go.reduce((t,g)=>t+1+Math.max(0,g.score-fl),0);
+    go.forEach(g=>{g.lim=Math.min(perCap,g.impact||0);g.qty=0;});
+    let cash=cap;
+    go.forEach(g=>{
+      const budget=Math.min(g.lim,cap*(1+Math.max(0,g.score-fl))/W,cash);
+      while(debit(g.qty+1,g.px)<=budget+1e-9)g.qty++;
+      cash-=debit(g.qty,g.px);
+    });
+    // Whole shares leave cash over: spend it one share at a time, strongest score first, within each cap.
+    for(let moved=true;moved;){moved=false;
+      for(const g of go){const extra=debit(g.qty+1,g.px)-debit(g.qty,g.px);
+        if(debit(g.qty+1,g.px)<=g.lim+1e-9&&extra<=cash+1e-9){g.qty++;cash-=extra;moved=true;}}}
+    go.forEach(g=>{
+      if(g.qty>0){const cost=g.qty*g.px,comm=ibkrCommission(g.qty,g.px);
+        plan.alloc[g.sym]={qty:g.qty,limit:g.px,alloc:cost+comm,comm};plan.funded++;plan.spent+=cost+comm;}
+      else plan.alloc[g.sym]={rejected:true,reason:!(g.impact>0)?'No turnover figure for the market-impact cap'
+        :g.lim<debit(1,g.px)?(g.lim===g.impact?'One share exceeds 0.10% of 20-day turnover':'One share exceeds Max % Capital'):'Cash used by stronger scores'};
+    });
+  }else go.forEach(g=>{plan.alloc[g.sym]={rejected:true,reason:'Enter US Capital $ to size'};});
+  _usPlanMemo={d,cap,fl,pct,live,plan};
+  return plan;
+}
 function usRows(){
   const d=US_FEED.data;
   if(!d||!d.ok) return [];
@@ -11338,7 +11394,13 @@ function usRowHtml(r){
     price:`<td data-key="price" style="white-space:nowrap">${usd(r.price)}<span style="color:var(--t3)"> · </span><span style="font-size:12px">${fPerf(chg)}</span></td>`,
     day:`<td>${fPerf(chg)}</td>`,
     turnover:`<td data-key="turnover">$${(Number(r.turnover20)/1e6).toFixed(1)}M</td>`,
-    tgt:`<td style="font-weight:700;color:var(--green)" title="Target price ${usd(r.targetPrice)} (+${r.tgtPct}%)">+${r.tgtPct.toFixed(2)}%</td>`
+    tgt:`<td style="font-weight:700;color:var(--green)" title="Target price ${usd(r.targetPrice)} (+${r.tgtPct}%)">+${r.tgtPct.toFixed(2)}%</td>`,
+    alloc:`<td class="alloc-cell">${(()=>{
+      const a=usPlan().alloc[r.symbol];
+      if(!a)return '<span style="color:var(--t3);font-size:13px">—</span>';
+      if(a.rejected)return `<span style="color:var(--t3);font-size:12px" title="${escHtml(a.reason)}">Not sized</span>`;
+      return `<span style="color:#818cf8;font-weight:700;font-family:'DM Mono',monospace;font-size:14px" title="LIMIT ${usd(a.limit)} (last +0.25%) · IBKR commission ${usd(a.comm)} included. Place it yourself in IBKR.">${usd(a.alloc)}</span><div style="font-size:11px;color:var(--t3)">${a.qty} sh @ ${usd(a.limit)}</div>`;
+    })()}</td>`
   };
   const cells=COLS.map(c=>cellH[c.key]||'<td style="color:var(--t3)">—</td>').join('');
   return `<tr data-us="${escHtml(r.symbol)}" style="background:rgba(129,140,248,.09);box-shadow:inset 4px 0 0 #818cf8${r.live?'':';opacity:.75'}" title="US stock - suggest only, trade it in IBKR">${cells}</tr>`;
@@ -11353,6 +11415,8 @@ async function loadUsFeed(){
 }
 function initMarketViewUI(){
   const el=document.getElementById('fMarket');if(el) el.value=marketView();
+  const uc=document.getElementById('fUsCapital');
+  if(uc&&!uc.value)try{uc.value=localStorage.getItem(US_CAPITAL_STORE)||'';}catch(e){}
   readHelperResponse('/api/intl/min-score',{timeout:6000}).then(d=>{
     const u=document.getElementById('fUsFloor');
     if(u&&d&&Number.isFinite(Number(d.US))&&document.activeElement!==u) u.value=d.US;
