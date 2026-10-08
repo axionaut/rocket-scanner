@@ -1,5 +1,5 @@
 const BUILD_TS='2026-10-08 IST'; // release build date (IST)
-const APP_VERSION=1489;
+const APP_VERSION=1490;
 const RADAR_SCORE_VERSION='v1419-recross-batches'; // Eligible on crossing the score floor at any time; selected model's evolving target and movement-based profit protection.
 
 // ── v1358: AN UNCAUGHT ERROR MUST NAME ITSELF ─────────────────────────────────────────────────
@@ -11399,7 +11399,7 @@ function usRowHtml(r){
       const a=usPlan().alloc[r.symbol];
       if(!a)return '<span style="color:var(--t3);font-size:13px">—</span>';
       if(a.rejected)return `<span style="color:var(--t3);font-size:12px" title="${escHtml(a.reason)}">Not sized</span>`;
-      return `<span style="color:#818cf8;font-weight:700;font-family:'DM Mono',monospace;font-size:14px" title="LIMIT ${usd(a.limit)} (last +0.25%) · IBKR commission ${usd(a.comm)} included. Place it yourself in IBKR.">${usd(a.alloc)}</span><div style="font-size:11px;color:var(--t3)">${a.qty} sh @ ${usd(a.limit)}</div>`;
+      return `<span style="color:#818cf8;font-weight:700;font-family:'DM Mono',monospace;font-size:14px" title="LIMIT ${usd(a.limit)} (last +0.25%) · IBKR commission ${usd(a.comm)} included. In IBKR set Quantity unit to Shares (not USD), Limit order.">Buy ${a.qty} sh</span><div style="font-size:11px;color:var(--t3)">limit ${usd(a.limit)} · ${usd(a.alloc)} incl. fee</div>`;
     })()}</td>`
   };
   const cells=COLS.map(c=>cellH[c.key]||'<td style="color:var(--t3)">—</td>').join('');
