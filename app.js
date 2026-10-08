@@ -1,5 +1,5 @@
-const BUILD_TS='2026-10-07 20:00 IST'; // release build time (IST)
-const APP_VERSION=1484;
+const BUILD_TS='2026-10-08 IST'; // release build date (IST)
+const APP_VERSION=1485;
 const RADAR_SCORE_VERSION='v1419-recross-batches'; // Eligible on crossing the score floor at any time; selected model's evolving target and movement-based profit protection.
 
 // ── v1358: AN UNCAUGHT ERROR MUST NAME ITSELF ─────────────────────────────────────────────────
@@ -11234,6 +11234,121 @@ function strategySignalCells(row){
     rvol:x.rvol==null?'--':x.rvol.toFixed(2)+'x',
     depth:fresh&&buy>0&&sell>0?(100*buy/(buy+sell)).toFixed(0)+'% / '+(100*sell/(buy+sell)).toFixed(0)+'%':'Unavailable'};
 }
+// ── v1485 ONE DASHBOARD (owner, 8 Oct 2026) ─────────────────────────────────────────────────────
+// US stocks (helper's intl engine, S&P 1500, scored every 2 minutes in US hours) share the main
+// table with NSE. Suggest-only: US rows never fund, export or reach Zerodha; the owner places them in
+// IBKR himself. Scores live on different scales (NSE floor 1.6, US 0.6), so in the default score
+// order both markets merge on "score above its own floor". US rows are tinted, no Market column.
+// Market "Auto" shows the markets that are live now (both when neither is); NSE / US / All override.
+const US_FEED={data:null,at:0,err:null};
+const MARKET_VIEW_STORE='rocket-market-view-v1';
+function marketView(){try{const v=localStorage.getItem(MARKET_VIEW_STORE);return ['auto','nse','us','all'].includes(v)?v:'auto';}catch(e){return 'auto';}}
+function onMarketViewChange(){
+  const v=document.getElementById('fMarket')?.value||'auto';
+  try{localStorage.setItem(MARKET_VIEW_STORE,v);}catch(e){}
+  PG=1;renderTable();
+}
+function usFeedLive(){
+  const d=US_FEED.data;
+  const now=Date.now(),age=now-Date.parse(d?.asOf),close=Date.parse(d?.closesAt);
+  return !!(d&&d.ok&&d.live&&!US_FEED.err&&age>=0&&age<10*60000&&(!Number.isFinite(close)||now<close));
+}
+function marketsShown(){
+  const v=marketView();
+  if(v==='nse') return {nse:true,us:false};
+  if(v==='us') return {nse:false,us:true};
+  if(v==='all') return {nse:true,us:true};
+  const nse=isEquitySession(Date.now()),us=usFeedLive();
+  return nse||us?{nse,us}:{nse:true,us:true};
+}
+function usFloor(){
+  const typed=parseFloat(document.getElementById('fUsFloor')?.value);
+  if(Number.isFinite(typed)) return typed;
+  const p=Number(US_FEED.data?.rules?.minScore);
+  return Number.isFinite(p)?p:0.6;
+}
+function usRows(){
+  const d=US_FEED.data;
+  if(!d||!d.ok) return [];
+  const fl=usFloor(),gateOn=d.gateOn!==false,live=usFeedLive();
+  const q=(document.getElementById('fSearch')?.value||'').trim().toUpperCase();
+  return (d.ranking||[]).map(r=>{
+    const score=Number(r.score);
+    return {...r,_us:true,score,fl,edge:Number.isFinite(score)?score-fl:null,
+      go:live&&gateOn&&Number.isFinite(score)&&score>=fl,live,gateOn,tgtPct:Number(d.rules?.targetPct)||3};
+  }).filter(r=>(SHOW_INELIGIBLE||r.go)&&(!q||String(r.symbol).toUpperCase().includes(q)||String(r.name||'').toUpperCase().includes(q)))
+    .sort((a,b)=>(b.edge??-1e9)-(a.edge??-1e9));
+}
+function nseEdge(s){
+  const sc=btstScoreOf(s.symbol),fl=btstMinScore();
+  return Number.isFinite(sc)&&Number.isFinite(fl)?sc-fl:null;
+}
+// NSE rows keep FILT's order; US rows interleave by edge only in the default score order.
+function dashboardRows(){
+  const m=marketsShown(),nse=m.nse?FILT:[],us=m.us?usRows():[];
+  if(!us.length) return nse;
+  if(!nse.length) return us;
+  if(SCOL!=='score'||SDIR!==-1) return nse.concat(us);
+  const out=[];let j=0;
+  for(const s of nse){
+    const e=isPinned(s.symbol)?Infinity:nseEdge(s);
+    while(j<us.length&&e!==null&&(us[j].edge??-1e9)>e) out.push(us[j++]);
+    out.push(s);
+  }
+  while(j<us.length) out.push(us[j++]);
+  return out;
+}
+let DASH_LEN=0;
+function usRowHtml(r){
+  const usd=v=>Number.isFinite(Number(v))?'$'+Number(v).toFixed(2):'—';
+  const chg=Number(r.chgPct);
+  const why=!r.live?'US market closed - last scored '+String(US_FEED.data?.asOf||'').slice(0,16).replace('T',' ')
+    :!r.gateOn?'US market gate off (index more than 5% below its 50-day average)':r.go?'Score at/above the US floor':'Below the US floor';
+  const status=r.go
+    ?`<span class="info-pill pill-green" style="padding:2px 8px;font-size:12px" title="Suggest-only: place this buy yourself in IBKR. Target +${r.tgtPct}%.">GO · IBKR</span>`
+    :`<span class="info-pill" style="padding:2px 8px;font-size:12px;color:var(--t2)" title="${escHtml(why)}">WAIT</span>`;
+  const sc=Number.isFinite(r.score)?(r.score>=0?'+':'')+r.score.toFixed(2):'—';
+  const cellH={
+    chk:`<td style="text-align:center"><input type="checkbox" disabled title="US stock: suggest-only, place it in IBKR yourself" style="width:14px;height:14px"></td>`,
+    rank:'<td style="text-align:right;color:var(--t3)">—</td>',
+    score:`<td data-key="score" style="text-align:center" title="US model score vs the US floor ${r.fl}"><span style="font-weight:800;font-family:'DM Mono',monospace;color:${r.score>=r.fl?'var(--green)':'var(--amber)'}">${sc}</span><span style="font-size:11px;color:var(--t3)"> / ${r.fl}</span></td>`,
+    symbol:`<td style="font-family:'Plus Jakarta Sans',sans-serif"><div style="font-weight:700;font-size:15px;color:var(--t1)">🇺🇸 ${escHtml(r.symbol)} <a href="https://www.tradingview.com/chart/?symbol=${encodeURIComponent(r.symbol)}" target="_blank" rel="noopener" onclick="event.stopPropagation()" style="font-size:11px;color:var(--cyan);text-decoration:none" title="TradingView chart">T</a></div><div style="font-size:11px;color:var(--t3);max-width:200px;overflow:hidden;text-overflow:ellipsis">${escHtml(r.sector||'')}</div></td>`,
+    status:`<td data-key="status" class="recommendation-status">${status}</td>`,
+    price:`<td data-key="price" style="white-space:nowrap">${usd(r.price)}<span style="color:var(--t3)"> · </span><span style="font-size:12px">${fPerf(chg)}</span></td>`,
+    day:`<td>${fPerf(chg)}</td>`,
+    turnover:`<td data-key="turnover">$${(Number(r.turnover20)/1e6).toFixed(1)}M</td>`,
+    tgt:`<td style="font-weight:700;color:var(--green)" title="Target price ${usd(r.targetPrice)} (+${r.tgtPct}%)">+${r.tgtPct.toFixed(2)}%</td>`
+  };
+  const cells=COLS.map(c=>cellH[c.key]||'<td style="color:var(--t3)">—</td>').join('');
+  return `<tr data-us="${escHtml(r.symbol)}" style="background:rgba(129,140,248,.09);box-shadow:inset 4px 0 0 #818cf8${r.live?'':';opacity:.75'}" title="US stock - suggest only, trade it in IBKR">${cells}</tr>`;
+}
+async function loadUsFeed(){
+  try{
+    const d=await readHelperResponse('/api/inputs/file?name='+encodeURIComponent('intl_US.json'),{timeout:6000});
+    const changed=JSON.stringify([d?.asOf,d?.lastError])!==JSON.stringify([US_FEED.data?.asOf,US_FEED.data?.lastError]);
+    US_FEED.data=d;US_FEED.at=Date.now();US_FEED.err=null;
+    const ae=document.activeElement?.tagName;
+    if(changed&&ae!=='INPUT'&&ae!=='SELECT') renderTable();
+  }catch(e){US_FEED.err=e.message;}
+}
+function initMarketViewUI(){
+  const el=document.getElementById('fMarket');if(el) el.value=marketView();
+  readHelperResponse('/api/intl/min-score',{timeout:6000}).then(d=>{
+    const u=document.getElementById('fUsFloor');
+    if(u&&d&&Number.isFinite(Number(d.US))&&document.activeElement!==u) u.value=d.US;
+  }).catch(()=>{});
+}
+let _usFloorTimer=null;
+function onUsFloorChange(){
+  clearTimeout(_usFloorTimer);
+  _usFloorTimer=setTimeout(()=>{
+    const v=(document.getElementById('fUsFloor')?.value||'').trim();
+    readHelperResponse('/api/intl/min-score?market=US&set='+encodeURIComponent(v),{timeout:6000}).catch(()=>{});
+    PG=1;renderTable();
+  },600);
+}
+setTimeout(()=>{try{initMarketViewUI();}catch(e){}loadUsFeed();},1500);
+setInterval(loadUsFeed,30000);
 function renderTable(){
   renderModelComparison();
   renderLiveTapeBar();
@@ -11245,8 +11360,11 @@ function renderTable(){
 
   // Pagination restored in v534 (owner): 100 rows/page keeps the DOM small, which is
   // also what kept the full-universe render off the typing path.
-  const start=(PG-1)*PGSZ,pg=FILT.slice(start,start+PGSZ);
+  const DASH=dashboardRows();DASH_LEN=DASH.length;
+  PG=Math.max(1,Math.min(PG,Math.ceil(DASH_LEN/PGSZ)||1));
+  const start=(PG-1)*PGSZ,pg=DASH.slice(start,start+PGSZ);
   document.getElementById('tBody').innerHTML=pg.map(s=>{
+    if(s._us) return usRowHtml(s);
     const isSelected=SELECTED.has(s.symbol);
     const am=allocMap[s.symbol];
     // v1371: a funded row shows ITS ORDER's target (the one exported as the GTT), not a target priced
@@ -11356,7 +11474,7 @@ function renderTable(){
 }
 
 function renderPgn(){
-  const tot=FILT.length,tp=Math.ceil(tot/PGSZ),c=document.getElementById('pgn');
+  const tot=DASH_LEN,tp=Math.ceil(tot/PGSZ),c=document.getElementById('pgn');
   if(!c) return;
   if(tp<=1){c.innerHTML='';return;}
   let h=`<button ${PG===1?'disabled':''} onclick="goP(${PG-1})">‹</button>`;
@@ -14835,7 +14953,6 @@ function switchTab(n){
   // Performance analytics are intentionally deferred so tab switching paints immediately.
   if(n===2&&(PERF_DIRTY||!PERF_RENDERED)) schedulePerformanceRender();
   if(n===3&&window.RocketFinance) window.RocketFinance.render();
-  if(n===4&&window.RocketIntl) window.RocketIntl.render();
   // v1101: a hidden grid has clientWidth 0, so balancing on the tab it lives in is the only moment
   // the column count can actually be computed. rAF lets the tab paint first.
   requestAnimationFrame(balanceGrids);

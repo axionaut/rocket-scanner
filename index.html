@@ -25,7 +25,6 @@
    <div class="tab" onclick="switchTab(1)">🔬 Methodology <span id="tabCount1" style="font-size:12px;opacity:.7"></span></div>
    <div class="tab" onclick="switchTab(2)">📈 Performance</div>
    <div class="tab" onclick="switchTab(3)">💰 Finance <span id="tabCount3" style="font-size:12px"></span></div>
-   <div class="tab" onclick="switchTab(4)">🌍 Global <span id="tabCount4" style="font-size:12px;opacity:.8"></span></div>
   </div>
   <input type="file" id="brainIn" accept=".json" style="display:none" onchange="importBrain(event)">
   <div style="position:relative;display:flex;align-items:center">
@@ -74,6 +73,8 @@
     <div class="fg"><span class="fg-lbl" style="color:var(--amber)">Max % Capital</span><input type="number" id="fMaxPct" placeholder="100" min="1" max="100" step="5" style="width:90px;padding:8px 10px;background:var(--bg-card);border:1px solid var(--border);border-radius:8px;color:var(--t1);font-family:'DM Mono',monospace;font-size:14px;outline:none;transition:border .2s" onfocus="this.style.borderColor='var(--amber)'" onblur="this.style.borderColor='var(--border)'" oninput="onTradeInputChange()" title="Above the All-in amount, no single stock gets more than this % of capital. Empty = 100%."></div>
     <div class="fg" style="display:none"><select id="fModel" onchange="onModelChange()"><option value="ENS">Ensemble</option></select></div>
     <div class="fg"><span class="fg-lbl" style="color:var(--green)">Score Floor</span><input type="number" id="fScoreFloor" placeholder="engine" step="0.1" style="width:90px;padding:8px 10px;background:var(--bg-card);border:1px solid var(--border);border-radius:8px;color:var(--t1);font-family:'DM Mono',monospace;font-size:14px;outline:none;transition:border .2s" onfocus="this.style.borderColor='var(--green)'" onblur="this.style.borderColor='var(--border)'" oninput="onScoreFloorChange()" title="Minimum model score a stock must reach to become a pick. This is sent to the engine and applies from its next scoring run (every 2 minutes, 09:20-15:00). A stock becomes buyable the moment its score crosses this floor. Hard floor 1.2 - lower values are raised to it. Empty = the engine's own default (1.6). Requires the local helper; if it is not running the engine keeps using its own floor."></div>
+    <div class="fg"><span class="fg-lbl" style="color:#818cf8">US Floor</span><input type="number" id="fUsFloor" placeholder="0.6" step="0.1" style="width:80px;padding:8px 10px;background:var(--bg-card);border:1px solid var(--border);border-radius:8px;color:var(--t1);font-family:'DM Mono',monospace;font-size:14px;outline:none" oninput="onUsFloorChange()" title="Minimum US model score for a US GO. US stocks are suggest-only: you place them in IBKR. Sent to the helper; applies from the next US scoring run (every 2 minutes in US hours). Empty = 0.6."></div>
+    <div class="fg"><span class="fg-lbl">Market</span><select id="fMarket" onchange="onMarketViewChange()" style="padding:8px 10px;background:var(--bg-card);border:1px solid var(--border);border-radius:8px;color:var(--t1);font-size:14px" title="Auto shows the markets that are open now (both when neither is). US rows are tinted violet."><option value="auto">Auto (live)</option><option value="nse">NSE</option><option value="us">US</option><option value="all">All</option></select></div>
     <button class="btn" id="btnToggleBelowThreshold" onclick="toggleBelowThreshold()" style="padding:8px 14px;border-radius:8px;font-size:13px;font-weight:600;display:inline-flex;align-items:center;gap:6px" title="Show or hide non-qualifying universe stocks">👁 Show Ineligible</button>
     <button class="btn" id="basketBtn" onclick="exportBasket()" disabled style="background:rgba(251,191,36,.12);border-color:rgba(251,191,36,.3);color:var(--amber);font-weight:700;padding:8px 16px;border-radius:8px" title="Export funded stocks as Zerodha basket orders with their assigned sell targets; no loss stop">🧺 Buy Basket <span id="basketCount"></span></button>
     <button class="btn" id="sendKiteBtn" onclick="sendBasketToKite()" title="New funded baskets go to the Scanner_Buy basket in Kite automatically; the basket need not be open. Click to resend now. Requires the Kite Basket Bridge extension; review and Execute in Kite.">Kite auto-send</button>
@@ -99,7 +100,6 @@
  <div class="tp" id="tab1"><div class="meth" id="methContent"></div></div>
  <div class="tp" id="tab2"><div class="meth" id="perfContent"></div></div>
  <div class="tp" id="tab3"><div class="meth" id="finContent"></div></div>
- <div class="tp" id="tab4"><div class="meth" id="intlContent"></div></div>
 </div><!-- /dash -->
 <button class="go-top" id="goTop" onclick="window.scrollTo({top:0,behavior:'smooth'})" title="Go to top">▲</button>
 </div><!-- /app -->
@@ -126,9 +126,9 @@
     script.async = false;
     script.src = 'app.js?cb=' + cacheKey;
     script.dataset.cacheKey = cacheKey;
-    // Finance and Global tabs load after app.js; each is independent, so one failing never stops the app.
+    // The Finance tab loads after app.js; each is independent, so one failing never stops the app.
     script.onload = function() {
-      ['finance.js', 'intl.js'].forEach(function (f) {
+      ['finance.js'].forEach(function (f) {
         var s = document.createElement('script'); s.async = false; s.src = f + '?cb=' + cacheKey;
         s.onerror = function () { console.error('Failed to load ' + f); };
         document.head.appendChild(s);
