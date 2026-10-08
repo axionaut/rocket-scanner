@@ -1,5 +1,5 @@
 const BUILD_TS='2026-10-08 IST'; // release build date (IST)
-const APP_VERSION=1487;
+const APP_VERSION=1488;
 const RADAR_SCORE_VERSION='v1419-recross-batches'; // Eligible on crossing the score floor at any time; selected model's evolving target and movement-based profit protection.
 
 // ── v1358: AN UNCAUGHT ERROR MUST NAME ITSELF ─────────────────────────────────────────────────
@@ -9892,7 +9892,7 @@ function getCols(){
   // User-dragged column order (v536) applies here so header and cells always agree.
   return applyColOrder('main-rankings',[
     {key:'chk',label:'',s:0},
-    {key:'score',label:'Model Score',s:1},
+    {key:'score',label:'Percentile / Score',s:1},
     {key:'symbol',label:'Symbol',s:1},
     {key:'status',label:'Trigger Status',s:1},
     {key:'price',label:'Price/Day',s:1},
@@ -11193,7 +11193,7 @@ function strategySignalCells(row){
 // US stocks (helper's intl engine, S&P 1500, scored every 2 minutes in US hours) share the main
 // table with NSE. Suggest-only: US rows never fund, export or reach Zerodha; the owner places them in
 // IBKR himself. Scores live on different scales (NSE floor 1.6, US 0.6), so in the default score
-// order both markets merge on percentage above their own floor. US rows are tinted, no Market column.
+// order both markets merge on within-market score percentile. US rows are tinted, no Market column.
 // Market "Auto" shows the markets that are live now (both when neither is); NSE / US / All override.
 const US_FEED={data:null,at:0,err:null};
 const MARKET_VIEW_STORE='rocket-market-view-v1';
@@ -11203,13 +11203,35 @@ function onMarketViewChange(){
   try{localStorage.setItem(MARKET_VIEW_STORE,v);}catch(e){}
   PG=1;renderTable();
 }
-// Relative threshold margin is a display ordering, not a calibrated return or probability.
-function floorMargin(score,floor){
-  return Number.isFinite(score)&&Number.isFinite(floor)&&floor>0?100*(score-floor)/floor:null;
+// Full-market empirical percentiles; equal scores share their average rank. Never use the floor
+// or the filtered/displayed subset. Cache each feed snapshot rather than sorting on every cell.
+function scorePercentiles(entries){
+  const unique=new Map(entries.filter(([sym,score])=>sym&&Number.isFinite(score)));
+  const sorted=[...unique].sort((a,b)=>a[1]-b[1]),out=new Map(),n=sorted.length;
+  for(let i=0;i<n;){
+    let end=i+1;while(end<n&&sorted[end][1]===sorted[i][1])end++;
+    const value=n>1?100*(i+(end-i-1)/2)/(n-1):null;
+    for(let j=i;j<end;j++)out.set(sorted[j][0],value);
+    i=end;
+  }
+  return out;
 }
-function marginHtml(margin){
-  const txt=margin===null?'Undefined at zero/missing floor':`${margin>=0?'+':''}${margin.toFixed(1)}% vs floor`;
-  return `<div style="font-size:10px;color:var(--t3)" title="Relative threshold margin = 100 × (score / floor − 1). Used for score sorting; not calibrated confidence or expected return.">${txt}</div>`;
+const SCORE_PERCENTILES={nseSrc:null,nse:new Map(),usSrc:null,us:new Map()};
+function marketPercentile(market,symbol){
+  const br=market==='nse'?btstRanking():null;
+  const src=market==='nse'?br?.src:US_FEED.data;
+  if(!src)return null;
+  const key=market+'Src';
+  if(SCORE_PERCENTILES[key]!==src){
+    const entries=market==='nse'?[...br.map].map(([sym,r])=>[sym,r.score])
+      :(src.ok?(src.ranking||[]).map(r=>[r.symbol,typeof r.score==='number'?r.score:NaN]):[]);
+    SCORE_PERCENTILES[market]=scorePercentiles(entries);
+    SCORE_PERCENTILES[key]=src;
+  }
+  return SCORE_PERCENTILES[market].get(symbol)??null;
+}
+function percentileHtml(value){
+  return `<div style="font-weight:800;color:var(--cyan)" title="Score percentile within this market's full scored universe (0–100); equal scores share a rank. Original score and GO floor are unchanged.">${value===null?'—':value.toFixed(1)}<span style="font-size:10px;color:var(--t3)"> percentile</span></div>`;
 }
 function usFeedLive(){
   const d=US_FEED.data;
@@ -11239,13 +11261,9 @@ function usRows(){
     const score=Number(r.score);
     return {...r,_us:true,score,fl,edge:Number.isFinite(score)?score-fl:null,
       go:live&&gateOn&&Number.isFinite(score)&&score>=fl,live,gateOn,tgtPct:Number(d.rules?.targetPct)||3,
-      margin:floorMargin(score,fl)};
+      percentile:marketPercentile('us',r.symbol)};
   }).filter(r=>(SHOW_INELIGIBLE||r.go)&&(!q||String(r.symbol).toUpperCase().includes(q)||String(r.name||'').toUpperCase().includes(q)))
     .sort((a,b)=>(b.edge??-1e9)-(a.edge??-1e9));
-}
-function nseEdge(s){
-  const sc=btstScoreOf(s.symbol),fl=btstMinScore();
-  return floorMargin(sc,fl);
 }
 // Work on a display copy: filtering, allocation, selection and execution keep the NSE list.
 function dashboardRows(){
@@ -11254,7 +11272,7 @@ function dashboardRows(){
   return nse.concat(us).sort((a,b)=>{
     const ap=!a._us&&isPinned(a.symbol),bp=!b._us&&isPinned(b.symbol);
     if(ap!==bp)return ap?-1:1;
-    const av=a._us?a.margin:nseEdge(a),bv=b._us?b.margin:nseEdge(b);
+    const av=a._us?a.percentile:marketPercentile('nse',a.symbol),bv=b._us?b.percentile:marketPercentile('nse',b.symbol);
     if(av===null)return bv===null?0:1;
     if(bv===null)return -1;
     return (SDIR===-1?-1:1)*(av-bv);
@@ -11314,7 +11332,7 @@ function usRowHtml(r){
   const cellH={
     chk:`<td style="text-align:center"><input type="checkbox" disabled title="US stock: suggest-only, place it in IBKR yourself" style="width:14px;height:14px"></td>`,
     rank:'<td style="text-align:right;color:var(--t3)">—</td>',
-    score:`<td data-key="score" style="text-align:center" title="US model score vs the US floor ${r.fl}"><span style="font-weight:800;font-family:'DM Mono',monospace;color:${r.score>=r.fl?'var(--green)':'var(--amber)'}">${sc}</span><span style="font-size:11px;color:var(--t3)"> / ${r.fl}</span>${marginHtml(r.margin)}</td>`,
+    score:`<td data-key="score" style="text-align:center" title="US model score vs the US floor ${r.fl}">${percentileHtml(r.percentile)}<span style="font-weight:800;font-family:'DM Mono',monospace;color:${r.score>=r.fl?'var(--green)':'var(--amber)'}">${sc}</span><span style="font-size:11px;color:var(--t3)"> / ${r.fl}</span></td>`,
     symbol:`<td style="font-family:'Plus Jakarta Sans',sans-serif"><div style="font-weight:700;font-size:15px;color:var(--t1)">🇺🇸 ${escHtml(r.symbol)} <a href="https://www.tradingview.com/chart/?symbol=${encodeURIComponent(r.symbol)}" target="_blank" rel="noopener" onclick="event.stopPropagation()" style="font-size:11px;color:var(--cyan);text-decoration:none" title="TradingView chart">T</a></div><div style="font-size:11px;color:var(--t3);max-width:200px;overflow:hidden;text-overflow:ellipsis">${escHtml(r.sector||'')}</div></td>`,
     status:`<td data-key="status" class="recommendation-status">${status}</td>`,
     price:`<td data-key="price" style="white-space:nowrap">${usd(r.price)}<span style="color:var(--t3)"> · </span><span style="font-size:12px">${fPerf(chg)}</span></td>`,
@@ -11388,7 +11406,7 @@ function renderTable(){
     const cellH={
       chk:`<td style="text-align:center"><input type="checkbox" ${isSelected?'checked':''} ${canBuy?'':'disabled'} style="width:14px;height:14px;accent-color:var(--amber);cursor:${canBuy?'pointer':'not-allowed'}" onclick="event.stopPropagation()" onchange="toggleStock('${s.symbol}',this.checked)" title="${checkTitle}"></td>`,
       rank:`<td style="font-family:'DM Mono',monospace;font-weight:800;color:var(--t1);text-align:right">${s.rank??'—'}</td>`,
-      score:`<td data-key="score" style="text-align:center">${dualScoreCell(s)}${marginHtml(nseEdge(s))}</td>`,
+      score:`<td data-key="score" style="text-align:center">${percentileHtml(marketPercentile('nse',s.symbol))}${dualScoreCell(s)}</td>`,
       // v1142: routed through symbolChartButton like every other table. This cell had built its own
       // TradingView link since v1070, so the "one symbol interaction everywhere" rule was true of the
       // panels and quietly false of the main table - which is why swapping to Zerodha missed it.
@@ -12653,7 +12671,7 @@ function patchVisiblePrices(){
       }
       const scoreCell = tr.querySelector('td[data-key="score"]');
       if(scoreCell){
-        scoreCell.innerHTML = dualScoreCell(s)+marginHtml(nseEdge(s));
+        scoreCell.innerHTML = percentileHtml(marketPercentile('nse',s.symbol))+dualScoreCell(s);
       }
       const statusCell = tr.querySelector('td[data-key="status"]');
       if(statusCell){
