@@ -1,5 +1,5 @@
 const BUILD_TS='2026-10-09 IST'; // release build date (IST)
-const APP_VERSION=1493;
+const APP_VERSION=1494;
 const RADAR_SCORE_VERSION='v1419-recross-batches'; // Eligible on crossing the score floor at any time; selected model's evolving target and movement-based profit protection.
 
 // ── v1358: AN UNCAUGHT ERROR MUST NAME ITSELF ─────────────────────────────────────────────────
@@ -4525,7 +4525,7 @@ function btstScoreAOf(sym){
   return r.model==='A'?btstScoreOf(sym):null;
 }
 const BTST_MODEL_NAMES={ENS:'Ensemble',A:'Original'};
-function btstModelName(m){return BTST.data?.model?.kind==='five-minute-forward-return'?'5-minute candles':BTST_MODEL_NAMES[m]||m||'Original';}
+function btstModelName(m){return BTST_MODEL_NAMES[m]||m||'Original';}
 // Model switch (index.html #fModel). The helper stores the choice and passes it to every engine run;
 // the other model keeps scoring as a shadow for the day-end review. Applies from the next run.
 // v1446: the helper owns the choice, but the browser must not display the wrong one while asking it.
@@ -9882,9 +9882,9 @@ function buildIndicatorWatchHTML(){
 function _renderMethodologyInner(){
   const mc=document.getElementById('methContent');if(!mc)return;
   mc.innerHTML=`<h3>Live score-crossing engine</h3>
-    <p>The five-minute candle model supplies NSE recommendations, counts, allocation and baskets. The saved score floor uses the existing ENS score scale, now derived from candle-model forward-return ranks. A nonpositive forward net-return prediction cannot receive a positive buy score. US scoring is separate.</p>
+    <p>The selected Ensemble model supplies the recommendation table, counts, allocation and basket. It is the April-2026 idea (score every stock, learn what is working) rebuilt on Zerodha data with a gradient-boosting learner. No ALL NSE files.</p>
     <div class="m-grid">
-    <div class="m-card"><h4>1. Five-minute entry model</h4><p>Entry scores are learned from completed 5-minute candles: recent returns, candle shape and sequences, volume, VWAP, pullbacks and market movement. Training measures the next 60 minutes from a next-candle entry, with a +3% research target, 0.10% entry allowance and 0.38% round-trip costs. Daily bars support universe and market context; they do not supply entry predictions. The helper checks scores every two minutes, but new candle inputs arrive every five minutes. The research horizon does not impose a live exit deadline. Earlier daily-model results below are historical, not validation of this model.</p></div>
+    <div class="m-card"><h4>1. Live score (throughout the session)</h4><p>The local helper runs <code>dev/btst_engine.py</code>. It builds daily, market and sector features (today's volume projected to a full session) for every liquid stock (20-day average turnover ≥ ₹5 Cr, price ₹5–₹4,000) from Zerodha daily bars plus today's live price and volume: returns from 1 day to 3 months, gap, close location, range, volume surges, volatility, distance to highs and averages, RSI, stochastics, ADX, MACD, TradingView-style ratings, relative strength and market condition. The selected model ranks opportunities; Ensemble scores are percentile-mapped scores, not calibrated expected returns. Models are retrained every 5 sessions on the last 220 sessions.</p></div>
     <div class="m-card"><h4>2. Buy on qualification</h4><p>A current live score clearing your floor can become GO throughout the session. Qualifying names share available capital by score, within saved allocation and execution limits (minimum ₹5,000 per funded stock). A purchase consumes its crossing; a completed below-floor observation enables a fresh crossing, held or unheld. The market gate, price freshness, circuit, surveillance and EQ checks still apply.</p></div>
     <div class="m-card"><h4>3. Exit</h4><p>Orders carry the selected model target, floored for costs and profit. The target learner observes simulated signals through two later sessions; that research horizon does not force a live exit. +3% is its startup fallback. Profit protection follows measured candle swings and 30-second live samples: quieter movement tightens the distance; wider swings cannot lower an established stop. The runner hands off near the target after broker protection is confirmed. No loss stop or scheduled expiry.</p></div></div>
     <h3>Historical evidence</h3><p>The experiments below used older fixed entry and exit rules. They do not validate the current score-crossing entries, adaptive profit trail or holding without a time deadline.</p>
@@ -10554,24 +10554,10 @@ function getBookAllocationCap(row){
   const exitable=total>0?total:l.bids.reduce((n,x)=>n+(Number(x[1])||0),0);
   return exitable>0?exitable*px:0;
 }
-// v1466: the 0.10% rail applies to the projected FULL-day turnover, not the part of the day traded so far,
-// which blocked ~20% of liquid stocks at 09:45 and ~11% at 10:30. Median share of a day's rupee turnover
-// traded by each time (dev/turnover_projection_study.py, 229 sessions, ~1,300 stocks; holdout median error
-// 53% at 09:45, 22% at 12:30, 9% at 14:30). Clamped at the 09:45 share so the first half hour, which was
-// not measured, never projects more than ~6.8x what has traded. Order-book depth still caps every order.
-const TURNOVER_DAY_SHARE=[[555,0],[585,0.148],[630,0.273],[690,0.407],[750,0.526],[810,0.637],[870,0.755],[930,1]];
-function projectedDayTurnover(turnover,now=new Date()){
-  const ist=new Date(now.getTime()+now.getTimezoneOffset()*60000+19800000),m=ist.getHours()*60+ist.getMinutes();
-  if(!(turnover>0)||m>=930||m<555) return turnover;
-  let share=1;
-  for(let i=1;i<TURNOVER_DAY_SHARE.length;i++){
-    const [m1,s1]=TURNOVER_DAY_SHARE[i-1],[m2,s2]=TURNOVER_DAY_SHARE[i];
-    if(m<=m2){share=s1+(s2-s1)*(m-m1)/(m2-m1);break;}
-  }
-  return turnover/Math.max(TURNOVER_DAY_SHARE[1][1],share);
-}
+// v1494 (owner): v1466's projected full-day turnover reverted. The 0.10% rail applies to rupee turnover
+// traded so far today, as before 5 Oct; morning blocking accepted by the owner (6 Oct). Book depth still caps.
 function getTurnoverAllocationCap(row){
-  const turnover=projectedDayTurnover(Number(row?.turnover));
+  const turnover=Number(row?.turnover);
   const turnCap=Number.isFinite(turnover)&&turnover>0?turnover*MAX_TURNOVER_PARTICIPATION:0;
   const bookCap=getBookAllocationCap(row);
   if(bookCap>0&&turnCap>0) return Math.min(bookCap,turnCap);
