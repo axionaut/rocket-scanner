@@ -1,5 +1,5 @@
 const BUILD_TS='2026-10-09 IST'; // release build date (IST)
-const APP_VERSION=1492;
+const APP_VERSION=1493;
 const RADAR_SCORE_VERSION='v1419-recross-batches'; // Eligible on crossing the score floor at any time; selected model's evolving target and movement-based profit protection.
 
 // ── v1358: AN UNCAUGHT ERROR MUST NAME ITSELF ─────────────────────────────────────────────────
@@ -4525,7 +4525,7 @@ function btstScoreAOf(sym){
   return r.model==='A'?btstScoreOf(sym):null;
 }
 const BTST_MODEL_NAMES={ENS:'Ensemble',A:'Original'};
-function btstModelName(m){return BTST_MODEL_NAMES[m]||m||'Original';}
+function btstModelName(m){return BTST.data?.model?.kind==='five-minute-forward-return'?'5-minute candles':BTST_MODEL_NAMES[m]||m||'Original';}
 // Model switch (index.html #fModel). The helper stores the choice and passes it to every engine run;
 // the other model keeps scoring as a shadow for the day-end review. Applies from the next run.
 // v1446: the helper owns the choice, but the browser must not display the wrong one while asking it.
@@ -9882,9 +9882,9 @@ function buildIndicatorWatchHTML(){
 function _renderMethodologyInner(){
   const mc=document.getElementById('methContent');if(!mc)return;
   mc.innerHTML=`<h3>Live score-crossing engine</h3>
-    <p>The selected Ensemble model supplies the recommendation table, counts, allocation and basket. It is the April-2026 idea (score every stock, learn what is working) rebuilt on Zerodha data with a gradient-boosting learner. No ALL NSE files.</p>
+    <p>The five-minute candle model supplies NSE recommendations, counts, allocation and baskets. The saved score floor uses the existing ENS score scale, now derived from candle-model forward-return ranks. A nonpositive forward net-return prediction cannot receive a positive buy score. US scoring is separate.</p>
     <div class="m-grid">
-    <div class="m-card"><h4>1. Live score (throughout the session)</h4><p>The local helper runs <code>dev/btst_engine.py</code>. It builds daily, market, sector and intraday-sequence features for every liquid stock (20-day average turnover ≥ ₹5 Cr, price ₹5–₹4,000) from Zerodha daily bars plus today's live price and volume: returns from 1 day to 3 months, gap, close location, range, volume surges, volatility, distance to highs and averages, RSI, stochastics, ADX, MACD, TradingView-style ratings, relative strength and market condition. The selected model ranks opportunities; Ensemble scores are percentile-mapped scores, not calibrated expected returns. Models are retrained every 5 sessions on the last 220 sessions.</p></div>
+    <div class="m-card"><h4>1. Five-minute entry model</h4><p>Entry scores are learned from completed 5-minute candles: recent returns, candle shape and sequences, volume, VWAP, pullbacks and market movement. Training measures the next 60 minutes from a next-candle entry, with a +3% research target, 0.10% entry allowance and 0.38% round-trip costs. Daily bars support universe and market context; they do not supply entry predictions. The helper checks scores every two minutes, but new candle inputs arrive every five minutes. The research horizon does not impose a live exit deadline. Earlier daily-model results below are historical, not validation of this model.</p></div>
     <div class="m-card"><h4>2. Buy on qualification</h4><p>A current live score clearing your floor can become GO throughout the session. Qualifying names share available capital by score, within saved allocation and execution limits (minimum ₹5,000 per funded stock). A purchase consumes its crossing; a completed below-floor observation enables a fresh crossing, held or unheld. The market gate, price freshness, circuit, surveillance and EQ checks still apply.</p></div>
     <div class="m-card"><h4>3. Exit</h4><p>Orders carry the selected model target, floored for costs and profit. The target learner observes simulated signals through two later sessions; that research horizon does not force a live exit. +3% is its startup fallback. Profit protection follows measured candle swings and 30-second live samples: quieter movement tightens the distance; wider swings cannot lower an established stop. The runner hands off near the target after broker protection is confirmed. No loss stop or scheduled expiry.</p></div></div>
     <h3>Historical evidence</h3><p>The experiments below used older fixed entry and exit rules. They do not validate the current score-crossing entries, adaptive profit trail or holding without a time deadline.</p>
