@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Rocket Scanner — Kite Basket Bridge",
-  "version": "1.5.0",
+  "version": "1.6.0",
   "description": "Write funded Rocket Scanner buys into Scanner_Buy and profit-lock sells into Scanner_Sell in Kite. Never executes orders.",
   "permissions": ["scripting"],
   "host_permissions": ["https://kite.zerodha.com/*", "https://axionaut.github.io/rocket-scanner/*"],

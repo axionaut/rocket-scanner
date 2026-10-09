@@ -57,15 +57,31 @@ async function rocketKiteImport(orders,createdAt,openElsewhere=false,side='BUY')
   // Kite's basket API module, found by its own route name rather than a build-specific module id.
   let api=window.__rocketBasketApi;
   if(!api){
-    let req=null;
-    try{ self.webpackChunkkite?.push([[`rocket-${Date.now()}-${Math.random()}`],{},r=>{req=r;}]); }catch(e){}
-    for(const id of Object.keys(req?.m||{})){
-      let src='';
-      try{ src=Function.prototype.toString.call(req.m[id]); }catch(e){ continue; }
-      if(!src.includes('"baskets.items.add"')) continue;
-      try{ const z=req(id)?.Z; if(['getBaskets','createBasket','addBasketItem','removeBasketItem'].every(k=>typeof z?.[k]==='function')){ api=z; break; } }catch(e){}
+    // 1.6.0 (9 Oct): Kite's build changed and the 1.5 lookup (webpackChunkkite, "baskets.items.add", export .Z)
+    // stopped matching. Search every webpack chunk global, any module mentioning baskets, and every export
+    // object for the four basket methods; report which step failed so the next change is diagnosable.
+    const NEED=['getBaskets','createBasket','addBasketItem','removeBasketItem'];
+    const hasApi=z=>z&&NEED.every(k=>typeof z[k]==='function');
+    const chunks=Object.keys(self).filter(k=>/^webpackChunk/.test(k)&&typeof self[k]?.push==='function');
+    let modules=0,candidates=0;
+    for(const g of chunks){
+      let req=null;
+      try{ self[g].push([[`rocket-${Date.now()}-${Math.random()}`],{},r=>{req=r;}]); }catch(e){}
+      const ids=Object.keys(req?.m||{});modules+=ids.length;
+      for(const id of ids){
+        let src='';
+        try{ src=Function.prototype.toString.call(req.m[id]); }catch(e){ continue; }
+        if(!/baskets/.test(src)) continue;
+        candidates++;
+        try{
+          const ex=req(id);
+          const found=[ex,ex?.default,...Object.values(ex||{})].find(hasApi);
+          if(found){ api=found; break; }
+        }catch(e){}
+      }
+      if(api) break;
     }
-    if(!api) return fail('This Kite version has no compatible basket API. Reload Kite; otherwise use the JSON file.');
+    if(!api) return fail(`This Kite version has no compatible basket API (webpack globals ${chunks.length}, modules ${modules}, basket modules ${candidates}). Reload Kite; otherwise use the JSON file.`);
     window.__rocketBasketApi=api;
   }
   const key=(symbol,exchange,p={})=>JSON.stringify([symbol,exchange,p.transactionType??p.transaction_type,p.product,p.orderType??p.order_type,p.validity,p.variety,Number(p.quantity),Number(p.price||0),Number((p.triggerPrice??p.trigger_price)||0),Number((p.disclosedQuantity??p.disclosed_quantity)||0),Number(p.gtt?.target||0),Number(p.gtt?.stoploss||0)]);
