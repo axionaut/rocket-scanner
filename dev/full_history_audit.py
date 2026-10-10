@@ -35,6 +35,7 @@ def match_fifo(df):
     completed_trades = []
     open_positions = {}
     unreconciled_opening_sells = []
+    dp_charged = set()
 
     for symbol, group in df.groupby('symbol', sort=False):
         long_inventory = deque()
@@ -70,8 +71,31 @@ def match_fifo(df):
                     entry_val = matched_qty * long_lot['price']
                     exit_val = matched_qty * price
                     turnover = entry_val + exit_val
-                    charges = turnover * 0.001 + turnover * 0.0000325 + entry_val * 0.00015 + turnover * 0.000001 + 15.93
-                    charges += (turnover * 0.0000325 + turnover * 0.000001 + 15.93) * 0.18
+                    
+                    is_intraday = (long_lot['date'] == tdate)
+                    
+                    # Calculate precise charges
+                    if is_intraday:
+                        stt = exit_val * 0.00025  # Intraday STT on sell side only (0.025%)
+                        brokerage = min(20.0, turnover * 0.0003)
+                    else:
+                        stt = turnover * 0.001    # Delivery STT on both sides (0.1%)
+                        brokerage = 0.0
+                        
+                    txn_charge = turnover * 0.0000325
+                    sebi_fee = turnover * 0.000001
+                    stamp_duty = entry_val * 0.00015
+                    
+                    gst = (brokerage + txn_charge + sebi_fee) * 0.18
+                    
+                    dp_charge = 0.0
+                    if not is_intraday:
+                        # DP charge is per symbol per day for delivery sales
+                        if (symbol, tdate) not in dp_charged:
+                            dp_charge = 15.93  # 13.5 + 18% GST
+                            dp_charged.add((symbol, tdate))
+                            
+                    charges = stt + txn_charge + sebi_fee + stamp_duty + brokerage + gst + dp_charge
                     
                     pnl = exit_val - entry_val - charges
                     pnl_pct = (pnl / entry_val) * 100.0
@@ -251,12 +275,22 @@ def main():
             val = lot['qty'] * lot['price']
             cur_val = lot['qty'] * cmp
             turnover = val + cur_val
-            charges = turnover * 0.001 + turnover * 0.0000325 + cur_val * 0.00015 + turnover * 0.000001 + 15.93
-            charges += (turnover * 0.0000325 + turnover * 0.000001 + 15.93) * 0.18
+            
+            # Assume delivery exit for open positions
+            stt = turnover * 0.001
+            txn_charge = turnover * 0.0000325
+            sebi_fee = turnover * 0.000001
+            stamp_duty = val * 0.00015
+            gst = (txn_charge + sebi_fee) * 0.18
+            
+            charges = stt + txn_charge + sebi_fee + stamp_duty + gst
             
             open_cost += val
             open_unrealized_pnl += (cur_val - val - charges)
             open_count += 1
+            
+        # 1 DP charge per symbol for closing out
+        open_unrealized_pnl -= 15.93
 
     print("\n" + "="*80)
     print("                    1. ALL DAYS ACHIEVING >= Rs 5,000 NET PROFIT")
@@ -273,13 +307,21 @@ def main():
     print("="*80)
     all_profitable = daily_df[daily_df['net_pnl'] > 0]
     all_loss = daily_df[daily_df['net_pnl'] < 0]
+    
+    total_realized = daily_df['net_pnl'].sum()
+    base_cash = 350000.0
+    
+    print(f"Base Cash (Assumed):     Rs {base_cash:,.2f} (Estimated scale from history)")
+    print(f"Total Realized P&L:      Rs {total_realized:,.2f}")
+    print(f"Open Positions:          {open_count} trades (Cost: Rs {open_cost:,.2f})")
+    print(f"Open Unrealized P&L:     Rs {open_unrealized_pnl:,.2f}")
+    print(f"Total Equity (Net):      Rs {base_cash + total_realized + open_unrealized_pnl:,.2f}")
+    print(f"")
     print(f"Total active days:       {len(daily_df)}")
     print(f"Profitable days:         {len(all_profitable)} ({len(all_profitable)/len(daily_df)*100:.1f}%)")
     print(f"Losing days:             {len(all_loss)} ({len(all_loss)/len(daily_df)*100:.1f}%)")
     print(f"Mean Daily Net P&L:      Rs {daily_df['net_pnl'].mean():.2f}")
     print(f"Median Daily Net P&L:    Rs {daily_df['net_pnl'].median():.2f}")
-    print(f"Open Positions:          {open_count} trades (Cost: Rs {open_cost:,.2f})")
-    print(f"Open Unrealized P&L:     Rs {open_unrealized_pnl:,.2f}")
     
     print("\nMetric                    >= Rs 5,000 Days (n={})   Profitable Days (n={})   All Days (n={})".format(
         len(top_days), len(all_profitable), len(daily_df)))
