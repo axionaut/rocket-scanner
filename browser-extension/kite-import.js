@@ -71,11 +71,11 @@ async function rocketKiteImport(orders,createdAt,openElsewhere=false,side='BUY')
       for(const id of ids){
         let src='';
         try{ src=Function.prototype.toString.call(req.m[id]); }catch(e){ continue; }
-        if(!/baskets/.test(src)) continue;
+        if(!src.includes('"baskets.items.add"')) continue;
         candidates++;
         try{
           const ex=req(id);
-          const found=[ex,ex?.default,...Object.values(ex||{})].find(hasApi);
+          const found=[ex,ex?.default,ex?.Z,...Object.values(ex||{})].find(hasApi);
           if(found){ api=found; break; }
         }catch(e){}
       }
