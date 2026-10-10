@@ -26,12 +26,14 @@ def load_data():
     df['trade_type'] = df['trade_type'].str.strip().str.lower()
     df['exec_time'] = pd.to_datetime(df['order_execution_time'])
     df = df.sort_values(by=['exec_time', 'trade_id']).reset_index(drop=True)
+    df['trade_val'] = df['quantity'] * df['price']
+    order_vals = df.groupby('order_id')['trade_val'].sum().to_dict()
     
     with open(STORE_PATH, 'rb') as f:
         store = pickle.load(f)
-    return df, store
+    return df, store, order_vals
 
-def match_fifo(df):
+def match_fifo(df, order_vals):
     completed_trades = []
     open_positions = {}
     unreconciled_opening_sells = []
@@ -77,7 +79,11 @@ def match_fifo(df):
                     # Calculate precise charges
                     if is_intraday:
                         stt = exit_val * 0.00025  # Intraday STT on sell side only (0.025%)
-                        brokerage = min(20.0, turnover * 0.0003)
+                        buy_ord_val = order_vals.get(long_lot['order_id'], entry_val)
+                        sell_ord_val = order_vals.get(order_id, exit_val)
+                        buy_brok = min(20.0, buy_ord_val * 0.0003) * (entry_val / buy_ord_val)
+                        sell_brok = min(20.0, sell_ord_val * 0.0003) * (exit_val / sell_ord_val)
+                        brokerage = buy_brok + sell_brok
                     else:
                         stt = turnover * 0.001    # Delivery STT on both sides (0.1%)
                         brokerage = 0.0
@@ -253,8 +259,8 @@ def correlate_extension(trades_df, store):
 
 def main():
     print("Loading Tradebook and Daily Bars...")
-    df, store = load_data()
-    trades_df, open_pos, unreconciled_df = match_fifo(df)
+    df, store, order_vals = load_data()
+    trades_df, open_pos, unreconciled_df = match_fifo(df, order_vals)
     
     print(f"Found {len(unreconciled_df)} unreconciled opening sells (inherited inventory sold).")
     
@@ -311,7 +317,7 @@ def main():
     total_realized = daily_df['net_pnl'].sum()
     base_cash = 350000.0
     
-    print(f"Base Cash (Assumed):     Rs {base_cash:,.2f} (Estimated scale from history)")
+    print(f"Hypothetical Arithmetic: Rs {base_cash:,.2f} (Estimated scale from history)")
     print(f"Total Realized P&L:      Rs {total_realized:,.2f}")
     print(f"Open Positions:          {open_count} trades (Cost: Rs {open_cost:,.2f})")
     print(f"Open Unrealized P&L:     Rs {open_unrealized_pnl:,.2f}")
