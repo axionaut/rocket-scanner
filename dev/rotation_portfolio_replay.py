@@ -6,7 +6,7 @@ from full_history_audit import load_data, match_fifo
 UP = os.path.join(os.path.dirname(__file__), '..', 'Scanner Uploads')
 COST = 0.38
 TARGET = 3.0 # Baseline +3%
-INITIAL_CAPITAL = 1000000.0 # 10 Lakhs assumption for base capital
+INITIAL_CAPITAL = 350000.0 # 3.5 Lakhs assumption for base capital
 
 bars_cache = {}
 def bars(sym):
@@ -26,23 +26,19 @@ def get_inherited_state(df, cutoff_date='2026-09-18'):
     
     trades_df, open_pos, unreconciled = match_fifo(past_df)
     
-    realized_pnl = trades_df['pnl'].sum() if not trades_df.empty else 0
     open_cost = 0
-    for sym, lots in open_pos.items():
-        for lot in lots:
-            open_cost += lot['qty'] * lot['price']
-            
-    cash = INITIAL_CAPITAL + realized_pnl - open_cost
-    
     inherited = []
     for sym, lots in open_pos.items():
         for lot in lots:
+            open_cost += lot['qty'] * lot['price']
             inherited.append({
                 'symbol': sym,
                 'qty': lot['qty'],
                 'entry_price': lot['price'],
                 'entry_date': pd.Timestamp(lot['date'])
             })
+            
+    cash = INITIAL_CAPITAL - open_cost
     return cash, inherited
 
 def exit_baseline(sym, entry, entry_date):
@@ -58,23 +54,34 @@ def exit_baseline(sym, entry, entry_date):
     return None, None # Still open
 
 def exit_candidate(sym, entry, entry_date):
-    # Pure T+2 session close expiry
     df = bars(sym)
     if df.empty: return None, None
     dt_ts = pd.Timestamp(entry_date).normalize()
-    # Find unique days after entry
-    unique_days = df[df.Day > dt_ts].Day.unique()
-    if len(unique_days) >= 2:
-        t2_day = unique_days[1]
-        path_t2 = df[df.Day == t2_day]
-        if not path_t2.empty:
-            b = path_t2.iloc[-1] # Close of T+2 session
-            return b.Date, b.Close / entry * 100 - 100 - COST
+    path = df[df.Date > dt_ts + pd.Timedelta(hours=15)]
+    if path.empty: return None, None
+    
+    unique_days = path.Day.unique()
+    t2_day = unique_days[1] if len(unique_days) >= 2 else None
+    
+    if t2_day is not None:
+        path = path[path.Day <= t2_day]
+        
+    tgt = entry * 1.03
+    for _, b in path.iterrows():
+        if b.High > tgt:
+            px = max(b.Open, tgt) if b.Open > tgt else tgt
+            return b.Date, px / entry * 100 - 100 - COST
+            
+    if t2_day is not None:
+        b = path.iloc[-1] # Close of T+2 session
+        return b.Date, b.Close / entry * 100 - 100 - COST
+        
     return None, None # Still open
 
 def load_preview_logs():
     files = sorted(glob.glob(os.path.join(UP, 'btst_preview_log_*.jsonl')))
     sigs = []
+    excluded_signals = 0
     for f in files:
         dt = f.split('_')[-1].replace('.jsonl', '')
         if dt > '2026-10-09': continue
@@ -88,25 +95,37 @@ def load_preview_logs():
                     last_data = data
                     
         if last_data and 'top20' in last_data:
-            # Get the day's close price for entry
+            price_map = {}
+            if 'diagnostics' in last_data and 'signals' in last_data['diagnostics']:
+                for sig_info in last_data['diagnostics']['signals']:
+                    if 'symbol' in sig_info and 'ohlcv' in sig_info and 'price' in sig_info['ohlcv']:
+                        price_map[sig_info['symbol']] = sig_info['ohlcv']['price']
+                        
+            # Get the day's close price for entry if available
             for r in last_data['top20']:
                 sym = r[0]
                 score = r[1]
                 
                 if score > 0:
-                    df = bars(sym)
-                    if df.empty: continue
-                    dt_ts = pd.Timestamp(dt).normalize()
-                    path = df[df.Day == dt_ts]
-                    if not path.empty:
-                        px = path.iloc[-1].Close
+                    px = None
+                    if len(r) > 2 and r[2] is not None:
+                        px = r[2]
+                    elif sym in price_map:
+                        px = price_map[sym]
+                        
+                    if px is not None:
+                        df = bars(sym)
+                        if df.empty: continue
                         sigs.append({
                             'symbol': sym,
                             'day': dt,
                             'score': score,
                             'price': px
                         })
+                    else:
+                        excluded_signals += 1
                         
+    print(f"Coverage Limitation: Excluded {excluded_signals} signals due to missing contemporaneous prices (lookahead bias prevented).")
     # Group by day, sort by score desc
     daily_sigs = {}
     for s in sigs:
