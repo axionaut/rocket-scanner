@@ -34,10 +34,10 @@ def load_data():
 def match_fifo(df):
     completed_trades = []
     open_positions = {}
+    unreconciled_opening_sells = []
 
     for symbol, group in df.groupby('symbol', sort=False):
         long_inventory = deque()
-        short_inventory = deque()
 
         for _, row in group.iterrows():
             ttype = row['trade_type']
@@ -52,47 +52,14 @@ def match_fifo(df):
                 continue
 
             if ttype == 'buy':
-                rem_qty = qty
-                while rem_qty > 1e-6 and short_inventory:
-                    short_lot = short_inventory[0]
-                    matched_qty = min(rem_qty, short_lot['qty'])
-                    entry_val = matched_qty * short_lot['price']
-                    exit_val = matched_qty * price
-                    turnover = entry_val + exit_val
-                    charges = turnover * 0.001 + turnover * 0.0000325 + exit_val * 0.00015 + turnover * 0.000001 + 15.93
-                    charges += (turnover * 0.0000325 + turnover * 0.000001 + 15.93) * 0.18
-                    
-                    pnl = entry_val - exit_val - charges
-                    pnl_pct = (pnl / entry_val) * 100.0
-                    completed_trades.append({
-                        'symbol': symbol,
-                        'side': 'SHORT',
-                        'entry_date': short_lot['date'],
-                        'entry_time': short_lot['time'],
-                        'entry_price': short_lot['price'],
-                        'exit_date': tdate,
-                        'exit_time': etime,
-                        'exit_price': price,
-                        'quantity': matched_qty,
-                        'entry_value': entry_val,
-                        'exit_value': exit_val,
-                        'pnl': pnl,
-                        'pnl_pct': pnl_pct,
-                    })
-                    short_lot['qty'] -= matched_qty
-                    rem_qty -= matched_qty
-                    if short_lot['qty'] < 1e-6:
-                        short_inventory.popleft()
-
-                if rem_qty > 1e-6:
-                    long_inventory.append({
-                        'qty': rem_qty,
-                        'price': price,
-                        'date': tdate,
-                        'time': etime,
-                        'order_id': order_id,
-                        'trade_id': trade_id
-                    })
+                long_inventory.append({
+                    'qty': qty,
+                    'price': price,
+                    'date': tdate,
+                    'time': etime,
+                    'order_id': order_id,
+                    'trade_id': trade_id
+                })
 
             elif ttype == 'sell':
                 rem_qty = qty
@@ -128,13 +95,14 @@ def match_fifo(df):
                     rem_qty -= matched_qty
                     if long_lot['qty'] < 1e-6:
                         long_inventory.popleft()
-
+                        
                 if rem_qty > 1e-6:
-                    short_inventory.append({
-                        'qty': rem_qty,
-                        'price': price,
+                    unreconciled_opening_sells.append({
+                        'symbol': symbol,
                         'date': tdate,
                         'time': etime,
+                        'price': price,
+                        'unmatched_qty': rem_qty,
                         'order_id': order_id,
                         'trade_id': trade_id
                     })
@@ -144,7 +112,8 @@ def match_fifo(df):
             open_positions[symbol] = [{'qty': x['qty'], 'price': x['price'], 'date': x['date']} for x in long_inventory]
 
     trades_df = pd.DataFrame(completed_trades)
-    return trades_df, open_positions
+    unreconciled_df = pd.DataFrame(unreconciled_opening_sells)
+    return trades_df, open_positions, unreconciled_df
 
 def analyze_daily(trades_df):
     trades_df['entry_dt'] = pd.to_datetime(trades_df['entry_date'])
@@ -261,7 +230,10 @@ def correlate_extension(trades_df, store):
 def main():
     print("Loading Tradebook and Daily Bars...")
     df, store = load_data()
-    trades_df, open_pos = match_fifo(df)
+    trades_df, open_pos, unreconciled_df = match_fifo(df)
+    
+    print(f"Found {len(unreconciled_df)} unreconciled opening sells (inherited inventory sold).")
+    
     daily_df, trades_df = analyze_daily(trades_df)
     
     # Calculate open positions summary
