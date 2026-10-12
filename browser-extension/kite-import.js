@@ -30,7 +30,36 @@ function rocketKiteRefresh(basket,refreshOpen=false){
   }catch(e){}
 }
 
+// Scoped on self.__rocketKite so re-injection into Kite's page context (world: 'MAIN')
+// never causes SyntaxError or identifier collisions.
+self.__rocketKite = self.__rocketKite || {};
+
+self.__rocketKite.unpackBaskets = function(res){
+  if (Array.isArray(res)) return res;
+  if (Array.isArray(res?.data)) return res.data;
+  if (Array.isArray(res?.data?.data)) return res.data.data;
+  return null;
+};
+
+self.__rocketKite.extractBasketId = function(res){
+  const candidates = [
+    res?.data?.data?.id,
+    res?.data?.id,
+    res?.id,
+    res?.data?.data,
+    res?.data,
+    res
+  ];
+  for (const c of candidates) {
+    if (typeof c === 'string' && c.trim().length > 0) return c.trim();
+    if (typeof c === 'number' && Number.isFinite(c)) return c;
+  }
+  return null;
+};
+
 async function rocketKiteImport(orders,createdAt,openElsewhere=false,side='BUY'){
+
+
   const sell=side==='SELL';
   const cleanup=side==='CLEANUP_BUY';
   const NAME=sell?ROCKET_BASKET.SELL:ROCKET_BASKET.BUY;
@@ -135,19 +164,23 @@ async function rocketKiteImport(orders,createdAt,openElsewhere=false,side='BUY')
       api={
         async getBaskets(){
           const r=await fetch('/oms/orders/baskets',{credentials:'include',headers:{'Accept':'application/json','X-Kite-Version':'3'}});
-          return {data:await r.json()};
+          if(!r.ok) throw new Error(`OMS getBaskets failed with HTTP ${r.status}`);
+          return await r.json();
         },
         async createBasket({name}){
           const r=await fetch('/oms/orders/baskets',{method:'POST',credentials:'include',headers,body:JSON.stringify({name})});
-          return {data:await r.json()};
+          if(!r.ok) throw new Error(`OMS createBasket failed with HTTP ${r.status}`);
+          return await r.json();
         },
         async addBasketItem(basketId,item){
           const r=await fetch(`/oms/orders/baskets/${basketId}/items`,{method:'POST',credentials:'include',headers,body:JSON.stringify(item)});
-          return {data:await r.json()};
+          if(!r.ok) throw new Error(`OMS addBasketItem failed with HTTP ${r.status}`);
+          return await r.json();
         },
         async removeBasketItem(basketId,itemId){
           const r=await fetch(`/oms/orders/baskets/${basketId}/items/${itemId}`,{method:'DELETE',credentials:'include',headers:{'Accept':'application/json','X-Kite-Version':'3'}});
-          return {data:await r.json()};
+          if(!r.ok) throw new Error(`OMS removeBasketItem failed with HTTP ${r.status}`);
+          return await r.json();
         }
       };
     }
@@ -160,8 +193,15 @@ async function rocketKiteImport(orders,createdAt,openElsewhere=false,side='BUY')
   if(window.__rocketImportBusy) return fail('A Kite basket transfer is still running. Wait for it to finish.');
   window.__rocketImportBusy=true;
   try{
-    const all=(await api.getBaskets())?.data?.data;
-    if(!Array.isArray(all)) return fail('Kite did not return your baskets. Reload Kite and retry.');
+    const basketsRes=await api.getBaskets();
+    const unpackBaskets=self.__rocketKite.unpackBaskets;
+    const extractBasketId=self.__rocketKite.extractBasketId;
+    const all=unpackBaskets(basketsRes);
+    if(!Array.isArray(all)){
+      let shape='unknown';
+      try{ shape=JSON.stringify(basketsRes).slice(0,200); }catch(e){ shape=String(basketsRes).slice(0,200); }
+      return fail(`Kite did not return your baskets. Reload Kite and retry. (response shape: ${shape})`);
+    }
     const named=all.filter(b=>b?.name===NAME);
     if(named.length>1) return fail(`Kite has more than one ${NAME} basket. Delete the extra one.`);
     let basket=named[0];
@@ -174,7 +214,7 @@ async function rocketKiteImport(orders,createdAt,openElsewhere=false,side='BUY')
           await api.removeBasketItem(basket.id,item.id); removed++;
         }
       }
-      const fresh=((await api.getBaskets())?.data?.data||[]).find(b=>b?.id===basket.id);
+      const fresh=(unpackBaskets(await api.getBaskets())||[]).find(b=>b?.id===basket.id);
       if(!fresh) return fail('Filled-stock cleanup could not be verified.');
       if((fresh.items||[]).some(i=>{const p=typeof i.params==='string'?JSON.parse(i.params):i.params;return symbols.has(i.tradingsymbol)&&i.exchange==='NSE'&&p?.product==='CNC'&&(p.transaction_type??p.transactionType)==='BUY';})) return fail('Filled stock is still in Scanner_Buy; cleanup will retry.');
       rocketKiteRefresh(fresh,true);
@@ -185,9 +225,31 @@ async function rocketKiteImport(orders,createdAt,openElsewhere=false,side='BUY')
     // Never change a basket the owner has open: Kite executes the items shown on screen.
     if(basket?.items?.length&&(openElsewhere||rocketKiteBasketOpen(NAME))) return fail(`${NAME} is open in Kite with different orders. Close it; the new basket is written on the next retry.`);
     if(!basket){
-      const id=(await api.createBasket({name:NAME}))?.data?.data;
-      if(!id) return fail(`Kite did not create the ${NAME} basket.`);
-      basket={id,name:NAME,items:[]};
+      let createRes=null;
+      try{
+        createRes=await api.createBasket({name:NAME});
+      }catch(err){
+        // Network or HTTP error during create: backend might still have succeeded
+      }
+      let id=extractBasketId(createRes);
+      if(id==null){
+        // Immediate reconciliation check
+        const postCheck=(unpackBaskets(await api.getBaskets())||[]).filter(b=>b?.name===NAME);
+        if(postCheck.length>1) return fail(`Kite has more than one ${NAME} basket after creation. Delete the extra one.`);
+        if(postCheck.length===1){
+          const recId=extractBasketId(postCheck[0]);
+          if(recId!=null){
+            basket=postCheck[0];
+            id=recId;
+          }
+        }
+      }
+      if(id==null) return fail(`Kite did not create the ${NAME} basket (unverified response ID).`);
+      if(!basket) basket={id,name:NAME,items:[]};
+
+      // If a recovered basket already matches desired orders, return success
+      if(basket.items?.length&&signature(basket.items)===want) return {ok:true,count:orders.length,already:true,basket};
+      if(basket.items?.length&&(openElsewhere||rocketKiteBasketOpen(NAME))) return fail(`${NAME} is open in Kite with different orders. Close it; the new basket is written on the next retry.`);
     }
     const replaced=basket.items?.length||0;
     for(const item of basket.items||[]) await api.removeBasketItem(basket.id,item.id);
@@ -195,11 +257,15 @@ async function rocketKiteImport(orders,createdAt,openElsewhere=false,side='BUY')
       const p=o.params;
       await api.addBasketItem(basket.id,{tradingsymbol:o.instrument.tradingsymbol,exchange:o.instrument.exchange,weight,params:JSON.stringify({transaction_type:p.transactionType,product:p.product,order_type:p.orderType,validity:p.validity,validity_ttl:p.validityTTL,variety:p.variety,quantity:p.quantity,price:p.price,trigger_price:p.triggerPrice,disclosed_quantity:p.disclosedQuantity,...(p.gtt?{gtt:p.gtt}:{}),tags:Array.isArray(p.tags)?p.tags:[]})});
     }
-    const fresh=((await api.getBaskets())?.data?.data||[]).find(b=>b?.id===basket.id);
+    const fresh=(unpackBaskets(await api.getBaskets())||[]).find(b=>b?.id===basket.id);
     if(!fresh||signature(fresh.items)!==want) return fail(`Kite did not confirm every item. Inspect ${NAME} before retrying. No orders were executed.`);
     rocketKiteRefresh(fresh);
     return {ok:true,count:orders.length,replaced,basket:fresh};
-  }catch(e){return fail('Kite rejected the basket update ('+(e?.response?.data?.message||e?.message||'unknown error')+`). Inspect ${NAME} before retrying. No orders were executed.`);}
-  finally{window.__rocketImportBusy=false;}
+  }catch(e){
+    return fail('Kite rejected the basket update ('+(e?.response?.data?.message||e?.message||'unknown error')+`). Inspect ${NAME} before retrying. No orders were executed.`);
+  }finally{
+    window.__rocketImportBusy=false;
+  }
 }
-if(typeof module!=='undefined') module.exports={rocketKiteImport,rocketKiteBasketOpen,rocketKiteRefresh,ROCKET_BASKET};
+
+if(typeof module!=='undefined') module.exports={rocketKiteImport,rocketKiteBasketOpen,rocketKiteRefresh,ROCKET_BASKET,unpackBaskets:self.__rocketKite.unpackBaskets,extractBasketId:self.__rocketKite.extractBasketId};
