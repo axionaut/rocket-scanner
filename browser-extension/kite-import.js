@@ -54,32 +54,102 @@ async function rocketKiteImport(orders,createdAt,openElsewhere=false,side='BUY')
     if(!ok) return fail(sell?'Invalid CNC sell order. Nothing was written.':'Invalid funded CNC buy order. Nothing was imported.');
     symbols.add(s);
   }
-  // Kite's basket API module, found by its own route name rather than a build-specific module id.
+  // Kite's basket API module, found across webpack layouts, Vue instances, or direct OMS fallback.
   let api=window.__rocketBasketApi;
   if(!api){
-    // 1.6.0 (9 Oct): Kite's build changed and the 1.5 lookup (webpackChunkkite, "baskets.items.add", export .Z)
-    // stopped matching. Search every webpack chunk global, any module mentioning baskets, and every export
-    // object for the four basket methods; report which step failed so the next change is diagnosable.
-    const NEED=['getBaskets','createBasket','addBasketItem','removeBasketItem'];
-    const hasApi=z=>z&&NEED.every(k=>typeof z[k]==='function');
+    const hasApi=z=>{
+      if(!z) return false;
+      const getB=typeof z.getBaskets==='function';
+      const createB=typeof z.createBasket==='function';
+      const addB=typeof z.addBasketItem==='function'||typeof z.addItem==='function';
+      const delB=typeof z.removeBasketItem==='function'||typeof z.deleteBasketItem==='function';
+      return getB&&createB&&addB&&delB;
+    };
+    const normalizeApi=z=>{
+      if(!z) return null;
+      if(!z.removeBasketItem&&typeof z.deleteBasketItem==='function') z.removeBasketItem=z.deleteBasketItem.bind(z);
+      if(!z.addBasketItem&&typeof z.addItem==='function') z.addBasketItem=z.addItem.bind(z);
+      return z;
+    };
+    const inspectCandidate=target=>{
+      if(!target) return null;
+      const pool=[target,target?.default,target?.Z,...(typeof target==='object'?Object.values(target):[])];
+      for(const obj of pool){
+        if(!obj) continue;
+        if(hasApi(obj)) return normalizeApi(obj);
+        if(obj.prototype&&hasApi(obj.prototype)){
+          try{ return normalizeApi(new obj()); }catch(e){ return normalizeApi(obj.prototype); }
+        }
+      }
+      return null;
+    };
+
     const chunks=Object.keys(self).filter(k=>/^webpackChunk/.test(k)&&typeof self[k]?.push==='function');
     let modules=0,candidates=0;
     for(const g of chunks){
       let req=null;
       try{ self[g].push([[`rocket-${Date.now()}-${Math.random()}`],{},r=>{req=r;}]); }catch(e){}
-      const ids=Object.keys(req?.m||{});modules+=ids.length;
+      if(!req) continue;
+      // 1. Inspect already-instantiated module exports in cache
+      for(const id of Object.keys(req.c||{})){
+        const found=inspectCandidate(req.c[id]?.exports);
+        if(found){ api=found; break; }
+      }
+      if(api) break;
+      // 2. Scan module source definitions
+      const ids=Object.keys(req.m||{}); modules+=ids.length;
       for(const id of ids){
         let src='';
         try{ src=Function.prototype.toString.call(req.m[id]); }catch(e){ continue; }
-        if(!src.includes('"baskets.items.add"')) continue;
+        if(!/(getBaskets|createBasket|addBasketItem|removeBasketItem|deleteBasketItem|baskets\.items|baskets)/i.test(src)) continue;
         candidates++;
         try{
           const ex=req(id);
-          const found=[ex,ex?.default,ex?.Z,...Object.values(ex||{})].find(hasApi);
+          const found=inspectCandidate(ex);
           if(found){ api=found; break; }
         }catch(e){}
       }
       if(api) break;
+      // 3. Fallback: inspect any module export
+      for(const id of ids){
+        try{
+          const ex=req(id);
+          const found=inspectCandidate(ex);
+          if(found){ api=found; break; }
+        }catch(e){}
+      }
+      if(api) break;
+    }
+    // 4. Inspect Vue components
+    if(!api){
+      for(const el of document.querySelectorAll('*')){
+        const v=el.__vue__;
+        if(!v) continue;
+        const found=inspectCandidate(v.$api)||inspectCandidate(v.$services)||inspectCandidate(v.$http)||inspectCandidate(v.basketApi);
+        if(found){ api=found; break; }
+      }
+    }
+    // 5. Direct OMS API client fallback within Kite's authenticated session
+    if(!api&&location.origin==='https://kite.zerodha.com'){
+      const headers={'Accept':'application/json','Content-Type':'application/json','X-Kite-Version':'3'};
+      api={
+        async getBaskets(){
+          const r=await fetch('/oms/orders/baskets',{credentials:'include',headers:{'Accept':'application/json','X-Kite-Version':'3'}});
+          return {data:await r.json()};
+        },
+        async createBasket({name}){
+          const r=await fetch('/oms/orders/baskets',{method:'POST',credentials:'include',headers,body:JSON.stringify({name})});
+          return {data:await r.json()};
+        },
+        async addBasketItem(basketId,item){
+          const r=await fetch(`/oms/orders/baskets/${basketId}/items`,{method:'POST',credentials:'include',headers,body:JSON.stringify(item)});
+          return {data:await r.json()};
+        },
+        async removeBasketItem(basketId,itemId){
+          const r=await fetch(`/oms/orders/baskets/${basketId}/items/${itemId}`,{method:'DELETE',credentials:'include',headers:{'Accept':'application/json','X-Kite-Version':'3'}});
+          return {data:await r.json()};
+        }
+      };
     }
     if(!api) return fail(`This Kite version has no compatible basket API (webpack globals ${chunks.length}, modules ${modules}, basket modules ${candidates}). Reload Kite; otherwise use the JSON file.`);
     window.__rocketBasketApi=api;

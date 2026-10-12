@@ -14975,10 +14975,18 @@ function scheduleKiteBasketSync(delay=500){
 }
 // Every Kite basket outcome goes to the phone through the helper's ntfy push: the basket-file alert alone
 // cannot say whether Scanner_Buy was actually updated. The helper de-duplicates repeats.
-let _kiteLastReported='';
+let _kiteLastReported='',_kiteLastFailReported='',_kiteLastFailTime=0;
 function reportKiteBasketOutcome(ok,message){
   const key=(ok?'1':'0')+message;
   if(key===_kiteLastReported) return;
+  if(!ok){
+    const now=Date.now();
+    if(message===_kiteLastFailReported && now - _kiteLastFailTime < 900000) return;
+    _kiteLastFailReported=message;
+    _kiteLastFailTime=now;
+  } else {
+    _kiteLastFailReported='';
+  }
   _kiteLastReported=key;
   readHelperResponse(`/api/notify/kite?ok=${ok?1:0}&msg=${encodeURIComponent(String(message).slice(0,400))}`,{timeout:6000}).catch(()=>{});
 }
@@ -15012,6 +15020,10 @@ async function syncSellBasketToKite(){
   if(!Array.isArray(list)) return;
   const sig=list.map(o=>o?.instrument?.tradingsymbol+':'+o?.params?.quantity+'@'+(o?.params?.price||0)).sort().join('|');
   if(sig===_kiteSellSent) return;
+  if(!list.length && _kiteSellSent === null){
+    _kiteSellSent = sig;
+    return;
+  }
   _kiteSellBusy=true;
   try{
     const r=await kiteBridgeRequest(list,'SELL');
@@ -15027,6 +15039,7 @@ async function syncSellBasketToKite(){
     if(msg.includes('already running')){
       setTimeout(syncSellBasketToKite, 3000);
     } else {
+      if(!list.length) _kiteSellSent = sig;
       reportKiteBasketOutcome(false,'Scanner_Sell: '+msg);
     }
   }finally{_kiteSellBusy=false;}
