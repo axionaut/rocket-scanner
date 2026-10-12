@@ -1,3 +1,4 @@
+(() => {
 'use strict';
 // Runs in Kite's page and calls Kite's own basket API client, the same calls its basket screen makes.
 // The basket does not need to be open. No credentials are read and no order API is called.
@@ -30,8 +31,8 @@ function rocketKiteRefresh(basket,refreshOpen=false){
   }catch(e){}
 }
 
-// Scoped on self.__rocketKite so re-injection into Kite's page context (world: 'MAIN')
-// never causes SyntaxError or identifier collisions.
+// Internal helpers and all declarations stay inside this closure. The background
+// worker invokes only the explicitly exported window properties below.
 self.__rocketKite = self.__rocketKite || {};
 
 self.__rocketKite.unpackBaskets = function(res){
@@ -268,4 +269,7 @@ async function rocketKiteImport(orders,createdAt,openElsewhere=false,side='BUY')
   }
 }
 
+Object.assign(self, {rocketKiteImport, rocketKiteBasketOpen, rocketKiteRefresh});
+self.__rocketKite.build = '1.6.3';
 if(typeof module!=='undefined') module.exports={rocketKiteImport,rocketKiteBasketOpen,rocketKiteRefresh,ROCKET_BASKET,unpackBaskets:self.__rocketKite.unpackBaskets,extractBasketId:self.__rocketKite.extractBasketId};
+})();
