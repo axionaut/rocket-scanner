@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Rocket Scanner — Kite Basket Bridge",
-  "version": "1.6.3",
+  "version": "1.6.4",
   "description": "Write funded Rocket Scanner buys into Scanner_Buy and profit-lock sells into Scanner_Sell in Kite. Never executes orders.",
   "permissions": [
     "scripting"

@@ -159,33 +159,9 @@ async function rocketKiteImport(orders,createdAt,openElsewhere=false,side='BUY')
         if(found){ api=found; break; }
       }
     }
-    // 5. Direct OMS API client fallback within Kite's authenticated session
-    if(!api&&location.origin==='https://kite.zerodha.com'){
-      const headers={'Accept':'application/json','Content-Type':'application/json','X-Kite-Version':'3'};
-      api={
-        async getBaskets(){
-          const r=await fetch('/oms/orders/baskets',{credentials:'include',headers:{'Accept':'application/json','X-Kite-Version':'3'}});
-          if(!r.ok) throw new Error(`OMS getBaskets failed with HTTP ${r.status}`);
-          return await r.json();
-        },
-        async createBasket({name}){
-          const r=await fetch('/oms/orders/baskets',{method:'POST',credentials:'include',headers,body:JSON.stringify({name})});
-          if(!r.ok) throw new Error(`OMS createBasket failed with HTTP ${r.status}`);
-          return await r.json();
-        },
-        async addBasketItem(basketId,item){
-          const r=await fetch(`/oms/orders/baskets/${basketId}/items`,{method:'POST',credentials:'include',headers,body:JSON.stringify(item)});
-          if(!r.ok) throw new Error(`OMS addBasketItem failed with HTTP ${r.status}`);
-          return await r.json();
-        },
-        async removeBasketItem(basketId,itemId){
-          const r=await fetch(`/oms/orders/baskets/${basketId}/items/${itemId}`,{method:'DELETE',credentials:'include',headers:{'Accept':'application/json','X-Kite-Version':'3'}});
-          if(!r.ok) throw new Error(`OMS removeBasketItem failed with HTTP ${r.status}`);
-          return await r.json();
-        }
-      };
-    }
-    if(!api) return fail(`This Kite version has no compatible basket API (webpack globals ${chunks.length}, modules ${modules}, basket modules ${candidates}). Reload Kite; otherwise use the JSON file.`);
+    // Unsupported OMS routes can return HTTP 400 even in a valid Kite session.
+    // Use only Kite's own authenticated client; never guess broker endpoints.
+    if(!api) return fail(`Kite's basket client is not loaded. Open Orders > Baskets in Kite once, then retry. If it still fails, reload Kite and the Kite Basket Bridge. (${chunks.length} webpack globals, ${modules} modules, ${candidates} basket candidates)`);
     window.__rocketBasketApi=api;
   }
   const key=(symbol,exchange,p={})=>JSON.stringify([symbol,exchange,p.transactionType??p.transaction_type,p.product,p.orderType??p.order_type,p.validity,p.variety,Number(p.quantity),Number(p.price||0),Number((p.triggerPrice??p.trigger_price)||0),Number((p.disclosedQuantity??p.disclosed_quantity)||0),Number(p.gtt?.target||0),Number(p.gtt?.stoploss||0)]);
@@ -259,17 +235,17 @@ async function rocketKiteImport(orders,createdAt,openElsewhere=false,side='BUY')
       await api.addBasketItem(basket.id,{tradingsymbol:o.instrument.tradingsymbol,exchange:o.instrument.exchange,weight,params:JSON.stringify({transaction_type:p.transactionType,product:p.product,order_type:p.orderType,validity:p.validity,validity_ttl:p.validityTTL,variety:p.variety,quantity:p.quantity,price:p.price,trigger_price:p.triggerPrice,disclosed_quantity:p.disclosedQuantity,...(p.gtt?{gtt:p.gtt}:{}),tags:Array.isArray(p.tags)?p.tags:[]})});
     }
     const fresh=(unpackBaskets(await api.getBaskets())||[]).find(b=>b?.id===basket.id);
-    if(!fresh||signature(fresh.items)!==want) return fail(`Kite did not confirm every item. Inspect ${NAME} before retrying. No orders were executed.`);
+    if(!fresh||signature(fresh.items)!==want) return fail(`Kite did not confirm every item. Inspect ${NAME} before retrying. This basket operation did not place any orders.`);
     rocketKiteRefresh(fresh);
     return {ok:true,count:orders.length,replaced,basket:fresh};
   }catch(e){
-    return fail('Kite rejected the basket update ('+(e?.response?.data?.message||e?.message||'unknown error')+`). Inspect ${NAME} before retrying. No orders were executed.`);
+    return fail((cleanup?'The buy is already filled; only basket cleanup failed (':'Kite rejected the basket update (')+(e?.response?.data?.message||e?.message||'unknown error')+`). Inspect ${NAME} before retrying. This basket operation did not place any orders.`);
   }finally{
     window.__rocketImportBusy=false;
   }
 }
 
 Object.assign(self, {rocketKiteImport, rocketKiteBasketOpen, rocketKiteRefresh});
-self.__rocketKite.build = '1.6.3';
+self.__rocketKite.build = '1.6.4';
 if(typeof module!=='undefined') module.exports={rocketKiteImport,rocketKiteBasketOpen,rocketKiteRefresh,ROCKET_BASKET,unpackBaskets:self.__rocketKite.unpackBaskets,extractBasketId:self.__rocketKite.extractBasketId};
 })();
