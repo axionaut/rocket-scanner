@@ -246,6 +246,6 @@ async function rocketKiteImport(orders,createdAt,openElsewhere=false,side='BUY')
 }
 
 Object.assign(self, {rocketKiteImport, rocketKiteBasketOpen, rocketKiteRefresh});
-self.__rocketKite.build = '1.6.4';
+self.__rocketKite.build = '1.6.5';
 if(typeof module!=='undefined') module.exports={rocketKiteImport,rocketKiteBasketOpen,rocketKiteRefresh,ROCKET_BASKET,unpackBaskets:self.__rocketKite.unpackBaskets,extractBasketId:self.__rocketKite.extractBasketId};
 })();
