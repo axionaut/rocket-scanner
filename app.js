@@ -1,5 +1,5 @@
 const BUILD_TS='2026-10-09 IST'; // release build date (IST)
-const APP_VERSION=1494;
+const APP_VERSION=1495;
 const RADAR_SCORE_VERSION='v1419-recross-batches'; // Eligible on crossing the score floor at any time; selected model's evolving target and movement-based profit protection.
 
 // ── v1358: AN UNCAUGHT ERROR MUST NAME ITSELF ─────────────────────────────────────────────────
@@ -7056,6 +7056,8 @@ function enrichExitPnlRow(row,bookedDate=null){
   const ext=getPostSellExtremes(row?.sym,bookedDate,row?.sellTime);
   out.postSellHigh=ext.high!=null?+ext.high.toFixed(2):null;
   out.postSellLow=ext.low!=null?+ext.low.toFixed(2):null;
+  out.referenceHighNote=`Post-sell high used for the upside comparison after ${bookedDate||'unknown sell date'}${row?.sellTime?` ${String(row.sellTime).slice(11,16)}`:''}${ext.to?` through ${ext.to}`:''}. ${ext.exact?'Observed post-exit window.':'Upper bound: part of the range may predate the exit.'}${ext.sellDayNote?` ${ext.sellDayNote}.`:''} A negative Left on Table value uses the post-sell low instead.`;
+  out.referenceHighPerFill=false;
   out.leftOnTableExact=ext.exact;
   out.leftOnTableSessions=ext.sessions;
   out.sellDayNote=ext.sellDayNote||null;
@@ -7100,11 +7102,12 @@ function enrichExitPnlRow(row,bookedDate=null){
           sl[i].rq+=u;sl[i].reentry+=u*Math.max(0,b.price-sl[i].price);q-=u;
         }
       }
-      let rs=0,proceeds=0;const parts=[];
+      let rs=0,proceeds=0;const parts=[],referenceHighs=[];
       for(const x of sl){
         const q=x.qty-x.rq;let tail=0;
         if(q>0){
           const e=getPostSellExtremes(row?.sym,bookedDate,x.time);
+          if(e?.high!=null) referenceHighs.push(e.high);
           if(e?.high!=null&&e.high>x.price) tail=(e.high-x.price)*q;
         }
         rs+=x.reentry+tail;proceeds+=x.qty*x.price;
@@ -7115,6 +7118,9 @@ function enrichExitPnlRow(row,bookedDate=null){
       out.leftOnTableRs=+rs.toFixed(0);
       out.leftOnTablePct=proceeds>0?+(rs/proceeds*100).toFixed(2):null;
       out.leftOnTableNote=`Several trades today, so each sell is charged only what it cost you: ${parts.join('; ')}. Total ${fmtINR(out.leftOnTableRs)}.`;
+      out.referenceHighPerFill=true;
+      out.referenceHighLabel=referenceHighs.length?[...new Set(referenceHighs.map(h=>Number(h).toLocaleString('en-IN',INR_2)))].join(' / '):'Unobserved';
+      out.referenceHighNote=out.leftOnTableNote+' Each unreentered sell uses its own post-exit high; bought-back shares use the reentry premium. There is no single reference high for this row.';
       return out;
     }
     out.leftOnTableNote=out.leftOnTableRs>0
@@ -7767,7 +7773,7 @@ async function syncFilledBuyBasketToKite(){
     if(msg.includes('already running')){
       setTimeout(syncFilledBuyBasketToKite, 3000);
     } else {
-      reportKiteBasketOutcome(false,'Filled buy still needs basket cleanup: '+msg);
+      reportKiteBasketOutcome(false,'Filled buy still needs basket cleanup: '+msg,'CLEANUP_BUY');
     }
   }finally{_kiteTransferBusy=false;}
 }
@@ -8894,7 +8900,7 @@ function buildLatestSessionPanel(query=''){
       {key:'capital',label:'Invested ₹',align:'right',fmt:v=>v!=null?fmtINR(v):'—',clrFn:()=>'var(--t1)',totFmt:v=>v!=null?fmtINR(v):'—',totClrFn:()=>'var(--t1)'},
       {key:'sellPrice',label:'Sell ₹',align:'right',fmt:v=>Number(v).toLocaleString('en-IN',INR_2),clrFn:()=>'var(--t2)',..._dash},
       {key:'priceDiff',label:'Diff ₹',align:'right',fmt:v=>v!=null?fmtSignedINR(v).replace('₹','₹/sh '):'—',clrFn:v=>v!=null?clr(v):'var(--t3)',..._dash},
-      {key:'currentPrice',label:'Now ₹',align:'right',fmt:v=>v!=null?Number(v).toLocaleString('en-IN',INR_2):'—',clrFn:()=>'var(--t2)',..._dash},
+      {key:'postSellHigh',label:'Reference High ₹',align:'right',fmt:(v,r)=>`<span title="${escHtml(r.referenceHighNote||'No observed post-sell high.')}"${v==null?' style="color:var(--t3)"':''}>${r.referenceHighPerFill?(r.referenceHighLabel||'Per-fill'):v!=null?Number(v).toLocaleString('en-IN',INR_2):'—'}</span>`,clrFn:()=>'var(--t2)',..._dash},
       ..._leftCols(_leftTot,_leftPctTot),
       {key:'charges',label:'Total Charges',align:'right',bold:true,
        fmt:(v,r)=>{
@@ -8963,7 +8969,7 @@ function buildLatestSessionPanel(query=''){
       {key:'capital',label:'Invested ₹',align:'right',fmt:v=>v!=null?fmtINR(v):'—',clrFn:()=>'var(--t1)',totFmt:v=>v!=null?fmtINR(v):'—',totClrFn:()=>'var(--t1)'},
       {key:'sellPrice',label:'Sell ₹',align:'right',fmt:v=>`<span style="font-family:'DM Mono',monospace">${Number(v).toLocaleString('en-IN',INR_2)}</span>`,..._dash},
       {key:'priceDiff',label:'Diff ₹',align:'right',fmt:v=>v!=null?fmtSignedINR(v).replace('₹','₹/sh '):'—',clrFn:v=>v!=null?clr(v):'var(--t3)',..._dash},
-      {key:'currentPrice',label:'Now ₹',align:'right',fmt:v=>v!=null?Number(v).toLocaleString('en-IN',INR_2):'—',clrFn:()=>'var(--t2)',..._dash},
+      {key:'postSellHigh',label:'Reference High ₹',align:'right',fmt:(v,r)=>`<span title="${escHtml(r.referenceHighNote||'No observed post-sell high.')}"${v==null?' style="color:var(--t3)"':''}>${r.referenceHighPerFill?(r.referenceHighLabel||'Per-fill'):v!=null?Number(v).toLocaleString('en-IN',INR_2):'—'}</span>`,clrFn:()=>'var(--t2)',..._dash},
       ..._leftCols(_leftTot,_leftPctTot),
       {key:'charges',label:'Charges ₹',align:'right',bold:true,fmt:fmtNegINR,clrFn:()=>'var(--red)',totFmt:v=>fmtNegINR(v),totClrFn:()=>'var(--red)'},
       {key:'grossPnl',label:'Gross P&L',align:'right',bold:true,fmt:v=>v!=null?fmtPerfRs(v):'—',clrFn:v=>v!=null?clr(v):'var(--t3)',..._signTot},
@@ -14976,19 +14982,22 @@ function scheduleKiteBasketSync(delay=500){
 // Every Kite basket outcome goes to the phone through the helper's ntfy push: the basket-file alert alone
 // cannot say whether Scanner_Buy was actually updated. The helper de-duplicates repeats.
 let _kiteLastReported='',_kiteLastFailReported='',_kiteLastFailTime=0;
-function reportKiteBasketOutcome(ok,message){
-  const key=(ok?'1':'0')+message;
+function kiteBuyPlanSignature(orders){
+  return JSON.stringify((orders||[]).map(o=>{const p=o.params||{};return [String(o.instrument?.tradingsymbol||o.tradingsymbol||'').toUpperCase(),Number(p.quantity)||0,Number(p.price)||0,Number(p.gtt?.target)||0,p.orderType||'',p.product||''];}).sort((a,b)=>JSON.stringify(a).localeCompare(JSON.stringify(b))));
+}
+function reportKiteBasketOutcome(ok,message,side='BUY',plan=''){
+  const key=(ok?'1':'0')+side+plan+message;
   if(key===_kiteLastReported) return;
   if(!ok){
     const now=Date.now();
-    if(message===_kiteLastFailReported && now - _kiteLastFailTime < 900000) return;
-    _kiteLastFailReported=message;
+    if(key===_kiteLastFailReported && now - _kiteLastFailTime < 900000) return;
+    _kiteLastFailReported=key;
     _kiteLastFailTime=now;
   } else {
     _kiteLastFailReported='';
   }
   _kiteLastReported=key;
-  readHelperResponse(`/api/notify/kite?ok=${ok?1:0}&msg=${encodeURIComponent(String(message).slice(0,400))}`,{timeout:6000}).catch(()=>{});
+  readHelperResponse(`/api/notify/kite?ok=${ok?1:0}&side=${side}&plan=${encodeURIComponent(plan)}&msg=${encodeURIComponent(String(message).slice(0,400))}`,{timeout:6000}).catch(()=>{});
 }
 // One round trip to the Kite Basket Bridge extension. BUY -> Scanner_Buy, SELL -> Scanner_Sell.
 function kiteBridgeRequest(orders,side='BUY',automatic=true){
@@ -15031,7 +15040,7 @@ async function syncSellBasketToKite(){
     _kiteSellSent=sig;
     if(list.length){
       const names=list.map(o=>o.instrument.tradingsymbol+' x'+o.params.quantity+(o.params.orderType==='LIMIT'?' @'+o.params.price:'')).join(', ');
-      reportKiteBasketOutcome(true,`SELL ${names} ${r.already?'already in':'written to'} Scanner_Sell. Open Scanner_Sell in Kite and Execute.`);
+      reportKiteBasketOutcome(true,`SELL ${names} ${r.already?'already in':'written to'} Scanner_Sell. Open Scanner_Sell in Kite and Execute.`,'SELL');
       showToast(`<strong>Scanner_Sell ready:</strong> ${escHtml(names)}. Open it in Kite and Execute.`,10000,true);
     }
   }catch(e){
@@ -15040,7 +15049,7 @@ async function syncSellBasketToKite(){
       setTimeout(syncSellBasketToKite, 3000);
     } else {
       if(!list.length) _kiteSellSent = sig;
-      reportKiteBasketOutcome(false,'Scanner_Sell: '+msg);
+      reportKiteBasketOutcome(false,'Scanner_Sell: '+msg,'SELL');
     }
   }finally{_kiteSellBusy=false;}
 }
@@ -15053,10 +15062,11 @@ async function sendBasketToKite(automatic=false){
   _kiteTransferBusy=true;
   const button=document.getElementById('sendKiteBtn');
   if(button){button.disabled=true;button.textContent='Sending to Kite…';}
-  let retry=false;
+  let retry=false,noticePlan='';
   try{
     if(APPLY_FILTERS_TIMER){clearTimeout(APPLY_FILTERS_TIMER);APPLY_FILTERS_TIMER=null;applyFilters();}
     const orders=getDesiredBasketOrders();
+    noticePlan=kiteBuyPlanSignature(orders);
     const signature=getCanonicalBasketSignature(orders);
     if(automatic&&(!orders.length||signature===_kiteSentSignature)) return;
     if(!orders.length) throw new Error('No selected GO orders fit the available cash and allocation limits.');
@@ -15069,12 +15079,12 @@ async function sendBasketToKite(automatic=false){
     _kiteSentSignature=signature;
     const isAutoOn = typeof AUTO_BUY_ENABLED!=='undefined'&&AUTO_BUY_ENABLED;
     const autoNote = isAutoOn ? ' (Auto-Buy also active via dip GTT)' : '';
-    reportKiteBasketOutcome(true,`${result.count} order${result.count===1?'':'s'} ${result.already?'already in':'written to'} Scanner_Buy: ${orders.map(o=>o.instrument.tradingsymbol+' x'+o.params.quantity).join(', ')}. Review and Execute in Kite${autoNote}.`);
+    reportKiteBasketOutcome(true,`${result.count} order${result.count===1?'':'s'} ${result.already?'already in':'written to'} Scanner_Buy: ${orders.map(o=>o.instrument.tradingsymbol+' x'+o.params.quantity).join(', ')}. Basket copy only; check GTTs and filled orders before executing${autoNote}.`,'BUY',noticePlan);
     if(button) button.title=`Scanner_Buy is ready. Review and Execute in Kite. New funded baskets are sent automatically.${autoNote}`;
     showToast(`<strong>${result.count} orders ${result.already?'already in':'loaded into'} Scanner_Buy.</strong> Review and Execute in Kite${isAutoOn ? ', or let Auto-Buy dip-buy' : ''}.`,7000);
   }catch(e){
     retry=automatic;
-    reportKiteBasketOutcome(false,e?.message||String(e));
+    reportKiteBasketOutcome(false,e?.message||String(e),'BUY',noticePlan);
     if(button) button.title='Kite auto-send pending: '+(e?.message||String(e));
     if(!automatic) showToast(escHtml(e?.message||String(e)),10000,true);
   }
