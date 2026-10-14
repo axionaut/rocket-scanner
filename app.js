@@ -1,5 +1,5 @@
-const BUILD_TS='2026-10-09 IST'; // release build date (IST)
-const APP_VERSION=1495;
+const BUILD_TS='2026-10-14 IST'; // release build date (IST)
+const APP_VERSION=1496;
 const RADAR_SCORE_VERSION='v1419-recross-batches'; // Eligible on crossing the score floor at any time; selected model's evolving target and movement-based profit protection.
 
 // ── v1358: AN UNCAUGHT ERROR MUST NAME ITSELF ─────────────────────────────────────────────────
@@ -10493,7 +10493,7 @@ function getRowExitPolicy(row,buyPrice=null,activeInfo=null,nudgeInfo=null,qty=n
   const targetPct=Math.ceil((Math.max(learned?.pct??basePct,learned?.y||0,z)-1e-9)*100)/100;
   if(learned?.method==='evolving-t2')return {targetPct,basePct,stopPct,viable:true,
     targetPolicy:TARGET_POLICY_VERSION,x:learned.x,y:learned.y,z,
-    targetSource:`${learned.model==='ENS'?'Ensemble':'Original'}: ${learned.fallback?'3% startup fallback':`75% of median ${learned.x.toFixed(2)}%`}; ${learned.n} closed signals (${learned.provisional} still tracking); costs + minimum net floor ${z.toFixed(2)}%`,
+    targetSource:`${learned.model==='ENS'?'Ensemble':'Original'}: ${learned.fallback?'3% startup fallback':`85% of median ${learned.x.toFixed(2)}%`}; ${learned.n} closed signals (${learned.provisional} still tracking); costs + minimum net floor ${z.toFixed(2)}%`,
     viabilitySource:null,stopSource:'No loss stop; target GTT and adaptive profit protection',rewardRisk:null};
   return {targetPct,basePct,stopPct,viable:true,targetPolicy:learned?(learned.method==='profit-model'?'btst-profit-model':'btst-score-learned'):'btst-fixed',
     targetSource:learned?`${learned.method==='profit-model'?'Profit-model':'Score-learned'} BTST target (${learned.n} completed paths through ${learned.through})`:`BTST +${basePct}% GTT (learning fallback)`,
