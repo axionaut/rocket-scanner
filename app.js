@@ -1,5 +1,5 @@
 const BUILD_TS='2026-10-15 IST'; // release build date (IST)
-const APP_VERSION=1498;
+const APP_VERSION=1499;
 const RADAR_SCORE_VERSION='v1419-recross-batches'; // Eligible on crossing the score floor at any time; selected model's evolving target and movement-based profit protection.
 
 // ── v1358: AN UNCAUGHT ERROR MUST NAME ITSELF ─────────────────────────────────────────────────
@@ -168,7 +168,8 @@ function tapeSigOf(key){
   return bars.length+':'+a.t+':'+z.t+':'+z.o+':'+z.h+':'+z.l+':'+z.c+':'+z.v+':'+(_memoryRevisions.get(key)||0);
 }
 let _tvLoadedThisSession=false; // true once a TV CSV has been processed this session
-let PERF_PERIOD_FILTER='btst'; // 'btst' | 'all' | '1m' | '3m' | '6m' | '1y'
+let PERF_PERIOD_FILTER='btst'; // 'btst' | 'mtd' | '1m' | '3m' | '6m' | '1y' | 'all' | 'custom'
+let PERF_FROM='',PERF_TO=''; // v1499: custom entry-date range (YYYY-MM-DD, both ends included)
 let PERF_LATEST_SUMMARY=null; // cached latest session summary from buildLatestSessionPanel — used by renderStats card
 let PERF_RENDERED=false; // true after background or foreground performance calculation
 let PERF_RENDER_QUEUED=false;
@@ -9289,7 +9290,8 @@ function _tgtRangeTxt(){
 }
 // Display-only cohort; learning history and trading rules are unchanged.
 const BTST_PERFORMANCE_START='2026-09-18';
-function selectPerformanceTrips(trips,period,cutoff){
+function selectPerformanceTrips(trips,period,cutoff,from,to){
+  if(period==='custom') return (trips||[]).filter(r=>(!from||r.buyDate>=from)&&(!to||r.buyDate<=to));
   return (trips||[]).filter(r=>period==='btst'? !r.shortTrip&&r.buyDate>=BTST_PERFORMANCE_START:!cutoff||r.buyDate>=cutoff);
 }
 function performanceEntrySummary(trips,openLots){
@@ -9307,6 +9309,24 @@ function performanceEntrySummary(trips,openLots){
     winRate:closed.length?wins.length/closed.length*100:null,avgWin:wins.length?winSum/wins.length:null,
     avgLoss:losses.length?lossSum/losses.length:null,expectancy:closed.length?(winSum+lossSum)/closed.length:null,
     profitFactor:lossSum<0?winSum/-lossSum:null,noLosses:wins.length>0&&!losses.length};
+}
+// v1499: calendar range for the Performance tab. Picking either date switches to a custom range of entry dates;
+// clicking a preset pill switches back. The inputs show the current period's range so the owner starts from it.
+function perfRangePicker(trips){
+  const on=PERF_PERIOD_FILTER==='custom',c=on?'var(--amber)':'var(--t3)';
+  const first=(trips||[]).map(r=>r.buyDate).filter(Boolean).sort()[0]||'';
+  const from=PERF_FROM||first,to=PERF_TO||getSessionDate();
+  const inp='background:var(--bg);color:var(--t1);border:1px solid var(--border);border-radius:6px;padding:3px 6px;font-size:13px;color-scheme:dark';
+  return `<span style="display:inline-flex;gap:6px;align-items:center;margin-left:6px;padding:3px 10px;border-radius:20px;border:1px solid ${on?'var(--amber)':'var(--border)'}" title="Custom range of entry (buy) dates, both ends included">
+    <span style="font-size:13px;color:${c};font-weight:600">From</span>
+    <input type="date" id="perfFrom" value="${from}" max="${to}" onchange="setPerfRange()" style="${inp}">
+    <span style="font-size:13px;color:${c};font-weight:600">To</span>
+    <input type="date" id="perfTo" value="${to}" min="${from}" onchange="setPerfRange()" style="${inp}">
+  </span>`;
+}
+function setPerfRange(){
+  const f=document.getElementById('perfFrom')?.value||'',t=document.getElementById('perfTo')?.value||'';
+  PERF_FROM=f;PERF_TO=t;PERF_PERIOD_FILTER='custom';renderPerformance();
 }
 function renderPerformance(){
   PERF_RENDERED=true;
@@ -9334,15 +9354,17 @@ function renderPerformance(){
   }
 
   const _now=new Date(getSessionDate());
-  const _cutoff=['all','btst'].includes(PERF_PERIOD_FILTER)?null
+  const _ymd=d=>d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')+'-'+String(d.getDate()).padStart(2,'0');
+  const _cutoff=['all','btst','custom'].includes(PERF_PERIOD_FILTER)?null
+    :PERF_PERIOD_FILTER==='mtd'?_ymd(new Date(_now.getFullYear(),_now.getMonth(),1))
     :PERF_PERIOD_FILTER==='1m'?new Date(_now.getFullYear(),_now.getMonth()-1,_now.getDate()).toISOString().slice(0,10)
     :PERF_PERIOD_FILTER==='3m'?new Date(_now.getFullYear(),_now.getMonth()-3,_now.getDate()).toISOString().slice(0,10)
     :PERF_PERIOD_FILTER==='6m'?new Date(_now.getFullYear(),_now.getMonth()-6,_now.getDate()).toISOString().slice(0,10)
     :new Date(_now.getFullYear()-1,_now.getMonth(),_now.getDate()).toISOString().slice(0,10);
-  const perfTrips=selectPerformanceTrips(allTripsRaw,PERF_PERIOD_FILTER,_cutoff),p=computePerfStats(perfTrips);
+  const perfTrips=selectPerformanceTrips(allTripsRaw,PERF_PERIOD_FILTER,_cutoff,PERF_FROM,PERF_TO),p=computePerfStats(perfTrips);
   const entries=performanceEntrySummary(perfTrips,tb.openPositionLotsMap);
   const dates=perfTrips.map(r=>r.sellDate).filter(Boolean).sort();
-  const periodLabel=PERF_PERIOD_FILTER==='btst'?`Entries since ${BTST_PERFORMANCE_START}`:_cutoff?`Entries since ${_cutoff}`:'All recorded history';
+  const periodLabel=PERF_PERIOD_FILTER==='custom'?`Entries ${PERF_FROM||'start'} to ${PERF_TO||'today'}`:PERF_PERIOD_FILTER==='btst'?`Entries since ${BTST_PERFORMANCE_START}`:_cutoff?`Entries since ${_cutoff}`:'All recorded history';
   const settledNet=perfTrips.reduce((n,r)=>n+(Number(r.netPnl)||0),0);
   const charges=perfTrips.reduce((n,r)=>n+(Number(r.charges)||0),0),money=v=>v==null?'—':fmtPerfRs(v);
   const dpTotal=perfTrips.reduce((n,r)=>n+(Number(r.dpCharge)||0),0);
@@ -9414,14 +9436,15 @@ function renderPerformance(){
   const symTotals={sym:'TOTAL',netPnl:settledNet,charges,entries:entries.count,winRate:entries.winRate,avgNet:entries.expectancy};
   const symTbl=makeSortableTable('perf-sym',symCols,symRows,'netPnl',-1,null,symTotals,'sym');
 
-  const periodPills=['btst','all','1m','3m','6m','1y'].map(p=>{
+  const periodPills=['btst','mtd','1m','3m','6m','1y','all'].map(p=>{
     const active=PERF_PERIOD_FILTER===p;
-    const label=p==='btst'?'Current system':p==='all'?'All history':p==='1m'?'1M':p==='3m'?'3M':p==='6m'?'6M':'1Y';
+    const label=p==='btst'?'Current system':p==='mtd'?'This month':p==='all'?'All history':p==='1m'?'1M':p==='3m'?'3M':p==='6m'?'6M':'1Y';
     return `<button onclick="PERF_PERIOD_FILTER='${p}';renderPerformance()" style="padding:5px 14px;border-radius:20px;border:1px solid ${active?'var(--amber)':'var(--border)'};background:${active?'rgba(251,191,36,.15)':'transparent'};color:${active?'var(--amber)':'var(--t3)'};font-size:14px;font-weight:${active?700:500};cursor:pointer">${label}</button>`;
   }).join('');
   const periodPillsHtml=`<div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:16px">
     <span style="font-size:13px;color:var(--t3);font-weight:600;text-transform:uppercase;letter-spacing:.06em">Period</span>
     ${periodPills}
+    ${perfRangePicker(perfTrips)}
   </div>`;
 
   const perfCard=(title,content,maxH,id)=>`
