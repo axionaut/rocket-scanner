@@ -1,5 +1,5 @@
 const BUILD_TS='2026-10-15 IST'; // release build date (IST)
-const APP_VERSION=1500;
+const APP_VERSION=1501;
 const RADAR_SCORE_VERSION='v1419-recross-batches'; // Eligible on crossing the score floor at any time; selected model's evolving target and movement-based profit protection.
 
 // ── v1358: AN UNCAUGHT ERROR MUST NAME ITSELF ─────────────────────────────────────────────────
@@ -9326,21 +9326,66 @@ function perfPresetStart(p,today){
 }
 // v1499: calendar range for the Performance tab. Picking either date switches to a custom range of entry dates;
 // clicking a preset pill switches back. The inputs show the current period's range so the owner starts from it.
+// v1501: one field. Clicking it opens a month calendar; first click picks the start, second the end (either order).
+const PERF_CAL={open:false,month:'',start:'',from:'',to:''};
+function perfFmtDate(s){
+  if(!s) return '';
+  const [y,m,d]=s.split('-').map(Number);
+  return `${d} ${['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'][m-1]} ${y}`;
+}
 function perfRangePicker(trips){
-  const on=PERF_PERIOD_FILTER==='custom',c=on?'var(--amber)':'var(--t3)';
+  const on=PERF_PERIOD_FILTER==='custom';
   const first=(trips||[]).map(r=>r.buyDate).filter(Boolean).sort()[0]||'';
-  const from=PERF_FROM||first,to=PERF_TO||getSessionDate();
-  const inp='background:var(--bg);color:var(--t1);border:1px solid var(--border);border-radius:6px;padding:3px 6px;font-size:13px;color-scheme:dark';
-  return `<span style="display:inline-flex;gap:6px;align-items:center;margin-left:6px;padding:3px 10px;border-radius:20px;border:1px solid ${on?'var(--amber)':'var(--border)'}" title="Custom range of entry (buy) dates, both ends included">
-    <span style="font-size:13px;color:${c};font-weight:600">From</span>
-    <input type="date" id="perfFrom" value="${from}" max="${to}" onchange="setPerfRange()" style="${inp}">
-    <span style="font-size:13px;color:${c};font-weight:600">To</span>
-    <input type="date" id="perfTo" value="${to}" min="${from}" onchange="setPerfRange()" style="${inp}">
+  PERF_CAL.from=PERF_FROM||first;PERF_CAL.to=PERF_TO||getSessionDate();
+  if(!PERF_CAL.month) PERF_CAL.month=PERF_CAL.to.slice(0,7);
+  return `<span id="perfRangeWrap" style="position:relative;display:inline-block;margin-left:6px">
+    <button type="button" onclick="togglePerfCal(event)" title="Custom range of entry (buy) dates, both ends included"
+      style="background:var(--bg);color:${on?'var(--amber)':'var(--t1)'};border:1px solid ${on?'var(--amber)':'var(--border)'};border-radius:20px;padding:4px 12px;font-size:13px;font-weight:600;cursor:pointer">
+      &#128197; ${perfFmtDate(PERF_CAL.from)||'start'} &ndash; ${perfFmtDate(PERF_CAL.to)}</button>
+    <div id="perfCalPop" onclick="event.stopPropagation()" style="display:${PERF_CAL.open?'block':'none'};position:absolute;z-index:50;top:calc(100% + 6px);left:0;background:var(--bg2,var(--bg));border:1px solid var(--border);border-radius:10px;padding:10px;box-shadow:0 8px 24px rgba(0,0,0,.4)">${PERF_CAL.open?perfCalHtml():''}</div>
   </span>`;
 }
-function setPerfRange(){
-  const f=document.getElementById('perfFrom')?.value||'',t=document.getElementById('perfTo')?.value||'';
-  PERF_FROM=f;PERF_TO=t;PERF_PERIOD_FILTER='custom';renderPerformance();
+function perfCalHtml(){
+  const [y,m]=PERF_CAL.month.split('-').map(Number);
+  const pad=n=>String(n).padStart(2,'0'),days=new Date(Date.UTC(y,m,0)).getUTCDate();
+  const lead=(new Date(Date.UTC(y,m-1,1)).getUTCDay()+6)%7;   // Monday first
+  const today=getSessionDate(),lo=PERF_CAL.start||PERF_CAL.from,hi=PERF_CAL.start?'':PERF_CAL.to;
+  let cells='';
+  for(let i=0;i<lead;i++) cells+='<span></span>';
+  for(let d=1;d<=days;d++){
+    const s=`${y}-${pad(m)}-${pad(d)}`,end=s===lo||s===hi,mid=hi&&s>lo&&s<hi,fut=s>today;
+    const bg=end?'var(--amber)':mid?'rgba(245,158,11,.18)':'transparent',col=end?'#000':fut?'var(--t3)':'var(--t1)';
+    cells+=`<button type="button" ${fut?'disabled':''} onclick="pickPerfDay('${s}')" style="width:32px;height:28px;border:0;border-radius:6px;background:${bg};color:${col};font-size:13px;cursor:${fut?'default':'pointer'}">${d}</button>`;
+  }
+  const nav='background:transparent;border:0;color:var(--t1);font-size:16px;cursor:pointer;padding:0 8px';
+  const title=new Date(Date.UTC(y,m-1,1)).toLocaleString('en-GB',{month:'long',year:'numeric',timeZone:'UTC'});
+  return `<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px">
+      <button type="button" style="${nav}" onclick="shiftPerfCal(-1)">&lsaquo;</button>
+      <span style="font-size:13px;font-weight:600;color:var(--t1)">${title}</span>
+      <button type="button" style="${nav}" onclick="shiftPerfCal(1)">&rsaquo;</button></div>
+    <div style="display:grid;grid-template-columns:repeat(7,32px);gap:2px;font-size:11px;color:var(--t3);text-align:center;margin-bottom:2px">${['Mo','Tu','We','Th','Fr','Sa','Su'].map(x=>`<span>${x}</span>`).join('')}</div>
+    <div style="display:grid;grid-template-columns:repeat(7,32px);gap:2px">${cells}</div>
+    <div style="font-size:11px;color:var(--t3);margin-top:6px">${PERF_CAL.start?'Now pick the end date':'Pick the start date'}</div>`;
+}
+function redrawPerfCal(){const p=document.getElementById('perfCalPop');if(p){p.style.display=PERF_CAL.open?'block':'none';p.innerHTML=PERF_CAL.open?perfCalHtml():'';}}
+function togglePerfCal(ev){
+  ev&&ev.stopPropagation();
+  PERF_CAL.open=!PERF_CAL.open;PERF_CAL.start='';
+  if(PERF_CAL.open) PERF_CAL.month=(PERF_CAL.to||getSessionDate()).slice(0,7);
+  redrawPerfCal();
+}
+function shiftPerfCal(n){
+  const [y,m]=PERF_CAL.month.split('-').map(Number),t=new Date(Date.UTC(y,m-1+n,1));
+  PERF_CAL.month=t.toISOString().slice(0,7);redrawPerfCal();
+}
+function pickPerfDay(s){
+  if(!PERF_CAL.start){PERF_CAL.start=s;redrawPerfCal();return;}
+  const a=PERF_CAL.start<s?PERF_CAL.start:s,b=PERF_CAL.start<s?s:PERF_CAL.start;
+  PERF_CAL.open=false;PERF_CAL.start='';setPerfRange(a,b);
+}
+document.addEventListener('click',()=>{if(PERF_CAL.open){PERF_CAL.open=false;PERF_CAL.start='';redrawPerfCal();}});
+function setPerfRange(f,t){
+  PERF_FROM=f||'';PERF_TO=t||'';PERF_PERIOD_FILTER='custom';renderPerformance();
 }
 function renderPerformance(){
   PERF_RENDERED=true;
