@@ -1,5 +1,5 @@
 const BUILD_TS='2026-10-15 IST'; // release build date (IST)
-const APP_VERSION=1505;
+const APP_VERSION=1506;
 const RADAR_SCORE_VERSION='v1419-recross-batches'; // Eligible on crossing the score floor at any time; selected model's evolving target and movement-based profit protection.
 
 // ── v1358: AN UNCAUGHT ERROR MUST NAME ITSELF ─────────────────────────────────────────────────
@@ -4717,6 +4717,12 @@ function btstCrossingState(s){
   // Ensemble only: for Peak (v1502) 2.15+ is just its top-ranked names, not "every model agrees".
   const SCORE_CAP=2.15;
   if(r.model==='ENS'&&score>=SCORE_CAP) return {state:'WAIT',reason:`Score +${score.toFixed(2)} is at the maxed-out top (${SCORE_CAP}+): every model ranks it #1, usually mid-spike. These lost money live, so it is skipped; buyable if it settles back inside +${floor.toFixed(2)} to +${SCORE_CAP}.`};
+  // v1506 (owner, 15 Oct): volume-fade veto. A push whose last 15 minutes trade at 40-80% of today's biggest
+  // 5-minute bar is rising on weakening volume (BLUSPRING 15 Oct, fade 0.46). Replayed on 135 live Ensemble
+  // signals 29 Sep-14 Oct those lost -0.53% each with 20 of 34 stuck. Not noted as a crossing, so the stock is
+  // buyable on a later run once volume picks up again or dries out. No figure (under 4 bars today) = no veto.
+  const vf=r.src.volFade?.[normSym(s.symbol)],band=Array.isArray(r.src.volFadeBand)?r.src.volFadeBand:[0.4,0.8];
+  if(vf&&Number.isFinite(vf.fade)&&vf.fade>=band[0]&&vf.fade<band[1]) return {state:'WAIT',reason:`Score +${score.toFixed(2)} clears +${floor.toFixed(2)}, but the push is on fading volume: last 15 min average ${Math.round(vf.last15Avg).toLocaleString('en-IN')} = ${Math.round(vf.fade*100)}% of today's biggest 5-min bar (${Math.round(vf.peakBar).toLocaleString('en-IN')}). Fading pushes lost money live, so it is skipped; buyable once volume picks up or dries out.`};
   const gateOff=r.src.gate?.on!==true;
   if(gateOff) return {state:'WAIT',reason:`Score +${score.toFixed(2)} clears +${floor.toFixed(2)}, but the market gate is off - no buys today.`};
   const first=noteCrossing(s.symbol,score,floor);
