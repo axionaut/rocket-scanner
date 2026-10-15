@@ -1,5 +1,5 @@
 const BUILD_TS='2026-10-15 IST'; // release build date (IST)
-const APP_VERSION=1503;
+const APP_VERSION=1504;
 const RADAR_SCORE_VERSION='v1419-recross-batches'; // Eligible on crossing the score floor at any time; selected model's evolving target and movement-based profit protection.
 
 // ── v1358: AN UNCAUGHT ERROR MUST NAME ITSELF ─────────────────────────────────────────────────
@@ -118,7 +118,7 @@ function isCsvLikeFile(file){
 
 function updateModeUI(){
   const brand=document.querySelector('.brand-tag');
-  if(brand) brand.textContent='Ensemble Engine';
+  if(brand) brand.textContent=(document.getElementById('fModel')?.value==='PEAK'?'Peak':'Ensemble')+' Engine';
   document.querySelectorAll('.currency-lbl').forEach(el=>{el.textContent='₹';});
 }
 let ALL=[],FILT=[],PG=1,PGSZ=100,SCOL='score',SDIR=-1;
@@ -3729,7 +3729,7 @@ function setRadarEvidenceScore(r){
 function radarScoreTitle(r){
   const p=r?.btstPick;
   return p?`Pick #${p.rank}: model score ${p.score}. Buyable when it crosses your score floor; exit through the selected model's target and adaptive profit protection.`
-    :"Model score: the selected model score (Ensemble uses mapped percentiles, not calibrated return percentages). GO requires a fresh crossing of your score floor.";
+    :"Model score: Peak uses predicted rise minus dip per session; Ensemble uses mapped percentiles. Each model has its own saved floor. GO requires a fresh crossing.";
 }
 function* refreshRocketScoresGen(deferPaint=false){
   const staged=[];
@@ -4355,30 +4355,30 @@ function requestAlertPermission(){
 // if the element is already seeded or currently focused.
 const SCORE_FLOOR_STORE='rs_score_floor';
 let _scoreFloorSeeded=false;
+let _scoreFloorEpoch=0;
 // v1416: declared HERE, not beside pushScoreFloorToEngine ~160 lines below. initScoreFloorUI
 // adopts the helper's value into it, and a `let` declared later is in the temporal dead zone -
 // the v1400 trap that left the alert toggle silently uninitialised inside its own try/catch.
 let _floorPushTimer=null,_floorPushed=null;
-function initScoreFloorUI(){
+function floorModel(){return document.getElementById('fModel')?.value==='PEAK'?'PEAK':'ENS';}
+function scoreFloorStore(model=floorModel()){return model==='PEAK'?'rs_peak_score_floor':SCORE_FLOOR_STORE;}
+function initScoreFloorUI(force=false){
   try{
-    const el=document.getElementById('fScoreFloor');
-    if(!el) return;                                   // markup lives in index.html (v1407)
-    if(_scoreFloorSeeded) return;                     // seed once; repaints must not rewrite it
-    if(document.activeElement===el) return;           // never overwrite what is being typed
-    el.value=localStorage.getItem(SCORE_FLOOR_STORE)||'';
-    _scoreFloorSeeded=true;
-    // v1416: the helper holds the floor the ENGINE will use, and it outlives this browser's
-    // localStorage (another machine, a cleared profile, a hand-edited state file). Reconcile to it
-    // so the box never shows a floor the engine is not applying. Still skips a focused input.
-    readHelperResponse('/api/btst/min-score',{timeout:6000}).then(d=>{
-      if(!d||d.ok===false) return;
+    const el=document.getElementById('fScoreFloor'),model=floorModel();
+    if(!el||(!force&&_scoreFloorSeeded===model)||document.activeElement===el)return;
+    const key=scoreFloorStore(model),stored=localStorage.getItem(key),epoch=++_scoreFloorEpoch;
+    el.value=stored===null?(model==='PEAK'?'0':''):stored;
+    el.min=model==='PEAK'?'0':'1.2';el.placeholder=model==='PEAK'?'0':'1.6';
+    const label=document.getElementById('scoreFloorLabel');if(label)label.textContent=model==='PEAK'?'Peak Floor':'Ensemble Floor';
+    el.title=model==='PEAK'?'Peak only: its own predicted rise minus dip, per session to peak. Default 0 requires positive predicted advantage. Saved independently from Ensemble.':'Ensemble only: mapped ensemble score. Default 1.6; minimum 1.2. Saved independently from Peak.';
+    _scoreFloorSeeded=model;_floorPushed=null;
+    updateModeUI();
+    readHelperResponse('/api/btst/min-score?model='+model,{timeout:6000}).then(d=>{
+      if(!d||d.ok===false||floorModel()!==model||epoch!==_scoreFloorEpoch||document.activeElement===el)return;
       const server=d.minScore==null?'':String(d.minScore);
-      const shown=String(el.value||'');
-      if(server===shown||document.activeElement===el) return;
-      el.value=server;
-      _floorPushed=server;                            // adopt, do not echo it straight back
-      try{localStorage.setItem(SCORE_FLOOR_STORE,server);}catch(e){}
-      if(typeof applyFilters==='function') applyFilters();
+      el.value=server;_floorPushed=model+':'+server;
+      try{localStorage.setItem(key,server);}catch(e){}
+      if(typeof applyFilters==='function')applyFilters();
     }).catch(()=>{});
   }catch(e){}
 }
@@ -4392,7 +4392,7 @@ function initAlertUI(){
 if(typeof document!=='undefined'){
   const initUI=()=>{initAlertUI();initScoreFloorUI();try{initModelUI();}catch(e){}try{renderAutoBuyBtn();loadAutoBuyStatus();}catch(e){}};
   if(document.readyState==='loading') document.addEventListener('DOMContentLoaded',initUI);
-  else initUI();
+  else queueMicrotask(initUI());
 }
 // Crossing alerts are checked alongside the live ranking poll.
 
@@ -4467,7 +4467,7 @@ async function loadBtstPicks(){
     const picks=j||((BTST.data?.session===today)?BTST.data:null);
     const rank=rk||((BTST.rank?.session===today)?BTST.rank:null);
     const target=tm||BTST.targetModel;
-    const key=[picks?.asOf,picks?.stage,picks?.ok,picks?.session].join('|'),rankKey=[rank?.asOf,rank?.ok,rank?.session].join('|');
+    const key=[picks?.asOf,picks?.stage,picks?.ok,picks?.session,picks?.activeModel,picks?.rules?.minScore,picks?.modelSelectedAt].join('|'),rankKey=[rank?.asOf,rank?.ok,rank?.session,rank?.activeModel,rank?.rules?.minScore,rank?.modelSelectedAt].join('|');
     const targetKey=[target?.version,target?.asOf,target?.asOfSession,target?.trainedThrough,target?.cases?.length].join('|');
     BTST.loadedAt=Date.now();
     if(key===BTST.key&&rankKey===BTST.rankKey&&targetKey===BTST.targetKey) return;
@@ -4490,20 +4490,22 @@ let _btstRankMemo=null;
 function btstRanking(){
   const pk=btstToday();
   const preview=BTST.rank&&BTST.rank.ok&&BTST.rank.mode==='live'&&BTST.rank.session===getSessionDate()&&Array.isArray(BTST.rank.ranking)?BTST.rank:null;
-  const src=pk&&Array.isArray(pk.ranking)&&(!preview||String(pk.asOf)>=String(preview.asOf))?pk:preview;
+  const src=pk&&Array.isArray(pk.ranking)&&(!preview||String(pk.asOf)>String(preview.asOf))?pk:preview;
   if(!src) return null;
-  if(_btstRankMemo&&_btstRankMemo.src===src) return _btstRankMemo;
+  const requested=floorModel(),viewModel=Array.isArray(src.rankings?.[requested])?requested:(src.activeModel||'A');
+  if(_btstRankMemo&&_btstRankMemo.src===src&&_btstRankMemo.model===viewModel) return _btstRankMemo;
+  const ranking=src.rankings?.[viewModel]||src.ranking;
   const map=new Map();
   // v1405: keep the SCORE alongside the rank. The engine publishes [symbol, score] pairs and this
   // used to discard x[1], so the one number that decides the trade (score >= MIN_SCORE) was the
   // one number never shown. Rank is ordinal - #1 of a weak day and #1 of a strong day look
   // identical - so rank alone cannot tell the owner whether anything is close to qualifying.
-  src.ranking.forEach((x,i)=>{const s=normSym(x&&x[0]);if(s&&!map.has(s))map.set(s,{rank:i+1,score:Number(x&&x[1])});});
+  ranking.forEach((x,i)=>{const s=normSym(x&&x[0]);if(s&&!map.has(s))map.set(s,{rank:i+1,score:Number(x&&x[1])});});
   // 25 Sep 2026: two models score every run; `ranking` is the ACTIVE one's, `rankings` holds both.
   const scoresA=new Map();
   (src.rankings?.A||[]).forEach(x=>{const s=normSym(x&&x[0]);if(s)scoresA.set(s,Number(x&&x[1]));});
-  _btstRankMemo={src,map,scoresA,n:src.ranking.length,at:String(src.asOf||'').slice(11,16),stage:src.stage,
-    minScore:Number(src.rules&&src.rules.minScore),model:src.activeModel||'A'};
+  _btstRankMemo={src,map,scoresA,n:ranking.length,at:String(src.asOf||'').slice(11,16),stage:src.stage,
+    minScore:Number(src.rules?.modelFloors?.[viewModel]??src.rules?.minScore),model:viewModel};
   return _btstRankMemo;
 }
 function btstRankOf(sym){
@@ -4545,6 +4547,7 @@ function rememberModelChoice(m){
 }
 let _modelSeeded=false;
 let _modelChoiceEpoch=0;
+let _modelSwitchPending=false;
 function initModelUI(){
   try{
     if(_modelSeeded) return;
@@ -4555,7 +4558,7 @@ function initModelUI(){
     readHelperResponse('/api/btst/model',{timeout:6000}).then(d=>{
       if(epoch!==_modelChoiceEpoch)return;
       const m=d&&String(d.model||'').toUpperCase();
-      if(SELECTABLE_MODELS.includes(m)){rememberModelChoice(m);const e2=document.getElementById('fModel');if(e2&&document.activeElement!==e2)e2.value=m;}
+      if(SELECTABLE_MODELS.includes(m)){rememberModelChoice(m);const e2=document.getElementById('fModel');if(e2&&document.activeElement!==e2)e2.value=m;initScoreFloorUI(true);refreshBtstModelView();}
     }).catch(()=>{});
   }catch(e){}
 }
@@ -4566,16 +4569,25 @@ function selectedBtstModel(){
 }
 function onModelChange(){
   _modelChoiceEpoch++;
+  _modelSwitchPending=true;
   const el=document.getElementById('fModel');
   const m=SELECTABLE_MODELS.includes(el?.value)?el.value:'ENS';
   const previous=savedModelChoice()||'ENS';
+  initScoreFloorUI(true);refreshBtstModelView();
   if(el) el.disabled=true;
-  const restore=()=>{if(el)el.value=previous;};
+  const restore=()=>{_modelSwitchPending=false;if(el)el.value=previous;initScoreFloorUI(true);refreshBtstModelView();};
   readHelperResponse('/api/btst/model?set='+m,{timeout:6000}).then(d=>{
-    if(d&&d.ok&&d.model===m){rememberModelChoice(m);showToast(`${btstModelName(m)} model selected - it ranks and buys from the next engine run (within 2 minutes)`,4000);}
+    if(d&&d.ok&&d.model===m){rememberModelChoice(m);_modelSwitchPending=false;initScoreFloorUI(true);loadBtstPicks();refreshBtstModelView();showToast(`${btstModelName(m)} selected - ${d.ready?'current scores active':'refreshing stale scores'}`,4000);}
     else {restore();showToast('Helper did not accept the model change: '+(d?.why||'no reply'),6000,true);}
   }).catch(()=>{restore();showToast('Helper not reachable - model change not applied',6000,true);})
     .finally(()=>{if(el)el.disabled=false;});
+}
+function refreshBtstModelView(){
+  _btstRankMemo=null;
+  for(const row of ALL){ROW_ACTION_MEMO.delete(row);setRadarEvidenceScore(row);}
+  _dualPlanMemo=null;
+  if(ALL.length)applyFilters({preservePage:true});
+  try{renderStats();}catch(e){}
 }
 // v1407: the floor is adjustable from the filters row, DISPLAY ONLY. The engine publishes its own
 // MIN_SCORE in the picks/rank file and that is what actually selected the picks; typing a number
@@ -4601,6 +4613,8 @@ function btstEngineMinScore(){
 }
 // What the screen judges against: the override when typed, otherwise the engine's own floor.
 function btstMinScore(){
+  const r=btstRanking();
+  if(r&&r.model!==floorModel())return r.minScore;
   const o=btstFloorOverride();
   return o!==null?o:btstEngineMinScore();
 }
@@ -4668,6 +4682,9 @@ function btstCrossingState(s){
   // Only a LIVE ranking may trigger a buy. A replay, a dry run or another session's file must
   // never reach here - same rule the final path has enforced since v1393.
   if(!r||!r.src||r.src.mode!=='live'||r.src.session!==getSessionDate()) return null;
+  if(_modelSwitchPending||r.model!==r.src.activeModel)return {state:'WAIT',reason:'Confirming selected model with helper'};
+  if(r.model==='PEAK'&&score<=0)return {state:'WAIT',reason:'Peak predicts no positive advantage over the dip'};
+  if(r.model==='PEAK'&&r.src.peak?.[normSym(s.symbol)]?.eligible!==true)return {state:'WAIT',reason:'Peak predicted target is below the existing minimum needed for an entry'};
   const st=crossingStore(),key=normSym(s.symbol);
   st.rebuy=st.rebuy||{};
   const qty=Number(getCombinedOpenPositionMap()[s.symbol]?.qty)||0;
@@ -4719,33 +4736,29 @@ function btstCrossingState(s){
 // bypassed: this one can be skipped by a stale page, the helper's by a hand-written state file.
 // The engine's clamp is the authoritative one.
 const SCORE_FLOOR_HARD_MIN=1.2;   // _floorPushTimer/_floorPushed are declared beside SCORE_FLOOR_STORE
-function pushScoreFloorToEngine(raw){
-  // Debounced: typing "2.15" would otherwise fire on 2, 2.1, 2.15.
+function pushScoreFloorToEngine(raw,model=floorModel()){
   clearTimeout(_floorPushTimer);
   _floorPushTimer=setTimeout(()=>{
-    const v=String(raw??'').trim();
-    if(v===_floorPushed) return;
-    _floorPushed=v;
-    // readHelperResponse, not a bare fetch on KITE_HELPER: that const is declared ~11,270 lines
-    // below this function and a direct reference here is the v1400 temporal-dead-zone trap.
-    readHelperResponse('/api/btst/min-score?set='+encodeURIComponent(v),{timeout:6000}).then(d=>{
-      if(!d||d.ok===false){ showToast('Score floor not applied: '+escHtml(d?.why||'helper refused'),4000,true); return; }
-      if(d.minScore==null){ showToast('Score floor cleared - the engine uses its own +'+(btstEngineMinScore()??1.6).toFixed(2)+' from the next run.',4000); return; }
-      showToast('Score floor +'+Number(d.minScore).toFixed(2)+(d.clamped?' (raised to the '+Number(d.hardFloor).toFixed(1)+' hard floor)':'')
-        +' applies from the next engine run.',4500);
-    }).catch(()=>{ showToast('Helper unreachable - the score floor was saved locally but the engine still uses its own.',5000,true); });
+    const v=String(raw??'').trim(),request=model+':'+v;
+    if(request===_floorPushed)return;
+    readHelperResponse('/api/btst/min-score?model='+model+'&set='+encodeURIComponent(v),{timeout:6000}).then(d=>{
+      if(!d||d.ok===false){showToast('Score floor not applied: '+escHtml(d?.why||'helper refused'),4000,true);return;}
+      _floorPushed=request;
+      const applied=d.minScore==null?d.defaultScore:Number(d.minScore);
+      if(floorModel()===model){
+        const el=document.getElementById('fScoreFloor');
+        if(el&&document.activeElement!==el)el.value=d.minScore==null?'':String(d.minScore);
+      }
+      showToast(btstModelName(model)+' floor '+Number(applied).toFixed(2)+' applies from its next engine run.',4500);
+    }).catch(()=>showToast('Helper unreachable - model floor not applied.',5000,true));
   },700);
 }
 function onScoreFloorChange(){
-  let raw='';
-  try{
-    const el=document.getElementById('fScoreFloor');
-    raw=el?.value||'';
-    localStorage.setItem(SCORE_FLOOR_STORE,raw);
-  }catch(e){}
-  pushScoreFloorToEngine(raw);
-  // Verdict text and colour live in the rendered rows, so a redraw is the whole update.
-  if(typeof applyFilters==='function') applyFilters();
+  _scoreFloorEpoch++;
+  let raw='';const model=floorModel();
+  try{raw=document.getElementById('fScoreFloor')?.value??'';localStorage.setItem(scoreFloorStore(model),raw);}catch(e){}
+  pushScoreFloorToEngine(raw,model);
+  if(typeof applyFilters==='function')applyFilters();
 }
 // Why a symbol has no model score, in plain words. The engine publishes the exact exclusion per
 // symbol (price outside Rs 5-4,000, turnover under Rs 5 Cr, a >22% day in 60 sessions, short
@@ -7772,22 +7785,24 @@ function filledBuyBasketSymbols(){
   const consumed=new Set(AUTO_BUY_STATUS.executedToday||[]);
   return new Set((AUTO_BUY_STATUS.dipBuys||[]).filter(d=>d.day===getSessionDate()&&Number(d.filled)>0&&consumed.has(d.sym)).map(d=>d.sym));
 }
-const _kiteCleanedFills=new Set();
+const KITE_CLEANED_FILLS_STORE='rs_kite_cleaned_fills_v1';
+const _kiteCleanedFills=new Set((()=>{try{const a=JSON.parse(localStorage.getItem(KITE_CLEANED_FILLS_STORE)||'[]');return Array.isArray(a)?a.filter(k=>typeof k==='string'):[];}catch(e){return [];}})());
 function filledBasketCleanupEvents(){
   return (AUTO_BUY_STATUS.dipBuys||[]).filter(d=>d.day===getSessionDate()&&Number(d.filled)>0)
     .map(d=>({sym:d.sym,key:[d.day,d.sym,d.orderId,d.placedAt].join('|')}));
 }
 async function syncFilledBuyBasketToKite(){
-  const consumed=filledBuyBasketSymbols();
-  const events=filledBasketCleanupEvents().filter(e=>consumed.has(e.sym)||!_kiteCleanedFills.has(e.key));
-  const syms=[...new Set(events.map(e=>e.sym))];
+  const events=filledBasketCleanupEvents().filter(e=>!_kiteCleanedFills.has(e.key));
+  const syms=[...new Set(events.map(e=>e.sym))].slice(0,20);
+  const batchEvents=events.filter(e=>syms.includes(e.sym));
   if(!syms.length||_kiteTransferBusy||_kiteSellBusy) return;
   _kiteTransferBusy=true;
   try{
     const orders=syms.map(sym=>({instrument:{tradingsymbol:sym,exchange:'NSE'},params:{}}));
     const r=await kiteBridgeRequest(orders,'CLEANUP_BUY');
     if(!r.ok) throw new Error(r.why||'Filled-stock basket cleanup failed');
-    events.forEach(e=>_kiteCleanedFills.add(e.key));
+    batchEvents.forEach(e=>_kiteCleanedFills.add(e.key));
+    try{localStorage.setItem(KITE_CLEANED_FILLS_STORE,JSON.stringify([..._kiteCleanedFills].filter(k=>k.startsWith(getSessionDate()+'|'))));}catch(e){}
     if(r.removed) showToast('Removed filled '+syms.join(', ')+' from Scanner_Buy.',5000);
   }catch(e){
     const msg = String(e?.message||e);
@@ -11578,7 +11593,7 @@ function dashboardMarketCards(){
     add(1,'NSE',br?escHtml(br.at):'Awaiting scores',`${br?br.n:0} scored · floor ${btstMinScore()} · ${isEquitySession(Date.now())?'current session':'last session'}`);
     const go=ALL.filter(isStockEligible).length;
     add(2,'NSE',`${go} GO`,'Kite execution checks apply');
-    add(3,'NSE',signed(target?.pct??3),'Learned target · adaptive profit protection');
+    add(3,'NSE',br?.model==='PEAK'?'Per stock':signed(target?.pct??3),br?.model==='PEAK'?'85% of each predicted peak · adaptive profit protection':'Learned target · adaptive profit protection');
   }
   if(m.us){
     const trend=d?.marketTrendPct;
