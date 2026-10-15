@@ -1,5 +1,5 @@
-const BUILD_TS='2026-10-14 IST'; // release build date (IST)
-const APP_VERSION=1496;
+const BUILD_TS='2026-10-15 IST'; // release build date (IST)
+const APP_VERSION=1497;
 const RADAR_SCORE_VERSION='v1419-recross-batches'; // Eligible on crossing the score floor at any time; selected model's evolving target and movement-based profit protection.
 
 // ── v1358: AN UNCAUGHT ERROR MUST NAME ITSELF ─────────────────────────────────────────────────
@@ -4679,6 +4679,12 @@ function btstCrossingState(s){
     // crosses again it is eligible again - so this is a WAIT, not a permanent disqualification.
     return {state:'WAIT',reason:`Crossed +${floor.toFixed(2)} earlier today but is back to +${score.toFixed(2)}. Eligible again if it re-crosses.`};
   }
+  // v1497 (owner, 15 Oct): no buy at the maxed-out score. 2.15+ means every model ranks the stock #1, usually
+  // mid-spike; replayed on the live Ensemble crossings 29 Sep-14 Oct these lost money (-0.13%/signal) and
+  // skipping them lifted the Rs 1.13L account result in both halves. Not noted as a crossing, so a later
+  // score back inside the band is an ordinary GO.
+  const SCORE_CAP=2.15;
+  if(score>=SCORE_CAP) return {state:'WAIT',reason:`Score +${score.toFixed(2)} is at the maxed-out top (${SCORE_CAP}+): every model ranks it #1, usually mid-spike. These lost money live, so it is skipped; buyable if it settles back inside +${floor.toFixed(2)} to +${SCORE_CAP}.`};
   const gateOff=r.src.gate?.on!==true;
   if(gateOff) return {state:'WAIT',reason:`Score +${score.toFixed(2)} clears +${floor.toFixed(2)}, but the market gate is off - no buys today.`};
   const first=noteCrossing(s.symbol,score,floor);
