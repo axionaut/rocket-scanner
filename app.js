@@ -1,5 +1,5 @@
 const BUILD_TS='2026-10-15 IST'; // release build date (IST)
-const APP_VERSION=1504;
+const APP_VERSION=1505;
 const RADAR_SCORE_VERSION='v1419-recross-batches'; // Eligible on crossing the score floor at any time; selected model's evolving target and movement-based profit protection.
 
 // ── v1358: AN UNCAUGHT ERROR MUST NAME ITSELF ─────────────────────────────────────────────────
@@ -4392,7 +4392,7 @@ function initAlertUI(){
 if(typeof document!=='undefined'){
   const initUI=()=>{initAlertUI();initScoreFloorUI();try{initModelUI();}catch(e){}try{renderAutoBuyBtn();loadAutoBuyStatus();}catch(e){}};
   if(document.readyState==='loading') document.addEventListener('DOMContentLoaded',initUI);
-  else queueMicrotask(initUI());
+  else queueMicrotask(initUI);
 }
 // Crossing alerts are checked alongside the live ranking poll.
 
