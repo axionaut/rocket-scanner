@@ -1,5 +1,5 @@
 const BUILD_TS='2026-10-15 IST'; // release build date (IST)
-const APP_VERSION=1501;
+const APP_VERSION=1502;
 const RADAR_SCORE_VERSION='v1419-recross-batches'; // Eligible on crossing the score floor at any time; selected model's evolving target and movement-based profit protection.
 
 // ── v1358: AN UNCAUGHT ERROR MUST NAME ITSELF ─────────────────────────────────────────────────
@@ -4525,7 +4525,7 @@ function btstScoreAOf(sym){
   if(r.scoresA.size){const v=r.scoresA.get(normSym(sym));return Number.isFinite(v)?v:null;}
   return r.model==='A'?btstScoreOf(sym):null;
 }
-const BTST_MODEL_NAMES={ENS:'Ensemble',A:'Original'};
+const BTST_MODEL_NAMES={ENS:'Ensemble',A:'Original',PEAK:'Peak'};
 function btstModelName(m){return BTST_MODEL_NAMES[m]||m||'Original';}
 // Model switch (index.html #fModel). The helper stores the choice and passes it to every engine run;
 // the other model keeps scoring as a shadow for the day-end review. Applies from the next run.
@@ -4534,35 +4534,48 @@ function btstModelName(m){return BTST_MODEL_NAMES[m]||m||'Original';}
 // async round-trip answered - and showed it permanently whenever the helper was slow or down.
 // localStorage now paints the owner's last known choice synchronously; the helper still wins on reply.
 const MODEL_STORE='rocket-btst-model-v1';
+// v1502 (owner, 15 Oct): Ensemble or Peak, selectable like A vs Ensemble in September. Whichever is selected
+// ranks, signals and buys from the next engine run; the engine scores both every run.
+const SELECTABLE_MODELS=['ENS','PEAK'];
 function savedModelChoice(){
-  try{const v=localStorage.getItem(MODEL_STORE);return v==='A'||v==='ENS'?v:null;}catch(e){return null;}
+  try{const v=localStorage.getItem(MODEL_STORE);return SELECTABLE_MODELS.includes(v)?v:null;}catch(e){return null;}
 }
 function rememberModelChoice(m){
-  try{if(m==='A'||m==='ENS') localStorage.setItem(MODEL_STORE,m);}catch(e){}
+  try{if(SELECTABLE_MODELS.includes(m)) localStorage.setItem(MODEL_STORE,m);}catch(e){}
 }
 let _modelSeeded=false;
-// v1467 (owner, 5 Oct): Ensemble is the only trading model. The original model (A) still scores
-// every run because it is one of Ensemble's five members, but it can no longer be selected.
+let _modelChoiceEpoch=0;
 function initModelUI(){
   try{
     if(_modelSeeded) return;
     _modelSeeded=true;
-    rememberModelChoice('ENS');
     const el=document.getElementById('fModel');
-    if(el) el.value='ENS';
+    if(el) el.value=savedModelChoice()||'ENS';
+    const epoch=_modelChoiceEpoch;
     readHelperResponse('/api/btst/model',{timeout:6000}).then(d=>{
-      if(d&&d.model&&d.model!=='ENS') return readHelperResponse('/api/btst/model?set=ENS',{timeout:6000});
+      if(epoch!==_modelChoiceEpoch)return;
+      const m=d&&String(d.model||'').toUpperCase();
+      if(SELECTABLE_MODELS.includes(m)){rememberModelChoice(m);const e2=document.getElementById('fModel');if(e2&&document.activeElement!==e2)e2.value=m;}
     }).catch(()=>{});
   }catch(e){}
 }
-// The model new orders are targeted on: always Ensemble since v1467.
+// The model new orders are ranked and targeted on: the dropdown (helper-confirmed), else the saved choice.
 function selectedBtstModel(){
-  return 'ENS';
+  const v=document.getElementById('fModel')?.value;
+  return SELECTABLE_MODELS.includes(v)?v:(savedModelChoice()||'ENS');
 }
 function onModelChange(){
+  _modelChoiceEpoch++;
   const el=document.getElementById('fModel');
-  if(el) el.value='ENS';
-  rememberModelChoice('ENS');
+  const m=SELECTABLE_MODELS.includes(el?.value)?el.value:'ENS';
+  const previous=savedModelChoice()||'ENS';
+  if(el) el.disabled=true;
+  const restore=()=>{if(el)el.value=previous;};
+  readHelperResponse('/api/btst/model?set='+m,{timeout:6000}).then(d=>{
+    if(d&&d.ok&&d.model===m){rememberModelChoice(m);showToast(`${btstModelName(m)} model selected - it ranks and buys from the next engine run (within 2 minutes)`,'success');}
+    else {restore();showToast('Helper did not accept the model change: '+(d?.why||'no reply'),'error');}
+  }).catch(()=>{restore();showToast('Helper not reachable - model change not applied','error');})
+    .finally(()=>{if(el)el.disabled=false;});
 }
 // v1407: the floor is adjustable from the filters row, DISPLAY ONLY. The engine publishes its own
 // MIN_SCORE in the picks/rank file and that is what actually selected the picks; typing a number
@@ -4684,8 +4697,9 @@ function btstCrossingState(s){
   // mid-spike; replayed on the live Ensemble crossings 29 Sep-14 Oct these lost money (-0.13%/signal) and
   // skipping them lifted the Rs 1.13L account result in both halves. Not noted as a crossing, so a later
   // score back inside the band is an ordinary GO.
+  // Ensemble only: for Peak (v1502) 2.15+ is just its top-ranked names, not "every model agrees".
   const SCORE_CAP=2.15;
-  if(score>=SCORE_CAP) return {state:'WAIT',reason:`Score +${score.toFixed(2)} is at the maxed-out top (${SCORE_CAP}+): every model ranks it #1, usually mid-spike. These lost money live, so it is skipped; buyable if it settles back inside +${floor.toFixed(2)} to +${SCORE_CAP}.`};
+  if(r.model==='ENS'&&score>=SCORE_CAP) return {state:'WAIT',reason:`Score +${score.toFixed(2)} is at the maxed-out top (${SCORE_CAP}+): every model ranks it #1, usually mid-spike. These lost money live, so it is skipped; buyable if it settles back inside +${floor.toFixed(2)} to +${SCORE_CAP}.`};
   const gateOff=r.src.gate?.on!==true;
   if(gateOff) return {state:'WAIT',reason:`Score +${score.toFixed(2)} clears +${floor.toFixed(2)}, but the market gate is off - no buys today.`};
   const first=noteCrossing(s.symbol,score,floor);
@@ -10543,9 +10557,16 @@ function currentModelTargetPct(){
   return Number.isFinite(t?.pct)&&t.pct>0?t.pct:RocketStrategy.CONFIG.TARGET_PCT;
 }
 function learnedBtstTarget(score,symbol=null){
+  // v1502: Peak sets each stock's own target (85% of its predicted peak), published in the ranking file.
+  // Ranked by Peak and no per-stock figure for this symbol: fall through to the Ensemble's evolving target.
+  if(symbol){
+    const r=btstRanking(),pk=r?.src?.peak?.[normSym(symbol)];
+    if(r?.model==='PEAK'&&Number.isFinite(pk?.target)&&pk.target>0)
+      return {pct:pk.target,y:0,x:pk.peak,dip:pk.dip,sessions:pk.sessions,model:'PEAK',method:'peak-model',through:r.src.asOf};
+  }
   const model=BTST.targetModel;
   if(model?.version!==3)return null;
-  const mdl=selectedBtstModel(),p=model.models?.[mdl];
+  const mdl=selectedBtstModel()==='PEAK'?'ENS':selectedBtstModel(),p=model.models?.[mdl];
   if(!p||!Number.isFinite(p.pct)||p.pct<0)return null;
   return {pct:p.pct,y:p.y||0,x:p.x,n:p.n,provisional:p.provisional,
     through:model.asOf,model:mdl,fallback:p.fallback,method:'evolving-t2'};
@@ -10571,6 +10592,10 @@ function getRowExitPolicy(row,buyPrice=null,activeInfo=null,nudgeInfo=null,qty=n
     z=(sell/price-1)*100;
   }
   const targetPct=Math.ceil((Math.max(learned?.pct??basePct,learned?.y||0,z)-1e-9)*100)/100;
+  if(learned?.method==='peak-model')return {targetPct,basePct,stopPct,viable:true,
+    targetPolicy:'peak-model',x:learned.x,y:0,z,
+    targetSource:`Peak: 85% of this stock's predicted peak +${learned.x.toFixed(2)}% (predicted dip ${learned.dip.toFixed(2)}%, peak in ~${learned.sessions.toFixed(1)} sessions); costs + minimum net floor ${z.toFixed(2)}%`,
+    viabilitySource:null,stopSource:'No loss stop; target GTT and adaptive profit protection',rewardRisk:null};
   if(learned?.method==='evolving-t2')return {targetPct,basePct,stopPct,viable:true,
     targetPolicy:TARGET_POLICY_VERSION,x:learned.x,y:learned.y,z,
     targetSource:`${learned.model==='ENS'?'Ensemble':'Original'}: ${learned.fallback?'3% startup fallback':`85% of median ${learned.x.toFixed(2)}%`}; ${learned.n} closed signals (${learned.provisional} still tracking); costs + minimum net floor ${z.toFixed(2)}%`,
