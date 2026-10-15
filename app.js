@@ -1,5 +1,5 @@
 const BUILD_TS='2026-10-15 IST'; // release build date (IST)
-const APP_VERSION=1499;
+const APP_VERSION=1500;
 const RADAR_SCORE_VERSION='v1419-recross-batches'; // Eligible on crossing the score floor at any time; selected model's evolving target and movement-based profit protection.
 
 // ── v1358: AN UNCAUGHT ERROR MUST NAME ITSELF ─────────────────────────────────────────────────
@@ -168,7 +168,7 @@ function tapeSigOf(key){
   return bars.length+':'+a.t+':'+z.t+':'+z.o+':'+z.h+':'+z.l+':'+z.c+':'+z.v+':'+(_memoryRevisions.get(key)||0);
 }
 let _tvLoadedThisSession=false; // true once a TV CSV has been processed this session
-let PERF_PERIOD_FILTER='btst'; // 'btst' | 'mtd' | '1m' | '3m' | '6m' | '1y' | 'all' | 'custom'
+let PERF_PERIOD_FILTER='btst'; // a PERF_PRESETS key or 'custom'
 let PERF_FROM='',PERF_TO=''; // v1499: custom entry-date range (YYYY-MM-DD, both ends included)
 let PERF_LATEST_SUMMARY=null; // cached latest session summary from buildLatestSessionPanel — used by renderStats card
 let PERF_RENDERED=false; // true after background or foreground performance calculation
@@ -9310,6 +9310,20 @@ function performanceEntrySummary(trips,openLots){
     avgLoss:losses.length?lossSum/losses.length:null,expectancy:closed.length?(winSum+lossSum)/closed.length:null,
     profitFactor:lossSum<0?winSum/-lossSum:null,noLosses:wins.length>0&&!losses.length};
 }
+// v1499: preset start dates (entry date on or after). Indian financial year starts 1 Apr; quarters are calendar
+// quarters (Jan/Apr/Jul/Oct), which line up with the FY quarters.
+const PERF_PRESETS=[['btst','Current system'],['mtd','This month'],['30d','Last 30 days'],['qtd','This quarter'],
+  ['fytd','This financial year'],['365d','Last 365 days'],['ytd','This year'],['all','All history']];
+function perfPresetStart(p,today){
+  const [y,m,d]=String(today).split('-').map(Number),ymd=(Y,M,D)=>{const t=new Date(Date.UTC(Y,M-1,D));return t.toISOString().slice(0,10);};
+  if(p==='mtd') return ymd(y,m,1);
+  if(p==='30d') return ymd(y,m,d-30);
+  if(p==='qtd') return ymd(y,Math.floor((m-1)/3)*3+1,1);
+  if(p==='fytd') return m>=4?ymd(y,4,1):ymd(y-1,4,1);
+  if(p==='365d') return ymd(y,m,d-365);
+  if(p==='ytd') return ymd(y,1,1);
+  return null;   // btst (own start), all, custom
+}
 // v1499: calendar range for the Performance tab. Picking either date switches to a custom range of entry dates;
 // clicking a preset pill switches back. The inputs show the current period's range so the owner starts from it.
 function perfRangePicker(trips){
@@ -9353,14 +9367,7 @@ function renderPerformance(){
     return;
   }
 
-  const _now=new Date(getSessionDate());
-  const _ymd=d=>d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')+'-'+String(d.getDate()).padStart(2,'0');
-  const _cutoff=['all','btst','custom'].includes(PERF_PERIOD_FILTER)?null
-    :PERF_PERIOD_FILTER==='mtd'?_ymd(new Date(_now.getFullYear(),_now.getMonth(),1))
-    :PERF_PERIOD_FILTER==='1m'?new Date(_now.getFullYear(),_now.getMonth()-1,_now.getDate()).toISOString().slice(0,10)
-    :PERF_PERIOD_FILTER==='3m'?new Date(_now.getFullYear(),_now.getMonth()-3,_now.getDate()).toISOString().slice(0,10)
-    :PERF_PERIOD_FILTER==='6m'?new Date(_now.getFullYear(),_now.getMonth()-6,_now.getDate()).toISOString().slice(0,10)
-    :new Date(_now.getFullYear()-1,_now.getMonth(),_now.getDate()).toISOString().slice(0,10);
+  const _cutoff=perfPresetStart(PERF_PERIOD_FILTER,getSessionDate());
   const perfTrips=selectPerformanceTrips(allTripsRaw,PERF_PERIOD_FILTER,_cutoff,PERF_FROM,PERF_TO),p=computePerfStats(perfTrips);
   const entries=performanceEntrySummary(perfTrips,tb.openPositionLotsMap);
   const dates=perfTrips.map(r=>r.sellDate).filter(Boolean).sort();
@@ -9436,9 +9443,8 @@ function renderPerformance(){
   const symTotals={sym:'TOTAL',netPnl:settledNet,charges,entries:entries.count,winRate:entries.winRate,avgNet:entries.expectancy};
   const symTbl=makeSortableTable('perf-sym',symCols,symRows,'netPnl',-1,null,symTotals,'sym');
 
-  const periodPills=['btst','mtd','1m','3m','6m','1y','all'].map(p=>{
+  const periodPills=PERF_PRESETS.map(([p,label])=>{
     const active=PERF_PERIOD_FILTER===p;
-    const label=p==='btst'?'Current system':p==='mtd'?'This month':p==='all'?'All history':p==='1m'?'1M':p==='3m'?'3M':p==='6m'?'6M':'1Y';
     return `<button onclick="PERF_PERIOD_FILTER='${p}';renderPerformance()" style="padding:5px 14px;border-radius:20px;border:1px solid ${active?'var(--amber)':'var(--border)'};background:${active?'rgba(251,191,36,.15)':'transparent'};color:${active?'var(--amber)':'var(--t3)'};font-size:14px;font-weight:${active?700:500};cursor:pointer">${label}</button>`;
   }).join('');
   const periodPillsHtml=`<div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:16px">
