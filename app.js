@@ -1,5 +1,5 @@
 const BUILD_TS='2026-10-15 IST'; // release build date (IST)
-const APP_VERSION=1497;
+const APP_VERSION=1498;
 const RADAR_SCORE_VERSION='v1419-recross-batches'; // Eligible on crossing the score floor at any time; selected model's evolving target and movement-based profit protection.
 
 // ── v1358: AN UNCAUGHT ERROR MUST NAME ITSELF ─────────────────────────────────────────────────
@@ -118,7 +118,7 @@ function isCsvLikeFile(file){
 
 function updateModeUI(){
   const brand=document.querySelector('.brand-tag');
-  if(brand) brand.textContent='BTST Engine';
+  if(brand) brand.textContent='Ensemble Engine';
   document.querySelectorAll('.currency-lbl').forEach(el=>{el.textContent='₹';});
 }
 let ALL=[],FILT=[],PG=1,PGSZ=100,SCOL='score',SDIR=-1;
@@ -3649,7 +3649,7 @@ function modelBadgeHtml(model,note=''){
   if(!model) return '';
   return `<span class="model-badge model-badge-${model}" title="${escHtml('Recommended by the '+MODEL_LABELS[model]+' model.'+(note?' '+note:''))}">${model==='tick'?'T':'M'} ${MODEL_LABELS[model]}</span>`;
 }
-function enabledModelsLabel(){return 'BTST engine';
+function enabledModelsLabel(){return 'Ensemble engine';
 }
 function dualScoreCell(row){
   const act=getRowActionState(row);
@@ -3673,7 +3673,7 @@ function dualScoreCell(row){
     const clears=ms!==null&&floor!==null&&ms>=floor;
     return `<div style="display:flex;align-items:center;gap:6px;justify-content:center">
       ${ms===null?`<span title="${escHtml(btstUnscoredReason(row.symbol))}">N/A</span>`:`<span style="font-family:'DM Mono',monospace;font-weight:800;font-size:15px;color:${clears?'var(--green)':'var(--amber)'}" title="${escHtml(btstRankNote(row.symbol))}">${ms>=0?'+':''}${ms.toFixed(2)}</span>`}
-      <span style="font-family:'DM Mono',monospace;font-weight:600;font-size:11px;color:var(--t3)" title="${rk?escHtml(btstRankNote(row.symbol)+' - ranking only, not a buy signal'):'Not ranked by the BTST engine'}">${rk?'#'+rk:''}</span>
+      <span style="font-family:'DM Mono',monospace;font-weight:600;font-size:11px;color:var(--t3)" title="${rk?escHtml(btstRankNote(row.symbol)+' - ranking only, not a buy signal'):'Not ranked by the engine'}">${rk?'#'+rk:''}</span>
       <span style="font-size:10px;font-weight:600;color:var(--t3)">${act.state}</span>
     </div>`;
   }
@@ -3727,7 +3727,7 @@ function setRadarEvidenceScore(r){
 }
 function radarScoreTitle(r){
   const p=r?.btstPick;
-  return p?`BTST pick #${p.rank}: model score ${p.score}. Buyable when it crosses your score floor; exit through the selected model's target and adaptive profit protection.`
+  return p?`Pick #${p.rank}: model score ${p.score}. Buyable when it crosses your score floor; exit through the selected model's target and adaptive profit protection.`
     :"Model score: the selected model score (Ensemble uses mapped percentiles, not calibrated return percentages). GO requires a fresh crossing of your score floor.";
 }
 function* refreshRocketScoresGen(deferPaint=false){
@@ -4763,7 +4763,7 @@ function btstPickOf(sym){
 }
 function btstWaitReason(){
   const d=BTST.data;
-  if(d&&d.session===getSessionDate()&&d.ok===false) return 'BTST engine failed at '+String(d.asOf||'').slice(11,16)+': '+(d.error||'unknown error');
+  if(d&&d.session===getSessionDate()&&d.ok===false) return 'Engine failed at '+String(d.asOf||'').slice(11,16)+': '+(d.error||'unknown error');
   return "Today's live model ranking has not reached this tab. Check the local helper connection.";
 }
 const ROW_ACTION_MEMO=new WeakMap();
@@ -8211,7 +8211,7 @@ function buildGoalCard(){
   const freeStr=parts.overridden
     ?`capital ₹${goalFmtRs(basis)} (your Capital ₹ override · computed book ₹${goalFmtRs(parts.computed)})`
     :`capital ₹${goalFmtRs(basis)} (delivery ${goalFmtRs(parts.holdings)}${parts.positions?` + today's buys ${goalFmtRs(parts.positions)}`:''}${parts.idleCash?` + freed cash ${goalFmtRs(parts.idleCash)}`:''}${parts.posStale?' · positions file is a prior session, its buys already settled into delivery':''})`;
-  const title='Required NET earnings per NSE trading day, as % of your capital. Capital = the Capital ₹ field, which DEFAULTS to your computed deployed book (holdings + every open position incl. BTST, from the CSVs) and can be overridden; clearing the field restores the default. Informational only; does not change targets.';
+  const title='Required NET earnings per NSE trading day, as % of your capital. Capital = the Capital ₹ field, which DEFAULTS to your computed deployed book (holdings + every open position, from the CSVs) and can be overridden; clearing the field restores the default. Informational only; does not change targets.';
   // v1078 (owner): the card must answer TODAY (how much do I need to make, how much have I made)
   // and REMAINING (how much of the goal is left). "Need/day" was already here; today's PROGRESS
   // against it and the remaining target were not, so the card could not be acted on intra-day.
@@ -9416,7 +9416,7 @@ function renderPerformance(){
 
   const periodPills=['btst','all','1m','3m','6m','1y'].map(p=>{
     const active=PERF_PERIOD_FILTER===p;
-    const label=p==='btst'?'Current BTST':p==='all'?'All history':p==='1m'?'1M':p==='3m'?'3M':p==='6m'?'6M':'1Y';
+    const label=p==='btst'?'Current system':p==='all'?'All history':p==='1m'?'1M':p==='3m'?'3M':p==='6m'?'6M':'1Y';
     return `<button onclick="PERF_PERIOD_FILTER='${p}';renderPerformance()" style="padding:5px 14px;border-radius:20px;border:1px solid ${active?'var(--amber)':'var(--border)'};background:${active?'rgba(251,191,36,.15)':'transparent'};color:${active?'var(--amber)':'var(--t3)'};font-size:14px;font-weight:${active?700:500};cursor:pointer">${label}</button>`;
   }).join('');
   const periodPillsHtml=`<div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:16px">
@@ -10502,7 +10502,7 @@ function getRowExitPolicy(row,buyPrice=null,activeInfo=null,nudgeInfo=null,qty=n
     targetSource:`${learned.model==='ENS'?'Ensemble':'Original'}: ${learned.fallback?'3% startup fallback':`85% of median ${learned.x.toFixed(2)}%`}; ${learned.n} closed signals (${learned.provisional} still tracking); costs + minimum net floor ${z.toFixed(2)}%`,
     viabilitySource:null,stopSource:'No loss stop; target GTT and adaptive profit protection',rewardRisk:null};
   return {targetPct,basePct,stopPct,viable:true,targetPolicy:learned?(learned.method==='profit-model'?'btst-profit-model':'btst-score-learned'):'btst-fixed',
-    targetSource:learned?`${learned.method==='profit-model'?'Profit-model':'Score-learned'} BTST target (${learned.n} completed paths through ${learned.through})`:`BTST +${basePct}% GTT (learning fallback)`,
+    targetSource:learned?`${learned.method==='profit-model'?'Profit-model':'Score-learned'} target (${learned.n} completed paths through ${learned.through})`:`+${basePct}% GTT (learning fallback)`,
     viabilitySource:null,
     stopSource:stopPct>0?'Fixed strategy stop':'No loss stop; target GTT and adaptive profit protection',rewardRisk:stopPct>0?targetPct/stopPct:null};
 }
@@ -10680,7 +10680,7 @@ function getOpenPositionTargetFloor(sym,pos){
   const cushionFloorPrice=costFloorPrice>0?+(Math.ceil((costFloorPrice+cushionPx-1e-9)/0.05)*0.05).toFixed(2):null;
   const marketPrice=tickPrice(raw);
   const price=Math.max(anchorPrice,cushionFloorPrice||0,marketPrice||0);
-  const source=anchorPct!=null?'manual Target Override':boughtPct!=null?'exported BTST GTT target':'selected model target (no exported target recorded)';
+  const source=anchorPct!=null?'manual Target Override':boughtPct!=null?'exported GTT target':'selected model target (no exported target recorded)';
   return {avgPrice,price:+price.toFixed(2),anchorPrice:+anchorPrice.toFixed(2),
     costFloorPrice,cushionFloorPrice,cushionIsSpread:cushionPx>0.05,anchorPct,source,marketPrice};
 }
@@ -10718,7 +10718,7 @@ function getPositionTapeFallback(sym,pos,deadline,entryStop,bars,why){
   const sell=RocketStrategy.CONFIG.STOP_LOSS_PCT>0&&stopBreached;
   const signal=sell?'SELL':recent?'WARMING UP':'REFRESHING';
   const floor=getOpenPositionTargetFloor(sym,pos);
-  const ageWarning=deadline.date?'':' Buy date unavailable; BTST age cannot yet be verified.';
+  const ageWarning=deadline.date?'':' Buy date unavailable; holding age cannot yet be verified.';
   return {symbol:sym,signal,signalSort:sell?0:3,qty,price,asOf:recent?.t||null,
     targetPrice:floor?.price||null,stopPrice:entryStop,pacePct:null,paceRs:null,
     eodPct:null,eodPrice:null,flowPct:null,ageUnknown:!deadline.date,
@@ -13388,9 +13388,9 @@ function emptyBoardReason(){
   if(stale)return 'No buy recommendations: '+escHtml(stale)+'. Use Show ineligible to inspect every stock.';
   const d=btstToday();
   if(!d)return escHtml(btstWaitReason())+'.';
-  if(!d.gate?.on)return `No BTST buys today: market gate off (equal-weight market ${d.gate?.marketTrendPct}% vs its 50DMA; trades above ${d.gate?.threshold}%).`;
-  if(!d.picks.length)return `No BTST picks today: nothing cleared the model's score floor${d.rules&&d.rules.minScore!=null?' of +'+d.rules.minScore:''}. On the tested history that happens on about 1 session in 4 - sitting out is the rule, not a failure.`;
-  return `Today's BTST picks (${escHtml(d.picks.map(p=>p.symbol).join(', '))}) are held, stale or blocked. Use Show ineligible to see why.`;
+  if(!d.gate?.on)return `No buys today: market gate off (equal-weight market ${d.gate?.marketTrendPct}% vs its 50DMA; trades above ${d.gate?.threshold}%).`;
+  if(!d.picks.length)return `No picks today: nothing cleared the model's score floor${d.rules&&d.rules.minScore!=null?' of +'+d.rules.minScore:''}. On the tested history that happens on about 1 session in 4 - sitting out is the rule, not a failure.`;
+  return `Today's picks (${escHtml(d.picks.map(p=>p.symbol).join(', '))}) are held, stale or blocked. Use Show ineligible to see why.`;
 }
 const LIVE_TAPE_TIME_FMT=new Intl.DateTimeFormat('en-IN',{
   timeZone:'Asia/Kolkata',hour:'2-digit',minute:'2-digit',second:'2-digit',hour12:false
