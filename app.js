@@ -1,5 +1,5 @@
 const BUILD_TS='2026-10-15 IST'; // release build date (IST)
-const APP_VERSION=1502;
+const APP_VERSION=1503;
 const RADAR_SCORE_VERSION='v1419-recross-batches'; // Eligible on crossing the score floor at any time; selected model's evolving target and movement-based profit protection.
 
 // ── v1358: AN UNCAUGHT ERROR MUST NAME ITSELF ─────────────────────────────────────────────────
@@ -4572,9 +4572,9 @@ function onModelChange(){
   if(el) el.disabled=true;
   const restore=()=>{if(el)el.value=previous;};
   readHelperResponse('/api/btst/model?set='+m,{timeout:6000}).then(d=>{
-    if(d&&d.ok&&d.model===m){rememberModelChoice(m);showToast(`${btstModelName(m)} model selected - it ranks and buys from the next engine run (within 2 minutes)`,'success');}
-    else {restore();showToast('Helper did not accept the model change: '+(d?.why||'no reply'),'error');}
-  }).catch(()=>{restore();showToast('Helper not reachable - model change not applied','error');})
+    if(d&&d.ok&&d.model===m){rememberModelChoice(m);showToast(`${btstModelName(m)} model selected - it ranks and buys from the next engine run (within 2 minutes)`,4000);}
+    else {restore();showToast('Helper did not accept the model change: '+(d?.why||'no reply'),6000,true);}
+  }).catch(()=>{restore();showToast('Helper not reachable - model change not applied',6000,true);})
     .finally(()=>{if(el)el.disabled=false;});
 }
 // v1407: the floor is adjustable from the filters row, DISPLAY ONLY. The engine publishes its own
