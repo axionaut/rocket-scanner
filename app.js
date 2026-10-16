@@ -1,5 +1,5 @@
 const BUILD_TS='2026-10-16 IST'; // release build date (IST)
-const APP_VERSION=1513;
+const APP_VERSION=1514;
 const RADAR_SCORE_VERSION='v1419-recross-batches'; // Eligible on crossing the score floor at any time; selected model's evolving target and movement-based profit protection.
 
 // ── v1358: AN UNCAUGHT ERROR MUST NAME ITSELF ─────────────────────────────────────────────────
@@ -4686,8 +4686,7 @@ function btstCrossingState(s){
   // never reach here - same rule the final path has enforced since v1393.
   if(!r||!r.src||r.src.mode!=='live'||r.src.session!==getSessionDate()) return null;
   if(_modelSwitchPending||r.model!==r.src.activeModel)return {state:'WAIT',reason:'Confirming selected model with helper'};
-  if(r.model==='PEAK'&&score<=0)return {state:'WAIT',reason:'Peak predicts no positive advantage over the dip'};
-  if(r.model==='PEAK'&&r.src.peak?.[normSym(s.symbol)]?.eligible!==true){const rel=r.src.peak?.[normSym(s.symbol)]?.relTop;return {state:'WAIT',reason:Number.isFinite(rel)?`Peak buys only at 80-90% of this run's top Peak score; this one is at ${Math.round(rel*100)}%`:'Peak predicted target is below the existing minimum needed for an entry'};}
+  const peakOutside=r.model==='PEAK'&&r.src.peak?.[normSym(s.symbol)]?.eligible!==true;
   const st=crossingStore(),key=normSym(s.symbol);
   st.rebuy=st.rebuy||{};
   const qty=Number(getCombinedOpenPositionMap()[s.symbol]?.qty)||0;
@@ -4700,10 +4699,19 @@ function btstCrossingState(s){
     state.consumed=true;state.armed=false;
   }
   state.qty=qty;state.fillKey=fillKey;
+  if(peakOutside){
+    if(state.consumed&&Number.isFinite(r.src.peak?.[key]?.relTop)&&r.src.peak[key].eligible===false)state.armed=true;
+    saveCrossings();
+    const rel=r.src.peak?.[key]?.relTop;
+    return {state:'WAIT',reason:Number.isFinite(rel)?`Peak buys at 80-90% of the run top; this one is at ${Math.round(rel*100)}%`:'Peak is not eligible in this run'};
+  }
+  if(r.model==='PEAK'&&score<=0)return {state:'WAIT',reason:'Peak predicts no positive advantage over the dip'};
   if(score<floor&&state.consumed) state.armed=true;
   if(score<floor&&st.at?.[key]&&!st.at[key].below){st.at[key].below=true;saveCrossings();}
   if(score>=floor&&state.consumed&&state.armed){state.consumed=false;state.armed=false;}
   if(before!==state.qty+'|'+state.fillKey+'|'+state.consumed+'|'+state.armed) saveCrossings();
+  if(AUTO_BUY_STATUS?.executedToday?.includes(key))return {state:'WAIT',reason:'Helper confirms this crossing was already bought; waiting for a completed run outside the entry band and a fresh crossing.'};
+  if(AUTO_BUY_STATUS?.bridgeEntries?.some(e=>e.sym===key&&e.signalAsOf===r.src.asOf&&e.status==='done'&&e.filled===0))return {state:'WAIT',reason:'Immediate order did not fill within its price cap. Waiting for a fresh engine signal.'};
   if(state.consumed&&score>=floor)
     return {state:'WAIT',reason:'Already bought on this crossing; waiting for a fresh dip below the floor and re-crossing.'};
   if(score<floor){
@@ -7239,133 +7247,12 @@ function sessionBuyFifo(sym,orders){
     carriedQty,carriedAvg:carriedQty>0?lots.reduce((t,l)=>t+l.qty*l.price,0)/carriedQty:null,lots};
 }
 function computeLatestOrderBooked(){
-  // Only compute from orders loaded this session — never from brain-restored stale orders.
   if(!ORDERS_TODAY?._loadedThisSession) return null;
-  const session=getLatestOrderSession();
-  if(!session) return null;
-  const bySym={};
-  session.orders.forEach(o=>{
-    if(!bySym[o.symbol]) bySym[o.symbol]={buys:[],sells:[]};
-    if(o.type==='BUY') bySym[o.symbol].buys.push(o);
-    else if(o.type==='SELL') bySym[o.symbol].sells.push(o);
-  });
-
-  const rows=[];
-  const dpCharged=new Set();
-  Object.entries(bySym).forEach(([sym,{buys,sells}])=>{
-    if(!sells.length) return;
-    const totalSellQty=sells.reduce((s,o)=>s+o.qty,0);
-    // v1119: the time of the LAST sell for this symbol, so the panel can say how long after the
-    // exit the day high arrived. orders.csv carries fill times to the second (v1096).
-    const _sellTime=sells.map(o=>String(o.time||'')).filter(Boolean).sort().pop()||null;
-    const avgSell=sells.reduce((s,o)=>s+o.price*o.qty,0)/totalSellQty;
-    const holdingAvg=getHoldingAvgCost(sym);
-    const totalBuyQty=buys.reduce((s,o)=>s+o.qty,0);
-    // v1438: Chronological same-day matching.  Zerodha settles intraday only when
-    // buy shares are available at the time of the sell.  A sell-then-rebuy of carried
-    // stock (e.g. GTT fires at 10:10, re-buy at 14:30) is a delivery sell + a new
-    // position, not an intraday round-trip.  Walk buys and sells by time: a sell
-    // share counts as same-day only when a preceding same-day buy share exists.
-    // 25 Sep: each leg also keeps its OWN sell proceeds and buy lots. Using the symbol's average
-    // sell for every leg priced SHANTIGOLD's 09:26 carried sell (293.97) and its later same-day
-    // sells (314.32, 323.65) all at 310.23: the total survived, the legs and their charges did not.
-    let sameDayQty=0,deliveryQty=0,sameCost=0,sameProceeds=0,deliveryProceeds=0;
-    const sortedSells=sells.slice().sort((a,b)=>String(a.time).localeCompare(String(b.time)));
-    const lots=buys.slice().sort((a,b)=>String(a.time).localeCompare(String(b.time))).map(b=>({t:String(b.time||''),q:Number(b.qty),p:Number(b.price),v:0}));
-    let li=0;
-    const avail=[],sameOrderValues=[];
-    for(const s of sortedSells){
-      const sTime=String(s.time||'');
-      while(li<lots.length&&lots[li].t<=sTime) avail.push(lots[li++]);
-      let need=Number(s.qty),sellMatched=0;
-      while(need>0&&avail.length){
-        const lot=avail[0],use=Math.min(need,lot.q);
-        sameDayQty+=use;sameCost+=use*lot.p;sameProceeds+=use*Number(s.price);
-        lot.v+=use*lot.p;sellMatched+=use*Number(s.price);
-        lot.q-=use;need-=use;
-        if(lot.q<=0) avail.shift();
-      }
-      deliveryQty+=need;deliveryProceeds+=need*Number(s.price);
-      if(sellMatched>0) sameOrderValues.push(sellMatched);
-    }
-    lots.forEach(l=>{if(l.v>0) sameOrderValues.push(l.v);});
-    // Zerodha caps intraday brokerage at Rs 20 PER ORDER; charging the leg as one order halved it
-    // for SHANTIGOLD's four ~Rs 1 lakh same-day orders (Rs 40 instead of Rs 80, plus GST).
-    const sameDayBrokerage=sameOrderValues.reduce((t,v)=>t+Math.min(0.0003*v,20),0);
-    const todayAvg=sameDayQty>0?sameCost/sameDayQty:null;
-    const sameSellAvg=sameDayQty>0?sameProceeds/sameDayQty:null;
-    const deliverySellAvg=deliveryQty>0?deliveryProceeds/deliveryQty:null;
-    const components=[];
-    const addKnownComponent=(qty,avgBuy,isSameDay)=>{
-      const avgSell=isSameDay?sameSellAvg:deliverySellAvg;
-      if(!(qty>0)||!(avgBuy>0)) return;
-      const skipDp=isSameDay||dpCharged.has(sym);
-      if(!isSameDay) dpCharged.add(sym);
-      const bcS=calcZerodhaChargesSplit(avgBuy,qty,false,isSameDay,false);
-      const scS=calcZerodhaChargesSplit(avgSell,qty,true,isSameDay,skipDp);
-      if(isSameDay){
-        const shift=sameDayBrokerage-(bcS.brokerage+scS.brokerage);
-        scS.brokerage+=shift;scS.gst+=0.18*shift;
-      }
-      const parts={
-        _brok:+(bcS.brokerage+scS.brokerage).toFixed(2),
-        _stt:+(bcS.stt+scS.stt).toFixed(2),
-        _txn:+(bcS.txn+scS.txn).toFixed(2),
-        _sebi:+(bcS.sebi+scS.sebi).toFixed(2),
-        _gst:+(bcS.gst+scS.gst).toFixed(2),
-        _stamp:+(bcS.stamp+scS.stamp).toFixed(2),
-        _dp:+(bcS.dp+scS.dp).toFixed(2)
-      };
-      const charges=+sumChargeParts(parts).toFixed(0);
-      const capital=avgBuy*qty;
-      const netPnl=+((avgSell-avgBuy)*qty-charges).toFixed(0);
-      components.push({qty,avgBuy,capital,proceeds:avgSell*qty,charges,netPnl,...parts});
-    };
-    if(sameDayQty>0) addKnownComponent(sameDayQty,todayAvg,true);
-    if(deliveryQty>0&&holdingAvg!=null) addKnownComponent(deliveryQty,holdingAvg,false);
-    if(deliveryQty>0&&holdingAvg==null){
-      if(sameDayQty===0){
-        // If tradebook has the same sell date, use its exact FIFO-realized row.
-        const tradebookRow=TRADEBOOK_STATS?._loadedThisSession
-          && TRADEBOOK_STATS.lastDate===session.date
-          && TRADEBOOK_STATS.lastDayRows?.find(r=>r.sym===sym);
-        if(tradebookRow){
-          rows.push(enrichExitPnlRow({...tradebookRow,_sort:tradebookRow.netPnl},session.date));
-          return;
-        }
-      }
-      // Preserve a known intraday component, but disclose carried shares whose cost is unavailable.
-      const skipDp=dpCharged.has(sym);
-      dpCharged.add(sym);
-      const scS=calcZerodhaChargesSplit(deliverySellAvg,deliveryQty,true,false,skipDp);
-      const _brok=+scS.brokerage.toFixed(2),_stt=+scS.stt.toFixed(2),_txn=+scS.txn.toFixed(2);
-      const _sebi=+scS.sebi.toFixed(2),_gst=+scS.gst.toFixed(2),_stamp=+scS.stamp.toFixed(2),_dp=+scS.dp.toFixed(2);
-      const charges=+sumChargeParts({_brok,_stt,_txn,_sebi,_gst,_stamp,_dp}).toFixed(0);
-      rows.push(enrichExitPnlRow({sym,sellTime:_sellTime,lots:sells.length,qty:deliveryQty,capital:null,buyPrice:null,sellPrice:+deliverySellAvg.toFixed(2),_brok,_stt,_txn,_sebi,_gst,_stamp,_dp,charges,winRate:null,netPnl:null,netPnlPct:null,_sort:-Infinity,_noAvgCost:true},session.date));
-    }
-    if(!components.length) return;
-    const matchedQty=components.reduce((sum,c)=>sum+c.qty,0);
-    const capital=components.reduce((sum,c)=>sum+c.capital,0);
-    const avgBuy=capital/matchedQty;
-    const avgSellMatched=components.reduce((sum,c)=>sum+c.proceeds,0)/matchedQty;
-    const _brok=+components.reduce((sum,c)=>sum+c._brok,0).toFixed(2);
-    const _stt=+components.reduce((sum,c)=>sum+c._stt,0).toFixed(2);
-    const _txn=+components.reduce((sum,c)=>sum+c._txn,0).toFixed(2);
-    const _sebi=+components.reduce((sum,c)=>sum+c._sebi,0).toFixed(2);
-    const _gst=+components.reduce((sum,c)=>sum+c._gst,0).toFixed(2);
-    const _stamp=+components.reduce((sum,c)=>sum+c._stamp,0).toFixed(2);
-    const _dp=+components.reduce((sum,c)=>sum+c._dp,0).toFixed(2);
-    const charges=+components.reduce((sum,c)=>sum+c.charges,0).toFixed(0);
-    const netPnl=+components.reduce((sum,c)=>sum+c.netPnl,0).toFixed(0);
-    const netPnlPct=capital>0?+(netPnl/capital*100).toFixed(2):null;
-    rows.push(enrichExitPnlRow({sym,sellTime:_sellTime,lots:sells.length,legs:{sells:sortedSells.map(o=>({time:String(o.time||''),qty:Number(o.qty),price:Number(o.price)})),buys:buys.map(o=>({time:String(o.time||''),qty:Number(o.qty),price:Number(o.price)})).sort((a,b)=>a.time.localeCompare(b.time))},qty:matchedQty,capital,buyPrice:+avgBuy.toFixed(2),sellPrice:+avgSellMatched.toFixed(2),_brok,_stt,_txn,_sebi,_gst,_stamp,_dp,charges,winRate:netPnl>0?100:0,netPnl,netPnlPct,_sort:netPnl},session.date));
-  });
-  const total=rows.reduce((s,r)=>s+(r.netPnl||0),0);
-  const unknownRows=rows.filter(r=>r.netPnl==null).length;
-  // Only return Orders.csv result if there are actual sell rows — if today only has buys,
-  // fall through to tradebook so yesterday's session P&L shows instead of ₹0.
-  if(!rows.length) return null;
-  return {source:'Orders.csv',date:session.date,total,rows,unknownRows,hasOrders:session.orders.length>0};
+  const session=getLatestOrderSession();if(!session)return null;
+  const costs=Object.fromEntries([...new Set(session.orders.map(o=>o.symbol))].map(sym=>[sym,getHoldingAvgCost(sym)]));
+  const result=RocketStrategy.bookedSession(session,costs,TRADEBOOK_STATS);
+  if(result)result.rows=result.rows.map(row=>enrichExitPnlRow(row,session.date));
+  return result;
 }
 
 function getTodayBookedAddendum(){
@@ -7761,7 +7648,7 @@ async function loadProfitLockStatus(){
   if(!j||!j.ok||!Array.isArray(j.positions)) return;
   const bySym=new Map();
   for(const p of j.positions){if(p&&p.sym)bySym.set(normSym(p.sym),p);}
-  PROFIT_LOCK_STATUS={bySym,at:j.asOf||Date.now()};
+  PROFIT_LOCK_STATUS={bySym,at:j.asOf||Date.now(),lossBudget:j.lossBudget||null};
 }
 function profitLockFor(sym){
   return Date.now()-PROFIT_LOCK_STATUS.at<60000?(PROFIT_LOCK_STATUS.bySym.get(normSym(sym))||null):null;
@@ -8979,6 +8866,8 @@ function buildLatestSessionPanel(query=''){
       highGapMin:(()=>{const g=rows.map(r=>r.highGapMin).filter(v=>Number.isFinite(v));
         return g.length?Math.round(g.reduce((a,b)=>a+b,0)/g.length):null;})()
     }:null;
+    const lossBudget=Date.now()-PROFIT_LOCK_STATUS.at<60000?PROFIT_LOCK_STATUS.lossBudget:null;
+    const lossAllowance=lossBudget?.day===latestDate?'<div style="padding:8px 16px;color:var(--t2);font-size:12px">Loss-trim allowance: '+fmtPerfRs(lossBudget.available)+' available | '+fmtPerfRs(lossBudget.reserved)+' reserved | starts at -6%; costs included'+(!lossBudget.known?' | cost basis incomplete':'')+'</div>':'';
     const latestTbl=makeSortableTable('rank-latest-session',latestCols,rows,'_sort',-1,null,latestTotals,'sym');
     const emptyNote=String(query||'').trim()
       ?panelNoMatchHtml(query,'booked trade')
@@ -8988,7 +8877,7 @@ function buildLatestSessionPanel(query=''){
         <span style="font-size:12px;font-weight:700;color:var(--t2);text-transform:uppercase;letter-spacing:.1em">Latest Session — ${latestDate} <span style="font-weight:400;color:var(--t3)">(Orders.csv · holdings/same-day buys)</span>${panelFilterTag(allRows,rows,query)}</span>
         <span style="font-size:17px;font-weight:800;color:${clr(latestTotal)};font-family:'DM Mono',monospace">${allRows.length?fmtPerfRs(latestTotal):''} <span style="font-size:12px;color:var(--t3);font-weight:400">${allRows.length?'net of charges':''}</span>${latestUnknownWarning}</span>
       </div>
-      ${rows.length?`<div class="scroll-x">${latestTbl.getHtml()}</div>`:emptyNote}`);
+      ${lossAllowance}${rows.length?`<div class="scroll-x">${latestTbl.getHtml()}</div>`:emptyNote}`);
     const render=()=>{if(rows.length)latestTbl.render();};
     return {html,render};
   }
@@ -9312,7 +9201,7 @@ function buildOpenPositionsPanel(query=''){
         <span style="font-size:13px;font-weight:800;color:var(--t1);text-transform:uppercase;letter-spacing:.08em">Open Positions${panelFilterTag(rows,shown,query)}</span>
         <span style="font-size:14px;font-weight:700;color:${pnlColor}">${rows.length} live position${rows.length===1?'':'s'} · ${fmtINR(totalCapital)} deployed · ${fmtSignedINR(totalPnl)}</span>
       </div>
-      <div style="font-size:14px;color:var(--t2);line-height:1.5">Live merge of Holdings, Positions, and today's net buys. Exits follow the active broker target, confirmed adaptive profit stop and a 6% loss stop GTT under average cost. No holding-age deadline. Exit advice requires fresh live prices. </div>
+      <div style="font-size:14px;color:var(--t2);line-height:1.5">Live merge of Holdings, Positions, and today's net buys. Exits follow the active broker target, confirmed adaptive profit stop and profit-funded partial loss trims starting at -6%. No holding-age deadline. Exit advice requires fresh live prices. </div>
     </div>
     ${shown.length?`<div class="scroll-x">${table.getHtml()}</div>`:panelNoMatchHtml(query,'open position')}
   </div>`;
@@ -10050,7 +9939,7 @@ function _renderMethodologyInner(){
     <div class="m-grid">
     <div class="m-card"><h4>1. Live score (throughout the session)</h4><p>The local helper runs <code>dev/btst_engine.py</code>. It builds daily, market and sector features (today's volume projected to a full session) for every liquid stock (20-day average turnover ≥ ₹5 Cr, price ₹5–₹4,000) from Zerodha daily bars plus today's live price and volume: returns from 1 day to 3 months, gap, close location, range, volume surges, volatility, distance to highs and averages, RSI, stochastics, ADX, MACD, TradingView-style ratings, relative strength and market condition. The selected model ranks opportunities; Ensemble scores are percentile-mapped scores, not calibrated expected returns. Models are retrained every 5 sessions on the last 220 sessions.</p></div>
     <div class="m-card"><h4>2. Buy on qualification</h4><p>A current live score clearing your floor can become GO throughout the session. Qualifying names share available capital by score, within saved allocation and execution limits (minimum ₹5,000 per funded stock). A purchase consumes its crossing; a completed below-floor observation enables a fresh crossing, held or unheld. The market gate, price freshness, circuit, surveillance and EQ checks still apply.</p></div>
-    <div class="m-card"><h4>3. Exit</h4><p>Orders carry the selected model target, floored for costs and profit. The target learner observes simulated signals through two later sessions; that research horizon does not force a live exit. +3% is its startup fallback. Profit protection follows measured candle swings and 30-second live samples: quieter movement tightens the distance; wider swings cannot lower an established stop. The runner hands off near the target after broker protection is confirmed. A separate loss stop GTT sells 6% under average cost (deep stops cut stuck losers; tight stops sold dips that recovered). No scheduled expiry.</p></div></div>
+    <div class="m-card"><h4>3. Exit</h4><p>Orders carry the selected model target, floored for costs and profit. The target learner observes simulated signals through two later sessions; that research horizon does not force a live exit. +3% is its startup fallback. Profit protection follows measured candle swings and 30-second live samples: the runner distance shrinks from arming to the original target, reaching the broker minimum gap; wider swings cannot loosen it. The runner hands off near the target after broker protection is confirmed. At -6%, a separate GTT sells only the whole-share quantity covered by today's realised net profit after estimated costs and pending loss exits. Without available profit, shares remain held. No scheduled expiry.</p></div></div>
     <h3>Historical evidence</h3><p>The experiments below used older fixed entry and exit rules. They do not validate the current score-crossing entries, adaptive profit trail or holding without a time deadline.</p>
     <p>Walk-forward on NSE daily data, Dec 2025 – Sep 2026 (the model never saw the future), costs included: top 5 bought at the close and sold at +3% the next day or at its close averaged <b>+0.91% per trade</b>, 73% of days positive. With the market gate: <b>+1.18% per trade, 79% of days positive, worst drawdown −4.7%</b>. A 1-minute replay of 36 recent sessions (buy at the real 15:25 price, +3% only when price traded through it) averaged <b>+1.17% per trade</b>, 26 of 36 days positive. Different random seeds and settings gave +0.91% to +1.05%.</p>
     <p>The earlier near-high rules (v1388–v1392) and every intraday entry rule tested on 5-minute and 1-minute data did not beat costs; they are retired.</p>
@@ -10660,15 +10549,15 @@ function getRowExitPolicy(row,buyPrice=null,activeInfo=null,nudgeInfo=null,qty=n
   if(learned?.method==='peak-model')return {targetPct,basePct,stopPct,viable:true,
     targetPolicy:'peak-model',x:learned.x,y:0,z,
     targetSource:`Peak: 85% of this stock's predicted peak +${learned.x.toFixed(2)}% (predicted dip ${learned.dip.toFixed(2)}%, peak in ~${learned.sessions.toFixed(1)} sessions); costs + minimum net floor ${z.toFixed(2)}%`,
-    viabilitySource:null,stopSource:'6% loss stop GTT; target GTT and adaptive profit protection',rewardRisk:null};
+    viabilitySource:null,stopSource:'Profit-funded loss trims from -6%; target GTT and adaptive profit protection',rewardRisk:null};
   if(learned?.method==='evolving-t2')return {targetPct,basePct,stopPct,viable:true,
     targetPolicy:TARGET_POLICY_VERSION,x:learned.x,y:learned.y,z,
     targetSource:`${learned.model==='ENS'?'Ensemble':'Original'}: ${learned.fallback?'3% startup fallback':`85% of median ${learned.x.toFixed(2)}%`}; ${learned.n} closed signals (${learned.provisional} still tracking); costs + minimum net floor ${z.toFixed(2)}%`,
-    viabilitySource:null,stopSource:'6% loss stop GTT; target GTT and adaptive profit protection',rewardRisk:null};
+    viabilitySource:null,stopSource:'Profit-funded loss trims from -6%; target GTT and adaptive profit protection',rewardRisk:null};
   return {targetPct,basePct,stopPct,viable:true,targetPolicy:learned?(learned.method==='profit-model'?'btst-profit-model':'btst-score-learned'):'btst-fixed',
     targetSource:learned?`${learned.method==='profit-model'?'Profit-model':'Score-learned'} target (${learned.n} completed paths through ${learned.through})`:`+${basePct}% GTT (learning fallback)`,
     viabilitySource:null,
-    stopSource:stopPct>0?'Fixed strategy stop':'6% loss stop GTT; target GTT and adaptive profit protection',rewardRisk:stopPct>0?targetPct/stopPct:null};
+    stopSource:stopPct>0?'Fixed strategy stop':'Profit-funded loss trims from -6%; target GTT and adaptive profit protection',rewardRisk:stopPct>0?targetPct/stopPct:null};
 }
 function summarizeRowExitPolicies(rows){
   const policies=(rows||[]).map(r=>getRowExitPolicy(r,r?.price)).filter(p=>p.targetPct>0&&p.stopPct>0&&p.viable);
@@ -10906,11 +10795,11 @@ function getOpenPositionTapePolicy(sym,pos){
   if(!stale&&plk?.activated&&!plk?.triggered&&!brokerStop&&!verdict.shouldExit) verdict.reason='Profit protection pending broker confirmation. '+verdict.reason;
   else if(!stale&&plk?.swingDataMissing&&!plk?.activated&&!verdict.shouldExit) verdict.reason='Swing estimate unavailable; profit trail not armed. '+verdict.reason;
   const {STOP_LOSS_PCT:slPct}=RocketStrategy.CONFIG;
-  const lossStop=plk?.lossGttId&&plk?.lossGttQty===qty&&plk?.lossGttTrigger>0?plk.lossGttTrigger:null;
+  const lossStop=plk?.lossGttId&&plk?.lossGttQty>0&&plk.lossGttQty<=qty&&plk?.lossGttTrigger>0?plk.lossGttTrigger:null;
   const targetPrice=avg>0?+(avg*(1+tgtPct/100)).toFixed(2):null,stopPrice=lossStop||(avg>0&&slPct>0?+(avg*(1-slPct/100)).toFixed(2):null);
   return {symbol,qty,price,open:quote?.open,signal:verdict.action,signalSort:verdict.shouldExit?0:1,
     why:verdict.reason,exitVerdict:verdict,targetPrice,stopPrice,targetPct:tgtPct,stopPct:slPct,
-    targetWhy:activeTarget>0?`Active target GTT at ${activeTarget}`:`Entry target +${tgtPct}% (active broker target not confirmed)`,stopWhy:lossStop?`Loss stop GTT at ${lossStop} (6% under average cost, or just under the price once past it)`:slPct>0?`-${slPct}% from average buy cost`:'Loss stop GTT not confirmed yet; target GTT and adaptive profit protection',
+    targetWhy:activeTarget>0?`Active target GTT at ${activeTarget}`:`Entry target +${tgtPct}% (active broker target not confirmed)`,stopWhy:lossStop?`Profit-funded loss GTT: ${plk.lossGttQty} of ${qty} shares at ${lossStop}; loss and costs reserved from today's realised net profit`:slPct>0?`-${slPct}% from average buy cost`:'Loss trim waits for -6% and available realised net profit after costs; remaining shares stay held',
     pacePct:null,paceRs:null,daysHeld:days,ageUnknown:days==null,afterCostFloor:null,
     profitLock:plk||null,lockStopPrice:verdict.lockStopPrice||null};
 }
@@ -13835,7 +13724,7 @@ function showRadarDetail(sym){
   document.getElementById('radarDetailTitle').textContent=r.symbol+' | Strategy';
   document.getElementById('radarDetailBody').innerHTML=`<p><b>${act.state}</b>: ${escHtml(act.reason)}</p>
     <p>${escHtml(radarScoreTitle(r))}</p><p>Price ${fmtINR(x.price)} | Day high ${fmtINR(x.high)} | Open ${fmtINR(x.open)} | VWAP ${fmtINR(x.vwap)}</p>
-    <p>Target +${getRowExitPolicy(r,r.price).targetPct}% base GTT (allocated order includes cost/profit floor) | 6% loss stop GTT | Adaptive profit protection; no scheduled exit.</p>`;
+    <p>Target +${getRowExitPolicy(r,r.price).targetPct}% base GTT (allocated order includes cost/profit floor) | Profit-funded loss trim from -6% | Adaptive profit protection; no scheduled exit.</p>`;
   dlg.showModal();
 }
 
@@ -15275,6 +15164,7 @@ async function sendBasketToKite(automatic=false){
     }else await requestBasketSync({manual:true,precomputedOrders:orders});
     if(getCanonicalBasketSignature(orders)!==getCanonicalBasketSignature(getDesiredBasketOrders())) throw new Error('Recommendations changed. Send the current basket again.');
     if(AUTO_BUY_ENABLED&&AUTO_BUY_STATUS.mode==='browser-ioc'){
+      if(automatic)await requestBasketSync({manual:true,precomputedOrders:orders});
       _kiteSentSignature=signature;_kiteSentAt=Date.now();
       setTimeout(()=>syncNativeKiteEntries().catch(()=>{}),0);
       if(!automatic)showToast('Funded signals queued for immediate capped entry through Kite. No parallel executable buy basket is created.',6000);
