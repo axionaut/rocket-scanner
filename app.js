@@ -1,5 +1,5 @@
 const BUILD_TS='2026-10-16 IST'; // release build date (IST)
-const APP_VERSION=1511;
+const APP_VERSION=1512;
 const RADAR_SCORE_VERSION='v1419-recross-batches'; // Eligible on crossing the score floor at any time; selected model's evolving target and movement-based profit protection.
 
 // ── v1358: AN UNCAUGHT ERROR MUST NAME ITSELF ─────────────────────────────────────────────────
@@ -14258,7 +14258,16 @@ function refreshStrategySafety(){
   if(states!==refreshStrategySafety.last){refreshStrategySafety.last=states;applyFilters({preservePage:true});}
 }
 function startStreamRefresh(){
-  if(!startStreamRefresh.nativeEntry)startStreamRefresh.nativeEntry=setInterval(()=>syncNativeKiteEntries().catch(()=>{}),2000);
+  // v1512: a background tab's timers are throttled to about once a minute (16 Oct HBLENGINE/SOLARA expired unclaimed).
+  // A worker's timer is not, so its 2 s tick drives the claim; the plain interval stays as the fallback.
+  if(!startStreamRefresh.nativeEntry){
+    startStreamRefresh.nativeEntry=setInterval(()=>syncNativeKiteEntries().catch(()=>{}),2000);
+    try{
+      const w=new Worker(URL.createObjectURL(new Blob(['setInterval(()=>postMessage(0),2000)'],{type:'text/javascript'})));
+      w.onmessage=()=>{if(document.hidden)syncNativeKiteEntries().catch(()=>{});};
+      startStreamRefresh.nativeWorker=w;
+    }catch(e){}
+  }
   if(_streamRefreshTimer) return;
   if(!startStreamRefresh.btst){startStreamRefresh.btst=setInterval(()=>{loadBtstPicks();loadKiteMargins();loadKiteGtts();loadProfitLockStatus();loadAutoBuyStatus();loadModelPortfolios();syncSellBasketToKite();scheduleKiteBasketSync();try{resetCrossAlertsIfNewDay();checkCrossingAlerts();}catch(e){}},20000);loadBtstPicks();loadKiteMargins();loadKiteGtts();loadProfitLockStatus();loadAutoBuyStatus();loadModelPortfolios();syncSellBasketToKite();try{resetCrossAlertsIfNewDay();checkCrossingAlerts();}catch(e){}
     try{seedSavedBasketCount();}catch(e){}}
