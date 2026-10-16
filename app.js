@@ -1,5 +1,5 @@
 const BUILD_TS='2026-10-16 IST'; // release build date (IST)
-const APP_VERSION=1508;
+const APP_VERSION=1509;
 const RADAR_SCORE_VERSION='v1419-recross-batches'; // Eligible on crossing the score floor at any time; selected model's evolving target and movement-based profit protection.
 
 // ── v1358: AN UNCAUGHT ERROR MUST NAME ITSELF ─────────────────────────────────────────────────
@@ -7743,7 +7743,7 @@ async function loadKiteGtts(){
   const j=await readHelperResponse('/api/kite/gtt',{timeout:8000}).catch(()=>null);
   if(!j||!j.ok||!Array.isArray(j.gtts)) return;
   const bySym=new Map();
-  for(const g of j.gtts){const k=normSym(g.sym);if(!bySym.has(k))bySym.set(k,[]);bySym.get(k).push({id:Number(g.id),trigger:Number(g.trigger),price:Number(g.price),qty:Number(g.qty)});}
+  for(const g of j.gtts){if(g.loss)continue;const k=normSym(g.sym);if(!bySym.has(k))bySym.set(k,[]);bySym.get(k).push({id:Number(g.id),trigger:Number(g.trigger),price:Number(g.price),qty:Number(g.qty)});}
   KITE_GTTS={bySym,at:Date.now()};
 }
 function kiteGttsFor(sym){
@@ -9309,7 +9309,7 @@ function buildOpenPositionsPanel(query=''){
         <span style="font-size:13px;font-weight:800;color:var(--t1);text-transform:uppercase;letter-spacing:.08em">Open Positions${panelFilterTag(rows,shown,query)}</span>
         <span style="font-size:14px;font-weight:700;color:${pnlColor}">${rows.length} live position${rows.length===1?'':'s'} · ${fmtINR(totalCapital)} deployed · ${fmtSignedINR(totalPnl)}</span>
       </div>
-      <div style="font-size:14px;color:var(--t2);line-height:1.5">Live merge of Holdings, Positions, and today's net buys. Exits follow the active broker target and confirmed adaptive profit stop. No loss stop or holding-age deadline. Exit advice requires fresh live prices. </div>
+      <div style="font-size:14px;color:var(--t2);line-height:1.5">Live merge of Holdings, Positions, and today's net buys. Exits follow the active broker target, confirmed adaptive profit stop and a 6% loss stop GTT under average cost. No holding-age deadline. Exit advice requires fresh live prices. </div>
     </div>
     ${shown.length?`<div class="scroll-x">${table.getHtml()}</div>`:panelNoMatchHtml(query,'open position')}
   </div>`;
@@ -10047,7 +10047,7 @@ function _renderMethodologyInner(){
     <div class="m-grid">
     <div class="m-card"><h4>1. Live score (throughout the session)</h4><p>The local helper runs <code>dev/btst_engine.py</code>. It builds daily, market and sector features (today's volume projected to a full session) for every liquid stock (20-day average turnover ≥ ₹5 Cr, price ₹5–₹4,000) from Zerodha daily bars plus today's live price and volume: returns from 1 day to 3 months, gap, close location, range, volume surges, volatility, distance to highs and averages, RSI, stochastics, ADX, MACD, TradingView-style ratings, relative strength and market condition. The selected model ranks opportunities; Ensemble scores are percentile-mapped scores, not calibrated expected returns. Models are retrained every 5 sessions on the last 220 sessions.</p></div>
     <div class="m-card"><h4>2. Buy on qualification</h4><p>A current live score clearing your floor can become GO throughout the session. Qualifying names share available capital by score, within saved allocation and execution limits (minimum ₹5,000 per funded stock). A purchase consumes its crossing; a completed below-floor observation enables a fresh crossing, held or unheld. The market gate, price freshness, circuit, surveillance and EQ checks still apply.</p></div>
-    <div class="m-card"><h4>3. Exit</h4><p>Orders carry the selected model target, floored for costs and profit. The target learner observes simulated signals through two later sessions; that research horizon does not force a live exit. +3% is its startup fallback. Profit protection follows measured candle swings and 30-second live samples: quieter movement tightens the distance; wider swings cannot lower an established stop. The runner hands off near the target after broker protection is confirmed. No loss stop or scheduled expiry.</p></div></div>
+    <div class="m-card"><h4>3. Exit</h4><p>Orders carry the selected model target, floored for costs and profit. The target learner observes simulated signals through two later sessions; that research horizon does not force a live exit. +3% is its startup fallback. Profit protection follows measured candle swings and 30-second live samples: quieter movement tightens the distance; wider swings cannot lower an established stop. The runner hands off near the target after broker protection is confirmed. A separate loss stop GTT sells 6% under average cost (deep stops cut stuck losers; tight stops sold dips that recovered). No scheduled expiry.</p></div></div>
     <h3>Historical evidence</h3><p>The experiments below used older fixed entry and exit rules. They do not validate the current score-crossing entries, adaptive profit trail or holding without a time deadline.</p>
     <p>Walk-forward on NSE daily data, Dec 2025 – Sep 2026 (the model never saw the future), costs included: top 5 bought at the close and sold at +3% the next day or at its close averaged <b>+0.91% per trade</b>, 73% of days positive. With the market gate: <b>+1.18% per trade, 79% of days positive, worst drawdown −4.7%</b>. A 1-minute replay of 36 recent sessions (buy at the real 15:25 price, +3% only when price traded through it) averaged <b>+1.17% per trade</b>, 26 of 36 days positive. Different random seeds and settings gave +0.91% to +1.05%.</p>
     <p>The earlier near-high rules (v1388–v1392) and every intraday entry rule tested on 5-minute and 1-minute data did not beat costs; they are retired.</p>
@@ -10656,15 +10656,15 @@ function getRowExitPolicy(row,buyPrice=null,activeInfo=null,nudgeInfo=null,qty=n
   if(learned?.method==='peak-model')return {targetPct,basePct,stopPct,viable:true,
     targetPolicy:'peak-model',x:learned.x,y:0,z,
     targetSource:`Peak: 85% of this stock's predicted peak +${learned.x.toFixed(2)}% (predicted dip ${learned.dip.toFixed(2)}%, peak in ~${learned.sessions.toFixed(1)} sessions); costs + minimum net floor ${z.toFixed(2)}%`,
-    viabilitySource:null,stopSource:'No loss stop; target GTT and adaptive profit protection',rewardRisk:null};
+    viabilitySource:null,stopSource:'6% loss stop GTT; target GTT and adaptive profit protection',rewardRisk:null};
   if(learned?.method==='evolving-t2')return {targetPct,basePct,stopPct,viable:true,
     targetPolicy:TARGET_POLICY_VERSION,x:learned.x,y:learned.y,z,
     targetSource:`${learned.model==='ENS'?'Ensemble':'Original'}: ${learned.fallback?'3% startup fallback':`85% of median ${learned.x.toFixed(2)}%`}; ${learned.n} closed signals (${learned.provisional} still tracking); costs + minimum net floor ${z.toFixed(2)}%`,
-    viabilitySource:null,stopSource:'No loss stop; target GTT and adaptive profit protection',rewardRisk:null};
+    viabilitySource:null,stopSource:'6% loss stop GTT; target GTT and adaptive profit protection',rewardRisk:null};
   return {targetPct,basePct,stopPct,viable:true,targetPolicy:learned?(learned.method==='profit-model'?'btst-profit-model':'btst-score-learned'):'btst-fixed',
     targetSource:learned?`${learned.method==='profit-model'?'Profit-model':'Score-learned'} target (${learned.n} completed paths through ${learned.through})`:`+${basePct}% GTT (learning fallback)`,
     viabilitySource:null,
-    stopSource:stopPct>0?'Fixed strategy stop':'No loss stop; target GTT and adaptive profit protection',rewardRisk:stopPct>0?targetPct/stopPct:null};
+    stopSource:stopPct>0?'Fixed strategy stop':'6% loss stop GTT; target GTT and adaptive profit protection',rewardRisk:stopPct>0?targetPct/stopPct:null};
 }
 function summarizeRowExitPolicies(rows){
   const policies=(rows||[]).map(r=>getRowExitPolicy(r,r?.price)).filter(p=>p.targetPct>0&&p.stopPct>0&&p.viable);
@@ -10902,10 +10902,11 @@ function getOpenPositionTapePolicy(sym,pos){
   if(!stale&&plk?.activated&&!plk?.triggered&&!brokerStop&&!verdict.shouldExit) verdict.reason='Profit protection pending broker confirmation. '+verdict.reason;
   else if(!stale&&plk?.swingDataMissing&&!plk?.activated&&!verdict.shouldExit) verdict.reason='Swing estimate unavailable; profit trail not armed. '+verdict.reason;
   const {STOP_LOSS_PCT:slPct}=RocketStrategy.CONFIG;
-  const targetPrice=avg>0?+(avg*(1+tgtPct/100)).toFixed(2):null,stopPrice=avg>0&&slPct>0?+(avg*(1-slPct/100)).toFixed(2):null;
+  const lossStop=plk?.lossGttId&&plk?.lossGttQty===qty&&plk?.lossGttTrigger>0?plk.lossGttTrigger:null;
+  const targetPrice=avg>0?+(avg*(1+tgtPct/100)).toFixed(2):null,stopPrice=lossStop||(avg>0&&slPct>0?+(avg*(1-slPct/100)).toFixed(2):null);
   return {symbol,qty,price,open:quote?.open,signal:verdict.action,signalSort:verdict.shouldExit?0:1,
     why:verdict.reason,exitVerdict:verdict,targetPrice,stopPrice,targetPct:tgtPct,stopPct:slPct,
-    targetWhy:activeTarget>0?`Active target GTT at ${activeTarget}`:`Entry target +${tgtPct}% (active broker target not confirmed)`,stopWhy:slPct>0?`-${slPct}% from average buy cost`:'No loss stop; target GTT and adaptive profit protection',
+    targetWhy:activeTarget>0?`Active target GTT at ${activeTarget}`:`Entry target +${tgtPct}% (active broker target not confirmed)`,stopWhy:lossStop?`Loss stop GTT at ${lossStop} (6% under average cost, or just under the price once past it)`:slPct>0?`-${slPct}% from average buy cost`:'Loss stop GTT not confirmed yet; target GTT and adaptive profit protection',
     pacePct:null,paceRs:null,daysHeld:days,ageUnknown:days==null,afterCostFloor:null,
     profitLock:plk||null,lockStopPrice:verdict.lockStopPrice||null};
 }
@@ -13830,7 +13831,7 @@ function showRadarDetail(sym){
   document.getElementById('radarDetailTitle').textContent=r.symbol+' | Strategy';
   document.getElementById('radarDetailBody').innerHTML=`<p><b>${act.state}</b>: ${escHtml(act.reason)}</p>
     <p>${escHtml(radarScoreTitle(r))}</p><p>Price ${fmtINR(x.price)} | Day high ${fmtINR(x.high)} | Open ${fmtINR(x.open)} | VWAP ${fmtINR(x.vwap)}</p>
-    <p>Target +${getRowExitPolicy(r,r.price).targetPct}% base GTT (allocated order includes cost/profit floor) | No loss stop | Adaptive profit protection; no scheduled exit.</p>`;
+    <p>Target +${getRowExitPolicy(r,r.price).targetPct}% base GTT (allocated order includes cost/profit floor) | 6% loss stop GTT | Adaptive profit protection; no scheduled exit.</p>`;
   dlg.showModal();
 }
 
