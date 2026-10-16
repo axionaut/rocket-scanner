@@ -450,7 +450,31 @@ function bookedSession(session,holdingCosts,tradebook){
     return exits.filter(e=>e.qty>0);
   }
 
+  // Operational inventory basis. A sale releases average cost, never a selected buy lot.
+  // Re-entry after a complete exit starts a new position and a new peak window.
+  function weightedPosition(opening, fills, expectedQty){
+    let qty=Number(opening?.qty||0),avgCost=Number(opening?.price||0),buyTime=opening?.time||null,cycles=0;
+    const bad=reason=>({ok:false,reason});
+    if(!Number.isFinite(qty)||qty<0||(qty>0&&!(avgCost>0&&Number.isFinite(avgCost))))return bad('Opening cost is unknown');
+    if(expectedQty!=null&&!(Number.isFinite(Number(expectedQty))&&Number(expectedQty)>=0))return bad('Invalid portfolio quantity');
+    const sorted=fills.map((f,i)=>({...f,_i:i})).sort((a,b)=>String(a.time).localeCompare(String(b.time))||a._i-b._i);
+    for(const f of sorted){
+      const q=Number(f.qty),price=Number(f.price),side=String(f.side||f.type||'').toUpperCase();
+      if(!(q>0&&price>0&&Number.isFinite(q)&&Number.isFinite(price))||!f.time||!['BUY','SELL'].includes(side))return bad('Invalid execution fill');
+      if(side==='BUY'){
+        if(!qty){avgCost=0;buyTime=f.time;cycles++;}
+        avgCost=(avgCost*qty+price*q)/(qty+q);qty+=q;
+      }else{
+        if(q>qty+1e-6)return bad('Sales exceed explained inventory');
+        qty=Math.max(0,qty-q);if(!qty){avgCost=0;buyTime=null;}
+      }
+    }
+    if(expectedQty!=null&&Math.abs(qty-Number(expectedQty))>1e-6)return bad('Execution and portfolio quantities disagree');
+    return {ok:true,qty,avgCost,buyTime,cycles};
+  }
+
   return {
+    weightedPosition,
     exitBuyWindows,
     bookedSession,
     calcZerodhaChargesSplit,

@@ -1,5 +1,5 @@
 const BUILD_TS='2026-10-16 IST'; // release build date (IST)
-const APP_VERSION=1515;
+const APP_VERSION=1516;
 const RADAR_SCORE_VERSION='v1419-recross-batches'; // Eligible on crossing the score floor at any time; selected model's evolving target and movement-based profit protection.
 
 // ── v1358: AN UNCAUGHT ERROR MUST NAME ITSELF ─────────────────────────────────────────────────
@@ -7158,28 +7158,6 @@ function recordLeftOnTableSession(date,summary){
 }
 let _reachMemo=null;
 
-// v1427: HOW ZERODHA SPLITS A DAY WITH BUYS AND SELLS IN THE SAME STOCK. Matched quantity is intraday
-// and is taken from the EARLIEST buys of the day; only the later lots carry. Kite's positions `Avg.`
-// is the average of EVERY buy that day, so on 23 Sep MANINDS read 955.16 (all 411 shares) while the
-// 100 carried shares cost 991.40 - the figure Kite Holdings and the GTT both use. Pricing the
-// intraday trip at the day average also flipped PREMIERPOL's 540-share trip from +890 to -407.
-function sessionBuyFifo(sym,orders){
-  const key=normSym(sym);
-  const mine=(orders||[]).filter(o=>normSym(o.symbol)===key&&Number(o.qty)>0&&Number(o.price)>0);
-  const buys=mine.filter(o=>o.type==='BUY').sort((a,b)=>String(a.time).localeCompare(String(b.time)));
-  const buyQty=buys.reduce((t,o)=>t+Number(o.qty),0),sellQty=mine.filter(o=>o.type==='SELL').reduce((t,o)=>t+Number(o.qty),0);
-  if(!(buyQty>0)) return null;
-  let left=Math.min(buyQty,sellQty),sameCost=0;
-  const lots=[];
-  for(const o of buys){
-    const q=Number(o.qty),px=Number(o.price),use=Math.min(left,q);
-    sameCost+=use*px;left-=use;
-    if(q-use>0) lots.push({qty:q-use,price:px,time:o.time});
-  }
-  const sameDayQty=Math.min(buyQty,sellQty),carriedQty=lots.reduce((t,l)=>t+l.qty,0);
-  return {buyQty,sellQty,sameDayQty,sameDayAvg:sameDayQty>0?sameCost/sameDayQty:null,
-    carriedQty,carriedAvg:carriedQty>0?lots.reduce((t,l)=>t+l.qty*l.price,0)/carriedQty:null,lots};
-}
 function computeLatestOrderBooked(){
   if(!ORDERS_TODAY?._loadedThisSession) return null;
   const session=getLatestOrderSession();if(!session)return null;
@@ -9019,10 +8997,6 @@ function buildOpenPositionsPanel(query=''){
             +(covered<row.qty?`<div style="font-size:11px;color:var(--amber)" title="Shares held with no active GTT">${row.qty-covered} without GTT</div>`:'');
         }
         if(v==null) return '<span style="color:var(--t3)">—</span>';
-        if(row.lots&&Number(row.targetPct)>0){
-          const pct=Number(row.targetPct);
-          return row.lots.map(l=>`<div title="${escHtml('Lot bought '+String(l.time||'').slice(11,16)+' at '+fmtINR(l.price)+': +'+pct.toFixed(2)+'% target, one GTT per lot')}">${fmtINR(gttLotPrice(l.price*(1+pct/100)))}<span style="font-size:11px;color:var(--t3)">×${l.qty}</span></div>`).join('');
-        }
         return fmtINR(v)+`<span style="font-size:11px;color:var(--t3)">×${row.qty??''}</span>`
           +`<span title="${escHtml('Profit target: '
             +(row.targetPct!=null?('+'+Number(row.targetPct).toFixed(2)+'% from average buy. '):'')
@@ -9953,9 +9927,9 @@ let _openPosMemo=null;
 function getCombinedOpenPositionMap(){
   const now=Date.now(),m=_openPosMemo;
   if(m&&now-m.at<1000&&m.h===HOLDINGS&&m.p===POSITIONS&&m.o===ORDERS_TODAY&&m.c===HOLD_COST_MAP
-    &&m.hn===(HOLDINGS?.length||0)&&m.pn===(POSITIONS?.length||0)&&m.on===(ORDERS_TODAY?.length||0)&&m.day===getSessionDate()) return m.v;
+    &&m.plk===PROFIT_LOCK_STATUS&&m.hn===(HOLDINGS?.length||0)&&m.pn===(POSITIONS?.length||0)&&m.on===(ORDERS_TODAY?.length||0)&&m.day===getSessionDate()) return m.v;
   const v=_combinedOpenPositionMapUncached();
-  _openPosMemo={at:now,h:HOLDINGS,p:POSITIONS,o:ORDERS_TODAY,c:HOLD_COST_MAP,hn:HOLDINGS?.length||0,pn:POSITIONS?.length||0,on:ORDERS_TODAY?.length||0,day:getSessionDate(),v};
+  _openPosMemo={at:now,plk:PROFIT_LOCK_STATUS,h:HOLDINGS,p:POSITIONS,o:ORDERS_TODAY,c:HOLD_COST_MAP,hn:HOLDINGS?.length||0,pn:POSITIONS?.length||0,on:ORDERS_TODAY?.length||0,day:getSessionDate(),v};
   return v;
 }
 function _combinedOpenPositionMapUncached(){
@@ -9965,7 +9939,7 @@ function _combinedOpenPositionMapUncached(){
     if(!ORDERS_TODAY?.length) return null;
     const days=[...new Set(ORDERS_TODAY.map(o=>normOrderDate(o.time)).filter(Boolean))].sort();
     const last=days.at(-1);
-    return last?ORDERS_TODAY.filter(o=>normOrderDate(o.time)===last):null;
+    return last===getSessionDate()?ORDERS_TODAY.filter(o=>normOrderDate(o.time)===last):null;
   }catch(e){return null;}})();
   const ensure=(symbol)=>{
     if(!combined[symbol]) combined[symbol]={symbol,qty:0,avg:0,ltp:null,hasLivePosition:false};
@@ -9975,31 +9949,14 @@ function _combinedOpenPositionMapUncached(){
     if(!h?.symbol||!(h.qty>0)) return;
     const pos=ensure(h.symbol);
     pos.qty=h.qty;
-    pos.avg=HOLD_COST_MAP[h.symbol]??h.avgCost??0;
+    pos.avg=h.avgCost??0;
     pos.ltp=h.ltp??pos.ltp;
-    // Lots bought as separate orders carry separate GTTs; group the tradebook's open FIFO fills by
-    // execution time (one order's partial fills share it) when they account for the whole holding.
-    try{
-      const open=(TRADEBOOK_STATS?.openPositionLotsMap?.[h.symbol]||[]).filter(l=>l.qty>0&&l.price>0);
-      if(open.length&&Math.abs(open.reduce((t,l)=>t+l.qty,0)-h.qty)<1e-6){
-        const byTime=new Map();
-        for(const l of open){const k=String(l.time||l.date);const g=byTime.get(k)||{qty:0,cost:0,time:l.time||l.date};g.qty+=l.qty;g.cost+=l.qty*l.price;byTime.set(k,g);}
-        const lots=[...byTime.values()].map(g=>({qty:g.qty,price:g.cost/g.qty,time:g.time}));
-        if(lots.length>1) pos.lots=lots;
-        pos.lotCost=open.reduce((t,l)=>t+l.qty*l.price,0);
-      }
-    }catch(e){}
   });
   if(POSITIONS?.length) POSITIONS.forEach(p=>{
     if(!p?.symbol||!isFinite(Number(p.qty))) return;
     const pos=ensure(p.symbol);
     const liveQty=Number(p.qty)||0;
     let liveAvg=Number(p.avg??p.avgCost)||0;
-    // v1427: carried shares cost what their own lots cost, not Kite's all-buys day average.
-    if(liveQty>0&&posSessionOrders){
-      const f=sessionBuyFifo(p.symbol,posSessionOrders);
-      if(f&&Math.abs(f.carriedQty-liveQty)<1e-6&&f.carriedAvg>0){ liveAvg=f.carriedAvg; if(!(pos.qty>0)){ pos.lots=f.lots; pos.lotCost=f.lots.reduce((t,l)=>t+l.qty*l.price,0); } }
-    }
     pos.hasLivePosition=true;
     pos.ltp=p.ltp??pos.ltp;
     if(liveQty>0){
@@ -10050,7 +10007,23 @@ function _combinedOpenPositionMapUncached(){
       }
     });
   }
-  Object.values(combined).forEach(pos=>{pos.avg=pos.avg>0?+pos.avg.toFixed(4):0;});
+  // The helper reconciles individual execution fills, including partial/cancelled orders.
+  // Offline fallback uses chronological orders and the opening holding, never day-wide buy averages.
+  for(const pos of Object.values(combined)){
+    pos.lots=null;pos.lotCost=null;
+    const helper=profitLockFor(pos.symbol);
+    if(helper?.basisKnown===true&&helper.basisMode==='weighted-average'&&Date.now()-helper.basisAt<60000){
+      pos.qty=helper.qty;pos.avg=helper.avgCost;pos.basisKnown=true;
+    }else if(pos.qty>0&&posSessionOrders){
+      const fills=posSessionOrders.filter(o=>o.symbol===pos.symbol&&o.qty>0&&o.price>0);
+      const net=fills.reduce((n,o)=>n+(o.type==='BUY'?o.qty:-o.qty),0),openingQty=pos.qty-net;
+      const h=(HOLDINGS||[]).find(h=>h.symbol===pos.symbol);
+      const basis=RocketStrategy.weightedPosition({qty:openingQty,price:Number(h?.avgCost)||0},fills,pos.qty);
+      if(basis.ok){pos.avg=basis.avgCost;pos.basisKnown=true;}else pos.basisKnown=false;
+    }
+    if(helper?.basisKnown===false)pos.basisKnown=false;
+    pos.avg=pos.avg>0?+pos.avg.toFixed(4):0;
+  }
   return combined;
 }
 function estimateRoundTripCostPct(grossTargetPct=1){
@@ -10723,8 +10696,8 @@ function getOpenPositionTapePolicy(sym,pos){
     :plk?.targetGttId&&plk.targetGttQty===qty&&plk.targetPrice>0&&!plk.targetMissingSince?plk.targetPrice:null;
   const tgtPct=activeTarget>0&&avg>0?(activeTarget/avg-1)*100:executedBtstTarget(symbol)||currentModelTargetPct();
   const brokerStop=plk?.stopConfirmed&&plk?.stopGttId&&plk?.stopGttQty===qty&&plk?.stopGttTrigger>0?plk.stopGttTrigger:null;
-  const pending=plk&&(plk.triggered||plk.cleanupPending||plk.needsReconcile||plk.handoffPending||(plk.runner&&!brokerStop));
-  const verdict=stale?{action:'WAIT',reason:stale,shouldExit:false}:pending?{action:'WAIT',reason:plk.triggered?'Broker exit triggered; awaiting fill or cleanup.':'Broker profit protection is being reconciled.',shouldExit:false}:RocketStrategy.evaluateExit({avgCost:avg,daysHeld:days,targetPct:tgtPct,targetPrice:activeTarget,peakPnlPct:plk?.peakPnlPct??null,runnerStopPrice:plk?.runner&&!plk?.triggered?brokerStop:null,swingStopPrice:plk?.swingLock&&plk?.activated&&!plk?.runner&&!plk?.triggered?brokerStop:null},price);
+  const pending=pos?.basisKnown===false||plk&&(plk.triggered||plk.cleanupPending||plk.needsReconcile||plk.handoffPending||(plk.runner&&!brokerStop));
+  const verdict=stale?{action:'WAIT',reason:stale,shouldExit:false}:pending?{action:'WAIT',reason:pos?.basisKnown===false?'Position cost is awaiting execution reconciliation.':plk?.triggered?'Broker exit triggered; awaiting fill or cleanup.':'Broker profit protection is being reconciled.',shouldExit:false}:RocketStrategy.evaluateExit({avgCost:avg,daysHeld:days,targetPct:tgtPct,targetPrice:activeTarget,peakPnlPct:plk?.peakPnlPct??null,runnerStopPrice:plk?.runner&&!plk?.triggered?brokerStop:null,swingStopPrice:plk?.swingLock&&plk?.activated&&!plk?.runner&&!plk?.triggered?brokerStop:null},price);
   if(!stale&&plk?.activated&&!plk?.triggered&&!brokerStop&&!verdict.shouldExit) verdict.reason='Profit protection pending broker confirmation. '+verdict.reason;
   else if(!stale&&plk?.swingDataMissing&&!plk?.activated&&!verdict.shouldExit) verdict.reason='Swing estimate unavailable; profit trail not armed. '+verdict.reason;
   const {STOP_LOSS_PCT:slPct}=RocketStrategy.CONFIG;
