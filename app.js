@@ -1,5 +1,5 @@
 const BUILD_TS='2026-10-16 IST'; // release build date (IST)
-const APP_VERSION=1509;
+const APP_VERSION=1510;
 const RADAR_SCORE_VERSION='v1419-recross-batches'; // Eligible on crossing the score floor at any time; selected model's evolving target and movement-based profit protection.
 
 // ── v1358: AN UNCAUGHT ERROR MUST NAME ITSELF ─────────────────────────────────────────────────
@@ -4400,6 +4400,8 @@ if(typeof document!=='undefined'){
 // It reads getRowActionState, never the raw score - v1417's lesson: an alert that names a stock
 // the board has already refused is exactly the one that gets acted on.
 function checkCrossingAlerts(){
+  // Owner 16 Oct (v1510): no "buyable now" crossing popup at all. The funded basket and Auto-Buy carry the signal.
+  if(!CROSSING_POPUP_ON) return;
   if(!ALERTS_ON) return;
   // Owner 1 Oct: with Auto-Buy on the helper places the buy itself; the "buy the basket now" popup is noise.
   if(AUTO_BUY_ENABLED) return;
@@ -4428,6 +4430,7 @@ function checkCrossingAlerts(){
 // Symbols already announced today. Cleared when the session date rolls, so a tab left open
 // overnight re-arms rather than staying silent on tomorrow's first crossing.
 let _crossAlerted=new Set(),_crossAlertDay='';
+const CROSSING_POPUP_ON=false;
 function resetCrossAlertsIfNewDay(){
   const d=getSessionDate();
   if(d!==_crossAlertDay){_crossAlertDay=d;_crossAlerted=new Set();}
@@ -14257,7 +14260,7 @@ function refreshStrategySafety(){
 function startStreamRefresh(){
   if(!startStreamRefresh.nativeEntry)startStreamRefresh.nativeEntry=setInterval(()=>syncNativeKiteEntries().catch(()=>{}),2000);
   if(_streamRefreshTimer) return;
-  if(!startStreamRefresh.btst){startStreamRefresh.btst=setInterval(()=>{loadBtstPicks();loadKiteMargins();loadKiteGtts();loadProfitLockStatus();loadAutoBuyStatus();loadModelPortfolios();syncSellBasketToKite();try{resetCrossAlertsIfNewDay();checkCrossingAlerts();}catch(e){}},20000);loadBtstPicks();loadKiteMargins();loadKiteGtts();loadProfitLockStatus();loadAutoBuyStatus();loadModelPortfolios();syncSellBasketToKite();try{resetCrossAlertsIfNewDay();checkCrossingAlerts();}catch(e){}
+  if(!startStreamRefresh.btst){startStreamRefresh.btst=setInterval(()=>{loadBtstPicks();loadKiteMargins();loadKiteGtts();loadProfitLockStatus();loadAutoBuyStatus();loadModelPortfolios();syncSellBasketToKite();scheduleKiteBasketSync();try{resetCrossAlertsIfNewDay();checkCrossingAlerts();}catch(e){}},20000);loadBtstPicks();loadKiteMargins();loadKiteGtts();loadProfitLockStatus();loadAutoBuyStatus();loadModelPortfolios();syncSellBasketToKite();try{resetCrossAlertsIfNewDay();checkCrossingAlerts();}catch(e){}
     try{seedSavedBasketCount();}catch(e){}}
   _streamRefreshUiTimer=setInterval(()=>{try{refreshStrategySafety();renderLiveTapeBar();}catch(e){console.warn('Strategy safety refresh',e);}},1000);
   if(!_streamVisibilityBound){
@@ -15142,7 +15145,11 @@ async function _drainBasketQueue(preferredOrders = null){
 }
 
 window.BASKET_EXPORT_BUSY = false;
-let _kiteTransferBusy=false,_kiteSyncTimer=null,_kiteSentSignature='';
+let _kiteTransferBusy=false,_kiteSyncTimer=null,_kiteSentSignature='',_kiteSentAt=0;
+// v1510 (owner 16 Oct): a Scanner_Buy cleared in Kite stayed empty because an unchanged plan was never sent again.
+// An unchanged plan is re-checked against Kite every minute; the bridge leaves an identical basket untouched,
+// refills a cleared one, and never rewrites a non-empty basket that is open on screen.
+const KITE_BASKET_RESYNC_MS=60000;
 function scheduleKiteBasketSync(delay=500){
   if(_kiteSyncTimer||_kiteTransferBusy) return;
   _kiteSyncTimer=setTimeout(()=>{_kiteSyncTimer=null;sendBasketToKite(true);},delay);
@@ -15251,21 +15258,22 @@ async function sendBasketToKite(automatic=false){
     const orders=getDesiredBasketOrders();
     noticePlan=kiteBuyPlanSignature(orders);
     const signature=getCanonicalBasketSignature(orders);
-    if(automatic&&(!orders.length||signature===_kiteSentSignature)) return;
+    if(automatic&&(!orders.length||(signature===_kiteSentSignature&&Date.now()-_kiteSentAt<KITE_BASKET_RESYNC_MS))) return;
     if(!orders.length) throw new Error('No selected GO orders fit the available cash and allocation limits.');
     if(automatic){
       if(signature!==_lastSavedBasketSig) return;
     }else await requestBasketSync({manual:true,precomputedOrders:orders});
     if(getCanonicalBasketSignature(orders)!==getCanonicalBasketSignature(getDesiredBasketOrders())) throw new Error('Recommendations changed. Send the current basket again.');
     if(AUTO_BUY_ENABLED&&AUTO_BUY_STATUS.mode==='browser-ioc'){
-      _kiteSentSignature=signature;
+      _kiteSentSignature=signature;_kiteSentAt=Date.now();
       setTimeout(()=>syncNativeKiteEntries().catch(()=>{}),0);
       if(!automatic)showToast('Funded signals queued for immediate capped entry through Kite. No parallel executable buy basket is created.',6000);
       return;
     }
     const result=await kiteBridgeRequest(orders,'BUY',automatic);
     if(!result.ok) throw new Error(result.why||'Kite did not confirm the basket.');
-    _kiteSentSignature=signature;
+    _kiteSentSignature=signature;_kiteSentAt=Date.now();
+    if(automatic&&result.already) return;   // periodic re-check found Kite already matching: nothing to announce
     const isAutoOn = typeof AUTO_BUY_ENABLED!=='undefined'&&AUTO_BUY_ENABLED;
     const autoNote = isAutoOn ? ' (Auto-Buy also active via dip GTT)' : '';
     reportKiteBasketOutcome(true,`${result.count} order${result.count===1?'':'s'} ${result.already?'already in':'written to'} Scanner_Buy: ${orders.map(o=>o.instrument.tradingsymbol+' x'+o.params.quantity).join(', ')}. Basket copy only; check GTTs and filled orders before executing${autoNote}.`,'BUY',noticePlan);
