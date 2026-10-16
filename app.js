@@ -1,5 +1,5 @@
 const BUILD_TS='2026-10-16 IST'; // release build date (IST)
-const APP_VERSION=1507;
+const APP_VERSION=1508;
 const RADAR_SCORE_VERSION='v1419-recross-batches'; // Eligible on crossing the score floor at any time; selected model's evolving target and movement-based profit protection.
 
 // ── v1358: AN UNCAUGHT ERROR MUST NAME ITSELF ─────────────────────────────────────────────────
@@ -7777,6 +7777,7 @@ async function loadAutoBuyStatus(){
     countToday: Number(j.countToday) || 0,
     at: j.asOf || Date.now(),
     mode: j.mode || (j.apiOrdersAllowed ? 'api' : 'gtt-dip'),
+    bridgeEntries: Array.isArray(j.bridgeEntries) ? j.bridgeEntries : [],
     blockedWhy: (j.apiOrdersAllowed === false && !j.mode && j.why) ? String(j.why) : ''
   };
   if (AUTO_BUY_STATUS.enabled !== AUTO_BUY_ENABLED) {
@@ -7847,7 +7848,7 @@ async function toggleAutoBuy(){
     return;
   }
   showToast(AUTO_BUY_ENABLED
-    ? '<strong>⚡ Auto-Buy ON:</strong> Qualifying recommendations will automatically place BUY GTT orders on dip with +target GTT.' 
+    ? '<strong>⚡ Auto-Buy ON:</strong> Fresh signals buy through Kite with a capped LIMIT; unfilled shares cancel immediately. Target GTT follows the confirmed fill.'
     : '<strong>⚡ Auto-Buy OFF:</strong> Baskets will be exported to Zerodha_Basket_Buy.json for manual execution.',
     6000
   );
@@ -7862,13 +7863,13 @@ function renderAutoBuyBtn(){
     btn.style.borderColor = 'rgba(16,185,129,.4)';
     btn.style.color = 'var(--green)';
     span.textContent = 'ON';
-    btn.title = 'Auto-Buy is ENABLED via Dip-Buy GTTs. Qualifying recommendations automatically place BUY GTTs on 0.25%/9p dip with target GTT upon fill. Click to disable.';
+    btn.title = AUTO_BUY_STATUS.mode==='browser-ioc' ? 'Auto-Buy: immediate CNC LIMIT IOC through logged-in Kite, capped 0.25% above the signal price. Unfilled quantity cancels; confirmed fills receive target GTTs. Bridge 1.6.0 and open Kite required. Click to disable.' : 'Auto-Buy: legacy dip GTT entry. Update helper and bridge for immediate capped entry. Click to disable.';
   } else {
     btn.style.background = 'var(--bg-card)';
     btn.style.borderColor = 'var(--border)';
     btn.style.color = 'var(--t2)';
     const blocked = AUTO_BUY_STATUS && AUTO_BUY_STATUS.blockedWhy;
-    span.textContent = blocked ? 'OFF (no static IP)' : 'OFF';
+    span.textContent = blocked ? 'OFF (unavailable)' : 'OFF';
     btn.title = blocked
       ? 'Auto-Buy unavailable: ' + blocked + ' Buy basket and Zerodha_Basket_Sell.json are for manual execution in Kite.'
       : 'Auto-Buy is DISABLED. Baskets are exported to Zerodha_Basket_Buy.json for manual review and execution. Click to enable.';
@@ -9435,21 +9436,28 @@ async function loadModelPortfolios(){
   finally{MODEL_PORTFOLIO_BUSY=false;}
 }
 function buildModelPortfolioPanel(){
-  const j=MODEL_PORTFOLIO_STATUS;
-  const start=j?.startedAt?new Date(j.startedAt).toLocaleString('en-IN',{timeZone:'Asia/Kolkata'}):null;
-  const money=n=>Number.isFinite(n)?'₹'+n.toLocaleString('en-IN',{maximumFractionDigits:2}):'—';
-  const pct=n=>Number.isFinite(n)?(n>=0?'+':'')+n.toFixed(2)+'%':'—';
-  const color=n=>n>0?'var(--green)':n<0?'var(--red)':'var(--t2)';
-  const models=['ENS','PEAK'];
+  const j=MODEL_PORTFOLIO_STATUS,models=['ENS','PEAK'];
+  const money=n=>Number.isFinite(n)?'₹'+n.toLocaleString('en-IN',{minimumFractionDigits:2,maximumFractionDigits:2}):'—';
+  const pct=n=>Number.isFinite(n)?(n>0?'+':'')+n.toFixed(2)+'%':'—';
+  const tone=n=>n>0?'mp-positive':n<0?'mp-negative':'';
+  const name=k=>k==='ENS'?'Ensemble':'Peak';
+  const time=at=>new Date(at).toLocaleTimeString('en-IN',{timeZone:'Asia/Kolkata',hour:'2-digit',minute:'2-digit',hour12:false});
   const stale=j?.lastObservedAt&&Date.now()-j.lastObservedAt>60000;
-  const head=`<section id="modelPortfolioPanel" style="margin:16px;padding:16px;border:1px solid var(--border);border-radius:10px"><b>Ensemble vs Peak · Live paper portfolios</b><div id="modelPortfolioConnection" style="color:var(--t3);font-size:12px;margin:8px 0">${j?.error?escHtml(j.error):!start?'Waiting for the helper, fresh scores for both models, and live capital.':`Tracking since ${escHtml(start)} IST · ${stale?'Observation paused; showing saved marks':'Both models tracked regardless of the live selection'}${j.gaps?.length?' · '+j.gaps.length+' observation gap(s)':''}`}</div>`;
-  if(!start)return head+'</section>';
-  const rows=models.map(k=>{const m=j.models?.[k];if(!m)return '';const fl=j.settings?.values?.floors?.[k];return `<tr><td>${k==='ENS'?'Ensemble':'Peak'}<div style="font-size:11px;color:var(--t3)">Floor ${escHtml(String(fl??'—'))}</div></td><td>${money(m.fundedCapital??m.startingCapital)}</td><td style="color:${color(m.net)}">${money(m.net)}<div>${pct(m.returnPct)}</div></td><td>${money(m.realised)}</td><td style="color:${color(m.openNet)}">${money(m.openNet)}</td><td>${money(m.cash)}</td><td>${money(m.tied)}</td><td>${m.maxDrawdownPct.toFixed(2)}%</td><td>${m.closedFills} / ${m.openPositions} / ${m.waitingOrders}${m.staleMarks?'<div style="color:var(--amber)">'+m.staleMarks+' stale mark(s)</div>':''}</td></tr>`;}).join('');
-  const series=models.map(k=>(j.models?.[k]?.curve||[]).map(x=>({at:x.at,pct:x.returnPct??x.net/j.models[k].startingCapital*100})));
-  const points=series.flat(),t0=Math.min(...points.map(x=>x.at)),t1=Math.max(...points.map(x=>x.at)),lo=Math.min(0,...points.map(x=>x.pct)),hi=Math.max(.01,...points.map(x=>x.pct));
-  const chart=points.length>1?`<svg viewBox="0 0 800 120" role="img" aria-label="Paper account return over time. Ensemble orange; Peak blue." style="width:100%;height:140px;margin-top:12px"><line x1="0" x2="800" y1="${110-(0-lo)/(hi-lo||1)*100}" y2="${110-(0-lo)/(hi-lo||1)*100}" stroke="var(--border)"/>${series.map((s,i)=>`<polyline fill="none" stroke="${i?'#60a5fa':'#fb923c'}" stroke-width="2" points="${s.map(x=>((x.at-t0)/(t1-t0||1)*800).toFixed(1)+','+(110-(x.pct-lo)/(hi-lo||1)*100).toFixed(1)).join(' ')}"/>`).join('')}<text x="4" y="12" fill="var(--t3)" font-size="11">${hi.toFixed(2)}%</text><text x="4" y="119" fill="var(--t3)" font-size="11">${lo.toFixed(2)}%</text></svg><div style="font-size:12px;color:var(--t3)"><span style="color:#fb923c">● Ensemble</span> · <span style="color:#60a5fa">● Peak</span> · Net account return since tracking began</div>`:'';
-  const details=models.map(k=>{const m=j.models[k];if(!m)return '';const positions=(m.positions||[]).map(p=>`<tr><td>${escHtml(p.sym)}</td><td>${p.qty}</td><td>${money(p.avgCost)}</td><td>${money(p.mark)}</td><td>${money(p.target)}</td><td>${p.stop?money(p.stop):'Not armed'}</td></tr>`).join('');const trades=(m.trades||[]).slice(-10).reverse().map(t=>`<tr><td>${escHtml(t.sym)}</td><td>${t.qty}</td><td>${money(t.buyPrice)}</td><td>${money(t.sellPrice)}</td><td>${money(t.charges)}</td><td style="color:${color(t.net)}">${money(t.net)}</td></tr>`).join('');return `<details style="margin-top:12px"><summary>${k==='ENS'?'Ensemble':'Peak'} positions and recent simulated exits</summary><div style="overflow:auto"><table style="width:100%;text-align:left"><thead><tr><th>Open stock</th><th>Qty</th><th>Average</th><th>Mark</th><th>Target</th><th>Profit stop</th></tr></thead><tbody>${positions||'<tr><td colspan="6">No open positions</td></tr>'}</tbody></table><table style="width:100%;text-align:left;margin-top:12px"><thead><tr><th>Sold stock</th><th>Qty</th><th>Buy</th><th>Sell</th><th>Charges</th><th>Net P&amp;L</th></tr></thead><tbody>${trades||'<tr><td colspan="6">No simulated exits yet</td></tr>'}</tbody></table></div></details>`;}).join('');
-  return head+`<div style="overflow:auto"><table style="width:100%;text-align:left;white-space:nowrap"><thead><tr><th>Model</th><th>Funded capital</th><th>Total net</th><th>Realised net</th><th>Open net</th><th>Cash</th><th>Tied up</th><th>Max drawdown</th><th>Exit fills / Open / Waiting</th></tr></thead><tbody>${rows}</tbody></table></div>${chart}<p style="font-size:12px;color:var(--t3)">Common live capital limit: ${money(j.settings?.values?.capital)}. Each portfolio keeps its own cash under the current live cash ceiling. New highs in the live cash budget add equal paper funding to both accounts, excluded from profit. Returns and drawdown adjust for those funding flows. Settings are captured at order placement. Fills are estimates from observed ticks and visible order-book depth, including partial fills and charges. Open net reserves delivery exit charges. Unobserved prices are not replayed.</p>${details}</section>`;
+  const status=j?.error?escHtml(j.error):!j?.startedAt?'Waiting for live scores and capital':stale?'Paused · showing saved marks':'Tracking both models live';
+  const css=`<style>
+  #modelPortfolioPanel{margin:16px;padding:20px;border:1px solid var(--border);border-radius:12px;background:var(--bg-card);font-size:12px;color:var(--t2)}
+  #modelPortfolioPanel *{box-sizing:border-box}.mp-header,.mp-card-top,.mp-result,.mp-chart-head{display:flex;justify-content:space-between;align-items:center;gap:12px}.mp-header h3{margin:0;color:var(--t1);font-size:16px}.mp-sub{color:var(--t3);font-size:11px;margin-top:5px;line-height:1.5}.mp-status{font-size:11px;padding:5px 9px;border:1px solid var(--border);border-radius:20px;white-space:nowrap}.mp-cards{display:grid;grid-template-columns:1fr 1fr;gap:14px;margin:18px 0}.mp-card{padding:16px;border:1px solid var(--border);border-top:2px solid var(--model-color);border-radius:8px;background:var(--bg)}.mp-card-top b{color:var(--t1);font-size:13px}.mp-floor{color:var(--t3);font-size:11px}.mp-result{justify-content:flex-start;align-items:baseline;margin:14px 0 16px;font-variant-numeric:tabular-nums}.mp-result strong{font-size:26px;font-family:var(--mono,monospace);letter-spacing:-1px}.mp-result span{font-size:13px}.mp-metrics{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:14px 10px}.mp-metric small{display:block;color:var(--t3);font-size:10px;margin-bottom:5px}.mp-metric b{font-weight:600;font-size:12px;font-variant-numeric:tabular-nums}.mp-card-foot{display:flex;flex-wrap:wrap;gap:14px;border-top:1px solid var(--border);padding-top:12px;margin-top:14px;color:var(--t3);font-size:10px}.mp-card-foot b{color:var(--t2);font-weight:600}.mp-positive{color:var(--green)}.mp-negative{color:var(--red)}.mp-chart{border:1px solid var(--border);border-radius:8px;padding:14px 14px 10px;margin-bottom:14px;background:var(--bg)}.mp-chart-head{margin-bottom:14px}.mp-chart-head b{font-size:11px;font-weight:600;color:var(--t2)}.mp-legend{display:flex;gap:14px;font-size:10px}.mp-dot{display:inline-block;width:7px;height:7px;border-radius:50%;background:var(--model-color);margin-right:5px}.mp-plot{display:grid;grid-template-columns:50px minmax(0,1fr);gap:8px}.mp-axis{display:flex;flex-direction:column;justify-content:space-between;text-align:right;font-size:10px;color:var(--t3);padding-bottom:2px}.mp-plot svg{display:block;width:100%;height:160px;overflow:visible}.mp-times{display:flex;justify-content:space-between;margin:8px 0 0 58px;color:var(--t3);font-size:10px}.mp-detail{border-top:1px solid var(--border);margin-top:0}.mp-detail summary{cursor:pointer;padding:12px 2px;color:var(--t2);font-size:12px}.mp-detail summary span{color:var(--t3);font-size:10px;margin-left:8px}.mp-table-wrap{overflow:auto;margin:0 0 14px;border:1px solid var(--border);border-radius:6px}#modelPortfolioPanel table{width:100%;border-collapse:collapse;white-space:nowrap;font-size:11px;min-width:560px}#modelPortfolioPanel th{background:var(--bg);color:var(--t3);font-size:10px;font-weight:500}#modelPortfolioPanel th,#modelPortfolioPanel td{padding:10px 12px;text-align:right;border-bottom:1px solid var(--border)}#modelPortfolioPanel th:first-child,#modelPortfolioPanel td:first-child{text-align:left}#modelPortfolioPanel tbody tr:last-child td{border-bottom:0}.mp-table-label{color:var(--t3);font-size:10px;margin:0 0 8px}.mp-empty{padding:12px 0 16px;color:var(--t3);font-size:11px}.mp-method{line-height:1.7;color:var(--t3);font-size:11px;max-width:1000px;padding-bottom:8px}.mp-method p{margin:0 0 8px}@media(max-width:650px){#modelPortfolioPanel{margin:10px;padding:14px}.mp-header{align-items:flex-start;flex-direction:column;gap:8px}.mp-cards{grid-template-columns:1fr;gap:10px}.mp-result strong{font-size:23px}.mp-chart-head{align-items:flex-start;flex-direction:column;gap:8px}.mp-plot svg{height:135px}.mp-detail summary span{display:block;margin:5px 0 0 14px}}
+  </style>`;
+  const head=`<section id="modelPortfolioPanel">${css}<div class="mp-header"><div><h3>Model comparison</h3><div class="mp-sub">Independent paper portfolios · net of estimated charges</div></div><span id="modelPortfolioConnection" class="mp-status">${status}</span></div>`;
+  if(!j?.startedAt)return head+'</section>';
+  const cards=models.map(k=>{const m=j.models?.[k];if(!m)return '';const metric=(label,value,cls='')=>`<div class="mp-metric"><small>${label}</small><b class="${cls}">${value}</b></div>`;return `<article class="mp-card" style="--model-color:${k==='ENS'?'#fb923c':'#60a5fa'}"><div class="mp-card-top"><b><i class="mp-dot"></i>${name(k)}</b><span class="mp-floor">Floor ${escHtml(String(j.settings?.values?.floors?.[k]??'—'))}</span></div><div class="mp-result ${tone(m.net)}"><strong>${money(m.net)}</strong><span>${pct(m.returnPct)}</span></div><div class="mp-metrics">${metric('Realised net',money(m.realised),tone(m.realised))}${metric('Open net',money(m.openNet),tone(m.openNet))}${metric('Max drawdown',Number.isFinite(m.maxDrawdownPct)?m.maxDrawdownPct.toFixed(2)+'%':'—')}${metric('Funded capital',money(m.fundedCapital??m.startingCapital))}${metric('Cash',money(m.cash))}${metric('Capital in positions',money(m.tied))}</div><div class="mp-card-foot"><span><b>${m.closedFills||0}</b> exits</span><span><b>${m.openPositions||0}</b> open</span><span><b>${m.waitingOrders||0}</b> waiting</span>${m.staleMarks?`<span style="color:var(--amber)">${m.staleMarks} stale marks</span>`:''}</div></article>`;}).join('');
+  const series=models.map(k=>{const m=j.models?.[k],s=(m?.curve||[]).map(x=>({at:x.at,pct:x.returnPct??x.net/m.startingCapital*100})).filter(x=>Number.isFinite(x.at)&&Number.isFinite(x.pct));if(Number.isFinite(j.lastObservedAt)&&Number.isFinite(m?.returnPct)&&(!s.length||j.lastObservedAt>s.at(-1).at))s.push({at:j.lastObservedAt,pct:m.returnPct});return s;});
+  const points=series.flat(),t0=Math.min(...points.map(x=>x.at)),t1=Math.max(...points.map(x=>x.at));
+  const rawLo=Math.min(0,...points.map(x=>x.pct)),rawHi=Math.max(0,...points.map(x=>x.pct)),pad=Math.max(.01,(rawHi-rawLo)*.12),lo=rawLo-pad,hi=rawHi+pad;
+  const y=v=>160-(v-lo)/(hi-lo)*160;
+  const chart=points.length>1?`<div class="mp-chart"><div class="mp-chart-head"><b>Account return</b><div class="mp-legend"><span style="--model-color:#fb923c"><i class="mp-dot"></i>Ensemble</span><span style="--model-color:#60a5fa"><i class="mp-dot"></i>Peak</span></div></div><div class="mp-plot"><div class="mp-axis"><span>${pct(hi)}</span><span>${pct((hi+lo)/2)}</span><span>${pct(lo)}</span></div><svg viewBox="0 0 1000 160" preserveAspectRatio="none" role="img" aria-label="Net paper account returns over time. Ensemble orange; Peak blue.">${[0,80,160].map(v=>`<line x1="0" x2="1000" y1="${v}" y2="${v}" stroke="var(--border)" vector-effect="non-scaling-stroke"/>`).join('')}<line x1="0" x2="1000" y1="${y(0)}" y2="${y(0)}" stroke="var(--t3)" stroke-dasharray="3 5" opacity=".5" vector-effect="non-scaling-stroke"/>${series.map((s,i)=>`<polyline fill="none" stroke="${i?'#60a5fa':'#fb923c'}" stroke-width="2" vector-effect="non-scaling-stroke" points="${s.map(x=>((x.at-t0)/(t1-t0||1)*1000).toFixed(1)+','+y(x.pct).toFixed(1)).join(' ')}"><title>${name(models[i])}: ${pct(s.at(-1)?.pct)}</title></polyline>`).join('')}</svg></div><div class="mp-times"><span>${time(t0)}</span><span>${time((t0+t1)/2)} IST</span><span>${time(t1)}</span></div></div>`:'<div class="mp-empty">Return chart appears after the next observation.</div>';
+  const details=models.map(k=>{const m=j.models?.[k];if(!m)return '';const positions=(m.positions||[]).map(p=>`<tr><td><b>${escHtml(p.sym)}</b></td><td>${p.qty}</td><td>${money(p.avgCost)}</td><td>${money(p.mark)}</td><td>${money(p.target)}</td><td>${p.stop?money(p.stop):'Not armed'}</td></tr>`).join('');const trades=(m.trades||[]).slice(-10).reverse().map(t=>`<tr><td><b>${escHtml(t.sym)}</b></td><td>${t.qty}</td><td>${money(t.buyPrice)}</td><td>${money(t.sellPrice)}</td><td>${money(t.charges)}</td><td class="${tone(t.net)}">${money(t.net)}</td></tr>`).join('');return `<details class="mp-detail"><summary>${name(k)} activity<span>${m.positions?.length||0} open · ${m.trades?.length||0} simulated exits</span></summary>${positions?`<div class="mp-table-label">OPEN POSITIONS</div><div class="mp-table-wrap"><table><thead><tr><th>Stock</th><th>Qty</th><th>Average</th><th>Mark</th><th>Target</th><th>Profit stop</th></tr></thead><tbody>${positions}</tbody></table></div>`:'<div class="mp-empty">No open positions.</div>'}${trades?`<div class="mp-table-label">RECENT EXITS</div><div class="mp-table-wrap"><table><thead><tr><th>Stock</th><th>Qty</th><th>Buy</th><th>Sell</th><th>Charges</th><th>Net P&amp;L</th></tr></thead><tbody>${trades}</tbody></table></div>`:'<div class="mp-empty">No simulated exits yet.</div>'}</details>`;}).join('');
+  return head+`<div class="mp-cards">${cards}</div>${chart}${details}<details class="mp-detail"><summary>How this comparison works</summary><div class="mp-method"><p>Tracking since ${escHtml(new Date(j.startedAt).toLocaleString('en-IN',{timeZone:'Asia/Kolkata'}))} IST. Both portfolios run regardless of the selected live model. Current live capital limit: ${money(j.settings?.values?.capital)}.${j.gaps?.length?' '+j.gaps.length+' observation gap(s) recorded.':''}</p><p>Each portfolio keeps its own cash under the live cash ceiling. New highs in the shared cash budget add equal paper funding, excluded from profit. Returns and drawdown adjust for funding. Settings and entry policy are recorded per order; existing positions retain their entry history.</p><p>Fills use subsequent observed ticks and visible depth, including partial fills and estimated charges. New capped immediate entries cancel any unfilled remainder; earlier dip orders keep their original policy. Open net reserves delivery exit charges. Broker latency, queue position and rejected orders can differ from these estimates. Unobserved prices are never replayed.</p></div></details></section>`;
 }
 function renderPerformance(){
   PERF_RENDERED=true;
@@ -14246,6 +14254,7 @@ function refreshStrategySafety(){
   if(states!==refreshStrategySafety.last){refreshStrategySafety.last=states;applyFilters({preservePage:true});}
 }
 function startStreamRefresh(){
+  if(!startStreamRefresh.nativeEntry)startStreamRefresh.nativeEntry=setInterval(()=>syncNativeKiteEntries().catch(()=>{}),2000);
   if(_streamRefreshTimer) return;
   if(!startStreamRefresh.btst){startStreamRefresh.btst=setInterval(()=>{loadBtstPicks();loadKiteMargins();loadKiteGtts();loadProfitLockStatus();loadAutoBuyStatus();loadModelPortfolios();syncSellBasketToKite();try{resetCrossAlertsIfNewDay();checkCrossingAlerts();}catch(e){}},20000);loadBtstPicks();loadKiteMargins();loadKiteGtts();loadProfitLockStatus();loadAutoBuyStatus();loadModelPortfolios();syncSellBasketToKite();try{resetCrossAlertsIfNewDay();checkCrossingAlerts();}catch(e){}
     try{seedSavedBasketCount();}catch(e){}}
@@ -15166,6 +15175,7 @@ function kiteBridgeRequest(orders,side='BUY',automatic=true){
       if(event.source!==window||event.origin!==location.origin||event.data?.type!=='RS_KITE_RESULT'||event.data.id!==id||!event.data.bridge)return;
       clearTimeout(timer);window.removeEventListener('message',listener);
       const [maj,min]=String(event.data.bridge).split('.').map(Number);
+      if(side==='EXECUTE'&&!(maj>1||(maj===1&&min>=6))) return reject(new Error('Reload Kite Bridge 1.6.0 in chrome://extensions, then refresh Kite and Rocket Scanner for immediate Auto-Buy.'));
       if(side==='CLEANUP_BUY'&&!(maj>1||(maj===1&&min>=5))) return reject(new Error('Reload Kite Basket Bridge 1.5.0 in chrome://extensions to remove filled buy entries automatically.'));
       if(side==='SELL'&&!(maj>1||(maj===1&&min>=4))) return reject(new Error('Kite Basket Bridge '+event.data.bridge+' cannot write Scanner_Sell (LIMIT sells need 1.4.0). In chrome://extensions reload it, then reload this page.'));
       resolve(event.data);
@@ -15177,6 +15187,20 @@ function kiteBridgeRequest(orders,side='BUY',automatic=true){
     window.addEventListener('message',listener);
     window.postMessage({type:'RS_KITE_PREPARE',id,side,automatic,createdAt:Date.now(),orders:orders.map(o=>({id:o.id,instrument:o.instrument,weight:o.weight,params:o.params}))},location.origin);
   });
+}
+let _nativeEntryBusy=false;
+async function syncNativeKiteEntries(){
+  if(_nativeEntryBusy||_kiteTransferBusy||_kiteSellBusy||!KITE_API||!AUTO_BUY_ENABLED||AUTO_BUY_STATUS.mode!=='browser-ioc')return;
+  _nativeEntryBusy=true;
+  try{
+    const r=await kiteBridgeRequest([],'EXECUTE',true);
+    if(!r.ok)throw Error(r.why||'Kite submission unconfirmed');
+    if(r.orderId){
+      showToast('Submitted '+escHtml(r.symbol)+' to Kite. Waiting for confirmed fill and target GTT.',5000);
+      loadAutoBuyStatus();setTimeout(()=>syncNativeKiteEntries().catch(()=>{}),100);
+    }
+  }catch(e){reportKiteBasketOutcome(false,'Immediate Auto-Buy: '+e.message,'BUY','native-entry');}
+  finally{_nativeEntryBusy=false;}
 }
 // The helper writes Zerodha_Basket_Sell.json when a profit-lock stop is hit (it cannot place API orders
 // without a static IP). Mirror it into Scanner_Sell on every 20 s poll; an empty file empties the basket.
@@ -15232,6 +15256,12 @@ async function sendBasketToKite(automatic=false){
       if(signature!==_lastSavedBasketSig) return;
     }else await requestBasketSync({manual:true,precomputedOrders:orders});
     if(getCanonicalBasketSignature(orders)!==getCanonicalBasketSignature(getDesiredBasketOrders())) throw new Error('Recommendations changed. Send the current basket again.');
+    if(AUTO_BUY_ENABLED&&AUTO_BUY_STATUS.mode==='browser-ioc'){
+      _kiteSentSignature=signature;
+      setTimeout(()=>syncNativeKiteEntries().catch(()=>{}),0);
+      if(!automatic)showToast('Funded signals queued for immediate capped entry through Kite. No parallel executable buy basket is created.',6000);
+      return;
+    }
     const result=await kiteBridgeRequest(orders,'BUY',automatic);
     if(!result.ok) throw new Error(result.why||'Kite did not confirm the basket.');
     _kiteSentSignature=signature;
@@ -15286,7 +15316,7 @@ async function exportBasket(){
     const hasTgt = orders.some(o => o.params?.gtt?.target);
     const hasSl = orders.some(o => o.params?.gtt?.stoploss);
     const gttNote = hasTgt && hasSl ? ' with Target & SL GTTs' : hasTgt ? ' with target GTTs' : '';
-    const autoNote = AUTO_BUY_ENABLED ? ' (⚡ Auto-Buy ON: Executing via Dip-Buy GTTs)' : '';
+    const autoNote = AUTO_BUY_ENABLED ? ' (⚡ Auto-Buy ON: immediate capped entry through Kite)' : '';
     showToast(`<strong>Exported ${orders.length} CNC BUY orders</strong> for ${new Set(orders.map(o => o._meta.sym)).size} selected stocks${gttNote}${autoNote} as Zerodha_Basket_Buy.json`);
   } catch(e) {
     console.error('Basket export failed', e);
