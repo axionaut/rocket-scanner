@@ -1,5 +1,5 @@
 const BUILD_TS='2026-10-16 IST'; // release build date (IST)
-const APP_VERSION=1512;
+const APP_VERSION=1513;
 const RADAR_SCORE_VERSION='v1419-recross-batches'; // Eligible on crossing the score floor at any time; selected model's evolving target and movement-based profit protection.
 
 // ── v1358: AN UNCAUGHT ERROR MUST NAME ITSELF ─────────────────────────────────────────────────
@@ -4687,7 +4687,7 @@ function btstCrossingState(s){
   if(!r||!r.src||r.src.mode!=='live'||r.src.session!==getSessionDate()) return null;
   if(_modelSwitchPending||r.model!==r.src.activeModel)return {state:'WAIT',reason:'Confirming selected model with helper'};
   if(r.model==='PEAK'&&score<=0)return {state:'WAIT',reason:'Peak predicts no positive advantage over the dip'};
-  if(r.model==='PEAK'&&r.src.peak?.[normSym(s.symbol)]?.eligible!==true)return {state:'WAIT',reason:'Peak predicted target is below the existing minimum needed for an entry'};
+  if(r.model==='PEAK'&&r.src.peak?.[normSym(s.symbol)]?.eligible!==true){const rel=r.src.peak?.[normSym(s.symbol)]?.relTop;return {state:'WAIT',reason:Number.isFinite(rel)?`Peak buys only at 80-90% of this run's top Peak score; this one is at ${Math.round(rel*100)}%`:'Peak predicted target is below the existing minimum needed for an entry'};}
   const st=crossingStore(),key=normSym(s.symbol);
   st.rebuy=st.rebuy||{};
   const qty=Number(getCombinedOpenPositionMap()[s.symbol]?.qty)||0;
@@ -10621,9 +10621,10 @@ function currentModelTargetPct(){
   return Number.isFinite(t?.pct)&&t.pct>0?t.pct:RocketStrategy.CONFIG.TARGET_PCT;
 }
 function learnedBtstTarget(score,symbol=null){
-  // v1502: Peak sets each stock's own target (85% of its predicted peak), published in the ranking file.
-  // Ranked by Peak and no per-stock figure for this symbol: fall through to the Ensemble's evolving target.
-  if(symbol){
+  const PEAK_OWN_TARGET=false;
+  // v1513 (owner, 16 Oct): Peak buys use the learned Ensemble target, not 85% of each stock's predicted peak. Fixed
+  // 1-2% targets lost on the 147 Ensemble crossings (capped wins vs 6% stops); per-stock Peak targets sit at 1.8-3.4%.
+  if(symbol&&PEAK_OWN_TARGET){
     const r=btstRanking(),pk=r?.src?.peak?.[normSym(symbol)];
     if(r?.model==='PEAK'&&Number.isFinite(pk?.target)&&pk.target>0)
       return {pct:pk.target,y:0,x:pk.peak,dip:pk.dip,sessions:pk.sessions,model:'PEAK',method:'peak-model',through:r.src.asOf};
