@@ -1,5 +1,5 @@
 const BUILD_TS='2026-10-16 IST'; // release build date (IST)
-const APP_VERSION=1514;
+const APP_VERSION=1515;
 const RADAR_SCORE_VERSION='v1419-recross-batches'; // Eligible on crossing the score floor at any time; selected model's evolving target and movement-based profit protection.
 
 // ── v1358: AN UNCAUGHT ERROR MUST NAME ITSELF ─────────────────────────────────────────────────
@@ -572,6 +572,7 @@ let LAST_BUY_DATE_MAP={}; // Legacy latest-buy map retained for stored-brain com
 let ORDERS_TODAY=null; // [{symbol,type,qty,price,time,product,status,totalQty,pending}] — `qty` is the
                        // FILLED quantity (every consumer sums it); `pending` is the unfilled half of an
                        // order still working in the market (v1207).
+let TRADEBOOK_FILLS=[];
 let TRADEBOOK_BUY_FILLS=[]; // Consolidated BUY fills available for executed-entry feedback matching.
 
 const FS = (() => {
@@ -7058,128 +7059,59 @@ function clockMinutes(v){
   const m=String(v||'').match(/(\d{1,2}):(\d{2})/);
   return m?(+m[1])*60+(+m[2]):null;
 }
+function exitEntryHigh(sym,fromTime,untilTime=null){
+  const stamp=v=>String(v||'').replace('T',' ').slice(0,19);
+  const from=Date.parse(stamp(fromTime)+'+05:30'),until=untilTime?Date.parse(stamp(untilTime)+'+05:30'):Date.now();
+  if(!Number.isFinite(from)||!(until>=from))return null;
+  let high=null,low=null,at=null,atExact=true,n=0;
+  const take=(h,t,l=null,exact=true)=>{if(h>0&&(high==null||h>high)){high=h;at=t;atExact=exact;}if(l>0&&(low==null||l<low))low=l;n++;};
+  // Whole five-minute bars only: never attribute a pre-buy or post-reentry boundary high.
+  for(const bar of INTRADAY_BARS[normSym(sym)]||[])if(bar.t>=from&&bar.t+300000<=until)take(bar.h,bar.t,bar.l);
+  // Tick peaks already recorded by the helper can resolve the omitted entry candle.
+  for(const p of PROFIT_LOCK_STATUS.entryPeaks||[])if(p.sym===normSym(sym)&&p.from>=from-2000&&p.from<until&&p.at>=from&&p.at<=until)take(p.high,p.at);
+  // Full intervening daily sessions are valid; entry and end-day boundaries use timed evidence.
+  const store=FS.get(PRICE_HISTORY_STORE)?.sessions||{},fromDay=stamp(fromTime).slice(0,10),untilDay=new Date(until+19800000).toISOString().slice(0,10);
+  for(const [date,rows] of Object.entries(store))if(date>fromDay&&date<untilDay){const h=phHigh(rows[normSym(sym)])??phClose(rows[normSym(sym)]);if(h>0)take(h,Date.parse(date+'T15:30:00+05:30'),phLow(rows[normSym(sym)])??phClose(rows[normSym(sym)]),false);}
+  return high==null?null:{high,low,at,atExact,observations:n};
+}
 function enrichExitPnlRow(row,bookedDate=null){
-  const qty=Number(row?.qty)||0;
-  const buy=Number(row?.buyPrice);
-  const sell=Number(row?.sellPrice);
-  const current=currentPriceForSymbol(row?.sym);
-  const out={...row};
-  out.highAt=null; out.highGapMin=null; out.highObs=null; out.highNote='';
-  try{
-    const info=getHighTimeInfo(row?.sym,bookedDate||getSessionDate());
-    if(!info){
-      out.highNote='No 5-minute tape and no watch record for that session. The tape reaches back about 13 sessions per symbol; the sampled watch recorder began 2026-08-11 and covers open positions plus the top of the ranking.';
-    } else {
-      out.highAt=info.at; out.highObs=info.observations;
-      // If the high was already in at the FIRST observation, the recorder never saw it advance, so
-      // the stamp is an UPPER BOUND ("at or before"), not a time. Saying otherwise would invent
-      // precision the recorder cannot have — the high may have printed before watching began.
-      // v1259: a tape stamp is the real time of the high, so it is never an "at or before" bound.
-      out.highAtIsBound=!info.exact&&(info.at===info.firstSeen);
-      const hi=clockMinutes(info.at), se=clockMinutes(row?.sellTime);
-      if(hi!=null&&se!=null) out.highGapMin=hi-se;
-      const sold=row?.sellTime?` · you sold at ${String(row.sellTime).match(/\d{1,2}:\d{2}/)?.[0]||'?'}`:'';
-      out.highNote=info.exact
-        ? `Day high ${info.high} printed at ${info.at} IST, read off the 5-minute tape`
-          +` (${info.observations} bar${info.observations===1?'':'s'} that session)${sold}. Resolution is 5 minutes.`
-        : (out.highAtIsBound
-            ? `Day high ${info.high} was ALREADY IN at the first observation (${info.at} IST), so this is "at or before", not the time of the high.`
-            : `Day high ${info.high} last advanced at ${info.at} IST.`)
-          +` ${info.observations} observation${info.observations===1?'':'s'} that session${sold}`
-          +`. Sampled from your refresh cadence, not the tape.`;
-    }
-  }catch(e){}
-  if(qty>0&&isFinite(buy)&&buy>0&&isFinite(sell)&&sell>0){
-    out.priceDiff=+(sell-buy).toFixed(2);
-    const _net=Number(out.netPnl), _chg=Number(out.charges);
-    out.grossPnl=(Number.isFinite(_net)&&Number.isFinite(_chg))
-      ? +(_net+_chg).toFixed(0)
-      : +((sell-buy)*qty).toFixed(0);
-  }else{
-    out.priceDiff=null;
-    out.grossPnl=null;
+  const out={...row},qty=Number(row?.qty)||0,buy=Number(row?.buyPrice),sell=Number(row?.sellPrice),current=currentPriceForSymbol(row?.sym);
+  out.priceDiff=qty>0&&buy>0&&sell>0?+(sell-buy).toFixed(2):null;
+  out.grossPnl=out.priceDiff==null?null:Number.isFinite(Number(row.netPnl))&&Number.isFinite(Number(row.charges))?+(Number(row.netPnl)+Number(row.charges)).toFixed(0):+((sell-buy)*qty).toFixed(0);
+  out.currentPrice=current>0?+current.toFixed(2):null;
+  Object.assign(out,{highAt:null,highGapMin:null,highNote:'',postSellHigh:null,postSellLow:null,leftOnTableRs:null,leftOnTablePct:null,moneySavedRs:null,moneySavedPct:null,referenceHighPerFill:false,leftOnTableExact:false});
+  if(!(qty>0&&sell>0)||!bookedDate){out.leftOnTableNote='Entry and sell details are required to measure the buy-window peak.';return out;}
+  const sym=normSym(row.sym),history=typeof TRADEBOOK_FILLS==='undefined'?[]:TRADEBOOK_FILLS;
+  const orders=row.legs?[...row.legs.buys.map(o=>({...o,type:'BUY'})),...row.legs.sells.map(o=>({...o,type:'SELL'}))]:history.filter(o=>o.symbol===sym&&String(o.time).slice(0,10)===bookedDate);
+  // Same-second CSV rows retain BUY-before-SELL ordering used by the page's realised calculation.
+  orders.sort((a,b)=>String(a.time).localeCompare(String(b.time))||(String(a.type).toUpperCase()==='BUY'?-1:1));
+  const exits=RocketStrategy.exitBuyWindows(sym,bookedDate,orders,history),parts=[],highs=[];
+  let missed=0,saved=0,proceeds=0,savedProceeds=0,known=0,savedKnown=0,best=null;
+  for(const e of exits){
+    const after=exitEntryHigh(sym,e.sellTime,e.until);
+    if(after?.low>0){saved+=Math.max(0,e.sellPrice-after.low)*e.qty;savedProceeds+=e.qty*e.sellPrice;savedKnown+=e.qty;}
+    const p=e.buyTime?exitEntryHigh(sym,e.buyTime,e.until):null;
+    if(!p)continue;
+    let high=p.high,peakAt=p.at,exact=p.atExact;
+    if(e.buyPrice>high){high=e.buyPrice;peakAt=Date.parse(e.buyTime.replace(' ','T')+'+05:30');exact=true;}
+    if(e.sellPrice>high){high=e.sellPrice;peakAt=Date.parse(e.sellTime.replace(' ','T')+'+05:30');exact=true;}
+    const rs=Math.max(0,high-e.sellPrice)*e.qty;
+    missed+=rs;proceeds+=e.qty*e.sellPrice;known+=e.qty;highs.push(high);
+    if(!best||high>best.high)best={high,at:peakAt,exact,sellTime:e.sellTime};
+    parts.push(e.qty+' shares bought '+e.buyTime+', sold '+e.sellTime+' at '+e.sellPrice.toFixed(2)+': observed peak '+high.toFixed(2)+(e.until?' before replacement buy '+e.until:' through review time')+', missed '+rs.toFixed(2));
   }
-  out.currentPrice=current!=null?+current.toFixed(2):null;
-  const dayHigh=dayHighForSymbol(row?.sym);
-  const scanDate=(typeof getSessionDate==='function')?getSessionDate():null;
-  out.leftOnTableRs=null; out.leftOnTablePct=null;
-  // v1120: the sell time is passed so the sell day can be split at the exit instead of folded in whole.
-  const ext=getPostSellExtremes(row?.sym,bookedDate,row?.sellTime);
-  out.postSellHigh=ext.high!=null?+ext.high.toFixed(2):null;
-  out.postSellLow=ext.low!=null?+ext.low.toFixed(2):null;
-  out.referenceHighNote=`Post-sell high used for the upside comparison after ${bookedDate||'unknown sell date'}${row?.sellTime?` ${String(row.sellTime).slice(11,16)}`:''}${ext.to?` through ${ext.to}`:''}. ${ext.exact?'Observed post-exit window.':'Upper bound: part of the range may predate the exit.'}${ext.sellDayNote?` ${ext.sellDayNote}.`:''} A negative Left on Table value uses the post-sell low instead.`;
-  out.referenceHighPerFill=false;
-  out.leftOnTableExact=ext.exact;
-  out.leftOnTableSessions=ext.sessions;
-  out.sellDayNote=ext.sellDayNote||null;
-  if(dayHigh!=null) out.dayHigh=+dayHigh.toFixed(2);
-  if(!(qty>0)||!(sell>0)){
-    out.leftOnTableNote='No sell price or quantity on this row.';
-  }else if(!bookedDate){
-    out.leftOnTableNote='No booking date on this row, so the post-sell window cannot be bounded.';
-  }else if(ext.high==null&&ext.low==null&&/no new high after your exit|no five-minute bar printed after your/.test(ext.sellDayNote||'')){
-    out.leftOnTableRs=0; out.leftOnTablePct=0;
-    out.leftOnTableExact=true;
-    out.leftOnTableNote=`Sold at ₹${sell.toFixed(2)}. ${ext.sellDayNote}. Nothing is attributable to waiting — the app sees the running high only, so a rise that stopped short of the earlier high would be invisible.`;
-  }else if(ext.high==null&&ext.low==null){
-    out.leftOnTableNote=`No price data covering any session at or after ${bookedDate} — the symbol is absent from both the stored daily history and the current scanner file, so what happened after the exit is unknown.`;
-  }else{
-    const hi=ext.high, lo=ext.low;
-    const wentUp=hi!=null&&hi>sell;
-    const ref=wentUp?hi:(lo!=null?lo:hi);
-    out.leftOnTableRs=+((ref-sell)*qty).toFixed(0);
-    out.leftOnTablePct=+(((ref-sell)/sell)*100).toFixed(2);
-    const res=ext.exact
-      ? `Measured across ${ext.sessions} full session${ext.sessions===1?'':'s'} after the sell${ext.from?` (${ext.from} to ${ext.to})`:''}${ext.sellDayNote?`, plus the sell day: ${ext.sellDayNote}`:''} — fully attributable.`
-      : `UPPER BOUND${ext.sellDayNote?` (${ext.sellDayNote})`:''}: part of that day's range may predate the exit. For a LIMIT sell it is exact — price can only reach the limit once, so anything above it came at or after the fill.`;
-    const live=(typeof isMarketHours==='function'&&isMarketHours())?' The market is still open, so this is still moving.':'';
-    const both=`Post-sell high ₹${hi!=null?hi.toFixed(2):'—'}, low ₹${lo!=null?lo.toFixed(2):'—'}.`;
-    // 25 Sep: a sell followed by a re-buy is not money left on the table at the later high - the
-    // shares came back. SHANTIGOLD sold 342, 322 and 316 shares in three round trips, and one
-    // blended price x 980 shares reported Rs 22,344 when no more than ~342 were ever held.
-    // Each sell is charged only what it actually cost: the premium paid to buy back in, plus the
-    // later high on shares that were never bought back.
-    const legs=row?.legs;
-    const multi=legs&&Array.isArray(legs.sells)&&(legs.sells.length>1||(legs.buys||[]).some(b=>b.time>legs.sells[0].time));
-    if(multi){
-      // A buy-back re-enters the MOST RECENT earlier sell first (11:23 buy <- 11:22 sell).
-      const sl=legs.sells.map(x=>({...x,rq:0,reentry:0}));
-      for(const b of legs.buys||[]){
-        let q=b.qty;
-        for(let i=sl.length-1;i>=0&&q>0;i--){
-          if(sl[i].time>=b.time) continue;
-          const u=Math.min(q,sl[i].qty-sl[i].rq);
-          if(u<=0) continue;
-          sl[i].rq+=u;sl[i].reentry+=u*Math.max(0,b.price-sl[i].price);q-=u;
-        }
-      }
-      let rs=0,proceeds=0;const parts=[],referenceHighs=[];
-      for(const x of sl){
-        const q=x.qty-x.rq;let tail=0;
-        if(q>0){
-          const e=getPostSellExtremes(row?.sym,bookedDate,x.time);
-          if(e?.high!=null) referenceHighs.push(e.high);
-          if(e?.high!=null&&e.high>x.price) tail=(e.high-x.price)*q;
-        }
-        rs+=x.reentry+tail;proceeds+=x.qty*x.price;
-        parts.push(`${x.time.slice(11,16)||x.time} sold ${x.qty} @ ₹${x.price.toFixed(2)}`
-          +(x.rq?`, bought ${x.rq} back ${x.reentry>0?`for ${fmtINR(x.reentry)} more`:'no higher'}`:'')
-          +(q>0?`, ${q} never bought back ${tail>0?`(${fmtINR(tail)} to the later high)`:'(no higher later)'}`:''));
-      }
-      out.leftOnTableRs=+rs.toFixed(0);
-      out.leftOnTablePct=proceeds>0?+(rs/proceeds*100).toFixed(2):null;
-      out.leftOnTableNote=`Several trades today, so each sell is charged only what it cost you: ${parts.join('; ')}. Total ${fmtINR(out.leftOnTableRs)}.`;
-      out.referenceHighPerFill=true;
-      out.referenceHighLabel=referenceHighs.length?[...new Set(referenceHighs.map(h=>Number(h).toLocaleString('en-IN',INR_2)))].join(' / '):'Unobserved';
-      out.referenceHighNote=out.leftOnTableNote+' Each unreentered sell uses its own post-exit high; bought-back shares use the reentry premium. There is no single reference high for this row.';
-      return out;
-    }
-    out.leftOnTableNote=out.leftOnTableRs>0
-      ? `Sold at ₹${sell.toFixed(2)}; it went on to ₹${hi.toFixed(2)} — ${fmtINR(out.leftOnTableRs)} (${out.leftOnTablePct.toFixed(2)}%) left on the table across ${qty} shares. ${both} ${res}${live}`
-      : out.leftOnTableRs===0
-        ? `Sold at ₹${sell.toFixed(2)} and it never traded away from that price afterwards. ${both} ${res}${live}`
-        : `Sold at ₹${sell.toFixed(2)}; it never traded above that and fell to ₹${lo.toFixed(2)} — the exit SAVED ${fmtINR(Math.abs(out.leftOnTableRs))} (${Math.abs(out.leftOnTablePct).toFixed(2)}%). ${both} ${res}${live}`;
-  }
+  out.moneySavedNote='Gross fall from each actual sell to the lowest observed subsequent price, ending at replacement buy or review time. This measures downside avoided, including profit giveback avoided; separate from peak upside missed. Ambiguous boundary candles are omitted.';
+  if(savedKnown>=qty-1e-8){out.moneySavedRs=+saved.toFixed(0);out.moneySavedPct=savedProceeds>0?+(saved/savedProceeds*100).toFixed(2):null;}
+  else out.moneySavedNote='Incomplete post-exit price coverage: '+savedKnown+' of '+qty+' sold shares observed. '+out.moneySavedNote;
+  out.referenceHighPerFill=exits.length>1;
+  out.referenceHighLabel=highs.length?[...new Set(highs.map(h=>Number(h).toLocaleString('en-IN',INR_2)))].join(' / '):'Unobserved';
+  out.postSellHigh=best?+best.high.toFixed(2):null;
+  if(best){const date=new Date(best.at+19800000).toISOString();out.highAt=best.exact?(date.slice(0,10)!==bookedDate?date.slice(5,10)+' ':'')+date.slice(11,16):date.slice(5,10)+' (time unknown)';const sold=Date.parse(String(best.sellTime).replace(' ','T')+'+05:30');out.highGapMin=best.exact&&Number.isFinite(sold)?Math.round((best.at-sold)/60000):null;}
+  out.highNote='Time the observed buy-window peak was recorded; a tick observation time or five-minute bar start. Daily-only evidence has no exact intraday time.';
+  out.leftOnTableNote=parts.join('; ')+'. Only highs after each actual buy count, including highs while held. Replaced quantities end at the replacement buy; its new lot has its own window. Boundary candles without timed evidence are omitted, so observed opportunity may understate the full peak. This is gross hindsight opportunity, not guaranteed executable profit.';
+  out.referenceHighNote=out.leftOnTableNote;
+  if(known>=qty-1e-8){out.leftOnTableRs=+missed.toFixed(0);out.leftOnTablePct=proceeds>0?+(missed/proceeds*100).toFixed(2):null;}
+  else out.leftOnTableNote='Incomplete entry/price coverage: '+known+' of '+qty+' sold shares observed. '+out.leftOnTableNote;
   return out;
 }
 
@@ -7196,7 +7128,8 @@ function summarizeExitPnlRows(rows){
   const leftRs=leftRows.reduce((s,r)=>s+r.leftOnTableRs,0);
   const leftProceeds=leftRows.reduce((s,r)=>s+(Number(r.sellPrice)||0)*(Number(r.qty)||0),0);
   const leftPct=leftProceeds>0?+((leftRs/leftProceeds)*100).toFixed(2):null;
-  return {known,capital,net,gross,charges,pct:capital>0?+(net/capital*100).toFixed(2):null,
+  const savedRows=(rows||[]).filter(r=>r.moneySavedRs!=null),savedRs=savedRows.reduce((n,r)=>n+r.moneySavedRs,0),savedProceeds=savedRows.reduce((n,r)=>n+(Number(r.sellPrice)||0)*(Number(r.qty)||0),0);
+  return {savedRs,savedCount:savedRows.length,savedPct:savedProceeds>0?savedRs/savedProceeds*100:null,known,capital,net,gross,charges,pct:capital>0?+(net/capital*100).toFixed(2):null,
           leftRs,leftPct,leftCount:leftRows.length,leftProceeds};
 }
 
@@ -7211,11 +7144,12 @@ function recordLeftOnTableSession(date,summary){
   const store=getLeftOnTableStore();
   const next={leftPct:+Number(summary.leftPct).toFixed(2),
               leftRs:Math.round(Number(summary.leftRs)||0),
+              moneySavedRs:Math.round(Number(summary.savedRs)||0),opportunityBasis:'buy-window-v1515',
               proceeds:Math.round(summary.leftProceeds),
               rows:summary.leftCount,
               updatedAt:new Date().toISOString()};
   const prev=store.sessions[date];
-  if(prev&&prev.leftPct===next.leftPct&&prev.proceeds===next.proceeds&&prev.rows===next.rows) return store;
+  if(prev&&prev.leftPct===next.leftPct&&prev.moneySavedRs===next.moneySavedRs&&prev.proceeds===next.proceeds&&prev.rows===next.rows) return store;
   const sessions={...store.sessions,[date]:next};
   for(const d of Object.keys(sessions).sort().slice(0,Math.max(0,Object.keys(sessions).length-LEFT_ON_TABLE_KEEP_SESSIONS))) delete sessions[d];
   const out={version:1,sessions};
@@ -7648,7 +7582,7 @@ async function loadProfitLockStatus(){
   if(!j||!j.ok||!Array.isArray(j.positions)) return;
   const bySym=new Map();
   for(const p of j.positions){if(p&&p.sym)bySym.set(normSym(p.sym),p);}
-  PROFIT_LOCK_STATUS={bySym,at:j.asOf||Date.now(),lossBudget:j.lossBudget||null};
+  PROFIT_LOCK_STATUS={bySym,at:j.asOf||Date.now(),lossBudget:j.lossBudget||null,entryPeaks:Array.isArray(j.entryPeaks)?j.entryPeaks:[]};
 }
 function profitLockFor(sym){
   return Date.now()-PROFIT_LOCK_STATUS.at<60000?(PROFIT_LOCK_STATUS.bySym.get(normSym(sym))||null):null;
@@ -8788,8 +8722,9 @@ function buildLatestSessionPanel(query=''){
        ?`<span title="${escHtml(r.leftOnTableNote||'')}">${v.toFixed(2)}%</span>`
        :`<span style="color:var(--t3)">—</span>`,
      clrFn:leftClr,...pctTot},
+    {key:'moneySavedRs',label:'Downside avoided '+String.fromCharCode(8377),align:'right',bold:true,fmt:(v,r)=>v!=null?'<span title="'+escHtml(r.moneySavedNote||'')+'">'+fmtINR(v)+'</span>':'&#8212;',clrFn:()=> 'var(--green)',totFmt:v=>v!=null?fmtINR(v):'&#8212;',totClrFn:()=> 'var(--green)'},
     // v1119: how long after the exit the day's high arrived. Positive = waiting would have paid.
-    {key:'highGapMin',label:'High after sell',align:'right',
+    {key:'highGapMin',label:'Peak vs sell',align:'right',
      fmt:(v,r)=>{
        if(r.highAt==null) return `<span style="color:var(--t3)" title="${escHtml(r.highNote||'')}">—</span>`;
        const gap=v==null?'':(v>0?`+${v}m`:v<0?`${v}m`:'0m');
@@ -8798,11 +8733,7 @@ function buildLatestSessionPanel(query=''){
        return `<span title="${escHtml(r.highNote||'')}">${pre}${r.highAt}`
          +(gap?`<span style="font-size:12px;color:var(--t3);margin-left:4px">${r.highAtIsBound?'≤':''}${gap}</span>`:'')+`</span>`;
      },
-     // Red when the high came AFTER the exit (money was still on the table), green when it came
-     // before (the exit was not early). Same inverted polarity as the Left on Table columns.
-     clrFn:v=>v==null?'var(--t3)':v>0?'var(--red)':'var(--green)',
-     totFmt:v=>v==null?'—':(v>0?`+${v}m avg`:`${v}m avg`),
-     totClrFn:v=>v==null?'var(--t3)':v>0?'var(--red)':'var(--green)'},
+     clrFn:()=> 'var(--t2)',totFmt:()=>String.fromCharCode(8212),totClrFn:()=> 'var(--t3)'},
   ];
   const card=inner=>`<div id="rank-latest-session-card" style="background:var(--bg-card);border:1px solid var(--border);border-radius:10px;overflow:hidden">${inner}</div>`;
   const summary=getLatestBookedSummary();
@@ -8852,6 +8783,7 @@ function buildLatestSessionPanel(query=''){
     const _sum=k=>rows.reduce((s,r)=>s+(r[k]||0),0);
     const latestTotals=(rows.length>1||latestUnknownRows>0)?{
       sym:`Total (${rows.length})${latestUnknownRows?` <span style="color:var(--amber)">&#9888; excludes ${latestUnknownRows} unknown</span>`:''}`,
+      moneySavedRs:shownSummary.savedCount?shownSummary.savedRs:null,
       leftOnTableRs:shownSummary.leftCount?shownSummary.leftRs:null,
       leftOnTablePct:shownSummary.leftCount?shownSummary.leftPct:null,
       _brok:_sum('_brok'),_stt:_sum('_stt'),_txn:_sum('_txn'),_gst:_sum('_gst'),_sebi:_sum('_sebi'),_stamp:_sum('_stamp'),_dp:_sum('_dp'),
@@ -8877,7 +8809,7 @@ function buildLatestSessionPanel(query=''){
         <span style="font-size:12px;font-weight:700;color:var(--t2);text-transform:uppercase;letter-spacing:.1em">Latest Session — ${latestDate} <span style="font-weight:400;color:var(--t3)">(Orders.csv · holdings/same-day buys)</span>${panelFilterTag(allRows,rows,query)}</span>
         <span style="font-size:17px;font-weight:800;color:${clr(latestTotal)};font-family:'DM Mono',monospace">${allRows.length?fmtPerfRs(latestTotal):''} <span style="font-size:12px;color:var(--t3);font-weight:400">${allRows.length?'net of charges':''}</span>${latestUnknownWarning}</span>
       </div>
-      ${lossAllowance}${rows.length?`<div class="scroll-x">${latestTbl.getHtml()}</div>`:emptyNote}`);
+      ${lossAllowance}<div style="padding:6px 16px;color:var(--t3);font-size:11px">Observed opportunity since each buy; carried lots can span earlier sessions. MLOT covers ${shownSummary.leftCount}/${rows.length} stocks; downside avoided covers ${shownSummary.savedCount}/${rows.length}. Separate gross hindsight measures; neither is guaranteed executable profit.</div>${rows.length?`<div class="scroll-x">${latestTbl.getHtml()}</div>`:emptyNote}`);
     const render=()=>{if(rows.length)latestTbl.render();};
     return {html,render};
   }
@@ -8913,6 +8845,7 @@ function buildLatestSessionPanel(query=''){
     ];
     const tbTotals=rows.length>1?{
       sym:`Total (${rows.length})`,
+      moneySavedRs:tbSummary.savedCount?tbSummary.savedRs:null,
       leftOnTableRs:tbSummary.leftCount?tbSummary.leftRs:null,
       leftOnTablePct:tbSummary.leftCount?tbSummary.leftPct:null,
       charges:rows.reduce((s,r)=>s+(r.charges||0),0),
@@ -11533,7 +11466,7 @@ function dashboardMarketCards(){
     add(1,'NSE',br?escHtml(br.at):'Awaiting scores',`${br?br.n:0} scored · floor ${btstMinScore()} · ${isEquitySession(Date.now())?'current session':'last session'}`);
     const go=ALL.filter(isStockEligible).length;
     add(2,'NSE',`${go} GO`,'Kite execution checks apply');
-    add(3,'NSE',br?.model==='PEAK'?'Per stock':signed(target?.pct??3),br?.model==='PEAK'?'85% of each predicted peak · adaptive profit protection':'Learned target · adaptive profit protection');
+    add(3,'NSE',signed(target?.pct??3),'Learned target | adaptive profit protection');
   }
   if(m.us){
     const trend=d?.marketTrendPct;
@@ -14296,7 +14229,7 @@ function resetBrain(btn){
   localStorage.removeItem(SHARED_FILTER_STORE);
   ALL=[]; FILT=[]; ENGINE_DATA={};
   RADAR={headers:[],matrix:[],features:[],ids:{},rockets:0,ms:0,sourceNote:'',scoredAt:null};
-  HOLDINGS=[]; POSITIONS=[]; ORDERS_TODAY=null; TRADEBOOK_STATS=null; LAST_BUY_DATE_MAP={};
+  HOLDINGS=[]; POSITIONS=[]; ORDERS_TODAY=null; TRADEBOOK_STATS=null; TRADEBOOK_FILLS=[]; LAST_BUY_DATE_MAP={};
   HOLD_COST_MAP={}; SURV_CORR_ACC={};
   btn._stage=0;
   btn.innerHTML='🗑 Reset Brain';btn.style.background='';btn.style.borderColor='rgba(239,68,68,.3)';btn.style.color='var(--red)';
@@ -14523,6 +14456,7 @@ async function hydrateSessionCSVsFromWorkspace(){
     if(tb){
       const selected=keepFullerTradebookHistory(tb,tbFile.path,tbFile.lastModified);
       TRADEBOOK_STATS=selected.stats;
+      TRADEBOOK_FILLS=selected.stats._fills||[];
       reconcileSameDayExitOpportunities();
       if(selected.persist) updates[TRADEBOOK_STORE]=selected.persist;
       if(selected.meta) FS.set(TRADEBOOK_META_STORE,selected.meta);
@@ -14599,6 +14533,7 @@ function parseTradebook(text){
       .sort((a,b)=>String(a.time||'').localeCompare(String(b.time||'')))
       .map(t=>({type:t.type,qty:t.qty,price:t.price,date:t.date,time:t.time,orderId:t.orderId}));
   });
+  TRADEBOOK_FILLS=Object.entries(bySymbol).flatMap(([symbol,trades])=>trades.map(t=>({...t,symbol})));
   TRADEBOOK_BUY_FILLS=Object.entries(bySymbol).flatMap(([symbol,trades])=>
     trades.filter(t=>t.type==='buy').map(t=>({symbol,date:t.date,time:t.time,qty:t.qty,price:t.price}))
   );
@@ -14708,6 +14643,7 @@ function parseTradebook(text){
     openPositionLotsMap, // {symbol:[{qty,date}]} for quantity-weighted open-position age
   };
 
+  Object.defineProperty(stats,'_fills',{value:TRADEBOOK_FILLS,enumerable:false});
   // Allocate capped brokerage per actual order, not per FIFO fragment.
   const tripsData=applyTradebookCharges(roundTrips);
   stats.tripsData=tripsData;

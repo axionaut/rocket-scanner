@@ -425,7 +425,33 @@ function bookedSession(session,holdingCosts,tradebook){
   return {source:'Orders.csv',date:session.date,total,rows,unknownRows,hasOrders:session.orders.length>0};
 }
 
+
+  // Economic FIFO for exit opportunity: never match an earlier sell to a later buy.
+  // A replacement buy ends the old quantity's opportunity window to avoid counting it twice.
+  function exitBuyWindows(symbol,date,orders,history=[]){
+    const stamp=t=>String(t||'').replace('T',' ').slice(0,19);
+    const normal=o=>({side:String(o.type||o.side||'').toUpperCase(),qty:Number(o.qty),price:Number(o.price),time:stamp(o.time)});
+    const before=history.filter(o=>o.symbol===symbol&&stamp(o.time).slice(0,10)<date).map(normal).sort((a,b)=>a.time.localeCompare(b.time));
+    const open=[];
+    const consume=(qty,visit)=>{let left=qty;while(left>0&&open.length){const b=open[0],n=Math.min(left,b.qty);if(visit)visit(b,n);b.qty-=n;left-=n;if(!b.qty)open.shift();}return left;};
+    for(const t of before){if(t.side==='BUY')open.push({...t});else consume(t.qty);}
+    const day=orders.map(normal).filter(t=>t.qty>0&&t.price>0&&t.time.slice(0,10)===date).sort((a,b)=>a.time.localeCompare(b.time));
+    const exits=[];
+    for(const t of day){
+      if(t.side==='BUY'){
+        let left=t.qty;
+        for(let i=exits.length-1;i>=0&&left>0;i--){const e=exits[i];if(e.until||e.sellTime>=t.time||!e.qty)continue;const q=Math.min(left,e.qty);e.qty-=q;exits.push({...e,qty:q,until:t.time});left-=q;}
+        open.push({...t});
+      }else if(t.side==='SELL'){
+        const left=consume(t.qty,(b,q)=>exits.push({qty:q,buyTime:b.time,buyPrice:b.price,sellTime:t.time,sellPrice:t.price,until:null}));
+        if(left>0)exits.push({qty:left,buyTime:null,sellTime:t.time,sellPrice:t.price,until:null});
+      }
+    }
+    return exits.filter(e=>e.qty>0);
+  }
+
   return {
+    exitBuyWindows,
     bookedSession,
     calcZerodhaChargesSplit,
     CONFIG,
