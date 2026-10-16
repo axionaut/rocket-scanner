@@ -1,5 +1,5 @@
-const BUILD_TS='2026-10-15 IST'; // release build date (IST)
-const APP_VERSION=1506;
+const BUILD_TS='2026-10-16 IST'; // release build date (IST)
+const APP_VERSION=1507;
 const RADAR_SCORE_VERSION='v1419-recross-batches'; // Eligible on crossing the score floor at any time; selected model's evolving target and movement-based profit protection.
 
 // ── v1358: AN UNCAUGHT ERROR MUST NAME ITSELF ─────────────────────────────────────────────────
@@ -9422,6 +9422,35 @@ document.addEventListener('click',()=>{if(PERF_CAL.open){PERF_CAL.open=false;PER
 function setPerfRange(f,t){
   PERF_FROM=f||'';PERF_TO=t||'';PERF_PERIOD_FILTER='custom';renderPerformance();
 }
+let MODEL_PORTFOLIO_STATUS=null,MODEL_PORTFOLIO_BUSY=false;
+async function loadModelPortfolios(){
+  if(MODEL_PORTFOLIO_BUSY)return;
+  MODEL_PORTFOLIO_BUSY=true;
+  try{
+    const tradeInputs={capital:document.getElementById('fCapital')?.value||'',allIn:document.getElementById('fAllIn')?.value||'',maxPct:document.getElementById('fMaxPct')?.value||''};
+    await readHelperResponse('/api/model-portfolios/context',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({tradeInputs,exclusions:[...EXPORT_EXCLUDED]}),timeout:5000}).catch(()=>null);
+    const j=await readHelperResponse('/api/model-portfolios',{timeout:5000});
+    if(j){MODEL_PORTFOLIO_STATUS=j;const panel=document.getElementById('modelPortfolioPanel');if(panel){const open=[...panel.querySelectorAll('details')].map(x=>x.open);panel.outerHTML=buildModelPortfolioPanel();document.querySelectorAll('#modelPortfolioPanel details').forEach((x,i)=>x.open=!!open[i]);}}
+  }catch(e){const panel=document.getElementById('modelPortfolioConnection');if(panel)panel.textContent='Helper unavailable; showing the last received comparison.';}
+  finally{MODEL_PORTFOLIO_BUSY=false;}
+}
+function buildModelPortfolioPanel(){
+  const j=MODEL_PORTFOLIO_STATUS;
+  const start=j?.startedAt?new Date(j.startedAt).toLocaleString('en-IN',{timeZone:'Asia/Kolkata'}):null;
+  const money=n=>Number.isFinite(n)?'₹'+n.toLocaleString('en-IN',{maximumFractionDigits:2}):'—';
+  const pct=n=>Number.isFinite(n)?(n>=0?'+':'')+n.toFixed(2)+'%':'—';
+  const color=n=>n>0?'var(--green)':n<0?'var(--red)':'var(--t2)';
+  const models=['ENS','PEAK'];
+  const stale=j?.lastObservedAt&&Date.now()-j.lastObservedAt>60000;
+  const head=`<section id="modelPortfolioPanel" style="margin:16px;padding:16px;border:1px solid var(--border);border-radius:10px"><b>Ensemble vs Peak · Live paper portfolios</b><div id="modelPortfolioConnection" style="color:var(--t3);font-size:12px;margin:8px 0">${j?.error?escHtml(j.error):!start?'Waiting for the helper, fresh scores for both models, and live capital.':`Tracking since ${escHtml(start)} IST · ${stale?'Observation paused; showing saved marks':'Both models tracked regardless of the live selection'}${j.gaps?.length?' · '+j.gaps.length+' observation gap(s)':''}`}</div>`;
+  if(!start)return head+'</section>';
+  const rows=models.map(k=>{const m=j.models?.[k];if(!m)return '';const fl=j.settings?.values?.floors?.[k];return `<tr><td>${k==='ENS'?'Ensemble':'Peak'}<div style="font-size:11px;color:var(--t3)">Floor ${escHtml(String(fl??'—'))}</div></td><td>${money(m.fundedCapital??m.startingCapital)}</td><td style="color:${color(m.net)}">${money(m.net)}<div>${pct(m.returnPct)}</div></td><td>${money(m.realised)}</td><td style="color:${color(m.openNet)}">${money(m.openNet)}</td><td>${money(m.cash)}</td><td>${money(m.tied)}</td><td>${m.maxDrawdownPct.toFixed(2)}%</td><td>${m.closedFills} / ${m.openPositions} / ${m.waitingOrders}${m.staleMarks?'<div style="color:var(--amber)">'+m.staleMarks+' stale mark(s)</div>':''}</td></tr>`;}).join('');
+  const series=models.map(k=>(j.models?.[k]?.curve||[]).map(x=>({at:x.at,pct:x.returnPct??x.net/j.models[k].startingCapital*100})));
+  const points=series.flat(),t0=Math.min(...points.map(x=>x.at)),t1=Math.max(...points.map(x=>x.at)),lo=Math.min(0,...points.map(x=>x.pct)),hi=Math.max(.01,...points.map(x=>x.pct));
+  const chart=points.length>1?`<svg viewBox="0 0 800 120" role="img" aria-label="Paper account return over time. Ensemble orange; Peak blue." style="width:100%;height:140px;margin-top:12px"><line x1="0" x2="800" y1="${110-(0-lo)/(hi-lo||1)*100}" y2="${110-(0-lo)/(hi-lo||1)*100}" stroke="var(--border)"/>${series.map((s,i)=>`<polyline fill="none" stroke="${i?'#60a5fa':'#fb923c'}" stroke-width="2" points="${s.map(x=>((x.at-t0)/(t1-t0||1)*800).toFixed(1)+','+(110-(x.pct-lo)/(hi-lo||1)*100).toFixed(1)).join(' ')}"/>`).join('')}<text x="4" y="12" fill="var(--t3)" font-size="11">${hi.toFixed(2)}%</text><text x="4" y="119" fill="var(--t3)" font-size="11">${lo.toFixed(2)}%</text></svg><div style="font-size:12px;color:var(--t3)"><span style="color:#fb923c">● Ensemble</span> · <span style="color:#60a5fa">● Peak</span> · Net account return since tracking began</div>`:'';
+  const details=models.map(k=>{const m=j.models[k];if(!m)return '';const positions=(m.positions||[]).map(p=>`<tr><td>${escHtml(p.sym)}</td><td>${p.qty}</td><td>${money(p.avgCost)}</td><td>${money(p.mark)}</td><td>${money(p.target)}</td><td>${p.stop?money(p.stop):'Not armed'}</td></tr>`).join('');const trades=(m.trades||[]).slice(-10).reverse().map(t=>`<tr><td>${escHtml(t.sym)}</td><td>${t.qty}</td><td>${money(t.buyPrice)}</td><td>${money(t.sellPrice)}</td><td>${money(t.charges)}</td><td style="color:${color(t.net)}">${money(t.net)}</td></tr>`).join('');return `<details style="margin-top:12px"><summary>${k==='ENS'?'Ensemble':'Peak'} positions and recent simulated exits</summary><div style="overflow:auto"><table style="width:100%;text-align:left"><thead><tr><th>Open stock</th><th>Qty</th><th>Average</th><th>Mark</th><th>Target</th><th>Profit stop</th></tr></thead><tbody>${positions||'<tr><td colspan="6">No open positions</td></tr>'}</tbody></table><table style="width:100%;text-align:left;margin-top:12px"><thead><tr><th>Sold stock</th><th>Qty</th><th>Buy</th><th>Sell</th><th>Charges</th><th>Net P&amp;L</th></tr></thead><tbody>${trades||'<tr><td colspan="6">No simulated exits yet</td></tr>'}</tbody></table></div></details>`;}).join('');
+  return head+`<div style="overflow:auto"><table style="width:100%;text-align:left;white-space:nowrap"><thead><tr><th>Model</th><th>Funded capital</th><th>Total net</th><th>Realised net</th><th>Open net</th><th>Cash</th><th>Tied up</th><th>Max drawdown</th><th>Exit fills / Open / Waiting</th></tr></thead><tbody>${rows}</tbody></table></div>${chart}<p style="font-size:12px;color:var(--t3)">Common live capital limit: ${money(j.settings?.values?.capital)}. Each portfolio keeps its own cash under the current live cash ceiling. New highs in the live cash budget add equal paper funding to both accounts, excluded from profit. Returns and drawdown adjust for those funding flows. Settings are captured at order placement. Fills are estimates from observed ticks and visible order-book depth, including partial fills and charges. Open net reserves delivery exit charges. Unobserved prices are not replayed.</p>${details}</section>`;
+}
 function renderPerformance(){
   PERF_RENDERED=true;
   const el=document.getElementById('perfContent');
@@ -9433,6 +9462,7 @@ function renderPerformance(){
   if(!tb){
     el.innerHTML=`<div style="padding:12px 16px"><div style="text-align:center;padding:60px 40px;color:var(--t2)"><div style="font-size:18px;font-weight:700;color:var(--t1);margin-bottom:8px">No Tradebook Loaded</div><div>Upload TRADEBOOK.csv to see performance analytics. Open Positions and Latest Session are on the Rankings tab.</div></div></div>`;
     el.innerHTML+=buildUsPerformancePanel();
+    el.insertAdjacentHTML('afterbegin',buildModelPortfolioPanel());
     return;
   }
 
@@ -9444,6 +9474,7 @@ function renderPerformance(){
   if(!allTripsRaw.length&&tb.roundTrips>0){
     el.innerHTML=`<div style="padding:12px 16px"><div style="text-align:center;padding:60px 40px;color:var(--t2)"><div style="font-size:18px;font-weight:700;color:var(--t1);margin-bottom:8px">Re-upload TRADEBOOK.csv</div><div>Brain has ${tb.roundTrips} trades stored in the old format. Re-upload TRADEBOOK.csv once to rebuild with full trip data.</div></div></div>`;
     el.innerHTML+=buildUsPerformancePanel();
+    el.insertAdjacentHTML('afterbegin',buildModelPortfolioPanel());
     return;
   }
 
@@ -9549,6 +9580,7 @@ function renderPerformance(){
       ${symRows.length?perfCard('Stocks',symTbl.getHtml(),'360px','perf-stocks'):''}
     </div>`;
   el.innerHTML+=buildUsPerformancePanel();
+    el.insertAdjacentHTML('afterbegin',buildModelPortfolioPanel());
 
   setTimeout(()=>{monthTbl.render();symTbl.render();},0);
 }
@@ -14215,7 +14247,7 @@ function refreshStrategySafety(){
 }
 function startStreamRefresh(){
   if(_streamRefreshTimer) return;
-  if(!startStreamRefresh.btst){startStreamRefresh.btst=setInterval(()=>{loadBtstPicks();loadKiteMargins();loadKiteGtts();loadProfitLockStatus();loadAutoBuyStatus();syncSellBasketToKite();try{resetCrossAlertsIfNewDay();checkCrossingAlerts();}catch(e){}},20000);loadBtstPicks();loadKiteMargins();loadKiteGtts();loadProfitLockStatus();loadAutoBuyStatus();syncSellBasketToKite();try{resetCrossAlertsIfNewDay();checkCrossingAlerts();}catch(e){}
+  if(!startStreamRefresh.btst){startStreamRefresh.btst=setInterval(()=>{loadBtstPicks();loadKiteMargins();loadKiteGtts();loadProfitLockStatus();loadAutoBuyStatus();loadModelPortfolios();syncSellBasketToKite();try{resetCrossAlertsIfNewDay();checkCrossingAlerts();}catch(e){}},20000);loadBtstPicks();loadKiteMargins();loadKiteGtts();loadProfitLockStatus();loadAutoBuyStatus();loadModelPortfolios();syncSellBasketToKite();try{resetCrossAlertsIfNewDay();checkCrossingAlerts();}catch(e){}
     try{seedSavedBasketCount();}catch(e){}}
   _streamRefreshUiTimer=setInterval(()=>{try{refreshStrategySafety();renderLiveTapeBar();}catch(e){console.warn('Strategy safety refresh',e);}},1000);
   if(!_streamVisibilityBound){
@@ -15305,7 +15337,7 @@ function switchTab(n){
   // tabs back and forth was rebuilding the full ledger and the trade analytics every time.
   if(n===1&&(METHODOLOGY_DIRTY||!METHODOLOGY_BUILT)) renderMethodology();
   // Performance analytics are intentionally deferred so tab switching paints immediately.
-  if(n===2&&(PERF_DIRTY||!PERF_RENDERED)) schedulePerformanceRender();
+  if(n===2){loadModelPortfolios();if(PERF_DIRTY||!PERF_RENDERED)schedulePerformanceRender();}
   if(n===3&&window.RocketFinance) window.RocketFinance.render();
   // v1101: a hidden grid has clientWidth 0, so balancing on the tab it lives in is the only moment
   // the column count can actually be computed. rAF lets the tab paint first.
@@ -16093,7 +16125,7 @@ function saveFilterState(){
     FS.setUserSetting(TRADE_INPUTS_STORE,tradeInputs);
     _lastTradeInputSig=sig;
     clearTimeout(_tradeInputPersistTimer);
-    _tradeInputPersistTimer=setTimeout(()=>{saveBrainInBackground();},500);
+    _tradeInputPersistTimer=setTimeout(()=>{saveBrainInBackground();loadModelPortfolios();},500);
   }
 }
 
