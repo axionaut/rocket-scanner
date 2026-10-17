@@ -1,5 +1,5 @@
-const BUILD_TS='2026-10-16 IST'; // release build date (IST)
-const APP_VERSION=1516;
+const BUILD_TS='2026-10-17 IST'; // release build date (IST)
+const APP_VERSION=1517;
 const RADAR_SCORE_VERSION='v1419-recross-batches'; // Eligible on crossing the score floor at any time; selected model's evolving target and movement-based profit protection.
 
 // ── v1358: AN UNCAUGHT ERROR MUST NAME ITSELF ─────────────────────────────────────────────────
@@ -4735,6 +4735,12 @@ function btstCrossingState(s){
   // buyable on a later run once volume picks up again or dries out. No figure (under 4 bars today) = no veto.
   const vf=r.src.volFade?.[normSym(s.symbol)],band=Array.isArray(r.src.volFadeBand)?r.src.volFadeBand:[0.4,0.8];
   if(vf&&Number.isFinite(vf.fade)&&vf.fade>=band[0]&&vf.fade<band[1]) return {state:'WAIT',reason:`Score +${score.toFixed(2)} clears +${floor.toFixed(2)}, but the push is on fading volume: last 15 min average ${Math.round(vf.last15Avg).toLocaleString('en-IN')} = ${Math.round(vf.fade*100)}% of today's biggest 5-min bar (${Math.round(vf.peakBar).toLocaleString('en-IN')}). Fading pushes lost money live, so it is skipped; buyable once volume picks up or dries out.`};
+  // 17 Oct 2026 (owner): size-bucket veto. m = how far this stock's market-cap bucket has run from the open vs
+  // that bucket's normal at this time of day (engine sizeRun). Below 1 = its size is out of favour today (13/15 Oct:
+  // top 100 ran, small caps sank). Not noted as a crossing; buyable once its bucket runs normally. No figure = no veto.
+  const sr=r.src.sizeRun?.[normSym(s.symbol)],srMin=Number.isFinite(Number(r.src.sizeRunMin))?Number(r.src.sizeRunMin):1;
+  if(sr&&Number.isFinite(sr.m)&&sr.m<srMin){const bx=r.src.sizeRunMarket?.buckets?.[sr.bucket],names={L:'top 100',M:'101-250',S1:'251-500',S2:'501-1000',S3:'beyond 1000'};
+    return {state:'WAIT',reason:`Score +${score.toFixed(2)} clears +${floor.toFixed(2)}, but its size bucket (market-cap rank ${names[sr.bucket]||sr.bucket}) is running ${sr.m.toFixed(2)}x its normal for this time of day`+(bx?` (${bx.todayPct.toFixed(2)}% from the open vs ${bx.basePct.toFixed(2)}% usually)`:'')+`. Buys in an out-of-favour size held losers live, so it waits until that bucket runs normally.`};}
   const gateOff=r.src.gate?.on!==true;
   if(gateOff) return {state:'WAIT',reason:`Score +${score.toFixed(2)} clears +${floor.toFixed(2)}, but the market gate is off - no buys today.`};
   const first=noteCrossing(s.symbol,score,floor);
