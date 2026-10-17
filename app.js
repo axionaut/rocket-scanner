@@ -1,5 +1,5 @@
 const BUILD_TS='2026-10-17 IST'; // release build date (IST)
-const APP_VERSION=1517;
+const APP_VERSION=1518;
 const RADAR_SCORE_VERSION='v1419-recross-batches'; // Eligible on crossing the score floor at any time; selected model's evolving target and movement-based profit protection.
 
 // ── v1358: AN UNCAUGHT ERROR MUST NAME ITSELF ─────────────────────────────────────────────────
@@ -41,7 +41,7 @@ if(typeof window!=='undefined'){
     reportAppError('Unhandled promise rejection',ev&&ev.reason,'');
   });
 }
-const TARGET_POLICY_VERSION='btst-model-evolving-t2-v3';
+const TARGET_POLICY_VERSION='bracket-v1518';
 function isValidChangeOpen(v){
   if(v===null||v===undefined||typeof v==='boolean') return false;
   if(typeof v==='string'&&v.trim()==='') return false;
@@ -3729,7 +3729,7 @@ function setRadarEvidenceScore(r){
 }
 function radarScoreTitle(r){
   const p=r?.btstPick;
-  return p?`Pick #${p.rank}: model score ${p.score}. Buyable when it crosses your score floor; exit through the selected model's target and adaptive profit protection.`
+  return p?`Pick #${p.rank}: model score ${p.score}. Buyable when it crosses your score floor; exit through the +1.25% starting target and ratcheting OCO.`
     :"Model score: Peak uses predicted rise minus dip per session; Ensemble uses mapped percentiles. Each model has its own saved floor. GO requires a fresh crossing.";
 }
 function* refreshRocketScoresGen(deferPaint=false){
@@ -4425,7 +4425,7 @@ function checkCrossingAlerts(){
       title:fresh.length===1?'Score crossing — '+fresh[0].sym+' is buyable now'
         :fresh.length+' score crossings — buyable now',
       body:'<strong>'+escHtml(names)+'</strong><br>Clears the +'
-        +(Number.isFinite(floor)?floor.toFixed(2):'?')+' floor. Buy the funded basket now; use its GTT target, let the adaptive profit trail manage the exit.'});
+        +(Number.isFinite(floor)?floor.toFixed(2):'?')+' floor. Buy the funded basket now; use its GTT target, let the OCO bracket manage the exit.'});
   }catch(e){}
 }
 // Symbols already announced today. Cleared when the session date rolls, so a tab left open
@@ -4749,7 +4749,7 @@ function btstCrossingState(s){
   if(stale) return {state:'WAIT',reason:stale};
   const at=first?new Date(first.t).toLocaleTimeString('en-IN',{hour:'2-digit',minute:'2-digit',hour12:false}):'';
   return {state:'GO',reason:`Score +${score.toFixed(2)} clears the +${floor.toFixed(2)} floor`
-    +(at?` (crossed ${at})`:'')+` - buy the funded basket now; let the target GTT and adaptive profit trail manage the exit`};
+    +(at?` (crossed ${at})`:'')+` - buy the funded basket now; let the OCO bracket manage the exit`};
 }
 // v1416: THE FLOOR NOW DECIDES WHAT TRADES. It is pushed to the helper, which passes --min-score
 // to every engine run including the scheduled 15:05/15:15 ones, so the picks file is cut at the
@@ -7566,7 +7566,7 @@ async function loadProfitLockStatus(){
   if(!j||!j.ok||!Array.isArray(j.positions)) return;
   const bySym=new Map();
   for(const p of j.positions){if(p&&p.sym)bySym.set(normSym(p.sym),p);}
-  PROFIT_LOCK_STATUS={bySym,at:j.asOf||Date.now(),lossBudget:j.lossBudget||null,entryPeaks:Array.isArray(j.entryPeaks)?j.entryPeaks:[]};
+  PROFIT_LOCK_STATUS={bySym,at:j.asOf||Date.now(),lossBudget:j.lossBudget||null,entryPeaks:Array.isArray(j.entryPeaks)?j.entryPeaks:[],bracket:j.bracket||null};
 }
 function profitLockFor(sym){
   return Date.now()-PROFIT_LOCK_STATUS.at<60000?(PROFIT_LOCK_STATUS.bySym.get(normSym(sym))||null):null;
@@ -8783,7 +8783,7 @@ function buildLatestSessionPanel(query=''){
         return g.length?Math.round(g.reduce((a,b)=>a+b,0)/g.length):null;})()
     }:null;
     const lossBudget=Date.now()-PROFIT_LOCK_STATUS.at<60000?PROFIT_LOCK_STATUS.lossBudget:null;
-    const lossAllowance=lossBudget?.day===latestDate?'<div style="padding:8px 16px;color:var(--t2);font-size:12px">Loss-trim allowance: '+fmtPerfRs(lossBudget.available)+' available | '+fmtPerfRs(lossBudget.reserved)+' reserved | starts at -6%; costs included'+(!lossBudget.known?' | cost basis incomplete':'')+'</div>':'';
+    const lossAllowance=lossBudget?.day===latestDate?'<div style="padding:8px 16px;color:var(--t2);font-size:12px">Loss-trim allowance: '+fmtPerfRs(lossBudget.available)+' available | '+fmtPerfRs(lossBudget.reserved)+' reserved | below -1.25%; 90% of booked profit; costs included'+(PROFIT_LOCK_STATUS.bracket?' | OCO gap '+PROFIT_LOCK_STATUS.bracket.params.gapPct+'%, zone '+PROFIT_LOCK_STATUS.bracket.params.zonePct+'% | '+PROFIT_LOCK_STATUS.bracket.learning.finished+'/40 finished trades':'')+(!lossBudget.known?' | cost basis incomplete':'')+'</div>':'';
     const latestTbl=makeSortableTable('rank-latest-session',latestCols,rows,'_sort',-1,null,latestTotals,'sym');
     const emptyNote=String(query||'').trim()
       ?panelNoMatchHtml(query,'booked trade')
@@ -9114,7 +9114,7 @@ function buildOpenPositionsPanel(query=''){
         <span style="font-size:13px;font-weight:800;color:var(--t1);text-transform:uppercase;letter-spacing:.08em">Open Positions${panelFilterTag(rows,shown,query)}</span>
         <span style="font-size:14px;font-weight:700;color:${pnlColor}">${rows.length} live position${rows.length===1?'':'s'} · ${fmtINR(totalCapital)} deployed · ${fmtSignedINR(totalPnl)}</span>
       </div>
-      <div style="font-size:14px;color:var(--t2);line-height:1.5">Live merge of Holdings, Positions, and today's net buys. Exits follow the active broker target, confirmed adaptive profit stop and profit-funded partial loss trims starting at -6%. No holding-age deadline. Exit advice requires fresh live prices. </div>
+      <div style="font-size:14px;color:var(--t2);line-height:1.5">Live merge of Holdings, Positions, and today's net buys. Exits follow the active broker bracket and profit-funded partial loss trims below -1.25%. No holding-age deadline. Exit advice requires fresh live prices. </div>
     </div>
     ${shown.length?`<div class="scroll-x">${table.getHtml()}</div>`:panelNoMatchHtml(query,'open position')}
   </div>`;
@@ -9852,7 +9852,7 @@ function _renderMethodologyInner(){
     <div class="m-grid">
     <div class="m-card"><h4>1. Live score (throughout the session)</h4><p>The local helper runs <code>dev/btst_engine.py</code>. It builds daily, market and sector features (today's volume projected to a full session) for every liquid stock (20-day average turnover ≥ ₹5 Cr, price ₹5–₹4,000) from Zerodha daily bars plus today's live price and volume: returns from 1 day to 3 months, gap, close location, range, volume surges, volatility, distance to highs and averages, RSI, stochastics, ADX, MACD, TradingView-style ratings, relative strength and market condition. The selected model ranks opportunities; Ensemble scores are percentile-mapped scores, not calibrated expected returns. Models are retrained every 5 sessions on the last 220 sessions.</p></div>
     <div class="m-card"><h4>2. Buy on qualification</h4><p>A current live score clearing your floor can become GO throughout the session. Qualifying names share available capital by score, within saved allocation and execution limits (minimum ₹5,000 per funded stock). A purchase consumes its crossing; a completed below-floor observation enables a fresh crossing, held or unheld. The market gate, price freshness, circuit, surveillance and EQ checks still apply.</p></div>
-    <div class="m-card"><h4>3. Exit</h4><p>Orders carry the selected model target, floored for costs and profit. The target learner observes simulated signals through two later sessions; that research horizon does not force a live exit. +3% is its startup fallback. Profit protection follows measured candle swings and 30-second live samples: the runner distance shrinks from arming to the original target, reaching the broker minimum gap; wider swings cannot loosen it. The runner hands off near the target after broker protection is confirmed. At -6%, a separate GTT sells only the whole-share quantity covered by today's realised net profit after estimated costs and pending loss exits. Without available profit, shares remain held. No scheduled expiry.</p></div></div>
+    <div class="m-card"><h4>3. Exit</h4><p>Every buy starts with a sell GTT at +1.25% of weighted average cost. Within the zone of the upper sell, the helper converts it to one broker OCO: upper = live price + gap, lower = live price − gap. Both legs only move up. Gap starts at 0.26%, zone at 0.10%; the helper learns one shared pair after close from the last 40 finished trades, with a one-second modify delay, recorded bid depth and charges. Any change must improve both chronological halves; 1.25% stays fixed. Holdings down more than 1.25% can be trimmed, worst first, using up to 90% of today’s booked profit after charges. Without booked profit, they remain held. No scheduled expiry.</p></div></div>
     <h3>Historical evidence</h3><p>The experiments below used older fixed entry and exit rules. They do not validate the current score-crossing entries, adaptive profit trail or holding without a time deadline.</p>
     <p>Walk-forward on NSE daily data, Dec 2025 – Sep 2026 (the model never saw the future), costs included: top 5 bought at the close and sold at +3% the next day or at its close averaged <b>+0.91% per trade</b>, 73% of days positive. With the market gate: <b>+1.18% per trade, 79% of days positive, worst drawdown −4.7%</b>. A 1-minute replay of 36 recent sessions (buy at the real 15:25 price, +3% only when price traded through it) averaged <b>+1.17% per trade</b>, 26 of 36 days positive. Different random seeds and settings gave +0.91% to +1.05%.</p>
     <p>The earlier near-high rules (v1388–v1392) and every intraday entry rule tested on 5-minute and 1-minute data did not beat costs; they are retired.</p>
@@ -10422,55 +10422,15 @@ function currentModelTargetPct(){
   return Number.isFinite(t?.pct)&&t.pct>0?t.pct:RocketStrategy.CONFIG.TARGET_PCT;
 }
 function learnedBtstTarget(score,symbol=null){
-  const PEAK_OWN_TARGET=false;
-  // v1513 (owner, 16 Oct): Peak buys use the learned Ensemble target, not 85% of each stock's predicted peak. Fixed
-  // 1-2% targets lost on the 147 Ensemble crossings (capped wins vs 6% stops); per-stock Peak targets sit at 1.8-3.4%.
-  if(symbol&&PEAK_OWN_TARGET){
-    const r=btstRanking(),pk=r?.src?.peak?.[normSym(symbol)];
-    if(r?.model==='PEAK'&&Number.isFinite(pk?.target)&&pk.target>0)
-      return {pct:pk.target,y:0,x:pk.peak,dip:pk.dip,sessions:pk.sessions,model:'PEAK',method:'peak-model',through:r.src.asOf};
-  }
-  const model=BTST.targetModel;
-  if(model?.version!==3)return null;
-  const mdl=selectedBtstModel()==='PEAK'?'ENS':selectedBtstModel(),p=model.models?.[mdl];
-  if(!p||!Number.isFinite(p.pct)||p.pct<0)return null;
-  return {pct:p.pct,y:p.y||0,x:p.x,n:p.n,provisional:p.provisional,
-    through:model.asOf,model:mdl,fallback:p.fallback,method:'evolving-t2'};
+  return {pct:1.25,y:0,model:'COMMON',method:'bracket',n:0,through:null};
 }
+
 function getRowExitPolicy(row,buyPrice=null,activeInfo=null,nudgeInfo=null,qty=null){
-  const {TARGET_PCT:basePct,STOP_LOSS_PCT:stopPct}=RocketStrategy.CONFIG;
-  const learned=learnedBtstTarget(btstScoreAOf(row?.symbol),row?.symbol);
-  // Owner policy: quantity-specific cost + existing minimum net-profit floor.
-  const price=Number(buyPrice)||Number(row?.price),q=Number(qty);
-  let z=0;
-  if(price>0&&q>0){
-    const fr=getTradeFrictionPct(row,q*price);
-    const slip=fr?.covered&&Number.isFinite(fr.entryPct)&&Number.isFinite(fr.exitPct)
-      ?Math.max(0,fr.entryPct+fr.exitPct):2*BASKET_MARKET_BUDGET_BUFFER_PCT;
-    // 1 Oct: the floor is costs + 0.12% (the v1457 minimum-profit floor), not a fixed rupee goal. A rupee goal on a
-    // small position made the target absurd (DOLPHIN 19 x Rs 610 -> +10.82%).
-    const need=q*price*0.0012,buyCost=calcZerodhaCharges(price,q,false,false,false);
-    const net=sell=>q*(sell-price)-buyCost-calcZerodhaCharges(sell,q,true,false,false)-q*price*slip/100;
-    let lo=price,hi=price+Math.max(0.05,(need+buyCost)/q+price*0.01);
-    for(let i=0;i<32&&net(hi)<need;i++)hi=price+2*(hi-price);
-    for(let i=0;i<48;i++){const mid=(lo+hi)/2;if(net(mid)>=need)hi=mid;else lo=mid;}
-    const sell=Math.ceil((hi-1e-9)/0.05)*0.05;
-    z=(sell/price-1)*100;
-  }
-  const targetPct=Math.ceil((Math.max(learned?.pct??basePct,learned?.y||0,z)-1e-9)*100)/100;
-  if(learned?.method==='peak-model')return {targetPct,basePct,stopPct,viable:true,
-    targetPolicy:'peak-model',x:learned.x,y:0,z,
-    targetSource:`Peak: 85% of this stock's predicted peak +${learned.x.toFixed(2)}% (predicted dip ${learned.dip.toFixed(2)}%, peak in ~${learned.sessions.toFixed(1)} sessions); costs + minimum net floor ${z.toFixed(2)}%`,
-    viabilitySource:null,stopSource:'Profit-funded loss trims from -6%; target GTT and adaptive profit protection',rewardRisk:null};
-  if(learned?.method==='evolving-t2')return {targetPct,basePct,stopPct,viable:true,
-    targetPolicy:TARGET_POLICY_VERSION,x:learned.x,y:learned.y,z,
-    targetSource:`${learned.model==='ENS'?'Ensemble':'Original'}: ${learned.fallback?'3% startup fallback':`85% of median ${learned.x.toFixed(2)}%`}; ${learned.n} closed signals (${learned.provisional} still tracking); costs + minimum net floor ${z.toFixed(2)}%`,
-    viabilitySource:null,stopSource:'Profit-funded loss trims from -6%; target GTT and adaptive profit protection',rewardRisk:null};
-  return {targetPct,basePct,stopPct,viable:true,targetPolicy:learned?(learned.method==='profit-model'?'btst-profit-model':'btst-score-learned'):'btst-fixed',
-    targetSource:learned?`${learned.method==='profit-model'?'Profit-model':'Score-learned'} target (${learned.n} completed paths through ${learned.through})`:`+${basePct}% GTT (learning fallback)`,
-    viabilitySource:null,
-    stopSource:stopPct>0?'Fixed strategy stop':'Profit-funded loss trims from -6%; target GTT and adaptive profit protection',rewardRisk:stopPct>0?targetPct/stopPct:null};
+  return {targetPct:1.25,basePct:1.25,stopPct:0,viable:true,targetPolicy:'bracket-v1518',
+    targetSource:'Starts at +1.25% of weighted average cost; ratchets both OCO legs upward near the upper sell.',
+    stopSource:'Loss trims below -1.25%, funded by up to 90% of today’s booked profit after charges',rewardRisk:null};
 }
+
 function summarizeRowExitPolicies(rows){
   const policies=(rows||[]).map(r=>getRowExitPolicy(r,r?.price)).filter(p=>p.targetPct>0&&p.stopPct>0&&p.viable);
   if(!policies.length) return null;
@@ -10628,27 +10588,12 @@ function executedBtstTarget(sym){
   }catch(e){return null;}
 }
 function getOpenPositionTargetFloor(sym,pos){
-  const avgFromPos=Number(pos?.avg);
-  const avgPrice=avgFromPos>0?avgFromPos:Number(getHoldingAvgCost(sym));
-  if(!(avgPrice>0)) return null;
-  let active=null;
-  try{ active=getActiveTargetInfo(); }catch(e){}
-  const anchorPct=active?.source==='manual'&&Number(active.tgtPct)>0?Number(active.tgtPct):null;
-  const boughtPct=anchorPct==null?executedBtstTarget(sym):null;
-  const raw=avgPrice*(1+(anchorPct??boughtPct??currentModelTargetPct())/100);
-  const nextTick=+((Math.floor((avgPrice+1e-9)/0.05)+1)*0.05).toFixed(2);
-  const anchorPrice=Math.max(nextTick,tickPrice(raw));
-  const costFloorPrice=getPositionAfterCostFloor(avgPrice,Number(pos?.qty));
-  // v1368: break-even plus the minimum safe cushion - the live bid-ask spread, at least one tick.
-  const frH=costFloorPrice>0?getTradeFrictionPct({symbol:sym,price:avgPrice,turnover:null},Number(pos?.qty)*avgPrice):null;
-  const cushionPx=Math.max(0.05,Number.isFinite(frH?.spreadPct)&&frH.spreadPct>0?costFloorPrice*frH.spreadPct/100:0);
-  const cushionFloorPrice=costFloorPrice>0?+(Math.ceil((costFloorPrice+cushionPx-1e-9)/0.05)*0.05).toFixed(2):null;
-  const marketPrice=tickPrice(raw);
-  const price=Math.max(anchorPrice,cushionFloorPrice||0,marketPrice||0);
-  const source=anchorPct!=null?'manual Target Override':boughtPct!=null?'exported GTT target':'selected model target (no exported target recorded)';
-  return {avgPrice,price:+price.toFixed(2),anchorPrice:+anchorPrice.toFixed(2),
-    costFloorPrice,cushionFloorPrice,cushionIsSpread:cushionPx>0.05,anchorPct,source,marketPrice};
+  const avgPrice=Number(pos?.avg)||Number(getHoldingAvgCost(sym));
+  if(!(avgPrice>0))return null;
+  const plk=profitLockFor(sym),price=plk?.targetGttId&&plk.targetPrice>0?plk.targetPrice:tickPrice(avgPrice*1.0125);
+  return {avgPrice,price,anchorPrice:price,costFloorPrice:null,cushionFloorPrice:null,anchorPct:1.25,source:'Bracket upper sell',marketPrice:price};
 }
+
 function getPositionAgeData(sym,pos){
   const qty=Math.max(0,Number(pos?.qty)||0);
   const lots=(TRADEBOOK_STATS?.openPositionLotsMap?.[sym]||[]).filter(l=>l.qty>0&&l.date)
@@ -10697,13 +10642,13 @@ function getOpenPositionTapePolicy(sym,pos){
   const stale=!isEquitySession(Date.now())?'Market closed':universePriceStaleness()||stockPriceStaleness(symbol);
   const price=Number(quote?.price)>0?Number(quote.price):Number(pos?.ltp)||null;
   const plk=profitLockFor(symbol);
-  const brokerTarget=(kiteGttsFor(symbol)||[]).find(g=>Number(g.id)===Number(plk?.targetGttId)&&g.qty===qty);
+  const brokerTarget=(kiteGttsFor(symbol)||[]).filter(g=>Number(g.id)===Number(plk?.targetGttId)&&g.qty===qty).sort((a,b)=>b.trigger-a.trigger)[0];
   const activeTarget=brokerTarget?.trigger>0?brokerTarget.trigger
     :plk?.targetGttId&&plk.targetGttQty===qty&&plk.targetPrice>0&&!plk.targetMissingSince?plk.targetPrice:null;
   const tgtPct=activeTarget>0&&avg>0?(activeTarget/avg-1)*100:executedBtstTarget(symbol)||currentModelTargetPct();
   const brokerStop=plk?.stopConfirmed&&plk?.stopGttId&&plk?.stopGttQty===qty&&plk?.stopGttTrigger>0?plk.stopGttTrigger:null;
   const pending=pos?.basisKnown===false||plk&&(plk.triggered||plk.cleanupPending||plk.needsReconcile||plk.handoffPending||(plk.runner&&!brokerStop));
-  const verdict=stale?{action:'WAIT',reason:stale,shouldExit:false}:pending?{action:'WAIT',reason:pos?.basisKnown===false?'Position cost is awaiting execution reconciliation.':plk?.triggered?'Broker exit triggered; awaiting fill or cleanup.':'Broker profit protection is being reconciled.',shouldExit:false}:RocketStrategy.evaluateExit({avgCost:avg,daysHeld:days,targetPct:tgtPct,targetPrice:activeTarget,peakPnlPct:plk?.peakPnlPct??null,runnerStopPrice:plk?.runner&&!plk?.triggered?brokerStop:null,swingStopPrice:plk?.swingLock&&plk?.activated&&!plk?.runner&&!plk?.triggered?brokerStop:null},price);
+  const verdict=stale?{action:'WAIT',reason:stale,shouldExit:false}:pending?{action:'WAIT',reason:pos?.basisKnown===false?'Position cost is awaiting execution reconciliation.':plk?.triggered?'Broker exit triggered; awaiting fill or cleanup.':'Broker profit protection is being reconciled.',shouldExit:false}:RocketStrategy.evaluateExit({bracket:!plk?.runner,bracketLower:brokerStop,avgCost:avg,daysHeld:days,targetPct:tgtPct,targetPrice:activeTarget,peakPnlPct:plk?.peakPnlPct??null,runnerStopPrice:plk?.runner&&!plk?.triggered?brokerStop:null,swingStopPrice:plk?.swingLock&&plk?.activated&&!plk?.runner&&!plk?.triggered?brokerStop:null},price);
   if(!stale&&plk?.activated&&!plk?.triggered&&!brokerStop&&!verdict.shouldExit) verdict.reason='Profit protection pending broker confirmation. '+verdict.reason;
   else if(!stale&&plk?.swingDataMissing&&!plk?.activated&&!verdict.shouldExit) verdict.reason='Swing estimate unavailable; profit trail not armed. '+verdict.reason;
   const {STOP_LOSS_PCT:slPct}=RocketStrategy.CONFIG;
@@ -10711,7 +10656,7 @@ function getOpenPositionTapePolicy(sym,pos){
   const targetPrice=avg>0?+(avg*(1+tgtPct/100)).toFixed(2):null,stopPrice=lossStop||(avg>0&&slPct>0?+(avg*(1-slPct/100)).toFixed(2):null);
   return {symbol,qty,price,open:quote?.open,signal:verdict.action,signalSort:verdict.shouldExit?0:1,
     why:verdict.reason,exitVerdict:verdict,targetPrice,stopPrice,targetPct:tgtPct,stopPct:slPct,
-    targetWhy:activeTarget>0?`Active target GTT at ${activeTarget}`:`Entry target +${tgtPct}% (active broker target not confirmed)`,stopWhy:lossStop?`Profit-funded loss GTT: ${plk.lossGttQty} of ${qty} shares at ${lossStop}; loss and costs reserved from today's realised net profit`:slPct>0?`-${slPct}% from average buy cost`:'Loss trim waits for -6% and available realised net profit after costs; remaining shares stay held',
+    targetWhy:activeTarget>0?`Active target GTT at ${activeTarget}`:`Entry target +${tgtPct}% (active broker target not confirmed)`,stopWhy:lossStop?`Profit-funded loss GTT: ${plk.lossGttQty} of ${qty} shares at ${lossStop}; loss and costs reserved from today's realised net profit`:slPct>0?`-${slPct}% from average buy cost`:'Loss trim waits for a loss greater than 1.25% and the 90% booked-profit budget after charges',
     pacePct:null,paceRs:null,daysHeld:days,ageUnknown:days==null,afterCostFloor:null,
     profitLock:plk||null,lockStopPrice:verdict.lockStopPrice||null};
 }
@@ -11445,7 +11390,7 @@ function dashboardMarketCards(){
     add(1,'NSE',br?escHtml(br.at):'Awaiting scores',`${br?br.n:0} scored · floor ${btstMinScore()} · ${isEquitySession(Date.now())?'current session':'last session'}`);
     const go=ALL.filter(isStockEligible).length;
     add(2,'NSE',`${go} GO`,'Kite execution checks apply');
-    add(3,'NSE',signed(target?.pct??3),'Learned target | adaptive profit protection');
+    add(3,'NSE',signed(target?.pct??3),'Fixed start | ratcheting OCO');
   }
   if(m.us){
     const trend=d?.marketTrendPct;
@@ -13636,7 +13581,7 @@ function showRadarDetail(sym){
   document.getElementById('radarDetailTitle').textContent=r.symbol+' | Strategy';
   document.getElementById('radarDetailBody').innerHTML=`<p><b>${act.state}</b>: ${escHtml(act.reason)}</p>
     <p>${escHtml(radarScoreTitle(r))}</p><p>Price ${fmtINR(x.price)} | Day high ${fmtINR(x.high)} | Open ${fmtINR(x.open)} | VWAP ${fmtINR(x.vwap)}</p>
-    <p>Target +${getRowExitPolicy(r,r.price).targetPct}% base GTT (allocated order includes cost/profit floor) | Profit-funded loss trim from -6% | Adaptive profit protection; no scheduled exit.</p>`;
+    <p>Target +${getRowExitPolicy(r,r.price).targetPct}% base GTT on weighted average cost | Profit-funded loss trim below -1.25% | Ratcheting OCO; no scheduled exit.</p>`;
   dlg.showModal();
 }
 
@@ -14720,8 +14665,8 @@ function buildBasketOrders(capital, selList){
     if(!(qty>0)) return;
     const sym=s.symbol;
     const name=s.name||sym;
-    // The GTT uses the allocator's target: the selected model's evolving target, floored by cost + min profit.
-    const policy=Number(allocTgt)>0?{targetPct:Number(allocTgt)}:getRowExitPolicy(s,Number(s.price)||0,null,null,qty);
+    // Every funded buy carries the fixed bracket start on its reconciled weighted cost.
+    const policy=getRowExitPolicy(s,Number(s.price)||0,null,null,qty);
     const targetPct=(policy&&Number.isFinite(policy.targetPct)&&policy.targetPct>0)
       ? parseFloat(Number(policy.targetPct).toFixed(2))
       : currentModelTargetPct();

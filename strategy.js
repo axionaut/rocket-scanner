@@ -26,10 +26,9 @@
     MAX_HIGH_DISTANCE_PCT: 1.2,  // Within 1.2% of Day High
     MIN_CIRCUIT_HEADROOM_PCT: 3.0, // At least 3.0% below Upper Circuit
 
-    // BTST: +3% is the fallback for legacy positions and insufficient target-learning evidence.
-    // New funded orders carry a learned target and adaptive profit protection; no scheduled expiry.
-    // No stop: overnight gaps jump stops (a -2% stop turned the walk-forward result negative).
-    TARGET_PCT: 3.0,
+    // Common bracket start on weighted average cost; the helper ratchets a broker OCO.
+    // Profit-funded loss trims are budgeted separately, with no unconditional loss sale.
+    TARGET_PCT: 1.25,
     STOP_LOSS_PCT: 0,            // no stop-loss
     TOP_K: 5,                    // positions per day (equal weight)
     MIN_ALLOCATION_RS: 5000.0,   // ₹5,000 minimum allocation per stock to ensure profits clear DP & charges
@@ -129,6 +128,11 @@
 
     const targetPct = Number(position.targetPct) > 0 ? Number(position.targetPct) : CONFIG.TARGET_PCT;
     const targetPrice = Number(position.targetPrice) > 0 ? Number(position.targetPrice) : avgCost * (1 + targetPct / 100);
+    if(position.bracket) {
+      const lower=Number(position.bracketLower)||0,sell=ltp>=targetPrice||(lower>0&&ltp<=lower);
+      return {shouldExit:sell,action:sell?'SELL':'HOLD',exitType:sell?'BRACKET':'BRACKET_ACTIVE',pnlPct,
+        lockStopPrice:lower||null,reason:sell?'Broker bracket trigger reached; awaiting limit fill.':`Bracket upper ${targetPrice.toFixed(2)}${lower>0?`, lower ${lower.toFixed(2)}`:''}`};
+    }
     // v1451: a runner's target GTT was cancelled by the helper, which now trails it; the helper's
     // stop replaces both the target and the local lock computation.
     const runnerStop = Number(position.runnerStopPrice);
