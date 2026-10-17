@@ -8,12 +8,8 @@
 !app.js
 !strategy.js
 !finance.js
-!intl.js
 !styles.css
-!browser-extension/
-!browser-extension/manifest.json
-!browser-extension/background.js
-!browser-extension/relay.js
-!browser-extension/kite-import.js
-!browser-extension/README.md
+# Helper, research, extension and operating notes stay local.
+browser-extension/
 dev/
+brief.md
