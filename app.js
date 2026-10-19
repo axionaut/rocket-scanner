@@ -1,5 +1,5 @@
 const BUILD_TS='2026-10-19 IST'; // release build date (IST)
-const APP_VERSION=1527;
+const APP_VERSION=1528;
 const RADAR_SCORE_VERSION='v1419-recross-batches'; // Eligible on crossing the score floor at any time; selected model's evolving target and movement-based profit protection.
 
 // ── v1358: AN UNCAUGHT ERROR MUST NAME ITSELF ─────────────────────────────────────────────────
@@ -15018,11 +15018,25 @@ function kiteBridgeRequest(orders,side='BUY',automatic=true){
     window.postMessage({type:'RS_KITE_PREPARE',id,side,automatic,createdAt:Date.now(),orders:orders.map(o=>({id:o.id,instrument:o.instrument,weight:o.weight,params:o.params}))},location.origin);
   });
 }
-let _nativeEntryBusy=false;
+let _nativeEntryBusy=false,_nativeEntryUnavailableAt=0;
 async function syncNativeKiteEntries(){
   if(_nativeEntryBusy||_kiteTransferBusy||_kiteSellBusy||!KITE_API||!AUTO_BUY_ENABLED||AUTO_BUY_STATUS.mode!=='browser-ioc')return;
   _nativeEntryBusy=true;
   try{
+    // Poll the helper's read-only queue, not the extension/Kite, when there is no work.
+    // Never infer an empty queue from a timeout or from the slower dashboard status cache.
+    let queue;
+    try{
+      queue=await readHelperResponse('/api/bridge-entry/queue',{timeout:5000});
+      if(!queue?.ok)throw Error(queue?.why||'Queue status unavailable');
+    }catch(e){
+      if(!_nativeEntryUnavailableAt)_nativeEntryUnavailableAt=Date.now();
+      if(Date.now()-_nativeEntryUnavailableAt>=30000)
+        reportKiteBasketOutcome(false,'Immediate Auto-Buy queue unavailable for 30 seconds. New entries are paused until the helper responds. '+e.message,'BUY','native-entry-health');
+      return;
+    }
+    _nativeEntryUnavailableAt=0;
+    if(!queue.enabled||!queue.queued)return;
     const r=await kiteBridgeRequest([],'EXECUTE',true);
     if(!r.ok)throw Error(r.why||'Kite submission unconfirmed');
     if(r.orderId){
