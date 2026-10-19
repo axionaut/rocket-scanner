@@ -1,5 +1,5 @@
-const BUILD_TS='2026-10-17 IST'; // release build date (IST)
-const APP_VERSION=1520;
+const BUILD_TS='2026-10-19 IST'; // release build date (IST)
+const APP_VERSION=1521;
 const RADAR_SCORE_VERSION='v1419-recross-batches'; // Eligible on crossing the score floor at any time; selected model's evolving target and movement-based profit protection.
 
 // ── v1358: AN UNCAUGHT ERROR MUST NAME ITSELF ─────────────────────────────────────────────────
@@ -1417,7 +1417,12 @@ const DAY_LENGTH_MIN= DAY_END_MIN - DAY_START_MIN; // 420
 // 20-order cap. Which of the two applies to a given stock is DERIVED from its own bar file, never
 // from a list (see buildIntradayTrajectory); no input carries F&O membership.
 const SESSION_CLOSE_MIN      = 15*60+30;  // 15:30 - continuous close outside the F&O segment
-const CAS_CONTINUOUS_END_MIN = 15*60+15;  // 15:15 - earliest close the auction regime can produce
+const CAS_CONTINUOUS_END_MIN = 15*60+15;  // 15:15 - earliest close the Phase 1 auction regime can produce
+// SEBI circular 15 Oct 2026, effective 2026-12-07: the closing auction moves to 15:30-15:40, so F&O stocks
+// trade continuously to 15:30 like every other stock. From that IST date the earliest continuous close is 15:30.
+const CAS_V2_DAY = '2026-12-07';
+function istDateKeyNow(ts=Date.now()){ const c=istClock(ts); return c.year+'-'+String(c.month).padStart(2,'0')+'-'+String(c.day).padStart(2,'0'); }
+function casContinuousEndMin(ts=Date.now()){ return istDateKeyNow(ts)>=CAS_V2_DAY?SESSION_CLOSE_MIN:CAS_CONTINUOUS_END_MIN; }
 
 // v1364: WHICH OF THE TWO EXCHANGE CLOSES THIS STOCK TRADES TO, read from its own tape. A stock in
 // the closing auction regime prints no trade between 15:15 and 15:30, so a session that traded in
@@ -1429,6 +1434,7 @@ const _closeMinMemo=new Map();
 function continuousCloseMin(sym){
   const key=normSym(sym||''),bars=INTRADAY_BARS[key];
   if(!Array.isArray(bars)||!bars.length) return SESSION_CLOSE_MIN;
+  if(casContinuousEndMin()===SESSION_CLOSE_MIN) return SESSION_CLOSE_MIN;   // from 2026-12-07 every stock trades to 15:30
   const today=istDayKey(Date.now());
   const sig=(_memoryRevisions.get(key)||0)+':'+bars[0].t+':'+today;
   const hit=_closeMinMemo.get(key);
@@ -5473,7 +5479,7 @@ function buildIntradayTrajectory(bars,history){
     const _d=new Date(_hist[i].t), _m=_d.getHours()*60+_d.getMinutes();
     if(_m>_seenMin) _seenMin=_m;
   }
-  const _endMin=(_seenMin+stepMs/60000>=CAS_CONTINUOUS_END_MIN)?_seenMin+stepMs/60000:SESSION_CLOSE_MIN;
+  const _endMin=(casContinuousEndMin()<SESSION_CLOSE_MIN&&_seenMin+stepMs/60000>=CAS_CONTINUOUS_END_MIN)?_seenMin+stepMs/60000:SESSION_CLOSE_MIN;
   const closeT=new Date(lastT); closeT.setHours(Math.floor(_endMin/60),_endMin%60,0,0);
   const barsLeft=Math.max(0,Math.floor((closeT-lastT)/stepMs));
   const maxTravel=(avgMovePct!=null)?avgMovePct*barsLeft:null;
@@ -10310,7 +10316,7 @@ function medianRowCapacityPct(){
 function buildClockRunwayTable(){
   // Only sessions observed through their close enter (below), so today's forming bars cannot change
   // this table before the earliest continuous close; after it they can, and the live revision rejoins.
-  const late=istClock().mins>=CAS_CONTINUOUS_END_MIN;
+  const late=istClock().mins>=casContinuousEndMin();
   const sig=INTRADAY_HISTORY_V+':'+(late?newestTapeBucketMs():0)+':'+getSessionDate()+':'+((ALL&&ALL.length)||0);
   if(_clockRunwayMemo&&_clockRunwayMemo.sig===sig) return _clockRunwayMemo.tab;
   const keys=Object.keys(INTRADAY_BARS||{});
@@ -11919,7 +11925,7 @@ function intradayFetchJobs(limit){
   // OHLC and cumulative volume are still changing. The stock's own first bar starts the window;
   // CAS_CONTINUOUS_END_MIN is the earliest exchange-defined continuous close.
   const liveHeldBoundary=(fetchClock&&Number.isFinite(fetchClock.mins)
-    &&fetchClock.mins<CAS_CONTINUOUS_END_MIN)?Math.floor(fetchClock.mins/5)*5:null;
+    &&fetchClock.mins<casContinuousEndMin())?Math.floor(fetchClock.mins/5)*5:null;
   const gapOf=m=>{
     const rd=getIntradayRead(m.s);
     if(!rd||!rd.current) return null;          // no current read: the blocked state
