@@ -1,5 +1,5 @@
 const BUILD_TS='2026-10-19 IST'; // release build date (IST)
-const APP_VERSION=1523;
+const APP_VERSION=1524;
 const RADAR_SCORE_VERSION='v1419-recross-batches'; // Eligible on crossing the score floor at any time; selected model's evolving target and movement-based profit protection.
 
 // ── v1358: AN UNCAUGHT ERROR MUST NAME ITSELF ─────────────────────────────────────────────────
@@ -7096,7 +7096,7 @@ function exitEntryHigh(sym,fromTime,untilTime=null){
 function enrichExitPnlRow(row,bookedDate=null){
   const out={...row},qty=Number(row?.qty)||0,buy=Number(row?.buyPrice),sell=Number(row?.sellPrice),current=currentPriceForSymbol(row?.sym);
   out.priceDiff=qty>0&&buy>0&&sell>0?+(sell-buy).toFixed(2):null;
-  out.grossPnl=out.priceDiff==null?null:Number.isFinite(Number(row.netPnl))&&Number.isFinite(Number(row.charges))?+(Number(row.netPnl)+Number(row.charges)).toFixed(0):+((sell-buy)*qty).toFixed(0);
+  out.grossPnl=out.priceDiff==null?null:Number.isFinite(Number(row.netPnl))&&Number.isFinite(Number(row.charges))?+(Number(row.netPnl)+Number(row.charges)).toFixed(2):+((sell-buy)*qty).toFixed(2);
   out.currentPrice=current>0?+current.toFixed(2):null;
   Object.assign(out,{highAt:null,highGapMin:null,highNote:'',postSellHigh:null,postSellLow:null,leftOnTableRs:null,leftOnTablePct:null,moneySavedRs:null,moneySavedPct:null,referenceHighPerFill:false,leftOnTableExact:false});
   if(!(qty>0&&sell>0)||!bookedDate){out.leftOnTableNote='Entry and sell details are required to measure the buy-window peak.';return out;}
@@ -7195,7 +7195,7 @@ function getTodayBookedAddendum(){
   if(!known.length) return null;
   return {
     date:booked.date,
-    amount:+known.reduce((s,r)=>s+r.netPnl,0).toFixed(0),
+    amount:+known.reduce((s,r)=>s+r.netPnl,0).toFixed(2),
     lots:known.length,
     unknownRows:booked.unknownRows||0,
     tradebookDate:tbDate||null
@@ -8781,7 +8781,7 @@ function buildLatestSessionPanel(query=''){
       {key:'priceDiff',label:'Diff ₹',align:'right',fmt:v=>v!=null?fmtSignedINR(v).replace('₹','₹/sh '):'—',clrFn:v=>v!=null?clr(v):'var(--t3)',..._dash},
       {key:'postSellHigh',label:'Reference High ₹',align:'right',fmt:(v,r)=>`<span title="${escHtml(r.referenceHighNote||'No observed post-sell high.')}"${v==null?' style="color:var(--t3)"':''}>${r.referenceHighPerFill?(r.referenceHighLabel||'Per-fill'):v!=null?Number(v).toLocaleString('en-IN',INR_2):'—'}</span>`,clrFn:()=>'var(--t2)',..._dash},
       ..._leftCols(_leftTot,_leftPctTot),
-      {key:'charges',label:'Total Charges',align:'right',bold:true,
+      {key:'charges',label:'Est. Charges',align:'right',bold:true,
        fmt:(v,r)=>{
          if(v==null) return '—';
          const parts=[['Brokerage',r._brok],['STT/CTT',r._stt],['Txn',r._txn],['GST',r._gst],

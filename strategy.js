@@ -377,9 +377,9 @@ function bookedSession(session,holdingCosts,tradebook){
         _stamp:+(bcS.stamp+scS.stamp).toFixed(2),
         _dp:+(bcS.dp+scS.dp).toFixed(2)
       };
-      const charges=+sumChargeParts(parts).toFixed(0);
+      const charges=+sumChargeParts(parts).toFixed(2);
       const capital=avgBuy*qty;
-      const netPnl=+((avgSell-avgBuy)*qty-charges).toFixed(0);
+      const netPnl=+((avgSell-avgBuy)*qty-charges).toFixed(2);
       components.push({qty,avgBuy,capital,proceeds:avgSell*qty,charges,netPnl,...parts});
     };
     if(sameDayQty>0) addKnownComponent(sameDayQty,todayAvg,true);
@@ -401,7 +401,7 @@ function bookedSession(session,holdingCosts,tradebook){
       const scS=calcZerodhaChargesSplit(deliverySellAvg,deliveryQty,true,false,skipDp);
       const _brok=+scS.brokerage.toFixed(2),_stt=+scS.stt.toFixed(2),_txn=+scS.txn.toFixed(2);
       const _sebi=+scS.sebi.toFixed(2),_gst=+scS.gst.toFixed(2),_stamp=+scS.stamp.toFixed(2),_dp=+scS.dp.toFixed(2);
-      const charges=+sumChargeParts({_brok,_stt,_txn,_sebi,_gst,_stamp,_dp}).toFixed(0);
+      const charges=+sumChargeParts({_brok,_stt,_txn,_sebi,_gst,_stamp,_dp}).toFixed(2);
       rows.push(enrichExitPnlRow({sym,sellTime:_sellTime,lots:sells.length,qty:deliveryQty,capital:null,buyPrice:null,sellPrice:+deliverySellAvg.toFixed(2),_brok,_stt,_txn,_sebi,_gst,_stamp,_dp,charges,winRate:null,netPnl:null,netPnlPct:null,_sort:-Infinity,_noAvgCost:true},session.date));
     }
     if(!components.length) return;
@@ -416,12 +416,12 @@ function bookedSession(session,holdingCosts,tradebook){
     const _gst=+components.reduce((sum,c)=>sum+c._gst,0).toFixed(2);
     const _stamp=+components.reduce((sum,c)=>sum+c._stamp,0).toFixed(2);
     const _dp=+components.reduce((sum,c)=>sum+c._dp,0).toFixed(2);
-    const charges=+components.reduce((sum,c)=>sum+c.charges,0).toFixed(0);
-    const netPnl=+components.reduce((sum,c)=>sum+c.netPnl,0).toFixed(0);
+    const charges=+components.reduce((sum,c)=>sum+c.charges,0).toFixed(2);
+    const netPnl=+components.reduce((sum,c)=>sum+c.netPnl,0).toFixed(2);
     const netPnlPct=capital>0?+(netPnl/capital*100).toFixed(2):null;
     rows.push(enrichExitPnlRow({sym,sellTime:_sellTime,lots:sells.length,legs:{sells:sortedSells.map(o=>({time:String(o.time||''),qty:Number(o.qty),price:Number(o.price)})),buys:buys.map(o=>({time:String(o.time||''),qty:Number(o.qty),price:Number(o.price)})).sort((a,b)=>a.time.localeCompare(b.time))},qty:matchedQty,capital,buyPrice:+avgBuy.toFixed(2),sellPrice:+avgSellMatched.toFixed(2),_brok,_stt,_txn,_sebi,_gst,_stamp,_dp,charges,winRate:netPnl>0?100:0,netPnl,netPnlPct,_sort:netPnl},session.date));
   });
-  const total=rows.reduce((s,r)=>s+(r.netPnl||0),0);
+  const total=+rows.reduce((s,r)=>s+(r.netPnl||0),0).toFixed(2);
   const unknownRows=rows.filter(r=>r.netPnl==null).length;
   // Only return Orders.csv result if there are actual sell rows — if today only has buys,
   // fall through to tradebook so yesterday's session P&L shows instead of ₹0.
