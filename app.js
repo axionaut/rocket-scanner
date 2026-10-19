@@ -1,5 +1,5 @@
 const BUILD_TS='2026-10-19 IST'; // release build date (IST)
-const APP_VERSION=1524;
+const APP_VERSION=1525;
 const RADAR_SCORE_VERSION='v1419-recross-batches'; // Eligible on crossing the score floor at any time; selected model's evolving target and movement-based profit protection.
 
 // ── v1358: AN UNCAUGHT ERROR MUST NAME ITSELF ─────────────────────────────────────────────────
@@ -1327,6 +1327,7 @@ let SURV_RULES_RESTORE_STATE='unloaded'; // unloaded | loaded | seeded | error; 
 let SURV_FILE_RULES=[]; // [{key,column,label,manual:false}] — populated from actual REG1 file in parseSurv; replaces SURV_DEFAULT_RULES
 let SURV_MISSING_RULES=new Set(); // keys of custom rules whose column was not found in the last REG1 file — all stocks blocked as precaution
 let SURV_HEADERS=[]; // exact REG1 headers loaded this session
+let SURV_COST_STATUS=null;
 let SURV_RULE_HITS={}; // {ruleKey -> flagged symbol count} before hard filters
 let SURV_ALL_HITS={}; // {sym -> {colName: true}} — ALL columns flagged, not just active rules
 let SURV_CORR_ACC={}; // {colKey -> {col, sessions, winRate, avgPnl, lastCount}} accumulated correlation
@@ -1608,6 +1609,8 @@ function kitePublisherKey(login){
 async function kiteBuyOpen(sym){
   const s=normSym(sym||'');
   if(!s)return;
+  const blocked=surveillanceBlockReason(s);
+  if(blocked){showToast(escHtml(blocked),5000,true);return;}
   const row=(Array.isArray(ALL)?ALL:[]).find(r=>normSym(r?.symbol)===s);
   const limitPrice=row?getBuyPrice(row):0;
   if(!(limitPrice>0)){showToast('No valid live price for '+escHtml(s)+'.',4000,true);return;}
@@ -1774,6 +1777,13 @@ function tickPrice(v){return Math.round(v/0.05)*0.05;}
 // above reproduced all four live GTTs on 24 Sep (99.41, 99.64, 1,016.20, 300.75).
 function gttLotPrice(v){const t=v<250?0.01:0.05;return +(Math.round(v/t)*t).toFixed(2);}
 function survRuleKey(label){return String(label||'').trim().toLowerCase().replace(/[^a-z0-9]+/g,'_').replace(/^_|_$/g,'');}
+function surveillanceBlockReason(sym){
+  if(!['loaded','seeded'].includes(SURV_RULES_RESTORE_STATE))return 'Saved surveillance rules unavailable';
+  if(!SURV_HEADERS.length)return 'REG1 surveillance data unavailable';
+  if(SURV_MISSING_RULES.size)return 'Configured REG1 columns missing: '+[...SURV_MISSING_RULES].join(' | ');
+  if(!Object.prototype.hasOwnProperty.call(NSE_SERIES,sym))return 'Symbol absent from REG1';
+  return NSE_SURV[sym]?.length?'Surveillance: '+NSE_SURV[sym].join(' | '):null;
+}
 function isSurvFlag(v){
   const s=String(v||'').trim();
   return s!==''&&s!=='100';
@@ -2272,7 +2282,7 @@ function parseSurv(text){
     const matchedHdr=dataHdrs.find(h=>survRuleKey(h)===r.key);
     return {key:r.key, column:r.column, label:r.label, header:matchedHdr||null};
   });
-  activeRules.forEach(rule=>{SURV_RULE_HITS[rule.key]=0;});
+  activeRules.forEach(rule=>{SURV_RULE_HITS[rule.key]=0;if(!rule.header)SURV_MISSING_RULES.add(rule.key);});
   const statusCol=findHeader(hdrs,[/^status$/i])||null;
   rows.forEach(r=>{
     const sym=normSym(symCol?r[symCol]:r['Symbol']);if(!sym)return;
@@ -2291,8 +2301,9 @@ function parseSurv(text){
     // Populate SURV_ALL_HITS for ALL flagged columns (for P&L correlation)
     const allHit={};
     dataHdrs.forEach(h=>{if(isSurvFlag(r[h]))allHit[h]=true;});
-    if(Object.keys(allHit).length) SURV_ALL_HITS[sym]=allHit;
+    if(Object.keys(allHit).length) SURV_ALL_HITS[sym]={...SURV_ALL_HITS[sym],...allHit};
   });
+  rebuildActiveSurveillanceHits(); // Union duplicate-symbol flags and count each symbol once.
   NSE_NON_EQ=new Set(Object.entries(NSE_SERIES).filter(([,v])=>v!=='EQ').map(([k])=>k));
 }
 function parseDeal(text,map){
@@ -3006,7 +3017,7 @@ function getDisplayedEntryCandidates(rows){
   if(!Array.isArray(rows)||!rows.length) return [];
   return rows
     // v1070: held no longer excludes a candidate.
-    .filter(s=>s.symbol&&Number(s.price)>0&&s.basketEligible!==false&&!NSE_SURV[s.symbol]?.length&&meetsRecommendationBar(s))
+    .filter(s=>s.symbol&&Number(s.price)>0&&s.basketEligible!==false&&!surveillanceBlockReason(s.symbol)&&meetsRecommendationBar(s))
     .sort((a,b)=>(Number(b.score)||0)-(Number(a.score)||0)||a.symbol.localeCompare(b.symbol))
     .slice(0,20);
 }
@@ -3022,7 +3033,7 @@ function getScoreBandControlSample(rows,exclude){
   const out=[];
   getControlBands().forEach(([lo,hi])=>{
     const band=rows.filter(s=>s.symbol&&Number(s.price)>0&&s.basketEligible!==false
-      &&!NSE_SURV[s.symbol]?.length&&!taken.has(s.symbol)
+      &&!surveillanceBlockReason(s.symbol)&&!taken.has(s.symbol)
       &&Number(s.score)>=lo&&Number(s.score)<hi);
     // Take the TOP of each band by score: the same selection rule the cohort itself uses, so a
     // control row differs from a recommended row only in which band it fell into.
@@ -4924,7 +4935,8 @@ function liveMarketBreadth(){
 function _getRowActionStateUncached(s, ignoreMarketClosed=false){
   if(!s)return {state:'BLOCKED',reason:'Invalid row'};
   if(typeof RocketStrategy==='undefined')return {state:'BLOCKED',reason:'Strategy module unavailable'};
-  if(NSE_SURV[s.symbol]?.length)return {state:'BLOCKED',reason:'Surveillance: '+NSE_SURV[s.symbol].join(' | ')};
+  const survBlock=surveillanceBlockReason(s.symbol);
+  if(survBlock)return {state:'BLOCKED',reason:survBlock};
   // v1407: SURVEILLANCE AND THE UPPER CIRCUIT ARE DIFFERENT PROBLEMS AND ONE CANNOT COVER THE
   // OTHER. 21 Sep FEDDERSHOL ranked #1 and PROTEAN #2 while both sat locked at +20% with nothing
   // on offer, and REG1 flagged NEITHER - correctly: NSE lists ASM/GSM/ESM for sustained abnormal
@@ -7609,6 +7621,11 @@ var AUTO_BUY_STATUS = { enabled: AUTO_BUY_ENABLED, executedToday: [], countToday
 async function loadAutoBuyStatus(){
   const j = await readHelperResponse('/api/auto-buy/status', { timeout: 5000 }).catch(() => null);
   if (!j || !j.ok) return;
+  if(j.surveillanceCost){
+    const changed=JSON.stringify(SURV_COST_STATUS)!==JSON.stringify(j.surveillanceCost);
+    SURV_COST_STATUS=j.surveillanceCost;
+    if(changed&&document.getElementById('meth-hf-wrap')&&!document.getElementById('survRuleInput')?.value)_refreshHFSection();
+  }
   AUTO_BUY_STATUS = {
     enabled: !!j.enabled,
     executedToday: Array.isArray(j.executedToday) ? j.executedToday : [],
@@ -8278,7 +8295,7 @@ function makeSortableTable(id, cols, rows, defaultSortKey, defaultDir=-1, rowSty
       };
     });
   }
-  return {render,getHtml:()=>`<table id="${id}" style="width:100%;border-collapse:collapse;font-size:14px;font-family:'DM Mono',monospace"></table>`};
+  return {render,getSort:()=>({key:sortKey,dir:sortDir}),getHtml:()=>`<table id="${id}" style="width:100%;border-collapse:collapse;font-size:14px;font-family:'DM Mono',monospace"></table>`};
 }
 
 function computePerfStats(trips){
@@ -9462,12 +9479,12 @@ function _refreshHFSection(){
   else renderMethodology();
 }
 function rebuildActiveSurveillanceHits(){
-  NSE_SURV={};SURV_RULE_HITS={};
+  NSE_SURV={};SURV_RULE_HITS={};SURV_MISSING_RULES=new Set();
   const fileRuleByKey=Object.fromEntries((SURV_FILE_RULES||[]).map(r=>[r.key,r]));
   const colKeyToRuleKey={};
   SURV_CUSTOM_RULES.forEach(rule=>{
     const matched=fileRuleByKey[rule.key]||null;
-    if(matched){rule.column=matched.column;rule.label=matched.label;}
+    if(matched){rule.column=matched.column;rule.label=matched.label;}else SURV_MISSING_RULES.add(rule.key);
     SURV_RULE_HITS[rule.key]=0;
     colKeyToRuleKey[rule.key]=rule.key;
   });
@@ -9603,21 +9620,20 @@ function buildHardFilterMethodologyHTML(E){
   })).map(r=>r.column||r).filter(h=>!addedRuleKeys.has(survRuleKey(h)));
   const datalistHtml=availableCols.map(col=>`<option value="${escHtml(col)}"></option>`).join('');
 
-  // Live holdings P&L is deliberately shared with the correlation table below.
-  // Rule rows can overlap, so P&L is meaningful per rule but must never be totalled across rules.
-  const heldPnlByRule=Object.fromEntries(getCurrentSurvHoldingRows().map(row=>[row.key,row]));
+  // Marginal forward observations, kept separate from real account P&L.
   const fileRuleKeys=new Set((SURV_FILE_RULES||[]).map(r=>r.key));
   const hfRows=getSurvRules().map(rule=>{
-    const held=heldPnlByRule[rule.key]||null;
+    const cost=SURV_COST_STATUS?.ok?SURV_COST_STATUS.byRule?.[rule.key]:null;
     const active=!SURV_HEADERS.length||fileRuleKeys.has(rule.key);
     return {
       criteria:rule.column||rule.label,
       flagged:SURV_RULE_HITS[rule.key]||0,
-      heldPnlRs:held?.pnlRs??null,
-      heldPnlPct:held?.pnlPct??null,
-      heldCount:held?.lastCount??0,
+      missed:cost?.samples?cost.missed:null,
+      avoided:cost?.samples?cost.avoided:null,
+      net:cost?.samples?cost.net:null,
+      samples:cost?.samples||0,open:cost?.open||0,unresolved:cost?.unresolved||0,
       active, ruleKey:rule.key,
-      inactiveNote:active?'':'Inactive — REG1 column not found in last upload',
+      inactiveNote:active?'':'Entries blocked - configured REG1 column missing',
     };
   });
   const hfCols=[
@@ -9627,25 +9643,28 @@ function buildHardFilterMethodologyHTML(E){
     {key:'flagged',label:'Flagged',align:'right',
       fmt:(v,r)=>r.active?`<span style="color:${v>0?'var(--amber)':'var(--t3)'};font-weight:700;font-family:'DM Mono',monospace">${(v||0).toLocaleString()}</span>`:'&mdash;',
       totFmt:(v)=>`<span style="color:var(--amber);font-weight:700;font-family:'DM Mono',monospace">${(v||0).toLocaleString()}</span>`},
-    {key:'heldPnlRs',label:'Held P&L ₹',align:'right',
-      fmt:(v,r)=>v==null?'&mdash;':`<span style="color:${v<0?'var(--red)':v>0?'var(--green)':'var(--t3)'};font-weight:700;font-family:'DM Mono',monospace" title="Current unrealised P&L across ${r.heldCount||0} held stock${(r.heldCount||0)===1?'':'s'} currently flagged by this REG1 column">${fmtSignedINR(v)}</span>`,
-      totFmt:()=>`<span title="Rule-level P&L overlaps when a holding has multiple REG1 flags, so there is no P&L total.">&mdash;</span>`},
-    {key:'heldPnlPct',label:'Held P&L %',align:'right',
-      fmt:(v,r)=>v==null?'&mdash;':`<span style="color:${v<0?'var(--red)':v>0?'var(--green)':'var(--t3)'};font-weight:700;font-family:'DM Mono',monospace" title="Current unrealised P&L as a capital-weighted percentage across ${r.heldCount||0} held stock${(r.heldCount||0)===1?'':'s'} currently flagged by this REG1 column">${v>=0?'+':''}${v.toFixed(2)}%</span>`,
-      totFmt:()=>`<span title="Rule-level P&L overlaps when a holding has multiple REG1 flags, so there is no P&L total.">&mdash;</span>`},
+    {key:'missed',label:'Missed gains \u20b9',align:'right',
+      fmt:v=>v==null?'&mdash;':`<span style="color:var(--red);font-family:'DM Mono',monospace">${fmtSignedINR(v)}</span>`,totFmt:()=>'&mdash;'},
+    {key:'avoided',label:'Losses avoided \u20b9',align:'right',
+      fmt:v=>v==null?'&mdash;':`<span style="color:var(--green);font-family:'DM Mono',monospace">${fmtSignedINR(v)}</span>`,totFmt:()=>'&mdash;'},
+    {key:'net',label:'Net cost \u20b9',align:'right',
+      fmt:v=>v==null?`<span style="color:var(--t3);font-size:12px">Collecting</span>`:`<span style="color:${v>0?'var(--red)':v<0?'var(--green)':'var(--t3)'};font-weight:700;font-family:'DM Mono',monospace">${fmtSignedINR(v)}</span>`,totFmt:()=>'&mdash;'},
+    {key:'samples',label:'Measured',align:'right',
+      fmt:(v,r)=>`<span title="${r.open} open paper observations; ${r.unresolved} without a usable current or closing bid" style="font-family:'DM Mono',monospace">${v}${r.open?` (${r.open} open)`:''}${r.unresolved?` + ${r.unresolved} unresolved`:''}</span>`,totFmt:()=>'&mdash;'},
     {key:'ruleKey',label:'',align:'right',
       fmt:(v,r)=>`<button onclick="removeSurvRule('${v}')" style="padding:4px 8px;border-radius:6px;border:1px solid rgba(239,68,68,.3);background:rgba(239,68,68,.08);color:var(--red);font-size:12px;font-weight:700;cursor:pointer">Remove</button>`,
       totFmt:()=>''},
   ];
   const hfTotalsFlagged=hfRows.reduce((s,r)=>s+(r.active?(r.flagged||0):0),0);
-  _methTbls.hf=makeSortableTable('tbl-hf',hfCols,hfRows,'flagged',-1,null,{
+  const hfSort=_methTbls.hf?.getSort?.();
+  _methTbls.hf=makeSortableTable('tbl-hf',hfCols,hfRows,hfSort?.key||'flagged',hfSort?.dir??-1,null,{
     criteria:null,flagged:hfTotalsFlagged,ruleKey:null,
   });
 
   const survActiveThisSession=SURV_HEADERS.length>0;
   const survMeta=survActiveThisSession
     ? `<div style="font-size:13px;color:var(--t3);margin-top:8px">REG1 file active this session. Configured rules above are a hard filter — flagged stocks are removed from Rankings entirely. Every other flagged REG1 column still subtracts up to 12 points from the Radar composite score and appears on the stock's ⚠ badge.</div>`
-    : `<div style="margin-top:8px;padding:8px 10px;background:rgba(239,68,68,.08);border:1px solid rgba(239,68,68,.25);border-radius:8px;font-size:13px;color:var(--red)">NSE REG1 data not active — surveillance rules cannot filter until a REG1 file is loaded.</div>`;
+    : `<div style="margin-top:8px;padding:8px 10px;background:rgba(239,68,68,.08);border:1px solid rgba(239,68,68,.25);border-radius:8px;font-size:13px;color:var(--red)">NSE REG1 data unavailable - new buys are blocked until verification is restored.</div>`;
 
   return `
     <h3 id="meth-filters" style="margin-top:28px">Surveillance Hard Filters (NSE REG1)</h3>
@@ -9658,7 +9677,9 @@ function buildHardFilterMethodologyHTML(E){
     <div style="background:var(--bg-card);border:1px solid var(--border);border-radius:10px;overflow:hidden">
       <div class="scroll-x">${_methTbls.hf.getHtml()}</div>
     </div>
-    <div style="font-size:12px;color:var(--t3);margin-top:7px">Held P&L is live, unrealised P&L for your currently held stocks flagged by that exact REG1 column. A stock with multiple flags appears in each relevant row, so rule-level P&L is not totalled.</div>
+    <div style="font-size:12px;color:var(--t3);margin-top:7px">Net cost = missed net gains minus losses avoided. Positive means potential profit missed; negative means losses saved. Forward paper measurements start with this release; no historical gains are invented.</div>
+    <details style="font-size:12px;color:var(--t3);margin-top:6px"><summary style="cursor:pointer">How filter cost is measured</summary><div style="margin-top:6px">Removing this one rule must qualify a model signal; all other configured rules and entry checks still apply. Each stock/model/rule/session gets one independent observation of at least \u20b95,000, rounded to whole shares, within normal-bar turnover and displayed quote quantities. We use the fresh ask for entry and fresh bid for valuation, less estimated same-day charges. Open observations move until the session's final minute; missing closing quotes stay unresolved. This same-session benchmark does not simulate GTT exits, shared account cash or actual account P&amp;L. Multi-rule exclusions are not attributed to an individual rule, and alternative rule-removal scenarios are not added together.</div></details>
+    ${!SURV_COST_STATUS?`<div style="color:var(--t3);font-size:12px;margin-top:6px">Connect the updated helper to load forward filter-cost observations.</div>`:SURV_COST_STATUS.ok?'':`<div style="color:var(--red);font-size:12px;margin-top:6px">Filter-cost measurements unavailable: ${escHtml(SURV_COST_STATUS.error||'ledger unavailable')}</div>`}
     ${survMeta}
     ${buildSurvCorrHTML()}
   `;
@@ -13498,9 +13519,9 @@ function applyFilters({preservePage=false}={}){
     if(s._held)SUPPRESSED_HELD++;
     const pinned=isPinned(s.symbol);
     let removedReason=null;
-    if(NSE_SURV[s.symbol]?.length){
+    if(surveillanceBlockReason(s.symbol)){
       SURV_HARD_REMOVED++;
-      removedReason={s,reason:'surv',rules:NSE_SURV[s.symbol],detail:'configured surveillance rule'};
+      removedReason={s,reason:'surv',rules:NSE_SURV[s.symbol],detail:surveillanceBlockReason(s.symbol)};
     } else if(dropThinPct!=null){
       const cutInfo=getSharesPerBarCut(dropThinPct);
       const prof=getTapeFlowProfile(s.symbol);
@@ -14695,7 +14716,7 @@ function buildBasketOrders(capital, selList){
   const orders=[];
   let orderSeq=0;
   const pushBuyOrder=(s,qty,leg,allocTgt)=>{
-    if(!(qty>0)) return;
+    if(!(qty>0)||surveillanceBlockReason(s.symbol)) return;
     const sym=s.symbol;
     const name=s.name||sym;
     // Every funded buy carries the fixed bracket start on its reconciled weighted cost.
