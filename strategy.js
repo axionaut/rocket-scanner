@@ -31,13 +31,25 @@
     TARGET_PCT: 1.25,
     STOP_LOSS_PCT: 0,            // no stop-loss
     TOP_K: 5,                    // positions per day (equal weight)
-    MIN_ALLOCATION_RS: 5000.0,   // ₹5,000 minimum allocation per stock to ensure profits clear DP & charges
+    MIN_ALLOCATION_RS: 0,        // set below from charges: minOrderRs(false)
     // Profit Lock / Ratchet Trailing Exit
     PROFIT_LOCK_ACTIVATION_PCT: 0,   // v1455: early lock OFF (0). Replay on 65 live signals: every +1-2% lock lost to the target alone; only the runner (arm at target, 1% trail) beat it
     PROFIT_LOCK_FLOOR_PCT: 0.3,      // Legacy protected floor once armed (LIMIT fills are not guaranteed) (+0.3% break-even)
     PROFIT_LOCK_STEP2_PCT: 1.5,      // When peak reaches +1.5%, step floor up to +1.0%
     PROFIT_LOCK_TRAIL_DROP_PCT: 0.5  // Exit if price drops 0.5% from peak (min 10 paise)
   };
+
+  // 19 Oct (owner): the minimum order comes from charges and the fixed +1.25% start, not a flat Rs 5,000.
+  // A new position must net at least half its gross target gain after round-trip CNC charges, incl. the
+  // once-per-stock-per-day DP fee. An add to a held stock shares that sale's DP fee, so only the
+  // proportional charges apply and any whole share qualifies.
+  function minOrderRs(held) {
+    const v = 1e6, t = CONFIG.TARGET_PCT / 100;
+    const pct = (sumChargeParts(calcZerodhaChargesSplit(v, 1, false, false, true)) + sumChargeParts(calcZerodhaChargesSplit(v, 1, true, false, true))) / v;
+    const dp = held ? 0 : calcZerodhaChargesSplit(1, 1, true, false, false).dp;
+    return t / 2 > pct ? Math.ceil(dp / (t / 2 - pct)) : Infinity;
+  }
+  CONFIG.MIN_ALLOCATION_RS = minOrderRs(false);
 
   /**
    * Tier 1: Filter raw universe down to liquid, clean momentum candidates
@@ -482,6 +494,7 @@ function bookedSession(session,holdingCosts,tradebook){
     exitBuyWindows,
     bookedSession,
     calcZerodhaChargesSplit,
+    minOrderRs,
     CONFIG,
     inputs,
     evaluateUniverse,

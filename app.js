@@ -1,5 +1,5 @@
 const BUILD_TS='2026-10-19 IST'; // release build date (IST)
-const APP_VERSION=1525;
+const APP_VERSION=1526;
 const RADAR_SCORE_VERSION='v1419-recross-batches'; // Eligible on crossing the score floor at any time; selected model's evolving target and movement-based profit protection.
 
 // ── v1358: AN UNCAUGHT ERROR MUST NAME ITSELF ─────────────────────────────────────────────────
@@ -7546,7 +7546,7 @@ function getDefaultMaxAlloc(){return getAutoMaxAllocCap();}
 // owner's own goal: the goal's daily rupee need divided by his entries per day. Not a chosen number -
 // the same per-trade figure v1299 sizes allocations with. Read by every target, so memoized briefly.
 function goalAllocationExplanation(){
-  return `Eligible stocks share cash by score, within your saved All-in and Max % Capital limits. Minimum funded allocation is Rs ${RocketStrategy.CONFIG.MIN_ALLOCATION_RS.toLocaleString('en-IN')}.`;
+  return `Eligible stocks share cash by score, within your saved All-in and Max % Capital limits. Minimum new position is Rs ${RocketStrategy.CONFIG.MIN_ALLOCATION_RS.toLocaleString('en-IN')} (the +${RocketStrategy.CONFIG.TARGET_PCT}% start must net half its gross gain after charges incl. DP); adds to held stocks share that day's DP fee and need only one share.`;
 }
 
 // v1424: an empty Capital field means Kite's live allocatable cash (equity `net`, the "Available"
@@ -7745,7 +7745,8 @@ let _maxAllocMemo=null;
 // v1473 (owner): per-stock cap = max(capital x Max %, min(capital, All-in up to Rs)). Small capital
 // goes all into one stock; large capital is capped at a % that follows capital. The Rs 5,000
 // qualifying minimum is fixed again (v1472's Min Alloc box was a misreading).
-function getMinAlloc(){return RocketStrategy.CONFIG.MIN_ALLOCATION_RS;}
+// 19 Oct (owner): the minimum is charge-based (strategy.js minOrderRs); an add to a held stock carries no new DP fee.
+function getMinAlloc(held=false){return held?RocketStrategy.minOrderRs(true):RocketStrategy.CONFIG.MIN_ALLOCATION_RS;}
 function getAllInUpTo(){
   const v=parseFloat(document.getElementById('fAllIn')?.value);
   return Number.isFinite(v)&&v>0?v:0;
@@ -8152,7 +8153,7 @@ function renderStats(){
   const allocCard = `<div class="st" title="Capital allocated by score across eligible entries, subject to liquidity, minimum size and the 20-order export batch.">
     <div class="st-l">NSE · Active Basket</div>
     <div class="st-v" style="font-size:18px;color:var(--amber)">${plan.funded.size} <span style="font-size:12px;color:var(--t2)">funded (${fmtINR(totalAlloc)})</span></div>
-    <div class="st-d">of ${fmtINR(capital)} capital · ₹5,000 min per scrip</div></div>`;
+    <div class="st-d">of ${fmtINR(capital)} capital · ₹${RocketStrategy.CONFIG.MIN_ALLOCATION_RS.toLocaleString('en-IN')} min per new scrip</div></div>`;
 
   // Booked P&L Card
   let bookedCard = '';
@@ -9903,7 +9904,7 @@ function _renderMethodologyInner(){
     <p>The selected Ensemble model supplies the recommendation table, counts, allocation and basket. It is the April-2026 idea (score every stock, learn what is working) rebuilt on Zerodha data with a gradient-boosting learner. No ALL NSE files.</p>
     <div class="m-grid">
     <div class="m-card"><h4>1. Live score (throughout the session)</h4><p>The local helper runs <code>dev/btst_engine.py</code>. It builds daily, market and sector features (today's volume projected to a full session) for every liquid stock (20-day average turnover ≥ ₹5 Cr, price ₹5–₹4,000) from Zerodha daily bars plus today's live price and volume: returns from 1 day to 3 months, gap, close location, range, volume surges, volatility, distance to highs and averages, RSI, stochastics, ADX, MACD, TradingView-style ratings, relative strength and market condition. The selected model ranks opportunities; Ensemble scores are percentile-mapped scores, not calibrated expected returns. Models are retrained every 5 sessions on the last 220 sessions.</p></div>
-    <div class="m-card"><h4>2. Buy on qualification</h4><p>A current live score clearing your floor can become GO throughout the session. Qualifying names share available capital by score, within saved allocation and execution limits (minimum ₹5,000 per funded stock). A purchase consumes its crossing; a completed below-floor observation enables a fresh crossing, held or unheld. The market gate, price freshness, circuit, surveillance and EQ checks still apply.</p></div>
+    <div class="m-card"><h4>2. Buy on qualification</h4><p>A current live score clearing your floor can become GO throughout the session. Qualifying names share available capital by score, within saved allocation and execution limits (minimum ₹${RocketStrategy.CONFIG.MIN_ALLOCATION_RS.toLocaleString('en-IN')} per new position, from charges and the +${RocketStrategy.CONFIG.TARGET_PCT}% start; adds to held stocks need one share). A purchase consumes its crossing; a completed below-floor observation enables a fresh crossing, held or unheld. The market gate, price freshness, circuit, surveillance and EQ checks still apply.</p></div>
     <div class="m-card"><h4>3. Exit</h4><p>Every buy starts with a sell GTT at +1.25% of weighted average cost. Within the zone of the upper sell, the helper converts it to one broker OCO: upper = live price + upper distance, lower = live price − lower distance. Both legs only move up. Upper and lower distances each start at 0.26% and are learned separately; zone starts at 0.10%; the helper automatically learns when new evidence is ready, using the last 40 completed observations, a one-second modify delay, recorded bid depth and charges. Observation continues through the next session after a sale. It records each held stock’s rally speed, pullbacks, volatility and bid depth over 1, 3 and 5 minutes. Stock-specific upper-distance, lower-distance and zone adjustments become active only after replay validation; until then, the current base distances apply. Replay runs separately so learning does not block price protection. The helper reconciles positions and orders every 10 seconds during the session even with this page closed, and refreshes immediately on order updates. Exit requests have priority over queued routine entries. Any change must improve both chronological halves; 1.25% stays fixed. The loss-trim cutoff starts at 1.25% and learns separately from the last 40 mature funded portfolio decisions, including stocks held instead of sold. Each replay starts with the same recorded inventory and booked profit, models chronological fills and reservations, resets the funding pool each session and marks remaining holdings after estimated charges. Future unrelated buys or profits are not invented. A cutoff change must improve both chronological halves and its gradual step must pass again. Eligible losses are trimmed worst first using up to 90% of today’s booked profit after charges. Without booked profit, they remain held. No scheduled expiry.</p></div></div>
     <h3>Historical evidence</h3><p>The experiments below used older fixed entry and exit rules. They do not validate the current score-crossing entries, adaptive profit trail or holding without a time deadline.</p>
     <p>Walk-forward on NSE daily data, Dec 2025 – Sep 2026 (the model never saw the future), costs included: top 5 bought at the close and sold at +3% the next day or at its close averaged <b>+0.91% per trade</b>, 73% of days positive. With the market gate: <b>+1.18% per trade, 79% of days positive, worst drawdown −4.7%</b>. A 1-minute replay of 36 recent sessions (buy at the real 15:25 price, +3% only when price traded through it) averaged <b>+1.17% per trade</b>, 26 of 36 days positive. Different random seeds and settings gave +0.91% to +1.05%.</p>
@@ -10787,7 +10788,7 @@ function _planDualBasketUncached(rows,capital){
   let remaining=Math.max(0,Number(capital||0)-BASKET_CASH_RESERVE_RS);
   const pool=[...(rows||[])].sort((a,b)=>(btstScoreOf(b.symbol)??(Number(b.score)||0))-(btstScoreOf(a.symbol)??(Number(a.score)||0))||a.symbol.localeCompare(b.symbol));
   const unitDebitOf=price=>price+calcZerodhaCharges(price,1,false,false,false);
-  const autoCap=getAutoMaxAllocCap(capital);
+  const autoCap=getAutoMaxAllocCap(capital),heldNow=getHeldPositionMap();
   const eligiblePool=pool.filter(r=>!EXPORT_EXCLUDED.has(r.symbol)&&isStockEligible(r)&&getBuyPrice(r)>0).slice(0,20);
   const batch=new Set(eligiblePool.map(r=>r.symbol));
   let candidatesLeft=eligiblePool.length;
@@ -10831,22 +10832,25 @@ function _planDualBasketUncached(rows,capital){
     // v1472: Max % caps the score-weighted share instead of replacing it.
     const share=scoreWeighted?weightBudget(r):Math.min(remaining/slots,autoCap);
     let budget=Math.min(remaining,maxAlloc>0?Math.min(share,maxAlloc):share,liquidityCap);
+    // Adds to a held stock share its DP fee: one share is the minimum (19 Oct).
+    const rowMin=heldNow[r.symbol]?Math.max(getMinAlloc(true),price):minRequired;
+    const rowMinTxt=heldNow[r.symbol]?'one-share add':minTxt;
     let qty=0;
     if(!reason){
       candidatesLeft--;
       // Buy-side charges are linear for CNC. Reserve both notional and charges.
       qty=Math.floor(budget/unitDebitOf(price));
-      if(qty*price<minRequired){
+      if(qty*price<rowMin){
         // Smallest quantity reaching Min Alloc. Buy charges ride on top of the minimum (v1472: the
         // budget is often exactly Min Alloc, which made the minimum unreachable); cash, the
         // market-impact cap and the other slots' minimums still bind.
-        const minQty=Math.ceil(minRequired/price);
+        const minQty=Math.ceil(rowMin/price);
         const minDebit=minQty*price+calcZerodhaCharges(price,minQty,false,false,false);
         if(minDebit<=liquidityCap&&minDebit<=remaining&&minDebit<=remaining-Math.max(0,slots-1)*minRequired*1.005){qty=minQty;budget=minDebit;}
       }
     }
     const cost=qty*price,charges=qty>0?calcZerodhaCharges(price,qty,false,false,false):0,debit=cost+charges;
-    if(!reason&&(!(cost>=minRequired)||debit>budget))reason=liquidityCap<minRequired?`Market-impact cap below the ${minTxt} minimum`:`Available cash / per-stock cap / market-impact cap cannot fund the ${minTxt} minimum plus buy charges`;
+    if(!reason&&(!(qty>0)||!(cost>=rowMin)||debit>budget))reason=liquidityCap<rowMin?`Market-impact cap below the ${rowMinTxt} minimum`:`Available cash / per-stock cap / market-impact cap cannot fund the ${rowMinTxt} minimum plus buy charges`;
     if(reason){reasons.set(r.symbol,reason);alloc[r.symbol]={alloc:0,debit:0,qty:0,rejected:true,reason};continue;}
     r.basketModel='strategy';
     const exitPolicy=getRowExitPolicy(r,price,null,null,qty);
