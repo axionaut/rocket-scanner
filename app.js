@@ -1,5 +1,5 @@
 const BUILD_TS='2026-10-19 IST'; // release build date (IST)
-const APP_VERSION=1521;
+const APP_VERSION=1522;
 const RADAR_SCORE_VERSION='v1419-recross-batches'; // Eligible on crossing the score floor at any time; selected model's evolving target and movement-based profit protection.
 
 // ── v1358: AN UNCAUGHT ERROR MUST NAME ITSELF ─────────────────────────────────────────────────
@@ -7021,7 +7021,10 @@ function evaluateIndicatorWatch(){
 function getHoldingAvgCost(symbol){
   symbol=normSym(symbol);
   if(!symbol) return null;
-  // 1. Holdings.csv cost map (most accurate — Zerodha settled avg)
+  // 0. The helper's reconciled cost for lots held at today's open (real cost, not broker-netted).
+  const rec=reconciledOpeningCost(symbol);
+  if(rec!=null) return rec;
+  // 1. Holdings.csv cost map (Zerodha settled avg; broker-netted after a same-day sell + rebuy)
   if(HOLD_COST_MAP[symbol]!=null) return HOLD_COST_MAP[symbol];
   // 2. Holdings.csv all rows (includes qty=0 closed positions)
   const hrow=HOLDINGS_ALL?.find(h=>h.symbol===symbol&&h.avgCost!=null);
@@ -7573,6 +7576,17 @@ async function loadProfitLockStatus(){
   const bySym=new Map();
   for(const p of j.positions){if(p&&p.sym)bySym.set(normSym(p.sym),p);}
   PROFIT_LOCK_STATUS={bySym,at:j.asOf||Date.now(),lossBudget:j.lossBudget||null,entryPeaks:Array.isArray(j.entryPeaks)?j.entryPeaks:[],bracket:j.bracket||null};
+  const ob=j.openingBasis&&typeof j.openingBasis==='object'?j.openingBasis:{},day=j.openingBasisDay||null,next={};
+  for(const [s,v] of Object.entries(ob))if(v&&v.price>0)next[normSym(s)]=Number(v.price);
+  const changed=day!==RECONCILED_OPENING.day||JSON.stringify(next)!==JSON.stringify(RECONCILED_OPENING.cost);
+  RECONCILED_OPENING={day,cost:next};
+  if(changed&&typeof renderBooked==='function')try{renderBooked();}catch(e){}
+}
+// 19 Oct: the helper's reconciled weighted cost of lots held at today's open. Zerodha's holdings average is
+// broker-netted (a same-day sell + rebuy keeps the old lot's price), which turned BLUSPRING's +Rs 86 sale into -Rs 360.
+var RECONCILED_OPENING={day:null,cost:{}};
+function reconciledOpeningCost(symbol){
+  return RECONCILED_OPENING.day&&RECONCILED_OPENING.day===getSessionDate()?(RECONCILED_OPENING.cost[normSym(symbol)]??null):null;
 }
 function profitLockFor(sym){
   return Date.now()-PROFIT_LOCK_STATUS.at<60000?(PROFIT_LOCK_STATUS.bySym.get(normSym(sym))||null):null;
