@@ -8,6 +8,8 @@
 !app.js
 !strategy.js
 !finance.js
+!study.js
+!study_collect.py
 !styles.css
 # Helper, research, extension and operating notes stay local.
 browser-extension/

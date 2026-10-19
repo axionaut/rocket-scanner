@@ -25,6 +25,7 @@
    <div class="tab" onclick="switchTab(1)">🔬 Methodology <span id="tabCount1" style="font-size:12px;opacity:.7"></span></div>
    <div class="tab" onclick="switchTab(2)">📈 Performance</div>
    <div class="tab" onclick="switchTab(3)">💰 Finance <span id="tabCount3" style="font-size:12px"></span></div>
+   <div class="tab" onclick="switchTab(4)" title="Separate study: historical 1-minute data of the daily top-30 gainers">🧪 Study</div>
   </div>
   <input type="file" id="brainIn" accept=".json" style="display:none" onchange="importBrain(event)">
   <div style="position:relative;display:flex;align-items:center">
@@ -103,6 +104,7 @@
  <div class="tp" id="tab1"><div class="meth" id="methContent"></div></div>
  <div class="tp" id="tab2"><div class="meth" id="perfContent"></div></div>
  <div class="tp" id="tab3"><div class="meth" id="finContent"></div></div>
+ <div class="tp" id="tab4"><div class="meth" id="studyContent"></div></div>
 </div><!-- /dash -->
 <button class="go-top" id="goTop" onclick="window.scrollTo({top:0,behavior:'smooth'})" title="Go to top">▲</button>
 </div><!-- /app -->
@@ -129,9 +131,9 @@
     script.async = false;
     script.src = 'app.js?cb=' + cacheKey;
     script.dataset.cacheKey = cacheKey;
-    // The Finance tab loads after app.js; each is independent, so one failing never stops the app.
+    // The Finance and Study tabs load after app.js; each is independent, so one failing never stops the app.
     script.onload = function() {
-      ['finance.js'].forEach(function (f) {
+      ['finance.js', 'study.js'].forEach(function (f) {
         var s = document.createElement('script'); s.async = false; s.src = f + '?cb=' + cacheKey;
         s.onerror = function () { console.error('Failed to load ' + f); };
         document.head.appendChild(s);
