@@ -1,5 +1,5 @@
 const BUILD_TS='2026-10-19 IST'; // release build date (IST)
-const APP_VERSION=1522;
+const APP_VERSION=1523;
 const RADAR_SCORE_VERSION='v1419-recross-batches'; // Eligible on crossing the score floor at any time; selected model's evolving target and movement-based profit protection.
 
 // ── v1358: AN UNCAUGHT ERROR MUST NAME ITSELF ─────────────────────────────────────────────────
@@ -1421,6 +1421,7 @@ const CAS_CONTINUOUS_END_MIN = 15*60+15;  // 15:15 - earliest close the Phase 1 
 // SEBI circular 15 Oct 2026, effective 2026-12-07: the closing auction moves to 15:30-15:40, so F&O stocks
 // trade continuously to 15:30 like every other stock. From that IST date the earliest continuous close is 15:30.
 const CAS_V2_DAY = '2026-12-07';
+const ENTRY_START_MIN = 9*60+45;   // 19 Oct: first minute new buys are allowed (helper ENTRY_START_MIN)
 function istDateKeyNow(ts=Date.now()){ const c=istClock(ts); return c.year+'-'+String(c.month).padStart(2,'0')+'-'+String(c.day).padStart(2,'0'); }
 function casContinuousEndMin(ts=Date.now()){ return istDateKeyNow(ts)>=CAS_V2_DAY?SESSION_CLOSE_MIN:CAS_CONTINUOUS_END_MIN; }
 
@@ -4747,6 +4748,9 @@ function btstCrossingState(s){
   const sr=r.src.sizeRun?.[normSym(s.symbol)],srMin=Number.isFinite(Number(r.src.sizeRunMin))?Number(r.src.sizeRunMin):1;
   if(sr&&Number.isFinite(sr.m)&&sr.m<srMin){const bx=r.src.sizeRunMarket?.buckets?.[sr.bucket],names={L:'top 100',M:'101-250',S1:'251-500',S2:'501-1000',S3:'beyond 1000'};
     return {state:'WAIT',reason:`Score +${score.toFixed(2)} clears +${floor.toFixed(2)}, but its size bucket (market-cap rank ${names[sr.bucket]||sr.bucket}) is running ${sr.m.toFixed(2)}x its normal for this time of day`+(bx?` (${bx.todayPct.toFixed(2)}% from the open vs ${bx.basePct.toFixed(2)}% usually)`:'')+`. Buys in an out-of-favour size held losers live, so it waits until that bucket runs normally.`};}
+  // 19 Oct 2026 (owner): no new buys before 09:45 - the live Peak model was trained only on snapshots from 09:45 and
+  // the volume-fade check needs four bars (09:35). Not noted as a crossing: still above the floor at 09:45 = GO.
+  if(isEquitySession(Date.now())&&istClock().mins<ENTRY_START_MIN) return {state:'WAIT',reason:`Score +${score.toFixed(2)} clears +${floor.toFixed(2)}, but new buys start at 09:45: before then the models score opening spikes they were never trained on.`};
   const gateOff=r.src.gate?.on!==true;
   if(gateOff) return {state:'WAIT',reason:`Score +${score.toFixed(2)} clears +${floor.toFixed(2)}, but the market gate is off - no buys today.`};
   const first=noteCrossing(s.symbol,score,floor);
@@ -10524,8 +10528,11 @@ function getTurnoverAllocationCap(row){
   const turnover=Number(row?.turnover);
   const turnCap=Number.isFinite(turnover)&&turnover>0?turnover*MAX_TURNOVER_PARTICIPATION:0;
   const bookCap=getBookAllocationCap(row);
-  if(bookCap>0&&turnCap>0) return Math.min(bookCap,turnCap);
-  return bookCap>0?bookCap:turnCap;
+  const cap=bookCap>0&&turnCap>0?Math.min(bookCap,turnCap):(bookCap>0?bookCap:turnCap);
+  // 19 Oct 2026 (owner): never more than one normal 5-minute bar of the stock's own turnover (engine barTurnover:
+  // median over its last 20 sessions). GENCON's normal bar was Rs 3,568; our Rs 7,175 order was two bars.
+  const bar=Number((typeof btstRanking==='function'?btstRanking():null)?.src?.barTurnover?.[normSym(row?.symbol||'')]?.medianRs);
+  return bar>0&&cap>0?Math.min(cap,bar):cap;
 }
 function getPositionFlowRead(rd){
   const tt=rd&&rd.current?(rd.todayTraj||rd.traj):null;
