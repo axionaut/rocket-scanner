@@ -1,5 +1,5 @@
 const BUILD_TS='2026-10-19 IST'; // release build date (IST)
-const APP_VERSION=1526;
+const APP_VERSION=1527;
 const RADAR_SCORE_VERSION='v1419-recross-batches'; // Eligible on crossing the score floor at any time; selected model's evolving target and movement-based profit protection.
 
 // ── v1358: AN UNCAUGHT ERROR MUST NAME ITSELF ─────────────────────────────────────────────────
@@ -4977,8 +4977,8 @@ function _getRowActionStateUncached(s, ignoreMarketClosed=false){
 // ranks a locked stock first; the app must refuse it.
 //
 // Two independent tests, either one sufficient, because each can be missing:
-//   1. LIVE BOOK - a fresh depth packet with buyers and no sellers. This is direct proof, needs no
-//      reference data, and is what the owner saw on the broker screen.
+//   1. LIVE BOOK - no offers blocks entry, but only a confirmed upper-price boundary
+//      earns the upper-circuit label. Visible asks override contradictory zero totals.
 //   2. PRICE BAND - the last price sitting at (or through) the band ceiling. Needs sec_list to be
 //      loaded; getUpperCircuitInfo returns null without it, so this test simply does not fire.
 // A near-band stock that is still trading is NOT blocked: only an unbuyable one is.
@@ -4986,24 +4986,29 @@ const UC_LOCK_EPS_PCT=0.05;   // within 0.05% of the ceiling counts as pinned to
 function upperCircuitBlock(row){
   const sym=normSym(row?.symbol||'');
   if(!sym) return null;
-  // 1. Live book: buyers queued, nothing offered.
+  const uc=getUpperCircuitInfo(row,row?.price);
+  const atCeiling=!!(uc&&Number(row?.price)>0&&uc.ucPrice>0&&Number(row.price)>=uc.ucPrice*(1-UC_LOCK_EPS_PCT/100));
+  const pc=Number(row?.priceChange??row?.day);
+  const band=row?.price_band_pct??row?.band??(typeof getNSEPriceBandPct==='function'?getNSEPriceBandPct(sym):null);
+  const atDayBand=Number.isFinite(pc)&&((band>0&&pc>=band-UC_LOCK_EPS_PCT)||pc>=19.9);
   const l=BOOK_LADDER[sym],at=Number(l?.totalsAt??l?.at),now=Date.now();
   const bookFresh=l&&Number.isFinite(at)&&at>0&&at<=now+1000&&now-at<DEPTH_TOTALS_MAX_AGE_MS;
-  if(bookFresh&&Number.isFinite(l.buyQty)&&Number.isFinite(l.sellQty)&&l.buyQty>0&&l.sellQty<=0)
-    return `Locked at upper circuit - ${Number(l.buyQty).toLocaleString('en-IN')} shares bid, nothing on offer. Cannot be bought.`;
-  // 2. Price band ceiling (only when the band is on file).
-  const uc=getUpperCircuitInfo(row,row?.price);
-  if(uc&&Number(row?.price)>0&&uc.ucPrice>0&&Number(row.price)>=uc.ucPrice*(1-UC_LOCK_EPS_PCT/100))
-    return `At the +${uc.band}% upper circuit (Rs ${uc.ucPrice.toFixed(2)}) - no sellers at the ceiling, cannot be bought.`;
+  // Zero total sellers is not proof of an upper circuit. Positive visible asks also
+  // contradict a zero-total packet; prefer the actual offers for this availability test.
+  const hasOffer=Array.isArray(l?.asks)&&l.asks.some(a=>Number(a?.[0])>0&&Number(a?.[1])>0);
+  if(bookFresh&&!hasOffer&&Number.isFinite(l.buyQty)&&Number.isFinite(l.sellQty)&&l.buyQty>0&&l.sellQty<=0){
+    if(atCeiling||atDayBand)return `Locked at upper circuit - ${Number(l.buyQty).toLocaleString('en-IN')} shares bid, nothing on offer. Cannot be bought.`;
+    return 'No live sell offers in the latest book - entry unavailable; upper circuit is not confirmed.';
+  }
+  if(atCeiling)
+    return `At the +${uc.band}% upper price limit (Rs ${uc.ucPrice.toFixed(2)}). Entry blocked by the circuit guard.`;
   // 3. Day gain at or through its circuit band, or pinned at the max 20% ceiling. This is the
   // owner's actual complaint (v1409): a stock ALREADY at its band gets recommended all day and is
   // untradeable by 15:15. It fires on today's live priceChange, so no depth book and no reference
   // file are needed - it catches the locked-all-day case that tests 1 and 2 miss when the book is
   // absent and sec_list has not loaded. `bh` (the prior-session EOD band-hit report) is deliberately
   // NOT used here; only today's move drives this.
-  const pc=Number(row?.priceChange??row?.day);
   if(Number.isFinite(pc)){
-    const band=row?.price_band_pct??row?.band??(typeof getNSEPriceBandPct==='function'?getNSEPriceBandPct(sym):null);
     if(band&&band>0&&pc>=band-UC_LOCK_EPS_PCT)
       return `Up +${pc.toFixed(1)}% at the +${band}% upper circuit. Cannot be bought.`;
     if(pc>=19.9)
