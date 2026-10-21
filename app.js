@@ -1,5 +1,5 @@
-const BUILD_TS='2026-10-19 IST'; // release build date (IST)
-const APP_VERSION=1528;
+const BUILD_TS='2026-10-21 IST'; // release build date (IST)
+const APP_VERSION=1529;
 const RADAR_SCORE_VERSION='v1419-recross-batches'; // Eligible on crossing the score floor at any time; selected model's evolving target and movement-based profit protection.
 
 // ── v1358: AN UNCAUGHT ERROR MUST NAME ITSELF ─────────────────────────────────────────────────
@@ -118,7 +118,7 @@ function isCsvLikeFile(file){
 
 function updateModeUI(){
   const brand=document.querySelector('.brand-tag');
-  if(brand) brand.textContent=(document.getElementById('fModel')?.value==='PEAK'?'Peak':'Ensemble')+' Engine';
+  if(brand) brand.textContent='Ensemble Engine';
   document.querySelectorAll('.currency-lbl').forEach(el=>{el.textContent='₹';});
 }
 let ALL=[],FILT=[],PG=1,PGSZ=100,SCOL='score',SDIR=-1;
@@ -3748,7 +3748,7 @@ function setRadarEvidenceScore(r){
 function radarScoreTitle(r){
   const p=r?.btstPick;
   return p?`Pick #${p.rank}: model score ${p.score}. Buyable when it crosses your score floor; exit through the +1.25% starting target and ratcheting OCO.`
-    :"Model score: Peak uses predicted rise minus dip per session; Ensemble uses mapped percentiles. Each model has its own saved floor. GO requires a fresh crossing.";
+    :"Model score: Ensemble mapped percentile. GO requires a fresh crossing of your saved floor.";
 }
 function* refreshRocketScoresGen(deferPaint=false){
   const staged=[];
@@ -4379,17 +4379,18 @@ let _scoreFloorEpoch=0;
 // adopts the helper's value into it, and a `let` declared later is in the temporal dead zone -
 // the v1400 trap that left the alert toggle silently uninitialised inside its own try/catch.
 let _floorPushTimer=null,_floorPushed=null;
-function floorModel(){return document.getElementById('fModel')?.value==='PEAK'?'PEAK':'ENS';}
-function scoreFloorStore(model=floorModel()){return model==='PEAK'?'rs_peak_score_floor':SCORE_FLOOR_STORE;}
+// 21 Oct 2026 (owner): Peak removed; Ensemble is the only model.
+function floorModel(){return 'ENS';}
+function scoreFloorStore(){return SCORE_FLOOR_STORE;}
 function initScoreFloorUI(force=false){
   try{
     const el=document.getElementById('fScoreFloor'),model=floorModel();
     if(!el||(!force&&_scoreFloorSeeded===model)||document.activeElement===el)return;
     const key=scoreFloorStore(model),stored=localStorage.getItem(key),epoch=++_scoreFloorEpoch;
-    el.value=stored===null?(model==='PEAK'?'0':''):stored;
-    el.min=model==='PEAK'?'0':'1.2';el.placeholder=model==='PEAK'?'0':'1.6';
-    const label=document.getElementById('scoreFloorLabel');if(label)label.textContent=model==='PEAK'?'Peak Floor':'Ensemble Floor';
-    el.title=model==='PEAK'?'Peak only: its own predicted rise minus dip, per session to peak. Default 0 requires positive predicted advantage. Saved independently from Ensemble.':'Ensemble only: mapped ensemble score. Default 1.6; minimum 1.2. Saved independently from Peak.';
+    el.value=stored===null?'':stored;
+    el.min='1.2';el.placeholder='1.6';
+    const label=document.getElementById('scoreFloorLabel');if(label)label.textContent='Ensemble Floor';
+    el.title='Ensemble only: mapped ensemble score. Default 1.6; minimum 1.2.';
     _scoreFloorSeeded=model;_floorPushed=null;
     updateModeUI();
     readHelperResponse('/api/btst/min-score?model='+model,{timeout:6000}).then(d=>{
@@ -4549,7 +4550,7 @@ function btstScoreAOf(sym){
   if(r.scoresA.size){const v=r.scoresA.get(normSym(sym));return Number.isFinite(v)?v:null;}
   return r.model==='A'?btstScoreOf(sym):null;
 }
-const BTST_MODEL_NAMES={ENS:'Ensemble',A:'Original',PEAK:'Peak'};
+const BTST_MODEL_NAMES={ENS:'Ensemble',A:'Original'};
 function btstModelName(m){return BTST_MODEL_NAMES[m]||m||'Original';}
 // Model switch (index.html #fModel). The helper stores the choice and passes it to every engine run;
 // the other model keeps scoring as a shadow for the day-end review. Applies from the next run.
@@ -4558,9 +4559,8 @@ function btstModelName(m){return BTST_MODEL_NAMES[m]||m||'Original';}
 // async round-trip answered - and showed it permanently whenever the helper was slow or down.
 // localStorage now paints the owner's last known choice synchronously; the helper still wins on reply.
 const MODEL_STORE='rocket-btst-model-v1';
-// v1502 (owner, 15 Oct): Ensemble or Peak, selectable like A vs Ensemble in September. Whichever is selected
-// ranks, signals and buys from the next engine run; the engine scores both every run.
-const SELECTABLE_MODELS=['ENS','PEAK'];
+// 21 Oct 2026 (owner): Peak removed completely; Ensemble is the only model (the Model dropdown is gone).
+const SELECTABLE_MODELS=['ENS'];
 function savedModelChoice(){
   try{const v=localStorage.getItem(MODEL_STORE);return SELECTABLE_MODELS.includes(v)?v:null;}catch(e){return null;}
 }
@@ -4588,21 +4588,6 @@ function initModelUI(){
 function selectedBtstModel(){
   const v=document.getElementById('fModel')?.value;
   return SELECTABLE_MODELS.includes(v)?v:(savedModelChoice()||'ENS');
-}
-function onModelChange(){
-  _modelChoiceEpoch++;
-  _modelSwitchPending=true;
-  const el=document.getElementById('fModel');
-  const m=SELECTABLE_MODELS.includes(el?.value)?el.value:'ENS';
-  const previous=savedModelChoice()||'ENS';
-  initScoreFloorUI(true);refreshBtstModelView();
-  if(el) el.disabled=true;
-  const restore=()=>{_modelSwitchPending=false;if(el)el.value=previous;initScoreFloorUI(true);refreshBtstModelView();};
-  readHelperResponse('/api/btst/model?set='+m,{timeout:6000}).then(d=>{
-    if(d&&d.ok&&d.model===m){rememberModelChoice(m);_modelSwitchPending=false;initScoreFloorUI(true);loadBtstPicks();refreshBtstModelView();showToast(`${btstModelName(m)} selected - ${d.ready?'current scores active':'refreshing stale scores'}`,4000);}
-    else {restore();showToast('Helper did not accept the model change: '+(d?.why||'no reply'),6000,true);}
-  }).catch(()=>{restore();showToast('Helper not reachable - model change not applied',6000,true);})
-    .finally(()=>{if(el)el.disabled=false;});
 }
 function refreshBtstModelView(){
   _btstRankMemo=null;
@@ -4705,7 +4690,6 @@ function btstCrossingState(s){
   // never reach here - same rule the final path has enforced since v1393.
   if(!r||!r.src||r.src.mode!=='live'||r.src.session!==getSessionDate()) return null;
   if(_modelSwitchPending||r.model!==r.src.activeModel)return {state:'WAIT',reason:'Confirming selected model with helper'};
-  const peakOutside=r.model==='PEAK'&&r.src.peak?.[normSym(s.symbol)]?.eligible!==true;
   const st=crossingStore(),key=normSym(s.symbol);
   st.rebuy=st.rebuy||{};
   const qty=Number(getCombinedOpenPositionMap()[s.symbol]?.qty)||0;
@@ -4718,13 +4702,6 @@ function btstCrossingState(s){
     state.consumed=true;state.armed=false;
   }
   state.qty=qty;state.fillKey=fillKey;
-  if(peakOutside){
-    if(state.consumed&&Number.isFinite(r.src.peak?.[key]?.relTop)&&r.src.peak[key].eligible===false)state.armed=true;
-    saveCrossings();
-    const rel=r.src.peak?.[key]?.relTop;
-    return {state:'WAIT',reason:Number.isFinite(rel)?`Peak buys at 80-90% of the run top; this one is at ${Math.round(rel*100)}%`:'Peak is not eligible in this run'};
-  }
-  if(r.model==='PEAK'&&score<=0)return {state:'WAIT',reason:'Peak predicts no positive advantage over the dip'};
   if(score<floor&&state.consumed) state.armed=true;
   if(score<floor&&st.at?.[key]&&!st.at[key].below){st.at[key].below=true;saveCrossings();}
   if(score>=floor&&state.consumed&&state.armed){state.consumed=false;state.armed=false;}
@@ -4744,7 +4721,6 @@ function btstCrossingState(s){
   // mid-spike; replayed on the live Ensemble crossings 29 Sep-14 Oct these lost money (-0.13%/signal) and
   // skipping them lifted the Rs 1.13L account result in both halves. Not noted as a crossing, so a later
   // score back inside the band is an ordinary GO.
-  // Ensemble only: for Peak (v1502) 2.15+ is just its top-ranked names, not "every model agrees".
   const SCORE_CAP=2.15;
   if(r.model==='ENS'&&score>=SCORE_CAP) return {state:'WAIT',reason:`Score +${score.toFixed(2)} is at the maxed-out top (${SCORE_CAP}+): every model ranks it #1, usually mid-spike. These lost money live, so it is skipped; buyable if it settles back inside +${floor.toFixed(2)} to +${SCORE_CAP}.`};
   // v1506 (owner, 15 Oct): volume-fade veto. A push whose last 15 minutes trade at 40-80% of today's biggest
@@ -4759,7 +4735,7 @@ function btstCrossingState(s){
   const sr=r.src.sizeRun?.[normSym(s.symbol)],srMin=Number.isFinite(Number(r.src.sizeRunMin))?Number(r.src.sizeRunMin):1;
   if(sr&&Number.isFinite(sr.m)&&sr.m<srMin){const bx=r.src.sizeRunMarket?.buckets?.[sr.bucket],names={L:'top 100',M:'101-250',S1:'251-500',S2:'501-1000',S3:'beyond 1000'};
     return {state:'WAIT',reason:`Score +${score.toFixed(2)} clears +${floor.toFixed(2)}, but its size bucket (market-cap rank ${names[sr.bucket]||sr.bucket}) is running ${sr.m.toFixed(2)}x its normal for this time of day`+(bx?` (${bx.todayPct.toFixed(2)}% from the open vs ${bx.basePct.toFixed(2)}% usually)`:'')+`. Buys in an out-of-favour size held losers live, so it waits until that bucket runs normally.`};}
-  // 19 Oct 2026 (owner): no new buys before 09:45 - the live Peak model was trained only on snapshots from 09:45 and
+  // 19 Oct 2026 (owner): no new buys before 09:45 - set while Peak (removed 21 Oct) trained from 09:45; the rule stays, and
   // the volume-fade check needs four bars (09:35). Not noted as a crossing: still above the floor at 09:45 = GO.
   if(isEquitySession(Date.now())&&istClock().mins<ENTRY_START_MIN) return {state:'WAIT',reason:`Score +${score.toFixed(2)} clears +${floor.toFixed(2)}, but new buys start at 09:45: before then the models score opening spikes they were never trained on.`};
   const gateOff=r.src.gate?.on!==true;
@@ -9295,14 +9271,14 @@ async function loadModelPortfolios(){
   finally{MODEL_PORTFOLIO_BUSY=false;}
 }
 function buildModelPortfolioPanel(){
-  const j=MODEL_PORTFOLIO_STATUS,models=['ENS','PEAK'];
+  const j=MODEL_PORTFOLIO_STATUS,models=['ENS'];
   const money=n=>Number.isFinite(n)?'₹'+n.toLocaleString('en-IN',{minimumFractionDigits:2,maximumFractionDigits:2}):'—';
   const pct=n=>Number.isFinite(n)?(n>0?'+':'')+n.toFixed(2)+'%':'—';
   const tone=n=>n>0?'mp-positive':n<0?'mp-negative':'';
-  const name=k=>k==='ENS'?'Ensemble':'Peak';
+  const name=k=>k==='ENS'?'Ensemble':k;
   const time=at=>new Date(at).toLocaleTimeString('en-IN',{timeZone:'Asia/Kolkata',hour:'2-digit',minute:'2-digit',hour12:false});
   const stale=j?.lastObservedAt&&Date.now()-j.lastObservedAt>60000;
-  const status=j?.error?escHtml(j.error):!j?.startedAt?'Waiting for live scores and capital':stale?'Paused · showing saved marks':'Tracking both models live';
+  const status=j?.error?escHtml(j.error):!j?.startedAt?'Waiting for live scores and capital':stale?'Paused · showing saved marks':'Tracking Ensemble live';
   const css=`<style>
   #modelPortfolioPanel{margin:16px;padding:20px;border:1px solid var(--border);border-radius:12px;background:var(--bg-card);font-size:12px;color:var(--t2)}
   #modelPortfolioPanel *{box-sizing:border-box}.mp-header,.mp-card-top,.mp-result,.mp-chart-head{display:flex;justify-content:space-between;align-items:center;gap:12px}.mp-header h3{margin:0;color:var(--t1);font-size:16px}.mp-sub{color:var(--t3);font-size:11px;margin-top:5px;line-height:1.5}.mp-status{font-size:11px;padding:5px 9px;border:1px solid var(--border);border-radius:20px;white-space:nowrap}.mp-cards{display:grid;grid-template-columns:1fr 1fr;gap:14px;margin:18px 0}.mp-card{padding:16px;border:1px solid var(--border);border-top:2px solid var(--model-color);border-radius:8px;background:var(--bg)}.mp-card-top b{color:var(--t1);font-size:13px}.mp-floor{color:var(--t3);font-size:11px}.mp-result{justify-content:flex-start;align-items:baseline;margin:14px 0 16px;font-variant-numeric:tabular-nums}.mp-result strong{font-size:26px;font-family:var(--mono,monospace);letter-spacing:-1px}.mp-result span{font-size:13px}.mp-metrics{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:14px 10px}.mp-metric small{display:block;color:var(--t3);font-size:10px;margin-bottom:5px}.mp-metric b{font-weight:600;font-size:12px;font-variant-numeric:tabular-nums}.mp-card-foot{display:flex;flex-wrap:wrap;gap:14px;border-top:1px solid var(--border);padding-top:12px;margin-top:14px;color:var(--t3);font-size:10px}.mp-card-foot b{color:var(--t2);font-weight:600}.mp-positive{color:var(--green)}.mp-negative{color:var(--red)}.mp-chart{border:1px solid var(--border);border-radius:8px;padding:14px 14px 10px;margin-bottom:14px;background:var(--bg)}.mp-chart-head{margin-bottom:14px}.mp-chart-head b{font-size:11px;font-weight:600;color:var(--t2)}.mp-legend{display:flex;gap:14px;font-size:10px}.mp-dot{display:inline-block;width:7px;height:7px;border-radius:50%;background:var(--model-color);margin-right:5px}.mp-plot{display:grid;grid-template-columns:50px minmax(0,1fr);gap:8px}.mp-axis{display:flex;flex-direction:column;justify-content:space-between;text-align:right;font-size:10px;color:var(--t3);padding-bottom:2px}.mp-plot svg{display:block;width:100%;height:160px;overflow:visible}.mp-times{display:flex;justify-content:space-between;margin:8px 0 0 58px;color:var(--t3);font-size:10px}.mp-detail{border-top:1px solid var(--border);margin-top:0}.mp-detail summary{cursor:pointer;padding:12px 2px;color:var(--t2);font-size:12px}.mp-detail summary span{color:var(--t3);font-size:10px;margin-left:8px}.mp-table-wrap{overflow:auto;margin:0 0 14px;border:1px solid var(--border);border-radius:6px}#modelPortfolioPanel table{width:100%;border-collapse:collapse;white-space:nowrap;font-size:11px;min-width:560px}#modelPortfolioPanel th{background:var(--bg);color:var(--t3);font-size:10px;font-weight:500}#modelPortfolioPanel th,#modelPortfolioPanel td{padding:10px 12px;text-align:right;border-bottom:1px solid var(--border)}#modelPortfolioPanel th:first-child,#modelPortfolioPanel td:first-child{text-align:left}#modelPortfolioPanel tbody tr:last-child td{border-bottom:0}.mp-table-label{color:var(--t3);font-size:10px;margin:0 0 8px}.mp-empty{padding:12px 0 16px;color:var(--t3);font-size:11px}.mp-method{line-height:1.7;color:var(--t3);font-size:11px;max-width:1000px;padding-bottom:8px}.mp-method p{margin:0 0 8px}@media(max-width:650px){#modelPortfolioPanel{margin:10px;padding:14px}.mp-header{align-items:flex-start;flex-direction:column;gap:8px}.mp-cards{grid-template-columns:1fr;gap:10px}.mp-result strong{font-size:23px}.mp-chart-head{align-items:flex-start;flex-direction:column;gap:8px}.mp-plot svg{height:135px}.mp-detail summary span{display:block;margin:5px 0 0 14px}}
