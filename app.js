@@ -1,5 +1,5 @@
 const BUILD_TS='2026-10-22 IST'; // release build date (IST)
-const APP_VERSION=1535;
+const APP_VERSION=1536;
 const RADAR_SCORE_VERSION='v1419-recross-batches'; // Eligible on crossing the score floor at any time; selected model's evolving target and movement-based profit protection.
 
 // ── v1358: AN UNCAUGHT ERROR MUST NAME ITSELF ─────────────────────────────────────────────────
@@ -4513,7 +4513,8 @@ let _btstRankMemo=null;
 function pathSnapshotFresh(snapshot,now=Date.now()){
   const p=snapshot?.pathPrediction;
   if(!p||p.source!=='completed-minute-live'||p.horizon!=='T1'||!p.datasetId||p.symbols<50)return false;
-  return [p.asOf,p.featureAsOf].every(value=>{const at=Date.parse(value),age=now-at;return Number.isFinite(at)&&age>=0&&age<=180000&&String(value).slice(0,10)===snapshot.session;});
+  const decision=Date.parse(p.asOf),feature=Date.parse(p.featureAsOf);
+  return Number.isFinite(decision)&&Number.isFinite(feature)&&now>=decision&&now-decision<=180000&&decision>=feature&&decision-feature<=90000&&String(p.asOf).slice(0,10)===snapshot.session&&String(p.featureAsOf).slice(0,10)===snapshot.session;
 }
 function btstRanking(){
   const pk=btstToday();
