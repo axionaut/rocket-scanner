@@ -1,5 +1,5 @@
 const BUILD_TS='2026-10-22 IST'; // release build date (IST)
-const APP_VERSION=1533;
+const APP_VERSION=1534;
 const RADAR_SCORE_VERSION='v1419-recross-batches'; // Eligible on crossing the score floor at any time; selected model's evolving target and movement-based profit protection.
 
 // ── v1358: AN UNCAUGHT ERROR MUST NAME ITSELF ─────────────────────────────────────────────────
@@ -4686,7 +4686,8 @@ function noteCrossing(sym,score,floor){
   if(!k||!Number.isFinite(score)||!Number.isFinite(floor)||score<floor) return st.at[k]||null;
   if(!st.at[k]||st.at[k].below){
     // 1 Oct: a re-crossing after a below-floor run gets a fresh time; it is a new buy signal.
-    st.at[k]={t:Date.now(),score,floor};
+    const firstT=st.at[k]?.firstT||st.at[k]?.t||Date.now();
+    st.at[k]={t:Date.now(),score,floor,firstT};
     saveCrossings();
   }
   return st.at[k];
@@ -4705,6 +4706,7 @@ function btstCrossingState(s){
   if(_modelSwitchPending||r.model!==r.src.activeModel)return {state:'WAIT',reason:'Confirming selected model with helper'};
   const st=crossingStore(),key=normSym(s.symbol);
   st.rebuy=st.rebuy||{};
+  if(score>=floor){ st.firstCross=st.firstCross||{}; if(!st.firstCross[key]){ st.firstCross[key]=Date.now(); saveCrossings(); } }
   const qty=Number(getCombinedOpenPositionMap()[s.symbol]?.qty)||0;
   const buys=todayBuyFillsBySymbol().get(key)||[];
   const fillKey=buys.length?JSON.stringify(buys.map(f=>[f.date,f.time,f.qty,f.price])):'[]';
@@ -5074,7 +5076,12 @@ function rowStatusPillHtml(s){
   const funded=SELECTED.has(s.symbol)&&act.state==='GO';
   const unfunded=act.state==='GO'&&!funded;
   const tone=act.state==='BLOCKED'?'red':act.state==='GO'&&!unfunded?'green':'amber';
+  const k=normSym(s.symbol),st=crossingStore();
+  const firstAt=st?.firstCross?.[k]||st?.at?.[k]?.firstT||st?.at?.[k]?.t;
+  const firstTimeStr=firstAt?new Date(firstAt).toLocaleTimeString('en-IN',{hour:'2-digit',minute:'2-digit',hour12:false}):'';
+  const crossBadge=firstTimeStr?`<div style="font-size:11px;color:var(--cyan);font-family:'DM Mono',monospace;font-weight:700;margin-top:2px" title="First crossed the score floor today at ${firstTimeStr} IST">⏱ 1st cross: ${firstTimeStr}</div>`:'';
   return `<span class="info-pill pill-${tone}" title="${escHtml(act.reason)}">${act.state}${funded?' | Funded':unfunded?' | Not funded':''}</span>`
+    +crossBadge
     +(act.state!=='GO'?`<div style="font-size:11px;color:var(--t3)">${escHtml(act.reason)}</div>`:'')
     +(act.state==='GO'&&reason?`<div style="font-size:11px;color:var(--amber)">${escHtml(reason)}</div>`:'');
 }
