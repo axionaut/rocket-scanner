@@ -1,5 +1,5 @@
 const BUILD_TS='2026-10-22 IST'; // release build date (IST)
-const APP_VERSION=1537;
+const APP_VERSION=1538;
 const RADAR_SCORE_VERSION='v1419-recross-batches'; // Eligible on crossing the score floor at any time; selected model's evolving target and movement-based profit protection.
 
 // ── v1358: AN UNCAUGHT ERROR MUST NAME ITSELF ─────────────────────────────────────────────────
@@ -4762,18 +4762,8 @@ function btstCrossingState(s){
   // score back inside the band is an ordinary GO.
   const SCORE_CAP=2.15;
   if(r.model==='ENS'&&score>=SCORE_CAP) return {state:'WAIT',reason:`Score +${score.toFixed(2)} is at the maxed-out top (${SCORE_CAP}+): every model ranks it #1, usually mid-spike. These lost money live, so it is skipped; buyable if it settles back inside +${floor.toFixed(2)} to +${SCORE_CAP}.`};
-  // v1506 (owner, 15 Oct): volume-fade veto. A push whose last 15 minutes trade at 40-80% of today's biggest
-  // 5-minute bar is rising on weakening volume (BLUSPRING 15 Oct, fade 0.46). Replayed on 135 live Ensemble
-  // signals 29 Sep-14 Oct those lost -0.53% each with 20 of 34 stuck. Not noted as a crossing, so the stock is
-  // buyable on a later run once volume picks up again or dries out. No figure (under 4 bars today) = no veto.
-  const vf=r.src.volFade?.[normSym(s.symbol)],band=Array.isArray(r.src.volFadeBand)?r.src.volFadeBand:[0.4,0.8];
-  if(vf&&Number.isFinite(vf.fade)&&vf.fade>=band[0]&&vf.fade<band[1]) return {state:'WAIT',reason:`Score +${score.toFixed(2)} clears +${floor.toFixed(2)}, but the push is on fading volume: last 15 min average ${Math.round(vf.last15Avg).toLocaleString('en-IN')} = ${Math.round(vf.fade*100)}% of today's biggest 5-min bar (${Math.round(vf.peakBar).toLocaleString('en-IN')}). Fading pushes lost money live, so it is skipped; buyable once volume picks up or dries out.`};
-  // 17 Oct 2026 (owner): size-bucket veto. m = how far this stock's market-cap bucket has run from the open vs
-  // that bucket's normal at this time of day (engine sizeRun). Below 1 = its size is out of favour today (13/15 Oct:
-  // top 100 ran, small caps sank). Not noted as a crossing; buyable once its bucket runs normally. No figure = no veto.
-  const sr=r.src.sizeRun?.[normSym(s.symbol)],srMin=Number.isFinite(Number(r.src.sizeRunMin))?Number(r.src.sizeRunMin):1;
-  if(sr&&Number.isFinite(sr.m)&&sr.m<srMin){const bx=r.src.sizeRunMarket?.buckets?.[sr.bucket],names={L:'top 100',M:'101-250',S1:'251-500',S2:'501-1000',S3:'beyond 1000'};
-    return {state:'WAIT',reason:`Score +${score.toFixed(2)} clears +${floor.toFixed(2)}, but its size bucket (market-cap rank ${names[sr.bucket]||sr.bucket}) is running ${sr.m.toFixed(2)}x its normal for this time of day`+(bx?` (${bx.todayPct.toFixed(2)}% from the open vs ${bx.basePct.toFixed(2)}% usually)`:'')+`. Buys in an out-of-favour size held losers live, so it waits until that bucket runs normally.`};}
+  // v1538 (owner, 22 Oct): the volume-fade (v1506) and size-bucket (v1517) vetoes are removed. Replayed under the
+  // current OCO exit with profit-funded trims (1-21 Oct, Rs3.5L), no veto earned more than either or both in both halves.
   // 19 Oct 2026 (owner): no new buys before 09:45 - set while Peak (removed 21 Oct) trained from 09:45; the rule stays, and
   // the volume-fade check needs four bars (09:35). Not noted as a crossing: still above the floor at 09:45 = GO.
   if(isEquitySession(Date.now())&&istClock().mins<ENTRY_START_MIN) return {state:'WAIT',reason:`Score +${score.toFixed(2)} clears +${floor.toFixed(2)}, but new buys start at 09:45: before then the models score opening spikes they were never trained on.`};
