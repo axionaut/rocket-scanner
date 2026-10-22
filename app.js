@@ -1,5 +1,5 @@
 const BUILD_TS='2026-10-22 IST'; // release build date (IST)
-const APP_VERSION=1536;
+const APP_VERSION=1537;
 const RADAR_SCORE_VERSION='v1419-recross-batches'; // Eligible on crossing the score floor at any time; selected model's evolving target and movement-based profit protection.
 
 // ── v1358: AN UNCAUGHT ERROR MUST NAME ITSELF ─────────────────────────────────────────────────
@@ -4493,6 +4493,7 @@ async function loadBtstPicks(){
     const key=[picks?.asOf,picks?.stage,picks?.ok,picks?.session,picks?.activeModel,picks?.rules?.minScore,picks?.modelSelectedAt].join('|'),rankKey=[rank?.asOf,rank?.ok,rank?.session,rank?.activeModel,rank?.rules?.minScore,rank?.modelSelectedAt].join('|');
     const targetKey=[target?.version,target?.asOf,target?.asOfSession,target?.trainedThrough,target?.cases?.length].join('|');
     BTST.loadedAt=Date.now();
+    if(rankKey!==BTST.rankKey||SCORE_HIGHS?.day!==today) loadScoreHighs(today);
     if(key===BTST.key&&rankKey===BTST.rankKey&&targetKey===BTST.targetKey) return;
     BTST={data:picks,key,v:BTST.v+1,loadedAt:Date.now(),rank,rankKey,targetModel:target,targetKey};
     // Live crossing alerts below own buy notifications; file stages are not buy signals.
@@ -4502,6 +4503,22 @@ async function loadBtstPicks(){
     if(ALL.length) applyFilters({preservePage:true});
     try{renderStats();}catch(e){}
   }catch(e){}finally{loadBtstPicks.busy=false;}
+}
+// v1537: each stock's running score high per model today (engine score_highs_<day>.json, every live run, full
+// universe). The first entry at/above a floor is when the stock first scored that floor, so the badge follows
+// whichever model and floor are selected now.
+let SCORE_HIGHS=null;
+async function loadScoreHighs(day){
+  const h=await readHelperResponse('/api/inputs/file?name=score_highs_'+day+'.json',{timeout:6000}).catch(()=>null);
+  if(!h||h.day!==day||!h.models) return;
+  SCORE_HIGHS=h;
+  if(ALL.length) applyFilters({preservePage:true});
+}
+function firstScoreAtFloor(sym){
+  const model=floorModel(),floor=btstMinScore(),h=SCORE_HIGHS;
+  if(!h||h.day!==getSessionDate()||!Number.isFinite(floor)) return null;
+  const hit=(h.models?.[model]?.[normSym(sym)]||[]).find(([,sc])=>sc>=floor-1e-9);
+  return hit?{t:hit[0],floor,model,already:hit[0]===h.runs?.[model]?.first,since:h.runs?.[model]?.first}:null;
 }
 function btstToday(){
   const d=BTST.data;
@@ -4714,7 +4731,6 @@ function btstCrossingState(s){
   if(_modelSwitchPending||r.model!==r.src.activeModel)return {state:'WAIT',reason:'Confirming selected model with helper'};
   const st=crossingStore(),key=normSym(s.symbol);
   st.rebuy=st.rebuy||{};
-  if(score>=floor){ st.firstCross=st.firstCross||{}; if(!st.firstCross[key]){ st.firstCross[key]=Date.now(); saveCrossings(); } }
   const qty=Number(getCombinedOpenPositionMap()[s.symbol]?.qty)||0;
   const buys=todayBuyFillsBySymbol().get(key)||[];
   const fillKey=buys.length?JSON.stringify(buys.map(f=>[f.date,f.time,f.qty,f.price])):'[]';
@@ -5084,10 +5100,8 @@ function rowStatusPillHtml(s){
   const funded=SELECTED.has(s.symbol)&&act.state==='GO';
   const unfunded=act.state==='GO'&&!funded;
   const tone=act.state==='BLOCKED'?'red':act.state==='GO'&&!unfunded?'green':'amber';
-  const k=normSym(s.symbol),st=crossingStore();
-  const firstAt=st?.firstCross?.[k]||st?.at?.[k]?.firstT||st?.at?.[k]?.t;
-  const firstTimeStr=firstAt?new Date(firstAt).toLocaleTimeString('en-IN',{hour:'2-digit',minute:'2-digit',hour12:false}):'';
-  const crossBadge=firstTimeStr?`<div style="font-size:11px;color:var(--cyan);font-family:'DM Mono',monospace;font-weight:700;margin-top:2px" title="First crossed the score floor today at ${firstTimeStr} IST">⏱ 1st cross: ${firstTimeStr}</div>`:'';
+  const fc=firstScoreAtFloor(s.symbol),hm=t=>new Date(t).toLocaleTimeString('en-IN',{timeZone:'Asia/Kolkata',hour:'2-digit',minute:'2-digit',hour12:false});
+  const crossBadge=fc?`<div style="font-size:11px;color:var(--cyan);font-family:'DM Mono',monospace;font-weight:700;margin-top:2px" title="${fc.already?`Already at or above ${fc.model} ${fc.floor.toFixed(2)} when tracking began at ${hm(fc.since)} IST`:`First scored ${fc.model} ${fc.floor.toFixed(2)} or higher today in the ${hm(fc.t)} IST run (tracked since ${hm(fc.since)} IST)`}">⏱ 1st ≥${fc.floor.toFixed(2)}: ${fc.already?'by ':''}${hm(fc.t)}</div>`:'';
   return `<span class="info-pill pill-${tone}" title="${escHtml(act.reason)}">${act.state}${funded?' | Funded':unfunded?' | Not funded':''}</span>`
     +crossBadge
     +(act.state!=='GO'?`<div style="font-size:11px;color:var(--t3)">${escHtml(act.reason)}</div>`:'')
