@@ -1,5 +1,5 @@
 const BUILD_TS='2026-10-22 IST'; // release build date (IST)
-const APP_VERSION=1534;
+const APP_VERSION=1535;
 const RADAR_SCORE_VERSION='v1419-recross-batches'; // Eligible on crossing the score floor at any time; selected model's evolving target and movement-based profit protection.
 
 // ── v1358: AN UNCAUGHT ERROR MUST NAME ITSELF ─────────────────────────────────────────────────
@@ -4510,11 +4510,17 @@ function btstToday(){
 // v1396: full ranking of the liquid universe. Today's picks file (15:05/15:15) wins; before it the helper's
 // intraday preview (btst_rank.json, every 10 minutes) orders the table. A preview never makes a stock GO.
 let _btstRankMemo=null;
+function pathSnapshotFresh(snapshot,now=Date.now()){
+  const p=snapshot?.pathPrediction;
+  if(!p||p.source!=='completed-minute-live'||p.horizon!=='T1'||!p.datasetId||p.symbols<50)return false;
+  return [p.asOf,p.featureAsOf].every(value=>{const at=Date.parse(value),age=now-at;return Number.isFinite(at)&&age>=0&&age<=180000&&String(value).slice(0,10)===snapshot.session;});
+}
 function btstRanking(){
   const pk=btstToday();
   const preview=BTST.rank&&BTST.rank.ok&&BTST.rank.mode==='live'&&BTST.rank.session===getSessionDate()&&Array.isArray(BTST.rank.ranking)?BTST.rank:null;
   const src=pk&&Array.isArray(pk.ranking)&&(!preview||String(pk.asOf)>String(preview.asOf))?pk:preview;
   if(!src) return null;
+  if(floorModel()==='PATH'&&(!Array.isArray(src.rankings?.PATH)||!pathSnapshotFresh(src)))return null;
   const requested=floorModel(),viewModel=Array.isArray(src.rankings?.[requested])?requested:(src.activeModel||'A');
   if(_btstRankMemo&&_btstRankMemo.src===src&&_btstRankMemo.model===viewModel) return _btstRankMemo;
   const ranking=src.rankings?.[viewModel]||src.ranking;
@@ -4695,6 +4701,7 @@ function noteCrossing(sym,score,floor){
 // The action state for a live intraday crossing, or null when this row is not one.
 // Returning null hands the row back to the 15:15 final path unchanged.
 function btstCrossingState(s){
+  if(floorModel()==='PATH'&&!btstRanking())return {state:'WAIT',reason:'PATH predictions unavailable or stale; awaiting fresh completed-minute scores'};
   const floor=btstMinScore();
   if(!Number.isFinite(floor)) return null;
   const score=btstScoreOf(s?.symbol);
