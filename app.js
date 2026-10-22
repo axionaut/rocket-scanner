@@ -1,5 +1,5 @@
 const BUILD_TS='2026-10-22 IST'; // release build date (IST)
-const APP_VERSION=1532;
+const APP_VERSION=1533;
 const RADAR_SCORE_VERSION='v1419-recross-batches'; // Eligible on crossing the score floor at any time; selected model's evolving target and movement-based profit protection.
 
 // ── v1358: AN UNCAUGHT ERROR MUST NAME ITSELF ─────────────────────────────────────────────────
@@ -118,7 +118,7 @@ function isCsvLikeFile(file){
 
 function updateModeUI(){
   const brand=document.querySelector('.brand-tag');
-  if(brand) brand.textContent='Ensemble Engine';
+  if(brand) brand.textContent=(document.getElementById('fModel')?.value==='PATH'?'PATH':'Ensemble')+' Engine';
   document.querySelectorAll('.currency-lbl').forEach(el=>{el.textContent='₹';});
 }
 let ALL=[],FILT=[],PG=1,PGSZ=100,SCOL='score',SDIR=-1;
@@ -4380,17 +4380,17 @@ let _scoreFloorEpoch=0;
 // the v1400 trap that left the alert toggle silently uninitialised inside its own try/catch.
 let _floorPushTimer=null,_floorPushed=null;
 // 21 Oct 2026 (owner): Peak removed; Ensemble is the only model.
-function floorModel(){return 'ENS';}
-function scoreFloorStore(){return SCORE_FLOOR_STORE;}
+function floorModel(){return document.getElementById('fModel')?.value==='PATH'?'PATH':'ENS';}
+function scoreFloorStore(model=floorModel()){return model==='PATH'?'rs_path_score_floor':SCORE_FLOOR_STORE;}
 function initScoreFloorUI(force=false){
   try{
     const el=document.getElementById('fScoreFloor'),model=floorModel();
     if(!el||(!force&&_scoreFloorSeeded===model)||document.activeElement===el)return;
     const key=scoreFloorStore(model),stored=localStorage.getItem(key),epoch=++_scoreFloorEpoch;
-    el.value=stored===null?'':stored;
-    el.min='1.2';el.placeholder='1.6';
-    const label=document.getElementById('scoreFloorLabel');if(label)label.textContent='Ensemble Floor';
-    el.title='Ensemble only: mapped ensemble score. Default 1.6; minimum 1.2.';
+    el.value=stored===null?(model==='PATH'?'0.40':''):stored;
+    el.min=model==='PATH'?'0':'1.2';el.placeholder=model==='PATH'?'0.40':'1.6';el.step=model==='PATH'?'0.01':'0.1';
+    const label=document.getElementById('scoreFloorLabel');if(label)label.textContent=model==='PATH'?'PATH Floor':'Ensemble Floor';
+    el.title=model==='PATH'?'PATH only: price-action path trajectory model. Default 0.40. Saved independently from Ensemble.':'Ensemble only: mapped ensemble score. Default 1.6; minimum 1.2. Saved independently from PATH.';
     _scoreFloorSeeded=model;_floorPushed=null;
     updateModeUI();
     readHelperResponse('/api/btst/min-score?model='+model,{timeout:6000}).then(d=>{
@@ -4550,7 +4550,7 @@ function btstScoreAOf(sym){
   if(r.scoresA.size){const v=r.scoresA.get(normSym(sym));return Number.isFinite(v)?v:null;}
   return r.model==='A'?btstScoreOf(sym):null;
 }
-const BTST_MODEL_NAMES={ENS:'Ensemble',A:'Original'};
+const BTST_MODEL_NAMES={ENS:'Ensemble',PATH:'PATH',A:'Original'};
 function btstModelName(m){return BTST_MODEL_NAMES[m]||m||'Original';}
 // Model switch (index.html #fModel). The helper stores the choice and passes it to every engine run;
 // the other model keeps scoring as a shadow for the day-end review. Applies from the next run.
@@ -4560,7 +4560,7 @@ function btstModelName(m){return BTST_MODEL_NAMES[m]||m||'Original';}
 // localStorage now paints the owner's last known choice synchronously; the helper still wins on reply.
 const MODEL_STORE='rocket-btst-model-v1';
 // 21 Oct 2026 (owner): Peak removed completely; Ensemble is the only model (the Model dropdown is gone).
-const SELECTABLE_MODELS=['ENS'];
+const SELECTABLE_MODELS=['ENS','PATH'];
 function savedModelChoice(){
   try{const v=localStorage.getItem(MODEL_STORE);return SELECTABLE_MODELS.includes(v)?v:null;}catch(e){return null;}
 }
@@ -4583,6 +4583,19 @@ function initModelUI(){
       if(SELECTABLE_MODELS.includes(m)){rememberModelChoice(m);const e2=document.getElementById('fModel');if(e2&&document.activeElement!==e2)e2.value=m;initScoreFloorUI(true);refreshBtstModelView();}
     }).catch(()=>{});
   }catch(e){}
+}
+function onModelChange(){
+  const el=document.getElementById('fModel'),m=el?el.value:'ENS';
+  if(!SELECTABLE_MODELS.includes(m))return;
+  rememberModelChoice(m);_modelChoiceEpoch++;_modelSwitchPending=true;
+  initScoreFloorUI(true);refreshBtstModelView();
+  readHelperResponse('/api/btst/model?set='+encodeURIComponent(m),{timeout:6000}).then(d=>{
+    _modelSwitchPending=false;
+    if(!d||d.ok===false)return;
+    const act=d.model||m;rememberModelChoice(act);
+    if(el&&el.value!==act)el.value=act;
+    initScoreFloorUI(true);refreshBtstModelView();
+  }).catch(()=>{_modelSwitchPending=false;});
 }
 // The model new orders are ranked and targeted on: the dropdown (helper-confirmed), else the saved choice.
 function selectedBtstModel(){
