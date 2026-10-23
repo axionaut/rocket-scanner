@@ -1,5 +1,5 @@
 const BUILD_TS='2026-10-23 IST'; // release build date (IST)
-const APP_VERSION=1546;
+const APP_VERSION=1547;
 const RADAR_SCORE_VERSION='v1419-recross-batches'; // Eligible on crossing the score floor at any time; selected model's evolving target and movement-based profit protection.
 
 // ── v1358: AN UNCAUGHT ERROR MUST NAME ITSELF ─────────────────────────────────────────────────
@@ -9666,7 +9666,55 @@ async function removeSurvRule(key){
   await refreshRankingsAfterSurvRuleChange();
   showToast('Surveillance rule removed.',2500);
 }
+let SURV_OPPORTUNITY_STATUS=null,SURV_TABLE_MODE='opportunity',SURV_EVIDENCE_RULE=null;
+async function loadFilterOpportunity(){
+  if(loadFilterOpportunity.busy)return;loadFilterOpportunity.busy=true;
+  try{const j=await readHelperResponse('/api/inputs/file?name=filter_opportunity.json',{timeout:6000});
+    if(j?.ok&&j.asOf!==SURV_OPPORTUNITY_STATUS?.asOf){SURV_OPPORTUNITY_STATUS=j;if(isMainTabActive(1)&&!document.getElementById('survRuleInput')?.value)_refreshHFSection();}
+  }catch(e){console.warn('Filter opportunity benchmark unavailable',e);}finally{loadFilterOpportunity.busy=false;}
+}
+function currentFilterOpportunity(){
+  const s=SURV_OPPORTUNITY_STATUS;
+  return s?.ok&&JSON.stringify([...(s.rules||[])].sort())===JSON.stringify(getSurvRules().map(r=>r.key).sort())?s:null;
+}
+function setSurvTableMode(mode){SURV_TABLE_MODE=mode==='model'?'model':'opportunity';SURV_EVIDENCE_RULE=null;_methTbls.hf=null;_refreshHFSection();}
+function showFilterEvidence(key){SURV_EVIDENCE_RULE=key;_refreshHFSection();scrollToSection('meth-filter-evidence');}
+function filterEvidenceHTML(){
+  if(!SURV_EVIDENCE_RULE)return '';
+  const rule=getSurvRules().find(r=>r.key===SURV_EVIDENCE_RULE);
+  const rows=(currentFilterOpportunity()?.observations||[]).filter(r=>r.rules.includes(SURV_EVIDENCE_RULE)).sort((a,b)=>Math.abs(b.net)-Math.abs(a.net));
+  return `<section id="meth-filter-evidence" class="filter-evidence"><h4>${escHtml(rule?.column||rule?.label||SURV_EVIDENCE_RULE)}: stock evidence</h4><p>${rows.length} priced stocks; showing ${Math.min(100,rows.length)} with the largest absolute net result. Stocks with other rule hits remain blocked if only this rule is removed.</p><div class="scroll-x"><table class="ct"><thead><tr><th>Stock</th><th>Entry time</th><th>Entry ₹</th><th>Mark time</th><th>Mark ₹</th><th>Shares</th><th>Est. charges ₹</th><th>Net ₹</th><th>Other rules</th></tr></thead><tbody>${rows.slice(0,100).map(r=>`<tr><td>${escHtml(r.symbol)}${r.flatEntry?' <span title="Flat entry candle: executable fill not established">⚠</span>':''}</td><td>${escHtml(r.entryAt.slice(11))}</td><td>${r.entry.toFixed(2)}</td><td>${escHtml(r.markAt.slice(11))}</td><td>${r.mark.toFixed(2)}</td><td>${r.qty}</td><td>${r.charges.toFixed(2)}</td><td style="color:${r.net>=0?'var(--green)':'var(--red)'}">${fmtSignedINR(r.net)}</td><td>${r.rules.length===1?'None — only this rule':r.rules.filter(k=>k!==SURV_EVIDENCE_RULE).map(k=>escHtml(getSurvRules().find(x=>x.key===k)?.column||k)).join(', ')}</td></tr>`).join('')||'<tr><td colspan="9">No priced observations for this rule.</td></tr>'}</tbody></table></div></section>`;
+}
 function buildHardFilterMethodologyHTML(E){
+  const modelName=BTST_MODEL_NAMES?.[floorModel()]||floorModel(),op=currentFilterOpportunity();
+  const modes=`<div class="filter-view"><button class="btn ${SURV_TABLE_MODE==='opportunity'?'active':''}" onclick="setSurvTableMode('opportunity')">Blocked stocks · today</button><button class="btn ${SURV_TABLE_MODE==='model'?'active':''}" onclick="setSurvTableMode('model')">${escHtml(modelName)} signals</button></div>`;
+  if(SURV_TABLE_MODE==='model')return `<div class="filter-heading"><div><h3>Model-qualified filter evidence</h3><p>Actual recorded model qualifications with one rule removed; other entry checks still apply.</p></div>${modes}</div>`+buildModelFilterEvidenceHTML(E);
+  const rows=getSurvRules().map(rule=>{const b=op?.byRule?.[rule.key];return {ruleKey:rule.key,criteria:rule.column||rule.label,flagged:b?.flagged??SURV_RULE_HITS[rule.key]??0,net:b?.soleSamples?b.soleNet:null,per5000:b?.solePer5000??null,gains:b?.soleSamples?b.soleGains:null,losses:b?.soleSamples?-b.soleLosses:null,allNet:b?.samples?b.net:null,samples:b?.soleSamples||0,missing:b?.soleMissing||0,allSamples:b?.samples||0,impact:Math.abs(b?.soleNet||0)};});
+  const money=v=>v==null?'&mdash;':`<span class="filter-money" style="color:${v>0?'var(--green)':v<0?'var(--red)':'var(--t3)'}">${fmtSignedINR(v)}</span>`;
+  const cols=[
+    {key:'criteria',label:'Filter',align:'left',fmt:(v,r)=>`<button class="filter-name" onclick="showFilterEvidence('${r.ruleKey}')">${escHtml(v)}</button>${r.net==null?'':`<div class="filter-outcome" style="color:${r.net>0?'var(--amber)':'var(--green)'}">${r.net>0?'Blocked net winners':r.net<0?'Avoided a net loss':'Even after charges'}</div>`}`},
+    {key:'net',label:'Remove this rule alone ₹',align:'right',fmt:v=>v==null?`<span class="filter-empty">${op?.ok?'No priced sole-rule stocks':'Awaiting benchmark'}</span>`:money(v)},
+    {key:'per5000',label:'Net per ₹5,000',align:'right',fmt:money},
+    {key:'gains',label:'Gains missed ₹',align:'right',fmt:money},
+    {key:'losses',label:'Losses avoided ₹',align:'right',fmt:money},
+    {key:'allNet',label:'All matching stocks ₹',align:'right',fmt:(v,r)=>`<span title="${r.allSamples} priced stocks, including other-rule overlaps">${money(v)}</span>`},
+    {key:'flagged',label:'Flagged',align:'right',fmt:v=>Number(v).toLocaleString()},
+    {key:'samples',label:'Priced · sole rule',align:'right',fmt:(v,r)=>`${v}${r.missing?` <span class="filter-empty">+ ${r.missing} missing</span>`:''}`},
+    {key:'ruleKey',label:'Action',align:'right',fmt:v=>`<button class="btn" onclick="showFilterEvidence('${v}')">Stocks</button> <button class="filter-remove" onclick="removeSurvRule('${v}')">Remove</button>`}
+  ];
+  const sort=_methTbls.hf?.getSort?.();_methTbls.hf=makeSortableTable('tbl-hf',cols,rows,sort?.key||'impact',sort?.dir??-1);
+  const configured=new Set(getSurvRules().map(r=>r.key));const available=SURV_FILE_RULES.filter(r=>!configured.has(r.key)).map(r=>`<option value="${escHtml(r.column||r.label)}"></option>`).join('');
+  const age=op?.asOf?Date.now()-Date.parse(op.asOf):Infinity,stale=isEquitySession(Date.now())&&age>6*60000;
+  return `<section id="meth-filters"><div class="filter-heading"><div><h3>Which filters are helping?</h3><p>Positive net = missed gains. Negative net = avoided losses. Click a filter to inspect the stocks.</p></div>${modes}</div>
+    <div class="filter-summary"><div><span>Benchmark size</span><b>₹5,000 target / stock</b><small>Rounded up to whole shares; independent observations</small></div><div><span>Pricing coverage</span><b>${op?.ok?op.uniquePriced.toLocaleString():'Awaiting prices'}</b><small>Blocked EQ stocks with completed minutes</small></div><div><span>Session</span><b>${escHtml(op?.day||'Not available')}</b><small style="color:${stale?'var(--amber)':'var(--t3)'}">${op?.asOf?'Updated '+escHtml(new Date(op.asOf).toLocaleTimeString('en-IN',{timeZone:'Asia/Kolkata',hour:'2-digit',minute:'2-digit'}))+' IST'+(stale?' · refresh overdue':''):'Benchmark refresh pending'}</small></div></div>
+    <p class="filter-basis">First recorded traded minute open from 09:16 → latest completed-minute close, less estimated charges. A price benchmark, not account P&amp;L; model floors and the market gate are not applied.</p>
+    <p class="filter-basis"><b>Remove this rule alone</b> includes only stocks with no other configured surveillance hit. <b>All matching stocks</b> includes overlaps. Other entry conditions can still prevent a trade. Rows cannot be added together; initially sorted by largest net effect.</p>
+    <div class="filter-controls"><input id="survRuleInput" type="text" placeholder="Search REG1 columns to add a filter…" list="survRuleDatalist" onkeydown="if(event.key==='Enter'){event.preventDefault();addSurvRule();}"><datalist id="survRuleDatalist">${available}</datalist><button class="btn" onclick="addSurvRule()">+ Add rule</button></div>
+    <div class="filter-table scroll-x">${_methTbls.hf.getHtml()}</div><p class="filter-basis">Missing prices are not zero returns. This session helps you review a filter; it does not establish future profitability.</p>
+    ${filterEvidenceHTML()}<details class="meth-detail"><summary>Measurement details and coverage</summary><p>${escHtml(op?.method||'Waiting for the first benchmark refresh.')}</p><p>These candle-based observations do not establish executable fills, depth, circuit access or slippage. Flat entry candles are flagged in stock evidence. Notional capital is ₹5,000 per stock rounded up to whole shares; this is not a shared-capital simulation. Source: ${escHtml(op?.source||'unavailable')}. Saved filters remain authoritative.</p></details></section>`;
+}
+
+function buildModelFilterEvidenceHTML(E){
   // Configured rules are a HARD filter (owner 2026-07-17): any stock flagged under a
   // rule in this table is weeded out of Rankings, selection, and outcome candidates.
   // Non-configured REG1 flags remain a Radar score penalty + badge only.
@@ -9970,7 +10018,13 @@ function buildIndicatorWatchHTML(){
 }
 function _renderMethodologyInner(){
   const mc=document.getElementById('methContent');if(!mc)return;
-  mc.innerHTML=`<h3>Live score-crossing engine</h3>
+  mc.innerHTML=`<nav class="meth-nav" aria-label="Methodology sections"><button onclick="scrollToSection('meth-filters')">Filter decisions</button><button onclick="scrollToSection('meth-evidence')">Current evidence</button><button onclick="scrollToSection('meth-rules')">Entry rules</button><button onclick="scrollToSection('meth-models')">Models & exits</button><button onclick="scrollToSection('meth-history')">Older research</button></nav>
+    <div id="meth-hf-wrap">${buildHardFilterMethodologyHTML(ENGINE_DATA)}</div>
+    <section id="meth-evidence"><h3>Current evidence</h3><p>Every model is tested the same way: chosen on months before 6 Aug, judged on 6 Aug–21 Oct (two halves), through the same paper account the Model comparison uses (real minute prices and volumes, real charges, the live bracket exit and funded trims), against a copy trained on shuffled outcomes. PATH and STACK find different trades from the Ensemble: on the Ensemble's own crossings and on your real trades their opinion does not separate winners from losers, so they are separate choices, not blended into the Ensemble. The Performance tab's Model comparison shows all of them side by side live, plus this history.</p>
+</section>
+    <section id="meth-rules"><h3>Entry rules now</h3><p>New buys from 09:16 (the first completed minute), any time a fresh score crosses the selected model's floor with the market gate on and a fresh price. No volume-fade or size-bucket veto (removed 22 Oct: without them the account made more in both halves of the 1-21 Oct replay). The Ensemble keeps its 2.15 upper cap. Liquidity, impact and minimum-order limits apply to every model.</p>
+</section>
+    <details id="meth-models" class="meth-detail"><summary>Models, scoring and exits</summary><h3>Live score-crossing engine</h3>
     <p>The model chosen in the Model box (Ensemble, PATH or STACK) supplies the recommendation table, counts, allocation and basket. Every model scores every streamed NSE EQ stock every 2 minutes from Zerodha one-minute candles; surveillance-listed, non-EQ, circuit-locked and too-new stocks are removed first. All three publish on the same percentile scale (1.6 = top 1.5% of stocks, 2.2 = the model's #1), so a floor means the same share for each. Scores are ranks, not promised returns.</p>
     <div class="m-grid">
     <div class="m-card"><h4>Ensemble (default floor 1.6)</h4><p>Five learners (return regressor, +3% classifier, excess-over-market, downside quantile, extra-trees) trained walk-forward on the last 220 sessions of daily candles built from the minutes, retrained every 5 sessions; inputs are 52 daily features (returns 1 day to 3 months, gap, range, volume surges with today's volume projected, volatility, distance to highs and averages, RSI, stochastics, ADX, MACD, TradingView-style ratings, sector strength, market condition). The blend is the average of their rankings. Replayed through the paper account on its saved 1-21 Oct signals: +₹18,915 on ₹3.5L.</p></div>
@@ -9979,12 +10033,15 @@ function _renderMethodologyInner(){
     <div class="m-card"><h4>1. Live score (throughout the session)</h4><p>The local helper runs <code>dev/btst_engine.py</code> every 2 minutes. Ensemble scores from daily candles plus today's partial candle; PATH and STACK score from the completed minutes of today, continuing a state saved after each close. If PATH or STACK cannot score (stale data, missing nightly state), that model shows WAIT and never substitutes another model; the Ensemble keeps running.</p></div>
     <div class="m-card"><h4>2. Buy on qualification</h4><p>A current live score clearing your floor can become GO throughout the session. Qualifying names share available capital by score, within saved allocation and execution limits (minimum ₹${RocketStrategy.CONFIG.MIN_ALLOCATION_RS.toLocaleString('en-IN')} per new position, from charges and the +${RocketStrategy.CONFIG.TARGET_PCT}% start; adds to held stocks need one share). A purchase consumes its crossing; a completed below-floor observation enables a fresh crossing, held or unheld. The market gate, price freshness, circuit, surveillance and EQ checks still apply.</p></div>
     <div class="m-card"><h4>3. Exit</h4><p>Every buy starts with a sell GTT at +1.25% of weighted average cost. Within the zone of the upper sell, the helper converts it to one broker OCO: upper = live price + upper distance, lower = live price − lower distance. Both legs only move up. Upper and lower distances each start at 0.26% and are learned separately; zone starts at 0.10%; the helper automatically learns when new evidence is ready, using the last 40 completed observations, a one-second modify delay, recorded bid depth and charges. Observation continues through the next session after a sale. It records each held stock’s rally speed, pullbacks, volatility and bid depth over 1, 3 and 5 minutes. Stock-specific upper-distance, lower-distance and zone adjustments become active only after replay validation; until then, the current base distances apply. Replay runs separately so learning does not block price protection. The helper reconciles positions and orders every 10 seconds during the session even with this page closed, and refreshes immediately on order updates. Exit requests have priority over queued routine entries. Any change must improve both chronological halves; 1.25% stays fixed. The loss-trim cutoff starts at 1.25% and learns separately from the last 40 mature funded portfolio decisions, including stocks held instead of sold. Each replay starts with the same recorded inventory and booked profit, models chronological fills and reservations, resets the funding pool each session and marks remaining holdings after estimated charges. Future unrelated buys or profits are not invented. A cutoff change must improve both chronological halves and its gradual step must pass again. Eligible losses are trimmed worst first using up to 90% of today’s booked profit after charges. Without booked profit, they remain held. No scheduled expiry.</p></div></div>
-    <h3>Entry rules now</h3><p>New buys from 09:16 (the first completed minute), any time a fresh score crosses the selected model's floor with the market gate on and a fresh price. No volume-fade or size-bucket veto (removed 22 Oct: without them the account made more in both halves of the 1-21 Oct replay). The Ensemble keeps its 2.15 upper cap. Liquidity, impact and minimum-order limits apply to every model.</p>
-    <h3>Current evidence (22-23 Oct 2026)</h3><p>Every model is tested the same way: chosen on months before 6 Aug, judged on 6 Aug–21 Oct (two halves), through the same paper account the Model comparison uses (real minute prices and volumes, real charges, the live bracket exit and funded trims), against a copy trained on shuffled outcomes. PATH and STACK find different trades from the Ensemble: on the Ensemble's own crossings and on your real trades their opinion does not separate winners from losers, so they are separate choices, not blended into the Ensemble. The Performance tab's Model comparison shows all of them side by side live, plus this history.</p>
-    <h3>Older evidence</h3><p>The experiments below used older fixed entry and exit rules. They do not validate the current score-crossing entries, adaptive profit trail or holding without a time deadline.</p>
+</details>
+    <details id="meth-history" class="meth-detail"><summary>Older research ? different trading rules</summary><p>The experiments below used older fixed entry and exit rules. They do not validate the current score-crossing entries, adaptive profit trail or holding without a time deadline.</p>
     <p>Walk-forward on NSE daily data, Dec 2025 – Sep 2026 (the model never saw the future), costs included: top 5 bought at the close and sold at +3% the next day or at its close averaged <b>+0.91% per trade</b>, 73% of days positive. With the market gate: <b>+1.18% per trade, 79% of days positive, worst drawdown −4.7%</b>. A 1-minute replay of 36 recent sessions (buy at the real 15:25 price, +3% only when price traded through it) averaged <b>+1.17% per trade</b>, 26 of 36 days positive. Different random seeds and settings gave +0.91% to +1.05%.</p>
     <p>The earlier near-high rules (v1388–v1392) and every intraday entry rule tested on 5-minute and 1-minute data did not beat costs; they are retired.</p>
-    <div id="meth-hf-wrap">${buildHardFilterMethodologyHTML(ENGINE_DATA)}</div>`;
+</details>`;
+  const hdr=document.querySelector('.hdr');
+  const sync=()=>document.documentElement.style.setProperty('--meth-nav-top',(hdr?.getBoundingClientRect().height||80)+'px');
+  sync();if(hdr&&!_renderMethodologyInner.resizeObserver){_renderMethodologyInner.resizeObserver=new ResizeObserver(sync);_renderMethodologyInner.resizeObserver.observe(hdr);}
+  loadFilterOpportunity();
   // v1393: restored (dropped in v1389) - the rule and correlation tables only exist after render().
   setTimeout(()=>{_methTbls.hf?.render();_methTbls.sc?.render();},0);
 }
@@ -11744,7 +11801,9 @@ function renderPgn(){
 function scrollToSection(id){
   const el=document.getElementById(id);
   if(!el) return;
-  const y=el.getBoundingClientRect().top+window.pageYOffset-130;
+  if(el.tagName==='DETAILS')el.open=true;
+  const offset=id.startsWith('meth-')?(document.querySelector('.hdr')?.getBoundingClientRect().height||80)+(document.querySelector('.meth-nav')?.getBoundingClientRect().height||48)+16:130;
+  const y=el.getBoundingClientRect().top+window.pageYOffset-offset;
   window.scrollTo({top:y,behavior:'smooth'});
 }
 function goP(p){PG=p;renderTable();scrollToSection('tHead');}
@@ -14149,7 +14208,7 @@ function startStreamRefresh(){
     }catch(e){}
   }
   if(_streamRefreshTimer) return;
-  if(!startStreamRefresh.btst){startStreamRefresh.btst=setInterval(()=>{loadBtstPicks();loadKiteMargins();loadKiteGtts();loadProfitLockStatus();loadAutoBuyStatus();loadModelPortfolios();syncSellBasketToKite();scheduleKiteBasketSync();try{resetCrossAlertsIfNewDay();checkCrossingAlerts();}catch(e){}},20000);loadBtstPicks();loadKiteMargins();loadKiteGtts();loadProfitLockStatus();loadAutoBuyStatus();loadModelPortfolios();syncSellBasketToKite();try{resetCrossAlertsIfNewDay();checkCrossingAlerts();}catch(e){}
+  if(!startStreamRefresh.btst){startStreamRefresh.btst=setInterval(()=>{loadBtstPicks();loadKiteMargins();loadKiteGtts();loadProfitLockStatus();loadAutoBuyStatus();loadFilterOpportunity();loadModelPortfolios();syncSellBasketToKite();scheduleKiteBasketSync();try{resetCrossAlertsIfNewDay();checkCrossingAlerts();}catch(e){}},20000);loadBtstPicks();loadKiteMargins();loadKiteGtts();loadProfitLockStatus();loadAutoBuyStatus();loadFilterOpportunity();loadModelPortfolios();syncSellBasketToKite();try{resetCrossAlertsIfNewDay();checkCrossingAlerts();}catch(e){}
     try{seedSavedBasketCount();}catch(e){}}
   _streamRefreshUiTimer=setInterval(()=>{try{refreshStrategySafety();renderLiveTapeBar();}catch(e){console.warn('Strategy safety refresh',e);}},1000);
   if(!_streamVisibilityBound){
