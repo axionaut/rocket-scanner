@@ -1,5 +1,5 @@
 const BUILD_TS='2026-10-23 IST'; // release build date (IST)
-const APP_VERSION=1540;
+const APP_VERSION=1541;
 const RADAR_SCORE_VERSION='v1419-recross-batches'; // Eligible on crossing the score floor at any time; selected model's evolving target and movement-based profit protection.
 
 // ── v1358: AN UNCAUGHT ERROR MUST NAME ITSELF ─────────────────────────────────────────────────
@@ -4415,7 +4415,8 @@ function initAlertUI(){
   }catch(e){}
 }
 if(typeof document!=='undefined'){
-  const initUI=()=>{initAlertUI();initScoreFloorUI();try{initModelUI();}catch(e){}try{renderAutoBuyBtn();loadAutoBuyStatus();}catch(e){}};
+  // 23 Oct 2026: restore the saved model BEFORE seeding the floor, so the floor box belongs to the model shown.
+  const initUI=()=>{initAlertUI();try{initModelUI();}catch(e){}initScoreFloorUI(true);try{renderAutoBuyBtn();loadAutoBuyStatus();}catch(e){}};
   if(document.readyState==='loading') document.addEventListener('DOMContentLoaded',initUI);
   else queueMicrotask(initUI);
 }
@@ -4605,6 +4606,7 @@ function initModelUI(){
     _modelSeeded=true;
     const el=document.getElementById('fModel');
     if(el) el.value=savedModelChoice()||'ENS';
+    initScoreFloorUI(true);   // the floor box follows the model just restored
     const epoch=_modelChoiceEpoch;
     readHelperResponse('/api/btst/model',{timeout:6000}).then(d=>{
       if(epoch!==_modelChoiceEpoch)return;
