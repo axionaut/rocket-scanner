@@ -1,5 +1,5 @@
 const BUILD_TS='2026-10-23 IST'; // release build date (IST)
-const APP_VERSION=1544;
+const APP_VERSION=1545;
 const RADAR_SCORE_VERSION='v1419-recross-batches'; // Eligible on crossing the score floor at any time; selected model's evolving target and movement-based profit protection.
 
 // ── v1358: AN UNCAUGHT ERROR MUST NAME ITSELF ─────────────────────────────────────────────────
@@ -4480,15 +4480,21 @@ function picksBlockedNote(bd){
 // ── BTST ENGINE PICKS (v1393) ──────────────────────────────────────────────────────────────────
 // The helper publishes live rankings throughout the session. A score-floor crossing can become GO
 // at any time; the late-session picks file is only another live snapshot, not the card's authority.
-let BTST={data:null,key:'',v:0,loadedAt:0,rank:null,rankKey:'',targetModel:null,targetKey:''};
+let BTST={data:null,key:'',v:0,loadedAt:0,rank:null,rankKey:'',targetModel:null,targetKey:'',rankError:null};
 async function loadBtstPicks(){
   // Read scores even when an independent helper status probe has timed out.
   if(loadBtstPicks.busy) return;
   loadBtstPicks.busy=true;
+  const previousRankError=BTST.rankError;
   try{
     const [j,rk,tm]=await Promise.all([
       readHelperResponse('/api/inputs/file?name=btst_picks.json',{timeout:6000}).catch(()=>null),
-      readHelperResponse('/api/inputs/file?name=btst_rank.json',{timeout:6000}).catch(()=>null),
+      readHelperResponse('/api/inputs/file?name=btst_rank.json',{timeout:6000}).then(r=>{BTST.rankError=null;return r;}).catch(e=>{
+        BTST.rankError='Score refresh failed; retrying';
+        console.warn('Score refresh failed; retaining last valid snapshot',e);
+        try{renderStats();}catch(_){}
+        return null;
+      }),
       readHelperResponse('/api/inputs/file?name=btst_target_model.json',{timeout:6000}).catch(()=>null)]);
     // A busy helper can miss one poll. Keep only today's last valid files so a transient
     // timeout cannot turn every visible model score into N/A.
@@ -4500,8 +4506,8 @@ async function loadBtstPicks(){
     const targetKey=[target?.version,target?.asOf,target?.asOfSession,target?.trainedThrough,target?.cases?.length].join('|');
     BTST.loadedAt=Date.now();
     if(rankKey!==BTST.rankKey||SCORE_HIGHS?.day!==today) loadScoreHighs(today);
-    if(key===BTST.key&&rankKey===BTST.rankKey&&targetKey===BTST.targetKey) return;
-    BTST={data:picks,key,v:BTST.v+1,loadedAt:Date.now(),rank,rankKey,targetModel:target,targetKey};
+    if(key===BTST.key&&rankKey===BTST.rankKey&&targetKey===BTST.targetKey){if(previousRankError!==BTST.rankError){try{renderStats();}catch(_){}}return;}
+    BTST={data:picks,key,v:BTST.v+1,loadedAt:Date.now(),rank,rankKey,targetModel:target,targetKey,rankError:BTST.rankError};
     // Live crossing alerts below own buy notifications; file stages are not buy signals.
     _btstRankMemo=null;
     for(const row of ALL){ROW_ACTION_MEMO.delete(row);setRadarEvidenceScore(row);}
@@ -11514,7 +11520,7 @@ function dashboardMarketCards(){
   if(m.nse){
     const bull=ALL.filter(s=>(s.priceChange||0)>0).length;
     add(0,'NSE',ALL.length?(100*bull/ALL.length).toFixed(0)+'% advancing':'Unavailable',`${bull} up / ${ALL.length-bull} not up · ${isEquitySession(Date.now())?'session open':'closed'}`);
-    add(1,'NSE',br?escHtml(br.at):'Awaiting scores',`${br?br.n:0} scored · floor ${btstMinScore()} · ${isEquitySession(Date.now())?'current session':'last session'}`);
+    add(1,'NSE',br?escHtml(br.at):'Awaiting scores',BTST.rankError?`<span style="color:var(--amber)">${escHtml(BTST.rankError)}</span>`:`${br?br.n:0} scored · floor ${btstMinScore()} · ${isEquitySession(Date.now())?'current session':'last session'}`);
     const go=ALL.filter(isStockEligible).length;
     add(2,'NSE',`${go} GO`,'Kite execution checks apply');
     add(3,'NSE',signed(target?.pct??3),'Fixed start | ratcheting OCO');
