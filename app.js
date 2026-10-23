@@ -1,5 +1,5 @@
 const BUILD_TS='2026-10-23 IST'; // release build date (IST)
-const APP_VERSION=1549;
+const APP_VERSION=1550;
 const RADAR_SCORE_VERSION='v1419-recross-batches'; // Eligible on crossing the score floor at any time; selected model's evolving target and movement-based profit protection.
 
 // ── v1358: AN UNCAUGHT ERROR MUST NAME ITSELF ─────────────────────────────────────────────────
@@ -11250,7 +11250,7 @@ function renderHead(){
         </div>
       </th>`;
     }
-    const arr=c.key===SCOL?(SDIR===-1?'▼':'▲'):'';
+    const arr=c.key===SCOL?(c.key==='score'?(SDIR===-1?'▲':'▼'):(SDIR===-1?'▼':'▲')):'';
     // v1409: the score column is centre-aligned, so its header must match or the label floats
     // left of the numbers it titles.
     const align=c.key==='score'?' style="text-align:center"':'';
@@ -11569,14 +11569,7 @@ function usRows(){
 function dashboardRows(){
   const m=marketsShown(),nse=m.nse?FILT:[],us=m.us?usRows():[];
   if(SCOL!=='score') return nse.concat(us);
-  return nse.concat(us).sort((a,b)=>{
-    const ap=!a._us&&isPinned(a.symbol),bp=!b._us&&isPinned(b.symbol);
-    if(ap!==bp)return ap?-1:1;
-    const sc=r=>{const v=r._us?r.score:btstScoreOf(r.symbol);return Number.isFinite(v)?v:null;},av=sc(a),bv=sc(b);
-    if(av===null)return bv===null?0:1;
-    if(bv===null)return -1;
-    return (SDIR===-1?-1:1)*(av-bv);
-  });
+  return nse.concat(us).sort(compareModelScoreRows);
 }
 function usMarketStatus(){
   const d=US_FEED.data;
@@ -11847,12 +11840,7 @@ function sortValueOf(row,key){
     // Sort the displayed model score only. Missing scores stay last, including below negative scores.
     const ms=typeof btstScoreOf==='function'?btstScoreOf(row.symbol):null;
     if(!Number.isFinite(ms)) return null;
-    // 23 Oct 2026 (owner): order follows the threshold rule, not the raw score. Crossed in this run first (equal), then
-    // already above the floor (most recent crossing first, score ignored), then below the floor by score (nearest first).
-    const r=btstRanking(),fl=btstMinScore();
-    if(!r||!Number.isFinite(fl)||ms<fl) return ms;
-    if(r.crossingsKnown&&r.crossed.has(normSym(row.symbol))) return 3e13;
-    return 2e13+(Number(crossingStore().at?.[normSym(row.symbol)]?.t)||0);
+    return ms;
   }
   // Derived columns render a formatted STRING ("1.90%", "GO"), so the underlying number has to be
   // recomputed here - sorting row.highDistance would compare `undefined` on every row.
@@ -11873,9 +11861,32 @@ function sortValueOf(row,key){
   const n=num(v);
   return n!==null?n:String(v);
 }
+// Display order only: equal sizing/funding stays independent of score. Default
+// qualified order is floor-nearest first (1.20,1.21,...), with fresh crossings
+// first. Keep this comparator shared with the final mixed-market display copy.
+function compareModelScoreRows(a,b){
+  const ap=!a._us&&isPinned(a.symbol),bp=!b._us&&isPinned(b.symbol);
+  if(ap!==bp)return ap?-1:1;
+  const info=row=>{
+    const score=row._us?row.score:btstScoreOf(row.symbol),floor=row._us?Number(row.fl):btstMinScore();
+    if(!Number.isFinite(score))return {score:null,group:3};
+    if(!Number.isFinite(floor)||score<floor-1e-9)return {score,group:2};
+    const ranking=row._us?null:btstRanking();
+    return {score,group:ranking?.crossingsKnown&&ranking.crossed.has(normSym(row.symbol))?0:1};
+  };
+  const av=info(a),bv=info(b);
+  if(av.group!==bv.group)return av.group-bv.group;
+  if(av.score!==null&&bv.score!==null){
+    const direction=SDIR===-1?1:-1;
+    const diff=(av.score-bv.score)*(av.group===2?-direction:direction);
+    if(diff)return diff;
+  }
+  return String(a.symbol).localeCompare(String(b.symbol));
+}
 function applySort(){
   if(!SCOL){SCOL='score';SDIR=-1;}
   FILT.sort((a,b)=>{
+    if(SCOL==='score')return compareModelScoreRows(a,b);
     const ap=isPinned(a.symbol),bp=isPinned(b.symbol);
     if(ap!==bp) return ap?-1:1;   // pinned rows first, then the chosen sort within each group
     const av=sortValueOf(a,SCOL),bv=sortValueOf(b,SCOL);
@@ -13107,9 +13118,7 @@ function* patchUniverseDeltasGen(deltaRows,deferPaint=false){
   if(scoreMoved && FILT.length > 1){
     if(SCOL === 'score'){
       for(let i = 0; i < FILT.length - 1; i++){
-        const sa = sortValueOf(FILT[i],'score') ?? -Infinity;
-        const sb = sortValueOf(FILT[i+1],'score') ?? -Infinity;
-        if(SDIR === -1 ? sa < sb : sa > sb){
+        if(compareModelScoreRows(FILT[i],FILT[i+1])>0){
           orderChanged = true;
           break;
         }
