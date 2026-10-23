@@ -172,11 +172,17 @@ let FIN_LUMP=0;
 const cell='padding:6px 8px;border-bottom:1px solid var(--border)';
 const inBox='background:var(--bg-card);border:1px solid var(--border);border-radius:6px;color:var(--t1);padding:4px 6px;font-size:13px;font-family:inherit';
 function inp(list,id,field,val,{num=false,w=90,type}={}){
-  return `<input ${num?'data-num="1"':''} type="${type||(num?'number':'text')}" value="${esc(val??'')}" style="${inBox};width:${w}px${num?";text-align:right;font-family:'DM Mono',monospace":''}" onchange="finEdit('${list}','${id}','${field}',this)">`;
+  return `<input ${num?'data-num="1"':''} type="${type||(num?'number':'text')}" value="${esc(val??'')}" style="${inBox};width:${typeof w==='number'?w+'px':w}${num?";text-align:right;font-family:'DM Mono',monospace":''}" onchange="finEdit('${list}','${id}','${field}',this)">`;
 }
 function sel(list,id,field,val,opts){return `<select style="${inBox}" onchange="finEdit('${list}','${id}','${field}',this)">${opts.map(o=>`<option value="${o[0]}"${o[0]===val?' selected':''}>${o[1]}</option>`).join('')}</select>`;}
 function card(label,value,sub,color){return `<div class="st"><div class="st-l">${label}</div><div class="st-v" style="font-size:20px;color:${color||'var(--t1)'}">${value}</div><div class="st-d">${sub||''}</div></div>`;}
-function section(title,body,right=''){return `<div style="margin:18px 0 8px;display:flex;align-items:baseline;justify-content:space-between;gap:12px"><h3 style="margin:0;font-size:16px;color:var(--t1)">${title}</h3><div style="font-size:12px;color:var(--t2)">${right}</div></div>${body}`;}
+function section(title,body,right=''){return `<div style="margin:4px 0 10px;display:flex;align-items:baseline;justify-content:space-between;gap:12px"><h3 style="margin:0;font-size:16px;color:var(--t1)">${title}</h3><div style="font-size:12px;color:var(--t2)">${right}</div></div>${body}`;}
+// Layout (23 Oct, owner): panels side by side where there is room, one per row on a phone; long lists flow in columns.
+const pane=html=>html?`<div style="min-width:0;border:1px solid var(--border);border-radius:12px;background:rgba(127,127,127,.04);padding:12px 14px">${html}</div>`:'';
+const cols=(...p)=>`<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(min(460px,100%),1fr));gap:14px;margin-top:14px;align-items:start">${p.filter(Boolean).map(pane).join('')}</div>`;
+const listGrid=items=>`<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(min(270px,100%),1fr));gap:6px 18px">${items.join('')}</div>`;
+const listItem=(name,amount,del)=>`<div style="display:flex;gap:6px;align-items:center;padding:3px 0;border-bottom:1px solid var(--border)"><div style="flex:1;min-width:0">${name}</div>${amount}${del}</div>`;
+const totalsLine=parts=>`<div style="display:flex;gap:22px;flex-wrap:wrap;margin-top:10px;font-size:14px">${parts.join('')}</div>`;
 // align: one letter per column (l/r/c) applied to the header AND every body cell of that column, so a
 // header, its inputs and its totals line up; fit=true sizes the table to its content instead of full width.
 let TBL_N=0;
@@ -249,9 +255,10 @@ function renderFinance(){
   h+=`<div style="font-size:12px;color:var(--t2);margin-top:4px">The target is a yardstick for this screen only. It never changes the score floor, trade count or sizing on the Rankings tab.</div>`;
 
   // Goal (v1474): the corpus goal lives here; its monthly withdrawal is the gross trading target above.
+  let goalH='';
   if(typeof buildGoalPopoverContent==='function'){
     let goal='';try{goal=buildGoalPopoverContent();}catch(e){goal='<div style="color:var(--t2)">Goal unavailable: '+esc(e.message)+'</div>';}
-    h+=`<div id="finGoal" style="scroll-margin-top:80px">`+section('Goal',`<div id="goalPopoverContent" style="max-width:560px;font-size:13px;line-height:1.6;color:var(--t2)">${goal}</div>`,
+    goalH=`<div id="finGoal" style="scroll-margin-top:80px">`+section('',`<div id="goalPopoverContent" style="font-size:13px;line-height:1.6;color:var(--t2)">${goal}</div>`,
       `withdrawal = gross trading target ${inr(gross)}/month`)+`</div>`;
   }
 
@@ -259,12 +266,13 @@ function renderFinance(){
   const modes=[['business','Business income (slab, new regime)'],['stcg','Short-term capital gains (20%)'],['flat','Flat %']];
   const taxRows=modes.map(([m,lab])=>{const g=grossFor(m,netNeed,flat);
     return `<tr style="${m===mode?'background:rgba(251,191,36,.08)':''}"><td style="${cell}"><label style="cursor:pointer"><input type="radio" name="finTax" ${m===mode?'checked':''} onchange="finEdit('root','','settings.taxMode',{type:'text',value:'${m}',dataset:{}})"> ${lab}${m==='flat'?' '+inp('root','','settings.flatTaxPct',flat,{num:true,w:60}):''}</label></td><td style="${cell};text-align:right">${inr(g)}</td><td style="${cell};text-align:right">${inr(g-netNeed)}</td><td style="${cell};text-align:right">${inr(g/days)}</td></tr>`;});
-  h+=section('Income target and tax',tbl(['How trading income is taxed','Gross / month','Tax / month','Per trading day'],taxRows,'','lrrr')+
+  const taxH=section('Income target and tax',tbl(['How trading income is taxed','Gross / month','Tax / month','Per trading day'],taxRows,'','lrrr')+
     `<div style="font-size:12px;color:var(--t2);margin-top:6px;line-height:1.6">New regime FY 2026-27: 0-4L nil, 4-8L 5%, 8-12L 10%, 12-16L 15%, 16-20L 20%, 20-24L 25%, above 30%; 87A rebate up to ₹60,000 when income ≤ ₹12L (with marginal relief); 4% cess; surcharge above ₹50L. Intraday profit is speculative business income; frequent delivery trading can be declared business income (CBDT circular 6/2016) or taxed as STCG at 20% after the ₹4L basic exemption (no 87A rebate on STCG). The need is every living expense and EMI; other household income goes to the reserve unless set to "covers expenses" below. Trading days/month: ${inp('root','','settings.tradingDaysPerMonth',days,{num:true,w:60})}</div>`,
     `${inr(netNeed)} net a month`);
+  h+=cols(goalH,taxH);
 
   // incomes
-  h+=section('Other household income',tbl(['Source','Amount / month','Goes to',''],
+  const incH=section('Other household income',tbl(['Source','Amount / month','Goes to',''],
     FIN.incomes.map(i=>`<tr><td style="${cell}">${inp('incomes',i.id,'name',i.name,{w:240})}</td><td style="${cell}">${inp('incomes',i.id,'amount',i.amount,{num:true,w:110})}</td><td style="${cell}">${sel('incomes',i.id,'role',covers(i)?'covers':'reserve',[['reserve','reserve'],['covers','covers expenses']])}</td><td style="${cell}">${delBtn('incomes',i.id)}</td></tr>`),
     `<tr><td style="${cell};font-weight:700">To reserve</td><td style="${cell};font-weight:700;text-align:right">${inr(reserveIn)}</td><td style="${cell};color:var(--t2)">${counted?inr(counted)+' covers expenses':''}</td><td></td></tr>`,'lrlc',true)+addBtn('incomes','income')+
     `<div style="margin-top:8px;font-size:14px">Reserve balance now ${inp('root','','settings.reserveBalance',S.reserveBalance||0,{num:true,w:120})}</div>`,
@@ -280,10 +288,11 @@ function renderFinance(){
     const p=!!paidMap[o.id],d=o.dueDay?n(o.dueDay)-today:null;
     const st=p?'<span style="color:var(--green)">paid</span>':d==null?'<span style="color:var(--t3)">set due day</span>':d<0?'<span style="color:var(--red);font-weight:700">overdue</span>':d===0?'<span style="color:var(--amber);font-weight:700">due today</span>':`<span style="color:var(--t2)">in ${d} d</span>`;
     return `<tr style="${p?'opacity:.6':''}"><td style="${cell}"><input type="checkbox" ${p?'checked':''} onchange="finTogglePaid('${o.id}',this)"></td><td style="${cell}">${inp('obligations',o.id,'name',o.name,{w:160})}</td><td style="${cell}">${inp('obligations',o.id,'amount',o.amount,{num:true,w:100})}</td><td style="${cell}">${inp('obligations',o.id,'dueDay',o.dueDay,{num:true,w:60})}</td><td style="${cell}">${st}</td><td style="${cell}">${sel('obligations',o.id,'group',o.group||'household',[['household','household'],['loan','loan / EMI'],['salary','salary'],['fees','fees'],['other','other']])}</td><td style="${cell}">${delBtn('obligations',o.id)}</td></tr>`;});
-  h+=section(`Paid from your account by the 5th · ${now.toLocaleString('en-IN',{month:'long'})}`,tbl(['Paid','Item','Amount','Due day','Status','Type',''],obRows,
+  const obH=section(`Paid from your account by the 5th · ${now.toLocaleString('en-IN',{month:'long'})}`,tbl(['Paid','Item','Amount','Due day','Status','Type',''],obRows,
     `<tr><td></td><td style="${cell};font-weight:700">Total</td><td style="${cell};font-weight:700;text-align:right">${inr(obAll)}</td><td colspan="4" style="${cell};color:var(--t2)">paid ${inr(obPaid)} · <b style="color:${obLeft>0?'var(--red)':'var(--green)'}">left ${inr(obLeft)}</b></td></tr>`,'clrcllc',true)+
     `<div style="display:flex;gap:18px;flex-wrap:wrap;align-items:center;margin-top:8px;font-size:14px"><span>Cash in savings ${inp('root','','cashInHand',FIN.cashInHand,{num:true,w:110})}</span><span>${withdraw>0?`<b style="color:var(--amber)">Withdraw ${inr(withdraw)} from trading</b>`:`<b style="color:var(--green)">Covered</b> - ${inr(-withdraw)} spare`} <span style="color:var(--t2);font-size:12px">= ${inr(obLeft)} fixed still to pay + ${inr(restOfMonth)} rest of the month's living & EMIs − ${inr(cash)} in savings</span></span></div>`+addBtn('obligations','obligation'),
     `ticks reset each month · reminders ${inp('root','','settings.reminderDays',S.reminderDays??3,{num:true,w:50})} days ahead`);
+  h+=cols(obH,incH);
 
   // loans
   const ranked=activeLoans.slice().sort((a,b)=>priorityRate(b)-priorityRate(a));
@@ -304,15 +313,15 @@ function renderFinance(){
       <td style="${cell};text-align:right">${Number.isFinite(intLeft)?inr(intLeft):'—'}</td>
       <td style="${cell};text-align:right;white-space:nowrap">${Number.isFinite(bp)?monthName(now,bp):'—'}${Number.isFinite(pp)&&pp<bp?`<div style="color:var(--green);font-size:12px">→ ${monthName(now,pp)}</div>`:''}</td><td style="${cell}">${delBtn('loans',l.id)}</td></tr>`;});
   const P=n(activeLoans.reduce((s,l)=>s+n(l.principal),0));
-  h+=section('Loans',tbl(['Order','Loan','Paid by today','Type','Rate %','EMI','Outstanding','Due day','Prepay charge %','Months left','Interest left','Paid off',''],loanRows,
+  h+=cols(section('Loans',tbl(['Order','Loan','Paid by today','Type','Rate %','EMI','Outstanding','Due day','Prepay charge %','Months left','Interest left','Paid off',''],loanRows,
     `<tr><td></td><td style="${cell};font-weight:700">Total</td><td colspan="3"></td><td style="${cell};font-weight:700;text-align:right">${inr(emis)}</td><td style="${cell};font-weight:700;text-align:right">${inr(P)}</td><td colspan="4" style="${cell};text-align:right;font-weight:700">${inr(base.interest)} interest still to pay</td><td></td><td></td></tr>`,'cllrrrrcrrrrc')+addBtn('loans','loan')+
     `<div style="font-size:12px;color:var(--t2);margin-top:6px;line-height:1.6">Order = where an extra rupee saves the most: highest annual rate first, less any prepayment charge spread over the loan's remaining life. Floating-rate home loans to individuals cannot charge for prepayment (RBI); fixed-rate personal loans often do - "?" marks a charge not set yet. All loans are treated as ${esc(owner())}'s to repay; "Paid by today" only records who pays now.</div>`,
-    `${activeLoans.length} active · debt-free ${Number.isFinite(base.months)?monthName(now,base.months):'never at current EMIs'}`);
+    `${activeLoans.length} active · debt-free ${Number.isFinite(base.months)?monthName(now,base.months):'never at current EMIs'}`));
 
   // prepayment planner
   const saved=base.interest-plan.interest-plan.charges, mSaved=(Number.isFinite(base.months)&&Number.isFinite(plan.months))?base.months-plan.months:null;
   const next=ranked[0];
-  h+=section('Prepayment plan',
+  h+=cols(section('Prepayment plan',
     `<div style="display:flex;gap:18px;flex-wrap:wrap;align-items:center;font-size:14px;margin-bottom:8px">
       <span>Extra every month ${inp('root','','settings.extraPrepayPerMonth',S.extraPrepayPerMonth||0,{num:true,w:100})}</span>
       <span>One-off lump sum now <input type="number" value="${FIN_LUMP||''}" placeholder="0" style="${inBox};width:110px;text-align:right" onchange="finLumpSum(this)"></span>
@@ -320,19 +329,20 @@ function renderFinance(){
     `<div class="stats">${card('Next prepayment goes to',next?esc(next.name):'—',next?`${next.rate}% ${next.rateType}${next.prepayChargePct==null?' · charge unknown':n(next.prepayChargePct)?' · charge '+next.prepayChargePct+'%':''}`:'')}
       ${card('Debt-free',Number.isFinite(plan.months)?monthName(now,plan.months):'never',Number.isFinite(base.months)?`now ${monthName(now,base.months)}${mSaved>0?' · '+mSaved+' months sooner':''}`:'')}
       ${card('Interest saved',inr(Math.max(0,saved)),`vs EMIs only (${inr(base.interest)})${plan.charges>0?' · after '+inr(plan.charges)+' charges':''}`,'var(--green)')}</div>`+
-    `<div style="font-size:12px;color:var(--t2);margin-top:4px">A month that beats the gross target: put the surplus in the lump-sum box to see what it buys, then pay it to the loan named above.</div>`);
+    `<div style="font-size:12px;color:var(--t2);margin-top:4px">A month that beats the gross target: put the surplus in the lump-sum box to see what it buys, then pay it to the loan named above.</div>`));
 
   // expenses
-  h+=section('Living expenses',tbl(['Item','Amount / month',''],FIN.expenses.map(e=>`<tr><td style="${cell}">${inp('expenses',e.id,'name',e.name,{w:320})}</td><td style="${cell}">${inp('expenses',e.id,'amount',e.amount,{num:true,w:110})}</td><td style="${cell}">${delBtn('expenses',e.id)}</td></tr>`),
-    `<tr><td style="${cell};font-weight:700">Living total</td><td style="${cell};font-weight:700;text-align:right">${inr(living)}</td><td></td></tr><tr><td style="${cell}">+ loan EMIs</td><td style="${cell};text-align:right">${inr(emis)}</td><td></td></tr><tr><td style="${cell};font-weight:700">Total expenses</td><td style="${cell};font-weight:700;text-align:right">${inr(totalExp)}</td><td></td></tr>`,'lrc',true)+addBtn('expenses','expense'));
+  h+=cols(section('Living expenses',listGrid(FIN.expenses.map(e=>listItem(inp('expenses',e.id,'name',e.name,{w:'100%'}),inp('expenses',e.id,'amount',e.amount,{num:true,w:100}),delBtn('expenses',e.id))))+
+    totalsLine([`<span>Living <b>${inr(living)}</b></span>`,`<span>+ loan EMIs <b>${inr(emis)}</b></span>`,`<span>Total expenses <b style="color:var(--amber)">${inr(totalExp)}</b></span>`])+addBtn('expenses','expense'),
+    `${FIN.expenses.length} items · ${inr(living)}/month`));
 
   // Partner's salary breakdown
   const mz=FIN.salary, mNet=n(mz.gross)-n(mz.deductions), mAlloc=(mz.allocations||[]).reduce((s,a)=>s+n(a.amount),0);
   (mz.allocations||[]).forEach(a=>{if(!a.id)a.id=uid('mz');});
-  h+=section(esc(mz.label||'Partner salary'),`<div style="display:flex;gap:18px;flex-wrap:wrap;font-size:14px;margin-bottom:6px"><span>Gross ${inp('root','','salary.gross',mz.gross,{num:true,w:100})}</span><span>Deductions ${inp('root','','salary.deductions',mz.deductions,{num:true,w:100})}</span><span>Net <b>${inr(mNet)}</b></span></div>`+
-    tbl(['Paid from her net','Amount',''],(mz.allocations||[]).map(a=>`<tr><td style="${cell}">${inp('salary',a.id,'name',a.name,{w:200})}</td><td style="${cell}">${inp('salary',a.id,'amount',a.amount,{num:true,w:100})}</td><td style="${cell}">${delBtn('salary',a.id)}</td></tr>`),
-      `<tr><td style="${cell};font-weight:700">Allocated</td><td style="${cell};font-weight:700;text-align:right">${inr(mAlloc)}</td><td style="${cell};color:${mNet-mAlloc<0?'var(--red)':'var(--t2)'}">${mNet-mAlloc===0?'fully allocated':(mNet-mAlloc>0?inr(mNet-mAlloc)+' free':inr(mAlloc-mNet)+' over')}</td></tr>`,'lrl',true)+addBtn('salary','item'),
-    'how her salary is spent today - informational; the plan does not depend on it');
+  h+=cols(section(esc(mz.label||'Partner salary'),`<div style="display:flex;gap:18px;flex-wrap:wrap;font-size:14px;margin-bottom:10px;align-items:center"><span>Gross ${inp('root','','salary.gross',mz.gross,{num:true,w:100})}</span><span>Deductions ${inp('root','','salary.deductions',mz.deductions,{num:true,w:100})}</span><span>Net <b>${inr(mNet)}</b></span></div>`+
+    listGrid((mz.allocations||[]).map(a=>listItem(inp('salary',a.id,'name',a.name,{w:'100%'}),inp('salary',a.id,'amount',a.amount,{num:true,w:100}),delBtn('salary',a.id))))+
+    totalsLine([`<span>Allocated <b>${inr(mAlloc)}</b></span>`,`<span style="color:${mNet-mAlloc<0?'var(--red)':'var(--t2)'}">${mNet-mAlloc===0?'fully allocated':(mNet-mAlloc>0?inr(mNet-mAlloc)+' free':inr(mAlloc-mNet)+' over')}</span>`])+addBtn('salary','item'),
+    'how her salary is spent today - informational; the plan does not depend on it'));
   h+=`</div>`;
   const ae=document.activeElement, focusKey=ae&&ae.closest&&ae.closest('#finContent')?[...root.querySelectorAll('input,select')].indexOf(ae):-1;
   root.innerHTML=h;
