@@ -1,5 +1,5 @@
 const BUILD_TS='2026-10-23 IST'; // release build date (IST)
-const APP_VERSION=1551;
+const APP_VERSION=1552;
 const RADAR_SCORE_VERSION='v1419-recross-batches'; // Eligible on crossing the score floor at any time; selected model's evolving target and movement-based profit protection.
 
 // ── v1358: AN UNCAUGHT ERROR MUST NAME ITSELF ─────────────────────────────────────────────────
@@ -8218,7 +8218,7 @@ function renderStats(){
   }
 
   const mv=marketsShown(),up=usPlan();
-  const usAllocCard = `<div class="st" title="Sized from the US Capital $ you typed (IBKR cash is not readable). Suggest-only: place the orders in IBKR yourself.">
+  const usAllocCard = `<div class="st" title="Sized from the US Capital $ you entered or imported from the read-only broker panel. Suggest-only: place the orders in IBKR yourself.">
     <div class="st-l">US · Suggested sizing</div>
     <div class="st-v" style="font-size:18px;color:#818cf8">${up.funded} <span style="font-size:12px;color:var(--t2)">sized ($${up.spent.toFixed(2)})</span></div>
     <div class="st-d">${up.capital>0?'of $'+up.capital.toFixed(2)+' typed capital · manual IBKR':'Enter US Capital $ to size US GO rows'}</div></div>`;
@@ -11513,7 +11513,40 @@ function usAccountCard(){
   const sg=v=>(v>=0?'+':'-')+'$'+Math.abs(v).toFixed(2);
   return '<div class="st" title="From the IBKR fills you recorded under IBKR · US Positions."><div class="st-l">US · IBKR P&amp;L</div><div class="st-v" style="font-size:18px;color:'+(un+realized>=0?'var(--green)':'var(--red)')+'">'+(l.open.length||l.closed.length?(priced?sg(un+realized):'Partly unpriced'):'No fills recorded')+'</div><div class="st-d">'+l.open.length+' open · unrealized '+(priced?sg(un):'partly unpriced')+' · realized '+sg(realized)+' · recorded same-day exits '+dt.used+'/'+US_DAY_TRADE_LIMIT+'</div></div>';
 }
-function buildUsPositionsPanel(){
+const IBKR_FEED={data:null,error:null};
+function ibkrFresh(){const d=IBKR_FEED.data,age=Date.now()-Number(d?.asOf);return !!(d?.connected&&!IBKR_FEED.error&&d.complete?.account&&age>=0&&age<30000);}
+function ibkrCash(){
+  const v=IBKR_FEED.data?.summary?.USD;if(!ibkrFresh()||!v)return null;
+  const amounts=[v.AvailableFunds,v.SettledCash,v.TotalCashValue];
+  return amounts.every(x=>typeof x==='number'&&Number.isFinite(x))?Math.max(0,Math.min(...amounts)):null;
+}
+function useIbkrCash(){const cash=ibkrCash(),el=document.getElementById('fUsCapital');if(cash===null||!el)return;el.value=cash.toFixed(2);onUsCapitalChange();renderRankingsPanels();}
+async function loadIbkrAccount(){
+  try{const d=await readHelperResponse('/api/ibkr/account',{timeout:4000});if(!d?.ok)throw Error(d?.why||'Broker snapshot unavailable');IBKR_FEED.data=d;IBKR_FEED.error=null;}
+  catch(e){IBKR_FEED.error=e.message;}
+}
+function buildIbkrBrokerPanel(){
+  if(!marketsShown().us)return '';
+  const d=IBKR_FEED.data,live=ibkrFresh()&&!IBKR_FEED.error,usd=d?.summary?.USD||{};
+  const money=x=>typeof x==='number'&&Number.isFinite(x)?'$'+x.toFixed(2):'Unavailable';
+  const positions=d?.positions||[],orders=d?.orders||[],fills=d?.executions||[];
+  const age=d?.asOf?Math.max(0,Math.floor((Date.now()-d.asOf)/1000)):null;
+  const header=live?'TWS connected - read-only':'TWS disconnected / stale';
+  const td=v=>'<td style="padding:7px 10px;text-align:right">'+v+'</td>';
+  const rows=positions.map(p=>'<tr><td style="padding:7px 10px;font-weight:700">'+escHtml(p.symbol)+' <small>'+escHtml(p.secType+' / '+p.currency)+'</small></td>'+td(escHtml(String(p.quantity)))+td(money(p.averageCost))+td(money(p.marketPrice))+td(money(p.marketValue))+td(money(p.unrealizedPnl))+'</tr>').join('');
+  const orderRows=orders.map(o=>'<tr><td>'+escHtml(o.symbol)+'</td><td>'+escHtml(o.action)+'</td><td>'+escHtml(String(o.quantity))+'</td><td>'+escHtml(o.orderType)+'</td><td>'+money(o.limitPrice)+'</td><td>'+escHtml(o.status)+'</td></tr>').join('');
+  const fillRows=fills.map(f=>'<tr><td>'+escHtml(f.symbol)+'</td><td>'+escHtml(f.side)+'</td><td>'+escHtml(String(f.quantity))+'</td><td>'+money(f.price)+'</td><td>'+escHtml(f.time)+'</td><td>'+money(f.commission)+'</td></tr>').join('');
+  return `<section style="margin-top:12px;padding:14px;border:1px solid #818cf8;border-radius:10px;background:var(--bg-card)">
+    <div style="display:flex;gap:12px;justify-content:space-between;flex-wrap:wrap"><b>IBKR - Broker account</b><span style="color:${live?'var(--green)':'var(--amber)'}">${header}</span></div>
+    <div style="margin:9px 0;display:flex;gap:18px;flex-wrap:wrap"><span>Net liquidation <b>${money(usd.NetLiquidation)}</b></span><span>Cash <b>${money(usd.TotalCashValue)}</b></span><span>Settled <b>${money(usd.SettledCash)}</b></span><span>Available funds <b>${money(usd.AvailableFunds)}</b></span><span>Buying power <b>${money(usd.BuyingPower)}</b></span></div>
+    <div style="font-size:11px;color:var(--t2)">${age===null?'No broker snapshot yet':'Bridge sync '+age+'s ago / '+escHtml(new Date(d.asOf).toLocaleTimeString())}. Portfolio marks from TWS; live quote entitlement is unverified.${IBKR_FEED.error?' '+escHtml(IBKR_FEED.error):''}${!live&&d?' ? Last known values; not current.':''}</div>
+    <div style="overflow:auto;margin-top:10px"><table style="width:100%;font-size:12px"><thead><tr><th>Position</th><th>Quantity</th><th>Avg cost / unit</th><th>TWS mark</th><th>Market value</th><th>Unrealized</th></tr></thead><tbody>${rows||'<tr><td colspan="6">'+(d?.complete?.positions?'No broker positions':'Position download pending')+'</td></tr>'}</tbody></table></div>
+    <div style="margin-top:10px"><button class="btn" onclick="useIbkrCash()" ${live&&ibkrCash()!==null?'':'disabled'}>Use ${money(ibkrCash())} cash for US sizing</button> <small>Updates the suggested capital only when clicked.</small></div>
+    <details style="margin-top:10px"><summary>Open orders (${orders.length}) / session executions (${fills.length})</summary><div style="overflow:auto"><table style="width:100%;font-size:12px"><tbody>${orderRows||'<tr><td>'+(d?.complete?.orders?'No open orders reported':'Order download pending')+'</td></tr>'}</tbody></table><p style="font-size:11px">Executions available in this TWS session; this is not a complete historical performance record.</p><table style="width:100%;font-size:12px"><tbody>${fillRows||'<tr><td>No session executions reported</td></tr>'}</tbody></table></div></details>
+  </section>`;
+}
+function buildUsPositionsPanel(){const manual=buildUsManualPositionsPanel();return buildIbkrBrokerPanel()+(manual?'<details style="margin-top:10px"><summary>Manually recorded US ledger (separate)</summary>'+manual+'</details>':'');}
+function buildUsManualPositionsPanel(){
   const l=usLedger(),dt=usDayTradeStatus(l),f=v=>Number.isFinite(v)?'$'+v.toFixed(2):'—';
   const sg=v=>Number.isFinite(v)?(v>=0?'+':'-')+'$'+Math.abs(v).toFixed(2):'—',cl=v=>v>0?'var(--green)':v<0?'var(--red)':'var(--t3)';
   if(!l.open.length&&!l.closed.length&&!marketsShown().us)return '';
@@ -11638,7 +11671,9 @@ function usRowHtml(r){
   return `<tr data-us="${escHtml(r.symbol)}" style="background:rgba(129,140,248,.09);box-shadow:inset 4px 0 0 #818cf8${r.live?'':';opacity:.75'}" title="US stock - suggest only, trade it in IBKR">${cells}</tr>`;
 }
 async function loadUsFeed(){
-  await syncUsLedger();
+  await Promise.allSettled([syncUsLedger(),loadIbkrAccount()]);
+  const brokerPanel=document.getElementById('rankUsPositions');
+  if(brokerPanel&&!brokerPanel.contains(document.activeElement))brokerPanel.innerHTML=buildUsPositionsPanel();
   try{
     const d=await readHelperResponse('/api/inputs/file?name='+encodeURIComponent('intl_US.json'),{timeout:6000});
     US_FEED.data=d;US_FEED.at=Date.now();US_FEED.err=null;
