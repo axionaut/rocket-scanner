@@ -1,5 +1,5 @@
 const BUILD_TS='2026-10-23 IST'; // release build date (IST)
-const APP_VERSION=1550;
+const APP_VERSION=1551;
 const RADAR_SCORE_VERSION='v1419-recross-batches'; // Eligible on crossing the score floor at any time; selected model's evolving target and movement-based profit protection.
 
 // ── v1358: AN UNCAUGHT ERROR MUST NAME ITSELF ─────────────────────────────────────────────────
@@ -11862,17 +11862,14 @@ function sortValueOf(row,key){
   return n!==null?n:String(v);
 }
 // Display order only: equal sizing/funding stays independent of score. Default
-// qualified order is floor-nearest first (1.20,1.21,...), with fresh crossings
-// first. Keep this comparator shared with the final mixed-market display copy.
+// qualified order is one floor-nearest list (1.20,1.21,...). Fresh crossings
+// and pins are labels, never score-sort partitions. Share the final display path.
 function compareModelScoreRows(a,b){
-  const ap=!a._us&&isPinned(a.symbol),bp=!b._us&&isPinned(b.symbol);
-  if(ap!==bp)return ap?-1:1;
   const info=row=>{
     const score=row._us?row.score:btstScoreOf(row.symbol),floor=row._us?Number(row.fl):btstMinScore();
     if(!Number.isFinite(score))return {score:null,group:3};
     if(!Number.isFinite(floor)||score<floor-1e-9)return {score,group:2};
-    const ranking=row._us?null:btstRanking();
-    return {score,group:ranking?.crossingsKnown&&ranking.crossed.has(normSym(row.symbol))?0:1};
+    return {score,group:1};
   };
   const av=info(a),bv=info(b);
   if(av.group!==bv.group)return av.group-bv.group;
