@@ -1,5 +1,5 @@
-const BUILD_TS='2026-10-22 IST'; // release build date (IST)
-const APP_VERSION=1538;
+const BUILD_TS='2026-10-23 IST'; // release build date (IST)
+const APP_VERSION=1539;
 const RADAR_SCORE_VERSION='v1419-recross-batches'; // Eligible on crossing the score floor at any time; selected model's evolving target and movement-based profit protection.
 
 // ── v1358: AN UNCAUGHT ERROR MUST NAME ITSELF ─────────────────────────────────────────────────
@@ -118,7 +118,7 @@ function isCsvLikeFile(file){
 
 function updateModeUI(){
   const brand=document.querySelector('.brand-tag');
-  if(brand) brand.textContent=(document.getElementById('fModel')?.value==='PATH'?'PATH':'Ensemble')+' Engine';
+  if(brand){const v=document.getElementById('fModel')?.value;brand.textContent=(v==='PATH'||v==='STACK'?v:'Ensemble')+' Engine';}
   document.querySelectorAll('.currency-lbl').forEach(el=>{el.textContent='₹';});
 }
 let ALL=[],FILT=[],PG=1,PGSZ=100,SCOL='score',SDIR=-1;
@@ -1422,7 +1422,7 @@ const CAS_CONTINUOUS_END_MIN = 15*60+15;  // 15:15 - earliest close the Phase 1 
 // SEBI circular 15 Oct 2026, effective 2026-12-07: the closing auction moves to 15:30-15:40, so F&O stocks
 // trade continuously to 15:30 like every other stock. From that IST date the earliest continuous close is 15:30.
 const CAS_V2_DAY = '2026-12-07';
-const ENTRY_START_MIN = 9*60+45;   // 19 Oct: first minute new buys are allowed (helper ENTRY_START_MIN)
+const ENTRY_START_MIN = 9*60+16;   // 23 Oct (owner): 09:45 start removed; first decision after the opening minute (helper ENTRY_START_MIN)
 function istDateKeyNow(ts=Date.now()){ const c=istClock(ts); return c.year+'-'+String(c.month).padStart(2,'0')+'-'+String(c.day).padStart(2,'0'); }
 function casContinuousEndMin(ts=Date.now()){ return istDateKeyNow(ts)>=CAS_V2_DAY?SESSION_CLOSE_MIN:CAS_CONTINUOUS_END_MIN; }
 
@@ -4380,17 +4380,22 @@ let _scoreFloorEpoch=0;
 // the v1400 trap that left the alert toggle silently uninitialised inside its own try/catch.
 let _floorPushTimer=null,_floorPushed=null;
 // 21 Oct 2026 (owner): Peak removed; Ensemble is the only model.
-function floorModel(){return document.getElementById('fModel')?.value==='PATH'?'PATH':'ENS';}
-function scoreFloorStore(model=floorModel()){return model==='PATH'?'rs_path_score_floor':SCORE_FLOOR_STORE;}
+// 23 Oct 2026 (owner): fixed PATH replaces the old PATH and STACK is added. Both publish on the Ensemble's percentile
+// scale (1.6 = top 1.5%, 2.2 = rank #1), default floor 2.1 (~top 2-3 stocks, as validated). New storage keys so the
+// old PATH probability floor (0-1 scale) is never read as a percentile-scale floor.
+function isRankedModel(m){return m==='PATH'||m==='STACK';}   // a hoisted function: safe even for callers that run at load
+function floorModel(){const v=document.getElementById('fModel')?.value;return isRankedModel(v)?v:'ENS';}
+function scoreFloorStore(model=floorModel()){return model==='PATH'?'rs_path2_score_floor':model==='STACK'?'rs_stack_score_floor':SCORE_FLOOR_STORE;}
 function initScoreFloorUI(force=false){
   try{
     const el=document.getElementById('fScoreFloor'),model=floorModel();
     if(!el||(!force&&_scoreFloorSeeded===model)||document.activeElement===el)return;
     const key=scoreFloorStore(model),stored=localStorage.getItem(key),epoch=++_scoreFloorEpoch;
-    el.value=stored===null?(model==='PATH'?'0.40':''):stored;
-    el.min=model==='PATH'?'0':'1.2';el.placeholder=model==='PATH'?'0.40':'1.6';el.step=model==='PATH'?'0.01':'0.1';
-    const label=document.getElementById('scoreFloorLabel');if(label)label.textContent=model==='PATH'?'PATH Floor':'Ensemble Floor';
-    el.title=model==='PATH'?'PATH only: price-action path trajectory model. Default 0.40. Saved independently from Ensemble.':'Ensemble only: mapped ensemble score. Default 1.6; minimum 1.2. Saved independently from PATH.';
+    const ranked=isRankedModel(model);
+    el.value=stored===null?(ranked?'2.1':''):stored;
+    el.min='1.2';el.placeholder=ranked?'2.1':'1.6';el.step='0.1';
+    const label=document.getElementById('scoreFloorLabel');if(label)label.textContent=(model==='ENS'?'Ensemble':model)+' Floor';
+    el.title=ranked?model+' only: its own ranking on the Ensemble scale (1.6 = top 1.5%, 2.2 = its #1). Default 2.1 ~ top 2-3 stocks. Saved independently.':'Ensemble only: mapped ensemble score. Default 1.6; minimum 1.2. Saved independently from PATH and STACK.';
     _scoreFloorSeeded=model;_floorPushed=null;
     updateModeUI();
     readHelperResponse('/api/btst/min-score?model='+model,{timeout:6000}).then(d=>{
@@ -4527,8 +4532,8 @@ function btstToday(){
 // v1396: full ranking of the liquid universe. Today's picks file (15:05/15:15) wins; before it the helper's
 // intraday preview (btst_rank.json, every 10 minutes) orders the table. A preview never makes a stock GO.
 let _btstRankMemo=null;
-function pathSnapshotFresh(snapshot,now=Date.now()){
-  const p=snapshot?.pathPrediction;
+function pathSnapshotFresh(snapshot,now=Date.now(),key='pathPrediction'){
+  const p=snapshot?.[key];
   if(!p||p.source!=='completed-minute-live'||p.horizon!=='T1'||!p.datasetId||p.symbols<50)return false;
   const decision=Date.parse(p.asOf),feature=Date.parse(p.featureAsOf);
   return Number.isFinite(decision)&&Number.isFinite(feature)&&now>=decision&&now-decision<=180000&&decision>=feature&&decision-feature<=90000&&String(p.asOf).slice(0,10)===snapshot.session&&String(p.featureAsOf).slice(0,10)===snapshot.session;
@@ -4538,7 +4543,7 @@ function btstRanking(){
   const preview=BTST.rank&&BTST.rank.ok&&BTST.rank.mode==='live'&&BTST.rank.session===getSessionDate()&&Array.isArray(BTST.rank.ranking)?BTST.rank:null;
   const src=pk&&Array.isArray(pk.ranking)&&(!preview||String(pk.asOf)>String(preview.asOf))?pk:preview;
   if(!src) return null;
-  if(floorModel()==='PATH'&&(!Array.isArray(src.rankings?.PATH)||!pathSnapshotFresh(src)))return null;
+  {const fm=floorModel();if(isRankedModel(fm)&&(!Array.isArray(src.rankings?.[fm])||!pathSnapshotFresh(src,Date.now(),fm==='STACK'?'stackPrediction':'pathPrediction')))return null;}
   const requested=floorModel(),viewModel=Array.isArray(src.rankings?.[requested])?requested:(src.activeModel||'A');
   if(_btstRankMemo&&_btstRankMemo.src===src&&_btstRankMemo.model===viewModel) return _btstRankMemo;
   const ranking=src.rankings?.[viewModel]||src.ranking;
@@ -4574,7 +4579,7 @@ function btstScoreAOf(sym){
   if(r.scoresA.size){const v=r.scoresA.get(normSym(sym));return Number.isFinite(v)?v:null;}
   return r.model==='A'?btstScoreOf(sym):null;
 }
-const BTST_MODEL_NAMES={ENS:'Ensemble',PATH:'PATH',A:'Original'};
+const BTST_MODEL_NAMES={ENS:'Ensemble',PATH:'PATH',STACK:'STACK',A:'Original'};
 function btstModelName(m){return BTST_MODEL_NAMES[m]||m||'Original';}
 // Model switch (index.html #fModel). The helper stores the choice and passes it to every engine run;
 // the other model keeps scoring as a shadow for the day-end review. Applies from the next run.
@@ -4584,7 +4589,7 @@ function btstModelName(m){return BTST_MODEL_NAMES[m]||m||'Original';}
 // localStorage now paints the owner's last known choice synchronously; the helper still wins on reply.
 const MODEL_STORE='rocket-btst-model-v1';
 // 21 Oct 2026 (owner): Peak removed completely; Ensemble is the only model (the Model dropdown is gone).
-const SELECTABLE_MODELS=['ENS','PATH'];
+const SELECTABLE_MODELS=['ENS','PATH','STACK'];
 function savedModelChoice(){
   try{const v=localStorage.getItem(MODEL_STORE);return SELECTABLE_MODELS.includes(v)?v:null;}catch(e){return null;}
 }
@@ -4719,7 +4724,7 @@ function noteCrossing(sym,score,floor){
 // The action state for a live intraday crossing, or null when this row is not one.
 // Returning null hands the row back to the 15:15 final path unchanged.
 function btstCrossingState(s){
-  if(floorModel()==='PATH'&&!btstRanking())return {state:'WAIT',reason:'PATH predictions unavailable or stale; awaiting fresh completed-minute scores'};
+  if(isRankedModel(floorModel())&&!btstRanking())return {state:'WAIT',reason:floorModel()+' predictions unavailable or stale; awaiting fresh completed-minute scores'};
   const floor=btstMinScore();
   if(!Number.isFinite(floor)) return null;
   const score=btstScoreOf(s?.symbol);
@@ -4764,9 +4769,9 @@ function btstCrossingState(s){
   if(r.model==='ENS'&&score>=SCORE_CAP) return {state:'WAIT',reason:`Score +${score.toFixed(2)} is at the maxed-out top (${SCORE_CAP}+): every model ranks it #1, usually mid-spike. These lost money live, so it is skipped; buyable if it settles back inside +${floor.toFixed(2)} to +${SCORE_CAP}.`};
   // v1538 (owner, 22 Oct): the volume-fade (v1506) and size-bucket (v1517) vetoes are removed. Replayed under the
   // current OCO exit with profit-funded trims (1-21 Oct, Rs3.5L), no veto earned more than either or both in both halves.
-  // 19 Oct 2026 (owner): no new buys before 09:45 - set while Peak (removed 21 Oct) trained from 09:45; the rule stays, and
-  // the volume-fade check needs four bars (09:35). Not noted as a crossing: still above the floor at 09:45 = GO.
-  if(isEquitySession(Date.now())&&istClock().mins<ENTRY_START_MIN) return {state:'WAIT',reason:`Score +${score.toFixed(2)} clears +${floor.toFixed(2)}, but new buys start at 09:45: before then the models score opening spikes they were never trained on.`};
+  // 23 Oct 2026 (owner): the 09:45 start (set for the removed Peak model) is gone; only the opening minute itself waits,
+  // because no decision has a completed minute before 09:16. Not noted as a crossing.
+  if(isEquitySession(Date.now())&&istClock().mins<ENTRY_START_MIN) return {state:'WAIT',reason:`Score +${score.toFixed(2)} clears +${floor.toFixed(2)}, but new buys start at 09:16, after the first completed minute.`};
   const gateOff=r.src.gate?.on!==true;
   if(gateOff) return {state:'WAIT',reason:`Score +${score.toFixed(2)} clears +${floor.toFixed(2)}, but the market gate is off - no buys today.`};
   const first=noteCrossing(s.symbol,score,floor);
