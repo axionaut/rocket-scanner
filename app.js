@@ -1,5 +1,5 @@
 const BUILD_TS='2026-10-23 IST'; // release build date (IST)
-const APP_VERSION=1548;
+const APP_VERSION=1549;
 const RADAR_SCORE_VERSION='v1419-recross-batches'; // Eligible on crossing the score floor at any time; selected model's evolving target and movement-based profit protection.
 
 // ── v1358: AN UNCAUGHT ERROR MUST NAME ITSELF ─────────────────────────────────────────────────
@@ -4393,9 +4393,9 @@ function initScoreFloorUI(force=false){
     const key=scoreFloorStore(model),stored=localStorage.getItem(key),epoch=++_scoreFloorEpoch;
     const ranked=isRankedModel(model);
     el.value=stored===null?(ranked?'2.1':''):stored;
-    el.min='1.2';el.placeholder=ranked?'2.1':'1.6';el.step='0.1';
+    el.removeAttribute('min');el.placeholder=ranked?'2.1':'1.6';el.step='0.1';
     const label=document.getElementById('scoreFloorLabel');if(label)label.textContent=(model==='ENS'?'Ensemble':model)+' Floor';
-    el.title=ranked?model+' only: its own ranking on the Ensemble scale (1.6 = top 1.5%, 2.2 = its #1). Default 2.1 ~ top 2-3 stocks. Saved independently.':'Ensemble only: mapped ensemble score. Default 1.6; minimum 1.2. Saved independently from PATH and STACK.';
+    el.title=ranked?model+' only: its own ranking on the Ensemble scale (1.6 = top 1.5%, 2.2 = its #1). Default 2.1 ~ top 2-3 stocks. Saved independently.':'Ensemble only: mapped ensemble score. Default 1.6; no minimum. Saved independently from PATH and STACK.';
     _scoreFloorSeeded=model;_floorPushed=null;
     updateModeUI();
     readHelperResponse('/api/btst/min-score?model='+model,{timeout:6000}).then(d=>{
@@ -4577,7 +4577,9 @@ function btstRanking(){
   const scoresA=new Map();
   (src.rankings?.A||[]).forEach(x=>{const s=normSym(x&&x[0]);if(s)scoresA.set(s,Number(x&&x[1]));});
   _btstRankMemo={src,map,scoresA,n:ranking.length,at:String(src.asOf||'').slice(11,16),stage:src.stage,
-    minScore:Number(src.rules?.modelFloors?.[viewModel]??src.rules?.minScore),model:viewModel};
+    minScore:Number(src.rules?.modelFloors?.[viewModel]??src.rules?.minScore),model:viewModel,
+    // 23 Oct 2026 (owner): stocks that crossed the floor IN THIS RUN (engine-published). Only these can buy.
+    crossingsKnown:Array.isArray(src.crossings)&&viewModel===src.activeModel,crossed:new Set((src.crossings||[]).map(normSym))};
   return _btstRankMemo;
 }
 function btstRankOf(sym){
@@ -4793,10 +4795,17 @@ function btstCrossingState(s){
   // 23 Oct 2026 (owner): the 09:45 start (set for the removed Peak model) is gone; only the opening minute itself waits,
   // because no decision has a completed minute before 09:16. Not noted as a crossing.
   if(isEquitySession(Date.now())&&istClock().mins<ENTRY_START_MIN) return {state:'WAIT',reason:`Score +${score.toFixed(2)} clears +${floor.toFixed(2)}, but new buys start at 09:16, after the first completed minute.`};
-  const gateOff=r.src.gate?.on!==true;
+  const gateOff=RocketStrategy.entryGateApplies(r.model)&&r.src.gate?.on!==true;   // 23 Oct 2026 (owner): PATH ignores the gate
   if(gateOff) return {state:'WAIT',reason:`Score +${score.toFixed(2)} clears +${floor.toFixed(2)}, but the market gate is off - no buys today.`};
   const first=noteCrossing(s.symbol,score,floor);
   if(!isEquitySession(Date.now())) return {state:'WAIT',reason:`Score +${score.toFixed(2)} clears +${floor.toFixed(2)} - market closed.`};
+  // 23 Oct 2026 (owner): buy only AT the crossing. Being further above the floor is not a better signal, and a stock
+  // that crossed in an earlier run is not bought later; it needs a completed run below the floor and a fresh crossing.
+  if(!r.crossingsKnown) return {state:'WAIT',reason:'Waiting for an engine run that reports this run’s floor crossings.'};
+  if(!r.crossed.has(key)){
+    const at=first?new Date(first.t).toLocaleTimeString('en-IN',{hour:'2-digit',minute:'2-digit',hour12:false}):'';
+    return {state:'WAIT',reason:`Above +${floor.toFixed(2)}${at?' since '+at:''}, but buys happen only in the run where it crosses. Needs a run below the floor and a fresh crossing.`};
+  }
   const stale=universePriceStaleness()||stockPriceStaleness(s.symbol);
   if(stale) return {state:'WAIT',reason:stale};
   const at=first?new Date(first.t).toLocaleTimeString('en-IN',{hour:'2-digit',minute:'2-digit',hour12:false}):'';
@@ -4808,10 +4817,7 @@ function btstCrossingState(s){
 // owner's number rather than the engine's built-in 1.6. This deliberately supersedes the v1407
 // "display only" design: invariant 5 still holds - GO comes solely from the FINAL picks list - but
 // that list is now produced under a floor the owner chose.
-// HARD FLOOR 1.2, enforced in three places (here, the helper, the engine) because each can be
-// bypassed: this one can be skipped by a stale page, the helper's by a hand-written state file.
-// The engine's clamp is the authoritative one.
-const SCORE_FLOOR_HARD_MIN=1.2;   // _floorPushTimer/_floorPushed are declared beside SCORE_FLOOR_STORE
+// 23 Oct 2026 (owner): no floor clamp anywhere (page, helper, engine); the saved floor is used as typed.
 function pushScoreFloorToEngine(raw,model=floorModel()){
   clearTimeout(_floorPushTimer);
   _floorPushTimer=setTimeout(()=>{
@@ -10930,7 +10936,7 @@ function _planDualBasketUncached(rows,capital){
   const maxAlloc=getTypedMaxAlloc(capital),minRequired=getMinAlloc();
   const minTxt='Rs '+Math.round(minRequired).toLocaleString('en-IN');
   let remaining=Math.max(0,Number(capital||0)-BASKET_CASH_RESERVE_RS);
-  const pool=[...(rows||[])].sort((a,b)=>(btstScoreOf(b.symbol)??(Number(b.score)||0))-(btstScoreOf(a.symbol)??(Number(a.score)||0))||a.symbol.localeCompare(b.symbol));
+  const pool=[...(rows||[])].sort((a,b)=>a.symbol.localeCompare(b.symbol));   // 23 Oct 2026 (owner): no score priority among crossings
   const unitDebitOf=price=>price+calcZerodhaCharges(price,1,false,false,false);
   const autoCap=getAutoMaxAllocCap(capital),heldNow=getHeldPositionMap();
   const eligiblePool=pool.filter(r=>!EXPORT_EXCLUDED.has(r.symbol)&&isStockEligible(r)&&getBuyPrice(r)>0).slice(0,20);
@@ -10945,9 +10951,8 @@ function _planDualBasketUncached(rows,capital){
   const crossFloor=btstMinScore();
   const weightOf=r=>{
     const sc=btstScoreOf(r.symbol);
-    if(!Number.isFinite(sc)||!Number.isFinite(crossFloor)) return 1;
-    // Base 1 keeps a name that just clears the floor fundable; excess is the conviction premium.
-    return 1+Math.max(0,sc-crossFloor);
+    // 23 Oct 2026 (owner): every crossing gets an equal share; a higher score above the floor is not a better signal.
+    return 1;
   };
   const totalWeight=eligiblePool.reduce((a,r)=>a+weightOf(r),0)||1;
   const scoreWeighted=Number.isFinite(crossFloor)&&eligiblePool.length>0;
@@ -11841,7 +11846,13 @@ function sortValueOf(row,key){
   if(key==='score'){
     // Sort the displayed model score only. Missing scores stay last, including below negative scores.
     const ms=typeof btstScoreOf==='function'?btstScoreOf(row.symbol):null;
-    return Number.isFinite(ms)?ms:null;
+    if(!Number.isFinite(ms)) return null;
+    // 23 Oct 2026 (owner): order follows the threshold rule, not the raw score. Crossed in this run first (equal), then
+    // already above the floor (most recent crossing first, score ignored), then below the floor by score (nearest first).
+    const r=btstRanking(),fl=btstMinScore();
+    if(!r||!Number.isFinite(fl)||ms<fl) return ms;
+    if(r.crossingsKnown&&r.crossed.has(normSym(row.symbol))) return 3e13;
+    return 2e13+(Number(crossingStore().at?.[normSym(row.symbol)]?.t)||0);
   }
   // Derived columns render a formatted STRING ("1.90%", "GO"), so the underlying number has to be
   // recomputed here - sorting row.highDistance would compare `undefined` on every row.
@@ -13096,8 +13107,8 @@ function* patchUniverseDeltasGen(deltaRows,deferPaint=false){
   if(scoreMoved && FILT.length > 1){
     if(SCOL === 'score'){
       for(let i = 0; i < FILT.length - 1; i++){
-        const sa = Number(FILT[i].score) || 0;
-        const sb = Number(FILT[i+1].score) || 0;
+        const sa = sortValueOf(FILT[i],'score') ?? -Infinity;
+        const sb = sortValueOf(FILT[i+1],'score') ?? -Infinity;
         if(SDIR === -1 ? sa < sb : sa > sb){
           orderChanged = true;
           break;
@@ -13503,7 +13514,7 @@ function emptyBoardReason(){
   if(stale)return 'No buy recommendations: '+escHtml(stale)+'. Use Show ineligible to inspect every stock.';
   const d=btstToday();
   if(!d)return escHtml(btstWaitReason())+'.';
-  if(!d.gate?.on)return `No buys today: market gate off (equal-weight market ${d.gate?.marketTrendPct}% vs its 50DMA; trades above ${d.gate?.threshold}%).`;
+  if(!d.gate?.on&&RocketStrategy.entryGateApplies(floorModel()))return `No buys today: market gate off (equal-weight market ${d.gate?.marketTrendPct}% vs its 50DMA; trades above ${d.gate?.threshold}%).`;
   if(!d.picks.length)return `No picks today: nothing cleared the model's score floor${d.rules&&d.rules.minScore!=null?' of +'+d.rules.minScore:''}. On the tested history that happens on about 1 session in 4 - sitting out is the rule, not a failure.`;
   return `Today's picks (${escHtml(d.picks.map(p=>p.symbol).join(', '))}) are held, stale or blocked. Use Show ineligible to see why.`;
 }

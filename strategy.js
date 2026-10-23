@@ -494,8 +494,14 @@ function bookedSession(session,holdingCosts,tradebook){
     return model === 'ENS' && Number.isFinite(score) && score >= 2.15;
   }
 
+  // 23 Oct 2026 (owner): PATH buys without the market gate (live and its M:PATH paper account); every other model keeps it.
+  function entryGateApplies(model){
+    return String(model || '').replace(/^M:/, '') !== 'PATH';
+  }
+
   return {
     entryScoreCapped,
+    entryGateApplies,
     weightedPosition,
     exitBuyWindows,
     bookedSession,
