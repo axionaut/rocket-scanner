@@ -1,5 +1,5 @@
 const BUILD_TS='2026-10-23 IST'; // release build date (IST)
-const APP_VERSION=1545;
+const APP_VERSION=1546;
 const RADAR_SCORE_VERSION='v1419-recross-batches'; // Eligible on crossing the score floor at any time; selected model's evolving target and movement-based profit protection.
 
 // ── v1358: AN UNCAUGHT ERROR MUST NAME ITSELF ─────────────────────────────────────────────────
@@ -4774,7 +4774,7 @@ function btstCrossingState(s){
   // skipping them lifted the Rs 1.13L account result in both halves. Not noted as a crossing, so a later
   // score back inside the band is an ordinary GO.
   const SCORE_CAP=2.15;
-  if(r.model==='ENS'&&score>=SCORE_CAP) return {state:'WAIT',reason:`Score +${score.toFixed(2)} is at the maxed-out top (${SCORE_CAP}+): every model ranks it #1, usually mid-spike. These lost money live, so it is skipped; buyable if it settles back inside +${floor.toFixed(2)} to +${SCORE_CAP}.`};
+  if(RocketStrategy.entryScoreCapped(r.model,score)) return {state:'WAIT',reason:`Score +${score.toFixed(2)} is at the maxed-out top (${SCORE_CAP}+): every model ranks it #1, usually mid-spike. These lost money live, so it is skipped; buyable if it settles back inside +${floor.toFixed(2)} to +${SCORE_CAP}.`};
   // v1538 (owner, 22 Oct): the volume-fade (v1506) and size-bucket (v1517) vetoes are removed. Replayed under the
   // current OCO exit with profit-funded trims (1-21 Oct, Rs3.5L), no veto earned more than either or both in both halves.
   // 23 Oct 2026 (owner): the 09:45 start (set for the removed Peak model) is gone; only the opening minute itself waits,

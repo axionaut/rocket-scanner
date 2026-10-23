@@ -489,7 +489,13 @@ function bookedSession(session,holdingCosts,tradebook){
     return {ok:true,qty,avgCost,buyTime,cycles};
   }
 
+  // The saturation cap belongs to the Ensemble aggregate, not individual models.
+  function entryScoreCapped(model, score){
+    return model === 'ENS' && Number.isFinite(score) && score >= 2.15;
+  }
+
   return {
+    entryScoreCapped,
     weightedPosition,
     exitBuyWindows,
     bookedSession,
