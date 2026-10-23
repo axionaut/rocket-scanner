@@ -1,5 +1,5 @@
 const BUILD_TS='2026-10-23 IST'; // release build date (IST)
-const APP_VERSION=1543;
+const APP_VERSION=1544;
 const RADAR_SCORE_VERSION='v1419-recross-batches'; // Eligible on crossing the score floor at any time; selected model's evolving target and movement-based profit protection.
 
 // ── v1358: AN UNCAUGHT ERROR MUST NAME ITSELF ─────────────────────────────────────────────────
@@ -9682,7 +9682,7 @@ function buildHardFilterMethodologyHTML(E){
       missed:cost?.samples?cost.missed:null,
       avoided:cost?.samples?cost.avoided:null,
       net:cost?.samples?cost.net:null,
-      samples:cost?.samples||0,open:cost?.open||0,unresolved:cost?.unresolved||0,
+      samples:cost?.samples||0,open:cost?.open||0,unresolved:cost?.unresolved||0,verdict:cost?.samples?cost.net:null,
       active, ruleKey:rule.key,
       inactiveNote:active?'':'Entries blocked - configured REG1 column missing',
     };
@@ -9694,14 +9694,23 @@ function buildHardFilterMethodologyHTML(E){
     {key:'flagged',label:'Flagged',align:'right',
       fmt:(v,r)=>r.active?`<span style="color:${v>0?'var(--amber)':'var(--t3)'};font-weight:700;font-family:'DM Mono',monospace">${(v||0).toLocaleString()}</span>`:'&mdash;',
       totFmt:(v)=>`<span style="color:var(--amber);font-weight:700;font-family:'DM Mono',monospace">${(v||0).toLocaleString()}</span>`},
-    {key:'missed',label:'Missed gains \u20b9',align:'right',
-      fmt:v=>v==null?'&mdash;':`<span style="color:var(--red);font-family:'DM Mono',monospace">${fmtSignedINR(v)}</span>`,totFmt:()=>'&mdash;'},
+    // 23 Oct 2026 (owner): what the SELECTED model's blocked would-be trades would have made with this filter off,
+    // added up from the first observation (helper summary(model)).
+    {key:'missed',label:'Gains missed \u20b9',align:'right',
+      fmt:v=>v==null?'&mdash;':`<span style="color:var(--green);font-family:'DM Mono',monospace">${fmtSignedINR(v)}</span>`,
+      totFmt:v=>v==null?'&mdash;':`<span style="color:var(--green);font-weight:700;font-family:'DM Mono',monospace">${fmtSignedINR(v)}</span>`},
     {key:'avoided',label:'Losses avoided \u20b9',align:'right',
-      fmt:v=>v==null?'&mdash;':`<span style="color:var(--green);font-family:'DM Mono',monospace">${fmtSignedINR(v)}</span>`,totFmt:()=>'&mdash;'},
-    {key:'net',label:'Net cost \u20b9',align:'right',
-      fmt:v=>v==null?`<span style="color:var(--t3);font-size:12px">Collecting</span>`:`<span style="color:${v>0?'var(--red)':v<0?'var(--green)':'var(--t3)'};font-weight:700;font-family:'DM Mono',monospace">${fmtSignedINR(v)}</span>`,totFmt:()=>'&mdash;'},
-    {key:'samples',label:'Measured',align:'right',
-      fmt:(v,r)=>`<span title="${r.open} open paper observations; ${r.unresolved} without a usable current or closing bid" style="font-family:'DM Mono',monospace">${v}${r.open?` (${r.open} open)`:''}${r.unresolved?` + ${r.unresolved} unresolved`:''}</span>`,totFmt:()=>'&mdash;'},
+      fmt:v=>v==null?'&mdash;':`<span style="color:var(--red);font-family:'DM Mono',monospace">${fmtSignedINR(-v)}</span>`,
+      totFmt:v=>v==null?'&mdash;':`<span style="color:var(--red);font-weight:700;font-family:'DM Mono',monospace">${fmtSignedINR(-v)}</span>`},
+    {key:'net',label:'If filter off \u20b9',align:'right',
+      fmt:v=>v==null?`<span style="color:var(--t3);font-size:12px">No trades yet</span>`:`<span style="color:${v>0?'var(--green)':v<0?'var(--red)':'var(--t3)'};font-weight:700;font-family:'DM Mono',monospace">${fmtSignedINR(v)}</span>`,
+      totFmt:v=>v==null?'&mdash;':`<span style="color:${v>0?'var(--green)':v<0?'var(--red)':'var(--t3)'};font-weight:700;font-family:'DM Mono',monospace">${fmtSignedINR(v)}</span>`},
+    {key:'verdict',label:'Filter',align:'left',
+      fmt:(v,r)=>r.net==null?'&mdash;':r.net<0?`<span style="color:var(--green);font-weight:700">Saving you ${fmtINR(-r.net)}</span>`:r.net>0?`<span style="color:var(--amber);font-weight:700">Costing you ${fmtINR(r.net)}</span>`:'<span style="color:var(--t3)">Even</span>',
+      totFmt:()=>''},
+    {key:'samples',label:'Trades',align:'right',
+      fmt:(v,r)=>`<span title="${r.open} open today; ${r.unresolved} without a usable mark" style="font-family:'DM Mono',monospace">${v}${r.open?` (${r.open} open)`:''}${r.unresolved?` + ${r.unresolved} unresolved`:''}</span>`,
+      totFmt:v=>`<span style="font-weight:700;font-family:'DM Mono',monospace">${v||0}</span>`},
     {key:'ruleKey',label:'',align:'right',
       fmt:(v,r)=>`<button onclick="removeSurvRule('${v}')" style="padding:4px 8px;border-radius:6px;border:1px solid rgba(239,68,68,.3);background:rgba(239,68,68,.08);color:var(--red);font-size:12px;font-weight:700;cursor:pointer">Remove</button>`,
       totFmt:()=>''},
@@ -9710,6 +9719,8 @@ function buildHardFilterMethodologyHTML(E){
   const hfSort=_methTbls.hf?.getSort?.();
   _methTbls.hf=makeSortableTable('tbl-hf',hfCols,hfRows,hfSort?.key||'flagged',hfSort?.dir??-1,null,{
     criteria:null,flagged:hfTotalsFlagged,ruleKey:null,
+    ...(hfRows.some(r=>r.samples)?{missed:hfRows.reduce((s,r)=>s+(r.missed||0),0),avoided:hfRows.reduce((s,r)=>s+(r.avoided||0),0),net:hfRows.reduce((s,r)=>s+(r.net||0),0)}:{}),
+    samples:hfRows.reduce((s,r)=>s+(r.samples||0),0),
   });
 
   const survActiveThisSession=SURV_HEADERS.length>0;
@@ -9728,8 +9739,11 @@ function buildHardFilterMethodologyHTML(E){
     <div style="background:var(--bg-card);border:1px solid var(--border);border-radius:10px;overflow:hidden">
       <div class="scroll-x">${_methTbls.hf.getHtml()}</div>
     </div>
-    <div style="font-size:12px;color:var(--t3);margin-top:7px">Net cost = missed net gains minus losses avoided. Positive means potential profit missed; negative means losses saved. Forward paper measurements start with this release; no historical gains are invented.</div>
-    <details style="font-size:12px;color:var(--t3);margin-top:6px"><summary style="cursor:pointer">How filter cost is measured</summary><div style="margin-top:6px">Removing this one rule must qualify a model signal; all other configured rules and entry checks still apply. Each stock/model/rule/session gets one independent observation of at least \u20b95,000, rounded to whole shares, within normal-bar turnover and displayed quote quantities. We use the fresh ask for entry and fresh bid for valuation, less estimated same-day charges. Open observations move until the session's final minute; missing closing quotes stay unresolved. This same-session benchmark does not simulate GTT exits, shared account cash or actual account P&amp;L. Multi-rule exclusions are not attributed to an individual rule, and alternative rule-removal scenarios are not added together.</div></details>
+    <div style="font-size:12px;color:var(--t3);margin-top:7px">${(()=>{const c=SURV_COST_STATUS,m=c?.model||floorModel(),name=BTST_MODEL_NAMES?.[m]||m;
+      const span=c?.from?` ${c.from}${c.through&&c.through!==c.from?' to '+c.through:''}`:'';
+      const how=c?.backfilled?`${c.backfilled} from the history backfill (6 Aug-21 Oct, ${escHtml(name)}'s monthly walk-forward model scoring every blocked stock) and the rest live`:'live trades only';
+      return `<b style="color:var(--t2)">${escHtml(name)}</b> (the selected model) — the trades it would have bought if this one filter were off, added up${span}: ${how}. If filter off = gains missed minus losses avoided after charges; <span style="color:var(--green)">positive</span> means the filter is costing you money, <span style="color:var(--red)">negative</span> means it is saving you. ${m==='ENS'?'Ensemble has no history backfill (its scores for blocked stocks were never saved), so it fills forward from 23 Oct.':''} Switch the model above to see another model's totals.`;})()}</div>
+    <details style="font-size:12px;color:var(--t3);margin-top:6px"><summary style="cursor:pointer">How filter cost is measured</summary><div style="margin-top:6px">Removing this one rule must qualify a model signal; all other configured rules and entry checks still apply. Each stock/model/rule/session gets one independent observation of at least \u20b95,000, rounded to whole shares, within normal-bar turnover and displayed quote quantities. We use the fresh ask for entry and fresh bid for valuation, less estimated same-day charges. Open observations move until the session's final minute; missing closing quotes stay unresolved. This same-session benchmark does not simulate GTT exits, shared account cash or actual account P&amp;L. Multi-rule exclusions are not attributed to an individual rule, and alternative rule-removal scenarios are not added together. History rows (PATH/STACK, 6 Aug-21 Oct) use that day's REG1 file from the previous session, the 5-minute decision's minute close as entry and the session's last traded minute as mark, with the same charges.</div></details>
     ${!SURV_COST_STATUS?`<div style="color:var(--t3);font-size:12px;margin-top:6px">Connect the updated helper to load forward filter-cost observations.</div>`:SURV_COST_STATUS.ok?'':`<div style="color:var(--red);font-size:12px;margin-top:6px">Filter-cost measurements unavailable: ${escHtml(SURV_COST_STATUS.error||'ledger unavailable')}</div>`}
     ${survMeta}
     ${buildSurvCorrHTML()}
