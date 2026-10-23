@@ -1,5 +1,5 @@
 const BUILD_TS='2026-10-23 IST'; // release build date (IST)
-const APP_VERSION=1547;
+const APP_VERSION=1548;
 const RADAR_SCORE_VERSION='v1419-recross-batches'; // Eligible on crossing the score floor at any time; selected model's evolving target and movement-based profit protection.
 
 // ── v1358: AN UNCAUGHT ERROR MUST NAME ITSELF ─────────────────────────────────────────────────
@@ -4530,7 +4530,20 @@ function firstScoreAtFloor(sym){
   const model=floorModel(),floor=btstMinScore(),h=SCORE_HIGHS;
   if(!h||h.day!==getSessionDate()||!Number.isFinite(floor)) return null;
   const hit=(h.models?.[model]?.[normSym(sym)]||[]).find(([,sc])=>sc>=floor-1e-9);
-  return hit?{t:hit[0],floor,model,already:hit[0]===h.runs?.[model]?.first,since:h.runs?.[model]?.first}:null;
+  return hit?{t:hit[0],floor,model,price:Number(hit[2])>0?Number(hit[2]):null,priceSource:hit[3]||null,priceAt:hit[4]||hit[0],already:hit[0]===h.runs?.[model]?.first,since:h.runs?.[model]?.first}:null;
+}
+function firstScoreBadgeHtml(fc,currentPrice){
+  if(!fc)return '';
+  const hm=t=>new Date(t).toLocaleTimeString('en-IN',{timeZone:'Asia/Kolkata',hour:'2-digit',minute:'2-digit',hour12:false});
+  const approx=fc.priceSource==='minute-close',price=Number(fc.price),current=Number(currentPrice);
+  const hasPrice=Number.isFinite(price)&&price>0,hasCurrent=Number.isFinite(current)&&current>0;
+  const delta=hasPrice&&hasCurrent?current-price:null,pct=delta===null?null:delta/price*100;
+  const signed=(n,prefix='')=>(n>0?'+':n<0?'−':'')+prefix+Math.abs(n).toFixed(2);
+  const title=(fc.already?`Already at or above ${fc.model} ${fc.floor.toFixed(2)} when tracking began at ${hm(fc.since)} IST`:`First scored ${fc.model} ${fc.floor.toFixed(2)} or higher today in the ${hm(fc.t)} IST run (tracked since ${hm(fc.since)} IST)`)
+    +(hasPrice?(approx?`; approximate reference: completed minute ending ${hm(fc.priceAt)} IST`:'; price captured in that score run'):'; historical crossing price was not recorded');
+  return `<div style="font-size:11px;color:var(--cyan);font-family:'DM Mono',monospace;font-weight:700;margin-top:2px" title="${escHtml(title)}">⏱ 1st ≥${fc.floor.toFixed(2)}: ${fc.already?'by ':''}${hm(fc.t)}`
+    +(hasPrice?` · ${approx?'~':''}₹${price.toFixed(2)}`:' · price unavailable')
+    +(delta!==null?`<span style="color:var(--${delta>0?'green':delta<0?'red':'t3'});white-space:nowrap"> · ${approx?'~':''}${signed(delta,'₹')} (${signed(pct)}%) since</span>`:hasPrice?' · current price unavailable':'')+'</div>';
 }
 function btstToday(){
   const d=BTST.data;
@@ -5103,8 +5116,7 @@ function rowStatusPillHtml(s){
   const funded=SELECTED.has(s.symbol)&&act.state==='GO';
   const unfunded=act.state==='GO'&&!funded;
   const tone=act.state==='BLOCKED'?'red':act.state==='GO'&&!unfunded?'green':'amber';
-  const fc=firstScoreAtFloor(s.symbol),hm=t=>new Date(t).toLocaleTimeString('en-IN',{timeZone:'Asia/Kolkata',hour:'2-digit',minute:'2-digit',hour12:false});
-  const crossBadge=fc?`<div style="font-size:11px;color:var(--cyan);font-family:'DM Mono',monospace;font-weight:700;margin-top:2px" title="${fc.already?`Already at or above ${fc.model} ${fc.floor.toFixed(2)} when tracking began at ${hm(fc.since)} IST`:`First scored ${fc.model} ${fc.floor.toFixed(2)} or higher today in the ${hm(fc.t)} IST run (tracked since ${hm(fc.since)} IST)`}">⏱ 1st ≥${fc.floor.toFixed(2)}: ${fc.already?'by ':''}${hm(fc.t)}</div>`:'';
+  const crossBadge=firstScoreBadgeHtml(firstScoreAtFloor(s.symbol),s.price);
   return `<span class="info-pill pill-${tone}" title="${escHtml(act.reason)}">${act.state}${funded?' | Funded':unfunded?' | Not funded':''}</span>`
     +crossBadge
     +(act.state!=='GO'?`<div style="font-size:11px;color:var(--t3)">${escHtml(act.reason)}</div>`:'')
