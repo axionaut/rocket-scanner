@@ -501,11 +501,12 @@ function bookedSession(session,holdingCosts,tradebook){
     return m !== 'PATH' && m !== 'LIFTOFF';
   }
 
-  // 27 Oct 2026 (owner): LIFTOFF scalp target = just above breakeven with BOTH sides' same-day (intraday) charges:
-  // the first price, rounded up to the instrument tick, whose net after the buy and sell charges is positive. Zerodha's
-  // GTT distance rule (>= 0.26% and > Rs 0.09 from LTP) is a placement constraint applied by the helper, not part of
-  // the target. up(v) rounds a price UP to a valid tick. Returns {price, breakeven} (equal).
-  function scalpTargetPrice(avgCost, qty, up){
+  // 27 Oct 2026 (owner): LIFTOFF exit. breakeven = the first tick whose net after BOTH sides' same-day (intraday)
+  // charges is positive. The first sell (price) sits just high enough that, when the price enters the approach zone
+  // below it, the usual ratcheting OCO can form with its lower leg (Zerodha minimum distance below the price:
+  // >= gapPct and > Rs 0.09) at or above breakeven - about breakeven + 0.26% + the 0.10% zone. From there it ratchets
+  // like every position and the lower leg never goes below breakeven. up(v) rounds a price UP to a valid tick.
+  function scalpTargetPrice(avgCost, qty, up, gapPct = 0.26, zonePct = 0.10, gapRs = 0.10){
     if(!(avgCost > 0) || !(qty > 0)) return null;
     const ch = (px, sell) => sumChargeParts(calcZerodhaChargesSplit(px, qty, sell, true, true));
     const buy = ch(avgCost, false), net = px => (px - avgCost) * qty - buy - ch(px, true);
@@ -513,7 +514,10 @@ function bookedSession(session,holdingCosts,tradebook){
     for(let i = 0; i < 6; i++) p = avgCost + (buy + ch(p, true)) / qty;
     let be = up(p);
     for(let i = 0; i < 50 && !(net(be) > 0); i++) be = up(be + 0.01);
-    return { price: be, breakeven: be };
+    const lowerAt = u => { const px = u * (1 - zonePct / 100); return px - Math.max(px * gapPct / 100, gapRs); };
+    let price = up((be + Math.max(be * gapPct / 100, gapRs)) / (1 - zonePct / 100));
+    for(let i = 0; i < 50 && lowerAt(price) < be; i++) price = up(price + 0.01);
+    return { price, breakeven: be };
   }
 
   return {

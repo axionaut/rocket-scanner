@@ -1,5 +1,5 @@
 const BUILD_TS='2026-10-27 IST'; // release build date (IST)
-const APP_VERSION=1557;
+const APP_VERSION=1558;
 const RADAR_SCORE_VERSION='v1419-recross-batches'; // Eligible on crossing the score floor at any time; selected model's evolving target and movement-based profit protection.
 
 // ── v1358: AN UNCAUGHT ERROR MUST NAME ITSELF ─────────────────────────────────────────────────
@@ -10652,7 +10652,7 @@ function currentModelTargetPct(){
   return Number.isFinite(t?.pct)&&t.pct>0?t.pct:RocketStrategy.CONFIG.TARGET_PCT;
 }
 function learnedBtstTarget(score,symbol=null){
-  // 27 Oct 2026: LIFTOFF scalp target = just above same-day round-trip breakeven (~0.11% at a typical order size).
+  // 27 Oct 2026: LIFTOFF first sell = same-day breakeven + the room the ratcheting OCO needs (~0.47% at a typical order).
   if(isLiftoffModel()){const t=RocketStrategy.scalpTargetPrice(1000,10,v=>Math.ceil(v*100-1e-9)/100);return {pct:+((t.price/1000-1)*100).toFixed(2),y:0,model:'LIFTOFF',method:'scalp',n:0,through:null};}
   return {pct:1.25,y:0,model:'COMMON',method:'bracket',n:0,through:null};
 }
@@ -11656,7 +11656,7 @@ function dashboardMarketCards(){
     add(1,'NSE',br?escHtml(br.at):'Awaiting scores',BTST.rankError?`<span style="color:var(--amber)">${escHtml(BTST.rankError)}</span>`:`${br?br.n:0} scored · floor ${btstMinScore()} · ${isEquitySession(Date.now())?'current session':'last session'}`);
     const go=ALL.filter(isStockEligible).length;
     add(2,'NSE',`${go} GO`,'Kite execution checks apply');
-    add(3,'NSE',signed(target?.pct??3),isLiftoffModel()?'Scalp: breakeven after both sides’ charges':'Fixed start | ratcheting OCO');
+    add(3,'NSE',signed(target?.pct??3),isLiftoffModel()?'Breakeven + OCO room, then ratcheting OCO (lower leg never below breakeven)':'Fixed start | ratcheting OCO');
   }
   if(m.us){
     const trend=d?.marketTrendPct;
