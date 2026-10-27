@@ -1,5 +1,5 @@
-const BUILD_TS='2026-10-23 IST'; // release build date (IST)
-const APP_VERSION=1552;
+const BUILD_TS='2026-10-27 IST'; // release build date (IST)
+const APP_VERSION=1553;
 const RADAR_SCORE_VERSION='v1419-recross-batches'; // Eligible on crossing the score floor at any time; selected model's evolving target and movement-based profit protection.
 
 // ── v1358: AN UNCAUGHT ERROR MUST NAME ITSELF ─────────────────────────────────────────────────
@@ -12356,6 +12356,32 @@ async function readHelperResponse(path,options={}){
     return await r[type]();
   }finally{clearTimeout(timer);}
 }
+// v1553 (owner, 27 Oct): live liftoff board from the helper (dev/liftoff-live.cjs). Each stock's last 1 and 5 minutes
+// against its own normal move and volume, ranked across the market every 2 s. Display only: it never makes a stock GO.
+const LIFTOFF_SEEN=new Map();
+function liftoffTime(ms){return ms?new Date(ms+19800000).toISOString().slice(11,19):'-';}
+function renderLiftoff(j){
+  const host=document.getElementById('liftoffBoard');if(!host)return;
+  if(!j||!j.ok||!j.asOf||Date.now()-j.asOf>60000){host.innerHTML='';return;}
+  const c=j.counts||{},chip=k=>`<span class="lo-chip lo-${k}">${k} ${c[k]||0}</span>`;
+  const rows=(j.rows||[]).slice(0,15).map(r=>{
+    const isNew=!LIFTOFF_SEEN.has(r.sym);LIFTOFF_SEEN.set(r.sym,j.asOf);
+    const cls=v=>v>0?'lo-up':v<0?'lo-dn':'';
+    return `<tr class="${isNew?'lo-new':''}"><td><b>${escHtml(r.sym)}</b></td><td><span class="lo-chip lo-${escHtml(r.state)}">${escHtml(r.state)}</span></td>`
+      +`<td>${r.atHigh?'day high':''}</td><td>${r.score.toFixed(1)}</td><td class="${cls(r.m1)}">${r.m1.toFixed(1)}×</td><td>${r.v1.toFixed(1)}×</td>`
+      +`<td class="${cls(r.m5)}">${r.m5.toFixed(1)}×</td><td>${r.v5.toFixed(1)}×</td><td class="${cls(r.dayPct)}">${r.dayPct>0?'+':''}${r.dayPct.toFixed(2)}%</td>`
+      +`<td>₹${Number(r.ltp).toFixed(2)}</td><td>${liftoffTime(r.firstBlastAt)}</td></tr>`;}).join('');
+  host.innerHTML=`<div class="lo-card"><div class="lo-head"><div><b>Liftoff board</b> <span>live · ${liftoffTime(j.asOf)} · ${j.scored||0} stocks scored</span></div>`
+    +`<div class="lo-counts">${['BLAST','RUN','FLUCT','FALL','LOCKED'].map(chip).join('')}</div></div>`
+    +(rows?`<div class="lo-wrap"><table><thead><tr><th>Symbol</th><th>State</th><th></th><th>Score</th><th>1m move</th><th>1m vol</th><th>5m move</th><th>5m vol</th><th>Day</th><th>LTP</th><th>1st blast</th></tr></thead><tbody>${rows}</tbody></table></div>`
+      :`<div class="lo-note">No stock is moving up faster than its own normal right now.</div>`)
+    +`<div class="lo-note">Move and volume are multiples of the stock's own normal minute (last 20 sessions). BLAST = 1m move ≥3× and volume ≥5× normal, rising, up on the day. LOCKED = no sellers at the high. Display only; it never makes a stock GO.</div></div>`;
+}
+async function pollLiftoff(){
+  if(document.hidden)return;
+  try{renderLiftoff(await readHelperResponse('/api/liftoff',{timeout:2500}));}catch(e){renderLiftoff(null);}
+}
+setInterval(pollLiftoff,3000);setTimeout(pollLiftoff,1500);
 function rssCompanyKey(value){
   return String(value||'').toUpperCase().replace(/&AMP;/g,' AND ').replace(/\b(LIMITED|LTD|PRIVATE|PVT|INDIA)\b/g,' ')
     .replace(/[^A-Z0-9]+/g,' ').trim().replace(/\s+/g,' ');
