@@ -1,5 +1,5 @@
 const BUILD_TS='2026-10-27 IST'; // release build date (IST)
-const APP_VERSION=1573;
+const APP_VERSION=1574;
 const RADAR_SCORE_VERSION='v1419-recross-batches'; // Eligible on crossing the score floor at any time; selected model's evolving target and movement-based profit protection.
 
 // ── v1358: AN UNCAUGHT ERROR MUST NAME ITSELF ─────────────────────────────────────────────────
@@ -4551,10 +4551,11 @@ async function loadScoreHighs(day){
 function firstScoreAtFloor(sym){
   const model=floorModel(),floor=btstMinScore(),h=SCORE_HIGHS;
   if(model==='CUM'){
-    const cumulative=btstRanking()?.src?.cumulative,highs=cumulative?.highs;
-    if(!Number.isFinite(floor)||!highs||highs.day!==getSessionDate()||highs.epoch!==cumulative.startedAt)return null;
-    const points=highs.records?.[normSym(sym)]||[],hit=points.find(([,sc])=>sc>=floor-1e-9);
-    return hit?{t:hit[0],floor,model,price:hit[2],priceSource:hit[3],priceAt:hit[4],already:hit===points[0],since:points[0]?.[0]}:null;
+    // v1574: the first check today where the score rose from below the floor to at/above it (helper upCross).
+    const up=btstRanking()?.src?.cumulative?.upCross;
+    if(!Number.isFinite(floor)||!up||up.day!==getSessionDate()||up.floor!==floor)return null;
+    const hit=up.records?.[normSym(sym)];
+    return hit?{t:hit[0],floor,model,price:hit[2],priceSource:'live-tick',priceAt:hit[3],already:false,since:up.since}:null;
   }
   if(!h||h.day!==getSessionDate()||!Number.isFinite(floor)) return null;
   const hit=(h.models?.[model]?.[normSym(sym)]||[]).find(([,sc])=>sc>=floor-1e-9);
@@ -4608,7 +4609,7 @@ function firstScoreBadgeHtml(fc,currentPrice,currentAt=null,exit=null){
   const hasPrice=Number.isFinite(price)&&price>0,hasCurrent=Number.isFinite(current)&&current>0;
   const delta=hasPrice&&hasCurrent?current-price:null,pct=delta===null?null:delta/price*100;
   const signed=(n,prefix='')=>(n>0?'+':n<0?'−':'')+prefix+Math.abs(n).toFixed(2);
-  const title=(fc.already?`Already at or above ${fc.model} ${fc.floor.toFixed(2)} when tracking began at ${hm(fc.since)} IST`:`First scored ${fc.model} ${fc.floor.toFixed(2)} or higher today in the ${hm(fc.t)} IST run (tracked since ${hm(fc.since)} IST)`)
+  const title=(fc.model==='CUM'?`First rose from below the Cumulative Change floor ${fc.floor.toFixed(2)} to ${fc.floor.toFixed(2)} or higher today in the ${hm(fc.t)} IST check (record for this floor since ${hm(fc.since)} IST)`:fc.already?`Already at or above ${fc.model} ${fc.floor.toFixed(2)} when tracking began at ${hm(fc.since)} IST`:`First scored ${fc.model} ${fc.floor.toFixed(2)} or higher today in the ${hm(fc.t)} IST run (tracked since ${hm(fc.since)} IST)`)
     +(hasPrice?(approx?`; approximate reference: completed minute ending ${hm(fc.priceAt)} IST`:fc.priceSource==='prior-observation'?'; last observed price retained at the date reset, quoted '+new Date(fc.priceAt).toLocaleString('en-IN',{timeZone:'Asia/Kolkata'})+' IST':'; price captured in that score run'):'; historical crossing price was not recorded')
     +(exit?`; ${exit.res==='TGT'?'target':'stop'} ±${CROSS_EXIT_PCT}% reached in the bar starting ${hm(exit.t)} IST, exit ₹${exit.price.toFixed(2)}${exit.both?' (that bar touched both; counted as the stop)':''}`
       :hasPrice&&hasCurrent?`; still open: price move from ₹${price.toFixed(2)} to observed ₹${current.toFixed(2)}${currentAt?' at '+hm(currentAt)+' IST':''}`:'');
