@@ -495,13 +495,31 @@ function bookedSession(session,holdingCosts,tradebook){
   }
 
   // 23 Oct 2026 (owner): PATH buys without the market gate (live and its M:PATH paper account); every other model keeps it.
+  // 27 Oct 2026: LIFTOFF (scalp, exits within minutes) also ignores the daily-trend gate.
   function entryGateApplies(model){
-    return String(model || '').replace(/^M:/, '') !== 'PATH';
+    const m = String(model || '').replace(/^M:/, '');
+    return m !== 'PATH' && m !== 'LIFTOFF';
+  }
+
+  // 27 Oct 2026 (owner): LIFTOFF scalp target = just above breakeven with BOTH sides' same-day (intraday) charges:
+  // the first price, rounded up to the instrument tick, whose net after the buy and sell charges is positive. A GTT
+  // trigger must also sit at least ~0.26% from the current price (Zerodha), so the target is never below that.
+  // up(v) rounds a price UP to a valid tick. Returns {price, breakeven}.
+  function scalpTargetPrice(avgCost, qty, up, minGapPct = 0.26){
+    if(!(avgCost > 0) || !(qty > 0)) return null;
+    const ch = (px, sell) => sumChargeParts(calcZerodhaChargesSplit(px, qty, sell, true, true));
+    const buy = ch(avgCost, false), net = px => (px - avgCost) * qty - buy - ch(px, true);
+    let p = avgCost;
+    for(let i = 0; i < 6; i++) p = avgCost + (buy + ch(p, true)) / qty;
+    let be = up(p);
+    for(let i = 0; i < 50 && !(net(be) > 0); i++) be = up(be + 0.01);
+    return { price: Math.max(be, up(avgCost * (1 + minGapPct / 100))), breakeven: be };
   }
 
   return {
     entryScoreCapped,
     entryGateApplies,
+    scalpTargetPrice,
     weightedPosition,
     exitBuyWindows,
     bookedSession,

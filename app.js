@@ -1,5 +1,5 @@
 const BUILD_TS='2026-10-27 IST'; // release build date (IST)
-const APP_VERSION=1554;
+const APP_VERSION=1555;
 const RADAR_SCORE_VERSION='v1419-recross-batches'; // Eligible on crossing the score floor at any time; selected model's evolving target and movement-based profit protection.
 
 // ── v1358: AN UNCAUGHT ERROR MUST NAME ITSELF ─────────────────────────────────────────────────
@@ -118,7 +118,7 @@ function isCsvLikeFile(file){
 
 function updateModeUI(){
   const brand=document.querySelector('.brand-tag');
-  if(brand){const v=document.getElementById('fModel')?.value;brand.textContent=(v==='PATH'||v==='STACK'?v:'Ensemble')+' Engine';}
+  if(brand){const v=document.getElementById('fModel')?.value;brand.textContent=(v==='PATH'||v==='STACK'?v:v==='LIFTOFF'?'Liftoff':'Ensemble')+' Engine';}
   document.querySelectorAll('.currency-lbl').forEach(el=>{el.textContent='₹';});
 }
 let ALL=[],FILT=[],PG=1,PGSZ=100,SCOL='score',SDIR=-1;
@@ -3692,7 +3692,7 @@ function dualScoreCell(row){
     const ms=btstScoreOf(row.symbol),floor=btstMinScore();
     const clears=ms!==null&&floor!==null&&ms>=floor;
     return `<div style="display:flex;align-items:center;gap:6px;justify-content:center">
-      ${ms===null?`<span title="${escHtml(btstUnscoredReason(row.symbol))}">N/A</span>`:`<span style="font-family:'DM Mono',monospace;font-weight:800;font-size:15px;color:${clears?'var(--green)':'var(--amber)'}" title="${escHtml(btstRankNote(row.symbol))}">${ms>=0?'+':''}${ms.toFixed(2)}</span>`}
+      ${ms===null?`<span title="${escHtml(btstUnscoredReason(row.symbol))}">N/A</span>`:isLiftoffModel()&&btstRanking()?.src?.liftoff?.[normSym(row.symbol)]?(()=>{const [st,sc]=btstRanking().src.liftoff[normSym(row.symbol)];return `<span class="lo-chip lo-${escHtml(st)}" title="Liftoff state now; buys only on entering a checked state (${escHtml((btstRanking().src.rules?.liftoffStates||[]).join(', '))})">${escHtml(st)}</span><span style="font-family:'DM Mono',monospace;font-weight:700;font-size:13px;color:${clears?'var(--green)':'var(--t2)'}">${Number(sc).toFixed(1)}</span>`;})():`<span style="font-family:'DM Mono',monospace;font-weight:800;font-size:15px;color:${clears?'var(--green)':'var(--amber)'}" title="${escHtml(btstRankNote(row.symbol))}">${ms>=0?'+':''}${ms.toFixed(2)}</span>`}
       <span style="font-family:'DM Mono',monospace;font-weight:600;font-size:11px;color:var(--t3)" title="${rk?escHtml(btstRankNote(row.symbol)+' - ranking only, not a buy signal'):'Not ranked by the engine'}">${rk?'#'+rk:''}</span>
       <span style="font-size:10px;font-weight:600;color:var(--t3)">${act.state}</span>
     </div>`;
@@ -4384,10 +4384,35 @@ let _floorPushTimer=null,_floorPushed=null;
 // scale (1.6 = top 1.5%, 2.2 = rank #1), default floor 2.1 (~top 2-3 stocks, as validated). New storage keys so the
 // old PATH probability floor (0-1 scale) is never read as a percentile-scale floor.
 function isRankedModel(m){return m==='PATH'||m==='STACK';}   // a hoisted function: safe even for callers that run at load
-function floorModel(){const v=document.getElementById('fModel')?.value;return isRankedModel(v)?v:'ENS';}
+function floorModel(){const v=document.getElementById('fModel')?.value;return isRankedModel(v)||v==='LIFTOFF'?v:'ENS';}
 function scoreFloorStore(model=floorModel()){return model==='PATH'?'rs_path2_score_floor':model==='STACK'?'rs_stack_score_floor':SCORE_FLOOR_STORE;}
+// 27 Oct 2026 (owner): LIFTOFF qualifies by live liftoff state, chosen in a checkbox dropdown (helper /api/liftoff/states),
+// instead of a typed floor. The published floor for LIFTOFF is fixed at 1 (= in a checked state).
+function liftoffStatesUI(){
+  const lift=floorModel()==='LIFTOFF',w=document.getElementById('liftoffStatesWrap'),f=document.getElementById('scoreFloorWrap');
+  if(w)w.style.display=lift?'':'none';if(f)f.style.display=lift?'none':'';
+  if(!lift)return;
+  readHelperResponse('/api/liftoff/states',{timeout:5000}).then(d=>{if(d?.ok)paintLiftoffStates(d.states);}).catch(()=>{});
+}
+function paintLiftoffStates(states){
+  const set=new Set(states||[]);
+  document.querySelectorAll('#liftoffStates input[type=checkbox]').forEach(b=>{b.checked=set.has(b.value);});
+  const sum=document.getElementById('liftoffStatesSum');if(sum)sum.textContent=(states||[]).join(' + ')||'none';
+}
+function onLiftoffStatesChange(){
+  const states=[...document.querySelectorAll('#liftoffStates input[type=checkbox]:checked')].map(b=>b.value);
+  if(!states.length){showToast('Keep at least one Liftoff state checked.',3500,true);liftoffStatesUI();return;}
+  paintLiftoffStates(states);
+  readHelperResponse('/api/liftoff/states?set='+encodeURIComponent(states.join(',')),{timeout:6000}).then(d=>{
+    if(!d?.ok){showToast('Liftoff states not applied: '+escHtml(d?.why||'helper refused'),4000,true);liftoffStatesUI();return;}
+    paintLiftoffStates(d.states);showToast('Liftoff buys on entering: '+d.states.join(' + '),4000);loadBtstPicks();
+  }).catch(()=>showToast('Helper unreachable - Liftoff states not applied.',5000,true));
+}
+function isLiftoffModel(){return floorModel()==='LIFTOFF';}
 function initScoreFloorUI(force=false){
   try{
+    liftoffStatesUI();
+    if(isLiftoffModel())return;
     const el=document.getElementById('fScoreFloor'),model=floorModel();
     if(!el||(!force&&_scoreFloorSeeded===model)||document.activeElement===el)return;
     const key=scoreFloorStore(model),stored=localStorage.getItem(key),epoch=++_scoreFloorEpoch;
@@ -4601,7 +4626,7 @@ function btstScoreAOf(sym){
   if(r.scoresA.size){const v=r.scoresA.get(normSym(sym));return Number.isFinite(v)?v:null;}
   return r.model==='A'?btstScoreOf(sym):null;
 }
-const BTST_MODEL_NAMES={ENS:'Ensemble',PATH:'PATH',STACK:'STACK',A:'Original'};
+const BTST_MODEL_NAMES={ENS:'Ensemble',PATH:'PATH',STACK:'STACK',LIFTOFF:'Liftoff',A:'Original'};
 function btstModelName(m){return BTST_MODEL_NAMES[m]||m||'Original';}
 // Model switch (index.html #fModel). The helper stores the choice and passes it to every engine run;
 // the other model keeps scoring as a shadow for the day-end review. Applies from the next run.
@@ -4611,7 +4636,7 @@ function btstModelName(m){return BTST_MODEL_NAMES[m]||m||'Original';}
 // localStorage now paints the owner's last known choice synchronously; the helper still wins on reply.
 const MODEL_STORE='rocket-btst-model-v1';
 // 21 Oct 2026 (owner): Peak removed completely; Ensemble is the only model (the Model dropdown is gone).
-const SELECTABLE_MODELS=['ENS','PATH','STACK'];
+const SELECTABLE_MODELS=['ENS','PATH','STACK','LIFTOFF'];
 function savedModelChoice(){
   try{const v=localStorage.getItem(MODEL_STORE);return SELECTABLE_MODELS.includes(v)?v:null;}catch(e){return null;}
 }
@@ -4668,6 +4693,7 @@ function refreshBtstModelView(){
 // feed _getRowActionStateUncached: GO still comes only from the engine's own FINAL picks list, so
 // lowering this cannot manufacture a buy and raising it cannot suppress one (invariant 5).
 function btstFloorOverride(){
+  if(isLiftoffModel())return null;
   const v=parseFloat(document.getElementById('fScoreFloor')?.value);
   return Number.isFinite(v)?v:null;
 }
@@ -7790,7 +7816,8 @@ let _maxAllocMemo=null;
 // goes all into one stock; large capital is capped at a % that follows capital. The Rs 5,000
 // qualifying minimum is fixed again (v1472's Min Alloc box was a misreading).
 // 19 Oct (owner): the minimum is charge-based (strategy.js minOrderRs); an add to a held stock carries no new DP fee.
-function getMinAlloc(held=false){return held?RocketStrategy.minOrderRs(true):RocketStrategy.CONFIG.MIN_ALLOCATION_RS;}
+// 27 Oct 2026: LIFTOFF scalps pay same-day (intraday) charges, all proportional - one whole share qualifies.
+function getMinAlloc(held=false){return isLiftoffModel()?1:held?RocketStrategy.minOrderRs(true):RocketStrategy.CONFIG.MIN_ALLOCATION_RS;}
 function getAllInUpTo(){
   const v=parseFloat(document.getElementById('fAllIn')?.value);
   return Number.isFinite(v)&&v>0?v:0;
@@ -10625,6 +10652,8 @@ function currentModelTargetPct(){
   return Number.isFinite(t?.pct)&&t.pct>0?t.pct:RocketStrategy.CONFIG.TARGET_PCT;
 }
 function learnedBtstTarget(score,symbol=null){
+  // 27 Oct 2026: LIFTOFF scalp target = just above same-day breakeven, never closer than the ~0.26% GTT minimum.
+  if(isLiftoffModel())return {pct:0.26,y:0,model:'LIFTOFF',method:'scalp',n:0,through:null};
   return {pct:1.25,y:0,model:'COMMON',method:'bracket',n:0,through:null};
 }
 
@@ -11623,7 +11652,7 @@ function dashboardMarketCards(){
     add(1,'NSE',br?escHtml(br.at):'Awaiting scores',BTST.rankError?`<span style="color:var(--amber)">${escHtml(BTST.rankError)}</span>`:`${br?br.n:0} scored · floor ${btstMinScore()} · ${isEquitySession(Date.now())?'current session':'last session'}`);
     const go=ALL.filter(isStockEligible).length;
     add(2,'NSE',`${go} GO`,'Kite execution checks apply');
-    add(3,'NSE',signed(target?.pct??3),'Fixed start | ratcheting OCO');
+    add(3,'NSE',signed(target?.pct??3),isLiftoffModel()?'Scalp: breakeven after both sides’ charges, min GTT gap':'Fixed start | ratcheting OCO');
   }
   if(m.us){
     const trend=d?.marketTrendPct;
@@ -14309,6 +14338,8 @@ function startStreamRefresh(){
   if(_streamRefreshTimer) return;
   if(!startStreamRefresh.btst){startStreamRefresh.btst=setInterval(()=>{loadBtstPicks();loadKiteMargins();loadKiteGtts();loadProfitLockStatus();loadAutoBuyStatus();loadFilterOpportunity();loadModelPortfolios();syncSellBasketToKite();scheduleKiteBasketSync();try{resetCrossAlertsIfNewDay();checkCrossingAlerts();}catch(e){}},20000);loadBtstPicks();loadKiteMargins();loadKiteGtts();loadProfitLockStatus();loadAutoBuyStatus();loadFilterOpportunity();loadModelPortfolios();syncSellBasketToKite();try{resetCrossAlertsIfNewDay();checkCrossingAlerts();}catch(e){}
     try{seedSavedBasketCount();}catch(e){}}
+  // 27 Oct 2026: LIFTOFF publishes every 5 s and a crossing lasts 30 s, so the ranking and the Auto-Buy plan refresh every 5 s.
+  if(!startStreamRefresh.liftoff)startStreamRefresh.liftoff=setInterval(()=>{if(isLiftoffModel()){loadBtstPicks();scheduleKiteBasketSync();}},5000);
   _streamRefreshUiTimer=setInterval(()=>{try{refreshStrategySafety();renderLiveTapeBar();}catch(e){console.warn('Strategy safety refresh',e);}},1000);
   if(!_streamVisibilityBound){
     _streamVisibilityBound=true;
