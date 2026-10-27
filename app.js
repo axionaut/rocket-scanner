@@ -1,5 +1,5 @@
 const BUILD_TS='2026-10-27 IST'; // release build date (IST)
-const APP_VERSION=1567;
+const APP_VERSION=1568;
 const RADAR_SCORE_VERSION='v1419-recross-batches'; // Eligible on crossing the score floor at any time; selected model's evolving target and movement-based profit protection.
 
 // ── v1358: AN UNCAUGHT ERROR MUST NAME ITSELF ─────────────────────────────────────────────────
@@ -121,13 +121,13 @@ function updateModeUI(){
   if(brand){const v=document.getElementById('fModel')?.value;brand.textContent=(v==='CUM'?'Cumulative Change':v==='PATH'?v:'Ensemble')+' Engine';}
   document.querySelectorAll('.currency-lbl').forEach(el=>{el.textContent='₹';});
 }
-let ALL=[],FILT=[],PG=1,PGSZ=100,SCOL='score',SDIR=-1;
+let ALL=[],FILT=[],PG=1,PGSZ=100,SCOL='score',SDIR=-1,SORT_EXPLICIT=false;
 let SHOW_INELIGIBLE=false;
 function toggleBelowThreshold(){
   SHOW_INELIGIBLE=!SHOW_INELIGIBLE;
   updateIneligibleToggle();
   SCOL='score';
-  SDIR=-1;
+  SDIR=-1;SORT_EXPLICIT=false;
   saveFilterState();
   applyFilters();
 }
@@ -1353,44 +1353,65 @@ window.addEventListener('scroll',function(){
   if(btn) btn.classList.toggle('vis', window.scrollY>400);
 },{passive:true});
 
-// ── Generic sortable tables: click any <th> in a .ct table to sort ──
+// All plain tables share header sorting; tables with their own handlers keep those handlers.
+function tableCellSortValue(cell){
+  let value=cell?.dataset?.sortValue??cell?.querySelector?.('input,select')?.value??cell?.textContent??'';
+  value=String(value).trim().replace(/\u2212/g,'-');
+  if(!value||/^(?:\u2014|\u2013|--|N\/A|Unavailable|Not armed)$/i.test(value))return null;
+  if(/^\d{4}-\d{2}-\d{2}(?:[ T]|$)/.test(value)){const at=Date.parse(value);if(Number.isFinite(at))return at;}
+  const time=value.match(/^(\d{1,2}):(\d{2})(?::(\d{2}))?$/);
+  if(time)return Number(time[1])*3600+Number(time[2])*60+Number(time[3]||0);
+  const numeric=value.replace(/[\u20b9$\u20ac\u00a3,]/g,'').replace(/^(?:Rs\.?|INR|USD)\s*/i,'').trim();
+  const n=numeric.match(/^([+-]?(?:\d+(?:\.\d*)?|\.\d+))\s*(Cr|L|K|M|B|%)?(?=$|\s)/i);
+  if(n)return Number(n[1])*({cr:1e7,l:1e5,k:1e3,m:1e6,b:1e9}[n[2]?.toLowerCase()]||1);
+  return value;
+}
+function compareDisplayValues(a,b,dir){
+  if(a==null||b==null)return a==null?(b==null?0:1):-1;
+  return dir*(typeof a==='number'&&typeof b==='number'?a-b:String(a).localeCompare(String(b),undefined,{numeric:true,sensitivity:'base'}));
+}
+const PLAIN_TABLE_SORTS=new Map();
+function plainTableSortKey(table){
+  if(table.id)return table.id;
+  const host=table.parentElement.closest('[id]')||document.body;
+  return (host.id||'body')+':'+[...host.querySelectorAll('table')].indexOf(table)+':'+[...table.querySelectorAll('thead th')].map(th=>th.textContent.trim()).join('|');
+}
+function sortPlainTable(table,col,dir){
+  const body=table.tBodies[0],th=table.tHead?.rows[0]?.cells[col];
+  if(!body||!th)return;
+  table.querySelectorAll('thead th').forEach(h=>{if(h!==th){delete h.dataset.sortDir;h.removeAttribute('aria-sort');}});
+  th.dataset.sortDir=dir;th.setAttribute('aria-sort',dir==='asc'?'ascending':'descending');
+  const rows=[...body.rows],totals=rows.filter(r=>r.hasAttribute('data-total')||r.cells.length<=col||[...r.cells].some(c=>c.colSpan>1));
+  const fixed=new Set(totals);
+  const sorted=rows.filter(r=>!fixed.has(r)).map(row=>({row,value:tableCellSortValue(row.cells[col])}))
+    .sort((a,b)=>compareDisplayValues(a.value,b.value,dir==='asc'?1:-1)).map(x=>x.row).concat(totals);
+  if(sorted.some((row,i)=>row!==rows[i]))body.append(...sorted);
+}
 document.addEventListener('click',function(e){
-  const th=e.target.closest('.ct th');
-  if(!th) return;
-  const table=th.closest('table');
-  if(!table) return;
-  const thead=table.querySelector('thead');
-  const tbody=table.querySelector('tbody');
-  if(!thead||!tbody) return;
-  const ths=[...thead.querySelectorAll('th')];
-  const colIdx=ths.indexOf(th);
-  if(colIdx<0) return;
-  // Toggle direction
-  const prevDir=th.dataset.sortDir||'';
-  ths.forEach(t=>{t.dataset.sortDir='';t.style.color='';});
-  const dir=prevDir==='asc'?'desc':'asc';
-  th.dataset.sortDir=dir;
-  th.style.color='var(--blue)';
-  const rows=[...tbody.querySelectorAll('tr:not([data-total])')];
-  const totalRows=[...tbody.querySelectorAll('tr[data-total]')];
-  rows.sort((a,b)=>{
-    const cellA=(a.cells[colIdx]?.textContent||'').trim();
-    const cellB=(b.cells[colIdx]?.textContent||'').trim();
-    const numA=parseFloat(cellA.replace(/[₹,%+↑↓]/g,''));
-    const numB=parseFloat(cellB.replace(/[₹,%+↑↓]/g,''));
-    const aIsNum=isFinite(numA), bIsNum=isFinite(numB);
-    // If both are numbers, compare numerically
-    if(aIsNum&&bIsNum) return dir==='asc'?(numA-numB):(numB-numA);
-    // Push non-numeric (NaN, —, empty) to bottom regardless of direction
-    if(aIsNum&&!bIsNum) return -1;
-    if(!aIsNum&&bIsNum) return 1;
-    // Both non-numeric — compare as text
-    const cmp=cellA.localeCompare(cellB);
-    return dir==='asc'?cmp:-cmp;
-  });
-  rows.forEach(r=>tbody.appendChild(r));
-  totalRows.forEach(r=>tbody.appendChild(r)); // total always last
+  const th=e.target.closest('table thead th');
+  if(!th||th.closest('thead')?.id==='tHead'||th.onclick||th.colSpan>1||
+      !th.textContent.trim()||e.target.closest('input,select,button,a'))return;
+  const table=th.closest('table'),dir=th.dataset.sortDir==='asc'?'desc':'asc';
+  PLAIN_TABLE_SORTS.set(plainTableSortKey(table),{col:th.cellIndex,dir});
+  sortPlainTable(table,th.cellIndex,dir);
 });
+// Only tables explicitly sorted by the user are restored when a live panel replaces its rows.
+const plainTableSortObserver=new MutationObserver(changes=>{
+  if(!PLAIN_TABLE_SORTS.size)return;
+  const tables=new Set();
+  for(const change of changes){
+    const table=change.target.closest?.('table');if(table)tables.add(table);
+    for(const node of change.addedNodes)if(node.nodeType===1){
+      if(node.matches('table'))tables.add(node);
+      node.querySelectorAll('table').forEach(t=>tables.add(t));
+    }
+  }
+  for(const table of tables){
+    if(!table.isConnected||table.tHead?.id==='tHead')continue;
+    const saved=PLAIN_TABLE_SORTS.get(plainTableSortKey(table));if(saved)sortPlainTable(table,saved.col,saved.dir);
+  }
+});
+plainTableSortObserver.observe(document.body,{childList:true,subtree:true});
 
 // ── Toast notifications (replaces alert/confirm) ──
 function showToast(msg, duration=4000, isError=false){
@@ -4393,10 +4414,10 @@ function initScoreFloorUI(force=false){
     const key=scoreFloorStore(model),stored=localStorage.getItem(key),epoch=++_scoreFloorEpoch;
     const ranked=isRankedModel(model);
     el.value=stored===null?(ranked?'2.1':''):stored;
-    el.removeAttribute('min');el.removeAttribute('max');el.placeholder=model==='CUM'?'Set threshold':ranked?'2.1':'1.6';el.step=model==='CUM'?'any':'0.1';
+    el.removeAttribute('min');el.removeAttribute('max');el.placeholder=model==='CUM'?'Set threshold':ranked?'2.1':'1.6';el.step='0.1';
     el.style.width=model==='CUM'?'140px':'90px';
     const label=document.getElementById('scoreFloorLabel');if(label)label.textContent=model==='CUM'?'Cumulative Floor':(model==='ENS'?'Ensemble':model)+' Floor';
-    el.title=model==='CUM'?'Running sum of percentage changes from each previous live price. Starts at zero; persists across days and restarts. No minimum or maximum. Enter your own threshold to enable buy signals. Saved independently.':ranked?model+' only: its own ranking on the Ensemble scale (1.6 = top 1.5%, 2.2 = its #1). Default 2.1 ~ top 2-3 stocks. Saved independently.':'Ensemble only: mapped ensemble score. Default 1.6; no minimum. Saved independently from other models.';
+    el.title=model==='CUM'?'Rises deduct points; falls add points, using percentage change from each previous live price. Starts at zero; persists across days and restarts. No minimum or maximum. Enter your own threshold to enable buy signals. Saved independently.':ranked?model+' only: its own ranking on the Ensemble scale (1.6 = top 1.5%, 2.2 = its #1). Default 2.1 ~ top 2-3 stocks. Saved independently.':'Ensemble only: mapped ensemble score. Default 1.6; no minimum. Saved independently from other models.';
     _scoreFloorSeeded=model;_floorPushed=null;
     updateModeUI();
     readHelperResponse('/api/btst/min-score?model='+model,{timeout:6000}).then(d=>{
@@ -4657,7 +4678,7 @@ function selectedBtstModel(){
 }
 function refreshBtstModelView(){
   _btstRankMemo=null;
-  if(floorModel()==='CUM'){SCOL='score';SDIR=-1;}
+  if(!SORT_EXPLICIT&&floorModel()==='CUM'){SCOL='score';SDIR=-1;}
   for(const row of ALL){ROW_ACTION_MEMO.delete(row);setRadarEvidenceScore(row);}
   _dualPlanMemo=null;
   if(ALL.length)applyFilters({preservePage:true});
@@ -10047,7 +10068,7 @@ function _renderMethodologyInner(){
     <p>The selected model (Ensemble, PATH or Cumulative Change) supplies the recommendation table, counts, allocation and basket. Ensemble and PATH use the trained percentile scale (1.6 = top 1.5%, 2.2 = the model's #1). Cumulative Change has its own raw scale: a running sum of observed percentage changes. Its floor does not represent a percentile.</p>
     <div class="m-grid">
     <div class="m-card"><h4>Ensemble (default floor 1.6)</h4><p>Five learners (return regressor, +3% classifier, excess-over-market, downside quantile, extra-trees) trained walk-forward on the last 220 sessions of daily candles built from the minutes, retrained every 5 sessions; inputs are 52 daily features (returns 1 day to 3 months, gap, range, volume surges with today's volume projected, volatility, distance to highs and averages, RSI, stochastics, ADX, MACD, TradingView-style ratings, sector strength, market condition). The blend is the average of their rankings. Replayed through the paper account on its saved 1-21 Oct signals: +₹18,915 on ₹3.5L.</p></div>
-    <div class="m-card"><h4>Cumulative Change (set your own threshold)</h4><p>Each stock starts at zero on its first live observation. Every 20 seconds the helper adds (current price - previous observed price) / previous observed price ? 100. It saves the score and last price across days and restarts, including the next observed overnight move. No historical backfill, compounding, decay or score cap. Tracking continues with other models selected. The table orders the highest scores first; negative values are valid. There is no default threshold: enter any finite number to enable buy signals. This is a price record, with no trained prediction or claimed trading edge.</p></div>
+    <div class="m-card"><h4>Cumulative Change (set your own threshold)</h4><p>Each stock starts at zero on its first live observation. Every 20 seconds the helper subtracts (current price - previous observed price) / previous observed price * 100: rises deduct points and falls add points. The record restarted for this reversed direction on 27 Oct. It saves the score and last price across days and restarts, including the next observed overnight move. No historical backfill, compounding, decay or score cap. Tracking continues with other models selected. The table defaults to highest score first; click any data header to sort or reverse it. Negative values are valid. There is no default threshold: enter any finite number to enable buy signals. This is a price record, with no trained prediction or claimed trading edge.</p></div>
     <div class="m-card"><h4>PATH (default floor 2.1)</h4><p>Learns directly from our trade: from each completed minute, does +1.25% come before −1.25% (net of the real intraday or delivery charges)? Inputs are 12 minute-level features: time of day, distance from the open, VWAP and the day's high, the day's range, 1/5/15-minute moves, relative volume, turnover, opening gap, yesterday's range. Trained only on tradable stocks, retrained monthly. Held-out per trade: +0.38% / +0.27% (a model trained on shuffled outcomes: −0.22% / −0.30%). It is strongest only at its very top, hence the 2.1 floor.</p></div>
     <div class="m-card"><h4>1. Live score (throughout the session)</h4><p>The local helper runs <code>dev/btst_engine.py</code> every 2 minutes. Ensemble scores from daily candles plus today's partial candle; PATH and STACK score from the completed minutes of today, continuing a state saved after each close. If PATH or STACK cannot score (stale data, missing nightly state), that model shows WAIT and never substitutes another model; the Ensemble keeps running.</p></div>
     <div class="m-card"><h4>2. Buy on qualification</h4><p>A current live score clearing your floor can become GO throughout the session. Qualifying names share available capital by score, within saved allocation and execution limits (minimum ₹${RocketStrategy.CONFIG.MIN_ALLOCATION_RS.toLocaleString('en-IN')} per new position, from charges and the +${RocketStrategy.CONFIG.TARGET_PCT}% start; adds to held stocks need one share). A purchase consumes its crossing; a completed below-floor observation enables a fresh crossing, held or unheld. Price freshness, circuit, surveillance and EQ checks still apply. Market trend does not block entries.</p></div>
@@ -10075,11 +10096,11 @@ function getCols(){
     {key:'status',label:'Trigger Status',s:1},
     {key:'price',label:'Price/Day',s:1},
     {key:'highDistance',label:'From High',s:1},
-    {key:'depth',label:'Buyer / Seller',s:0},
+    {key:'depth',label:'Buyer / Seller',s:1},
     {key:'relvol',label:'RelVol',s:1},
     {key:'turnover',label:'Turnover',s:1},
-    {key:'tgt',label:'Target',s:0},
-    {key:'alloc',label:'Alloc',s:0},
+    {key:'tgt',label:'Target',s:1},
+    {key:'alloc',label:'Alloc',s:1},
 
   ]);
 }
@@ -11256,7 +11277,7 @@ function renderHead(){
         </div>
       </th>`;
     }
-    const arr=c.key===SCOL?(c.key==='score'?(floorModel()==='CUM'?'▼':SDIR===-1?'▲':'▼'):(SDIR===-1?'▼':'▲')):'';
+    const arr=c.key===SCOL?(c.key==='score'&&!SORT_EXPLICIT&&floorModel()!=='CUM'?(SDIR===-1?'▲':'▼'):(SDIR===-1?'▼':'▲')):'';
     // v1409: the score column is centre-aligned, so its header must match or the label floats
     // left of the numbers it titles.
     const align=c.key==='score'?' style="text-align:center"':'';
@@ -11548,7 +11569,7 @@ function buildIbkrBrokerPanel(){
     <div style="font-size:11px;color:var(--t2)">${age===null?'No broker snapshot yet':'Bridge sync '+age+'s ago / '+escHtml(new Date(d.asOf).toLocaleTimeString())}. Portfolio marks from TWS; live quote entitlement is unverified.${IBKR_FEED.error?' '+escHtml(IBKR_FEED.error):''}${!live&&d?' ? Last known values; not current.':''}</div>
     <div style="overflow:auto;margin-top:10px"><table style="width:100%;font-size:12px"><thead><tr><th>Position</th><th>Quantity</th><th>Avg cost / unit</th><th>TWS mark</th><th>Market value</th><th>Unrealized</th></tr></thead><tbody>${rows||'<tr><td colspan="6">'+(d?.complete?.positions?'No broker positions':'Position download pending')+'</td></tr>'}</tbody></table></div>
     <div style="margin-top:10px"><button class="btn" onclick="useIbkrCash()" ${live&&ibkrCash()!==null?'':'disabled'}>Use ${money(ibkrCash())} cash for US sizing</button> <small>Updates the suggested capital only when clicked.</small></div>
-    <details style="margin-top:10px"><summary>Open orders (${orders.length}) / session executions (${fills.length})</summary><div style="overflow:auto"><table style="width:100%;font-size:12px"><tbody>${orderRows||'<tr><td>'+(d?.complete?.orders?'No open orders reported':'Order download pending')+'</td></tr>'}</tbody></table><p style="font-size:11px">Executions available in this TWS session; this is not a complete historical performance record.</p><table style="width:100%;font-size:12px"><tbody>${fillRows||'<tr><td>No session executions reported</td></tr>'}</tbody></table></div></details>
+    <details style="margin-top:10px"><summary>Open orders (${orders.length}) / session executions (${fills.length})</summary><div style="overflow:auto"><table style="width:100%;font-size:12px"><thead><tr><th>Symbol</th><th>Side</th><th>Quantity</th><th>Type</th><th>Limit</th><th>Status</th></tr></thead><tbody>${orderRows||'<tr><td>'+(d?.complete?.orders?'No open orders reported':'Order download pending')+'</td></tr>'}</tbody></table><p style="font-size:11px">Executions available in this TWS session; this is not a complete historical performance record.</p><table style="width:100%;font-size:12px"><thead><tr><th>Symbol</th><th>Side</th><th>Quantity</th><th>Price</th><th>Time</th><th>Commission</th></tr></thead><tbody>${fillRows||'<tr><td>No session executions reported</td></tr>'}</tbody></table></div></details>
   </section>`;
 }
 function buildUsPositionsPanel(){const manual=buildUsManualPositionsPanel();return buildIbkrBrokerPanel()+(manual?'<details style="margin-top:10px"><summary>Manually recorded US ledger (separate)</summary>'+manual+'</details>':'');}
@@ -11607,8 +11628,7 @@ function usRows(){
 // Work on a display copy: filtering, allocation, selection and execution keep the NSE list.
 function dashboardRows(){
   const m=marketsShown(),nse=m.nse?FILT:[],us=m.us?usRows():[];
-  if(SCOL!=='score') return nse.concat(us);
-  return nse.concat(us).sort(compareModelScoreRows);
+  return sortDisplayRows(nse.concat(us));
 }
 function usMarketStatus(){
   const d=US_FEED.data;
@@ -11866,8 +11886,9 @@ function goP(p){PG=p;renderTable();scrollToSection('tHead');}
 function doSort(key){
   if(key){
     if(SCOL===key) SDIR=-SDIR; else{SCOL=key;SDIR=-1;}
+    SORT_EXPLICIT=true;
   }
-  applySort();PG=1;renderHead();renderTable();
+  applySort();PG=1;renderHead();renderTable();saveFilterState();
 }
 // Sort value for a column key. Numbers sort numerically, everything else as text; missing values
 // always sink to the bottom regardless of direction, so a blank cell never outranks a real one.
@@ -11876,10 +11897,10 @@ function sortValueOf(row,key){
   // `Number(undefined) ?? null` is NaN, not null - and one NaN makes every comparison against it
   // false, which silently scrambles the whole sort. Every numeric path returns null or a finite
   // number, never NaN.
-  const num=v=>{const n=Number(v);return Number.isFinite(n)?n:null;};
+  const num=v=>{if(v==null||v==='')return null;const n=Number(v);return Number.isFinite(n)?n:null;};
   if(key==='score'){
     // Sort the displayed model score only. Missing scores stay last, including below negative scores.
-    const ms=typeof btstScoreOf==='function'?btstScoreOf(row.symbol):null;
+    const ms=row._us?row.score:typeof btstScoreOf==='function'?btstScoreOf(row.symbol):null;
     if(!Number.isFinite(ms)) return null;
     return ms;
   }
@@ -11892,9 +11913,12 @@ function sortValueOf(row,key){
   if(key==='status'){
     // GO first, then WAIT, then BLOCKED - decision order, not alphabetical. Negated because the
     // first click on any column is descending, and on this column "best first" is what's wanted.
-    const st=getRowActionState(row).state;
+    const st=row._us?(row.go?'GO':'WAIT'):getRowActionState(row).state;
     return st==='GO'?2:st==='WAIT'?1:0;
   }
+  if(key==='depth')return row._us?null:tableCellSortValue({textContent:strategySignalCells(row).depth});
+  if(key==='tgt')return row._us?num(row.tgtPct):num(getRowExitPolicy(row,getBuyPrice(row)).targetPct);
+  if(key==='turnover'&&row._us)return num(row.turnover20);
   if(key==='price') return num(row.price);
   if(key==='relvol') return num(RocketStrategy.inputs(row).rvol);
   const v=row[key];
@@ -11906,11 +11930,11 @@ function sortValueOf(row,key){
 // qualified order is one floor-nearest list (1.20,1.21,...). Fresh crossings
 // and pins are labels, never score-sort partitions. Share the final display path.
 function compareModelScoreRows(a,b){
-  if(floorModel()==='CUM'){
+  if(SORT_EXPLICIT||floorModel()==='CUM'){
     const av=a._us?a.score:btstScoreOf(a.symbol),bv=b._us?b.score:btstScoreOf(b.symbol);
     const an=!Number.isFinite(av),bn=!Number.isFinite(bv);
     if(an!==bn)return an?1:-1;
-    return (!an?bv-av:0)||String(a.symbol).localeCompare(String(b.symbol));
+    return (!an?(av-bv)*SDIR:0)||String(a.symbol).localeCompare(String(b.symbol));
   }
   const info=row=>{
     const score=row._us?row.score:btstScoreOf(row.symbol),floor=row._us?Number(row.fl):btstMinScore();
@@ -11927,22 +11951,17 @@ function compareModelScoreRows(a,b){
   }
   return String(a.symbol).localeCompare(String(b.symbol));
 }
+function sortDisplayRows(rows){
+  if(SCOL==='score')return rows.sort(compareModelScoreRows);
+  let allocations=null;
+  if(SCOL==='alloc')allocations=computeAlloc(getEffectiveCapital(),FILT.filter(row=>SELECTED.has(row.symbol)));
+  const values=new Map(rows.map(row=>[row,SCOL==='alloc'?
+    (row._us?usPlan().alloc[row.symbol]?.alloc:allocations?.[row.symbol]?.alloc)??null:sortValueOf(row,SCOL)]));
+  return rows.sort((a,b)=>compareDisplayValues(values.get(a),values.get(b),SDIR)||String(a.symbol).localeCompare(String(b.symbol)));
+}
 function applySort(){
   if(!SCOL){SCOL='score';SDIR=-1;}
-  FILT.sort((a,b)=>{
-    if(SCOL==='score')return compareModelScoreRows(a,b);
-    const ap=isPinned(a.symbol),bp=isPinned(b.symbol);
-    if(ap!==bp) return ap?-1:1;   // pinned rows first, then the chosen sort within each group
-    const av=sortValueOf(a,SCOL),bv=sortValueOf(b,SCOL);
-    const an=av===null,bn=bv===null;
-    if(an&&bn) return radarRankTieBreak(a,b);
-    if(an) return 1;            // missing sinks, in both directions
-    if(bn) return -1;
-    let c;
-    if(typeof av==='number'&&typeof bv==='number') c=av-bv;
-    else c=String(av).localeCompare(String(bv),undefined,{numeric:true,sensitivity:'base'});
-    return (SDIR===-1?-c:c)||radarRankTieBreak(a,b);
-  });
+  sortDisplayRows(FILT);
 }
 function toggleFilters(){
   const p=document.getElementById('ctrlsPanel');
@@ -16183,6 +16202,7 @@ function saveFilterState(){
     dropThin:document.getElementById('fDropThin')?.value??'',
     sortCol:SCOL,
     sortDir:SDIR,
+    sortExplicit:SORT_EXPLICIT,
   };
   localStorage.setItem(modeKey(SCANNER_STORE), JSON.stringify(state));
   const capEl=document.getElementById('fCapital');
@@ -16245,6 +16265,7 @@ function loadFilterState(){
     const legacy=new Set(['_rank','rank','rocketScore','snapshotChange','tslRefPoints','velocityPotential','delivPct','volume','action','risk','chk']);
     if(state.sortCol&&!legacy.has(state.sortCol)){
       SCOL=state.sortCol;
+      SORT_EXPLICIT=state.sortExplicit===true;
       if(state.sortDir!=null) SDIR=state.sortDir;
     } else {
       SCOL='score';
