@@ -1,5 +1,5 @@
 const BUILD_TS='2026-10-27 IST'; // release build date (IST)
-const APP_VERSION=1570;
+const APP_VERSION=1571;
 const RADAR_SCORE_VERSION='v1419-recross-batches'; // Eligible on crossing the score floor at any time; selected model's evolving target and movement-based profit protection.
 
 // ── v1358: AN UNCAUGHT ERROR MUST NAME ITSELF ─────────────────────────────────────────────────
@@ -4581,6 +4581,22 @@ function firstScoreBadgeHtml(fc,currentPrice,currentAt=null){
   return `<div style="font-size:11px;color:var(--cyan);font-family:'DM Mono',monospace;font-weight:700;margin-top:2px" title="${escHtml(title)}">⏱ 1st ≥${fc.floor.toFixed(2)}: ${fc.already?'by ':''}${hm(fc.t)}`
     +(hasPrice?` · ${approx?'~':''}₹${price.toFixed(2)}`:' · price unavailable')
     +(delta!==null?`<span style="color:var(--${delta>0?'green':delta<0?'red':'t3'});white-space:nowrap"> · ${approx?'~':''}${signed(delta,'₹')} (${signed(pct)}%) since</span>`:hasPrice?' · current price unavailable':'')+'</div>';
+}
+// v1571: total of the Trigger Status "since" moves over the listed rows, one share each, shown in the column header.
+let TRIGGER_PNL_HTML='';
+function updateTriggerPnl(rows){
+  let n=0,abs=0,ref=0,pctSum=0;
+  for(const s of rows||[]){
+    if(!s||s._us)continue;
+    const fc=firstScoreAtFloor(s.symbol),price=Number(fc?.price),q=crossingCurrentQuote(s.symbol,fc),cur=Number(q?.price);
+    if(!(price>0&&cur>0))continue;
+    n++;abs+=cur-price;ref+=price;pctSum+=(cur-price)/price*100;
+  }
+  const signed=(v,p='')=>(v>0?'+':v<0?'−':'')+p+Math.abs(v).toFixed(2);
+  const pct=ref>0?abs/ref*100:0,tone=abs>0?'green':abs<0?'red':'t3';
+  TRIGGER_PNL_HTML=n?`<div title="${escHtml(`Sum of the 'since' moves of ${n} listed stocks, one share each: ₹${abs.toFixed(2)} on ₹${ref.toFixed(2)} of first-crossing prices. Equal-weight average: ${signed(pctSum/n)}%. Gross, before charges; not account P&L.`)}" style="font-size:11px;font-family:'DM Mono',monospace;font-weight:700;color:var(--${tone});text-transform:none;letter-spacing:0;margin-top:2px;white-space:nowrap">Σ ${signed(abs,'₹')} (${signed(pct)}%) · ${n}</div>`:'';
+  const el=document.getElementById('trigger-pnl');
+  if(el)el.innerHTML=TRIGGER_PNL_HTML;
 }
 function btstToday(){
   const d=BTST.data;
@@ -11303,7 +11319,7 @@ function renderHead(){
     // v1409: the score column is centre-aligned, so its header must match or the label floats
     // left of the numbers it titles.
     const align=c.key==='score'?' style="text-align:center"':'';
-    return`<th data-key="${c.key}"${align} class="${c.key===SCOL?'sorted':''}" ${c.s?`onclick="doSort('${c.key}')"`:''}>${c.label}<span class="sa">${arr}</span></th>`;
+    return`<th data-key="${c.key}"${align} class="${c.key===SCOL?'sorted':''}" ${c.s?`onclick="doSort('${c.key}')"`:''}>${c.label}<span class="sa">${arr}</span>${c.key==='status'?`<span id="trigger-pnl">${TRIGGER_PNL_HTML}</span>`:''}</th>`;
   }).join('')+'</tr>';
   // Drag-to-reorder columns; the saved order re-enters through getCols() (v536).
   attachColDrag(document.getElementById('tHead').parentElement,'main-rankings',()=>{COLS=getCols();renderHead();renderTable();});
@@ -11765,6 +11781,7 @@ function renderTable(){
   // Pagination restored in v534 (owner): 100 rows/page keeps the DOM small, which is
   // also what kept the full-universe render off the typing path.
   const DASH=dashboardRows();DASH_LEN=DASH.length;
+  updateTriggerPnl(DASH);
   PG=Math.max(1,Math.min(PG,Math.ceil(DASH_LEN/PGSZ)||1));
   const start=(PG-1)*PGSZ,pg=DASH.slice(start,start+PGSZ);
   document.getElementById('tBody').innerHTML=pg.map(s=>{
