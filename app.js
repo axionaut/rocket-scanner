@@ -1,5 +1,5 @@
 const BUILD_TS='2026-10-27 IST'; // release build date (IST)
-const APP_VERSION=1560;
+const APP_VERSION=1561;
 const RADAR_SCORE_VERSION='v1419-recross-batches'; // Eligible on crossing the score floor at any time; selected model's evolving target and movement-based profit protection.
 
 // ── v1358: AN UNCAUGHT ERROR MUST NAME ITSELF ─────────────────────────────────────────────────
@@ -12414,10 +12414,10 @@ try{LIFTOFF_COLLAPSED=localStorage.getItem('rs_liftoff_collapsed')==='1';}catch(
 function toggleLiftoff(){LIFTOFF_COLLAPSED=!LIFTOFF_COLLAPSED;try{localStorage.setItem('rs_liftoff_collapsed',LIFTOFF_COLLAPSED?'1':'0');}catch(e){}renderLiftoff(LIFTOFF_LAST);}
 function liftoffFilter(k){LIFTOFF_FILTER=LIFTOFF_FILTER===k?null:k;renderLiftoff(LIFTOFF_LAST);}
 // Change from the price at the stock's first BLAST today to the current LTP (per share and %), as the main table's first-crossing badge.
-function liftoffSince(r){
-  if(!(r.firstBlastPx>0)||!(r.ltp>0))return '-';
-  const d=r.ltp-r.firstBlastPx,p=d/r.firstBlastPx*100,cls=d>0?'lo-up':d<0?'lo-dn':'';
-  return `<span class="${cls}">${d>=0?'+':'−'}₹${Math.abs(d).toFixed(2)} (${p>=0?'+':''}${p.toFixed(2)}%)</span> <span style="color:var(--t3)">from ₹${r.firstBlastPx.toFixed(2)}</span>`;
+function liftoffSince(r,px=r.firstBlastPx){
+  if(!(px>0)||!(r.ltp>0))return '-';
+  const d=r.ltp-px,p=d/px*100,cls=d>0?'lo-up':d<0?'lo-dn':'';
+  return `<span class="${cls}">${d>=0?'+':'−'}₹${Math.abs(d).toFixed(2)} (${p>=0?'+':''}${p.toFixed(2)}%)</span> <span style="color:var(--t3)">from ₹${px.toFixed(2)}</span>`;
 }
 function liftoffTime(ms){return ms?new Date(ms+19800000).toISOString().slice(11,19):'-';}
 function renderLiftoff(j){
@@ -12432,10 +12432,10 @@ function renderLiftoff(j){
     return `<tr class="${isNew?'lo-new':''}"><td><b>${escHtml(r.sym)}</b>${chartLinkButtons(r.sym)}</td><td><span class="lo-chip lo-${escHtml(r.state)}">${escHtml(r.state)}</span></td>`
       +`<td>${r.atHigh?'day high':''}</td><td>${r.score.toFixed(1)}</td><td class="${cls(r.m1)}">${r.m1.toFixed(1)}×</td><td>${r.v1.toFixed(1)}×</td>`
       +`<td class="${cls(r.m5)}">${r.m5.toFixed(1)}×</td><td>${r.v5.toFixed(1)}×</td><td class="${cls(r.dayPct)}">${r.dayPct>0?'+':''}${r.dayPct.toFixed(2)}%</td>`
-      +`<td>₹${Number(r.ltp).toFixed(2)}</td><td>${liftoffTime(r.firstBlastAt)}</td><td>${liftoffSince(r)}</td></tr>`;}).join('');
+      +`<td>₹${Number(r.ltp).toFixed(2)}</td><td>${liftoffTime(r.firstInStateAt)}</td><td>${liftoffSince(r,r.firstInStatePx)}</td><td>${liftoffTime(r.firstBlastAt)}</td><td>${liftoffSince(r)}</td></tr>`;}).join('');
   host.innerHTML=`<div class="lo-card${LIFTOFF_COLLAPSED?' lo-collapsed':''}"><div class="lo-head"><div><button type="button" class="lo-toggle" onclick="toggleLiftoff()" aria-expanded="${!LIFTOFF_COLLAPSED}" title="${LIFTOFF_COLLAPSED?'Expand':'Collapse'} the liftoff board">${LIFTOFF_COLLAPSED?'▸':'▾'}</button> <b>Liftoff board</b> <span>live · ${liftoffTime(j.asOf)} · ${j.scored||0} stocks scored${LIFTOFF_FILTER?' · showing '+LIFTOFF_FILTER+' only':''}</span></div>`
     +`<div class="lo-counts">${['BLAST','RUN','FLUCT','FALL','LOCKED'].map(chip).join('')}</div></div>`
-    +(LIFTOFF_COLLAPSED?'':rows?`<div class="lo-wrap"><table><thead><tr><th>Symbol</th><th>State</th><th></th><th>Score</th><th>1m move</th><th>1m vol</th><th>5m move</th><th>5m vol</th><th>Day</th><th>LTP</th><th>1st blast</th><th>Since 1st blast</th></tr></thead><tbody>${rows}</tbody></table></div>`
+    +(LIFTOFF_COLLAPSED?'':rows?`<div class="lo-wrap"><table><thead><tr><th>Symbol</th><th>State</th><th></th><th>Score</th><th>1m move</th><th>1m vol</th><th>5m move</th><th>5m vol</th><th>Day</th><th>LTP</th><th title="First time today this stock entered the state it is in now">1st in state</th><th>Since then</th><th>1st blast</th><th>Since 1st blast</th></tr></thead><tbody>${rows}</tbody></table></div>`
       :`<div class="lo-note">${LIFTOFF_FILTER?'No stock is in '+LIFTOFF_FILTER+' right now.':'No stock is moving up faster than its own normal right now.'}</div>`)
     +(LIFTOFF_COLLAPSED?'</div>':`<div class="lo-note">Move and volume are multiples of the stock's own normal minute (last 20 sessions). BLAST = 1m move ≥3× and volume ≥5× normal, rising, up on the day. LOCKED = no sellers at the high. Click a state to show only those; click it again for all. Display only; it never makes a stock GO.</div></div>`);
 }
