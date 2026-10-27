@@ -1,5 +1,5 @@
 const BUILD_TS='2026-10-27 IST'; // release build date (IST)
-const APP_VERSION=1562;
+const APP_VERSION=1563;
 const RADAR_SCORE_VERSION='v1419-recross-batches'; // Eligible on crossing the score floor at any time; selected model's evolving target and movement-based profit protection.
 
 // ── v1358: AN UNCAUGHT ERROR MUST NAME ITSELF ─────────────────────────────────────────────────
@@ -12412,7 +12412,7 @@ async function readHelperResponse(path,options={}){
 const LIFTOFF_SEEN=new Map();let LIFTOFF_FILTER=null,LIFTOFF_LAST=null,LIFTOFF_COLLAPSED=false;
 try{LIFTOFF_COLLAPSED=localStorage.getItem('rs_liftoff_collapsed')==='1';}catch(e){}
 function toggleLiftoff(){LIFTOFF_COLLAPSED=!LIFTOFF_COLLAPSED;try{localStorage.setItem('rs_liftoff_collapsed',LIFTOFF_COLLAPSED?'1':'0');}catch(e){}renderLiftoff(LIFTOFF_LAST);}
-function liftoffFilter(k){LIFTOFF_FILTER=LIFTOFF_FILTER===k?null:k;renderLiftoff(LIFTOFF_LAST);}
+function liftoffFilter(k){LIFTOFF_FILTER=k;renderLiftoff(LIFTOFF_LAST);}
 // Change from the price at the stock's first BLAST today to the current LTP (per share and %), as the main table's first-crossing badge.
 function liftoffSince(r,px=r.firstBlastPx){
   if(!(px>0)||!(r.ltp>0))return '-';
@@ -12421,23 +12421,24 @@ function liftoffSince(r,px=r.firstBlastPx){
 }
 function liftoffTime(ms){return ms?new Date(ms+19800000).toISOString().slice(11,19):'-';}
 function renderLiftoff(j){
+  // 27 Oct 2026 (owner): the board is a RECORD of the liftoff states. For each state: every stock that entered it today
+  // (first entry time and price) and its change since, and a per-state summary, so the state that is usually followed by
+  // gains can be chosen in the Liftoff states dropdown as the basis to buy.
   const host=document.getElementById('liftoffBoard');if(!host)return;
   LIFTOFF_LAST=j;
-  if(!j||!j.ok||!j.asOf||Date.now()-j.asOf>60000){host.innerHTML='';return;}
-  const c=j.counts||{},chip=k=>`<button type="button" class="lo-chip lo-${k}${LIFTOFF_FILTER===k?' lo-on':''}" onclick="liftoffFilter('${k}')" title="${LIFTOFF_FILTER===k?'Show all':'Show only '+k}">${k} ${c[k]||0}</button>`;
-  const list=LIFTOFF_FILTER?((j.byState||{})[LIFTOFF_FILTER]||[]):(j.rows||[]);
-  const rows=list.slice(0,LIFTOFF_FILTER?30:15).map(r=>{
-    const isNew=!LIFTOFF_SEEN.has(r.sym);LIFTOFF_SEEN.set(r.sym,j.asOf);
-    const cls=v=>v>0?'lo-up':v<0?'lo-dn':'';
-    return `<tr class="${isNew?'lo-new':''}"><td><b>${escHtml(r.sym)}</b>${chartLinkButtons(r.sym)}</td><td><span class="lo-chip lo-${escHtml(r.state)}">${escHtml(r.state)}</span></td>`
-      +`<td>${r.atHigh?'day high':''}</td><td>${r.score.toFixed(1)}</td><td class="${cls(r.m1)}">${r.m1.toFixed(1)}×</td><td>${r.v1.toFixed(1)}×</td>`
-      +`<td class="${cls(r.m5)}">${r.m5.toFixed(1)}×</td><td>${r.v5.toFixed(1)}×</td><td class="${cls(r.dayPct)}">${r.dayPct>0?'+':''}${r.dayPct.toFixed(2)}%</td>`
-      +`<td>₹${Number(r.ltp).toFixed(2)}</td><td>${liftoffTime(r.firstInStateAt)}</td><td>${liftoffSince(r,r.firstInStatePx)}</td></tr>`;}).join('');
-  host.innerHTML=`<div class="lo-card${LIFTOFF_COLLAPSED?' lo-collapsed':''}"><div class="lo-head"><div><button type="button" class="lo-toggle" onclick="toggleLiftoff()" aria-expanded="${!LIFTOFF_COLLAPSED}" title="${LIFTOFF_COLLAPSED?'Expand':'Collapse'} the liftoff board">${LIFTOFF_COLLAPSED?'▸':'▾'}</button> <b>Liftoff board</b> <span>live · ${liftoffTime(j.asOf)} · ${j.scored||0} stocks scored${LIFTOFF_FILTER?' · showing '+LIFTOFF_FILTER+' only':''}</span></div>`
-    +`<div class="lo-counts">${['BLAST','RUN','FLUCT','FALL','LOCKED'].map(chip).join('')}</div></div>`
-    +(LIFTOFF_COLLAPSED?'':rows?`<div class="lo-wrap"><table><thead><tr><th>Symbol</th><th>State</th><th></th><th>Score</th><th>1m move</th><th>1m vol</th><th>5m move</th><th>5m vol</th><th>Day</th><th>LTP</th><th title="When this stock first entered the state it is in now (today)">Entered state</th><th title="Price change since it first entered this state">Since entry</th></tr></thead><tbody>${rows}</tbody></table></div>`
-      :`<div class="lo-note">${LIFTOFF_FILTER?'No stock is in '+LIFTOFF_FILTER+' right now.':'No stock is moving up faster than its own normal right now.'}</div>`)
-    +(LIFTOFF_COLLAPSED?'</div>':`<div class="lo-note">Move and volume are multiples of the stock's own normal minute (last 20 sessions). BLAST = 1m move ≥3× and volume ≥5× normal, rising, up on the day. LOCKED = no sellers at the high. Click a state to show only those; click it again for all. Display only; it never makes a stock GO.</div></div>`);
+  if(!j||!j.ok||!j.asOf||Date.now()-j.asOf>60000||!j.summary){host.innerHTML='';return;}
+  const states=['BLAST','RUN','FLUCT','FALL','LOCKED'],sel=LIFTOFF_FILTER||'BLAST',c=j.counts||{};
+  const pct=v=>v==null?'-':`<span class="${v>0?'lo-up':v<0?'lo-dn':''}">${v>0?'+':''}${Number(v).toFixed(2)}%</span>`;
+  // Sorted by expectancy (owner: a metric of win rate and profit): win rate x avg win + loss rate x avg loss.
+  const ranked=states.slice().sort((x,y)=>((j.summary[y]||{}).n?j.summary[y].expectancy:-1e9)-((j.summary[x]||{}).n?j.summary[x].expectancy:-1e9));
+  const sumRows=ranked.map(k=>{const s=j.summary[k]||{n:0};return `<tr class="lo-sum${k===sel?' lo-sel':''}" onclick="liftoffFilter('${k}')" style="cursor:pointer"><td><span class="lo-chip lo-${k}">${k}</span></td><td><b>${s.n?pct(s.expectancy):'-'}</b></td><td>${s.n?s.upPct+'%':'-'}</td><td>${s.n?pct(s.avgWin):'-'}</td><td>${s.n?pct(s.avgLoss):'-'}</td><td>${s.n||0}</td><td>${s.n?pct(s.median):'-'}</td><td>${s.n?pct(s.best):'-'}</td><td>${s.n?pct(s.worst):'-'}</td><td>${c[k]||0}</td></tr>`;}).join('');
+  const rec=((j.record||{})[sel]||[]).map(r=>`<tr><td><b>${escHtml(r.sym)}</b>${chartLinkButtons(r.sym)}</td><td>${liftoffTime(r.at)}</td><td>₹${Number(r.px).toFixed(2)}</td><td>₹${Number(r.ltp).toFixed(2)}</td><td>${liftoffSince({ltp:r.ltp},r.px)}</td><td>${r.now?`<span class="lo-chip lo-${escHtml(r.now)}">${escHtml(r.now)}</span>`:'-'}</td></tr>`).join('');
+  host.innerHTML=`<div class="lo-card${LIFTOFF_COLLAPSED?' lo-collapsed':''}"><div class="lo-head"><div><button type="button" class="lo-toggle" onclick="toggleLiftoff()" aria-expanded="${!LIFTOFF_COLLAPSED}" title="${LIFTOFF_COLLAPSED?'Expand':'Collapse'} the liftoff board">${LIFTOFF_COLLAPSED?'▸':'▾'}</button> <b>Liftoff board</b> <span>live · ${liftoffTime(j.asOf)} · ${j.scored||0} stocks scored · change since each stock first entered a state today</span></div></div>`
+    +(LIFTOFF_COLLAPSED?'</div>':
+      `<div class="lo-wrap"><table><thead><tr><th>State</th><th title="Win rate x average win + loss rate x average loss, per entry">Expectancy ▼</th><th>Win rate</th><th>Avg win</th><th>Avg loss</th><th>Entered today</th><th>Median</th><th>Best</th><th>Worst</th><th>In it now</th></tr></thead><tbody>${sumRows}</tbody></table></div>`
+      +`<div class="lo-note" style="margin:10px 0 4px">Stocks that entered <b>${sel}</b> today, newest first (click a state above to switch):</div>`
+      +(rec?`<div class="lo-wrap lo-scroll"><table><thead><tr><th>Symbol</th><th>Entered</th><th>Entry price</th><th>LTP</th><th>Since entry</th><th>State now</th></tr></thead><tbody>${rec}</tbody></table></div>`:`<div class="lo-note">No stock has entered ${sel} today yet.</div>`)
+      +`<div class="lo-note">Each stock counts once per state: its first entry today, compared with its latest price. Move and volume are multiples of the stock's own normal minute (last 20 sessions). BLAST = 1m move ≥3× and volume ≥5× normal, rising, up on the day; RUN = 5m move ≥1.5× normal, still rising; FALL = falling fast; LOCKED = no sellers at the high. Choose the state that makes money in the Liftoff states dropdown.</div></div>`);
 }
 async function pollLiftoff(){
   if(document.hidden)return;
