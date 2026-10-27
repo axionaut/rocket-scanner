@@ -1,5 +1,5 @@
 const BUILD_TS='2026-10-27 IST'; // release build date (IST)
-const APP_VERSION=1555;
+const APP_VERSION=1556;
 const RADAR_SCORE_VERSION='v1419-recross-batches'; // Eligible on crossing the score floor at any time; selected model's evolving target and movement-based profit protection.
 
 // ── v1358: AN UNCAUGHT ERROR MUST NAME ITSELF ─────────────────────────────────────────────────
@@ -11012,7 +11012,6 @@ function _planDualBasketUncached(rows,capital){
     let budget=Math.min(remaining,maxAlloc>0?Math.min(share,maxAlloc):share,liquidityCap);
     // Adds to a held stock share its DP fee: one share is the minimum (19 Oct).
     const rowMin=heldNow[r.symbol]?Math.max(getMinAlloc(true),price):minRequired;
-    const rowMinTxt=heldNow[r.symbol]?'one-share add':minTxt;
     let qty=0;
     if(!reason){
       candidatesLeft--;
@@ -11028,7 +11027,12 @@ function _planDualBasketUncached(rows,capital){
       }
     }
     const cost=qty*price,charges=qty>0?calcZerodhaCharges(price,qty,false,false,false):0,debit=cost+charges;
-    if(!reason&&(!(qty>0)||!(cost>=rowMin)||debit>budget))reason=liquidityCap<rowMin?`Market-impact cap below the ${rowMinTxt} minimum`:`Available cash / per-stock cap / market-impact cap cannot fund the ${rowMinTxt} minimum plus buy charges`;
+    if(!reason&&(!(qty>0)||!(cost>=rowMin)||debit>budget)){
+      // 27 Oct 2026: name the amount needed and each limit, so the binding one is visible (LIFTOFF's minimum is one share).
+      const needQty=Math.max(1,Math.ceil(rowMin/price)),need=needQty*price+calcZerodhaCharges(price,needQty,false,false,false);
+      const inr=v=>'₹'+Math.round(v).toLocaleString('en-IN');
+      reason=`Cannot fund ${needQty===1?'one share':needQty+' shares'} (${inr(need)} incl. buy charges): cash left ${inr(remaining)}, per-stock cap ${inr(maxAlloc>0?Math.min(share,maxAlloc):share)}, market-impact cap ${Number.isFinite(liquidityCap)?inr(liquidityCap):'none'}`;
+    }
     if(reason){reasons.set(r.symbol,reason);alloc[r.symbol]={alloc:0,debit:0,qty:0,rejected:true,reason};continue;}
     r.basketModel='strategy';
     const exitPolicy=getRowExitPolicy(r,price,null,null,qty);
@@ -12387,7 +12391,9 @@ async function readHelperResponse(path,options={}){
 }
 // v1553 (owner, 27 Oct): live liftoff board from the helper (dev/liftoff-live.cjs). Each stock's last 1 and 5 minutes
 // against its own normal move and volume, ranked across the market every 2 s. Display only: it never makes a stock GO.
-const LIFTOFF_SEEN=new Map();let LIFTOFF_FILTER=null,LIFTOFF_LAST=null;
+const LIFTOFF_SEEN=new Map();let LIFTOFF_FILTER=null,LIFTOFF_LAST=null,LIFTOFF_COLLAPSED=false;
+try{LIFTOFF_COLLAPSED=localStorage.getItem('rs_liftoff_collapsed')==='1';}catch(e){}
+function toggleLiftoff(){LIFTOFF_COLLAPSED=!LIFTOFF_COLLAPSED;try{localStorage.setItem('rs_liftoff_collapsed',LIFTOFF_COLLAPSED?'1':'0');}catch(e){}renderLiftoff(LIFTOFF_LAST);}
 function liftoffFilter(k){LIFTOFF_FILTER=LIFTOFF_FILTER===k?null:k;renderLiftoff(LIFTOFF_LAST);}
 // Change from the price at the stock's first BLAST today to the current LTP (per share and %), as the main table's first-crossing badge.
 function liftoffSince(r){
@@ -12409,11 +12415,11 @@ function renderLiftoff(j){
       +`<td>${r.atHigh?'day high':''}</td><td>${r.score.toFixed(1)}</td><td class="${cls(r.m1)}">${r.m1.toFixed(1)}×</td><td>${r.v1.toFixed(1)}×</td>`
       +`<td class="${cls(r.m5)}">${r.m5.toFixed(1)}×</td><td>${r.v5.toFixed(1)}×</td><td class="${cls(r.dayPct)}">${r.dayPct>0?'+':''}${r.dayPct.toFixed(2)}%</td>`
       +`<td>₹${Number(r.ltp).toFixed(2)}</td><td>${liftoffTime(r.firstBlastAt)}</td><td>${liftoffSince(r)}</td></tr>`;}).join('');
-  host.innerHTML=`<div class="lo-card"><div class="lo-head"><div><b>Liftoff board</b> <span>live · ${liftoffTime(j.asOf)} · ${j.scored||0} stocks scored${LIFTOFF_FILTER?' · showing '+LIFTOFF_FILTER+' only':''}</span></div>`
+  host.innerHTML=`<div class="lo-card${LIFTOFF_COLLAPSED?' lo-collapsed':''}"><div class="lo-head"><div><button type="button" class="lo-toggle" onclick="toggleLiftoff()" aria-expanded="${!LIFTOFF_COLLAPSED}" title="${LIFTOFF_COLLAPSED?'Expand':'Collapse'} the liftoff board">${LIFTOFF_COLLAPSED?'▸':'▾'}</button> <b>Liftoff board</b> <span>live · ${liftoffTime(j.asOf)} · ${j.scored||0} stocks scored${LIFTOFF_FILTER?' · showing '+LIFTOFF_FILTER+' only':''}</span></div>`
     +`<div class="lo-counts">${['BLAST','RUN','FLUCT','FALL','LOCKED'].map(chip).join('')}</div></div>`
-    +(rows?`<div class="lo-wrap"><table><thead><tr><th>Symbol</th><th>State</th><th></th><th>Score</th><th>1m move</th><th>1m vol</th><th>5m move</th><th>5m vol</th><th>Day</th><th>LTP</th><th>1st blast</th><th>Since 1st blast</th></tr></thead><tbody>${rows}</tbody></table></div>`
+    +(LIFTOFF_COLLAPSED?'':rows?`<div class="lo-wrap"><table><thead><tr><th>Symbol</th><th>State</th><th></th><th>Score</th><th>1m move</th><th>1m vol</th><th>5m move</th><th>5m vol</th><th>Day</th><th>LTP</th><th>1st blast</th><th>Since 1st blast</th></tr></thead><tbody>${rows}</tbody></table></div>`
       :`<div class="lo-note">${LIFTOFF_FILTER?'No stock is in '+LIFTOFF_FILTER+' right now.':'No stock is moving up faster than its own normal right now.'}</div>`)
-    +`<div class="lo-note">Move and volume are multiples of the stock's own normal minute (last 20 sessions). BLAST = 1m move ≥3× and volume ≥5× normal, rising, up on the day. LOCKED = no sellers at the high. Click a state to show only those; click it again for all. Display only; it never makes a stock GO.</div></div>`;
+    +(LIFTOFF_COLLAPSED?'</div>':`<div class="lo-note">Move and volume are multiples of the stock's own normal minute (last 20 sessions). BLAST = 1m move ≥3× and volume ≥5× normal, rising, up on the day. LOCKED = no sellers at the high. Click a state to show only those; click it again for all. Display only; it never makes a stock GO.</div></div>`);
 }
 async function pollLiftoff(){
   if(document.hidden)return;
