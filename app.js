@@ -1,5 +1,5 @@
 const BUILD_TS='2026-10-27 IST'; // release build date (IST)
-const APP_VERSION=1559;
+const APP_VERSION=1560;
 const RADAR_SCORE_VERSION='v1419-recross-batches'; // Eligible on crossing the score floor at any time; selected model's evolving target and movement-based profit protection.
 
 // ── v1358: AN UNCAUGHT ERROR MUST NAME ITSELF ─────────────────────────────────────────────────
@@ -4843,6 +4843,11 @@ function btstCrossingState(s){
   if(!r.crossingsKnown) return {state:'WAIT',reason:'Waiting for an engine run that reports this run’s floor crossings.'};
   if(!r.crossed.has(key)){
     const at=first?new Date(first.t).toLocaleTimeString('en-IN',{hour:'2-digit',minute:'2-digit',hour12:false}):'';
+    // 27 Oct 2026: LIFTOFF's "floor" is the checked states and its "run" is the helper's 5 s publication.
+    if(r.model==='LIFTOFF'){
+      const st=r.src.liftoff?.[key]?.[0]||'a checked state',sel=(r.src.rules?.liftoffStates||[]).join(' / ')||'the checked states';
+      return {state:'WAIT',reason:`In ${st}${at?' since '+at:''}, but Liftoff buys only within ${r.src.rules?.crossWindowSec||30} s of a stock entering ${sel}. It must be seen outside ${sel} and enter again.`};
+    }
     return {state:'WAIT',reason:`Above +${floor.toFixed(2)}${at?' since '+at:''}, but buys happen only in the run where it crosses. Needs a run below the floor and a fresh crossing.`};
   }
   const stale=universePriceStaleness()||stockPriceStaleness(s.symbol);
