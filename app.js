@@ -1,5 +1,5 @@
 const BUILD_TS='2026-10-27 IST'; // release build date (IST)
-const APP_VERSION=1565;
+const APP_VERSION=1566;
 const RADAR_SCORE_VERSION='v1419-recross-batches'; // Eligible on crossing the score floor at any time; selected model's evolving target and movement-based profit protection.
 
 // ── v1358: AN UNCAUGHT ERROR MUST NAME ITSELF ─────────────────────────────────────────────────
@@ -118,7 +118,7 @@ function isCsvLikeFile(file){
 
 function updateModeUI(){
   const brand=document.querySelector('.brand-tag');
-  if(brand){const v=document.getElementById('fModel')?.value;brand.textContent=(v==='PATH'?v:'Ensemble')+' Engine';}
+  if(brand){const v=document.getElementById('fModel')?.value;brand.textContent=(v==='CUM'?'Cumulative Change':v==='PATH'?v:'Ensemble')+' Engine';}
   document.querySelectorAll('.currency-lbl').forEach(el=>{el.textContent='₹';});
 }
 let ALL=[],FILT=[],PG=1,PGSZ=100,SCOL='score',SDIR=-1;
@@ -4384,8 +4384,8 @@ let _floorPushTimer=null,_floorPushed=null;
 // scale (1.6 = top 1.5%, 2.2 = rank #1), default floor 2.1 (~top 2-3 stocks, as validated). New storage keys so the
 // old PATH probability floor (0-1 scale) is never read as a percentile-scale floor.
 function isRankedModel(m){return m==='PATH';}   // 27 Oct 2026 (owner): STACK removed   // a hoisted function: safe even for callers that run at load
-function floorModel(){const v=document.getElementById('fModel')?.value;return isRankedModel(v)?v:'ENS';}
-function scoreFloorStore(model=floorModel()){return model==='PATH'?'rs_path2_score_floor':SCORE_FLOOR_STORE;}
+function floorModel(){const v=document.getElementById('fModel')?.value;return v==='CUM'||isRankedModel(v)?v:'ENS';}
+function scoreFloorStore(model=floorModel()){return model==='CUM'?'rs_cumulative_score_floor':model==='PATH'?'rs_path2_score_floor':SCORE_FLOOR_STORE;}
 function initScoreFloorUI(force=false){
   try{
     const el=document.getElementById('fScoreFloor'),model=floorModel();
@@ -4393,9 +4393,10 @@ function initScoreFloorUI(force=false){
     const key=scoreFloorStore(model),stored=localStorage.getItem(key),epoch=++_scoreFloorEpoch;
     const ranked=isRankedModel(model);
     el.value=stored===null?(ranked?'2.1':''):stored;
-    el.removeAttribute('min');el.placeholder=ranked?'2.1':'1.6';el.step='0.1';
-    const label=document.getElementById('scoreFloorLabel');if(label)label.textContent=(model==='ENS'?'Ensemble':model)+' Floor';
-    el.title=ranked?model+' only: its own ranking on the Ensemble scale (1.6 = top 1.5%, 2.2 = its #1). Default 2.1 ~ top 2-3 stocks. Saved independently.':'Ensemble only: mapped ensemble score. Default 1.6; no minimum. Saved independently from PATH and STACK.';
+    el.removeAttribute('min');el.removeAttribute('max');el.placeholder=model==='CUM'?'Set threshold':ranked?'2.1':'1.6';el.step=model==='CUM'?'any':'0.1';
+    el.style.width=model==='CUM'?'140px':'90px';
+    const label=document.getElementById('scoreFloorLabel');if(label)label.textContent=model==='CUM'?'Cumulative Floor':(model==='ENS'?'Ensemble':model)+' Floor';
+    el.title=model==='CUM'?'Running sum of percentage changes from each previous live price. Starts at zero; persists across days and restarts. No minimum or maximum. Enter your own threshold to enable buy signals. Saved independently.':ranked?model+' only: its own ranking on the Ensemble scale (1.6 = top 1.5%, 2.2 = its #1). Default 2.1 ~ top 2-3 stocks. Saved independently.':'Ensemble only: mapped ensemble score. Default 1.6; no minimum. Saved independently from other models.';
     _scoreFloorSeeded=model;_floorPushed=null;
     updateModeUI();
     readHelperResponse('/api/btst/min-score?model='+model,{timeout:6000}).then(d=>{
@@ -4563,7 +4564,7 @@ function btstRanking(){
   const preview=BTST.rank&&BTST.rank.ok&&BTST.rank.mode==='live'&&BTST.rank.session===getSessionDate()&&Array.isArray(BTST.rank.ranking)?BTST.rank:null;
   const src=pk&&Array.isArray(pk.ranking)&&(!preview||String(pk.asOf)>String(preview.asOf))?pk:preview;
   if(!src) return null;
-  {const fm=floorModel();if(isRankedModel(fm)&&(!Array.isArray(src.rankings?.[fm])||!pathSnapshotFresh(src,Date.now(),'pathPrediction')))return null;}
+  {const fm=floorModel();if((fm==='CUM'&&!Array.isArray(src.rankings?.CUM))||(isRankedModel(fm)&&(!Array.isArray(src.rankings?.[fm])||!pathSnapshotFresh(src,Date.now(),'pathPrediction'))))return null;}
   const requested=floorModel(),viewModel=Array.isArray(src.rankings?.[requested])?requested:(src.activeModel||'A');
   if(_btstRankMemo&&_btstRankMemo.src===src&&_btstRankMemo.model===viewModel) return _btstRankMemo;
   const ranking=src.rankings?.[viewModel]||src.ranking;
@@ -4577,7 +4578,7 @@ function btstRanking(){
   const scoresA=new Map();
   (src.rankings?.A||[]).forEach(x=>{const s=normSym(x&&x[0]);if(s)scoresA.set(s,Number(x&&x[1]));});
   _btstRankMemo={src,map,scoresA,n:ranking.length,at:String(src.asOf||'').slice(11,16),stage:src.stage,
-    minScore:Number(src.rules?.modelFloors?.[viewModel]??src.rules?.minScore),model:viewModel,
+    minScore:src.rules?.modelFloors?.[viewModel]==null&&src.rules?.minScore==null?null:Number(src.rules?.modelFloors?.[viewModel]??src.rules?.minScore),model:viewModel,
     // 23 Oct 2026 (owner): stocks that crossed the floor IN THIS RUN (engine-published). Only these can buy.
     crossingsKnown:Array.isArray(src.crossings)&&viewModel===src.activeModel,crossed:new Set((src.crossings||[]).map(normSym))};
   return _btstRankMemo;
@@ -4601,7 +4602,7 @@ function btstScoreAOf(sym){
   if(r.scoresA.size){const v=r.scoresA.get(normSym(sym));return Number.isFinite(v)?v:null;}
   return r.model==='A'?btstScoreOf(sym):null;
 }
-const BTST_MODEL_NAMES={ENS:'Ensemble',PATH:'PATH',A:'Original'};
+const BTST_MODEL_NAMES={ENS:'Ensemble',PATH:'PATH',CUM:'Cumulative Change',A:'Original'};
 function btstModelName(m){return BTST_MODEL_NAMES[m]||m||'Original';}
 // Model switch (index.html #fModel). The helper stores the choice and passes it to every engine run;
 // the other model keeps scoring as a shadow for the day-end review. Applies from the next run.
@@ -4611,7 +4612,7 @@ function btstModelName(m){return BTST_MODEL_NAMES[m]||m||'Original';}
 // localStorage now paints the owner's last known choice synchronously; the helper still wins on reply.
 const MODEL_STORE='rocket-btst-model-v1';
 // 21 Oct 2026 (owner): Peak removed completely; Ensemble is the only model (the Model dropdown is gone).
-const SELECTABLE_MODELS=['ENS','PATH'];
+const SELECTABLE_MODELS=['ENS','PATH','CUM'];
 function savedModelChoice(){
   try{const v=localStorage.getItem(MODEL_STORE);return SELECTABLE_MODELS.includes(v)?v:null;}catch(e){return null;}
 }
@@ -4656,6 +4657,7 @@ function selectedBtstModel(){
 }
 function refreshBtstModelView(){
   _btstRankMemo=null;
+  if(floorModel()==='CUM'){SCOL='score';SDIR=-1;}
   for(const row of ALL){ROW_ACTION_MEMO.delete(row);setRadarEvidenceScore(row);}
   _dualPlanMemo=null;
   if(ALL.length)applyFilters({preservePage:true});
@@ -4747,6 +4749,7 @@ function noteCrossing(sym,score,floor){
 // The action state for a live intraday crossing, or null when this row is not one.
 // Returning null hands the row back to the 15:15 final path unchanged.
 function btstCrossingState(s){
+  if(floorModel()==='CUM'&&!Number.isFinite(btstMinScore()))return {state:'WAIT',reason:'Enter your Cumulative Change threshold to enable buy signals.'};
   if(isRankedModel(floorModel())&&!btstRanking())return {state:'WAIT',reason:floorModel()+' predictions unavailable or stale; awaiting fresh completed-minute scores'};
   const floor=btstMinScore();
   if(!Number.isFinite(floor)) return null;
@@ -4831,7 +4834,7 @@ function pushScoreFloorToEngine(raw,model=floorModel()){
         const el=document.getElementById('fScoreFloor');
         if(el&&document.activeElement!==el)el.value=d.minScore==null?'':String(d.minScore);
       }
-      showToast(btstModelName(model)+' floor '+Number(applied).toFixed(2)+' applies from its next engine run.',4500);
+      showToast(model==='CUM'&&applied==null?'Cumulative threshold cleared. Enter a threshold to enable buy signals.':btstModelName(model)+' floor '+Number(applied).toFixed(2)+' applies from its next '+(model==='CUM'?'live check.':'engine run.'),4500);
     }).catch(()=>showToast('Helper unreachable - model floor not applied.',5000,true));
   },700);
 }
@@ -10038,14 +10041,15 @@ function _renderMethodologyInner(){
   const mc=document.getElementById('methContent');if(!mc)return;
   mc.innerHTML=`<nav class="meth-nav" aria-label="Methodology sections"><button onclick="scrollToSection('meth-filters')">Filter decisions</button><button onclick="scrollToSection('meth-evidence')">Current evidence</button><button onclick="scrollToSection('meth-rules')">Entry rules</button><button onclick="scrollToSection('meth-models')">Models & exits</button><button onclick="scrollToSection('meth-history')">Older research</button></nav>
     <div id="meth-hf-wrap">${buildHardFilterMethodologyHTML(ENGINE_DATA)}</div>
-    <section id="meth-evidence"><h3>Current evidence</h3><p>Every model is tested the same way: chosen on months before 6 Aug, judged on 6 Aug–21 Oct (two halves), through the same paper account the Model comparison uses (real minute prices and volumes, real charges, the live bracket exit and funded trims), against a copy trained on shuffled outcomes. PATH and STACK find different trades from the Ensemble: on the Ensemble's own crossings and on your real trades their opinion does not separate winners from losers, so they are separate choices, not blended into the Ensemble. The Performance tab's Model comparison shows all of them side by side live, plus this history.</p>
+    <section id="meth-evidence"><h3>Current evidence</h3><p>The trained models are tested the same way: chosen on months before 6 Aug, judged on 6 Aug–21 Oct (two halves), through the same paper account the Model comparison uses (real minute prices and volumes, real charges, the live bracket exit and funded trims), against a copy trained on shuffled outcomes. PATH and STACK find different trades from the Ensemble: on the Ensemble's own crossings and on your real trades their opinion does not separate winners from losers, so they are separate choices, not blended into the Ensemble. The Performance tab's Model comparison shows all of them side by side live, plus this history.</p>
 </section>
     <section id="meth-rules"><h3>Entry rules now</h3><p>New buys from 09:16 (the first completed minute), any time a fresh score crosses the selected model's floor with the market gate on and a fresh price. No volume-fade or size-bucket veto (removed 22 Oct: without them the account made more in both halves of the 1-21 Oct replay). The Ensemble keeps its 2.15 upper cap. Liquidity, impact and minimum-order limits apply to every model.</p>
 </section>
     <details id="meth-models" class="meth-detail"><summary>Models, scoring and exits</summary><h3>Live score-crossing engine</h3>
-    <p>The model chosen in the Model box (Ensemble or PATH) supplies the recommendation table, counts, allocation and basket. Every model scores every streamed NSE EQ stock every 2 minutes from Zerodha one-minute candles; surveillance-listed, non-EQ, circuit-locked and too-new stocks are removed first. Both publish on the same percentile scale (1.6 = top 1.5% of stocks, 2.2 = the model's #1), so a floor means the same share for each. Scores are ranks, not promised returns.</p>
+    <p>The selected model (Ensemble, PATH or Cumulative Change) supplies the recommendation table, counts, allocation and basket. Ensemble and PATH use the trained percentile scale (1.6 = top 1.5%, 2.2 = the model's #1). Cumulative Change has its own raw scale: a running sum of observed percentage changes. Its floor does not represent a percentile.</p>
     <div class="m-grid">
     <div class="m-card"><h4>Ensemble (default floor 1.6)</h4><p>Five learners (return regressor, +3% classifier, excess-over-market, downside quantile, extra-trees) trained walk-forward on the last 220 sessions of daily candles built from the minutes, retrained every 5 sessions; inputs are 52 daily features (returns 1 day to 3 months, gap, range, volume surges with today's volume projected, volatility, distance to highs and averages, RSI, stochastics, ADX, MACD, TradingView-style ratings, sector strength, market condition). The blend is the average of their rankings. Replayed through the paper account on its saved 1-21 Oct signals: +₹18,915 on ₹3.5L.</p></div>
+    <div class="m-card"><h4>Cumulative Change (set your own threshold)</h4><p>Each stock starts at zero on its first live observation. Every 20 seconds the helper adds (current price - previous observed price) / previous observed price ? 100. It saves the score and last price across days and restarts, including the next observed overnight move. No historical backfill, compounding, decay or score cap. Tracking continues with other models selected. The table orders the highest scores first; negative values are valid. There is no default threshold: enter any finite number to enable buy signals. This is a price record, with no trained prediction or claimed trading edge.</p></div>
     <div class="m-card"><h4>PATH (default floor 2.1)</h4><p>Learns directly from our trade: from each completed minute, does +1.25% come before −1.25% (net of the real intraday or delivery charges)? Inputs are 12 minute-level features: time of day, distance from the open, VWAP and the day's high, the day's range, 1/5/15-minute moves, relative volume, turnover, opening gap, yesterday's range. Trained only on tradable stocks, retrained monthly. Held-out per trade: +0.38% / +0.27% (a model trained on shuffled outcomes: −0.22% / −0.30%). It is strongest only at its very top, hence the 2.1 floor.</p></div>
     <div class="m-card"><h4>1. Live score (throughout the session)</h4><p>The local helper runs <code>dev/btst_engine.py</code> every 2 minutes. Ensemble scores from daily candles plus today's partial candle; PATH and STACK score from the completed minutes of today, continuing a state saved after each close. If PATH or STACK cannot score (stale data, missing nightly state), that model shows WAIT and never substitutes another model; the Ensemble keeps running.</p></div>
     <div class="m-card"><h4>2. Buy on qualification</h4><p>A current live score clearing your floor can become GO throughout the session. Qualifying names share available capital by score, within saved allocation and execution limits (minimum ₹${RocketStrategy.CONFIG.MIN_ALLOCATION_RS.toLocaleString('en-IN')} per new position, from charges and the +${RocketStrategy.CONFIG.TARGET_PCT}% start; adds to held stocks need one share). A purchase consumes its crossing; a completed below-floor observation enables a fresh crossing, held or unheld. The market gate, price freshness, circuit, surveillance and EQ checks still apply.</p></div>
@@ -11254,7 +11258,7 @@ function renderHead(){
         </div>
       </th>`;
     }
-    const arr=c.key===SCOL?(c.key==='score'?(SDIR===-1?'▲':'▼'):(SDIR===-1?'▼':'▲')):'';
+    const arr=c.key===SCOL?(c.key==='score'?(floorModel()==='CUM'?'▼':SDIR===-1?'▲':'▼'):(SDIR===-1?'▼':'▲')):'';
     // v1409: the score column is centre-aligned, so its header must match or the label floats
     // left of the numbers it titles.
     const align=c.key==='score'?' style="text-align:center"':'';
@@ -11624,7 +11628,7 @@ function dashboardMarketCards(){
   if(m.nse){
     const bull=ALL.filter(s=>(s.priceChange||0)>0).length;
     add(0,'NSE',ALL.length?(100*bull/ALL.length).toFixed(0)+'% advancing':'Unavailable',`${bull} up / ${ALL.length-bull} not up · ${isEquitySession(Date.now())?'session open':'closed'}`);
-    add(1,'NSE',br?escHtml(br.at):'Awaiting scores',BTST.rankError?`<span style="color:var(--amber)">${escHtml(BTST.rankError)}</span>`:`${br?br.n:0} scored · floor ${btstMinScore()} · ${isEquitySession(Date.now())?'current session':'last session'}`);
+    add(1,'NSE',br?escHtml(br.at):'Awaiting scores',BTST.rankError?`<span style="color:var(--amber)">${escHtml(BTST.rankError)}</span>`:`${br?br.n:0} scored · ${Number.isFinite(btstMinScore())?'floor '+btstMinScore():'set threshold'} · ${isEquitySession(Date.now())?'current session':'last session'}`);
     const go=ALL.filter(isStockEligible).length;
     add(2,'NSE',`${go} GO`,'Kite execution checks apply');
     add(3,'NSE',signed(target?.pct??3),'Fixed start | ratcheting OCO');
@@ -11904,6 +11908,12 @@ function sortValueOf(row,key){
 // qualified order is one floor-nearest list (1.20,1.21,...). Fresh crossings
 // and pins are labels, never score-sort partitions. Share the final display path.
 function compareModelScoreRows(a,b){
+  if(floorModel()==='CUM'){
+    const av=a._us?a.score:btstScoreOf(a.symbol),bv=b._us?b.score:btstScoreOf(b.symbol);
+    const an=!Number.isFinite(av),bn=!Number.isFinite(bv);
+    if(an!==bn)return an?1:-1;
+    return (!an?bv-av:0)||String(a.symbol).localeCompare(String(b.symbol));
+  }
   const info=row=>{
     const score=row._us?row.score:btstScoreOf(row.symbol),floor=row._us?Number(row.fl):btstMinScore();
     if(!Number.isFinite(score))return {score:null,group:3};
