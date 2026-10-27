@@ -393,7 +393,7 @@ button.lo-chip{cursor:pointer}button.lo-chip:hover{border-color:var(--border-hi)
 .lo-wrap tr.lo-new td{background:rgba(249,115,22,.06)}.lo-up{color:var(--green)}.lo-dn{color:var(--red)}.lo-note{font-size:11px;color:var(--t3);margin-top:6px}
 .lo-states{position:relative}.lo-states>summary{list-style:none;cursor:pointer;padding:8px 10px;min-width:120px;background:var(--bg-card);border:1px solid var(--border);border-radius:8px;color:var(--t1);font:14px 'DM Mono',monospace}
 .lo-states>summary::-webkit-details-marker{display:none}.lo-states>summary::after{content:' ▾';color:var(--t3)}
-.lo-states-menu{position:absolute;z-index:50;top:calc(100% + 4px);left:0;display:flex;flex-direction:column;gap:6px;padding:10px 12px;background:var(--bg-raised);border:1px solid var(--border-hi);border-radius:8px;min-width:150px}
+.lo-states-menu{position:fixed;z-index:500;display:flex;flex-direction:column;gap:6px;padding:10px 12px;background:var(--bg-raised);border:1px solid var(--border-hi);border-radius:8px;min-width:150px}
 .lo-states-menu label{display:flex;gap:8px;align-items:center;font:13px 'DM Mono',monospace;color:var(--t1);cursor:pointer;white-space:nowrap}
 .lo-toggle{background:none;border:1px solid var(--border);border-radius:5px;color:var(--t2);cursor:pointer;font-size:12px;width:22px;height:22px;line-height:1;padding:0}.lo-toggle:hover{color:var(--t1);border-color:var(--border-hi)}
 .lo-collapsed .lo-head{margin-bottom:0}

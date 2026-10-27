@@ -1,5 +1,5 @@
 const BUILD_TS='2026-10-27 IST'; // release build date (IST)
-const APP_VERSION=1558;
+const APP_VERSION=1559;
 const RADAR_SCORE_VERSION='v1419-recross-batches'; // Eligible on crossing the score floor at any time; selected model's evolving target and movement-based profit protection.
 
 // ── v1358: AN UNCAUGHT ERROR MUST NAME ITSELF ─────────────────────────────────────────────────
@@ -4409,6 +4409,19 @@ function onLiftoffStatesChange(){
   }).catch(()=>showToast('Helper unreachable - Liftoff states not applied.',5000,true));
 }
 function isLiftoffModel(){return floorModel()==='LIFTOFF';}
+// The filters row scrolls sideways (overflow-x), which clips anything below it, so the states menu is fixed-positioned
+// under its button when opened, and closes on an outside click or when the row scrolls.
+(function(){
+  if(typeof document==='undefined')return;
+  const place=()=>{const d=document.getElementById('liftoffStates');if(!d?.open)return;const r=d.querySelector('summary').getBoundingClientRect(),m=d.querySelector('.lo-states-menu');m.style.top=(r.bottom+4)+'px';m.style.left=r.left+'px';};
+  const wire=()=>{
+    const d=document.getElementById('liftoffStates');if(!d||d._wired)return;d._wired=true;
+    d.addEventListener('toggle',place);
+    document.addEventListener('click',e=>{if(d.open&&!d.contains(e.target))d.open=false;});
+    window.addEventListener('resize',place);window.addEventListener('scroll',place,true);
+  };
+  if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',wire);else wire();
+})();
 function initScoreFloorUI(force=false){
   try{
     liftoffStatesUI();
