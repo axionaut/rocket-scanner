@@ -387,7 +387,7 @@ dialog#radarDetail::backdrop{background:rgba(2,5,7,.87)}
 button.lo-chip{cursor:pointer}button.lo-chip:hover{border-color:var(--border-hi)}button.lo-chip.lo-on{outline:2px solid currentColor;outline-offset:1px}
 .lo-BLAST{color:var(--fire);border-color:rgba(249,115,22,.35);background:rgba(249,115,22,.1)}.lo-RUN{color:var(--green);border-color:rgba(34,197,94,.3);background:rgba(34,197,94,.08)}
 .lo-FLUCT{color:var(--t2)}.lo-FALL{color:var(--red);border-color:rgba(239,68,68,.3);background:rgba(239,68,68,.08)}.lo-LOCKED{color:var(--amber);border-color:rgba(251,191,36,.3);background:rgba(251,191,36,.08)}
-.lo-wrap{overflow-x:auto}.lo-wrap table{width:100%;border-collapse:collapse;font:12px 'DM Mono',monospace;min-width:1080px}
+.lo-wrap{overflow-x:auto}.lo-wrap table{width:100%;border-collapse:collapse;font:12px 'DM Mono',monospace;min-width:900px}
 .lo-wrap th{color:var(--t3);font-weight:600;text-align:right;padding:5px 8px;border-bottom:1px solid var(--border);white-space:nowrap}.lo-wrap th:nth-child(-n+3){text-align:left}
 .lo-wrap td{padding:5px 8px;text-align:right;border-bottom:1px solid var(--border);white-space:nowrap}.lo-wrap td:nth-child(-n+3){text-align:left}
 .lo-wrap tr.lo-new td{background:rgba(249,115,22,.06)}.lo-up{color:var(--green)}.lo-dn{color:var(--red)}.lo-note{font-size:11px;color:var(--t3);margin-top:6px}
