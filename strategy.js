@@ -502,10 +502,10 @@ function bookedSession(session,holdingCosts,tradebook){
   }
 
   // 27 Oct 2026 (owner): LIFTOFF scalp target = just above breakeven with BOTH sides' same-day (intraday) charges:
-  // the first price, rounded up to the instrument tick, whose net after the buy and sell charges is positive. A GTT
-  // trigger must also sit at least ~0.26% from the current price (Zerodha), so the target is never below that.
-  // up(v) rounds a price UP to a valid tick. Returns {price, breakeven}.
-  function scalpTargetPrice(avgCost, qty, up, minGapPct = 0.26){
+  // the first price, rounded up to the instrument tick, whose net after the buy and sell charges is positive. Zerodha's
+  // GTT distance rule (>= 0.26% and > Rs 0.09 from LTP) is a placement constraint applied by the helper, not part of
+  // the target. up(v) rounds a price UP to a valid tick. Returns {price, breakeven} (equal).
+  function scalpTargetPrice(avgCost, qty, up){
     if(!(avgCost > 0) || !(qty > 0)) return null;
     const ch = (px, sell) => sumChargeParts(calcZerodhaChargesSplit(px, qty, sell, true, true));
     const buy = ch(avgCost, false), net = px => (px - avgCost) * qty - buy - ch(px, true);
@@ -513,7 +513,7 @@ function bookedSession(session,holdingCosts,tradebook){
     for(let i = 0; i < 6; i++) p = avgCost + (buy + ch(p, true)) / qty;
     let be = up(p);
     for(let i = 0; i < 50 && !(net(be) > 0); i++) be = up(be + 0.01);
-    return { price: Math.max(be, up(avgCost * (1 + minGapPct / 100))), breakeven: be };
+    return { price: be, breakeven: be };
   }
 
   return {
