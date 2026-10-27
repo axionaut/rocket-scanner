@@ -1,5 +1,5 @@
 const BUILD_TS='2026-10-27 IST'; // release build date (IST)
-const APP_VERSION=1571;
+const APP_VERSION=1572;
 const RADAR_SCORE_VERSION='v1419-recross-batches'; // Eligible on crossing the score floor at any time; selected model's evolving target and movement-based profit protection.
 
 // ── v1358: AN UNCAUGHT ERROR MUST NAME ITSELF ─────────────────────────────────────────────────
@@ -4568,8 +4568,41 @@ function crossingCurrentQuote(sym,fc){
     Number.isFinite(q.priceAt)&&q.priceAt>0&&q.priceAt<=now&&q.priceAt>=(fc.priceAt||fc.t)&&
     new Date(q.priceAt+19800000).toISOString().slice(0,10)===day).sort((a,b)=>b.priceAt-a.priceAt)[0]||null;
 }
-function firstScoreBadgeHtml(fc,currentPrice,currentAt=null){
+// v1572: a crossing bought at its captured price would have left at +/-1.25% (target / stop) in the first
+// later session minute (Session_1min, via the helper) whose high/low reached either; a minute touching both
+// counts as the stop. Minutes starting before the crossing are excluded. Null = still open.
+const CROSS_EXIT_PCT=1.25;
+let CROSS_EXITS=new Map(),_crossExitsAt=0,_crossExitsBusy=false;
+function crossingExit(sym,fc){
+  const ref=Number(fc?.price);if(!(ref>0))return null;
+  const e=CROSS_EXITS.get(normSym(sym));
+  return e&&e.res&&e.t0===(fc.priceAt||fc.t)&&e.ref===ref?e:null;
+}
+async function refreshCrossingExits(rows){
+  if(_crossExitsBusy||Date.now()-_crossExitsAt<60000)return;
+  const day=getSessionDate(),items=[];
+  if(CROSS_EXITS.day!==day){CROSS_EXITS=new Map();CROSS_EXITS.day=day;}
+  for(const s of rows||[]){
+    if(!s||s._us)continue;
+    const fc=firstScoreAtFloor(s.symbol),ref=Number(fc?.price);if(!(ref>0))continue;
+    const sym=normSym(s.symbol),t0=fc.priceAt||fc.t,e=CROSS_EXITS.get(sym);
+    if(e&&e.res&&e.t0===t0&&e.ref===ref)continue;
+    items.push({sym,t0,ref});
+  }
+  _crossExitsAt=Date.now();
+  if(!items.length)return;
+  _crossExitsBusy=true;
+  try{
+    const j=await readHelperResponse('/api/crossing-exits',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({day,pct:CROSS_EXIT_PCT,items}),timeout:20000});
+    if(!j?.ok||j.day!==getSessionDate())return;
+    let changed=false;
+    for(const [sym,e] of Object.entries(j.exits||{})){if(e.res&&!CROSS_EXITS.get(sym)?.res)changed=true;CROSS_EXITS.set(sym,e);}
+    if(changed&&ALL.length)applyFilters({preservePage:true});
+  }catch(e){}finally{_crossExitsBusy=false;}
+}
+function firstScoreBadgeHtml(fc,currentPrice,currentAt=null,exit=null){
   if(!fc)return '';
+  if(exit){currentPrice=exit.price;currentAt=exit.t;}
   const hm=t=>new Date(t).toLocaleTimeString('en-IN',{timeZone:'Asia/Kolkata',hour:'2-digit',minute:'2-digit',hour12:false});
   const approx=fc.priceSource==='minute-close',price=Number(fc.price),current=Number(currentPrice);
   const hasPrice=Number.isFinite(price)&&price>0,hasCurrent=Number.isFinite(current)&&current>0;
@@ -4577,24 +4610,29 @@ function firstScoreBadgeHtml(fc,currentPrice,currentAt=null){
   const signed=(n,prefix='')=>(n>0?'+':n<0?'−':'')+prefix+Math.abs(n).toFixed(2);
   const title=(fc.already?`Already at or above ${fc.model} ${fc.floor.toFixed(2)} when tracking began at ${hm(fc.since)} IST`:`First scored ${fc.model} ${fc.floor.toFixed(2)} or higher today in the ${hm(fc.t)} IST run (tracked since ${hm(fc.since)} IST)`)
     +(hasPrice?(approx?`; approximate reference: completed minute ending ${hm(fc.priceAt)} IST`:fc.priceSource==='prior-observation'?'; last observed price retained at the date reset, quoted '+new Date(fc.priceAt).toLocaleString('en-IN',{timeZone:'Asia/Kolkata'})+' IST':'; price captured in that score run'):'; historical crossing price was not recorded')
-    +(hasPrice&&hasCurrent?`; price move from ₹${price.toFixed(2)} to observed ₹${current.toFixed(2)}${currentAt?' at '+hm(currentAt)+' IST':''}`:'');
+    +(exit?`; ${exit.res==='TGT'?'target':'stop'} ±${CROSS_EXIT_PCT}% reached in the bar starting ${hm(exit.t)} IST, exit ₹${exit.price.toFixed(2)}${exit.both?' (that bar touched both; counted as the stop)':''}`
+      :hasPrice&&hasCurrent?`; still open: price move from ₹${price.toFixed(2)} to observed ₹${current.toFixed(2)}${currentAt?' at '+hm(currentAt)+' IST':''}`:'');
   return `<div style="font-size:11px;color:var(--cyan);font-family:'DM Mono',monospace;font-weight:700;margin-top:2px" title="${escHtml(title)}">⏱ 1st ≥${fc.floor.toFixed(2)}: ${fc.already?'by ':''}${hm(fc.t)}`
     +(hasPrice?` · ${approx?'~':''}₹${price.toFixed(2)}`:' · price unavailable')
-    +(delta!==null?`<span style="color:var(--${delta>0?'green':delta<0?'red':'t3'});white-space:nowrap"> · ${approx?'~':''}${signed(delta,'₹')} (${signed(pct)}%) since</span>`:hasPrice?' · current price unavailable':'')+'</div>';
+    +(delta!==null?`<span style="color:var(--${delta>0?'green':delta<0?'red':'t3'});white-space:nowrap"> · ${exit?(exit.res==='TGT'?'TGT ':'SL ')+hm(exit.t)+' ':''}${approx?'~':''}${signed(delta,'₹')} (${signed(pct)}%)${exit?'':' open'}</span>`:hasPrice?' · current price unavailable':'')+'</div>';
 }
-// v1571: total of the Trigger Status "since" moves over the listed rows, one share each, shown in the column header.
+// v1571: total of the Trigger Status moves over the listed rows, one share each, shown in the column header.
+// v1572: a row that reached the +/-1.25% target or stop counts at that exit, not at the current price.
 let TRIGGER_PNL_HTML='';
 function updateTriggerPnl(rows){
-  let n=0,abs=0,ref=0,pctSum=0;
+  refreshCrossingExits(rows);
+  let n=0,abs=0,ref=0,pctSum=0,tgt=0,sl=0;
   for(const s of rows||[]){
     if(!s||s._us)continue;
-    const fc=firstScoreAtFloor(s.symbol),price=Number(fc?.price),q=crossingCurrentQuote(s.symbol,fc),cur=Number(q?.price);
+    const fc=firstScoreAtFloor(s.symbol),price=Number(fc?.price),exit=crossingExit(s.symbol,fc);
+    const cur=exit?exit.price:Number(crossingCurrentQuote(s.symbol,fc)?.price);
     if(!(price>0&&cur>0))continue;
     n++;abs+=cur-price;ref+=price;pctSum+=(cur-price)/price*100;
+    if(exit?.res==='TGT')tgt++;else if(exit)sl++;
   }
   const signed=(v,p='')=>(v>0?'+':v<0?'−':'')+p+Math.abs(v).toFixed(2);
   const pct=ref>0?abs/ref*100:0,tone=abs>0?'green':abs<0?'red':'t3';
-  TRIGGER_PNL_HTML=n?`<div title="${escHtml(`Sum of the 'since' moves of ${n} listed stocks, one share each: ₹${abs.toFixed(2)} on ₹${ref.toFixed(2)} of first-crossing prices. Equal-weight average: ${signed(pctSum/n)}%. Gross, before charges; not account P&L.`)}" style="font-size:11px;font-family:'DM Mono',monospace;font-weight:700;color:var(--${tone});text-transform:none;letter-spacing:0;margin-top:2px;white-space:nowrap">Σ ${signed(abs,'₹')} (${signed(pct)}%) · ${n}</div>`:'';
+  TRIGGER_PNL_HTML=n?`<div title="${escHtml(`${n} listed stocks, one share each at the first-crossing price: ${tgt} reached the +${CROSS_EXIT_PCT}% target, ${sl} the −${CROSS_EXIT_PCT}% stop (counted at those exits), ${n-tgt-sl} still open at the current price. Total ₹${abs.toFixed(2)} on ₹${ref.toFixed(2)} invested. Equal-weight average: ${signed(pctSum/n)}%. Gross, before charges.`)}" style="font-size:11px;font-family:'DM Mono',monospace;font-weight:700;color:var(--${tone});text-transform:none;letter-spacing:0;margin-top:2px;white-space:nowrap">Σ ${signed(abs,'₹')} (${signed(pct)}%) · ${n}<span style="color:var(--t3);font-weight:400"> · T${tgt} S${sl} O${n-tgt-sl}</span></div>`:'';
   const el=document.getElementById('trigger-pnl');
   if(el)el.innerHTML=TRIGGER_PNL_HTML;
 }
@@ -5182,7 +5220,7 @@ function rowStatusPillHtml(s){
   const unfunded=act.state==='GO'&&!funded;
   const tone=act.state==='BLOCKED'?'red':act.state==='GO'&&!unfunded?'green':'amber';
   const first=firstScoreAtFloor(s.symbol),quote=crossingCurrentQuote(s.symbol,first);
-  const crossBadge=firstScoreBadgeHtml(first,quote?.price??null,quote?.priceAt??null);
+  const crossBadge=firstScoreBadgeHtml(first,quote?.price??null,quote?.priceAt??null,crossingExit(s.symbol,first));
   return `<span class="info-pill pill-${tone}" title="${escHtml(act.reason)}">${act.state}${funded?' | Funded':unfunded?' | Not funded':''}</span>`
     +crossBadge
     +(act.state!=='GO'?`<div style="font-size:11px;color:var(--t3)">${escHtml(act.reason)}</div>`:'')
