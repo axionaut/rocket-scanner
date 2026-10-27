@@ -1,5 +1,5 @@
 const BUILD_TS='2026-10-27 IST'; // release build date (IST)
-const APP_VERSION=1564;
+const APP_VERSION=1565;
 const RADAR_SCORE_VERSION='v1419-recross-batches'; // Eligible on crossing the score floor at any time; selected model's evolving target and movement-based profit protection.
 
 // ── v1358: AN UNCAUGHT ERROR MUST NAME ITSELF ─────────────────────────────────────────────────
@@ -118,7 +118,7 @@ function isCsvLikeFile(file){
 
 function updateModeUI(){
   const brand=document.querySelector('.brand-tag');
-  if(brand){const v=document.getElementById('fModel')?.value;brand.textContent=(v==='PATH'||v==='STACK'?v:v==='LIFTOFF'?'Liftoff':'Ensemble')+' Engine';}
+  if(brand){const v=document.getElementById('fModel')?.value;brand.textContent=(v==='PATH'?v:'Ensemble')+' Engine';}
   document.querySelectorAll('.currency-lbl').forEach(el=>{el.textContent='₹';});
 }
 let ALL=[],FILT=[],PG=1,PGSZ=100,SCOL='score',SDIR=-1;
@@ -3692,7 +3692,7 @@ function dualScoreCell(row){
     const ms=btstScoreOf(row.symbol),floor=btstMinScore();
     const clears=ms!==null&&floor!==null&&ms>=floor;
     return `<div style="display:flex;align-items:center;gap:6px;justify-content:center">
-      ${ms===null?`<span title="${escHtml(btstUnscoredReason(row.symbol))}">N/A</span>`:isLiftoffModel()&&btstRanking()?.src?.liftoff?.[normSym(row.symbol)]?(()=>{const [st,sc]=btstRanking().src.liftoff[normSym(row.symbol)];return `<span class="lo-chip lo-${escHtml(st)}" title="Liftoff state now; buys only on entering a checked state (${escHtml((btstRanking().src.rules?.liftoffStates||[]).join(', '))})">${escHtml(st)}</span><span style="font-family:'DM Mono',monospace;font-weight:700;font-size:13px;color:${clears?'var(--green)':'var(--t2)'}">${Number(sc).toFixed(1)}</span>`;})():`<span style="font-family:'DM Mono',monospace;font-weight:800;font-size:15px;color:${clears?'var(--green)':'var(--amber)'}" title="${escHtml(btstRankNote(row.symbol))}">${ms>=0?'+':''}${ms.toFixed(2)}</span>`}
+      ${ms===null?`<span title="${escHtml(btstUnscoredReason(row.symbol))}">N/A</span>`:`<span style="font-family:'DM Mono',monospace;font-weight:800;font-size:15px;color:${clears?'var(--green)':'var(--amber)'}" title="${escHtml(btstRankNote(row.symbol))}">${ms>=0?'+':''}${ms.toFixed(2)}</span>`}
       <span style="font-family:'DM Mono',monospace;font-weight:600;font-size:11px;color:var(--t3)" title="${rk?escHtml(btstRankNote(row.symbol)+' - ranking only, not a buy signal'):'Not ranked by the engine'}">${rk?'#'+rk:''}</span>
       <span style="font-size:10px;font-weight:600;color:var(--t3)">${act.state}</span>
     </div>`;
@@ -4383,49 +4383,11 @@ let _floorPushTimer=null,_floorPushed=null;
 // 23 Oct 2026 (owner): fixed PATH replaces the old PATH and STACK is added. Both publish on the Ensemble's percentile
 // scale (1.6 = top 1.5%, 2.2 = rank #1), default floor 2.1 (~top 2-3 stocks, as validated). New storage keys so the
 // old PATH probability floor (0-1 scale) is never read as a percentile-scale floor.
-function isRankedModel(m){return m==='PATH'||m==='STACK';}   // a hoisted function: safe even for callers that run at load
-function floorModel(){const v=document.getElementById('fModel')?.value;return isRankedModel(v)||v==='LIFTOFF'?v:'ENS';}
-function scoreFloorStore(model=floorModel()){return model==='PATH'?'rs_path2_score_floor':model==='STACK'?'rs_stack_score_floor':SCORE_FLOOR_STORE;}
-// 27 Oct 2026 (owner): LIFTOFF qualifies by live liftoff state, chosen in a checkbox dropdown (helper /api/liftoff/states),
-// instead of a typed floor. The published floor for LIFTOFF is fixed at 1 (= in a checked state).
-function liftoffStatesUI(){
-  const lift=floorModel()==='LIFTOFF',w=document.getElementById('liftoffStatesWrap'),f=document.getElementById('scoreFloorWrap');
-  if(w)w.style.display=lift?'':'none';if(f)f.style.display=lift?'none':'';
-  if(!lift)return;
-  readHelperResponse('/api/liftoff/states',{timeout:5000}).then(d=>{if(d?.ok)paintLiftoffStates(d.states);}).catch(()=>{});
-}
-function paintLiftoffStates(states){
-  const set=new Set(states||[]);
-  document.querySelectorAll('#liftoffStates input[type=checkbox]').forEach(b=>{b.checked=set.has(b.value);});
-  const sum=document.getElementById('liftoffStatesSum');if(sum)sum.textContent=(states||[]).join(' + ')||'none';
-}
-function onLiftoffStatesChange(){
-  const states=[...document.querySelectorAll('#liftoffStates input[type=checkbox]:checked')].map(b=>b.value);
-  if(!states.length){showToast('Keep at least one Liftoff state checked.',3500,true);liftoffStatesUI();return;}
-  paintLiftoffStates(states);
-  readHelperResponse('/api/liftoff/states?set='+encodeURIComponent(states.join(',')),{timeout:6000}).then(d=>{
-    if(!d?.ok){showToast('Liftoff states not applied: '+escHtml(d?.why||'helper refused'),4000,true);liftoffStatesUI();return;}
-    paintLiftoffStates(d.states);showToast('Liftoff buys on entering: '+d.states.join(' + '),4000);loadBtstPicks();
-  }).catch(()=>showToast('Helper unreachable - Liftoff states not applied.',5000,true));
-}
-function isLiftoffModel(){return floorModel()==='LIFTOFF';}
-// The filters row scrolls sideways (overflow-x), which clips anything below it, so the states menu is fixed-positioned
-// under its button when opened, and closes on an outside click or when the row scrolls.
-(function(){
-  if(typeof document==='undefined')return;
-  const place=()=>{const d=document.getElementById('liftoffStates');if(!d?.open)return;const r=d.querySelector('summary').getBoundingClientRect(),m=d.querySelector('.lo-states-menu');m.style.top=(r.bottom+4)+'px';m.style.left=r.left+'px';};
-  const wire=()=>{
-    const d=document.getElementById('liftoffStates');if(!d||d._wired)return;d._wired=true;
-    d.addEventListener('toggle',place);
-    document.addEventListener('click',e=>{if(d.open&&!d.contains(e.target))d.open=false;});
-    window.addEventListener('resize',place);window.addEventListener('scroll',place,true);
-  };
-  if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',wire);else wire();
-})();
+function isRankedModel(m){return m==='PATH';}   // 27 Oct 2026 (owner): STACK removed   // a hoisted function: safe even for callers that run at load
+function floorModel(){const v=document.getElementById('fModel')?.value;return isRankedModel(v)?v:'ENS';}
+function scoreFloorStore(model=floorModel()){return model==='PATH'?'rs_path2_score_floor':SCORE_FLOOR_STORE;}
 function initScoreFloorUI(force=false){
   try{
-    liftoffStatesUI();
-    if(isLiftoffModel())return;
     const el=document.getElementById('fScoreFloor'),model=floorModel();
     if(!el||(!force&&_scoreFloorSeeded===model)||document.activeElement===el)return;
     const key=scoreFloorStore(model),stored=localStorage.getItem(key),epoch=++_scoreFloorEpoch;
@@ -4601,7 +4563,7 @@ function btstRanking(){
   const preview=BTST.rank&&BTST.rank.ok&&BTST.rank.mode==='live'&&BTST.rank.session===getSessionDate()&&Array.isArray(BTST.rank.ranking)?BTST.rank:null;
   const src=pk&&Array.isArray(pk.ranking)&&(!preview||String(pk.asOf)>String(preview.asOf))?pk:preview;
   if(!src) return null;
-  {const fm=floorModel();if(isRankedModel(fm)&&(!Array.isArray(src.rankings?.[fm])||!pathSnapshotFresh(src,Date.now(),fm==='STACK'?'stackPrediction':'pathPrediction')))return null;}
+  {const fm=floorModel();if(isRankedModel(fm)&&(!Array.isArray(src.rankings?.[fm])||!pathSnapshotFresh(src,Date.now(),'pathPrediction')))return null;}
   const requested=floorModel(),viewModel=Array.isArray(src.rankings?.[requested])?requested:(src.activeModel||'A');
   if(_btstRankMemo&&_btstRankMemo.src===src&&_btstRankMemo.model===viewModel) return _btstRankMemo;
   const ranking=src.rankings?.[viewModel]||src.ranking;
@@ -4639,7 +4601,7 @@ function btstScoreAOf(sym){
   if(r.scoresA.size){const v=r.scoresA.get(normSym(sym));return Number.isFinite(v)?v:null;}
   return r.model==='A'?btstScoreOf(sym):null;
 }
-const BTST_MODEL_NAMES={ENS:'Ensemble',PATH:'PATH',STACK:'STACK',LIFTOFF:'Liftoff',A:'Original'};
+const BTST_MODEL_NAMES={ENS:'Ensemble',PATH:'PATH',A:'Original'};
 function btstModelName(m){return BTST_MODEL_NAMES[m]||m||'Original';}
 // Model switch (index.html #fModel). The helper stores the choice and passes it to every engine run;
 // the other model keeps scoring as a shadow for the day-end review. Applies from the next run.
@@ -4649,7 +4611,7 @@ function btstModelName(m){return BTST_MODEL_NAMES[m]||m||'Original';}
 // localStorage now paints the owner's last known choice synchronously; the helper still wins on reply.
 const MODEL_STORE='rocket-btst-model-v1';
 // 21 Oct 2026 (owner): Peak removed completely; Ensemble is the only model (the Model dropdown is gone).
-const SELECTABLE_MODELS=['ENS','PATH','STACK','LIFTOFF'];
+const SELECTABLE_MODELS=['ENS','PATH'];
 function savedModelChoice(){
   try{const v=localStorage.getItem(MODEL_STORE);return SELECTABLE_MODELS.includes(v)?v:null;}catch(e){return null;}
 }
@@ -4706,7 +4668,6 @@ function refreshBtstModelView(){
 // feed _getRowActionStateUncached: GO still comes only from the engine's own FINAL picks list, so
 // lowering this cannot manufacture a buy and raising it cannot suppress one (invariant 5).
 function btstFloorOverride(){
-  if(isLiftoffModel())return null;
   const v=parseFloat(document.getElementById('fScoreFloor')?.value);
   return Number.isFinite(v)?v:null;
 }
@@ -4843,11 +4804,6 @@ function btstCrossingState(s){
   if(!r.crossingsKnown) return {state:'WAIT',reason:'Waiting for an engine run that reports this run’s floor crossings.'};
   if(!r.crossed.has(key)){
     const at=first?new Date(first.t).toLocaleTimeString('en-IN',{hour:'2-digit',minute:'2-digit',hour12:false}):'';
-    // 27 Oct 2026: LIFTOFF's "floor" is the checked states and its "run" is the helper's 5 s publication.
-    if(r.model==='LIFTOFF'){
-      const st=r.src.liftoff?.[key]?.[0]||'a checked state',sel=(r.src.rules?.liftoffStates||[]).join(' / ')||'the checked states';
-      return {state:'WAIT',reason:`In ${st}${at?' since '+at:''}, but Liftoff buys only within ${r.src.rules?.crossWindowSec||30} s of a stock entering ${sel}. It must be seen outside ${sel} and enter again.`};
-    }
     return {state:'WAIT',reason:`Above +${floor.toFixed(2)}${at?' since '+at:''}, but buys happen only in the run where it crosses. Needs a run below the floor and a fresh crossing.`};
   }
   const stale=universePriceStaleness()||stockPriceStaleness(s.symbol);
@@ -7834,8 +7790,7 @@ let _maxAllocMemo=null;
 // goes all into one stock; large capital is capped at a % that follows capital. The Rs 5,000
 // qualifying minimum is fixed again (v1472's Min Alloc box was a misreading).
 // 19 Oct (owner): the minimum is charge-based (strategy.js minOrderRs); an add to a held stock carries no new DP fee.
-// 27 Oct 2026: LIFTOFF scalps pay same-day (intraday) charges, all proportional - one whole share qualifies.
-function getMinAlloc(held=false){return isLiftoffModel()?1:held?RocketStrategy.minOrderRs(true):RocketStrategy.CONFIG.MIN_ALLOCATION_RS;}
+function getMinAlloc(held=false){return held?RocketStrategy.minOrderRs(true):RocketStrategy.CONFIG.MIN_ALLOCATION_RS;}
 function getAllInUpTo(){
   const v=parseFloat(document.getElementById('fAllIn')?.value);
   return Number.isFinite(v)&&v>0?v:0;
@@ -10088,11 +10043,10 @@ function _renderMethodologyInner(){
     <section id="meth-rules"><h3>Entry rules now</h3><p>New buys from 09:16 (the first completed minute), any time a fresh score crosses the selected model's floor with the market gate on and a fresh price. No volume-fade or size-bucket veto (removed 22 Oct: without them the account made more in both halves of the 1-21 Oct replay). The Ensemble keeps its 2.15 upper cap. Liquidity, impact and minimum-order limits apply to every model.</p>
 </section>
     <details id="meth-models" class="meth-detail"><summary>Models, scoring and exits</summary><h3>Live score-crossing engine</h3>
-    <p>The model chosen in the Model box (Ensemble, PATH or STACK) supplies the recommendation table, counts, allocation and basket. Every model scores every streamed NSE EQ stock every 2 minutes from Zerodha one-minute candles; surveillance-listed, non-EQ, circuit-locked and too-new stocks are removed first. All three publish on the same percentile scale (1.6 = top 1.5% of stocks, 2.2 = the model's #1), so a floor means the same share for each. Scores are ranks, not promised returns.</p>
+    <p>The model chosen in the Model box (Ensemble or PATH) supplies the recommendation table, counts, allocation and basket. Every model scores every streamed NSE EQ stock every 2 minutes from Zerodha one-minute candles; surveillance-listed, non-EQ, circuit-locked and too-new stocks are removed first. Both publish on the same percentile scale (1.6 = top 1.5% of stocks, 2.2 = the model's #1), so a floor means the same share for each. Scores are ranks, not promised returns.</p>
     <div class="m-grid">
     <div class="m-card"><h4>Ensemble (default floor 1.6)</h4><p>Five learners (return regressor, +3% classifier, excess-over-market, downside quantile, extra-trees) trained walk-forward on the last 220 sessions of daily candles built from the minutes, retrained every 5 sessions; inputs are 52 daily features (returns 1 day to 3 months, gap, range, volume surges with today's volume projected, volatility, distance to highs and averages, RSI, stochastics, ADX, MACD, TradingView-style ratings, sector strength, market condition). The blend is the average of their rankings. Replayed through the paper account on its saved 1-21 Oct signals: +₹18,915 on ₹3.5L.</p></div>
     <div class="m-card"><h4>PATH (default floor 2.1)</h4><p>Learns directly from our trade: from each completed minute, does +1.25% come before −1.25% (net of the real intraday or delivery charges)? Inputs are 12 minute-level features: time of day, distance from the open, VWAP and the day's high, the day's range, 1/5/15-minute moves, relative volume, turnover, opening gap, yesterday's range. Trained only on tradable stocks, retrained monthly. Held-out per trade: +0.38% / +0.27% (a model trained on shuffled outcomes: −0.22% / −0.30%). It is strongest only at its very top, hence the 2.1 floor.</p></div>
-    <div class="m-card"><h4>STACK (default floor 2.1)</h4><p>Stacks 35 signals into one model on the same +1.25%-before-−1.25% trade: PATH's 12 features plus recent-strength ranks, oversold and overdue-jump measures, sector/size-group laggards, money-flow partner moves, strength against the market over 5 minutes to 5 days, candle buying pressure and market state. Retrained monthly. Paper-account replay of its top pick on ₹3.5L: +₹11,015 (6 Aug–10 Sep) and +₹9,114 (11 Sep–21 Oct, a falling market). Only its #1 pick has worked; its #2–#3 picks lose, hence the 2.1 floor.</p></div>
     <div class="m-card"><h4>1. Live score (throughout the session)</h4><p>The local helper runs <code>dev/btst_engine.py</code> every 2 minutes. Ensemble scores from daily candles plus today's partial candle; PATH and STACK score from the completed minutes of today, continuing a state saved after each close. If PATH or STACK cannot score (stale data, missing nightly state), that model shows WAIT and never substitutes another model; the Ensemble keeps running.</p></div>
     <div class="m-card"><h4>2. Buy on qualification</h4><p>A current live score clearing your floor can become GO throughout the session. Qualifying names share available capital by score, within saved allocation and execution limits (minimum ₹${RocketStrategy.CONFIG.MIN_ALLOCATION_RS.toLocaleString('en-IN')} per new position, from charges and the +${RocketStrategy.CONFIG.TARGET_PCT}% start; adds to held stocks need one share). A purchase consumes its crossing; a completed below-floor observation enables a fresh crossing, held or unheld. The market gate, price freshness, circuit, surveillance and EQ checks still apply.</p></div>
     <div class="m-card"><h4>3. Exit</h4><p>Every buy starts with a sell GTT at +1.25% of weighted average cost. Within the zone of the upper sell, the helper converts it to one broker OCO: upper = live price + upper distance, lower = live price − lower distance. Both legs only move up. Upper and lower distances each start at 0.26% and are learned separately; zone starts at 0.10%; the helper automatically learns when new evidence is ready, using the last 40 completed observations, a one-second modify delay, recorded bid depth and charges. Observation continues through the next session after a sale. It records each held stock’s rally speed, pullbacks, volatility and bid depth over 1, 3 and 5 minutes. Stock-specific upper-distance, lower-distance and zone adjustments become active only after replay validation; until then, the current base distances apply. Replay runs separately so learning does not block price protection. The helper reconciles positions and orders every 10 seconds during the session even with this page closed, and refreshes immediately on order updates. Exit requests have priority over queued routine entries. Any change must improve both chronological halves; 1.25% stays fixed. The loss-trim cutoff starts at 1.25% and learns separately from the last 40 mature funded portfolio decisions, including stocks held instead of sold. Each replay starts with the same recorded inventory and booked profit, models chronological fills and reservations, resets the funding pool each session and marks remaining holdings after estimated charges. Future unrelated buys or profits are not invented. A cutoff change must improve both chronological halves and its gradual step must pass again. Eligible losses are trimmed worst first using up to 90% of today’s booked profit after charges. Without booked profit, they remain held. No scheduled expiry.</p></div></div>
@@ -10670,8 +10624,6 @@ function currentModelTargetPct(){
   return Number.isFinite(t?.pct)&&t.pct>0?t.pct:RocketStrategy.CONFIG.TARGET_PCT;
 }
 function learnedBtstTarget(score,symbol=null){
-  // 27 Oct 2026: LIFTOFF first sell = same-day breakeven + the room the ratcheting OCO needs (~0.47% at a typical order).
-  if(isLiftoffModel()){const t=RocketStrategy.scalpTargetPrice(1000,10,v=>Math.ceil(v*100-1e-9)/100);return {pct:+((t.price/1000-1)*100).toFixed(2),y:0,model:'LIFTOFF',method:'scalp',n:0,through:null};}
   return {pct:1.25,y:0,model:'COMMON',method:'bracket',n:0,through:null};
 }
 
@@ -11030,6 +10982,7 @@ function _planDualBasketUncached(rows,capital){
     let budget=Math.min(remaining,maxAlloc>0?Math.min(share,maxAlloc):share,liquidityCap);
     // Adds to a held stock share its DP fee: one share is the minimum (19 Oct).
     const rowMin=heldNow[r.symbol]?Math.max(getMinAlloc(true),price):minRequired;
+    const rowMinTxt=heldNow[r.symbol]?'one-share add':minTxt;
     let qty=0;
     if(!reason){
       candidatesLeft--;
@@ -11046,10 +10999,10 @@ function _planDualBasketUncached(rows,capital){
     }
     const cost=qty*price,charges=qty>0?calcZerodhaCharges(price,qty,false,false,false):0,debit=cost+charges;
     if(!reason&&(!(qty>0)||!(cost>=rowMin)||debit>budget)){
-      // 27 Oct 2026: name the amount needed and each limit, so the binding one is visible (LIFTOFF's minimum is one share).
+      // 27 Oct 2026: name the amount needed and each limit, so the binding one is visible.
       const needQty=Math.max(1,Math.ceil(rowMin/price)),need=needQty*price+calcZerodhaCharges(price,needQty,false,false,false);
       const inr=v=>'₹'+Math.round(v).toLocaleString('en-IN');
-      reason=`Cannot fund ${needQty===1?'one share':needQty+' shares'} (${inr(need)} incl. buy charges): cash left ${inr(remaining)}, per-stock cap ${inr(maxAlloc>0?Math.min(share,maxAlloc):share)}, market-impact cap ${Number.isFinite(liquidityCap)?inr(liquidityCap):'none'}`;
+      reason=liquidityCap<rowMin?`Market-impact cap below the ${rowMinTxt} minimum`:`Cannot fund ${needQty===1?'one share':needQty+' shares'} (${inr(need)} incl. buy charges): cash left ${inr(remaining)}, per-stock cap ${inr(maxAlloc>0?Math.min(share,maxAlloc):share)}, market-impact cap ${Number.isFinite(liquidityCap)?inr(liquidityCap):'none'}`;
     }
     if(reason){reasons.set(r.symbol,reason);alloc[r.symbol]={alloc:0,debit:0,qty:0,rejected:true,reason};continue;}
     r.basketModel='strategy';
@@ -11674,7 +11627,7 @@ function dashboardMarketCards(){
     add(1,'NSE',br?escHtml(br.at):'Awaiting scores',BTST.rankError?`<span style="color:var(--amber)">${escHtml(BTST.rankError)}</span>`:`${br?br.n:0} scored · floor ${btstMinScore()} · ${isEquitySession(Date.now())?'current session':'last session'}`);
     const go=ALL.filter(isStockEligible).length;
     add(2,'NSE',`${go} GO`,'Kite execution checks apply');
-    add(3,'NSE',signed(target?.pct??3),isLiftoffModel()?'Breakeven + OCO room, then ratcheting OCO (lower leg never below breakeven)':'Fixed start | ratcheting OCO');
+    add(3,'NSE',signed(target?.pct??3),'Fixed start | ratcheting OCO');
   }
   if(m.us){
     const trend=d?.marketTrendPct;
@@ -12407,44 +12360,6 @@ async function readHelperResponse(path,options={}){
     return await r[type]();
   }finally{clearTimeout(timer);}
 }
-// v1553 (owner, 27 Oct): live liftoff board from the helper (dev/liftoff-live.cjs). Each stock's last 1 and 5 minutes
-// against its own normal move and volume, ranked across the market every 2 s. Display only: it never makes a stock GO.
-const LIFTOFF_SEEN=new Map();let LIFTOFF_FILTER=null,LIFTOFF_LAST=null,LIFTOFF_COLLAPSED=false;
-try{LIFTOFF_COLLAPSED=localStorage.getItem('rs_liftoff_collapsed')==='1';}catch(e){}
-function toggleLiftoff(){LIFTOFF_COLLAPSED=!LIFTOFF_COLLAPSED;try{localStorage.setItem('rs_liftoff_collapsed',LIFTOFF_COLLAPSED?'1':'0');}catch(e){}renderLiftoff(LIFTOFF_LAST);}
-function liftoffFilter(k){LIFTOFF_FILTER=k;renderLiftoff(LIFTOFF_LAST);}
-// Change from the price at the stock's first BLAST today to the current LTP (per share and %), as the main table's first-crossing badge.
-function liftoffSince(r,px=r.firstBlastPx){
-  if(!(px>0)||!(r.ltp>0))return '-';
-  const d=r.ltp-px,p=d/px*100,cls=d>0?'lo-up':d<0?'lo-dn':'';
-  return `<span class="${cls}">${d>=0?'+':'−'}₹${Math.abs(d).toFixed(2)} (${p>=0?'+':''}${p.toFixed(2)}%)</span> <span style="color:var(--t3)">from ₹${px.toFixed(2)}</span>`;
-}
-function liftoffTime(ms){return ms?new Date(ms+19800000).toISOString().slice(11,19):'-';}
-function renderLiftoff(j){
-  // 27 Oct 2026 (owner): the board is a RECORD of the liftoff states. For each state: every stock that entered it today
-  // (first entry time and price) and its change since, and a per-state summary, so the state that is usually followed by
-  // gains can be chosen in the Liftoff states dropdown as the basis to buy.
-  const host=document.getElementById('liftoffBoard');if(!host)return;
-  LIFTOFF_LAST=j;
-  if(!j||!j.ok||!j.asOf||Date.now()-j.asOf>60000||!j.summary){host.innerHTML='';return;}
-  const states=['BLAST','RUN','FLUCT','FALL','LOCKED'],sel=LIFTOFF_FILTER||'BLAST',c=j.counts||{};
-  const pct=v=>v==null?'-':`<span class="${v>0?'lo-up':v<0?'lo-dn':''}">${v>0?'+':''}${Number(v).toFixed(2)}%</span>`;
-  // Sorted by expectancy (owner: a metric of win rate and profit): win rate x avg win + loss rate x avg loss.
-  const ranked=states.slice().sort((x,y)=>((j.summary[y]||{}).n?j.summary[y].expectancy:-1e9)-((j.summary[x]||{}).n?j.summary[x].expectancy:-1e9));
-  const sumRows=ranked.map(k=>{const s=j.summary[k]||{n:0};return `<tr class="lo-sum${k===sel?' lo-sel':''}" onclick="liftoffFilter('${k}')" style="cursor:pointer"><td><span class="lo-chip lo-${k}">${k}</span></td><td>${s.n||0}</td><td>${s.n?pct(s.avgHigh):'-'}</td><td>${s.n?pct(s.avgLow):'-'}</td><td>${s.n?s.highFirst+' ('+Math.round(s.highFirst/s.n*100)+'%)':'-'}</td><td>${s.n?s.lowFirst+' ('+Math.round(s.lowFirst/s.n*100)+'%)':'-'}</td><td><b>${s.n?pct(s.expectancy):'-'}</b></td><td>${s.n?s.upPct+'%':'-'}</td><td>${c[k]||0}</td></tr>`;}).join('');
-  const rec=((j.record||{})[sel]||[]).map(r=>`<tr><td><b>${escHtml(r.sym)}</b>${chartLinkButtons(r.sym)}</td><td>${liftoffTime(r.at)}</td><td>₹${Number(r.px).toFixed(2)}</td><td>${pct(r.hi)} <span style="color:var(--t3)">${liftoffTime(r.hiAt)}</span></td><td>${pct(r.lo)} <span style="color:var(--t3)">${liftoffTime(r.loAt)}</span></td><td>${r.first==='HIGH'?'<span class="lo-up">High</span>':r.first==='LOW'?'<span class="lo-dn">Low</span>':'-'}</td><td>${liftoffSince({ltp:r.ltp},r.px)}</td><td>${r.now?`<span class="lo-chip lo-${escHtml(r.now)}">${escHtml(r.now)}</span>`:'-'}</td></tr>`).join('');
-  host.innerHTML=`<div class="lo-card${LIFTOFF_COLLAPSED?' lo-collapsed':''}"><div class="lo-head"><div><button type="button" class="lo-toggle" onclick="toggleLiftoff()" aria-expanded="${!LIFTOFF_COLLAPSED}" title="${LIFTOFF_COLLAPSED?'Expand':'Collapse'} the liftoff board">${LIFTOFF_COLLAPSED?'▸':'▾'}</button> <b>Liftoff board</b> <span>live · ${liftoffTime(j.asOf)} · ${j.scored||0} stocks scored · change since each stock first entered a state today</span></div></div>`
-    +(LIFTOFF_COLLAPSED?'</div>':
-      `<div class="lo-wrap"><table><thead><tr><th>State</th><th>Entries</th><th title="Average of the highest price reached after entry">Avg high</th><th title="Average of the lowest price reached after entry">Avg low</th><th title="Entries whose high came before their low">High first</th><th title="Entries whose low came before their high">Low first</th><th title="Now: win rate x average win + loss rate x average loss, per entry">Expectancy now ▼</th><th>Up now</th><th>In it now</th></tr></thead><tbody>${sumRows}</tbody></table></div>`
-      +`<div class="lo-note" style="margin:10px 0 4px">Stocks that entered <b>${sel}</b> today, newest first (click a state above to switch):</div>`
-      +(rec?`<div class="lo-wrap lo-scroll"><table><thead><tr><th>Symbol</th><th>Entered</th><th>Entry price</th><th>High after entry</th><th>Low after entry</th><th>First</th><th>Now</th><th>State now</th></tr></thead><tbody>${rec}</tbody></table></div>`:`<div class="lo-note">No stock has entered ${sel} today yet.</div>`)
-      +`<div class="lo-note">Each stock counts once per state: its first entry today. High/low = the highest and lowest price reached after entry (with time); First = which came first; Now = change to the latest price. Move and volume are multiples of the stock's own normal minute (last 20 sessions). BLAST = 1m move ≥3× and volume ≥5× normal, rising, up on the day; RUN = 5m move ≥1.5× normal, still rising; FALL = falling fast; LOCKED = no sellers at the high. Choose the state that makes money in the Liftoff states dropdown.</div></div>`);
-}
-async function pollLiftoff(){
-  if(document.hidden)return;
-  try{renderLiftoff(await readHelperResponse('/api/liftoff',{timeout:2500}));}catch(e){renderLiftoff(null);}
-}
-setInterval(pollLiftoff,3000);setTimeout(pollLiftoff,1500);
 function rssCompanyKey(value){
   return String(value||'').toUpperCase().replace(/&AMP;/g,' AND ').replace(/\b(LIMITED|LTD|PRIVATE|PVT|INDIA)\b/g,' ')
     .replace(/[^A-Z0-9]+/g,' ').trim().replace(/\s+/g,' ');
@@ -14363,8 +14278,6 @@ function startStreamRefresh(){
   if(_streamRefreshTimer) return;
   if(!startStreamRefresh.btst){startStreamRefresh.btst=setInterval(()=>{loadBtstPicks();loadKiteMargins();loadKiteGtts();loadProfitLockStatus();loadAutoBuyStatus();loadFilterOpportunity();loadModelPortfolios();syncSellBasketToKite();scheduleKiteBasketSync();try{resetCrossAlertsIfNewDay();checkCrossingAlerts();}catch(e){}},20000);loadBtstPicks();loadKiteMargins();loadKiteGtts();loadProfitLockStatus();loadAutoBuyStatus();loadFilterOpportunity();loadModelPortfolios();syncSellBasketToKite();try{resetCrossAlertsIfNewDay();checkCrossingAlerts();}catch(e){}
     try{seedSavedBasketCount();}catch(e){}}
-  // 27 Oct 2026: LIFTOFF publishes every 5 s and a crossing lasts 30 s, so the ranking and the Auto-Buy plan refresh every 5 s.
-  if(!startStreamRefresh.liftoff)startStreamRefresh.liftoff=setInterval(()=>{if(isLiftoffModel()){loadBtstPicks();scheduleKiteBasketSync();}},5000);
   _streamRefreshUiTimer=setInterval(()=>{try{refreshStrategySafety();renderLiveTapeBar();}catch(e){console.warn('Strategy safety refresh',e);}},1000);
   if(!_streamVisibilityBound){
     _streamVisibilityBound=true;
