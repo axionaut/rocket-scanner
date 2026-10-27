@@ -1,5 +1,5 @@
 const BUILD_TS='2026-10-27 IST'; // release build date (IST)
-const APP_VERSION=1568;
+const APP_VERSION=1569;
 const RADAR_SCORE_VERSION='v1419-recross-batches'; // Eligible on crossing the score floor at any time; selected model's evolving target and movement-based profit protection.
 
 // ── v1358: AN UNCAUGHT ERROR MUST NAME ITSELF ─────────────────────────────────────────────────
@@ -4417,7 +4417,7 @@ function initScoreFloorUI(force=false){
     el.removeAttribute('min');el.removeAttribute('max');el.placeholder=model==='CUM'?'Set threshold':ranked?'2.1':'1.6';el.step='0.1';
     el.style.width=model==='CUM'?'140px':'90px';
     const label=document.getElementById('scoreFloorLabel');if(label)label.textContent=model==='CUM'?'Cumulative Floor':(model==='ENS'?'Ensemble':model)+' Floor';
-    el.title=model==='CUM'?'Rises deduct points; falls add points, using percentage change from each previous live price. Starts at zero; persists across days and restarts. No minimum or maximum. Enter your own threshold to enable buy signals. Saved independently.':ranked?model+' only: its own ranking on the Ensemble scale (1.6 = top 1.5%, 2.2 = its #1). Default 2.1 ~ top 2-3 stocks. Saved independently.':'Ensemble only: mapped ensemble score. Default 1.6; no minimum. Saved independently from other models.';
+    el.title=model==='CUM'?'Rises add points; falls deduct points, using percentage change from each previous live price. Starts at zero each morning; persists through restarts during the day. No minimum or maximum. Enter your own threshold to enable buy signals. Saved independently.':ranked?model+' only: its own ranking on the Ensemble scale (1.6 = top 1.5%, 2.2 = its #1). Default 2.1 ~ top 2-3 stocks. Saved independently.':'Ensemble only: mapped ensemble score. Default 1.6; no minimum. Saved independently from other models.';
     _scoreFloorSeeded=model;_floorPushed=null;
     updateModeUI();
     readHelperResponse('/api/btst/min-score?model='+model,{timeout:6000}).then(d=>{
@@ -4550,11 +4550,25 @@ async function loadScoreHighs(day){
 }
 function firstScoreAtFloor(sym){
   const model=floorModel(),floor=btstMinScore(),h=SCORE_HIGHS;
+  if(model==='CUM'){
+    const cumulative=btstRanking()?.src?.cumulative,highs=cumulative?.highs;
+    if(!Number.isFinite(floor)||!highs||highs.day!==getSessionDate()||highs.epoch!==cumulative.startedAt)return null;
+    const points=highs.records?.[normSym(sym)]||[],hit=points.find(([,sc])=>sc>=floor-1e-9);
+    return hit?{t:hit[0],floor,model,price:hit[2],priceSource:hit[3],priceAt:hit[4],already:hit===points[0],since:points[0]?.[0]}:null;
+  }
   if(!h||h.day!==getSessionDate()||!Number.isFinite(floor)) return null;
   const hit=(h.models?.[model]?.[normSym(sym)]||[]).find(([,sc])=>sc>=floor-1e-9);
   return hit?{t:hit[0],floor,model,price:Number(hit[2])>0?Number(hit[2]):null,priceSource:hit[3]||null,priceAt:hit[4]||hit[0],already:hit[0]===h.runs?.[model]?.first,since:h.runs?.[model]?.first}:null;
 }
-function firstScoreBadgeHtml(fc,currentPrice){
+function crossingCurrentQuote(sym,fc){
+  if(!fc)return null;
+  const now=Date.now(),day=new Date(fc.t+19800000).toISOString().slice(0,10);
+  const candidates=[_universeMap.get(normSym(sym)),btstRanking()?.src?.pickInputs?.[normSym(sym)]];
+  return candidates.filter(q=>q?.priceSource==='live tick'&&Number.isFinite(q.price)&&q.price>0&&
+    Number.isFinite(q.priceAt)&&q.priceAt>0&&q.priceAt<=now&&q.priceAt>=(fc.priceAt||fc.t)&&
+    new Date(q.priceAt+19800000).toISOString().slice(0,10)===day).sort((a,b)=>b.priceAt-a.priceAt)[0]||null;
+}
+function firstScoreBadgeHtml(fc,currentPrice,currentAt=null){
   if(!fc)return '';
   const hm=t=>new Date(t).toLocaleTimeString('en-IN',{timeZone:'Asia/Kolkata',hour:'2-digit',minute:'2-digit',hour12:false});
   const approx=fc.priceSource==='minute-close',price=Number(fc.price),current=Number(currentPrice);
@@ -4562,7 +4576,8 @@ function firstScoreBadgeHtml(fc,currentPrice){
   const delta=hasPrice&&hasCurrent?current-price:null,pct=delta===null?null:delta/price*100;
   const signed=(n,prefix='')=>(n>0?'+':n<0?'−':'')+prefix+Math.abs(n).toFixed(2);
   const title=(fc.already?`Already at or above ${fc.model} ${fc.floor.toFixed(2)} when tracking began at ${hm(fc.since)} IST`:`First scored ${fc.model} ${fc.floor.toFixed(2)} or higher today in the ${hm(fc.t)} IST run (tracked since ${hm(fc.since)} IST)`)
-    +(hasPrice?(approx?`; approximate reference: completed minute ending ${hm(fc.priceAt)} IST`:'; price captured in that score run'):'; historical crossing price was not recorded');
+    +(hasPrice?(approx?`; approximate reference: completed minute ending ${hm(fc.priceAt)} IST`:'; price captured in that score run'):'; historical crossing price was not recorded')
+    +(hasPrice&&hasCurrent?`; price move from ₹${price.toFixed(2)} to observed ₹${current.toFixed(2)}${currentAt?' at '+hm(currentAt)+' IST':''}`:'');
   return `<div style="font-size:11px;color:var(--cyan);font-family:'DM Mono',monospace;font-weight:700;margin-top:2px" title="${escHtml(title)}">⏱ 1st ≥${fc.floor.toFixed(2)}: ${fc.already?'by ':''}${hm(fc.t)}`
     +(hasPrice?` · ${approx?'~':''}₹${price.toFixed(2)}`:' · price unavailable')
     +(delta!==null?`<span style="color:var(--${delta>0?'green':delta<0?'red':'t3'});white-space:nowrap"> · ${approx?'~':''}${signed(delta,'₹')} (${signed(pct)}%) since</span>`:hasPrice?' · current price unavailable':'')+'</div>';
@@ -4722,14 +4737,20 @@ function btstMinScore(){
 // publishes the FULL ranking with every score, so the app can apply the owner's floor to the live
 // ranking directly. That is what makes the box decide trades intraday as well as at 15:15.
 const CROSS_STORE='rs_btst_crossings_v1';
-let _crossings=null;
+let _crossings=null,_crossingsKey=null;
+function crossingStoreKey(){
+  return floorModel()==='CUM'?CROSS_STORE+':CUM:'+(btstRanking()?.src?.cumulative?.startedAt??'unavailable'):CROSS_STORE;
+}
 function crossingStore(){
-  if(_crossings&&_crossings.day===getSessionDate()) return _crossings;
+  const key=crossingStoreKey();
+  if(_crossings&&_crossingsKey===key&&_crossings.day===getSessionDate()) return _crossings;
+  if(_crossSaveTimer)flushCrossings();
   let saved=null;
-  try{saved=JSON.parse(localStorage.getItem(CROSS_STORE)||'null');}catch(e){}
+  try{saved=JSON.parse(localStorage.getItem(key)||'null');}catch(e){}
   // A crossing is a fact about TODAY. Yesterday's is discarded rather than replayed, so a page
   // left open overnight cannot resurrect a stale buy signal.
   _crossings=(saved&&saved.day===getSessionDate())?saved:{day:getSessionDate(),at:{}};
+  _crossingsKey=key;
   return _crossings;
 }
 // Coalesced: the store is serialised at most once per tick, and only after something changed.
@@ -4738,7 +4759,7 @@ function crossingStore(){
 let _crossSaveTimer=null;
 function flushCrossings(){
   clearTimeout(_crossSaveTimer);_crossSaveTimer=null;
-  try{localStorage.setItem(CROSS_STORE,JSON.stringify(crossingStore()));}catch(e){}
+  try{if(_crossings&&_crossingsKey)localStorage.setItem(_crossingsKey,JSON.stringify(_crossings));}catch(e){}
 }
 function saveCrossings(){
   if(_crossSaveTimer) return;
@@ -5144,7 +5165,8 @@ function rowStatusPillHtml(s){
   const funded=SELECTED.has(s.symbol)&&act.state==='GO';
   const unfunded=act.state==='GO'&&!funded;
   const tone=act.state==='BLOCKED'?'red':act.state==='GO'&&!unfunded?'green':'amber';
-  const crossBadge=firstScoreBadgeHtml(firstScoreAtFloor(s.symbol),s.price);
+  const first=firstScoreAtFloor(s.symbol),quote=crossingCurrentQuote(s.symbol,first);
+  const crossBadge=firstScoreBadgeHtml(first,quote?.price??null,quote?.priceAt??null);
   return `<span class="info-pill pill-${tone}" title="${escHtml(act.reason)}">${act.state}${funded?' | Funded':unfunded?' | Not funded':''}</span>`
     +crossBadge
     +(act.state!=='GO'?`<div style="font-size:11px;color:var(--t3)">${escHtml(act.reason)}</div>`:'')
@@ -10068,7 +10090,7 @@ function _renderMethodologyInner(){
     <p>The selected model (Ensemble, PATH or Cumulative Change) supplies the recommendation table, counts, allocation and basket. Ensemble and PATH use the trained percentile scale (1.6 = top 1.5%, 2.2 = the model's #1). Cumulative Change has its own raw scale: a running sum of observed percentage changes. Its floor does not represent a percentile.</p>
     <div class="m-grid">
     <div class="m-card"><h4>Ensemble (default floor 1.6)</h4><p>Five learners (return regressor, +3% classifier, excess-over-market, downside quantile, extra-trees) trained walk-forward on the last 220 sessions of daily candles built from the minutes, retrained every 5 sessions; inputs are 52 daily features (returns 1 day to 3 months, gap, range, volume surges with today's volume projected, volatility, distance to highs and averages, RSI, stochastics, ADX, MACD, TradingView-style ratings, sector strength, market condition). The blend is the average of their rankings. Replayed through the paper account on its saved 1-21 Oct signals: +₹18,915 on ₹3.5L.</p></div>
-    <div class="m-card"><h4>Cumulative Change (set your own threshold)</h4><p>Each stock starts at zero on its first live observation. Every 20 seconds the helper subtracts (current price - previous observed price) / previous observed price * 100: rises deduct points and falls add points. The record restarted for this reversed direction on 27 Oct. It saves the score and last price across days and restarts, including the next observed overnight move. No historical backfill, compounding, decay or score cap. Tracking continues with other models selected. The table defaults to highest score first; click any data header to sort or reverse it. Negative values are valid. There is no default threshold: enter any finite number to enable buy signals. This is a price record, with no trained prediction or claimed trading edge.</p></div>
+    <div class="m-card"><h4>Cumulative Change (set your own threshold)</h4><p>Each stock starts at zero on its first live observation each day. Every 20 seconds the helper adds (current price - previous observed price) / previous observed price * 100: rises add points and falls deduct points. The record restarted at zero when this direction was restored on 27 Oct. It saves the score and last price through restarts within the day. At 09:00 IST it clears the previous day; the next fresh quote is a zero baseline, with no overnight move added. The first-crossing history resets with it. No historical backfill, compounding, decay or score cap. Tracking continues with other models selected. The table defaults to highest score first; click any data header to sort or reverse it. Negative values are valid. There is no default threshold: enter any finite number to enable buy signals. This is a price record, with no trained prediction or claimed trading edge.</p></div>
     <div class="m-card"><h4>PATH (default floor 2.1)</h4><p>Learns directly from our trade: from each completed minute, does +1.25% come before −1.25% (net of the real intraday or delivery charges)? Inputs are 12 minute-level features: time of day, distance from the open, VWAP and the day's high, the day's range, 1/5/15-minute moves, relative volume, turnover, opening gap, yesterday's range. Trained only on tradable stocks, retrained monthly. Held-out per trade: +0.38% / +0.27% (a model trained on shuffled outcomes: −0.22% / −0.30%). It is strongest only at its very top, hence the 2.1 floor.</p></div>
     <div class="m-card"><h4>1. Live score (throughout the session)</h4><p>The local helper runs <code>dev/btst_engine.py</code> every 2 minutes. Ensemble scores from daily candles plus today's partial candle; PATH and STACK score from the completed minutes of today, continuing a state saved after each close. If PATH or STACK cannot score (stale data, missing nightly state), that model shows WAIT and never substitutes another model; the Ensemble keeps running.</p></div>
     <div class="m-card"><h4>2. Buy on qualification</h4><p>A current live score clearing your floor can become GO throughout the session. Qualifying names share available capital by score, within saved allocation and execution limits (minimum ₹${RocketStrategy.CONFIG.MIN_ALLOCATION_RS.toLocaleString('en-IN')} per new position, from charges and the +${RocketStrategy.CONFIG.TARGET_PCT}% start; adds to held stocks need one share). A purchase consumes its crossing; a completed below-floor observation enables a fresh crossing, held or unheld. Price freshness, circuit, surveillance and EQ checks still apply. Market trend does not block entries.</p></div>
