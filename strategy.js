@@ -44,7 +44,10 @@
   // once-per-stock-per-day DP fee. An add to a held stock shares that sale's DP fee, so only the
   // proportional charges apply and any whole share qualifies.
   function minOrderRs(held) {
-    return 0;   // 28 Oct 2026 (owner): the charge-based Rs 3,812 minimum is removed; any whole share qualifies.
+    // 28 Oct 2026 (owner, v1586): size from the exit. A new position must be large enough that the one DP fee is at most
+    // 0.26% (Zerodha's minimum GTT gap) of it: Rs 15.34 / 0.26% = Rs 5,900. Skip a crossing rather than buy it thin.
+    // An add to a held stock shares that day's DP fee, so one whole share qualifies.
+    return held ? 0 : Math.ceil(calcZerodhaChargesSplit(1, 1, true, false, false).dp / 0.0026);
     const v = 1e6, t = CONFIG.TARGET_PCT / 100;
     const pct = (sumChargeParts(calcZerodhaChargesSplit(v, 1, false, false, true)) + sumChargeParts(calcZerodhaChargesSplit(v, 1, true, false, true))) / v;
     const dp = held ? 0 : calcZerodhaChargesSplit(1, 1, true, false, false).dp;
