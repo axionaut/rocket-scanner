@@ -1,5 +1,5 @@
 const BUILD_TS='2026-10-28 IST'; // release build date (IST)
-const APP_VERSION=1592;
+const APP_VERSION=1593;
 const RADAR_SCORE_VERSION='v1419-recross-batches'; // Eligible on crossing the score floor at any time; selected model's evolving target and movement-based profit protection.
 
 // ── v1358: AN UNCAUGHT ERROR MUST NAME ITSELF ─────────────────────────────────────────────────
@@ -9474,74 +9474,6 @@ document.addEventListener('click',()=>{if(PERF_CAL.open){PERF_CAL.open=false;PER
 function setPerfRange(f,t){
   PERF_FROM=f||'';PERF_TO=t||'';PERF_PERIOD_FILTER='custom';renderPerformance();
 }
-let MODEL_PORTFOLIO_STATUS=null,MODEL_PORTFOLIO_BUSY=false,MODEL_BACKFILL=null,MODEL_BACKFILL_AT=0;
-// 23 Oct 2026 (owner): history before live tracking - production paper-account replays per model and every model
-// judged on the real trades (dev/research/backfill_summary.py -> /api/model-backfill). Display only.
-function buildModelBackfillHtml(){
-  const b=MODEL_BACKFILL;if(!b)return '';
-  const money=n=>Number.isFinite(n)?(n<0?'-':'')+'₹'+Math.abs(n).toLocaleString('en-IN'):'—';
-  const tone=n=>n>0?'mp-positive':n<0?'mp-negative':'';
-  // Retired models (owner: STACK removed 27 Oct; Peak removed 21 Oct) are not shown.
-  const RETIRED=new Set(['STACK','PEAK']);
-  const rows=(b.replay||[]).filter(m=>!RETIRED.has(String(m.model).toUpperCase())).map(m=>{
-    if(!m.halves)return `<tr><td>${escHtml(m.model)}</td><td colspan="7" style="color:var(--t3)">${escHtml(m.status||'not available')}</td></tr>`;
-    return m.halves.map((h,i)=>`<tr>${i===0?`<td rowspan="${m.halves.length}"><b>${escHtml(m.model)}</b><div style="font-size:13px;color:var(--t3)">${escHtml(m.basket||'')}</div></td>`:''}<td>${escHtml(h.from_&&h.to?h.from_+' → '+h.to:h.window)}</td>`+
-      (h.status?`<td colspan="6" style="color:var(--t3)">${escHtml(h.status)}</td>`:`<td class="${tone(h.net)}">${money(h.net)}</td><td>${money(h.realised)}</td><td class="${tone(h.open)}">${money(h.open)}</td><td>${h.openPositions??'—'}</td><td>${Number.isFinite(h.maxDrawdownPct)?h.maxDrawdownPct.toFixed(2)+'%':'—'}</td><td>${h.buys??'—'}</td>`)+`</tr>`).join('');
-  }).join('');
-  const lt=b.liveTrades;let live='';
-  if(lt&&lt.models){
-    const all=lt.all_real_trades||{};
-    const lines=Object.entries(lt.models).filter(([m])=>!RETIRED.has(String(m).toUpperCase())).map(([m,v])=>Object.entries(v.bands||{}).map(([band,x],i)=>`<tr>${i===0?`<td rowspan="${Object.keys(v.bands).length}"><b>${escHtml(m)}</b><div style="font-size:13px;color:var(--t3)">${v.scored} scored trades</div></td>`:''}<td>${escHtml(band)}</td><td>${x.n}</td><td class="${tone(x.net)}">${money(x.net)}</td><td>${x.n?Math.round(100*x.wins/x.n)+'%':'—'}</td></tr>`).join('')).join('');
-    live=`<h4 style="margin:16px 0 6px">On your real trades (since ${escHtml(lt.from||'')})</h4><div style="font-size:13px;color:var(--t2);margin-bottom:6px">${all.n} real buy lots, net ${money(all.net)} after charges (open lots marked at the last close). Each model's view of the stock at the minute you bought it: would it have bought too (top 2%), and how did those real trades end?</div><div class="mp-table-wrap"><table class="mp-table"><thead><tr><th>Model</th><th>Its view at buy time</th><th>Trades</th><th>Real net P&amp;L</th><th>Won</th></tr></thead><tbody>${lines}</tbody></table></div>`;
-  }
-  return `<details class="mp-detail" open><summary>Before live tracking: history (built ${escHtml(b.builtAt||'')})</summary><div style="font-size:13px;color:var(--t2);margin:6px 0">${escHtml(b.note||'')} Capital ${money(b.capital)}.</div><div class="mp-table-wrap"><table class="mp-table"><thead><tr><th>Model</th><th>Window</th><th>Net</th><th>Booked</th><th>Open</th><th>Open pos.</th><th>Max DD</th><th>Buys</th></tr></thead><tbody>${rows}</tbody></table></div>${live}</details>`;
-}
-async function loadModelPortfolios(){
-  if(MODEL_PORTFOLIO_BUSY)return;
-  MODEL_PORTFOLIO_BUSY=true;
-  try{
-    const tradeInputs={capital:document.getElementById('fCapital')?.value||'',allIn:document.getElementById('fAllIn')?.value||'',maxPct:document.getElementById('fMaxPct')?.value||''};
-    await readHelperResponse('/api/model-portfolios/context',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({tradeInputs,exclusions:[...EXPORT_EXCLUDED]}),timeout:5000}).catch(()=>null);
-    const j=await readHelperResponse('/api/model-portfolios',{timeout:5000});
-    // 23 Oct 2026 (owner): backfill so the comparison is not blank before live tracking has trades.
-    if(!MODEL_BACKFILL||Date.now()-MODEL_BACKFILL_AT>60000){const b=await readHelperResponse('/api/model-backfill',{timeout:5000}).catch(()=>null);if(b&&b.ok){MODEL_BACKFILL=b;MODEL_BACKFILL_AT=Date.now();}}
-    if(j){MODEL_PORTFOLIO_STATUS=j;const panel=document.getElementById('modelPortfolioPanel');if(panel){const open=[...panel.querySelectorAll('details')].map(x=>x.open);panel.outerHTML=buildModelPortfolioPanel();document.querySelectorAll('#modelPortfolioPanel details').forEach((x,i)=>x.open=!!open[i]);}}
-  }catch(e){const panel=document.getElementById('modelPortfolioConnection');if(panel)panel.textContent='Helper unavailable; showing the last received comparison.';}
-  finally{MODEL_PORTFOLIO_BUSY=false;}
-}
-function buildModelPortfolioPanel(){
-  // 21 Oct 2026 (owner): compares the live Ensemble with each of its member models (and any member added later).
-  const j=MODEL_PORTFOLIO_STATUS;
-  const models=Object.keys(j?.models||{}).sort((a,b)=>(a==='ENS'?-1:b==='ENS'?1:a.localeCompare(b)));
-  const money=n=>Number.isFinite(n)?'₹'+n.toLocaleString('en-IN',{minimumFractionDigits:2,maximumFractionDigits:2}):'—';
-  const pct=n=>Number.isFinite(n)?(n>0?'+':'')+n.toFixed(2)+'%':'—';
-  const tone=n=>n>0?'mp-positive':n<0?'mp-negative':'';
-  const name=k=>j?.labels?.[k]||(k==='ENS'?'Ensemble (live)':k.replace(/^M:/,''));
-  const short=k=>k==='ENS'?'Ensemble':k.replace(/^M:/,'');
-  const palette=['#fb923c','#60a5fa','#34d399','#f472b6','#a78bfa','#facc15','#22d3ee','#f87171'];
-  const color=k=>palette[Math.max(0,models.indexOf(k))%palette.length];
-  const time=at=>new Date(at).toLocaleTimeString('en-IN',{timeZone:'Asia/Kolkata',hour:'2-digit',minute:'2-digit',hour12:false});
-  const when=at=>new Date(at).toLocaleString('en-IN',{timeZone:'Asia/Kolkata',day:'2-digit',month:'short',hour:'2-digit',minute:'2-digit',hour12:false});
-  const stale=j?.lastObservedAt&&Date.now()-j.lastObservedAt>60000;
-  const status=j?.error?escHtml(j.error):!j?.startedAt?'Waiting for live scores and capital':stale?'Paused · showing saved marks':`Tracking ${models.length} models live`;
-  const css=`<style>
-  #modelPortfolioPanel{margin:16px;padding:20px;border:1px solid var(--border);border-radius:12px;background:var(--bg-card);font-size:14px;color:var(--t2)}
-  #modelPortfolioPanel *{box-sizing:border-box}.mp-header,.mp-chart-head{display:flex;justify-content:space-between;align-items:center;gap:12px}.mp-header h3{margin:0;color:var(--t1);font-size:18px}.mp-sub{color:var(--t3);font-size:13px;margin-top:5px;line-height:1.5}.mp-status{font-size:13px;padding:5px 9px;border:1px solid var(--border);border-radius:20px;white-space:nowrap}.mp-board{margin:18px 0 14px}.mp-board td:first-child b{color:var(--t1)}.mp-board .mp-live td{background:rgba(251,146,60,.06)}.mp-board small{display:block;color:var(--t3);font-size:12px;margin-top:3px;font-weight:400}.mp-positive{color:var(--green)}.mp-negative{color:var(--red)}.mp-chart{border:1px solid var(--border);border-radius:8px;padding:14px 14px 10px;margin-bottom:14px;background:var(--bg)}.mp-chart-head{margin-bottom:14px}.mp-chart-head b{font-size:13px;font-weight:600;color:var(--t2)}.mp-legend{display:flex;flex-wrap:wrap;gap:14px;font-size:12px}.mp-dot{display:inline-block;width:7px;height:7px;border-radius:50%;background:var(--model-color);margin-right:5px}.mp-plot{display:grid;grid-template-columns:50px minmax(0,1fr);gap:8px}.mp-axis{display:flex;flex-direction:column;justify-content:space-between;text-align:right;font-size:12px;color:var(--t3);padding-bottom:2px}.mp-plot svg{display:block;width:100%;height:160px;overflow:visible}.mp-times{display:flex;justify-content:space-between;margin:8px 0 0 58px;color:var(--t3);font-size:12px}.mp-detail{border-top:1px solid var(--border);margin-top:0}.mp-detail summary{cursor:pointer;padding:12px 2px;color:var(--t2);font-size:13px}.mp-detail summary span{color:var(--t3);font-size:12px;margin-left:8px}.mp-table-wrap{overflow:auto;margin:0 0 14px;border:1px solid var(--border);border-radius:6px}#modelPortfolioPanel table{width:100%;border-collapse:collapse;white-space:nowrap;font-size:14px;font-family:'DM Mono',monospace;min-width:560px;font-variant-numeric:tabular-nums}#modelPortfolioPanel th{background:var(--bg-raised);color:var(--t3);font-size:12px;font-weight:600;text-transform:uppercase;letter-spacing:.7px;font-family:'Plus Jakarta Sans',sans-serif}#modelPortfolioPanel th,#modelPortfolioPanel td{padding:10px 12px;text-align:right;border-bottom:1px solid var(--border)}#modelPortfolioPanel th:first-child,#modelPortfolioPanel td:first-child{text-align:left}#modelPortfolioPanel tbody tr:last-child td{border-bottom:0}.mp-table-label{color:var(--t3);font-size:12px;margin:0 0 8px}.mp-empty{padding:12px 0 16px;color:var(--t3);font-size:13px}.mp-method{line-height:1.7;color:var(--t3);font-size:13px;max-width:1000px;padding-bottom:8px}.mp-method p{margin:0 0 8px}@media(max-width:650px){#modelPortfolioPanel{margin:10px;padding:14px}.mp-header{align-items:flex-start;flex-direction:column;gap:8px}.mp-chart-head{align-items:flex-start;flex-direction:column;gap:8px}.mp-plot svg{height:135px}.mp-detail summary span{display:block;margin:5px 0 0 14px}}
-  </style>`;
-  const head=`<section id="modelPortfolioPanel">${css}<div class="mp-header"><div><h3>Model comparison</h3><div class="mp-sub">The live Ensemble and its member models, as independent paper portfolios · net of estimated charges</div></div><span id="modelPortfolioConnection" class="mp-status">${status}</span></div>`;
-  if(!j?.startedAt||!models.length)return head+'</section>';
-  const ranked=models.slice().sort((a,b)=>(j.models[b].returnPct??-1e9)-(j.models[a].returnPct??-1e9));
-  const rows=ranked.map((k,i)=>{const m=j.models[k];return `<tr class="${k==='ENS'?'mp-live':''}"><td><b style="--model-color:${color(k)}"><i class="mp-dot"></i>${i+1}. ${escHtml(name(k))}</b><small>since ${escHtml(when(m.startedAt||j.startedAt))} IST</small></td><td><b class="${tone(m.net)}">${money(m.net)}</b></td><td class="${tone(m.returnPct)}">${pct(m.returnPct)}</td><td class="${tone(m.realised)}">${money(m.realised)}</td><td class="${tone(m.openNet)}">${money(m.openNet)}</td><td>${Number.isFinite(m.maxDrawdownPct)?m.maxDrawdownPct.toFixed(2)+'%':'—'}</td><td>${money(m.tied)}</td><td>${m.closedFills||0}</td><td>${m.openPositions||0}${m.waitingOrders?`<small>${m.waitingOrders} waiting</small>`:''}${m.staleMarks?`<small style="color:var(--amber)">${m.staleMarks} stale marks</small>`:''}</td></tr>`;}).join('');
-  const board=`<div class="mp-table-wrap mp-board"><table><thead><tr><th>Model</th><th>Net P&amp;L</th><th>Return</th><th>Realised net</th><th>Open net</th><th>Max drawdown</th><th>Capital in positions</th><th>Exits</th><th>Open</th></tr></thead><tbody>${rows}</tbody></table></div>`;
-  const series=models.map(k=>{const m=j.models?.[k],s=(m?.curve||[]).map(x=>({at:x.at,pct:x.returnPct??x.net/m.startingCapital*100})).filter(x=>Number.isFinite(x.at)&&Number.isFinite(x.pct));if(Number.isFinite(j.lastObservedAt)&&Number.isFinite(m?.returnPct)&&(!s.length||j.lastObservedAt>s.at(-1).at))s.push({at:j.lastObservedAt,pct:m.returnPct});return s;});
-  const points=series.flat(),t0=Math.min(...points.map(x=>x.at)),t1=Math.max(...points.map(x=>x.at));
-  const rawLo=Math.min(0,...points.map(x=>x.pct)),rawHi=Math.max(0,...points.map(x=>x.pct)),pad=Math.max(.01,(rawHi-rawLo)*.12),lo=rawLo-pad,hi=rawHi+pad;
-  const y=v=>160-(v-lo)/(hi-lo)*160;
-  const legend=models.map(k=>`<span style="--model-color:${color(k)}"><i class="mp-dot"></i>${escHtml(short(k))}</span>`).join('');
-  const chart=points.length>1?`<div class="mp-chart"><div class="mp-chart-head"><b>Account return</b><div class="mp-legend">${legend}</div></div><div class="mp-plot"><div class="mp-axis"><span>${pct(hi)}</span><span>${pct((hi+lo)/2)}</span><span>${pct(lo)}</span></div><svg viewBox="0 0 1000 160" preserveAspectRatio="none" role="img" aria-label="Net paper account return over time for each model.">${[0,80,160].map(v=>`<line x1="0" x2="1000" y1="${v}" y2="${v}" stroke="var(--border)" vector-effect="non-scaling-stroke"/>`).join('')}<line x1="0" x2="1000" y1="${y(0)}" y2="${y(0)}" stroke="var(--t3)" stroke-dasharray="3 5" opacity=".5" vector-effect="non-scaling-stroke"/>${series.map((s,i)=>`<polyline fill="none" stroke="${color(models[i])}" stroke-width="${models[i]==='ENS'?2.5:1.5}" vector-effect="non-scaling-stroke" points="${s.map(x=>((x.at-t0)/(t1-t0||1)*1000).toFixed(1)+','+y(x.pct).toFixed(1)).join(' ')}"><title>${escHtml(name(models[i]))}: ${pct(s.at(-1)?.pct)}</title></polyline>`).join('')}</svg></div><div class="mp-times"><span>${time(t0)}</span><span>${time((t0+t1)/2)} IST</span><span>${time(t1)}</span></div></div>`:'<div class="mp-empty">Return chart appears after the next observation.</div>';
-  const details=models.map(k=>{const m=j.models?.[k];if(!m)return '';const positions=(m.positions||[]).map(p=>`<tr><td><b>${escHtml(p.sym)}</b></td><td>${p.qty}</td><td>${money(p.avgCost)}</td><td>${money(p.mark)}</td><td>${money(p.target)}</td><td>${p.stop?money(p.stop):'Not armed'}</td></tr>`).join('');const trades=(m.trades||[]).slice(-10).reverse().map(t=>`<tr><td><b>${escHtml(t.sym)}</b></td><td>${t.qty}</td><td>${money(t.buyPrice)}</td><td>${money(t.sellPrice)}</td><td>${money(t.charges)}</td><td class="${tone(t.net)}">${money(t.net)}</td></tr>`).join('');return `<details class="mp-detail"><summary>${escHtml(name(k))} activity<span>${m.positions?.length||0} open · ${m.trades?.length||0} simulated exits</span></summary>${positions?`<div class="mp-table-label">OPEN POSITIONS</div><div class="mp-table-wrap"><table><thead><tr><th>Stock</th><th>Qty</th><th>Average</th><th>Mark</th><th>Target</th><th>Profit stop</th></tr></thead><tbody>${positions}</tbody></table></div>`:'<div class="mp-empty">No open positions.</div>'}${trades?`<div class="mp-table-label">RECENT EXITS</div><div class="mp-table-wrap"><table><thead><tr><th>Stock</th><th>Qty</th><th>Buy</th><th>Sell</th><th>Charges</th><th>Net P&amp;L</th></tr></thead><tbody>${trades}</tbody></table></div>`:'<div class="mp-empty">No simulated exits yet.</div>'}</details>`;}).join('');
-  return head+board+chart+details+buildModelBackfillHtml()+`<details class="mp-detail"><summary>How this comparison works</summary><div class="mp-method"><p>Tracking since ${escHtml(new Date(j.startedAt).toLocaleString('en-IN',{timeZone:'Asia/Kolkata'}))} IST. Current live capital limit: ${money(j.settings?.values?.capital)}.${j.gaps?.length?' '+j.gaps.length+' observation gap(s) recorded.':''}</p><p>The Ensemble row trades the live blended score. Each member row trades that model's own ranking alone, converted to a score with the same percentile scale the Ensemble uses. The five Ensemble members share the Ensemble floor; PATH uses its own saved floor (default 2.1, about the top 2-3 stocks, as validated). Cumulative Change trades its own live 10-second record under its own threshold, whichever model is selected, and has no account until a threshold is saved. All rows share capital, sizing, liquidity limits, the 09:15 start and bracket exits. No model applies a market-trend gate; only Ensemble has its score upper cap. A model added later opens its own account from that moment; the history section above shows replays and real-trade results from before live tracking.</p><p>Each portfolio keeps its own cash under the live cash ceiling. New highs in the shared cash budget add equal paper funding, excluded from profit. Returns and drawdown adjust for funding.</p><p>Fills use subsequent observed ticks and visible depth, including partial fills and estimated charges. Open net reserves delivery exit charges. Broker latency, queue position and rejected orders can differ from these estimates. Unobserved prices are never replayed.</p></div></details></section>`;
-}
 function renderPerformance(){
   PERF_RENDERED=true;
   const el=document.getElementById('perfContent');
@@ -9553,7 +9485,6 @@ function renderPerformance(){
   if(!tb){
     el.innerHTML=`<div style="padding:12px 16px"><div style="text-align:center;padding:60px 40px;color:var(--t2)"><div style="font-size:18px;font-weight:700;color:var(--t1);margin-bottom:8px">No Tradebook Loaded</div><div>Upload TRADEBOOK.csv to see performance analytics. Open Positions and Latest Session are on the Rankings tab.</div></div></div>`;
     el.innerHTML+=buildUsPerformancePanel();
-    el.insertAdjacentHTML('afterbegin',buildModelPortfolioPanel());
     return;
   }
 
@@ -9565,7 +9496,6 @@ function renderPerformance(){
   if(!allTripsRaw.length&&tb.roundTrips>0){
     el.innerHTML=`<div style="padding:12px 16px"><div style="text-align:center;padding:60px 40px;color:var(--t2)"><div style="font-size:18px;font-weight:700;color:var(--t1);margin-bottom:8px">Re-upload TRADEBOOK.csv</div><div>Brain has ${tb.roundTrips} trades stored in the old format. Re-upload TRADEBOOK.csv once to rebuild with full trip data.</div></div></div>`;
     el.innerHTML+=buildUsPerformancePanel();
-    el.insertAdjacentHTML('afterbegin',buildModelPortfolioPanel());
     return;
   }
 
@@ -9671,7 +9601,6 @@ function renderPerformance(){
       ${symRows.length?perfCard('Stocks',symTbl.getHtml(),'360px','perf-stocks'):''}
     </div>`;
   el.innerHTML+=buildUsPerformancePanel();
-    el.insertAdjacentHTML('afterbegin',buildModelPortfolioPanel());
 
   setTimeout(()=>{monthTbl.render();symTbl.render();},0);
 }
@@ -10193,14 +10122,14 @@ function _renderMethodologyInner(){
   const mc=document.getElementById('methContent');if(!mc)return;
   mc.innerHTML=`<nav class="meth-nav" aria-label="Methodology sections"><button onclick="scrollToSection('meth-filters')">Filter decisions</button><button onclick="scrollToSection('meth-evidence')">Current evidence</button><button onclick="scrollToSection('meth-rules')">Entry rules</button><button onclick="scrollToSection('meth-models')">Models & exits</button><button onclick="scrollToSection('meth-history')">Older research</button></nav>
     <div id="meth-hf-wrap">${buildHardFilterMethodologyHTML(ENGINE_DATA)}</div>
-    <section id="meth-evidence"><h3>Current evidence</h3><p>The trained models are tested the same way: chosen on months before 6 Aug, judged on 6 Aug–21 Oct (two halves), through the same paper account the Model comparison uses (real minute prices and volumes, real charges, the live bracket exit and funded trims), against a copy trained on shuffled outcomes. PATH and STACK find different trades from the Ensemble: on the Ensemble's own crossings and on your real trades their opinion does not separate winners from losers, so they are separate choices, not blended into the Ensemble. The Performance tab's Model comparison shows all of them side by side live, plus this history.</p>
+    <section id="meth-evidence"><h3>Current evidence</h3><p>Ensemble and PATH use their trained model scores; Cumulative Change records live price movements. Live entries follow the selected model, its saved threshold and the shared entry rules. Performance reports recorded account trades and their estimated charges.</p>
 </section>
     <section id="meth-rules"><h3>Entry rules now</h3><p>New buys from the 09:15 open, any time a fresh score crosses the selected model's floor with a fresh price. Market-trend gates are removed for all models. No volume-fade or size-bucket veto (removed 22 Oct: without them the account made more in both halves of the 1-21 Oct replay). The Ensemble keeps its 2.15 upper cap. Liquidity, impact and minimum-order limits apply to every model.</p>
 </section>
     <details id="meth-models" class="meth-detail"><summary>Models, scoring and exits</summary><h3>Live score-crossing engine</h3>
     <p>The selected model (Ensemble, PATH or Cumulative Change) supplies the recommendation table, counts, allocation and basket. Ensemble and PATH use the trained percentile scale (1.6 = top 1.5%, 2.2 = the model's #1). Cumulative Change has its own raw scale: a running sum of observed percentage changes. Its floor does not represent a percentile.</p>
     <div class="m-grid">
-    <div class="m-card"><h4>Ensemble (default floor 1.6)</h4><p>Five learners (return regressor, +3% classifier, excess-over-market, downside quantile, extra-trees) trained walk-forward on the last 220 sessions of daily candles built from the minutes, retrained every 5 sessions; inputs are 52 daily features (returns 1 day to 3 months, gap, range, volume surges with today's volume projected, volatility, distance to highs and averages, RSI, stochastics, ADX, MACD, TradingView-style ratings, sector strength, market condition). The blend is the average of their rankings. Replayed through the paper account on its saved 1-21 Oct signals: +₹18,915 on ₹3.5L.</p></div>
+    <div class="m-card"><h4>Ensemble (default floor 1.6)</h4><p>Five learners (return regressor, +3% classifier, excess-over-market, downside quantile, extra-trees) trained walk-forward on the last 220 sessions of daily candles built from the minutes, retrained every 5 sessions; inputs are 52 daily features (returns 1 day to 3 months, gap, range, volume surges with today's volume projected, volatility, distance to highs and averages, RSI, stochastics, ADX, MACD, TradingView-style ratings, sector strength, market condition). The blend is the average of their rankings.</p></div>
     <div class="m-card"><h4>Cumulative Change (set your own threshold)</h4><p>Each stock starts with a zero score on the new IST date. Every 10 seconds the helper takes the % change from the previous observed price and adds its square root, keeping the sign: rises add points and falls deduct points. Many small advances therefore outweigh one equally large jump (fifty 0.1% rises add 15.8; one 5% jump adds 2.2). The record restarted at zero when this direction was restored on 27 Oct. It saves the score and last price through restarts within the day. An IST date change resets the score to zero and starts new crossing history. The last observed price remains the reference, so the first price refresh around 09:00 contributes its change, including the opening gap. No historical backfill, compounding, decay or score cap. Tracking continues with other models selected. The table defaults to highest score first; click any data header to sort or reverse it. Negative values are valid. There is no default threshold: enter any finite number to enable buy signals. This is a price record, with no trained prediction or claimed trading edge.</p></div>
     <div class="m-card"><h4>PATH (default floor 2.1)</h4><p>Learns directly from our trade: from each completed minute, does +1.25% come before −1.25% (net of the real intraday or delivery charges)? Inputs are 12 minute-level features: time of day, distance from the open, VWAP and the day's high, the day's range, 1/5/15-minute moves, relative volume, turnover, opening gap, yesterday's range. Trained only on tradable stocks, retrained monthly. Held-out per trade: +0.38% / +0.27% (a model trained on shuffled outcomes: −0.22% / −0.30%). It is strongest only at its very top, hence the 2.1 floor.</p></div>
     <div class="m-card"><h4>1. Live score (throughout the session)</h4><p>The local helper runs <code>dev/btst_engine.py</code> every 2 minutes. Ensemble scores from daily candles plus today's partial candle; PATH and STACK score from the completed minutes of today, continuing a state saved after each close. If PATH or STACK cannot score (stale data, missing nightly state), that model shows WAIT and never substitutes another model; the Ensemble keeps running.</p></div>
@@ -11239,10 +11168,6 @@ function updateModelComparisonAudit(now=Date.now()){
     FS.set('rs_median_model_revisions_v1',history);
   }
 }
-function renderModelComparison(){
-  const host=document.getElementById('modelComparison');
-  if(host&&host.childNodes.length)host.replaceChildren();
-}
 function computeModelAlloc(capital,selList){
   if(!(capital>0)||!selList.length) return {};
   const maxAlloc=getEffectiveMaxAlloc(),cap=Math.min(capital,maxAlloc>0?maxAlloc:capital);
@@ -11867,7 +11792,6 @@ function onUsFloorChange(){
 setTimeout(()=>{try{initMarketViewUI();}catch(e){}loadUsFeed();},1500);
 setInterval(loadUsFeed,30000);
 function renderTable(){
-  renderModelComparison();
   renderLiveTapeBar();
   const capital=getEffectiveCapital();
   // Allocation only across SELECTED instruments
@@ -13175,7 +13099,6 @@ function livePriceAge(sym){
   return `<div style="font-size:10px;color:var(--t3)">${escHtml(f.priceSource||'stored price')}${age===null?'':` / ${age}s ago`} / refresh 30s</div>`;
 }
 function patchVisiblePrices(){
-  renderModelComparison();
   const rows = document.querySelectorAll('#tBody tr[data-sym]');
   if(!rows.length) return;
   const allMap = new Map(ALL.map(s => [s.symbol, s]));
@@ -14434,7 +14357,7 @@ function startStreamRefresh(){
   }
   if(_streamRefreshTimer) return;
   if(!startStreamRefresh.entry)startStreamRefresh.entry=setInterval(loadEntryTriggers,2000);   // v1584: 2 s, so a trigger reaches the basket within ~2 s of the helper check
-  if(!startStreamRefresh.btst){startStreamRefresh.btst=setInterval(()=>{loadBtstPicks();loadKiteMargins();loadKiteGtts();loadProfitLockStatus();loadAutoBuyStatus();loadFilterOpportunity();loadModelPortfolios();syncSellBasketToKite();scheduleKiteBasketSync();try{resetCrossAlertsIfNewDay();checkCrossingAlerts();}catch(e){}},20000);loadBtstPicks();loadKiteMargins();loadKiteGtts();loadProfitLockStatus();loadAutoBuyStatus();loadFilterOpportunity();loadModelPortfolios();syncSellBasketToKite();try{resetCrossAlertsIfNewDay();checkCrossingAlerts();}catch(e){}
+  if(!startStreamRefresh.btst){startStreamRefresh.btst=setInterval(()=>{loadBtstPicks();loadKiteMargins();loadKiteGtts();loadProfitLockStatus();loadAutoBuyStatus();loadFilterOpportunity();syncSellBasketToKite();scheduleKiteBasketSync();try{resetCrossAlertsIfNewDay();checkCrossingAlerts();}catch(e){}},20000);loadBtstPicks();loadKiteMargins();loadKiteGtts();loadProfitLockStatus();loadAutoBuyStatus();loadFilterOpportunity();syncSellBasketToKite();try{resetCrossAlertsIfNewDay();checkCrossingAlerts();}catch(e){}
     try{seedSavedBasketCount();}catch(e){}}
   _streamRefreshUiTimer=setInterval(()=>{try{refreshStrategySafety();renderLiveTapeBar();}catch(e){console.warn('Strategy safety refresh',e);}},1000);
   if(!_streamVisibilityBound){
@@ -15568,7 +15491,7 @@ function switchTab(n){
   // tabs back and forth was rebuilding the full ledger and the trade analytics every time.
   if(n===1&&(METHODOLOGY_DIRTY||!METHODOLOGY_BUILT)) renderMethodology();
   // Performance analytics are intentionally deferred so tab switching paints immediately.
-  if(n===2){loadModelPortfolios();if(PERF_DIRTY||!PERF_RENDERED)schedulePerformanceRender();}
+  if(n===2){if(PERF_DIRTY||!PERF_RENDERED)schedulePerformanceRender();}
   if(n===3&&window.RocketFinance) window.RocketFinance.render();
   // v1101: a hidden grid has clientWidth 0, so balancing on the tab it lives in is the only moment
   // the column count can actually be computed. rAF lets the tab paint first.
@@ -16357,7 +16280,7 @@ function saveFilterState(){
     FS.setUserSetting(TRADE_INPUTS_STORE,tradeInputs);
     _lastTradeInputSig=sig;
     clearTimeout(_tradeInputPersistTimer);
-    _tradeInputPersistTimer=setTimeout(()=>{saveBrainInBackground();loadModelPortfolios();},500);
+    _tradeInputPersistTimer=setTimeout(()=>{saveBrainInBackground();},500);
   }
 }
 
