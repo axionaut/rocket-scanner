@@ -1,5 +1,5 @@
 const BUILD_TS='2026-10-28 IST'; // release build date (IST)
-const APP_VERSION=1589;
+const APP_VERSION=1590;
 const RADAR_SCORE_VERSION='v1419-recross-batches'; // Eligible on crossing the score floor at any time; selected model's evolving target and movement-based profit protection.
 
 // ── v1358: AN UNCAUGHT ERROR MUST NAME ITSELF ─────────────────────────────────────────────────
@@ -4620,7 +4620,7 @@ function crossingExit(sym,fc){
   return e&&e.res&&e.t0===(fc.priceAt||fc.t)&&e.ref===ref?e:null;
 }
 async function refreshCrossingExits(rows){
-  if(_crossExitsBusy||Date.now()-_crossExitsAt<15000)return;   // v1589: 15 s (was 60 s); only still-open crossings are asked
+  if(_crossExitsBusy||Date.now()-_crossExitsAt<60000)return;   // v1589: 15 s (was 60 s); only still-open crossings are asked
   const day=getSessionDate(),items=[];
   if(CROSS_EXITS.day!==day){CROSS_EXITS=new Map();CROSS_EXITS.day=day;}
   for(const s of rows||[]){
@@ -14443,7 +14443,7 @@ function startStreamRefresh(){
   }
   if(_streamRefreshTimer) return;
   if(!startStreamRefresh.entry)startStreamRefresh.entry=setInterval(loadEntryTriggers,2000);   // v1584: 2 s, so a trigger reaches the basket within ~2 s of the helper check
-  if(!startStreamRefresh.revs)startStreamRefresh.revs=setInterval(pollRevs,2000);
+  // v1590 (owner): change-number sync switched off; the 20 s loop fetches scores, positions and auto-buy as before.
   if(!startStreamRefresh.btst){startStreamRefresh.btst=setInterval(()=>{const revsLive=Date.now()-REVS_OK_AT<10000;if(!revsLive){loadBtstPicks();loadProfitLockStatus();loadAutoBuyStatus();}loadKiteMargins();loadKiteGtts();loadFilterOpportunity();loadModelPortfolios();syncSellBasketToKite();scheduleKiteBasketSync();try{resetCrossAlertsIfNewDay();checkCrossingAlerts();}catch(e){}},20000);loadBtstPicks();loadKiteMargins();loadKiteGtts();loadProfitLockStatus();loadAutoBuyStatus();loadFilterOpportunity();loadModelPortfolios();syncSellBasketToKite();try{resetCrossAlertsIfNewDay();checkCrossingAlerts();}catch(e){}
     try{seedSavedBasketCount();}catch(e){}}
   _streamRefreshUiTimer=setInterval(()=>{try{refreshStrategySafety();renderLiveTapeBar();}catch(e){console.warn('Strategy safety refresh',e);}},1000);
