@@ -1,5 +1,5 @@
 const BUILD_TS='2026-10-28 IST'; // release build date (IST)
-const APP_VERSION=1588;
+const APP_VERSION=1589;
 const RADAR_SCORE_VERSION='v1419-recross-batches'; // Eligible on crossing the score floor at any time; selected model's evolving target and movement-based profit protection.
 
 // ── v1358: AN UNCAUGHT ERROR MUST NAME ITSELF ─────────────────────────────────────────────────
@@ -4620,7 +4620,7 @@ function crossingExit(sym,fc){
   return e&&e.res&&e.t0===(fc.priceAt||fc.t)&&e.ref===ref?e:null;
 }
 async function refreshCrossingExits(rows){
-  if(_crossExitsBusy||Date.now()-_crossExitsAt<60000)return;
+  if(_crossExitsBusy||Date.now()-_crossExitsAt<15000)return;   // v1589: 15 s (was 60 s); only still-open crossings are asked
   const day=getSessionDate(),items=[];
   if(CROSS_EXITS.day!==day){CROSS_EXITS=new Map();CROSS_EXITS.day=day;}
   for(const s of rows||[]){
