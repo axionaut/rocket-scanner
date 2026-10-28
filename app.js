@@ -1,5 +1,5 @@
 const BUILD_TS='2026-10-28 IST'; // release build date (IST)
-const APP_VERSION=1577;
+const APP_VERSION=1578;
 const RADAR_SCORE_VERSION='v1419-recross-batches'; // Eligible on crossing the score floor at any time; selected model's evolving target and movement-based profit protection.
 
 // ── v1358: AN UNCAUGHT ERROR MUST NAME ITSELF ─────────────────────────────────────────────────
@@ -4517,7 +4517,8 @@ async function loadBtstPicks(){
         try{renderStats();}catch(_){}
         return null;
       }),
-      readHelperResponse('/api/inputs/file?name=btst_target_model.json',{timeout:6000}).catch(()=>null)]);
+      readHelperResponse('/api/inputs/file?name=btst_target_model.json',{timeout:6000}).catch(()=>null),
+      readHelperResponse('/api/inputs/file?name=entry_triggers.json',{timeout:6000}).then(x=>{ENTRY_TRIGGERS=x;return x;}).catch(()=>null)]);
     // A busy helper can miss one poll. Keep only today's last valid files so a transient
     // timeout cannot turn every visible model score into N/A.
     const today=getSessionDate();
@@ -4525,7 +4526,7 @@ async function loadBtstPicks(){
     const rank=rk||((BTST.rank?.session===today)?BTST.rank:null);
     const target=tm||BTST.targetModel;
     const key=[picks?.asOf,picks?.stage,picks?.ok,picks?.session,picks?.activeModel,picks?.rules?.minScore,picks?.modelSelectedAt].join('|'),rankKey=[rank?.asOf,rank?.ok,rank?.session,rank?.activeModel,rank?.rules?.minScore,rank?.modelSelectedAt].join('|');
-    const targetKey=[target?.version,target?.asOf,target?.asOfSession,target?.trainedThrough,target?.cases?.length].join('|');
+    const targetKey=[target?.version,target?.asOf,target?.asOfSession,target?.trainedThrough,target?.cases?.length,ENTRY_TRIGGERS?.at].join('|');
     BTST.loadedAt=Date.now();
     if(rankKey!==BTST.rankKey||SCORE_HIGHS?.day!==today) loadScoreHighs(today);
     if(key===BTST.key&&rankKey===BTST.rankKey&&targetKey===BTST.targetKey){if(previousRankError!==BTST.rankError){try{renderStats();}catch(_){}}return;}
@@ -4542,6 +4543,14 @@ async function loadBtstPicks(){
 // universe). The first entry at/above a floor is when the stock first scored that floor, so the badge follows
 // whichever model and floor are selected now.
 let SCORE_HIGHS=null;
+let ENTRY_TRIGGERS=null;
+function entryTriggerView(model){
+  const p=ENTRY_TRIGGERS,now=Date.now();
+  const known=!!p&&p.day===getSessionDate()&&p.model===model&&now-p.at<=60000;
+  return {crossingsKnown:known,
+    crossed:new Set(known?Object.entries(p.triggered||{}).filter(([,t])=>now-t.at<=45000).map(([s])=>normSym(s)):[]),
+    armed:known?p.armed||{}:{}};
+}
 async function loadScoreHighs(day){
   const h=await readHelperResponse('/api/inputs/file?name=score_highs_'+day+'.json',{timeout:6000}).catch(()=>null);
   if(!h||h.day!==day||!h.models) return;
@@ -4671,7 +4680,9 @@ function btstRanking(){
   _btstRankMemo={src,map,scoresA,n:ranking.length,at:String(src.asOf||'').slice(11,16),stage:src.stage,
     minScore:src.rules?.modelFloors?.[viewModel]==null&&src.rules?.minScore==null?null:Number(src.rules?.modelFloors?.[viewModel]??src.rules?.minScore),model:viewModel,
     // 23 Oct 2026 (owner): stocks that crossed the floor IN THIS RUN (engine-published). Only these can buy.
-    crossingsKnown:Array.isArray(src.crossings)&&viewModel===src.activeModel,crossed:new Set((src.crossings||[]).map(normSym))};
+    // v1578 (owner 28 Oct): a crossing arms the stock; only the helper's entry triggers (two rising 20-second checks
+    // after it, the second strictly bigger, within the last 45 s) can buy.
+    ...entryTriggerView(viewModel)};
   return _btstRankMemo;
 }
 function btstRankOf(sym){
@@ -4899,7 +4910,11 @@ function btstCrossingState(s){
   if(!isEquitySession(Date.now())) return {state:'WAIT',reason:`Score +${score.toFixed(2)} clears +${floor.toFixed(2)} - market closed.`};
   // 23 Oct 2026 (owner): buy only AT the crossing. Being further above the floor is not a better signal, and a stock
   // that crossed in an earlier run is not bought later; it needs a completed run below the floor and a fresh crossing.
-  if(!r.crossingsKnown) return {state:'WAIT',reason:'Waiting for an engine run that reports this run’s floor crossings.'};
+  if(!r.crossingsKnown) return {state:'WAIT',reason:'Waiting for the helper’s 20-second entry check.'};
+  if(!r.crossed.has(key)&&r.armed?.[key]){
+    const a=r.armed[key],since=new Date(a.since).toLocaleTimeString('en-IN',{timeZone:'Asia/Kolkata',hour:'2-digit',minute:'2-digit',hour12:false});
+    return {state:'WAIT',reason:`Crossed +${floor.toFixed(2)} at ${since}. Buys on two rising 20-second checks, the second bigger${a.prevUp!=null?` (last rise +${a.prevUp.toFixed(2)}%; next must beat it)`:' (waiting for the first rise)'}.`};
+  }
   if(!r.crossed.has(key)){
     const at=first?new Date(first.t).toLocaleTimeString('en-IN',{hour:'2-digit',minute:'2-digit',hour12:false}):'';
     return {state:'WAIT',reason:`Above +${floor.toFixed(2)}${at?' since '+at:''}, but buys happen only in the run where it crosses. Needs a run below the floor and a fresh crossing.`};
