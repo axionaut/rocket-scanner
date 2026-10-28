@@ -1,5 +1,5 @@
 const BUILD_TS='2026-10-28 IST'; // release build date (IST)
-const APP_VERSION=1590;
+const APP_VERSION=1591;
 const RADAR_SCORE_VERSION='v1419-recross-batches'; // Eligible on crossing the score floor at any time; selected model's evolving target and movement-based profit protection.
 
 // ── v1358: AN UNCAUGHT ERROR MUST NAME ITSELF ─────────────────────────────────────────────────
@@ -4535,7 +4535,8 @@ async function loadBtstPicks(){
     _btstRankMemo=null;
     for(const row of ALL){ROW_ACTION_MEMO.delete(row);setRadarEvidenceScore(row);}
     _dualPlanMemo=null;
-    scoreRedraw();
+    if(ALL.length) applyFilters({preservePage:true});
+    try{renderStats();}catch(e){}
   }catch(e){}finally{loadBtstPicks.busy=false;}
 }
 // v1537: each stock's running score high per model today (engine score_highs_<day>.json, every live run, full
@@ -4543,29 +4544,6 @@ async function loadBtstPicks(){
 // whichever model and floor are selected now.
 let SCORE_HIGHS=null;
 let ENTRY_TRIGGERS=null;
-// v1588 (owner 28 Oct): change numbers. Every 2 s the page asks the helper what changed (a few bytes) and downloads
-// only those: scores, positions/exit legs, auto-buy status, model comparison. If this check stops answering, the
-// 20 s loop fetches everything again as before.
-let REVS={},REVS_OK_AT=0,_scoreRenderAt=0,_scoreRenderTimer=null;
-async function pollRevs(){
-  const r=await readHelperResponse('/api/revs',{timeout:3000}).catch(()=>null);
-  if(!r?.ok)return;
-  const prev=REVS;REVS=r;REVS_OK_AT=Date.now();
-  // The score file is large: fetched at most every 10 s (Cumulative Change publishes every 10 s); busy or too soon = retry next poll.
-  if(prev.scores!==r.scores){if(loadBtstPicks.busy||Date.now()-(loadBtstPicks.at||0)<10000)REVS.scores=prev.scores;else{loadBtstPicks.at=Date.now();loadBtstPicks();}}
-  if(prev.profitLock!==r.profitLock)loadProfitLockStatus();
-  if(prev.autoBuy!==r.autoBuy)loadAutoBuyStatus();
-  if(prev.models!==r.models&&isMainTabActive(2))loadModelPortfolios({viewOnly:true});
-}
-// Score-driven table redraws are spaced at least 8 s apart; the newest data is always the one drawn.
-function scoreRedraw(){
-  const wait=8000-(Date.now()-_scoreRenderAt);
-  clearTimeout(_scoreRenderTimer);
-  if(wait>0){_scoreRenderTimer=setTimeout(scoreRedraw,wait);return;}
-  _scoreRenderAt=Date.now();
-  if(ALL.length)applyFilters({preservePage:true});
-  try{renderStats();}catch(e){}
-}
 // v1579/v1584: entry triggers are read every 2 s (one small file), so a GO appears within ~2 s of the helper check.
 async function loadEntryTriggers(){
   const x=await readHelperResponse('/api/inputs/file?name=entry_triggers.json',{timeout:6000}).catch(()=>null);
@@ -4620,7 +4598,7 @@ function crossingExit(sym,fc){
   return e&&e.res&&e.t0===(fc.priceAt||fc.t)&&e.ref===ref?e:null;
 }
 async function refreshCrossingExits(rows){
-  if(_crossExitsBusy||Date.now()-_crossExitsAt<60000)return;   // v1589: 15 s (was 60 s); only still-open crossings are asked
+  if(_crossExitsBusy||Date.now()-_crossExitsAt<60000)return;
   const day=getSessionDate(),items=[];
   if(CROSS_EXITS.day!==day){CROSS_EXITS=new Map();CROSS_EXITS.day=day;}
   for(const s of rows||[]){
@@ -9505,12 +9483,12 @@ function buildModelBackfillHtml(){
   }
   return `<details class="mp-detail" open><summary>Before live tracking: history (built ${escHtml(b.builtAt||'')})</summary><div style="font-size:13px;color:var(--t2);margin:6px 0">${escHtml(b.note||'')} Capital ${money(b.capital)}.</div><div class="mp-table-wrap"><table class="mp-table"><thead><tr><th>Model</th><th>Window</th><th>Net</th><th>Booked</th><th>Open</th><th>Open pos.</th><th>Max DD</th><th>Buys</th></tr></thead><tbody>${rows}</tbody></table></div>${live}</details>`;
 }
-async function loadModelPortfolios(opts={}){
+async function loadModelPortfolios(){
   if(MODEL_PORTFOLIO_BUSY)return;
   MODEL_PORTFOLIO_BUSY=true;
   try{
     const tradeInputs={capital:document.getElementById('fCapital')?.value||'',allIn:document.getElementById('fAllIn')?.value||'',maxPct:document.getElementById('fMaxPct')?.value||''};
-    if(!opts.viewOnly)await readHelperResponse('/api/model-portfolios/context',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({tradeInputs,exclusions:[...EXPORT_EXCLUDED]}),timeout:5000}).catch(()=>null);
+    await readHelperResponse('/api/model-portfolios/context',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({tradeInputs,exclusions:[...EXPORT_EXCLUDED]}),timeout:5000}).catch(()=>null);
     const j=await readHelperResponse('/api/model-portfolios',{timeout:5000});
     // 23 Oct 2026 (owner): backfill so the comparison is not blank before live tracking has trades.
     if(!MODEL_BACKFILL||Date.now()-MODEL_BACKFILL_AT>60000){const b=await readHelperResponse('/api/model-backfill',{timeout:5000}).catch(()=>null);if(b&&b.ok){MODEL_BACKFILL=b;MODEL_BACKFILL_AT=Date.now();}}
@@ -14443,8 +14421,7 @@ function startStreamRefresh(){
   }
   if(_streamRefreshTimer) return;
   if(!startStreamRefresh.entry)startStreamRefresh.entry=setInterval(loadEntryTriggers,2000);   // v1584: 2 s, so a trigger reaches the basket within ~2 s of the helper check
-  // v1590 (owner): change-number sync switched off; the 20 s loop fetches scores, positions and auto-buy as before.
-  if(!startStreamRefresh.btst){startStreamRefresh.btst=setInterval(()=>{const revsLive=Date.now()-REVS_OK_AT<10000;if(!revsLive){loadBtstPicks();loadProfitLockStatus();loadAutoBuyStatus();}loadKiteMargins();loadKiteGtts();loadFilterOpportunity();loadModelPortfolios();syncSellBasketToKite();scheduleKiteBasketSync();try{resetCrossAlertsIfNewDay();checkCrossingAlerts();}catch(e){}},20000);loadBtstPicks();loadKiteMargins();loadKiteGtts();loadProfitLockStatus();loadAutoBuyStatus();loadFilterOpportunity();loadModelPortfolios();syncSellBasketToKite();try{resetCrossAlertsIfNewDay();checkCrossingAlerts();}catch(e){}
+  if(!startStreamRefresh.btst){startStreamRefresh.btst=setInterval(()=>{loadBtstPicks();loadKiteMargins();loadKiteGtts();loadProfitLockStatus();loadAutoBuyStatus();loadFilterOpportunity();loadModelPortfolios();syncSellBasketToKite();scheduleKiteBasketSync();try{resetCrossAlertsIfNewDay();checkCrossingAlerts();}catch(e){}},20000);loadBtstPicks();loadKiteMargins();loadKiteGtts();loadProfitLockStatus();loadAutoBuyStatus();loadFilterOpportunity();loadModelPortfolios();syncSellBasketToKite();try{resetCrossAlertsIfNewDay();checkCrossingAlerts();}catch(e){}
     try{seedSavedBasketCount();}catch(e){}}
   _streamRefreshUiTimer=setInterval(()=>{try{refreshStrategySafety();renderLiveTapeBar();}catch(e){console.warn('Strategy safety refresh',e);}},1000);
   if(!_streamVisibilityBound){
