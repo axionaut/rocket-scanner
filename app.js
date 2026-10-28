@@ -1,5 +1,5 @@
 const BUILD_TS='2026-10-28 IST'; // release build date (IST)
-const APP_VERSION=1583;
+const APP_VERSION=1584;
 const RADAR_SCORE_VERSION='v1419-recross-batches'; // Eligible on crossing the score floor at any time; selected model's evolving target and movement-based profit protection.
 
 // ── v1358: AN UNCAUGHT ERROR MUST NAME ITSELF ─────────────────────────────────────────────────
@@ -4544,7 +4544,7 @@ async function loadBtstPicks(){
 // whichever model and floor are selected now.
 let SCORE_HIGHS=null;
 let ENTRY_TRIGGERS=null;
-// v1579: entry triggers are read every 10 s, matching the helper check, so a GO appears without waiting for the 20 s score poll.
+// v1579/v1584: entry triggers are read every 2 s (one small file), so a GO appears within ~2 s of the helper check.
 async function loadEntryTriggers(){
   const x=await readHelperResponse('/api/inputs/file?name=entry_triggers.json',{timeout:6000}).catch(()=>null);
   if(!x||x.at===ENTRY_TRIGGERS?.at)return;
@@ -14417,7 +14417,7 @@ function startStreamRefresh(){
     }catch(e){}
   }
   if(_streamRefreshTimer) return;
-  if(!startStreamRefresh.entry)startStreamRefresh.entry=setInterval(loadEntryTriggers,10000);
+  if(!startStreamRefresh.entry)startStreamRefresh.entry=setInterval(loadEntryTriggers,2000);   // v1584: 2 s, so a trigger reaches the basket within ~2 s of the helper check
   if(!startStreamRefresh.btst){startStreamRefresh.btst=setInterval(()=>{loadBtstPicks();loadKiteMargins();loadKiteGtts();loadProfitLockStatus();loadAutoBuyStatus();loadFilterOpportunity();loadModelPortfolios();syncSellBasketToKite();scheduleKiteBasketSync();try{resetCrossAlertsIfNewDay();checkCrossingAlerts();}catch(e){}},20000);loadBtstPicks();loadKiteMargins();loadKiteGtts();loadProfitLockStatus();loadAutoBuyStatus();loadFilterOpportunity();loadModelPortfolios();syncSellBasketToKite();try{resetCrossAlertsIfNewDay();checkCrossingAlerts();}catch(e){}
     try{seedSavedBasketCount();}catch(e){}}
   _streamRefreshUiTimer=setInterval(()=>{try{refreshStrategySafety();renderLiveTapeBar();}catch(e){console.warn('Strategy safety refresh',e);}},1000);
