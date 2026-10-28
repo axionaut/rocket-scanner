@@ -1,5 +1,5 @@
 const BUILD_TS='2026-10-28 IST'; // release build date (IST)
-const APP_VERSION=1591;
+const APP_VERSION=1592;
 const RADAR_SCORE_VERSION='v1419-recross-batches'; // Eligible on crossing the score floor at any time; selected model's evolving target and movement-based profit protection.
 
 // ── v1358: AN UNCAUGHT ERROR MUST NAME ITSELF ─────────────────────────────────────────────────
@@ -4546,12 +4546,25 @@ let SCORE_HIGHS=null;
 let ENTRY_TRIGGERS=null;
 // v1579/v1584: entry triggers are read every 2 s (one small file), so a GO appears within ~2 s of the helper check.
 async function loadEntryTriggers(){
+  if(loadEntryTriggers.busy)return;
+  loadEntryTriggers.busy=true;
+  try{
   const x=await readHelperResponse('/api/inputs/file?name=entry_triggers.json',{timeout:6000}).catch(()=>null);
+  if(x?.stream){
+    acceptStreamEvidence(x.stream);
+    if(x.stream.connected&&x.quotes&&Object.keys(x.quotes).length){
+      for(const [sym,q] of Object.entries(x.quotes))_universeMap.set(sym,q);
+      _universeLiveAt=Date.now();
+      // Entry quotes must not queue behind a full candle-history/scoring recovery job.
+      for(const ignored of patchUniverseDeltasGen(x.quotes,true)){}
+    }
+  }
   if(!x||x.at===ENTRY_TRIGGERS?.at)return;
   ENTRY_TRIGGERS=x;_btstRankMemo=null;
   for(const row of ALL)ROW_ACTION_MEMO.delete(row);
   _dualPlanMemo=null;
   if(ALL.length)applyFilters({preservePage:true});
+  }finally{loadEntryTriggers.busy=false;}
 }
 function entryTriggerView(model){
   const p=ENTRY_TRIGGERS,now=Date.now();
