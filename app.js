@@ -1,5 +1,5 @@
 const BUILD_TS='2026-10-28 IST'; // release build date (IST)
-const APP_VERSION=1576;
+const APP_VERSION=1577;
 const RADAR_SCORE_VERSION='v1419-recross-batches'; // Eligible on crossing the score floor at any time; selected model's evolving target and movement-based profit protection.
 
 // ── v1358: AN UNCAUGHT ERROR MUST NAME ITSELF ─────────────────────────────────────────────────
@@ -11354,7 +11354,7 @@ function renderHead(){
         </div>
       </th>`;
     }
-    const arr=c.key===SCOL?(c.key==='score'&&!SORT_EXPLICIT&&floorModel()!=='CUM'?(SDIR===-1?'▲':'▼'):(SDIR===-1?'▼':'▲')):'';
+    const arr=c.key===SCOL?(SDIR===-1?'▼':'▲'):'';
     // v1409: the score column is centre-aligned, so its header must match or the label floats
     // left of the numbers it titles.
     const align=c.key==='score'?' style="text-align:center"':'';
@@ -12004,30 +12004,20 @@ function sortValueOf(row,key){
   const n=num(v);
   return n!==null?n:String(v);
 }
-// Display order only: equal sizing/funding stays independent of score. Default
-// qualified order is one floor-nearest list (1.20,1.21,...). Fresh crossings
-// and pins are labels, never score-sort partitions. Share the final display path.
+// Display order only: equal sizing/funding stays independent of score. v1577 (owner 28 Oct): the default
+// order is Trigger Status (GO, WAIT, BLOCKED, other) then score high to low, missing scores last, for
+// every model. An explicit Model Score header click sorts the numeric score alone, either direction.
+const STATUS_SORT_RANK={GO:0,WAIT:1,BLOCKED:2};
 function compareModelScoreRows(a,b){
-  if(SORT_EXPLICIT||floorModel()==='CUM'){
-    const av=a._us?a.score:btstScoreOf(a.symbol),bv=b._us?b.score:btstScoreOf(b.symbol);
-    const an=!Number.isFinite(av),bn=!Number.isFinite(bv);
-    if(an!==bn)return an?1:-1;
-    return (!an?(av-bv)*SDIR:0)||String(a.symbol).localeCompare(String(b.symbol));
+  const av=a._us?a.score:btstScoreOf(a.symbol),bv=b._us?b.score:btstScoreOf(b.symbol);
+  const an=!Number.isFinite(av),bn=!Number.isFinite(bv);
+  if(!SORT_EXPLICIT){
+    const rank=row=>row._us?(row.go?0:1):(STATUS_SORT_RANK[getRowActionState(row)?.state]??3);
+    const ar=rank(a),br=rank(b);
+    if(ar!==br)return ar-br;
   }
-  const info=row=>{
-    const score=row._us?row.score:btstScoreOf(row.symbol),floor=row._us?Number(row.fl):btstMinScore();
-    if(!Number.isFinite(score))return {score:null,group:3};
-    if(!Number.isFinite(floor)||score<floor-1e-9)return {score,group:2};
-    return {score,group:1};
-  };
-  const av=info(a),bv=info(b);
-  if(av.group!==bv.group)return av.group-bv.group;
-  if(av.score!==null&&bv.score!==null){
-    const direction=SDIR===-1?1:-1;
-    const diff=(av.score-bv.score)*(av.group===2?-direction:direction);
-    if(diff)return diff;
-  }
-  return String(a.symbol).localeCompare(String(b.symbol));
+  if(an!==bn)return an?1:-1;
+  return (!an?(av-bv)*(SORT_EXPLICIT?SDIR:-1):0)||String(a.symbol).localeCompare(String(b.symbol));
 }
 function sortDisplayRows(rows){
   if(SCOL==='score')return rows.sort(compareModelScoreRows);
