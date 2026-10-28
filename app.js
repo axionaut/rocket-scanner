@@ -1,5 +1,5 @@
 const BUILD_TS='2026-10-28 IST'; // release build date (IST)
-const APP_VERSION=1593;
+const APP_VERSION=1594;
 const RADAR_SCORE_VERSION='v1419-recross-batches'; // Eligible on crossing the score floor at any time; selected model's evolving target and movement-based profit protection.
 
 // ── v1358: AN UNCAUGHT ERROR MUST NAME ITSELF ─────────────────────────────────────────────────
@@ -4518,12 +4518,16 @@ async function loadBtstPicks(){
         return null;
       }),
       readHelperResponse('/api/inputs/file?name=btst_target_model.json',{timeout:6000}).catch(()=>null),
-      readHelperResponse('/api/inputs/file?name=entry_triggers.json',{timeout:6000}).then(x=>{ENTRY_TRIGGERS=x;return x;}).catch(()=>null)]);
+      readHelperResponse('/api/inputs/file?name=entry_triggers.json',{timeout:6000}).then(x=>{if(x&&(!pageLiveHealthy()||x.at>=(ENTRY_TRIGGERS?.at||0)))ENTRY_TRIGGERS=x;return x;}).catch(()=>null)]);
     // A busy helper can miss one poll. Keep only today's last valid files so a transient
     // timeout cannot turn every visible model score into N/A.
     const today=getSessionDate();
-    const picks=j||((BTST.data?.session===today)?BTST.data:null);
-    const rank=rk||((BTST.rank?.session===today)?BTST.rank:null);
+    let picks=j||((BTST.data?.session===today)?BTST.data:null);
+    let rank=rk||((BTST.rank?.session===today)?BTST.rank:null);
+    if(pageLiveHealthy()&&BTST.rank?.session===today){
+      if(!rank||String(rank.asOf)<=String(BTST.rank.asOf))rank=BTST.rank;
+      if(!picks||String(picks.asOf)<=String(BTST.rank.asOf))picks=BTST.rank;
+    }
     const target=tm||BTST.targetModel;
     const key=[picks?.asOf,picks?.stage,picks?.ok,picks?.session,picks?.activeModel,picks?.rules?.minScore,picks?.modelSelectedAt].join('|'),rankKey=[rank?.asOf,rank?.ok,rank?.session,rank?.activeModel,rank?.rules?.minScore,rank?.modelSelectedAt].join('|');
     const targetKey=[target?.version,target?.asOf,target?.asOfSession,target?.trainedThrough,target?.cases?.length,ENTRY_TRIGGERS?.at].join('|');
@@ -4544,12 +4548,103 @@ async function loadBtstPicks(){
 // whichever model and floor are selected now.
 let SCORE_HIGHS=null;
 let ENTRY_TRIGGERS=null;
+// One push connection replaces entry/score/status polling while healthy. Execution timers stay independent.
+const PAGE_LIVE={source:null,lastAt:0,boot:null,seq:-1,rankRevision:null,rows:new Map(),crossRecords:{},paint:null,reads:new Set(),reading:false,readTimer:null,
+  metrics:{messages:0,characters:0,lastDeliveryMs:0,maxDeliveryMs:0,lastCheckToDomMs:null,paintMs:0}};
+function pageLiveHealthy(){return !!PAGE_LIVE.source&&PAGE_LIVE.source.readyState===1&&Date.now()-PAGE_LIVE.lastAt<25000;}
+function pageLiveStatus(){return {...PAGE_LIVE.metrics,healthy:pageLiveHealthy(),ageMs:Date.now()-PAGE_LIVE.lastAt,rankRevision:PAGE_LIVE.rankRevision,rows:PAGE_LIVE.rows.size};}
+function applyPageLiveRank(p){
+  if(!p)return false;
+  if(!p.full&&PAGE_LIVE.rankRevision!==p.base)throw Error('Live score baseline changed; snapshot required');
+  if(!p.full&&!p.rows.length&&!p.removed.length&&!Object.keys(p.meta).length&&!Object.keys(p.crossRecords).length&&!p.crossRemoved.length)return false;
+  if(p.full){PAGE_LIVE.rows.clear();PAGE_LIVE.crossRecords={};}
+  for(const row of p.rows)PAGE_LIVE.rows.set(row[0],row);
+  for(const sym of p.removed)PAGE_LIVE.rows.delete(sym);
+  Object.assign(PAGE_LIVE.crossRecords,p.crossRecords);
+  for(const sym of p.crossRemoved)delete PAGE_LIVE.crossRecords[sym];
+  const prior=p.full?{}:BTST.rank||{},rank={...prior,...p.meta};
+  if(rank.cumulative){const c={...(prior.cumulative||{}),...(p.meta.cumulative||rank.cumulative)};
+    c.upCross={...(prior.cumulative?.upCross||{}),...(p.meta.cumulative?.upCross||c.upCross||{}),records:{...PAGE_LIVE.crossRecords}};rank.cumulative=c;}
+  const ordered=[...PAGE_LIVE.rows.values()].sort((a,b)=>a[5]-b[5]);
+  rank.ranking=ordered.map(r=>[r[0],r[1]]);rank.rankings={...(p.full?{}:prior.rankings),[rank.activeModel]:rank.ranking};
+  rank.pickInputs=Object.fromEntries(ordered.map(r=>[r[0],{symbol:r[0],price:r[2],priceAt:r[3],priceSource:r[6],dayPct:r[4]}]));
+  PAGE_LIVE.rankRevision=p.revision;
+  BTST={...BTST,rank,data:rank,v:BTST.v+1,loadedAt:Date.now(),rankError:null};_btstRankMemo=null;
+  return true;
+}
+function schedulePageLivePaint(checkAt,scoreChanged=true,replan=true){
+  if(checkAt)PAGE_LIVE.checkAt=checkAt;
+  PAGE_LIVE.scoreDirty=PAGE_LIVE.scoreDirty||scoreChanged;PAGE_LIVE.replan=PAGE_LIVE.replan||replan;
+  if(PAGE_LIVE.paint)return;
+  PAGE_LIVE.paint=setTimeout(()=>{
+    PAGE_LIVE.paint=null;const start=performance.now();
+    if(PAGE_LIVE.replan){
+      for(const row of ALL){ROW_ACTION_MEMO.delete(row);if(PAGE_LIVE.scoreDirty)setRadarEvidenceScore(row);}
+      _dualPlanMemo=null;if(ALL.length)applyFilters({preservePage:true});
+    }else{if(ALL.length)scheduleFilterPaint();renderRankingsPanels();}
+    PAGE_LIVE.scoreDirty=false;PAGE_LIVE.replan=false;
+    PAGE_LIVE.metrics.paintMs=performance.now()-start;PAGE_LIVE.awaitingDom=true;
+  },100);
+}
+function queuePageLiveReads(names){
+  for(const n of names)PAGE_LIVE.reads.add(n);
+  if(PAGE_LIVE.readTimer||PAGE_LIVE.reading)return;
+  PAGE_LIVE.readTimer=setTimeout(async()=>{
+    PAGE_LIVE.readTimer=null;PAGE_LIVE.reading=true;
+    const pending=new Set(PAGE_LIVE.reads);PAGE_LIVE.reads.clear();
+    try{
+      const tasks=[];
+      if(pending.has('positions')||pending.has('portfolio'))tasks.push(loadProfitLockStatus());
+      if(pending.has('auto')||pending.has('portfolio'))tasks.push(loadAutoBuyStatus());
+      if(pending.has('portfolio')){_lastIndependentInputCheck=0;tasks.push(refreshChangedHelperInputs());}
+      await Promise.allSettled(tasks);schedulePageLivePaint(null,false,pending.has('portfolio')||pending.has('auto'));
+    }finally{PAGE_LIVE.reading=false;if(PAGE_LIVE.reads.size)queuePageLiveReads([]);}
+  },250);
+}
+function startPageLiveStream(){
+  if(PAGE_LIVE.source||typeof EventSource==='undefined')return;
+  const source=new EventSource(KITE_HELPER+'/api/page/events');PAGE_LIVE.source=source;
+  const receive=(event,snapshot=false)=>{
+    try{
+      const data=JSON.parse(event.data);
+      if(!snapshot&&PAGE_LIVE.boot===data.boot&&data.seq<=PAGE_LIVE.seq)return;
+      if(!snapshot&&PAGE_LIVE.boot&&PAGE_LIVE.boot!==data.boot)throw Error('Helper restarted; snapshot required');
+      const delay=Math.max(0,Date.now()-data.sentAt);Object.assign(PAGE_LIVE,{lastAt:Date.now(),boot:data.boot,seq:data.seq,retryDelay:2000});
+      PAGE_LIVE.metrics.messages++;PAGE_LIVE.metrics.characters+=event.data.length;PAGE_LIVE.metrics.lastDeliveryMs=delay;PAGE_LIVE.metrics.maxDeliveryMs=Math.max(delay,PAGE_LIVE.metrics.maxDeliveryMs);
+      if(data.stream){PAGE_LIVE.streamEvidence=data.stream;acceptStreamEvidence(data.stream);}
+      if(event.type==='changed'){
+        if(data.versions?.portfolio){_helperPortfolioRev=Number(data.versions.portfolio);_seenPortfolioRev=_helperPortfolioRev;}
+        queuePageLiveReads(data.names||[]);return;
+      }
+      if(event.type==='pulse')return;
+      const scoreChanged=applyPageLiveRank(data.rank);
+      if(scoreChanged&&BTST.rank?.activeModel!=='CUM')loadScoreHighs(getSessionDate(),true);
+      if(data.entry){ENTRY_TRIGGERS=data.entry;_btstRankMemo=null;}
+      if(data.quotes&&Object.keys(data.quotes).length){
+        for(const [sym,q] of Object.entries(data.quotes))_universeMap.set(sym,q);
+        _universeLiveAt=Date.now();for(const ignored of patchUniverseDeltasGen(data.quotes,true)){}
+      }
+      if(data.portfolioRev&&data.portfolioRev!==_seenPortfolioRev){_helperPortfolioRev=data.portfolioRev;_seenPortfolioRev=data.portfolioRev;queuePageLiveReads(['portfolio']);}
+      if(snapshot)queuePageLiveReads(['positions','auto']);
+      schedulePageLivePaint(snapshot?null:data.entry?.at,scoreChanged);
+    }catch(e){PAGE_LIVE.metrics.lastError=e.message;retryPageLiveStream(source);}
+  };
+  source.addEventListener('snapshot',e=>receive(e,true));
+  for(const name of ['live','changed','pulse'])source.addEventListener(name,receive);
+  source.onerror=()=>retryPageLiveStream(source);
+}
+function retryPageLiveStream(source){
+  if(PAGE_LIVE.source!==source)return;
+  PAGE_LIVE.lastAt=0;source.close();PAGE_LIVE.source=null;
+  if(!PAGE_LIVE.retry){const delay=PAGE_LIVE.retryDelay||2000;PAGE_LIVE.retryDelay=Math.min(30000,delay*2);PAGE_LIVE.retry=setTimeout(()=>{PAGE_LIVE.retry=null;startPageLiveStream();},delay);}
+}
 // v1579/v1584: entry triggers are read every 2 s (one small file), so a GO appears within ~2 s of the helper check.
 async function loadEntryTriggers(){
   if(loadEntryTriggers.busy)return;
   loadEntryTriggers.busy=true;
   try{
   const x=await readHelperResponse('/api/inputs/file?name=entry_triggers.json',{timeout:6000}).catch(()=>null);
+  if(pageLiveHealthy()&&x?.at<(ENTRY_TRIGGERS?.at||0))return;
   if(x?.stream){
     acceptStreamEvidence(x.stream);
     if(x.stream.connected&&x.quotes&&Object.keys(x.quotes).length){
@@ -4573,11 +4668,11 @@ function entryTriggerView(model){
     crossed:new Set(known?Object.entries(p.triggered||{}).filter(([,t])=>now-t.at<=45000).map(([s])=>normSym(s)):[]),
     armed:known?p.armed||{}:{}};
 }
-async function loadScoreHighs(day){
+async function loadScoreHighs(day,live=false){
   const h=await readHelperResponse('/api/inputs/file?name=score_highs_'+day+'.json',{timeout:6000}).catch(()=>null);
   if(!h||h.day!==day||!h.models) return;
   SCORE_HIGHS=h;
-  if(ALL.length) applyFilters({preservePage:true});
+  if(ALL.length){if(live)schedulePageLivePaint(null,false);else applyFilters({preservePage:true});}
 }
 function firstScoreAtFloor(sym){
   const model=floorModel(),floor=btstMinScore(),h=SCORE_HIGHS;
@@ -11791,6 +11886,23 @@ function onUsFloorChange(){
 }
 setTimeout(()=>{try{initMarketViewUI();}catch(e){}loadUsFeed();},1500);
 setInterval(loadUsFeed,30000);
+function patchRankingBody(html){
+  const body=document.getElementById('tBody'),template=document.createElement('template');
+  template.innerHTML=html;
+  const oldRows=[...body.children],newRows=[...template.content.children];
+  const oldBySymbol=new Map(oldRows.filter(r=>r.dataset.sym).map(r=>[r.dataset.sym,r]));
+  if(!newRows.every(r=>r.dataset.sym))body.replaceChildren(template.content);
+  else for(let i=0;i<newRows.length;i++){
+    const next=newRows[i],old=oldBySymbol.get(next.dataset.sym);
+    if(!old||old.children.length!==next.children.length){body.insertBefore(next.cloneNode(true),body.children[i]||null);continue;}
+    for(const a of [...old.attributes])if(!next.hasAttribute(a.name))old.removeAttribute(a.name);
+    for(const a of next.attributes)if(old.getAttribute(a.name)!==a.value)old.setAttribute(a.name,a.value);
+    for(let k=0;k<next.children.length;k++)if(!old.children[k].isEqualNode(next.children[k]))old.children[k].replaceWith(next.children[k].cloneNode(true));
+    if(body.children[i]!==old)body.insertBefore(old,body.children[i]||null);
+  }
+  if(newRows.every(r=>r.dataset.sym)){const wanted=new Set(newRows.map(r=>r.dataset.sym));for(const row of [...body.children])if(!wanted.has(row.dataset.sym))row.remove();}
+  if(PAGE_LIVE.awaitingDom){PAGE_LIVE.awaitingDom=false;if(PAGE_LIVE.checkAt)PAGE_LIVE.metrics.lastCheckToDomMs=Date.now()-PAGE_LIVE.checkAt;}
+}
 function renderTable(){
   renderLiveTapeBar();
   const capital=getEffectiveCapital();
@@ -11805,7 +11917,7 @@ function renderTable(){
   updateTriggerPnl(DASH);
   PG=Math.max(1,Math.min(PG,Math.ceil(DASH_LEN/PGSZ)||1));
   const start=(PG-1)*PGSZ,pg=DASH.slice(start,start+PGSZ);
-  document.getElementById('tBody').innerHTML=pg.map(s=>{
+  patchRankingBody(pg.map(s=>{
     if(s._us) return usRowHtml(s);
     const isSelected=SELECTED.has(s.symbol);
     const am=allocMap[s.symbol];
@@ -11912,7 +12024,7 @@ function renderTable(){
     // Pinned rows: distinct blue tint and an amber left edge, at full opacity.
     if(isPinned(s.symbol)) _trStyle+=';opacity:1;background:rgba(56,189,248,.10);box-shadow:inset 4px 0 0 var(--amber)';
     return`<tr data-sym="${s.symbol}" style="${_trStyle}" onclick="showRadarDetail('${s.symbol}')" title="Click for the full scoring breakdown">${cells}</tr>`;
-  }).join('')||`<tr><td colspan="${COLS.length}" class="rankings-empty-cell"><div class="rankings-empty-message">${emptyBoardReason()}</div></td></tr>`;
+  }).join('')||`<tr><td colspan="${COLS.length}" class="rankings-empty-cell"><div class="rankings-empty-message">${emptyBoardReason()}</div></td></tr>`);
   renderPgn();
   updateSelectAll();
   refreshMarketSummary();
@@ -13245,7 +13357,7 @@ function* patchUniverseDeltasGen(deltaRows,deferPaint=false){
 
   // If any stock's eligibility changed, sort order changed, or if any stock in selection or
   // the filtered board became ineligible, re-filter so the board and basket stay completely truthful.
-  const filtNeedsPrune = !SHOW_INELIGIBLE && FILT.some(s => getRowActionState(s).state!=='GO' || (!SELECTED.has(s.symbol)&&!EXPORT_EXCLUDED.has(s.symbol)));
+  const filtNeedsPrune = !SHOW_INELIGIBLE && FILT.some(s => getRowActionState(s).state!=='GO' && !isPinned(s.symbol));
   const selectionHasIneligible = Array.from(SELECTED).some(sym => {
     const s = symMap.get(sym);
     return !s || !isSelectableRecommendation(s);
@@ -13860,9 +13972,8 @@ function applyFilters({preservePage=false}={}){
     if(s) REMOVED_ROWS.push({s,reason:'allocation',chip:reason,detail:reason});
   });
   SELECTED=plan.funded;
-  // Hide ineligible: the table is the buy list. Only funded GO stocks remain, plus any GO stock
-  // you excluded by hand so it can be ticked back in.
-  if(!SHOW_INELIGIBLE)rows=rows.filter(r=>SELECTED.has(r.symbol)||isPinned(r.symbol)||(EXPORT_EXCLUDED.has(r.symbol)&&isStockEligible(r)));
+  // Eligibility controls visibility; funding controls selection and execution only.
+  if(!SHOW_INELIGIBLE)rows=rows.filter(r=>isStockEligible(r)||isPinned(r.symbol));
   FILT=rows;
   recordTableEntries(ALL);
   rows.forEach(r=>{
@@ -14023,7 +14134,7 @@ function compactTapeStatus(){
 function updateIneligibleToggle(){
   const button=document.getElementById('btnToggleBelowThreshold');
   if(button){button.textContent=SHOW_INELIGIBLE?'Hide ineligible':'Show ineligible';button.setAttribute('aria-pressed',String(SHOW_INELIGIBLE));
-    button.title=SHOW_INELIGIBLE?'Showing every stock with its reason. Click to show funded GO buys only.':'Showing funded GO buys only. Click to also show unfunded GO, WAIT and BLOCKED stocks with their reasons.';}
+    button.title=SHOW_INELIGIBLE?'Showing every stock with its reason. Click to show all GO stocks.':'Showing all GO stocks, including unfunded ones. Click to also show WAIT and BLOCKED stocks.';}
 }
 
 function clearFilters(){
@@ -14356,8 +14467,9 @@ function startStreamRefresh(){
     }catch(e){}
   }
   if(_streamRefreshTimer) return;
-  if(!startStreamRefresh.entry)startStreamRefresh.entry=setInterval(loadEntryTriggers,2000);   // v1584: 2 s, so a trigger reaches the basket within ~2 s of the helper check
-  if(!startStreamRefresh.btst){startStreamRefresh.btst=setInterval(()=>{loadBtstPicks();loadKiteMargins();loadKiteGtts();loadProfitLockStatus();loadAutoBuyStatus();loadFilterOpportunity();syncSellBasketToKite();scheduleKiteBasketSync();try{resetCrossAlertsIfNewDay();checkCrossingAlerts();}catch(e){}},20000);loadBtstPicks();loadKiteMargins();loadKiteGtts();loadProfitLockStatus();loadAutoBuyStatus();loadFilterOpportunity();syncSellBasketToKite();try{resetCrossAlertsIfNewDay();checkCrossingAlerts();}catch(e){}
+  startPageLiveStream();
+  if(!startStreamRefresh.entry)startStreamRefresh.entry=setInterval(()=>{if(!pageLiveHealthy())loadEntryTriggers();},2000);
+  if(!startStreamRefresh.btst){startStreamRefresh.btst=setInterval(()=>{if(!pageLiveHealthy()){loadBtstPicks();loadProfitLockStatus();loadAutoBuyStatus();}loadKiteMargins();loadKiteGtts();loadFilterOpportunity();syncSellBasketToKite();scheduleKiteBasketSync();try{resetCrossAlertsIfNewDay();checkCrossingAlerts();}catch(e){}},20000);loadBtstPicks();loadKiteMargins();loadKiteGtts();loadProfitLockStatus();loadAutoBuyStatus();loadFilterOpportunity();syncSellBasketToKite();try{resetCrossAlertsIfNewDay();checkCrossingAlerts();}catch(e){}
     try{seedSavedBasketCount();}catch(e){}}
   _streamRefreshUiTimer=setInterval(()=>{try{refreshStrategySafety();renderLiveTapeBar();}catch(e){console.warn('Strategy safety refresh',e);}},1000);
   if(!_streamVisibilityBound){
@@ -14377,6 +14489,7 @@ let STREAM_STATUS=null;
 let STREAM_STATUS_FAILS=0;
 async function loadStreamStatus(){
   if(!KITE_API){STREAM_STATUS=null;return null;}
+  if(pageLiveHealthy()&&PAGE_LIVE.streamEvidence){STREAM_STATUS_FAILS=0;STREAM_STATUS={...STREAM_STATUS,...PAGE_LIVE.streamEvidence,statusUnknown:false,checkedAt:Date.now()};return STREAM_STATUS;}
   try{
     const next=await readHelperResponse('/api/kite/stream',{timeout:3000});
     if(!next||next.ok===false) throw new Error('Stream status unavailable');
