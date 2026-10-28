@@ -1,5 +1,5 @@
 const BUILD_TS='2026-10-28 IST'; // release build date (IST)
-const APP_VERSION=1580;
+const APP_VERSION=1581;
 const RADAR_SCORE_VERSION='v1419-recross-batches'; // Eligible on crossing the score floor at any time; selected model's evolving target and movement-based profit protection.
 
 // ── v1358: AN UNCAUGHT ERROR MUST NAME ITSELF ─────────────────────────────────────────────────
@@ -4922,7 +4922,7 @@ function btstCrossingState(s){
   if(!r.crossingsKnown) return {state:'WAIT',reason:'Waiting for the helper’s 10-second entry check.'};
   if(!r.crossed.has(key)&&r.armed?.[key]){
     const a=r.armed[key],since=new Date(a.since).toLocaleTimeString('en-IN',{timeZone:'Asia/Kolkata',hour:'2-digit',minute:'2-digit',hour12:false});
-    return {state:'WAIT',reason:`Crossed +${floor.toFixed(2)} at ${since}. Buys on two rising 10-second checks, the second bigger${a.prevUp!=null?` (last rise +${a.prevUp.toFixed(2)}%; next must beat it)`:' (waiting for the first rise)'}.`};
+    return {state:'WAIT',armed:true,reason:`Crossed +${floor.toFixed(2)} at ${since}. Buys on two rising 10-second checks, the second bigger${a.prevUp!=null?` (last rise +${a.prevUp.toFixed(2)}%; next must beat it)`:' (waiting for the first rise)'}.`};
   }
   if(!r.crossed.has(key)){
     const at=first?new Date(first.t).toLocaleTimeString('en-IN',{hour:'2-digit',minute:'2-digit',hour12:false}):'';
@@ -5244,12 +5244,29 @@ function rowStatusPillHtml(s){
   const funded=SELECTED.has(s.symbol)&&act.state==='GO';
   const unfunded=act.state==='GO'&&!funded;
   const tone=act.state==='BLOCKED'?'red':act.state==='GO'&&!unfunded?'green':'amber';
-  const first=firstScoreAtFloor(s.symbol),quote=crossingCurrentQuote(s.symbol,first);
-  const crossBadge=firstScoreBadgeHtml(first,quote?.price??null,quote?.priceAt??null,crossingExit(s.symbol,first));
-  return `<span class="info-pill pill-${tone}" title="${escHtml(act.reason)}">${act.state}${funded?' | Funded':unfunded?' | Not funded':''}</span>`
-    +crossBadge
-    +(act.state!=='GO'?`<div style="font-size:11px;color:var(--t3)">${escHtml(act.reason)}</div>`:'')
-    +(act.state==='GO'&&reason?`<div style="font-size:11px;color:var(--amber)">${escHtml(reason)}</div>`:'');
+  // v1581 (owner 28 Oct): one pill and one short line; the full reason is in the tooltip. Crossing and exit
+  // detail live in their own columns.
+  const label=act.armed?'ARMED':act.state;
+  const full=act.state==='GO'&&reason?reason:act.reason;
+  const first=String(full||'').split(/(?<=\.)\s/)[0],line=first.length>90?first.slice(0,88)+'…':first;
+  return `<span class="info-pill pill-${act.armed?'amber':tone}" title="${escHtml(full)}">${label}${funded?' | Funded':unfunded?' | Not funded':''}</span>`
+    +(line?`<div style="font-size:12px;color:var(--${act.state==='GO'&&reason?'amber':'t3'})" title="${escHtml(full)}">${escHtml(line)}</div>`:'');
+}
+function crossCellHtml(s){
+  const first=firstScoreAtFloor(s.symbol);
+  if(!first)return '<span style="color:var(--t3)">—</span>';
+  const quote=crossingCurrentQuote(s.symbol,first);
+  return firstScoreBadgeHtml(first,quote?.price??null,quote?.priceAt??null,crossingExit(s.symbol,first));
+}
+// v1581: the live trailing exit for a held stock - not armed (arming price) or the current SL / target legs.
+function exitCellHtml(s){
+  const p=PROFIT_LOCK_STATUS.bySym.get(normSym(s.symbol));
+  if(!p||!(p.qty>0))return '<span style="color:var(--t3)">—</span>';
+  const be=Number(p.breakeven),sl=Number(p.stopGttTrigger),tgt=Number(p.targetPrice);
+  if(sl>0&&tgt>0&&p.targetGttId)return `<div style="font-family:'DM Mono',monospace;font-size:13px;white-space:nowrap" title="Trailing OCO: both legs move up with each new high and never down${be>0?'; breakeven ₹'+be.toFixed(2):''}"><span style="color:var(--red)">SL ₹${sl.toFixed(2)}</span> · <span style="color:var(--green)">TGT ₹${tgt.toFixed(2)}</span></div>`;
+  if(!(be>0))return '<span style="color:var(--t3)">awaiting cost basis</span>';
+  const arm=Math.max(be/(1-0.0026),be+0.10);
+  return `<div style="font-family:'DM Mono',monospace;font-size:13px;white-space:nowrap;color:var(--t2)" title="No sell order until price minus 0.26% (at least ₹0.10) clears breakeven ₹${be.toFixed(2)} (charges and DP included)">arms ≥ ₹${arm.toFixed(2)}</div><div style="font-size:12px;color:var(--t3)">breakeven ₹${be.toFixed(2)}</div>`;
 }
 function radarSetupLabel(r){
   const b=[];
@@ -10193,16 +10210,15 @@ function _renderMethodologyInner(){
 function getCols(){
   // User-dragged column order (v536) applies here so header and cells always agree.
   return applyColOrder('main-rankings',[
+    // v1581 (owner 28 Oct): only what the buy/exit decisions use. From High, Buyer/Seller, RelVol, Turnover and the
+    // fixed Target are dropped (they remain in the row detail on click).
     {key:'chk',label:'',s:0},
+    {key:'status',label:'Status',s:1},
     {key:'score',label:'Model Score',s:1},
     {key:'symbol',label:'Symbol',s:1},
-    {key:'status',label:'Trigger Status',s:1},
-    {key:'price',label:'Price/Day',s:1},
-    {key:'highDistance',label:'From High',s:1},
-    {key:'depth',label:'Buyer / Seller',s:1},
-    {key:'relvol',label:'RelVol',s:1},
-    {key:'turnover',label:'Turnover',s:1},
-    {key:'tgt',label:'Target',s:1},
+    {key:'price',label:'Price · Day',s:1},
+    {key:'cross',label:'Since crossing',s:0},
+    {key:'exit',label:'Exit',s:0},
     {key:'alloc',label:'Alloc',s:1},
 
   ]);
@@ -11384,7 +11400,7 @@ function renderHead(){
     // v1409: the score column is centre-aligned, so its header must match or the label floats
     // left of the numbers it titles.
     const align=c.key==='score'?' style="text-align:center"':'';
-    return`<th data-key="${c.key}"${align} class="${c.key===SCOL?'sorted':''}" ${c.s?`onclick="doSort('${c.key}')"`:''}>${c.label}<span class="sa">${arr}</span>${c.key==='status'?`<span id="trigger-pnl">${TRIGGER_PNL_HTML}</span>`:''}</th>`;
+    return`<th data-key="${c.key}"${align} class="${c.key===SCOL?'sorted':''}" ${c.s?`onclick="doSort('${c.key}')"`:''}>${c.label}<span class="sa">${arr}</span>${c.key==='cross'?`<span id="trigger-pnl">${TRIGGER_PNL_HTML}</span>`:''}</th>`;
   }).join('')+'</tr>';
   // Drag-to-reorder columns; the saved order re-enters through getCols() (v536).
   attachColDrag(document.getElementById('tHead').parentElement,'main-rankings',()=>{COLS=getCols();renderHead();renderTable();});
@@ -11879,6 +11895,8 @@ function renderTable(){
       symbol:`<td style="font-family:'Plus Jakarta Sans',sans-serif">${(
         `<div style="font-weight:700;font-size:15px;color:var(--t1);max-width:280px;overflow:hidden;text-overflow:ellipsis">${pinButton(s.symbol)}${escHtml(s.symbol)}${chartLinkButtons(s.symbol)}${(()=>{const bf=getBookFlag(s.symbol);if(!bf)return '';return `<span style="font-size:11px;background:rgba(245,158,11,.14);color:var(--amber);border-radius:4px;padding:1px 5px;margin-left:5px;font-weight:700;vertical-align:middle" title="Order book: ${escHtml(bf.text)}. Display only - it does not change the score unless the graded book weight says it should.">${bf.iceberg?'🧊':'⚑'}${bf.heavyCancel?' cx':''}</span>`;})()}${s._held?`<span style="font-size:12px;background:rgba(244,114,182,.15);color:#f472b6;border-radius:4px;padding:1px 5px;margin-left:5px;font-weight:700;vertical-align:middle" title="You already hold this. Held stocks stay in the ranking (v1070) and can be recommended again — buying here ADDS to the existing position.">📌 held</span>`:''}</div><div style="font-size:11px;color:var(--t3);max-width:180px;overflow:hidden;text-overflow:ellipsis" title="${escHtml((s.name||'')+(s.setup?' · '+s.setup:''))}">${radarSeriesBandPill(s)} ${escHtml(s.setup||s.name||'')}</div>`)}</td>`,
       status:`<td data-key="status" class="recommendation-status">${rowStatusPillHtml(s)}</td>`,
+      cross:`<td data-key="cross" style="white-space:normal;min-width:170px">${crossCellHtml(s)}</td>`,
+      exit:`<td data-key="exit">${exitCellHtml(s)}</td>`,
       setup:`<td style="font-size:13px;color:var(--t2)">${escHtml(s.setup||'—')}${s.stage?' '+radarStagePill(s):''}</td>`,
       series:`<td>${radarSeriesBandPill(s)}</td>`,
       price:`<td data-key="price" style="white-space:nowrap">${livePriceAge(s.symbol)}${fmtINR(s.price)}<span style="color:var(--t3)"> · </span><span style="font-size:12px">${fPerf(s.day??s.priceChange)}${s.corpAction?`<span title="Corporate action (${escHtml(s.corpAction)}) — mechanical ex-date move, neutralised in scoring" style="font-size:11px;color:var(--amber);margin-left:4px;cursor:help">⚑</span>`:''}</span></td>`,
@@ -12033,12 +12051,12 @@ function sortValueOf(row,key){
 // Display order only: equal sizing/funding stays independent of score. v1577 (owner 28 Oct): the default
 // order is Trigger Status (GO, WAIT, BLOCKED, other) then score high to low, missing scores last, for
 // every model. An explicit Model Score header click sorts the numeric score alone, either direction.
-const STATUS_SORT_RANK={GO:0,WAIT:1,BLOCKED:2};
+const STATUS_SORT_RANK={GO:0,WAIT:2,BLOCKED:3};   // ARMED (a WAIT that crossed and is waiting for its upticks) ranks 1
 function compareModelScoreRows(a,b){
   const av=a._us?a.score:btstScoreOf(a.symbol),bv=b._us?b.score:btstScoreOf(b.symbol);
   const an=!Number.isFinite(av),bn=!Number.isFinite(bv);
   if(!SORT_EXPLICIT){
-    const rank=row=>row._us?(row.go?0:1):(STATUS_SORT_RANK[getRowActionState(row)?.state]??3);
+    const rank=row=>{if(row._us)return row.go?0:2;const st=getRowActionState(row);return st?.armed?1:(STATUS_SORT_RANK[st?.state]??4);};
     const ar=rank(a),br=rank(b);
     if(ar!==br)return ar-br;
   }
@@ -13134,6 +13152,7 @@ function universeFieldsToRow(sym, f){
 }
 
 function livePriceAge(sym){
+  return '';   // v1581 (owner): the price-source label is noise in the table
   const f=_universeMap.get(sym);
   if(!f) return '<div style="font-size:10px;color:var(--amber)">stored price</div>';
   const age=f.priceAt>0?Math.max(0,Math.floor((Date.now()-f.priceAt)/1000)):null;
@@ -13161,6 +13180,8 @@ function patchVisiblePrices(){
       if(statusCell){
         statusCell.innerHTML = rowStatusPillHtml(s);
       }
+      const crossCell=tr.querySelector('td[data-key="cross"]');if(crossCell)crossCell.innerHTML=crossCellHtml(s);
+      const exitCell=tr.querySelector('td[data-key="exit"]');if(exitCell)exitCell.innerHTML=exitCellHtml(s);
       const signals=strategySignalCells(s);
       for(const [key,value] of Object.entries({highDistance:signals.highDistance,depth:signals.depth,relvol:signals.rvol,turnover:fV(s.turnover)})){const cell=tr.querySelector('td[data-key="'+key+'"]');if(cell)cell.innerHTML=value;}
       const chk = tr.querySelector('input[type="checkbox"]');
