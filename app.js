@@ -1,5 +1,5 @@
 const BUILD_TS='2026-10-29 IST'; // release build date (IST)
-const APP_VERSION=1597;
+const APP_VERSION=1598;
 const RADAR_SCORE_VERSION='v1419-recross-batches'; // Eligible on crossing the score floor at any time; selected model's evolving target and movement-based profit protection.
 
 // ── v1358: AN UNCAUGHT ERROR MUST NAME ITSELF ─────────────────────────────────────────────────
@@ -7458,7 +7458,9 @@ let _reachMemo=null;
 function computeLatestOrderBooked(){
   if(!ORDERS_TODAY?._loadedThisSession) return null;
   const session=getLatestOrderSession();if(!session)return null;
-  const costs=Object.fromEntries([...new Set(session.orders.map(o=>o.symbol))].map(sym=>[sym,getHoldingAvgCost(sym)]));
+  // v1598: with the helper's opening quantity, sales are costed at one weighted average, as the loss budget does.
+  const current=RECONCILED_OPENING.day===session.date&&session.date===getSessionDate();
+  const costs=Object.fromEntries([...new Set(session.orders.map(o=>o.symbol))].map(sym=>{const q=current?RECONCILED_OPENING.qty?.[normSym(sym)]:null,p=getHoldingAvgCost(sym);return [sym,q>0&&p>0&&reconciledOpeningCost(sym)!=null?{qty:q,price:p}:p];}));
   const result=RocketStrategy.bookedSession(session,costs,TRADEBOOK_STATS);
   if(result)result.rows=result.rows.map(row=>enrichExitPnlRow(row,session.date));
   return result;
@@ -7859,15 +7861,15 @@ async function loadProfitLockStatus(){
   const bySym=new Map();
   for(const p of j.positions){if(p&&p.sym)bySym.set(normSym(p.sym),p);}
   PROFIT_LOCK_STATUS={bySym,at:j.asOf||Date.now(),lossBudget:j.lossBudget||null,entryPeaks:Array.isArray(j.entryPeaks)?j.entryPeaks:[],mlotHistory:j.mlotHistory||null,mlotObservations:Array.isArray(j.mlotObservations)?j.mlotObservations:[],bracket:j.bracket||null};
-  const ob=j.openingBasis&&typeof j.openingBasis==='object'?j.openingBasis:{},day=j.openingBasisDay||null,next={};
-  for(const [s,v] of Object.entries(ob))if(v&&v.price>0)next[normSym(s)]=Number(v.price);
-  const changed=day!==RECONCILED_OPENING.day||JSON.stringify(next)!==JSON.stringify(RECONCILED_OPENING.cost);
-  RECONCILED_OPENING={day,cost:next};
+  const ob=j.openingBasis&&typeof j.openingBasis==='object'?j.openingBasis:{},day=j.openingBasisDay||null,next={},qty={};
+  for(const [s,v] of Object.entries(ob))if(v&&v.price>0){next[normSym(s)]=Number(v.price);if(Number(v.qty)>0)qty[normSym(s)]=Number(v.qty);}
+  const changed=day!==RECONCILED_OPENING.day||JSON.stringify(next)!==JSON.stringify(RECONCILED_OPENING.cost)||JSON.stringify(qty)!==JSON.stringify(RECONCILED_OPENING.qty);
+  RECONCILED_OPENING={day,cost:next,qty};
   if(changed&&typeof renderBooked==='function')try{renderBooked();}catch(e){}
 }
 // 19 Oct: the helper's reconciled weighted cost of lots held at today's open. Zerodha's holdings average is
 // broker-netted (a same-day sell + rebuy keeps the old lot's price), which turned BLUSPRING's +Rs 86 sale into -Rs 360.
-var RECONCILED_OPENING={day:null,cost:{}};
+var RECONCILED_OPENING={day:null,cost:{},qty:{}};
 function reconciledOpeningCost(symbol){
   return RECONCILED_OPENING.day&&RECONCILED_OPENING.day===getSessionDate()?(RECONCILED_OPENING.cost[normSym(symbol)]??null):null;
 }

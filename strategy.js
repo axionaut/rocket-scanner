@@ -314,9 +314,27 @@ function calcZerodhaChargesSplit(price, qty, isSell, isIntraday, skipDp){
 function sumChargeParts(parts){
   return Object.values(parts).reduce((sum,v)=>sum+(v||0),0);
 }
+// v1598 (owner 29 Oct): one weighted average cost per stock. When the opening quantity is known
+// ({qty,price}), every sale realises (sell - running average) x qty: a buy blends into the average, a
+// sale never changes it. Zerodha's same-day netting still decides which charges apply, not the cost.
+// null = a sale exceeds the shares known to be held, so the caller keeps the broker-matched result.
+function movingAverageCost(opening,buys,sells){
+  if(!opening||typeof opening!=='object'||!Number.isFinite(Number(opening.qty)))return null;
+  let q=Number(opening.qty),avg=q>0?Number(opening.price):0,cost=0;
+  if(q>0&&!(avg>0))return null;
+  const events=[...buys.map(o=>({o,buy:true})),...sells.map(o=>({o,buy:false}))]
+    .sort((a,b)=>String(a.o.time).localeCompare(String(b.o.time))||(a.buy===b.buy?0:a.buy?-1:1));
+  for(const {o,buy} of events){
+    const n=Number(o.qty),p=Number(o.price);
+    if(buy){avg=(avg*q+p*n)/(q+n);q+=n;continue;}
+    if(n>q+1e-9)return null;
+    cost+=avg*n;q-=n;
+  }
+  return cost;
+}
 // Shared realised P&L: the page and profit-funded exits use this exact calculation.
 function bookedSession(session,holdingCosts,tradebook){
-  const getHoldingAvgCost=sym=>holdingCosts[sym]??null;
+  const getHoldingAvgCost=sym=>{const v=holdingCosts[sym];return v&&typeof v==='object'?(Number(v.price)>0?Number(v.price):null):v??null;};
   const enrichExitPnlRow=row=>row;
   const TRADEBOOK_STATS=tradebook;
   if(!session) return null;
@@ -421,8 +439,16 @@ function bookedSession(session,holdingCosts,tradebook){
       rows.push(enrichExitPnlRow({sym,sellTime:_sellTime,lots:sells.length,qty:deliveryQty,capital:null,buyPrice:null,sellPrice:+deliverySellAvg.toFixed(2),_brok,_stt,_txn,_sebi,_gst,_stamp,_dp,charges,winRate:null,netPnl:null,netPnlPct:null,_sort:-Infinity,_noAvgCost:true},session.date));
     }
     if(!components.length) return;
-    const matchedQty=components.reduce((sum,c)=>sum+c.qty,0);
-    const capital=components.reduce((sum,c)=>sum+c.capital,0);
+    let matchedQty=components.reduce((sum,c)=>sum+c.qty,0);
+    let capital=components.reduce((sum,c)=>sum+c.capital,0);
+    const weightedCost=matchedQty===totalSellQty?movingAverageCost(holdingCosts[sym],buys,sells):null;
+    if(weightedCost!=null){
+      const proceeds=sells.reduce((s,o)=>s+Number(o.price)*Number(o.qty),0),fees=components.reduce((sum,c)=>sum+c.charges,0);
+      components.splice(0,components.length,{qty:totalSellQty,capital:weightedCost,proceeds,charges:fees,netPnl:+(proceeds-weightedCost-fees).toFixed(2),
+        _brok:components.reduce((s,c)=>s+c._brok,0),_stt:components.reduce((s,c)=>s+c._stt,0),_txn:components.reduce((s,c)=>s+c._txn,0),_sebi:components.reduce((s,c)=>s+c._sebi,0),
+        _gst:components.reduce((s,c)=>s+c._gst,0),_stamp:components.reduce((s,c)=>s+c._stamp,0),_dp:components.reduce((s,c)=>s+c._dp,0)});
+      matchedQty=totalSellQty;capital=weightedCost;
+    }
     const avgBuy=capital/matchedQty;
     const avgSellMatched=components.reduce((sum,c)=>sum+c.proceeds,0)/matchedQty;
     const _brok=+components.reduce((sum,c)=>sum+c._brok,0).toFixed(2);
