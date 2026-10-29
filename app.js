@@ -1,5 +1,5 @@
 const BUILD_TS='2026-10-29 IST'; // release build date (IST)
-const APP_VERSION=1598;
+const APP_VERSION=1599;
 const RADAR_SCORE_VERSION='v1419-recross-batches'; // Eligible on crossing the score floor at any time; selected model's evolving target and movement-based profit protection.
 
 // ── v1358: AN UNCAUGHT ERROR MUST NAME ITSELF ─────────────────────────────────────────────────
@@ -4954,7 +4954,10 @@ function btstCrossingState(s){
   const fillKey=buys.length?JSON.stringify(buys.map(f=>[f.date,f.time,f.qty,f.price])):'[]';
   let state=st.rebuy[key];
   const before=state?state.qty+'|'+state.fillKey+'|'+state.consumed+'|'+state.armed:'';
-  if(!state) state=st.rebuy[key]={qty,fillKey,consumed:qty>0||buys.length>0,armed:false};
+  // v1599: only a buy TODAY consumes today's crossing; shares carried from earlier sessions never do.
+  if(!state) state=st.rebuy[key]={qty,fillKey,consumed:buys.length>0,armed:false,v:1599};
+  // States saved before v1599 marked every carried holding consumed; correct them once.
+  if(!state.v){if(state.consumed&&!buys.length){state.consumed=false;state.armed=false;}state.v=1599;}
   if(qty>state.qty||(fillKey!==state.fillKey&&buys.length>0)){
     state.consumed=true;state.armed=false;
   }
