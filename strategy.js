@@ -314,27 +314,9 @@ function calcZerodhaChargesSplit(price, qty, isSell, isIntraday, skipDp){
 function sumChargeParts(parts){
   return Object.values(parts).reduce((sum,v)=>sum+(v||0),0);
 }
-// v1598 (owner 29 Oct): one weighted average cost per stock. When the opening quantity is known
-// ({qty,price}), every sale realises (sell - running average) x qty: a buy blends into the average, a
-// sale never changes it. Zerodha's same-day netting still decides which charges apply, not the cost.
-// null = a sale exceeds the shares known to be held, so the caller keeps the broker-matched result.
-function movingAverageCost(opening,buys,sells){
-  if(!opening||typeof opening!=='object'||!Number.isFinite(Number(opening.qty)))return null;
-  let q=Number(opening.qty),avg=q>0?Number(opening.price):0,cost=0;
-  if(q>0&&!(avg>0))return null;
-  const events=[...buys.map(o=>({o,buy:true})),...sells.map(o=>({o,buy:false}))]
-    .sort((a,b)=>String(a.o.time).localeCompare(String(b.o.time))||(a.buy===b.buy?0:a.buy?-1:1));
-  for(const {o,buy} of events){
-    const n=Number(o.qty),p=Number(o.price);
-    if(buy){avg=(avg*q+p*n)/(q+n);q+=n;continue;}
-    if(n>q+1e-9)return null;
-    cost+=avg*n;q-=n;
-  }
-  return cost;
-}
 // Shared realised P&L: the page and profit-funded exits use this exact calculation.
 function bookedSession(session,holdingCosts,tradebook){
-  const getHoldingAvgCost=sym=>{const v=holdingCosts[sym];return v&&typeof v==='object'?(Number(v.price)>0?Number(v.price):null):v??null;};
+  const getHoldingAvgCost=sym=>holdingCosts[sym]??null;
   const enrichExitPnlRow=row=>row;
   const TRADEBOOK_STATS=tradebook;
   if(!session) return null;
@@ -439,16 +421,8 @@ function bookedSession(session,holdingCosts,tradebook){
       rows.push(enrichExitPnlRow({sym,sellTime:_sellTime,lots:sells.length,qty:deliveryQty,capital:null,buyPrice:null,sellPrice:+deliverySellAvg.toFixed(2),_brok,_stt,_txn,_sebi,_gst,_stamp,_dp,charges,winRate:null,netPnl:null,netPnlPct:null,_sort:-Infinity,_noAvgCost:true},session.date));
     }
     if(!components.length) return;
-    let matchedQty=components.reduce((sum,c)=>sum+c.qty,0);
-    let capital=components.reduce((sum,c)=>sum+c.capital,0);
-    const weightedCost=matchedQty===totalSellQty?movingAverageCost(holdingCosts[sym],buys,sells):null;
-    if(weightedCost!=null){
-      const proceeds=sells.reduce((s,o)=>s+Number(o.price)*Number(o.qty),0),fees=components.reduce((sum,c)=>sum+c.charges,0);
-      components.splice(0,components.length,{qty:totalSellQty,capital:weightedCost,proceeds,charges:fees,netPnl:+(proceeds-weightedCost-fees).toFixed(2),
-        _brok:components.reduce((s,c)=>s+c._brok,0),_stt:components.reduce((s,c)=>s+c._stt,0),_txn:components.reduce((s,c)=>s+c._txn,0),_sebi:components.reduce((s,c)=>s+c._sebi,0),
-        _gst:components.reduce((s,c)=>s+c._gst,0),_stamp:components.reduce((s,c)=>s+c._stamp,0),_dp:components.reduce((s,c)=>s+c._dp,0)});
-      matchedQty=totalSellQty;capital=weightedCost;
-    }
+    const matchedQty=components.reduce((sum,c)=>sum+c.qty,0);
+    const capital=components.reduce((sum,c)=>sum+c.capital,0);
     const avgBuy=capital/matchedQty;
     const avgSellMatched=components.reduce((sum,c)=>sum+c.proceeds,0)/matchedQty;
     const _brok=+components.reduce((sum,c)=>sum+c._brok,0).toFixed(2);
@@ -496,10 +470,14 @@ function bookedSession(session,holdingCosts,tradebook){
     return exits.filter(e=>e.qty>0);
   }
 
-  // Operational inventory basis. A sale releases average cost, never a selected buy lot.
+  // Operational inventory basis: one weighted average over every share held.
+  // v1600 (owner 29 Oct): a sale releases cost the way Zerodha books it. Same-day buys made before the sale go
+  // first (earliest first), then carried shares at their opening average, so a same-day add that is sold again
+  // leaves the carried shares at their own cost (LLOYDSENGG: 64 stay at 97.61). Fills are one session's.
   // Re-entry after a complete exit starts a new position and a new peak window.
   function weightedPosition(opening, fills, expectedQty){
     let qty=Number(opening?.qty||0),avgCost=Number(opening?.price||0),buyTime=opening?.time||null,cycles=0;
+    let carriedQty=qty,carriedAvg=avgCost;const lots=[];
     const bad=reason=>({ok:false,reason});
     if(!Number.isFinite(qty)||qty<0||(qty>0&&!(avgCost>0&&Number.isFinite(avgCost))))return bad('Opening cost is unknown');
     if(expectedQty!=null&&!(Number.isFinite(Number(expectedQty))&&Number(expectedQty)>=0))return bad('Invalid portfolio quantity');
@@ -509,11 +487,15 @@ function bookedSession(session,holdingCosts,tradebook){
       if(!(q>0&&price>0&&Number.isFinite(q)&&Number.isFinite(price))||!f.time||!['BUY','SELL'].includes(side))return bad('Invalid execution fill');
       if(side==='BUY'){
         if(!qty){avgCost=0;buyTime=f.time;cycles++;}
-        avgCost=(avgCost*qty+price*q)/(qty+q);qty+=q;
+        lots.push({q,p:price});qty+=q;
       }else{
         if(q>qty+1e-6)return bad('Sales exceed explained inventory');
-        qty=Math.max(0,qty-q);if(!qty){avgCost=0;buyTime=null;}
+        let left=q;
+        while(left>1e-9&&lots.length){const n=Math.min(left,lots[0].q);lots[0].q-=n;left-=n;if(lots[0].q<=1e-9)lots.shift();}
+        carriedQty=Math.max(0,carriedQty-left);
+        qty=Math.max(0,qty-q);if(!qty){avgCost=0;buyTime=null;carriedQty=0;lots.length=0;}
       }
+      if(qty>0)avgCost=(carriedQty*carriedAvg+lots.reduce((n,l)=>n+l.q*l.p,0))/qty;
     }
     if(expectedQty!=null&&Math.abs(qty-Number(expectedQty))>1e-6)return bad('Execution and portfolio quantities disagree');
     return {ok:true,qty,avgCost,buyTime,cycles};
