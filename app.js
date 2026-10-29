@@ -1,5 +1,5 @@
 const BUILD_TS='2026-10-29 IST'; // release build date (IST)
-const APP_VERSION=1595;
+const APP_VERSION=1596;
 const RADAR_SCORE_VERSION='v1419-recross-batches'; // Eligible on crossing the score floor at any time; selected model's evolving target and movement-based profit protection.
 
 // ── v1358: AN UNCAUGHT ERROR MUST NAME ITSELF ─────────────────────────────────────────────────
@@ -4612,6 +4612,8 @@ function startPageLiveStream(){
       const delay=Math.max(0,Date.now()-data.sentAt);Object.assign(PAGE_LIVE,{lastAt:Date.now(),boot:data.boot,seq:data.seq,retryDelay:2000});
       PAGE_LIVE.metrics.messages++;PAGE_LIVE.metrics.characters+=event.data.length;PAGE_LIVE.metrics.lastDeliveryMs=delay;PAGE_LIVE.metrics.maxDeliveryMs=Math.max(delay,PAGE_LIVE.metrics.maxDeliveryMs);
       if(data.stream){PAGE_LIVE.streamEvidence=data.stream;acceptStreamEvidence(data.stream);}
+      if(data.replay)acceptRuleReplay(data.replay);
+      if(event.type==='replay')return;
       if(event.type==='changed'){
         if(data.versions?.portfolio){_helperPortfolioRev=Number(data.versions.portfolio);_seenPortfolioRev=_helperPortfolioRev;}
         queuePageLiveReads(data.names||[]);return;
@@ -4630,7 +4632,7 @@ function startPageLiveStream(){
     }catch(e){PAGE_LIVE.metrics.lastError=e.message;retryPageLiveStream(source);}
   };
   source.addEventListener('snapshot',e=>receive(e,true));
-  for(const name of ['live','changed','pulse'])source.addEventListener(name,receive);
+  for(const name of ['live','changed','pulse','replay'])source.addEventListener(name,receive);
   source.onerror=()=>retryPageLiveStream(source);
 }
 function retryPageLiveStream(source){
@@ -4695,73 +4697,33 @@ function crossingCurrentQuote(sym,fc){
     Number.isFinite(q.priceAt)&&q.priceAt>0&&q.priceAt<=now&&q.priceAt>=(fc.priceAt||fc.t)&&
     new Date(q.priceAt+19800000).toISOString().slice(0,10)===day).sort((a,b)=>b.priceAt-a.priceAt)[0]||null;
 }
-// v1572: a crossing bought at its captured price would have left at +/-1.25% (target / stop) in the first
-// later session minute (Session_1min, via the helper) whose high/low reached either; a minute touching both
-// counts as the stop. Minutes starting before the crossing are excluded. Null = still open.
-const CROSS_EXIT_PCT=1.25;
-let CROSS_EXITS=new Map(),_crossExitsAt=0,_crossExitsBusy=false;
-function crossingExit(sym,fc){
-  const ref=Number(fc?.price);if(!(ref>0))return null;
-  const e=CROSS_EXITS.get(normSym(sym));
-  return e&&e.res&&e.t0===(fc.priceAt||fc.t)&&e.ref===ref?e:null;
-}
-async function refreshCrossingExits(rows){
-  if(_crossExitsBusy||Date.now()-_crossExitsAt<60000)return;
-  const day=getSessionDate(),items=[];
-  if(CROSS_EXITS.day!==day){CROSS_EXITS=new Map();CROSS_EXITS.day=day;}
-  for(const s of rows||[]){
-    if(!s||s._us)continue;
-    const fc=firstScoreAtFloor(s.symbol),ref=Number(fc?.price);if(!(ref>0))continue;
-    const sym=normSym(s.symbol),t0=fc.priceAt||fc.t,e=CROSS_EXITS.get(sym);
-    if(e&&e.res&&e.t0===t0&&e.ref===ref)continue;
-    items.push({sym,t0,ref});
-  }
-  _crossExitsAt=Date.now();
-  if(!items.length)return;
-  _crossExitsBusy=true;
-  try{
-    const j=await readHelperResponse('/api/crossing-exits',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({day,pct:CROSS_EXIT_PCT,items}),timeout:20000});
-    if(!j?.ok||j.day!==getSessionDate())return;
-    let changed=false;
-    for(const [sym,e] of Object.entries(j.exits||{})){if(e.res&&!CROSS_EXITS.get(sym)?.res)changed=true;CROSS_EXITS.set(sym,e);}
-    if(changed&&ALL.length)applyFilters({preservePage:true});
-  }catch(e){}finally{_crossExitsBusy=false;}
-}
-function firstScoreBadgeHtml(fc,currentPrice,currentAt=null,exit=null){
+function firstScoreBadgeHtml(fc,currentPrice,currentAt=null){
   if(!fc)return '';
-  if(exit){currentPrice=exit.price;currentAt=exit.t;}
   const hm=t=>new Date(t).toLocaleTimeString('en-IN',{timeZone:'Asia/Kolkata',hour:'2-digit',minute:'2-digit',hour12:false});
   const approx=fc.priceSource==='minute-close',price=Number(fc.price),current=Number(currentPrice);
   const hasPrice=Number.isFinite(price)&&price>0,hasCurrent=Number.isFinite(current)&&current>0;
   const delta=hasPrice&&hasCurrent?current-price:null,pct=delta===null?null:delta/price*100;
-  const signed=(n,prefix='')=>(n>0?'+':n<0?'−':'')+prefix+Math.abs(n).toFixed(2);
-  const title=(fc.model==='CUM'?`First rose from below the Cumulative Change floor ${fc.floor.toFixed(2)} to ${fc.floor.toFixed(2)} or higher today in the ${hm(fc.t)} IST check (record for this floor since ${hm(fc.since)} IST)`:fc.already?`Already at or above ${fc.model} ${fc.floor.toFixed(2)} when tracking began at ${hm(fc.since)} IST`:`First scored ${fc.model} ${fc.floor.toFixed(2)} or higher today in the ${hm(fc.t)} IST run (tracked since ${hm(fc.since)} IST)`)
-    +(hasPrice?(approx?`; approximate reference: completed minute ending ${hm(fc.priceAt)} IST`:fc.priceSource==='prior-observation'?'; last observed price retained at the date reset, quoted '+new Date(fc.priceAt).toLocaleString('en-IN',{timeZone:'Asia/Kolkata'})+' IST':'; price captured in that score run'):'; historical crossing price was not recorded')
-    +(exit?`; ${exit.res==='TGT'?'target':'stop'} ±${CROSS_EXIT_PCT}% reached in the bar starting ${hm(exit.t)} IST, exit ₹${exit.price.toFixed(2)}${exit.both?' (that bar touched both; counted as the stop)':''}`
-      :hasPrice&&hasCurrent?`; still open: price move from ₹${price.toFixed(2)} to observed ₹${current.toFixed(2)}${currentAt?' at '+hm(currentAt)+' IST':''}`:'');
-  return `<div style="font-size:11px;color:var(--cyan);font-family:'DM Mono',monospace;font-weight:700;margin-top:2px" title="${escHtml(title)}">⏱ 1st ≥${fc.floor.toFixed(2)}: ${fc.already?'by ':''}${hm(fc.t)}`
-    +(hasPrice?` · ${approx?'~':''}₹${price.toFixed(2)}`:' · price unavailable')
-    +(delta!==null?`<span style="color:var(--${delta>0?'green':delta<0?'red':'t3'});white-space:nowrap"> · ${exit?(exit.res==='TGT'?'TGT ':'SL ')+hm(exit.t)+' ':''}${approx?'~':''}${signed(delta,'₹')} (${signed(pct)}%)${exit?'':' open'}</span>`:hasPrice?' · current price unavailable':'')+'</div>';
+  const signed=(n,prefix='')=>(n>0?'+':n<0?'-':'')+prefix+Math.abs(n).toFixed(2);
+  const title=`First ${fc.model} score at/above floor ${Number(fc.floor).toFixed(2)}: ${hm(fc.t)} IST. This is an observed price reference, not a hypothetical buy.`
+    +(hasPrice?(approx?`; approximate completed-minute reference ending ${hm(fc.priceAt)} IST`:fc.priceSource==='prior-observation'?'; price retained from an earlier observation':'; price captured in that score check'):'; crossing price unavailable')
+    +(hasPrice&&hasCurrent?`; observed price move from ${price.toFixed(2)} to ${current.toFixed(2)}${currentAt?' at '+hm(currentAt)+' IST':''}`:'');
+  return `<div style="font-size:11px;color:var(--cyan);font-family:'DM Mono',monospace;font-weight:700;margin-top:2px" title="${escHtml(title)}">&#9201; 1st &ge;${Number(fc.floor).toFixed(2)}: ${fc.already?'by ':''}${hm(fc.t)}`
+    +(hasPrice?` &middot; ${approx?'~':''}&#8377;${price.toFixed(2)}`:' &middot; price unavailable')
+    +(delta!==null?`<span style="color:var(--${delta>0?'green':delta<0?'red':'t3'});white-space:nowrap"> &middot; ${approx?'~':''}${signed(delta,'&#8377;')} (${signed(pct)}%) price move</span>`:hasPrice?' &middot; current price unavailable':'')+'</div>';
 }
-// v1595: all NSE first-crossing moves, one share each, in the status bar; independent of table filters.
-// v1572: a row that reached the +/-1.25% target or stop counts at that exit, not at the current price.
-let TRIGGER_PNL_HTML='';
+// v1596: capital-independent signal entries with the shared live ratchet; no fixed target/stop basket.
+let TRIGGER_PNL_HTML='',RULE_REPLAY=null;
+function acceptRuleReplay(r){if(!r)return;if(RULE_REPLAY?.ok&&!Number.isFinite(r.asOf))return;if(Number.isFinite(RULE_REPLAY?.asOf)&&Number.isFinite(r.asOf)&&r.asOf<RULE_REPLAY.asOf)return;RULE_REPLAY=r;updateTriggerPnl(ALL);}
 function updateTriggerPnl(rows){
-  refreshCrossingExits(rows);
-  let n=0,abs=0,ref=0,pctSum=0,tgt=0,sl=0;
-  for(const s of rows||[]){
-    if(!s||s._us)continue;
-    const fc=firstScoreAtFloor(s.symbol),price=Number(fc?.price),exit=crossingExit(s.symbol,fc);
-    const cur=exit?exit.price:Number(crossingCurrentQuote(s.symbol,fc)?.price);
-    if(!(price>0&&cur>0))continue;
-    n++;abs+=cur-price;ref+=price;pctSum+=(cur-price)/price*100;
-    if(exit?.res==='TGT')tgt++;else if(exit)sl++;
+  const r=RULE_REPLAY;
+  if(!r?.ok)TRIGGER_PNL_HTML='<span style="color:var(--t3)" title="'+escHtml(r?.error||'Waiting for helper signal recording. Earlier unrecorded checks are not invented.')+'">Signal replay: '+(r?.error?'unavailable':'awaiting recorder')+'</span>';
+  else{
+    const startDay=new Date(r.startedAt+19800000).toISOString().slice(0,10),since=(startDay===getSessionDate()?'':startDay+' ')+new Date(r.startedAt).toLocaleTimeString('en-IN',{timeZone:'Asia/Kolkata',hour:'2-digit',minute:'2-digit',hour12:false});
+    const sign=v=>(v>0?'+':v<0?'-':'')+Math.abs(v).toFixed(2),tone=r.netRs>0?'green':r.netRs<0?'red':'t3';
+    const title='Hypothetical one share per qualifying two-rise entry, ignoring cash. Starts '+since+' IST; earlier checks were not retained. Shared fee-breakeven and 0.26% OCO ratchet, actual tick sizes and profit-funded loss rules; no fixed +/-1.25% profit exit. LIMIT exits require a recorded bid at/above the limit. Net includes estimated liquidation fees for open positions. Recording interruptions: '+(r.recordingInterruptions||0)+'. No real orders.';
+    TRIGGER_PNL_HTML=`<span style="color:var(--${tone});white-space:nowrap" title="${escHtml(title)}">Signal replay: &#8377;${sign(r.netRs)} net (${sign(r.netPct)}%)<span style="color:var(--t3)"> &middot; ${r.entries} entries &middot; ${r.closed} exited &middot; ${r.open} open${r.pending?' &middot; '+r.pending+' pending':''}${r.recordingInterruptions?' &middot; '+r.recordingInterruptions+' recording gaps':''} &middot; since ${since}</span></span>`;
   }
-  const signed=(v,p='')=>(v>0?'+':v<0?'−':'')+p+Math.abs(v).toFixed(2);
-  const pct=ref>0?abs/ref*100:0,tone=abs>0?'green':abs<0?'red':'t3';
-  TRIGGER_PNL_HTML=`<span title="${escHtml(`${n} tracked NSE stocks, one share each at the first-crossing price: ${tgt} reached the +${CROSS_EXIT_PCT}% target, ${sl} the −${CROSS_EXIT_PCT}% stop (counted at those exits), ${n-tgt-sl} still open at the current price. Total ₹${abs.toFixed(2)} on ₹${ref.toFixed(2)} invested. Equal-weight average: ${signed(n?pctSum/n:0)}%. Gross, before charges.`)}" style="font-size:inherit;font-family:'DM Mono',monospace;font-weight:700;color:var(--${tone});text-transform:none;letter-spacing:0;white-space:nowrap">Since Crossing: Σ ${signed(abs,'₹')} (${signed(pct)}%) · ${n}<span style="color:var(--t3);font-weight:400"> · T${tgt} S${sl} O${n-tgt-sl}</span></span>`;
-  const el=document.getElementById('trigger-pnl');
-  if(el)el.innerHTML=TRIGGER_PNL_HTML;
+  const el=document.getElementById('trigger-pnl');if(el)el.innerHTML=TRIGGER_PNL_HTML;
 }
 function btstToday(){
   const d=BTST.data;
@@ -5364,7 +5326,7 @@ function crossCellHtml(s){
   const first=firstScoreAtFloor(s.symbol);
   if(!first)return '<span style="color:var(--t3)">—</span>';
   const quote=crossingCurrentQuote(s.symbol,first);
-  return firstScoreBadgeHtml(first,quote?.price??null,quote?.priceAt??null,crossingExit(s.symbol,first));
+  return firstScoreBadgeHtml(first,quote?.price??null,quote?.priceAt??null);
 }
 // v1581: the live trailing exit for a held stock - not armed (arming price) or the current SL / target legs.
 function exitCellHtml(s){
@@ -7394,6 +7356,8 @@ function exitSaleWindow(sym,sellTime){
   const bars=(rows,d)=>{for(const bar of rows||[])if(bar.t>from&&bar.t+d<=until&&bar.h>0&&bar.l>0&&bar.h>=bar.l)take(bar.h,bar.t,bar.l,'bar',d);};
   bars(INTRADAY_BARS[normSym(sym)],300000);
   if(typeof MINUTE_BARS!=='undefined')bars(MINUTE_BARS[normSym(sym)],60000);
+  // Helper-owned complete minute observations survive page closure and source-file retirement.
+  for(const p of PROFIT_LOCK_STATUS.mlotObservations||[])if(p.symbol===normSym(sym)&&p.from===from&&p.highAt>from&&p.highAt<end&&p.through<=until&&p.highAt+60000<=p.through)take(Number(p.high),p.highAt,p.lowAt>from&&p.lowAt<end?Number(p.low):null,'bar',60000);
   // A verified quote is a timed post-sale observation, including before the first full candle exists.
   const quotes=[ALL.find(r=>normSym(r.symbol)===normSym(sym)),typeof _universeMap==='undefined'?null:_universeMap.get(normSym(sym))];
   for(const row of quotes){const quoteAt=Number(row?.priceAt);if(row?.priceSource==='live tick'&&quoteAt>=from+1000&&quoteAt<end&&quoteAt<=until&&Number(row.price)>0)take(Number(row.price),quoteAt,Number(row.price));}
@@ -7447,6 +7411,7 @@ function enrichExitPnlRow(row,bookedDate=null){
   return out;
 }
 
+function mlotMedian(values){const a=values.filter(Number.isFinite).sort((x,y)=>x-y);if(!a.length)return null;const i=Math.floor(a.length/2);return a.length%2?a[i]:(a[i-1]+a[i])/2;}
 function summarizeExitPnlRows(rows){
   const known=(rows||[]).filter(r=>r&&r.capital>0&&r.netPnl!=null);
   const capital=known.reduce((s,r)=>s+(r.capital||0),0);
@@ -7462,7 +7427,7 @@ function summarizeExitPnlRows(rows){
   const leftPct=leftProceeds>0?+((leftRs/leftProceeds)*100).toFixed(2):null;
   const savedRows=(rows||[]).filter(r=>r.moneySavedRs!=null),savedRs=savedRows.reduce((n,r)=>n+r.moneySavedRs,0),savedProceeds=savedRows.reduce((n,r)=>n+(Number(r.sellPrice)||0)*(Number(r.qty)||0),0);
   return {savedRs,savedCount:savedRows.length,savedPct:savedProceeds>0?savedRs/savedProceeds*100:null,known,capital,net,gross,charges,pct:capital>0?+(net/capital*100).toFixed(2):null,
-          leftRs,leftPct,leftCount:leftRows.length,leftProceeds};
+          leftRs,leftPct,leftCount:leftRows.length,leftProceeds,mlotMedianPct:mlotMedian(leftRows.map(r=>r.leftOnTablePct)),mlotMedianRs:mlotMedian(leftRows.map(r=>r.leftOnTableRs)),peakMedianMin:mlotMedian(leftRows.map(r=>r.highGapMin)),peakCount:leftRows.filter(r=>Number.isFinite(r.highGapMin)).length,largestContributionPct:leftRs>0?Math.max(...leftRows.map(r=>r.leftOnTableRs))/leftRs*100:0};
 }
 
 function getLeftOnTableStore(){
@@ -7478,10 +7443,10 @@ function recordLeftOnTableSession(date,summary){
               leftRs:+Number(summary.leftRs||0).toFixed(2),
               moneySavedRs:+Number(summary.savedRs||0).toFixed(2),opportunityBasis:'post-sell-same-day-v1595',
               proceeds:Math.round(summary.leftProceeds),
-              rows:summary.leftCount,
+              rows:summary.leftCount,medianPct:summary.mlotMedianPct,medianRs:summary.mlotMedianRs,medianPeakDelayMin:summary.peakMedianMin,peakCount:summary.peakCount,largestContributionPct:summary.largestContributionPct,
               updatedAt:new Date().toISOString()};
   const prev=store.sessions[date];
-  if(prev&&prev.opportunityBasis===next.opportunityBasis&&prev.leftRs===next.leftRs&&prev.leftPct===next.leftPct&&prev.moneySavedRs===next.moneySavedRs&&prev.proceeds===next.proceeds&&prev.rows===next.rows) return store;
+  if(prev&&Object.entries(next).every(([k,v])=>k==='updatedAt'||prev[k]===v)) return store;
   const sessions={...store.sessions,[date]:next};
   for(const d of Object.keys(sessions).sort().slice(0,Math.max(0,Object.keys(sessions).length-LEFT_ON_TABLE_KEEP_SESSIONS))) delete sessions[d];
   const out={version:2,sessions};
@@ -7890,9 +7855,10 @@ var PROFIT_LOCK_STATUS={bySym:new Map(),at:0};
 async function loadProfitLockStatus(){
   const j=await readHelperResponse('/api/profit-lock/status',{timeout:5000}).catch(()=>null);
   if(!j||!j.ok||!Array.isArray(j.positions)) return;
+  if(j.ruleReplay)acceptRuleReplay(j.ruleReplay);
   const bySym=new Map();
   for(const p of j.positions){if(p&&p.sym)bySym.set(normSym(p.sym),p);}
-  PROFIT_LOCK_STATUS={bySym,at:j.asOf||Date.now(),lossBudget:j.lossBudget||null,entryPeaks:Array.isArray(j.entryPeaks)?j.entryPeaks:[],bracket:j.bracket||null};
+  PROFIT_LOCK_STATUS={bySym,at:j.asOf||Date.now(),lossBudget:j.lossBudget||null,entryPeaks:Array.isArray(j.entryPeaks)?j.entryPeaks:[],mlotHistory:j.mlotHistory||null,mlotObservations:Array.isArray(j.mlotObservations)?j.mlotObservations:[],bracket:j.bracket||null};
   const ob=j.openingBasis&&typeof j.openingBasis==='object'?j.openingBasis:{},day=j.openingBasisDay||null,next={};
   for(const [s,v] of Object.entries(ob))if(v&&v.price>0)next[normSym(s)]=Number(v.price);
   const changed=day!==RECONCILED_OPENING.day||JSON.stringify(next)!==JSON.stringify(RECONCILED_OPENING.cost);
@@ -9045,8 +9011,8 @@ function buildLatestSessionPanel(query=''){
     {key:'_score',label:'Model Score',align:'right',bold:true,fmt:v=>modelScoreCell(v),clrFn:()=>'var(--t1)',...dash},
   ];
   const leftClr=v=>v==null?'var(--t3)':v>0?'var(--red)':v===0?'var(--green)':'var(--amber)';
-  const _leftTot={totFmt:v=>v!=null?fmtINR(v):'—',totClrFn:leftClr};
-  const _leftPctTot={totFmt:v=>v!=null?v.toFixed(2)+'%':'—',totClrFn:leftClr};
+  const _leftTot={totFmt:(v,r)=>v!=null?`<span title="Sum of observed stock MLoT; median per stock ${fmtINR(r.mlotMedianRs)}. Largest contributor ${Number(r.largestContributionPct||0).toFixed(1)}% of this total.">${fmtINR(v)}</span>`:'--',totClrFn:leftClr};
+  const _leftPctTot={totFmt:(v,r)=>r.mlotMedianPct!=null?`<span title="Median of ${r.mlotCount} observed stock percentages; zeros included.">Median ${Number(r.mlotMedianPct).toLocaleString('en-IN',INR_2)}%</span><div style="font-size:11px;color:var(--t3);font-weight:400" title="Total MLoT divided by total sale proceeds for observed rows.">Weighted ${v.toFixed(2)}%</div>`:'--',totClrFn:(v,r)=>leftClr(r.mlotMedianPct)};
   const _leftCols=(rsTot,pctTot)=>[
     {key:'leftOnTableRs',label:'Left on Table ₹',align:'right',bold:true,
      fmt:(v,r)=>v!=null
@@ -9069,7 +9035,7 @@ function buildLatestSessionPanel(query=''){
        return `<span title="${escHtml(r.highNote||'')}">${pre}${r.highAt}`
          +(gap?`<span style="font-size:12px;color:var(--t3);margin-left:4px">${r.highAtIsBound?'≤':''}${gap}</span>`:'')+`</span>`;
      },
-     clrFn:()=> 'var(--t2)',totFmt:()=>String.fromCharCode(8212),totClrFn:()=> 'var(--t3)'},
+     clrFn:()=> 'var(--t2)',totFmt:(v,r)=>Number.isFinite(v)?`<span title="Median sale-to-peak delay across ${r.peakCount} timed stock peaks; candle times are approximate; observed zero-MLoT rows included.">Median +${Number.isInteger(v)?v:v.toFixed(1)}m</span>`:'--',totClrFn:()=> 'var(--t2)'},
   ];
   const card=inner=>`<div id="rank-latest-session-card" style="background:var(--bg-card);border:1px solid var(--border);border-radius:10px;overflow:hidden">${inner}</div>`;
   const summary=getLatestBookedSummary();
@@ -9123,18 +9089,14 @@ function buildLatestSessionPanel(query=''){
       qty:_sum('qty'),
       moneySavedRs:shownSummary.savedCount?shownSummary.savedRs:null,
       leftOnTableRs:shownSummary.leftCount?shownSummary.leftRs:null,
-      leftOnTablePct:shownSummary.leftCount?shownSummary.leftPct:null,
+      leftOnTablePct:shownSummary.leftCount?shownSummary.leftPct:null,mlotMedianPct:shownSummary.mlotMedianPct,mlotCount:shownSummary.leftCount,mlotMedianRs:shownSummary.mlotMedianRs,largestContributionPct:shownSummary.largestContributionPct,peakCount:shownSummary.peakCount,
       _brok:_sum('_brok'),_stt:_sum('_stt'),_txn:_sum('_txn'),_gst:_sum('_gst'),_sebi:_sum('_sebi'),_stamp:_sum('_stamp'),_dp:_sum('_dp'),
       charges:_sum('charges'),
       grossPnl:shownSummary.known.length?shownSummary.gross:null,
       netPnl:shownTotal,
       capital:shownSummary.known.length?shownSummary.capital:null,
       netPnlPct:shownSummary.pct,
-      // v1121: the session's AVERAGE gap between the exit and the day's high. Straight mean over the
-      // rows that have one — negatives included, because a negative is the informative case (the
-      // high was already in, so the exit was late rather than early).
-      highGapMin:(()=>{const g=rows.map(r=>r.highGapMin).filter(v=>Number.isFinite(v));
-        return g.length?Math.round(g.reduce((a,b)=>a+b,0)/g.length):null;})()
+      highGapMin:shownSummary.peakMedianMin
     }:null;
     const lossBudget=Date.now()-PROFIT_LOCK_STATUS.at<60000?PROFIT_LOCK_STATUS.lossBudget:null;
     const lossAllowance=lossBudget?.day===latestDate?'<div style="padding:8px 16px;color:var(--t2);font-size:12px">Loss-trim allowance: '+fmtPerfRs(lossBudget.available)+' available | '+fmtPerfRs(lossBudget.reserved)+' reserved | '+(lossBudget.triggerPct>0?'below -'+lossBudget.triggerPct+'%':'cutoff paused')+'; 90% of booked profit; costs included'+(PROFIT_LOCK_STATUS.bracket?' | Base upper gap '+(PROFIT_LOCK_STATUS.bracket.params.upperGapPct??PROFIT_LOCK_STATUS.bracket.params.gapPct)+'%, lower gap '+(PROFIT_LOCK_STATUS.bracket.params.lowerGapPct??PROFIT_LOCK_STATUS.bracket.params.gapPct)+'%, zone '+PROFIT_LOCK_STATUS.bracket.params.zonePct+'% | '+PROFIT_LOCK_STATUS.bracket.learning.finished+'/40 finished trades | '+bracketLearningStatusText():'')+(!lossBudget.known?' | cost basis incomplete':'')+'</div>':'';
@@ -9147,7 +9109,7 @@ function buildLatestSessionPanel(query=''){
         <span style="font-size:12px;font-weight:700;color:var(--t2);text-transform:uppercase;letter-spacing:.1em">Latest Session — ${latestDate} <span style="font-weight:400;color:var(--t3)">(Orders.csv · holdings/same-day buys)</span>${panelFilterTag(allRows,rows,query)}</span>
         <span style="font-size:17px;font-weight:800;color:${clr(latestTotal)};font-family:'DM Mono',monospace">${allRows.length?fmtPerfRs(latestTotal):''} <span style="font-size:12px;color:var(--t3);font-weight:400">${allRows.length?'net of charges':''}</span>${latestUnknownWarning}</span>
       </div>
-      ${lossAllowance}<div style="padding:6px 16px;color:var(--t3);font-size:11px">Observed opportunity after each filled sale on its sale date only; pre-sale and later-day highs excluded. MLOT covers ${shownSummary.leftCount}/${rows.length} stocks; downside avoided covers ${shownSummary.savedCount}/${rows.length}. Separate gross hindsight measures; neither is guaranteed executable profit.</div>${rows.length?`<div class="scroll-x">${latestTbl.getHtml()}</div>`:emptyNote}`);
+      ${lossAllowance}<div style="padding:6px 16px;color:var(--t3);font-size:11px">Observed opportunity after each filled sale on its sale date only; pre-sale and later-day highs excluded. MLOT covers ${shownSummary.leftCount}/${rows.length} stocks; downside avoided covers ${shownSummary.savedCount}/${rows.length}. ${PROFIT_LOCK_STATUS.mlotHistory?.ok?'History: '+PROFIT_LOCK_STATUS.mlotHistory.sessions+' sessions / '+PROFIT_LOCK_STATUS.mlotHistory.fills+' sale fills recorded by helper; review-only.':''} Separate gross hindsight measures; neither is guaranteed executable profit.</div>${rows.length?`<div class="scroll-x">${latestTbl.getHtml()}</div>`:emptyNote}`);
     const render=()=>{if(rows.length)latestTbl.render();};
     return {html,render};
   }
@@ -9187,7 +9149,7 @@ function buildLatestSessionPanel(query=''){
       qty:rows.reduce((n,r)=>n+(Number(r.qty)||0),0),
       moneySavedRs:tbSummary.savedCount?tbSummary.savedRs:null,
       leftOnTableRs:tbSummary.leftCount?tbSummary.leftRs:null,
-      leftOnTablePct:tbSummary.leftCount?tbSummary.leftPct:null,
+      leftOnTablePct:tbSummary.leftCount?tbSummary.leftPct:null,mlotMedianPct:tbSummary.mlotMedianPct,mlotCount:tbSummary.leftCount,mlotMedianRs:tbSummary.mlotMedianRs,largestContributionPct:tbSummary.largestContributionPct,highGapMin:tbSummary.peakMedianMin,peakCount:tbSummary.peakCount,
       charges:rows.reduce((s,r)=>s+(r.charges||0),0),
       grossPnl:tbSummary.known.length?tbSummary.gross:null,
       netPnl:shownTotal,
