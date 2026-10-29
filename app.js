@@ -1,5 +1,5 @@
 const BUILD_TS='2026-10-29 IST'; // release build date (IST)
-const APP_VERSION=1596;
+const APP_VERSION=1597;
 const RADAR_SCORE_VERSION='v1419-recross-batches'; // Eligible on crossing the score floor at any time; selected model's evolving target and movement-based profit protection.
 
 // ── v1358: AN UNCAUGHT ERROR MUST NAME ITSELF ─────────────────────────────────────────────────
@@ -14688,7 +14688,7 @@ function keepFullerTradebookHistory(candidate,sourcePath,lastModified){
   const priorMetaN=priorMeta?.tripsDataLength||priorMeta?.roundTrips||0;
   const nextN=candidate?.tripsData?.length||candidate?.roundTrips||0;
   if((priorN>nextN||priorMetaN>nextN)&&nextN>0){
-    const priorFirst=(prior.tripsData||[]).map(r=>r.buyDate||r.sellDate).filter(Boolean).sort()[0]||priorMeta?.firstDate||'';
+    const priorFirst=(prior?.tripsData||[]).map(r=>r.buyDate||r.sellDate).filter(Boolean).sort()[0]||priorMeta?.firstDate||'';
     const nextFirst=(candidate.tripsData||[]).map(r=>r.buyDate||r.sellDate).filter(Boolean).sort()[0]||'';
     const baselineN=Math.max(priorN,priorMetaN);
     const isPartialExport=nextN<Math.max(10,Math.floor(baselineN*0.8)) || (priorFirst&&nextFirst&&nextFirst>priorFirst);
