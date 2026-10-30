@@ -1,5 +1,5 @@
 const BUILD_TS='2026-10-30 IST'; // release build date (IST)
-const APP_VERSION=1603;
+const APP_VERSION=1604;
 const RADAR_SCORE_VERSION='v1419-recross-batches'; // Eligible on crossing the score floor at any time; selected model's evolving target and movement-based profit protection.
 
 // ── v1358: AN UNCAUGHT ERROR MUST NAME ITSELF ─────────────────────────────────────────────────
@@ -4576,15 +4576,16 @@ function schedulePageLivePaint(checkAt,scoreChanged=true,replan=true){
   if(checkAt)PAGE_LIVE.checkAt=checkAt;
   PAGE_LIVE.scoreDirty=PAGE_LIVE.scoreDirty||scoreChanged;PAGE_LIVE.replan=PAGE_LIVE.replan||replan;
   if(PAGE_LIVE.paint)return;
-  PAGE_LIVE.paint=setTimeout(()=>{
-    PAGE_LIVE.paint=null;const start=performance.now();
-    if(PAGE_LIVE.replan){
-      for(const row of ALL){ROW_ACTION_MEMO.delete(row);if(PAGE_LIVE.scoreDirty)setRadarEvidenceScore(row);}
-      _dualPlanMemo=null;if(ALL.length)applyFilters({preservePage:true});
-    }else{if(ALL.length)scheduleFilterPaint();renderRankingsPanels();}
-    PAGE_LIVE.scoreDirty=false;PAGE_LIVE.replan=false;
-    PAGE_LIVE.metrics.paintMs=performance.now()-start;PAGE_LIVE.awaitingDom=true;
-  },100);
+  PAGE_LIVE.paint=setTimeout(runPageLivePaint,100);
+}
+function runPageLivePaint(){
+  clearTimeout(PAGE_LIVE.paint);PAGE_LIVE.paint=null;const start=performance.now();
+  if(PAGE_LIVE.replan){
+    for(const row of ALL){ROW_ACTION_MEMO.delete(row);if(PAGE_LIVE.scoreDirty)setRadarEvidenceScore(row);}
+    _dualPlanMemo=null;if(ALL.length)applyFilters({preservePage:true});
+  }else{if(ALL.length)scheduleFilterPaint();renderRankingsPanels();}
+  PAGE_LIVE.scoreDirty=false;PAGE_LIVE.replan=false;
+  PAGE_LIVE.metrics.paintMs=performance.now()-start;PAGE_LIVE.awaitingDom=true;
 }
 function queuePageLiveReads(names){
   for(const n of names)PAGE_LIVE.reads.add(n);
@@ -14470,6 +14471,10 @@ function refreshStrategySafety(){
   const states=ALL.map(r=>r.symbol+':'+getRowActionState(r).state).join('|');
   if(states!==refreshStrategySafety.last){refreshStrategySafety.last=states;applyFilters({preservePage:true});}
 }
+function streamRefreshBeat(){
+  streamRefreshBeat.at=Date.now();
+  if(!pageLiveHealthy()){loadBtstPicks();loadProfitLockStatus();loadAutoBuyStatus();}loadKiteMargins();loadKiteGtts();loadFilterOpportunity();syncSellBasketToKite();scheduleKiteBasketSync();try{resetCrossAlertsIfNewDay();checkCrossingAlerts();}catch(e){}
+}
 function startStreamRefresh(){
   // v1512: a background tab's timers are throttled to about once a minute (16 Oct HBLENGINE/SOLARA expired unclaimed).
   // A worker's timer is not, so its 2 s tick drives the claim; the plain interval stays as the fallback.
@@ -14477,14 +14482,14 @@ function startStreamRefresh(){
     startStreamRefresh.nativeEntry=setInterval(()=>syncNativeKiteEntries().catch(()=>{}),2000);
     try{
       const w=new Worker(URL.createObjectURL(new Blob(['setInterval(()=>postMessage(0),2000)'],{type:'text/javascript'})));
-      w.onmessage=()=>{if(document.hidden)syncNativeKiteEntries().catch(()=>{});};
+      w.onmessage=()=>{if(!document.hidden)return;try{hiddenEntryBeat();}catch(e){console.warn('Hidden entry beat',e);}syncNativeKiteEntries().catch(()=>{});};
       startStreamRefresh.nativeWorker=w;
     }catch(e){}
   }
   if(_streamRefreshTimer) return;
   startPageLiveStream();
   if(!startStreamRefresh.entry)startStreamRefresh.entry=setInterval(()=>{if(!pageLiveHealthy())loadEntryTriggers();},2000);
-  if(!startStreamRefresh.btst){startStreamRefresh.btst=setInterval(()=>{if(!pageLiveHealthy()){loadBtstPicks();loadProfitLockStatus();loadAutoBuyStatus();}loadKiteMargins();loadKiteGtts();loadFilterOpportunity();syncSellBasketToKite();scheduleKiteBasketSync();try{resetCrossAlertsIfNewDay();checkCrossingAlerts();}catch(e){}},20000);loadBtstPicks();loadKiteMargins();loadKiteGtts();loadProfitLockStatus();loadAutoBuyStatus();loadFilterOpportunity();syncSellBasketToKite();try{resetCrossAlertsIfNewDay();checkCrossingAlerts();}catch(e){}
+  if(!startStreamRefresh.btst){startStreamRefresh.btst=setInterval(streamRefreshBeat,20000);streamRefreshBeat.at=Date.now();loadBtstPicks();loadKiteMargins();loadKiteGtts();loadProfitLockStatus();loadAutoBuyStatus();loadFilterOpportunity();syncSellBasketToKite();try{resetCrossAlertsIfNewDay();checkCrossingAlerts();}catch(e){}
     try{seedSavedBasketCount();}catch(e){}}
   _streamRefreshUiTimer=setInterval(()=>{try{refreshStrategySafety();renderLiveTapeBar();}catch(e){console.warn('Strategy safety refresh',e);}},1000);
   if(!_streamVisibilityBound){
@@ -15244,10 +15249,21 @@ let _autoBasketTimer = null;
 
 function scheduleAutoSyncBasket(delayMs = 300){
   if(_autoBasketTimer) clearTimeout(_autoBasketTimer);
-  _autoBasketTimer = setTimeout(() => {
-    _autoBasketTimer = null;
-    requestBasketSync({ manual: false }).catch(() => {});
-  }, delayMs);
+  _autoBasketTimer = setTimeout(flushAutoSyncBasket, delayMs);
+}
+function flushAutoSyncBasket(){
+  clearTimeout(_autoBasketTimer);_autoBasketTimer = null;
+  requestBasketSync({ manual: false }).catch(() => {});
+}
+// v1604 (30 Oct, NEWGEN/VENKEYS): in a background tab Chrome throttles page timers, so the 100 ms live paint and the
+// 300 ms basket export after an entry trigger ran 1-45 s late (median ~40 s; triggers expire after 45 s). The worker's
+// 2 s tick is not throttled: while hidden it runs the pending paint and basket export directly, reads entry triggers
+// when the push stream is down, and keeps the 20 s cash/GTT beat on time. A visible tab is unchanged.
+function hiddenEntryBeat(){
+  if(!pageLiveHealthy())loadEntryTriggers();
+  if(PAGE_LIVE.paint)runPageLivePaint();
+  if(_autoBasketTimer)flushAutoSyncBasket();
+  if(startStreamRefresh.btst&&Date.now()-(streamRefreshBeat.at||0)>=20000)streamRefreshBeat();
 }
 
 function requestBasketSync({ manual = false, precomputedOrders = null } = {}){
