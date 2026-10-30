@@ -1,5 +1,5 @@
 const BUILD_TS='2026-10-30 IST'; // release build date (IST)
-const APP_VERSION=1605;
+const APP_VERSION=1606;
 const RADAR_SCORE_VERSION='v1419-recross-batches'; // Eligible on crossing the score floor at any time; selected model's evolving target and movement-based profit protection.
 
 // ── v1358: AN UNCAUGHT ERROR MUST NAME ITSELF ─────────────────────────────────────────────────
@@ -4712,7 +4712,8 @@ function firstScoreBadgeHtml(fc,currentPrice,currentAt=null){
     +(hasPrice?` &middot; ${approx?'~':''}&#8377;${price.toFixed(2)}`:' &middot; price unavailable')
     +(delta!==null?`<span style="color:var(--${delta>0?'green':delta<0?'red':'t3'});white-space:nowrap"> &middot; ${approx?'~':''}${signed(delta,'&#8377;')} (${signed(pct)}%) price move</span>`:hasPrice?' &middot; current price unavailable':'')+'</div>';
 }
-// v1596: capital-independent signal entries with the shared live ratchet; no fixed target/stop basket.
+// v1606 (owner 30 Oct): the replay follows the live rules except cash (Min. Allocation sizing, re-crossing adds, one-bar liquidity
+// skip, trailing OCO on the real cost/qty, 5-session profit-funded trims, Zerodha-matched booking). The bar shows today; since-start in the hover.
 let TRIGGER_PNL_HTML='',RULE_REPLAY=null;
 function acceptRuleReplay(r){if(!r)return;if(RULE_REPLAY?.ok&&!Number.isFinite(r.asOf))return;if(Number.isFinite(RULE_REPLAY?.asOf)&&Number.isFinite(r.asOf)&&r.asOf<RULE_REPLAY.asOf)return;RULE_REPLAY=r;updateTriggerPnl(ALL);}
 function updateTriggerPnl(rows){
@@ -4720,7 +4721,14 @@ function updateTriggerPnl(rows){
   if(!r?.ok)TRIGGER_PNL_HTML='<span style="color:var(--t3)" title="'+escHtml(r?.error||'Waiting for helper signal recording. Earlier unrecorded checks are not invented.')+'">Signal replay: '+(r?.error?'unavailable':'awaiting recorder')+'</span>';
   else{
     const startDay=new Date(r.startedAt+19800000).toISOString().slice(0,10),since=(startDay===getSessionDate()?'':startDay+' ')+new Date(r.startedAt).toLocaleTimeString('en-IN',{timeZone:'Asia/Kolkata',hour:'2-digit',minute:'2-digit',hour12:false});
-    const sign=v=>(v>0?'+':v<0?'-':'')+Math.abs(v).toFixed(2),tone=r.netRs>0?'green':r.netRs<0?'red':'t3';
+    const sign=v=>(v>0?'+':v<0?'-':'')+Math.abs(v).toFixed(2);
+    if(r.today){
+      const t=r.today,tone=t.netRs>0?'green':t.netRs<0?'red':'t3',inr=v=>'Rs '+Math.round(v).toLocaleString('en-IN');
+      const title='Live rules except cash: every live trigger bought at your Min. Allocation ('+inr(r.minAllocRs)+', whole shares), re-crossing adds, one-bar liquidity skip ('+r.skippedLiquidity+' skipped), trailing OCO on the real cost and quantity, profit-funded trims from the last 5 sessions, Zerodha-matched booking with DP. LIMIT exits need a recorded bid at/above the limit; open positions are marked with estimated sale charges. No real orders.\n\nToday: '+t.entries+' entries, '+inr(t.investedRs)+' bought, net '+sign(t.netRs)+' ('+sign(t.netPct)+'%).\nSince '+since+' IST: '+r.entries+' entries ('+r.adds+' adds), '+inr(r.investedRs)+' bought, fees '+inr(r.estimatedFees)+', net '+sign(r.netRs)+' ('+sign(r.netPct)+'%). Recording interruptions: '+(r.recordingInterruptions||0)+'.';
+      TRIGGER_PNL_HTML=`<span style="color:var(--${tone});white-space:nowrap" title="${escHtml(title)}">Signal replay today: &#8377;${sign(t.netRs)} net (${sign(t.netPct)}%)<span style="color:var(--t3)"> &middot; ${t.entries} entries &middot; ${t.closed} exited &middot; ${t.open} open${r.pending?' &middot; '+r.pending+' pending':''}</span></span>`;
+      const el=document.getElementById('trigger-pnl');if(el)el.innerHTML=TRIGGER_PNL_HTML;return;
+    }
+    const tone=r.netRs>0?'green':r.netRs<0?'red':'t3';
     const title='Hypothetical one share per qualifying two-rise entry, ignoring cash. Starts '+since+' IST; earlier checks were not retained. Shared fee-breakeven and 0.26% OCO ratchet, actual tick sizes and profit-funded loss rules; no fixed +/-1.25% profit exit. LIMIT exits require a recorded bid at/above the limit. Net includes estimated liquidation fees for open positions. Recording interruptions: '+(r.recordingInterruptions||0)+'. No real orders.';
     TRIGGER_PNL_HTML=`<span style="color:var(--${tone});white-space:nowrap" title="${escHtml(title)}">Signal replay: &#8377;${sign(r.netRs)} net (${sign(r.netPct)}%)<span style="color:var(--t3)"> &middot; ${r.entries} entries &middot; ${r.closed} exited &middot; ${r.open} open${r.pending?' &middot; '+r.pending+' pending':''}${r.recordingInterruptions?' &middot; '+r.recordingInterruptions+' recording gaps':''} &middot; since ${since}</span></span>`;
   }
