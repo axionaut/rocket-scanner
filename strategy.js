@@ -502,7 +502,11 @@ function bookedSession(session,holdingCosts,tradebook){
   }
 
   // The saturation cap belongs to the Ensemble aggregate, not individual models.
-  function entryScoreCapped(model, score){
+  // v1607 (owner 30 Oct): Cumulative Change buys only fresh crossings: score below floor + 0.5. Replayed under the live
+  // rules on 29/30 Oct triggers it was the only one-change variant better on both days (+0.06% vs +0.02%; -0.21% vs -0.41%).
+  const CUM_ENTRY_BAND = 0.5;
+  function entryScoreCapped(model, score, floor){
+    if (model === 'CUM') return Number.isFinite(score) && Number.isFinite(floor) && score >= floor + CUM_ENTRY_BAND;
     return model === 'ENS' && Number.isFinite(score) && score >= 2.15;
   }
 
@@ -513,6 +517,7 @@ function bookedSession(session,holdingCosts,tradebook){
 
   return {
     entryScoreCapped,
+    CUM_ENTRY_BAND,
     entryGateApplies,
     weightedPosition,
     exitBuyWindows,
