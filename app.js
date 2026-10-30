@@ -1,5 +1,5 @@
 const BUILD_TS='2026-10-30 IST'; // release build date (IST)
-const APP_VERSION=1601;
+const APP_VERSION=1602;
 const RADAR_SCORE_VERSION='v1419-recross-batches'; // Eligible on crossing the score floor at any time; selected model's evolving target and movement-based profit protection.
 
 // ── v1358: AN UNCAUGHT ERROR MUST NAME ITSELF ─────────────────────────────────────────────────
@@ -7867,6 +7867,35 @@ async function loadProfitLockStatus(){
   const changed=day!==RECONCILED_OPENING.day||JSON.stringify(next)!==JSON.stringify(RECONCILED_OPENING.cost);
   RECONCILED_OPENING={day,cost:next};
   if(changed&&typeof renderBooked==='function')try{renderBooked();}catch(e){}
+  const mu=j.mlotHistory?.updatedAt;
+  if(mu&&typeof MLOT_SESSIONS==="object"&&mu!==MLOT_SESSIONS.updatedAt){
+    MLOT_SESSIONS.updatedAt=mu;
+    readHelperResponse('/api/mlot/history',{timeout:5000}).then(r=>{
+      if(!r||!Array.isArray(r.sessions))return;
+      MLOT_SESSIONS.sessions=r.sessions;
+      const el=document.getElementById('mlot-history-wrap');if(el)el.innerHTML=mlotHistoryHtml();
+    }).catch(()=>{MLOT_SESSIONS.updatedAt=null;});
+  }
+}
+// v1602 (owner 30 Oct): the helper's day-by-day MLoT record, shown under Latest Session. Review only.
+var MLOT_SESSIONS={updatedAt:null,sessions:[]};
+function mlotHistoryHtml(){
+  const days=[...(typeof MLOT_SESSIONS==="object"&&MLOT_SESSIONS?.sessions||[])].filter(s=>s&&s.day).sort((a,b)=>b.day.localeCompare(a.day));
+  if(!days.length)return '';
+  const rs=v=>Number.isFinite(v)?'₹'+Math.round(v).toLocaleString('en-IN'):'—';
+  const pc=v=>Number.isFinite(v)?v.toFixed(2)+'%':'—';
+  const mins=v=>Number.isFinite(v)?'+'+Math.round(v)+'m':'—';
+  const sum=k=>days.reduce((n,s)=>n+(Number(s[k])||0),0);
+  const proceeds=sum('proceedsRs'),quickProceeds=days.reduce((n,s)=>n+(Number.isFinite(s.quickWeightedPct)&&s.quickWeightedPct>0?s.quickRs/s.quickWeightedPct*100:0),0);
+  const delays=days.map(s=>s.medianPeakDelayMin).filter(Number.isFinite).sort((a,b)=>a-b);
+  const midDelay=delays.length?(delays.length%2?delays[(delays.length-1)/2]:(delays[delays.length/2-1]+delays[delays.length/2])/2):null;
+  const th=(t,a='right',tip='')=>`<th style="padding:6px 10px;text-align:${a};white-space:nowrap"${tip?` title="${escHtml(tip)}"`:''}>${t}</th>`;
+  const td=(v,c='var(--t2)',a='right')=>`<td style="padding:7px 10px;text-align:${a};white-space:nowrap;color:${c};font-family:'DM Mono',monospace">${v}</td>`;
+  const row=s=>`<tr>${td(s.day,'var(--t1)','left')}${td(s.fills)}${td(s.stocks)}${td(rs(s.totalRs),'var(--red)')}${td(pc(s.medianPct),'var(--red)')}${td(rs(s.quickRs),'var(--red)')}${td(pc(s.quickMedianPct),'var(--red)')}${td(rs(s.savedRs),'var(--green)')}${td(mins(s.medianPeakDelayMin))}</tr>`;
+  const total=`<tr style="border-top:1px solid var(--border);font-weight:700">${td(`Total (${days.length} days)`,'var(--t2)','left')}${td(sum('fills'))}${td(sum('stocks'))}${td(rs(sum('totalRs')),'var(--red)')}${td(proceeds?'Weighted '+pc(sum('totalRs')/proceeds*100):'—','var(--red)')}${td(rs(sum('quickRs')),'var(--red)')}${td(quickProceeds?'Weighted '+pc(sum('quickRs')/quickProceeds*100):'—','var(--red)')}${td(rs(sum('savedRs')),'var(--green)')}${td(midDelay==null?'—':'Median '+mins(midDelay))}</tr>`;
+  return `<div style="margin-top:12px;background:var(--bg-card);border:1px solid var(--border);border-radius:10px;overflow:hidden"><div style="padding:10px 16px 4px;font-size:12px;font-weight:700;color:var(--t2);text-transform:uppercase;letter-spacing:.1em">MLoT history <span style="font-weight:400;color:var(--t3);text-transform:none;letter-spacing:0">helper record, one row per session</span></div>
+    <div style="padding:0 16px 6px;color:var(--t3);font-size:12px">Left on table = highest price after each sale on its sale date. Within 15 min = the part of that rise reached in the first 15 minutes after the sale. Downside avoided = lowest price after the sale. Medians are per stock. Hindsight measures for review only, not executable profit.</div>
+    <div class="scroll-x"><table style="width:100%;border-collapse:collapse;font-size:14px"><thead><tr style="font-size:12px;text-transform:uppercase;color:var(--t3)">${th('Day','left')}${th('Sales')}${th('Stocks')}${th('Left on table ₹')}${th('Median %')}${th('Within 15 min ₹','right','Rise reached in the first 15 minutes after each sale')}${th('Within 15 min %','right','Per-stock median of the 15-minute rise')}${th('Downside avoided ₹')}${th('Median peak delay')}</tr></thead><tbody>${days.map(row).join('')}${total}</tbody></table></div></div>`;
 }
 // 19 Oct: the helper's reconciled weighted cost of lots held at today's open. Zerodha's holdings average is
 // broker-netted (a same-day sell + rebuy keeps the old lot's price), which turned BLUSPRING's +Rs 86 sale into -Rs 360.
@@ -13987,7 +14016,7 @@ function renderRankingsPanels(){
   const latestEl=document.getElementById('rankLatestSession');
   if(latestEl){
     const latest=buildLatestSessionPanel(q);
-    latestEl.innerHTML=latest.html;
+    latestEl.innerHTML=latest.html+`<div id="mlot-history-wrap">${mlotHistoryHtml()}</div>`;
     latest.render();
   }
   const posEl=document.getElementById('rankOpenPositions');
