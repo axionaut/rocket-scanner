@@ -280,9 +280,9 @@ table.main tbody td.recommendation-status{white-space:normal;min-width:140px;max
 .page{display:none}.page.act{display:block}
 
 /* ── Tracker CSS removed (feature was removed) ──*/
-.go-top{position:fixed;bottom:28px;right:28px;width:42px;height:42px;border-radius:50%;background:var(--bg-raised);border:1px solid var(--border-hi);color:var(--t2);font-size:21px;cursor:pointer;display:none;align-items:center;justify-content:center;z-index:998;transition:all .2s;box-shadow:0 4px 16px rgba(0,0,0,.3)}
+.go-top{position:static;flex:0 0 36px;width:36px;height:36px;border-radius:8px;background:var(--bg-raised);border:1px solid var(--border-hi);color:var(--t2);font-size:18px;cursor:pointer;display:flex;visibility:hidden;pointer-events:none;align-items:center;justify-content:center;transition:background .2s,color .2s}
 .go-top:hover{background:var(--fire);color:#fff;border-color:var(--fire);transform:translateY(-2px)}
-.go-top.vis{display:flex}
+.go-top.vis{visibility:visible;pointer-events:auto}
 .breadth-bar{background:var(--bg-card);border:1px solid var(--border);border-radius:10px;padding:14px 20px;margin:14px 0 6px;display:flex;align-items:center;gap:16px;flex-wrap:wrap}
 .breadth-badge{font-size:24px;font-weight:800;display:flex;align-items:center;gap:6px;letter-spacing:-.2px}
 .breadth-meta{font-size:13px;color:var(--t2);line-height:1.7}

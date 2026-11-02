@@ -1,5 +1,5 @@
 const BUILD_TS='2026-11-02 IST'; // release build date (IST)
-const APP_VERSION=1613;
+const APP_VERSION=1614;
 const RADAR_SCORE_VERSION='v1419-recross-batches'; // Eligible on crossing the score floor at any time; selected model's evolving target and movement-based profit protection.
 
 // ── v1358: AN UNCAUGHT ERROR MUST NAME ITSELF ─────────────────────────────────────────────────
@@ -7425,70 +7425,31 @@ function clockMinutes(v){
   const m=String(v||'').match(/(\d{1,2}):(\d{2})/);
   return m?(+m[1])*60+(+m[2]):null;
 }
-// v1595: post-sale observations only, bounded to the sale date. No buy-window or daily-high fallback.
-function exitSaleWindow(sym,sellTime){
-  const stamp=String(sellTime||'').replace('T',' ').slice(0,19),day=stamp.slice(0,10);
-  if(!/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/.test(stamp))return null;
-  const from=Date.parse(stamp+'+05:30'),end=Date.parse(day+'T00:00:00+05:30')+86400000,until=Math.min(Date.now(),end);
-  if(!Number.isFinite(from)||!(until>from))return null;
-  let high=null,low=null,at=null,kind='',duration=0,n=0;
-  const take=(h,t,l=null,k='quote',d=0)=>{if(Number.isFinite(h)&&h>0&&(high==null||h>high)){high=h;at=t;kind=k;duration=d;}if(Number.isFinite(l)&&l>0&&(low==null||l<low))low=l;n++;};
-  // Omit the sale candle: its high/low may precede the fill, even when the fill is at its start.
-  const bars=(rows,d)=>{for(const bar of rows||[])if(bar.t>from&&bar.t+d<=until&&bar.h>0&&bar.l>0&&bar.h>=bar.l)take(bar.h,bar.t,bar.l,'bar',d);};
-  bars(INTRADAY_BARS[normSym(sym)],300000);
-  if(typeof MINUTE_BARS!=='undefined')bars(MINUTE_BARS[normSym(sym)],60000);
-  // Helper-owned complete minute observations survive page closure and source-file retirement.
-  for(const p of PROFIT_LOCK_STATUS.mlotObservations||[])if(p.symbol===normSym(sym)&&p.from===from&&p.highAt>from&&p.highAt<end&&p.through<=until&&p.highAt+60000<=p.through)take(Number(p.high),p.highAt,p.lowAt>from&&p.lowAt<end?Number(p.low):null,'bar',60000);
-  // A verified quote is a timed post-sale observation, including before the first full candle exists.
-  const quotes=[ALL.find(r=>normSym(r.symbol)===normSym(sym)),typeof _universeMap==='undefined'?null:_universeMap.get(normSym(sym))];
-  for(const row of quotes){const quoteAt=Number(row?.priceAt);if(row?.priceSource==='live tick'&&quoteAt>=from+1000&&quoteAt<end&&quoteAt<=until&&Number(row.price)>0)take(Number(row.price),quoteAt,Number(row.price));}
-  // An aggregated entry peak is safe only when that entry itself began strictly after this sale.
-  for(const p of PROFIT_LOCK_STATUS.entryPeaks||[])if(p.sym===normSym(sym)&&p.from>=from+1000&&p.from<until&&p.at>=p.from&&p.at<end&&p.at<=until)take(Number(p.high),p.at,null,'recorded peak');
-  return high==null?null:{high,low,at,kind,duration,observations:n};
-}
-function exitSaleFills(row,day){
-  const sym=normSym(row.sym),stamp=t=>String(t||'').replace('T',' ').slice(0,19);
-  const valid=o=>Number(o.qty)>0&&Number(o.price)>0&&stamp(o.time).slice(0,10)===day&&/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/.test(stamp(o.time));
-  const compatible=rows=>{
-    const q=rows.reduce((n,o)=>n+Number(o.qty),0),v=rows.reduce((n,o)=>n+Number(o.qty)*Number(o.price),0);
-    return rows.length&&Math.abs(q-Number(row.qty))<1e-8&&Math.abs(v/q-Number(row.sellPrice))<=.005001;
-  };
-  const history=(typeof TRADEBOOK_FILLS==='undefined'?[]:TRADEBOOK_FILLS).filter(o=>normSym(o.symbol)===sym&&String(o.type||o.side).toUpperCase()==='SELL'&&valid(o));
-  if(compatible(history))return history.map(o=>({qty:Number(o.qty),price:Number(o.price),time:stamp(o.time)}));
-  const legs=(row.legs?.sells||[]).filter(valid);
-  if(compatible(legs))return legs.map(o=>({qty:Number(o.qty),price:Number(o.price),time:stamp(o.time)}));
-  // An aggregate sell timestamp cannot reconstruct separate fill windows; withhold instead of inventing them.
-  return [];
-}
 function enrichExitPnlRow(row,bookedDate=null){
   const out={...row},qty=Number(row?.qty)||0,buy=Number(row?.buyPrice),sell=Number(row?.sellPrice),current=currentPriceForSymbol(row?.sym);
   out.priceDiff=qty>0&&buy>0&&sell>0?+(sell-buy).toFixed(2):null;
   out.grossPnl=out.priceDiff==null?null:Number.isFinite(Number(row.netPnl))&&Number.isFinite(Number(row.charges))?+(Number(row.netPnl)+Number(row.charges)).toFixed(2):+((sell-buy)*qty).toFixed(2);
   out.currentPrice=current>0?+current.toFixed(2):null;
-  Object.assign(out,{highAt:null,highGapMin:null,highNote:'',postSellHigh:null,postSellLow:null,leftOnTableRs:null,leftOnTablePct:null,moneySavedRs:null,moneySavedPct:null,referenceHighPerFill:false,leftOnTableExact:false});
-  if(!(qty>0&&sell>0)||!bookedDate){out.leftOnTableNote='Timed filled sales are required to measure post-sale opportunity.';return out;}
-  const sym=normSym(row.sym),exits=exitSaleFills(row,bookedDate),parts=[],highs=[];
-  let missed=0,saved=0,proceeds=0,savedProceeds=0,known=0,savedKnown=0,best=null;
-  for(const e of exits){
-    const after=exitSaleWindow(sym,e.time);
-    if(after?.low>0){saved+=Math.max(0,e.price-after.low)*e.qty;savedProceeds+=e.qty*e.price;savedKnown+=e.qty;}
-    if(!after)continue;
-    missed+=Math.max(0,after.high-e.price)*e.qty;proceeds+=e.qty*e.price;known+=e.qty;highs.push(after.high);
-    if(!best||after.high>best.high)best={...after,sellTime:e.time};
-    parts.push(e.qty+' shares sold '+e.time+' at '+e.price.toFixed(2)+': observed same-day post-sale high '+after.high.toFixed(2));
+  Object.assign(out,{highAt:null,highGapMin:null,highNote:'',postSellHigh:null,postSellLow:null,leftOnTableRs:null,leftOnTablePct:null,moneySavedRs:null,moneySavedPct:null,saleProceeds:null,priceProxy:false,referenceHighPerFill:false,leftOnTableExact:false});
+  const note='Observed complete one-minute candles strictly after each actual sale on its sale date. Sale candles and later dates are excluded; re-buys do not truncate the window. Gross hindsight measure, before hypothetical extra charges.';
+  const session=MLOT_SESSIONS?.sessions?.find(s=>s.day===bookedDate);
+  const observed=session?.rows?.find(s=>s.symbol===normSym(row.sym));
+  // A newer Orders export must not borrow a partial or older tradebook's observations.
+  const matched=qty>0&&sell>0&&observed&&Math.abs(observed.qty-qty)<1e-8&&Math.abs(observed.proceeds/qty-sell)<=.005001;
+  const missing=!matched?'Awaiting matching sale fills in the helper record.':observed.mlot==null?'Incomplete post-sale observations.':observed.exchanges.includes('BSE')?'BSE sale; NSE price proxy used.':'';
+  out.leftOnTableNote=out.moneySavedNote=out.referenceHighNote=missing?missing+' '+note:note;
+  out.highNote='Same-day post-sale peak from the shared helper record. Times are one-minute candle starts; delays are approximate.';
+  if(!matched)return out;
+  out.saleProceeds=observed.proceeds;
+  out.leftOnTableRs=observed.mlot;out.leftOnTablePct=observed.pct;
+  out.moneySavedRs=observed.saved;out.moneySavedPct=observed.savedPct;
+  if(observed.mlot!=null){
+    out.priceProxy=observed.exchanges.includes('BSE');
+    out.postSellHigh=observed.high;out.highGapMin=observed.peakDelay;
+    out.referenceHighPerFill=observed.fills>1||out.priceProxy;
+    out.referenceHighLabel=[...new Set(observed.highs)].map(h=>Number(h).toLocaleString('en-IN',INR_2)).join(' / ')+(out.priceProxy?' (NSE proxy)':'');
+    if(observed.highAt!=null)out.highAt=new Date(observed.highAt+19800000).toISOString().slice(11,16)+' (1m bar)';
   }
-  out.moneySavedNote='Gross fall after each filled sale on its sale date only, through the latest observation or day end. Re-buys do not truncate the window. Separate hindsight measure; ambiguous sale-candle lows are omitted.';
-  if(savedKnown>=qty-1e-8){out.moneySavedRs=+saved.toFixed(2);out.moneySavedPct=savedProceeds>0?+(saved/savedProceeds*100).toFixed(2):null;}
-  else out.moneySavedNote='Incomplete post-sale coverage: '+savedKnown+' of '+qty+' sold shares observed. '+out.moneySavedNote;
-  out.referenceHighPerFill=exits.length>1;
-  out.referenceHighLabel=highs.length?[...new Set(highs.map(h=>Number(h).toLocaleString('en-IN',INR_2)))].join(' / '):'Unobserved';
-  out.postSellHigh=best?+best.high.toFixed(2):null;
-  if(best){out.highAt=new Date(best.at+19800000).toISOString().slice(11,16)+(best.kind==='bar'?' ('+best.duration/60000+'m bar)':best.kind==='recorded peak'?' observed':'');out.highGapMin=Math.round((best.at-Date.parse(best.sellTime.replace(' ','T')+'+05:30'))/60000);}
-  out.highNote='Post-sale peak on the sale date only. Candle timestamps are bar starts, so their displayed minute gaps are approximate; recorded peaks show observation times.';
-  out.leftOnTableNote=parts.join('; ')+'. Only observations strictly after each sale on '+bookedDate+' count. No pre-sale or later-date highs; re-buys do not truncate the window. Sale-candle extremes without timed evidence are omitted. Gross hindsight opportunity, before hypothetical extra charges; not guaranteed executable profit.';
-  out.referenceHighNote=out.leftOnTableNote;
-  if(known>=qty-1e-8){out.leftOnTableRs=+missed.toFixed(2);out.leftOnTablePct=proceeds>0?+(missed/proceeds*100).toFixed(2):null;}
-  else out.leftOnTableNote='Incomplete timed-sale/price coverage: '+known+' of '+qty+' sold shares observed. '+out.leftOnTableNote;
   return out;
 }
 
@@ -7504,9 +7465,9 @@ function summarizeExitPnlRows(rows){
   // position swing the headline.
   const leftRows=(rows||[]).filter(r=>r.leftOnTableRs!=null);
   const leftRs=leftRows.reduce((s,r)=>s+r.leftOnTableRs,0);
-  const leftProceeds=leftRows.reduce((s,r)=>s+(Number(r.sellPrice)||0)*(Number(r.qty)||0),0);
+  const leftProceeds=leftRows.reduce((s,r)=>s+(r.saleProceeds??(Number(r.sellPrice)||0)*(Number(r.qty)||0)),0);
   const leftPct=leftProceeds>0?+((leftRs/leftProceeds)*100).toFixed(2):null;
-  const savedRows=(rows||[]).filter(r=>r.moneySavedRs!=null),savedRs=savedRows.reduce((n,r)=>n+r.moneySavedRs,0),savedProceeds=savedRows.reduce((n,r)=>n+(Number(r.sellPrice)||0)*(Number(r.qty)||0),0);
+  const savedRows=(rows||[]).filter(r=>r.moneySavedRs!=null),savedRs=savedRows.reduce((n,r)=>n+r.moneySavedRs,0),savedProceeds=savedRows.reduce((n,r)=>n+(r.saleProceeds??(Number(r.sellPrice)||0)*(Number(r.qty)||0)),0);
   return {savedRs,savedCount:savedRows.length,savedPct:savedProceeds>0?savedRs/savedProceeds*100:null,known,capital,net,gross,charges,pct:capital>0?+(net/capital*100).toFixed(2):null,
           leftRs,leftPct,leftCount:leftRows.length,leftProceeds,mlotMedianPct:mlotMedian(leftRows.map(r=>r.leftOnTablePct)),mlotMedianRs:mlotMedian(leftRows.map(r=>r.leftOnTableRs)),peakMedianMin:mlotMedian(leftRows.map(r=>r.highGapMin)),peakCount:leftRows.filter(r=>Number.isFinite(r.highGapMin)).length,largestContributionPct:leftRs>0?Math.max(...leftRows.map(r=>r.leftOnTableRs))/leftRs*100:0};
 }
@@ -7949,9 +7910,9 @@ async function loadProfitLockStatus(){
   if(mu&&typeof MLOT_SESSIONS==="object"&&mu!==MLOT_SESSIONS.updatedAt){
     MLOT_SESSIONS.updatedAt=mu;
     readHelperResponse('/api/mlot/history',{timeout:5000}).then(r=>{
-      if(!r||!Array.isArray(r.sessions))return;
+      if(!r?.ok||!Array.isArray(r.sessions)){MLOT_SESSIONS.updatedAt=null;return;}
       MLOT_SESSIONS.sessions=r.sessions;
-      const el=document.getElementById('mlot-history-wrap');if(el)el.innerHTML=mlotHistoryHtml();
+      renderRankingsPanels();
     }).catch(()=>{MLOT_SESSIONS.updatedAt=null;});
   }
 }
@@ -7960,20 +7921,20 @@ var MLOT_SESSIONS={updatedAt:null,sessions:[]};
 function mlotHistoryHtml(){
   const days=[...(typeof MLOT_SESSIONS==="object"&&MLOT_SESSIONS?.sessions||[])].filter(s=>s&&s.day).sort((a,b)=>b.day.localeCompare(a.day));
   if(!days.length)return '';
-  const rs=v=>Number.isFinite(v)?'₹'+Math.round(v).toLocaleString('en-IN'):'—';
+  const rs=v=>Number.isFinite(v)?fmtINR(v):'—';
   const pc=v=>Number.isFinite(v)?v.toFixed(2)+'%':'—';
-  const mins=v=>Number.isFinite(v)?'+'+Math.round(v)+'m':'—';
+  const mins=v=>Number.isFinite(v)?'+'+(Number.isInteger(v)?v:v.toFixed(1))+'m':'—';
   const sum=k=>days.reduce((n,s)=>n+(Number(s[k])||0),0);
-  const proceeds=sum('proceedsRs'),quickProceeds=days.reduce((n,s)=>n+(Number.isFinite(s.quickWeightedPct)&&s.quickWeightedPct>0?s.quickRs/s.quickWeightedPct*100:0),0);
+  const proceeds=sum('proceedsRs');
   const delays=days.map(s=>s.medianPeakDelayMin).filter(Number.isFinite).sort((a,b)=>a-b);
   const midDelay=delays.length?(delays.length%2?delays[(delays.length-1)/2]:(delays[delays.length/2-1]+delays[delays.length/2])/2):null;
   const th=(t,a='right',tip='')=>`<th style="padding:6px 10px;text-align:${a};white-space:nowrap"${tip?` title="${escHtml(tip)}"`:''}>${t}</th>`;
   const td=(v,c='var(--t2)',a='right')=>`<td style="padding:7px 10px;text-align:${a};white-space:nowrap;color:${c};font-family:'DM Mono',monospace">${v}</td>`;
-  const row=s=>`<tr>${td(s.day,'var(--t1)','left')}${td(s.fills)}${td(s.stocks)}${td(rs(s.totalRs),'var(--red)')}${td(pc(s.medianPct),'var(--red)')}${td(rs(s.quickRs),'var(--red)')}${td(pc(s.quickMedianPct),'var(--red)')}${td(rs(s.savedRs),'var(--green)')}${td(mins(s.medianPeakDelayMin))}</tr>`;
-  const total=`<tr style="border-top:1px solid var(--border);font-weight:700">${td(`Total (${days.length} days)`,'var(--t2)','left')}${td(sum('fills'))}${td(sum('stocks'))}${td(rs(sum('totalRs')),'var(--red)')}${td(proceeds?'Weighted '+pc(sum('totalRs')/proceeds*100):'—','var(--red)')}${td(rs(sum('quickRs')),'var(--red)')}${td(quickProceeds?'Weighted '+pc(sum('quickRs')/quickProceeds*100):'—','var(--red)')}${td(rs(sum('savedRs')),'var(--green)')}${td(midDelay==null?'—':'Median '+mins(midDelay))}</tr>`;
+  const row=s=>`<tr>${td(s.day+(s.proxyStocks?' (NSE proxy)':''),'var(--t1)','left')}${td(s.fills)}${td(s.stocks+(s.unknownStocks?' ('+s.coveredStocks+' covered)':''))}${td(rs(s.totalRs),'var(--red)')}${td(pc(s.medianPct),'var(--red)')}${td(rs(s.savedRs),'var(--green)')}${td(mins(s.medianPeakDelayMin))}</tr>`;
+  const total=`<tr style="border-top:1px solid var(--border);font-weight:700">${td(`Total (${days.length} days)`,'var(--t2)','left')}${td(sum('fills'))}${td(sum('stocks'))}${td(rs(sum('totalRs')),'var(--red)')}${td(proceeds?'Weighted '+pc(sum('totalRs')/proceeds*100):'—','var(--red)')}${td(rs(sum('savedRs')),'var(--green)')}${td(midDelay==null?'—':'Median '+mins(midDelay))}</tr>`;
   return `<div style="margin-top:12px;background:var(--bg-card);border:1px solid var(--border);border-radius:10px;overflow:hidden"><div style="padding:10px 16px 4px;font-size:12px;font-weight:700;color:var(--t2);text-transform:uppercase;letter-spacing:.1em">MLoT history <span style="font-weight:400;color:var(--t3);text-transform:none;letter-spacing:0">helper record, one row per session</span></div>
-    <div style="padding:0 16px 6px;color:var(--t3);font-size:12px">Left on table = highest price after each sale on its sale date. Within 15 min = the part of that rise reached in the first 15 minutes after the sale. Downside avoided = lowest price after the sale. Medians are per stock. Hindsight measures for review only, not executable profit.</div>
-    <div class="scroll-x"><table style="width:100%;border-collapse:collapse;font-size:14px"><thead><tr style="font-size:12px;text-transform:uppercase;color:var(--t3)">${th('Day','left')}${th('Sales')}${th('Stocks')}${th('Left on table ₹')}${th('Median %')}${th('Within 15 min ₹','right','Rise reached in the first 15 minutes after each sale')}${th('Within 15 min %','right','Per-stock median of the 15-minute rise')}${th('Downside avoided ₹')}${th('Median peak delay')}</tr></thead><tbody>${days.map(row).join('')}${total}</tbody></table></div></div>`;
+    <div style="padding:0 16px 6px;color:var(--t3);font-size:12px">Left on table = rise above each sale price to its later same-day high. Downside avoided = fall below each sale price to its later same-day low. Both tables use the same recorded fills and one-minute observations. BSE sales use NSE prices when BSE prices are unavailable (NSE proxy). Missing observations are excluded from amounts. Medians are per covered stock. Hindsight measures for review only, not executable profit.</div>
+    <div class="scroll-x"><table style="width:100%;border-collapse:collapse;font-size:14px"><thead><tr style="font-size:12px;text-transform:uppercase;color:var(--t3)">${th('Day','left')}${th('Sales')}${th('Stocks')}${th('Left on table ₹')}${th('Median %')}${th('Downside avoided ₹')}${th('Median peak delay')}</tr></thead><tbody>${days.map(row).join('')}${total}</tbody></table></div></div>`;
 }
 // 19 Oct: the helper's reconciled weighted cost of lots held at today's open. Zerodha's holdings average is
 // broker-netted (a same-day sell + rebuy keeps the old lot's price), which turned BLUSPRING's +Rs 86 sale into -Rs 360.
@@ -9120,25 +9081,25 @@ function buildLatestSessionPanel(query=''){
   const _latestAllBySym=new Map(ALL.map(x=>[x.symbol,x]));
   const withRadar=arr=>{arr.forEach(r=>{r._score=btstScoreOf(r.sym);r._rank=btstRankOf(r.sym);});return arr;};
   const radarCols=dash=>[
-    {key:'_score',label:'Model Score',align:'right',bold:true,fmt:v=>modelScoreCell(v),clrFn:()=>'var(--t1)',...dash},
+    {key:'_score',label:'Score',align:'right',bold:true,fmt:v=>modelScoreCell(v),clrFn:()=>'var(--t1)',...dash},
   ];
   const leftClr=v=>v==null?'var(--t3)':v>0?'var(--red)':v===0?'var(--green)':'var(--amber)';
   const _leftTot={totFmt:(v,r)=>v!=null?`<span title="Sum of observed stock MLoT; median per stock ${fmtINR(r.mlotMedianRs)}. Largest contributor ${Number(r.largestContributionPct||0).toFixed(1)}% of this total.">${fmtINR(v)}</span>`:'--',totClrFn:leftClr};
   const _leftPctTot={totFmt:(v,r)=>r.mlotMedianPct!=null?`<span title="Median of ${r.mlotCount} observed stock percentages; zeros included.">Median ${Number(r.mlotMedianPct).toLocaleString('en-IN',INR_2)}%</span><div style="font-size:11px;color:var(--t3);font-weight:400" title="Total MLoT divided by total sale proceeds for observed rows.">Weighted ${v.toFixed(2)}%</div>`:'--',totClrFn:(v,r)=>leftClr(r.mlotMedianPct)};
   const _leftCols=(rsTot,pctTot)=>[
-    {key:'leftOnTableRs',label:'Left on Table ₹',align:'right',bold:true,
+    {key:'leftOnTableRs',label:'MLoT ₹',align:'right',bold:true,
      fmt:(v,r)=>v!=null
        ?`<span title="${escHtml(r.leftOnTableNote||'')}">${fmtINR(v)}</span>`
        :`<span style="color:var(--t3)" title="${escHtml(r.leftOnTableNote||'')}">—</span>`,
      clrFn:leftClr,...rsTot},
-    {key:'leftOnTablePct',label:'Left on Table %',align:'right',
+    {key:'leftOnTablePct',label:'MLoT %',align:'right',
      fmt:(v,r)=>v!=null
        ?`<span title="${escHtml(r.leftOnTableNote||'')}">${v.toFixed(2)}%</span>`
        :`<span style="color:var(--t3)">—</span>`,
      clrFn:leftClr,...pctTot},
-    {key:'moneySavedRs',label:'Downside avoided '+String.fromCharCode(8377),align:'right',bold:true,fmt:(v,r)=>v!=null?'<span title="'+escHtml(r.moneySavedNote||'')+'">'+fmtINR(v)+'</span>':'&#8212;',clrFn:()=> 'var(--green)',totFmt:v=>v!=null?fmtINR(v):'&#8212;',totClrFn:()=> 'var(--green)'},
+    {key:'moneySavedRs',label:'Avoided '+String.fromCharCode(8377),align:'right',bold:true,fmt:(v,r)=>v!=null?'<span title="'+escHtml(r.moneySavedNote||'')+'">'+fmtINR(v)+'</span>':'&#8212;',clrFn:()=> 'var(--green)',totFmt:v=>v!=null?fmtINR(v):'&#8212;',totClrFn:()=> 'var(--green)'},
     // v1119: how long after the exit the day's high arrived. Positive = waiting would have paid.
-    {key:'highGapMin',label:'Peak after sell',align:'right',
+    {key:'highGapMin',label:'Peak time',align:'right',
      fmt:(v,r)=>{
        if(r.highAt==null) return `<span style="color:var(--t3)" title="${escHtml(r.highNote||'')}">—</span>`;
        const gap=v==null?'':(v>0?`+${v}m`:v<0?`${v}m`:'0m');
@@ -9176,12 +9137,12 @@ function buildLatestSessionPanel(query=''){
       {key:'qty',label:'Qty',align:'right',fmt:v=>Number(v).toLocaleString('en-IN'),totFmt:v=>v==null?'--':Number(v).toLocaleString('en-IN'),totClrFn:()=>'var(--t2)'},
       ...radarCols(_dash),
       {key:'buyPrice',label:'Buy ₹',align:'right',fmt:(v,r)=>v!=null?Number(v).toLocaleString('en-IN',INR_2):`<span style="color:var(--amber);font-size:12px" title="Load Holdings.csv to see avg cost">avg cost?</span>`,clrFn:()=>'var(--t2)',..._dash},
-      {key:'capital',label:'Invested ₹',align:'right',fmt:v=>v!=null?fmtINR(v):'—',clrFn:()=>'var(--t1)',totFmt:v=>v!=null?fmtINR(v):'—',totClrFn:()=>'var(--t1)'},
+      {key:'capital',label:'Cost ₹',align:'right',fmt:v=>v!=null?fmtINR(v):'—',clrFn:()=>'var(--t1)',totFmt:v=>v!=null?fmtINR(v):'—',totClrFn:()=>'var(--t1)'},
       {key:'sellPrice',label:'Sell ₹',align:'right',fmt:v=>Number(v).toLocaleString('en-IN',INR_2),clrFn:()=>'var(--t2)',..._dash},
       {key:'priceDiff',label:'Diff ₹',align:'right',fmt:v=>v!=null?fmtSignedINR(v).replace('₹','₹/sh '):'—',clrFn:v=>v!=null?clr(v):'var(--t3)',..._dash},
-      {key:'postSellHigh',label:'Post-sell High ₹',align:'right',fmt:(v,r)=>`<span title="${escHtml(r.referenceHighNote||'No observed post-sell high.')}"${v==null?' style="color:var(--t3)"':''}>${r.referenceHighPerFill?(r.referenceHighLabel||'Per-fill'):v!=null?Number(v).toLocaleString('en-IN',INR_2):'—'}</span>`,clrFn:()=>'var(--t2)',..._dash},
+      {key:'postSellHigh',label:'High ₹',align:'right',fmt:(v,r)=>`<span title="${escHtml(r.referenceHighNote||'No observed post-sell high.')}"${v==null?' style="color:var(--t3)"':''}>${r.referenceHighPerFill?(r.referenceHighLabel||'Per-fill'):v!=null?Number(v).toLocaleString('en-IN',INR_2):'—'}</span>`,clrFn:()=>'var(--t2)',..._dash},
       ..._leftCols(_leftTot,_leftPctTot),
-      {key:'charges',label:'Est. Charges',align:'right',bold:true,
+      {key:'charges',label:'Fees',align:'right',bold:true,
        fmt:(v,r)=>{
          if(v==null) return '—';
          const parts=[['Brokerage',r._brok],['STT/CTT',r._stt],['Txn',r._txn],['GST',r._gst],
@@ -9191,7 +9152,7 @@ function buildLatestSessionPanel(query=''){
          return `<span title="${escHtml(parts||'no component breakdown on this row')}">${fmtNegINR(v)}</span>`;
        },
        clrFn:()=>'var(--red)',..._chTot},
-      {key:'grossPnl',label:'Gross P&L',align:'right',bold:true,fmt:v=>v!=null?fmtPerfRs(v):'—',clrFn:v=>v!=null?clr(v):'var(--t3)',..._signTot},
+      {key:'grossPnl',label:'Gross',align:'right',bold:true,fmt:v=>v!=null?fmtPerfRs(v):'—',clrFn:v=>v!=null?clr(v):'var(--t3)',..._signTot},
       {key:'netPnl',label:'Net P&L',align:'right',bold:true,fmt:(v,r)=>v!=null?fmtPerfRs(v):`<span style="color:var(--amber);font-size:12px">unknown</span>`,clrFn:(v)=>v!=null?clr(v):'var(--amber)',..._signTot},
       {key:'netPnlPct',label:'P&L %',align:'right',bold:true,fmt:v=>v!=null?fmtPct(v):`<span style="color:var(--amber);font-size:12px">unknown</span>`,clrFn:v=>v!=null?clr(v):'var(--amber)',totFmt:v=>v==null?'--':fmtPct(v),totClrFn:v=>v==null?'var(--t3)':v>=0?'var(--green)':'var(--red)'},
     ];
@@ -9246,13 +9207,13 @@ function buildLatestSessionPanel(query=''){
       {key:'qty',label:'Qty',align:'right',fmt:v=>Number(v).toLocaleString('en-IN'),totFmt:v=>v==null?'--':Number(v).toLocaleString('en-IN'),totClrFn:()=>'var(--t2)'},
       ...radarCols(_dash),
       {key:'buyPrice',label:'Buy ₹',align:'right',fmt:v=>`<span style="font-family:'DM Mono',monospace">${Number(v).toLocaleString('en-IN',INR_2)}</span>`,..._dash},
-      {key:'capital',label:'Invested ₹',align:'right',fmt:v=>v!=null?fmtINR(v):'—',clrFn:()=>'var(--t1)',totFmt:v=>v!=null?fmtINR(v):'—',totClrFn:()=>'var(--t1)'},
+      {key:'capital',label:'Cost ₹',align:'right',fmt:v=>v!=null?fmtINR(v):'—',clrFn:()=>'var(--t1)',totFmt:v=>v!=null?fmtINR(v):'—',totClrFn:()=>'var(--t1)'},
       {key:'sellPrice',label:'Sell ₹',align:'right',fmt:v=>`<span style="font-family:'DM Mono',monospace">${Number(v).toLocaleString('en-IN',INR_2)}</span>`,..._dash},
       {key:'priceDiff',label:'Diff ₹',align:'right',fmt:v=>v!=null?fmtSignedINR(v).replace('₹','₹/sh '):'—',clrFn:v=>v!=null?clr(v):'var(--t3)',..._dash},
-      {key:'postSellHigh',label:'Post-sell High ₹',align:'right',fmt:(v,r)=>`<span title="${escHtml(r.referenceHighNote||'No observed post-sell high.')}"${v==null?' style="color:var(--t3)"':''}>${r.referenceHighPerFill?(r.referenceHighLabel||'Per-fill'):v!=null?Number(v).toLocaleString('en-IN',INR_2):'—'}</span>`,clrFn:()=>'var(--t2)',..._dash},
+      {key:'postSellHigh',label:'High ₹',align:'right',fmt:(v,r)=>`<span title="${escHtml(r.referenceHighNote||'No observed post-sell high.')}"${v==null?' style="color:var(--t3)"':''}>${r.referenceHighPerFill?(r.referenceHighLabel||'Per-fill'):v!=null?Number(v).toLocaleString('en-IN',INR_2):'—'}</span>`,clrFn:()=>'var(--t2)',..._dash},
       ..._leftCols(_leftTot,_leftPctTot),
-      {key:'charges',label:'Charges ₹',align:'right',bold:true,fmt:fmtNegINR,clrFn:()=>'var(--red)',totFmt:v=>fmtNegINR(v),totClrFn:()=>'var(--red)'},
-      {key:'grossPnl',label:'Gross P&L',align:'right',bold:true,fmt:v=>v!=null?fmtPerfRs(v):'—',clrFn:v=>v!=null?clr(v):'var(--t3)',..._signTot},
+      {key:'charges',label:'Fees ₹',align:'right',bold:true,fmt:fmtNegINR,clrFn:()=>'var(--red)',totFmt:v=>fmtNegINR(v),totClrFn:()=>'var(--red)'},
+      {key:'grossPnl',label:'Gross',align:'right',bold:true,fmt:v=>v!=null?fmtPerfRs(v):'—',clrFn:v=>v!=null?clr(v):'var(--t3)',..._signTot},
       {key:'netPnl',label:'Net P&L',align:'right',bold:true,fmt:fmtPerfRs,clrFn:clr,..._signTot},
       {key:'netPnlPct',label:'P&L %',align:'right',bold:true,fmt:v=>v!=null?fmtPct(v):'--',clrFn:v=>v!=null?clr(v):'var(--t3)',totFmt:v=>v==null?'--':fmtPct(v),totClrFn:v=>v==null?'var(--t3)':v>=0?'var(--green)':'var(--red)'},
     ];

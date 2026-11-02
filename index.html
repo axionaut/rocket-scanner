@@ -27,6 +27,7 @@
    <div class="tab" onclick="switchTab(3)">💰 Finance <span id="tabCount3" style="font-size:12px"></span></div>
   </div>
   <input type="file" id="brainIn" accept=".json" style="display:none" onchange="importBrain(event)">
+  <button class="go-top" id="goTop" onclick="window.scrollTo({top:0,behavior:'smooth'})" title="Go to top" aria-label="Go to top">▲</button>
   <div style="position:relative;display:flex;align-items:center">
     <button class="btn" id="menuBtn" onclick="toggleHeaderMenu()" title="Brain backup, restore and reset" style="font-size:16px;padding:8px 12px">☰</button>
     <div id="headerMenu" style="display:none;position:absolute;top:100%;left:0;margin-top:8px;background:var(--bg-raised);border:1px solid var(--border-hi);border-radius:10px;padding:8px;z-index:1000;box-shadow:0 8px 32px rgba(0,0,0,.35);min-width:190px">
@@ -103,7 +104,6 @@
  <div class="tp" id="tab2"><div class="meth" id="perfContent"></div></div>
  <div class="tp" id="tab3"><div class="meth" id="finContent"></div></div>
 </div><!-- /dash -->
-<button class="go-top" id="goTop" onclick="window.scrollTo({top:0,behavior:'smooth'})" title="Go to top">▲</button>
 </div><!-- /app -->
 
 <dialog id="radarDetail"><div class="rr-modalhead"><h2 id="radarDetailTitle"></h2><button class="rr-close" onclick="closeRadarDetail()">Close</button></div><div class="rr-modalbody" id="radarDetailBody"></div></dialog>
