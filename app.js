@@ -1,5 +1,5 @@
 const BUILD_TS='2026-11-02 IST'; // release build date (IST)
-const APP_VERSION=1611;
+const APP_VERSION=1612;
 const RADAR_SCORE_VERSION='v1419-recross-batches'; // Eligible on crossing the score floor at any time; selected model's evolving target and movement-based profit protection.
 
 // ── v1358: AN UNCAUGHT ERROR MUST NAME ITSELF ─────────────────────────────────────────────────
@@ -587,6 +587,9 @@ const FS = (() => {
   const LOCAL_STORE = 'brain';
   const LOCAL_KEY = 'rocket_brain';
   const LOCAL_HANDLE_KEY = 'rocket_brain_dir_handle';
+  const FILTER_MIRROR_KEY = 'filter_mirrors_v1';
+  let _filterMirrors = null;
+  let _filterMirrorWrite = Promise.resolve();
   let _saveTimer = null;
   let _brain = {};
   let _brainLoaded = false;
@@ -646,6 +649,11 @@ const FS = (() => {
   async function init(){
     restoreSession();
     await restoreLocalDirectoryHandle();
+    try{
+      const mirrors=await getLocalStore(FILTER_MIRROR_KEY);
+      if(mirrors!==null&&(!mirrors||typeof mirrors!=='object'||Array.isArray(mirrors))) throw new Error('Invalid filter recovery store');
+      _filterMirrors=mirrors||{};
+    }catch(e){console.warn('Saved filter recovery could not be read; filter saving stays locked.',e);}
     updateFolderUI();
     const localBrain=await readLocalBrain();
     if(!isConnected()&&localStorage.getItem(PROVIDER_STORE)==='drive'){
@@ -898,6 +906,50 @@ const FS = (() => {
     });
   }
 
+  // Small, immediate IndexedDB recovery copies keep a full localStorage cache from
+  // interrupting edits or losing them before the debounced full-brain save.
+  function getFilterMirror(key){
+    if(!_filterMirrors) throw new Error('Saved filter recovery is unavailable');
+    const raw=localStorage.getItem(key);
+    const saved=raw===null?null:JSON.parse(raw); // unreadable saved settings must still lock saving
+    if(raw!==null&&(!saved||typeof saved!=='object'||Array.isArray(saved))) throw new Error('Invalid saved filters');
+    const recovery=_filterMirrors[key];
+    if(Object.hasOwn(_filterMirrors,key)&&(!recovery||typeof recovery!=='object'||Array.isArray(recovery)||!Number.isFinite(Number(recovery._updatedAt)))) throw new Error('Invalid saved filter recovery');
+    return recovery&&Number(recovery._updatedAt)>=Number(saved?._updatedAt||0)?recovery:(saved||{});
+  }
+  function persistFilterMirrors(){
+    const snapshot=JSON.parse(JSON.stringify(_filterMirrors));
+    _filterMirrorWrite=_filterMirrorWrite.catch(()=>{}).then(async()=>{
+      if(!await putLocalStore(FILTER_MIRROR_KEY,snapshot)) throw new Error('IndexedDB is unavailable');
+    }).catch(e=>{
+      console.warn('Filter recovery save failed',e);
+      showToast('Filter changes could not be saved. Keep this page open and retry before reloading.',7000,true);
+    });
+  }
+  function setFilterMirror(key,value){
+    if(!_filterMirrors) throw new Error('Saved filter recovery is unavailable');
+    const raw=JSON.stringify(value);
+    try{
+      if(localStorage.getItem(key)!==raw) localStorage.setItem(key,raw);
+      if(Object.hasOwn(_filterMirrors,key)){
+        delete _filterMirrors[key];
+        persistFilterMirrors();
+      }
+    }catch(e){
+      if(JSON.stringify(_filterMirrors[key])!==raw){
+        _filterMirrors[key]=JSON.parse(raw);
+        persistFilterMirrors();
+      }
+    }
+  }
+  function removeFilterMirror(key){
+    localStorage.removeItem(key);
+    if(_filterMirrors&&Object.hasOwn(_filterMirrors,key)){
+      delete _filterMirrors[key];
+      persistFilterMirrors();
+    }
+  }
+
   async function readIndexedBrain(){
     const db=await openLocalDb();
     if(!db) return null;
@@ -1088,6 +1140,8 @@ const FS = (() => {
   }
   function getBrain(){ return _brain; }
   function reset(preserved={}){
+    _filterMirrors={};
+    persistFilterMirrors();
     _brain=pruneBrainForStorage(preserved||{});
     _brainLoaded=true;
     if(_saveTimer) clearTimeout(_saveTimer);
@@ -1099,7 +1153,7 @@ const FS = (() => {
   function hasLocalBrainFolder(){ return !!_localDirHandle; }
   function getActiveLocalDirectoryHandle(){ return _localDirHandle; }
 
-  return {init,connect,needsReconnect,isConfigured,setClientId,isConnected,read,readJsonFile,writeJsonFile,readUploadText,readUploadFile,saveUploadedInputs,write,set,setMultiple,setUserSetting,get,load,loadFromDisk,ensureLoaded,refreshCloudIndex,verifyConnection,getBrain,reset,folderName,hasFolder,setLocalDirectoryHandle,getStoredUploadDirHandle,hasLocalBrainFolder,getActiveLocalDirectoryHandle};
+  return {init,connect,needsReconnect,isConfigured,setClientId,isConnected,read,readJsonFile,writeJsonFile,readUploadText,readUploadFile,saveUploadedInputs,write,set,setMultiple,setUserSetting,get,getFilterMirror,setFilterMirror,removeFilterMirror,load,loadFromDisk,ensureLoaded,refreshCloudIndex,verifyConnection,getBrain,reset,folderName,hasFolder,setLocalDirectoryHandle,getStoredUploadDirHandle,hasLocalBrainFolder,getActiveLocalDirectoryHandle};
 })();
 
 function updateFolderUI(){
@@ -4899,6 +4953,7 @@ function crossingStore(){
   const key=crossingStoreKey();
   if(_crossings&&_crossingsKey===key&&_crossings.day===getSessionDate()) return _crossings;
   if(_crossSaveTimer)flushCrossings();
+  pruneExpiredCrossingCaches();
   let saved=null;
   try{saved=JSON.parse(localStorage.getItem(key)||'null');}catch(e){}
   // A crossing is a fact about TODAY. Yesterday's is discarded rather than replayed, so a page
@@ -4906,6 +4961,19 @@ function crossingStore(){
   _crossings=(saved&&saved.day===getSessionDate())?saved:{day:getSessionDate(),at:{}};
   _crossingsKey=key;
   return _crossings;
+}
+function pruneExpiredCrossingCaches(){
+  // Only old session caches expire. Preserve current-day and unreadable records.
+  try{
+    const today=getSessionDate();
+    for(const key of Object.keys(localStorage)){
+      if(!key.startsWith(CROSS_STORE+':CUM:')) continue;
+      try{
+        const saved=JSON.parse(localStorage.getItem(key));
+        if(/^\d{4}-\d{2}-\d{2}$/.test(saved?.day)&&saved.day<today) localStorage.removeItem(key);
+      }catch(e){}
+    }
+  }catch(e){}
 }
 // Coalesced: the store is serialised at most once per tick, and only after something changed.
 // It used to be stringified and written to localStorage on EVERY row evaluation - measured as 60%
@@ -14169,7 +14237,7 @@ function clearFilters(){
   const dtEl=document.getElementById('fDropThin');if(dtEl)dtEl.value='';
   updateFilterPlaceholders();
   applyFilters();
-  localStorage.removeItem(SCANNER_STORE);
+  FS.removeFilterMirror(SCANNER_STORE);
 }
 function toggleHeaderMenu(){
   const menu=document.getElementById('headerMenu');
@@ -15822,8 +15890,8 @@ function applySavedFiltersForMode(mode){
   const prev={};
   ids.forEach(id=>{const el=document.getElementById(id);if(el)prev[id]=el.value;});
   try{
-    const st=JSON.parse(localStorage.getItem(modeKey(SCANNER_STORE,mode))||'{}');
-    const shared=JSON.parse(localStorage.getItem(SHARED_FILTER_STORE)||'{}');
+    const st=FS.getFilterMirror(modeKey(SCANNER_STORE,mode));
+    const shared=FS.getFilterMirror(SHARED_FILTER_STORE);
     const map={minScore:'fMinScore',dropThin:'fDropThin'};
     Object.entries(map).forEach(([k,id])=>{const el=document.getElementById(id);if(el&&st[k]!=null)el.value=st[k];});
     const capEl=document.getElementById('fCapital');if(capEl&&shared.capital!=null)capEl.value=shared.capital;
@@ -16418,7 +16486,7 @@ function saveFilterState(){
     sortDir:SDIR,
     sortExplicit:SORT_EXPLICIT,
   };
-  localStorage.setItem(modeKey(SCANNER_STORE), JSON.stringify(state));
+  FS.setFilterMirror(modeKey(SCANNER_STORE), {...state,_updatedAt:Date.now()});
   const capEl=document.getElementById('fCapital');
   // The fields hold only manual overrides now; an empty field means "use the computed
   // default" (shown in the placeholder), so we persist the raw value as-is.
@@ -16431,10 +16499,10 @@ function saveFilterState(){
   };
   const sig=JSON.stringify(tradeInputs);
   const changed=sig!==_lastTradeInputSig;
-  const previous=JSON.parse(localStorage.getItem(SHARED_FILTER_STORE)||'{}');
+  const previous=FS.getFilterMirror(SHARED_FILTER_STORE);
   const updatedAt=changed?Date.now():(Number(previous._updatedAt)||Number(FS.get(USER_SETTINGS_META_STORE)?.[TRADE_INPUTS_STORE])||0);
   // A timestamped synchronous mirror survives reload before the debounced brain write finishes.
-  localStorage.setItem(SHARED_FILTER_STORE,JSON.stringify({...tradeInputs,_updatedAt:updatedAt}));
+  FS.setFilterMirror(SHARED_FILTER_STORE,{...tradeInputs,_updatedAt:updatedAt});
   if(changed){
     FS.setUserSetting(TRADE_INPUTS_STORE,tradeInputs);
     _lastTradeInputSig=sig;
@@ -16445,8 +16513,8 @@ function saveFilterState(){
 
 function loadFilterState(){
   try{
-    const state=JSON.parse(localStorage.getItem(modeKey(SCANNER_STORE))||'{}');
-    const shared=JSON.parse(localStorage.getItem(SHARED_FILTER_STORE)||'{}');
+    const state=FS.getFilterMirror(modeKey(SCANNER_STORE));
+    const shared=FS.getFilterMirror(SHARED_FILTER_STORE);
     if(state.search!=null){const el=document.getElementById('fSearch');if(el)el.value=state.search;}
     if(state.minScore!=null){const el=document.getElementById('fMinScore');if(el)el.value=state.minScore==='60'&&state.minScorePolicyVersion!==1?'':state.minScore;}
     if(state.showIneligible!=null){SHOW_INELIGIBLE=!!state.showIneligible;}
