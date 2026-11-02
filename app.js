@@ -1,5 +1,5 @@
-const BUILD_TS='2026-10-30 IST'; // release build date (IST)
-const APP_VERSION=1607;
+const BUILD_TS='2026-11-02 IST'; // release build date (IST)
+const APP_VERSION=1608;
 const RADAR_SCORE_VERSION='v1419-recross-batches'; // Eligible on crossing the score floor at any time; selected model's evolving target and movement-based profit protection.
 
 // ── v1358: AN UNCAUGHT ERROR MUST NAME ITSELF ─────────────────────────────────────────────────
@@ -9143,7 +9143,7 @@ function buildLatestSessionPanel(query=''){
       highGapMin:shownSummary.peakMedianMin
     }:null;
     const lossBudget=Date.now()-PROFIT_LOCK_STATUS.at<60000?PROFIT_LOCK_STATUS.lossBudget:null;
-    const lossAllowance=lossBudget?.day===latestDate?'<div style="padding:8px 16px;color:var(--t2);font-size:12px">Loss-trim allowance: '+fmtPerfRs(lossBudget.available)+' available | '+fmtPerfRs(lossBudget.reserved)+' reserved | '+(lossBudget.triggerPct>0?(lossBudget.triggerPct<0.01?'any holding below cost, worst first':'below -'+lossBudget.triggerPct+'%'):'cutoff paused')+'; 90% of booked profit over the last '+(lossBudget.pool?.days?.length||lossBudget.poolSessions||5)+' sessions'+(lossBudget.pool?' (net '+fmtPerfRs(lossBudget.pool.net)+')':'')+'; costs included'+(PROFIT_LOCK_STATUS.bracket?' | Base upper gap '+(PROFIT_LOCK_STATUS.bracket.params.upperGapPct??PROFIT_LOCK_STATUS.bracket.params.gapPct)+'%, lower gap '+(PROFIT_LOCK_STATUS.bracket.params.lowerGapPct??PROFIT_LOCK_STATUS.bracket.params.gapPct)+'%, zone '+PROFIT_LOCK_STATUS.bracket.params.zonePct+'% | '+PROFIT_LOCK_STATUS.bracket.learning.finished+'/40 finished trades | '+bracketLearningStatusText():'')+(!lossBudget.known?' | cost basis incomplete':'')+'</div>':'';
+    const lossAllowance=lossBudget?.day===latestDate?'<div style="padding:8px 16px;color:var(--t2);font-size:12px">Loss-trim allowance: '+fmtPerfRs(lossBudget.available)+' available | '+fmtPerfRs(lossBudget.reserved)+' reserved | '+(lossBudget.triggerPct>0?(lossBudget.triggerPct<0.01?'the single worst holding below cost':'below -'+lossBudget.triggerPct+'%'):'cutoff paused')+'; 90% of booked profit over the last '+(lossBudget.pool?.days?.length||lossBudget.poolSessions||5)+' sessions'+(lossBudget.pool?' (net '+fmtPerfRs(lossBudget.pool.net)+')':'')+'; costs included'+(PROFIT_LOCK_STATUS.bracket?' | Base upper gap '+(PROFIT_LOCK_STATUS.bracket.params.upperGapPct??PROFIT_LOCK_STATUS.bracket.params.gapPct)+'%, lower gap '+(PROFIT_LOCK_STATUS.bracket.params.lowerGapPct??PROFIT_LOCK_STATUS.bracket.params.gapPct)+'%, zone '+PROFIT_LOCK_STATUS.bracket.params.zonePct+'% | '+PROFIT_LOCK_STATUS.bracket.learning.finished+'/40 finished trades | '+bracketLearningStatusText():'')+(!lossBudget.known?' | cost basis incomplete':'')+'</div>':'';
     const latestTbl=makeSortableTable('rank-latest-session',latestCols,rows,'_sort',-1,null,latestTotals,'sym');
     const emptyNote=String(query||'').trim()
       ?panelNoMatchHtml(query,'booked trade')
