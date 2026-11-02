@@ -1,5 +1,5 @@
 const BUILD_TS='2026-11-02 IST'; // release build date (IST)
-const APP_VERSION=1608;
+const APP_VERSION=1609;
 const RADAR_SCORE_VERSION='v1419-recross-batches'; // Eligible on crossing the score floor at any time; selected model's evolving target and movement-based profit protection.
 
 // ── v1358: AN UNCAUGHT ERROR MUST NAME ITSELF ─────────────────────────────────────────────────
@@ -15156,7 +15156,8 @@ function buildBasketOrders(capital, selList){
     const stoplossPct = (typeof RocketStrategy!=='undefined' ? RocketStrategy.CONFIG.STOP_LOSS_PCT : 1.8);
     const gttPayload = {};
     if(stoplossPct > 0) gttPayload.stoploss = -parseFloat(Number(stoplossPct).toFixed(2));
-    if(targetPct > 0) gttPayload.target = targetPct;
+    // v1609 (owner 2 Nov): no fixed +1.25% target GTT on basket orders. The trailing exit sells; a basket target was
+    // created by Kite on a manual buy and then cancelled by the helper.
 
     orders.push({
       id:Date.now()+(++orderSeq),
@@ -15179,7 +15180,7 @@ function buildBasketOrders(capital, selList){
         triggerPrice:0,disclosedQuantity:0,lastPrice:Number(s.price)||0,
         variety:'regular',
         ...(Object.keys(gttPayload).length > 0 ? {gtt: gttPayload} : {}),
-        tags:[...(targetPct>0?['TGT']:[]), ...(stoplossPct>0?['SL']:[]), 'RS_'+s.basketModel.toUpperCase()]
+        tags:[...(stoplossPct>0?['SL']:[]), 'RS_'+s.basketModel.toUpperCase()]
       },
       _meta:{leg:leg||'base',sym,targetPct,stoplossPct,fullQty:null,model:s.basketModel,modelScores:s.modelScores,
         recommendation:{capturedAt:Date.now(),session:getSessionDate(),score:btstScoreOf(sym),
@@ -15253,6 +15254,7 @@ let _basketWriterInFlight = false;
 let _pendingWaiters = []; // [{ resolve, reject, manual }]
 let _lastSavedBasketSig = '';
 let _lastSavedBasketAt = 0;
+let _lastSavedBasketOrders = null;   // v1609: what Zerodha_Basket_Buy.json holds, so Kite can be re-synced to it
 let _lastBasketSyncError = null;
 let _autoBasketTimer = null;
 
@@ -15272,6 +15274,7 @@ function hiddenEntryBeat(){
   if(!pageLiveHealthy())loadEntryTriggers();
   if(PAGE_LIVE.paint)runPageLivePaint();
   if(_autoBasketTimer)flushAutoSyncBasket();
+  if(_kiteSyncTimer){clearTimeout(_kiteSyncTimer);_kiteSyncTimer=null;sendBasketToKite(true);}   // v1609: Kite copy on time too
   if(startStreamRefresh.btst&&Date.now()-(streamRefreshBeat.at||0)>=20000)streamRefreshBeat();
 }
 
@@ -15369,6 +15372,7 @@ async function _drainBasketQueue(preferredOrders = null){
     _lastSavedBasketSig = targetSig;
     _lastSavedBasketAt = Date.now();
     _lastSavedBasketCount = orders.length;
+    _lastSavedBasketOrders = orders;
     _lastSavedBasketCost = basketOrdersCost(orders);
     _lastBasketSyncError = null;
     scheduleKiteBasketSync();
@@ -15522,7 +15526,9 @@ async function sendBasketToKite(automatic=false){
   let retry=false,noticePlan='';
   try{
     if(APPLY_FILTERS_TIMER){clearTimeout(APPLY_FILTERS_TIMER);APPLY_FILTERS_TIMER=null;applyFilters();}
-    const orders=getDesiredBasketOrders();
+    // v1609: GO lasts 45 s, so the saved basket snapshot (kept by design, v1402) is what Kite must match once GO empties;
+    // before, the minute re-check stopped at an empty GO list and Kite kept an older set than the file.
+    const live=getDesiredBasketOrders(),orders=automatic&&!live.length&&!AUTO_BUY_ENABLED&&_lastSavedBasketOrders?.length?_lastSavedBasketOrders:live;   // manual-basket mode only
     noticePlan=kiteBuyPlanSignature(orders);
     const signature=getCanonicalBasketSignature(orders);
     if(automatic&&(!orders.length||(signature===_kiteSentSignature&&Date.now()-_kiteSentAt<KITE_BASKET_RESYNC_MS))) return;
@@ -15530,7 +15536,7 @@ async function sendBasketToKite(automatic=false){
     if(automatic){
       if(signature!==_lastSavedBasketSig) return;
     }else await requestBasketSync({manual:true,precomputedOrders:orders});
-    if(getCanonicalBasketSignature(orders)!==getCanonicalBasketSignature(getDesiredBasketOrders())) throw new Error('Recommendations changed. Send the current basket again.');
+    if(orders===live&&getCanonicalBasketSignature(orders)!==getCanonicalBasketSignature(getDesiredBasketOrders())) throw new Error('Recommendations changed. Send the current basket again.');
     if(AUTO_BUY_ENABLED&&AUTO_BUY_STATUS.mode==='browser-ioc'){
       if(automatic)await requestBasketSync({manual:true,precomputedOrders:orders});
       _kiteSentSignature=signature;_kiteSentAt=Date.now();
