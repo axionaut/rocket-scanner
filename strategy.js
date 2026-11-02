@@ -75,7 +75,8 @@
   function evaluateUniverse(stock, heldSymbols = new Set()) {
     const reject=reason=>({eligible:false,reason});
     if(!stock?.symbol)return reject('Invalid stock');
-    if(heldSymbols.has(String(stock.symbol).trim().toUpperCase()))return reject('Already held (no additional buys)');
+    // Invariant 2 (owner 5 Oct 2026): Re-crossings can add to held positions when below average cost.
+    if(heldSymbols.has(String(stock.symbol).trim().toUpperCase()))return reject('Already held (re-crossing requires price below average cost)');
     const x=inputs(stock);
     if(!(x.price>=CONFIG.MIN_PRICE&&x.price<=CONFIG.MAX_PRICE))return reject('Price outside Rs 5 to Rs 4,000 range');
     if(!(x.turnover>=CONFIG.MIN_TURNOVER||x.avgVol10>=CONFIG.MIN_AVG_VOLUME))return reject('Liquidity below Rs 5 Cr turnover / 100,000 average shares, or unavailable');

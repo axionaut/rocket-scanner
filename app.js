@@ -1,5 +1,5 @@
 const BUILD_TS='2026-11-02 IST'; // release build date (IST)
-const APP_VERSION=1614;
+const APP_VERSION=1615;
 const RADAR_SCORE_VERSION='v1419-recross-batches'; // Eligible on crossing the score floor at any time; selected model's evolving target and movement-based profit protection.
 
 // ── v1358: AN UNCAUGHT ERROR MUST NAME ITSELF ─────────────────────────────────────────────────
@@ -11169,9 +11169,15 @@ function _planDualBasketUncached(rows,capital){
   // gets its equal share.
   const trigAt=r=>Number(ENTRY_TRIGGERS?.triggered?.[r.symbol]?.at)||Infinity;
   const barRs=r=>Number((typeof btstRanking==='function'?btstRanking():null)?.src?.barTurnover?.[normSym(r.symbol||'')]?.medianRs)||0;
-  const pool=[...(rows||[])].sort((a,b)=>((btstScoreOf(b.symbol)??-Infinity)-(btstScoreOf(a.symbol)??-Infinity))||(trigAt(a)-trigAt(b))||(barRs(b)-barRs(a))||a.symbol.localeCompare(b.symbol));
+  const heldNow=getHeldPositionMap();
+  // v1615 (owner 2 Nov): Accumulation priority - underwater held stocks with a qualifying crossing signal are funded first.
+  const isAccum=r=>{
+    const h=heldNow[r.symbol], px=getBuyPrice(r)||r.price;
+    return !!(h && h.qty > 0 && h.avg > 0 && px > 0 && px < h.avg);
+  };
+  const pool=[...(rows||[])].sort((a,b)=>(isAccum(b)?1:0)-(isAccum(a)?1:0)||((btstScoreOf(b.symbol)??-Infinity)-(btstScoreOf(a.symbol)??-Infinity))||(trigAt(a)-trigAt(b))||(barRs(b)-barRs(a))||a.symbol.localeCompare(b.symbol));
   const unitDebitOf=price=>price+calcZerodhaCharges(price,1,false,false,false);
-  const autoCap=getAutoMaxAllocCap(capital),heldNow=getHeldPositionMap();
+  const autoCap=getAutoMaxAllocCap(capital);
   const eligiblePool=pool.filter(r=>!EXPORT_EXCLUDED.has(r.symbol)&&isStockEligible(r)&&getBuyPrice(r)>0).slice(0,20);
   const batch=new Set(eligiblePool.map(r=>r.symbol));
   let candidatesLeft=eligiblePool.length;
@@ -11322,7 +11328,12 @@ function computeModelAlloc(capital,selList){
   const memoKey=[capital,cap,BOOK_V,INTRADAY_STORE_V,Math.floor(Date.now()/1000),getEffectiveTgtPct(),respectableProfitRs(),RECOMMEND_MIN_SCORE,
     selList.map(r=>[r.symbol,r.price,r.score,r.atr,r.slPct,r.rangePct,r.basketModel,r.medianPath?.target,r.medianPath?.low,r.medianPath?.liveHigh,r.medianPath?.modelRevision,isStockEligible(r)].join(':')).join(',')].join('|');
   if(_allocMemo?.key===memoKey)return _allocMemo.val;
-  const sorted=[...selList].sort((a,b)=>(b.score??-1)-(a.score??-1)||radarRankTieBreak(a,b));
+  const heldNow=getHeldPositionMap();
+  const isAccum=r=>{
+    const h=heldNow[r.symbol], px=getBuyPrice(r)||r.price;
+    return !!(h && h.qty > 0 && h.avg > 0 && px > 0 && px < h.avg);
+  };
+  const sorted=[...selList].sort((a,b)=>(isAccum(b)?1:0)-(isAccum(a)?1:0)||((b.score??-1)-(a.score??-1))||radarRankTieBreak(a,b));
   const result={},funded=[];
   const debit=(price,qty)=>qty>0?price*qty+calcZerodhaCharges(price,qty,false,false,false):0;
   const affordable=(budget,price,maxQty)=>{
