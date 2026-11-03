@@ -1,5 +1,5 @@
-const BUILD_TS='2026-11-02 IST'; // release build date (IST)
-const APP_VERSION=1615;
+const BUILD_TS='2026-11-03 IST'; // release build date (IST)
+const APP_VERSION=1616;
 const RADAR_SCORE_VERSION='v1419-recross-batches'; // Eligible on crossing the score floor at any time; selected model's evolving target and movement-based profit protection.
 
 // ── v1358: AN UNCAUGHT ERROR MUST NAME ITSELF ─────────────────────────────────────────────────
@@ -4766,7 +4766,7 @@ function firstScoreBadgeHtml(fc,currentPrice,currentAt=null){
     +(hasPrice?` &middot; ${approx?'~':''}&#8377;${price.toFixed(2)}`:' &middot; price unavailable')
     +(delta!==null?`<span style="color:var(--${delta>0?'green':delta<0?'red':'t3'});white-space:nowrap"> &middot; ${approx?'~':''}${signed(delta,'&#8377;')} (${signed(pct)}%) price move</span>`:hasPrice?' &middot; current price unavailable':'')+'</div>';
 }
-// v1606 (owner 30 Oct): the replay follows the live rules except cash (Min. Allocation sizing, re-crossing adds, one-bar liquidity
+// v1606 (owner 30 Oct; v1616 3 Nov): the replay follows the live rules except cash (Min. Allocation sizing, re-crossing adds below cost, one-bar liquidity
 // skip, trailing OCO on the real cost/qty, 5-session profit-funded trims, Zerodha-matched booking). The bar shows today; since-start in the hover.
 let TRIGGER_PNL_HTML='',RULE_REPLAY=null;
 function acceptRuleReplay(r){if(!r)return;if(RULE_REPLAY?.ok&&!Number.isFinite(r.asOf))return;if(Number.isFinite(RULE_REPLAY?.asOf)&&Number.isFinite(r.asOf)&&r.asOf<RULE_REPLAY.asOf)return;RULE_REPLAY=r;updateTriggerPnl(ALL);}
@@ -4778,7 +4778,7 @@ function updateTriggerPnl(rows){
     const sign=v=>(v>0?'+':v<0?'-':'')+Math.abs(v).toFixed(2);
     if(r.today){
       const t=r.today,tone=t.netRs>0?'green':t.netRs<0?'red':'t3',inr=v=>'Rs '+Math.round(v).toLocaleString('en-IN');
-      const title='Live rules except cash: every live trigger bought at your Min. Allocation ('+inr(r.minAllocRs)+', whole shares), re-crossing adds, one-bar liquidity skip ('+r.skippedLiquidity+' skipped), trailing OCO on the real cost and quantity, profit-funded trims from the last 5 sessions, Zerodha-matched booking with DP. LIMIT exits need a recorded bid at/above the limit; open positions are marked with estimated sale charges. No real orders.\n\nToday: '+t.entries+' entries, '+inr(t.investedRs)+' bought, net '+sign(t.netRs)+' ('+sign(t.netPct)+'%).\nSince '+since+' IST: '+r.entries+' entries ('+r.adds+' adds), '+inr(r.investedRs)+' bought, fees '+inr(r.estimatedFees)+', net '+sign(r.netRs)+' ('+sign(r.netPct)+'%). Recording interruptions: '+(r.recordingInterruptions||0)+'.';
+      const title='Live rules except cash: every live trigger bought at your Min. Allocation ('+inr(r.minAllocRs)+', whole shares), re-crossing adds (below cost only), one-bar liquidity skip ('+r.skippedLiquidity+' skipped), trailing OCO on the real cost and quantity, profit-funded trims from the last 5 sessions, Zerodha-matched booking with DP. LIMIT exits need a recorded bid at/above the limit; open positions are marked with estimated sale charges. No real orders.\n\nToday: '+t.entries+' entries, '+inr(t.investedRs)+' bought, net '+sign(t.netRs)+' ('+sign(t.netPct)+'%).\nSince '+since+' IST: '+r.entries+' entries ('+r.adds+' adds), '+inr(r.investedRs)+' bought, fees '+inr(r.estimatedFees)+', net '+sign(r.netRs)+' ('+sign(r.netPct)+'%). Recording interruptions: '+(r.recordingInterruptions||0)+'.';
       TRIGGER_PNL_HTML=`<span style="color:var(--${tone});white-space:nowrap" title="${escHtml(title)}">Signal replay today: &#8377;${sign(t.netRs)} net (${sign(t.netPct)}%)<span style="color:var(--t3)"> &middot; ${t.entries} entries &middot; ${t.closed} exited &middot; ${t.open} open${r.pending?' &middot; '+r.pending+' pending':''}</span></span>`;
       const el=document.getElementById('trigger-pnl');if(el)el.innerHTML=TRIGGER_PNL_HTML;return;
     }
