@@ -1,5 +1,5 @@
 const BUILD_TS='2026-11-04 IST'; // release build date (IST)
-const APP_VERSION=1623;
+const APP_VERSION=1624;
 const RADAR_SCORE_VERSION='v1419-recross-batches'; // Eligible on crossing the score floor at any time; selected model's evolving target and movement-based profit protection.
 
 // ── v1358: AN UNCAUGHT ERROR MUST NAME ITSELF ─────────────────────────────────────────────────
@@ -118,7 +118,7 @@ function isCsvLikeFile(file){
 
 function updateModeUI(){
   const brand=document.querySelector('.brand-tag');
-  if(brand){const v=document.getElementById('fModel')?.value;brand.textContent=(v==='CUM'?'Cumulative Change':v==='PATH'?v:'Ensemble')+' Engine';}
+  if(brand){const v=document.getElementById('fModel')?.value;brand.textContent=(v==='STRATGEN'?'StratGen Alpha':v==='CUM'?'Cumulative Change':v==='PATH'?v:'Ensemble')+' Engine';}
   document.querySelectorAll('.currency-lbl').forEach(el=>{el.textContent='₹';});
 }
 let ALL=[],FILT=[],PG=1,PGSZ=100,SCOL='score',SDIR=-1,SORT_EXPLICIT=false;
@@ -3744,7 +3744,9 @@ function modelBadgeHtml(model,note=''){
   if(!model) return '';
   return `<span class="model-badge model-badge-${model}" title="${escHtml('Recommended by the '+MODEL_LABELS[model]+' model.'+(note?' '+note:''))}">${model==='tick'?'T':'M'} ${MODEL_LABELS[model]}</span>`;
 }
-function enabledModelsLabel(){return 'Ensemble engine';
+function enabledModelsLabel(){
+  const m = selectedBtstModel();
+  return m === 'STRATGEN' ? 'StratGen Alpha' : (m === 'CUM' ? 'Cumulative Change' : (m === 'PATH' ? 'PATH' : 'Ensemble engine'));
 }
 function dualScoreCell(row){
   const act=getRowActionState(row);
@@ -4459,8 +4461,8 @@ let _floorPushTimer=null,_floorPushed=null;
 // scale (1.6 = top 1.5%, 2.2 = rank #1), default floor 2.1 (~top 2-3 stocks, as validated). New storage keys so the
 // old PATH probability floor (0-1 scale) is never read as a percentile-scale floor.
 function isRankedModel(m){return m==='PATH';}   // 27 Oct 2026 (owner): STACK removed   // a hoisted function: safe even for callers that run at load
-function floorModel(){const v=document.getElementById('fModel')?.value;return v==='CUM'||isRankedModel(v)?v:'ENS';}
-function scoreFloorStore(model=floorModel()){return model==='CUM'?'rs_cumulative_score_floor':model==='PATH'?'rs_path2_score_floor':SCORE_FLOOR_STORE;}
+function floorModel(){const v=document.getElementById('fModel')?.value;return v==='STRATGEN'?'STRATGEN':(v==='CUM'||isRankedModel(v)?v:'ENS');}
+function scoreFloorStore(model=floorModel()){return model==='STRATGEN'?'rs_stratgen_score_floor':(model==='CUM'?'rs_cumulative_score_floor':model==='PATH'?'rs_path2_score_floor':SCORE_FLOOR_STORE);}
 function initScoreFloorUI(force=false){
   try{
     const el=document.getElementById('fScoreFloor'),model=floorModel();
@@ -4470,7 +4472,7 @@ function initScoreFloorUI(force=false){
     el.value=stored===null?(ranked?'2.1':''):stored;
     el.removeAttribute('min');el.removeAttribute('max');el.placeholder=model==='CUM'?'Set threshold':ranked?'2.1':'1.6';el.step='0.1';
     el.style.width=model==='CUM'?'140px':'90px';
-    const label=document.getElementById('scoreFloorLabel');if(label)label.textContent=model==='CUM'?'Cumulative Floor':(model==='ENS'?'Ensemble':model)+' Floor';
+    const label=document.getElementById('scoreFloorLabel');if(label)label.textContent=model==='STRATGEN'?'StratGen Floor':(model==='CUM'?'Cumulative Floor':(model==='ENS'?'Ensemble':model)+' Floor');
     el.title=model==='CUM'?'VWAP strengthening, in percentage points per minute: change in 100 × (price / session VWAP − 1) between fresh 10-second observations. Widening gap is positive; unchanged gap is zero; narrowing gap is negative. No accumulated points. Enter your own threshold; saved independently.':ranked?model+' only: its own ranking on the Ensemble scale (1.6 = top 1.5%, 2.2 = its #1). Default 2.1 ~ top 2-3 stocks. Saved independently.':'Ensemble only: mapped ensemble score. Default 1.6; no minimum. Saved independently from other models.';
     _scoreFloorSeeded=model;_floorPushed=null;
     updateModeUI();
@@ -5091,7 +5093,7 @@ function btstCrossingState(s){
   // score back inside the band is an ordinary GO.
   const SCORE_CAP=2.15;
   if(r.model==='CUM'&&RocketStrategy.entryScoreCapped(r.model,score,floor)) return {state:'WAIT',reason:`Score +${score.toFixed(2)} is already ${RocketStrategy.CUM_ENTRY_BAND} or more above the +${floor.toFixed(2)} floor: Cumulative Change buys only fresh crossings (below +${(floor+RocketStrategy.CUM_ENTRY_BAND).toFixed(2)}). Buyable again after it falls below the floor and re-crosses.`};
-  if(RocketStrategy.entryScoreCapped(r.model,score,floor)) return {state:'WAIT',reason:`Score +${score.toFixed(2)} is at the maxed-out top (${SCORE_CAP}+): every model ranks it #1, usually mid-spike. These lost money live, so it is skipped; buyable if it settles back inside +${floor.toFixed(2)} to +${SCORE_CAP}.`};
+  if((r.model==='ENS'||r.model==='A')&&RocketStrategy.entryScoreCapped(r.model,score,floor)) return {state:'WAIT',reason:`Score +${score.toFixed(2)} is at the maxed-out top (${SCORE_CAP}+): every model ranks it #1, usually mid-spike. These lost money live, so it is skipped; buyable if it settles back inside +${floor.toFixed(2)} to +${SCORE_CAP}.`};
   // v1538 (owner, 22 Oct): the volume-fade (v1506) and size-bucket (v1517) vetoes are removed. Replayed under the
   // current OCO exit with profit-funded trims (1-21 Oct, Rs3.5L), no veto earned more than either or both in both halves.
   // 28 Oct 2026 (owner): new buys from the 09:15 open for every model (was 09:16; 09:45 before 23 Oct).
