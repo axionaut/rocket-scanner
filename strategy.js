@@ -162,11 +162,12 @@
     const pnlPct = +(((ltp - avgCost) / avgCost) * 100).toFixed(2);
 
     const targetPct = Number(position.targetPct) > 0 ? Number(position.targetPct) : CONFIG.TARGET_PCT;
-    const targetPrice = Number(position.targetPrice) > 0 ? Number(position.targetPrice) : avgCost * (1 + targetPct / 100);
+    const hasTarget = Number(position.targetPrice) > 0;
+    const targetPrice = hasTarget ? Number(position.targetPrice) : avgCost * (1 + targetPct / 100);
     if(position.bracket) {
-      const lower=Number(position.bracketLower)||0,sell=ltp>=targetPrice||(lower>0&&ltp<=lower);
+      const lower=Number(position.bracketLower)||0,sell=(hasTarget&&ltp>=targetPrice)||(lower>0&&ltp<=lower);
       return {shouldExit:sell,action:sell?'SELL':'HOLD',exitType:sell?'BRACKET':'BRACKET_ACTIVE',pnlPct,
-        lockStopPrice:lower||null,reason:sell?'Broker bracket trigger reached; awaiting limit fill.':`Bracket upper ${targetPrice.toFixed(2)}${lower>0?`, lower ${lower.toFixed(2)}`:''}`};
+        lockStopPrice:lower||null,reason:sell?'Broker bracket trigger reached; awaiting limit fill.':lower>0?`Trailing stop ${lower.toFixed(2)}`:hasTarget?`Bracket upper ${targetPrice.toFixed(2)}`:'Awaiting breakeven arming'};
     }
     // v1451: a runner's target GTT was cancelled by the helper, which now trails it; the helper's
     // stop replaces both the target and the local lock computation.

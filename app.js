@@ -1,5 +1,5 @@
-const BUILD_TS='2026-11-03 IST'; // release build date (IST)
-const APP_VERSION=1620;
+const BUILD_TS='2026-11-04 IST'; // release build date (IST)
+const APP_VERSION=1621;
 const RADAR_SCORE_VERSION='v1419-recross-batches'; // Eligible on crossing the score floor at any time; selected model's evolving target and movement-based profit protection.
 
 // ── v1358: AN UNCAUGHT ERROR MUST NAME ITSELF ─────────────────────────────────────────────────
@@ -5415,6 +5415,7 @@ function exitCellHtml(s){
   if(!p||!(p.qty>0))return '<span style="color:var(--t3)">—</span>';
   const be=Number(p.breakeven),sl=Number(p.stopGttTrigger),tgt=Number(p.targetPrice);
   if(sl>0&&tgt>0&&p.targetGttId)return `<div style="font-family:'DM Mono',monospace;font-size:13px;white-space:nowrap" title="Trailing OCO: both legs move up with each new high and never down${be>0?'; breakeven ₹'+be.toFixed(2):''}"><span style="color:var(--red)">SL ₹${sl.toFixed(2)}</span> · <span style="color:var(--green)">TGT ₹${tgt.toFixed(2)}</span></div>`;
+  if(sl>0&&(p.stopGttId||p.stopConfirmed))return `<div style="font-family:'DM Mono',monospace;font-size:13px;white-space:nowrap" title="Dynamic MLoT trailing stop: ratchets with new highs, no upper ceiling${be>0?'; breakeven ₹'+be.toFixed(2):''}"><span style="color:var(--red)">SL ₹${sl.toFixed(2)}</span> <span style="color:var(--t3)">(trailing)</span></div>`;
   if(!(be>0))return '<span style="color:var(--t3)">awaiting cost basis</span>';
   const arm=Math.max(be/(1-0.0026),be+0.10);
   return `<div style="font-family:'DM Mono',monospace;font-size:13px;white-space:nowrap;color:var(--t2)" title="No sell order until price minus 0.26% (at least ₹0.10) clears breakeven ₹${be.toFixed(2)} (charges and DP included)">arms ≥ ₹${arm.toFixed(2)}</div><div style="font-size:12px;color:var(--t3)">breakeven ₹${be.toFixed(2)}</div>`;
