@@ -554,7 +554,32 @@ function bookedSession(session,holdingCosts,tradebook){
     return false;
   }
 
+  function applyDeployedStrategy(dep) {
+    if (!dep || !dep.spec) return;
+    try {
+      const spec = dep.spec || {};
+      if (spec.target_pct && spec.target_pct > 0) CONFIG.TARGET_PCT = spec.target_pct;
+      if (spec.stop_loss_pct !== undefined && spec.stop_loss_pct >= 0) CONFIG.STOP_LOSS_PCT = spec.stop_loss_pct;
+      if (spec.max_holding_days) CONFIG.MAX_HOLDING_DAYS = spec.max_holding_days;
+      CONFIG.ACTIVE_STRATGEN_DEPLOYED = dep;
+      console.log(`[Strategy] Loaded deployed StratGen Champion: "${dep.name}" (Target: ${CONFIG.TARGET_PCT}%, SL: ${CONFIG.STOP_LOSS_PCT}%)`);
+    } catch(e) {}
+  }
+
+  // Node environment auto-read
+  if (typeof module !== 'undefined' && typeof require !== 'undefined') {
+    try {
+      const fs = require('fs');
+      const p = require('path');
+      const depPath = p.join(__dirname, 'deployed_strategy.json');
+      if (fs.existsSync(depPath)) {
+        applyDeployedStrategy(JSON.parse(fs.readFileSync(depPath, 'utf8')));
+      }
+    } catch(e) {}
+  }
+
   return {
+    applyDeployedStrategy,
     entryScoreCapped,
     CUM_ENTRY_BAND,
     entryGateApplies,

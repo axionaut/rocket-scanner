@@ -4846,7 +4846,7 @@ function btstScoreAOf(sym){
   if(r.scoresA.size){const v=r.scoresA.get(normSym(sym));return Number.isFinite(v)?v:null;}
   return r.model==='A'?btstScoreOf(sym):null;
 }
-const BTST_MODEL_NAMES={ENS:'Ensemble',PATH:'PATH',CUM:'Cumulative Change',A:'Original'};
+const BTST_MODEL_NAMES={ENS:'Ensemble',PATH:'PATH',CUM:'Cumulative Change',STRATGEN:'StratGen Alpha',A:'Original'};
 function btstModelName(m){return BTST_MODEL_NAMES[m]||m||'Original';}
 // Model switch (index.html #fModel). The helper stores the choice and passes it to every engine run;
 // the other model keeps scoring as a shadow for the day-end review. Applies from the next run.
@@ -4856,7 +4856,7 @@ function btstModelName(m){return BTST_MODEL_NAMES[m]||m||'Original';}
 // localStorage now paints the owner's last known choice synchronously; the helper still wins on reply.
 const MODEL_STORE='rocket-btst-model-v1';
 // 21 Oct 2026 (owner): Peak removed completely; Ensemble is the only model (the Model dropdown is gone).
-const SELECTABLE_MODELS=['ENS','PATH','CUM'];
+const SELECTABLE_MODELS=['ENS','PATH','CUM','STRATGEN'];
 function savedModelChoice(){
   try{const v=localStorage.getItem(MODEL_STORE);return SELECTABLE_MODELS.includes(v)?v:null;}catch(e){return null;}
 }
@@ -4866,13 +4866,44 @@ function rememberModelChoice(m){
 let _modelSeeded=false;
 let _modelChoiceEpoch=0;
 let _modelSwitchPending=false;
+function syncStratGenDeployedState(){
+  try{
+    const fromHelper = (typeof readHelperResponse==='function') ? readHelperResponse('/api/inputs/file?name=deployed_strategy.json',{timeout:4000}).catch(()=>null) : Promise.resolve(null);
+    const fromStatic = fetch('deployed_strategy.json?_=' + Date.now(), {cache: 'no-store'}).then(r => r.ok ? r.json() : null).catch(() => null);
+    Promise.all([fromHelper, fromStatic]).then(([d1, d2]) => {
+      const d = d1 || d2;
+      const el = document.getElementById('fModel');
+      let opt = document.getElementById('optStratGen');
+      if(d && d.name){
+        if(!opt && el){
+          opt = document.createElement('option');
+          opt.value = 'STRATGEN';
+          opt.id = 'optStratGen';
+          el.appendChild(opt);
+        }
+        if(opt) opt.textContent = '🚀 StratGen: ' + d.name;
+        window.__deployedStratGen = d;
+        if(typeof strategy !== 'undefined' && strategy.applyDeployedStrategy) strategy.applyDeployedStrategy(d);
+      } else {
+        if(opt) opt.remove();
+        window.__deployedStratGen = null;
+      }
+    }).catch(()=>{});
+  }catch(e){}
+}
 function initModelUI(){
+
   try{
     if(_modelSeeded) return;
     _modelSeeded=true;
     const el=document.getElementById('fModel');
     if(el) el.value=savedModelChoice()||'ENS';
     initScoreFloorUI(true);   // the floor box follows the model just restored
+    syncStratGenDeployedState();
+    if (!window._stratgenPollActive) {
+      window._stratgenPollActive = true;
+      setInterval(syncStratGenDeployedState, 5000);
+    }
     const epoch=_modelChoiceEpoch;
     readHelperResponse('/api/btst/model',{timeout:6000}).then(d=>{
       if(epoch!==_modelChoiceEpoch)return;
