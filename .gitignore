@@ -9,6 +9,7 @@
 !strategy.js
 !finance.js
 !styles.css
+!stratgen-tab.js
 !deployed_strategy.json
 # Helper, research, extension and operating notes stay local.
 browser-extension/

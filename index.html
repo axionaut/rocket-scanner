@@ -25,6 +25,7 @@
    <div class="tab" onclick="switchTab(1)">🔬 Methodology <span id="tabCount1" style="font-size:12px;opacity:.7"></span></div>
    <div class="tab" onclick="switchTab(2)">📈 Performance</div>
    <div class="tab" onclick="switchTab(3)">💰 Finance <span id="tabCount3" style="font-size:12px"></span></div>
+   <div class="tab" onclick="switchTab(4)" style="color:#00e5a3;font-weight:700">⚡ StratGen <span id="tabCount4" style="font-size:11px;padding:2px 6px;border-radius:4px;background:rgba(0,229,163,0.15);color:#00e5a3">Lab</span></div>
   </div>
   <input type="file" id="brainIn" accept=".json" style="display:none" onchange="importBrain(event)">
   <button class="go-top" id="goTop" onclick="window.scrollTo({top:0,behavior:'smooth'})" title="Go to top" aria-label="Go to top">▲</button>
@@ -102,6 +103,7 @@
  <div class="tp" id="tab1"><div class="meth" id="methContent"></div></div>
  <div class="tp" id="tab2"><div class="meth" id="perfContent"></div></div>
  <div class="tp" id="tab3"><div class="meth" id="finContent"></div></div>
+ <div class="tp" id="tab4"><div class="meth" id="stratgenContent"></div></div>
 </div><!-- /dash -->
 </div><!-- /app -->
 
@@ -129,7 +131,7 @@
     script.dataset.cacheKey = cacheKey;
     // The Finance tab loads after app.js; each is independent, so one failing never stops the app.
     script.onload = function() {
-      ['finance.js'].forEach(function (f) {
+      ['finance.js', 'stratgen-tab.js'].forEach(function (f) {
         var s = document.createElement('script'); s.async = false; s.src = f + '?cb=' + cacheKey;
         s.onerror = function () { console.error('Failed to load ' + f); };
         document.head.appendChild(s);

@@ -1,5 +1,5 @@
 const BUILD_TS='2026-11-04 15:35 IST'; // release build date (IST)
-const APP_VERSION=1625;
+const APP_VERSION=1626;
 const RADAR_SCORE_VERSION='v1419-recross-batches'; // Eligible on crossing the score floor at any time; selected model's evolving target and movement-based profit protection.
 
 // ── v1358: AN UNCAUGHT ERROR MUST NAME ITSELF ─────────────────────────────────────────────────
@@ -15697,6 +15697,7 @@ function switchTab(n){
   // Performance analytics are intentionally deferred so tab switching paints immediately.
   if(n===2){if(PERF_DIRTY||!PERF_RENDERED)schedulePerformanceRender();}
   if(n===3&&window.RocketFinance) window.RocketFinance.render();
+  if(n===4&&window.RocketStratGen) window.RocketStratGen.render();
   // v1101: a hidden grid has clientWidth 0, so balancing on the tab it lives in is the only moment
   // the column count can actually be computed. rAF lets the tab paint first.
   requestAnimationFrame(balanceGrids);

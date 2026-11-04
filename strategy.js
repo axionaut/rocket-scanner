@@ -145,34 +145,36 @@
       case 'turnover': return x.turnover;
       case 'rvol': case 'relvol': return x.rvol ?? stock.rvol ?? stock.relAt ?? 1.0;
       case 'vwap': return x.vwap || x.price;
-      case 'rsi': return Number(stock.rsi ?? stock.rsi14 ?? 50);
-      case 'macd': return Number(stock.macd ?? 0);
-      case 'macd_sig': case 'macd_signal': return Number(stock.macd_sig ?? stock.macdSig ?? 0);
-      case 'macd_hist': return Number(stock.macd_hist ?? stock.macdHist ?? 0);
-      case 'stoch_k': return Number(stock.stoch_k ?? stock.stochK ?? 50);
-      case 'stoch_d': return Number(stock.stoch_d ?? stock.stochD ?? 50);
-      case 'ema9': return Number(stock.ema9 ?? x.price);
-      case 'ema20': return Number(stock.ema20 ?? x.price);
-      case 'ema50': return Number(stock.ema50 ?? x.price);
-      case 'ema200': return Number(stock.ema200 ?? x.price);
-      case 'ema50_1d': return Number(stock.ema50_1d ?? stock.ema50 ?? x.price);
-      case 'ema200_1d': return Number(stock.ema200_1d ?? stock.ema200 ?? (x.open > 0 ? x.open * 0.98 : x.price));
-      case 'aroon_up_1d': return Number(stock.aroon_up_1d ?? stock.aroonUp ?? 70);
-      case 'pivot_p': return Number(stock.pivot_p ?? stock.pp ?? x.open ?? x.price);
-      case 'pivot_r1': return Number(stock.pivot_r1 ?? stock.r1 ?? ((x.open || x.price) * 1.02));
-      case 'pivot_r2': return Number(stock.pivot_r2 ?? stock.r2 ?? ((x.open || x.price) * 1.04));
-      case 'pivot_s1': return Number(stock.pivot_s1 ?? stock.s1 ?? ((x.open || x.price) * 0.98));
-      case 'keltner_lower': return Number(stock.keltner_lower ?? ((x.vwap || x.price) * 0.985));
-      case 'keltner_upper': return Number(stock.keltner_upper ?? ((x.vwap || x.price) * 1.015));
-      case 'donchian_lower': return Number(stock.donchian_lower ?? (x.open ? Math.min(x.open, x.price) : x.price));
-      case 'donchian_upper': return Number(stock.donchian_upper ?? x.high ?? x.price);
-      case 'bb_lower': return Number(stock.bb_lower ?? ((x.vwap || x.price) * 0.98));
-      case 'bb_upper': return Number(stock.bb_upper ?? ((x.vwap || x.price) * 1.02));
+      case 'rsi': return stock.rsi !== undefined ? Number(stock.rsi) : (stock.rsi14 !== undefined ? Number(stock.rsi14) : null);
+      case 'macd': return stock.macd !== undefined ? Number(stock.macd) : null;
+      case 'macd_sig': case 'macd_signal': return stock.macd_sig !== undefined ? Number(stock.macd_sig) : (stock.macdSig !== undefined ? Number(stock.macdSig) : null);
+      case 'macd_hist': return stock.macd_hist !== undefined ? Number(stock.macd_hist) : (stock.macdHist !== undefined ? Number(stock.macdHist) : null);
+      case 'stoch_k': return stock.stoch_k !== undefined ? Number(stock.stoch_k) : (stock.stochK !== undefined ? Number(stock.stochK) : null);
+      case 'stoch_d': return stock.stoch_d !== undefined ? Number(stock.stoch_d) : (stock.stochD !== undefined ? Number(stock.stochD) : null);
+      case 'ema9': return stock.ema9 !== undefined ? Number(stock.ema9) : null;
+      case 'ema20': return stock.ema20 !== undefined ? Number(stock.ema20) : null;
+      case 'ema50': return stock.ema50 !== undefined ? Number(stock.ema50) : null;
+      case 'ema200': return stock.ema200 !== undefined ? Number(stock.ema200) : null;
+      case 'ema50_1d': return stock.ema50_1d !== undefined ? Number(stock.ema50_1d) : (stock.ema50 !== undefined ? Number(stock.ema50) : null);
+      case 'ema200_1d': return stock.ema200_1d !== undefined ? Number(stock.ema200_1d) : (stock.ema200 !== undefined ? Number(stock.ema200) : null);
+      case 'aroon_up_1d': return stock.aroon_up_1d !== undefined ? Number(stock.aroon_up_1d) : (stock.aroonUp !== undefined ? Number(stock.aroonUp) : null);
+      case 'pivot_p': return stock.pivot_p !== undefined ? Number(stock.pivot_p) : (stock.pp !== undefined ? Number(stock.pp) : null);
+      case 'pivot_r1': return stock.pivot_r1 !== undefined ? Number(stock.pivot_r1) : (stock.r1 !== undefined ? Number(stock.r1) : null);
+      case 'pivot_r2': return stock.pivot_r2 !== undefined ? Number(stock.pivot_r2) : (stock.r2 !== undefined ? Number(stock.r2) : null);
+      case 'pivot_s1': return stock.pivot_s1 !== undefined ? Number(stock.pivot_s1) : (stock.s1 !== undefined ? Number(stock.s1) : null);
+      case 'keltner_lower': return stock.keltner_lower !== undefined ? Number(stock.keltner_lower) : null;
+      case 'keltner_upper': return stock.keltner_upper !== undefined ? Number(stock.keltner_upper) : null;
+      case 'donchian_lower': return stock.donchian_lower !== undefined ? Number(stock.donchian_lower) : null;
+      case 'donchian_upper': return stock.donchian_upper !== undefined ? Number(stock.donchian_upper) : null;
+      case 'bb_lower': return stock.bb_lower !== undefined ? Number(stock.bb_lower) : null;
+      case 'bb_upper': return stock.bb_upper !== undefined ? Number(stock.bb_upper) : null;
       default:
         if (k.startsWith('pattern_')) {
           const pat = k.replace('pattern_', '').replace(/_/g, ' ');
-          const s = String(stock.setup || '').toLowerCase();
-          return (s.includes(pat.slice(0, 5)) || s.includes('reversal') || s.includes('ignition') || s.includes('breakout')) ? 1 : 0;
+          if (stock[k] !== undefined) return stock[k] ? 1 : 0;
+          if (stock.pattern) return String(stock.pattern).toLowerCase().includes(pat) ? 1 : 0;
+          if (Array.isArray(stock.patterns)) return stock.patterns.some(p => String(p).toLowerCase().includes(pat)) ? 1 : 0;
+          return 0;
         }
         if (stock[key] !== undefined && Number.isFinite(Number(stock[key]))) return Number(stock[key]);
         return null;
@@ -652,6 +654,9 @@ function bookedSession(session,holdingCosts,tradebook){
   function applyDeployedStrategy(dep) {
     if (!dep) {
       CONFIG.ACTIVE_STRATGEN_DEPLOYED = null;
+      CONFIG.TARGET_PCT = 1.25;
+      CONFIG.STOP_LOSS_PCT = 0;
+      CONFIG.MAX_HOLDING_DAYS = 2;
       return;
     }
     try {
