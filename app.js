@@ -1,5 +1,5 @@
 const BUILD_TS='2026-11-04 IST'; // release build date (IST)
-const APP_VERSION=1621;
+const APP_VERSION=1622;
 const RADAR_SCORE_VERSION='v1419-recross-batches'; // Eligible on crossing the score floor at any time; selected model's evolving target and movement-based profit protection.
 
 // ── v1358: AN UNCAUGHT ERROR MUST NAME ITSELF ─────────────────────────────────────────────────
@@ -5413,8 +5413,7 @@ function crossCellHtml(s){
 function exitCellHtml(s){
   const p=PROFIT_LOCK_STATUS.bySym.get(normSym(s.symbol));
   if(!p||!(p.qty>0))return '<span style="color:var(--t3)">—</span>';
-  const be=Number(p.breakeven),sl=Number(p.stopGttTrigger),tgt=Number(p.targetPrice);
-  if(sl>0&&tgt>0&&p.targetGttId)return `<div style="font-family:'DM Mono',monospace;font-size:13px;white-space:nowrap" title="Trailing OCO: both legs move up with each new high and never down${be>0?'; breakeven ₹'+be.toFixed(2):''}"><span style="color:var(--red)">SL ₹${sl.toFixed(2)}</span> · <span style="color:var(--green)">TGT ₹${tgt.toFixed(2)}</span></div>`;
+  const be=Number(p.breakeven),sl=Number(p.stopGttTrigger);
   if(sl>0&&(p.stopGttId||p.stopConfirmed))return `<div style="font-family:'DM Mono',monospace;font-size:13px;white-space:nowrap" title="Dynamic MLoT trailing stop: ratchets with new highs, no upper ceiling${be>0?'; breakeven ₹'+be.toFixed(2):''}"><span style="color:var(--red)">SL ₹${sl.toFixed(2)}</span> <span style="color:var(--t3)">(trailing)</span></div>`;
   if(!(be>0))return '<span style="color:var(--t3)">awaiting cost basis</span>';
   const arm=Math.max(be/(1-0.0026),be+0.10);
@@ -7844,6 +7843,14 @@ function getGoalAllocationPlan(){
 // larger of Rs 5,000 and Capital/TOP_K", but this function kept returning the whole capital, so the
 // Max Allocation KPI read "full capital" and three sizing consumers sized at full capital. This is
 // the same expression the basket planner applies as `autoCap` - not a new number.
+function getLiveMlotQuantiles(){
+  const b=PROFIT_LOCK_STATUS?.bracket;
+  if(b?.params?.mlot&&Number.isFinite(b.params.mlot.p50))return b.params.mlot;
+  for(const pos of (PROFIT_LOCK_STATUS?.bySym?.values()||[])){
+    if(pos?.bracketParams?.mlot&&Number.isFinite(pos.bracketParams.mlot.p50))return pos.bracketParams.mlot;
+  }
+  return null;
+}
 function getAutoMaxAllocCap(capital=getEffectiveCapital()){
   const cap=Number(capital);
   if(!(cap>0)) return 0;
@@ -7855,7 +7862,8 @@ function getDefaultMaxAlloc(){return getAutoMaxAllocCap();}
 // owner's own goal: the goal's daily rupee need divided by his entries per day. Not a chosen number -
 // the same per-trade figure v1299 sizes allocations with. Read by every target, so memoized briefly.
 function goalAllocationExplanation(){
-  return `Eligible stocks share cash equally, within your saved Min Allocation and Max % Capital limits. Your Rs ${Math.round(getMinAlloc()).toLocaleString('en-IN')} minimum rounds down to whole shares that fit including buy charges; it never rounds up past a cap. The charge-based Rs ${RocketStrategy.CONFIG.MIN_ALLOCATION_RS.toLocaleString('en-IN')} minimum still applies; adds need one share. When cash is short, the higher score is funded first, then the earlier entry trigger, then the more liquid stock.`;
+  const econ=RocketStrategy.breakevenTurnover(false,getLiveMlotQuantiles());
+  return `Eligible stocks share cash equally, within your saved Min % Capital. Each position is sized to reach your minimum allocation and clear the dynamic whole-share MLoT breakeven turnover (currently ₹${econ.toLocaleString('en-IN')}); adds need one share. When cash is short, the higher score is funded first, then the earlier entry trigger, then the more liquid stock.`;
 }
 
 // v1424: an empty Capital field means Kite's live allocatable cash (equity `net`, the "Available"
@@ -8087,21 +8095,24 @@ let _maxAllocMemo=null;
 // 19 Oct (owner): the minimum is charge-based (strategy.js minOrderRs); an add to a held stock carries no new DP fee.
 // v1603 (owner 30 Oct): Min Allocation replaces All-in up to. A new position needs at least the typed amount (never
 // below the charge-based Rs 5,900); empty = the charge-based minimum. Adds still need one share.
-function getMinAlloc(held=false){
-  if(held)return RocketStrategy.minOrderRs(true);
-  const v=parseFloat(document.getElementById('fMinAlloc')?.value);
-  return Math.max(RocketStrategy.CONFIG.MIN_ALLOCATION_RS,Number.isFinite(v)&&v>0?v:0);
+function getMinAllocPct(){
+  const v=parseFloat(document.getElementById('fMinAllocPct')?.value);
+  return Number.isFinite(v)&&v>0&&v<=100?v:10;
+}
+function getMinAlloc(held=false,mlot=null){
+  if(held)return RocketStrategy.breakevenTurnover(true,mlot||getLiveMlotQuantiles());
+  const cap=getEffectiveCapital();
+  const pct=getMinAllocPct();
+  const targetRs=(cap>0&&pct>0)?cap*pct/100:0;
+  const econ=RocketStrategy.breakevenTurnover(false,mlot||getLiveMlotQuantiles());
+  return Math.max(econ,targetRs);
 }
 function getMaxAllocPct(){
-  const v=parseFloat(document.getElementById('fMaxPct')?.value);
-  return Number.isFinite(v)&&v>0&&v<100?v:100;
+  return 100;
 }
-// Per-stock rupee cap; 0 = no cap. Never below the Rs 5,000 minimum.
+// Per-stock rupee cap; 0 = no cap. Sizing is governed by Min % Capital and 1-bar turnover liquidity.
 function getTypedMaxAlloc(capital=getEffectiveCapital()){
-  const pct=getMaxAllocPct(),cap=Number(capital);
-  if(pct>=100||!(cap>0)) return 0;
-  const v=Math.max(cap*pct/100,getMinAlloc());
-  return v>=cap?0:v;
+  return 0;
 }
 function getEffectiveMaxAlloc(){
   const v=getTypedMaxAlloc();
@@ -8203,12 +8214,19 @@ function updateFilterPlaceholders(){
       capEl.title=`Empty = Kite available cash ${f(kiteCash)}, refreshed every 20 s (as of ${new Date(KITE_MARGINS.at).toLocaleTimeString('en-IN',{hour12:false})}).\n= opening balance ${f(a.opening_balance)} + intraday pay-in ${f(a.intraday_payin)} − debits ${f(u.debits)} − payout ${f(u.payout)}\n(debits = today's delivery buys ${f(u.delivery)} − sale credit ${f(u.holding_sales)} + charges/other)\nType a value to override.`;
     } else { const d=getDefaultCapital(); if(d>0){ capEl.placeholder=String(Math.round(d)); capEl.title=`Empty = your computed capital ₹${Math.round(d).toLocaleString('en-IN')} (holdings + open positions); Kite cash unavailable. Type a value to override.`; } }
   }
-  const maxEl=document.getElementById('fMaxPct');
-  if(maxEl){ const m=getTypedMaxAlloc(); maxEl.title='Per-stock cap = the larger of capital x this % and your Min Allocation. Now: '+(m>0?`Rs ${Math.round(m).toLocaleString('en-IN')} per stock`:'no cap (one stock may take all capital)')+'. Empty = 100%.'; }
+  const minPctEl=document.getElementById('fMinAllocPct');
+  if(minPctEl){
+    const cap=getEffectiveCapital();
+    const econ=RocketStrategy.breakevenTurnover(false,getLiveMlotQuantiles());
+    const econPct=cap>0?Math.ceil(econ/cap*100):0;
+    minPctEl.placeholder='10';
+    minPctEl.title=`Minimum % of capital per position (empty = 10%). Sizing dynamically ensures every stock clears its dynamic MLoT breakeven turnover (currently ₹${econ.toLocaleString('en-IN')}${econPct>0?` ≈ ${econPct}%`:''}) in whole shares.`;
+    showTradeInputMode(minPctEl);
+  }
   const riskEl=document.getElementById('fRiskPerTrade');
   const tgtEl=document.getElementById('fTgtOverride');
   if(tgtEl){ let d=0; try{d=getDefaultTgtPct();}catch(e){} tgtEl.placeholder=d>0?d.toFixed(1):'auto'; tgtEl.title='Empty keeps this as a harvest-based planning reference only; it never changes allocation. It does not set automatic candidate or held-position targets. Type a value to explicitly override those targets; clear it to restore planning-only Auto.'; }
-  showTradeInputMode(capEl,kiteCash!=null?'Kite':'Auto');showTradeInputMode(maxEl);
+  showTradeInputMode(capEl,kiteCash!=null?'Kite':'Auto');showTradeInputMode(minPctEl);
   if(riskEl?.closest('.fg')) riskEl.closest('.fg').style.display='none'; // retained saved value; no risk gate in tick sizing
   showTradeInputMode(tgtEl,'Planning');
 }
@@ -15851,7 +15869,7 @@ function compactRankingRows(rows){
   }));
 }
 function applySavedFiltersForMode(mode){
-  const ids=['fSearch','fMinScore','fDropThin','fCapital','fMinAlloc','fMaxPct','fRiskPerTrade'];
+  const ids=['fSearch','fMinScore','fDropThin','fCapital','fMinAllocPct','fRiskPerTrade'];
   const prev={};
   ids.forEach(id=>{const el=document.getElementById(id);if(el)prev[id]=el.value;});
   try{
@@ -15860,8 +15878,7 @@ function applySavedFiltersForMode(mode){
     const map={minScore:'fMinScore',dropThin:'fDropThin'};
     Object.entries(map).forEach(([k,id])=>{const el=document.getElementById(id);if(el&&st[k]!=null)el.value=st[k];});
     const capEl=document.getElementById('fCapital');if(capEl&&shared.capital!=null)capEl.value=shared.capital;
-    const minEl=document.getElementById('fMinAlloc');if(minEl&&shared.minAlloc!=null)minEl.value=shared.minAlloc;
-    const pctEl=document.getElementById('fMaxPct');if(pctEl&&shared.maxPct!=null)pctEl.value=shared.maxPct;
+    const minPctEl=document.getElementById('fMinAllocPct');if(minPctEl&&(shared.minAllocPct!=null||shared.minAlloc!=null))minPctEl.value=shared.minAllocPct??(Number(shared.minAlloc)<=100?shared.minAlloc:'10');
     const rkEl=document.getElementById('fRiskPerTrade');if(rkEl&&shared.riskPerTrade!=null)rkEl.value=shared.riskPerTrade;
   }catch(e){
     // v1358: this was bare. loadFilterState() already reports unreadable saved filters and locks
@@ -16457,8 +16474,7 @@ function saveFilterState(){
   // default" (shown in the placeholder), so we persist the raw value as-is.
   const tradeInputs={
     capital:capEl?.value||'',
-    minAlloc:document.getElementById('fMinAlloc')?.value||'',
-    maxPct:document.getElementById('fMaxPct')?.value||'',
+    minAllocPct:document.getElementById('fMinAllocPct')?.value||'',
     tgtOverride:document.getElementById('fTgtOverride')?.value||'',
     riskPerTrade:document.getElementById('fRiskPerTrade')?.value||''
   };
@@ -16494,15 +16510,14 @@ function loadFilterState(){
     const localNewer=Number(shared._updatedAt)>brainAt;
     const pick=(k)=>localNewer&&shared[k]!=null?shared[k]
       :(ti&&ti[k]!=null)?ti[k]:(shared[k]!=null?shared[k]:state[k]);
-    const sharedCapital=pick('capital'), sharedMinAlloc=pick('minAlloc'), sharedMaxPct=pick('maxPct'), sharedTgt=pick('tgtOverride');
+    const sharedCapital=pick('capital'), sharedMinAllocPct=pick('minAllocPct')??(Number(pick('minAlloc'))<=100?pick('minAlloc'):null), sharedTgt=pick('tgtOverride');
     const sharedRisk=pick('riskPerTrade');
     if(sharedCapital!=null){const el=document.getElementById('fCapital');if(el)el.value=sharedCapital;}
-    if(sharedMinAlloc!=null){const el=document.getElementById('fMinAlloc');if(el)el.value=sharedMinAlloc;}
-    if(sharedMaxPct!=null){const el=document.getElementById('fMaxPct');if(el)el.value=sharedMaxPct;}
+    if(sharedMinAllocPct!=null){const el=document.getElementById('fMinAllocPct');if(el)el.value=sharedMinAllocPct;}
     if(sharedTgt!=null){const el=document.getElementById('fTgtOverride');if(el)el.value=sharedTgt;}
     if(sharedRisk!=null){const el=document.getElementById('fRiskPerTrade');if(el)el.value=sharedRisk;}
     // Prime the change-gate so the first save after load doesn't needlessly rewrite the brain.
-    _lastTradeInputSig=JSON.stringify({capital:sharedCapital??'',minAlloc:sharedMinAlloc??'',maxPct:sharedMaxPct??'',tgtOverride:sharedTgt??'',riskPerTrade:sharedRisk??''});
+    _lastTradeInputSig=JSON.stringify({capital:sharedCapital??'',minAllocPct:sharedMinAllocPct??'',tgtOverride:sharedTgt??'',riskPerTrade:sharedRisk??''});
     if(localNewer){
       FS.setUserSetting(TRADE_INPUTS_STORE,JSON.parse(_lastTradeInputSig));
       saveBrainInBackground();

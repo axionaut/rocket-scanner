@@ -39,38 +39,57 @@
     PROFIT_LOCK_TRAIL_DROP_PCT: 0.5  // Exit if price drops 0.5% from peak (min 10 paise)
   };
 
-  // 19 Oct (owner): the minimum order comes from charges and the fixed +1.25% start, not a flat Rs 5,000.
-  // A new position must net at least half its gross target gain after round-trip CNC charges, incl. the
-  // once-per-stock-per-day DP fee. An add to a held stock shares that sale's DP fee, so only the
-  // proportional charges apply and any whole share qualifies.
-  function minOrderRs(held) {
-    // 28 Oct 2026 (owner, v1586): size from the exit. A new position must be large enough that the one DP fee is at most
-    // 0.26% (Zerodha's minimum GTT gap) of it: Rs 15.34 / 0.26% = Rs 5,900. Skip a crossing rather than buy it thin.
-    // An add to a held stock shares that day's DP fee, so one whole share qualifies.
-    return held ? 0 : Math.ceil(calcZerodhaChargesSplit(1, 1, true, false, false).dp / 0.0026);
-    const v = 1e6, t = CONFIG.TARGET_PCT / 100;
-    const pct = (sumChargeParts(calcZerodhaChargesSplit(v, 1, false, false, true)) + sumChargeParts(calcZerodhaChargesSplit(v, 1, true, false, true))) / v;
-    const dp = held ? 0 : calcZerodhaChargesSplit(1, 1, true, false, false).dp;
-    return t / 2 > pct ? Math.ceil(dp / (t / 2 - pct)) : Infinity;
+  // v1622 (owner 4 Nov 2026): Size from dynamic MLoT breakeven turnover & share count.
+  // The minimum profit booked is the dynamic MLoT trail distance (max(0.26%, p50 - p25)).
+  // Required turnover is the exact volume at which this dynamic profit covers round-trip charges + the Rs 15.34 DP fee.
+  // The minimum order for any stock is the whole shares reaching that turnover. Hardcoded Rs 5,900 removed.
+  function dynamicTrailGapPct(mlot) {
+    const p25 = Number.isFinite(mlot?.p25) ? mlot.p25 : 0.35;
+    const p50 = Number.isFinite(mlot?.p50) ? mlot.p50 : 1.09;
+    return Math.max(0.26, +((p50 - p25) || 0).toFixed(2));
+  }
+
+  function breakevenTurnover(held = false, mlot = null) {
+    if (held) return 0;
+    const gapPct = dynamicTrailGapPct(mlot);
+    const v = 1e6;
+    const buyParts = calcZerodhaChargesSplit(v, 1, false, false, true);
+    const sellParts = calcZerodhaChargesSplit(v * (1 + gapPct / 100), 1, true, false, true);
+    const propPct = (sumChargeParts(buyParts) + sumChargeParts(sellParts)) / v;
+    const margin = (gapPct / 100) - propPct;
+    const dp = calcZerodhaChargesSplit(1, 1, true, false, false).dp || 15.34;
+    return margin > 0.0001 ? Math.ceil(dp / margin) : Math.ceil(dp / 0.0026);
+  }
+
+  function minSharesForStock(price, held = false, mlot = null) {
+    if (!(price > 0) || !Number.isFinite(price)) return 0;
+    if (held) return 1;
+    const t = breakevenTurnover(false, mlot);
+    return Math.max(1, Math.ceil(t / price));
+  }
+
+  function minOrderRs(held = false, mlot = null) {
+    return breakevenTurnover(held, mlot);
   }
   CONFIG.MIN_ALLOCATION_RS = minOrderRs(false);
 
-  // Whole shares must fit the allocation INCLUDING buy charges. The typed
-  // minimum is rounded down to an attainable whole-share amount; the separate
-  // charge-based economic minimum remains a hard floor.
-  function quantityWithinBudget(budget,price,unitDebit){
-    if(!(budget>0)||!Number.isFinite(budget)||!(price>0)||!Number.isFinite(price))return 0;
-    const unit=unitDebit??price+sumChargeParts(calcZerodhaChargesSplit(price,1,false,false,false));
-    if(!(unit>=price)||!Number.isFinite(unit))return 0;
-    let qty=Math.floor(budget/unit+1e-10);
-    while(qty>0&&qty*unit>budget+1e-7)qty--;
+  // Whole shares must fit the allocation INCLUDING buy charges.
+  function quantityWithinBudget(budget, price, unitDebit) {
+    if (!(budget > 0) || !Number.isFinite(budget) || !(price > 0) || !Number.isFinite(price)) return 0;
+    const unit = unitDebit ?? price + sumChargeParts(calcZerodhaChargesSplit(price, 1, false, false, false));
+    if (!(unit >= price) || !Number.isFinite(unit)) return 0;
+    let qty = Math.floor(budget / unit + 1e-10);
+    while (qty > 0 && qty * unit > budget + 1e-7) qty--;
     return qty;
   }
-  function minimumAllocationRs(price,requested,held=false,unitDebit){
-    if(!(price>0)||!Number.isFinite(price))return Infinity;
-    if(held)return Math.max(price,minOrderRs(true));
-    const economic=minOrderRs(false),target=Math.max(economic,Number(requested)>0?Number(requested):0);
-    return Math.max(economic,quantityWithinBudget(target,price,unitDebit)*price);
+
+  function minimumAllocationRs(price, requested, held = false, unitDebit = null, mlot = null) {
+    if (!(price > 0) || !Number.isFinite(price)) return Infinity;
+    if (held) return price;
+    const minShares = minSharesForStock(price, false, mlot);
+    const economic = minShares * price;
+    const reqShares = quantityWithinBudget(requested, price, unitDebit);
+    return Math.max(economic, reqShares * price);
   }
 
   /**
@@ -544,6 +563,9 @@ function bookedSession(session,holdingCosts,tradebook){
     bookedSession,
     calcZerodhaChargesSplit,
     minOrderRs,
+    breakevenTurnover,
+    minSharesForStock,
+    dynamicTrailGapPct,
     quantityWithinBudget,
     minimumAllocationRs,
     CONFIG,
