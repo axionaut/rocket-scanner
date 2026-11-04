@@ -1,5 +1,5 @@
 const BUILD_TS='2026-11-03 IST'; // release build date (IST)
-const APP_VERSION=1617;
+const APP_VERSION=1618;
 const RADAR_SCORE_VERSION='v1419-recross-batches'; // Eligible on crossing the score floor at any time; selected model's evolving target and movement-based profit protection.
 
 // ── v1358: AN UNCAUGHT ERROR MUST NAME ITSELF ─────────────────────────────────────────────────
@@ -7854,7 +7854,7 @@ function getDefaultMaxAlloc(){return getAutoMaxAllocCap();}
 // owner's own goal: the goal's daily rupee need divided by his entries per day. Not a chosen number -
 // the same per-trade figure v1299 sizes allocations with. Read by every target, so memoized briefly.
 function goalAllocationExplanation(){
-  return `Eligible stocks share cash equally, within your saved Min Allocation and Max % Capital limits. A new position needs at least Rs ${Math.round(getMinAlloc()).toLocaleString('en-IN')} (your Min Allocation; never below Rs ${RocketStrategy.CONFIG.MIN_ALLOCATION_RS.toLocaleString('en-IN')}, where the Rs 15.34 DP fee is 0.26% of it); adds need one share. When cash is short, the higher score is funded first, then the earlier entry trigger, then the more liquid stock.`;
+  return `Eligible stocks share cash equally, within your saved Min Allocation and Max % Capital limits. Your Rs ${Math.round(getMinAlloc()).toLocaleString('en-IN')} minimum rounds down to whole shares that fit including buy charges; it never rounds up past a cap. The charge-based Rs ${RocketStrategy.CONFIG.MIN_ALLOCATION_RS.toLocaleString('en-IN')} minimum still applies; adds need one share. When cash is short, the higher score is funded first, then the earlier entry trigger, then the more liquid stock.`;
 }
 
 // v1424: an empty Capital field means Kite's live allocatable cash (equity `net`, the "Available"
@@ -11221,26 +11221,18 @@ function _planDualBasketUncached(rows,capital){
     const share=scoreWeighted?weightBudget(r):Math.min(remaining/slots,autoCap);
     let budget=Math.min(remaining,maxAlloc>0?Math.min(share,maxAlloc):share,liquidityCap);
     // Adds to a held stock share its DP fee: one share is the minimum (19 Oct).
-    const rowMin=heldNow[r.symbol]?Math.max(getMinAlloc(true),price):minRequired;
-    const rowMinTxt=heldNow[r.symbol]?'one-share add':minTxt;
+    const rowMin=RocketStrategy.minimumAllocationRs(price,minRequired,!!(heldNow[r.symbol]?.qty>0),unitDebitOf(price));
+    const rowMinTxt=heldNow[r.symbol]?'one-share add':'whole-share '+minTxt+' allocation';
     let qty=0;
     if(!reason){
       candidatesLeft--;
       // Buy-side charges are linear for CNC. Reserve both notional and charges.
-      qty=Math.floor(budget/unitDebitOf(price));
-      if(qty*price<rowMin){
-        // Smallest quantity reaching Min Alloc. Buy charges ride on top of the minimum (v1472: the
-        // budget is often exactly Min Alloc, which made the minimum unreachable); cash, the
-        // market-impact cap and the other slots' minimums still bind.
-        const minQty=Math.ceil(rowMin/price);
-        const minDebit=minQty*price+calcZerodhaCharges(price,minQty,false,false,false);
-        if(minDebit<=liquidityCap&&minDebit<=remaining&&minDebit<=remaining-Math.max(0,slots-1)*minRequired*1.005){qty=minQty;budget=minDebit;}
-      }
+      qty=RocketStrategy.quantityWithinBudget(budget,price,unitDebitOf(price));
     }
     const cost=qty*price,charges=qty>0?calcZerodhaCharges(price,qty,false,false,false):0,debit=cost+charges;
-    if(!reason&&(!(qty>0)||!(cost>=rowMin)||debit>budget)){
+    if(!reason&&(!(qty>0)||cost+1e-7<rowMin||debit>budget+1e-7)){
       // 27 Oct 2026: name the amount needed and each limit, so the binding one is visible.
-      const needQty=Math.max(1,Math.ceil(rowMin/price)),need=needQty*price+calcZerodhaCharges(price,needQty,false,false,false);
+      const needQty=Math.max(1,Math.ceil(rowMin/price-1e-10)),need=needQty*price+calcZerodhaCharges(price,needQty,false,false,false);
       const inr=v=>'₹'+Math.round(v).toLocaleString('en-IN');
       reason=liquidityCap<rowMin?`Market-impact cap below the ${rowMinTxt} minimum`:`Cannot fund ${needQty===1?'one share':needQty+' shares'} (${inr(need)} incl. buy charges): cash left ${inr(remaining)}, per-stock cap ${inr(maxAlloc>0?Math.min(share,maxAlloc):share)}, market-impact cap ${Number.isFinite(liquidityCap)?inr(liquidityCap):'none'}`;
     }

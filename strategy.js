@@ -55,6 +55,24 @@
   }
   CONFIG.MIN_ALLOCATION_RS = minOrderRs(false);
 
+  // Whole shares must fit the allocation INCLUDING buy charges. The typed
+  // minimum is rounded down to an attainable whole-share amount; the separate
+  // charge-based economic minimum remains a hard floor.
+  function quantityWithinBudget(budget,price,unitDebit){
+    if(!(budget>0)||!Number.isFinite(budget)||!(price>0)||!Number.isFinite(price))return 0;
+    const unit=unitDebit??price+sumChargeParts(calcZerodhaChargesSplit(price,1,false,false,false));
+    if(!(unit>=price)||!Number.isFinite(unit))return 0;
+    let qty=Math.floor(budget/unit+1e-10);
+    while(qty>0&&qty*unit>budget+1e-7)qty--;
+    return qty;
+  }
+  function minimumAllocationRs(price,requested,held=false,unitDebit){
+    if(!(price>0)||!Number.isFinite(price))return Infinity;
+    if(held)return Math.max(price,minOrderRs(true));
+    const economic=minOrderRs(false),target=Math.max(economic,Number(requested)>0?Number(requested):0);
+    return Math.max(economic,quantityWithinBudget(target,price,unitDebit)*price);
+  }
+
   /**
    * Tier 1: Filter raw universe down to liquid, clean momentum candidates
    * @param {Array} stocks - List of stock objects from Kite universe
@@ -525,6 +543,8 @@ function bookedSession(session,holdingCosts,tradebook){
     bookedSession,
     calcZerodhaChargesSplit,
     minOrderRs,
+    quantityWithinBudget,
+    minimumAllocationRs,
     CONFIG,
     inputs,
     evaluateUniverse,
