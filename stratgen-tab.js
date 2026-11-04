@@ -2,7 +2,7 @@
 (function () {
   'use strict';
   const API='http://127.0.0.1:8787/api/stratgen';
-  let mounted=false,checking=false,lastState='',nativeApi=null,viewReady=false,viewLoading=false;
+  let mounted=false,checking=false,lastState='',nativeApi=null,viewReady=false,viewLoading=false,lastJobId=null,lastJobState=null;
   const $=id=>document.getElementById(id);
   function render(){
     const container=$('stratgenContent');if(!container)return;
@@ -75,6 +75,8 @@
     if(checking)return;checking=true;
     try{
       const s=await request('/status');
+      if(s.job?.state==='COMPLETE'&&(s.job.id!==lastJobId||lastJobState!=='COMPLETE'))nativeApi?.loadLeaderboard?.();
+      lastJobId=s.job?.id||null;lastJobState=s.job?.state||null;
       const state=s.state==='READY'&&s.job?.state==='RUNNING'?'BUSY':s.state;
       const badge=$('tabCount4');
       if(badge){badge.textContent=state;badge.style.color=s.ok&&state!=='STALLED'?'#00e5a3':'#ff7043';badge.title=s.lastError||s.deploymentBlock||'';}
