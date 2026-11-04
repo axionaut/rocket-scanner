@@ -15,7 +15,7 @@
         <button class="btn" id="sgClear">Clear active strategy</button>
         <details id="sgLogBox" hidden><summary>StratGen logs</summary><pre id="sgLogText"></pre></details>
       </div><div id="sgFailure" class="sg-failure" hidden></div>
-      <iframe id="sgOriginalUI" title="StratGen Rankings, Discovery and Indicator Suite" src="${API}/ui" sandbox="allow-scripts allow-same-origin allow-modals allow-downloads" allow="clipboard-write" referrerpolicy="no-referrer"></iframe>`;
+      <iframe id="sgOriginalUI" scrolling="no" title="StratGen Rankings, Discovery and Indicator Suite" src="${API}/ui" sandbox="allow-scripts allow-same-origin allow-modals allow-downloads" allow="clipboard-write" referrerpolicy="no-referrer"></iframe>`;
       $('sgRestart').onclick=async()=>{
         if(!confirm('Restart StratGen? Any running research job will be stopped.'))return;
         try{await request('/restart',{method:'POST'});$('sgOriginalUI').src=API+'/ui';await health();}catch(e){failure(e.message);}
@@ -44,6 +44,7 @@
   }
   window.addEventListener('message',event=>{
     if(event.origin!=='http://127.0.0.1:8787'||event.source!==$('sgOriginalUI')?.contentWindow)return;
+    if(event.data?.type==='sg-size'&&Number.isFinite(event.data.height)&&event.data.height>0&&event.data.height<200000){$('sgOriginalUI').style.height=Math.ceil(event.data.height)+2+'px';}
     if(event.data?.type==='sg-deployed')applyActive(event.data.deployed);
   });
   async function health(){
