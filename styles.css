@@ -371,7 +371,7 @@ table thead th[aria-sort="descending"]::after{content:" ▼";color:var(--blue)}
 
 /* Original StratGen layout fills the RS content width. */
 #stratgenContent{width:100%;max-width:none;padding:10px 0}
-#sgOriginalUI{display:block;width:100%;height:760px;min-height:0;border:0;background:#080c14}
+.sg-native-host{display:block;width:100%;min-width:0}
 .sg-health{display:flex;flex-wrap:wrap;align-items:center;gap:10px;padding:12px;border:1px solid var(--border);border-radius:8px;margin-bottom:8px;font-size:12px}
 .sg-health>span{flex:1;color:var(--t2)}
 .sg-health details{flex-basis:100%;max-width:100%}
