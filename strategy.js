@@ -201,7 +201,18 @@
 
     // Dynamic StratGen Strategy Execution (Universal Binary Pass/Fail for ANY strategy)
     const dep = CONFIG.ACTIVE_STRATGEN_DEPLOYED;
+    if(dep && (dep.live_capability_version !== 'rs-stratgen-live-1' || dep.test_evidence?.live_parity !== true)){
+      return {canBuy:false,reason:'Legacy/research contract: live entry and exit parity is not verified'};
+    }
+    if(dep?.live_capability_version==='rs-stratgen-live-1'){
+      const signal=stock.stratgenSignal;
+      if(!signal||signal.contractHash!==dep.sha256||!Number.isFinite(signal.computedAt)||signal.computedAt>Date.now()+1000||Date.now()-signal.computedAt>90000)return {canBuy:false,reason:'Awaiting fresh shared-engine contract evaluation'};
+      if(!signal.eligible)return {canBuy:false,reason:signal.reason||'Shared strategy conditions are not satisfied'};
+      return {canBuy:true,symbol:stock.symbol,limitPrice:ltp,targetPrice:null,stopPrice:null,targetPct:0,stopLossPct:0,reason:'Tested entry contract satisfied; shared RS trailing exit; minimum five minutes, no maximum'};
+    }
     if(dep && dep.spec && Array.isArray(dep.spec.entry_rules) && dep.spec.entry_rules.length > 0){
+      const universe=evaluateUniverse(stock);
+      if(!universe.eligible)return {canBuy:false,reason:universe.reason};
       const rules = dep.spec.entry_rules;
       for(const rule of rules){
         const ind = (rule.indicator || '').toLowerCase();
@@ -662,6 +673,9 @@ function bookedSession(session,holdingCosts,tradebook){
     try {
       const spec = dep.spec || {};
       const exit = spec.exit || {};
+      CONFIG.TARGET_PCT = 1.25;
+      CONFIG.STOP_LOSS_PCT = 0;
+      CONFIG.MAX_HOLDING_DAYS = 2;
       if (exit.tp_pct && exit.tp_pct > 0) {
         CONFIG.TARGET_PCT = +(exit.tp_pct * 100).toFixed(2);
       } else if (spec.target_pct && spec.target_pct > 0) {
@@ -674,6 +688,7 @@ function bookedSession(session,holdingCosts,tradebook){
       }
       if (spec.max_holding_days) CONFIG.MAX_HOLDING_DAYS = spec.max_holding_days;
       CONFIG.ACTIVE_STRATGEN_DEPLOYED = dep;
+      if(spec.exit?.policy==='rs-trail-min5-v2'){CONFIG.TARGET_PCT=0;CONFIG.STOP_LOSS_PCT=0;}
       console.log(`[Strategy] Loaded deployed StratGen Champion: "${dep.name}" (Target: ${CONFIG.TARGET_PCT}%, SL: ${CONFIG.STOP_LOSS_PCT}%)`);
     } catch(e) {}
   }

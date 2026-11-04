@@ -368,3 +368,12 @@ dialog#radarDetail::backdrop{background:rgba(2,5,7,.87)}
 table thead th{cursor:pointer;user-select:none}
 table thead th[aria-sort="ascending"]::after{content:" ▲";color:var(--blue)}
 table thead th[aria-sort="descending"]::after{content:" ▼";color:var(--blue)}
+
+/* Original StratGen layout fills the RS content width. */
+#stratgenContent{width:100%;max-width:none;padding:10px 0}
+#sgOriginalUI{display:block;width:100%;height:calc(100vh - 170px);min-height:760px;border:0;background:#080c14}
+.sg-health{display:flex;flex-wrap:wrap;align-items:center;gap:10px;padding:12px;border:1px solid var(--border);border-radius:8px;margin-bottom:8px;font-size:12px}
+.sg-health>span{flex:1;color:var(--t2)}
+.sg-health details{flex-basis:100%;max-width:100%}
+.sg-health pre{white-space:pre-wrap;overflow-wrap:anywhere;max-height:320px;overflow:auto;font-size:11px}
+.sg-failure{padding:12px;border:1px solid #ff7043;color:#ff9b7c;border-radius:8px;margin-bottom:8px;font-size:13px}

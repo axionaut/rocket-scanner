@@ -1,5 +1,5 @@
-const BUILD_TS='2026-11-04 15:35 IST'; // release build date (IST)
-const APP_VERSION=1626;
+const BUILD_TS='2026-11-04 19:00 IST'; // release build date (IST)
+const APP_VERSION=1627;
 const RADAR_SCORE_VERSION='v1419-recross-batches'; // Eligible on crossing the score floor at any time; selected model's evolving target and movement-based profit protection.
 
 // ── v1358: AN UNCAUGHT ERROR MUST NAME ITSELF ─────────────────────────────────────────────────
@@ -4449,7 +4449,7 @@ let _floorPushTimer=null,_floorPushed=null;
 // scale (1.6 = top 1.5%, 2.2 = rank #1), default floor 2.1 (~top 2-3 stocks, as validated). New storage keys so the
 // old PATH probability floor (0-1 scale) is never read as a percentile-scale floor.
 function isRankedModel(m){ return false; }   // 27 Oct 2026 (owner): STACK removed   // a hoisted function: safe even for callers that run at load
-function floorModel(){ return 'STRATGEN'; }
+function floorModel(){ return selectedBtstModel(); }
 function scoreFloorStore(model=floorModel()){return model==='STRATGEN'?'rs_stratgen_score_floor':(model==='CUM'?'rs_cumulative_score_floor':model==='PATH'?'rs_path2_score_floor':SCORE_FLOOR_STORE);}
 function initScoreFloorUI(force=false){
   try{
@@ -4846,7 +4846,7 @@ function btstModelName(m){return BTST_MODEL_NAMES[m]||m||'Original';}
 // localStorage now paints the owner's last known choice synchronously; the helper still wins on reply.
 const MODEL_STORE='rocket-btst-model-v1';
 // 21 Oct 2026 (owner): Peak removed completely; Ensemble is the only model (the Model dropdown is gone).
-const SELECTABLE_MODELS=['STRATGEN'];
+const SELECTABLE_MODELS=['CUM','STRATGEN'];
 function savedModelChoice(){
   try{const v=localStorage.getItem(MODEL_STORE);return SELECTABLE_MODELS.includes(v)?v:null;}catch(e){return null;}
 }
@@ -4858,25 +4858,24 @@ let _modelChoiceEpoch=0;
 let _modelSwitchPending=false;
 function syncStratGenDeployedState(){
   try{
-    const fromHelper = (typeof readHelperResponse==='function') ? readHelperResponse('/api/inputs/file?name=deployed_strategy.json',{timeout:4000}).catch(()=>null) : Promise.resolve(null);
-    const fromStatic = fetch('deployed_strategy.json?_=' + Date.now(), {cache: 'no-store'}).then(r => r.ok ? r.json() : null).catch(() => null);
-    Promise.all([fromHelper, fromStatic]).then(([d1, d2]) => {
-      const d = d1 || d2;
+    const source=(typeof readHelperResponse==='function')?readHelperResponse('/api/stratgen/deployed',{timeout:4000}):Promise.reject(Error('Helper unavailable'));
+    source.then(result=>{
+      if(result?.ok!==true)throw Error('Local deployment authority unavailable');
+      const d = result.deployed;
       const el = document.getElementById('fModel');
       let opt = document.getElementById('optStratGen');
       if(d && d.name){
         if(opt) opt.textContent = '🚀 ' + d.name;
-        if(el) el.value = 'STRATGEN';
         window.__deployedStratGen = d;
         if(typeof RocketStrategy !== 'undefined' && RocketStrategy.applyDeployedStrategy) RocketStrategy.applyDeployedStrategy(d);
         const brandTag = document.querySelector('.brand-tag');
-        if(brandTag) brandTag.textContent = '⚡ ' + d.name;
+        if(brandTag) brandTag.textContent = floorModel()==='CUM'?'Cumulative Change - VWAP Strengthening':d.name;
       } else {
         if(opt) opt.textContent = 'No Strategy Deployed (Awaiting StratGen)';
         window.__deployedStratGen = null;
-        if(typeof RocketStrategy !== 'undefined') RocketStrategy.CONFIG.ACTIVE_STRATGEN_DEPLOYED = null;
+        if(typeof RocketStrategy !== 'undefined') RocketStrategy.applyDeployedStrategy(null);
         const brandTag = document.querySelector('.brand-tag');
-        if(brandTag) brandTag.textContent = 'StratGen Alpha Engine';
+        if(brandTag) brandTag.textContent = floorModel()==='CUM'?'Cumulative Change - VWAP Strengthening':'StratGen Alpha Engine';
       }
       refreshBtstModelView();
       renderStats();
@@ -4889,7 +4888,7 @@ function initModelUI(){
     if(_modelSeeded) return;
     _modelSeeded=true;
     const el=document.getElementById('fModel');
-    if(el) el.value=savedModelChoice()||'ENS';
+    if(el) el.value=savedModelChoice()||'CUM';
     initScoreFloorUI(true);   // the floor box follows the model just restored
     syncStratGenDeployedState();
     if (!window._stratgenPollActive) {
@@ -4920,7 +4919,7 @@ function onModelChange(){
 // The model new orders are ranked and targeted on: the dropdown (helper-confirmed), else the saved choice.
 function selectedBtstModel(){
   const v=document.getElementById('fModel')?.value;
-  return SELECTABLE_MODELS.includes(v)?v:(savedModelChoice()||'ENS');
+  return SELECTABLE_MODELS.includes(v)?v:(savedModelChoice()||'CUM');
 }
 function refreshBtstModelView(){
   _btstRankMemo=null;
@@ -4954,6 +4953,7 @@ function btstEngineMinScore(){
 }
 // What the screen judges against: the override when typed, otherwise the engine's own floor.
 function btstMinScore(){
+  if(floorModel()==='CUM')return 0; // Intrinsic sign boundary for binary widening; never an editable threshold.
   const r=btstRanking();
   if(r&&r.model!==floorModel())return r.minScore;
   const o=btstFloorOverride();
@@ -5198,6 +5198,10 @@ function liveMarketBreadth(){
 function _getRowActionStateUncached(s, ignoreMarketClosed=false){
   if(!s) return {state:'BLOCKED', reason:'Invalid row'};
   if(typeof RocketStrategy==='undefined') return {state:'BLOCKED', reason:'Strategy module unavailable'};
+  if(!ignoreMarketClosed&&!isEquitySession(Date.now()))return {state:'WAIT',reason:'NSE market is closed'};
+  const stale=universePriceStaleness()||stockPriceStaleness(s.symbol);
+  if(stale)return {state:'WAIT',reason:stale};
+  if((getCombinedOpenPositionMap()[s.symbol]?.qty||0)>0)return {state:'WAIT',reason:'Strategy already has an open position'};
 
   // 1. Universal Native Hard Safety Rails (Always active across all strategies)
   const survBlock = surveillanceBlockReason(s.symbol);
@@ -5209,6 +5213,14 @@ function _getRowActionStateUncached(s, ignoreMarketClosed=false){
   const price = Number(s.price);
   if(!(price > 0)) return {state:'BLOCKED', reason:'Invalid or missing live price'};
   if(price < 5 || price > 4000) return {state:'BLOCKED', reason:'Price outside native ₹5 to ₹4,000 range'};
+  const common=RocketStrategy.evaluateUniverse(s);
+  if(!common.eligible)return {state:'WAIT',reason:common.reason};
+  if(floorModel()==='CUM'){
+    const source=BTST.data,sym=normSym(s.symbol),score=(source?.ranking||[]).find(r=>normSym(r[0])===sym)?.[1];
+    if(source?.activeModel!=='CUM'||source?.cumulative?.scoring!=='vwap-strengthening-v1'||!(score>0))return {state:'WAIT',reason:'VWAP percentage gap is not increasing, or a fresh paired observation is unavailable'};
+    const entry=entryTriggerView('CUM');
+    return entry.crossed.has(sym)?{state:'GO',reason:'Native VWAP strengthening, two rising checks, VWAP and opening-range breakout passed',targetPct:0,stopLossPct:0}: {state:'WAIT',reason:entry.armed[sym]?'VWAP gap is increasing; awaiting two rising price checks':'Awaiting an observed transition to an increasing VWAP gap'};
+  }
 
   // 2. Active Strategy Evaluation (Dynamic from StratGen)
   const activeStrat = window.__deployedStratGen || RocketStrategy.CONFIG?.ACTIVE_STRATGEN_DEPLOYED;
@@ -5217,7 +5229,8 @@ function _getRowActionStateUncached(s, ignoreMarketClosed=false){
   }
 
   // 3. Evaluate Strategy Trigger Rules
-  const trig = RocketStrategy.evaluateTrigger(s, BOOK_LADDER?.[normSym(s.symbol)] || null);
+  const certified={...s,stratgenSignal:BTST.data?.stratgen?.signals?.[normSym(s.symbol)]};
+  const trig = RocketStrategy.evaluateTrigger(certified, BOOK_LADDER?.[normSym(s.symbol)] || null);
   if(trig && trig.canBuy){
     noteCrossing(s.symbol, trig.limitPrice || price, 0);
     return {
@@ -10246,7 +10259,7 @@ function _renderMethodologyInner(){
   const mc=document.getElementById('methContent');if(!mc)return;
   mc.innerHTML=`<nav class="meth-nav" aria-label="Methodology sections"><button onclick="scrollToSection('meth-filters')">Filter decisions</button><button onclick="scrollToSection('meth-evidence')">Current evidence</button><button onclick="scrollToSection('meth-rules')">Entry rules</button><button onclick="scrollToSection('meth-models')">Models & exits</button><button onclick="scrollToSection('meth-history')">Older research</button></nav>
     <div id="meth-hf-wrap">${buildHardFilterMethodologyHTML(ENGINE_DATA)}</div>
-    <section id="meth-evidence"><h3>Current evidence</h3><p>Ensemble and PATH use their trained model scores; Cumulative Change records live price movements. Live entries follow the selected model, its saved threshold and the shared entry rules. Performance reports recorded account trades and their estimated charges.</p>
+    <section id="meth-evidence"><h3>Current evidence</h3><p>Ensemble and PATH use their trained model scores; Cumulative Change records live price movements. Live entries follow the selected binary strategy and shared entry rules. Performance reports recorded account trades and their estimated charges.</p>
 </section>
     <section id="meth-rules"><h3>Entry rules now</h3><p>New buys from the 09:15 open, any time a fresh score crosses the selected model's floor with a fresh price. Market-trend gates are removed for all models. No volume-fade or size-bucket veto (removed 22 Oct: without them the account made more in both halves of the 1-21 Oct replay). The Ensemble keeps its 2.15 upper cap. Liquidity, impact and minimum-order limits apply to every model.</p>
 </section>
@@ -10254,7 +10267,7 @@ function _renderMethodologyInner(){
     <p>The selected model (Ensemble, PATH or Cumulative Change) supplies the recommendation table, counts, allocation and basket. Ensemble and PATH use the trained percentile scale (1.6 = top 1.5%, 2.2 = the model's #1). Cumulative Change measures how quickly the stock's percentage distance from session VWAP is strengthening, in percentage points per minute. Its independently saved floor does not represent a percentile.</p>
     <div class="m-grid">
     <div class="m-card"><h4>Ensemble (default floor 1.6)</h4><p>Five learners (return regressor, +3% classifier, excess-over-market, downside quantile, extra-trees) trained walk-forward on the last 220 sessions of daily candles built from the minutes, retrained every 5 sessions; inputs are 52 daily features (returns 1 day to 3 months, gap, range, volume surges with today's volume projected, volatility, distance to highs and averages, RSI, stochastics, ADX, MACD, TradingView-style ratings, sector strength, market condition). The blend is the average of their rankings.</p></div>
-    <div class="m-card"><h4>Cumulative Change — VWAP strengthening (set your own threshold)</h4><p>Every 10 seconds the helper measures the stock's percentage distance from today's exchange VWAP: gap = 100 × (price / VWAP − 1). The score is the change in that gap divided by the elapsed quote time in minutes. A widening gap scores positive, an unchanged gap scores zero, and a narrowing gap scores negative even while price remains above VWAP. This is a current rate, in percentage points per minute: old gains are not accumulated, square-rooted, market-subtracted or market-cap weighted. Price and VWAP must belong to the same fresh full-mode quote, at most 30 seconds old. Two consecutive valid observations are needed; missing, repeated or stale quotes wait for a fresh pair. Overnight observations are never joined. The first v1617 helper start archives the previous score record and starts a clean scoring epoch, including crossing and arming history; old points are not converted or mixed into this formula. Valid same-session references survive restarts. Each new IST date starts fresh references. The saved floor, floor + 0.5 entry band, two actual rising-price checks with the second bigger, above-VWAP gate, after-09:30 opening-range breakout, surveillance, sizing, funding and exits retain their existing rules. A fresh crossing must be observed from below the saved floor; warm-up cannot create a buy. Tracking continues with other models selected. The table defaults to highest score first; click any data header to sort or reverse it. Negative scores are valid. The floor is saved independently; it now uses the new percentage-points-per-minute units. The historical minute-based screen improved early-profit selection but remained negative after costs; it is not proof of live profitability.</p></div>
+    <div class="m-card"><h4>Cumulative Change - VWAP strengthening</h4><p>The permanent native baseline uses the original v1617 calculation every 10 seconds: gap = 100 * (price / exchange session VWAP - 1); score = change in gap / elapsed quote minutes. Qualification is binary: the gap must be increasing. There is no editable threshold. A real observed transition from non-increasing to increasing arms entry; warm-up never creates a crossing. Two actual rising-price checks are required, with the second rise larger. Price must remain above session VWAP and, after 09:30 IST, above the opening-range high. Fresh paired quotes, surveillance and common execution gates apply. Exits use RS adaptive trailing after a minimum five-minute hold, with no maximum holding period. One-minute OHLCV cannot faithfully replay its synchronized ten-second exchange-VWAP observations, so no candle approximation is presented as its tested baseline.</p></div>
     <div class="m-card"><h4>PATH (default floor 2.1)</h4><p>Learns directly from our trade: from each completed minute, does +1.25% come before −1.25% (net of the real intraday or delivery charges)? Inputs are 12 minute-level features: time of day, distance from the open, VWAP and the day's high, the day's range, 1/5/15-minute moves, relative volume, turnover, opening gap, yesterday's range. Trained only on tradable stocks, retrained monthly. Held-out per trade: +0.38% / +0.27% (a model trained on shuffled outcomes: −0.22% / −0.30%). It is strongest only at its very top, hence the 2.1 floor.</p></div>
     <div class="m-card"><h4>1. Live score (throughout the session)</h4><p>The local helper runs <code>dev/btst_engine.py</code> every 2 minutes. Ensemble scores from daily candles plus today's partial candle; PATH and STACK score from the completed minutes of today, continuing a state saved after each close. If PATH or STACK cannot score (stale data, missing nightly state), that model shows WAIT and never substitutes another model; the Ensemble keeps running.</p></div>
     <div class="m-card"><h4>2. Buy on qualification</h4><p>A current live score clearing your floor can become GO throughout the session. Qualifying names share available capital by score, within saved allocation and execution limits (a new position needs at least ₹${RocketStrategy.CONFIG.MIN_ALLOCATION_RS.toLocaleString('en-IN')}, so the ₹15.34 DP fee is at most 0.26% of it; adds need one share; when cash is short the higher score, then the earlier trigger, then the more liquid stock is funded first). A purchase consumes its crossing; a completed below-floor observation enables a fresh crossing, held or unheld. Price freshness, circuit, surveillance and EQ checks still apply. Market trend does not block entries.</p></div>
@@ -11839,7 +11852,7 @@ function usMarketStatus(){
 }
 function dashboardMarketCards(){
   const m=marketsShown(),d=US_FEED.data;
-  const dep = window.__deployedStratGen || (typeof RocketStrategy !== 'undefined' ? RocketStrategy.CONFIG?.ACTIVE_STRATGEN_DEPLOYED : null);
+  const dep = floorModel()==='CUM'?{name:'Cumulative Change - VWAP Strengthening',archetype:'Native 10-second VWAP gap velocity',spec:{exit:{policy:'rs-trail-min5-v2'}}}:window.__deployedStratGen || (typeof RocketStrategy !== 'undefined' ? RocketStrategy.CONFIG?.ACTIVE_STRATGEN_DEPLOYED : null);
   const groups=[[],[],[],[]];
   const add=(i,market,value,detail)=>groups[i].push(`<div><b>${market}</b> ${value}<div class="st-d">${detail}</div></div>`);
   const signed=v=>Number.isFinite(v)?(v>=0?'+':'')+v.toFixed(2)+'%':'Unavailable';
@@ -11850,9 +11863,10 @@ function dashboardMarketCards(){
     add(1,'NSE',escHtml(stratName), dep ? `${dep.archetype || 'Quantitative'} · Binary Pass/Fail` : 'Awaiting strategy deployment');
     const go=ALL.filter(isStockEligible).length;
     add(2,'NSE',`${go} GO`,'Binary trigger rules satisfied');
-    const tgt = RocketStrategy.CONFIG?.TARGET_PCT || 2.0;
+    const tgt = RocketStrategy.CONFIG?.TARGET_PCT ?? 2.0;
     const sl = RocketStrategy.CONFIG?.STOP_LOSS_PCT || 0;
-    add(3,'NSE',signed(tgt),`Target ${signed(tgt)}${sl > 0 ? ` | SL -${sl.toFixed(1)}%` : ' | Ratcheting MLoT trail'}`);
+    if(dep?.spec?.exit?.policy==='rs-trail-min5-v2')add(3,'NSE','RS trailing exit','Minimum hold: 5 minutes; no maximum');
+    else add(3,'NSE',signed(tgt),`Target ${signed(tgt)}${sl > 0 ? ` | SL -${sl.toFixed(1)}%` : ' | Ratcheting MLoT trail'}`);
   }
   if(m.us){
     const trend=d?.marketTrendPct;
