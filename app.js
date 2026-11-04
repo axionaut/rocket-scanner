@@ -11146,7 +11146,6 @@ function _planDualBasketUncached(rows,capital){
   // v1601 (owner 30 Oct): when cash cannot fund every trigger, the higher score is funded first, then the earlier entry
   // trigger, then the more liquid stock (higher normal 5-minute bar turnover; was alphabetical). Each funded name still
   // gets its equal share.
-  const trigAt=r=>Number(ENTRY_TRIGGERS?.triggered?.[r.symbol]?.at)||Infinity;
   const barRs=r=>Number((typeof btstRanking==='function'?btstRanking():null)?.src?.barTurnover?.[normSym(r.symbol||'')]?.medianRs)||0;
   const heldNow=getHeldPositionMap();
   // v1615 (owner 2 Nov): Accumulation priority - underwater held stocks with a qualifying crossing signal are funded first.
@@ -11154,7 +11153,18 @@ function _planDualBasketUncached(rows,capital){
     const h=heldNow[r.symbol], px=getBuyPrice(r)||r.price;
     return !!(h && h.qty > 0 && h.avg > 0 && px > 0 && px < h.avg);
   };
-  const pool=[...(rows||[])].sort((a,b)=>(isAccum(b)?1:0)-(isAccum(a)?1:0)||((btstScoreOf(b.symbol)??-Infinity)-(btstScoreOf(a.symbol)??-Infinity))||(trigAt(a)-trigAt(b))||(barRs(b)-barRs(a))||a.symbol.localeCompare(b.symbol));
+  const trigAt = r => {
+    const k = normSym(r.symbol);
+    return Number(crossingStore()?.at?.[k]?.firstT || crossingStore()?.at?.[k]?.t || Infinity);
+  };
+  const rvolOf = r => Number(RocketStrategy.inputs(r).rvol ?? r.rvol ?? 1.0);
+  const pool = [...(rows||[])].sort((a,b) => 
+    (isAccum(b)?1:0) - (isAccum(a)?1:0) ||
+    (trigAt(a) - trigAt(b)) ||
+    (rvolOf(b) - rvolOf(a)) ||
+    (barRs(b) - barRs(a)) ||
+    a.symbol.localeCompare(b.symbol)
+  );
   const unitDebitOf=price=>price+calcZerodhaCharges(price,1,false,false,false);
   const autoCap=getAutoMaxAllocCap(capital);
   const eligiblePool=pool.filter(r=>!EXPORT_EXCLUDED.has(r.symbol)&&isStockEligible(r)&&getBuyPrice(r)>0).slice(0,20);
@@ -12150,6 +12160,26 @@ function compareModelScoreRows(a,b){
   };
   const ar = rank(a), br = rank(b);
   if(ar !== br) return ar - br;
+
+  // 100% Fidelity with StratGen Portfolio Backtest (engine.py line 456):
+  // 1. Chronological Trigger Time (earliest signal today gets funded first)
+  // 2. Tie-breaker: Highest Relative Volume (RVOL) conviction
+  if(ar === 0 && br === 0){
+    const store = crossingStore();
+    const tA = Number(store?.at?.[normSym(a.symbol)]?.firstT || store?.at?.[normSym(a.symbol)]?.t || Infinity);
+    const tB = Number(store?.at?.[normSym(b.symbol)]?.firstT || store?.at?.[normSym(b.symbol)]?.t || Infinity);
+    if(tA !== tB) return tA - tB;
+
+    const rvolA = Number(RocketStrategy.inputs(a).rvol ?? a.rvol ?? 1.0);
+    const rvolB = Number(RocketStrategy.inputs(b).rvol ?? b.rvol ?? 1.0);
+    if(Math.abs(rvolB - rvolA) > 0.01) return rvolB - rvolA;
+  }
+
+  // WAIT stocks sorted by institutional volume conviction (RVOL) then price momentum
+  const rvolA = Number(RocketStrategy.inputs(a).rvol ?? a.rvol ?? 1.0);
+  const rvolB = Number(RocketStrategy.inputs(b).rvol ?? b.rvol ?? 1.0);
+  if(Math.abs(rvolB - rvolA) > 0.1) return rvolB - rvolA;
+
   const ap = Number(a.day ?? a.priceChange ?? 0), bp = Number(b.day ?? b.priceChange ?? 0);
   return (bp - ap) || String(a.symbol).localeCompare(String(b.symbol));
 }
