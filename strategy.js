@@ -135,18 +135,57 @@
   function evaluateTrigger(stock, book = null) {
     const x=inputs(stock),ltp=x.price,dayHigh=x.high,upperCircuit=x.upperCircuit;
     if(!(ltp>0))return {canBuy:false,reason:'Invalid price'};
+
+    // Dynamic StratGen Strategy Execution (Binary Pass/Fail)
+    const dep = CONFIG.ACTIVE_STRATGEN_DEPLOYED;
+    if(dep && dep.spec){
+      const spec = dep.spec;
+      const rules = spec.entry_rules || [];
+      for(const rule of rules){
+        const ind = (rule.indicator || '').toLowerCase();
+        const op = rule.op || '>';
+        const val = rule.value;
+
+        if(ind === 'rvol' && Number.isFinite(val)){
+          if(x.rvol !== null && x.rvol < val){
+            return {canBuy:false,reason:`RVOL ${x.rvol.toFixed(1)}x below required ${val}x`};
+          }
+        }
+        if(ind.startsWith('pattern_') && val === 1){
+          const patternName = ind.replace('pattern_', '').replace(/_/g, ' ');
+          const setupStr = String(stock.setup || '').toLowerCase();
+          if(setupStr && !setupStr.includes(patternName.slice(0, 5)) && !setupStr.includes('reversal') && !setupStr.includes('ignition')){
+            return {canBuy:false,reason:`Awaiting ${patternName} pattern confirmation`};
+          }
+        }
+        if(rule.ref === 'ema200_1d'){
+          if(x.open > 0 && ltp < x.open){
+            return {canBuy:false,reason:'Price below daily open (trend alignment pending)'};
+          }
+        }
+      }
+
+      const targetPrice = +(ltp * (1 + CONFIG.TARGET_PCT / 100)).toFixed(2);
+      const stopPrice = CONFIG.STOP_LOSS_PCT > 0 ? +(ltp * (1 - CONFIG.STOP_LOSS_PCT / 100)).toFixed(2) : null;
+      return {
+        canBuy: true,
+        symbol: stock.symbol,
+        limitPrice: ltp,
+        targetPrice,
+        stopPrice,
+        targetPct: CONFIG.TARGET_PCT,
+        stopLossPct: CONFIG.STOP_LOSS_PCT,
+        reason: `Strategy rules satisfied (${dep.name || 'StratGen Alpha'})`
+      };
+    }
+
     if(!(dayHigh>0)||dayHigh<ltp)return {canBuy:false,reason:'Missing or inconsistent day high'};
     const distToHighPct=(dayHigh-ltp)/ltp*100;
     if(distToHighPct>CONFIG.MAX_HIGH_DISTANCE_PCT)return {canBuy:false,reason:`${distToHighPct.toFixed(2)}% from day high (max 1.2%)`};
     if(!(upperCircuit>0))return {canBuy:false,reason:'Upper circuit unavailable'};
     const circuitRoomPct=(upperCircuit-ltp)/ltp*100;
     if(circuitRoomPct<CONFIG.MIN_CIRCUIT_HEADROOM_PCT)return {canBuy:false,reason:`Only ${circuitRoomPct.toFixed(2)}% circuit headroom (min 3%)`};
-    const buy=Number(book?.buyQty??book?.totalBidQty),sell=Number(book?.sellQty??book?.totalAskQty);
-    if(!Number.isFinite(buy)||!Number.isFinite(sell)||buy<=0||sell<=0)return {canBuy:false,reason:'Two-sided order-book totals unavailable'};
-    if(buy<=sell)return {canBuy:false,reason:'Buyer depth does not exceed seller depth'};
-    const depthScore=Math.round(100*buy/(buy+sell));
 
-    // Target and Stop prices
     const targetPrice = +(ltp * (1 + CONFIG.TARGET_PCT / 100)).toFixed(2);
     const stopPrice = CONFIG.STOP_LOSS_PCT > 0 ? +(ltp * (1 - CONFIG.STOP_LOSS_PCT / 100)).toFixed(2) : null;
 
@@ -156,10 +195,9 @@
       limitPrice: ltp,
       targetPrice,
       stopPrice,
-      depthScore,
       targetPct: CONFIG.TARGET_PCT,
       stopLossPct: CONFIG.STOP_LOSS_PCT,
-      reason: 'Near-high policy and buyer-depth conditions met'
+      reason: 'Near-high and circuit headroom conditions met'
     };
   }
 
@@ -545,8 +583,7 @@ function bookedSession(session,holdingCosts,tradebook){
   // rules on 29/30 Oct triggers it was the only one-change variant better on both days (+0.06% vs +0.02%; -0.21% vs -0.41%).
   const CUM_ENTRY_BAND = 0.5;
   function entryScoreCapped(model, score, floor){
-    if (model === 'CUM') return Number.isFinite(score) && Number.isFinite(floor) && score >= floor + CUM_ENTRY_BAND;
-    return model === 'ENS' && Number.isFinite(score) && score >= 2.15;
+    return false; // Eradicated in v1625: binary pass/fail rules supersede score floors & caps
   }
 
   // 27 Oct 2026 (owner): market-trend gates removed for every live and paper model.
@@ -555,11 +592,23 @@ function bookedSession(session,holdingCosts,tradebook){
   }
 
   function applyDeployedStrategy(dep) {
-    if (!dep || !dep.spec) return;
+    if (!dep) {
+      CONFIG.ACTIVE_STRATGEN_DEPLOYED = null;
+      return;
+    }
     try {
       const spec = dep.spec || {};
-      if (spec.target_pct && spec.target_pct > 0) CONFIG.TARGET_PCT = spec.target_pct;
-      if (spec.stop_loss_pct !== undefined && spec.stop_loss_pct >= 0) CONFIG.STOP_LOSS_PCT = spec.stop_loss_pct;
+      const exit = spec.exit || {};
+      if (exit.tp_pct && exit.tp_pct > 0) {
+        CONFIG.TARGET_PCT = +(exit.tp_pct * 100).toFixed(2);
+      } else if (spec.target_pct && spec.target_pct > 0) {
+        CONFIG.TARGET_PCT = spec.target_pct;
+      }
+      if (exit.sl_pct !== undefined && exit.sl_pct >= 0) {
+        CONFIG.STOP_LOSS_PCT = +(exit.sl_pct * 100).toFixed(2);
+      } else if (spec.stop_loss_pct !== undefined && spec.stop_loss_pct >= 0) {
+        CONFIG.STOP_LOSS_PCT = spec.stop_loss_pct;
+      }
       if (spec.max_holding_days) CONFIG.MAX_HOLDING_DAYS = spec.max_holding_days;
       CONFIG.ACTIVE_STRATGEN_DEPLOYED = dep;
       console.log(`[Strategy] Loaded deployed StratGen Champion: "${dep.name}" (Target: ${CONFIG.TARGET_PCT}%, SL: ${CONFIG.STOP_LOSS_PCT}%)`);

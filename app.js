@@ -1,5 +1,5 @@
-const BUILD_TS='2026-11-04 IST'; // release build date (IST)
-const APP_VERSION=1624;
+const BUILD_TS='2026-11-04 15:35 IST'; // release build date (IST)
+const APP_VERSION=1625;
 const RADAR_SCORE_VERSION='v1419-recross-batches'; // Eligible on crossing the score floor at any time; selected model's evolving target and movement-based profit protection.
 
 // ── v1358: AN UNCAUGHT ERROR MUST NAME ITSELF ─────────────────────────────────────────────────
@@ -3749,32 +3749,20 @@ function enabledModelsLabel(){
   return m === 'STRATGEN' ? 'StratGen Alpha' : (m === 'CUM' ? 'Cumulative Change' : (m === 'PATH' ? 'PATH' : 'Ensemble engine'));
 }
 function dualScoreCell(row){
-  const act=getRowActionState(row);
-  const sc=Math.round(Number(row.score)||0);
-  if(act.state==='GO'){
-    // v1405: a GO row shows its real model score too. `sc` is 100-rank, a display ordinal with no
-    // units; the pick's own `score` is the predicted next-session net return the rule tests.
-    const ps=btstScoreOf(row.symbol);
+  const act = getRowActionState(row);
+  if(act.state === 'GO'){
     return `<div style="display:flex;align-items:center;gap:6px;justify-content:center">
-      <span style="font-family:'DM Mono',monospace;font-weight:800;font-size:15px;color:var(--green)" title="${escHtml(radarScoreTitle(row)||'')}">⚡ ${Number.isFinite(ps)?(ps>=0?'+':'')+ps.toFixed(2):'N/A'}</span>
-      <span style="font-size:10px;font-weight:800;background:var(--green);color:#fff;padding:1px 5px;border-radius:3px">GO</span>
+      <span class="info-pill pill-green" style="font-size:12px;font-weight:800;padding:2px 8px;border-radius:4px" title="${escHtml(act.reason || 'Strategy entry satisfied')}">🟢 GO (Eligible)</span>
     </div>`;
   }
-  if(act.state!=='GO'){
-    const rk=btstRankOf(row.symbol);
-    // v1405: show the MODEL SCORE, not just the ordinal rank. The pick rule is "score >= floor",
-    // so a rank without its score hides the only quantity that decides anything - #1 on a dead day
-    // and #1 on a strong day looked identical. Green = clears the floor (it will be bought at
-    // 15:15 if it holds), amber = ranked but short of it.
-    const ms=btstScoreOf(row.symbol),floor=btstMinScore();
-    const clears=ms!==null&&floor!==null&&ms>=floor;
+  if(act.state === 'WAIT'){
     return `<div style="display:flex;align-items:center;gap:6px;justify-content:center">
-      ${ms===null?`<span title="${escHtml(btstUnscoredReason(row.symbol))}">N/A</span>`:`<span style="font-family:'DM Mono',monospace;font-weight:800;font-size:15px;color:${clears?'var(--green)':'var(--amber)'}" title="${escHtml(btstRankNote(row.symbol))}">${ms>=0?'+':''}${ms.toFixed(2)}</span>`}
-      <span style="font-family:'DM Mono',monospace;font-weight:600;font-size:11px;color:var(--t3)" title="${rk?escHtml(btstRankNote(row.symbol)+' - ranking only, not a buy signal'):'Not ranked by the engine'}">${rk?'#'+rk:''}</span>
-      <span style="font-size:10px;font-weight:600;color:var(--t3)">${act.state}</span>
+      <span class="info-pill" style="font-size:11px;font-weight:700;color:var(--amber);background:rgba(245,158,11,.15);padding:2px 8px;border-radius:4px" title="${escHtml(act.reason || 'Conditions pending')}">WAIT</span>
     </div>`;
   }
-  return `<div style="font-family:'DM Mono',monospace;font-weight:500;font-size:13px;color:var(--t3);text-align:center">—</div>`;
+  return `<div style="display:flex;align-items:center;gap:6px;justify-content:center">
+    <span class="info-pill" style="font-size:11px;font-weight:700;color:var(--red);background:rgba(239,68,68,.12);padding:2px 8px;border-radius:4px" title="${escHtml(act.reason || 'Blocked')}">BLOCKED</span>
+  </div>`;
 }
 // Equal slots, not equal rupee amounts. A symbol occupies only one slot.
 // Search both rankings so a shared top pick cannot starve a model's unique pick.
@@ -4460,8 +4448,8 @@ let _floorPushTimer=null,_floorPushed=null;
 // 23 Oct 2026 (owner): fixed PATH replaces the old PATH and STACK is added. Both publish on the Ensemble's percentile
 // scale (1.6 = top 1.5%, 2.2 = rank #1), default floor 2.1 (~top 2-3 stocks, as validated). New storage keys so the
 // old PATH probability floor (0-1 scale) is never read as a percentile-scale floor.
-function isRankedModel(m){return m==='PATH';}   // 27 Oct 2026 (owner): STACK removed   // a hoisted function: safe even for callers that run at load
-function floorModel(){const v=document.getElementById('fModel')?.value;return v==='STRATGEN'?'STRATGEN':(v==='CUM'||isRankedModel(v)?v:'ENS');}
+function isRankedModel(m){ return false; }   // 27 Oct 2026 (owner): STACK removed   // a hoisted function: safe even for callers that run at load
+function floorModel(){ return 'STRATGEN'; }
 function scoreFloorStore(model=floorModel()){return model==='STRATGEN'?'rs_stratgen_score_floor':(model==='CUM'?'rs_cumulative_score_floor':model==='PATH'?'rs_path2_score_floor':SCORE_FLOOR_STORE);}
 function initScoreFloorUI(force=false){
   try{
@@ -4858,7 +4846,7 @@ function btstModelName(m){return BTST_MODEL_NAMES[m]||m||'Original';}
 // localStorage now paints the owner's last known choice synchronously; the helper still wins on reply.
 const MODEL_STORE='rocket-btst-model-v1';
 // 21 Oct 2026 (owner): Peak removed completely; Ensemble is the only model (the Model dropdown is gone).
-const SELECTABLE_MODELS=['ENS','PATH','CUM','STRATGEN'];
+const SELECTABLE_MODELS=['STRATGEN'];
 function savedModelChoice(){
   try{const v=localStorage.getItem(MODEL_STORE);return SELECTABLE_MODELS.includes(v)?v:null;}catch(e){return null;}
 }
@@ -4877,19 +4865,21 @@ function syncStratGenDeployedState(){
       const el = document.getElementById('fModel');
       let opt = document.getElementById('optStratGen');
       if(d && d.name){
-        if(!opt && el){
-          opt = document.createElement('option');
-          opt.value = 'STRATGEN';
-          opt.id = 'optStratGen';
-          el.appendChild(opt);
-        }
-        if(opt) opt.textContent = '🚀 StratGen: ' + d.name;
+        if(opt) opt.textContent = '🚀 ' + d.name;
+        if(el) el.value = 'STRATGEN';
         window.__deployedStratGen = d;
-        if(typeof strategy !== 'undefined' && strategy.applyDeployedStrategy) strategy.applyDeployedStrategy(d);
+        if(typeof RocketStrategy !== 'undefined' && RocketStrategy.applyDeployedStrategy) RocketStrategy.applyDeployedStrategy(d);
+        const brandTag = document.querySelector('.brand-tag');
+        if(brandTag) brandTag.textContent = '⚡ ' + d.name;
       } else {
-        if(opt) opt.remove();
+        if(opt) opt.textContent = 'No Strategy Deployed (Awaiting StratGen)';
         window.__deployedStratGen = null;
+        if(typeof RocketStrategy !== 'undefined') RocketStrategy.CONFIG.ACTIVE_STRATGEN_DEPLOYED = null;
+        const brandTag = document.querySelector('.brand-tag');
+        if(brandTag) brandTag.textContent = 'StratGen Alpha Engine';
       }
+      refreshBtstModelView();
+      renderStats();
     }).catch(()=>{});
   }catch(e){}
 }
@@ -5046,77 +5036,7 @@ function noteCrossing(sym,score,floor){
 // The action state for a live intraday crossing, or null when this row is not one.
 // Returning null hands the row back to the 15:15 final path unchanged.
 function btstCrossingState(s){
-  if(floorModel()==='CUM'&&!Number.isFinite(btstMinScore()))return {state:'WAIT',reason:'Enter your Cumulative Change threshold to enable buy signals.'};
-  if(isRankedModel(floorModel())&&!btstRanking())return {state:'WAIT',reason:floorModel()+' predictions unavailable or stale; awaiting fresh completed-minute scores'};
-  const floor=btstMinScore();
-  if(!Number.isFinite(floor)) return null;
-  const score=btstScoreOf(s?.symbol);
-  if(!Number.isFinite(score)) return null;
-  const r=btstRanking();
-  // Only a LIVE ranking may trigger a buy. A replay, a dry run or another session's file must
-  // never reach here - same rule the final path has enforced since v1393.
-  if(!r||!r.src||r.src.mode!=='live'||r.src.session!==getSessionDate()) return null;
-  if(_modelSwitchPending||r.model!==r.src.activeModel)return {state:'WAIT',reason:'Confirming selected model with helper'};
-  const st=crossingStore(),key=normSym(s.symbol);
-  st.rebuy=st.rebuy||{};
-  const qty=Number(getCombinedOpenPositionMap()[s.symbol]?.qty)||0;
-  const buys=todayBuyFillsBySymbol().get(key)||[];
-  const fillKey=buys.length?JSON.stringify(buys.map(f=>[f.date,f.time,f.qty,f.price])):'[]';
-  let state=st.rebuy[key];
-  const before=state?state.qty+'|'+state.fillKey+'|'+state.consumed+'|'+state.armed:'';
-  // v1599: only a buy TODAY consumes today's crossing; shares carried from earlier sessions never do.
-  if(!state) state=st.rebuy[key]={qty,fillKey,consumed:buys.length>0,armed:false,v:1599};
-  // States saved before v1599 marked every carried holding consumed; correct them once.
-  if(!state.v){if(state.consumed&&!buys.length){state.consumed=false;state.armed=false;}state.v=1599;}
-  if(qty>state.qty||(fillKey!==state.fillKey&&buys.length>0)){
-    state.consumed=true;state.armed=false;
-  }
-  state.qty=qty;state.fillKey=fillKey;
-  if(score<floor&&state.consumed) state.armed=true;
-  if(score<floor&&st.at?.[key]&&!st.at[key].below){st.at[key].below=true;saveCrossings();}
-  if(score>=floor&&state.consumed&&state.armed){state.consumed=false;state.armed=false;}
-  if(before!==state.qty+'|'+state.fillKey+'|'+state.consumed+'|'+state.armed) saveCrossings();
-  if(AUTO_BUY_STATUS?.executedToday?.includes(key))return {state:'WAIT',reason:'Helper confirms this crossing was already bought; waiting for a completed run outside the entry band and a fresh crossing.'};
-  if(AUTO_BUY_STATUS?.bridgeEntries?.some(e=>e.sym===key&&e.signalAsOf===r.src.asOf&&e.status==='done'&&e.filled===0))return {state:'WAIT',reason:'Immediate order did not fill within its price cap. Waiting for a fresh engine signal.'};
-  if(state.consumed&&score>=floor)
-    return {state:'WAIT',reason:'Already bought on this crossing; waiting for a fresh dip below the floor and re-crossing.'};
-  if(score<floor){
-    // Below the floor and never crossed today: nothing to say beyond the usual rank note.
-    if(!crossingStore().at[normSym(s.symbol)]) return {state:'WAIT',reason:'Model score is below your score floor'};
-    // It crossed earlier and has since fallen back. Requirement 1: if it was NOT bought and
-    // crosses again it is eligible again - so this is a WAIT, not a permanent disqualification.
-    return {state:'WAIT',reason:`Crossed +${floor.toFixed(2)} earlier today but is back to +${score.toFixed(2)}. Eligible again if it re-crosses.`};
-  }
-  // v1497 (owner, 15 Oct): no buy at the maxed-out score. 2.15+ means every model ranks the stock #1, usually
-  // mid-spike; replayed on the live Ensemble crossings 29 Sep-14 Oct these lost money (-0.13%/signal) and
-  // skipping them lifted the Rs 1.13L account result in both halves. Not noted as a crossing, so a later
-  // score back inside the band is an ordinary GO.
-  const SCORE_CAP=2.15;
-  if(r.model==='CUM'&&RocketStrategy.entryScoreCapped(r.model,score,floor)) return {state:'WAIT',reason:`Score +${score.toFixed(2)} is already ${RocketStrategy.CUM_ENTRY_BAND} or more above the +${floor.toFixed(2)} floor: Cumulative Change buys only fresh crossings (below +${(floor+RocketStrategy.CUM_ENTRY_BAND).toFixed(2)}). Buyable again after it falls below the floor and re-crosses.`};
-  if((r.model==='ENS'||r.model==='A')&&RocketStrategy.entryScoreCapped(r.model,score,floor)) return {state:'WAIT',reason:`Score +${score.toFixed(2)} is at the maxed-out top (${SCORE_CAP}+): every model ranks it #1, usually mid-spike. These lost money live, so it is skipped; buyable if it settles back inside +${floor.toFixed(2)} to +${SCORE_CAP}.`};
-  // v1538 (owner, 22 Oct): the volume-fade (v1506) and size-bucket (v1517) vetoes are removed. Replayed under the
-  // current OCO exit with profit-funded trims (1-21 Oct, Rs3.5L), no veto earned more than either or both in both halves.
-  // 28 Oct 2026 (owner): new buys from the 09:15 open for every model (was 09:16; 09:45 before 23 Oct).
-  // A crossing before the open waits. Not noted as a crossing.
-  if(isEquitySession(Date.now())&&istClock().mins<ENTRY_START_MIN) return {state:'WAIT',reason:`Score +${score.toFixed(2)} clears +${floor.toFixed(2)}, but new buys start at the 09:15 open.`};
-  const first=noteCrossing(s.symbol,score,floor);
-  if(!isEquitySession(Date.now())) return {state:'WAIT',reason:`Score +${score.toFixed(2)} clears +${floor.toFixed(2)} - market closed.`};
-  // 23 Oct 2026 (owner): buy only AT the crossing. Being further above the floor is not a better signal, and a stock
-  // that crossed in an earlier run is not bought later; it needs a completed run below the floor and a fresh crossing.
-  if(!r.crossingsKnown) return {state:'WAIT',reason:'Waiting for the helper’s 10-second entry check.'};
-  if(!r.crossed.has(key)&&r.armed?.[key]){
-    const a=r.armed[key],since=new Date(a.since).toLocaleTimeString('en-IN',{timeZone:'Asia/Kolkata',hour:'2-digit',minute:'2-digit',hour12:false});
-    return {state:'WAIT',armed:true,reason:`Crossed +${floor.toFixed(2)} at ${since}. Buys on two rising 10-second checks, the second bigger${a.prevUp!=null?` (last rise +${a.prevUp.toFixed(2)}%; next must beat it)`:' (waiting for the first rise)'}.`};
-  }
-  if(!r.crossed.has(key)){
-    const at=first?new Date(first.t).toLocaleTimeString('en-IN',{hour:'2-digit',minute:'2-digit',hour12:false}):'';
-    return {state:'WAIT',reason:`Above +${floor.toFixed(2)}${at?' since '+at:''}, but buys happen only in the run where it crosses. Needs a run below the floor and a fresh crossing.`};
-  }
-  const stale=universePriceStaleness()||stockPriceStaleness(s.symbol);
-  if(stale) return {state:'WAIT',reason:stale};
-  const at=first?new Date(first.t).toLocaleTimeString('en-IN',{hour:'2-digit',minute:'2-digit',hour12:false}):'';
-  return {state:'GO',reason:`Score +${score.toFixed(2)} clears the +${floor.toFixed(2)} floor`
-    +(at?` (crossed ${at})`:'')+` - buy the funded basket now; let the OCO bracket manage the exit`};
+  return null; // Abolished in v1625 in favor of pure binary strategy execution
 }
 // v1416: THE FLOOR NOW DECIDES WHAT TRADES. It is pushed to the helper, which passes --min-score
 // to every engine run including the scheduled 15:05/15:15 ones, so the picks file is cut at the
@@ -5276,41 +5196,44 @@ function liveMarketBreadth(){
   return LIVE_BREADTH_MEMO={beat,rev,advancing,total,pct:total?100*advancing/total:null};
 }
 function _getRowActionStateUncached(s, ignoreMarketClosed=false){
-  if(!s)return {state:'BLOCKED',reason:'Invalid row'};
-  if(typeof RocketStrategy==='undefined')return {state:'BLOCKED',reason:'Strategy module unavailable'};
-  const survBlock=surveillanceBlockReason(s.symbol);
-  if(survBlock)return {state:'BLOCKED',reason:survBlock};
-  // v1407: SURVEILLANCE AND THE UPPER CIRCUIT ARE DIFFERENT PROBLEMS AND ONE CANNOT COVER THE
-  // OTHER. 21 Sep FEDDERSHOL ranked #1 and PROTEAN #2 while both sat locked at +20% with nothing
-  // on offer, and REG1 flagged NEITHER - correctly: NSE lists ASM/GSM/ESM for sustained abnormal
-  // behaviour, so a stock that locks its band TODAY appears in no surveillance column today.
-  // A locked stock cannot be bought at any price, so this is a block, not a score penalty.
-  const ucBlock=upperCircuitBlock(s);
-  if(ucBlock)return {state:'BLOCKED',reason:ucBlock};
-  if(s.basketEligible===false)return {state:'BLOCKED',reason:'Non-EQ series or price band under 10%'};
-  const held=getCombinedOpenPositionMap()[s.symbol];
-  // Actual purchases consume their crossing in btstCrossingState; a fresh crossing allows a rebuy.
-  // ── v1418: ONE PATH. CROSSING THE SCORE FLOOR MAKES A STOCK ELIGIBLE, AT ANY TIME OF DAY. ──
-  // Measured 18-22 Sep 2026, the three sessions this system has actually run. Buying each name
-  // when it FIRST crossed the owner's 1.2 floor intraday, +3% target, 5 slots of Capital/5:
-  // 17 buys, 10 of 12 reaching +3% at the original floor, about +Rs 4,000 on Rs 1,00,000 in
-  // three days. The invariant-11 control ran 2,000 random liquid longs at the SAME minutes on
-  // the SAME days: the signal beat it in 64 of 64 policy cells, p=0.000 at the 1.2 floor, while
-  // a random long LOST 0.28% - two of the three days had the median stock falling, so this is
-  // not a rising-tape artefact. A negative control (random symbols in place of the signalled
-  // ones) collapses the excess to +0.012%, so the harness measures the signal. Fillability was
-  // audited against the Book files: 18 of 20 signals provably two-sided at entry, zero locked.
-  //
-  // OPTIEMUS on 22 Sep is the whole argument: freely trading and buyable at 11:15 when it
-  // crossed, hit +3% by 11:30, then locked at its circuit from 14:15 through the close - which
-  // is the state the 15:15 final saw, which is why it published an unbuyable pick and the owner
-  // got no trade at all that day. Waiting four hours is what cost the trade, not the pick.
-  //
-  // This REPLACES the 15:15-final-only rule rather than running beside it (owner requirement 1).
-  // The final list is still published and still trades; it is simply no longer the only way a
-  // stock becomes eligible. A purchase consumes the current crossing; a later dip and re-crossing permits another buy.
-  const cross=btstCrossingState(s);
-  return cross||{state:'WAIT',reason:btstRankNote(s.symbol)||btstUnscoredReason(s.symbol)};
+  if(!s) return {state:'BLOCKED', reason:'Invalid row'};
+  if(typeof RocketStrategy==='undefined') return {state:'BLOCKED', reason:'Strategy module unavailable'};
+
+  // 1. Universal Native Hard Safety Rails (Always active across all strategies)
+  const survBlock = surveillanceBlockReason(s.symbol);
+  if(survBlock) return {state:'BLOCKED', reason:survBlock};
+  const ucBlock = upperCircuitBlock(s);
+  if(ucBlock) return {state:'BLOCKED', reason:ucBlock};
+  if(s.basketEligible === false) return {state:'BLOCKED', reason:'Non-EQ series or price band under 10%'};
+
+  const price = Number(s.price);
+  if(!(price > 0)) return {state:'BLOCKED', reason:'Invalid or missing live price'};
+  if(price < 5 || price > 4000) return {state:'BLOCKED', reason:'Price outside native ₹5 to ₹4,000 range'};
+
+  // 2. Active Strategy Evaluation (Dynamic from StratGen)
+  const activeStrat = window.__deployedStratGen || RocketStrategy.CONFIG?.ACTIVE_STRATGEN_DEPLOYED;
+  if(!activeStrat){
+    return {state:'WAIT', reason:'No active strategy deployed in StratGen'};
+  }
+
+  // 3. Evaluate Strategy Trigger Rules
+  const trig = RocketStrategy.evaluateTrigger(s, BOOK_LADDER?.[normSym(s.symbol)] || null);
+  if(trig && trig.canBuy){
+    noteCrossing(s.symbol, trig.limitPrice || price, 0);
+    return {
+      state: 'GO',
+      reason: trig.reason || 'Active strategy entry conditions satisfied',
+      targetPrice: trig.targetPrice,
+      stopPrice: trig.stopPrice,
+      targetPct: trig.targetPct,
+      stopLossPct: trig.stopLossPct
+    };
+  }
+
+  return {
+    state: 'WAIT',
+    reason: trig?.reason || 'Strategy entry conditions pending'
+  };
 }
 // v1407: A STOCK FROZEN AT ITS UPPER CIRCUIT CANNOT BE BOUGHT AT ALL. 21 Sep FEDDERSHOL ranked
 // #1 (+2.13) and PROTEAN #2 while both sat locked at +20%: Kite showed 75,34,463 shares bid and
@@ -5437,10 +5360,14 @@ function rowStatusPillHtml(s){
     +(line?`<div style="font-size:12px;color:var(--${act.state==='GO'&&reason?'amber':'t3'})" title="${escHtml(full)}">${escHtml(line)}</div>`:'');
 }
 function crossCellHtml(s){
-  const first=firstScoreAtFloor(s.symbol);
-  if(!first)return '<span style="color:var(--t3)">—</span>';
-  const quote=crossingCurrentQuote(s.symbol,first);
-  return firstScoreBadgeHtml(first,quote?.price??null,quote?.priceAt??null);
+  const act = getRowActionState(s);
+  const k = normSym(s.symbol);
+  const first = crossingStore().at[k];
+  if(act.state === 'GO' && first){
+    const hm = new Date(first.t).toLocaleTimeString('en-IN', {timeZone: 'Asia/Kolkata', hour: '2-digit', minute: '2-digit', hour12: false});
+    return `<div style="font-size:11px;color:var(--green);font-family:'DM Mono',monospace;font-weight:700">🟢 Triggered ${hm} IST</div>`;
+  }
+  return '<span style="color:var(--t3)">-</span>';
 }
 // v1581: the live trailing exit for a held stock - not armed (arming price) or the current SL / target legs.
 function exitCellHtml(s){
@@ -10353,7 +10280,7 @@ function getCols(){
     // fixed Target are dropped (they remain in the row detail on click).
     {key:'chk',label:'',s:0},
     {key:'status',label:'Status',s:1},
-    {key:'score',label:'Model Score',s:1},
+    {key:'score',label:'Strategy Status',s:1},
     {key:'symbol',label:'Symbol',s:1},
     {key:'price',label:'Price · Day',s:1},
     {key:'cross',label:'Since crossing',s:0},
@@ -11901,28 +11828,32 @@ function usMarketStatus(){
   return d.live&&(!d.closesAt||Date.now()<Date.parse(d.closesAt))?'scores stale':'closed';
 }
 function dashboardMarketCards(){
-  const m=marketsShown(),d=US_FEED.data,br=btstRanking(),target=learnedBtstTarget(null);
+  const m=marketsShown(),d=US_FEED.data;
+  const dep = window.__deployedStratGen || (typeof RocketStrategy !== 'undefined' ? RocketStrategy.CONFIG?.ACTIVE_STRATGEN_DEPLOYED : null);
   const groups=[[],[],[],[]];
   const add=(i,market,value,detail)=>groups[i].push(`<div><b>${market}</b> ${value}<div class="st-d">${detail}</div></div>`);
   const signed=v=>Number.isFinite(v)?(v>=0?'+':'')+v.toFixed(2)+'%':'Unavailable';
   if(m.nse){
     const bull=ALL.filter(s=>(s.priceChange||0)>0).length;
     add(0,'NSE',ALL.length?(100*bull/ALL.length).toFixed(0)+'% advancing':'Unavailable',`${bull} up / ${ALL.length-bull} not up · ${isEquitySession(Date.now())?'session open':'closed'}`);
-    add(1,'NSE',br?escHtml(br.at):'Awaiting scores',BTST.rankError?`<span style="color:var(--amber)">${escHtml(BTST.rankError)}</span>`:`${br?br.n:0} scored · ${Number.isFinite(btstMinScore())?'floor '+btstMinScore():'set threshold'} · ${isEquitySession(Date.now())?'current session':'last session'}`);
+    const stratName = dep?.name ? (dep.name.length > 25 ? dep.name.slice(0, 23) + '…' : dep.name) : 'StratGen Alpha';
+    add(1,'NSE',escHtml(stratName), dep ? `${dep.archetype || 'Quantitative'} · Binary Pass/Fail` : 'Awaiting strategy deployment');
     const go=ALL.filter(isStockEligible).length;
-    add(2,'NSE',`${go} GO`,'Kite execution checks apply');
-    add(3,'NSE',signed(target?.pct??3),'Fixed start | ratcheting OCO');
+    add(2,'NSE',`${go} GO`,'Binary trigger rules satisfied');
+    const tgt = RocketStrategy.CONFIG?.TARGET_PCT || 2.0;
+    const sl = RocketStrategy.CONFIG?.STOP_LOSS_PCT || 0;
+    add(3,'NSE',signed(tgt),`Target ${signed(tgt)}${sl > 0 ? ` | SL -${sl.toFixed(1)}%` : ' | Ratcheting MLoT trail'}`);
   }
   if(m.us){
     const trend=d?.marketTrendPct;
     add(0,'US',signed(typeof trend==='number'?trend:NaN),`vs 50-day average · ${escHtml(usMarketStatus())}`);
     const at=d?.asOf?new Date(d.asOf).toLocaleString('en-IN',{day:'numeric',month:'short',hour:'2-digit',minute:'2-digit'}):'Awaiting scores';
-    add(1,'US',escHtml(at),`${d?.ok?d.universe??d.ranking?.length??0:0} scored · floor ${usFloor()} · ${d?.ranking?.length??0} rows published`);
+    add(1,'US',escHtml(at),`${d?.ok?d.universe??d.ranking?.length??0:0} scored · ${d?.ranking?.length??0} rows published`);
     const go=d?.ok&&usFeedLive()?(d.ranking||[]).filter(r=>Number.isFinite(Number(r.score))&&Number(r.score)>=usFloor()).length:0;
     add(2,'US',`${go} GO`,'Suggestions · manual IBKR trades');
     add(3,'US',signed(Number(d?.rules?.targetPct)||3),'Suggested target · no automated protection');
   }
-  return groups.map((rows,i)=>`<div class="st"><div class="st-l">${['Market context','Model scores','Qualification','Targets'][i]}</div><div style="font-size:15px;line-height:1.7">${rows.join('')}</div></div>`).join('');
+  return groups.map((rows,i)=>`<div class="st"><div class="st-l">${['Market context','Active Strategy','Qualification','Targets'][i]}</div><div style="font-size:15px;line-height:1.7">${rows.join('')}</div></div>`).join('');
 }
 function refreshMarketSummary(){
   renderStats();renderStatusBar();updateTabCounts();
@@ -12212,15 +12143,15 @@ function sortValueOf(row,key){
 // every model. An explicit Model Score header click sorts the numeric score alone, either direction.
 const STATUS_SORT_RANK={GO:0,WAIT:2,BLOCKED:3};   // ARMED (a WAIT that crossed and is waiting for its upticks) ranks 1
 function compareModelScoreRows(a,b){
-  const av=a._us?a.score:btstScoreOf(a.symbol),bv=b._us?b.score:btstScoreOf(b.symbol);
-  const an=!Number.isFinite(av),bn=!Number.isFinite(bv);
-  if(!SORT_EXPLICIT){
-    const rank=row=>{if(row._us)return row.go?0:2;const st=getRowActionState(row);return st?.armed?1:(STATUS_SORT_RANK[st?.state]??4);};
-    const ar=rank(a),br=rank(b);
-    if(ar!==br)return ar-br;
-  }
-  if(an!==bn)return an?1:-1;
-  return (!an?(av-bv)*(SORT_EXPLICIT?SDIR:-1):0)||String(a.symbol).localeCompare(String(b.symbol));
+  const rank = row => {
+    if(row._us) return row.go ? 0 : 2;
+    const st = getRowActionState(row);
+    return st?.state === 'GO' ? 0 : st?.state === 'WAIT' ? 1 : 2;
+  };
+  const ar = rank(a), br = rank(b);
+  if(ar !== br) return ar - br;
+  const ap = Number(a.day ?? a.priceChange ?? 0), bp = Number(b.day ?? b.priceChange ?? 0);
+  return (bp - ap) || String(a.symbol).localeCompare(String(b.symbol));
 }
 function sortDisplayRows(rows){
   if(SCOL==='score')return rows.sort(compareModelScoreRows);
