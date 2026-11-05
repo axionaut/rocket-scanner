@@ -1,5 +1,5 @@
-const BUILD_TS='2026-11-05 09:01 IST'; // release build date (IST)
-const APP_VERSION=1631;
+const BUILD_TS='2026-11-05 10:18 IST'; // release build date (IST)
+const APP_VERSION=1632;
 const RADAR_SCORE_VERSION='v1419-recross-batches'; // Eligible on crossing the score floor at any time; selected model's evolving target and movement-based profit protection.
 
 // ── v1358: AN UNCAUGHT ERROR MUST NAME ITSELF ─────────────────────────────────────────────────
@@ -4756,28 +4756,22 @@ function firstScoreBadgeHtml(fc,currentPrice,currentAt=null){
     +(hasPrice?` &middot; ${approx?'~':''}&#8377;${price.toFixed(2)}`:' &middot; price unavailable')
     +(delta!==null?`<span style="color:var(--${delta>0?'green':delta<0?'red':'t3'});white-space:nowrap"> &middot; ${approx?'~':''}${signed(delta,'&#8377;')} (${signed(pct)}%) price move</span>`:hasPrice?' &middot; current price unavailable':'')+'</div>';
 }
-// v1606 (owner 30 Oct; v1616 3 Nov): the replay follows the live rules except cash (Min. Allocation sizing, re-crossing adds below cost, one-bar liquidity
-// skip, trailing OCO on the real cost/qty, 5-session profit-funded trims, Zerodha-matched booking). The bar shows today; since-start in the hover.
+// Account replay begins with actual inventory/cash and uses the shared allocator.
 let TRIGGER_PNL_HTML='',RULE_REPLAY=null;
 function acceptRuleReplay(r){if(!r)return;if(RULE_REPLAY?.ok&&!Number.isFinite(r.asOf))return;if(Number.isFinite(RULE_REPLAY?.asOf)&&Number.isFinite(r.asOf)&&r.asOf<RULE_REPLAY.asOf)return;RULE_REPLAY=r;updateTriggerPnl(ALL);}
 function updateTriggerPnl(rows){
-  const r=RULE_REPLAY;
-  if(!r?.ok)TRIGGER_PNL_HTML='<span style="color:var(--t3)" title="'+escHtml(r?.error||'Waiting for helper signal recording. Earlier unrecorded checks are not invented.')+'">Signal replay: '+(r?.error?'unavailable':'awaiting recorder')+'</span>';
+  const r=RULE_REPLAY,el=document.getElementById('trigger-pnl');
+  if(!r?.ok)TRIGGER_PNL_HTML='<span style="color:var(--t3)" title="'+escHtml(r?.error||'Waiting for the account snapshot')+'">Account replay: '+(r?.error?'unavailable':'starting')+'</span>';
+  else if(r.policy!=='live-account-rules-v2')TRIGGER_PNL_HTML='<span style="color:var(--t3)" title="The helper must load the shared score allocation and actual-account replay policy.">Replay update pending helper reload</span>';
   else{
-    const startDay=new Date(r.startedAt+19800000).toISOString().slice(0,10),since=(startDay===getSessionDate()?'':startDay+' ')+new Date(r.startedAt).toLocaleTimeString('en-IN',{timeZone:'Asia/Kolkata',hour:'2-digit',minute:'2-digit',hour12:false});
-    const sign=v=>(v>0?'+':v<0?'-':'')+Math.abs(v).toFixed(2);
-    if(r.today){
-      const t=r.today,tone=t.netRs>0?'green':t.netRs<0?'red':'t3',inr=v=>'Rs '+Math.round(v).toLocaleString('en-IN');
-      const title='Live rules except cash: every live trigger bought at your Min. Allocation ('+inr(r.minAllocRs)+', whole shares), re-crossing adds (below cost only), one-bar liquidity skip ('+r.skippedLiquidity+' skipped), trailing OCO on the real cost and quantity, profit-funded trims from the last 5 sessions, Zerodha-matched booking with DP. LIMIT exits need a recorded bid at/above the limit; open positions are marked with estimated sale charges. No real orders.\n\nToday: '+t.entries+' entries, '+inr(t.investedRs)+' bought, net '+sign(t.netRs)+' ('+sign(t.netPct)+'%).\nSince '+since+' IST: '+r.entries+' entries ('+r.adds+' adds), '+inr(r.investedRs)+' bought, fees '+inr(r.estimatedFees)+', net '+sign(r.netRs)+' ('+sign(r.netPct)+'%). Recording interruptions: '+(r.recordingInterruptions||0)+'.';
-      TRIGGER_PNL_HTML=`<span style="color:var(--${tone});white-space:nowrap" title="${escHtml(title)}">Signal replay today: &#8377;${sign(t.netRs)} net (${sign(t.netPct)}%)<span style="color:var(--t3)"> &middot; ${t.entries} entries &middot; ${t.closed} exited &middot; ${t.open} open${r.pending?' &middot; '+r.pending+' pending':''}</span></span>`;
-      const el=document.getElementById('trigger-pnl');if(el)el.innerHTML=TRIGGER_PNL_HTML;return;
-    }
-    const tone=r.netRs>0?'green':r.netRs<0?'red':'t3';
-    const title='Hypothetical one share per qualifying two-rise entry, ignoring cash. Starts '+since+' IST; earlier checks were not retained. Shared fee-breakeven and 0.26% OCO ratchet, actual tick sizes and profit-funded loss rules; no fixed +/-1.25% profit exit. LIMIT exits require a recorded bid at/above the limit. Net includes estimated liquidation fees for open positions. Recording interruptions: '+(r.recordingInterruptions||0)+'. No real orders.';
-    TRIGGER_PNL_HTML=`<span style="color:var(--${tone});white-space:nowrap" title="${escHtml(title)}">Signal replay: &#8377;${sign(r.netRs)} net (${sign(r.netPct)}%)<span style="color:var(--t3)"> &middot; ${r.entries} entries &middot; ${r.closed} exited &middot; ${r.open} open${r.pending?' &middot; '+r.pending+' pending':''}${r.recordingInterruptions?' &middot; '+r.recordingInterruptions+' recording gaps':''} &middot; since ${since}</span></span>`;
+    const since=new Date(r.startedAt).toLocaleTimeString('en-IN',{timeZone:'Asia/Kolkata',hour:'2-digit',minute:'2-digit',hour12:false});
+    const sign=v=>(v>0?'+':v<0?'-':'')+Math.abs(v).toFixed(2),tone=r.netRs>0?'green':r.netRs<0?'red':'t3';
+    const title='Starts from real available cash and existing holdings. Invested holdings cannot fund another entry. Shared score-proportional allocation, cost floor, liquidity caps, IOC price cap and RS exits. Net includes estimated charges and open liquidation costs. Recording begins at '+since+' IST; earlier trading is not invented. Broker fills may differ from recorded quote execution. No real orders.';
+    TRIGGER_PNL_HTML=`<span style="color:var(--${tone});white-space:nowrap" title="${escHtml(title)}">Account replay since ${since}: &#8377;${sign(r.netRs)} net (${sign(r.netPct)}%)<span style="color:var(--t3)"> &middot; ${r.entries-r.initialHoldings} new entries &middot; ${r.open} open</span></span>`;
   }
-  const el=document.getElementById('trigger-pnl');if(el)el.innerHTML=TRIGGER_PNL_HTML;
+  if(el)el.innerHTML=TRIGGER_PNL_HTML;
 }
+
 function btstToday(){
   const d=BTST.data;
   return d&&d.ok&&d.mode==='live'&&d.session===getSessionDate()&&Array.isArray(d.picks)?d:null;
@@ -5036,7 +5030,76 @@ function noteCrossing(sym,score,floor){
 // The action state for a live intraday crossing, or null when this row is not one.
 // Returning null hands the row back to the 15:15 final path unchanged.
 function btstCrossingState(s){
-  return null; // Abolished in v1625 in favor of pure binary strategy execution
+  if(isRankedModel(floorModel())&&!btstRanking())return {state:'WAIT',reason:floorModel()+' predictions unavailable or stale; awaiting fresh completed-minute scores'};
+  const floor=0;
+  if(!Number.isFinite(floor)) return null;
+  const score=btstScoreOf(s?.symbol);
+  if(!Number.isFinite(score)) return null;
+  const r=btstRanking();
+  // Only a LIVE ranking may trigger a buy. A replay, a dry run or another session's file must
+  // never reach here - same rule the final path has enforced since v1393.
+  if(!r||!r.src||r.src.mode!=='live'||r.src.session!==getSessionDate()) return null;
+  if(_modelSwitchPending||r.model!==r.src.activeModel)return {state:'WAIT',reason:'Confirming selected model with helper'};
+  const st=crossingStore(),key=normSym(s.symbol);
+  st.rebuy=st.rebuy||{};
+  const qty=Number(getCombinedOpenPositionMap()[s.symbol]?.qty)||0;
+  const buys=todayBuyFillsBySymbol().get(key)||[];
+  const fillKey=buys.length?JSON.stringify(buys.map(f=>[f.date,f.time,f.qty,f.price])):'[]';
+  let state=st.rebuy[key];
+  const before=state?state.qty+'|'+state.fillKey+'|'+state.consumed+'|'+state.armed:'';
+  // v1599: only a buy TODAY consumes today's crossing; shares carried from earlier sessions never do.
+  if(!state) state=st.rebuy[key]={qty,fillKey,consumed:buys.length>0,armed:false,v:1599};
+  // States saved before v1599 marked every carried holding consumed; correct them once.
+  if(!state.v){if(state.consumed&&!buys.length){state.consumed=false;state.armed=false;}state.v=1599;}
+  if(qty>state.qty||(fillKey!==state.fillKey&&buys.length>0)){
+    state.consumed=true;state.armed=false;
+  }
+  state.qty=qty;state.fillKey=fillKey;
+  if(score<=floor&&state.consumed) state.armed=true;
+  if(score<=floor&&st.at?.[key]&&!st.at[key].below){st.at[key].below=true;saveCrossings();}
+  if(score>floor&&state.consumed&&state.armed){state.consumed=false;state.armed=false;}
+  if(before!==state.qty+'|'+state.fillKey+'|'+state.consumed+'|'+state.armed) saveCrossings();
+  if(AUTO_BUY_STATUS?.executedToday?.includes(key))return {state:'WAIT',reason:'Helper confirms this crossing was already bought; waiting for a completed run outside the entry band and a fresh crossing.'};
+  if(AUTO_BUY_STATUS?.bridgeEntries?.some(e=>e.sym===key&&e.signalAsOf===r.src.asOf&&e.status==='done'&&e.filled===0))return {state:'WAIT',reason:'Immediate order did not fill within its price cap. Waiting for a fresh engine signal.'};
+  if(state.consumed&&score>floor)
+    return {state:'WAIT',reason:'Already bought on this crossing; waiting for a fresh dip below the floor and re-crossing.'};
+  if(score<=floor){
+    // Below the floor and never crossed today: nothing to say beyond the usual rank note.
+    if(!crossingStore().at[normSym(s.symbol)]) return {state:'WAIT',reason:'Model score is below your score floor'};
+    // It crossed earlier and has since fallen back. Requirement 1: if it was NOT bought and
+    // crosses again it is eligible again - so this is a WAIT, not a permanent disqualification.
+    return {state:'WAIT',reason:`Crossed +${floor.toFixed(2)} earlier today but is back to +${score.toFixed(2)}. Eligible again if it re-crosses.`};
+  }
+  // v1497 (owner, 15 Oct): no buy at the maxed-out score. 2.15+ means every model ranks the stock #1, usually
+  // mid-spike; replayed on the live Ensemble crossings 29 Sep-14 Oct these lost money (-0.13%/signal) and
+  // skipping them lifted the Rs 1.13L account result in both halves. Not noted as a crossing, so a later
+  // score back inside the band is an ordinary GO.
+  const SCORE_CAP=2.15;
+  if(r.model==='CUM'&&RocketStrategy.entryScoreCapped(r.model,score,floor)) return {state:'WAIT',reason:`Score +${score.toFixed(2)} is already ${RocketStrategy.CUM_ENTRY_BAND} or more above the +${floor.toFixed(2)} floor: Cumulative Change buys only fresh crossings (below +${(floor+RocketStrategy.CUM_ENTRY_BAND).toFixed(2)}). Buyable again after it falls below the floor and re-crosses.`};
+  if(RocketStrategy.entryScoreCapped(r.model,score,floor)) return {state:'WAIT',reason:`Score +${score.toFixed(2)} is at the maxed-out top (${SCORE_CAP}+): every model ranks it #1, usually mid-spike. These lost money live, so it is skipped; buyable if it settles back inside +${floor.toFixed(2)} to +${SCORE_CAP}.`};
+  // v1538 (owner, 22 Oct): the volume-fade (v1506) and size-bucket (v1517) vetoes are removed. Replayed under the
+  // current OCO exit with profit-funded trims (1-21 Oct, Rs3.5L), no veto earned more than either or both in both halves.
+  // 28 Oct 2026 (owner): new buys from the 09:15 open for every model (was 09:16; 09:45 before 23 Oct).
+  // A crossing before the open waits. Not noted as a crossing.
+  if(isEquitySession(Date.now())&&istClock().mins<ENTRY_START_MIN) return {state:'WAIT',reason:`Score +${score.toFixed(2)} clears +${floor.toFixed(2)}, but new buys start at the 09:15 open.`};
+  const first=noteCrossing(s.symbol,score,floor);
+  if(!isEquitySession(Date.now())) return {state:'WAIT',reason:`Score +${score.toFixed(2)} clears +${floor.toFixed(2)} - market closed.`};
+  // 23 Oct 2026 (owner): buy only AT the crossing. Being further above the floor is not a better signal, and a stock
+  // that crossed in an earlier run is not bought later; it needs a completed run below the floor and a fresh crossing.
+  if(!r.crossingsKnown) return {state:'WAIT',reason:'Waiting for the helper’s 10-second entry check.'};
+  if(!r.crossed.has(key)&&r.armed?.[key]){
+    const a=r.armed[key],since=new Date(a.since).toLocaleTimeString('en-IN',{timeZone:'Asia/Kolkata',hour:'2-digit',minute:'2-digit',hour12:false});
+    return {state:'WAIT',armed:true,reason:`Crossed +${floor.toFixed(2)} at ${since}. Buys on two rising 10-second checks, the second bigger${a.prevUp!=null?` (last rise +${a.prevUp.toFixed(2)}%; next must beat it)`:' (waiting for the first rise)'}.`};
+  }
+  if(!r.crossed.has(key)){
+    const at=first?new Date(first.t).toLocaleTimeString('en-IN',{hour:'2-digit',minute:'2-digit',hour12:false}):'';
+    return {state:'WAIT',reason:`Above +${floor.toFixed(2)}${at?' since '+at:''}, but buys happen only in the run where it crosses. Needs a run below the floor and a fresh crossing.`};
+  }
+  const stale=universePriceStaleness()||stockPriceStaleness(s.symbol);
+  if(stale) return {state:'WAIT',reason:stale};
+  const at=first?new Date(first.t).toLocaleTimeString('en-IN',{hour:'2-digit',minute:'2-digit',hour12:false}):'';
+  return {state:'GO',reason:`Score +${score.toFixed(2)} clears the +${floor.toFixed(2)} floor`
+    +(at?` (crossed ${at})`:'')+` - buy the funded basket now; let the OCO bracket manage the exit`};
 }
 // v1416: THE FLOOR NOW DECIDES WHAT TRADES. It is pushed to the helper, which passes --min-score
 // to every engine run including the scheduled 15:05/15:15 ones, so the picks file is cut at the
@@ -5201,7 +5264,6 @@ function _getRowActionStateUncached(s, ignoreMarketClosed=false){
   if(!ignoreMarketClosed&&!isEquitySession(Date.now()))return {state:'WAIT',reason:'NSE market is closed'};
   const stale=universePriceStaleness()||stockPriceStaleness(s.symbol);
   if(stale)return {state:'WAIT',reason:stale};
-  if((getCombinedOpenPositionMap()[s.symbol]?.qty||0)>0)return {state:'WAIT',reason:'Strategy already has an open position'};
 
   // 1. Universal Native Hard Safety Rails (Always active across all strategies)
   const survBlock = surveillanceBlockReason(s.symbol);
@@ -5210,17 +5272,18 @@ function _getRowActionStateUncached(s, ignoreMarketClosed=false){
   if(ucBlock) return {state:'BLOCKED', reason:ucBlock};
   if(s.basketEligible === false) return {state:'BLOCKED', reason:'Non-EQ series or price band under 10%'};
 
-  const price = Number(s.price);
-  if(!(price > 0)) return {state:'BLOCKED', reason:'Invalid or missing live price'};
-  if(price < 5 || price > 4000) return {state:'BLOCKED', reason:'Price outside native ₹5 to ₹4,000 range'};
+  if(floorModel()==='CUM'){
+    const source=BTST.data;
+    if(source?.activeModel!=='CUM'||source?.cumulative?.scoring!=='vwap-strengthening-v1')return {state:'WAIT',reason:'Awaiting native v1617 VWAP-strengthening observations'};
+    const held=getCombinedOpenPositionMap()[s.symbol];
+    if(held?.qty>0&&Number(s.price)>=(held.avg||held.avgCost||Infinity))return {state:'WAIT',reason:'CUM re-crossing adds require price below average cost'};
+    return btstCrossingState(s)||{state:'WAIT',reason:'Awaiting native VWAP crossing'};
+  }
+  if((getCombinedOpenPositionMap()[s.symbol]?.qty||0)>0)return {state:'WAIT',reason:'Strategy already has an open position'};
+  const price=Number(s.price);
+  if(!(price>0))return {state:'BLOCKED',reason:'Invalid or missing live price'};
   const common=RocketStrategy.evaluateUniverse(s);
   if(!common.eligible)return {state:'WAIT',reason:common.reason};
-  if(floorModel()==='CUM'){
-    const source=BTST.data,sym=normSym(s.symbol),score=(source?.ranking||[]).find(r=>normSym(r[0])===sym)?.[1];
-    if(source?.activeModel!=='CUM'||source?.cumulative?.scoring!=='vwap-strengthening-v1'||!(score>0))return {state:'WAIT',reason:'VWAP percentage gap is not increasing, or a fresh paired observation is unavailable'};
-    const entry=entryTriggerView('CUM');
-    return entry.crossed.has(sym)?{state:'GO',reason:'Native VWAP strengthening, two rising checks, VWAP and opening-range breakout passed',targetPct:0,stopLossPct:0}: {state:'WAIT',reason:entry.armed[sym]?'VWAP gap is increasing; awaiting two rising price checks':'Awaiting an observed transition to an increasing VWAP gap'};
-  }
 
   // 2. Active Strategy Evaluation (Dynamic from StratGen)
   const activeStrat = window.__deployedStratGen || RocketStrategy.CONFIG?.ACTIVE_STRATGEN_DEPLOYED;
@@ -7836,7 +7899,7 @@ function getDefaultMaxAlloc(){return getAutoMaxAllocCap();}
 // the same per-trade figure v1299 sizes allocations with. Read by every target, so memoized briefly.
 function goalAllocationExplanation(){
   const econ=RocketStrategy.breakevenTurnover(false,getLiveMlotQuantiles());
-  return `Eligible stocks share cash equally, within your saved Min % Capital. Each position is sized to reach your minimum allocation and clear the dynamic whole-share MLoT breakeven turnover (currently ₹${econ.toLocaleString('en-IN')}); adds need one share. When cash is short, the higher score is funded first, then the earlier entry trigger, then the more liquid stock.`;
+  return `Eligible stocks share available cash in proportion to their positive strategy scores. Each position must clear the dynamic whole-share MLoT breakeven turnover (currently ₹${econ.toLocaleString('en-IN')}); adds need one share. When cash is short, the higher score is funded first, then the earlier entry trigger, then the more liquid stock.`;
 }
 
 // v1424: an empty Capital field means Kite's live allocatable cash (equity `net`, the "Available"
@@ -8068,18 +8131,10 @@ let _maxAllocMemo=null;
 // 19 Oct (owner): the minimum is charge-based (strategy.js minOrderRs); an add to a held stock carries no new DP fee.
 // v1603 (owner 30 Oct): Min Allocation replaces All-in up to. A new position needs at least the typed amount (never
 // below the charge-based Rs 5,900); empty = the charge-based minimum. Adds still need one share.
-function getMinAllocPct(){
-  const v=parseFloat(document.getElementById('fMinAllocPct')?.value);
-  return Number.isFinite(v)&&v>0&&v<=100?v:10;
-}
 function getMinAlloc(held=false,mlot=null){
-  if(held)return RocketStrategy.breakevenTurnover(true,mlot||getLiveMlotQuantiles());
-  const cap=getEffectiveCapital();
-  const pct=getMinAllocPct();
-  const targetRs=(cap>0&&pct>0)?cap*pct/100:0;
-  const econ=RocketStrategy.breakevenTurnover(false,mlot||getLiveMlotQuantiles());
-  return Math.max(econ,targetRs);
+  return RocketStrategy.breakevenTurnover(held,mlot||getLiveMlotQuantiles());
 }
+
 function getMaxAllocPct(){
   return 100;
 }
@@ -8187,19 +8242,10 @@ function updateFilterPlaceholders(){
       capEl.title=`Empty = Kite available cash ${f(kiteCash)}, refreshed every 20 s (as of ${new Date(KITE_MARGINS.at).toLocaleTimeString('en-IN',{hour12:false})}).\n= opening balance ${f(a.opening_balance)} + intraday pay-in ${f(a.intraday_payin)} − debits ${f(u.debits)} − payout ${f(u.payout)}\n(debits = today's delivery buys ${f(u.delivery)} − sale credit ${f(u.holding_sales)} + charges/other)\nType a value to override.`;
     } else { const d=getDefaultCapital(); if(d>0){ capEl.placeholder=String(Math.round(d)); capEl.title=`Empty = your computed capital ₹${Math.round(d).toLocaleString('en-IN')} (holdings + open positions); Kite cash unavailable. Type a value to override.`; } }
   }
-  const minPctEl=document.getElementById('fMinAllocPct');
-  if(minPctEl){
-    const cap=getEffectiveCapital();
-    const econ=RocketStrategy.breakevenTurnover(false,getLiveMlotQuantiles());
-    const econPct=cap>0?Math.ceil(econ/cap*100):0;
-    minPctEl.placeholder='10';
-    minPctEl.title=`Minimum % of capital per position (empty = 10%). Sizing dynamically ensures every stock clears its dynamic MLoT breakeven turnover (currently ₹${econ.toLocaleString('en-IN')}${econPct>0?` ≈ ${econPct}%`:''}) in whole shares.`;
-    showTradeInputMode(minPctEl);
-  }
   const riskEl=document.getElementById('fRiskPerTrade');
   const tgtEl=document.getElementById('fTgtOverride');
   if(tgtEl){ let d=0; try{d=getDefaultTgtPct();}catch(e){} tgtEl.placeholder=d>0?d.toFixed(1):'auto'; tgtEl.title='Empty keeps this as a harvest-based planning reference only; it never changes allocation. It does not set automatic candidate or held-position targets. Type a value to explicitly override those targets; clear it to restore planning-only Auto.'; }
-  showTradeInputMode(capEl,kiteCash!=null?'Kite':'Auto');showTradeInputMode(minPctEl);
+  showTradeInputMode(capEl,kiteCash!=null?'Kite':'Auto');
   if(riskEl?.closest('.fg')) riskEl.closest('.fg').style.display='none'; // retained saved value; no risk gate in tick sizing
   showTradeInputMode(tgtEl,'Planning');
 }
@@ -11152,101 +11198,20 @@ function planDualBasket(rows,capital){
   return val;
 }
 function _planDualBasketUncached(rows,capital){
-  const reasons=new Map(),alloc={},funded=[];
-  const maxAlloc=getTypedMaxAlloc(capital),minRequired=getMinAlloc();
-  const minTxt='Rs '+Math.round(minRequired).toLocaleString('en-IN');
-  let remaining=Math.max(0,Number(capital||0)-BASKET_CASH_RESERVE_RS);
-  // v1601 (owner 30 Oct): when cash cannot fund every trigger, the higher score is funded first, then the earlier entry
-  // trigger, then the more liquid stock (higher normal 5-minute bar turnover; was alphabetical). Each funded name still
-  // gets its equal share.
-  const barRs=r=>Number((typeof btstRanking==='function'?btstRanking():null)?.src?.barTurnover?.[normSym(r.symbol||'')]?.medianRs)||0;
-  const heldNow=getHeldPositionMap();
-  // v1615 (owner 2 Nov): Accumulation priority - underwater held stocks with a qualifying crossing signal are funded first.
-  const isAccum=r=>{
-    const h=heldNow[r.symbol], px=getBuyPrice(r)||r.price;
-    return !!(h && h.qty > 0 && h.avg > 0 && px > 0 && px < h.avg);
-  };
-  const trigAt = r => {
-    const k = normSym(r.symbol);
-    return Number(crossingStore()?.at?.[k]?.firstT || crossingStore()?.at?.[k]?.t || Infinity);
-  };
-  const rvolOf = r => Number(RocketStrategy.inputs(r).rvol ?? r.rvol ?? 1.0);
-  const pool = [...(rows||[])].sort((a,b) => 
-    (isAccum(b)?1:0) - (isAccum(a)?1:0) ||
-    (trigAt(a) - trigAt(b)) ||
-    (rvolOf(b) - rvolOf(a)) ||
-    (barRs(b) - barRs(a)) ||
-    a.symbol.localeCompare(b.symbol)
-  );
-  const unitDebitOf=price=>price+calcZerodhaCharges(price,1,false,false,false);
-  const autoCap=getAutoMaxAllocCap(capital);
-  const eligiblePool=pool.filter(r=>!EXPORT_EXCLUDED.has(r.symbol)&&isStockEligible(r)&&getBuyPrice(r)>0).slice(0,20);
-  const batch=new Set(eligiblePool.map(r=>r.symbol));
-  let candidatesLeft=eligiblePool.length;
-  // ── v1418 requirement 2: NO SLOT CAP, AND CAPITAL SPLIT BY SCORE ──────────────────────────────
-  // Every eligible name is funded, not the first five. The share each gets is proportional to how
-  // far its score clears the floor, so a +2.66 conviction is sized above a +1.21 one instead of
-  // both taking Capital/5. Weights use (score - floor) + a floor-relative base rather than the raw
-  // score: raw scores are all clustered near the floor, so raw-proportional weighting would be
-  // almost exactly equal and the "score-weighted" label would be cosmetic.
-  const crossFloor=btstMinScore();
-  const weightOf=r=>{
-    const sc=btstScoreOf(r.symbol);
-    // 23 Oct 2026 (owner): every crossing gets an equal share; a higher score above the floor is not a better signal.
-    return 1;
-  };
-  const totalWeight=eligiblePool.reduce((a,r)=>a+weightOf(r),0)||1;
-  const scoreWeighted=Number.isFinite(crossFloor)&&eligiblePool.length>0;
-  // Declared BEFORE weightBudget closes over it. A `const` referenced from a closure that runs
-  // before its declaration is the v1400/v1416 temporal-dead-zone trap - it throws rather than
-  // reading undefined, and the throw is swallowed by an enclosing try/catch.
-  const startingCash=remaining;
-  const weightBudget=r=>{
-    // Proportional share of the cash available at the START of the pass, so the first-funded name
-    // does not silently absorb what later names are owed.
-    const share=startingCash*weightOf(r)/totalWeight;
-    return Math.max(minRequired,share);
-  };
-  for(const r of pool){
-    let reason=EXPORT_EXCLUDED.has(r.symbol)?'Excluded from basket by you':!isStockEligible(r)?getRowActionState(r).reason:null;
-    const price=getBuyPrice(r);
-    if(!reason&&!(price>0))reason='No valid buy price';
-    if(!reason&&!batch.has(r.symbol))reason='Next basket: Zerodha allows 20 stocks per export';
-    const liquidityCap=getTurnoverAllocationCap(r);
-    if(!reason&&!(liquidityCap>0))reason='No turnover or order-book depth to enforce the market-impact cap';
-    // Auto (Max Alloc empty): split remaining cash equally across the GO stocks still to fund,
-    // never below Rs 5,000 each, so one top-ranked stock cannot absorb the whole capital.
-    const slots=Math.max(1,Math.min(candidatesLeft,Math.floor(remaining/Math.max(1,minRequired*1.005))));
-    // Auto also caps each stock at the larger of Rs 5,000 and one twentieth of capital, so a lone GO
-    // stock cannot absorb the account (investigation Problem 3: concentration).
-    // v1472: Max % caps the score-weighted share instead of replacing it.
-    const share=scoreWeighted?weightBudget(r):Math.min(remaining/slots,autoCap);
-    let budget=Math.min(remaining,maxAlloc>0?Math.min(share,maxAlloc):share,liquidityCap);
-    // Adds to a held stock share its DP fee: one share is the minimum (19 Oct).
-    const rowMin=RocketStrategy.minimumAllocationRs(price,minRequired,!!(heldNow[r.symbol]?.qty>0),unitDebitOf(price));
-    const rowMinTxt=heldNow[r.symbol]?'one-share add':'whole-share '+minTxt+' allocation';
-    let qty=0;
-    if(!reason){
-      candidatesLeft--;
-      // Buy-side charges are linear for CNC. Reserve both notional and charges.
-      qty=RocketStrategy.quantityWithinBudget(budget,price,unitDebitOf(price));
-    }
-    const cost=qty*price,charges=qty>0?calcZerodhaCharges(price,qty,false,false,false):0,debit=cost+charges;
-    if(!reason&&(!(qty>0)||cost+1e-7<rowMin||debit>budget+1e-7)){
-      // 27 Oct 2026: name the amount needed and each limit, so the binding one is visible.
-      const needQty=Math.max(1,Math.ceil(rowMin/price-1e-10)),need=needQty*price+calcZerodhaCharges(price,needQty,false,false,false);
-      const inr=v=>'₹'+Math.round(v).toLocaleString('en-IN');
-      reason=liquidityCap<rowMin?`Market-impact cap below the ${rowMinTxt} minimum`:`Cannot fund ${needQty===1?'one share':needQty+' shares'} (${inr(need)} incl. buy charges): cash left ${inr(remaining)}, per-stock cap ${inr(maxAlloc>0?Math.min(share,maxAlloc):share)}, market-impact cap ${Number.isFinite(liquidityCap)?inr(liquidityCap):'none'}`;
-    }
-    if(reason){reasons.set(r.symbol,reason);alloc[r.symbol]={alloc:0,debit:0,qty:0,rejected:true,reason};continue;}
-    r.basketModel='strategy';
-    const exitPolicy=getRowExitPolicy(r,price,null,null,qty);
-    alloc[r.symbol]={alloc:cost,debit,qty,buyPrice:price,rejected:false,model:'strategy',exitPolicy,
-      tgtPct:exitPolicy.targetPct,slPct:exitPolicy.stopPct};
-    funded.push(r);remaining-=debit;
-  }
-  return {rows:funded,alloc,reasons};
+  const held=getHeldPositionMap(),cross=crossingStore(),ranking=btstRanking();
+  const candidates=(rows||[]).map(r=>{
+    const h=held[r.symbol],price=getBuyPrice(r),k=normSym(r.symbol);
+    return {symbol:r.symbol,price,score:Number(btstScoreOf(r.symbol)),held:!!(h?.qty>0),accumulation:!!(h?.qty>0&&h.avg>0&&price<h.avg),
+      triggerAt:Number(cross?.at?.[k]?.firstT||cross?.at?.[k]?.t||Infinity),
+      rvol:Number(RocketStrategy.inputs(r).rvol??r.rvol??1),barRs:Number(ranking?.src?.barTurnover?.[k]?.medianRs)||0,
+      liquidityCap:getTurnoverAllocationCap(r),unitDebit:price+calcZerodhaCharges(price,1,false,false,false),
+      reason:EXPORT_EXCLUDED.has(r.symbol)?'Excluded from basket by you':!isStockEligible(r)?getRowActionState(r).reason:null};
+  });
+  const planned=RocketStrategy.planAccountEntries(candidates,{cash:Math.max(0,Math.min(Number(capital),getKiteAvailableCash()??0)),maxAlloc:getTypedMaxAlloc(capital),mlot:getLiveMlotQuantiles()});
+  for(const r of rows||[])if(planned.alloc[r.symbol]){const p=getRowExitPolicy(r);Object.assign(planned.alloc[r.symbol],{tgtPct:p.targetPct,slPct:p.stopPct});}
+  return {rows:planned.funded.map(symbol=>(rows||[]).find(r=>r.symbol===symbol)),alloc:planned.alloc,reasons:new Map(Object.entries(planned.reasons))};
 }
+
 function computeAlloc(capital,selList){
   return planDualBasket(selList,capital).alloc;
 }
@@ -15245,7 +15210,7 @@ function buildBasketOrders(capital, selList){
         recommendation:{capturedAt:Date.now(),session:getSessionDate(),score:btstScoreOf(sym),
           scoreAsOf:btstRanking()?.src?.asOf||null,scoreFloor:btstMinScore(),
           scoringModel:btstRanking()?.model||null,scoreA:btstScoreAOf(sym),
-          referencePrice:Number(s.price)||null,appVersion:APP_VERSION,targetPolicy:TARGET_POLICY_VERSION}}
+          referencePrice:Number(s.price)||null,allocationPolicy:'score-proportional-v2',appVersion:APP_VERSION,targetPolicy:TARGET_POLICY_VERSION}}
     });
   };
   // v1398: NO EXPORTED ORDER MAY EXCEED THE CASH BEHIND IT. 17 Sep 15:24 a BUY VENUSPIPES 6,000 @
@@ -15878,7 +15843,7 @@ function compactRankingRows(rows){
   }));
 }
 function applySavedFiltersForMode(mode){
-  const ids=['fSearch','fMinScore','fDropThin','fCapital','fMinAllocPct','fRiskPerTrade'];
+  const ids=['fSearch','fMinScore','fDropThin','fCapital','fRiskPerTrade'];
   const prev={};
   ids.forEach(id=>{const el=document.getElementById(id);if(el)prev[id]=el.value;});
   try{
@@ -16483,7 +16448,7 @@ function saveFilterState(){
   // default" (shown in the placeholder), so we persist the raw value as-is.
   const tradeInputs={
     capital:capEl?.value||'',
-    minAllocPct:document.getElementById('fMinAllocPct')?.value||'',
+    allocationMode:'score-proportional',
     tgtOverride:document.getElementById('fTgtOverride')?.value||'',
     riskPerTrade:document.getElementById('fRiskPerTrade')?.value||''
   };

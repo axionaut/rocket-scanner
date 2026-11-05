@@ -92,6 +92,56 @@
     return Math.max(economic, reqShares * price);
   }
 
+  // One allocation decision for the live basket, account replay and StratGen.
+  // Callers provide contemporaneous eligibility/quotes, never a different sizing model.
+  function planAccountEntries(candidates, account) {
+    const cash=Number(account.cash);
+    if(!Number.isFinite(cash)||cash<0)throw Error('Recorded available cash is required');
+    const capital=Number(account.capital)>0?Math.min(cash,Number(account.capital)):cash;
+    const spendable=Math.max(0,capital-1),alloc={},reasons={},selected=[];
+    const pool=[...candidates].sort((a,b)=>(b.score||0)-(a.score||0)||
+      ((a.triggerAt??Infinity)-(b.triggerAt??Infinity))||(b.rvol||0)-(a.rvol||0)||(b.barRs||0)-(a.barRs||0)||a.symbol.localeCompare(b.symbol));
+    let reserved=0;
+    for(const r of pool){
+      let reason=r.reason||null;
+      if(!reason&&!(r.price>0&&Number.isFinite(r.price)))reason='No valid buy price';
+      if(!reason&&!(r.score>0&&Number.isFinite(r.score)))reason='A positive executable strategy score is required';
+      if(!reason&&!(r.liquidityCap>0))reason='No turnover or order-book depth to enforce the market-impact cap';
+      const unit=r.unitDebit??r.price+sumChargeParts(calcZerodhaChargesSplit(r.price,1,false,false,false));
+      const minimum=minSharesForStock(r.price,!!r.held,account.mlot),floor=minimum*unit;
+      const ceiling=Math.min(spendable,r.liquidityCap,Number(account.maxAlloc)>0?Number(account.maxAlloc):Infinity);
+      if(!reason&&floor>ceiling+1e-7)reason='Liquidity or allocation cap cannot cover the whole-share cost breakeven minimum';
+      if(!reason&&selected.length>=20)reason='Next basket: Zerodha allows 20 stocks per export';
+      if(!reason&&reserved+floor>spendable+1e-7)reason='Cash cannot cover every minimum order; higher scores funded first';
+      if(reason){reasons[r.symbol]=reason;continue;}
+      selected.push({...r,unit,minimum,floor,ceiling});reserved+=floor;
+    }
+    // Weighted water filling: preserve minimum viable orders, cap market impact,
+    // and redistribute capacity released by a binding cap to the other names.
+    const target=Math.min(spendable,selected.reduce((n,r)=>n+r.ceiling,0));
+    let lo=0,hi=selected.reduce((n,r)=>Math.max(n,r.ceiling/r.score),0);
+    for(let i=0;i<60;i++){const mid=(lo+hi)/2,total=selected.reduce((n,r)=>n+Math.max(r.floor,Math.min(r.ceiling,mid*r.score)),0);if(total>target)hi=mid;else lo=mid;}
+    let remaining=spendable;
+    for(const r of selected){
+      const budget=Math.max(r.floor,Math.min(r.ceiling,lo*r.score)),qty=Math.max(r.minimum,quantityWithinBudget(budget,r.price,r.unit));
+      const cost=qty*r.price,charges=sumChargeParts(calcZerodhaChargesSplit(r.price,qty,false,false,false)),debit=cost+charges;
+      if(debit>remaining+1e-7||debit>r.ceiling+1e-7)throw Error('Score allocation exceeded its funded capacity');
+      alloc[r.symbol]={qty,capital:cost,charges,debit,budget,minimum:r.minimum*r.price,score:r.score,weight:r.score/selected.reduce((n,x)=>n+x.score,0)};remaining-=debit;
+    }
+    // Largest remainders; no cash overrun or fractional shares.
+    const rounding=[...selected].sort((a,b)=>((alloc[b.symbol].budget/ b.unit)%1)-((alloc[a.symbol].budget/a.unit)%1)||b.score-a.score);
+    for(const r of rounding){const x=alloc[r.symbol];if(r.unit>remaining+1e-7||x.debit+r.unit>r.ceiling+1e-7)continue;x.qty++;x.capital=x.qty*r.price;x.charges=sumChargeParts(calcZerodhaChargesSplit(r.price,x.qty,false,false,false));const debit=x.capital+x.charges;remaining-=debit-x.debit;x.debit=debit;}
+    return {alloc,reasons,funded:selected.map(r=>r.symbol),remaining,minimum:breakevenTurnover(false,account.mlot),mode:'score-proportional'};
+  }
+
+  function authorizeAccountEntry(request, live, minimum) {
+    const budget=Math.min(live.cash,Number.isFinite(live.allocationCap)?live.allocationCap:Infinity);
+    const qty=Math.min(request.qty,quantityWithinBudget(budget,request.cap,request.cap*1.003));
+    if(!(qty>0))throw Error('Entry no longer fits available cash');
+    if(minimum>0&&qty*request.cap<minimum)throw Error(`Cash left fits only ${qty} share(s) (Rs ${Math.round(qty*request.cap)}), below the Rs ${Math.round(minimum)} minimum`);
+    return qty;
+  }
+
   /**
    * Tier 1: Filter raw universe down to liquid, clean momentum candidates
    * @param {Array} stocks - List of stock objects from Kite universe
@@ -654,7 +704,7 @@ function bookedSession(session,holdingCosts,tradebook){
   // rules on 29/30 Oct triggers it was the only one-change variant better on both days (+0.06% vs +0.02%; -0.21% vs -0.41%).
   const CUM_ENTRY_BAND = 0.5;
   function entryScoreCapped(model, score, floor){
-    return false; // Eradicated in v1625: binary pass/fail rules supersede score floors & caps
+    return model==='CUM'&&Number.isFinite(score)&&Number.isFinite(floor)&&score>=floor+CUM_ENTRY_BAND;
   }
 
   // 27 Oct 2026 (owner): market-trend gates removed for every live and paper model.
@@ -663,46 +713,11 @@ function bookedSession(session,holdingCosts,tradebook){
   }
 
   function applyDeployedStrategy(dep) {
-    if (!dep) {
-      CONFIG.ACTIVE_STRATGEN_DEPLOYED = null;
-      CONFIG.TARGET_PCT = 1.25;
-      CONFIG.STOP_LOSS_PCT = 0;
-      CONFIG.MAX_HOLDING_DAYS = 2;
-      return;
-    }
-    try {
-      const spec = dep.spec || {};
-      const exit = spec.exit || {};
-      CONFIG.TARGET_PCT = 1.25;
-      CONFIG.STOP_LOSS_PCT = 0;
-      CONFIG.MAX_HOLDING_DAYS = 2;
-      if (exit.tp_pct && exit.tp_pct > 0) {
-        CONFIG.TARGET_PCT = +(exit.tp_pct * 100).toFixed(2);
-      } else if (spec.target_pct && spec.target_pct > 0) {
-        CONFIG.TARGET_PCT = spec.target_pct;
-      }
-      if (exit.sl_pct !== undefined && exit.sl_pct >= 0) {
-        CONFIG.STOP_LOSS_PCT = +(exit.sl_pct * 100).toFixed(2);
-      } else if (spec.stop_loss_pct !== undefined && spec.stop_loss_pct >= 0) {
-        CONFIG.STOP_LOSS_PCT = spec.stop_loss_pct;
-      }
-      if (spec.max_holding_days) CONFIG.MAX_HOLDING_DAYS = spec.max_holding_days;
-      CONFIG.ACTIVE_STRATGEN_DEPLOYED = dep;
-      if(spec.exit?.policy==='rs-trail-min5-v2'){CONFIG.TARGET_PCT=0;CONFIG.STOP_LOSS_PCT=0;}
-      console.log(`[Strategy] Loaded deployed StratGen Champion: "${dep.name}" (Target: ${CONFIG.TARGET_PCT}%, SL: ${CONFIG.STOP_LOSS_PCT}%)`);
-    } catch(e) {}
-  }
-
-  // Node environment auto-read
-  if (typeof module !== 'undefined' && typeof require !== 'undefined') {
-    try {
-      const fs = require('fs');
-      const p = require('path');
-      const depPath = p.join(__dirname, 'deployed_strategy.json');
-      if (fs.existsSync(depPath)) {
-        applyDeployedStrategy(JSON.parse(fs.readFileSync(depPath, 'utf8')));
-      }
-    } catch(e) {}
+    CONFIG.TARGET_PCT=1.25;CONFIG.STOP_LOSS_PCT=0;CONFIG.MAX_HOLDING_DAYS=null;CONFIG.ACTIVE_STRATGEN_DEPLOYED=null;
+    if(!dep)return;
+    // Proposal TP/SL/horizons must never silently rewrite the common executor.
+    if(dep.spec?.exit?.policy!=='rs-trail-min5-v2'||dep.test_evidence?.live_parity!==true)return;
+    CONFIG.TARGET_PCT=0;CONFIG.ACTIVE_STRATGEN_DEPLOYED=dep;
   }
 
   return {
@@ -720,6 +735,8 @@ function bookedSession(session,holdingCosts,tradebook){
     dynamicTrailGapPct,
     quantityWithinBudget,
     minimumAllocationRs,
+    planAccountEntries,
+    authorizeAccountEntry,
     CONFIG,
     inputs,
     evaluateUniverse,

@@ -82,7 +82,7 @@
       if(badge){badge.textContent=state;badge.style.color=s.ok&&state!=='STALLED'&&state!=='FAILED'?'#00e5a3':'#ff7043';badge.title=s.lastError||s.deploymentBlock||'';}
       if($('sgHealthState')){
         $('sgHealthState').textContent='StratGen '+state;
-        const job=s.job;
+        const job=s.job;nativeApi?.sgShowCurrentJob?.(job);
         $('sgHealthDetail').textContent=[s.pid?'PID '+s.pid:'',s.heartbeatAgeMs!==null?Math.round(s.heartbeatAgeMs/1000)+'s since heartbeat':'No heartbeat',job?job.action+' | '+job.state+(job.phase?' | '+job.phase.replaceAll('_',' '):'')+(job.total?' | '+job.progress+'/'+job.total:''):'No job',s.restarts?'Restarts '+s.restarts:'',s.live?($('fModel')?.value==='CUM'?'Live: native CUM':'Live '+s.live.state+(s.live.error?' | '+s.live.error:'')):'',s.upstreamChanges?.length?'Original StratGen changed: '+s.upstreamChanges.join(', ')+' (review pending)':''].filter(Boolean).join(' · ');
         $('sgCancel').disabled=job?.state!=='RUNNING';
         $('sgFailure').hidden=!s.lastError&&s.job?.state!=='FAILED'&&s.ok&&state!=='STALLED'&&state!=='FAILED';
