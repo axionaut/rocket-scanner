@@ -83,6 +83,17 @@
     return qty;
   }
 
+  // USD fee estimate, checked 5 Nov 2026 against IBKR and FINRA schedules.
+  // Tiered includes a conservative 0.0035/share venue reserve, not an exact route fee.
+  function ibkrOrderFee(qty,price,plan='fixed',sell=false,day='2026-11-05'){
+    if(!(qty>0&&price>0))return 0;
+    const commission=Math.min(Math.max(plan==='tiered'?.35:1,qty*(plan==='tiered'?.0035:.005)),qty*price*.01);
+    const taf=sell&&(day<'2026-10-01'||day>'2026-12-31')?Math.min(9.79,qty*.000195):0;
+    const regulatory=qty*.000003+(sell?qty*price*.0000206+taf:0);
+    const routing=plan==='tiered'?qty*(.0035+.0002)+commission*(.000175+.00056):0;
+    return Math.ceil((commission+regulatory+routing)*100-1e-9)/100;
+  }
+
   function minimumAllocationRs(price, requested, held = false, unitDebit = null, mlot = null) {
     if (!(price > 0) || !Number.isFinite(price)) return Infinity;
     if (held) return price;
@@ -101,6 +112,13 @@
     const spendable=Math.max(0,capital-1),alloc={},reasons={},selected=[];
     const pool=[...candidates].sort((a,b)=>(b.score||0)-(a.score||0)||
       ((a.triggerAt??Infinity)-(b.triggerAt??Infinity))||(b.rvol||0)-(a.rvol||0)||(b.barRs||0)-(a.barRs||0)||a.symbol.localeCompare(b.symbol));
+    const fees=account.orderCharges||((qty,price)=>sumChargeParts(calcZerodhaChargesSplit(price,qty,false,false,false)));
+    const quantity=(budget,r)=>{
+      if(!account.orderCharges)return quantityWithinBudget(budget,r.price,r.unit);
+      let lo=0,hi=Math.floor(budget/r.price);
+      while(lo<hi){const n=Math.ceil((lo+hi)/2);if(n*r.price+fees(n,r.price)<=budget+1e-7)lo=n;else hi=n-1;}
+      return lo;
+    };
     let reserved=0;
     for(const r of pool){
       let reason=r.reason||null;
@@ -108,7 +126,7 @@
       if(!reason&&!(r.score>0&&Number.isFinite(r.score)))reason='A positive executable strategy score is required';
       if(!reason&&!(r.liquidityCap>0))reason='No turnover or order-book depth to enforce the market-impact cap';
       const unit=r.unitDebit??r.price+sumChargeParts(calcZerodhaChargesSplit(r.price,1,false,false,false));
-      const minimum=minSharesForStock(r.price,!!r.held,account.mlot),floor=minimum*unit;
+      const minimum=account.minimumShares?account.minimumShares(r.price,!!r.held,account.mlot):minSharesForStock(r.price,!!r.held,account.mlot),floor=account.orderCharges?minimum*r.price+fees(minimum,r.price):minimum*unit;
       const ceiling=Math.min(spendable,r.liquidityCap,Number(account.maxAlloc)>0?Number(account.maxAlloc):Infinity);
       if(!reason&&floor>ceiling+1e-7)reason='Liquidity or allocation cap cannot cover the whole-share cost breakeven minimum';
       if(!reason&&selected.length>=20)reason='Next basket: Zerodha allows 20 stocks per export';
@@ -123,14 +141,14 @@
     for(let i=0;i<60;i++){const mid=(lo+hi)/2,total=selected.reduce((n,r)=>n+Math.max(r.floor,Math.min(r.ceiling,mid*r.score)),0);if(total>target)hi=mid;else lo=mid;}
     let remaining=spendable;
     for(const r of selected){
-      const budget=Math.max(r.floor,Math.min(r.ceiling,lo*r.score)),qty=Math.max(r.minimum,quantityWithinBudget(budget,r.price,r.unit));
-      const cost=qty*r.price,charges=sumChargeParts(calcZerodhaChargesSplit(r.price,qty,false,false,false)),debit=cost+charges;
+      const budget=Math.max(r.floor,Math.min(r.ceiling,lo*r.score)),qty=Math.max(r.minimum,quantity(budget,r));
+      const cost=qty*r.price,charges=fees(qty,r.price),debit=cost+charges;
       if(debit>remaining+1e-7||debit>r.ceiling+1e-7)throw Error('Score allocation exceeded its funded capacity');
       alloc[r.symbol]={qty,capital:cost,charges,debit,budget,minimum:r.minimum*r.price,score:r.score,weight:r.score/selected.reduce((n,x)=>n+x.score,0)};remaining-=debit;
     }
     // Largest remainders; no cash overrun or fractional shares.
     const rounding=[...selected].sort((a,b)=>((alloc[b.symbol].budget/ b.unit)%1)-((alloc[a.symbol].budget/a.unit)%1)||b.score-a.score);
-    for(const r of rounding){const x=alloc[r.symbol];if(r.unit>remaining+1e-7||x.debit+r.unit>r.ceiling+1e-7)continue;x.qty++;x.capital=x.qty*r.price;x.charges=sumChargeParts(calcZerodhaChargesSplit(r.price,x.qty,false,false,false));const debit=x.capital+x.charges;remaining-=debit-x.debit;x.debit=debit;}
+    for(const r of rounding){const x=alloc[r.symbol],extra=account.orderCharges?r.price+fees(x.qty+1,r.price)-x.charges:r.unit;if(extra>remaining+1e-7||x.debit+extra>r.ceiling+1e-7)continue;x.qty++;x.capital=x.qty*r.price;x.charges=fees(x.qty,r.price);const debit=x.capital+x.charges;remaining-=debit-x.debit;x.debit=debit;}
     return {alloc,reasons,funded:selected.map(r=>r.symbol),remaining,minimum:breakevenTurnover(false,account.mlot),mode:'score-proportional'};
   }
 
@@ -705,8 +723,9 @@ function bookedSession(session,holdingCosts,tradebook){
   // Owner-approved 5 Nov research candidate DX_market60; raw CUM scoring is unchanged.
   const CUM_REFINEMENT = Object.freeze({version:'cum-dx-market60-v1',acceleration:3,minMarketMembers:100,minMarketBreadth:0.5,minDailyBreadth:0.6,
     symbols:Object.freeze(["HDFCBANK","RELIANCE","ICICIBANK","BHARTIARTL","SBIN","LT","INFY","ETERNAL","M&M","BSE","TEJASNET","VEDL","AXISBANK","SHRIRAMFIN","MCX","BAJFINANCE","INDIGO","BEL","TCS","KOTAKBANK","MARUTI","ONGC","DIXON","GUJALKALI","NATIONALUM","ITC","TATASTEEL","COALINDIA","MAZDOCK","TMCV","HINDALCO","HAL","ATGL","WAAREEENER","NETWEB","HINDCOPPER","POWERGRID","NTPC","MRPL","SUNPHARMA","BPCL","KAYNES","IDEA","ULTRACEMCO","ADANIPOWER","CUMMINSIND","POLYCAB","EICHERMOT","HCLTECH","HINDPETRO","HINDUNILVR","ASHOKLEY","MUTHOOTFIN","ADANIENT","ADANIPORTS","JIOFIN","TVSMOTOR","TATAPOWER","IOC","DATAPATTNS","PFC","TITAN","TMPV","INDUSINDBK","HINDZINC","COFORGE","CHENNPETRO","GRASIM","PERSISTENT","APOLLOHOSP","SWIGGY","HAPPSTMNDS","SAIL","SOLARINDS","OIL","WIPRO","UNIONBANK","CANBK","POWERINDIA","TRENT","SUZLON","DLF","MAXHEALTH","BAJAJFINSV","HDFCAMC","CHOLAFIN","TECHM","GROWW","RECLTD","JBMA","NTPCGREEN","VBL","JINDALSAW","GRSE","ADANIGREEN","LTFOODS","BANKBARODA","JINDRILL","ASIANPAINT","FEDERALBNK","LODHA","PAYTM","HEROMOTOCO","BHARATFORG","PARAS","GAIL","ITI","IDFCFIRSTB","BHEL","PGEL","FACT","AMBER","AUBANK","CDSL","IDBI","MOTHERSON","KEI","JWL","SAMMAANCAP","BDL","LUPIN","DMART","GMDCLTD","GVT&D","ABB","FORCEMOT","BRITANNIA","HEGAM","HDFCLIFE","DRREDDY","JSWSTEEL","POLICYBZR","NAUKRI","SBILIFE","PETRONET","JSWENERGY","GODREJPROP","PNB","CGPOWER","GODFRYPHLP","RVNL","APOLLOPIPE","REDINGTON","RSYSTEMS","INDHOTEL","AUROPHARMA","PREMIERENE","CUPID","YESBANK","BLS","ATHERENERG","VMM","DCXINDIA","ANGELONE","CIPLA","LAURUSLABS","FIRSTCRY","URBANCO","NMDC","ADANIENSOL","GODREJCP","OLECTRA","JPPOWER","BANDHANBNK","NOCIL","ZYDUSWELL","UNITDSPR","INDUSTOWER","COCHINSHIP","IRFC","SAGILITY","JINDALSTEL","DIVISLAB","ICICIGI","INDIANB","SRF","HFCL","UPL","TATACONSUM","AMBUJACEM","TORNTPHARM","NESTLEIND","MFSL","HAVELLS","GMRAIRPORT","FORTIS","RADICO","MANAPPURAM","MAHABANK","KPITTECH","VOLTAS","OLAELEC","GLENMARK","PCBL","ABCAPITAL","LTF","TATAELXSI","BANKINDIA","TIINDIA","MTARTECH"])});
-  function cumRefinementReason(symbol,context,trigger=null){
-    if(!CUM_REFINEMENT.symbols.includes(symbol))return 'Outside the tested 200-stock CUM sample';
+  function cumRefinementReason(symbol,context,trigger=null,market='NSE'){
+    const symbols=market==='NSE'?CUM_REFINEMENT.symbols:context?.market===market&&context?.sampleSymbols?.length===200?context.sampleSymbols:[];
+    if(!symbols.includes(symbol))return 'Outside the market 200-stock CUM sample';
     if(!context?.ready||context.version!==CUM_REFINEMENT.version)return 'Awaiting previous completed-session CUM trend data';
     if(!(context.marketMembers>=100&&context.marketBreadth>=0.5))return 'CUM needs 50% advancing breadth with at least 100 fresh sample stocks';
     if(!(context.dailyBreadth>=0.6))return 'CUM needs 60% of sample prior closes above EMA20';
@@ -763,6 +782,7 @@ function bookedSession(session,holdingCosts,tradebook){
     quantityWithinBudget,
     minimumAllocationRs,
     planAccountEntries,
+    ibkrOrderFee,
     authorizeAccountEntry,
     CONFIG,
     inputs,
