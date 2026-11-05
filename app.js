@@ -1,5 +1,5 @@
-const BUILD_TS='2026-11-05 10:18 IST'; // release build date (IST)
-const APP_VERSION=1632;
+const BUILD_TS='2026-11-05 13:44 IST'; // release build date (IST)
+const APP_VERSION=1634;
 const RADAR_SCORE_VERSION='v1419-recross-batches'; // Eligible on crossing the score floor at any time; selected model's evolving target and movement-based profit protection.
 
 // ── v1358: AN UNCAUGHT ERROR MUST NAME ITSELF ─────────────────────────────────────────────────
@@ -4871,10 +4871,23 @@ function syncStratGenDeployedState(){
         const brandTag = document.querySelector('.brand-tag');
         if(brandTag) brandTag.textContent = floorModel()==='CUM'?'Cumulative Change - VWAP Strengthening':'StratGen Alpha Engine';
       }
+      syncSelectedModelFromHelper();
       refreshBtstModelView();
       renderStats();
     }).catch(()=>{});
   }catch(e){}
+}
+// v1634: deploy selects the strategy in the helper; clear returns to CUM. The
+// dropdown follows the helper (the single source of truth) without a reload.
+function syncSelectedModelFromHelper(){
+  if(_modelSwitchPending)return;
+  readHelperResponse('/api/btst/model',{timeout:4000}).then(m=>{
+    const model=String(m?.model||'').toUpperCase();
+    const el=document.getElementById('fModel');
+    if(!el||!SELECTABLE_MODELS.includes(model)||el.value===model)return;
+    el.value=model;initScoreFloorUI(true);refreshBtstModelView();
+    if(ALL.length)applyFilters({preservePage:true});
+  }).catch(()=>{});
 }
 function initModelUI(){
 
