@@ -1,5 +1,5 @@
-const BUILD_TS='2026-11-05 17:40 IST'; // release build date (IST)
-const APP_VERSION=1636;
+const BUILD_TS='2026-11-05 23:05 IST'; // release build date (IST)
+const APP_VERSION=1638;
 const RADAR_SCORE_VERSION='v1419-recross-batches'; // Eligible on crossing the score floor at any time; selected model's evolving target and movement-based profit protection.
 
 // ── v1358: AN UNCAUGHT ERROR MUST NAME ITSELF ─────────────────────────────────────────────────
@@ -5288,7 +5288,7 @@ function _getRowActionStateUncached(s, ignoreMarketClosed=false){
   if(floorModel()==='CUM'){
     const source=BTST.data;
     if(source?.activeModel!=='CUM'||source?.cumulative?.scoring!=='vwap-strengthening-v1')return {state:'WAIT',reason:'Awaiting native v1617 VWAP-strengthening observations'};
-    const cumWhy=RocketStrategy.cumRefinementReason(s.symbol,source.cumulative.entryContext);
+    const cumWhy=RocketStrategy.cumRefinementReason(s.symbol,source.cumulative.entryContext,null,'NSE',s);
     if(cumWhy)return {state:'WAIT',reason:cumWhy};
     const held=getCombinedOpenPositionMap()[s.symbol];
     if(held?.qty>0&&Number(s.price)>=(held.avg||held.avgCost||Infinity))return {state:'WAIT',reason:'CUM re-crossing adds require price below average cost'};

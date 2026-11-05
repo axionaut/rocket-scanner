@@ -723,10 +723,16 @@ function bookedSession(session,holdingCosts,tradebook){
   // Owner-approved 5 Nov research candidate DX_market60; raw CUM scoring is unchanged.
   const CUM_REFINEMENT = Object.freeze({version:'cum-dx-market60-v1',acceleration:3,minMarketMembers:100,minMarketBreadth:0.5,minDailyBreadth:0.6,
     symbols:Object.freeze(["HDFCBANK","RELIANCE","ICICIBANK","BHARTIARTL","SBIN","LT","INFY","ETERNAL","M&M","BSE","TEJASNET","VEDL","AXISBANK","SHRIRAMFIN","MCX","BAJFINANCE","INDIGO","BEL","TCS","KOTAKBANK","MARUTI","ONGC","DIXON","GUJALKALI","NATIONALUM","ITC","TATASTEEL","COALINDIA","MAZDOCK","TMCV","HINDALCO","HAL","ATGL","WAAREEENER","NETWEB","HINDCOPPER","POWERGRID","NTPC","MRPL","SUNPHARMA","BPCL","KAYNES","IDEA","ULTRACEMCO","ADANIPOWER","CUMMINSIND","POLYCAB","EICHERMOT","HCLTECH","HINDPETRO","HINDUNILVR","ASHOKLEY","MUTHOOTFIN","ADANIENT","ADANIPORTS","JIOFIN","TVSMOTOR","TATAPOWER","IOC","DATAPATTNS","PFC","TITAN","TMPV","INDUSINDBK","HINDZINC","COFORGE","CHENNPETRO","GRASIM","PERSISTENT","APOLLOHOSP","SWIGGY","HAPPSTMNDS","SAIL","SOLARINDS","OIL","WIPRO","UNIONBANK","CANBK","POWERINDIA","TRENT","SUZLON","DLF","MAXHEALTH","BAJAJFINSV","HDFCAMC","CHOLAFIN","TECHM","GROWW","RECLTD","JBMA","NTPCGREEN","VBL","JINDALSAW","GRSE","ADANIGREEN","LTFOODS","BANKBARODA","JINDRILL","ASIANPAINT","FEDERALBNK","LODHA","PAYTM","HEROMOTOCO","BHARATFORG","PARAS","GAIL","ITI","IDFCFIRSTB","BHEL","PGEL","FACT","AMBER","AUBANK","CDSL","IDBI","MOTHERSON","KEI","JWL","SAMMAANCAP","BDL","LUPIN","DMART","GMDCLTD","GVT&D","ABB","FORCEMOT","BRITANNIA","HEGAM","HDFCLIFE","DRREDDY","JSWSTEEL","POLICYBZR","NAUKRI","SBILIFE","PETRONET","JSWENERGY","GODREJPROP","PNB","CGPOWER","GODFRYPHLP","RVNL","APOLLOPIPE","REDINGTON","RSYSTEMS","INDHOTEL","AUROPHARMA","PREMIERENE","CUPID","YESBANK","BLS","ATHERENERG","VMM","DCXINDIA","ANGELONE","CIPLA","LAURUSLABS","FIRSTCRY","URBANCO","NMDC","ADANIENSOL","GODREJCP","OLECTRA","JPPOWER","BANDHANBNK","NOCIL","ZYDUSWELL","UNITDSPR","INDUSTOWER","COCHINSHIP","IRFC","SAGILITY","JINDALSTEL","DIVISLAB","ICICIGI","INDIANB","SRF","HFCL","UPL","TATACONSUM","AMBUJACEM","TORNTPHARM","NESTLEIND","MFSL","HAVELLS","GMRAIRPORT","FORTIS","RADICO","MANAPPURAM","MAHABANK","KPITTECH","VOLTAS","OLAELEC","GLENMARK","PCBL","ABCAPITAL","LTF","TATAELXSI","BANKINDIA","TIINDIA","MTARTECH"])});
-  function cumRefinementReason(symbol,context,trigger=null,market='NSE'){
+  function cumRefinementReason(symbol,context,trigger=null,market='NSE',quote=null,now=null){
     const symbols=market==='NSE'?CUM_REFINEMENT.symbols:context?.market===market&&context?.sampleSymbols?.length===200?context.sampleSymbols:[];
     if(!symbols.includes(symbol))return 'Outside the market 200-stock CUM sample';
     if(!context?.ready||context.version!==CUM_REFINEMENT.version)return 'Awaiting previous completed-session CUM trend data';
+    if(market==='NSE'){
+      const ist=new Date((now||Date.now())+19800000);
+      const m=ist.getUTCHours()*60+ist.getUTCMinutes();
+      if(m>=690)return 'CUM midday entry freeze active after 11:30 IST';
+    }
+    if(quote?.price>0&&quote?.vwap>0&&quote.price>quote.vwap*1.0075)return 'CUM gap ceiling: price stretched >0.75% above VWAP';
     if(!(context.marketMembers>=100&&context.marketBreadth>=0.5))return 'CUM needs 50% advancing breadth with at least 100 fresh sample stocks';
     if(!(context.dailyBreadth>=0.6))return 'CUM needs 60% of sample prior closes above EMA20';
     if(!context.stocks?.[symbol]?.trend)return 'CUM needs previous close > EMA20 > EMA50';
