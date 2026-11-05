@@ -256,7 +256,7 @@
     }
     if(dep?.live_capability_version==='rs-stratgen-live-1'){
       const signal=stock.stratgenSignal;
-      if(!signal||signal.contractHash!==dep.sha256||!Number.isFinite(signal.computedAt)||signal.computedAt>Date.now()+1000||Date.now()-signal.computedAt>90000)return {canBuy:false,reason:'Awaiting fresh shared-engine contract evaluation'};
+      if(!signal||signal.contractHash!==dep.sha256||!Number.isFinite(signal.computedAt)||signal.computedAt>Date.now()+1000||Date.now()-signal.computedAt>signalTtlMs(dep))return {canBuy:false,reason:'Awaiting fresh shared-engine contract evaluation'};
       if(!signal.eligible)return {canBuy:false,reason:signal.reason||'Shared strategy conditions are not satisfied'};
       return {canBuy:true,symbol:stock.symbol,limitPrice:ltp,targetPrice:null,stopPrice:null,targetPct:0,stopLossPct:0,reason:'Tested entry contract satisfied; shared RS trailing exit; no minimum holding period; no maximum'};
     }
@@ -707,6 +707,16 @@ function bookedSession(session,holdingCosts,tradebook){
     return model==='CUM'&&Number.isFinite(score)&&Number.isFinite(floor)&&score>=floor+CUM_ENTRY_BAND;
   }
 
+  // v1635: a StratGen signal is produced at a completed bar and is valid until the
+  // next bar of its own timeframe closes (90 s remains the floor for 1-minute work).
+  function timeframeMinutesOf(dep){
+    const match=/(\d+)\s*(minute|min|hour|hr)/i.exec(String(dep?.spec?.timeframe||dep?.timeframe||''));
+    if(!match)return 5;
+    const n=parseInt(match[1],10);
+    return Math.max(1,Math.min(375,/^h/i.test(match[2])?n*60:n));
+  }
+  function signalTtlMs(dep){return Math.max(90000,timeframeMinutesOf(dep)*60000+30000);}
+
   // 27 Oct 2026 (owner): market-trend gates removed for every live and paper model.
   function entryGateApplies(){
     return false;
@@ -724,6 +734,8 @@ function bookedSession(session,holdingCosts,tradebook){
     applyDeployedStrategy,
     entryScoreCapped,
     CUM_ENTRY_BAND,
+    timeframeMinutesOf,
+    signalTtlMs,
     entryGateApplies,
     weightedPosition,
     exitBuyWindows,
