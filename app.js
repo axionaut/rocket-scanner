@@ -11830,7 +11830,7 @@ function dashboardMarketCards(){
     add(2,'NSE',`${go} GO`,'Binary trigger rules satisfied');
     const tgt = RocketStrategy.CONFIG?.TARGET_PCT ?? 2.0;
     const sl = RocketStrategy.CONFIG?.STOP_LOSS_PCT || 0;
-    if(dep?.spec?.exit?.policy==='rs-trail-min5-v2')add(3,'NSE','RS trailing exit','Minimum hold: 5 minutes; no maximum');
+    if(dep?.spec?.exit?.policy==='rs-trail-min5-v2')add(3,'NSE','RS trailing exit','No minimum hold; no maximum');
     else add(3,'NSE',signed(tgt),`Target ${signed(tgt)}${sl > 0 ? ` | SL -${sl.toFixed(1)}%` : ' | Ratcheting MLoT trail'}`);
   }
   if(m.us){

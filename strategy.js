@@ -258,7 +258,7 @@
       const signal=stock.stratgenSignal;
       if(!signal||signal.contractHash!==dep.sha256||!Number.isFinite(signal.computedAt)||signal.computedAt>Date.now()+1000||Date.now()-signal.computedAt>90000)return {canBuy:false,reason:'Awaiting fresh shared-engine contract evaluation'};
       if(!signal.eligible)return {canBuy:false,reason:signal.reason||'Shared strategy conditions are not satisfied'};
-      return {canBuy:true,symbol:stock.symbol,limitPrice:ltp,targetPrice:null,stopPrice:null,targetPct:0,stopLossPct:0,reason:'Tested entry contract satisfied; shared RS trailing exit; minimum five minutes, no maximum'};
+      return {canBuy:true,symbol:stock.symbol,limitPrice:ltp,targetPrice:null,stopPrice:null,targetPct:0,stopLossPct:0,reason:'Tested entry contract satisfied; shared RS trailing exit; no minimum holding period; no maximum'};
     }
     if(dep && dep.spec && Array.isArray(dep.spec.entry_rules) && dep.spec.entry_rules.length > 0){
       const universe=evaluateUniverse(stock);
