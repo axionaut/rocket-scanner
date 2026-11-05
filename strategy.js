@@ -702,6 +702,19 @@ function bookedSession(session,holdingCosts,tradebook){
   // The saturation cap belongs to the Ensemble aggregate, not individual models.
   // v1607 (owner 30 Oct): Cumulative Change buys only fresh crossings: score below floor + 0.5. Replayed under the live
   // rules on 29/30 Oct triggers it was the only one-change variant better on both days (+0.06% vs +0.02%; -0.21% vs -0.41%).
+  // Owner-approved 5 Nov research candidate DX_market60; raw CUM scoring is unchanged.
+  const CUM_REFINEMENT = Object.freeze({version:'cum-dx-market60-v1',acceleration:3,minMarketMembers:100,minMarketBreadth:0.5,minDailyBreadth:0.6,
+    symbols:Object.freeze(["HDFCBANK","RELIANCE","ICICIBANK","BHARTIARTL","SBIN","LT","INFY","ETERNAL","M&M","BSE","TEJASNET","VEDL","AXISBANK","SHRIRAMFIN","MCX","BAJFINANCE","INDIGO","BEL","TCS","KOTAKBANK","MARUTI","ONGC","DIXON","GUJALKALI","NATIONALUM","ITC","TATASTEEL","COALINDIA","MAZDOCK","TMCV","HINDALCO","HAL","ATGL","WAAREEENER","NETWEB","HINDCOPPER","POWERGRID","NTPC","MRPL","SUNPHARMA","BPCL","KAYNES","IDEA","ULTRACEMCO","ADANIPOWER","CUMMINSIND","POLYCAB","EICHERMOT","HCLTECH","HINDPETRO","HINDUNILVR","ASHOKLEY","MUTHOOTFIN","ADANIENT","ADANIPORTS","JIOFIN","TVSMOTOR","TATAPOWER","IOC","DATAPATTNS","PFC","TITAN","TMPV","INDUSINDBK","HINDZINC","COFORGE","CHENNPETRO","GRASIM","PERSISTENT","APOLLOHOSP","SWIGGY","HAPPSTMNDS","SAIL","SOLARINDS","OIL","WIPRO","UNIONBANK","CANBK","POWERINDIA","TRENT","SUZLON","DLF","MAXHEALTH","BAJAJFINSV","HDFCAMC","CHOLAFIN","TECHM","GROWW","RECLTD","JBMA","NTPCGREEN","VBL","JINDALSAW","GRSE","ADANIGREEN","LTFOODS","BANKBARODA","JINDRILL","ASIANPAINT","FEDERALBNK","LODHA","PAYTM","HEROMOTOCO","BHARATFORG","PARAS","GAIL","ITI","IDFCFIRSTB","BHEL","PGEL","FACT","AMBER","AUBANK","CDSL","IDBI","MOTHERSON","KEI","JWL","SAMMAANCAP","BDL","LUPIN","DMART","GMDCLTD","GVT&D","ABB","FORCEMOT","BRITANNIA","HEGAM","HDFCLIFE","DRREDDY","JSWSTEEL","POLICYBZR","NAUKRI","SBILIFE","PETRONET","JSWENERGY","GODREJPROP","PNB","CGPOWER","GODFRYPHLP","RVNL","APOLLOPIPE","REDINGTON","RSYSTEMS","INDHOTEL","AUROPHARMA","PREMIERENE","CUPID","YESBANK","BLS","ATHERENERG","VMM","DCXINDIA","ANGELONE","CIPLA","LAURUSLABS","FIRSTCRY","URBANCO","NMDC","ADANIENSOL","GODREJCP","OLECTRA","JPPOWER","BANDHANBNK","NOCIL","ZYDUSWELL","UNITDSPR","INDUSTOWER","COCHINSHIP","IRFC","SAGILITY","JINDALSTEL","DIVISLAB","ICICIGI","INDIANB","SRF","HFCL","UPL","TATACONSUM","AMBUJACEM","TORNTPHARM","NESTLEIND","MFSL","HAVELLS","GMRAIRPORT","FORTIS","RADICO","MANAPPURAM","MAHABANK","KPITTECH","VOLTAS","OLAELEC","GLENMARK","PCBL","ABCAPITAL","LTF","TATAELXSI","BANKINDIA","TIINDIA","MTARTECH"])});
+  function cumRefinementReason(symbol,context,trigger=null){
+    if(!CUM_REFINEMENT.symbols.includes(symbol))return 'Outside the tested 200-stock CUM sample';
+    if(!context?.ready||context.version!==CUM_REFINEMENT.version)return 'Awaiting previous completed-session CUM trend data';
+    if(!(context.marketMembers>=100&&context.marketBreadth>=0.5))return 'CUM needs 50% advancing breadth with at least 100 fresh sample stocks';
+    if(!(context.dailyBreadth>=0.6))return 'CUM needs 60% of sample prior closes above EMA20';
+    if(!context.stocks?.[symbol]?.trend)return 'CUM needs previous close > EMA20 > EMA50';
+    if(trigger&&!(trigger.prevPct>0&&trigger.pct>3*trigger.prevPct))return 'CUM second rise must exceed three times the first';
+    return null;
+  }
+
   const CUM_ENTRY_BAND = 0.5;
   function entryScoreCapped(model, score, floor){
     return model==='CUM'&&Number.isFinite(score)&&Number.isFinite(floor)&&score>=floor+CUM_ENTRY_BAND;
@@ -734,6 +747,8 @@ function bookedSession(session,holdingCosts,tradebook){
     applyDeployedStrategy,
     entryScoreCapped,
     CUM_ENTRY_BAND,
+    CUM_REFINEMENT,
+    cumRefinementReason,
     timeframeMinutesOf,
     signalTtlMs,
     entryGateApplies,

@@ -1,5 +1,5 @@
-const BUILD_TS='2026-11-05 14:04 IST'; // release build date (IST)
-const APP_VERSION=1635;
+const BUILD_TS='2026-11-05 17:40 IST'; // release build date (IST)
+const APP_VERSION=1636;
 const RADAR_SCORE_VERSION='v1419-recross-batches'; // Eligible on crossing the score floor at any time; selected model's evolving target and movement-based profit protection.
 
 // ── v1358: AN UNCAUGHT ERROR MUST NAME ITSELF ─────────────────────────────────────────────────
@@ -4863,13 +4863,13 @@ function syncStratGenDeployedState(){
         window.__deployedStratGen = d;
         if(typeof RocketStrategy !== 'undefined' && RocketStrategy.applyDeployedStrategy) RocketStrategy.applyDeployedStrategy(d);
         const brandTag = document.querySelector('.brand-tag');
-        if(brandTag) brandTag.textContent = floorModel()==='CUM'?'Cumulative Change - VWAP Strengthening':d.name;
+        if(brandTag) brandTag.textContent = floorModel()==='CUM'?'CUM - VWAP Trend & Breadth':d.name;
       } else {
         if(opt) opt.textContent = 'No Strategy Deployed (Awaiting StratGen)';
         window.__deployedStratGen = null;
         if(typeof RocketStrategy !== 'undefined') RocketStrategy.applyDeployedStrategy(null);
         const brandTag = document.querySelector('.brand-tag');
-        if(brandTag) brandTag.textContent = floorModel()==='CUM'?'Cumulative Change - VWAP Strengthening':'StratGen Alpha Engine';
+        if(brandTag) brandTag.textContent = floorModel()==='CUM'?'CUM - VWAP Trend & Breadth':'StratGen Alpha Engine';
       }
       syncSelectedModelFromHelper();
       refreshBtstModelView();
@@ -5288,6 +5288,8 @@ function _getRowActionStateUncached(s, ignoreMarketClosed=false){
   if(floorModel()==='CUM'){
     const source=BTST.data;
     if(source?.activeModel!=='CUM'||source?.cumulative?.scoring!=='vwap-strengthening-v1')return {state:'WAIT',reason:'Awaiting native v1617 VWAP-strengthening observations'};
+    const cumWhy=RocketStrategy.cumRefinementReason(s.symbol,source.cumulative.entryContext);
+    if(cumWhy)return {state:'WAIT',reason:cumWhy};
     const held=getCombinedOpenPositionMap()[s.symbol];
     if(held?.qty>0&&Number(s.price)>=(held.avg||held.avgCost||Infinity))return {state:'WAIT',reason:'CUM re-crossing adds require price below average cost'};
     return btstCrossingState(s)||{state:'WAIT',reason:'Awaiting native VWAP crossing'};
@@ -10326,7 +10328,7 @@ function _renderMethodologyInner(){
     <p>The selected model (Ensemble, PATH or Cumulative Change) supplies the recommendation table, counts, allocation and basket. Ensemble and PATH use the trained percentile scale (1.6 = top 1.5%, 2.2 = the model's #1). Cumulative Change measures how quickly the stock's percentage distance from session VWAP is strengthening, in percentage points per minute. Its independently saved floor does not represent a percentile.</p>
     <div class="m-grid">
     <div class="m-card"><h4>Ensemble (default floor 1.6)</h4><p>Five learners (return regressor, +3% classifier, excess-over-market, downside quantile, extra-trees) trained walk-forward on the last 220 sessions of daily candles built from the minutes, retrained every 5 sessions; inputs are 52 daily features (returns 1 day to 3 months, gap, range, volume surges with today's volume projected, volatility, distance to highs and averages, RSI, stochastics, ADX, MACD, TradingView-style ratings, sector strength, market condition). The blend is the average of their rankings.</p></div>
-    <div class="m-card"><h4>Cumulative Change - VWAP strengthening</h4><p>The permanent native baseline uses the original v1617 calculation every 10 seconds: gap = 100 * (price / exchange session VWAP - 1); score = change in gap / elapsed quote minutes. Qualification is binary: the gap must be increasing. There is no editable threshold. A real observed transition from non-increasing to increasing arms entry; warm-up never creates a crossing. Two actual rising-price checks are required, with the second rise larger. Price must remain above session VWAP and, after 09:30 IST, above the opening-range high. Fresh paired quotes, surveillance and common execution gates apply. Exits use RS adaptive trailing after a minimum five-minute hold, with no maximum holding period. One-minute OHLCV cannot faithfully replay its synchronized ten-second exchange-VWAP observations, so no candle approximation is presented as its tested baseline.</p></div>
+    <div class="m-card"><h4>CUM - VWAP Trend &amp; Breadth</h4><p>Native ten-second VWAP-gap zero crossing and original positive score below +0.5. A native two-rise trigger is consumed when it fires; only a second rise greater than three times the first passes. Price must be above session VWAP and the 09:15-09:29 opening high after 09:30. The frozen March-selected 200-stock sample needs at least 100 fresh quotes and 50% above their opens. Previous completed stock close must exceed EMA20 &gt; EMA50, and at least 60% of sample prior closes must exceed EMA20. Missing context waits. Shared score allocation, held-add/rebuy rules, fees, liquidity and trailing exits apply, with no minimum or maximum hold. StratGen rankings show the completed one-minute modeled replay, its dates and real equity snapshot; it is not exact tick or broker performance.</p></div>
     <div class="m-card"><h4>PATH (default floor 2.1)</h4><p>Learns directly from our trade: from each completed minute, does +1.25% come before −1.25% (net of the real intraday or delivery charges)? Inputs are 12 minute-level features: time of day, distance from the open, VWAP and the day's high, the day's range, 1/5/15-minute moves, relative volume, turnover, opening gap, yesterday's range. Trained only on tradable stocks, retrained monthly. Held-out per trade: +0.38% / +0.27% (a model trained on shuffled outcomes: −0.22% / −0.30%). It is strongest only at its very top, hence the 2.1 floor.</p></div>
     <div class="m-card"><h4>1. Live score (throughout the session)</h4><p>The local helper runs <code>dev/btst_engine.py</code> every 2 minutes. Ensemble scores from daily candles plus today's partial candle; PATH and STACK score from the completed minutes of today, continuing a state saved after each close. If PATH or STACK cannot score (stale data, missing nightly state), that model shows WAIT and never substitutes another model; the Ensemble keeps running.</p></div>
     <div class="m-card"><h4>2. Buy on qualification</h4><p>A current live score clearing your floor can become GO throughout the session. Qualifying names share available capital by score, within saved allocation and execution limits (a new position needs at least ₹${RocketStrategy.CONFIG.MIN_ALLOCATION_RS.toLocaleString('en-IN')}, so the ₹15.34 DP fee is at most 0.26% of it; adds need one share; when cash is short the higher score, then the earlier trigger, then the more liquid stock is funded first). A purchase consumes its crossing; a completed below-floor observation enables a fresh crossing, held or unheld. Price freshness, circuit, surveillance and EQ checks still apply. Market trend does not block entries.</p></div>
@@ -11830,7 +11832,7 @@ function usMarketStatus(){
 }
 function dashboardMarketCards(){
   const m=marketsShown(),d=US_FEED.data;
-  const dep = floorModel()==='CUM'?{name:'Cumulative Change - VWAP Strengthening',archetype:'Native 10-second VWAP gap velocity',spec:{exit:{policy:'rs-trail-min5-v2'}}}:window.__deployedStratGen || (typeof RocketStrategy !== 'undefined' ? RocketStrategy.CONFIG?.ACTIVE_STRATGEN_DEPLOYED : null);
+  const dep = floorModel()==='CUM'?{name:'CUM - VWAP Trend & Breadth',archetype:'VWAP acceleration 3x + trend + breadth',spec:{exit:{policy:'rs-trail-min5-v2'}}}:window.__deployedStratGen || (typeof RocketStrategy !== 'undefined' ? RocketStrategy.CONFIG?.ACTIVE_STRATGEN_DEPLOYED : null);
   const groups=[[],[],[],[]];
   const add=(i,market,value,detail)=>groups[i].push(`<div><b>${market}</b> ${value}<div class="st-d">${detail}</div></div>`);
   const signed=v=>Number.isFinite(v)?(v>=0?'+':'')+v.toFixed(2)+'%':'Unavailable';

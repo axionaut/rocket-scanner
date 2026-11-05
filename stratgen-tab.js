@@ -39,7 +39,7 @@
     window.__deployedStratGen=contract;window.RocketStrategy?.applyDeployedStrategy(contract);
     const option=$('optStratGen');if(option)option.textContent=contract?.name||'No Strategy Deployed (Awaiting StratGen)';
     const selector=$('fModel');if(selector){selector.value=contract?'STRATGEN':'CUM';if(typeof onModelChange==='function')onModelChange();}
-    const brand=document.querySelector('.brand-tag');if(brand)brand.textContent=contract?.name||'Cumulative Change - VWAP Strengthening';
+    const brand=document.querySelector('.brand-tag');if(brand)brand.textContent=contract?.name||'CUM - VWAP Trend & Breadth';
     if(typeof applyFilters==='function')applyFilters({preservePage:true});
     if(typeof renderStats==='function')renderStats();
   }
