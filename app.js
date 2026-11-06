@@ -1,5 +1,5 @@
 const BUILD_TS='2026-11-06 10:35 IST'; // release build date (IST)
-const APP_VERSION=1640;
+const APP_VERSION=1641;
 const RADAR_SCORE_VERSION='v1419-recross-batches'; // Eligible on crossing the score floor at any time; selected model's evolving target and movement-based profit protection.
 
 // ── v1358: AN UNCAUGHT ERROR MUST NAME ITSELF ─────────────────────────────────────────────────
@@ -5460,15 +5460,22 @@ function crossCellHtml(s){
   }
   return '<span style="color:var(--t3)">-</span>';
 }
-// v1581: the live trailing exit for a held stock - not armed (arming price) or the current SL / target legs.
+// v1581 / v1641: live Markov-adaptive trailing exit for a held stock.
 function exitCellHtml(s){
   const p=PROFIT_LOCK_STATUS.bySym.get(normSym(s.symbol));
   if(!p||!(p.qty>0))return '<span style="color:var(--t3)">—</span>';
   const be=Number(p.breakeven),sl=Number(p.stopGttTrigger);
-  if(sl>0&&(p.stopGttId||p.stopConfirmed))return `<div style="font-family:'DM Mono',monospace;font-size:13px;white-space:nowrap" title="Dynamic MLoT trailing stop: ratchets with new highs, no upper ceiling${be>0?'; breakeven ₹'+be.toFixed(2):''}"><span style="color:var(--red)">SL ₹${sl.toFixed(2)}</span> <span style="color:var(--t3)">(trailing)</span></div>`;
+  const mk=p.markovExit||p.bracketParams?.markov;
+  let mkBadge='';
+  if(mk){
+    if(mk.regime==='EXHAUSTION'||mk.probDown>=0.60)mkBadge=` <span style="display:inline-block;padding:1px 5px;border-radius:4px;font-size:11px;background:rgba(239,68,68,0.15);color:#f87171;font-weight:600;border:1px solid rgba(239,68,68,0.3)" title="Markov Exit: Exhaustion predicted (P↓ ${(mk.probDown*100).toFixed(0)}%, exp ${(mk.expectedMagnitudePct||0).toFixed(2)}% in ${mk.expectedHorizonSec||20}s) — GTT trail tightened to minimum viable distance">⚡ P↓ ${(mk.probDown*100).toFixed(0)}%</span>`;
+    else if(mk.regime==='RUNWAY'||mk.probUp>=0.65)mkBadge=` <span style="display:inline-block;padding:1px 5px;border-radius:4px;font-size:11px;background:rgba(34,197,94,0.15);color:#4ade80;font-weight:600;border:1px solid rgba(34,197,94,0.3)" title="Markov Exit: Runway continuation predicted (P↑ ${(mk.probUp*100).toFixed(0)}%, exp +${(mk.expectedMagnitudePct||0).toFixed(2)}%) — Normal buffer retained">🚀 P↑ ${(mk.probUp*100).toFixed(0)}%</span>`;
+    else if(mk.regime==='STALL')mkBadge=` <span style="display:inline-block;padding:1px 5px;border-radius:4px;font-size:11px;background:rgba(234,179,8,0.15);color:#facc15;font-weight:600;border:1px solid rgba(234,179,8,0.3)" title="Markov Exit: Momentum stall (P↓ ${(mk.probDown*100).toFixed(0)}%) — Stop locked">⏸ Stall</span>`;
+  }
+  if(sl>0&&(p.stopGttId||p.stopConfirmed))return `<div style="font-family:'DM Mono',monospace;font-size:13px;white-space:nowrap" title="Dynamic MLoT trailing stop: ratchets with new highs, no upper ceiling${be>0?'; breakeven ₹'+be.toFixed(2):''}"><span style="color:var(--red)">SL ₹${sl.toFixed(2)}</span> <span style="color:var(--t3)">(trailing)</span>${mkBadge}</div>`;
   if(!(be>0))return '<span style="color:var(--t3)">awaiting cost basis</span>';
   const arm=Math.max(be/(1-0.0026),be+0.10);
-  return `<div style="font-family:'DM Mono',monospace;font-size:13px;white-space:nowrap;color:var(--t2)" title="No sell order until price minus 0.26% (at least ₹0.10) clears breakeven ₹${be.toFixed(2)} (charges and DP included)">arms ≥ ₹${arm.toFixed(2)}</div><div style="font-size:12px;color:var(--t3)">breakeven ₹${be.toFixed(2)}</div>`;
+  return `<div style="font-family:'DM Mono',monospace;font-size:13px;white-space:nowrap;color:var(--t2)" title="No sell order until price minus 0.26% (at least ₹0.10) clears breakeven ₹${be.toFixed(2)} (charges and DP included)">arms ≥ ₹${arm.toFixed(2)}</div><div style="font-size:12px;color:var(--t3)">breakeven ₹${be.toFixed(2)}${mkBadge}</div>`;
 }
 function radarSetupLabel(r){
   const b=[];
