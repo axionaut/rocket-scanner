@@ -2,7 +2,7 @@
 (function () {
   'use strict';
   const API='http://127.0.0.1:8787/api/stratgen';
-  let mounted=false,checking=false,lastState='',nativeApi=null,viewReady=false,viewLoading=false,lastJobId=null,lastJobState=null,stallCount=0;
+  let mounted=false,checking=false,lastState='',nativeApi=null,viewReady=false,viewLoading=false,lastJobId=null,lastJobState=null,stallCount=0,lastReachable=Date.now();
   const $=id=>document.getElementById(id);
   function render(){
     const container=$('stratgenContent');if(!container)return;
@@ -60,6 +60,7 @@
     if(checking)return;checking=true;
     try{
       const s=await request('/status');
+      lastReachable=Date.now();
       nativeApi?.sgShowCurrentJob?.(s.job);
       if(s.job?.state==='COMPLETE'&&(s.job.id!==lastJobId||lastJobState!=='COMPLETE'))nativeApi?.loadLeaderboard?.();
       lastJobId=s.job?.id||null;lastJobState=s.job?.state||null;
@@ -81,7 +82,7 @@
       if(s.state==='READY'&&!viewReady&&mounted)await loadNativeUI();
       lastState=s.state;
     }catch(e){
-      const badge=$('tabCount4');if(badge){badge.textContent='OFFLINE';badge.style.color='#ff7043';badge.title=e.message;}
+      const badge=$('tabCount4');if(badge){badge.textContent=Date.now()-lastReachable<30000?'RECONNECTING':'OFFLINE';badge.style.color='#ff7043';badge.title=e.message;}
       lastState='OFFLINE';
     }finally{checking=false;}
   }
