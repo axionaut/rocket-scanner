@@ -1,5 +1,5 @@
-const BUILD_TS='2026-11-06 10:35 IST'; // release build date (IST)
-const APP_VERSION=1643;
+const BUILD_TS='2026-11-06 12:35 IST'; // release build date (IST)
+const APP_VERSION=1644;
 const RADAR_SCORE_VERSION='v1419-recross-batches'; // Eligible on crossing the score floor at any time; selected model's evolving target and movement-based profit protection.
 
 // ── v1358: AN UNCAUGHT ERROR MUST NAME ITSELF ─────────────────────────────────────────────────
@@ -11602,18 +11602,40 @@ function ibkrCommission(qty,price,plan=usIbkrPlan()){
   const fixed=plan==='fixed';
   return Math.min(Math.max(fixed?1:0.35,(fixed?0.005:0.0035)*qty),0.01*qty*price);
 }
+function usIbkrFee(qty,price,sell=false){
+  if(!(qty>0&&price>0))return 0;
+  if(typeof RocketStrategy!=='undefined'&&typeof RocketStrategy.ibkrOrderFee==='function'){
+    return RocketStrategy.ibkrOrderFee(qty,price,usIbkrPlan(),sell,nyDate());
+  }
+  const fixed=usIbkrPlan()==='fixed';
+  const comm=Math.min(Math.max(fixed?1:0.35,(fixed?0.005:0.0035)*qty),0.01*qty*price);
+  const reg=qty*0.000003+(sell?qty*price*0.0000206+Math.min(9.79,qty*0.000195):0);
+  const routing=!fixed?qty*0.0037+comm*0.000735:0;
+  return Math.ceil((comm+reg+routing)*100-1e-9)/100;
+}
 const usCents=v=>Math.ceil(v*100-1e-6)/100;
 const US_BUY_BUFFER=1.0025;
 let _usPlanMemo=null;
 function usPlan(){
   const d=US_FEED.data,cap=usCapital(),fl=usFloor(),pct=typeof getMaxAllocPct==='function'?getMaxAllocPct():100,live=usFeedLive();
-  const ibkr=usIbkrPlan(),tgt=Number(d?.rules?.targetPct)||3;
-  if(_usPlanMemo&&_usPlanMemo.d===d&&_usPlanMemo.cap===cap&&_usPlanMemo.fl===fl&&_usPlanMemo.pct===pct&&_usPlanMemo.live===live&&_usPlanMemo.ibkr===ibkr)return _usPlanMemo.plan;
+  const ibkr=usIbkrPlan();
+  const isTrailing=d?.rules?.exitPolicy==='rs-trail-min5-v2'||['CUM','STRATGEN'].includes(d?.model)||(typeof floorModel==='function'&&['CUM','STRATGEN'].includes(floorModel()));
+  const mlot=typeof getLiveMlotQuantiles==='function'?getLiveMlotQuantiles():null;
+  const trailGap=(typeof RocketStrategy!=='undefined'&&typeof RocketStrategy.dynamicTrailGapPct==='function')
+    ?RocketStrategy.dynamicTrailGapPct(mlot)
+    :0.74;
+  const gapPct=isTrailing?trailGap:(Number(d?.rules?.targetPct)||3);
+  if(_usPlanMemo&&_usPlanMemo.d===d&&_usPlanMemo.cap===cap&&_usPlanMemo.fl===fl&&_usPlanMemo.pct===pct&&_usPlanMemo.live===live&&_usPlanMemo.ibkr===ibkr&&_usPlanMemo.gapPct===gapPct)return _usPlanMemo.plan;
   const plan={capital:cap,alloc:{},funded:0,spent:0};
-  const go=d&&d.ok&&live?(d.ranking||[]).filter(r=>Number.isFinite(Number(r.score))&&Number(r.score)>=fl&&Number(r.price)>0)
-    .map(r=>({sym:r.symbol,score:Number(r.score),px:usCents(Number(r.price)*US_BUY_BUFFER),impact:Number(r.turnover20)>0?0.001*Number(r.turnover20):0}))
-    .sort((a,b)=>b.score-a.score):[];
-  const debit=(q,px)=>q*px+ibkrCommission(q,px,ibkr);
+  const isGo=r=>(typeof r.eligible==='boolean'?r.eligible:(Number.isFinite(Number(r.score))&&Number(r.score)>=fl));
+  const go=d&&d.ok&&live?(d.ranking||[]).filter(r=>isGo(r)&&Number(r.price)>0)
+    .map(r=>{
+      const px=usCents(Number(r.price)*US_BUY_BUFFER);
+      const impact=Number(r.liquidityCap)>0?Number(r.liquidityCap):(Number(r.turnover20)>0?0.001*Number(r.turnover20):(Number(r.volume)>0?0.001*px*Number(r.volume):50000));
+      const sc=Number(r.score);
+      return {sym:r.symbol,score:Number.isFinite(sc)?sc:1,px,impact};
+    }).sort((a,b)=>b.score-a.score):[];
+  const debit=(q,px)=>q*px+usIbkrFee(q,px,false);
   if(cap>0&&go.length){
     const perCap=cap*Math.min(pct,100)/100,W=go.reduce((t,g)=>t+1+Math.max(0,g.score-fl),0);
     go.forEach(g=>{g.lim=Math.min(perCap,g.impact||0);g.qty=0;});
@@ -11628,32 +11650,38 @@ function usPlan(){
       for(const g of go){const extra=debit(g.qty+1,g.px)-debit(g.qty,g.px);
         if(debit(g.qty+1,g.px)<=g.lim+1e-9&&extra<=cash+1e-9){g.qty++;cash-=extra;moved=true;}}}
     go.forEach(g=>{
-      // Sell target = limit +target%, rounded up to the cent; net = profit at the target after both commissions.
-      const sell=usCents(g.px*(1+tgt/100));
-      const net=q=>q*(sell-g.px)-ibkrCommission(q,g.px,ibkr)-ibkrCommission(q,sell,ibkr);
+      // Sizing and cost coverage against dynamic trailing gap (covers round-trip IBKR tiered/fixed fees + SEC/FINRA regulatory fees)
+      const sell=usCents(g.px*(1+gapPct/100));
+      const buyFee=usIbkrFee(g.qty,g.px,false);
+      const sellFee=usIbkrFee(g.qty,sell,true);
+      const roundTrip=buyFee+sellFee;
+      const net=q=>{const bF=usIbkrFee(q,g.px,false),sF=usIbkrFee(q,sell,true);return q*(sell-g.px)-(bF+sF);};
       if(g.qty>0&&net(g.qty)<=0){g.lossQty=g.qty;g.qty=0;}
-      if(g.qty>0){const cost=g.qty*g.px,comm=ibkrCommission(g.qty,g.px,ibkr);
-        plan.alloc[g.sym]={qty:g.qty,limit:g.px,alloc:cost+comm,comm,sell,net:net(g.qty),
-          roundTrip:comm+ibkrCommission(g.qty,sell,ibkr)};plan.funded++;plan.spent+=cost+comm;}
-      else if(g.lossQty)plan.alloc[g.sym]={rejected:true,reason:'Commissions take the whole +'+tgt+'% at this size'};
+      if(g.qty>0){const cost=g.qty*g.px;
+        plan.alloc[g.sym]={qty:g.qty,limit:g.px,alloc:cost+buyFee,comm:buyFee,sell,net:net(g.qty),
+          roundTrip,gapPct,isTrailing};plan.funded++;plan.spent+=cost+buyFee;}
+      else if(g.lossQty)plan.alloc[g.sym]={rejected:true,reason:isTrailing?`IBKR round-trip fees ($${roundTrip.toFixed(2)}) exceed dynamic trail profit (+${gapPct.toFixed(2)}%) at this share count`:`Commissions take the whole +${gapPct}% at this size`};
       else plan.alloc[g.sym]={rejected:true,reason:!(g.impact>0)?'No turnover figure for the market-impact cap'
-        :g.lim<debit(1,g.px)?(g.lim===g.impact?'One share exceeds 0.10% of 20-day turnover':'One share exceeds Max % Capital'):'Cash used by stronger scores'};
+        :g.lim<debit(1,g.px)?(g.lim===g.impact?'One share exceeds 0.10% of turnover cap':'One share exceeds Max % Capital'):'Cash used by stronger scores'};
     });
   }else go.forEach(g=>{plan.alloc[g.sym]={rejected:true,reason:'Enter US Capital $ to size'};});
-  _usPlanMemo={d,cap,fl,pct,live,ibkr,plan};
+  _usPlanMemo={d,cap,fl,pct,live,ibkr,gapPct,plan};
   return plan;
 }
 // IBKR order-ticket steps learned on the first live order (8 Oct): units, TIF, Profit Taker,
 // Price Management Algo, and the <$5k liquid-net-worth limit of one day trade per 5 trading days.
 function usTicketSteps(sym,a){
   const f=v=>'$'+Number(v).toFixed(2),dt=usDayTradeStatus();
+  const exitStep=a.isTrailing
+    ?'2. Dynamic MLoT Trailing Stop (policy rs-trail-min5-v2). Trail stop ratchets with price highs (gap '+(a.gapPct?.toFixed(2)||'0.74')+'%); no fixed ceiling or time exit.'
+    :(dt.left>0?'2. Attach Profit Taker '+f(a.sell)+', TIF Good till Cancel. Stop Loss OFF (no loss stop).'
+      :'2. NO day trade left ('+dt.used+' used in 5 sessions): do NOT attach the Profit Taker. Place the '+f(a.sell)+' GTC sell next US session.');
   return [sym+' in IBKR (suggest-only):',
     '1. Buy - Quantity '+a.qty+', unit Shares (not USD), Limit '+f(a.limit)+', TIF Day, Outside RTH No, All or None No.',
-    dt.left>0?'2. Attach Profit Taker '+f(a.sell)+', TIF Good till Cancel. Stop Loss OFF (no loss stop).'
-      :'2. NO day trade left ('+dt.used+' used in 5 sessions): do NOT attach the Profit Taker. Place the '+f(a.sell)+' GTC sell next US session.',
+    exitStep,
     '3. Price Management Algo may cap the submitted price. Review its disclosure and verify both buy and GTC sell are accepted in Orders.',
     '4. After the fill, add it under IBKR Positions so P&L and the day-trade count stay current.',
-    'Estimated cost (other exchange/regulatory fees excluded) '+f(a.alloc)+' incl. '+f(a.comm)+' buy commission ('+usIbkrPlan()+' plan); net at target '+(a.net>=0?'+':'')+f(a.net)+' after '+f(a.roundTrip)+' round-trip commission.'].join('\n');
+    'Estimated cost (IBKR '+usIbkrPlan()+' plan + SEC/FINRA fees) '+f(a.alloc)+' incl. '+f(a.comm)+' buy fee; net at breakeven/trail gap '+(a.net>=0?'+':'')+f(a.net)+' after '+f(a.roundTrip)+' round-trip fees.'].join('\n');
 }
 // ── v1491 IBKR POSITIONS LEDGER ─────────────────────────────────────────────────────────────────
 // IBKR is not connected (no API), so the owner records fills here; prices come from the US feed.
@@ -11817,12 +11845,22 @@ function usRows(){
   if(!d||!d.ok) return [];
   const fl=usFloor(),live=usFeedLive();
   const q=(document.getElementById('fSearch')?.value||'').trim().toUpperCase();
+  const isTrailing=d.rules?.exitPolicy==='rs-trail-min5-v2'||['CUM','STRATGEN'].includes(d.model)||(typeof floorModel==='function'&&['CUM','STRATGEN'].includes(floorModel()));
+  const mlot=typeof getLiveMlotQuantiles==='function'?getLiveMlotQuantiles():null;
+  const trailGap=(typeof RocketStrategy!=='undefined'&&typeof RocketStrategy.dynamicTrailGapPct==='function')
+    ?RocketStrategy.dynamicTrailGapPct(mlot)
+    :0.74;
+  const tgtPct=isTrailing?trailGap:(Number(d.rules?.targetPct)||3);
   return (d.ranking||[]).map(r=>{
     const score=Number(r.score);
+    const go=live&&(typeof r.eligible==='boolean'?r.eligible:(Number.isFinite(score)&&score>=fl));
     return {...r,_us:true,score,fl,edge:Number.isFinite(score)?score-fl:null,
-      go:live&&Number.isFinite(score)&&score>=fl,live,tgtPct:Number(d.rules?.targetPct)||3};
+      go,live,tgtPct,isTrailing};
   }).filter(r=>(SHOW_INELIGIBLE||r.go)&&(!q||String(r.symbol).toUpperCase().includes(q)||String(r.name||'').toUpperCase().includes(q)))
-    .sort((a,b)=>(Number.isFinite(b.score)?b.score:-1e9)-(Number.isFinite(a.score)?a.score:-1e9));
+    .sort((a,b)=>{
+      if(b.go!==a.go)return (b.go?1:0)-(a.go?1:0);
+      return (Number.isFinite(b.score)?b.score:-1e9)-(Number.isFinite(a.score)?a.score:-1e9);
+    });
 }
 // Work on a display copy: filtering, allocation, selection and execution keep the NSE list.
 function dashboardRows(){
@@ -11859,10 +11897,12 @@ function dashboardMarketCards(){
     const trend=d?.marketTrendPct;
     add(0,'US',signed(typeof trend==='number'?trend:NaN),`vs 50-day average · ${escHtml(usMarketStatus())}`);
     const at=d?.asOf?new Date(d.asOf).toLocaleString('en-IN',{day:'numeric',month:'short',hour:'2-digit',minute:'2-digit'}):'Awaiting scores';
-    add(1,'US',escHtml(at),`${d?.ok?d.universe??d.ranking?.length??0:0} scored · ${d?.ranking?.length??0} rows published`);
-    const go=d?.ok&&usFeedLive()?(d.ranking||[]).filter(r=>Number.isFinite(Number(r.score))&&Number(r.score)>=usFloor()).length:0;
+    const stratName=d?.strategyName||(d?.model==='CUM'?'CUM - VWAP Trend & Breadth':(d?.model||'ENS'));
+    add(1,'US',escHtml(stratName),`${d?.ok?d.universe??d.ranking?.length??0:0} scored · ${d?.ranking?.length??0} rows published`);
+    const go=d?.ok&&usFeedLive()?(d.ranking||[]).filter(r=>typeof r.eligible==='boolean'?r.eligible:(Number.isFinite(Number(r.score))&&Number(r.score)>=usFloor())).length:0;
     add(2,'US',`${go} GO`,'Suggestions · manual IBKR trades');
-    add(3,'US',signed(Number(d?.rules?.targetPct)||3),'Suggested target · no automated protection');
+    if(d?.rules?.exitPolicy==='rs-trail-min5-v2'||['CUM','STRATGEN'].includes(d?.model))add(3,'US','RS trailing exit','No minimum hold; no maximum');
+    else add(3,'US',signed(Number(d?.rules?.targetPct)||3),'Suggested target · no automated protection');
   }
   return groups.map((rows,i)=>`<div class="st"><div class="st-l">${['Market context','Active Strategy','Qualification','Targets'][i]}</div><div style="font-size:15px;line-height:1.7">${rows.join('')}</div></div>`).join('');
 }
@@ -11874,9 +11914,9 @@ function usRowHtml(r){
   const usd=v=>Number.isFinite(Number(v))?'$'+Number(v).toFixed(2):'—';
   const chg=Number(r.chgPct);
   const why=!r.live?'US market closed - last scored '+String(US_FEED.data?.asOf||'').slice(0,16).replace('T',' ')
-    :r.go?'Score at/above the US floor':'Below the US floor';
+    :r.go?(r.eligible?'Selected strategy conditions passed':'Score at/above the US floor'):(r.reason||'Below the US floor');
   const status=r.go
-    ?`<span class="info-pill pill-green" style="padding:2px 8px;font-size:13px" title="Suggest-only: place this buy yourself in IBKR. Target +${r.tgtPct}%.">GO · IBKR</span>`
+    ?`<span class="info-pill pill-green" style="padding:2px 8px;font-size:13px" title="Suggest-only: place this buy yourself in IBKR. ${r.isTrailing?'RS trailing exit (gap ~'+r.tgtPct.toFixed(2)+'%)':'Target +'+r.tgtPct+'%'}.">GO · IBKR</span>`
     :`<span class="info-pill" style="padding:2px 8px;font-size:13px;color:var(--t2)" title="${escHtml(why)}">WAIT</span>`;
   const sc=Number.isFinite(r.score)?(r.score>=0?'+':'')+r.score.toFixed(2):'—';
   const cellH={
@@ -11888,13 +11928,13 @@ function usRowHtml(r){
     price:`<td data-key="price" style="white-space:nowrap">${usd(r.price)}<span style="color:var(--t3)"> · </span><span style="font-size:13px">${fPerf(chg)}</span></td>`,
     day:`<td>${fPerf(chg)}</td>`,
     turnover:`<td data-key="turnover">$${(Number(r.turnover20)/1e6).toFixed(1)}M</td>`,
-    tgt:`<td style="font-weight:700;color:var(--green)" title="Target price ${usd(r.targetPrice)} (+${r.tgtPct}%)">+${r.tgtPct.toFixed(2)}%</td>`,
+    tgt:`<td style="font-weight:700;color:var(--green)" title="${r.isTrailing?'RS dynamic trailing stop (MLoT trail gap '+r.tgtPct.toFixed(2)+'%)':'Target price '+usd(r.targetPrice)+' (+'+r.tgtPct+'%)'}">${r.isTrailing?'Trail ~'+r.tgtPct.toFixed(2)+'%':'+'+r.tgtPct.toFixed(2)+'%'}</td>`,
     alloc:`<td class="alloc-cell">${(()=>{
       const a=usPlan().alloc[r.symbol];
       if(!a)return '<span style="color:var(--t3);font-size:13px">—</span>';
       if(a.rejected)return `<span style="color:var(--t3);font-size:12px" title="${escHtml(a.reason)}">Not sized</span>`;
       const tip=usTicketSteps(r.symbol,a);
-      return `<span style="color:#818cf8;font-weight:700;font-family:'DM Mono',monospace;font-size:14px" title="${escHtml(tip)}">Buy ${a.qty} sh</span><div style="font-size:11px;color:var(--t3)" title="${escHtml(tip)}">limit ${usd(a.limit)} Day · sell ${usd(a.sell)} GTC</div><div style="font-size:11px;color:${a.net>0?'var(--green)':'var(--red)'}" title="${escHtml(tip)}">net ${a.net>=0?'+':'-'}${usd(Math.abs(a.net))} after ${usd(a.roundTrip)} fees</div>`;
+      return `<span style="color:#818cf8;font-weight:700;font-family:'DM Mono',monospace;font-size:14px" title="${escHtml(tip)}">Buy ${a.qty} sh</span><div style="font-size:11px;color:var(--t3)" title="${escHtml(tip)}">limit ${usd(a.limit)} Day · sell ${usd(a.sell)} GTC</div><div style="font-size:11px;color:${a.net>0?'var(--green)':'var(--red)'}" title="${escHtml(tip)}">net ${a.net>=0?'+':'-'}${usd(Math.abs(a.net))} after ${usd(a.roundTrip)} fees (${usIbkrPlan()})</div>`;
     })()}</td>`
   };
   const cells=COLS.map(c=>cellH[c.key]||'<td style="color:var(--t3)">—</td>').join('');
@@ -11905,7 +11945,19 @@ async function loadUsFeed(){
   const brokerPanel=document.getElementById('rankUsPositions');
   if(brokerPanel&&!brokerPanel.contains(document.activeElement))brokerPanel.innerHTML=buildUsPositionsPanel();
   try{
-    const d=await readHelperResponse('/api/inputs/file?name='+encodeURIComponent('intl_US.json'),{timeout:6000});
+    const model=typeof floorModel==='function'?floorModel():'CUM';
+    const useUnified=(model==='CUM'||model==='STRATGEN');
+    let d=null;
+    if(useUnified){
+      try{
+        d=await readHelperResponse('/api/inputs/file?name='+encodeURIComponent('us_strategy_feed.json'),{timeout:6000});
+      }catch(err){
+        d=null;
+      }
+    }
+    if(!d||d.ok===false){
+      d=await readHelperResponse('/api/inputs/file?name='+encodeURIComponent('intl_US.json'),{timeout:6000});
+    }
     US_FEED.data=d;US_FEED.at=Date.now();US_FEED.err=null;
     const usEl=document.getElementById('rankUsPositions');
     if(usEl&&!usEl.contains(document.activeElement)){try{usEl.innerHTML=buildUsPositionsPanel();}catch(e){}}
