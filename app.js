@@ -1,5 +1,5 @@
-const BUILD_TS='2026-11-06 18:01 IST'; // release build date (IST)
-const APP_VERSION=1648;
+const BUILD_TS='2026-11-06 20:30 IST'; // release build date (IST)
+const APP_VERSION=1649;
 const RADAR_SCORE_VERSION='v1419-recross-batches'; // Eligible on crossing the score floor at any time; selected model's evolving target and movement-based profit protection.
 
 // ── v1358: AN UNCAUGHT ERROR MUST NAME ITSELF ─────────────────────────────────────────────────
@@ -9485,79 +9485,11 @@ function buildOpenPositionsPanel(query=''){
         /* c8 ignore stop */
       },
       clrFn:()=>'var(--green)'},
-    {key:'stopPrice',label:'SL ₹',align:'right',fmt:(v,row)=>{
-      if(v==null) return `<span style="color:var(--t3)" title="${escHtml('No valid protective stop is available. Nothing switches to TSL automatically.')}">—</span>`;
-      const ltp=Number(row.ltp),deltaPct=ltp>0?100*(Number(v)-ltp)/ltp:null;
-      const distance=Number.isFinite(deltaPct)
-        ?`<span style="font-size:12px;color:var(--t3);margin-left:4px">${Math.abs(deltaPct).toFixed(2)}% ${deltaPct<=0?'below':'above'} LTP</span>`:'';
-      return `<span title="${escHtml('Protective stop: the tighter of entry risk and the recovered-pullback trail. The percentage is relative to current LTP, not profit after costs. An exit can realise a loss. No trailing mode is changed automatically.')}">${fmtINR(v)}${distance}</span>`;
-    },
-      clrFn:v=>v==null?'var(--t3)':'var(--green)'},
     {key:'score',label:'Model Score',align:'right',bold:true,
       fmt:(v,row)=>modelScoreCell(v)+`<span style="font-size:11px;color:var(--t3)"> #${row.rank??'—'}</span>`,
       clrFn:()=>'var(--t1)'},
     {key:'dayPct',label:'Day %',align:'right',fmt:fPerf,clrFn:()=>'var(--t2)'},
-    // Pace is the suggested Zerodha trigger GAP: the deepest seller retreat buyers proved
-    // survivable by making a later high.
-    {key:'pace',label:'Pace',align:'right',
-      fmt:(v,row)=>{
-        const dim=(txt,title)=>`<span style="color:var(--t3)"${title?` title="${escHtml(title)}"`:''}>${txt}</span>`;
-        const p=row.tapePolicy||getOpenPositionTapePolicy(row.sym,row);
-        const tapePace=Number.isFinite(p.pacePct)
-          ?`<span title="${escHtml('Proven recovered pullback; Zerodha trail gap ₹'+Number(p.paceRs||0).toFixed(2)+'.')}">${p.pacePct.toFixed(2)}%<span style="color:var(--t3);font-size:11px"> ₹${Number(p.paceRs||0).toFixed(2)}</span></span>`
-          :dim('—','No seller pullback has yet been recovered by a later high.');
-        return tapePace;
-        /* c8 ignore start -- legacy renderer retained below for old assertion source only. */
-        const rd=getIntradayRead(row.sym);
-        if(!rd) return dim('—','No 5-minute read for this stock yet.');
-        if(!rd.current) return dim('—',`Last read was ${rd.on}, not this session — nothing here can describe today.`);
 
-        const ltp=Number(row.ltp)||0;
-        let pace;
-        if(Number.isFinite(rd.confirmedPacePct)){
-          const rs=ltp>0?ltp*rd.confirmedPacePct/100:null;
-          const open=Number.isFinite(rd.currentPullbackPct)
-            ?` Current unresolved pullback: ${rd.currentPullbackPct.toFixed(2)}%; it does not widen Pace unless buyers make another high.`:'';
-          pace=`<span title="${escHtml('Deepest seller pullback today that buyers subsequently recovered by establishing a new high. '
-            +rd.confirmedPullbackCount+' recovered episode'+(rd.confirmedPullbackCount===1?'':'s')
-            +(rs?'; suggested Zerodha trigger gap at this LTP is ₹'+rs.toFixed(2):'')+'.'+open)}">${rd.confirmedPacePct.toFixed(2)}%${
-            rs?`<span style="color:var(--t3);font-size:11px"> ₹${rs.toFixed(2)}</span>`:''}</span>`;
-        } else if(Number.isFinite(rd.currentPullbackPct)){
-          // Down and NOT back. No trail distance is quoted, deliberately.
-          pace=dim(`↓${rd.currentPullbackPct.toFixed(2)}%`,
-            `Down ${rd.currentPullbackPct.toFixed(2)}% from today's high and not recovered — buyers have made no new high since. `
-            +`This is NOT Pace and is not a trail distance: a trailing stop exists to ride a pullback that was recovered, and this one has not been.`);
-        } else {
-          pace=dim('—','No seller pullback has yet been followed by a new high today.');
-        }
-
-        // v1206: ONE OBJECT, so the number and the pressure that explains it cannot come from
-        // different windows. `rd.eod` is the CURRENT session's projection or nothing.
-        const t=rd.eod;
-        // ...and when the instruction on this row runs the other way, the cell says WHICH reading
-        // overruled which, instead of leaving two numbers arguing. That is the owner's question of
-        // 2026-08-20 answered where he asked it, not in a methodology page.
-        // v1210: it quotes the INSTRUCTION'S OWN reconciliation rather than guessing at one. The
-        // old text asserted the clash was always the flow test; on a stop-driven exit that was
-        // simply untrue, and the row then carried a third story.
-        const _act=getPositionAction(row.sym,row);
-        const _clash=(t&&_act&&/^EXIT/.test(_act.act)&&t.pct>0)
-          ?' This row still says '+_act.act+' — '+_act.why
-          :'';
-        const eod=t
-          ?`<span style="color:${t.pct>=0?'var(--green)':'var(--red)'};font-weight:700" title="${escHtml(
-              'Unspent pressure '+(t.pressurePct>=0?'+':'')+t.pressurePct.toFixed(2)+'% THIS SESSION, capped by what '
-              +'this stock can travel in the '+t.barsLeft+' bars left and scaled to the '
-              +Math.round(t.sessionSeen*100)+'% of the session already seen. Arithmetic, not a forecast.'+_clash)}">${
-              (t.pct>=0?'+':'')+t.pct.toFixed(2)}%</span>`
-          :dim('—',rd.todayTraj&&rd.todayTraj.pressureConverting===false
-            ?'No projection: this session\u2019s imbalance is being ABSORBED, not converted — its unspent '
-             +'pressure points one way and its own price slope the other, so there is no honest close to quote.'
-            :'No projection: the current session has under three bars, or carries no measurable unspent pressure yet.');
-        return pace+'<span style="color:var(--t3)"> / </span>'+eod;
-        /* c8 ignore stop */
-      },clrFn:()=>'var(--t2)'},
-    {key:'risk',label:'Risk',align:'left',fmt:v=>v?radarRiskPill(v):'—'}
   ];
   // Header totals always describe the WHOLE portfolio; the table shows the search match.
   const totalCapital=rows.reduce((sum,row)=>sum+(row.capital||0),0);
@@ -9570,7 +9502,7 @@ function buildOpenPositionsPanel(query=''){
   const table=makeSortableTable('rank-open-positions',cols,shown,'score',-1,null,openTotals,'sym','rank',1);
   const radarNote=ALL.length
     ?'Radar context is built from the live Kite tape. Click a symbol for its scoring breakdown.'
-    :'Start the helper and log in to Kite to add Radar score, rank, setup, day change, and risk.';
+    :'Start the helper and log in to Kite to add Radar score, rank, setup, day change.';
   const html=`<div id="rank-open-positions-card" style="background:var(--bg-card);border:1px solid var(--border);border-radius:10px;overflow:hidden">
     <div style="padding:12px 16px;border-bottom:1px solid var(--border)">
       <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:8px;margin-bottom:6px">
