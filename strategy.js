@@ -106,6 +106,8 @@
   // One allocation decision for the live basket, account replay and StratGen.
   // Callers provide contemporaneous eligibility/quotes, never a different sizing model.
   function planAccountEntries(candidates, account) {
+    const maxStocks=account.maxStocks??20;
+    if(!Number.isInteger(maxStocks)||maxStocks<1||maxStocks>20)throw Error('Stocks per allocation must be an integer from 1 to 20');
     const cash=Number(account.cash);
     if(!Number.isFinite(cash)||cash<0)throw Error('Recorded available cash is required');
     const capital=Number(account.capital)>0?Math.min(cash,Number(account.capital)):cash;
@@ -129,7 +131,7 @@
       const minimum=account.minimumShares?account.minimumShares(r.price,!!r.held,account.mlot):minSharesForStock(r.price,!!r.held,account.mlot),floor=account.orderCharges?minimum*r.price+fees(minimum,r.price):minimum*unit;
       const ceiling=Math.min(spendable,r.liquidityCap,Number(account.maxAlloc)>0?Number(account.maxAlloc):Infinity);
       if(!reason&&floor>ceiling+1e-7)reason='Liquidity or allocation cap cannot cover the whole-share cost breakeven minimum';
-      if(!reason&&selected.length>=20)reason='Next basket: Zerodha allows 20 stocks per export';
+      if(!reason&&selected.length>=maxStocks)reason='Stocks per allocation limit reached; higher scores funded first';
       if(!reason&&reserved+floor>spendable+1e-7)reason='Cash cannot cover every minimum order; higher scores funded first';
       if(reason){reasons[r.symbol]=reason;continue;}
       selected.push({...r,unit,minimum,floor,ceiling});reserved+=floor;

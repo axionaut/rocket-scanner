@@ -1,5 +1,5 @@
-const BUILD_TS='2026-11-06 20:30 IST'; // release build date (IST)
-const APP_VERSION=1649;
+const BUILD_TS='2026-11-06 20:43 IST'; // release build date (IST)
+const APP_VERSION=1650;
 const RADAR_SCORE_VERSION='v1419-recross-batches'; // Eligible on crossing the score floor at any time; selected model's evolving target and movement-based profit protection.
 
 // ── v1358: AN UNCAUGHT ERROR MUST NAME ITSELF ─────────────────────────────────────────────────
@@ -7961,6 +7961,29 @@ function kiteGttsFor(sym){
 // The helper tracks live highs and observed swings; target/stop GTT confirmation drives profit protection. This poller fetches the tracker state so the
 // browser can show armed / triggered badges and feed peakPnlPct to strategy.js evaluateExit.
 var PROFIT_LOCK_STATUS={bySym:new Map(),at:0};
+let executionControls=null;
+const executionControlDirty=new Set();
+function applyExecutionControls(controls){
+  if(!controls||!Number.isInteger(controls.maxStocks)||!Number.isFinite(controls.targetExtraPct))return;
+  const changed=JSON.stringify(executionControls)!==JSON.stringify(controls);
+  executionControls=controls;
+  for(const [key,id] of [['targetExtraPct','fTargetExtra'],['maxStocks','fMaxStocks']]){
+    const el=document.getElementById(id);if(el&&!executionControlDirty.has(key)&&document.activeElement!==el)el.value=controls[key];
+  }
+  if(changed){_dualPlanMemo=null;_usPlanMemo=null;if(typeof renderStats==='function')renderStats();}
+}
+async function saveExecutionControl(key,el){
+  const raw=el.value.trim(),value=Number(raw),valid=raw!==''&&Number.isFinite(value)&&(key==='maxStocks'?Number.isInteger(value)&&value>=1&&value<=20:value>=0&&value<=100);
+  if(!valid){showToast(key==='maxStocks'?'Enter 1-20 stocks per allocation.':'Enter a target addition from 0 to 100%.',5000,true);return;}
+  el.disabled=true;
+  try{
+    const result=await readHelperResponse('/api/execution-controls',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({[key]:value}),timeout:8000});
+    if(!result?.ok)throw Error(result?.why||'Could not save execution control');
+    executionControlDirty.delete(key);applyExecutionControls(result.controls);
+    if(typeof applyFilters==='function')applyFilters({preservePage:true});
+    showToast(key==='maxStocks'?'Stocks per allocation: '+value:'Target addition: +'+value+' percentage points');
+  }catch(e){showToast('Not saved: '+e.message,6000,true);}finally{el.disabled=false;}
+}
 let lossFundingDirty=false;
 async function saveLossFunding(){
   const el=document.getElementById('fLossFunding'),raw=el?.value?.trim(),percent=Number(raw);
@@ -7975,6 +7998,7 @@ async function saveLossFunding(){
 async function loadProfitLockStatus(){
   const j=await readHelperResponse('/api/profit-lock/status',{timeout:5000}).catch(()=>null);
   if(!j||!j.ok||!Array.isArray(j.positions)) return;
+  applyExecutionControls(j.executionControls);
   if(j.ruleReplay)acceptRuleReplay(j.ruleReplay);
   const bySym=new Map();
   for(const p of j.positions){if(p&&p.sym)bySym.set(normSym(p.sym),p);}
@@ -10857,11 +10881,11 @@ function currentModelTargetPct(){
   return Number.isFinite(t?.pct)&&t.pct>0?t.pct:RocketStrategy.CONFIG.TARGET_PCT;
 }
 function learnedBtstTarget(score,symbol=null){
-  return {pct:1.25,y:0,model:'COMMON',method:'bracket',n:0,through:null};
+  return {pct:1.25+(executionControls?.targetExtraPct??0),y:0,model:'COMMON',method:'bracket',n:0,through:null};
 }
 
 function getRowExitPolicy(row,buyPrice=null,activeInfo=null,nudgeInfo=null,qty=null){
-  return {targetPct:1.25,basePct:1.25,stopPct:0,viable:true,targetPolicy:'bracket-v1520',
+  return {targetPct:1.25+(executionControls?.targetExtraPct??0),basePct:1.25,stopPct:0,viable:true,targetPolicy:'bracket-v1520',
     targetSource:'Starts at +1.25% of weighted average cost; ratchets both OCO legs upward near the upper sell.',
     stopSource:'Loss-trim cutoff learns from funded portfolio decisions; up to 90% of today’s booked profit after charges funds trims',rewardRisk:null};
 }
@@ -11155,7 +11179,7 @@ function minimumModelQuantity(row,price,maxQty){
 }
 let _dualPlanMemo=null;
 function planDualBasket(rows,capital){
-  const key=[capital,BASKET_MODEL_MODE,RECOMMEND_MIN_SCORE,getEffectiveMaxAlloc(),getMinAlloc(),getMaxAllocPct(),BOOK_V,INTRADAY_STORE_V,
+  const key=[capital,executionControls?.maxStocks,executionControls?.targetExtraPct,BASKET_MODEL_MODE,RECOMMEND_MIN_SCORE,getEffectiveMaxAlloc(),getMinAlloc(),getMaxAllocPct(),BOOK_V,INTRADAY_STORE_V,
     Math.floor(Date.now()/1000),
     (rows||[]).map(r=>r.symbol+':'+r.price+':'+r.turnover+':'+r.score+':'+getRowActionState(r).state+':'+EXPORT_EXCLUDED.has(r.symbol)).join(',')].join('|');
   if(_dualPlanMemo?.key===key) return _dualPlanMemo.val;
@@ -11164,6 +11188,7 @@ function planDualBasket(rows,capital){
   return val;
 }
 function _planDualBasketUncached(rows,capital){
+  if(!executionControls)return {rows:[],alloc:{},reasons:new Map((rows||[]).map(r=>[r.symbol,'Waiting for saved execution controls']))};
   const held=getHeldPositionMap(),cross=crossingStore(),ranking=btstRanking();
   const candidates=(rows||[]).map(r=>{
     const h=held[r.symbol],price=getBuyPrice(r),k=normSym(r.symbol);
@@ -11173,7 +11198,7 @@ function _planDualBasketUncached(rows,capital){
       liquidityCap:getTurnoverAllocationCap(r),unitDebit:price+calcZerodhaCharges(price,1,false,false,false),
       reason:EXPORT_EXCLUDED.has(r.symbol)?'Excluded from basket by you':!isStockEligible(r)?getRowActionState(r).reason:null};
   });
-  const planned=RocketStrategy.planAccountEntries(candidates,{cash:Math.max(0,Math.min(Number(capital),getKiteAvailableCash()??0)),maxAlloc:getTypedMaxAlloc(capital),mlot:getLiveMlotQuantiles()});
+  const planned=RocketStrategy.planAccountEntries(candidates,{cash:Math.max(0,Math.min(Number(capital),getKiteAvailableCash()??0)),maxAlloc:getTypedMaxAlloc(capital),maxStocks:executionControls?.maxStocks??20,mlot:getLiveMlotQuantiles()});
   for(const r of rows||[])if(planned.alloc[r.symbol]){const p=getRowExitPolicy(r);Object.assign(planned.alloc[r.symbol],{tgtPct:p.targetPct,slPct:p.stopPct});}
   return {rows:planned.funded.map(symbol=>(rows||[]).find(r=>r.symbol===symbol)),alloc:planned.alloc,reasons:new Map(Object.entries(planned.reasons))};
 }
@@ -11572,13 +11597,13 @@ function usPlan(){
   if(_usPlanMemo&&_usPlanMemo.d===d&&_usPlanMemo.cap===cap&&_usPlanMemo.fl===fl&&_usPlanMemo.pct===pct&&_usPlanMemo.live===live&&_usPlanMemo.ibkr===ibkr&&_usPlanMemo.gapPct===gapPct)return _usPlanMemo.plan;
   const plan={capital:cap,alloc:{},funded:0,spent:0};
   const isGo=r=>(typeof r.eligible==='boolean'?r.eligible:(Number.isFinite(Number(r.score))&&Number(r.score)>=fl));
-  const go=d&&d.ok&&live?(d.ranking||[]).filter(r=>isGo(r)&&Number(r.price)>0)
+  const go=executionControls&&d&&d.ok&&live?(d.ranking||[]).filter(r=>isGo(r)&&Number(r.price)>0)
     .map(r=>{
       const px=usCents(Number(r.price)*US_BUY_BUFFER);
       const impact=Number(r.liquidityCap)>0?Number(r.liquidityCap):(Number(r.turnover20)>0?0.001*Number(r.turnover20):(Number(r.volume)>0?0.001*px*Number(r.volume):50000));
       const sc=Number(r.score);
       return {sym:r.symbol,score:Number.isFinite(sc)?sc:1,px,impact};
-    }).sort((a,b)=>b.score-a.score):[];
+    }).sort((a,b)=>b.score-a.score).slice(0,executionControls.maxStocks):[];
   const debit=(q,px)=>q*px+usIbkrFee(q,px,false);
   if(cap>0&&go.length){
     const perCap=cap*Math.min(pct,100)/100,W=go.reduce((t,g)=>t+1+Math.max(0,g.score-fl),0);
@@ -15228,7 +15253,7 @@ function buildBasketOrders(capital, selList){
         recommendation:{capturedAt:Date.now(),session:getSessionDate(),score:btstScoreOf(sym),
           scoreAsOf:btstRanking()?.src?.asOf||null,scoreFloor:btstMinScore(),
           scoringModel:btstRanking()?.model||null,scoreA:btstScoreAOf(sym),
-          referencePrice:Number(s.price)||null,allocationPolicy:'score-proportional-v2',appVersion:APP_VERSION,targetPolicy:TARGET_POLICY_VERSION}}
+          referencePrice:Number(s.price)||null,allocationPolicy:'score-proportional-v2',maxStocks:executionControls?.maxStocks??20,appVersion:APP_VERSION,targetPolicy:TARGET_POLICY_VERSION}}
     });
   };
   // v1398: NO EXPORTED ORDER MAY EXCEED THE CASH BEHIND IT. 17 Sep 15:24 a BUY VENUSPIPES 6,000 @
