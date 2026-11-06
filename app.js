@@ -1,5 +1,5 @@
 const BUILD_TS='2026-11-06 12:35 IST'; // release build date (IST)
-const APP_VERSION=1646;
+const APP_VERSION=1647;
 const RADAR_SCORE_VERSION='v1419-recross-batches'; // Eligible on crossing the score floor at any time; selected model's evolving target and movement-based profit protection.
 
 // ── v1358: AN UNCAUGHT ERROR MUST NAME ITSELF ─────────────────────────────────────────────────
@@ -7961,6 +7961,17 @@ function kiteGttsFor(sym){
 // The helper tracks live highs and observed swings; target/stop GTT confirmation drives profit protection. This poller fetches the tracker state so the
 // browser can show armed / triggered badges and feed peakPnlPct to strategy.js evaluateExit.
 var PROFIT_LOCK_STATUS={bySym:new Map(),at:0};
+let lossFundingDirty=false;
+async function saveLossFunding(){
+  const el=document.getElementById('fLossFunding'),raw=el?.value?.trim(),percent=Number(raw);
+  if(!raw||!Number.isFinite(percent)||percent<0||percent>100){showToast('Enter a loss-trim percentage from 0 to 100.',5000,true);return;}
+  try{
+    const result=await readHelperResponse('/api/profit-lock/funding-share',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({percent}),timeout:8000});
+    if(!result?.ok)throw Error(result?.why||'Could not save loss-trim percentage');
+    lossFundingDirty=false;await loadProfitLockStatus();showToast('Loss-trim budget saved: '+percent+'% of remaining five-session net profit.');
+    renderRankingsPanels();
+  }catch(e){showToast('Loss-trim budget was not saved: '+e.message,6000,true);}
+}
 async function loadProfitLockStatus(){
   const j=await readHelperResponse('/api/profit-lock/status',{timeout:5000}).catch(()=>null);
   if(!j||!j.ok||!Array.isArray(j.positions)) return;
@@ -7968,6 +7979,7 @@ async function loadProfitLockStatus(){
   const bySym=new Map();
   for(const p of j.positions){if(p&&p.sym)bySym.set(normSym(p.sym),p);}
   PROFIT_LOCK_STATUS={bySym,at:j.asOf||Date.now(),lossBudget:j.lossBudget||null,entryPeaks:Array.isArray(j.entryPeaks)?j.entryPeaks:[],mlotHistory:j.mlotHistory||null,mlotObservations:Array.isArray(j.mlotObservations)?j.mlotObservations:[],bracket:j.bracket||null};
+  const funding=document.getElementById('fLossFunding');if(funding&&!lossFundingDirty&&document.activeElement!==funding&&Number.isFinite(j.lossBudget?.fundingShare))funding.value=+(j.lossBudget.fundingShare*100).toFixed(2);
   const ob=j.openingBasis&&typeof j.openingBasis==='object'?j.openingBasis:{},day=j.openingBasisDay||null,next={};
   for(const [s,v] of Object.entries(ob))if(v&&v.price>0)next[normSym(s)]=Number(v.price);
   const changed=day!==RECONCILED_OPENING.day||JSON.stringify(next)!==JSON.stringify(RECONCILED_OPENING.cost);
@@ -9232,7 +9244,7 @@ function buildLatestSessionPanel(query=''){
       highGapMin:shownSummary.peakMedianMin
     }:null;
     const lossBudget=Date.now()-PROFIT_LOCK_STATUS.at<60000?PROFIT_LOCK_STATUS.lossBudget:null;
-    const lossAllowance=lossBudget?.day===latestDate?'<div style="padding:8px 16px;color:var(--t2);font-size:12px">Loss-trim allowance: '+fmtPerfRs(lossBudget.available)+' available | '+fmtPerfRs(lossBudget.reserved)+' reserved | '+(lossBudget.triggerPct>0?(lossBudget.triggerPct<0.01?'the single worst holding below cost':'below -'+lossBudget.triggerPct+'%'):'cutoff paused')+'; 90% of booked profit over the last '+(lossBudget.pool?.days?.length||lossBudget.poolSessions||5)+' sessions'+(lossBudget.pool?' (net '+fmtPerfRs(lossBudget.pool.net)+')':'')+'; costs included'+(PROFIT_LOCK_STATUS.bracket?' | Base upper gap '+(PROFIT_LOCK_STATUS.bracket.params.upperGapPct??PROFIT_LOCK_STATUS.bracket.params.gapPct)+'%, lower gap '+(PROFIT_LOCK_STATUS.bracket.params.lowerGapPct??PROFIT_LOCK_STATUS.bracket.params.gapPct)+'%, zone '+PROFIT_LOCK_STATUS.bracket.params.zonePct+'% | '+PROFIT_LOCK_STATUS.bracket.learning.finished+'/40 finished trades | '+bracketLearningStatusText():'')+(!lossBudget.known?' | cost basis incomplete':'')+'</div>':'';
+    const lossAllowance=lossBudget?.day===latestDate?'<div style="padding:8px 16px;color:var(--t2);font-size:12px">Loss-trim allowance: '+fmtPerfRs(lossBudget.available)+' available | '+fmtPerfRs(lossBudget.reserved)+' reserved | '+(lossBudget.triggerPct>0?(lossBudget.triggerPct<0.01?'the single worst holding below cost':'below -'+lossBudget.triggerPct+'%'):'cutoff paused')+'; '+(lossBudget.pool?.complete&&Number.isFinite(lossBudget.fundingShare)?'5-session net estimate after wins, losses and completed trims: '+fmtPerfRs(lossBudget.pool.net)+'; '+Number((lossBudget.fundingShare*100).toFixed(2))+'% available before reservations and ₹5 cushion':'waiting for complete five-session accounting')+'; weighted account basis and estimated costs; broker FIFO may differ'+(PROFIT_LOCK_STATUS.bracket?' | Base upper gap '+(PROFIT_LOCK_STATUS.bracket.params.upperGapPct??PROFIT_LOCK_STATUS.bracket.params.gapPct)+'%, lower gap '+(PROFIT_LOCK_STATUS.bracket.params.lowerGapPct??PROFIT_LOCK_STATUS.bracket.params.gapPct)+'%, zone '+PROFIT_LOCK_STATUS.bracket.params.zonePct+'% | '+PROFIT_LOCK_STATUS.bracket.learning.finished+'/40 finished trades | '+bracketLearningStatusText():'')+(!lossBudget.known?' | accounting incomplete':'')+'</div>':'';
     const latestTbl=makeSortableTable('rank-latest-session',latestCols,rows,'_sort',-1,null,latestTotals,'sym');
     const emptyNote=String(query||'').trim()
       ?panelNoMatchHtml(query,'booked trade')
@@ -11149,7 +11161,7 @@ function getOpenPositionTapePolicy(sym,pos){
   const targetPrice=avg>0?+(avg*(1+tgtPct/100)).toFixed(2):null,stopPrice=lossStop||(avg>0&&slPct>0?+(avg*(1-slPct/100)).toFixed(2):null);
   return {symbol,qty,price,open:quote?.open,signal:verdict.action,signalSort:verdict.shouldExit?0:1,
     why:verdict.reason,exitVerdict:verdict,targetPrice,stopPrice,targetPct:tgtPct,stopPct:slPct,
-    targetWhy:(activeTarget>0?`Active target GTT at ${activeTarget}`:`Entry target +${tgtPct}% (active broker target not confirmed)`)+(plk?.bracketParams?`; upper gap ${plk.bracketParams.upperGapPct??plk.bracketParams.gapPct}%, lower gap ${plk.bracketParams.lowerGapPct??plk.bracketParams.gapPct}%, zone ${plk.bracketParams.zonePct}%`:''),stopWhy:lossStop?`Profit-funded loss GTT: ${plk.lossGttQty} of ${qty} shares at ${lossStop}; loss and costs reserved from today's realised net profit`:slPct>0?`-${slPct}% from average buy cost`:'Loss trims wait for '+(plk?.lossCutoffPct>0?`a loss greater than ${plk.lossCutoffPct}%`:'the helper’s current cutoff')+' and the 90% booked-profit budget after charges',
+      targetWhy:(activeTarget>0?`Active target GTT at ${activeTarget}`:`Entry target +${tgtPct}% (active broker target not confirmed)`)+(plk?.bracketParams?`; upper gap ${plk.bracketParams.upperGapPct??plk.bracketParams.gapPct}%, lower gap ${plk.bracketParams.lowerGapPct??plk.bracketParams.gapPct}%, zone ${plk.bracketParams.zonePct}%`:''),stopWhy:lossStop?`Profit-funded loss GTT: ${plk.lossGttQty} of ${qty} shares at ${lossStop}; loss and costs reserved from the five-session net-profit budget`:slPct>0?`-${slPct}% from average buy cost`:'Loss trims wait for '+(plk?.lossCutoffPct>0?`a loss greater than ${plk.lossCutoffPct}%`:'the helper’s current cutoff')+' and the configured share of five-session net profit after charges',
     pacePct:null,paceRs:null,daysHeld:days,ageUnknown:days==null,afterCostFloor:null,
     profitLock:plk||null,lockStopPrice:verdict.lockStopPrice||null};
 }
