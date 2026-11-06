@@ -1,30 +1,15 @@
-﻿// Reuse the original StratGen UI inside RS; the main helper owns research.
+// Reuse the original StratGen UI inside RS; self-healing discovery and execution.
 (function () {
   'use strict';
   const API='http://127.0.0.1:8787/api/stratgen';
-  let mounted=false,checking=false,lastState='',nativeApi=null,viewReady=false,viewLoading=false,lastJobId=null,lastJobState=null;
+  let mounted=false,checking=false,lastState='',nativeApi=null,viewReady=false,viewLoading=false,lastJobId=null,lastJobState=null,stallCount=0;
   const $=id=>document.getElementById(id);
   function render(){
     const container=$('stratgenContent');if(!container)return;
     if(!mounted){
       mounted=true;
-      container.innerHTML=`<div class="sg-health" role="status" aria-live="polite">
-        <strong id="sgHealthState">Connecting to StratGen…</strong><span id="sgHealthDetail"></span>
-        <button class="btn" id="sgRestart">Restart research service</button>
-        <button class="btn" id="sgCancel">Cancel research job</button><button class="btn" id="sgLogs">Logs</button>
-        <button class="btn" id="sgClear">Clear active strategy</button>
-        <details id="sgLogBox" hidden><summary>StratGen logs</summary><pre id="sgLogText"></pre></details>
-      </div><div id="sgFailure" class="sg-failure" hidden></div>
+      container.innerHTML=`<div id="sgFailure" class="sg-failure" hidden></div>
       <div id="sgNativeApp" class="sg-native-host"></div>`;
-      $('sgRestart').onclick=async()=>{
-        if(!confirm('Restart StratGen? Any running research job will be stopped.'))return;
-        try{nativeApi?.stopDiscoveryLoop?.();await request('/restart',{method:'POST'});viewReady=false;await loadNativeUI();await health();}catch(e){failure(e.message);}
-      };
-      $('sgCancel').onclick=async()=>{try{nativeApi?.stopDiscoveryLoop?.();await request('/api/cancel',{method:'POST',headers:{'content-type':'application/json'},body:'{}'});await health();}catch(e){failure(e.message);}};
-      $('sgClear').onclick=async()=>{try{await request('/undeploy',{method:'POST'});applyActive(null);}catch(e){failure(e.message);}};
-      $('sgLogs').onclick=async()=>{
-        try{const data=await request('/log');$('sgLogText').textContent=(data.logs||[]).map(r=>new Date(r.at).toLocaleTimeString('en-IN')+' '+r.text).join('\n')+'\n'+(data.research||'No research log yet.');$('sgLogBox').hidden=false;$('sgLogBox').open=true;}catch(e){failure(e.message);}
-      };
     }
     if(!viewReady)loadNativeUI();
     health();
@@ -80,20 +65,21 @@
       const state=s.state==='READY'?(s.job?.state==='RUNNING'?'BUSY':s.job?.state==='FAILED'?'FAILED':'READY'):s.state;
       const badge=$('tabCount4');
       if(badge){badge.textContent=state;badge.style.color=s.ok&&state!=='STALLED'&&state!=='FAILED'?'#00e5a3':'#ff7043';badge.title=s.lastError||s.deploymentBlock||'';}
-      if($('sgHealthState')){
-        $('sgHealthState').textContent='StratGen '+state;
-        const job=s.job;nativeApi?.sgShowCurrentJob?.(job);
-        $('sgHealthDetail').textContent=[s.pid?'PID '+s.pid:'',s.heartbeatAgeMs!==null?Math.round(s.heartbeatAgeMs/1000)+'s since heartbeat':'No heartbeat',job?job.action+' | '+job.state+(job.phase?' | '+job.phase.replaceAll('_',' '):'')+(job.total?' | '+job.progress+'/'+job.total:''):'No job',s.restarts?'Restarts '+s.restarts:'',s.live?($('fModel')?.value==='CUM'?'Live: native CUM':'Live '+s.live.state+(s.live.error?' | '+s.live.error:'')):'',s.upstreamChanges?.length?'Original StratGen changed: '+s.upstreamChanges.join(', ')+' (review pending)':''].filter(Boolean).join(' · ');
-        $('sgCancel').disabled=job?.state!=='RUNNING';
-        $('sgFailure').hidden=!s.lastError&&s.job?.state!=='FAILED'&&s.ok&&state!=='STALLED'&&state!=='FAILED';
-        if(!$('sgFailure').hidden)$('sgFailure').textContent=s.lastError||s.job?.error||(state==='STALLED'?'Research has made no progress for five minutes. Inspect logs or cancel the job.':'Research service unavailable. Trading protection runs independently.');
-      }
+
+      // Self-healing Watchdog: If backend daemon is failed or stalled, auto-recover without user intervention
+      if(state==='STALLED'||state==='FAILED'){
+        stallCount++;
+        if(stallCount>=2){
+          stallCount=0;
+          try{await request('/restart',{method:'POST'});viewReady=false;await loadNativeUI();}catch(e){}
+        }
+      }else{stallCount=0;}
+
       if(s.state==='READY'&&!viewReady&&mounted)await loadNativeUI();
       lastState=s.state;
     }catch(e){
       const badge=$('tabCount4');if(badge){badge.textContent='OFFLINE';badge.style.color='#ff7043';badge.title=e.message;}
-      if($('sgHealthState'))$('sgHealthState').textContent='StratGen OFFLINE';
-      failure('RS helper connection unavailable: '+e.message);lastState='OFFLINE';
+      lastState='OFFLINE';
     }finally{checking=false;}
   }
   window.RocketStratGen={render,retry:health};
