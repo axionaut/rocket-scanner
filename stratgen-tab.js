@@ -60,14 +60,17 @@
     if(checking)return;checking=true;
     try{
       const s=await request('/status');
+      nativeApi?.sgShowCurrentJob?.(s.job);
       if(s.job?.state==='COMPLETE'&&(s.job.id!==lastJobId||lastJobState!=='COMPLETE'))nativeApi?.loadLeaderboard?.();
       lastJobId=s.job?.id||null;lastJobState=s.job?.state||null;
-      const state=s.state==='READY'?(s.job?.state==='RUNNING'?'BUSY':s.job?.state==='FAILED'?'FAILED':'READY'):s.state;
+      const active=s.job?.state==='RUNNING';
+      const healthyWork=active&&Date.now()-s.job.last_progress_at<90*60*1000;
+      const state=s.state==='READY'||(s.state==='STALLED'&&healthyWork)?(active?'BUSY':s.job?.state==='FAILED'?'FAILED':'READY'):s.state;
       const badge=$('tabCount4');
       if(badge){badge.textContent=state;badge.style.color=s.ok&&state!=='STALLED'&&state!=='FAILED'?'#00e5a3':'#ff7043';badge.title=s.lastError||s.deploymentBlock||'';}
 
       // Self-healing Watchdog: If backend daemon is failed or stalled, auto-recover without user intervention
-      if(state==='STALLED'||state==='FAILED'){
+      if((s.state==='STALLED'&&!healthyWork)||s.state==='FAILED'){
         stallCount++;
         if(stallCount>=2){
           stallCount=0;
