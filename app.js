@@ -15219,9 +15219,9 @@ function buildBasketOrders(capital, selList){
         triggerPrice:0,disclosedQuantity:0,lastPrice:Number(s.price)||0,
         variety:'regular',
         ...(Object.keys(gttPayload).length > 0 ? {gtt: gttPayload} : {}),
-        tags:[...(stoplossPct>0?['SL']:[]), 'RS_'+s.basketModel.toUpperCase()]
+        tags:[...(stoplossPct>0?['SL']:[]), 'RS_'+String(s.basketModel||floorModel()||'CUM').toUpperCase()]
       },
-      _meta:{leg:leg||'base',sym,targetPct,stoplossPct,fullQty:null,model:s.basketModel,modelScores:s.modelScores,
+      _meta:{leg:leg||'base',sym,targetPct,stoplossPct,fullQty:null,model:s.basketModel||floorModel()||'CUM',modelScores:s.modelScores,
         recommendation:{capturedAt:Date.now(),session:getSessionDate(),score:btstScoreOf(sym),
           scoreAsOf:btstRanking()?.src?.asOf||null,scoreFloor:btstMinScore(),
           scoringModel:btstRanking()?.model||null,scoreA:btstScoreAOf(sym),
