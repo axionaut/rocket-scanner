@@ -23,12 +23,26 @@
   function applyActive(contract){
     window.__deployedStratGen=contract;window.RocketStrategy?.applyDeployedStrategy(contract);
     const option=$('optStratGen');if(option){option.textContent=contract?'Deployed · '+contract.name:'Deployed · none installed';option.disabled=!contract;}
-    const selector=$('fModel');if(selector){selector.value=contract?'STRATGEN':'CUM';if(typeof onModelChange==='function')onModelChange();}
-    const brand=document.querySelector('.brand-tag');if(brand)brand.textContent=contract?.name||'CUM - VWAP Trend & Breadth';
+    const selector=$('fModel');
+    if(selector){
+      selector.value=contract?'STRATGEN':(selector.value==='MARKOV_3PCT'?'MARKOV_3PCT':'CUM');
+      if(typeof onModelChange==='function')onModelChange();
+    }
+    const brand=document.querySelector('.brand-tag');
+    if(brand){
+      const cur=selector?.value;
+      brand.textContent=contract?.name||(cur==='MARKOV_3PCT'?'Markov · 3% Multi-Horizon Swing':'CUM - VWAP Trend & Breadth');
+    }
     if(typeof applyFilters==='function')applyFilters({preservePage:true});
     if(typeof renderStats==='function')renderStats();
   }
-  function selectBaseline(){const el=$('fModel');if(el){el.value='CUM';if(typeof onModelChange==='function')onModelChange();}}
+  function selectBaseline(){
+    const el=$('fModel');
+    if(el){
+      if(el.value!=='MARKOV_3PCT')el.value='CUM';
+      if(typeof onModelChange==='function')onModelChange();
+    }
+  }
   async function loadNativeUI(){
     if(viewLoading||viewReady||!$('sgNativeApp'))return;
     viewLoading=true;

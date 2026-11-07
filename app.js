@@ -1,5 +1,5 @@
-const BUILD_TS='2026-11-07 17:08 IST'; // release build date (IST)
-const APP_VERSION=1654;
+const BUILD_TS='2026-11-07 22:26 IST'; // release build date (IST)
+const APP_VERSION=1655;
 const RADAR_SCORE_VERSION='v1419-recross-batches'; // Eligible on crossing the score floor at any time; selected model's evolving target and movement-based profit protection.
 
 // ── v1358: AN UNCAUGHT ERROR MUST NAME ITSELF ─────────────────────────────────────────────────
@@ -118,7 +118,7 @@ function isCsvLikeFile(file){
 
 function updateModeUI(){
   const brand=document.querySelector('.brand-tag');
-  if(brand){const v=document.getElementById('fModel')?.value;brand.textContent=(v==='STRATGEN'?'StratGen Alpha':v==='CUM'?'Cumulative Change':v==='PATH'?v:'Ensemble')+' Engine';}
+  if(brand){const v=document.getElementById('fModel')?.value;brand.textContent=(v==='STRATGEN'?'StratGen Alpha':v==='MARKOV_3PCT'?'Markov · 3% Multi-Horizon Swing':v==='CUM'?'Cumulative Change':v==='PATH'?v:'Ensemble')+' Engine';}
   document.querySelectorAll('.currency-lbl').forEach(el=>{el.textContent='₹';});
 }
 let ALL=[],FILT=[],PG=1,PGSZ=100,SCOL='score',SDIR=-1,SORT_EXPLICIT=false;
@@ -4450,18 +4450,18 @@ let _floorPushTimer=null,_floorPushed=null;
 // old PATH probability floor (0-1 scale) is never read as a percentile-scale floor.
 function isRankedModel(m){ return false; }   // 27 Oct 2026 (owner): STACK removed   // a hoisted function: safe even for callers that run at load
 function floorModel(){ return selectedBtstModel(); }
-function scoreFloorStore(model=floorModel()){return model==='STRATGEN'?'rs_stratgen_score_floor':(model==='CUM'?'rs_cumulative_score_floor':model==='PATH'?'rs_path2_score_floor':SCORE_FLOOR_STORE);}
+function scoreFloorStore(model=floorModel()){return model==='STRATGEN'?'rs_stratgen_score_floor':(model==='CUM'?'rs_cumulative_score_floor':model==='MARKOV_3PCT'?'rs_markov_score_floor':model==='PATH'?'rs_path2_score_floor':SCORE_FLOOR_STORE);}
 function initScoreFloorUI(force=false){
   try{
     const el=document.getElementById('fScoreFloor'),model=floorModel();
     if(!el||(!force&&_scoreFloorSeeded===model)||document.activeElement===el)return;
     const key=scoreFloorStore(model),stored=localStorage.getItem(key),epoch=++_scoreFloorEpoch;
     const ranked=isRankedModel(model);
-    el.value=stored===null?(ranked?'2.1':''):stored;
-    el.removeAttribute('min');el.removeAttribute('max');el.placeholder=model==='CUM'?'Set threshold':ranked?'2.1':'1.6';el.step='0.1';
-    el.style.width=model==='CUM'?'140px':'90px';
-    const label=document.getElementById('scoreFloorLabel');if(label)label.textContent=model==='STRATGEN'?'StratGen Floor':(model==='CUM'?'Cumulative Floor':(model==='ENS'?'Ensemble':model)+' Floor');
-    el.title=model==='CUM'?'VWAP strengthening, in percentage points per minute: change in 100 × (price / session VWAP − 1) between fresh 10-second observations. Widening gap is positive; unchanged gap is zero; narrowing gap is negative. No accumulated points. Enter your own threshold; saved independently.':ranked?model+' only: its own ranking on the Ensemble scale (1.6 = top 1.5%, 2.2 = its #1). Default 2.1 ~ top 2-3 stocks. Saved independently.':'Ensemble only: mapped ensemble score. Default 1.6; no minimum. Saved independently from other models.';
+    el.value=stored===null?(model==='MARKOV_3PCT'?'60':ranked?'2.1':''):stored;
+    el.removeAttribute('min');el.removeAttribute('max');el.placeholder=model==='MARKOV_3PCT'?'60':model==='CUM'?'Set threshold':ranked?'2.1':'1.6';el.step=model==='MARKOV_3PCT'?'1':'0.1';
+    el.style.width=model==='CUM'?'140px':model==='MARKOV_3PCT'?'110px':'90px';
+    const label=document.getElementById('scoreFloorLabel');if(label)label.textContent=model==='STRATGEN'?'StratGen Floor':(model==='CUM'?'Cumulative Floor':model==='MARKOV_3PCT'?'Markov Prob Floor (%)':(model==='ENS'?'Ensemble':model)+' Floor');
+    el.title=model==='MARKOV_3PCT'?'Markov multi-horizon bounce probability floor (40% to 100%). Default 60% filters for Tier 1 high-probability alpha stocks. Saved independently.':model==='CUM'?'VWAP strengthening, in percentage points per minute: change in 100 × (price / session VWAP − 1) between fresh 10-second observations. Widening gap is positive; unchanged gap is zero; narrowing gap is negative. No accumulated points. Enter your own threshold; saved independently.':ranked?model+' only: its own ranking on the Ensemble scale (1.6 = top 1.5%, 2.2 = its #1). Default 2.1 ~ top 2-3 stocks. Saved independently.':'Ensemble only: mapped ensemble score. Default 1.6; no minimum. Saved independently from other models.';
     _scoreFloorSeeded=model;_floorPushed=null;
     updateModeUI();
     readHelperResponse('/api/btst/min-score?model='+model,{timeout:6000}).then(d=>{
@@ -4830,7 +4830,7 @@ function btstScoreAOf(sym){
   if(r.scoresA.size){const v=r.scoresA.get(normSym(sym));return Number.isFinite(v)?v:null;}
   return r.model==='A'?btstScoreOf(sym):null;
 }
-const BTST_MODEL_NAMES={ENS:'Ensemble',PATH:'PATH',CUM:'Cumulative Change',STRATGEN:'StratGen Alpha',A:'Original'};
+const BTST_MODEL_NAMES={ENS:'Ensemble',PATH:'PATH',CUM:'Cumulative Change',MARKOV_3PCT:'Markov 3% Swing',STRATGEN:'StratGen Alpha',A:'Original'};
 function btstModelName(m){return BTST_MODEL_NAMES[m]||m||'Original';}
 // Model switch (index.html #fModel). The helper stores the choice and passes it to every engine run;
 // the other model keeps scoring as a shadow for the day-end review. Applies from the next run.
@@ -4840,7 +4840,7 @@ function btstModelName(m){return BTST_MODEL_NAMES[m]||m||'Original';}
 // localStorage now paints the owner's last known choice synchronously; the helper still wins on reply.
 const MODEL_STORE='rocket-btst-model-v1';
 // 21 Oct 2026 (owner): Peak removed completely; Ensemble is the only model (the Model dropdown is gone).
-const SELECTABLE_MODELS=['CUM','STRATGEN'];
+const SELECTABLE_MODELS=['CUM','MARKOV_3PCT','STRATGEN'];
 function savedModelChoice(){
   try{const v=localStorage.getItem(MODEL_STORE);return SELECTABLE_MODELS.includes(v)?v:null;}catch(e){return null;}
 }
@@ -4858,18 +4858,19 @@ function syncStratGenDeployedState(){
       const d = result.deployed;
       const el = document.getElementById('fModel');
       let opt = document.getElementById('optStratGen');
+      const curM = floorModel();
       if(d && d.name){
         if(opt){opt.textContent='Deployed · '+d.name;opt.disabled=false;}
         window.__deployedStratGen = d;
-        if(typeof RocketStrategy !== 'undefined' && RocketStrategy.applyDeployedStrategy) RocketStrategy.applyDeployedStrategy((result.selectedModel||floorModel())==='STRATGEN'?d:null);
+        if(typeof RocketStrategy !== 'undefined' && RocketStrategy.applyDeployedStrategy) RocketStrategy.applyDeployedStrategy((result.selectedModel||curM)==='STRATGEN'?d:((result.selectedModel||curM)==='MARKOV_3PCT'?'MARKOV_3PCT':null));
         const brandTag = document.querySelector('.brand-tag');
-        if(brandTag) brandTag.textContent = floorModel()==='CUM'?'CUM - VWAP Trend & Breadth':d.name;
+        if(brandTag) brandTag.textContent = curM==='MARKOV_3PCT'?'Markov · 3% Multi-Horizon Swing':curM==='CUM'?'CUM - VWAP Trend & Breadth':d.name;
       } else {
         if(opt){opt.textContent='Deployed · none installed';opt.disabled=true;}
         window.__deployedStratGen = null;
-        if(typeof RocketStrategy !== 'undefined') RocketStrategy.applyDeployedStrategy(null);
+        if(typeof RocketStrategy !== 'undefined') RocketStrategy.applyDeployedStrategy(curM==='MARKOV_3PCT'?'MARKOV_3PCT':null);
         const brandTag = document.querySelector('.brand-tag');
-        if(brandTag) brandTag.textContent = floorModel()==='CUM'?'CUM - VWAP Trend & Breadth':'StratGen Alpha Engine';
+        if(brandTag) brandTag.textContent = curM==='MARKOV_3PCT'?'Markov · 3% Multi-Horizon Swing':curM==='CUM'?'CUM - VWAP Trend & Breadth':'StratGen Alpha Engine';
       }
       syncSelectedModelFromHelper();
       refreshBtstModelView();
@@ -4885,7 +4886,7 @@ function syncSelectedModelFromHelper(){
     const model=String(m?.model||'').toUpperCase();
     const el=document.getElementById('fModel');
     if(!el||!SELECTABLE_MODELS.includes(model)||el.value===model)return;
-    el.value=model;RocketStrategy?.applyDeployedStrategy(model==='STRATGEN'?window.__deployedStratGen:null);initScoreFloorUI(true);refreshBtstModelView();
+    el.value=model;RocketStrategy?.applyDeployedStrategy(model==='STRATGEN'?window.__deployedStratGen:(model==='MARKOV_3PCT'?'MARKOV_3PCT':null));initScoreFloorUI(true);refreshBtstModelView();
     if(ALL.length)applyFilters({preservePage:true});
   }).catch(()=>{});
 }
@@ -4918,7 +4919,7 @@ function onModelChange(){
   return readHelperResponse('/api/btst/model?set='+encodeURIComponent(m),{timeout:6000}).then(data=>{
     if(!data||data.ok===false||data.model!==m)throw Error(data?.error||data?.why||'Strategy selection was not confirmed');
     rememberModelChoice(m);el.value=m;
-    RocketStrategy?.applyDeployedStrategy(m==='STRATGEN'?window.__deployedStratGen:null);
+    RocketStrategy?.applyDeployedStrategy(m==='STRATGEN'?window.__deployedStratGen:(m==='MARKOV_3PCT'?'MARKOV_3PCT':null));
     initScoreFloorUI(true);refreshBtstModelView();
     if(ALL.length)applyFilters({preservePage:true});
   }).catch(error=>{el.value=previous;rememberModelChoice(previous);alert('Strategy switch failed: '+error.message);})
@@ -4931,7 +4932,7 @@ function selectedBtstModel(){
 }
 function refreshBtstModelView(){
   _btstRankMemo=null;
-  if(!SORT_EXPLICIT&&floorModel()==='CUM'){SCOL='score';SDIR=-1;}
+  if(!SORT_EXPLICIT&&(floorModel()==='CUM'||floorModel()==='MARKOV_3PCT')){SCOL='score';SDIR=-1;}
   for(const row of ALL){ROW_ACTION_MEMO.delete(row);setRadarEvidenceScore(row);}
   _dualPlanMemo=null;
   if(ALL.length)applyFilters({preservePage:true});
@@ -4963,6 +4964,10 @@ function btstEngineMinScore(){
 function btstMinScore(){
   if(floorModel()==='STRATGEN')return window.__deployedStratGen?.spec?.common_policy?.version?.startsWith('native-cum-')?0:1;
   if(floorModel()==='CUM')return 0; // Intrinsic sign boundary for binary widening; never an editable threshold.
+  if(floorModel()==='MARKOV_3PCT'){
+    const o=btstFloorOverride();
+    return o!==null?o:(btstEngineMinScore()??60);
+  }
   const r=btstRanking();
   if(r&&r.model!==floorModel())return r.minScore;
   const o=btstFloorOverride();
@@ -5295,6 +5300,46 @@ function _getRowActionStateUncached(s, ignoreMarketClosed=false){
     const held=getCombinedOpenPositionMap()[s.symbol];
     if(held?.qty>0&&Number(s.price)>=(held.avg||held.avgCost||Infinity))return {state:'WAIT',reason:'CUM re-crossing adds require price below average cost'};
     return btstCrossingState(s)||{state:'WAIT',reason:'Awaiting native VWAP crossing'};
+  }
+  if(floorModel()==='MARKOV_3PCT'){
+    const source=BTST.data;
+    if(source?.activeModel!=='MARKOV_3PCT')return {state:'WAIT',reason:'Awaiting Markov 3% strategy observations'};
+    const held=getCombinedOpenPositionMap()[s.symbol];
+    if(held?.qty>0)return {state:'WAIT',reason:'Markov swing position already active'};
+    
+    const sym=normSym(s.symbol);
+    const pick=(source.picks||[]).find(p=>normSym(p.symbol)===sym);
+    const score=btstScoreOf(s.symbol);
+    const floor=btstMinScore();
+    
+    if(!Number.isFinite(score)||score<floor){
+      return {state:'WAIT',reason:`Markov prob ${score!=null?score.toFixed(1)+'%':'N/A'} is below ${floor}% probability floor`};
+    }
+    if(!pick){
+      return {state:'WAIT',reason:`Markov setup pending for ${s.symbol} (U_Week + daily pullback)`};
+    }
+    const price=Number(s.price);
+    const targetPrice=+(price*1.03).toFixed(2);
+    const stopLossPct=pick.stopPct||2.8;
+    const stopPrice=+(price*(1-stopLossPct/100)).toFixed(2);
+
+    if(pick.triggered){
+      noteCrossing(s.symbol, price, floor);
+      return {
+        state:'GO',
+        reason:pick.why||`Markov Reversal: U_Week + Daily pullback with afternoon VWAP support (${pick.p5d}% 5D win rate)`,
+        targetPrice,
+        stopPrice,
+        targetPct:3.0,
+        stopLossPct
+      };
+    }
+    return {
+      state:'WAIT',
+      reason:source.markov?.afternoonWindow
+        ?`Awaiting intraday VWAP absorption (price ₹${price} vs VWAP)`
+        :`Arming: U_Week + D pullback confirmed (${pick.p5d}% win rate). Entry window opens 14:15 IST.`
+    };
   }
   if((getCombinedOpenPositionMap()[s.symbol]?.qty||0)>0)return {state:'WAIT',reason:'Strategy already has an open position'};
   const price=Number(s.price);
@@ -10879,14 +10924,29 @@ function getClockRunwayRead(row,opts){
 // v1446: the one place a non-order-specific target comes from - the selected model's evolving
 // base target, +3% only as its labelled startup fallback when the tracker has not loaded.
 function currentModelTargetPct(){
+  if(floorModel()==='MARKOV_3PCT') return 3.0 + (executionControls?.targetExtraPct ?? 0);
   const t=learnedBtstTarget(null);
   return Number.isFinite(t?.pct)&&t.pct>0?t.pct:RocketStrategy.CONFIG.TARGET_PCT;
 }
 function learnedBtstTarget(score,symbol=null){
+  if(floorModel()==='MARKOV_3PCT') return {pct:3.0+(executionControls?.targetExtraPct??0),y:0,model:'MARKOV_3PCT',method:'markov_swing',n:0,through:null};
   return {pct:1.25+(executionControls?.targetExtraPct??0),y:0,model:'COMMON',method:'bracket',n:0,through:null};
 }
 
 function getRowExitPolicy(row,buyPrice=null,activeInfo=null,nudgeInfo=null,qty=null){
+  if(floorModel()==='MARKOV_3PCT'){
+    const tgt = 3.0 + (executionControls?.targetExtraPct ?? 0);
+    return {
+      targetPct: tgt,
+      basePct: 3.0,
+      stopPct: 2.8,
+      viable: true,
+      targetPolicy: 'markov-3pct-swing',
+      targetSource: `Fixed +${tgt.toFixed(2)}% target calibrated to 5-day Markov multi-horizon bounce.`,
+      stopSource: '2.80% protective trailing stop loss (dynamic GTT). Holding period up to 5 trading sessions.',
+      rewardRisk: +(tgt / 2.8).toFixed(2)
+    };
+  }
   return {targetPct:1.25+(executionControls?.targetExtraPct??0),basePct:1.25,stopPct:0,viable:true,targetPolicy:'bracket-v1520',
     targetSource:'Starts at +1.25% of weighted average cost; ratchets both OCO legs upward near the upper sell.',
     stopSource:'Loss-trim cutoff learns from funded portfolio decisions; up to 90% of today’s booked profit after charges funds trims',rewardRisk:null};

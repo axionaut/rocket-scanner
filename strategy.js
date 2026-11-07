@@ -758,6 +758,13 @@ function bookedSession(session,holdingCosts,tradebook){
   function applyDeployedStrategy(dep) {
     CONFIG.TARGET_PCT=1.25;CONFIG.STOP_LOSS_PCT=0;CONFIG.MAX_HOLDING_DAYS=null;CONFIG.ACTIVE_STRATGEN_DEPLOYED=null;
     if(!dep)return;
+    if(dep==='MARKOV_3PCT'||dep.isMarkov||dep.strategy_id==='markov_multihorizon_3pct'){
+      CONFIG.TARGET_PCT=3.0;
+      CONFIG.STOP_LOSS_PCT=2.8;
+      CONFIG.MAX_HOLDING_DAYS=5;
+      CONFIG.ACTIVE_STRATGEN_DEPLOYED=null;
+      return;
+    }
     // Proposal TP/SL/horizons must never silently rewrite the common executor.
     if(dep.spec?.exit?.policy!=='rs-trail-min5-v2'||!(dep.program_schema==='rs-strategy-program-1'&&dep.program_validation?.contract_hash===dep.sha256)&&dep.test_evidence?.live_parity!==true)return;
     CONFIG.TARGET_PCT=0;CONFIG.ACTIVE_STRATGEN_DEPLOYED=dep;
