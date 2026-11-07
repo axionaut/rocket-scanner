@@ -22,7 +22,7 @@
   function failure(message){if($('sgFailure')){$('sgFailure').hidden=false;$('sgFailure').textContent=message;}}
   function applyActive(contract){
     window.__deployedStratGen=contract;window.RocketStrategy?.applyDeployedStrategy(contract);
-    const option=$('optStratGen');if(option)option.textContent=contract?.name||'No Strategy Deployed (Awaiting StratGen)';
+    const option=$('optStratGen');if(option){option.textContent=contract?'Deployed · '+contract.name:'Deployed · none installed';option.disabled=!contract;}
     const selector=$('fModel');if(selector){selector.value=contract?'STRATGEN':'CUM';if(typeof onModelChange==='function')onModelChange();}
     const brand=document.querySelector('.brand-tag');if(brand)brand.textContent=contract?.name||'CUM - VWAP Trend & Breadth';
     if(typeof applyFilters==='function')applyFilters({preservePage:true});
@@ -61,6 +61,7 @@
     try{
       const s=await request('/status');
       lastReachable=Date.now();
+      nativeApi?.sgObserveBoardRevision?.(s.leaderboardRevision);
       nativeApi?.sgShowCurrentJob?.(s.job);
       if(s.job?.state==='COMPLETE'&&(s.job.id!==lastJobId||lastJobState!=='COMPLETE'))nativeApi?.loadLeaderboard?.();
       lastJobId=s.job?.id||null;lastJobState=s.job?.state||null;

@@ -1,5 +1,5 @@
-const BUILD_TS='2026-11-07 15:20 IST'; // release build date (IST)
-const APP_VERSION=1653;
+const BUILD_TS='2026-11-07 17:08 IST'; // release build date (IST)
+const APP_VERSION=1654;
 const RADAR_SCORE_VERSION='v1419-recross-batches'; // Eligible on crossing the score floor at any time; selected model's evolving target and movement-based profit protection.
 
 // ── v1358: AN UNCAUGHT ERROR MUST NAME ITSELF ─────────────────────────────────────────────────
@@ -4859,13 +4859,13 @@ function syncStratGenDeployedState(){
       const el = document.getElementById('fModel');
       let opt = document.getElementById('optStratGen');
       if(d && d.name){
-        if(opt) opt.textContent = '🚀 ' + d.name;
+        if(opt){opt.textContent='Deployed · '+d.name;opt.disabled=false;}
         window.__deployedStratGen = d;
-        if(typeof RocketStrategy !== 'undefined' && RocketStrategy.applyDeployedStrategy) RocketStrategy.applyDeployedStrategy(d);
+        if(typeof RocketStrategy !== 'undefined' && RocketStrategy.applyDeployedStrategy) RocketStrategy.applyDeployedStrategy((result.selectedModel||floorModel())==='STRATGEN'?d:null);
         const brandTag = document.querySelector('.brand-tag');
         if(brandTag) brandTag.textContent = floorModel()==='CUM'?'CUM - VWAP Trend & Breadth':d.name;
       } else {
-        if(opt) opt.textContent = 'No Strategy Deployed (Awaiting StratGen)';
+        if(opt){opt.textContent='Deployed · none installed';opt.disabled=true;}
         window.__deployedStratGen = null;
         if(typeof RocketStrategy !== 'undefined') RocketStrategy.applyDeployedStrategy(null);
         const brandTag = document.querySelector('.brand-tag');
@@ -4885,7 +4885,7 @@ function syncSelectedModelFromHelper(){
     const model=String(m?.model||'').toUpperCase();
     const el=document.getElementById('fModel');
     if(!el||!SELECTABLE_MODELS.includes(model)||el.value===model)return;
-    el.value=model;initScoreFloorUI(true);refreshBtstModelView();
+    el.value=model;RocketStrategy?.applyDeployedStrategy(model==='STRATGEN'?window.__deployedStratGen:null);initScoreFloorUI(true);refreshBtstModelView();
     if(ALL.length)applyFilters({preservePage:true});
   }).catch(()=>{});
 }
@@ -4911,17 +4911,18 @@ function initModelUI(){
   }catch(e){}
 }
 function onModelChange(){
-  const el=document.getElementById('fModel'),m=el?el.value:'ENS';
-  if(!SELECTABLE_MODELS.includes(m))return;
-  rememberModelChoice(m);_modelChoiceEpoch++;_modelSwitchPending=true;
-  initScoreFloorUI(true);refreshBtstModelView();
-  readHelperResponse('/api/btst/model?set='+encodeURIComponent(m),{timeout:6000}).then(d=>{
-    _modelSwitchPending=false;
-    if(!d||d.ok===false)return;
-    const act=d.model||m;rememberModelChoice(act);
-    if(el&&el.value!==act)el.value=act;
+  const el=document.getElementById('fModel'),m=el?.value;
+  if(!SELECTABLE_MODELS.includes(m)||_modelSwitchPending)return;
+  const previous=savedModelChoice()||'CUM';
+  el.value=previous;el.disabled=true;_modelChoiceEpoch++;_modelSwitchPending=true;
+  return readHelperResponse('/api/btst/model?set='+encodeURIComponent(m),{timeout:6000}).then(data=>{
+    if(!data||data.ok===false||data.model!==m)throw Error(data?.error||data?.why||'Strategy selection was not confirmed');
+    rememberModelChoice(m);el.value=m;
+    RocketStrategy?.applyDeployedStrategy(m==='STRATGEN'?window.__deployedStratGen:null);
     initScoreFloorUI(true);refreshBtstModelView();
-  }).catch(()=>{_modelSwitchPending=false;});
+    if(ALL.length)applyFilters({preservePage:true});
+  }).catch(error=>{el.value=previous;rememberModelChoice(previous);alert('Strategy switch failed: '+error.message);})
+    .finally(()=>{_modelSwitchPending=false;el.disabled=false;});
 }
 // The model new orders are ranked and targeted on: the dropdown (helper-confirmed), else the saved choice.
 function selectedBtstModel(){
@@ -4960,6 +4961,7 @@ function btstEngineMinScore(){
 }
 // What the screen judges against: the override when typed, otherwise the engine's own floor.
 function btstMinScore(){
+  if(floorModel()==='STRATGEN')return window.__deployedStratGen?.spec?.common_policy?.version?.startsWith('native-cum-')?0:1;
   if(floorModel()==='CUM')return 0; // Intrinsic sign boundary for binary widening; never an editable threshold.
   const r=btstRanking();
   if(r&&r.model!==floorModel())return r.minScore;
@@ -5297,8 +5299,8 @@ function _getRowActionStateUncached(s, ignoreMarketClosed=false){
   if((getCombinedOpenPositionMap()[s.symbol]?.qty||0)>0)return {state:'WAIT',reason:'Strategy already has an open position'};
   const price=Number(s.price);
   if(!(price>0))return {state:'BLOCKED',reason:'Invalid or missing live price'};
-  const common=RocketStrategy.evaluateUniverse(s);
-  if(!common.eligible)return {state:'WAIT',reason:common.reason};
+  const installed=window.__deployedStratGen||RocketStrategy.CONFIG?.ACTIVE_STRATGEN_DEPLOYED;
+  if(!installed?.spec?.common_policy?.version?.startsWith('native-cum-')){const common=RocketStrategy.evaluateUniverse(s);if(!common.eligible)return {state:'WAIT',reason:common.reason};}
 
   // 2. Active Strategy Evaluation (Dynamic from StratGen)
   const activeStrat = window.__deployedStratGen || RocketStrategy.CONFIG?.ACTIVE_STRATGEN_DEPLOYED;
