@@ -66,9 +66,14 @@
       lastJobId=s.job?.id||null;lastJobState=s.job?.state||null;
       const active=s.job?.state==='RUNNING';
       const healthyWork=active&&Date.now()-s.job.last_progress_at<90*60*1000;
-      const state=s.state==='READY'||(s.state==='STALLED'&&healthyWork)?(active?'BUSY':s.job?.state==='FAILED'?'FAILED':'READY'):s.state;
+      const discovery=nativeApi?.sgDiscoveryStatus?.();
+      let state=s.state==='READY'||(s.state==='STALLED'&&healthyWork)?(active?'BUSY':s.job?.state==='FAILED'?'FAILED':'READY'):s.state;
+      if(discovery?.active){
+        if(discovery.supervisor_alive===false||discovery.status==='RETRYING')state='RECOVERING';
+        else if(state==='READY')state='DISCOVERING';
+      }
       const badge=$('tabCount4');
-      if(badge){badge.textContent=state;badge.style.color=s.ok&&state!=='STALLED'&&state!=='FAILED'?'#00e5a3':'#ff7043';badge.title=s.lastError||s.deploymentBlock||'';}
+      if(badge){badge.textContent=state;badge.style.color=s.ok&&state!=='STALLED'&&state!=='FAILED'&&state!=='RECOVERING'?'#00e5a3':'#ff7043';badge.title=discovery?.last_error||s.lastError||s.deploymentBlock||'';}
 
       // Self-healing Watchdog: If backend daemon is failed or stalled, auto-recover without user intervention
       if((s.state==='STALLED'&&!healthyWork)||s.state==='FAILED'){
