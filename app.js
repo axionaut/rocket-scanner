@@ -1,5 +1,5 @@
-const BUILD_TS='2026-11-08 14:39 IST'; // release build date (IST)
-const APP_VERSION=1661;
+const BUILD_TS='2026-11-08 15:44 IST'; // release build date (IST)
+const APP_VERSION=1662;
 const RADAR_SCORE_VERSION='v1419-recross-batches'; // Eligible on crossing the score floor at any time; selected model's evolving target and movement-based profit protection.
 
 // ── v1358: AN UNCAUGHT ERROR MUST NAME ITSELF ─────────────────────────────────────────────────
@@ -3744,17 +3744,24 @@ function enabledModelsLabel(){
 }
 function dualScoreCell(row){
   const act = getRowActionState(row);
+  const ms = btstScoreOf(row.symbol) ?? (Number.isFinite(Number(row.score)) ? Number(row.score) : null);
+  const scoreText = Number.isFinite(ms) ? (Math.abs(ms) >= 10 ? ms.toFixed(1) : (ms >= 0 ? '+' : '') + ms.toFixed(2)) : null;
+  const scoreHtml = scoreText ? `<span style="font-family:'DM Mono',monospace;font-weight:800;font-size:13px;color:${act.state==='GO'?'var(--green)':'var(--amber)'}">${scoreText}</span>` : '';
+
   if(act.state === 'GO'){
     return `<div style="display:flex;align-items:center;gap:6px;justify-content:center">
-      <span class="info-pill pill-green" style="font-size:12px;font-weight:800;padding:2px 8px;border-radius:4px" title="${escHtml(act.reason || 'Strategy entry satisfied')}">🟢 GO (Eligible)</span>
+      ${scoreHtml}
+      <span class="info-pill pill-green" style="font-size:12px;font-weight:800;padding:2px 8px;border-radius:4px" title="${escHtml(act.reason || 'Strategy entry satisfied')}">🟢 GO</span>
     </div>`;
   }
   if(act.state === 'WAIT'){
     return `<div style="display:flex;align-items:center;gap:6px;justify-content:center">
+      ${scoreHtml}
       <span class="info-pill" style="font-size:11px;font-weight:700;color:var(--amber);background:rgba(245,158,11,.15);padding:2px 8px;border-radius:4px" title="${escHtml(act.reason || 'Conditions pending')}">WAIT</span>
     </div>`;
   }
   return `<div style="display:flex;align-items:center;gap:6px;justify-content:center">
+    ${scoreHtml}
     <span class="info-pill" style="font-size:11px;font-weight:700;color:var(--red);background:rgba(239,68,68,.12);padding:2px 8px;border-radius:4px" title="${escHtml(act.reason || 'Blocked')}">BLOCKED</span>
   </div>`;
 }
@@ -11258,7 +11265,7 @@ function _planDualBasketUncached(rows,capital){
       reason:EXPORT_EXCLUDED.has(r.symbol)?'Excluded from basket by you':!isStockEligible(r)?getRowActionState(r).reason:null};
   });
   const planned=RocketStrategy.planAccountEntries(candidates,{cash:Math.max(0,Math.min(Number(capital),getKiteAvailableCash()??0)),maxAlloc:getTypedMaxAlloc(capital),maxStocks:executionControls?.maxStocks??20,mlot:getLiveMlotQuantiles()});
-  for(const r of rows||[])if(planned.alloc[r.symbol]){const p=getRowExitPolicy(r);Object.assign(planned.alloc[r.symbol],{tgtPct:p.targetPct,slPct:p.stopPct});}
+  for(const r of rows||[])if(planned.alloc[r.symbol]){const p=getRowExitPolicy(r);Object.assign(planned.alloc[r.symbol],{tgtPct:p.targetPct,slPct:p.stopPct,alloc:planned.alloc[r.symbol].capital});}
   return {rows:planned.funded.map(symbol=>(rows||[]).find(r=>r.symbol===symbol)),alloc:planned.alloc,reasons:new Map(Object.entries(planned.reasons))};
 }
 
@@ -12142,7 +12149,8 @@ function renderTable(){
       tgt:`<td style="font-weight:700" title="${escHtml((exitPolicy.viable?`${exitPolicy.targetSource}. Entry-relative objective ${exitPolicy.targetPct?.toFixed(2)??'—'}%; target-hit proceeds are not expected returns.${exitPolicy.positionFloorPct>exitPolicy.targetPct?` CNC after-cost floor is ${exitPolicy.positionFloorPct.toFixed(2)}%.`:''}`:`${exitPolicy.viabilitySource||'Target economics'}; planning target unavailable; allocation uses the 10-share minimum.`)+' '+exitPolicy.horizonNote+' '+exitPolicy.stopSource+(exitPolicy.rewardRisk!=null?` · reward:risk ${exitPolicy.rewardRisk.toFixed(2)}`:''))}"><span style="color:${exitPolicy.viable?'var(--green)':'var(--red)'}">${exitPolicy.viable&&exitPolicy.targetPct!=null?'+'+exitPolicy.targetPct.toFixed(2)+'%':'—'}</span>${exitPolicy.stopPct>0?`<span style="color:var(--t3)"> / </span><span style="color:var(--red)">−${exitPolicy.stopPct.toFixed(2)}%</span>`:''}</td>`,
       alloc:`<td class="alloc-cell" data-sym="${s.symbol}">${(()=>{
         if(!am||am.rejected||!(am.qty>0)) return '<span style="color:var(--t3);font-size:13px">—</span>';
-        return `<span style="color:var(--amber);font-weight:700;font-family:'DM Mono',monospace;font-size:14px">${fmtINR(am.alloc)}</span>${allocationSubline(am,unitLabel)}`;
+        const allocatedCapital = am.capital ?? am.alloc ?? am.debit ?? (am.qty * Number(s.price || 0));
+        return `<span style="color:var(--amber);font-weight:700;font-family:'DM Mono',monospace;font-size:14px">${fmtINR(allocatedCapital)}</span>${allocationSubline(am,unitLabel)}`;
       })()}</td>`,
       risk:`<td>${radarRiskPill(s.risk)}</td>`
     };
@@ -12242,9 +12250,14 @@ function compareModelScoreRows(a,b){
   const ar = rank(a), br = rank(b);
   if(ar !== br) return ar - br;
 
-  // 100% Fidelity with StratGen Portfolio Backtest (engine.py line 456):
-  // 1. Chronological Trigger Time (earliest signal today gets funded first)
-  // 2. Tie-breaker: Highest Relative Volume (RVOL) conviction
+  // 100% Fidelity with planAccountEntries & Strategy funding:
+  // 1. Model score priority (higher scores funded first)
+  const scA = btstScoreOf(a.symbol) ?? (Number.isFinite(Number(a.score)) ? Number(a.score) : 0);
+  const scB = btstScoreOf(b.symbol) ?? (Number.isFinite(Number(b.score)) ? Number(b.score) : 0);
+  if(Math.abs(scB - scA) > 1e-5) return scB - scA;
+
+  // 2. Chronological Trigger Time (earliest signal today gets funded first)
+  // 3. Tie-breaker: Highest Relative Volume (RVOL) conviction
   if(ar === 0 && br === 0){
     const store = crossingStore();
     const tA = Number(store?.at?.[normSym(a.symbol)]?.firstT || store?.at?.[normSym(a.symbol)]?.t || Infinity);
