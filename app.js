@@ -1,5 +1,5 @@
-const BUILD_TS='2026-11-08 14:01 IST'; // release build date (IST)
-const APP_VERSION=1660;
+const BUILD_TS='2026-11-08 14:39 IST'; // release build date (IST)
+const APP_VERSION=1661;
 const RADAR_SCORE_VERSION='v1419-recross-batches'; // Eligible on crossing the score floor at any time; selected model's evolving target and movement-based profit protection.
 
 // ── v1358: AN UNCAUGHT ERROR MUST NAME ITSELF ─────────────────────────────────────────────────
@@ -1509,6 +1509,7 @@ function casContinuousEndMin(ts=Date.now()){ return istDateKeyNow(ts)>=CAS_V2_DA
 // which is why every F&O name read "Insufficient complete historical paths (1/5)".
 const _closeMinMemo=new Map();
 function continuousCloseMin(sym){
+  const session=nseSessionBounds(istDateKeyNow(),sym);if(session?.special)return session.close;
   const key=normSym(sym||''),bars=INTRADAY_BARS[key];
   if(!Array.isArray(bars)||!bars.length) return SESSION_CLOSE_MIN;
   if(casContinuousEndMin()===SESSION_CLOSE_MIN) return SESSION_CLOSE_MIN;   // from 2026-12-07 every stock trades to 15:30
@@ -1544,12 +1545,8 @@ function istClock(timestamp=Date.now()){
   };
 }
 function isoDateFromUtcDate(date){ return date.toISOString().slice(0,10); }
-function isNseTradingDate(dateText){
-  const date=new Date(String(dateText||'')+'T12:00:00Z');
-  if(Number.isNaN(date.getTime())) return false;
-  const day=date.getUTCDay();
-  return day!==0&&day!==6&&!NSE_HOLIDAYS.has(isoDateFromUtcDate(date));
-}
+function nseSessionBounds(day,symbol=null){return RocketStrategy.nseSession(day,NSE_HOLIDAYS,symbol);}
+function isNseTradingDate(dateText){return !!nseSessionBounds(String(dateText||''));}
 function getPreviousTradingDate(dateText){
   const date=new Date(String(dateText||'')+'T12:00:00Z');
   if(Number.isNaN(date.getTime())) return '';
@@ -1560,20 +1557,17 @@ function getPreviousTradingDate(dateText){
 function getModelTradingDate(timestamp=Date.now()){
   const clock=istClock(timestamp);
   const anchor=new Date(Date.UTC(clock.year,clock.month-1,clock.day,12,0,0));
-  if(clock.mins<DAY_START_MIN) anchor.setUTCDate(anchor.getUTCDate()-1);
+  if(clock.mins<(nseSessionBounds(isoDateFromUtcDate(anchor))?.preopen??DAY_START_MIN)) anchor.setUTCDate(anchor.getUTCDate()-1);
   while(!isNseTradingDate(isoDateFromUtcDate(anchor))) anchor.setUTCDate(anchor.getUTCDate()-1);
   return isoDateFromUtcDate(anchor);
 }
 function istNow(){ return istClock(Date.now()); }
-function isEquitySession(timestamp=Date.now()){
-  const c=istClock(timestamp),date=new Date(c.dateMs).toISOString().slice(0,10);
-  return isNseTradingDate(date)&&c.mins>=EQUITY_OPEN_MIN&&c.mins<EQUITY_CLOSE_MIN;
-}
+function isEquitySession(timestamp=Date.now(),symbol=null){return RocketStrategy.nseContinuous(timestamp,symbol,NSE_HOLIDAYS);}
 function isMarketHours(){return isEquitySession();}
 function isMarketRefreshWindow(timestamp=Date.now()){
   // Keep collecting the closing tape through 16:00; this is not an entry window.
   const c=istClock(timestamp),date=new Date(c.dateMs).toISOString().slice(0,10);
-  return isNseTradingDate(date)&&c.mins>=DAY_START_MIN&&c.mins<DAY_END_MIN;
+  const session=nseSessionBounds(date);return !!session&&c.mins>=session.preopen&&c.mins<session.postClose;
 }
 // Called tens of thousands of times a second by the row evaluators; the answer can only change on a
 // minute boundary (DAY_START_MIN) or when the holiday list loads, so memoise it per minute.
@@ -2636,12 +2630,12 @@ function isRocketOutcome(p){return p?.rocketOutcome===ROCKET_OUTCOME.ROCKET;}
 // on an F&O stock evidence-incomplete and hid every one of its complete sessions from the target.
 function nextScoreBarStart(timestamp,closeMin=EQUITY_CLOSE_MIN){
   const rounded=Math.ceil(timestamp/TAPE_BAR_MS)*TAPE_BAR_MS;
-  let day=istDayKey(rounded);
+  let day=istDayKey(rounded),session=nseSessionBounds(day);
   const mins=istClock(rounded).mins;
-  if(isNseTradingDate(day)&&mins>=EQUITY_OPEN_MIN&&mins<closeMin) return rounded;
-  if(isNseTradingDate(day)&&mins<EQUITY_OPEN_MIN) return Date.parse(day+'T09:15:00+05:30');
-  do{day=new Date(Date.parse(day+'T12:00:00Z')+86400000).toISOString().slice(0,10);}while(!isNseTradingDate(day));
-  return Date.parse(day+'T09:15:00+05:30');
+  if(session&&mins>=session.open&&mins<Math.min(closeMin,session.close))return rounded;
+  if(session&&mins<session.open)return Date.parse(day+'T'+String(Math.floor(session.open/60)).padStart(2,'0')+':'+String(session.open%60).padStart(2,'0')+':00+05:30');
+  do{day=new Date(Date.parse(day+'T12:00:00Z')+86400000).toISOString().slice(0,10);session=nseSessionBounds(day);}while(!session);
+  return Date.parse(day+'T'+String(Math.floor(session.open/60)).padStart(2,'0')+':'+String(session.open%60).padStart(2,'0')+':00+05:30');
 }
 function resolveNetRecommendation(p,asOf){
   if(p.paperComplete) return;
@@ -2651,7 +2645,7 @@ function resolveNetRecommendation(p,asOf){
   const _closeMin=continuousCloseMin(p.symbol);
   // Only bars of the continuous session count: the stream has written pre-open (09:00-09:10) and
   // post-close buckets that are not candles of any tradeable window.
-  const inSession=b=>{const m=istClock(b.t).mins;return m>=EQUITY_OPEN_MIN&&m<_closeMin;};
+  const inSession=b=>{const c=istClock(b.t),session=nseSessionBounds(istDayKey(b.t),p.symbol);return !!session&&c.mins>=session.open&&c.mins<Math.min(_closeMin,session.close);};
   const eligible=bars.filter(b=>Number(b.t)>=p.issuedAt&&Number(b.t)+TAPE_BAR_MS<=end
     &&tradingDaysBetween(p.issueDate,istDayKey(b.t))<=1&&inSession(b)).sort((a,b)=>a.t-b.t);
   if(eligible.length&&eligible[0].t>nextScoreBarStart(p.issuedAt,_closeMin)) p.evidenceIncomplete=true;
@@ -5103,7 +5097,7 @@ function btstCrossingState(s){
   // A crossing before the open waits. Not noted as a crossing.
   if(isEquitySession(Date.now())&&istClock().mins<ENTRY_START_MIN) return {state:'WAIT',reason:`Score +${score.toFixed(2)} clears +${floor.toFixed(2)}, but new buys start at the 09:15 open.`};
   const first=noteCrossing(s.symbol,score,floor);
-  if(!isEquitySession(Date.now())) return {state:'WAIT',reason:`Score +${score.toFixed(2)} clears +${floor.toFixed(2)} - market closed.`};
+  if(!isEquitySession(Date.now(),s.symbol)) return {state:'WAIT',reason:`Score +${score.toFixed(2)} clears +${floor.toFixed(2)} - market closed.`};
   // 23 Oct 2026 (owner): buy only AT the crossing. Being further above the floor is not a better signal, and a stock
   // that crossed in an earlier run is not bought later; it needs a completed run below the floor and a fresh crossing.
   if(!r.crossingsKnown) return {state:'WAIT',reason:'Waiting for the helper’s 10-second entry check.'};
@@ -5281,7 +5275,7 @@ function liveMarketBreadth(){
 function _getRowActionStateUncached(s, ignoreMarketClosed=false){
   if(!s) return {state:'BLOCKED', reason:'Invalid row'};
   if(typeof RocketStrategy==='undefined') return {state:'BLOCKED', reason:'Strategy module unavailable'};
-  if(!ignoreMarketClosed&&!isEquitySession(Date.now()))return {state:'WAIT',reason:'NSE market is closed'};
+  if(!ignoreMarketClosed&&!isEquitySession(Date.now(),s.symbol))return {state:'WAIT',reason:'NSE market is closed'};
   const stale=universePriceStaleness()||stockPriceStaleness(s.symbol);
   if(stale)return {state:'WAIT',reason:stale};
 

@@ -14,6 +14,32 @@
 }(typeof self !== 'undefined' ? self : this, function () {
   'use strict';
 
+  // Shared by browser, helper and Python candle readers. JSON block is read verbatim by nse_calendar.py.
+  /* NSE_SESSION_RULES_BEGIN */
+  const NSE_SESSION_RULES = {"version":"nse-session-2026-11-08","special":{"2026-11-08":{"name":"Diwali Muhurat","preopen":845,"open":860,"close":930,"casClose":915,"postClose":960,"casSymbols":["360ONE","ABB","ABCAPITAL","ADANIENSOL","ADANIENT","ADANIGREEN","ADANIPORTS","ADANIPOWER","ALKEM","AMBER","AMBUJACEM","ANANDRATHI","ANGELONE","APLAPOLLO","APOLLOHOSP","ASHOKLEY","ASIANPAINT","ASTRAL","ATHERENERG","AUBANK","AUROPHARMA","AXISBANK","BAJAJ-AUTO","BAJAJFINSV","BAJFINANCE","BANDHANBNK","BANKBARODA","BANKINDIA","BDL","BEL","BHARATFORG","BHARTIARTL","BHEL","BIOCON","BLUESTARCO","BOSCHLTD","BPCL","BRITANNIA","BSE","CAMS","CANBK","CDSL","CGPOWER","CHOLAFIN","CIPLA","COALINDIA","COCHINSHIP","COFORGE","COLPAL","CONCOR","COROMANDEL","CROMPTON","CUB","CUMMINSIND","DABUR","DATAPATTNS","DELHIVERY","DIVISLAB","DIXON","DLF","DMART","DRREDDY","EICHERMOT","ENRIN","ETERNAL","FEDERALBNK","FORCEMOT","FORTIS","GAIL","GLENMARK","GMRAIRPORT","GODFRYPHLP","GODREJCP","GODREJPROP","GRASIM","GVT&D","HAL","HAVELLS","HCLTECH","HDFCAMC","HDFCBANK","HDFCLIFE","HEROMOTOCO","HINDALCO","HINDPETRO","HINDUNILVR","HINDZINC","HYUNDAI","ICICIBANK","ICICIGI","ICICILIFE","IDEA","IDFCFIRSTB","IEX","INDHOTEL","INDIANB","INDIGO","INDUSINDBK","INDUSTOWER","INFY","INOXWIND","IOC","IREDA","IRFC","ITC","JINDALSTEL","JIOFIN","JSWENERGY","JSWSTEEL","JUBLFOOD","KALYANKJIL","KARURVYSYA","KAYNES","KEI","KFINTECH","KOTAKBANK","KPITTECH","LAURUSLABS","LICHSGFIN","LICI","LODHA","LT","LTF","LTM","LUPIN","M&M","MAHABANK","MANAPPURAM","MANKIND","MARICO","MARUTI","MAXHEALTH","MAZDOCK","MCX","MFSL","MOTHERSON","MOTILALOFS","MPHASIS","MUTHOOTFIN","NAM-INDIA","NATIONALUM","NAUKRI","NAVINFLUOR","NBCC","NESTLEIND","NHPC","NIFTYFPI","NMDC","NTPC","NYKAA","OBEROIRLTY","OFSS","OIL","ONGC","PAGEIND","PATANJALI","PAYTM","PERSISTENT","PETRONET","PFC","PGEL","PHOENIXLTD","PIDILITIND","PIIND","PNB","PNBHOUSING","POLICYBZR","POLYCAB","POWERGRID","POWERINDIA","PREMIERENE","PRESTIGE","RADICO","RBLBANK","RECLTD","RELIANCE","RVNL","SAGILITY","SAIL","SBICARD","SBILIFE","SBIN","SHREECEM","SHRIRAMFIN","SIEMENS","SOLARINDS","SONACOMS","SRF","SUNPHARMA","SUPREMEIND","SUZLON","SWIGGY","SYRMA","TATACONSUM","TATAELXSI","TATAPOWER","TATASTEEL","TCS","TECHM","TIINDIA","TITAN","TMPV","TORNTPHARM","TRENT","TVSMOTOR","UJJIVANSFB","ULTRACEMCO","UNIONBANK","UNITDSPR","UNOMINDA","UPL","VBL","VEDL","VMM","VOLTAS","WAAREEENER","WIPRO","YESBANK","ZYDUSLIFE"],"source":"https://nsearchives.nseindia.com/content/circulars/CMTR76941.pdf","classificationSource":"https://nsearchives.nseindia.com/content/fo/fo_mktlots.csv","classificationAsOf":"2026-11-08","classificationSha256":"a52889218e2ca1a9acd233b986f613833ef239127fab72548663d8eefacd8ceb"}}};
+  /* NSE_SESSION_RULES_END */
+  function nseSession(day, holidays=null, symbol=null){
+    const date=new Date(String(day)+'T12:00:00Z');
+    if(!Number.isFinite(date.getTime())||date.toISOString().slice(0,10)!==day)return null;
+    const special=NSE_SESSION_RULES.special[day];
+    if(special){
+      const sym=String(symbol||'').toUpperCase().replace(/^NSE:/,'').replace(/-EQ$/,'');
+      return {...special,date:day,special:true,close:symbol&&special.casSymbols.includes(sym)?special.casClose:special.close};
+    }
+    const weekday=date.getUTCDay();
+    if(weekday===0||weekday===6||(holidays?.has?holidays.has(day):Array.isArray(holidays)&&holidays.includes(day)))return null;
+    return {date:day,name:'Regular',preopen:540,open:555,close:930,postClose:960,special:false};
+  }
+  function nseClock(at=Date.now()){
+    const d=new Date(Number(at)+19800000);
+    return {day:d.toISOString().slice(0,10),minute:d.getUTCHours()*60+d.getUTCMinutes()};
+  }
+  function nseContinuous(at=Date.now(),symbol=null,holidays=null){
+    if(!Number.isFinite(Number(at)))return false;
+    const c=nseClock(at),s=nseSession(c.day,holidays,symbol);
+    return !!s&&c.minute>=s.open&&c.minute<s.close;
+  }
+
   const CONFIG = {
     // Tier 1: Universe Filters
     MIN_PRICE: 5.0,               // mirrors dev/btst_engine.py LIQ; not read by the app's decision path
@@ -771,6 +797,7 @@ function bookedSession(session,holdingCosts,tradebook){
   }
 
   return {
+    NSE_SESSION_RULES,nseSession,nseClock,nseContinuous,
     applyDeployedStrategy,
     entryScoreCapped,
     CUM_ENTRY_BAND,
