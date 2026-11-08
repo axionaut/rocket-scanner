@@ -1,5 +1,5 @@
-const BUILD_TS='2026-11-08 13:02 IST'; // release build date (IST)
-const APP_VERSION=1659;
+const BUILD_TS='2026-11-08 14:01 IST'; // release build date (IST)
+const APP_VERSION=1660;
 const RADAR_SCORE_VERSION='v1419-recross-batches'; // Eligible on crossing the score floor at any time; selected model's evolving target and movement-based profit protection.
 
 // ── v1358: AN UNCAUGHT ERROR MUST NAME ITSELF ─────────────────────────────────────────────────
@@ -5316,10 +5316,13 @@ function _getRowActionStateUncached(s, ignoreMarketClosed=false){
       return {state:'WAIT',reason:`Markov prob ${score!=null?score.toFixed(1)+'%':'N/A'} is below ${floor}% probability floor`};
     }
     if(!pick){
-      return {state:'WAIT',reason:`Markov setup pending for ${s.symbol} (U_Week + daily pullback)`};
+      return {state:'WAIT',reason:`Markov setup pending for ${s.symbol} (U_Week + daily pullback >= 3%)`};
+    }
+    if(pick.dropPct != null && pick.dropPct < 3.0){
+      return {state:'WAIT',reason:`Markov pullback drop ${pick.dropPct.toFixed(1)}% is below 3.0% threshold`};
     }
     const price=Number(s.price);
-    const targetPrice=+(price*1.03).toFixed(2);
+    const targetPrice=+(price*(1 + currentModelTargetPct()/100)).toFixed(2);
     const stopLossPct=pick.stopPct||2.8;
     const stopPrice=+(price*(1-stopLossPct/100)).toFixed(2);
 
@@ -5327,10 +5330,10 @@ function _getRowActionStateUncached(s, ignoreMarketClosed=false){
       noteCrossing(s.symbol, price, floor);
       return {
         state:'GO',
-        reason:pick.why||`Markov Reversal: U_Week + Daily pullback with afternoon VWAP support (${pick.p5d}% 5D win rate)`,
+        reason:pick.why||`Markov Reversal: U_Week + D${pick.streak||2} (-${(pick.dropPct||3).toFixed(1)}% Drop) with afternoon VWAP support (${pick.p5d}% 5D win rate)`,
         targetPrice,
         stopPrice,
-        targetPct:3.0,
+        targetPct:currentModelTargetPct(),
         stopLossPct
       };
     }
@@ -5338,7 +5341,7 @@ function _getRowActionStateUncached(s, ignoreMarketClosed=false){
       state:'WAIT',
       reason:source.markov?.afternoonWindow
         ?`Awaiting intraday VWAP absorption (price ₹${price} vs VWAP)`
-        :`Arming: U_Week + D pullback confirmed (${pick.p5d}% win rate). Entry window opens 14:15 IST.`
+        :`Arming: U_Week + D${pick.streak||2} pullback (-${(pick.dropPct||3).toFixed(1)}% drop, ${pick.p5d}% win rate). Entry window opens 14:15 IST.`
     };
   }
   if((getCombinedOpenPositionMap()[s.symbol]?.qty||0)>0)return {state:'WAIT',reason:'Strategy already has an open position'};
