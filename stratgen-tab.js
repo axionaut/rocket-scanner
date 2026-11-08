@@ -39,7 +39,14 @@
   function selectBaseline(){
     const el=$('fModel');
     if(el){
-      if(el.value!=='MARKOV_3PCT')el.value='CUM';
+      el.value='CUM';
+      if(typeof onModelChange==='function')onModelChange();
+    }
+  }
+  function selectMarkov(){
+    const el=$('fModel');
+    if(el){
+      el.value='MARKOV_3PCT';
       if(typeof onModelChange==='function')onModelChange();
     }
   }
@@ -57,7 +64,7 @@
       const body=root.querySelector('.sg-native-body');
       const doc={body,documentElement:body,getElementById:id=>root.getElementById(id),querySelector:q=>root.querySelector(q),querySelectorAll:q=>root.querySelectorAll(q),createElement:tag=>document.createElement(tag),addEventListener:(...a)=>document.addEventListener(...a)};
       const baseFetch=(input,options)=>fetch(typeof input==='string'&&input.startsWith('/api/stratgen')?'http://127.0.0.1:8787'+input:input,options);
-      const sandbox=new Proxy({fetch:baseFetch,postMessage:data=>{if(data?.type==='sg-deployed')applyActive(data.deployed);if(data?.type==='sg-select-baseline')selectBaseline();}}, {get:(target,key)=>{if(key in target)return target[key];const value=window[key];return typeof value==='function'?value.bind(window):value;},set:(target,key,value)=>(target[key]=value,true)});
+      const sandbox=new Proxy({fetch:baseFetch,postMessage:data=>{if(data?.type==='sg-deployed')applyActive(data.deployed);if(data?.type==='sg-select-baseline')selectBaseline();if(data?.type==='sg-select-markov')selectMarkov();}}, {get:(target,key)=>{if(key in target)return target[key];const value=window[key];return typeof value==='function'?value.bind(window):value;},set:(target,key,value)=>(target[key]=value,true)});
       const names=[...new Set([...script.matchAll(/(?:^|\n)\s*(?:async\s+)?function\s+(\w+)\s*\(/g)].map(m=>m[1]))];
       const exports=names.map(name=>name+':(typeof '+name+"==='function'?"+name+':undefined)').join(',');
       const run=new Function('window','document','parent','location','fetch',script+'\nreturn {window,document,parent,'+exports+'};');
