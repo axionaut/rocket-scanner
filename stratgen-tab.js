@@ -31,7 +31,7 @@
     const brand=document.querySelector('.brand-tag');
     if(brand){
       const cur=selector?.value;
-      brand.textContent=contract?.name||(cur==='MARKOV_3PCT'?'Markov · 3% Multi-Horizon Swing':'CUM - VWAP Trend & Breadth');
+      brand.textContent=contract?.name||(cur==='MARKOV_3PCT'?'Markov · Multi-Horizon Swing (Trailing)':'CUM - VWAP Trend & Breadth');
     }
     if(typeof applyFilters==='function')applyFilters({preservePage:true});
     if(typeof renderStats==='function')renderStats();

@@ -759,9 +759,9 @@ function bookedSession(session,holdingCosts,tradebook){
     CONFIG.TARGET_PCT=1.25;CONFIG.STOP_LOSS_PCT=0;CONFIG.MAX_HOLDING_DAYS=null;CONFIG.ACTIVE_STRATGEN_DEPLOYED=null;
     if(!dep)return;
     if(dep==='MARKOV_3PCT'||dep.isMarkov||dep.strategy_id==='markov_multihorizon_3pct'){
-      CONFIG.TARGET_PCT=3.0;
-      CONFIG.STOP_LOSS_PCT=2.8;
-      CONFIG.MAX_HOLDING_DAYS=5;
+      CONFIG.TARGET_PCT=1.25;
+      CONFIG.STOP_LOSS_PCT=0;
+      CONFIG.MAX_HOLDING_DAYS=null;
       CONFIG.ACTIVE_STRATGEN_DEPLOYED=null;
       return;
     }

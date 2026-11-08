@@ -118,7 +118,7 @@ function isCsvLikeFile(file){
 
 function updateModeUI(){
   const brand=document.querySelector('.brand-tag');
-  if(brand){const v=document.getElementById('fModel')?.value;brand.textContent=(v==='STRATGEN'?'StratGen Alpha':v==='MARKOV_3PCT'?'Markov · 3% Multi-Horizon Swing':v==='CUM'?'Cumulative Change':v==='PATH'?v:'Ensemble')+' Engine';}
+  if(brand){const v=document.getElementById('fModel')?.value;brand.textContent=(v==='STRATGEN'?'StratGen Alpha':v==='MARKOV_3PCT'?'Markov · Multi-Horizon Swing (Trailing)':v==='CUM'?'Cumulative Change':v==='PATH'?v:'Ensemble')+' Engine';}
   document.querySelectorAll('.currency-lbl').forEach(el=>{el.textContent='₹';});
 }
 let ALL=[],FILT=[],PG=1,PGSZ=100,SCOL='score',SDIR=-1,SORT_EXPLICIT=false;
@@ -4830,7 +4830,7 @@ function btstScoreAOf(sym){
   if(r.scoresA.size){const v=r.scoresA.get(normSym(sym));return Number.isFinite(v)?v:null;}
   return r.model==='A'?btstScoreOf(sym):null;
 }
-const BTST_MODEL_NAMES={ENS:'Ensemble',PATH:'PATH',CUM:'Cumulative Change',MARKOV_3PCT:'Markov 3% Swing',STRATGEN:'StratGen Alpha',A:'Original'};
+const BTST_MODEL_NAMES={ENS:'Ensemble',PATH:'PATH',CUM:'Cumulative Change',MARKOV_3PCT:'Markov Swing (Trailing)',STRATGEN:'StratGen Alpha',A:'Original'};
 function btstModelName(m){return BTST_MODEL_NAMES[m]||m||'Original';}
 // Model switch (index.html #fModel). The helper stores the choice and passes it to every engine run;
 // the other model keeps scoring as a shadow for the day-end review. Applies from the next run.
@@ -4864,13 +4864,13 @@ function syncStratGenDeployedState(){
         window.__deployedStratGen = d;
         if(typeof RocketStrategy !== 'undefined' && RocketStrategy.applyDeployedStrategy) RocketStrategy.applyDeployedStrategy((result.selectedModel||curM)==='STRATGEN'?d:((result.selectedModel||curM)==='MARKOV_3PCT'?'MARKOV_3PCT':null));
         const brandTag = document.querySelector('.brand-tag');
-        if(brandTag) brandTag.textContent = curM==='MARKOV_3PCT'?'Markov · 3% Multi-Horizon Swing':curM==='CUM'?'CUM - VWAP Trend & Breadth':d.name;
+        if(brandTag) brandTag.textContent = curM==='MARKOV_3PCT'?'Markov · Multi-Horizon Swing (Trailing)':curM==='CUM'?'CUM - VWAP Trend & Breadth':d.name;
       } else {
         if(opt){opt.textContent='Deployed · none installed';opt.disabled=true;}
         window.__deployedStratGen = null;
         if(typeof RocketStrategy !== 'undefined') RocketStrategy.applyDeployedStrategy(curM==='MARKOV_3PCT'?'MARKOV_3PCT':null);
         const brandTag = document.querySelector('.brand-tag');
-        if(brandTag) brandTag.textContent = curM==='MARKOV_3PCT'?'Markov · 3% Multi-Horizon Swing':curM==='CUM'?'CUM - VWAP Trend & Breadth':'StratGen Alpha Engine';
+        if(brandTag) brandTag.textContent = curM==='MARKOV_3PCT'?'Markov · Multi-Horizon Swing (Trailing)':curM==='CUM'?'CUM - VWAP Trend & Breadth':'StratGen Alpha Engine';
       }
       syncSelectedModelFromHelper();
       refreshBtstModelView();
@@ -10924,27 +10924,27 @@ function getClockRunwayRead(row,opts){
 // v1446: the one place a non-order-specific target comes from - the selected model's evolving
 // base target, +3% only as its labelled startup fallback when the tracker has not loaded.
 function currentModelTargetPct(){
-  if(floorModel()==='MARKOV_3PCT') return 3.0 + (executionControls?.targetExtraPct ?? 0);
+  if(floorModel()==='MARKOV_3PCT') return 1.25 + (executionControls?.targetExtraPct ?? 0);
   const t=learnedBtstTarget(null);
   return Number.isFinite(t?.pct)&&t.pct>0?t.pct:RocketStrategy.CONFIG.TARGET_PCT;
 }
 function learnedBtstTarget(score,symbol=null){
-  if(floorModel()==='MARKOV_3PCT') return {pct:3.0+(executionControls?.targetExtraPct??0),y:0,model:'MARKOV_3PCT',method:'markov_swing',n:0,through:null};
+  if(floorModel()==='MARKOV_3PCT') return {pct:1.25+(executionControls?.targetExtraPct??0),y:0,model:'MARKOV_3PCT',method:'markov_trailing',n:0,through:null};
   return {pct:1.25+(executionControls?.targetExtraPct??0),y:0,model:'COMMON',method:'bracket',n:0,through:null};
 }
 
 function getRowExitPolicy(row,buyPrice=null,activeInfo=null,nudgeInfo=null,qty=null){
   if(floorModel()==='MARKOV_3PCT'){
-    const tgt = 3.0 + (executionControls?.targetExtraPct ?? 0);
+    const tgt = 1.25 + (executionControls?.targetExtraPct ?? 0);
     return {
       targetPct: tgt,
-      basePct: 3.0,
-      stopPct: 2.8,
+      basePct: 1.25,
+      stopPct: 0,
       viable: true,
-      targetPolicy: 'markov-3pct-swing',
-      targetSource: `Fixed +${tgt.toFixed(2)}% target calibrated to 5-day Markov multi-horizon bounce.`,
-      stopSource: '2.80% protective trailing stop loss (dynamic GTT). Holding period up to 5 trading sessions.',
-      rewardRisk: +(tgt / 2.8).toFixed(2)
+      targetPolicy: 'rs-trail-min5-v2',
+      targetSource: 'Shared RS Trailing Ratchet: Breakeven arming (~+0.35%), MLoT trailing behind new highs, uncapped runner.',
+      stopSource: 'Single-leg GTT trailing stop; dynamic breakeven locks cost; neither leg ever moves down.',
+      rewardRisk: null
     };
   }
   return {targetPct:1.25+(executionControls?.targetExtraPct??0),basePct:1.25,stopPct:0,viable:true,targetPolicy:'bracket-v1520',
