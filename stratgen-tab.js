@@ -58,6 +58,8 @@
       const parsed=new DOMParser().parseFromString(await response.text(),'text/html');
       const host=$('sgNativeApp'),root=host.shadowRoot||host.attachShadow({mode:'open'});
       const script=[...parsed.querySelectorAll('script')].map(n=>n.textContent).join('\n');
+      // Compile before mounting so a malformed native view cannot expose dead controls.
+      new Function(script);
       const css=[...parsed.querySelectorAll('style')].map(n=>n.textContent).join('\n').replace(/:root/g,':host').replace(/\bbody\s*\{/g,':host {');
       parsed.querySelectorAll('script,style').forEach(n=>n.remove());
       root.innerHTML='<style>'+css+'\n:host{display:block;min-height:0;padding:8px 0}.modal-overlay{z-index:10000}.modal-content{max-height:90vh}</style><div class="sg-native-body">'+parsed.body.innerHTML+'</div>';
@@ -74,7 +76,7 @@
         const type=attr.name.slice(2),handler=new Function('api','event','with(api){'+attr.value+'}');el.removeAttribute(attr.name);
         el.addEventListener(type,event=>{try{if(handler.call(el,nativeApi,event)===false)event.preventDefault();}catch(e){failure(e.message);console.error(e);}});
       }};
-      bind();new MutationObserver(bind).observe(root,{childList:true,subtree:true});viewReady=true;
+      bind();new MutationObserver(bind).observe(root,{childList:true,subtree:true});viewReady=true;if($('sgFailure'))$('sgFailure').hidden=true;
     }catch(e){failure('StratGen view: '+e.message);}finally{viewLoading=false;}
   }
   async function health(){
