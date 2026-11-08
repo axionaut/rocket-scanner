@@ -18,13 +18,34 @@
   /* NSE_SESSION_RULES_BEGIN */
   const NSE_SESSION_RULES = {"version":"nse-session-2026-11-08","special":{"2026-11-08":{"name":"Diwali Muhurat","preopen":845,"open":860,"close":930,"casClose":915,"postClose":960,"casSymbols":["360ONE","ABB","ABCAPITAL","ADANIENSOL","ADANIENT","ADANIGREEN","ADANIPORTS","ADANIPOWER","ALKEM","AMBER","AMBUJACEM","ANANDRATHI","ANGELONE","APLAPOLLO","APOLLOHOSP","ASHOKLEY","ASIANPAINT","ASTRAL","ATHERENERG","AUBANK","AUROPHARMA","AXISBANK","BAJAJ-AUTO","BAJAJFINSV","BAJFINANCE","BANDHANBNK","BANKBARODA","BANKINDIA","BDL","BEL","BHARATFORG","BHARTIARTL","BHEL","BIOCON","BLUESTARCO","BOSCHLTD","BPCL","BRITANNIA","BSE","CAMS","CANBK","CDSL","CGPOWER","CHOLAFIN","CIPLA","COALINDIA","COCHINSHIP","COFORGE","COLPAL","CONCOR","COROMANDEL","CROMPTON","CUB","CUMMINSIND","DABUR","DATAPATTNS","DELHIVERY","DIVISLAB","DIXON","DLF","DMART","DRREDDY","EICHERMOT","ENRIN","ETERNAL","FEDERALBNK","FORCEMOT","FORTIS","GAIL","GLENMARK","GMRAIRPORT","GODFRYPHLP","GODREJCP","GODREJPROP","GRASIM","GVT&D","HAL","HAVELLS","HCLTECH","HDFCAMC","HDFCBANK","HDFCLIFE","HEROMOTOCO","HINDALCO","HINDPETRO","HINDUNILVR","HINDZINC","HYUNDAI","ICICIBANK","ICICIGI","ICICILIFE","IDEA","IDFCFIRSTB","IEX","INDHOTEL","INDIANB","INDIGO","INDUSINDBK","INDUSTOWER","INFY","INOXWIND","IOC","IREDA","IRFC","ITC","JINDALSTEL","JIOFIN","JSWENERGY","JSWSTEEL","JUBLFOOD","KALYANKJIL","KARURVYSYA","KAYNES","KEI","KFINTECH","KOTAKBANK","KPITTECH","LAURUSLABS","LICHSGFIN","LICI","LODHA","LT","LTF","LTM","LUPIN","M&M","MAHABANK","MANAPPURAM","MANKIND","MARICO","MARUTI","MAXHEALTH","MAZDOCK","MCX","MFSL","MOTHERSON","MOTILALOFS","MPHASIS","MUTHOOTFIN","NAM-INDIA","NATIONALUM","NAUKRI","NAVINFLUOR","NBCC","NESTLEIND","NHPC","NIFTYFPI","NMDC","NTPC","NYKAA","OBEROIRLTY","OFSS","OIL","ONGC","PAGEIND","PATANJALI","PAYTM","PERSISTENT","PETRONET","PFC","PGEL","PHOENIXLTD","PIDILITIND","PIIND","PNB","PNBHOUSING","POLICYBZR","POLYCAB","POWERGRID","POWERINDIA","PREMIERENE","PRESTIGE","RADICO","RBLBANK","RECLTD","RELIANCE","RVNL","SAGILITY","SAIL","SBICARD","SBILIFE","SBIN","SHREECEM","SHRIRAMFIN","SIEMENS","SOLARINDS","SONACOMS","SRF","SUNPHARMA","SUPREMEIND","SUZLON","SWIGGY","SYRMA","TATACONSUM","TATAELXSI","TATAPOWER","TATASTEEL","TCS","TECHM","TIINDIA","TITAN","TMPV","TORNTPHARM","TRENT","TVSMOTOR","UJJIVANSFB","ULTRACEMCO","UNIONBANK","UNITDSPR","UNOMINDA","UPL","VBL","VEDL","VMM","VOLTAS","WAAREEENER","WIPRO","YESBANK","ZYDUSLIFE"],"source":"https://nsearchives.nseindia.com/content/circulars/CMTR76941.pdf","classificationSource":"https://nsearchives.nseindia.com/content/fo/fo_mktlots.csv","classificationAsOf":"2026-11-08","classificationSha256":"a52889218e2ca1a9acd233b986f613833ef239127fab72548663d8eefacd8ceb"}}};
   /* NSE_SESSION_RULES_END */
+  const _liveMarketState = {
+    nse: { active: false, detectedAt: 0, reason: null },
+    us: { active: false, detectedAt: 0, reason: null }
+  };
+  function setMarketLiveOverride(market, active, reason='tape_active', now=Date.now()){
+    if(market==='nse'||market==='all') _liveMarketState.nse = { active: !!active, detectedAt: now, reason };
+    if(market==='us'||market==='all') _liveMarketState.us = { active: !!active, detectedAt: now, reason };
+  }
+  function isMarketLiveOverride(market, now=Date.now(), timeoutMs=300000){
+    const st = market === 'us' ? _liveMarketState.us : _liveMarketState.nse;
+    return !!st.active && (now - st.detectedAt <= timeoutMs);
+  }
+  function getMarketLiveState(){
+    return { ..._liveMarketState };
+  }
+
   function nseSession(day, holidays=null, symbol=null){
     const date=new Date(String(day)+'T12:00:00Z');
     if(!Number.isFinite(date.getTime())||date.toISOString().slice(0,10)!==day)return null;
-    const special=NSE_SESSION_RULES.special[day];
+    const special=NSE_SESSION_RULES.special?.[day];
     if(special){
       const sym=String(symbol||'').toUpperCase().replace(/^NSE:/,'').replace(/-EQ$/,'');
-      return {...special,date:day,special:true,close:symbol&&special.casSymbols.includes(sym)?special.casClose:special.close};
+      return {...special,date:day,special:true,close:symbol&&special.casSymbols?.includes(sym)?special.casClose:special.close};
+    }
+    const c=nseClock();
+    // Dynamic market-sensing: verified live ticks flowing today automatically unlock the session without manual code edits
+    if(c.day===day && isMarketLiveOverride('nse')){
+      return {date:day,name:'Special Session (Auto-Detected)',preopen:540,open:555,close:930,postClose:960,special:true,autoDetected:true};
     }
     const weekday=date.getUTCDay();
     if(weekday===0||weekday===6||(holidays?.has?holidays.has(day):Array.isArray(holidays)&&holidays.includes(day)))return null;
@@ -36,7 +57,15 @@
   }
   function nseContinuous(at=Date.now(),symbol=null,holidays=null){
     if(!Number.isFinite(Number(at)))return false;
-    const c=nseClock(at),s=nseSession(c.day,holidays,symbol);
+    const c=nseClock(at);
+    // Dynamic market-sensing override: active live ticks stream continuous trading regardless of static calendars
+    if(isMarketLiveOverride('nse', at)){
+      const weekday=new Date(c.day+'T12:00:00Z').getUTCDay();
+      // Pre-open auction protection on standard weekdays: regular trading begins at 09:15
+      if(weekday>=1&&weekday<=5&&c.minute>=540&&c.minute<555)return false;
+      return true;
+    }
+    const s=nseSession(c.day,holidays,symbol);
     return !!s&&c.minute>=s.open&&c.minute<s.close;
   }
 
@@ -797,7 +826,7 @@ function bookedSession(session,holdingCosts,tradebook){
   }
 
   return {
-    NSE_SESSION_RULES,nseSession,nseClock,nseContinuous,
+    NSE_SESSION_RULES,nseSession,nseClock,nseContinuous,setMarketLiveOverride,isMarketLiveOverride,getMarketLiveState,
     applyDeployedStrategy,
     entryScoreCapped,
     CUM_ENTRY_BAND,

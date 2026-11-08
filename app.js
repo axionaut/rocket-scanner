@@ -1,5 +1,5 @@
-const BUILD_TS='2026-11-08 15:44 IST'; // release build date (IST)
-const APP_VERSION=1662;
+const BUILD_TS='2026-11-08 16:20 IST'; // release build date (IST)
+const APP_VERSION=1663;
 const RADAR_SCORE_VERSION='v1419-recross-batches'; // Eligible on crossing the score floor at any time; selected model's evolving target and movement-based profit protection.
 
 // ── v1358: AN UNCAUGHT ERROR MUST NAME ITSELF ─────────────────────────────────────────────────
@@ -1562,7 +1562,10 @@ function getModelTradingDate(timestamp=Date.now()){
   return isoDateFromUtcDate(anchor);
 }
 function istNow(){ return istClock(Date.now()); }
-function isEquitySession(timestamp=Date.now(),symbol=null){return RocketStrategy.nseContinuous(timestamp,symbol,NSE_HOLIDAYS);}
+function isEquitySession(timestamp=Date.now(),symbol=null){
+  if(typeof RocketStrategy!=='undefined'&&RocketStrategy.isMarketLiveOverride('nse',timestamp))return true;
+  return RocketStrategy.nseContinuous(timestamp,symbol,NSE_HOLIDAYS);
+}
 function isMarketHours(){return isEquitySession();}
 function isMarketRefreshWindow(timestamp=Date.now()){
   // Keep collecting the closing tape through 16:00; this is not an entry window.
@@ -5238,6 +5241,9 @@ function invalidateLiveEvidence(reason){
   if(ALL.length)applyFilters({preservePage:true});
 }
 function acceptStreamEvidence(status){
+  if(status?.marketLive||(status?.connected&&status?.lastTickAt&&Date.now()-status.lastTickAt<=45000)){
+    if(typeof RocketStrategy!=='undefined')RocketStrategy.setMarketLiveOverride('nse',true,'server_live_stream',Date.now());
+  }
   const fresh=status?.connected===true&&Number.isFinite(status.lastTickAt)&&status.lastTickAt>0&&status.lastTickAt<=Date.now()&&Date.now()-status.lastTickAt<=30000;
   if(!fresh){if(_streamConfirmed)invalidateLiveEvidence('Stream disconnected or awaiting fresh ticks');return;}
   _streamConfirmed=true;_universeTickAt=status.lastTickAt;
@@ -5276,6 +5282,9 @@ function liveMarketBreadth(){
       !Number.isFinite(price)||price<=0||!Number.isFinite(open)||open<=0) continue;
     total++;
     if(price>open) advancing++;
+  }
+  if(total>=5&&_universeTickAt>0&&Date.now()-_universeTickAt<=45000){
+    if(typeof RocketStrategy!=='undefined')RocketStrategy.setMarketLiveOverride('nse',true,'client_live_breadth',Date.now());
   }
   return LIVE_BREADTH_MEMO={beat,rev,advancing,total,pct:total?100*advancing/total:null};
 }
@@ -11591,7 +11600,9 @@ function onMarketViewChange(){
 function usFeedLive(){
   const d=US_FEED.data;
   const now=Date.now(),age=now-Date.parse(d?.asOf),close=Date.parse(d?.closesAt);
-  return !!(d&&d.ok&&d.live&&!US_FEED.err&&age>=0&&age<10*60000&&(!Number.isFinite(close)||now<close));
+  const live = !!(d&&d.ok&&d.live&&!US_FEED.err&&age>=0&&age<10*60000&&(!Number.isFinite(close)||now<close));
+  if(typeof RocketStrategy!=='undefined'&&live)RocketStrategy.setMarketLiveOverride('us',true,'us_feed_live',now);
+  return live;
 }
 function marketsShown(){
   const v=marketView();
