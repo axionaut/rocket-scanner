@@ -1,5 +1,5 @@
-const BUILD_TS='2026-11-09 10:55 IST'; // release build date (IST)
-const APP_VERSION=1665;
+const BUILD_TS='2026-11-09 11:46 IST'; // release build date (IST)
+const APP_VERSION=1666;
 const RADAR_SCORE_VERSION='v1419-recross-batches'; // Eligible on crossing the score floor at any time; selected model's evolving target and movement-based profit protection.
 
 // ── v1358: AN UNCAUGHT ERROR MUST NAME ITSELF ─────────────────────────────────────────────────
@@ -4778,7 +4778,14 @@ function updateTriggerPnl(rows){
     const osBadge=osData?.swapsToday?.length>0
       ?` &middot; <span style="color:var(--accent,#38bdf8);font-weight:600" title="Opportunity Swaps today: ${escHtml(osData.swapsToday.map(s=>(s.sacrificeSym||s.sacrifice)+' -> '+(s.buyerSym||s.buyer)).join(', '))}">&#9889; ${osData.swapsToday.length} Swap${osData.swapsToday.length>1?'s':''}</span>`
       :'';
-    TRIGGER_PNL_HTML=`<span style="color:var(--${tone});white-space:nowrap" title="${escHtml(title)}">Account replay since ${since}: &#8377;${sign(r.netRs)} net (${sign(r.netPct)}%)<span style="color:var(--t3)"> &middot; ${r.entries-r.initialHoldings} new entries &middot; ${r.open} open${osBadge}</span></span>`;
+    if(!isToday){
+      const todayNet=Number(r.today?.netRs??r.today?.realizedNetRs??0);
+      const todaySign=(todayNet>0?'+':todayNet<0?'-':'')+Math.abs(todayNet).toFixed(2);
+      const todayTone=todayNet>0?'green':todayNet<0?'red':'t3';
+      TRIGGER_PNL_HTML=`<span style="white-space:nowrap" title="${escHtml(title)}"><span style="color:var(--${todayTone});font-weight:600">Replay Today: &#8377;${todaySign}</span> <span style="color:var(--t3)">&middot;</span> <span style="color:var(--${tone})">Since ${since}: &#8377;${sign(r.netRs)} net (${sign(r.netPct)}%)</span><span style="color:var(--t3)"> &middot; ${r.entries-r.initialHoldings} new &middot; ${r.open} open${osBadge}</span></span>`;
+    }else{
+      TRIGGER_PNL_HTML=`<span style="color:var(--${tone});white-space:nowrap" title="${escHtml(title)}">Account replay since ${since}: &#8377;${sign(r.netRs)} net (${sign(r.netPct)}%)<span style="color:var(--t3)"> &middot; ${r.entries-r.initialHoldings} new entries &middot; ${r.open} open${osBadge}</span></span>`;
+    }
   }
   if(el)el.innerHTML=TRIGGER_PNL_HTML;
 }
