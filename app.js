@@ -1,5 +1,5 @@
-const BUILD_TS='2026-11-08 16:20 IST'; // release build date (IST)
-const APP_VERSION=1663;
+const BUILD_TS='2026-11-09 10:41 IST'; // release build date (IST)
+const APP_VERSION=1664;
 const RADAR_SCORE_VERSION='v1419-recross-batches'; // Eligible on crossing the score floor at any time; selected model's evolving target and movement-based profit protection.
 
 // ── v1358: AN UNCAUGHT ERROR MUST NAME ITSELF ─────────────────────────────────────────────────
@@ -4768,7 +4768,10 @@ function updateTriggerPnl(rows){
   if(!r?.ok)TRIGGER_PNL_HTML='<span style="color:var(--t3)" title="'+escHtml(r?.error||'Waiting for the account snapshot')+'">Account replay: '+(r?.error?'unavailable':'starting')+'</span>';
   else if(r.policy!=='live-account-rules-v2')TRIGGER_PNL_HTML='<span style="color:var(--t3)" title="The helper must load the shared score allocation and actual-account replay policy.">Replay update pending helper reload</span>';
   else{
-    const since=new Date(r.startedAt).toLocaleTimeString('en-IN',{timeZone:'Asia/Kolkata',hour:'2-digit',minute:'2-digit',hour12:false});
+    const startedD=new Date(r.startedAt);
+    const isToday=startedD.toLocaleDateString('en-CA',{timeZone:'Asia/Kolkata'})===getSessionDate();
+    const sinceTime=startedD.toLocaleTimeString('en-IN',{timeZone:'Asia/Kolkata',hour:'2-digit',minute:'2-digit',hour12:false});
+    const since=isToday?sinceTime:`${startedD.toLocaleDateString('en-IN',{timeZone:'Asia/Kolkata',day:'numeric',month:'short'})} ${sinceTime}`;
     const sign=v=>(v>0?'+':v<0?'-':'')+Math.abs(v).toFixed(2),tone=r.netRs>0?'green':r.netRs<0?'red':'t3';
     const title='Starts from real available cash and existing holdings. Invested holdings cannot fund another entry. Shared score-proportional allocation, cost floor, liquidity caps, IOC price cap and RS exits. Net includes estimated charges and open liquidation costs. Recording begins at '+since+' IST; earlier trading is not invented. Broker fills may differ from recorded quote execution. No real orders.';
     TRIGGER_PNL_HTML=`<span style="color:var(--${tone});white-space:nowrap" title="${escHtml(title)}">Account replay since ${since}: &#8377;${sign(r.netRs)} net (${sign(r.netPct)}%)<span style="color:var(--t3)"> &middot; ${r.entries-r.initialHoldings} new entries &middot; ${r.open} open</span></span>`;
