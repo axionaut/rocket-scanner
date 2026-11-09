@@ -185,7 +185,11 @@
       const unit=r.unitDebit??r.price+sumChargeParts(calcZerodhaChargesSplit(r.price,1,false,false,false));
       const minimum=account.minimumShares?account.minimumShares(r.price,!!r.held,account.mlot):minSharesForStock(r.price,!!r.held,account.mlot),floor=account.orderCharges?minimum*r.price+fees(minimum,r.price):minimum*unit;
       const ceiling=Math.min(spendable,r.liquidityCap,Number(account.maxAlloc)>0?Number(account.maxAlloc):Infinity);
-      if(!reason&&floor>ceiling+1e-7)reason='Liquidity or allocation cap cannot cover the whole-share cost breakeven minimum';
+      if(!reason&&floor>ceiling+1e-7){
+        reason = spendable < floor
+          ? 'Available cash cannot cover the whole-share minimum order'
+          : 'Liquidity or allocation cap cannot cover the whole-share cost breakeven minimum';
+      }
       if(!reason&&selected.length>=maxStocks)reason='Stocks per allocation limit reached; higher scores funded first';
       if(!reason&&reserved+floor>spendable+1e-7)reason='Cash cannot cover every minimum order; higher scores funded first';
       if(reason){reasons[r.symbol]=reason;continue;}
@@ -229,7 +233,8 @@
    * 4. Sacrifice dwell time (>= 60 min, not bought in last hour)
    * 5. Sacrifice momentum failure (pnl < 0 AND (dayChg <= 0 OR ltp <= vwap))
    * 6. Sacrifice shallow loss limit (lossPct <= 2.5% and lossRs <= 250)
-   * 7. Sacrifice ranked by lowest lossPct (highest Liberation Efficiency Ratio)
+   * 7. Deficit-aware partial trimming (bounded by loss limit, preserving winners & balance)
+   * 8. Sacrifice ranked by lowest lossPct (highest Liberation Efficiency Ratio)
    */
   function evaluateOpportunitySwap(unfundedCandidates, heldPositions, options = {}) {
     if (!Array.isArray(unfundedCandidates) || !unfundedCandidates.length) {
@@ -249,6 +254,8 @@
     const maxLossPct = Number.isFinite(options.maxLossPct) ? Number(options.maxLossPct) : 3.00;
     const maxLossRs = Number.isFinite(options.maxLossRs) ? Number(options.maxLossRs) : 300.0;
     const minDwellMs = Number.isFinite(options.minDwellMs) ? Number(options.minDwellMs) : 3600000;
+    const availableCash = Math.max(0, Number(options.availableCash || 0));
+    const usableCreditFactor = Number.isFinite(options.usableCreditFactor) ? Number(options.usableCreditFactor) : 0.80; // SEBI / Kite CNC T-day instant credit
     const now = options.now || Date.now();
 
     // 1. Pick the best eligible buy candidate
@@ -271,8 +278,19 @@
       ? Number(buyer.minCapital)
       : Math.max(CONFIG.MIN_ALLOCATION_RS, buyerPx * (buyer.minShares || 1));
 
+    // Deficit calculation
+    const deficit = Math.max(0, minTicket - availableCash);
+    if (deficit <= 0) {
+      return { eligible: false, buyer, minTicket, availableCash, reason: `Available cash (₹${availableCash.toFixed(0)}) covers minTicket (₹${minTicket.toFixed(0)}); no swap needed` };
+    }
+
     // 2. Filter and rank held positions for the best sacrifice
     const sacrifices = [];
+    let greenRunnersCount = 0;
+    let freshEntriesCount = 0;
+    let bouncingCount = 0;
+    let deepLossCount = 0;
+
     for (const h of heldPositions) {
       const sym = h.symbol || h.sym;
       const qty = Number(h.qty);
@@ -281,41 +299,73 @@
       if (!sym || !(qty > 0 && avgCost > 0 && ltp > 0)) continue;
 
       // In profit -> protect running winners!
-      if (ltp >= avgCost) continue;
+      if (ltp >= avgCost) {
+        greenRunnersCount++;
+        continue;
+      }
 
       // Dwell time: protect freshly entered positions
       const firstAt = Number(h.firstAt || h.entryAt || h.at || 0);
-      if (firstAt > 0 && (now - firstAt) < minDwellMs) continue;
+      if (firstAt > 0 && (now - firstAt) < minDwellMs) {
+        freshEntriesCount++;
+        continue;
+      }
 
       // Momentum failure check: day change must be <= 0 OR ltp <= vwap
       const dayOpen = Number(h.open || h.dayOpen || 0);
       const vwap = Number(h.vwap || 0);
       const dayChg = Number.isFinite(h.dayChg) ? h.dayChg : (dayOpen > 0 ? ((ltp - dayOpen) / dayOpen) * 100 : 0);
       const isDeadOrFalling = dayChg <= 0 || (vwap > 0 && ltp <= vwap);
-      if (!isDeadOrFalling) continue; // Skip stocks that are actively bouncing green today
+      if (!isDeadOrFalling) {
+        bouncingCount++;
+        continue; // Skip stocks that are actively bouncing green today
+      }
 
-      // Loss percentage
+      // Loss percentage check
       const lossPct = ((avgCost - ltp) / avgCost) * 100;
-      if (lossPct > maxLossPct) continue; // Exceeds shallow threshold (e.g. > 2.5%)
+      if (lossPct > maxLossPct) {
+        deepLossCount++;
+        continue; // Exceeds shallow threshold (e.g. > 2.5% or 3.0%)
+      }
 
-      // How many shares to sell to cover minTicket?
-      const sharesToSell = Math.min(qty, Math.ceil(minTicket / ltp));
-      const liberatedRs = sharesToSell * ltp;
-      if (liberatedRs < minTicket * 0.85) continue; // cannot cover the ticket
+      // Deficit-aware partial sizing bounded by loss ceiling
+      const lossPerShare = Math.max(0.01, avgCost - ltp);
+      const maxSharesByLoss = Math.floor(maxLossRs / lossPerShare);
+      if (maxSharesByLoss <= 0) continue; // Even 1 share exceeds rupee loss ceiling
+
+      const effectiveUsableLtp = ltp * usableCreditFactor;
+      const sharesNeeded = Math.ceil(deficit / effectiveUsableLtp);
+      const sharesToSell = Math.min(qty, maxSharesByLoss, sharesNeeded);
+      if (sharesToSell <= 0) continue;
+
+      const liberatedGross = sharesToSell * ltp;
+      const liberatedUsable = liberatedGross * usableCreditFactor;
+      const totalFunding = availableCash + liberatedUsable;
+
+      // Viability check: total funding must cover at least 1 whole buyer share AND at least 85% of minTicket (or full deficit if deficit <= liberatedUsable)
+      if (totalFunding < buyerPx || (totalFunding < minTicket * 0.85 && liberatedUsable < deficit * 0.85)) {
+        continue;
+      }
 
       const lossRs = Math.max(0, sharesToSell * (avgCost - ltp));
-      if (lossRs > maxLossRs) continue; // Exceeds rupee loss safety ceiling
+      if (lossRs > maxLossRs) continue;
 
-      const ler = liberatedRs / (lossRs || 1);
+      const ler = liberatedUsable / (lossRs || 1);
       sacrifices.push({
         symbol: sym,
         qty,
         sharesToSell,
+        isPartial: sharesToSell < qty,
+        remainingQty: qty - sharesToSell,
         avgCost,
         ltp,
         lossPct,
         lossRs,
-        liberatedRs,
+        liberatedGross,
+        liberatedUsable,
+        liberatedRs: liberatedGross, // backwards compatibility
+        totalFunding,
+        deficit,
         ler,
         dayChg,
         position: h
@@ -323,19 +373,28 @@
     }
 
     if (!sacrifices.length) {
-      return { eligible: false, buyer, reason: 'No held positions qualify under shallow sacrifice & momentum failure criteria' };
+      let specificReason = 'No held positions qualify for sacrifice';
+      if (greenRunnersCount === heldPositions.length) {
+        specificReason = 'All open positions are profitable; profitable runners are strictly protected';
+      } else if (greenRunnersCount > 0 && (freshEntriesCount + bouncingCount + deepLossCount) > 0) {
+        specificReason = `No stagnant shallow loss candidates (${greenRunnersCount} green, ${freshEntriesCount} fresh, ${bouncingCount} bouncing, ${deepLossCount} deep loss)`;
+      }
+      return { eligible: false, buyer, deficit, minTicket, reason: specificReason };
     }
 
     // Rank sacrifices: lowest lossPct (highest LER) ascending, then lowest lossRs
     sacrifices.sort((a, b) => a.lossPct - b.lossPct || a.lossRs - b.lossRs);
     const chosen = sacrifices[0];
+    const trimLabel = chosen.isPartial ? `Trim ${chosen.sharesToSell}/${chosen.qty} sh` : `Sell full ${chosen.sharesToSell} sh`;
 
     return {
       eligible: true,
       buyer,
       sacrifice: chosen,
       minTicket,
-      reason: `Swap ${chosen.sharesToSell} sh of ${chosen.symbol} (-₹${chosen.lossRs.toFixed(1)}, -${chosen.lossPct.toFixed(2)}%) to liberate ₹${chosen.liberatedRs.toFixed(0)} for ${buyer.symbol} (Score ${buyer.score})`
+      deficit,
+      availableCash,
+      reason: `${trimLabel} of ${chosen.symbol} (-₹${chosen.lossRs.toFixed(1)}, -${chosen.lossPct.toFixed(2)}%) to liberate ₹${chosen.liberatedGross.toFixed(0)} (₹${chosen.liberatedUsable.toFixed(0)} usable) for ${buyer.symbol} (Score ${buyer.score})`
     };
   }
 

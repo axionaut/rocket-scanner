@@ -1,5 +1,5 @@
-const BUILD_TS='2026-11-09 14:31 IST'; // release build date (IST)
-const APP_VERSION=1668;
+const BUILD_TS='2026-11-09 15:12 IST'; // release build date (IST)
+const APP_VERSION=1669;
 const RADAR_SCORE_VERSION='v1419-recross-batches'; // Eligible on crossing the score floor at any time; selected model's evolving target and movement-based profit protection.
 
 // ── v1358: AN UNCAUGHT ERROR MUST NAME ITSELF ─────────────────────────────────────────────────
@@ -5523,6 +5523,70 @@ function planFundedRecommendations(rows,capital){
   BASKET_MODELS=new Map(plan.rows.map(r=>[r.symbol,'strategy']));
   return {funded:new Set(plan.rows.map(r=>r.symbol)),reasons:plan.reasons,alloc:plan.alloc};
 }
+const _swapCandidateMemo = new Map();
+function getOpportunitySwapForCandidate(s){
+  if(!s || typeof RocketStrategy==='undefined' || typeof RocketStrategy.evaluateOpportunitySwap!=='function') return null;
+  const act = getRowActionState(s);
+  if(act.state !== 'GO') return null;
+
+  const now = Date.now();
+  const hit = _swapCandidateMemo.get(s.symbol);
+  if(hit && now - hit.at < 2000) return hit.res;
+
+  const heldMap = getCombinedOpenPositionMap();
+  const heldList = Object.values(heldMap).filter(h => h && h.qty > 0 && h.avg > 0).map(h => {
+    const sym = normSym(h.symbol);
+    const plk = PROFIT_LOCK_STATUS.bySym.get(sym);
+    const quote = _universeMap.get(h.symbol);
+    const ltp = Number(plk?.ltp || h.ltp || quote?.price || 0);
+    const avgCost = Number(plk?.avgCost || h.avg || 0);
+    const open = Number(quote?.open || plk?.open || 0);
+    const vwap = Number(quote?.vwap || 0);
+    const dayChg = Number.isFinite(plk?.dayChg) ? plk.dayChg : (open > 0 ? ((ltp - open) / open) * 100 : 0);
+    return {
+      symbol: h.symbol,
+      qty: h.qty,
+      avgCost,
+      ltp,
+      open,
+      vwap,
+      firstAt: plk?.firstAt || 0,
+      dayChg
+    };
+  });
+  if(!heldList.length){
+    _swapCandidateMemo.set(s.symbol, { at: now, res: null });
+    return null;
+  }
+
+  const px = Number(s.price || 0);
+  const score = btstScoreOf(s.symbol) || 1.0;
+  const quote = _universeMap.get(s.symbol);
+  const vwap = Number(quote?.vwap || s.vwap || px);
+  const minCap = (typeof minOrderFor==='function') ? minOrderFor(s.symbol, px, px * 1.003) : Math.max(500, px);
+  const candidate = {
+    symbol: s.symbol,
+    price: px,
+    ltp: px,
+    vwap,
+    score,
+    minCapital: minCap
+  };
+
+  const breadthObj = typeof computeLiveBreadth==='function' ? computeLiveBreadth() : null;
+  const breadth = breadthObj?.total > 0 ? breadthObj.advancing / breadthObj.total : 0.50;
+  const availableCash = (typeof getKiteAvailableCash==='function' && getKiteAvailableCash() != null) ? getKiteAvailableCash() : 0;
+  const circuitBroken = Boolean(PROFIT_LOCK_STATUS?.opportunitySwap?.circuitBroken);
+
+  const res = RocketStrategy.evaluateOpportunitySwap([candidate], heldList, {
+    breadth,
+    availableCash,
+    circuitBroken,
+    now
+  });
+  _swapCandidateMemo.set(s.symbol, { at: now, res });
+  return res;
+}
 function rowStatusPillHtml(s){
   if(!s)return '';
   const act=getRowActionState(s),reason=BASKET_ROW_REASONS.get(s.symbol);
@@ -5532,6 +5596,19 @@ function rowStatusPillHtml(s){
   // v1581 (owner 28 Oct): one pill and one short line; the full reason is in the tooltip. Crossing and exit
   // detail live in their own columns.
   const label=act.armed?'ARMED':act.state;
+
+  if(unfunded){
+    const swap=getOpportunitySwapForCandidate(s);
+    if(swap&&swap.eligible&&swap.sacrifice){
+      const sac=swap.sacrifice;
+      const trimLabel=sac.isPartial?`Trim ${sac.sharesToSell}/${sac.qty} sh`:`Sell ${sac.sharesToSell} sh`;
+      const swapTitle=`Opportunity Swap Eligible: ${trimLabel} of ${sac.symbol} (-₹${sac.lossRs.toFixed(1)}, -${sac.lossPct.toFixed(2)}%) to liberate ₹${sac.liberatedGross.toFixed(0)} (₹${sac.liberatedUsable.toFixed(0)} usable) to fund ${s.symbol}`;
+      const lineText=`Liberate ₹${Math.round(sac.liberatedUsable)} by trimming ${sac.sharesToSell} sh of ${sac.symbol} (-₹${sac.lossRs.toFixed(0)}, -${sac.lossPct.toFixed(1)}%)`;
+      return `<span class="info-pill pill-amber" style="background:rgba(245,158,11,0.22);border:1px solid #f59e0b;color:#fbbf24;font-weight:700" title="${escHtml(swapTitle)}">GO | Swap Eligible (${sac.isPartial?'Trim':'Swap'} ${sac.symbol})</span>`
+        +`<div style="font-size:12px;color:#fbbf24;cursor:help;font-weight:600" title="${escHtml(swapTitle)}">⚡ ${escHtml(lineText)}</div>`;
+    }
+  }
+
   const full=act.state==='GO'&&reason?reason:act.reason;
   const first=String(full||'').split(/(?<=\.)\s/)[0],line=first.length>90?first.slice(0,88)+'…':first;
   return `<span class="info-pill pill-${act.armed?'amber':tone}" title="${escHtml(full)}">${label}${funded?' | Funded':unfunded?' | Not funded':''}</span>`
