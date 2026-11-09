@@ -1,5 +1,5 @@
-const BUILD_TS='2026-11-09 13:37 IST'; // release build date (IST)
-const APP_VERSION=1667;
+const BUILD_TS='2026-11-09 14:31 IST'; // release build date (IST)
+const APP_VERSION=1668;
 const RADAR_SCORE_VERSION='v1419-recross-batches'; // Eligible on crossing the score floor at any time; selected model's evolving target and movement-based profit protection.
 
 // ── v1358: AN UNCAUGHT ERROR MUST NAME ITSELF ─────────────────────────────────────────────────
@@ -5350,22 +5350,34 @@ function _getRowActionStateUncached(s, ignoreMarketClosed=false){
     const stopLossPct=pick.stopPct||2.8;
     const stopPrice=+(price*(1-stopLossPct/100)).toFixed(2);
 
-    if(pick.triggered){
+    const quote = _universeMap.get(s.symbol);
+    const dayOpen = Number(quote?.open || s.open1d || pick.open || s.open || 0);
+    const isLiveTriggered = Boolean(pick.triggered || (pick.isArmed && dayOpen > 0 && price >= dayOpen));
+
+    if(isLiveTriggered){
       noteCrossing(s.symbol, price, floor);
       return {
         state:'GO',
-        reason:pick.why||`Markov Reversal: U_Week + D${pick.streak||2} (-${(pick.dropPct||3).toFixed(1)}% Drop) with green-day confirmation (${pick.p5d}% 5D win rate)`,
+        reason:(pick.why && pick.triggered)
+          ? pick.why
+          : `Markov Reversal: U_Week + D${pick.streak||2} (-${(pick.dropPct||3).toFixed(1)}% Drop) Green Reversal (Price ₹${price.toFixed(2)} >= Open ₹${(dayOpen||price).toFixed(2)}) | ${pick.p5d}% 5D win rate`,
         targetPrice,
         stopPrice,
         targetPct:currentModelTargetPct(),
         stopLossPct
       };
     }
-    const dayOpen = Number(pick.open || s.open || price);
+    let conditionText = '';
+    if(dayOpen > 0){
+      const diffPct = ((price - dayOpen) / dayOpen) * 100;
+      conditionText = `Price ₹${price.toFixed(2)} < Open ₹${dayOpen.toFixed(2)} (${diffPct.toFixed(2)}%)`;
+    } else {
+      conditionText = `Price ₹${price.toFixed(2)} < Open`;
+    }
     return {
       state:'WAIT',
       reason:pick.isArmed
-        ?`Arming: U_Week + D${pick.streak||2} (-${(pick.dropPct||3).toFixed(1)}% drop). Awaiting intraday reversal (Price ₹${price.toFixed(2)} >= Open ₹${dayOpen.toFixed(2)})`
+        ?`Arming: U_Week + D${pick.streak||2} (-${(pick.dropPct||3).toFixed(1)}% drop). Awaiting intraday reversal (${conditionText})`
         :`Markov setup pending for ${s.symbol} (U_Week + daily pullback >= 3%)`
     };
   }
