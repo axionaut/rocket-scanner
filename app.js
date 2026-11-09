@@ -1,5 +1,5 @@
-const BUILD_TS='2026-11-09 11:46 IST'; // release build date (IST)
-const APP_VERSION=1666;
+const BUILD_TS='2026-11-09 13:37 IST'; // release build date (IST)
+const APP_VERSION=1667;
 const RADAR_SCORE_VERSION='v1419-recross-batches'; // Eligible on crossing the score floor at any time; selected model's evolving target and movement-based profit protection.
 
 // ── v1358: AN UNCAUGHT ERROR MUST NAME ITSELF ─────────────────────────────────────────────────
@@ -5354,18 +5354,19 @@ function _getRowActionStateUncached(s, ignoreMarketClosed=false){
       noteCrossing(s.symbol, price, floor);
       return {
         state:'GO',
-        reason:pick.why||`Markov Reversal: U_Week + D${pick.streak||2} (-${(pick.dropPct||3).toFixed(1)}% Drop) with afternoon VWAP support (${pick.p5d}% 5D win rate)`,
+        reason:pick.why||`Markov Reversal: U_Week + D${pick.streak||2} (-${(pick.dropPct||3).toFixed(1)}% Drop) with green-day confirmation (${pick.p5d}% 5D win rate)`,
         targetPrice,
         stopPrice,
         targetPct:currentModelTargetPct(),
         stopLossPct
       };
     }
+    const dayOpen = Number(pick.open || s.open || price);
     return {
       state:'WAIT',
-      reason:source.markov?.afternoonWindow
-        ?`Awaiting intraday VWAP absorption (price ₹${price} vs VWAP)`
-        :`Arming: U_Week + D${pick.streak||2} pullback (-${(pick.dropPct||3).toFixed(1)}% drop, ${pick.p5d}% win rate). Entry window opens 14:15 IST.`
+      reason:pick.isArmed
+        ?`Arming: U_Week + D${pick.streak||2} (-${(pick.dropPct||3).toFixed(1)}% drop). Awaiting intraday reversal (Price ₹${price.toFixed(2)} >= Open ₹${dayOpen.toFixed(2)})`
+        :`Markov setup pending for ${s.symbol} (U_Week + daily pullback >= 3%)`
     };
   }
   if((getCombinedOpenPositionMap()[s.symbol]?.qty||0)>0)return {state:'WAIT',reason:'Strategy already has an open position'};
