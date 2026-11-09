@@ -251,25 +251,22 @@
       return { eligible: false, reason: 'Swap circuit breaker active (prior swap stopped out)' };
     }
 
-    const maxLossPct = Number.isFinite(options.maxLossPct) ? Number(options.maxLossPct) : 5.00; // allow shallow drawdowns up to 5.0%
-    const maxLossRs = Number.isFinite(options.maxLossRs) ? Number(options.maxLossRs) : 250.0; // hard rupee loss ceiling per trim
+    const maxLossPct = Number.isFinite(options.maxLossPct) ? Number(options.maxLossPct) : 3.00;
+    const maxLossRs = Number.isFinite(options.maxLossRs) ? Number(options.maxLossRs) : 250.0;
     const minDwellMs = Number.isFinite(options.minDwellMs) ? Number(options.minDwellMs) : 3600000;
     const availableCash = Math.max(0, Number(options.availableCash || 0));
     const usableCreditFactor = Number.isFinite(options.usableCreditFactor) ? Number(options.usableCreditFactor) : 0.80; // SEBI / Kite CNC T-day instant credit
     const now = options.now || Date.now();
 
-    const antiChasePct = Number.isFinite(options.antiChasePct) ? Number(options.antiChasePct) : 3.50; // allow momentum breakouts up to 3.5% above VWAP
+    // 1. Pick the highest-scoring pending buy candidate (already qualified by active strategy)
     const validBuyers = unfundedCandidates.filter(c => {
       const px = Number(c.price || c.ltp);
       const score = Number(c.score);
-      if (!(px > 0 && score > 0)) return false;
-      const vwap = Number(c.vwap);
-      if (vwap > 0 && px > vwap * (1 + antiChasePct / 100)) return false; // anti-chase ceiling
-      return true;
+      return px > 0 && score > 0;
     }).sort((a, b) => (b.score || 0) - (a.score || 0));
 
     if (!validBuyers.length) {
-      return { eligible: false, reason: 'No buy candidate passes anti-chase and score criteria' };
+      return { eligible: false, reason: 'No buy candidates with valid price and strategy score' };
     }
 
     const buyer = validBuyers[0];
