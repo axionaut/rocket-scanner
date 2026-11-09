@@ -218,6 +218,128 @@
   }
 
   /**
+   * Opportunity Swap (OS) Engine Evaluation:
+   * Finds high-liberation-efficiency, shallow, stagnant holdings that can be sacrificed
+   * to immediately fund high-conviction buy setups when available cash is exhausted.
+   *
+   * Dynamic checks:
+   * 1. Market breadth >= 50%
+   * 2. Not circuit-broken
+   * 3. Buyer anti-chase ceiling (<= 1% above VWAP / Opening Range High)
+   * 4. Sacrifice dwell time (>= 60 min, not bought in last hour)
+   * 5. Sacrifice momentum failure (pnl < 0 AND (dayChg <= 0 OR ltp <= vwap))
+   * 6. Sacrifice shallow loss limit (lossPct <= 2.5% and lossRs <= 250)
+   * 7. Sacrifice ranked by lowest lossPct (highest Liberation Efficiency Ratio)
+   */
+  function evaluateOpportunitySwap(unfundedCandidates, heldPositions, options = {}) {
+    if (!Array.isArray(unfundedCandidates) || !unfundedCandidates.length) {
+      return { eligible: false, reason: 'No pending buy candidates' };
+    }
+    if (!Array.isArray(heldPositions) || !heldPositions.length) {
+      return { eligible: false, reason: 'No open positions to evaluate for sacrifice' };
+    }
+    const breadth = Number.isFinite(options.breadth) ? Number(options.breadth) : 0.50;
+    if (breadth < 0.50) {
+      return { eligible: false, reason: `Market breadth ${(breadth * 100).toFixed(1)}% < 50%` };
+    }
+    if (options.circuitBroken) {
+      return { eligible: false, reason: 'Swap circuit breaker active (prior swap stopped out)' };
+    }
+
+    const maxLossPct = Number.isFinite(options.maxLossPct) ? Number(options.maxLossPct) : 3.00;
+    const maxLossRs = Number.isFinite(options.maxLossRs) ? Number(options.maxLossRs) : 300.0;
+    const minDwellMs = Number.isFinite(options.minDwellMs) ? Number(options.minDwellMs) : 3600000;
+    const now = options.now || Date.now();
+
+    // 1. Pick the best eligible buy candidate
+    const validBuyers = unfundedCandidates.filter(c => {
+      const px = Number(c.price || c.ltp);
+      const score = Number(c.score);
+      if (!(px > 0 && score > 0)) return false;
+      const vwap = Number(c.vwap);
+      if (vwap > 0 && px > vwap * 1.01) return false; // anti-chase ceiling
+      return true;
+    }).sort((a, b) => (b.score || 0) - (a.score || 0));
+
+    if (!validBuyers.length) {
+      return { eligible: false, reason: 'No buy candidate passes anti-chase and score criteria' };
+    }
+
+    const buyer = validBuyers[0];
+    const buyerPx = Number(buyer.price || buyer.ltp);
+    const minTicket = Number(buyer.minCapital) > 0
+      ? Number(buyer.minCapital)
+      : Math.max(CONFIG.MIN_ALLOCATION_RS, buyerPx * (buyer.minShares || 1));
+
+    // 2. Filter and rank held positions for the best sacrifice
+    const sacrifices = [];
+    for (const h of heldPositions) {
+      const sym = h.symbol || h.sym;
+      const qty = Number(h.qty);
+      const avgCost = Number(h.avgCost || h.cost);
+      const ltp = Number(h.ltp || h.lastPrice);
+      if (!sym || !(qty > 0 && avgCost > 0 && ltp > 0)) continue;
+
+      // In profit -> protect running winners!
+      if (ltp >= avgCost) continue;
+
+      // Dwell time: protect freshly entered positions
+      const firstAt = Number(h.firstAt || h.entryAt || h.at || 0);
+      if (firstAt > 0 && (now - firstAt) < minDwellMs) continue;
+
+      // Momentum failure check: day change must be <= 0 OR ltp <= vwap
+      const dayOpen = Number(h.open || h.dayOpen || 0);
+      const vwap = Number(h.vwap || 0);
+      const dayChg = Number.isFinite(h.dayChg) ? h.dayChg : (dayOpen > 0 ? ((ltp - dayOpen) / dayOpen) * 100 : 0);
+      const isDeadOrFalling = dayChg <= 0 || (vwap > 0 && ltp <= vwap);
+      if (!isDeadOrFalling) continue; // Skip stocks that are actively bouncing green today
+
+      // Loss percentage
+      const lossPct = ((avgCost - ltp) / avgCost) * 100;
+      if (lossPct > maxLossPct) continue; // Exceeds shallow threshold (e.g. > 2.5%)
+
+      // How many shares to sell to cover minTicket?
+      const sharesToSell = Math.min(qty, Math.ceil(minTicket / ltp));
+      const liberatedRs = sharesToSell * ltp;
+      if (liberatedRs < minTicket * 0.85) continue; // cannot cover the ticket
+
+      const lossRs = Math.max(0, sharesToSell * (avgCost - ltp));
+      if (lossRs > maxLossRs) continue; // Exceeds rupee loss safety ceiling
+
+      const ler = liberatedRs / (lossRs || 1);
+      sacrifices.push({
+        symbol: sym,
+        qty,
+        sharesToSell,
+        avgCost,
+        ltp,
+        lossPct,
+        lossRs,
+        liberatedRs,
+        ler,
+        dayChg,
+        position: h
+      });
+    }
+
+    if (!sacrifices.length) {
+      return { eligible: false, buyer, reason: 'No held positions qualify under shallow sacrifice & momentum failure criteria' };
+    }
+
+    // Rank sacrifices: lowest lossPct (highest LER) ascending, then lowest lossRs
+    sacrifices.sort((a, b) => a.lossPct - b.lossPct || a.lossRs - b.lossRs);
+    const chosen = sacrifices[0];
+
+    return {
+      eligible: true,
+      buyer,
+      sacrifice: chosen,
+      minTicket,
+      reason: `Swap ${chosen.sharesToSell} sh of ${chosen.symbol} (-₹${chosen.lossRs.toFixed(1)}, -${chosen.lossPct.toFixed(2)}%) to liberate ₹${chosen.liberatedRs.toFixed(0)} for ${buyer.symbol} (Score ${buyer.score})`
+    };
+  }
+
+  /**
    * Tier 1: Filter raw universe down to liquid, clean momentum candidates
    * @param {Array} stocks - List of stock objects from Kite universe
    * @param {Set} heldSymbols - Set of uppercase symbols currently open
@@ -848,6 +970,7 @@ function bookedSession(session,holdingCosts,tradebook){
     planAccountEntries,
     ibkrOrderFee,
     authorizeAccountEntry,
+    evaluateOpportunitySwap,
     CONFIG,
     inputs,
     evaluateUniverse,

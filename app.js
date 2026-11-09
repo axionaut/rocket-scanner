@@ -1,5 +1,5 @@
-const BUILD_TS='2026-11-09 10:41 IST'; // release build date (IST)
-const APP_VERSION=1664;
+const BUILD_TS='2026-11-09 10:55 IST'; // release build date (IST)
+const APP_VERSION=1665;
 const RADAR_SCORE_VERSION='v1419-recross-batches'; // Eligible on crossing the score floor at any time; selected model's evolving target and movement-based profit protection.
 
 // ── v1358: AN UNCAUGHT ERROR MUST NAME ITSELF ─────────────────────────────────────────────────
@@ -4774,7 +4774,11 @@ function updateTriggerPnl(rows){
     const since=isToday?sinceTime:`${startedD.toLocaleDateString('en-IN',{timeZone:'Asia/Kolkata',day:'numeric',month:'short'})} ${sinceTime}`;
     const sign=v=>(v>0?'+':v<0?'-':'')+Math.abs(v).toFixed(2),tone=r.netRs>0?'green':r.netRs<0?'red':'t3';
     const title='Starts from real available cash and existing holdings. Invested holdings cannot fund another entry. Shared score-proportional allocation, cost floor, liquidity caps, IOC price cap and RS exits. Net includes estimated charges and open liquidation costs. Recording begins at '+since+' IST; earlier trading is not invented. Broker fills may differ from recorded quote execution. No real orders.';
-    TRIGGER_PNL_HTML=`<span style="color:var(--${tone});white-space:nowrap" title="${escHtml(title)}">Account replay since ${since}: &#8377;${sign(r.netRs)} net (${sign(r.netPct)}%)<span style="color:var(--t3)"> &middot; ${r.entries-r.initialHoldings} new entries &middot; ${r.open} open</span></span>`;
+    const osData=typeof PROFIT_LOCK_STATUS==='object'?PROFIT_LOCK_STATUS?.opportunitySwap:null;
+    const osBadge=osData?.swapsToday?.length>0
+      ?` &middot; <span style="color:var(--accent,#38bdf8);font-weight:600" title="Opportunity Swaps today: ${escHtml(osData.swapsToday.map(s=>(s.sacrificeSym||s.sacrifice)+' -> '+(s.buyerSym||s.buyer)).join(', '))}">&#9889; ${osData.swapsToday.length} Swap${osData.swapsToday.length>1?'s':''}</span>`
+      :'';
+    TRIGGER_PNL_HTML=`<span style="color:var(--${tone});white-space:nowrap" title="${escHtml(title)}">Account replay since ${since}: &#8377;${sign(r.netRs)} net (${sign(r.netPct)}%)<span style="color:var(--t3)"> &middot; ${r.entries-r.initialHoldings} new entries &middot; ${r.open} open${osBadge}</span></span>`;
   }
   if(el)el.innerHTML=TRIGGER_PNL_HTML;
 }
@@ -8065,7 +8069,7 @@ async function loadProfitLockStatus(){
   if(j.ruleReplay)acceptRuleReplay(j.ruleReplay);
   const bySym=new Map();
   for(const p of j.positions){if(p&&p.sym)bySym.set(normSym(p.sym),p);}
-  PROFIT_LOCK_STATUS={bySym,at:j.asOf||Date.now(),lossBudget:j.lossBudget||null,entryPeaks:Array.isArray(j.entryPeaks)?j.entryPeaks:[],mlotHistory:j.mlotHistory||null,mlotObservations:Array.isArray(j.mlotObservations)?j.mlotObservations:[],bracket:j.bracket||null};
+  PROFIT_LOCK_STATUS={bySym,at:j.asOf||Date.now(),lossBudget:j.lossBudget||null,opportunitySwap:j.opportunitySwap||null,entryPeaks:Array.isArray(j.entryPeaks)?j.entryPeaks:[],mlotHistory:j.mlotHistory||null,mlotObservations:Array.isArray(j.mlotObservations)?j.mlotObservations:[],bracket:j.bracket||null};
   const funding=document.getElementById('fLossFunding');if(funding&&!lossFundingDirty&&document.activeElement!==funding&&Number.isFinite(j.lossBudget?.fundingShare))funding.value=+(j.lossBudget.fundingShare*100).toFixed(2);
   const ob=j.openingBasis&&typeof j.openingBasis==='object'?j.openingBasis:{},day=j.openingBasisDay||null,next={};
   for(const [s,v] of Object.entries(ob))if(v&&v.price>0)next[normSym(s)]=Number(v.price);
