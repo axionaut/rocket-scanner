@@ -1,5 +1,5 @@
-const BUILD_TS='2026-11-09 15:12 IST'; // release build date (IST)
-const APP_VERSION=1669;
+const BUILD_TS='2026-11-09 15:26 IST'; // release build date (IST)
+const APP_VERSION=1670;
 const RADAR_SCORE_VERSION='v1419-recross-batches'; // Eligible on crossing the score floor at any time; selected model's evolving target and movement-based profit protection.
 
 // ── v1358: AN UNCAUGHT ERROR MUST NAME ITSELF ─────────────────────────────────────────────────
@@ -5560,10 +5560,10 @@ function getOpportunitySwapForCandidate(s){
   }
 
   const px = Number(s.price || 0);
-  const score = btstScoreOf(s.symbol) || 1.0;
+  const score = Number(s.score || s.stratScore || btstScoreOf(s.symbol) || 1.0);
   const quote = _universeMap.get(s.symbol);
   const vwap = Number(quote?.vwap || s.vwap || px);
-  const minCap = (typeof minOrderFor==='function') ? minOrderFor(s.symbol, px, px * 1.003) : Math.max(500, px);
+  const minCap = Math.max(RocketStrategy.CONFIG?.MIN_ALLOCATION_RS || 2969, px);
   const candidate = {
     symbol: s.symbol,
     price: px,
@@ -5573,8 +5573,8 @@ function getOpportunitySwapForCandidate(s){
     minCapital: minCap
   };
 
-  const breadthObj = typeof computeLiveBreadth==='function' ? computeLiveBreadth() : null;
-  const breadth = breadthObj?.total > 0 ? breadthObj.advancing / breadthObj.total : 0.50;
+  const breadthObj = (typeof liveMarketBreadth==='function') ? liveMarketBreadth() : null;
+  const breadth = (breadthObj?.pct != null) ? (breadthObj.pct / 100) : (breadthObj?.total > 0 ? breadthObj.advancing / breadthObj.total : 0.50);
   const availableCash = (typeof getKiteAvailableCash==='function' && getKiteAvailableCash() != null) ? getKiteAvailableCash() : 0;
   const circuitBroken = Boolean(PROFIT_LOCK_STATUS?.opportunitySwap?.circuitBroken);
 
