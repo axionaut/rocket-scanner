@@ -1,5 +1,5 @@
-const BUILD_TS='2026-11-11 10:22 IST'; // release build date (IST)
-const APP_VERSION=1672;
+const BUILD_TS='2026-11-11 10:34 IST'; // release build date (IST)
+const APP_VERSION=1673;
 const RADAR_SCORE_VERSION='v1419-recross-batches'; // Eligible on crossing the score floor at any time; selected model's evolving target and movement-based profit protection.
 
 // ── v1358: AN UNCAUGHT ERROR MUST NAME ITSELF ─────────────────────────────────────────────────
@@ -11452,7 +11452,11 @@ function _planDualBasketUncached(rows,capital){
           score: buyer.score,
           model: floorModel() || 'MARKOV_3PCT'
         };
-        planned.reasons.delete(buyer.symbol);
+        if (planned.reasons instanceof Map) {
+          planned.reasons.delete(buyer.symbol);
+        } else if (planned.reasons && typeof planned.reasons === 'object') {
+          delete planned.reasons[buyer.symbol];
+        }
       }
     }
   }
