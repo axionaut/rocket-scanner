@@ -1,10 +1,11 @@
-# Active Task: Deployed v1680 / Operational
+# Active Task: Deployed v1681 / Operational
 
-Rocket Scanner v1680 deployed at 2026-11-11 12:53 IST. System operational and in sync with origin/master.
+Rocket Scanner v1681 deployed at 2026-11-11 12:58 IST. System operational and in sync with origin/master.
 
 ---
 
 ### Recent Deployed Releases
+- **v1681:** Fix EXECUTION_CONTROLS ReferenceError on frontend and display required minimum order rupees in allocation status
 - **v1680:** Unified Profit-Underwritten Opportunity Swap (PUOS) and Release Expert doc maintenance
 - **v1679:** Removed manual Buy Basket and Kite auto-send buttons from top control bar.
 - **v1678:** Disqualified already-executed Markov stocks so liberated cash funds fresh candidates.

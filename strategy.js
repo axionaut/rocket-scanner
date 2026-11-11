@@ -187,11 +187,11 @@
       const ceiling=Math.min(spendable,r.liquidityCap,Number(account.maxAlloc)>0?Number(account.maxAlloc):Infinity);
       if(!reason&&floor>ceiling+1e-7){
         reason = spendable < floor
-          ? 'Available cash cannot cover the whole-share minimum order'
-          : 'Liquidity or allocation cap cannot cover the whole-share cost breakeven minimum';
+          ? `Available cash cannot cover the whole-share minimum order (needs ₹${Math.round(floor).toLocaleString('en-IN')})`
+          : `Liquidity or allocation cap cannot cover the whole-share cost breakeven minimum (needs ₹${Math.round(floor).toLocaleString('en-IN')})`;
       }
       if(!reason&&selected.length>=maxStocks)reason='Stocks per allocation limit reached; higher scores funded first';
-      if(!reason&&reserved+floor>spendable+1e-7)reason='Cash cannot cover every minimum order; higher scores funded first';
+      if(!reason&&reserved+floor>spendable+1e-7)reason=`Cash cannot cover every minimum order (needs ₹${Math.round(floor).toLocaleString('en-IN')}); higher scores funded first`;
       if(reason){reasons[r.symbol]=reason;continue;}
       selected.push({...r,unit,minimum,floor,ceiling});reserved+=floor;
     }
