@@ -1,10 +1,11 @@
-# Active Task: Deployed v1682 / Operational
+# Active Task: Deployed v1683 / Operational
 
-Rocket Scanner v1682 deployed at 2026-11-11 13:10 IST. System operational and in sync with origin/master.
+Rocket Scanner v1683 deployed at 2026-11-11 13:22 IST. System operational and in sync with origin/master.
 
 ---
 
 ### Recent Deployed Releases
+- **v1683:** Calculate Loss Budget from full 5-session rolling pool and eliminate StratGen status jitter
 - **v1682:** Show OS eligibility reason in unfunded GO row tooltips and status
 - **v1681:** Fix EXECUTION_CONTROLS ReferenceError on frontend and display required minimum order rupees in allocation status
 - **v1680:** Unified Profit-Underwritten Opportunity Swap (PUOS) and Release Expert doc maintenance

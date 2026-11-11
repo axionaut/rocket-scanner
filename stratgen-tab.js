@@ -15,7 +15,7 @@
     health();
   }
   async function request(route,options){
-    const controller=new AbortController(),timer=setTimeout(()=>controller.abort(),6000);
+    const controller=new AbortController(),timer=setTimeout(()=>controller.abort(),15000);
     try{const res=await fetch(API+route,{...options,signal:controller.signal,cache:'no-store'});const data=await res.json();if(!res.ok)throw Error(data.error||data.why||'StratGen request failed');return data;}
     finally{clearTimeout(timer);}
   }
@@ -79,11 +79,13 @@
       bind();new MutationObserver(bind).observe(root,{childList:true,subtree:true});viewReady=true;if($('sgFailure'))$('sgFailure').hidden=true;
     }catch(e){failure('StratGen view: '+e.message);}finally{viewLoading=false;}
   }
+  let failCount=0;
   async function health(){
     if(checking)return;checking=true;
     try{
       const s=await request('/status');
       lastReachable=Date.now();
+      failCount=0;
       nativeApi?.sgObserveBoardRevision?.(s.leaderboardRevision);
       nativeApi?.sgShowCurrentJob?.(s.job);
       if(s.job?.state==='COMPLETE'&&(s.job.id!==lastJobId||lastJobState!=='COMPLETE'))nativeApi?.loadLeaderboard?.();
@@ -97,22 +99,23 @@
         else if(state==='READY')state='DISCOVERING';
       }
       const badge=$('tabCount4');
-      if(badge){badge.textContent=state;badge.style.color=s.ok&&state!=='STALLED'&&state!=='FAILED'&&state!=='RECOVERING'?'#00e5a3':'#ff7043';badge.title=discovery?.last_error||s.lastError||s.deploymentBlock||'';}
-
-      // Self-healing Watchdog: If backend daemon is failed or stalled, auto-recover without user intervention
-      if((s.state==='STALLED'&&!healthyWork)||s.state==='FAILED'){
-        stallCount++;
-        if(stallCount>=2){
-          stallCount=0;
-          try{await request('/restart',{method:'POST'});viewReady=false;await loadNativeUI();}catch(e){}
-        }
-      }else{stallCount=0;}
+      if(badge){
+        badge.textContent=state;
+        badge.style.color=s.ok&&state!=='STALLED'&&state!=='FAILED'&&state!=='RECOVERING'?'#00e5a3':'#ff7043';
+        badge.title=discovery?.last_error||s.lastError||s.deploymentBlock||'';
+      }
 
       if(s.state==='READY'&&!viewReady&&mounted)await loadNativeUI();
       lastState=s.state;
     }catch(e){
-      const badge=$('tabCount4');if(badge){badge.textContent=Date.now()-lastReachable<30000?'RECONNECTING':'OFFLINE';badge.style.color='#ff7043';badge.title=e.message;}
-      lastState='OFFLINE';
+      failCount++;
+      const badge=$('tabCount4');
+      if(badge&&failCount>=3){
+        badge.textContent=Date.now()-lastReachable<60000?'RECONNECTING':'OFFLINE';
+        badge.style.color='#ff7043';
+        badge.title=e.message;
+        lastState='OFFLINE';
+      }
     }finally{checking=false;}
   }
   window.RocketStratGen={render,retry:health};
