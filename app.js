@@ -1,5 +1,5 @@
-const BUILD_TS='2026-11-11 11:23 IST'; // release build date (IST)
-const APP_VERSION=1675;
+const BUILD_TS='2026-11-11 11:48 IST'; // release build date (IST)
+const APP_VERSION=1676;
 const RADAR_SCORE_VERSION='v1419-recross-batches'; // Eligible on crossing the score floor at any time; selected model's evolving target and movement-based profit protection.
 
 // ── v1358: AN UNCAUGHT ERROR MUST NAME ITSELF ─────────────────────────────────────────────────
@@ -15704,8 +15704,8 @@ async function _drainBasketQueue(preferredOrders = null){
     return;
   }
 
-  // If nothing changed and no manual export requested, resolve waiting callers and return
-  if(targetSig === _lastSavedBasketSig && !waiters.some(w => w.manual)){
+  // If nothing changed, no error to recover, and no manual export requested, resolve waiting callers and return
+  if(targetSig === _lastSavedBasketSig && !_lastBasketSyncError && !waiters.some(w => w.manual)){
     scheduleKiteBasketSync();
     waiters.forEach(w => {
       try { w.resolve({ ok: true, count: orders.length, skipped: true }); } catch(e){}

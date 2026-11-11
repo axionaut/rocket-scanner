@@ -214,10 +214,17 @@
   }
 
   function authorizeAccountEntry(request, live, minimum) {
+    const isSwap = request.kind === 'opportunity-swap' || request.isOpportunitySwap;
     const budget=Math.min(live.cash,Number.isFinite(live.allocationCap)?live.allocationCap:Infinity);
     const qty=Math.min(request.qty,quantityWithinBudget(budget,request.cap,request.cap*1.003));
-    if(!(qty>0))throw Error('Entry no longer fits available cash');
-    if(minimum>0&&qty*request.cap<minimum)throw Error(`Cash left fits only ${qty} share(s) (Rs ${Math.round(qty*request.cap)}), below the Rs ${Math.round(minimum)} minimum`);
+    if(!(qty>0)) {
+      if (isSwap) throw Error('Cash unavailable: waiting for sacrifice sell fill');
+      throw Error('Entry no longer fits available cash');
+    }
+    if(minimum>0&&qty*request.cap<minimum) {
+      if (isSwap) throw Error('Cash unavailable: waiting for sacrifice sell fill');
+      throw Error(`Cash left fits only ${qty} share(s) (Rs ${Math.round(qty*request.cap)}), below the Rs ${Math.round(minimum)} minimum`);
+    }
     return qty;
   }
 
