@@ -275,8 +275,9 @@
       ? Number(buyer.minCapital)
       : Math.max(CONFIG.MIN_ALLOCATION_RS, buyerPx * (buyer.minShares || 1));
 
-    // Deficit calculation
-    const deficit = Math.max(0, minTicket - availableCash);
+    // Deficit calculation against buffered ticket to ensure whole-share viability with charges
+    const targetBudget = Math.max(minTicket * 1.003, buyerPx * 1.003);
+    const deficit = Math.max(0, targetBudget - availableCash);
     if (deficit <= 0) {
       return { eligible: false, buyer, minTicket, availableCash, reason: `Available cash (₹${availableCash.toFixed(0)}) covers minTicket (₹${minTicket.toFixed(0)}); no swap needed` };
     }
@@ -339,8 +340,8 @@
       const liberatedUsable = liberatedGross * usableCreditFactor;
       const totalFunding = availableCash + liberatedUsable;
 
-      // Viability check: total funding must cover at least 1 whole buyer share AND at least 85% of minTicket (or full deficit if deficit <= liberatedUsable)
-      if (totalFunding < buyerPx || (totalFunding < minTicket * 0.85 && liberatedUsable < deficit * 0.85)) {
+      // Viability check: total funding must cover at least 1 whole buyer share AND 100% of minTicket
+      if (totalFunding < buyerPx || totalFunding < minTicket) {
         continue;
       }
 

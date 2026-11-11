@@ -1,5 +1,5 @@
-const BUILD_TS='2026-11-09 15:31 IST'; // release build date (IST)
-const APP_VERSION=1671;
+const BUILD_TS='2026-11-11 10:22 IST'; // release build date (IST)
+const APP_VERSION=1672;
 const RADAR_SCORE_VERSION='v1419-recross-batches'; // Eligible on crossing the score floor at any time; selected model's evolving target and movement-based profit protection.
 
 // ── v1358: AN UNCAUGHT ERROR MUST NAME ITSELF ─────────────────────────────────────────────────
@@ -5596,6 +5596,17 @@ function rowStatusPillHtml(s){
   // v1581 (owner 28 Oct): one pill and one short line; the full reason is in the tooltip. Crossing and exit
   // detail live in their own columns.
   const label=act.armed?'ARMED':act.state;
+  const allocMap=_dualPlanMemo?.val?.alloc||{};
+  const isSwapFunded=funded&&Boolean(allocMap[s.symbol]?.isOpportunitySwap);
+
+  if(isSwapFunded){
+    const sac=allocMap[s.symbol].sacrifice;
+    const trimLabel=sac?.isPartial?`Trim ${sac.sharesToSell}/${sac.qty} sh`:`Sell ${sac.sharesToSell} sh`;
+    const swapTitle=`Opportunity Swap Active: ${trimLabel} of ${sac.symbol} (-₹${sac.lossRs.toFixed(1)}, -${sac.lossPct.toFixed(2)}%) to liberate ₹${sac.liberatedGross.toFixed(0)} (₹${sac.liberatedUsable.toFixed(0)} usable) to fund ${s.symbol}`;
+    const lineText=`Liberating ₹${Math.round(sac.liberatedUsable)} by trimming ${sac.sharesToSell} sh of ${sac.symbol} (-₹${sac.lossRs.toFixed(0)}, -${sac.lossPct.toFixed(1)}%)`;
+    return `<span class="info-pill pill-green" style="background:rgba(16,185,129,0.22);border:1px solid #10b981;color:#34d399;font-weight:700" title="${escHtml(swapTitle)}">GO | Swap Funded (${sac?.isPartial?'Trim':'Swap'} ${sac?.symbol})</span>`
+      +`<div style="font-size:12px;color:#34d399;cursor:help;font-weight:600" title="${escHtml(swapTitle)}">⚡ ${escHtml(lineText)}</div>`;
+  }
 
   if(unfunded){
     const swap=getOpportunitySwapForCandidate(s);
@@ -11377,7 +11388,74 @@ function _planDualBasketUncached(rows,capital){
       liquidityCap:getTurnoverAllocationCap(r),unitDebit:price+calcZerodhaCharges(price,1,false,false,false),
       reason:EXPORT_EXCLUDED.has(r.symbol)?'Excluded from basket by you':!isStockEligible(r)?getRowActionState(r).reason:null};
   });
-  const planned=RocketStrategy.planAccountEntries(candidates,{cash:Math.max(0,Math.min(Number(capital),getKiteAvailableCash()??0)),maxAlloc:getTypedMaxAlloc(capital),maxStocks:executionControls?.maxStocks??20,mlot:getLiveMlotQuantiles()});
+  const maxStocks=executionControls?.maxStocks??20;
+  const planned=RocketStrategy.planAccountEntries(candidates,{cash:Math.max(0,Math.min(Number(capital),getKiteAvailableCash()??0)),maxAlloc:getTypedMaxAlloc(capital),maxStocks,mlot:getLiveMlotQuantiles()});
+
+  // Opportunity Swap: If available cash could not fund maxStocks, check if remaining slots can be funded via Opportunity Swap
+  const slotsRemaining = maxStocks - planned.funded.length;
+  if (slotsRemaining > 0 && typeof RocketStrategy.evaluateOpportunitySwap === 'function') {
+    const unfundedCandidates = candidates.filter(c => {
+      if (planned.funded.includes(c.symbol)) return false;
+      if (c.held) return false;
+      const act = getRowActionState((rows || []).find(r => r.symbol === c.symbol));
+      return act && act.state === 'GO';
+    });
+    if (unfundedCandidates.length) {
+      const heldMap = getCombinedOpenPositionMap();
+      const heldList = Object.values(heldMap).filter(h => h && h.qty > 0 && h.avg > 0).map(h => {
+        const sym = normSym(h.symbol);
+        const plk = PROFIT_LOCK_STATUS?.bySym?.get(sym);
+        const quote = _universeMap?.get(h.symbol);
+        const ltp = Number(plk?.ltp || h.ltp || quote?.price || 0);
+        const avgCost = Number(plk?.avgCost || h.avg || 0);
+        const open = Number(quote?.open || plk?.open || 0);
+        const vwap = Number(quote?.vwap || 0);
+        const dayChg = Number.isFinite(plk?.dayChg) ? plk.dayChg : (open > 0 ? ((ltp - open) / open) * 100 : 0);
+        return {
+          symbol: h.symbol,
+          qty: h.qty,
+          avgCost,
+          ltp,
+          open,
+          vwap,
+          firstAt: plk?.firstAt || 0,
+          dayChg
+        };
+      });
+      const breadthObj = (typeof liveMarketBreadth === 'function') ? liveMarketBreadth() : null;
+      const breadth = (breadthObj?.pct != null) ? (breadthObj.pct / 100) : (breadthObj?.total > 0 ? breadthObj.advancing / breadthObj.total : 0.50);
+      const availableCash = (typeof getKiteAvailableCash === 'function' && getKiteAvailableCash() != null) ? getKiteAvailableCash() : 0;
+      const circuitBroken = Boolean(PROFIT_LOCK_STATUS?.opportunitySwap?.circuitBroken);
+
+      const swapEval = RocketStrategy.evaluateOpportunitySwap(unfundedCandidates, heldList, {
+        breadth,
+        availableCash,
+        circuitBroken,
+        now: Date.now()
+      });
+
+      if (swapEval && swapEval.eligible && swapEval.buyer && swapEval.sacrifice) {
+        const buyer = swapEval.buyer;
+        const sac = swapEval.sacrifice;
+        const totalUsable = (sac.liberatedUsable || (sac.liberatedGross * 0.80)) + Math.max(0, availableCash);
+        const per = buyer.price * 1.003;
+        const swapQty = Math.max(1, Math.floor(totalUsable / per));
+        const swapCap = swapQty * buyer.price;
+        planned.funded.push(buyer.symbol);
+        planned.alloc[buyer.symbol] = {
+          qty: swapQty,
+          capital: swapCap,
+          alloc: swapCap,
+          debit: swapCap * 1.003,
+          isOpportunitySwap: true,
+          sacrifice: sac,
+          score: buyer.score,
+          model: floorModel() || 'MARKOV_3PCT'
+        };
+        planned.reasons.delete(buyer.symbol);
+      }
+    }
+  }
   for(const r of rows||[])if(planned.alloc[r.symbol]){const p=getRowExitPolicy(r);Object.assign(planned.alloc[r.symbol],{tgtPct:p.targetPct,slPct:p.stopPct,alloc:planned.alloc[r.symbol].capital});}
   return {rows:planned.funded.map(symbol=>(rows||[]).find(r=>r.symbol===symbol)),alloc:planned.alloc,reasons:new Map(Object.entries(planned.reasons))};
 }
@@ -15398,7 +15476,7 @@ function buildBasketOrders(capital, selList){
   const {exportList,basketAlloc}=planBasketExport(capital,selList);
   const orders=[];
   let orderSeq=0;
-  const pushBuyOrder=(s,qty,leg,allocTgt)=>{
+  const pushBuyOrder=(s,qty,leg,allocTgt,am)=>{
     if(!(qty>0)||surveillanceBlockReason(s.symbol)) return;
     const sym=s.symbol;
     const name=s.name||sym;
@@ -15410,8 +15488,8 @@ function buildBasketOrders(capital, selList){
     const stoplossPct = (typeof RocketStrategy!=='undefined' ? RocketStrategy.CONFIG.STOP_LOSS_PCT : 1.8);
     const gttPayload = {};
     if(stoplossPct > 0) gttPayload.stoploss = -parseFloat(Number(stoplossPct).toFixed(2));
-    // v1609 (owner 2 Nov): no fixed +1.25% target GTT on basket orders. The trailing exit sells; a basket target was
-    // created by Kite on a manual buy and then cancelled by the helper.
+    const isSwap = Boolean(am?.isOpportunitySwap);
+    const sac = am?.sacrifice;
 
     orders.push({
       id:Date.now()+(++orderSeq),
@@ -15425,6 +15503,9 @@ function buildBasketOrders(capital, selList){
         isEquity:true,isWeekly:false
       },
       weight:0,
+      isOpportunitySwap: isSwap,
+      swappedFrom: sac?.symbol || null,
+      sacrifice: sac || null,
       params:{
         transactionType:'BUY',product:'CNC',
         orderType:'MARKET',
@@ -15433,10 +15514,15 @@ function buildBasketOrders(capital, selList){
         price:0,
         triggerPrice:0,disclosedQuantity:0,lastPrice:Number(s.price)||0,
         variety:'regular',
+        isOpportunitySwap: isSwap,
+        swappedFrom: sac?.symbol || null,
         ...(Object.keys(gttPayload).length > 0 ? {gtt: gttPayload} : {}),
-        tags:[...(stoplossPct>0?['SL']:[]), 'RS_'+String(s.basketModel||floorModel()||'CUM').toUpperCase()]
+        tags:[...(stoplossPct>0?['SL']:[]), 'RS_'+String(s.basketModel||floorModel()||'CUM').toUpperCase(), ...(isSwap?['OPPORTUNITY_SWAP','SWAP_'+sac.symbol]:[])]
       },
       _meta:{leg:leg||'base',sym,targetPct,stoplossPct,fullQty:null,model:s.basketModel||floorModel()||'CUM',modelScores:s.modelScores,
+        isOpportunitySwap: isSwap,
+        swappedFrom: sac?.symbol || null,
+        sacrifice: sac || null,
         recommendation:{capturedAt:Date.now(),session:getSessionDate(),score:btstScoreOf(sym),
           scoreAsOf:btstRanking()?.src?.asOf||null,scoreFloor:btstMinScore(),
           scoringModel:btstRanking()?.model||null,scoreA:btstScoreAOf(sym),
@@ -15451,7 +15537,7 @@ function buildBasketOrders(capital, selList){
   const clampQty=(s,qty,am)=>{
     // buyPrice is the price the planner actually sized against; s.price is the fallback.
     const px=Number(am?.buyPrice)>0?Number(am.buyPrice):(Number(s?.price)||0);
-    if(!(qty>0)||!(px>0)||!(capital>0)) return 0;
+    if(!(qty>0)||!(px>0)||(!(capital>0)&&!am?.isOpportunitySwap)) return 0;
     // The planner's own funded quantity is the ceiling when it sized this row (alloc = qty*price
     // exactly, so a re-derivation from cost would round a legitimate order down by a share). With
     // no funded quantity the fallback is whole capital, which only a corrupted qty can exceed.
@@ -15466,8 +15552,8 @@ function buildBasketOrders(capital, selList){
   };
   exportList.forEach(s=>{
     const am = basketAlloc[s.symbol];
-    const raw = capital > 0 && !am?.rejected ? Math.max(0,Math.floor(Number(am?.qty)||0)) : 0;
-    pushBuyOrder(s,clampQty(s,raw,am),'base',am?.tgtPct);
+    const raw = (capital > 0 || am?.isOpportunitySwap) && !am?.rejected ? Math.max(0,Math.floor(Number(am?.qty)||0)) : 0;
+    pushBuyOrder(s,clampQty(s,raw,am),'base',am?.tgtPct,am);
   });
   orders.forEach(o=>{
     const total=orders.filter(x=>x._meta.sym===o._meta.sym).reduce((n,x)=>n+x.params.quantity,0);
@@ -15499,8 +15585,9 @@ function getCanonicalBasketSignature(orders){
 function getDesiredBasketOrders(){
   const capital = getEffectiveCapital();
   const filled=filledBuyBasketSymbols();
+  const allocMap = _dualPlanMemo?.val?.alloc || {};
   const selList = (Array.isArray(FILT) ? FILT : []).filter(s => s && s.symbol && !filled.has(s.symbol) && SELECTED.has(s.symbol) && isSelectableRecommendation(s));
-  if(!selList.length || !(capital > 0)) return [];
+  if(!selList.length || (!(capital > 0) && !selList.some(s => allocMap[s.symbol]?.isOpportunitySwap))) return [];
   return buildBasketOrders(capital, selList);
 }
 
