@@ -1,5 +1,5 @@
-const BUILD_TS='2026-11-11 12:05 IST'; // release build date (IST)
-const APP_VERSION=1677;
+const BUILD_TS='2026-11-11 12:27 IST'; // release build date (IST)
+const APP_VERSION=1678;
 const RADAR_SCORE_VERSION='v1419-recross-batches'; // Eligible on crossing the score floor at any time; selected model's evolving target and movement-based profit protection.
 
 // ── v1358: AN UNCAUGHT ERROR MUST NAME ITSELF ─────────────────────────────────────────────────
@@ -5330,8 +5330,10 @@ function _getRowActionStateUncached(s, ignoreMarketClosed=false){
     if(source?.activeModel!=='MARKOV_3PCT')return {state:'WAIT',reason:'Awaiting Markov 3% strategy observations'};
     const held=getCombinedOpenPositionMap()[s.symbol];
     if(held?.qty>0)return {state:'WAIT',reason:'Markov swing position already active'};
-    
     const sym=normSym(s.symbol);
+    if(AUTO_BUY_STATUS?.executedToday?.includes(sym)||AUTO_BUY_STATUS?.executedToday?.includes(s.symbol)){
+      return {state:'WAIT',reason:`Markov strategy already executed today for ${s.symbol}; waiting for next session`};
+    }
     const pick=(source.picks||[]).find(p=>normSym(p.symbol)===sym);
     const score=btstScoreOf(s.symbol);
     const floor=btstMinScore();
