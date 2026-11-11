@@ -1,5 +1,5 @@
-const BUILD_TS='2026-11-11 12:40 IST'; // release build date (IST)
-const APP_VERSION=1679;
+const BUILD_TS='2026-11-11 12:53 IST'; // release build date (IST)
+const APP_VERSION=1680;
 const RADAR_SCORE_VERSION='v1419-recross-batches'; // Eligible on crossing the score floor at any time; selected model's evolving target and movement-based profit protection.
 
 // ── v1358: AN UNCAUGHT ERROR MUST NAME ITSELF ─────────────────────────────────────────────────
@@ -5589,10 +5589,14 @@ function getOpportunitySwapForCandidate(s){
   const breadth = (breadthObj?.pct != null) ? (breadthObj.pct / 100) : (breadthObj?.total > 0 ? breadthObj.advancing / breadthObj.total : 0.50);
   const availableCash = (typeof getKiteAvailableCash==='function' && getKiteAvailableCash() != null) ? getKiteAvailableCash() : 0;
   const circuitBroken = Boolean(PROFIT_LOCK_STATUS?.opportunitySwap?.circuitBroken);
+  const profitBudget = PROFIT_LOCK_STATUS?.lossBudget?.available != null ? PROFIT_LOCK_STATUS.lossBudget.available : null;
+  const targetPct = 1.25 + (Number(EXECUTION_CONTROLS?.targetExtraPct) || 0);
 
   const res = RocketStrategy.evaluateOpportunitySwap([candidate], heldList, {
     breadth,
     availableCash,
+    profitBudget,
+    targetPct,
     circuitBroken,
     now
   });
@@ -11438,10 +11442,14 @@ function _planDualBasketUncached(rows,capital){
       const breadth = (breadthObj?.pct != null) ? (breadthObj.pct / 100) : (breadthObj?.total > 0 ? breadthObj.advancing / breadthObj.total : 0.50);
       const availableCash = (typeof getKiteAvailableCash === 'function' && getKiteAvailableCash() != null) ? getKiteAvailableCash() : 0;
       const circuitBroken = Boolean(PROFIT_LOCK_STATUS?.opportunitySwap?.circuitBroken);
+      const profitBudget = PROFIT_LOCK_STATUS?.lossBudget?.available != null ? PROFIT_LOCK_STATUS.lossBudget.available : null;
+      const targetPct = 1.25 + (Number(EXECUTION_CONTROLS?.targetExtraPct) || 0);
 
       const swapEval = RocketStrategy.evaluateOpportunitySwap(unfundedCandidates, heldList, {
         breadth,
         availableCash,
+        profitBudget,
+        targetPct,
         circuitBroken,
         now: Date.now()
       });

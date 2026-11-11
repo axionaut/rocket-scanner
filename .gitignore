@@ -11,7 +11,9 @@
 !styles.css
 !stratgen-tab.js
 !deployed_strategy.json
-# Helper, research, extension and operating notes stay local.
+!brief.md
+!CLAUDE.md
+!AGENTS.md
+# Helper, research, and extension stay local.
 browser-extension/
 dev/
-brief.md

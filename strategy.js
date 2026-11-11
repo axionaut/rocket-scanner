@@ -259,7 +259,11 @@
     }
 
     const maxLossPct = Number.isFinite(options.maxLossPct) ? Number(options.maxLossPct) : 3.00;
-    const maxLossRs = Number.isFinite(options.maxLossRs) ? Number(options.maxLossRs) : 250.0;
+    const maxLossRsLimit = Number.isFinite(options.maxLossRs) ? Number(options.maxLossRs) : 250.0;
+    // Profit-underwritten budget: loss is strictly bounded by available banked profit from 5-day pool
+    const profitBudget = Number.isFinite(options.profitBudget) ? Math.max(0, Number(options.profitBudget)) : maxLossRsLimit;
+    const maxLossRs = Math.max(0, Math.min(maxLossRsLimit, profitBudget));
+    const targetPct = Number.isFinite(options.targetPct) ? Number(options.targetPct) : 1.25;
     const minDwellMs = Number.isFinite(options.minDwellMs) ? Number(options.minDwellMs) : 3600000;
     const availableCash = Math.max(0, Number(options.availableCash || 0));
     const usableCreditFactor = Number.isFinite(options.usableCreditFactor) ? Number(options.usableCreditFactor) : 0.80; // SEBI / Kite CNC T-day instant credit
@@ -287,6 +291,11 @@
     const deficit = Math.max(0, targetBudget - availableCash);
     if (deficit <= 0) {
       return { eligible: false, buyer, minTicket, availableCash, reason: `Available cash (₹${availableCash.toFixed(0)}) covers minTicket (₹${minTicket.toFixed(0)}); no swap needed` };
+    }
+
+    // Profit-underwritten gate: if banked net profit is 0, no speculative swap loss is allowed
+    if (maxLossRs <= 0) {
+      return { eligible: false, buyer, deficit, minTicket, availableCash, reason: 'No available banked net profit in 5-day pool to underwrite swap loss' };
     }
 
     // 2. Filter and rank held positions for the best sacrifice
@@ -333,23 +342,37 @@
         continue; // Exceeds shallow threshold (e.g. > 2.5% or 3.0%)
       }
 
-      // Deficit-aware partial sizing bounded by loss ceiling
+      // Deficit-aware partial sizing bounded by profit underwriting budget
       const lossPerShare = Math.max(0.01, avgCost - ltp);
       const maxSharesByLoss = Math.floor(maxLossRs / lossPerShare);
       if (maxSharesByLoss <= 0) continue; // Even 1 share exceeds rupee loss ceiling
 
       const effectiveUsableLtp = ltp * usableCreditFactor;
       const sharesNeeded = Math.ceil(deficit / effectiveUsableLtp);
-      const sharesToSell = Math.min(qty, maxSharesByLoss, sharesNeeded);
+      let sharesToSell = Math.min(qty, maxSharesByLoss, sharesNeeded);
       if (sharesToSell <= 0) continue;
 
-      const liberatedGross = sharesToSell * ltp;
-      const liberatedUsable = liberatedGross * usableCreditFactor;
-      const totalFunding = availableCash + liberatedUsable;
+      let liberatedGross = sharesToSell * ltp;
+      let liberatedUsable = liberatedGross * usableCreditFactor;
+      let totalFunding = availableCash + liberatedUsable;
 
       // Viability check: total funding must cover at least 1 whole buyer share AND 100% of minTicket
       if (totalFunding < buyerPx || totalFunding < minTicket) {
         continue;
+      }
+
+      // Expectancy Hurdle: the buyer's potential target gain must be >= the sacrifice's realized loss
+      // This ensures that when the buyer reaches its target, the swap is net profitable or breakeven
+      const buyerSharesFunded = Math.floor(totalFunding / (buyerPx * 1.003));
+      const expectedGainRs = buyerSharesFunded * buyerPx * (targetPct / 100);
+      const maxSharesByGain = Math.floor(expectedGainRs / lossPerShare);
+      if (maxSharesByGain < sharesToSell) {
+        sharesToSell = maxSharesByGain;
+        if (sharesToSell <= 0) continue;
+        liberatedGross = sharesToSell * ltp;
+        liberatedUsable = liberatedGross * usableCreditFactor;
+        totalFunding = availableCash + liberatedUsable;
+        if (totalFunding < buyerPx || totalFunding < minTicket) continue;
       }
 
       const lossRs = Math.max(0, sharesToSell * (avgCost - ltp));
