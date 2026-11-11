@@ -1,5 +1,5 @@
-const BUILD_TS='2026-11-11 12:58 IST'; // release build date (IST)
-const APP_VERSION=1681;
+const BUILD_TS='2026-11-11 13:10 IST'; // release build date (IST)
+const APP_VERSION=1682;
 const RADAR_SCORE_VERSION='v1419-recross-batches'; // Eligible on crossing the score floor at any time; selected model's evolving target and movement-based profit protection.
 
 // ── v1358: AN UNCAUGHT ERROR MUST NAME ITSELF ─────────────────────────────────────────────────
@@ -5634,6 +5634,11 @@ function rowStatusPillHtml(s){
       return `<span class="info-pill pill-amber" style="background:rgba(245,158,11,0.22);border:1px solid #f59e0b;color:#fbbf24;font-weight:700" title="${escHtml(swapTitle)}">GO | Swap Eligible (${sac.isPartial?'Trim':'Swap'} ${sac.symbol})</span>`
         +`<div style="font-size:12px;color:#fbbf24;cursor:help;font-weight:600" title="${escHtml(swapTitle)}">⚡ ${escHtml(lineText)}</div>`;
     }
+    const osNote = (swap && !swap.eligible && swap.reason) ? ` · OS: ${swap.reason}` : '';
+    const full = (act.state==='GO'&&reason ? reason : act.reason) + osNote;
+    const first = String(full||'').split(/(?<=\.)\s/)[0], line = first.length>100 ? first.slice(0,98)+'…' : first;
+    return `<span class="info-pill pill-${act.armed?'amber':tone}" title="${escHtml(full)}">${label} | Not funded</span>`
+      +(line?`<div style="font-size:12px;color:var(--amber)" title="${escHtml(full)}">${escHtml(line)}</div>`:'');
   }
 
   const full=act.state==='GO'&&reason?reason:act.reason;
