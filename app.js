@@ -1,5 +1,5 @@
-const BUILD_TS='2026-11-11 11:17 IST'; // release build date (IST)
-const APP_VERSION=1674;
+const BUILD_TS='2026-11-11 11:23 IST'; // release build date (IST)
+const APP_VERSION=1675;
 const RADAR_SCORE_VERSION='v1419-recross-batches'; // Eligible on crossing the score floor at any time; selected model's evolving target and movement-based profit protection.
 
 // ── v1358: AN UNCAUGHT ERROR MUST NAME ITSELF ─────────────────────────────────────────────────
@@ -5352,6 +5352,16 @@ function _getRowActionStateUncached(s, ignoreMarketClosed=false){
 
     const quote = _universeMap.get(s.symbol);
     const dayOpen = Number(quote?.open || s.open1d || pick.open || s.open || 0);
+    const vwap = Number(quote?.vwap || s.vwap || 0);
+    const isExtended = (vwap > 0 && price > vwap * 1.015) || (dayOpen > 0 && price > dayOpen * 1.035);
+    if(isExtended){
+      const vwapDiff = vwap > 0 ? ((price / vwap - 1) * 100).toFixed(1) : null;
+      const openDiff = dayOpen > 0 ? ((price / dayOpen - 1) * 100).toFixed(1) : null;
+      return {
+        state: 'WAIT',
+        reason: `Anti-Chase: ${s.symbol} extended too far (+${vwapDiff ? vwapDiff + '% vs VWAP' : ''}${vwapDiff && openDiff ? ', ' : ''}${openDiff ? '+' + openDiff + '% vs Open' : ''}). Awaiting pullback to VWAP.`
+      };
+    }
     const isLiveTriggered = Boolean(pick.triggered || (pick.isArmed && dayOpen > 0 && price >= dayOpen));
 
     if(isLiveTriggered){
