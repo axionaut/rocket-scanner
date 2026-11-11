@@ -242,7 +242,6 @@ table.main tbody td.recommendation-status{white-space:normal;min-width:140px;max
   .ctrls{gap:6px}
   .fg{flex:0 0 auto}
   .ctrls .btn{width:100%;justify-content:center}
-  #basketBtn{flex:1 1 calc(50% - 6px)}
   .status-bar{font-size:12px}
   .info-bar{gap:5px}
   .info-pill{font-size:12px;padding:3px 8px}
